@@ -1,0 +1,4 @@
+kind: track
+name: assessment
+label: "授权评估"
+description: "授权真实目标的安全评估：强角色分工、owner 规则与噪声预算、授权边界；收尾产物漏洞报告"

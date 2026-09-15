@@ -1,0 +1,74 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/* 克制黑客风（DESIGN.md §12 定稿）：深灰底 + 青色强调；状态色：运行=青 / 审批=琥珀 / 异常=红 */
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --radius: 0.5rem;
+  /* 仅深色主题：:root 即深色取值 */
+  --background: oklch(0.17 0.005 260);
+  --foreground: oklch(0.93 0.003 260);
+  --card: oklch(0.21 0.006 260);
+  --card-foreground: oklch(0.93 0.003 260);
+  --popover: oklch(0.21 0.006 260);
+  --popover-foreground: oklch(0.93 0.003 260);
+  --primary: oklch(0.82 0.13 195);          /* 青 */
+  --primary-foreground: oklch(0.17 0.005 260);
+  --secondary: oklch(0.26 0.006 260);
+  --secondary-foreground: oklch(0.9 0.003 260);
+  --muted: oklch(0.26 0.006 260);
+  --muted-foreground: oklch(0.62 0.008 260);
+  --accent: oklch(0.26 0.006 260);
+  --accent-foreground: oklch(0.93 0.003 260);
+  --destructive: oklch(0.62 0.2 25);        /* 异常红 */
+  --destructive-foreground: oklch(0.98 0 0);
+  --border: oklch(0.3 0.006 260);
+  --input: oklch(0.3 0.006 260);
+  --ring: oklch(0.82 0.13 195);
+  /* 状态语义色 */
+  --status-running: oklch(0.82 0.13 195);   /* 运行=青 */
+  --status-approval: oklch(0.8 0.14 75);    /* 审批=琥珀 */
+  --status-error: oklch(0.62 0.2 25);       /* 异常=红 */
+  --status-idle: oklch(0.6 0.01 260);       /* 空闲=灰 */
+  --status-paused: oklch(0.75 0.1 240);     /* 暂停=青蓝（与运行青区分） */
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --font-mono: "Cascadia Code", ui-monospace, Consolas, monospace;
+  --font-sans: "Segoe UI", system-ui, sans-serif;
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+  body {
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+  }
+}

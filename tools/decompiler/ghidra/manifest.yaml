@@ -1,0 +1,6 @@
+name: ghidra
+category: decompiler
+probe: "where analyzeHeadless"
+install: "winget install --id=Ghidra.Ghidra -e 或 scoop install ghidra"
+runtime: host
+note: "headless 全量导出走 analyzeHeadless + scripts/export_funcs.py（Jython postScript）"

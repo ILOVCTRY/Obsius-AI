@@ -1,0 +1,59 @@
+- generic [ref=f2e36]:
+  - banner [ref=f2e37]:
+    - generic [ref=f2e38]: ctf
+    - heading "浏览器联调演练" [level=1] [ref=f2e39]
+    - generic [ref=f2e40]: 任务 0/0 · 发现 0 · 资产 0
+    - button "🔔 审批" [ref=f2e41]
+    - button "← 项目" [ref=f2e42]
+  - generic [ref=f2e43]:
+    - navigation [ref=f2e44]:
+      - button "◈ 项目" [ref=f2e45]:
+        - generic [ref=f2e46]: ◈
+        - text: 项目
+      - button "◉ 直播间" [ref=f2e47]:
+        - generic [ref=f2e48]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=f2e49]:
+        - generic [ref=f2e50]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=f2e51]:
+        - generic [ref=f2e52]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=f2e53]:
+        - generic [ref=f2e54]: ⚑
+        - text: 审批
+      - button "⋯ 技能/终端/设置" [ref=f2e55]:
+        - generic [ref=f2e56]: ⋯
+        - text: 技能/终端/设置
+    - main [ref=f2e57]:
+      - generic [ref=f2e59]:
+        - generic [ref=f2e60]:
+          - button "全部" [ref=f2e61]
+          - button "Orchestrator" [ref=f2e62]
+          - generic [ref=f2e63]: ● live
+          - button "开窗" [ref=f2e64]
+          - button "编排一轮" [ref=f2e65]
+        - generic [ref=f2e66]:
+          - button "全部" [ref=f2e67]
+          - button "决策" [ref=f2e68]
+          - button "命令" [ref=f2e69]
+          - button "发现" [ref=f2e70]
+        - generic [ref=f2e90] [cursor=pointer]:
+          - generic [ref=f2e91]:
+            - generic [ref=f2e92]: 16:52:55
+            - generic [ref=f2e93]: 📋 发布任务
+            - generic [ref=f2e94]: 对 samples/ 下的样本做静态分诊
+            - generic [ref=f2e95]: human
+          - generic [ref=f2e96]: "{ \"task_id\": \"task-507c236cf0ae\", \"objective\": \"对 samples/ 下的样本做静态分诊\", \"task_type\": \"generic\" }"
+        - generic [ref=f2e72]:
+          - textbox "插话：向黑板发布一个任务或一条指示…" [active] [ref=f2e73]
+          - button "发送" [disabled]
+      - complementary [ref=f2e74]:
+        - generic [ref=f2e75]:
+          - tablist [ref=f2e76]:
+            - tab "发现" [selected] [ref=f2e77]
+            - tab "资产" [ref=f2e78]
+            - tab "函数库" [ref=f2e79]
+          - tabpanel "发现" [ref=f2e80]:
+            - paragraph [ref=f2e86]: 暂无数据
+      - button "›" [ref=f2e87]

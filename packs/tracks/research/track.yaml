@@ -1,0 +1,4 @@
+kind: track
+name: research
+label: "研究"
+description: "通用逆向/样本研究工作台：headless 客观函数缓存 + func_kb 人机共写；收尾产物为研究笔记与可复现发现"

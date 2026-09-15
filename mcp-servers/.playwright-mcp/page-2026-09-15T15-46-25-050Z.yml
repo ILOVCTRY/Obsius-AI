@@ -1,0 +1,78 @@
+- generic [ref=e55]:
+  - banner [ref=e56]:
+    - generic [ref=e57]: CTF · 二进制/杂项
+    - heading "A组端到端走查" [level=1] [ref=e58]
+    - generic [ref=e59]: 任务 1/2 · 发现 0 · 资产 0
+    - button "🔔 审批" [ref=e60]
+    - button "← 项目" [ref=e61]
+  - generic [ref=e62]:
+    - navigation [ref=e63]:
+      - button "◈ 项目" [ref=e64]:
+        - generic [ref=e65]: ◈
+        - text: 项目
+      - button "◉ 直播间" [ref=e66]:
+        - generic [ref=e67]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=e68]:
+        - generic [ref=e69]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=e70]:
+        - generic [ref=e71]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=e72]:
+        - generic [ref=e73]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=e74]:
+        - generic [ref=e75]: ⚙
+        - text: 技能/设置
+    - main [ref=e76]:
+      - generic [ref=e1747]:
+        - generic [ref=e1748]:
+          - combobox "类型" [ref=e1749]: generic
+          - combobox [ref=e1750]:
+            - option "passive" [selected]
+            - option "low（active）"
+            - option "medium（active）"
+            - option "high（active）"
+          - spinbutton "优先级 0-9，大者优先" [ref=e1751]: "2"
+          - textbox "任务目标…" [ref=e1752]
+          - button "发布" [disabled]
+        - generic [ref=e1753]:
+          - generic [ref=e1755]:
+            - text: 待认领
+            - generic [ref=e1756]: "0"
+          - generic [ref=e1759]:
+            - text: 执行中
+            - generic [ref=e1760]: "0"
+          - generic [ref=e1772]:
+            - generic [ref=e1773]:
+              - text: 完成
+              - generic [ref=e1774]: "1"
+            - generic [ref=e1776]:
+              - generic [ref=e1777]:
+                - generic [ref=e1778]: generic
+                - generic [ref=e1779]: passive
+                - generic [ref=e1780]: P2
+              - paragraph [ref=e1781]: 侦察任务：用 bb_query 通读当前黑板（资产、发现、任务），输出三条下一步分析建议后调用 complete_task 结束。保持被动分析，不执行任何外部命令。
+              - paragraph [ref=e1782]: ▦ 4/4
+              - generic [ref=e1783]:
+                - generic [ref=e1784]: sess-a2a0f0143
+                - generic "侦察完成（全程被动，仅 bb_query，未执行外部命令）。 黑板态势：assets=[]、findings=[]、tasks 仅本任务 task-4a9ef7a51e64（无父/子/兄弟任务）、events 仅生命周期事件且技能路由 matched=[]。结论：全新空白黑板，未提供任何目标（无附件/二进制/URL/IP/题面）。 三条下一步建议： 1) 补目标输入：请人类提供题目附件或目标 URL/IP/题面，拿到后立即 bb_add_asset 登记种子资产（binary 记 sha256，URL 自动挂 host）；目标明确前不发起主动动作（本任务上限 passive）。 2) 被动分诊流水线：静态 file/strings 可在 host；反编译走 decompile MCP 且必须先 bb_query what=func 按 sha256 查重、分析后 bb_upsert_func；执行样本默认 untrusted 在 WSL 隔离（Docker 不可用、本地无 Ghidra/IDA）。定类别后再 kb_open 对应模块，不猜文件名。 3) 按类别 publish_task 分解（静态/动态/exp），非 passive 带 conflict_keys（ip:/binary:sha256）防重复；发现即 bb_add_finding，无证据 unverified、连续 3 次复现才 verified 并附 poc；flag 只认实际运行输出；先拿分后完美。 当前阻塞点：缺少目标范围，需人类下发输入后方可进入实质分析。" [ref=e1785]
+                - button "🗑 删除" [ref=e1786]
+          - generic [ref=e1787]:
+            - generic [ref=e1788]:
+              - text: 失败
+              - generic [ref=e1789]: "1"
+            - generic [ref=e1791]:
+              - generic [ref=e1792]:
+                - generic [ref=e1793]: generic
+                - generic [ref=e1794]: passive
+                - generic [ref=e1795]: P2
+              - paragraph [ref=e1796]: 知识库通读任务：用 kb_open 依次打开并通读 ctf-misc 知识库里至少 3 篇不同文档（每次读完简述要点），最后汇总成一份阅读笔记再 complete_task。全程被动，不执行命令。
+              - generic [ref=e1797]:
+                - generic [ref=e1798]: sess-a2a0f0143
+                - generic "会话结束但任务未收尾，自动标记失败" [ref=e1799]
+                - button "♻ 放回" [ref=e1800]
+                - button "✏ 编辑" [ref=e1801]
+                - button "🗑 删除" [ref=e1802]
+        - paragraph [ref=e1803]: 待认领/失败任务可编辑（目标/类型/噪声/优先级/互斥键）；失败任务可放回待认领； 四态任务均可删除（A1：claimed 取消在当前步结束即硬中断，done 战果快照进审计）；有子任务需先处理子任务（§6.4）

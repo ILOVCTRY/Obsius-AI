@@ -1,0 +1,126 @@
+- generic [ref=f1e19]:
+  - banner [ref=f1e20]:
+    - generic [ref=f1e21]: 研究 · 二进制
+    - heading "rev真机走查" [level=1] [ref=f1e22]
+    - generic [ref=f1e23]: 任务 0/1 · 发现 3 · 资产 1
+    - button "🔔 审批" [ref=f1e24]
+    - button "← 项目" [ref=f1e25]
+  - generic [ref=f1e26]:
+    - navigation [ref=f1e27]:
+      - button "◈ 项目" [ref=f1e28]:
+        - generic [ref=f1e29]: ◈
+        - text: 项目
+      - button "◉ 直播间" [ref=f1e30]:
+        - generic [ref=f1e31]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=f1e32]:
+        - generic [ref=f1e33]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=f1e34]:
+        - generic [ref=f1e35]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=f1e36]:
+        - generic [ref=f1e37]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=f1e38]:
+        - generic [ref=f1e39]: ⚙
+        - text: 技能/设置
+    - main [ref=f1e40]:
+      - generic [ref=f1e42]:
+        - generic [ref=f1e43]:
+          - button "crackme.elf" [ref=f1e45]
+          - generic "34fe7d4ba000f908d71407672fc3d5a8296ba5d5a1248286f3b9cb1a456fa4bc" [ref=f1e49]: 34fe7d4ba000f908…
+          - generic [ref=f1e50]: x86-64/64bit/le
+          - generic [ref=f1e51]: 28 函数 · 覆盖 4% · 1 风险
+          - generic [ref=f1e52]:
+            - 'generic "IDA: installed" [ref=f1e53]': IDA
+            - 'generic "Ghidra: cached" [ref=f1e55]': Ghidra
+            - 'generic "MCP: off" [ref=f1e57]': MCP
+          - button "上传样本" [ref=f1e59]
+          - button "重新分诊" [ref=f1e60]
+          - button "AI triage" [ref=f1e61]
+        - generic [ref=f1e62]:
+          - generic [ref=f1e64]:
+            - textbox "搜索函数名 / hex 地址…" [ref=f1e66]
+            - tablist [ref=f1e67]:
+              - tab "函数 28" [selected] [ref=f1e68]
+              - tab "导入表" [ref=f1e69]
+            - tabpanel "函数 28" [ref=f1e70]:
+              - generic [ref=f1e72]:
+                - generic [ref=f1e73]: 风险函数 1
+                - button "check_license_v2 anti-debug ✓ 0x401237" [ref=f1e74]:
+                  - generic [ref=f1e75]: check_license_v2
+                  - generic [ref=f1e76]: anti-debug
+                  - generic "已入 func_kb" [ref=f1e77]: ✓
+                  - generic [ref=f1e78]: "0x401237"
+                - generic [ref=f1e79]: 全部 27
+                - button ".init_proc 0x401000" [ref=f1e80]:
+                  - generic [ref=f1e81]: .init_proc
+                  - generic [ref=f1e82]: "0x401000"
+                - button "sub_401020 0x401020" [ref=f1e83]:
+                  - generic [ref=f1e84]: sub_401020
+                  - generic [ref=f1e85]: "0x401020"
+                - button "sub_401030 0x401030" [ref=f1e86]:
+                  - generic [ref=f1e87]: sub_401030
+                  - generic [ref=f1e88]: "0x401030"
+                - button "sub_401040 0x401040" [ref=f1e89]:
+                  - generic [ref=f1e90]: sub_401040
+                  - generic [ref=f1e91]: "0x401040"
+                - button "sub_401050 0x401050" [ref=f1e92]:
+                  - generic [ref=f1e93]: sub_401050
+                  - generic [ref=f1e94]: "0x401050"
+                - button "sub_401060 0x401060" [ref=f1e95]:
+                  - generic [ref=f1e96]: sub_401060
+                  - generic [ref=f1e97]: "0x401060"
+                - button "sub_401070 0x401070" [ref=f1e98]:
+                  - generic [ref=f1e99]: sub_401070
+                  - generic [ref=f1e100]: "0x401070"
+                - button ".puts 0x401080" [ref=f1e101]:
+                  - generic [ref=f1e102]: .puts
+                  - generic [ref=f1e103]: "0x401080"
+                - button ".strlen 0x401090" [ref=f1e104]:
+                  - generic [ref=f1e105]: .strlen
+                  - generic [ref=f1e106]: "0x401090"
+                - button ".__stack_chk_fail 0x4010a0" [ref=f1e107]:
+                  - generic [ref=f1e108]: .__stack_chk_fail
+                  - generic [ref=f1e109]: "0x4010a0"
+                - button ".strcspn 0x4010b0" [ref=f1e110]:
+                  - generic [ref=f1e111]: .strcspn
+                  - generic [ref=f1e112]: "0x4010b0"
+                - button ".fgets 0x4010c0" [ref=f1e113]:
+                  - generic [ref=f1e114]: .fgets
+                  - generic [ref=f1e115]: "0x4010c0"
+          - generic [ref=f1e126]:
+            - generic [ref=f1e128]:
+              - generic [ref=f1e129]: check_flag
+              - generic [ref=f1e130]: "0x4011b6"
+              - generic [ref=f1e131]: 129B
+              - button "复制地址" [ref=f1e133]
+              - button "IDA 打开" [ref=f1e134]
+              - button "x64dbg 下断脚本" [ref=f1e135]
+            - generic [ref=f1e138]:
+              - generic [ref=f1e139]:
+                - heading "结论与笔记（func_kb）" [level=3] [ref=f1e140]
+                - paragraph [ref=f1e175]: 尚未分析——在右侧「笔记」里写下第一条结论。
+              - generic [ref=f1e149]:
+                - generic [ref=f1e150]:
+                  - heading "反编译伪码（headless 缓存，仅供阅读）" [level=3] [ref=f1e151]
+                  - button "复制伪码" [ref=f1e152]
+                - generic [ref=f1e176]: "__int64 __fastcall check_flag(const char *a1) { unsigned __int64 i; // [rsp+10h] [rbp-10h] if ( strlen(a1) != 21 ) return 0; for ( i = 0; i < 0x15; ++i ) { if ( (char)(a1[i] ^ 0x5A) != enc[i] ) return 0; } return 1; }"
+          - generic [ref=f1e119]:
+            - tablist [ref=f1e120]:
+              - tab "xref" [selected] [ref=f1e121]
+              - tab "发现" [ref=f1e122]
+              - tab "笔记" [ref=f1e123]
+            - tabpanel "xref" [ref=f1e124]:
+              - generic [ref=f1e177]:
+                - generic [ref=f1e178]:
+                  - heading "被谁调用 · 1" [level=4] [ref=f1e179]
+                  - button "main 0x401237" [ref=f1e180]:
+                    - generic [ref=f1e181]: main
+                    - generic [ref=f1e182]: "0x401237"
+                - generic [ref=f1e183]:
+                  - heading "调用了 · 1" [level=4] [ref=f1e184]
+                  - button ".strlen 0x401090" [ref=f1e185]:
+                    - generic [ref=f1e186]: .strlen
+                    - generic [ref=f1e187]: "0x401090"

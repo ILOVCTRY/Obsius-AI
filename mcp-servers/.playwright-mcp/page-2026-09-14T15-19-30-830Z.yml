@@ -1,0 +1,13 @@
+- generic [ref=f2e3]:
+  - generic [ref=f2e4]:
+    - heading "项目" [level=1] [ref=f2e5]
+    - paragraph [ref=f2e6]: 项目 = 场景轨（单选）× 能力包（多选）；数据随 workspaces/ 项目目录隔离
+  - generic [ref=f2e7]:
+    - generic [ref=f2e8]: 新建项目
+    - generic [ref=f2e10]:
+      - generic [ref=f2e11]:
+        - textbox "项目名（可用中文）" [ref=f2e12]
+        - button "创建" [disabled]
+      - generic [ref=f2e13]: 场景轨
+      - generic [ref=f2e15]: 能力包
+  - paragraph [ref=f2e18]: 还没有项目——上面创建一个

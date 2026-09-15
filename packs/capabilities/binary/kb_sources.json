@@ -1,0 +1,9 @@
+{
+  "sources": [
+    {
+      "id": "binary-kb",
+      "root": "kb",
+      "recursive": true
+    }
+  ]
+}

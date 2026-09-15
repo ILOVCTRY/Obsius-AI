@@ -1,0 +1,195 @@
+- generic [ref=f9e54]:
+  - banner [ref=f9e55]:
+    - generic [ref=f9e56]: 研究 · 二进制
+    - heading "rev真机走查" [level=1] [ref=f9e57]
+    - generic [ref=f9e58]: 任务 0/2 · 发现 3 · 资产 1
+    - button "🔔 审批" [ref=f9e59]
+    - button "← 项目" [ref=f9e60]
+  - generic [ref=f9e61]:
+    - navigation [ref=f9e62]:
+      - button "◈ 项目" [ref=f9e63]:
+        - generic [ref=f9e64]: ◈
+        - text: 项目
+      - button "◉ 直播间" [ref=f9e65]:
+        - generic [ref=f9e66]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=f9e67]:
+        - generic [ref=f9e68]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=f9e69]:
+        - generic [ref=f9e70]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=f9e71]:
+        - generic [ref=f9e72]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=f9e73]:
+        - generic [ref=f9e74]: ⚙
+        - text: 技能/设置
+    - main [ref=f9e75]:
+      - generic [ref=f9e347]:
+        - generic [ref=f9e348]:
+          - button "crackme.elf" [ref=f9e350]
+          - generic "34fe7d4ba000f908d71407672fc3d5a8296ba5d5a1248286f3b9cb1a456fa4bc" [ref=f9e354]: 34fe7d4ba000f908…
+          - generic [ref=f9e355]: x86-64/64bit/le
+          - generic [ref=f9e356]: 28 函数 · 覆盖 7% · 2 风险
+          - generic [ref=f9e357]:
+            - 'generic "IDA: installed" [ref=f9e358]': IDA
+            - 'generic "Ghidra: cached" [ref=f9e360]': Ghidra
+            - 'generic "MCP: off" [ref=f9e362]': MCP
+          - button "上传样本" [ref=f9e364]
+          - button "重新分诊" [ref=f9e365]
+          - button "⬇ 从 IDA 同步改名" [ref=f9e366]
+          - generic "IDA 正开着该库，请先关闭后再同步" [ref=f9e483]
+          - button "AI triage" [ref=f9e367]
+        - generic [ref=f9e368]:
+          - button "逆向分析" [ref=f9e369]
+          - button "攻击链" [ref=f9e370]
+        - generic [ref=f9e371]:
+          - generic [ref=f9e373]:
+            - textbox "搜索函数名 / hex 地址…" [ref=f9e375]
+            - tablist [ref=f9e376]:
+              - tab "函数 28" [selected] [ref=f9e377]
+              - tab "字符串 16" [ref=f9e378]
+              - tab "导入表" [ref=f9e379]
+            - tabpanel "函数 28" [ref=f9e380]:
+              - generic [ref=f9e382]:
+                - generic [ref=f9e383]: 风险函数 2
+                - button "check_flag crypto ✓ 0x4011b6" [ref=f9e384]:
+                  - generic [ref=f9e385]: check_flag
+                  - generic [ref=f9e386]: crypto
+                  - generic "已入 func_kb" [ref=f9e387]: ✓
+                  - generic [ref=f9e388]: "0x4011b6"
+                - button "check_license_v2 anti-debug ✓ 0x401237" [ref=f9e389]:
+                  - generic [ref=f9e390]: check_license_v2
+                  - generic [ref=f9e391]: anti-debug
+                  - generic "已入 func_kb" [ref=f9e392]: ✓
+                  - generic [ref=f9e393]: "0x401237"
+                - generic [ref=f9e394]: 全部 26
+                - button ".init_proc 0x401000" [ref=f9e395]:
+                  - generic [ref=f9e396]: .init_proc
+                  - generic [ref=f9e397]: "0x401000"
+                - button "sub_401020 0x401020" [ref=f9e398]:
+                  - generic [ref=f9e399]: sub_401020
+                  - generic [ref=f9e400]: "0x401020"
+                - button "sub_401030 0x401030" [ref=f9e401]:
+                  - generic [ref=f9e402]: sub_401030
+                  - generic [ref=f9e403]: "0x401030"
+                - button "sub_401040 0x401040" [ref=f9e404]:
+                  - generic [ref=f9e405]: sub_401040
+                  - generic [ref=f9e406]: "0x401040"
+                - button "sub_401050 0x401050" [ref=f9e407]:
+                  - generic [ref=f9e408]: sub_401050
+                  - generic [ref=f9e409]: "0x401050"
+                - button "sub_401060 0x401060" [ref=f9e410]:
+                  - generic [ref=f9e411]: sub_401060
+                  - generic [ref=f9e412]: "0x401060"
+                - button "sub_401070 0x401070" [ref=f9e413]:
+                  - generic [ref=f9e414]: sub_401070
+                  - generic [ref=f9e415]: "0x401070"
+                - button ".puts 0x401080" [ref=f9e416]:
+                  - generic [ref=f9e417]: .puts
+                  - generic [ref=f9e418]: "0x401080"
+                - button ".strlen 0x401090" [ref=f9e419]:
+                  - generic [ref=f9e420]: .strlen
+                  - generic [ref=f9e421]: "0x401090"
+                - button ".__stack_chk_fail 0x4010a0" [ref=f9e422]:
+                  - generic [ref=f9e423]: .__stack_chk_fail
+                  - generic [ref=f9e424]: "0x4010a0"
+                - button ".strcspn 0x4010b0" [ref=f9e425]:
+                  - generic [ref=f9e426]: .strcspn
+                  - generic [ref=f9e427]: "0x4010b0"
+                - button ".fgets 0x4010c0" [ref=f9e428]:
+                  - generic [ref=f9e429]: .fgets
+                  - generic [ref=f9e430]: "0x4010c0"
+                - button "_start 0x4010d0" [ref=f9e431]:
+                  - generic [ref=f9e432]: _start
+                  - generic [ref=f9e433]: "0x4010d0"
+                - button "_dl_relocate_static_pie 0x401100" [ref=f9e434]:
+                  - generic [ref=f9e435]: _dl_relocate_static_pie
+                  - generic [ref=f9e436]: "0x401100"
+                - button "deregister_tm_clones 0x401110" [ref=f9e437]:
+                  - generic [ref=f9e438]: deregister_tm_clones
+                  - generic [ref=f9e439]: "0x401110"
+                - button "register_tm_clones 0x401140" [ref=f9e440]:
+                  - generic [ref=f9e441]: register_tm_clones
+                  - generic [ref=f9e442]: "0x401140"
+                - button "__do_global_dtors_aux 0x401180" [ref=f9e443]:
+                  - generic [ref=f9e444]: __do_global_dtors_aux
+                  - generic [ref=f9e445]: "0x401180"
+                - button "frame_dummy 0x4011b0" [ref=f9e446]:
+                  - generic [ref=f9e447]: frame_dummy
+                  - generic [ref=f9e448]: "0x4011b0"
+                - button ".term_proc 0x401388" [ref=f9e449]:
+                  - generic [ref=f9e450]: .term_proc
+                  - generic [ref=f9e451]: "0x401388"
+                - button "__libc_start_main 0x404058" [ref=f9e452]:
+                  - generic [ref=f9e453]: __libc_start_main
+                  - generic [ref=f9e454]: "0x404058"
+                - button "puts 0x404060" [ref=f9e455]:
+                  - generic [ref=f9e456]: puts
+                  - generic [ref=f9e457]: "0x404060"
+                - button "strlen 0x404068" [ref=f9e458]:
+                  - generic [ref=f9e459]: strlen
+                  - generic [ref=f9e460]: "0x404068"
+                - button "__stack_chk_fail 0x404070" [ref=f9e461]:
+                  - generic [ref=f9e462]: __stack_chk_fail
+                  - generic [ref=f9e463]: "0x404070"
+                - button "strcspn 0x404078" [ref=f9e464]:
+                  - generic [ref=f9e465]: strcspn
+                  - generic [ref=f9e466]: "0x404078"
+                - button "fgets 0x404080" [ref=f9e467]:
+                  - generic [ref=f9e468]: fgets
+                  - generic [ref=f9e469]: "0x404080"
+                - button "__gmon_start__ 0x404088" [ref=f9e470]:
+                  - generic [ref=f9e471]: __gmon_start__
+                  - generic [ref=f9e472]: "0x404088"
+          - generic [ref=f9e484]:
+            - generic [ref=f9e485]:
+              - generic [ref=f9e486]:
+                - generic [ref=f9e487]: check_flag
+                - generic [ref=f9e488]: "0x4011b6"
+                - generic [ref=f9e489]: 129B
+                - generic [ref=f9e490]: "0.5"
+                - button "复制地址" [ref=f9e491]
+                - button "IDA 跳转" [ref=f9e492]
+                - button "脚本档" [ref=f9e493]
+                - button "入链" [ref=f9e494]
+              - generic [ref=f9e498]:
+                - generic [ref=f9e499]: crypto
+                - generic [ref=f9e500]: xor
+            - generic [ref=f9e501]:
+              - generic [ref=f9e502]:
+                - heading "结论与笔记（func_kb）" [level=3] [ref=f9e503]
+                - generic [ref=f9e504]: "## 笔记 2026-09-14T05:00:43+00:00 by human XOR 0x5A 逐字节比较，长度必须为 21"
+              - generic [ref=f9e505]:
+                - generic [ref=f9e506]:
+                  - heading "反编译伪码（headless 缓存，仅供阅读）" [level=3] [ref=f9e507]
+                  - button "复制伪码" [ref=f9e508]
+                - generic [ref=f9e509]: "__int64 __fastcall check_flag(const char *a1) { unsigned __int64 i; // [rsp+10h] [rbp-10h] if ( strlen(a1) != 21 ) return 0; for ( i = 0; i < 0x15; ++i ) { if ( (char)(a1[i] ^ 0x5A) != enc[i] ) return 0; } return 1; }"
+          - generic [ref=f9e476]:
+            - tablist [ref=f9e477]:
+              - tab "xref" [ref=f9e478]
+              - tab "发现" [ref=f9e479]
+              - tab "笔记" [selected] [ref=f9e480]
+            - tabpanel "笔记" [ref=f9e521]:
+              - generic [ref=f9e537]:
+                - generic [ref=f9e538]:
+                  - generic [ref=f9e539]: 函数名（改名记入 name_history）
+                  - textbox "函数名（改名记入 name_history）" [ref=f9e540]:
+                    - /placeholder: check_flag
+                    - text: check_flag
+                - generic [ref=f9e541]:
+                  - generic [ref=f9e542]: 风险标签（逗号分隔，全量替换语义；清空=无标签）
+                  - textbox "风险标签（逗号分隔，全量替换语义；清空=无标签）" [ref=f9e543]:
+                    - /placeholder: 如 crypto, anti-debug
+                    - text: crypto, xor
+                - generic [ref=f9e544]:
+                  - generic [ref=f9e545]: 结论笔记（追加为「## 笔记 时间 by human」分段；客观全量在 headless 缓存，这里只写理解）
+                  - textbox "结论笔记（追加为「## 笔记 时间 by human」分段；客观全量在 headless 缓存，这里只写理解）" [ref=f9e546]:
+                    - /placeholder: 这个函数做什么 / 关键分支 / 与发现的关联…
+                - button "保存到 func_kb" [ref=f9e547]
+                - generic [ref=f9e548]:
+                  - generic [ref=f9e549]:
+                    - checkbox "把分析笔记首段作为函数注释" [ref=f9e550]
+                    - text: 把分析笔记首段作为函数注释
+                  - button "⬆ 写回 IDA" [ref=f9e551]

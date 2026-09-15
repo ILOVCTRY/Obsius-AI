@@ -1,0 +1,107 @@
+- generic [ref=e55]:
+  - banner [ref=e56]:
+    - generic [ref=e57]: CTF · 二进制/杂项
+    - heading "A组端到端走查" [level=1] [ref=e58]
+    - generic [ref=e59]: 任务 0/1 · 发现 0 · 资产 0
+    - button "🔔 审批" [ref=e60]
+    - button "← 项目" [ref=e61]
+  - generic [ref=e62]:
+    - navigation [ref=e63]:
+      - button "◈ 项目" [ref=e64]:
+        - generic [ref=e65]: ◈
+        - text: 项目
+      - button "◉ 直播间" [ref=e66]:
+        - generic [ref=e67]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=e68]:
+        - generic [ref=e69]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=e70]:
+        - generic [ref=e71]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=e72]:
+        - generic [ref=e73]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=e74]:
+        - generic [ref=e75]: ⚙
+        - text: 技能/设置
+    - main [ref=e76]:
+      - generic [ref=e78]:
+        - generic [ref=e79]:
+          - generic [ref=e80]:
+            - button "全部" [ref=e81]
+            - button "Orchestrator" [ref=e82]
+            - button "idle _generalist 分离页签 _generalist（任务后台继续）" [ref=e160]:
+              - generic "idle" [ref=e161]
+              - text: _generalist
+              - button "分离页签 _generalist（任务后台继续）" [ref=e162]
+          - generic [ref=e83]:
+            - button "直播" [ref=e84]
+            - button "任务流" [ref=e85]
+          - generic [ref=e91]: ● live
+        - generic [ref=e92]:
+          - combobox "通用 · 通用 CTF 选手：分诊、解题全链路" [ref=e93]:
+            - option "通用 · 通用 CTF 选手：分诊、解题全链路" [selected]
+            - option "recon · 静态分诊：只看不跑，快速给出文件类型/保护/建议下一步"
+            - option "reverse · 逆向：函数定位、算法还原、func_kb 协作、求解验证"
+          - combobox "开窗供应商（缺省=全局默认供应商）" [ref=e94]:
+            - option "默认供应商" [selected]
+            - option "ark-plan"
+            - option "ark-coding"
+          - combobox "开窗模型（缺省=该供应商首个模型）" [ref=e95]:
+            - option "默认模型（ark-code-latest）" [selected]
+            - option "ark-code-latest"
+            - option "deepseek-v4-flash"
+            - option "glm-5-3-flash-260828"
+          - button "开窗" [ref=e96]
+          - generic "项目自主级别（§6.8：L0 全手动 / L1 任务自动·开窗审批 / L2 全自动链）；安全层任何档位不放松" [ref=e97]:
+            - button "L0" [ref=e98]
+            - button "L1" [ref=e99]
+            - button "L2" [ref=e100]
+          - button "⏸ 暂停自动" [ref=e101]
+          - button "∑ 0 📋 0 🪟 1/4" [ref=e166]:
+            - generic [ref=e104]: ∑ 0
+            - generic [ref=e105]: 📋 0
+            - generic [ref=e106]: 🪟 1/4
+          - button "编排一轮" [ref=e108]
+          - button "重排优先级" [ref=e109]
+          - button "复盘沉淀" [ref=e110]
+        - generic [ref=e111]:
+          - button "全部" [ref=e112]
+          - button "思考" [ref=e113]
+          - button "决策" [ref=e114]
+          - button "命令" [ref=e115]
+          - button "发现" [ref=e116]
+        - generic [ref=e153] [cursor=pointer]:
+          - generic [ref=e154]:
+            - generic "UTC 2026-09-15 15:33:52" [ref=e155]: 23:33:52
+            - generic [ref=e156]: 📋 发布任务
+            - generic [ref=e157]: 侦察任务：用 bb_query 通读当前黑板（资产、发现、任务），输出三条下一步分析建议后调用 complete_task 结束。保持被动分析，不执行任何外部命令。
+            - generic [ref=e158]: human
+          - generic [ref=e159]: "{ \"task_id\": \"task-4a9ef7a51e64\", \"objective\": \"侦察任务：用 bb_query 通读当前黑板（资产、发现、任务），输出三条下一步分析建议后调用 complete_task 结束。保持被动分析，不执行任何外部命令。\", \"task_type\": \"generic\" }"
+        - generic [ref=e118]:
+          - textbox "插话：向黑板发布一个任务或一条指示…" [ref=e119]
+          - button "发送" [disabled]
+      - complementary [ref=e120]:
+        - generic [ref=e121]:
+          - tablist [ref=e122]:
+            - tab "发现" [selected] [ref=e123]
+            - tab "资产" [ref=e124]
+            - tab "函数库" [ref=e125]
+          - tabpanel "发现" [ref=e126]:
+            - generic [ref=e127]:
+              - generic [ref=e128]:
+                - button "全部资产" [ref=e130]
+                - generic [ref=e134]:
+                  - button "全部" [ref=e135]
+                  - button "critical" [ref=e136]
+                  - button "high" [ref=e137]
+                  - button "medium" [ref=e138]
+                  - button "low" [ref=e139]
+                  - button "info" [ref=e140]
+                - generic [ref=e141]:
+                  - button "全部状态" [ref=e142]
+                  - button "unverified" [ref=e143]
+                  - button "verified" [ref=e144]
+              - paragraph [ref=e149]: 暂无数据
+      - button "›" [ref=e150]

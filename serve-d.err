@@ -1,0 +1,44 @@
+INFO:     Started server process [41032]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8420 (Press CTRL+C to quit)
+INFO:     127.0.0.1:56651 - "WebSocket /api/ws/projects/proj-9f7ee28609e7?since_id=197" [accepted]
+INFO:     connection open
+INFO:     127.0.0.1:56653 - "WebSocket /api/ws/projects/proj-9f7ee28609e7?since_id=197" [accepted]
+INFO:     connection open
+INFO:     127.0.0.1:56655 - "WebSocket /api/ws/projects/proj-9f7ee28609e7?since_id=197" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     127.0.0.1:12439 - "WebSocket /api/ws/projects/proj-e193f14eb587?since_id=0" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     127.0.0.1:12453 - "WebSocket /api/ws/projects/proj-e193f14eb587?since_id=0" [accepted]
+INFO:     connection open
+INFO:     127.0.0.1:12467 - "WebSocket /api/ws/projects/proj-e193f14eb587?since_id=0" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     127.0.0.1:16017 - "WebSocket /api/ws/projects/proj-e193f14eb587?since_id=0" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     127.0.0.1:16028 - "WebSocket /api/ws/projects/proj-e193f14eb587?since_id=0" [accepted]
+INFO:     connection open
+INFO:     127.0.0.1:16065 - "WebSocket /api/ws/projects/proj-e193f14eb587?since_id=61" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     connection closed
+INFO:     127.0.0.1:16086 - "WebSocket /api/ws/projects/proj-9f7ee28609e7?since_id=0" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     127.0.0.1:16089 - "WebSocket /api/ws/projects/proj-9f7ee28609e7?since_id=0" [accepted]
+INFO:     connection open
+INFO:     127.0.0.1:16091 - "WebSocket /api/ws/projects/proj-9f7ee28609e7?since_id=0" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     127.0.0.1:16148 - "WebSocket /api/ws/projects/proj-e193f14eb587?since_id=197" [accepted]
+INFO:     connection open
+INFO:     127.0.0.1:47360 - "WebSocket /api/ws/projects/proj-9f7ee28609e7?since_id=0" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     127.0.0.1:47377 - "WebSocket /api/ws/projects/proj-9f7ee28609e7?since_id=0" [accepted]
+INFO:     connection open
+INFO:     connection closed

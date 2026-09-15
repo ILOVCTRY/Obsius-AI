@@ -1,0 +1,1222 @@
+"""黑板系统测试：去重合并、认领互斥、lease 回收、链校验、事件增量、审计溯源。"""
+
+import sqlite3
+import threading
+
+import pytest
+
+from core.blackboard import Blackboard, ClaimError, TaskQueue
+
+
+@pytest.fixture()
+def bb(tmp_path):
+    board = Blackboard(str(tmp_path / "bb.db"))
+    yield board
+    board.close()
+
+
+@pytest.fixture()
+def project(bb):
+    return bb.create_project("渗透-测试项目", "assessment", ["web"],
+                             config={"cross_target": "ask-orchestrator"})
+
+
+def _session(bb, project, name="S1"):
+    return bb.register_session(project["id"], name)
+
+
+# ---------- 基础与审计 ----------
+
+def test_project_and_session(bb, project):
+    # v2 绑定：track + capabilities；旧 domain 列写轨名兜底
+    assert project["track"] == "assessment"
+    assert project["capabilities"] == ["web"]
+    assert project["domain"] == "assessment"
+    assert bb.get_project(project["id"])["config"]["cross_target"] == "ask-orchestrator"
+    sess = _session(bb, project, "S1主攻")
+    assert sess["role"] == "_generalist"
+
+
+def test_legacy_db_row_domain_mapped(bb):
+    """v1 库行（无 track/capabilities，只有 domain=pentest）经 get_project 读兼容映射。"""
+    with bb._tx():
+        bb.conn.execute(
+            "INSERT INTO projects(id,name,domain,track,capabilities,config,created_at)"
+            " VALUES('proj-legacydb','旧库','pentest','','[]','{}','2026-01-01T00:00:00+00:00')")
+    got = bb.get_project("proj-legacydb")
+    assert got["track"] == "assessment" and got["capabilities"] == ["web"]
+    assert got["domain"] == "assessment"
+
+
+def test_schema_v6_migration(tmp_path):
+    """v5 旧库（tasks 无 plan、orchestrator_state 无 last_replan_at）幂等升到 v6。"""
+    from core.blackboard.schema import SCHEMA_VERSION
+    from core.blackboard.store import Blackboard as BB
+    from core.orchestrator import state as orch_state
+
+    db_path = tmp_path / "old.db"
+    raw = sqlite3.connect(db_path)
+    raw.executescript(
+        """
+        CREATE TABLE projects (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, domain TEXT NOT NULL,
+            track TEXT NOT NULL DEFAULT '', capabilities TEXT NOT NULL DEFAULT '[]',
+            config TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL);
+        CREATE TABLE tasks (
+            id TEXT PRIMARY KEY, project_id TEXT NOT NULL, scope TEXT NOT NULL DEFAULT '',
+            task_type TEXT NOT NULL DEFAULT 'generic', objective TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open', priority INTEGER NOT NULL DEFAULT 2,
+            noise_budget TEXT NOT NULL DEFAULT 'passive',
+            conflict_keys TEXT NOT NULL DEFAULT '[]', claimed_by TEXT,
+            lease_until TEXT, parent_id TEXT, created_by TEXT NOT NULL DEFAULT 'human',
+            result_note TEXT NOT NULL DEFAULT '',
+            context_refs TEXT NOT NULL DEFAULT '[]',
+            stale_refs TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE TABLE orchestrator_state (
+            project_id TEXT PRIMARY KEY, tokens_in INTEGER NOT NULL DEFAULT 0,
+            tokens_out INTEGER NOT NULL DEFAULT 0, tokens_cache_read INTEGER NOT NULL DEFAULT 0,
+            tokens_cache_creation INTEGER NOT NULL DEFAULT 0, llm_calls INTEGER NOT NULL DEFAULT 0,
+            tasks_published INTEGER NOT NULL DEFAULT 0, budget_warned INTEGER NOT NULL DEFAULT 0,
+            event_cursor INTEGER NOT NULL DEFAULT 0, cycles INTEGER NOT NULL DEFAULT 0,
+            last_digest_cycle INTEGER NOT NULL DEFAULT -999,
+            chain_active INTEGER NOT NULL DEFAULT 0, chain_ticks INTEGER NOT NULL DEFAULT 0,
+            last_auto_tick_at TEXT NOT NULL DEFAULT '', auto_ticks_total INTEGER NOT NULL DEFAULT 0,
+            tick_owner TEXT NOT NULL DEFAULT '', tick_lease_until TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT '');
+        """
+    )
+    raw.commit()
+    raw.close()
+
+    board = BB(str(db_path))
+    try:
+        ver = board.conn.execute(
+            "SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
+        assert int(ver) == SCHEMA_VERSION == 6
+        task_cols = {r[1] for r in board.conn.execute("PRAGMA table_info(tasks)")}
+        os_cols = {r[1] for r in board.conn.execute(
+            "PRAGMA table_info(orchestrator_state)")}
+        assert "plan" in task_cols and "last_replan_at" in os_cols
+
+        proj = board.create_project("迁移项目", "ctf", ["binary"])
+        tq = TaskQueue(board)
+        tid = tq.publish(proj["id"], "旧库新任务")
+        assert tq.get_task(tid)["plan"] == []  # 旧行默认空计划
+        saved = orch_state.save_fields(
+            board, proj["id"], last_replan_at="2026-09-15T00:00:00+00:00")
+        assert saved["last_replan_at"] == "2026-09-15T00:00:00+00:00"
+    finally:
+        board.close()
+
+
+def test_human_attribution_recorded(bb, project):
+    """人机共写：author 必须可溯源（§6.5）。"""
+    r = bb.add_finding(project["id"], "info-leak", "备份文件泄露", author="human")
+    row = [f for f in bb.list_findings(project["id"]) if f["id"] == r["id"]][0]
+    assert row["author"] == "human"
+
+
+# ---------- 资产去重 ----------
+
+def test_asset_upsert_dedup(bb, project):
+    pid = project["id"]
+    a1 = bb.upsert_asset(pid, "domain", "xxx.example.com", author="session-1")
+    a2 = bb.upsert_asset(pid, "domain", "xxx.example.com", author="session-2")
+    assert a1["created"] and not a2["created"]
+    assert a1["id"] == a2["id"]
+    assert len(bb.list_assets(pid, "domain")) == 1
+
+
+# ---------- findings 去重合并 ----------
+
+def test_finding_dedup_merge(bb, project):
+    pid = project["id"]
+    r1 = bb.add_finding(pid, "sqli", "登录框 SQL 注入", severity="high", confidence=0.6)
+    r2 = bb.add_finding(pid, "sqli", "登录框 SQL 注入", severity="high", confidence=0.9)
+    assert not r1["merged"] and r2["merged"]
+    assert r1["id"] == r2["id"]
+    rows = bb.list_findings(pid, min_severity="high")
+    assert len(rows) == 1
+    assert rows[0]["confidence"] == 0.9  # 取最大
+
+
+def test_finding_dedup_respects_target(bb, project):
+    """同 vuln_class 但不同目标资产 → 不合并。"""
+    pid = project["id"]
+    a = bb.upsert_asset(pid, "domain", "a.com")["id"]
+    b = bb.upsert_asset(pid, "domain", "b.com")["id"]
+    r1 = bb.add_finding(pid, "xss", "XSS", target_asset_id=a)
+    r2 = bb.add_finding(pid, "xss", "XSS", target_asset_id=b)
+    assert r1["id"] != r2["id"]
+
+
+def test_rev_finding_without_vuln_class_no_merge(bb, project):
+    """逆向发现类别在 evidence.category：省略 vuln_class 时各是各的，不做空键合并。"""
+    pid = project["id"]
+    r1 = bb.add_finding(pid, title="校验算法", evidence={"category": "algorithm"})
+    r2 = bb.add_finding(pid, title="通信协议", evidence={"category": "protocol"})
+    assert not r1["merged"] and not r2["merged"] and r1["id"] != r2["id"]
+    assert len(bb.list_findings(pid)) == 2
+
+
+# ---------- relates_to 强关系（E0） ----------
+
+def test_relates_to_stored_and_union_dedup(bb, project):
+    """合法强边落 evidence.relates_to；重报同 finding 走并集：同边去重、异 note 保留。"""
+    pid = project["id"]
+    # 注意 dedup 指纹是 vuln_class+target（不含 title），基线与升级用不同 vuln_class
+    base = bb.add_finding(pid, "info-leak", "备份文件泄露", severity="medium")["id"]
+
+    r = bb.add_finding(pid, "sqli", "id 参数可堆叠注入", severity="high",
+                       evidence={"relates_to": [{"finding_id": base, "note": "同点升级"}]})
+    assert not r["merged"]
+    f = bb.get_finding(pid, r["id"])
+    assert f["evidence"]["relates_to"] == [{"finding_id": base, "note": "同点升级"}]
+
+    # 重报同一 dedup（vuln_class 相同且同 target）：同内容边去重
+    assert bb.add_finding(pid, "sqli", "id 参数可堆叠注入", severity="high",
+                          evidence={"relates_to": [{"finding_id": base, "note": "同点升级"}]})["merged"]
+    f = bb.get_finding(pid, r["id"])
+    assert len(f["evidence"]["relates_to"]) == 1
+
+    # 不同 note = 不同边，追加
+    bb.add_finding(pid, "sqli", "id 参数可堆叠注入", severity="critical",
+                   evidence={"relates_to": [{"finding_id": base, "note": "升到 DBA"}]})
+    f = bb.get_finding(pid, r["id"])
+    notes = {e["note"] for e in f["evidence"]["relates_to"]}
+    assert notes == {"同点升级", "升到 DBA"}
+    assert f["severity"] == "critical"  # 严重度就高
+
+
+def test_relates_to_dangling_and_malformed_rejected(bb, project):
+    """悬空 id / 形态非法 / note 非字符串 → ValueError（API 层 422），严格不静默丢。"""
+    pid = project["id"]
+    with pytest.raises(ValueError, match="不存在或不属于本项目"):
+        bb.add_finding(pid, "x", "悬空强边",
+                       evidence={"relates_to": [{"finding_id": "find-deadbeef", "note": "n"}]})
+    with pytest.raises(ValueError, match="finding_id"):
+        bb.add_finding(pid, "x", "缺 id", evidence={"relates_to": [{"note": "n"}]})
+    with pytest.raises(ValueError, match="对象"):
+        bb.add_finding(pid, "x", "非对象项", evidence={"relates_to": ["find-aaaa"]})
+    with pytest.raises(ValueError, match="列表"):
+        bb.add_finding(pid, "x", "非列表", evidence={"relates_to": {"finding_id": "x"}})
+    with pytest.raises(ValueError, match="note 必须是字符串"):
+        bb.add_finding(pid, "x", "note 非字符串",
+                       evidence={"relates_to": [{"finding_id": "find-deadbeef", "note": 1}]})
+    # 拒绝后无残留写入
+    assert bb.list_findings(pid) == []
+
+
+def test_relates_to_cross_project_rejected(bb, project):
+    """引用别的项目的发现 → ValueError（防跨项目幻觉串线）。"""
+    pid = project["id"]
+    other = bb.create_project("别的项目", "ctf", ["binary"])["id"]
+    foreign = bb.add_finding(other, "rev", "别项目的发现")["id"]
+    with pytest.raises(ValueError, match="不存在或不属于本项目"):
+        bb.add_finding(pid, "sqli", "串线发现",
+                       evidence={"relates_to": [{"finding_id": foreign, "note": "跨项目"}]})
+
+
+def test_patch_finding_relates_to_validation_and_preserve(bb, project):
+    """PATCH 携带悬空强边 → ValueError；PATCH 其他 evidence 键不丢既有 relates_to。"""
+    pid = project["id"]
+    base = bb.add_finding(pid, "port-scan", "基线发现")["id"]
+    fid = bb.add_finding(pid, "sqli", "升级发现",
+                         evidence={"relates_to": [{"finding_id": base, "note": "升级"}]})["id"]
+
+    with pytest.raises(ValueError, match="不存在或不属于本项目"):
+        bb.patch_finding(pid, fid, evidence={"relates_to": [{"finding_id": "find-xxx", "note": "x"}]})
+
+    # 浅层 merge：改别的键，relates_to 原样保留
+    out = bb.patch_finding(pid, fid, evidence={"manual_note": "人工备注"})
+    assert out["evidence"]["relates_to"] == [{"finding_id": base, "note": "升级"}]
+    assert out["evidence"]["manual_note"] == "人工备注"
+
+    # 显式带合法强边 = 键级覆盖（PATCH 语义不并集）
+    base2 = bb.add_finding(pid, "info", "另一基线")["id"]
+    out = bb.patch_finding(pid, fid, evidence={"relates_to": [{"finding_id": base2, "note": "改挂"}]})
+    assert out["evidence"]["relates_to"] == [{"finding_id": base2, "note": "改挂"}]
+
+
+def test_relates_to_self_merge_target_rejected(bb, project):
+    """合并分支自引防护：同 dedup 键新报 relates_to 指向将并入的既有发现 → ValueError（防自环边）。"""
+    pid = project["id"]
+    first = bb.add_finding(pid, "sqli", "注入点")["id"]
+    # 同 vuln_class+target(均无 target) 必命中合并；引用合并目标自身必须拒
+    with pytest.raises(ValueError, match="不能引用发现自身"):
+        bb.add_finding(pid, "sqli", "注入点升级",
+                       evidence={"relates_to": [{"finding_id": first, "note": "自指"}]})
+    # 原行未被污染（severity 也不应升级、无自边）
+    got = bb.get_finding(pid, first)
+    assert got["evidence"].get("relates_to", []) == []
+    assert got["severity"] == "info"
+
+
+# ---------- func_kb ----------
+
+def test_func_kb_upsert_and_history(bb, project):
+    pid = project["id"]
+    sha = "ab3f" * 16
+    r1 = bb.upsert_func(pid, sha, 0x401176, "sub_401176", "读 stdin", confidence=0.4)
+    r2 = bb.upsert_func(pid, sha, 0x401176, "parse_user_input", "未检查长度", confidence=0.8)
+    assert r1["created"] and not r2["created"]
+    f = bb.lookup_func(pid, sha, 0x401176)
+    assert f["confidence"] == 0.8
+    names = [h["name"] for h in f["name_history"]]
+    assert names == ["sub_401176", "parse_user_input"]  # 重命名演变史 = 分析笔记
+    assert "读 stdin" in f["analysis"] and "未检查长度" in f["analysis"]  # 追加不覆盖
+
+
+def test_func_kb_risk_filter(bb, project):
+    pid, sha = project["id"], "cd" * 32
+    bb.upsert_func(pid, sha, 0x1000, "f1", risk_tags=["stack-overflow"])
+    bb.upsert_func(pid, sha, 0x2000, "f2", risk_tags=["fmt-str"])
+    hits = bb.list_funcs_by_risk(pid, sha, "stack-overflow")
+    assert [f["name"] for f in hits] == ["f1"]
+
+
+# ---------- 攻击链 ----------
+
+def test_chain_manual_build_seq_and_events(bb, project):
+    """人工建链：seq 自动追加；改名/状态/边注/删中间重排；五类事件齐。"""
+    pid = project["id"]
+    func = bb.upsert_func(pid, "ab" * 32, 0x401176, "read_input")["id"]
+    finding = bb.add_finding(pid, "stack-overflow", "read 无长度检查")["id"]
+    art = bb.add_artifact(pid, "poc/exp.py", kind="poc", description="利用脚本")
+    chain = bb.create_chain(pid, "栈溢出→shell", goal="获取 shell")
+    l1 = bb.add_chain_link(pid, chain, "func_kb", func, "溢出可覆盖返回地址")
+    l2 = bb.add_chain_link(pid, chain, "finding", finding, "需要先 leak libc")
+    l3 = bb.add_chain_link(pid, chain, "artifact", art)
+    d = bb.get_chain(chain)
+    assert [l["seq"] for l in d["links"]] == [1, 2, 3]
+    assert bb.list_chains(pid)[0]["link_count"] == 3
+
+    bb.update_link_note(pid, l2, "先 leak 再 ret2libc")
+    assert bb.get_chain(chain)["links"][1]["edge_note"] == "先 leak 再 ret2libc"
+
+    # 删中间节点 → 剩余按旧序重排 1..n（线性序不留洞）
+    assert bb.delete_chain_link(pid, l2)["chain_id"] == chain
+    seqs = [(l["id"], l["seq"]) for l in bb.get_chain(chain)["links"]]
+    assert seqs == [(l1, 1), (l3, 2)]
+
+    bb.update_chain(pid, chain, name="破链", status="validated")
+    assert bb.get_chain(chain)["status"] == "validated"
+    with pytest.raises(ValueError):
+        bb.update_chain(pid, chain, status="nonsense")
+
+    chain_events = [e["kind"] for e in bb.recent_events(pid) if e["kind"].startswith("chain.")]
+    assert chain_events == [
+        "chain.created", "chain.link_added", "chain.link_added", "chain.link_added",
+        "chain.updated", "chain.link_removed", "chain.updated",
+    ]
+    link_payload = [e for e in bb.recent_events(pid) if e["kind"] == "chain.link_added"][0]
+    assert link_payload["payload"]["node_type"] == "func_kb"
+    assert link_payload["payload"]["node_id"] == func
+
+
+def test_chain_node_validation(bb, project):
+    pid = project["id"]
+    chain = bb.create_chain(pid, "链")
+    with pytest.raises(ValueError, match="非法节点类型"):
+        bb.add_chain_link(pid, chain, "host", "x")
+    with pytest.raises(ValueError, match="禁止跨项目/引用未落库实体"):
+        bb.add_chain_link(pid, chain, "func_kb", "func-不存在")  # 防幻觉校验
+
+
+def test_chain_cross_project_isolation(bb, project):
+    """跨项目：链不可见（LookupError/None/False），别项目节点不可挂（ValueError）。"""
+    pid = project["id"]
+    other = bb.create_project("别的项目", "ctf", ["binary"])["id"]
+    func_other = bb.upsert_func(other, "ab" * 32, 0x1000, "f")["id"]
+    chain = bb.create_chain(pid, "本项目链")
+
+    with pytest.raises(LookupError):
+        bb.add_chain_link(other, chain, "func_kb", func_other)  # 链对 other 不存在
+    func_me = bb.upsert_func(pid, "cd" * 32, 0x2000, "g")["id"]
+    with pytest.raises(ValueError):
+        bb.add_chain_link(pid, chain, "func_kb", func_other)  # 节点不属本项目
+    link = bb.add_chain_link(pid, chain, "func_kb", func_me)
+
+    assert bb.update_chain(other, chain, status="exploited") is None
+    assert bb.delete_chain(other, chain) is False
+    assert bb.update_link_note(other, link, "x") is None
+    assert bb.delete_chain_link(other, link) is None
+    assert bb.list_chains(other) == []
+    # 本项目链毫发无损
+    assert bb.get_chain(chain)["links"][0]["id"] == link
+
+
+def test_chain_orphan_node_and_delete(bb, project):
+    """实体被删后链仍可读（孤儿节点占位由 API 层组装）；删链清头+links。"""
+    pid = project["id"]
+    finding = bb.add_finding(pid, "x", "临时发现")["id"]
+    chain = bb.create_chain(pid, "孤儿链")
+    bb.add_chain_link(pid, chain, "finding", finding)
+    with bb._tx():
+        bb.conn.execute("DELETE FROM findings WHERE id=?", (finding,))
+    assert bb.get_chain(chain)["links"][0]["node_id"] == finding  # 不报错
+    assert bb.delete_chain(pid, chain) is True
+    assert bb.get_chain(chain) is None
+    with bb._tx():
+        n = bb.conn.execute("SELECT COUNT(*) c FROM chain_links").fetchone()["c"]
+    assert n == 0
+    assert bb.delete_chain(pid, "chain-missing") is False
+
+
+# ---------- 任务队列 ----------
+
+def test_task_claim_and_finish(bb, project):
+    pid = project["id"]
+    s1 = _session(bb, project)
+    tq = TaskQueue(bb)
+    t = tq.publish(pid, "枚举子域名", scope="domain:xxx.com", task_type="recon",
+                   created_by="orchestrator")
+    tq.claim(t, s1["id"])
+    task = tq.get_task(t)
+    assert task["status"] == "claimed" and task["claimed_by"] == s1["id"]
+    assert task["lease_until"] is not None
+    with pytest.raises(ClaimError):
+        tq.claim(t, "sess-other")  # 已被认领
+    tq.complete(t, s1["id"], "发现 12 个子域")
+    assert tq.get_task(t)["status"] == "done"
+
+
+def test_active_tasks_conflict_on_ip(bb, project):
+    """active 任务按 conflict_keys 互斥（§6.2：同 IP 只许一个 active，防 WAF）。"""
+    pid = project["id"]
+    s1, s2 = _session(bb, project, "S1"), _session(bb, project, "S2")
+    tq = TaskQueue(bb)
+    t1 = tq.publish(pid, "漏扫 1.2.3.4", noise_budget="medium",
+                    conflict_keys=["ip:1.2.3.4"], created_by="orchestrator")
+    t2 = tq.publish(pid, "爆破同 IP 另一域名", noise_budget="medium",
+                    conflict_keys=["ip:1.2.3.4"], created_by="orchestrator")
+    tq.claim(t1, s1["id"])
+    with pytest.raises(ClaimError, match="conflict_keys 交叠"):
+        tq.claim(t2, s2["id"])
+    tq.complete(t1, s1["id"])
+    tq.claim(t2, s2["id"])  # 前一个 done 后即可认领
+
+
+def test_passive_tasks_share(bb, project):
+    """passive 任务（逆向分析等）任意共享，不互斥。"""
+    pid = project["id"]
+    s1, s2 = _session(bb, project, "S1"), _session(bb, project, "S2")
+    tq = TaskQueue(bb)
+    t1 = tq.publish(pid, "分析战斗逻辑", task_type="analyze", created_by="orchestrator")
+    t2 = tq.publish(pid, "分析通信逻辑", task_type="analyze", created_by="orchestrator")
+    tq.claim(t1, s1["id"])
+    tq.claim(t2, s2["id"])  # 无 conflict_keys，不冲突
+
+
+def test_active_requires_conflict_keys(bb, project):
+    tq = TaskQueue(bb)
+    with pytest.raises(ValueError, match="conflict_keys"):
+        tq.publish(project["id"], "漏扫", noise_budget="high")
+
+
+def test_update_task_rules(bb, project):
+    """任务编辑：open/failed 可改；claimed/done 拒；非 passive 必填 conflict_keys。"""
+    pid = project["id"]
+    s = _session(bb, project)
+    tq = TaskQueue(bb)
+    t = tq.publish(pid, "原目标", task_type="recon", priority=2)
+    out = tq.update_task(t, objective="新目标", priority=0)
+    assert out["objective"] == "新目标" and out["priority"] == 0
+    tq.claim(t, s["id"])
+    with pytest.raises(ValueError, match="不可编辑"):
+        tq.update_task(t, objective="改不动")  # claimed：objective 已固化进在跑会话
+    tq.complete(t, s["id"])
+    with pytest.raises(ValueError, match="不可编辑"):
+        tq.update_task(t, objective="战果不可改")  # done
+    # failed 可编辑但状态不变
+    t2 = tq.publish(pid, "失败任务", noise_budget="low", conflict_keys=["ip:9.9.9.9"])
+    tq.claim(t2, s["id"])
+    tq.fail(t2, s["id"], "炸了")
+    tq.update_task(t2, objective="失败任务 v2")
+    assert tq.get_task(t2)["status"] == "failed"
+    with pytest.raises(ValueError, match="conflict_keys"):
+        tq.update_task(t2, noise_budget="high", conflict_keys=[])  # active 必须有互斥键
+    with pytest.raises(ValueError, match="不可编辑字段"):
+        tq.update_task(t2, claimed_by="sess-x")  # 白名单外字段
+    ev = [e for e in bb.recent_events(pid) if e["kind"] == "task.updated"]
+    assert ev[-1]["payload"]["changes"]["objective"] == "失败任务 v2"
+
+
+def test_reopen_failed_task(bb, project):
+    """失败放回：failed→open，清持有方/租约，result_note 保留，落 task.reopened。"""
+    pid = project["id"]
+    s = _session(bb, project)
+    tq = TaskQueue(bb)
+    t = tq.publish(pid, "再试一次", noise_budget="low", conflict_keys=["ip:8.8.8.8"])
+    tq.claim(t, s["id"])
+    tq.fail(t, s["id"], "会话结束但任务未收尾")
+    tq.reopen(t)
+    row = tq.get_task(t)
+    assert row["status"] == "open" and row["claimed_by"] is None
+    assert row["lease_until"] is None
+    assert row["result_note"] == "会话结束但任务未收尾"  # 保留在库（open 卡片不渲染）
+    assert "task.reopened" in [e["kind"] for e in bb.recent_events(pid)]
+    with pytest.raises(ValueError, match="仅失败任务可放回"):
+        tq.reopen(t)  # open 不可放回
+    tq.claim(t, s["id"])
+    tq.complete(t, s["id"])
+    with pytest.raises(ValueError, match="仅失败任务可放回"):
+        tq.reopen(t)  # done 不可放回
+
+
+def test_plan_first_set_and_revision(bb, project):
+    """A2：首次写计划服务端发号 + task.plan_set；修订保留状态/ts、丢弃缺步、落 plan_revised。"""
+    pid = project["id"]
+    s = _session(bb, project)
+    tq = TaskQueue(bb)
+    t = tq.publish(pid, "分析样本", task_type="analyze")
+    tq.claim(t, s["id"])
+
+    plan = tq.set_plan(t, s["id"], [{"title": "查黑板"}, {"title": "静态分析"}, {"title": "落结论"}])
+    assert [x["id"] for x in plan] == ["p1", "p2", "p3"]
+    assert all(x["status"] == "todo" and x["ts"] for x in plan)
+    assert tq.get_task(t)["plan"][1]["title"] == "静态分析"
+    ev = [e for e in bb.recent_events(pid) if e["kind"] == "task.plan_set"]
+    assert len(ev) == 1 and ev[-1]["payload"]["task_id"] == t
+
+    # p1 做完、p2 进行中，修订：保留 p1/p2（p1 done/ts 不变，p2 标题可改），
+    # 丢弃 p3，新增一步发号 p4
+    tq.step_plan(t, s["id"], "p1", "done")
+    p1_ts_before = tq.get_task(t)["plan"][0]["ts"]
+    tq.step_plan(t, s["id"], "p2", "doing")
+    revised = tq.set_plan(t, s["id"], [
+        {"id": "p1", "title": "查黑板"},
+        {"id": "p2", "title": "静态分析（加深）"},
+        {"title": "动态验证"},
+    ], rev_reason="需要动态验证补充")
+    assert [x["id"] for x in revised] == ["p1", "p2", "p4"]
+    by_id = {x["id"]: x for x in revised}
+    assert by_id["p1"]["status"] == "done" and by_id["p1"]["ts"] == p1_ts_before
+    assert by_id["p2"]["status"] == "doing" and by_id["p2"]["title"] == "静态分析（加深）"
+    assert by_id["p4"]["status"] == "todo"
+    rev_ev = [e for e in bb.recent_events(pid) if e["kind"] == "task.plan_revised"]
+    assert len(rev_ev) == 1
+    payload = rev_ev[-1]["payload"]
+    assert payload["rev_reason"] == "需要动态验证补充"
+    assert len(payload["old_plan"]) == 3 and payload["session_id"] == s["id"]
+    # 首次事件只有一条（修订没有重发 plan_set）
+    assert len([e for e in bb.recent_events(pid) if e["kind"] == "task.plan_set"]) == 1
+
+
+def test_plan_step_auto_demote_and_blocked_note(bb, project):
+    """A2：至多一个 doing（旧 doing 自动回 todo 记 auto_demoted）；blocked 无 note 拒。"""
+    pid = project["id"]
+    s = _session(bb, project)
+    tq = TaskQueue(bb)
+    t = tq.publish(pid, "打站点", task_type="web")
+    tq.claim(t, s["id"])
+    tq.set_plan(t, s["id"], [{"title": "a"}, {"title": "b"}, {"title": "c"}])
+
+    tq.step_plan(t, s["id"], "p1", "doing")
+    task = tq.step_plan(t, s["id"], "p2", "doing")  # 切 doing：p1 自动回 todo
+    plan = {x["id"]: x["status"] for x in task["plan"]}
+    assert plan == {"p1": "todo", "p2": "doing", "p3": "todo"}
+    step_ev = [e for e in bb.recent_events(pid) if e["kind"] == "task.step"]
+    assert step_ev[-1]["payload"]["auto_demoted"] == ["p1"]
+
+    with pytest.raises(ValueError, match="blocked 必须"):
+        tq.step_plan(t, s["id"], "p2", "blocked")
+    task = tq.step_plan(t, s["id"], "p2", "blocked", note="等目标账号")
+    blocked = next(x for x in task["plan"] if x["id"] == "p2")
+    assert blocked["status"] == "blocked" and blocked["note"] == "等目标账号"
+    assert step_ev[-1]["payload"]["task_id"] == t
+
+    with pytest.raises(ValueError, match="非法计划步状态"):
+        tq.step_plan(t, s["id"], "p1", "wat")
+    with pytest.raises(ValueError, match="计划步不存在"):
+        tq.step_plan(t, s["id"], "p9", "doing")
+
+
+def test_plan_permissions(bb, project):
+    """A2：仅 claimed 持有者可写计划；空计划/空标题拒绝。"""
+    pid = project["id"]
+    s1, s2 = _session(bb, project, "S1"), _session(bb, project, "S2")
+    tq = TaskQueue(bb)
+    t = tq.publish(pid, "活", task_type="generic")
+    with pytest.raises(ClaimError):
+        tq.set_plan(t, s1["id"], [{"title": "x"}])  # open 态
+    tq.claim(t, s1["id"])
+    with pytest.raises(ClaimError):
+        tq.set_plan(t, s2["id"], [{"title": "x"}])  # 非认领者
+    with pytest.raises(ClaimError):
+        tq.step_plan(t, s2["id"], "p1", "doing")
+    with pytest.raises(ValueError, match="至少包含一个步骤"):
+        tq.set_plan(t, s1["id"], [])
+    tq.set_plan(t, s1["id"], [{"title": "x"}])
+    with pytest.raises(ValueError, match="title 不能为空"):
+        tq.set_plan(t, s1["id"], [{"title": "   "}])
+    tq.complete(t, s1["id"])
+    with pytest.raises(ClaimError):
+        tq.set_plan(t, s1["id"], [{"title": "done 不可改"}])
+
+
+def test_delete_task_physical_and_side_effects(bb, project):
+    """删除：物理删行 + task.deleted 快照事件；done 不可删；claimed 删除释放互斥；子任务防护。"""
+    pid = project["id"]
+    s1, s2 = _session(bb, project, "S1"), _session(bb, project, "S2")
+    tq = TaskQueue(bb)
+    t1 = tq.publish(pid, "扫 1.2.3.4", noise_budget="medium",
+                    conflict_keys=["ip:1.2.3.4"])
+    tq.claim(t1, s1["id"])
+    t2 = tq.publish(pid, "同 IP 排队", noise_budget="medium",
+                    conflict_keys=["ip:1.2.3.4"])
+    with pytest.raises(ClaimError):
+        tq.claim(t2, s2["id"])
+    tq.delete(t1)  # claimed 可删
+    assert tq.get_task(t1) is None
+    tq.claim(t2, s2["id"])  # conflict_keys/lease 随行走，互斥立即释放
+    ev = [e for e in bb.recent_events(pid) if e["kind"] == "task.deleted"]
+    assert ev and ev[0]["payload"]["objective"] == "扫 1.2.3.4"
+    assert ev[0]["payload"]["was_status"] == "claimed"
+    # A1：done 也可删（战果不再强保留，快照事件留审计）
+    t3 = tq.publish(pid, "已完成的战果")
+    tq.claim(t3, s2["id"])
+    tq.complete(t3, s2["id"], "收工")
+    tq.delete(t3)
+    assert tq.get_task(t3) is None
+    done_ev = [e for e in bb.recent_events(pid)
+               if e["kind"] == "task.deleted" and e["payload"]["task_id"] == t3]
+    assert done_ev and done_ev[-1]["payload"]["was_status"] == "done"
+    t4 = tq.publish(pid, "失败品")
+    tq.claim(t4, s2["id"])
+    tq.fail(t4, s2["id"], "炸了")
+    tq.delete(t4)
+    assert tq.get_task(t4) is None
+    # 子任务防护（外键 parent_id 自引用）
+    parent = tq.publish(pid, "父任务")
+    tq.publish(pid, "子任务", parent_id=parent)
+    with pytest.raises(ValueError, match="子任务"):
+        tq.delete(parent)
+
+
+def test_claim_next_respects_role_filter_and_priority(bb, project):
+    """Worker 循环 + 角色过滤（§6.6）：privesc 角色看不到 recon 任务；P0 优先。"""
+    pid = project["id"]
+    s = _session(bb, project, "privesc-worker")
+    tq = TaskQueue(bb)
+    t_recon = tq.publish(pid, "信息收集", task_type="recon", priority=0,
+                         created_by="orchestrator")
+    t_privesc = tq.publish(pid, "本地提权", task_type="privesc", priority=2,
+                           created_by="orchestrator")
+    got = tq.claim_next(pid, s["id"], allowed_task_types=["privesc"])
+    assert got == t_privesc  # 跳过了更高优先级但类型不符的 recon
+    assert tq.get_task(t_recon)["status"] == "open"
+
+
+def test_lease_expiry_recycles(bb, project):
+    """lease 过期 → 任务回 open，会话挂死不占坑（§6.4）。"""
+    pid = project["id"]
+    s1 = _session(bb, project)
+    tq = TaskQueue(bb)
+    t = tq.publish(pid, "长任务", created_by="orchestrator")
+    tq.claim(t, s1["id"], lease_minutes=0)
+    from core.blackboard.store import now
+    with bb._tx():
+        bb.conn.execute("UPDATE tasks SET lease_until='2000-01-01T00:00:00+00:00' WHERE id=?", (t,))
+    assert tq.expire_leases() == [t]
+    assert tq.get_task(t)["status"] == "open"
+    s_new = _session(bb, project, "S-new")  # 外键约束：会话必须先登记
+    tq.claim(t, s_new["id"])  # 新会话可接手
+
+
+# ---------- 事件总线 ----------
+
+def test_event_bus_subscriber_and_increment(bb, project):
+    """落库即广播 + since_id 增量（§5.3 变更通知）。"""
+    pid = project["id"]
+    seen = []
+    unsubscribe = bb.bus.subscribe(seen.append)
+    try:
+        bb.append_event(pid, "decision", {"thought": "检查 NX"})
+        bb.append_event(pid, "command", {"cmd": "checksec"})
+    finally:
+        unsubscribe()
+    assert [e["kind"] for e in seen] == ["decision", "command"]
+    last = seen[-1]["id"]
+    bb.append_event(pid, "finding.new", {"x": 1})
+    incremental = bb.recent_events(pid, since_id=last)
+    assert [e["kind"] for e in incremental] == ["finding.new"]
+
+
+def test_subscriber_exception_does_not_block_writes(bb, project):
+    """订阅者炸了不影响黑板写路径（通知是尽力而为）。"""
+    pid = project["id"]
+
+    def bad(_):
+        raise RuntimeError("WS 断了")
+
+    bb.bus.subscribe(bad)
+    eid = bb.append_event(pid, "command", {"cmd": "nmap"})
+    assert eid > 0
+
+
+# ---------- 审批（request/decide 唯一 core 入口） ----------
+
+def test_approval_request_and_decide(bb, project):
+    """创建 pending 审批 → 人类批准（状态流转 + 审计事件）；重复决策报错。"""
+    pid = project["id"]
+    appr = bb.request_approval(
+        pid, {"type": "net_real", "scope": "http://127.0.0.1:8085"},
+        risk="low", requested_by="sess-x")
+    assert appr["id"].startswith("appr-") and appr["status"] == "pending"
+    row = bb.conn.execute("SELECT * FROM approvals WHERE id=?", (appr["id"],)).fetchone()
+    assert row["risk"] == "low" and row["requested_by"] == "sess-x"
+    # 批准：decided_by/author 可分离（演练自批标 demo，不冒充人类）
+    done = bb.decide_approval(appr["id"], "approved",
+                              decided_by="demo-script(auto)", author="demo")
+    assert done["status"] == "approved" and done["decided_by"] == "demo-script(auto)"
+    kinds = [e["kind"] for e in bb.recent_events(pid)]
+    assert "approval.approved" in kinds
+    # 重复决策 / 非法决策 / 不存在 → ValueError
+    with pytest.raises(ValueError):
+        bb.decide_approval(appr["id"], "rejected")
+    with pytest.raises(ValueError):
+        bb.decide_approval(appr["id"], "maybe")
+    with pytest.raises(ValueError):
+        bb.decide_approval("appr-nope", "approved")
+
+
+# ---------- 资产树（DESIGN.md §5.2：host 主行 + domain/service 挂载） ----------
+
+def test_list_assets_parses_meta(bb, project):
+    """回归：list_assets 返回的 meta 必须是 dict（曾是 JSON 字符串）。"""
+    pid = project["id"]
+    bb.upsert_asset(pid, "domain", "x.com", meta={"source": "dns"}, author="human")
+    a = bb.list_assets(pid)[0]
+    assert a["meta"] == {"source": "dns"}
+
+
+def test_asset_parent_tree(bb, project):
+    pid = project["id"]
+    host = bb.upsert_asset(pid, "host", "10.0.0.8")
+    assert host["created"] is True
+    d1 = bb.upsert_asset(pid, "domain", "portal.corp.cn", parent_id=host["id"])
+    d2 = bb.upsert_asset(pid, "domain", "vpn.corp.cn", parent_id=host["id"])
+    svc = bb.upsert_asset(pid, "service", "10.0.0.8:8443", parent_id=host["id"])
+    # 孤儿写不进库（外键 parent_id → assets.id 强制挂载真实 host）
+    with pytest.raises(sqlite3.IntegrityError):
+        bb.upsert_asset(pid, "url", "http://x.com/a", parent_id="host-nope")
+    free = bb.upsert_asset(pid, "binary", "a" * 64)
+
+    assets = bb.list_assets(pid)
+    by_id = {a["id"]: a for a in assets}
+    roots = [a for a in assets if not (a["parent_id"] and a["parent_id"] in by_id)]
+    kids = [a for a in assets if a["parent_id"] == host["id"]]
+    assert {a["value"] for a in kids} == {"portal.corp.cn", "vpn.corp.cn", "10.0.0.8:8443"}
+    assert host["id"] in {a["id"] for a in roots}
+    assert free["id"] in {a["id"] for a in roots}
+    # 去重：同 (type, value, parent) 再写 → 返回既有记录
+    dup = bb.upsert_asset(pid, "domain", "vpn.corp.cn", parent_id=host["id"])
+    assert dup["id"] == d2["id"] and dup["created"] is False
+
+
+# ---------- 资产更新（DESIGN.md §5.2：补挂/改 meta 不走 upsert） ----------
+
+def test_set_asset_parent(bb, project):
+    pid = project["id"]
+    host = bb.upsert_asset(pid, "host", "10.0.0.9")
+    a = bb.upsert_asset(pid, "domain", "a.cn", parent_id=host["id"])
+    b = bb.upsert_asset(pid, "url", "http://a.cn/")
+    # 挂载 + 摘挂
+    bb.set_asset_parent(b["id"], a["id"])
+    assert bb.get_asset(b["id"])["parent_id"] == a["id"]
+    bb.set_asset_parent(b["id"], None)
+    assert bb.get_asset(b["id"])["parent_id"] is None
+    # 非法操作一律 ValueError：自挂 / 父缺失 / 成环（host 挂到其子孙下）/ 资产不存在
+    with pytest.raises(ValueError):
+        bb.set_asset_parent(a["id"], a["id"])
+    with pytest.raises(ValueError):
+        bb.set_asset_parent(a["id"], "asset-nope")
+    with pytest.raises(ValueError):
+        bb.set_asset_parent(host["id"], a["id"])
+    with pytest.raises(ValueError):
+        bb.set_asset_parent("asset-nope", None)
+    # 审计：asset.reparent 事件落流
+    assert any(e["kind"] == "asset.reparent" for e in bb.recent_events(pid))
+
+
+def test_update_asset_meta(bb, project):
+    pid = project["id"]
+    a = bb.upsert_asset(pid, "domain", "x.cn", meta={"source": "dns"})
+    r = bb.update_asset_meta(a["id"], {"title": "门户首页", "scanned": True})
+    assert r["meta"] == {"source": "dns", "title": "门户首页", "scanned": True}
+    with pytest.raises(ValueError):
+        bb.update_asset_meta("asset-nope", {"title": "t"})
+
+
+def test_find_asset_ignores_parent(bb, project):
+    """find_asset 按 (type, value) 命中（不看 parent）——重报合并路径的基础。"""
+    pid = project["id"]
+    host = bb.upsert_asset(pid, "host", "10.0.0.9")
+    a = bb.upsert_asset(pid, "url", "http://10.0.0.9/x", parent_id=host["id"])
+    hit = bb.find_asset(pid, "url", "http://10.0.0.9/x")
+    assert hit and hit["id"] == a["id"] and hit["meta"] == {}
+    assert bb.find_asset(pid, "url", "http://nope") is None
+
+
+def test_finding_merge_backfills_poc_artifact(bb, project):
+    """合并路径回填 POC 引用：旧行没有 poc_artifact_id 且本次带了 → 回填；已有则不覆盖。"""
+    pid = project["id"]
+    art = bb.add_artifact(pid, "poc/poc.py", kind="poc", sha256="a" * 64)
+    art2 = bb.add_artifact(pid, "poc/poc2.py", kind="poc", sha256="b" * 64)
+    r1 = bb.add_finding(pid, "sqli", "登录框注入", severity="high", confidence=0.6)
+    r2 = bb.add_finding(pid, "sqli", "登录框注入", severity="high", confidence=0.8,
+                        poc_artifact_id=art)
+    assert r2["merged"]
+    row = [f for f in bb.list_findings(pid) if f["id"] == r1["id"]][0]
+    assert row["poc_artifact_id"] == art
+    # 旧行已有引用时合并不覆盖
+    r3 = bb.add_finding(pid, "sqli", "登录框注入", confidence=0.9, poc_artifact_id=art2)
+    assert r3["merged"]
+    row = [f for f in bb.list_findings(pid) if f["id"] == r1["id"]][0]
+    assert row["poc_artifact_id"] == art
+
+
+def test_owner_tags_distinct(bb, project):
+    """meta.owner 去重清单：开窗注入 owner 规则的数据源（DESIGN.md §4 AI 自动打标）。"""
+    pid = project["id"]
+    assert bb.owner_tags(pid) == []  # 无打标返回空
+    bb.upsert_asset(pid, "host", "10.0.0.1", meta={"owner": "edusrc"}, author="t")
+    bb.upsert_asset(pid, "host", "10.0.0.2", meta={"owner": "osrc"}, author="t")
+    bb.upsert_asset(pid, "host", "10.0.0.3", meta={"owner": "edusrc"}, author="t")  # 重复
+    bb.upsert_asset(pid, "host", "10.0.0.4", meta={}, author="t")  # 无 owner
+    assert bb.owner_tags(pid) == ["edusrc", "osrc"]
+
+
+# ---------- 人机共写：patch_func / patch_finding（rev 工作台） ----------
+
+def test_patch_func_rename_note_tags_history(bb, project):
+    """改名入史 / 笔记分段追加 / tags 全量替换（含 []）/ confidence 人不动。"""
+    pid = project["id"]
+    sha = "a" * 64
+    fid = bb.upsert_func(pid, sha, 0x401000, "sub_401000",
+                         analysis="AI 初判", analyzed_by="agent")["id"]
+    r = bb.patch_func(pid, fid, name="check_license", note="密钥比较循环",
+                      risk_tags=["crypto", "anti-debug"], author="human")
+    assert r["name"] == "check_license"
+    assert [h["name"] for h in r["name_history"]] == ["sub_401000", "check_license"]
+    assert "AI 初判" in r["analysis"]
+    assert "## 笔记" in r["analysis"] and "密钥比较循环" in r["analysis"]
+    assert r["risk_tags"] == ["crypto", "anti-debug"]
+    assert r["confidence"] == 0.5  # 人不动 AI 字段
+
+    # 第二条笔记分段；UNSET 不动 tags
+    r2 = bb.patch_func(pid, fid, note="第二段", author="human")
+    assert r2["analysis"].count("## 笔记") == 2
+    assert r2["risk_tags"] == ["crypto", "anti-debug"]
+
+    # [] = 显式清空
+    r3 = bb.patch_func(pid, fid, risk_tags=[], author="human")
+    assert r3["risk_tags"] == []
+
+    events = bb.recent_events(pid)
+    kinds = [e["kind"] for e in events]
+    assert kinds.count("func.updated") == 3
+    # 事件 payload 地址同样出 hex 字符串（不出 int，§9 地址纪律）
+    for e in events:
+        if e["kind"] == "func.updated":
+            assert e["payload"]["address"] == "0x401000"
+
+
+def test_patch_func_missing_and_cross_project(bb, project):
+    other = bb.create_project("别的研究", "research", ["binary"])
+    fid = bb.upsert_func(other["id"], "b" * 64, 1, "f")["id"]
+    assert bb.patch_func(project["id"], fid, note="越界") is None  # 项目隔离
+    assert bb.patch_func(project["id"], "func-deadbeef", note="x") is None
+
+
+def test_patch_finding_status_whitelist_and_evidence_merge(bb, project):
+    pid = project["id"]
+    fid = bb.add_finding(pid, "crypto", "AES 常量",
+                         evidence={"category": "algorithm", "address": "0x401000"})["id"]
+    with pytest.raises(ValueError):
+        bb.patch_finding(pid, fid, status="hacked")  # 白名单
+    r = bb.patch_finding(pid, fid, status="verified", evidence={
+        "confirm_by": "dynamic", "debug_log_artifact_id": "art-x"})
+    assert r["status"] == "verified"
+    assert r["evidence"]["category"] == "algorithm"  # 浅层 merge 保留旧字段
+    assert r["evidence"]["confirm_by"] == "dynamic"
+    assert "finding.updated" in [e["kind"] for e in bb.recent_events(pid)]
+
+    other = bb.create_project("p2", "research", ["binary"])
+    assert bb.patch_finding(other["id"], fid, status="verified") is None
+    assert bb.patch_finding(pid, "find-deadbeef", status="verified") is None
+
+
+# ---------- 租约续租原语（A1：renew_lease 此前零调用，心跳接线的底层护栏） ----------
+
+def test_renew_lease_extends_and_shields_from_expiry(bb, project):
+    """续租后 lease_until 前进；过期前续租的任务不被 expire_leases 回收。"""
+    tq = TaskQueue(bb)
+    s1 = _session(bb, project, "S1")["id"]
+    tid = tq.publish(project["id"], "被动分析")
+    tq.claim(tid, s1, lease_minutes=1)
+    old_lease = tq.get_task(tid)["lease_until"]
+    tq.renew_lease(tid, s1, lease_minutes=30)
+    assert tq.get_task(tid)["lease_until"] > old_lease  # ISO 字符串字典序即时间序
+    # 人为把租约回拨到过去（模拟 TTL 将到）后再续租 → 回收扫描跳过本任务
+    with bb._tx():
+        bb.conn.execute("UPDATE tasks SET lease_until=? WHERE id=?",
+                        ("2000-01-01T00:00:00+00:00", tid))
+    tq.renew_lease(tid, s1, lease_minutes=30)
+    assert tq.expire_leases() == []
+    row = tq.get_task(tid)
+    assert row["status"] == "claimed" and row["claimed_by"] == s1
+
+
+def test_expire_leases_recycles_stale_claim_and_allows_reclaim(bb, project):
+    """未续租的过期任务回到 open、清持有方，可被其他会话重新认领。"""
+    tq = TaskQueue(bb)
+    s1 = _session(bb, project, "S1")["id"]
+    tid = tq.publish(project["id"], "被动分析")
+    tq.claim(tid, s1, lease_minutes=1)
+    with bb._tx():
+        bb.conn.execute("UPDATE tasks SET lease_until=? WHERE id=?",
+                        ("2000-01-01T00:00:00+00:00", tid))
+    assert tq.expire_leases() == [tid]
+    row = tq.get_task(tid)
+    assert (row["status"], row["claimed_by"], row["lease_until"]) == ("open", None, None)
+    s2 = _session(bb, project, "S2")["id"]
+    tq.claim(tid, s2)  # 回收后他人可认领，不抛 ClaimError
+
+
+def test_renew_lease_rejects_non_owner_and_finished(bb, project):
+    """续租只认持有者：非 claimed_by 拒绝；done/failed 后续租拒绝。"""
+    tq = TaskQueue(bb)
+    s1 = _session(bb, project, "S1")["id"]
+    s2 = _session(bb, project, "S2")["id"]
+    tid = tq.publish(project["id"], "被动分析")
+    tq.claim(tid, s1)
+    with pytest.raises(ClaimError):
+        tq.renew_lease(tid, s2)  # 非持有者
+    tq.complete(tid, s1)
+    with pytest.raises(ClaimError):
+        tq.renew_lease(tid, s1)  # 已收尾
+
+
+# ---------- 重复发现：证据并集语义（A2，§5.3） ----------
+
+def test_finding_merge_evidence_list_union_and_fill_only(bb, project):
+    """列表键按内容去重追加；relates_to 同 finding_id+note 不重复；其余键只补空不覆盖。"""
+    pid = project["id"]
+    rel = bb.add_finding(pid, "info-leak", "被关联的基线发现")["id"]  # E0：强边须真有其 finding
+    bb.add_finding(pid, "sqli", "登录框注入", evidence={
+        "category": "algorithm", "pocs": [{"payload": "a1"}], "requests": ["r1"]})
+    r = bb.add_finding(pid, "sqli", "登录框注入", evidence={
+        "category": "other",  # 已有真值，不被新报告覆盖
+        "confirm_by": "dynamic",
+        "pocs": [{"payload": "a1"}, {"payload": "a2"}],
+        "requests": ["r1", "r2"],
+        "relates_to": [
+            {"finding_id": rel, "note": "同源"},
+            {"finding_id": rel, "note": "同源"},  # 同边去重
+            {"finding_id": rel, "note": "升级"},
+        ]})
+    assert r["merged"] is True
+    ev = bb.get_finding(pid, r["id"])["evidence"]  # rel 基线先建，list[0] 不再是 sqli
+    assert ev["category"] == "algorithm"
+    assert ev["confirm_by"] == "dynamic"
+    assert ev["pocs"] == [{"payload": "a1"}, {"payload": "a2"}]
+    assert ev["requests"] == ["r1", "r2"]
+    assert ev["relates_to"] == [
+        {"finding_id": rel, "note": "同源"},
+        {"finding_id": rel, "note": "升级"}]
+
+
+def test_finding_merge_severity_status_confidence_never_downgrade(bb, project):
+    """severity 就高不就低；status verified 不被后续 unverified 报告降级；confidence 取大。"""
+    pid = project["id"]
+    bb.add_finding(pid, "sqli", "登录框注入", severity="high", confidence=0.6)
+    assert bb.list_findings(pid)[0]["severity"] == "high"
+    bb.add_finding(pid, "sqli", "登录框注入", severity="low", confidence=0.5)
+    row = bb.list_findings(pid)[0]
+    assert row["severity"] == "high" and row["confidence"] == 0.6
+    bb.add_finding(pid, "sqli", "登录框注入", severity="critical", confidence=0.9,
+                   status="verified")
+    bb.add_finding(pid, "sqli", "登录框注入", severity="info", status="unverified")
+    row = bb.list_findings(pid)[0]
+    assert row["severity"] == "critical" and row["status"] == "verified"
+    assert row["confidence"] == 0.9
+
+
+def test_finding_merge_notes_segmented_append(bb, project):
+    """notes 多来源分段追加，前人笔记不被覆盖。"""
+    pid = project["id"]
+    bb.add_finding(pid, "sqli", "登录框注入", evidence={"notes": "初报：报错页见 SQL 语法"})
+    bb.add_finding(pid, "sqli", "登录框注入", evidence={"notes": "复核：time-based 可延迟"})
+    notes = bb.list_findings(pid)[0]["evidence"]["notes"]
+    assert "初报" in notes and "复核" in notes and notes.count("\n\n") == 1
+
+
+# ---------- A2：并发 read-modify-write 不丢更新（BEGIN IMMEDIATE 临界区） ----------
+
+def _run_threads(n, fn):
+    """起 n 线程各跑 fn(i)，透传线程内异常。"""
+    errors: list[Exception] = []
+
+    def worker(i):
+        try:
+            fn(i)
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors, f"并发线程内异常: {errors!r}"
+
+
+def test_concurrent_patch_func_notes_no_lost_segments(bb, project):
+    """8 会话并发给同一函数追加笔记 → 8 段全留（旧实现锁外读→锁内写会丢段）。"""
+    pid = project["id"]
+    fid = bb.upsert_func(pid, "a" * 64, 0x401000, "sub_401000",
+                         analysis="AI 初判", analyzed_by="agent")["id"]
+
+    def add_note(i):
+        bb.patch_func(pid, fid, note=f"第{i}段笔记内容", author=f"human-{i}")
+
+    _run_threads(8, add_note)
+    row = bb.get_func(pid, fid)
+    assert row["analysis"].count("## 笔记") == 8
+    for i in range(8):
+        assert f"第{i}段笔记内容" in row["analysis"]
+
+
+def test_concurrent_add_finding_union_no_lost_evidence(bb, project):
+    """8 会话并发上报同一漏洞、各带不同 pocs/requests/relates_to → 最终并集无丢失。"""
+    pid = project["id"]
+    first = bb.add_finding(pid, "sqli", "登录框注入", severity="high")
+    # E0：被引强边必须是本项目真实 finding（各用独立 vuln_class，避免与 sqli 互相合并）
+    rel_ids = [bb.add_finding(pid, f"rel-class-{i}", f"关联基线 {i}")["id"]
+               for i in range(8)]
+
+    def report(i):
+        bb.add_finding(pid, "sqli", "登录框注入", evidence={
+            "pocs": [{"payload": f"payload-{i}"}],
+            "requests": [f"GET /?id={i}"],
+            "relates_to": [{"finding_id": rel_ids[i], "note": f"边-{i}"}]})
+
+    _run_threads(8, report)
+    assert len(bb.list_findings(pid)) == 9  # 1 主漏洞 + 8 个被引基线
+    ev = bb.get_finding(pid, first["id"])["evidence"]
+    assert len(ev["pocs"]) == 8 and len(ev["requests"]) == 8 and len(ev["relates_to"]) == 8
+    assert {p["payload"] for p in ev["pocs"]} == {f"payload-{i}" for i in range(8)}
+    assert {r for r in ev["requests"]} == {f"GET /?id={i}" for i in range(8)}
+
+
+def test_concurrent_asset_meta_and_finding_patch_no_lost_keys(bb, project):
+    """并发 PATCH 资产 meta（深合并）与 finding evidence（浅层 merge）：各键全留。"""
+    pid = project["id"]
+    aid = bb.upsert_asset(pid, "host", "10.0.0.1")["id"]
+    fid = bb.add_finding(pid, "xss", "搜索框反射", evidence={"base": "v0"})["id"]
+
+    def patch_both(i):
+        bb.update_asset_meta(aid, {f"meta-{i}": i})
+        bb.patch_finding(pid, fid, evidence={f"ev-{i}": i})
+
+    _run_threads(8, patch_both)
+    asset = bb.get_asset(aid)
+    assert asset["meta"] == {f"meta-{i}": i for i in range(8)}
+    ev = bb.get_finding(pid, fid)["evidence"]
+    assert ev["base"] == "v0"
+    assert all(ev[f"ev-{i}"] == i for i in range(8))
+
+
+# ---------- 删除项目：close_all 关闭闸门（防惰性重连锁死 db） ----------
+
+def test_close_all_rejects_reconnect(bb):
+    """close_all 后访问 .conn 必须抛 BlackboardClosedError，不再惰性重连。
+
+    旧实现下仍持引用的 WS/轮询线程会在 close_all 后毫秒级重开 sqlite 连接，
+    Windows 上重新锁死文件导致删项目 rename 必败（WinError 5）。"""
+    from core.blackboard.store import BlackboardClosedError
+    assert bb.conn is bb.conn  # 触发本线程惰性连接
+    bb.close_all()
+    with pytest.raises(BlackboardClosedError):
+        _ = bb.conn
+    # 写路径同样被挡（_tx 经 conn property）
+    with pytest.raises(BlackboardClosedError):
+        with bb._tx():
+            pass
+
+# ---------- finding/asset 物理删除（走查/垃圾数据清理，2026-09-15） ----------
+
+def test_delete_finding_cascades_and_audits(bb, project):
+    """删 finding：反向 relates_to 边摘除、任务 context_refs/stale_refs 摘引用、
+    链边保留（孤儿占位）、私信保留审计、落 finding.deleted 事件；不触发撤回传播。"""
+    pid = project["id"]
+    tq = TaskQueue(bb)
+    base = bb.add_finding(pid, "sqli", "上游注入", severity="high")
+    # 下游 finding 以强边引用上游（含一条历史悬空边，也应一并清掉）
+    down = bb.add_finding(pid, "rce", "下游 getshell", severity="critical",
+                          evidence={"relates_to": [
+                              {"finding_id": base["id"], "note": "以前置注入为前提"}]})
+    # 再注入一条 E0 校验上线前可能存在的历史悬空边（绕过校验直接落库模拟）
+    import json as _json
+    ev = bb.get_finding(pid, down["id"])["evidence"]
+    ev["relates_to"].append({"finding_id": "find-deadbeefcafe", "note": "历史悬空"})
+    with bb._tx():
+        bb.conn.execute(
+            "UPDATE findings SET evidence=? WHERE id=?",
+            (_json.dumps(ev, ensure_ascii=False), down["id"]))
+    # 任务依据 + 撤回挂标
+    tid = tq.publish(pid, f"验证 {base['id']}", refs=[base["id"]])
+    assert tq.add_stale_ref(tid, base["id"]) is True
+    # 链边挂上游（删 finding 不级联链，链详情走孤儿占位）
+    cid = bb.create_chain(pid, "演示链")
+    bb.add_chain_link(pid, cid, "finding", base["id"], edge_note="入链")
+    # 撤回私信（删 finding 保留行：payload 自包含，同关窗私信留审计）
+    sess = bb.register_session(pid, "recon")["id"]
+    bb.inbox_post(pid, sess, "basis_stale", base["id"], {"title": "上游注入"})
+
+    out = bb.delete_finding(pid, base["id"], author="human")
+    assert out["id"] == base["id"] and out["trimmed_relates_to"] == 1
+    assert out["affected_tasks"] == [tid]
+    assert bb.get_finding(pid, base["id"]) is None
+    # 下游边被摘：只剩悬空边
+    rels = bb.get_finding(pid, down["id"])["evidence"]["relates_to"]
+    assert [r["finding_id"] for r in rels] == ["find-deadbeefcafe"]
+    # 任务行保留但引用清空
+    t = tq.get_task(tid)
+    assert t["context_refs"] == [] and t["stale_refs"] == []
+    # 链边行仍在（孤儿）
+    detail = bb.get_chain(cid)
+    assert [l["node_id"] for l in detail["links"]] == [base["id"]]
+    # 私信行保留
+    assert len(bb.inbox_list(pid, sess)) == 1
+    # 审计事件；且删除不是撤回（无 retracted/message.inbox 新事件）
+    kinds = [e["kind"] for e in bb.recent_events(pid, 0, limit=200)]
+    assert kinds.count("finding.deleted") == 1
+    assert "finding.retracted" not in kinds[kinds.index("finding.deleted"):]
+    assert "message.inbox" not in kinds[kinds.index("finding.deleted"):]
+
+
+def test_delete_finding_missing_returns_none(bb, project):
+    assert bb.delete_finding(project["id"], "find-000000000000") is None
+
+
+def test_delete_asset_guards(bb, project):
+    """叶子资产可删；被 finding 引用/有子资产 → ValueError；不存在 → LookupError。"""
+    pid = project["id"]
+    host = bb.upsert_asset(pid, "host", "10.0.0.9")["id"]
+    leaf_free = bb.upsert_asset(pid, "url", "http://10.0.0.9/a")["id"]
+    leaf_used = bb.upsert_asset(pid, "url", "http://10.0.0.9/b", parent_id=host)["id"]
+    bb.upsert_asset(pid, "url", "http://10.0.0.9/c", parent_id=host)  # host 的另一个子
+    bb.add_finding(pid, "xss", "XSS", target_asset_id=leaf_used)
+
+    with pytest.raises(ValueError, match="引用"):
+        bb.delete_asset(leaf_used)               # 被 finding 引用
+    with pytest.raises(ValueError, match="子资产"):
+        bb.delete_asset(host)                    # 有子节点
+    assert bb.delete_asset(leaf_free)["id"] == leaf_free
+    assert bb.get_asset(leaf_free) is None
+    with pytest.raises(LookupError):
+        bb.delete_asset("asset-000000000000")
+    # 审计事件
+    kinds = [e["kind"] for e in bb.recent_events(pid, 0, limit=50)]
+    assert "asset.deleted" in kinds
+
+# ---------- A3：任务流图组装（parent 实线 / 私信虚线，set-based 无 N+1） ----------
+
+def test_task_graph_parent_and_inbox_edges(bb, project):
+    from core.blackboard.graph import task_graph
+    pid = project["id"]
+    tq = TaskQueue(bb)
+    s1 = _session(bb, project, "worker1")
+    s2 = _session(bb, project, "worker2")
+    parent = tq.publish(pid, "父任务", task_type="generic")
+    t1 = tq.publish(pid, "子一", task_type="generic", parent_id=parent, created_by=s1["id"])
+    t2 = tq.publish(pid, "子二", task_type="generic")
+    tq.claim(t1, s1["id"])
+    tq.claim(t2, s2["id"])
+    f = bb.add_finding(pid, "xss", "反射 XSS")["id"]
+
+    # 同依据以两种私信触达两个在跑会话 → 同一任务对，多簇合并为一条虚线
+    assert bb.inbox_post(pid, s1["id"], "basis_stale", f, {"title": "反射 XSS"})
+    assert bb.inbox_post(pid, s2["id"], "basis_stale", f, {"title": "反射 XSS"})
+    assert bb.inbox_post(pid, s1["id"], "finding_update", f, {"title": "反射 XSS"})
+    assert bb.inbox_post(pid, s2["id"], "finding_update", f, {"title": "反射 XSS"})
+
+    g = task_graph(bb, pid)
+    edge_pairs = {(e["kind"], e["source"], e["target"]) for e in g["edges"]}
+    assert ("parent", parent, t1) in edge_pairs
+    inbox = [e for e in g["edges"] if e["kind"] == "inbox"]
+    assert len(inbox) == 1 and {inbox[0]["source"], inbox[0]["target"]} == {t1, t2}
+    kinds = {r["kind"] for r in inbox[0]["refs"]}
+    assert kinds == {"basis_stale", "finding_update"}
+    assert inbox[0]["refs"][0]["title"] == "反射 XSS"  # findings 表标题优先
+
+    # 节点带会话信息与计划
+    tq.set_plan(t1, s1["id"], [{"title": "a"}, {"title": "b"}])
+    n1 = next(n for n in task_graph(bb, pid)["nodes"] if n["id"] == t1)
+    assert n1["session"] == {"id": s1["id"], "name": "worker1", "status": "idle"}
+    assert len(n1["plan"]) == 2
+    # 完成的任务节点保留（节点持久），实线不断
+    tq.complete(t2, s2["id"], "完")
+    g2 = task_graph(bb, pid)
+    assert {n["id"] for n in g2["nodes"]} == {parent, t1, t2}
+    assert ("parent", parent, t1) in {(e["kind"], e["source"], e["target"]) for e in g2["edges"]}
+
+
+def test_task_graph_closed_session_not_mapped(bb, project):
+    from core.blackboard.graph import task_graph
+    pid = project["id"]
+    tq = TaskQueue(bb)
+    s1 = _session(bb, project, "alive")
+    s3 = _session(bb, project, "closed-one")
+    t1 = tq.publish(pid, "活任务", task_type="generic")
+    t3 = tq.publish(pid, "旧任务", task_type="generic")
+    tq.claim(t1, s1["id"])
+    tq.claim(t3, s3["id"])
+    bb.close_session(s3["id"])
+    f = bb.add_finding(pid, "sqli", "SQLi")["id"]
+    bb.inbox_post(pid, s1["id"], "basis_stale", f, {"title": "SQLi"})
+    bb.inbox_post(pid, s3["id"], "basis_stale", f, {"title": "SQLi"})
+
+    edges = [e for e in task_graph(bb, pid)["edges"] if e["kind"] == "inbox"]
+    assert edges == []  # closed 会话不映射 → 簇内不足两个任务，不出虚线
+
+
+def test_task_graph_query_count_bounded(bb, project):
+    """任务/私信量增长时组装查询条数固定（无 N+1）。"""
+    from core.blackboard.graph import task_graph
+    import sqlite3
+    pid = project["id"]
+    tq = TaskQueue(bb)
+    f = bb.add_finding(pid, "xss", "XSS")["id"]
+
+    def add_worker(i: int) -> None:
+        s = _session(bb, project, f"w{i}")
+        t = tq.publish(pid, f"任务{i}", task_type="generic")
+        tq.claim(t, s["id"])
+        bb.inbox_post(pid, s["id"], "finding_update", f, {"title": "XSS"})
+
+    def count_queries() -> int:
+        stmts: list[str] = []
+        bb.conn.set_trace_callback(lambda sql: stmts.append(sql))
+        try:
+            task_graph(bb, pid)
+        finally:
+            bb.conn.set_trace_callback(None)
+        return len([s for s in stmts if not s.startswith(("BEGIN", "COMMIT"))])
+
+    add_worker(0)
+    n1 = count_queries()                     # tasks / sessions / 窗口映射 / inbox / findings = 5
+    for i in range(1, 60):
+        add_worker(i)
+    n2 = count_queries()
+    assert n1 <= 6 and n2 == n1  # 查询条数不随任务量增长（无 N+1）
+    g = task_graph(bb, pid)
+    assert len(g["nodes"]) == 60
+    # 60 个会话同簇 → 两两连边 C(60,2)=1770，边在合理规模内且不出自连
+    inbox_edges = [e for e in g["edges"] if e["kind"] == "inbox"]
+    assert len(inbox_edges) == 60 * 59 // 2
+    assert all(e["source"] != e["target"] for e in inbox_edges)

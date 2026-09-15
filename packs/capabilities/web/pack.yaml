@@ -1,0 +1,4 @@
+kind: capability
+name: web
+label: "Web 攻防"
+description: "Web/SRC 攻防方法论、侦察与打点：src-strike 全量快照 + ctf-web 知识库"

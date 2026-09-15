@@ -1,0 +1,9 @@
+{
+  "sources": [
+    {
+      "id": "crypto-kb",
+      "root": "kb",
+      "recursive": true
+    }
+  ]
+}

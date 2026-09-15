@@ -1,0 +1,41 @@
+- generic [ref=f6e3]:
+  - generic [ref=f6e4]:
+    - heading "项目" [level=1] [ref=f6e5]
+    - paragraph [ref=f6e6]: 项目 = 场景轨（单选）× 能力包（多选）；数据随 workspaces/ 项目目录隔离
+  - generic [ref=f6e7]:
+    - generic [ref=f6e8]: 新建项目
+    - generic [ref=f6e10]:
+      - generic [ref=f6e11]:
+        - textbox "项目名（可用中文）" [ref=f6e12]
+        - button "创建" [disabled]
+      - generic [ref=f6e13]: 场景轨
+      - generic [ref=f6e15]: 能力包
+  - generic [ref=f6e17]:
+    - button "授权评估 · Web 批4走查-L1开窗 proj-ea1f6ac22698 2026-09-15 删除 批4走查-L1开窗" [ref=f6e18] [cursor=pointer]:
+      - generic [ref=f6e19]: 授权评估 · Web
+      - generic [ref=f6e20]:
+        - generic [ref=f6e21]: 批4走查-L1开窗
+        - generic [ref=f6e22]: proj-ea1f6ac22698
+      - generic "UTC 2026-09-15 07:36:07" [ref=f6e23]: 2026-09-15
+      - button "删除 批4走查-L1开窗" [ref=f6e24]
+    - button "授权评估 · Web assessment 编排演练-Pikachu proj-9f7ee28609e7 2026-09-13 删除 assessment 编排演练-Pikachu" [ref=f6e25] [cursor=pointer]:
+      - generic [ref=f6e26]: 授权评估 · Web
+      - generic [ref=f6e27]:
+        - generic [ref=f6e28]: assessment 编排演练-Pikachu
+        - generic [ref=f6e29]: proj-9f7ee28609e7
+      - generic "UTC 2026-09-13 14:08:10" [ref=f6e30]: 2026-09-13
+      - button "删除 assessment 编排演练-Pikachu" [ref=f6e31]
+    - button "授权评估 · Web pentest 编排演练-Pikachu proj-63dd10c7d1a6 2026-09-13 删除 pentest 编排演练-Pikachu" [ref=f6e32] [cursor=pointer]:
+      - generic [ref=f6e33]: 授权评估 · Web
+      - generic [ref=f6e34]:
+        - generic [ref=f6e35]: pentest 编排演练-Pikachu
+        - generic [ref=f6e36]: proj-63dd10c7d1a6
+      - generic "UTC 2026-09-12 17:59:51" [ref=f6e37]: 2026-09-13
+      - button "删除 pentest 编排演练-Pikachu" [ref=f6e38]
+    - button "研究 · 二进制 rev真机走查 proj-e193f14eb587 2026-09-14 删除 rev真机走查" [ref=f6e39] [cursor=pointer]:
+      - generic [ref=f6e40]: 研究 · 二进制
+      - generic [ref=f6e41]:
+        - generic [ref=f6e42]: rev真机走查
+        - generic [ref=f6e43]: proj-e193f14eb587
+      - generic "UTC 2026-09-14 04:36:24" [ref=f6e44]: 2026-09-14
+      - button "删除 rev真机走查" [ref=f6e45]

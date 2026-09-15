@@ -1,0 +1,155 @@
+- generic:
+  - generic:
+    - generic:
+      - banner:
+        - generic: 授权评估 · Web
+        - heading [level=1]: E1画布走查-Pikachu
+        - generic: 任务 0/0 · 发现 4 · 资产 3
+        - button: 🔔 审批
+        - button: ← 项目
+      - generic:
+        - navigation:
+          - button:
+            - generic: ◈
+            - text: 项目
+          - button:
+            - generic: ◉
+            - text: 直播间
+          - button:
+            - generic: ▤
+            - text: 黑板
+          - button:
+            - generic: ▦
+            - text: 任务
+          - button:
+            - generic: ⚑
+            - text: 审批
+          - button:
+            - generic: ⚙
+            - text: 技能/设置
+        - main:
+          - generic:
+            - generic:
+              - tablist:
+                - tab [selected]: 发现
+                - tab: 资产
+                - tab: 函数库
+              - tabpanel "发现":
+                - generic:
+                  - generic:
+                    - generic:
+                      - button:
+                        - generic: 全部资产
+                    - generic:
+                      - button: 全部
+                      - button: critical
+                      - button: high
+                      - button: medium
+                      - button: low
+                      - button: info
+                    - generic:
+                      - button: 全部状态
+                      - button: unverified
+                      - button: verified
+                    - generic:
+                      - button: 列表
+                      - button: 链路
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic:
+                          - generic:
+                            - button:
+                              - generic: 尚无攻击链
+                          - button: ＋新建链
+                        - generic:
+                          - checkbox [checked]
+                          - text: 弱边
+                        - button
+                        - button
+                        - button
+                      - application:
+                        - generic:
+                          - generic:
+                            - generic:
+                              - img:
+                                - group [ref=f6e1] [cursor=pointer]
+                              - img:
+                                - group [ref=f6e5] [cursor=pointer]
+                              - generic:
+                                - generic: 同一 id 参数，UNION 注入升级到 DBA，存在写文件/执行系统命令面
+                                - generic: 指纹确认 Web 靶场后，在 sqli 模块 id 参数验证注入点
+                              - generic:
+                                - generic [ref=f6e14]:
+                                  - generic [ref=f6e15]: 🖧 192.168.56.10
+                                  - generic [ref=f6e17]:
+                                    - generic [ref=f6e18]: 信息/低危1
+                                    - generic [ref=f6e19]: 中危1
+                                    - generic [ref=f6e20]: 高危/严重1
+                                - generic [ref=f6e22]:
+                                  - generic [ref=f6e23]: 🖧 未归属
+                                  - generic [ref=f6e25]:
+                                    - generic [ref=f6e26]: 信息/低危1
+                                    - generic [ref=f6e27]: 中危
+                                    - generic [ref=f6e28]: 高危/严重
+                                - group [ref=f6e29]:
+                                  - generic [ref=f6e30]:
+                                    - paragraph [ref=f6e33]: SQL 注入升级 DBA：当前库用户具备 DBA 权限，可 --os-shell
+                                    - generic [ref=f6e34]:
+                                      - generic [ref=f6e35]: sql-injection
+                                      - generic [ref=f6e36]: high
+                                      - generic [ref=f6e37]: POC
+                                - group [ref=f6e39]:
+                                  - generic [ref=f6e40]:
+                                    - button [ref=f6e43]
+                                    - paragraph [ref=f6e47]: 数字型 SQL 注入：/vul/sqli/sqli.php GET id 可注入
+                                    - generic [ref=f6e48]:
+                                      - generic [ref=f6e49]: sql-injection
+                                      - generic [ref=f6e50]: medium
+                                      - generic [ref=f6e51]: ✓
+                                      - generic [ref=f6e52]: POC
+                                - group [ref=f6e54]:
+                                  - generic [ref=f6e55]:
+                                    - paragraph [ref=f6e58]: 旁站发现：8080 端口疑似另一 Web 服务（资产待登记）
+                                    - generic [ref=f6e59]:
+                                      - generic [ref=f6e60]: recon-fingerprint
+                                      - generic [ref=f6e61]: info
+                                - group [ref=f6e63]:
+                                  - generic [ref=f6e64]:
+                                    - paragraph [ref=f6e67]: 8085 端口开放，指纹 nginx/1.15.11 + PHP/7.3.4（Pikachu 靶场）
+                                    - generic [ref=f6e68]:
+                                      - generic [ref=f6e69]: recon-fingerprint
+                                      - generic [ref=f6e70]: info
+                                      - generic [ref=f6e71]: ✓
+                                      - generic [ref=f6e72]: POC
+                        - generic:
+                          - button
+                          - button
+                          - button
+  - dialog [ref=f6e75]:
+    - heading "medium 数字型 SQL 注入：/vul/sqli/sqli.php GET id 可注入 verified" [level=2] [ref=f6e76]:
+      - generic [ref=f6e77]: medium
+      - generic [ref=f6e78]: 数字型 SQL 注入：/vul/sqli/sqli.php GET id 可注入
+      - generic [ref=f6e79]: verified
+    - paragraph [ref=f6e80]: sql-injection · 2026-09-14 15:13 · human · http://192.168.56.10:8085/vul/sqli/sqli.php
+    - generic [ref=f6e81]:
+      - generic [ref=f6e82]:
+        - generic [ref=f6e83]:
+          - heading "POC" [level=4] [ref=f6e84]
+          - button "一键复制全部" [active] [ref=f6e85]
+        - generic [ref=f6e87]:
+          - generic [ref=f6e88]:
+            - generic [ref=f6e89]: http_raw
+            - generic [ref=f6e90]: 稳定性 3/3
+            - generic [ref=f6e91]: http://192.168.56.10:8085/vul/sqli/sqli.php
+          - generic [ref=f6e92]:
+            - generic [ref=f6e93]: "GET /vul/sqli/sqli.php?id=1%20and%201=2%20union%20select%201,2 HTTP/1.1 Host: 192.168.56.10:8085"
+            - button "复制" [ref=f6e95]
+      - generic [ref=f6e96]:
+        - heading "复现步骤" [level=4] [ref=f6e98]
+        - generic [ref=f6e100]:
+          - generic [ref=f6e101]:
+            - generic [ref=f6e102]: relates_to
+            - button "复制" [ref=f6e103]
+          - generic [ref=f6e104]: "[ { \"finding_id\": \"find-d918e0529b9c\", \"note\": \"指纹确认 Web 靶场后，在 sqli 模块 id 参数验证注入点\" } ]"
+    - button "关闭" [ref=f6e105]

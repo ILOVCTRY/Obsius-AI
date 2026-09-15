@@ -1,0 +1,87 @@
+- generic [ref=e55]:
+  - banner [ref=e56]:
+    - generic [ref=e57]: CTF · 二进制/杂项
+    - heading "A组端到端走查" [level=1] [ref=e58]
+    - generic [ref=e59]: 任务 1/1 · 发现 0 · 资产 0
+    - button "🔔 审批" [ref=e60]
+    - button "← 项目" [ref=e61]
+  - generic [ref=e62]:
+    - navigation [ref=e63]:
+      - button "◈ 项目" [ref=e64]:
+        - generic [ref=e65]: ◈
+        - text: 项目
+      - button "◉ 直播间" [ref=e66]:
+        - generic [ref=e67]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=e68]:
+        - generic [ref=e69]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=e70]:
+        - generic [ref=e71]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=e72]:
+        - generic [ref=e73]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=e74]:
+        - generic [ref=e75]: ⚙
+        - text: 技能/设置
+    - main [ref=e76]:
+      - generic [ref=e78]:
+        - generic [ref=e79]:
+          - generic [ref=e80]:
+            - button "全部" [ref=e81]
+            - button "Orchestrator" [ref=e82]
+            - button "finished _generalist 分离页签 _generalist（任务后台继续）" [ref=e389]:
+              - generic "finished" [ref=e390]
+              - text: _generalist
+              - button "分离页签 _generalist（任务后台继续）" [ref=e162]
+          - generic [ref=e83]:
+            - button "直播" [ref=e84]
+            - button "任务流" [active] [ref=e85]
+          - generic [ref=e91]: ● live
+        - generic [ref=e392]:
+          - application [ref=e393]:
+            - group [ref=e396]:
+              - generic "双击挂回该认领会话的直播页签" [ref=e397]:
+                - generic [ref=e400]:
+                  - generic [ref=e401]: generic
+                  - generic [ref=e402]: 完成
+                  - generic [ref=e403]: P2
+                - paragraph [ref=e404]: 侦察任务：用 bb_query 通读当前黑板（资产、发现、任务），输出三条下一步分析建议后调用 complete_task 结束。保持被动分析，不执行任何外部命令。
+                - paragraph [ref=e406]: ▦ 4/4
+                - generic "认领会话：_generalist" [ref=e408]: ● _generalist
+            - img "Mini Map" [ref=e411]
+            - generic "Control Panel" [ref=e413]:
+              - button "Zoom In" [ref=e414] [cursor=pointer]
+              - button "Zoom Out" [ref=e417] [cursor=pointer]
+              - button "Fit View" [ref=e420] [cursor=pointer]
+          - generic [ref=e424]:
+            - generic [ref=e425]: 任务流
+            - generic [ref=e426]: 分解
+            - generic [ref=e428]: ✉ 私信
+            - generic [ref=e430]: 双击节点挂回会话 / 跳看板
+            - button "重置布局（清除手动位置）" [ref=e431]
+            - button "适应视图" [ref=e435]
+      - complementary [ref=e120]:
+        - generic [ref=e121]:
+          - tablist [ref=e122]:
+            - tab "发现" [selected] [ref=e123]
+            - tab "资产" [ref=e124]
+            - tab "函数库" [ref=e125]
+          - tabpanel "发现" [ref=e126]:
+            - generic [ref=e127]:
+              - generic [ref=e128]:
+                - button "全部资产" [ref=e130]
+                - generic [ref=e134]:
+                  - button "全部" [ref=e135]
+                  - button "critical" [ref=e136]
+                  - button "high" [ref=e137]
+                  - button "medium" [ref=e138]
+                  - button "low" [ref=e139]
+                  - button "info" [ref=e140]
+                - generic [ref=e141]:
+                  - button "全部状态" [ref=e142]
+                  - button "unverified" [ref=e143]
+                  - button "verified" [ref=e144]
+              - paragraph [ref=e149]: 暂无数据
+      - button "›" [ref=e150]

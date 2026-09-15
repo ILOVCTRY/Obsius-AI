@@ -1,0 +1,51 @@
+- generic [ref=f10e3]:
+  - generic [ref=f10e4]:
+    - heading "项目" [level=1] [ref=f10e5]
+    - paragraph [ref=f10e6]: 项目 = 场景轨（单选）× 能力包（多选）；数据随 workspaces/ 项目目录隔离
+  - generic [ref=f10e7]:
+    - generic [ref=f10e8]: 新建项目
+    - generic [ref=f10e10]:
+      - generic [ref=f10e11]:
+        - textbox "项目名（可用中文）" [ref=f10e12]
+        - button "创建" [disabled]
+      - generic [ref=f10e13]:
+        - generic [ref=f10e14]: 场景轨
+        - button "授权评估" [ref=f10e15]
+        - button "CTF" [ref=f10e16]
+        - button "研究" [ref=f10e17]
+      - generic [ref=f10e18]:
+        - generic [ref=f10e19]: 能力包
+        - button "二进制" [ref=f10e20]
+        - button "密码学" [ref=f10e21]
+        - button "取证" [ref=f10e22]
+        - button "杂项" [ref=f10e23]
+        - button "Web 攻防" [ref=f10e24]
+  - generic [ref=f10e25]:
+    - button "授权评估 · Web assessment 编排演练-Pikachu proj-9f7ee28609e7 2026-09-13 删除 assessment 编排演练-Pikachu" [ref=f10e26] [cursor=pointer]:
+      - generic [ref=f10e27]: 授权评估 · Web
+      - generic [ref=f10e28]:
+        - generic [ref=f10e29]: assessment 编排演练-Pikachu
+        - generic [ref=f10e30]: proj-9f7ee28609e7
+      - generic [ref=f10e31]: 2026-09-13
+      - button "删除 assessment 编排演练-Pikachu" [ref=f10e32]
+    - button "CTF · 杂项 del-e2e proj-19f89ad371a4 2026-09-14 删除 del-e2e" [ref=f10e33] [cursor=pointer]:
+      - generic [ref=f10e34]: CTF · 杂项
+      - generic [ref=f10e35]:
+        - generic [ref=f10e36]: del-e2e
+        - generic [ref=f10e37]: proj-19f89ad371a4
+      - generic [ref=f10e38]: 2026-09-14
+      - button "删除 del-e2e" [ref=f10e39]
+    - button "授权评估 · Web pentest 编排演练-Pikachu proj-63dd10c7d1a6 2026-09-12 删除 pentest 编排演练-Pikachu" [ref=f10e40] [cursor=pointer]:
+      - generic [ref=f10e41]: 授权评估 · Web
+      - generic [ref=f10e42]:
+        - generic [ref=f10e43]: pentest 编排演练-Pikachu
+        - generic [ref=f10e44]: proj-63dd10c7d1a6
+      - generic [ref=f10e45]: 2026-09-12
+      - button "删除 pentest 编排演练-Pikachu" [ref=f10e46]
+    - button "研究 · 二进制 rev真机走查 proj-e193f14eb587 2026-09-14 删除 rev真机走查" [ref=f10e47] [cursor=pointer]:
+      - generic [ref=f10e48]: 研究 · 二进制
+      - generic [ref=f10e49]:
+        - generic [ref=f10e50]: rev真机走查
+        - generic [ref=f10e51]: proj-e193f14eb587
+      - generic [ref=f10e52]: 2026-09-14
+      - button "删除 rev真机走查" [ref=f10e53]

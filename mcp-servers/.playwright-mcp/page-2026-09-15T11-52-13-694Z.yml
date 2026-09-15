@@ -1,0 +1,109 @@
+- generic [ref=f5e3]:
+  - banner [ref=f5e4]:
+    - generic [ref=f5e5]: 授权评估 · Web
+    - heading "assessment 编排演练-Pikachu" [level=1] [ref=f5e6]
+    - generic [ref=f5e7]: 任务 0/5 · 发现 0 · 资产 50
+    - button "🔔 审批" [ref=f5e8]
+    - button "← 项目" [ref=f5e9]
+  - generic [ref=f5e10]:
+    - navigation [ref=f5e11]:
+      - button "◈ 项目" [ref=f5e12]:
+        - generic [ref=f5e13]: ◈
+        - text: 项目
+      - button "◉ 直播间" [ref=f5e14]:
+        - generic [ref=f5e15]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=f5e16]:
+        - generic [ref=f5e17]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=f5e18]:
+        - generic [ref=f5e19]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=f5e20]:
+        - generic [ref=f5e21]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=f5e22]:
+        - generic [ref=f5e23]: ⚙
+        - text: 技能/设置
+    - main [ref=f5e24]:
+      - generic [ref=f5e97]:
+        - generic [ref=f5e98]:
+          - generic [ref=f5e99]:
+            - button "全部" [ref=f5e100]
+            - button "Orchestrator" [ref=f5e101]
+            - button "idle assessment/recon 关闭 assessment/recon" [ref=f5e102]:
+              - generic "idle" [ref=f5e103]
+              - text: assessment/recon
+              - button "关闭 assessment/recon" [ref=f5e104]
+            - button "idle assessment/external-entry 关闭 assessment/external-entry" [ref=f5e108]:
+              - generic "idle" [ref=f5e109]
+              - text: assessment/external-entry
+              - button "关闭 assessment/external-entry" [ref=f5e110]
+            - button "idle 走查-recon 关闭 走查-recon" [ref=f5e114]:
+              - generic "idle" [ref=f5e115]
+              - text: 走查-recon
+              - button "关闭 走查-recon" [ref=f5e116]
+            - button "idle 走查-exploit 关闭 走查-exploit" [ref=f5e120]:
+              - generic "idle" [ref=f5e121]
+              - text: 走查-exploit
+              - button "关闭 走查-exploit" [ref=f5e122]
+          - generic [ref=f5e126]: ○ 重连中
+        - generic [ref=f5e127]:
+          - combobox "通用 · 通用评估员：按入口技能路由分配的方向干活" [ref=f5e128]:
+            - option "通用 · 通用评估员：按入口技能路由分配的方向干活" [selected]
+            - option "external-entry · 外网打点：按目标特征路由打法，最小伤害验证，发现即上报"
+            - option "lateral · 内网横向：凭据搜寻与横向移动，谨慎动静小，借力必须记录溯源"
+            - option "privesc · 提权：在已授权落点内纵向提权，谨慎、动静小"
+            - option "recon · 信息收集：被动侦察、子域枚举、活筛、指纹识别，产出结构化资产清单"
+          - combobox "开窗供应商（缺省=全局默认供应商）" [ref=f5e129]:
+            - option "默认供应商" [selected]
+            - option "ark-plan"
+            - option "ark-coding"
+          - combobox "开窗模型（缺省=该供应商首个模型）" [ref=f5e130]:
+            - option "默认模型（ark-code-latest）" [selected]
+            - option "ark-code-latest"
+            - option "deepseek-v4-flash"
+            - option "glm-5-3-flash-260828"
+          - button "开窗" [ref=f5e131]
+          - generic "项目自主级别（§6.8：L0 全手动 / L1 任务自动·开窗审批 / L2 全自动链）；安全层任何档位不放松" [ref=f5e132]:
+            - button "L0" [ref=f5e133]
+            - button "L1" [ref=f5e134]
+            - button "L2" [ref=f5e135]
+          - button "⏸ 暂停自动" [ref=f5e136]
+          - button "∑ 45.7k 📋 2 🪟 4/6" [ref=f5e138]:
+            - generic [ref=f5e139]: ∑ 45.7k
+            - generic [ref=f5e140]: 📋 2
+            - generic [ref=f5e141]: 🪟 4/6
+          - button "编排一轮" [ref=f5e143]
+          - button "复盘沉淀" [ref=f5e144]
+        - generic [ref=f5e145]:
+          - button "全部" [ref=f5e146]
+          - button "思考" [ref=f5e147]
+          - button "决策" [ref=f5e148]
+          - button "命令" [ref=f5e149]
+          - button "发现" [ref=f5e150]
+        - generic [ref=f5e152]:
+          - textbox "插话：向黑板发布一个任务或一条指示…" [ref=f5e153]
+          - button "发送" [disabled]
+      - complementary [ref=f5e154]:
+        - generic [ref=f5e155]:
+          - tablist [ref=f5e156]:
+            - tab "发现" [selected] [ref=f5e157]
+            - tab "资产" [ref=f5e158]
+          - tabpanel "发现" [ref=f5e159]:
+            - generic [ref=f5e160]:
+              - generic [ref=f5e161]:
+                - button "全部资产" [ref=f5e163]
+                - generic [ref=f5e167]:
+                  - button "全部" [ref=f5e168]
+                  - button "critical" [ref=f5e169]
+                  - button "high" [ref=f5e170]
+                  - button "medium" [ref=f5e171]
+                  - button "low" [ref=f5e172]
+                  - button "info" [ref=f5e173]
+                - generic [ref=f5e174]:
+                  - button "全部状态" [ref=f5e175]
+                  - button "unverified" [ref=f5e176]
+                  - button "verified" [ref=f5e177]
+              - paragraph [ref=f5e182]: 暂无数据
+      - button "›" [ref=f5e183]

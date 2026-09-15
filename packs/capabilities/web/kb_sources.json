@@ -1,0 +1,9 @@
+{
+  "sources": [
+    {
+      "id": "web-kb",
+      "root": "kb",
+      "recursive": true
+    }
+  ]
+}

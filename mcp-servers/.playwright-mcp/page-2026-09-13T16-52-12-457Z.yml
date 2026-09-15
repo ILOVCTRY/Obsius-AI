@@ -1,0 +1,117 @@
+- generic:
+  - generic:
+    - generic:
+      - banner:
+        - generic: 授权评估 · Web
+        - heading [level=1]: assessment 编排演练-Pikachu
+        - generic: 任务 0/5 · 发现 0 · 资产 54
+        - button: 🔔 审批
+        - button: ← 项目
+      - generic:
+        - navigation:
+          - button:
+            - generic: ◈
+            - text: 项目
+          - button:
+            - generic: ◉
+            - text: 直播间
+          - button:
+            - generic: ▤
+            - text: 黑板
+          - button:
+            - generic: ▦
+            - text: 任务
+          - button:
+            - generic: ⚑
+            - text: 审批
+          - button:
+            - generic: ⚙
+            - text: 技能/设置
+        - main:
+          - generic:
+            - generic:
+              - generic: 场景轨
+              - combobox
+              - generic: 能力包
+              - combobox
+              - generic: 角色/owners 属轨，Skill/红线轨与包各一份；写入留 .history，下次开窗生效
+            - button:
+              - generic: 健康度
+              - generic: 0 error / 5 warning / 2 info
+            - generic:
+              - tablist:
+                - tab [selected]: 角色
+                - tab: Skill
+                - tab: 矩阵
+                - tab: 红线
+                - tab: 模型
+                - tab: MCP
+              - tabpanel:
+                - generic:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic:
+                          - button: ＋ 新建 / 克隆角色
+                          - generic:
+                            - button: 通用 _generalist
+                          - generic:
+                            - button: external-entry
+                            - button: ✕
+                          - generic:
+                            - button: lateral
+                            - button: ✕
+                          - generic:
+                            - button: privesc
+                            - button: ✕
+                          - generic:
+                            - button: recon
+                            - button: ✕
+                  - generic:
+                    - generic:
+                      - generic: assessment/_generalist
+                      - generic: 已保存 ✓
+                      - button: 历史
+                      - button: 保存
+                    - generic: 职责 description（编排开窗目录的一句话说明）
+                    - textbox:
+                      - /placeholder: 如：外网打点与入口利用
+                      - text: 通用评估员：按入口技能路由分配的方向干活
+                    - generic: 人设 persona（注入系统提示）
+                    - textbox: 通用渗透测试员，按入口技能路由分配的方向干活。
+                    - generic:
+                      - generic:
+                        - text: 默认噪声预算 default_noise
+                        - combobox
+                      - generic:
+                        - text: 运行时软上限 max_runtime（只能比网关更严）
+                        - combobox
+                    - generic: 技能白名单 skills（逗号分隔；留空 = 不过滤，自由竞争）
+                    - textbox:
+                      - /placeholder: recon-asset-enum, web-strike-entry
+                    - generic: 任务类型 task_types（Worker 认领过滤器；留空 = 不限）
+                    - textbox:
+                      - /placeholder: recon, exploit
+                    - generic: 工具白名单 tools（逗号分隔；留空 = 不限制；complete/fail/finish 永远放行）
+                    - textbox:
+                      - /placeholder: bb_query, run_cmd
+                    - generic: 最大步数 max_steps（正整数；留空 = 不设）
+                    - textbox:
+                      - /placeholder: "30"
+  - dialog [ref=f1e382]:
+    - heading "新建角色" [level=2] [ref=f1e383]
+    - paragraph [ref=f1e384]: tracks/assessment/roles/ 下新增一个角色 yaml；删除进回收站可恢复。
+    - textbox "角色 slug，如 web-recon" [active] [ref=f1e385]: zz-ui-walk
+    - paragraph [ref=f1e386]: 英文 slug：字母/数字/_-/.，1-64 字符（如 web-recon）
+    - generic [ref=f1e387]: 起始模板（克隆会照抄 skills/task_types 等字段）
+    - combobox [ref=f1e388]:
+      - option "空白模板（列表字段为 null=不过滤）"
+      - option "_generalist"
+      - option "external-entry"
+      - option "lateral"
+      - option "privesc"
+      - option "recon" [selected]
+    - generic [ref=f1e389]:
+      - button "取消" [ref=f1e390]
+      - button "创建" [ref=f1e396]
+    - button "关闭" [ref=f1e391]

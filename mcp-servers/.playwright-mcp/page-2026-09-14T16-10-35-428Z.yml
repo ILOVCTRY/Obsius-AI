@@ -1,0 +1,68 @@
+- generic [ref=f10e3]:
+  - banner [ref=f10e4]:
+    - generic [ref=f10e5]: 授权评估 · Web
+    - heading "E1画布走查-Pikachu" [level=1] [ref=f10e6]
+    - generic [ref=f10e7]: 任务 0/0 · 发现 4 · 资产 3
+    - button "🔔 审批" [ref=f10e8]
+    - button "← 项目" [ref=f10e9]
+  - generic [ref=f10e10]:
+    - navigation [ref=f10e11]:
+      - button "◈ 项目" [ref=f10e12]:
+        - generic [ref=f10e13]: ◈
+        - text: 项目
+      - button "◉ 直播间" [ref=f10e14]:
+        - generic [ref=f10e15]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=f10e16]:
+        - generic [ref=f10e17]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=f10e18]:
+        - generic [ref=f10e19]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=f10e20]:
+        - generic [ref=f10e21]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=f10e22]:
+        - generic [ref=f10e23]: ⚙
+        - text: 技能/设置
+    - main [ref=f10e24]:
+      - generic [ref=f10e26]:
+        - tablist [ref=f10e27]:
+          - tab "发现" [selected] [ref=f10e28]
+          - tab "资产" [ref=f10e29]
+          - tab "函数库" [ref=f10e30]
+        - tabpanel "发现" [active] [ref=f10e31]:
+          - generic [ref=f10e32]:
+            - generic [ref=f10e33]:
+              - button "全部资产" [ref=f10e35]
+              - generic [ref=f10e39]:
+                - button "全部" [ref=f10e40]
+                - button "critical" [ref=f10e41]
+                - button "high" [ref=f10e42]
+                - button "medium" [ref=f10e43]
+                - button "low" [ref=f10e44]
+                - button "info" [ref=f10e45]
+              - generic [ref=f10e46]:
+                - button "全部状态" [ref=f10e47]
+                - button "unverified" [ref=f10e48]
+                - button "verified" [ref=f10e49]
+              - generic [ref=f10e50]:
+                - button "列表" [ref=f10e51]
+                - button "链路" [ref=f10e52]
+            - generic [ref=f10e54]:
+              - generic [ref=f10e55]:
+                - generic [ref=f10e56]:
+                  - button "尚无攻击链" [ref=f10e58]
+                  - button "＋新建链" [ref=f10e62]
+                - generic [ref=f10e63] [cursor=pointer]:
+                  - checkbox "弱边" [checked] [ref=f10e64]
+                  - text: 弱边
+                - button "重置布局（清除手动位置）" [ref=f10e65]
+                - button "适应视图" [ref=f10e69]
+                - button "全屏" [ref=f10e75]
+              - application [ref=f10e81]:
+                - img "Mini Map" [ref=f10e85]
+                - generic "Control Panel" [ref=f10e86]:
+                  - button "Zoom In" [ref=f10e87] [cursor=pointer]
+                  - button "Zoom Out" [ref=f10e90] [cursor=pointer]
+                  - button "Fit View" [ref=f10e93] [cursor=pointer]

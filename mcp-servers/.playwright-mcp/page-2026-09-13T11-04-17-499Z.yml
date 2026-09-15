@@ -1,0 +1,20 @@
+- generic [ref=f1e3]:
+  - generic [ref=f1e4]:
+    - heading "项目" [level=1] [ref=f1e5]
+    - paragraph [ref=f1e6]: 项目 = workspaces/ 下的一个文件夹，黑板数据随项目隔离存储
+  - generic [ref=f1e7]:
+    - generic [ref=f1e8]: 新建项目
+    - generic [ref=f1e10]:
+      - textbox "项目名（可用中文）" [ref=f1e11]
+      - generic [ref=f1e12]:
+        - button "CTF" [ref=f1e13]
+        - button "渗透测试" [ref=f1e14]
+        - button "逆向" [ref=f1e15]
+      - button "创建" [disabled]
+  - button "渗透测试 pentest 编排演练-Pikachu proj-63dd10c7d1a6 2026-09-12 删除 pentest 编排演练-Pikachu" [ref=f1e17] [cursor=pointer]:
+    - generic [ref=f1e18]: 渗透测试
+    - generic [ref=f1e19]:
+      - generic [ref=f1e20]: pentest 编排演练-Pikachu
+      - generic [ref=f1e21]: proj-63dd10c7d1a6
+    - generic [ref=f1e22]: 2026-09-12
+    - button "删除 pentest 编排演练-Pikachu" [ref=f1e23]

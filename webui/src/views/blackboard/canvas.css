@@ -1,0 +1,42 @@
+/* 评估画布深色化（DESIGN §12 克制黑客风）：
+   xyflow 自带样式表是未分层 plain CSS，层叠优先级高于 Tailwind v4 的 utilities layer，
+   组件内任意选择器压不住；故在 @xyflow/react/dist/style.css 之后引入本文件，
+   用 .fc-dark 提高特异性覆盖其白底控件。改这里后无需重启 Vite。 */
+
+.fc-dark .react-flow__controls {
+  border-radius: 6px;
+  overflow: hidden;
+  box-shadow: none;
+  border: 1px solid #21262d;
+}
+
+.fc-dark .react-flow__controls-button {
+  width: 24px;
+  height: 24px;
+  background: #161b22;
+  border-bottom: 1px solid #21262d;
+  fill: #8b949e;
+}
+
+.fc-dark .react-flow__controls-button:last-child {
+  border-bottom: 0;
+}
+
+.fc-dark .react-flow__controls-button:hover {
+  background: #21262d;
+  fill: #e6edf3;
+}
+
+.fc-dark .react-flow__controls button svg {
+  fill: inherit;
+}
+
+.fc-dark .react-flow__minimap {
+  border-radius: 6px;
+  border: 1px solid #21262d;
+  background: #0d1117;
+}
+
+.fc-dark .react-flow__minimap-mask {
+  fill: rgba(13, 17, 23, 0.7);
+}

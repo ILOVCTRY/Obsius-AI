@@ -1,0 +1,248 @@
+- generic [ref=f2e24]:
+  - banner [ref=f2e25]:
+    - generic [ref=f2e26]: 渗透测试
+    - heading "pentest 编排演练-Pikachu" [level=1] [ref=f2e27]
+    - generic [ref=f2e28]: 任务 1/6 · 发现 5 · 资产 19
+    - button "🔔 审批" [ref=f2e29]
+    - button "← 项目" [ref=f2e30]
+  - generic [ref=f2e31]:
+    - navigation [ref=f2e32]:
+      - button "◈ 项目" [ref=f2e33]:
+        - generic [ref=f2e34]: ◈
+        - text: 项目
+      - button "◉ 直播间" [ref=f2e35]:
+        - generic [ref=f2e36]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=f2e37]:
+        - generic [ref=f2e38]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=f2e39]:
+        - generic [ref=f2e40]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=f2e41]:
+        - generic [ref=f2e42]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=f2e43]:
+        - generic [ref=f2e44]: ⚙
+        - text: 技能/设置
+    - main [ref=f2e45]:
+      - generic [ref=f2e47]:
+        - generic [ref=f2e48]:
+          - button "全部" [ref=f2e49]
+          - button "Orchestrator" [ref=f2e50]
+          - button "idle _generalist 关闭 _generalist" [ref=f2e51]:
+            - generic "idle" [ref=f2e52]
+            - text: _generalist
+            - button "关闭 _generalist" [ref=f2e53]
+          - generic [ref=f2e57]: ● live
+          - combobox "开窗角色" [ref=f2e58]:
+            - option "通用" [selected]
+            - option "external-entry"
+            - option "lateral"
+            - option "privesc"
+            - option "recon"
+          - combobox "开窗供应商（缺省=全局默认供应商）" [ref=f2e59]:
+            - option "默认供应商" [selected]
+            - option "ark-plan"
+            - option "ark-coding"
+          - combobox "开窗模型（缺省=该供应商首个模型）" [ref=f2e60]:
+            - option "默认模型（ark-code-latest）" [selected]
+            - option "ark-code-latest"
+            - option "deepseek-v4-flash"
+            - option "glm-5-3-flash-260828"
+          - button "开窗" [ref=f2e61]
+          - button "编排一轮" [ref=f2e63]
+        - generic [ref=f2e64]:
+          - button "全部" [ref=f2e65]
+          - button "思考" [ref=f2e66]
+          - button "决策" [ref=f2e67]
+          - button "命令" [ref=f2e68]
+          - button "发现" [ref=f2e69]
+        - generic [ref=f2e71]:
+          - generic [ref=f2e73] [cursor=pointer]:
+            - generic [ref=f2e74]:
+              - generic [ref=f2e75]: 17:59:51
+              - generic [ref=f2e76]: 🔔 审批决定
+              - generic [ref=f2e77]: approval_id, action, risk, requested_by
+              - generic [ref=f2e78]: demo
+            - generic [ref=f2e79]: "{ \"approval_id\": \"appr-c3cdcbdcdac8\", \"action\": { \"type\": \"net_real\", \"scope\": \"http://127.0.0.1:8085\", \"reason\": \"本地授权靶机（Pikachu）演练：HTTP 访问该地址\" }, \"risk\": \"low\", \"requested_by\": \"demo-script\" }"
+          - generic [ref=f2e81] [cursor=pointer]:
+            - generic [ref=f2e82]:
+              - generic [ref=f2e83]: 17:59:51
+              - generic [ref=f2e84]: 📋 发布任务
+              - generic [ref=f2e85]: 对 http://127.0.0.1:8085 做被动侦察与入口枚举（recon-asset-enum 技能）： 1) 单请求观察响应头/HTML 指纹，识别平台/语言/中间件； 2) robots.txt、首页导航链接枚举入口；禁全量扫描/大字典爆破； 3) 每条入口 bb_add_asset（先 bb_query what=assets 查重），meta 带 source； 4) 可疑入口落 findings(unverified)，不验证——验证派生给 exploit 角色。 需要 HTTP 请求时用 run_cmd(cmd, runtime='host', threat_class='trusted', net='real', approval_id='appr-c3cdcbdcdac8')。
+              - generic [ref=f2e86]: human
+            - generic [ref=f2e87]: "{ \"task_id\": \"task-da7e10b72121\", \"objective\": \"对 http://127.0.0.1:8085 做被动侦察与入口枚举（recon-asset-enum 技能）：\\n1) 单请求观察响应头/HTML 指纹，识别平台/语言/中间件；\\n2) robots.txt、首页导航链接枚举入口；禁全量扫描/大字典爆破；\\n3) 每条入口 bb_add_asset（先 bb_query what=assets 查重），meta 带 source；\\n4) 可疑入口落 findings(unverified)，不验证——验证派生给 exploit 角色。\\n需要 HTTP 请求时用 run_cmd(cmd, runtime='host', threat_class='trusted', net='real', approval_id='appr-c3cdcbdcdac8')。\", \"task_type\": \"recon\" }"
+          - generic [ref=f2e89] [cursor=pointer]:
+            - generic [ref=f2e90]:
+              - generic [ref=f2e91]: 18:00:22
+              - generic [ref=f2e92]: 🟢 会话开窗
+              - generic [ref=f2e93]: role, session_id
+              - generic [ref=f2e94]: orchestrator
+            - generic [ref=f2e95]: "{ \"role\": \"recon\", \"session_id\": \"sess-57f302f33e78\" }"
+          - generic [ref=f2e97] [cursor=pointer]:
+            - generic [ref=f2e98]:
+              - generic [ref=f2e99]: 18:00:22
+              - generic [ref=f2e100]: 📌 编排简报
+              - generic [ref=f2e101]: digest, stats
+              - generic [ref=f2e102]: orchestrator
+            - generic [ref=f2e103]: "{ \"digest\": \"【项目启动】目标：本地授权靶机 http://127.0.0.1:8085（授权 appr-c3cdcbdcdac8 已批准 net_real）。\\n当前状态：人类已发布侦察任务 task-da7e10b72121（被动侦察与入口枚举，recon-asset-enum 技能），任务 open 待认领。\\n本轮动作：开窗 recon 会话认领侦察任务；暂无发现、暂无风险项。\\n下一步：待侦察结果回填黑板后，视发现 severity 派生验证/利用任务；如需主动探测将配套 conflict_keys 控制噪声。\", \"stats\": { \"tasks\": { \"by_status\": { \"open\": 1 }, \"open\": [ { \"id\": \"task-da7e10b72121\", \"type\": \"recon\", \"priority\": 2, \"objective\": \"对 http://127.0.0.1:8085 做被动侦察与入口枚举（recon-asset-enum 技能）：\\n1) 单请求观察响应头/HTML 指纹，识别平\" } ] }, \"findings\": [], \"sessions\": [ { \"id\": \"sess-57f302f33e78\", \"role\": \"recon\", \"status\": \"idle\" } ], \"live_windows\": 1 } }"
+          - generic [ref=f2e106] [cursor=pointer]:
+            - generic [ref=f2e107]: 18:00:37
+            - generic [ref=f2e108]: 🔧 认领任务
+            - generic [ref=f2e109]: task_id, session_id, lease_until
+            - generic [ref=f2e110]: system
+          - generic [ref=f2e113] [cursor=pointer]:
+            - generic [ref=f2e114]: 18:00:56
+            - generic [ref=f2e115]: ⚡ 执行命令
+            - code [ref=f2e117]: curl -sS -i -m 10 http://127.0.0.1:8085/
+            - generic [ref=f2e118]: sess-57f302f33e78
+          - generic [ref=f2e121] [cursor=pointer]:
+            - generic [ref=f2e122]: 18:00:56
+            - generic [ref=f2e123]: ↳ 命令输出
+            - generic [ref=f2e124]: runtime, exit_code, duration_s, timed_out, stdout_head, stderr_head
+            - generic [ref=f2e125]: sess-57f302f33e78
+          - generic [ref=f2e128] [cursor=pointer]:
+            - generic [ref=f2e129]: 18:01:05
+            - generic [ref=f2e130]: ⚡ 执行命令
+            - code [ref=f2e132]: curl.exe -sS -i -m 10 http://127.0.0.1:8085/
+            - generic [ref=f2e133]: sess-57f302f33e78
+          - generic [ref=f2e136] [cursor=pointer]:
+            - generic [ref=f2e137]: 18:01:05
+            - generic [ref=f2e138]: ↳ 命令输出
+            - generic [ref=f2e139]: runtime, exit_code, duration_s, timed_out, stdout_head, stderr_head
+            - generic [ref=f2e140]: sess-57f302f33e78
+          - generic [ref=f2e143] [cursor=pointer]:
+            - generic [ref=f2e144]: 18:01:27
+            - generic [ref=f2e145]: ⚡ 执行命令
+            - code [ref=f2e147]: "curl.exe -sS -m 10 http://127.0.0.1:8085/ | Select-String -Pattern 'href=\"[^\"]+\"' -AllMatches | ForEach-Object { $_.Matches.Value }"
+            - generic [ref=f2e148]: sess-57f302f33e78
+          - generic [ref=f2e151] [cursor=pointer]:
+            - generic [ref=f2e152]: 18:01:27
+            - generic [ref=f2e153]: ↳ 命令输出
+            - generic [ref=f2e154]: runtime, exit_code, duration_s, timed_out, stdout_head, stderr_head
+            - generic [ref=f2e155]: sess-57f302f33e78
+          - generic [ref=f2e158] [cursor=pointer]:
+            - generic [ref=f2e159]: 18:01:27
+            - generic [ref=f2e160]: ⚡ 执行命令
+            - code [ref=f2e162]: curl.exe -sS -i -m 10 http://127.0.0.1:8085/robots.txt
+            - generic [ref=f2e163]: sess-57f302f33e78
+          - generic [ref=f2e166] [cursor=pointer]:
+            - generic [ref=f2e167]: 18:01:27
+            - generic [ref=f2e168]: ↳ 命令输出
+            - generic [ref=f2e169]: runtime, exit_code, duration_s, timed_out, stdout_head, stderr_head
+            - generic [ref=f2e170]: sess-57f302f33e78
+          - generic [ref=f2e173] [cursor=pointer]:
+            - generic [ref=f2e174]: 18:02:03
+            - generic [ref=f2e175]: ⚡ 执行命令
+            - code [ref=f2e177]: "curl.exe -sS -m 10 http://127.0.0.1:8085/ -o $env:TEMP\\pikachu_index.html; $html = Get-Content $env:TEMP\\pikachu_index.html -Raw; [regex]::Matches($html, 'href=\"([^\"]+)\"') | ForEach-Object { $_.Groups[1].Value } | Where-Object { $_ -notmatch '\\.(css|js|ico|png|jpg|gif)' } | Sort-Object -Unique"
+            - generic [ref=f2e178]: sess-57f302f33e78
+          - generic [ref=f2e181] [cursor=pointer]:
+            - generic [ref=f2e182]: 18:02:03
+            - generic [ref=f2e183]: ↳ 命令输出
+            - generic [ref=f2e184]: runtime, exit_code, duration_s, timed_out, stdout_head, stderr_head
+            - generic [ref=f2e185]: sess-57f302f33e78
+          - generic [ref=f2e188] [cursor=pointer]:
+            - generic [ref=f2e189]: 18:02:03
+            - generic [ref=f2e190]: ⚡ 执行命令
+            - code [ref=f2e192]: curl.exe -sS -i -m 10 http://127.0.0.1:8085/robots.txt
+            - generic [ref=f2e193]: sess-57f302f33e78
+          - generic [ref=f2e196] [cursor=pointer]:
+            - generic [ref=f2e197]: 18:02:03
+            - generic [ref=f2e198]: ↳ 命令输出
+            - generic [ref=f2e199]: runtime, exit_code, duration_s, timed_out, stdout_head, stderr_head
+            - generic [ref=f2e200]: sess-57f302f33e78
+          - generic [ref=f2e203] [cursor=pointer]:
+            - generic [ref=f2e204]: 18:03:20
+            - generic [ref=f2e205]: ⚡ 执行命令
+            - code [ref=f2e207]: "\"== robots.txt ==\"; curl.exe -sS -i -m 10 http://127.0.0.1:8085/robots.txt; \"`n== sitemap.xml ==\"; curl.exe -sS -o NUL -w 'HTTP %{http_code} size=%{size_download}' -m 10 http://127.0.0.1:8085/sitemap.xml"
+            - generic [ref=f2e208]: sess-57f302f33e78
+          - generic [ref=f2e211] [cursor=pointer]:
+            - generic [ref=f2e212]: 18:03:20
+            - generic [ref=f2e213]: ↳ 命令输出
+            - generic [ref=f2e214]: runtime, exit_code, duration_s, timed_out, stdout_head, stderr_head
+            - generic [ref=f2e215]: sess-57f302f33e78
+          - generic [ref=f2e218] [cursor=pointer]:
+            - generic [ref=f2e219]: 18:03:21
+            - generic [ref=f2e220]: ⚡ 执行命令
+            - code [ref=f2e222]: "$urls = @('http://127.0.0.1:8085/pkxss/index.php','http://127.0.0.1:8085/vul/burteforce/burteforce.php','http://127.0.0.1:8085/vul/xss/xss.php','http://127.0.0.1:8085/vul/csrf/csrf.php','http://127.0.0.1:8085/vul/sqli/sqli.php','http://127.0.0.1:8085/vul/rce/rce.php','http://127.0.0.1:8085/vul/fileinclude/fileinclude.php','http://127.0.0.1:8085/vul/unsafedownload/unsafedownload.php','http://127.0.0.1:8085/vul/unsafeupload/upload.php','http://127.0.0.1:8085/vul/overpermission/op.php','http://127.0.0.1:8085/vul/dir/dir.php','http://127.0.0.1:8085/vul/infoleak/infoleak.php','http://127.0.0.1:8085/vul/ssrf/ssrf.php','http://127.0.0.1:8085/vul/unserilization/unserilization.php','http://127.0.0.1:8085/vul/urlredirect/urlredirect.php','http://127.0.0.1:8085/vul/xxe/xxe.php'); foreach ($u in $urls) { $c = curl.exe -s -o NUL -w '%{http_code}' -m 10 -I $u; \"$c $u\" }"
+            - generic [ref=f2e223]: sess-57f302f33e78
+          - generic [ref=f2e226] [cursor=pointer]:
+            - generic [ref=f2e227]: 18:03:21
+            - generic [ref=f2e228]: ↳ 命令输出
+            - generic [ref=f2e229]: runtime, exit_code, duration_s, timed_out, stdout_head, stderr_head
+            - generic [ref=f2e230]: sess-57f302f33e78
+          - generic [ref=f2e233] [cursor=pointer]:
+            - generic [ref=f2e234]: 18:03:33
+            - generic [ref=f2e235]: ⚡ 执行命令
+            - code [ref=f2e237]: "$urls = @('http://127.0.0.1:8085/pkxss/index.php','http://127.0.0.1:8085/vul/burteforce/burteforce.php','http://127.0.0.1:8085/vul/xss/xss.php','http://127.0.0.1:8085/vul/csrf/csrf.php','http://127.0.0.1:8085/vul/sqli/sqli.php','http://127.0.0.1:8085/vul/rce/rce.php','http://127.0.0.1:8085/vul/fileinclude/fileinclude.php','http://127.0.0.1:8085/vul/unsafedownload/unsafedownload.php','http://127.0.0.1:8085/vul/unsafeupload/upload.php','http://127.0.0.1:8085/vul/overpermission/op.php','http://127.0.0.1:8085/vul/dir/dir.php','http://127.0.0.1:8085/vul/infoleak/infoleak.php','http://127.0.0.1:8085/vul/ssrf/ssrf.php','http://127.0.0.1:8085/vul/unserilization/unserilization.php','http://127.0.0.1:8085/vul/urlredirect/urlredirect.php','http://127.0.0.1:8085/vul/xxe/xxe.php'); foreach ($u in $urls) { $c = curl.exe -s -o NUL -w '%{http_code}' -m 10 -I $u; \"$c $u\" }"
+            - generic [ref=f2e238]: sess-57f302f33e78
+          - generic [ref=f2e241] [cursor=pointer]:
+            - generic [ref=f2e242]: 18:03:33
+            - generic [ref=f2e243]: ↳ 命令输出
+            - generic [ref=f2e244]: runtime, exit_code, duration_s, timed_out, stdout_head, stderr_head
+            - generic [ref=f2e245]: sess-57f302f33e78
+          - generic [ref=f2e248] [cursor=pointer]:
+            - generic [ref=f2e249]: 18:05:14
+            - generic [ref=f2e250]: ⚡ 执行命令
+            - code [ref=f2e252]: "curl.exe -sS -m 5 -o NUL -w \"%{http_code}`t%{redirect_url}\" \"http://127.0.0.1:8085/pkxss/index.php\""
+            - generic [ref=f2e253]: sess-57f302f33e78
+        - generic [ref=f2e254]:
+          - textbox "插话：向黑板发布一个任务或一条指示…" [ref=f2e255]
+          - button "发送" [disabled]
+      - complementary [ref=f2e256]:
+        - generic [ref=f2e257]:
+          - tablist [ref=f2e258]:
+            - tab "发现" [selected] [ref=f2e259]
+            - tab "资产" [ref=f2e260]
+            - tab "函数库" [ref=f2e261]
+          - tabpanel "发现" [ref=f2e262]:
+            - generic [ref=f2e263]:
+              - generic [ref=f2e264]:
+                - button "全部资产" [ref=f2e266]
+                - generic [ref=f2e270]:
+                  - button "全部" [ref=f2e271]
+                  - button "critical" [ref=f2e272]
+                  - button "high" [ref=f2e273]
+                  - button "medium" [ref=f2e274]
+                  - button "low" [ref=f2e275]
+                  - button "info" [ref=f2e276]
+                - generic [ref=f2e277]:
+                  - button "全部状态" [ref=f2e278]
+                  - button "unverified" [ref=f2e279]
+                  - button "verified" [ref=f2e280]
+              - generic [ref=f2e284]:
+                - generic [ref=f2e285] [cursor=pointer]:
+                  - generic [ref=f2e286]:
+                    - generic [ref=f2e287]: medium
+                    - generic [ref=f2e288]: pkxss 管理后台入口：302 跳转 pkxss_login.php 登录门（鉴权面存在）；未授权可达性未验证且有反证（登录页泄露口令但后台库缺表，登录路径不可用）
+                    - generic [ref=f2e289]: sess-f8f29908f462
+                  - generic [ref=f2e290]: unauthorized-access-candidate · 2026-09-12 18:21 · http://127.0.0.1:8085/pkxss/index.php
+                - generic [ref=f2e291] [cursor=pointer]:
+                  - generic [ref=f2e292]:
+                    - generic [ref=f2e293]: medium
+                    - generic [ref=f2e294]: pkxss 管理后台入口：302 跳转至 pkxss_login.php 登录门，未授权可达性未验证
+                    - generic [ref=f2e295]: sess-57f302f33e78
+                  - generic [ref=f2e296]: unauthorized-access-candidate · 2026-09-12 18:06 · http://127.0.0.1:8085/pkxss/index.php
+                - generic [ref=f2e297] [cursor=pointer]:
+                  - generic [ref=f2e298]:
+                    - generic [ref=f2e299]: low
+                    - generic [ref=f2e300]: 中间件版本暴露：nginx/1.15.11 + PHP/7.3.4（Server/X-Powered-By 响应头）
+                    - generic [ref=f2e301]: verified
+                    - generic [ref=f2e302]: sess-57f302f33e78
+                  - generic [ref=f2e303]: version-disclosure · 2026-09-12 18:06 · http://127.0.0.1:8085/
+                - generic [ref=f2e304] [cursor=pointer]:
+                  - generic [ref=f2e305]:
+                    - generic [ref=f2e306]: low
+                    - generic [ref=f2e307]: Pikachu 靶场 15 个漏洞模块入口页全部 HTTP 200 可达（exploit 派生目标地图）
+                    - generic [ref=f2e308]: verified
+                    - generic [ref=f2e309]: sess-57f302f33e78
+                  - generic [ref=f2e310]: exposed-vulnerable-modules · 2026-09-12 18:06 · 127.0.0.1:8085
+                - generic [ref=f2e311] [cursor=pointer]:
+                  - generic [ref=f2e312]:
+                    - generic [ref=f2e313]: info
+                    - generic [ref=f2e314]: robots.txt / sitemap.xml 均不存在（404），无额外路径线索
+                    - generic [ref=f2e315]: verified
+                    - generic [ref=f2e316]: sess-57f302f33e78
+                  - generic [ref=f2e317]: recon-note · 2026-09-12 18:06 · 127.0.0.1:8085
+      - button "›" [ref=f2e318]

@@ -1,0 +1,4 @@
+kind: capability
+name: crypto
+label: "密码学"
+description: "密码攻击与编码：现代密码学误用、古典密码、编码转换（ctf-crypto 知识库）"

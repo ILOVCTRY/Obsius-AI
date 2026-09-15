@@ -1,0 +1,148 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - generic [ref=e5]: 授权评估 · Web
+    - heading "批4走查-L1开窗" [level=1] [ref=e6]
+    - generic [ref=e7]: 任务 0/0 · 发现 0 · 资产 0
+    - button "🔔 审批" [ref=e8]
+    - button "← 项目" [ref=e9]
+  - generic [ref=e10]:
+    - navigation [ref=e11]:
+      - button "◈ 项目" [ref=e12]:
+        - generic [ref=e13]: ◈
+        - text: 项目
+      - button "◉ 直播间" [ref=e14]:
+        - generic [ref=e15]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=e16]:
+        - generic [ref=e17]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=e18]:
+        - generic [ref=e19]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=e20]:
+        - generic [ref=e21]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=e22]:
+        - generic [ref=e23]: ⚙
+        - text: 技能/设置
+    - main [ref=e24]:
+      - generic [ref=e26]:
+        - generic [ref=e27]:
+          - generic [ref=e28]:
+            - button "全部" [ref=e29]
+            - button "Orchestrator" [ref=e30]
+            - button "idle recon 关闭 recon" [ref=e31]:
+              - generic "idle" [ref=e32]
+              - text: recon
+              - button "关闭 recon" [ref=e33]
+          - generic [ref=e37]: ● live
+        - generic [ref=e38]:
+          - combobox "通用 · 通用评估员：按入口技能路由分配的方向干活" [ref=e39]:
+            - option "通用 · 通用评估员：按入口技能路由分配的方向干活" [selected]
+            - option "external-entry · 外网打点：按目标特征路由打法，最小伤害验证，发现即上报"
+            - option "lateral · 内网横向：凭据搜寻与横向移动，谨慎动静小，借力必须记录溯源"
+            - option "privesc · 提权：在已授权落点内纵向提权，谨慎、动静小"
+            - option "recon · 信息收集：被动侦察、子域枚举、活筛、指纹识别，产出结构化资产清单"
+          - combobox "开窗供应商（缺省=全局默认供应商）" [ref=e40]:
+            - option "默认供应商" [selected]
+            - option "ark-plan"
+            - option "ark-coding"
+          - combobox "开窗模型（缺省=该供应商首个模型）" [ref=e41]:
+            - option "默认模型（ark-code-latest）" [selected]
+            - option "ark-code-latest"
+            - option "deepseek-v4-flash"
+            - option "glm-5-3-flash-260828"
+          - button "开窗" [ref=e42]
+          - generic "项目自主级别（§6.8：L0 全手动 / L1 任务自动·开窗审批 / L2 全自动链）；安全层任何档位不放松" [ref=e43]:
+            - button "L0" [ref=e44]
+            - button "L1" [ref=e45]
+            - button "L2" [ref=e46]
+          - button "⏸ 暂停自动" [ref=e47]
+          - button "∑ 7778 📋 1 🪟 1/4" [ref=e49]:
+            - generic [ref=e50]: ∑ 7778
+            - generic [ref=e51]: 📋 1
+            - generic [ref=e52]: 🪟 1/4
+          - button "编排一轮" [ref=e54]
+          - button "复盘沉淀" [ref=e55]
+        - generic [ref=e56]:
+          - button "全部" [ref=e57]
+          - button "思考" [ref=e58]
+          - button "决策" [ref=e59]
+          - button "命令" [ref=e60]
+          - button "发现" [ref=e61]
+        - generic [ref=e63]:
+          - generic [ref=e66] [cursor=pointer]:
+            - generic [ref=e67]: 07:36:30
+            - generic [ref=e68]: ∑ token
+            - generic [ref=e69]: 编排 · ark-code-latest · ↑1679 ↓611 · ∑2290
+            - generic [ref=e71]: orchestrator
+          - generic [ref=e73] [cursor=pointer]:
+            - generic [ref=e74]:
+              - generic [ref=e75]: 07:36:30
+              - generic [ref=e76]: 📋 发布任务
+              - generic [ref=e77]: 对本次授权评估目标开展初始被动侦察：依据授权书/项目材料确认目标范围（根域名、IP 段、组织名），进行被动子域枚举、公开信息收集、存活资产筛选与服务/指纹识别，禁止主动漏洞探测或高强度扫描。输出结构化资产清单（资产、IP、端口/服务、指纹、来源、置信度），并标注疑似高价值入口与边界资产。
+              - generic [ref=e78]: orchestrator
+            - generic [ref=e79]: "{ \"task_id\": \"task-ab9f0e7ec122\", \"objective\": \"对本次授权评估目标开展初始被动侦察：依据授权书/项目材料确认目标范围（根域名、IP 段、组织名），进行被动子域枚举、公开信息收集、存活资产筛选与服务/指纹识别，禁止主动漏洞探测或高强度扫描。输出结构化资产清单（资产、IP、端口/服务、指纹、来源、置信度），并标注疑似高价值入口与边界资产。\", \"task_type\": \"recon\" }"
+          - generic [ref=e82] [cursor=pointer]:
+            - generic [ref=e83]: 07:36:48
+            - generic [ref=e84]: ∑ token
+            - generic [ref=e85]: 编排 · ark-code-latest · ↑2364 ↓359 · ∑5013
+            - generic [ref=e87]: orchestrator
+          - generic [ref=e89] [cursor=pointer]:
+            - generic [ref=e90]:
+              - generic [ref=e91]: 07:36:48
+              - generic [ref=e92]: 📌 编排简报
+              - generic [ref=e93]: digest, stats
+              - generic [ref=e94]: orchestrator
+            - generic [ref=e95]: "{ \"digest\": \"第 1 轮：项目刚启动，尚无资产/发现/会话。已申请开设 recon 信息收集会话（等待人类审批，审批单号 appr-4a6389b60fa4），并发布 1 条 passive 级初始侦察任务：确认授权范围、被动子域枚举、公开信息收集、存活筛选与指纹识别，要求输出结构化资产清单，暂不进行主动漏洞探测。下一步：审批通过后由 recon 会话认领任务并产出首批资产；若被拒则改派通用角色/调整任务。\", \"stats\": { \"tasks\": { \"by_status\": { \"open\": 1 }, \"open\": [ { \"id\": \"task-ab9f0e7ec122\", \"type\": \"recon\", \"priority\": 1, \"noise_budget\": \"passive\", \"created_at\": \"2026-09-15T07:36:30+00:00\", \"objective\": \"对本次授权评估目标开展初始被动侦察：依据授权书/项目材料确认目标范围（根域名、IP 段、组织名），进行被动子域枚举、公开信息收集、存活资产筛选与服务/指纹识别，\" } ], \"starvation\": [] }, \"findings\": [], \"sessions\": [], \"live_windows\": 0 } }"
+          - generic [ref=e98] [cursor=pointer]:
+            - generic [ref=e99]: 07:36:57
+            - generic [ref=e100]: ∑ token
+            - generic [ref=e101]: 编排 · ark-code-latest · ↑895 ↓22 · ∑7778
+            - generic [ref=e103]: orchestrator
+          - generic [ref=e105] [cursor=pointer]:
+            - generic [ref=e106]:
+              - generic [ref=e107]: 07:38:26
+              - generic [ref=e108]: 🗑 删除任务
+              - generic [ref=e109]: 对本次授权评估目标开展初始被动侦察：依据授权书/项目材料确认目标范围（根域名、IP 段、组织名），进行被动子域枚举、公开信息收集、存活资产筛选与服务/指纹识别，禁止主动漏洞探测或高强度扫描。输出结构化资产清单（资产、IP、端口/服务、指纹、来源、置信度），并标注疑似高价值入口与边界资产。
+              - generic [ref=e110]: human
+            - generic [ref=e111]: "{ \"task_id\": \"task-ab9f0e7ec122\", \"by\": \"human\", \"was_status\": \"open\", \"objective\": \"对本次授权评估目标开展初始被动侦察：依据授权书/项目材料确认目标范围（根域名、IP 段、组织名），进行被动子域枚举、公开信息收集、存活资产筛选与服务/指纹识别，禁止主动漏洞探测或高强度扫描。输出结构化资产清单（资产、IP、端口/服务、指纹、来源、置信度），并标注疑似高价值入口与边界资产。\", \"task_type\": \"recon\", \"noise_budget\": \"passive\", \"priority\": 1, \"conflict_keys\": [] }"
+          - generic [ref=e113] [cursor=pointer]:
+            - generic [ref=e114]:
+              - generic [ref=e115]: 07:40:58
+              - generic [ref=e116]: 🔔 审批决定
+              - generic [ref=e117]: approval_id, action, risk, requested_by
+              - generic [ref=e118]: human
+            - generic [ref=e119]: "{ \"approval_id\": \"appr-4a6389b60fa4\", \"action\": { \"op\": \"spawn_session\", \"role\": \"recon\", \"reason\": \"项目初始轮，尚无任何资产与侦察信息。申请开设信息收集角色，负责对授权目标开展被动侦察、子域枚举、活筛与指纹识别，产出结构化资产清单，为后续外网打点建立目标范围。\" }, \"risk\": \"low\", \"requested_by\": \"orchestrator\" }"
+          - generic [ref=e121] [cursor=pointer]:
+            - generic [ref=e122]:
+              - generic [ref=e123]: 07:40:59
+              - generic [ref=e124]: 🟢 会话开窗
+              - generic [ref=e125]: role, session_id, approval_id
+              - generic [ref=e126]: orchestrator
+            - generic [ref=e127]: "{ \"role\": \"recon\", \"session_id\": \"sess-16fea78db02d\", \"approval_id\": \"appr-4a6389b60fa4\" }"
+        - generic [ref=e128]:
+          - textbox "插话：向黑板发布一个任务或一条指示…" [ref=e129]
+          - button "发送" [disabled]
+      - complementary [ref=e130]:
+        - generic [ref=e131]:
+          - tablist [ref=e132]:
+            - tab "发现" [selected] [ref=e133]
+            - tab "资产" [ref=e134]
+          - tabpanel "发现" [ref=e135]:
+            - generic [ref=e136]:
+              - generic [ref=e137]:
+                - button "全部资产" [ref=e139]
+                - generic [ref=e143]:
+                  - button "全部" [ref=e144]
+                  - button "critical" [ref=e145]
+                  - button "high" [ref=e146]
+                  - button "medium" [ref=e147]
+                  - button "low" [ref=e148]
+                  - button "info" [ref=e149]
+                - generic [ref=e150]:
+                  - button "全部状态" [ref=e151]
+                  - button "unverified" [ref=e152]
+                  - button "verified" [ref=e153]
+              - paragraph [ref=e158]: 暂无数据
+      - button "›" [ref=e159]

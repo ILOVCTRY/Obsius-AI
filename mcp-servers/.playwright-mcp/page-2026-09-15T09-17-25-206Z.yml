@@ -1,0 +1,327 @@
+- generic [ref=f10e3]:
+  - banner [ref=f10e4]:
+    - generic [ref=f10e5]: 授权评估 · Web
+    - heading "assessment 编排演练-Pikachu" [level=1] [ref=f10e6]
+    - generic [ref=f10e7]: 任务 0/9 · 发现 6 · 资产 54
+    - button "🔔 审批" [ref=f10e8]
+    - button "← 项目" [ref=f10e9]
+  - generic [ref=f10e10]:
+    - navigation [ref=f10e11]:
+      - button "◈ 项目" [ref=f10e12]:
+        - generic [ref=f10e13]: ◈
+        - text: 项目
+      - button "◉ 直播间" [ref=f10e14]:
+        - generic [ref=f10e15]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=f10e16]:
+        - generic [ref=f10e17]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=f10e18]:
+        - generic [ref=f10e19]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=f10e20]:
+        - generic [ref=f10e21]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=f10e22]:
+        - generic [ref=f10e23]: ⚙
+        - text: 技能/设置
+    - main [ref=f10e24]:
+      - generic [ref=f10e26]:
+        - generic [ref=f10e27]:
+          - generic [ref=f10e28]:
+            - button "全部" [ref=f10e29]
+            - button "Orchestrator" [ref=f10e30]
+            - button "finished assessment/recon 关闭 assessment/recon" [ref=f10e31]:
+              - generic "finished" [ref=f10e32]
+              - text: assessment/recon
+              - button "关闭 assessment/recon" [ref=f10e33]
+            - button "finished assessment/external-entry 关闭 assessment/external-entry" [ref=f10e37]:
+              - generic "finished" [ref=f10e38]
+              - text: assessment/external-entry
+              - button "关闭 assessment/external-entry" [ref=f10e39]
+            - button "idle 走查-recon 关闭 走查-recon" [ref=f10e43]:
+              - generic "idle" [ref=f10e44]
+              - text: 走查-recon
+              - button "关闭 走查-recon" [ref=f10e45]
+            - button "idle 走查-exploit 关闭 走查-exploit" [ref=f10e49]:
+              - generic "idle" [ref=f10e50]
+              - text: 走查-exploit
+              - button "关闭 走查-exploit" [ref=f10e51]
+          - generic [ref=f10e55]: ● live
+        - generic [ref=f10e56]:
+          - combobox "通用 · 通用评估员：按入口技能路由分配的方向干活" [ref=f10e57]:
+            - option "通用 · 通用评估员：按入口技能路由分配的方向干活" [selected]
+            - option "external-entry · 外网打点：按目标特征路由打法，最小伤害验证，发现即上报"
+            - option "lateral · 内网横向：凭据搜寻与横向移动，谨慎动静小，借力必须记录溯源"
+            - option "privesc · 提权：在已授权落点内纵向提权，谨慎、动静小"
+            - option "recon · 信息收集：被动侦察、子域枚举、活筛、指纹识别，产出结构化资产清单"
+          - combobox "开窗供应商（缺省=全局默认供应商）" [ref=f10e58]:
+            - option "默认供应商" [selected]
+            - option "ark-plan"
+            - option "ark-coding"
+          - combobox "开窗模型（缺省=该供应商首个模型）" [ref=f10e59]:
+            - option "默认模型（ark-code-latest）" [selected]
+            - option "ark-code-latest"
+            - option "deepseek-v4-flash"
+            - option "glm-5-3-flash-260828"
+          - button "开窗" [ref=f10e60]
+          - generic "项目自主级别（§6.8：L0 全手动 / L1 任务自动·开窗审批 / L2 全自动链）；安全层任何档位不放松" [ref=f10e61]:
+            - button "L0" [ref=f10e62]
+            - button "L1" [ref=f10e63]
+            - button "L2" [ref=f10e64]
+          - button "⏸ 暂停自动" [ref=f10e65]
+          - generic "链因服务重启已急停：状态保留但不会自动恢复，点「编排一轮」手动恢复（轮数预算清零重算）" [ref=f10e66]: ⛓ 急停
+          - button "∑ 45.7k 📋 2 🪟 4/6" [ref=f10e68]:
+            - generic [ref=f10e69]: ∑ 45.7k
+            - generic [ref=f10e70]: 📋 2
+            - generic [ref=f10e71]: 🪟 4/6
+          - button "编排一轮" [ref=f10e73]
+          - button "复盘沉淀" [ref=f10e74]
+        - generic [ref=f10e75]:
+          - generic [ref=f10e76]: ⛓ L2 自动链因服务重启已急停（链内自动 2 轮），不会自动恢复。
+          - button "点此「编排一轮」手动恢复（轮数清零重算）" [ref=f10e77]
+        - generic [ref=f10e78]:
+          - button "全部" [ref=f10e79]
+          - button "思考" [ref=f10e80]
+          - button "决策" [ref=f10e81]
+          - button "命令" [ref=f10e82]
+          - button "发现" [ref=f10e83]
+        - generic [ref=f10e85]:
+          - generic [ref=f10e87] [cursor=pointer]:
+            - generic [ref=f10e88]:
+              - generic [ref=f10e89]: 15:13:21
+              - generic [ref=f10e90]: 🔍 发现更新
+              - generic [ref=f10e91]: finding_id, changed, status
+              - generic [ref=f10e92]: human
+            - generic [ref=f10e93]: "{ \"finding_id\": \"find-a71a2a4aabe0\", \"changed\": [ \"evidence\" ], \"status\": \"verified\" }"
+          - generic [ref=f10e95] [cursor=pointer]:
+            - generic [ref=f10e96]:
+              - generic [ref=f10e97]: 15:13:21
+              - generic [ref=f10e98]: 🔍 发现更新
+              - generic [ref=f10e99]: finding_id, changed, status
+              - generic [ref=f10e100]: human
+            - generic [ref=f10e101]: "{ \"finding_id\": \"find-8eb36bb3f3dc\", \"changed\": [ \"status\" ], \"status\": \"false-positive\" }"
+          - generic [ref=f10e103] [cursor=pointer]:
+            - generic [ref=f10e104]:
+              - generic [ref=f10e105]: 01:03:37
+              - generic [ref=f10e106]: ⏸ 已暂停
+              - generic [ref=f10e107]: session_id, task_id
+              - generic [ref=f10e108]: sess-b93da2d073b9
+            - generic [ref=f10e109]: "{ \"session_id\": \"sess-b93da2d073b9\", \"task_id\": null }"
+          - generic [ref=f10e111] [cursor=pointer]:
+            - generic [ref=f10e112]:
+              - generic [ref=f10e113]: 01:03:37
+              - generic [ref=f10e114]: ⛔ 人工中断
+              - generic [ref=f10e115]: 人工中断
+              - generic [ref=f10e116]: sess-b93da2d073b9
+            - generic [ref=f10e117]: "{ \"session_id\": \"sess-b93da2d073b9\", \"task_id\": null, \"note\": \"人工中断\" }"
+          - generic [ref=f10e119] [cursor=pointer]:
+            - generic [ref=f10e120]:
+              - generic [ref=f10e121]: 04:22:37
+              - generic [ref=f10e122]: 🔍 新发现
+              - generic [ref=f10e123]: finding_id, vuln_class, severity
+              - generic [ref=f10e124]: sess-bbf0305f07f8
+            - generic [ref=f10e125]: "{ \"finding_id\": \"find-a71a2a4aabe0\", \"vuln_class\": \"sql-injection\", \"severity\": \"high\" }"
+          - generic [ref=f10e127] [cursor=pointer]:
+            - generic [ref=f10e128]:
+              - generic [ref=f10e129]: 04:22:37
+              - generic [ref=f10e130]: 📋 发布任务
+              - generic [ref=f10e131]: 【走查】利用 find-a71a2a4aabe0 验证注入可利用（已认领演示）
+              - generic [ref=f10e132]: orchestrator
+            - generic [ref=f10e133]: "{ \"task_id\": \"task-a800e641761d\", \"objective\": \"【走查】利用 find-a71a2a4aabe0 验证注入可利用（已认领演示）\", \"task_type\": \"generic\" }"
+          - generic [ref=f10e136] [cursor=pointer]:
+            - generic [ref=f10e137]: 04:22:37
+            - generic [ref=f10e138]: 🔧 认领任务
+            - generic [ref=f10e139]: task_id, session_id, lease_until
+            - generic [ref=f10e140]: system
+          - generic [ref=f10e142] [cursor=pointer]:
+            - generic [ref=f10e143]:
+              - generic [ref=f10e144]: 04:25:41
+              - generic [ref=f10e145]: 🗑 删除任务
+              - generic [ref=f10e146]: 【走查】利用 find-a71a2a4aabe0 验证注入可利用（已认领演示）
+              - generic [ref=f10e147]: human
+            - generic [ref=f10e148]: "{ \"task_id\": \"task-a800e641761d\", \"by\": \"human\", \"was_status\": \"claimed\", \"objective\": \"【走查】利用 find-a71a2a4aabe0 验证注入可利用（已认领演示）\", \"task_type\": \"generic\", \"noise_budget\": \"passive\", \"priority\": 2, \"conflict_keys\": [] }"
+          - generic [ref=f10e150] [cursor=pointer]:
+            - generic [ref=f10e151]:
+              - generic [ref=f10e152]: 04:25:41
+              - generic [ref=f10e153]: 🔍 新发现
+              - generic [ref=f10e154]: finding_id, vuln_class, severity
+              - generic [ref=f10e155]: sess-bbf0305f07f8
+            - generic [ref=f10e156]: "{ \"finding_id\": \"find-694126cffd48\", \"vuln_class\": \"sql-injection-blind\", \"severity\": \"high\" }"
+          - generic [ref=f10e158] [cursor=pointer]:
+            - generic [ref=f10e159]:
+              - generic [ref=f10e160]: 04:25:41
+              - generic [ref=f10e161]: 📋 发布任务
+              - generic [ref=f10e162]: 【走查】利用 find-694126cffd48 验证盲注可取数据（已认领演示）
+              - generic [ref=f10e163]: orchestrator
+            - generic [ref=f10e164]: "{ \"task_id\": \"task-02ba0f0b754e\", \"objective\": \"【走查】利用 find-694126cffd48 验证盲注可取数据（已认领演示）\", \"task_type\": \"generic\" }"
+          - generic [ref=f10e167] [cursor=pointer]:
+            - generic [ref=f10e168]: 04:25:41
+            - generic [ref=f10e169]: 🔧 认领任务
+            - generic [ref=f10e170]: task_id, session_id, lease_until
+            - generic [ref=f10e171]: system
+          - generic [ref=f10e173] [cursor=pointer]:
+            - generic [ref=f10e174]:
+              - generic [ref=f10e175]: 04:25:41
+              - generic [ref=f10e176]: 🔍 新发现
+              - generic [ref=f10e177]: finding_id, vuln_class, severity
+              - generic [ref=f10e178]: sess-d912fb5e0729
+            - generic [ref=f10e179]: "{ \"finding_id\": \"find-b2b879669332\", \"vuln_class\": \"rce\", \"severity\": \"critical\" }"
+          - generic [ref=f10e181] [cursor=pointer]:
+            - generic [ref=f10e182]:
+              - generic [ref=f10e183]: 04:25:41
+              - generic [ref=f10e184]: 📋 发布任务
+              - generic [ref=f10e185]: 【走查】待认领：扩证 find-694126cffd48 注入影响面（留给真实 worker 认领）
+              - generic [ref=f10e186]: orchestrator
+            - generic [ref=f10e187]: "{ \"task_id\": \"task-b0cff3d5c8a5\", \"objective\": \"【走查】待认领：扩证 find-694126cffd48 注入影响面（留给真实 worker 认领）\", \"task_type\": \"generic\" }"
+          - generic [ref=f10e189] [cursor=pointer]:
+            - generic [ref=f10e190]:
+              - generic [ref=f10e191]: 04:28:00
+              - generic [ref=f10e192]: 🔍 发现更新
+              - generic [ref=f10e193]: finding_id, changed, status
+              - generic [ref=f10e194]: human
+            - generic [ref=f10e195]: "{ \"finding_id\": \"find-694126cffd48\", \"changed\": [ \"status\", \"evidence\" ], \"status\": \"false-positive\" }"
+          - generic [ref=f10e197] [cursor=pointer]:
+            - generic [ref=f10e198]:
+              - generic [ref=f10e199]: 04:28:00
+              - generic [ref=f10e200]: 🚫 发现撤回
+              - generic [ref=f10e201]: 【走查】sqli_blind_b.php name 参数布尔盲注
+              - generic [ref=f10e202]: human
+            - generic [ref=f10e203]: "{ \"finding_id\": \"find-694126cffd48\", \"title\": \"【走查】sqli_blind_b.php name 参数布尔盲注\", \"vuln_class\": \"sql-injection-blind\", \"by\": \"human\" }"
+          - generic [ref=f10e205] [cursor=pointer]:
+            - generic [ref=f10e206]:
+              - generic [ref=f10e207]: 04:28:00
+              - generic [ref=f10e208]: 🔔 会话私信
+              - generic [ref=f10e209]: 【走查】sqli_blind_b.php name 参数布尔盲注
+              - generic [ref=f10e210]: system
+            - generic [ref=f10e211]: "{ \"to_session\": \"sess-bbf0305f07f8\", \"kind\": \"basis_stale\", \"ref_id\": \"find-694126cffd48\", \"title\": \"【走查】sqli_blind_b.php name 参数布尔盲注\", \"by\": \"human\" }"
+          - generic [ref=f10e213] [cursor=pointer]:
+            - generic [ref=f10e214]:
+              - generic [ref=f10e215]: 04:28:00
+              - generic [ref=f10e216]: 🔔 会话私信
+              - generic [ref=f10e217]: 【走查】sqli_blind_b.php name 参数布尔盲注
+              - generic [ref=f10e218]: system
+            - generic [ref=f10e219]: "{ \"to_session\": \"sess-d912fb5e0729\", \"kind\": \"basis_stale\", \"ref_id\": \"find-694126cffd48\", \"title\": \"【走查】sqli_blind_b.php name 参数布尔盲注\", \"by\": \"human\" }"
+          - generic [ref=f10e221] [cursor=pointer]:
+            - generic [ref=f10e222]:
+              - generic [ref=f10e223]: 06:11:46
+              - generic [ref=f10e224]: ⏰ 租约过期
+              - generic [ref=f10e225]: task_ids
+              - generic [ref=f10e226]: orchestrator
+            - generic [ref=f10e227]: "{ \"task_ids\": [ \"task-02ba0f0b754e\" ] }"
+          - generic [ref=f10e230] [cursor=pointer]:
+            - generic [ref=f10e231]: 06:24:14
+            - generic [ref=f10e232]: ∑ token
+            - generic [ref=f10e233]: 编排 · ark-code-latest · ↑5840 ↓4058 · ∑9898
+            - generic [ref=f10e235]: orchestrator
+          - generic [ref=f10e237] [cursor=pointer]:
+            - generic [ref=f10e238]:
+              - generic [ref=f10e239]: 06:24:14
+              - generic [ref=f10e240]: 📋 发布任务
+              - generic [ref=f10e241]: 独立验证 critical 发现 find-b2b879669332（声称经 sqli_blind_b.php 盲注写文件 getshell）。重要背景：其唯一上游 find-694126cffd48（sqli_blind_b.php name 参数布尔盲注）已被复核标记为 false-positive，因此该下游 getshell 结论极可能不成立。必须独立证实或证伪，禁止把旧结论当作既定事实。授权靶场：http://127.0.0.1:8085。 要求（最小伤害）： 1) 先复核 /vul/sqli/sqli_blind_b.php 是否确实存在可利用注入（可参照同靶场已验证的数字型注入 find-a71a2a4aabe0 的方法论），给出明确判定； 2) 若注入不成立，直接建议将 find-b2b879669332 标记 false-positive 并说明推理链； 3) 若发现疑似曾被写入的 web 文件（检查 /vul/sqli/、webroot 常见落点），仅用 HTTP GET/HEAD 做存在性与静态内容确认，不调用任何 shell 参数、不执行命令、不删除或修改文件； 4) 结论必须二选一上报：verified（附可复现证据链）或 false-positive（附证伪依据），并更新对应 finding。
+              - generic [ref=f10e242]: orchestrator
+            - generic [ref=f10e243]: "{ \"task_id\": \"task-0121ee7c630c\", \"objective\": \"独立验证 critical 发现 find-b2b879669332（声称经 sqli_blind_b.php 盲注写文件 getshell）。重要背景：其唯一上游 find-694126cffd48（sqli_blind_b.php name 参数布尔盲注）已被复核标记为 false-positive，因此该下游 getshell 结论极可能不成立。必须独立证实或证伪，禁止把旧结论当作既定事实。授权靶场：http://127.0.0.1:8085。\\n\\n要求（最小伤害）：\\n1) 先复核 /vul/sqli/sqli_blind_b.php 是否确实存在可利用注入（可参照同靶场已验证的数字型注入 find-a71a2a4aabe0 的方法论），给出明确判定；\\n2) 若注入不成立，直接建议将 find-b2b879669332 标记 false-positive 并说明推理链；\\n3) 若发现疑似曾被写入的 web 文件（检查 /vul/sqli/、webroot 常见落点），仅用 HTTP GET/HEAD 做存在性与静态内容确认，不调用任何 shell 参数、不执行命令、不删除或修改文件；\\n4) 结论必须二选一上报：verified（附可复现证据链）或 false-positive（附证伪依据），并更新对应 finding。\", \"task_type\": \"exploit\" }"
+          - generic [ref=f10e245] [cursor=pointer]:
+            - generic [ref=f10e246]:
+              - generic [ref=f10e247]: 06:24:14
+              - generic [ref=f10e248]: 📋 发布任务
+              - generic [ref=f10e249]: 低噪核查 find-1fded962a416：127.0.0.1:8080 疑似存在另一个 Web 服务（8085 为已确认的 Pikachu 靶场，指纹 nginx/1.15.11 + PHP/7.3.4）。 要求： 1) 至多 2 个请求完成指纹识别（建议 GET / 与视情况 HEAD /），记录：状态码、Server / X-Powered-By 等响应头、页面标题、跳转目标、是否与 8085 为同一应用或另一服务； 2) 严禁目录爆破、漏洞探测、任何利用尝试； 3) 注意授权范围：当前书面授权目标为 http://127.0.0.1:8085，8080 仅为旁站观察对象。若 8080 存活，只做指纹记录，并在结论中明确提示「需人类确认 8080 是否在授权范围内，确认前不得深入测试」； 4) 更新 find-1fded962a416（verified 存活指纹 / 修正为不存在），并按需登记新资产。
+              - generic [ref=f10e250]: orchestrator
+            - generic [ref=f10e251]: "{ \"task_id\": \"task-1b154e671210\", \"objective\": \"低噪核查 find-1fded962a416：127.0.0.1:8080 疑似存在另一个 Web 服务（8085 为已确认的 Pikachu 靶场，指纹 nginx/1.15.11 + PHP/7.3.4）。\\n\\n要求：\\n1) 至多 2 个请求完成指纹识别（建议 GET / 与视情况 HEAD /），记录：状态码、Server / X-Powered-By 等响应头、页面标题、跳转目标、是否与 8085 为同一应用或另一服务；\\n2) 严禁目录爆破、漏洞探测、任何利用尝试；\\n3) 注意授权范围：当前书面授权目标为 http://127.0.0.1:8085，8080 仅为旁站观察对象。若 8080 存活，只做指纹记录，并在结论中明确提示「需人类确认 8080 是否在授权范围内，确认前不得深入测试」；\\n4) 更新 find-1fded962a416（verified 存活指纹 / 修正为不存在），并按需登记新资产。\", \"task_type\": \"recon\" }"
+          - generic [ref=f10e254] [cursor=pointer]:
+            - generic [ref=f10e255]: 06:24:50
+            - generic [ref=f10e256]: ∑ token
+            - generic [ref=f10e257]: 编排 · ark-code-latest · ↑5018 ↓1070 · ∑20906
+            - generic [ref=f10e259]: orchestrator
+          - generic [ref=f10e261] [cursor=pointer]:
+            - generic [ref=f10e262]:
+              - generic [ref=f10e263]: 06:24:50
+              - generic [ref=f10e264]: 📌 编排简报
+              - generic [ref=f10e265]: digest, stats
+              - generic [ref=f10e266]: orchestrator
+            - generic [ref=f10e267]: "{ \"digest\": \"第 3 轮简报（验证/利用阶段）\\n\\n目标：授权靶场 http://127.0.0.1:8085（Pikachu，nginx/1.15.11 + PHP/7.3.4，指纹已验证）。\\n\\n已确认：\\n- find-a71a2a4aabe0（high/verified）：/vul/sqli/sqli.php GET id 数字型 SQL 注入。\\n- 侦察会话已登记 30+ URL 资产（sqli/ssrf/rce/unsafeupload/unserilization/urlredirect/xss 等模块）。\\n\\n本轮关键处置：\\n1. 发现证据链矛盾并派单纠偏：find-694126cffd48（sqli_blind_b.php 布尔盲注）已被标记 false-positive，但其下游 find-b2b879669332（critical，声称盲注写文件 getshell）仍为 unverified。已发布高优先验证任务 task-0121ee7c630c（exploit/medium），要求独立复核注入是否存在、仅静态核查可疑落地文件（不执行/不破坏），并给出 verified 或 false-positive 的明确结论。\\n2. 8080 旁站（find-1fded962a416，info/unverified）拟以最低噪声指纹识别核查，并要求执行者提示人类确认 8080 是否在授权范围内（发布状态下轮核对队列确认）。\\n\\n队列说明：\\n- 两个走查类 generic 任务（task-b0cff3d5c8a5、task-02ba0f0b754e）均以已证伪的 find-694126cffd48 为依据，将随 refs 强制自评机制收敛，不再追加资源。\\n- task-1fb4eae35eb1 与 task-7e94fde3f153 为 9/13 发布的重复 exploit 验证单（文件上传等其余入口），现有 2 个 idle external-entry 会话可认领，暂不重发；若持续无认领下轮考虑收束。\\n\\n风险/下一步：\\n- 重点等 task-0121ee7c630c 结论：若 getshell 证实则影响升级（critical 成立），若证伪则证据链恢复一致。\\n- 会话数已达开窗上限（4 个未关闭），本轮全部通过派单复用 idle 会话，未新开窗。\", \"stats\": { \"tasks\": { \"by_status\": { \"failed\": 3, \"open\": 6 }, \"open\": [ { \"id\": \"task-b0cff3d5c8a5\", \"type\": \"generic\", \"priority\": 1, \"noise_budget\": \"passive\", \"created_at\": \"2026-09-15T04:25:41+00:00\", \"objective\": \"【走查】待认领：扩证 find-694126cffd48 注入影响面（留给真实 worker 认领）\" }, { \"id\": \"task-0121ee7c630c\", \"type\": \"exploit\", \"priority\": 1, \"noise_budget\": \"medium\", \"created_at\": \"2026-09-15T06:24:14+00:00\", \"objective\": \"独立验证 critical 发现 find-b2b879669332（声称经 sqli_blind_b.php 盲注写文件 getshell）。重要背景：其唯一\" }, { \"id\": \"task-1fb4eae35eb1\", \"type\": \"exploit\", \"priority\": 2, \"noise_budget\": \"medium\", \"created_at\": \"2026-09-13T14:20:29+00:00\", \"objective\": \"对其余已登记入口做最小伤害验证并上报确认结果。目标资产（授权靶场 http://127.0.0.1:8085）：\\n- 文件上传：/vul/unsafeuploa\" }, { \"id\": \"task-7e94fde3f153\", \"type\": \"exploit\", \"priority\": 2, \"noise_budget\": \"medium\", \"created_at\": \"2026-09-13T14:22:22+00:00\", \"objective\": \"对其余已登记入口做最小伤害验证并上报确认结果。目标资产（授权靶场 http://127.0.0.1:8085）：\\n- 文件上传：/vul/unsafeuploa\" }, { \"id\": \"task-02ba0f0b754e\", \"type\": \"generic\", \"priority\": 2, \"noise_budget\": \"passive\", \"created_at\": \"2026-09-15T04:25:41+00:00\", \"objective\": \"【走查】利用 find-694126cffd48 验证盲注可取数据（已认领演示）\" }, { \"id\": \"task-1b154e671210\", \"type\": \"recon\", \"priority\": 2, \"noise_budget\": \"low\", \"created_at\": \"2026-09-15T06:24:14+00:00\", \"objective\": \"低噪核查 find-1fded962a416：127.0.0.1:8080 疑似存在另一个 Web 服务（8085 为已确认的 Pikachu 靶场，指纹 ng\" } ], \"starvation\": [] }, \"findings\": [ { \"id\": \"find-1fded962a416\", \"vuln_class\": \"recon-fingerprint\", \"title\": \"旁站发现：8080 端口疑似另一 Web 服务（资产待登记）\", \"severity\": \"info\", \"status\": \"unverified\" }, { \"id\": \"find-8eb36bb3f3dc\", \"vuln_class\": \"x\", \"title\": \"x\", \"severity\": \"info\", \"status\": \"false-positive\" }, { \"id\": \"find-a71a2a4aabe0\", \"vuln_class\": \"sql-injection\", \"title\": \"数字型 SQL 注入：/vul/sqli/sqli.php GET id 可注入\", \"severity\": \"high\", \"status\": \"verified\" }, { \"id\": \"find-228432ab8c01\", \"vuln_class\": \"recon-fingerprint\", \"title\": \"8085 端口开放，指纹 nginx/1.15.11 + PHP/7.3.4（Pikachu 靶场）\", \"severity\": \"info\", \"status\": \"verified\" }, { \"id\": \"find-694126cffd48\", \"vuln_class\": \"sql-injection-blind\", \"title\": \"【走查】sqli_blind_b.php name 参数布尔盲注\", \"severity\": \"high\", \"status\": \"false-positive\" }, { \"id\": \"find-b2b879669332\", \"vuln_class\": \"rce\", \"title\": \"【走查】经盲注写文件尝试 getshell（下游结论）\", \"severity\": \"critical\", \"status\": \"unverified\" } ], \"sessions\": [ { \"id\": \"sess-f920a7dc74d1\", \"role\": \"recon\", \"status\": \"idle\" }, { \"id\": \"sess-b93da2d073b9\", \"role\": \"external-entry\", \"status\": \"idle\" }, { \"id\": \"sess-e0e5d10f100b\", \"role\": \"_generalist\", \"status\": \"closed\" }, { \"id\": \"sess-02eba36b6e43\", \"role\": \"_generalist\", \"status\": \"closed\" }, { \"id\": \"sess-bbf0305f07f8\", \"role\": \"recon\", \"status\": \"idle\" }, { \"id\": \"sess-d912fb5e0729\", \"role\": \"external-entry\", \"status\": \"idle\" } ], \"live_windows\": 0 } }"
+          - generic [ref=f10e270] [cursor=pointer]:
+            - generic [ref=f10e271]: 06:24:56
+            - generic [ref=f10e272]: ∑ token
+            - generic [ref=f10e273]: 编排 · ark-code-latest · ↑2011 ↓31 · ∑31964
+            - generic [ref=f10e275]: orchestrator
+          - generic [ref=f10e278] [cursor=pointer]:
+            - generic [ref=f10e279]: 06:33:44
+            - generic [ref=f10e280]: ∑ token
+            - generic [ref=f10e281]: 编排 · ark-code-latest · ↑5649 ↓1999 · ∑39612
+            - generic [ref=f10e283]: orchestrator
+          - generic [ref=f10e286] [cursor=pointer]:
+            - generic [ref=f10e287]: 07:34:54
+            - generic [ref=f10e288]: ∑ token
+            - generic [ref=f10e289]: 编排 · ark-code-latest · ↑3322 ↓2789 · ∑45723
+            - generic [ref=f10e291]: orchestrator
+          - generic [ref=f10e293] [cursor=pointer]:
+            - generic [ref=f10e294]:
+              - generic [ref=f10e295]: 07:34:54
+              - generic [ref=f10e296]: 📌 编排简报
+              - generic [ref=f10e297]: digest, stats
+              - generic [ref=f10e298]: orchestrator
+            - generic [ref=f10e299]: "{ \"digest\": \"【第 3 轮简报】授权靶场评估进展\\n\\n一、资产\\n- 127.0.0.1:8085：nginx/1.15.11 + PHP/7.3.4，Pikachu 靶场，指纹已确认（find-228432ab8c01，verified）。\\n- 127.0.0.1:8080：疑似另一 Web 服务（find-1fded962a416，info/unverified），低噪核查任务 task-1b154e671210 在途。\\n\\n二、漏洞结论\\n- 已确认：/vul/sqli/sqli.php GET id 数字型 SQL 注入（find-a71a2a4aabe0，high，verified）。\\n- 已证伪：sqli_blind_b.php name 参数布尔盲注（find-694126cffd48）已标记 false-positive；find-8eb36bb3f3dc 同为误报。\\n- 待裁决：critical 级「经盲注写文件 getshell」（find-b2b879669332）目前 unverified，其唯一上游依据正是已被推翻的盲注发现，预判大概率不成立；独立验证任务 task-0121ee7c630c（p1）在途，结论出来后即定级关闭，在此之前该 critical 不应采信。\\n\\n三、队列状态\\n- 6 open：critical 独立验证 ×1、8080 旁站核查 ×1、其余已登记入口最小伤害验证 ×2（两单目标重复，依赖 conflict_keys 串行，避免重复打点）、基于旧盲注结论的被动走查 ×2（将随发现被推翻的强制通知自评收口）。\\n- 3 failed：失败明细不足，暂不盲目重发，待下轮事件补充原因后决定是否重派。\\n- 4 个 idle 会话（recon×2、external-entry×2）可认领，无饿死任务；当前无落点，不申请 lateral 开窗。\\n\\n四、下一步\\n1. 等 task-0121 对 getshell 的独立验证结论（本轮最高优先）。\\n2. 等 8080 旁站核查结果，确认是否登记为新资产。\\n3. 关注两个重复入口验证任务的认领与冲突情况，必要时下轮收敛。\", \"stats\": { \"tasks\": { \"by_status\": { \"failed\": 3, \"open\": 6 }, \"open\": [ { \"id\": \"task-b0cff3d5c8a5\", \"type\": \"generic\", \"priority\": 1, \"noise_budget\": \"passive\", \"created_at\": \"2026-09-15T04:25:41+00:00\", \"objective\": \"【走查】待认领：扩证 find-694126cffd48 注入影响面（留给真实 worker 认领）\" }, { \"id\": \"task-0121ee7c630c\", \"type\": \"exploit\", \"priority\": 1, \"noise_budget\": \"medium\", \"created_at\": \"2026-09-15T06:24:14+00:00\", \"objective\": \"独立验证 critical 发现 find-b2b879669332（声称经 sqli_blind_b.php 盲注写文件 getshell）。重要背景：其唯一\" }, { \"id\": \"task-1fb4eae35eb1\", \"type\": \"exploit\", \"priority\": 2, \"noise_budget\": \"medium\", \"created_at\": \"2026-09-13T14:20:29+00:00\", \"objective\": \"对其余已登记入口做最小伤害验证并上报确认结果。目标资产（授权靶场 http://127.0.0.1:8085）：\\n- 文件上传：/vul/unsafeuploa\" }, { \"id\": \"task-7e94fde3f153\", \"type\": \"exploit\", \"priority\": 2, \"noise_budget\": \"medium\", \"created_at\": \"2026-09-13T14:22:22+00:00\", \"objective\": \"对其余已登记入口做最小伤害验证并上报确认结果。目标资产（授权靶场 http://127.0.0.1:8085）：\\n- 文件上传：/vul/unsafeuploa\" }, { \"id\": \"task-02ba0f0b754e\", \"type\": \"generic\", \"priority\": 2, \"noise_budget\": \"passive\", \"created_at\": \"2026-09-15T04:25:41+00:00\", \"objective\": \"【走查】利用 find-694126cffd48 验证盲注可取数据（已认领演示）\" }, { \"id\": \"task-1b154e671210\", \"type\": \"recon\", \"priority\": 2, \"noise_budget\": \"low\", \"created_at\": \"2026-09-15T06:24:14+00:00\", \"objective\": \"低噪核查 find-1fded962a416：127.0.0.1:8080 疑似存在另一个 Web 服务（8085 为已确认的 Pikachu 靶场，指纹 ng\" } ], \"starvation\": [] }, \"findings\": [ { \"id\": \"find-1fded962a416\", \"vuln_class\": \"recon-fingerprint\", \"title\": \"旁站发现：8080 端口疑似另一 Web 服务（资产待登记）\", \"severity\": \"info\", \"status\": \"unverified\" }, { \"id\": \"find-8eb36bb3f3dc\", \"vuln_class\": \"x\", \"title\": \"x\", \"severity\": \"info\", \"status\": \"false-positive\" }, { \"id\": \"find-a71a2a4aabe0\", \"vuln_class\": \"sql-injection\", \"title\": \"数字型 SQL 注入：/vul/sqli/sqli.php GET id 可注入\", \"severity\": \"high\", \"status\": \"verified\" }, { \"id\": \"find-228432ab8c01\", \"vuln_class\": \"recon-fingerprint\", \"title\": \"8085 端口开放，指纹 nginx/1.15.11 + PHP/7.3.4（Pikachu 靶场）\", \"severity\": \"info\", \"status\": \"verified\" }, { \"id\": \"find-694126cffd48\", \"vuln_class\": \"sql-injection-blind\", \"title\": \"【走查】sqli_blind_b.php name 参数布尔盲注\", \"severity\": \"high\", \"status\": \"false-positive\" }, { \"id\": \"find-b2b879669332\", \"vuln_class\": \"rce\", \"title\": \"【走查】经盲注写文件尝试 getshell（下游结论）\", \"severity\": \"critical\", \"status\": \"unverified\" } ], \"sessions\": [ { \"id\": \"sess-f920a7dc74d1\", \"role\": \"recon\", \"status\": \"idle\" }, { \"id\": \"sess-b93da2d073b9\", \"role\": \"external-entry\", \"status\": \"idle\" }, { \"id\": \"sess-e0e5d10f100b\", \"role\": \"_generalist\", \"status\": \"closed\" }, { \"id\": \"sess-02eba36b6e43\", \"role\": \"_generalist\", \"status\": \"closed\" }, { \"id\": \"sess-bbf0305f07f8\", \"role\": \"recon\", \"status\": \"idle\" }, { \"id\": \"sess-d912fb5e0729\", \"role\": \"external-entry\", \"status\": \"idle\" } ], \"live_windows\": 0 } }"
+        - generic [ref=f10e300]:
+          - textbox "插话：向黑板发布一个任务或一条指示…" [ref=f10e301]
+          - button "发送" [disabled]
+      - complementary [ref=f10e302]:
+        - generic [ref=f10e303]:
+          - tablist [ref=f10e304]:
+            - tab "发现" [selected] [ref=f10e305]
+            - tab "资产" [ref=f10e306]
+          - tabpanel "发现" [ref=f10e307]:
+            - generic [ref=f10e308]:
+              - generic [ref=f10e309]:
+                - button "全部资产" [ref=f10e311]
+                - generic [ref=f10e315]:
+                  - button "全部" [ref=f10e316]
+                  - button "critical" [ref=f10e317]
+                  - button "high" [ref=f10e318]
+                  - button "medium" [ref=f10e319]
+                  - button "low" [ref=f10e320]
+                  - button "info" [ref=f10e321]
+                - generic [ref=f10e322]:
+                  - button "全部状态" [ref=f10e323]
+                  - button "unverified" [ref=f10e324]
+                  - button "verified" [ref=f10e325]
+              - generic [ref=f10e329]:
+                - generic [ref=f10e330] [cursor=pointer]:
+                  - generic [ref=f10e331]:
+                    - generic [ref=f10e332]: critical
+                    - generic [ref=f10e333]: 【走查】经盲注写文件尝试 getshell（下游结论）
+                    - generic [ref=f10e334]: sess-d912fb5e0729
+                  - generic [ref=f10e335]: rce · 2026-09-15 04:25 · http://127.0.0.1:8085/vul/rce/rce_eval.php
+                - generic [ref=f10e336] [cursor=pointer]:
+                  - generic [ref=f10e337]:
+                    - generic [ref=f10e338]: high
+                    - generic [ref=f10e339]: 【走查】sqli_blind_b.php name 参数布尔盲注
+                    - generic [ref=f10e340]: sess-bbf0305f07f8
+                  - generic [ref=f10e341]: sql-injection-blind · 2026-09-15 04:25 · http://127.0.0.1:8085/vul/sqli/sqli_blind_b.php
+                - generic [ref=f10e342] [cursor=pointer]:
+                  - generic [ref=f10e343]:
+                    - generic [ref=f10e344]: high
+                    - generic [ref=f10e345]: 数字型 SQL 注入：/vul/sqli/sqli.php GET id 可注入
+                    - generic [ref=f10e346]: verified
+                    - generic [ref=f10e347]: human
+                  - generic [ref=f10e348]: sql-injection · 2026-09-14 15:07 · http://127.0.0.1:8085/vul/sqli/sqli.php
+                - generic [ref=f10e349] [cursor=pointer]:
+                  - generic [ref=f10e350]:
+                    - generic [ref=f10e351]: info
+                    - generic [ref=f10e352]: 旁站发现：8080 端口疑似另一 Web 服务（资产待登记）
+                    - generic [ref=f10e353]: human
+                  - generic [ref=f10e354]: recon-fingerprint · 2026-09-14 15:07
+                - generic [ref=f10e355] [cursor=pointer]:
+                  - generic [ref=f10e356]:
+                    - generic [ref=f10e357]: info
+                    - generic [ref=f10e358]: x
+                    - generic [ref=f10e359]: human
+                  - generic [ref=f10e360]: x · 2026-09-14 15:07
+                - generic [ref=f10e361] [cursor=pointer]:
+                  - generic [ref=f10e362]:
+                    - generic [ref=f10e363]: info
+                    - generic [ref=f10e364]: 8085 端口开放，指纹 nginx/1.15.11 + PHP/7.3.4（Pikachu 靶场）
+                    - generic [ref=f10e365]: verified
+                    - generic [ref=f10e366]: human
+                  - generic [ref=f10e367]: recon-fingerprint · 2026-09-14 15:07 · 127.0.0.1:8085
+      - button "›" [ref=f10e368]

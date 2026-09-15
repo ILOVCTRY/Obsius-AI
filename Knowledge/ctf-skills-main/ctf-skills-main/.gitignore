@@ -1,0 +1,28 @@
+# Claude Code
+.claude/worktrees
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# PayloadsAllTheThings — on-demand clone, not vendored
+ctf-web/payloads/
+.ctf-tools/
+
+# Generated
+_site/
+
+# OS
+.DS_Store
+Thumbs.db

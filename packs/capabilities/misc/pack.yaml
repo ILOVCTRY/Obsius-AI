@@ -1,0 +1,4 @@
+kind: capability
+name: misc
+label: "杂项"
+description: "杂项技能与 AI/ML 题；规模长大后再拆包（ctf-misc / ctf-ai-ml 知识库）"

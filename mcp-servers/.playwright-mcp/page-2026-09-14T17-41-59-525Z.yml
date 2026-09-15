@@ -1,0 +1,66 @@
+- generic [ref=f9e54]:
+  - banner [ref=f9e55]:
+    - generic [ref=f9e56]: 研究 · 二进制
+    - heading "re1" [level=1] [ref=f9e57]
+    - generic [ref=f9e58]: 任务 0/0 · 发现 0 · 资产 0
+    - button "🔔 审批" [ref=f9e59]
+    - button "← 项目" [ref=f9e60]
+  - generic [ref=f9e61]:
+    - navigation [ref=f9e62]:
+      - button "◈ 项目" [ref=f9e63]:
+        - generic [ref=f9e64]: ◈
+        - text: 项目
+      - button "◉ 直播间" [ref=f9e65]:
+        - generic [ref=f9e66]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=f9e67]:
+        - generic [ref=f9e68]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=f9e69]:
+        - generic [ref=f9e70]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=f9e71]:
+        - generic [ref=f9e72]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=f9e73]:
+        - generic [ref=f9e74]: ⚙
+        - text: 技能/设置
+    - main [ref=f9e75]:
+      - generic [ref=f9e77]:
+        - generic [ref=f9e78]:
+          - button "全部" [ref=f9e79]
+          - button "Orchestrator" [ref=f9e80]
+          - generic [ref=f9e81]: ● live
+          - combobox "开窗角色" [ref=f9e82]:
+            - option "通用 · 通用研究员：分诊、逆向、验证全链路" [selected]
+            - option "reverse-analyst · 逆向分析：样本分诊、函数定位、算法还原、func_kb 协作、动态验证"
+          - combobox "开窗供应商（缺省=全局默认供应商）" [ref=f9e83]:
+            - option "默认供应商" [selected]
+            - option "ark-plan"
+            - option "ark-coding"
+          - combobox "开窗模型（缺省=该供应商首个模型）" [ref=f9e84]:
+            - option "默认模型（ark-code-latest）" [selected]
+            - option "ark-code-latest"
+            - option "deepseek-v4-flash"
+            - option "glm-5-3-flash-260828"
+          - button "开窗" [ref=f9e85]
+          - button "编排一轮" [ref=f9e87]
+          - button "复盘沉淀" [ref=f9e88]
+        - generic [ref=f9e89]:
+          - button "全部" [ref=f9e90]
+          - button "思考" [ref=f9e91]
+          - button "决策" [ref=f9e92]
+          - button "命令" [ref=f9e93]
+          - button "发现" [ref=f9e94]
+        - generic [ref=f9e96]:
+          - textbox "插话：向黑板发布一个任务或一条指示…" [ref=f9e97]
+          - button "发送" [disabled]
+      - complementary [ref=f9e98]:
+        - generic [ref=f9e99]:
+          - tablist [ref=f9e100]:
+            - tab "风险 0" [selected] [ref=f9e101]
+            - tab "发现 0" [ref=f9e102]
+            - tab "样本" [ref=f9e103]
+          - tabpanel "风险 0" [ref=f9e104]:
+            - paragraph [ref=f9e105]: 还没有标记风险的函数。在全屏工作台的「笔记」里给函数加 risk_tags。
+      - button "›" [ref=f9e106]

@@ -1,0 +1,198 @@
+- generic:
+  - generic:
+    - generic:
+      - banner:
+        - generic: 授权评估 · Web
+        - heading [level=1]: assessment 编排演练-Pikachu
+        - generic: 任务 0/5 · 发现 0 · 资产 54
+        - button: 🔔 审批
+        - button: ← 项目
+      - generic:
+        - navigation:
+          - button:
+            - generic: ◈
+            - text: 项目
+          - button:
+            - generic: ◉
+            - text: 直播间
+          - button:
+            - generic: ▤
+            - text: 黑板
+          - button:
+            - generic: ▦
+            - text: 任务
+          - button:
+            - generic: ⚑
+            - text: 审批
+          - button:
+            - generic: ⚙
+            - text: 技能/设置
+        - main:
+          - generic:
+            - generic:
+              - generic: 场景轨
+              - combobox
+              - generic: 能力包
+              - combobox
+              - generic: 角色/owners 属轨，Skill/红线轨与包各一份；写入留 .history，下次开窗生效
+            - button:
+              - generic: 健康度
+              - generic: 0 error / 5 warning / 3 info
+            - generic:
+              - tablist:
+                - tab: 角色
+                - tab [selected]: Skill
+                - tab: 矩阵
+                - tab: 红线
+                - tab: 模型
+                - tab: MCP
+              - tabpanel:
+                - generic:
+                  - generic:
+                    - generic:
+                      - textbox:
+                        - /placeholder: 任务描述 / 关键词…
+                      - combobox
+                      - button: 试算
+                    - generic: 试算范围：全部能力包 ∪ 「授权评估」轨技能；可选角色做白名单窄化
+                    - generic:
+                      - textbox:
+                        - /placeholder: 特征 features（逗号/空格分隔，×3 加权）
+                      - textbox:
+                        - /placeholder: 文件特征 file_features，如 NX, Canary（×3 加权）
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic:
+                          - generic:
+                            - generic:
+                              - button: 包：二进制
+                              - button: 轨：授权评估
+                              - button: ＋新建
+                            - generic:
+                              - button: binary-pwn
+                              - button: ✕
+                            - generic:
+                              - button: binary-rev
+                              - button: ✕
+                            - generic:
+                              - button: file-triage
+                              - button: ✕
+                    - generic:
+                      - generic:
+                        - generic: binary-pwn
+                        - generic: capability/binary
+                        - generic: pwn
+                        - generic: 溢出
+                        - generic: 栈
+                        - generic: 堆
+                        - generic: uaf
+                        - generic: double free
+                        - generic: file:ELF
+                        - generic: file:NX
+                        - generic: file:Canary
+                        - generic: file:PIE
+                        - generic: file:RELRO
+                        - generic: file:FORTIFY
+                        - generic: file:stripped
+                        - generic: file:dynamically_linked
+                        - generic: file:PE
+                        - generic: file:seccomp
+                        - generic: linux
+                        - generic: windows
+                        - generic: elf
+                        - generic: pe
+                        - generic: so
+                        - generic: dll
+                        - generic: stack-overflow
+                        - generic: heap
+                        - generic: format-string
+                        - generic: rop
+                        - generic: kernel
+                        - generic: sandbox-escape
+                        - generic: malware-c2
+                        - generic: solve
+                        - generic: reverse
+                        - generic:
+                          - checkbox [checked]
+                          - text: 启用
+                        - button: 历史
+                        - button: 删除
+                        - generic: 已保存 ✓
+                        - button [disabled]: 保存
+                      - paragraph: "Pwn 利用入口：checksec 保护判定 → 栈/堆/内核打法路由；兼恶意样本静态分析入口（混淆脚本/C2/PE .NET） #walk-3b"
+                      - generic:
+                        - generic:
+                          - paragraph: frontmatter 表单（路由依据；name 不可改，改名请新建+删除）；其余字段（enabled 等）原样保留
+                          - text: 描述 description（×1）
+                          - textbox:
+                            - /placeholder: 一句话说明何时该路由到本技能
+                            - text: "Pwn 利用入口：checksec 保护判定 → 栈/堆/内核打法路由；兼恶意样本静态分析入口（混淆脚本/C2/PE .NET） #walk-3b"
+                          - generic:
+                            - generic:
+                              - text: 关键词 keywords（×2）
+                              - textbox:
+                                - /placeholder: 逗号分隔，留空=不设置
+                                - text: pwn, 溢出, 栈, 堆, uaf, double free, shellcode, rop, ret2libc, 格式化字符串, seccomp, 沙箱逃逸, 内核, 驱动, 恶意样本, c2, beacon, 混淆
+                            - generic:
+                              - text: 行为特征 features（×3）
+                              - textbox:
+                                - /placeholder: 逗号分隔，留空=不设置
+                                - text: has_remote_service, crashes_on_input, has_shellcode_hint
+                            - generic:
+                              - text: 文件特征 file_features（×3）
+                              - textbox:
+                                - /placeholder: 逗号分隔，留空=不设置
+                                - text: ELF, NX, Canary, PIE, RELRO, FORTIFY, stripped, dynamically_linked, PE, seccomp
+                            - generic:
+                              - text: 平台标签 platforms（×3）
+                              - textbox:
+                                - /placeholder: 逗号分隔，留空=不设置
+                                - text: linux, windows
+                            - generic:
+                              - text: 格式标签 formats（×3）
+                              - textbox:
+                                - /placeholder: 逗号分隔，留空=不设置
+                                - text: elf, pe, so, dll
+                            - generic:
+                              - text: 漏洞类 vuln_classes（×3）
+                              - textbox:
+                                - /placeholder: 逗号分隔，留空=不设置
+                                - text: stack-overflow, heap, format-string, rop, kernel, sandbox-escape, malware-c2
+                            - generic:
+                              - text: 任务类型 task_types
+                              - textbox:
+                                - /placeholder: 逗号分隔，留空=不设置
+                                - text: solve, reverse
+                        - generic: 正文 Markdown（入口纪律与「观察→kb_open」对照；当前 18 个关键词）
+                        - textbox: "# binary-pwn —— Pwn 利用与恶意样本静态入口 > 分层纪律：本技能只做**保护判定 + 打法路由**。具体技术在 ctf-pwn / ctf-malware > 英文知识库，用 `kb_open(module=…)` 按表开单篇，禁止通读。逆向校验逻辑先走 > file-triage 分诊、binary-rev 还原；拿到漏洞点再回本技能选利用路线。 ## 0. 第一眼：checksec → 保护组合 → 路线 `checksec`（或 readelf 手判）后按下表开模块（路径均为 kb_open 的 module）： | 观察到的保护/形态 | 首选模块（ctf-pwn/） | |---|---| | 无 NX（栈可执行）/ ret2shellcode | `ctf-pwn/rop-and-shellcode.md` | | NX 开、No PIE：ret2text / 基础栈溢出 | `ctf-pwn/overflow-basics.md` | | NX+PIE：ret2libc / ROP / 栈迁移 | `ctf-pwn/rop-and-shellcode.md` → `ctf-pwn/rop-advanced.md` | | 有格式化字符串（%x/%p/%n） | `ctf-pwn/format-string.md`（配套 `ctf-pwn/scripts/fmtstr_payload_suite.py`） | | Canary：泄露/爆破/覆盖 | `ctf-pwn/rop-advanced.md` | | 菜单题 / malloc-free / UAF / double free / tcache | `ctf-pwn/heap-techniques.md` → `heap-techniques-2.md` → `heap-fsop.md` | | seccomp 过滤（orw / open-read-write） | `ctf-pwn/sandbox-escape.md`（配套 `scripts/seccomp_orw_generator.py`、`shellcraft_asm.py`） | | 内核题（vmlinux/bzImage/启动脚本/qemu）/ 驱动 ioctl | `ctf-pwn/kernel.md` → `kernel-techniques.md` → `kernel-bypass.md` | | SROP / 高阶花式 | `ctf-pwn/advanced.md`、`advanced-exploits.md`（至 `-5.md`） | | 临场 checklist / 踩坑 | `ctf-pwn/field-notes.md` | 配套 exp 骨架（Read 参考，**运行只准 docker/sandbox**）： `ctf-pwn/scripts/`：ret2libc_two_stage.py、srop_execve.py、fmtstr_payload_suite.py、 seccomp_orw_generator.py、shellcraft_asm.py。 ## 1. 恶意样本/可疑文件的静态分析入口（ctf-malware/） 未知样本默认按恶意处理：**只做静态，不执行**；确需动态一律 L3 沙箱 + 断网。 | 样本形态 | 模块（ctf-malware/） | |---|---| | 混淆脚本（JS/VBS/PowerShell/宏）、loader、打包器 | `ctf-malware/scripts-and-obfuscation.md` | | C2 流量特征、信标协议、回连行为推断 | `ctf-malware/c2-and-protocols.md` | | PE / .NET 程序集、托管代码反编 | `ctf-malware/pe-and-dotnet.md` | 函数级结论（解密例、校验函数）照例 `bb_upsert_func` 落 func_kb，别重复反编译。 ## 2. 产出落点 - exp / 解密脚本 → `bb_add_artifact(kind=\"poc\")`（自包含，拿到能跑，限授权目标）； - 漏洞机制结论 → findings（CTF 题可 info 级）；保护组合写进资产 meta，供后续会话复用。 ## 红线 - 样本与 exp **只在 docker/sandbox 执行**；host 端只允许 file/readelf/objdump/ python-capstone 等不执行样本的静态命令。 - exp 的远程目标只能是题目靶机或授权范围；越界走审批，禁止对真实第三方 IP 打。"
+                      - paragraph: 表单保存时合并回写 frontmatter（name 锁定与目录一致，改名请新建+删除）；正文是 Agent 入口纪律，写坏会导致路由失效。
+  - dialog [ref=f1e532]:
+    - heading "历史版本" [level=2] [ref=f1e533]
+    - paragraph [ref=f1e534]: capabilities/binary/skills/binary-pwn/SKILL.md
+    - generic [ref=f1e539]:
+      - generic [ref=f1e540]:
+        - generic [ref=f1e541]: 2026-09-13T16:57:06Z
+        - generic [ref=f1e542]: 3615B
+        - button "收起 diff" [ref=f1e552]
+        - button "回滚" [ref=f1e544]
+      - generic [ref=f1e545]: 20260913T165706Z_SKILL.md
+      - generic [ref=f1e554]:
+        - generic [ref=f1e555]: "--- 20260913T165706Z_SKILL.md（历史版）"
+        - generic [ref=f1e556]: +++ SKILL.md（当前）
+        - generic [ref=f1e557]: "@@ -1,12 +1,12 @@"
+        - generic [ref=f1e558]: "---"
+        - generic [ref=f1e559]: "name: binary-pwn"
+        - generic [ref=f1e560]: "-description: Pwn 利用入口：checksec 保护判定 → 栈/堆/内核打法路由；兼恶意样本静态分析入口（混淆脚本/C2/PE .NET）"
+        - generic [ref=f1e561]: "+description: Pwn 利用入口：checksec 保护判定 → 栈/堆/内核打法路由；兼恶意样本静态分析入口（混淆脚本/C2/PE .NET） #walk-3b"
+        - generic [ref=f1e562]: "keywords: pwn, 溢出, 栈, 堆, uaf, double free, shellcode, rop, ret2libc, 格式化字符串, seccomp, 沙箱逃逸, 内核, 驱动, 恶意样本, c2, beacon, 混淆"
+        - generic [ref=f1e563]: "features: has_remote_service, crashes_on_input, has_shellcode_hint"
+        - generic [ref=f1e564]: "file_features: ELF, NX, Canary, PIE, RELRO, FORTIFY, stripped, dynamically_linked, PE, seccomp"
+        - generic [ref=f1e565]: "+platforms: linux, windows"
+        - generic [ref=f1e566]: "formats: elf, pe, so, dll"
+        - generic [ref=f1e567]: "vuln_classes: stack-overflow, heap, format-string, rop, kernel, sandbox-escape, malware-c2"
+        - generic [ref=f1e568]: "-platforms: linux, windows"
+        - generic [ref=f1e569]: "task_types: solve, reverse"
+        - generic [ref=f1e570]: "---"
+    - paragraph [ref=f1e546]: 回滚前会自动再备份当前版（生成新版本），因此回滚可逆；两种备份命名（时间戳前缀 / .bak 后缀）都会列出。
+    - button "关闭" [ref=f1e547]

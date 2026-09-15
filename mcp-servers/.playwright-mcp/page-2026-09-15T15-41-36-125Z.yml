@@ -1,0 +1,178 @@
+- generic [ref=e55]:
+  - banner [ref=e56]:
+    - generic [ref=e57]: CTF · 二进制/杂项
+    - heading "A组端到端走查" [level=1] [ref=e58]
+    - generic [ref=e59]: 任务 1/3 · 发现 0 · 资产 0
+    - button "🔔 审批" [ref=e60]
+    - button "← 项目" [ref=e61]
+  - generic [ref=e62]:
+    - navigation [ref=e63]:
+      - button "◈ 项目" [ref=e64]:
+        - generic [ref=e65]: ◈
+        - text: 项目
+      - button "◉ 直播间" [ref=e66]:
+        - generic [ref=e67]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=e68]:
+        - generic [ref=e69]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=e70]:
+        - generic [ref=e71]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=e72]:
+        - generic [ref=e73]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=e74]:
+        - generic [ref=e75]: ⚙
+        - text: 技能/设置
+    - main [ref=e76]:
+      - generic [ref=e78]:
+        - generic [ref=e79]:
+          - generic [ref=e80]:
+            - button "全部" [ref=e81]
+            - button "Orchestrator" [ref=e82]
+            - button "finished _generalist 分离页签 _generalist（任务后台继续）" [ref=e389]:
+              - generic "finished" [ref=e390]
+              - text: _generalist
+              - button "分离页签 _generalist（任务后台继续）" [ref=e162]
+            - button "running _generalist 分离页签 _generalist（任务后台继续）" [ref=e764]:
+              - generic "running" [ref=e765]
+              - text: _generalist
+              - button "分离页签 _generalist（任务后台继续）" [ref=e759]
+          - generic [ref=e83]:
+            - button "直播" [ref=e84]
+            - button "任务流" [ref=e85]
+          - generic [ref=e91]: ● live
+        - generic [ref=e441]:
+          - combobox "通用 · 通用 CTF 选手：分诊、解题全链路" [ref=e442]:
+            - option "通用 · 通用 CTF 选手：分诊、解题全链路" [selected]
+            - option "recon · 静态分诊：只看不跑，快速给出文件类型/保护/建议下一步"
+            - option "reverse · 逆向：函数定位、算法还原、func_kb 协作、求解验证"
+          - combobox "开窗供应商（缺省=全局默认供应商）" [ref=e443]:
+            - option "默认供应商" [selected]
+            - option "ark-plan"
+            - option "ark-coding"
+          - combobox "开窗模型（缺省=该供应商首个模型）" [ref=e444]:
+            - option "默认模型（ark-code-latest）" [selected]
+            - option "ark-code-latest"
+            - option "deepseek-v4-flash"
+            - option "glm-5-3-flash-260828"
+          - button "开窗" [ref=e445]
+          - generic "项目自主级别（§6.8：L0 全手动 / L1 任务自动·开窗审批 / L2 全自动链）；安全层任何档位不放松" [ref=e446]:
+            - button "L0" [ref=e447]
+            - button "L1" [ref=e448]
+            - button "L2" [ref=e449]
+          - button "⏸ 暂停自动" [ref=e450]
+          - button "∑ 90.1k 📋 0 🪟 2/4" [ref=e766]:
+            - generic [ref=e453]: ∑ 90.1k
+            - generic [ref=e454]: 📋 0
+            - generic [ref=e455]: 🪟 2/4
+          - button "跑任务队列" [ref=e456]
+          - button "⏸ 暂停" [ref=e457]
+          - button "⛔ 中断" [ref=e458]
+          - button "结束会话" [ref=e459]
+          - generic "动态切换当前会话的供应商/模型，下一次 LLM 调用生效" [ref=e460]:
+            - generic [ref=e461]: 🔀
+            - combobox [ref=e462]:
+              - option "ark-plan" [selected]
+              - option "ark-coding"
+            - combobox [ref=e463]:
+              - option "默认模型" [selected]
+              - option "ark-code-latest"
+              - option "deepseek-v4-flash"
+              - option "glm-5-3-flash-260828"
+            - button "切换" [ref=e464]
+          - button "编排一轮" [ref=e466]
+          - button "重排优先级" [ref=e467]
+          - button "复盘沉淀" [ref=e468]
+        - generic [ref=e469]:
+          - button "全部" [ref=e470]
+          - button "思考" [ref=e471]
+          - button "决策" [ref=e472]
+          - button "命令" [ref=e473]
+          - button "发现" [ref=e474]
+          - generic [ref=e475]: Worker 执行中…
+        - generic [ref=e477]:
+          - generic [ref=e769] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:41:17" [ref=e770]: 23:41:17
+            - generic [ref=e771]: 🔧 认领任务
+            - generic [ref=e772]: task_id, session_id, lease_until
+            - generic [ref=e773]: system
+          - generic [ref=e776] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:41:17" [ref=e777]: 23:41:17
+            - generic [ref=e778]: 🎯 技能路由
+            - generic [ref=e779]: triage · 2 分 · ctf
+            - generic [ref=e781]: sess-e2c83c3fd342
+          - generic [ref=e784] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:41:20" [ref=e785]: 23:41:20
+            - generic [ref=e786]: ∑ token
+            - generic [ref=e787]: Agent · ark-code-latest · ↑0 ↓143 · ∑83563
+            - generic [ref=e789]: sess-e2c83c3fd342
+          - generic [ref=e792] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:41:20" [ref=e793]: 23:41:20
+            - generic [ref=e794]: 💭 思考
+            - generic [ref=e795]: Let me analyze this task. The plan is to open and read at least 3 documents from…
+            - generic [ref=e796]: sess-e2c83c3fd342
+          - generic [ref=e799] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:41:29" [ref=e800]: 23:41:29
+            - generic [ref=e801]: ∑ token
+            - generic [ref=e802]: Agent · ark-code-latest · ↑1289 ↓338 · ∑90110
+            - generic [ref=e804]: sess-e2c83c3fd342
+          - generic [ref=e807] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:41:29" [ref=e808]: 23:41:29
+            - generic [ref=e809]: 💭 思考
+            - generic [ref=e810]: I see there's a previous failed task with the same objective, which is claimed t…
+            - generic [ref=e811]: sess-e2c83c3fd342
+          - generic [ref=e813] [cursor=pointer]:
+            - generic [ref=e814]:
+              - generic "UTC 2026-09-15 15:41:29" [ref=e815]: 23:41:29
+              - generic [ref=e816]: 📐 制定计划
+              - generic [ref=e817]: 6 步 · 完成 0/6
+              - generic [ref=e819]: system
+            - generic [ref=e820]: "{ \"task_id\": \"task-3997f9bcb328\", \"session_id\": \"sess-e2c83c3fd342\", \"plan\": [ { \"id\": \"p1\", \"title\": \"用 kb_open 打开 ctf-misc/SKILL.md 获取文档索引与阅读纪律\", \"status\": \"todo\", \"ts\": \"2026-09-15T15:41:29+00:00\" }, { \"id\": \"p2\", \"title\": \"通读第 1 篇 ctf-misc 文档并简述要点\", \"status\": \"todo\", \"ts\": \"2026-09-15T15:41:29+00:00\" }, { \"id\": \"p3\", \"title\": \"通读第 2 篇 ctf-misc 文档并简述要点\", \"status\": \"todo\", \"ts\": \"2026-09-15T15:41:29+00:00\" }, { \"id\": \"p4\", \"title\": \"通读第 3 篇 ctf-misc 文档并简述要点\", \"status\": \"todo\", \"ts\": \"2026-09-15T15:41:29+00:00\" }, { \"id\": \"p5\", \"title\": \"（可选）通读第 4 篇补充覆盖面\", \"status\": \"todo\", \"ts\": \"2026-09-15T15:41:29+00:00\" }, { \"id\": \"p6\", \"title\": \"汇总阅读笔记（落 finding/产物）并 complete_task\", \"status\": \"todo\", \"ts\": \"2026-09-15T15:41:29+00:00\" } ] }"
+          - generic [ref=e823] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:41:33" [ref=e824]: 23:41:33
+            - generic [ref=e825]: ∑ token
+            - generic [ref=e826]: Agent · ark-code-latest · ↑773 ↓94 · ∑96921
+            - generic [ref=e828]: sess-e2c83c3fd342
+          - generic [ref=e831] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:41:33" [ref=e832]: 23:41:33
+            - generic [ref=e833]: 💭 思考
+            - generic [ref=e834]: "Now let me start step 1: open the ctf-misc SKILL.md."
+            - generic [ref=e835]: sess-e2c83c3fd342
+          - generic [ref=e838] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:41:33" [ref=e839]: 23:41:33
+            - generic [ref=e840]: ▦ 计划步进
+            - generic [ref=e841]: p1 → doing
+            - generic [ref=e843]: system
+          - generic [ref=e846] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:41:33" [ref=e847]: 23:41:33
+            - generic [ref=e848]: 📖 打开知识库
+            - generic [ref=e849]: source, module, path
+            - generic [ref=e850]: sess-e2c83c3fd342
+        - generic [ref=e708]:
+          - textbox "插话：向黑板发布一个任务或一条指示…" [ref=e709]
+          - button "发送" [disabled]
+      - complementary [ref=e120]:
+        - generic [ref=e121]:
+          - tablist [ref=e122]:
+            - tab "发现" [selected] [ref=e123]
+            - tab "资产" [ref=e124]
+            - tab "函数库" [ref=e125]
+          - tabpanel "发现" [ref=e126]:
+            - generic [ref=e127]:
+              - generic [ref=e128]:
+                - button "全部资产" [ref=e130]
+                - generic [ref=e134]:
+                  - button "全部" [ref=e135]
+                  - button "critical" [ref=e136]
+                  - button "high" [ref=e137]
+                  - button "medium" [ref=e138]
+                  - button "low" [ref=e139]
+                  - button "info" [ref=e140]
+                - generic [ref=e141]:
+                  - button "全部状态" [ref=e142]
+                  - button "unverified" [ref=e143]
+                  - button "verified" [ref=e144]
+              - paragraph [ref=e149]: 暂无数据
+      - button "›" [ref=e150]

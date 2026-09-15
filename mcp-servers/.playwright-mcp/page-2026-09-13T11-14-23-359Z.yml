@@ -1,0 +1,86 @@
+- generic [ref=f1e24]:
+  - banner [ref=f1e25]:
+    - generic [ref=f1e26]: 渗透测试
+    - heading "pentest 编排演练-Pikachu" [level=1] [ref=f1e27]
+    - generic [ref=f1e28]: 任务 1/6 · 发现 5 · 资产 19
+    - button "🔔 审批" [ref=f1e29]
+    - button "← 项目" [ref=f1e30]
+  - generic [ref=f1e31]:
+    - navigation [ref=f1e32]:
+      - button "◈ 项目" [ref=f1e33]:
+        - generic [ref=f1e34]: ◈
+        - text: 项目
+      - button "◉ 直播间" [ref=f1e35]:
+        - generic [ref=f1e36]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=f1e37]:
+        - generic [ref=f1e38]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=f1e39]:
+        - generic [ref=f1e40]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=f1e41]:
+        - generic [ref=f1e42]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=f1e43]:
+        - generic [ref=f1e44]: ⚙
+        - text: 技能/设置
+    - main [ref=f1e45]:
+      - generic [ref=f1e482]:
+        - tablist [ref=f1e483]:
+          - tab "发现" [selected] [ref=f1e484]
+          - tab "资产" [ref=f1e485]
+          - tab "函数库" [ref=f1e486]
+        - tabpanel "发现" [ref=f1e487]:
+          - generic [ref=f1e488]:
+            - generic [ref=f1e489]:
+              - button "全部资产" [ref=f1e491]
+              - generic [ref=f1e495]:
+                - button "全部" [ref=f1e496]
+                - button "critical" [ref=f1e497]
+                - button "high" [ref=f1e498]
+                - button "medium" [ref=f1e499]
+                - button "low" [ref=f1e500]
+                - button "info" [ref=f1e501]
+              - generic [ref=f1e502]:
+                - button "全部状态" [ref=f1e503]
+                - button "unverified" [ref=f1e504]
+                - button "verified" [ref=f1e505]
+            - generic [ref=f1e509]:
+              - generic [ref=f1e510] [cursor=pointer]:
+                - generic [ref=f1e511]:
+                  - generic [ref=f1e512]: medium
+                  - generic [ref=f1e513]: pkxss 管理后台入口：302 跳转 pkxss_login.php 登录门（鉴权面存在）；未授权可达性未验证且有反证（登录页泄露口令但后台库缺表，登录路径不可用）
+                  - generic [ref=f1e514]: sess-f8f29908f462
+                - generic [ref=f1e515]: unauthorized-access-candidate · 2026-09-12 18:21 · http://127.0.0.1:8085/pkxss/index.php
+              - generic [ref=f1e516] [cursor=pointer]:
+                - generic [ref=f1e517]:
+                  - generic [ref=f1e518]: medium
+                  - generic [ref=f1e519]: pkxss 管理后台入口：302 跳转至 pkxss_login.php 登录门，未授权可达性未验证
+                  - generic [ref=f1e520]: sess-57f302f33e78
+                - generic [ref=f1e521]: unauthorized-access-candidate · 2026-09-12 18:06 · http://127.0.0.1:8085/pkxss/index.php
+              - generic [ref=f1e522] [cursor=pointer]:
+                - generic [ref=f1e523]:
+                  - generic [ref=f1e524]: low
+                  - generic [ref=f1e525]: 中间件版本暴露：nginx/1.15.11 + PHP/7.3.4（Server/X-Powered-By 响应头）
+                  - generic [ref=f1e526]: verified
+                  - generic [ref=f1e527]: sess-57f302f33e78
+                - generic [ref=f1e528]: version-disclosure · 2026-09-12 18:06 · http://127.0.0.1:8085/
+              - generic [ref=f1e529] [cursor=pointer]:
+                - generic [ref=f1e530]:
+                  - generic [ref=f1e531]: low
+                  - generic [ref=f1e532]: Pikachu 靶场 15 个漏洞模块入口页全部 HTTP 200 可达（exploit 派生目标地图）
+                  - generic [ref=f1e533]: verified
+                  - generic [ref=f1e534]: sess-57f302f33e78
+                - generic [ref=f1e535]: exposed-vulnerable-modules · 2026-09-12 18:06 · 127.0.0.1:8085
+              - generic [ref=f1e536] [cursor=pointer]:
+                - generic [ref=f1e537]:
+                  - generic [ref=f1e538]: info
+                  - generic [ref=f1e539]: robots.txt / sitemap.xml 均不存在（404），无额外路径线索
+                  - generic [ref=f1e540]: verified
+                  - generic [ref=f1e541]: sess-57f302f33e78
+                - generic [ref=f1e542]: recon-note · 2026-09-12 18:06 · 127.0.0.1:8085
+            - generic [ref=f1e543]:
+              - textbox "类别" [ref=f1e544]: triage
+              - textbox "手动添加发现（human 共写，§6.5）" [ref=f1e545]
+              - button "添加" [disabled]

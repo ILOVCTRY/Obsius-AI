@@ -1,0 +1,32 @@
+{
+  "_comment": "MCP 配置层：stdio server 填 command/args（url 留空），http server 填 url（transport=streamable-http，只允许本机 loopback）。domains 命中的领域才会启用（pentest/reverse/binary）。逆向工作台 MCP 实时桥：IDA 中 Ctrl-Alt-M 启动 vendored 插件后即连 127.0.0.1:13337；无此条目时也默认探活该地址。fofa 三账号轮换在 src-strike mcp-servers/fofa_MCP/.env——密钥禁止写进本文件。",
+  "servers": [
+    {
+      "name": "ida",
+      "url": "http://127.0.0.1:13337/mcp",
+      "transport": "streamable-http",
+      "enabled": true,
+      "domains": ["reverse"],
+      "command": null,
+      "args": []
+    },
+    {
+      "name": "fofa",
+      "url": "",
+      "transport": "stdio",
+      "enabled": true,
+      "domains": ["pentest"],
+      "command": "uv",
+      "args": ["run", "--active", "E:\\ILOVCTRY\\SRC\\src-strike\\mcp-servers\\fofa_MCP\\fofa.py"]
+    },
+    {
+      "name": "playwright",
+      "url": "",
+      "transport": "stdio",
+      "enabled": true,
+      "domains": ["pentest"],
+      "command": "node",
+      "args": ["E:\\ILOVCTRY\\SRC\\src-strike\\mcp-servers\\playwright-mcp\\node_modules\\@playwright\\mcp\\cli.js"]
+    }
+  ]
+}

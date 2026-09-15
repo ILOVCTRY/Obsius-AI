@@ -1,0 +1,108 @@
+- generic [ref=f1e54]:
+  - banner [ref=f1e55]:
+    - generic [ref=f1e56]: 授权评估 · Web
+    - heading "assessment 编排演练-Pikachu" [level=1] [ref=f1e57]
+    - generic [ref=f1e58]: 任务 0/5 · 发现 0 · 资产 54
+    - button "🔔 审批" [ref=f1e59]
+    - button "← 项目" [ref=f1e60]
+  - generic [ref=f1e61]:
+    - navigation [ref=f1e62]:
+      - button "◈ 项目" [ref=f1e63]:
+        - generic [ref=f1e64]: ◈
+        - text: 项目
+      - button "◉ 直播间" [ref=f1e65]:
+        - generic [ref=f1e66]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=f1e67]:
+        - generic [ref=f1e68]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=f1e69]:
+        - generic [ref=f1e70]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=f1e71]:
+        - generic [ref=f1e72]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=f1e73]:
+        - generic [ref=f1e74]: ⚙
+        - text: 技能/设置
+    - main [ref=f1e75]:
+      - generic [ref=f1e318]:
+        - generic [ref=f1e319]:
+          - generic [ref=f1e320]: 场景轨
+          - combobox [ref=f1e321]:
+            - option "授权评估" [selected]
+            - option "CTF"
+          - generic [ref=f1e322]: 能力包
+          - combobox [ref=f1e323]:
+            - option "二进制" [selected]
+            - option "密码学"
+            - option "取证"
+            - option "杂项"
+            - option "Web 攻防"
+          - generic [ref=f1e324]: 角色/owners 属轨，Skill/红线轨与包各一份；写入留 .history，下次开窗生效
+        - button "健康度 0 error / 5 warning / 2 info" [ref=f1e325]:
+          - generic [ref=f1e326]: 健康度
+          - generic [ref=f1e328]: 0 error / 5 warning / 2 info
+        - generic [ref=f1e329]:
+          - tablist [ref=f1e330]:
+            - tab "角色" [selected] [ref=f1e331]
+            - tab "Skill" [ref=f1e332]
+            - tab "矩阵" [ref=f1e333]
+            - tab "红线" [ref=f1e334]
+            - tab "模型" [ref=f1e335]
+            - tab "MCP" [ref=f1e336]
+          - tabpanel "角色" [ref=f1e337]:
+            - generic [ref=f1e338]:
+              - generic [ref=f1e342]:
+                - button "＋ 新建 / 克隆角色" [ref=f1e343]
+                - button "通用 _generalist" [ref=f1e345]
+                - generic [ref=f1e346]:
+                  - button "external-entry" [ref=f1e347]
+                  - button "✕" [ref=f1e348]
+                - generic [ref=f1e349]:
+                  - button "lateral" [ref=f1e350]
+                  - button "✕" [ref=f1e351]
+                - generic [ref=f1e352]:
+                  - button "privesc" [ref=f1e353]
+                  - button "✕" [ref=f1e354]
+                - generic [ref=f1e355]:
+                  - button "recon" [ref=f1e356]
+                  - button "✕" [ref=f1e357]
+                - generic [ref=f1e397]:
+                  - button "zz-ui-walk" [ref=f1e398]
+                  - button "✕" [ref=f1e399]
+              - generic [ref=f1e358]:
+                - generic [ref=f1e359]:
+                  - generic [ref=f1e360]: assessment/zz-ui-walk
+                  - generic [ref=f1e361]: 已保存 ✓
+                  - button "历史" [ref=f1e362]
+                  - button "保存" [ref=f1e363]
+                - generic [ref=f1e364]: 职责 description（编排开窗目录的一句话说明）
+                - textbox "如：外网打点与入口利用" [ref=f1e365]: 信息收集：被动侦察、子域枚举、活筛、指纹识别，产出结构化资产清单
+                - generic [ref=f1e366]: 人设 persona（注入系统提示）
+                - textbox [ref=f1e367]: 信息收集专家：被动优先、不触发 WAF、产出结构化资产清单写入黑板。
+                - generic [ref=f1e368]:
+                  - generic [ref=f1e369]:
+                    - text: 默认噪声预算 default_noise
+                    - combobox [ref=f1e370]:
+                      - option "（不设）"
+                      - option "passive" [selected]
+                      - option "low"
+                      - option "medium"
+                      - option "high"
+                  - generic [ref=f1e371]:
+                    - text: 运行时软上限 max_runtime（只能比网关更严）
+                    - combobox [ref=f1e372]:
+                      - option "（不设）" [selected]
+                      - option "host"
+                      - option "wsl"
+                      - option "docker"
+                      - option "sandbox"
+                - generic [ref=f1e373]: 技能白名单 skills（逗号分隔；留空 = 不过滤，自由竞争）
+                - textbox "recon-asset-enum, web-strike-entry" [ref=f1e374]: recon-asset-enum
+                - generic [ref=f1e375]: 任务类型 task_types（Worker 认领过滤器；留空 = 不限）
+                - textbox "recon, exploit" [ref=f1e376]: recon, asset-enum
+                - generic [ref=f1e377]: 工具白名单 tools（逗号分隔；留空 = 不限制；complete/fail/finish 永远放行）
+                - textbox "bb_query, run_cmd" [ref=f1e378]
+                - generic [ref=f1e379]: 最大步数 max_steps（正整数；留空 = 不设）
+                - textbox "30" [ref=f1e380]

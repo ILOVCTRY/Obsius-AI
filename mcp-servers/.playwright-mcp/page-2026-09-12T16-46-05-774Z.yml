@@ -1,0 +1,26 @@
+- generic [ref=f1e3]:
+  - generic [ref=f1e4]:
+    - heading "项目" [level=1] [ref=f1e5]
+    - paragraph [ref=f1e6]: 项目 = workspaces/ 下的一个文件夹，黑板数据随项目隔离存储
+  - generic [ref=f1e7]:
+    - generic [ref=f1e8]: 新建项目
+    - generic [ref=f1e10]:
+      - textbox "项目名（可用中文）" [ref=f1e11]
+      - generic [ref=f1e12]:
+        - button "ctf" [ref=f1e13]
+        - button "pentest" [ref=f1e14]
+        - button "reverse" [ref=f1e15]
+      - button "创建" [disabled]
+  - generic [ref=f1e16]:
+    - button "ctf API 冒烟项目 proj-2d12c0b84a23 2026-09-12" [ref=f1e17]:
+      - generic [ref=f1e18]: ctf
+      - generic [ref=f1e19]:
+        - generic [ref=f1e20]: API 冒烟项目
+        - generic [ref=f1e21]: proj-2d12c0b84a23
+      - generic [ref=f1e22]: 2026-09-12
+    - button "ctf webui-smoke proj-1694f3b6d743 2026-09-12" [ref=f1e23]:
+      - generic [ref=f1e24]: ctf
+      - generic [ref=f1e25]:
+        - generic [ref=f1e26]: webui-smoke
+        - generic [ref=f1e27]: proj-1694f3b6d743
+      - generic [ref=f1e28]: 2026-09-12

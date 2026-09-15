@@ -1,0 +1,109 @@
+- generic [ref=e54]:
+  - banner [ref=e55]:
+    - generic [ref=e56]: 授权评估 · Web
+    - heading "assessment 编排演练-Pikachu" [level=1] [ref=e57]
+    - generic [ref=e58]: 任务 0/5 · 发现 0 · 资产 54
+    - button "🔔 审批" [ref=e59]
+    - button "← 项目" [ref=e60]
+  - generic [ref=e61]:
+    - navigation [ref=e62]:
+      - button "◈ 项目" [ref=e63]:
+        - generic [ref=e64]: ◈
+        - text: 项目
+      - button "◉ 直播间" [ref=e65]:
+        - generic [ref=e66]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=e67]:
+        - generic [ref=e68]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=e69]:
+        - generic [ref=e70]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=e71]:
+        - generic [ref=e72]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=e73]:
+        - generic [ref=e74]: ⚙
+        - text: 技能/设置
+    - main [ref=e75]:
+      - generic [ref=e319]:
+        - generic [ref=e320]:
+          - generic [ref=e321]: 场景轨
+          - combobox [ref=e322]:
+            - option "授权评估" [selected]
+            - option "CTF"
+            - option "研究"
+          - generic [ref=e323]: 能力包
+          - combobox [ref=e324]:
+            - option "二进制" [selected]
+            - option "密码学"
+            - option "取证"
+            - option "杂项"
+            - option "Web 攻防"
+          - generic [ref=e325]: 角色/owners 属轨，Skill/红线轨与包各一份；写入留 .history，下次开窗生效
+        - button "健康度 0 error / 5 warning / 2 info" [ref=e326]:
+          - generic [ref=e327]: 健康度
+          - generic [ref=e329]: 0 error / 5 warning / 2 info
+        - generic [ref=e330]:
+          - tablist [ref=e331]:
+            - tab "角色" [selected] [ref=e332]
+            - tab "Skill" [ref=e333]
+            - tab "矩阵" [ref=e334]
+            - tab "红线" [ref=e335]
+            - tab "模型" [ref=e336]
+            - tab "MCP" [ref=e337]
+            - tab "提案 1" [ref=e338]:
+              - text: 提案
+              - generic [ref=e339]: "1"
+          - tabpanel "角色" [ref=e340]:
+            - generic [ref=e341]:
+              - generic [ref=e345]:
+                - button "＋ 新建 / 克隆角色" [ref=e346]
+                - button "通用 _generalist" [ref=e348]
+                - generic [ref=e349]:
+                  - button "external-entry" [ref=e350]
+                  - button "✕" [ref=e351]
+                - generic [ref=e352]:
+                  - button "lateral" [ref=e353]
+                  - button "✕" [ref=e354]
+                - generic [ref=e355]:
+                  - button "privesc" [ref=e356]
+                  - button "✕" [ref=e357]
+                - generic [ref=e358]:
+                  - button "recon" [ref=e359]
+                  - button "✕" [ref=e360]
+              - generic [ref=e361]:
+                - generic [ref=e362]:
+                  - generic [ref=e363]: assessment/_generalist
+                  - generic [ref=e364]: 已保存 ✓
+                  - button "历史" [ref=e365]
+                  - button "保存" [ref=e366]
+                - generic [ref=e367]: 职责 description（编排开窗目录的一句话说明）
+                - textbox "如：外网打点与入口利用" [ref=e368]: 通用评估员：按入口技能路由分配的方向干活
+                - generic [ref=e369]: 人设 persona（注入系统提示）
+                - textbox [ref=e370]: 通用渗透测试员，按入口技能路由分配的方向干活。
+                - generic [ref=e371]:
+                  - generic [ref=e372]:
+                    - text: 默认噪声预算 default_noise
+                    - combobox [ref=e373]:
+                      - option "（不设）"
+                      - option "passive"
+                      - option "low" [selected]
+                      - option "medium"
+                      - option "high"
+                  - generic [ref=e374]:
+                    - text: 运行时软上限 max_runtime（只能比网关更严）
+                    - combobox [ref=e375]:
+                      - option "（不设）" [selected]
+                      - option "host"
+                      - option "wsl"
+                      - option "docker"
+                      - option "sandbox"
+                - generic [ref=e376]: 技能白名单 skills（逗号分隔；留空 = 不过滤，自由竞争）
+                - textbox "recon-asset-enum, web-strike-entry" [ref=e377]
+                - generic [ref=e378]: 任务类型 task_types（Worker 认领过滤器；留空 = 不限）
+                - textbox "recon, exploit" [ref=e379]
+                - generic [ref=e380]: 工具白名单 tools（逗号分隔；留空 = 不限制；complete/fail/finish 永远放行）
+                - textbox "bb_query, run_cmd" [ref=e381]
+                - generic [ref=e382]: 最大步数 max_steps（正整数；留空 = 不设）
+                - textbox "30" [ref=e383]

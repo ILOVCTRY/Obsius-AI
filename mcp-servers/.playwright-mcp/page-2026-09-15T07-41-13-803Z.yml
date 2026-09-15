@@ -1,0 +1,42 @@
+- generic [ref=f4e436]:
+  - banner [ref=f4e437]:
+    - generic [ref=f4e438]: 授权评估 · Web
+    - heading "批4走查-L1开窗" [level=1] [ref=f4e439]
+    - generic [ref=f4e440]: 任务 0/0 · 发现 0 · 资产 0
+    - button "🔔 审批 1" [ref=f4e441]:
+      - text: 🔔 审批
+      - generic [ref=f4e442]: "1"
+    - button "← 项目" [ref=f4e443]
+  - generic [ref=f4e444]:
+    - navigation [ref=f4e445]:
+      - button "◈ 项目" [ref=f4e446]:
+        - generic [ref=f4e447]: ◈
+        - text: 项目
+      - button "◉ 直播间" [ref=f4e448]:
+        - generic [ref=f4e449]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=f4e450]:
+        - generic [ref=f4e451]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=f4e452]:
+        - generic [ref=f4e453]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=f4e454]:
+        - generic [ref=f4e455]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=f4e456]:
+        - generic [ref=f4e457]: ⚙
+        - text: 技能/设置
+    - main [ref=f4e458]:
+      - generic [ref=f4e572]:
+        - generic [ref=f4e573]:
+          - heading "审批收件箱" [level=1] [ref=f4e574]
+          - paragraph [ref=f4e575]: 编排开窗申请（L1）/ 越界审批 / net:real / cross_target 等待批动作；批准与拒绝均落事件流审计
+        - paragraph [ref=f4e595]: 暂无待审批动作
+        - heading "已处理" [level=2] [ref=f4e596]
+        - generic [ref=f4e598]:
+          - generic [ref=f4e599]:
+            - generic [ref=f4e600]: 已批准
+            - generic [ref=f4e601]: 🪟 开窗 recon（recon）
+            - generic [ref=f4e602]: human
+          - paragraph [ref=f4e603]: 已自动建窗（sess-16fea78）并提交跑队列

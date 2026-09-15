@@ -1,0 +1,150 @@
+- generic [ref=f1e54]:
+  - banner [ref=f1e55]:
+    - generic [ref=f1e56]: 授权评估 · Web
+    - heading "assessment 编排演练-Pikachu" [level=1] [ref=f1e57]
+    - generic [ref=f1e58]: 任务 0/5 · 发现 0 · 资产 54
+    - button "🔔 审批" [ref=f1e59]
+    - button "← 项目" [ref=f1e60]
+  - generic [ref=f1e61]:
+    - navigation [ref=f1e62]:
+      - button "◈ 项目" [ref=f1e63]:
+        - generic [ref=f1e64]: ◈
+        - text: 项目
+      - button "◉ 直播间" [ref=f1e65]:
+        - generic [ref=f1e66]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=f1e67]:
+        - generic [ref=f1e68]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=f1e69]:
+        - generic [ref=f1e70]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=f1e71]:
+        - generic [ref=f1e72]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=f1e73]:
+        - generic [ref=f1e74]: ⚙
+        - text: 技能/设置
+    - main [ref=f1e75]:
+      - generic [ref=f1e318]:
+        - generic [ref=f1e319]:
+          - generic [ref=f1e320]: 场景轨
+          - combobox [ref=f1e321]:
+            - option "授权评估" [selected]
+            - option "CTF"
+          - generic [ref=f1e322]: 能力包
+          - combobox [ref=f1e323]:
+            - option "二进制" [selected]
+            - option "密码学"
+            - option "取证"
+            - option "杂项"
+            - option "Web 攻防"
+          - generic [ref=f1e324]: 角色/owners 属轨，Skill/红线轨与包各一份；写入留 .history，下次开窗生效
+        - button "健康度 0 error / 5 warning / 4 info" [ref=f1e607]:
+          - generic [ref=f1e326]: 健康度
+          - generic [ref=f1e328]: 0 error / 5 warning / 4 info
+        - generic [ref=f1e329]:
+          - tablist [ref=f1e330]:
+            - tab "角色" [ref=f1e331]
+            - tab "Skill" [ref=f1e332]
+            - tab "矩阵" [active] [selected] [ref=f1e333]
+            - tab "红线" [ref=f1e334]
+            - tab "模型" [ref=f1e335]
+            - tab "MCP" [ref=f1e336]
+          - tabpanel "矩阵" [ref=f1e608]:
+            - generic [ref=f1e612]:
+              - paragraph [ref=f1e613]: 行=「assessment」轨角色；✓=在该角色技能白名单内，·=skills 为 null（全放行），空白=不挂。 列=全部能力包 ∪ 本轨技能。红=悬空引用或未注册 task_type，黄=引用了已禁用技能。
+              - table [ref=f1e615]:
+                - rowgroup [ref=f1e616]:
+                  - row [ref=f1e617]:
+                    - columnheader "角色 \\ 技能" [ref=f1e618]
+                    - columnheader [ref=f1e619]:
+                      - button "binary-pwn" [ref=f1e620]
+                    - columnheader [ref=f1e621]:
+                      - button "binary-rev" [ref=f1e622]
+                    - columnheader [ref=f1e623]:
+                      - button "file-triage" [ref=f1e624]
+                    - columnheader [ref=f1e625]:
+                      - button "crypto-triage" [ref=f1e626]
+                    - columnheader [ref=f1e627]:
+                      - button "forensics-triage" [ref=f1e628]
+                    - columnheader [ref=f1e629]:
+                      - button "recon-asset-enum" [ref=f1e630]
+                    - columnheader [ref=f1e631]:
+                      - button "web-strike-entry" [ref=f1e632]
+                  - row [ref=f1e633]:
+                    - columnheader [ref=f1e634]
+                    - columnheader "二进制" [ref=f1e635]
+                    - columnheader "二进制" [ref=f1e636]
+                    - columnheader "二进制" [ref=f1e637]
+                    - columnheader "密码学" [ref=f1e638]
+                    - columnheader "取证" [ref=f1e639]
+                    - columnheader "Web 攻防" [ref=f1e640]
+                    - columnheader "Web 攻防" [ref=f1e641]
+                - rowgroup [ref=f1e642]:
+                  - row [ref=f1e643]:
+                    - cell "通用 _generalist" [ref=f1e644]
+                    - cell "·" [ref=f1e645]
+                    - cell "·" [ref=f1e646]
+                    - cell "·" [ref=f1e647]
+                    - cell "·" [ref=f1e648]
+                    - cell "·" [ref=f1e649]
+                    - cell "·" [ref=f1e650]
+                    - cell "·" [ref=f1e651]
+                  - row [ref=f1e652]:
+                    - cell "external-entry" [ref=f1e653]
+                    - cell [ref=f1e654]
+                    - cell [ref=f1e655]
+                    - cell [ref=f1e656]
+                    - cell [ref=f1e657]
+                    - cell [ref=f1e658]
+                    - cell [ref=f1e659]
+                    - cell "✓" [ref=f1e660]
+                  - row [ref=f1e661]:
+                    - cell "lateral" [ref=f1e662]
+                    - cell [ref=f1e663]
+                    - cell [ref=f1e664]
+                    - cell [ref=f1e665]
+                    - cell [ref=f1e666]
+                    - cell [ref=f1e667]
+                    - cell [ref=f1e668]
+                    - cell "✓" [ref=f1e669]
+                  - row [ref=f1e670]:
+                    - cell "privesc" [ref=f1e671]
+                    - cell [ref=f1e672]
+                    - cell [ref=f1e673]
+                    - cell [ref=f1e674]
+                    - cell [ref=f1e675]
+                    - cell [ref=f1e676]
+                    - cell [ref=f1e677]
+                    - cell "✓" [ref=f1e678]
+                  - row [ref=f1e679]:
+                    - cell "recon" [ref=f1e680]
+                    - cell [ref=f1e681]
+                    - cell [ref=f1e682]
+                    - cell [ref=f1e683]
+                    - cell [ref=f1e684]
+                    - cell [ref=f1e685]
+                    - cell "✓" [ref=f1e686]
+                    - cell [ref=f1e687]
+              - generic [ref=f1e688]:
+                - paragraph [ref=f1e689]: 任务类型白名单（注册表：generic、recon、asset-enum、exploit、privesc、lateral-movement、credential-access）
+                - generic [ref=f1e690]:
+                  - generic [ref=f1e691]:
+                    - generic [ref=f1e692]: _generalist
+                    - generic [ref=f1e693]: "全部（task_types: null）"
+                  - generic [ref=f1e694]:
+                    - generic [ref=f1e695]: external-entry
+                    - generic [ref=f1e696]: exploit
+                    - generic [ref=f1e697]: recon
+                  - generic [ref=f1e698]:
+                    - generic [ref=f1e699]: lateral
+                    - generic [ref=f1e700]: lateral-movement
+                    - generic [ref=f1e701]: credential-access
+                  - generic [ref=f1e702]:
+                    - generic [ref=f1e703]: privesc
+                    - generic [ref=f1e704]: privesc
+                  - generic [ref=f1e705]:
+                    - generic [ref=f1e706]: recon
+                    - generic [ref=f1e707]: recon
+                    - generic [ref=f1e708]: asset-enum

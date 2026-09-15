@@ -1,0 +1,256 @@
+- generic [ref=e55]:
+  - banner [ref=e56]:
+    - generic [ref=e57]: CTF · 二进制/杂项
+    - heading "A组端到端走查" [level=1] [ref=e58]
+    - generic [ref=e59]: 任务 1/1 · 发现 0 · 资产 0
+    - button "🔔 审批" [ref=e60]
+    - button "← 项目" [ref=e61]
+  - generic [ref=e62]:
+    - navigation [ref=e63]:
+      - button "◈ 项目" [ref=e64]:
+        - generic [ref=e65]: ◈
+        - text: 项目
+      - button "◉ 直播间" [ref=e66]:
+        - generic [ref=e67]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=e68]:
+        - generic [ref=e69]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=e70]:
+        - generic [ref=e71]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=e72]:
+        - generic [ref=e73]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=e74]:
+        - generic [ref=e75]: ⚙
+        - text: 技能/设置
+    - main [ref=e76]:
+      - generic [ref=e78]:
+        - generic [ref=e79]:
+          - generic [ref=e80]:
+            - button "全部" [ref=e81]
+            - button "Orchestrator" [ref=e82]
+            - button "running _generalist 分离页签 _generalist（任务后台继续）" [ref=e176]:
+              - generic "running" [ref=e177]
+              - text: _generalist
+              - button "分离页签 _generalist（任务后台继续）" [ref=e162]
+          - generic [ref=e83]:
+            - button "直播" [ref=e84]
+            - button "任务流" [ref=e85]
+          - generic [ref=e91]: ● live
+        - generic [ref=e92]:
+          - combobox "通用 · 通用 CTF 选手：分诊、解题全链路" [ref=e93]:
+            - option "通用 · 通用 CTF 选手：分诊、解题全链路" [selected]
+            - option "recon · 静态分诊：只看不跑，快速给出文件类型/保护/建议下一步"
+            - option "reverse · 逆向：函数定位、算法还原、func_kb 协作、求解验证"
+          - combobox "开窗供应商（缺省=全局默认供应商）" [ref=e94]:
+            - option "默认供应商" [selected]
+            - option "ark-plan"
+            - option "ark-coding"
+          - combobox "开窗模型（缺省=该供应商首个模型）" [ref=e95]:
+            - option "默认模型（ark-code-latest）" [selected]
+            - option "ark-code-latest"
+            - option "deepseek-v4-flash"
+            - option "glm-5-3-flash-260828"
+          - button "开窗" [ref=e96]
+          - generic "项目自主级别（§6.8：L0 全手动 / L1 任务自动·开窗审批 / L2 全自动链）；安全层任何档位不放松" [ref=e97]:
+            - button "L0" [ref=e98]
+            - button "L1" [ref=e99]
+            - button "L2" [ref=e100]
+          - button "⏸ 暂停自动" [ref=e101]
+          - button "∑ 61.3k 📋 0 🪟 1/4" [ref=e303]:
+            - generic [ref=e104]: ∑ 61.3k
+            - generic [ref=e105]: 📋 0
+            - generic [ref=e106]: 🪟 1/4
+          - button "跑任务队列" [active] [ref=e167]
+          - button "⏸ 暂停" [ref=e168]
+          - button "⛔ 中断" [ref=e169]
+          - button "结束会话" [ref=e170]
+          - generic "动态切换当前会话的供应商/模型，下一次 LLM 调用生效" [ref=e171]:
+            - generic [ref=e172]: 🔀
+            - combobox [ref=e173]:
+              - option "ark-plan" [selected]
+              - option "ark-coding"
+            - combobox [ref=e174]:
+              - option "默认模型" [selected]
+              - option "ark-code-latest"
+              - option "deepseek-v4-flash"
+              - option "glm-5-3-flash-260828"
+            - button "切换" [ref=e175]
+          - button "编排一轮" [ref=e108]
+          - button "重排优先级" [ref=e109]
+          - button "复盘沉淀" [ref=e110]
+        - generic [ref=e111]:
+          - button "全部" [ref=e112]
+          - button "思考" [ref=e113]
+          - button "决策" [ref=e114]
+          - button "命令" [ref=e115]
+          - button "发现" [ref=e116]
+          - generic [ref=e178]: Worker 执行中…
+        - generic [ref=e151]:
+          - generic [ref=e181] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:34:35" [ref=e182]: 23:34:35
+            - generic [ref=e183]: 🔧 认领任务
+            - generic [ref=e184]: task_id, session_id, lease_until
+            - generic [ref=e185]: system
+          - generic [ref=e188] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:34:35" [ref=e189]: 23:34:35
+            - generic [ref=e190]: 🎯 技能路由
+            - generic [ref=e191]: 未命中 · 侦察任务：用 bb_query 通读当前黑板（资产、发现、任务），输出三条下一步分析建议后调用 co
+            - generic [ref=e193]: sess-a2a0f0143780
+          - generic [ref=e197] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:34:41" [ref=e198]: 23:34:41
+            - generic [ref=e199]: ∑ token
+            - generic [ref=e200]: Agent · ark-code-latest · ↑4647 ↓181 · ∑4828
+            - generic [ref=e202]: sess-a2a0f0143780
+          - generic [ref=e205] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:34:41" [ref=e206]: 23:34:41
+            - generic [ref=e207]: 💭 思考
+            - generic [ref=e208]: "Let me start by understanding the task: I need to do reconnaissance by querying …"
+            - generic [ref=e209]: sess-a2a0f0143780
+          - generic [ref=e211] [cursor=pointer]:
+            - generic [ref=e212]:
+              - generic "UTC 2026-09-15 15:34:41" [ref=e213]: 23:34:41
+              - generic [ref=e214]: 📐 制定计划
+              - generic [ref=e215]: 4 步 · 完成 0/4
+              - generic [ref=e217]: system
+            - generic [ref=e218]: "{ \"task_id\": \"task-4a9ef7a51e64\", \"session_id\": \"sess-a2a0f0143780\", \"plan\": [ { \"id\": \"p1\", \"title\": \"查询黑板资产（assets），梳理已登记目标与范围\", \"status\": \"todo\", \"ts\": \"2026-09-15T15:34:41+00:00\" }, { \"id\": \"p2\", \"title\": \"查询黑板发现（findings），梳理已有漏洞/线索及证据状态\", \"status\": \"todo\", \"ts\": \"2026-09-15T15:34:41+00:00\" }, { \"id\": \"p3\", \"title\": \"查询黑板任务（tasks），了解进行中/已完成的分析分工\", \"status\": \"todo\", \"ts\": \"2026-09-15T15:34:41+00:00\" }, { \"id\": \"p4\", \"title\": \"汇总态势，输出三条下一步分析建议并 complete_task\", \"status\": \"todo\", \"ts\": \"2026-09-15T15:34:41+00:00\" } ] }"
+          - generic [ref=e222] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:34:52" [ref=e223]: 23:34:52
+            - generic [ref=e224]: ∑ token
+            - generic [ref=e225]: Agent · ark-code-latest · ↑1055 ↓422 · ∑10201
+            - generic [ref=e227]: sess-a2a0f0143780
+          - generic [ref=e230] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:34:52" [ref=e231]: 23:34:52
+            - generic [ref=e232]: 💭 思考
+            - generic [ref=e233]: Now let me start step 1 and query the blackboard. I've confirmed three independ…
+            - generic [ref=e234]: sess-a2a0f0143780
+          - generic [ref=e237] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:34:52" [ref=e238]: 23:34:52
+            - generic [ref=e239]: ▦ 计划步进
+            - generic [ref=e240]: p1 → doing
+            - generic [ref=e242]: system
+          - generic [ref=e245] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:34:56" [ref=e246]: 23:34:56
+            - generic [ref=e247]: ∑ token
+            - generic [ref=e248]: Agent · ark-code-latest · ↑567 ↓114 · ∑15802
+            - generic [ref=e250]: sess-a2a0f0143780
+          - generic [ref=e253] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:34:56" [ref=e254]: 23:34:56
+            - generic [ref=e255]: 💭 思考
+            - generic [ref=e256]: The tool calls seem to have returned empty. The queries may have returned invis…
+            - generic [ref=e257]: sess-a2a0f0143780
+          - generic [ref=e260] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:34:59" [ref=e261]: 23:34:59
+            - generic [ref=e262]: ∑ token
+            - generic [ref=e263]: Agent · ark-code-latest · ↑692 ↓67 · ∑21481
+            - generic [ref=e265]: sess-a2a0f0143780
+          - generic [ref=e268] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:34:59" [ref=e269]: 23:34:59
+            - generic [ref=e270]: 💭 思考
+            - generic [ref=e271]: Assets is empty. Query findings and tasks.
+            - generic [ref=e272]: sess-a2a0f0143780
+          - generic [ref=e275] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:35:03" [ref=e276]: 23:35:03
+            - generic [ref=e277]: ∑ token
+            - generic [ref=e278]: Agent · ark-code-latest · ↑774 ↓77 · ∑27252
+            - generic [ref=e280]: sess-a2a0f0143780
+          - generic [ref=e283] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:35:03" [ref=e284]: 23:35:03
+            - generic [ref=e285]: 💭 思考
+            - generic [ref=e286]: Findings empty too. Query tasks again for results.
+            - generic [ref=e287]: sess-a2a0f0143780
+          - generic [ref=e290] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:35:08" [ref=e291]: 23:35:08
+            - generic [ref=e292]: ∑ token
+            - generic [ref=e293]: Agent · ark-code-latest · ↑940 ↓108 · ∑33220
+            - generic [ref=e295]: sess-a2a0f0143780
+          - generic [ref=e298] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:35:08" [ref=e299]: 23:35:08
+            - generic [ref=e300]: 💭 思考
+            - generic [ref=e301]: Events query result wasn't shown. Verification shows assets, findings and other…
+            - generic [ref=e302]: sess-a2a0f0143780
+          - generic [ref=e306] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:35:37" [ref=e307]: 23:35:37
+            - generic [ref=e308]: ∑ token
+            - generic [ref=e309]: Agent · ark-code-latest · ↑2754 ↓1071 · ∑41965
+            - generic [ref=e311]: sess-a2a0f0143780
+          - generic [ref=e314] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:35:37" [ref=e315]: 23:35:37
+            - generic [ref=e316]: 💭 思考
+            - generic [ref=e317]: "Now I have the full picture:"
+            - generic [ref=e318]: sess-a2a0f0143780
+          - generic [ref=e321] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:35:37" [ref=e322]: 23:35:37
+            - generic [ref=e323]: ▦ 计划步进
+            - generic [ref=e324]: p1 → done
+            - generic [ref=e326]: system
+          - generic [ref=e329] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:35:37" [ref=e330]: 23:35:37
+            - generic [ref=e331]: ▦ 计划步进
+            - generic [ref=e332]: p2 → done
+            - generic [ref=e334]: system
+          - generic [ref=e337] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:35:38" [ref=e338]: 23:35:38
+            - generic [ref=e339]: ▦ 计划步进
+            - generic [ref=e340]: p3 → done
+            - generic [ref=e342]: system
+          - generic [ref=e345] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:35:54" [ref=e346]: 23:35:54
+            - generic [ref=e347]: ∑ token
+            - generic [ref=e348]: Agent · ark-code-latest · ↑1885 ↓591 · ∑51409
+            - generic [ref=e350]: sess-a2a0f0143780
+          - generic [ref=e353] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:35:54" [ref=e354]: 23:35:54
+            - generic [ref=e355]: 💭 思考
+            - generic [ref=e356]: Now mark p4 done and complete the task with the three suggestions. I'll put sug…
+            - generic [ref=e357]: sess-a2a0f0143780
+          - generic [ref=e360] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:35:54" [ref=e361]: 23:35:54
+            - generic [ref=e362]: ▦ 计划步进
+            - generic [ref=e363]: p4 → done
+            - generic [ref=e365]: system
+          - generic [ref=e368] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:36:04" [ref=e369]: 23:36:04
+            - generic [ref=e370]: ∑ token
+            - generic [ref=e371]: Agent · ark-code-latest · ↑1549 ↓390 · ∑61340
+            - generic [ref=e373]: sess-a2a0f0143780
+          - generic [ref=e376] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:36:04" [ref=e377]: 23:36:04
+            - generic [ref=e378]: 💭 思考
+            - generic [ref=e379]: Now complete the task with the summary.
+            - generic [ref=e380]: sess-a2a0f0143780
+          - generic [ref=e382] [cursor=pointer]:
+            - generic [ref=e383]:
+              - generic "UTC 2026-09-15 15:36:04" [ref=e384]: 23:36:04
+              - generic [ref=e385]: ✅ 任务完成
+              - generic [ref=e386]: 侦察完成（全程被动，仅 bb_query，未执行外部命令）。 黑板态势：assets=[]、findings=[]、tasks 仅本任务 task-4a9ef7a51e64（无父/子/兄弟任务）、events 仅生命周期事件且技能路由 matched=[]。结论：全新空白黑板，未提供任何目标（无附件/二进制/URL/IP/题面）。 三条下一步建议： 1) 补目标输入：请人类提供题目附件或目标 URL/IP/题面，拿到后立即 bb_add_asset 登记种子资产（binary 记 sha256，URL 自动挂 host）；目标明确前不发起主动动作（本任务上限 passive）。 2) 被动分诊流水线：静态 file/strings 可在 host；反编译走 decompile MCP 且必须先 bb_query what=func 按 sha256 查重、分析后 bb_upsert_func；执行样本默认 untrusted 在 WSL 隔离（Docker 不可用、本地无 Ghidra/IDA）。定类别后再 kb_open 对应模块，不猜文件名。 3) 按类别 publish_task 分解（静态/动态/exp），非 passive 带 conflict_keys（ip:/binary:sha256）防重复；发现即 bb_add_finding，无证据 unverified、连续 3 次复现才 verified 并附 poc；flag 只认实际运行输出；先拿分后完美。 当前阻塞点：缺少目标范围，需人类下发输入后方可进入实质分析。
+              - generic [ref=e387]: system
+            - generic [ref=e388]: "{ \"task_id\": \"task-4a9ef7a51e64\", \"session_id\": \"sess-a2a0f0143780\", \"note\": \"侦察完成（全程被动，仅 bb_query，未执行外部命令）。\\n\\n黑板态势：assets=[]、findings=[]、tasks 仅本任务 task-4a9ef7a51e64（无父/子/兄弟任务）、events 仅生命周期事件且技能路由 matched=[]。结论：全新空白黑板，未提供任何目标（无附件/二进制/URL/IP/题面）。\\n\\n三条下一步建议：\\n1) 补目标输入：请人类提供题目附件或目标 URL/IP/题面，拿到后立即 bb_add_asset 登记种子资产（binary 记 sha256，URL 自动挂 host）；目标明确前不发起主动动作（本任务上限 passive）。\\n2) 被动分诊流水线：静态 file/strings 可在 host；反编译走 decompile MCP 且必须先 bb_query what=func 按 sha256 查重、分析后 bb_upsert_func；执行样本默认 untrusted 在 WSL 隔离（Docker 不可用、本地无 Ghidra/IDA）。定类别后再 kb_open 对应模块，不猜文件名。\\n3) 按类别 publish_task 分解（静态/动态/exp），非 passive 带 conflict_keys（ip:/binary:sha256）防重复；发现即 bb_add_finding，无证据 unverified、连续 3 次复现才 verified 并附 poc；flag 只认实际运行输出；先拿分后完美。\\n\\n当前阻塞点：缺少目标范围，需人类下发输入后方可进入实质分析。\" }"
+        - generic [ref=e118]:
+          - textbox "插话：向黑板发布一个任务或一条指示…" [ref=e119]
+          - button "发送" [disabled]
+      - complementary [ref=e120]:
+        - generic [ref=e121]:
+          - tablist [ref=e122]:
+            - tab "发现" [selected] [ref=e123]
+            - tab "资产" [ref=e124]
+            - tab "函数库" [ref=e125]
+          - tabpanel "发现" [ref=e126]:
+            - generic [ref=e127]:
+              - generic [ref=e128]:
+                - button "全部资产" [ref=e130]
+                - generic [ref=e134]:
+                  - button "全部" [ref=e135]
+                  - button "critical" [ref=e136]
+                  - button "high" [ref=e137]
+                  - button "medium" [ref=e138]
+                  - button "low" [ref=e139]
+                  - button "info" [ref=e140]
+                - generic [ref=e141]:
+                  - button "全部状态" [ref=e142]
+                  - button "unverified" [ref=e143]
+                  - button "verified" [ref=e144]
+              - paragraph [ref=e149]: 暂无数据
+      - button "›" [ref=e150]

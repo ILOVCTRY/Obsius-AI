@@ -1,0 +1,81 @@
+- generic [ref=f10e54]:
+  - banner [ref=f10e55]:
+    - generic [ref=f10e56]: CTF · 杂项
+    - heading "del-e2e" [level=1] [ref=f10e57]
+    - generic [ref=f10e58]: 任务 0/0 · 发现 0 · 资产 0
+    - button "🔔 审批" [ref=f10e59]
+    - button "← 项目" [ref=f10e60]
+  - generic [ref=f10e61]:
+    - navigation [ref=f10e62]:
+      - button "◈ 项目" [ref=f10e63]:
+        - generic [ref=f10e64]: ◈
+        - text: 项目
+      - button "◉ 直播间" [ref=f10e65]:
+        - generic [ref=f10e66]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=f10e67]:
+        - generic [ref=f10e68]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=f10e69]:
+        - generic [ref=f10e70]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=f10e71]:
+        - generic [ref=f10e72]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=f10e73]:
+        - generic [ref=f10e74]: ⚙
+        - text: 技能/设置
+    - main [ref=f10e75]:
+      - generic [ref=f10e77]:
+        - generic [ref=f10e78]:
+          - button "全部" [ref=f10e79]
+          - button "Orchestrator" [ref=f10e80]
+          - generic [ref=f10e81]: ● live
+          - combobox "开窗角色" [ref=f10e82]:
+            - option "通用 · 通用 CTF 选手：分诊、解题全链路" [selected]
+            - option "recon · 静态分诊：只看不跑，快速给出文件类型/保护/建议下一步"
+            - option "reverse · 逆向：函数定位、算法还原、func_kb 协作、求解验证"
+          - combobox "开窗供应商（缺省=全局默认供应商）" [ref=f10e83]:
+            - option "默认供应商" [selected]
+            - option "ark-plan"
+            - option "ark-coding"
+          - combobox "开窗模型（缺省=该供应商首个模型）" [ref=f10e84]:
+            - option "默认模型（ark-code-latest）" [selected]
+            - option "ark-code-latest"
+            - option "deepseek-v4-flash"
+            - option "glm-5-3-flash-260828"
+          - button "开窗" [ref=f10e85]
+          - button "编排一轮" [ref=f10e87]
+          - button "复盘沉淀" [ref=f10e88]
+        - generic [ref=f10e89]:
+          - button "全部" [ref=f10e90]
+          - button "思考" [ref=f10e91]
+          - button "决策" [ref=f10e92]
+          - button "命令" [ref=f10e93]
+          - button "发现" [ref=f10e94]
+        - generic [ref=f10e96]:
+          - textbox "插话：向黑板发布一个任务或一条指示…" [ref=f10e97]
+          - button "发送" [disabled]
+      - complementary [ref=f10e98]:
+        - generic [ref=f10e99]:
+          - tablist [ref=f10e100]:
+            - tab "发现" [selected] [ref=f10e101]
+            - tab "资产" [ref=f10e102]
+            - tab "函数库" [ref=f10e103]
+          - tabpanel "发现" [ref=f10e104]:
+            - generic [ref=f10e105]:
+              - generic [ref=f10e106]:
+                - button "全部资产" [ref=f10e108]
+                - generic [ref=f10e112]:
+                  - button "全部" [ref=f10e113]
+                  - button "critical" [ref=f10e114]
+                  - button "high" [ref=f10e115]
+                  - button "medium" [ref=f10e116]
+                  - button "low" [ref=f10e117]
+                  - button "info" [ref=f10e118]
+                - generic [ref=f10e119]:
+                  - button "全部状态" [ref=f10e120]
+                  - button "unverified" [ref=f10e121]
+                  - button "verified" [ref=f10e122]
+              - paragraph [ref=f10e127]: 暂无数据
+      - button "›" [ref=f10e128]

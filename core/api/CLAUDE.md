@@ -1,0 +1,80 @@
+# core/api/
+
+> core API：HTTP + WebSocket 把黑板/任务/会话/编排暴露给 WebUI 与 CLI（DESIGN.md：所有写经 core API 单一入口的 HTTP 化）。**全项目唯一 import fastapi 的地方**，核心引擎保持零依赖。
+
+## 文件
+
+- `app.py` — `create_app(workspace_root, packs_root, tools_root, *, executor_llm=None, planner_llm=None, providers_config=config/providers.json)`。`app.state.llm_store` = `ProviderStore`（多供应商，§8）；LLM 缺省 = 路由覆写目标或全局默认（第一个启用供应商的第一个模型）；测试可注入 executor_llm 或用 tmp providers_config 避免种子污染真实文件。无可用 key → Agent/编排端点 **503**（不崩）。
+- `JobRegistry` — 长耗时动作（跑 Agent / orchestrator tick/auto-tick/auto-wait/**replan/replan-wait**）后台线程执行，`POST` 立即返回 job_id，`GET /api/jobs/{id}` 轮询；`submit(..., on_done=)` 在状态翻 done/error 后回调（异常只 log），是 L2 链防搁浅的关键（worker/tick 收尾期的竞态由它兜底）。
+
+## 端点速查（前缀 /api）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET/POST | `/projects` | 列出（扫 project.json）/ 创建（ProjectStore） |
+| GET/PATCH | `/projects/{pid}` `/projects/{pid}/config` | GET=元数据+任务统计+能力清单+**usage 用量视图**（autonomy 六字段+active_sessions+tokens/tasks used·budget·pct+**`chain:{active,ticks,auto_ticks_total,estranged}`**，§6.8）；PATCH config 顶层浅合并、autonomy 段整段归一化（坏值 ValueError→422），project.json+黑板行双写 |
+| DELETE | `/projects/{pid}` | 回收站式删除（整目录移入 `workspaces/.trash/`；409 运行中/删除窗口 / 422 重试后仍占用） |
+| GET/POST | `/projects/{pid}/findings` `/assets` | 人机共写（§6.5，author=human）；GET findings 支持过滤 query：`target_asset_id` / `min_severity`（不低于该级，如 high→high+critical）/ `verified_only`；POST/PATCH evidence 带 `relates_to` 时被引 finding 须存在且同项目，否则 **422**（E0 防幻觉） |
+| PATCH | `/assets/{asset_id}` | 资产更新（§5.2）：改挂父行（null=摘挂，防环校验）/ 合并 meta（title/scanned）；exclude_unset 区分不传与传 null |
+| GET | `/projects/{pid}/artifacts/content?ref=` | 产物文本内容只读（WebUI POC 弹窗）：ref 按 artifact id → 表内 path → 裸路径（旧数据）解析；**防穿越**（resolve 后必须落在项目目录内）+ 256KB 上限；越界 422 / 缺文件 404 / 超限 413 |
+| GET | `/projects/{pid}/funcs` `/events?since_id=` `/sessions` | 函数库（funcs 支持 `?binary_sha256=` 过滤）/ 增量事件 / 会话列表（每行带 `unread`=会话收件箱未读数） |
+| POST | `/projects/{pid}/samples` | **样本上传**（multipart，256MB，文件名 basename+防穿越，流式算 sha256）→ 落 samples/ + binary 资产；缓存未命中自动投 `binary-triage` Job（零 LLM headless 首跑，900s；无后端→done `{status:"no-tool"}` + binary.triage_failed 事件，非 500） |
+| POST | `/projects/{pid}/binaries/{sha}/triage` | 重新分诊（running 409，未知 sha 404） |
+| GET | `/projects/{pid}/binaries/{sha}/overview` | 工作台首屏：meta/sections/imports/function_count/analyzed_count/risk_count/**strings_count** + tools 三态（installed/cached/off）+ db_path；缓存缺席也 200（cached:false）；**mcp 灯是真探活**（懒握手 1.5s + 3s TTL，青=IDA MCP 在线） |
+| GET | `/projects/{pid}/binaries/{sha}/functions[/{addr}]` | 精简行（address 为 **hex 字符串**）/ 单函数含 pseudocode；addr 路径参数不带 0x；无此函数 404；**缓存缺席时 MCP 在线则实时取并标 `source:"mcp"`，否则 409**（文案提示 Ctrl-Alt-M） |
+| GET | `/projects/{pid}/binaries/{sha}/xrefs/{addr}` | callers+callees（导入函数地址 null）；缓存缺席时 MCP func_profile 实时降级（source:"mcp"），都无才 409 |
+| GET | `/projects/{pid}/binaries/{sha}/strings?q=` | v3 字符串表（address hex、refs 附所属函数名）；?q 大小写不敏感子串、5000 行截断 truncated；缓存缺席 409、strings 段为 error 409 |
+| POST | `/projects/{pid}/binaries/{sha}/open?addr=0x..` | detached 启 IDA GUI 打开 .i64；带 addr 时 db 同目录写 `_jump_<sha8>.py`（相对 -S + cwd=db 目录）精确跳址；无库 409、无 GUI 422、addr 非法 422 |
+| POST | `/projects/{pid}/binaries/{sha}/writeback` | func_kb→IDA 写回 Job `binary-writeback`，body `{items:[{address:int\|hex,name?,comment?}]}`（1–500，每条至少 name/comment）；**MCP 在线优先实时写 GUI 当前库**（rename batch+set_comments，ok 结果带 `channel:"mcp"`、不主动 idb_save），离线/失败降级 headless 对 .i64 跑（locked/no-db/no-tool/unsupported）；ok 发 `binary.annotated`（仅成功条数，注释全文不进事件）；同 Job running 409 |
+| POST | `/projects/{pid}/binaries/{sha}/pull-names` | IDA 手改名→func_kb Job `binary-pull-names`（库内重导不删库→diff，自动名 sub_/nullsub/unk_ 不拉，改名入 name_history author=ida-pull）；事件 `binary.names_pulled`；非 ok 结构化返回不发事件 |
+| POST/PATCH | `/projects/{pid}/funcs[/{fid}]` | POST 人工建 func_kb 行（幂等）；PATCH 改名（入 name_history）/笔记分段追加/risk_tags 全量替换（**不含 confidence**），事件 func.updated |
+| PATCH | `/projects/{pid}/findings/{fid}` | status 白名单（unverified/verified/false-positive，非法 422）+ evidence 浅层 merge；事件 finding.updated；**非 FP→FP 跳变单次触发撤回传播**（finding.retracted 广播 + 四类会话私信/挂 stale_refs，§6.7 的 1.6） |
+| DELETE | `/projects/{pid}/findings/{fid}`、`/projects/{pid}/assets/{aid}` | 物理删除（垃圾/走查清理，2026-09-15；**误报走 PATCH FP 不走删**）：finding 同事务摘反向 relates_to 边+任务 refs（不删任务/链边/私信/POC 产物），落 finding.deleted；asset 限叶子且无 finding 引用否则 **409**；不存在 404 |
+| GET/POST/PATCH/DELETE | `/projects/{pid}/chains[/{cid}]` `/chains/links/{lid}` | 攻击链 8 端点（人工建链）：列表(link_count)/建 201/详情（links 带**实体快照**：func 地址 hex、finding category、artifact kind；孤儿 `deleted:true`）/改名改状态/删链/挂节点（LookupError→404、ValueError→422）/边注/删边（store 重排 seq） |
+| GET | `/projects/{pid}/artifacts` | 产物只读列表（链节点选择器数据源；上传仍只有 debug-log 入口） |
+| POST | `/projects/{pid}/artifacts/upload` | multipart 产物；kind=debug-log 走 16MB 上限（其他 kind 422），artifact_content 对其放宽到 4MB |
+| GET | `/projects/{pid}/approvals?status=` | 审批列表（收件箱数据源；**action 出口解析为对象**，库存 JSON 字符串） |
+| POST | `/api/approvals/{aid}/decide` | 人类批准/拒绝（落审计事件）；**批 4**：approved 且 `action.op` 命中 `_APPROVAL_OP_HANDLERS` 白名单才执行处理器（当前仅 `spawn_session`：终检 cap→注册式工厂建窗→发 session.spawned(带 approval_id)→submit agent-work 批准即开跑），响应多 `executed/session_id/job_id`（批 5：处理器 worker 走 `_submit_worker` 统一口）；执行失败**不回滚批准**，落 `approval.exec_failed` 事件 + `{executed:false,error}`；approved 后**触发点 E** 再 `_kick_workers`（响应多 `kicked:sid[]`）；rejected/无 op/未知 op 只翻状态（旧语义） |
+| GET/POST | `/projects/{pid}/tasks`、`/projects/{pid}/task-graph` | 任务列表（行含 context_refs/stale_refs/**plan**）/ 人类发布（body 可选 `refs:finding id[]`，与正文 find-id 自动抽取合并）；POST 响应 `{task_id,kicked}`——**触发点 D**：L1/L2 未暂停顺带唤醒空闲 worker，L0/paused 返 `[]`，**A5：L2 同点异步触发 `_maybe_replan(human-publish)`**（30s 去抖，见下）；task-graph=A3 任务流图数据（`blackboard.graph`：全部任务+认领会话，parent 实线/inbox 虚线） |
+| POST | `/projects/{pid}/orchestrator/replan-priorities` | **A5 手动重排**：不受自主档（L0/L1/L2 均可）/30s 去抖/预算闸限制；同步抢 tick 租约（占用 **409** 不产 job），提交 `orchestrator-replan` Job 返 `{job_id}`，`result={updated,skipped,reason:"manual"}`；on_done 补评估 auto_tick 防链搁浅 |
+| GET/POST | `/api/sessions/{sid}/inbox[ /read]` | **会话收件箱全局路径（无 projects/{pid} 前缀）**，与审批收件箱分设：列表（?unread=true 只未读，服务端 _pid_of_session 反查归属）/ 标记已读（body `{ids:null\|[...]}` 返 `{marked:n}`，null=全部）；系统私信仅 basis_stale/finding_update（A4）两类 |
+| PATCH/POST/DELETE | `/tasks/{tid}`（`/reopen`） | PATCH 编辑任务（§6.4：仅 open/failed；五字段白名单 exclude_unset；状态不符 409/校验失败 422）；reopen failed→open（清持有方/租约留 result_note，非 failed 409）；DELETE 物理删除（**A1：四态皆可删**；有子任务 409；task.deleted 快照含 plan；不存在 404；claimed 在 worker 步边界急停） |
+| POST | `/sessions/{sid}/close` `/pause` `/resume` `/abort` | 关窗（closed+事件；409 执行中；编排摘除；暂停快照任务先 fail 防占坑；**A1：结束会话入口在 LiveRoom 收敛**）/软暂停（步边界，空闲立即）/恢复（有快照起新 agent-work job）/硬中断（fail「人工中断」）；不在册 404，重复/状态不符 409 |
+| GET | `/models` | 模型清单 + **供应商表**（§8 多供应商）：`{models, providers:[脱敏：无 api_key 只有 has_key], default:{provider,model}}` |
+| GET/PUT | `/llm/providers` | 供应商整表读写（config/providers.json，PUT 为全量替换语义：空 api_key=沿用原 key；至少一个启用，否则 422） |
+| POST | `/llm/discover` `/llm/test-model` | discover：带 name 走已存供应商/带 base_url+api_key 直探（先 GET /v1/models，404/405 降级最小调用，网络失败 502）；test-model 单模型测活，恒 200 `{ok,error?}` |
+| POST | `/projects/{pid}/agents` | 开窗（AgentSession，反编译服务自动装配，**工厂返回即注册 app.state.agents**；body.provider/body.model 非空则用该供应商该模型开窗，§8）；**sessions_cap 超限 409**（非 closed 会话计数，判定在取 LLM 前）；**触发点 C**：L1/L2 未暂停响应多 `job_id`（自动起一个 worker，空队列零成本退），L0/paused 不带；超 token 预算人手动作放行、响应带 `warning` |
+| POST | `/agents/{sid}/llm` | **运行中动态切换**：直接替换会话 LLM 引用，下一次调用生效，落 llm.switched 事件；未知会话 404 |
+| POST | `/agents/{sid}/work` `/projects/{pid}/orchestrator/tick` | 后台 Job：worker 循环直到队列空（**内存未命中先 `_ensure_agent` rehydrate**）/ 跑一轮编排（编排开窗走同一注册式工厂，不再有孤儿窗；**tick 先同步拿租约**（orch_state，他人未过期租约→409 且不产 job；LLM 503 前先释放），job finally 按 owner 释放；注入 gate/on_task_published（预算/cap 硬闸实时重读、tasks_published 计数）+ **autonomy_provider（批 4：L1 档 orch spawn 转审批）+ `propose_only=(实时 level=="L0")`（批 6 L0 提案：构造 orch 前现读档位注入，tick 内 publish/spawn 只发 orch.proposed 不写实体）** + state_loader/saver（游标/轮数/digest 落 orchestrator_state）+ heartbeat（每 LLM 步续租，TTL 900s）；**触发点 B** `_post_tick`：kick workers + L2 链状态机（有产出发 `orch.chain_started`，零产出/零会话收敛停）；job.result 为结构化 dict，§6.8/1.9） |
+| GET | `/taxonomy` | 能力包×场景轨目录（pack.yaml/track.yaml 的 label/description）+ 各轨 task_types 注册表；新建向导/类型 datalist 数据源 |
+| POST/GET | `/skills/route-preview` `/skills/vocab` | 路由试算：body `{query, track, capabilities[], role?, features?, file_features?, labels?}`（旧 domain 透明映射）→ 真评分（特征/标签×3 > keywords×2 > 描述×1），返回 name/kind/pack/enabled/score/matched/**breakdown**（逐类命中明细，C5）；vocab=七类字段（keywords/features/file_features/platforms/formats/vuln_classes/task_types）值+使用计数 |
+| GET/POST/PUT/DELETE | `/capabilities/{cap}/kb`、`/kb/file`、`/kb/rename`、`/kb/versions`、`/kb/diff`、`/kb/rollback`、`/kb/refs` | **kb 本地基线（C2/C3，writing/refs 薄封装）**：列源树（排除 .history）/读文件（附 refs）/新建 201（重名 409）/改（自动备份，不存在 404）/删（有引用默认 409 带 refs，`?force=true` 进 kb-trash）；rename=同源移动+全路径引用联动（一个临界区，相对 md 链接进 skipped_relative，跨源 422）；versions/diff/rollback（版本缺失 404、路径或版本名非法 422）；refs 查引用点。校验：仅 .md/非空/非绝对/无 `..`/拒 `<>:"|?*`/1 MiB，KbError→422 |
+| POST/GET | `/proposals[/{pid}]` + `/apply` `/reject` `/revise`；POST `/projects/{pid}/review-proposals` | **统一变更提案（C4）**：提案落 `packs/.proposals/pp_*.json`；创建模拟校验非法即 422（不落地）；列表可按 status 过滤；详情带**实时磁盘 diff**（不存快照）与 rename/delete 的 refs；apply/reject 状态冲突 409、缺失 404；**apply 仅人类**（`decided_by=human`，demo 脚本须 `demo-script(auto)`），应用复用 writing 备份与改名联动，落 proposal.created/applied/rejected 审计；revise 追加修订仍 pending。review-proposals 为后台 **Job**：planner_llm 复盘会话（kb.open/任务/findings+显式文件清单）批量产 origin=review 提案，无 key→**503**，逐条校验拒收非法 |
+| GET/POST/PUT/DELETE | `/tracks/{track}/roles[/{name}]` | 轨角色：POST 新建（`{name, clone_from?}` 空白模板/克隆同轨角色；重名 409、非法名 422、克隆源缺失 404）；PUT 表单改字段（**要求文件已存在**；skills/tools/task_types 显式 null=白名单关闭；default_noise/max_runtime 枚举、max_steps 正整数）；DELETE 移入 `roles/.history/trash/`（`_generalist` 保护 409，可恢复） |
+| GET/POST/PUT/DELETE/PATCH | `/tracks/{track}/skills[/{name}[/enabled]]` | 轨技能：POST 向导建薄路由模板（重名 409）；PUT 全文（frontmatter name 须与路径一致）；DELETE 整目录移入 `skills/.history/trash/`；PATCH `.../enabled` body `{enabled}` 只改 frontmatter 行、正文不动、自动备份 |
+| GET/POST/PUT/DELETE/PATCH | `/capabilities/{cap}/skills[/{name}[/enabled]]` | 能力包技能，同上（POST 前校验能力包目录存在，否则 404） |
+| GET/PUT | `/tracks/{track}/rules` `/capabilities/{cap}/rules` `/tracks/{track}/task-types` | 轨/包红线读写（**redlines 缺失回 200 `{content:"",exists:false}` 非 404**，PUT 即新建）、轨任务类型注册表 |
+| GET | `/packs/doctor` | packs 静态体检（`core/skills/doctor.py`）：`{issues:[{level,code,target,message}], counts:{error,warning,info}}`；error=悬空技能引用/未注册 task_type/name 不一致/kb root 缺失 |
+| GET/POST | `/packs/history` `/packs/history/diff` `/packs/history/rollback` | 版本管理，query 参数 `file`（packs 相对路径，只许 capabilities/tracks 下、逐段白名单+resolve 双保险防穿越）+`version`：列版本（**兼容 `<ts>[.n]_<file>` 与 `<file>.<ts>.bak` 两种命名**）/ unified diff / 一键回滚（回滚前自动再备份当前版，可同秒往返） |
+| GET/PUT/DELETE | `/tracks/{track}/owners[/{tag}]` | 平台规则（文件即规则：删=停用、建=扩展；资产 meta.owner 命中才注入会话）；DELETE 也先留 .history 回滚件再删；非法 tag 422 / 不存在 404 |
+| GET/PUT | `/mcp` | config/mcp.json 配置层（`{servers:[{name,url,transport,enabled,domains[],command?,args[]}]}`——stdio 填 command/args（url 留空），http 填 url；重名/非法名 422；**PUT 另校验：domains ⊆ pentest/reverse/binary、http 的 url 必须 loopback（红线只连本机）、stdio 必填 command**。逆向运行时桥已接：`select_mcp_endpoint` 选 enabled+http+domains 含 reverse（兼容 binary）的 loopback 条目，无配置兜底 `http://127.0.0.1:13337/mcp` |
+| WS | `/ws/projects/{pid}?since_id=0` | 事件流（1s 轮询 since_id 推送）；项目删除中/已删以 **close 1008** 拒绝（前端停止重连） |
+
+## 关键约定
+
+- **零业务逻辑**：这里只做 HTTP↔core 翻译，规则全在 blackboard/gateway/agent/orchestrator。
+- **会话控制（§3）**：work/pause/resume/abort 先经 `_ensure_agent(pid,sid)`——内存命中直取，缺失（重启/历史孤儿窗）则按黑板 sessions 行调注册式工厂 rehydrate（陈旧 running/paused 行回 idle），未知/closed 才 404；API 线程只置 Event，worker 在步边界消费；空闲会话端点直接调 `_enter_paused()/_abort_current_task()` 立即生效。
+- 阻塞路由用 `def`（FastAPI 自动线程池），WS 用 `run_in_threadpool` 调 SQLite。
+- rev 服务闭包 `_rev_service(proj)`：每项目独立 cache/db 目录（artifacts/decompiler-cache、decompiler-db），服务缓存于 `app.state.rev_services[pid]`，构造时经 `select_mcp_endpoint(_load_mcp_config())` 装 MCP 实时桥（配置缺失/损坏回 {} 走默认端点，绝不 500）；测试经 `app.state.rev_service_factory` 注入假后端（签名 factory(proj)->service）。**Agent 会话工厂 `_registered_session_factory` 刻意不装 MCP**（无人值守不赌 GUI 当前库）；返回即注册 `app.state.agents`，人开窗与编排 tick 同路径（修孤儿窗），factory 第三参 `existing_session` 走 rehydrate。
+- **审批 op 处理器（批 4 红线）**：`_APPROVAL_OP_HANDLERS` 是 dict 白名单分派，**绝不 eval**；`spawn_session` 的唯一生产方是 Orchestrator L1 分流（Agent 工具集无任何建审批入口，未来 Agent escalation 不得复用该 op 自行建单）。处理器在 `decide_approval` 翻状态**之后**跑，任何异常只落 `approval.exec_failed`（审批保持 approved，HTTP 200）。
+- **L2 全自动链（批 5，§6.8；纯事件驱动，无调度器/无轮询）**：唯一续 tick 闸门 `_maybe_auto_tick(pid,reason)`，七闸顺序=档位重读（降级落 level_changed）→paused→**重启急停**（DB `chain_active=1` 且 `pid∈app.state.active_chains` 双条件，缺一即 restart 停）→预算双硬闸（publish+spawn 都拦才 budget_blocked）→无在跑 worker→无在跑 tick/auto-tick/auto-wait/replan/replan-wait（软去重，五类经 `_orch_jobs_running`；硬去重=自动 job 内抢 tick 租约，抢不到 `{skipped:"lease"}`）→`chain_ticks>=max_chain_ticks`→10s 节流（`AUTO_TICK_MIN_INTERVAL`，踩间隔起 auto-wait job 睡满经 **on_done** 重入，不丢触发）。五触发点：A worker 空队列退（`AgentSession.last_claim_idle`）、B tick 收尾（`_post_tick`）、C 开窗落地、D 人手插话、E 审批批准；全部经 `_kick_workers`（跳过 closed/paused/在跑）与 **`_submit_worker`（agent-work 唯一提交口，统一挂 on_done 兜底竞态；meta.auto=True 才受 paused 认领约束，人显式跑队列/恢复是 override）**。停止原因八值：converged/no_sessions/max_chain_ticks/paused/level_changed/budget_blocked/restart/error；`_stop_chain` 先存 DB chain_active=0 后摘进程标记（顺序反了会在间隙误报 restart）；急停后链不自动恢复，人点 tick 经 `_start_chain` 走 `manual_recovery`（ticks 清零）。
+- **A5 优先级重排（§6.4/§6.7）**：唯一自动入口 `_maybe_replan(pid,reason)→"submitted"/"waiting"/"busy"/"skipped"/"error"`，四闸=L2 & !paused & 无 tick/auto-tick/auto-wait/replan/replan-wait 在跑（`_orch_jobs_running` 五类白名单）& 距 `last_replan_at≥REPLAN_MIN_INTERVAL`（**30s**，手动/自动统一计时；踩窗口起 `orchestrator-replan-wait` 睡满经 on_done 重入，触发不丢）。触发点：**D** POST /tasks 成功后（human-publish）、**A** worker 空退（run() 尾部 + `_submit_worker` on_done——尾部只有返回 `busy`（被在跑编排动作挤掉）时 on_done 才补一次，避免同事件重复踩节流排长命 wait 堵编排槽）。runner（`_replan_runner`，manual 旗标跳档位/节流复核）抢 tick 租约单飞，抢不到返 `{skipped:"lease"}`；**无 open 空转不调 LLM、不刷计时**（否则紧随的正常触发必排长命 wait，曾堵死自动链）；LLM 异常结构化 `{error}` 不炸线程；有 LLM 轮才 save last_replan_at。手动端点见上表。
+- **L0 提案模式（批 6，§6.8）**：唯一接线点是 `_build_orchestrator` 按实时档位注入 `OrchestratorConfig(propose_only=...)`；提案**没有独立采纳端点**——人在前端点「采纳」即走既有 POST /tasks（created_by=human）与 POST /agents，故 L0 采纳不产生 job_id/kicked、不触发任何链逻辑（`_post_tick` 对 L0 早返）。
+- **地址纪律**：headless 内部 int，出 API 一律 hex 字符串（JS Number 无 64 位精度），路径参数不带 0x；样本绝不执行，headless 定性 trusted 解析。Project 黑板连接 / AgentSession 会话表进程内缓存在 `app.state`。
+- packs 写操作三件套：建前查目录（重名 409/宿主不存在 404/非法 slug 422）、写前 `_pack_history_backup`（同秒避让 `.n`，绝不覆盖既有版本）、删除走 `_trash_move`（进同级 `.history/trash/`，可恢复，不物理抹除）。**A3 起所有 packs 写端点把"存在性检查→备份→写"整体包进 `core.skills.writing.pack_write_lock()` 临界区（进程内 RLock，备份/trash 辅助可重入）**，并发保存不丢更新、同秒备份不互覆；kb 改名联动、提案 apply 同在临界区内；仅保单进程部署。
+- 删除项目的前置链（`DELETE /projects/{pid}`）：`_project_busy`（running job 的 meta.project_id + expire_leases 后数 claimed 任务）→ 置 `app.state.projects_closing` 闸门 → pop `app.state.projects` 缓存 → `store.delete_project` 内统一 `bb.close_all()`+`proj.close()` → rename（**0/0.05/0.1/0.2s 退避重试**，耗尽才 422）。闸门期 `_project` 返 409 防重建实例；Blackboard/Project 双层关闭标志使旧引用（WS tick、在飞请求）访问即抛 `BlackboardClosedError`（全局 handler 转 409），**杜绝惰性重连在 Windows 上重新锁死 db**（曾是删除必 422 的根因）；WS tick 见闸门/异常发 close 1008 退出。JobRegistry.submit 带 `meta={"project_id"}` 供忙检查。
+- 启动：`scripts/serve.py [port]`（默认 127.0.0.1:8420， Swagger 在 /docs）。
+
+## 坑与注意
+
+- Agent 开窗依赖真实 Ark key（.env），无 key 时 Agent 端点 503、黑板/任务端点照常可用；测试里 WS 收消息条数必须与事件数精确匹配，多收会挂（TestClient 无超时）。多进程部署（uvicorn workers>1）会让 app.state 会话表/任务 job 失效——当前按单进程设计。

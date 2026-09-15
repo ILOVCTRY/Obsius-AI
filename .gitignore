@@ -1,0 +1,22 @@
+# 密钥与环境
+.env
+*.local.json
+config/providers.json
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 运行时数据
+workspaces/
+*.db
+*.db-wal
+*.db-shm
+
+# 工具按需安装目录（DESIGN.md §7 tools/installed/）
+tools/installed/
+
+# 临时产物
+*.tmp
+*.log

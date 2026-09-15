@@ -1,0 +1,137 @@
+- generic [ref=e54]:
+  - banner [ref=e55]:
+    - generic [ref=e56]: 研究 · 二进制
+    - heading "rev真机走查" [level=1] [ref=e57]
+    - generic [ref=e58]: 任务 0/1 · 发现 2 · 资产 1
+    - button "🔔 审批" [ref=e59]
+    - button "← 项目" [ref=e60]
+  - generic [ref=e61]:
+    - navigation [ref=e62]:
+      - button "◈ 项目" [ref=e63]:
+        - generic [ref=e64]: ◈
+        - text: 项目
+      - button "◉ 直播间" [ref=e65]:
+        - generic [ref=e66]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=e67]:
+        - generic [ref=e68]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=e69]:
+        - generic [ref=e70]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=e71]:
+        - generic [ref=e72]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=e73]:
+        - generic [ref=e74]: ⚙
+        - text: 技能/设置
+    - main [ref=e75]:
+      - generic [ref=e77]:
+        - generic [ref=e78]:
+          - button "全部" [ref=e79]
+          - button "Orchestrator" [ref=e80]
+          - generic [ref=e81]: ● live
+          - combobox "开窗角色" [ref=e82]:
+            - option "通用 · 通用研究员：分诊、逆向、验证全链路" [selected]
+            - option "reverse-analyst · 逆向分析：样本分诊、函数定位、算法还原、func_kb 协作、动态验证"
+          - combobox "开窗供应商（缺省=全局默认供应商）" [ref=e83]:
+            - option "默认供应商" [selected]
+            - option "ark-plan"
+            - option "ark-coding"
+          - combobox "开窗模型（缺省=该供应商首个模型）" [ref=e84]:
+            - option "默认模型（ark-code-latest）" [selected]
+            - option "ark-code-latest"
+            - option "deepseek-v4-flash"
+            - option "glm-5-3-flash-260828"
+          - button "开窗" [ref=e85]
+          - button "编排一轮" [ref=e87]
+        - generic [ref=e88]:
+          - button "全部" [ref=e89]
+          - button "思考" [ref=e90]
+          - button "决策" [ref=e91]
+          - button "命令" [ref=e92]
+          - button "发现" [ref=e93]
+        - generic [ref=e95]:
+          - generic [ref=e98] [cursor=pointer]:
+            - generic [ref=e99]: 04:38:59
+            - generic [ref=e100]: ⚡ 执行命令
+            - code [ref=e102]: D:\Tools\IDA93\idat.exe --% -A -S"E:\ILOVCTRY\cyberstrike-pro\tools\decompiler\ida\scripts\export_funcs.py E:\ILOVCTRY\cyberstrike-pro\workspaces\rev\artifacts\decompiler-cache\34fe7d4ba000f908d71407672fc3d5a8296ba5d5a1248286f3b9cb1a456fa4bc.json" -oE:\ILOVCTRY\cyberstrike-pro\workspaces\rev\artifacts\decompiler-db\34fe7d4ba000f908d71407672fc3d5a8296ba5d5a1248286f3b9cb1a456fa4bc E:\ILOVCTRY\cyberstrike-pro\workspaces\rev\samples\crackme.34fe7d4b.elf
+            - generic [ref=e103]: human
+          - generic [ref=e106] [cursor=pointer]:
+            - generic [ref=e107]: 04:38:59
+            - generic [ref=e108]: ↳ 命令输出
+            - generic [ref=e109]: runtime, exit_code, duration_s, timed_out, stdout_head, stderr_head
+            - generic [ref=e110]: human
+          - generic [ref=e112] [cursor=pointer]:
+            - generic [ref=e113]:
+              - generic [ref=e114]: 04:38:59
+              - generic [ref=e115]: 🧊 样本分诊完成
+              - code [ref=e117]: 34fe7d4ba000 · 28 函数
+              - generic [ref=e118]: human
+            - generic [ref=e119]: "{ \"sha\": \"34fe7d4ba000f908d71407672fc3d5a8296ba5d5a1248286f3b9cb1a456fa4bc\", \"backend\": \"ida-headless\", \"function_count\": 28, \"packer_suspect\": false }"
+          - generic [ref=e122] [cursor=pointer]:
+            - generic [ref=e123]: 04:41:28
+            - generic [ref=e124]: ⚡ 执行命令
+            - code [ref=e126]: D:\Tools\IDA93\idat.exe --% -A -S"E:\ILOVCTRY\cyberstrike-pro\tools\decompiler\ida\scripts\export_funcs.py E:\ILOVCTRY\cyberstrike-pro\workspaces\rev\artifacts\decompiler-cache\34fe7d4ba000f908d71407672fc3d5a8296ba5d5a1248286f3b9cb1a456fa4bc.json" -oE:\ILOVCTRY\cyberstrike-pro\workspaces\rev\artifacts\decompiler-db\34fe7d4ba000f908d71407672fc3d5a8296ba5d5a1248286f3b9cb1a456fa4bc E:\ILOVCTRY\cyberstrike-pro\workspaces\rev\samples\crackme.34fe7d4b.elf
+            - generic [ref=e127]: human
+          - generic [ref=e130] [cursor=pointer]:
+            - generic [ref=e131]: 04:41:28
+            - generic [ref=e132]: ↳ 命令输出
+            - generic [ref=e133]: runtime, exit_code, duration_s, timed_out, stdout_head, stderr_head
+            - generic [ref=e134]: human
+          - generic [ref=e136] [cursor=pointer]:
+            - generic [ref=e137]:
+              - generic [ref=e138]: 04:41:28
+              - generic [ref=e139]: 🧊 样本分诊完成
+              - code [ref=e141]: 34fe7d4ba000 · 28 函数
+              - generic [ref=e142]: human
+            - generic [ref=e143]: "{ \"sha\": \"34fe7d4ba000f908d71407672fc3d5a8296ba5d5a1248286f3b9cb1a456fa4bc\", \"backend\": \"ida-headless\", \"function_count\": 28, \"packer_suspect\": false }"
+          - generic [ref=e146] [cursor=pointer]:
+            - generic [ref=e147]: 04:42:04
+            - generic [ref=e148]: ƒ 函数更新
+            - generic [ref=e149]: func_id, binary_sha256, address, changed
+            - generic [ref=e150]: human
+          - generic [ref=e152] [cursor=pointer]:
+            - generic [ref=e153]:
+              - generic [ref=e154]: 04:46:05
+              - generic [ref=e155]: 🔍 新发现
+              - generic [ref=e156]: finding_id, vuln_class, severity
+              - generic [ref=e157]: human
+            - generic [ref=e158]: "{ \"finding_id\": \"find-9e30583d97b2\", \"vuln_class\": \"\", \"severity\": \"medium\" }"
+          - generic [ref=e160] [cursor=pointer]:
+            - generic [ref=e161]:
+              - generic [ref=e162]: 04:46:16
+              - generic [ref=e163]: 🔍 新发现
+              - generic [ref=e164]: finding_id, vuln_class, severity
+              - generic [ref=e165]: human
+            - generic [ref=e166]: "{ \"finding_id\": \"find-77fffb265169\", \"vuln_class\": \"\", \"severity\": \"medium\" }"
+          - generic [ref=e168] [cursor=pointer]:
+            - generic [ref=e169]:
+              - generic [ref=e170]: 04:46:34
+              - generic [ref=e171]: 🔍 发现更新
+              - generic [ref=e172]: finding_id, changed, status
+              - generic [ref=e173]: human
+            - generic [ref=e174]: "{ \"finding_id\": \"find-9e30583d97b2\", \"changed\": [ \"status\", \"evidence\" ], \"status\": \"verified\" }"
+          - generic [ref=e176] [cursor=pointer]:
+            - generic [ref=e177]:
+              - generic [ref=e178]: 04:46:34
+              - generic [ref=e179]: 📋 发布任务
+              - generic [ref=e180]: 样本 34fe7d4ba000 function_count=28；先查后写 func_kb
+              - generic [ref=e181]: human
+            - generic [ref=e182]: "{ \"task_id\": \"task-ce22b4e491d1\", \"objective\": \"样本 34fe7d4ba000 function_count=28；先查后写 func_kb\", \"task_type\": \"triage\" }"
+        - generic [ref=e183]:
+          - textbox "插话：向黑板发布一个任务或一条指示…" [ref=e184]
+          - button "发送" [disabled]
+      - complementary [ref=e185]:
+        - generic [ref=e186]:
+          - tablist [ref=e187]:
+            - tab "风险 1" [selected] [ref=e188]
+            - tab "发现 0" [ref=e189]
+            - tab "样本" [ref=e190]
+          - tabpanel "风险 1" [ref=e191]:
+            - button "check_license_v2 anti-debug 0x401237 · 0.5" [ref=e192]:
+              - generic [ref=e193]:
+                - generic [ref=e194]: check_license_v2
+                - generic [ref=e195]: anti-debug
+              - generic [ref=e196]: 0x401237 · 0.5
+      - button "›" [ref=e197]

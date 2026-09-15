@@ -1,0 +1,9 @@
+{
+  "sources": [
+    {
+      "id": "misc-kb",
+      "root": "kb",
+      "recursive": true
+    }
+  ]
+}

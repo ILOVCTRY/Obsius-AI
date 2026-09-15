@@ -1,0 +1,4 @@
+kind: track
+name: ctf
+label: "CTF"
+description: "CTF 解题：flag 导向、弱角色（一题一会话）、分诊入口；收尾产物 writeup"

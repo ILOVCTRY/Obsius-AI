@@ -1,0 +1,61 @@
+- generic:
+  - generic:
+    - generic:
+      - generic:
+        - heading [level=1]: 项目
+        - paragraph: 项目 = 场景轨（单选）× 能力包（多选）；数据随 workspaces/ 项目目录隔离
+      - generic:
+        - generic: 新建项目
+        - generic:
+          - generic:
+            - textbox:
+              - /placeholder: 项目名（可用中文）
+            - button [disabled]: 创建
+          - generic:
+            - generic: 场景轨
+            - button: 授权评估
+            - button: CTF
+            - button: 研究
+          - generic:
+            - generic: 能力包
+            - button: 二进制
+            - button: 密码学
+            - button: 取证
+            - button: 杂项
+            - button: Web 攻防
+      - generic:
+        - button:
+          - generic: 授权评估 · Web
+          - generic:
+            - generic: assessment 编排演练-Pikachu
+            - generic: proj-9f7ee28609e7
+          - generic: 2026-09-13
+          - button
+        - button:
+          - generic: CTF · 杂项
+          - generic:
+            - generic: del-e2e
+            - generic: proj-19f89ad371a4
+          - generic: 2026-09-14
+          - button
+        - button:
+          - generic: 授权评估 · Web
+          - generic:
+            - generic: pentest 编排演练-Pikachu
+            - generic: proj-63dd10c7d1a6
+          - generic: 2026-09-12
+          - button
+        - button:
+          - generic: 研究 · 二进制
+          - generic:
+            - generic: rev真机走查
+            - generic: proj-e193f14eb587
+          - generic: 2026-09-14
+          - button
+  - alertdialog [ref=f1e55]:
+    - generic [ref=f1e56]:
+      - heading "删除项目「del-e2e」？" [level=2] [ref=f1e57]
+      - paragraph [ref=f1e58]: 整个项目目录将移入回收站（workspaces/.trash/），数据不会立即丢失，可手动移回恢复；运行中的项目无法删除。
+    - generic [ref=f1e59]:
+      - button "取消" [active] [ref=f1e60]
+      - button "删除" [ref=f1e61]

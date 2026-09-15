@@ -1,0 +1,220 @@
+- generic [ref=e384]:
+  - banner [ref=e385]:
+    - generic [ref=e386]: 授权评估 · Web
+    - heading "assessment 编排演练-Pikachu" [level=1] [ref=e387]
+    - generic [ref=e388]: 任务 0/5 · 发现 0 · 资产 54
+    - button "🔔 审批" [ref=e389]
+    - button "← 项目" [ref=e390]
+  - generic [ref=e391]:
+    - navigation [ref=e392]:
+      - button "◈ 项目" [ref=e393]:
+        - generic [ref=e394]: ◈
+        - text: 项目
+      - button "◉ 直播间" [ref=e395]:
+        - generic [ref=e396]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=e397]:
+        - generic [ref=e398]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=e399]:
+        - generic [ref=e400]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=e401]:
+        - generic [ref=e402]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=e403]:
+        - generic [ref=e404]: ⚙
+        - text: 技能/设置
+    - main [ref=e405]:
+      - generic [ref=e407]:
+        - generic [ref=e408]:
+          - button "全部" [ref=e409]
+          - button "Orchestrator" [ref=e410]
+          - button "finished assessment/recon 关闭 assessment/recon" [ref=e411]:
+            - generic "finished" [ref=e412]
+            - text: assessment/recon
+            - button "关闭 assessment/recon" [ref=e413]
+          - button "finished assessment/external-entry 关闭 assessment/external-entry" [ref=e417]:
+            - generic "finished" [ref=e418]
+            - text: assessment/external-entry
+            - button "关闭 assessment/external-entry" [ref=e419]
+          - generic [ref=e423]: ● live
+          - combobox "开窗角色" [ref=e424]:
+            - option "通用 · 通用评估员：按入口技能路由分配的方向干活" [selected]
+            - option "external-entry · 外网打点：按目标特征路由打法，最小伤害验证，发现即上报"
+            - option "lateral · 内网横向：凭据搜寻与横向移动，谨慎动静小，借力必须记录溯源"
+            - option "privesc · 提权：在已授权落点内纵向提权，谨慎、动静小"
+            - option "recon · 信息收集：被动侦察、子域枚举、活筛、指纹识别，产出结构化资产清单"
+          - combobox "开窗供应商（缺省=全局默认供应商）" [ref=e425]:
+            - option "默认供应商" [selected]
+            - option "ark-plan"
+            - option "ark-coding"
+          - combobox "开窗模型（缺省=该供应商首个模型）" [ref=e426]:
+            - option "默认模型（ark-code-latest）" [selected]
+            - option "ark-code-latest"
+            - option "deepseek-v4-flash"
+            - option "glm-5-3-flash-260828"
+          - button "开窗" [ref=e427]
+          - button "编排一轮" [ref=e429]
+          - button "复盘沉淀" [ref=e430]
+        - generic [ref=e431]:
+          - button "全部" [ref=e432]
+          - button "思考" [ref=e433]
+          - button "决策" [ref=e434]
+          - button "命令" [ref=e435]
+          - button "发现" [ref=e436]
+        - generic [ref=e438]:
+          - generic [ref=e440] [cursor=pointer]:
+            - generic [ref=e441]:
+              - generic [ref=e442]: 14:08:10
+              - generic [ref=e443]: 🔔 审批决定
+              - generic [ref=e444]: approval_id, action, risk, requested_by
+              - generic [ref=e445]: demo
+            - generic [ref=e446]: "{ \"approval_id\": \"appr-b9a58d7215a9\", \"action\": { \"type\": \"net_real\", \"scope\": \"http://127.0.0.1:8085\", \"reason\": \"本地授权靶机（Pikachu）演练：HTTP 访问该地址\" }, \"risk\": \"low\", \"requested_by\": \"demo-script\" }"
+          - generic [ref=e448] [cursor=pointer]:
+            - generic [ref=e449]:
+              - generic [ref=e450]: 14:08:10
+              - generic [ref=e451]: 📋 发布任务
+              - generic [ref=e452]: 对 http://127.0.0.1:8085 做被动侦察与入口枚举（recon-asset-enum 技能）： 1) 单请求观察响应头/HTML 指纹，识别平台/语言/中间件； 2) robots.txt、首页导航链接枚举入口；禁全量扫描/大字典爆破； 3) 每条入口 bb_add_asset 查重后登记（url 带 IP 会自动挂到 host 下），meta 带 source 和 title（页面 <title> 原文）； 4) 扫过的入口再报一次 bb_add_asset（同 type+value）带 meta.scanned=true 打「已扫」标；可疑入口落 findings(unverified)，不验证——验证派生给 exploit 角色。 需要 HTTP 请求时用 run_cmd(cmd, runtime='host', threat_class='trusted', net='real', approval_id='appr-b9a58d7215a9')。
+              - generic [ref=e453]: human
+            - generic [ref=e454]: "{ \"task_id\": \"task-da5b1137764a\", \"objective\": \"对 http://127.0.0.1:8085 做被动侦察与入口枚举（recon-asset-enum 技能）：\\n1) 单请求观察响应头/HTML 指纹，识别平台/语言/中间件；\\n2) robots.txt、首页导航链接枚举入口；禁全量扫描/大字典爆破；\\n3) 每条入口 bb_add_asset 查重后登记（url 带 IP 会自动挂到 host 下），meta 带 source 和 title（页面 <title> 原文）；\\n4) 扫过的入口再报一次 bb_add_asset（同 type+value）带 meta.scanned=true 打「已扫」标；可疑入口落 findings(unverified)，不验证——验证派生给 exploit 角色。\\n需要 HTTP 请求时用 run_cmd(cmd, runtime='host', threat_class='trusted', net='real', approval_id='appr-b9a58d7215a9')。\", \"task_type\": \"recon\" }"
+          - generic [ref=e456] [cursor=pointer]:
+            - generic [ref=e457]:
+              - generic [ref=e458]: 14:08:43
+              - generic [ref=e459]: 🟢 会话开窗
+              - generic [ref=e460]: role, session_id
+              - generic [ref=e461]: orchestrator
+            - generic [ref=e462]: "{ \"role\": \"recon\", \"session_id\": \"sess-f920a7dc74d1\" }"
+          - generic [ref=e464] [cursor=pointer]:
+            - generic [ref=e465]:
+              - generic [ref=e466]: 14:08:43
+              - generic [ref=e467]: 📌 编排简报
+              - generic [ref=e468]: digest, stats
+              - generic [ref=e469]: orchestrator
+            - generic [ref=e470]: "{ \"digest\": \"【第 1 轮协调简报】\\n目标：http://127.0.0.1:8085（本地授权靶机，net_real 审批已通过，approval_id: appr-b9a58d7215a9）。\\n\\n进展：\\n- 人类已发布首个任务 task-da5b1137764a（recon 类型，passive 噪声预算）：对该入口做被动侦察与入口枚举（响应头/HTML 指纹识别、入口清单）。\\n- 本轮已开窗 recon 角色会话认领该任务，执行被动资产枚举。\\n\\n发现：暂无。\\n\\n风险：暂无（首轮）。\\n\\n下一步：等待 recon 会话产出结构化资产清单；若发现 severity>=medium 的未验证发现，将派生验证任务；拿到入口面后视结果决定是否派生 external-entry 打点任务。\", \"stats\": { \"tasks\": { \"by_status\": { \"open\": 1 }, \"open\": [ { \"id\": \"task-da5b1137764a\", \"type\": \"recon\", \"priority\": 2, \"noise_budget\": \"passive\", \"created_at\": \"2026-09-13T14:08:10+00:00\", \"objective\": \"对 http://127.0.0.1:8085 做被动侦察与入口枚举（recon-asset-enum 技能）：\\n1) 单请求观察响应头/HTML 指纹，识别平\" } ], \"starvation\": [] }, \"findings\": [], \"sessions\": [ { \"id\": \"sess-f920a7dc74d1\", \"role\": \"recon\", \"status\": \"idle\" } ], \"live_windows\": 1 } }"
+          - generic [ref=e473] [cursor=pointer]:
+            - generic [ref=e474]: 14:08:51
+            - generic [ref=e475]: 🔧 认领任务
+            - generic [ref=e476]: task_id, session_id, lease_until
+            - generic [ref=e477]: system
+          - generic [ref=e480] [cursor=pointer]:
+            - generic [ref=e481]: 14:09:00
+            - generic [ref=e482]: 💭 思考
+            - generic [ref=e483]: Let me start by checking the blackboard for existing assets and findings, to avo…
+            - generic [ref=e484]: sess-f920a7dc74d1
+          - generic [ref=e487] [cursor=pointer]:
+            - generic [ref=e488]: 14:09:09
+            - generic [ref=e489]: 💭 思考
+            - generic [ref=e490]: "The blackboard already has:"
+            - generic [ref=e491]: sess-f920a7dc74d1
+          - generic [ref=e494] [cursor=pointer]:
+            - generic [ref=e495]: 14:09:10
+            - generic [ref=e496]: ⚡ 执行命令
+            - code [ref=e498]: curl -sS -i --max-time 15 http://127.0.0.1:8085/ | head -c 6000
+            - generic [ref=e499]: sess-f920a7dc74d1
+          - generic [ref=e502] [cursor=pointer]:
+            - generic [ref=e503]: 14:09:10
+            - generic [ref=e504]: ↳ 命令输出
+            - generic [ref=e505]: runtime, exit_code, duration_s, timed_out, stdout_head, stderr_head
+            - generic [ref=e506]: sess-f920a7dc74d1
+          - generic [ref=e509] [cursor=pointer]:
+            - generic [ref=e510]: 14:09:14
+            - generic [ref=e511]: 💭 思考
+            - generic [ref=e512]: "The host runtime is Windows PowerShell, where `curl` is an alias for Invoke-WebR…"
+            - generic [ref=e513]: sess-f920a7dc74d1
+          - generic [ref=e516] [cursor=pointer]:
+            - generic [ref=e517]: 14:09:15
+            - generic [ref=e518]: ⚡ 执行命令
+            - code [ref=e520]: curl.exe -sS -i --max-time 15 http://127.0.0.1:8085/
+            - generic [ref=e521]: sess-f920a7dc74d1
+          - generic [ref=e524] [cursor=pointer]:
+            - generic [ref=e525]: 14:09:15
+            - generic [ref=e526]: ↳ 命令输出
+            - generic [ref=e527]: runtime, exit_code, duration_s, timed_out, stdout_head, stderr_head
+            - generic [ref=e528]: sess-f920a7dc74d1
+          - generic [ref=e531] [cursor=pointer]:
+            - generic [ref=e532]: 14:09:35
+            - generic [ref=e533]: 💭 思考
+            - generic [ref=e534]: "Fingerprint confirmed:"
+            - generic [ref=e535]: sess-f920a7dc74d1
+          - generic [ref=e538] [cursor=pointer]:
+            - generic [ref=e539]: 14:09:36
+            - generic [ref=e540]: ⚡ 执行命令
+            - code [ref=e542]: "curl.exe -sS -i --max-time 15 http://127.0.0.1:8085/robots.txt; Write-Output '---LINKS---'; $html = curl.exe -sS --max-time 15 http://127.0.0.1:8085/; ($html | Out-String) | Select-String -Pattern 'href=\"([^\"]+)\"' -AllMatches | ForEach-Object { $_.Matches } | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique"
+            - generic [ref=e543]: sess-f920a7dc74d1
+          - generic [ref=e546] [cursor=pointer]:
+            - generic [ref=e547]: 14:09:36
+            - generic [ref=e548]: ↳ 命令输出
+            - generic [ref=e549]: runtime, exit_code, duration_s, timed_out, stdout_head, stderr_head
+            - generic [ref=e550]: sess-f920a7dc74d1
+          - generic [ref=e553] [cursor=pointer]:
+            - generic [ref=e554]: 14:11:34
+            - generic [ref=e555]: 💭 思考
+            - generic [ref=e556]: "robots.txt: 404 — note that."
+            - generic [ref=e557]: sess-f920a7dc74d1
+          - generic [ref=e560] [cursor=pointer]:
+            - generic [ref=e561]: 14:11:51
+            - generic [ref=e562]: 💭 思考
+            - generic [ref=e563]: "I need to continue: batch-fetch titles for the ~53 nav entries, then register as…"
+            - generic [ref=e564]: sess-f920a7dc74d1
+          - generic [ref=e567] [cursor=pointer]:
+            - generic [ref=e568]: 14:11:56
+            - generic [ref=e569]: ⚡ 执行命令
+            - code [ref=e571]: "$base='http://127.0.0.1:8085/'; $paths=@('top-menu.html','pkxss/index.php','vul/','vul/burteforce/burteforce.php','vul/burteforce/bf_client.php','vul/burteforce/bf_form.php','vul/burteforce/bf_server.php','vul/burteforce/bf_token.php','vul/csrf/csrf.php','vul/csrf/csrfget/csrf_get_login.php','vul/csrf/csrfpost/csrf_post_login.php','vul/csrf/csrftoken/token_get_login.php','vul/dir/dir.php','vul/dir/dir_list.php','vul/fileinclude/fileinclude.php','vul/fileinclude/fi_local.php','vul/fileinclude/fi_remote.php','vul/infoleak/infoleak.php','vul/infoleak/findabc.php','vul/overpermission/op.php','vul/overpermission/op1/op1_login.php','vul/overpermission/op2/op2_login.php','vul/rce/rce.php','vul/rce/rce_eval.php','vul/rce/rce_ping.php','vul/sqli/sqli.php','vul/sqli/sqli_str.php','vul/sqli/sqli_iu/sqli_login.php','vul/sqli/sqli_blind_b.php','vul/sqli/sqli_blind_t.php','vul/sqli/sqli_del.php','vul/sqli/sqli_header/sqli_header_login.php','vul/sqli/sqli_id.php','vul/sqli/sqli_search.php','vul/sqli/sqli_widebyte.php','vul/sqli/sqli_x.php','vul/ssrf/ssrf.php','vul/ssrf/ssrf_curl.php','vul/ssrf/ssrf_fgc.php','vul/unsafedownload/unsafedownload.php','vul/unsafedownload/down_nba.php','vul/unsafeupload/upload.php','vul/unsafeupload/clientcheck.php','vul/unsafeupload/servercheck.php','vul/unsafeupload/getimagesize.php','vul/unserilization/unserilization.php','vul/unserilization/unser.php','vul/urlredirect/urlredirect.php','vul/urlredirect/unsafere.php','vul/xss/xss.php','vul/xss/xss_01.php','vul/xss/xss_02.php','vul/xss/xss_03.php'); foreach($p in $paths){ $u=$base+$p; $h=(curl.exe -sS -o - --max-time 10 $u | Out-String); if($h -match '<title>([\\s\\S]*?)</title>'){ \"$u`t$($Matches[1])\" } else { \"$u`t<no-title>\" } }"
+            - generic [ref=e572]: sess-f920a7dc74d1
+          - generic [ref=e575] [cursor=pointer]:
+            - generic [ref=e576]: 14:11:56
+            - generic [ref=e577]: ↳ 命令输出
+            - generic [ref=e578]: runtime, exit_code, duration_s, timed_out, stdout_head, stderr_head
+            - generic [ref=e579]: sess-f920a7dc74d1
+          - generic [ref=e582] [cursor=pointer]:
+            - generic [ref=e583]: 14:12:51
+            - generic [ref=e584]: 💭 思考
+            - generic [ref=e585]: The output got truncated at "vul/sqli/sqli" — the tool output limit cut it. I ha…
+            - generic [ref=e586]: sess-f920a7dc74d1
+          - generic [ref=e589] [cursor=pointer]:
+            - generic [ref=e590]: 14:12:53
+            - generic [ref=e591]: ⚡ 执行命令
+            - code [ref=e593]: "$base='http://127.0.0.1:8085/'; $paths=@('vul/sqli/sqli_search.php','vul/sqli/sqli_widebyte.php','vul/sqli/sqli_x.php','vul/ssrf/ssrf.php','vul/ssrf/ssrf_curl.php','vul/ssrf/ssrf_fgc.php','vul/unsafedownload/unsafedownload.php','vul/unsafedownload/down_nba.php','vul/unsafeupload/upload.php','vul/unsafeupload/clientcheck.php','vul/unsafeupload/servercheck.php','vul/unsafeupload/getimagesize.php','vul/unserilization/unserilization.php','vul/unserilization/unser.php','vul/urlredirect/urlredirect.php','vul/urlredirect/unsafere.php','vul/xss/xss.php','vul/xss/xss_01.php','vul/xss/xss_02.php','vul/xss/xss_03.php'); foreach($p in $paths){ $u=$base+$p; $h=(curl.exe -sS -o - --max-time 10 $u | Out-String); if($h -match '<title>([\\s\\S]*?)</title>'){ \"$u`t$($Matches[1])\" } else { \"$u`t<no-title>\" } }"
+            - generic [ref=e594]: sess-f920a7dc74d1
+          - generic [ref=e597] [cursor=pointer]:
+            - generic [ref=e598]: 14:12:53
+            - generic [ref=e599]: ↳ 命令输出
+            - generic [ref=e600]: runtime, exit_code, duration_s, timed_out, stdout_head, stderr_head
+            - generic [ref=e601]: sess-f920a7dc74d1
+          - generic [ref=e604] [cursor=pointer]:
+            - generic [ref=e605]: 14:15:06
+            - generic [ref=e606]: 💭 思考
+            - generic [ref=e607]: 策略顾问说：
+            - generic [ref=e608]: sess-f920a7dc74d1
+          - generic [ref=e611] [cursor=pointer]:
+            - generic [ref=e612]: 14:15:06
+            - generic [ref=e613]: 📦 资产
+            - generic [ref=e614]: asset_id, type, value, parent_id
+            - generic [ref=e615]: sess-f920a7dc74d1
+        - generic [ref=e616]:
+          - textbox "插话：向黑板发布一个任务或一条指示…" [ref=e617]
+          - button "发送" [disabled]
+      - complementary [ref=e618]:
+        - generic [ref=e619]:
+          - tablist [ref=e620]:
+            - tab "发现" [selected] [ref=e621]
+            - tab "资产" [ref=e622]
+            - tab "函数库" [ref=e623]
+          - tabpanel "发现" [ref=e624]:
+            - generic [ref=e625]:
+              - generic [ref=e626]:
+                - button "全部资产" [ref=e628]
+                - generic [ref=e632]:
+                  - button "全部" [ref=e633]
+                  - button "critical" [ref=e634]
+                  - button "high" [ref=e635]
+                  - button "medium" [ref=e636]
+                  - button "low" [ref=e637]
+                  - button "info" [ref=e638]
+                - generic [ref=e639]:
+                  - button "全部状态" [ref=e640]
+                  - button "unverified" [ref=e641]
+                  - button "verified" [ref=e642]
+              - paragraph [ref=e647]: 暂无数据
+      - button "›" [ref=e648]

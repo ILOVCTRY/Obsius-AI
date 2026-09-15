@@ -1,0 +1,61 @@
+- generic [ref=f2e36]:
+  - banner [ref=f2e37]:
+    - generic [ref=f2e38]: ctf
+    - heading "浏览器联调演练" [level=1] [ref=f2e39]
+    - generic [ref=f2e40]: 任务 0/0 · 发现 0 · 资产 0
+    - button "🔔 审批" [ref=f2e41]
+    - button "← 项目" [ref=f2e42]
+  - generic [ref=f2e43]:
+    - navigation [ref=f2e44]:
+      - button "◈ 项目" [ref=f2e45]:
+        - generic [ref=f2e46]: ◈
+        - text: 项目
+      - button "◉ 直播间" [ref=f2e47]:
+        - generic [ref=f2e48]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=f2e49]:
+        - generic [ref=f2e50]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=f2e51]:
+        - generic [ref=f2e52]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=f2e53]:
+        - generic [ref=f2e54]: ⚑
+        - text: 审批
+      - button "⋯ 技能/终端/设置" [ref=f2e55]:
+        - generic [ref=f2e56]: ⋯
+        - text: 技能/终端/设置
+    - main [ref=f2e57]:
+      - generic [ref=f2e97]:
+        - generic [ref=f2e98]:
+          - textbox "类型" [ref=f2e99]: generic
+          - combobox [ref=f2e100]:
+            - option "passive"
+            - option "low（active）" [selected]
+            - option "medium（active）"
+            - option "high（active）"
+          - textbox "conflict_keys（逗号分隔，必填）" [ref=f2e128]
+          - textbox "任务目标…" [ref=f2e101]
+          - button "发布" [disabled]
+        - generic [ref=f2e102]:
+          - generic [ref=f2e103]:
+            - generic [ref=f2e104]:
+              - text: 待认领
+              - generic [ref=f2e105]: "1"
+            - generic [ref=f2e107]:
+              - generic [ref=f2e108]:
+                - generic [ref=f2e109]: generic
+                - generic [ref=f2e110]: passive
+                - generic [ref=f2e111]: P2
+              - paragraph [ref=f2e112]: 对 samples/ 下的样本做静态分诊
+              - button "取消" [ref=f2e114]
+          - generic [ref=f2e116]:
+            - text: 执行中
+            - generic [ref=f2e117]: "0"
+          - generic [ref=f2e120]:
+            - text: 完成
+            - generic [ref=f2e121]: "0"
+          - generic [ref=f2e124]:
+            - text: 失败
+            - generic [ref=f2e125]: "0"
+        - paragraph [ref=f2e127]: 已取消任务不计列；active 任务认领互斥由 conflict_keys 交叠判定（§6.2 噪声预算）

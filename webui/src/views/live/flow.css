@@ -1,0 +1,42 @@
+/* 任务流画布深色化（DESIGN §12 克制黑客风）：
+   xyflow 自带样式表是未分层 plain CSS，层叠优先级高于 Tailwind v4 utilities layer；
+   必须在 @xyflow/react/dist/style.css 之后引入本文件，用 .tf-dark 提高特异性
+   覆盖其白底控件（与 views/blackboard/canvas.css 同手法）。 */
+
+.tf-dark .react-flow__controls {
+  border-radius: 6px;
+  overflow: hidden;
+  box-shadow: none;
+  border: 1px solid #21262d;
+}
+
+.tf-dark .react-flow__controls-button {
+  width: 24px;
+  height: 24px;
+  background: #161b22;
+  border-bottom: 1px solid #21262d;
+  fill: #8b949e;
+}
+
+.tf-dark .react-flow__controls-button:last-child {
+  border-bottom: 0;
+}
+
+.tf-dark .react-flow__controls-button:hover {
+  background: #21262d;
+  fill: #e6edf3;
+}
+
+.tf-dark .react-flow__controls button svg {
+  fill: inherit;
+}
+
+.tf-dark .react-flow__minimap {
+  border-radius: 6px;
+  border: 1px solid #21262d;
+  background: #0d1117;
+}
+
+.tf-dark .react-flow__minimap-mask {
+  fill: rgba(13, 17, 23, 0.7);
+}

@@ -1,0 +1,67 @@
+- generic [ref=e47]:
+  - banner [ref=e48]:
+    - generic [ref=e49]: 授权评估 · Web
+    - heading "assessment 编排演练-Pikachu" [level=1] [ref=e50]
+    - generic [ref=e51]: 任务 0/7 · 发现 6 · 资产 54
+    - button "🔔 审批" [ref=e52]
+    - button "← 项目" [ref=e53]
+  - generic [ref=e54]:
+    - navigation [ref=e55]:
+      - button "◈ 项目" [ref=e56]:
+        - generic [ref=e57]: ◈
+        - text: 项目
+      - button "◉ 直播间" [ref=e58]:
+        - generic [ref=e59]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=e60]:
+        - generic [ref=e61]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=e62]:
+        - generic [ref=e63]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=e64]:
+        - generic [ref=e65]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=e66]:
+        - generic [ref=e67]: ⚙
+        - text: 技能/设置
+    - main [ref=e68]:
+      - generic [ref=e70]:
+        - tablist [ref=e71]:
+          - tab "发现" [selected] [ref=e72]
+          - tab "资产" [ref=e73]
+        - tabpanel "发现" [ref=e74]:
+          - generic [ref=e75]:
+            - generic [ref=e76]:
+              - button "全部资产" [ref=e78]
+              - generic [ref=e82]:
+                - button "全部" [ref=e83]
+                - button "critical" [ref=e84]
+                - button "high" [ref=e85]
+                - button "medium" [ref=e86]
+                - button "low" [ref=e87]
+                - button "info" [ref=e88]
+              - generic [ref=e89]:
+                - button "全部状态" [ref=e90]
+                - button "unverified" [ref=e91]
+                - button "verified" [ref=e92]
+              - generic [ref=e93]:
+                - button "列表" [ref=e94]
+                - button "链路" [ref=e95]
+            - generic [ref=e97]:
+              - generic [ref=e98]:
+                - generic [ref=e99]:
+                  - button "尚无攻击链" [ref=e101]
+                  - button "＋新建链" [ref=e105]
+                - generic [ref=e106] [cursor=pointer]:
+                  - checkbox "弱边" [checked] [ref=e107]
+                  - text: 弱边
+                - button "重置布局（清除手动位置）" [ref=e108]
+                - button "适应视图" [ref=e112]
+                - button "全屏" [ref=e118]
+              - application [ref=e124]:
+                - img "Mini Map" [ref=e128]
+                - generic "Control Panel" [ref=e129]:
+                  - button "Zoom In" [ref=e130] [cursor=pointer]
+                  - button "Zoom Out" [ref=e133] [cursor=pointer]
+                  - button "Fit View" [ref=e136] [cursor=pointer]

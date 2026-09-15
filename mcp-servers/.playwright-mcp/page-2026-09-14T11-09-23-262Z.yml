@@ -1,0 +1,94 @@
+- generic [ref=f14e54]:
+  - banner [ref=f14e55]:
+    - generic [ref=f14e56]: 研究 · 二进制
+    - heading "rev真机走查" [level=1] [ref=f14e57]
+    - generic [ref=f14e58]: 任务 0/2 · 发现 3 · 资产 1
+    - button "🔔 审批" [ref=f14e59]
+    - button "← 项目" [ref=f14e60]
+  - generic [ref=f14e61]:
+    - navigation [ref=f14e62]:
+      - button "◈ 项目" [ref=f14e63]:
+        - generic [ref=f14e64]: ◈
+        - text: 项目
+      - button "◉ 直播间" [ref=f14e65]:
+        - generic [ref=f14e66]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=f14e67]:
+        - generic [ref=f14e68]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=f14e69]:
+        - generic [ref=f14e70]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=f14e71]:
+        - generic [ref=f14e72]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=f14e73]:
+        - generic [ref=f14e74]: ⚙
+        - text: 技能/设置
+    - main [ref=f14e75]:
+      - generic [ref=f14e347]:
+        - generic [ref=f14e348]:
+          - button "crackme.elf" [ref=f14e350]
+          - generic "34fe7d4ba000f908d71407672fc3d5a8296ba5d5a1248286f3b9cb1a456fa4bc" [ref=f14e354]: 34fe7d4ba000f908…
+          - generic [ref=f14e355]: x86-64/64bit/le
+          - generic [ref=f14e356]: 28 函数 · 覆盖 7% · 2 风险
+          - generic [ref=f14e357]:
+            - 'generic "IDA: installed" [ref=f14e358]': IDA
+            - 'generic "Ghidra: cached" [ref=f14e360]': Ghidra
+            - generic "MCP 离线：在 IDA 中打开库后按 Ctrl-Alt-M 启动（仅连本机 127.0.0.1:13337）" [ref=f14e362]: MCP
+          - button "上传样本" [ref=f14e364]
+          - button "重新分诊" [ref=f14e365]
+          - button "⬇ 从 IDA 同步改名" [ref=f14e366]
+          - button "AI triage" [ref=f14e367]
+        - generic [ref=f14e368]:
+          - button "逆向分析" [ref=f14e369]
+          - button "攻击链" [ref=f14e370]
+        - generic [ref=f14e371]:
+          - generic [ref=f14e372]:
+            - generic [ref=f14e374]:
+              - textbox "新链名称…" [ref=f14e375]
+              - button [ref=f14e376]
+            - generic [ref=f14e378] [cursor=pointer]:
+              - generic [ref=f14e379]:
+                - generic [ref=f14e381]: 破解校验链
+                - button "改名/目标" [ref=f14e382]
+                - button "删除链" [ref=f14e386]
+              - generic [ref=f14e390]:
+                - combobox [ref=f14e391]:
+                  - option "假说"
+                  - option "已验证" [selected]
+                  - option "已利用"
+                - generic [ref=f14e392]: 3 节点
+          - generic [ref=f14e393]:
+            - application [ref=f14e394]:
+              - generic [ref=f14e396]:
+                - generic:
+                  - generic:
+                    - img:
+                      - group "Edge from clink-02a1e0a0224d to clink-4d39f7a541b1" [ref=f14e397] [cursor=pointer]
+                    - img:
+                      - group "Edge from clink-4d39f7a541b1 to clink-8ff91aa68eb7" [ref=f14e400] [cursor=pointer]
+                  - generic:
+                    - generic "断点命中后导出 bp_main.log，作为明文凭据的动态证据"
+                  - generic:
+                    - group [ref=f14e403] [cursor=pointer]:
+                      - generic [ref=f14e406]:
+                        - paragraph [ref=f14e407]: ƒ 函数
+                        - paragraph [ref=f14e408]: check_flag
+                        - paragraph [ref=f14e409]: "0x4011b6"
+                        - paragraph [ref=f14e410]: crypto · xor
+                    - group [ref=f14e412] [cursor=pointer]:
+                      - generic [ref=f14e415]:
+                        - paragraph [ref=f14e416]: 📎 产物
+                        - text: debug-log
+                        - paragraph [ref=f14e417]: bp_main.log
+                    - group [ref=f14e419] [cursor=pointer]:
+                      - generic [ref=f14e423]:
+                        - paragraph [ref=f14e424]: 🔍 发现
+                        - paragraph [ref=f14e425]: strcmp 明文凭据比较(挂资产)
+                        - generic [ref=f14e426]:
+                          - generic [ref=f14e427]: 机制
+                          - generic [ref=f14e428]: medium
+                          - generic [ref=f14e429]: ✓
+            - button "挂节点" [ref=f14e432]
+            - paragraph: 点节点回跳分析视图 · 双击边编辑「这条边为什么成立」 · 节点悬停 × 移出链

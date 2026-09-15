@@ -1,0 +1,41 @@
+# core/blackboard/
+
+> 黑板：SQLite(WAL) 存储 + 任务队列 + 事件总线（DESIGN.md §5、§6）。**全项目写存储的唯一入口**，禁止任何旁路直写（API 层也只调这里）。
+
+## 文件
+
+- `schema.py` — DDL，**SCHEMA_VERSION=6**：projects 含 track（单选）+ capabilities（JSON 多选）；v1→v2 幂等 ALTER（旧库补列，旧行 track='' 时由 get_project 经 LEGACY_DOMAIN_MAP 映射）；**v3（批 1B）** tasks 幂等补 `context_refs/stale_refs`（JSON TEXT 默认 '[]'）+ 新表 `session_inbox`（id/project_id/to_session/kind/ref_id/payload/created_at/read_at；部分唯一索引 `(to_session,ref_id,kind) WHERE read_at IS NULL` 未读去重；to_session 不设外键，关窗私信留审计）。**v4（批 2）** 新表 `orchestrator_state`（用量列 + tasks_published + budget_warned）；**v5（批 3）** 同表幂等补编排游标/链/租约 9 列（chain_active/chain_ticks/last_auto_tick_at/auto_ticks_total/tick_owner/tick_lease_until 等）；**v5→v6（A 组）** tasks 幂等补 `plan TEXT DEFAULT '[]'`（A2 计划步）、orchestrator_state 补 `last_replan_at`（A5 重排去抖）；迁移走 PRAGMA 补缺列，meta schema_version 随迁移 upsert。其余表：sessions/assets/findings/func_kb/chains/tasks/events/approvals。
+- `store.py` — `Blackboard`：线程局部连接 + 写锁；资产/发现/产物/函数库/链 CRUD；`request_approval/decide_approval`；`owner_tags(project_id)`；`get_project` 返回绑定（旧行 domain→track/caps 映射，`d["domain"]=d["track"]` 兜底旧读法）。
+  - **chains 人工建链（P2）**：`create_chain/list_chains/update_chain/delete_chain`、`add_chain_link(project_id, chain_id, node_type, node_id, edge_note="")`（**seq 自动 max+1**；链缺/跨项目抛 `LookupError`→API 404；节点非法/不存在/跨项目抛 `ValueError`→API 422）、`update_link_note/delete_chain_link`（删后同链剩余 link **重排 seq 1..n**）；实体删除不级联，链详情照读（API 标 `deleted:true` 孤儿占位）。事件 `chain.created/updated/deleted/link_added/link_removed`；状态白名单 CHAIN_STATUSES。产物另有 `get_artifact/list_artifacts`（add_artifact 不发事件）。
+  - **func_kb 人机共写**：`upsert_func(author=...)` 幂等；`patch_func(fid, *, name/note/risk_tags=UNSET, author)`——改名入 `name_history`，note 以 `## 笔记 <utc> by <author>` 分段追加 analysis，risk_tags 传 list（含 []）=全量替换、UNSET 不动，**不动 confidence**（AI 字段）；事件 `func.updated`；跨项目/不存在返回 None。
+  - **add_finding 合并分支 = 证据并集（A2/§5.3，`merge_finding_evidence`）**：命中 dedup 时 evidence 列表键（pocs/requests/relates_to/screenshots）按内容指纹去重追加、notes 分段追加、其余键只补空不覆盖；severity 就高、status verified 只升不降、confidence=MAX、poc_artifact_id 缺者回填。旧实现曾整体丢弃新 evidence，勿回退。
+  - **relates_to 强关系（E0）**：evidence 内嵌 `relates_to:[{finding_id,note}]`，不建表不升 schema；`validate_relates_to(conn,pid,evidence)` 在 add_finding/patch_finding 事务内校验——形态必须为带非空 finding_id 的 dict 列表，**被引 finding 必须存在且同项目，非法/悬空/跨项目抛 ValueError（API 422，严格不静默丢）**；新行自引不可能（未入库），但**合并分支**里新报 relates_to 指向将并入的既有 dedup 目标同样抛「不能引用发现自身」（防自环边，整笔拒写不污染原行）。
+  - **patch_finding(fid, *, status/evidence)**：status 白名单 {unverified,verified,false-positive}（非法 ValueError），evidence 先过 validate_relates_to，**人类 PATCH 的 evidence 是浅层 merge（键级覆盖），不要换成并集**；事件 `finding.updated`；配套 get_func/get_finding。
+  - **delete_finding / delete_asset（2026-09-15，垃圾/走查数据清理；误报走 PATCH 不走删）**：`delete_finding` 不存在返 None，同事务摘反向 relates_to 边（含历史悬空边）+摘任务 context_refs/stale_refs（**不删任务**）；chain_links 不级联（孤儿 deleted:true 占位）、inbox 私信/POC 产物保留，落 `finding.deleted`，**不触发撤回传播**。`delete_asset` 限叶子且无 finding 引用，违例 ValueError→409，不存在 LookupError→404，落 `asset.deleted`。
+  - **撤回传播（批 1B，§6.7 的 1.6，`_propagate_retraction`）**：patch_finding 事务内记旧 status，仅「非 false-positive→false-positive」跳变触发**一次**（重复 PATCH 不重放）；先广播 `finding.retracted`，再解析四类私聊目标——① finding 作者会话 ② evidence.relates_to 反向边下游作者 ③ context_refs 命中任务及 parent_id 子树（claimed 私信+TaskQueue.add_stale_ref 挂标，open 只挂标，done/failed 只私信作者）④ 命中任务的上一级父任务 claimed 时抄送父认领者；human/system 作者不私聊、closed 会话不投递。每新私信落 session_inbox 一条 + `message.inbox` 事件（未读唯一索引去重，读后可再投）。
+  - **finding_update 信息式私信（A4，`_notify_finding_updates`；任务展开共用 `_finding_task_graph`）**：与撤回严格分语义——add_finding merge 分支（新 POC/主 poc 回填/severity 升高/status 升 verified/relates_to 增长，多变化聚合一条）与 patch_finding 浅层 merge 后证据增长，事务内算 changes、事务后投递；只给**引用任务（含 parent 子树）的 claimed 认领者** + 命中任务父认领者，不给 open/done/failed、不给作者本人（`targets.discard(by)`）、不给 closed；不挂 stale_refs、不强制动作。finding.new 首次创建不通知；非 FP→FP 只走撤回不发更新。
+  - **会话收件箱（§6.7 的 1.5 系统侧，与审批收件箱严格分设）**：`inbox_post(...)→bool`（INSERT OR IGNORE，rowcount 判新）/ `inbox_list(pid,sid,unread_only=)` / `inbox_drain`（取未读+单事务全标已读，worker 注入用）/ `inbox_mark_read(ids=None)`；`list_sessions` 带子查询 `unread` 计数。系统私信仅两种 kind：basis_stale（撤回三选一）/ finding_update（信息式），**没有 Agent bb_notify 工具**。
+  - patch_func / patch_finding / update_asset_meta 的读-合并-写整体在单个 `_tx()` 内（A2 修 TOCTOU），并发追加不丢段/键（8 线程测试护栏）。
+  - **项目配置/用量（批 2，§6.8）**：`update_project_config(pid, config)` 整 JSON 替换 projects.config（不存在抛 LookupError）；`usage_state_get(pid)`（无行返全 0，**默认 dict 不含 v5 新列**，消费方 core/orchestrator/state.py 自行兜底）/ `usage_add_llm(pid, *, ti,to,cache_read,cache_creation,token_budget)` 单事务建行+累加四项与 llm_calls，同事务算 80% 越线置 budget_warned（预算调大回落自动复位），返行附 `budget_warn` 布尔；`usage_inc_tasks(pid)` tasks_published+1（只计编排自主发布）。v5 编排列（游标/租约/chain_*）的读写不在 store.py，统一走 `core/orchestrator/state.py`（白名单 save_fields + 单事务租约），勿在他处旁路 UPDATE。
+- `tasks.py` — `TaskQueue`：publish/claim/claim_next/complete/fail/renew_lease/expire_leases + 人类管理 update_task/reopen/delete + 计划 set_plan/step_plan。`renew_lease(task_id, session_id, lease_minutes=30)` 仅持有者（claimed_by 且 claimed 态）可续，否则 ClaimError；**A1 起由 AgentSession 租约心跳每 10 分钟调用**（此前零调用）。
+  - **四态 open/claimed/done/failed 皆可物理删除（A1）**：delete 仅留「有子任务 409」+不存在 404，落 `task.deleted` 快照审计（快照含 plan）；claimed 删除在 worker **步边界**生效（见 agent/CLAUDE.md `_task_gone`）。
+  - **计划模型（A2，tasks.plan JSON 列）**：`set_plan(task_id, session_id, steps:[{title}], rev_reason="")` 仅认领者；首次服务端发号 `p1..` 落 `task.plan_set`，再调=修订（按 id 保留状态/ts、新步追加、旧 plan+rev_reason 落 `task.plan_revised`）；`step_plan(..., step_id, status, note="")` 状态 todo/doing/done/blocked（切 doing 自动把原 doing 置 todo；**blocked 必填 note 否则 ValueError**），落 `task.step`。出口解析 plan JSON。
+  - **context_refs/stale_refs（批 1B）**：`publish(..., refs=None)` 存「显式 refs ∪ objective 正文正则 `find-[0-9a-f]{12}`」排序去重到 context_refs；A5 `publish(parent_id=, created_by=)` 由 Agent 工具按会话钉死（parent=当前认领任务、created_by=session_id，LLM 入参不收这两个字段）。`add_stale_ref(task_id, ref_id)→bool` 仅 open/claimed 幂等并入，收尾行返回 False；`_finish` 在 done 且 stale_refs 非空时补发 `task.basis_stale_done`（fail 不补）；list/get 出口解析 JSON 列。
+  - **task_type 注册表**：`TaskTypeError`；publish/update 的 `allowed_types` 由调用方按项目轨注入（Orchestrator/Agent/API 已接线）；None = 未接线不校验；generic 恒合法。
+  - **default_noise 生效点**：`claim_next(..., max_noise=)` SQL 按噪声等级（passive<low<medium<high）过滤。
+  - 非 passive 任务须带 conflict_keys，同项目 active 键交叠抛 ClaimError。
+- `graph.py` — `task_graph(bb, pid)`（A3 直播间任务流，纯 set-based SQL 无 N+1）：节点=全部任务（不过滤状态）+认领会话快照；实线边=parent_id；虚线边=session_inbox 按 `(kind,ref_id)` 聚类 + 会话→最近 claimed 任务映射（`ROW_NUMBER() OVER(PARTITION BY claimed_by)`，closed 不映射），同簇会话两两连边、同任务对多簇去重。
+- `events.py` — `EventBus`：同步落库 + 回调广播；订阅者异常不阻断写路径。store.py 侧 `recent_events(pid,since_id,limit)`（id>since 升序窗口，WS 回放共用）与 `latest_event_id(pid)`（末端 id；编排游标追赶 backlog 跳尖用，保证只前进不回放）。
+
+## 约定
+
+- 时间 UTC ISO（`now()`）；ID `<前缀>-<12hex>`（`new_id()`）；外键开启。
+- 写靠 WAL + busy_timeout + BEGIN IMMEDIATE + Lock；读多连接；多进程需换 Postgres。
+- `close()` 只关当前线程连接；`close_all()` 关全部并置**关闭闸门**——之后 `.conn` 拒绝惰性重连（抛 `BlackboardClosedError`，闸门锁内双重检查，无孤儿连接窗口）。**Windows 删项目目录前必须 close_all**，否则 WS/轮询线程会重开连接锁死 db。`Project.bb` property 同样有闸门（`Project.close()` 后拒绝重新实例化黑板）。
+- 事件 kind 含 `llm.usage`（批 2 记账：source=agent/planner/orchestrator、四项 token+total_tokens、model；全 0 usage 不发）、`budget.soft_warning`（80% 预算首发一次，budget_warned 持久去重）、`task.starvation`、`kb.open`、`task.published/claimed/done/failed/updated/reopened/deleted`、`task.plan_set/plan_revised/step`（A2）、`func.updated`、`finding.updated/new/deleted`、`asset.deleted`、`finding.retracted`（撤回广播）、`message.inbox`（会话系统私信，session_id=收件人；kind=basis_stale/finding_update）、`task.basis_stale_done`、`orch.replan_priorities`（A5，payload={updated,skipped_n}，仅实际改级才发）（推翻依据下完成的复核钩子）、`chain.created/updated/deleted/link_added/link_removed`（binary.triaged/binary.triage_failed 由 API 层分诊 Job 发；`binary.annotated`（写回成功条数）/`binary.names_pulled`（IDA 拉回的改名对）由写回 Job 发，拉回改名经 patch_func author=`ida-pull`），消费方按此过滤。
+- 三层数据纪律：headless 全量函数只活在 artifacts/decompiler-cache 的 JSON，**不进 SQLite**；func_kb 只存分析过的函数；finding 逆向结论挂 binary 资产、evidence 带 func_id+address。
+
+## 坑
+
+- upsert_asset 去重键含 parent_id；补挂/改 meta 用 find_asset + update_asset_meta/set_asset_parent，勿重复 upsert。
+- tests/test_blackboard.py 含旧 DB 行映射护栏；改 schema 必须升版本 + 幂等迁移。

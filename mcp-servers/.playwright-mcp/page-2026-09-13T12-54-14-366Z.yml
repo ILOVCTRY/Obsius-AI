@@ -1,0 +1,146 @@
+- generic:
+  - generic:
+    - generic:
+      - banner:
+        - generic: 渗透测试
+        - heading [level=1]: pentest 编排演练-Pikachu
+        - generic: 任务 1/6 · 发现 5 · 资产 19
+        - button: 🔔 审批
+        - button: ← 项目
+      - generic:
+        - navigation:
+          - button:
+            - generic: ◈
+            - text: 项目
+          - button:
+            - generic: ◉
+            - text: 直播间
+          - button:
+            - generic: ▤
+            - text: 黑板
+          - button:
+            - generic: ▦
+            - text: 任务
+          - button:
+            - generic: ⚑
+            - text: 审批
+          - button:
+            - generic: ⚙
+            - text: 技能/设置
+        - main:
+          - generic:
+            - generic:
+              - tablist:
+                - tab [selected]: 发现
+                - tab: 资产
+                - tab: 函数库
+              - tabpanel:
+                - generic:
+                  - generic:
+                    - generic:
+                      - button:
+                        - generic: 全部资产
+                    - generic:
+                      - button: 全部
+                      - button: critical
+                      - button: high
+                      - button: medium
+                      - button: low
+                      - button: info
+                    - generic:
+                      - button: 全部状态
+                      - button: unverified
+                      - button: verified
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic:
+                          - generic:
+                            - generic:
+                              - generic: medium
+                              - generic: pkxss 管理后台入口：302 跳转 pkxss_login.php 登录门（鉴权面存在）；未授权可达性未验证且有反证（登录页泄露口令但后台库缺表，登录路径不可用）
+                              - generic: sess-f8f29908f462
+                            - generic: unauthorized-access-candidate · 2026-09-12 18:21 · http://127.0.0.1:8085/pkxss/index.php
+                          - generic:
+                            - generic:
+                              - generic: medium
+                              - generic: pkxss 管理后台入口：302 跳转至 pkxss_login.php 登录门，未授权可达性未验证
+                              - generic: sess-57f302f33e78
+                            - generic: unauthorized-access-candidate · 2026-09-12 18:06 · http://127.0.0.1:8085/pkxss/index.php
+                          - generic:
+                            - generic:
+                              - generic: low
+                              - generic: 中间件版本暴露：nginx/1.15.11 + PHP/7.3.4（Server/X-Powered-By 响应头）
+                              - generic: verified
+                              - generic: sess-57f302f33e78
+                            - generic: version-disclosure · 2026-09-12 18:06 · http://127.0.0.1:8085/
+                          - generic:
+                            - generic:
+                              - generic: low
+                              - generic: Pikachu 靶场 15 个漏洞模块入口页全部 HTTP 200 可达（exploit 派生目标地图）
+                              - generic: verified
+                              - generic: sess-57f302f33e78
+                            - generic: exposed-vulnerable-modules · 2026-09-12 18:06 · 127.0.0.1:8085
+                          - generic:
+                            - generic:
+                              - generic: info
+                              - generic: robots.txt / sitemap.xml 均不存在（404），无额外路径线索
+                              - generic: verified
+                              - generic: sess-57f302f33e78
+                            - generic: recon-note · 2026-09-12 18:06 · 127.0.0.1:8085
+                  - generic:
+                    - textbox:
+                      - /placeholder: 类别
+                      - text: triage
+                    - textbox:
+                      - /placeholder: 手动添加发现（human 共写，§6.5）
+                    - button [disabled]: 添加
+  - dialog [ref=f2e432]:
+    - heading "medium pkxss 管理后台入口：302 跳转 pkxss_login.php 登录门（鉴权面存在）；未授权可达性未验证且有反证（登录页泄露口令但后台库缺表，登录路径不可用）" [level=2] [ref=f2e433]:
+      - generic [ref=f2e434]: medium
+      - generic [ref=f2e435]: pkxss 管理后台入口：302 跳转 pkxss_login.php 登录门（鉴权面存在）；未授权可达性未验证且有反证（登录页泄露口令但后台库缺表，登录路径不可用）
+    - paragraph [ref=f2e436]: unauthorized-access-candidate · 2026-09-12 18:21 · sess-f8f29908f462 · http://127.0.0.1:8085/pkxss/index.php
+    - generic [ref=f2e437]:
+      - generic [ref=f2e438]:
+        - generic [ref=f2e439]:
+          - heading "POC" [level=4] [ref=f2e440]
+          - button "一键复制全部" [active] [ref=f2e441]
+        - generic [ref=f2e443]:
+          - generic [ref=f2e444]:
+            - generic [ref=f2e445]: artifacts/poc_pkxss_entry_gate_302.py
+            - button "复制脚本" [ref=f2e446]
+          - generic [ref=f2e447]: "# POC: pkxss 管理后台入口门 302（鉴权面存在，未授权不可达） # 依据黑板 finding（find-a0642f25fe72）evidence 重建（原 Agent 报了 .ps1 路径但未落盘； # 按 §5.2 约定 POC 脚本仅限 Python，故重建为 .py）。 # 用法: python poc_pkxss_entry_gate_302.py （靶标: http://127.0.0.1:8085，仅限本地授权靶机） import urllib.error import urllib.request BASE = \"http://127.0.0.1:8085\" def probe(path: str, note: str) -> None: req = urllib.request.Request(BASE + path, method=\"GET\") opener = urllib.request.build_opener(NoRedirect()) try: r = opener.open(req, timeout=5) print(f\"[{path}] {r.status}（{note}）\") except urllib.error.HTTPError as e: loc = e.headers.get(\"Location\", \"-\") print(f\"[{path}] {e.code} location: {loc} （{note}）\") class NoRedirect(urllib.request.HTTPRedirectHandler): def redirect_request(self, *a, **k): # 不跟随跳转，观察原始状态码 return None probe(\"/pkxss/index.php\", \"期望 302 弹回登录门（访问控制存在）\") probe(\"/pkxss/pkxss_admin.php\", \"期望 404（后台子页不可枚举）\") probe(\"/pkxss/inc/\", \"期望 404（目录列表关闭）\") print(\"[结论] 302→登录门 + 子页 404 → 访问控制面存在，未授权可达性不成立\")"
+      - generic [ref=f2e448]:
+        - heading "复现步骤" [level=4] [ref=f2e450]
+        - generic [ref=f2e451]:
+          - generic [ref=f2e452]:
+            - generic [ref=f2e453]:
+              - generic [ref=f2e454]: conclusion
+              - button "复制" [ref=f2e455]
+            - generic [ref=f2e456]: 访问控制面存在（302→登录门）；凭据虽泄露但登录路径因库未初始化不可用，最小伤害边界内无法证实未授权可达 → 保持 unverified 并附反证，禁止继续绕过/爆破（超出单请求边界）
+          - generic [ref=f2e457]:
+            - generic [ref=f2e458]:
+              - generic [ref=f2e459]: counter_evidence_login
+              - button "复制" [ref=f2e460]
+            - generic [ref=f2e461]: "POST /pkxss/pkxss_login.php (username=admin&password=123456, 凭据来自页面自身披露, 单次非爆破) → HTTP/1.1 200 OK, body: Table 'pkxss.users' doesn't exist（后台库未初始化，登录路径实际不可用；同时暴露详细 SQL 错误）"
+          - generic [ref=f2e462]:
+            - generic [ref=f2e463]:
+              - generic [ref=f2e464]: gate_evidence
+              - button "复制" [ref=f2e465]
+            - generic [ref=f2e466]: "GET /pkxss/index.php → HTTP/1.1 302 Found; location: pkxss_login.php; Set-Cookie: PHPSESSID=...（未带会话被弹回登录门，访问控制存在）"
+          - generic [ref=f2e467]:
+            - generic [ref=f2e468]:
+              - generic [ref=f2e469]: missing_pages
+              - button "复制" [ref=f2e470]
+            - generic [ref=f2e471]: GET /pkxss/pkxss_admin.php → 404; GET /pkxss/xssresult/ → 404; GET /pkxss/inc/ → 404（目录列表关闭，后台子页面不可枚举）
+          - generic [ref=f2e472]:
+            - generic [ref=f2e473]:
+              - generic [ref=f2e474]: poc_artifact
+              - button "复制" [ref=f2e475]
+            - generic [ref=f2e476]: artifacts/poc_pkxss_entry_gate_302.py
+          - generic [ref=f2e477]:
+            - generic [ref=f2e478]:
+              - generic [ref=f2e479]: related_new_finding
+              - button "复制" [ref=f2e480]
+            - generic [ref=f2e481]: pkxss 登录页明文泄露 admin/123456（另立条目）
+    - button "关闭" [ref=f2e482]

@@ -1,0 +1,68 @@
+- generic [ref=f6e112]:
+  - banner [ref=f6e113]:
+    - generic [ref=f6e114]: 授权评估 · Web
+    - heading "E1画布走查-Pikachu" [level=1] [ref=f6e115]
+    - generic [ref=f6e116]: 任务 0/0 · 发现 4 · 资产 3
+    - button "🔔 审批" [ref=f6e117]
+    - button "← 项目" [ref=f6e118]
+  - generic [ref=f6e119]:
+    - navigation [ref=f6e120]:
+      - button "◈ 项目" [ref=f6e121]:
+        - generic [ref=f6e122]: ◈
+        - text: 项目
+      - button "◉ 直播间" [ref=f6e123]:
+        - generic [ref=f6e124]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=f6e125]:
+        - generic [ref=f6e126]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=f6e127]:
+        - generic [ref=f6e128]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=f6e129]:
+        - generic [ref=f6e130]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=f6e131]:
+        - generic [ref=f6e132]: ⚙
+        - text: 技能/设置
+    - main [ref=f6e133]:
+      - generic [ref=f6e135]:
+        - tablist [ref=f6e136]:
+          - tab "发现" [selected] [ref=f6e137]
+          - tab "资产" [ref=f6e138]
+          - tab "函数库" [ref=f6e139]
+        - tabpanel "发现" [active] [ref=f6e140]:
+          - generic [ref=f6e141]:
+            - generic [ref=f6e142]:
+              - button "全部资产" [ref=f6e144]
+              - generic [ref=f6e148]:
+                - button "全部" [ref=f6e149]
+                - button "critical" [ref=f6e150]
+                - button "high" [ref=f6e151]
+                - button "medium" [ref=f6e152]
+                - button "low" [ref=f6e153]
+                - button "info" [ref=f6e154]
+              - generic [ref=f6e155]:
+                - button "全部状态" [ref=f6e156]
+                - button "unverified" [ref=f6e157]
+                - button "verified" [ref=f6e158]
+              - generic [ref=f6e159]:
+                - button "列表" [ref=f6e160]
+                - button "链路" [ref=f6e161]
+            - generic [ref=f6e163]:
+              - generic [ref=f6e164]:
+                - generic [ref=f6e165]:
+                  - button "尚无攻击链" [ref=f6e167]
+                  - button "＋新建链" [ref=f6e171]
+                - generic [ref=f6e172] [cursor=pointer]:
+                  - checkbox "弱边" [checked] [ref=f6e173]
+                  - text: 弱边
+                - button "重置布局（清除手动位置）" [ref=f6e174]
+                - button "适应视图" [ref=f6e178]
+                - button "全屏" [ref=f6e184]
+              - application [ref=f6e190]:
+                - img "Mini Map" [ref=f6e194]
+                - generic "Control Panel" [ref=f6e195]:
+                  - button "Zoom In" [ref=f6e196] [cursor=pointer]
+                  - button "Zoom Out" [ref=f6e199] [cursor=pointer]
+                  - button "Fit View" [ref=f6e202] [cursor=pointer]

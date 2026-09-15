@@ -1,0 +1,59 @@
+# webui/
+
+> React 19 + TS(strict) + Vite SPA——三栏指挥台（DESIGN.md §12），core API 的平等消费者，不含业务逻辑。
+
+## 运行
+
+- 开发 `npm run dev`（5173；`/api` 与 WS 代理到 127.0.0.1:8420）；Vite 只绑 IPv6，浏览器用 `http://localhost:5173`。
+- 构建 `npm run build`（tsc -b + vite build，**必须零 TS 错误**）；后端 `E:\Miniconda3\python.exe scripts/serve.py`（改 core 需重启，前端 HMR）。
+
+## 页面（src/views/）
+
+- `ProjectsView.tsx` 项目列表+新建向导（先选**场景轨**单选再勾**能力包**多选）+回收站；`LiveRoom.tsx` 直播间（**顶栏两行**：第一行会话页签横滚+●live，第二行开窗三下拉常驻铺开+开窗钮/**L0/L1/L2 分段+⏸暂停自动+用量 chip**（批 2 §6.8：点击即 PATCH 整段 autonomy；chip 显 ∑token used/budget%、📋自主任务、🪟活跃窗/cap，≥80% 琥珀 ≥100% 红，点击弹 cap/链轮数/双预算 BudgetPopover，空预算=不限；5s 轮询 GET 项目 usage，人手开窗超预算只显 ⚠ 不拦）/会话控制/🔀切模型/编排一轮/复盘沉淀；**批 5 L2 链视图**=usage.chain 的 `⛓ ticks/max` 青 chip（active）/`⛓ 急停` 琥珀脉冲（estranged）+ 第二行下琥珀横幅（点「编排一轮」手动恢复，经 popover）；角色+供应商+模型三级开窗；暂停恢复中断；🔀运行中切模型；**A1** 页签 ×=detach 本地摘离（不调后端、会话照跑，「⊟ 已分离 N」下拉点名挂回）+ 控制组「结束会话」=api.closeSession（409 引导先暂停/中断；终止入口仅此与看板 claimed「取消」）；**A5「重排优先级」**钮（编排一轮旁）→`api.replanPriorities` Job 轮询，手动不受自主档/30s 去抖/预算限制，运行中禁用，tick/重排占用 **409** 直显，jobInfo 显「n 条改级（id:P旧→P新…），跳过 m 条」/note 空转；顶栏「直播｜任务流」分段（A3，见 [`views/live/CLAUDE.md`](src/views/live/CLAUDE.md)，React.lazy 分包）；**编排一轮**消费批 3 结构化 job 结果（`OrchTickResult`={summary,published,spawned,digest,proposals}，渲染「summary（📤n 任务 · 🪟m 窗 · 💡n 提案待采纳 · 📝 已写简报）」；**批 6 行内采纳见下「自主配置」段**；并发 tick 服务端 **409** 直显）；**复盘沉淀**按钮→review-proposals Job，落地后 dispatch `goto-settings` 跳提案 tab；无 planner key 503 直显；**会话页签红点**=sessions[].unread 撤回传播私信（与审批收件箱分设），切页签即 readSessionInbox 清红点，复用 5s 轮询）；`Blackboard.tsx` 黑板（发现/资产/函数库+human 共写；**函数库 tab 仅 capabilities 含 binary 挂载**，判据是能力不是轨；**资产树与发现 tab「列表｜链路」子切换仅 assessment 轨**，compact 侧栏不渲染画布；签名 `{pid, compact, track, capabilities}`）。评估攻击链画布见 [`views/blackboard/CLAUDE.md`](src/views/blackboard/CLAUDE.md)（React.lazy 分包）。
+- `reverse/` rev-generic 工作台（research+binary 项目替换黑板，App.tsx 经 deriveWorkbenchProfile 切换，详见下）。
+- `TaskBoard.tsx` 任务看板（**A1** 删除钮四态皆可：claimed 文案「取消」+步边界硬中断警示、done 可删、有子任务 409；**A2** claimed 卡显 `▦ done/total` 计划进度+■ blocked 原因，hover 列全部步骤）；`ApprovalsView.tsx` 审批收件箱（4s 轮询 + GET roles 建 map；**批 4**：`action.op==="spawn_session"` 渲染专属卡=角色 Badge+roles 名称/描述+开窗理由，其余 action 维持通用 JSON `<pre>`；decide 回执类型 `DecideApprovalResult`，`executed:false`=批准但自动建窗失败（不回滚，显红字引导手动开窗），`executed:true` 显已建窗+提交跑队列）；`SettingsView.tsx` 设置（轨/包 select + DoctorBar + **7 tab**）。
+- `App.tsx` 监听 window `goto-settings`（CustomEvent detail.tab）跨视图切设置；SettingsView 经 `nav={{tab,n}}` prop 接收。
+
+### 设置 7 tab（components/settings/）
+
+1 **角色** RolesPane：左列表右表单；`CreateDialogs` 新建/克隆（slug 双端校验，409/422 直显 detail）；✕ 删除（`_generalist` 保护）；HistoryButton 版本/diff/回滚（回滚前自动备份）。
+2 **Skill** SkillsPane：**react-resizable-panels 三栏**（左 240px 技能列表+📚知识库折叠树 / 中弹性文档 / 右 300px 试算+大纲）。技能与 kb **互斥选中**，互切 dirty `window.confirm` 拦截。
+   - 左：包｜轨来源切换（SkillCreateDialog ＋新建）；`KbTree`（源树/过滤框/悬停 ✎改名 ✕删除；kb 挂当前 cap，切 cap 有未保存修改时 kbCap 冻结拦截）；`KbCreateDialog` ＋新建 md。
+   - 中：技能=精简顶栏（去 chips）+`SkillEditor`（frontmatter 表单默认折叠、七字段 `<datalist>` 走 `/skills/vocab`、正文编辑/`MarkdownView` 预览、13px；`ref.getRaw()` 经 skillfm 合并，name 锁定）；kb=`KbPane`（路径/source/大小/被引 N 处/编辑预览/保存/改名/删除，PUT 自动备份 kb-backups；删除有引用先 409 弹 refs，显式「强制删除」才带 force）。
+   - 右：`RouteTester`（真评分，候选恒为全包∪轨；features/file_features/**labels** 三框；命中行展开看 breakdown）+ `MarkdownOutline`（h1–h3，与预览共享 prefix 做 headingId scrollIntoView；技能 prefix=`skill`，kb=`kb-<cap>`）。
+   - `KbRenameDialog` 改名成功显示联动替换文件清单+skipped_relative 琥珀警告。
+3 **矩阵** MatrixPane 只读：行=轨角色列=全部包∪轨技能，悬空引用红/禁用技能琥珀/列头点击反查。
+4 **红线** Rules+Owners：redlines 全文编辑（**文件缺失 GET 200 `{exists:false}`** 非 404）、owners tag。
+5 **模型** LlmPane CRUD/测活/密钥留空沿用；6 **MCP** McpPane：config/mcp.json 配置层，仅配置。
+7 **提案** `ProposalsPane`：左列表（待审批/全部/已应用/已拒绝）+右详情（target/mode/origin、**实时 diff** DiffView、rename/delete 显 live.refs 影响面）；批准 applyProposal（decided_by=human）/拒绝（带 note）/**改后采纳**（revise 编辑 content/new_path/summary/reason，可只保存或修订并应用）。pending 数经 `proposals-changed` 事件刷新 tab 角标。
+- 共享：`MarkdownView`（react-markdown+gfm 深色主题，标题带 slug id；extractHeadings 识别 ```/~~~ 围栏防误判）；`DiffView` 统一 diff 高亮（HistoryDialog/ProposalsPane 共用）；`HistoryButton` 可注入 `HistorySource`（kb 版本三件套复用，srcRef 防内联对象重复加载）。DoctorBar 监听 `packs-changed`+30s 轮询，可跳转 target（切 tab + focus nonce 选中）。
+
+## views/reverse/（DESIGN §12，摘要）
+
+- `ReverseWorkbench.tsx` 全屏：SampleBar+subnav（逆向分析｜攻击链，**同级条件渲染**）；分析=左 FunctionBrowser/中 FunctionDetail/右受控 Tabs；4s 轮询+WS bump；上传 pollJob。
+- `RevCompact.tsx` 384px 挂机侧栏；`SampleBar` 三态灯 ToolLamp；`XrefPane` mcp 实时标记；`NotesPane` [⬆写回 IDA]（mcpLive 时写当前 GUI 库，ok 按 channel=mcp 换文案；笔记只在切函数时重置）；FunctionDetail 伪码缓存缺席时显 MCP 读取态，脚本 Dialog 双 tab（x64dbg/ce 纯前端模板）。
+- MCP 实时桥：overview.tools.mcp.state==="installed" 时放宽取数（无缓存也拉单函数/xref）；func_kb 分析过的函数在缓存缺席时补 kb-only 行（key 前缀 k）。
+- `chains/` 人工建链：`ChainView` React Flow（状态色点 hypothesis 琥珀/validated 青/exploited 紫；**React.lazy 切包**，@xyflow/react 192KB 不进主包）；`chainNodes.ts` 布局；`ChainEdge` 自定义边（**默认 edge 的 label 只走 SVG `<text>`，JSX 会渲染成 0×0**；HTML 卡片 pointer-events-none）；EntityNode/AddNodeDialog/AddToChainDialog。链事件 🔗 紫见 lib/events.tsx。
+- 三层数据：headless v3 缓存 JSON / func_kb / findings（挂 binary 资产，evidence 带 func_id+address）。join key 一律归一 hex 串；**所有地址都是 hex 字符串**；笔记无 kb 行先 POST funcs 再 PATCH；「传日志确认」=uploadDebugLog→patchFinding(verified)。
+
+## 结构与约定
+
+- `lib/api.ts` 唯一 fetch 客户端 + pollJob/wsUrl/httpUpload（multipart **勿手设 Content-Type**）；失败抛 **ApiError**（`status`/`data`，detail 对象取 message；DELETE kb 409 的 refs 从 `e.data.refs` 取，见 KbPane.refsFromError）。Job 结果 WritebackResult/PullNamesResult/ReviewProposalsResult/ReplanResult（A5：{updated:[{task_id,old,new}],skipped:[{task_id,reason}],note?,reason?,error?}）；`api.replanPriorities(pid)` POST orchestrator/replan-priorities。
+- `lib/workbench.ts` deriveWorkbenchProfile/hexAddr 等；`lib/skillfm.ts` frontmatter 七键解析合并；`lib/taxonomy.ts` TRACK/CAP/bindingBadge（**勿再引 domain 入新建流程**）；`lib/types.ts` 全部接口；`lib/useEvents.ts` WS since_id 游标+断线重连+去重（**服务端 close 1008=项目删除中/已删，停止重连**）。
+- `lib/datetime.ts` 时间展示**唯一入口**（§12，2026-09-15 落地）：后端 UTC 三形态——naive 无 Z（parseTs 按 UTC 补 Z，勿直接 `new Date` 双重偏移）/带 `+00:00`/packs 紧凑版本号 `20260913T145750Z`；展示只用 `fmtDateTime/fmtDateTimeMin/fmtDate/fmtTime`（跟随浏览器本地时区），悬停 `utcTitle` 显 UTC 原值；**禁止再 slice/replace ISO 手拼**；排序/age 用原串或 parseTs epoch，写入端不本地化。
+- `lib/events.tsx` 事件样式/摘要：🎯 skill.routed（未命中 name=null 显 query）、📝 proposal.created/✅ applied/⊘ rejected、🔗 chain.*、💡 `orch.proposed`（批 6 L0 提案，默认展开，摘要按 payload.op/args 出，行内采纳按钮在 LiveRoom）、⛓🤖 `orch.chain_started`/⛓⏹ `orch.chain_stopped`（批 5，停止原因八值中文映射 + 自动轮数，默认展开）、🚫 finding.retracted/🔔 message.inbox（**A4**：payload.kind=finding_update 显 🔵 发现增补、basis_stale 显 ⚠ 依据撤回）/⚠ task.basis_stale_done（批 1B 撤回传播，默认展开）、🔀 `orch.replan_priorities`（A5 优先级重排，默认折叠，摘要「n 条改级·id P旧→P新，跳过 m」）、∑ token `llm.usage`（批 2，默认折叠，摘要显来源 编排/顾问/Agent·model·↑↓·∑total）/🟡 `budget.soft_warning`（琥珀展开）等；summary 字段通用渲染（私信 payload.title 天然成摘要行）。
+- 自主配置（批 2/3/5，§6.8）：`Autonomy/ProjectUsage(+chain?)/ChainState/OrchTickResult` 类型在 lib/types.ts；publishTask 返 `{task_id,kicked}`、spawnAgent 可带 `job_id`（触发点 C）、DecideApprovalResult 可带 `kicked`（触发点 E）；`api.patchProjectConfig(pid,{autonomy:整段})` 打 PATCH /config（服务端整段归一化，前端始终以当前 usage 拼全字段再 spread 补丁）；`spawnAgent` 返回可能带 `warning`（超 token 预算的人手开窗）。档位行为：L1 审批卡批 4、L2 自动链批 5、**L0 提案批 6 全部落地**。批 6：orch tick 结构化结果带 `proposals:OrchProposal[]`（{op:'publish_task'|'spawn_session',args,event_id}）；事件 `orch.proposed`（💡 琥珀、默认展开，events.tsx 按 op 出「提议发任务（type/noise）/提议开窗 role（reason）」摘要）；LiveRoom 事件流对该事件显行内「采纳」钮——publish_task 映射 args 调 `api.publishTask`（body 支持 scope）、spawn_session 调 `api.spawnAgent(role)`，即走人类写口（服务端 created_by=human、L0 无 job_id/kicked）；采纳中/✓已采纳态只存组件内存（Set<event_id>），刷新可再采纳不做去重；「决策」过滤器含 orch.*；LEVEL_HINTS 三档已改为真实语义。
+- 撤回传播前端（批 1B，DESIGN §6.7 的 1.5/1.6）：`Session.unread`+`InboxMessage` 类型；`api.sessionInbox/readSessionInbox`、`publishTask(refs?)`；私信全文经事件流 message.inbox 可见，无专门收件箱视图；评估画布误报边淡出见 views/blackboard/CLAUDE.md。
+- 风格：克制黑客风（深灰+青，等宽只用于数据区）。packs 写后 dispatch `packs-changed`；提案落定 dispatch `proposals-changed`；角色/技能保存下次开窗生效；写操作服务端自动 .history 备份（同秒 .n，删除进 .history/trash 或 kb-trash）。
+- 跨 tab 跳转选中用 focus nonce（`{...,n:Date.now()}`，effect 依赖 focus?.n）；SkillsPane 在 render 期用 prevPack 守卫重置 selected 防误发 404。
+- 轮询：sessions 5s、黑板/逆向 4s、任务 3s、审批 5s（WS 断了照常用）；App 顶栏统计订阅 WS 后 400ms 去抖重拉。**顶栏 getProject 轮询收到 404 自动 setPid(null) 退回项目列表**（项目被另一标签删除时，子视图轮询随卸载全停；只认 404，409/网络错误不退）。
+- 插话=以 human 名义发 passive 任务，参照 scripts/demo_pentest.py。
+
+## 坑
+
+- **高度链**：App.tsx 主区包装统一为 `h-full w-full`（rev 另加 overflow-hidden），不再有"普通黑板是滚动文档"特例；画布类定高视图一路 `min-h-0` 不可断。
+- **@xyflow/react v12 受控节点**：受控 `nodes` 按引用比较，重渲染给不带 `measured` 的新节点会清测量/handleBounds → 边卸载；必须在 `onNodesChange` 回收 dimensions（字段名 `ch.dimensions`）回灌派生节点。EdgeLabelRenderer 容器 pointer-events:none，标签要自加 pointer-events-auto。详见 views/blackboard 与 reverse/chains 的 CLAUDE.md。
+- **react-resizable-panels 是 v4 API**：`Group(orientation)/Panel/Separator`（非旧版 PanelGroup/PanelResizeHandle）；Panel 的 number 尺寸=像素、带单位字符串=%。
+- **radix Tabs 在 mousedown/focus 激活不是 click**：JS 合成 `.click()` 不切 tab，用真实点击或 `.focus()`。
+- shadcn `add` 可能把 cn 导入写成 `"cn"` 包，改回 `@/lib/utils`；tsconfig.app.json 不写 baseUrl。
+- Vite 只听 `::1`，curl 127.0.0.1:5173 拒连；中文 JSON body 用 Python/httpx 测，勿用 Git Bash curl 管道（乱码成假象）。

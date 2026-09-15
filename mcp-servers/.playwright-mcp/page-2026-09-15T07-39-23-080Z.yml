@@ -1,0 +1,52 @@
+- generic [ref=f4e436]:
+  - banner [ref=f4e437]:
+    - generic [ref=f4e438]: 授权评估 · Web
+    - heading "批4走查-L1开窗" [level=1] [ref=f4e439]
+    - generic [ref=f4e440]: 任务 0/0 · 发现 0 · 资产 0
+    - button "🔔 审批 1" [ref=f4e441]:
+      - text: 🔔 审批
+      - generic [ref=f4e442]: "1"
+    - button "← 项目" [ref=f4e443]
+  - generic [ref=f4e444]:
+    - navigation [ref=f4e445]:
+      - button "◈ 项目" [ref=f4e446]:
+        - generic [ref=f4e447]: ◈
+        - text: 项目
+      - button "◉ 直播间" [ref=f4e448]:
+        - generic [ref=f4e449]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=f4e450]:
+        - generic [ref=f4e451]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=f4e452]:
+        - generic [ref=f4e453]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=f4e454]:
+        - generic [ref=f4e455]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=f4e456]:
+        - generic [ref=f4e457]: ⚙
+        - text: 技能/设置
+    - main [ref=f4e458]:
+      - generic [ref=f4e572]:
+        - generic [ref=f4e573]:
+          - heading "审批收件箱" [level=1] [ref=f4e574]
+          - paragraph [ref=f4e575]: 编排开窗申请（L1）/ 越界审批 / net:real / cross_target 等待批动作；批准与拒绝均落事件流审计
+        - generic [ref=f4e577]:
+          - generic [ref=f4e578]:
+            - generic [ref=f4e579]: 风险 low
+            - generic [ref=f4e580]: orchestrator
+            - generic [ref=f4e581]: 2026-09-15 07:36:30
+          - generic [ref=f4e582]:
+            - paragraph [ref=f4e583]: 🪟 编排申请开新会话窗
+            - generic [ref=f4e584]:
+              - generic [ref=f4e585]: recon
+              - generic [ref=f4e586]: recon
+            - paragraph [ref=f4e587]: 信息收集：被动侦察、子域枚举、活筛、指纹识别，产出结构化资产清单
+            - generic [ref=f4e588]:
+              - paragraph [ref=f4e589]: 开窗理由（审批人只看得到角色与理由）
+              - paragraph [ref=f4e590]: 项目初始轮，尚无任何资产与侦察信息。申请开设信息收集角色，负责对授权目标开展被动侦察、子域枚举、活筛与指纹识别，产出结构化资产清单，为后续外网打点建立目标范围。
+            - paragraph [ref=f4e591]: 批准后系统自动建窗并立即提交跑队列；拒绝不动作，编排下一轮经事件可见后改道。
+          - generic [ref=f4e592]:
+            - button "拒绝" [ref=f4e593]
+            - button "批准" [ref=f4e594]

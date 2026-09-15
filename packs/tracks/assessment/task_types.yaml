@@ -1,0 +1,10 @@
+# 授权评估轨任务类型注册表（DESIGN.md §4.5.5）
+# 格式：<type>: <默认噪声预算>。generic 为内置兜底类型，始终合法。
+# 角色 yaml 的 task_types 必须是本表子集（pack doctor 校验）。
+generic: passive
+recon: passive
+asset-enum: passive
+exploit: low
+privesc: medium
+lateral-movement: medium
+credential-access: medium

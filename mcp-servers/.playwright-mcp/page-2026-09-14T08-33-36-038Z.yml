@@ -1,0 +1,260 @@
+- generic [ref=f9e54]:
+  - banner [ref=f9e55]:
+    - generic [ref=f9e56]: 研究 · 二进制
+    - heading "rev真机走查" [level=1] [ref=f9e57]
+    - generic [ref=f9e58]: 任务 0/2 · 发现 3 · 资产 1
+    - button "🔔 审批" [ref=f9e59]
+    - button "← 项目" [ref=f9e60]
+  - generic [ref=f9e61]:
+    - navigation [ref=f9e62]:
+      - button "◈ 项目" [ref=f9e63]:
+        - generic [ref=f9e64]: ◈
+        - text: 项目
+      - button "◉ 直播间" [ref=f9e65]:
+        - generic [ref=f9e66]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=f9e67]:
+        - generic [ref=f9e68]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=f9e69]:
+        - generic [ref=f9e70]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=f9e71]:
+        - generic [ref=f9e72]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=f9e73]:
+        - generic [ref=f9e74]: ⚙
+        - text: 技能/设置
+    - main [ref=f9e75]:
+      - generic [ref=f9e77]:
+        - generic [ref=f9e78]:
+          - button "全部" [ref=f9e79]
+          - button "Orchestrator" [ref=f9e80]
+          - generic [ref=f9e81]: ● live
+          - combobox "开窗角色" [ref=f9e82]:
+            - option "通用 · 通用研究员：分诊、逆向、验证全链路" [selected]
+            - option "reverse-analyst · 逆向分析：样本分诊、函数定位、算法还原、func_kb 协作、动态验证"
+          - combobox "开窗供应商（缺省=全局默认供应商）" [ref=f9e83]:
+            - option "默认供应商" [selected]
+            - option "ark-plan"
+            - option "ark-coding"
+          - combobox "开窗模型（缺省=该供应商首个模型）" [ref=f9e84]:
+            - option "默认模型（ark-code-latest）" [selected]
+            - option "ark-code-latest"
+            - option "deepseek-v4-flash"
+            - option "glm-5-3-flash-260828"
+          - button "开窗" [ref=f9e85]
+          - button "编排一轮" [ref=f9e87]
+        - generic [ref=f9e88]:
+          - button "全部" [ref=f9e89]
+          - button "思考" [ref=f9e90]
+          - button "决策" [ref=f9e91]
+          - button "命令" [ref=f9e92]
+          - button "发现" [ref=f9e93]
+        - generic [ref=f9e95]:
+          - generic [ref=f9e98] [cursor=pointer]:
+            - generic [ref=f9e99]: 04:38:59
+            - generic [ref=f9e100]: ⚡ 执行命令
+            - code [ref=f9e102]: D:\Tools\IDA93\idat.exe --% -A -S"E:\ILOVCTRY\cyberstrike-pro\tools\decompiler\ida\scripts\export_funcs.py E:\ILOVCTRY\cyberstrike-pro\workspaces\rev\artifacts\decompiler-cache\34fe7d4ba000f908d71407672fc3d5a8296ba5d5a1248286f3b9cb1a456fa4bc.json" -oE:\ILOVCTRY\cyberstrike-pro\workspaces\rev\artifacts\decompiler-db\34fe7d4ba000f908d71407672fc3d5a8296ba5d5a1248286f3b9cb1a456fa4bc E:\ILOVCTRY\cyberstrike-pro\workspaces\rev\samples\crackme.34fe7d4b.elf
+            - generic [ref=f9e103]: human
+          - generic [ref=f9e106] [cursor=pointer]:
+            - generic [ref=f9e107]: 04:38:59
+            - generic [ref=f9e108]: ↳ 命令输出
+            - generic [ref=f9e109]: runtime, exit_code, duration_s, timed_out, stdout_head, stderr_head
+            - generic [ref=f9e110]: human
+          - generic [ref=f9e112] [cursor=pointer]:
+            - generic [ref=f9e113]:
+              - generic [ref=f9e114]: 04:38:59
+              - generic [ref=f9e115]: 🧊 样本分诊完成
+              - code [ref=f9e117]: 34fe7d4ba000 · 28 函数
+              - generic [ref=f9e118]: human
+            - generic [ref=f9e119]: "{ \"sha\": \"34fe7d4ba000f908d71407672fc3d5a8296ba5d5a1248286f3b9cb1a456fa4bc\", \"backend\": \"ida-headless\", \"function_count\": 28, \"packer_suspect\": false }"
+          - generic [ref=f9e122] [cursor=pointer]:
+            - generic [ref=f9e123]: 04:41:28
+            - generic [ref=f9e124]: ⚡ 执行命令
+            - code [ref=f9e126]: D:\Tools\IDA93\idat.exe --% -A -S"E:\ILOVCTRY\cyberstrike-pro\tools\decompiler\ida\scripts\export_funcs.py E:\ILOVCTRY\cyberstrike-pro\workspaces\rev\artifacts\decompiler-cache\34fe7d4ba000f908d71407672fc3d5a8296ba5d5a1248286f3b9cb1a456fa4bc.json" -oE:\ILOVCTRY\cyberstrike-pro\workspaces\rev\artifacts\decompiler-db\34fe7d4ba000f908d71407672fc3d5a8296ba5d5a1248286f3b9cb1a456fa4bc E:\ILOVCTRY\cyberstrike-pro\workspaces\rev\samples\crackme.34fe7d4b.elf
+            - generic [ref=f9e127]: human
+          - generic [ref=f9e130] [cursor=pointer]:
+            - generic [ref=f9e131]: 04:41:28
+            - generic [ref=f9e132]: ↳ 命令输出
+            - generic [ref=f9e133]: runtime, exit_code, duration_s, timed_out, stdout_head, stderr_head
+            - generic [ref=f9e134]: human
+          - generic [ref=f9e136] [cursor=pointer]:
+            - generic [ref=f9e137]:
+              - generic [ref=f9e138]: 04:41:28
+              - generic [ref=f9e139]: 🧊 样本分诊完成
+              - code [ref=f9e141]: 34fe7d4ba000 · 28 函数
+              - generic [ref=f9e142]: human
+            - generic [ref=f9e143]: "{ \"sha\": \"34fe7d4ba000f908d71407672fc3d5a8296ba5d5a1248286f3b9cb1a456fa4bc\", \"backend\": \"ida-headless\", \"function_count\": 28, \"packer_suspect\": false }"
+          - generic [ref=f9e146] [cursor=pointer]:
+            - generic [ref=f9e147]: 04:42:04
+            - generic [ref=f9e148]: ƒ 函数更新
+            - generic [ref=f9e149]: func_id, binary_sha256, address, changed
+            - generic [ref=f9e150]: human
+          - generic [ref=f9e152] [cursor=pointer]:
+            - generic [ref=f9e153]:
+              - generic [ref=f9e154]: 04:46:05
+              - generic [ref=f9e155]: 🔍 新发现
+              - generic [ref=f9e156]: finding_id, vuln_class, severity
+              - generic [ref=f9e157]: human
+            - generic [ref=f9e158]: "{ \"finding_id\": \"find-9e30583d97b2\", \"vuln_class\": \"\", \"severity\": \"medium\" }"
+          - generic [ref=f9e160] [cursor=pointer]:
+            - generic [ref=f9e161]:
+              - generic [ref=f9e162]: 04:46:16
+              - generic [ref=f9e163]: 🔍 新发现
+              - generic [ref=f9e164]: finding_id, vuln_class, severity
+              - generic [ref=f9e165]: human
+            - generic [ref=f9e166]: "{ \"finding_id\": \"find-77fffb265169\", \"vuln_class\": \"\", \"severity\": \"medium\" }"
+          - generic [ref=f9e168] [cursor=pointer]:
+            - generic [ref=f9e169]:
+              - generic [ref=f9e170]: 04:46:34
+              - generic [ref=f9e171]: 🔍 发现更新
+              - generic [ref=f9e172]: finding_id, changed, status
+              - generic [ref=f9e173]: human
+            - generic [ref=f9e174]: "{ \"finding_id\": \"find-9e30583d97b2\", \"changed\": [ \"status\", \"evidence\" ], \"status\": \"verified\" }"
+          - generic [ref=f9e176] [cursor=pointer]:
+            - generic [ref=f9e177]:
+              - generic [ref=f9e178]: 04:46:34
+              - generic [ref=f9e179]: 📋 发布任务
+              - generic [ref=f9e180]: 样本 34fe7d4ba000 function_count=28；先查后写 func_kb
+              - generic [ref=f9e181]: human
+            - generic [ref=f9e182]: "{ \"task_id\": \"task-ce22b4e491d1\", \"objective\": \"样本 34fe7d4ba000 function_count=28；先查后写 func_kb\", \"task_type\": \"triage\" }"
+          - generic [ref=f9e184] [cursor=pointer]:
+            - generic [ref=f9e185]:
+              - generic [ref=f9e186]: 04:52:16
+              - generic [ref=f9e187]: 🔍 新发现
+              - generic [ref=f9e188]: finding_id, vuln_class, severity
+              - generic [ref=f9e189]: human
+            - generic [ref=f9e190]: "{ \"finding_id\": \"find-ea9dafc7b0cd\", \"vuln_class\": \"\", \"severity\": \"medium\" }"
+          - generic [ref=f9e192] [cursor=pointer]:
+            - generic [ref=f9e193]:
+              - generic [ref=f9e194]: 05:00:16
+              - generic [ref=f9e195]: 🔍 发现更新
+              - generic [ref=f9e196]: finding_id, changed, status
+              - generic [ref=f9e197]: human
+            - generic [ref=f9e198]: "{ \"finding_id\": \"find-ea9dafc7b0cd\", \"changed\": [ \"status\", \"evidence\" ], \"status\": \"verified\" }"
+          - generic [ref=f9e201] [cursor=pointer]:
+            - generic [ref=f9e202]: 05:00:43
+            - generic [ref=f9e203]: ƒ 函数更新
+            - generic [ref=f9e204]: func_id, binary_sha256, address, changed
+            - generic [ref=f9e205]: human
+          - generic [ref=f9e207] [cursor=pointer]:
+            - generic [ref=f9e208]:
+              - generic [ref=f9e209]: 05:02:20
+              - generic [ref=f9e210]: 📋 发布任务
+              - generic [ref=f9e211]: 逆向分诊任务（triage）。样本文件：samples/crackme.34fe7d4b.elf sha256=34fe7d4ba000f908d71407672fc3d5a8296ba5d5a1248286f3b9cb1a456fa4bc；headless 已导出 28 个函数（客观全量在缓存，不要重复跑反编译器）。 产出要求： 1. 逐函数理解样本行为，结论写入 func_kb（先查后写）；重要函数才建行，不要全量搬运。 2. 发现挂 binary 资产 asset-586a38bc0742，evidence 必须带 func_id 与 address，category 取 algorithm/protocol/data-structure/mechanism/risk 之一。 3. 未经动态验证的结论一律 unverified；需要执行样本的动作必须等人类授权，禁止自行运行样本。 4. 伪码不进事件流。
+              - generic [ref=f9e212]: human
+            - generic [ref=f9e213]: "{ \"task_id\": \"task-ba4e6c0c97fd\", \"objective\": \"逆向分诊任务（triage）。样本文件：samples/crackme.34fe7d4b.elf\\nsha256=34fe7d4ba000f908d71407672fc3d5a8296ba5d5a1248286f3b9cb1a456fa4bc；headless 已导出 28 个函数（客观全量在缓存，不要重复跑反编译器）。\\n产出要求：\\n1. 逐函数理解样本行为，结论写入 func_kb（先查后写）；重要函数才建行，不要全量搬运。\\n2. 发现挂 binary 资产 asset-586a38bc0742，evidence 必须带 func_id 与 address，category 取 algorithm/protocol/data-structure/mechanism/risk 之一。\\n3. 未经动态验证的结论一律 unverified；需要执行样本的动作必须等人类授权，禁止自行运行样本。\\n4. 伪码不进事件流。\", \"task_type\": \"triage\" }"
+          - generic [ref=f9e215] [cursor=pointer]:
+            - generic [ref=f9e216]:
+              - generic [ref=f9e217]: 05:15:26
+              - generic [ref=f9e218]: ⚠ 样本分诊失败
+              - code [ref=f9e220]: 34fe7d4ba000 · no-tool
+              - generic [ref=f9e221]: human
+            - generic [ref=f9e222]: "{ \"sha\": \"34fe7d4ba000f908d71407672fc3d5a8296ba5d5a1248286f3b9cb1a456fa4bc\", \"reason\": \"no-tool\", \"guidance\": \"[反编译器不可用] 检测结果：IDA(idat64) 未安装、Ghidra(analyzeHeadless) 未安装、MCP 离线。安装引导：IDA → 确认 idat64 在 PATH；Ghidra → winget install Ghidra.Ghidra 或 scoop install ghidra；MCP → 启动本地 IDA/Ghidra MCP 服务。在此之前请退回纯静态分析（objdump / 手撕汇编），结论照常落 func_kb。\" }"
+          - generic [ref=f9e225] [cursor=pointer]:
+            - generic [ref=f9e226]: 06:27:07
+            - generic [ref=f9e227]: ⚡ 执行命令
+            - code [ref=f9e229]: D:\Tools\IDA93\idat.exe --% -A -S"E:\ILOVCTRY\cyberstrike-pro\tools\decompiler\ida\scripts\export_funcs.py E:\ILOVCTRY\cyberstrike-pro\workspaces\rev\artifacts\decompiler-cache\34fe7d4ba000f908d71407672fc3d5a8296ba5d5a1248286f3b9cb1a456fa4bc.json" -oE:\ILOVCTRY\cyberstrike-pro\workspaces\rev\artifacts\decompiler-db\34fe7d4ba000f908d71407672fc3d5a8296ba5d5a1248286f3b9cb1a456fa4bc E:\ILOVCTRY\cyberstrike-pro\workspaces\rev\samples\crackme.34fe7d4b.elf
+            - generic [ref=f9e230]: human
+          - generic [ref=f9e233] [cursor=pointer]:
+            - generic [ref=f9e234]: 06:27:07
+            - generic [ref=f9e235]: ↳ 命令输出
+            - generic [ref=f9e236]: runtime, exit_code, duration_s, timed_out, stdout_head, stderr_head
+            - generic [ref=f9e237]: human
+          - generic [ref=f9e239] [cursor=pointer]:
+            - generic [ref=f9e240]:
+              - generic [ref=f9e241]: 06:27:07
+              - generic [ref=f9e242]: 🧊 样本分诊完成
+              - code [ref=f9e244]: 34fe7d4ba000 · 28 函数
+              - generic [ref=f9e245]: human
+            - generic [ref=f9e246]: "{ \"sha\": \"34fe7d4ba000f908d71407672fc3d5a8296ba5d5a1248286f3b9cb1a456fa4bc\", \"backend\": \"ida-headless\", \"function_count\": 28, \"packer_suspect\": false }"
+          - generic [ref=f9e249] [cursor=pointer]:
+            - generic [ref=f9e250]: 06:28:10
+            - generic [ref=f9e251]: session.closed
+            - generic [ref=f9e252]: session_id, summary
+            - generic [ref=f9e253]: human
+          - generic [ref=f9e255] [cursor=pointer]:
+            - generic [ref=f9e256]:
+              - generic [ref=f9e257]: 06:32:06
+              - generic [ref=f9e258]: 📋 发布任务
+              - generic [ref=f9e259]: A5 顶栏统计走查（可删）
+              - generic [ref=f9e260]: human
+            - generic [ref=f9e261]: "{ \"task_id\": \"task-dd3073bcb5d4\", \"objective\": \"A5 顶栏统计走查（可删）\", \"task_type\": \"triage\" }"
+          - generic [ref=f9e263] [cursor=pointer]:
+            - generic [ref=f9e264]:
+              - generic [ref=f9e265]: 06:38:40
+              - generic [ref=f9e266]: 📋 发布任务
+              - generic [ref=f9e267]: A5 事件刷新复测（可删）
+              - generic [ref=f9e268]: human
+            - generic [ref=f9e269]: "{ \"task_id\": \"task-6746c695ba19\", \"objective\": \"A5 事件刷新复测（可删）\", \"task_type\": \"reverse\" }"
+          - generic [ref=f9e271] [cursor=pointer]:
+            - generic [ref=f9e272]:
+              - generic [ref=f9e273]: 06:39:04
+              - generic [ref=f9e274]: 📋 发布任务
+              - generic [ref=f9e275]: A5 事件刷新复测2（可删）
+              - generic [ref=f9e276]: human
+            - generic [ref=f9e277]: "{ \"task_id\": \"task-93e874258310\", \"objective\": \"A5 事件刷新复测2（可删）\", \"task_type\": \"reverse\" }"
+          - generic [ref=f9e279] [cursor=pointer]:
+            - generic [ref=f9e280]:
+              - generic [ref=f9e281]: 06:39:36
+              - generic [ref=f9e282]: 🗑 删除任务
+              - generic [ref=f9e283]: A5 顶栏统计走查（可删）
+              - generic [ref=f9e284]: human
+            - generic [ref=f9e285]: "{ \"task_id\": \"task-dd3073bcb5d4\", \"by\": \"human\", \"was_status\": \"open\", \"objective\": \"A5 顶栏统计走查（可删）\", \"task_type\": \"triage\", \"noise_budget\": \"passive\", \"priority\": 2, \"conflict_keys\": [] }"
+          - generic [ref=f9e287] [cursor=pointer]:
+            - generic [ref=f9e288]:
+              - generic [ref=f9e289]: 06:39:36
+              - generic [ref=f9e290]: 🗑 删除任务
+              - generic [ref=f9e291]: A5 事件刷新复测（可删）
+              - generic [ref=f9e292]: human
+            - generic [ref=f9e293]: "{ \"task_id\": \"task-6746c695ba19\", \"by\": \"human\", \"was_status\": \"open\", \"objective\": \"A5 事件刷新复测（可删）\", \"task_type\": \"reverse\", \"noise_budget\": \"passive\", \"priority\": 2, \"conflict_keys\": [] }"
+          - generic [ref=f9e295] [cursor=pointer]:
+            - generic [ref=f9e296]:
+              - generic [ref=f9e297]: 06:39:36
+              - generic [ref=f9e298]: 🗑 删除任务
+              - generic [ref=f9e299]: A5 事件刷新复测2（可删）
+              - generic [ref=f9e300]: human
+            - generic [ref=f9e301]: "{ \"task_id\": \"task-93e874258310\", \"by\": \"human\", \"was_status\": \"open\", \"objective\": \"A5 事件刷新复测2（可删）\", \"task_type\": \"reverse\", \"noise_budget\": \"passive\", \"priority\": 2, \"conflict_keys\": [] }"
+          - generic [ref=f9e303] [cursor=pointer]:
+            - generic [ref=f9e304]:
+              - generic [ref=f9e305]: 07:04:42
+              - generic [ref=f9e306]: 🔗 新建攻击链
+              - generic [ref=f9e307]: 负向校验临时链
+              - generic [ref=f9e308]: human
+            - generic [ref=f9e309]: "{ \"chain_id\": \"chain-a64bed917e26\", \"name\": \"负向校验临时链\", \"goal\": \"\", \"status\": \"hypothesis\" }"
+          - generic [ref=f9e311] [cursor=pointer]:
+            - generic [ref=f9e312]:
+              - generic [ref=f9e313]: 07:04:42
+              - generic [ref=f9e314]: 🔗 删除攻击链
+              - generic [ref=f9e315]: 负向校验临时链
+              - generic [ref=f9e316]: human
+            - generic [ref=f9e317]: "{ \"chain_id\": \"chain-a64bed917e26\", \"name\": \"负向校验临时链\" }"
+          - generic [ref=f9e319] [cursor=pointer]:
+            - generic [ref=f9e320]:
+              - generic [ref=f9e321]: 07:06:05
+              - generic [ref=f9e322]: 🔗 新建攻击链
+              - generic [ref=f9e323]: 破解校验链
+              - generic [ref=f9e324]: human
+            - generic [ref=f9e325]: "{ \"chain_id\": \"chain-e81f0827922d\", \"name\": \"破解校验链\", \"goal\": \"\", \"status\": \"hypothesis\" }"
+        - generic [ref=f9e326]:
+          - textbox "插话：向黑板发布一个任务或一条指示…" [ref=f9e327]
+          - button "发送" [disabled]
+      - complementary [ref=f9e328]:
+        - generic [ref=f9e329]:
+          - tablist [ref=f9e330]:
+            - tab "风险 2" [selected] [ref=f9e331]
+            - tab "发现 1" [ref=f9e332]
+            - tab "样本" [ref=f9e333]
+          - tabpanel "风险 2" [ref=f9e334]:
+            - button "check_flag crypto 0x4011b6 · 0.5" [ref=f9e335]:
+              - generic [ref=f9e336]:
+                - generic [ref=f9e337]: check_flag
+                - generic [ref=f9e338]: crypto
+              - generic [ref=f9e339]: 0x4011b6 · 0.5
+            - button "check_license_v2 anti-debug 0x401237 · 0.5" [ref=f9e340]:
+              - generic [ref=f9e341]:
+                - generic [ref=f9e342]: check_license_v2
+                - generic [ref=f9e343]: anti-debug
+              - generic [ref=f9e344]: 0x401237 · 0.5
+      - button "›" [ref=f9e345]

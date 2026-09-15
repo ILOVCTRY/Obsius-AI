@@ -1,0 +1,132 @@
+- generic [ref=f4e436]:
+  - banner [ref=f4e437]:
+    - generic [ref=f4e438]: 授权评估 · Web
+    - heading "批4走查-L1开窗" [level=1] [ref=f4e439]
+    - generic [ref=f4e440]: 任务 0/0 · 发现 0 · 资产 0
+    - button "🔔 审批 1" [ref=f4e441]:
+      - text: 🔔 审批
+      - generic [ref=f4e442]: "1"
+    - button "← 项目" [ref=f4e443]
+  - generic [ref=f4e444]:
+    - navigation [ref=f4e445]:
+      - button "◈ 项目" [ref=f4e446]:
+        - generic [ref=f4e447]: ◈
+        - text: 项目
+      - button "◉ 直播间" [ref=f4e448]:
+        - generic [ref=f4e449]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=f4e450]:
+        - generic [ref=f4e451]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=f4e452]:
+        - generic [ref=f4e453]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=f4e454]:
+        - generic [ref=f4e455]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=f4e456]:
+        - generic [ref=f4e457]: ⚙
+        - text: 技能/设置
+    - main [ref=f4e458]:
+      - generic [ref=f4e460]:
+        - generic [ref=f4e461]:
+          - generic [ref=f4e462]:
+            - button "全部" [ref=f4e463]
+            - button "Orchestrator" [ref=f4e464]
+          - generic [ref=f4e465]: ● live
+        - generic [ref=f4e466]:
+          - combobox "通用 · 通用评估员：按入口技能路由分配的方向干活" [ref=f4e467]:
+            - option "通用 · 通用评估员：按入口技能路由分配的方向干活" [selected]
+            - option "external-entry · 外网打点：按目标特征路由打法，最小伤害验证，发现即上报"
+            - option "lateral · 内网横向：凭据搜寻与横向移动，谨慎动静小，借力必须记录溯源"
+            - option "privesc · 提权：在已授权落点内纵向提权，谨慎、动静小"
+            - option "recon · 信息收集：被动侦察、子域枚举、活筛、指纹识别，产出结构化资产清单"
+          - combobox "开窗供应商（缺省=全局默认供应商）" [ref=f4e468]:
+            - option "默认供应商" [selected]
+            - option "ark-plan"
+            - option "ark-coding"
+          - combobox "开窗模型（缺省=该供应商首个模型）" [ref=f4e469]:
+            - option "默认模型（ark-code-latest）" [selected]
+            - option "ark-code-latest"
+            - option "deepseek-v4-flash"
+            - option "glm-5-3-flash-260828"
+          - button "开窗" [ref=f4e470]
+          - generic "项目自主级别（安全层任何档位不放松）；档位行为差异在后续批次接入" [ref=f4e471]:
+            - button "L0" [ref=f4e472]
+            - button "L1" [ref=f4e473]
+            - button "L2" [ref=f4e474]
+          - button "⏸ 暂停自动" [ref=f4e475]
+          - button "∑ 7778 📋 1 🪟 0/4" [ref=f4e477]:
+            - generic [ref=f4e478]: ∑ 7778
+            - generic [ref=f4e479]: 📋 1
+            - generic [ref=f4e480]: 🪟 0/4
+          - button "编排一轮" [ref=f4e482]
+          - button "复盘沉淀" [ref=f4e483]
+        - generic [ref=f4e484]:
+          - button "全部" [ref=f4e485]
+          - button "思考" [ref=f4e486]
+          - button "决策" [ref=f4e487]
+          - button "命令" [ref=f4e488]
+          - button "发现" [ref=f4e489]
+        - generic [ref=f4e491]:
+          - generic [ref=f4e494] [cursor=pointer]:
+            - generic [ref=f4e495]: 07:36:30
+            - generic [ref=f4e496]: ∑ token
+            - generic [ref=f4e497]: 编排 · ark-code-latest · ↑1679 ↓611 · ∑2290
+            - generic [ref=f4e499]: orchestrator
+          - generic [ref=f4e501] [cursor=pointer]:
+            - generic [ref=f4e502]:
+              - generic [ref=f4e503]: 07:36:30
+              - generic [ref=f4e504]: 📋 发布任务
+              - generic [ref=f4e505]: 对本次授权评估目标开展初始被动侦察：依据授权书/项目材料确认目标范围（根域名、IP 段、组织名），进行被动子域枚举、公开信息收集、存活资产筛选与服务/指纹识别，禁止主动漏洞探测或高强度扫描。输出结构化资产清单（资产、IP、端口/服务、指纹、来源、置信度），并标注疑似高价值入口与边界资产。
+              - generic [ref=f4e506]: orchestrator
+            - generic [ref=f4e507]: "{ \"task_id\": \"task-ab9f0e7ec122\", \"objective\": \"对本次授权评估目标开展初始被动侦察：依据授权书/项目材料确认目标范围（根域名、IP 段、组织名），进行被动子域枚举、公开信息收集、存活资产筛选与服务/指纹识别，禁止主动漏洞探测或高强度扫描。输出结构化资产清单（资产、IP、端口/服务、指纹、来源、置信度），并标注疑似高价值入口与边界资产。\", \"task_type\": \"recon\" }"
+          - generic [ref=f4e510] [cursor=pointer]:
+            - generic [ref=f4e511]: 07:36:48
+            - generic [ref=f4e512]: ∑ token
+            - generic [ref=f4e513]: 编排 · ark-code-latest · ↑2364 ↓359 · ∑5013
+            - generic [ref=f4e515]: orchestrator
+          - generic [ref=f4e517] [cursor=pointer]:
+            - generic [ref=f4e518]:
+              - generic [ref=f4e519]: 07:36:48
+              - generic [ref=f4e520]: 📌 编排简报
+              - generic [ref=f4e521]: digest, stats
+              - generic [ref=f4e522]: orchestrator
+            - generic [ref=f4e523]: "{ \"digest\": \"第 1 轮：项目刚启动，尚无资产/发现/会话。已申请开设 recon 信息收集会话（等待人类审批，审批单号 appr-4a6389b60fa4），并发布 1 条 passive 级初始侦察任务：确认授权范围、被动子域枚举、公开信息收集、存活筛选与指纹识别，要求输出结构化资产清单，暂不进行主动漏洞探测。下一步：审批通过后由 recon 会话认领任务并产出首批资产；若被拒则改派通用角色/调整任务。\", \"stats\": { \"tasks\": { \"by_status\": { \"open\": 1 }, \"open\": [ { \"id\": \"task-ab9f0e7ec122\", \"type\": \"recon\", \"priority\": 1, \"noise_budget\": \"passive\", \"created_at\": \"2026-09-15T07:36:30+00:00\", \"objective\": \"对本次授权评估目标开展初始被动侦察：依据授权书/项目材料确认目标范围（根域名、IP 段、组织名），进行被动子域枚举、公开信息收集、存活资产筛选与服务/指纹识别，\" } ], \"starvation\": [] }, \"findings\": [], \"sessions\": [], \"live_windows\": 0 } }"
+          - generic [ref=f4e526] [cursor=pointer]:
+            - generic [ref=f4e527]: 07:36:57
+            - generic [ref=f4e528]: ∑ token
+            - generic [ref=f4e529]: 编排 · ark-code-latest · ↑895 ↓22 · ∑7778
+            - generic [ref=f4e531]: orchestrator
+          - generic [ref=f4e533] [cursor=pointer]:
+            - generic [ref=f4e534]:
+              - generic [ref=f4e535]: 07:38:26
+              - generic [ref=f4e536]: 🗑 删除任务
+              - generic [ref=f4e537]: 对本次授权评估目标开展初始被动侦察：依据授权书/项目材料确认目标范围（根域名、IP 段、组织名），进行被动子域枚举、公开信息收集、存活资产筛选与服务/指纹识别，禁止主动漏洞探测或高强度扫描。输出结构化资产清单（资产、IP、端口/服务、指纹、来源、置信度），并标注疑似高价值入口与边界资产。
+              - generic [ref=f4e538]: human
+            - generic [ref=f4e539]: "{ \"task_id\": \"task-ab9f0e7ec122\", \"by\": \"human\", \"was_status\": \"open\", \"objective\": \"对本次授权评估目标开展初始被动侦察：依据授权书/项目材料确认目标范围（根域名、IP 段、组织名），进行被动子域枚举、公开信息收集、存活资产筛选与服务/指纹识别，禁止主动漏洞探测或高强度扫描。输出结构化资产清单（资产、IP、端口/服务、指纹、来源、置信度），并标注疑似高价值入口与边界资产。\", \"task_type\": \"recon\", \"noise_budget\": \"passive\", \"priority\": 1, \"conflict_keys\": [] }"
+        - generic [ref=f4e540]:
+          - textbox "插话：向黑板发布一个任务或一条指示…" [ref=f4e541]
+          - button "发送" [disabled]
+      - complementary [ref=f4e542]:
+        - generic [ref=f4e543]:
+          - tablist [ref=f4e544]:
+            - tab "发现" [selected] [ref=f4e545]
+            - tab "资产" [ref=f4e546]
+          - tabpanel "发现" [ref=f4e547]:
+            - generic [ref=f4e548]:
+              - generic [ref=f4e549]:
+                - button "全部资产" [ref=f4e551]
+                - generic [ref=f4e555]:
+                  - button "全部" [ref=f4e556]
+                  - button "critical" [ref=f4e557]
+                  - button "high" [ref=f4e558]
+                  - button "medium" [ref=f4e559]
+                  - button "low" [ref=f4e560]
+                  - button "info" [ref=f4e561]
+                - generic [ref=f4e562]:
+                  - button "全部状态" [ref=f4e563]
+                  - button "unverified" [ref=f4e564]
+                  - button "verified" [ref=f4e565]
+              - paragraph [ref=f4e570]: 暂无数据
+      - button "›" [ref=f4e571]

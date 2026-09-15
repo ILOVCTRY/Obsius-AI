@@ -1,0 +1,41 @@
+- generic [ref=f1e3]:
+  - generic [ref=f1e4]:
+    - heading "项目" [level=1] [ref=f1e5]
+    - paragraph [ref=f1e6]: 项目 = 场景轨（单选）× 能力包（多选）；数据随 workspaces/ 项目目录隔离
+  - generic [ref=f1e7]:
+    - generic [ref=f1e8]: 新建项目
+    - generic [ref=f1e10]:
+      - generic [ref=f1e11]:
+        - textbox "项目名（可用中文）" [ref=f1e12]
+        - button "创建" [disabled]
+      - generic [ref=f1e13]:
+        - generic [ref=f1e14]: 场景轨
+        - button "授权评估" [ref=f1e15]
+        - button "CTF" [ref=f1e16]
+      - generic [ref=f1e17]:
+        - generic [ref=f1e18]: 能力包
+        - button "二进制" [ref=f1e19]
+        - button "密码学" [ref=f1e20]
+        - button "取证" [ref=f1e21]
+        - button "杂项" [ref=f1e22]
+        - button "Web 攻防" [ref=f1e23]
+  - generic [ref=f1e24]:
+    - button "授权评估 · Web assessment 编排演练-Pikachu proj-9f7ee28609e7 2026-09-13 删除 assessment 编排演练-Pikachu" [ref=f1e25] [cursor=pointer]:
+      - generic [ref=f1e26]: 授权评估 · Web
+      - generic [ref=f1e27]:
+        - generic [ref=f1e28]: assessment 编排演练-Pikachu
+        - generic [ref=f1e29]: proj-9f7ee28609e7
+      - generic [ref=f1e30]: 2026-09-13
+      - button "删除 assessment 编排演练-Pikachu" [ref=f1e31]
+    - button "pentest 编排演练-Pikachu proj-63dd10c7d1a6 2026-09-12 删除 pentest 编排演练-Pikachu" [ref=f1e32] [cursor=pointer]:
+      - generic [ref=f1e34]:
+        - generic [ref=f1e35]: pentest 编排演练-Pikachu
+        - generic [ref=f1e36]: proj-63dd10c7d1a6
+      - generic [ref=f1e37]: 2026-09-12
+      - button "删除 pentest 编排演练-Pikachu" [ref=f1e38]
+    - button "re1 proj-e5fab5943e3b 2026-09-13 删除 re1" [ref=f1e39] [cursor=pointer]:
+      - generic [ref=f1e41]:
+        - generic [ref=f1e42]: re1
+        - generic [ref=f1e43]: proj-e5fab5943e3b
+      - generic [ref=f1e44]: 2026-09-13
+      - button "删除 re1" [ref=f1e45]

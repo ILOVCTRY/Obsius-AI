@@ -1,0 +1,4 @@
+kind: capability
+name: binary
+label: "二进制"
+description: "Pwn / 逆向 / 恶意样本静态分析；固件、IoT、工控、车联网专有知识为 kb 子模块"

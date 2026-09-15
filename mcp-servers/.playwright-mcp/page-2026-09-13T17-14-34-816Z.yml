@@ -1,0 +1,163 @@
+- generic [ref=f3e46]:
+  - banner [ref=f3e47]:
+    - generic [ref=f3e48]: 授权评估 · Web
+    - heading "assessment 编排演练-Pikachu" [level=1] [ref=f3e49]
+    - generic [ref=f3e50]: 任务 0/5 · 发现 0 · 资产 54
+    - button "🔔 审批" [ref=f3e51]
+    - button "← 项目" [ref=f3e52]
+  - generic [ref=f3e53]:
+    - navigation [ref=f3e54]:
+      - button "◈ 项目" [ref=f3e55]:
+        - generic [ref=f3e56]: ◈
+        - text: 项目
+      - button "◉ 直播间" [ref=f3e57]:
+        - generic [ref=f3e58]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=f3e59]:
+        - generic [ref=f3e60]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=f3e61]:
+        - generic [ref=f3e62]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=f3e63]:
+        - generic [ref=f3e64]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=f3e65]:
+        - generic [ref=f3e66]: ⚙
+        - text: 技能/设置
+    - main [ref=f3e67]:
+      - generic [ref=f3e68]:
+        - generic [ref=f3e69]:
+          - generic [ref=f3e70]: 场景轨
+          - combobox [ref=f3e71]:
+            - option "授权评估" [selected]
+            - option "CTF"
+          - generic [ref=f3e72]: 能力包
+          - combobox [ref=f3e73]:
+            - option "二进制" [selected]
+            - option "密码学"
+            - option "取证"
+            - option "杂项"
+            - option "Web 攻防"
+          - generic [ref=f3e74]: 角色/owners 属轨，Skill/红线轨与包各一份；写入留 .history，下次开窗生效
+        - button "健康度 0 error / 5 warning / 4 info" [ref=f3e75]:
+          - generic [ref=f3e76]: 健康度
+          - generic [ref=f3e78]: 0 error / 5 warning / 4 info
+        - generic [ref=f3e79]:
+          - tablist [ref=f3e80]:
+            - tab "角色" [ref=f3e81]
+            - tab "Skill" [selected] [ref=f3e82]
+            - tab "矩阵" [ref=f3e83]
+            - tab "红线" [ref=f3e84]
+            - tab "模型" [ref=f3e85]
+            - tab "MCP" [ref=f3e86]
+          - tabpanel "Skill" [ref=f3e87]:
+            - generic [ref=f3e88]:
+              - generic [ref=f3e89]:
+                - generic [ref=f3e90]:
+                  - textbox "任务描述 / 关键词…" [ref=f3e91]: ELF 栈溢出 ret2libc Canary
+                  - combobox "按角色白名单窄化（可选）" [ref=f3e92]:
+                    - option "不限角色" [selected]
+                    - option "_generalist"
+                    - option "external-entry"
+                    - option "lateral"
+                    - option "privesc"
+                    - option "recon"
+                  - button "试算" [ref=f3e93]
+                - generic [ref=f3e94]: 试算范围：全部能力包 ∪ 「授权评估」轨技能；可选角色做白名单窄化
+                - generic [ref=f3e95]:
+                  - textbox "特征 features（逗号/空格分隔，×3 加权）" [ref=f3e96]
+                  - textbox "文件特征 file_features，如 NX, Canary（×3 加权）" [active] [ref=f3e97]: NX, Canary, PIE
+                - generic [ref=f3e180]:
+                  - generic [ref=f3e181]: binary-pwn
+                  - generic [ref=f3e182]: capability/binary
+                  - generic [ref=f3e183]: score 15
+                  - generic [ref=f3e184]: "命中: file:NX, file:Canary, file:PIE, 溢出, 栈, ret2libc"
+              - generic [ref=f3e98]:
+                - generic [ref=f3e102]:
+                  - generic [ref=f3e103]:
+                    - button "包：二进制" [ref=f3e104]
+                    - button "轨：授权评估" [ref=f3e105]
+                    - button "＋新建" [ref=f3e106]
+                  - generic [ref=f3e107]:
+                    - button "binary-pwn" [ref=f3e108]
+                    - button "✕" [ref=f3e109]
+                  - generic [ref=f3e110]:
+                    - button "binary-rev" [ref=f3e111]
+                    - button "✕" [ref=f3e112]
+                  - generic [ref=f3e113]:
+                    - button "file-triage" [ref=f3e114]
+                    - button "✕" [ref=f3e115]
+                - generic [ref=f3e116]:
+                  - generic [ref=f3e117]:
+                    - generic [ref=f3e118]: binary-pwn
+                    - generic [ref=f3e119]: capability/binary
+                    - generic [ref=f3e120]: pwn
+                    - generic [ref=f3e121]: 溢出
+                    - generic [ref=f3e122]: 栈
+                    - generic [ref=f3e123]: 堆
+                    - generic [ref=f3e124]: uaf
+                    - generic [ref=f3e125]: double free
+                    - generic [ref=f3e126]: file:ELF
+                    - generic [ref=f3e127]: file:NX
+                    - generic [ref=f3e128]: file:Canary
+                    - generic [ref=f3e129]: file:PIE
+                    - generic [ref=f3e130]: file:RELRO
+                    - generic [ref=f3e131]: file:FORTIFY
+                    - generic [ref=f3e132]: file:stripped
+                    - generic [ref=f3e133]: file:dynamically_linked
+                    - generic [ref=f3e134]: file:PE
+                    - generic [ref=f3e135]: file:seccomp
+                    - generic [ref=f3e136]: linux
+                    - generic [ref=f3e137]: windows
+                    - generic [ref=f3e138]: elf
+                    - generic [ref=f3e139]: pe
+                    - generic [ref=f3e140]: so
+                    - generic [ref=f3e141]: dll
+                    - generic [ref=f3e142]: stack-overflow
+                    - generic [ref=f3e143]: heap
+                    - generic [ref=f3e144]: format-string
+                    - generic [ref=f3e145]: rop
+                    - generic [ref=f3e146]: kernel
+                    - generic [ref=f3e147]: sandbox-escape
+                    - generic [ref=f3e148]: malware-c2
+                    - generic [ref=f3e149]: solve
+                    - generic [ref=f3e150]: reverse
+                    - generic "只改 frontmatter enabled 行；禁用后不参与路由，正文保留" [ref=f3e151]:
+                      - checkbox "启用" [checked] [ref=f3e152]
+                      - text: 启用
+                    - button "历史" [ref=f3e153]
+                    - button "删除" [ref=f3e154]
+                    - generic [ref=f3e155]: 已保存 ✓
+                    - button "保存" [disabled]
+                  - paragraph [ref=f3e156]: Pwn 利用入口：checksec 保护判定 → 栈/堆/内核打法路由；兼恶意样本静态分析入口（混淆脚本/C2/PE .NET）
+                  - generic [ref=f3e157]:
+                    - generic [ref=f3e158]:
+                      - paragraph [ref=f3e159]: frontmatter 表单（路由依据；name 不可改，改名请新建+删除）；其余字段（enabled 等）原样保留
+                      - text: 描述 description（×1）
+                      - textbox "一句话说明何时该路由到本技能" [ref=f3e160]: Pwn 利用入口：checksec 保护判定 → 栈/堆/内核打法路由；兼恶意样本静态分析入口（混淆脚本/C2/PE .NET）
+                      - generic [ref=f3e161]:
+                        - generic [ref=f3e162]:
+                          - text: 关键词 keywords（×2）
+                          - textbox "逗号分隔，留空=不设置" [ref=f3e163]: pwn, 溢出, 栈, 堆, uaf, double free, shellcode, rop, ret2libc, 格式化字符串, seccomp, 沙箱逃逸, 内核, 驱动, 恶意样本, c2, beacon, 混淆
+                        - generic [ref=f3e164]:
+                          - text: 行为特征 features（×3）
+                          - textbox "逗号分隔，留空=不设置" [ref=f3e165]: has_remote_service, crashes_on_input, has_shellcode_hint
+                        - generic [ref=f3e166]:
+                          - text: 文件特征 file_features（×3）
+                          - textbox "逗号分隔，留空=不设置" [ref=f3e167]: ELF, NX, Canary, PIE, RELRO, FORTIFY, stripped, dynamically_linked, PE, seccomp
+                        - generic [ref=f3e168]:
+                          - text: 平台标签 platforms（×3）
+                          - textbox "逗号分隔，留空=不设置" [ref=f3e169]: linux, windows
+                        - generic [ref=f3e170]:
+                          - text: 格式标签 formats（×3）
+                          - textbox "逗号分隔，留空=不设置" [ref=f3e171]: elf, pe, so, dll
+                        - generic [ref=f3e172]:
+                          - text: 漏洞类 vuln_classes（×3）
+                          - textbox "逗号分隔，留空=不设置" [ref=f3e173]: stack-overflow, heap, format-string, rop, kernel, sandbox-escape, malware-c2
+                        - generic [ref=f3e174]:
+                          - text: 任务类型 task_types
+                          - textbox "逗号分隔，留空=不设置" [ref=f3e175]: solve, reverse
+                    - generic [ref=f3e176]: 正文 Markdown（入口纪律与「观察→kb_open」对照；当前 18 个关键词）
+                    - textbox [ref=f3e177]: "# binary-pwn —— Pwn 利用与恶意样本静态入口 > 分层纪律：本技能只做**保护判定 + 打法路由**。具体技术在 ctf-pwn / ctf-malware > 英文知识库，用 `kb_open(module=…)` 按表开单篇，禁止通读。逆向校验逻辑先走 > file-triage 分诊、binary-rev 还原；拿到漏洞点再回本技能选利用路线。 ## 0. 第一眼：checksec → 保护组合 → 路线 `checksec`（或 readelf 手判）后按下表开模块（路径均为 kb_open 的 module）： | 观察到的保护/形态 | 首选模块（ctf-pwn/） | |---|---| | 无 NX（栈可执行）/ ret2shellcode | `ctf-pwn/rop-and-shellcode.md` | | NX 开、No PIE：ret2text / 基础栈溢出 | `ctf-pwn/overflow-basics.md` | | NX+PIE：ret2libc / ROP / 栈迁移 | `ctf-pwn/rop-and-shellcode.md` → `ctf-pwn/rop-advanced.md` | | 有格式化字符串（%x/%p/%n） | `ctf-pwn/format-string.md`（配套 `ctf-pwn/scripts/fmtstr_payload_suite.py`） | | Canary：泄露/爆破/覆盖 | `ctf-pwn/rop-advanced.md` | | 菜单题 / malloc-free / UAF / double free / tcache | `ctf-pwn/heap-techniques.md` → `heap-techniques-2.md` → `heap-fsop.md` | | seccomp 过滤（orw / open-read-write） | `ctf-pwn/sandbox-escape.md`（配套 `scripts/seccomp_orw_generator.py`、`shellcraft_asm.py`） | | 内核题（vmlinux/bzImage/启动脚本/qemu）/ 驱动 ioctl | `ctf-pwn/kernel.md` → `kernel-techniques.md` → `kernel-bypass.md` | | SROP / 高阶花式 | `ctf-pwn/advanced.md`、`advanced-exploits.md`（至 `-5.md`） | | 临场 checklist / 踩坑 | `ctf-pwn/field-notes.md` | 配套 exp 骨架（Read 参考，**运行只准 docker/sandbox**）： `ctf-pwn/scripts/`：ret2libc_two_stage.py、srop_execve.py、fmtstr_payload_suite.py、 seccomp_orw_generator.py、shellcraft_asm.py。 ## 1. 恶意样本/可疑文件的静态分析入口（ctf-malware/） 未知样本默认按恶意处理：**只做静态，不执行**；确需动态一律 L3 沙箱 + 断网。 | 样本形态 | 模块（ctf-malware/） | |---|---| | 混淆脚本（JS/VBS/PowerShell/宏）、loader、打包器 | `ctf-malware/scripts-and-obfuscation.md` | | C2 流量特征、信标协议、回连行为推断 | `ctf-malware/c2-and-protocols.md` | | PE / .NET 程序集、托管代码反编 | `ctf-malware/pe-and-dotnet.md` | 函数级结论（解密例、校验函数）照例 `bb_upsert_func` 落 func_kb，别重复反编译。 ## 2. 产出落点 - exp / 解密脚本 → `bb_add_artifact(kind=\"poc\")`（自包含，拿到能跑，限授权目标）； - 漏洞机制结论 → findings（CTF 题可 info 级）；保护组合写进资产 meta，供后续会话复用。 ## 红线 - 样本与 exp **只在 docker/sandbox 执行**；host 端只允许 file/readelf/objdump/ python-capstone 等不执行样本的静态命令。 - exp 的远程目标只能是题目靶机或授权范围；越界走审批，禁止对真实第三方 IP 打。"
+                  - paragraph [ref=f3e178]: 表单保存时合并回写 frontmatter（name 锁定与目录一致，改名请新建+删除）；正文是 Agent 入口纪律，写坏会导致路由失效。

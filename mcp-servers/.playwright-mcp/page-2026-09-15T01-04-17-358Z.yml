@@ -1,0 +1,267 @@
+- generic [ref=f1e47]:
+  - banner [ref=f1e48]:
+    - generic [ref=f1e49]: 授权评估 · Web
+    - heading "assessment 编排演练-Pikachu" [level=1] [ref=f1e50]
+    - generic [ref=f1e51]: 任务 0/5 · 发现 4 · 资产 54
+    - button "🔔 审批" [ref=f1e52]
+    - button "← 项目" [ref=f1e53]
+  - generic [ref=f1e54]:
+    - navigation [ref=f1e55]:
+      - button "◈ 项目" [ref=f1e56]:
+        - generic [ref=f1e57]: ◈
+        - text: 项目
+      - button "◉ 直播间" [ref=f1e58]:
+        - generic [ref=f1e59]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=f1e60]:
+        - generic [ref=f1e61]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=f1e62]:
+        - generic [ref=f1e63]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=f1e64]:
+        - generic [ref=f1e65]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=f1e66]:
+        - generic [ref=f1e67]: ⚙
+        - text: 技能/设置
+    - main [ref=f1e68]:
+      - generic [ref=f1e70]:
+        - generic [ref=f1e71]:
+          - generic [ref=f1e72]:
+            - button "全部" [ref=f1e73]
+            - button "Orchestrator" [ref=f1e74]
+            - button "finished assessment/recon 关闭 assessment/recon" [ref=f1e75]:
+              - generic "finished" [ref=f1e76]
+              - text: assessment/recon
+              - button "关闭 assessment/recon" [ref=f1e77]
+            - button "finished assessment/external-entry 关闭 assessment/external-entry" [ref=f1e81]:
+              - generic "finished" [ref=f1e82]
+              - text: assessment/external-entry
+              - button "关闭 assessment/external-entry" [ref=f1e83]
+          - generic [ref=f1e87]: ● live
+        - generic [ref=f1e88]:
+          - combobox "通用 · 通用评估员：按入口技能路由分配的方向干活" [ref=f1e89]:
+            - option "通用 · 通用评估员：按入口技能路由分配的方向干活" [selected]
+            - option "external-entry · 外网打点：按目标特征路由打法，最小伤害验证，发现即上报"
+            - option "lateral · 内网横向：凭据搜寻与横向移动，谨慎动静小，借力必须记录溯源"
+            - option "privesc · 提权：在已授权落点内纵向提权，谨慎、动静小"
+            - option "recon · 信息收集：被动侦察、子域枚举、活筛、指纹识别，产出结构化资产清单"
+          - combobox "开窗供应商（缺省=全局默认供应商）" [ref=f1e90]:
+            - option "默认供应商" [selected]
+            - option "ark-plan"
+            - option "ark-coding"
+          - combobox "开窗模型（缺省=该供应商首个模型）" [ref=f1e91]:
+            - option "默认模型（ark-code-latest）" [selected]
+            - option "ark-code-latest"
+            - option "deepseek-v4-flash"
+            - option "glm-5-3-flash-260828"
+          - button "开窗" [ref=f1e92]
+          - button "编排一轮" [ref=f1e94]
+          - button "复盘沉淀" [ref=f1e95]
+        - generic [ref=f1e96]:
+          - button "全部" [ref=f1e97]
+          - button "思考" [ref=f1e98]
+          - button "决策" [ref=f1e99]
+          - button "命令" [ref=f1e100]
+          - button "发现" [ref=f1e101]
+        - generic [ref=f1e103]:
+          - generic [ref=f1e106] [cursor=pointer]:
+            - generic [ref=f1e107]: 14:33:09
+            - generic [ref=f1e108]: 💭 思考
+            - generic [ref=f1e109]: 有意思的结果：
+            - generic [ref=f1e110]: sess-b93da2d073b9
+          - generic [ref=f1e113] [cursor=pointer]:
+            - generic [ref=f1e114]: 14:33:10
+            - generic [ref=f1e115]: ⚡ 执行命令
+            - code [ref=f1e117]: "Write-Output \"=== sqli.php raw form area ===\"; $h = curl.exe -s -m 10 \"http://127.0.0.1:8085/vul/sqli/sqli.php\"; ($h | Select-String -Pattern 'form|select|option|input|submit|id=' -SimpleMatch:$false).Line | Select-Object -First 12; Write-Output \"=== sqli_id.php baseline display area ===\"; curl.exe -s -m 10 -o \"$env:TEMP\\pik2.html\" -d \"id=1&submit=chaxun\" \"http://127.0.0.1:8085/vul/sqli/sqli_id.php\"; $c = Get-Content \"$env:TEMP\\pik2.html\" -Encoding UTF8 -Raw; $i = $c.IndexOf('sli'); if ($i -lt 0) { $i = $c.IndexOf('查询结果') }; if ($i -lt 0) { $i = [Math]::Max(0, $c.Length - 4000) }; $c.Substring([Math]::Max(0,$i-500), [Math]::Min(2000, $c.Length - [Math]::Max(0,$i-500)))"
+            - generic [ref=f1e118]: sess-b93da2d073b9
+          - generic [ref=f1e121] [cursor=pointer]:
+            - generic [ref=f1e122]: 14:33:10
+            - generic [ref=f1e123]: ↳ 命令输出
+            - generic [ref=f1e124]: runtime, exit_code, duration_s, timed_out, stdout_head, stderr_head
+            - generic [ref=f1e125]: sess-b93da2d073b9
+          - generic [ref=f1e128] [cursor=pointer]:
+            - generic [ref=f1e129]: 14:33:45
+            - generic [ref=f1e130]: 💭 思考
+            - generic [ref=f1e131]: sqli.php 页面里根本没有 form/select/option —— 只有导航和 vul_info div。这说明 sqli.php 可能是个介绍页（在…
+            - generic [ref=f1e132]: sess-b93da2d073b9
+          - generic [ref=f1e135] [cursor=pointer]:
+            - generic [ref=f1e136]: 14:33:45
+            - generic [ref=f1e137]: ⚡ 执行命令
+            - code [ref=f1e139]: "$c = Get-Content \"$env:TEMP\\pik2.html\" -Encoding UTF8 -Raw; $i = $c.IndexOf('id=\"vul_info\"'); if ($i -ge 0) { $c.Substring($i, [Math]::Min(1500, $c.Length - $i)) } else { Write-Output \"NO vul_info\"; $c.Length }"
+            - generic [ref=f1e140]: sess-b93da2d073b9
+          - generic [ref=f1e143] [cursor=pointer]:
+            - generic [ref=f1e144]: 14:33:45
+            - generic [ref=f1e145]: ↳ 命令输出
+            - generic [ref=f1e146]: runtime, exit_code, duration_s, timed_out, stdout_head, stderr_head
+            - generic [ref=f1e147]: sess-b93da2d073b9
+          - generic [ref=f1e150] [cursor=pointer]:
+            - generic [ref=f1e151]: 14:33:46
+            - generic [ref=f1e152]: ⚡ 执行命令
+            - code [ref=f1e154]: "$h = curl.exe -s -m 10 \"http://127.0.0.1:8085/vul/sqli/sqli.php\"; $c = $h -join \"`n\"; $i = $c.IndexOf('id=\"vul_info\"'); if ($i -ge 0) { $c.Substring($i, [Math]::Min(1500, $c.Length - $i)) } else { Write-Output \"NO vul_info\" }"
+            - generic [ref=f1e155]: sess-b93da2d073b9
+          - generic [ref=f1e158] [cursor=pointer]:
+            - generic [ref=f1e159]: 14:33:46
+            - generic [ref=f1e160]: ↳ 命令输出
+            - generic [ref=f1e161]: runtime, exit_code, duration_s, timed_out, stdout_head, stderr_head
+            - generic [ref=f1e162]: sess-b93da2d073b9
+          - generic [ref=f1e165] [cursor=pointer]:
+            - generic [ref=f1e166]: 14:34:21
+            - generic [ref=f1e167]: 💭 思考
+            - generic [ref=f1e168]: "The first command: sqli_id.php baseline response has no vul_info (length 33655 —…"
+            - generic [ref=f1e169]: sess-b93da2d073b9
+          - generic [ref=f1e172] [cursor=pointer]:
+            - generic [ref=f1e173]: 14:34:22
+            - generic [ref=f1e174]: ⚡ 执行命令
+            - code [ref=f1e176]: "$t=\"$env:TEMP\"; curl.exe -s -m 10 -o \"$t\\a.html\" -d \"id=1&submit=chaxun\" \"http://127.0.0.1:8085/vul/sqli/sqli_id.php\"; curl.exe -s -m 10 -o \"$t\\b.html\" -d \"id=1%20and%201%3D2&submit=chaxun\" \"http://127.0.0.1:8085/vul/sqli/sqli_id.php\"; Write-Output \"=== diff baseline vs and 1=2 ===\"; Compare-Object (Get-Content \"$t\\a.html\" -Encoding UTF8) (Get-Content \"$t\\b.html\" -Encoding UTF8) | ? { $_.SideIndicator -eq '<=' } | % { $_.InputInputInputInputInputInputInputInput }"
+            - generic [ref=f1e177]: sess-b93da2d073b9
+          - generic [ref=f1e180] [cursor=pointer]:
+            - generic [ref=f1e181]: 14:34:22
+            - generic [ref=f1e182]: ↳ 命令输出
+            - generic [ref=f1e183]: runtime, exit_code, duration_s, timed_out, stdout_head, stderr_head
+            - generic [ref=f1e184]: sess-b93da2d073b9
+          - generic [ref=f1e186] [cursor=pointer]:
+            - generic [ref=f1e187]:
+              - generic [ref=f1e188]: 14:34:22
+              - generic [ref=f1e189]: ❌ 任务失败
+              - generic [ref=f1e190]: 会话结束但任务未收尾，自动标记失败
+              - generic [ref=f1e191]: system
+            - generic [ref=f1e192]: "{ \"task_id\": \"task-9543c7dcbe1a\", \"session_id\": \"sess-b93da2d073b9\", \"note\": \"会话结束但任务未收尾，自动标记失败\" }"
+          - generic [ref=f1e194] [cursor=pointer]:
+            - generic [ref=f1e195]:
+              - generic [ref=f1e196]: 14:34:22
+              - generic [ref=f1e197]: ⚪ 会话收尾
+              - generic [ref=f1e198]: sess-b93da2d073b9
+            - generic [ref=f1e199]: "{ \"session_id\": \"sess-b93da2d073b9\", \"summary\": \"\" }"
+          - generic [ref=f1e201] [cursor=pointer]:
+            - generic [ref=f1e202]:
+              - generic [ref=f1e203]: 14:35:58
+              - generic [ref=f1e204]: 📌 编排简报
+              - generic [ref=f1e205]: digest, stats
+              - generic [ref=f1e206]: orchestrator
+            - generic [ref=f1e207]: "{ \"digest\": \"【项目简报 · 第 3 轮协调】授权靶场渗透评估：http://127.0.0.1:8085（pikachu 漏洞训练平台）\\n\\n■ 当前进展\\n- external-entry 会话（sess-b93da2d073b9）正执行 SQLi 入口最小伤害验证任务（task-9543c7dcbe1a）：已确认靶场可达，登记 11 个 SQLi 资产入口（sqli.php、sqli_str.php、sqli_blind_b/t.php、sqli_del.php、sqli_header、sqli_id、sqli_search、sqli_widebyte、sqli_x 等），正逐个用轻量 payload 验证，findings 待落板。\\n- recon 会话（sess-f920a7dc74d1）空闲备用，暂无派工需求。\\n\\n■ 任务队列态势\\n- 3 个 failed：均为\\\"会话结束但任务未收尾\\\"被系统自动标记——流程性损耗，已提醒执行会话在收尾前必须落 findings 并更新任务状态。\\n- 2 个 open exploit 任务内容重复（同为\\\"其余已登记入口验证\\\"，14:20/14:22 各建一次）：待 external-entry 会话收尾后认领其一即可，不得重复执行；本轮不再新增重复任务。\\n\\n■ 环境注意事项（供执行会话参考）\\n- WSL 运行时网络不可达（mirrored 模式故障，HTTP:000），对 127.0.0.1 的访问必须用宿主机 curl.exe / PowerShell 语法（&& 不支持，用分号）。\\n- 靶场为本地 pikachu，动静可控，保持 medium 噪声预算内的最小伤害验证。\\n\\n■ 风险与下一步\\n- findings 仍为空：若 sqli 验证出 confirmed 漏洞，须立即落黑板并按规则派生验证任务。\\n- 下轮复检：① sqli 任务是否收尾、findings 是否落板；② open 重复任务是否被认领收敛；③ 若 external-entry 会话再次异常结束，考虑由 recon 会话改道接手收尾。\", \"stats\": { \"tasks\": { \"by_status\": { \"failed\": 3, \"open\": 2 }, \"open\": [ { \"id\": \"task-1fb4eae35eb1\", \"type\": \"exploit\", \"priority\": 2, \"noise_budget\": \"medium\", \"created_at\": \"2026-09-13T14:20:29+00:00\", \"objective\": \"对其余已登记入口做最小伤害验证并上报确认结果。目标资产（授权靶场 http://127.0.0.1:8085）：\\n- 文件上传：/vul/unsafeuploa\" }, { \"id\": \"task-7e94fde3f153\", \"type\": \"exploit\", \"priority\": 2, \"noise_budget\": \"medium\", \"created_at\": \"2026-09-13T14:22:22+00:00\", \"objective\": \"对其余已登记入口做最小伤害验证并上报确认结果。目标资产（授权靶场 http://127.0.0.1:8085）：\\n- 文件上传：/vul/unsafeuploa\" } ], \"starvation\": [] }, \"findings\": [], \"sessions\": [ { \"id\": \"sess-f920a7dc74d1\", \"role\": \"recon\", \"status\": \"idle\" }, { \"id\": \"sess-b93da2d073b9\", \"role\": \"external-entry\", \"status\": \"idle\" } ], \"live_windows\": 2 } }"
+          - generic [ref=f1e210] [cursor=pointer]:
+            - generic [ref=f1e211]: 16:29:51
+            - generic [ref=f1e212]: session.closed
+            - generic [ref=f1e213]: 人类关闭会话窗口
+            - generic [ref=f1e214]: human
+          - generic [ref=f1e217] [cursor=pointer]:
+            - generic [ref=f1e218]: 16:29:53
+            - generic [ref=f1e219]: session.closed
+            - generic [ref=f1e220]: 人类关闭会话窗口
+            - generic [ref=f1e221]: human
+          - generic [ref=f1e223] [cursor=pointer]:
+            - generic [ref=f1e224]:
+              - generic [ref=f1e225]: 15:07:22
+              - generic [ref=f1e226]: 🔍 新发现
+              - generic [ref=f1e227]: finding_id, vuln_class, severity
+              - generic [ref=f1e228]: human
+            - generic [ref=f1e229]: "{ \"finding_id\": \"find-228432ab8c01\", \"vuln_class\": \"recon-fingerprint\", \"severity\": \"info\" }"
+          - generic [ref=f1e231] [cursor=pointer]:
+            - generic [ref=f1e232]:
+              - generic [ref=f1e233]: 15:07:22
+              - generic [ref=f1e234]: 🔍 新发现
+              - generic [ref=f1e235]: finding_id, vuln_class, severity
+              - generic [ref=f1e236]: human
+            - generic [ref=f1e237]: "{ \"finding_id\": \"find-a71a2a4aabe0\", \"vuln_class\": \"sql-injection\", \"severity\": \"medium\" }"
+          - generic [ref=f1e239] [cursor=pointer]:
+            - generic [ref=f1e240]:
+              - generic [ref=f1e241]: 15:07:22
+              - generic [ref=f1e242]: 🔍 新发现
+              - generic [ref=f1e243]: finding_id, vuln_class, severity
+              - generic [ref=f1e244]: human
+            - generic [ref=f1e245]: "{ \"finding_id\": \"find-a71a2a4aabe0\", \"vuln_class\": \"sql-injection\", \"severity\": \"high\" }"
+          - generic [ref=f1e247] [cursor=pointer]:
+            - generic [ref=f1e248]:
+              - generic [ref=f1e249]: 15:07:22
+              - generic [ref=f1e250]: 🔍 新发现
+              - generic [ref=f1e251]: finding_id, vuln_class, severity
+              - generic [ref=f1e252]: human
+            - generic [ref=f1e253]: "{ \"finding_id\": \"find-1fded962a416\", \"vuln_class\": \"recon-fingerprint\", \"severity\": \"info\" }"
+          - generic [ref=f1e255] [cursor=pointer]:
+            - generic [ref=f1e256]:
+              - generic [ref=f1e257]: 15:07:22
+              - generic [ref=f1e258]: 🔍 新发现
+              - generic [ref=f1e259]: finding_id, vuln_class, severity
+              - generic [ref=f1e260]: human
+            - generic [ref=f1e261]: "{ \"finding_id\": \"find-8eb36bb3f3dc\", \"vuln_class\": \"x\", \"severity\": \"info\" }"
+          - generic [ref=f1e263] [cursor=pointer]:
+            - generic [ref=f1e264]:
+              - generic [ref=f1e265]: 15:13:21
+              - generic [ref=f1e266]: 🔍 发现更新
+              - generic [ref=f1e267]: finding_id, changed, status
+              - generic [ref=f1e268]: human
+            - generic [ref=f1e269]: "{ \"finding_id\": \"find-a71a2a4aabe0\", \"changed\": [ \"evidence\" ], \"status\": \"verified\" }"
+          - generic [ref=f1e271] [cursor=pointer]:
+            - generic [ref=f1e272]:
+              - generic [ref=f1e273]: 15:13:21
+              - generic [ref=f1e274]: 🔍 发现更新
+              - generic [ref=f1e275]: finding_id, changed, status
+              - generic [ref=f1e276]: human
+            - generic [ref=f1e277]: "{ \"finding_id\": \"find-8eb36bb3f3dc\", \"changed\": [ \"status\" ], \"status\": \"false-positive\" }"
+          - generic [ref=f1e279] [cursor=pointer]:
+            - generic [ref=f1e280]:
+              - generic [ref=f1e281]: 01:03:37
+              - generic [ref=f1e282]: ⏸ 已暂停
+              - generic [ref=f1e283]: session_id, task_id
+              - generic [ref=f1e284]: sess-b93da2d073b9
+            - generic [ref=f1e285]: "{ \"session_id\": \"sess-b93da2d073b9\", \"task_id\": null }"
+          - generic [ref=f1e287] [cursor=pointer]:
+            - generic [ref=f1e288]:
+              - generic [ref=f1e289]: 01:03:37
+              - generic [ref=f1e290]: ⛔ 人工中断
+              - generic [ref=f1e291]: 人工中断
+              - generic [ref=f1e292]: sess-b93da2d073b9
+            - generic [ref=f1e293]: "{ \"session_id\": \"sess-b93da2d073b9\", \"task_id\": null, \"note\": \"人工中断\" }"
+        - generic [ref=f1e294]:
+          - textbox "插话：向黑板发布一个任务或一条指示…" [ref=f1e295]
+          - button "发送" [disabled]
+      - complementary [ref=f1e296]:
+        - generic [ref=f1e297]:
+          - tablist [ref=f1e298]:
+            - tab "发现" [selected] [ref=f1e299]
+            - tab "资产" [ref=f1e300]
+          - tabpanel "发现" [ref=f1e301]:
+            - generic [ref=f1e302]:
+              - generic [ref=f1e303]:
+                - button "全部资产" [ref=f1e305]
+                - generic [ref=f1e309]:
+                  - button "全部" [ref=f1e310]
+                  - button "critical" [ref=f1e311]
+                  - button "high" [ref=f1e312]
+                  - button "medium" [ref=f1e313]
+                  - button "low" [ref=f1e314]
+                  - button "info" [ref=f1e315]
+                - generic [ref=f1e316]:
+                  - button "全部状态" [ref=f1e317]
+                  - button "unverified" [ref=f1e318]
+                  - button "verified" [ref=f1e319]
+              - generic [ref=f1e323]:
+                - generic [ref=f1e324] [cursor=pointer]:
+                  - generic [ref=f1e325]:
+                    - generic [ref=f1e326]: high
+                    - generic [ref=f1e327]: 数字型 SQL 注入：/vul/sqli/sqli.php GET id 可注入
+                    - generic [ref=f1e328]: verified
+                    - generic [ref=f1e329]: human
+                  - generic [ref=f1e330]: sql-injection · 2026-09-14 15:07 · http://127.0.0.1:8085/vul/sqli/sqli.php
+                - generic [ref=f1e331] [cursor=pointer]:
+                  - generic [ref=f1e332]:
+                    - generic [ref=f1e333]: info
+                    - generic [ref=f1e334]: 旁站发现：8080 端口疑似另一 Web 服务（资产待登记）
+                    - generic [ref=f1e335]: human
+                  - generic [ref=f1e336]: recon-fingerprint · 2026-09-14 15:07
+                - generic [ref=f1e337] [cursor=pointer]:
+                  - generic [ref=f1e338]:
+                    - generic [ref=f1e339]: info
+                    - generic [ref=f1e340]: x
+                    - generic [ref=f1e341]: human
+                  - generic [ref=f1e342]: x · 2026-09-14 15:07
+                - generic [ref=f1e343] [cursor=pointer]:
+                  - generic [ref=f1e344]:
+                    - generic [ref=f1e345]: info
+                    - generic [ref=f1e346]: 8085 端口开放，指纹 nginx/1.15.11 + PHP/7.3.4（Pikachu 靶场）
+                    - generic [ref=f1e347]: verified
+                    - generic [ref=f1e348]: human
+                  - generic [ref=f1e349]: recon-fingerprint · 2026-09-14 15:07 · 127.0.0.1:8085
+      - button "›" [ref=f1e350]

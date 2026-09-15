@@ -1,0 +1,139 @@
+"""pack doctor 测试：tmp packs 造结构，精确断言 error/warning/info 分级。"""
+
+import json
+
+from core.skills.doctor import diagnose
+
+_SKILL = """---
+name: {name}
+description: {desc}
+---
+# {name}
+{body}
+"""
+
+
+def _write(path, content):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def _build_packs(root) -> None:
+    # web 包：齐全技能/红线/快照；一个技能 name 不一致（error）
+    _write(root / "capabilities/web/pack.yaml", "kind: capability\nname: web\n")
+    _write(root / "capabilities/web/rules/redlines.md", "# web 红线\n")
+    _write(root / "capabilities/web/kb/ctf-web/auth-jwt.md", "# jwt\n")
+    _write(root / "capabilities/web/kb_sources.json", json.dumps(
+        {"sources": [{"id": "web-kb", "root": "kb", "recursive": True},
+                     {"id": "ghost", "root": "ghost-kb"}]}, ensure_ascii=False))
+    _write(root / "capabilities/web/skills/good-skill/SKILL.md",
+           _SKILL.format(name="good-skill", desc="好技能", body="正文"))
+    _write(root / "capabilities/web/skills/wrong-dir/SKILL.md",
+           _SKILL.format(name="actually-other-name", desc="名实不符", body="正文"))
+    _write(root / "capabilities/web/skills/broken-refs/SKILL.md",
+           _SKILL.format(name="broken-refs", desc="引用失效", body=(
+               "见 `kb_open(module=\"ctf-web/missing.md\")`，"
+               "另引 `kb_open(module=\"nope-snap/x.md\")`。")))
+    _write(root / "capabilities/web/skills/disabled-skill/SKILL.md",
+           "---\nname: disabled-skill\ndescription: 停用\nenabled: false\n---\n# x\n")
+
+    # crypto 包：缺 redlines（warning）+ kb_sources 坏 JSON（warning）
+    _write(root / "capabilities/crypto/pack.yaml", "kind: capability\nname: crypto\n")
+    _write(root / "capabilities/crypto/kb_sources.json", "{这不是 JSON")
+
+    # ctf 轨：角色引用悬空技能/禁用技能/未注册 task_type
+    _write(root / "tracks/ctf/track.yaml", "name: ctf\n")
+    _write(root / "tracks/ctf/rules/redlines.md", "# ctf 红线\n")
+    _write(root / "tracks/ctf/task_types.yaml", "generic: passive\nsolve: passive\n")
+    _write(root / "tracks/ctf/roles/_generalist.yaml", 'name: _generalist\nskills: null\n')
+    _write(root / "tracks/ctf/roles/recon.yaml",
+           'name: recon\n'
+           'skills: [good-skill, ghost-skill, disabled-skill]\n'
+           'task_types: [solve, bogus-type]\n')
+    # 回收站有一项（info）
+    _write(root / "tracks/ctf/roles/.history/trash/old-role.20260101T000000Z.bak",
+           "name: old-role\n")
+
+    # research 空轨：缺 task_types.yaml 与 redlines（warning），不应炸
+    _write(root / "tracks/research/track.yaml", "name: research\n")
+
+
+def test_doctor_levels_and_codes(tmp_path):
+    root = tmp_path / "packs"
+    _build_packs(root)
+    rep = diagnose(root)
+    issues = rep.issues
+    by_code: dict[str, list] = {}
+    for i in issues:
+        by_code.setdefault(i.code, []).append(i)
+
+    errors = {i.code for i in issues if i.level == "error"}
+    warnings = {i.code for i in issues if i.level == "warning"}
+    infos = {i.code for i in issues if i.level == "info"}
+
+    # error 四项绑定断裂
+    assert "role-skill-missing" in errors
+    assert "role-tasktype-unregistered" in errors
+    assert "skill-name-mismatch" in errors
+    assert "kb-source-root-missing" in errors
+    assert any("ghost-skill" in i.message for i in by_code["role-skill-missing"])
+    assert any("bogus-type" in i.message for i in by_code["role-tasktype-unregistered"])
+    assert any("ghost-kb" in i.message for i in by_code["kb-source-root-missing"])
+
+    # warning：禁用引用 / 缺红线 / kb 引用失效（含未知快照）/ 坏 JSON / 空轨缺注册表
+    assert "role-skill-disabled" in warnings
+    assert "missing-redlines" in warnings
+    assert "kb-module-broken" in warnings
+    assert "kb-snapshot-unknown" in warnings
+    assert "kb-sources-bad-json" in warnings
+    assert "missing-task-types" in warnings
+    assert any("ctf-web/missing.md" in i.message for i in by_code["kb-module-broken"])
+    assert any("nope-snap/x.md" in i.message for i in by_code["kb-snapshot-unknown"])
+    # crypto 与 research 各缺一条红线
+    redline_targets = {i.target for i in by_code["missing-redlines"]}
+    assert "capabilities/crypto/rules/redlines.md" in redline_targets
+    assert "tracks/research/rules/redlines.md" in redline_targets
+    assert "capabilities/web/rules/redlines.md" not in redline_targets
+
+    # info：孤儿技能（被引用的 good-skill 不报；禁用技能不报）+ 回收站
+    orphan = {i.message for i in by_code.get("orphan-skill", [])}
+    assert all("good-skill" not in m for m in orphan)
+    assert all("disabled-skill" not in m for m in orphan)
+    assert "trash-present" in infos
+
+    # counts 与序列化
+    counts = rep.counts
+    assert counts["error"] >= 4 and counts["warning"] >= 6 and counts["info"] >= 2
+    payload = rep.to_dict()
+    assert set(payload["counts"]) == {"error", "warning", "info"}
+    assert payload["issues"] == sorted(
+        payload["issues"],
+        key=lambda x: ({"error": 0, "warning": 1, "info": 2}[x["level"]],
+                       x["code"], x["target"]))
+
+
+def test_doctor_clean_pack_has_only_soft_notes(tmp_path):
+    """健康结构：零 error；kb 引用全部有效；引用得到的技能不报孤儿。"""
+    root = tmp_path / "packs"
+    _write(root / "capabilities/web/pack.yaml", "kind: capability\nname: web\n")
+    _write(root / "capabilities/web/rules/redlines.md", "# r\n")
+    _write(root / "capabilities/web/kb/ctf-web/auth-jwt.md", "# jwt\n")
+    _write(root / "capabilities/web/kb_sources.json",
+           json.dumps({"sources": [{"id": "web-kb", "root": "kb"}]}))
+    _write(root / "capabilities/web/skills/s1/SKILL.md",
+           '---\nname: s1\ndescription: d\n---\n# s1\n`kb_open(module="ctf-web/auth-jwt.md")`\n')
+    _write(root / "tracks/ctf/track.yaml", "name: ctf\n")
+    _write(root / "tracks/ctf/rules/redlines.md", "# r\n")
+    _write(root / "tracks/ctf/task_types.yaml", "generic: passive\nsolve: passive\n")
+    _write(root / "tracks/ctf/roles/recon.yaml",
+           "name: recon\nskills: [s1]\ntask_types: [solve]\n")
+    rep = diagnose(root)
+    assert rep.counts["error"] == 0
+    codes = {i.code for i in rep.issues}
+    assert not {"kb-module-broken", "kb-snapshot-unknown", "orphan-skill"} & codes
+
+
+def test_doctor_missing_root(tmp_path):
+    rep = diagnose(tmp_path / "nope")
+    assert rep.counts["error"] == 1
+    assert rep.issues[0].code == "packs-root-missing"

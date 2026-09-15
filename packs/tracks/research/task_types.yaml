@@ -1,0 +1,8 @@
+# 研究轨任务类型注册表（DESIGN.md §4.5.5）
+# 格式：<type>: <默认噪声预算>。generic 为内置兜底类型，始终合法。
+# 研究轨全部被动：静态分析/反编译不接触真实目标，无主动流量。
+generic: passive
+triage: passive
+reverse: passive
+analyze: passive
+verify: passive

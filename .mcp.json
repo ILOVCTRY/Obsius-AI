@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "fofa": {
+      "command": "E:/ILOVCTRY/SRC/src-strike/mcp-servers/fofa_MCP/.venv/Scripts/python.exe",
+      "args": ["mcp-servers/fofa_MCP/fofa.py"]
+    },
+    "playwright-claude": {
+      "command": "node",
+      "args": ["mcp-servers/playwright-mcp/bin/playwright-claude.mjs"]
+    }
+  }
+}

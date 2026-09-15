@@ -1,0 +1,4 @@
+kind: capability
+name: forensics
+label: "取证"
+description: "取证、流量分析、内存/磁盘镜像、OSINT（ctf-forensics / ctf-osint 知识库）"

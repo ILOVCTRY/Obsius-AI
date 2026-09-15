@@ -1,0 +1,132 @@
+- generic [ref=f1e54]:
+  - banner [ref=f1e55]:
+    - generic [ref=f1e56]: 授权评估 · Web
+    - heading "assessment 编排演练-Pikachu" [level=1] [ref=f1e57]
+    - generic [ref=f1e58]: 任务 0/9 · 发现 6 · 资产 54
+    - button "🔔 审批" [ref=f1e59]
+    - button "← 项目" [ref=f1e60]
+  - generic [ref=f1e61]:
+    - navigation [ref=f1e62]:
+      - button "◈ 项目" [ref=f1e63]:
+        - generic [ref=f1e64]: ◈
+        - text: 项目
+      - button "◉ 直播间" [ref=f1e65]:
+        - generic [ref=f1e66]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=f1e67]:
+        - generic [ref=f1e68]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=f1e69]:
+        - generic [ref=f1e70]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=f1e71]:
+        - generic [ref=f1e72]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=f1e73]:
+        - generic [ref=f1e74]: ⚙
+        - text: 技能/设置
+    - main [ref=f1e75]:
+      - generic [ref=f1e77]:
+        - tablist [ref=f1e78]:
+          - tab "发现" [selected] [ref=f1e79]
+          - tab "资产" [ref=f1e80]
+        - tabpanel "发现" [ref=f1e81]:
+          - generic [ref=f1e82]:
+            - generic [ref=f1e83]:
+              - button "全部资产" [ref=f1e85]
+              - generic [ref=f1e89]:
+                - button "全部" [ref=f1e90]
+                - button "critical" [ref=f1e91]
+                - button "high" [ref=f1e92]
+                - button "medium" [ref=f1e93]
+                - button "low" [ref=f1e94]
+                - button "info" [ref=f1e95]
+              - generic [ref=f1e96]:
+                - button "全部状态" [ref=f1e97]
+                - button "unverified" [ref=f1e98]
+                - button "verified" [ref=f1e99]
+              - generic [ref=f1e100]:
+                - button "列表" [ref=f1e101]
+                - button "链路" [ref=f1e102]
+            - generic [ref=f1e104]:
+              - generic [ref=f1e105]:
+                - generic [ref=f1e106]:
+                  - button "尚无攻击链" [ref=f1e108]
+                  - button "＋新建链" [ref=f1e112]
+                - generic [ref=f1e113] [cursor=pointer]:
+                  - checkbox "弱边" [checked] [ref=f1e114]
+                  - text: 弱边
+                - button "重置布局（清除手动位置）" [ref=f1e115]
+                - button "适应视图" [ref=f1e119]
+                - button "全屏" [ref=f1e125]
+              - application [ref=f1e131]:
+                - generic [ref=f1e133]:
+                  - generic:
+                    - generic:
+                      - img:
+                        - group "Edge from find-694126cffd48 to find-b2b879669332" [ref=f1e134] [cursor=pointer]
+                      - img:
+                        - group "Edge from find-228432ab8c01 to find-a71a2a4aabe0"
+                    - generic:
+                      - generic "依据已被推翻（false-positive），此引用失效——见 DESIGN §6.7 的 1.6" [ref=f1e138] [cursor=pointer]: 【走查】以前置盲注为写入前提
+                      - generic "指纹确认 Web 靶场后，在 sqli 模块 id 参数验证注入点" [ref=f1e139] [cursor=pointer]
+                    - generic:
+                      - generic [ref=f1e141]:
+                        - generic [ref=f1e142]: 🖧 127.0.0.1
+                        - generic [ref=f1e144]:
+                          - generic [ref=f1e145]: 信息/低危1
+                          - generic [ref=f1e146]: 中危
+                          - generic [ref=f1e147]: 高危/严重3
+                      - generic [ref=f1e149]:
+                        - generic [ref=f1e150]: 🖧 未归属
+                        - generic [ref=f1e152]:
+                          - generic [ref=f1e153]: 信息/低危2
+                          - generic [ref=f1e154]: 中危
+                          - generic [ref=f1e155]: 高危/严重
+                      - group [ref=f1e156]:
+                        - generic [ref=f1e157]:
+                          - paragraph [ref=f1e160]: 【走查】经盲注写文件尝试 getshell（下游结论）
+                          - generic [ref=f1e161]:
+                            - generic [ref=f1e162]: rce
+                            - generic [ref=f1e163]: critical
+                      - group [ref=f1e165]:
+                        - generic [ref=f1e166]:
+                          - paragraph [ref=f1e169]: 【走查】sqli_blind_b.php name 参数布尔盲注
+                          - generic [ref=f1e170]:
+                            - generic [ref=f1e171]: sql-injection-blind
+                            - generic [ref=f1e172]: high
+                            - generic "false-positive" [ref=f1e173]: ✕
+                      - group [ref=f1e175]:
+                        - generic [ref=f1e176]:
+                          - paragraph [ref=f1e179]: 数字型 SQL 注入：/vul/sqli/sqli.php GET id 可注入
+                          - generic [ref=f1e180]:
+                            - generic [ref=f1e181]: sql-injection
+                            - generic [ref=f1e182]: high
+                            - generic "verified" [ref=f1e183]: ✓
+                            - generic [ref=f1e184]: POC
+                      - group [ref=f1e186]:
+                        - generic [ref=f1e187]:
+                          - paragraph [ref=f1e190]: 旁站发现：8080 端口疑似另一 Web 服务（资产待登记）
+                          - generic [ref=f1e191]:
+                            - generic [ref=f1e192]: recon-fingerprint
+                            - generic [ref=f1e193]: info
+                      - group [ref=f1e195]:
+                        - generic [ref=f1e196]:
+                          - paragraph [ref=f1e199]: x
+                          - generic [ref=f1e200]:
+                            - generic [ref=f1e201]: x
+                            - generic [ref=f1e202]: info
+                            - generic "false-positive" [ref=f1e203]: ✕
+                      - group [ref=f1e205]:
+                        - generic [ref=f1e206]:
+                          - paragraph [ref=f1e209]: 8085 端口开放，指纹 nginx/1.15.11 + PHP/7.3.4（Pikachu 靶场）
+                          - generic [ref=f1e210]:
+                            - generic [ref=f1e211]: recon-fingerprint
+                            - generic [ref=f1e212]: info
+                            - generic "verified" [ref=f1e213]: ✓
+                            - generic [ref=f1e214]: POC
+                - img "Mini Map" [ref=f1e217]
+                - generic "Control Panel" [ref=f1e228]:
+                  - button "Zoom In" [ref=f1e229] [cursor=pointer]
+                  - button "Zoom Out" [ref=f1e232] [cursor=pointer]
+                  - button "Fit View" [ref=f1e235] [cursor=pointer]

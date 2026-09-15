@@ -1,0 +1,6 @@
+name: ida
+category: decompiler
+probe: "where idat"
+install: "IDA Pro 商业授权；9.x 统一 idat.exe（8.x 为 idat64.exe），建议把 IDA 目录加入 PATH；未配 PATH 时平台也会扫描 Program Files / Tools 等常见安装目录"
+runtime: host
+note: "headless 全量导出走 idat -A + scripts/export_funcs.py（IDAPython v2 契约）；9.x 数据库扩展 .idb，8.x 为 .i64；MCP 端口在线时优先 MCP（P2 接线）"

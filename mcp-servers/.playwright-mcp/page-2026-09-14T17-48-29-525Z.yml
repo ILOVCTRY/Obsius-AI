@@ -1,0 +1,44 @@
+- generic [ref=f10e129]:
+  - generic [ref=f10e130]:
+    - heading "项目" [level=1] [ref=f10e131]
+    - paragraph [ref=f10e132]: 项目 = 场景轨（单选）× 能力包（多选）；数据随 workspaces/ 项目目录隔离
+  - generic [ref=f10e133]:
+    - generic [ref=f10e134]: 新建项目
+    - generic [ref=f10e136]:
+      - generic [ref=f10e137]:
+        - textbox "项目名（可用中文）" [ref=f10e138]
+        - button "创建" [disabled]
+      - generic [ref=f10e139]:
+        - generic [ref=f10e140]: 场景轨
+        - button "授权评估" [ref=f10e141]
+        - button "CTF" [ref=f10e142]
+        - button "研究" [ref=f10e143]
+      - generic [ref=f10e144]:
+        - generic [ref=f10e145]: 能力包
+        - button "二进制" [ref=f10e146]
+        - button "密码学" [ref=f10e147]
+        - button "取证" [ref=f10e148]
+        - button "杂项" [ref=f10e149]
+        - button "Web 攻防" [ref=f10e150]
+  - generic [ref=f10e151]:
+    - button "授权评估 · Web assessment 编排演练-Pikachu proj-9f7ee28609e7 2026-09-13 删除 assessment 编排演练-Pikachu" [ref=f10e152] [cursor=pointer]:
+      - generic [ref=f10e153]: 授权评估 · Web
+      - generic [ref=f10e154]:
+        - generic [ref=f10e155]: assessment 编排演练-Pikachu
+        - generic [ref=f10e156]: proj-9f7ee28609e7
+      - generic [ref=f10e157]: 2026-09-13
+      - button "删除 assessment 编排演练-Pikachu" [ref=f10e158]
+    - button "授权评估 · Web pentest 编排演练-Pikachu proj-63dd10c7d1a6 2026-09-12 删除 pentest 编排演练-Pikachu" [ref=f10e159] [cursor=pointer]:
+      - generic [ref=f10e160]: 授权评估 · Web
+      - generic [ref=f10e161]:
+        - generic [ref=f10e162]: pentest 编排演练-Pikachu
+        - generic [ref=f10e163]: proj-63dd10c7d1a6
+      - generic [ref=f10e164]: 2026-09-12
+      - button "删除 pentest 编排演练-Pikachu" [ref=f10e165]
+    - button "研究 · 二进制 rev真机走查 proj-e193f14eb587 2026-09-14 删除 rev真机走查" [ref=f10e166] [cursor=pointer]:
+      - generic [ref=f10e167]: 研究 · 二进制
+      - generic [ref=f10e168]:
+        - generic [ref=f10e169]: rev真机走查
+        - generic [ref=f10e170]: proj-e193f14eb587
+      - generic [ref=f10e171]: 2026-09-14
+      - button "删除 rev真机走查" [ref=f10e172]
