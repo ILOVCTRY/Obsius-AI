@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { Group, Panel, Separator } from "react-resizable-panels"
 import { api } from "@/lib/api"
 import type {
-  KbRefHit, KbSourceTree, LlmProvider, McpServer, OwnerRule, PackRole,
+  KbRefHit, KbSourceTree, LlmProvider, McpServer, PackRole,
   SkillDef, SkillDetail, SkillVocab,
 } from "@/lib/types"
 import { capLabel, trackLabel, type Taxonomy } from "@/lib/taxonomy"
@@ -28,6 +28,7 @@ import { KbTree } from "@/components/settings/KbTree"
 import { RouteTester } from "@/components/settings/RouteTester"
 import { MarkdownOutline } from "@/components/settings/MarkdownOutline"
 import { ProposalsPane } from "@/components/settings/ProposalsPane"
+import { RulesPane, type RuleFocus } from "@/components/settings/RulesPane"
 import { parseSkill } from "@/lib/skillfm"
 import { cn } from "@/lib/utils"
 
@@ -61,6 +62,7 @@ export function SettingsView({ nav }: { nav?: { tab: string; n: number } | null 
   const [tab, setTab] = useState("roles")
   const [roleFocus, setRoleFocus] = useState<RoleFocus | null>(null)
   const [skillFocus, setSkillFocus] = useState<SkillFocus | null>(null)
+  const [ruleFocus, setRuleFocus] = useState<RuleFocus | null>(null)
   const [pendingN, setPendingN] = useState(0)
 
   useEffect(() => {
@@ -107,6 +109,7 @@ export function SettingsView({ nav }: { nav?: { tab: string; n: number } | null 
     if ((m = target.match(/^(tracks|capabilities)\/([\w.-]+)\/rules\/redlines\.md$/))) {
       if (m[1] === "tracks") setTrack(m[2]); else setCap(m[2])
       setTab("rules")
+      setRuleFocus({ kind: m[1] === "tracks" ? "track-redlines" : "cap-redlines", name: m[2], n: Date.now() })
       return true
     }
     return false
@@ -150,7 +153,7 @@ export function SettingsView({ nav }: { nav?: { tab: string; n: number } | null 
                         setSkillFocus({ source, pack, name, n: Date.now() })
                       }} />
         </TabsContent>
-        <TabsContent value="rules" className="min-h-0 flex-1"><RulesPane track={track} cap={cap} /></TabsContent>
+        <TabsContent value="rules" className="min-h-0 flex-1"><RulesPane track={track} cap={cap} focus={ruleFocus} /></TabsContent>
         <TabsContent value="llm" className="min-h-0 flex-1"><LlmPane /></TabsContent>
         <TabsContent value="mcp" className="min-h-0 flex-1"><McpPane /></TabsContent>
         <TabsContent value="proposals" className="min-h-0 flex-1">
@@ -730,153 +733,6 @@ function SkillsPane({ tax, track, cap, focus }: {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </div>
-  )
-}
-
-// ---------- 红线（轨 + 能力包）+ 平台规则 owners（轨） ----------
-
-function RulesPane({ track, cap }: { track: string; cap: string }) {
-  return (
-    <ScrollArea className="h-full">
-      <div className="flex flex-col gap-3 p-3">
-        <RulesSection title={`tracks/${track}/rules/redlines.md`}
-                      badge="轨红线 · 该轨全角色全量注入"
-                      load={() => api.trackRules(track)} save={(c) => api.updateTrackRules(track, c)} />
-        <RulesSection title={`capabilities/${cap}/rules/redlines.md`}
-                      badge="能力包红线 · 启用该包的项目注入"
-                      load={() => api.capRules(cap)} save={(c) => api.updateCapRules(cap, c)} />
-        <OwnersSection track={track} />
-      </div>
-    </ScrollArea>
-  )
-}
-
-function RulesSection({ title, badge, load, save: doSave }: {
-  title: string
-  badge: string
-  load: () => Promise<{ content: string; exists?: boolean }>
-  save: (content: string) => Promise<unknown>
-}) {
-  const [content, setContent] = useState("")
-  const [dirty, setDirty] = useState(false)
-  const [saved, setSaved] = useState(false)
-  const [missing, setMissing] = useState(false)
-
-  const reload = useCallback(() => {
-    // 缺文件是预期态：后端回 200+exists:false（不再产生 404 控制台噪声）
-    load().then((r) => { setContent(r.content); setMissing(r.exists === false) }).catch(() => setMissing(true))
-  }, [load])
-  useEffect(reload, [reload])
-
-  const save = async () => {
-    await doSave(content)
-    setSaved(true)
-    setTimeout(() => setSaved(false), 1500)
-    setDirty(false)
-    setMissing(false)
-    packsChanged()
-  }
-
-  return (
-    <div className="flex min-h-56 flex-col gap-2 rounded border p-2">
-      <div className="flex items-center gap-2">
-        <span className="font-mono text-sm">{title}</span>
-        <Badge variant="outline" className="text-[10px]">{badge}</Badge>
-        <span className="flex-1" />
-        <Saved saved={saved} />
-        <Button size="sm" onClick={save} disabled={!dirty && !missing}>
-          {missing ? "新建并保存" : "保存"}
-        </Button>
-      </div>
-      <Textarea value={content} onChange={(e) => { setContent(e.target.value); setDirty(true) }}
-                className="min-h-44 flex-1 font-mono text-[11px] leading-relaxed" spellCheck={false}
-                placeholder={missing ? "（红线文件不存在，输入内容后点「新建并保存」）" : undefined} />
-      <DangerNote>红线是 Agent 的安全底线（build_rules_preamble 永久注入）；每次保存自动在 .history/ 留时间戳备份可回滚。</DangerNote>
-    </div>
-  )
-}
-
-function OwnersSection({ track }: { track: string }) {
-  const [owners, setOwners] = useState<OwnerRule[]>([])
-  const [sel, setSel] = useState<string | null>(null)
-  const [content, setContent] = useState("")
-  const [dirty, setDirty] = useState(false)
-  const [saved, setSaved] = useState(false)
-  const [newTag, setNewTag] = useState("")
-
-  const reload = useCallback(() =>
-    api.trackOwners(track).then((os) => {
-      setOwners(os)
-      setSel((cur) => cur && os.some((o) => o.tag === cur) ? cur : null)
-    }).catch(() => {}), [track])
-  useEffect(() => { reload() }, [reload, track])
-
-  useEffect(() => {
-    const o = owners.find((x) => x.tag === sel)
-    if (o) { setContent(o.content); setDirty(false) }
-  }, [owners, sel])
-
-  const save = async () => {
-    if (!sel) return
-    await api.updateTrackOwner(track, sel, content)
-    setSaved(true)
-    setTimeout(() => setSaved(false), 1500)
-    setDirty(false)
-    reload()
-  }
-
-  const create = async () => {
-    const tag = newTag.trim()
-    if (!tag) return
-    await api.updateTrackOwner(track, tag, `# ${tag} 平台规则（标题/触发条件/测试边界…）\n`)
-    setNewTag("")
-    setSel(tag)
-    reload()
-  }
-
-  const remove = async (tag: string) => {
-    await api.deleteTrackOwner(track, tag)
-    if (sel === tag) { setSel(null); setContent("") }
-    reload()
-  }
-
-  return (
-    <div className="flex min-h-72 flex-col gap-2 rounded border p-2">
-      <div className="flex items-center gap-2">
-        <span className="font-mono text-sm">tracks/{track}/rules/owners/</span>
-        <Badge variant="outline" className="text-[10px]">平台规则 · 资产 meta.owner 命中才注入</Badge>
-        <span className="flex-1" />
-        <Saved saved={saved} />
-        <Input value={newTag} onChange={(e) => setNewTag(e.target.value)} placeholder="新平台 tag，如 edusrc"
-               className="h-7 w-40 text-xs" onKeyDown={(e) => e.key === "Enter" && create()} />
-        <Button size="sm" variant="outline" onClick={create} disabled={!newTag.trim()}>+ 新建</Button>
-        <Button size="sm" onClick={save} disabled={!sel || !dirty}>保存</Button>
-      </div>
-      <div className="flex min-h-48 flex-1 gap-2">
-        <div className="w-44 shrink-0 space-y-1 overflow-y-auto">
-          {owners.map((o) => (
-            <div key={o.tag}
-                 className={cn("group flex items-center rounded border text-xs", sel === o.tag && "border-primary/50 bg-primary/10")}>
-              <button className="min-w-0 flex-1 truncate px-2 py-1.5 text-left font-mono hover:bg-accent/40"
-                      onClick={() => setSel(o.tag)} title={o.tag}>
-                {o.tag}
-              </button>
-              <button className="px-1.5 text-[10px] text-[--status-error] opacity-0 transition-opacity group-hover:opacity-100"
-                      onClick={() => remove(o.tag)} title="删除（.history 留备份，删除即停用）">✕</button>
-            </div>
-          ))}
-          {owners.length === 0 && <p className="p-1 text-[10px] text-muted-foreground">暂无平台规则</p>}
-        </div>
-        {sel ? (
-          <Textarea value={content} onChange={(e) => { setContent(e.target.value); setDirty(true) }}
-                    className="min-h-0 flex-1 font-mono text-[11px] leading-relaxed" spellCheck={false} />
-        ) : (
-          <p className="flex-1 self-center text-center text-xs text-muted-foreground">
-            选择或新建平台规则（文件即规则：删除 = 停用，新建 = 扩展；.history 留备份）
-          </p>
-        )}
-      </div>
     </div>
   )
 }

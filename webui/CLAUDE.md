@@ -23,7 +23,7 @@
    - 右：`RouteTester`（真评分，候选恒为全包∪轨；features/file_features/**labels** 三框；命中行展开看 breakdown）+ `MarkdownOutline`（h1–h3，与预览共享 prefix 做 headingId scrollIntoView；技能 prefix=`skill`，kb=`kb-<cap>`）。
    - `KbRenameDialog` 改名成功显示联动替换文件清单+skipped_relative 琥珀警告。
 3 **矩阵** MatrixPane 只读：行=轨角色列=全部包∪轨技能，悬空引用红/禁用技能琥珀/列头点击反查。
-4 **红线** Rules+Owners：redlines 全文编辑（**文件缺失 GET 200 `{exists:false}`** 非 404）、owners tag。
+4 **红线** `RulesPane`（E1 重构，独立组件）：**左文件列表 + 右单文件编辑器**——三组文件（轨红线/能力包红线/平台规则 owners），● 存在 ○ 缺失状态点、注入范围 Badge、字数+保存状态底栏、缺失文件「新建并保存」、owner hover ✕ 停用+内联新建 tag；**切文件/切轨包前 dirty `window.confirm` 守卫**（切轨包被取消时父级 select 无法回退但编辑内容保留）；doctor 红线跳转经 `ruleFocus` nonce 自动选中。**文件缺失 GET 200 `{exists:false}`** 非 404。
 5 **模型** LlmPane CRUD/测活/密钥留空沿用；6 **MCP** McpPane：config/mcp.json 配置层，仅配置。
 7 **提案** `ProposalsPane`：左列表（待审批/全部/已应用/已拒绝）+右详情（target/mode/origin、**实时 diff** DiffView、rename/delete 显 live.refs 影响面）；批准 applyProposal（decided_by=human）/拒绝（带 note）/**改后采纳**（revise 编辑 content/new_path/summary/reason，可只保存或修订并应用）。pending 数经 `proposals-changed` 事件刷新 tab 角标。
 - 共享：`MarkdownView`（react-markdown+gfm 深色主题，标题带 slug id；extractHeadings 识别 ```/~~~ 围栏防误判）；`DiffView` 统一 diff 高亮（HistoryDialog/ProposalsPane 共用）；`HistoryButton` 可注入 `HistorySource`（kb 版本三件套复用，srcRef 防内联对象重复加载）。DoctorBar 监听 `packs-changed`+30s 轮询，可跳转 target（切 tab + focus nonce 选中）。
