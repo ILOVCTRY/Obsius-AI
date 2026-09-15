@@ -1,15 +1,15 @@
 # cyberstrike-pro 设计文档
 
-> 版本: v0.9 (2026-09-15)
+> 版本: v0.10 (2026-09-15)
 本文档是项目蓝图，后续开发以本文档为准；重大变更需更新此文档。
 > 
 > **状态约定（v0.3 起）**：正文默认以**现在时描述已落地的系统现状**；未落地的定稿设计在节/段首以引用块标注：  
 **〔未实施〕**＝代码未动，仅有设计（括注排期，如 F 批 / R1 / Phase 3）；  
 **〔部分落地〕**＝注明"已有/缺口"。
 > 
-> **当前总体状态**：Phase 1 核心平台已完成——黑板（**schema v6**）、四态任务（**四态皆可删**）、Agent 循环（暂停/恢复/中断+租约心跳+认领后计划闸）、Skill 体系（路由/kb 本地基线/统一变更提案制）、Runtime 网关 L0–L2、LLM 多供应商、research 轨 rev-generic 工作台 P1/P2（headless 全量导出/chains 逆向链视图/MCP 实时桥/IDA 双向写回/脚本档）、评估攻击链画布、撤回传播（协调机制 1.6 全量、1.5 系统侧）、**项目自主级别 L0/L1/L2 配置面 + sessions_cap + 用量记账（§6.8，G 批批 2）、tick 租约/编排状态持久化（机制 1.9，G 批批 3）、L1 开窗审批流（G 批批 4：orch spawn 转审批、decide op 白名单处理器批准即建窗开跑）与 **L2 全自动链（G 批批 5：事件驱动 `_kick_workers`/`_maybe_auto_tick`、防失控七闸、orch.chain_started/stopped、重启=急停）**、**L0 提案模式（G 批批 6：propose_only、`orch.proposed`、前端行内采纳，自主三档全部落地）**；时间本地化（统一 formatter/本地时区，§12）已落地；**A 组多会话可观察/可急停（2026-09-15，§16 原 A 组已全部移出 backlog）**：A1 detach/终止入口收敛/claimed 步边界急停/done 可删、A2 tasks.plan 先规划后动手、A3 直播间任务流视图、A4 finding_update 增补私信、A5 编排器规划-分派（子代理 publish_task、L2 30s 去抖自动重排+手动按钮）。**未落地**：F 批协调机制余部（1.1–1.4、1.7 传播本体、1.8、1.10、1.5 的 Agent 自由私信侧，见 §16 B 组）、逆向复用 R1/R2/R3、development 轨（§15，含 §15.5 AI 反代/破甲专项）、malware 轨与 fakenet（NotImplementedError）。
+> **当前总体状态**：Phase 1 核心平台完成，Phase 2 进行中。已落地的模块级明细见下「落地状态总览」表与 §6.7/§6.8 各节状态标注（此处不再重复罗列）。**未落地**：F 批协调机制余部（1.1–1.4、1.7 传播本体、1.8、1.10、1.5 的 Agent 自由私信侧，见 §16 B 组）、逆向复用 R1/R2/R3（§16 C 组）、development 轨（§15，含 §15.5 AI 反代/破甲专项）、malware 轨与 fakenet（Phase 3）。
 > 
-> 历史：v0.9 (2026-09-15) A 组五项全部落地（schema v5→v6：tasks.plan + orchestrator_state.last_replan_at）：A1 detach/终止入口两处收敛/claimed 步边界急停/done 可删（四态皆可删）、A2 task_plan/task_step 先规划后动手（计划闸+修订审计）、A3 直播间任务流视图（第三个 React Flow 图）、A4 finding_update 增补私信（与撤回严格分语义）、A5 子代理 publish_task（服务端钉死 parent/created_by）+ L2 事件驱动 30s 去抖优先级重排 + 手动重排按钮（replan_priorities 单工具只改 open）；§16 A 组移除、B–E 重编号。v0.8 (2026-09-15) 时间本地化落地（§12，纯前端统一 formatter）+ §16 backlog 按重要性/必要性重排（A 可观察可急停 → B 协调底座 → C 逆向复用 → D 新轨 → E 体验/文档债），修正任务删除条目的现状/目标态措辞。v0.7 (2026-09-15) G 批批 6 L0 提案模式（§6.8，自主三档齐活）。v0.6 (2026-09-15) G 批批 5 L2 全自动链（§6.8）。v0.5 (2026-09-15) G 批批 4 L1 开窗审批（§6.8）。v0.4 (2026-09-15) G 批批 2/3 自主配置面/记账 + tick 租约/编排状态持久化（schema v5）。v0.3 (2026-09-15) 状态约定 + 撤回传播（机制 1.6/1.5 系统侧）。v0.2 (2026-09-13) 分类学重构——平铺领域包改为「能力包 × 场景轨」正交模型（§4.5）；src-strike 反转为全量快照融入（§4）；新增角色软边界+一次性越界审批、技能修改全提案制。v0.1 为首版定稿。
+> 历史：v0.10 (2026-09-15) 直播间事件流新增「路由」筛选 tab（§12）+ 全文精简（重复状态叙述并入落地状态总览，实现坑细节移交各级 CLAUDE.md）；仓库 git init。v0.9 (2026-09-15) A 组五项落地（schema v5→v6，§16 A 组移除、B–E 重编号）。v0.8 (2026-09-15) 时间本地化（§12）+ §16 重排 A–E 组。v0.7/v0.6/v0.5 (2026-09-15) G 批批 6/5/4：L0 提案模式 / L2 全自动链 / L1 开窗审批（§6.8）。v0.4 (2026-09-15) G 批批 2/3 自主配置面/记账 + tick 租约/编排状态持久化（schema v5）。v0.3 (2026-09-15) 状态约定 + 撤回传播（机制 1.6/1.5 系统侧）。v0.2 (2026-09-13) 「能力包 × 场景轨」正交分类学（§4.5）+ src-strike 全量融入（§4）+ 角色软边界/技能全提案制。v0.1 首版定稿。
 
 ## 落地状态总览（2026-09-15 代码核查）
 
@@ -42,12 +42,8 @@
 | WebUI 终端页（workspace 容器/shell、终端抽屉）                                        | ⬜         | §12 页面骨架第 7 项，未实施                                                                   |
 | 报告生成（黑板数据 → 渗透报告初稿）                                                   | ⬜         | §12 Open Questions（随 R2 推进）                                                              |
 | development 场景轨                                                                    | ⬜         | §15（仓库尚未 git init）                                                                      |
-| A1 detach + 终止入口收敛 + claimed 步边界急停 + done 可删                             | ✅         | §3/§6.4（机制 1.7 单任务先遣），2026-09-15                                                    |
-| A2 任务计划 plan（task_plan/task_step + 计划闸 + 修订审计）                            | ✅         | §6.1/§5.2；tasks.plan 列 schema v6                                                            |
-| A3 直播间任务流视图（第三个 React Flow 图）                                           | ✅         | §12；GET /task-graph（graph.py），实线父子/虚线私信                                            |
-| A4 finding 实质更新私信（kind='finding_update'）                                      | ✅         | §6.7 机制 1.5 扩展，复用撤回传播通道                                                          |
-| A5 编排器规划-分派（publish_task + 重排；子代理上限复用 sessions_cap）                 | ✅         | §6.4；L2 30s 去抖自动 + 手动按钮，max_subagents 以 sessions_cap 形态早已落地                    |
-| 时间本地化（本地时区 + YYYY-MM-DD HH:mm:ss 统一 formatter）                           | ✅         | §12，2026-09-15 落地（纯前端 webui/src/lib/datetime.ts，无后端改动）                          |
+| A 组多会话可观察/可急停（A1 detach/终止入口收敛/步边界急停/done 可删、A2 tasks.plan 计划闸、A3 任务流视图、A4 finding_update 私信、A5 编排规划-分派） | ✅ | §3/§6.1/§6.4/§6.7/§12，2026-09-15（schema v6）                                                |
+| 时间本地化（本地时区 + YYYY-MM-DD HH:mm:ss 统一 formatter，纯前端 datetime.ts）       | ✅         | §12，2026-09-15 落地                                                                          |
 | AI 反代 / AI 破甲专项方向（含红线）                                                   | ⬜         | §15.5，随 development 轨，红线先行进 track redlines                                           |
 | malware 场景轨                                                                        | ⬜         | Phase 3，依赖 fakenet                                                                         |
 | 文档债：五个能力包 `rules/redlines.md`                                                | ◐          | track 级 redlines 齐（ctf/assessment/research）；能力包级全缺                                 |
@@ -786,9 +782,9 @@ core/tools/decompiler.py
   ④ **Cheat Engine 脚本档**（纯前端 `ce.ts` Lua 模板：module+offset 断点观察 / 改返回值爆破，与 x64dbg 同档同 Dialog）；  
   ⑤ **MCP 实时桥**（见下「MCP 路线」）。
 - **P2 仍不做**：MCP stdio 拉起（仅 http 连本机）、MCP 全量列表替换 headless 缓存、Ghidra 写回、CE 进程附加/内存扫描自动化（仅 Lua 脚本档）。
-- **Headless 路线**：IDA `idat` + IDAPython 优先，Ghidra `analyzeHeadless` post-script 兜底；detector 在 PATH 外再扫常见安装目录（`C:\Program Files\IDA*` 等）。**实测 IDA 9.3**：统一 `idat.exe`（无 idat64），64 位目标产出 `.i64`（扩展名由目标位宽决定、忽略写错的 `-o` 扩展名）→ `-o` 只给无扩展主干，产物按 .i64→.idb 探测；ELF 导入模块名是 `.dynsym`，符号带 `@@GLIBC_x.y` 版本后缀需剥离才能与 calls 对齐。
-- **Windows PowerShell 引号坑（实证）**：网关用 `powershell -Command` 执行时 `-S"script out"` 会被改写成 `"-Sscript out"`（引号挪位，IDA 无法解析）；解法是首个 token 后插 `--%`（停止解析），RAW 精确还原（`gateway_runner` 已固化，exe 与 Ghidra .bat 均有效）。约束：`--%` 后 `%` 按 cmd 风格展开，项目/样本路径约定不含 `%`。
-- **MCP 路线（P2 已落地）**：插件 **mrexodia/ida-pro-mcp** vendor 在 `tools/mcp/ida-pro-mcp/`（零 pip 依赖，zeromcp 自带），`scripts/install_ida_mcp.py` 幂等复制进 IDA 用户 plugins 目录——平台只依赖项目内 vendor 件。插件在 IDA 内起标准 MCP streamable-http 于 `http://127.0.0.1:13337/mcp`（Ctrl-Alt-M 启动；**真机实测 initialize 回 200 JSON 而非 SSE**——客户端两种体都兼容，会话 id 一律从响应头 `Mcp-Session-Id` 取并回带，随后发 notifications/initialized 服务端回 202；缺/失效 session 回 400，客户端清 session 重握一次，不递归持锁）。真机工具名：`decompile / list_funcs / rename(batch) / set_comments(items) / func_query / lookup_funcs / func_profile / xrefs_to / callees / entity_query / server_health / idb_save`——**不是**旧客户端猜的 decompile_function 等；按 tools/list 动态发现 + 别名表对接；真机 tools/call 把工具返回值再 `json.dumps` 进 `content[0].text`（双重 JSON 编码），客户端必须二次解码。config/mcp.json 的 domains 首次被消费（含 `reverse`（兼容 `binary`）的 http 条目，PUT 校验域名白名单 pentest/reverse/binary 与 url 必须 loopback）；无配置时对默认 13337 **懒探活兜底**（构造零网络，available() 握手 1.5s 超时 + 3s TTL 正负缓存），只连 127.0.0.1/localhost/::1。在线时：三态灯 MCP 青；写回优先走 MCP 实时写 GUI 当前库（无锁问题，channel=mcp）；缓存缺席的单函数伪码经 `decompile` 实时取（标 source=mcp）；函数列表/xrefs 仍以 headless 缓存为主，xref 缓存缺席且在线时 func_profile 降级。
+- **Headless 路线**：IDA `idat` + IDAPython 优先，Ghidra `analyzeHeadless` post-script 兜底；detector 在 PATH 外再扫常见安装目录（`C:\Program Files\IDA*` 等）。IDA 9.3 实测坑（统一 `idat.exe`/`.i64` 位宽判定/ELF `.dynsym`/GLIBC 版本后缀剥离）见 `core/tools/CLAUDE.md`。
+- **Windows PowerShell 引号坑**：`powershell -Command` 会挪引号改写 IDA `-S` 参数，网关已用 `--%`（停止解析）固化（`gateway_runner`），细节见 `core/runtime/CLAUDE.md`；`--%` 后 `%` 按 cmd 展开，项目/样本路径约定不含 `%`。
+- **MCP 路线（P2 已落地）**：插件 **mrexodia/ida-pro-mcp** vendor 在 `tools/mcp/ida-pro-mcp/`（零 pip 依赖），`scripts/install_ida_mcp.py` 幂等装进 IDA plugins；IDA 内起 streamable-http 于 `http://127.0.0.1:13337/mcp`（Ctrl-Alt-M）。平台只连 loopback（config/mcp.json domains 校验白名单与 url 必须 loopback；无配置时对默认端口懒探活，1.5s 超时 + 3s TTL 正负缓存）。在线时：三态灯 MCP 青；写回优先 MCP 实时写 GUI 当前库（channel=mcp）；缓存缺席的单函数伪码实时取（source=mcp）；函数列表/xrefs 仍以 headless 缓存为主。握手细节/真机工具名/双重 JSON 编码等实测坑见 `tools/mcp/CLAUDE.md`。
 
 **headless 导出 v3 契约**（2026-09-14 P2 升版；IDA/Ghidra 的 `scripts/export_funcs.py` 同步）：
 
@@ -847,14 +843,14 @@ packs/
 
 **执行批次与落地状态**（每批结束跑全量测试/构建并同步 CLAUDE.md）：
 
-- **A 批 ✅ 已落地**：P0 并发修复三项——租约心跳接线（`renew_lease` 此前零调用，长任务 30 分钟 TTL 会被回收双跑）；人类 PATCH 三方法 TOCTOU 收进单事务 + add_finding 证据并集修复（机制 1.12）；packs 写入进程锁（`core/skills/writing.py` RLock，仅单进程）。
-- **C 批 ✅ 已落地**：Skill 页后端——kb 本地基线 CRUD/备份/版本/改名引用联动、统一提案通道（`packs/.proposals/` + `propose_pack_edit` Agent 工具 + review-proposals 复盘 Job）、路由 breakdown 与 `skill.routed` 事件可观测、近重复 doctor info、`/api/skills/vocab`。
-- **D 批 ✅ 已落地**：Skill 页三栏前端（知识树 / Markdown 编辑预览 / 提案审批队列 / 试算器迁入右栏 + labels 第三框）。
-- **E 批 ✅ 已落地**：评估攻击链画布（§12）——`relates_to` 强关系（证据内嵌 JSON + 存在性/同项目校验）、FindingsCanvas（IP 泳道 × 严重度列 × 三级边）；未触碰逆向 ChainView。
-- **F 批：协调机制实施（§6.7，部分已落地）**——批 1B ✅：机制 1.6 撤回传播全量 + 1.5 系统侧私信；机制 1.9/1.11 随 G 批批 2/批 3 ✅（见下与 §6.8）。余部（1.1–1.4、1.7 传播本体、1.8、1.10、1.5 的 Agent 自由私信侧）〔未实施〕，重排后的顺序见 §16 B 组；机制 1.7 的**单任务先遣版**（claimed 步边界取消，不带父任务传播）已随 A 组 A1 落地。每项机制自带并发测试（重点：租约环检测牺牲者、门控释放不重领、取消传播、分片汇聚）。
-- **G 批：项目自主级别 L0/L1/L2（§6.8，✅ 全部落地）**——批 2 ✅ 配置面（档段/暂停/cap/双预算，建项按轨归一化，PATCH /config 双写）+ sessions_cap 三检查点 + 用量记账（llm.usage/原子计数/80% 软警告/自主硬闸/人手仅警告/直播间 chip+popover）；批 3 ✅ tick 租约（900s TTL+心跳，手动并发 409）+ 编排状态持久化（event_cursor/cycles/last_digest_cycle，结构化 tick 结果，backlog 跳尖，schema v4→v5）；批 4 ✅ L1 开窗审批（orch spawn L1 转 pending 审批、spawn_session 带 reason；decide op 白名单处理器，批准终检 cap→注册式建窗→session.spawned→当场 agent-work job；失败不回滚批准落 approval.exec_failed；审批收件箱专属卡）；批 5 ✅ L2 全自动链（_kick_workers/_maybe_auto_tick 事件驱动，消费 chain_*/paused/max_chain_ticks，防失控七闸，重启=急停）；批 6 ✅ L0 提案模式（orch.proposed 事件+前端行内采纳）。
-- **任务流批次（2026-09-15 设计，✅ A 组已落地）**：A1 detach/终止入口收敛/claimed 步边界取消/done 可删、A2 tasks.plan 先规划后动手（schema v6 幂等迁移：tasks.plan + orchestrator_state.last_replan_at）、A3 直播间任务流视图、A4 finding_update 私信、A5 编排器规划-分派（子代理 publish_task 钉死 parent/created_by、L2 30s 去抖自动重排、手动重排按钮）。B 组资源租约未来继续在 v6 幂等加列。时间本地化已于 2026-09-15 独立先行落地（§12）。
-- **F/任务流之后（§16 C–E 组）**：R1 全局缓存 → R2 全局函数库/报告导出 → R3 跨 binary 签名匹配 → development 轨 P1（§15，依赖 B3 的 blocked_by，含 §15.5 AI 反代/破甲，红线先行）→ L3 fakenet/malware 轨（Phase 3）；体验/文档债项（红线设置页重构、包级 redlines、终端页等）见 §16 E 组，可随时穿插。
+- **A 批 ✅**：P0 并发修复——租约心跳接线、人类 PATCH 单事务 + 证据并集（机制 1.12）、packs 进程写锁（§5.3/§6.4）。
+- **C 批 ✅**：Skill 页后端——kb 本地基线 CRUD/备份/版本/改名引用联动、统一提案通道、路由 breakdown 与 `skill.routed` 事件可观测、vocab（§4）。
+- **D 批 ✅**：Skill 页三栏前端（知识树/编辑预览/提案队列/试算器）。
+- **E 批 ✅**：评估攻击链画布（`relates_to` 强关系 + FindingsCanvas，§12）。
+- **F 批：协调机制实施（§6.7，部分已落地）**——批 1B ✅（机制 1.6 撤回传播全量 + 1.5 系统侧私信）；机制 1.9/1.11 随 G 批 ✅、1.7 的**单任务先遣版**（claimed 步边界取消）已随 A 组 A1 落地。余部（1.1–1.4、1.7 传播本体、1.8、1.10、1.5 的 Agent 自由私信侧）〔未实施〕，顺序见 §16 B 组；每项机制自带并发测试。
+- **G 批：项目自主级别 L0/L1/L2（§6.8，✅ 全部落地）**——批 2 配置面/sessions_cap/用量记账、批 3 tick 租约/编排状态持久化（schema v4→v5）、批 4 L1 开窗审批、批 5 L2 全自动链、批 6 L0 提案模式；明细见 §6.8。
+- **任务流批次（✅ A 组已落地，2026-09-15）**：A1 detach/终止入口收敛/步边界取消/done 可删、A2 tasks.plan（schema v6）、A3 任务流视图、A4 finding_update 私信、A5 编排器规划-分派（§3/§6.1/§6.4/§12）。B 组资源租约未来继续在 v6 幂等加列。
+- **F/任务流之后（§16 C–E 组）**：R1 全局缓存 → R2 全局函数库/报告导出 → R3 签名匹配 → development 轨 P1（§15，依赖 B3 blocked_by，含 §15.5，红线先行）→ L3 fakenet/malware 轨（Phase 3）；体验/文档债（§16 E 组）可随时穿插。
 
 ***
 
@@ -994,6 +990,7 @@ subnav 切到「攻击链」全屏替换三栏（分析状态不卸载）：左 
 ### 直播间实现要求
 
 - 虚拟滚动（长会话数千事件）；事件分层折叠（工具输出默认折叠，思考/决策默认展开）；按类型过滤（只看决策/只看命令）；WS 断线重连后增量回放。
+- **事件流类型筛选（2026-09-15 v0.10）**：类型 tab = 全部/思考/决策/**路由**/命令/发现，定义在 LiveRoom `FILTERS` 常量、纯前端按 `kind` 匹配（无服务端过滤）。「路由」= `skill.routed`（任务入口技能路由审计，`core/agent/loop.py` `skill_context_for` 落事件）：命中与未命中都进该 tab，未命中条目摘要自带「未命中 · query」样式区分（前端渲染见 `lib/events.tsx`）。既有多归属：`finding.new` 同时命中决策与发现两个 tab。
 - **开窗/编排的轨驱动交互**：开窗 = 角色下拉（`GET /api/projects/{pid}/roles` 取项目所属轨的清单）+ 开窗按钮；编排一轮 = 角色多选 popover（空选 = allowed_roles 不限）+ 开始。track/capabilities 为内部英文 slug，UI 中文显示名经 `lib/taxonomy.ts` 映射（ctf→CTF、assessment→授权评估；web→Web、binary→二进制…），旧 domain 值在展示层兼容映射。
 
 ### 待定项（Open Questions）

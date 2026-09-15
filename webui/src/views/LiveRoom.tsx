@@ -107,6 +107,7 @@ const FILTERS = [
       k.startsWith("task.") || k.startsWith("session.") || k.startsWith("approval.") ||
       k.startsWith("orch.") ||
       k === "project.digest" || k === "finding.new" },
+  { key: "route", label: "路由", match: (k: string) => k === "skill.routed" },
   { key: "command", label: "命令", match: (k: string) =>
       k === "command" || k === "command.result" || k === "audit.deny" },
   { key: "finding", label: "发现", match: (k: string) =>
