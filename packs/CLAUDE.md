@@ -49,4 +49,4 @@ packs/
 - 样本执行必须 docker/sandbox（各轨红线）；宿主 docker 未启动时 Agent 应改道静态分析并标 unverified。
 - 角色 skills 白名单可跨能力包引用，但名字必须存在（`scripts/pack_doctor.py` / `GET /api/packs/doctor` 查悬空引用，零 error 才健康）。
 - 删除不物理抹除：角色/技能经 API 删除进同级 `.history/trash/`（带 UTC 时间戳，可恢复）；编辑备份两种命名（`<ts>[.n]_<file>` 与 `<file>.<ts>.bak`），历史端点两种都认；回滚前会自动再备份当前版。
-- 五个能力包的 `rules/redlines.md` 暂未建设（doctor 报 warning，属已知内容债，非结构错误）。
+- 五个能力包的 `rules/redlines.md` 已补齐（2026-09-16，E2：AI 起草**草案待人审**，见各文件头注）；内容修订直接改文件（.history 自动备份）。
