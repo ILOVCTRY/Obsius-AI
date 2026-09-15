@@ -28,6 +28,7 @@ import { KbTree } from "@/components/settings/KbTree"
 import { RouteTester } from "@/components/settings/RouteTester"
 import { MarkdownOutline } from "@/components/settings/MarkdownOutline"
 import { ProposalsPane } from "@/components/settings/ProposalsPane"
+import { IntelSourcePane } from "@/components/settings/IntelSourcePane"
 import { RulesPane, type RuleFocus } from "@/components/settings/RulesPane"
 import { parseSkill } from "@/lib/skillfm"
 import { cn } from "@/lib/utils"
@@ -133,7 +134,7 @@ export function SettingsView({ nav }: { nav?: { tab: string; n: number } | null 
         <TabsList className="w-full shrink-0 justify-start rounded-none border-b bg-transparent p-0">
           {[
             ["roles", "角色"], ["skills", "Skill"], ["matrix", "矩阵"], ["rules", "红线"],
-            ["llm", "模型"], ["mcp", "MCP"], ["proposals", "提案"],
+            ["llm", "模型"], ["mcp", "MCP"], ["intel", "情报源"], ["proposals", "提案"],
           ].map(([k, label]) => (
             <TabsTrigger key={k} value={k} className="rounded-none border-b-2 px-3 py-1.5 text-xs">
               {label}
@@ -156,6 +157,7 @@ export function SettingsView({ nav }: { nav?: { tab: string; n: number } | null 
         <TabsContent value="rules" className="min-h-0 flex-1"><RulesPane track={track} cap={cap} focus={ruleFocus} /></TabsContent>
         <TabsContent value="llm" className="min-h-0 flex-1"><LlmPane /></TabsContent>
         <TabsContent value="mcp" className="min-h-0 flex-1"><McpPane /></TabsContent>
+        <TabsContent value="intel" className="min-h-0 flex-1"><IntelSourcePane /></TabsContent>
         <TabsContent value="proposals" className="min-h-0 flex-1">
           <ProposalsPane onPendingChange={setPendingN} />
         </TabsContent>

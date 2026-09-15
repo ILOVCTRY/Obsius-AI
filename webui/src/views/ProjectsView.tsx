@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react"
 import { Trash2 } from "lucide-react"
-import { api } from "@/lib/api"
-import type { ProjectMeta } from "@/lib/types"
+import { api, pollJob } from "@/lib/api"
+import type { IntelOverview, ProjectMeta } from "@/lib/types"
 import { RECOMMENDED_CAPS, bindingBadge, capLabel, trackLabel, type Taxonomy } from "@/lib/taxonomy"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -81,7 +81,8 @@ export function ProjectsView({ onOpen }: { onOpen: (pid: string) => void }) {
   }
 
   return (
-    <div className="mx-auto max-w-3xl space-y-4 p-6">
+    <div className="flex min-h-screen">
+      <div className="mx-auto w-full max-w-3xl space-y-4 p-6">
       <div>
         <h1 className="text-lg font-semibold">项目</h1>
         <p className="text-sm text-muted-foreground">项目 = 场景轨（单选）× 能力包（多选）；数据随 workspaces/ 项目目录隔离</p>
@@ -207,6 +208,66 @@ export function ProjectsView({ onOpen }: { onOpen: (pid: string) => void }) {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+      </div>
+      <IntelBriefCard />
     </div>
+  )
+}
+
+// 今日简报摘要卡（E9，§16.4）：项目列表右栏；无简报时显示引导抓取。
+function IntelBriefCard() {
+  const [overview, setOverview] = useState<IntelOverview | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const load = useCallback(() =>
+    api.intelOverview().then(setOverview).catch(() => {}), [])
+  useEffect(() => { load() }, [load])
+
+  const fetchNow = async () => {
+    if (busy) return
+    setBusy(true)
+    try {
+      const { job_id } = await api.intelFetch()
+      await pollJob(job_id, () => {})
+      load()
+    } catch { /* 静默，卡片维持现状 */ }
+    finally { setBusy(false) }
+  }
+
+  // 摘要 = 简报 markdown 的前几条要点（剥 md 标记）
+  const bullets = (overview?.today?.content ?? "")
+    .split("\n").filter((l) => l.trim().startsWith("- "))
+    .map((l) => l.replace(/^-\s*/, "").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1"))
+    .slice(0, 4)
+
+  return (
+    <aside className="w-72 shrink-0 space-y-2 border-l p-4">
+      <div className="flex items-center gap-2">
+        <h2 className="text-sm font-semibold">今日简报</h2>
+        <span className="flex-1" />
+        <Button size="sm" variant="outline" className="h-6 px-2 text-[10px]"
+                onClick={fetchNow} disabled={busy}>
+          {busy ? "抓取中…" : "刷新情报"}
+        </Button>
+      </div>
+      {!overview || !overview.today ? (
+        <p className="text-xs text-muted-foreground">
+          今日暂无简报。点「刷新情报」抓取漏洞源与社区热点，自动合成中文简报。
+        </p>
+      ) : (
+        <>
+          <ul className="space-y-1.5 text-xs">
+            {bullets.map((b, i) => (
+              <li key={i} className="line-clamp-2 text-muted-foreground">· {b}</li>
+            ))}
+            {bullets.length === 0 && <li className="text-muted-foreground">（简报为空）</li>}
+          </ul>
+          <Button size="sm" variant="ghost" className="h-6 px-2 text-[10px]"
+                  onClick={() => window.dispatchEvent(new Event("goto-intel"))}>
+            查看全部 →
+          </Button>
+        </>
+      )}
+    </aside>
   )
 }

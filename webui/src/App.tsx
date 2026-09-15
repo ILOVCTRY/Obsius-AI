@@ -10,6 +10,7 @@ import { RevCompact } from "@/views/reverse/RevCompact"
 import { deriveWorkbenchProfile } from "@/lib/workbench"
 import { useEvents } from "@/lib/useEvents"
 import { ProjectsView } from "@/views/ProjectsView"
+import { IntelView } from "@/views/IntelView"
 import { TaskBoard } from "@/views/TaskBoard"
 import { ApprovalsView } from "@/views/ApprovalsView"
 import { SettingsView } from "@/views/SettingsView"
@@ -18,10 +19,11 @@ import { bindingBadge } from "@/lib/taxonomy"
 
 // 三栏指挥台（DESIGN.md §12 定稿）：左窄导航 / 中主区 / 直播间页右侧黑板常驻侧栏
 
-type View = "projects" | "live" | "board" | "tasks" | "approvals" | "settings"
+type View = "projects" | "intel" | "live" | "board" | "tasks" | "approvals" | "settings"
 
 const NAV: { key: View; label: string; icon: string; needsProject: boolean }[] = [
   { key: "projects", label: "项目", icon: "◈", needsProject: false },
+  { key: "intel", label: "情报", icon: "📡", needsProject: false },
   { key: "live", label: "直播间", icon: "◉", needsProject: true },
   { key: "board", label: "黑板", icon: "▤", needsProject: true },
   { key: "tasks", label: "任务", icon: "▦", needsProject: true },
@@ -59,6 +61,13 @@ export default function App() {
     }
     window.addEventListener("goto-tasks", h)
     return () => window.removeEventListener("goto-tasks", h)
+  }, [])
+
+  // 情报页「查看全部」等跨视图跳转（goto-* 自定义事件模式）
+  useEffect(() => {
+    const h = () => setView("intel")
+    window.addEventListener("goto-intel", h)
+    return () => window.removeEventListener("goto-intel", h)
   }, [])
 
   const openProject = useCallback((id: string) => {
@@ -114,8 +123,33 @@ export default function App() {
   // 工作台 profile：research+binary ⇒ rev-generic 逆向工作台（其他轨保持渗透模板）
   const profile = deriveWorkbenchProfile(meta)
 
-  if (!pid || view === "projects") {
-    return <ProjectsView onOpen={openProject} />
+  // 无项目上下文的视图（项目列表 / 全局情报页 §16.4）：左导航 + 主区
+  if (!pid || view === "projects" || view === "intel") {
+    return (
+      <div className="flex h-screen">
+        <nav className="flex w-14 shrink-0 flex-col items-center gap-1 border-r py-3">
+          {NAV.map((n) => (
+            <button
+              key={n.key}
+              disabled={n.needsProject && !pid}
+              onClick={() => setView(n.key)}
+              title={n.label}
+              className={cn(
+                "flex w-12 flex-col items-center gap-0.5 rounded-md py-2 text-[10px]",
+                view === n.key ? "bg-secondary text-primary" : "text-muted-foreground hover:bg-accent",
+                n.needsProject && !pid && "opacity-30",
+              )}
+            >
+              <span className="text-base leading-none">{n.icon}</span>
+              {n.label}
+            </button>
+          ))}
+        </nav>
+        <main className="min-w-0 flex-1 overflow-auto">
+          {view === "intel" ? <IntelView /> : <ProjectsView onOpen={openProject} />}
+        </main>
+      </div>
+    )
   }
 
   return (

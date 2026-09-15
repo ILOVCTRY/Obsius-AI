@@ -3,7 +3,8 @@ import type {
   CachedFuncRow, CachedFunction, Chain, ChainLink, ChainNodeType, ChainStatus, ChainSummary,
   DecideApprovalResult, DoctorReport, DiscoveredModel, Finding, FindingPatchBody, FuncCreateBody, FuncEntry,
   FuncPatchBody, HistoryList, InboxMessage, Job, KbRead, KbRefHit, KbRenameResult, KbSourceTree,
-  KbWriteResult, LlmProvider, McpServer, ModelInfo, OwnerRule, PackRole, ProjectDetail, ProjectMeta,
+  KbWriteResult, LlmProvider, McpServer, ModelInfo, IntelArticle, IntelBrief, IntelBriefMeta,
+  IntelFeed, IntelOverview, IntelProfile, OwnerRule, PackRole, ProjectDetail, ProjectMeta,
   Proposal, ProposalOrigin, RoleCreateBody, RoleInfo, RouteHit,
   RoutePreviewBody, RoleUpdateBody, SampleUploadResponse, Session, SkillCreateBody, SkillDef,
   SkillDetail, SkillVocab, Task, TaskGraph, WritebackItem, XrefData,
@@ -429,6 +430,41 @@ export const api = {
   testLlmModel: (body: { name?: string; base_url?: string; api_key?: string; model: string }) =>
     http<{ ok: boolean; error?: string }>("/api/llm/test-model", {
       method: "POST", body: JSON.stringify(body),
+    }),
+
+  // 情报面板（E9，全局模块；与项目无关）
+  intelOverview: () =>
+    http<IntelOverview>("/api/intel/overview"),
+  intelFeeds: () =>
+    http<{ feeds: IntelFeed[] }>("/api/intel/feeds"),
+  intelUpdateFeeds: (feeds: { name: string; url: string }[]) =>
+    http<{ status: string; feeds: IntelFeed[] }>("/api/intel/feeds", {
+      method: "PUT", body: JSON.stringify({ feeds }),
+    }),
+  intelProfile: () =>
+    http<IntelProfile>("/api/intel/profile"),
+  intelUpdateProfile: (profile: IntelProfile) =>
+    http<{ status: string; profile: IntelProfile }>("/api/intel/profile", {
+      method: "PUT", body: JSON.stringify(profile),
+    }),
+  intelFetch: () =>
+    http<{ job_id: string }>("/api/intel/fetch", { method: "POST" }),
+  intelBriefs: () =>
+    http<{ briefs: IntelBriefMeta[] }>("/api/intel/briefs"),
+  intelBrief: (date: string) =>
+    http<IntelBrief>(`/api/intel/briefs/${date}`),
+  intelArticles: (params?: { kind?: string; unread?: boolean; starred?: boolean; limit?: number }) => {
+    const q = new URLSearchParams()
+    if (params?.kind) q.set("kind", params.kind)
+    if (params?.unread) q.set("unread", "true")
+    if (params?.starred) q.set("starred", "true")
+    if (params?.limit) q.set("limit", String(params.limit))
+    const qs = q.toString()
+    return http<{ articles: IntelArticle[] }>(`/api/intel/articles${qs ? `?${qs}` : ""}`)
+  },
+  intelMarkArticle: (id: string, patch: { read?: boolean; starred?: boolean }) =>
+    http<IntelArticle>(`/api/intel/articles/${id}`, {
+      method: "PATCH", body: JSON.stringify(patch),
     }),
 }
 

@@ -787,3 +787,50 @@ export interface HistoryList {
   exists: boolean
   versions: HistoryVersion[]
 }
+
+// ---------- 情报面板（E9，DESIGN.md §16；全局模块，与项目无关） ----------
+
+export interface IntelArticle {
+  id: string
+  url: string
+  title: string
+  source: string
+  kind: string // cve | article
+  summary: string
+  published_at: string
+  fetched_at: string
+  score: number
+  direction: string
+  is_priority: number // 1 = KEV/优先标
+  score_detail: string // JSON 字符串：{by: llm|rule|priority, hot?}
+  brief_date: string | null
+  read: number
+  starred: number
+}
+
+export interface IntelBriefMeta {
+  date: string
+  stats: Record<string, unknown>
+  created_at: string
+}
+
+export interface IntelBrief extends IntelBriefMeta {
+  content: string // markdown 全文
+}
+
+export interface IntelFeed {
+  name: string
+  url: string
+  kind: string
+}
+
+export interface IntelProfile {
+  directions: Record<string, number>
+  stage: string
+}
+
+export interface IntelOverview {
+  counts: { articles: number; unread: number; starred: number }
+  today: IntelBrief | null
+  top_unread: IntelArticle[]
+}

@@ -59,6 +59,7 @@
 | GET/POST | `/packs/history` `/packs/history/diff` `/packs/history/rollback` | 版本管理，query 参数 `file`（packs 相对路径，只许 capabilities/tracks 下、逐段白名单+resolve 双保险防穿越）+`version`：列版本（**兼容 `<ts>[.n]_<file>` 与 `<file>.<ts>.bak` 两种命名**）/ unified diff / 一键回滚（回滚前自动再备份当前版，可同秒往返） |
 | GET/PUT/DELETE | `/tracks/{track}/owners[/{tag}]` | 平台规则（文件即规则：删=停用、建=扩展；资产 meta.owner 命中才注入会话）；DELETE 也先留 .history 回滚件再删；非法 tag 422 / 不存在 404 |
 | GET/PUT | `/mcp` | config/mcp.json 配置层（`{servers:[{name,url,transport,enabled,domains[],command?,args[]}]}`——stdio 填 command/args（url 留空），http 填 url；重名/非法名 422；**PUT 另校验：domains ⊆ pentest/reverse/binary、http 的 url 必须 loopback（红线只连本机）、stdio 必填 command**。逆向运行时桥已接：`select_mcp_endpoint` 选 enabled+http+domains 含 reverse（兼容 binary）的 loopback 条目，无配置兜底 `http://127.0.0.1:13337/mcp` |
+| `/intel/*` | 全局情报（E9，无项目前缀） | overview / feeds+profile GET|PUT（写经 pack_write_lock+.history）/ fetch POST=Job `intel-refresh`（run_refresh 管线）/ briefs[/{date}] / articles GET / articles/{id} PATCH；**惰性建 config/intel/**（`app.state.intel`，测试传 `intel_dir=`）；**注入口 `intel_getter`/`intel_llm`**；classifier 缺席降级规则**不 503** |
 | WS | `/ws/projects/{pid}?since_id=0` | 事件流（1s 轮询 since_id 推送）；项目删除中/已删以 **close 1008** 拒绝（前端停止重连） |
 
 ## 关键约定
@@ -72,9 +73,8 @@
 - **L0 提案模式（批 6，§6.8）**：唯一接线点是 `_build_orchestrator` 按实时档位注入 `OrchestratorConfig(propose_only=...)`；提案**没有独立采纳端点**——人在前端点「采纳」即走既有 POST /tasks（created_by=human）与 POST /agents，故 L0 采纳不产生 job_id/kicked、不触发任何链逻辑（`_post_tick` 对 L0 早返）。
 - **地址纪律**：headless 内部 int，出 API 一律 hex 字符串（JS Number 无 64 位精度），路径参数不带 0x；样本绝不执行，headless 定性 trusted 解析。Project 黑板连接 / AgentSession 会话表进程内缓存在 `app.state`。
 - packs 写操作三件套：建前查目录（重名 409/宿主不存在 404/非法 slug 422）、写前 `_pack_history_backup`（同秒避让 `.n`，绝不覆盖既有版本）、删除走 `_trash_move`（进同级 `.history/trash/`，可恢复，不物理抹除）。**A3 起所有 packs 写端点把"存在性检查→备份→写"整体包进 `core.skills.writing.pack_write_lock()` 临界区（进程内 RLock，备份/trash 辅助可重入）**，并发保存不丢更新、同秒备份不互覆；kb 改名联动、提案 apply 同在临界区内；仅保单进程部署。
-- 删除项目的前置链（`DELETE /projects/{pid}`）：`_project_busy`（running job 的 meta.project_id + expire_leases 后数 claimed 任务）→ 置 `app.state.projects_closing` 闸门 → pop `app.state.projects` 缓存 → `store.delete_project` 内统一 `bb.close_all()`+`proj.close()` → rename（**0/0.05/0.1/0.2s 退避重试**，耗尽才 422）。闸门期 `_project` 返 409 防重建实例；Blackboard/Project 双层关闭标志使旧引用（WS tick、在飞请求）访问即抛 `BlackboardClosedError`（全局 handler 转 409），**杜绝惰性重连在 Windows 上重新锁死 db**（曾是删除必 422 的根因）；WS tick 见闸门/异常发 close 1008 退出。JobRegistry.submit 带 `meta={"project_id"}` 供忙检查。
-- 启动：`scripts/serve.py [port]`（默认 127.0.0.1:8420， Swagger 在 /docs）。
+- 删除项目的前置链（`DELETE /projects/{pid}`）：`_project_busy`（running job 的 meta.project_id + expire_leases 后数 claimed 任务）→ 置 `app.state.projects_closing` 闸门 → pop `app.state.projects` 缓存 → `store.delete_project` 内统一 `bb.close_all()`+`proj.close()` → rename（**0/0.05/0.1/0.2s 退避重试**，耗尽才 422）。闸门期 `_project` 返 409 防重建实例；Blackboard/Project 双层关闭标志使旧引用（WS tick、在飞请求）访问即抛 `BlackboardClosedError`（全局 handler 转 409），**杜绝惰性重连在 Windows 上重新锁死 db**（曾是删除必 422 的根因）；WS tick 见闸门/异常发 close 1008 退出。JobRegistry.submit 带 `meta={"project_id"}` 供忙检查。启动：`scripts/serve.py [port]`（默认 127.0.0.1:8420， Swagger 在 /docs）。
 
 ## 坑与注意
 
-- Agent 开窗依赖真实 Ark key（.env），无 key 时 Agent 端点 503、黑板/任务端点照常可用；测试里 WS 收消息条数必须与事件数精确匹配，多收会挂（TestClient 无超时）。多进程部署（uvicorn workers>1）会让 app.state 会话表/任务 job 失效——当前按单进程设计。
+- Agent 开窗依赖真实 Ark key（.env），无 key 时 Agent 端点 503、黑板/任务端点照常可用；测试里 WS 收消息条数必须与事件数精确匹配，多收会挂（TestClient 无超时）。多进程部署（uvicorn workers>1）会让 app.state 会话表/任务 job 失效——当前按单进程设计。intel 端点注入口/惰性建库见 [`core/intel/CLAUDE.md`](../intel/CLAUDE.md)。

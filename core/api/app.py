@@ -38,6 +38,9 @@ from core.blackboard import TaskQueue
 from core.blackboard.assets import register_asset
 from core.blackboard.graph import task_graph
 from core.blackboard.store import Blackboard, BlackboardClosedError
+from core.intel import config as intel_config
+from core.intel.intel_service import run_refresh as intel_run_refresh
+from core.intel.store import IntelStore
 from core.llm import ModelRouter, ProviderError, ProviderStore, probe_credentials
 from core.llm.providers import CONFIG_PATH as PROVIDERS_CONFIG_PATH
 from core.llm.routing import AVAILABLE_MODELS, KNOWN_ROLES
@@ -688,6 +691,25 @@ class SessionNoteIn(BaseModel):
     text: str
 
 
+class IntelFeedItem(BaseModel):
+    name: str = ""
+    url: str
+
+
+class IntelFeedsIn(BaseModel):
+    feeds: list[IntelFeedItem]
+
+
+class IntelProfileIn(BaseModel):
+    directions: dict[str, float]
+    stage: str = ""
+
+
+class IntelArticlePatch(BaseModel):
+    read: bool | None = None
+    starred: bool | None = None
+
+
 # ---------------- Job 注册表（长耗时动作） ----------------
 
 class JobRegistry:
@@ -741,6 +763,7 @@ def create_app(
     executor_llm: Any | None = None,
     planner_llm: Any | None = None,
     providers_config: str = PROVIDERS_CONFIG_PATH,
+    intel_dir: str | Path = "config/intel",
 ) -> FastAPI:
     """executor_llm / planner_llm 缺省时按供应商配置（config/providers.json）+
     llm.json 文件级覆写构建 provider；测试可注入假 provider。
@@ -772,6 +795,12 @@ def create_app(
     # rev_service_factory 供测试注入假后端（签名 factory(proj) -> service）
     app.state.rev_services: dict[str, Any] = {}
     app.state.rev_service_factory = None
+    # 情报面板（E9，全局模块）：惰性建 IntelStore（首访问情报端点才落 config/intel/）；
+    # intel_getter / intel_llm 为测试注入口（None = urllib 真抓 / classifier 路由）
+    app.state.intel_dir = str(intel_dir)
+    app.state.intel: IntelStore | None = None
+    app.state.intel_getter = None
+    app.state.intel_llm = None
 
     def _llms():
         exec_llm = executor_llm
@@ -3419,6 +3448,92 @@ def create_app(
                            ensure_ascii=False, indent=2),
                 encoding="utf-8")
         return {"status": "ok", "count": len(body.servers)}
+
+    # ---------- 情报面板（E9，全局模块，DESIGN.md §16；与项目黑板无关） ----------
+
+    def _intel() -> IntelStore:
+        if app.state.intel is None:
+            app.state.intel = IntelStore(app.state.intel_dir)
+        return app.state.intel
+
+    def _intel_classifier():
+        """classifier 小模型（打分/简报）；任何构建失败返回 None → 规则降级，不 503。"""
+        if app.state.intel_llm is not None:
+            return app.state.intel_llm
+        try:
+            router = ModelRouter()
+            t = router.target_for("classifier")
+            llm_store: ProviderStore = app.state.llm_store
+            return llm_store.build(*t) if t else llm_store.build()
+        except Exception:  # noqa: BLE001 —— 无 key/无供应商时情报功能照常（降级）
+            return None
+
+    @app.get("/api/intel/overview")
+    def intel_overview():
+        store = _intel()
+        today = time.strftime("%Y-%m-%d", time.gmtime())
+        return {"counts": store.counts(), "today": store.get_brief(today),
+                "top_unread": store.list_articles(unread_only=True, limit=5)}
+
+    @app.get("/api/intel/feeds")
+    def intel_feeds():
+        return {"feeds": intel_config.load_feeds(app.state.intel_dir)}
+
+    @app.put("/api/intel/feeds")
+    def intel_update_feeds(body: IntelFeedsIn):
+        with pack_write_lock():
+            _pack_history_backup(Path(app.state.intel_dir) / "feeds.json")
+            feeds = intel_config.save_feeds(
+                [f.model_dump() for f in body.feeds], app.state.intel_dir)
+        return {"status": "ok", "feeds": feeds}
+
+    @app.get("/api/intel/profile")
+    def intel_profile():
+        return intel_config.load_profile(app.state.intel_dir)
+
+    @app.put("/api/intel/profile")
+    def intel_update_profile(body: IntelProfileIn):
+        with pack_write_lock():
+            _pack_history_backup(Path(app.state.intel_dir) / "profile.json")
+            prof = intel_config.save_profile(body.model_dump(), app.state.intel_dir)
+        return {"status": "ok", "profile": prof}
+
+    @app.post("/api/intel/fetch")
+    def intel_fetch_job():
+        _intel()  # 404 前置：先确保存储就绪再提交 Job
+
+        def _run() -> dict:
+            return intel_run_refresh(
+                _intel(), intel_config.load_profile(app.state.intel_dir),
+                intel_config.load_feeds(app.state.intel_dir),
+                llm=_intel_classifier(), getter=app.state.intel_getter)
+
+        return {"job_id": app.state.jobs.submit("intel-refresh", _run)}
+
+    @app.get("/api/intel/briefs")
+    def intel_briefs():
+        return {"briefs": _intel().list_briefs()}
+
+    @app.get("/api/intel/briefs/{date}")
+    def intel_brief(date: str):
+        b = _intel().get_brief(date)
+        if b is None:
+            raise HTTPException(404, f"无 {date} 简报")
+        return b
+
+    @app.get("/api/intel/articles")
+    def intel_articles(kind: str | None = None, unread: bool = False,
+                       starred: bool = False, limit: int = 50):
+        limit = max(1, min(limit, 200))
+        return {"articles": _intel().list_articles(
+            kind=kind, unread_only=unread, starred_only=starred, limit=limit)}
+
+    @app.patch("/api/intel/articles/{article_id}")
+    def intel_mark_article(article_id: str, body: IntelArticlePatch):
+        row = _intel().mark_article(article_id, read=body.read, starred=body.starred)
+        if row is None:
+            raise HTTPException(404, f"文章不存在: {article_id}")
+        return row
 
     # ---------- Job 轮询 ----------
 
