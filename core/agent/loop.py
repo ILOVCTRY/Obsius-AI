@@ -2,9 +2,10 @@
 
 单 Agent + Skill 上下文注入：
   系统提示 = 领域红线(规则链) + 能力清单(detector) + 角色人设 + 任务目标 + 工具纪律
-  循环 = LLM 调用 → 工具分发 → 结果回填 → （卡死则召唤策略顾问） → 直至 finish/步数上限
+  循环 = LLM 调用 → 工具分发 → 结果回填 → （卡死则召唤策略顾问） → 直至 finish；
+  步数耗尽不再自动 fail，而是自动步数暂停（E8）：快照 + 任务保持 claimed，等人类恢复
 上下文预算：超限裁剪旧工具输出（防淹没全局目标）。
-会话收尾安全：任务未收尾自动 fail（防 lease 占坑，§6.4）。
+会话收尾安全：显式结束会话时任务未收尾自动 fail（防 lease 占坑，§6.4）。
 会话控制（§3）：暂停/恢复/中断检查点一律落在 LLM 步之间；暂停存 messages 快照，
 恢复从快照续跑当前任务；中断任务 fail（人工中断）不回队列。
 """
@@ -50,7 +51,8 @@ STRICT_PROMPT_TAIL = """
 
 @dataclass
 class AgentConfig:
-    max_steps: int = 40
+    # E8：默认步数预算 200（角色 yaml 取 min 可更严；request_steps 可自助 +200）
+    max_steps: int = 200
     context_char_budget: int = 120_000
     stuck_after: int = 8          # 连续 N 步无进展 → 召唤策略顾问
     task_types: list[str] | None = None   # Worker 角色过滤（认领任务时）
@@ -126,6 +128,7 @@ class AgentSession:
         self.track = track
         self.capabilities = capabilities or []
         self.config = config or AgentConfig()
+        self.artifacts_dir = Path(artifacts_dir) if artifacts_dir else None
 
         role_data = load_role(self.packs_root, track, role)
         # 角色文件缺失时 load_role 已回退 _generalist；role-rules/会话名按实际角色走
@@ -137,7 +140,8 @@ class AgentSession:
 
         if existing_session is not None:
             # rehydrate（服务重启/孤儿窗）：附着既有 sessions 行，不新建、不重置状态。
-            # 角色 yaml 仍按当盘文件重载（软边界可能已变）；暂停快照是纯内存态，无法恢复。
+            # 角色 yaml 仍按当盘文件重载（软边界可能已变）；E8 起落盘的暂停快照
+            # 会经 sessions.meta 指针载回（见 _load_persisted_snapshot）。
             self.session = dict(existing_session)
         else:
             self.session = bb.register_session(
@@ -150,6 +154,7 @@ class AgentSession:
             packs_root=packs_root, track=track, capabilities=self.capabilities,
             allowed_tools=self.config.allowed_tools, max_runtime=self.config.max_runtime,
             allowed_task_types=load_task_types(self.packs_root, track).keys(),
+            max_steps=self.config.max_steps,
         )
         self.registry: SkillRegistry | None = None
         self.capability_prompt = capability_prompt
@@ -167,6 +172,10 @@ class AgentSession:
         self._heartbeat: _LeaseHeartbeat | None = None  # 当前任务的租约心跳
         # 撤回传播：已在首条消息告过警的任务（防续跑/重入重复告警）
         self._stale_alerted: set[str] = set()
+        if existing_session is not None:
+            # E8：暂停快照已落盘 → 载回 _resume_state 并置回暂停态
+            #（服务重启后 resume 仍可从快照+步数断点续跑；无快照行为同旧版）
+            self._resume_state = self._load_persisted_snapshot()
 
     # ---------- 租约心跳（A1：长任务防 30 分钟 TTL 过期被重领双跑） ----------
 
@@ -347,12 +356,20 @@ class AgentSession:
             return None                  # 中断收尾闸门 / 暂停态不领新任务
         if self._resume_state is not None:
             st, self._resume_state = self._resume_state, None
+            self._clear_snapshot()  # 快照已消费（文件+指针清理；失败留垃圾不影响主流程）
             task = self.tq.get_task(st["task_id"])
             if (task and task["claimed_by"] == self.session["id"]
                     and task["status"] == "claimed"):
                 self.dispatcher.current_task_id = st["task_id"]
                 if self._heartbeat is None:  # 兜底：暂停期心跳本应保留，缺失则补起
                     self._start_heartbeat(st["task_id"])
+                # E8：暂停期积压的私信（含 human_note 人类引导）随快照恢复一并注入
+                drained = self.bb.inbox_drain(self.project_id, self.session["id"])
+                for notice in (self._basis_stale_notice([], drained),
+                               self._finding_update_notice(drained),
+                               self._human_note_notice(drained)):
+                    if notice:
+                        st["messages"].append({"role": "user", "content": notice})
                 summary = self._loop(st["system"], st["messages"], st["objective"],
                                      start_step=st["next_step"])
                 if summary is None:
@@ -376,9 +393,23 @@ class AgentSession:
 
     def _loop(self, system: str, messages: list[dict[str, Any]], objective: str,
               start_step: int = 1) -> str | None:
-        """返回 None = 暂停/中断退出（调用方不得 finalize）；其余返回任务总结。"""
-        for step in range(start_step, self.config.max_steps + 1):
+        """返回 None = 暂停/中断退出（调用方不得 finalize）；其余返回任务总结。
+
+        步数上界读 dispatcher.max_steps（E8）：request_steps 增补写在那里，
+        本会话内跨任务生效。"""
+        max_steps = self.dispatcher.max_steps
+        step = start_step
+        # while 而非 range（E8）：request_steps 在步内增补预算后，循环上界随之
+        # 前移——耗尽轮当场自救（步号不增）也成立，不会因 range 预计算被截断。
+        while step <= max_steps:
             self.dispatcher.set_step(step)
+            # 步数感知（E8）：剩余 <20 步起每步边界注入提醒——模型对预算无感是
+            # 步数耗尽事故的第一根因；预算吃紧时由模型自行 request_steps 或收尾。
+            remaining = max_steps - step
+            if remaining < 20:
+                messages.append({"role": "user", "content":
+                    f"⏳ 预算剩余 {remaining} 步，请规划收尾；如确需更多步数，"
+                    "调 request_steps 申请增补（一次 +200，剩余 ≤20 步才放行）。"})
             if self._stuck(step):
                 messages.append({"role": "user", "content": self._advisor_prompt(messages, objective)})
                 self.dispatcher.last_progress_step = step  # 顾问干预后重置观察窗
@@ -405,7 +436,12 @@ class AgentSession:
             ctrl = self._control_point(system, messages, objective, step)
             if ctrl is not None:
                 return None  # 检查点消费了暂停/中断（§3 会话控制）
-        return self.dispatcher.summary or "（步数上限，未显式 finish）"
+            step += 1
+            max_steps = self.dispatcher.max_steps  # 步内 request_steps 增补 → 上界前移
+        # 步数耗尽（E8）：不再自动 fail——快照 + 自动步数暂停，任务保持 claimed、
+        # 心跳继续，等人类在直播间「继续」（恢复时可附引导语/追加预算）。
+        self._budget_pause(system, messages, objective, self.dispatcher.max_steps)
+        return None
 
     # ---------- 会话控制（DESIGN.md §3：暂停/恢复/中断） ----------
 
@@ -420,6 +456,8 @@ class AgentSession:
             self._resume_state = {
                 "system": system, "messages": messages, "objective": objective,
                 "task_id": self.dispatcher.current_task_id, "next_step": step + 1,
+                "max_steps": self.dispatcher.max_steps,  # E8：暂停时预算随快照走
+                "reason": "pause",
             }
             self._enter_paused()
             return "paused"
@@ -437,7 +475,20 @@ class AgentSession:
         update_notice = self._finding_update_notice(fresh)
         if update_notice:
             messages.append({"role": "user", "content": update_notice})
+        note_notice = self._human_note_notice(fresh)
+        if note_notice:
+            messages.append({"role": "user", "content": note_notice})
         return None
+
+    def _human_note_notice(self, inbox_rows: list[dict[str, Any]]) -> str | None:
+        """拼「人类引导」消息（E8，kind='human_note'）：信息式注入，不打断当前
+        工具调用；多条按序各占一行。"""
+        notes = [str((r.get("payload") or {}).get("text", "")).strip()
+                 for r in inbox_rows if r.get("kind") == "human_note"]
+        notes = [n for n in notes if n]
+        if not notes:
+            return None
+        return "\n".join(["💬 人类引导："] + [f"- {n}" for n in notes])
 
     def _finding_update_notice(self, inbox_rows: list[dict[str, Any]]) -> str | None:
         """拼「发现增补」信息式消息（A4，kind='finding_update'）：不强制任何动作。
@@ -510,16 +561,106 @@ class AgentSession:
         return "\n".join(lines)
 
     def _enter_paused(self) -> None:
-        """落 paused 状态 + 审计事件。任务保持 claimed，恢复后从快照（如有）续跑。"""
+        """落 paused 状态 + 审计事件。任务保持 claimed，恢复后从快照（如有）续跑。
+        E8：有快照时同步落盘（workspace 文件 + sessions.meta 指针），重启可恢复。"""
         self.paused = True
         try:
             self.bb.set_session_status(self.session["id"], "paused")
         except Exception:  # noqa: BLE001
             log.exception("set_session_status(paused) 失败")
+        self._persist_snapshot()
         self.bb.append_event(
             self.project_id, "session.paused",
             {"session_id": self.session["id"], "task_id": self.dispatcher.current_task_id},
             session_id=self.session["id"], author=self.session["id"])
+
+    def _budget_pause(self, system: str, messages: list[dict[str, Any]],
+                      objective: str, max_steps: int) -> None:
+        """步数耗尽自动暂停（E8）：复用软暂停设施，快照标 reason=budget，
+        next_step 停在耗尽步（恢复不增补预算时也至少还能走一轮对话，
+        模型可当场 request_steps 自救）。任务保持 claimed、心跳继续。"""
+        self._resume_state = {
+            "system": system, "messages": messages, "objective": objective,
+            "task_id": self.dispatcher.current_task_id,
+            "next_step": self.dispatcher.step,  # 耗尽步号 = 恢复断点
+            "max_steps": max_steps, "reason": "budget",
+        }
+        self._enter_paused()
+        self.bb.append_event(
+            self.project_id, "session.budget_paused",
+            {"session_id": self.session["id"], "task_id": self.dispatcher.current_task_id,
+             "max_steps": max_steps},
+            session_id=self.session["id"], author=self.session["id"])
+
+    # ---------- 暂停快照落盘（E8：修纯内存不恢复缺口） ----------
+
+    def _snapshot_path(self) -> Path | None:
+        """快照文件路径：<workspace>/<pid>/snapshots/<sid>.json；无 artifacts_dir
+        （部分测试/直跑）时返回 None = 保持纯内存。"""
+        if self.artifacts_dir is None:
+            return None
+        return self.artifacts_dir.parent / "snapshots" / f"{self.session['id']}.json"
+
+    def _persist_snapshot(self) -> None:
+        """暂停快照落盘：写 workspace 文件并在 sessions.meta 存指针。
+        落盘失败只降级为纯内存快照（本进程内 resume 仍可用），不阻断暂停。"""
+        st = self._resume_state
+        path = self._snapshot_path()
+        if st is None or path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps({**st, "session_id": self.session["id"]},
+                           ensure_ascii=False),
+                encoding="utf-8")
+            self.bb.set_session_meta(self.session["id"],
+                                     {"resume_snapshot": path.name})
+        except Exception:  # noqa: BLE001
+            log.exception("暂停快照落盘失败（会话 %s）", self.session["id"])
+
+    def _load_persisted_snapshot(self) -> dict | None:
+        """rehydrate：按 sessions.meta 指针读回暂停快照；命中即置回暂停态。
+        文件缺失/损坏 → 返回 None（走旧版无快照路径，任务靠租约过期回队列）。"""
+        path = self._snapshot_path()
+        if path is None:
+            return None
+        meta = self.session.get("meta")
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except ValueError:
+                meta = {}
+        if not isinstance(meta, dict) or not meta.get("resume_snapshot"):
+            return None
+        try:
+            st = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            log.warning("暂停快照读取失败（会话 %s）", self.session["id"])
+            return None
+        if not isinstance(st, dict) or "messages" not in st:
+            return None
+        if isinstance(st.get("max_steps"), int) and st["max_steps"] > 0:
+            self.dispatcher.max_steps = st["max_steps"]  # 暂停时的预算随快照还原
+        self.paused = True
+        return st
+
+    def _clear_snapshot(self) -> None:
+        """快照已消费（续跑/中断）：删文件 + 清 meta 指针。失败只留垃圾文件，
+        不影响主流程（下次暂停会覆盖同名文件）。"""
+        path = self._snapshot_path()
+        if path is None:
+            return
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            log.warning("暂停快照文件清理失败（会话 %s）", self.session["id"])
+        try:
+            self.bb.set_session_meta(self.session["id"], {"resume_snapshot": None})
+        except Exception:  # noqa: BLE001
+            log.exception("暂停快照指针清理失败（会话 %s）", self.session["id"])
 
     def _task_gone(self) -> bool:
         """A1：当前任务行是否已从看板删除（claimed 任务可被人工取消，步边界感知）。"""
@@ -533,6 +674,7 @@ class AgentSession:
         if task_id is None and self._resume_state:
             task_id = self._resume_state.get("task_id")  # 空闲暂停态被中断：快照任务也要收尾
         self._resume_state = None
+        self._clear_snapshot()  # E8：中断即丢弃落盘快照（文件+指针）
         self.paused = False
         self._pause_req.clear()
         self._abort_req.clear()

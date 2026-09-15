@@ -17,8 +17,9 @@ from core.skills import proposals
 from core.skills.proposals import ProposalError
 from core.skills.rules import load_kb_sources
 
-# 收尾协议工具不在角色 tools 白名单管控内（它们是循环控制原语，不是能力）
-_CONTROL_TOOLS = {"complete_task", "fail_task", "finish"}
+# 收尾协议工具不在角色 tools 白名单管控内（它们是循环控制原语，不是能力）。
+# request_steps（E8）同属控制原语：预算自助增补与收尾决策一样必须永远可达。
+_CONTROL_TOOLS = {"complete_task", "fail_task", "finish", "request_steps"}
 
 # 计划原语同样恒放行：任何角色认领任务后都必须能写/推进计划（A2 先规划后动手）
 _PLAN_TOOLS = {"task_plan", "task_step"}
@@ -349,6 +350,19 @@ AGENT_TOOLS: list[dict[str, Any]] = [
             "required": ["summary"],
         },
     },
+    {
+        "name": "request_steps",
+        "description": "申请步数预算增补（一次固定 +200）。仅当剩余步数 ≤20 时放行，"
+                       "剩余充足时会被拒收（防未雨绸缪囤步数）。步数耗尽会话会自动"
+                       "暂停等人类恢复，所以预算吃紧时请主动申请并说明理由。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "reason": {"type": "string",
+                           "description": "为何还需要更多步数（一句话，落审计）"},
+            },
+        },
+    },
 ]
 
 
@@ -363,7 +377,8 @@ class ToolDispatcher:
                  capabilities: list[str] | None = None,
                  allowed_tools: list[str] | None = None,
                  max_runtime: str | None = None,
-                 allowed_task_types: Iterable[str] | None = None):
+                 allowed_task_types: Iterable[str] | None = None,
+                 max_steps: int = 0):
         self.bb = bb
         self.gateway = gateway
         self.tq = tq
@@ -381,6 +396,9 @@ class ToolDispatcher:
         self.max_runtime = max_runtime if max_runtime in RUNTIME_RANK else None
         # 轨 task_types.yaml 注册表（A5 子代理发任务的类型护栏）：None=未接线不校验
         self.allowed_task_types = allowed_task_types
+        # 会话步数预算（E8）：AgentSession 按角色收敛后的 max_steps 注入；request_steps
+        # 增补写这里（_loop 的 range 上界同读），0 = 未装配（request_steps 拒收）
+        self.max_steps = max_steps
         self.current_task_id: str | None = None
         self._step = 0
         self.last_progress_step = 0   # 最近一次实质进展的步号（卡死检测用）
@@ -389,6 +407,11 @@ class ToolDispatcher:
 
     def set_step(self, n: int) -> None:
         self._step = n
+
+    @property
+    def step(self) -> int:
+        """当前步号（E8：预算耗尽暂停时作恢复断点）。"""
+        return self._step
 
     # ---------- 分发 ----------
 
@@ -781,6 +804,25 @@ class ToolDispatcher:
         self.finished = True
         self.summary = summary
         return "会话即将结束"
+
+    def _tool_request_steps(self, reason: str = "") -> str:
+        """E8 自助加步：一次固定 +200；剩余 >20 拒收（防囤步数），落审计事件。"""
+        if self.max_steps <= 0:
+            return "[拒绝] 步数预算未装配，无法增补"
+        remaining = self.max_steps - self._step
+        if remaining > 20:
+            return (f"[拒绝] 剩余 {remaining} 步 > 20，暂不允许增补"
+                    "（防未雨绸缪囤步数；预算吃紧到 ≤20 步时再申请）")
+        old = self.max_steps
+        self.max_steps = old + 200
+        self.bb.append_event(
+            self.project_id, "step.budget_extended",
+            {"session_id": self.session_id, "task_id": self.current_task_id,
+             "old_max": old, "new_max": self.max_steps, "step": self._step,
+             "remaining": remaining, "reason": (reason or "")[:200], "by": "agent"},
+            session_id=self.session_id, author=self.author)
+        return (f"步数预算已增补：{old} → {self.max_steps}。请继续规划收尾，"
+                "优先完成当前任务再考虑新动作。")
 
     # ---------- 反编译组合服务（§9；func_kb 查重在这里机制级强制） ----------
 

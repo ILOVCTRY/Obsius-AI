@@ -147,6 +147,9 @@ export function LiveRoom({ pid }: { pid: string }) {
   const [model, setModel] = useState("")
   const [switchProvider, setSwitchProvider] = useState("")
   const [switchModel, setSwitchModel] = useState("")
+  // E8：开窗步数预算（留空=后端默认 200）与输入框模式（发任务｜引导会话）
+  const [maxSteps, setMaxSteps] = useState("")
+  const [inputMode, setInputMode] = useState<"task" | "note">("task")
   const [orchOpen, setOrchOpen] = useState(false)
   const [orchRoles, setOrchRoles] = useState<Set<string>>(new Set())
   // A1：关页签=本地 detach（后台任务继续跑），可从溢出菜单/任务流视图挂回
@@ -278,7 +281,9 @@ export function LiveRoom({ pid }: { pid: string }) {
   const spawn = async () => {
     setSpawning(true)
     try {
-      const r = await api.spawnAgent(pid, role, undefined, model || undefined, provider || undefined)
+      const ms = maxSteps ? Number(maxSteps) : undefined
+      const r = await api.spawnAgent(pid, role, undefined, model || undefined,
+                                     provider || undefined, ms)
       await refreshSessions()
       void refreshUsage()
       // 预算超支：人手动作放行仅警告（硬闸只拦编排自主动作，§6.8）
@@ -460,9 +465,21 @@ export function LiveRoom({ pid }: { pid: string }) {
     }
   }
 
+  // 输入框（E8）：「发任务」= 以 human 名义发布 passive 任务；「引导会话」=
+  // human_note 私信直达当前选中会话（步边界注入「💬 人类引导」，不打断当前工具调用）
   const sendRemark = async () => {
     const text = remark.trim()
     if (!text) return
+    if (inputMode === "note") {
+      if (!activeSession) return
+      setRemark("")
+      try {
+        await api.sessionNote(activeSession.id, text)
+      } catch (e) {
+        setJobInfo(`引导投递失败：${e}`)
+      }
+      return
+    }
     setRemark("")
     try {
       await api.publishTask(pid, { objective: text, task_type: "generic", noise_budget: "passive" })
@@ -509,6 +526,17 @@ export function LiveRoom({ pid }: { pid: string }) {
 
   const activeSession = sessions.find((s) => s.id === activeTab)
   const activeStatus = activeSession ? sessionStatus(activeSession.id, events) : null
+  // E8：步数预算用尽自动暂停的会话集（恢复/中断/收尾即移出）——控制组显「继续」
+  const budgetPausedSids = useMemo(() => {
+    const s = new Set<string>()
+    for (const e of events) {
+      if (!e.session_id) continue
+      if (e.kind === "session.budget_paused") s.add(e.session_id)
+      else if (e.kind === "session.resumed" || e.kind === "session.aborted"
+               || e.kind === "session.finished") s.delete(e.session_id)
+    }
+    return s
+  }, [events])
 
   return (
     <div className="flex h-full flex-col">
@@ -653,6 +681,13 @@ export function LiveRoom({ pid }: { pid: string }) {
             <option key={m} value={m}>{m}</option>
           ))}
         </select>
+        <input
+          value={maxSteps}
+          onChange={(e) => setMaxSteps(e.target.value.replace(/\D/g, ""))}
+          placeholder="步数 200"
+          title="开窗步数预算 max_steps（E8，缺省 200；角色 yaml 上限取更严者；步数吃紧时 Agent 可 request_steps 自助 +200，耗尽自动暂停）"
+          className="h-8 w-20 shrink-0 rounded-md border bg-background px-2 font-mono text-xs placeholder:text-muted-foreground"
+        />
         <Button size="sm" variant="outline" onClick={spawn} disabled={spawning || !roles.length}>开窗</Button>
         {/* 自主级别 / 暂停 / L2 链状态 / 用量预算（DESIGN §6.8，批 2-5） */}
         {usage && (
@@ -749,8 +784,14 @@ export function LiveRoom({ pid }: { pid: string }) {
         {activeSession && (
           activeStatus === "paused" ? (
             <>
-              <Button size="sm" variant="outline" onClick={() => controlSession("resume", activeSession.id)}>
-                ▶ 恢复
+              <Button
+                size="sm" variant="outline"
+                title={budgetPausedSids.has(activeSession.id)
+                  ? "步数预算用尽自动暂停：从快照+步数断点恢复（默认自动 +200 步，落审计）；恢复后可用输入框「引导会话」补充指示"
+                  : "从快照恢复被暂停的任务"}
+                onClick={() => controlSession("resume", activeSession.id)}
+              >
+                {budgetPausedSids.has(activeSession.id) ? "▶ 继续" : "▶ 恢复"}
               </Button>
               <Button size="sm" variant="outline"
                       className="text-[--status-error] hover:text-[--status-error]"
@@ -944,15 +985,45 @@ export function LiveRoom({ pid }: { pid: string }) {
         </div>
       </div>
 
-      {/* 插话输入（人类插手通道 §6.4：以 human 名义发布 passive 任务） */}
+      {/* 插话输入（人类插手通道 §6.4）：发任务=human 名义 passive 任务；E8 引导会话=human_note 直达选中会话 */}
       <div className="flex items-center gap-2 border-t p-3">
+        <div className="flex h-9 shrink-0 overflow-hidden rounded-md border text-xs">
+          <button
+            type="button"
+            title="以 human 名义向黑板发布一个 passive 任务（插话）"
+            onClick={() => setInputMode("task")}
+            className={cn("px-2.5 transition-colors",
+              inputMode === "task" ? "bg-primary/15 font-medium text-primary" : "text-muted-foreground hover:bg-accent")}
+          >
+            发任务
+          </button>
+          <button
+            type="button"
+            title={activeSession
+              ? "向当前选中会话投递人类引导（步边界注入，不打断当前工作；暂停期投递恢复时随快照注入）"
+              : "引导直达会话：先在上方选中一个会话页签"}
+            onClick={() => setInputMode("note")}
+            className={cn("border-l px-2.5 transition-colors",
+              inputMode === "note" ? "bg-primary/15 font-medium text-primary" : "text-muted-foreground hover:bg-accent",
+              !activeSession && "opacity-50")}
+          >
+            引导会话
+          </button>
+        </div>
         <Input
-          placeholder="插话：向黑板发布一个任务或一条指示…"
+          placeholder={inputMode === "note"
+            ? (activeSession
+                ? `引导「${activeSession.name || activeSession.role}」：一句话指示，步边界注入不打断当前工作…`
+                : "引导会话：先选中一个会话页签…")
+            : "插话：向黑板发布一个任务或一条指示…"}
           value={remark}
           onChange={(e) => setRemark(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && sendRemark()}
         />
-        <Button size="sm" onClick={sendRemark} disabled={!remark.trim()}>发送</Button>
+        <Button size="sm" onClick={sendRemark}
+                disabled={!remark.trim() || (inputMode === "note" && !activeSession)}>
+          {inputMode === "note" ? "引导" : "发送"}
+        </Button>
       </div>
       </>
       )}

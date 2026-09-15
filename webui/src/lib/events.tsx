@@ -36,9 +36,13 @@ export function eventStyle(kind: string, payload?: Record<string, unknown>): Eve
   if (kind === "finding.retracted")
     return { label: "🚫 发现撤回", className: "text-[--status-error]", defaultOpen: true }
   if (kind === "message.inbox") {
-    // A4：finding_update 是信息式增补通知，与撤回强提醒分样式
+    // A4：信息式增补（🔵）与撤回强提醒（⚠ 三选一）严格分样式；E8 人类引导直达
+    if (payload?.kind === "human_note")
+      return { label: "💬 人类引导", className: "text-primary", defaultOpen: true }
     if (payload?.kind === "finding_update")
       return { label: "🔵 发现增补", className: "text-sky-400", defaultOpen: true }
+    if (payload?.kind === "basis_stale")
+      return { label: "⚠ 依据撤回", className: "text-amber-400", defaultOpen: true }
     return { label: "🔔 会话私信", className: "text-[--status-approval]", defaultOpen: true }
   }
   if (kind === "task.basis_stale_done")
@@ -62,6 +66,11 @@ export function eventStyle(kind: string, payload?: Record<string, unknown>): Eve
     return { label: "∑ token", className: "text-muted-foreground", defaultOpen: false }
   if (kind === "budget.soft_warning")
     return { label: "🟡 预算预警", className: "text-amber-400", defaultOpen: true }
+  // E8 步数预算：自助/人工增补与耗尽自动暂停
+  if (kind === "step.budget_extended")
+    return { label: "⏳ 步数增补", className: "text-amber-400", defaultOpen: true }
+  if (kind === "session.budget_paused")
+    return { label: "⏸ 步数预算用尽", className: "text-amber-400", defaultOpen: true }
   if (kind === "kb.open") return { label: "📖 打开知识库", className: "text-muted-foreground", defaultOpen: false }
   if (kind === "skill.routed") return { label: "🎯 技能路由", className: "text-muted-foreground", defaultOpen: false }
   if (kind === "proposal.created") return { label: "📝 变更提案", className: "text-[--status-approval]", defaultOpen: true }
@@ -180,6 +189,24 @@ export function eventSummary(payload: Record<string, unknown>): ReactNode {
   if (payload.kind === "finding_update" && typeof payload.title === "string") {
     const changes = Array.isArray(payload.changes) ? `（${payload.changes.join("、")}）` : ""
     return `${payload.title}${changes}`
+  }
+  // E8 步数预算事件摘要
+  if (typeof payload.old_max === "number" && typeof payload.new_max === "number") {
+    const who = payload.by === "human" ? "人类" : "Agent"
+    const why = typeof payload.reason === "string" && payload.reason ? `（${payload.reason}）` : ""
+    return (
+      <span className="font-mono text-xs">
+        {who}增补 · {payload.old_max} → {payload.new_max} 步{why}
+      </span>
+    )
+  }
+  if (typeof payload.max_steps === "number" && payload.session_id !== undefined
+      && payload.old_max === undefined) {
+    return (
+      <span className="font-mono text-xs">
+        预算 {payload.max_steps} 步已用尽 · 任务保持，等待人类「继续」（可附引导/增补步数）
+      </span>
+    )
   }
   if (typeof payload.summary === "string") return payload.summary
   if (typeof payload.objective === "string") return payload.objective

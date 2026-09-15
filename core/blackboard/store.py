@@ -490,6 +490,51 @@ class Blackboard:
             "SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
         return _row_to_dict(updated) or {}
 
+    def get_session(self, session_id: str) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
+        return _row_to_dict(row)
+
+    def set_session_meta(self, session_id: str, patch: dict) -> dict:
+        """合并更新会话 meta（JSON 列；E8 暂停快照指针等运行期状态）。
+
+        读-合并-写在单个 _tx() 内（并发 PATCH 不丢键）；值可为 None（键留存、语义清除）。"""
+        with self._tx():
+            row = self.conn.execute(
+                "SELECT meta FROM sessions WHERE id=?", (session_id,)).fetchone()
+            if row is None:
+                raise ValueError(f"会话不存在: {session_id}")
+            merged = {**_loads(row["meta"], {}), **patch}
+            self.conn.execute(
+                "UPDATE sessions SET meta=? WHERE id=?",
+                (json.dumps(merged, ensure_ascii=False), session_id))
+        sess = self.get_session(session_id) or {}
+        sess["meta"] = _loads(sess.get("meta"), {})
+        return sess
+
+    def post_human_note(self, project_id: str, to_session: str, text: str) -> dict | None:
+        """人类引导私信（E8 人工引导通道）：kind=human_note，作者=human。
+
+        ref_id 用唯一 note id（不参与未读去重，连发多条各自投递）；落 message.inbox
+        审计事件（作者 human，页签红点/已读全复用）。会话不存在抛 ValueError，
+        已关闭返回 None（不投递）；成功返回 {id, text}。"""
+        row = self.conn.execute(
+            "SELECT status FROM sessions WHERE id=?", (to_session,)).fetchone()
+        if row is None:
+            raise ValueError(f"会话不存在: {to_session}")
+        if row["status"] == "closed":
+            return None
+        note_id = new_id("note")
+        if not self.inbox_post(project_id, to_session, "human_note", note_id,
+                               {"text": text}):
+            return None
+        self.append_event(
+            project_id, "message.inbox",
+            {"to_session": to_session, "kind": "human_note", "ref_id": note_id,
+             "title": text[:80], "by": "human"},
+            session_id=to_session, author="human")
+        return {"id": note_id, "kind": "human_note", "text": text}
+
     # ---------- 审批（§12 收件箱：创建/决策的唯一 core 入口） ----------
 
     def request_approval(

@@ -1220,3 +1220,46 @@ def test_task_graph_query_count_bounded(bb, project):
     inbox_edges = [e for e in g["edges"] if e["kind"] == "inbox"]
     assert len(inbox_edges) == 60 * 59 // 2
     assert all(e["source"] != e["target"] for e in inbox_edges)
+
+
+# ---------- E8：会话 meta 合并 + 人工引导私信 ----------
+
+def test_set_session_meta_merges(bb, project):
+    s = _session(bb, project, "meta会话")
+    bb.set_session_meta(s["id"], {"resume_snapshot": "a.json"})
+    got = bb.set_session_meta(s["id"], {"other": 1})
+    meta = got["meta"]
+    assert meta["resume_snapshot"] == "a.json" and meta["other"] == 1
+    # None 值 = 语义清除（键留存）
+    bb.set_session_meta(s["id"], {"resume_snapshot": None})
+    meta = bb.get_session(s["id"])
+    import json as _json
+    assert _json.loads(meta["meta"])["resume_snapshot"] is None
+
+
+def test_set_session_meta_missing_session(bb):
+    with pytest.raises(ValueError):
+        bb.set_session_meta("sess-nope", {"x": 1})
+
+
+def test_post_human_note_delivers_and_audits(bb, project):
+    s = _session(bb, project, "引导会话")
+    r1 = bb.post_human_note(project["id"], s["id"], "先看 80 端口")
+    r2 = bb.post_human_note(project["id"], s["id"], "再试弱口令")
+    assert r1 and r2 and r1["id"] != r2["id"]      # 每条都是新 note，不去重
+    rows = bb.inbox_list(project["id"], s["id"])
+    assert [r["kind"] for r in rows] == ["human_note", "human_note"]
+    assert [r["payload"]["text"] for r in rows] == ["先看 80 端口", "再试弱口令"]
+    evs = [e for e in bb.recent_events(project["id"]) if e["kind"] == "message.inbox"]
+    assert len(evs) == 2
+    assert all(e["author"] == "human" and e["payload"]["kind"] == "human_note"
+               for e in evs)
+    assert evs[0]["payload"]["title"] == "先看 80 端口"
+
+
+def test_post_human_note_rejects_missing_and_closed(bb, project):
+    with pytest.raises(ValueError):
+        bb.post_human_note(project["id"], "sess-nope", "x")
+    s = _session(bb, project, "将关窗")
+    bb.close_session(s["id"])
+    assert bb.post_human_note(project["id"], s["id"], "晚了") is None

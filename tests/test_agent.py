@@ -933,3 +933,192 @@ def test_agent_publish_task_empty_objective_rejected(env):
     d.dispatch("task_plan", {"steps": [{"title": "分解"}]})
     r = d.dispatch("publish_task", {"objective": "   "})
     assert r.startswith("[错误]") and "objective" in r
+
+
+# ---------- E8：步数预算与人工引导 ----------
+
+def test_request_steps_gate_and_extension(env):
+    """request_steps（E8）：剩余 >20 拒收防囤步；≤20 放行固定 +200 并落审计；
+    未装配预算（max_steps=0）拒收。"""
+    from core.agent.tools import ToolDispatcher
+    bb, project, gw, tq, _ = env
+    sid = bb.register_session(project["id"], "budget")["id"]
+    d = ToolDispatcher(bb, gateway=gw, tq=tq, project_id=project["id"],
+                       session_id=sid, author=sid, max_steps=40)
+    d.set_step(5)   # 剩余 35 > 20 → 拒
+    r = d.dispatch("request_steps", {"reason": "想囤点步数"})
+    assert r.startswith("[拒绝]") and "35" in r and d.max_steps == 40
+    d.set_step(25)  # 剩余 15 → 放行
+    r = d.dispatch("request_steps", {"reason": "深度扫描未完"})
+    assert "240" in r and d.max_steps == 240
+    ev = [e for e in bb.recent_events(project["id"])
+          if e["kind"] == "step.budget_extended"]
+    assert ev and ev[-1]["payload"]["old_max"] == 40
+    assert ev[-1]["payload"]["new_max"] == 240
+    assert ev[-1]["payload"]["by"] == "agent"
+
+    # 未装配预算的裸 dispatcher → 拒收不崩
+    sid2 = bb.register_session(project["id"], "nobudget")["id"]
+    d2 = ToolDispatcher(bb, gateway=gw, tq=tq, project_id=project["id"],
+                        session_id=sid2, author=sid2)
+    assert d2.dispatch("request_steps", {}).startswith("[拒绝]")
+
+
+def test_budget_exhaustion_pauses_not_fails_then_resumes(env):
+    """步数耗尽（E8）：不再 fail——任务保持 claimed、会话 paused、快照 reason=budget、
+    session.budget_paused 事件；恢复（API 同款 +200）后从断点续跑至完成。"""
+    bb, project, gw, tq, _ = env
+    tid = tq.publish(project["id"], "步数耗尽任务", task_type="generic")
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("t1", "run_cmd",
+                                            {"cmd": "c1", "runtime": "host",
+                                             "threat_class": "trusted"})]},
+        {"tool_use": [ScriptedLLM.tool_call("t2", "run_cmd",
+                                            {"cmd": "c2", "runtime": "host",
+                                             "threat_class": "trusted"})]},
+        {"tool_use": [ScriptedLLM.tool_call("t3", "run_cmd",
+                                            {"cmd": "c3", "runtime": "host",
+                                             "threat_class": "trusted"})]},
+        # 恢复后的续跑剧本
+        {"tool_use": [ScriptedLLM.tool_call("t4", "complete_task",
+                                            {"result_note": "补步后完成"})]},
+        {"tool_use": [ScriptedLLM.tool_call("t5", "finish", {"summary": "干完了"})]},
+    ])
+    agent = make_agent(env, llm, config=AgentConfig(max_steps=3))
+    assert agent.run_task("步数耗尽演练", task_id=tid) == ""   # 暂停退出，非任务总结
+    assert tq.get_task(tid)["status"] == "claimed"             # 不 fail（占坑语义保留给显式收尾）
+    assert agent.paused is True
+    assert agent._resume_state["reason"] == "budget"
+    assert agent._resume_state["task_id"] == tid
+    assert agent._resume_state["next_step"] == 3               # 断点=耗尽步
+    assert agent._heartbeat is not None and agent._heartbeat.is_alive()  # 心跳保留
+    evs = [e["kind"] for e in bb.recent_events(project["id"])]
+    assert "session.budget_paused" in evs and "session.finished" not in evs
+    # 预算提醒已注入（剩余 <20 起每步边界）
+    assert any("预算剩余" in json.dumps(c["messages"], ensure_ascii=False)
+               for c in llm.calls)
+
+    # 人类「继续」（resume 端点同款操作：+200 + 清标志 → run_next_task 续跑）
+    old_max = agent.dispatcher.max_steps
+    agent.dispatcher.max_steps = old_max + 200                 # resume 端点的默认增补
+    agent._pause_req.clear()
+    agent._abort_req.clear()
+    agent.paused = False
+    assert agent.run_next_task() == "干完了"
+    assert tq.get_task(tid)["status"] == "done"
+    # 扩展后的预算在同一会话跨任务生效
+    assert agent.dispatcher.max_steps == old_max + 200
+
+
+def test_budget_exhaustion_self_rescue_via_request_steps(env):
+    """耗尽步号恢复且不加预算：循环仍给一轮对话，模型当场 request_steps 自救续跑。"""
+    bb, project, gw, tq, _ = env
+    tid = tq.publish(project["id"], "自救任务", task_type="generic")
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("t1", "run_cmd",
+                                            {"cmd": "c1", "runtime": "host",
+                                             "threat_class": "trusted"})]},
+        {"tool_use": [ScriptedLLM.tool_call("t2", "run_cmd",
+                                            {"cmd": "c2", "runtime": "host",
+                                             "threat_class": "trusted"})]},
+        # 恢复后耗尽断点：先自救申请，再收尾
+        {"tool_use": [ScriptedLLM.tool_call("t3", "request_steps",
+                                            {"reason": "还差最后一步"})]},
+        {"tool_use": [ScriptedLLM.tool_call("t4", "complete_task", {"result_note": "完"})]},
+        {"tool_use": [ScriptedLLM.tool_call("t5", "finish", {"summary": "自救成功"})]},
+    ])
+    agent = make_agent(env, llm, config=AgentConfig(max_steps=2))
+    assert agent.run_task("自救演练", task_id=tid) == ""
+    agent._pause_req.clear()
+    agent._abort_req.clear()
+    agent.paused = False                                       # 不加预算直接恢复
+    assert agent.run_next_task() == "自救成功"                  # request_steps +200 续上
+    assert tq.get_task(tid)["status"] == "done"
+    ev = [e for e in bb.recent_events(project["id"])
+          if e["kind"] == "step.budget_extended"]
+    assert ev and ev[-1]["payload"]["by"] == "agent"
+
+
+def test_human_note_injected_at_step_boundary(env):
+    """human_note（E8）：步边界 drain 注入「💬 人类引导」user 消息，不打断工具调用。"""
+    bb, project, gw, tq, _ = env
+    tid = tq.publish(project["id"], "被引导的任务", task_type="generic")
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("t1", "run_cmd",
+                                            {"cmd": "whoami", "runtime": "host",
+                                             "threat_class": "trusted"})]},
+        {"tool_use": [ScriptedLLM.tool_call("t2", "finish", {"summary": "收到引导"})]},
+    ])
+    agent = make_agent(env, llm)
+    orig_chat = llm.chat
+    n = {"c": 0}
+
+    def chat(messages, **kw):
+        n["c"] += 1
+        r = orig_chat(messages, **kw)
+        if n["c"] == 1:
+            bb.post_human_note(project["id"], agent.session["id"], "优先看备份文件")
+        return r
+    llm.chat = chat
+
+    assert agent.run_task("引导演练", task_id=tid) == "收到引导"
+    second = json.dumps(llm.calls[1]["messages"], ensure_ascii=False)
+    assert "💬 人类引导" in second and "优先看备份文件" in second
+
+
+def test_snapshot_persisted_and_rehydrates(env):
+    """暂停快照落盘（E8）：workspace 文件 + sessions.meta 指针；服务重启 rehydrate
+    载回快照置回 paused，resume 从断点续跑完成并清理快照。"""
+    bb, project, gw, tq, tmp_path = env
+    tid = tq.publish(project["id"], "重启可续任务", task_type="generic")
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("t1", "run_cmd",
+                                            {"cmd": "c1", "runtime": "host",
+                                             "threat_class": "trusted"})]},
+    ])
+    agent = make_agent(env, llm, config=AgentConfig(max_steps=10),
+                       artifacts_dir=tmp_path / "proj" / "artifacts")
+    orig_chat = llm.chat
+    n = {"c": 0}
+
+    def chat(messages, **kw):
+        n["c"] += 1
+        r = orig_chat(messages, **kw)
+        if n["c"] == 1:
+            agent.request_pause()
+        return r
+    llm.chat = chat
+
+    assert agent.run_task("重启演练", task_id=tid) == ""
+    sid = agent.session["id"]
+    snap = tmp_path / "proj" / "snapshots" / f"{sid}.json"
+    assert snap.is_file()
+    persisted = json.loads(snap.read_text(encoding="utf-8"))
+    assert persisted["task_id"] == tid and persisted["reason"] == "pause"
+    meta = json.loads(bb.get_session(sid)["meta"])
+    assert meta["resume_snapshot"] == snap.name
+
+    # 服务重启：新 AgentSession 附着既有 sessions 行（rehydrate）
+    row = bb.get_session(sid)
+    llm2 = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("t2", "complete_task",
+                                            {"result_note": "重启后完成"})]},
+        {"tool_use": [ScriptedLLM.tool_call("t3", "finish", {"summary": "续跑成功"})]},
+    ])
+    reborn = AgentSession(
+        project_id=project["id"], bb=bb, gateway=gw, llm=llm2,
+        packs_root=tmp_path / "packs", track="assessment", capabilities=["web"],
+        role="_generalist", capability_prompt="", config=AgentConfig(max_steps=10),
+        artifacts_dir=tmp_path / "proj" / "artifacts", existing_session=row)
+    assert reborn.paused is True
+    assert reborn._resume_state is not None
+    assert reborn._resume_state["task_id"] == tid
+    assert reborn._resume_state["next_step"] == 2
+    assert reborn.dispatcher.max_steps == 10                   # 暂停时预算随快照还原
+
+    # 人类「继续」→ 从快照续跑 → 快照文件与指针清理
+    reborn.paused = False
+    assert reborn.run_next_task() == "续跑成功"
+    assert tq.get_task(tid)["status"] == "done"
+    assert not snap.exists()
+    assert json.loads(bb.get_session(sid)["meta"])["resume_snapshot"] is None

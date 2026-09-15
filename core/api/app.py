@@ -618,7 +618,14 @@ class AgentIn(BaseModel):
     session_name: str | None = None
     model: str | None = None  # per-session 覆盖 executor 模型（DESIGN.md §8）；None=供应商默认
     provider: str | None = None  # 供应商名（config/providers.json）；None=全局默认供应商
-    max_steps: int = 30
+    max_steps: int = 200  # E8：默认步数预算（角色 yaml 取 min 可更严；request_steps 可自助 +200）
+
+    @field_validator("max_steps")
+    @classmethod
+    def _check_max_steps(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("max_steps 须为正整数")
+        return v
 
 
 class LlmProviderIn(BaseModel):
@@ -667,6 +674,17 @@ class ApprovalDecisionIn(BaseModel):
         if v not in {"approved", "rejected"}:
             raise ValueError("decision 只能是 approved / rejected")
         return v
+
+
+class SessionResumeIn(BaseModel):
+    """E8：恢复暂停会话的可选参数——引导语随快照注入；步数增补仅对
+    预算暂停（reason=budget）生效，缺省自动 +200（与 request_steps 同增量）。"""
+    note: str | None = None
+    extra_steps: int | None = None
+
+
+class SessionNoteIn(BaseModel):
+    text: str
 
 
 # ---------------- Job 注册表（长耗时动作） ----------------
@@ -1041,7 +1059,8 @@ def create_app(
         inventory = app.state.inventory
 
         def factory(role: str, session_name: str | None = None,
-                    existing_session: dict | None = None) -> AgentSession:
+                    existing_session: dict | None = None,
+                    max_steps: int | None = None) -> AgentSession:
             from core.tools.decompiler import build_headless_service, gateway_runner
 
             gateway = ExecutionGateway(bb=proj.bb)
@@ -1055,7 +1074,8 @@ def create_app(
                 capability_prompt=inventory.to_prompt(),
                 # 角色 yaml 的 default_noise/tools/max_runtime/max_steps 在
                 # AgentSession 内消费（只可能更严）；这里只给全局/动态部分
-                config=AgentConfig(max_steps=30, task_types=r.get("task_types"),
+                config=AgentConfig(max_steps=max_steps or 200,
+                                   task_types=r.get("task_types"),
                                    owner_tags=proj.bb.owner_tags(pid)),
                 artifacts_dir=proj.artifacts_dir,
                 existing_session=existing_session,
@@ -1090,9 +1110,12 @@ def create_app(
         exec_llm, plan_llm = _llms()
         agent = _registered_session_factory(pid, exec_llm, plan_llm)(
             row["role"], existing_session=row)
-        # 重启后无 worker 线程：running/paused 都是无消费者的陈旧行状态，回 idle
+        # 重启后无 worker 线程：running/paused 都是无消费者的陈旧行状态。E8：落盘
+        # 快照在手（_resume_state 已载回且 paused=True）→ 保持 paused 可恢复；
+        # 无快照回 idle（claimed 任务靠 30min 租约过期回 open，§3 重启纪律）。
         if row.get("status") in {"running", "paused", "blocked"}:
-            proj.bb.set_session_status(sid, "idle")
+            proj.bb.set_session_status(
+                sid, "paused" if agent._resume_state is not None else "idle")
         return agent
 
     # ---------- 项目 ----------
@@ -1942,8 +1965,10 @@ def create_app(
         return {"session_id": sid, "status": "paused"}
 
     @app.post("/api/sessions/{sid}/resume")
-    def resume_session(sid: str):
-        """恢复：清控制标志；有快照则起新 agent-work job 续跑被暂停的任务。"""
+    def resume_session(sid: str, body: SessionResumeIn | None = None):
+        """恢复：清控制标志；有快照则起新 agent-work job 续跑被暂停的任务。
+        E8：可附引导语（随快照注入 user 消息）；预算暂停缺省自动 +200 步
+        （extra_steps 可覆盖，0=不增补），并落 step.budget_extended 审计。"""
         agent = _ensure_agent(_pid_of_session(sid), sid)
         if not agent.paused:
             raise HTTPException(409, "会话未处于暂停态")
@@ -1952,9 +1977,23 @@ def create_app(
         agent._abort_req.clear()
         pid = agent.project_id
         bb = _project(pid).bb
+        st = agent._resume_state
+        if st is not None and st.get("reason") == "budget":
+            extra = 200 if body is None or body.extra_steps is None else body.extra_steps
+            if extra > 0:
+                old = agent.dispatcher.max_steps
+                agent.dispatcher.max_steps = old + extra
+                bb.append_event(
+                    pid, "step.budget_extended",
+                    {"session_id": sid, "task_id": st.get("task_id"),
+                     "old_max": old, "new_max": old + extra, "by": "human"},
+                    session_id=sid, author="human")
+        if body and body.note and st is not None:
+            st["messages"].append(
+                {"role": "user", "content": f"💬 人类引导：{body.note.strip()}"})
         bb.append_event(pid, "session.resumed", {"session_id": sid},
                         session_id=sid, author="human")
-        if agent._resume_state is not None:
+        if st is not None:
             bb.set_session_status(sid, "running")
             _submit_worker(pid, agent, origin="human-resume")
         else:
@@ -1982,6 +2021,23 @@ def create_app(
         pid = _pid_of_session(sid)
         n = _project(pid).bb.inbox_mark_read(pid, sid, body.ids if body else None)
         return {"marked": n}
+
+    @app.post("/api/sessions/{sid}/note", status_code=201)
+    def post_session_note(sid: str, body: SessionNoteIn):
+        """人工引导通道（E8）：human_note 私信直达会话，worker 步边界 drain
+        注入「💬 人类引导：…」user 消息（不打断当前工具调用）；暂停期投递的
+        引导在恢复随快照一并注入。页签红点/已读/事件流审计全复用。"""
+        text = body.text.strip()
+        if not text:
+            raise HTTPException(422, "引导内容不能为空")
+        pid = _pid_of_session(sid)
+        try:
+            r = _project(pid).bb.post_human_note(pid, sid, text)
+        except ValueError as e:
+            raise HTTPException(404, str(e))
+        if r is None:
+            raise HTTPException(409, "会话已关闭，无法投递引导")
+        return {"note_id": r["id"], "session_id": sid}
 
     def _pid_of_session(sid: str) -> str:
         for proj in store.list_projects():
@@ -2134,7 +2190,8 @@ def create_app(
                 raise HTTPException(503, f"供应商/模型不可用（{e}）") from e
         factory = _registered_session_factory(pid, exec_llm, plan_llm)
         try:
-            agent = factory(body.role, session_name=body.session_name)
+            agent = factory(body.role, session_name=body.session_name,
+                            max_steps=body.max_steps)
         except FileNotFoundError as e:
             raise HTTPException(422, str(e))
         # 触发点 C（批 5）：L1/L2 未暂停时人手开窗即自动起一个 worker（空队列零成本退）；

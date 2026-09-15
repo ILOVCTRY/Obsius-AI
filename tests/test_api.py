@@ -578,6 +578,74 @@ def test_pause_resume_abort_endpoints(client):
     gate.set()
 
 
+# ---------- E8：人工引导端点 + 恢复附引导/增补步数 ----------
+
+
+def test_session_note_endpoint(client):
+    """POST /note（E8 人工引导通道）：human_note 私信落地 + message.inbox 审计
+    （author=human）+ 已读复用；空文本 422 / 未知会话 404 / 关窗 409。"""
+    pid = _make_project(client)
+    proj = client.app.state.projects[pid]
+    sid = proj.bb.register_session(pid, "引导目标", role="_generalist")["id"]
+    r = client.post(f"/api/sessions/{sid}/note", json={"text": "先看 80 端口"})
+    assert r.status_code == 201 and r.json()["note_id"]
+    inbox = client.get(f"/api/sessions/{sid}/inbox").json()
+    assert [m["kind"] for m in inbox] == ["human_note"]
+    assert inbox[0]["payload"]["text"] == "先看 80 端口"
+    events = client.get(f"/api/projects/{pid}/events").json()
+    assert any(e["kind"] == "message.inbox" and e["author"] == "human"
+               and e["payload"]["kind"] == "human_note" for e in events)
+    # 红点/已读复用 inbox read 端点
+    assert client.post(f"/api/sessions/{sid}/inbox/read").json()["marked"] == 1
+    assert client.post(f"/api/sessions/{sid}/note", json={"text": "  "}).status_code == 422
+    assert client.post("/api/sessions/sess-nope/note",
+                       json={"text": "x"}).status_code == 404
+    proj.bb.close_session(sid)
+    assert client.post(f"/api/sessions/{sid}/note", json={"text": "x"}).status_code == 409
+
+
+def test_resume_budget_pause_note_and_extra_steps(client):
+    """预算暂停恢复（E8）：引导语随快照注入；增补缺省 +200、可显式指定、0=不加；
+    每次增补落 step.budget_extended（by=human）。"""
+    pid = client.post("/api/projects", json={"name": "渗透-恢复增补",
+                                              "track": "assessment",
+                                              "capabilities": ["web"]}).json()["id"]
+    agent = _spawn_test_agent(client, pid)
+    sid = agent.session["id"]
+
+    def pause_budget(max_steps: int) -> None:
+        agent._resume_state = {"system": "s", "messages": [], "objective": "x",
+                               "task_id": None, "next_step": max_steps,
+                               "max_steps": max_steps, "reason": "budget"}
+        agent.dispatcher.max_steps = max_steps
+        agent.paused = True
+
+    # 显式 +50 + 引导语
+    pause_budget(10)
+    r = client.post(f"/api/sessions/{sid}/resume",
+                    json={"note": "换个思路看子域", "extra_steps": 50})
+    assert r.status_code == 200
+    assert agent.dispatcher.max_steps == 60
+    events = client.get(f"/api/projects/{pid}/events").json()
+    ext = [e for e in events if e["kind"] == "step.budget_extended"]
+    assert ext and ext[-1]["payload"]["by"] == "human"
+    assert ext[-1]["payload"]["old_max"] == 10 and ext[-1]["payload"]["new_max"] == 60
+
+    # 缺省（无 body）→ 预算暂停自动 +200
+    pause_budget(60)
+    assert client.post(f"/api/sessions/{sid}/resume").status_code == 200
+    assert agent.dispatcher.max_steps == 260
+
+    # extra_steps=0 → 显式不加，无增补事件
+    pause_budget(260)
+    assert client.post(f"/api/sessions/{sid}/resume",
+                       json={"extra_steps": 0}).status_code == 200
+    assert agent.dispatcher.max_steps == 260
+    ext = [e for e in client.get(f"/api/projects/{pid}/events").json()
+           if e["kind"] == "step.budget_extended"]
+    assert len(ext) == 2  # 只落了前两次的增补事件
+
+
 def test_close_session_fails_paused_snapshot_task(client):
     """关窗守卫：暂停快照里的任务仍 claimed → 关窗前先 fail 防占坑（§6.4）。"""
     from core.blackboard import TaskQueue

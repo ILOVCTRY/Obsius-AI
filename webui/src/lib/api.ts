@@ -200,10 +200,18 @@ export const api = {
     http<{ status: string }>(`/api/sessions/${sid}/close`, { method: "POST" }),
   pauseSession: (sid: string) =>
     http<{ status: string }>(`/api/sessions/${sid}/pause`, { method: "POST" }),
-  resumeSession: (sid: string) =>
-    http<{ status: string }>(`/api/sessions/${sid}/resume`, { method: "POST" }),
+  // E8：恢复可附引导语（随快照注入）与增补步数；预算暂停缺省自动 +200
+  resumeSession: (sid: string, body?: { note?: string; extra_steps?: number }) =>
+    http<{ status: string }>(`/api/sessions/${sid}/resume`, {
+      method: "POST", body: body ? JSON.stringify(body) : undefined,
+    }),
   abortSession: (sid: string) =>
     http<{ status: string }>(`/api/sessions/${sid}/abort`, { method: "POST" }),
+  // E8 人工引导通道：human_note 私信直达会话，worker 步边界注入
+  sessionNote: (sid: string, text: string) =>
+    http<{ note_id: string; session_id: string }>(`/api/sessions/${sid}/note`, {
+      method: "POST", body: JSON.stringify({ text }),
+    }),
   sessionInbox: (sid: string, unread = false) =>
     http<InboxMessage[]>(`/api/sessions/${sid}/inbox${unread ? "?unread=true" : ""}`),
   readSessionInbox: (sid: string, ids?: string[]) =>
@@ -214,12 +222,13 @@ export const api = {
   // Agent / 编排
   models: () => http<ModelInfo>("/api/models"),
   spawnAgent: (pid: string, role: string, sessionName?: string, model?: string,
-               provider?: string) =>
+               provider?: string, maxSteps?: number) =>
     http<Session & { warning?: string; job_id?: string }>(`/api/projects/${pid}/agents`, {
       method: "POST",
       body: JSON.stringify({
         role, session_name: sessionName,
         model: model || undefined, provider: provider || undefined,
+        max_steps: maxSteps || undefined,  // E8：开窗可调步数预算（缺省 200）
       }),
     }),
   switchAgentLlm: (sid: string, provider: string, model?: string) =>
