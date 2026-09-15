@@ -1543,7 +1543,13 @@ def test_llm_providers_crud_and_switch(client):
 # ---------- 资产更新端点（DESIGN.md §5.2：PATCH 补挂/合并 meta） ----------
 
 
-def test_patch_asset_endpoint(client):
+def test_patch_asset_endpoint(client, monkeypatch):
+    # E6 起 domain 走自动 DNS——测试断网 hermetic（不给 monkeypatch 就会打真实解析）
+    from core.blackboard import assets as am
+
+    def _no_dns(*a, **k):
+        raise OSError("dns off")
+    monkeypatch.setattr(am.socket, "getaddrinfo", _no_dns)
     pid = _make_project(client)
     a = client.post(f"/api/projects/{pid}/assets",
                     json={"type": "host", "value": "10.0.0.10"}).json()
@@ -2518,3 +2524,28 @@ def test_manual_replan_bypasses_gates_and_409_on_lease(tmp_path, monkeypatch):
         blocked = c.post(f"/api/projects/{pid}/orchestrator/replan-priorities")
         assert blocked.status_code == 409
         ost.release_tick_lease(bb, pid, "test-holder")
+
+
+def test_assets_register_entry_auto_detect_and_dedup(client):
+    """E6：POST /assets 走 register_asset 统一入口——auto 识别类型、同值合并
+    不插重复行（修人工路径重复行）、识别不出 422 提示手选。"""
+    pid = _make_project(client)
+    r1 = client.post(f"/api/projects/{pid}/assets",
+                     json={"type": "auto", "value": "https://10.5.5.5/admin"})
+    assert r1.status_code == 201
+    body = r1.json()
+    assert body["type"] == "url" and body["created"] and body["host_id"]
+
+    # 同值重报（旧实现直接 upsert 会插重复行）→ 同 id 合并
+    r2 = client.post(f"/api/projects/{pid}/assets",
+                     json={"value": "https://10.5.5.5/admin"})
+    assert r2.status_code == 201
+    assert r2.json()["id"] == body["id"] and not r2.json()["created"]
+
+    # 识别不出 → 422
+    r3 = client.post(f"/api/projects/{pid}/assets", json={"value": "无法识别???"})
+    assert r3.status_code == 422 and "手选" in r3.json()["detail"]
+
+    rows = client.get(f"/api/projects/{pid}/assets").json()
+    assert len([a for a in rows if a["type"] == "url"]) == 1
+    assert all("status" in a for a in rows)      # E7：status 出口

@@ -784,12 +784,16 @@ class Blackboard:
             author=author)
         return {"id": asset_id, **snapshot}
 
-    def list_assets(self, project_id: str, type_: str | None = None) -> list[dict]:
+    def list_assets(self, project_id: str, type_: str | None = None,
+                    status: str | None = None) -> list[dict]:
         sql = "SELECT * FROM assets WHERE project_id=?"
         params: list[Any] = [project_id]
         if type_:
             sql += " AND type=?"
             params.append(type_)
+        if status:
+            sql += " AND status=?"
+            params.append(status)
         sql += " ORDER BY created_at"
         out = []
         for r in self.conn.execute(sql, params):
@@ -797,6 +801,36 @@ class Blackboard:
             d["meta"] = _loads(d.get("meta"), {})  # meta 列是 JSON 文本，读出解析回 dict
             out.append(d)
         return out
+
+    def set_asset_status(self, asset_id: str, status: str, note: str | None = None,
+                         author: str = "system") -> dict:
+        """资产扫描/测试状态机（E7，§5.2）：复活 assets.status 死列。
+
+        白名单四态 open/visited/scanning/tested_clean，非法值抛 ValueError；
+        **tested_clean 必带 note**（测了什么/怎么测，服务端强制——防 AI 虚标干净）；
+        同状态重复流转是 no-op；每次实际流转落 asset.status_changed 审计事件。
+        「有发现」不由 AI 标：verified findings 由前端反查显徽章，结论以 findings 为准。
+        资产不存在抛 LookupError（→API 404）。
+        """
+        if status not in ("open", "visited", "scanning", "tested_clean"):
+            raise ValueError(f"非法资产状态: {status}（open/visited/scanning/tested_clean）")
+        if status == "tested_clean" and not (note and note.strip()):
+            raise ValueError("tested_clean 必须附 note（测了什么/怎么测）")
+        with self._tx():
+            row = self.conn.execute(
+                "SELECT project_id, status FROM assets WHERE id=?", (asset_id,)).fetchone()
+            if row is None:
+                raise LookupError(f"资产不存在: {asset_id}")
+            if row["status"] == status:
+                return self.get_asset(asset_id)  # type: ignore[return-value]
+            self.conn.execute(
+                "UPDATE assets SET status=? WHERE id=?", (status, asset_id))
+        self.append_event(
+            row["project_id"], "asset.status_changed",
+            {"asset_id": asset_id, "old": row["status"], "new": status,
+             "note": (note or "")[:200], "by": author},
+            author=author)
+        return self.get_asset(asset_id)  # type: ignore[return-value]
 
     def owner_tags(self, project_id: str) -> list[str]:
         """项目资产 meta.owner 去重清单（开窗注入 owner 规则的数据源，DESIGN.md §4）。"""

@@ -58,6 +58,7 @@ export function eventStyle(kind: string, payload?: Record<string, unknown>): Eve
   if (kind === "func.updated")
     return { label: "ƒ 函数更新", className: "text-muted-foreground", defaultOpen: false }
   if (kind === "asset.new") return { label: "📦 资产", className: "text-muted-foreground", defaultOpen: false }
+  if (kind === "asset.status_changed") return { label: "🔄 资产状态", className: "text-muted-foreground", defaultOpen: false }
   if (kind === "func.upsert") return { label: "ƒ 函数分析", className: "text-muted-foreground", defaultOpen: false }
   if (kind === "llm.thinking")
     return { label: "💭 思考", className: "text-muted-foreground italic", defaultOpen: false }
@@ -189,6 +190,16 @@ export function eventSummary(payload: Record<string, unknown>): ReactNode {
   if (payload.kind === "finding_update" && typeof payload.title === "string") {
     const changes = Array.isArray(payload.changes) ? `（${payload.changes.join("、")}）` : ""
     return `${payload.title}${changes}`
+  }
+  // E7 资产状态流转摘要：open → visited（note）
+  if (typeof payload.old === "string" && typeof payload.new === "string"
+      && typeof payload.asset_id === "string") {
+    const note = typeof payload.note === "string" && payload.note ? `（${payload.note}）` : ""
+    return (
+      <span className="font-mono text-xs">
+        {payload.old} → {payload.new}{note}
+      </span>
+    )
   }
   // E8 步数预算事件摘要
   if (typeof payload.old_max === "number" && typeof payload.new_max === "number") {

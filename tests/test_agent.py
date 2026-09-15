@@ -344,7 +344,13 @@ def test_worker_never_claims_after_pause(env):
 
 # ---------- bb_add_asset 自动挂载 + 重复合并（DESIGN.md §5.2） ----------
 
-def test_add_asset_auto_mount_and_meta_merge(env):
+def test_add_asset_auto_mount_and_meta_merge(env, monkeypatch):
+    # E6 起 domain 由平台自动 DNS 挂载——测试断网 hermetic（解析失败=独立行）
+    from core.blackboard import assets as am
+
+    def _no_dns(*a, **k):
+        raise OSError("dns off")
+    monkeypatch.setattr(am.socket, "getaddrinfo", _no_dns)
     bb, project, gw, tq, _ = env
     llm = ScriptedLLM([
         {"tool_use": [ScriptedLLM.tool_call("t1", "bb_add_asset",
@@ -1122,3 +1128,71 @@ def test_snapshot_persisted_and_rehydrates(env):
     assert tq.get_task(tid)["status"] == "done"
     assert not snap.exists()
     assert json.loads(bb.get_session(sid)["meta"])["resume_snapshot"] is None
+
+
+# ---------- E6/E7 资产登记统一入口与扫描/测试状态机 ----------
+
+def _dispatcher(env, name="assets"):
+    from core.agent.tools import ToolDispatcher
+    bb, project, gw, tq, _ = env
+    sid = bb.register_session(project["id"], name)["id"]
+    return ToolDispatcher(bb, gateway=gw, tq=tq, project_id=project["id"],
+                          session_id=sid, author=sid)
+
+
+def test_bb_add_asset_unified_entry_and_dedup_hint(env):
+    """E6：bb_add_asset 走 register_asset 统一入口——类型自动识别、url 含 IP
+    自动挂 host、重报合并并回执防重扫提示；识别不出拒收回填。"""
+    d = _dispatcher(env)
+    r = d.dispatch("bb_add_asset", {"value": "https://10.9.9.9/login"})
+    assert "type=url" in r and "created=True" in r and "host=" in r
+    aid = r.split("asset=")[1].split()[0]
+
+    r2 = d.dispatch("bb_add_asset", {"value": "https://10.9.9.9/login",
+                                     "meta": {"title": "登录页"}})
+    assert f"asset={aid}" in r2 and "created=False" in r2
+    assert "命中既有资产" in r2 and "bb_query" in r2      # E6 ⑥ 防重扫提示
+
+    r3 = d.dispatch("bb_add_asset", {"value": "怪值无类型"})
+    assert r3.startswith("[错误]") and "手选" in r3
+
+
+def test_bb_add_asset_domain_dns_mount(env, monkeypatch):
+    """E6 ③⑤：domain 由平台自动 DNS 解析挂 host（Agent 侧无需显式传 parent_id）。"""
+    from core.blackboard import assets as am
+    monkeypatch.setattr(am.socket, "getaddrinfo",
+                        lambda *a, **k: [(2, 1, 6, "", ("10.10.10.10", 0))])
+    d = _dispatcher(env, "dns")
+    r = d.dispatch("bb_add_asset", {"value": "app.corp.example"})
+    assert "type=domain" in r and "host=" in r
+    # 同 IP 第二个域名复用 host 并命中既有资产提示
+    r2 = d.dispatch("bb_add_asset", {"value": "dev.corp.example"})
+    assert "命中既有资产" in r2
+
+
+def test_bb_asset_status_tool_and_query_filters(env):
+    """E7：bb_asset_status 流转（tested_clean 必带 note）；bb_query assets
+    增 status/type 过滤并返回 status。"""
+    d = _dispatcher(env, "status")
+    r = d.dispatch("bb_add_asset", {"value": "10.2.2.2"})
+    aid = r.split("asset=")[1].split()[0]
+
+    assert d.dispatch("bb_asset_status",
+                      {"asset_id": aid, "status": "tested_clean"}).startswith("[拒绝]")
+    assert d.dispatch("bb_asset_status",
+                      {"asset_id": aid, "status": "hacked"}).startswith("[拒绝]")
+    assert d.dispatch("bb_asset_status",
+                      {"asset_id": "asset-000000000000", "status": "visited"}).startswith("[错误]")
+    for st in ("visited", "scanning"):
+        assert d.dispatch("bb_asset_status", {"asset_id": aid, "status": st}).startswith("asset=")
+    assert d.dispatch("bb_asset_status",
+                      {"asset_id": aid, "status": "tested_clean",
+                       "note": "手测 4 个入口"}).startswith("asset=")
+    ev = [e for e in d.bb.recent_events(d.project_id)
+          if e["kind"] == "asset.status_changed"]
+    assert [e["payload"]["new"] for e in ev] == ["visited", "scanning", "tested_clean"]
+
+    q = json.loads(d.dispatch("bb_query", {"what": "assets", "status": "tested_clean"}))
+    assert [a["id"] for a in q] == [aid] and q[0]["status"] == "tested_clean"
+    q2 = json.loads(d.dispatch("bb_query", {"what": "assets", "type": "host", "status": "open"}))
+    assert all(a["type"] == "host" and a["status"] == "open" for a in q2)

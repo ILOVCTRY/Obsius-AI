@@ -5,13 +5,12 @@ Agent 没有裸 shell：run_cmd 经 gateway；黑板读写走 Blackboard；
 """
 
 import hashlib
-import ipaddress
 import json
 from pathlib import Path
 from typing import Any, Iterable
-from urllib.parse import urlparse
 
 from core.blackboard import Blackboard, ClaimError, TaskQueue
+from core.blackboard.assets import register_asset
 from core.runtime.gateway import ExecutionGateway, GatewayDenied
 from core.skills import proposals
 from core.skills.proposals import ProposalError
@@ -69,25 +68,49 @@ AGENT_TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "bb_add_asset",
-        "description": "登记资产（domain/host/service/url/binary），重复自动去重。"
-                       "资产树：url/service 若值里含 IP 会自动建 host 并挂载；域名挂载需"
-                       "显式传 parent_id=host 资产 id。重报同值资产 = 合并 meta"
-                       "（title=一句话简述；scanned=true 标记已扫描）。"
-                       "meta.title 展示在资产页，meta.scanned 显示「已扫」徽章。"
-                       "meta.owner=平台标签（.edu.cn 系→edusrc；品牌/平台标注→对应 tag；"
-                       "无归属不打）——命中的平台规则会注入会话。",
+        "description": "登记资产（host/domain/service/url/binary），人工与 Agent 同一入口。"
+                       "type 省略=按值自动识别（url/IPv4/host:port/完整域名/64hex，"
+                       "识别不出拒收回填）。资产树：url/service 值里含 IP 自动建 host 并"
+                       "挂载；domain 由平台自动 DNS 解析挂 host（解析失败独立成行），"
+                       "同 IP 多域名自动标主域名/别名。重报同值资产 = 合并 meta 不插重复行"
+                       "（回执会提示先 bb_query 查重——勿对同一目标重复登记、重复扫描）。"
+                       "meta.title=一句话简述（资产页展示）；meta.owner=平台标签"
+                       "（.edu.cn 系→edusrc；品牌/平台标注→对应 tag；无归属不打）——"
+                       "命中的平台规则会注入会话。扫描/测试状态走 bb_asset_status"
+                       "（访问≠测试），不要再写 meta.scanned。",
         "input_schema": {
             "type": "object",
             "properties": {
-                "type": {"type": "string"},
+                "type": {"type": "string",
+                         "description": "host/domain/service/url/binary；省略或 auto=自动识别"},
                 "value": {"type": "string"},
                 "meta": {"type": "object",
-                         "description": "title=一句话简述；scanned=true=已扫描"},
+                         "description": "title=一句话简述；owner=平台标签"},
                 "parent_id": {"type": "string",
-                              "description": "父资产 id（url/service 的 IP 主机部可自动挂载，"
-                                             "domain 需先 bb_query 查到 host 的 id）"},
+                              "description": "父资产 id（url/service 的 IP 主机部自动挂载，"
+                                             "domain 自动 DNS；显式传可跳过自动逻辑）"},
             },
-            "required": ["type", "value"],
+            "required": ["value"],
+        },
+    },
+    {
+        "name": "bb_asset_status",
+        "description": "流转资产扫描/测试状态（白名单四态：open→visited→scanning→tested_clean）。"
+                       "硬纪律：**访问≠测试**——访问过标 visited、开始扫描标 scanning、"
+                       "测完且无发现才允许 tested_clean；tested_clean 必须带 note"
+                       "（测了什么/怎么测，服务端强制，缺 note 拒收）。测出问题直接 "
+                       "bb_add_finding（verified 发现由前端反查显「有发现」徽章，"
+                       "不要自报状态），每次流转落 asset.status_changed 审计。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "asset_id": {"type": "string"},
+                "status": {"type": "string",
+                           "enum": ["visited", "scanning", "tested_clean", "open"]},
+                "note": {"type": "string",
+                         "description": "tested_clean 必填：测了什么/怎么测"},
+            },
+            "required": ["asset_id", "status"],
         },
     },
     {
@@ -159,6 +182,12 @@ AGENT_TOOLS: list[dict[str, Any]] = [
                 "address": {"type": ["integer", "string"],
                             "description": f"func 单点查询。{_ADDR_DESC}"},
                 "risk_tag": {"type": "string", "description": "func 按风险标签过滤"},
+                "type": {"type": "string",
+                         "description": "assets 按类型过滤（host/domain/service/url/binary）"},
+                "status": {"type": "string",
+                           "description": "assets 按扫描/测试状态过滤"
+                                          "（open/visited/scanning/tested_clean）——"
+                                          "并发会话可借此感知哪些目标正被扫"},
             },
             "required": ["what"],
         },
@@ -462,48 +491,39 @@ class ToolDispatcher:
         )
         return r.brief()
 
-    def _host_parent_for(self, type: str, value: str) -> str | None:
-        """自动挂载（§5.2）：url/service 值解析出 IP 主机部 → 确保 host 资产存在并返回其 id。
-        域名不猜 DNS（返回 None，靠技能纪律显式挂载）。"""
-        host_part = None
-        if type == "url":
-            host_part = urlparse(value).hostname
-        elif type == "service":
-            host_part = value.rsplit(":", 1)[0] if ":" in value else None
-        if not host_part:
-            return None
-        try:
-            ipaddress.ip_address(host_part)
-        except ValueError:
-            return None  # 域名/主机名：不猜 DNS
-        return self.bb.upsert_asset(self.project_id, "host", host_part,
-                                    author=self.author)["id"]
-
-    def _tool_bb_add_asset(self, type: str, value: str, meta: dict | None = None,
+    def _tool_bb_add_asset(self, value: str, type: str = "auto",
+                           meta: dict | None = None,
                            parent_id: str | None = None) -> str:
-        if parent_id is None:  # 未显式给父行 → 尝试按 IP 主机部自动挂载
-            parent_id = self._host_parent_for(type, value)
-        # 同值资产已存在 → 走合并路径（upsert 去重键含 parent_id，直接 upsert 会插重复行）
-        existing = self.bb.find_asset(self.project_id, type, value)
-        if existing is not None:
-            if parent_id and not existing.get("parent_id"):
-                try:
-                    self.bb.set_asset_parent(existing["id"], parent_id)
-                except ValueError:
-                    pass  # 挂载被拒（环/父缺失）：保留原状
-            if meta:
-                self.bb.update_asset_meta(existing["id"], meta)
-            self.last_progress_step = self._step
-            return f"asset={existing['id']} created=False"
-        r = self.bb.upsert_asset(self.project_id, type, value, parent_id=parent_id,
-                                 meta=meta, author=self.author)
-        if r["created"]:
-            self.bb.append_event(self.project_id, "asset.new",
-                                 {"asset_id": r["id"], "type": type, "value": value,
-                                  "parent_id": parent_id},
-                                 session_id=self.session_id, author=self.author)
+        # E6 统一登记入口：类型自动识别/去重合并/DNS 挂载/主域名标记全在
+        # register_asset（人工 POST /assets 同路径）；非法类型 ValueError 回填
+        try:
+            r = register_asset(self.bb, self.project_id, value, type_=type,
+                               parent_id=parent_id, meta=meta, author=self.author,
+                               session_id=self.session_id)
+        except ValueError as e:
+            return f"[错误] {e}"
         self.last_progress_step = self._step
-        return f"asset={r['id']} created={r['created']}"
+        reply = f"asset={r['id']} type={r['type']} value={r['value']} created={r['created']}"
+        if r.get("host_id"):
+            reply += f" host={r['host_id']}"
+        # E6 ⑥ 防重扫：命中既有资产/既有 IP 时回执提示查重
+        if not r["created"] or r.get("host_existed"):
+            reply += ("\n[提示] 命中既有资产（同值或同 IP）：先 bb_query what=assets 查重，"
+                      "不要对同一目标重复登记、重复扫描；确需补挂/补 meta 才复报。")
+        return reply
+
+    def _tool_bb_asset_status(self, asset_id: str, status: str,
+                              note: str | None = None) -> str:
+        a0 = self.bb.get_asset(asset_id)
+        if a0 is None or a0.get("project_id") != self.project_id:
+            return f"[错误] 资产不存在: {asset_id}"
+        try:
+            a = self.bb.set_asset_status(asset_id, status, note=note,
+                                         author=self.author)
+        except ValueError as e:
+            return f"[拒绝] {e}"
+        self.last_progress_step = self._step
+        return f"asset={asset_id} status={a['status']}"
 
     def _tool_bb_add_finding(self, vuln_class: str, title: str, severity: str = "info",
                              status: str = "unverified", evidence: dict | None = None,
@@ -560,7 +580,8 @@ class ToolDispatcher:
 
     def _tool_bb_query(self, what: str, target_asset_id: str | None = None,
                        binary_sha256: str | None = None, address: int | str | None = None,
-                       risk_tag: str | None = None) -> str:
+                       risk_tag: str | None = None, type: str | None = None,
+                       status: str | None = None) -> str:
         if address is not None:
             try:
                 address = _coerce_addr(address)
@@ -573,10 +594,11 @@ class ToolDispatcher:
                   "severity": f["severity"], "status": f["status"], "confidence": f["confidence"]}
                  for f in rows], ensure_ascii=False)
         if what == "assets":
-            rows = self.bb.list_assets(self.project_id)
+            rows = self.bb.list_assets(self.project_id, type_=type, status=status)
             return json.dumps(
                 [{"id": a["id"], "type": a["type"], "value": a["value"],
-                  "parent_id": a.get("parent_id"), "meta": a.get("meta", {})}
+                  "parent_id": a.get("parent_id"), "status": a.get("status", "open"),
+                  "meta": a.get("meta", {})}
                  for a in rows], ensure_ascii=False)
         if what == "events":
             rows = self.bb.recent_events(self.project_id, limit=50)

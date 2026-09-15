@@ -318,7 +318,22 @@ function Findings({ pid, compact, showCanvas }: { pid: string; compact?: boolean
   )
 }
 
-function AssetRow({ a, indent = false }: { a: Asset; indent?: boolean }) {
+// E7 资产状态徽章（§5.2）：open 不显；旧数据 meta.scanned=true 映射「已访问」；
+// 「有发现」= 该资产挂 verified finding 的前端反查（结论以 findings 为准，AI 不自报）
+function AssetBadges({ a, hasFinding }: { a: Asset; hasFinding?: boolean }) {
+  if (hasFinding)
+    return <Badge variant="outline" className="text-[10px] text-[--status-error]">有发现</Badge>
+  const s = a.status === "open" && a.meta?.scanned ? "visited" : a.status
+  if (s === "visited")
+    return <Badge variant="outline" className="text-[10px] text-muted-foreground">已访问</Badge>
+  if (s === "scanning")
+    return <Badge variant="outline" className="text-[10px] text-amber-400">扫描中</Badge>
+  if (s === "tested_clean")
+    return <Badge variant="outline" className="text-[10px] text-primary">已测试·干净</Badge>
+  return null
+}
+
+function AssetRow({ a, indent = false, hasFinding }: { a: Asset; indent?: boolean; hasFinding?: boolean }) {
   const meta = a.meta ?? {}
   const hint = (meta.module ?? meta.platform ?? meta.source) as string | undefined
   const title = meta.title as string | undefined
@@ -327,10 +342,7 @@ function AssetRow({ a, indent = false }: { a: Asset; indent?: boolean }) {
       <div className="flex items-center gap-2">
         <Badge variant="outline" className="font-mono text-[10px]">{a.type}</Badge>
         <span className="min-w-0 flex-1 truncate font-mono text-xs">{a.value}</span>
-        {/* 扫描标识（§5.2 meta.scanned）：AI 扫过的目标显「已扫」徽章 */}
-        {!!meta.scanned && (
-          <Badge variant="outline" className="text-[10px] text-primary">已扫</Badge>
-        )}
+        <AssetBadges a={a} hasFinding={hasFinding} />
         {hint && <span className="max-w-32 truncate text-[10px] text-muted-foreground">{hint}</span>}
         <span className="font-mono text-[10px] text-muted-foreground">{a.author}</span>
       </div>
@@ -344,12 +356,20 @@ function AssetRow({ a, indent = false }: { a: Asset; indent?: boolean }) {
 
 function Assets({ pid, compact, tree = false }: { pid: string; compact?: boolean; tree?: boolean }) {
   const [items, setItems] = useState<Asset[]>([])
-  const [type, setType] = useState("binary")
+  const [type, setType] = useState("auto")   // E6：默认自动识别（修旧默认 binary bug）
   const [value, setValue] = useState("")
+  const [err, setErr] = useState("")
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  // E7「有发现」徽章数据源：verified findings 的 target_asset_id 反查集合
+  const [verifiedIds, setVerifiedIds] = useState<Set<string>>(new Set())
 
-  const refresh = useCallback(() =>
-    api.assets(pid).then(setItems).catch(() => {}), [pid])
+  const refresh = useCallback(() => {
+    api.assets(pid).then(setItems).catch(() => {})
+    api.findings(pid).then((fs) =>
+      setVerifiedIds(new Set(fs
+        .filter((f) => f.status === "verified" && f.target_asset_id)
+        .map((f) => f.target_asset_id as string)))).catch(() => {})
+  }, [pid])
   useEffect(() => {
     refresh()
     const t = setInterval(refresh, 4000)
@@ -384,14 +404,20 @@ function Assets({ pid, compact, tree = false }: { pid: string; compact?: boolean
 
   const add = async () => {
     if (!value.trim()) return
-    await api.addAsset(pid, type.trim(), value.trim())
-    setValue("")
-    refresh()
+    try {
+      await api.addAsset(pid, type.trim(), value.trim())
+      setErr("")
+      setValue("")
+      refresh()
+    } catch (e) {
+      // 识别不出类型的 422 提示手选（E6 ②）
+      setErr(e instanceof Error ? e.message : String(e))
+    }
   }
 
   const renderRows = () => {
     if (items.length === 0) return <Empty />
-    if (!tree) return items.map((a) => <AssetRow key={a.id} a={a} />)
+    if (!tree) return items.map((a) => <AssetRow key={a.id} a={a} hasFinding={verifiedIds.has(a.id)} />)
     // 递归渲染（host → service → url 多层）：任意带子行的节点都可展开
     const countDesc = (id: string): number =>
       (childrenOf.get(id) ?? []).reduce((n, c) => n + 1 + countDesc(c.id), 0)
@@ -413,9 +439,7 @@ function Assets({ pid, compact, tree = false }: { pid: string; compact?: boolean
             ) : <span className="size-3.5 shrink-0" />}
             <Badge variant="outline" className="font-mono text-[10px]">{a.type}</Badge>
             <span className="min-w-0 flex-1 truncate font-mono text-xs">{a.value}</span>
-            {!!meta.scanned && (
-              <Badge variant="outline" className="text-[10px] text-primary">已扫</Badge>
-            )}
+            <AssetBadges a={a} hasFinding={verifiedIds.has(a.id)} />
             {children.length > 0 && (
               <Badge variant="outline" className="font-mono text-[10px] text-muted-foreground">
                 {countDesc(a.id)}
@@ -444,11 +468,24 @@ function Assets({ pid, compact, tree = false }: { pid: string; compact?: boolean
         <div className="space-y-1 p-3">{renderRows()}</div>
       </ScrollArea>
       {!compact && (
-        <div className="flex gap-2 border-t p-2">
-          <Input className="w-28" value={type} onChange={(e) => setType(e.target.value)} placeholder="类型" />
-          <Input className="flex-1" value={value} onChange={(e) => setValue(e.target.value)}
-                 placeholder="手动添加资产（值/哈希/路径）" onKeyDown={(e) => e.key === "Enter" && add()} />
-          <Button size="sm" onClick={add} disabled={!value.trim()}>添加</Button>
+        <div className="border-t p-2">
+          <div className="flex gap-2">
+            <select className="h-8 w-24 shrink-0 rounded-md border bg-background px-2 text-xs"
+                    value={type} onChange={(e) => setType(e.target.value)}
+                    title="auto=按值自动识别（url/IPv4/host:port/完整域名/64hex）">
+              <option value="auto">自动</option>
+              <option value="host">host</option>
+              <option value="domain">domain</option>
+              <option value="service">service</option>
+              <option value="url">url</option>
+              <option value="binary">binary</option>
+            </select>
+            <Input className="flex-1" value={value} onChange={(e) => setValue(e.target.value)}
+                   placeholder="手动添加资产（值/哈希/路径；自动=识别类型）"
+                   onKeyDown={(e) => e.key === "Enter" && add()} />
+            <Button size="sm" onClick={add} disabled={!value.trim()}>添加</Button>
+          </div>
+          {err && <p className="mt-1 text-[10px] text-[--status-error]">{err}</p>}
         </div>
       )}
     </div>

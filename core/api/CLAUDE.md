@@ -14,7 +14,7 @@
 | GET/POST | `/projects` | 列出（扫 project.json）/ 创建（ProjectStore） |
 | GET/PATCH | `/projects/{pid}` `/projects/{pid}/config` | GET=元数据+任务统计+能力清单+**usage 用量视图**（autonomy 六字段+active_sessions+tokens/tasks used·budget·pct+**`chain:{active,ticks,auto_ticks_total,estranged}`**，§6.8）；PATCH config 顶层浅合并、autonomy 段整段归一化（坏值 ValueError→422），project.json+黑板行双写 |
 | DELETE | `/projects/{pid}` | 回收站式删除（整目录移入 `workspaces/.trash/`；409 运行中/删除窗口 / 422 重试后仍占用） |
-| GET/POST | `/projects/{pid}/findings` `/assets` | 人机共写（§6.5，author=human）；GET findings 支持过滤 query：`target_asset_id` / `min_severity`（不低于该级，如 high→high+critical）/ `verified_only`；POST/PATCH evidence 带 `relates_to` 时被引 finding 须存在且同项目，否则 **422**（E0 防幻觉） |
+| GET/POST | `/projects/{pid}/findings` `/assets` | 人机共写（§6.5，author=human）；GET findings 支持过滤 query：`target_asset_id` / `min_severity`（不低于该级，如 high→high+critical）/ `verified_only`；GET assets 支持 `type`/`status`（E7 四态）；**POST assets 走 register_asset 统一入口（E6）**：type 默认 auto 自动识别、识别不出 **422** 提示手选、同值合并去重（修人工路径重复行）；POST/PATCH evidence 带 `relates_to` 时被引 finding 须存在且同项目，否则 **422**（E0 防幻觉） |
 | PATCH | `/assets/{asset_id}` | 资产更新（§5.2）：改挂父行（null=摘挂，防环校验）/ 合并 meta（title/scanned）；exclude_unset 区分不传与传 null |
 | GET | `/projects/{pid}/artifacts/content?ref=` | 产物文本内容只读（WebUI POC 弹窗）：ref 按 artifact id → 表内 path → 裸路径（旧数据）解析；**防穿越**（resolve 后必须落在项目目录内）+ 256KB 上限；越界 422 / 缺文件 404 / 超限 413 |
 | GET | `/projects/{pid}/funcs` `/events?since_id=` `/sessions` | 函数库（funcs 支持 `?binary_sha256=` 过滤）/ 增量事件 / 会话列表（每行带 `unread`=会话收件箱未读数） |

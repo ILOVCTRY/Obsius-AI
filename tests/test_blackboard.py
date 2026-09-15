@@ -1263,3 +1263,87 @@ def test_post_human_note_rejects_missing_and_closed(bb, project):
     s = _session(bb, project, "将关窗")
     bb.close_session(s["id"])
     assert bb.post_human_note(project["id"], s["id"], "晚了") is None
+
+
+# ---------- E6 统一资产登记 ----------
+
+def test_register_asset_auto_detect_and_dedup(bb, project):
+    from core.blackboard.assets import detect_type, register_asset
+    pid = project["id"]
+    assert detect_type("https://a.com/x?y=1") == "url"
+    assert detect_type("10.0.0.1") == "host"
+    assert detect_type("10.0.0.1:8080") == "service"
+    assert detect_type("a.example.com") == "domain"
+    assert detect_type("a" * 64) == "binary"
+    assert detect_type("随机 文本/nothing") is None
+
+    r1 = register_asset(bb, pid, "https://10.0.0.1/admin")
+    assert r1["type"] == "url" and r1["created"]
+    # url 值含 IP → 自动建 host 并挂载
+    assert bb.get_asset(r1["id"])["parent_id"] == r1["host_id"]
+    assert bb.get_asset(r1["host_id"])["value"] == "10.0.0.1"
+
+    # 同值重报（人工路径曾插重复行）→ 合并不插行 + meta merge
+    r2 = register_asset(bb, pid, "https://10.0.0.1/admin", meta={"title": "后台"})
+    assert r2["id"] == r1["id"] and not r2["created"]
+    assert len(bb.list_assets(pid, type_="url")) == 1
+    assert bb.get_asset(r1["id"])["meta"]["title"] == "后台"
+
+    # 识别不出 → ValueError（API 422 提示手选）
+    with pytest.raises(ValueError):
+        register_asset(bb, pid, "不是资产的东西")
+
+
+def test_register_asset_domain_dns_primary_alias(bb, project, monkeypatch):
+    from core.blackboard.assets import register_asset
+    from core.blackboard import assets as am
+    monkeypatch.setattr(am.socket, "getaddrinfo",
+                        lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))])
+    pid = project["id"]
+    r1 = register_asset(bb, pid, "www.example.com")
+    assert r1["dns"] and r1["host_id"]
+    assert bb.get_asset(r1["host_id"])["meta"]["primary_domain"] == "www.example.com"
+
+    r2 = register_asset(bb, pid, "dev.example.com")
+    assert r2["host_id"] == r1["host_id"]            # host 按 IP 去重
+    assert bb.get_asset(r2["id"])["meta"]["alias"] is True
+    # 完整域名不降级：两行 domain 都在
+    assert len(bb.list_assets(pid, type_="domain")) == 2
+
+    # 解析失败 → 独立行
+    def _boom(*a, **k):
+        raise OSError("dns down")
+    monkeypatch.setattr(am.socket, "getaddrinfo", _boom)
+    r3 = register_asset(bb, pid, "dead.example.com")
+    assert "host_id" not in r3
+    assert bb.get_asset(r3["id"])["parent_id"] is None
+
+
+# ---------- E7 扫描/测试状态机 ----------
+
+def test_set_asset_status_whitelist_note_and_audit(bb, project):
+    from core.blackboard.assets import register_asset
+    pid = project["id"]
+    aid = register_asset(bb, pid, "10.1.1.1")["id"]
+
+    with pytest.raises(ValueError):
+        bb.set_asset_status(aid, "pwned")
+    with pytest.raises(ValueError):                    # tested_clean 必带 note
+        bb.set_asset_status(aid, "tested_clean")
+    with pytest.raises(LookupError):
+        bb.set_asset_status("asset-000000000000", "visited")
+
+    bb.set_asset_status(aid, "visited", author="s1")
+    bb.set_asset_status(aid, "scanning", author="s1")
+    bb.set_asset_status(aid, "tested_clean", note="nikto 全模板 + 手测上传点",
+                        author="s1")
+    assert bb.get_asset(aid)["status"] == "tested_clean"
+    ev = [e for e in bb.recent_events(pid) if e["kind"] == "asset.status_changed"]
+    assert [(e["payload"]["old"], e["payload"]["new"]) for e in ev] == \
+        [("open", "visited"), ("visited", "scanning"), ("scanning", "tested_clean")]
+    assert ev[-1]["payload"]["note"].startswith("nikto")
+
+    # 同状态 no-op：不发事件
+    bb.set_asset_status(aid, "tested_clean", note="重复流转")
+    assert len([e for e in bb.recent_events(pid)
+                if e["kind"] == "asset.status_changed"]) == 3

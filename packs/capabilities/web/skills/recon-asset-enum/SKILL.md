@@ -43,8 +43,10 @@ task_types: recon, asset-enum
 
 ## 2. 产出落点（黑板联动）
 
-- **每条可达入口 → `bb_add_asset`**：type 用 url / host / service；
-  登记前先 `bb_query what=assets` 查重，防重复条目；
+- **每条可达入口 → `bb_add_asset`**：type 可省略（平台按值自动识别：url/IP/
+  host:port/完整域名/64hex，识别不出会拒收回填）；**登记前先
+  `bb_query what=assets` 查重**（同值/同 IP/同域名都算重复——回执带
+  「命中既有资产」提示时停止对同一目标重复登记、重复扫描，E6 防重扫）；
   **每条带 `meta.source`**（观察途径，如 "首页导航链接"/"robots.txt"）——
   Orchestrator 派生任务时要引用来源。
   **平台归属 → `meta.owner`**：`.edu.cn` 系打 `edusrc`；资产明确标注品牌/平台时打
@@ -54,10 +56,15 @@ task_types: recon, asset-enum
   该 IP 上的域名（domain）、服务（service）、URL（url）一律带
   `parent_id=<host 资产 id>` 挂载——WebUI 资产页按 host 折叠展示，
   多域名指向同一 IP 时只显示该 IP 一行，展开看子资产。
-  url/service 的值里带 IP 时会**自动挂载**（无需手动查 host id），domain 仍需显式传。
-- **展示 meta**：URL 落资产时 `meta.title` 带页面 `<title>` 原文（资产页第二行展示）；
-  已请求/枚举过的入口**复报一次** `bb_add_asset`（同 type+value）带
-  `meta.scanned=true`——资产页显「已扫」徽章，人类一眼看出哪些目标 AI 碰过。
+  url/service 值里带 IP、domain（平台自动 DNS 解析）都会**自动挂载**；
+  同 IP 多域名自动标主域名/别名（AI 扫描目标粒度按 host+主域名，勿对别名重复扫）。
+- **展示 meta**：URL 落资产时 `meta.title` 带页面 `<title>` 原文（资产页第二行展示）。
+- **扫描/测试状态机（E7，访问≠测试）**：入口访问过 →
+  `bb_asset_status(asset_id, "visited")`；开始扫描 → `"scanning"`（并发会话经
+  `bb_query what=assets` 按状态过滤可感知哪些目标正被扫）；**测完且无发现才许
+  `"tested_clean"`——必附 note**（测了什么/怎么测，服务端强制，缺 note 拒收）；
+  测出问题直接 `bb_add_finding`，不要标 tested_clean（verified 发现由平台反查显
+  「有发现」徽章，结论以 findings 为准）。`meta.scanned` 已废弃，勿再写。
 - **可疑入口 → findings(unverified)**：未授权管理面、非常规参数、疑似注入点、
   异常报错带栈信息。只记录现象与 URL，**不带验证 payload 的执行结果**。
   落 finding 时带 `target_asset_id`（该入口的资产 id，先 bb_add_asset 拿 id）——

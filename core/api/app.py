@@ -35,6 +35,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from core import autonomy
 from core.agent import AgentConfig, AgentSession
 from core.blackboard import TaskQueue
+from core.blackboard.assets import register_asset
 from core.blackboard.graph import task_graph
 from core.blackboard.store import Blackboard, BlackboardClosedError
 from core.llm import ModelRouter, ProviderError, ProviderStore, probe_credentials
@@ -123,7 +124,7 @@ class FindingIn(BaseModel):
 
 
 class AssetIn(BaseModel):
-    type: str
+    type: str = "auto"  # auto=按值自动识别（E6）；识别不出 422 提示手选
     value: str
     meta: dict = Field(default_factory=dict)
     parent_id: str | None = None  # 资产树挂载（DESIGN.md §5.2）：domain/service/url 挂 host 下
@@ -1253,15 +1254,19 @@ def create_app(
             raise HTTPException(422, str(e)) from e
 
     @app.get("/api/projects/{pid}/assets")
-    def list_assets(pid: str, type: str | None = None):
-        return _project(pid).bb.list_assets(pid, type_=type)
+    def list_assets(pid: str, type: str | None = None, status: str | None = None):
+        return _project(pid).bb.list_assets(pid, type_=type, status=status)
 
     @app.post("/api/projects/{pid}/assets", status_code=201)
     def add_asset(pid: str, body: AssetIn):
-        r = _project(pid).bb.upsert_asset(pid, body.type, body.value,
-                                          parent_id=body.parent_id,
-                                          meta=body.meta, author="human")
-        return r
+        """人工登记资产（E6 统一入口）：与 Agent bb_add_asset 同走 register_asset——
+        类型自动识别/去重合并（修人工路径同值插重复行）/DNS 挂载/主域名标记。"""
+        try:
+            return register_asset(_project(pid).bb, pid, body.value, type_=body.type,
+                                  parent_id=body.parent_id, meta=body.meta,
+                                  author="human")
+        except ValueError as e:
+            raise HTTPException(422, str(e))
 
     @app.get("/api/projects/{pid}/artifacts/content")
     def artifact_content(pid: str, ref: str):

@@ -1,6 +1,6 @@
 # cyberstrike-pro 设计文档
 
-> 版本: v0.17 (2026-09-16)
+> 版本: v0.18 (2026-09-16)
 本文档是项目蓝图，后续开发以本文档为准；重大变更需更新此文档。
 > 
 > **状态约定（v0.3 起）**：正文默认以**现在时描述已落地的系统现状**；未落地的定稿设计在节/段首以引用块标注：  
@@ -9,7 +9,7 @@
 > 
 > **当前总体状态**：Phase 1 核心平台完成，Phase 2 进行中。已落地的模块级明细见下「落地状态总览」表与 §6.7/§6.8 各节状态标注（此处不再重复罗列）。**未落地**：F 批协调机制余部（1.1–1.4、1.7 传播本体、1.8、1.10、1.5 的 Agent 自由私信侧，见 §17 B 组）、逆向复用 R1/R2/R3（§17 C 组）、development 轨（§15，含 §15.5 AI 反代/破甲专项）、malware 轨与 fakenet（Phase 3）。
 > 
-> 历史：v0.17 (2026-09-16) E8 步数预算与人工引导落地（§3）：max_steps 默认 200、剩余<20 步边界提醒、request_steps 自助加步（+200/剩余>20 拒收/审计）、耗尽自动步数暂停（快照落库可 rehydrate，不 fail）、human_note 引导通道 + 直播间「发任务｜引导会话」切换、resume 支持附引导语/追加步数；§17 E 组移除 E8 并重编号。v0.16 (2026-09-16) 章节调序：情报面板（原 §17）前移为 §16、待做清单移至末位 §17，交叉引用同步改；待做清单内容不变。v0.15 (2026-09-16) CTF 线索板 + 跨轨路标定稿（§5.2：四级线索词表/产物内联/三级注入按 IP 聚合）+ §16 E11 挂账（实施后置；起因：CTF 黑板通用性太高，MISC/取证线索串联无承载）。v0.14 (2026-09-16) 情报面板定稿（新章 §17：漏洞简报/高分文章/Obsidian 学习计划）+ §16 E9/E10 挂账（实施后置）。v0.13 (2026-09-16) 步数预算与人工引导定稿（§3）+ §16 E8 挂账（实施后置；起因：recon 任务 30 步耗尽被自动 fail 走查）。v0.12 (2026-09-16) 资产扫描/测试状态机定稿（§5.2）+ §16 E7 挂账（实施后置，可与 E6 同批）。v0.11 (2026-09-16) 资产登记改造定稿（§5.2）+ §16 E6 挂账（实施后置）。v0.10 (2026-09-15) 直播间事件流新增「路由」筛选 tab（§12）+ 全文精简（重复状态叙述并入落地状态总览，实现坑细节移交各级 CLAUDE.md）；仓库 git init。v0.9 (2026-09-15) A 组五项落地（schema v5→v6，§16 A 组移除、B–E 重编号）。v0.8 (2026-09-15) 时间本地化（§12）+ §16 重排 A–E 组。v0.7/v0.6/v0.5 (2026-09-15) G 批批 6/5/4：L0 提案模式 / L2 全自动链 / L1 开窗审批（§6.8）。v0.4 (2026-09-15) G 批批 2/3 自主配置面/记账 + tick 租约/编排状态持久化（schema v5）。v0.3 (2026-09-15) 状态约定 + 撤回传播（机制 1.6/1.5 系统侧）。v0.2 (2026-09-13) 「能力包 × 场景轨」正交分类学（§4.5）+ src-strike 全量融入（§4）+ 角色软边界/技能全提案制。v0.1 首版定稿。
+> 历史：v0.18 (2026-09-16) E6+E7 资产登记改造与扫描/测试状态机落地（§5.2）：register_asset 统一登记入口（人工/Agent 同路）、类型自动识别、domain 自动 DNS 挂载与主域名/别名标记、host 按 IP 去重、bb_add_asset 防重扫回执；assets.status 四态状态机 + bb_asset_status（tested_clean 必带 note）+ asset.status_changed 审计 +「有发现」前端反查徽章 + bb_query status/type 过滤；§17 E 组移除 E6/E7 并重编号。v0.17 (2026-09-16) E8 步数预算与人工引导落地（§3）：max_steps 默认 200、剩余<20 步边界提醒、request_steps 自助加步（+200/剩余>20 拒收/审计）、耗尽自动步数暂停（快照落库可 rehydrate，不 fail）、human_note 引导通道 + 直播间「发任务｜引导会话」切换、resume 支持附引导语/追加步数；§17 E 组移除 E8 并重编号。v0.16 (2026-09-16) 章节调序：情报面板（原 §17）前移为 §16、待做清单移至末位 §17，交叉引用同步改；待做清单内容不变。v0.15 (2026-09-16) CTF 线索板 + 跨轨路标定稿（§5.2：四级线索词表/产物内联/三级注入按 IP 聚合）+ §16 E11 挂账（实施后置；起因：CTF 黑板通用性太高，MISC/取证线索串联无承载）。v0.14 (2026-09-16) 情报面板定稿（新章 §17：漏洞简报/高分文章/Obsidian 学习计划）+ §16 E9/E10 挂账（实施后置）。v0.13 (2026-09-16) 步数预算与人工引导定稿（§3）+ §16 E8 挂账（实施后置；起因：recon 任务 30 步耗尽被自动 fail 走查）。v0.12 (2026-09-16) 资产扫描/测试状态机定稿（§5.2）+ §16 E7 挂账（实施后置，可与 E6 同批）。v0.11 (2026-09-16) 资产登记改造定稿（§5.2）+ §16 E6 挂账（实施后置）。v0.10 (2026-09-15) 直播间事件流新增「路由」筛选 tab（§12）+ 全文精简（重复状态叙述并入落地状态总览，实现坑细节移交各级 CLAUDE.md）；仓库 git init。v0.9 (2026-09-15) A 组五项落地（schema v5→v6，§16 A 组移除、B–E 重编号）。v0.8 (2026-09-15) 时间本地化（§12）+ §16 重排 A–E 组。v0.7/v0.6/v0.5 (2026-09-15) G 批批 6/5/4：L0 提案模式 / L2 全自动链 / L1 开窗审批（§6.8）。v0.4 (2026-09-15) G 批批 2/3 自主配置面/记账 + tick 租约/编排状态持久化（schema v5）。v0.3 (2026-09-15) 状态约定 + 撤回传播（机制 1.6/1.5 系统侧）。v0.2 (2026-09-13) 「能力包 × 场景轨」正交分类学（§4.5）+ src-strike 全量融入（§4）+ 角色软边界/技能全提案制。v0.1 首版定稿。
 
 ## 落地状态总览（2026-09-15 代码核查）
 
@@ -44,6 +44,7 @@
 | development 场景轨                                                                    | ⬜         | §15（仓库已 git init）                                                                      |
 | A 组多会话可观察/可急停（A1 detach/终止入口收敛/步边界急停/done 可删、A2 tasks.plan 计划闸、A3 任务流视图、A4 finding_update 私信、A5 编排规划-分派） | ✅ | §3/§6.1/§6.4/§6.7/§12，2026-09-15（schema v6）                                                |
 | E8 步数预算与人工引导（max_steps 200/request_steps 自助/耗尽自动暂停+快照落库/human_note 通道） | ✅ | §3，2026-09-16（无 schema 升级）                                                              |
+| E6+E7 资产登记统一入口（类型自动识别/DNS 挂载/主域名别名）+ 扫描测试状态机（status 四态/bb_asset_status/有发现反查徽章） | ✅ | §5.2，2026-09-16（无 schema 升级）                                                            |
 | 时间本地化（本地时区 + YYYY-MM-DD HH:mm:ss 统一 formatter，纯前端 datetime.ts）       | ✅         | §12，2026-09-15 落地                                                                          |
 | AI 反代 / AI 破甲专项方向（含红线）                                                   | ⬜         | §15.5，随 development 轨，红线先行进 track redlines                                           |
 | malware 场景轨                                                                        | ⬜         | Phase 3，依赖 fakenet                                                                         |
@@ -283,8 +284,9 @@ assets       多态资产表（domain → host → service → url / 二进制 /
              自动挂载：bb_add_asset 对 url/service 值解析出 IP 主机部时自动建 host 并挂载
              （域名不猜 DNS，靠技能纪律手动挂）。
              meta 约定：`title`=一句话简述（页面 <title> 等，WebUI 第二行展示）、
-             `scanned=true`=AI 扫描过（复报 bb_add_asset 打标，WebUI「已扫」徽章）
-             **资产登记改造定稿（2026-09-16，〔未实施〕§17 E6）**：
+             `scanned=true` 已废弃（E7 状态机取代，旧值前端映射「已访问」）、
+             `primary_domain`/`alias`=同 IP 主域名/别名标记（E6）
+             **资产登记改造（2026-09-16 定稿并〔已实施〕，原 §17 E6）**：
              ① 统一登记入口——新建 core/blackboard/assets.py register_asset，抽取
              bb_add_asset 的 find_asset 合并/自动挂载路径共用，人工（POST /assets）与
              Agent 同一入口（修人工路径同值插重复行）；② 类型自动识别——url/IPv4/
@@ -297,7 +299,9 @@ assets       多态资产表（domain → host → service → url / 二进制 /
              AI 扫描目标粒度按 host+主域名，经现有 PATCH /assets/{aid} 写 meta 不加端点；
              ⑥ AI 防重扫——bb_add_asset 回执命中已有 IP 追加「先 bb_query 查重」提示 +
              web 技能（web-strike-entry/recon-asset-enum）补同 IP 查重纪律。无 schema 升级。
-             **扫描/测试状态机定稿（2026-09-16，〔未实施〕§17 E7）**：
+             **实施注记**：register_asset 落在 `core/blackboard/assets.py`（含
+             detect_type/resolve_ipv4），测试对 DNS 一律 monkeypatch 断网 hermetic。
+             **扫描/测试状态机（2026-09-16 定稿并〔已实施〕，原 §17 E7）**：
              复活 assets.status 死列（无 schema 升级），白名单四态 open（未触碰，默认）/
              visited（已访问）/ scanning（正在扫描）/ tested_clean（已测试·无发现），
              非法值拒收。AI 经新专用工具 `bb_asset_status(asset_id, status, note?)` 流转
@@ -309,6 +313,8 @@ assets       多态资产表（domain → host → service → url / 二进制 /
              findings 为准）。bb_query what=assets 增 status/type 过滤并返回 status
              （并发会话可感知"哪些目标正被扫"）。旧 meta.scanned=true 前端映射为
              「已访问」，WebUI「已扫」徽章由四态徽章+有发现徽章取代。
+             **实施注记**：set_asset_status 在 store.py（同状态 no-op 不发事件）；
+             前端徽章组件 AssetBadges（Blackboard.tsx，树/平铺共用）。
 findings     发现：挂任意资产节点（尽量挂，target_asset_id 是按资产筛选的数据基础）；
              severity(info~critical)、evidence、poc 产物引用（poc_artifact_id）、
              verified 状态（未验证/已验证分管）、去重指纹 (target, vuln_class, 参数指纹)。
@@ -1215,9 +1221,7 @@ cyberstrike-pro/
 14. **E3 · assessment 轨 Phase 2 收尾**：角色体系实战打磨、设备方向知识模块（binary/kb/iot、ics、vehicular）充实、network 能力包视内网内容量评估拆分；渗透报告随 C2 报告导出落地（自动化程度见 §12 待定项）。
 15. **E4 · WebUI 终端页**：workspace 容器/shell 视图与直播间底部终端抽屉（§12 页面骨架第 7 项）。
 16. **E5 · 杂项小项**：misc 包技能（§4.5.4、§10）；fofa/playwright 等运行时 MCP 工具桥（§4，当前仅逆向 IDA 桥）；浅色主题（§12 待定项，低优先级）。
-17. **E6 · 资产登记改造（2026-09-16 定稿，§5.2）**：手动添加类型框下拉化+自动识别（修默认 binary bug）→ 统一登记入口（人工/Agent 共用，修人工路径重复行）→ domain 自动 DNS 挂 IP、IP 主键去重、完整域名不降级 → 主域名/别名标记 → AI 防重扫（回执提示+技能纪律）。纯增量改动，无 schema 升级，任意时机可穿插。
-18. **E7 · 资产扫描/测试状态机（2026-09-16 定稿，§5.2）**：assets.status 死列复活白名单四态（open/visited/scanning/tested_clean）→ 专用工具 bb_asset_status（tested_clean 必带 note + asset.status_changed 审计，防虚标）→ 技能纪律改写（访问≠测试）→「有发现」由 verified findings 反查徽章、AI 不自报 → bb_query assets 增 status/type 过滤 → 旧 scanned=true 映射已访问。无 schema 升级，**可与 E6 同批实施**。
-19. **E9 · 情报面板 v1（2026-09-16 定稿，§16.1/16.2/16.4）**：全局存储 config/intel/（intel.db + feeds.json + profile.json，全局 DB 新模式）→ 触发式抓取 Job（RSS + NVD/GH Advisory/KEV，urllib 出站不经网关）→ classifier 打分/中文摘要 → 混合日报（CVE+中文社区，KEV/POC 优先标）+ 高分文章推送（热点 1–2 + 技术 3–5 配比）→ 情报导航页三 tab + 项目页简报卡 + 设置页「情报源」tab。无 scheduler、无新依赖。
-20. **E10 · Obsidian 接入 + 学习计划（2026-09-16 定稿，§16.3）**：vault 只读接入（文件树/搜索/链接图谱）→ **LLM 仅看元数据**（正文不出本机，隐私红线）→ 学习档案（声明画像 + vault 元数据推断 + 平台学习记录）→ LLM 周学习计划（结合当周简报/文章），存平台侧可导出 md。依赖 E9 的全局存储与画像。
-21. **E11 · CTF 线索板 + 跨轨路标（2026-09-16 定稿，§5.2）**：findings 换词表复用（四级线索级别含死路、线索类别、false-positive→死路）→ relates_to 卡片链 + 产物内联附件 + 解题脚本/writeup 落 artifact 纪律 → 跨轨统一路标（渗透已排除路径/逆向已排除假设）→ 三级注入按 IP 聚合 → 线索卡流+级别筛选融入现有列表 → CTF 样本上传 UI/远程靶机落资产补缺。无 schema 升级。
+17. **E9 · 情报面板 v1（2026-09-16 定稿，§16.1/16.2/16.4）**：全局存储 config/intel/（intel.db + feeds.json + profile.json，全局 DB 新模式）→ 触发式抓取 Job（RSS + NVD/GH Advisory/KEV，urllib 出站不经网关）→ classifier 打分/中文摘要 → 混合日报（CVE+中文社区，KEV/POC 优先标）+ 高分文章推送（热点 1–2 + 技术 3–5 配比）→ 情报导航页三 tab + 项目页简报卡 + 设置页「情报源」tab。无 scheduler、无新依赖。
+18. **E10 · Obsidian 接入 + 学习计划（2026-09-16 定稿，§16.3）**：vault 只读接入（文件树/搜索/链接图谱）→ **LLM 仅看元数据**（正文不出本机，隐私红线）→ 学习档案（声明画像 + vault 元数据推断 + 平台学习记录）→ LLM 周学习计划（结合当周简报/文章），存平台侧可导出 md。依赖 E9 的全局存储与画像。
+19. **E11 · CTF 线索板 + 跨轨路标（2026-09-16 定稿，§5.2）**：findings 换词表复用（四级线索级别含死路、线索类别、false-positive→死路）→ relates_to 卡片链 + 产物内联附件 + 解题脚本/writeup 落 artifact 纪律 → 跨轨统一路标（渗透已排除路径/逆向已排除假设）→ 三级注入按 IP 聚合 → 线索卡流+级别筛选融入现有列表 → CTF 样本上传 UI/远程靶机落资产补缺。无 schema 升级。
 

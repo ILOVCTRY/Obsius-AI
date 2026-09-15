@@ -173,6 +173,7 @@ export interface Asset {
   type: string
   value: string
   parent_id: string | null
+  status: string   // E7：open / visited / scanning / tested_clean
   meta: Record<string, unknown>
   author: string
   created_at: string
