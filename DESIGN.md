@@ -1,6 +1,6 @@
 # cyberstrike-pro 设计文档
 
-> 版本: v0.11 (2026-09-16)
+> 版本: v0.12 (2026-09-16)
 本文档是项目蓝图，后续开发以本文档为准；重大变更需更新此文档。
 > 
 > **状态约定（v0.3 起）**：正文默认以**现在时描述已落地的系统现状**；未落地的定稿设计在节/段首以引用块标注：  
@@ -9,7 +9,7 @@
 > 
 > **当前总体状态**：Phase 1 核心平台完成，Phase 2 进行中。已落地的模块级明细见下「落地状态总览」表与 §6.7/§6.8 各节状态标注（此处不再重复罗列）。**未落地**：F 批协调机制余部（1.1–1.4、1.7 传播本体、1.8、1.10、1.5 的 Agent 自由私信侧，见 §16 B 组）、逆向复用 R1/R2/R3（§16 C 组）、development 轨（§15，含 §15.5 AI 反代/破甲专项）、malware 轨与 fakenet（Phase 3）。
 > 
-> 历史：v0.11 (2026-09-16) 资产登记改造定稿（§5.2）+ §16 E6 挂账（实施后置）。v0.10 (2026-09-15) 直播间事件流新增「路由」筛选 tab（§12）+ 全文精简（重复状态叙述并入落地状态总览，实现坑细节移交各级 CLAUDE.md）；仓库 git init。v0.9 (2026-09-15) A 组五项落地（schema v5→v6，§16 A 组移除、B–E 重编号）。v0.8 (2026-09-15) 时间本地化（§12）+ §16 重排 A–E 组。v0.7/v0.6/v0.5 (2026-09-15) G 批批 6/5/4：L0 提案模式 / L2 全自动链 / L1 开窗审批（§6.8）。v0.4 (2026-09-15) G 批批 2/3 自主配置面/记账 + tick 租约/编排状态持久化（schema v5）。v0.3 (2026-09-15) 状态约定 + 撤回传播（机制 1.6/1.5 系统侧）。v0.2 (2026-09-13) 「能力包 × 场景轨」正交分类学（§4.5）+ src-strike 全量融入（§4）+ 角色软边界/技能全提案制。v0.1 首版定稿。
+> 历史：v0.12 (2026-09-16) 资产扫描/测试状态机定稿（§5.2）+ §16 E7 挂账（实施后置，可与 E6 同批）。v0.11 (2026-09-16) 资产登记改造定稿（§5.2）+ §16 E6 挂账（实施后置）。v0.10 (2026-09-15) 直播间事件流新增「路由」筛选 tab（§12）+ 全文精简（重复状态叙述并入落地状态总览，实现坑细节移交各级 CLAUDE.md）；仓库 git init。v0.9 (2026-09-15) A 组五项落地（schema v5→v6，§16 A 组移除、B–E 重编号）。v0.8 (2026-09-15) 时间本地化（§12）+ §16 重排 A–E 组。v0.7/v0.6/v0.5 (2026-09-15) G 批批 6/5/4：L0 提案模式 / L2 全自动链 / L1 开窗审批（§6.8）。v0.4 (2026-09-15) G 批批 2/3 自主配置面/记账 + tick 租约/编排状态持久化（schema v5）。v0.3 (2026-09-15) 状态约定 + 撤回传播（机制 1.6/1.5 系统侧）。v0.2 (2026-09-13) 「能力包 × 场景轨」正交分类学（§4.5）+ src-strike 全量融入（§4）+ 角色软边界/技能全提案制。v0.1 首版定稿。
 
 ## 落地状态总览（2026-09-15 代码核查）
 
@@ -285,6 +285,18 @@ assets       多态资产表（domain → host → service → url / 二进制 /
              AI 扫描目标粒度按 host+主域名，经现有 PATCH /assets/{aid} 写 meta 不加端点；
              ⑥ AI 防重扫——bb_add_asset 回执命中已有 IP 追加「先 bb_query 查重」提示 +
              web 技能（web-strike-entry/recon-asset-enum）补同 IP 查重纪律。无 schema 升级。
+             **扫描/测试状态机定稿（2026-09-16，〔未实施〕§16 E7）**：
+             复活 assets.status 死列（无 schema 升级），白名单四态 open（未触碰，默认）/
+             visited（已访问）/ scanning（正在扫描）/ tested_clean（已测试·无发现），
+             非法值拒收。AI 经新专用工具 `bb_asset_status(asset_id, status, note?)` 流转
+             ——**tested_clean 必带 note**（测了什么/怎么测，服务端强制），每次流转落
+             `asset.status_changed` 审计事件；技能纪律改写（recon-asset-enum）：
+             **访问≠测试**，访问后 visited、开测 scanning、测完才许 tested_clean。
+             「已测试·有发现」不由 AI 标：资产挂 verified finding 即由前端反查显
+             「有发现」徽章（标 tested_clean 后出 verified finding 自动翻红，结论以
+             findings 为准）。bb_query what=assets 增 status/type 过滤并返回 status
+             （并发会话可感知"哪些目标正被扫"）。旧 meta.scanned=true 前端映射为
+             「已访问」，WebUI「已扫」徽章由四态徽章+有发现徽章取代。
 findings     发现：挂任意资产节点（尽量挂，target_asset_id 是按资产筛选的数据基础）；
              severity(info~critical)、evidence、poc 产物引用（poc_artifact_id）、
              verified 状态（未验证/已验证分管）、去重指纹 (target, vuln_class, 参数指纹)。
@@ -1130,4 +1142,5 @@ cyberstrike-pro/
 15. **E4 · WebUI 终端页**：workspace 容器/shell 视图与直播间底部终端抽屉（§12 页面骨架第 7 项）。
 16. **E5 · 杂项小项**：misc 包技能（§4.5.4、§10）；fofa/playwright 等运行时 MCP 工具桥（§4，当前仅逆向 IDA 桥）；浅色主题（§12 待定项，低优先级）。
 17. **E6 · 资产登记改造（2026-09-16 定稿，§5.2）**：手动添加类型框下拉化+自动识别（修默认 binary bug）→ 统一登记入口（人工/Agent 共用，修人工路径重复行）→ domain 自动 DNS 挂 IP、IP 主键去重、完整域名不降级 → 主域名/别名标记 → AI 防重扫（回执提示+技能纪律）。纯增量改动，无 schema 升级，任意时机可穿插。
+18. **E7 · 资产扫描/测试状态机（2026-09-16 定稿，§5.2）**：assets.status 死列复活白名单四态（open/visited/scanning/tested_clean）→ 专用工具 bb_asset_status（tested_clean 必带 note + asset.status_changed 审计，防虚标）→ 技能纪律改写（访问≠测试）→「有发现」由 verified findings 反查徽章、AI 不自报 → bb_query assets 增 status/type 过滤 → 旧 scanned=true 映射已访问。无 schema 升级，**可与 E6 同批实施**。
 
