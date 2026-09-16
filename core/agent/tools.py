@@ -352,7 +352,7 @@ AGENT_TOOLS: list[dict[str, Any]] = [
                 "conflict_keys": {"type": "array", "items": {"type": "string"},
                                   "description": "非 passive 必填（如 [\"ip:1.2.3.4\"]）；服务端归一化，非法拒收"},
                 "workset": {"type": "array", "items": {"type": "string"},
-                            "description": "工作集软声明（B1，可选）：正在分析的目标（如 0x401000 / url），供他人避让，不阻塞认领"},
+                            "description": "工作集软声明（机制 1.1，可选）：正在分析的目标（如 0x401000 / url），供他人避让，不阻塞认领"},
             },
             "required": ["objective"],
         },
@@ -796,12 +796,12 @@ class ToolDispatcher:
 
         入参里不接受 parent_id/created_by——分解关系由服务端按会话状态钉死，
         与撤回传播的 is_session 识别一致（created_by=sess-…）。
-        B1：发布前按指纹查重，命中 open/claimed 同目标任务 → 复用不新建（防重复派活）。
+        机制 1.1：发布前按指纹查重，命中 open/claimed 同目标任务 → 复用不新建（防重复派活）。
         """
         objective = (objective or "").strip()
         if not objective:
             return "[错误] objective 不能为空"
-        # B1 发布去重：命中同指纹 open/claimed 任务 → 静默复用（编排/Agent 不重复派活）
+        # 机制 1.1 发布去重：命中同指纹 open/claimed 任务 → 静默复用（编排/Agent 不重复派活）
         fp = dedup_fp(task_type, scope, objective)
         dup = self.tq.find_dedup_target(self.project_id, fp)
         if dup is not None:

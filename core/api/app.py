@@ -107,8 +107,8 @@ class TaskIn(BaseModel):
     conflict_keys: list[str] | None = None
     parent_id: str | None = None
     refs: list[str] | None = None   # 任务依据的 finding id（显式层；正文 find-id 自动抽取）
-    workset: list[str] | None = None   # B1 工作集软声明（advisory，不阻塞认领）
-    force: bool = False                # B1：True 跳过发布去重（人类"仍要发布"确认后）
+    workset: list[str] | None = None   # 机制 1.1 工作集软声明（advisory，不阻塞认领）
+    force: bool = False                # 机制 1.1：True 跳过发布去重（人类"仍要发布"确认后）
 
 
 class InboxRead(BaseModel):
@@ -1926,7 +1926,7 @@ def create_app(
         table = _task_type_table(pid)
         noise = body.noise_budget or table.get(body.task_type, "passive")
         tq = _tq(pid)
-        # B1 发布去重：同指纹（type+归一化 scope+objective）命中 open/claimed →
+        # 机制 1.1 发布去重：同指纹（type+归一化 scope+objective）命中 open/claimed →
         # 返回 200 + deduplicated，前端确认框"仍要发布"后带 force 重发才真发
         if not body.force:
             dup = tq.find_dedup_target(

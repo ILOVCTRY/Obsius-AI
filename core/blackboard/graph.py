@@ -4,7 +4,7 @@
 - parent 实线：tasks.parent_id（人/编排/子代理分解结构）；
 - inbox 虚线：session_inbox 按 (kind, ref_id) 聚类——同一依据（被撤回/增补的 finding）
   触达 ≥2 个会话，而会话各自映射到「最近任务」后，任务两两连边；
-- suggest 点虚线（B1）：同父任务或 context_refs 相交、却尚无私信记录的两个已认领
+- suggest 点虚线（机制 1.1）：同父任务或 context_refs 相交、却尚无私信记录的两个已认领
   任务——机器猜测"这两个子代理很可能需要交流"，不落库、前端可关。
 
 查询条数固定（tasks/sessions/窗口映射/inbox/finding 标题共 5 条以内），与任务量无关，
@@ -135,7 +135,7 @@ def task_graph(bb: Any, project_id: str) -> dict[str, Any]:
         edges.append({"id": f"inbox:{a}:{b}", "source": a, "target": b,
                       "kind": "inbox", "refs": uniq})
 
-    # B1 建议私信边：同父或依据（context_refs）相交、都已认领、且尚无 inbox 边——
+    # 机制 1.1 建议私信边：同父或依据（context_refs）相交、都已认领、且尚无 inbox 边——
     # 点虚线提示"很可能需要交流"，机器猜测不落库（inbox 边出现后自然消失）
     task_by_id = {t["id"]: t for t in tasks}
     inbox_pairs = {(e["source"], e["target"]) for e in edges if e["kind"] == "inbox"}

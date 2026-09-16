@@ -29,7 +29,7 @@ class TaskTypeError(ValueError):
 
 
 def dedup_fp(task_type: str, scope: str, objective: str) -> str:
-    """B1 发布去重指纹：task_type + 归一化 scope（折叠空白+小写）+ 规范化 objective
+    """机制 1.1 发布去重指纹：task_type + 归一化 scope（折叠空白+小写）+ 规范化 objective
     （折叠空白）的 sha256 截短。scope 支持分号分隔多键，逐段归一后排序拼接。"""
     import hashlib
 
@@ -83,14 +83,14 @@ class TaskQueue:
         """发布任务。created_by: human / orchestrator / session-x。
 
         conflict_keys 示例：渗透 active 任务填 ["ip:1.2.3.4", "domain:x.com"]——
-        携带同一 IP 键的 active 任务彼此互斥；passive 任务的键 = S 共享租约（B2）。
+        携带同一 IP 键的 active 任务彼此互斥；passive 任务的键 = S 共享租约（机制 1.4）。
         键经服务端白名单归一化（leases.normalize_key），非法抛 ValueError。
         allowed_types：轨 task_types.yaml 注册表（由调用方按项目 track 注入），
         未知 task_type 直接拒收——拼写错误不再静默饿死（DESIGN.md §4.5.5）。
         refs：任务依据的 finding id（显式层，orch 工具/人发任务可填）；
         服务端同时从 objective 正文自动抽取 find- 标识（自动层），并集去重后
         入 context_refs——撤回传播据此反向定位（DESIGN.md §6.7 的 1.6）。
-        workset（B1）：正在分析的目标集（advisory 软声明，不阻塞任何人，
+        workset（机制 1.1）：正在分析的目标集（advisory 软声明，不阻塞任何人，
         认领/派生/UI 可见，供避让）。
         """
         if noise_budget not in {"passive", "low", "medium", "high"}:
@@ -106,7 +106,7 @@ class TaskQueue:
         task_id = new_id("task")
         ts = now()
         with self.bb._tx():
-            # 发布期冲突检查（B2）：active(X) 键被有效租约持有 → open 行写 wait_for
+            # 发布期冲突检查（机制 1.4）：active(X) 键被有效租约持有 → open 行写 wait_for
             # 门控标记（claim_next 排除，等待不占线程），不阻塞发布本身。
             wait: list[str] = []
             if noise_budget != "passive" and norm_keys:
@@ -146,7 +146,7 @@ class TaskQueue:
         return task_id
 
     def find_dedup_target(self, project_id: str, fp: str) -> dict | None:
-        """B1：按指纹找既有 open/claimed 任务（发布去重的查询半步）。"""
+        """机制 1.1：按指纹找既有 open/claimed 任务（发布去重的查询半步）。"""
         row = self.bb.conn.execute(
             "SELECT id FROM tasks WHERE project_id=? AND dedup_fp=?"
             " AND status IN ('open','claimed') ORDER BY created_at LIMIT 1",
@@ -169,7 +169,7 @@ class TaskQueue:
                 raise ClaimError(f"任务不存在: {task_id}")
             if row["status"] != "open":
                 raise ClaimError(f"任务 {task_id} 状态为 {row['status']}，不可认领")
-            # B2：冲突统一收集（快路径 active 交叠 + 资源租约），事务内写 wait_for
+            # 机制 1.4：冲突统一收集（快路径 active 交叠 + 资源租约），事务内写 wait_for
             # 门控标记并保持 open，事务提交后在事务外抛 ClaimError（线程不阻塞，
             # 标记不被回滚）。无冲突 → 授予租约行 + 置 claimed。
             lease_blockers: list[str] = []
@@ -256,7 +256,7 @@ class TaskQueue:
             )
             params.append(self._NOISE_RANK[max_noise])
         sql += " ORDER BY priority, created_at"
-        # B2：预过滤——wait_for 键仍被有效租约持有的行、死锁牺牲者冷却未到的行
+        # 机制 1.4：预过滤——wait_for 键仍被有效租约持有的行、死锁牺牲者冷却未到的行
         # 直接跳过（等待不占线程；键已空闲的 stale wait_for 仍走正常认领路径）
         held_union: set[str] = set()
         for keys in leases.held_keys_by_task(self.bb, project_id).values():
@@ -288,7 +288,7 @@ class TaskQueue:
                      extra={"resumable": True} if resumable else None)
 
     def _release_and_revalidate(self, project_id: str, task_id: str) -> None:
-        """B2：释放任务的全部资源租约行，并重校验本项目 open 行的 wait_for——
+        """机制 1.4：释放任务的全部资源租约行，并重校验本项目 open 行的 wait_for——
         键已全部空闲的等待者清门控标记（重新可被 claim_next 认领）。
         必须在调用方的 _tx() 内执行。"""
         self.bb.conn.execute("DELETE FROM resource_leases WHERE task_id=?", (task_id,))
@@ -318,7 +318,7 @@ class TaskQueue:
                 " WHERE id=?",
                 (status, result_note, now(), task_id),
             )
-            self._release_and_revalidate(row["project_id"], task_id)  # B2 释放+重校验
+            self._release_and_revalidate(row["project_id"], task_id)  # 机制 1.4 释放+重校验
             stale_refs = _loads(row["stale_refs"], [])
         payload = {"task_id": task_id, "session_id": session_id, "note": result_note}
         if extra:
@@ -523,9 +523,9 @@ class TaskQueue:
             if merged["noise_budget"] != "passive" and not merged["conflict_keys"]:
                 raise ValueError("非 passive 任务必须提供 conflict_keys（active 互斥的依据）")
             if merged["conflict_keys"]:
-                # B2：编辑后的键重新归一化（非法 422），归一化结果回写
+                # 机制 1.4：编辑后的键重新归一化（非法 422），归一化结果回写
                 merged["conflict_keys"] = leases.normalize_keys(merged["conflict_keys"])
-            # B1：编辑触及指纹要素时重算发布去重指纹
+            # 机制 1.1：编辑触及指纹要素时重算发布去重指纹
             merged["dedup_fp"] = dedup_fp(str(merged["task_type"]),
                                           str(merged["scope"]), str(merged["objective"]))
             sets: list[str] = []
@@ -593,7 +593,7 @@ class TaskQueue:
             snapshot = dict(row)
             self.bb.conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))
             self._release_and_revalidate(project_id=row["project_id"],
-                                         task_id=task_id)  # B2 释放+重校验
+                                         task_id=task_id)  # 机制 1.4 释放+重校验
             project_id, was_status = row["project_id"], row["status"]
         self.bb.append_event(
             project_id, "task.deleted",
@@ -605,7 +605,7 @@ class TaskQueue:
             author=by,
         )
 
-    # ---------- B2 六防死锁之 6：wait-for 图环检测（安全网） ----------
+    # ---------- 机制 1.4 六防死锁之 6：wait-for 图环检测（安全网） ----------
 
     def detect_wait_for_deadlock(self, project_id: str) -> list[str]:
         """wait-for 图环检测兜底。发布期/认领期门控下环在构造上不可达（claimed
@@ -696,7 +696,7 @@ class TaskQueue:
 
     def expire_leases(self) -> list[str]:
         """回收过期租约 → 任务回到 open。Orchestrator 周期调用（§6.4 监控）。
-        B2：过期任务的资源租约行随行释放，并重校验等待者。"""
+        机制 1.4：过期任务的资源租约行随行释放，并重校验等待者。"""
         expired: list[str] = []
         ts = now()
         with self.bb._tx():

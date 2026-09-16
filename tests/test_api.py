@@ -2599,10 +2599,10 @@ def test_assets_register_entry_auto_detect_and_dedup(client):
     assert all("status" in a for a in rows)      # E7：status 出口
 
 
-# ---------- B1 发布去重/workset + B2 wait_for 门控 / 建议私信边 ----------
+# ---------- 机制 1.1 发布去重/workset + 机制 1.4 wait_for 门控 / 建议私信边 ----------
 
 def test_publish_dedup_and_force(client):
-    """B1：同指纹第二次发布 200 deduplicated；force 真发；workset 出口可见。"""
+    """机制 1.1：同指纹第二次发布 200 deduplicated；force 真发；workset 出口可见。"""
     pid = _make_project(client)
     body = {"objective": "对 target.com 做被动侦察", "task_type": "generic",
             "workset": ["a.target.com", "0x401000"]}
@@ -2619,7 +2619,7 @@ def test_publish_dedup_and_force(client):
 
 
 def test_publish_invalid_conflict_key_422(client):
-    """B2：conflict_keys 非法键（过宽/未知方案）发布 422。"""
+    """机制 1.4：conflict_keys 非法键（过宽/未知方案）发布 422。"""
     pid = _make_project(client)
     r = client.post(f"/api/projects/{pid}/tasks",
                     json={"objective": "扫它", "noise_budget": "low",
@@ -2628,7 +2628,7 @@ def test_publish_invalid_conflict_key_422(client):
 
 
 def test_task_graph_suggest_edge(client):
-    """B1：同依据（context_refs 相交）且已认领、无 inbox 边的任务对出 suggest 点虚线边。"""
+    """机制 1.1：同依据（context_refs 相交）且已认领、无 inbox 边的任务对出 suggest 点虚线边。"""
     pid = _make_project(client)
     proj = client.app.state.projects[pid]
     from core.blackboard import TaskQueue

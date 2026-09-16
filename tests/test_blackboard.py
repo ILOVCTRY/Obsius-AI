@@ -49,7 +49,7 @@ def test_legacy_db_row_domain_mapped(bb):
 
 
 def test_schema_v7_migration(tmp_path):
-    """旧库幂等升到当前版（v7：B1/B2 workset/dedup_fp/wait_for 列 + resource_leases 表）。"""
+    """旧库幂等升到当前版（v7：机制 1.1/机制 1.4 workset/dedup_fp/wait_for 列 + resource_leases 表）。"""
     from core.blackboard.schema import SCHEMA_VERSION
     from core.blackboard.store import Blackboard as BB
     from core.orchestrator import state as orch_state
@@ -396,7 +396,7 @@ def test_active_tasks_conflict_on_ip(bb, project):
     t2 = tq.publish(pid, "爆破同 IP 另一域名", noise_budget="medium",
                     conflict_keys=["ip:1.2.3.4"], created_by="orchestrator")
     tq.claim(t1, s1["id"])
-    # B2：冲突统一为资源租约语义——保持 open + wait_for 门控标记，消息带占用者
+    # 机制 1.4：冲突统一为资源租约语义——保持 open + wait_for 门控标记，消息带占用者
     with pytest.raises(ClaimError, match="认领被拒：资源 ip:1.2.3.4 已被"):
         tq.claim(t2, s2["id"])
     assert tq.get_task(t2)["wait_for"] == ["ip:1.2.3.4"]
@@ -1355,7 +1355,7 @@ def test_set_asset_status_whitelist_note_and_audit(bb, project):
                 if e["kind"] == "asset.status_changed"]) == 3
 
 
-# ---------- B1 发布去重 + workset / B2 资源租约与 wait_for 门控 ----------
+# ---------- 机制 1.1 发布去重 + workset / 机制 1.4 资源租约与 wait_for 门控 ----------
 
 import pytest as _pytest
 
@@ -1380,7 +1380,7 @@ def test_lease_key_normalization():
 
 
 def test_publish_dedup_fp_and_workset(bb, project):
-    """B1：publish 存指纹与 workset；find_dedup_target 命中 open/claimed、不命中 done。"""
+    """机制 1.1：publish 存指纹与 workset；find_dedup_target 命中 open/claimed、不命中 done。"""
     pid = project["id"]
     tq = TaskQueue(bb)
     t1 = tq.publish(pid, "对 zut.edu.cn 做被动侦察", task_type="recon",
@@ -1410,7 +1410,7 @@ def test_publish_scope_normalized_in_fp(bb, project):
 
 
 def test_claim_grants_leases_x_x_conflict_marks_wait_for(bb, project):
-    """B2：认领转写 X 租约；第二个同键 active 任务认领被拒并写 wait_for；
+    """机制 1.4：认领转写 X 租约；第二个同键 active 任务认领被拒并写 wait_for；
     前者收尾释放 → wait_for 清空、可认领（释放重校验同事务，不重领）。"""
     pid = project["id"]
     tq = TaskQueue(bb)
@@ -1437,7 +1437,7 @@ def test_claim_grants_leases_x_x_conflict_marks_wait_for(bb, project):
 
 
 def test_lease_s_mode_shares_x_blocks(bb, project):
-    """B2：passive 任务的键 = S 共享（两个 S 并行不冲突）；active X 与 S 互斥。"""
+    """机制 1.4：passive 任务的键 = S 共享（两个 S 并行不冲突）；active X 与 S 互斥。"""
     pid = project["id"]
     tq = TaskQueue(bb)
     ta = tq.publish(pid, "被动分析 A", task_type="recon", noise_budget="passive",
@@ -1456,7 +1456,7 @@ def test_lease_s_mode_shares_x_blocks(bb, project):
 
 
 def test_claim_next_releases_then_claims(bb, project):
-    """B2：占用者收尾后，等待者经 claim_next 正常认领（FIFO 不重领冲突）。"""
+    """机制 1.4：占用者收尾后，等待者经 claim_next 正常认领（FIFO 不重领冲突）。"""
     pid = project["id"]
     tq = TaskQueue(bb)
     tq.publish(pid, "占用者", task_type="exploit", noise_budget="low",
@@ -1491,7 +1491,7 @@ def test_delete_and_expire_release_leases(bb, project):
 
 
 def test_wait_for_deadlock_detection_sacrifices_youngest(bb, project):
-    """B2 六防死锁之 6（安全网）：构造 wait-for 环 → 牺牲者=最年轻任务，
+    """机制 1.4 六防死锁之 6（安全网）：构造 wait-for 环 → 牺牲者=最年轻任务，
     清 wait_for + 冷却 + lock.deadlock_victim 事件。"""
     pid = project["id"]
     tq = TaskQueue(bb)
