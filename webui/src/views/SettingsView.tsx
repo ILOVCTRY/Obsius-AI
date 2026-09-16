@@ -6,6 +6,7 @@ import type {
   SkillDef, SkillDetail, SkillVocab,
 } from "@/lib/types"
 import { capLabel, trackLabel, type Taxonomy } from "@/lib/taxonomy"
+import { roleLabel } from "@/lib/roles"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -187,6 +188,7 @@ const NOISE_LEVELS = ["", "passive", "low", "medium", "high"]
 function RolesPane({ track, focus }: { track: string; focus: RoleFocus | null }) {
   const [roles, setRoles] = useState<PackRole[]>([])
   const [selected, setSelected] = useState<string | null>(null)
+  const [displayName, setDisplayName] = useState("")   // 中文显示名；留空 = 重置为文件名
   const [description, setDescription] = useState("")
   const [persona, setPersona] = useState("")
   const [skills, setSkills] = useState("")       // 逗号分隔；空 = 白名单关闭（null）
@@ -216,6 +218,7 @@ function RolesPane({ track, focus }: { track: string; focus: RoleFocus | null })
   useEffect(() => {
     const r = roles.find((x) => x.file === selected)
     if (!r) return
+    setDisplayName(r.name && r.name !== r.file ? r.name : "")
     setDescription(r.description ?? "")
     setPersona(r.persona ?? "")
     setSkills((r.skills ?? []).join(", "))
@@ -234,6 +237,7 @@ function RolesPane({ track, focus }: { track: string; focus: RoleFocus | null })
     const stepsTrim = steps.trim()
     try {
       await api.updateTrackRole(track, selected, {
+        name: displayName.trim(),   // 空串 = 重置为文件名（后端语义）
         description,
         persona,
         skills: skills.trim() ? toList(skills) : null,        // 空 = 白名单关闭
@@ -283,7 +287,7 @@ function RolesPane({ track, focus }: { track: string; focus: RoleFocus | null })
                 className="min-w-0 flex-1 truncate rounded px-2 py-1.5 text-left font-mono hover:bg-accent/40"
                 onClick={() => setSelected(r.file)}
                 title={r.description ?? undefined}>
-                {r.file === "_generalist" ? "通用 _generalist" : r.file}
+                {roleLabel(r)}
               </button>
               {r.file !== "_generalist" && (
                 <button className="px-1.5 text-[10px] text-[--status-error] opacity-0 transition-opacity group-hover:opacity-100"
@@ -306,6 +310,9 @@ function RolesPane({ track, focus }: { track: string; focus: RoleFocus | null })
               <HistoryButton file={`tracks/${track}/roles/${selected}.yaml`} onRolledBack={reload} />
               <Button size="sm" onClick={save}>保存</Button>
             </div>
+            <label className="text-[10px] text-muted-foreground">显示名（可中文；留空 = 用文件名 {selected}；界面各处展示用）</label>
+            <Input value={displayName} onChange={(e) => setDisplayName(e.target.value)} className="text-xs"
+                   placeholder={`如：${selected.replace(/^_/, "")}`} />
             <label className="text-[10px] text-muted-foreground">职责 description（编排开窗目录的一句话说明）</label>
             <Input value={description} onChange={(e) => setDescription(e.target.value)} className="text-xs"
                    placeholder="如：外网打点与入口利用" />

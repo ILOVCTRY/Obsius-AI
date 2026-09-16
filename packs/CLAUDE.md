@@ -15,7 +15,8 @@ packs/
 │  └─ rules/*.md         # 能力级红线（glob 不递归，全量注入）
 └─ tracks/<track>/       # 场景轨（单选）= 规则 + 角色 + 任务类型，回答"什么语境、产出什么"
    ├─ track.yaml
-   ├─ roles/*.yaml       # _generalist 兜底（受保护）+ 角色：persona/description/skills/task_types/
+   ├─ roles/*.yaml       # _generalist 兜底（受保护）+ 角色：name（中文显示名，可≠文件 stem——
+   │                     #   stem 才是角色 id）/description/persona/skills/task_types/
    │                     #   default_noise/tools/max_runtime/max_steps（软边界，越界走审批）
    ├─ rules/{redlines.md, owners/<tag>.md, role-rules/<role>.md}
    ├─ task_types.yaml    # 合法 task_type 注册表（publish 校验，拼错即拒）

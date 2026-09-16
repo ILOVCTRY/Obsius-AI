@@ -133,6 +133,23 @@ def test_doctor_clean_pack_has_only_soft_notes(tmp_path):
     assert not {"kb-module-broken", "kb-snapshot-unknown", "orphan-skill"} & codes
 
 
+def test_doctor_role_display_name_decoupled_from_stem(tmp_path):
+    """yaml name 行=中文显示名（可 ≠ 文件 stem）：不报 mismatch；缺 name 行才 warning。"""
+    root = tmp_path / "packs"
+    _write(root / "capabilities/web/pack.yaml", "kind: capability\nname: web\n")
+    _write(root / "capabilities/web/rules/redlines.md", "# r\n")
+    _write(root / "tracks/ctf/track.yaml", "name: ctf\n")
+    _write(root / "tracks/ctf/rules/redlines.md", "# r\n")
+    _write(root / "tracks/ctf/task_types.yaml", "generic: passive\n")
+    _write(root / "tracks/ctf/roles/_generalist.yaml", 'name: 通用\nskills: null\n')
+    _write(root / "tracks/ctf/roles/noname.yaml", "skills: null\n")  # 缺 name 行
+    rep = diagnose(root)
+    codes = {i.code for i in rep.issues}
+    assert "role-name-mismatch" not in codes          # 旧检查已移除（name≠stem 合法）
+    missing = [i for i in rep.issues if i.code == "role-name-missing"]
+    assert len(missing) == 1 and "noname" in missing[0].target
+
+
 def test_doctor_missing_root(tmp_path):
     rep = diagnose(tmp_path / "nope")
     assert rep.counts["error"] == 1

@@ -48,18 +48,32 @@ def test_role_create_clone_and_trash_delete(client):
     assert r.status_code == 201 and r.json()["cloned"] is None
     roles = {x["file"]: x for x in client.get("/api/tracks/ctf/roles").json()}
     assert "spare" in roles
+    assert roles["spare"]["name"] == "spare"  # 无 display_name → 显示名回退 slug
 
-    # 重名 409 / 非法名 422 / 未知轨 404
+    # 中文显示名（display_name 写 yaml name 行；slug 仍 ASCII）
+    assert client.post("/api/tracks/ctf/roles",
+                       json={"name": "spy", "display_name": "备胎"}).status_code == 201
+    roles = {x["file"]: x for x in client.get("/api/tracks/ctf/roles").json()}
+    assert roles["spy"]["name"] == "备胎"
+
+    # 重名 409 / 非法名 422（slug 拒中文；display_name 禁 #）/ 未知轨 404
     assert client.post("/api/tracks/ctf/roles", json={"name": "spare"}).status_code == 409
     assert client.post("/api/tracks/ctf/roles", json={"name": "../x"}).status_code == 422
+    assert client.post("/api/tracks/ctf/roles", json={"name": "中文角色"}).status_code == 422
+    assert client.post("/api/tracks/ctf/roles",
+                       json={"name": "a1", "display_name": "含#井号"}).status_code == 422
+    assert client.post("/api/tracks/ctf/roles",
+                       json={"name": "a2", "display_name": "含:冒号"}).status_code == 422
     assert client.post("/api/tracks/nope/roles", json={"name": "spare"}).status_code == 404
 
-    # 克隆：字段照抄
+    # 克隆：字段照抄，显示名换新值
     r = client.post("/api/tracks/ctf/roles",
-                    json={"name": "recon-copy", "clone_from": "recon"})
+                    json={"name": "recon-copy", "display_name": "侦察二号",
+                          "clone_from": "recon"})
     assert r.status_code == 201 and r.json()["cloned"] == "recon"
     copied = {x["file"]: x for x in client.get("/api/tracks/ctf/roles").json()}["recon-copy"]
     assert copied["skills"] == ["demo-skill"] and copied["task_types"] == ["recon"]
+    assert copied["name"] == "侦察二号"
     assert client.post("/api/tracks/ctf/roles",
                        json={"name": "c2", "clone_from": "ghost"}).status_code == 404
 

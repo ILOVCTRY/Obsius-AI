@@ -5,6 +5,7 @@ import { GitFork, X } from "lucide-react"
 const TaskFlow = lazy(() => import("./live/TaskFlow").then((m) => ({ default: m.TaskFlow })))
 import { api, pollJob } from "@/lib/api"
 import { eventStyle, eventSummary } from "@/lib/events"
+import { roleName } from "@/lib/roles"
 import { useEvents } from "@/lib/useEvents"
 import { fmtTime, parseTs, utcTitle } from "@/lib/datetime"
 import type { Autonomy, BBEvent, ModelInfo, OrchProposal, OrchTickResult, ProjectUsage, ReplanResult, RoleInfo, Session } from "@/lib/types"
@@ -697,12 +698,20 @@ export function LiveRoom({ pid }: { pid: string }) {
       .filter((s) => s.status !== "closed" && sessionStatus(s.id, events) === "paused")
       .map((s) => s.id)),
     [sessions, events])
+  // 角色中文名映射（事件流「提议开窗」摘要显中文）
+  const roleNames = useMemo(
+    () => Object.fromEntries(roles.map((r) => [r.role, r.name || r.role])),
+    [roles])
   // F9 状态灯：事件流派生叠加 armed——armed 且事件流判空闲 → 绿点「已启动待命」；
   // 未 armed 空闲保持灰点（未启动）。armed 数据来自 sessions 轮询（GET sessions 增强）。
   const sessionsById = useMemo(() => new Map(sessions.map((s) => [s.id, s])), [sessions])
   const tabStatus = useCallback((sid: string): SessionStatus => {
     const st = sessionStatus(sid, events)
-    if (st === "idle" && sessionsById.get(sid)?.worker_armed) return "armed"
+    const s = sessionsById.get(sid)
+    // 稳定事实优先：worker job 在跑（服务端 JobRegistry）→ 恒亮青灯，
+    // 不受事件窗口截断（窗口外会话 events 为空）与 2 分钟阈值抖动影响
+    if (s?.worker_running) return "running"
+    if (st === "idle" && s?.worker_armed) return "armed"
     return st
   }, [events, sessionsById])
   // A3 任务流 WS bump：只数图关心的事件（3s 轮询兜底，组件内去抖重拉）
@@ -948,13 +957,13 @@ export function LiveRoom({ pid }: { pid: string }) {
           value={role}
           onChange={(e) => setRole(e.target.value)}
           title={roles.find((r) => r.role === role)?.description
-            ? `${role === "_generalist" ? "通用" : role} · ${roles.find((r) => r.role === role)?.description}`
+            ? `${roleName(roles.find((r) => r.role === role)?.name, role)} · ${roles.find((r) => r.role === role)?.description}`
             : "开窗角色"}
           className="h-8 max-w-48 truncate rounded-md border bg-background px-2 text-xs"
         >
           {roles.map((r) => (
             <option key={r.role} value={r.role}>
-              {r.role === "_generalist" ? "通用" : r.role}{r.description ? ` · ${r.description}` : ""}
+              {roleName(r.name, r.role)}{r.description ? ` · ${r.description}` : ""}
             </option>
           ))}
         </select>
@@ -1180,7 +1189,7 @@ export function LiveRoom({ pid }: { pid: string }) {
                         : "text-muted-foreground hover:bg-accent",
                     )}
                   >
-                    {r.role === "_generalist" ? "通用" : r.role}
+                    {roleName(r.name, r.role)}
                   </button>
                 ))}
               </div>
@@ -1211,7 +1220,7 @@ export function LiveRoom({ pid }: { pid: string }) {
                 ? (usage.paused ? "自动派生被暂停拦住" : "自动派生运行中：任务空时自动派生新任务")
                 : "自动派生已关闭"}
             />
-            🎯 {usage?.mode === "redteam" ? "红队" : usage?.mode === "pentest" ? "渗透" : (usage?.mode ?? "渗透")}
+            🎯 {usage?.mode === "redteam" ? "红队行动" : "渗透测试"}
           </Button>
           {modeOpen && usage && (
             <ModePopover
@@ -1260,16 +1269,15 @@ export function LiveRoom({ pid }: { pid: string }) {
         {jobInfo && <span className="ml-auto font-mono text-xs text-muted-foreground">{jobInfo}</span>}
       </div>
 
-      {/* 事件流（倒序流：column-reverse 令 scrollTop=0 即最新，贴底由浏览器布局保证，零脚本） */}
+      {/* 事件流（倒序流：滚动容器自身 column-reverse，scrollTop=0 即最新，贴底由浏览器布局保证） */}
       <div
         ref={listRef}
-        className="min-h-0 flex-1 overflow-auto px-3"
+        className="flex min-h-0 flex-1 flex-col-reverse overflow-auto px-3"
       >
-        <div className="flex flex-col-reverse">
-          {shown.map((e) => {
+        {shown.map((e) => {
             const style = eventStyle(e.kind, e.payload)
             const open = overrides.get(e.id) ?? style.defaultOpen
-            const summary = eventSummary(e.payload)
+            const summary = eventSummary(e.payload, roleNames)
             // 只在展开时才序列化详情（回放期全表重渲染时省掉几百次 stringify）
             const detail = open ? JSON.stringify(e.payload, null, 2) : ""
             // skill.routed 命中技能：双击跳设置页 Skill tab 选中该技能（deep link 经 goto-settings）
@@ -1341,7 +1349,6 @@ export function LiveRoom({ pid }: { pid: string }) {
               ↑ 加载更早（窗口外还有 {visible.length - windowSize} 条）
             </button>
           )}
-        </div>
       </div>
 
       {/* 插话输入（人类插手通道 §6.4）：发任务=human 名义 passive 任务；E8 引导会话=human_note 直达选中会话 */}

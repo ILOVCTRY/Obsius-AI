@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react"
 import { api } from "@/lib/api"
 import type { KbRenameResult, PackRole } from "@/lib/types"
+import { roleLabel } from "@/lib/roles"
 import { Textarea } from "@/components/ui/textarea"
 
 /** 技能归属来源：能力包 / 场景轨 */
@@ -27,19 +28,24 @@ export function RoleCreateDialog({ open, onOpenChange, track, roles, onCreated }
   onCreated: (name: string) => void
 }) {
   const [name, setName] = useState("")
+  const [displayName, setDisplayName] = useState("")
   const [cloneFrom, setCloneFrom] = useState("")
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
 
   useEffect(() => {
-    if (open) { setName(""); setCloneFrom(""); setErr(null); setBusy(false) }
+    if (open) { setName(""); setDisplayName(""); setCloneFrom(""); setErr(null); setBusy(false) }
   }, [open])
 
   const submit = async () => {
     setBusy(true)
     setErr(null)
     try {
-      await api.createTrackRole(track, { name: name.trim(), clone_from: cloneFrom || null })
+      await api.createTrackRole(track, {
+        name: name.trim(),
+        display_name: displayName.trim() || null,
+        clone_from: cloneFrom || null,
+      })
       onCreated(name.trim())
       onOpenChange(false)
     } catch (e) {
@@ -58,11 +64,15 @@ export function RoleCreateDialog({ open, onOpenChange, track, roles, onCreated }
                className="font-mono text-xs" autoFocus
                onKeyDown={(e) => e.key === "Enter" && name.trim() && submit()} />
         <p className="-mt-1 text-[10px] text-muted-foreground">{SLUG_HINT}</p>
+        <Input value={displayName} onChange={(e) => setDisplayName(e.target.value)}
+               placeholder="显示名（可中文，留空 = 用 slug）" className="text-xs"
+               onKeyDown={(e) => e.key === "Enter" && name.trim() && submit()} />
+        <p className="-mt-1 text-[10px] text-muted-foreground">界面各处展示用；不含 # 与 :</p>
         <label className="text-[10px] text-muted-foreground">起始模板（克隆会照抄 skills/task_types 等字段）</label>
         <select value={cloneFrom} onChange={(e) => setCloneFrom(e.target.value)}
                 className="rounded border bg-background px-1.5 py-1 text-xs [color-scheme:dark]">
           <option value="">空白模板（列表字段为 null=不过滤）</option>
-          {roles.map((r) => <option key={r.file} value={r.file}>{r.file}</option>)}
+          {roles.map((r) => <option key={r.file} value={r.file}>{roleLabel(r)}</option>)}
         </select>
         <ErrorLine err={err} />
         <div className="flex justify-end gap-2">

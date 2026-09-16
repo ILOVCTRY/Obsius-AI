@@ -570,7 +570,7 @@ export interface Artifact {
 // ---------- packs 管理（设置页） ----------
 
 export interface PackRole {
-  name?: string
+  name?: string // yaml name 行 = 中文显示名（可 ≠ file stem；stem 才是角色 id）
   description?: string | null
   persona?: string | null
   skills: string[] | null
@@ -579,7 +579,7 @@ export interface PackRole {
   tools?: string[] | null
   max_runtime?: string | null
   max_steps?: number | null
-  file: string // yaml 文件名（去 .yaml 后即角色名）
+  file: string // yaml 文件名（去 .yaml 后即角色 id，sessions.role/URL/日志标识）
 }
 
 export interface SkillDef {
@@ -748,6 +748,7 @@ export interface ReviewProposalsResult {
 
 /** PUT /api/tracks/{track}/roles/{name} 表单（未提交字段保留原值；列表显式 null=白名单关闭） */
 export interface RoleUpdateBody {
+  name?: string | null // 中文显示名；null 不动，空串重置为 stem
   description?: string | null
   persona?: string | null
   skills?: string[] | null
@@ -789,7 +790,8 @@ export interface OwnerRule {
 
 /** POST 新建角色（clone_from 缺省=空白模板） */
 export interface RoleCreateBody {
-  name: string
+  name: string // 文件 slug（ASCII）
+  display_name?: string | null // 中文显示名（yaml name 行），缺省用 slug
   clone_from?: string | null
 }
 

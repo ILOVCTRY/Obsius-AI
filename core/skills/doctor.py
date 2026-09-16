@@ -109,10 +109,11 @@ def diagnose(packs_root: str | Path) -> DoctorReport:
             if roles_dir.is_dir():
                 for rp in sorted(roles_dir.glob("*.yaml")):
                     role = _parse_role(rp)
-                    if role.get("name") and role["name"] != rp.stem:
+                    if not role.get("name"):
+                        # name 行=中文显示名（可 ≠ 文件 stem，stem 才是角色 id），缺失才提示
                         rep.issues.append(Issue(
-                            "warning", "role-name-mismatch", _rel(rp, root),
-                            f"yaml name={role['name']!r} 与文件名 {rp.stem!r} 不一致"))
+                            "warning", "role-name-missing", _rel(rp, root),
+                            f"角色 {rp.stem} yaml 缺 name 行（显示名缺失，界面回退文件名）"))
                     for sk_name in role.get("skills") or []:
                         referenced.add(sk_name)
                         sk = reg.get(sk_name)

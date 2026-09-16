@@ -1,5 +1,5 @@
 # 默认兜底角色：不绑角色时使用，全量能力不过滤（受保护不可删）
-name: _generalist
+name: 通用
 description: "通用 CTF 选手：分诊、解题全链路"
 persona: "通用 CTF 选手：分诊、逆向、解题全链路，动手前先查黑板去重。"
 skills: null

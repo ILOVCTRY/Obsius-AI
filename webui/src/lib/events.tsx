@@ -111,7 +111,10 @@ const CHAIN_STOP_REASON: Record<string, string> = {
   error: "自动编排异常",
 }
 
-export function eventSummary(payload: Record<string, unknown>): ReactNode {
+export function eventSummary(payload: Record<string, unknown>,
+                              roleNames?: Record<string, string>): ReactNode {
+  // roleNames：role id → 中文显示名映射（LiveRoom 由 GET /api/projects/{pid}/roles 建）；
+  // 缺省兜底显 role id。
   // 批 6 L0 提案：{op, args}，按动作给一行人话摘要（行内「采纳」按钮在 LiveRoom 挂）
   if (payload.op === "publish_task" && payload.args && typeof payload.args === "object") {
     const a = payload.args as Record<string, unknown>
@@ -129,7 +132,8 @@ export function eventSummary(payload: Record<string, unknown>): ReactNode {
     if (typeof a.role === "string") {
       return (
         <span className="font-mono text-xs">
-          提议开窗 · {a.role}{typeof a.reason === "string" && a.reason ? `（${a.reason}）` : ""}
+          提议开窗 · {roleNames?.[a.role] ?? a.role}
+          {typeof a.reason === "string" && a.reason ? `（${a.reason}）` : ""}
         </span>
       )
     }

@@ -264,7 +264,9 @@ class WritebackIn(BaseModel):
 
 class RoleUpdateIn(BaseModel):
     """PUT 角色字段（表单编辑，不做自由 yaml 文本；未提交字段保留原值）。
-    skills/task_types 显式传 null = 白名单关闭（不过滤）。"""
+    skills/task_types 显式传 null = 白名单关闭（不过滤）。
+    name = 中文显示名（可 ≠ 文件 stem；缺省/None 不动，空串 = 重置为 stem）。"""
+    name: str | None = None
     description: str | None = None
     persona: str | None = None
     skills: list[str] | None = None
@@ -276,8 +278,10 @@ class RoleUpdateIn(BaseModel):
 
 
 class RoleCreateIn(BaseModel):
-    """新建角色：空白模板，或克隆同轨现有角色（字段照抄、name 换成新值）。"""
+    """新建角色：空白模板，或克隆同轨现有角色（字段照抄）。name = 文件 slug（ASCII）；
+    display_name = 中文显示名（写 yaml name 行，缺省用 slug）。"""
     name: str
+    display_name: str | None = None
     clone_from: str | None = None
 
 
@@ -389,7 +393,8 @@ class McpConfigIn(BaseModel):
 
 # ---------------- packs 管理辅助（设置页：角色 / Skill / 红线 / MCP） ----------------
 
-_NAME_RE = re.compile(r"^[\w][\w.-]{0,63}$")  # 角色/技能文件名白名单（防穿越，路径段只允许字母数字_-）
+_NAME_RE = re.compile(r"^[\w][\w.-]{0,63}$")  # 名称白名单（防穿越；\w Unicode-aware 会放行中文——技能/包名等沿用）
+_SLUG_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$")  # 角色 slug（文件名）ASCII 白名单：中文走 display_name，防中文文件名进 URL/路径段
 MCP_CONFIG_PATH = Path("config/mcp.json")     # 与 llm.json 同级（cwd = 项目根）
 
 # MCP server 允许声明的领域；http server 只连本机 loopback（红线，见 decompiler._is_loopback_url）
@@ -562,6 +567,24 @@ def _check_name(value: str, label: str) -> None:
         raise HTTPException(422, f"非法{label}: {value}")
 
 
+def _check_slug(value: str, label: str) -> None:
+    if not _SLUG_RE.fullmatch(value):
+        raise HTTPException(422, f"非法{label}: {value}（只允许英文字母/数字/_-/.，1-64 字符）")
+
+
+def _check_display_name(value: str | None) -> str | None:
+    """角色中文显示名校验（写进 yaml name 行的值）：strip 后空返回 None（调用方回退
+    slug）；禁 #/:/换行——# 触发行内注释截断、: 破坏极简 partition(":") 解析。"""
+    if value is None:
+        return None
+    v = value.strip()
+    if not v:
+        return None
+    if len(v) > 64 or any(c in v for c in "#:\n\r"):
+        raise HTTPException(422, f"非法显示名: {value}（≤64 字符，且不含 # 与 :）")
+    return v
+
+
 def _cap_path(app: Any, cap: str, *parts: str) -> Path:
     """packs/capabilities/<cap>/... 路径校验（各段过白名单，防穿越）。"""
     _check_name(cap, "能力包")
@@ -616,11 +639,13 @@ def _validate_role_fields(changes: dict) -> None:
 def _dump_role_yaml(name: str, existing: dict, changes: dict) -> str:
     """角色 yaml 序列化（极简约定：平铺 key + 内联列表）。
 
+    name 是 yaml name 行的**显示名**（可中文，与文件 stem 解耦——调用方决定传什么），
+    加双引号写（_parse_inline_value 会剥引号）杜绝值内 #/空格 边角问题。
     existing 与 changes 合并后重写——表单只提交改动字段，未提交字段（如
     description/tools）必须保留，不能因 PUT 丢字段。三个列表键缺省输出 null。"""
     data = {k: existing.get(k) for k in _ROLE_KEY_ORDER}
     data.update(changes)
-    lines = [f"name: {name}"]
+    lines = [f'name: "{name}"']
     for key in _ROLE_KEY_ORDER:
         v = data.get(key)
         if v is None:
@@ -3408,23 +3433,35 @@ def create_app(
 
     @app.put("/api/tracks/{track}/roles/{role_name}")
     def update_track_role(track: str, role_name: str, body: RoleUpdateIn):
-        """表单编辑角色：只提交改动字段，与既有 yaml merge 后整写（备份留 .history）。"""
+        """表单编辑角色：只提交改动字段，与既有 yaml merge 后整写（备份留 .history）。
+        yaml name 行=中文显示名（与 stem 解耦）：未提交 name 时**保留原值**——
+        否则每次保存都会把显示名回滚成英文 stem（历史 bug）；空串=重置为 stem。"""
         path = _track_path(app, track, "roles", f"{role_name}.yaml")
         if not path.is_file():
             raise HTTPException(404, f"角色不存在: tracks/{track}/roles/{role_name}")
         changes = body.model_dump(exclude_unset=True)
+        name_in = changes.pop("name", None)
         _validate_role_fields(changes)
         with pack_write_lock():  # 读 yaml→merge→写整文件同一临界区（防并发保存丢字段）
             existing = _parse_flat_yaml(path)
+            if name_in is None:            # 未提交 → 保留 yaml 现有显示名
+                shown = existing.get("name") or role_name
+            elif name_in.strip() == "":    # 空串 → 重置为 stem
+                shown = role_name
+            else:                          # 改显示名（禁 #/:，见 _check_display_name）
+                shown = _check_display_name(name_in) or role_name
             _pack_history_backup(path)
-            path.write_text(_dump_role_yaml(role_name, existing, changes), encoding="utf-8")
-        return {"status": "ok", "file": path.name}
+            path.write_text(_dump_role_yaml(shown, existing, changes), encoding="utf-8")
+        return {"status": "ok", "file": path.name, "name": shown}
 
     @app.post("/api/tracks/{track}/roles", status_code=201)
     def create_track_role(track: str, body: RoleCreateIn):
-        """新建角色（空白模板或克隆同轨角色）。重名 409、非法名 422、克隆源缺失 404。"""
+        """新建角色（空白模板或克隆同轨角色）。重名 409、非法名 422、克隆源缺失 404。
+        文件 slug 走 ASCII 白名单 _SLUG_RE（防中文文件名进 URL/路径段）；中文显示名
+        走 display_name（写 yaml name 行，缺省=slug）。"""
         _check_name(track, "场景轨")
-        _check_name(body.name, "角色名")
+        _check_slug(body.name, "角色名")
+        display_name = _check_display_name(body.display_name) or body.name
         tdir = track_dir(app.state.packs_root, track)
         if not tdir.is_dir():
             raise HTTPException(404, f"场景轨不存在: {track}")
@@ -3434,19 +3471,20 @@ def create_app(
             if dest.exists():
                 raise HTTPException(409, f"角色已存在: {track}/{body.name}")
             if body.clone_from:
-                _check_name(body.clone_from, "克隆源角色名")
+                _check_slug(body.clone_from, "克隆源角色名")
                 src = roles_dir / f"{body.clone_from}.yaml"
                 if not src.is_file():
                     raise HTTPException(404, f"克隆源角色不存在: {track}/{body.clone_from}")
                 existing = _parse_flat_yaml(src)
                 changes = {k: existing.get(k) for k in _ROLE_KEY_ORDER if k in existing}
                 _validate_role_fields(changes)
-                content = _dump_role_yaml(body.name, {}, changes)
+                content = _dump_role_yaml(display_name, {}, changes)
             else:
-                content = _dump_role_yaml(body.name, {}, {})
+                content = _dump_role_yaml(display_name, {}, {})
             roles_dir.mkdir(parents=True, exist_ok=True)
             dest.write_text(content, encoding="utf-8")
-        return {"status": "ok", "file": dest.name, "cloned": body.clone_from}
+        return {"status": "ok", "file": dest.name, "name": display_name,
+                "cloned": body.clone_from}
 
     @app.delete("/api/tracks/{track}/roles/{role_name}")
     def delete_track_role(track: str, role_name: str):

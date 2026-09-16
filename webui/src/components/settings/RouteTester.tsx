@@ -3,6 +3,7 @@ import { api } from "@/lib/api"
 import type { PackRole, RouteHit } from "@/lib/types"
 import type { Taxonomy } from "@/lib/taxonomy"
 import { trackLabel } from "@/lib/taxonomy"
+import { roleLabel } from "@/lib/roles"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
@@ -51,7 +52,7 @@ export function RouteTester({ tax, track }: { tax: Taxonomy | null; track: strin
         <select value={role} onChange={(e) => setRole(e.target.value)} title="按角色白名单窄化（可选）"
                 className={cn("h-7 rounded border bg-background px-1 text-[11px] [color-scheme:dark]")}>
           <option value="">不限角色</option>
-          {roles.map((r) => <option key={r.file} value={r.file}>{r.file}</option>)}
+          {roles.map((r) => <option key={r.file} value={r.file}>{roleLabel(r)}</option>)}
         </select>
       </div>
       <Input value={features} onChange={(e) => setFeatures(e.target.value)} className="h-7 font-mono text-[11px]"

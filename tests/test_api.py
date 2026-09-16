@@ -471,6 +471,7 @@ def test_list_roles_endpoint(client):
     recon = next(r for r in roles if r["role"] == "recon")
     assert recon["task_types"] == ["recon", "asset-enum"]
     assert recon["persona"] and recon["default_noise"] == "passive"
+    assert recon["name"] == "侦察"  # yaml name 行=中文显示名（与 stem 解耦）
     # ctf 项目返回 ctf 角色集（轨驱动的反例校验）
     rc = client.post("/api/projects", json={"name": "c", "track": "ctf",
                                             "capabilities": ["binary"]})
@@ -1738,14 +1739,28 @@ def test_packs_roles_and_skills_endpoints(tmp_path, monkeypatch):
         roles = c.get("/api/tracks/assessment/roles").json()
         assert roles[0]["name"] == "tester" and roles[0]["skills"] == ["demo-skill"]
         r = c.put("/api/tracks/assessment/roles/tester",
-                  json={"persona": "新人设。", "skills": None, "task_types": ["recon"],
-                        "tools": ["bb_query"], "max_runtime": "docker", "max_steps": 20})
+                  json={"name": "测试员", "persona": "新人设。", "skills": None,
+                        "task_types": ["recon"], "tools": ["bb_query"],
+                        "max_runtime": "docker", "max_steps": 20})
         assert r.json()["status"] == "ok"
         from core.skills.roles import load_role
         role = load_role(packs_root, "assessment", "tester")
         assert role["persona"] == "新人设。" and role["skills"] is None  # null = 白名单关闭
         assert role["tools"] == ["bb_query"] and role["max_runtime"] == "docker"
         assert role["max_steps"] == 20
+        assert role["name"] == "测试员"
+        # 显示名与 stem 解耦：不提交 name 的 PUT 保留显示名（回滚 bug 回归锁）；空串=重置
+        r = c.put("/api/tracks/assessment/roles/tester", json={"persona": "再改。"})
+        assert r.json()["name"] == "测试员"
+        assert load_role(packs_root, "assessment", "tester")["name"] == "测试员"
+        r = c.put("/api/tracks/assessment/roles/tester", json={"name": ""})
+        assert r.json()["name"] == "tester"
+        assert load_role(packs_root, "assessment", "tester")["name"] == "tester"
+        # 非法显示名（# / :）→ 422
+        assert c.put("/api/tracks/assessment/roles/tester",
+                     json={"name": "含#井"}).status_code == 422
+        assert c.put("/api/tracks/assessment/roles/tester",
+                     json={"name": "含:号"}).status_code == 422
         # 值域校验：非法 max_runtime / max_steps → 422
         assert c.put("/api/tracks/assessment/roles/tester",
                      json={"max_runtime": "metal"}).status_code == 422
