@@ -1,6 +1,7 @@
 # cyberstrike-pro 设计文档
 
-> 版本: v0.32 (2026-09-16)
+> 版本: v0.33 (2026-09-16)
+  
 本文档是项目蓝图，后续开发以本文档为准；重大变更需更新此文档。
 > 
 > **状态约定（v0.3 起）**：正文默认以**现在时描述已落地的系统现状**；未落地的定稿设计在节/段首以引用块标注：  
@@ -9,56 +10,57 @@
 > 
 > **当前总体状态**：Phase 1 核心平台完成，Phase 2 进行中。已落地的模块级明细见下「落地状态总览」表与 §6.7/§6.8 各节状态标注（此处不再重复罗列）。**未落地**：F 批协调机制余部（1.2、1.3、1.7 传播本体、1.8、1.10、1.5 的 Agent 自由私信侧——1.1/1.4 已落地，见 §17 B 组）、编排与任务语义（C1 暂停语义/C2 编排拆解/C3 作战模式/C5 CTF 线索板，见 §17 C 组）、逆向复用 R1/R2/R3（D1/D2/D3，见 §17 D 组）、development 轨（§15，含 §15.5 AI 反代/破甲专项）、malware 轨与 fakenet（Phase 3）。
 > 
-> 历史：v0.32 (2026-09-16) 待做清单条目 ID 重编（纯文档）：按新组顺序连续编号——B 组 B1(取消传播+私信)/B2(逆向互斥)/B3(联动审批)/B4(blocked_by+分片)，C 组 C1(暂停语义)/C2(编排拆解)/C3(作战模式)/C4(L2 自动续跑)/C5(CTF 线索板)，D 组 D1(R1 缓存)/D2(R2 函数库报告)/D3(R3 签名)，E 组 E1(fakenet+malware)/E2(development 轨)，F 组 F1(三栏拖拽)/F2(终端页)/F3(assessment 收尾)/F4(杂项)；§17 头部附旧→新对照表，正文互引与外部引用同步；历史行沿用当时 ID 不改写；已落地批次标签在代码/CLAUDE.md 改用机制号消歧。 待做清单重整（纯文档）：B1/B2 移除后，实战走查催生的 E14/E15/E16 与 E11 自原 E 组拆出成立 **C 组 编排与任务语义**（实战优先），逆向复用顺延为 D 组、新场景轨为 E 组、体验与基建归位 F 组；B 组余部重排 B4→B5→B6→B3（价值×成本，B3 仅 D1 前置押后）；补账 **E17 L2 档步数耗尽自动续跑**（E8 后置项原漏挂）；排序理由段重写，外部引用（§6.4/§10/§3 注记）同步。条目 ID 为稳定句柄不随组变。 B1+B2 落地（schema v6→v7，F 批协调底座首批）：机制 1.1 发布去重（dedup_fp 指纹/人类 force 确认/Agent [复用] 回填）+ workset 软声明 + 任务流图建议私信边（kind=suggest 点虚线，A3 原 TODO）；机制 1.4 资源租约（新表 resource_leases + leases.py 键白名单归一化、passive→S/active→X 模式映射、认领转写授予、wait_for 门控 claim_next 排除、收尾/删除/过期释放并重校验、环检测安全网 lock.deadlock_victim；运行期动态锁后置）。起因=落实 B 组商议定稿。 E16 作战模式与 mission 战役目标定稿（§6.9 新小节）：**渗透测试（mode=pentest 缺省）**=挖漏洞形成 verified 证据链，验证上限=**影响证明级**（SQL 注入读敏感表/RCE 一次性回显允许），禁驻留/持久化/横向/提权推进；**红队行动（mode=redteam）**=信息收集+外网打点+社工钓鱼（未开发）+内网渗透+提权+横向，以获取重要高危业务数据与设备权限为主，打穿 mission 判据清单为主要目标；mode 与自主档/能力包正交、角色集共用不建新轨，安全红线不放松——仅 §6.3 第 3 级「主动利用未认领目标」禁令在 redteam ROE 四要素核验+授权范围内放开（切换门槛=二次确认+ROE 必填+mode.changed 审计，收紧无门槛）；项目级 mission{text,criteria} 注入编排 overview，converged 从「零产出停链」升级为「mission 判据达成或资产穷尽」（redteam 判据清单全打完=完成、缺省全部已登记资产；七闸不放松）；社工钓鱼+shell 管理页（被攻陷目标会话化管理视图，复用会话设施不建独立 C2、Agent 无裸 shell 不变）仿 §15.5 专项挂账；§17 19 挂账五批拆解，实施后置；起因=用户重申渗透/红队两个定义与长任务语义（渗透没挖到漏洞自动扫其他资产=mission+E14 低水位承载）。纯文档定稿，无代码改动。v0.28 (2026-09-16) E15 任务暂停语义统一+待人工输入承接定稿（§6.1 新小节；§3 E12 扩展注记；§6.4 放回注记；§12 看板行）：fail_task 结构化 blocked_reason（awaiting_human|error，tasks 幂等加列，缺省 error 向后兼容）——「等人类输入」与真失败在看板可区分、暂停原因上卡片正文不再藏 tooltip；awaiting_human 保留会话快照走 E12 既有「▶ 续跑」（限原会话），三类「停」（人工中断/E8 步数耗尽/Agent 自主挂起）统一为「都能继续」；放回可附人类补充说明写进任务行；有旧 plan 的任务被新会话认领时提示层注入旧 plan（done 步骤带真实性注记不视为已验证）+该任务 findings 摘要；awaiting_human 计入审批铃铛红点（只计数不混 approval 表）；宁严勿松——不自动重试不自动放回、L2 自动链不处置。起因=实测 ROE 未核验自主挂起任务无继续入口、放回重做白烧 2.78M tokens 且新会话误读旧计划 done 标记；§17 18 挂账五批拆解，实施后置。纯文档定稿，无代码改动。v0.27 (2026-09-16) E14 编排器任务拆解+资产分批发布+低水位补任务定稿（§6.4 新小节「任务拆解与分批发布」）：编排 tick 分析新任务可拆解为带 parent_id 的子任务并对不同目标同时开窗——深度 1 层（子任务不可再被编排器拆）、每轮发布硬闸 max_publish_per_tick=5（L0 提案同闸计数）、权威校验收敛到 TaskQueue.check_parent（编排器/人类 POST/提案采纳三写路径共用）、_stats() 注入资产视图（计数+未覆盖清单 cap 30 带 id+uncovered_total，判定为提示层、真护栏 conflict_keys 互斥）、分批 3-5/轮经 worker 空退事件驱动续批（无新触发点）、L0/L1/L2 同逻辑；§17 17 挂账四批拆解，实施后置；机制 1.3 加部分前置注记。纯文档定稿，无代码改动。v0.26 (2026-09-16) E10 Obsidian 接入 + 学习计划落地（§16.3 三批一次实施）：core/intel/ 增 vault.py（index_vault 只读索引=frontmatter 复用/title 三级回退/tags fm+内联去重/SKIP_DIRS，build_tree 嵌套化）+ intel.db SCHEMA_VERSION 1→2（vault_notes/learning_plans 两表，DDL 全 IF NOT EXISTS 幂等迁移）+ config.py load/save_profile 重写为**透传未知键**（手编字段不再丢）+ learning_profile 三来源聚合（声明画像+vault 元数据推断【不读正文】+platform_direction_counts）+ compose_weekly_plan（classifier 只喂**元数据**——隐私红线测试断言 LLM 入参不含笔记正文；LLM 失败降级模板）；API 增 vault+learning 八端点（PUT vault 配了路径即自动索引 Job；learning/plan POST=Job、GET 缺省 latest）；前端 IntelView 学习 tab 换三来源档案+当周计划（生成/复制 md/归档周列表）、IntelSourcePane 加 vault 节（保存并索引/重建索引/n 篇·上次索引）。实施注记（v1 取舍）：tree/search 全走索引（请求路径零 FS 访问，天然无穿越）；索引为全量重建、无自动监听，编辑后手动重建（staleness 可接受）。v0.25 (2026-09-16) 编排开窗赛跑修复：spawn_session 批准处理器加 open 任务终检（无 open 任务不建窗，落 approval.exec_failed，防空窗占 cap）+ spawn_session 工具描述补「既有会话可覆盖时不提案开窗」纪律；起因=L1 tick 的 B 触发 kick 旧窗抢走放回任务、审批落地开出两个空窗占满 4/4。v0.24 (2026-09-16) E13 三栏框架可拖拽调宽定稿（§12 布局定稿）：左导航栏与右侧黑板侧栏改 react-resizable-panels v4 可拖拽 Panel（不引新依赖，复用 SkillsPane 模式；左 48–220px、右 288–640px）、两分支逐字重复的 nav JSX 抽取为 NavRail 组件、宽度 localStorage 持久化（ui.nav-width/ui.board-width 设备级）、折叠钮与 boardOpen 逻辑不动（条件 Panel 容忍度实施时实测）；纯前端无后端改动，§17 17 挂账实施后置。v0.23 (2026-09-16) E12 意外终止任务可续跑落地（§3）：中断保留现场——`_abort_current_task` 不再销毁落盘快照（`task.failed` 带 resumable；仅任务已删除的中断仍清防孤儿）、`revive_snapshot` 限原会话复活、API `POST /tasks/{tid}/resume`（reopen+claim+清 _stop_after_task+续跑，budget 快照缺省 +200）、看板 failed 卡「▶ 续跑」、两处中断确认弹窗、close 会话显式清快照修孤儿泄漏；起因=暂停后误点中断快照被销毁任务单程失败。v0.22 (2026-09-16) E 组收尾商议定稿（纯文档，无代码）：E4 WebUI 终端页设计定稿写入 §12 新小节「终端页与人类命令通路」——E4a 人类 one-shot 命令面板（POST /exec 经 gateway，author=human，审计/审批全继承）+ E4b 交互终端（持久 workspace 容器 cyb-ws-<slug> 惰性创建/空闲回收/reconcile + PTY 三后端 + 双向 WS + xterm.js lazy）；安全边界定稿：人类命令必须过网关、交互终端人类专属（Agent 工具面不新增 PTY 工具）、host 终端默认关闭（settings 显式开+仅 127.0.0.1）、WSL 终端不提供、PTY 不逐键审计（session 级 open/close 代替）；§7 补「人类命令同层」一句。E10/E11 定实施拆批写入 §17 条目（E10 三批：vault 索引→学习档案→周计划，E10 先于 E11；E11 五批：换词表卡流→路标→三级注入 IP 聚合→产物附件→补缺）。v0.21 (2026-09-16) E9 情报面板 v1 落地（§16）：core/intel/ 新模块——全局存储 config/intel/（intel.db SQLite WAL + feeds.json + profile.json，全局 DB 新模式）、触发式抓取（NVD/KEV/GitHub Advisory 经免 key REST/中文社区 RSS，urllib 出站不经网关，getter 可注入，单源失败不中断）、classifier 打分（profile 权重侧乘封顶 100）与中文简报合成（**LLM 缺席降级规则打分与模板简报，不 503**）、run_refresh 管线（文章配比=热点 1–2+技术 3–5）；API `/api/intel/*` 十端点（惰性建库、intel_getter/intel_llm 测试注入口）；前端情报页三 tab（简报/文章/学习）+ App 顶级导航 + 项目页两栏简报卡 + 设置页「情报源」tab；§17 E 组移除 E9 并重编号。实施注记：GitHub Advisory 走 api.github.com/advisories 免 key REST（GraphQL 要 token 弃用）。v0.20 (2026-09-16) E2 能力包级 redlines 补齐落地：web/binary/crypto/forensics/misc 五份 rules/redlines.md 按轨级风格起草（**AI 起草草案待人审**，能力级跨轨纪律：web 验证最小伤害/证据反幻觉/状态机、binary 样本信任/func_kb 查重、crypto 可复现结论/敏感密钥处置、forensics 证据只读/OSINT 边界/最小化、misc 先常规后重型/反幻觉），build_rules_preamble 注入实测通过、doctor missing-redlines 告警清零；§17 E 组移除 E2 并重编号。v0.19 (2026-09-16) E1 红线设置页 UI 重构落地（§12 设置页）：RulesPane 拆至 components/settings/，改左文件列表+右单文件编辑器（●/○ 存在状态点、注入范围 Badge、字数/保存底栏、缺失新建并保存、owner hover ✕ 停用与内联新建），切文件/切轨包 dirty confirm 守卫（修未保存内容被静默覆盖），doctor 红线跳转自动选中；后端 API 与 .history 不动；§17 E 组移除 E1 并重编号。v0.18 (2026-09-16) E6+E7 资产登记改造与扫描/测试状态机落地（§5.2）：register_asset 统一登记入口（人工/Agent 同路）、类型自动识别、domain 自动 DNS 挂载与主域名/别名标记、host 按 IP 去重、bb_add_asset 防重扫回执；assets.status 四态状态机 + bb_asset_status（tested_clean 必带 note）+ asset.status_changed 审计 +「有发现」前端反查徽章 + bb_query status/type 过滤；§17 E 组移除 E6/E7 并重编号。v0.17 (2026-09-16) E8 步数预算与人工引导落地（§3）：max_steps 默认 200、剩余<20 步边界提醒、request_steps 自助加步（+200/剩余>20 拒收/审计）、耗尽自动步数暂停（快照落库可 rehydrate，不 fail）、human_note 引导通道 + 直播间「发任务｜引导会话」切换、resume 支持附引导语/追加步数；§17 E 组移除 E8 并重编号。v0.16 (2026-09-16) 章节调序：情报面板（原 §17）前移为 §16、待做清单移至末位 §17，交叉引用同步改；待做清单内容不变。v0.15 (2026-09-16) CTF 线索板 + 跨轨路标定稿（§5.2：四级线索词表/产物内联/三级注入按 IP 聚合）+ §16 E11 挂账（实施后置；起因：CTF 黑板通用性太高，MISC/取证线索串联无承载）。v0.14 (2026-09-16) 情报面板定稿（新章 §17：漏洞简报/高分文章/Obsidian 学习计划）+ §16 E9/E10 挂账（实施后置）。v0.13 (2026-09-16) 步数预算与人工引导定稿（§3）+ §16 E8 挂账（实施后置；起因：recon 任务 30 步耗尽被自动 fail 走查）。v0.12 (2026-09-16) 资产扫描/测试状态机定稿（§5.2）+ §16 E7 挂账（实施后置，可与 E6 同批）。v0.11 (2026-09-16) 资产登记改造定稿（§5.2）+ §16 E6 挂账（实施后置）。v0.10 (2026-09-15) 直播间事件流新增「路由」筛选 tab（§12）+ 全文精简（重复状态叙述并入落地状态总览，实现坑细节移交各级 CLAUDE.md）；仓库 git init。v0.9 (2026-09-15) A 组五项落地（schema v5→v6，§16 A 组移除、B–E 重编号）。v0.8 (2026-09-15) 时间本地化（§12）+ §16 重排 A–E 组。v0.7/v0.6/v0.5 (2026-09-15) G 批批 6/5/4：L0 提案模式 / L2 全自动链 / L1 开窗审批（§6.8）。v0.4 (2026-09-15) G 批批 2/3 自主配置面/记账 + tick 租约/编排状态持久化（schema v5）。v0.3 (2026-09-15) 状态约定 + 撤回传播（机制 1.6/1.5 系统侧）。v0.2 (2026-09-13) 「能力包 × 场景轨」正交分类学（§4.5）+ src-strike 全量融入（§4）+ 角色软边界/技能全提案制。v0.1 首版定稿。
+> 历史：v0.33 (2026-09-16) F5 vault 结构化 frontmatter 画像定稿（§16.3 新定稿块）：index_vault 读 fm category（vault_notes 加列，SCHEMA_VERSION 2→3 幂等迁移）、方向判定 category 归一化**精确命中 DIRECTIONS 优先**+infer_direction 关键词回退（不建用户可维护别名表，v1 取舍）、学习档案 vault 来源加 **top tags 频次 cap 15**（「蓝牙/BLE 投入多、PWN 少」类细粒度画像可表达；全元数据隐私红线不变）、周计划导向=**兴趣权重优先+明显缺口提醒**（LLM 提示语与降级模板同口径，入参加 tag 频次行）、重建索引生效；§17 F5 挂账四批拆解，实施后置。另：v0.31 重整遗留的 §17 旧数字编号引用（总览 E13/E14/E15/E16 行、§3/§6.1/§6.4/§6.7/§6.9/§10/§12 正文注记）统一改指新 ID（C1/C2/C3/F1）。纯文档定稿，无代码改动。v0.32 (2026-09-16) 待做清单条目 ID 重编（纯文档）：按新组顺序连续编号——B 组 B1(取消传播+私信)/B2(逆向互斥)/B3(联动审批)/B4(blocked_by+分片)，C 组 C1(暂停语义)/C2(编排拆解)/C3(作战模式)/C4(L2 自动续跑)/C5(CTF 线索板)，D 组 D1(R1 缓存)/D2(R2 函数库报告)/D3(R3 签名)，E 组 E1(fakenet+malware)/E2(development 轨)，F 组 F1(三栏拖拽)/F2(终端页)/F3(assessment 收尾)/F4(杂项)；§17 头部附旧→新对照表，正文互引与外部引用同步；历史行沿用当时 ID 不改写；已落地批次标签在代码/CLAUDE.md 改用机制号消歧。 待做清单重整（纯文档）：B1/B2 移除后，实战走查催生的 E14/E15/E16 与 E11 自原 E 组拆出成立 **C 组 编排与任务语义**（实战优先），逆向复用顺延为 D 组、新场景轨为 E 组、体验与基建归位 F 组；B 组余部重排 B4→B5→B6→B3（价值×成本，B3 仅 D1 前置押后）；补账 **E17 L2 档步数耗尽自动续跑**（E8 后置项原漏挂）；排序理由段重写，外部引用（§6.4/§10/§3 注记）同步。条目 ID 为稳定句柄不随组变。 B1+B2 落地（schema v6→v7，F 批协调底座首批）：机制 1.1 发布去重（dedup_fp 指纹/人类 force 确认/Agent [复用] 回填）+ workset 软声明 + 任务流图建议私信边（kind=suggest 点虚线，A3 原 TODO）；机制 1.4 资源租约（新表 resource_leases + leases.py 键白名单归一化、passive→S/active→X 模式映射、认领转写授予、wait_for 门控 claim_next 排除、收尾/删除/过期释放并重校验、环检测安全网 lock.deadlock_victim；运行期动态锁后置）。起因=落实 B 组商议定稿。 E16 作战模式与 mission 战役目标定稿（§6.9 新小节）：**渗透测试（mode=pentest 缺省）**=挖漏洞形成 verified 证据链，验证上限=**影响证明级**（SQL 注入读敏感表/RCE 一次性回显允许），禁驻留/持久化/横向/提权推进；**红队行动（mode=redteam）**=信息收集+外网打点+社工钓鱼（未开发）+内网渗透+提权+横向，以获取重要高危业务数据与设备权限为主，打穿 mission 判据清单为主要目标；mode 与自主档/能力包正交、角色集共用不建新轨，安全红线不放松——仅 §6.3 第 3 级「主动利用未认领目标」禁令在 redteam ROE 四要素核验+授权范围内放开（切换门槛=二次确认+ROE 必填+mode.changed 审计，收紧无门槛）；项目级 mission{text,criteria} 注入编排 overview，converged 从「零产出停链」升级为「mission 判据达成或资产穷尽」（redteam 判据清单全打完=完成、缺省全部已登记资产；七闸不放松）；社工钓鱼+shell 管理页（被攻陷目标会话化管理视图，复用会话设施不建独立 C2、Agent 无裸 shell 不变）仿 §15.5 专项挂账；§17 19 挂账五批拆解，实施后置；起因=用户重申渗透/红队两个定义与长任务语义（渗透没挖到漏洞自动扫其他资产=mission+E14 低水位承载）。纯文档定稿，无代码改动。v0.28 (2026-09-16) E15 任务暂停语义统一+待人工输入承接定稿（§6.1 新小节；§3 E12 扩展注记；§6.4 放回注记；§12 看板行）：fail_task 结构化 blocked_reason（awaiting_human|error，tasks 幂等加列，缺省 error 向后兼容）——「等人类输入」与真失败在看板可区分、暂停原因上卡片正文不再藏 tooltip；awaiting_human 保留会话快照走 E12 既有「▶ 续跑」（限原会话），三类「停」（人工中断/E8 步数耗尽/Agent 自主挂起）统一为「都能继续」；放回可附人类补充说明写进任务行；有旧 plan 的任务被新会话认领时提示层注入旧 plan（done 步骤带真实性注记不视为已验证）+该任务 findings 摘要；awaiting_human 计入审批铃铛红点（只计数不混 approval 表）；宁严勿松——不自动重试不自动放回、L2 自动链不处置。起因=实测 ROE 未核验自主挂起任务无继续入口、放回重做白烧 2.78M tokens 且新会话误读旧计划 done 标记；§17 18 挂账五批拆解，实施后置。纯文档定稿，无代码改动。v0.27 (2026-09-16) E14 编排器任务拆解+资产分批发布+低水位补任务定稿（§6.4 新小节「任务拆解与分批发布」）：编排 tick 分析新任务可拆解为带 parent_id 的子任务并对不同目标同时开窗——深度 1 层（子任务不可再被编排器拆）、每轮发布硬闸 max_publish_per_tick=5（L0 提案同闸计数）、权威校验收敛到 TaskQueue.check_parent（编排器/人类 POST/提案采纳三写路径共用）、_stats() 注入资产视图（计数+未覆盖清单 cap 30 带 id+uncovered_total，判定为提示层、真护栏 conflict_keys 互斥）、分批 3-5/轮经 worker 空退事件驱动续批（无新触发点）、L0/L1/L2 同逻辑；§17 17 挂账四批拆解，实施后置；机制 1.3 加部分前置注记。纯文档定稿，无代码改动。v0.26 (2026-09-16) E10 Obsidian 接入 + 学习计划落地（§16.3 三批一次实施）：core/intel/ 增 vault.py（index_vault 只读索引=frontmatter 复用/title 三级回退/tags fm+内联去重/SKIP_DIRS，build_tree 嵌套化）+ intel.db SCHEMA_VERSION 1→2（vault_notes/learning_plans 两表，DDL 全 IF NOT EXISTS 幂等迁移）+ config.py load/save_profile 重写为**透传未知键**（手编字段不再丢）+ learning_profile 三来源聚合（声明画像+vault 元数据推断【不读正文】+platform_direction_counts）+ compose_weekly_plan（classifier 只喂**元数据**——隐私红线测试断言 LLM 入参不含笔记正文；LLM 失败降级模板）；API 增 vault+learning 八端点（PUT vault 配了路径即自动索引 Job；learning/plan POST=Job、GET 缺省 latest）；前端 IntelView 学习 tab 换三来源档案+当周计划（生成/复制 md/归档周列表）、IntelSourcePane 加 vault 节（保存并索引/重建索引/n 篇·上次索引）。实施注记（v1 取舍）：tree/search 全走索引（请求路径零 FS 访问，天然无穿越）；索引为全量重建、无自动监听，编辑后手动重建（staleness 可接受）。v0.25 (2026-09-16) 编排开窗赛跑修复：spawn_session 批准处理器加 open 任务终检（无 open 任务不建窗，落 approval.exec_failed，防空窗占 cap）+ spawn_session 工具描述补「既有会话可覆盖时不提案开窗」纪律；起因=L1 tick 的 B 触发 kick 旧窗抢走放回任务、审批落地开出两个空窗占满 4/4。v0.24 (2026-09-16) E13 三栏框架可拖拽调宽定稿（§12 布局定稿）：左导航栏与右侧黑板侧栏改 react-resizable-panels v4 可拖拽 Panel（不引新依赖，复用 SkillsPane 模式；左 48–220px、右 288–640px）、两分支逐字重复的 nav JSX 抽取为 NavRail 组件、宽度 localStorage 持久化（ui.nav-width/ui.board-width 设备级）、折叠钮与 boardOpen 逻辑不动（条件 Panel 容忍度实施时实测）；纯前端无后端改动，§17 17 挂账实施后置。v0.23 (2026-09-16) E12 意外终止任务可续跑落地（§3）：中断保留现场——`_abort_current_task` 不再销毁落盘快照（`task.failed` 带 resumable；仅任务已删除的中断仍清防孤儿）、`revive_snapshot` 限原会话复活、API `POST /tasks/{tid}/resume`（reopen+claim+清 _stop_after_task+续跑，budget 快照缺省 +200）、看板 failed 卡「▶ 续跑」、两处中断确认弹窗、close 会话显式清快照修孤儿泄漏；起因=暂停后误点中断快照被销毁任务单程失败。v0.22 (2026-09-16) E 组收尾商议定稿（纯文档，无代码）：E4 WebUI 终端页设计定稿写入 §12 新小节「终端页与人类命令通路」——E4a 人类 one-shot 命令面板（POST /exec 经 gateway，author=human，审计/审批全继承）+ E4b 交互终端（持久 workspace 容器 cyb-ws-<slug> 惰性创建/空闲回收/reconcile + PTY 三后端 + 双向 WS + xterm.js lazy）；安全边界定稿：人类命令必须过网关、交互终端人类专属（Agent 工具面不新增 PTY 工具）、host 终端默认关闭（settings 显式开+仅 127.0.0.1）、WSL 终端不提供、PTY 不逐键审计（session 级 open/close 代替）；§7 补「人类命令同层」一句。E10/E11 定实施拆批写入 §17 条目（E10 三批：vault 索引→学习档案→周计划，E10 先于 E11；E11 五批：换词表卡流→路标→三级注入 IP 聚合→产物附件→补缺）。v0.21 (2026-09-16) E9 情报面板 v1 落地（§16）：core/intel/ 新模块——全局存储 config/intel/（intel.db SQLite WAL + feeds.json + profile.json，全局 DB 新模式）、触发式抓取（NVD/KEV/GitHub Advisory 经免 key REST/中文社区 RSS，urllib 出站不经网关，getter 可注入，单源失败不中断）、classifier 打分（profile 权重侧乘封顶 100）与中文简报合成（**LLM 缺席降级规则打分与模板简报，不 503**）、run_refresh 管线（文章配比=热点 1–2+技术 3–5）；API `/api/intel/*` 十端点（惰性建库、intel_getter/intel_llm 测试注入口）；前端情报页三 tab（简报/文章/学习）+ App 顶级导航 + 项目页两栏简报卡 + 设置页「情报源」tab；§17 E 组移除 E9 并重编号。实施注记：GitHub Advisory 走 api.github.com/advisories 免 key REST（GraphQL 要 token 弃用）。v0.20 (2026-09-16) E2 能力包级 redlines 补齐落地：web/binary/crypto/forensics/misc 五份 rules/redlines.md 按轨级风格起草（**AI 起草草案待人审**，能力级跨轨纪律：web 验证最小伤害/证据反幻觉/状态机、binary 样本信任/func_kb 查重、crypto 可复现结论/敏感密钥处置、forensics 证据只读/OSINT 边界/最小化、misc 先常规后重型/反幻觉），build_rules_preamble 注入实测通过、doctor missing-redlines 告警清零；§17 E 组移除 E2 并重编号。v0.19 (2026-09-16) E1 红线设置页 UI 重构落地（§12 设置页）：RulesPane 拆至 components/settings/，改左文件列表+右单文件编辑器（●/○ 存在状态点、注入范围 Badge、字数/保存底栏、缺失新建并保存、owner hover ✕ 停用与内联新建），切文件/切轨包 dirty confirm 守卫（修未保存内容被静默覆盖），doctor 红线跳转自动选中；后端 API 与 .history 不动；§17 E 组移除 E1 并重编号。v0.18 (2026-09-16) E6+E7 资产登记改造与扫描/测试状态机落地（§5.2）：register_asset 统一登记入口（人工/Agent 同路）、类型自动识别、domain 自动 DNS 挂载与主域名/别名标记、host 按 IP 去重、bb_add_asset 防重扫回执；assets.status 四态状态机 + bb_asset_status（tested_clean 必带 note）+ asset.status_changed 审计 +「有发现」前端反查徽章 + bb_query status/type 过滤；§17 E 组移除 E6/E7 并重编号。v0.17 (2026-09-16) E8 步数预算与人工引导落地（§3）：max_steps 默认 200、剩余<20 步边界提醒、request_steps 自助加步（+200/剩余>20 拒收/审计）、耗尽自动步数暂停（快照落库可 rehydrate，不 fail）、human_note 引导通道 + 直播间「发任务｜引导会话」切换、resume 支持附引导语/追加步数；§17 E 组移除 E8 并重编号。v0.16 (2026-09-16) 章节调序：情报面板（原 §17）前移为 §16、待做清单移至末位 §17，交叉引用同步改；待做清单内容不变。v0.15 (2026-09-16) CTF 线索板 + 跨轨路标定稿（§5.2：四级线索词表/产物内联/三级注入按 IP 聚合）+ §16 E11 挂账（实施后置；起因：CTF 黑板通用性太高，MISC/取证线索串联无承载）。v0.14 (2026-09-16) 情报面板定稿（新章 §17：漏洞简报/高分文章/Obsidian 学习计划）+ §16 E9/E10 挂账（实施后置）。v0.13 (2026-09-16) 步数预算与人工引导定稿（§3）+ §16 E8 挂账（实施后置；起因：recon 任务 30 步耗尽被自动 fail 走查）。v0.12 (2026-09-16) 资产扫描/测试状态机定稿（§5.2）+ §16 E7 挂账（实施后置，可与 E6 同批）。v0.11 (2026-09-16) 资产登记改造定稿（§5.2）+ §16 E6 挂账（实施后置）。v0.10 (2026-09-15) 直播间事件流新增「路由」筛选 tab（§12）+ 全文精简（重复状态叙述并入落地状态总览，实现坑细节移交各级 CLAUDE.md）；仓库 git init。v0.9 (2026-09-15) A 组五项落地（schema v5→v6，§16 A 组移除、B–E 重编号）。v0.8 (2026-09-15) 时间本地化（§12）+ §16 重排 A–E 组。v0.7/v0.6/v0.5 (2026-09-15) G 批批 6/5/4：L0 提案模式 / L2 全自动链 / L1 开窗审批（§6.8）。v0.4 (2026-09-15) G 批批 2/3 自主配置面/记账 + tick 租约/编排状态持久化（schema v5）。v0.3 (2026-09-15) 状态约定 + 撤回传播（机制 1.6/1.5 系统侧）。v0.2 (2026-09-13) 「能力包 × 场景轨」正交分类学（§4.5）+ src-strike 全量融入（§4）+ 角色软边界/技能全提案制。v0.1 首版定稿。
 
 ## 落地状态总览（2026-09-15 代码核查）
 
-| 模块                                                                                  | 状态       | 说明                                                                                          |
-| ------------------------------------------------------------------------------------- | ---------- | --------------------------------------------------------------------------------------------- |
-| Agent 循环（观察-思考-工具-黑板；暂停/恢复/中断；租约心跳）                           | ✅         | §3                                                                                            |
-| 黑板存储 schema v6（事件流/资产/findings/func_kb/chains/tasks/session_inbox/orchestrator_state） | ✅         | §5；v4=用量计数，v5=编排游标/tick 租约，v6=tasks.plan + last_replan_at（A 组）                  |
-| 证据并集 + 人类 PATCH 单事务（机制 1.12）                                             | ✅         | §5.3                                                                                          |
-| 四态任务 + 看板运维（编辑/放回/物理删除）                                             | ✅         | §6.1/§6.4；A 组 A1 起四态皆可删、claimed 步边界急停                                             |
-| conflict_keys 认领时快照交集检查 → 资源租约（1.4，schema v7）                          | ✅         | §6.7.1：X/S 租约转写 + wait_for 门控 + 释放重校验 + 环检测安全网（机制 1.4）                        |
-| 发布去重 + workset 软声明（1.1，schema v7）                                           | ✅         | §6.7：dedup_fp 指纹命中复用 + workset advisory + 任务流图建议边（机制 1.1）                          |
-| 协调 1.5 会话收件箱                                                                   | ◐          | 系统私信两类已落地（basis_stale 撤回/finding_update 增补，A4）+worker 注入/页签红点；Agent bb_notify/handoff/to_role 未做 |
-| 协调 1.6 证伪撤回传播                                                                 | ✅         | finding.retracted + 四类私聊 + stale_refs 三选一 + 画布 FP 淡出                               |
-| 协调 1.12 + 任务心跳 + packs 写锁（A 批）                                             | ✅         | 证据并集、心跳、packs 进程写锁                                                                |
-| 协调 1.9 编排状态持久化 + tick 租约                                                   | ✅         | §6.7/§6.8（G 批批 3；live_sessions 仍只在内存，跨重启靠 rehydrate）                            |
-| 协调 1.11 sessions_cap + 用量记账 + 80% 软警告                                        | ✅         | §6.8（G 批批 2；自主动作硬闸、人手动作仅警告）                                                 |
-| 协调 1.2/1.3/1.7/1.8/1.10（1.1/1.4 已落地）                                          | ⬜         | F 批余部，§6.7/§17 B 组                                                                       |
-| 自主级别 L0/L1/L2 配置面（档段/暂停/cap/双预算）                                      | ✅         | §6.8（G 批批 2 配置面；行为差异批 4/5 已落地，L0 提案批 6）                                    |
-| 自主行为：L1 开窗审批（op 注册表+预检/终检，批准即建窗开跑）                           | ✅         | §6.8，G 批批 4                                                                                |
-| 自主行为：L2 全自动链（事件驱动无调度器；kick/续 tick；防失控七闸；chain 事件；重启急停） | ✅         | §6.8，G 批批 5                                                                                |
-| 自主行为：L0 提案模式（propose_only/orch.proposed/前端行内采纳）                       | ✅         | §6.8，G 批批 6                                                                                |
-| Skill：路由/kb CRUD/备份版本/refs 联动/doctor/vocab                                   | ✅         | §4                                                                                            |
-| Skill：统一变更提案制（propose_pack_edit/提案队列/review Job）                        | ✅         | §4                                                                                            |
-| Runtime L0 host / L1 wsl / L2 docker + policy + 执行网关                              | ✅         | §7                                                                                            |
-| Runtime L3 sandbox                                                                    | ◐          | 加固参数（无挂载/限额）+ net=none 可用；**fakenet 未实现（NotImplementedError）**、无 sidecar |
-| LLM：多供应商/模型发现/运行中切换                                                     | ✅         | §8                                                                                            |
-| research 轨 + rev-generic 工作台 P1/P2                                                | ✅         | §9/§12：headless v3、chains 逆向链、MCP、IDA 双向写回、脚本档                                 |
-| 评估攻击链画布（relates_to + FindingsCanvas）                                         | ✅         | §12                                                                                           |
-| 逆向复用 R1 全局缓存 / R2 全局函数库 / R3 签名匹配                                    | ⬜         | §9 末                                                                                         |
-| WebUI 主体（项目向导/直播间/黑板双工作台/任务看板/Skill 设置/审批收件箱）+ 三栏指挥台 | ✅         | §12                                                                                           |
-| WebUI 终端页（workspace 容器/shell、终端抽屉）                                        | ⬜         | §12 页面骨架第 7 项；E4 已定稿（§12「终端页与人类命令通路」），§17 13 拆批                      |
-| 报告生成（黑板数据 → 渗透报告初稿）                                                   | ⬜         | §12 Open Questions（随 R2 推进）                                                              |
-| development 场景轨                                                                    | ⬜         | §15（仓库已 git init）                                                                      |
-| A 组多会话可观察/可急停（A1 detach/终止入口收敛/步边界急停/done 可删、A2 tasks.plan 计划闸、A3 任务流视图、A4 finding_update 私信、A5 编排规划-分派） | ✅ | §3/§6.1/§6.4/§6.7/§12，2026-09-15（schema v6）                                                |
-| E12 意外终止任务可续跑（中断保留现场 + 看板「▶ 续跑」限原会话 + 中断确认弹窗） | ✅ | §3，2026-09-16                                                                                |
-| E13 三栏框架可拖拽调宽（左导航/右侧黑板侧栏 react-resizable-panels v4 化 + NavRail 抽取） | ⬜ | §12 布局定稿，E13 已定稿挂账 §17 16                                                                  |
-| E14 编排器任务拆解+资产分批发布+低水位补任务（parent_id 拆解深度 1/每轮 ≤5/资产视图注入/事件驱动续批） | ⬜ | §6.4 定稿，挂账 §17 17（机制 1.3 部分前置）                                                          |
-| E15 任务暂停语义统一+待人工输入承接（blocked_reason 区分/续跑统一/放回附注/认领提示层注入/铃铛红点） | ⬜ | §6.1 定稿，挂账 §17 18（§3 E12 续跑扩展）                                                            |
-| E16 作战模式（pentest/redteam）+ mission 战役目标+社工钓鱼/shell 管理页挂账 | ⬜ | §6.9 定稿，挂账 §17 19（§6.3 禁令 redteam ROE 内放开）                                               |
-| E8 步数预算与人工引导（max_steps 200/request_steps 自助/耗尽自动暂停+快照落库/human_note 通道） | ✅ | §3，2026-09-16（无 schema 升级）                                                              |
-| E6+E7 资产登记统一入口（类型自动识别/DNS 挂载/主域名别名）+ 扫描测试状态机（status 四态/bb_asset_status/有发现反查徽章） | ✅ | §5.2，2026-09-16（无 schema 升级）                                                            |
-| E1 红线设置页 UI 重构（左文件列表+右单文件编辑器/dirty 守卫/doctor 跳转选中） | ✅ | §12，2026-09-16（纯前端，无 schema 升级）                                                     |
-| E2 能力包级 redlines 补齐（web/binary/crypto/forensics/misc 五份草案，待人审） | ✅ | §4.5，2026-09-16（纯文档，无 schema 升级）                                                    |
-| E9 情报面板 v1（config/intel 全局库/触发式抓取/classifier 打分与简报/情报页三 tab/简报卡/情报源 tab） | ✅ | §16，2026-09-16（core/intel 新模块 + 全局 DB 新模式；LLM 缺席降级规则不 503；无 schema 升级）  |
-| E10 Obsidian 接入 + 学习计划（vault 只读索引/本地全文搜索/学习档案三来源/LLM 周计划只喂元数据） | ✅ | §16.3，2026-09-16（intel.db SCHEMA_VERSION=2；隐私红线=正文不出本机有测试断言；v1 无自动监听，手动重建索引）  |
-| 时间本地化（本地时区 + YYYY-MM-DD HH:mm:ss 统一 formatter，纯前端 datetime.ts）       | ✅         | §12，2026-09-15 落地                                                                          |
-| AI 反代 / AI 破甲专项方向（含红线）                                                   | ⬜         | §15.5，随 development 轨，红线先行进 track redlines                                           |
-| malware 场景轨                                                                        | ⬜         | Phase 3，依赖 fakenet                                                                         |
-| 文档债：五个能力包 `rules/redlines.md`                                                | ◐          | track 级 redlines 齐（ctf/assessment/research）；能力包级全缺                                 |
+| 模块                                                                                                                                                  | 状态 | 说明                                                                                                                      |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------- | ---- | ------------------------------------------------------------------------------------------------------------------------- |
+| Agent 循环（观察-思考-工具-黑板；暂停/恢复/中断；租约心跳）                                                                                           | ✅   | §3                                                                                                                        |
+| 黑板存储 schema v6（事件流/资产/findings/func_kb/chains/tasks/session_inbox/orchestrator_state）                                                      | ✅   | §5；v4=用量计数，v5=编排游标/tick 租约，v6=tasks.plan + last_replan_at（A 组）                                            |
+| 证据并集 + 人类 PATCH 单事务（机制 1.12）                                                                                                             | ✅   | §5.3                                                                                                                      |
+| 四态任务 + 看板运维（编辑/放回/物理删除）                                                                                                             | ✅   | §6.1/§6.4；A 组 A1 起四态皆可删、claimed 步边界急停                                                                       |
+| conflict_keys 认领时快照交集检查 → 资源租约（1.4，schema v7）                                                                                         | ✅   | §6.7.1：X/S 租约转写 + wait_for 门控 + 释放重校验 + 环检测安全网（机制 1.4）                                              |
+| 发布去重 + workset 软声明（1.1，schema v7）                                                                                                           | ✅   | §6.7：dedup_fp 指纹命中复用 + workset advisory + 任务流图建议边（机制 1.1）                                               |
+| 协调 1.5 会话收件箱                                                                                                                                   | ◐    | 系统私信两类已落地（basis_stale 撤回/finding_update 增补，A4）+worker 注入/页签红点；Agent bb_notify/handoff/to_role 未做 |
+| 协调 1.6 证伪撤回传播                                                                                                                                 | ✅   | finding.retracted + 四类私聊 + stale_refs 三选一 + 画布 FP 淡出                                                           |
+| 协调 1.12 + 任务心跳 + packs 写锁（A 批）                                                                                                             | ✅   | 证据并集、心跳、packs 进程写锁                                                                                            |
+| 协调 1.9 编排状态持久化 + tick 租约                                                                                                                   | ✅   | §6.7/§6.8（G 批批 3；live_sessions 仍只在内存，跨重启靠 rehydrate）                                                       |
+| 协调 1.11 sessions_cap + 用量记账 + 80% 软警告                                                                                                        | ✅   | §6.8（G 批批 2；自主动作硬闸、人手动作仅警告）                                                                            |
+| 协调 1.2/1.3/1.7/1.8/1.10（1.1/1.4 已落地）                                                                                                           | ⬜   | F 批余部，§6.7/§17 B 组                                                                                                   |
+| 自主级别 L0/L1/L2 配置面（档段/暂停/cap/双预算）                                                                                                      | ✅   | §6.8（G 批批 2 配置面；行为差异批 4/5 已落地，L0 提案批 6）                                                               |
+| 自主行为：L1 开窗审批（op 注册表+预检/终检，批准即建窗开跑）                                                                                          | ✅   | §6.8，G 批批 4                                                                                                            |
+| 自主行为：L2 全自动链（事件驱动无调度器；kick/续 tick；防失控七闸；chain 事件；重启急停）                                                             | ✅   | §6.8，G 批批 5                                                                                                            |
+| 自主行为：L0 提案模式（propose_only/orch.proposed/前端行内采纳）                                                                                      | ✅   | §6.8，G 批批 6                                                                                                            |
+| Skill：路由/kb CRUD/备份版本/refs 联动/doctor/vocab                                                                                                   | ✅   | §4                                                                                                                        |
+| Skill：统一变更提案制（propose_pack_edit/提案队列/review Job）                                                                                        | ✅   | §4                                                                                                                        |
+| Runtime L0 host / L1 wsl / L2 docker + policy + 执行网关                                                                                              | ✅   | §7                                                                                                                        |
+| Runtime L3 sandbox                                                                                                                                    | ◐    | 加固参数（无挂载/限额）+ net=none 可用；**fakenet 未实现（NotImplementedError）**、无 sidecar                             |
+| LLM：多供应商/模型发现/运行中切换                                                                                                                     | ✅   | §8                                                                                                                        |
+| research 轨 + rev-generic 工作台 P1/P2                                                                                                                | ✅   | §9/§12：headless v3、chains 逆向链、MCP、IDA 双向写回、脚本档                                                             |
+| 评估攻击链画布（relates_to + FindingsCanvas）                                                                                                         | ✅   | §12                                                                                                                       |
+| 逆向复用 R1 全局缓存 / R2 全局函数库 / R3 签名匹配                                                                                                    | ⬜   | §9 末                                                                                                                     |
+| WebUI 主体（项目向导/直播间/黑板双工作台/任务看板/Skill 设置/审批收件箱）+ 三栏指挥台                                                                 | ✅   | §12                                                                                                                       |
+| WebUI 终端页（workspace 容器/shell、终端抽屉）                                                                                                        | ⬜   | §12 页面骨架第 7 项；E4 已定稿（§12「终端页与人类命令通路」），§17 13 拆批                                                |
+| 报告生成（黑板数据 → 渗透报告初稿）                                                                                                                   | ⬜   | §12 Open Questions（随 R2 推进）                                                                                          |
+| development 场景轨                                                                                                                                    | ⬜   | §15（仓库已 git init）                                                                                                    |
+| A 组多会话可观察/可急停（A1 detach/终止入口收敛/步边界急停/done 可删、A2 tasks.plan 计划闸、A3 任务流视图、A4 finding_update 私信、A5 编排规划-分派） | ✅   | §3/§6.1/§6.4/§6.7/§12，2026-09-15（schema v6）                                                                            |
+| E12 意外终止任务可续跑（中断保留现场 + 看板「▶ 续跑」限原会话 + 中断确认弹窗）                                                                       | ✅   | §3，2026-09-16                                                                                                            |
+| E13/F1 三栏框架可拖拽调宽（左导航/右侧黑板侧栏 react-resizable-panels v4 化 + NavRail 抽取）                                                             | ⬜   | §12 布局定稿，挂账 §17 F1                                                                                       |
+| E14/C2 编排器任务拆解+资产分批发布+低水位补任务（parent_id 拆解深度 1/每轮 ≤5/资产视图注入/事件驱动续批）                                                | ⬜   | §6.4 定稿，挂账 §17 C2（机制 1.3 部分前置）                                                                               |
+| E15/C1 任务暂停语义统一+待人工输入承接（blocked_reason 区分/续跑统一/放回附注/认领提示层注入/铃铛红点）                                                  | ⬜   | §6.1 定稿，挂账 §17 C1（§3 E12 续跑扩展）                                                                                 |
+| E16/C3 作战模式（pentest/redteam）+ mission 战役目标+社工钓鱼/shell 管理页挂账                                                                           | ⬜   | §6.9 定稿，挂账 §17 C3（§6.3 禁令 redteam ROE 内放开）                                                                    |
+| F5 vault 结构化 frontmatter 画像（category 入索引/方向判定优先/tag 频次画像/周计划导向）                                                             | ⬜   | §16.3 定稿，挂账 §17 F5                                                                                          |
+| E8 步数预算与人工引导（max_steps 200/request_steps 自助/耗尽自动暂停+快照落库/human_note 通道）                                                       | ✅   | §3，2026-09-16（无 schema 升级）                                                                                          |
+| E6+E7 资产登记统一入口（类型自动识别/DNS 挂载/主域名别名）+ 扫描测试状态机（status 四态/bb_asset_status/有发现反查徽章）                              | ✅   | §5.2，2026-09-16（无 schema 升级）                                                                                        |
+| E1 红线设置页 UI 重构（左文件列表+右单文件编辑器/dirty 守卫/doctor 跳转选中）                                                                         | ✅   | §12，2026-09-16（纯前端，无 schema 升级）                                                                                 |
+| E2 能力包级 redlines 补齐（web/binary/crypto/forensics/misc 五份草案，待人审）                                                                        | ✅   | §4.5，2026-09-16（纯文档，无 schema 升级）                                                                                |
+| E9 情报面板 v1（config/intel 全局库/触发式抓取/classifier 打分与简报/情报页三 tab/简报卡/情报源 tab）                                                 | ✅   | §16，2026-09-16（core/intel 新模块 + 全局 DB 新模式；LLM 缺席降级规则不 503；无 schema 升级）                             |
+| E10 Obsidian 接入 + 学习计划（vault 只读索引/本地全文搜索/学习档案三来源/LLM 周计划只喂元数据）                                                       | ✅   | §16.3，2026-09-16（intel.db SCHEMA_VERSION=2；隐私红线=正文不出本机有测试断言；v1 无自动监听，手动重建索引）              |
+| 时间本地化（本地时区 + YYYY-MM-DD HH:mm:ss 统一 formatter，纯前端 datetime.ts）                                                                       | ✅   | §12，2026-09-15 落地                                                                                                      |
+| AI 反代 / AI 破甲专项方向（含红线）                                                                                                                   | ⬜   | §15.5，随 development 轨，红线先行进 track redlines                                                                       |
+| malware 场景轨                                                                                                                                        | ⬜   | Phase 3，依赖 fakenet                                                                                                     |
+| 文档债：五个能力包 `rules/redlines.md`                                                                                                                | ◐    | track 级 redlines 齐（ctf/assessment/research）；能力包级全缺                                                             |
 
 ***
 
@@ -133,13 +135,14 @@ CLI ────────────────┼──→ core API (FastA
 
   **E12：中断保留现场（2026-09-16 已落地）**——硬中断的**落盘快照不再销毁**（内存态照清）：`task.failed` 事件带 `resumable: true`，看板 failed 卡出「▶ 续跑」（= reopen + 原会话 `revive_snapshot` 载快照 + 提交 worker，budget 快照缺省 +200，**限原会话**——closed 会话不可 rehydrate，故结束会话时快照显式清理）；两处中断按钮加确认弹窗；任务被删除触发的中断仍清快照防孤儿。服务重启导致的中断路径（running 无快照）后置。
 
-  **E15 扩展（2026-09-16 定稿，〔未实施〕§17 18）**——Agent 自主 `fail_task` 携带 `blocked_reason=awaiting_human` 时同样保留落盘快照、看板同显「▶ 续跑」，与人工中断同路径同端点；语义与承接面定稿见 §6.1「任务暂停语义统一与待人工输入承接」。
+  **E15 扩展（2026-09-16 定稿，〔未实施〕§17 C1）**——Agent 自主 `fail_task` 携带 `blocked_reason=awaiting_human` 时同样保留落盘快照、看板同显「▶ 续跑」，与人工中断同路径同端点；语义与承接面定稿见 §6.1「任务暂停语义统一与待人工输入承接」。
+
 
 **步数预算与人工引导（2026-09-16 定稿并〔已实施〕，原 §17 E8）**：
 
 - **max_steps 默认 30→200**（开窗 / 角色 yaml / 项目 config 可调，API 已支持 per-session 覆盖，开窗 UI 补暴露）。
 - **步数感知**：剩余 <20 步起，每步边界注入「预算剩余 N 步，请规划收尾或申请增补」——模型对预算无感是步数耗尽事故（2026-09-16 走查）的第一根因。
-- **自助加步 `request_steps`**：AI 可为自己申请步数，**一次固定 +200**；**剩余 >20 步时服务端拒收**（防未雨绸缪囤步数），≤20 步才放行；每次增补落 `step.budget_extended` 审计事件。
+- **自助加步** **`request_steps`** **request_steps**：AI 可为自己申请步数，**一次固定 +200**；**剩余 >20 步时服务端拒收**（防未雨绸缪囤步数），≤20 步才放行；每次增补落 `step.budget_extended` 审计事件。
 - **步数耗尽 = 自动步数暂停**（复用软暂停设施）：保存 messages 快照 + 任务保持 claimed + 心跳继续，落「⏸ 步数预算用尽」事件，**不再自动 fail**（原 `_finalize` 自动 fail 仅保留给显式结束会话场景）；直播间会话控制组出「继续」按钮 → 提交 agent-work job 从快照+步数断点恢复，恢复时可附引导语/追加预算。
 - **暂停快照落库**（修"纯内存不恢复"已知缺口）：快照持久化到 workspace 文件、`sessions.meta` 存指针，服务重启 rehydrate 后仍可继续。
 - **人工引导通道**：session_inbox 新 kind=`human_note`（author=human，新增 POST 端点），worker 步边界 drain 注入 user 消息「💬 人类引导：…」（不打断当前工具调用）；步数暂停恢复时随快照注入；直播间输入框加「发任务｜引导会话」模式切换（选中页签时引导直达该会话），页签红点/已读/事件流审计全复用。
@@ -170,7 +173,7 @@ rules（红线，永久注入系统提示） > SKILL.md（入口路由） > kb �
 - 红线来源 = 项目启用的各能力包 `packs/capabilities/<cap>/rules/*.md` ∪ 场景轨 `packs/tracks/<track>/rules/*.md`，构建系统提示时全量注入；与一切 skill 冲突时以 rules 为准。
 - `packs/tracks/<track>/rules/owners/<tag>.md`：按资产 owner 叠加的更严规则（EDUSRC/OSRC/YSRC 模式：资产带标签 → 对应规则生效压过通用默认）。**owner 规则可管理**：文件即规则——删除文件 = 停用该平台规则、新建文件 = 扩展新平台；src-strike 四套（edusrc/edu-rating/ysrc/osrc）完整版作为初始内容预置，设置页（红线 tab）可建/改/删（.history 留备份）。**数据通路（2026-09-13 定稿，AI 自动打标）**：Agent `bb_add_asset` 时按资产特征打 `meta.owner`（`.edu.cn` 系 → `edusrc`；品牌/平台标注 → 对应 tag；无归属不打，纪律在技能正文不在工具层）→ 开窗时 `Blackboard.owner_tags(pid)` 收集去重 → `AgentConfig.owner_tags` → `build_rules_preamble` 注入。注入天然可选：没资产打标就一个 owner 规则都不进提示。
 - `packs/tracks/<track>/rules/role-rules/<role>.md`：**角色专属红线**（2026-09-13 定稿），仅当会话绑定该角色时注入（§6.6）。
-- `packs/capabilities/<cap>/kb_sources.json`：**包内知识库源登记**（取代旧的包外 `knowledge_sources.json`）。每个源 `{id, root（包内相对路径）, recursive}`；开窗时合并项目启用的全部能力包源。**知识库模块打开走** **`kb_open`** **kb_open** **工具**：入参 `source` + 模块相对路径 → 服务端 resolve 后强制校验落点在该源 root 内（防穿越）→ 支持递归子目录（playbooks/poc 等深层模块全部可达）→ 模块不存在时返回该源可选清单改选（防幻觉模块名）→ 返回绝对路径 + 纪律（只 Read 该文件禁通读目录）+ `kb.open` 审计事件。谁打到什么开什么（exploit 开 xss-test、recon 开 recon-methodology），不按角色预配。
+- `packs/capabilities/<cap>/kb_sources.json`：**包内知识库源登记**（取代旧的包外 `knowledge_sources.json`）。每个源 `{id, root（包内相对路径）, recursive}`；开窗时合并项目启用的全部能力包源。**知识库模块打开走** **`kb_open`** **kb_open** **kb_open** **工具**：入参 `source` + 模块相对路径 → 服务端 resolve 后强制校验落点在该源 root 内（防穿越）→ 支持递归子目录（playbooks/poc 等深层模块全部可达）→ 模块不存在时返回该源可选清单改选（防幻觉模块名）→ 返回绝对路径 + 纪律（只 Read 该文件禁通读目录）+ `kb.open` 审计事件。谁打到什么开什么（exploit 开 xss-test、recon 开 recon-methodology），不按角色预配。
 - `packs/capabilities/<cap>/kb/`：**知识基库区**（ctf-skills 英文专题、src-strike 快照等）。该区内容不被 SkillRegistry 扫描（不进路由表）；由包内自写的**中文薄路由技能**以「特征 → kb 相对路径」对照表指向其中文件。
 
   - **本地基线可改**：快照是平台自洽的起点而非只读文物，设置页 kb 浏览器与 AI 提案通道（见下）均可增改。两条纪律：**英文快照原文不翻译**（翻译即污染上游语义）、**新增经验写新 md，不覆盖原文**（快照原文保持可与上游对照，本地增量另成文）；改名/删除有引用扫描联动（refs 扫描器），删除有引用默认 409。维护策略＝偶尔人工合并上游精华，不持续同步、不回灌。
@@ -211,12 +214,12 @@ CTF（MISC/PWN/REV/CRYPTO/FORENSIC/流量/IoT/工控）、逆向工程（Windows
 | `forensics` | 取证、流量分析、OSINT                                                     | ctf-forensics + ctf-osint           |
 | `misc`      | 杂项、AI/ML 题（规模长大后再拆包）                                        | ctf-misc + ctf-ai-ml                |
 
-| 场景轨                         | 收尾产物                            | 角色强度                                            | 关键约束                                           |
-| ------------------------------ | ----------------------------------- | --------------------------------------------------- | -------------------------------------------------- |
-| `ctf`                          | flag / writeup                      | 弱角色（一题一会话，分诊入口）                      | 只打授权靶机                                       |
+| 场景轨                         | 收尾产物                                                    | 角色强度                                            | 关键约束                                                              |
+| ------------------------------ | ----------------------------------------------------------- | --------------------------------------------------- | --------------------------------------------------------------------- |
+| `ctf`                          | flag / writeup                                              | 弱角色（一题一会话，分诊入口）                      | 只打授权靶机                                                          |
 | `assessment`                   | 漏洞报告（verified 证据链；redteam 模式为战果链报告，§6.9） | 强角色：recon/external-entry/privesc/lateral        | owner 规则、噪声预算、授权边界；作战模式 mode=pentest\|redteam（§6.9） |
-| `research`                     | 研究笔记/func_kb 结论/PoC/0day 报告 | 逆向分析角色（reverse-analyst；rev-generic 工作台） | 单样本深度理解语境；headless 只解析不执行          |
-| `malware`（〔未实施〕Phase 3） | IOC/行为报告                        | 静态/动态角色强制分离                               | L3 沙箱 + fakenet **硬强制**（§7，不可被审批放松） |
+| `research`                     | 研究笔记/func_kb 结论/PoC/0day 报告                         | 逆向分析角色（reverse-analyst；rev-generic 工作台） | 单样本深度理解语境；headless 只解析不执行                             |
+| `malware`（〔未实施〕Phase 3） | IOC/行为报告                                                | 静态/动态角色强制分离                               | L3 沙箱 + fakenet **硬强制**（§7，不可被审批放松）                    |
 
 > 内网/协议类（smb-enum、ad-mapping 等）随 assessment 轨深化后再评估是否拆 `network` 能力包。`research` 轨已落地（任务类型 triage/reverse/analyze/verify，全 passive；工作台 profile 为 `rev-generic`，§4.5.5、§12）；`malware` 轨待 fakenet 配套，〔未实施〕。
 
@@ -486,10 +489,10 @@ tasks
 
 **先规划后动手（2026-09-15 任务流设计，A 组 A2 已落地）**：子代理认领任务后、首个实质性工具调用前，必须先调 `task_plan(steps[])` 写下自己的解决计划；执行中用 `task_step(id, status, note?)` 推进——任意时刻至多一个 `doing` 步骤，`blocked` 必须带原因并落事件。计划允许修订（修订动作落审计）。任务流视图（§12）节点上显示的"任务进度"就是 plan 的 n/m、当前 doing 步骤与 blocked 原因；编排器与人类据此一眼看出每个子代理在干什么、卡在哪，而不必读会话流。
 
-> **〔未实施〕任务暂停语义统一与待人工输入承接（E15，2026-09-16 定稿，§17 18）**
->
+> **〔未实施〕任务暂停语义统一与待人工输入承接（E15/C1，2026-09-16 定稿，§17 C1）**
+> 
 > 三类「停」——人工硬中断（E12 快照→看板「▶ 续跑」）、E8 步数耗尽自动暂停（直播间「继续」）、Agent 自主 `fail_task`（无快照、无任何继续入口）——在 UI 上不可区分，第三类恰是最需要人类响应的反而没有承接面（2026-09-16 实测：ROE 未核验自主挂起任务只能「放回」→ 新会话从零重做白烧 2.78M tokens，且误读旧计划 done 标记）。定稿：
->
+> 
 > - **结构化暂停原因**：`fail_task` 增可选 `blocked_reason`（`awaiting_human`＝等人类输入（授权/ROE 核验、待补凭据）｜`error`＝真失败；缺省 `error` 向后兼容），落 tasks 加列（幂等加列惯例）并进 `task.failed` 事件。三类「停」统一为「都能继续，只是入口与原因展示不同」。
 > - **续跑统一**：`awaiting_human` 的自主 fail 同样保留落盘快照，看板 failed 卡与人工中断同显「▶ 续跑」（复用 E12 revive_snapshot/resume 端点，限原会话；会话已 closed/无快照时自动降级为仅「放回」，不报错）。
 > - **原因正文化**：暂停原因（fail note）直接显示在失败卡正文（截断+悬停全文），不再藏 tooltip；`awaiting_human` 卡加「⏸ 待人工输入」badge，与 error 卡一眼可辨。
@@ -549,7 +552,7 @@ Agent 在 A 资产发现敏感数据泄露（值得跟进）：
 
 **演练约定（demo_pentest.py，2026-09-13）**：演练脚本预创建 net=real 审批并可 `--auto-approve` 自批，`decided_by` 固定写 `"demo-script(auto)"`、事件 author="demo"——**不冒充人类审批语义**，审计一眼可辨；该路径仅限本地授权靶机演练，生产审批必须经人类（WebUI 审批页 / decide 端点）。
 
-**任务拆解与分批发布（E14，2026-09-16 定稿，〔未实施〕§17 17）**：发布任务后编排 tick 对新任务做一轮分析，多目标任务（如渗透测试多目标）可拆解为子任务并对不同目标同时开窗——
+**任务拆解与分批发布（E14/C2，2026-09-16 定稿，〔未实施〕§17 C2）**：发布任务后编排 tick 对新任务做一轮分析，多目标任务（如渗透测试多目标）可拆解为子任务并对不同目标同时开窗——
 
 - **拆解**：`publish_task` 工具增加 `parent_id` 参数（指向顶层任务，任务流图实线边）；**深度 1 层**——父任务必须是顶层任务，子任务不可再被编排器拆解；每轮 tick 发布硬闸 `max_publish_per_tick`（默认 **5**，**L0 提案模式同闸计数**——提案不落实体但灌洪水同样受限，宁严勿松）。
 - **权威校验在黑板单一入口**：`TaskQueue.check_parent(project_id, parent_id)`（存在 + 同项目 + 父为顶层），在 `publish()` 内调用——编排器 / 人类 POST /tasks / 提案采纳三条写路径自动共享校验（坏父 → 编排器回填 `[拒绝]` / API 422）。
@@ -614,15 +617,17 @@ max_steps: 30                                    # 步数软上限；缺省 = Ag
 
 - **1.1 发布去重 + 工作集软声明**〔已落地，2026-09-16（机制 1.1，schema v7）〕：publish 算指纹（task_type + 归一化 scope + 规范化 objective 的 sha256 截短，tasks.dedup_fp），命中 open/claimed 不新建——API 返回 `{deduplicated:true, task_id, existed_status}`（人类确认"仍要发布"后 force 重发），Agent publish_task 回填 `[复用]` 静默复用。`workset` JSON 列：发布时可选声明（Agent 工具/API 均支持），**纯 advisory**——不阻塞任何人，看板 open 卡与 bb_query 可见（"有人正在分析 0x401000"），供避让。任务流图补**建议私信边**（kind=suggest 点虚线：同父或 context_refs 相交、已认领、尚无私信——机器猜测不落库，A3 原 TODO）。
 - **1.2 blocked_by 依赖调度**〔未实施，F 批〕：tasks 增 `blocked_by` JSON 列；被门控任务**状态仍为 open**，claim_next SQL 排除"有依赖未 done"的行（发布者/UI 显"等待依赖"门控标记）；依赖全 done 后下次认领自然可见，无状态翻转。依赖 fail → 编排器决策自动 fail（reason=依赖失败）或解除门控重派，黑板只提供原语。开发工作流（implement→build→test→review，§15）与 map-reduce 汇聚均依赖此原语。
-- **1.3 大任务分片（map-reduce）**〔未实施，F 批〕：父任务 `shatter(by: func|url|host, items[])` 派生 N 个子任务（parent_id 已有），分片键写 workset 防重复分片；聚合任务 blocked_by 全部分片；分片失败重派/取消其余是编排器策略，黑板只提供父子关系与依赖原语。**注记（2026-09-16）**：E14（§6.4「任务拆解与分批发布」，§17 17）是其部分前置——编排器一层拆解 + 资产分批先行；shatter 原语/workset 防重分片/聚合依赖仍属 F 批。
+- **1.3 大任务分片（map-reduce）**〔未实施，F 批〕：父任务 `shatter(by: func|url|host, items[])` 派生 N 个子任务（parent_id 已有），分片键写 workset 防重复分片；聚合任务 blocked_by 全部分片；分片失败重派/取消其余是编排器策略，黑板只提供父子关系与依赖原语。**注记（2026-09-16）**：E14/C2（§6.4「任务拆解与分批发布」，§17 C2）是其部分前置——编排器一层拆解 + 资产分批先行；shatter 原语/workset 防重分片/聚合依赖仍属 F 批。
 - **1.4 conflict_keys 升级为资源租约**〔已落地（发布期/认领期为主，2026-09-16 机制 1.4，schema v7）〕——设计专节见 §6.7.1。落地口径：`resource_leases` 新表（键方案白名单归一化在 `core/blackboard/leases.py`）；锁模式由噪声预算映射（passive→S 共享、active→X 独占，无需新键语法）；认领时 conflict_keys 同事务转写为租约行，同键冲突（X×X/X×S）→ 写 `wait_for` 门控标记保持 open 拒领（**标记在事务内写、ClaimError 在事务外抛——异常回滚会吞标记**）；claim_next 预过滤 wait_for 仍被占行与死锁牺牲者冷却行（等待不占线程）；收尾/删除/租约过期释放租约并同事务重校验等待者（清已空闲的 wait_for）；wait-for 环检测（牺牲者=最年轻，清 wait_for+冷却 5 分钟+`lock.deadlock_victim` 事件）为安全网——发布期门控下环构造上不可达，供运行期动态锁未来路径兜底；租约有效性 = JOIN tasks（claimed 且 lease_until 未过期）判定，免心跳双写。**运行期动态锁申请（bb_acquire/网关自动申请）后置**。
 
 **② 协作感知层**
 
 - **1.5 会话收件箱 + 交接**〔部分落地〕：**已有（系统侧私信通道）**——`session_inbox` 表 + `GET /sessions/{sid}/inbox[/read]` 端点 + worker 认领/步边界注入 + UI 会话页签红点（与审批收件箱 approvals 表/ApprovalsView 严格分设：这是**会话间消息**，知会而非待决，不进审批流）。**缺口**：Agent 自由通信工具 `bb_notify(to: session|role, kind: intel|handoff|assist, content, refs[])`（落 `message.inbox`/`message.handoff`，带 to_session/to_role）、会话领任务时按 scope 注入未读 intel、handoff 接手任务、to_role 角色广播均未做；当前系统私信写方有两类：1.6 撤回传播（kind='basis_stale'）与 finding 增补通知（kind='finding_update'，A 组 A4）。
+
   - **finding 引用更新私信（2026-09-15 任务流设计新增，A 组 A4 已落地，kind='finding_update'）**：任务 `context_refs` 引用的 finding 发生**实质更新**——新增 POC、severity/verified/relates_to 变化、func 结论影响证据含义——即由系统私信引用方任务的认领会话（撤回仍走 basis_stale，二者不混：撤回=依据被推翻，更新=依据有增补/修正）。复用撤回传播的同一套设施：部分唯一索引合并去重、worker 步边界 drain 注入、页签红点。**会话间的私信关系同时是任务流图上的虚线边**（§12）。
+
 - **1.6 证伪撤回传播**〔已落地〕：finding 转 false-positive 发 `finding.retracted`；引用方（evidence.relates_to/任务 context_refs）经收件箱+事件得到通知；在飞任务打 `stale_refs` 标记（不强制杀，Agent/编排器决定），画布 relates_to 边淡出。已实现行为见本节末「撤回传播实现约定」。
-- **1.7 取消传播**〔传播本体未实施，F 批；单任务先遣已随 A 组 A1 落地〕：人工取消/父任务 fail 沿 parent_id 树传播——**open 子任务物理删除**（沿用 delete() 纪律，落 task.deleted 快照，payload 标 cancel_cascade）；**claimed 子任务发 `task.cancel_requested`**，worker 步边界消费后置 fail（reason 注明传播来源），fail 再向下传播一层；派生时标 `keep_independent` 的独立子任务不传播。先遣版=人工直接删 claimed 任务的步边界硬中断（无父子传播，见 §3/§6.4）。
+- **1.7 取消传播**〔传播本体未实施，F 批；单任务先遣已随 A 组 A1 落地〕：人工取消/父任务 fail 沿 parent_id 树传播——**open 子任务物理删除**（沿用 delete() 纪律，落 task.deleted 快照，payload 标 cancel_cascade）；**claimed 子任务发** **`task.cancel_requested`** **task.cancel_requested**，worker 步边界消费后置 fail（reason 注明传播来源），fail 再向下传播一层；派生时标 `keep_independent` 的独立子任务不传播。先遣版=人工直接删 claimed 任务的步边界硬中断（无父子传播，见 §3/§6.4）。
 
 **撤回传播实现约定（1.6 已落地；私信通道即机制 1.5 的系统侧）**
 
@@ -687,13 +692,13 @@ autonomy:
 
 **档位行为定稿（任何档位都不放松安全层——net:real/越界/L3 审批永远强制，见 §7）**：
 
-| 行为 | L0 全手动 | L1 任务自动·开窗审批 | L2 全自动链 |
-|---|---|---|---|
-| orch 发任务 | 只提案 ✅（`orch.proposed`，不写实体） | 直接发 ✅ | 直接发（预算硬闸）✅ |
-| orch 开窗 | 只提案 ✅（人在事件流行内采纳才建窗） | 进审批收件箱，人批后自动建窗+开跑 ✅ | 直接开窗+自动开跑（cap 硬闸）✅ |
-| 自动 worker | 关 | 开 ✅（tick 后/审批后/人手插话后 kick；审批新窗当场一个 job） | 开 ✅（同 L1，另加开窗即起 worker） |
-| 自动续 tick | 关 | 关 | 开 ✅（max_chain_ticks/收敛/节流/暂停约束） |
-| 人手开窗/插话/跑队列 | 照常（cap 409） | 照常；L1/L2 未暂停时开窗与插话后自动 kick ✅ | 同 L1 |
+| 行为                 | L0 全手动                              | L1 任务自动·开窗审批                                          | L2 全自动链                                 |
+| -------------------- | -------------------------------------- | ------------------------------------------------------------- | ------------------------------------------- |
+| orch 发任务          | 只提案 ✅（`orch.proposed`，不写实体） | 直接发 ✅                                                     | 直接发（预算硬闸）✅                        |
+| orch 开窗            | 只提案 ✅（人在事件流行内采纳才建窗）  | 进审批收件箱，人批后自动建窗+开跑 ✅                          | 直接开窗+自动开跑（cap 硬闸）✅             |
+| 自动 worker          | 关                                     | 开 ✅（tick 后/审批后/人手插话后 kick；审批新窗当场一个 job） | 开 ✅（同 L1，另加开窗即起 worker）         |
+| 自动续 tick          | 关                                     | 关                                                            | 开 ✅（max_chain_ticks/收敛/节流/暂停约束） |
+| 人手开窗/插话/跑队列 | 照常（cap 409）                        | 照常；L1/L2 未暂停时开窗与插话后自动 kick ✅                  | 同 L1                                       |
 
 **已落地的共用设施**：
 
@@ -703,17 +708,22 @@ autonomy:
 - **tick 租约（机制 1.9）**：`core/orchestrator/state.py`——`acquire_tick_lease` 单 `_tx()`（BEGIN IMMEDIATE + 进程写锁）内建行→读租约→他人未过期抛 TickLeaseError→否则抢占；手动 tick 端点在构造 LLM/提交 job **之前**同步获取，冲突直接 **409**（不产生 job；503 等同步失败先释放租约），job finally 只按 owner 身份释放；TTL 900s 崩溃自然到期，job 内每个 LLM 步前 `renew_tick_lease` 心跳，易主即抛错停续。未来自动 tick 冲突=跳过不报错。
 - **编排状态持久化**：tick 开头经 state_loader 装载 `event_cursor/cycles/last_digest_cycle`（Orchestrator 纯鸭子回调，脚本/旧测试不接线即纯内存），结尾经 state_saver 落盘；digest_every 判定与事件增量游标跨重启生效（游标在态势收集时推进，上一轮自身产生的事件下轮可见，属既定口径；历史 backlog 超 100 条时只喂最新 100 条、游标一次跳到当轮开始时的末端 id，旧事件不逐轮回放）。tick 结构化返回 `{summary, published:[task_id], spawned:[{session_id,role}], digest|null, proposals:[{op,args}]}`，JobRegistry 存结构、前端中文渲染；proposals 仅 L0 提案模式非空（批 6）。
 - **L1 开窗审批流（批 4 已落地）**：
+
   - **Orchestrator 分流**：经鸭子回调 `autonomy_provider()`（API tick 端点注入，实时重读归一化 autonomy；脚本/旧测试不接线=直接开窗）取 level；`L1` 下 `spawn_session(role, reason)` 不调工厂，先过白名单与 gate 预检（cap/预算），再 `bb.request_approval(action={"op":"spawn_session","role","reason"}, risk="low", requested_by="orchestrator")`，工具回填「已提交审批 appr-x，批准后自动建窗开跑」给 LLM；不进结构化结果的 `spawned`（窗未开）。spawn_session 工具 schema 新增可选 `reason`（审批卡展示）；**L1 档 reason 必填**（空白直接 `[拒绝]` 回填，不建审批单——审批人只看得到 role+reason）。L2/未接线维持直接开窗；L0 走提案（见上「L0 提案模式」）。
   - **decide op 处理器注册表**（`core/api/app.py` 内，**字典白名单分派，绝不 eval**）：`POST /api/approvals/{id}/decide` approved 后解析 `action.op`，命中注册表才执行，无 op/未知 op 维持「只翻状态」的旧语义（net_real 等旧式审批不回归）。`spawn_session` 处理器：**批准终检 cap**（实时再数非 closed 会话，超限不执行）+ **open 任务终检**（2026-09-16：项目已无 open 任务——同一 tick 的触发点 B kick 让既有 worker 在审批等待期抢走了任务——则不建窗，落 `approval.exec_failed{error:"无待认领任务…"}`，防空窗占 sessions_cap）→ `_registered_session_factory` 建窗（即注册 app.state.agents，非孤儿窗）→ 发 `session.spawned`（payload 带 approval_id）→ 当场 submit 一个 `agent-work` job（批准即开跑，空队列自然退出）。响应 `{approval_id,status,executed,session_id?,job_id?,error?}`。
   - **失败不回滚批准**：终检超限/角色文件缺失/无 LLM key 等执行失败时审批行保持 approved，落 `approval.exec_failed{approval_id,op,error}` 事件，HTTP 200 返 `executed:false,error`（人可改配置/关窗后手动开窗）。
   - **拒绝**：rejected 不动作；orch 下轮 tick 经事件游标看到的 `approval.rejected`（payload 含 action）感知改道（复用现有事件，不加专用通道）。
   - **防伪造红线**：Agent 工具集没有任何创建审批的入口（越界目前只有「工具白名单拒绝+请人类改配置」），op=spawn_session 审批的唯一生产路径是 Orchestrator；未来 Agent escalation（阶段 4）不得复用该 op 自行建单。
+
 - **L0 提案模式（批 6 已落地）**：`OrchestratorConfig.propose_only`（API `_build_orchestrator` 按实时档位 `level=="L0"` 注入，手动/自动 tick 同装配）。L0 下 `publish_task`/`spawn_session` **校验照跑但不写实体**：
-  - **publish_task**：task_type 注册表校验、噪声缺省（取注册表默认并并入提案 args）、入参形状校验照常，未注册类型仍 `[拒绝]` 回填 LLM 改道；**不走 gate 预算闸、不调 `tq.publish`、不触发 `on_task_published` 计数、不进 `published`**，改发 `orch.proposed{op:"publish_task", args:{objective,scope,task_type,noise_budget,priority,conflict_keys,refs}}`（author=orchestrator）。
-  - **spawn_session**：`allowed_roles` 白名单与 config `max_sessions` 校验照常；**不走 sessions_cap gate、不调 session_factory、不发 session.spawned、不进 `spawned`**，改发 `orch.proposed{op:"spawn_session", args:{role,reason}}`。cap/预算在人采纳时由 `POST /agents` 的既有 409/警告兜底。
+
+  - **publish_task**：task_type 注册表校验、噪声缺省（取注册表默认并并入提案 args）、入参形状校验照常，未注册类型仍 `[拒绝]` 回填 LLM 改道；**不走 gate 预算闸、不调** **`tq.publish`** **tq.publish****、不触发** **`on_task_published`** **on_task_published** **计数、不进** **`published`** **published**，改发 `orch.proposed{op:"publish_task", args:{objective,scope,task_type,noise_budget,priority,conflict_keys,refs}}`（author=orchestrator）。
+  - **spawn_session**：`allowed_roles` 白名单与 config `max_sessions` 校验照常；**不走 sessions_cap gate、不调 session_factory、不发 session.spawned、不进** **`spawned`** **spawned**，改发 `orch.proposed{op:"spawn_session", args:{role,reason}}`。cap/预算在人采纳时由 `POST /agents` 的既有 409/警告兜底。
   - **write_digest 照常落地**（简报是黑板写作不是自主动作）；done/LLM 循环/tick 租约/状态持久化/记账均不变。tick 结果 `proposals:[{op,args}]` 收集本轮全部提案；LLM 收到工具回填「已提案 #event-id，等待人类采纳，本轮可继续提案或 done」。系统提示在 L0 下经 `{autonomy_notice}` 槽追加提案模式说明（你不直接派活/开窗，只产提案）。
   - **不污染审批语义**：提案不是 approval（无 decide、无 risk、无收件箱条目），只是事件流上的建议；不碰任务四态（tasks 表无行）。采纳=**人以自己名义**走既有写口：前端事件流 `orch.proposed` 行内「采纳」按钮——发任务→`POST /tasks`（created_by=human）、开窗→`POST /agents`（created_by=human，L0 不自动起 worker）；采纳状态只存前端内存（按钮置「已采纳」），刷新后提案仍在事件流、可再次采纳（人负责，不做去重）。
+
 - **L2 全自动链（批 5 已落地）**：纯事件驱动，**无调度器/无后台轮询**——所有自动动作都是 HTTP 请求或 job 收尾的同步副产物，实现集中在 `core/api/app.py` 两个辅助 + 五个触发点：
+
   - **两个辅助**：`_kick_workers(pid)` 遍历黑板非 closed/非 paused 会话，经 `_session_job_running` 内存去重（在跑不重复提交）、`_ensure_agent` rehydrate、跳过 `agent.paused`，各 submit 一个 `agent-work` job——空队列时 worker 只花一次 claim SQL 即零成本退出；`_maybe_auto_tick(pid, reason)` 是自动续 tick 的**唯一入口**，自身只判闸门+submit job，绝不直接跑 LLM。
   - **触发点**：A＝worker 队列空退出（仅 `AgentSession.last_claim_idle=True` 才触发；暂停/中断退出不触发；项目仍有 agent-work job 在跑则跳过，最后一个退出的 worker 才续）；B＝tick 完成后处理（手动/自动共用：L1/L2 未暂停先 kick；L2 按本轮 `published/spawned` 是否非空决定链续/止）；C＝开窗落地（L2 orch 直接开的窗由 B 的 tick 后 kick 统一起 worker；人手 `POST /agents` 在 L1/L2 未暂停时也自动起一个 worker；L0 不自起）；D＝人手 `POST /tasks` 插话（L1/L2 未暂停 → kick；L0 不动）；E＝审批批准（处理器已为新窗起 job，再对全项目 kick 一次，唤醒能认领同轮其他任务的旧窗）。
   - **链生命周期与事件**：L2 手动 tick 产出非空且链未激活时 `chain_active=1/chain_ticks=0`、进程内 `app.state.active_chains` 加标记、发 `orch.chain_started{reason:"manual_tick"}`；自动 tick 拿租约成功后 `chain_ticks+1/auto_ticks_total+1/last_auto_tick_at=now`（拿不到租约只跳过不计数）。链停一律发 `orch.chain_stopped{reason,chain_ticks}` 并清 `chain_active` 与进程标记，reason 枚举：`converged`（自动 tick 零 published 零 spawned，收敛终止）、`no_sessions`（有产出但全项目零非 closed 会话，无执行者链无法自驱）、`max_chain_ticks`（自动 tick 数达预算，默认 3）、`paused`（暂停）、`level_changed`（L2 被降级）、`budget_blocked`（publish_task 与 spawn_session 两类自主动作都被硬闸拦住）、`restart`（见急停）、`error`（tick job 内异常，payload 带 error，job 自身 done 不抛断线程）。
@@ -721,13 +731,14 @@ autonomy:
   - **paused 语义**：不拦人手显式动作（手动 tick/开窗/插话），但 B/C/D 的自动 kick 在暂停时不发起；在跑 worker 每次认领前重读 `autonomy.paused`，True 则不再认领新任务直接退出（不点暂停会话、不触发 A）；链在下次触发点落 `chain_stopped{paused}`。**取消暂停不自动恢复链**——人再点一次「编排一轮」开新链（与重启同纪律）。paused 不拦人显式「跑队列」/恢复（人工 override，暂停下照常认领消费，与行为表「人手动作照常」一致）；它只让自动消费 job（触发点 C/kick/批准即跑）在认领前零成本退出。
   - **重启=急停（不变量）**：自动续 tick 同时要求 DB `chain_active=1` **与** `pid ∈ app.state.active_chains`（进程内集合，只在本进程 B 启动链时加入；重启后集合为空且服务不预置任何 worker/tick 线程）。进程标记缺失时 `_maybe_auto_tick` 落一次 `orch.chain_stopped{reason:"restart"}` 并清零 `chain_active`，拒绝续链。GET 项目 usage 的 `chain` 视图 `{active,ticks,auto_ticks_total,estranged}`（`estranged`=DB 活但本进程无标记，API 层拼）供直播间提示「链因服务重启已急停，点编排一轮手动恢复」。
   - **自动 tick 参数**：无 HTTP body，用默认 `TickIn`（allowed_roles=None=轨内全部角色、max_sessions=4、digest_every=3、max_steps=12）；sessions_cap/预算等硬闸不受影响，Orchestrator 仍每 tick 新建但经 state_loader 续用 cycles/事件游标。
+
 - **红线**：L2 的"链"指自动 tick 链，**chains 攻击链表永远人工建链**，Agent/Orchestrator 无自动建链工具；重启=急停（chain_active 持久但不自动恢复，必须人手动开新链）✅ 批 5。
 
 **与作战模式正交（E16，§6.9）**：mode=pentest|redteam 与自主档独立——档位管「自动动作的审批强度」，mode 管「行为边界与目标语义」；L2 自动链的行为边界同时受两者约束，任一收紧都以更严者为准。
 
-### 6.9 作战模式与 mission 战役目标（E16，2026-09-16 定稿，〔未实施〕§17 19）
+### 6.9 作战模式与 mission 战役目标（E16/C3，2026-09-16 定稿，〔未实施〕§17 C3）
 
-> **〔未实施〕**——本节全部为设计定稿，实施挂 §17 19；起因=用户重申渗透测试/红队行动两个定义与长任务语义（2026-09-16）。
+> **〔未实施〕**——本节全部为设计定稿，实施挂 §17 C3；起因=用户重申渗透测试/红队行动两个定义与长任务语义（2026-09-16）。
 
 **两个作战定义**：
 
@@ -738,12 +749,12 @@ autonomy:
 
 **mode×行为边界表**：
 
-| 维度 | pentest | redteam |
-|------|---------|---------|
-| 主动利用未认领目标（§6.3 第 3 级） | 禁止，发现即上报 | **ROE 内放开**：ROE 四要素核验通过且授权范围内允许（网关/审批/审计/active 噪声互斥照旧；未核验或出 scope 仍硬禁） |
-| shell | 影响证明级一次性回显即止 | 可获取；管理面未开发前经 run 网关+会话设施记录（Agent 无裸 shell 约束不变） |
-| 提权/横向 | 只记录可能性，不推进 | 允许（溯源记录照旧，借力必记 chain） |
-| 收尾产物 | 漏洞报告（verified 证据链） | 战果链报告（攻击链+战果资产+取证记录） |
+| 维度                               | pentest                     | redteam                                                                                                           |
+| ---------------------------------- | --------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| 主动利用未认领目标（§6.3 第 3 级） | 禁止，发现即上报            | **ROE 内放开**：ROE 四要素核验通过且授权范围内允许（网关/审批/审计/active 噪声互斥照旧；未核验或出 scope 仍硬禁） |
+| shell                              | 影响证明级一次性回显即止    | 可获取；管理面未开发前经 run 网关+会话设施记录（Agent 无裸 shell 约束不变）                                       |
+| 提权/横向                          | 只记录可能性，不推进        | 允许（溯源记录照旧，借力必记 chain）                                                                              |
+| 收尾产物                           | 漏洞报告（verified 证据链） | 战果链报告（攻击链+战果资产+取证记录）                                                                            |
 
 **切换门槛（宁严勿松）**：pentest→redteam 需 ①前端二次确认弹窗（明示放宽范围）②ROE 四要素必填（精确范围/排除系统、测试窗口、允许动作、应急联系人——复用 E15 授权核验语境）③落 `mode.changed` 审计事件；redteam→pentest 随时可切（收紧无门槛）。
 
@@ -887,7 +898,7 @@ core/llm/
 
 - Ark 特有注意点：endpoint ID / model name 双配置兼容；tool calling 逐模型实测；长输出（伪码注入）上下文预算管理。
 - **模型清单与开窗覆盖**：`GET /api/models` 返回路由默认 ∪ `AVAILABLE_MODELS`（实测可用清单）；人类开窗可 per-session 覆盖 executor 模型（`POST /agents` 的可选 model 参数）；编排开窗保持路由默认不掺入。
-- **多供应商管理**：`config/providers.json` 登记供应商数组 `{name, base_url, api_key, models[], enabled}`（文件含密钥，gitignore 排除）。种子两条：`ark-coding`（/api/coding，key 留空→回退 `ARK_API_KEY`/.env）、`ark-plan`（/api/plan，独立配额，coding 限额时的分流入口）。**全局默认 = 第一个启用供应商的** **`models[0]`** **models[0]**；不做分角色路由 UI——`config/llm.json` 保留为文件级覆写（值为裸模型名或 `{provider, model}`）。
+- **多供应商管理**：`config/providers.json` 登记供应商数组 `{name, base_url, api_key, models[], enabled}`（文件含密钥，gitignore 排除）。种子两条：`ark-coding`（/api/coding，key 留空→回退 `ARK_API_KEY`/.env）、`ark-plan`（/api/plan，独立配额，coding 限额时的分流入口）。**全局默认 = 第一个启用供应商的** **`models[0]`** **models[0]** **models[0]**；不做分角色路由 UI——`config/llm.json` 保留为文件级覆写（值为裸模型名或 `{provider, model}`）。
 
   - **模型发现**：设置页「获取支持的模型」→ `POST /api/llm/discover` 先 `GET {base_url}/v1/models`（OpenAI 风格 `data[]`，过滤 Shutdown）；端点 404（ark-plan 实测不支持）则降级为**候选清单最小调用探活**；另支持手填模型名单独测活（`POST /api/llm/test-model`）。发现结果由用户勾选保存，`models[]` 有序、首个即该供应商默认。
   - **选择与切换**：直播间开窗两级下拉（供应商→其勾选模型，缺省=全局默认）；**在跑会话可动态切换**（`POST /api/agents/{sid}/llm`）——直接替换 AgentSession 的 provider 引用，下一次 LLM 调用生效，落 `llm.switched` 审计事件；不用重开窗口。
@@ -971,11 +982,11 @@ packs/
    └─ malware/    # 〔未实施，Phase 3〕：L3+fakenet 硬强制，静态/动态角色分离（UI 复用 rev-generic profile）
 ````
 
-| 阶段                  | 内容                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Phase 1（已完成）** | 核心（黑板、任务协调、runtime、Ark、Agent 循环、Orchestrator）+ 正交结构落地：ctf 轨 × web/binary/crypto/forensics/misc 五包，ctf-skills 为第一代知识库；assessment 轨骨架（src-strike 快照融入、5 角色、owners、task_types 注册表）+ WebUI 基础版；research 轨 rev-generic 逆向理解工作台 P1（headless 全量首跑 + 三栏工作台 + 人机共写 func_kb）。已通过 pwn/rev/web 解题闭环、三会话并行分析 func_kb 无重复劳动、demo_pentest 端到端、旧 domain 自动归位、无工具结构化降级等验收。 |
-| **Phase 2（当前）**   | **已落地**：research P2（chains 攻击链 React Flow、MCP 实时桥、IDA 双向写回、Cheat Engine/x64dbg 脚本档、v3 字符串视图、hex 地址全链路）、评估攻击链画布（§12）、Skill 统一提案制前后端、F 批批 1B（机制 1.6 撤回传播 + 1.5 系统私信）。**未完成**：报告生成、角色体系实战打磨、设备方向知识模块（binary/kb/iot、ics、vehicular）随研究目标充实、五个能力包 redlines 补齐；network 能力包视内网内容量评估拆分；作战模式/mission（E16，§6.9 已定稿〔未实施〕§17 19——红队行动与长任务推进随此深化）。                                                                       |
-| **Phase 3**           | malware 轨（依赖 fakenet/INetSim sidecar 与样本投递落地，复用 rev-generic 内核）；AI 安全方向进 misc 或视规模拆包                                                                                                                                                                                                                                                                                                                                                                     |
+| 阶段                  | 内容                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Phase 1（已完成）** | 核心（黑板、任务协调、runtime、Ark、Agent 循环、Orchestrator）+ 正交结构落地：ctf 轨 × web/binary/crypto/forensics/misc 五包，ctf-skills 为第一代知识库；assessment 轨骨架（src-strike 快照融入、5 角色、owners、task_types 注册表）+ WebUI 基础版；research 轨 rev-generic 逆向理解工作台 P1（headless 全量首跑 + 三栏工作台 + 人机共写 func_kb）。已通过 pwn/rev/web 解题闭环、三会话并行分析 func_kb 无重复劳动、demo_pentest 端到端、旧 domain 自动归位、无工具结构化降级等验收。               |
+| **Phase 2（当前）**   | **已落地**：research P2（chains 攻击链 React Flow、MCP 实时桥、IDA 双向写回、Cheat Engine/x64dbg 脚本档、v3 字符串视图、hex 地址全链路）、评估攻击链画布（§12）、Skill 统一提案制前后端、F 批批 1B（机制 1.6 撤回传播 + 1.5 系统私信）。**未完成**：报告生成、角色体系实战打磨、设备方向知识模块（binary/kb/iot、ics、vehicular）随研究目标充实、五个能力包 redlines 补齐；network 能力包视内网内容量评估拆分；作战模式/mission（E16/C3，§6.9 已定稿〔未实施〕§17 C3——红队行动与长任务推进随此深化）。 |
+| **Phase 3**           | malware 轨（依赖 fakenet/INetSim sidecar 与样本投递落地，复用 rev-generic 内核）；AI 安全方向进 misc 或视规模拆包                                                                                                                                                                                                                                                                                                                                                                                   |
 
 **执行批次与落地状态**（每批结束跑全量测试/构建并同步 CLAUDE.md）：
 
@@ -1014,7 +1025,7 @@ packs/
 6. **Skill 库** — 按轨/能力包浏览、技能/角色 CRUD、启停、路由试算器（query+features+文件特征）、角色×技能×任务类型矩阵、pack doctor 摘要；**AI 技能提案队列**（diff 审阅：批准/拒绝/改后采纳，见 §4 全提案制）
 7. **终端**〔未实施，E4 已定稿见下「终端页与人类命令通路」〕— workspace 容器/shell（当前无独立视图，直播间底部终端抽屉亦未做）
 8. **审批收件箱** — 全局通知 + 待办（安全审批是一等公民，见下）
-9. **项目设置** — 授权边界、cross_target 策略、噪声预算、模型路由；作战模式 mode 切换（二次确认+ROE 四要素必填，§6.9）与 mission 编辑器〔未实施，E16 §17 19〕
+9. **项目设置** — 授权边界、cross_target 策略、噪声预算、模型路由；作战模式 mode 切换（二次确认+ROE 四要素必填，§6.9）与 mission 编辑器〔未实施，E16/C3 §17 C3〕
 
 ### 布局定稿：三栏指挥台
 
@@ -1036,7 +1047,7 @@ packs/
 - 直播间与黑板同屏共存——挂机监控时随时瞟结论性状态，无需切页。
 - rev-generic profile 下右侧栏换成 **384px 逆向挂机侧栏**（风险函数/发现/样本三 tab：覆盖率、三态灯、上传与重新分诊、点击风险函数切全屏工作台）；全屏工作台占满中右区域。
 
-**框架可拖拽调宽（E13，2026-09-16 定稿，〔未实施〕§17 16）**——左导航栏与右侧黑板侧栏宽度可拖拽调整：
+**框架可拖拽调宽（E13/F1，2026-09-16 定稿，〔未实施〕§17 F1）**——左导航栏与右侧黑板侧栏宽度可拖拽调整：
 
 - 机制：react-resizable-panels v4（**已在依赖，不引新包**），复用 SkillsPane 三栏模式（Group/Panel/Separator，number=px、字符串=%）与 `HANDLE_CLS` 样式常量（SettingsView.tsx）。
 - 左导航：无 pid/有 pid 两分支包水平 Group，`Panel defaultSize={56} minSize={48} maxSize={220}`；两分支逐字重复的 nav JSX 顺带抽取为 **NavRail 组件**（nav 改 `h-full w-full`，按钮 `w-12`→`w-[calc(100%-8px)]`，拖宽后 label 显示更完整）。
@@ -1100,13 +1111,13 @@ packs/
 
 **拆批**（依赖链 B3→B4，机制 1.1 可独立交付验收主体）：
 
-| 批 | 内容 | 量级 |
-|---|---|---|
-| 机制 1.1 | E4a 命令面板：POST /exec（gateway 接线 author=human）+ CommandPanel + 抽屉壳 + 历史回放 + 策略矩阵单测（越权 runtime/net=real 无审批/deny 落审计） | 2–3 天 |
-| 机制 1.4 | 独立路由复用组件、命令补全、快捷键 | 0.5–1 天 |
-| B3 | 持久 workspace 容器基建：WorkspaceContainerManager（ensure/stop/reconcile/idle reaper）+ project.json runtime 段 + container 端点 + 无 Docker 降级测试（独立于 机制 1.1/机制 1.4） | 3–4 天 |
-| B4 | E4b 交互终端：pty.py 三后端 + term WS + 会话注册表 + TerminalPanel（xterm lazy）+ host 终端 settings 开关 | 4–5 天 |
-| B5 | 收口：session 级审计事件、审批 UI 打通（面板内发起审批跳收件箱）、fakenet sidecar 挂点预留（与 D2 合并评审） | 1–2 天 |
+| 批       | 内容                                                                                                                                                                               | 量级     |
+| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| 机制 1.1 | E4a 命令面板：POST /exec（gateway 接线 author=human）+ CommandPanel + 抽屉壳 + 历史回放 + 策略矩阵单测（越权 runtime/net=real 无审批/deny 落审计）                                 | 2–3 天   |
+| 机制 1.4 | 独立路由复用组件、命令补全、快捷键                                                                                                                                                 | 0.5–1 天 |
+| B3       | 持久 workspace 容器基建：WorkspaceContainerManager（ensure/stop/reconcile/idle reaper）+ project.json runtime 段 + container 端点 + 无 Docker 降级测试（独立于 机制 1.1/机制 1.4） | 3–4 天   |
+| B4       | E4b 交互终端：pty.py 三后端 + term WS + 会话注册表 + TerminalPanel（xterm lazy）+ host 终端 settings 开关                                                                          | 4–5 天   |
+| B5       | 收口：session 级审计事件、审批 UI 打通（面板内发起审批跳收件箱）、fakenet sidecar 挂点预留（与 D2 合并评审）                                                                       | 1–2 天   |
 
 ### 攻击链视图（逆向链，P2 已落地）
 
@@ -1135,9 +1146,11 @@ subnav 切到「攻击链」全屏替换三栏（分析状态不卸载）：左 
 
 - **节点 = 一个子任务**，节点卡只显示：子任务目标（objective 截断）、计划进度（plan n/m）、当前 doing 步骤、blocked 原因、认领它的会话、状态色——**open 灰 / claimed 青 / done 绿 / failed 红 / paused 琥珀**。编排器（主代理）安排的任务与子代理为解决该任务写下的计划（§6.1 先规划后动手）都在节点上呈现，不展示会话流水。
 - **边**：
+
   - **实线 = 父子关系**：经 tasks.parent_id，父任务与它分解出的子任务相连，左→右 DAG 布局；
   - **普通虚线 = 实际私信**：两任务认领会话间在 session_inbox 有私信（含 basis_stale/finding_update/未来的 bb_notify），可点击查看私信记录；
   - **点虚线 = 建议私信**：同父任务、或 context_refs 高度相交却尚无私信的两个节点，提示"这两个子代理很可能需要交流"。建议边是机器猜测、**不落库**（相交判定待机制 1.1 workset 落地后加入）。
+
 - **节点持久**：任务 done/failed/会话结束后节点**不消失**，任务流一直保存，供复盘；用户可手动删除节点（＝删除该任务，四态均可删、claimed 删除即硬中断，AlertDialog 二次确认，见 §6.4）。
 - **双击节点**：在直播间打开/聚焦对应会话页签——若页签已 detach（关页签不关任务，见 §3）即由此挂回；open 无人认领的任务则跳到任务看板对应卡片。
 - 布局：parent 层级左→右 DAG，节点拖动偏移按项目存 localStorage（`taskflow-offsets-v1:<pid>`，不入库）；3s 轮询 + WS（task.*/message.inbox/session.* 事件 300ms 去抖重拉）。
@@ -1297,6 +1310,16 @@ cyberstrike-pro/
 - **学习档案** = 用户声明（profile.json 方向与阶段）+ vault 元数据推断（各方向笔记分布/最近活跃）+ 平台侧学习记录（文章已读/收藏）。
 - **周学习计划**：LLM 结合学习档案与当周简报/文章生成（学什么、读哪篇、练什么）；计划存平台侧，**可导出 md 由用户自行贴回 Obsidian**（不自动写入）。
 
+> **〔未实施〕vault 结构化 frontmatter 画像（F5，2026-09-16 定稿，§17 F5）**
+>
+> 起因：用户笔记每篇有结构化 frontmatter（`tags` YAML 列表 + `category`）；实测 tags 已被索引兼容解析（parse_frontmatter 块收集 + `strip("- ")` 清洗），**category 完全未读**。定稿：
+>
+> - **category 入索引**：`index_vault` 读 fm `category`（归一化小写），vault_notes 加列（SCHEMA_VERSION 2→3，DDL IF NOT EXISTS 幂等迁移惯例同 E10）；tags 解析现状不动。
+> - **方向判定升级**：category 精确命中 `DIRECTIONS` 直接作为方向（用户手工维护，最可靠）→ 未命中回退 `infer_direction`（title/tags/path 关键词表，现状不变）；不建用户可维护的别名映射表（v1 取舍）。
+> - **画像增强**：learning_profile vault 来源加 **top tags 频次**（cap 15）——「蓝牙/BLE 投入多、PWN 少」这类细粒度画像可表达；全元数据，隐私红线不变（正文仍不出本机，隐私断言测试覆盖新入参）。
+> - **周计划导向**：LLM 提示语与降级模板补两组信号（各方向笔记篇数=投入分布、声明兴趣权重），口径=**兴趣权重优先、明显缺口提醒一句**（不硬编码偏向）；入参加 tag 频次行。
+> - **生效**：重建索引后生效（v1 全量重建、无自动监听语义不变）。
+
 ### 16.4 前端入口（E9/E10）
 
 - 左侧导航新增顶级页「**情报**」：`App.tsx` 四处注册（View 联合类型 / NAV 数组 `needsProject=false` / 无 pid 分支可渲染 / 视图分发），三 tab = 简报/文章/学习；跨页跳转复用 `goto-*` 自定义事件模式。
@@ -1309,7 +1332,7 @@ cyberstrike-pro/
 ## 17. 待做清单（Backlog）
 
 > 全部未落地工作的索引。**2026-09-16 v0.31 重整**：原 机制 1.1/机制 1.4（发布去重/资源租约，schema v7）已落地移除；实战走查催生的 C2/C1/C3 与 C5 自原 E 组拆出成立**C 组 编排与任务语义**（实战优先）；逆向复用顺延为 D 组；体验与基建归位 F 组；补账 E8 后置项 **C4 L2 档步数耗尽自动续跑**（原挂账遗漏）。**ID 对照（v0.31 重编前→后）**：B4→机制 1.1、B5→机制 1.4、B6→B3、B3→B4；E15→C1、E14→C2、E16→C3、E17→C4、E11→C5；C1→D1、C2→D2、C3→D3；D2→E1、D1→E2；E13→F1、E4→F2、E3→F3、E5→F4。**历史行与已落地批次沿用当时 ID**（E1=红线 UI 重构、E2=redlines 补齐、E6/E7/E8/E9/E10/E12 为已落地批次，勿与本章 E1/E2 混淆）。每条只给概述与实施拆批，完整设计见所注章节；落地一项即从此处移除并更新文首「落地状态总览」。
->
+> 
 > **排序理由（v0.31）**：B 组余部按日常正确性价值×成本排——机制 1.1 取消传播（多会话日常正确性）→ 机制 1.4 逆向互斥（消 TOCTOU，机制 1.4 租约机制已就绪、工作量小）→ B3 小件 → B4 大件且仅 E2 前置、押后；C 组编排/任务语义直接服务当前评估实战（C1 止损 → C2 提质 → C3 定界 → C4 小件 → C5 CTF 大件）；D 组逆向复用独立可插队；E 组新轨外部依赖重殿后（E1 独立于 B4 先行、E2 依赖 B4）；F 组体验债穿插。
 
 ### B 组：协调机制正确性底座（F 批余部，§6.7/§6.7.1；任务仍保持四态，每项自带并发测试）
@@ -1344,3 +1367,5 @@ cyberstrike-pro/
 16. **F2 · WebUI 终端页（2026-09-16 定稿，§12「终端页与人类命令通路」）**：① E4a 人类命令面板（POST /exec 经 gateway，author=human，审计/审批全继承）→ ② 独立路由/补全 → B4 持久 workspace 容器基建（`cyb-ws-<slug>` 惰性创建/空闲 30min 回收/reconcile）→ 机制 1.1 E4b PTY 交互终端（双向 WS+xterm.js lazy；host 默认关、WSL 不提供、PTY 不逐键审计）→ 机制 1.4 收口（session 审计/审批 UI/fakenet 挂点与 E1 合并评审）。交互终端为人类专属，Agent 工具面不新增 PTY 工具。
 17. **F3 · assessment 轨 Phase 2 收尾**：角色体系实战打磨、设备方向知识模块（binary/kb/iot、ics、vehicular）充实、network 能力包视内网内容量评估拆分；渗透报告随 D2 报告导出落地（自动化程度见 §12 待定项）。
 18. **F4 · 杂项小项**：misc 包技能（§4.5.4、§10）；fofa/playwright 等运行时 MCP 工具桥（§4，当前仅逆向 IDA 桥）；浅色主题（§12 待定项，低优先级）。
+19. **F5 · vault 结构化 frontmatter 画像（2026-09-16 定稿，§16.3 定稿块）**：index_vault 读 fm `category`（vault_notes 加列，SCHEMA_VERSION 2→3 幂等迁移）→ 方向判定 category 归一化精确命中 DIRECTIONS 优先+`infer_direction` 关键词回退（不建用户可维护别名表）→ learning_profile vault 来源加 top tags 频次（cap 15，全元数据隐私红线不变）→ 周计划 LLM 提示语/降级模板补「兴趣权重优先+明显缺口提醒」导向与 tag 频次入参 → IntelView 学习 tab vault 档案加 tag 频次 badges。**拆批**：① 索引与存储（vault.py category+store.py v3）→ ② 画像与计划聚合（方向判定/频次/提示语与模板）→ ③ 前端 badges → ④ 测试（category 优先判定/未命中回退/迁移幂等/tags 频次/隐私断言）。
+
