@@ -105,8 +105,9 @@ function BudgetPopover({ usage, onClose, onSave }: {
 }
 
 /** C2 作战模式编辑弹层（§6.9）：mode 切换（redteam ROE 四要素必填）+ mission 编辑 */
-function ModePopover({ usage, onClose, onSave }: {
+function ModePopover({ usage, pid, onClose, onSave }: {
   usage: ProjectUsage
+  pid: string
   onClose: () => void
   onSave: (patch: Record<string, unknown>) => Promise<void>
 }) {
@@ -123,10 +124,40 @@ function ModePopover({ usage, onClose, onSave }: {
   const [approver, setApprover] = useState(usage.redteam_roe?.approver ?? "")
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState("")
+  // 已应用的内置模板（""=无）：下拉选择后保持显示所选项，不复位回占位符
+  const [appliedBuiltin, setAppliedBuiltin] = useState<"" | "__b_pentest" | "__b_redteam">("")
+  const prefilledRef = useRef(false)
 
   useEffect(() => {
     api.judgmentTemplates().then(setTemplates).catch(() => {})
   }, [])
+
+  // 打开弹层时判据为空 → 自动预填当前 mode 的内置默认判据（templates 首包到位后一次）
+  useEffect(() => {
+    if (prefilledRef.current || !Object.keys(templates.builtin).length) return
+    if (!criteria.trim()) {
+      const key = mode === "redteam" ? "红队默认" : "渗透默认"
+      const text0 = templates.builtin[key]
+      if (text0) {
+        setCriteria(text0)
+        setAppliedBuiltin(mode === "redteam" ? "__b_redteam" : "__b_pentest")
+      }
+    }
+    prefilledRef.current = true
+  }, [templates.builtin, mode, criteria])
+
+  // 切换作战模式：判据为空或仍是另一模式的内置默认 → 跟随换新模式的内置默认
+  useEffect(() => {
+    const other = mode === "redteam" ? "渗透默认" : "红队默认"
+    const mine = mode === "redteam" ? "红队默认" : "渗透默认"
+    if (criteria.trim() && criteria !== (templates.builtin[other] ?? "")) return
+    const text0 = templates.builtin[mine]
+    if (text0) {
+      setCriteria(text0)
+      setAppliedBuiltin(mode === "redteam" ? "__b_redteam" : "__b_pentest")
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, templates.builtin])
 
   const save = async () => {
     if (mode === "redteam" &&
@@ -157,6 +188,16 @@ function ModePopover({ usage, onClose, onSave }: {
         }
       }
       await onSave(patch)
+      // C2：保存即启动——勾选自动派生时立即触发一轮编排（读判据+uncovered 开始派活）
+      if (autoDerive) {
+        try {
+          await api.orchTick(pid)
+        } catch (e) {
+          setErr(`配置已保存，但启动编排失败：${e}`)
+          setSaving(false)
+          return
+        }
+      }
       onClose()
     } catch (e) {
       setErr(String(e))
@@ -167,7 +208,7 @@ function ModePopover({ usage, onClose, onSave }: {
 
   const field = "w-full rounded border bg-background p-1.5 text-[11px]"
   return (
-    <div className="absolute left-0 top-9 z-20 w-72 rounded-lg border bg-popover p-3 text-xs shadow-md">
+    <div className="absolute left-0 top-9 z-20 w-80 rounded-lg border bg-popover p-3 text-xs shadow-md">
       <p className="mb-2 flex items-center gap-1.5 text-muted-foreground">
         <span
           className={cn("inline-block size-2 rounded-full",
@@ -219,15 +260,26 @@ function ModePopover({ usage, onClose, onSave }: {
       <div className="mb-1 flex gap-1">
         <select
           className="h-7 min-w-0 flex-1 rounded border bg-background px-1 text-[11px]"
-          value=""
+          value={templateName ? templateName : appliedBuiltin}
           onChange={(e) => {
             const name = e.target.value
             if (!name) return
-            if (name === "__b_pentest") { setCriteria(templates.builtin["渗透默认"] ?? ""); return }
-            if (name === "__b_redteam") { setCriteria(templates.builtin["红队默认"] ?? ""); return }
+            if (name === "__b_pentest") {
+              setCriteria(templates.builtin["渗透默认"] ?? "")
+              setTemplateName("")
+              setAppliedBuiltin("__b_pentest")
+              return
+            }
+            if (name === "__b_redteam") {
+              setCriteria(templates.builtin["红队默认"] ?? "")
+              setTemplateName("")
+              setAppliedBuiltin("__b_redteam")
+              return
+            }
             if (name in templates.user) {
               setCriteria(templates.user[name])
               setTemplateName(name)
+              setAppliedBuiltin("")
             }
           }}
         >
@@ -245,7 +297,7 @@ function ModePopover({ usage, onClose, onSave }: {
           )}
         </select>
       </div>
-      <textarea className={field} rows={3} value={criteria} onChange={(e) => setCriteria(e.target.value)}
+      <textarea className={field} rows={8} value={criteria} onChange={(e) => setCriteria(e.target.value)}
                 placeholder="□ 判据一&#10;□ 判据二（写判据 = 授权自动派生往此方向打）" />
       <div className="mb-2 mt-1 flex gap-1">
         <input className={cn(field, "min-w-0 flex-1")} value={tplName} onChange={(e) => setTplName(e.target.value)}
@@ -273,9 +325,14 @@ function ModePopover({ usage, onClose, onSave }: {
           </Button>
         )}
       </div>
-      <label className="mb-1 block text-muted-foreground">mission 目标（可选）</label>
-      <textarea className={field} rows={2} value={text} onChange={(e) => setText(e.target.value)}
+      <label className="mb-1 block text-muted-foreground">mission 目标（可选；留空则只用判据驱动）</label>
+      <textarea className={field} rows={3} value={text} onChange={(e) => setText(e.target.value)}
                 placeholder="战役目标一句话" />
+      <p className="mt-2 rounded border bg-card p-2 text-[10px] leading-relaxed text-muted-foreground">
+        <span className="font-medium text-foreground">启动方式：</span>
+        ① 勾选「任务空时自动派生」② 点保存——勾选状态下会立即启动一轮编排，之后任务空了自动续批；
+        也可用输入框「指挥编排」直接下达一次性指令。判据全部达成或资产穷尽（uncovered=0）时自动收工。
+      </p>
       {err && <p className="mt-2 text-[--status-error]">{err}</p>}
       <Button size="sm" className="mt-2 w-full" disabled={saving} onClick={save}>
         {saving ? "保存中…" : "保存"}
@@ -1129,14 +1186,27 @@ export function LiveRoom({ pid }: { pid: string }) {
         </Button>
         <div className="relative">
           <Button size="sm" variant="outline"
-                  className={cn(usage?.mode === "redteam" && "text-[--status-error]")}
+                  className={cn("gap-1.5", usage?.mode === "redteam" && "text-[--status-error]")}
                   title="作战模式与 mission（§6.9）：pentest/redteam 切换（redteam 需 ROE 四要素）"
                   onClick={() => setModeOpen((o) => !o)}>
+            {/* C2 状态灯：绿=自动派生运行中 / 琥珀=被闸暂拦 / 灰=关闭 */}
+            <span
+              className={cn("inline-block size-2 rounded-full",
+                usage?.auto_derive
+                  ? (usage.paused || (usage.tokens.pct !== null && usage.tokens.pct >= 100))
+                    ? "bg-[--status-approval]"
+                    : "bg-[--status-ok]"
+                  : "bg-muted-foreground/40")}
+              title={usage?.auto_derive
+                ? (usage.paused ? "自动派生被暂停拦住" : "自动派生运行中：任务空时自动派生新任务")
+                : "自动派生已关闭"}
+            />
             🎯 {usage?.mode === "redteam" ? "红队" : usage?.mode === "pentest" ? "渗透" : (usage?.mode ?? "渗透")}
           </Button>
           {modeOpen && usage && (
             <ModePopover
               usage={usage}
+              pid={pid}
               onClose={() => setModeOpen(false)}
               onSave={async (patch) => {
                 await api.patchProjectConfig(pid, patch)
