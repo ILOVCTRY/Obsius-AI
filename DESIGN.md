@@ -1355,9 +1355,6 @@ cyberstrike-pro/
 **B3 · 机制 1.10 高噪声联动审批**：approval 携带归一化目标（ip/host），net=real 审批弹窗显示同目标历史审批次数辅助判断；**只联动展示，绝不自动批准、不放松红线**。
 **B4 · 机制 1.2 blocked_by 依赖调度 + 1.3 大任务分片（map-reduce）**：依赖未 done 的 open 行经 claim_next SQL 排除、无状态翻转，依赖 fail 由编排决策；shatter(func|url|host) 分片+聚合任务 blocked_by，分片键防重复。**1.2 是 E2 development 轨 implement→build→test→review 工作流的前置**。
 
-### C 组：编排与任务语义（2026-09-16 新设，实战优先——源自走查痛点：ROE 挂起 token 白烧、编排手工拆解）
-
-
 ### D 组：逆向复用（§9 末；独立低风险，可随时插队）
 
 **D1 · R1 同 sha256 内容寻址全局缓存**：headless JSON/.i64 从 per-project 提至 `workspaces/.cache/`，项目改引用——同样本 N 个项目只付一次 900s 全量导出；项目删除不牵连缓存。独立、风险低，逆向线立刻受益，**可随时插队**。
