@@ -212,6 +212,7 @@ function TaskCard({ task, onChanged, onDelete, focused, focusNonce }: {
 }) {
   const editable = task.status === "open" || task.status === "failed"
   const [editing, setEditing] = useState(false)
+  const [resumeErr, setResumeErr] = useState<string | null>(null)
   const cardRef = useRef<HTMLDivElement>(null)
 
   // A3：任务流跳来——滚动到卡片并高亮（nonce 变化即重新触发，同卡二次跳转也生效）
@@ -257,6 +258,11 @@ function TaskCard({ task, onChanged, onDelete, focused, focusNonce }: {
           ⚔ {task.conflict_keys.join(", ")}
         </p>
       )}
+      {resumeErr && (
+        <p className="mt-1 truncate text-[10px] text-[--status-error]" title={resumeErr}>
+          续跑失败：{resumeErr}（可改用「放回」重新派发）
+        </p>
+      )}
       <div className="mt-1.5 flex items-center gap-2">
         {task.claimed_by && (
           <span className="font-mono text-[10px] text-primary">{task.claimed_by.slice(0, 14)}</span>
@@ -267,6 +273,23 @@ function TaskCard({ task, onChanged, onDelete, focused, focusNonce }: {
           </span>
         )}
         <span className="flex-1" />
+        {task.status === "failed" && task.resumable && (
+          <button
+            onClick={async () => {
+              setResumeErr(null)
+              try {
+                await api.resumeTask(task.id)
+                onChanged()
+              } catch (e) {
+                setResumeErr(e instanceof Error ? e.message : String(e))
+              }
+            }}
+            className="text-[10px] text-primary hover:underline"
+            title="带现场续跑（E12）：原会话从落盘快照与步数断点恢复，上下文不丢"
+          >
+            ▶ 续跑
+          </button>
+        )}
         {task.status === "failed" && (
           <button
             onClick={async () => {

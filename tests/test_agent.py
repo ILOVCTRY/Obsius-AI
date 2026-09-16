@@ -1130,6 +1130,97 @@ def test_snapshot_persisted_and_rehydrates(env):
     assert json.loads(bb.get_session(sid)["meta"])["resume_snapshot"] is None
 
 
+def test_abort_keeps_snapshot_and_task_resumable(env):
+    """E12：人工中断不再销毁落盘快照——task.failed 带 resumable 标记、
+    快照文件+meta 指针保留；reopen+claim 后 revive_snapshot 复活续跑至完成并清理。"""
+    bb, project, gw, tq, tmp_path = env
+    tid = tq.publish(project["id"], "中断可续任务", task_type="generic")
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("t1", "run_cmd",
+                                            {"cmd": "c1", "runtime": "host",
+                                             "threat_class": "trusted"})]},
+    ])
+    agent = make_agent(env, llm, config=AgentConfig(max_steps=10),
+                       artifacts_dir=tmp_path / "proj" / "artifacts")
+    orig_chat = llm.chat
+    n = {"c": 0}
+
+    def chat(messages, **kw):
+        n["c"] += 1
+        r = orig_chat(messages, **kw)
+        if n["c"] == 1:
+            agent.request_pause()   # 暂停 → 快照落盘（可续现场）
+        return r
+    llm.chat = chat
+
+    assert agent.run_task("中断演练", task_id=tid) == ""
+    sid = agent.session["id"]
+    snap = tmp_path / "proj" / "snapshots" / f"{sid}.json"
+    assert snap.is_file()
+
+    # 暂停态被硬中断（abort 端点对无 job 会话同款路径）
+    agent._abort_current_task()
+    assert tq.get_task(tid)["status"] == "failed"
+    failed = [e for e in bb.recent_events(project["id"]) if e["kind"] == "task.failed"][-1]
+    assert failed["payload"]["resumable"] is True
+    assert failed["payload"]["note"] == "人工中断"
+    assert snap.is_file()                                    # 现场保留（不再销毁）
+    assert json.loads(bb.get_session(sid)["meta"])["resume_snapshot"] == snap.name
+    assert agent.paused is False and agent._resume_state is None
+
+    # 看板「▶ 续跑」（resume 端点同款编排）：reopen → claim → revive → run_next_task
+    st = agent.revive_snapshot(tid)
+    assert st is not None and st["task_id"] == tid
+    tq.reopen(tid, by="human")
+    tq.claim(tid, sid, lease_minutes=agent.config.lease_minutes)
+    agent._stop_after_task = False                           # 清中断一次性闸门
+    llm2 = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("t2", "complete_task",
+                                            {"result_note": "复活后完成"})]},
+        {"tool_use": [ScriptedLLM.tool_call("t3", "finish", {"summary": "续跑成功"})]},
+    ])
+    agent.llm = llm2
+    assert agent.run_next_task() == "续跑成功"
+    assert tq.get_task(tid)["status"] == "done"
+    assert not snap.exists()                                 # 快照消费后清理
+    assert json.loads(bb.get_session(sid)["meta"])["resume_snapshot"] is None
+
+
+def test_abort_after_task_deleted_clears_snapshot(env):
+    """E12：任务已被删除（看板取消）时中断——快照作废并清理，防孤儿文件。"""
+    bb, project, gw, tq, tmp_path = env
+    tid = tq.publish(project["id"], "删除收尾任务", task_type="generic")
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("t1", "run_cmd",
+                                            {"cmd": "c1", "runtime": "host",
+                                             "threat_class": "trusted"})]},
+    ])
+    agent = make_agent(env, llm, config=AgentConfig(max_steps=10),
+                       artifacts_dir=tmp_path / "proj" / "artifacts")
+    orig_chat = llm.chat
+    n = {"c": 0}
+
+    def chat(messages, **kw):
+        n["c"] += 1
+        r = orig_chat(messages, **kw)
+        if n["c"] == 1:
+            agent.request_pause()
+        return r
+    llm.chat = chat
+
+    assert agent.run_task("删除演练", task_id=tid) == ""
+    sid = agent.session["id"]
+    snap = tmp_path / "proj" / "snapshots" / f"{sid}.json"
+    assert snap.is_file()
+
+    tq.delete(tid, by="human")                               # claimed 任务可物理删除（A1）
+    agent._abort_current_task()
+    aborted = [e for e in bb.recent_events(project["id"]) if e["kind"] == "session.aborted"][-1]
+    assert aborted["payload"]["note"] == "任务已被删除"
+    assert not snap.exists()                                 # 任务没了快照即作废
+    assert json.loads(bb.get_session(sid)["meta"])["resume_snapshot"] is None
+
+
 # ---------- E6/E7 资产登记统一入口与扫描/测试状态机 ----------
 
 def _dispatcher(env, name="assets"):

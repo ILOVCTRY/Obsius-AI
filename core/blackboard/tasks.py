@@ -194,10 +194,15 @@ class TaskQueue:
     def complete(self, task_id: str, session_id: str, result_note: str = "") -> None:
         self._finish(task_id, session_id, "done", result_note)
 
-    def fail(self, task_id: str, session_id: str, result_note: str = "") -> None:
-        self._finish(task_id, session_id, "failed", result_note)
+    def fail(self, task_id: str, session_id: str, result_note: str = "",
+             resumable: bool = False) -> None:
+        """E12：resumable=True 表示中断保留了落盘快照（task.failed 事件带标记，
+        看板 failed 卡出「▶ 续跑」——reopen+原会话载快照复活）。"""
+        self._finish(task_id, session_id, "failed", result_note,
+                     extra={"resumable": True} if resumable else None)
 
-    def _finish(self, task_id: str, session_id: str, status: str, result_note: str) -> None:
+    def _finish(self, task_id: str, session_id: str, status: str, result_note: str,
+                extra: dict | None = None) -> None:
         with self.bb._tx():
             row = self.bb.conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
             if row is None:
@@ -210,10 +215,13 @@ class TaskQueue:
                 (status, result_note, now(), task_id),
             )
             stale_refs = _loads(row["stale_refs"], [])
+        payload = {"task_id": task_id, "session_id": session_id, "note": result_note}
+        if extra:
+            payload.update(extra)
         self.bb.append_event(
             row["project_id"],
             f"task.{status}",
-            {"task_id": task_id, "session_id": session_id, "note": result_note},
+            payload,
             session_id=session_id,
         )
         if status == "done" and stale_refs:

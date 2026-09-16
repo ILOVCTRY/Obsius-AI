@@ -19,6 +19,7 @@
 ## 关键约定
 
 - **v12 受控节点契约**：onNodesChange 必须回收 `ch.dimensions` 存 measuredById 并回灌每个派生节点，否则重渲染清测量、边整体卸载；拖拽位置相对自动槽位记 dx/dy。
+- **首挂丢边坑（实测定论）**：边依赖节点 measured+handleBounds，二者只由 ResizeObserver 首包驱动。①**后台/隐藏标签页** Chromium 冻结 rAF 与 RO 首包（`document.visibilityState==="hidden"`），此时无边是浏览器行为，转可见即恢复——无头自动化必现，真人前台不复现；②dev StrictMode 双挂载可能让 RO disconnect 后不重连。组件内有兜底：setTimeout 链对全部节点 `updateNodeInternals` 强测（**不要用 rAF**，隐藏页会冻），收齐 measured 即停（上限 ~2.4s）；ready 门只控 fitView 时机，**边始终供给，不要两阶段喂空边**（会干扰内部初始化）。
 - 手动偏移存 localStorage `taskflow-offsets-v1:<pid>`（只本地不入库），RotateCcw 清空；首次全部节点测量完成后 rAF 触发一次 fitView（maxZoom≤1）。
 - 节点 data 类型用 `type` 不用 `interface`（xyflow Record<string,unknown> 约束）。
 - EdgeLabelRenderer 容器 pointer-events:none，✉ 标签必须自加 `pointer-events-auto`。

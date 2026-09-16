@@ -1,0 +1,170 @@
+- generic [ref=f1e3]:
+  - banner [ref=f1e4]:
+    - generic [ref=f1e5]: CTF · 二进制/杂项
+    - heading "A组端到端走查" [level=1] [ref=f1e6]
+    - generic [ref=f1e7]: 任务 0/4 · 发现 2 · 资产 0
+    - button "🔔 审批" [ref=f1e8]
+    - button "← 项目" [ref=f1e9]
+  - generic [ref=f1e10]:
+    - navigation [ref=f1e11]:
+      - button "◈ 项目" [ref=f1e12]:
+        - generic [ref=f1e13]: ◈
+        - text: 项目
+      - button "◉ 直播间" [ref=f1e14]:
+        - generic [ref=f1e15]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=f1e16]:
+        - generic [ref=f1e17]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=f1e18]:
+        - generic [ref=f1e19]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=f1e20]:
+        - generic [ref=f1e21]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=f1e22]:
+        - generic [ref=f1e23]: ⚙
+        - text: 技能/设置
+    - main [ref=f1e24]:
+      - generic [ref=f1e316]:
+        - generic [ref=f1e317]:
+          - generic [ref=f1e318]:
+            - button "全部" [ref=f1e319]
+            - button "Orchestrator" [ref=f1e320]
+            - button "finished _generalist 分离页签 _generalist（任务后台继续）" [ref=f1e321]:
+              - generic "finished" [ref=f1e322]
+              - text: _generalist
+              - button "分离页签 _generalist（任务后台继续）" [ref=f1e323]
+            - button "finished _generalist 分离页签 _generalist（任务后台继续）" [ref=f1e327]:
+              - generic "finished" [ref=f1e328]
+              - text: _generalist
+              - button "分离页签 _generalist（任务后台继续）" [ref=f1e329]
+            - button "idle _generalist 分离页签 _generalist（任务后台继续）" [ref=f1e333]:
+              - generic "idle" [ref=f1e334]
+              - text: _generalist
+              - button "分离页签 _generalist（任务后台继续）" [ref=f1e335]
+            - button "idle 走查-私信UI 1 分离页签 走查-私信UI（任务后台继续）" [ref=f1e339]:
+              - generic "idle" [ref=f1e340]
+              - text: 走查-私信UI
+              - generic "有系统私信（依据撤回需自评 / 发现增补通知）" [ref=f1e341]: "1"
+              - button "分离页签 走查-私信UI（任务后台继续）" [ref=f1e342]
+            - button "idle 走查-私信UI 1 分离页签 走查-私信UI（任务后台继续）" [ref=f1e346]:
+              - generic "idle" [ref=f1e347]
+              - text: 走查-私信UI
+              - generic "有系统私信（依据撤回需自评 / 发现增补通知）" [ref=f1e348]: "1"
+              - button "分离页签 走查-私信UI（任务后台继续）" [ref=f1e349]
+            - button "idle 走查-私信UI 分离页签 走查-私信UI（任务后台继续）" [ref=f1e353]:
+              - generic "idle" [ref=f1e354]
+              - text: 走查-私信UI
+              - button "分离页签 走查-私信UI（任务后台继续）" [ref=f1e355]
+          - generic [ref=f1e359]:
+            - button "直播" [ref=f1e360]
+            - button "任务流" [ref=f1e361]
+          - generic [ref=f1e367]: ● live
+        - generic [ref=f1e564]:
+          - combobox "通用 · 通用 CTF 选手：分诊、解题全链路" [ref=f1e565]:
+            - option "通用 · 通用 CTF 选手：分诊、解题全链路" [selected]
+            - option "recon · 静态分诊：只看不跑，快速给出文件类型/保护/建议下一步"
+            - option "reverse · 逆向：函数定位、算法还原、func_kb 协作、求解验证"
+          - combobox "开窗供应商（缺省=全局默认供应商）" [ref=f1e566]:
+            - option "默认供应商" [selected]
+            - option "ark-plan"
+            - option "ark-coding"
+          - combobox "开窗模型（缺省=该供应商首个模型）" [ref=f1e567]:
+            - option "默认模型（ark-code-latest）" [selected]
+            - option "ark-code-latest"
+            - option "deepseek-v4-flash"
+            - option "glm-5-3-flash-260828"
+          - button "开窗" [ref=f1e568]
+          - generic "项目自主级别（§6.8：L0 全手动 / L1 任务自动·开窗审批 / L2 全自动链）；安全层任何档位不放松" [ref=f1e569]:
+            - button "L0" [ref=f1e570]
+            - button "L1" [ref=f1e571]
+            - button "L2" [ref=f1e572]
+          - button "⏸ 暂停自动" [ref=f1e573]
+          - button "∑ 596.3k 📋 0 🪟 6/4" [ref=f1e575]:
+            - generic [ref=f1e576]: ∑ 596.3k
+            - generic [ref=f1e577]: 📋 0
+            - generic [ref=f1e578]: 🪟 6/4
+          - button "跑任务队列" [ref=f1e579]
+          - button "⏸ 暂停" [ref=f1e580]
+          - button "⛔ 中断" [ref=f1e581]
+          - button "结束会话" [ref=f1e582]
+          - generic "动态切换当前会话的供应商/模型，下一次 LLM 调用生效" [ref=f1e583]:
+            - generic [ref=f1e584]: 🔀
+            - combobox [ref=f1e585]:
+              - option "ark-plan" [selected]
+              - option "ark-coding"
+            - combobox [ref=f1e586]:
+              - option "默认模型" [selected]
+              - option "ark-code-latest"
+              - option "deepseek-v4-flash"
+              - option "glm-5-3-flash-260828"
+            - button "切换" [ref=f1e587]
+          - button "编排一轮" [ref=f1e589]
+          - button "重排优先级" [ref=f1e590]
+          - button "复盘沉淀" [ref=f1e591]
+        - generic [ref=f1e592]:
+          - button "全部" [ref=f1e593]
+          - button "思考" [ref=f1e594]
+          - button "决策" [ref=f1e595]
+          - button "路由" [ref=f1e596]
+          - button "命令" [ref=f1e597]
+          - button "发现" [ref=f1e598]
+        - generic [ref=f1e600]:
+          - generic [ref=f1e603] [cursor=pointer]:
+            - generic "UTC 2026-09-15 16:16:37" [ref=f1e604]: 00:16:37
+            - generic [ref=f1e605]: 🔧 认领任务
+            - generic [ref=f1e606]: task_id, session_id, lease_until
+            - generic [ref=f1e607]: system
+          - generic [ref=f1e609] [cursor=pointer]:
+            - generic [ref=f1e610]:
+              - generic "UTC 2026-09-15 16:16:37" [ref=f1e611]: 00:16:37
+              - generic [ref=f1e612]: 🔵 发现增补
+              - generic [ref=f1e613]: 发现增补：走查发现：SQL 注入点 /login id 参数（1789488997）（新增 POC）
+              - generic [ref=f1e614]: system
+            - generic [ref=f1e615]: "{ \"to_session\": \"sess-907187d8d1bf\", \"kind\": \"finding_update\", \"ref_id\": \"find-7086c828969a\", \"title\": \"发现增补：走查发现：SQL 注入点 /login id 参数（1789488997）\", \"changes\": [ \"新增 POC\" ], \"by\": \"human\" }"
+          - generic [ref=f1e617] [cursor=pointer]:
+            - generic [ref=f1e618]:
+              - generic "UTC 2026-09-15 16:16:37" [ref=f1e619]: 00:16:37
+              - generic [ref=f1e620]: ⚠ 依据撤回
+              - generic [ref=f1e621]: 走查发现：SQL 注入点 /login id 参数（1789488997）
+              - generic [ref=f1e622]: system
+            - generic [ref=f1e623]: "{ \"to_session\": \"sess-907187d8d1bf\", \"kind\": \"basis_stale\", \"ref_id\": \"find-7086c828969a\", \"title\": \"走查发现：SQL 注入点 /login id 参数（1789488997）\", \"by\": \"human\" }"
+        - generic [ref=f1e624]:
+          - textbox "插话：向黑板发布一个任务或一条指示…" [ref=f1e625]
+          - button "发送" [disabled]
+      - complementary [ref=f1e430]:
+        - generic [ref=f1e431]:
+          - tablist [ref=f1e432]:
+            - tab "发现" [selected] [ref=f1e433]
+            - tab "资产" [ref=f1e434]
+            - tab "函数库" [ref=f1e435]
+          - tabpanel "发现" [ref=f1e436]:
+            - generic [ref=f1e437]:
+              - generic [ref=f1e438]:
+                - button "全部资产" [ref=f1e440]
+                - generic [ref=f1e444]:
+                  - button "全部" [ref=f1e445]
+                  - button "critical" [ref=f1e446]
+                  - button "high" [ref=f1e447]
+                  - button "medium" [ref=f1e448]
+                  - button "low" [ref=f1e449]
+                  - button "info" [ref=f1e450]
+                - generic [ref=f1e451]:
+                  - button "全部状态" [ref=f1e452]
+                  - button "unverified" [ref=f1e453]
+                  - button "verified" [ref=f1e454]
+              - generic [ref=f1e458]:
+                - generic [ref=f1e459] [cursor=pointer]:
+                  - generic [ref=f1e460]:
+                    - generic [ref=f1e461]: medium
+                    - generic [ref=f1e462]: 走查发现：SQL 注入点 /login id 参数（1789488997）
+                    - generic [ref=f1e463]: human
+                  - generic [ref=f1e464]: walk-ui · 2026-09-16 00:16:37
+                - generic [ref=f1e465] [cursor=pointer]:
+                  - generic [ref=f1e466]:
+                    - generic [ref=f1e467]: medium
+                    - generic [ref=f1e468]: 走查发现：SQL 注入点 /login id 参数
+                    - generic [ref=f1e469]: human
+                  - generic [ref=f1e470]: walk-ui · 2026-09-16 00:11:42
+      - button "›" [ref=f1e471]

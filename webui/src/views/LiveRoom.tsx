@@ -12,6 +12,10 @@ import type { Autonomy, BBEvent, ModelInfo, OrchProposal, OrchTickResult, Projec
 import { StatusDot, type SessionStatus } from "@/components/StatusDot"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import {
+  AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
+  AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import { cn } from "@/lib/utils"
 
 // 核心页（DESIGN.md §12）：Agent 直播间——多会话页签 + 状态点 + 事件流 + 插话
@@ -162,6 +166,8 @@ export function LiveRoom({ pid }: { pid: string }) {
   const [adoptingId, setAdoptingId] = useState<number | null>(null)
   // 项目自主配置/用量（§6.8，5s 轮询；闸门服务端实时重读，改配置即时生效）
   const [usage, setUsage] = useState<ProjectUsage | null>(null)
+  // E12：中断确认（防误触）——确认后任务标记失败，落盘快照保留，看板 failed 卡可「带现场续跑」
+  const [abortTarget, setAbortTarget] = useState<string | null>(null)
   const [budgetOpen, setBudgetOpen] = useState(false)
   const [savingAuto, setSavingAuto] = useState(false)
   const refreshUsage = () =>
@@ -795,7 +801,7 @@ export function LiveRoom({ pid }: { pid: string }) {
               </Button>
               <Button size="sm" variant="outline"
                       className="text-[--status-error] hover:text-[--status-error]"
-                      onClick={() => controlSession("abort", activeSession.id)}>
+                      onClick={() => setAbortTarget(activeSession.id)}>
                 ⛔ 中断
               </Button>
             </>
@@ -809,7 +815,7 @@ export function LiveRoom({ pid }: { pid: string }) {
               </Button>
               <Button size="sm" variant="outline"
                       className="text-[--status-error] hover:text-[--status-error]"
-                      onClick={() => controlSession("abort", activeSession.id)}>
+                      onClick={() => setAbortTarget(activeSession.id)}>
                 ⛔ 中断
               </Button>
             </>
@@ -1046,6 +1052,38 @@ export function LiveRoom({ pid }: { pid: string }) {
           </Suspense>
         </div>
       )}
+
+      {/* E12：中断确认（两处「⛔ 中断」都经此）——落盘快照保留，任务可续跑 */}
+      <AlertDialog
+        open={abortTarget !== null}
+        onOpenChange={(open) => !open && setAbortTarget(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>硬中断会话 {abortTarget ?? ""}？</AlertDialogTitle>
+            <AlertDialogDescription>
+              当前任务将标记为失败（人工中断，不回队列）。暂停/执行中已落盘的
+              现场快照会保留——稍后可在任务看板该失败卡上「▶ 续跑」，
+              原会话将从快照与步数断点恢复，上下文不丢失。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel asChild>
+              <Button variant="outline" size="sm">取消</Button>
+            </AlertDialogCancel>
+            <Button
+              variant="destructive" size="sm"
+              onClick={() => {
+                const sid = abortTarget
+                setAbortTarget(null)
+                if (sid) void controlSession("abort", sid)
+              }}
+            >
+              确认中断
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

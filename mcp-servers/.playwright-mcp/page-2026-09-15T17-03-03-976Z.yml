@@ -1,0 +1,279 @@
+- generic [ref=f4e68]:
+  - banner [ref=f4e69]:
+    - generic [ref=f4e70]: CTF · 二进制/杂项
+    - heading "A组端到端走查" [level=1] [ref=f4e71]
+    - generic [ref=f4e72]: 任务 1/15 · 发现 4 · 资产 3
+    - button "🔔 审批" [ref=f4e73]
+    - button "← 项目" [ref=f4e74]
+  - generic [ref=f4e75]:
+    - navigation [ref=f4e76]:
+      - button "◈ 项目" [ref=f4e77]:
+        - generic [ref=f4e78]: ◈
+        - text: 项目
+      - button "◉ 直播间" [ref=f4e79]:
+        - generic [ref=f4e80]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=f4e81]:
+        - generic [ref=f4e82]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=f4e83]:
+        - generic [ref=f4e84]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=f4e85]:
+        - generic [ref=f4e86]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=f4e87]:
+        - generic [ref=f4e88]: ⚙
+        - text: 技能/设置
+    - main [ref=f4e89]:
+      - generic [ref=f4e91]:
+        - generic [ref=f4e92]:
+          - generic [ref=f4e93]:
+            - button "全部" [ref=f4e94]
+            - button "Orchestrator" [ref=f4e95]
+          - generic [ref=f4e96]:
+            - button "直播" [ref=f4e97]
+            - button "任务流" [ref=f4e98]
+          - generic [ref=f4e104]: ● live
+        - generic [ref=f4e105]:
+          - combobox "通用 · 通用 CTF 选手：分诊、解题全链路" [ref=f4e106]:
+            - option "通用 · 通用 CTF 选手：分诊、解题全链路" [selected]
+            - option "recon · 静态分诊：只看不跑，快速给出文件类型/保护/建议下一步"
+            - option "reverse · 逆向：函数定位、算法还原、func_kb 协作、求解验证"
+          - combobox "开窗供应商（缺省=全局默认供应商）" [ref=f4e107]:
+            - option "默认供应商" [selected]
+            - option "ark-plan"
+            - option "ark-coding"
+          - combobox "开窗模型（缺省=该供应商首个模型）" [ref=f4e108]:
+            - option "默认模型（ark-code-latest）" [selected]
+            - option "ark-code-latest"
+            - option "deepseek-v4-flash"
+            - option "glm-5-3-flash-260828"
+          - button "开窗" [ref=f4e109]
+          - generic "项目自主级别（§6.8：L0 全手动 / L1 任务自动·开窗审批 / L2 全自动链）；安全层任何档位不放松" [ref=f4e110]:
+            - button "L0" [ref=f4e111]
+            - button "L1" [ref=f4e112]
+            - button "L2" [ref=f4e113]
+          - button "⏸ 暂停自动" [ref=f4e114]
+          - button "∑ 4.8M 📋 0 🪟 0/4" [ref=f4e678]:
+            - generic [ref=f4e117]: ∑ 4.8M
+            - generic [ref=f4e118]: 📋 0
+            - generic [ref=f4e119]: 🪟 0/4
+          - button "编排一轮" [ref=f4e121]
+          - button "重排优先级" [ref=f4e122]
+          - button "复盘沉淀" [ref=f4e123]
+        - generic [ref=f4e124]:
+          - button "全部" [ref=f4e125]
+          - button "思考" [ref=f4e126]
+          - button "决策" [ref=f4e127]
+          - button "路由" [ref=f4e128]
+          - button "命令" [ref=f4e129]
+          - button "发现" [ref=f4e130]
+          - generic [ref=f4e131]: 重排完成：1 条改级（026164:P5→P3），跳过 0 条
+        - generic [ref=f4e133]:
+          - generic [ref=f4e681] [cursor=pointer]:
+            - generic "UTC 2026-09-15 17:01:26" [ref=f4e682]: 01:01:26
+            - generic [ref=f4e683]: ⚡ 执行命令
+            - code [ref=f4e685]: "cd E:\\ILOVCTRY\\cyberstrike-pro; Get-ChildItem -Recurse -File -Include *.py -Path core | Where-Object {$_.FullName -notmatch '\\\\(\\.venv|venv|__pycache__|\\.history)\\\\'} | Select-Object -ExpandProperty FullName; '--- append_event defs/usages repo-wide ---'; Get-ChildItem -Recurse -File -Include *.py -Path core | Where-Object {$_.FullName -notmatch '\\\\(__pycache__|\\.history)\\\\'} | Select-String -Pattern 'def append_event|append_event\\(' | ForEach-Object { '{0}:{1}: {2}' -f $_.Path,$_.LineNumber,$_.Line.Trim() }"
+            - generic [ref=f4e686]: sess-9c3d1545998b
+          - generic [ref=f4e689] [cursor=pointer]:
+            - generic "UTC 2026-09-15 17:01:26" [ref=f4e690]: 01:01:26
+            - generic [ref=f4e691]: ↳ 命令输出
+            - generic [ref=f4e692]: runtime, exit_code, duration_s, timed_out, stdout_head, stderr_head
+            - generic [ref=f4e693]: sess-9c3d1545998b
+          - generic [ref=f4e695] [cursor=pointer]:
+            - generic [ref=f4e696]:
+              - generic "UTC 2026-09-15 17:01:26" [ref=f4e697]: 01:01:26
+              - generic [ref=f4e698]: ⛔ 人工中断
+              - generic [ref=f4e699]: 任务已被删除
+              - generic [ref=f4e700]: sess-9c3d1545998b
+            - generic [ref=f4e701]: "{ \"session_id\": \"sess-9c3d1545998b\", \"task_id\": \"task-18e1881bd0bc\", \"note\": \"任务已被删除\" }"
+          - generic [ref=f4e704] [cursor=pointer]:
+            - generic "UTC 2026-09-15 17:01:28" [ref=f4e705]: 01:01:28
+            - generic [ref=f4e706]: ∑ token
+            - generic [ref=f4e707]: Agent · ark-code-latest · ↑1129 ↓181 · ∑4744928
+            - generic [ref=f4e709]: sess-a1dc4d01fbaf
+          - generic [ref=f4e712] [cursor=pointer]:
+            - generic "UTC 2026-09-15 17:01:28" [ref=f4e713]: 01:01:28
+            - generic [ref=f4e714]: 💭 思考
+            - generic [ref=f4e715]: Maybe WMI inaccessible. List drives first.
+            - generic [ref=f4e716]: sess-a1dc4d01fbaf
+          - generic [ref=f4e719] [cursor=pointer]:
+            - generic "UTC 2026-09-15 17:01:28" [ref=f4e720]: 01:01:28
+            - generic [ref=f4e721]: ⚡ 执行命令
+            - code [ref=f4e723]: Get-PSDrive -PSProvider FileSystem | Select-Object Name,Root,Used,Free | Format-Table -AutoSize; Get-ChildItem D:\,C:\phpstudy_pro -Force -ErrorAction SilentlyContinue | Select-Object FullName,Mode,Length | Format-Table -AutoSize
+            - generic [ref=f4e724]: sess-a1dc4d01fbaf
+          - generic [ref=f4e727] [cursor=pointer]:
+            - generic "UTC 2026-09-15 17:01:28" [ref=f4e728]: 01:01:28
+            - generic [ref=f4e729]: ↳ 命令输出
+            - generic [ref=f4e730]: runtime, exit_code, duration_s, timed_out, stdout_head, stderr_head
+            - generic [ref=f4e731]: sess-a1dc4d01fbaf
+          - generic [ref=f4e733] [cursor=pointer]:
+            - generic [ref=f4e734]:
+              - generic "UTC 2026-09-15 17:01:28" [ref=f4e735]: 01:01:28
+              - generic [ref=f4e736]: ⛔ 人工中断
+              - generic [ref=f4e737]: 任务已被删除
+              - generic [ref=f4e738]: sess-a1dc4d01fbaf
+            - generic [ref=f4e739]: "{ \"session_id\": \"sess-a1dc4d01fbaf\", \"task_id\": \"task-44e368403158\", \"note\": \"任务已被删除\" }"
+          - generic [ref=f4e742] [cursor=pointer]:
+            - generic "UTC 2026-09-15 17:01:32" [ref=f4e743]: 01:01:32
+            - generic [ref=f4e744]: ∑ token
+            - generic [ref=f4e745]: Agent · ark-code-latest · ↑7392 ↓541 · ∑4756757
+            - generic [ref=f4e747]: sess-32a8770084ee
+          - generic [ref=f4e750] [cursor=pointer]:
+            - generic "UTC 2026-09-15 17:01:32" [ref=f4e751]: 01:01:32
+            - generic [ref=f4e752]: 💭 思考
+            - generic [ref=f4e753]: 策略顾问建议我补齐目标信息再测试。我当前负责静态走查审计，目标为本地无认证平台，登录限速与锁定策略的评估可作为发现点。我将先核查相关登录相关信息，同步完成认证端…
+            - generic [ref=f4e754]: sess-32a8770084ee
+          - generic [ref=f4e757] [cursor=pointer]:
+            - generic "UTC 2026-09-15 17:01:33" [ref=f4e758]: 01:01:33
+            - generic [ref=f4e759]: session.closed
+            - generic [ref=f4e760]: 人类关闭会话窗口
+            - generic [ref=f4e761]: human
+          - generic [ref=f4e764] [cursor=pointer]:
+            - generic "UTC 2026-09-15 17:01:37" [ref=f4e765]: 01:01:37
+            - generic [ref=f4e766]: ⚡ 执行命令
+            - code [ref=f4e768]: wsl -e bash -c "cd /mnt/e/ILOVCTRY/cyberstrike-pro && sed -n '60,200p' routes_dump.txt && echo ===== && ls workspaces/ 2>/dev/null && ls config/ 2>/dev/null"
+            - generic [ref=f4e769]: sess-32a8770084ee
+          - generic [ref=f4e772] [cursor=pointer]:
+            - generic "UTC 2026-09-15 17:01:37" [ref=f4e773]: 01:01:37
+            - generic [ref=f4e774]: ↳ 命令输出
+            - generic [ref=f4e775]: runtime, exit_code, duration_s, timed_out, stdout_head, stderr_head
+            - generic [ref=f4e776]: sess-32a8770084ee
+          - generic [ref=f4e778] [cursor=pointer]:
+            - generic [ref=f4e779]:
+              - generic "UTC 2026-09-15 17:01:37" [ref=f4e780]: 01:01:37
+              - generic [ref=f4e781]: ⛔ 人工中断
+              - generic [ref=f4e782]: 任务已被删除
+              - generic [ref=f4e783]: sess-32a8770084ee
+            - generic [ref=f4e784]: "{ \"session_id\": \"sess-32a8770084ee\", \"task_id\": \"task-f2c33d2188d3\", \"note\": \"任务已被删除\" }"
+          - generic [ref=f4e787] [cursor=pointer]:
+            - generic "UTC 2026-09-15 17:01:40" [ref=f4e788]: 01:01:40
+            - generic [ref=f4e789]: ∑ token
+            - generic [ref=f4e790]: Agent · ark-code-latest · ↑18763 ↓1581 · ∑4780997
+            - generic [ref=f4e792]: sess-b6a26aa8818d
+          - generic [ref=f4e795] [cursor=pointer]:
+            - generic "UTC 2026-09-15 17:01:40" [ref=f4e796]: 01:01:40
+            - generic [ref=f4e797]: 💭 思考
+            - generic [ref=f4e798]: 策略顾问建议主动差分探测，
+            - generic [ref=f4e799]: sess-b6a26aa8818d
+          - generic [ref=f4e801] [cursor=pointer]:
+            - generic [ref=f4e802]:
+              - generic "UTC 2026-09-15 17:01:40" [ref=f4e803]: 01:01:40
+              - generic [ref=f4e804]: ⛔ 人工中断
+              - generic [ref=f4e805]: 任务已被删除
+              - generic [ref=f4e806]: sess-b6a26aa8818d
+            - generic [ref=f4e807]: "{ \"session_id\": \"sess-b6a26aa8818d\", \"task_id\": \"task-97ce7c3223c8\", \"note\": \"任务已被删除\" }"
+          - generic [ref=f4e809] [cursor=pointer]:
+            - generic [ref=f4e810]:
+              - generic "UTC 2026-09-15 17:01:50" [ref=f4e811]: 01:01:50
+              - generic [ref=f4e812]: 📋 发布任务
+              - generic [ref=f4e813]: 走查-去抖F1：复核错误处理是否泄露内部堆栈信息
+              - generic [ref=f4e814]: human
+            - generic [ref=f4e815]: "{ \"task_id\": \"task-6e24c36016ca\", \"objective\": \"走查-去抖F1：复核错误处理是否泄露内部堆栈信息\", \"task_type\": \"generic\" }"
+          - generic [ref=f4e818] [cursor=pointer]:
+            - generic "UTC 2026-09-15 17:02:02" [ref=f4e819]: 01:02:02
+            - generic [ref=f4e820]: ∑ token
+            - generic [ref=f4e821]: 编排 · ark-code-latest · ↑970 ↓275 · ∑4782242
+            - generic [ref=f4e823]: orchestrator
+          - generic [ref=f4e825] [cursor=pointer]:
+            - generic [ref=f4e826]:
+              - generic "UTC 2026-09-15 17:02:02" [ref=f4e827]: 01:02:02
+              - generic [ref=f4e828]: ✏️ 编辑任务
+              - generic [ref=f4e829]: task_id, by, changes
+              - generic [ref=f4e830]: orchestrator-replan
+            - generic [ref=f4e831]: "{ \"task_id\": \"task-6e24c36016ca\", \"by\": \"orchestrator-replan\", \"changes\": { \"priority\": 3 } }"
+          - generic [ref=f4e834] [cursor=pointer]:
+            - generic "UTC 2026-09-15 17:02:02" [ref=f4e835]: 01:02:02
+            - generic [ref=f4e836]: 🔀 优先级重排
+            - generic [ref=f4e837]: 1 条改级 · 6016ca P5→P3 · 跳过 0
+            - generic [ref=f4e839]: orchestrator
+          - generic [ref=f4e841] [cursor=pointer]:
+            - generic [ref=f4e842]:
+              - generic "UTC 2026-09-15 17:02:14" [ref=f4e843]: 01:02:14
+              - generic [ref=f4e844]: 📋 发布任务
+              - generic [ref=f4e845]: 走查-去抖F2：验证多因素认证接口的暴力破解防护
+              - generic [ref=f4e846]: human
+            - generic [ref=f4e847]: "{ \"task_id\": \"task-873905539265\", \"objective\": \"走查-去抖F2：验证多因素认证接口的暴力破解防护\", \"task_type\": \"generic\" }"
+          - generic [ref=f4e849] [cursor=pointer]:
+            - generic [ref=f4e850]:
+              - generic "UTC 2026-09-15 17:02:14" [ref=f4e851]: 01:02:14
+              - generic [ref=f4e852]: 📋 发布任务
+              - generic [ref=f4e853]: 走查-去抖F3：梳理后台权限矩阵并标记越权高危点
+              - generic [ref=f4e854]: human
+            - generic [ref=f4e855]: "{ \"task_id\": \"task-519fca217ca0\", \"objective\": \"走查-去抖F3：梳理后台权限矩阵并标记越权高危点\", \"task_type\": \"generic\" }"
+          - generic [ref=f4e858] [cursor=pointer]:
+            - generic "UTC 2026-09-15 17:02:48" [ref=f4e859]: 01:02:48
+            - generic [ref=f4e860]: ∑ token
+            - generic [ref=f4e861]: 编排 · ark-code-latest · ↑1109 ↓447 · ∑4783798
+            - generic [ref=f4e863]: orchestrator
+          - generic [ref=f4e865] [cursor=pointer]:
+            - generic [ref=f4e866]:
+              - generic "UTC 2026-09-15 17:02:48" [ref=f4e867]: 01:02:48
+              - generic [ref=f4e868]: ✏️ 编辑任务
+              - generic [ref=f4e869]: task_id, by, changes
+              - generic [ref=f4e870]: orchestrator-replan
+            - generic [ref=f4e871]: "{ \"task_id\": \"task-519fca217ca0\", \"by\": \"orchestrator-replan\", \"changes\": { \"priority\": 2 } }"
+          - generic [ref=f4e873] [cursor=pointer]:
+            - generic [ref=f4e874]:
+              - generic "UTC 2026-09-15 17:02:48" [ref=f4e875]: 01:02:48
+              - generic [ref=f4e876]: ✏️ 编辑任务
+              - generic [ref=f4e877]: task_id, by, changes
+              - generic [ref=f4e878]: orchestrator-replan
+            - generic [ref=f4e879]: "{ \"task_id\": \"task-6e24c36016ca\", \"by\": \"orchestrator-replan\", \"changes\": { \"priority\": 4 } }"
+          - generic [ref=f4e882] [cursor=pointer]:
+            - generic "UTC 2026-09-15 17:02:48" [ref=f4e883]: 01:02:48
+            - generic [ref=f4e884]: 🔀 优先级重排
+            - generic [ref=f4e885]: 2 条改级 · 217ca0 P5→P2，6016ca P3→P4 · 跳过 1
+            - generic [ref=f4e887]: orchestrator
+        - generic [ref=f4e576]:
+          - textbox "插话：向黑板发布一个任务或一条指示…" [ref=f4e577]
+          - button "发送" [disabled]
+      - complementary [ref=f4e578]:
+        - generic [ref=f4e579]:
+          - tablist [ref=f4e580]:
+            - tab "发现" [selected] [ref=f4e581]
+            - tab "资产" [ref=f4e582]
+            - tab "函数库" [ref=f4e583]
+          - tabpanel "发现" [ref=f4e584]:
+            - generic [ref=f4e585]:
+              - generic [ref=f4e586]:
+                - button "全部资产" [ref=f4e588]
+                - generic [ref=f4e592]:
+                  - button "全部" [ref=f4e593]
+                  - button "critical" [ref=f4e594]
+                  - button "high" [ref=f4e595]
+                  - button "medium" [ref=f4e596]
+                  - button "low" [ref=f4e597]
+                  - button "info" [ref=f4e598]
+                - generic [ref=f4e599]:
+                  - button "全部状态" [ref=f4e600]
+                  - button "unverified" [ref=f4e601]
+                  - button "verified" [ref=f4e602]
+              - generic [ref=f4e606]:
+                - generic [ref=f4e607] [cursor=pointer]:
+                  - generic [ref=f4e608]:
+                    - generic [ref=f4e609]: medium
+                    - generic [ref=f4e610]: 走查发现：SQL 注入点 /login id 参数（1789488997）
+                    - generic [ref=f4e611]: human
+                  - generic [ref=f4e612]: walk-ui · 2026-09-16 00:16:37
+                - generic [ref=f4e613] [cursor=pointer]:
+                  - generic [ref=f4e614]:
+                    - generic [ref=f4e615]: medium
+                    - generic [ref=f4e616]: 走查发现：SQL 注入点 /login id 参数
+                    - generic [ref=f4e617]: human
+                  - generic [ref=f4e618]: walk-ui · 2026-09-16 00:11:42
+                - generic [ref=f4e888] [cursor=pointer]:
+                  - generic [ref=f4e889]:
+                    - generic [ref=f4e890]: info
+                    - generic [ref=f4e891]: 会话 Cookie 安全属性审计：API 不签发任何 Cookie，HttpOnly/Secure/SameSite 无适用对象（无鉴权层、仅环回绑定需另评）
+                    - generic [ref=f4e892]: verified
+                    - generic [ref=f4e893]: sess-e2c83c3fd342
+                  - generic [ref=f4e894]: session-cookie-security-audit · 2026-09-16 00:59:58
+                - generic [ref=f4e619] [cursor=pointer]:
+                  - generic [ref=f4e620]:
+                    - generic [ref=f4e621]: info
+                    - generic [ref=f4e622]: 报告交付（重排C）：缓解建议与修复优先级 art-56a847676aa9
+                    - generic [ref=f4e623]: sess-b6a26aa8818d
+                  - generic [ref=f4e624]: assessment-report · 2026-09-16 00:56:24
+      - button "›" [ref=f4e625]

@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from core import autonomy
 from core.agent import AgentConfig, AgentSession
+from core.agent.loop import persisted_snapshot_path
 from core.blackboard import TaskQueue
 from core.blackboard.assets import register_asset
 from core.blackboard.graph import task_graph
@@ -1882,7 +1883,16 @@ def create_app(
 
     @app.get("/api/projects/{pid}/tasks")
     def list_tasks(pid: str, status: str | None = None):
-        return _tq(pid).list_tasks(pid, status=status)
+        rows = _tq(pid).list_tasks(pid, status=status)
+        proj = _project(pid)
+        for r in rows:
+            # E12：failed 行派生 resumable（原会话落盘快照在 → 看板 failed 卡出「▶ 续跑」）
+            resumable = False
+            if r.get("status") == "failed" and r.get("claimed_by"):
+                sp = persisted_snapshot_path(proj.artifacts_dir, r["claimed_by"])
+                resumable = bool(sp and sp.exists())
+            r["resumable"] = resumable
+        return rows
 
     @app.get("/api/projects/{pid}/task-graph")
     def get_task_graph(pid: str):
@@ -1937,6 +1947,45 @@ def create_app(
             raise HTTPException(409, str(e))
         return {"task_id": task_id, "status": "open"}
 
+    @app.post("/api/tasks/{task_id}/resume")
+    def resume_task(task_id: str):
+        """E12 意外终止续跑（限原会话）：人工中断保留的落盘快照复活——
+        reopen（failed→open）+ 原会话重认领 + 提交 worker 从快照/步数断点续跑。
+        budget 快照缺省 +200（与 /sessions/{sid}/resume 同语义，可再 request_steps）。"""
+        pid = _pid_of_task(task_id)
+        tq = TaskQueue(_project(pid).bb)
+        task = tq.get_task(task_id)
+        if task is None:
+            raise HTTPException(404, f"任务不存在: {task_id}")
+        if task["status"] != "failed":
+            raise HTTPException(409, f"任务状态为 {task['status']}，仅失败任务可续跑")
+        sid = task["claimed_by"]
+        if not sid:
+            raise HTTPException(409, "任务无认领会话，请用「放回」重新派发")
+        agent = _ensure_agent(pid, sid)  # closed 会话 404：结束会话不可续跑，只能放回
+        st = agent.revive_snapshot(task_id)
+        if st is None:
+            raise HTTPException(409, "无现场快照，请用「放回」重新派发")
+        try:
+            tq.reopen(task_id, by="human")
+            tq.claim(task_id, sid, lease_minutes=agent.config.lease_minutes)
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+        if st.get("reason") == "budget":
+            old = agent.dispatcher.max_steps
+            agent.dispatcher.max_steps = old + 200
+            _project(pid).bb.append_event(
+                pid, "step.budget_extended",
+                {"session_id": sid, "task_id": task_id,
+                 "old_max": old, "new_max": old + 200, "by": "human"},
+                session_id=sid, author="human")
+        agent._stop_after_task = False  # 清中断一次性闸门，否则 worker 领任务前即退出
+        agent._pause_req.clear()
+        agent._abort_req.clear()
+        _project(pid).bb.set_session_status(sid, "running")
+        _submit_worker(pid, agent, origin="human-resume")
+        return {"task_id": task_id, "session_id": sid, "status": "resumed"}
+
     @app.delete("/api/tasks/{task_id}")
     def delete_task(task_id: str):
         pid = _pid_of_task(task_id)
@@ -1977,6 +2026,9 @@ def create_app(
                         tid, sid, "会话关闭，任务未完成")
                 except Exception:  # noqa: BLE001
                     pass
+        if agent is not None:
+            # E12：closed 会话不可 rehydrate（_ensure_agent 404），快照必成孤儿 → 显式清理
+            agent._clear_snapshot()
         pid = _pid_of_session(sid)
         try:
             _project(pid).bb.close_session(sid)

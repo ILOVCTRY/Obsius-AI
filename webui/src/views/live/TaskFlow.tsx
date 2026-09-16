@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   ReactFlow, ReactFlowProvider, Background, MiniMap, Controls,
-  MarkerType, useReactFlow,
+  MarkerType, useReactFlow, useUpdateNodeInternals,
   type Edge, type NodeChange,
 } from "@xyflow/react"
 import "@xyflow/react/dist/style.css"
@@ -50,6 +50,7 @@ export type TaskFlowProps = {
 
 function Flow({ pid, pausedSids, wsBump, onAttachSession }: TaskFlowProps) {
   const rf = useReactFlow()
+  const updateNodeInternals = useUpdateNodeInternals()
   const [graph, setGraph] = useState<TaskGraph | null>(null)
 
   const load = useCallback(() => {
@@ -67,8 +68,8 @@ function Flow({ pid, pausedSids, wsBump, onAttachSession }: TaskFlowProps) {
   }, [wsBump, load])
 
   // 手动偏移（相对自动槽位，localStorage 按项目持久，只本地不入库）
+  // TaskFlow 在 LiveRoom 以 key={pid} 挂载，换项目即重建，初始化器即可
   const [offsets, setOffsets] = useState<Offsets>(() => loadOffsets(pid))
-  useEffect(() => { setOffsets(loadOffsets(pid)) }, [pid])
   const saveOffsets = useCallback((next: Offsets) => {
     setOffsets(next)
     try { localStorage.setItem(OFFSETS_KEY(pid), JSON.stringify(next)) } catch { /* 满/隐私模式 */ }
@@ -108,15 +109,42 @@ function Flow({ pid, pausedSids, wsBump, onAttachSession }: TaskFlowProps) {
     }
   }, [slots, pid])
 
-  // 首次测量齐了之后 fitView（maxZoom≤1），之后只由人手动触发
-  const fittedRef = useRef(false)
+  // 测量兜底：React StrictMode 开发态双挂载会让全 flow 唯一的 ResizeObserver 在
+  // disconnect 后不重连（节点 effect 误判已初始化不再 observe），dimensions 可能整批不到。
+  // 对全部节点强制重测，收齐即停。注意后台标签页 rAF/RO 被 Chromium 冻结，此时不出边属
+  // 浏览器行为，页面转可见后 RO 补发首包即恢复（生产构建无 StrictMode 双挂载）。
+  const measuredCountRef = useRef(0)
+  useEffect(() => { measuredCountRef.current = Object.keys(measuredById).length })
   useEffect(() => {
-    if (fittedRef.current || !graph || graph.nodes.length === 0) return
+    if (!graph || graph.nodes.length === 0) return
+    const total = graph.nodes.length
+    let tries = 0
+    let timer: ReturnType<typeof setTimeout>
+    const tick = () => {
+      if (measuredCountRef.current >= total) return
+      if (tries++ >= 40) return // 至多 ~2.4s；3s 轮询换 graph 后会再起一轮
+      updateNodeInternals(graph.nodes.map((n) => n.id))
+      timer = setTimeout(tick, 60)
+    }
+    timer = setTimeout(tick, 0)
+    return () => clearTimeout(timer)
+  }, [graph, updateNodeInternals])
+
+  // 全部节点测量完成才 fitView，避免视口在未测量时算错；边始终正常供给，无需两阶段喂边。
+  const [ready, setReady] = useState(false)
+  useEffect(() => {
+    if (ready || !graph || graph.nodes.length === 0) return
     if (!graph.nodes.every((n) => measuredById[n.id])) return
-    fittedRef.current = true
+    const t = setTimeout(() => setReady(true))
+    return () => clearTimeout(t)
+  }, [ready, graph, measuredById])
+
+  // 定型挂载后 fitView（maxZoom≤1）一次，之后只由人手动触发
+  useEffect(() => {
+    if (!ready) return
     const raf = requestAnimationFrame(() => rf.fitView({ padding: 0.15, maxZoom: 1 }))
     return () => cancelAnimationFrame(raf)
-  }, [graph, measuredById, rf])
+  }, [ready, rf])
 
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null)
   const selectedEdge: TaskGraphEdge | null = useMemo(

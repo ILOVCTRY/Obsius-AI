@@ -1,0 +1,65 @@
+- generic [ref=f5e3]:
+  - generic [ref=f5e4]:
+    - heading "项目" [level=1] [ref=f5e5]
+    - paragraph [ref=f5e6]: 项目 = 场景轨（单选）× 能力包（多选）；数据随 workspaces/ 项目目录隔离
+  - generic [ref=f5e7]:
+    - generic [ref=f5e8]: 新建项目
+    - generic [ref=f5e10]:
+      - generic [ref=f5e11]:
+        - textbox "项目名（可用中文）" [ref=f5e12]
+        - button "创建" [disabled]
+      - generic [ref=f5e13]:
+        - generic [ref=f5e14]: 场景轨
+        - button "授权评估" [ref=f5e15]
+        - button "CTF" [ref=f5e16]
+        - button "研究" [ref=f5e17]
+      - generic [ref=f5e18]:
+        - generic [ref=f5e19]: 能力包
+        - button "二进制" [ref=f5e20]
+        - button "密码学" [ref=f5e21]
+        - button "取证" [ref=f5e22]
+        - button "杂项" [ref=f5e23]
+        - button "Web 攻防" [ref=f5e24]
+  - generic [ref=f5e25]:
+    - button "授权评估 · Web 批4走查-L1开窗 proj-ea1f6ac22698 2026-09-15 删除 批4走查-L1开窗" [ref=f5e26] [cursor=pointer]:
+      - generic [ref=f5e27]: 授权评估 · Web
+      - generic [ref=f5e28]:
+        - generic [ref=f5e29]: 批4走查-L1开窗
+        - generic [ref=f5e30]: proj-ea1f6ac22698
+      - generic "UTC 2026-09-15 07:36:07" [ref=f5e31]: 2026-09-15
+      - button "删除 批4走查-L1开窗" [ref=f5e32]
+    - button "CTF · 二进制/杂项 A组端到端走查 proj-a70916a0aa74 2026-09-15 删除 A组端到端走查" [ref=f5e33] [cursor=pointer]:
+      - generic [ref=f5e34]: CTF · 二进制/杂项
+      - generic [ref=f5e35]:
+        - generic [ref=f5e36]: A组端到端走查
+        - generic [ref=f5e37]: proj-a70916a0aa74
+      - generic "UTC 2026-09-15 15:33:15" [ref=f5e38]: 2026-09-15
+      - button "删除 A组端到端走查" [ref=f5e39]
+    - button "授权评估 · Web 中原工学院 proj-c6cf7859135f 2026-09-16 删除 中原工学院" [ref=f5e40] [cursor=pointer]:
+      - generic [ref=f5e41]: 授权评估 · Web
+      - generic [ref=f5e42]:
+        - generic [ref=f5e43]: 中原工学院
+        - generic [ref=f5e44]: proj-c6cf7859135f
+      - generic "UTC 2026-09-15 16:05:06" [ref=f5e45]: 2026-09-16
+      - button "删除 中原工学院" [ref=f5e46]
+    - button "授权评估 · Web assessment 编排演练-Pikachu proj-9f7ee28609e7 2026-09-13 删除 assessment 编排演练-Pikachu" [ref=f5e47] [cursor=pointer]:
+      - generic [ref=f5e48]: 授权评估 · Web
+      - generic [ref=f5e49]:
+        - generic [ref=f5e50]: assessment 编排演练-Pikachu
+        - generic [ref=f5e51]: proj-9f7ee28609e7
+      - generic "UTC 2026-09-13 14:08:10" [ref=f5e52]: 2026-09-13
+      - button "删除 assessment 编排演练-Pikachu" [ref=f5e53]
+    - button "授权评估 · Web pentest 编排演练-Pikachu proj-63dd10c7d1a6 2026-09-13 删除 pentest 编排演练-Pikachu" [ref=f5e54] [cursor=pointer]:
+      - generic [ref=f5e55]: 授权评估 · Web
+      - generic [ref=f5e56]:
+        - generic [ref=f5e57]: pentest 编排演练-Pikachu
+        - generic [ref=f5e58]: proj-63dd10c7d1a6
+      - generic "UTC 2026-09-12 17:59:51" [ref=f5e59]: 2026-09-13
+      - button "删除 pentest 编排演练-Pikachu" [ref=f5e60]
+    - button "研究 · 二进制 rev真机走查 proj-e193f14eb587 2026-09-14 删除 rev真机走查" [ref=f5e61] [cursor=pointer]:
+      - generic [ref=f5e62]: 研究 · 二进制
+      - generic [ref=f5e63]:
+        - generic [ref=f5e64]: rev真机走查
+        - generic [ref=f5e65]: proj-e193f14eb587
+      - generic "UTC 2026-09-14 04:36:24" [ref=f5e66]: 2026-09-14
+      - button "删除 rev真机走查" [ref=f5e67]

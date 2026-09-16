@@ -1,0 +1,24 @@
+﻿29: from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
+31: from starlette.websockets import WebSocketState
+627: api_key: str = ""        # 读出脱敏；保存空串=保持原 key
+639: api_key: str | None = None
+643: name: str | None = None       # 已保存供应商：用其 base_url/key（api_key 字段可覆盖）
+645: api_key: str | None = None
+733: async def _bb_closed_handler(request, exc):  # noqa: ANN001
+1197: except PermissionError as e:  # 重试耗尽仍有句柄（外部进程占用）
+1939: agent.request_pause()
+1968: agent.request_abort()
+2063: 已保存供应商给 name；未保存的新供应商给 base_url+api_key。"""
+2068: if body.base_url and body.api_key:
+2069: return llm_store.discover_credentials(body.base_url, body.api_key)
+2070: raise ProviderError("须提供已保存供应商 name，或 base_url+api_key")
+2084: api_key = body.api_key or llm_store.resolve_key(p)
+2086: if not body.base_url or not body.api_key:
+2087: return {"ok": False, "error": "未保存供应商须填 base_url 与 api_key"}
+2088: base_url, api_key = body.base_url, body.api_key
+2089: probe_credentials(base_url, api_key, body.model)
+3370: # ---------- WebSocket 事件流 ----------
+3372: @app.websocket("/api/ws/projects/{pid}")
+3373: async def ws_events(ws: WebSocket, pid: str, since_id: int = 0):
+3378: if ws.application_state != WebSocketState.DISCONNECTED:
+3414: except WebSocketDisconnect:

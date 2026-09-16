@@ -195,6 +195,10 @@ export const api = {
     }),
   reopenTask: (taskId: string) =>
     http<{ status: string }>(`/api/tasks/${taskId}/reopen`, { method: "POST" }),
+  // E12 意外终止续跑（限原会话）：reopen + 原会话载落盘快照 + 提交 worker
+  resumeTask: (taskId: string) =>
+    http<{ task_id: string; session_id: string; status: string }>(
+      `/api/tasks/${taskId}/resume`, { method: "POST" }),
   deleteTask: (taskId: string) =>
     http<{ deleted: string }>(`/api/tasks/${taskId}`, { method: "DELETE" }),
   closeSession: (sid: string) =>

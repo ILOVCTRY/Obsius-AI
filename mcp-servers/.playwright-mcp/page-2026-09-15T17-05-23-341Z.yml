@@ -1,0 +1,99 @@
+- generic [ref=f4e68]:
+  - banner [ref=f4e69]:
+    - generic [ref=f4e70]: CTF · 二进制/杂项
+    - heading "A组端到端走查" [level=1] [ref=f4e71]
+    - generic [ref=f4e72]: 任务 1/15 · 发现 4 · 资产 3
+    - button "🔔 审批" [ref=f4e73]
+    - button "← 项目" [ref=f4e74]
+  - generic [ref=f4e75]:
+    - navigation [ref=f4e76]:
+      - button "◈ 项目" [ref=f4e77]:
+        - generic [ref=f4e78]: ◈
+        - text: 项目
+      - button "◉ 直播间" [ref=f4e79]:
+        - generic [ref=f4e80]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=f4e81]:
+        - generic [ref=f4e82]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=f4e83]:
+        - generic [ref=f4e84]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=f4e85]:
+        - generic [ref=f4e86]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=f4e87]:
+        - generic [ref=f4e88]: ⚙
+        - text: 技能/设置
+    - main [ref=f4e89]:
+      - generic [ref=f4e91]:
+        - generic [ref=f4e92]:
+          - generic [ref=f4e93]:
+            - button "全部" [ref=f4e94]
+            - button "Orchestrator" [ref=f4e95]
+          - generic [ref=f4e96]:
+            - button "直播" [ref=f4e97]
+            - button "任务流" [ref=f4e98]
+          - generic [ref=f4e104]: ● live
+        - generic [ref=f4e896]:
+          - application [ref=f4e897]:
+            - img "Mini Map" [ref=f4e901]
+            - generic "Control Panel" [ref=f4e902]:
+              - button "Zoom In" [ref=f4e903] [cursor=pointer]
+              - button "Zoom Out" [ref=f4e906] [cursor=pointer]
+              - button "Fit View" [ref=f4e909] [cursor=pointer]
+          - generic [ref=f4e913]:
+            - generic [ref=f4e914]: 任务流
+            - generic [ref=f4e915]: 分解
+            - generic [ref=f4e917]: ✉ 私信
+            - generic [ref=f4e919]: 双击节点挂回会话 / 跳看板
+            - button "重置布局（清除手动位置）" [ref=f4e920]
+            - button "适应视图" [ref=f4e924]
+      - complementary [ref=f4e578]:
+        - generic [ref=f4e579]:
+          - tablist [ref=f4e580]:
+            - tab "发现" [selected] [ref=f4e581]
+            - tab "资产" [ref=f4e582]
+            - tab "函数库" [ref=f4e583]
+          - tabpanel "发现" [ref=f4e584]:
+            - generic [ref=f4e585]:
+              - generic [ref=f4e586]:
+                - button "全部资产" [ref=f4e588]
+                - generic [ref=f4e592]:
+                  - button "全部" [ref=f4e593]
+                  - button "critical" [ref=f4e594]
+                  - button "high" [ref=f4e595]
+                  - button "medium" [ref=f4e596]
+                  - button "low" [ref=f4e597]
+                  - button "info" [ref=f4e598]
+                - generic [ref=f4e599]:
+                  - button "全部状态" [ref=f4e600]
+                  - button "unverified" [ref=f4e601]
+                  - button "verified" [ref=f4e602]
+              - generic [ref=f4e606]:
+                - generic [ref=f4e607] [cursor=pointer]:
+                  - generic [ref=f4e608]:
+                    - generic [ref=f4e609]: medium
+                    - generic [ref=f4e610]: 走查发现：SQL 注入点 /login id 参数（1789488997）
+                    - generic [ref=f4e611]: human
+                  - generic [ref=f4e612]: walk-ui · 2026-09-16 00:16:37
+                - generic [ref=f4e613] [cursor=pointer]:
+                  - generic [ref=f4e614]:
+                    - generic [ref=f4e615]: medium
+                    - generic [ref=f4e616]: 走查发现：SQL 注入点 /login id 参数
+                    - generic [ref=f4e617]: human
+                  - generic [ref=f4e618]: walk-ui · 2026-09-16 00:11:42
+                - generic [ref=f4e888] [cursor=pointer]:
+                  - generic [ref=f4e889]:
+                    - generic [ref=f4e890]: info
+                    - generic [ref=f4e891]: 会话 Cookie 安全属性审计：API 不签发任何 Cookie，HttpOnly/Secure/SameSite 无适用对象（无鉴权层、仅环回绑定需另评）
+                    - generic [ref=f4e892]: verified
+                    - generic [ref=f4e893]: sess-e2c83c3fd342
+                  - generic [ref=f4e894]: session-cookie-security-audit · 2026-09-16 00:59:58
+                - generic [ref=f4e619] [cursor=pointer]:
+                  - generic [ref=f4e620]:
+                    - generic [ref=f4e621]: info
+                    - generic [ref=f4e622]: 报告交付（重排C）：缓解建议与修复优先级 art-56a847676aa9
+                    - generic [ref=f4e623]: sess-b6a26aa8818d
+                  - generic [ref=f4e624]: assessment-report · 2026-09-16 00:56:24
+      - button "›" [ref=f4e625]

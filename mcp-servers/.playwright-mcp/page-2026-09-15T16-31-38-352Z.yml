@@ -1,0 +1,151 @@
+- generic [ref=f1e3]:
+  - banner [ref=f1e4]:
+    - generic [ref=f1e5]: CTF · 二进制/杂项
+    - heading "A组端到端走查" [level=1] [ref=f1e6]
+    - generic [ref=f1e7]: 任务 0/4 · 发现 2 · 资产 0
+    - button "🔔 审批" [ref=f1e8]
+    - button "← 项目" [ref=f1e9]
+  - generic [ref=f1e10]:
+    - navigation [ref=f1e11]:
+      - button "◈ 项目" [ref=f1e12]:
+        - generic [ref=f1e13]: ◈
+        - text: 项目
+      - button "◉ 直播间" [ref=f1e14]:
+        - generic [ref=f1e15]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=f1e16]:
+        - generic [ref=f1e17]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=f1e18]:
+        - generic [ref=f1e19]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=f1e20]:
+        - generic [ref=f1e21]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=f1e22]:
+        - generic [ref=f1e23]: ⚙
+        - text: 技能/设置
+    - main [ref=f1e24]:
+      - generic [ref=f1e316]:
+        - generic [ref=f1e317]:
+          - generic [ref=f1e318]:
+            - button "全部" [ref=f1e319]
+            - button "Orchestrator" [ref=f1e320]
+            - button "finished _generalist 分离页签 _generalist（任务后台继续）" [ref=f1e321]:
+              - generic "finished" [ref=f1e322]
+              - text: _generalist
+              - button "分离页签 _generalist（任务后台继续）" [ref=f1e323]
+            - button "finished _generalist 分离页签 _generalist（任务后台继续）" [ref=f1e327]:
+              - generic "finished" [ref=f1e328]
+              - text: _generalist
+              - button "分离页签 _generalist（任务后台继续）" [ref=f1e329]
+            - button "idle _generalist 分离页签 _generalist（任务后台继续）" [ref=f1e333]:
+              - generic "idle" [ref=f1e334]
+              - text: _generalist
+              - button "分离页签 _generalist（任务后台继续）" [ref=f1e335]
+            - button "idle 走查-私信UI 1 分离页签 走查-私信UI（任务后台继续）" [ref=f1e339]:
+              - generic "idle" [ref=f1e340]
+              - text: 走查-私信UI
+              - generic "有系统私信（依据撤回需自评 / 发现增补通知）" [ref=f1e341]: "1"
+              - button "分离页签 走查-私信UI（任务后台继续）" [ref=f1e342]
+            - button "idle 走查-私信UI 1 分离页签 走查-私信UI（任务后台继续）" [ref=f1e346]:
+              - generic "idle" [ref=f1e347]
+              - text: 走查-私信UI
+              - generic "有系统私信（依据撤回需自评 / 发现增补通知）" [ref=f1e348]: "1"
+              - button "分离页签 走查-私信UI（任务后台继续）" [ref=f1e349]
+            - button "idle 走查-私信UI 分离页签 走查-私信UI（任务后台继续）" [ref=f1e353]:
+              - generic "idle" [ref=f1e354]
+              - text: 走查-私信UI
+              - button "分离页签 走查-私信UI（任务后台继续）" [ref=f1e355]
+          - generic [ref=f1e359]:
+            - button "直播" [ref=f1e360]
+            - button "任务流" [ref=f1e361]
+          - generic [ref=f1e367]: ● live
+        - generic [ref=f1e473]:
+          - application [ref=f1e474]:
+            - generic [ref=f1e476]:
+              - generic:
+                - generic:
+                  - img:
+                    - group "Edge from task-2d6a005a87f5 to task-7581125eab3b" [ref=f1e507] [cursor=pointer]
+                - generic "发现增补：走查发现：SQL 注入点 /login id 参数" [ref=f1e511]: ✉
+                - generic:
+                  - group [ref=f1e512]:
+                    - generic "双击挂回该认领会话的直播页签" [ref=f1e513]:
+                      - generic [ref=f1e516]:
+                        - generic [ref=f1e517]: generic
+                        - generic [ref=f1e518]: 失败
+                        - generic [ref=f1e519]: P2
+                      - paragraph [ref=f1e520]: 知识库通读任务：用 kb_open 依次打开并通读 ctf-misc 知识库里至少 3 篇不同文档（每次读完简述要点），最后汇总成一份阅读笔记再 complete_task。全程被动，不执行命令。
+                      - generic "认领会话：_generalist" [ref=f1e522]: ● _generalist
+                  - group [ref=f1e524]:
+                    - generic "双击挂回该认领会话的直播页签" [ref=f1e525]:
+                      - generic [ref=f1e528]:
+                        - generic [ref=f1e529]: generic
+                        - generic [ref=f1e530]: 执行中
+                        - generic [ref=f1e531]: P3
+                      - paragraph [ref=f1e532]: 走查：依据 find-b8f753d6e41d 验证注入并评估危害
+                      - generic "认领会话：走查-私信UI" [ref=f1e534]: ● 走查-私信UI
+                  - group [ref=f1e536]:
+                    - generic "双击挂回该认领会话的直播页签" [ref=f1e537]:
+                      - generic [ref=f1e540]:
+                        - generic [ref=f1e541]: generic
+                        - generic [ref=f1e542]: 执行中
+                        - generic [ref=f1e543]: P3
+                      - paragraph [ref=f1e544]: 走查：依据 find-b8f753d6e41d 验证注入并评估危害
+                      - generic "认领会话：走查-私信UI" [ref=f1e546]: ● 走查-私信UI
+                  - group [ref=f1e548]:
+                    - generic "双击挂回该认领会话的直播页签" [ref=f1e549]:
+                      - generic [ref=f1e552]:
+                        - generic [ref=f1e553]: generic
+                        - generic [ref=f1e554]: 执行中
+                        - generic [ref=f1e555]: P3
+                      - paragraph [ref=f1e556]: 走查：依据 find-7086c828969a 验证注入并评估危害
+                      - generic "认领会话：走查-私信UI" [ref=f1e558]: ● 走查-私信UI
+            - img "Mini Map" [ref=f1e478]
+            - generic "Control Panel" [ref=f1e479]:
+              - button "Zoom In" [ref=f1e480] [cursor=pointer]
+              - button "Zoom Out" [ref=f1e483] [cursor=pointer]
+              - button "Fit View" [ref=f1e486] [cursor=pointer]
+          - generic [ref=f1e490]:
+            - generic [ref=f1e491]: 任务流
+            - generic [ref=f1e492]: 分解
+            - generic [ref=f1e494]: ✉ 私信
+            - generic [ref=f1e496]: 双击节点挂回会话 / 跳看板
+            - button "重置布局（清除手动位置）" [ref=f1e497]
+            - button "适应视图" [ref=f1e501]
+      - complementary [ref=f1e430]:
+        - generic [ref=f1e431]:
+          - tablist [ref=f1e432]:
+            - tab "发现" [selected] [ref=f1e433]
+            - tab "资产" [ref=f1e434]
+            - tab "函数库" [ref=f1e435]
+          - tabpanel "发现" [ref=f1e436]:
+            - generic [ref=f1e437]:
+              - generic [ref=f1e438]:
+                - button "全部资产" [ref=f1e440]
+                - generic [ref=f1e444]:
+                  - button "全部" [ref=f1e445]
+                  - button "critical" [ref=f1e446]
+                  - button "high" [ref=f1e447]
+                  - button "medium" [ref=f1e448]
+                  - button "low" [ref=f1e449]
+                  - button "info" [ref=f1e450]
+                - generic [ref=f1e451]:
+                  - button "全部状态" [ref=f1e452]
+                  - button "unverified" [ref=f1e453]
+                  - button "verified" [ref=f1e454]
+              - generic [ref=f1e458]:
+                - generic [ref=f1e459] [cursor=pointer]:
+                  - generic [ref=f1e460]:
+                    - generic [ref=f1e461]: medium
+                    - generic [ref=f1e462]: 走查发现：SQL 注入点 /login id 参数（1789488997）
+                    - generic [ref=f1e463]: human
+                  - generic [ref=f1e464]: walk-ui · 2026-09-16 00:16:37
+                - generic [ref=f1e465] [cursor=pointer]:
+                  - generic [ref=f1e466]:
+                    - generic [ref=f1e467]: medium
+                    - generic [ref=f1e468]: 走查发现：SQL 注入点 /login id 参数
+                    - generic [ref=f1e469]: human
+                  - generic [ref=f1e470]: walk-ui · 2026-09-16 00:11:42
+      - button "›" [ref=f1e471]

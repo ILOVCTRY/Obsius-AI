@@ -1,0 +1,320 @@
+- generic [ref=f5e68]:
+  - banner [ref=f5e69]:
+    - generic [ref=f5e70]: CTF · 二进制/杂项
+    - heading "A组端到端走查" [level=1] [ref=f5e71]
+    - generic [ref=f5e72]: 任务 1/17 · 发现 4 · 资产 3
+    - button "🔔 审批" [ref=f5e73]
+    - button "← 项目" [ref=f5e74]
+  - generic [ref=f5e75]:
+    - navigation [ref=f5e76]:
+      - button "◈ 项目" [ref=f5e77]:
+        - generic [ref=f5e78]: ◈
+        - text: 项目
+      - button "◉ 直播间" [ref=f5e79]:
+        - generic [ref=f5e80]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=f5e81]:
+        - generic [ref=f5e82]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=f5e83]:
+        - generic [ref=f5e84]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=f5e85]:
+        - generic [ref=f5e86]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=f5e87]:
+        - generic [ref=f5e88]: ⚙
+        - text: 技能/设置
+    - main [ref=f5e89]:
+      - generic [ref=f5e91]:
+        - generic [ref=f5e92]:
+          - generic [ref=f5e93]:
+            - button "全部" [ref=f5e94]
+            - button "Orchestrator" [ref=f5e95]
+            - button "idle 走查-流图私信A 分离页签 走查-流图私信A（任务后台继续）" [ref=f5e96]:
+              - generic "idle" [ref=f5e97]
+              - text: 走查-流图私信A
+              - button "分离页签 走查-流图私信A（任务后台继续）" [ref=f5e98]
+            - button "idle 走查-流图私信B 分离页签 走查-流图私信B（任务后台继续）" [ref=f5e102]:
+              - generic "idle" [ref=f5e103]
+              - text: 走查-流图私信B
+              - button "分离页签 走查-流图私信B（任务后台继续）" [ref=f5e104]
+            - button "paused 走查-流图暂停 分离页签 走查-流图暂停（任务后台继续）" [ref=f5e108]:
+              - generic "paused" [ref=f5e109]
+              - text: 走查-流图暂停
+              - button "分离页签 走查-流图暂停（任务后台继续）" [ref=f5e110]
+          - generic [ref=f5e114]:
+            - button "直播" [ref=f5e115]
+            - button "任务流" [ref=f5e116]
+          - generic [ref=f5e122]: ● live
+        - generic [ref=f5e123]:
+          - combobox "通用 · 通用 CTF 选手：分诊、解题全链路" [ref=f5e124]:
+            - option "通用 · 通用 CTF 选手：分诊、解题全链路" [selected]
+            - option "recon · 静态分诊：只看不跑，快速给出文件类型/保护/建议下一步"
+            - option "reverse · 逆向：函数定位、算法还原、func_kb 协作、求解验证"
+          - combobox "开窗供应商（缺省=全局默认供应商）" [ref=f5e125]:
+            - option "默认供应商" [selected]
+            - option "ark-plan"
+            - option "ark-coding"
+          - combobox "开窗模型（缺省=该供应商首个模型）" [ref=f5e126]:
+            - option "默认模型（ark-code-latest）" [selected]
+            - option "ark-code-latest"
+            - option "deepseek-v4-flash"
+            - option "glm-5-3-flash-260828"
+          - button "开窗" [ref=f5e127]
+          - generic "项目自主级别（§6.8：L0 全手动 / L1 任务自动·开窗审批 / L2 全自动链）；安全层任何档位不放松" [ref=f5e128]:
+            - button "L0" [ref=f5e129]
+            - button "L1" [ref=f5e130]
+            - button "L2" [ref=f5e131]
+          - button "⏸ 暂停自动" [ref=f5e132]
+          - button "∑ 4.8M 📋 0 🪟 3/4" [ref=f5e134]:
+            - generic [ref=f5e135]: ∑ 4.8M
+            - generic [ref=f5e136]: 📋 0
+            - generic [ref=f5e137]: 🪟 3/4
+          - button "编排一轮" [ref=f5e139]
+          - button "重排优先级" [ref=f5e140]
+          - button "复盘沉淀" [ref=f5e141]
+        - generic [ref=f5e142]:
+          - button "全部" [ref=f5e143]
+          - button "思考" [ref=f5e144]
+          - button "决策" [ref=f5e145]
+          - button "路由" [ref=f5e146]
+          - button "命令" [ref=f5e147]
+          - button "发现" [ref=f5e148]
+        - generic [ref=f5e150]:
+          - generic [ref=f5e152] [cursor=pointer]:
+            - generic [ref=f5e153]:
+              - generic "UTC 2026-09-15 15:33:52" [ref=f5e154]: 23:33:52
+              - generic [ref=f5e155]: 📋 发布任务
+              - generic [ref=f5e156]: 侦察任务：用 bb_query 通读当前黑板（资产、发现、任务），输出三条下一步分析建议后调用 complete_task 结束。保持被动分析，不执行任何外部命令。
+              - generic [ref=f5e157]: human
+            - generic [ref=f5e158]: "{ \"task_id\": \"task-4a9ef7a51e64\", \"objective\": \"侦察任务：用 bb_query 通读当前黑板（资产、发现、任务），输出三条下一步分析建议后调用 complete_task 结束。保持被动分析，不执行任何外部命令。\", \"task_type\": \"generic\" }"
+          - generic [ref=f5e161] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:34:35" [ref=f5e162]: 23:34:35
+            - generic [ref=f5e163]: 🔧 认领任务
+            - generic [ref=f5e164]: task_id, session_id, lease_until
+            - generic [ref=f5e165]: system
+          - generic [ref=f5e168] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:34:35" [ref=f5e169]: 23:34:35
+            - generic [ref=f5e170]: 🎯 技能路由
+            - generic [ref=f5e171]: 未命中 · 侦察任务：用 bb_query 通读当前黑板（资产、发现、任务），输出三条下一步分析建议后调用 co
+            - generic [ref=f5e173]: sess-a2a0f0143780
+          - generic [ref=f5e176] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:34:41" [ref=f5e177]: 23:34:41
+            - generic [ref=f5e178]: ∑ token
+            - generic [ref=f5e179]: Agent · ark-code-latest · ↑4647 ↓181 · ∑4828
+            - generic [ref=f5e181]: sess-a2a0f0143780
+          - generic [ref=f5e184] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:34:41" [ref=f5e185]: 23:34:41
+            - generic [ref=f5e186]: 💭 思考
+            - generic [ref=f5e187]: "Let me start by understanding the task: I need to do reconnaissance by querying …"
+            - generic [ref=f5e188]: sess-a2a0f0143780
+          - generic [ref=f5e190] [cursor=pointer]:
+            - generic [ref=f5e191]:
+              - generic "UTC 2026-09-15 15:34:41" [ref=f5e192]: 23:34:41
+              - generic [ref=f5e193]: 📐 制定计划
+              - generic [ref=f5e194]: 4 步 · 完成 0/4
+              - generic [ref=f5e196]: system
+            - generic [ref=f5e197]: "{ \"task_id\": \"task-4a9ef7a51e64\", \"session_id\": \"sess-a2a0f0143780\", \"plan\": [ { \"id\": \"p1\", \"title\": \"查询黑板资产（assets），梳理已登记目标与范围\", \"status\": \"todo\", \"ts\": \"2026-09-15T15:34:41+00:00\" }, { \"id\": \"p2\", \"title\": \"查询黑板发现（findings），梳理已有漏洞/线索及证据状态\", \"status\": \"todo\", \"ts\": \"2026-09-15T15:34:41+00:00\" }, { \"id\": \"p3\", \"title\": \"查询黑板任务（tasks），了解进行中/已完成的分析分工\", \"status\": \"todo\", \"ts\": \"2026-09-15T15:34:41+00:00\" }, { \"id\": \"p4\", \"title\": \"汇总态势，输出三条下一步分析建议并 complete_task\", \"status\": \"todo\", \"ts\": \"2026-09-15T15:34:41+00:00\" } ] }"
+          - generic [ref=f5e200] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:34:52" [ref=f5e201]: 23:34:52
+            - generic [ref=f5e202]: ∑ token
+            - generic [ref=f5e203]: Agent · ark-code-latest · ↑1055 ↓422 · ∑10201
+            - generic [ref=f5e205]: sess-a2a0f0143780
+          - generic [ref=f5e208] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:34:52" [ref=f5e209]: 23:34:52
+            - generic [ref=f5e210]: 💭 思考
+            - generic [ref=f5e211]: Now let me start step 1 and query the blackboard. I've confirmed three independ…
+            - generic [ref=f5e212]: sess-a2a0f0143780
+          - generic [ref=f5e215] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:34:52" [ref=f5e216]: 23:34:52
+            - generic [ref=f5e217]: ▦ 计划步进
+            - generic [ref=f5e218]: p1 → doing
+            - generic [ref=f5e220]: system
+          - generic [ref=f5e223] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:34:56" [ref=f5e224]: 23:34:56
+            - generic [ref=f5e225]: ∑ token
+            - generic [ref=f5e226]: Agent · ark-code-latest · ↑567 ↓114 · ∑15802
+            - generic [ref=f5e228]: sess-a2a0f0143780
+          - generic [ref=f5e231] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:34:56" [ref=f5e232]: 23:34:56
+            - generic [ref=f5e233]: 💭 思考
+            - generic [ref=f5e234]: The tool calls seem to have returned empty. The queries may have returned invis…
+            - generic [ref=f5e235]: sess-a2a0f0143780
+          - generic [ref=f5e238] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:34:59" [ref=f5e239]: 23:34:59
+            - generic [ref=f5e240]: ∑ token
+            - generic [ref=f5e241]: Agent · ark-code-latest · ↑692 ↓67 · ∑21481
+            - generic [ref=f5e243]: sess-a2a0f0143780
+          - generic [ref=f5e246] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:34:59" [ref=f5e247]: 23:34:59
+            - generic [ref=f5e248]: 💭 思考
+            - generic [ref=f5e249]: Assets is empty. Query findings and tasks.
+            - generic [ref=f5e250]: sess-a2a0f0143780
+          - generic [ref=f5e253] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:35:03" [ref=f5e254]: 23:35:03
+            - generic [ref=f5e255]: ∑ token
+            - generic [ref=f5e256]: Agent · ark-code-latest · ↑774 ↓77 · ∑27252
+            - generic [ref=f5e258]: sess-a2a0f0143780
+          - generic [ref=f5e261] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:35:03" [ref=f5e262]: 23:35:03
+            - generic [ref=f5e263]: 💭 思考
+            - generic [ref=f5e264]: Findings empty too. Query tasks again for results.
+            - generic [ref=f5e265]: sess-a2a0f0143780
+          - generic [ref=f5e268] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:35:08" [ref=f5e269]: 23:35:08
+            - generic [ref=f5e270]: ∑ token
+            - generic [ref=f5e271]: Agent · ark-code-latest · ↑940 ↓108 · ∑33220
+            - generic [ref=f5e273]: sess-a2a0f0143780
+          - generic [ref=f5e276] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:35:08" [ref=f5e277]: 23:35:08
+            - generic [ref=f5e278]: 💭 思考
+            - generic [ref=f5e279]: Events query result wasn't shown. Verification shows assets, findings and other…
+            - generic [ref=f5e280]: sess-a2a0f0143780
+          - generic [ref=f5e283] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:35:37" [ref=f5e284]: 23:35:37
+            - generic [ref=f5e285]: ∑ token
+            - generic [ref=f5e286]: Agent · ark-code-latest · ↑2754 ↓1071 · ∑41965
+            - generic [ref=f5e288]: sess-a2a0f0143780
+          - generic [ref=f5e291] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:35:37" [ref=f5e292]: 23:35:37
+            - generic [ref=f5e293]: 💭 思考
+            - generic [ref=f5e294]: "Now I have the full picture:"
+            - generic [ref=f5e295]: sess-a2a0f0143780
+          - generic [ref=f5e298] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:35:37" [ref=f5e299]: 23:35:37
+            - generic [ref=f5e300]: ▦ 计划步进
+            - generic [ref=f5e301]: p1 → done
+            - generic [ref=f5e303]: system
+          - generic [ref=f5e306] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:35:37" [ref=f5e307]: 23:35:37
+            - generic [ref=f5e308]: ▦ 计划步进
+            - generic [ref=f5e309]: p2 → done
+            - generic [ref=f5e311]: system
+          - generic [ref=f5e314] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:35:38" [ref=f5e315]: 23:35:38
+            - generic [ref=f5e316]: ▦ 计划步进
+            - generic [ref=f5e317]: p3 → done
+            - generic [ref=f5e319]: system
+          - generic [ref=f5e322] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:35:54" [ref=f5e323]: 23:35:54
+            - generic [ref=f5e324]: ∑ token
+            - generic [ref=f5e325]: Agent · ark-code-latest · ↑1885 ↓591 · ∑51409
+            - generic [ref=f5e327]: sess-a2a0f0143780
+          - generic [ref=f5e330] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:35:54" [ref=f5e331]: 23:35:54
+            - generic [ref=f5e332]: 💭 思考
+            - generic [ref=f5e333]: Now mark p4 done and complete the task with the three suggestions. I'll put sug…
+            - generic [ref=f5e334]: sess-a2a0f0143780
+          - generic [ref=f5e337] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:35:54" [ref=f5e338]: 23:35:54
+            - generic [ref=f5e339]: ▦ 计划步进
+            - generic [ref=f5e340]: p4 → done
+            - generic [ref=f5e342]: system
+          - generic [ref=f5e345] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:36:04" [ref=f5e346]: 23:36:04
+            - generic [ref=f5e347]: ∑ token
+            - generic [ref=f5e348]: Agent · ark-code-latest · ↑1549 ↓390 · ∑61340
+            - generic [ref=f5e350]: sess-a2a0f0143780
+          - generic [ref=f5e353] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:36:04" [ref=f5e354]: 23:36:04
+            - generic [ref=f5e355]: 💭 思考
+            - generic [ref=f5e356]: Now complete the task with the summary.
+            - generic [ref=f5e357]: sess-a2a0f0143780
+          - generic [ref=f5e359] [cursor=pointer]:
+            - generic [ref=f5e360]:
+              - generic "UTC 2026-09-15 15:36:04" [ref=f5e361]: 23:36:04
+              - generic [ref=f5e362]: ✅ 任务完成
+              - generic [ref=f5e363]: 侦察完成（全程被动，仅 bb_query，未执行外部命令）。 黑板态势：assets=[]、findings=[]、tasks 仅本任务 task-4a9ef7a51e64（无父/子/兄弟任务）、events 仅生命周期事件且技能路由 matched=[]。结论：全新空白黑板，未提供任何目标（无附件/二进制/URL/IP/题面）。 三条下一步建议： 1) 补目标输入：请人类提供题目附件或目标 URL/IP/题面，拿到后立即 bb_add_asset 登记种子资产（binary 记 sha256，URL 自动挂 host）；目标明确前不发起主动动作（本任务上限 passive）。 2) 被动分诊流水线：静态 file/strings 可在 host；反编译走 decompile MCP 且必须先 bb_query what=func 按 sha256 查重、分析后 bb_upsert_func；执行样本默认 untrusted 在 WSL 隔离（Docker 不可用、本地无 Ghidra/IDA）。定类别后再 kb_open 对应模块，不猜文件名。 3) 按类别 publish_task 分解（静态/动态/exp），非 passive 带 conflict_keys（ip:/binary:sha256）防重复；发现即 bb_add_finding，无证据 unverified、连续 3 次复现才 verified 并附 poc；flag 只认实际运行输出；先拿分后完美。 当前阻塞点：缺少目标范围，需人类下发输入后方可进入实质分析。
+              - generic [ref=f5e364]: system
+            - generic [ref=f5e365]: "{ \"task_id\": \"task-4a9ef7a51e64\", \"session_id\": \"sess-a2a0f0143780\", \"note\": \"侦察完成（全程被动，仅 bb_query，未执行外部命令）。\\n\\n黑板态势：assets=[]、findings=[]、tasks 仅本任务 task-4a9ef7a51e64（无父/子/兄弟任务）、events 仅生命周期事件且技能路由 matched=[]。结论：全新空白黑板，未提供任何目标（无附件/二进制/URL/IP/题面）。\\n\\n三条下一步建议：\\n1) 补目标输入：请人类提供题目附件或目标 URL/IP/题面，拿到后立即 bb_add_asset 登记种子资产（binary 记 sha256，URL 自动挂 host）；目标明确前不发起主动动作（本任务上限 passive）。\\n2) 被动分诊流水线：静态 file/strings 可在 host；反编译走 decompile MCP 且必须先 bb_query what=func 按 sha256 查重、分析后 bb_upsert_func；执行样本默认 untrusted 在 WSL 隔离（Docker 不可用、本地无 Ghidra/IDA）。定类别后再 kb_open 对应模块，不猜文件名。\\n3) 按类别 publish_task 分解（静态/动态/exp），非 passive 带 conflict_keys（ip:/binary:sha256）防重复；发现即 bb_add_finding，无证据 unverified、连续 3 次复现才 verified 并附 poc；flag 只认实际运行输出；先拿分后完美。\\n\\n当前阻塞点：缺少目标范围，需人类下发输入后方可进入实质分析。\" }"
+          - generic [ref=f5e368] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:36:12" [ref=f5e369]: 23:36:12
+            - generic [ref=f5e370]: ∑ token
+            - generic [ref=f5e371]: Agent · ark-code-latest · ↑943 ↓373 · ∑71672
+            - generic [ref=f5e373]: sess-a2a0f0143780
+          - generic [ref=f5e376] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:36:12" [ref=f5e377]: 23:36:12
+            - generic [ref=f5e378]: 💭 思考
+            - generic [ref=f5e379]: Task completed. Call finish with summary.
+            - generic [ref=f5e380]: sess-a2a0f0143780
+          - generic [ref=f5e382] [cursor=pointer]:
+            - generic [ref=f5e383]:
+              - generic "UTC 2026-09-15 15:36:12" [ref=f5e384]: 23:36:12
+              - generic [ref=f5e385]: ⚪ 会话收尾
+              - generic [ref=f5e386]: 侦察任务完成。全程被动分析，仅使用 bb_query，未执行任何外部命令。 黑板通读结果：assets 为空、findings 为空、tasks 中仅当前侦察任务 task-4a9ef7a51e64（无父/子/兄弟任务）、events 仅含本任务生命周期事件且技能路由未命中（matched=[]）。判定为全新空白黑板，任务未提供任何目标（无附件、二进制、URL、IP、题面）。 已输出三条下一步建议： 1. 请人类补充目标输入（附件/URL/题面），到位后立即 bb_add_asset 登记种子资产；目标明确前保持 passive，不主动动作。 2. 目标到位后走被动分诊：静态分析在 host；反编译走 decompile 工具且先按 binary_sha256 查 func_kb 查重、分析后落库；样本执行默认 untrusted、用 WSL 隔离（Docker 不可用、本地无 Ghidra/IDA）；定类别后再 kb_open 对应技能模块。 3. 按类别用 publish_task 分解子任务（非 passive 带 conflict_keys 防重复），发现即 bb_add_
+              - generic [ref=f5e387]: sess-a2a0f0143780
+            - generic [ref=f5e388]: "{ \"session_id\": \"sess-a2a0f0143780\", \"summary\": \"侦察任务完成。全程被动分析，仅使用 bb_query，未执行任何外部命令。\\n\\n黑板通读结果：assets 为空、findings 为空、tasks 中仅当前侦察任务 task-4a9ef7a51e64（无父/子/兄弟任务）、events 仅含本任务生命周期事件且技能路由未命中（matched=[]）。判定为全新空白黑板，任务未提供任何目标（无附件、二进制、URL、IP、题面）。\\n\\n已输出三条下一步建议：\\n1. 请人类补充目标输入（附件/URL/题面），到位后立即 bb_add_asset 登记种子资产；目标明确前保持 passive，不主动动作。\\n2. 目标到位后走被动分诊：静态分析在 host；反编译走 decompile 工具且先按 binary_sha256 查 func_kb 查重、分析后落库；样本执行默认 untrusted、用 WSL 隔离（Docker 不可用、本地无 Ghidra/IDA）；定类别后再 kb_open 对应技能模块。\\n3. 按类别用 publish_task 分解子任务（非 passive 带 conflict_keys 防重复），发现即 bb_add_\" }"
+          - generic [ref=f5e390] [cursor=pointer]:
+            - generic [ref=f5e391]:
+              - generic "UTC 2026-09-15 15:37:30" [ref=f5e392]: 23:37:30
+              - generic [ref=f5e393]: 📋 发布任务
+              - generic [ref=f5e394]: 知识库通读任务：用 kb_open 依次打开并通读 ctf-misc 知识库里至少 3 篇不同文档（每次读完简述要点），最后汇总成一份阅读笔记再 complete_task。全程被动，不执行命令。
+              - generic [ref=f5e395]: human
+            - generic [ref=f5e396]: "{ \"task_id\": \"task-d45da8ba5c26\", \"objective\": \"知识库通读任务：用 kb_open 依次打开并通读 ctf-misc 知识库里至少 3 篇不同文档（每次读完简述要点），最后汇总成一份阅读笔记再 complete_task。全程被动，不执行命令。\", \"task_type\": \"generic\" }"
+          - generic [ref=f5e399] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:37:40" [ref=f5e400]: 23:37:40
+            - generic [ref=f5e401]: 🔧 认领任务
+            - generic [ref=f5e402]: task_id, session_id, lease_until
+            - generic [ref=f5e403]: system
+          - generic [ref=f5e406] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:37:40" [ref=f5e407]: 23:37:40
+            - generic [ref=f5e408]: 🎯 技能路由
+            - generic [ref=f5e409]: triage · 2 分 · ctf
+            - generic [ref=f5e411]: sess-a2a0f0143780
+          - generic [ref=f5e414] [cursor=pointer]:
+            - generic "UTC 2026-09-15 15:37:44" [ref=f5e415]: 23:37:44
+            - generic [ref=f5e416]: ∑ token
+            - generic [ref=f5e417]: Agent · ark-code-latest · ↑1912 ↓132 · ∑77612
+            - generic [ref=f5e419]: sess-a2a0f0143780
+        - generic [ref=f5e420]:
+          - textbox "插话：向黑板发布一个任务或一条指示…" [ref=f5e421]
+          - button "发送" [disabled]
+      - complementary [ref=f5e422]:
+        - generic [ref=f5e423]:
+          - tablist [ref=f5e424]:
+            - tab "发现" [selected] [ref=f5e425]
+            - tab "资产" [ref=f5e426]
+            - tab "函数库" [ref=f5e427]
+          - tabpanel "发现" [ref=f5e428]:
+            - generic [ref=f5e429]:
+              - generic [ref=f5e430]:
+                - button "全部资产" [ref=f5e432]
+                - generic [ref=f5e436]:
+                  - button "全部" [ref=f5e437]
+                  - button "critical" [ref=f5e438]
+                  - button "high" [ref=f5e439]
+                  - button "medium" [ref=f5e440]
+                  - button "low" [ref=f5e441]
+                  - button "info" [ref=f5e442]
+                - generic [ref=f5e443]:
+                  - button "全部状态" [ref=f5e444]
+                  - button "unverified" [ref=f5e445]
+                  - button "verified" [ref=f5e446]
+              - generic [ref=f5e450]:
+                - generic [ref=f5e451] [cursor=pointer]:
+                  - generic [ref=f5e452]:
+                    - generic [ref=f5e453]: medium
+                    - generic [ref=f5e454]: 走查发现：SQL 注入点 /login id 参数（1789488997）
+                    - generic [ref=f5e455]: human
+                  - generic [ref=f5e456]: walk-ui · 2026-09-16 00:16:37
+                - generic [ref=f5e457] [cursor=pointer]:
+                  - generic [ref=f5e458]:
+                    - generic [ref=f5e459]: medium
+                    - generic [ref=f5e460]: 走查发现：SQL 注入点 /login id 参数
+                    - generic [ref=f5e461]: human
+                  - generic [ref=f5e462]: walk-ui · 2026-09-16 00:11:42
+                - generic [ref=f5e463] [cursor=pointer]:
+                  - generic [ref=f5e464]:
+                    - generic [ref=f5e465]: info
+                    - generic [ref=f5e466]: 会话 Cookie 安全属性审计：API 不签发任何 Cookie，HttpOnly/Secure/SameSite 无适用对象（无鉴权层、仅环回绑定需另评）
+                    - generic [ref=f5e467]: verified
+                    - generic [ref=f5e468]: sess-e2c83c3fd342
+                  - generic [ref=f5e469]: session-cookie-security-audit · 2026-09-16 00:59:58 · http://127.0.0.1:8420
+                - generic [ref=f5e470] [cursor=pointer]:
+                  - generic [ref=f5e471]:
+                    - generic [ref=f5e472]: info
+                    - generic [ref=f5e473]: 报告交付（重排C）：缓解建议与修复优先级 art-56a847676aa9
+                    - generic [ref=f5e474]: sess-b6a26aa8818d
+                  - generic [ref=f5e475]: assessment-report · 2026-09-16 00:56:24
+      - button "›" [ref=f5e476]

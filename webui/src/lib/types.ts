@@ -85,6 +85,7 @@ export interface Task {
   plan: TaskPlanStep[]
   created_at: string
   updated_at: string
+  resumable?: boolean  // E12：failed 行派生（原会话落盘快照在 → 看板可「带现场续跑」）
 }
 
 // A3 直播间任务流图

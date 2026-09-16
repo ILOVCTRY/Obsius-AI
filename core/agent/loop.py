@@ -65,6 +65,14 @@ class AgentConfig:
     lease_renew_seconds: int = 600        # 租约心跳间隔（TTL 的 1/3，留两次余量）
 
 
+def persisted_snapshot_path(artifacts_dir, sid: str) -> "Path | None":
+    """快照落盘路径的模块级形态（API 层判 resumable 用）：
+    <workspace>/<pid>/snapshots/<sid>.json；artifacts_dir 为 None 返回 None。"""
+    if artifacts_dir is None:
+        return None
+    return Path(artifacts_dir).parent / "snapshots" / f"{sid}.json"
+
+
 class _LeaseHeartbeat(threading.Thread):
     """任务租约守护心跳（§6.4）：认领后周期 renew_lease，防长任务超过 TTL 被回收双跑。
 
@@ -176,6 +184,8 @@ class AgentSession:
             # E8：暂停快照已落盘 → 载回 _resume_state 并置回暂停态
             #（服务重启后 resume 仍可从快照+步数断点续跑；无快照行为同旧版）
             self._resume_state = self._load_persisted_snapshot()
+            if self._resume_state is not None:
+                self.paused = True
 
     # ---------- 租约心跳（A1：长任务防 30 分钟 TTL 过期被重领双跑） ----------
 
@@ -597,9 +607,7 @@ class AgentSession:
     def _snapshot_path(self) -> Path | None:
         """快照文件路径：<workspace>/<pid>/snapshots/<sid>.json；无 artifacts_dir
         （部分测试/直跑）时返回 None = 保持纯内存。"""
-        if self.artifacts_dir is None:
-            return None
-        return self.artifacts_dir.parent / "snapshots" / f"{self.session['id']}.json"
+        return persisted_snapshot_path(self.artifacts_dir, self.session["id"])
 
     def _persist_snapshot(self) -> None:
         """暂停快照落盘：写 workspace 文件并在 sessions.meta 存指针。
@@ -642,7 +650,6 @@ class AgentSession:
             return None
         if isinstance(st.get("max_steps"), int) and st["max_steps"] > 0:
             self.dispatcher.max_steps = st["max_steps"]  # 暂停时的预算随快照还原
-        self.paused = True
         return st
 
     def _clear_snapshot(self) -> None:
@@ -662,6 +669,23 @@ class AgentSession:
         except Exception:  # noqa: BLE001
             log.exception("暂停快照指针清理失败（会话 %s）", self.session["id"])
 
+    def revive_snapshot(self, task_id: str) -> dict | None:
+        """E12：人工中断后从落盘快照复活（限原会话）——刷新会话行取最新快照
+        指针，载回 _resume_state 并校验任务匹配；不匹配/无快照返回 None。
+        任务的 reopen/claim 与 worker 提交由 API 层编排（POST /tasks/{tid}/resume）。"""
+        try:
+            row = self.bb.get_session(self.session["id"])
+        except Exception:  # noqa: BLE001
+            row = None
+        if row is not None:
+            self.session = dict(row)  # 中断可能发生在本进程外：meta 指针要现读
+        st = self._load_persisted_snapshot()
+        if st is None or st.get("task_id") != task_id:
+            return None
+        self._resume_state = st
+        self.paused = False
+        return st
+
     def _task_gone(self) -> bool:
         """A1：当前任务行是否已从看板删除（claimed 任务可被人工取消，步边界感知）。"""
         task_id = self.dispatcher.current_task_id
@@ -669,12 +693,20 @@ class AgentSession:
 
     def _abort_current_task(self) -> None:
         """硬中断收尾：任务 fail（人工中断，不回队列）→ 会话空闲 + 审计。
-        任务行已被删除（看板取消）时跳过 fail——task.deleted 事件即审计。"""
+        任务行已被删除（看板取消）时跳过 fail——task.deleted 事件即审计。
+        E12：人工中断**保留落盘快照**（任务续跑凭证，看板 failed 卡可「▶ 续跑」
+        原会话复活）；仅任务已删除/无快照时清理，防孤儿文件。"""
         task_id = self.dispatcher.current_task_id
         if task_id is None and self._resume_state:
             task_id = self._resume_state.get("task_id")  # 空闲暂停态被中断：快照任务也要收尾
         self._resume_state = None
-        self._clear_snapshot()  # E8：中断即丢弃落盘快照（文件+指针）
+        task_alive = bool(task_id) and self.tq.get_task(task_id) is not None
+        resumable = False
+        if task_alive:
+            path = self._snapshot_path()
+            resumable = path is not None and path.exists()  # 有落盘现场才可续跑
+        if not resumable:
+            self._clear_snapshot()  # 无任务/任务已删/无落盘快照：清理防孤儿
         self.paused = False
         self._pause_req.clear()
         self._abort_req.clear()
@@ -682,11 +714,12 @@ class AgentSession:
         self._stop_heartbeat()
         note = "人工中断"
         if task_id:
-            if self.tq.get_task(task_id) is None:
+            if not task_alive:
                 note = "任务已被删除"
             else:
                 try:
-                    self.tq.fail(task_id, self.session["id"], "人工中断")
+                    self.tq.fail(task_id, self.session["id"], "人工中断",
+                                 resumable=resumable)
                 except Exception:  # noqa: BLE001
                     log.exception("中断 fail 任务失败")
             self.dispatcher.current_task_id = None
