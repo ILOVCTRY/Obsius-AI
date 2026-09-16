@@ -150,7 +150,7 @@ function ModePopover({ usage, onClose, onSave }: {
 
   const field = "w-full rounded border bg-background p-1.5 text-[11px]"
   return (
-    <div className="absolute right-0 top-9 z-20 w-72 rounded-lg border bg-popover p-3 text-xs shadow-md">
+    <div className="absolute left-0 top-9 z-20 w-72 rounded-lg border bg-popover p-3 text-xs shadow-md">
       <p className="mb-2 text-muted-foreground">作战模式与 mission（§6.9；安全红线不放松）</p>
       <div className="mb-2 flex gap-1">
         <button
