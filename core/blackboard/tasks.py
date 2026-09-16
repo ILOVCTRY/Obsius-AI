@@ -281,11 +281,16 @@ class TaskQueue:
         self._finish(task_id, session_id, "done", result_note)
 
     def fail(self, task_id: str, session_id: str, result_note: str = "",
-             resumable: bool = False) -> None:
+             resumable: bool = False, blocked_reason: str = "error") -> None:
         """E12：resumable=True 表示中断保留了落盘快照（task.failed 事件带标记，
-        看板 failed 卡出「▶ 续跑」——reopen+原会话载快照复活）。"""
+        看板 failed 卡出「▶ 续跑」——reopen+原会话载快照复活）。
+        C1：blocked_reason 结构化失败原因——error（真失败）| awaiting_human（等
+        人类输入，保留现场可续跑，看板出「待人工」徽章与「已解决，放回继续」）。"""
+        if blocked_reason not in {"error", "awaiting_human"}:
+            raise ValueError(f"非法 blocked_reason: {blocked_reason}")
         self._finish(task_id, session_id, "failed", result_note,
-                     extra={"resumable": True} if resumable else None)
+                     extra={"resumable": True} if resumable else None,
+                     blocked_reason=blocked_reason)
 
     def _release_and_revalidate(self, project_id: str, task_id: str) -> None:
         """机制 1.4：释放任务的全部资源租约行，并重校验本项目 open 行的 wait_for——
@@ -306,7 +311,7 @@ class TaskQueue:
                     (now(), r["id"]))
 
     def _finish(self, task_id: str, session_id: str, status: str, result_note: str,
-                extra: dict | None = None) -> None:
+                extra: dict | None = None, blocked_reason: str | None = None) -> None:
         with self.bb._tx():
             row = self.bb.conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
             if row is None:
@@ -314,13 +319,15 @@ class TaskQueue:
             if row["claimed_by"] != session_id:
                 raise ClaimError(f"任务 {task_id} 不由会话 {session_id} 持有，无权收尾")
             self.bb.conn.execute(
-                "UPDATE tasks SET status=?, result_note=?, lease_until=NULL, updated_at=?"
-                " WHERE id=?",
-                (status, result_note, now(), task_id),
+                "UPDATE tasks SET status=?, result_note=?, lease_until=NULL,"
+                " blocked_reason=?, updated_at=? WHERE id=?",
+                (status, result_note, blocked_reason or "error", now(), task_id),
             )
             self._release_and_revalidate(row["project_id"], task_id)  # 机制 1.4 释放+重校验
             stale_refs = _loads(row["stale_refs"], [])
         payload = {"task_id": task_id, "session_id": session_id, "note": result_note}
+        if status == "failed":
+            payload["blocked_reason"] = blocked_reason or "error"
         if extra:
             payload.update(extra)
         self.bb.append_event(
@@ -553,23 +560,31 @@ class TaskQueue:
         )
         return self.get_task(task_id)  # type: ignore[return-value]
 
-    def reopen(self, task_id: str, by: str = "human") -> None:
+    def reopen(self, task_id: str, by: str = "human", note: str = "") -> None:
         """失败任务放回待认领（failed→open）：清持有方/租约；result_note 保留在库
-        （看板 open 卡片不渲染，失败原因仍可从 task.failed 事件追溯）。仅 failed 可放回。"""
+        （看板 open 卡片不渲染，失败原因仍可从 task.failed 事件追溯）。仅 failed 可放回。
+        C1：note = 人类补充说明（如「ROE 已核验」），追加进 result_note 并随
+        task.reopened 事件落审计——认领会话在旧计划注入提示中可见。"""
         with self.bb._tx():
             row = self.bb.conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
             if row is None:
                 raise ValueError(f"任务不存在: {task_id}")
             if row["status"] != "failed":
                 raise ValueError(f"任务 {task_id} 状态为 {row['status']}，仅失败任务可放回")
+            result_note = row["result_note"] or ""
+            if note.strip():
+                result_note = (result_note + "\n" if result_note else "") + \
+                    f"人类补充（{by}）: {note.strip()}"
             self.bb.conn.execute(
-                "UPDATE tasks SET status='open', claimed_by=NULL, lease_until=NULL, updated_at=?"
-                " WHERE id=?",
-                (now(), task_id),
+                "UPDATE tasks SET status='open', claimed_by=NULL, lease_until=NULL,"
+                " result_note=?, updated_at=? WHERE id=?",
+                (result_note, now(), task_id),
             )
             project_id = row["project_id"]
         self.bb.append_event(
-            project_id, "task.reopened", {"task_id": task_id, "by": by}, author=by,
+            project_id, "task.reopened",
+            {"task_id": task_id, "by": by, "note": note.strip()},
+            author=by,
         )
 
     def delete(self, task_id: str, by: str = "human") -> None:

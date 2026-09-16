@@ -1287,3 +1287,73 @@ def test_bb_asset_status_tool_and_query_filters(env):
     assert [a["id"] for a in q] == [aid] and q[0]["status"] == "tested_clean"
     q2 = json.loads(d.dispatch("bb_query", {"what": "assets", "type": "host", "status": "open"}))
     assert all(a["type"] == "host" and a["status"] == "open" for a in q2)
+
+
+def test_awaiting_human_pauses_with_snapshot_then_reusable(env):
+    """C1：fail_task(awaiting_human)——快照落盘 + 任务 fail（blocked_reason=
+    awaiting_human，resumable）；会话不结束、worker 继续认领下一任务；
+    revive 复活续跑完成；认领注入旧计划注记。"""
+    bb, project, gw, tq, tmp_path = env
+    t1 = tq.publish(project["id"], "等 ROE 的任务", task_type="generic")
+    t2 = tq.publish(project["id"], "不需要等待的任务", task_type="generic")
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call(
+            "t0", "task_plan", {"steps": [{"title": "摸底"}]})]},
+        {"tool_use": [ScriptedLLM.tool_call(
+            "t1", "fail_task", {"result_note": "ROE 未核验，等人类",
+                                 "blocked_reason": "awaiting_human"})]},
+        # worker 继续认领 t2 并完成（会话不结束）
+        {"tool_use": [ScriptedLLM.tool_call(
+            "t2", "complete_task", {"result_note": "t2 完成"})]},
+        {"tool_use": [ScriptedLLM.tool_call("t3", "finish", {"summary": "t2 干完"})]},
+        # revive 续跑 t1 的剧本
+        {"tool_use": [ScriptedLLM.tool_call(
+            "t4", "complete_task", {"result_note": "ROE 核验后完成"})]},
+        {"tool_use": [ScriptedLLM.tool_call("t5", "finish", {"summary": "t1 续跑成功"})]},
+    ])
+    agent = make_agent(env, llm, config=AgentConfig(max_steps=10),
+                       artifacts_dir=tmp_path / "proj" / "artifacts")
+    assert agent.run_next_task() == ""              # t1 挂起 → 空串，worker 继续认领
+    assert agent.paused is False                     # 不进 paused（区别于 budget 暂停）
+    row1 = tq.get_task(t1)
+    assert row1["status"] == "failed" and row1["blocked_reason"] == "awaiting_human"
+    sid = agent.session["id"]
+    snap = tmp_path / "proj" / "snapshots" / f"{sid}.json"
+    assert snap.is_file()                            # 现场保留（awaiting 快照）
+    failed = [e for e in bb.recent_events(project["id"]) if e["kind"] == "task.failed"][-1]
+    assert failed["payload"]["resumable"] is True
+    # worker 继续认领 t2（同一 job 内）
+    assert agent.run_next_task() == "t2 干完"
+    assert tq.get_task(t2)["status"] == "done"
+
+    # 人类续跑 t1：revive → reopen → claim → run_next_task
+    st = agent.revive_snapshot(t1)
+    assert st is not None and st["reason"] == "awaiting"
+    tq.reopen(t1, by="human", note="ROE 已核验")
+    assert "人类补充（human）: ROE 已核验" in tq.get_task(t1)["result_note"]  # complete 覆盖前可见
+    tq.claim(t1, sid, lease_minutes=agent.config.lease_minutes)
+    agent._stop_after_task = False
+    assert agent.run_next_task() == "t1 续跑成功"
+    assert tq.get_task(t1)["status"] == "done"
+    assert not snap.exists()
+
+
+def test_reclaim_notice_injects_old_plan(env):
+    """C1：重新认领曾执行过的任务（无快照/新会话）→ 注入旧计划注记（done 未经
+    本会话验证不视为已验证），防新会话误读旧进度。"""
+    bb, project, gw, tq, _ = env
+    t1 = tq.publish(project["id"], "被接手的任务", task_type="generic")
+    s1 = bb.register_session(project["id"], "S1")
+    tq.claim(t1, s1["id"])
+    tq.set_plan(t1, s1["id"], [{"title": "摸底"}])
+    tq.fail(t1, s1["id"], "挂起", blocked_reason="awaiting_human")
+    tq.reopen(t1, by="human")  # 放回后由新会话认领（清持有方）
+    llm2 = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call(
+            "c1", "complete_task", {"result_note": "接手完成"})]},
+        {"tool_use": [ScriptedLLM.tool_call("c2", "finish", {"summary": "接手成功"})]},
+    ])
+    agent2 = make_agent(env, llm2)
+    agent2.run_task("被接手的任务", task_id=t1)
+    injected = json.dumps(llm2.calls[0]["messages"], ensure_ascii=False)
+    assert "旧计划仅供参考" in injected and "p1 [todo] 摸底" in injected

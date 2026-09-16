@@ -312,6 +312,7 @@ class AgentSession:
         """执行一个目标（任务）。task_id 给定时：open 则自动认领，已被他人持有则拒绝。
         返回空串 = 暂停/中断退出（任务收尾已由检查点处理，不得再走 _finalize）。"""
         stale_refs: list[str] = []
+        old_plan_notice: str | None = None  # C1：重认领旧任务的计划/发现注入
         if task_id:
             task = self.tq.get_task(task_id)
             if task is None:
@@ -331,6 +332,7 @@ class AgentSession:
             stale_refs = list(task.get("stale_refs") or [])
             self.dispatcher.current_task_id = task_id
             self._start_heartbeat(task_id)
+            old_plan_notice = self._old_plan_notice(task)  # C1：重认领任务的旧计划/发现注入
         system = self.build_system_prompt(
             objective, self.skill_context_for(objective, features, file_features,
                                               task_id=task_id))
@@ -344,6 +346,8 @@ class AgentSession:
             update_notice = self._finding_update_notice(drained)
             if update_notice:
                 messages.append({"role": "user", "content": update_notice})
+        if old_plan_notice:
+            messages.append({"role": "user", "content": old_plan_notice})
         messages.append({"role": "user", "content": objective})
         summary = self._loop(system, messages, objective)
         if summary is None:  # 暂停（心跳保留，继续占任务）/中断（_abort_current_task 已停心跳）
@@ -401,6 +405,32 @@ class AgentSession:
 
     # ---------- 内部 ----------
 
+    def _old_plan_notice(self, task: dict) -> str | None:
+        """C1：重新认领曾执行过的任务时，注入旧计划与依据发现摘要——
+        done 步骤带真实性注记（未经本会话验证，不视为已验证），防新会话误读。"""
+        old_plan = task.get("plan") or []
+        if not old_plan:
+            return None
+        lines = ["♻ 该任务曾被执行过并中途停止（现重新认领）。以下旧计划仅供参考——"
+                 "done 步骤未经你验证，重做前先核实，不要盲目沿用："]
+        for s in old_plan:
+            line = f"- {s.get('id')} [{s.get('status')}] {s.get('title')}"
+            if s.get("note"):
+                line += f"（{s['note']}）"
+            lines.append(line)
+        fsums: list[str] = []
+        for fid in (task.get("context_refs") or [])[:5]:
+            try:
+                f = self.bb.get_finding(self.project_id, fid)
+            except Exception:  # noqa: BLE001
+                f = None
+            if f:
+                fsums.append(f"- {fid} [{f['status']}/{f['severity']}] {f['title']}")
+        if fsums:
+            lines.append("该任务依据的发现摘要：")
+            lines += fsums
+        return "\n".join(lines)
+
     def _loop(self, system: str, messages: list[dict[str, Any]], objective: str,
               start_step: int = 1) -> str | None:
         """返回 None = 暂停/中断退出（调用方不得 finalize）；其余返回任务总结。
@@ -409,6 +439,11 @@ class AgentSession:
         本会话内跨任务生效。"""
         max_steps = self.dispatcher.max_steps
         step = start_step
+        # 每任务复位收尾标志（潜伏 bug 修复：finish 后同会话再认领的任务会在
+        # 首步命中 stale finished → 返回旧总结并被 _finalize 误标失败）
+        self.dispatcher.finished = False
+        self.dispatcher.awaiting_human = False
+        self.dispatcher.summary = ""
         # while 而非 range（E8）：request_steps 在步内增补预算后，循环上界随之
         # 前移——耗尽轮当场自救（步号不增）也成立，不会因 range 预计算被截断。
         while step <= max_steps:
@@ -441,6 +476,30 @@ class AgentSession:
                     result_text = self.dispatcher.dispatch(tc.name, tc.arguments)
                     messages.append(self.llm.tool_result_message(tc, result_text))
                 self._trim(messages)
+            if getattr(self.dispatcher, "awaiting_human", False):
+                # C1：Agent 自主挂起（awaiting_human）——快照落盘 + 任务 fail
+                # （blocked_reason=awaiting_human，resumable=True），现场保留，
+                # 人类可经看板「▶ 续跑」（E12 revive）或「✅ 已解决，放回继续」承接。
+                # 会话不结束（不走 finished/_finalize），worker 继续认领下一个任务。
+                self.dispatcher.awaiting_human = False
+                self._resume_state = {
+                    "system": system, "messages": messages, "objective": objective,
+                    "task_id": self.dispatcher.current_task_id,
+                    "next_step": step + 1, "max_steps": self.dispatcher.max_steps,
+                    "reason": "awaiting",
+                }
+                self._persist_snapshot()
+                try:
+                    self.tq.fail(
+                        self.dispatcher.current_task_id, self.session["id"],
+                        self.dispatcher.summary or "等待人工输入",
+                        resumable=True, blocked_reason="awaiting_human")
+                except Exception:  # noqa: BLE001
+                    log.exception("awaiting_human fail 失败")
+                self.dispatcher.current_task_id = None
+                self._resume_state = None  # 快照只留在磁盘（内存态泄漏会被下轮 run_next_task 误消费清盘）
+                self._stop_heartbeat()
+                return None  # 任务收尾已处理（同暂停/中断语义，不走 _finalize）
             if self.dispatcher.finished:
                 return self.dispatcher.summary
             ctrl = self._control_point(system, messages, objective, step)

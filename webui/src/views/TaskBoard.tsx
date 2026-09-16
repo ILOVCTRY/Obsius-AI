@@ -42,6 +42,9 @@ export function TaskBoard({ pid, focused }: {
   const [dupPending, setDupPending] = useState<{
     body: Parameters<typeof api.publishTask>[1]; existed: string; taskId: string
   } | null>(null)
+  // C1：「已解决，放回继续」附注（写进任务行 result_note 落审计）
+  const [resolveTarget, setResolveTarget] = useState<Task | null>(null)
+  const [resolveNote, setResolveNote] = useState("")
 
   useEffect(() => {
     Promise.all([api.getProject(pid), api.taxonomy()])
@@ -136,6 +139,52 @@ export function TaskBoard({ pid, focused }: {
         <Button size="sm" onClick={() => publish()} disabled={!objective.trim()}>发布</Button>
       </div>
 
+      {/* C1：「已解决，放回继续」——附注写进任务行落审计 */}
+      <AlertDialog
+        open={resolveTarget !== null}
+        onOpenChange={(open) => !open && setResolveTarget(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>标记问题已解决并放回？</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-2">
+                <p className="line-clamp-2 rounded border bg-card p-2 font-mono text-xs">
+                  {resolveTarget?.objective}
+                </p>
+                <p>补充说明会写进任务行（认领会话在旧计划注入提示中可见）。</p>
+                <textarea
+                  value={resolveNote}
+                  onChange={(e) => setResolveNote(e.target.value)}
+                  rows={2}
+                  className="w-full rounded-md border bg-background p-1.5 text-xs"
+                  placeholder="人类已做了什么 / 需要执行者接下来注意什么（可空）"
+                />
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel asChild>
+              <Button variant="outline" size="sm">取消</Button>
+            </AlertDialogCancel>
+            <Button
+              size="sm"
+              onClick={() => {
+                const t = resolveTarget
+                setResolveTarget(null)
+                if (t) {
+                  api.reopenTask(t.id, resolveNote.trim())
+                    .then(() => { setResolveNote(""); refresh() })
+                    .catch((e) => setError(String(e)))
+                }
+              }}
+            >
+              ✅ 已解决，放回继续
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       {/* B1 发布去重确认：同指纹任务已存在，确认后 force 重发 */}
       <AlertDialog
         open={dupPending !== null}
@@ -190,6 +239,7 @@ export function TaskBoard({ pid, focused }: {
                   task={t}
                   onChanged={refresh}
                   onDelete={setDeleteTarget}
+                  onResolve={setResolveTarget}
                   focused={focused?.id === t.id}
                   focusNonce={focused?.n ?? 0}
                 />
@@ -249,10 +299,11 @@ export function TaskBoard({ pid, focused }: {
   )
 }
 
-function TaskCard({ task, onChanged, onDelete, focused, focusNonce }: {
+function TaskCard({ task, onChanged, onDelete, onResolve, focused, focusNonce }: {
   task: Task
   onChanged: () => void
   onDelete: (t: Task) => void
+  onResolve: (t: Task) => void
   focused: boolean
   focusNonce: number
 }) {
@@ -283,10 +334,21 @@ function TaskCard({ task, onChanged, onDelete, focused, focusNonce }: {
           task.noise_budget === "passive" ? "text-muted-foreground" : "text-[--status-approval]")}>
           {task.noise_budget}
         </Badge>
+        {task.status === "failed" && task.blocked_reason === "awaiting_human" && (
+          <Badge variant="outline" className="text-[10px] text-[--status-approval]"
+                 title="Agent 挂起等待人工输入；现场快照保留，可续跑或放回继续（C1）">
+            ⏸ 待人工
+          </Badge>
+        )}
         <span className="flex-1" />
         <span className="font-mono text-[10px] text-muted-foreground">P{task.priority}</span>
       </div>
       <p className="mt-1.5 text-xs leading-relaxed">{task.objective}</p>
+      {task.status === "failed" && task.blocked_reason === "awaiting_human" && task.result_note && (
+        <p className="mt-1 rounded border border-[--status-approval]/40 bg-[--status-approval]/5 p-1.5 text-[10px] leading-relaxed">
+          <span className="font-medium">需要人工：</span>{task.result_note}
+        </p>
+      )}
       {task.plan.length > 0 && (
         <p className="mt-1 truncate font-mono text-[10px] text-sky-400"
            title={task.plan.map((s) => `${s.id} ${s.title}：${s.status}${s.note ? `（${s.note}）` : ""}`).join("\n")}>
@@ -352,7 +414,16 @@ function TaskCard({ task, onChanged, onDelete, focused, focusNonce }: {
             ▶ 续跑
           </button>
         )}
-        {task.status === "failed" && (
+        {task.status === "failed" && task.blocked_reason === "awaiting_human" && (
+          <button
+            onClick={() => onResolve(task)}
+            className="text-[10px] text-primary hover:underline"
+            title="人工已解决挂起原因：附注后放回待认领（附注写进任务行落审计，C1）"
+          >
+            ✅ 已解决，放回继续
+          </button>
+        )}
+        {task.status === "failed" && task.blocked_reason !== "awaiting_human" && (
           <button
             onClick={async () => {
               try {

@@ -195,8 +195,10 @@ export const api = {
     http<Task>(`/api/tasks/${taskId}`, {
       method: "PATCH", body: JSON.stringify(body),
     }),
-  reopenTask: (taskId: string) =>
-    http<{ status: string }>(`/api/tasks/${taskId}/reopen`, { method: "POST" }),
+  reopenTask: (taskId: string, note?: string) =>
+    http<{ status: string }>(`/api/tasks/${taskId}/reopen`, {
+      method: "POST", body: JSON.stringify({ note: note ?? "" }),
+    }),
   // E12 意外终止续跑（限原会话）：reopen + 原会话载落盘快照 + 提交 worker
   resumeTask: (taskId: string) =>
     http<{ task_id: string; session_id: string; status: string }>(

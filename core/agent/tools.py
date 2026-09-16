@@ -368,10 +368,19 @@ AGENT_TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "fail_task",
-        "description": "当前任务失败收尾（附原因），任务回队列或标记失败。",
+        "description": "当前任务失败收尾（附原因）。blocked_reason=error（缺省）＝真失败；"
+                       "blocked_reason=awaiting_human＝卡在等待人类输入/决策（如 ROE 未核验、"
+                       "缺授权凭据、需要人类在两个方案间拍板）——note 必须写清**需要人类做什么**，"
+                       "现场快照会保留，人类处理后可从断点续跑，上下文不丢。宁严勿松："
+                       "不确定就 error，awaiting_human 只用于确实需要人类才能继续的场景。",
         "input_schema": {
             "type": "object",
-            "properties": {"result_note": {"type": "string"}},
+            "properties": {
+                "result_note": {"type": "string",
+                                 "description": "awaiting_human 时必写清需要人类做什么"},
+                "blocked_reason": {"type": "string", "enum": ["error", "awaiting_human"],
+                                    "description": "缺省 error"},
+            },
             "required": ["result_note"],
         },
     },
@@ -437,6 +446,7 @@ class ToolDispatcher:
         self._step = 0
         self.last_progress_step = 0   # 最近一次实质进展的步号（卡死检测用）
         self.finished = False
+        self.awaiting_human = False  # C1：fail_task(awaiting_human) 置位，_loop 收尾时落快照+fail
         self.summary = ""
 
     def set_step(self, n: int) -> None:
@@ -830,9 +840,20 @@ class ToolDispatcher:
         return self._finish_or_report_deleted(
             lambda tid, sid: self.tq.complete(tid, sid, result_note), "已完成")
 
-    def _tool_fail_task(self, result_note: str) -> str:
+    def _tool_fail_task(self, result_note: str = "",
+                        blocked_reason: str = "error") -> str:
         if not self.current_task_id:
             return "[错误] 当前没有认领的任务"
+        if blocked_reason not in ("error", "awaiting_human"):
+            return f"[拒绝] 非法 blocked_reason: {blocked_reason}"
+        if blocked_reason == "awaiting_human":
+            # C1：不在此处 fail——_loop 步边界检测 awaiting_human 后先落快照再
+            # fail(blocked_reason=awaiting_human, resumable=True)，现场保留供
+            # 「▶ 续跑」/「放回继续」；会话不结束，worker 继续认领下一个任务
+            self.awaiting_human = True
+            self.last_progress_step = self._step
+            return ("任务已挂起等待人工输入（现场快照保留，人类处理后可从断点续跑）。"
+                    "挂起在本步收尾生效；之后可继续认领其他任务。")
         return self._finish_or_report_deleted(
             lambda tid, sid: self.tq.fail(tid, sid, result_note), "已标记失败")
 

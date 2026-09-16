@@ -9,7 +9,9 @@
 
 import sqlite3
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
+
+# v7→v8（C1 任务暂停语义统一，§6.1）：tasks 幂等补 blocked_reason（error|awaiting_human，缺省 error 向后兼容）。
 
 # v6→v7（机制 1.1/1.4 协调底座，DESIGN §6.7 机制 1.1/1.4）：
 # tasks 幂等补 workset/dedup_fp/wait_for/lease_cooldown_until 4 列；
@@ -157,6 +159,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     dedup_fp      TEXT NOT NULL DEFAULT '',    -- v7：发布去重指纹（project+type+归一化 scope+objective 哈希，机制 1.1）
     wait_for      TEXT NOT NULL DEFAULT '[]',  -- v7 JSON：被占资源键（open 行门控标记，claim_next 排除，机制 1.4）
     lease_cooldown_until TEXT,                 -- v7：死锁牺牲者冷却（到期前 claim_next 跳过，机制 1.4）
+    blocked_reason TEXT NOT NULL DEFAULT 'error',  -- v8：fail 通道结构化原因 error|awaiting_human（C1）
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL
 );

@@ -98,6 +98,11 @@ class ConfigPatchIn(BaseModel):
     config: dict = Field(default_factory=dict)
 
 
+class ReopenIn(BaseModel):
+    """C1：放回/「已解决，放回继续」的人类补充说明（写进任务行 result_note 落审计）。"""
+    note: str = ""
+
+
 class TaskIn(BaseModel):
     objective: str
     task_type: str = "generic"
@@ -1204,6 +1209,10 @@ def create_app(
         stats: dict[str, int] = {}
         for t in tasks:
             stats[t["status"]] = stats.get(t["status"], 0) + 1
+        # C1：awaiting_human 任务计数——供顶栏铃铛红点（只计数，不混 approval 表）
+        stats["awaiting_human"] = sum(
+            1 for t in tasks
+            if t["status"] == "failed" and t.get("blocked_reason") == "awaiting_human")
         usage = autonomy.usage_view(proj.bb, pid)
         # 批 5（§6.8）：L2 链状态给直播间；estranged=DB 活但本进程无标记（重启急停）
         cst = orch_state.load_or_create(proj.bb, pid)
@@ -1970,11 +1979,12 @@ def create_app(
             raise HTTPException(422, str(e))
 
     @app.post("/api/tasks/{task_id}/reopen")
-    def reopen_task(task_id: str):
+    def reopen_task(task_id: str, body: ReopenIn | None = None):
         pid = _pid_of_task(task_id)
         tq = TaskQueue(_project(pid).bb)
         try:
-            tq.reopen(task_id, by="human")
+            tq.reopen(task_id, by="human",
+                      note=(body.note if body else "") or "")
         except ValueError as e:
             raise HTTPException(409, str(e))
         return {"task_id": task_id, "status": "open"}
@@ -2375,6 +2385,40 @@ def create_app(
             return done
         return run
 
+    def _maybe_auto_resume(pid: str, agent: AgentSession) -> None:
+        """C4：L2 档步数耗尽（budget_paused）自动续跑——不等人工，缺省 +200 步。
+        闸（每次实时重读）：档位 ==L2、全局未暂停、token 预算未硬阻断（token 即
+        总闸，不另设次数上限）；任一不满足保持 paused 等人工「▶ 继续」。
+        awaiting_human 挂起不受此路径影响（C1 宁严勿松：不自动处置）。"""
+        try:
+            st = agent._resume_state
+            if not (agent.paused and st and st.get("reason") == "budget"):
+                return
+            cfg = _auto_cfg(pid)
+            if cfg["level"] != "L2" or cfg["paused"]:
+                return
+            tok = autonomy.usage_view(agent.bb, pid).get("tokens", {})
+            if tok.get("pct") is not None and tok["pct"] >= 100:
+                return  # token 预算硬闸：保持暂停等人工
+            sid = agent.session["id"]
+            agent.paused = False
+            agent._pause_req.clear()
+            agent._abort_req.clear()
+            old = agent.dispatcher.max_steps
+            agent.dispatcher.max_steps = old + 200
+            agent.bb.append_event(
+                pid, "step.budget_extended",
+                {"session_id": sid, "task_id": st.get("task_id"),
+                 "old_max": old, "new_max": old + 200, "by": "l2-auto"},
+                session_id=sid, author="l2-auto")
+            agent.bb.append_event(
+                pid, "session.resumed", {"session_id": sid, "by": "l2-auto"},
+                session_id=sid, author="l2-auto")
+            agent.bb.set_session_status(sid, "running")
+            _submit_worker(pid, agent, auto=True, origin="l2-auto-resume")
+        except Exception:  # noqa: BLE001 —— 自动续跑失败保持暂停，等人工
+            log.exception("C4 L2 自动续跑失败 pid=%s", pid)
+
     def _submit_worker(pid: str, agent: AgentSession, **extra_meta) -> str:
         """agent-work job 的唯一提交口（批 5）：run() 末尾的 A 触发可能因自身 job 仍
         running 被软去重跳过，这里统一挂 on_done 在状态翻 done 后再评估一次续链，
@@ -2387,6 +2431,7 @@ def create_app(
             "agent-work", _worker_loop(agent, manual=manual, tail=tail),
             meta={"project_id": pid, "session_id": sid, **extra_meta},
             on_done=lambda _j: (
+                _maybe_auto_resume(pid, agent),  # C4：L2 下 budget_paused 自动续跑
                 _maybe_auto_tick(pid, reason=f"worker-done:{sid}"),
                 # 重排只补「尾部被挤掉」的那一次；已提交/已起 wait 的不重复触发
                 _maybe_replan(pid, reason=f"worker-done:{sid}")

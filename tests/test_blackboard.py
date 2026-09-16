@@ -93,7 +93,7 @@ def test_schema_v7_migration(tmp_path):
     try:
         ver = board.conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
-        assert int(ver) == SCHEMA_VERSION == 7
+        assert int(ver) == SCHEMA_VERSION == 8
         task_cols = {r[1] for r in board.conn.execute("PRAGMA table_info(tasks)")}
         os_cols = {r[1] for r in board.conn.execute(
             "PRAGMA table_info(orchestrator_state)")}
@@ -1532,3 +1532,37 @@ def test_update_task_recomputes_fp_and_normalizes_keys(bb, project):
     assert tq.get_task(t)["dedup_fp"] == dedup_fp("recon", "", "新目标")
     with _pytest.raises(ValueError):
         tq.update_task(t, by="human", conflict_keys=["ip:*"])
+
+
+# ---------- C1 blocked_reason / reopen 附注 ----------
+
+def test_fail_blocked_reason_recorded(bb, project):
+    """C1：fail 落 blocked_reason 列与事件；非法值拒收。"""
+    pid = project["id"]
+    tq = TaskQueue(bb)
+    t1 = tq.publish(pid, "挂起任务", task_type="recon")
+    s1 = _session(bb, project)
+    tq.claim(t1, s1["id"])
+    tq.fail(t1, s1["id"], "ROE 未核验", resumable=True, blocked_reason="awaiting_human")
+    row = tq.get_task(t1)
+    assert row["blocked_reason"] == "awaiting_human"
+    ev = [e for e in bb.recent_events(pid) if e["kind"] == "task.failed"][-1]
+    assert ev["payload"]["blocked_reason"] == "awaiting_human"
+    with _pytest.raises(ValueError):
+        tq.fail(t1, s1["id"], "x", blocked_reason="bogus")
+
+
+def test_reopen_note_appended(bb, project):
+    """C1：放回附注追加进 result_note 并随 task.reopened 落审计。"""
+    pid = project["id"]
+    tq = TaskQueue(bb)
+    t1 = tq.publish(pid, "待人工任务", task_type="recon")
+    s1 = _session(bb, project)
+    tq.claim(t1, s1["id"])
+    tq.fail(t1, s1["id"], "等 ROE", blocked_reason="awaiting_human")
+    tq.reopen(t1, by="human", note="ROE 已核验，继续")
+    row = tq.get_task(t1)
+    assert row["status"] == "open"
+    assert "人类补充（human）: ROE 已核验，继续" in row["result_note"]
+    ev = [e for e in bb.recent_events(pid) if e["kind"] == "task.reopened"][-1]
+    assert ev["payload"]["note"] == "ROE 已核验，继续"

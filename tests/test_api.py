@@ -34,7 +34,7 @@ def test_project_lifecycle(client):
     assert any(m["id"] == pid and m["name"] == "API 测试项目" for m in listed)
     detail = client.get(f"/api/projects/{pid}").json()
     assert detail["track"] == "ctf" and detail["capabilities"] == ["binary"]
-    assert "domain" not in detail and detail["task_stats"] == {}  # 写新值不写旧值
+    assert "domain" not in detail and set(detail["task_stats"]) <= {"awaiting_human"}  # 写新值不写旧值；C1 空项目 awaiting 计数为 0
     assert "capability" in detail
     assert client.get("/api/projects/nope").status_code == 404
 
@@ -2643,3 +2643,42 @@ def test_task_graph_suggest_edge(client):
     suggest = [e for e in graph["edges"] if e["kind"] == "suggest"]
     pair = {(e["source"], e["target"]) for e in suggest}
     assert ((t1, t2) in pair) or ((t2, t1) in pair)
+
+
+def test_l2_budget_pause_auto_resumes(tmp_path):
+    """C4：L2 档 budget_paused 自动续跑（缺省 +200，by=l2-auto；token 预算即总闸），
+    任务不经人工最终完成；L0/L1 不受影响（保持人工「▶ 继续」）。"""
+    from test_orchestrator import ScriptedLLM as S
+    app = create_app(
+        workspace_root=str(tmp_path / "ws"), tools_root=None,
+        executor_llm=S([
+            {"tool_use": [S.tool_call("p1", "task_plan", {"steps": [{"title": "摸底"}]})]},
+            {"tool_use": [S.tool_call("c1", "complete_task", {"result_note": "自动续跑后完成"})]},
+            {"tool_use": [S.tool_call("f1", "finish", {"summary": "续跑成功"})]},
+        ]),
+        planner_llm=S([]), providers_config=str(tmp_path / "p.json"))
+    with TestClient(app) as c:
+        pid = c.post("/api/projects", json={"name": "L2自续", "track": "ctf",
+                                            "capabilities": ["binary"]}).json()["id"]
+        assert c.patch(f"/api/projects/{pid}/config",
+                       json={"config": {"autonomy": {"level": "L2", "paused": False}}}
+                       ).status_code == 200
+        tid = c.post(f"/api/projects/{pid}/tasks",
+                     json={"objective": "自续任务", "task_type": "generic"}).json()["task_id"]
+        sp = c.post(f"/api/projects/{pid}/agents",
+                    json={"role": "_generalist", "max_steps": 1})  # 一步即耗尽 → budget pause
+        assert sp.status_code == 201
+
+        deadline = time.time() + 10
+        done = False
+        while time.time() < deadline:
+            row = next(t for t in c.get(f"/api/projects/{pid}/tasks").json() if t["id"] == tid)
+            if row["status"] == "done":
+                done = True
+                break
+            time.sleep(0.2)
+        assert done  # 无人点「继续」，L2 自动续跑后完成
+        bb = c.app.state.projects[pid].bb
+        evs = [(e["kind"], e["payload"]) for e in bb.recent_events(pid)]
+        assert any(k == "step.budget_extended" and p.get("by") == "l2-auto" for k, p in evs)
+        assert any(k == "session.resumed" and p.get("by") == "l2-auto" for k, p in evs)

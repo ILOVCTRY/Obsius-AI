@@ -27,6 +27,8 @@
   - **task_type 注册表**：`TaskTypeError`；publish/update 的 `allowed_types` 由调用方按项目轨注入（Orchestrator/Agent/API 已接线）；None = 未接线不校验；generic 恒合法。
   - **default_noise 生效点**：`claim_next(..., max_noise=)` SQL 按噪声等级（passive<low<medium<high）过滤。
   - 非 passive 任务须带 conflict_keys，同项目 active 键交叠抛 ClaimError。
+  - **C1 blocked_reason（schema v8）**：fail 增 blocked_reason（error|awaiting_human，非法 ValueError），落列+task.failed payload；reopen 增 note（追加 result_note「人类补充（by）: …」+事件 payload）。
+  - **C4**：awaiting_human 不受 L2 自动续跑影响（宁严勿松不自动处置）。
   - **机制 1.1 发布去重**：publish 存 `dedup_fp`（dedup_fp()：type+归一化 scope+折叠空白 objective 的 sha256 截短）；`find_dedup_target` 查 open/claimed 同指纹行（API 层 force 前检，Agent 工具回填 [复用]）；update_task 触及要素时重算 fp。workset 列 advisory 出口已解析。
   - **机制 1.4 资源租约/wait_for**：认领时 conflict_keys 同事务转写 resource_leases（X/S）；冲突（快路径交叠或租约占用）→ 事务内写 `wait_for` 标记、**事务外**抛 ClaimError（事务内 raise 会回滚标记，勿改回）；claim_next 预过滤 wait_for 仍被占/冷却行；`_release_and_revalidate` 在 _finish/delete/expire 内释放租约并清已空闲等待者的 wait_for；`detect_wait_for_deadlock` 环检测安全网（牺牲者清 wait_for+冷却 5min+lock.deadlock_victim）。
   - **graph.py 建议边（机制 1.1）**：kind=suggest 点虚线——同父或 context_refs 相交、已认领、无 inbox 边（机器猜测不落库）。

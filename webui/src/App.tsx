@@ -107,14 +107,20 @@ export default function App() {
     return () => clearTimeout(t)
   }, [events.length, pid])
 
-  // 全局审批铃铛轮询
+  // 全局审批铃铛轮询（C1：awaiting_human 任务计入红点，只计数不混 approval 表）
   useEffect(() => {
     if (!pid) {
       setPendingApprovals(0)
       return
     }
     const load = () =>
-      api.approvals(pid, "pending").then((a) => setPendingApprovals(a.length)).catch(() => {})
+      Promise.all([
+        api.approvals(pid, "pending"),
+        api.getProject(pid),
+      ])
+        .then(([a, detail]) =>
+          setPendingApprovals(a.length + (detail.task_stats.awaiting_human ?? 0)))
+        .catch(() => {})
     load()
     const t = setInterval(load, 5000)
     return () => clearInterval(t)
