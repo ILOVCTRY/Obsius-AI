@@ -278,6 +278,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} TEXT NOT NULL DEFAULT '[]'")
     if "lease_cooldown_until" not in task_cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN lease_cooldown_until TEXT")
+    if "blocked_reason" not in task_cols:  # v8（C1 暂停语义统一）
+        conn.execute(
+            "ALTER TABLE tasks ADD COLUMN blocked_reason TEXT NOT NULL DEFAULT 'error'")
     os_tables = {r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='orchestrator_state'")}
     if os_tables:
