@@ -8,6 +8,7 @@ import "@xyflow/react/dist/style.css"
 import "./canvas.css" // 必须在 xyflow css 之后：深色覆盖（plain CSS 压层叠层）
 import { Maximize2, Minimize2, RotateCcw } from "lucide-react"
 import { api } from "@/lib/api"
+import { cn } from "@/lib/utils"
 import type { Asset, Chain, ChainStatus, ChainSummary, Finding } from "@/lib/types"
 import { FindingDetailDialog } from "@/components/blackboard/FindingDetailDialog"
 import {
@@ -39,10 +40,11 @@ function loadOffsets(pid: string): Offsets {
   catch { return {} }
 }
 
-function Canvas({ pid, findings, assets, onMutated }: {
+function Canvas({ pid, findings, assets, assetFilter, onMutated }: {
   pid: string
   findings: Finding[]      // 已过 IP/sev/status 共享筛选
   assets: Asset[]
+  assetFilter?: string     // C2 降噪：选中 host → 泳道模式；空 → 全局严重度分块
   onMutated: () => void
 }) {
   const wrapperRef = useRef<HTMLDivElement>(null)
@@ -81,7 +83,18 @@ function Canvas({ pid, findings, assets, onMutated }: {
     try { localStorage.setItem(OFFSETS_KEY(pid), JSON.stringify(next)) } catch { /* 满/隐私模式忽略 */ }
   }, [pid])
 
-  const [weakOn, setWeakOn] = useState(true)
+  // C2 边显示三态：全部（含弱边）/ 仅强边（弱边隐藏，缺省）/ 仅链边（只看人工确认链）
+  type EdgeMode = "all" | "strong" | "chain"
+  const EDGE_MODE_KEY = (pid: string) => `findings-edgemode:${pid}`
+  const [edgeMode, setEdgeMode] = useState<EdgeMode>(() => {
+    try { return (localStorage.getItem(EDGE_MODE_KEY(pid)) as EdgeMode) || "strong" } catch { return "strong" }
+  })
+  const changeEdgeMode = useCallback((m: EdgeMode) => {
+    setEdgeMode(m)
+    try { localStorage.setItem(EDGE_MODE_KEY(pid), m) } catch { /* 忽略 */ }
+  }, [pid])
+  const [focusOn, setFocusOn] = useState(true)     // C2 聚焦：hover/点选节点 → 只亮一跳邻接
+  const [hoverNodeId, setHoverNodeId] = useState<string | null>(null)
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null)
   const [detail, setDetail] = useState<Finding | null>(null)
@@ -94,7 +107,17 @@ function Canvas({ pid, findings, assets, onMutated }: {
     return () => document.removeEventListener("fullscreenchange", h)
   }, [])
 
-  const model = useMemo(() => buildLanes(findings, assets), [findings, assets])
+  // C2：强/链边先算——供 buildLanes 重心排序减少交叉（弱边依赖 laneOf 在模型之后）
+  const strongEdgesPre = useMemo(() => buildStrongEdges(findings), [findings])
+  const chainEdgesPre = useMemo(
+    () => buildChainEdges([...details.values()], new Set(findings.map((f) => f.id))),
+    [details, findings])
+  const globalLayout = !assetFilter
+  const model = useMemo(
+    () => buildLanes(findings, assets, {
+      globalLayout, orderEdges: [...strongEdgesPre, ...chainEdgesPre],
+    }),
+    [findings, assets, globalLayout, strongEdgesPre, chainEdgesPre])
   const assetById = useMemo(() => new Map(assets.map((a) => [a.id, a])), [assets])
 
   // 受控 ReactFlow 契约：节点由 model+offsets 派生，但内部测量/拖拽变化必须回写——
@@ -131,23 +154,26 @@ function Canvas({ pid, findings, assets, onMutated }: {
 
   // ---------- 边 ----------
   const edges = useMemo(() => {
-    const weak = weakOn ? buildWeakEdges(findings, model.laneOf) : []
-    const strong = buildStrongEdges(findings)
-    const chain = buildChainEdges([...details.values()], new Set(findings.map((f) => f.id)))
+    const weak = edgeMode === "all" ? buildWeakEdges(findings, model.laneOf) : []
+    const strong = edgeMode === "chain" ? [] : strongEdgesPre
+    const chain = edgeMode === "all" || edgeMode === "strong" ? chainEdgesPre : []
     return [...weak, ...strong, ...chain]
-  }, [weakOn, findings, model.laneOf, details])
+  }, [edgeMode, findings, model.laneOf, strongEdgesPre, chainEdgesPre])
+
+  // C2 聚焦：hover/点选的当前焦点节点（聚焦关闭时仅点选生效）
+  const focusNodeId = focusOn ? (selectedNodeId ?? hoverNodeId) : null
 
   const adjacent = useMemo(() => {
     const s = new Set<string>()
-    if (selectedNodeId) {
-      s.add(selectedNodeId)
+    if (focusNodeId) {
+      s.add(focusNodeId)
       for (const e of edges) {
-        if (e.source === selectedNodeId) s.add(e.target)
-        if (e.target === selectedNodeId) s.add(e.source)
+        if (e.source === focusNodeId) s.add(e.target)
+        if (e.target === focusNodeId) s.add(e.source)
       }
     }
     return s
-  }, [selectedNodeId, edges])
+  }, [focusNodeId, edges])
 
   const selectedEdge: ModelEdge | undefined = useMemo(
     () => edges.find((e) => e.id === selectedEdgeId), [edges, selectedEdgeId])
@@ -171,28 +197,35 @@ function Canvas({ pid, findings, assets, onMutated }: {
     && (fpIds.has(selectedEdge.source) || fpIds.has(selectedEdge.target))
 
   const flowEdges: FindingFlowEdge[] = useMemo(() => edges.map((e): FindingFlowEdge => {
-    const connected = !selectedNodeId
-      || e.source === selectedNodeId || e.target === selectedNodeId
+    const connected = !focusNodeId
+      || e.source === focusNodeId || e.target === focusNodeId
     const chainDim = e.kind === "chain" && !!selectedChainId && e.chainId !== selectedChainId
     const stale = fpIds.has(e.source) || fpIds.has(e.target)
     const dim = !connected || chainDim
     const color = edgeColor(e)
+    // C2 路由：同泳道同列直线 / 同泳道跨列平滑折线 / 跨泳道贝塞尔
+    const sp = model.place.get(e.source)
+    const tp = model.place.get(e.target)
+    const route = sp && tp
+      ? sp.laneKey === tp.laneKey ? (sp.col === tp.col ? "straight" : "step") : "bezier"
+      : "bezier"
     return {
       id: e.id, source: e.source, target: e.target, type: "findingEdge",
       data: {
         kind: e.kind, label: e.label, selected: e.id === selectedEdgeId,
-        dimmed: dim, stale, onSelect: selectEdge,
+        dimmed: dim, stale, route, onSelect: selectEdge,
       },
       style: {
         stroke: color,
         strokeWidth: e.kind === "chain" ? 1.8 : e.kind === "strong" ? 1.6 : 1,
         strokeDasharray: stale ? "3 4" : e.kind === "weak" ? "5 4" : undefined,
-        opacity: dim ? 0.15 : stale ? 0.25 : e.kind === "weak" ? 0.65 : 0.95,
+        opacity: dim ? (focusOn ? 0.08 : 0.15)
+          : stale ? 0.25 : e.kind === "weak" ? 0.4 : 0.95,
       },
       markerEnd: { type: MarkerType.ArrowClosed, color, width: 14, height: 14 },
       interactionWidth: 0,
     }
-  }), [edges, fpIds, selectedNodeId, selectedChainId, selectedEdgeId, selectEdge])
+  }), [edges, fpIds, focusNodeId, focusOn, selectedChainId, selectedEdgeId, selectEdge, model.place])
 
   // ---------- 节点 ----------
   const openDetail = useCallback((f: Finding) => setDetail(f), [])
@@ -233,18 +266,18 @@ function Canvas({ pid, findings, assets, onMutated }: {
       const p = model.place.get(f.id)
       if (!p) continue
       const off = offsets[f.id] ?? { dx: 0, dy: 0 }
-      const dim = selectedNodeId !== null && !adjacent.has(f.id)
+      const dim = focusNodeId !== null && !adjacent.has(f.id)
       const node: FindingFlowNode = {
         id: f.id, type: "finding",
         position: { x: p.x + off.dx, y: p.y + off.dy },
-        data: { f, dim, onOpen: openDetail, onQuickAdd: quickAdd },
+        data: { f, dim, compact: f.severity === "low" || f.severity === "info", onOpen: openDetail, onQuickAdd: quickAdd },
         measured: measuredById[f.id],
         style: { width: 224 },
       }
       nodes.push(node)
     }
     return nodes
-  }, [model, findings, offsets, selectedNodeId, adjacent, openDetail, quickAdd, measuredById])
+  }, [model, findings, offsets, focusNodeId, adjacent, openDetail, quickAdd, measuredById])
 
   const onNodeDragStop = useCallback((_: unknown, node: Node) => {
     // 位置已在 onNodesChangeCb 实时回写并在拖拽结束时落盘；这里只兜底再持久化一次
@@ -314,10 +347,25 @@ function Canvas({ pid, findings, assets, onMutated }: {
           mutating={mutating}
         />
         <span className="flex-1" />
+        {/* C2 聚焦：hover/点选节点 → 只亮一跳邻接（默认开） */}
         <label className="flex cursor-pointer items-center gap-1 text-[11px] text-muted-foreground">
-          <input type="checkbox" checked={weakOn} onChange={(e) => setWeakOn(e.target.checked)} />
-          弱边
+          <input type="checkbox" checked={focusOn} onChange={(e) => setFocusOn(e.target.checked)} />
+          聚焦
         </label>
+        {/* C2 边显示三态：全部（含弱边）/ 仅强边（缺省）/ 仅链边 */}
+        <div className="flex items-center overflow-hidden rounded border border-[#30363d] text-[11px]">
+          {([["all", "全部"], ["strong", "仅强边"], ["chain", "仅链边"]] as const).map(([m, label]) => (
+            <button
+              key={m} type="button"
+              className={cn("px-2 py-0.5 transition-colors",
+                edgeMode === m ? "bg-primary/15 font-medium text-primary" : "text-muted-foreground hover:bg-accent/40",
+                m !== "all" && "border-l border-[#30363d]")}
+              onClick={() => changeEdgeMode(m)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
         <button
           type="button" title="重置布局（清除手动位置）"
           className="rounded p-1 text-muted-foreground hover:bg-accent/40 hover:text-foreground"
@@ -354,6 +402,13 @@ function Canvas({ pid, findings, assets, onMutated }: {
         onNodesChange={onNodesChangeCb}
         onConnect={onConnect}
         onNodeDragStop={onNodeDragStop}
+        onNodeMouseEnter={(_, node) => {
+          if (node.type === "finding") setHoverNodeId(node.id)
+        }}
+        onNodeMouseLeave={(_, node) => {
+          if (node.type === "finding") setHoverNodeId((cur) => (cur === node.id ? null : cur))
+        }}
+        onlyRenderVisibleElements
         onNodeClick={(_, node) => {
           if (node.type !== "finding") return
           setSelectedNodeId(node.id)
@@ -469,7 +524,7 @@ function Canvas({ pid, findings, assets, onMutated }: {
 }
 
 export function FindingsCanvas(props: {
-  pid: string; findings: Finding[]; assets: Asset[]; onMutated: () => void
+  pid: string; findings: Finding[]; assets: Asset[]; assetFilter?: string; onMutated: () => void
 }) {
   return (
     <ReactFlowProvider>

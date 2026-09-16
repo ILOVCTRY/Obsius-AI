@@ -295,7 +295,7 @@ function Findings({ pid, compact, track, showCanvas }: {
               加载攻击链画布…
             </div>
           }>
-            <FindingsCanvas pid={pid} findings={visible} assets={assets} onMutated={refresh} />
+            <FindingsCanvas pid={pid} findings={visible} assets={assets} assetFilter={assetFilter} onMutated={refresh} />
           </Suspense>
         </div>
         {detail && (

@@ -19,6 +19,8 @@ const SEV: Record<string, string> = {
 export type FindingNodeData = {
   f: Finding
   dim: boolean
+  /** C2 降噪：info/low 紧凑形态（高度减半，只显色条+标题一行） */
+  compact?: boolean
   onOpen: (f: Finding) => void
   onQuickAdd: (f: Finding) => void
 }
@@ -26,18 +28,19 @@ export type FindingNodeData = {
 export type FindingFlowNode = Node<FindingNodeData, "finding">
 
 export function FindingNode({ data }: NodeProps<FindingFlowNode>) {
-  const { f, dim, onQuickAdd } = data
+  const { f, dim, compact, onQuickAdd } = data
   const sevColor = SEV[f.severity] ?? SEV.info
   return (
     <div
       className={cn(
-        "group relative w-56 rounded-md border bg-popover px-2.5 py-2 shadow-sm transition-opacity",
+        "group relative w-56 rounded-md border bg-popover shadow-sm transition-opacity",
+        compact ? "px-2.5 py-1" : "px-2.5 py-2",
         f.status === "false-positive"
           ? "border-dashed border-muted-foreground/40"
           : f.status === "unverified"
             ? "border-dashed border-[#39424e]"
             : "border-[#3fb950]/50",
-        dim && "opacity-20",
+        dim && "opacity-[0.08]",
       )}
     >
       <Handle type="target" position={Position.Left} className="!h-2 !w-2 !border-0 !bg-[#39c5cf]" />
@@ -52,7 +55,10 @@ export function FindingNode({ data }: NodeProps<FindingFlowNode>) {
         <Link2 className="size-3.5" />
       </button>
 
-      <p className="line-clamp-2 pr-5 text-[11px] font-medium leading-tight">{f.title}</p>
+      <p className={cn("pr-5 text-[11px] font-medium leading-tight", compact ? "truncate" : "line-clamp-2")}>
+        {f.title}
+      </p>
+      {!compact && (
       <div className="mt-1 flex items-center gap-1">
         <span className="min-w-0 flex-1 truncate rounded bg-muted px-1 font-mono text-[9px] text-muted-foreground">
           {f.vuln_class}
@@ -68,6 +74,7 @@ export function FindingNode({ data }: NodeProps<FindingFlowNode>) {
           <span className="rounded bg-[#39c5cf]/15 px-1 text-[9px] text-[#39c5cf]">POC</span>
         )}
       </div>
+      )}
       <Handle type="source" position={Position.Right} className="!h-2 !w-2 !border-0 !bg-[#39c5cf]" />
     </div>
   )

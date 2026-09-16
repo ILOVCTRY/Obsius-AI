@@ -5,6 +5,7 @@ import type { Asset, Chain, Finding } from "@/lib/types"
 // 产出泳道/列归属与三级边。React Flow 节点组装在 FindingsCanvas.tsx。
 
 export const UNASSIGNED = "__unassigned__"
+export const GLOBAL_LANE = "__global__"   // C2 降噪：无筛选时单一全局泳道（severity 四列共用）
 
 export const CARD_W = 224          // w-56
 export const COL_W = 252           // 列宽（卡 224 + 列间距 28）
@@ -12,6 +13,7 @@ export const LANE_GAP = 36
 export const LANE_W = COL_W * 4    // 四列严重度带（info/low｜medium｜high｜critical）
 export const HEADER_H = 40
 export const CARD_STEP = 118       // 同列卡纵向步距
+export const CARD_STEP_COMPACT = 64 // info/low 紧凑卡步距（C2 降噪）
 export const CARD_Y0 = 92          // 顶部留 44px 给画布工具条：泳道头 y=44/高40
 
 export const SEV_RANK: Record<string, number> = {
@@ -50,35 +52,50 @@ export interface LaneModel {
   lanes: Lane[]
   /** finding.id → {laneX, col, y（同列按 created_at 升序的堆叠序）} */
   place: Map<string, { x: number; y: number; laneKey: string; col: 0 | 1 | 2 | 3 }>
-  /** finding.id → host id/UNASSIGNED */
+  /** finding.id → host id/UNASSIGNED（全局布局=GLOBAL_LANE） */
   laneOf: Map<string, string>
 }
 
-export function buildLanes(findings: Finding[], assets: Asset[]): LaneModel {
+export interface BuildLanesOptions {
+  /** 无资产筛选：单一全局泳道（所有发现共用 severity 四列，不按 host 分块） */
+  globalLayout?: boolean
+  /** 强边+链边——供重心排序减少交叉（弱边不参与：纯推导联想边） */
+  orderEdges?: ModelEdge[]
+}
+
+export function buildLanes(findings: Finding[], assets: Asset[],
+                           opts: BuildLanesOptions = {}): LaneModel {
   const byId = new Map(assets.map((a) => [a.id, a]))
   const laneOf = new Map<string, string>()
-  const hosts = new Map<string, Asset>()
-  for (const f of findings) {
-    const hk = hostOf(f, byId)
-    laneOf.set(f.id, hk)
-    if (hk !== UNASSIGNED) {
-      const h = byId.get(hk)
-      if (h) hosts.set(hk, h)
-    }
-  }
-  // 泳道按 IP 排序，「未归属」垫底
-  const hostLanes = [...hosts.values()].sort((a, b) => a.value.localeCompare(b.value))
-  const keys = hostLanes.map((h) => h.id)
-  if (laneOfContains(laneOf, UNASSIGNED)) keys.push(UNASSIGNED)
-  const lanes: Lane[] = keys.map((k, i) => ({
-    key: k,
-    label: k === UNASSIGNED ? "未归属" : (byId.get(k)?.value ?? k),
-    x: i * (LANE_W + LANE_GAP),
-  }))
+  const lanes: Lane[] = []
 
-  // 泳道 × 列内按 created_at 升序堆叠（早→晚自上而下）
-  const counters = new Map<string, number>()
-  const place = new Map<string, { x: number; y: number; laneKey: string; col: 0 | 1 | 2 | 3 }>()
+  if (opts.globalLayout) {
+    // C2 降噪：无筛选时全部发现共用一个严重度四列分块（不按 IP 分泳道）
+    lanes.push({ key: GLOBAL_LANE, label: "全部发现", x: 0 })
+    for (const f of findings) laneOf.set(f.id, GLOBAL_LANE)
+  } else {
+    const hosts = new Map<string, Asset>()
+    for (const f of findings) {
+      const hk = hostOf(f, byId)
+      laneOf.set(f.id, hk)
+      if (hk !== UNASSIGNED) {
+        const h = byId.get(hk)
+        if (h) hosts.set(hk, h)
+      }
+    }
+    // 泳道按 IP 排序，「未归属」垫底
+    const hostLanes = [...hosts.values()].sort((a, b) => a.value.localeCompare(b.value))
+    const keys = hostLanes.map((h) => h.id)
+    if (laneOfContains(laneOf, UNASSIGNED)) keys.push(UNASSIGNED)
+    keys.forEach((k, i) => lanes.push({
+      key: k,
+      label: k === UNASSIGNED ? "未归属" : (byId.get(k)?.value ?? k),
+      x: i * (LANE_W + LANE_GAP),
+    }))
+  }
+
+  // 列内初始分组（created_at 升序）
+  const cols = new Map<string, Finding[]>()
   const laneX = new Map(lanes.map((l) => [l.key, l.x]))
   const sorted = [...findings].sort((a, b) =>
     a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id))
@@ -86,13 +103,92 @@ export function buildLanes(findings: Finding[], assets: Asset[]): LaneModel {
     const lk = laneOf.get(f.id)!
     const col = sevColumn(f.severity)
     const ck = `${lk}:${col}`
-    const idx = counters.get(ck) ?? 0
-    counters.set(ck, idx + 1)
-    place.set(f.id, {
-      x: (laneX.get(lk) ?? 0) + col * COL_W,
-      y: CARD_Y0 + idx * CARD_STEP,
-      laneKey: lk, col,
+    ;(cols.get(ck) ?? cols.set(ck, []).get(ck)!).push(f)
+  }
+
+  // 分量聚簇：强边/链边连通的发现作为一个排序单元（并查集，簇内不被打散）
+  const orderEdges = opts.orderEdges ?? []
+  const compParent = new Map<string, string>()
+  const compFind = (x: string): string => {
+    let r = compParent.get(x) ?? x
+    while (r !== (compParent.get(r) ?? r)) r = compParent.get(r) ?? r
+    let c = x
+    while (c !== r) { const n = compParent.get(c) ?? r; compParent.set(c, r); c = n }
+    return r
+  }
+  const compUnion = (a: string, b: string) => {
+    const ra = compFind(a); const rb = compFind(b)
+    if (ra !== rb) compParent.set(ra, rb)
+  }
+  for (const e of orderEdges) {
+    if (laneOf.has(e.source) && laneOf.has(e.target)) compUnion(e.source, e.target)
+  }
+  const compMinCreated = new Map<string, string>()
+  for (const f of sorted) {
+    const r = compFind(f.id)
+    const min = compMinCreated.get(r)
+    if (!min || f.created_at < min) compMinCreated.set(r, f.created_at)
+  }
+
+  // 列内排序：分量（簇间按最早发现时间）→ created_at → id
+  for (const list of cols.values()) {
+    list.sort((a, b) => {
+      const ca = compMinCreated.get(compFind(a.id)) ?? a.created_at
+      const cb = compMinCreated.get(compFind(b.id)) ?? b.created_at
+      return ca.localeCompare(cb) ||
+        a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id)
     })
+  }
+
+  // 重心排序（barycenter，2 轮往返）：按强边/链边邻接的列内位置均值排——
+  // 强边两端对齐，交叉典型降 50%+。位置 = 各自列内下标。
+  if (orderEdges.length) {
+    const adj = new Map<string, string[]>()
+    for (const e of orderEdges) {
+      if (!laneOf.has(e.source) || !laneOf.has(e.target)) continue
+      ;(adj.get(e.source) ?? adj.set(e.source, []).get(e.source)!).push(e.target)
+      ;(adj.get(e.target) ?? adj.set(e.target, []).get(e.target)!).push(e.source)
+    }
+    const pos = new Map<string, number>()
+    const rebuildPos = () => {
+      for (const list of cols.values()) list.forEach((f, i) => pos.set(f.id, i))
+    }
+    rebuildPos()
+    const colKeys = [...cols.keys()].sort((a, b) => a.localeCompare(b))
+    for (let pass = 0; pass < 4; pass++) {
+      const l2r = pass % 2 === 0
+      for (const key of l2r ? colKeys : [...colKeys].reverse()) {
+        const list = cols.get(key)!
+        const bary = new Map<string, number>()
+        for (const f of list) {
+          const ns = (adj.get(f.id) ?? []).filter((n) => pos.has(n))
+          bary.set(f.id, ns.length
+            ? ns.reduce((s, n) => s + (pos.get(n) ?? 0), 0) / ns.length
+            : (pos.get(f.id) ?? 0))
+        }
+        list.sort((a, b) =>
+          (bary.get(a.id)! - bary.get(b.id)!) ||
+          a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id))
+        rebuildPos()
+      }
+    }
+  }
+
+  // 最终按列游标堆叠（info/low 紧凑卡矮步距）
+  const place = new Map<string, { x: number; y: number; laneKey: string; col: 0 | 1 | 2 | 3 }>()
+  const isCompact = (f: Finding) => f.severity === "low" || f.severity === "info"
+  for (const lane of lanes) {
+    for (let col = 0 as 0 | 1 | 2 | 3; col <= 3; col++) {
+      const list = cols.get(`${lane.key}:${col}`) ?? []
+      let y = CARD_Y0
+      for (const f of list) {
+        place.set(f.id, {
+          x: (laneX.get(lane.key) ?? 0) + col * COL_W, y,
+          laneKey: lane.key, col,
+        })
+        y += isCompact(f) ? CARD_STEP_COMPACT : CARD_STEP
+      }
+    }
   }
   return { lanes, place, laneOf }
 }
