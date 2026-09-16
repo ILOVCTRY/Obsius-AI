@@ -514,6 +514,7 @@ export function LiveRoom({ pid }: { pid: string }) {
           priority: typeof a.priority === "number" ? a.priority : undefined,
           conflict_keys: strs(a.conflict_keys),
           refs: strs(a.refs),
+          parent_id: str(a.parent_id),  // C1 编排拆解：透传父子关系（任务流实线/撤回子树依赖）
         })
         setJobInfo("已采纳任务提案：以人类名义入队（L0 不自动跑队列，需要时点「跑队列」）")
       } else if (p.op === "spawn_session") {

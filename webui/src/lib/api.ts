@@ -185,7 +185,7 @@ export const api = {
   publishTask: (pid: string, body: {
     objective: string; scope?: string; task_type?: string; noise_budget?: string;
     priority?: number; conflict_keys?: string[]; refs?: string[];
-    workset?: string[]; force?: boolean
+    workset?: string[]; force?: boolean; parent_id?: string
   }) =>
     http<{ task_id: string; kicked: string[]; deduplicated?: boolean; existed_status?: string }>(
       `/api/projects/${pid}/tasks`, { method: "POST", body: JSON.stringify(body) }),

@@ -1,0 +1,43 @@
+- generic [ref=f6e3]:
+  - navigation [ref=f6e4]:
+    - button "◈ 项目" [ref=f6e5]:
+      - generic [ref=f6e6]: ◈
+      - text: 项目
+    - button "📡 情报" [ref=f6e7]:
+      - generic [ref=f6e8]: 📡
+      - text: 情报
+    - button "◉ 直播间" [disabled] [ref=f6e9]:
+      - generic [ref=f6e10]: ◉
+      - text: 直播间
+    - button "▤ 黑板" [disabled] [ref=f6e11]:
+      - generic [ref=f6e12]: ▤
+      - text: 黑板
+    - button "▦ 任务" [disabled] [ref=f6e13]:
+      - generic [ref=f6e14]: ▦
+      - text: 任务
+    - button "⚑ 审批" [disabled] [ref=f6e15]:
+      - generic [ref=f6e16]: ⚑
+      - text: 审批
+    - button "⚙ 技能/设置" [ref=f6e17]:
+      - generic [ref=f6e18]: ⚙
+      - text: 技能/设置
+  - main [ref=f6e19]:
+    - generic [ref=f6e20]:
+      - generic [ref=f6e21]:
+        - generic [ref=f6e22]:
+          - heading "项目" [level=1] [ref=f6e23]
+          - paragraph [ref=f6e24]: 项目 = 场景轨（单选）× 能力包（多选）；数据随 workspaces/ 项目目录隔离
+        - generic [ref=f6e25]:
+          - generic [ref=f6e26]: 新建项目
+          - generic [ref=f6e28]:
+            - generic [ref=f6e29]:
+              - textbox "项目名（可用中文）" [ref=f6e30]
+              - button "创建" [disabled]
+            - generic [ref=f6e31]: 场景轨
+            - generic [ref=f6e33]: 能力包
+        - paragraph [ref=f6e36]: 还没有项目——上面创建一个
+      - complementary [ref=f6e37]:
+        - generic [ref=f6e38]:
+          - heading "今日简报" [level=2] [ref=f6e39]
+          - button "刷新情报" [ref=f6e40]
+        - paragraph [ref=f6e41]: 今日暂无简报。点「刷新情报」抓取漏洞源与社区热点，自动合成中文简报。

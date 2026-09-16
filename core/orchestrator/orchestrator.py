@@ -48,6 +48,10 @@ ORCH_SYSTEM_PROMPT = """你是项目主代理（Orchestrator），职责是监�
 4. 开窗被拒（白名单/上限）即改道：复用现有会话或调整任务。
 5. 距上次简报 >= {digest_every} 轮时，本轮必须 write_digest。
 6. 决策完毕调用 done。
+7. 任务拆解与分批（C1）：大目标（如全资产侦察）拆解为自足子任务——先发布父任务拿到
+   task_id，再发布子任务并把 parent_id 指向它（**深度 1 层**：子任务不可再拆）；每轮
+   发布 ≤{max_publish_per_tick} 个（分批 3-5 个/轮，按建议角色与优先级）；队列空退后
+   下一轮 tick 续批（态势里有 uncovered 资产清单可对照发批）；资产全覆盖前不要 done。
 """
 
 
@@ -86,6 +90,9 @@ ORCH_TOOLS: list[dict[str, Any]] = [
                          "description": "本任务依据的既有发现 id（find- 前缀）；"
                                         "依据被推翻时执行者会收到强制自评通知。正文里"
                                         "直接写 find-id 也会被服务端自动抽取，显式填写更准"},
+                "parent_id": {"type": "string",
+                              "description": "父任务 id（C1 任务拆解）：大目标拆解时先发布父任务，"
+                                             "再把子任务的 parent_id 指向它（深度 1 层，子任务不可再拆）"},
             },
             "required": ["objective", "task_type"],
         },
@@ -179,6 +186,8 @@ class OrchestratorConfig:
     allowed_roles: list[str] | None = None  # None = 不限
     max_sessions: int = 4
     digest_every: int = 3   # 每 N 轮至少一份简报
+    # C1 编排拆解：单轮发布硬闸（拆解/分批 3-5/轮；worker 空退事件驱动续批）
+    max_publish_per_tick: int = 5
     # 批 6（§6.8）：L0 提案模式——publish_task/spawn_session 只发 orch.proposed
     # 事件、不写实体（校验照跑）；API 按实时档位 level=="L0" 注入。
     propose_only: bool = False
@@ -241,6 +250,7 @@ class Orchestrator:
         # 批 3：每 tick 的结构化动作收集（tick 开头重置；构造器预置以便单测直调工具）
         self._published: list[str] = []
         self._spawned: list[dict[str, str]] = []
+        self._publish_count = 0  # C1：单轮发布计数（tick 每轮重置）
         self._proposals: list[dict[str, Any]] = []  # 批 6：L0 提案 {op,args,event_id}
         self._digest: str | None = None
         self._warned_starvation: dict[tuple[str, str], dict] = {}
@@ -342,6 +352,48 @@ class Orchestrator:
             "sessions": [{"id": s["id"], "role": s["role"], "status": s["status"]}
                          for s in sessions],
             "live_windows": len(self.live_sessions),
+            **self._assets_view(tasks),
+        }
+
+    def _assets_view(self, tasks: list[dict]) -> dict:
+        """C1 资产视图：by_type/by_status 计数 + 未覆盖清单（cap 30 带 id）——
+        供编排器分批发批对照；判定为提示层，真护栏 = conflict_keys 互斥。
+        未覆盖 = host/domain/url/service 资产未被任何 open/claimed 任务的
+        conflict_keys/scope/objective 文本提及。"""
+        assets = self.bb.list_assets(self.project_id)
+        by_type: dict[str, int] = {}
+        by_status: dict[str, int] = {}
+        targetable = []
+        for a in assets:
+            by_type[a["type"]] = by_type.get(a["type"], 0) + 1
+            st = (a.get("status") or "open")
+            by_status[st] = by_status.get(st, 0) + 1
+            if a["type"] in ("host", "domain", "url", "service"):
+                targetable.append(a)
+        covered_text = ""
+        for t in tasks:
+            if t["status"] not in ("open", "claimed"):
+                continue
+            covered_text += " ".join([
+                *(t.get("conflict_keys") or []), t.get("scope") or "",
+                t.get("objective") or ""]).lower() + "\n"
+        def _asset_keys(a: dict) -> list[str]:
+            v = a["value"].lower()
+            if a["type"] == "url":
+                v = v.split("://", 1)[-1].rstrip("/")
+            return [v]
+
+        uncovered = [
+            a for a in targetable
+            if not any(k in covered_text for k in _asset_keys(a))
+        ]
+        return {
+            "assets": {
+                "total": len(assets), "by_type": by_type, "by_status": by_status,
+                "uncovered_total": len(uncovered),
+                "uncovered": [{"id": a["id"], "type": a["type"], "value": a["value"][:60]}
+                              for a in uncovered[:30]],
+            },
         }
 
     def _starvation_warnings(self, open_tasks: list[dict]) -> list[dict]:
@@ -404,6 +456,7 @@ class Orchestrator:
         self._spawned: list[dict[str, str]] = []
         self._proposals = []
         self._digest: str | None = None
+        self._publish_count = 0  # C1：单轮发布硬闸计数（直接发布与 L0 提案同闸）
         overview = self._overview(expired)
         self._emit_starvation_events(self._last_stats_starvation)
         auto = self.autonomy_provider() if self.autonomy_provider is not None else None
@@ -421,6 +474,7 @@ class Orchestrator:
             allowed_roles=self.config.allowed_roles or "不限",
             max_sessions=self.config.max_sessions,
             digest_every=self.config.digest_every,
+            max_publish_per_tick=self.config.max_publish_per_tick,
         )
         messages: list[dict[str, Any]] = [{
             "role": "user",
@@ -582,7 +636,13 @@ class Orchestrator:
         self, objective: str, task_type: str, scope: str = "",
         noise_budget: str | None = None, conflict_keys: list[str] | None = None,
         priority: int = 2, refs: list[str] | None = None,
+        parent_id: str | None = None,
     ) -> str:
+        # C1 单轮发布硬闸：直接发布与 L0 提案同闸（拆解/分批 3-5/轮，防一轮刷爆队列）
+        if self._publish_count >= self.config.max_publish_per_tick:
+            return (f"[拒绝] 本轮发布已达上限 max_publish_per_tick="
+                    f"{self.config.max_publish_per_tick}；分批发布——本轮先 done，"
+                    "队列空退后下一轮 tick 续批（态势含 uncovered 资产清单）")
         # 批 6 L0 提案模式：校验照跑（噪声/conflict_keys/注册表），但不走预算闸、
         # 不发布、不计数，只发 orch.proposed（人采纳时以 created_by=human 走 POST /tasks）
         if self.config.propose_only:
@@ -595,12 +655,17 @@ class Orchestrator:
             try:
                 _check_task_type(task_type,
                                  self.task_types.keys() if self.track else None)
+                if parent_id:
+                    self.tq.check_parent(self.project_id, parent_id,
+                                         enforce_depth=True)  # 编排拆解深度 1
             except ValueError as e:
                 return f"[拒绝] {e}"
+            self._publish_count += 1
             return self._propose("publish_task", {
                 "objective": objective, "scope": scope, "task_type": task_type,
                 "noise_budget": noise_budget, "priority": priority,
-                "conflict_keys": conflict_keys or [], "refs": refs or []})
+                "conflict_keys": conflict_keys or [], "refs": refs or [],
+                "parent_id": parent_id})
         # 自主预算硬闸（§6.8）：每闸门经 gate 回调重读项目配置（task_budget/token_budget）
         if self.gate is not None:
             reason = self.gate("publish_task")
@@ -615,9 +680,10 @@ class Orchestrator:
                 noise_budget=noise_budget, priority=priority,
                 conflict_keys=conflict_keys, created_by="orchestrator",
                 allowed_types=(self.task_types.keys() if self.track else None),
-                refs=refs)
+                refs=refs, parent_id=parent_id, parent_depth_limit=1)
         except ValueError as e:
             return f"[拒绝] {e}"
+        self._publish_count += 1
         self._published.append(task_id)
         if self.on_task_published is not None:
             try:

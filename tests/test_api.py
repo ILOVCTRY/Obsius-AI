@@ -2682,3 +2682,24 @@ def test_l2_budget_pause_auto_resumes(tmp_path):
         evs = [(e["kind"], e["payload"]) for e in bb.recent_events(pid)]
         assert any(k == "step.budget_extended" and p.get("by") == "l2-auto" for k, p in evs)
         assert any(k == "session.resumed" and p.get("by") == "l2-auto" for k, p in evs)
+
+
+def test_publish_parent_id_and_depth_422(client):
+    """C1：parent_id 落库（任务流实线边）；坏父/超深 422。"""
+    pid = _make_project(client)
+    parent = client.post(f"/api/projects/{pid}/tasks",
+                         json={"objective": "父任务", "task_type": "generic"}).json()["task_id"]
+    r = client.post(f"/api/projects/{pid}/tasks",
+                    json={"objective": "子任务", "task_type": "generic", "parent_id": parent})
+    assert r.status_code == 201
+    child = r.json()["task_id"]
+    rows = {t["id"]: t for t in client.get(f"/api/projects/{pid}/tasks").json()}
+    assert rows[child]["parent_id"] == parent
+    # 坏父
+    r = client.post(f"/api/projects/{pid}/tasks",
+                    json={"objective": "坏父", "task_type": "generic", "parent_id": "task-nope"})
+    assert r.status_code == 422
+    # 人类显式建深树允许（深度 1 限编排器；撤回传播子树语义优先）
+    r = client.post(f"/api/projects/{pid}/tasks",
+                    json={"objective": "孙任务", "task_type": "generic", "parent_id": child})
+    assert r.status_code == 201

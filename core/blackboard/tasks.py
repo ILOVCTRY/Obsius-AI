@@ -65,6 +65,22 @@ class TaskQueue:
 
     # ---------- 发布 ----------
 
+    def check_parent(self, project_id: str, parent_id: str | None,
+                     enforce_depth: bool = False) -> None:
+        """C1 编排拆解：父子关系校验。坏父（不存在/跨项目——外键兜底）三写路径
+        共用强制；**深度 1 层限制仅编排器路径强制**（enforce_depth=True）——
+        撤回传播（机制 1.6/1.7）依赖任意深度 parent_id 子树，人类显式建深树不受限。
+        违例抛 ValueError（API 422 / 工具回填 [拒绝]）。"""
+        if not parent_id:
+            return
+        row = self.bb.conn.execute(
+            "SELECT project_id, parent_id FROM tasks WHERE id=?", (parent_id,)).fetchone()
+        if row is None or row["project_id"] != project_id:
+            raise ValueError(f"父任务不存在或跨项目: {parent_id}")
+        if enforce_depth and row["parent_id"]:
+            raise ValueError(
+                f"任务 {parent_id} 已是拆解子任务（编排拆解深度 1 层上限），不可再被拆解")
+
     def publish(
         self,
         project_id: str,
@@ -79,6 +95,7 @@ class TaskQueue:
         allowed_types: Iterable[str] | None = None,
         refs: list[str] | None = None,
         workset: list[str] | None = None,
+        parent_depth_limit: int | None = None,
     ) -> str:
         """发布任务。created_by: human / orchestrator / session-x。
 
@@ -98,6 +115,22 @@ class TaskQueue:
         if noise_budget != "passive" and not conflict_keys:
             raise ValueError("非 passive 任务必须提供 conflict_keys（active 互斥的依据）")
         _check_task_type(task_type, allowed_types)
+        if parent_id:
+            self.check_parent(project_id, parent_id,
+                              enforce_depth=parent_depth_limit is not None)  # 坏父共用；深度限编排器
+        if parent_id and parent_depth_limit is not None:
+            # 深度上限（编排器=1）：父任务自身必须仍是顶层（无 parent）——
+            # 即拆解只允许「顶层父 + 子」两层；父已是被拆解的子任务 → 拒
+            anc, cur = 0, parent_id
+            while cur:
+                row = self.bb.conn.execute(
+                    "SELECT parent_id FROM tasks WHERE id=?", (cur,)).fetchone()
+                cur = row["parent_id"] if row else None
+                if cur:
+                    anc += 1
+            if anc >= parent_depth_limit:
+                raise ValueError(
+                    f"编排拆解深度 {parent_depth_limit} 层上限：父任务已是被拆解的子任务，不可再挂子任务")
         norm_keys = leases.normalize_keys(conflict_keys) if conflict_keys else []
         if workset and not isinstance(workset, list):
             raise ValueError("workset 须为字符串数组")

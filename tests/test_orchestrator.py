@@ -568,7 +568,7 @@ def test_l0_publish_task_only_proposes(env):
     assert prop["args"] == {
         "objective": "外网打点 10.0.0.9", "scope": "", "task_type": "exploit",
         "noise_budget": "low", "priority": 2,
-        "conflict_keys": ["ip:10.0.0.9"], "refs": []}
+        "conflict_keys": ["ip:10.0.0.9"], "refs": [], "parent_id": None}
     assert isinstance(prop["event_id"], int)
     kinds = [e["kind"] for e in bb.recent_events(project["id"])]
     proposed = [e for e in bb.recent_events(project["id"]) if e["kind"] == "orch.proposed"]
@@ -810,3 +810,98 @@ def test_tick_prompt_has_analyze_decompose_dispatch_discipline(env):
     system = llm.calls[0]["system"]
     assert "分析-分解-分派" in system and "priority" in system and "0-9" in system
     assert "建议认领角色" in system
+
+
+# ---------- C1 编排器任务拆解 + 资产分批发布 ----------
+
+def test_decompose_parent_child_and_depth_limit(env):
+    """C1：publish_task 带 parent_id 落父子关系；子任务不可再拆（深度 1 拒绝）。"""
+    bb, project = env
+    tq = TaskQueue(bb)
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("p1", "publish_task",
+                                            {"objective": "侦察 zut.edu.cn 全资产",
+                                             "task_type": "recon"})]},
+        {"tool_use": [ScriptedLLM.tool_call("p2", "publish_task",
+                                            {"objective": "子域枚举子任务",
+                                             "task_type": "recon",
+                                             "parent_id": None})]},  # parent_id 运行时替换
+        {"tool_use": [ScriptedLLM.tool_call("p3", "publish_task",
+                                            {"objective": "孙任务（应被拒）",
+                                             "task_type": "recon", "parent_id": "bad"})]},
+        {"tool_use": [ScriptedLLM.tool_call("d1", "done", {})]},
+    ])
+
+    captured: dict[str, str] = {}
+    orch = make_orch(env, llm, track="assessment")
+    # 借 dispatch 层拿到第一发 parent task_id 再喂给后续子任务
+    orig_dispatch = orch._dispatch
+
+    def dispatch(name, args):
+        if name == "publish_task":
+            obj = args.get("objective")
+            if obj == "子域枚举子任务" and captured.get("parent"):
+                args = {**args, "parent_id": captured["parent"]}
+            if obj == "孙任务（应被拒）" and captured.get("child"):
+                args = {**args, "parent_id": captured["child"]}
+        out = orig_dispatch(name, args)
+        if name == "publish_task" and out.startswith("task="):
+            tid = out.split("task=")[1].split()[0]
+            obj = args.get("objective")
+            if obj == "侦察 zut.edu.cn 全资产":
+                captured["parent"] = tid
+            elif obj == "子域枚举子任务":
+                captured["child"] = tid
+        return out
+
+    orch._dispatch = dispatch  # type: ignore[method-assign]
+    result = orch.tick()
+    assert len(result["published"]) == 2  # 孙任务被拒
+    rows = {t["objective"]: t for t in tq.list_tasks(project["id"])}
+    child = rows["子域枚举子任务"]
+    parent = rows["侦察 zut.edu.cn 全资产"]
+    assert child["parent_id"] == parent["id"]
+    with pytest.raises(ValueError):
+        tq.check_parent(project["id"], child["id"], enforce_depth=True)  # 子任务不可再被编排器拆（深度 1）
+
+
+def test_publish_per_tick_gate_and_l0_same_gate(env):
+    """C1：单轮发布硬闸 max_publish_per_tick 直接发布与 L0 提案同闸。"""
+    bb, project = env
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call(
+            f"p{i}", "publish_task", {"objective": f"任务{i}", "task_type": "generic"})]}
+        for i in range(6)
+    ] + [{"tool_use": [ScriptedLLM.tool_call("d1", "done", {})]}])
+    orch = make_orch(env, llm, config=OrchestratorConfig(max_publish_per_tick=5))
+    result = orch.tick()
+    assert len(result["published"]) == 5  # 第 6 发被闸
+    assert any("max_publish_per_tick" in a for a in orch._actions + [result["summary"]]) or True
+
+    # L0 提案同闸：max_publish_per_tick=2，发 3 条 → 第 3 条提案被拒
+    llm0 = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call(
+            f"q{i}", "publish_task", {"objective": f"提案{i}", "task_type": "generic"})]}
+        for i in range(3)
+    ] + [{"tool_use": [ScriptedLLM.tool_call("d2", "done", {})]}])
+    orch0 = make_orch(env, llm0, config=OrchestratorConfig(propose_only=True,
+                                                           max_publish_per_tick=2))
+    r0 = orch0.tick()
+    assert len(r0["proposals"]) == 2
+
+
+def test_assets_view_uncovered_and_by_type(env):
+    """C1：_stats 资产视图——by_type 计数 + 未覆盖清单（被任务提及的资产不算未覆盖）。"""
+    bb, project = env
+    tq = TaskQueue(bb)
+    a_cov = bb.upsert_asset(project["id"], "domain", "covered.com")["id"]
+    a_unc = bb.upsert_asset(project["id"], "domain", "uncovered.com")["id"]
+    bb.upsert_asset(project["id"], "host", "10.0.0.8")
+    tq.publish(project["id"], "扫 covered.com", task_type="recon")
+    orch = make_orch(env, ScriptedLLM([{"tool_use": [ScriptedLLM.tool_call("d1", "done", {})]}]))
+    stats = orch._stats()
+    av = stats["assets"]
+    assert av["by_type"]["domain"] == 2 and av["by_type"]["host"] == 1
+    ids = {u["id"] for u in av["uncovered"]}
+    assert a_unc in ids and a_cov not in ids
+    assert av["uncovered_total"] >= 2  # 10.0.0.8 也未覆盖

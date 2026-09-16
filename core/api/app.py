@@ -1949,7 +1949,8 @@ def create_app(
                 pid, body.objective, scope=body.scope, task_type=body.task_type,
                 noise_budget=noise, priority=body.priority,
                 conflict_keys=body.conflict_keys, created_by="human",
-                allowed_types=table.keys(), refs=body.refs, workset=body.workset)
+                allowed_types=table.keys(), refs=body.refs, workset=body.workset,
+                parent_id=body.parent_id)
         except ValueError as e:
             raise HTTPException(422, str(e))
         # 触发点 D（批 5）：L1/L2 未暂停时人手插话后自动唤醒空闲 worker；
