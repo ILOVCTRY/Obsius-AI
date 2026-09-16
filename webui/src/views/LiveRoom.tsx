@@ -442,9 +442,21 @@ export function LiveRoom({ pid }: { pid: string }) {
   })
   // 新事件自动滚底（仅当原本就在底部附近）
   const stickToBottom = useRef(true)
+  const totalSize = virtualizer.getTotalSize()
   useEffect(() => {
-    if (stickToBottom.current) virtualizer.scrollToIndex(visible.length - 1, { align: "end" })
-  }, [visible.length])
+    if (!stickToBottom.current) return
+    const el = listRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [visible.length, totalSize])
+  // 切上下文（会话页签/类型筛选）= 用户要看最新：重置贴底并立即对齐一次
+  useEffect(() => {
+    stickToBottom.current = true
+    const raf = requestAnimationFrame(() => {
+      const el = listRef.current
+      if (el) el.scrollTop = el.scrollHeight
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [activeTab, filter])
 
   const toggleRow = (id: number, defaultValue: boolean) =>
     setOverrides((prev) => new Map(prev).set(id, !(prev.get(id) ?? defaultValue)))
@@ -844,8 +856,11 @@ export function LiveRoom({ pid }: { pid: string }) {
       </div>
       {viewMode === "live" && (
       <>
-      {/* 第二行：开窗三下拉常驻铺开 + 右侧会话控制/编排动作（窄屏兜底 wrap） */}
+      {/* 第二行（F7 上下文分组）：编排器态（无选中会话）=开窗组+自主面板+编排动作；会话态=会话控制+切模型，互斥显隐（窄屏兜底 wrap） */}
       <div className="flex min-h-10 flex-wrap items-center gap-1.5 border-b px-2 py-1.5">
+        {/* 开窗组——编排器态专属（F7：开窗=编排产出会话的入口） */}
+        {!activeSession && (
+        <>
         <select
           value={role}
           onChange={(e) => setRole(e.target.value)}
@@ -890,8 +905,10 @@ export function LiveRoom({ pid }: { pid: string }) {
           className="h-8 w-20 shrink-0 rounded-md border bg-background px-2 font-mono text-xs placeholder:text-muted-foreground"
         />
         <Button size="sm" variant="outline" onClick={spawn} disabled={spawning || !roles.length}>开窗</Button>
-        {/* 自主级别 / 暂停 / L2 链状态 / 用量预算（DESIGN §6.8，批 2-5） */}
-        {usage && (
+        </>
+        )}
+        {/* 自主级别 / 暂停 / L2 链状态 / 用量预算（DESIGN §6.8，批 2-5）——编排器态专属（F7：行为边界与产出度量） */}
+        {!activeSession && usage && (
           <>
             <div className="flex h-8 overflow-hidden rounded-md border text-xs"
                  title="项目自主级别（§6.8：L0 全手动 / L1 任务自动·开窗审批 / L2 全自动链）；安全层任何档位不放松">
@@ -1053,6 +1070,9 @@ export function LiveRoom({ pid }: { pid: string }) {
             <Button size="sm" variant="outline" onClick={switchLlm}>切换</Button>
           </div>
         )}
+        {/* 编排动作——编排器态专属（F7） */}
+        {!activeSession && (
+        <>
         <div className="relative">
           <Button size="sm" onClick={() => setOrchOpen((v) => !v)}>编排一轮</Button>
           {orchOpen && (
@@ -1107,6 +1127,8 @@ export function LiveRoom({ pid }: { pid: string }) {
             />
           )}
         </div>
+        </>
+        )}
       </div>
 
       {/* 批 5 §6.8：重启=急停。DB 链活但本进程无标记 → 提示手动编排恢复 */}
