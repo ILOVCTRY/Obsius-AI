@@ -1424,3 +1424,4 @@ cyberstrike-pro/
 
 **F6 · 浏览器能力（内置 Playwright + 截图流，2026-09-16 定稿，§7）**：内置 Playwright 实例池 + 原生工具面（browser.* 审计 + 导航资产白名单）→ 截图流落黑板 + 前端「🌐 浏览器」页 → E7 状态机联动（导航自动 visited）+ 下载落 artifacts → 测试（白名单/隔离/降级）。范围=assessment 轨先行，C2 作战模式落地后按 mode 收窄渗透/红队。
 **F7 · 直播间顶栏上下文分组（2026-09-16 定稿并落地，§12「多会话组织」定稿块）**：第二行动作配置行按选中页签二分——编排器态（Orchestrator 页签）=开窗组+自主面板+编排三钮+作战模式；会话态=会话控制+切模型；两组互斥显隐，纯前端 JSX 条件（`activeSession == null` 判编排器态），组件与事件零改动，单批实施。起因=会话页签选中时编排/自主控件混排（实测截图走查）。✅ 2026-09-16 落地。
+**F8 · 未进项目点「技能/设置」无反应（2026-09-17 挂账）**：App.tsx 无项目帧（`!pid || view==="projects" || view==="intel"`）主区只两选一渲染（intel→IntelView，否则→ProjectsView），`view==="settings"` 落 else 被渲染成项目列表（仅导航按钮高亮变化）——新开浏览器点「技能/设置」看似无反应；NAV 里 settings 本就 `needsProject: false`。修法（一行）：主区三选一补 `<SettingsView nav={settingsNav} />`（SettingsView 无 pid 可独立工作，轨/包 select 自带）；顺带核对无项目态 goto-settings 深链（DoctorBar/skill.routed 双击跳转）同路径可达。起因=用户实测截图走查。
