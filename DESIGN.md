@@ -1,6 +1,6 @@
 # cyberstrike-pro 设计文档
 
-> 版本: v0.21 (2026-09-16)
+> 版本: v0.22 (2026-09-16)
 本文档是项目蓝图，后续开发以本文档为准；重大变更需更新此文档。
 > 
 > **状态约定（v0.3 起）**：正文默认以**现在时描述已落地的系统现状**；未落地的定稿设计在节/段首以引用块标注：  
@@ -9,7 +9,7 @@
 > 
 > **当前总体状态**：Phase 1 核心平台完成，Phase 2 进行中。已落地的模块级明细见下「落地状态总览」表与 §6.7/§6.8 各节状态标注（此处不再重复罗列）。**未落地**：F 批协调机制余部（1.1–1.4、1.7 传播本体、1.8、1.10、1.5 的 Agent 自由私信侧，见 §17 B 组）、逆向复用 R1/R2/R3（§17 C 组）、development 轨（§15，含 §15.5 AI 反代/破甲专项）、malware 轨与 fakenet（Phase 3）。
 > 
-> 历史：v0.21 (2026-09-16) E9 情报面板 v1 落地（§16）：core/intel/ 新模块——全局存储 config/intel/（intel.db SQLite WAL + feeds.json + profile.json，全局 DB 新模式）、触发式抓取（NVD/KEV/GitHub Advisory 经免 key REST/中文社区 RSS，urllib 出站不经网关，getter 可注入，单源失败不中断）、classifier 打分（profile 权重侧乘封顶 100）与中文简报合成（**LLM 缺席降级规则打分与模板简报，不 503**）、run_refresh 管线（文章配比=热点 1–2+技术 3–5）；API `/api/intel/*` 十端点（惰性建库、intel_getter/intel_llm 测试注入口）；前端情报页三 tab（简报/文章/学习）+ App 顶级导航 + 项目页两栏简报卡 + 设置页「情报源」tab；§17 E 组移除 E9 并重编号。实施注记：GitHub Advisory 走 api.github.com/advisories 免 key REST（GraphQL 要 token 弃用）。v0.20 (2026-09-16) E2 能力包级 redlines 补齐落地：web/binary/crypto/forensics/misc 五份 rules/redlines.md 按轨级风格起草（**AI 起草草案待人审**，能力级跨轨纪律：web 验证最小伤害/证据反幻觉/状态机、binary 样本信任/func_kb 查重、crypto 可复现结论/敏感密钥处置、forensics 证据只读/OSINT 边界/最小化、misc 先常规后重型/反幻觉），build_rules_preamble 注入实测通过、doctor missing-redlines 告警清零；§17 E 组移除 E2 并重编号。v0.19 (2026-09-16) E1 红线设置页 UI 重构落地（§12 设置页）：RulesPane 拆至 components/settings/，改左文件列表+右单文件编辑器（●/○ 存在状态点、注入范围 Badge、字数/保存底栏、缺失新建并保存、owner hover ✕ 停用与内联新建），切文件/切轨包 dirty confirm 守卫（修未保存内容被静默覆盖），doctor 红线跳转自动选中；后端 API 与 .history 不动；§17 E 组移除 E1 并重编号。v0.18 (2026-09-16) E6+E7 资产登记改造与扫描/测试状态机落地（§5.2）：register_asset 统一登记入口（人工/Agent 同路）、类型自动识别、domain 自动 DNS 挂载与主域名/别名标记、host 按 IP 去重、bb_add_asset 防重扫回执；assets.status 四态状态机 + bb_asset_status（tested_clean 必带 note）+ asset.status_changed 审计 +「有发现」前端反查徽章 + bb_query status/type 过滤；§17 E 组移除 E6/E7 并重编号。v0.17 (2026-09-16) E8 步数预算与人工引导落地（§3）：max_steps 默认 200、剩余<20 步边界提醒、request_steps 自助加步（+200/剩余>20 拒收/审计）、耗尽自动步数暂停（快照落库可 rehydrate，不 fail）、human_note 引导通道 + 直播间「发任务｜引导会话」切换、resume 支持附引导语/追加步数；§17 E 组移除 E8 并重编号。v0.16 (2026-09-16) 章节调序：情报面板（原 §17）前移为 §16、待做清单移至末位 §17，交叉引用同步改；待做清单内容不变。v0.15 (2026-09-16) CTF 线索板 + 跨轨路标定稿（§5.2：四级线索词表/产物内联/三级注入按 IP 聚合）+ §16 E11 挂账（实施后置；起因：CTF 黑板通用性太高，MISC/取证线索串联无承载）。v0.14 (2026-09-16) 情报面板定稿（新章 §17：漏洞简报/高分文章/Obsidian 学习计划）+ §16 E9/E10 挂账（实施后置）。v0.13 (2026-09-16) 步数预算与人工引导定稿（§3）+ §16 E8 挂账（实施后置；起因：recon 任务 30 步耗尽被自动 fail 走查）。v0.12 (2026-09-16) 资产扫描/测试状态机定稿（§5.2）+ §16 E7 挂账（实施后置，可与 E6 同批）。v0.11 (2026-09-16) 资产登记改造定稿（§5.2）+ §16 E6 挂账（实施后置）。v0.10 (2026-09-15) 直播间事件流新增「路由」筛选 tab（§12）+ 全文精简（重复状态叙述并入落地状态总览，实现坑细节移交各级 CLAUDE.md）；仓库 git init。v0.9 (2026-09-15) A 组五项落地（schema v5→v6，§16 A 组移除、B–E 重编号）。v0.8 (2026-09-15) 时间本地化（§12）+ §16 重排 A–E 组。v0.7/v0.6/v0.5 (2026-09-15) G 批批 6/5/4：L0 提案模式 / L2 全自动链 / L1 开窗审批（§6.8）。v0.4 (2026-09-15) G 批批 2/3 自主配置面/记账 + tick 租约/编排状态持久化（schema v5）。v0.3 (2026-09-15) 状态约定 + 撤回传播（机制 1.6/1.5 系统侧）。v0.2 (2026-09-13) 「能力包 × 场景轨」正交分类学（§4.5）+ src-strike 全量融入（§4）+ 角色软边界/技能全提案制。v0.1 首版定稿。
+> 历史：v0.22 (2026-09-16) E 组收尾商议定稿（纯文档，无代码）：E4 WebUI 终端页设计定稿写入 §12 新小节「终端页与人类命令通路」——E4a 人类 one-shot 命令面板（POST /exec 经 gateway，author=human，审计/审批全继承）+ E4b 交互终端（持久 workspace 容器 cyb-ws-<slug> 惰性创建/空闲回收/reconcile + PTY 三后端 + 双向 WS + xterm.js lazy）；安全边界定稿：人类命令必须过网关、交互终端人类专属（Agent 工具面不新增 PTY 工具）、host 终端默认关闭（settings 显式开+仅 127.0.0.1）、WSL 终端不提供、PTY 不逐键审计（session 级 open/close 代替）；§7 补「人类命令同层」一句。E10/E11 定实施拆批写入 §17 条目（E10 三批：vault 索引→学习档案→周计划，E10 先于 E11；E11 五批：换词表卡流→路标→三级注入 IP 聚合→产物附件→补缺）。v0.21 (2026-09-16) E9 情报面板 v1 落地（§16）：core/intel/ 新模块——全局存储 config/intel/（intel.db SQLite WAL + feeds.json + profile.json，全局 DB 新模式）、触发式抓取（NVD/KEV/GitHub Advisory 经免 key REST/中文社区 RSS，urllib 出站不经网关，getter 可注入，单源失败不中断）、classifier 打分（profile 权重侧乘封顶 100）与中文简报合成（**LLM 缺席降级规则打分与模板简报，不 503**）、run_refresh 管线（文章配比=热点 1–2+技术 3–5）；API `/api/intel/*` 十端点（惰性建库、intel_getter/intel_llm 测试注入口）；前端情报页三 tab（简报/文章/学习）+ App 顶级导航 + 项目页两栏简报卡 + 设置页「情报源」tab；§17 E 组移除 E9 并重编号。实施注记：GitHub Advisory 走 api.github.com/advisories 免 key REST（GraphQL 要 token 弃用）。v0.20 (2026-09-16) E2 能力包级 redlines 补齐落地：web/binary/crypto/forensics/misc 五份 rules/redlines.md 按轨级风格起草（**AI 起草草案待人审**，能力级跨轨纪律：web 验证最小伤害/证据反幻觉/状态机、binary 样本信任/func_kb 查重、crypto 可复现结论/敏感密钥处置、forensics 证据只读/OSINT 边界/最小化、misc 先常规后重型/反幻觉），build_rules_preamble 注入实测通过、doctor missing-redlines 告警清零；§17 E 组移除 E2 并重编号。v0.19 (2026-09-16) E1 红线设置页 UI 重构落地（§12 设置页）：RulesPane 拆至 components/settings/，改左文件列表+右单文件编辑器（●/○ 存在状态点、注入范围 Badge、字数/保存底栏、缺失新建并保存、owner hover ✕ 停用与内联新建），切文件/切轨包 dirty confirm 守卫（修未保存内容被静默覆盖），doctor 红线跳转自动选中；后端 API 与 .history 不动；§17 E 组移除 E1 并重编号。v0.18 (2026-09-16) E6+E7 资产登记改造与扫描/测试状态机落地（§5.2）：register_asset 统一登记入口（人工/Agent 同路）、类型自动识别、domain 自动 DNS 挂载与主域名/别名标记、host 按 IP 去重、bb_add_asset 防重扫回执；assets.status 四态状态机 + bb_asset_status（tested_clean 必带 note）+ asset.status_changed 审计 +「有发现」前端反查徽章 + bb_query status/type 过滤；§17 E 组移除 E6/E7 并重编号。v0.17 (2026-09-16) E8 步数预算与人工引导落地（§3）：max_steps 默认 200、剩余<20 步边界提醒、request_steps 自助加步（+200/剩余>20 拒收/审计）、耗尽自动步数暂停（快照落库可 rehydrate，不 fail）、human_note 引导通道 + 直播间「发任务｜引导会话」切换、resume 支持附引导语/追加步数；§17 E 组移除 E8 并重编号。v0.16 (2026-09-16) 章节调序：情报面板（原 §17）前移为 §16、待做清单移至末位 §17，交叉引用同步改；待做清单内容不变。v0.15 (2026-09-16) CTF 线索板 + 跨轨路标定稿（§5.2：四级线索词表/产物内联/三级注入按 IP 聚合）+ §16 E11 挂账（实施后置；起因：CTF 黑板通用性太高，MISC/取证线索串联无承载）。v0.14 (2026-09-16) 情报面板定稿（新章 §17：漏洞简报/高分文章/Obsidian 学习计划）+ §16 E9/E10 挂账（实施后置）。v0.13 (2026-09-16) 步数预算与人工引导定稿（§3）+ §16 E8 挂账（实施后置；起因：recon 任务 30 步耗尽被自动 fail 走查）。v0.12 (2026-09-16) 资产扫描/测试状态机定稿（§5.2）+ §16 E7 挂账（实施后置，可与 E6 同批）。v0.11 (2026-09-16) 资产登记改造定稿（§5.2）+ §16 E6 挂账（实施后置）。v0.10 (2026-09-15) 直播间事件流新增「路由」筛选 tab（§12）+ 全文精简（重复状态叙述并入落地状态总览，实现坑细节移交各级 CLAUDE.md）；仓库 git init。v0.9 (2026-09-15) A 组五项落地（schema v5→v6，§16 A 组移除、B–E 重编号）。v0.8 (2026-09-15) 时间本地化（§12）+ §16 重排 A–E 组。v0.7/v0.6/v0.5 (2026-09-15) G 批批 6/5/4：L0 提案模式 / L2 全自动链 / L1 开窗审批（§6.8）。v0.4 (2026-09-15) G 批批 2/3 自主配置面/记账 + tick 租约/编排状态持久化（schema v5）。v0.3 (2026-09-15) 状态约定 + 撤回传播（机制 1.6/1.5 系统侧）。v0.2 (2026-09-13) 「能力包 × 场景轨」正交分类学（§4.5）+ src-strike 全量融入（§4）+ 角色软边界/技能全提案制。v0.1 首版定稿。
 
 ## 落地状态总览（2026-09-15 代码核查）
 
@@ -39,7 +39,7 @@
 | 评估攻击链画布（relates_to + FindingsCanvas）                                         | ✅         | §12                                                                                           |
 | 逆向复用 R1 全局缓存 / R2 全局函数库 / R3 签名匹配                                    | ⬜         | §9 末                                                                                         |
 | WebUI 主体（项目向导/直播间/黑板双工作台/任务看板/Skill 设置/审批收件箱）+ 三栏指挥台 | ✅         | §12                                                                                           |
-| WebUI 终端页（workspace 容器/shell、终端抽屉）                                        | ⬜         | §12 页面骨架第 7 项，未实施                                                                   |
+| WebUI 终端页（workspace 容器/shell、终端抽屉）                                        | ⬜         | §12 页面骨架第 7 项；E4 已定稿（§12「终端页与人类命令通路」），§17 13 拆批                      |
 | 报告生成（黑板数据 → 渗透报告初稿）                                                   | ⬜         | §12 Open Questions（随 R2 推进）                                                              |
 | development 场景轨                                                                    | ⬜         | §15（仓库已 git init）                                                                      |
 | A 组多会话可观察/可急停（A1 detach/终止入口收敛/步边界急停/done 可删、A2 tasks.plan 计划闸、A3 任务流视图、A4 finding_update 私信、A5 编排规划-分派） | ✅ | §3/§6.1/§6.4/§6.7/§12，2026-09-15（schema v6）                                                |
@@ -755,6 +755,7 @@ net: real        真实外网——永不默认，须人工显式批准
 ````
 
 - **执行面设计**：单网关 + 参数选 runtime（Agent 按场景选，服务端强制校验），不采用每 runtime 独立工具。
+- **人类命令同层**（E4a 定稿，§12）：human 的一次性命令同样经执行网关（`gateway.run(..., author="human", threat_class="trusted")`），审计与审批策略与 Agent 同层生效——人侧命令不落审计等于审计流有旁路，不设任何绕过 gateway 的执行端点。
 - **未知样本默认按恶意处理**（L3 + fakenet）；静态分析（反编译/字符串/哈希）可在 L0/L1 执行；安全默认值，宁严勿松。
 - 预留：Windows 恶意样本（Wine 容器 / Windows VM）走同一策略框架，Phase 3 实现。
 - **已知缺口（2026-09-13 记录，暂不修）**：host/wsl runtime 的 backend 不接收 net 参数（`_dispatch` 只传 cmd+timeout），即 L0/L1 + 默认 bridge 事实上可访问任意网络且不经 net 审批。pentest 对授权目标的 HTTP 访问应显式走 `net=real + approval_id`（演练脚本已按此约定）。
@@ -947,7 +948,7 @@ packs/
 4. **黑板/工作台视图** — **工作台 profile 驱动**（§4.5.5）：assessment=资产树+漏洞表；**rev-generic=逆向理解工作台**（样本条 + 三栏：函数浏览器｜结论+伪码｜xref/发现/笔记，详见下）；human 添加入口内置于各 profile。黑板 tab=发现/资产/**函数库**，其中函数库 tab 仅项目 capabilities 含 binary 时挂载（func_kb 只由二进制分析产生，web-only 项目不显示空 tab；判据是能力不是轨）
 5. **任务看板** — 四态列 + 认领者徽章 + 手动发布；open/failed 卡片内联编辑五字段，failed 一键放回（或保存并放回）；删除＝物理删除（AlertDialog 二次确认；A 组 A1 起**四态皆可删**、有子任务 409；claimed 卡文案「取消」，当前步结束即步边界硬中断，见 §6.4/§3）；claimed 卡显 plan 进度 ▦done/total 与 blocked 原因（A2）
 6. **Skill 库** — 按轨/能力包浏览、技能/角色 CRUD、启停、路由试算器（query+features+文件特征）、角色×技能×任务类型矩阵、pack doctor 摘要；**AI 技能提案队列**（diff 审阅：批准/拒绝/改后采纳，见 §4 全提案制）
-7. **终端**〔未实施〕— workspace 容器/shell（当前无独立视图，直播间底部终端抽屉亦未做）
+7. **终端**〔未实施，E4 已定稿见下「终端页与人类命令通路」〕— workspace 容器/shell（当前无独立视图，直播间底部终端抽屉亦未做）
 8. **审批收件箱** — 全局通知 + 待办（安全审批是一等公民，见下）
 9. **项目设置** — 授权边界、cross_target 策略、噪声预算、模型路由
 
@@ -995,6 +996,45 @@ packs/
 - **脚本档（纯前端、零插件、不触网）**：x64dbg 下断日志档 + Cheat Engine Lua 档（module+offset 断点观察 / ret 改返回值爆破，32/64 位寄存器前缀自动）；平台全程不执行样本。
 - **动态验证闭环**：x64dbg 脚本档 → 人工在自己的调试器执行 → 导出日志 → 发现卡「传日志确认」上传（artifact kind=debug-log）→ finding 自动转 verified（`confirm_by=dynamic` + 日志 artifact id）。
 - 无 headless 后端：样本条三灯全灰、函数栏显「尚未完成 headless 分诊」、[重新分诊] 可随时补跑；AI triage 按钮在缓存就绪前禁用；MCP 在线时单函数伪码可实时取（source=mcp）。
+
+### 终端页与人类命令通路（E4，2026-09-16 定稿，〔未实施〕§17 13）
+
+「人类直接操作终端」是 E4 首次引入的全新执行面；定稿原则：**人侧命令必须过执行网关（审计无旁路），交互终端是人类专属（Agent 工具面不新增 PTY 工具），分期交付（E4a 面板先行、E4b 交互终端后置）**。
+
+**E4a · 命令面板（one-shot，先期批）**
+
+- `POST /api/projects/{pid}/exec`：body `{cmd, runtime, net?, approval_id?, timeout≤600s}` → 线程池执行 `gateway.run(cmd, runtime, author="human", threat_class="trusted", session_id="human")` → 同步返 ExecutionResult；`GatewayDenied` = 403 + reason 原文（网关已落 `command.deny` 审计事件）。
+- 审计/审批/net 策略全部在网关层原样生效：`command`/`command.result` 事件落黑板，直播间事件流自然可见人类命令行。UI 不暴露 threat_class（无可信级伪造入口）。
+- **诚实降级**：host/wsl runtime 下 net 控件禁用并标注「该 runtime 不受网络策略约束」（对应 §7 已知缺口：host/wsl backend 不消费 net 参数），不做假开关。
+- 历史回放：面板打开时拉 `author=human` 的 command 事件 + localStorage 最近 N 条。
+
+**E4b · 交互终端（后置批，依赖持久容器基建）**
+
+- **持久 workspace 容器** `cyb-ws-<slug>`：`docker run -d` 挂载 `workspaces/<slug>` → `/workspace`，默认 `--network none`；**首次使用惰性创建 + 空闲 30min 回收 + 项目关闭 stop / 项目删除 rm -f**；容器 id 记 project.json `runtime.tool_container` 字段（服务端为真源），重启 reconcile 对账孤儿容器。无 Docker 环境零感知（不随项目创建拉起）。
+- **PTY 三后端**（`core/runtime/pty.py` 新建，`PtyBackend` 协议 spawn/read/write/resize/kill）：pywinpty（Windows ConPTY）、标准库 pty（POSIX）、DockerExecPtyBackend（`subprocess.Popen` 流式接 `docker exec -it <ctr> bash`——现有 `exec_in` 是阻塞版，此为其流式扩展）。
+- **双向 WS** `WS /api/ws/projects/{pid}/term?sid=&shell=&token=`：客户端→服务端 JSON 文本帧 `{t:"stdin"|"resize"|"ping"}`；服务端→客户端 PTY 输出**二进制帧透传**（保 TUI 程序不破版）+ 15s JSON 心跳。不复用单向事件 WS（`/api/ws/projects/{pid}`），避免污染重连语义。
+- **会话注册表**：sid→PtySession；最后一端断开宽限 5min、空闲上限 15min 强杀；每项目并发 ≤2；Windows 句柄与 docker exec 进程必须显式 kill 并 reap。
+- 前端 xterm.js（`@xterm/xterm`+`addon-fit`）**仅在 TerminalPanel chunk**（React.lazy 深一层，仿 TaskFlow/ChainView 先例）。
+
+**安全边界（定稿，不可放松）**
+
+1. 人类命令必须过 gateway；API 层不新增任何绕过网关的执行路径。
+2. E4b 交互终端为**人类专属**；Agent 工具面（tools.py 白名单）不新增任何 PTY 工具，Agent 唯一命令口仍是 `run_cmd`。
+3. **host 交互终端默认关闭**（settings 显式开启 + 仅 127.0.0.1 绑定可用）；**WSL 终端不提供**（信任级=宿主机，做了等于 host shell 还制造半隔离错觉）；E4b 首发主推 docker 目标。
+4. PTY 内容**不做逐键审计**（量级大且含凭据明文）；以 session 级 `terminal.open/close` 事件（shell 类型+容器 id）代替，后续如需可 opt-in 容器内 `script` 录制。
+5. 不可信代码不因终端新增暴露面：容器默认 `--network none`，挂载共享面与现有 run_once 一致；无 Docker 只禁终端、不提供替代性直接 shell。
+
+**前端形态**：直播间底部抽屉（浮层覆盖事件流上方、可拖拽高度、默认收起；**不与 viewMode=flow 互斥**——flow 图上跑命令查 finding 是高频动作）；同 lazy 组件顺手暴露独立路由复用。
+
+**拆批**（依赖链 B3→B4，B1 可独立交付验收主体）：
+
+| 批 | 内容 | 量级 |
+|---|---|---|
+| B1 | E4a 命令面板：POST /exec（gateway 接线 author=human）+ CommandPanel + 抽屉壳 + 历史回放 + 策略矩阵单测（越权 runtime/net=real 无审批/deny 落审计） | 2–3 天 |
+| B2 | 独立路由复用组件、命令补全、快捷键 | 0.5–1 天 |
+| B3 | 持久 workspace 容器基建：WorkspaceContainerManager（ensure/stop/reconcile/idle reaper）+ project.json runtime 段 + container 端点 + 无 Docker 降级测试（独立于 B1/B2） | 3–4 天 |
+| B4 | E4b 交互终端：pty.py 三后端 + term WS + 会话注册表 + TerminalPanel（xterm lazy）+ host 终端 settings 开关 | 4–5 天 |
+| B5 | 收口：session 级审计事件、审批 UI 打通（面板内发起审批跳收件箱）、fakenet sidecar 挂点预留（与 D2 合并评审） | 1–2 天 |
 
 ### 攻击链视图（逆向链，P2 已落地）
 
@@ -1220,8 +1260,8 @@ cyberstrike-pro/
 ### E 组：体验与文档债（任意时机可穿插）
 
 12. **E3 · assessment 轨 Phase 2 收尾**：角色体系实战打磨、设备方向知识模块（binary/kb/iot、ics、vehicular）充实、network 能力包视内网内容量评估拆分；渗透报告随 C2 报告导出落地（自动化程度见 §12 待定项）。
-13. **E4 · WebUI 终端页**：workspace 容器/shell 视图与直播间底部终端抽屉（§12 页面骨架第 7 项）。
+13. **E4 · WebUI 终端页（2026-09-16 定稿，§12「终端页与人类命令通路」）**：B1 E4a 人类命令面板（POST /exec 经 gateway，author=human，审计/审批全继承）→ B2 独立路由/补全 → B3 持久 workspace 容器基建（`cyb-ws-<slug>` 惰性创建/空闲 30min 回收/reconcile）→ B4 E4b PTY 交互终端（双向 WS+xterm.js lazy；host 默认关、WSL 不提供、PTY 不逐键审计）→ B5 收口（session 审计/审批 UI/fakenet 挂点与 D2 合并评审）。交互终端为人类专属，Agent 工具面不新增 PTY 工具。
 14. **E5 · 杂项小项**：misc 包技能（§4.5.4、§10）；fofa/playwright 等运行时 MCP 工具桥（§4，当前仅逆向 IDA 桥）；浅色主题（§12 待定项，低优先级）。
-15. **E10 · Obsidian 接入 + 学习计划（2026-09-16 定稿，§16.3）**：vault 只读接入（文件树/搜索/链接图谱）→ **LLM 仅看元数据**（正文不出本机，隐私红线）→ 学习档案（声明画像 + vault 元数据推断 + 平台学习记录）→ LLM 周学习计划（结合当周简报/文章），存平台侧可导出 md。依赖 E9 的全局存储与画像（已就绪：core/intel/）。
-16. **E11 · CTF 线索板 + 跨轨路标（2026-09-16 定稿，§5.2）**：findings 换词表复用（四级线索级别含死路、线索类别、false-positive→死路）→ relates_to 卡片链 + 产物内联附件 + 解题脚本/writeup 落 artifact 纪律 → 跨轨统一路标（渗透已排除路径/逆向已排除假设）→ 三级注入按 IP 聚合 → 线索卡流+级别筛选融入现有列表 → CTF 样本上传 UI/远程靶机落资产补缺。无 schema 升级。
+15. **E10 · Obsidian 接入 + 学习计划（2026-09-16 定稿，§16.3；E 组内先于 E11 实施）**：vault 只读接入（文件树/搜索/链接图谱）→ **LLM 仅看元数据**（正文不出本机，隐私红线）→ 学习档案（声明画像 + vault 元数据推断 + 平台学习记录）→ LLM 周学习计划（结合当周简报/文章），存平台侧可导出 md。依赖 E9 的全局存储与画像（已就绪：core/intel/）。**拆批**：① vault 配置+只读索引（config.py `load/save_profile` 扩展保未知 key、vault 元数据索引 Job 仿 intel-refresh、intel.db 加 vault_notes 表 **SCHEMA_VERSION=2 幂等迁移**、`GET /api/intel/vault/tree`+`/search` 本地全文（正文不出本机）、IntelSourcePane 加 vault 配置）→ ② 学习档案聚合（声明画像+vault 元数据推断+平台已读收藏，`GET /api/intel/learning/profile`，IntelView 学习 tab 渲染三来源）→ ③ 周学习计划（classifier 路由、**只喂元数据**——隐私红线测试断言 LLM 入参不含笔记正文；intel.db 加 learning_plans 表；导出=返回 md+前端复制，无下载端点）。
+16. **E11 · CTF 线索板 + 跨轨路标（2026-09-16 定稿，§5.2）**：findings 换词表复用（四级线索级别含死路、线索类别、false-positive→死路）→ relates_to 卡片链 + 产物内联附件 + 解题脚本/writeup 落 artifact 纪律 → 跨轨统一路标（渗透已排除路径/逆向已排除假设）→ 三级注入按 IP 聚合 → 线索卡流+级别筛选融入现有列表 → CTF 样本上传 UI/远程靶机落资产补缺。无 schema 升级。**拆批**：① CTF 换词表+线索卡流（前端为主：Blackboard Findings 组件四级分色/vuln_class→线索类别/false-positive→死路默认折叠/级别筛选 chips，详情弹窗同步，bb_add_finding 工具描述补 CTF 语义）→ ② 路标记录（bb_add_finding 增死路/已排除方向带原因+已尝试清单，挂 target_asset_id）→ ③ 三级注入按 IP 聚合（loop.py 认领后：scope 精确匹配路标全文 → 资产父链归并同 IP 一行动态摘要（跨端口可见、未覆盖端口显形）→ 项目级计数 + bb_query 查询纪律改写）→ ④ 产物纪律+内联附件（解题脚本/writeup 落 artifact 的技能规则文本、线索卡内联附件复用 POC 弹窗、relates_to 卡片链显示）→ ⑤ 补缺（CTF 样本上传控件——samples 端点已在、非逆向场景需跳过自动 triage；远程靶机 host:port 落资产引导——register_asset 已能识别）。
 
