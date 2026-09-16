@@ -2,6 +2,7 @@
 
 import json
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -799,7 +800,7 @@ def test_orchestrator_spawn_registers_agent(tmp_path):
         assert "session.spawned" in kinds
 
 
-def _l1_tick_app(tmp_path, role="recon", reason="核查 8080 旁站低噪信息"):
+def _l1_tick_app(tmp_path, role="recon", reason="核查 8080 旁站低噪信息", exec_llm=None):
     """批 4：assessment 默认 L1 的 tick app——planner 剧本开一扇窗后 done。"""
     from test_orchestrator import ScriptedLLM
 
@@ -810,7 +811,7 @@ def _l1_tick_app(tmp_path, role="recon", reason="核查 8080 旁站低噪信息"
     ])
     return create_app(workspace_root=str(tmp_path / "workspaces"),
                       tools_root=None,
-                      executor_llm=ScriptedLLM([]), planner_llm=orch_llm,
+                      executor_llm=exec_llm or ScriptedLLM([]), planner_llm=orch_llm,
                       providers_config=str(tmp_path / "providers.json"))
 
 
@@ -825,8 +826,15 @@ def _l1_tick_to_pending(c, pid):
 
 
 def test_l1_spawn_approved_creates_and_runs(tmp_path):
-    """批准 spawn_session：当场注册建窗 + 提交 agent-work job + session.spawned 带 approval_id。"""
-    app = _l1_tick_app(tmp_path)
+    """批准 spawn_session（有 open 任务）：当场注册建窗 + 提交 agent-work job +
+    session.spawned 带 approval_id；worker 认领该任务跑至完成。"""
+    from test_orchestrator import ScriptedLLM
+
+    app = _l1_tick_app(tmp_path, exec_llm=ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("w1", "complete_task",
+                                            {"result_note": "新窗完成"})]},
+        {"tool_use": [ScriptedLLM.tool_call("w2", "finish", {"summary": "开跑成功"})]},
+    ]))
     with TestClient(app) as c:
         rp = c.post("/api/projects", json={"name": "L1批准", "track": "assessment",
                                            "capabilities": ["web"]})
@@ -836,15 +844,24 @@ def test_l1_spawn_approved_creates_and_runs(tmp_path):
                                   "reason": "核查 8080 旁站低噪信息"}
         # 批准前：tick 未开窗（窗未开，不计 spawned）
         assert [s for s in c.app.state.agents.values() if s.project_id == pid] == []
+        # 批准前留一个 open 任务（赛跑终检要求；recon 角色可认领 recon 类型）
+        pr = c.post(f"/api/projects/{pid}/tasks",
+                    json={"objective": "新窗要跑的任务", "task_type": "recon"})
+        assert pr.status_code == 201
+        task_id = pr.json()["task_id"]
 
         r = c.post(f"/api/approvals/{item['id']}/decide", json={"decision": "approved"})
         assert r.status_code == 200
         body = r.json()
         assert body["executed"] is True and body["session_id"] and body["job_id"]
         job = _wait_job(c, body["job_id"])
-        assert job["status"] == "done" and job["result"] == 0  # 空队列即退
+        assert job["status"] == "done"
         agents = [s for s in c.app.state.agents.values() if s.project_id == pid]
         assert len(agents) == 1 and agents[0].session["id"] == body["session_id"]
+        assert c.app.state.projects[pid].bb  # 任务已被新窗跑完
+        row = c.app.state.projects[pid].bb.conn.execute(
+            "SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
+        assert row["status"] == "done"
 
         kinds = {}
         for e in c.app.state.projects[pid].bb.recent_events(pid):
@@ -852,6 +869,30 @@ def test_l1_spawn_approved_creates_and_runs(tmp_path):
         spawns = kinds.get("session.spawned", [])
         assert len(spawns) == 1 and spawns[0]["approval_id"] == item["id"]
         assert "approval.approved" in kinds
+
+
+def test_l1_spawn_approved_no_open_task_skipped(tmp_path):
+    """赛跑终检（E12 后继）：批准时项目已无 open 任务（被既有 worker 抢走）→
+    不建窗，落 approval.exec_failed，响应 executed:false。"""
+    app = _l1_tick_app(tmp_path)
+    with TestClient(app) as c:
+        rp = c.post("/api/projects", json={"name": "L1赛跑跳过", "track": "assessment",
+                                           "capabilities": ["web"]})
+        pid = rp.json()["id"]
+        item = _l1_tick_to_pending(c, pid)
+
+        r = c.post(f"/api/approvals/{item['id']}/decide", json={"decision": "approved"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["executed"] is False and "无待认领任务" in body["error"]
+        # 没有建窗（agents/sessions 均空）
+        assert [s for s in c.app.state.agents.values() if s.project_id == pid] == []
+        assert c.get(f"/api/projects/{pid}/sessions").json() == []
+        kinds = [e["kind"] for e in c.app.state.projects[pid].bb.recent_events(pid)]
+        assert "session.spawned" not in kinds and "approval.exec_failed" in kinds
+        # 审批保持 approved（不回滚）
+        decided = c.get(f"/api/projects/{pid}/approvals").json()[0]
+        assert decided["status"] == "approved"
 
 
 def test_l1_spawn_rejected_no_session(tmp_path):
@@ -1233,15 +1274,22 @@ def test_l0_l1_trigger_gates_c_d_e(tmp_path):
         dr = c1.post(f"/api/projects/{pid1}/tasks",
                      json={"objective": "核查 8080", "task_type": "recon"})
         assert dr.json()["kicked"] == [old_sid]  # 触发点 D
+        t1 = dr.json()["task_id"]
+        # 第二个任务用 recon 角色认领不了的类型（exploit 不在 [recon, asset-enum]
+        # 白名单），确定性保证 decide 时仍有 open 任务（赛跑终检不跳过）
+        dr2 = c1.post(f"/api/projects/{pid1}/tasks",
+                      json={"objective": "提权演练", "task_type": "exploit",
+                            "noise_budget": "passive"})
+        t2 = dr2.json()["task_id"]
         decided = c1.post(f"/api/approvals/{item['id']}/decide",
                           json={"decision": "approved"})
         # 触发点 E：响应带 kicked（新窗自带在跑 job 被去重）
         assert decided.status_code == 200 and decided.json()["executed"] is True
         assert isinstance(decided.json().get("kicked"), list)
         _wait_no_running(c1, pid1)
-        tasks = c1.get(f"/api/projects/{pid1}/tasks").json()
-        assert tasks and tasks[0]["status"] == "done"
-        assert tasks[0]["claimed_by"] in {old_sid, decided.json()["session_id"]}
+        by_id = {t["id"]: t for t in c1.get(f"/api/projects/{pid1}/tasks").json()}
+        assert by_id[t1]["status"] == "done"
+        assert by_id[t2]["status"] == "open"  # recon 角色不可认领 exploit，留作终检素材
 
 
 def test_l2_net_real_without_approval_denied(tmp_path):

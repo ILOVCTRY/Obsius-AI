@@ -92,7 +92,10 @@ ORCH_TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "spawn_session",
-        "description": "启动一个新 AI 会话（开窗）。role 决定领域人设与可认领任务类型。",
+        "description": "启动一个新 AI 会话（开窗）。role 决定领域人设与可认领任务类型。"
+                       "提案前先确认现有会话不足以覆盖：有空闲/可唤醒的既有会话时"
+                       "优先复用（开窗请求与任务认领存在赛跑——审批落地时任务可能已被"
+                       "既有 worker 认领），仅当既有会话全部在忙且 open 任务无人认领时才开窗。",
         "input_schema": {
             "type": "object",
             "properties": {

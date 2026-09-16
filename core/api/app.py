@@ -1799,6 +1799,13 @@ def create_app(
             raise RuntimeError(
                 f"活跃会话已达项目上限 sessions_cap={auto['sessions_cap']}"
                 f"（当前 {active} 个非 closed 会话）；请先关窗或调高上限后重新申请")
+        # 赛跑终检：tick 的触发点 B kick 可能让既有 worker 在审批等待期抢走任务；
+        # 批准落地时已无 open（未认领）任务则不建窗——防空窗占 sessions_cap。
+        open_n = bb.conn.execute(
+            "SELECT COUNT(*) AS n FROM tasks WHERE project_id=? AND status='open'",
+            (pid,)).fetchone()["n"]
+        if open_n == 0:
+            raise RuntimeError("无待认领任务（已被其他会话认领），未建窗")
         role = (action.get("role") or "").strip()
         if not role:
             raise RuntimeError("审批 action 缺少 role")
