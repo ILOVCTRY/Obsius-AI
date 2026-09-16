@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react"
 import { api } from "@/lib/api"
 import type { PackRole, SkillDef } from "@/lib/types"
 import type { Taxonomy } from "@/lib/taxonomy"
@@ -59,6 +59,18 @@ export function MatrixPane({ tax, track, onFocusSkill }: {
     return groups
   }, [cols, tax, track])
 
+  // 转置后悬空/禁用徽章挂角色列头（原为行尾附加列）
+  const roleIssues = useMemo(() => {
+    const m = new Map<string, { dangling: string[]; disabled: string[] }>()
+    for (const r of roles) {
+      const dangling = (r.skills ?? []).filter((s) => !knownNames.has(s))
+      const disabled = (r.skills ?? []).filter((s) =>
+        knownNames.has(s) && !cols.find((c) => c.name === s)!.enabled)
+      m.set(r.file, { dangling, disabled })
+    }
+    return m
+  }, [roles, cols, knownNames])
+
   const Cell = ({ role, name }: { role: PackRole; name: string }) => {
     if (role.skills == null) return <span className="text-muted-foreground/40" title="skills: null 全放行">·</span>
     return role.skills.includes(name)
@@ -70,78 +82,66 @@ export function MatrixPane({ tax, track, onFocusSkill }: {
     <ScrollArea className="h-full">
       <div className="space-y-3 p-3">
         <p className="text-[10px] text-muted-foreground">
-          行=「{track}」轨角色；✓=在该角色技能白名单内，·=skills 为 null（全放行），空白=不挂。
-          列=全部能力包 ∪ 本轨技能。红=悬空引用或未注册 task_type，黄=引用了已禁用技能。
+          行=全部能力包 ∪ 本轨技能（按来源分组）；列=「{track}」轨角色。✓=在该角色技能白名单内，
+          ·=skills 为 null（全放行），空白=不挂。红=悬空引用或未注册 task_type，黄=引用了已禁用技能。
         </p>
         {err && <p className="text-xs text-[--status-error]">{err}</p>}
 
-        {/* 技能矩阵 */}
+        {/* 技能矩阵（转置：技能为行、角色为列） */}
         <div className="overflow-x-auto rounded border">
-          <table className="border-collapse text-[11px]">
+          <table className="border-collapse text-xs">
             <thead>
               <tr className="border-b">
-                <th className="sticky left-0 z-10 bg-popover p-1.5 text-left font-mono font-normal text-muted-foreground">角色 \ 技能</th>
-                {grouped.map((g) =>
-                  g.cols.map((c) => (
-                    <th key={`${c.source}:${c.pack}:${c.name}`}
-                        className="border-l p-1 text-center align-bottom font-normal">
-                      <button className="font-mono text-[10px] leading-tight text-primary hover:underline"
-                              style={{ writingMode: "vertical-rl" }}
-                              title={`${c.kind}/${c.pack} · ${c.description}`}
-                              onClick={() => onFocusSkill?.(c.source, c.pack, c.name)}>
-                        {c.name}
-                      </button>
-                      {!c.enabled && <div className="text-[9px] text-amber-300">禁用</div>}
+                <th className="sticky left-0 z-10 min-w-[220px] bg-popover p-2 text-left font-mono text-[10px] font-normal text-muted-foreground">技能 \ 角色</th>
+                {roles.map((r) => {
+                  const iss = roleIssues.get(r.file) ?? { dangling: [], disabled: [] }
+                  return (
+                    <th key={r.file} className="border-l p-2 text-left align-top font-normal">
+                      <div className="whitespace-nowrap font-mono">
+                        {r.file === "_generalist" ? "通用 _generalist" : r.file}
+                      </div>
+                      {iss.dangling.map((d) => (
+                        <Badge key={d} variant="outline" className="mt-1 mr-1 border-red-500/50 text-[9px] text-red-300"
+                               title="该技能在任何包/轨中都不存在">
+                          悬空:{d}
+                        </Badge>
+                      ))}
+                      {iss.disabled.map((d) => (
+                        <Badge key={d} variant="outline" className="mt-1 mr-1 text-[9px] text-amber-300"
+                               title="引用了 enabled:false 的技能，开窗时被静默过滤">禁用:{d}</Badge>
+                      ))}
                     </th>
-                  )))}
-              </tr>
-              <tr className="border-b bg-card/40 text-[9px] text-muted-foreground">
-                <th className="sticky left-0 z-10 bg-card p-1 text-left font-normal" />
-                {grouped.map((g) =>
-                  g.cols.map((c) => (
-                    <th key={`g:${c.source}:${c.pack}:${c.name}`}
-                        className="border-l px-1 text-center font-normal">{g.title}</th>
-                  )))}
+                  )
+                })}
               </tr>
             </thead>
             <tbody>
-              {roles.map((r) => {
-                const dangling = (r.skills ?? []).filter((s) => !knownNames.has(s))
-                const disabled = (r.skills ?? []).filter((s) =>
-                  knownNames.has(s) && !cols.find((c) => c.name === s)!.enabled)
-                return (
-                  <tr key={r.file} className="border-b last:border-0 hover:bg-accent/20">
-                    <td className="sticky left-0 z-10 bg-popover p-1.5 font-mono whitespace-nowrap">
-                      {r.file === "_generalist" ? "通用 _generalist" : r.file}
-                    </td>
-                    {grouped.map((g) => g.cols.map((c) => (
-                      <td key={`${r.file}:${c.name}`} className={cn("border-l p-1 text-center",
-                        !c.enabled && r.skills?.includes(c.name) && "bg-amber-500/10")}>
-                        <Cell role={r} name={c.name} />
-                      </td>
-                    )))}
-                    {dangling.length > 0 && (
-                      <td className="border-l bg-red-500/10 p-1">
-                        {dangling.map((d) => (
-                          <Badge key={d} variant="outline"
-                                 className="mr-1 border-red-500/50 text-[9px] text-red-300"
-                                 title="该技能在任何包/轨中都不存在">
-                            悬空:{d}
-                          </Badge>
-                        ))}
-                      </td>
-                    )}
-                    {disabled.length > 0 && dangling.length === 0 && (
-                      <td className="border-l bg-amber-500/10 p-1">
-                        {disabled.map((d) => (
-                          <Badge key={d} variant="outline" className="mr-1 text-[9px] text-amber-300"
-                                 title="引用了 enabled:false 的技能，开窗时被静默过滤">禁用:{d}</Badge>
-                        ))}
-                      </td>
-                    )}
+              {grouped.map((g) => (
+                <Fragment key={g.title}>
+                  <tr className="border-b bg-card/40 text-[10px] text-muted-foreground">
+                    <th colSpan={roles.length + 1}
+                        className="sticky left-0 z-10 bg-card p-1.5 text-left font-normal">{g.title}</th>
                   </tr>
-                )
-              })}
+                  {g.cols.map((c) => (
+                    <tr key={`${c.source}:${c.pack}:${c.name}`} className="border-b last:border-0 hover:bg-accent/20">
+                      <td className="sticky left-0 z-10 bg-popover p-2 font-mono whitespace-nowrap">
+                        <button className="text-primary hover:underline"
+                                title={`${c.kind}/${c.pack} · ${c.description}`}
+                                onClick={() => onFocusSkill?.(c.source, c.pack, c.name)}>
+                          {c.name}
+                        </button>
+                        {!c.enabled && <span className="ml-1.5 text-[9px] text-amber-300">禁用</span>}
+                      </td>
+                      {roles.map((r) => (
+                        <td key={`${r.file}:${c.name}`} className={cn("border-l p-2 text-center",
+                          !c.enabled && r.skills?.includes(c.name) && "bg-amber-500/10")}>
+                          <Cell role={r} name={c.name} />
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </Fragment>
+              ))}
             </tbody>
           </table>
         </div>

@@ -1,0 +1,48 @@
+- generic [ref=f1e3]:
+  - navigation [ref=f1e4]:
+    - button "◈ 项目" [ref=f1e5]:
+      - generic [ref=f1e6]: ◈
+      - text: 项目
+    - button "📡 情报" [ref=f1e7]:
+      - generic [ref=f1e8]: 📡
+      - text: 情报
+    - button "◉ 直播间" [disabled] [ref=f1e9]:
+      - generic [ref=f1e10]: ◉
+      - text: 直播间
+    - button "▤ 黑板" [disabled] [ref=f1e11]:
+      - generic [ref=f1e12]: ▤
+      - text: 黑板
+    - button "▦ 任务" [disabled] [ref=f1e13]:
+      - generic [ref=f1e14]: ▦
+      - text: 任务
+    - button "⚑ 审批" [disabled] [ref=f1e15]:
+      - generic [ref=f1e16]: ⚑
+      - text: 审批
+    - button "⚙ 技能/设置" [ref=f1e17]:
+      - generic [ref=f1e18]: ⚙
+      - text: 技能/设置
+  - main [ref=f1e19]:
+    - generic [ref=f1e20]:
+      - generic [ref=f1e21]:
+        - generic [ref=f1e22]:
+          - heading "项目" [level=1] [ref=f1e23]
+          - paragraph [ref=f1e24]: 项目 = 场景轨（单选）× 能力包（多选）；数据随 workspaces/ 项目目录隔离
+        - generic [ref=f1e25]:
+          - generic [ref=f1e26]: 新建项目
+          - generic [ref=f1e28]:
+            - generic [ref=f1e29]:
+              - textbox "项目名（可用中文）" [ref=f1e30]
+              - button "创建" [disabled]
+            - generic [ref=f1e31]: 场景轨
+            - generic [ref=f1e33]: 能力包
+        - paragraph [ref=f1e36]: 还没有项目——上面创建一个
+      - complementary [ref=f1e37]:
+        - generic [ref=f1e38]:
+          - heading "今日简报" [level=2] [ref=f1e39]
+          - button "刷新情报" [ref=f1e40]
+        - list [ref=f1e41]:
+          - listitem [ref=f1e42]: · 🔴 KEV [[KEV] CVE-2026-76461 Cisco Secure Email Gateway SQL Injection Vulnerability](https://nvd.nist.gov/vuln/detail/CVE-2026-76461) — Cisco AsyncOS software for Cisco Secure Email Gateway (SEG) contains a SQL injection vulnerability that could allow an u
+          - listitem [ref=f1e43]: · 🔴 KEV [[KEV] CVE-2026-84869 ConnectWise ScreenConnect Improper Privilege Management and Missing Authorization Vulnerability](https://nvd.nist.gov/vuln/detail/CVE-2026-84869) — ConnectWise ScreenConnect contains both an improper privilege management and missing authorization vulnerability that ma
+          - listitem [ref=f1e44]: · 🔴 KEV [[KEV] CVE-2026-42016 JFrog Artifactory Incorrect Authorization Vulnerability](https://nvd.nist.gov/vuln/detail/CVE-2026-42016) — JFrog Artifactory contains an incorrect authorization vulnerability that allows leads to privilege escalation attack due
+          - listitem [ref=f1e45]: · 🔴 KEV [[KEV] CVE-2026-42018 JFrog Artifactory Improper Authentication Vulnerability](https://nvd.nist.gov/vuln/detail/CVE-2026-42018) — JFrog Artifactory contains an improper authentication vulnerability that could return an internal anonymous-user token t
+        - button "查看全部 →" [ref=f1e46]

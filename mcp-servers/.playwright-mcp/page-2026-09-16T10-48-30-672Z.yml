@@ -1,0 +1,102 @@
+- generic [ref=f11e3]:
+  - banner [ref=f11e42]:
+    - generic [ref=f11e43]: 授权评估 · Web
+    - heading "批4走查-L1开窗" [level=1] [ref=f11e44]
+    - generic [ref=f11e45]: 任务 0/0 · 发现 0 · 资产 0
+    - button "🔔 审批" [ref=f11e46]
+    - button "← 项目" [ref=f11e47]
+  - generic [ref=f11e48]:
+    - navigation [ref=f11e49]:
+      - button "◈ 项目" [ref=f11e50]:
+        - generic [ref=f11e51]: ◈
+        - text: 项目
+      - button "📡 情报" [ref=f11e52]:
+        - generic [ref=f11e53]: 📡
+        - text: 情报
+      - button "◉ 直播间" [ref=f11e54]:
+        - generic [ref=f11e55]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=f11e56]:
+        - generic [ref=f11e57]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=f11e58]:
+        - generic [ref=f11e59]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=f11e60]:
+        - generic [ref=f11e61]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=f11e62]:
+        - generic [ref=f11e63]: ⚙
+        - text: 技能/设置
+    - main [ref=f11e64]:
+      - generic [ref=f11e66]:
+        - generic [ref=f11e67]:
+          - generic [ref=f11e68]:
+            - button "全部" [ref=f11e69]
+            - button "Orchestrator" [ref=f11e70]
+            - button "idle recon 分离页签 recon（任务后台继续）" [ref=f11e71]:
+              - generic "idle" [ref=f11e72]
+              - text: recon
+              - button "分离页签 recon（任务后台继续）" [ref=f11e73]
+            - button "idle _generalist 分离页签 _generalist（任务后台继续）" [ref=f11e77]:
+              - generic "idle" [ref=f11e78]
+              - text: _generalist
+              - button "分离页签 _generalist（任务后台继续）" [ref=f11e79]
+          - generic [ref=f11e83]:
+            - button "直播" [ref=f11e84]
+            - button "任务流" [ref=f11e85]
+          - generic [ref=f11e91]: ● live
+        - generic [ref=f11e92]:
+          - button "跑任务队列" [ref=f11e222]
+          - button "⏸ 暂停" [ref=f11e223]
+          - button "⛔ 中断" [ref=f11e224]
+          - button "结束会话" [ref=f11e225]
+          - button "📋 复盘本会话" [ref=f11e226]
+          - generic "动态切换当前会话的供应商/模型，下一次 LLM 调用生效" [ref=f11e227]:
+            - generic [ref=f11e228]: 🔀
+            - combobox [ref=f11e229]:
+              - option "ark-plan" [selected]
+              - option "ark-coding"
+            - combobox [ref=f11e230]:
+              - option "默认模型" [selected]
+              - option "ark-code-latest"
+              - option "deepseek-v4-flash"
+              - option "glm-5-3-flash-260828"
+            - button "切换" [ref=f11e231]
+        - generic [ref=f11e113]:
+          - button "全部" [ref=f11e114]
+          - button "思考" [ref=f11e115]
+          - button "决策" [ref=f11e116]
+          - button "路由" [ref=f11e117]
+          - button "命令" [ref=f11e118]
+          - button "发现" [ref=f11e119]
+          - generic [ref=f11e232]: 复盘完成：无新提案
+        - generic [ref=f11e186]:
+          - generic [ref=f11e187]:
+            - button "发任务" [ref=f11e188]
+            - button "引导会话" [ref=f11e189]
+            - button "指挥编排" [ref=f11e190]
+          - textbox "插话：向黑板发布一个任务或一条指示…" [ref=f11e191]
+          - button "发送" [disabled]
+      - complementary [ref=f11e192]:
+        - generic [ref=f11e193]:
+          - tablist [ref=f11e194]:
+            - tab "发现" [selected] [ref=f11e195]
+            - tab "资产" [ref=f11e196]
+          - tabpanel "发现" [ref=f11e197]:
+            - generic [ref=f11e198]:
+              - generic [ref=f11e199]:
+                - button "全部资产" [ref=f11e201]
+                - generic [ref=f11e205]:
+                  - button "全部" [ref=f11e206]
+                  - button "critical" [ref=f11e207]
+                  - button "high" [ref=f11e208]
+                  - button "medium" [ref=f11e209]
+                  - button "low" [ref=f11e210]
+                  - button "info" [ref=f11e211]
+                - generic [ref=f11e212]:
+                  - button "全部状态" [ref=f11e213]
+                  - button "unverified" [ref=f11e214]
+                  - button "verified" [ref=f11e215]
+              - paragraph [ref=f11e220]: 暂无数据
+      - button "›" [ref=f11e221]

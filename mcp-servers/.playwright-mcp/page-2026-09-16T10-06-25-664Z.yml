@@ -1,0 +1,311 @@
+- generic [ref=e3]:
+  - banner [ref=e96]:
+    - generic [ref=e97]: 授权评估 · Web
+    - heading "中原工学院" [level=1] [ref=e98]
+    - generic [ref=e99]: 任务 2/2 · 发现 10 · 资产 125
+    - button "🔔 审批" [ref=e100]
+    - button "← 项目" [ref=e101]
+  - generic [ref=e102]:
+    - navigation [ref=e103]:
+      - button "◈ 项目" [ref=e104]:
+        - generic [ref=e105]: ◈
+        - text: 项目
+      - button "📡 情报" [ref=e106]:
+        - generic [ref=e107]: 📡
+        - text: 情报
+      - button "◉ 直播间" [ref=e108]:
+        - generic [ref=e109]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=e110]:
+        - generic [ref=e111]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=e112]:
+        - generic [ref=e113]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=e114]:
+        - generic [ref=e115]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=e116]:
+        - generic [ref=e117]: ⚙
+        - text: 技能/设置
+    - main [ref=e118]:
+      - generic [ref=e120]:
+        - generic [ref=e121]:
+          - generic [ref=e122]:
+            - button "全部" [ref=e123]
+            - button "Orchestrator" [ref=e124]
+            - button "finished _generalist 分离页签 _generalist（任务后台继续）" [ref=e125]:
+              - generic "finished" [ref=e126]
+              - text: _generalist
+              - button "分离页签 _generalist（任务后台继续）" [ref=e127]
+          - generic [ref=e131]:
+            - button "直播" [ref=e132]
+            - button "任务流" [ref=e133]
+          - generic [ref=e139]: ● live
+        - generic [ref=e140]:
+          - combobox "通用 · 通用评估员：按入口技能路由分配的方向干活" [ref=e141]:
+            - option "通用 · 通用评估员：按入口技能路由分配的方向干活" [selected]
+            - option "external-entry · 外网打点：按目标特征路由打法，最小伤害验证，发现即上报"
+            - option "lateral · 内网横向：凭据搜寻与横向移动，谨慎动静小，借力必须记录溯源"
+            - option "privesc · 提权：在已授权落点内纵向提权，谨慎、动静小"
+            - option "recon · 信息收集：被动侦察、子域枚举、活筛、指纹识别，产出结构化资产清单"
+          - combobox "开窗供应商（缺省=全局默认供应商）" [ref=e142]:
+            - option "默认供应商" [selected]
+            - option "ark-plan"
+            - option "ark-coding"
+          - combobox "开窗模型（缺省=该供应商首个模型）" [ref=e143]:
+            - option "默认模型（ark-code-latest）" [selected]
+            - option "ark-code-latest"
+            - option "deepseek-v4-flash"
+            - option "glm-5-3-flash-260828"
+          - textbox "开窗步数预算 max_steps（E8，缺省 200；角色 yaml 上限取更严者；步数吃紧时 Agent 可 request_steps 自助 +200，耗尽自动暂停）" [ref=e144]:
+            - /placeholder: 步数 200
+          - button "开窗" [ref=e145]
+          - generic "项目自主级别（§6.8：L0 全手动 / L1 任务自动·开窗审批 / L2 全自动链）；安全层任何档位不放松" [ref=e146]:
+            - button "L0" [ref=e147]
+            - button "L1" [ref=e148]
+            - button "L2" [ref=e149]
+          - button "⏸ 暂停自动" [ref=e150]
+          - button "∑ 8.7M 📋 2 🪟 1/4" [ref=e152]:
+            - generic [ref=e153]: ∑ 8.7M
+            - generic [ref=e154]: 📋 2
+            - generic [ref=e155]: 🪟 1/4
+          - button "编排一轮" [ref=e157]
+          - button "重排优先级" [ref=e158]
+          - button "复盘沉淀" [ref=e159]
+          - button "🎯 渗透" [ref=e161]
+        - generic [ref=e162]:
+          - button "全部" [ref=e163]
+          - button "思考" [ref=e164]
+          - button "决策" [ref=e165]
+          - button "路由" [ref=e166]
+          - button "命令" [ref=e167]
+          - button "发现" [ref=e168]
+        - generic [ref=e170]:
+          - generic [ref=e172] [cursor=pointer]:
+            - generic [ref=e173]:
+              - generic "UTC 2026-09-15 16:27:40" [ref=e174]: 00:27:40
+              - generic [ref=e175]: 📋 发布任务
+              - generic [ref=e176]: 需要测试的是中原工学院的资产，域名为*.zut.edu.cn，先给你一些资产。后续发现后你自己添加。https://ai.zut.edu.cn gygl.zut.edu.cn:8080/ https://aias.zut.edu.cn https://apis.zut.edu.cn https://app.zut.edu.cn https://archives.zut.edu.cn https://art.zut.edu.cn https://art.zut.edu.cn https://authserver.zut.edu.cn https://authserver.zut.edu.cn https://booklocation.zut.edu.cn https://bpm.zut.edu.cn https://bwc.zut.edu.cn https://camr.zut.edu.cn https://canvas.zut.edu.cn https://cie.zut.edu.cn https://cs.zut.edu.cn https://cube.zut.edu.cn https://cwc.zut.edu.cn https://cwc.zut.edu.cn
+              - generic [ref=e177]: human
+            - generic [ref=e178]: "{ \"task_id\": \"task-1a62e488824f\", \"objective\": \"需要测试的是中原工学院的资产，域名为*.zut.edu.cn，先给你一些资产。后续发现后你自己添加。https://ai.zut.edu.cn gygl.zut.edu.cn:8080/ https://aias.zut.edu.cn https://apis.zut.edu.cn https://app.zut.edu.cn https://archives.zut.edu.cn https://art.zut.edu.cn https://art.zut.edu.cn https://authserver.zut.edu.cn https://authserver.zut.edu.cn https://booklocation.zut.edu.cn https://bpm.zut.edu.cn https://bwc.zut.edu.cn https://camr.zut.edu.cn https://canvas.zut.edu.cn https://cie.zut.edu.cn https://cs.zut.edu.cn https://cube.zut.edu.cn https://cwc.zut.edu.cn https://cwc.zut.edu.cn\", \"task_type\": \"generic\" }"
+          - generic [ref=e180] [cursor=pointer]:
+            - generic [ref=e181]:
+              - generic "UTC 2026-09-15 16:28:41" [ref=e182]: 00:28:41
+              - generic [ref=e183]: 📋 发布任务
+              - generic [ref=e184]: 开始分配任务
+              - generic [ref=e185]: human
+            - generic [ref=e186]: "{ \"task_id\": \"task-d9bbfd4b96ea\", \"objective\": \"开始分配任务\", \"task_type\": \"generic\" }"
+          - generic [ref=e189] [cursor=pointer]:
+            - generic "UTC 2026-09-15 16:28:50" [ref=e190]: 00:28:50
+            - generic [ref=e191]: ∑ token
+            - generic [ref=e192]: 编排 · ark-code-latest · ↑2001 ↓1433 · ∑3434
+            - generic [ref=e194]: orchestrator
+          - generic [ref=e196] [cursor=pointer]:
+            - generic [ref=e197]:
+              - generic "UTC 2026-09-15 16:28:50" [ref=e198]: 00:28:50
+              - generic [ref=e199]: 📋 发布任务
+              - generic [ref=e200]: "对中原工学院资产范围 *.zut.edu.cn 开展纯被动侦察并建立结构化资产清单。已知确定入口：https://ai.zut.edu.cn 。人类提供的另一线索在任务文本中被截断为 `gygl.zu`，疑似为 `gygl.zut.edu.cn`，需通过证书透明度日志、公开 DNS/被动数据等方式核实，不得直接将其当作已确认资产。 工作内容： 1. 被动收集并核实 zut.edu.cn 子域名、解析记录、CDN/WAF 特征、IP 归属； 2. 汇总各资产标题、指纹、技术栈、登录入口、历史暴露信息； 3. 标记资产来源、确认/疑似状态及后续外网打点优先级； 4. 发现高价值或疑似敏感暴露面时及时形成发现记录。 严格限制：仅使用被动信息源；不进行主动端口扫描、目录爆破、漏洞探测、登录尝试或任何会产生交互噪声的操作。"
+              - generic [ref=e201]: orchestrator
+            - generic [ref=e202]: "{ \"task_id\": \"task-56f524382d15\", \"objective\": \"对中原工学院资产范围 *.zut.edu.cn 开展纯被动侦察并建立结构化资产清单。已知确定入口：https://ai.zut.edu.cn 。人类提供的另一线索在任务文本中被截断为 `gygl.zu`，疑似为 `gygl.zut.edu.cn`，需通过证书透明度日志、公开 DNS/被动数据等方式核实，不得直接将其当作已确认资产。\\n\\n工作内容：\\n1. 被动收集并核实 zut.edu.cn 子域名、解析记录、CDN/WAF 特征、IP 归属；\\n2. 汇总各资产标题、指纹、技术栈、登录入口、历史暴露信息；\\n3. 标记资产来源、确认/疑似状态及后续外网打点优先级；\\n4. 发现高价值或疑似敏感暴露面时及时形成发现记录。\\n\\n严格限制：仅使用被动信息源；不进行主动端口扫描、目录爆破、漏洞探测、登录尝试或任何会产生交互噪声的操作。\", \"task_type\": \"recon\" }"
+          - generic [ref=e204] [cursor=pointer]:
+            - generic [ref=e205]:
+              - generic "UTC 2026-09-15 16:28:50" [ref=e206]: 00:28:50
+              - generic [ref=e207]: 📌 编排简报
+              - generic [ref=e208]: digest, stats
+              - generic [ref=e209]: orchestrator
+            - generic [ref=e210]: "{ \"digest\": \"项目启动：目标为中原工学院 *.zut.edu.cn。已知入口 https://ai.zut.edu.cn；另有截断线索 `gygl.zu`，疑似 `gygl.zut.edu.cn`，尚需被动核实。本轮已发布 passive 级 recon 任务并申请开启 recon 会话，目标是先形成结构化资产清单与暴露面优先级。当前暂无已确认漏洞或中高危发现；待资产清单产出后再决定是否申请 external-entry 会话进行低噪声验证。\", \"stats\": { \"tasks\": { \"by_status\": { \"open\": 3 }, \"open\": [ { \"id\": \"task-56f524382d15\", \"type\": \"recon\", \"priority\": 1, \"noise_budget\": \"passive\", \"created_at\": \"2026-09-15T16:28:50+00:00\", \"objective\": \"对中原工学院资产范围 *.zut.edu.cn 开展纯被动侦察并建立结构化资产清单。已知确定入口：https://ai.zut.edu.cn 。人类提供的另一线\" }, { \"id\": \"task-1a62e488824f\", \"type\": \"generic\", \"priority\": 2, \"noise_budget\": \"passive\", \"created_at\": \"2026-09-15T16:27:40+00:00\", \"objective\": \"需要测试的是中原工学院的资产，域名为*.zut.edu.cn，先给你一些资产。后续发现后你自己添加。https://ai.zut.edu.cn gygl.zu\" }, { \"id\": \"task-d9bbfd4b96ea\", \"type\": \"generic\", \"priority\": 2, \"noise_budget\": \"passive\", \"created_at\": \"2026-09-15T16:28:41+00:00\", \"objective\": \"开始分配任务\" } ], \"blocked_plan\": [], \"starvation\": [] }, \"findings\": [], \"sessions\": [], \"live_windows\": 0 } }"
+          - generic [ref=e212] [cursor=pointer]:
+            - generic [ref=e213]:
+              - generic "UTC 2026-09-15 16:28:51" [ref=e214]: 00:28:51
+              - generic [ref=e215]: 🗑 删除任务
+              - generic [ref=e216]: 开始分配任务
+              - generic [ref=e217]: human
+            - generic [ref=e218]: "{ \"task_id\": \"task-d9bbfd4b96ea\", \"by\": \"human\", \"was_status\": \"open\", \"objective\": \"开始分配任务\", \"task_type\": \"generic\", \"noise_budget\": \"passive\", \"priority\": 2, \"conflict_keys\": [], \"plan\": [] }"
+          - generic [ref=e221] [cursor=pointer]:
+            - generic "UTC 2026-09-15 16:28:56" [ref=e222]: 00:28:56
+            - generic [ref=e223]: ∑ token
+            - generic [ref=e224]: 编排 · ark-code-latest · ↑1631 ↓89 · ∑7002
+            - generic [ref=e226]: orchestrator
+          - generic [ref=e229] [cursor=pointer]:
+            - generic "UTC 2026-09-15 16:30:12" [ref=e230]: 00:30:12
+            - generic [ref=e231]: 🔧 认领任务
+            - generic [ref=e232]: task_id, session_id, lease_until
+            - generic [ref=e233]: system
+          - generic "双击查看技能 recon-asset-enum" [ref=e235] [cursor=pointer]:
+            - generic [ref=e236]:
+              - generic "UTC 2026-09-15 16:30:12" [ref=e237]: 00:30:12
+              - generic [ref=e238]: 🎯 技能路由
+              - generic [ref=e239]: recon-asset-enum · 16 分 · 侦察, 子域, 指纹, 资产
+              - generic [ref=e241]: sess-a73edb3989ba
+          - generic [ref=e244] [cursor=pointer]:
+            - generic "UTC 2026-09-15 16:30:42" [ref=e245]: 00:30:42
+            - generic [ref=e246]: ∑ token
+            - generic [ref=e247]: Agent · ark-code-latest · ↑3823 ↓1116 · ∑14813
+            - generic [ref=e249]: sess-a73edb3989ba
+          - generic [ref=e252] [cursor=pointer]:
+            - generic "UTC 2026-09-15 16:30:42" [ref=e253]: 00:30:42
+            - generic [ref=e254]: 💭 思考
+            - generic [ref=e255]: Let me start by understanding the task. I need to conduct passive reconnaissance…
+            - generic [ref=e256]: sess-a73edb3989ba
+          - generic [ref=e259] [cursor=pointer]:
+            - generic "UTC 2026-09-15 16:31:02" [ref=e260]: 00:31:02
+            - generic [ref=e261]: ∑ token
+            - generic [ref=e262]: Agent · ark-code-latest · ↑1883 ↓657 · ∑23297
+            - generic [ref=e264]: sess-a73edb3989ba
+          - generic [ref=e267] [cursor=pointer]:
+            - generic "UTC 2026-09-15 16:31:02" [ref=e268]: 00:31:02
+            - generic [ref=e269]: 💭 思考
+            - generic [ref=e270]: 黑板为空。针对目标站点的信息收集任务计划，我已梳理完成8项合规可验证的被动执行步骤，所有操作均严格符合无交互噪声的要求，完成计划初稿撰写后即可推进后续工作。
+            - generic [ref=e271]: sess-a73edb3989ba
+          - generic [ref=e273] [cursor=pointer]:
+            - generic [ref=e274]:
+              - generic "UTC 2026-09-15 16:31:02" [ref=e275]: 00:31:02
+              - generic [ref=e276]: 📐 制定计划
+              - generic [ref=e277]: 8 步 · 完成 0/8
+              - generic [ref=e279]: system
+            - generic [ref=e280]: "{ \"task_id\": \"task-56f524382d15\", \"session_id\": \"sess-a73edb3989ba\", \"plan\": [ { \"id\": \"p1\", \"title\": \"CT 日志枚举：通过 crt.sh 查询 %.zut.edu.cn 证书记录，收集子域名并核实 gygl.zut.edu.cn 是否存在\", \"status\": \"todo\", \"ts\": \"2026-09-15T16:31:02+00:00\" }, { \"id\": \"p2\", \"title\": \"多源被动补充：用其他公开被动数据源（CT 镜像/被动 DNS 聚合）补全子域名单，全部记录来源\", \"status\": \"todo\", \"ts\": \"2026-09-15T16:31:02+00:00\" }, { \"id\": \"p3\", \"title\": \"DNS 被动核实：批量解析子域名 A/CNAME，识别 CDN/WAF CNAME 特征与真实 IP，做 IP 归属判断\", \"status\": \"todo\", \"ts\": \"2026-09-15T16:31:02+00:00\" }, { \"id\": \"p4\", \"title\": \"指纹采集：仅对已确认解析的入口做单次 GET（被动观察级），取标题/响应头/技术栈/登录入口线索\", \"status\": \"todo\", \"ts\": \"2026-09-15T16:31:02+00:00\" }, { \"id\": \"p5\", \"title\": \"历史暴露：通过 Wayback CDX 等公开存档被动查询关键入口的历史 URL/暴露信息\", \"status\": \"todo\", \"ts\": \"2026-09-15T16:31:02+00:00\" }, { \"id\": \"p6\", \"title\": \"结构化登记：按 host/domain/url 登记全部资产，meta 标注来源、确认/疑似、owner=edusrc、指纹与优先级\", \"status\": \"todo\", \"ts\": \"2026-09-15T16:31:02+00:00\" }, { \"id\": \"p7\", \"title\": \"发现记录：对高价值/疑似敏感暴露面（管理后台、登录入口、信息泄露线索）落 findings(unverified)\", \"status\": \"todo\", \"ts\": \"2026-09-15T16:31:02+00:00\" }, { \"id\": \"p8\", \"title\": \"收尾：输出资产清单与下一步外网打点建议，complete_task\", \"status\": \"todo\", \"ts\": \"2026-09-15T16:31:02+00:00\" } ] }"
+          - generic [ref=e283] [cursor=pointer]:
+            - generic "UTC 2026-09-15 16:31:08" [ref=e284]: 00:31:08
+            - generic [ref=e285]: ∑ token
+            - generic [ref=e286]: Agent · ark-code-latest · ↑1828 ↓143 · ∑32236
+            - generic [ref=e288]: sess-a73edb3989ba
+          - generic [ref=e291] [cursor=pointer]:
+            - generic "UTC 2026-09-15 16:31:08" [ref=e292]: 00:31:08
+            - generic [ref=e293]: 💭 思考
+            - generic [ref=e294]: 开始 p1：crt.sh 查询。查询参数已确认，将用curl获取crt.sh的JSON数据。
+            - generic [ref=e295]: sess-a73edb3989ba
+          - generic [ref=e298] [cursor=pointer]:
+            - generic "UTC 2026-09-15 16:31:08" [ref=e299]: 00:31:08
+            - generic [ref=e300]: ▦ 计划步进
+            - generic [ref=e301]: p1 → doing
+            - generic [ref=e303]: system
+          - generic [ref=e306] [cursor=pointer]:
+            - generic "UTC 2026-09-15 16:31:13" [ref=e307]: 00:31:13
+            - generic [ref=e308]: ∑ token
+            - generic [ref=e309]: Agent · ark-code-latest · ↑1238 ↓172 · ∑41638
+            - generic [ref=e311]: sess-a73edb3989ba
+          - generic [ref=e314] [cursor=pointer]:
+            - generic "UTC 2026-09-15 16:31:13" [ref=e315]: 00:31:13
+            - generic [ref=e316]: 💭 思考
+            - generic [ref=e317]: 现在执行 crt.sh 查询。将用curl查询，超时120秒，输出存文件。
+            - generic [ref=e318]: sess-a73edb3989ba
+          - generic [ref=e321] [cursor=pointer]:
+            - generic "UTC 2026-09-15 16:31:19" [ref=e322]: 00:31:19
+            - generic [ref=e323]: ⚡ 执行命令
+            - code [ref=e325]: curl -s "https://crt.sh/?q=%25.zut.edu.cn&output=json" -o %TEMP%\crtsh_zut.json; echo EXIT=%errorlevel%; powershell -Command "(Get-Item $env:TEMP\crtsh_zut.json).Length"
+            - generic [ref=e326]: sess-a73edb3989ba
+          - generic [ref=e329] [cursor=pointer]:
+            - generic "UTC 2026-09-15 16:31:19" [ref=e330]: 00:31:19
+            - generic [ref=e331]: ↳ 命令输出
+            - generic [ref=e332]: runtime, exit_code, duration_s, timed_out, stdout_head, stderr_head
+            - generic [ref=e333]: sess-a73edb3989ba
+          - generic [ref=e336] [cursor=pointer]:
+            - generic "UTC 2026-09-15 16:31:25" [ref=e337]: 00:31:25
+            - generic [ref=e338]: ∑ token
+            - generic [ref=e339]: Agent · ark-code-latest · ↑666 ↓194 · ∑51514
+            - generic [ref=e341]: sess-a73edb3989ba
+          - generic [ref=e344] [cursor=pointer]:
+            - generic "UTC 2026-09-15 16:31:25" [ref=e345]: 00:31:25
+            - generic [ref=e346]: 💭 思考
+            - generic [ref=e347]: 在 PowerShell 中 curl 是 Invoke-WebRequest 的别名。用curl.exe显式调用。
+            - generic [ref=e348]: sess-a73edb3989ba
+          - generic [ref=e351] [cursor=pointer]:
+            - generic "UTC 2026-09-15 16:31:30" [ref=e352]: 00:31:30
+            - generic [ref=e353]: ⚡ 执行命令
+            - code [ref=e355]: curl.exe -s "https://crt.sh/?q=%25.zut.edu.cn&output=json" -o "$env:TEMP\crtsh_zut.json"; echo EXIT=$LASTEXITCODE; (Get-Item "$env:TEMP\crtsh_zut.json").Length
+            - generic [ref=e356]: sess-a73edb3989ba
+          - generic [ref=e359] [cursor=pointer]:
+            - generic "UTC 2026-09-15 16:31:30" [ref=e360]: 00:31:30
+            - generic [ref=e361]: ↳ 命令输出
+            - generic [ref=e362]: runtime, exit_code, duration_s, timed_out, stdout_head, stderr_head
+            - generic [ref=e363]: sess-a73edb3989ba
+        - generic [ref=e364]:
+          - generic [ref=e365]:
+            - button "发任务" [ref=e366]
+            - button "引导会话" [ref=e367]
+            - button "指挥编排" [ref=e368]
+          - textbox "插话：向黑板发布一个任务或一条指示…" [ref=e369]
+          - button "发送" [disabled]
+      - complementary [ref=e370]:
+        - generic [ref=e371]:
+          - tablist [ref=e372]:
+            - tab "发现" [selected] [ref=e373]
+            - tab "资产" [ref=e374]
+          - tabpanel "发现" [ref=e375]:
+            - generic [ref=e376]:
+              - generic [ref=e377]:
+                - button "全部资产" [ref=e379]
+                - generic [ref=e383]:
+                  - button "全部" [ref=e384]
+                  - button "critical" [ref=e385]
+                  - button "high" [ref=e386]
+                  - button "medium" [ref=e387]
+                  - button "low" [ref=e388]
+                  - button "info" [ref=e389]
+                - generic [ref=e390]:
+                  - button "全部状态" [ref=e391]
+                  - button "unverified" [ref=e392]
+                  - button "verified" [ref=e393]
+              - generic [ref=e397]:
+                - generic [ref=e398] [cursor=pointer]:
+                  - generic [ref=e399]:
+                    - generic [ref=e400]: low
+                    - generic [ref=e401]: yqgx.zut.edu.cn 大型仪器共享平台运行 Microsoft-IIS/8.5(Win2012R2组件)
+                    - generic [ref=e402]: sess-741e662c8cdc
+                  - generic [ref=e403]: outdated-middleware-exposure · 2026-09-16 10:18:44 · http://yqgx.zut.edu.cn/
+                - generic [ref=e404] [cursor=pointer]:
+                  - generic [ref=e405]:
+                    - generic [ref=e406]: low
+                    - generic [ref=e407]: gygl内部系统(8080)暴露老旧 Apache Tomcat/8.5.37 默认页,且解析为内网RFC1918(split-horizon)
+                    - generic [ref=e408]: sess-741e662c8cdc
+                  - generic [ref=e409]: outdated-middleware-exposure · 2026-09-16 10:18:44 · http://gygl.zut.edu.cn:8080/
+                - generic [ref=e410] [cursor=pointer]:
+                  - generic [ref=e411]:
+                    - generic [ref=e412]: low
+                    - generic [ref=e413]: lt.zut.edu.cn 迎新网运行老旧 Microsoft-IIS/7.5(Win2008R2 EOL组件)
+                    - generic [ref=e414]: sess-741e662c8cdc
+                  - generic [ref=e415]: outdated-middleware-exposure · 2026-09-16 10:18:44 · http://lt.zut.edu.cn/
+                - generic [ref=e416] [cursor=pointer]:
+                  - generic [ref=e417]:
+                    - generic [ref=e418]: info
+                    - generic [ref=e419]: wengine-auth资源代理网关公网暴露(proxy.zut.edu.cn,CAS统一认证保护,service回跳)
+                    - generic [ref=e420]: sess-470f697db320
+                  - generic [ref=e421]: attack-surface/exposed-proxy · 2026-09-16 10:21:17 · proxy.zut.edu.cn
+                - generic [ref=e422] [cursor=pointer]:
+                  - generic [ref=e423]:
+                    - generic [ref=e424]: info
+                    - generic [ref=e425]: 全站群统一为博达VSB网站群系统(202.196.32.138,20+ vhost,/system/resource/+vsbscreen.min.js指纹)
+                    - generic [ref=e426]: sess-470f697db320
+                  - generic [ref=e427]: attack-surface/uniform-cms · 2026-09-16 10:21:17 · 202.196.32.138
+                - generic [ref=e428] [cursor=pointer]:
+                  - generic [ref=e429]:
+                    - generic [ref=e430]: info
+                    - generic [ref=e431]: 职工之家独立Java应用公网暴露(gh.zut.edu.cn,/front/*.do?dispatch=老MVC,含登录/报名/提案功能)
+                    - generic [ref=e432]: sess-470f697db320
+                  - generic [ref=e433]: attack-surface/exposed-service · 2026-09-16 10:21:17 · gh.zut.edu.cn
+                - generic [ref=e434] [cursor=pointer]:
+                  - generic [ref=e435]:
+                    - generic [ref=e436]: info
+                    - generic [ref=e437]: 汇文Libsys OPAC书目系统线索(202.196.33.227:8080/opac_two,图书馆页引用,公网直连超时)
+                    - generic [ref=e438]: sess-470f697db320
+                  - generic [ref=e439]: attack-surface/internal-service-referenced · 2026-09-16 10:21:17 · http://202.196.33.227:8080/opac_two/include/login_app.jsp
+                - generic [ref=e440] [cursor=pointer]:
+                  - generic [ref=e441]:
+                    - generic [ref=e442]: info
+                    - generic [ref=e443]: 深信服 SSL VPN 边界设备对外暴露(vpn/wpn/nwpn三入口),高价值打点面
+                    - generic [ref=e444]: sess-741e662c8cdc
+                  - generic [ref=e445]: attack-surface-vpn-edge · 2026-09-16 10:18:44 · https://vpn.zut.edu.cn/
+                - generic [ref=e446] [cursor=pointer]:
+                  - generic [ref=e447]:
+                    - generic [ref=e448]: info
+                    - generic [ref=e449]: seafile.zut.edu.cn Seafile 网盘登录页对外暴露(文件存储攻击面)
+                    - generic [ref=e450]: sess-741e662c8cdc
+                  - generic [ref=e451]: attack-surface-file-storage-login · 2026-09-16 10:18:44 · https://seafile.zut.edu.cn/accounts/login/?next=/
+                - generic [ref=e452] [cursor=pointer]:
+                  - generic [ref=e453]:
+                    - generic [ref=e454]: info
+                    - generic [ref=e455]: 学生选课系统公网暴露(res1.zut.edu.cn/xsxk,自研教务系统)
+                    - generic [ref=e456]: sess-470f697db320
+                  - generic [ref=e457]: attack-surface/exposed-admin-entry · 2026-09-16 09:59:08 · https://res1.zut.edu.cn/xsxk/profile/index.html
+      - button "›" [ref=e458]

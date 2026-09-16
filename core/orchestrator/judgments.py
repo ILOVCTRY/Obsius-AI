@@ -65,6 +65,8 @@ def resolve_criteria(config: dict, config_dir: str | Path = "config") -> dict:
         user = load_user_templates(config_dir)
         if chosen in user and user[chosen].strip():
             return {"source": "template", "criteria": user[chosen], "name": chosen}
+        if chosen in BUILTIN_TEMPLATES:  # 内置模板名被显式选定时精确命中（跨 mode 也尊重）
+            return {"source": "builtin", "criteria": BUILTIN_TEMPLATES[chosen], "name": chosen}
     mode = cfg.get("mode", "pentest")
     builtin_name = "红队默认" if mode == "redteam" else "渗透默认"
     return {"source": "builtin",

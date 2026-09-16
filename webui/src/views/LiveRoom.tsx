@@ -1,5 +1,4 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react"
-import { useVirtualizer } from "@tanstack/react-virtual"
 import { GitFork, X } from "lucide-react"
 
 // A3 任务流视图（第三个 React Flow 图）：懒加载，@xyflow/react 不进直播间主包
@@ -125,7 +124,9 @@ function ModePopover({ usage, pid, onClose, onSave }: {
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState("")
   // 已应用的内置模板（""=无）：下拉选择后保持显示所选项，不复位回占位符
-  const [appliedBuiltin, setAppliedBuiltin] = useState<"" | "__b_pentest" | "__b_redteam">("")
+  const [appliedBuiltin, setAppliedBuiltin] = useState<"" | "__b_pentest" | "__b_redteam">(
+    () => (usage.criteria_template === "渗透默认" ? "__b_pentest"
+      : usage.criteria_template === "红队默认" ? "__b_redteam" : ""))
   const prefilledRef = useRef(false)
 
   useEffect(() => {
@@ -170,7 +171,9 @@ function ModePopover({ usage, pid, onClose, onSave }: {
     try {
       const patch: Record<string, unknown> = {
         mode,
-        criteria_template: templateName,
+        criteria_template: templateName
+          || (appliedBuiltin === "__b_pentest" ? "渗透默认"
+            : appliedBuiltin === "__b_redteam" ? "红队默认" : ""),
         autonomy: {
           level: usage.level, paused: usage.paused,
           sessions_cap: usage.sessions_cap, max_chain_ticks: usage.max_chain_ticks,
@@ -491,44 +494,19 @@ export function LiveRoom({ pid }: { pid: string }) {
   }, [events, activeTab, filter])
 
   const listRef = useRef<HTMLDivElement>(null)
-  const virtualizer = useVirtualizer({
-    count: visible.length,
-    getScrollElement: () => listRef.current,
-    estimateSize: () => 44,
-    overscan: 20,
-  })
-  // 新事件自动滚底（仅当原本就在底部附近）
-  const stickToBottom = useRef(true)
-  const prevTop = useRef(0)
-  const totalSize = virtualizer.getTotalSize()
+  // 窗口化：事件流不虚拟化后用「最近 N 条」控 DOM 规模，「加载更早」按批扩窗
+  const [windowSize, setWindowSize] = useState(300)
+  // 倒序窗口：最新事件 = DOM 首子 = column-reverse 视觉最底 = 滚动原点 0。
+  // 贴底由浏览器布局保证（scrollTop 初始/钳制在 0 即最新），零脚本滚动零竞态；
+  // 上翻阅读的位置稳定交给浏览器 scroll anchoring。
+  const shown = useMemo(
+    () => visible.slice(-windowSize).reverse(),
+    [visible, windowSize])
+  // 切上下文（会话页签/类型筛选）= 用户要看最新：重置窗口并回到滚动原点（最底部）
   useEffect(() => {
-    if (!stickToBottom.current) return
+    setWindowSize(300)
     const el = listRef.current
-    if (el) el.scrollTop = el.scrollHeight
-  }, [visible.length, totalSize])
-  // 容器滚动：贴底附近恢复跟随；只有视口上移（用户上翻）才解除跟随。
-  // 不能用「距底>60 就解锁」——回放/测量修正期间程序化滚动的 scroll 事件
-  // 派发晚于内容增长，瞬时 d 可超 60，会误锁成 false 永久停更（历史 bug）。
-  // 贴底追赶时 scrollTop 只增不减；收缩钳制落点 d=0 走恢复分支，均不误判。
-  const handleListScroll = () => {
-    const el = listRef.current
-    if (!el) return
-    const d = el.scrollHeight - el.scrollTop - el.clientHeight
-    if (stickToBottom.current) {
-      if (d >= 60 && el.scrollTop < prevTop.current - 1) stickToBottom.current = false
-    } else if (d < 60) {
-      stickToBottom.current = true
-    }
-    prevTop.current = el.scrollTop
-  }
-  // 切上下文（会话页签/类型筛选）= 用户要看最新：重置贴底并立即对齐一次
-  useEffect(() => {
-    stickToBottom.current = true
-    const raf = requestAnimationFrame(() => {
-      const el = listRef.current
-      if (el) el.scrollTop = el.scrollHeight
-    })
-    return () => cancelAnimationFrame(raf)
+    if (el) el.scrollTop = 0
   }, [activeTab, filter])
 
   const toggleRow = (id: number, defaultValue: boolean) =>
@@ -1250,29 +1228,25 @@ export function LiveRoom({ pid }: { pid: string }) {
         {jobInfo && <span className="ml-auto font-mono text-xs text-muted-foreground">{jobInfo}</span>}
       </div>
 
-      {/* 事件流（虚拟滚动） */}
+      {/* 事件流（倒序流：column-reverse 令 scrollTop=0 即最新，贴底由浏览器布局保证，零脚本） */}
       <div
         ref={listRef}
-        onScroll={handleListScroll}
         className="min-h-0 flex-1 overflow-auto px-3"
       >
-        <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
-          {virtualizer.getVirtualItems().map((vi) => {
-            const e = visible[vi.index]
+        <div className="flex flex-col-reverse">
+          {shown.map((e) => {
             const style = eventStyle(e.kind, e.payload)
             const open = overrides.get(e.id) ?? style.defaultOpen
             const summary = eventSummary(e.payload)
-            const detail = JSON.stringify(e.payload, null, 2)
+            // 只在展开时才序列化详情（回放期全表重渲染时省掉几百次 stringify）
+            const detail = open ? JSON.stringify(e.payload, null, 2) : ""
             // skill.routed 命中技能：双击跳设置页 Skill tab 选中该技能（deep link 经 goto-settings）
             const routedName = e.kind === "skill.routed" && typeof e.payload.name === "string"
               ? e.payload.name : null
             return (
               <div
                 key={e.id}
-                ref={virtualizer.measureElement}
-                data-index={vi.index}
-                className="absolute left-0 top-0 w-full py-0.5"
-                style={{ transform: `translateY(${vi.start}px)` }}
+                className="w-full shrink-0 py-0.5"
               >
                 <div
                   className="cursor-pointer rounded px-2 py-1 hover:bg-accent/40"
@@ -1326,6 +1300,15 @@ export function LiveRoom({ pid }: { pid: string }) {
               </div>
             )
           })}
+          {visible.length > windowSize && (
+            <button
+              type="button"
+              onClick={() => setWindowSize((n) => n + 300)}
+              className="shrink-0 rounded border bg-card px-2 py-1 text-center text-xs text-muted-foreground hover:bg-accent"
+            >
+              ↑ 加载更早（窗口外还有 {visible.length - windowSize} 条）
+            </button>
+          )}
         </div>
       </div>
 

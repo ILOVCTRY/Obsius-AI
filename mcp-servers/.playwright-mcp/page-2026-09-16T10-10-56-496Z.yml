@@ -1,0 +1,90 @@
+- generic [ref=f8e3]:
+  - navigation [ref=f8e4]:
+    - button "◈ 项目" [ref=f8e5]:
+      - generic [ref=f8e6]: ◈
+      - text: 项目
+    - button "📡 情报" [ref=f8e7]:
+      - generic [ref=f8e8]: 📡
+      - text: 情报
+    - button "◉ 直播间" [disabled] [ref=f8e9]:
+      - generic [ref=f8e10]: ◉
+      - text: 直播间
+    - button "▤ 黑板" [disabled] [ref=f8e11]:
+      - generic [ref=f8e12]: ▤
+      - text: 黑板
+    - button "▦ 任务" [disabled] [ref=f8e13]:
+      - generic [ref=f8e14]: ▦
+      - text: 任务
+    - button "⚑ 审批" [disabled] [ref=f8e15]:
+      - generic [ref=f8e16]: ⚑
+      - text: 审批
+    - button "⚙ 技能/设置" [ref=f8e17]:
+      - generic [ref=f8e18]: ⚙
+      - text: 技能/设置
+  - main [ref=f8e19]:
+    - generic [ref=f8e20]:
+      - generic [ref=f8e21]:
+        - generic [ref=f8e22]:
+          - heading "项目" [level=1] [ref=f8e23]
+          - paragraph [ref=f8e24]: 项目 = 场景轨（单选）× 能力包（多选）；数据随 workspaces/ 项目目录隔离
+        - generic [ref=f8e25]:
+          - generic [ref=f8e26]: 新建项目
+          - generic [ref=f8e28]:
+            - generic [ref=f8e29]:
+              - textbox "项目名（可用中文）" [ref=f8e30]
+              - button "创建" [disabled]
+            - generic [ref=f8e31]: 场景轨
+            - generic [ref=f8e33]: 能力包
+        - generic [ref=f8e35]:
+          - button "授权评估 · Web 批4走查-L1开窗 proj-ea1f6ac22698 2026-09-15 删除 批4走查-L1开窗" [ref=f8e36] [cursor=pointer]:
+            - generic [ref=f8e37]: 授权评估 · Web
+            - generic [ref=f8e38]:
+              - generic [ref=f8e39]: 批4走查-L1开窗
+              - generic [ref=f8e40]: proj-ea1f6ac22698
+            - generic "UTC 2026-09-15 07:36:07" [ref=f8e41]: 2026-09-15
+            - button "删除 批4走查-L1开窗" [ref=f8e42]
+          - button "CTF · 二进制/杂项 A组端到端走查 proj-a70916a0aa74 2026-09-15 删除 A组端到端走查" [ref=f8e43] [cursor=pointer]:
+            - generic [ref=f8e44]: CTF · 二进制/杂项
+            - generic [ref=f8e45]:
+              - generic [ref=f8e46]: A组端到端走查
+              - generic [ref=f8e47]: proj-a70916a0aa74
+            - generic "UTC 2026-09-15 15:33:15" [ref=f8e48]: 2026-09-15
+            - button "删除 A组端到端走查" [ref=f8e49]
+          - button "授权评估 · Web 中原工学院 proj-c6cf7859135f 2026-09-16 删除 中原工学院" [ref=f8e50] [cursor=pointer]:
+            - generic [ref=f8e51]: 授权评估 · Web
+            - generic [ref=f8e52]:
+              - generic [ref=f8e53]: 中原工学院
+              - generic [ref=f8e54]: proj-c6cf7859135f
+            - generic "UTC 2026-09-15 16:05:06" [ref=f8e55]: 2026-09-16
+            - button "删除 中原工学院" [ref=f8e56]
+          - button "授权评估 · Web assessment 编排演练-Pikachu proj-9f7ee28609e7 2026-09-13 删除 assessment 编排演练-Pikachu" [ref=f8e57] [cursor=pointer]:
+            - generic [ref=f8e58]: 授权评估 · Web
+            - generic [ref=f8e59]:
+              - generic [ref=f8e60]: assessment 编排演练-Pikachu
+              - generic [ref=f8e61]: proj-9f7ee28609e7
+            - generic "UTC 2026-09-13 14:08:10" [ref=f8e62]: 2026-09-13
+            - button "删除 assessment 编排演练-Pikachu" [ref=f8e63]
+          - button "授权评估 · Web pentest 编排演练-Pikachu proj-63dd10c7d1a6 2026-09-13 删除 pentest 编排演练-Pikachu" [ref=f8e64] [cursor=pointer]:
+            - generic [ref=f8e65]: 授权评估 · Web
+            - generic [ref=f8e66]:
+              - generic [ref=f8e67]: pentest 编排演练-Pikachu
+              - generic [ref=f8e68]: proj-63dd10c7d1a6
+            - generic "UTC 2026-09-12 17:59:51" [ref=f8e69]: 2026-09-13
+            - button "删除 pentest 编排演练-Pikachu" [ref=f8e70]
+          - button "研究 · 二进制 rev真机走查 proj-e193f14eb587 2026-09-14 删除 rev真机走查" [ref=f8e71] [cursor=pointer]:
+            - generic [ref=f8e72]: 研究 · 二进制
+            - generic [ref=f8e73]:
+              - generic [ref=f8e74]: rev真机走查
+              - generic [ref=f8e75]: proj-e193f14eb587
+            - generic "UTC 2026-09-14 04:36:24" [ref=f8e76]: 2026-09-14
+            - button "删除 rev真机走查" [ref=f8e77]
+      - complementary [ref=f8e78]:
+        - generic [ref=f8e79]:
+          - heading "今日简报" [level=2] [ref=f8e80]
+          - button "刷新情报" [ref=f8e81]
+        - list [ref=f8e82]:
+          - listitem [ref=f8e83]: · 🔴 KEV [[KEV] CVE-2026-76461 Cisco Secure Email Gateway SQL Injection Vulnerability](https://nvd.nist.gov/vuln/detail/CVE-2026-76461) — Cisco AsyncOS software for Cisco Secure Email Gateway (SEG) contains a SQL injection vulnerability that could allow an u
+          - listitem [ref=f8e84]: · 🔴 KEV [[KEV] CVE-2026-84869 ConnectWise ScreenConnect Improper Privilege Management and Missing Authorization Vulnerability](https://nvd.nist.gov/vuln/detail/CVE-2026-84869) — ConnectWise ScreenConnect contains both an improper privilege management and missing authorization vulnerability that ma
+          - listitem [ref=f8e85]: · 🔴 KEV [[KEV] CVE-2026-42016 JFrog Artifactory Incorrect Authorization Vulnerability](https://nvd.nist.gov/vuln/detail/CVE-2026-42016) — JFrog Artifactory contains an incorrect authorization vulnerability that allows leads to privilege escalation attack due
+          - listitem [ref=f8e86]: · 🔴 KEV [[KEV] CVE-2026-42018 JFrog Artifactory Improper Authentication Vulnerability](https://nvd.nist.gov/vuln/detail/CVE-2026-42018) — JFrog Artifactory contains an improper authentication vulnerability that could return an internal anonymous-user token t
+        - button "查看全部 →" [ref=f8e87]

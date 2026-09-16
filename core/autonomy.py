@@ -217,6 +217,7 @@ def usage_view(bb, project_id: str) -> dict:
     return {
         **auto,
         "auto_derive": bool(auto.get("auto_derive")),
+        "criteria_template": str((proj["config"] or {}).get("criteria_template") or ""),
         "mode": mode_view["mode"],
         "mission": mode_view.get("mission"),
         "redteam_roe": mode_view.get("redteam_roe"),
