@@ -11,6 +11,8 @@ __pycache__/
 # 运行时数据
 workspaces/
 config/intel/
+# packs 编辑备份与回收站（.history/trash），API 写入自动生成
+packs/**/.history/
 *.db
 *.db-wal
 *.db-shm
