@@ -64,6 +64,10 @@ def normalize_autonomy(raw: dict | None, *, track: str | None = "ctf") -> dict:
     if not isinstance(raw, dict):
         raise ValueError("autonomy 必须是对象")
     level = raw.get("level", default_level(track))
+    # C2 mission 自动派生开关（§6.9）：bool，缺省 False（显式开启才自动派生）
+    auto_derive = raw.get("auto_derive", False)
+    if not isinstance(auto_derive, bool):
+        raise ValueError("auto_derive 须为布尔值")
     if level not in LEVELS:
         raise ValueError(f"非法自主级别: {level}（合法: {LEVELS}）")
     paused = raw.get("paused", _DEFAULTS["paused"])
@@ -80,6 +84,7 @@ def normalize_autonomy(raw: dict | None, *, track: str | None = "ctf") -> dict:
             "max_chain_ticks", 1, CAP_MAX),
         "token_budget": _pos_int_or_none(raw.get("token_budget"), "token_budget"),
         "task_budget": _pos_int_or_none(raw.get("task_budget"), "task_budget"),
+        "auto_derive": auto_derive,  # C2 mission 自动派生开关（§6.9）
     }
 
 
@@ -211,6 +216,7 @@ def usage_view(bb, project_id: str) -> dict:
     mode_view = normalize_mode_config(proj["config"] or {})
     return {
         **auto,
+        "auto_derive": bool(auto.get("auto_derive")),
         "mode": mode_view["mode"],
         "mission": mode_view.get("mission"),
         "redteam_roe": mode_view.get("redteam_roe"),

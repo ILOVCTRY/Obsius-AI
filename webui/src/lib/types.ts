@@ -33,6 +33,8 @@ export interface ChainState {
 export interface ProjectUsage extends Autonomy {
   active_sessions: number
   mode?: "pentest" | "redteam"  // C2 作战模式（§6.9）
+  auto_derive?: boolean         // C2 mission 自动派生开关（状态灯数据源）
+  criteria_template?: string    // C2 所选判据模板名
   mission?: { text: string; criteria: string }
   redteam_roe?: { targets: string; window: string; exclusions: string; approver: string }
   llm_calls: number
@@ -329,6 +331,11 @@ export interface FuncPatchBody {
 export interface FindingPatchBody {
   status?: string
   evidence?: Record<string, unknown>
+}
+
+export interface JudgmentTemplates {
+  builtin: Record<string, string>
+  user: Record<string, string>
 }
 
 export interface Session {

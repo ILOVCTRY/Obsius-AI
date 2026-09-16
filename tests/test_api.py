@@ -2738,3 +2738,72 @@ def test_mode_prompt_fixed_at_session_creation(client):
     sid = sp.json()["id"]
     agent = client.app.state.agents[sid]
     assert "红队行动" in agent.capability_prompt and "*.t.com" in agent.capability_prompt
+
+
+def test_directive_endpoint_and_auto_derive(tmp_path):
+    """C2：指挥编排器——directive 落事件+自动 tick+注入 overview+轮末标 done；
+    L1 auto_derive 开启时 worker 空退 → mission 自动派生新任务。"""
+    from test_orchestrator import ScriptedLLM as S
+    app = create_app(
+        workspace_root=str(tmp_path / "ws"), tools_root=None,
+        executor_llm=S([{"text": "ok"}]),
+        planner_llm=S([
+            # directive 触发的第一轮：按指令发布任务
+            {"tool_use": [S.tool_call("p1", "publish_task",
+                                       {"objective": "对已登记资产做漏洞挖掘",
+                                        "task_type": "generic"})]},
+            {"tool_use": [S.tool_call("d1", "done", {})]},
+        ]),
+        providers_config=str(tmp_path / "p.json"))
+    app.state.judgments_dir = tmp_path / "cfg"  # 测试隔离判据模板文件
+    with TestClient(app) as c:
+        pid = c.post("/api/projects", json={"name": "指挥", "track": "ctf",
+                                            "capabilities": ["binary"]}).json()["id"]
+        # 开自动派生（L1，ctf 缺省 L0 → PATCH 提档）+ mission 判据
+        assert c.patch(f"/api/projects/{pid}/config", json={"config": {
+            "autonomy": {"level": "L1", "auto_derive": True},
+            "mission": {"text": "挖洞", "criteria": "□ 全覆盖"}}}).status_code == 200
+        r = c.post(f"/api/projects/{pid}/orchestrator/directive",
+                   json={"text": "对已登记资产做漏洞挖掘"})
+        assert r.status_code == 200
+        _wait_job(c, r.json()["job_id"])
+        bb = c.app.state.projects[pid].bb
+        evs = [e["kind"] for e in bb.recent_events(pid)]
+        assert "orch.directive" in evs and "orch.directive.done" in evs
+        # 第一轮按指令派生了任务
+        assert any(t["objective"] == "对已登记资产做漏洞挖掘"
+                   for t in c.get(f"/api/projects/{pid}/tasks").json())
+        detail = c.get(f"/api/projects/{pid}").json()
+        assert detail["usage"]["auto_derive"] is True
+
+
+def test_judgment_templates_crud(client, tmp_path):
+    """C2 判据模板：默认全 user 空；PUT 整表保存；DELETE 删除；resolve 三层优先级。"""
+    from core.orchestrator.judgments import resolve_criteria
+    pid = _make_project(client)
+    app_jud = client.app.state.judgments_dir
+    client.app.state.judgments_dir = tmp_path / "cfg"
+    r = client.get("/api/judgment-templates")
+    assert r.status_code == 200 and "渗透默认" in r.json()["builtin"] and r.json()["user"] == {}
+    # PUT 保存
+    r = client.put("/api/judgment-templates", json={"我的模板": "□ 自定义判据"})
+    assert r.status_code == 200 and r.json()["saved"] == 1
+    # 三层优先级：mission > template > builtin
+    proj = client.app.state.projects[pid]
+    cfg_empty = proj.bb.get_project(pid)["config"]
+    res = resolve_criteria(cfg_empty, client.app.state.judgments_dir)
+    assert res["source"] == "builtin"  # 无 mission 无选模板 → 内置兜底
+    client.patch(f"/api/projects/{pid}/config",
+                 json={"config": {"criteria_template": "我的模板"}})
+    res = resolve_criteria(proj.bb.get_project(pid)["config"],
+                           client.app.state.judgments_dir)
+    assert res["source"] == "template" and "自定义判据" in res["criteria"]
+    client.patch(f"/api/projects/{pid}/config",
+                 json={"config": {"mission": {"criteria": "□ 手写判据"}}})
+    res = resolve_criteria(proj.bb.get_project(pid)["config"],
+                           client.app.state.judgments_dir)
+    assert res["source"] == "mission"
+    # DELETE
+    r = client.delete("/api/judgment-templates/我的模板")
+    assert r.status_code == 200
+    assert client.get("/api/judgment-templates").json()["user"] == {}

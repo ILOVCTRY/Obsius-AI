@@ -217,6 +217,17 @@ export const api = {
     }),
   abortSession: (sid: string) =>
     http<{ status: string }>(`/api/sessions/${sid}/abort`, { method: "POST" }),
+  // C2 指挥编排器：一次性目标指令（自动触发一轮编排，最高优先落实）
+  orchDirective: (pid: string, text: string) =>
+    http<{ event_id: number; job_id: string; status: string }>(
+      `/api/projects/${pid}/orchestrator/directive`, { method: "POST", body: JSON.stringify({ text }) }),
+  // C2 判据模板：内置 + 用户自定义（全局）
+  judgmentTemplates: () =>
+    http<{ builtin: Record<string, string>; user: Record<string, string> }>(`/api/judgment-templates`),
+  saveJudgmentTemplates: (templates: Record<string, string>) =>
+    http<{ saved: number }>(`/api/judgment-templates`, { method: "PUT", body: JSON.stringify(templates) }),
+  deleteJudgmentTemplate: (name: string) =>
+    http<{ deleted: string }>(`/api/judgment-templates/${encodeURIComponent(name)}`, { method: "DELETE" }),
   // E8 人工引导通道：human_note 私信直达会话，worker 步边界注入
   sessionNote: (sid: string, text: string) =>
     http<{ note_id: string; session_id: string }>(`/api/sessions/${sid}/note`, {

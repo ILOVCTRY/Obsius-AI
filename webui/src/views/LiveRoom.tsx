@@ -113,12 +113,20 @@ function ModePopover({ usage, onClose, onSave }: {
   const [mode, setMode] = useState(usage.mode ?? "pentest")
   const [text, setText] = useState(usage.mission?.text ?? "")
   const [criteria, setCriteria] = useState(usage.mission?.criteria ?? "")
+  const [autoDerive, setAutoDerive] = useState(usage.auto_derive ?? false)
+  const [templateName, setTemplateName] = useState(usage.criteria_template ?? "")
+  const [tplName, setTplName] = useState("")
+  const [templates, setTemplates] = useState<{ builtin: Record<string, string>; user: Record<string, string> }>({ builtin: {}, user: {} })
   const [targets, setTargets] = useState(usage.redteam_roe?.targets ?? "")
   const [window_, setWindow_] = useState(usage.redteam_roe?.window ?? "")
   const [exclusions, setExclusions] = useState(usage.redteam_roe?.exclusions ?? "")
   const [approver, setApprover] = useState(usage.redteam_roe?.approver ?? "")
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState("")
+
+  useEffect(() => {
+    api.judgmentTemplates().then(setTemplates).catch(() => {})
+  }, [])
 
   const save = async () => {
     if (mode === "redteam" &&
@@ -129,7 +137,16 @@ function ModePopover({ usage, onClose, onSave }: {
     setSaving(true)
     setErr("")
     try {
-      const patch: Record<string, unknown> = { mode }
+      const patch: Record<string, unknown> = {
+        mode,
+        criteria_template: templateName,
+        autonomy: {
+          level: usage.level, paused: usage.paused,
+          sessions_cap: usage.sessions_cap, max_chain_ticks: usage.max_chain_ticks,
+          token_budget: usage.token_budget, task_budget: usage.task_budget,
+          auto_derive: autoDerive,
+        },
+      }
       if (text.trim() || criteria.trim()) {
         patch.mission = { text: text.trim(), criteria: criteria.trim() }
       }
@@ -151,7 +168,24 @@ function ModePopover({ usage, onClose, onSave }: {
   const field = "w-full rounded border bg-background p-1.5 text-[11px]"
   return (
     <div className="absolute left-0 top-9 z-20 w-72 rounded-lg border bg-popover p-3 text-xs shadow-md">
-      <p className="mb-2 text-muted-foreground">作战模式与 mission（§6.9；安全红线不放松）</p>
+      <p className="mb-2 flex items-center gap-1.5 text-muted-foreground">
+        <span
+          className={cn("inline-block size-2 rounded-full",
+            usage.auto_derive
+              ? (usage.tokens.pct !== null && usage.tokens.pct >= 100) || usage.paused
+                ? "bg-[--status-approval]"
+                : "bg-[--status-ok]"
+              : "bg-muted-foreground/40")}
+          title={usage.auto_derive
+            ? (usage.paused ? "已暂停：自动派生暂被拦住" : "自动派生已开启：任务空时自动派生新任务")
+            : "自动派生已关闭"}
+        />
+        作战模式与 mission（§6.9；安全红线不放松）
+      </p>
+      <label className="mb-2 flex cursor-pointer items-center gap-1.5">
+        <input type="checkbox" checked={autoDerive} onChange={(e) => setAutoDerive(e.target.checked)} />
+        <span>任务空时自动派生新任务（L1/L2 生效）</span>
+      </label>
       <div className="mb-2 flex gap-1">
         <button
           className={cn("flex-1 rounded border px-2 py-1",
@@ -181,12 +215,67 @@ function ModePopover({ usage, onClose, onSave }: {
                  placeholder="④ 授权人" />
         </div>
       )}
+      <label className="mb-1 block text-muted-foreground">判据（自动派生的方向；每行一条）</label>
+      <div className="mb-1 flex gap-1">
+        <select
+          className="h-7 min-w-0 flex-1 rounded border bg-background px-1 text-[11px]"
+          value=""
+          onChange={(e) => {
+            const name = e.target.value
+            if (!name) return
+            if (name === "__b_pentest") { setCriteria(templates.builtin["渗透默认"] ?? ""); return }
+            if (name === "__b_redteam") { setCriteria(templates.builtin["红队默认"] ?? ""); return }
+            if (name in templates.user) {
+              setCriteria(templates.user[name])
+              setTemplateName(name)
+            }
+          }}
+        >
+          <option value="">应用判据模板…</option>
+          <optgroup label="内置">
+            <option value="__b_pentest">内置：渗透默认</option>
+            <option value="__b_redteam">内置：红队默认</option>
+          </optgroup>
+          {Object.keys(templates.user).length > 0 && (
+            <optgroup label="我的模板">
+              {Object.keys(templates.user).map((n) => (
+                <option key={n} value={n}>{n}</option>
+              ))}
+            </optgroup>
+          )}
+        </select>
+      </div>
+      <textarea className={field} rows={3} value={criteria} onChange={(e) => setCriteria(e.target.value)}
+                placeholder="□ 判据一&#10;□ 判据二（写判据 = 授权自动派生往此方向打）" />
+      <div className="mb-2 mt-1 flex gap-1">
+        <input className={cn(field, "min-w-0 flex-1")} value={tplName} onChange={(e) => setTplName(e.target.value)}
+               placeholder="存为模板（名称）" />
+        <Button size="sm" variant="outline"
+                disabled={!tplName.trim() || !criteria.trim()}
+                onClick={async () => {
+                  const merged = { ...templates.user, [tplName.trim()]: criteria }
+                  setTemplates((t) => ({ ...t, user: merged }))
+                  setTemplateName(tplName.trim())
+                  await api.saveJudgmentTemplates(merged)
+                }}>
+          存模板
+        </Button>
+        {templateName && templates.user[templateName] !== undefined && (
+          <Button size="sm" variant="outline"
+                  onClick={async () => {
+                    const merged = { ...templates.user }
+                    delete merged[templateName]
+                    setTemplates((t) => ({ ...t, user: merged }))
+                    setTemplateName("")
+                    await api.deleteJudgmentTemplate(templateName)
+                  }}>
+            删
+          </Button>
+        )}
+      </div>
       <label className="mb-1 block text-muted-foreground">mission 目标（可选）</label>
       <textarea className={field} rows={2} value={text} onChange={(e) => setText(e.target.value)}
                 placeholder="战役目标一句话" />
-      <label className="mb-1 mt-1 block text-muted-foreground">判据清单（每行一条）</label>
-      <textarea className={field} rows={3} value={criteria} onChange={(e) => setCriteria(e.target.value)}
-                placeholder="□ 判据一&#10;□ 判据二" />
       {err && <p className="mt-2 text-[--status-error]">{err}</p>}
       <Button size="sm" className="mt-2 w-full" disabled={saving} onClick={save}>
         {saving ? "保存中…" : "保存"}
@@ -244,7 +333,7 @@ export function LiveRoom({ pid }: { pid: string }) {
   const [switchModel, setSwitchModel] = useState("")
   // E8：开窗步数预算（留空=后端默认 200）与输入框模式（发任务｜引导会话）
   const [maxSteps, setMaxSteps] = useState("")
-  const [inputMode, setInputMode] = useState<"task" | "note">("task")
+  const [inputMode, setInputMode] = useState<"task" | "note" | "directive">("task")
   const [orchOpen, setOrchOpen] = useState(false)
   const [orchRoles, setOrchRoles] = useState<Set<string>>(new Set())
   // A1：关页签=本地 detach（后台任务继续跑），可从溢出菜单/任务流视图挂回
@@ -565,7 +654,8 @@ export function LiveRoom({ pid }: { pid: string }) {
   }
 
   // 输入框（E8）：「发任务」= 以 human 名义发布 passive 任务；「引导会话」=
-  // human_note 私信直达当前选中会话（步边界注入「💬 人类引导」，不打断当前工具调用）
+  // human_note 私信直达当前选中会话（步边界注入「💬 人类引导」，不打断当前工具调用）；
+  // 「指挥编排」（C2）= 一次性目标指令直达编排器（最高优先注入 + 自动触发一轮编排）
   const sendRemark = async () => {
     const text = remark.trim()
     if (!text) return
@@ -576,6 +666,17 @@ export function LiveRoom({ pid }: { pid: string }) {
         await api.sessionNote(activeSession.id, text)
       } catch (e) {
         setJobInfo(`引导投递失败：${e}`)
+      }
+      return
+    }
+    if (inputMode === "directive") {
+      setRemark("")
+      setJobInfo("指令下发中，编排器拆解任务/分资产/开窗…")
+      try {
+        const r = await api.orchDirective(pid, text)
+        setJobInfo(`指令已下达（#${r.event_id}），编排进行中——结果看任务看板与事件流`)
+      } catch (e) {
+        setJobInfo(`指令失败：${e}`)
       }
       return
     }
@@ -1144,9 +1245,20 @@ export function LiveRoom({ pid }: { pid: string }) {
           >
             引导会话
           </button>
+          <button
+            type="button"
+            title="指挥编排器（C2）：一次性目标指令——自动触发一轮编排，编排器按指令拆解任务/分资产/开窗（最高优先落实）"
+            onClick={() => setInputMode("directive")}
+            className={cn("border-l px-2.5 transition-colors",
+              inputMode === "directive" ? "bg-primary/15 font-medium text-primary" : "text-muted-foreground hover:bg-accent")}
+          >
+            指挥编排
+          </button>
         </div>
         <Input
-          placeholder={inputMode === "note"
+          placeholder={inputMode === "directive"
+            ? "指挥编排器：一句话目标（如「对已登记资产做漏洞挖掘」）——自动触发编排拆解/分资产/开窗…"
+            : inputMode === "note"
             ? (activeSession
                 ? `引导「${activeSession.name || activeSession.role}」：一句话指示，步边界注入不打断当前工作…`
                 : "引导会话：先选中一个会话页签…")

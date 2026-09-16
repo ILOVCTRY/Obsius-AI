@@ -25,7 +25,8 @@ def test_default_level_by_track():
 def test_normalize_fills_defaults_and_validates():
     a = normalize_autonomy({"level": "L2"}, track="ctf")
     assert a == {"level": "L2", "paused": False, "sessions_cap": 4,
-                 "max_chain_ticks": 3, "token_budget": None, "task_budget": None}
+                 "max_chain_ticks": 3, "token_budget": None, "task_budget": None,
+                 "auto_derive": False}  # C2 mission 自动派生开关（缺省关）
     with pytest.raises(ValueError):
         normalize_autonomy({"level": "L9"})
     with pytest.raises(ValueError):

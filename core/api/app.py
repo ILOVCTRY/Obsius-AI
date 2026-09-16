@@ -54,6 +54,7 @@ from core.llm.providers import CONFIG_PATH as PROVIDERS_CONFIG_PATH
 from core.llm.routing import AVAILABLE_MODELS, KNOWN_ROLES
 from core.orchestrator import Orchestrator, OrchestratorConfig
 from core.orchestrator import state as orch_state
+from core.orchestrator import judgments
 from core.projects import Project, ProjectStore
 from core.runtime import ExecutionGateway, HostDetector
 from core.skills import proposals as proposals_mod
@@ -101,6 +102,11 @@ class ConfigPatchIn(BaseModel):
 class ReopenIn(BaseModel):
     """C1：放回/「已解决，放回继续」的人类补充说明（写进任务行 result_note 落审计）。"""
     note: str = ""
+
+
+class DirectiveIn(BaseModel):
+    """C2 指挥编排器：人类一次性目标指令（自动触发一轮编排，最高优先落实）。"""
+    text: str
 
 
 class TaskIn(BaseModel):
@@ -822,6 +828,9 @@ def create_app(
     app.state.intel: IntelStore | None = None
     app.state.intel_getter = None
     app.state.intel_llm = None
+    # C2 mission 自动派生：per-pid 防空转状态（{pid: {tip, empty}}）+ 判据模板目录
+    app.state.mission_derive: dict[str, dict[str, Any]] = {}
+    app.state.judgments_dir = Path("config")
 
     def _llms():
         exec_llm = executor_llm
@@ -2400,6 +2409,7 @@ def create_app(
             if stopped_by_pause:
                 _stop_chain(pid, "paused")
             elif agent.last_claim_idle:
+                _maybe_mission_auto_tick(pid, reason=f"worker-idle:{agent.session['id']}")
                 _maybe_auto_tick(pid, reason=f"worker-idle:{agent.session['id']}")
                 # A5：L2 下队列空转也是重排时机（子代理可能刚发了子任务）。
                 # 尾部触发若被在跑编排动作挤掉（busy），才让 on_done 补一次——
@@ -2457,6 +2467,7 @@ def create_app(
             meta={"project_id": pid, "session_id": sid, **extra_meta},
             on_done=lambda _j: (
                 _maybe_auto_resume(pid, agent),  # C4：L2 下 budget_paused 自动续跑
+                _maybe_mission_auto_tick(pid, reason=f"worker-done:{sid}"),  # C2 L1 自动派生
                 _maybe_auto_tick(pid, reason=f"worker-done:{sid}"),
                 # 重排只补「尾部被挤掉」的那一次；已提交/已起 wait 的不重复触发
                 _maybe_replan(pid, reason=f"worker-done:{sid}")
@@ -2548,6 +2559,78 @@ def create_app(
             return (datetime.now(timezone.utc) - datetime.fromisoformat(raw)).total_seconds()
         except ValueError:
             return None
+
+    def _maybe_mission_auto_tick(pid: str, reason: str) -> None:
+        """C2 mission 自动派生（§6.9）：L1 档专属补位——auto_derive 开启 + mission
+        判据存在 + worker 空退 → 自动编排一轮派生下一批任务（开窗仍走 L1 审批）。
+        L2 不走此路径（既有自动链已覆盖）。闸全部实时重读；防空转：上轮派生
+        tick 零发布且此后无新事件 → 跳过，直到黑板有变化。"""
+        try:
+            proj = _project(pid)
+        except HTTPException:
+            return
+        try:
+            bb = proj.bb
+            cfg = autonomy.autonomy_of(bb.get_project(pid)["config"], track=proj.track)
+            # 闸①开关显式开启
+            if not cfg.get("auto_derive"):
+                return
+            # 闸②档位：仅 L1 补位（L2 由既有自动链覆盖；L0 全手动）
+            if cfg["level"] != "L1" or cfg["paused"]:
+                return
+            # 闸③判据存在（三层解析：mission > 所选模板 > mode 内置默认）
+            resolved = judgments.resolve_criteria(
+                bb.get_project(pid)["config"], app.state.judgments_dir)
+            # 闸④token 预算硬阻
+            tok = autonomy.usage_view(bb, pid).get("tokens", {})
+            if tok.get("pct") is not None and tok["pct"] >= 100:
+                return
+            # 闸⑤防空转：上轮派生零发布且黑板无新事件 → 跳过（有新事件即重置）
+            st = app.state.mission_derive.setdefault(pid, {"tip": 0, "empty": False})
+            tip = bb.latest_event_id(pid)
+            if st["empty"] and tip <= st["tip"]:
+                return
+            st["tip"] = tip
+            st["empty"] = True  # tick 发布了任务则由其 on_done 复位
+            owner = f"mission-derive-{uuid.uuid4().hex}"
+            try:
+                orch_state.acquire_tick_lease(bb, pid, owner)
+            except orch_state.TickLeaseError:
+                return
+            try:
+                orch = _build_orchestrator(pid, TickIn(), owner)
+            except HTTPException:
+                orch_state.release_tick_lease(bb, pid, owner)
+                return
+            bb.append_event(
+                pid, "mission.derive",
+                {"reason": reason, "criteria_source": resolved["source"]},
+                author="orchestrator")
+
+            def _run_mission_tick() -> dict:
+                try:
+                    result = orch.tick()
+                    _post_tick(pid, result, manual=False)
+                    return result
+                finally:
+                    orch_state.release_tick_lease(bb, pid, owner)
+
+            def _mission_on_done(job: dict) -> None:
+                # 零发布 → 置空转标记（配合闸⑤防 LLM 空转循环）；有发布则复位
+                result = job.get("result") or {}
+                if not (result.get("published") or []):
+                    st["empty"] = True
+                    st["tip"] = bb.latest_event_id(pid)
+                else:
+                    st["empty"] = False
+
+            app.state.jobs.submit("orchestrator-tick", _run_mission_tick,
+                                  meta={"project_id": pid},
+                                  on_done=lambda _j: (_mission_on_done(_j),
+                                                      _maybe_auto_tick(pid, reason=f"mission-done:{pid}"),
+                                                      None)[-1])
+        except Exception:  # noqa: BLE001 —— 后台线程不能炸
+            log.exception("mission 自动派生失败 pid=%s", pid)
 
     def _maybe_auto_tick(pid: str, reason: str) -> None:
         """自动续 tick 的唯一入口（触发点 A）：只判闸门 + submit job，不直接跑 LLM。
@@ -2802,6 +2885,63 @@ def create_app(
         return run
 
     # ---------- Orchestrator ----------
+
+    @app.post("/api/projects/{pid}/orchestrator/directive")
+    def orchestrator_directive(pid: str, body: DirectiveIn):
+        """C2 指挥编排器（§6.4）：人类一次性目标指令——落 orch.directive 事件
+        （最高优先注入下一轮 tick）+ 自动触发一轮编排。持久方向走 mission。"""
+        text = body.text.strip()
+        if not text:
+            raise HTTPException(422, "指令不能为空")
+        proj = _project(pid)
+        event_id = proj.bb.append_event(
+            pid, "orch.directive",
+            {"text": text[:2000], "status": "pending"}, author="human")
+        # 自动触发一轮编排（复用手动 tick 同款租约/job 路径）
+        owner = f"directive-{uuid.uuid4().hex}"
+        try:
+            orch_state.acquire_tick_lease(proj.bb, pid, owner)
+        except orch_state.TickLeaseError as e:
+            raise HTTPException(409, str(e)) from e
+        try:
+            orch = _build_orchestrator(pid, TickIn(), owner)
+        except HTTPException:
+            orch_state.release_tick_lease(proj.bb, pid, owner)
+            raise
+
+        def _run_directive_tick() -> dict:
+            try:
+                result = orch.tick()
+                _post_tick(pid, result, manual=False)
+                return result
+            finally:
+                orch_state.release_tick_lease(proj.bb, pid, owner)
+
+        job_id = app.state.jobs.submit(
+            "orchestrator-tick", _run_directive_tick, meta={"project_id": pid},
+            on_done=lambda _j: _maybe_auto_tick(pid, reason="directive-done"))
+        return {"event_id": event_id, "job_id": job_id, "status": "dispatched"}
+
+    @app.get("/api/judgment-templates")
+    def list_judgment_templates():
+        """C2 判据模板：内置（渗透/红队默认）+ 用户自定义（config/judgment_templates.json）。"""
+        return {"builtin": judgments.BUILTIN_TEMPLATES,
+                "user": judgments.load_user_templates(app.state.judgments_dir)}
+
+    @app.put("/api/judgment-templates")
+    def save_judgment_templates(body: dict):
+        """整表保存用户模板（{name: criteria}）；空名/空判据条目剔除。"""
+        judgments.save_user_templates(app.state.judgments_dir, body or {})
+        return {"saved": len(judgments.load_user_templates(app.state.judgments_dir))}
+
+    @app.delete("/api/judgment-templates/{name}")
+    def delete_judgment_template(name: str):
+        templates = judgments.load_user_templates(app.state.judgments_dir)
+        if name not in templates:
+            raise HTTPException(404, f"模板不存在: {name}")
+        del templates[name]
+        judgments.save_user_templates(app.state.judgments_dir, templates)
+        return {"deleted": name}
 
     @app.post("/api/projects/{pid}/orchestrator/tick")
     def orchestrator_tick(pid: str, body: TickIn):

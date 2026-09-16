@@ -334,10 +334,37 @@ class Orchestrator:
             f"  #{e['id']} [{e['kind']}] {e['author']}: {json.dumps(e['payload'], ensure_ascii=False)[:120]}"
             for e in new_events[-40:]
         ]
-        return json.dumps(stats, ensure_ascii=False, indent=1) + (
+        out = json.dumps(stats, ensure_ascii=False, indent=1) + (
             "\n\n## 本轮过期租约（已回收为 open）\n- " + "\n- ".join(expired_leases)
             if expired_leases else ""
         ) + "\n\n## 自上轮以来的新事件\n" + ("\n".join(event_lines) or "  （无）")
+        directives = self._pending_directives()
+        if directives:
+            out += "\n\n## ⚠ 人类指令（最高优先，本轮优先落实）"
+            for d in directives:
+                out += f"\n- {d['text']}"
+        return out
+
+    def _pending_directives(self) -> list[dict]:
+        """C2 指挥编排器：捞未处理的 orch.directive 事件（有 done 标记的排除）。
+        人类一次性目标指令——最高优先注入态势。"""
+        rows = self.bb.conn.execute(
+            "SELECT id, payload FROM events WHERE project_id=? AND kind='orch.directive'"
+            " ORDER BY id DESC LIMIT 20",
+            (self.project_id,)).fetchall()
+        done_ids = {json.loads(r["payload"]).get("event_id") for r in self.bb.conn.execute(
+            "SELECT payload FROM events WHERE project_id=? AND kind='orch.directive.done'",
+            (self.project_id,)).fetchall()}
+        out = []
+        for r in rows:
+            try:
+                payload = json.loads(r["payload"])
+            except ValueError:
+                continue
+            text = str(payload.get("text") or "").strip()
+            if text and r["id"] not in done_ids:
+                out.append({"event_id": r["id"], "text": text[:300]})
+        return out
 
     def _stats(self) -> dict:
         tasks = self.tq.list_tasks(self.project_id)
@@ -488,6 +515,8 @@ class Orchestrator:
         self._digest: str | None = None
         self._publish_count = 0  # C1：单轮发布硬闸计数（直接发布与 L0 提案同闸）
         overview = self._overview(expired)
+        pending_directives = self._pending_directives()  # C2：人类指令随 tick 消费后标 done
+        self._consumed_directives = list(pending_directives)
         self._emit_starvation_events(self._last_stats_starvation)
         auto = self.autonomy_provider() if self.autonomy_provider is not None else None
         # 批 6：config.propose_only（API 按 L0 注入）优先；无 provider 的单测也可直配
@@ -534,7 +563,15 @@ class Orchestrator:
         return self._finish_tick(exhausted=True)
 
     def _finish_tick(self, *, exhausted: bool = False) -> dict[str, Any]:
-        """落盘持久游标/轮数并组装结构化结果（两条 tick 出口共用）。"""
+        """落盘持久游标/轮数并组装结构化结果（两条 tick 出口共用）。
+        C2：本轮消费的人类指令标 done（orch.directive.done 事件）——下轮不再注入。"""
+        for d in getattr(self, "_consumed_directives", []):
+            try:
+                self.bb.append_event(
+                    self.project_id, "orch.directive.done",
+                    {"event_id": d["event_id"]}, author="orchestrator")
+            except Exception:  # noqa: BLE001
+                log.exception("指令 done 标记失败")
         if self.state_saver is not None:
             try:
                 self.state_saver(
