@@ -499,17 +499,31 @@ def test_close_session_endpoint(client):
     assert client.post("/api/sessions/sess-nope/close").status_code == 404
 
 
-def test_close_session_409_while_job_running(client):
+def test_close_session_drains_while_job_running(client):
+    """F9 优雅关窗：worker 在跑不再 409——置 close_pending 排水标记 + 解除武装，
+    返回 draining；空闲时立即关。"""
     pid = _make_project(client)
     proj = client.app.state.projects[pid]
     sess = proj.bb.register_session(pid, "忙碌窗口", role="reverse")
+    sid = sess["id"]
     import threading
     gate = threading.Event()
     client.app.state.jobs.submit(
         "agent-work", gate.wait,  # 挂起直到测试放行
-        meta={"project_id": pid, "session_id": sess["id"]})
-    assert client.post(f"/api/sessions/{sess['id']}/close").status_code == 409
+        meta={"project_id": pid, "session_id": sid})
+    r = client.post(f"/api/sessions/{sid}/close")
+    assert r.status_code == 200 and r.json()["status"] == "draining"
+    rows = client.get(f"/api/projects/{pid}/sessions").json()
+    meta = json.loads(rows[0]["meta"]) if isinstance(rows[0].get("meta"), str) else rows[0].get("meta") or {}
+    assert meta["close_pending"] is True and meta["worker_armed"] is False
+    # 事件审计：session.work_state（armed=false + close_pending=true）
+    events = client.get(f"/api/projects/{pid}/events").json()
+    ws = [e for e in events if e["kind"] == "session.work_state"]
+    assert ws and ws[-1]["payload"]["close_pending"] is True
     gate.set()
+    # 空闲关窗照旧立即 closed
+    r2 = client.post(f"/api/sessions/{sid}/close")
+    assert r2.status_code == 200 and r2.json()["status"] == "closed"
 
 
 # ---------- 会话控制端点（DESIGN.md §3：暂停/恢复/中断） ----------
@@ -1035,7 +1049,7 @@ def test_l2_chain_full_cycle(tmp_path, monkeypatch):
     app = _chain_app(tmp_path, planner, _exec_finish_script(1))
     with TestClient(app) as c:
         pid = _l2_project(c, "L2全链")
-        sp = c.post(f"/api/projects/{pid}/agents", json={"role": "recon"})
+        sp = c.post(f"/api/projects/{pid}/agents", json={"role": "recon", "armed": True})
         assert sp.status_code == 201 and sp.json().get("job_id")  # 触发点 C
         sid = sp.json()["id"]
         _wait_no_running(c, pid)  # C 的空队列 worker 秒退（不消费 executor 剧本）
@@ -1097,7 +1111,7 @@ def test_l2_chain_max_chain_ticks(tmp_path, monkeypatch):
     app = _chain_app(tmp_path, planner, _exec_finish_script(2))
     with TestClient(app) as c:
         pid = _l2_project(c, "L2预算", max_chain_ticks=1)
-        sp = c.post(f"/api/projects/{pid}/agents", json={"role": "recon"})
+        sp = c.post(f"/api/projects/{pid}/agents", json={"role": "recon", "armed": True})
         assert sp.status_code == 201
         _wait_no_running(c, pid)
         r = c.post(f"/api/projects/{pid}/orchestrator/tick", json={})
@@ -1127,7 +1141,7 @@ def test_l2_chain_paused_blocks_auto_but_human_overrides(tmp_path, monkeypatch):
     app = _chain_app(tmp_path, [], _exec_finish_script(1))
     with TestClient(app) as c:
         pid = _l2_project(c, "L2暂停", paused=True)
-        sp = c.post(f"/api/projects/{pid}/agents", json={"role": "recon"})
+        sp = c.post(f"/api/projects/{pid}/agents", json={"role": "recon", "armed": True})
         assert sp.status_code == 201 and "job_id" not in sp.json()  # 触发点 C 暂停不开工
         sid = sp.json()["id"]
         r = c.post(f"/api/projects/{pid}/tasks",
@@ -1265,7 +1279,7 @@ def test_l0_l1_trigger_gates_c_d_e(tmp_path):
     with TestClient(app1) as c1:
         pid1 = c1.post("/api/projects", json={"name": "L1触发", "track": "assessment",
                                               "capabilities": ["web"]}).json()["id"]
-        old = c1.post(f"/api/projects/{pid1}/agents", json={"role": "recon"})
+        old = c1.post(f"/api/projects/{pid1}/agents", json={"role": "recon", "armed": True})
         old_sid = old.json()["id"]
         assert old.json().get("job_id")  # L1 开窗触发点 C 自起
         _wait_no_running(c1, pid1)
@@ -1312,7 +1326,7 @@ def test_l2_net_real_without_approval_denied(tmp_path):
     app = _chain_app(tmp_path, planner, executor)
     with TestClient(app) as c:
         pid = _l2_project(c, "L2红线")
-        sp = c.post(f"/api/projects/{pid}/agents", json={"role": "_generalist"})
+        sp = c.post(f"/api/projects/{pid}/agents", json={"role": "_generalist", "armed": True})
         sid = sp.json()["id"]
         _wait_no_running(c, pid)
         r = c.post(f"/api/projects/{pid}/tasks",
@@ -2527,7 +2541,7 @@ def test_l2_worker_idle_triggers_replan(tmp_path, monkeypatch):
     app = _chain_app(tmp_path, [])  # 无 open 任务 → replan 不消费剧本
     with TestClient(app) as c:
         pid = _l2_project(c, "L2重排A")
-        sp = c.post(f"/api/projects/{pid}/agents", json={"role": "recon"})
+        sp = c.post(f"/api/projects/{pid}/agents", json={"role": "recon", "armed": True})
         assert sp.status_code == 201 and sp.json().get("job_id")
         _wait_no_running(c, pid)
         jobs = _project_jobs(c, pid, "orchestrator-replan")
@@ -2666,7 +2680,7 @@ def test_l2_budget_pause_auto_resumes(tmp_path):
         tid = c.post(f"/api/projects/{pid}/tasks",
                      json={"objective": "自续任务", "task_type": "generic"}).json()["task_id"]
         sp = c.post(f"/api/projects/{pid}/agents",
-                    json={"role": "_generalist", "max_steps": 1})  # 一步即耗尽 → budget pause
+                    json={"role": "_generalist", "max_steps": 1, "armed": True})  # 一步即耗尽 → budget pause
         assert sp.status_code == 201
 
         deadline = time.time() + 10

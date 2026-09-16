@@ -774,6 +774,27 @@ class TaskQueue:
                 )
         return expired
 
+    def fail_interrupted_claims(self, project_id: str,
+                                result_note: str = "后端重启，任务中断",
+                                ) -> list[str]:
+        """重启纪律（§3）：单进程部署下进程重启=所有 worker 线程消失，项目在
+        本进程首次打开时全部 claimed 均为孤儿——统一转 failed(blocked_reason=
+        awaiting_human)，看板出「⏸ 待人工」徽章与「✅ 已解决，放回继续」，由人工
+        决定放回重跑或删除；**不自动回 open 重跑**（半执行任务重跑可能重复产生
+        噪声/动作，安全默认宁严勿松）。逐任务落 task.failed 审计
+        （session_id=原持有者），资源租约行随收尾释放。"""
+        interrupted: list[str] = []
+        for row in self.list_tasks(project_id, status="claimed"):
+            if not row.get("claimed_by"):
+                continue
+            try:
+                self.fail(row["id"], row["claimed_by"], result_note,
+                          blocked_reason="awaiting_human")
+                interrupted.append(row["id"])
+            except ClaimError:
+                continue  # 并发首开时已被另一路径收尾
+        return interrupted
+
     # ---------- 查询 ----------
 
     def list_tasks(self, project_id: str, status: str | None = None) -> list[dict]:

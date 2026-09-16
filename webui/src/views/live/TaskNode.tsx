@@ -42,9 +42,12 @@ export function TaskNode({ data }: NodeProps<TaskFlowNodeType>) {
   const { node: n, paused, onActivate, onDelete } = data
   const color = STATUS_COLOR[n.status]
   const s = planStats(n.plan)
+  // 双击三分支提示（F9，与 TaskFlow activateNode 一致）
   const activateTitle = n.claimed_by && n.session?.status !== "closed"
     ? "双击挂回该认领会话的直播页签"
-    : "双击跳到任务看板定位此任务"
+    : n.status === "done" || n.status === "failed"
+      ? "双击开任务窗：带该任务上下文的新会话（复盘/续研）"
+      : "双击跳到任务看板定位此任务"
 
   return (
     <div

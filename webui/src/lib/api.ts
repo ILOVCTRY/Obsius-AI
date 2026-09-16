@@ -257,7 +257,12 @@ export const api = {
       method: "POST", body: JSON.stringify({ provider, model: model || undefined }),
     }),
   agentWork: (sid: string) =>
-    http<{ job_id: string }>(`/api/agents/${sid}/work`, { method: "POST" }),
+    http<{ job_id?: string; session_id: string; already_running?: boolean }>(
+      `/api/agents/${sid}/work`, { method: "POST" }),
+  // F9 任务窗：双击已收尾任务卡开带上下文的新窗（幂等，已有窗直接返回）
+  spawnTaskWindow: (taskId: string) =>
+    http<{ session_id: string; created: boolean }>(
+      `/api/tasks/${taskId}/spawn-window`, { method: "POST" }),
   orchTick: (pid: string, opts: { allowed_roles?: string[]; max_sessions?: number } = {}) =>
     http<{ job_id: string }>(`/api/projects/${pid}/orchestrator/tick`, {
       method: "POST", body: JSON.stringify(opts),

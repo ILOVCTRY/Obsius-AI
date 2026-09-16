@@ -46,9 +46,11 @@ export type TaskFlowProps = {
   /** LiveRoom 过滤后的相关事件计数（task 前缀 / message.inbox / session 前缀）；变化即去抖重拉 */
   wsBump: number
   onAttachSession: (sid: string) => void
+  /** F9 任务窗：双击已收尾（done/failed）任务卡 → 开带任务上下文的新窗（幂等） */
+  onSpawnTaskWindow: (taskId: string) => void
 }
 
-function Flow({ pid, pausedSids, wsBump, onAttachSession }: TaskFlowProps) {
+function Flow({ pid, pausedSids, wsBump, onAttachSession, onSpawnTaskWindow }: TaskFlowProps) {
   const rf = useReactFlow()
   const updateNodeInternals = useUpdateNodeInternals()
   const [graph, setGraph] = useState<TaskGraph | null>(null)
@@ -151,14 +153,17 @@ function Flow({ pid, pausedSids, wsBump, onAttachSession }: TaskFlowProps) {
     () => graph?.edges.find((e) => e.id === selectedEdgeId) ?? null,
     [graph, selectedEdgeId])
 
-  // 双击：有活会话 → 挂回直播页签；open/会话已关 → 跳任务看板定位（App 监听 goto-tasks）
+  // 双击三分支（F9）：执行中 → 挂回正在跑的会话页签；done/failed → 开带任务上下文
+  // 的新「任务窗」（幂等，服务端已有窗直接返回）；open/会话已关 → 跳任务看板定位
   const activateNode = useCallback((n: TaskGraphNode) => {
     if (n.claimed_by && n.session && n.session.status !== "closed") {
       onAttachSession(n.claimed_by)
+    } else if (n.status === "done" || n.status === "failed") {
+      onSpawnTaskWindow(n.id)
     } else {
       window.dispatchEvent(new CustomEvent("goto-tasks", { detail: { taskId: n.id } }))
     }
-  }, [onAttachSession])
+  }, [onAttachSession, onSpawnTaskWindow])
 
   // 节点删除（四态皆可；claimed 警示，409 子任务错误留在对话框内）
   const [deleteTarget, setDeleteTarget] = useState<TaskGraphNode | null>(null)

@@ -1,9 +1,9 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react"
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { GitFork, X } from "lucide-react"
 
 // A3 任务流视图（第三个 React Flow 图）：懒加载，@xyflow/react 不进直播间主包
 const TaskFlow = lazy(() => import("./live/TaskFlow").then((m) => ({ default: m.TaskFlow })))
-import { api, ApiError, pollJob } from "@/lib/api"
+import { api, pollJob } from "@/lib/api"
 import { eventStyle, eventSummary } from "@/lib/events"
 import { useEvents } from "@/lib/useEvents"
 import { fmtTime, parseTs, utcTitle } from "@/lib/datetime"
@@ -640,12 +640,19 @@ export function LiveRoom({ pid }: { pid: string }) {
       return next
     })
 
+  // F9：跑任务队列=启动 worker（armed=true，之后自动接单；⏸暂停即停）
   const runWork = async (sid: string) => {
     setJobInfo("Worker 执行中…")
     try {
-      const { job_id } = await api.agentWork(sid)
-      const job = await pollJob(job_id, () => {})
+      const r = await api.agentWork(sid)
+      if (r.already_running) {
+        setJobInfo("Worker 已在跑（会话已启动）")
+        refreshSessions()
+        return
+      }
+      const job = await pollJob(r.job_id!, () => {})
       setJobInfo(job.status === "done" ? `Worker 完成（${String(job.result)} 个任务）` : `Worker 出错：${job.error}`)
+      refreshSessions()
     } catch (e) {
       setJobInfo(`Worker 出错：${e}`)
     }
@@ -670,6 +677,19 @@ export function LiveRoom({ pid }: { pid: string }) {
     attachSession(sid)
     setViewMode("live")
   }
+  // F9：任务流双击已收尾任务卡 → 开带任务上下文的「任务窗」（幂等，后端已有窗直接返回）
+  const spawnTaskWindowFromFlow = async (taskId: string) => {
+    try {
+      const r = await api.spawnTaskWindow(taskId)
+      refreshSessions()
+      attachFromFlow(r.session_id)
+      setJobInfo(r.created
+        ? "已开任务窗：该任务的上下文已注入收件箱（复盘本会话=复盘该任务）"
+        : "该任务已有任务窗，已挂回页签")
+    } catch (e) {
+      setJobInfo(`开任务窗失败：${e}`)
+    }
+  }
 
   // A3 任务流入参：暂停会话集（事件流感知，节点 paused 琥珀态）
   const pausedSids = useMemo(
@@ -677,6 +697,14 @@ export function LiveRoom({ pid }: { pid: string }) {
       .filter((s) => s.status !== "closed" && sessionStatus(s.id, events) === "paused")
       .map((s) => s.id)),
     [sessions, events])
+  // F9 状态灯：事件流派生叠加 armed——armed 且事件流判空闲 → 绿点「已启动待命」；
+  // 未 armed 空闲保持灰点（未启动）。armed 数据来自 sessions 轮询（GET sessions 增强）。
+  const sessionsById = useMemo(() => new Map(sessions.map((s) => [s.id, s])), [sessions])
+  const tabStatus = useCallback((sid: string): SessionStatus => {
+    const st = sessionStatus(sid, events)
+    if (st === "idle" && sessionsById.get(sid)?.worker_armed) return "armed"
+    return st
+  }, [events, sessionsById])
   // A3 任务流 WS bump：只数图关心的事件（3s 轮询兜底，组件内去抖重拉）
   const flowBump = useMemo(
     () => events.filter((e) =>
@@ -686,7 +714,13 @@ export function LiveRoom({ pid }: { pid: string }) {
   // 终止入口之一：会话控制组的「结束会话」（另一处是任务看板删除 claimed 任务）
   const closeSession = async (sid: string) => {
     try {
-      await api.closeSession(sid)
+      const r = await api.closeSession(sid)
+      if (r.status === "draining") {
+        // F9 优雅排水：worker 跑完当前任务后自动关闭（不再接新任务）
+        refreshSessions()
+        setJobInfo("会话排水中：跑完当前任务后自动关闭（不再接新任务）")
+        return
+      }
       setDetached((prev) => {
         const next = new Set(prev)
         next.delete(sid)
@@ -696,10 +730,7 @@ export function LiveRoom({ pid }: { pid: string }) {
       refreshSessions()
       setJobInfo("会话已结束")
     } catch (e) {
-      const hint = e instanceof ApiError && e.status === 409
-        ? "会话任务执行中，请先暂停或中断任务再结束会话"
-        : String(e)
-      setJobInfo(`结束会话失败：${hint}`)
+      setJobInfo(`结束会话失败：${e}`)
     }
   }
 
@@ -818,7 +849,7 @@ export function LiveRoom({ pid }: { pid: string }) {
               )}
             >
               {t.sessionId && t.sessionId !== "__orch" && (
-                <StatusDot status={sessionStatus(t.sessionId, events)} />
+                <StatusDot status={tabStatus(t.sessionId)} />
               )}
               {t.label}
               {t.sessionId && t.sessionId !== "__orch" && (unreadBySid.get(t.sessionId) ?? 0) > 0 && (
@@ -864,7 +895,7 @@ export function LiveRoom({ pid }: { pid: string }) {
                     onClick={() => attachSession(s.id)}
                     className="flex w-full items-center gap-1.5 rounded px-2 py-1 text-left text-xs hover:bg-accent"
                   >
-                    <StatusDot status={sessionStatus(s.id, events)} />
+                    <StatusDot status={tabStatus(s.id)} />
                     <span className="min-w-0 flex-1 truncate">{s.name || s.role}</span>
                     {(unreadBySid.get(s.id) ?? 0) > 0 && (
                       <span className="inline-flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-[--status-error] px-1 text-[9px] font-bold leading-none text-white">
@@ -1071,7 +1102,8 @@ export function LiveRoom({ pid }: { pid: string }) {
             </>
           ) : (
             <>
-              <Button size="sm" variant="outline" onClick={() => runWork(activeSession.id)}>
+              <Button size="sm" variant="outline" onClick={() => runWork(activeSession.id)}
+                      title="F9 启动 worker：自动接任务队列（未启动的窗不自动接单）；⏸暂停即停">
                 跑任务队列
               </Button>
               <Button size="sm" variant="outline" onClick={() => controlSession("pause", activeSession.id)}>
@@ -1088,9 +1120,9 @@ export function LiveRoom({ pid }: { pid: string }) {
         {activeSession && (
           <Button
             size="sm" variant="outline"
-            title="真正结束会话（关页签 × 只是收起，任务继续）；执行中需先暂停或中断"
+            title="F9 优雅关窗：执行中不中断，跑完当前任务后自动关闭（不再接新任务）；空闲立即关"
             onClick={() => {
-              if (window.confirm(`结束会话「${activeSession.name || activeSession.role}」？后台任务必须先暂停或中断。`))
+              if (window.confirm(`结束会话「${activeSession.name || activeSession.role}」？执行中的任务会完整跑完后自动关闭（不再接新任务）。`))
                 void closeSession(activeSession.id)
             }}
           >
@@ -1380,6 +1412,7 @@ export function LiveRoom({ pid }: { pid: string }) {
               pausedSids={pausedSids}
               wsBump={flowBump}
               onAttachSession={attachFromFlow}
+              onSpawnTaskWindow={spawnTaskWindowFromFlow}
             />
           </Suspense>
         </div>

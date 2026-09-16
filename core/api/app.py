@@ -644,6 +644,9 @@ class AgentIn(BaseModel):
     model: str | None = None  # per-session 覆盖 executor 模型（DESIGN.md §8）；None=供应商默认
     provider: str | None = None  # 供应商名（config/providers.json）；None=全局默认供应商
     max_steps: int = 200  # E8：默认步数预算（角色 yaml 取 min 可更严；request_steps 可自助 +200）
+    # worker 启动制（F9）：人手开窗默认不接任务（armed=False，点「跑任务队列」启动）；
+    # 编排/审批开窗走 armed=True 路径。armed=True 且 L1/L2 未暂停才触发触发点 C。
+    armed: bool = False
 
     @field_validator("max_steps")
     @classmethod
@@ -864,8 +867,34 @@ def create_app(
                 proj = store.open_project(pid)
             except FileNotFoundError:
                 raise HTTPException(404, f"项目不存在: {pid}")
+            _sweep_restarted_project(proj)
             app.state.projects[pid] = proj
         return proj
+
+    def _sweep_restarted_project(proj: Project) -> None:
+        """重启纪律（§3）：单进程部署下进程重启=内存态清零，项目在本进程首次
+        打开时归位陈旧状态——① 孤儿 claimed 任务统一 fail(awaiting_human
+        「后端重启，任务中断」，看板出「待人工/放回继续」，不自动重跑)；
+        ② 排水未竟（close_pending）的会话补关窗（关窗请求是人下达的，照常执行）；
+        ③ 陈旧 running/blocked 会话行按 meta 归位：有落盘快照回 paused 可续跑、
+        否则回 idle；paused 是合法持久态不动。"""
+        bb = proj.bb
+        TaskQueue(bb).fail_interrupted_claims(proj.id)
+        for row in bb.list_sessions(proj.id):
+            if row.get("status") == "closed":
+                continue
+            meta = json.loads(row["meta"]) if isinstance(row["meta"], str) \
+                else (row["meta"] or {})
+            try:
+                if meta.get("close_pending"):
+                    bb.close_session(row["id"])
+                elif row.get("status") in {"running", "blocked"}:
+                    if meta.get("resume_snapshot"):
+                        bb.set_session_status(row["id"], "paused")
+                    else:
+                        bb.set_session_status(row["id"], "idle")
+            except ValueError:
+                continue  # 并发首开时已被另一路径归位
 
     def _tq(pid: str) -> TaskQueue:
         return TaskQueue(_project(pid).bb)
@@ -1177,7 +1206,7 @@ def create_app(
     def _ensure_agent(pid: str, sid: str) -> AgentSession:
         """取在册会话；内存态缺失（服务重启/历史孤儿窗）时从黑板 sessions 行
         rehydrate 一个同角色 AgentSession 并注册。claimed 任务无快照不续跑，
-        靠 30min 租约过期回 open（§3 重启纪律）。"""
+        已在项目首开时统一 fail(awaiting_human)（§3 重启纪律）。"""
         agent = app.state.agents.get(sid)
         if agent is not None:
             return agent
@@ -1192,7 +1221,7 @@ def create_app(
             row["role"], existing_session=row)
         # 重启后无 worker 线程：running/paused 都是无消费者的陈旧行状态。E8：落盘
         # 快照在手（_resume_state 已载回且 paused=True）→ 保持 paused 可恢复；
-        # 无快照回 idle（claimed 任务靠 30min 租约过期回 open，§3 重启纪律）。
+        # 无快照回 idle（claimed 任务已在项目首开时统一 fail，§3 重启纪律）。
         if row.get("status") in {"running", "paused", "blocked"}:
             proj.bb.set_session_status(
                 sid, "paused" if agent._resume_state is not None else "idle")
@@ -1426,7 +1455,14 @@ def create_app(
 
     @app.get("/api/projects/{pid}/sessions")
     def list_sessions(pid: str):
-        return _project(pid).bb.list_sessions(pid)
+        # F9：补 worker 状态灯数据——armed（meta）+ worker_running（内存 jobs）
+        rows = _project(pid).bb.list_sessions(pid)
+        for row in rows:
+            meta = row.get("meta")
+            meta = json.loads(meta) if isinstance(meta, str) else (meta or {})
+            row["worker_armed"] = bool(meta.get("worker_armed"))
+            row["worker_running"] = _session_job_running(row["id"])
+        return rows
 
     @app.get("/api/projects/{pid}/funcs")
     def list_funcs(pid: str, binary_sha256: str | None = None):
@@ -1876,6 +1912,7 @@ def create_app(
         except FileNotFoundError as e:
             raise RuntimeError(str(e)) from e
         sid = agent.session["id"]
+        bb.set_session_meta(sid, {"worker_armed": True})  # F9：编排开窗默认已启动
         bb.append_event(
             pid, "session.spawned",
             {"role": role, "session_id": sid, "approval_id": approval_id},
@@ -2082,17 +2119,95 @@ def create_app(
                 return proj["id"]
         raise HTTPException(404, f"任务不存在: {task_id}")
 
+    @app.post("/api/tasks/{task_id}/spawn-window")
+    def spawn_task_window(task_id: str):
+        """F9 任务窗：双击已收尾（done/failed）任务卡开新窗复盘/续研。
+        不自动接任务（armed=False）；上下文经 human_note 注入（worker 首个
+        控制点 drain）。幂等：同任务已有非 closed 任务窗则直接返回该会话。"""
+        pid = _pid_of_task(task_id)
+        proj = _project(pid)
+        bb = proj.bb
+        task = TaskQueue(bb).get_task(task_id)
+        if task is None:
+            raise HTTPException(404, f"任务不存在: {task_id}")
+        if task["status"] not in {"done", "failed"}:
+            raise HTTPException(
+                422, f"任务状态为 {task['status']}：执行中的任务请挂回其会话页签，"
+                     "未认领的任务请到任务看板操作")
+        # 幂等：已有该任务的任务窗（非 closed）→ 直接挂回
+        for row in bb.list_sessions(pid):
+            if row.get("status") == "closed":
+                continue
+            meta = row.get("meta")
+            meta = json.loads(meta) if isinstance(meta, str) else (meta or {})
+            if meta.get("spawn_task_id") == task_id:
+                return {"session_id": row["id"], "created": False}
+        # sessions_cap 与人手开窗同效
+        auto = autonomy.autonomy_of(bb.get_project(pid)["config"], track=proj.track)
+        active = autonomy.count_active_sessions(bb, pid)
+        if active >= auto["sessions_cap"]:
+            raise HTTPException(
+                409, f"活跃会话已达项目上限 sessions_cap={auto['sessions_cap']}"
+                     f"（当前 {active} 个非 closed 会话）；请先关窗或在直播间调高上限")
+        exec_llm, plan_llm = _llms()
+        # 角色沿用原认领者（读不到/会话已关 → 通用角色）
+        role = "_generalist"
+        if task.get("claimed_by"):
+            origin_sess = bb.get_session(task["claimed_by"])
+            if origin_sess and origin_sess.get("role"):
+                role = origin_sess["role"]
+        factory = _registered_session_factory(pid, exec_llm, plan_llm)
+        try:
+            agent = factory(role, session_name=f"任务窗·{task['objective'][:12]}")
+        except FileNotFoundError as e:
+            raise HTTPException(422, str(e))
+        sid = agent.session["id"]
+        bb.set_session_meta(sid, {"spawn_task_id": task_id, "worker_armed": False})
+        # 上下文注入：E8 human_note 通道，worker 起跑后首个控制点 drain
+        lines = [f"📋 任务上下文（双击任务流卡片开窗，task={task_id}）",
+                 f"目标：{task['objective'][:500]}",
+                 f"状态：{task['status']}"]
+        if task.get("result_note"):
+            lines.append(f"结果注记：{task['result_note'][:500]}")
+        if task.get("blocked_reason"):
+            lines.append(f"受阻原因：{task['blocked_reason']}")
+        plan_steps = task.get("plan") or []
+        if plan_steps:
+            lines.append("计划步：" + "；".join(
+                f"{s.get('id')} {s.get('title')}({s.get('status')})"
+                for s in plan_steps[:10]))
+        refs = task.get("context_refs") or []
+        if refs:
+            by_id = {f["id"]: f for f in bb.list_findings(pid)}
+            hits = [by_id[r] for r in refs if r in by_id][:10]
+            if hits:
+                lines.append("相关发现：")
+                for f in hits:
+                    lines.append(
+                        f"- {f.get('vuln_class', '?')} [{f.get('severity', '?')}] "
+                        f"{(f.get('title') or '')[:120]} ({f['id']})")
+        text = "\n".join(lines)
+        try:
+            bb.post_human_note(pid, sid, text)
+        except ValueError:  # noqa: BLE001 —— 刚创建的会话不会不存在；防御性吞掉
+            pass
+        bb.append_event(
+            pid, "session.spawned",
+            {"role": role, "session_id": sid, "origin": "task-window",
+             "task_id": task_id},
+            session_id=sid, author="system")
+        return {"session_id": sid, "created": True}
+
     def _session_job_running(sid: str) -> bool:
         return any(j["status"] == "running" and j["kind"] == "agent-work"
                    and j["meta"].get("session_id") == sid
                    for j in app.state.jobs.all_jobs())
 
-    @app.post("/api/sessions/{sid}/close")
-    def close_session(sid: str):
-        """关窗（§6.4 人类插手通道）：status='closed' + session.closed 事件；
-        编排不再复用该窗口（从 app.state.agents 摘除），黑板数据保留。"""
-        if _session_job_running(sid):
-            raise HTTPException(409, "会话正在执行任务，等收尾后再关")
+    def _do_close_session(sid: str) -> dict:
+        """关窗收尾（§6.4 人类插手通道；F9 从 close_session 抽出供排水复用）：
+        status='closed' + session.closed 事件；编排不再复用该窗口（从
+        app.state.agents 摘除），黑板数据保留。调用方须先确认无在跑 worker
+        （排水路径由 worker 在任务收尾后自调，天然满足）。"""
         agent = app.state.agents.get(sid)
         if agent is not None and agent._resume_state:  # 暂停快照任务仍 claimed → 先收尾防占坑
             tid = agent._resume_state.get("task_id")
@@ -2113,6 +2228,21 @@ def create_app(
         app.state.agents.pop(sid, None)
         return {"session_id": sid, "status": "closed"}
 
+    @app.post("/api/sessions/{sid}/close")
+    def close_session(sid: str):
+        """关窗（F9 优雅排水）：worker 在跑不再 409——置 close_pending 排水标记，
+        worker 跑完当前任务后自关（不接新任务）；空闲时立即关。"""
+        pid = _pid_of_session(sid)
+        if _session_job_running(sid):
+            bb = _project(pid).bb
+            bb.set_session_meta(sid, {"close_pending": True, "worker_armed": False})
+            bb.append_event(
+                pid, "session.work_state",
+                {"session_id": sid, "armed": False, "close_pending": True},
+                session_id=sid, author="human")
+            return {"session_id": sid, "status": "draining"}
+        return _do_close_session(sid)
+
     # ---------- 会话控制（DESIGN.md §3：暂停/恢复/中断） ----------
 
     @app.post("/api/sessions/{sid}/pause")
@@ -2124,6 +2254,8 @@ def create_app(
         agent.request_pause()
         if not _session_job_running(sid):
             agent._enter_paused()  # 没有线程会消费检查点，直接落 paused
+        # F9：暂停 = 解除武装（armed 是自动接任务的常驻开关；显式「跑」才重新点亮）
+        _project(_pid_of_session(sid)).bb.set_session_meta(sid, {"worker_armed": False})
         return {"session_id": sid, "status": "paused"}
 
     @app.post("/api/sessions/{sid}/resume")
@@ -2155,6 +2287,8 @@ def create_app(
                 {"role": "user", "content": f"💬 人类引导：{body.note.strip()}"})
         bb.append_event(pid, "session.resumed", {"session_id": sid},
                         session_id=sid, author="human")
+        # F9：恢复是显式「跑」动作 → 重新点亮武装（有快照继续跑，无快照回到待命可接单）
+        bb.set_session_meta(sid, {"worker_armed": True, "close_pending": None})
         if st is not None:
             bb.set_session_status(sid, "running")
             _submit_worker(pid, agent, origin="human-resume")
@@ -2356,17 +2490,19 @@ def create_app(
                             max_steps=body.max_steps)
         except FileNotFoundError as e:
             raise HTTPException(422, str(e))
-        # 触发点 C（批 5）：L1/L2 未暂停时人手开窗即自动起一个 worker（空队列零成本退）；
-        # L0 不自起，人显式点「跑队列」；paused 时只开窗不消费。
+        # 触发点 C（批 5；F9 改 armed 闸）：L1/L2 未暂停且显式 armed 时开窗即自动起
+        # 一个 worker（空队列零成本退）；人手开窗默认不接任务，点「跑任务队列」启动；
+        # L0 不自起；paused 时只开窗不消费。
         extra: dict[str, Any] = {}
-        if auto["level"] in {"L1", "L2"} and not auto["paused"]:
+        proj.bb.set_session_meta(agent.session["id"], {"worker_armed": body.armed})
+        if body.armed and auto["level"] in {"L1", "L2"} and not auto["paused"]:
             extra["job_id"] = _submit_worker(
                 pid, agent, auto=True, origin="human-spawn")  # 触发点 C
         # 预算对人手动作仅警告不拦截（硬闸只拦编排自主动作，§6.8）
         warning = autonomy.human_warning(proj.bb, pid)
         if warning:
             extra["warning"] = warning
-        return {**agent.session, **extra}
+        return {**agent.session, **extra, "worker_armed": body.armed}
 
     @app.get("/api/agents")
     def list_agents():
@@ -2374,10 +2510,16 @@ def create_app(
 
     @app.post("/api/agents/{sid}/work")
     def run_agent_work(sid: str):
+        # F9 启动口：显式点亮武装（清排水标记）+ 起一个 worker；已在跑则去重不重复起
+        pid = _pid_of_session(sid)
+        bb = _project(pid).bb
+        bb.set_session_meta(sid, {"worker_armed": True, "close_pending": None})
+        if _session_job_running(sid):
+            return {"session_id": sid, "already_running": True}
         # 重启后/历史孤儿窗：内存未命中时按黑板 sessions 行 rehydrate 再开跑
-        agent = _ensure_agent(_pid_of_session(sid), sid)
-        job_id = _submit_worker(agent.project_id, agent, origin="human-work")
-        return {"job_id": job_id}
+        agent = _ensure_agent(pid, sid)
+        job_id = _submit_worker(pid, agent, origin="human-work")
+        return {"job_id": job_id, "session_id": sid}
 
     def _worker_loop(agent: AgentSession, *, manual: bool = False,
                      tail: dict | None = None) -> Callable[[], int]:
@@ -2396,6 +2538,17 @@ def create_app(
             done = 0
             stopped_by_pause = False
             while True:
+                # F9 优雅关窗：排水标记命中（close_pending）→ 不再认领，自关后退出。
+                # 检查点在任务收尾之后、下一轮认领之前——当前任务完整跑完。
+                try:
+                    meta_raw = (agent.bb.get_session(agent.session["id"])
+                                or {}).get("meta")
+                    meta = json.loads(meta_raw) if isinstance(meta_raw, str) else (meta_raw or {})
+                    if meta.get("close_pending"):
+                        _do_close_session(agent.session["id"])
+                        break
+                except Exception:  # noqa: BLE001 —— 读 meta 失败不该杀死 worker
+                    pass
                 # paused 只约束自动消费（C/kick/批准即跑）；人显式「跑队列」/恢复
                 # 是人工 override，暂停下照常认领（DESIGN §6.8 行为表：人手动作照常）
                 if not manual and _paused():
@@ -2450,6 +2603,7 @@ def create_app(
                 pid, "session.resumed", {"session_id": sid, "by": "l2-auto"},
                 session_id=sid, author="l2-auto")
             agent.bb.set_session_status(sid, "running")
+            agent.bb.set_session_meta(sid, {"worker_armed": True})  # F9：自动续跑=已启动
             _submit_worker(pid, agent, auto=True, origin="l2-auto-resume")
         except Exception:  # noqa: BLE001 —— 自动续跑失败保持暂停，等人工
             log.exception("C4 L2 自动续跑失败 pid=%s", pid)
@@ -2533,13 +2687,19 @@ def create_app(
 
     def _kick_workers(pid: str) -> list[str]:
         """给每个没有在跑 worker 的非关闭/非暂停会话提交一个 agent-work job。
-        空队列 worker 只花一次 claim SQL 即零成本退出。返回新提交的 sid 列表。"""
+        空队列 worker 只花一次 claim SQL 即零成本退出。返回新提交的 sid 列表。
+        F9 armed 闸：未启动（meta.worker_armed 非 true）的窗不自动接任务——
+        所有自动唤醒（D/E/B/tick）统一在此被拦。"""
         proj = _project(pid)
         submitted: list[str] = []
         for row in proj.bb.list_sessions(pid):
             sid = row["id"]
             if row.get("status") in {"closed", "paused"} or _session_job_running(sid):
                 continue
+            meta = row.get("meta")
+            meta = json.loads(meta) if isinstance(meta, str) else (meta or {})
+            if not meta.get("worker_armed"):
+                continue  # F9：未启动，不自动接任务
             try:
                 agent = _ensure_agent(pid, sid)  # 重启后 rehydrate；陈旧 running→idle
             except HTTPException:

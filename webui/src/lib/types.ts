@@ -348,6 +348,9 @@ export interface Session {
   finished_at?: string | null
   /** v3：会话收件箱未读数（撤回传播等系统私信；与审批收件箱分设） */
   unread?: number
+  /** F9 worker 启动制：armed=已启动自动接任务；running=worker 在跑 */
+  worker_armed?: boolean
+  worker_running?: boolean
 }
 
 /** 会话收件箱私信（DESIGN §6.7 的 1.5/1.6；本切片只有系统投递的 basis_stale） */
