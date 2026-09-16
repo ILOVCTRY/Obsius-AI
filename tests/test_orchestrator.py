@@ -905,3 +905,22 @@ def test_assets_view_uncovered_and_by_type(env):
     ids = {u["id"] for u in av["uncovered"]}
     assert a_unc in ids and a_cov not in ids
     assert av["uncovered_total"] >= 2  # 10.0.0.8 也未覆盖
+
+
+def test_mission_view_in_stats_and_prompt(env):
+    """C2 作战模式：mission/ROE 进 _stats 与系统提示（编排器对照判据评估收敛）。"""
+    bb, project = env
+    bb.update_project_config(project["id"], {
+        "mode": "redteam",
+        "mission": {"text": "拿到域控", "criteria": "□ 拿到域管哈希\n□ 截图留证"},
+        "redteam_roe": {"targets": "*.corp.local", "window": "w",
+                          "exclusions": "工控段", "approver": "owner"},
+    })
+    llm = ScriptedLLM([{"tool_use": [ScriptedLLM.tool_call("d1", "done", {})]}])
+    orch = make_orch(env, llm, track="assessment")
+    stats = orch._stats()
+    assert stats["mission"]["mode"] == "redteam"
+    assert stats["mission"]["roe"]["targets"] == "*.corp.local"
+    orch.tick()
+    system = llm.calls[0]["system"]
+    assert "作战模式：redteam" in system and "拿到域控" in system and "□ 拿到域管哈希" in system

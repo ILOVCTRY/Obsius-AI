@@ -2703,3 +2703,38 @@ def test_publish_parent_id_and_depth_422(client):
     r = client.post(f"/api/projects/{pid}/tasks",
                     json={"objective": "孙任务", "task_type": "generic", "parent_id": child})
     assert r.status_code == 201
+
+
+def test_mode_switch_roe_and_mission(client):
+    """C2 作战模式：无 ROE 切 redteam 422；带 ROE 200+mode.changed；usage 出口带 mode。"""
+    pid = _make_project(client)
+    r = client.patch(f"/api/projects/{pid}/config",
+                     json={"config": {"mode": "redteam"}})
+    assert r.status_code == 422 and "ROE" in r.json()["detail"]
+    r = client.patch(f"/api/projects/{pid}/config", json={"config": {
+        "mode": "redteam",
+        "mission": {"text": "打穿 mission", "criteria": "□ 判据一\n□ 判据二"},
+        "redteam_roe": {"targets": "*.t.com", "window": "2026-09-16~09-18",
+                         "exclusions": "无", "approver": "owner"}}})
+    assert r.status_code == 200
+    bb = client.app.state.projects[pid].bb
+    ev = [e for e in bb.recent_events(pid) if e["kind"] == "mode.changed"][-1]
+    assert ev["payload"]["new"] == "redteam" and ev["payload"]["roe"]["approver"] == "owner"
+    detail = client.get(f"/api/projects/{pid}").json()
+    assert detail["usage"]["mode"] == "redteam"
+    assert detail["usage"]["mission"]["text"] == "打穿 mission"
+
+
+def test_mode_prompt_fixed_at_session_creation(client):
+    """C2：mode 在会话创建时固化——redteam 项目的会话系统提示含红队语义与 ROE。"""
+    from core.agent import AgentConfig
+    pid = _make_project(client)
+    client.patch(f"/api/projects/{pid}/config", json={"config": {
+        "mode": "redteam",
+        "redteam_roe": {"targets": "*.t.com", "window": "w", "exclusions": "e",
+                          "approver": "a"}}})
+    sp = client.post(f"/api/projects/{pid}/agents", json={"role": "_generalist"})
+    assert sp.status_code == 201
+    sid = sp.json()["id"]
+    agent = client.app.state.agents[sid]
+    assert "红队行动" in agent.capability_prompt and "*.t.com" in agent.capability_prompt

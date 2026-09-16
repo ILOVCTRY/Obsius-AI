@@ -1116,13 +1116,33 @@ def create_app(
 
             gateway = ExecutionGateway(bb=proj.bb)
             r = load_role(app.state.packs_root, proj.track, role)
+            # C2 作战模式（§6.9）：mode 在会话创建时读取固化（切换只影响新窗），
+            # redteam 注入红队语义 + ROE 四要素摘要；pentest 注入影响证明级上限。
+            cfg_mode = (proj.bb.get_project(pid)["config"] or {}).get("mode", "pentest")
+            mode_prompt = ""
+            if cfg_mode == "redteam":
+                roe = ((proj.bb.get_project(pid)["config"] or {}).get("redteam_roe") or {})
+                mode_prompt = (
+                    "## 作战模式：红队行动（mode=redteam）\n"
+                    "本会话在红队 ROE 授权范围内行动：允许主动利用未认领目标（§6.3 第 3 级"
+                    "在 ROE 范围内放开），以打穿 mission 判据为目标；仍禁：超出 ROE 目标、"
+                    "破坏性毁伤、安全红线（审批/审计照常）。\n"
+                    f"- ROE 授权目标: {roe.get('targets', '-')}\n"
+                    f"- 时间窗口: {roe.get('window', '-')}\n"
+                    f"- 禁止事项: {roe.get('exclusions', '-')}\n"
+                    f"- 授权人: {roe.get('approver', '-')}\n")
+            else:
+                mode_prompt = (
+                    "## 作战模式：渗透测试（mode=pentest）\n"
+                    "验证上限=影响证明级（如 SQL 注入读敏感表/RCE 一次性回显）；"
+                    "禁驻留/持久化/横向/提权推进；主动利用未认领目标默认禁止（发现即上报）。")
             agent = AgentSession(
                 project_id=pid, bb=proj.bb, gateway=gateway,
                 llm=exec_llm, planner_llm=plan_llm,
                 packs_root=app.state.packs_root,
                 track=proj.track, capabilities=proj.capabilities, role=role,
                 session_name=session_name or r.get("name") or role,
-                capability_prompt=inventory.to_prompt(),
+                capability_prompt=(inventory.to_prompt() + "\n" + mode_prompt).strip(),
                 # 角色 yaml 的 default_noise/tools/max_runtime/max_steps 在
                 # AgentSession 内消费（只可能更严）；这里只给全局/动态部分
                 config=AgentConfig(max_steps=max_steps or 200,

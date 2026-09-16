@@ -172,6 +172,34 @@ def human_warning(bb, project_id: str) -> str | None:
     return None
 
 
+MODES = ("pentest", "redteam")
+ROE_KEYS = ("targets", "window", "exclusions", "approver")
+
+
+def normalize_mode_config(config: dict) -> dict:
+    """C2 作战模式（§6.9）：mode/mission/redteam_roe 归一化。
+    mode 白名单（缺省 pentest）；切 redteam 必须携带 ROE 四要素
+    （授权目标清单/时间窗口/禁止事项/授权人，全非空否则 ValueError→422）。"""
+    mode = (config.get("mode") or "pentest")
+    if mode not in MODES:
+        raise ValueError(f"非法 mode: {mode!r}（白名单 pentest/redteam）")
+    out: dict = {"mode": mode}
+    mission = config.get("mission")
+    if isinstance(mission, dict) and (mission.get("text") or mission.get("criteria")):
+        out["mission"] = {"text": str(mission.get("text") or ""),
+                          "criteria": str(mission.get("criteria") or "")}
+    roe = config.get("redteam_roe")
+    if isinstance(roe, dict):
+        missing = [k for k in ROE_KEYS if not str(roe.get(k) or "").strip()]
+        if missing:
+            raise ValueError(f"redteam ROE 四要素缺失: {missing}")
+        out["redteam_roe"] = {k: str(roe[k]).strip() for k in ROE_KEYS}
+    elif mode == "redteam":
+        raise ValueError("切换 redteam 必须携带 ROE 四要素"
+                         "（targets/window/exclusions/approver）")
+    return out
+
+
 def usage_view(bb, project_id: str) -> dict:
     """GET 项目用量视图：autonomy 全字段 + 实时计数/百分比。"""
     proj = bb.get_project(project_id)
@@ -180,8 +208,12 @@ def usage_view(bb, project_id: str) -> dict:
     used = total_tokens(st)
     tb, tkb = auto["token_budget"], auto["task_budget"]
     published = int(st.get("tasks_published", 0))
+    mode_view = normalize_mode_config(proj["config"] or {})
     return {
         **auto,
+        "mode": mode_view["mode"],
+        "mission": mode_view.get("mission"),
+        "redteam_roe": mode_view.get("redteam_roe"),
         "active_sessions": count_active_sessions(bb, project_id),
         "llm_calls": int(st.get("llm_calls", 0)),
         "tokens": {"used": used, "budget": tb,

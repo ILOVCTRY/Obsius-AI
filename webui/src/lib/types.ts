@@ -32,6 +32,9 @@ export interface ChainState {
 /** GET /api/projects/{pid} 的 usage：autonomy 全字段 + 实时计数 */
 export interface ProjectUsage extends Autonomy {
   active_sessions: number
+  mode?: "pentest" | "redteam"  // C2 作战模式（§6.9）
+  mission?: { text: string; criteria: string }
+  redteam_roe?: { targets: string; window: string; exclusions: string; approver: string }
   llm_calls: number
   tokens: { used: number; budget: number | null; pct: number | null }
   tasks: { published: number; budget: number | null; pct: number | null }

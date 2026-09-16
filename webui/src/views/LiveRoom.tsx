@@ -104,6 +104,97 @@ function BudgetPopover({ usage, onClose, onSave }: {
   )
 }
 
+/** C2 作战模式编辑弹层（§6.9）：mode 切换（redteam ROE 四要素必填）+ mission 编辑 */
+function ModePopover({ usage, onClose, onSave }: {
+  usage: ProjectUsage
+  onClose: () => void
+  onSave: (patch: Record<string, unknown>) => Promise<void>
+}) {
+  const [mode, setMode] = useState(usage.mode ?? "pentest")
+  const [text, setText] = useState(usage.mission?.text ?? "")
+  const [criteria, setCriteria] = useState(usage.mission?.criteria ?? "")
+  const [targets, setTargets] = useState(usage.redteam_roe?.targets ?? "")
+  const [window_, setWindow_] = useState(usage.redteam_roe?.window ?? "")
+  const [exclusions, setExclusions] = useState(usage.redteam_roe?.exclusions ?? "")
+  const [approver, setApprover] = useState(usage.redteam_roe?.approver ?? "")
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState("")
+
+  const save = async () => {
+    if (mode === "redteam" &&
+        (!targets.trim() || !window_.trim() || !exclusions.trim() || !approver.trim())) {
+      setErr("切换红队必须填写 ROE 四要素（授权目标/时间窗口/禁止事项/授权人）")
+      return
+    }
+    setSaving(true)
+    setErr("")
+    try {
+      const patch: Record<string, unknown> = { mode }
+      if (text.trim() || criteria.trim()) {
+        patch.mission = { text: text.trim(), criteria: criteria.trim() }
+      }
+      if (mode === "redteam") {
+        patch.redteam_roe = {
+          targets: targets.trim(), window: window_.trim(),
+          exclusions: exclusions.trim(), approver: approver.trim(),
+        }
+      }
+      await onSave(patch)
+      onClose()
+    } catch (e) {
+      setErr(String(e))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const field = "w-full rounded border bg-background p-1.5 text-[11px]"
+  return (
+    <div className="absolute right-0 top-9 z-20 w-72 rounded-lg border bg-popover p-3 text-xs shadow-md">
+      <p className="mb-2 text-muted-foreground">作战模式与 mission（§6.9；安全红线不放松）</p>
+      <div className="mb-2 flex gap-1">
+        <button
+          className={cn("flex-1 rounded border px-2 py-1",
+            mode === "pentest" ? "border-primary/60 bg-primary/10 text-primary" : "text-muted-foreground")}
+          onClick={() => setMode("pentest")}
+        >
+          渗透测试
+        </button>
+        <button
+          className={cn("flex-1 rounded border px-2 py-1",
+            mode === "redteam" ? "border-[--status-error]/60 bg-[--status-error]/10 text-[--status-error]" : "text-muted-foreground")}
+          onClick={() => setMode("redteam")}
+        >
+          红队行动
+        </button>
+      </div>
+      {mode === "redteam" && (
+        <div className="mb-2 space-y-1 rounded border border-[--status-approval]/40 p-2">
+          <p className="text-[10px] text-[--status-approval]">ROE 四要素（必填，留档审计）</p>
+          <input className={field} value={targets} onChange={(e) => setTargets(e.target.value)}
+                 placeholder="① 授权目标清单" />
+          <input className={field} value={window_} onChange={(e) => setWindow_(e.target.value)}
+                 placeholder="② 时间窗口" />
+          <input className={field} value={exclusions} onChange={(e) => setExclusions(e.target.value)}
+                 placeholder="③ 禁止事项" />
+          <input className={field} value={approver} onChange={(e) => setApprover(e.target.value)}
+                 placeholder="④ 授权人" />
+        </div>
+      )}
+      <label className="mb-1 block text-muted-foreground">mission 目标（可选）</label>
+      <textarea className={field} rows={2} value={text} onChange={(e) => setText(e.target.value)}
+                placeholder="战役目标一句话" />
+      <label className="mb-1 mt-1 block text-muted-foreground">判据清单（每行一条）</label>
+      <textarea className={field} rows={3} value={criteria} onChange={(e) => setCriteria(e.target.value)}
+                placeholder="□ 判据一&#10;□ 判据二" />
+      {err && <p className="mt-2 text-[--status-error]">{err}</p>}
+      <Button size="sm" className="mt-2 w-full" disabled={saving} onClick={save}>
+        {saving ? "保存中…" : "保存"}
+      </Button>
+    </div>
+  )
+}
+
 const FILTERS = [
   { key: "all", label: "全部", match: () => true },
   { key: "thinking", label: "思考", match: (k: string) => k === "llm.thinking" },
@@ -166,6 +257,8 @@ export function LiveRoom({ pid }: { pid: string }) {
   const [adoptingId, setAdoptingId] = useState<number | null>(null)
   // 项目自主配置/用量（§6.8，5s 轮询；闸门服务端实时重读，改配置即时生效）
   const [usage, setUsage] = useState<ProjectUsage | null>(null)
+  // C2 作战模式弹层（§6.9）
+  const [modeOpen, setModeOpen] = useState(false)
   // E12：中断确认（防误触）——确认后任务标记失败，落盘快照保留，看板 failed 卡可「带现场续跑」
   const [abortTarget, setAbortTarget] = useState<string | null>(null)
   const [budgetOpen, setBudgetOpen] = useState(false)
@@ -894,6 +987,25 @@ export function LiveRoom({ pid }: { pid: string }) {
                 title="planner LLM 复盘本项目任务，把文档错漏沉淀为变更提案（人类审批后才落盘）">
           {reviewing ? "复盘中…" : "复盘沉淀"}
         </Button>
+        <div className="relative">
+          <Button size="sm" variant="outline"
+                  className={cn(usage?.mode === "redteam" && "text-[--status-error]")}
+                  title="作战模式与 mission（§6.9）：pentest/redteam 切换（redteam 需 ROE 四要素）"
+                  onClick={() => setModeOpen((o) => !o)}>
+            🎯 {usage?.mode === "redteam" ? "红队" : usage?.mode === "pentest" ? "渗透" : (usage?.mode ?? "渗透")}
+          </Button>
+          {modeOpen && usage && (
+            <ModePopover
+              usage={usage}
+              onClose={() => setModeOpen(false)}
+              onSave={async (patch) => {
+                await api.patchProjectConfig(pid, patch)
+                void refreshUsage()
+                setJobInfo("作战模式已更新（mode.changed 审计已落；在跑会话维持创建时固化语义）")
+              }}
+            />
+          )}
+        </div>
       </div>
 
       {/* 批 5 §6.8：重启=急停。DB 链活但本进程无标记 → 提示手动编排恢复 */}

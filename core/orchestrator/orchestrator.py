@@ -32,7 +32,7 @@ ORCH_SYSTEM_PROMPT = """你是项目主代理（Orchestrator），职责是监�
 ## 本轮态势
 {overview}
 {role_catalog}
-{autonomy_notice}
+{autonomy_notice}{mission_section}
 ## 可用工具
 - publish_task：发布任务。task_type 必须是场景轨 task_types.yaml 已注册类型（未注册会被拒收——拼错的类型会让任务饿死），决定哪些角色能认领（先看角色目录与已有会话）；noise_budget 缺省取该类型注册表默认值；会产生噪声的动作（主动探测/执行样本）必须给 conflict_keys；任务若以某发现为依据（如「验证 find-x」），把该发现 id 填 refs——该发现事后被推翻时，执行者会立刻收到强制自评通知。
 - spawn_session：开一个新 AI 会话（受角色白名单 {allowed_roles} 与上限 {max_sessions} 个约束）；按角色目录里的职责对号入座。
@@ -51,7 +51,9 @@ ORCH_SYSTEM_PROMPT = """你是项目主代理（Orchestrator），职责是监�
 7. 任务拆解与分批（C1）：大目标（如全资产侦察）拆解为自足子任务——先发布父任务拿到
    task_id，再发布子任务并把 parent_id 指向它（**深度 1 层**：子任务不可再拆）；每轮
    发布 ≤{max_publish_per_tick} 个（分批 3-5 个/轮，按建议角色与优先级）；队列空退后
-   下一轮 tick 续批（态势里有 uncovered 资产清单可对照发批）；资产全覆盖前不要 done。
+   下一轮 tick 续批（态势里有 uncovered 资产清单可对照发批）。
+8. 收敛判据（C2 作战模式）：mission 判据全部达成、或资产穷尽（uncovered=0 且无可推进
+   发现）才 done——不要因为单轮零产出就提前收摊；对照上方作战模式段的判据清单逐条评估。
 """
 
 
@@ -295,6 +297,27 @@ class Orchestrator:
 
     # ---------- 态势收集 ----------
 
+    def _mission_section(self) -> str:
+        """C2 作战模式注入：mission/ROE 的人读摘要；pentest 缺省给一行上限提醒。"""
+        cfg = self.bb.get_project(self.project_id)["config"] or {}
+        mode = cfg.get("mode", "pentest")
+        lines: list[str] = [f"## 作战模式：{mode}"]
+        if mode == "redteam":
+            roe = cfg.get("redteam_roe") or {}
+            lines.append(f"- ROE 授权目标: {roe.get('targets', '-')}")
+            lines.append(f"- 时间窗口: {roe.get('window', '-')}")
+            lines.append(f"- 禁止事项: {roe.get('exclusions', '-')}")
+            lines.append(f"- 授权人: {roe.get('approver', '-')}")
+        mission = cfg.get("mission") or {}
+        if mission.get("text"):
+            lines.append(f"- mission: {str(mission['text'])[:200]}")
+        if mission.get("criteria"):
+            lines.append("- 判据清单：")
+            for c in str(mission["criteria"]).splitlines():
+                if c.strip():
+                    lines.append(f"  □ {c.strip()[:120]}")
+        return "\n".join(lines) + "\n" if len(lines) > 1 else ""
+
     def _overview(self, expired_leases: list[str]) -> str:
         stats = self._stats()
         self._last_stats_starvation = stats["tasks"]["starvation"]
@@ -337,7 +360,14 @@ class Orchestrator:
                     "blocked": len(blocked_steps),
                     "note": (blocked_steps[0].get("note") or "")[:120],
                 })
+        cfg = self.bb.get_project(self.project_id)["config"] or {}
+        mission_view: dict[str, Any] = {"mode": cfg.get("mode", "pentest")}
+        if isinstance(cfg.get("mission"), dict):
+            mission_view["mission"] = cfg["mission"]
+        if isinstance(cfg.get("redteam_roe"), dict):
+            mission_view["roe"] = cfg["redteam_roe"]
         return {
+            "mission": mission_view,
             "tasks": {
                 "by_status": by_status,
                 "open": [{"id": t["id"], "type": t["task_type"], "priority": t["priority"],
@@ -475,6 +505,7 @@ class Orchestrator:
             max_sessions=self.config.max_sessions,
             digest_every=self.config.digest_every,
             max_publish_per_tick=self.config.max_publish_per_tick,
+            mission_section=self._mission_section(),
         )
         messages: list[dict[str, Any]] = [{
             "role": "user",
