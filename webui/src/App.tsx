@@ -37,16 +37,20 @@ export default function App() {
   const [view, setView] = useState<View>("projects")
   const [pendingApprovals, setPendingApprovals] = useState(0)
   const [boardOpen, setBoardOpen] = useState(true)
-  // 直播间「复盘沉淀」完成 → 跨视图跳到设置指定 tab
-  const [settingsNav, setSettingsNav] = useState<{ tab: string; n: number } | null>(null)
+  // 直播间「复盘沉淀」完成 → 跨视图跳到设置指定 tab；skill.routed 双击 → 带 skill 深链选中
+  const [settingsNav, setSettingsNav] = useState<{
+    tab: string; n: number; skill?: { source: "cap" | "track"; pack: string; name: string }
+  } | null>(null)
   // A3 任务流双击无会话节点 → 跳任务看板并高亮定位卡片（focus nonce 触发滚动）
   const [taskNav, setTaskNav] = useState<{ id: string; n: number } | null>(null)
 
   useEffect(() => {
     const h = (e: Event) => {
-      const tab = (e as CustomEvent<{ tab?: string }>).detail?.tab
+      const d = (e as CustomEvent<{
+        tab?: string; skill?: { source: "cap" | "track"; pack: string; name: string }
+      }>).detail
       setView("settings")
-      if (tab) setSettingsNav({ tab, n: Date.now() })
+      if (d?.tab || d?.skill) setSettingsNav({ tab: d.tab ?? "skills", n: Date.now(), skill: d.skill })
     }
     window.addEventListener("goto-settings", h)
     return () => window.removeEventListener("goto-settings", h)

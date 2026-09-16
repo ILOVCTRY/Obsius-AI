@@ -941,6 +941,9 @@ export function LiveRoom({ pid }: { pid: string }) {
             const open = overrides.get(e.id) ?? style.defaultOpen
             const summary = eventSummary(e.payload)
             const detail = JSON.stringify(e.payload, null, 2)
+            // skill.routed 命中技能：双击跳设置页 Skill tab 选中该技能（deep link 经 goto-settings）
+            const routedName = e.kind === "skill.routed" && typeof e.payload.name === "string"
+              ? e.payload.name : null
             return (
               <div
                 key={e.id}
@@ -952,6 +955,19 @@ export function LiveRoom({ pid }: { pid: string }) {
                 <div
                   className="cursor-pointer rounded px-2 py-1 hover:bg-accent/40"
                   onClick={() => toggleRow(e.id, style.defaultOpen)}
+                  onDoubleClick={routedName ? () => {
+                    window.dispatchEvent(new CustomEvent("goto-settings", {
+                      detail: {
+                        tab: "skills",
+                        skill: {
+                          source: e.payload.kind === "track" ? "track" : "cap",
+                          pack: String(e.payload.pack ?? ""),
+                          name: routedName,
+                        },
+                      },
+                    }))
+                  } : undefined}
+                  title={routedName ? `双击查看技能 ${routedName}` : undefined}
                 >
                   <div className="flex items-baseline gap-2 text-xs">
                     <span className="font-mono text-[10px] text-muted-foreground" title={utcTitle(e.created_at)}>

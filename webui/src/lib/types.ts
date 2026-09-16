@@ -609,6 +609,14 @@ export interface KbSourceTree {
   files: KbFile[]
 }
 
+/** kb 正文搜索命中（GET /kb/search，matches 为该文件命中次数） */
+export interface KbSearchHit {
+  path: string
+  source: string
+  matches: number
+  snippet: string
+}
+
 export interface KbRefHit {
   file: string
   kind: "skill" | "kb"

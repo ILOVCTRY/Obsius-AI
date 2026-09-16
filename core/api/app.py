@@ -3254,6 +3254,11 @@ def create_app(
         return {"cap": cap, "sources": _kb_error_map(
             writing.list_kb, app.state.packs_root, cap)}
 
+    @app.get("/api/capabilities/{cap}/kb/search")
+    def kb_search(cap: str, q: str = Query(""), limit: int = Query(50, ge=1, le=200)):
+        return {"cap": cap, "q": q, "results": _kb_error_map(
+            writing.search_kb, app.state.packs_root, cap, q, limit)}
+
     @app.get("/api/capabilities/{cap}/kb/file")
     def kb_read(cap: str, path: str = Query(...)):
         target = _kb_error_map(writing.resolve_kb, app.state.packs_root, cap, path)

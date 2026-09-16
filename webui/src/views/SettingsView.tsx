@@ -56,7 +56,9 @@ function DangerNote({ children }: { children: React.ReactNode }) {
 
 const selectCls = "rounded border bg-background px-1.5 py-0.5 text-xs [color-scheme:dark] [&>option]:bg-popover [&>option]:text-popover-foreground"
 
-export function SettingsView({ nav }: { nav?: { tab: string; n: number } | null } = {}) {
+export function SettingsView({ nav }: {
+  nav?: { tab: string; n: number; skill?: { source: SkillSource; pack: string; name: string } } | null
+} = {}) {
   const [tax, setTax] = useState<Taxonomy | null>(null)
   const [track, setTrack] = useState("ctf")
   const [cap, setCap] = useState("web")
@@ -65,12 +67,16 @@ export function SettingsView({ nav }: { nav?: { tab: string; n: number } | null 
   const [skillFocus, setSkillFocus] = useState<SkillFocus | null>(null)
   const [ruleFocus, setRuleFocus] = useState<RuleFocus | null>(null)
   const [pendingN, setPendingN] = useState(0)
+  // 深链已指定轨/包时，taxonomy 异步回填的缺省值不得覆盖（晚于 nav effect 落地会冲掉深链）
+  const navAppliedRef = useRef(false)
 
   useEffect(() => {
     api.taxonomy().then((t) => {
       setTax(t)
-      if (t.tracks[0]) setTrack(t.tracks[0].name)
-      if (t.capabilities[0]) setCap(t.capabilities[0].name)
+      if (!navAppliedRef.current) {
+        if (t.tracks[0]) setTrack(t.tracks[0].name)
+        if (t.capabilities[0]) setCap(t.capabilities[0].name)
+      }
     }).catch(() => {})
   }, [])
 
@@ -83,9 +89,16 @@ export function SettingsView({ nav }: { nav?: { tab: string; n: number } | null 
     return () => window.removeEventListener("proposals-changed", refresh)
   }, [])
 
-  // 直播间「复盘沉淀」完成后经 App 跨视图跳到指定 tab
+  // 跨视图跳指定 tab；带 skill 时（直播间 skill.routed 双击）同步轨/包并深链选中该技能
   useEffect(() => {
-    if (nav?.n) setTab(nav.tab)
+    if (!nav?.n) return
+    setTab(nav.tab)
+    const s = nav.skill
+    if (s) {
+      navAppliedRef.current = true
+      if (s.source === "track") setTrack(s.pack); else setCap(s.pack)
+      setSkillFocus({ source: s.source, pack: s.pack, name: s.name, n: nav.n })
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nav?.n])
 
@@ -422,9 +435,13 @@ function SkillsPane({ tax, track, cap, focus }: {
     setKbDirty(false)
   }, [cap, kbCap, kbDirty, kbPath])
 
-  // doctor/矩阵跳转：切到指定来源并选中技能（packName 已由父组件同步）
+  // doctor/矩阵/直播间深链跳转：切到指定来源并选中技能
+  // （守卫按 focus.source 对应的包比较——packName 依赖本 pane 的 source state，
+  //   轨技能深链时 source 仍是 "cap"，用 packName 会永远不命中）
   useEffect(() => {
-    if (focus && focus.pack === packName) {
+    if (!focus) return
+    const focusPack = focus.source === "cap" ? cap : track
+    if (focus.pack === focusPack) {
       setSource(focus.source)
       setMode("skill")
       setSelected(focus.name)
@@ -587,7 +604,7 @@ function SkillsPane({ tax, track, cap, focus }: {
               </div>
               {kbTreeOpen && (
                 <div className="h-[42%] min-h-[120px] border-t">
-                  <KbTree sources={kbSources}
+                  <KbTree cap={kbCap} sources={kbSources}
                           selected={mode === "kb" ? kbPath : null}
                           onSelect={pickKb}
                           onRename={setKbRenamePath}

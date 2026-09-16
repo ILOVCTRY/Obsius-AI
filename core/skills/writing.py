@@ -198,6 +198,49 @@ def list_kb(packs_root: str | Path, cap: str) -> list[dict]:
     return out
 
 
+# ---------- kb 正文搜索 ----------
+
+# 单文件命中计数上限（排序够用，防超大文档刷爆计数）
+_KB_SEARCH_COUNT_CAP = 20
+# snippet 首处命中前后保留的字符数
+_KB_SNIPPET_CHARS = 60
+
+
+def search_kb(packs_root: str | Path, cap: str, q: str, limit: int = 50) -> list[dict]:
+    """kb 正文搜索（只读，与 list_kb 同一源遍历口径）。
+
+    大小写不敏感 substring；kb 文件量级为数百篇 × ≤1 MiB，全量遍历即可，不建索引。
+    每命中文件回 {path, source, matches, snippet}；按命中次数降序、同分按路径，cap limit。
+    空 q 返回空列表（交由调用方决定是否提示）。"""
+    needle = (q or "").strip().lower()
+    if not needle:
+        return []
+    out: list[dict] = []
+    for src in _sources(Path(packs_root), cap):
+        if not src.root.is_dir():
+            continue
+        iterator = src.root.rglob("*.md") if src.recursive else src.root.glob("*.md")
+        for f in sorted(iterator):
+            if ".history" in f.relative_to(src.root).parts:
+                continue
+            try:
+                text = f.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            hits = text.lower().count(needle)
+            if not hits:
+                continue
+            pos = text.lower().find(needle)
+            start = max(0, pos - _KB_SNIPPET_CHARS)
+            end = min(len(text), pos + len(needle) + _KB_SNIPPET_CHARS)
+            out.append({"path": f.relative_to(src.root).as_posix(),
+                        "source": src.id,
+                        "matches": min(hits, _KB_SEARCH_COUNT_CAP),
+                        "snippet": text[start:end].replace("\n", " ").strip()})
+    out.sort(key=lambda r: (-r["matches"], r["path"]))
+    return out[:max(1, limit)]
+
+
 # ---------- kb 备份布局（kb/<root>/.history/kb-backups 与 kb-trash） ----------
 
 def _kb_history_root(target: KbTarget) -> Path:

@@ -20,6 +20,7 @@ from core.blackboard import Blackboard, TaskQueue  # noqa: E402
 from core.runtime.backends import NativeBackend  # noqa: E402
 from core.runtime.gateway import ExecutionGateway  # noqa: E402
 from core.skills import proposals as pm  # noqa: E402
+from core.skills import writing  # noqa: E402
 from core.skills.doctor import diagnose  # noqa: E402
 
 
@@ -108,6 +109,60 @@ def test_kb_list_read_and_refs(tmp_path):
     assert "SQL 注入方法论" in data["content"]
     ref_files = {h["file"] for h in data["refs"]}
     assert any(f.endswith("web-skill/SKILL.md") for f in ref_files)
+
+
+def test_kb_search_api(tmp_path):
+    packs, c = _client(tmp_path)
+    # 大小写不敏感正文命中（auth.md 正文引用「同目录 README」）
+    r = c.get("/api/capabilities/web/kb/search", params={"q": "read"})
+    assert r.status_code == 200
+    assert [h["path"] for h in r.json()["results"]] == ["ctf-web/sqli/auth.md"]
+    assert r.json()["results"][0]["matches"] == 1
+    # 中文命中
+    r = c.get("/api/capabilities/web/kb/search", params={"q": "SQL 注入"})
+    assert r.status_code == 200
+    assert [h["path"] for h in r.json()["results"]] == ["ctf-web/sqli/README.md"]
+    # 空 q → 200 空列表（交前端提示）
+    r = c.get("/api/capabilities/web/kb/search", params={"q": "  "})
+    assert r.status_code == 200 and r.json()["results"] == []
+    # 未登记 kb_sources 的能力包 → 422（KbError 映射）
+    r = c.get("/api/capabilities/binary/kb/search", params={"q": "x"})
+    assert r.status_code == 422
+
+
+def test_search_kb_unit(tmp_path):
+    packs = tmp_path / "packs"
+    kb = packs / "capabilities" / "web" / "kb"
+    (kb / "a").mkdir(parents=True)
+    (kb / "a" / "x.md").write_text("Foo bar FOO", encoding="utf-8")
+    (kb / "a" / ".history").mkdir()
+    (kb / "a" / ".history" / "old.md").write_text("foo", encoding="utf-8")
+    (kb / "b.md").write_text("foo foo foo", encoding="utf-8")
+    flat = packs / "capabilities" / "web" / "flat"
+    (flat / "inner").mkdir(parents=True)
+    (flat / "inner" / "nested.md").write_text("foo", encoding="utf-8")
+    (flat / "top.md").write_text("foo", encoding="utf-8")
+    (packs / "capabilities" / "web" / "kb_sources.json").write_text(json.dumps({
+        "sources": [{"id": "web-kb", "root": "kb", "recursive": True},
+                    {"id": "web-flat", "root": "flat", "recursive": False}],
+    }, ensure_ascii=False), encoding="utf-8")
+
+    res = writing.search_kb(packs, "web", "FOO")
+    by_path = {(r["source"], r["path"]): r for r in res}
+    # 大小写不敏感；.history 排除；平铺源不递归（inner/nested.md 不出现）
+    assert ("web-kb", "b.md") in by_path and ("web-kb", "a/x.md") in by_path
+    assert ("web-flat", "top.md") in by_path
+    assert not any(p.endswith("old.md") or p.endswith("nested.md") for _, p in by_path)
+    assert by_path[("web-kb", "b.md")]["matches"] == 3
+    assert by_path[("web-kb", "a/x.md")]["matches"] == 2
+    assert by_path[("web-flat", "top.md")]["matches"] == 1
+    # 按命中次数降序
+    assert [r["matches"] for r in res] == sorted(
+        (r["matches"] for r in res), reverse=True)
+    assert "foo" in res[0]["snippet"].lower()
+    # limit 截断 + 空 q
+    assert len(writing.search_kb(packs, "web", "foo", limit=2)) == 2
+    assert writing.search_kb(packs, "web", "  ") == []
 
 
 def test_kb_create_chinese_path_and_conflicts(tmp_path):

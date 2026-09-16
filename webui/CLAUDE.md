@@ -13,13 +13,13 @@
 - `reverse/` rev-generic 工作台（research+binary 项目替换黑板，App.tsx 经 deriveWorkbenchProfile 切换，详见下）。
 - `TaskBoard.tsx` 任务看板（**A1** 删除钮四态皆可：claimed 文案「取消」+步边界硬中断警示、done 可删、有子任务 409；**A2** claimed 卡显 `▦ done/total` 计划进度+■ blocked 原因，hover 列全部步骤；**E12** failed 卡 `resumable`（GET /tasks 派生：原会话落盘快照在）显「▶ 续跑」=api.resumeTask（reopen+原会话载快照复活，409 行内显错引导放回）；**C1** awaiting_human 卡显「⏸ 待人工」琥珀徽章+result_note 正文卡片+「✅ 已解决，放回继续」（AlertDialog 附注→api.reopenTask(note) 落任务行），审批铃铛红点计入 task_stats.awaiting_human）；`ApprovalsView.tsx` 审批收件箱（4s 轮询 + GET roles 建 map；**批 4**：`action.op==="spawn_session"` 渲染专属卡=角色 Badge+roles 名称/描述+开窗理由，其余 action 维持通用 JSON `<pre>`；decide 回执类型 `DecideApprovalResult`，`executed:false`=批准但自动建窗失败（不回滚，显红字引导手动开窗），`executed:true` 显已建窗+提交跑队列）；`SettingsView.tsx` 设置（轨/包 select + DoctorBar + **8 tab**）。
 - `IntelView.tsx` 情报页（**E9/E10**，顶级导航「📡 情报」needsProject=false，全局与项目无关）：顶栏 counts+「刷新」（intelFetch+pollJob）；三 tab=简报（左归档日期列表+右 MarkdownView 渲染）/文章（kind/未读/收藏筛选+KEV/热点/方向徽章+外链点击自动已读+★收藏）/**学习（E10 §16.3）**=三来源档案（①声明画像权重+阶段 badges ②vault 推断=各方向篇数+最近活跃 title 提示，未配置显引导 ③平台已读/收藏按方向计数）+ 当周学习计划（MarkdownView 渲染 +「生成/重新生成」intelLearningPlanGenerate+pollJob +「复制 md」clipboard + 归档周列表切换 planWeek，""=latest；inputs.by 标 llm/template）；**打开页时今日无简报自动补跑一次**（ref 防循环，setTimeout 延后一拍避 lint）。App.tsx 无 pid 分支重构出左导航帧（`!pid || view projects/intel` 共用 NAV+主区）。设置页 8 tab 加「情报源」`IntelSourcePane`：feeds CRUD（整单 PUT，空 url 剔除）+ 画像七方向权重/阶段 + 手动抓取显 job stats。
-- `App.tsx` 监听 window `goto-settings`（CustomEvent detail.tab）与 `goto-intel`（E9）跨视图切换；SettingsView 经 `nav={{tab,n}}` prop 接收。
+- `App.tsx` 监听 window `goto-settings`（CustomEvent detail.tab；detail.skill={source,pack,name} 时随 nav 透传深链，SettingsView 消费后 setSkillFocus）与 `goto-intel`（E9）跨视图切换；SettingsView 经 `nav={{tab,n,skill?}}` prop 接收。直播间 skill.routed 命中行双击即 dispatch 该事件跳技能（payload.kind==="track"→source track，单击展开 JSON 不变）。
 
 ### 设置 8 tab（components/settings/）
 
 1 **角色** RolesPane：左列表右表单；`CreateDialogs` 新建/克隆（slug 双端校验，409/422 直显 detail）；✕ 删除（`_generalist` 保护）；HistoryButton 版本/diff/回滚（回滚前自动备份）。
 2 **Skill** SkillsPane：**react-resizable-panels 三栏**（左 240px 技能列表+📚知识库折叠树 / 中弹性文档 / 右 300px 试算+大纲）。技能与 kb **互斥选中**，互切 dirty `window.confirm` 拦截。
-   - 左：包｜轨来源切换（SkillCreateDialog ＋新建）；`KbTree`（源树/过滤框/悬停 ✎改名 ✕删除；kb 挂当前 cap，切 cap 有未保存修改时 kbCap 冻结拦截）；`KbCreateDialog` ＋新建 md。
+   - 左：包｜轨来源切换（SkillCreateDialog ＋新建）；`KbTree`（源树/过滤框/悬停 ✎改名 ✕删除；kb 挂当前 cap，切 cap 有未保存修改时 kbCap 冻结拦截；**双通道搜索**：文件名过滤照旧 + ≥2 字符 300ms 防抖调 `api.kbSearch` 正文搜索，命中列表置顶、点击走同一 onSelect 打开文件）；`KbCreateDialog` ＋新建 md。
    - 中：技能=精简顶栏（去 chips）+`SkillEditor`（frontmatter 表单默认折叠、七字段 `<datalist>` 走 `/skills/vocab`、正文编辑/`MarkdownView` 预览、13px；`ref.getRaw()` 经 skillfm 合并，name 锁定）；kb=`KbPane`（路径/source/大小/被引 N 处/编辑预览/保存/改名/删除，PUT 自动备份 kb-backups；删除有引用先 409 弹 refs，显式「强制删除」才带 force）。
    - 右：`RouteTester`（真评分，候选恒为全包∪轨；features/file_features/**labels** 三框；命中行展开看 breakdown）+ `MarkdownOutline`（h1–h3，与预览共享 prefix 做 headingId scrollIntoView；技能 prefix=`skill`，kb=`kb-<cap>`）。
    - `KbRenameDialog` 改名成功显示联动替换文件清单+skipped_relative 琥珀警告。

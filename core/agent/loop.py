@@ -283,7 +283,7 @@ class AgentSession:
         sk = top.skill
         self.bb.append_event(
             self.project_id, "skill.routed",
-            {"name": sk.name, "pack": sk.pack, "score": top.score,
+            {"name": sk.name, "kind": sk.kind, "pack": sk.pack, "score": top.score,
              "matched": top.matched, "breakdown": top.breakdown,
              "task_id": task_id, "query": (query or "")[:200]},
             session_id=self.session["id"], author=self.session["id"])

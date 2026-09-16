@@ -2,7 +2,8 @@ import type {
   Approval, Artifact, ArtifactUploadResponse, Asset, BBEvent, BinaryOverview, BinaryStrings,
   CachedFuncRow, CachedFunction, Chain, ChainLink, ChainNodeType, ChainStatus, ChainSummary,
   DecideApprovalResult, DoctorReport, DiscoveredModel, Finding, FindingPatchBody, FuncCreateBody, FuncEntry,
-  FuncPatchBody, HistoryList, InboxMessage, Job, KbRead, KbRefHit, KbRenameResult, KbSourceTree,
+  FuncPatchBody, HistoryList, InboxMessage, Job, KbRead, KbRefHit, KbRenameResult,
+  KbSearchHit, KbSourceTree,
   KbWriteResult, LlmProvider, McpServer, ModelInfo, IntelArticle, IntelBrief, IntelBriefMeta,
   IntelFeed, IntelOverview, IntelProfile, IntelVaultConfig, IntelVaultInfo, VaultNode,
   VaultSearchHit, IntelLearningProfile, IntelPlan, IntelPlanMeta,
@@ -346,6 +347,10 @@ export const api = {
   // kb 本地基线（C2/C3：源树/读写/改名联动/版本/引用）
   kbList: (cap: string) =>
     http<{ cap: string; sources: KbSourceTree[] }>(`/api/capabilities/${cap}/kb`),
+  /** kb 正文搜索（大小写不敏感 substring，按命中次数降序） */
+  kbSearch: (cap: string, q: string, limit = 50) =>
+    http<{ cap: string; q: string; results: KbSearchHit[] }>(
+      `/api/capabilities/${cap}/kb/search?q=${encodeURIComponent(q)}&limit=${limit}`),
   kbRead: (cap: string, path: string) =>
     http<KbRead>(`/api/capabilities/${cap}/kb/file?path=${encodeURIComponent(path)}`),
   kbCreate: (cap: string, path: string, content: string) =>
