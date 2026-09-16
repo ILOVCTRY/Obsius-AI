@@ -8,6 +8,7 @@ import "@xyflow/react/dist/style.css"
 import "./flow.css" // 必须在 xyflow css 之后：深色覆盖（plain CSS 压层叠层）
 import { Maximize2, RotateCcw, X } from "lucide-react"
 import { api } from "@/lib/api"
+import { sessionLabel } from "@/lib/roles"
 import type { TaskGraph, TaskGraphEdge, TaskGraphNode } from "@/lib/types"
 import { Button } from "@/components/ui/button"
 import {
@@ -54,6 +55,13 @@ function Flow({ pid, pausedSids, wsBump, onAttachSession, onSpawnTaskWindow }: T
   const rf = useReactFlow()
   const updateNodeInternals = useUpdateNodeInternals()
   const [graph, setGraph] = useState<TaskGraph | null>(null)
+  // 角色中文名映射（存量会话页签/认领节点显中文，与 LiveRoom 同源 GET /roles）
+  const [roleNames, setRoleNames] = useState<Record<string, string>>({})
+  useEffect(() => {
+    api.listRoles(pid).then((rs) => setRoleNames(
+      Object.fromEntries(rs.map((r) => [r.role, r.name || r.role])),
+    )).catch(() => {})
+  }, [pid])
 
   const load = useCallback(() => {
     api.taskGraph(pid).then(setGraph).catch(() => {})
@@ -191,12 +199,14 @@ function Flow({ pid, pausedSids, wsBump, onAttachSession, onSpawnTaskWindow }: T
   const flowNodes: TaskFlowNodeType[] = useMemo(() => (graph?.nodes ?? []).map((n) => {
     const slot = slots.get(n.id) ?? { x: 0, y: 0 }
     const off = offsets[n.id] ?? { dx: 0, dy: 0 }
+    // 存量会话 name=英文 role id：显示层映射为角色中文名（TaskNode 直读 n.session.name）
+    const sess = n.session ? { ...n.session, name: sessionLabel(n.session, roleNames) } : undefined
     return {
       id: n.id,
       type: "task",
       position: { x: slot.x + off.dx, y: slot.y + off.dy },
       data: {
-        node: n,
+        node: sess ? { ...n, session: sess } : n,
         paused: n.status === "claimed" && pausedSids.has(n.claimed_by ?? ""),
         onActivate: activateNode,
         onDelete: askDelete,
@@ -204,7 +214,7 @@ function Flow({ pid, pausedSids, wsBump, onAttachSession, onSpawnTaskWindow }: T
       measured: measuredById[n.id],
       style: { width: NODE_W },
     }
-  }), [graph, slots, offsets, measuredById, pausedSids, activateNode, askDelete])
+  }), [graph, slots, offsets, measuredById, pausedSids, activateNode, askDelete, roleNames])
 
   const flowEdges: TaskFlowEdgeType[] = useMemo(() => (graph?.edges ?? []).map((e) => ({
     id: e.id,
@@ -354,7 +364,7 @@ function Flow({ pid, pausedSids, wsBump, onAttachSession, onSpawnTaskWindow }: T
                 <p>
                   物理删除且不可恢复（留 task.deleted 审计）。
                   {deleteTarget?.status === "claimed" && (
-                    <span className="text-[--status-approval]">
+                    <span className="text-(--status-approval)">
                       该任务正在执行——当前这一步做完后立即硬中断，执行中的工具调用不会被打断。
                     </span>
                   )}
@@ -362,7 +372,7 @@ function Flow({ pid, pausedSids, wsBump, onAttachSession, onSpawnTaskWindow }: T
                     <span className="text-muted-foreground">已完成任务同样可删（战果快照进审计）。</span>
                   )}
                 </p>
-                {deleteError && <p className="text-sm text-[--status-error]">{deleteError}</p>}
+                {deleteError && <p className="text-sm text-(--status-error)">{deleteError}</p>}
               </div>
             </AlertDialogDescription>
           </AlertDialogHeader>

@@ -92,7 +92,7 @@ function DirNode({ node, depth, q, selected, onSelect, onRename, onDelete, colla
               </button>
               <button className="shrink-0 px-1 text-[10px] text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:text-primary"
                       title="改名（全仓引用联动替换）" onClick={() => onRename(f.path)}>✎</button>
-              <button className="shrink-0 px-1 text-[10px] text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:text-[--status-error]"
+              <button className="shrink-0 px-1 text-[10px] text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:text-(--status-error)"
                       title="删除（进 kb-trash，可恢复）" onClick={() => onDelete(f.path)}>✕</button>
             </div>
           ))}

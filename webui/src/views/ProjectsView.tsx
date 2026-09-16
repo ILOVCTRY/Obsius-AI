@@ -137,13 +137,13 @@ export function ProjectsView({ onOpen }: { onOpen: (pid: string) => void }) {
               </button>
             ))}
             {caps.length === 0 && (
-              <span className="text-[10px] text-[--status-approval]">未勾能力包：只有轨级技能/规则生效</span>
+              <span className="text-[10px] text-(--status-approval)">未勾能力包：只有轨级技能/规则生效</span>
             )}
           </div>
         </CardContent>
       </Card>
 
-      {error && <p className="text-sm text-[--status-error]">{error}</p>}
+      {error && <p className="text-sm text-(--status-error)">{error}</p>}
 
       <div className="space-y-2">
         {projects.length === 0 && !error && (
@@ -158,7 +158,7 @@ export function ProjectsView({ onOpen }: { onOpen: (pid: string) => void }) {
             onKeyDown={(e) => e.key === "Enter" && onOpen(p.id)}
             className={cn(
               "group flex w-full cursor-pointer items-center gap-3 rounded-lg border p-3 text-left",
-              "hover:border-[--ring] hover:bg-accent/50",
+              "hover:border-(--ring) hover:bg-accent/50",
             )}
           >
             <Badge variant="outline" className="font-mono">{bindingBadge(p.track, p.capabilities)}</Badge>
@@ -171,7 +171,7 @@ export function ProjectsView({ onOpen }: { onOpen: (pid: string) => void }) {
               variant="ghost"
               size="icon-sm"
               aria-label={`删除 ${p.name}`}
-              className="opacity-0 transition-opacity group-hover:opacity-100 text-[--status-error] hover:text-[--status-error]"
+              className="opacity-0 transition-opacity group-hover:opacity-100 text-(--status-error) hover:text-(--status-error)"
               onClick={(e) => {
                 e.stopPropagation()
                 setDelError(null)
@@ -194,7 +194,7 @@ export function ProjectsView({ onOpen }: { onOpen: (pid: string) => void }) {
             <AlertDialogDescription>
               整个项目目录将移入回收站（workspaces/.trash/），数据不会立即丢失，可手动移回恢复；运行中的项目无法删除。
             </AlertDialogDescription>
-            {delError && <p className="text-sm text-[--status-error]">{delError}</p>}
+            {delError && <p className="text-sm text-(--status-error)">{delError}</p>}
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel asChild>

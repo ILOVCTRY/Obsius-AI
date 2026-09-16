@@ -220,7 +220,7 @@ export function TaskBoard({ pid, focused }: {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-      {error && <p className="px-3 pt-2 text-xs text-[--status-error]">{error}</p>}
+      {error && <p className="px-3 pt-2 text-xs text-(--status-error)">{error}</p>}
 
       {/* 看板列 */}
       <div className="grid min-h-0 flex-1 grid-cols-4 gap-3 overflow-auto p-3">
@@ -264,7 +264,7 @@ export function TaskBoard({ pid, focused }: {
                 <p>
                   任务将被物理删除且不可恢复（删除会留一条 task.deleted 审计事件）。
                   {deleteTarget?.status === "claimed" && (
-                    <span className="text-[--status-approval]">
+                    <span className="text-(--status-approval)">
                       该任务正在执行——当前这一步做完后会被立即硬中断（按人工终止收尾），
                       执行中的工具调用不会被打断；conflict_keys 锁立即释放。
                     </span>
@@ -275,7 +275,7 @@ export function TaskBoard({ pid, focused }: {
                     </span>
                   )}
                 </p>
-                {deleteError && <p className="text-sm text-[--status-error]">{deleteError}</p>}
+                {deleteError && <p className="text-sm text-(--status-error)">{deleteError}</p>}
               </div>
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -331,11 +331,11 @@ function TaskCard({ task, onChanged, onDelete, onResolve, focused, focusNonce }:
       <div className="flex items-center gap-1.5">
         <Badge variant="outline" className="font-mono text-[10px]">{task.task_type}</Badge>
         <Badge variant="outline" className={cn("font-mono text-[10px]",
-          task.noise_budget === "passive" ? "text-muted-foreground" : "text-[--status-approval]")}>
+          task.noise_budget === "passive" ? "text-muted-foreground" : "text-(--status-approval)")}>
           {task.noise_budget}
         </Badge>
         {task.status === "failed" && task.blocked_reason === "awaiting_human" && (
-          <Badge variant="outline" className="text-[10px] text-[--status-approval]"
+          <Badge variant="outline" className="text-[10px] text-(--status-approval)"
                  title="Agent 挂起等待人工输入；现场快照保留，可续跑或放回继续（C1）">
             ⏸ 待人工
           </Badge>
@@ -352,7 +352,7 @@ function TaskCard({ task, onChanged, onDelete, onResolve, focused, focusNonce }:
       </div>
       <p className="mt-1.5 text-xs leading-relaxed">{task.objective}</p>
       {task.status === "failed" && task.blocked_reason === "awaiting_human" && task.result_note && (
-        <p className="mt-1 rounded border border-[--status-approval]/40 bg-[--status-approval]/5 p-1.5 text-[10px] leading-relaxed">
+        <p className="mt-1 rounded border border-(--status-approval)/40 bg-(--status-approval)/5 p-1.5 text-[10px] leading-relaxed">
           <span className="font-medium">需要人工：</span>{task.result_note}
         </p>
       )}
@@ -376,7 +376,7 @@ function TaskCard({ task, onChanged, onDelete, onResolve, focused, focusNonce }:
       {(task.status === "open" && (task.wait_for?.length || task.workset?.length)) && (
         <p className="mt-1 flex flex-wrap gap-1">
           {(task.wait_for ?? []).map((k) => (
-            <Badge key={k} variant="outline" className="font-mono text-[10px] text-[--status-approval]"
+            <Badge key={k} variant="outline" className="font-mono text-[10px] text-(--status-approval)"
                    title="资源被其他任务占用，释放后可被认领（B2 wait_for 门控）">
               ⏳ {k}
             </Badge>
@@ -390,7 +390,7 @@ function TaskCard({ task, onChanged, onDelete, onResolve, focused, focusNonce }:
         </p>
       )}
       {resumeErr && (
-        <p className="mt-1 truncate text-[10px] text-[--status-error]" title={resumeErr}>
+        <p className="mt-1 truncate text-[10px] text-(--status-error)" title={resumeErr}>
           续跑失败：{resumeErr}（可改用「放回」重新派发）
         </p>
       )}
@@ -455,7 +455,7 @@ function TaskCard({ task, onChanged, onDelete, onResolve, focused, focusNonce }:
           title={task.status === "claimed"
             ? "取消执行中任务：当前步结束即硬中断（A1）"
             : "物理删除（留 task.deleted 审计）"}
-          className="text-[10px] text-muted-foreground hover:text-[--status-error]"
+          className="text-[10px] text-muted-foreground hover:text-(--status-error)"
         >
           {task.status === "claimed" ? "🗑 取消" : "🗑 删除"}
         </button>
@@ -535,7 +535,7 @@ function TaskEdit({ task, onDone, onCancel }: {
         className="w-full rounded-md border bg-background p-1.5 text-xs leading-relaxed"
         placeholder="任务目标…"
       />
-      {error && <p className="text-[10px] text-[--status-error]">{error}</p>}
+      {error && <p className="text-[10px] text-(--status-error)">{error}</p>}
       <div className="flex justify-end gap-1.5">
         <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={onCancel} disabled={saving}>
           取消

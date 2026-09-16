@@ -126,7 +126,7 @@ export function ChainToolbar({ chains, selectedId, onSelect, onCreate, onAdvance
                   onClick={() => { setCreating(false); setErr("") }}>取消</Button>
         </div>
       )}
-      {err && <span className="text-[11px] text-[--status-error]">{err}</span>}
+      {err && <span className="text-[11px] text-(--status-error)">{err}</span>}
     </div>
   )
 }

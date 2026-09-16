@@ -184,7 +184,7 @@ export default function App() {
         >
           🔔 审批
           {pendingApprovals > 0 && (
-            <span className="rounded-full bg-[--status-approval] px-1.5 text-[10px] font-bold text-[--background]">
+            <span className="rounded-full bg-(--status-approval) px-1.5 text-[10px] font-bold text-(--background)">
               {pendingApprovals}
             </span>
           )}

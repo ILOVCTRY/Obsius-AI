@@ -36,7 +36,7 @@ export function EntityNode({ data }: NodeProps<EntityFlowNode>) {
         type="button"
         title="移出攻击链（不删实体）"
         onClick={(ev) => { ev.stopPropagation(); onRemove(link) }}
-        className="absolute right-1 top-1 hidden rounded text-muted-foreground hover:text-[--status-error] group-hover:block"
+        className="absolute right-1 top-1 hidden rounded text-muted-foreground hover:text-(--status-error) group-hover:block"
       >
         <X className="size-3" />
       </button>
@@ -54,7 +54,7 @@ export function EntityNode({ data }: NodeProps<EntityFlowNode>) {
           <p className="truncate text-xs text-primary">{e?.name}</p>
           <p className="font-mono text-[9px] text-muted-foreground">{e?.address}</p>
           {e?.risk_tags?.length ? (
-            <p className="mt-0.5 truncate text-[9px] text-[--status-error]">{e.risk_tags.join(" · ")}</p>
+            <p className="mt-0.5 truncate text-[9px] text-(--status-error)">{e.risk_tags.join(" · ")}</p>
           ) : null}
         </div>
       ) : link.node_type === "finding" ? (

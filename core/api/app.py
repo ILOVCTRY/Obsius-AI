@@ -2291,15 +2291,30 @@ def create_app(
 
     @app.post("/api/sessions/{sid}/pause")
     def pause_session(sid: str):
-        """软暂停：worker 在 LLM 步边界退出；空闲会话（无 job）立即生效。"""
-        agent = _ensure_agent(_pid_of_session(sid), sid)
+        """软暂停：worker 在 LLM 步边界退出。
+        空闲会话（无 job 且无认领任务）：已武装只解除武装（F9，不落 paused 不发
+        session.paused）；未武装无事可暂停 → 409（修「空闲点暂停也落已暂停」）。"""
+        pid = _pid_of_session(sid)
+        bb = _project(pid).bb
+        agent = _ensure_agent(pid, sid)
         if agent.paused:
             raise HTTPException(409, "会话已处于暂停态")
+        job_running = _session_job_running(sid)
+        if not job_running and agent.dispatcher.current_task_id is None:
+            meta_raw = (bb.get_session(sid) or {}).get("meta")
+            meta = json.loads(meta_raw) if isinstance(meta_raw, str) else (meta_raw or {})
+            if not meta.get("worker_armed"):
+                raise HTTPException(409, "会话空闲，无需暂停")
+            bb.set_session_meta(sid, {"worker_armed": False})
+            bb.append_event(pid, "session.work_state",
+                            {"session_id": sid, "armed": False},
+                            session_id=sid, author="human")
+            return {"session_id": sid, "status": "idle", "disarmed": True}
         agent.request_pause()
-        if not _session_job_running(sid):
-            agent._enter_paused()  # 没有线程会消费检查点，直接落 paused
+        if not job_running:
+            agent._enter_paused()  # 认领了任务但 worker 已退（孤儿认领）：无线程消费检查点，直接落 paused
         # F9：暂停 = 解除武装（armed 是自动接任务的常驻开关；显式「跑」才重新点亮）
-        _project(_pid_of_session(sid)).bb.set_session_meta(sid, {"worker_armed": False})
+        bb.set_session_meta(sid, {"worker_armed": False})
         return {"session_id": sid, "status": "paused"}
 
     @app.post("/api/sessions/{sid}/resume")

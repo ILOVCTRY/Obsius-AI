@@ -83,7 +83,7 @@ export function StringsTable({ pid, sha, query, cached, onSelectFunc }: Props) {
                 <span className={cn(
                   "mt-0.5 shrink-0 rounded px-1 text-[8px]",
                   s.type === "unicode"
-                    ? "bg-[--status-approval]/15 text-[--status-approval]"
+                    ? "bg-(--status-approval)/15 text-(--status-approval)"
                     : "bg-muted text-muted-foreground",
                 )}>{s.type === "unicode" ? "U" : "C"}</span>
                 <span className="min-w-0 flex-1 truncate font-mono text-[10px]">{s.string}</span>

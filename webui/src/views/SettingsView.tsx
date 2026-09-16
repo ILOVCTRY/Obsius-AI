@@ -52,7 +52,7 @@ function Saved({ saved }: { saved: boolean }) {
 }
 
 function DangerNote({ children }: { children: React.ReactNode }) {
-  return <p className="text-[10px] text-[--status-approval]">{children}</p>
+  return <p className="text-[10px] text-(--status-approval)">{children}</p>
 }
 
 const selectCls = "rounded border bg-background px-1.5 py-0.5 text-xs [color-scheme:dark] [&>option]:bg-popover [&>option]:text-popover-foreground"
@@ -153,7 +153,7 @@ export function SettingsView({ nav }: {
             <TabsTrigger key={k} value={k} className="rounded-none border-b-2 px-3 py-1.5 text-xs">
               {label}
               {k === "proposals" && pendingN > 0 && (
-                <span className="ml-1 rounded-full bg-[--status-error] px-1.5 text-[9px] leading-4 text-white">{pendingN}</span>
+                <span className="ml-1 rounded-full bg-(--status-error) px-1.5 text-[9px] leading-4 text-white">{pendingN}</span>
               )}
             </TabsTrigger>
           ))}
@@ -290,7 +290,7 @@ function RolesPane({ track, focus }: { track: string; focus: RoleFocus | null })
                 {roleLabel(r)}
               </button>
               {r.file !== "_generalist" && (
-                <button className="px-1.5 text-[10px] text-[--status-error] opacity-0 transition-opacity group-hover:opacity-100"
+                <button className="px-1.5 text-[10px] text-(--status-error) opacity-0 transition-opacity group-hover:opacity-100"
                         title="删除（移入 .history/trash，可恢复）"
                         onClick={() => setConfirmDel(r.file)}>✕</button>
               )}
@@ -305,7 +305,7 @@ function RolesPane({ track, focus }: { track: string; focus: RoleFocus | null })
             <div className="flex items-center gap-2">
               <span className="font-mono text-sm">{track}/{selected}</span>
               <span className="flex-1" />
-              {err && <span className="text-[10px] text-[--status-error]">{err}</span>}
+              {err && <span className="text-[10px] text-(--status-error)">{err}</span>}
               <Saved saved={saved} />
               <HistoryButton file={`tracks/${track}/roles/${selected}.yaml`} onRolledBack={reload} />
               <Button size="sm" onClick={save}>保存</Button>
@@ -585,7 +585,7 @@ function SkillsPane({ tax, track, cap, focus }: {
                     onClick={() => pickSkill(s.name)}>
                     {s.name}
                   </button>
-                  <button className="px-1.5 text-[10px] text-[--status-error] opacity-0 transition-opacity group-hover:opacity-100"
+                  <button className="px-1.5 text-[10px] text-(--status-error) opacity-0 transition-opacity group-hover:opacity-100"
                           title="删除（整目录移入 .history/trash，可恢复）"
                           onClick={() => setConfirmDel(s.name)}>✕</button>
                 </div>
@@ -642,8 +642,8 @@ function SkillsPane({ tax, track, cap, focus }: {
               <div className="flex shrink-0 flex-wrap items-center gap-1.5">
                 <span className="font-mono text-sm">{detail.name}</span>
                 <Badge variant="outline" className="text-[10px]">{sk?.kind}/{sk?.pack}</Badge>
-                {sk && !sk.enabled && <Badge variant="outline" className="text-[10px] text-[--status-approval]">enabled:false</Badge>}
-                {err && <span className="break-all text-[10px] text-[--status-error]">{err}</span>}
+                {sk && !sk.enabled && <Badge variant="outline" className="text-[10px] text-(--status-approval)">enabled:false</Badge>}
+                {err && <span className="break-all text-[10px] text-(--status-error)">{err}</span>}
                 <span className="flex-1" />
                 <label className="flex items-center gap-1 text-[10px] text-muted-foreground" title="只改 frontmatter enabled 行；禁用后不参与路由，正文保留">
                   <input type="checkbox" checked={sk?.enabled ?? true}
@@ -654,7 +654,7 @@ function SkillsPane({ tax, track, cap, focus }: {
                   source === "cap"
                     ? `capabilities/${packName}/skills/${selected}/SKILL.md`
                     : `tracks/${packName}/skills/${selected}/SKILL.md`} />
-                <Button size="sm" variant="outline" className="text-[10px] text-[--status-error]"
+                <Button size="sm" variant="outline" className="text-[10px] text-(--status-error)"
                         onClick={() => setConfirmDel(detail.name)}>删除</Button>
                 <Saved saved={saved} />
                 <Button size="sm" onClick={save} disabled={!dirty}>保存</Button>
@@ -736,7 +736,7 @@ function SkillsPane({ tax, track, cap, focus }: {
                 <p>文件将移入 {kbCap}/kb/.history/kb-trash/（带时间戳，可手工恢复）。</p>
                 {kbDel && kbDel.refs.length > 0 && (
                   <div className="mt-2 max-h-40 overflow-y-auto rounded border p-1.5">
-                    <p className="text-[--status-approval]">以下 {kbDel.refs.length} 处完整路径引用将变成悬空引用（doctor 报 error）：</p>
+                    <p className="text-(--status-approval)">以下 {kbDel.refs.length} 处完整路径引用将变成悬空引用（doctor 报 error）：</p>
                     {kbDel.refs.map((r, i) => (
                       <p key={i} className="truncate font-mono text-[10px]" title={r.forms.join(" / ")}>
                         {r.file}:{r.line}（{r.kind}）
@@ -822,7 +822,7 @@ function McpPane() {
                 <input type="checkbox" checked={s.enabled} onChange={(e) => patch(i, { enabled: e.target.checked })} />
                 启用
               </label>
-              <Button size="sm" variant="ghost" className="text-[10px] text-[--status-error]"
+              <Button size="sm" variant="ghost" className="text-[10px] text-(--status-error)"
                       onClick={() => setServers((ss) => ss.filter((_, j) => j !== i))}>删除</Button>
             </div>
           </div>
@@ -946,7 +946,7 @@ function LlmPane() {
         <Saved saved={saved} />
         <Button size="sm" onClick={save}>保存</Button>
       </div>
-      {error && <p className="text-xs text-[--status-error]">{error}</p>}
+      {error && <p className="text-xs text-(--status-error)">{error}</p>}
       <ScrollArea className="min-h-0 flex-1">
         <div className="space-y-2 pr-2">
           {providers.map((p, i) => (
@@ -964,7 +964,7 @@ function LlmPane() {
                   启用
                 </label>
                 <span className="flex-1" />
-                <Button size="sm" variant="ghost" className="text-[10px] text-[--status-error]"
+                <Button size="sm" variant="ghost" className="text-[10px] text-(--status-error)"
                         onClick={() => setProviders((ps) => ps.filter((_, j) => j !== i))}>删除</Button>
               </div>
               <div className="mt-1.5 flex flex-col gap-1.5">
@@ -991,7 +991,7 @@ function LlmPane() {
                             onClick={() => moveModel(i, mi, -1)}>↑</Button>
                     <Button size="sm" variant="ghost" className="h-5 px-1 text-[10px]"
                             onClick={() => moveModel(i, mi, 1)}>↓</Button>
-                    <Button size="sm" variant="ghost" className="h-5 px-1 text-[10px] text-[--status-error]"
+                    <Button size="sm" variant="ghost" className="h-5 px-1 text-[10px] text-(--status-error)"
                             onClick={() => patch(i, { models: p.models.filter((x) => x !== m) })}>✕</Button>
                   </div>
                 ))}
@@ -1008,7 +1008,7 @@ function LlmPane() {
                 </div>
                 {disc[i] && (
                   <div className="mt-1.5 rounded border p-1.5">
-                    {disc[i].msg && <p className="mb-1 text-[10px] text-[--status-approval]">{disc[i].msg}</p>}
+                    {disc[i].msg && <p className="mb-1 text-[10px] text-(--status-approval)">{disc[i].msg}</p>}
                     <div className="max-h-36 overflow-auto">
                       {disc[i].ids.length === 0 && <p className="text-[10px] text-muted-foreground">无可用模型</p>}
                       {disc[i].ids.map((id) => (

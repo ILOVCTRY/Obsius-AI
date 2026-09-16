@@ -131,11 +131,11 @@ export function FunctionBrowser(
                   )}
                   style={{ position: "absolute", top: 0, left: 0, width: "100%", height: vi.size, transform: `translateY(${vi.start}px)` }}
                 >
-                  <span className={cn("min-w-0 flex-1 truncate font-mono text-[11px]", it.kb?.risk_tags.length && "text-[--status-error]")}>
+                  <span className={cn("min-w-0 flex-1 truncate font-mono text-[11px]", it.kb?.risk_tags.length && "text-(--status-error)")}>
                     {it.row.name}
                   </span>
                   {it.kb?.risk_tags[0] && (
-                    <span className="shrink-0 rounded bg-[--status-error]/15 px-1 text-[9px] text-[--status-error]">
+                    <span className="shrink-0 rounded bg-(--status-error)/15 px-1 text-[9px] text-(--status-error)">
                       {it.kb.risk_tags[0]}
                     </span>
                   )}

@@ -14,11 +14,11 @@ export function eventStyle(kind: string, payload?: Record<string, unknown>): Eve
       "task.published": { label: "📋 发布任务", className: "text-primary", defaultOpen: true },
       "task.claimed": { label: "🔧 认领任务", className: "text-muted-foreground", defaultOpen: false },
       "task.done": { label: "✅ 任务完成", className: "text-primary", defaultOpen: true },
-      "task.failed": { label: "❌ 任务失败", className: "text-[--status-error]", defaultOpen: true },
+      "task.failed": { label: "❌ 任务失败", className: "text-(--status-error)", defaultOpen: true },
       "task.updated": { label: "✏️ 编辑任务", className: "text-muted-foreground", defaultOpen: true },
       "task.reopened": { label: "♻️ 放回待认领", className: "text-primary", defaultOpen: true },
       "task.deleted": { label: "🗑 删除任务", className: "text-muted-foreground", defaultOpen: true },
-      "task.lease_expired": { label: "⏰ 租约过期", className: "text-[--status-approval]", defaultOpen: true },
+      "task.lease_expired": { label: "⏰ 租约过期", className: "text-(--status-approval)", defaultOpen: true },
       // A2 先规划后动手
       "task.plan_set": { label: "📐 制定计划", className: "text-sky-400", defaultOpen: true },
       "task.plan_revised": { label: "📐 修订计划", className: "text-sky-400", defaultOpen: true },
@@ -28,13 +28,13 @@ export function eventStyle(kind: string, payload?: Record<string, unknown>): Eve
   }
   if (kind === "command") return { label: "⚡ 执行命令", className: "text-foreground/80", defaultOpen: false }
   if (kind === "command.result") return { label: "↳ 命令输出", className: "text-muted-foreground", defaultOpen: false }
-  if (kind === "audit.deny") return { label: "🛡 网关拒绝", className: "text-[--status-approval]", defaultOpen: true }
+  if (kind === "audit.deny") return { label: "🛡 网关拒绝", className: "text-(--status-approval)", defaultOpen: true }
   if (kind === "finding.new" || kind === "finding.merged")
     return { label: "🔍 新发现", className: "text-primary", defaultOpen: true }
   if (kind === "finding.updated")
     return { label: "🔍 发现更新", className: "text-primary", defaultOpen: true }
   if (kind === "finding.retracted")
-    return { label: "🚫 发现撤回", className: "text-[--status-error]", defaultOpen: true }
+    return { label: "🚫 发现撤回", className: "text-(--status-error)", defaultOpen: true }
   if (kind === "message.inbox") {
     // A4：信息式增补（🔵）与撤回强提醒（⚠ 三选一）严格分样式；E8 人类引导直达
     if (payload?.kind === "human_note")
@@ -43,14 +43,14 @@ export function eventStyle(kind: string, payload?: Record<string, unknown>): Eve
       return { label: "🔵 发现增补", className: "text-sky-400", defaultOpen: true }
     if (payload?.kind === "basis_stale")
       return { label: "⚠ 依据撤回", className: "text-amber-400", defaultOpen: true }
-    return { label: "🔔 会话私信", className: "text-[--status-approval]", defaultOpen: true }
+    return { label: "🔔 会话私信", className: "text-(--status-approval)", defaultOpen: true }
   }
   if (kind === "task.basis_stale_done")
     return { label: "⚠ 推翻依据下完成", className: "text-amber-400", defaultOpen: true }
   if (kind === "binary.triaged")
     return { label: "🧊 样本分诊完成", className: "text-primary", defaultOpen: true }
   if (kind === "binary.triage_failed")
-    return { label: "⚠ 样本分诊失败", className: "text-[--status-error]", defaultOpen: true }
+    return { label: "⚠ 样本分诊失败", className: "text-(--status-error)", defaultOpen: true }
   if (kind === "binary.annotated")
     return { label: "⬆ 写回 IDA", className: "text-primary", defaultOpen: false }
   if (kind === "binary.names_pulled")
@@ -74,16 +74,17 @@ export function eventStyle(kind: string, payload?: Record<string, unknown>): Eve
     return { label: "⏸ 步数预算用尽", className: "text-amber-400", defaultOpen: true }
   if (kind === "kb.open") return { label: "📖 打开知识库", className: "text-muted-foreground", defaultOpen: false }
   if (kind === "skill.routed") return { label: "🎯 技能路由", className: "text-muted-foreground", defaultOpen: false }
-  if (kind === "proposal.created") return { label: "📝 变更提案", className: "text-[--status-approval]", defaultOpen: true }
+  if (kind === "proposal.created") return { label: "📝 变更提案", className: "text-(--status-approval)", defaultOpen: true }
   if (kind === "proposal.applied") return { label: "✅ 提案应用", className: "text-primary", defaultOpen: true }
   if (kind === "proposal.rejected") return { label: "⊘ 提案拒绝", className: "text-muted-foreground", defaultOpen: false }
   if (kind === "session.spawned") return { label: "🟢 会话开窗", className: "text-primary", defaultOpen: true }
-  if (kind === "session.paused") return { label: "⏸ 已暂停", className: "text-[--status-paused]", defaultOpen: true }
+  if (kind === "session.work_state") return { label: "⚙ worker 状态", className: "text-muted-foreground", defaultOpen: false }
+  if (kind === "session.paused") return { label: "⏸ 已暂停", className: "text-(--status-paused)", defaultOpen: true }
   if (kind === "session.resumed") return { label: "▶ 已恢复", className: "text-primary", defaultOpen: true }
-  if (kind === "session.aborted") return { label: "⛔ 人工中断", className: "text-[--status-error]", defaultOpen: true }
+  if (kind === "session.aborted") return { label: "⛔ 人工中断", className: "text-(--status-error)", defaultOpen: true }
   if (kind === "session.finished") return { label: "⚪ 会话收尾", className: "text-muted-foreground", defaultOpen: true }
-  if (kind === "approval.requested") return { label: "🔔 请求审批", className: "text-[--status-approval]", defaultOpen: true }
-  if (kind.startsWith("approval.")) return { label: "🔔 审批决定", className: "text-[--status-approval]", defaultOpen: true }
+  if (kind === "approval.requested") return { label: "🔔 请求审批", className: "text-(--status-approval)", defaultOpen: true }
+  if (kind.startsWith("approval.")) return { label: "🔔 审批决定", className: "text-(--status-approval)", defaultOpen: true }
   if (kind === "orch.proposed") return { label: "💡 编排提案", className: "text-amber-400", defaultOpen: true }
   if (kind === "orch.chain_started") return { label: "⛓🤖 L2 自动链启动", className: "text-primary", defaultOpen: true }
   // 停止原因（含急停/预算/异常）由 eventSummary 中文行呈现

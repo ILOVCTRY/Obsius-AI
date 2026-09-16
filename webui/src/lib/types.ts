@@ -117,6 +117,7 @@ export interface TaskContext {
 export interface TaskGraphSession {
   id: string
   name: string
+  role: string
   status: string
 }
 

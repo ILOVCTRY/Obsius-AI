@@ -160,7 +160,7 @@ export function ChainView({ pid, tick, onLocate }: Props) {
                 <button
                   type="button" title="删除链"
                   onClick={(e) => { e.stopPropagation(); setDeleting(c) }}
-                  className="text-muted-foreground hover:text-[--status-error]"
+                  className="text-muted-foreground hover:text-(--status-error)"
                 ><Trash2 className="size-3" /></button>
               </div>
               {c.goal && <p className="mt-0.5 truncate text-[10px] text-muted-foreground" title={c.goal}>{c.goal}</p>}
@@ -285,7 +285,7 @@ export function ChainView({ pid, tick, onLocate }: Props) {
             <AlertDialogCancel>取消</AlertDialogCancel>
             <AlertDialogAction
               onClick={confirmDelete}
-              className="bg-[--status-error] text-[--background] hover:opacity-90"
+              className="bg-(--status-error) text-(--background) hover:opacity-90"
             >
               删除
             </AlertDialogAction>

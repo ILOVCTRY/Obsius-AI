@@ -9,7 +9,7 @@ import { cn } from "@/lib/utils"
 export function ToolLamp({ state, label, hint }: { state: ToolState; label: string; hint?: string }) {
   // installed=青（后端可用）；cached=琥珀（仅缓存可读）；off=灰
   const color =
-    state === "installed" ? "bg-primary" : state === "cached" ? "bg-[--status-approval]" : "bg-muted-foreground/30"
+    state === "installed" ? "bg-primary" : state === "cached" ? "bg-(--status-approval)" : "bg-muted-foreground/30"
   return (
     <span className="flex items-center gap-1 font-mono text-[10px] text-muted-foreground" title={hint ?? `${label}: ${state}`}>
       <span className={cn("size-1.5 rounded-full", color)} />
@@ -121,7 +121,7 @@ export function SampleBar({
         </span>
       )}
       {triage?.packer_suspect && (
-        <span className="rounded bg-[--status-error]/15 px-1.5 py-0.5 text-[10px] text-[--status-error]">壳嫌疑</span>
+        <span className="rounded bg-(--status-error)/15 px-1.5 py-0.5 text-[10px] text-(--status-error)">壳嫌疑</span>
       )}
       {overview && (
         <span className="font-mono text-[10px] text-muted-foreground">
@@ -129,7 +129,7 @@ export function SampleBar({
         </span>
       )}
       {!overview?.cached && sha && (
-        <span className="text-[10px] text-[--status-approval]">
+        <span className="text-[10px] text-(--status-approval)">
           {triaging ? "headless 分诊中…" : "未分诊"}
         </span>
       )}

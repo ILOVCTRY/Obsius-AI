@@ -46,7 +46,7 @@ function FileItem({ active, exists, path, title, onClick, onDelete }: {
         {path}
       </button>
       {onDelete && (
-        <button className="px-1.5 text-[10px] text-[--status-error] opacity-0 transition-opacity group-hover:opacity-100"
+        <button className="px-1.5 text-[10px] text-(--status-error) opacity-0 transition-opacity group-hover:opacity-100"
                 onClick={onDelete} title="停用（删除即停用，.history 留备份）">✕</button>
       )}
     </div>
@@ -206,9 +206,9 @@ export function RulesPane({ track, cap, focus }: { track: string; cap: string; f
                       placeholder={missing ? "（文件不存在，输入内容后点「新建并保存」）" : undefined} />
             <div className="flex shrink-0 items-center gap-2 border-t pt-1 text-[10px] text-muted-foreground">
               <span>{content.length} 字</span>
-              <span className={dirty ? "text-[--status-approval]" : ""}>{dirty ? "● 未保存" : "已同步"}</span>
+              <span className={dirty ? "text-(--status-approval)" : ""}>{dirty ? "● 未保存" : "已同步"}</span>
               <span className="flex-1" />
-              <span className="text-[--status-approval]">
+              <span className="text-(--status-approval)">
                 红线是 Agent 的安全底线（build_rules_preamble 永久注入）；保存自动留 .history 备份可回滚。
               </span>
             </div>

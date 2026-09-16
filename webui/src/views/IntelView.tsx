@@ -29,8 +29,8 @@ function ArticleRow({ a, onToggle }: {
   return (
     <div className={cn("rounded border p-2 text-xs", a.read ? "opacity-60" : "")}>
       <div className="flex items-center gap-2">
-        {Number(a.is_priority) === 1 && <Badge className="bg-[--status-error] text-[9px] text-white">KEV/优先</Badge>}
-        {hot && <Badge variant="outline" className="text-[9px] text-[--status-approval]">热点</Badge>}
+        {Number(a.is_priority) === 1 && <Badge className="bg-(--status-error) text-[9px] text-white">KEV/优先</Badge>}
+        {hot && <Badge variant="outline" className="text-[9px] text-(--status-approval)">热点</Badge>}
         {a.direction && (
           <Badge variant="outline" className="text-[9px]">{DIRECTION_LABELS[a.direction] ?? a.direction}</Badge>
         )}
@@ -39,7 +39,7 @@ function ArticleRow({ a, onToggle }: {
         <span className="flex-1" />
         <button onClick={() => onToggle(a.id, { starred: !a.starred })}
                 title={a.starred ? "取消收藏" : "收藏"}
-                className={cn("px-1", a.starred ? "text-[--status-approval]" : "text-muted-foreground hover:text-foreground")}>
+                className={cn("px-1", a.starred ? "text-(--status-approval)" : "text-muted-foreground hover:text-foreground")}>
           {a.starred ? "★" : "☆"}
         </button>
         <button onClick={() => onToggle(a.id, { read: !a.read })}

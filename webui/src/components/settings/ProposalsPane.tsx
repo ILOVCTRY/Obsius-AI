@@ -126,7 +126,7 @@ export function ProposalsPane({ onPendingChange }: { onPendingChange?: (n: numbe
                 onClick={() => setSelId(p.id)}>
                 <span className="flex items-center gap-1">
                   <Badge variant="outline" className={cn("shrink-0 px-1 text-[9px]",
-                    p.mode === "delete" && "text-[--status-error]",
+                    p.mode === "delete" && "text-(--status-error)",
                     p.mode === "create" && "text-emerald-300")}>
                     {MODE_LABEL[p.mode] ?? p.mode}
                   </Badge>
@@ -168,9 +168,9 @@ export function ProposalsPane({ onPendingChange }: { onPendingChange?: (n: numbe
                 <span className="font-mono text-[11px] text-muted-foreground">{targetLabel(detail)}</span>
                 <span className="flex-1" />
                 <Badge variant="outline" className={cn("text-[10px]",
-                  detail.status === "pending" && "text-[--status-approval]",
+                  detail.status === "pending" && "text-(--status-approval)",
                   detail.status === "approved" && "text-emerald-300",
-                  detail.status === "rejected" && "text-[--status-error]")}>
+                  detail.status === "rejected" && "text-(--status-error)")}>
                   {STATUS_LABEL[detail.status]}
                 </Badge>
               </div>
@@ -192,14 +192,14 @@ export function ProposalsPane({ onPendingChange }: { onPendingChange?: (n: numbe
               </div>
 
               {!detail.live?.exists_now && detail.mode !== "create" && (
-                <p className="rounded border border-[--status-approval]/50 p-1.5 text-[11px] text-[--status-approval]">
+                <p className="rounded border border-(--status-approval)/50 p-1.5 text-[11px] text-(--status-approval)">
                   目标文件当前不在磁盘上（可能已被改名/删除）；应用前复核大概率失败。
                 </p>
               )}
 
               {detail.live?.refs && detail.live.refs.length > 0 && (
                 <div className="rounded border p-2 text-[11px]">
-                  <p className="font-semibold text-[--status-approval]">
+                  <p className="font-semibold text-(--status-approval)">
                     {detail.mode === "delete" ? "删除" : "改名"}影响面：{detail.live.refs.length} 处引用
                   </p>
                   {detail.live.refs.map((r, i) => (
@@ -223,7 +223,7 @@ export function ProposalsPane({ onPendingChange }: { onPendingChange?: (n: numbe
                 <DiffView diff={detail.live?.diff ?? ""} className="max-h-[40vh] overflow-auto" />
               </div>
 
-              {err && <p className="break-all text-[11px] text-[--status-error]">{err}</p>}
+              {err && <p className="break-all text-[11px] text-(--status-error)">{err}</p>}
 
               {detail.status === "pending" && (
                 reviseOpen ? (
@@ -257,7 +257,7 @@ export function ProposalsPane({ onPendingChange }: { onPendingChange?: (n: numbe
                     <Input value={rejectNote} onChange={(e) => setRejectNote(e.target.value)}
                            className="h-7 text-xs" placeholder="拒绝理由（可空）" />
                     <div className="flex justify-end gap-1.5">
-                      <Button size="sm" variant="outline" className="text-[--status-error]"
+                      <Button size="sm" variant="outline" className="text-(--status-error)"
                               disabled={busy}
                               onClick={() => act(async () => {
                                 await api.rejectProposal(detail.id, rejectNote)

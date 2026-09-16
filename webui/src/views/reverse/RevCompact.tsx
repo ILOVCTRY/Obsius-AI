@@ -95,8 +95,8 @@ export function RevCompact({ pid, onOpenWorkbench }: { pid: string; onOpenWorkbe
             className="block w-full border-b px-3 py-1.5 text-left hover:bg-accent/40"
           >
             <div className="flex items-center gap-2">
-              <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[--status-error]">{f.name}</span>
-              <span className="shrink-0 rounded bg-[--status-error]/15 px-1 text-[9px] text-[--status-error]">
+              <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-(--status-error)">{f.name}</span>
+              <span className="shrink-0 rounded bg-(--status-error)/15 px-1 text-[9px] text-(--status-error)">
                 {f.risk_tags[0]}
               </span>
             </div>
@@ -147,7 +147,7 @@ export function RevCompact({ pid, onOpenWorkbench }: { pid: string; onOpenWorkbe
               {overview.function_count} 函数 · 已分析 {overview.analyzed_count} · 风险 {overview.risk_count}
             </div>
             {!overview.cached && (
-              <div className="text-[10px] text-[--status-approval]">
+              <div className="text-[10px] text-(--status-approval)">
                 {triaging ? "headless 分诊中…" : "未分诊（缺少 IDA/Ghidra 后端时请在设置中检查工具）"}
               </div>
             )}

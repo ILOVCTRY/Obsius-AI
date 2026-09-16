@@ -147,7 +147,7 @@ export function IntelSourcePane() {
                    placeholder="源名" className="h-7 w-36 text-xs" />
             <Input value={f.url} onChange={(e) => setFeeds((fs) => fs.map((x, j) => j === i ? { ...x, url: e.target.value } : x))}
                    placeholder="RSS URL" className="h-7 flex-1 font-mono text-xs" />
-            <Button size="sm" variant="ghost" className="h-7 px-2 text-[10px] text-[--status-error]"
+            <Button size="sm" variant="ghost" className="h-7 px-2 text-[10px] text-(--status-error)"
                     onClick={() => saveFeeds(feeds.filter((_, j) => j !== i))}>✕</Button>
           </div>
         ))}
@@ -184,7 +184,7 @@ export function IntelSourcePane() {
             <Button size="sm" className="h-7 px-2 text-xs" onClick={() => saveProfile(profile)}>保存画像</Button>
           </div>
         )}
-        <p className="mt-2 text-[10px] text-[--status-approval]">
+        <p className="mt-2 text-[10px] text-(--status-approval)">
           抓取出站为平台自身可信请求（不经执行网关）；classifier 小模型缺席时自动降级规则打分，情报功能始终可用。
         </p>
       </div>
@@ -210,7 +210,7 @@ export function IntelSourcePane() {
               : "未配置——vault 只读，平台绝不写回；笔记正文仅本地搜索用，LLM 只看元数据。"}
           </p>
         </div>
-        <p className="mt-2 text-[10px] text-[--status-approval]">
+        <p className="mt-2 text-[10px] text-(--status-approval)">
           索引为全量重建，编辑笔记后手动点「重建索引」同步（v1 无自动监听）；树/搜索按上次索引快照展示。
         </p>
       </div>

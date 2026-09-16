@@ -171,7 +171,7 @@ export function AddChainEdgeDialog({ pid, req, chains, onDone, onClose }: {
 
           <div className="space-y-1">
             <label className="text-[11px] font-medium text-foreground">
-              边理由 edge_note <span className="text-[--status-error]">*</span>
+              边理由 edge_note <span className="text-(--status-error)">*</span>
             </label>
             <textarea
               className="min-h-16 w-full rounded-md border bg-transparent p-2 text-xs outline-none focus:ring-1 focus:ring-primary/40"
@@ -182,11 +182,11 @@ export function AddChainEdgeDialog({ pid, req, chains, onDone, onClose }: {
           </div>
 
           {targetBusy && (
-            <p className="text-[11px] text-[--status-approval]">
+            <p className="text-[11px] text-(--status-approval)">
               目标发现已在所选链中（链按 seq 相邻自动成边，不能重复挂接），请选其它链。
             </p>
           )}
-          {err && <p className="text-[11px] text-[--status-error]">{err}</p>}
+          {err && <p className="text-[11px] text-(--status-error)">{err}</p>}
 
           <div className="flex justify-end gap-2">
             <Button size="sm" variant="outline" onClick={onClose}>取消</Button>

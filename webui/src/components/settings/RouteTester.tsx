@@ -83,7 +83,7 @@ export function RouteTester({ tax, track }: { tax: Taxonomy | null; track: strin
                   <span className="font-mono text-primary">{h.name}</span>
                   <span className="font-mono text-[10px] text-muted-foreground">{h.kind}/{h.pack}</span>
                   <span className="font-mono text-[10px] text-muted-foreground">{h.score}</span>
-                  {!h.enabled && <span className="text-[10px] text-[--status-approval]">已禁用</span>}
+                  {!h.enabled && <span className="text-[10px] text-(--status-approval)">已禁用</span>}
                   <span className="flex-1" />
                   <span className="max-w-[45%] truncate text-[10px] text-muted-foreground"
                         title={h.matched.join(", ")}>{h.matched.join(", ")}</span>

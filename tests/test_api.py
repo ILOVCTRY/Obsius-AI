@@ -557,12 +557,25 @@ def test_pause_resume_abort_endpoints(client):
     for act in ("pause", "resume", "abort"):
         assert client.post(f"/api/sessions/sess-nope/{act}").status_code == 404
 
-    # 空闲暂停（无 job）→ 立即生效；重复暂停 → 409
+    # 空闲未武装暂停 → 409（不落 paused、无 session.paused 事件）
+    r = client.post(f"/api/sessions/{sid}/pause")
+    assert r.status_code == 409 and agent.paused is False
+    # 空闲已武装 → 只解除武装（F9），不落 paused 不发 session.paused
+    client.app.state.projects[pid].bb.set_session_meta(sid, {"worker_armed": True})
+    r = client.post(f"/api/sessions/{sid}/pause")
+    assert r.status_code == 200 and r.json()["status"] == "idle" and r.json()["disarmed"] is True
+    assert agent.paused is False
+    sessions = client.get(f"/api/projects/{pid}/sessions").json()
+    assert sessions[0]["status"] == "idle" and sessions[0]["worker_armed"] is False
+    assert not any(e["kind"] == "session.paused"
+                   for e in client.get(f"/api/projects/{pid}/events").json())
+    # 有认领任务但 worker 已退（孤儿认领）→ 无线程消费检查点，立即落 paused
+    agent.dispatcher.current_task_id = "task-sim"
     r = client.post(f"/api/sessions/{sid}/pause")
     assert r.status_code == 200 and r.json()["status"] == "paused"
     assert agent.paused is True
-    sessions = client.get(f"/api/projects/{pid}/sessions").json()
-    assert sessions[0]["status"] == "paused"
+    agent.dispatcher.current_task_id = None
+    assert client.get(f"/api/projects/{pid}/sessions").json()[0]["status"] == "paused"
     events = client.get(f"/api/projects/{pid}/events").json()
     assert any(e["kind"] == "session.paused" for e in events)
     assert client.post(f"/api/sessions/{sid}/pause").status_code == 409
@@ -712,15 +725,19 @@ def test_work_rehydrates_orphan_session(client):
 
 
 def test_pause_abort_rehydrate_orphan_session(client):
-    """暂停/中断端点同样对孤儿窗 rehydrate（旧行为一律 404）。"""
+    """暂停/中断端点同样对孤儿窗 rehydrate（旧行为一律 404）；空闲未武装暂停 409。"""
     rp = client.post("/api/projects", json={"name": "渗透-控制孤儿", "track": "assessment",
                                             "capabilities": ["web"]})
     pid = rp.json()["id"]
     sid = _orphan_session_row(client, pid)["id"]
 
     r = client.post(f"/api/sessions/{sid}/pause")
+    assert r.status_code == 409  # 空闲未武装：无事可暂停（但 409 前已完成 rehydrate）
+    assert sid in client.app.state.agents
+    # 模拟孤儿认领（worker 已退、任务仍占）→ 暂停立即落 paused
+    client.app.state.agents[sid].dispatcher.current_task_id = "task-sim"
+    r = client.post(f"/api/sessions/{sid}/pause")
     assert r.status_code == 200 and r.json()["status"] == "paused"
-    assert client.app.state.agents[sid].paused is True
     # rehydrate 后陈旧 running 行状态已回 idle，暂停落 paused
     assert client.get(f"/api/projects/{pid}/sessions").json()[0]["status"] == "paused"
     # 中断把暂停态收尾回 idle
@@ -809,8 +826,9 @@ def test_orchestrator_spawn_registers_agent(tmp_path):
         # 旧根因：这两个操作对编排开窗 404
         w = c.post(f"/api/agents/{sid}/work")
         assert w.status_code == 200
-        _wait_job(c, w.json()["job_id"])  # 空队列秒退，收尾后再暂停避免 409 竞态
-        assert c.post(f"/api/sessions/{sid}/pause").status_code == 200
+        _wait_job(c, w.json()["job_id"])  # 空队列秒退；编排窗默认 armed → 空闲暂停只解除武装
+        r = c.post(f"/api/sessions/{sid}/pause")
+        assert r.status_code == 200 and r.json()["status"] == "idle"
         kinds = [e["kind"] for e in c.app.state.projects[pid].bb.recent_events(pid)]
         assert "session.spawned" in kinds
 

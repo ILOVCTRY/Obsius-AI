@@ -93,7 +93,7 @@ export function AddToChainButton({ pid, nodeType, nodeId, disabled, title }: Pro
         <DialogContent>
           <DialogTitle>加入攻击链</DialogTitle>
           <DialogDescription>把该节点挂到一条已有链的链尾，或新建一条链。</DialogDescription>
-          {err && <p className="rounded bg-[--status-error]/10 p-1.5 text-[10px] text-[--status-error]">{err}</p>}
+          {err && <p className="rounded bg-(--status-error)/10 p-1.5 text-[10px] text-(--status-error)">{err}</p>}
           {msg && <p className="rounded bg-primary/10 p-1.5 text-[10px] text-primary">{msg}</p>}
           <div className="flex gap-1">
             <input

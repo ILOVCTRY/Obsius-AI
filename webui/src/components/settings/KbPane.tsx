@@ -84,7 +84,7 @@ export function KbPane({ cap, path, reloadKey, onDirtyChange, onSaved,
   if (loadErr) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 p-4 text-xs">
-        <p className="text-[--status-error]">{loadErr}</p>
+        <p className="text-(--status-error)">{loadErr}</p>
         <Button size="sm" variant="outline" onClick={reload}>重试</Button>
       </div>
     )
@@ -98,7 +98,7 @@ export function KbPane({ cap, path, reloadKey, onDirtyChange, onSaved,
         <Badge variant="outline" className="text-[10px]">{doc.source}</Badge>
         <span className="font-mono text-[10px] text-muted-foreground">{doc.size}B</span>
         <RefBadge refs={doc.refs} />
-        {saveErr && <span className="max-w-[30%] truncate text-[10px] text-[--status-error]" title={saveErr}>{saveErr}</span>}
+        {saveErr && <span className="max-w-[30%] truncate text-[10px] text-(--status-error)" title={saveErr}>{saveErr}</span>}
         <span className="flex-1" />
         <div className="flex rounded border text-[10px]">
           <button className={mode === "edit" ? "bg-primary/10 px-2 py-0.5 text-primary" : "px-2 py-0.5 text-muted-foreground"}
@@ -109,7 +109,7 @@ export function KbPane({ cap, path, reloadKey, onDirtyChange, onSaved,
         <HistoryButton file={path} source={historySource} onRolledBack={() => { reload(); onSaved() }} />
         <Button size="sm" variant="outline" className="text-[10px]"
                 onClick={() => onRename(path)}>改名</Button>
-        <Button size="sm" variant="outline" className="text-[10px] text-[--status-error]"
+        <Button size="sm" variant="outline" className="text-[10px] text-(--status-error)"
                 onClick={() => onDelete(path)}>删除</Button>
         <span className={saved ? "text-[10px] text-primary" : "text-[10px] opacity-0"}>已保存 ✓</span>
         <Button size="sm" onClick={save} disabled={!dirty || saving}>保存</Button>

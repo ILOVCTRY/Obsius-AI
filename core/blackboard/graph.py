@@ -32,10 +32,11 @@ def task_graph(bb: Any, project_id: str) -> dict[str, Any]:
     tq = TaskQueue(bb)
     tasks = tq.list_tasks(project_id)  # 1 条 SQL，出口已解析 JSON 列
 
+    # role 随节点下发：前端把存量会话（name=英文 role id）显示层映射为角色中文名
     sessions = {
-        r["id"]: {"id": r["id"], "name": r["name"], "status": r["status"]}
+        r["id"]: {"id": r["id"], "name": r["name"], "role": r["role"], "status": r["status"]}
         for r in bb.conn.execute(
-            "SELECT id, name, status FROM sessions WHERE project_id=?", (project_id,))
+            "SELECT id, name, role, status FROM sessions WHERE project_id=?", (project_id,))
     }
 
     # 会话→最近任务：claimed 优先 0，其余 1；同档按 updated_at 倒序，每组取首行

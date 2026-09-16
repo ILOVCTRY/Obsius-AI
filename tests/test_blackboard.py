@@ -1162,10 +1162,11 @@ def test_task_graph_parent_and_inbox_edges(bb, project):
     assert kinds == {"basis_stale", "finding_update"}
     assert inbox[0]["refs"][0]["title"] == "反射 XSS"  # findings 表标题优先
 
-    # 节点带会话信息与计划
+    # 节点带会话信息（含 role，前端显示层映射中文名）与计划
     tq.set_plan(t1, s1["id"], [{"title": "a"}, {"title": "b"}])
     n1 = next(n for n in task_graph(bb, pid)["nodes"] if n["id"] == t1)
-    assert n1["session"] == {"id": s1["id"], "name": "worker1", "status": "idle"}
+    assert n1["session"] == {"id": s1["id"], "name": "worker1", "role": "_generalist",
+                             "status": "idle"}
     assert len(n1["plan"]) == 2
     # 完成的任务节点保留（节点持久），实线不断
     tq.complete(t2, s2["id"], "完")

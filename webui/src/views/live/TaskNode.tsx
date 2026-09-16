@@ -67,7 +67,7 @@ export function TaskNode({ data }: NodeProps<TaskFlowNodeType>) {
         title="删除任务（claimed 当前步结束即硬中断；有子任务被后端 409 拒绝）"
         onClick={(e) => { e.stopPropagation(); onDelete(n) }}
         onDoubleClick={(e) => e.stopPropagation()}
-        className="absolute right-1 top-1 hidden rounded p-0.5 text-muted-foreground hover:text-[--status-error] group-hover:block"
+        className="absolute right-1 top-1 hidden rounded p-0.5 text-muted-foreground hover:text-(--status-error) group-hover:block"
       >
         <Trash2 className="size-3.5" />
       </button>
@@ -120,7 +120,7 @@ export function TaskNode({ data }: NodeProps<TaskFlowNodeType>) {
           <span className="flex-1 truncate text-[9px] text-muted-foreground">未认领 · 双击跳看板</span>
         )}
         {n.noise_budget !== "passive" && (
-          <span className="shrink-0 font-mono text-[9px] text-[--status-approval]">{n.noise_budget}</span>
+          <span className="shrink-0 font-mono text-[9px] text-(--status-approval)">{n.noise_budget}</span>
         )}
       </div>
 

@@ -10,8 +10,8 @@ import { fmtDateTime, utcTitle } from "@/lib/datetime"
 // 批 4：spawn_session（编排 L1 开窗申请）渲染专属卡，其余 action 维持通用 JSON 卡
 
 const RISK_COLOR: Record<string, string> = {
-  high: "text-[--status-error]",
-  medium: "text-[--status-approval]",
+  high: "text-(--status-error)",
+  medium: "text-(--status-approval)",
   low: "text-muted-foreground",
 }
 
@@ -64,7 +64,7 @@ export function ApprovalsView({ pid }: { pid: string }) {
     if (!r || r.status !== "approved") return null
     if (r.executed === false) {
       return (
-        <p className="mt-2 rounded border border-[--status-error]/50 bg-[--status-error]/10 p-2 text-[11px] text-[--status-error]">
+        <p className="mt-2 rounded border border-(--status-error)/50 bg-(--status-error)/10 p-2 text-[11px] text-(--status-error)">
           已批准，但自动建窗失败：{r.error}
           <br />审批保持「已批准」，可在直播间手动开 {asSpawnAction(a)?.role} 角色窗。
         </p>
@@ -91,7 +91,7 @@ export function ApprovalsView({ pid }: { pid: string }) {
           编排开窗申请（L1）/ 越界审批 / net:real / cross_target 等待批动作；批准与拒绝均落事件流审计
         </p>
       </div>
-      {error && <p className="text-sm text-[--status-error]">{error}</p>}
+      {error && <p className="text-sm text-(--status-error)">{error}</p>}
 
       <div className="space-y-2">
         {pending.length === 0 && (
@@ -101,7 +101,7 @@ export function ApprovalsView({ pid }: { pid: string }) {
           const spawn = asSpawnAction(a)
           const ri = spawn ? roles[spawn.role] : undefined
           return (
-            <div key={a.id} className="rounded-lg border border-[--status-approval]/40 p-3">
+            <div key={a.id} className="rounded-lg border border-(--status-approval)/40 p-3">
               <div className="flex items-center gap-2">
                 <Badge variant="outline" className={cn("font-mono text-[10px]", RISK_COLOR[a.risk])}>
                   风险 {a.risk}
@@ -159,7 +159,7 @@ export function ApprovalsView({ pid }: { pid: string }) {
                   <div className="flex items-center gap-2">
                     <Badge variant="outline"
                            className={cn("font-mono text-[10px]",
-                             a.status === "approved" ? "text-primary" : "text-[--status-error]")}>
+                             a.status === "approved" ? "text-primary" : "text-(--status-error)")}>
                       {a.status === "approved" ? "已批准" : "已拒绝"}
                     </Badge>
                     <span className="min-w-0 flex-1 truncate font-mono text-[11px]">

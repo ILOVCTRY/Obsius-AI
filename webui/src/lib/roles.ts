@@ -11,3 +11,13 @@ export function roleLabel(r: { name?: string | null; file: string }): string {
 export function roleName(name: string | null | undefined, id: string): string {
   return name || id
 }
+
+/** 会话页签/标题显示名：存量会话 name 冻结为英文 role id（v0.48 改名前创建），
+ *  显示层映射为角色中文名；「任务窗·…」与自定义名原样保留。无 role 时兜底 id/名字。 */
+export function sessionLabel(
+  s: { name?: string | null; role?: string | null; id?: string },
+  roleNames: Record<string, string>,
+): string {
+  if (s.role && (!s.name || s.name === s.role)) return roleNames[s.role] || s.role
+  return s.name || s.role || s.id || ""
+}

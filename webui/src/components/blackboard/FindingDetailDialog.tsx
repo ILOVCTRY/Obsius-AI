@@ -10,9 +10,9 @@ import { fmtDateTime, utcTitle } from "@/lib/datetime"
 // 发现详情弹窗（发现列表与评估攻击链画布共用）：复现步骤 + POC，全部一键复制。
 
 const SEVERITY_COLOR: Record<string, string> = {
-  critical: "text-[--status-error]",
-  high: "text-[--status-error]",
-  medium: "text-[--status-approval]",
+  critical: "text-(--status-error)",
+  high: "text-(--status-error)",
+  medium: "text-(--status-approval)",
   low: "text-muted-foreground",
   info: "text-muted-foreground",
 }

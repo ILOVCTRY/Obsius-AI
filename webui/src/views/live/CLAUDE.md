@@ -10,6 +10,7 @@
 
 ## 文件
 
+- `PlanPanel.tsx` — 直播间类型过滤栏「计划」**特殊标签**（2026-09-16）的结构化面板：选中时由 LiveRoom 渲染本组件替代事件流。GET /tasks 3s 轮询（仅激活时挂载），按 activeTab 过滤（`sess-x`=claimed_by 匹配，`__all`/`__orch`=全项目总览）；任务卡=四态徽章+▦ done/total+步骤列表（○/▶/●/■ 图标对齐后端 _render_plan，blocked 显 note，时间走 datetime.ts）；排序 doing/blocked 步在前→任务态→priority→updated_at；不做事件订阅，纯轮询。
 - `TaskFlow.tsx` — 主视图（自带 ReactFlowProvider）：3s 轮询 `api.taskGraph` + wsBump 300ms 去抖重拉（**本组件不另开 WS**）；选中私信边浮卡；节点删除 AlertDialog（四态可删、claimed 硬中断文案、409 子任务错误直显）。
 - `TaskNode.tsx` — 任务卡：四态色条/边框（open 灰、claimed 青、done 绿、failed 红）、objective 两行截断、`▦ done/total` + doing 标题 + blocked 琥珀原因、认领会话名（claimed 且暂停时 ⏸ 琥珀）、hover 显删除钮；**双击**=有活会话挂回直播、否则派 window `goto-tasks` 事件（App.tsx 监听后切任务看板并高亮卡片）；**C10** `↻N` 徽章（node.attempts≥2，来自 graph.py 节点字段）。
 - `TaskFlowEdge.tsx` — parent 灰实线箭头（不可点）；inbox 紫虚边 + EdgeLabelRenderer 内 ✉/✉n 圆形标签，点击选中出浮卡（basis_stale=⚠依据撤回 / finding_update=🔵发现增补，refs 全列）。

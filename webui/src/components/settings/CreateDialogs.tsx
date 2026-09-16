@@ -17,7 +17,7 @@ const SLUG_HINT = "英文 slug：字母/数字/_-/.，1-64 字符（如 web-reco
 
 function ErrorLine({ err }: { err: string | null }) {
   if (!err) return null
-  return <p className="break-all text-[11px] text-[--status-error]">{err}</p>
+  return <p className="break-all text-[11px] text-(--status-error)">{err}</p>
 }
 
 export function RoleCreateDialog({ open, onOpenChange, track, roles, onCreated }: {
@@ -276,7 +276,7 @@ export function KbRenameDialog({ open, onOpenChange, cap, path, onRenamed }: {
               </p>
             ))}
             {result.skipped_relative.length > 0 && (
-              <p className="mt-1 text-[10px] text-[--status-approval]">
+              <p className="mt-1 text-[10px] text-(--status-approval)">
                 {result.skipped_relative.length} 个文件只用相对链接引用，无法安全自动替换，请手工检查：
                 {result.skipped_relative.slice(0, 5).join("、")}
                 {result.skipped_relative.length > 5 ? " …" : ""}

@@ -429,7 +429,7 @@ function Canvas({ pid, findings, assets, onMutated }: {
                 <p className="min-w-0 flex-1 truncate text-[11px] font-medium">{selectedEdge.chainName}</p>
                 <button
                   type="button"
-                  className="rounded border border-[--status-error]/40 px-2 py-0.5 text-[10px] text-[--status-error] hover:bg-[--status-error]/10"
+                  className="rounded border border-(--status-error)/40 px-2 py-0.5 text-[10px] text-(--status-error) hover:bg-(--status-error)/10"
                   onClick={deleteSelectedEdge}
                 >
                   删除链边

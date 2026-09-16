@@ -86,7 +86,7 @@ export function MatrixPane({ tax, track, onFocusSkill }: {
           行=全部能力包 ∪ 本轨技能（按来源分组）；列=「{track}」轨角色。✓=在该角色技能白名单内，
           ·=skills 为 null（全放行），空白=不挂。红=悬空引用或未注册 task_type，黄=引用了已禁用技能。
         </p>
-        {err && <p className="text-xs text-[--status-error]">{err}</p>}
+        {err && <p className="text-xs text-(--status-error)">{err}</p>}
 
         {/* 技能矩阵（转置：技能为行、角色为列；表窄居中、表宽横滚，边框贴住表格） */}
         <div className="flex justify-center">

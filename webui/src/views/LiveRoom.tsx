@@ -3,9 +3,10 @@ import { GitFork, X } from "lucide-react"
 
 // A3 任务流视图（第三个 React Flow 图）：懒加载，@xyflow/react 不进直播间主包
 const TaskFlow = lazy(() => import("./live/TaskFlow").then((m) => ({ default: m.TaskFlow })))
-import { api, pollJob } from "@/lib/api"
+import { PlanPanel } from "./live/PlanPanel"
+import { ApiError, api, pollJob } from "@/lib/api"
 import { eventStyle, eventSummary } from "@/lib/events"
-import { roleName } from "@/lib/roles"
+import { roleName, sessionLabel } from "@/lib/roles"
 import { useEvents } from "@/lib/useEvents"
 import { fmtTime, parseTs, utcTitle } from "@/lib/datetime"
 import type { Autonomy, BBEvent, ModelInfo, OrchProposal, OrchTickResult, ProjectUsage, ReplanResult, RoleInfo, Session } from "@/lib/types"
@@ -96,7 +97,7 @@ function BudgetPopover({ usage, onClose, onSave }: {
       <label className="mb-1 mt-2 block text-muted-foreground">自主任务数预算（编排发布；留空不限）</label>
       <input className={field} type="number" min={1} placeholder="不限" value={taskB}
              onChange={(e) => setTaskB(e.target.value)} />
-      {err && <p className="mt-2 text-[--status-error]">{err}</p>}
+      {err && <p className="mt-2 text-(--status-error)">{err}</p>}
       <Button size="sm" className="mt-3 w-full" disabled={saving} onClick={save}>
         {saving ? "保存中…" : "保存"}
       </Button>
@@ -218,8 +219,8 @@ function ModePopover({ usage, pid, onClose, onSave }: {
           className={cn("inline-block size-2 rounded-full",
             usage.auto_derive
               ? (usage.tokens.pct !== null && usage.tokens.pct >= 100) || usage.paused
-                ? "bg-[--status-approval]"
-                : "bg-[--status-ok]"
+                ? "bg-(--status-approval)"
+                : "bg-(--status-ok)"
               : "bg-muted-foreground/40")}
           title={usage.auto_derive
             ? (usage.paused ? "已暂停：自动派生暂被拦住" : "自动派生已开启：任务空时自动派生新任务")
@@ -241,15 +242,15 @@ function ModePopover({ usage, pid, onClose, onSave }: {
         </button>
         <button
           className={cn("flex-1 rounded border px-2 py-1",
-            mode === "redteam" ? "border-[--status-error]/60 bg-[--status-error]/10 text-[--status-error]" : "text-muted-foreground")}
+            mode === "redteam" ? "border-(--status-error)/60 bg-(--status-error)/10 text-(--status-error)" : "text-muted-foreground")}
           onClick={() => setMode("redteam")}
         >
           红队行动
         </button>
       </div>
       {mode === "redteam" && (
-        <div className="mb-2 space-y-1 rounded border border-[--status-approval]/40 p-2">
-          <p className="text-[10px] text-[--status-approval]">ROE 四要素（必填，留档审计）</p>
+        <div className="mb-2 space-y-1 rounded border border-(--status-approval)/40 p-2">
+          <p className="text-[10px] text-(--status-approval)">ROE 四要素（必填，留档审计）</p>
           <input className={field} value={targets} onChange={(e) => setTargets(e.target.value)}
                  placeholder="① 授权目标清单" />
           <input className={field} value={window_} onChange={(e) => setWindow_(e.target.value)}
@@ -337,7 +338,7 @@ function ModePopover({ usage, pid, onClose, onSave }: {
         ① 勾选「任务空时自动派生」② 点保存——勾选状态下会立即启动一轮编排，之后任务空了自动续批；
         也可用输入框「指挥编排」直接下达一次性指令。判据全部达成或资产穷尽（uncovered=0）时自动收工。
       </p>
-      {err && <p className="mt-2 text-[--status-error]">{err}</p>}
+      {err && <p className="mt-2 text-(--status-error)">{err}</p>}
       <Button size="sm" className="mt-2 w-full" disabled={saving} onClick={save}>
         {saving ? "保存中…" : "保存"}
       </Button>
@@ -357,6 +358,9 @@ const FILTERS = [
       k === "command" || k === "command.result" || k === "audit.deny" },
   { key: "finding", label: "发现", match: (k: string) =>
       k.startsWith("finding.") || k === "func.upsert" || k === "asset.new" },
+  // 「计划」是特殊标签：选中时主区渲染 PlanPanel（结构化任务计划/进度）而非事件流，match 仅供类型完整
+  { key: "plan", label: "计划", match: (k: string) =>
+      k === "task.plan_set" || k === "task.plan_revised" || k === "task.step" },
 ] as const
 
 function sessionStatus(sessionId: string, events: BBEvent[]): SessionStatus {
@@ -470,13 +474,17 @@ export function LiveRoom({ pid }: { pid: string }) {
     api.readSessionInbox(sid).catch(() => {})
   }, [activeTab])
 
-  // 页签：全部 / Orchestrator（无 session_id 的编排事件）/ 各会话（已关闭/已分离的隐藏）
+  // 角色中文名映射（事件流「提议开窗」摘要 / 会话页签显中文）
+  const roleNames = useMemo(
+    () => Object.fromEntries(roles.map((r) => [r.role, r.name || r.role])),
+    [roles])
+  // 页签：全部 / 编排（无 session_id 的编排事件）/ 各会话（已关闭/已分离的隐藏）
   const tabs: Tab[] = useMemo(() => [
     { key: "__all", label: "全部", sessionId: null },
-    { key: "__orch", label: "Orchestrator", sessionId: "__orch" },
+    { key: "__orch", label: "编排", sessionId: "__orch" },
     ...sessions.filter((s) => s.status !== "closed" && !detached.has(s.id))
-      .map((s) => ({ key: s.id, label: s.name || s.role, sessionId: s.id })),
-  ], [sessions, detached])
+      .map((s) => ({ key: s.id, label: sessionLabel(s, roleNames), sessionId: s.id })),
+  ], [sessions, detached, roleNames])
   // 已分离但会话仍在册（未关窗）的页签——挂回入口
   const detachedSessions = useMemo(
     () => sessions.filter((s) => s.status !== "closed" && detached.has(s.id)),
@@ -698,10 +706,6 @@ export function LiveRoom({ pid }: { pid: string }) {
       .filter((s) => s.status !== "closed" && sessionStatus(s.id, events) === "paused")
       .map((s) => s.id)),
     [sessions, events])
-  // 角色中文名映射（事件流「提议开窗」摘要显中文）
-  const roleNames = useMemo(
-    () => Object.fromEntries(roles.map((r) => [r.role, r.name || r.role])),
-    [roles])
   // F9 状态灯：事件流派生叠加 armed——armed 且事件流判空闲 → 绿点「已启动待命」；
   // 未 armed 空闲保持灰点（未启动）。armed 数据来自 sessions 轮询（GET sessions 增强）。
   const sessionsById = useMemo(() => new Map(sessions.map((s) => [s.id, s])), [sessions])
@@ -711,7 +715,8 @@ export function LiveRoom({ pid }: { pid: string }) {
     // 稳定事实优先：worker job 在跑（服务端 JobRegistry）→ 恒亮青灯，
     // 不受事件窗口截断（窗口外会话 events 为空）与 2 分钟阈值抖动影响
     if (s?.worker_running) return "running"
-    if (st === "idle" && s?.worker_armed) return "armed"
+    // F9 worker 模型下排空队列也落 session.finished（非终态），armed 待命要盖过 idle/finished
+    if (s?.worker_armed && (st === "idle" || st === "finished")) return "armed"
     return st
   }, [events, sessionsById])
   // A3 任务流 WS bump：只数图关心的事件（3s 轮询兜底，组件内去抖重拉）
@@ -749,11 +754,15 @@ export function LiveRoom({ pid }: { pid: string }) {
       : action === "resume" ? api.resumeSession : api.abortSession
     const label = action === "pause" ? "暂停" : action === "resume" ? "恢复" : "中断"
     try {
-      await fn(sid)
-      setJobInfo(`${label}请求已发送（当前步做完后生效）`)
+      const res = await fn(sid)
+      // 空闲已武装窗的暂停只解除武装（不落 paused），单独提示
+      setJobInfo(res.status === "idle"
+        ? "已解除武装：窗不再自动接任务，点「跑任务队列」重新启动"
+        : `${label}请求已发送（当前步做完后生效）`)
       refreshSessions()
     } catch (e) {
-      setJobInfo(`${label}失败：${e}`)
+      const msg = e instanceof ApiError && typeof e.data === "string" && e.data ? e.data : String(e)
+      setJobInfo(`${label}失败：${msg}`)
     }
   }
 
@@ -864,7 +873,7 @@ export function LiveRoom({ pid }: { pid: string }) {
               {t.sessionId && t.sessionId !== "__orch" && (unreadBySid.get(t.sessionId) ?? 0) > 0 && (
                 <span
                   title="有系统私信（依据撤回需自评 / 发现增补通知）"
-                  className="inline-flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-[--status-error] px-1 text-[9px] font-bold leading-none text-white"
+                  className="inline-flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-(--status-error) px-1 text-[9px] font-bold leading-none text-white"
                 >
                   {(unreadBySid.get(t.sessionId) ?? 0) > 9 ? "9+" : unreadBySid.get(t.sessionId)}
                 </span>
@@ -905,9 +914,9 @@ export function LiveRoom({ pid }: { pid: string }) {
                     className="flex w-full items-center gap-1.5 rounded px-2 py-1 text-left text-xs hover:bg-accent"
                   >
                     <StatusDot status={tabStatus(s.id)} />
-                    <span className="min-w-0 flex-1 truncate">{s.name || s.role}</span>
+                    <span className="min-w-0 flex-1 truncate">{sessionLabel(s, roleNames)}</span>
                     {(unreadBySid.get(s.id) ?? 0) > 0 && (
-                      <span className="inline-flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-[--status-error] px-1 text-[9px] font-bold leading-none text-white">
+                      <span className="inline-flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-(--status-error) px-1 text-[9px] font-bold leading-none text-white">
                         {unreadBySid.get(s.id)}
                       </span>
                     )}
@@ -942,7 +951,7 @@ export function LiveRoom({ pid }: { pid: string }) {
             <GitFork className="size-3" />任务流
           </button>
         </div>
-        <span className={cn("ml-1 shrink-0 font-mono text-[10px]", connected ? "text-primary" : "text-[--status-error]")}>
+        <span className={cn("ml-1 shrink-0 font-mono text-[10px]", connected ? "text-primary" : "text-(--status-error)")}>
           {connected ? "● live" : "○ 重连中"}
         </span>
       </div>
@@ -1029,7 +1038,7 @@ export function LiveRoom({ pid }: { pid: string }) {
               className={cn(
                 "h-8 rounded-md border px-2 text-xs disabled:opacity-50",
                 usage.paused
-                  ? "border-[--status-paused] text-[--status-paused]"
+                  ? "border-(--status-paused) text-(--status-paused)"
                   : "text-muted-foreground hover:bg-accent",
               )}
             >
@@ -1060,7 +1069,7 @@ export function LiveRoom({ pid }: { pid: string }) {
               >
                 <span className={usage.tokens.budget
                   ? (usage.tokens.pct ?? 0) >= 1
-                    ? "text-[--status-error]"
+                    ? "text-(--status-error)"
                     : (usage.tokens.pct ?? 0) >= 0.8 ? "text-amber-400" : "text-muted-foreground"
                   : "text-muted-foreground"}>
                   ∑ {fmtTokens(usage.tokens.used)}
@@ -1070,7 +1079,7 @@ export function LiveRoom({ pid }: { pid: string }) {
                 </span>
                 <span className={usage.tasks.budget
                   ? (usage.tasks.pct ?? 0) >= 1
-                    ? "text-[--status-error]"
+                    ? "text-(--status-error)"
                     : (usage.tasks.pct ?? 0) >= 0.8 ? "text-amber-400" : "text-muted-foreground"
                   : "text-muted-foreground"}>
                   📋 {usage.tasks.published}
@@ -1104,7 +1113,7 @@ export function LiveRoom({ pid }: { pid: string }) {
                 {budgetPausedSids.has(activeSession.id) ? "▶ 继续" : "▶ 恢复"}
               </Button>
               <Button size="sm" variant="outline"
-                      className="text-[--status-error] hover:text-[--status-error]"
+                      className="text-(--status-error) hover:text-(--status-error)"
                       onClick={() => setAbortTarget(activeSession.id)}>
                 ⛔ 中断
               </Button>
@@ -1119,7 +1128,7 @@ export function LiveRoom({ pid }: { pid: string }) {
                 ⏸ 暂停
               </Button>
               <Button size="sm" variant="outline"
-                      className="text-[--status-error] hover:text-[--status-error]"
+                      className="text-(--status-error) hover:text-(--status-error)"
                       onClick={() => setAbortTarget(activeSession.id)}>
                 ⛔ 中断
               </Button>
@@ -1131,7 +1140,7 @@ export function LiveRoom({ pid }: { pid: string }) {
             size="sm" variant="outline"
             title="F9 优雅关窗：执行中不中断，跑完当前任务后自动关闭（不再接新任务）；空闲立即关"
             onClick={() => {
-              if (window.confirm(`结束会话「${activeSession.name || activeSession.role}」？执行中的任务会完整跑完后自动关闭（不再接新任务）。`))
+              if (window.confirm(`结束会话「${sessionLabel(activeSession, roleNames)}」？执行中的任务会完整跑完后自动关闭（不再接新任务）。`))
                 void closeSession(activeSession.id)
             }}
           >
@@ -1205,7 +1214,7 @@ export function LiveRoom({ pid }: { pid: string }) {
         </Button>
         <div className="relative">
           <Button size="sm" variant="outline"
-                  className={cn("gap-1.5", usage?.mode === "redteam" && "text-[--status-error]")}
+                  className={cn("gap-1.5", usage?.mode === "redteam" && "text-(--status-error)")}
                   title="作战模式与 mission（§6.9）：pentest/redteam 切换（redteam 需 ROE 四要素）"
                   onClick={() => setModeOpen((o) => !o)}>
             {/* C2 状态灯：绿=自动派生运行中 / 琥珀=被闸暂拦 / 灰=关闭 */}
@@ -1213,8 +1222,8 @@ export function LiveRoom({ pid }: { pid: string }) {
               className={cn("inline-block size-2 rounded-full",
                 usage?.auto_derive
                   ? (usage.paused || (usage.tokens.pct !== null && usage.tokens.pct >= 100))
-                    ? "bg-[--status-approval]"
-                    : "bg-[--status-ok]"
+                    ? "bg-(--status-approval)"
+                    : "bg-(--status-ok)"
                   : "bg-muted-foreground/40")}
               title={usage?.auto_derive
                 ? (usage.paused ? "自动派生被暂停拦住" : "自动派生运行中：任务空时自动派生新任务")
@@ -1269,7 +1278,10 @@ export function LiveRoom({ pid }: { pid: string }) {
         {jobInfo && <span className="ml-auto font-mono text-xs text-muted-foreground">{jobInfo}</span>}
       </div>
 
-      {/* 事件流（倒序流：滚动容器自身 column-reverse，scrollTop=0 即最新，贴底由浏览器布局保证） */}
+      {/* 「计划」标签：结构化计划/进度面板替代事件流（GET /tasks，3s 轮询仅在本标签激活时跑） */}
+      {filter === "plan" ? (
+        <PlanPanel pid={pid} activeTab={activeTab} sessions={sessions} />
+      ) : (
       <div
         ref={listRef}
         className="flex min-h-0 flex-1 flex-col-reverse overflow-auto px-3"
@@ -1350,6 +1362,7 @@ export function LiveRoom({ pid }: { pid: string }) {
             </button>
           )}
       </div>
+      )}
 
       {/* 插话输入（人类插手通道 §6.4）：发任务=human 名义 passive 任务；E8 引导会话=human_note 直达选中会话 */}
       <div className="flex items-center gap-2 border-t p-3">
@@ -1390,7 +1403,7 @@ export function LiveRoom({ pid }: { pid: string }) {
             ? "指挥编排器：一句话目标（如「对已登记资产做漏洞挖掘」）——自动触发编排拆解/分资产/开窗…"
             : inputMode === "note"
             ? (activeSession
-                ? `引导「${activeSession.name || activeSession.role}」：一句话指示，步边界注入不打断当前工作…`
+                ? `引导「${sessionLabel(activeSession, roleNames)}」：一句话指示，步边界注入不打断当前工作…`
                 : "引导会话：先选中一个会话页签…")
             : "插话：向黑板发布一个任务或一条指示…"}
           value={remark}

@@ -89,7 +89,7 @@ export function HistoryButton({ file, onRolledBack, className, source, label = "
           <DialogDescription className="font-mono text-[10px]">
             {file}{!exists && "（当前文件不存在，回滚可恢复）"}
           </DialogDescription>
-          {err && <p className="text-xs text-[--status-error]">{err}</p>}
+          {err && <p className="text-xs text-(--status-error)">{err}</p>}
           {versions.length === 0
             ? <p className="py-6 text-center text-xs text-muted-foreground">暂无历史版本（每次保存/回滚自动备份）</p>
             : (

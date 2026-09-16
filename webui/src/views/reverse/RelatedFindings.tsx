@@ -83,7 +83,7 @@ export function RelatedFindings({ pid, findings, assetId, addr, kbId, onChanged,
 
   return (
     <div className="space-y-1.5 p-2">
-      {err && <p className="rounded bg-[--status-error]/10 p-1.5 text-[10px] text-[--status-error]">{err}</p>}
+      {err && <p className="rounded bg-(--status-error)/10 p-1.5 text-[10px] text-(--status-error)">{err}</p>}
       {related.map((f) => {
         const cat = typeof f.evidence?.category === "string"
           ? FINDING_CATEGORY_LABEL[f.evidence.category as string] ?? f.evidence.category

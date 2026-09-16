@@ -75,7 +75,7 @@ export function AddNodeDialog({ pid, chainId, existing, open, onOpenChange, onAd
           value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜索名称 / 地址 / 标题…"
           className="h-8 rounded-md border bg-background px-2 text-xs outline-none focus:border-primary"
         />
-        {err && <p className="rounded bg-[--status-error]/10 p-1.5 text-[10px] text-[--status-error]">{err}</p>}
+        {err && <p className="rounded bg-(--status-error)/10 p-1.5 text-[10px] text-(--status-error)">{err}</p>}
         <Tabs defaultValue="func_kb">
           <TabsList>
             <TabsTrigger value="func_kb">函数知识</TabsTrigger>

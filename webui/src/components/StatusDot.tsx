@@ -5,12 +5,12 @@ import { cn } from "@/lib/utils"
 export type SessionStatus = "running" | "idle" | "approval" | "error" | "finished" | "paused" | "armed"
 
 const COLOR: Record<SessionStatus, string> = {
-  running: "bg-[--status-running]",
-  idle: "bg-[--status-idle]",
-  approval: "bg-[--status-approval]",
-  error: "bg-[--status-error]",
+  running: "bg-(--status-running)",
+  idle: "bg-(--status-idle)",
+  approval: "bg-(--status-approval)",
+  error: "bg-(--status-error)",
   finished: "bg-muted-foreground/40",
-  paused: "bg-[--status-paused]",
+  paused: "bg-(--status-paused)",
   armed: "bg-emerald-500",
 }
 

@@ -16,9 +16,9 @@ import { FindingDetailDialog } from "@/components/blackboard/FindingDetailDialog
 // 发现 tab 内 assessment 轨额外提供「列表｜链路」子视图（攻击链画布，E1）。
 
 const SEVERITY_COLOR: Record<string, string> = {
-  critical: "text-[--status-error]",
-  high: "text-[--status-error]",
-  medium: "text-[--status-approval]",
+  critical: "text-(--status-error)",
+  high: "text-(--status-error)",
+  medium: "text-(--status-approval)",
   low: "text-muted-foreground",
   info: "text-muted-foreground",
 }
@@ -76,8 +76,8 @@ function Chip({ active, onClick, children }: { active: boolean; onClick: () => v
 
 // CTF 线索级别（C2 换词表）：severity 字段在 ctf 轨的语义映射与展示色
 const CTF_LEVEL: Record<string, { label: string; cls: string }> = {
-  critical: { label: "关键突破", cls: "text-[--status-error]" },
-  high: { label: "有效线索", cls: "text-[--status-approval]" },
+  critical: { label: "关键突破", cls: "text-(--status-error)" },
+  high: { label: "有效线索", cls: "text-(--status-approval)" },
   medium: { label: "背景信息", cls: "text-muted-foreground" },
   low: { label: "背景信息", cls: "text-muted-foreground" },
   info: { label: "背景信息", cls: "text-muted-foreground" },
@@ -238,10 +238,10 @@ function Findings({ pid, compact, track, showCanvas }: {
           <>
             <Chip active={levelFilter === ""} onClick={() => setLevelFilter("")}>全部</Chip>
             <Chip active={levelFilter === "critical"} onClick={() => setLevelFilter(levelFilter === "critical" ? "" : "critical")}>
-              <span className="text-[--status-error]">关键突破</span>
+              <span className="text-(--status-error)">关键突破</span>
             </Chip>
             <Chip active={levelFilter === "high"} onClick={() => setLevelFilter(levelFilter === "high" ? "" : "high")}>
-              <span className="text-[--status-approval]">有效线索</span>
+              <span className="text-(--status-approval)">有效线索</span>
             </Chip>
             <Chip active={levelFilter === "bg"} onClick={() => setLevelFilter(levelFilter === "bg" ? "" : "bg")}>背景信息</Chip>
             <Chip active={levelFilter === "dead"} onClick={() => setLevelFilter(levelFilter === "dead" ? "" : "dead")}>
@@ -368,7 +368,7 @@ function Findings({ pid, compact, track, showCanvas }: {
 // 「有发现」= 该资产挂 verified finding 的前端反查（结论以 findings 为准，AI 不自报）
 function AssetBadges({ a, hasFinding }: { a: Asset; hasFinding?: boolean }) {
   if (hasFinding)
-    return <Badge variant="outline" className="text-[10px] text-[--status-error]">有发现</Badge>
+    return <Badge variant="outline" className="text-[10px] text-(--status-error)">有发现</Badge>
   const s = a.status === "open" && a.meta?.scanned ? "visited" : a.status
   if (s === "visited")
     return <Badge variant="outline" className="text-[10px] text-muted-foreground">已访问</Badge>
@@ -531,7 +531,7 @@ function Assets({ pid, compact, tree = false }: { pid: string; compact?: boolean
                    onKeyDown={(e) => e.key === "Enter" && add()} />
             <Button size="sm" onClick={add} disabled={!value.trim()}>添加</Button>
           </div>
-          {err && <p className="mt-1 text-[10px] text-[--status-error]">{err}</p>}
+          {err && <p className="mt-1 text-[10px] text-(--status-error)">{err}</p>}
         </div>
       )}
     </div>
@@ -558,7 +558,7 @@ function Funcs({ pid }: { pid: string }) {
               <span className="font-mono text-xs text-primary">{f.name}</span>
               <span className="font-mono text-[10px] text-muted-foreground">@{hexAddr(f.address)}</span>
               {f.risk_tags.length > 0 && (
-                <span className="font-mono text-[10px] text-[--status-approval]">{f.risk_tags.join(",")}</span>
+                <span className="font-mono text-[10px] text-(--status-approval)">{f.risk_tags.join(",")}</span>
               )}
               <span className="flex-1" />
               <span className="font-mono text-[10px] text-muted-foreground">{f.confidence}</span>

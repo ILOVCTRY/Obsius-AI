@@ -95,7 +95,7 @@ export function FunctionDetail({
         {kb?.risk_tags?.length ? (
           <div className="mt-1 flex flex-wrap gap-1">
             {kb.risk_tags.map((t) => (
-              <span key={t} className="rounded bg-[--status-error]/15 px-1.5 text-[10px] text-[--status-error]">{t}</span>
+              <span key={t} className="rounded bg-(--status-error)/15 px-1.5 text-[10px] text-(--status-error)">{t}</span>
             ))}
           </div>
         ) : null}
