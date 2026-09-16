@@ -442,12 +442,28 @@ export function LiveRoom({ pid }: { pid: string }) {
   })
   // 新事件自动滚底（仅当原本就在底部附近）
   const stickToBottom = useRef(true)
+  const prevTop = useRef(0)
   const totalSize = virtualizer.getTotalSize()
   useEffect(() => {
     if (!stickToBottom.current) return
     const el = listRef.current
     if (el) el.scrollTop = el.scrollHeight
   }, [visible.length, totalSize])
+  // 容器滚动：贴底附近恢复跟随；只有视口上移（用户上翻）才解除跟随。
+  // 不能用「距底>60 就解锁」——回放/测量修正期间程序化滚动的 scroll 事件
+  // 派发晚于内容增长，瞬时 d 可超 60，会误锁成 false 永久停更（历史 bug）。
+  // 贴底追赶时 scrollTop 只增不减；收缩钳制落点 d=0 走恢复分支，均不误判。
+  const handleListScroll = () => {
+    const el = listRef.current
+    if (!el) return
+    const d = el.scrollHeight - el.scrollTop - el.clientHeight
+    if (stickToBottom.current) {
+      if (d >= 60 && el.scrollTop < prevTop.current - 1) stickToBottom.current = false
+    } else if (d < 60) {
+      stickToBottom.current = true
+    }
+    prevTop.current = el.scrollTop
+  }
   // 切上下文（会话页签/类型筛选）= 用户要看最新：重置贴底并立即对齐一次
   useEffect(() => {
     stickToBottom.current = true
@@ -551,13 +567,14 @@ export function LiveRoom({ pid }: { pid: string }) {
     }
   }
 
-  // 复盘沉淀：planner LLM 复盘本项目任务 → 变更提案进设置「提案」tab 等人审（无 key 503）
+  // F8 会话级复盘：planner LLM 复盘本会话跑过的任务 → 变更提案进设置「提案」tab 等人审（无 key 503）
   const [reviewing, setReviewing] = useState(false)
-  const reviewProposals = async () => {
+  const reviewSession = async () => {
+    if (!activeSession) return
     setReviewing(true)
-    setJobInfo("复盘沉淀中（planner LLM 复盘任务成败/被引文档）…")
+    setJobInfo("复盘中（planner LLM 复盘本会话任务/命令/文档引用）…")
     try {
-      const { job_id } = await api.reviewProposals(pid)
+      const { job_id } = await api.sessionReview(activeSession.id)
       const job = await pollJob(job_id, () => {})
       if (job.status !== "done") {
         setJobInfo(`复盘失败：${job.error}`)
@@ -1046,6 +1063,12 @@ export function LiveRoom({ pid }: { pid: string }) {
           </Button>
         )}
         {activeSession && (
+          <Button size="sm" variant="outline" disabled={reviewing} onClick={reviewSession}
+                  title="F8 会话级复盘：planner LLM 复盘本会话跑过的任务/命令/文档引用，把验证有效的手法沉淀为变更提案（人类审批后才落盘）">
+            {reviewing ? "复盘中…" : "📋 复盘本会话"}
+          </Button>
+        )}
+        {activeSession && (
           <div className="flex items-center gap-1" title="动态切换当前会话的供应商/模型，下一次 LLM 调用生效">
             <span className="text-[10px] text-muted-foreground">🔀</span>
             <select
@@ -1104,10 +1127,6 @@ export function LiveRoom({ pid }: { pid: string }) {
                 title="让 planner 重排待认领任务优先级（0-9，小者优先，只改 open）。手动随时可跑，不受自主档/30s 去抖/预算限制；tick 或重排在跑时返回 409">
           {replanning ? "重排中…" : "重排优先级"}
         </Button>
-        <Button size="sm" variant="outline" disabled={reviewing} onClick={reviewProposals}
-                title="planner LLM 复盘本项目任务，把文档错漏沉淀为变更提案（人类审批后才落盘）">
-          {reviewing ? "复盘中…" : "复盘沉淀"}
-        </Button>
         <div className="relative">
           <Button size="sm" variant="outline"
                   className={cn(usage?.mode === "redteam" && "text-[--status-error]")}
@@ -1164,10 +1183,7 @@ export function LiveRoom({ pid }: { pid: string }) {
       {/* 事件流（虚拟滚动） */}
       <div
         ref={listRef}
-        onScroll={(e) => {
-          const el = e.currentTarget
-          stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60
-        }}
+        onScroll={handleListScroll}
         className="min-h-0 flex-1 overflow-auto px-3"
       >
         <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>

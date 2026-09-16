@@ -3617,9 +3617,12 @@ def create_app(
 
     # ---- 复盘沉淀（C4）：planner_llm 后台复盘任务 → 逐条校验落 pending 提案 ----
 
-    @app.post("/api/projects/{pid}/review-proposals")
-    def review_proposals_job(pid: str):
-        proj = _project(pid)  # 404 先于 503
+    @app.post("/api/sessions/{sid}/review")
+    def session_review_job(sid: str):
+        # F8 会话级复盘：单个会话对它跑过的任务复盘（取代项目级 review-proposals）
+        pid = _pid_of_session(sid)  # 不存在的会话 → 404
+        proj = _project(pid)
+        sess = proj.bb.get_session(sid)
         _exec, plan_llm = _llms()  # 无 key/无启用供应商 → 503
         if plan_llm is None:
             raise HTTPException(503, "planner LLM 未配置，复盘沉淀不可用")
@@ -3627,21 +3630,31 @@ def create_app(
         def _run() -> dict:
             bb, root = proj.bb, app.state.packs_root
             tq = _tq(pid)
-            events = bb.recent_events(pid, limit=500)
+            # 会话级事件流（kb.open/命令/路由/任务生命周期/发现），天然有界
+            events = bb.recent_events(pid, session_id=sid, limit=300)
             kb_opens = [{"ts": e.get("created_at", ""),
                          "module": e.get("payload", {}).get("module"),
                          "source": e.get("payload", {}).get("source")}
                         for e in events if e.get("kind") == "kb.open"]
+            cmd_log = [{"kind": e.get("kind"), "ts": e.get("created_at", ""),
+                        "detail": json.dumps(e.get("payload", {}), ensure_ascii=False)[:200]}
+                       for e in events
+                       if e.get("kind") in ("command", "command.result", "skill.routed")]
+            task_events = {e.get("payload", {}).get("task_id")
+                           for e in events
+                           if e.get("kind") == "task.claimed"} - {None}
+            # 任务集 = claimed_by（done/failed 行保留最后认领者）∪ 事件回放 task.claimed
             tasks_view = [{"objective": t.get("objective", "")[:300],
                            "task_type": t.get("task_type"),
                            "status": t.get("status"),
                            "result_note": (t.get("result_note") or "")[:300]}
-                          for t in tq.list_tasks(pid)]
+                          for t in tq.list_tasks(pid)
+                          if t.get("claimed_by") == sid or t.get("id") in task_events]
             findings_view = [{"title": f.get("title", ""),
                               "vuln_class": f.get("vuln_class", ""),
                               "severity": f.get("severity"),
                               "status": f.get("status")}
-                             for f in bb.list_findings(pid)][:100]
+                             for f in bb.list_findings(pid) if f.get("author") == sid][:50]
             # 显式文件清单：LLM 只能在清单内给路径，防猜名（越界提案校验时也会被拒）
             file_list: dict[str, list[str]] = {}
             for cap in proj.capabilities:
@@ -3654,17 +3667,20 @@ def create_app(
             skills_list = [f"{s.kind}/{s.pack}/{s.name}"
                            for s in _loaded_registry().all()]
             system_msg = (
-                "你是安全行动复盘编辑。基于一次项目执行的证据，提出对知识库/技能文档的"
-                "沉淀提案。严格规则：(1) 仅限三种情形——文档互相矛盾、文档缺失、手法已被"
-                "本次任务验证有效；(2) 路径只能从给出的文件清单里选，禁止猜路径；"
+                "你是安全行动复盘编辑。基于一次会话执行的证据（该会话认领的任务、跑过的"
+                "命令、引用过的文档、产出的发现），提出对知识库/技能文档的沉淀提案。"
+                "严格规则：(1) 仅限三种情形——文档互相矛盾、文档缺失、手法已被本次任务"
+                "验证有效；(2) 路径只能从给出的文件清单里选，禁止猜路径；"
                 "新经验一律 create 新 .md 文件，禁止覆盖/翻译英文原文；技能只许 edit；"
                 "(3) 每条必须在 reason 附任务证据；(4) 无值得沉淀的内容就返回空列表。"
                 '只输出 JSON：{"proposals":[{"kind":"kb|skill","mode":"edit|create|rename|delete",'
                 '"target":{...},"content":"...","summary":"≤300字","reason":"证据"}]}')
             user_msg = json.dumps(
                 {"capabilities": proj.capabilities,
+                 "session": {"id": sid, "role": sess.get("role")},
                  "kb_files": file_list, "skills": skills_list,
                  "kb_open_sequence": kb_opens[-50:],
+                 "command_log": cmd_log[-100:],
                  "tasks": tasks_view, "findings": findings_view},
                 ensure_ascii=False)
             resp = plan_llm.chat(
@@ -3692,7 +3708,7 @@ def create_app(
                            "summary": item.get("summary", ""),
                            "reason": item.get("reason", ""),
                            "project": pid, "task": item.get("task"),
-                           "evidence": "复盘 Job：基于本项目 kb.open 序列/任务成败/findings"}
+                           "evidence": "复盘 Job：基于本会话命令/文档引用/任务成败/findings"}
                 try:
                     p = proposals_mod.create_proposal(root, payload, origin="review")
                 except (ProposalError, writing.KbError) as e:
@@ -3705,7 +3721,7 @@ def create_app(
             return {"landed": landed, "rejected": rejected}
 
         return {"job_id": app.state.jobs.submit(
-            "review-proposals", _run, meta={"project_id": pid})}
+            "session-review", _run, meta={"project_id": pid, "session_id": sid})}
 
     # ---- MCP 配置层（运行时工具桥后续批次；本端点只管 config/mcp.json） ----
 

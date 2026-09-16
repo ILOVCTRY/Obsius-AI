@@ -628,13 +628,20 @@ class Blackboard:
         return event_id
 
     def recent_events(
-        self, project_id: str, since_id: int = 0, limit: int = 200
+        self, project_id: str, since_id: int = 0, limit: int = 200,
+        session_id: str | None = None,
     ) -> list[dict]:
-        """增量拉取：id > since_id，升序。WS 断线重连回放也走这里。"""
-        rows = self.conn.execute(
-            "SELECT * FROM events WHERE project_id=? AND id>? ORDER BY id LIMIT ?",
-            (project_id, since_id, limit),
-        ).fetchall()
+        """增量拉取：id > since_id，升序。WS 断线重连回放也走这里。
+
+        session_id 非 None 时只取该会话落的事件（会话级复盘取材，F8）。"""
+        sql = "SELECT * FROM events WHERE project_id=? AND id>?"
+        args: list = [project_id, since_id]
+        if session_id is not None:
+            sql += " AND session_id=?"
+            args.append(session_id)
+        sql += " ORDER BY id LIMIT ?"
+        args.append(limit)
+        rows = self.conn.execute(sql, args).fetchall()
         out = []
         for r in rows:
             d = _row_to_dict(r)
@@ -990,6 +997,8 @@ class Blackboard:
             "finding.new" if not merged else "finding.merged",
             {"finding_id": finding_id, "vuln_class": vuln_class, "severity": severity},
             author=author,
+            # Agent 产出的 finding 才有会话归属（author=会话 id）；人工/系统写入不标
+            session_id=author if isinstance(author, str) and author.startswith("sess-") else None,
         )
         if merged and update_changes:  # 首次创建不通知；纯重复上报无变化不通知
             self._notify_finding_updates(project_id, finding_id, update_changes, author)

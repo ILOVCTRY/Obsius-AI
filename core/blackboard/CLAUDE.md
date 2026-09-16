@@ -33,7 +33,7 @@
   - **机制 1.4 资源租约/wait_for**：认领时 conflict_keys 同事务转写 resource_leases（X/S）；冲突（快路径交叠或租约占用）→ 事务内写 `wait_for` 标记、**事务外**抛 ClaimError（事务内 raise 会回滚标记，勿改回）；claim_next 预过滤 wait_for 仍被占/冷却行；`_release_and_revalidate` 在 _finish/delete/expire 内释放租约并清已空闲等待者的 wait_for；`detect_wait_for_deadlock` 环检测安全网（牺牲者清 wait_for+冷却 5min+lock.deadlock_victim）。
   - **graph.py 建议边（机制 1.1）**：kind=suggest 点虚线——同父或 context_refs 相交、已认领、无 inbox 边（机器猜测不落库）。
 - `graph.py` — `task_graph(bb, pid)`（A3 直播间任务流，纯 set-based SQL 无 N+1）：节点=全部任务（不过滤状态）+认领会话快照；实线边=parent_id；虚线边=session_inbox 按 `(kind,ref_id)` 聚类 + 会话→最近 claimed 任务映射（`ROW_NUMBER() OVER(PARTITION BY claimed_by)`，closed 不映射），同簇会话两两连边、同任务对多簇去重。
-- `events.py` — `EventBus`：同步落库 + 回调广播；订阅者异常不阻断写路径。store.py 侧 `recent_events(pid,since_id,limit)`（id>since 升序窗口，WS 回放共用）与 `latest_event_id(pid)`（末端 id；编排游标追赶 backlog 跳尖用，保证只前进不回放）。
+- `events.py` — `EventBus`：同步落库 + 回调广播；订阅者异常不阻断写路径。store.py 侧 `recent_events(pid,since_id,limit,session_id=None)`（id>since 升序窗口，WS 回放共用；session_id 非 None 只取该会话事件——F8 会话级复盘取材）与 `latest_event_id(pid)`（末端 id；编排游标追赶 backlog 跳尖用，保证只前进不回放）。finding.new/finding.merged 事件 session_id=author（仅 sess- 前缀的 Agent 产出标，人工/系统不标）。
 
 ## 约定
 

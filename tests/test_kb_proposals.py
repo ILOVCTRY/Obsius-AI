@@ -426,11 +426,14 @@ def test_proposal_reject_and_revise(tmp_path):
 # ---------------- Agent 工具 propose_pack_edit ----------------
 
 class _FakeLLM:
+    calls: list = []  # 记录 (messages, system)，供断言 LLM 实际收到的材料
+
     def __init__(self, text=""):
         self.text = text
 
     def chat(self, messages, *, system=None, tools=None, max_tokens=4096,
              temperature=None):
+        _FakeLLM.calls.append((messages, system))
         return SimpleNamespace(text=self.text, tool_calls=[])
 
 
@@ -553,9 +556,9 @@ def test_doctor_near_duplicate_info(tmp_path):
     assert "dup-a" in pair["message"] and "dup-b" in pair["message"]
 
 
-# ---------------- 复盘沉淀 Job（planner_llm） ----------------
+# ---------------- F8 会话级复盘 Job（planner_llm） ----------------
 
-def test_review_proposals_job_fake_planner(tmp_path):
+def test_session_review_job_fake_planner(tmp_path):
     proposal_json = json.dumps({"proposals": [
         # 合法：create 新经验 md
         {"kind": "kb", "mode": "create",
@@ -574,7 +577,23 @@ def test_review_proposals_job_fake_planner(tmp_path):
     _packs, c = _client(tmp_path,
                         executor_llm=_FakeLLM(), planner_llm=_FakeLLM(proposal_json))
     pid = _project(c)
-    r = c.post(f"/api/projects/{pid}/review-proposals")
+    proj = c.app.state.projects[pid]
+    # 造会话 + 它认领过的任务（done 保留 claimed_by）+ 带会话归属的事件/发现
+    sess = proj.bb.register_session(pid, "复盘窗", role="_generalist")
+    other = proj.bb.register_session(pid, "别家窗", role="_generalist")
+    tq = TaskQueue(proj.bb)
+    tid = tq.publish(pid, "测试 SQL 注入", task_type="recon",
+                     noise_budget="passive", created_by="human")
+    tq.claim(tid, sess["id"])
+    tq.complete(tid, sess["id"], result_note="SQLi 已验证")
+    tid_other = tq.publish(pid, "别家任务", task_type="recon",
+                           noise_budget="passive", created_by="human")
+    tq.claim(tid_other, other["id"])
+    proj.bb.add_finding(pid, vuln_class="sqli", title="本会话发现",
+                        author=sess["id"])
+    proj.bb.add_finding(pid, vuln_class="xss", title="别家发现",
+                        author=other["id"])
+    r = c.post(f"/api/sessions/{sess['id']}/review")
     assert r.status_code == 200, r.text
     job = _wait_job(c, r.json()["job_id"])  # 端点契约 {"job_id": ...}
     assert job["status"] == "done", job
@@ -587,9 +606,24 @@ def test_review_proposals_job_fake_planner(tmp_path):
     assert p["status"] == "pending" and p["origin"] == "review"
     kinds = {e["kind"] for e in c.get(f"/api/projects/{pid}/events").json()}
     assert "proposal.created" in kinds
+    # 会话过滤：喂给 LLM 的材料只含本会话任务/发现（FakeLLM 记录入参即可查）
+    chat_arg = _FakeLLM.calls[-1][0][0]["content"]
+    assert "测试 SQL 注入" in chat_arg and "别家任务" not in chat_arg
+    assert "本会话发现" in chat_arg and "别家发现" not in chat_arg
+    # finding.new 事件现在带会话归属（F8 顺手修）
+    fnew = [e for e in proj.bb.recent_events(pid) if e["kind"] == "finding.new"]
+    assert fnew and fnew[0]["session_id"] == sess["id"]
 
 
-def test_review_proposals_no_key_503(tmp_path, monkeypatch):
+def test_session_review_unknown_session_404_and_old_endpoint_gone(tmp_path):
+    _packs, c = _client(tmp_path, executor_llm=_FakeLLM(), planner_llm=_FakeLLM("{}"))
+    pid = _project(c)
+    assert c.post("/api/sessions/sess-nope/review").status_code == 404
+    # 项目级复盘端点已移除（F8：不搞项目级）
+    assert c.post(f"/api/projects/{pid}/review-proposals").status_code in (404, 405)
+
+
+def test_review_no_key_503(tmp_path, monkeypatch):
     # 隔离真 key：cwd 切 tmp（找不到 .env）+ 清环境变量（本机 .env 有真 Ark key）
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("ARK_API_KEY", raising=False)
@@ -599,5 +633,6 @@ def test_review_proposals_no_key_503(tmp_path, monkeypatch):
                      providers_config=str(tmp_path / "providers.json"))
     c = TestClient(app)
     pid = _project(c)
-    r = c.post(f"/api/projects/{pid}/review-proposals")
+    sess = c.app.state.projects[pid].bb.register_session(pid, "s", role="_generalist")
+    r = c.post(f"/api/sessions/{sess['id']}/review")
     assert r.status_code == 503

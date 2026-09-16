@@ -419,9 +419,9 @@ export const api = {
     http<Proposal>(`/api/proposals/${id}/revise`, {
       method: "POST", body: JSON.stringify({ by: "human", changes, note }),
     }),
-  /** 复盘沉淀后台 Job（planner_llm 复盘会话产 pending 提案；无 key 503） */
-  reviewProposals: (pid: string) =>
-    http<{ job_id: string }>(`/api/projects/${pid}/review-proposals`, { method: "POST" }),
+  /** F8 会话级复盘后台 Job（planner_llm 复盘该会话跑过的任务，产 pending 提案；无 key 503） */
+  sessionReview: (sid: string) =>
+    http<{ job_id: string }>(`/api/sessions/${sid}/review`, { method: "POST" }),
   // pack doctor + .history 版本管理（file = packs 内相对路径）
   packsDoctor: () => http<DoctorReport>("/api/packs/doctor"),
   historyList: (file: string) =>
