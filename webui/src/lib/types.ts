@@ -835,3 +835,50 @@ export interface IntelOverview {
   today: IntelBrief | null
   top_unread: IntelArticle[]
 }
+
+// ---------- E10：Obsidian vault 接入 + 学习档案 + 周计划（DESIGN.md §16.3） ----------
+
+export interface IntelVaultConfig {
+  path: string
+  enabled: boolean
+}
+
+export interface IntelVaultInfo extends IntelVaultConfig {
+  configured: boolean
+  notes: number
+  last_indexed: string
+}
+
+/** GET /api/intel/vault/tree 节点：目录 {name, children}，笔记叶子 {name, path, title, tags, mtime} */
+export interface VaultNode {
+  name: string
+  path?: string
+  title?: string
+  tags?: string[]
+  mtime?: string
+  children?: VaultNode[]
+}
+
+export interface VaultSearchHit {
+  path: string
+  title: string
+  tags: string[]
+  mtime: string
+  snippet: string
+}
+
+export interface IntelLearningProfile {
+  declared: { directions: Record<string, number>; stage: string }
+  vault: { total: number; by_direction: Record<string, { notes: number; last_active: string }> }
+  platform: Record<string, { notes: number; total: number; read: number; starred: number }>
+}
+
+export interface IntelPlanMeta {
+  week: string
+  inputs: Record<string, unknown> // {by: llm|template, week, brief_date?, articles?}
+  created_at: string
+}
+
+export interface IntelPlan extends IntelPlanMeta {
+  content: string
+}

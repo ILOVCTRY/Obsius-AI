@@ -40,7 +40,13 @@ from core.blackboard.assets import register_asset
 from core.blackboard.graph import task_graph
 from core.blackboard.store import Blackboard, BlackboardClosedError
 from core.intel import config as intel_config
-from core.intel.intel_service import run_refresh as intel_run_refresh
+from core.intel import vault as intel_vault
+from core.intel.intel_service import (
+    compose_weekly_plan as intel_weekly_plan,
+    learning_profile as intel_learning_profile,
+    run_refresh as intel_run_refresh,
+    week_start as intel_week_start,
+)
 from core.intel.store import IntelStore
 from core.llm import ModelRouter, ProviderError, ProviderStore, probe_credentials
 from core.llm.providers import CONFIG_PATH as PROVIDERS_CONFIG_PATH
@@ -704,6 +710,12 @@ class IntelFeedsIn(BaseModel):
 class IntelProfileIn(BaseModel):
     directions: dict[str, float]
     stage: str = ""
+    vault: dict | None = None  # E10：透传给 save_profile 归一化（path/enabled）
+
+
+class IntelVaultIn(BaseModel):
+    path: str = ""
+    enabled: bool = False
 
 
 class IntelArticlePatch(BaseModel):
@@ -3593,6 +3605,97 @@ def create_app(
         if row is None:
             raise HTTPException(404, f"文章不存在: {article_id}")
         return row
+
+    # ---- E10：Obsidian vault 只读接入 + 学习档案 + 周计划（§16.3；正文不出本机） ----
+
+    def _intel_profile_full() -> dict:
+        return intel_config.load_profile(app.state.intel_dir)
+
+    @app.get("/api/intel/vault")
+    def intel_vault_info():
+        prof = _intel_profile_full()
+        info = _intel().note_stats()
+        info.update(prof.get("vault", {}))
+        info["configured"] = bool(prof.get("vault", {}).get("path"))
+        return info
+
+    @app.put("/api/intel/vault")
+    def intel_update_vault(body: IntelVaultIn):
+        prof = _intel_profile_full()
+        prof["vault"] = {"path": body.path, "enabled": body.enabled}
+        with pack_write_lock():  # profile.json 与画像同文件同锁同备份
+            _pack_history_backup(Path(app.state.intel_dir) / "profile.json")
+            prof = intel_config.save_profile(prof, app.state.intel_dir)
+        job_id = None
+        if prof["vault"]["enabled"] and prof["vault"]["path"]:
+            job_id = _submit_vault_index(prof["vault"]["path"])
+        return {"status": "ok", "vault": prof["vault"], "index_job_id": job_id}
+
+    def _submit_vault_index(vault_path: str) -> str:
+        def _run() -> dict:
+            notes = intel_vault.index_vault(vault_path)
+            n = _intel().replace_notes(notes)
+            return {"indexed": n, "elapsed": None}
+
+        return app.state.jobs.submit("vault-index", _run)
+
+    @app.post("/api/intel/vault/index")
+    def intel_vault_index_job():
+        vpath = _intel_profile_full().get("vault", {}).get("path", "")
+        if not vpath:
+            raise HTTPException(422, "未配置 vault 路径（设置页 → 情报源）")
+        return {"job_id": _submit_vault_index(vpath)}
+
+    @app.get("/api/intel/vault/tree")
+    def intel_vault_tree():
+        notes = _intel().list_notes()
+        if not notes:
+            return {"configured": bool(_intel_profile_full().get("vault", {}).get("path")),
+                    "tree": []}
+        return {"configured": True, "tree": intel_vault.build_tree(notes)}
+
+    @app.get("/api/intel/vault/search")
+    def intel_vault_search(q: str = ""):
+        return {"hits": _intel().search_notes(q)}  # 元数据+snippet，不返回全文
+
+    @app.get("/api/intel/learning/profile")
+    def intel_learning_profile_ep():
+        return intel_learning_profile(_intel(), _intel_profile_full())
+
+    @app.post("/api/intel/learning/plan")
+    def intel_learning_plan_job():
+        _intel()  # 404 前置
+        week = intel_week_start()
+
+        def _run() -> dict:
+            store = _intel()
+            prof = _intel_profile_full()
+            agg = intel_learning_profile(store, prof)
+            brief = store.get_brief(time.strftime("%Y-%m-%d", time.gmtime()))
+            if brief is None:
+                briefs = store.list_briefs()
+                if briefs:
+                    brief = store.get_brief(briefs[0]["date"])
+            articles = store.list_articles(kind="article", limit=15)
+            content, stats = intel_weekly_plan(agg, brief, articles, week,
+                                               llm=_intel_classifier())
+            # 隐私红线：inputs 只存统计，不存笔记正文
+            store.save_plan(week, content, stats)
+            return stats
+
+        return {"job_id": app.state.jobs.submit("learning-plan", _run),
+                "week": week}
+
+    @app.get("/api/intel/learning/plan")
+    def intel_learning_plan_ep(week: str | None = None):
+        plan = _intel().get_plan(week) if week else _intel().latest_plan()
+        if plan is None:
+            raise HTTPException(404, "尚无学习计划")
+        return plan
+
+    @app.get("/api/intel/learning/plans")
+    def intel_learning_plans_ep():
+        return {"plans": _intel().list_plans()}
 
     # ---------- Job 轮询 ----------
 

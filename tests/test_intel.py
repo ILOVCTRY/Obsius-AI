@@ -1,9 +1,10 @@
-"""情报面板（E9，DESIGN.md §16）测试：全局存储 / 抓取解析 / 打分与简报 / API 端点。
+"""情报面板（E9/E10，DESIGN.md §16）测试：全局存储 / 抓取解析 / 打分与简报 / vault 索引 / 学习档案与周计划 / API 端点。
 
-全部不触网：抓取层 getter 注入、LLM 注入假对象。
+全部不触网：抓取层 getter 注入、LLM 注入假对象；vault 用 tmp 目录。
 """
 
 import json
+import sqlite3
 
 import pytest
 from fastapi.testclient import TestClient
@@ -11,8 +12,16 @@ from fastapi.testclient import TestClient
 from core.api.app import create_app
 from core.intel.config import load_feeds, load_profile, save_profile
 from core.intel.fetch import fetch_all, fetch_kev, fetch_nvd, fetch_github_advisories, parse_rss
-from core.intel.intel_service import compose_brief, run_refresh, score_articles
+from core.intel.intel_service import (
+    compose_brief,
+    compose_weekly_plan,
+    learning_profile,
+    run_refresh,
+    score_articles,
+    week_start,
+)
 from core.intel.store import IntelStore
+from core.intel.vault import build_tree, index_vault
 
 
 RSS_FIXTURE = """<?xml version="1.0"?>
@@ -262,3 +271,206 @@ def test_intel_articles_endpoints(intel_client):
     assert c.patch("/api/intel/articles/art-nonexistent", json={"read": True}).status_code == 404
     overview = c.get("/api/intel/overview").json()
     assert overview["counts"]["articles"] == 1 and overview["today"] is None
+
+
+# ---------- E10：vault 配置 / 索引 / 学习档案 / 周计划 ----------
+
+def test_profile_config_preserves_unknown_keys(tmp_path):
+    (tmp_path / "profile.json").write_text(json.dumps({
+        "directions": {"web": 2.0}, "stage": "进阶", "my_note": "手编字段",
+        "vault": {"path": "D:/vault", "enabled": True}}), encoding="utf-8")
+    prof = load_profile(tmp_path)
+    assert prof["my_note"] == "手编字段"  # 未知键透传不丢
+    assert prof["vault"] == {"path": "D:/vault", "enabled": True}
+    assert prof["directions"]["pwn"] == 1.0  # 漏项补默认
+    out = save_profile(prof, tmp_path)
+    assert out["my_note"] == "手编字段"
+    assert out["vault"]["enabled"] is True
+    assert out["directions"]["web"] == 2.0 and out["directions"]["ai"] == 1.0
+    # vault 归一化：路径字符串化、enabled 强转 bool
+    out2 = save_profile({"vault": {"path": 123, "enabled": "yes"}}, tmp_path)
+    assert out2["vault"]["path"] == "123" and out2["vault"]["enabled"] is True
+
+
+def test_intel_store_schema_v2_migration(tmp_path):
+    s = IntelStore(tmp_path)
+    s.close()
+    # 模拟 v1 旧库：删新表 + 版本号回 1
+    raw = sqlite3.connect(str(tmp_path / "intel.db"))
+    raw.execute("DROP TABLE vault_notes")
+    raw.execute("DROP TABLE learning_plans")
+    raw.execute("UPDATE meta SET value='1' WHERE key='schema_version'")
+    raw.commit()
+    raw.close()
+    s2 = IntelStore(tmp_path)  # DDL 全 IF NOT EXISTS → 幂等迁移
+    s2.replace_notes([{"path": "a.md", "title": "t"}])
+    assert s2.note_stats()["notes"] == 1
+    assert s2.latest_plan() is None
+    s2.close()
+
+
+def test_vault_index_and_search(tmp_path):
+    vault = tmp_path / "vault"
+    (vault / "notes" / "web").mkdir(parents=True)
+    (vault / ".obsidian").mkdir()
+    (vault / "notes" / "web" / "proxy.md").write_text(
+        "---\ntitle: 代理探测笔记\ntags: web, proxy\n---\n# 标题无用\n"
+        "正文含 SECRET_BODY_TOKEN 不外发。#内联标签\n", encoding="utf-8")
+    (vault / "notes" / "pwn.md").write_text("# 堆题入门\nheap 基础\n", encoding="utf-8")
+    (vault / ".obsidian" / "app.json.md").write_text("配置", encoding="utf-8")
+
+    notes = index_vault(vault)
+    assert len(notes) == 2  # .obsidian 跳过
+    by_path = {n["path"]: n for n in notes}
+    assert by_path["notes/web/proxy.md"]["title"] == "代理探测笔记"
+    assert "web" in by_path["notes/web/proxy.md"]["tags"]
+    assert "内联标签" in by_path["notes/web/proxy.md"]["tags"]
+    assert by_path["notes/pwn.md"]["title"] == "堆题入门"  # 无 frontmatter 取首个 h1
+
+    s = IntelStore(tmp_path / "intel")
+    assert s.replace_notes(notes) == 2
+    assert s.note_stats()["notes"] == 2
+    hits = s.search_notes("SECRET_BODY_TOKEN")
+    assert len(hits) == 1 and "SECRET_BODY_TOKEN" in hits[0]["snippet"]
+    assert "content" not in hits[0]  # 搜索结果不返回全文
+    assert s.search_notes("%") == []  # LIKE 通配符转义 → 字面匹配无命中
+    assert s.search_notes("  ") == []
+    tree = build_tree(s.list_notes())
+    dirs = {d["name"]: d for d in tree if "children" in d}
+    assert "notes" in dirs and len(dirs["notes"]["children"]) == 2
+    s.close()
+
+
+def test_learning_profile_aggregation(tmp_path):
+    s = IntelStore(tmp_path / "intel")
+    s.replace_notes([
+        {"path": "a.md", "title": "堆溢出利用笔记", "tags": ["pwn"],
+         "mtime": "2026-09-10T00:00:00+00:00"},
+        {"path": "b.md", "title": "XSS 挖掘", "tags": [],
+         "mtime": "2026-09-12T00:00:00+00:00"},
+        {"path": "c.md", "title": "无方向", "tags": [],
+         "mtime": "2026-09-13T00:00:00+00:00"},
+    ])
+    s.upsert_articles([{"url": "https://e/1", "title": "t", "source": "s",
+                        "kind": "article"}])
+    aid = s.list_articles()[0]["id"]
+    s.apply_scores([{"id": aid, "score": 60.0, "direction": "web"}])
+    s.mark_article(aid, read=True, starred=True)
+    prof = {"directions": {"web": 1.0}, "stage": "入门"}
+    agg = learning_profile(s, prof)
+    assert agg["declared"]["stage"] == "入门"
+    assert agg["vault"]["total"] == 3
+    assert agg["vault"]["by_direction"]["pwn"]["notes"] == 1
+    assert agg["vault"]["by_direction"]["web"]["notes"] == 1
+    assert agg["vault"]["by_direction"]["web"]["last_active"].startswith("2026-09-12")
+    assert agg["platform"]["web"]["read"] == 1 and agg["platform"]["web"]["starred"] == 1
+    s.close()
+
+
+def test_week_start_iso_monday():
+    assert week_start("2026-09-16") == "2026-09-14"  # 周三 → 周一
+    assert week_start("2026-09-14") == "2026-09-14"
+
+
+def test_weekly_plan_privacy_and_fallback():
+    """隐私红线测试：LLM 入参只含元数据，笔记正文（SECRET_BODY_TOKEN）绝不外发。"""
+    captured = []
+
+    class FakeLLM:
+        def chat(self, messages, **kw):
+            captured.append(messages[0]["content"] + str(kw.get("system", "")))
+
+            class R:
+                text = "# LLM 周计划"
+
+            return R()
+
+    class BoomLLM:
+        def chat(self, messages, **kw):
+            raise RuntimeError("无 key")
+
+    agg = {"declared": {"directions": {"web": 2.0}, "stage": "实战"},
+           "vault": {"total": 1, "by_direction": {
+               "web": {"notes": 1, "last_active": "2026-09-12T00:00:00+00:00"}}},
+           "platform": {"web": {"total": 1, "read": 1, "starred": 0}}}
+    articles = [{"title": "Java 反序列化复现", "source": "FreeBuf", "direction": "web",
+                 "score": 90.0, "is_priority": False}]
+    content, stats = compose_weekly_plan(agg, None, articles, "2026-09-14", llm=FakeLLM())
+    assert stats["by"] == "llm" and content == "# LLM 周计划"
+    assert len(captured) == 1
+    assert "SECRET_BODY_TOKEN" not in captured[0]  # 正文不出本机
+    assert "实战" in captured[0] and "Java 反序列化复现" in captured[0]  # 元数据在
+    # LLM 失败 → 模板降级
+    content2, stats2 = compose_weekly_plan(agg, None, articles, "2026-09-14",
+                                           llm=BoomLLM())
+    assert stats2["by"] == "template" and "周学习计划" in content2
+
+
+def test_vault_endpoints(intel_client):
+    tmp_path, c = intel_client
+    vault = tmp_path / "myvault"
+    vault.mkdir()
+    (vault / "a.md").write_text("---\ntitle: 笔记A\ntags: web\n---\n正文v1",
+                                encoding="utf-8")
+    assert c.get("/api/intel/vault").json()["configured"] is False
+    r = c.put("/api/intel/vault", json={"path": str(vault), "enabled": True}).json()
+    assert r["status"] == "ok" and r["vault"]["enabled"] is True
+    job = r["index_job_id"]
+    assert job  # 保存即自动索引
+    for _ in range(100):
+        j = c.get(f"/api/jobs/{job}").json()
+        if j["status"] != "running":
+            break
+    assert j["status"] == "done" and j["result"]["indexed"] == 1
+    info = c.get("/api/intel/vault").json()
+    assert info["notes"] == 1 and info["configured"] is True
+    tree = c.get("/api/intel/vault/tree").json()
+    assert tree["configured"] is True and tree["tree"][0]["name"] == "a.md"
+    hits = c.get("/api/intel/vault/search", params={"q": "正文v1"}).json()["hits"]
+    assert len(hits) == 1 and hits[0]["title"] == "笔记A"
+    # 手动重建（新增文件验证全量重建）
+    (vault / "b.md").write_text("# 笔记B\n内容", encoding="utf-8")
+    job2 = c.post("/api/intel/vault/index").json()["job_id"]
+    for _ in range(100):
+        j2 = c.get(f"/api/jobs/{job2}").json()
+        if j2["status"] != "running":
+            break
+    assert j2["status"] == "done" and j2["result"]["indexed"] == 2
+    # 置空路径后 configured False；未配置时手动索引 422
+    assert c.put("/api/intel/vault",
+                 json={"path": "", "enabled": False}).json()["index_job_id"] is None
+    assert c.get("/api/intel/vault").json()["configured"] is False
+    assert c.post("/api/intel/vault/index").status_code == 422
+
+
+def test_learning_plan_endpoint(intel_client):
+    tmp_path, c = intel_client
+    app = c.app
+    captured = []
+
+    class FakeLLM:
+        def chat(self, messages, **kw):
+            captured.append(messages[0]["content"])
+
+            class R:
+                text = "# 本周计划：读一篇 web 文章"
+
+            return R()
+
+    app.state.intel_llm = FakeLLM()
+    r = c.post("/api/intel/learning/plan").json()
+    week = r["week"]
+    assert week == week_start()
+    for _ in range(100):
+        j = c.get(f"/api/jobs/{r['job_id']}").json()
+        if j["status"] != "running":
+            break
+    assert j["status"] == "done", j
+    plan = c.get("/api/intel/learning/plan").json()
+    assert plan["week"] == week and "本周计划" in plan["content"]
+    assert plan["inputs"]["by"] == "llm"
+    assert len(captured) == 1
+    plans = c.get("/api/intel/learning/plans").json()["plans"]
+    assert plans[0]["week"] == week and "content" not in plans[0]  # 归档不含全文
+    assert c.get("/api/intel/learning/plan",
+                 params={"week": "1999-01-01"}).status_code == 404

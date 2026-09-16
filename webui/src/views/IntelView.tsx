@@ -1,14 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { api, pollJob } from "@/lib/api"
-import type { IntelArticle, IntelBriefMeta, IntelOverview, IntelProfile } from "@/lib/types"
+import type {
+  IntelArticle, IntelBriefMeta, IntelLearningProfile, IntelOverview,
+  IntelPlan, IntelPlanMeta, IntelProfile,
+} from "@/lib/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { MarkdownView } from "@/components/settings/MarkdownView"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { fmtDateTimeMin } from "@/lib/datetime"
 import { cn } from "@/lib/utils"
 
-// 情报面板（E9，DESIGN.md §16.4）：全局模块，与项目无关。
-// 三 tab = 简报（每日中文简报 + 归档）/ 文章（高分文章池）/ 学习（已读收藏 = E10 档案素材）。
+// 情报面板（E9/E10，DESIGN.md §16.4/§16.3）：全局模块，与项目无关。
+// 三 tab = 简报（每日中文简报 + 归档）/ 文章（高分文章池）/ 学习（三来源档案 + 当周周计划）。
 // 打开情报页时若今日无简报自动补跑一次抓取（设计定稿的触发式补跑，非 scheduler）。
 
 const DIRECTION_LABELS: Record<string, string> = {
@@ -62,6 +66,13 @@ export function IntelView() {
   const [articles, setArticles] = useState<IntelArticle[]>([])
   const [filter, setFilter] = useState<{ kind?: string; unread?: boolean; starred?: boolean }>({})
   const [refreshing, setRefreshing] = useState(false)
+  // E10：学习档案（三来源聚合）+ 周计划（planWeek=""=最新一份）
+  const [learning, setLearning] = useState<IntelLearningProfile | null>(null)
+  const [plan, setPlan] = useState<IntelPlan | null>(null)
+  const [plans, setPlans] = useState<IntelPlanMeta[]>([])
+  const [planWeek, setPlanWeek] = useState<string>("")
+  const [planBusy, setPlanBusy] = useState(false)
+  const [copied, setCopied] = useState(false)
   const autoFetched = useRef(false)
 
   const loadOverview = useCallback(() =>
@@ -85,8 +96,19 @@ export function IntelView() {
   const loadProfile = useCallback(() =>
     api.intelProfile().then(setProfile).catch(() => {}), [])
 
-  useEffect(() => { loadOverview(); loadBriefs(); loadProfile() },
-    [loadOverview, loadBriefs, loadProfile])
+  const loadLearning = useCallback(() =>
+    api.intelLearningProfile().then(setLearning).catch(() => {}), [])
+
+  const loadPlans = useCallback(() =>
+    api.intelLearningPlans().then((r) => setPlans(r.plans)).catch(() => {}), [])
+
+  const loadPlan = useCallback((week: string) => {
+    api.intelLearningPlan(week || undefined).then(setPlan).catch(() => setPlan(null))
+  }, [])
+
+  useEffect(() => { loadOverview(); loadBriefs(); loadProfile(); loadLearning(); loadPlans() },
+    [loadOverview, loadBriefs, loadProfile, loadLearning, loadPlans])
+  useEffect(() => { loadPlan(planWeek) }, [planWeek, loadPlan])
   useEffect(() => { loadArticles() }, [loadArticles])
   useEffect(() => { loadBrief(briefDate) }, [briefDate, loadBrief])
 
@@ -114,6 +136,26 @@ export function IntelView() {
   const toggle = (id: string, patch: { read?: boolean; starred?: boolean }) => {
     api.intelMarkArticle(id, patch)
       .then(() => { loadArticles(); loadOverview() })
+      .catch(() => {})
+  }
+
+  // E10：生成/重新生成当周计划（Job 轮询），完成后刷新归档并选中当周
+  const generatePlan = useCallback(async () => {
+    if (planBusy) return
+    setPlanBusy(true)
+    try {
+      const { job_id, week } = await api.intelLearningPlanGenerate()
+      await pollJob(job_id, () => {})
+      setPlanWeek(week)
+      loadPlans()
+    } catch { /* 失败静默，按钮恢复可再试 */ }
+    finally { setPlanBusy(false) }
+  }, [planBusy, loadPlans])
+
+  const copyPlan = () => {
+    if (!plan) return
+    navigator.clipboard.writeText(plan.content)
+      .then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500) })
       .catch(() => {})
   }
 
@@ -181,31 +223,87 @@ export function IntelView() {
           </div>
         </TabsContent>
         <TabsContent value="learning" className="min-h-0 flex-1 overflow-y-auto p-4">
-          {profile && (
-            <div className="space-y-3 text-xs">
+          <div className="space-y-4 text-xs">
+            {profile && (
               <div>
-                <p className="mb-1 text-[10px] text-muted-foreground">兴趣方向画像（权重在设置页「情报源」调整）</p>
-                <div className="flex flex-wrap gap-1">
+                <p className="mb-1 text-[10px] text-muted-foreground">① 声明画像（权重与阶段在设置页「情报源」调整）</p>
+                <div className="flex flex-wrap items-center gap-1">
                   {Object.entries(profile.directions).map(([d, w]) => (
                     <Badge key={d} variant="outline" className="text-[10px]">
                       {DIRECTION_LABELS[d] ?? d} ×{w}
                     </Badge>
                   ))}
+                  {profile.stage && <Badge variant="outline" className="text-[10px]">阶段：{profile.stage}</Badge>}
                 </div>
               </div>
-              <div>
-                <p className="mb-1 text-[10px] text-muted-foreground">学习素材（已读 / 收藏文章，E10 档案与周计划的数据源）</p>
-                {overview && (
-                  <p className="font-mono text-[11px]">
-                    已读 {overview.counts.articles - overview.counts.unread} · 收藏 {overview.counts.starred}
-                  </p>
-                )}
+            )}
+            {learning && (
+              <>
+                <div>
+                  <p className="mb-1 text-[10px] text-muted-foreground">② Obsidian vault 推断（只读元数据，笔记正文不出本机）</p>
+                  {learning.vault.total === 0 ? (
+                    <p className="text-[11px] text-muted-foreground">
+                      尚未配置 vault——到设置页「情报源」填入 Obsidian 库路径并索引。
+                    </p>
+                  ) : (
+                    <div className="flex flex-wrap gap-1">
+                      {Object.entries(learning.vault.by_direction).filter(([, v]) => v.notes > 0).map(([d, v]) => (
+                        <Badge key={d} variant="outline" className="text-[10px]" title={`最近活跃 ${v.last_active ? fmtDateTimeMin(v.last_active) : "—"}`}>
+                          {DIRECTION_LABELS[d] ?? d} {v.notes} 篇
+                        </Badge>
+                      ))}
+                      <span className="font-mono text-[10px] text-muted-foreground">共 {learning.vault.total} 篇</span>
+                    </div>
+                  )}
+                </div>
+                <div>
+                  <p className="mb-1 text-[10px] text-muted-foreground">③ 平台学习记录（文章池按方向的已读 / 收藏）</p>
+                  <div className="flex flex-wrap gap-1">
+                    {Object.entries(learning.platform).filter(([, v]) => v.total > 0).map(([d, v]) => (
+                      <Badge key={d} variant="outline" className="text-[10px]">
+                        {DIRECTION_LABELS[d] ?? d} 已读 {v.read} / 收藏 {v.starred}
+                      </Badge>
+                    ))}
+                    {Object.keys(learning.platform).length === 0 && (
+                      <span className="text-[11px] text-muted-foreground">暂无打分记录——去「文章」tab 阅读收藏。</span>
+                    )}
+                  </div>
+                </div>
+              </>
+            )}
+            <div className="border-t pt-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[10px] text-muted-foreground">
+                  当周学习计划{plan?.week ? `（${plan.week} 起）` : ""}
+                </span>
+                <span className="flex-1" />
+                <Button size="sm" variant="outline" className="h-6 px-2 text-[10px]" disabled={!plan || copied} onClick={copyPlan}>
+                  {copied ? "已复制 ✓" : "复制 md"}
+                </Button>
+                <Button size="sm" className="h-6 px-2 text-[10px]" onClick={generatePlan} disabled={planBusy}>
+                  {planBusy ? "生成中…" : plan ? "重新生成" : "生成本周计划"}
+                </Button>
               </div>
-              <p className="text-[10px] text-muted-foreground">
-                Obsidian vault 接入与 LLM 周学习计划为 E10（§16.3），本 tab 届时扩展。
-              </p>
+              {plans.length > 1 && (
+                <div className="mt-1.5 flex flex-wrap gap-1">
+                  {plans.map((p) => (
+                    <button key={p.week} onClick={() => setPlanWeek(p.week)}
+                            className={cn("rounded px-1.5 py-0.5 font-mono text-[10px]",
+                                          p.week === planWeek ? "bg-secondary text-primary" : "text-muted-foreground hover:bg-accent/40")}>
+                      {p.week}
+                    </button>
+                  ))}
+                </div>
+              )}
+              <div className="mt-2">
+                {plan
+                  ? <MarkdownView content={plan.content} prefix="plan" />
+                  : <p className="text-[11px] text-muted-foreground">
+                      暂无周计划——点「生成本周计划」，由画像 + 当周简报 + 高分文章合成（classifier 缺席降级模板）。
+                    </p>}
+              </div>
             </div>
-          )}
+          </div>
         </TabsContent>
       </Tabs>
     </div>

@@ -1,13 +1,14 @@
-"""情报打分与简报合成（E9，DESIGN.md §16）。
+"""情报打分与简报合成（E9）+ 学习档案与周计划（E10），DESIGN.md §16。
 
 LLM 用 classifier 小模型路由（只喂标题+RSS 摘要段，每条几百 token）；
 **LLM 缺席（无 key / 调用失败）不阻塞情报功能**——降级为规则打分与模板简报，
 score_detail 标 llm/rule 供前端区分。打分 = 方向相关性（profile 权重）× 技术深度。
+E10 隐私红线：周计划等 LLM 入参只含**元数据**（标题/标签/目录/计数），笔记正文永不出本机。
 """
 
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from core.intel.config import DIRECTIONS
 from core.intel.fetch import fetch_all
@@ -185,3 +186,114 @@ def run_refresh(store, profile: dict, feeds: list[dict], *, llm=None,
     stats.update({"new": new_n, "errors": errors, "scored": len(rows)})
     store.save_brief(date, content, stats)
     return stats
+
+
+# ---------- E10：学习档案与周计划（§16.3；LLM 只喂元数据） ----------
+
+def infer_direction(text: str) -> str:
+    """标题/标签/路径 → 主方向（复用 E9 关键词表，命中多者胜；无命中返回空）。"""
+    text = text.lower()
+    best_dir, best_hits = "", 0
+    for d, kws in _DIRECTION_KEYWORDS.items():
+        hits = sum(1 for k in kws if k.lower() in text)
+        if hits > best_hits:
+            best_dir, best_hits = d, hits
+    return best_dir
+
+
+def week_start(date: str | None = None) -> str:
+    """ISO 周起始日（周一）YYYY-MM-DD，learning_plans 主键。"""
+    d = (datetime.strptime(date, "%Y-%m-%d").date() if date
+         else datetime.now(timezone.utc).date())
+    return (d - timedelta(days=d.weekday())).isoformat()
+
+
+def learning_profile(store, profile: dict) -> dict:
+    """三来源聚合：声明画像 + vault 元数据推断 + 平台学习记录（文章已读/收藏）。"""
+    declared = {"directions": profile.get("directions", {}), "stage": profile.get("stage", "")}
+    # vault 推断：按 title+tags+path 判方向（**不读正文**）
+    vault_by: dict[str, dict] = {d: {"notes": 0, "last_active": ""} for d in DIRECTIONS}
+    vault_total = 0
+    for n in store.list_notes():
+        vault_total += 1
+        d = infer_direction(f"{n.get('title', '')} {' '.join(n.get('tags', []))} {n['path']}")
+        if d:
+            vault_by[d]["notes"] += 1
+            if n.get("mtime", "") > vault_by[d]["last_active"]:
+                vault_by[d]["last_active"] = n["mtime"]
+    platform = store.platform_direction_counts()
+    return {"declared": declared,
+            "vault": {"total": vault_total, "by_direction": vault_by},
+            "platform": platform}
+
+
+def compose_weekly_plan(agg: dict, brief: dict | None, articles: list[dict],
+                        week: str, llm=None) -> tuple[str, dict]:
+    """(markdown 周计划, stats)。入参只含元数据——笔记正文在此前已被剥除。"""
+    stats = {"by": "template", "week": week,
+             "brief_date": brief.get("date") if brief else None,
+             "articles": len(articles)}
+    if llm is not None:
+        try:
+            content = _llm_weekly_plan(agg, brief, articles, week, llm)
+            stats["by"] = "llm"
+            return content, stats
+        except Exception:  # noqa: BLE001
+            pass
+    lines = [f"# 周学习计划（{week} 起）", ""]
+    stage = agg["declared"].get("stage") or "（未声明阶段，可在设置页画像里填写）"
+    lines += [f"**学习阶段**：{stage}", "", "## 本周建议", ""]
+    hot = [a for a in articles if a.get("is_priority")][:3]
+    if hot:
+        lines.append("- **优先跟进热点**：" + "；".join(a["title"] for a in hot))
+    for a in articles[:5]:
+        lines.append(f"- 读：[{a['title']}]（{a.get('source', '')}"
+                     f"{'·' + a['direction'] if a.get('direction') else ''}）")
+    vault_dirs = {d: v for d, v in agg["vault"]["by_direction"].items() if v["notes"]}
+    if vault_dirs:
+        lines.append("- vault 近况：" + "、".join(
+            f"{d} {v['notes']} 篇（最近 {v['last_active'][:10]}）"
+            for d, v in sorted(vault_dirs.items())))
+    lines.append("- 练：任选一篇技术文章动手复现，把笔记整理回 vault（本平台不代写）。")
+    lines.append("")
+    return "\n".join(lines), stats
+
+
+def _llm_weekly_plan(agg: dict, brief: dict | None, articles: list[dict],
+                     week: str, llm) -> str:
+    """LLM 入参构造：**仅元数据**（计数/标题/方向/阶段声明），无任何笔记正文。"""
+    stage = agg["declared"].get("stage") or "未声明"
+    weights = agg["declared"].get("directions", {})
+    vault_lines = [f"- {d}：{v['notes']} 篇，最近活跃 {v['last_active'][:10] or '无'}"
+                   for d, v in agg["vault"]["by_direction"].items() if v["notes"]]
+    plat_lines = [f"- {d}：已读 {v['read']} / 收藏 {v['starred']}"
+                  for d, v in agg["platform"].items() if v.get("total")]
+    brief_lines = []
+    if brief:
+        for ln in brief.get("content", "").splitlines():
+            if ln.startswith("- "):
+                brief_lines.append(ln[:150])
+    art_lines = [f"- [{a.get('source', '')}] {a['title']}"
+                 f"{'·' + a['direction'] if a.get('direction') else ''}（分 {a.get('score', 0)}）"
+                 for a in articles[:15]]
+    sys_p = (
+        "你是中文安全学习教练。按给定素材生成本周学习计划 markdown：三节——"
+        "「本周重点」（结合画像方向权重与当周简报热点，2-3 条）、"
+        "「推荐阅读」（从文章清单挑 3-5 篇并说明理由）、「练习」（可动手的实操建议）。"
+        "不编造素材里没有的信息。直接输出 markdown。")
+    body = [f"周起始：{week}", f"学习阶段：{stage}",
+            "方向权重：" + " ".join(f"{d}={w}" for d, w in weights.items())]
+    if vault_lines:
+        body.append("vault 笔记分布（仅元数据）：\n" + "\n".join(vault_lines))
+    if plat_lines:
+        body.append("平台阅读记录：\n" + "\n".join(plat_lines))
+    if brief_lines:
+        body.append("当周简报要点：\n" + "\n".join(brief_lines[:8]))
+    if art_lines:
+        body.append("高分文章清单（标题元数据）：\n" + "\n".join(art_lines))
+    resp = llm.chat([{"role": "user", "content": "\n\n".join(body)}],
+                    system=sys_p, max_tokens=MAX_TOKENS_BUDGET, temperature=0.4)
+    text = resp.text.strip()
+    if not text:
+        raise ValueError("classifier 周计划为空")
+    return text

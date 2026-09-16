@@ -10,6 +10,7 @@ __pycache__/
 
 # 运行时数据
 workspaces/
+config/intel/
 *.db
 *.db-wal
 *.db-shm

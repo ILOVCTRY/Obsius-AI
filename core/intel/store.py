@@ -1,7 +1,7 @@
-"""情报全局存储（E9，DESIGN.md §16）：config/intel/intel.db（SQLite WAL）。
+"""情报全局存储（E9/E10，DESIGN.md §16）：config/intel/intel.db（SQLite WAL）。
 
 与项目黑板无关的**全局** DB（新模式：现全局配置仅 config/*.json）。
-文章池 + 简报归档两张表；feeds.json / profile.json 由 config.py 管理。
+文章池 + 简报归档 + vault 笔记元数据索引 + 学习计划四张表；feeds.json / profile.json 由 config.py 管理。
 流量极低（人工触发抓取/翻页），单连接 + 写锁即可，不照抄 Blackboard 的线程局部连接。
 """
 
@@ -13,7 +13,7 @@ from pathlib import Path
 
 from core.blackboard.store import new_id  # 复用 <前缀>-<12hex> 约定
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -40,6 +40,21 @@ CREATE TABLE IF NOT EXISTS briefs (
     date TEXT PRIMARY KEY,         -- YYYY-MM-DD（UTC）
     content TEXT NOT NULL,         -- markdown 全文
     stats TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS vault_notes (          -- E10：vault 元数据索引（只读，全量重建语义）
+    path TEXT PRIMARY KEY,         -- vault 根相对 POSIX 路径
+    title TEXT NOT NULL DEFAULT '',
+    tags TEXT NOT NULL DEFAULT '', -- JSON 数组
+    mtime TEXT NOT NULL DEFAULT '',
+    size INTEGER NOT NULL DEFAULT 0,
+    content TEXT NOT NULL DEFAULT '', -- 正文仅本地搜索用，绝不进 LLM 入参（隐私红线）
+    indexed_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS learning_plans (       -- E10：周学习计划（周一起始，同周覆盖）
+    week TEXT PRIMARY KEY,         -- YYYY-MM-DD（ISO 周起始日）
+    content TEXT NOT NULL,         -- markdown 全文
+    inputs TEXT NOT NULL DEFAULT '{}', -- 输入摘要统计（不含笔记正文）
     created_at TEXT NOT NULL
 );
 """
@@ -184,3 +199,115 @@ class IntelStore:
             starred = self._conn.execute(
                 "SELECT COUNT(*) c FROM articles WHERE starred=1").fetchone()["c"]
         return {"articles": total, "unread": unread, "starred": starred}
+
+    # ---- vault 笔记元数据索引（E10，只读；正文仅本地搜索用） ----
+
+    def replace_notes(self, notes: list[dict]) -> int:
+        """全量重建索引（事务内清表重灌）。返回入索引篇数。"""
+        with self._lock:
+            self._conn.execute("DELETE FROM vault_notes")
+            for n in notes:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO vault_notes"
+                    "(path,title,tags,mtime,size,content,indexed_at) VALUES(?,?,?,?,?,?,?)",
+                    (n["path"], n.get("title", ""),
+                     json.dumps(n.get("tags", []), ensure_ascii=False),
+                     n.get("mtime", ""), n.get("size", 0),
+                     n.get("content", ""), now()))
+            self._conn.commit()
+        return len(notes)
+
+    def list_notes(self, limit: int = 2000) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT path,title,tags,mtime,size,indexed_at FROM vault_notes "
+                "ORDER BY path LIMIT ?", (limit,)).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["tags"] = json.loads(d.get("tags") or "[]")
+            out.append(d)
+        return out
+
+    def search_notes(self, q: str, limit: int = 50) -> list[dict]:
+        """本地全文搜索（title/tags/content LIKE）。返回元数据 + 命中 snippet，不返回全文。"""
+        q = q.strip()
+        if not q:
+            return []
+        like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT path,title,tags,mtime,size,content FROM vault_notes "
+                "WHERE title LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\' "
+                "OR content LIKE ? ESCAPE '\\' ORDER BY path LIMIT ?",
+                (like, like, like, limit)).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["tags"] = json.loads(d.get("tags") or "[]")
+            content = d.pop("content", "")
+            pos = content.lower().find(q.lower())
+            if pos < 0:  # 命中在 title/tags 而非正文
+                d["snippet"] = content[:120]
+            else:
+                s = max(0, pos - 80)
+                d["snippet"] = ("…" if s > 0 else "") + content[s:pos + len(q) + 80] + "…"
+            out.append(d)
+        return out
+
+    def note_stats(self) -> dict:
+        with self._lock:
+            total = self._conn.execute("SELECT COUNT(*) c FROM vault_notes").fetchone()["c"]
+            row = self._conn.execute(
+                "SELECT MAX(indexed_at) m FROM vault_notes").fetchone()
+        return {"notes": total, "last_indexed": row["m"] or ""}
+
+    def platform_direction_counts(self) -> dict:
+        """文章池按方向的已读/收藏计数（E10 学习档案平台侧来源）。"""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT direction, COUNT(*) total, SUM(read) reads, SUM(starred) stars "
+                "FROM articles WHERE direction!='' GROUP BY direction").fetchall()
+        return {r["direction"]: {"notes": 0, "total": r["total"],
+                                 "read": r["reads"] or 0, "starred": r["stars"] or 0}
+                for r in rows}
+
+    # ---- 周学习计划（E10） ----
+
+    def save_plan(self, week: str, content: str, inputs: dict) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO learning_plans(week,content,inputs,created_at) VALUES(?,?,?,?) "
+                "ON CONFLICT(week) DO UPDATE SET content=excluded.content, "
+                "inputs=excluded.inputs", (week, content,
+                                           json.dumps(inputs, ensure_ascii=False), now()))
+            self._conn.commit()
+
+    def get_plan(self, week: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM learning_plans WHERE week=?",
+                                     (week,)).fetchone()
+        if row is None:
+            return None
+        d = dict(row)
+        d["inputs"] = json.loads(d.get("inputs") or "{}")
+        return d
+
+    def latest_plan(self) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT week FROM learning_plans ORDER BY week DESC LIMIT 1").fetchone()
+        return self.get_plan(row["week"]) if row else None
+
+    def list_plans(self) -> list[dict]:
+        """归档列表（不含全文）。"""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT week, inputs, created_at FROM learning_plans "
+                "ORDER BY week DESC").fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["inputs"] = json.loads(d.get("inputs") or "{}")
+            out.append(d)
+        return out

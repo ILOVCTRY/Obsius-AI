@@ -4,7 +4,9 @@ import type {
   DecideApprovalResult, DoctorReport, DiscoveredModel, Finding, FindingPatchBody, FuncCreateBody, FuncEntry,
   FuncPatchBody, HistoryList, InboxMessage, Job, KbRead, KbRefHit, KbRenameResult, KbSourceTree,
   KbWriteResult, LlmProvider, McpServer, ModelInfo, IntelArticle, IntelBrief, IntelBriefMeta,
-  IntelFeed, IntelOverview, IntelProfile, OwnerRule, PackRole, ProjectDetail, ProjectMeta,
+  IntelFeed, IntelOverview, IntelProfile, IntelVaultConfig, IntelVaultInfo, VaultNode,
+  VaultSearchHit, IntelLearningProfile, IntelPlan, IntelPlanMeta,
+  OwnerRule, PackRole, ProjectDetail, ProjectMeta,
   Proposal, ProposalOrigin, RoleCreateBody, RoleInfo, RouteHit,
   RoutePreviewBody, RoleUpdateBody, SampleUploadResponse, Session, SkillCreateBody, SkillDef,
   SkillDetail, SkillVocab, Task, TaskGraph, WritebackItem, XrefData,
@@ -470,6 +472,26 @@ export const api = {
     http<IntelArticle>(`/api/intel/articles/${id}`, {
       method: "PATCH", body: JSON.stringify(patch),
     }),
+  // E10：vault 接入 + 学习档案 + 周计划
+  intelVault: () =>
+    http<IntelVaultInfo>("/api/intel/vault"),
+  intelUpdateVault: (vault: IntelVaultConfig) =>
+    http<{ status: string; vault: IntelVaultConfig; index_job_id: string | null }>(
+      "/api/intel/vault", { method: "PUT", body: JSON.stringify(vault) }),
+  intelVaultIndex: () =>
+    http<{ job_id: string }>("/api/intel/vault/index", { method: "POST" }),
+  intelVaultTree: () =>
+    http<{ configured: boolean; tree: VaultNode[] }>("/api/intel/vault/tree"),
+  intelVaultSearch: (q: string) =>
+    http<{ hits: VaultSearchHit[] }>(`/api/intel/vault/search?q=${encodeURIComponent(q)}`),
+  intelLearningProfile: () =>
+    http<IntelLearningProfile>("/api/intel/learning/profile"),
+  intelLearningPlanGenerate: () =>
+    http<{ job_id: string; week: string }>("/api/intel/learning/plan", { method: "POST" }),
+  intelLearningPlan: (week?: string) =>
+    http<IntelPlan>(`/api/intel/learning/plan${week ? `?week=${encodeURIComponent(week)}` : ""}`),
+  intelLearningPlans: () =>
+    http<{ plans: IntelPlanMeta[] }>("/api/intel/learning/plans"),
 }
 
 // 长耗时 Job 轮询（Agent work / orchestrator tick）

@@ -1,6 +1,6 @@
 # cyberstrike-pro 设计文档
 
-> 版本: v0.25 (2026-09-16)
+> 版本: v0.26 (2026-09-16)
 本文档是项目蓝图，后续开发以本文档为准；重大变更需更新此文档。
 > 
 > **状态约定（v0.3 起）**：正文默认以**现在时描述已落地的系统现状**；未落地的定稿设计在节/段首以引用块标注：  
@@ -9,7 +9,7 @@
 > 
 > **当前总体状态**：Phase 1 核心平台完成，Phase 2 进行中。已落地的模块级明细见下「落地状态总览」表与 §6.7/§6.8 各节状态标注（此处不再重复罗列）。**未落地**：F 批协调机制余部（1.1–1.4、1.7 传播本体、1.8、1.10、1.5 的 Agent 自由私信侧，见 §17 B 组）、逆向复用 R1/R2/R3（§17 C 组）、development 轨（§15，含 §15.5 AI 反代/破甲专项）、malware 轨与 fakenet（Phase 3）。
 > 
-> 历史：v0.25 (2026-09-16) 编排开窗赛跑修复：spawn_session 批准处理器加 open 任务终检（无 open 任务不建窗，落 approval.exec_failed，防空窗占 cap）+ spawn_session 工具描述补「既有会话可覆盖时不提案开窗」纪律；起因=L1 tick 的 B 触发 kick 旧窗抢走放回任务、审批落地开出两个空窗占满 4/4。v0.24 (2026-09-16) E13 三栏框架可拖拽调宽定稿（§12 布局定稿）：左导航栏与右侧黑板侧栏改 react-resizable-panels v4 可拖拽 Panel（不引新依赖，复用 SkillsPane 模式；左 48–220px、右 288–640px）、两分支逐字重复的 nav JSX 抽取为 NavRail 组件、宽度 localStorage 持久化（ui.nav-width/ui.board-width 设备级）、折叠钮与 boardOpen 逻辑不动（条件 Panel 容忍度实施时实测）；纯前端无后端改动，§17 17 挂账实施后置。v0.23 (2026-09-16) E12 意外终止任务可续跑落地（§3）：中断保留现场——`_abort_current_task` 不再销毁落盘快照（`task.failed` 带 resumable；仅任务已删除的中断仍清防孤儿）、`revive_snapshot` 限原会话复活、API `POST /tasks/{tid}/resume`（reopen+claim+清 _stop_after_task+续跑，budget 快照缺省 +200）、看板 failed 卡「▶ 续跑」、两处中断确认弹窗、close 会话显式清快照修孤儿泄漏；起因=暂停后误点中断快照被销毁任务单程失败。v0.22 (2026-09-16) E 组收尾商议定稿（纯文档，无代码）：E4 WebUI 终端页设计定稿写入 §12 新小节「终端页与人类命令通路」——E4a 人类 one-shot 命令面板（POST /exec 经 gateway，author=human，审计/审批全继承）+ E4b 交互终端（持久 workspace 容器 cyb-ws-<slug> 惰性创建/空闲回收/reconcile + PTY 三后端 + 双向 WS + xterm.js lazy）；安全边界定稿：人类命令必须过网关、交互终端人类专属（Agent 工具面不新增 PTY 工具）、host 终端默认关闭（settings 显式开+仅 127.0.0.1）、WSL 终端不提供、PTY 不逐键审计（session 级 open/close 代替）；§7 补「人类命令同层」一句。E10/E11 定实施拆批写入 §17 条目（E10 三批：vault 索引→学习档案→周计划，E10 先于 E11；E11 五批：换词表卡流→路标→三级注入 IP 聚合→产物附件→补缺）。v0.21 (2026-09-16) E9 情报面板 v1 落地（§16）：core/intel/ 新模块——全局存储 config/intel/（intel.db SQLite WAL + feeds.json + profile.json，全局 DB 新模式）、触发式抓取（NVD/KEV/GitHub Advisory 经免 key REST/中文社区 RSS，urllib 出站不经网关，getter 可注入，单源失败不中断）、classifier 打分（profile 权重侧乘封顶 100）与中文简报合成（**LLM 缺席降级规则打分与模板简报，不 503**）、run_refresh 管线（文章配比=热点 1–2+技术 3–5）；API `/api/intel/*` 十端点（惰性建库、intel_getter/intel_llm 测试注入口）；前端情报页三 tab（简报/文章/学习）+ App 顶级导航 + 项目页两栏简报卡 + 设置页「情报源」tab；§17 E 组移除 E9 并重编号。实施注记：GitHub Advisory 走 api.github.com/advisories 免 key REST（GraphQL 要 token 弃用）。v0.20 (2026-09-16) E2 能力包级 redlines 补齐落地：web/binary/crypto/forensics/misc 五份 rules/redlines.md 按轨级风格起草（**AI 起草草案待人审**，能力级跨轨纪律：web 验证最小伤害/证据反幻觉/状态机、binary 样本信任/func_kb 查重、crypto 可复现结论/敏感密钥处置、forensics 证据只读/OSINT 边界/最小化、misc 先常规后重型/反幻觉），build_rules_preamble 注入实测通过、doctor missing-redlines 告警清零；§17 E 组移除 E2 并重编号。v0.19 (2026-09-16) E1 红线设置页 UI 重构落地（§12 设置页）：RulesPane 拆至 components/settings/，改左文件列表+右单文件编辑器（●/○ 存在状态点、注入范围 Badge、字数/保存底栏、缺失新建并保存、owner hover ✕ 停用与内联新建），切文件/切轨包 dirty confirm 守卫（修未保存内容被静默覆盖），doctor 红线跳转自动选中；后端 API 与 .history 不动；§17 E 组移除 E1 并重编号。v0.18 (2026-09-16) E6+E7 资产登记改造与扫描/测试状态机落地（§5.2）：register_asset 统一登记入口（人工/Agent 同路）、类型自动识别、domain 自动 DNS 挂载与主域名/别名标记、host 按 IP 去重、bb_add_asset 防重扫回执；assets.status 四态状态机 + bb_asset_status（tested_clean 必带 note）+ asset.status_changed 审计 +「有发现」前端反查徽章 + bb_query status/type 过滤；§17 E 组移除 E6/E7 并重编号。v0.17 (2026-09-16) E8 步数预算与人工引导落地（§3）：max_steps 默认 200、剩余<20 步边界提醒、request_steps 自助加步（+200/剩余>20 拒收/审计）、耗尽自动步数暂停（快照落库可 rehydrate，不 fail）、human_note 引导通道 + 直播间「发任务｜引导会话」切换、resume 支持附引导语/追加步数；§17 E 组移除 E8 并重编号。v0.16 (2026-09-16) 章节调序：情报面板（原 §17）前移为 §16、待做清单移至末位 §17，交叉引用同步改；待做清单内容不变。v0.15 (2026-09-16) CTF 线索板 + 跨轨路标定稿（§5.2：四级线索词表/产物内联/三级注入按 IP 聚合）+ §16 E11 挂账（实施后置；起因：CTF 黑板通用性太高，MISC/取证线索串联无承载）。v0.14 (2026-09-16) 情报面板定稿（新章 §17：漏洞简报/高分文章/Obsidian 学习计划）+ §16 E9/E10 挂账（实施后置）。v0.13 (2026-09-16) 步数预算与人工引导定稿（§3）+ §16 E8 挂账（实施后置；起因：recon 任务 30 步耗尽被自动 fail 走查）。v0.12 (2026-09-16) 资产扫描/测试状态机定稿（§5.2）+ §16 E7 挂账（实施后置，可与 E6 同批）。v0.11 (2026-09-16) 资产登记改造定稿（§5.2）+ §16 E6 挂账（实施后置）。v0.10 (2026-09-15) 直播间事件流新增「路由」筛选 tab（§12）+ 全文精简（重复状态叙述并入落地状态总览，实现坑细节移交各级 CLAUDE.md）；仓库 git init。v0.9 (2026-09-15) A 组五项落地（schema v5→v6，§16 A 组移除、B–E 重编号）。v0.8 (2026-09-15) 时间本地化（§12）+ §16 重排 A–E 组。v0.7/v0.6/v0.5 (2026-09-15) G 批批 6/5/4：L0 提案模式 / L2 全自动链 / L1 开窗审批（§6.8）。v0.4 (2026-09-15) G 批批 2/3 自主配置面/记账 + tick 租约/编排状态持久化（schema v5）。v0.3 (2026-09-15) 状态约定 + 撤回传播（机制 1.6/1.5 系统侧）。v0.2 (2026-09-13) 「能力包 × 场景轨」正交分类学（§4.5）+ src-strike 全量融入（§4）+ 角色软边界/技能全提案制。v0.1 首版定稿。
+> 历史：v0.26 (2026-09-16) E10 Obsidian 接入 + 学习计划落地（§16.3 三批一次实施）：core/intel/ 增 vault.py（index_vault 只读索引=frontmatter 复用/title 三级回退/tags fm+内联去重/SKIP_DIRS，build_tree 嵌套化）+ intel.db SCHEMA_VERSION 1→2（vault_notes/learning_plans 两表，DDL 全 IF NOT EXISTS 幂等迁移）+ config.py load/save_profile 重写为**透传未知键**（手编字段不再丢）+ learning_profile 三来源聚合（声明画像+vault 元数据推断【不读正文】+platform_direction_counts）+ compose_weekly_plan（classifier 只喂**元数据**——隐私红线测试断言 LLM 入参不含笔记正文；LLM 失败降级模板）；API 增 vault+learning 八端点（PUT vault 配了路径即自动索引 Job；learning/plan POST=Job、GET 缺省 latest）；前端 IntelView 学习 tab 换三来源档案+当周计划（生成/复制 md/归档周列表）、IntelSourcePane 加 vault 节（保存并索引/重建索引/n 篇·上次索引）。实施注记（v1 取舍）：tree/search 全走索引（请求路径零 FS 访问，天然无穿越）；索引为全量重建、无自动监听，编辑后手动重建（staleness 可接受）。v0.25 (2026-09-16) 编排开窗赛跑修复：spawn_session 批准处理器加 open 任务终检（无 open 任务不建窗，落 approval.exec_failed，防空窗占 cap）+ spawn_session 工具描述补「既有会话可覆盖时不提案开窗」纪律；起因=L1 tick 的 B 触发 kick 旧窗抢走放回任务、审批落地开出两个空窗占满 4/4。v0.24 (2026-09-16) E13 三栏框架可拖拽调宽定稿（§12 布局定稿）：左导航栏与右侧黑板侧栏改 react-resizable-panels v4 可拖拽 Panel（不引新依赖，复用 SkillsPane 模式；左 48–220px、右 288–640px）、两分支逐字重复的 nav JSX 抽取为 NavRail 组件、宽度 localStorage 持久化（ui.nav-width/ui.board-width 设备级）、折叠钮与 boardOpen 逻辑不动（条件 Panel 容忍度实施时实测）；纯前端无后端改动，§17 17 挂账实施后置。v0.23 (2026-09-16) E12 意外终止任务可续跑落地（§3）：中断保留现场——`_abort_current_task` 不再销毁落盘快照（`task.failed` 带 resumable；仅任务已删除的中断仍清防孤儿）、`revive_snapshot` 限原会话复活、API `POST /tasks/{tid}/resume`（reopen+claim+清 _stop_after_task+续跑，budget 快照缺省 +200）、看板 failed 卡「▶ 续跑」、两处中断确认弹窗、close 会话显式清快照修孤儿泄漏；起因=暂停后误点中断快照被销毁任务单程失败。v0.22 (2026-09-16) E 组收尾商议定稿（纯文档，无代码）：E4 WebUI 终端页设计定稿写入 §12 新小节「终端页与人类命令通路」——E4a 人类 one-shot 命令面板（POST /exec 经 gateway，author=human，审计/审批全继承）+ E4b 交互终端（持久 workspace 容器 cyb-ws-<slug> 惰性创建/空闲回收/reconcile + PTY 三后端 + 双向 WS + xterm.js lazy）；安全边界定稿：人类命令必须过网关、交互终端人类专属（Agent 工具面不新增 PTY 工具）、host 终端默认关闭（settings 显式开+仅 127.0.0.1）、WSL 终端不提供、PTY 不逐键审计（session 级 open/close 代替）；§7 补「人类命令同层」一句。E10/E11 定实施拆批写入 §17 条目（E10 三批：vault 索引→学习档案→周计划，E10 先于 E11；E11 五批：换词表卡流→路标→三级注入 IP 聚合→产物附件→补缺）。v0.21 (2026-09-16) E9 情报面板 v1 落地（§16）：core/intel/ 新模块——全局存储 config/intel/（intel.db SQLite WAL + feeds.json + profile.json，全局 DB 新模式）、触发式抓取（NVD/KEV/GitHub Advisory 经免 key REST/中文社区 RSS，urllib 出站不经网关，getter 可注入，单源失败不中断）、classifier 打分（profile 权重侧乘封顶 100）与中文简报合成（**LLM 缺席降级规则打分与模板简报，不 503**）、run_refresh 管线（文章配比=热点 1–2+技术 3–5）；API `/api/intel/*` 十端点（惰性建库、intel_getter/intel_llm 测试注入口）；前端情报页三 tab（简报/文章/学习）+ App 顶级导航 + 项目页两栏简报卡 + 设置页「情报源」tab；§17 E 组移除 E9 并重编号。实施注记：GitHub Advisory 走 api.github.com/advisories 免 key REST（GraphQL 要 token 弃用）。v0.20 (2026-09-16) E2 能力包级 redlines 补齐落地：web/binary/crypto/forensics/misc 五份 rules/redlines.md 按轨级风格起草（**AI 起草草案待人审**，能力级跨轨纪律：web 验证最小伤害/证据反幻觉/状态机、binary 样本信任/func_kb 查重、crypto 可复现结论/敏感密钥处置、forensics 证据只读/OSINT 边界/最小化、misc 先常规后重型/反幻觉），build_rules_preamble 注入实测通过、doctor missing-redlines 告警清零；§17 E 组移除 E2 并重编号。v0.19 (2026-09-16) E1 红线设置页 UI 重构落地（§12 设置页）：RulesPane 拆至 components/settings/，改左文件列表+右单文件编辑器（●/○ 存在状态点、注入范围 Badge、字数/保存底栏、缺失新建并保存、owner hover ✕ 停用与内联新建），切文件/切轨包 dirty confirm 守卫（修未保存内容被静默覆盖），doctor 红线跳转自动选中；后端 API 与 .history 不动；§17 E 组移除 E1 并重编号。v0.18 (2026-09-16) E6+E7 资产登记改造与扫描/测试状态机落地（§5.2）：register_asset 统一登记入口（人工/Agent 同路）、类型自动识别、domain 自动 DNS 挂载与主域名/别名标记、host 按 IP 去重、bb_add_asset 防重扫回执；assets.status 四态状态机 + bb_asset_status（tested_clean 必带 note）+ asset.status_changed 审计 +「有发现」前端反查徽章 + bb_query status/type 过滤；§17 E 组移除 E6/E7 并重编号。v0.17 (2026-09-16) E8 步数预算与人工引导落地（§3）：max_steps 默认 200、剩余<20 步边界提醒、request_steps 自助加步（+200/剩余>20 拒收/审计）、耗尽自动步数暂停（快照落库可 rehydrate，不 fail）、human_note 引导通道 + 直播间「发任务｜引导会话」切换、resume 支持附引导语/追加步数；§17 E 组移除 E8 并重编号。v0.16 (2026-09-16) 章节调序：情报面板（原 §17）前移为 §16、待做清单移至末位 §17，交叉引用同步改；待做清单内容不变。v0.15 (2026-09-16) CTF 线索板 + 跨轨路标定稿（§5.2：四级线索词表/产物内联/三级注入按 IP 聚合）+ §16 E11 挂账（实施后置；起因：CTF 黑板通用性太高，MISC/取证线索串联无承载）。v0.14 (2026-09-16) 情报面板定稿（新章 §17：漏洞简报/高分文章/Obsidian 学习计划）+ §16 E9/E10 挂账（实施后置）。v0.13 (2026-09-16) 步数预算与人工引导定稿（§3）+ §16 E8 挂账（实施后置；起因：recon 任务 30 步耗尽被自动 fail 走查）。v0.12 (2026-09-16) 资产扫描/测试状态机定稿（§5.2）+ §16 E7 挂账（实施后置，可与 E6 同批）。v0.11 (2026-09-16) 资产登记改造定稿（§5.2）+ §16 E6 挂账（实施后置）。v0.10 (2026-09-15) 直播间事件流新增「路由」筛选 tab（§12）+ 全文精简（重复状态叙述并入落地状态总览，实现坑细节移交各级 CLAUDE.md）；仓库 git init。v0.9 (2026-09-15) A 组五项落地（schema v5→v6，§16 A 组移除、B–E 重编号）。v0.8 (2026-09-15) 时间本地化（§12）+ §16 重排 A–E 组。v0.7/v0.6/v0.5 (2026-09-15) G 批批 6/5/4：L0 提案模式 / L2 全自动链 / L1 开窗审批（§6.8）。v0.4 (2026-09-15) G 批批 2/3 自主配置面/记账 + tick 租约/编排状态持久化（schema v5）。v0.3 (2026-09-15) 状态约定 + 撤回传播（机制 1.6/1.5 系统侧）。v0.2 (2026-09-13) 「能力包 × 场景轨」正交分类学（§4.5）+ src-strike 全量融入（§4）+ 角色软边界/技能全提案制。v0.1 首版定稿。
 
 ## 落地状态总览（2026-09-15 代码核查）
 
@@ -44,12 +44,13 @@
 | development 场景轨                                                                    | ⬜         | §15（仓库已 git init）                                                                      |
 | A 组多会话可观察/可急停（A1 detach/终止入口收敛/步边界急停/done 可删、A2 tasks.plan 计划闸、A3 任务流视图、A4 finding_update 私信、A5 编排规划-分派） | ✅ | §3/§6.1/§6.4/§6.7/§12，2026-09-15（schema v6）                                                |
 | E12 意外终止任务可续跑（中断保留现场 + 看板「▶ 续跑」限原会话 + 中断确认弹窗） | ✅ | §3，2026-09-16                                                                                |
-| E13 三栏框架可拖拽调宽（左导航/右侧黑板侧栏 react-resizable-panels v4 化 + NavRail 抽取） | ⬜ | §12 布局定稿，E13 已定稿挂账 §17 17                                                                  |
+| E13 三栏框架可拖拽调宽（左导航/右侧黑板侧栏 react-resizable-panels v4 化 + NavRail 抽取） | ⬜ | §12 布局定稿，E13 已定稿挂账 §17 16                                                                  |
 | E8 步数预算与人工引导（max_steps 200/request_steps 自助/耗尽自动暂停+快照落库/human_note 通道） | ✅ | §3，2026-09-16（无 schema 升级）                                                              |
 | E6+E7 资产登记统一入口（类型自动识别/DNS 挂载/主域名别名）+ 扫描测试状态机（status 四态/bb_asset_status/有发现反查徽章） | ✅ | §5.2，2026-09-16（无 schema 升级）                                                            |
 | E1 红线设置页 UI 重构（左文件列表+右单文件编辑器/dirty 守卫/doctor 跳转选中） | ✅ | §12，2026-09-16（纯前端，无 schema 升级）                                                     |
 | E2 能力包级 redlines 补齐（web/binary/crypto/forensics/misc 五份草案，待人审） | ✅ | §4.5，2026-09-16（纯文档，无 schema 升级）                                                    |
 | E9 情报面板 v1（config/intel 全局库/触发式抓取/classifier 打分与简报/情报页三 tab/简报卡/情报源 tab） | ✅ | §16，2026-09-16（core/intel 新模块 + 全局 DB 新模式；LLM 缺席降级规则不 503；无 schema 升级）  |
+| E10 Obsidian 接入 + 学习计划（vault 只读索引/本地全文搜索/学习档案三来源/LLM 周计划只喂元数据） | ✅ | §16.3，2026-09-16（intel.db SCHEMA_VERSION=2；隐私红线=正文不出本机有测试断言；v1 无自动监听，手动重建索引）  |
 | 时间本地化（本地时区 + YYYY-MM-DD HH:mm:ss 统一 formatter，纯前端 datetime.ts）       | ✅         | §12，2026-09-15 落地                                                                          |
 | AI 反代 / AI 破甲专项方向（含红线）                                                   | ⬜         | §15.5，随 development 轨，红线先行进 track redlines                                           |
 | malware 场景轨                                                                        | ⬜         | Phase 3，依赖 fakenet                                                                         |
@@ -976,7 +977,7 @@ packs/
 - 直播间与黑板同屏共存——挂机监控时随时瞟结论性状态，无需切页。
 - rev-generic profile 下右侧栏换成 **384px 逆向挂机侧栏**（风险函数/发现/样本三 tab：覆盖率、三态灯、上传与重新分诊、点击风险函数切全屏工作台）；全屏工作台占满中右区域。
 
-**框架可拖拽调宽（E13，2026-09-16 定稿，〔未实施〕§17 17）**——左导航栏与右侧黑板侧栏宽度可拖拽调整：
+**框架可拖拽调宽（E13，2026-09-16 定稿，〔未实施〕§17 16）**——左导航栏与右侧黑板侧栏宽度可拖拽调整：
 
 - 机制：react-resizable-panels v4（**已在依赖，不引新包**），复用 SkillsPane 三栏模式（Group/Panel/Separator，number=px、字符串=%）与 `HANDLE_CLS` 样式常量（SettingsView.tsx）。
 - 左导航：无 pid/有 pid 两分支包水平 Group，`Panel defaultSize={56} minSize={48} maxSize={220}`；两分支逐字重复的 nav JSX 顺带抽取为 **NavRail 组件**（nav 改 `h-full w-full`，按钮 `w-12`→`w-[calc(100%-8px)]`，拖宽后 label 显示更完整）。
@@ -1208,7 +1209,7 @@ cyberstrike-pro/
 
 ***
 
-## 16. 情报面板（Intel，2026-09-16 定稿，〔E9 已实施 2026-09-16；E10 未实施 §17 15〕）
+## 16. 情报面板（Intel，2026-09-16 定稿，〔E9/E10 已实施 2026-09-16〕）
 
 > 跨项目的**全局**学习/情报模块，与项目黑板无关（数据不进任何 blackboard.db）；覆盖三块：每日漏洞简报、优质技术文章推送、个人知识库（Obsidian）接入与学习计划。
 
@@ -1228,18 +1229,21 @@ cyberstrike-pro/
 - 文章池：RSS 全量入池（URL 去重），classifier 打分（方向相关 × 技术深度）；每日推送配比定稿 = **热点事件 1–2 条 + 技术文章 3–5 篇**（热点少、优质技术多）。
 - 交互：已读/收藏标记（学习档案素材）、点原文外链；默认源（先知/FreeBuf/安全客/看雪/arXiv cs.CR/PortSwigger Research 等）+ 源清单 CRUD 在设置页新增「**情报源**」tab（仿 McpPane 结构）。
 
-### 16.3 Obsidian 接入 + 学习计划（E10）
+### 16.3 Obsidian 接入 + 学习计划（E10 已实施 2026-09-16）
+
+> **实施注记（v1 取舍）**：文件树/搜索全走索引（只查 intel.db，请求路径零 FS 访问，路径来自 DB 天然无穿越）；索引为全量重建、无自动监听，编辑笔记后手动重建（staleness 可接受）。正文入库 vault_notes.content 仅本地搜索用，隐私红线以测试断言兜底（LLM 入参不含笔记正文）。
 
 - **vault 只读接入**：配置本地 vault 路径后接入文件树浏览 / 全文搜索 / 链接图谱（可选）；**平台绝不写回 vault**——用户手工整理的笔记是圣域。
 - **隐私红线（定稿，不可放松）**：LLM 只看**元数据**（文件名/标题/frontmatter 标签/目录结构），笔记正文永不出本机发给 LLM；正文仅平台内搜索用。
 - **学习档案** = 用户声明（profile.json 方向与阶段）+ vault 元数据推断（各方向笔记分布/最近活跃）+ 平台侧学习记录（文章已读/收藏）。
 - **周学习计划**：LLM 结合学习档案与当周简报/文章生成（学什么、读哪篇、练什么）；计划存平台侧，**可导出 md 由用户自行贴回 Obsidian**（不自动写入）。
 
-### 16.4 前端入口（E9）
+### 16.4 前端入口（E9/E10）
 
 - 左侧导航新增顶级页「**情报**」：`App.tsx` 四处注册（View 联合类型 / NAV 数组 `needsProject=false` / 无 pid 分支可渲染 / 视图分发），三 tab = 简报/文章/学习；跨页跳转复用 `goto-*` 自定义事件模式。
 - `ProjectsView` 从 `max-w-3xl` 单栏改两栏，右栏为今日简报摘要卡（无简报时显示引导抓取）。
-- 设置页 tab 数组加「情报源」（源清单 + profile 权重编辑 + 手动抓取按钮）。
+- 设置页 tab 数组加「情报源」（源清单 + profile 权重编辑 + 手动抓取按钮 + E10 vault 配置节）。
+- E10 学习 tab = 三来源档案（声明画像 / vault 推断 / 平台已读收藏）+ 当周计划（生成 Job、复制 md、归档周列表）。
 
 ***
 
@@ -1274,7 +1278,6 @@ cyberstrike-pro/
 12. **E3 · assessment 轨 Phase 2 收尾**：角色体系实战打磨、设备方向知识模块（binary/kb/iot、ics、vehicular）充实、network 能力包视内网内容量评估拆分；渗透报告随 C2 报告导出落地（自动化程度见 §12 待定项）。
 13. **E4 · WebUI 终端页（2026-09-16 定稿，§12「终端页与人类命令通路」）**：B1 E4a 人类命令面板（POST /exec 经 gateway，author=human，审计/审批全继承）→ B2 独立路由/补全 → B3 持久 workspace 容器基建（`cyb-ws-<slug>` 惰性创建/空闲 30min 回收/reconcile）→ B4 E4b PTY 交互终端（双向 WS+xterm.js lazy；host 默认关、WSL 不提供、PTY 不逐键审计）→ B5 收口（session 审计/审批 UI/fakenet 挂点与 D2 合并评审）。交互终端为人类专属，Agent 工具面不新增 PTY 工具。
 14. **E5 · 杂项小项**：misc 包技能（§4.5.4、§10）；fofa/playwright 等运行时 MCP 工具桥（§4，当前仅逆向 IDA 桥）；浅色主题（§12 待定项，低优先级）。
-15. **E10 · Obsidian 接入 + 学习计划（2026-09-16 定稿，§16.3；E 组内先于 E11 实施）**：vault 只读接入（文件树/搜索/链接图谱）→ **LLM 仅看元数据**（正文不出本机，隐私红线）→ 学习档案（声明画像 + vault 元数据推断 + 平台学习记录）→ LLM 周学习计划（结合当周简报/文章），存平台侧可导出 md。依赖 E9 的全局存储与画像（已就绪：core/intel/）。**拆批**：① vault 配置+只读索引（config.py `load/save_profile` 扩展保未知 key、vault 元数据索引 Job 仿 intel-refresh、intel.db 加 vault_notes 表 **SCHEMA_VERSION=2 幂等迁移**、`GET /api/intel/vault/tree`+`/search` 本地全文（正文不出本机）、IntelSourcePane 加 vault 配置）→ ② 学习档案聚合（声明画像+vault 元数据推断+平台已读收藏，`GET /api/intel/learning/profile`，IntelView 学习 tab 渲染三来源）→ ③ 周学习计划（classifier 路由、**只喂元数据**——隐私红线测试断言 LLM 入参不含笔记正文；intel.db 加 learning_plans 表；导出=返回 md+前端复制，无下载端点）。
-16. **E11 · CTF 线索板 + 跨轨路标（2026-09-16 定稿，§5.2）**：findings 换词表复用（四级线索级别含死路、线索类别、false-positive→死路）→ relates_to 卡片链 + 产物内联附件 + 解题脚本/writeup 落 artifact 纪律 → 跨轨统一路标（渗透已排除路径/逆向已排除假设）→ 三级注入按 IP 聚合 → 线索卡流+级别筛选融入现有列表 → CTF 样本上传 UI/远程靶机落资产补缺。无 schema 升级。**拆批**：① CTF 换词表+线索卡流（前端为主：Blackboard Findings 组件四级分色/vuln_class→线索类别/false-positive→死路默认折叠/级别筛选 chips，详情弹窗同步，bb_add_finding 工具描述补 CTF 语义）→ ② 路标记录（bb_add_finding 增死路/已排除方向带原因+已尝试清单，挂 target_asset_id）→ ③ 三级注入按 IP 聚合（loop.py 认领后：scope 精确匹配路标全文 → 资产父链归并同 IP 一行动态摘要（跨端口可见、未覆盖端口显形）→ 项目级计数 + bb_query 查询纪律改写）→ ④ 产物纪律+内联附件（解题脚本/writeup 落 artifact 的技能规则文本、线索卡内联附件复用 POC 弹窗、relates_to 卡片链显示）→ ⑤ 补缺（CTF 样本上传控件——samples 端点已在、非逆向场景需跳过自动 triage；远程靶机 host:port 落资产引导——register_asset 已能识别）。
-17. **E13 · 三栏框架可拖拽调宽（2026-09-16 定稿，§12 布局定稿）**：NavRail 抽取消重 + 左导航/右侧黑板侧栏 react-resizable-panels v4 化（左 48–220px、右 288–640px）+ localStorage 宽度持久化（`ui.nav-width`/`ui.board-width`）；纯前端无后端改动。
+15. **E11 · CTF 线索板 + 跨轨路标（2026-09-16 定稿，§5.2）**：findings 换词表复用（四级线索级别含死路、线索类别、false-positive→死路）→ relates_to 卡片链 + 产物内联附件 + 解题脚本/writeup 落 artifact 纪律 → 跨轨统一路标（渗透已排除路径/逆向已排除假设）→ 三级注入按 IP 聚合 → 线索卡流+级别筛选融入现有列表 → CTF 样本上传 UI/远程靶机落资产补缺。无 schema 升级。**拆批**：① CTF 换词表+线索卡流（前端为主：Blackboard Findings 组件四级分色/vuln_class→线索类别/false-positive→死路默认折叠/级别筛选 chips，详情弹窗同步，bb_add_finding 工具描述补 CTF 语义）→ ② 路标记录（bb_add_finding 增死路/已排除方向带原因+已尝试清单，挂 target_asset_id）→ ③ 三级注入按 IP 聚合（loop.py 认领后：scope 精确匹配路标全文 → 资产父链归并同 IP 一行动态摘要（跨端口可见、未覆盖端口显形）→ 项目级计数 + bb_query 查询纪律改写）→ ④ 产物纪律+内联附件（解题脚本/writeup 落 artifact 的技能规则文本、线索卡内联附件复用 POC 弹窗、relates_to 卡片链显示）→ ⑤ 补缺（CTF 样本上传控件——samples 端点已在、非逆向场景需跳过自动 triage；远程靶机 host:port 落资产引导——register_asset 已能识别）。
+16. **E13 · 三栏框架可拖拽调宽（2026-09-16 定稿，§12 布局定稿）**：NavRail 抽取消重 + 左导航/右侧黑板侧栏 react-resizable-panels v4 化（左 48–220px、右 288–640px）+ localStorage 宽度持久化（`ui.nav-width`/`ui.board-width`）；纯前端无后端改动。
 

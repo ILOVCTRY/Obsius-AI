@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useState } from "react"
 import { api, pollJob } from "@/lib/api"
-import type { IntelFeed, IntelProfile } from "@/lib/types"
+import type { IntelFeed, IntelProfile, IntelVaultInfo } from "@/lib/types"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { fmtDateTimeMin } from "@/lib/datetime"
 import { cn } from "@/lib/utils"
 
-// 设置页「情报源」tab（E9，DESIGN.md §16.4）：源清单 CRUD + 兴趣画像（七方向权重、
-// 学习阶段声明）+ 手动抓取。仿 McpPane 结构：读取即加载，保存整单 PUT（.history 备份）。
+// 设置页「情报源」tab（E9/E10，DESIGN.md §16.4/§16.3）：源清单 CRUD + 兴趣画像 +
+// Obsidian vault 只读接入（保存即自动索引）+ 手动抓取。仿 McpPane 结构：读取即加载，
+// 保存整单 PUT（.history 备份）。
 
 const DIRECTION_LABELS: Record<string, string> = {
   web: "Web", ai: "AI 安全", vehicle: "车联网", reverse: "逆向",
@@ -16,6 +18,10 @@ const DIRECTION_LABELS: Record<string, string> = {
 export function IntelSourcePane() {
   const [feeds, setFeeds] = useState<IntelFeed[]>([])
   const [profile, setProfile] = useState<IntelProfile | null>(null)
+  // E10：vault 配置（vaultInfo=服务端现状，vaultPath=输入框编辑值）
+  const [vaultInfo, setVaultInfo] = useState<IntelVaultInfo | null>(null)
+  const [vaultPath, setVaultPath] = useState("")
+  const [vaultBusy, setVaultBusy] = useState(false)
   const [saved, setSaved] = useState(false)
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
@@ -28,6 +34,7 @@ export function IntelSourcePane() {
   const reload = useCallback(() => {
     api.intelFeeds().then((r) => setFeeds(r.feeds)).catch(() => {})
     api.intelProfile().then(setProfile).catch(() => {})
+    api.intelVault().then((v) => { setVaultInfo(v); setVaultPath(v.path) }).catch(() => {})
   }, [])
   useEffect(() => { reload() }, [reload])
 
@@ -74,6 +81,54 @@ export function IntelSourcePane() {
     if (!profile) return
     const num = parseFloat(v)
     setProfile({ ...profile, directions: { ...profile.directions, [d]: isNaN(num) ? 0 : num } })
+  }
+
+  // E10：保存 vault 配置（写 profile.json 经 .history 备份）；配置了路径即自动触发索引 Job
+  const saveVault = async () => {
+    if (vaultBusy) return
+    setVaultBusy(true)
+    setMsg(null)
+    try {
+      const r = await api.intelUpdateVault({ path: vaultPath.trim(), enabled: !!vaultPath.trim() })
+      if (r.index_job_id) {
+        setMsg("vault 配置已保存，正在索引…")
+        const job = await pollJob(r.index_job_id, () => {})
+        const res = job.result as { indexed?: number } | null
+        setMsg(job.status === "done"
+          ? `索引完成：${res?.indexed ?? 0} 篇笔记`
+          : `索引失败：${job.error ?? "未知错误"}`)
+      } else {
+        setMsg("vault 配置已保存（未配置路径，未索引）")
+      }
+      const v = await api.intelVault()
+      setVaultInfo(v)
+      setVaultPath(v.path)
+      flashSaved()
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e))
+    } finally {
+      setVaultBusy(false)
+    }
+  }
+
+  // 手动全量重建索引（vault 编辑后同步用；v1 无自动监听，接受 staleness）
+  const rebuildVault = async () => {
+    if (vaultBusy) return
+    setVaultBusy(true)
+    setMsg(null)
+    try {
+      const { job_id } = await api.intelVaultIndex()
+      const job = await pollJob(job_id, () => {})
+      const res = job.result as { indexed?: number } | null
+      setMsg(job.status === "done"
+        ? `重建完成：${res?.indexed ?? 0} 篇笔记`
+        : `重建失败：${job.error ?? "未知错误"}`)
+      api.intelVault().then(setVaultInfo).catch(() => {})
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e))
+    } finally {
+      setVaultBusy(false)
+    }
   }
 
   return (
@@ -131,6 +186,32 @@ export function IntelSourcePane() {
         )}
         <p className="mt-2 text-[10px] text-[--status-approval]">
           抓取出站为平台自身可信请求（不经执行网关）；classifier 小模型缺席时自动降级规则打分，情报功能始终可用。
+        </p>
+      </div>
+
+      <div className="mt-2 border-t pt-3">
+        <div className="flex items-center gap-2">
+          <span className="font-mono text-sm">Obsidian vault · 只读接入</span>
+          <span className="flex-1" />
+        </div>
+        <div className="mt-2 space-y-2">
+          <div className="flex items-center gap-2">
+            <Input value={vaultPath} onChange={(e) => setVaultPath(e.target.value)}
+                   placeholder="vault 根目录绝对路径，如 D:/Notes/MyVault" className="h-7 flex-1 font-mono text-xs" />
+            <Button size="sm" className="h-7 px-2 text-xs" onClick={saveVault} disabled={vaultBusy}>
+              {vaultBusy ? "处理中…" : "保存并索引"}
+            </Button>
+            <Button size="sm" variant="outline" className="h-7 px-2 text-xs"
+                    onClick={rebuildVault} disabled={vaultBusy || !vaultInfo?.configured}>重建索引</Button>
+          </div>
+          <p className="font-mono text-[10px] text-muted-foreground">
+            {vaultInfo?.configured
+              ? `已索引 ${vaultInfo.notes} 篇 · 上次索引 ${vaultInfo.last_indexed ? fmtDateTimeMin(vaultInfo.last_indexed) : "—"}`
+              : "未配置——vault 只读，平台绝不写回；笔记正文仅本地搜索用，LLM 只看元数据。"}
+          </p>
+        </div>
+        <p className="mt-2 text-[10px] text-[--status-approval]">
+          索引为全量重建，编辑笔记后手动点「重建索引」同步（v1 无自动监听）；树/搜索按上次索引快照展示。
         </p>
       </div>
     </div>
