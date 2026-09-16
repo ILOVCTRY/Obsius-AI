@@ -214,12 +214,14 @@ function Flow({ pid, pausedSids, wsBump, onAttachSession }: TaskFlowProps) {
     },
     style: e.kind === "parent"
       ? { stroke: "#6e7681", strokeWidth: 1.5, opacity: 0.9 }
-      : {
-          stroke: "#a371f7",
-          strokeWidth: e.id === selectedEdgeId ? 2 : 1.2,
-          strokeDasharray: "5 4",
-          opacity: e.id === selectedEdgeId ? 1 : 0.8,
-        },
+      : e.kind === "suggest"
+        ? { stroke: "#6e7681", strokeWidth: 1, strokeDasharray: "2 4", opacity: 0.55 }
+        : {
+            stroke: "#a371f7",
+            strokeWidth: e.id === selectedEdgeId ? 2 : 1.2,
+            strokeDasharray: "5 4",
+            opacity: e.id === selectedEdgeId ? 1 : 0.8,
+          },
     markerEnd: e.kind === "parent"
       ? { type: MarkerType.ArrowClosed, color: "#6e7681", width: 14, height: 14 }
       : undefined,

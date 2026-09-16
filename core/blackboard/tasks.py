@@ -12,6 +12,7 @@ import json
 import re
 from typing import Any, Iterable
 
+from core.blackboard import leases
 from core.blackboard.store import Blackboard, new_id, now
 from core.skills.taxonomy import GENERIC_TASK_TYPE
 
@@ -25,6 +26,18 @@ class ClaimError(Exception):
 
 class TaskTypeError(ValueError):
     """task_type 不在场景轨注册表（task_types.yaml）内。拼错静默饿死的对侧防线。"""
+
+
+def dedup_fp(task_type: str, scope: str, objective: str) -> str:
+    """B1 发布去重指纹：task_type + 归一化 scope（折叠空白+小写）+ 规范化 objective
+    （折叠空白）的 sha256 截短。scope 支持分号分隔多键，逐段归一后排序拼接。"""
+    import hashlib
+
+    norm_scope = ";".join(sorted(
+        p.strip().lower() for p in re.split(r"[;；]", str(scope)) if p.strip()))
+    norm_obj = " ".join(str(objective).split())
+    raw = f"{str(task_type).strip().lower()}|{norm_scope}|{norm_obj}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
 def _check_task_type(task_type: str, allowed_types: Iterable[str] | None) -> None:
@@ -65,30 +78,46 @@ class TaskQueue:
         created_by: str = "human",
         allowed_types: Iterable[str] | None = None,
         refs: list[str] | None = None,
+        workset: list[str] | None = None,
     ) -> str:
         """发布任务。created_by: human / orchestrator / session-x。
 
         conflict_keys 示例：渗透 active 任务填 ["ip:1.2.3.4", "domain:x.com"]——
-        携带同一 IP 键的 active 任务彼此互斥；passive 任务忽略此字段。
+        携带同一 IP 键的 active 任务彼此互斥；passive 任务的键 = S 共享租约（B2）。
+        键经服务端白名单归一化（leases.normalize_key），非法抛 ValueError。
         allowed_types：轨 task_types.yaml 注册表（由调用方按项目 track 注入），
         未知 task_type 直接拒收——拼写错误不再静默饿死（DESIGN.md §4.5.5）。
         refs：任务依据的 finding id（显式层，orch 工具/人发任务可填）；
         服务端同时从 objective 正文自动抽取 find- 标识（自动层），并集去重后
         入 context_refs——撤回传播据此反向定位（DESIGN.md §6.7 的 1.6）。
+        workset（B1）：正在分析的目标集（advisory 软声明，不阻塞任何人，
+        认领/派生/UI 可见，供避让）。
         """
         if noise_budget not in {"passive", "low", "medium", "high"}:
             raise ValueError(f"非法 noise_budget: {noise_budget}")
         if noise_budget != "passive" and not conflict_keys:
             raise ValueError("非 passive 任务必须提供 conflict_keys（active 互斥的依据）")
         _check_task_type(task_type, allowed_types)
+        norm_keys = leases.normalize_keys(conflict_keys) if conflict_keys else []
+        if workset and not isinstance(workset, list):
+            raise ValueError("workset 须为字符串数组")
         context_refs = sorted({*(refs or []), *FINDING_REF_RE.findall(objective)})
+        fp = dedup_fp(task_type, scope, objective)
         task_id = new_id("task")
         ts = now()
         with self.bb._tx():
+            # 发布期冲突检查（B2）：active(X) 键被有效租约持有 → open 行写 wait_for
+            # 门控标记（claim_next 排除，等待不占线程），不阻塞发布本身。
+            wait: list[str] = []
+            if noise_budget != "passive" and norm_keys:
+                held = leases.active_leases_for_keys(self.bb, project_id, norm_keys)
+                wait = sorted({h["resource_key"] for h in held
+                               if leases.keys_conflict("X", h["mode"])})
             self.bb.conn.execute(
                 "INSERT INTO tasks(id,project_id,scope,task_type,objective,status,priority,"
-                "noise_budget,conflict_keys,parent_id,created_by,context_refs,created_at,updated_at)"
-                " VALUES(?,?,?,?,?,'open',?,?,?,?,?,?,?,?)",
+                "noise_budget,conflict_keys,parent_id,created_by,context_refs,"
+                "workset,dedup_fp,wait_for,created_at,updated_at)"
+                " VALUES(?,?,?,?,?,'open',?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     task_id,
                     project_id,
@@ -97,10 +126,13 @@ class TaskQueue:
                     objective,
                     priority,
                     noise_budget,
-                    json.dumps(conflict_keys or [], ensure_ascii=False),
+                    json.dumps(norm_keys, ensure_ascii=False),
                     parent_id,
                     created_by,
                     json.dumps(context_refs, ensure_ascii=False),
+                    json.dumps(sorted(str(w) for w in (workset or [])), ensure_ascii=False),
+                    fp,
+                    json.dumps(wait, ensure_ascii=False),
                     ts,
                     ts,
                 ),
@@ -112,6 +144,15 @@ class TaskQueue:
             author=created_by,
         )
         return task_id
+
+    def find_dedup_target(self, project_id: str, fp: str) -> dict | None:
+        """B1：按指纹找既有 open/claimed 任务（发布去重的查询半步）。"""
+        row = self.bb.conn.execute(
+            "SELECT id FROM tasks WHERE project_id=? AND dedup_fp=?"
+            " AND status IN ('open','claimed') ORDER BY created_at LIMIT 1",
+            (project_id, fp),
+        ).fetchone()
+        return self.get_task(row["id"]) if row else None
 
     # ---------- 认领 ----------
 
@@ -128,24 +169,57 @@ class TaskQueue:
                 raise ClaimError(f"任务不存在: {task_id}")
             if row["status"] != "open":
                 raise ClaimError(f"任务 {task_id} 状态为 {row['status']}，不可认领")
-            if row["noise_budget"] != "passive":
-                keys = set(_loads(row["conflict_keys"], []))
+            # B2：冲突统一收集（快路径 active 交叠 + 资源租约），事务内写 wait_for
+            # 门控标记并保持 open，事务提交后在事务外抛 ClaimError（线程不阻塞，
+            # 标记不被回滚）。无冲突 → 授予租约行 + 置 claimed。
+            lease_blockers: list[str] = []
+            blocker_by: str | None = None
+            norm_keys = leases.normalize_keys(_loads(row["conflict_keys"], []))
+            if row["noise_budget"] != "passive" and norm_keys:
+                keys = set(norm_keys)
                 others = self.bb.conn.execute(
                     "SELECT id, conflict_keys FROM tasks"
                     " WHERE project_id=? AND status='claimed' AND noise_budget!='passive' AND id!=?",
                     (row["project_id"], task_id),
                 ).fetchall()
                 for other in others:
-                    if keys & set(_loads(other["conflict_keys"], [])):
-                        raise ClaimError(
-                            f"认领被拒：任务 {task_id} 与 {other['id']} 的 conflict_keys 交叠"
-                            f"（同目标 active 任务互斥，见 DESIGN.md §6.2）"
-                        )
-            self.bb.conn.execute(
-                "UPDATE tasks SET status='claimed', claimed_by=?, lease_until=?, updated_at=?"
-                " WHERE id=?",
-                (session_id, lease_until, now(), task_id),
-            )
+                    overlap = keys & set(leases.normalize_keys(
+                        _loads(other["conflict_keys"], [])))
+                    if overlap:
+                        lease_blockers = sorted(overlap)
+                        blocker_by = other["id"]
+                        break
+            mode = leases.mode_for(row["noise_budget"])
+            if not lease_blockers and norm_keys:
+                held = [h for h in leases.active_leases_for_keys(
+                    self.bb, row["project_id"], norm_keys, exclude_task_id=task_id)
+                    if leases.keys_conflict(mode, h["mode"])]
+                if held:
+                    lease_blockers = sorted({h["resource_key"] for h in held})
+                    blocker_by = held[0]["task_id"]
+            if lease_blockers:
+                self.bb.conn.execute(
+                    "UPDATE tasks SET wait_for=?, updated_at=? WHERE id=?",
+                    (json.dumps(lease_blockers, ensure_ascii=False), now(), task_id))
+            else:
+                for key in norm_keys:
+                    self.bb.conn.execute(
+                        "INSERT INTO resource_leases"
+                        "(project_id,resource_key,mode,task_id,session_id,granted_at)"
+                        " VALUES(?,?,?,?,?,?)"
+                        " ON CONFLICT(project_id,resource_key,task_id) DO UPDATE SET"
+                        " mode=excluded.mode, session_id=excluded.session_id,"
+                        " granted_at=excluded.granted_at",
+                        (row["project_id"], key, mode, task_id, session_id, now()))
+                self.bb.conn.execute(
+                    "UPDATE tasks SET status='claimed', claimed_by=?, lease_until=?,"
+                    " wait_for='[]', updated_at=? WHERE id=?",
+                    (session_id, lease_until, now(), task_id),
+                )
+        if lease_blockers:
+            raise ClaimError(
+                f"任务 {task_id} 认领被拒：资源 {'、'.join(lease_blockers)} 已被"
+                f" {blocker_by} 占用（保持 open 等待释放，DESIGN.md §6.7.1 资源租约）")
         self.bb.append_event(
             row["project_id"],
             "task.claimed",
@@ -169,7 +243,8 @@ class TaskQueue:
         max_noise 为角色 default_noise 上限——高于角色噪声预算的任务不可认领
         （default_noise 死字段修复后的真正生效点）。
         """
-        sql = "SELECT id FROM tasks WHERE project_id=? AND status='open'"
+        sql = ("SELECT id, wait_for, lease_cooldown_until FROM tasks"
+               " WHERE project_id=? AND status='open'")
         params: list[Any] = [project_id]
         if allowed_task_types is not None:
             sql += f" AND task_type IN ({','.join('?' * len(allowed_task_types))})"
@@ -181,7 +256,18 @@ class TaskQueue:
             )
             params.append(self._NOISE_RANK[max_noise])
         sql += " ORDER BY priority, created_at"
+        # B2：预过滤——wait_for 键仍被有效租约持有的行、死锁牺牲者冷却未到的行
+        # 直接跳过（等待不占线程；键已空闲的 stale wait_for 仍走正常认领路径）
+        held_union: set[str] = set()
+        for keys in leases.held_keys_by_task(self.bb, project_id).values():
+            held_union |= keys
+        ts = now()
         for row in self.bb.conn.execute(sql, params).fetchall():
+            if row["lease_cooldown_until"] and row["lease_cooldown_until"] > ts:
+                continue
+            wf = _loads(row["wait_for"], [])
+            if wf and (set(wf) & held_union):
+                continue
             try:
                 self.claim(row["id"], session_id, lease_minutes)
                 return row["id"]
@@ -201,6 +287,24 @@ class TaskQueue:
         self._finish(task_id, session_id, "failed", result_note,
                      extra={"resumable": True} if resumable else None)
 
+    def _release_and_revalidate(self, project_id: str, task_id: str) -> None:
+        """B2：释放任务的全部资源租约行，并重校验本项目 open 行的 wait_for——
+        键已全部空闲的等待者清门控标记（重新可被 claim_next 认领）。
+        必须在调用方的 _tx() 内执行。"""
+        self.bb.conn.execute("DELETE FROM resource_leases WHERE task_id=?", (task_id,))
+        held_union: set[str] = set()
+        for keys in leases.held_keys_by_task(self.bb, project_id).values():
+            held_union |= keys
+        for r in self.bb.conn.execute(
+            "SELECT id, wait_for FROM tasks WHERE project_id=? AND status='open'"
+            " AND wait_for != '[]'", (project_id,),
+        ).fetchall():
+            wf = _loads(r["wait_for"], [])
+            if wf and not (set(wf) & held_union):
+                self.bb.conn.execute(
+                    "UPDATE tasks SET wait_for='[]', updated_at=? WHERE id=?",
+                    (now(), r["id"]))
+
     def _finish(self, task_id: str, session_id: str, status: str, result_note: str,
                 extra: dict | None = None) -> None:
         with self.bb._tx():
@@ -214,6 +318,7 @@ class TaskQueue:
                 " WHERE id=?",
                 (status, result_note, now(), task_id),
             )
+            self._release_and_revalidate(row["project_id"], task_id)  # B2 释放+重校验
             stale_refs = _loads(row["stale_refs"], [])
         payload = {"task_id": task_id, "session_id": session_id, "note": result_note}
         if extra:
@@ -417,6 +522,12 @@ class TaskQueue:
                 raise ValueError("priority 须为 0-9 的整数")
             if merged["noise_budget"] != "passive" and not merged["conflict_keys"]:
                 raise ValueError("非 passive 任务必须提供 conflict_keys（active 互斥的依据）")
+            if merged["conflict_keys"]:
+                # B2：编辑后的键重新归一化（非法 422），归一化结果回写
+                merged["conflict_keys"] = leases.normalize_keys(merged["conflict_keys"])
+            # B1：编辑触及指纹要素时重算发布去重指纹
+            merged["dedup_fp"] = dedup_fp(str(merged["task_type"]),
+                                          str(merged["scope"]), str(merged["objective"]))
             sets: list[str] = []
             params: list[Any] = []
             for col in ("objective", "task_type", "noise_budget", "priority"):
@@ -426,6 +537,8 @@ class TaskQueue:
             if "conflict_keys" in changes:
                 sets.append("conflict_keys=?")
                 params.append(json.dumps(merged["conflict_keys"], ensure_ascii=False))
+            sets.append("dedup_fp=?")
+            params.append(merged["dedup_fp"])
             sets.append("updated_at=?")
             params.extend([now(), task_id])
             self.bb.conn.execute(f"UPDATE tasks SET {', '.join(sets)} WHERE id=?", params)
@@ -479,6 +592,8 @@ class TaskQueue:
                 raise ValueError(f"任务 {task_id} 存在子任务，请先处理子任务再删除")
             snapshot = dict(row)
             self.bb.conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+            self._release_and_revalidate(project_id=row["project_id"],
+                                         task_id=task_id)  # B2 释放+重校验
             project_id, was_status = row["project_id"], row["status"]
         self.bb.append_event(
             project_id, "task.deleted",
@@ -489,6 +604,80 @@ class TaskQueue:
              "plan": _loads(snapshot.get("plan", "[]"), [])},
             author=by,
         )
+
+    # ---------- B2 六防死锁之 6：wait-for 图环检测（安全网） ----------
+
+    def detect_wait_for_deadlock(self, project_id: str) -> list[str]:
+        """wait-for 图环检测兜底。发布期/认领期门控下环在构造上不可达（claimed
+        任务不再等待），本函数是运行期动态锁（后置）与人工强占等未来路径、
+        以及实现 bug 的安全网。
+
+        图：wait_for 非空的任务 → 持有其被占键的租约任务（resource_leases 全量行，
+        不做有效性过滤——安全网要看的是不一致状态）。检出环 → 牺牲者=环内
+        created_at 最晚的任务：清 wait_for + 冷却 5 分钟（claim_next 跳过）+
+        落 lock.deadlock_victim 审计。返回牺牲者 task_id 列表。"""
+        from datetime import datetime, timedelta, timezone
+
+        with self.bb._tx():
+            waiting = {
+                r["id"]: (set(_loads(r["wait_for"], [])), str(r["created_at"]))
+                for r in self.bb.conn.execute(
+                    "SELECT id, wait_for, created_at FROM tasks"
+                    " WHERE project_id=? AND wait_for != '[]'", (project_id,))
+            }
+            if len(waiting) < 2:
+                return []
+            holders: dict[str, set[str]] = {}
+            for r in self.bb.conn.execute(
+                "SELECT resource_key, task_id FROM resource_leases WHERE project_id=?",
+                (project_id,),
+            ):
+                holders.setdefault(r["resource_key"], set()).add(r["task_id"])
+            # 边：等待任务 → 占它键的任务（不含自环）
+            edges: dict[str, set[str]] = {}
+            for wid, (keys, _ts) in waiting.items():
+                for k in keys:
+                    for h in holders.get(k, ()):
+                        if h != wid:
+                            edges.setdefault(wid, set()).add(h)
+            # DFS 找环；每个环选 created_at 最晚者为牺牲者
+            color: dict[str, int] = {}
+            stack: list[str] = []
+            cycles: list[list[str]] = []
+
+            def dfs(node: str) -> None:
+                color[node] = 1
+                stack.append(node)
+                for nxt in edges.get(node, ()):
+                    if color.get(nxt, 0) == 0:
+                        dfs(nxt)
+                    elif color.get(nxt) == 1:
+                        i = stack.index(nxt)
+                        cycles.append(stack[i:])
+                stack.pop()
+                color[node] = 2
+
+            for n in list(edges):
+                if color.get(n, 0) == 0:
+                    dfs(n)
+            victims: list[str] = []
+            cooldown = (datetime.now(timezone.utc) + timedelta(minutes=5)
+                        ).isoformat(timespec="seconds")
+            for cycle in cycles:
+                victim = max(cycle, key=lambda tid: waiting[tid][1])
+                victims.append(victim)
+                self.bb.conn.execute(
+                    "UPDATE tasks SET wait_for='[]', lease_cooldown_until=?, updated_at=?"
+                    " WHERE id=?",
+                    (cooldown, now(), victim),
+                )
+        for v in victims:
+            self.bb.append_event(
+                project_id, "lock.deadlock_victim",
+                {"task_id": v, "note": "wait-for 环检测牺牲者：清 wait_for 并冷却 5 分钟"},
+                author="orchestrator",
+            )
+        return victims
 
     def renew_lease(self, task_id: str, session_id: str, lease_minutes: int = 30) -> None:
         from datetime import datetime, timedelta, timezone
@@ -506,7 +695,8 @@ class TaskQueue:
                 raise ClaimError(f"续租失败：任务 {task_id} 未由 {session_id} 持有")
 
     def expire_leases(self) -> list[str]:
-        """回收过期租约 → 任务回到 open。Orchestrator 周期调用（§6.4 监控）。"""
+        """回收过期租约 → 任务回到 open。Orchestrator 周期调用（§6.4 监控）。
+        B2：过期任务的资源租约行随行释放，并重校验等待者。"""
         expired: list[str] = []
         ts = now()
         with self.bb._tx():
@@ -521,6 +711,7 @@ class TaskQueue:
                     " updated_at=? WHERE id=?",
                     (ts, r["id"]),
                 )
+                self._release_and_revalidate(r["project_id"], r["id"])
                 expired.append(r["id"])
         if expired:
             proj = self.bb.conn.execute(
@@ -551,6 +742,8 @@ class TaskQueue:
             d["context_refs"] = _loads(d.get("context_refs", "[]"), [])
             d["stale_refs"] = _loads(d.get("stale_refs", "[]"), [])
             d["plan"] = _loads(d.get("plan", "[]"), [])
+            d["workset"] = _loads(d.get("workset", "[]"), [])
+            d["wait_for"] = _loads(d.get("wait_for", "[]"), [])
             out.append(d)
         return out
 
@@ -563,4 +756,6 @@ class TaskQueue:
         d["context_refs"] = _loads(d.get("context_refs", "[]"), [])
         d["stale_refs"] = _loads(d.get("stale_refs", "[]"), [])
         d["plan"] = _loads(d.get("plan", "[]"), [])
+        d["workset"] = _loads(d.get("workset", "[]"), [])
+        d["wait_for"] = _loads(d.get("wait_for", "[]"), [])
         return d

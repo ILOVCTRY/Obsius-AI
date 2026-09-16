@@ -406,7 +406,7 @@ def test_delete_project_409_with_claimed_task(client):
     sess = proj.bb.register_session(pid, "sess-test", role="reverse")
     tq = TaskQueue(proj.bb)
     tid = tq.publish(pid, "逆向 x", task_type="reverse", noise_budget="low",
-                     conflict_keys=["bin:x"], created_by="human")
+                     conflict_keys=["binary:" + "a" * 64], created_by="human")
     tq.claim(tid, sess["id"])
     # 有 claimed 任务（活跃租约）→ 409 拒删
     r = client.delete(f"/api/projects/{pid}")
@@ -2597,3 +2597,49 @@ def test_assets_register_entry_auto_detect_and_dedup(client):
     rows = client.get(f"/api/projects/{pid}/assets").json()
     assert len([a for a in rows if a["type"] == "url"]) == 1
     assert all("status" in a for a in rows)      # E7：status 出口
+
+
+# ---------- B1 发布去重/workset + B2 wait_for 门控 / 建议私信边 ----------
+
+def test_publish_dedup_and_force(client):
+    """B1：同指纹第二次发布 200 deduplicated；force 真发；workset 出口可见。"""
+    pid = _make_project(client)
+    body = {"objective": "对 target.com 做被动侦察", "task_type": "generic",
+            "workset": ["a.target.com", "0x401000"]}
+    r1 = client.post(f"/api/projects/{pid}/tasks", json=body)
+    assert r1.status_code == 201 and r1.json()["deduplicated"] is False
+    r2 = client.post(f"/api/projects/{pid}/tasks", json=body)
+    assert r2.status_code == 200 and r2.json()["deduplicated"] is True
+    assert r2.json()["existed_status"] == "open" and r2.json()["task_id"] == r1.json()["task_id"]
+    r3 = client.post(f"/api/projects/{pid}/tasks", json={**body, "force": True})
+    assert r3.status_code == 201
+    assert r3.json()["task_id"] != r1.json()["task_id"]
+    rows = client.get(f"/api/projects/{pid}/tasks").json()
+    assert any(t["workset"] == ["0x401000", "a.target.com"] for t in rows)
+
+
+def test_publish_invalid_conflict_key_422(client):
+    """B2：conflict_keys 非法键（过宽/未知方案）发布 422。"""
+    pid = _make_project(client)
+    r = client.post(f"/api/projects/{pid}/tasks",
+                    json={"objective": "扫它", "noise_budget": "low",
+                          "conflict_keys": ["ip:*"]})
+    assert r.status_code == 422 and "ip:*" in r.json()["detail"]
+
+
+def test_task_graph_suggest_edge(client):
+    """B1：同依据（context_refs 相交）且已认领、无 inbox 边的任务对出 suggest 点虚线边。"""
+    pid = _make_project(client)
+    proj = client.app.state.projects[pid]
+    from core.blackboard import TaskQueue
+    tq = TaskQueue(proj.bb)
+    s1 = proj.bb.register_session(pid, "S1")
+    s2 = proj.bb.register_session(pid, "S2")
+    t1 = tq.publish(pid, "分析 find-aaaaaaaaaaaa 的结论", task_type="generic")
+    t2 = tq.publish(pid, "复核 find-aaaaaaaaaaaa 的证据", task_type="generic")
+    tq.claim(t1, s1["id"])
+    tq.claim(t2, s2["id"])
+    graph = client.get(f"/api/projects/{pid}/task-graph").json()
+    suggest = [e for e in graph["edges"] if e["kind"] == "suggest"]
+    pair = {(e["source"], e["target"]) for e in suggest}
+    assert ((t1, t2) in pair) or ((t2, t1) in pair)

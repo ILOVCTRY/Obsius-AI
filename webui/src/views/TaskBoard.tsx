@@ -38,6 +38,10 @@ export function TaskBoard({ pid, focused }: {
   const [error, setError] = useState<string | null>(null)
   // 轨任务类型注册表（task_types.yaml + generic）：输入框 datalist 提示，非法值后端 422
   const [typeOptions, setTypeOptions] = useState<Record<string, string>>({ generic: "passive" })
+  // B1 发布去重：命中同指纹 open/claimed 任务 → 确认"仍要发布"后 force 重发
+  const [dupPending, setDupPending] = useState<{
+    body: Parameters<typeof api.publishTask>[1]; existed: string; taskId: string
+  } | null>(null)
 
   useEffect(() => {
     Promise.all([api.getProject(pid), api.taxonomy()])
@@ -58,17 +62,23 @@ export function TaskBoard({ pid, focused }: {
     return () => clearInterval(t)
   }, [refresh])
 
-  const publish = async () => {
+  const publish = async (force = false) => {
     setError(null)
     const keys = conflictKeys.split(",").map((s) => s.trim()).filter(Boolean)
+    const body = {
+      objective: objective.trim(),
+      task_type: taskType.trim(),
+      noise_budget: noise,
+      priority,
+      conflict_keys: noise === "passive" ? undefined : keys,
+      force: force || undefined,
+    }
     try {
-      await api.publishTask(pid, {
-        objective: objective.trim(),
-        task_type: taskType.trim(),
-        noise_budget: noise,
-        priority,
-        conflict_keys: noise === "passive" ? undefined : keys,
-      })
+      const r = await api.publishTask(pid, body)
+      if (r.deduplicated) {
+        setDupPending({ body, existed: r.existed_status ?? "open", taskId: r.task_id })
+        return
+      }
       setObjective("")
       setConflictKeys("")
       refresh()
@@ -123,8 +133,44 @@ export function TaskBoard({ pid, focused }: {
         )}
         <Input className="min-w-64 flex-1" value={objective} onChange={(e) => setObjective(e.target.value)}
                placeholder="任务目标…" onKeyDown={(e) => e.key === "Enter" && objective.trim() && publish()} />
-        <Button size="sm" onClick={publish} disabled={!objective.trim()}>发布</Button>
+        <Button size="sm" onClick={() => publish()} disabled={!objective.trim()}>发布</Button>
       </div>
+
+      {/* B1 发布去重确认：同指纹任务已存在，确认后 force 重发 */}
+      <AlertDialog
+        open={dupPending !== null}
+        onOpenChange={(open) => !open && setDupPending(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>已存在相同目标任务</AlertDialogTitle>
+            <AlertDialogDescription>
+              任务 <span className="font-mono">{dupPending?.taskId}</span>
+              （状态 {dupPending?.existed}）与本条发布内容相同（类型/范围/目标指纹一致）。
+              仍要发布将产生一条重复任务。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel asChild>
+              <Button variant="outline" size="sm">取消</Button>
+            </AlertDialogCancel>
+            <Button
+              size="sm"
+              onClick={() => {
+                const pending = dupPending
+                setDupPending(null)
+                if (pending) {
+                  api.publishTask(pid, { ...pending.body, force: true })
+                    .then(() => { setObjective(""); setConflictKeys(""); refresh() })
+                    .catch((e) => setError(String(e)))
+                }
+              }}
+            >
+              仍要发布
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
       {error && <p className="px-3 pt-2 text-xs text-[--status-error]">{error}</p>}
 
       {/* 看板列 */}
@@ -256,6 +302,22 @@ function TaskCard({ task, onChanged, onDelete, focused, focusNonce }: {
         <p className="mt-1 truncate font-mono text-[10px] text-muted-foreground"
            title={task.conflict_keys.join(", ")}>
           ⚔ {task.conflict_keys.join(", ")}
+        </p>
+      )}
+      {(task.status === "open" && (task.wait_for?.length || task.workset?.length)) && (
+        <p className="mt-1 flex flex-wrap gap-1">
+          {(task.wait_for ?? []).map((k) => (
+            <Badge key={k} variant="outline" className="font-mono text-[10px] text-[--status-approval]"
+                   title="资源被其他任务占用，释放后可被认领（B2 wait_for 门控）">
+              ⏳ {k}
+            </Badge>
+          ))}
+          {(task.workset ?? []).map((w) => (
+            <Badge key={w} variant="outline" className="font-mono text-[10px] text-muted-foreground"
+                   title="工作集软声明：有人正在分析此目标（advisory，不阻塞）">
+              {w}
+            </Badge>
+          ))}
         </p>
       )}
       {resumeErr && (

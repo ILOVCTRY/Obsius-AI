@@ -5,13 +5,14 @@ import {
 import type { TaskGraphEdgeRef } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
-// A3 任务流两类边：
-//   parent 灰实线带箭头 = tasks.parent_id 分解结构（人/编排/子代理）；
-//   inbox  紫虚线 ✉     = 会话间实际私信（basis_stale 撤回 / finding_update 增补），
-//                        按 (kind,ref_id) 聚类后映射到最近任务，点 ✉ 看依据浮卡。
+// A3 任务流三类边：
+//   parent  灰实线带箭头 = tasks.parent_id 分解结构（人/编排/子代理）；
+//   inbox   紫虚线 ✉     = 会话间实际私信（basis_stale 撤回 / finding_update 增补），
+//                          按 (kind,ref_id) 聚类后映射到最近任务，点 ✉ 看依据浮卡；
+//   suggest 灰点虚线 💡  = B1 建议私信边（同父/共同依据却尚无私信，机器猜测不落库）。
 
 export type TaskFlowEdgeData = {
-  kind: "parent" | "inbox"
+  kind: "parent" | "inbox" | "suggest"
   refs?: TaskGraphEdgeRef[]
   selected?: boolean
   onSelect?: (id: string) => void
@@ -28,11 +29,14 @@ export function TaskFlowEdge({
   })
   const refs = data?.refs ?? []
   const isInbox = data?.kind === "inbox"
+  const isSuggest = data?.kind === "suggest"
   const title = refs.length
     ? refs
         .map((r) => `${r.kind === "basis_stale" ? "依据撤回" : "发现增补"}：${r.title || r.ref_id}`)
         .join("\n")
-    : "私信协作边"
+    : isSuggest
+      ? "疑似需要交流：同父任务或依据相交，尚无私信记录（机器猜测，不落库）"
+      : "私信协作边"
 
   return (
     <>
@@ -45,21 +49,23 @@ export function TaskFlowEdge({
         />
       )}
       <BaseEdge id={id} path={path} style={style} markerEnd={markerEnd} />
-      {isInbox && (
+      {(isInbox || isSuggest) && (
         <EdgeLabelRenderer>
           <span
             title={title}
-            onClick={(e) => { e.stopPropagation(); data?.onSelect?.(id) }}
+            onClick={isInbox ? (e) => { e.stopPropagation(); data?.onSelect?.(id) } : undefined}
             className={cn(
-              "nodrag nopan pointer-events-auto absolute flex size-5 items-center justify-center",
+              "nodrag nopan absolute flex size-5 items-center justify-center",
               "rounded-full border text-[9px] leading-none shadow-sm",
+              isInbox && "pointer-events-auto cursor-pointer",
+              isSuggest && "text-muted-foreground",
               data?.selected
                 ? "border-[#a371f7] bg-[#1c2128] text-[#d2a8ff] ring-1 ring-[#a371f7]/50"
                 : "border-[#39424e] bg-[#1c2128]/95 text-[#a371f7] hover:border-[#a371f7]/60",
             )}
             style={{ transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)` }}
           >
-            {refs.length > 1 ? `✉${refs.length}` : "✉"}
+            {isSuggest ? "💡" : refs.length > 1 ? `✉${refs.length}` : "✉"}
           </span>
         </EdgeLabelRenderer>
       )}

@@ -1,0 +1,96 @@
+- generic [ref=f1e3]:
+  - banner [ref=f1e96]:
+    - generic [ref=f1e97]: 授权评估 · Web
+    - heading "中原工学院" [level=1] [ref=f1e98]
+    - generic [ref=f1e99]: 任务 2/3 · 发现 10 · 资产 125
+    - button "🔔 审批" [ref=f1e100]
+    - button "← 项目" [ref=f1e101]
+  - generic [ref=f1e102]:
+    - navigation [ref=f1e103]:
+      - button "◈ 项目" [ref=f1e104]:
+        - generic [ref=f1e105]: ◈
+        - text: 项目
+      - button "📡 情报" [ref=f1e106]:
+        - generic [ref=f1e107]: 📡
+        - text: 情报
+      - button "◉ 直播间" [ref=f1e108]:
+        - generic [ref=f1e109]: ◉
+        - text: 直播间
+      - button "▤ 黑板" [ref=f1e110]:
+        - generic [ref=f1e111]: ▤
+        - text: 黑板
+      - button "▦ 任务" [ref=f1e112]:
+        - generic [ref=f1e113]: ▦
+        - text: 任务
+      - button "⚑ 审批" [ref=f1e114]:
+        - generic [ref=f1e115]: ⚑
+        - text: 审批
+      - button "⚙ 技能/设置" [ref=f1e116]:
+        - generic [ref=f1e117]: ⚙
+        - text: 技能/设置
+    - main [ref=f1e118]:
+      - generic [ref=f1e462]:
+        - generic [ref=f1e463]:
+          - combobox "类型" [ref=f1e464]: generic
+          - combobox [ref=f1e465]:
+            - option "passive" [selected]
+            - option "low（active）"
+            - option "medium（active）"
+            - option "high（active）"
+          - spinbutton "优先级 0-9，大者优先" [ref=f1e466]: "2"
+          - textbox "任务目标…" [ref=f1e467]
+          - button "发布" [disabled]
+        - generic [ref=f1e468]:
+          - generic [ref=f1e470]:
+            - text: 待认领
+            - generic [ref=f1e471]: "0"
+          - generic [ref=f1e474]:
+            - text: 执行中
+            - generic [ref=f1e475]: "0"
+          - generic [ref=f1e477]:
+            - generic [ref=f1e478]:
+              - text: 完成
+              - generic [ref=f1e479]: "2"
+            - generic [ref=f1e480]:
+              - generic [ref=f1e481]:
+                - generic [ref=f1e482]:
+                  - generic [ref=f1e483]: generic
+                  - generic [ref=f1e484]: passive
+                  - generic [ref=f1e485]: P2
+                - paragraph [ref=f1e486]: 需要测试的是中原工学院的资产，域名为*.zut.edu.cn，先给你一些资产。后续发现后你自己添加。https://ai.zut.edu.cn gygl.zut.edu.cn:8080/ https://aias.zut.edu.cn https://apis.zut.edu.cn https://app.zut.edu.cn https://archives.zut.edu.cn https://art.zut.edu.cn https://art.zut.edu.cn https://authserver.zut.edu.cn https://authserver.zut.edu.cn https://booklocation.zut.edu.cn https://bpm.zut.edu.cn https://bwc.zut.edu.cn https://camr.zut.edu.cn https://canvas.zut.edu.cn https://cie.zut.edu.cn https://cs.zut.edu.cn https://cube.zut.edu.cn https://cwc.zut.edu.cn https://cwc.zut.edu.cn
+                - paragraph [ref=f1e487]: ▦ 7/7
+                - generic [ref=f1e488]:
+                  - generic [ref=f1e489]: sess-470f697db
+                  - generic [ref=f1e490]
+                  - button "🗑 删除" [ref=f1e491]
+              - generic [ref=f1e492]:
+                - generic [ref=f1e493]:
+                  - generic [ref=f1e494]: generic
+                  - generic [ref=f1e495]: passive
+                  - generic [ref=f1e496]: P2
+                - paragraph [ref=f1e497]: "对中原工学院资产范围 *.zut.edu.cn 开展纯被动侦察并建立结构化资产清单。已知确定入口：https://ai.zut.edu.cn 。人类提供的另一线索在任务文本中被截断为 `gygl.zu`，疑似为 `gygl.zut.edu.cn`，需通过证书透明度日志、公开 DNS/被动数据等方式核实，不得直接将其当作已确认资产。 工作内容： 1. 被动收集并核实 zut.edu.cn 子域名、解析记录、CDN/WAF 特征、IP 归属； 2. 汇总各资产标题、指纹、技术栈、登录入口、历史暴露信息； 3. 标记资产来源、确认/疑似状态及后续外网打点优先级； 4. 发现高价值或疑似敏感暴露面时及时形成发现记录。 严格限制：仅使用被动信息源；不进行主动端口扫描、目录爆破、漏洞探测、登录尝试或任何会产生交互噪声的操作。"
+                - paragraph [ref=f1e498]: ▦ 7/7
+                - generic [ref=f1e499]:
+                  - generic [ref=f1e500]: sess-741e662c8
+                  - generic [ref=f1e501]
+                  - button "🗑 删除" [ref=f1e502]
+          - generic [ref=f1e503]:
+            - generic [ref=f1e504]:
+              - text: 失败
+              - generic [ref=f1e505]: "1"
+            - generic [ref=f1e507]:
+              - generic [ref=f1e508]:
+                - generic [ref=f1e509]: generic
+                - generic [ref=f1e510]: passive
+                - generic [ref=f1e511]: P2
+              - paragraph [ref=f1e512]: 开始指定计划准备，开始渗透测试
+              - paragraph [ref=f1e513]:
+                - text: ▦ 3/6
+                - generic [ref=f1e514]: ■ 授权与测试规则未验证；暂停 *.zut.edu.cn 的扫描、解析、目录枚举及任何主动验证，仅离线保存已有 CT 证书结果。需在 10 分钟内收到书面授权四要素：精确范围/排除系统、测试时间窗口、允许动作、应急联系人与升级路径；未确认前不继续。
+              - generic [ref=f1e515]:
+                - generic [ref=f1e516]: sess-470f697db
+                - generic "暂停原因：授权四要素与 ROE 未完成书面核验（精确范围/排除系统、测试时间窗口、允许动作、应急联系人与升级路径）。已停止对 *.zut.edu.cn 及业务流带出资产的所有主动验证；已访问资产均保持 visited，未把未证实问题登记为漏洞。待甲方/项目负责人补充书面授权与测试规则后可恢复。"
+                - button "♻ 放回" [ref=f1e517]
+                - button "✏ 编辑" [ref=f1e518]
+                - button "🗑 删除" [ref=f1e519]
+        - paragraph [ref=f1e520]: 待认领/失败任务可编辑（目标/类型/噪声/优先级/互斥键）；失败任务可放回待认领； 四态任务均可删除（A1：claimed 取消在当前步结束即硬中断，done 战果快照进审计）；有子任务需先处理子任务（§6.4）

@@ -39,6 +39,7 @@ from core.blackboard import TaskQueue
 from core.blackboard.assets import register_asset
 from core.blackboard.graph import task_graph
 from core.blackboard.store import Blackboard, BlackboardClosedError
+from core.blackboard.tasks import dedup_fp
 from core.intel import config as intel_config
 from core.intel import vault as intel_vault
 from core.intel.intel_service import (
@@ -106,6 +107,8 @@ class TaskIn(BaseModel):
     conflict_keys: list[str] | None = None
     parent_id: str | None = None
     refs: list[str] | None = None   # 任务依据的 finding id（显式层；正文 find-id 自动抽取）
+    workset: list[str] | None = None   # B1 工作集软声明（advisory，不阻塞认领）
+    force: bool = False                # B1：True 跳过发布去重（人类"仍要发布"确认后）
 
 
 class InboxRead(BaseModel):
@@ -1922,12 +1925,22 @@ def create_app(
     def publish_task(pid: str, body: TaskIn):
         table = _task_type_table(pid)
         noise = body.noise_budget or table.get(body.task_type, "passive")
+        tq = _tq(pid)
+        # B1 发布去重：同指纹（type+归一化 scope+objective）命中 open/claimed →
+        # 返回 200 + deduplicated，前端确认框"仍要发布"后带 force 重发才真发
+        if not body.force:
+            dup = tq.find_dedup_target(
+                pid, dedup_fp(body.task_type, body.scope, body.objective))
+            if dup is not None:
+                return JSONResponse(status_code=200, content={
+                    "task_id": dup["id"], "deduplicated": True,
+                    "existed_status": dup["status"], "kicked": []})
         try:
-            task_id = _tq(pid).publish(
+            task_id = tq.publish(
                 pid, body.objective, scope=body.scope, task_type=body.task_type,
                 noise_budget=noise, priority=body.priority,
                 conflict_keys=body.conflict_keys, created_by="human",
-                allowed_types=table.keys(), refs=body.refs)
+                allowed_types=table.keys(), refs=body.refs, workset=body.workset)
         except ValueError as e:
             raise HTTPException(422, str(e))
         # 触发点 D（批 5）：L1/L2 未暂停时人手插话后自动唤醒空闲 worker；
@@ -1938,7 +1951,7 @@ def create_app(
             kicked = _kick_workers(pid)
         # 触发点 D（A5）：L2 下人类发任务后去抖重排优先级（30s 合并一轮）
         _maybe_replan(pid, reason="human-publish")
-        return {"task_id": task_id, "kicked": kicked}
+        return {"task_id": task_id, "kicked": kicked, "deduplicated": False}
 
     @app.patch("/api/tasks/{task_id}")
     def update_task(task_id: str, body: TaskPatch):

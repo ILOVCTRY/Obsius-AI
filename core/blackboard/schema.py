@@ -9,10 +9,12 @@
 
 import sqlite3
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
-# v5→v6 给 orchestrator_state 补的重排节流列（A5，DESIGN §6.4/§16）：
-# 同版号 tasks 表补 plan 列（见 DDL 与 _migrate）；未来 B2 资源租约继续在 v6 幂等加列。
+# v6→v7（B1/B2 协调底座，DESIGN §6.7 机制 1.1/1.4）：
+# tasks 幂等补 workset/dedup_fp/wait_for/lease_cooldown_until 4 列；
+# 新表 resource_leases（资源租约，键方案白名单见 core/blackboard/leases.py）。
+# 运行期动态锁申请后置（发布期/认领期门控为主）。
 
 # v4→v5 给 orchestrator_state 补的编排状态列（批 3，DESIGN §6.8/机制 1.9）：
 # (列名, ALTER 声明)；DDL 新库直接全列，旧库 _migrate 幂等 ALTER。
@@ -151,9 +153,27 @@ CREATE TABLE IF NOT EXISTS tasks (
     context_refs  TEXT NOT NULL DEFAULT '[]',  -- v3 JSON：任务依据的 finding id（显式 refs ∪ 正文自动抽取）
     stale_refs    TEXT NOT NULL DEFAULT '[]',  -- v3 JSON：已被推翻待自评的依据（撤回传播挂标，收尾后留审计）
     plan          TEXT NOT NULL DEFAULT '[]',  -- v6 JSON：认领者计划步 [{id,title,status,note,ts}]（A2 先规划后动手）
+    workset       TEXT NOT NULL DEFAULT '[]',  -- v7 JSON：正在分析的目标集（advisory 软声明，不阻塞任何人，B1）
+    dedup_fp      TEXT NOT NULL DEFAULT '',    -- v7：发布去重指纹（project+type+归一化 scope+objective 哈希，B1）
+    wait_for      TEXT NOT NULL DEFAULT '[]',  -- v7 JSON：被占资源键（open 行门控标记，claim_next 排除，B2）
+    lease_cooldown_until TEXT,                 -- v7：死锁牺牲者冷却（到期前 claim_next 跳过，B2）
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL
 );
+
+-- v7 资源租约（B2 机制 1.4，DESIGN §6.7.1）：认领任务时由 conflict_keys 转写授予；
+-- 键方案白名单归一化在 leases.py；有效性 = JOIN tasks（claimed 且租约未过期）判定，
+-- 免心跳双写；任务收尾/删除/租约过期时释放行并重校验 wait_for 等待者。
+CREATE TABLE IF NOT EXISTS resource_leases (
+    project_id   TEXT NOT NULL REFERENCES projects(id),
+    resource_key TEXT NOT NULL,             -- 归一化键：ip:/host:/domain:/url:/binary:/func:/tool:/user:
+    mode         TEXT NOT NULL,             -- X 独占 / S 共享（passive→S、active→X）
+    task_id      TEXT NOT NULL,
+    session_id   TEXT,
+    granted_at   TEXT NOT NULL,
+    PRIMARY KEY (project_id, resource_key, task_id)
+);
+CREATE INDEX IF NOT EXISTS idx_resource_leases_key ON resource_leases(project_id, resource_key);
 
 -- v3 会话收件箱（DESIGN.md §6.7 的 1.5/1.6）：知会类私信，与审批收件箱严格分设。
 -- 只有系统写，没有 Agent 自由消息工具；kind：basis_stale（撤回强制自评）/
@@ -231,7 +251,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
       IF NOT EXISTS 直接建表）；
     - v3→v4：orchestrator_state 由 DDL 的 IF NOT EXISTS 直接建表（批 2 用量计数）；
     - v4→v5：旧库的 orchestrator_state 幂等 ALTER 补编排状态/租约 9 列（批 3）；
-    - v5→v6：tasks 幂等补 plan 列（A2），orchestrator_state 补 last_replan_at（A5）。"""
+    - v5→v6：tasks 幂等补 plan 列（A2），orchestrator_state 补 last_replan_at（A5）。
+    - v6→v7：tasks 幂等补 workset/dedup_fp/wait_for/lease_cooldown_until（B1/B2），
+      resource_leases 由 DDL 的 IF NOT EXISTS 直接建表。"""
     cols = {r[1] for r in conn.execute("PRAGMA table_info(projects)")}
     if "track" not in cols:
         conn.execute("ALTER TABLE projects ADD COLUMN track TEXT NOT NULL DEFAULT ''")
@@ -248,6 +270,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "plan" not in task_cols:  # v6（A2 先规划后动手）
         conn.execute(
             "ALTER TABLE tasks ADD COLUMN plan TEXT NOT NULL DEFAULT '[]'")
+    for col in ("workset", "dedup_fp", "wait_for"):  # v7（B1/B2 协调底座）
+        if col not in task_cols:
+            conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} TEXT NOT NULL DEFAULT '[]'")
+    if "lease_cooldown_until" not in task_cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN lease_cooldown_until TEXT")
     os_tables = {r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='orchestrator_state'")}
     if os_tables:

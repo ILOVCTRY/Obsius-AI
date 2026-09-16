@@ -183,11 +183,11 @@ export const api = {
     http<TaskGraph>(`/api/projects/${pid}/task-graph`),
   publishTask: (pid: string, body: {
     objective: string; scope?: string; task_type?: string; noise_budget?: string;
-    priority?: number; conflict_keys?: string[]; refs?: string[]
+    priority?: number; conflict_keys?: string[]; refs?: string[];
+    workset?: string[]; force?: boolean
   }) =>
-    http<{ task_id: string; kicked: string[] }>(`/api/projects/${pid}/tasks`, {
-      method: "POST", body: JSON.stringify(body),
-    }),
+    http<{ task_id: string; kicked: string[]; deduplicated?: boolean; existed_status?: string }>(
+      `/api/projects/${pid}/tasks`, { method: "POST", body: JSON.stringify(body) }),
   updateTask: (taskId: string, body: {
     objective?: string; task_type?: string; noise_budget?: string;
     priority?: number; conflict_keys?: string[]

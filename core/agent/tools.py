@@ -11,6 +11,7 @@ from typing import Any, Iterable
 
 from core.blackboard import Blackboard, ClaimError, TaskQueue
 from core.blackboard.assets import register_asset
+from core.blackboard.tasks import dedup_fp
 from core.runtime.gateway import ExecutionGateway, GatewayDenied
 from core.skills import proposals
 from core.skills.proposals import ProposalError
@@ -333,9 +334,11 @@ AGENT_TOOLS: list[dict[str, Any]] = [
         "description": "把当前任务**分解**出一个子任务，派给其他会话/Worker 认领执行（分析-分解-分派）。"
                        "新任务自动挂当前任务为 parent（任务流图上的分解实线），created_by 为本会话，"
                        "无需也不能手填；没有认领任务时 parent 为空。规则同人类发任务："
-                       "非 passive 必须给 conflict_keys（同目标 active 互斥）；refs 可挂依据发现 id；"
-                       "priority 0-9（小者优先，默认 2）；task_type 必须是本轨 task_types.yaml "
-                       "已注册类型（generic 恒合法）。分解是计划的一部分：先 task_plan 再发子任务。",
+                       "非 passive 必须给 conflict_keys（同目标 active 互斥，键会被服务端归一化校验）；"
+                       "refs 可挂依据发现 id；priority 0-9（小者优先，默认 2）；task_type 必须是本轨 "
+                       "task_types.yaml 已注册类型（generic 恒合法）。与既有 open/claimed 同目标任务"
+                       "重复发布会被拒绝（返回 [复用] 与既有任务 id）——发布前先 bb_query 查任务。"
+                       "分解是计划的一部分：先 task_plan 再发子任务。",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -347,7 +350,9 @@ AGENT_TOOLS: list[dict[str, Any]] = [
                 "noise_budget": {"type": "string", "enum": ["passive", "low", "medium", "high"]},
                 "priority": {"type": "integer", "description": "0-9，小者优先"},
                 "conflict_keys": {"type": "array", "items": {"type": "string"},
-                                  "description": "非 passive 必填（如 [\"ip:1.2.3.4\"]）"},
+                                  "description": "非 passive 必填（如 [\"ip:1.2.3.4\"]）；服务端归一化，非法拒收"},
+                "workset": {"type": "array", "items": {"type": "string"},
+                            "description": "工作集软声明（B1，可选）：正在分析的目标（如 0x401000 / url），供他人避让，不阻塞认领"},
             },
             "required": ["objective"],
         },
@@ -785,15 +790,24 @@ class ToolDispatcher:
     def _tool_publish_task(self, objective: str, task_type: str = "generic",
                            scope: str = "", refs: list[str] | None = None,
                            noise_budget: str = "passive", priority: int = 2,
-                           conflict_keys: list[str] | None = None) -> str:
+                           conflict_keys: list[str] | None = None,
+                           workset: list[str] | None = None) -> str:
         """子代理分解子任务（A5）：parent 强制当前任务、created_by 强制本会话。
 
         入参里不接受 parent_id/created_by——分解关系由服务端按会话状态钉死，
         与撤回传播的 is_session 识别一致（created_by=sess-…）。
+        B1：发布前按指纹查重，命中 open/claimed 同目标任务 → 复用不新建（防重复派活）。
         """
         objective = (objective or "").strip()
         if not objective:
             return "[错误] objective 不能为空"
+        # B1 发布去重：命中同指纹 open/claimed 任务 → 静默复用（编排/Agent 不重复派活）
+        fp = dedup_fp(task_type, scope, objective)
+        dup = self.tq.find_dedup_target(self.project_id, fp)
+        if dup is not None:
+            self.last_progress_step = self._step
+            return (f"[复用] 已存在同目标任务 {dup['id']}（status={dup['status']}），"
+                    f"本轮不重复发布；认领/避让请参考其 workset 与 conflict_keys")
         try:
             task_id = self.tq.publish(
                 self.project_id, objective, scope=scope, task_type=task_type,
@@ -801,8 +815,8 @@ class ToolDispatcher:
                 conflict_keys=conflict_keys,
                 parent_id=self.current_task_id,   # 无认领任务 → 顶层任务（parent 为空）
                 created_by=self.session_id,
-                allowed_types=self.allowed_task_types, refs=refs)
-        except ValueError as e:  # TaskTypeError / 噪声冲突键 / 非法优先级等
+                allowed_types=self.allowed_task_types, refs=refs, workset=workset)
+        except ValueError as e:  # TaskTypeError / 噪声冲突键 / 非法优先级 / 键归一化失败等
             return f"[拒绝] {e}"
         self.last_progress_step = self._step
         parent = self.current_task_id or "(无)"

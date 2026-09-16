@@ -48,8 +48,8 @@ def test_legacy_db_row_domain_mapped(bb):
     assert got["domain"] == "assessment"
 
 
-def test_schema_v6_migration(tmp_path):
-    """v5 旧库（tasks 无 plan、orchestrator_state 无 last_replan_at）幂等升到 v6。"""
+def test_schema_v7_migration(tmp_path):
+    """旧库幂等升到当前版（v7：B1/B2 workset/dedup_fp/wait_for 列 + resource_leases 表）。"""
     from core.blackboard.schema import SCHEMA_VERSION
     from core.blackboard.store import Blackboard as BB
     from core.orchestrator import state as orch_state
@@ -93,11 +93,15 @@ def test_schema_v6_migration(tmp_path):
     try:
         ver = board.conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
-        assert int(ver) == SCHEMA_VERSION == 6
+        assert int(ver) == SCHEMA_VERSION == 7
         task_cols = {r[1] for r in board.conn.execute("PRAGMA table_info(tasks)")}
         os_cols = {r[1] for r in board.conn.execute(
             "PRAGMA table_info(orchestrator_state)")}
         assert "plan" in task_cols and "last_replan_at" in os_cols
+        assert {"workset", "dedup_fp", "wait_for", "lease_cooldown_until"} <= task_cols
+        tables = {r[0] for r in board.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "resource_leases" in tables
 
         proj = board.create_project("迁移项目", "ctf", ["binary"])
         tq = TaskQueue(board)
@@ -392,8 +396,10 @@ def test_active_tasks_conflict_on_ip(bb, project):
     t2 = tq.publish(pid, "爆破同 IP 另一域名", noise_budget="medium",
                     conflict_keys=["ip:1.2.3.4"], created_by="orchestrator")
     tq.claim(t1, s1["id"])
-    with pytest.raises(ClaimError, match="conflict_keys 交叠"):
+    # B2：冲突统一为资源租约语义——保持 open + wait_for 门控标记，消息带占用者
+    with pytest.raises(ClaimError, match="认领被拒：资源 ip:1.2.3.4 已被"):
         tq.claim(t2, s2["id"])
+    assert tq.get_task(t2)["wait_for"] == ["ip:1.2.3.4"]
     tq.complete(t1, s1["id"])
     tq.claim(t2, s2["id"])  # 前一个 done 后即可认领
 
@@ -1347,3 +1353,182 @@ def test_set_asset_status_whitelist_note_and_audit(bb, project):
     bb.set_asset_status(aid, "tested_clean", note="重复流转")
     assert len([e for e in bb.recent_events(pid)
                 if e["kind"] == "asset.status_changed"]) == 3
+
+
+# ---------- B1 发布去重 + workset / B2 资源租约与 wait_for 门控 ----------
+
+import pytest as _pytest
+
+from core.blackboard.leases import normalize_key, normalize_keys
+from core.blackboard.tasks import dedup_fp
+
+
+def test_lease_key_normalization():
+    assert normalize_key("IP:1.2.3.4") == "ip:1.2.3.4"
+    assert normalize_key("host:Example.COM") == "host:example.com"
+    assert normalize_key("domain:Portal.Corp.CN.") == "domain:portal.corp.cn"
+    assert normalize_key("url:https://Ai.Example.COM/a/") == "url:ai.example.com/a"
+    assert normalize_key("binary:" + "a" * 64) == "binary:" + "a" * 64
+    assert normalize_key("func:" + "b" * 64 + ":0x401000") == "func:" + "b" * 64 + ":401000"
+    assert normalize_key("tool:ida") == "tool:ida"
+    assert normalize_key("user:edu-x:x.com") == "user:edu-x:x.com"
+    for bad in ("ip:*", "1.2.3.4", "ip:", "domain:a b.com", "binary:xyz",
+                "tool:IDA Pro", "user:Bad_NS:v", "func:a:z"):
+        with _pytest.raises(ValueError):
+            normalize_key(bad)
+    assert normalize_keys(["IP:1.2.3.4", "ip:1.2.3.4"]) == ["ip:1.2.3.4"]
+
+
+def test_publish_dedup_fp_and_workset(bb, project):
+    """B1：publish 存指纹与 workset；find_dedup_target 命中 open/claimed、不命中 done。"""
+    pid = project["id"]
+    tq = TaskQueue(bb)
+    t1 = tq.publish(pid, "对 zut.edu.cn 做被动侦察", task_type="recon",
+                    workset=["a.zut.edu.cn", "0x401000"])
+    row = tq.get_task(t1)
+    assert row["workset"] == ["0x401000", "a.zut.edu.cn"]
+    fp = row["dedup_fp"]
+    assert fp
+    assert tq.find_dedup_target(pid, fp)["id"] == t1
+    # claimed 也拦
+    sid = _session(bb, project)["id"]
+    tq.claim(t1, sid)
+    assert tq.find_dedup_target(pid, fp)["id"] == t1
+    # done 后不再命中（只拦 open/claimed）
+    tq.complete(t1, sid, "完")
+    assert tq.find_dedup_target(pid, fp) is None
+
+
+def test_publish_scope_normalized_in_fp(bb, project):
+    pid = project["id"]
+    tq = TaskQueue(bb)
+    t1 = tq.publish(pid, "枚举子域", scope="*.Zut.edu.cn;portal", task_type="recon")
+    fp = tq.get_task(t1)["dedup_fp"]
+    t2 = tq.publish(pid, "枚举子域", scope="*.zut.edu.cn;PORTAL", task_type="recon")
+    assert tq.get_task(t2)["dedup_fp"] == fp  # scope 归一化后同指纹
+    assert tq.find_dedup_target(pid, fp)["id"] == t1
+
+
+def test_claim_grants_leases_x_x_conflict_marks_wait_for(bb, project):
+    """B2：认领转写 X 租约；第二个同键 active 任务认领被拒并写 wait_for；
+    前者收尾释放 → wait_for 清空、可认领（释放重校验同事务，不重领）。"""
+    pid = project["id"]
+    tq = TaskQueue(bb)
+    k = ["ip:10.0.0.8"]
+    t1 = tq.publish(pid, "打点 10.0.0.8", task_type="exploit", noise_budget="low",
+                    conflict_keys=k)
+    t2 = tq.publish(pid, "再打 10.0.0.8", task_type="exploit", noise_budget="low",
+                    conflict_keys=k)
+    s1, s2 = _session(bb, project, "A"), _session(bb, project, "B")
+    tq.claim(t1, s1["id"])
+    rows = bb.conn.execute(
+        "SELECT * FROM resource_leases WHERE task_id=?", (t1,)).fetchall()
+    assert len(rows) == 1 and rows[0]["mode"] == "X"
+    assert rows[0]["resource_key"] == "ip:10.0.0.8"
+    with _pytest.raises(ClaimError):
+        tq.claim(t2, s2["id"])
+    row2 = tq.get_task(t2)
+    assert row2["wait_for"] == ["ip:10.0.0.8"]           # 门控标记（UI ⏳）
+    assert tq.claim_next(pid, s2["id"]) is None          # 预过滤：等待行不占线程
+    tq.complete(t1, s1["id"], "完")                      # 释放 → 重校验清 wait_for
+    assert tq.get_task(t2)["wait_for"] == []
+    tq.claim(t2, s2["id"])
+    assert tq.get_task(t2)["status"] == "claimed"
+
+
+def test_lease_s_mode_shares_x_blocks(bb, project):
+    """B2：passive 任务的键 = S 共享（两个 S 并行不冲突）；active X 与 S 互斥。"""
+    pid = project["id"]
+    tq = TaskQueue(bb)
+    ta = tq.publish(pid, "被动分析 A", task_type="recon", noise_budget="passive",
+                    conflict_keys=["domain:target.com"])
+    tb = tq.publish(pid, "被动分析 B", task_type="recon", noise_budget="passive",
+                    conflict_keys=["domain:target.com"])
+    tc = tq.publish(pid, "主动打点", task_type="exploit", noise_budget="low",
+                    conflict_keys=["domain:target.com"])
+    s1, s2, s3 = (_session(bb, project, "A"), _session(bb, project, "B"),
+                  _session(bb, project, "C"))
+    tq.claim(ta, s1["id"])
+    tq.claim(tb, s2["id"])  # S+S 兼容
+    with _pytest.raises(ClaimError):
+        tq.claim(tc, s3["id"])  # X 与 S 冲突
+    assert tq.get_task(tc)["wait_for"] == ["domain:target.com"]
+
+
+def test_claim_next_releases_then_claims(bb, project):
+    """B2：占用者收尾后，等待者经 claim_next 正常认领（FIFO 不重领冲突）。"""
+    pid = project["id"]
+    tq = TaskQueue(bb)
+    tq.publish(pid, "占用者", task_type="exploit", noise_budget="low",
+               conflict_keys=["ip:10.0.0.9"])
+    tq.publish(pid, "等待者", task_type="exploit", noise_budget="low",
+               conflict_keys=["ip:10.0.0.9"])
+    s1, s2 = _session(bb, project, "A"), _session(bb, project, "B")
+    tq.claim_next(pid, s1["id"])   # 占用者认领并拿 X 租约
+    assert tq.claim_next(pid, s2["id"]) is None  # 等待者被排除
+    occupier = next(t["id"] for t in tq.list_tasks(pid) if t["objective"] == "占用者")
+    tq.complete(occupier, s1["id"], "完")
+    got = tq.claim_next(pid, s2["id"])
+    assert got and tq.get_task(got)["objective"] == "等待者"
+
+
+def test_delete_and_expire_release_leases(bb, project):
+    pid = project["id"]
+    tq = TaskQueue(bb)
+    t1 = tq.publish(pid, "被删的占用者", task_type="exploit", noise_budget="low",
+                    conflict_keys=["ip:10.0.0.10"])
+    t2 = tq.publish(pid, "等 10.0.0.10", task_type="exploit", noise_budget="low",
+                    conflict_keys=["ip:10.0.0.10"])
+    s1, s2 = _session(bb, project, "A"), _session(bb, project, "B")
+    tq.claim(t1, s1["id"])
+    with _pytest.raises(ClaimError):
+        tq.claim(t2, s2["id"])
+    tq.delete(t1, by="human")  # 删除释放租约 + 重校验
+    assert tq.get_task(t2)["wait_for"] == []
+    tq.claim(t2, s2["id"])
+    assert bb.conn.execute("SELECT COUNT(*) c FROM resource_leases WHERE task_id=?",
+                           (t1,)).fetchone()["c"] == 0
+
+
+def test_wait_for_deadlock_detection_sacrifices_youngest(bb, project):
+    """B2 六防死锁之 6（安全网）：构造 wait-for 环 → 牺牲者=最年轻任务，
+    清 wait_for + 冷却 + lock.deadlock_victim 事件。"""
+    pid = project["id"]
+    tq = TaskQueue(bb)
+    s1, s2 = _session(bb, project, "A"), _session(bb, project, "B")
+    ta = tq.publish(pid, "环 A", task_type="recon")
+    tb = tq.publish(pid, "环 B", task_type="recon")
+    tq.claim(ta, s1["id"])
+    tq.claim(tb, s2["id"])
+    # 人工构造不一致态（运行期动态锁未来路径的安全网）：两个 claimed 任务互等
+    with bb._tx():
+        bb.conn.execute("UPDATE tasks SET wait_for=? WHERE id=?",
+                        ('["ip:1.1.1.1"]', ta))
+        bb.conn.execute("UPDATE tasks SET wait_for=? WHERE id=?",
+                        ('["ip:2.2.2.2"]', tb))
+        for key, holder in (("ip:1.1.1.1", tb), ("ip:2.2.2.2", ta)):
+            bb.conn.execute(
+                "INSERT INTO resource_leases(project_id,resource_key,mode,task_id,"
+                "session_id,granted_at) VALUES(?,?,?,?,?,?)",
+                (pid, key, "X", holder, s2["id"] if holder == tb else s1["id"], "2026-01-01"))
+    victims = tq.detect_wait_for_deadlock(pid)
+    assert len(victims) == 1
+    victim = victims[0]
+    other = tb if victim == ta else ta
+    assert victim == max((ta, tb), key=lambda t: tq.get_task(t)["created_at"])
+    v = tq.get_task(victim)
+    assert v["wait_for"] == [] and v["lease_cooldown_until"]
+    assert tq.get_task(other)["wait_for"]  # 另一方保留
+    assert "lock.deadlock_victim" in [e["kind"] for e in bb.recent_events(pid)]
+
+
+def test_update_task_recomputes_fp_and_normalizes_keys(bb, project):
+    pid = project["id"]
+    tq = TaskQueue(bb)
+    t = tq.publish(pid, "初版目标", task_type="recon", conflict_keys=["domain:X.com"])
+    updated = tq.update_task(t, by="human", objective="新目标",
+                             conflict_keys=["IP:10.0.0.1"])
+    assert updated["conflict_keys"] == ["ip:10.0.0.1"]
+    assert tq.get_task(t)["dedup_fp"] == dedup_fp("recon", "", "新目标")
+    with _pytest.raises(ValueError):
+        tq.update_task(t, by="human", conflict_keys=["ip:*"])

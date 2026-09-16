@@ -86,6 +86,8 @@ export interface Task {
   created_at: string
   updated_at: string
   resumable?: boolean  // E12：failed 行派生（原会话落盘快照在 → 看板可「带现场续跑」）
+  workset?: string[]   // B1 工作集软声明（advisory，供避让不阻塞）
+  wait_for?: string[]  // B2 被占资源键（open 行门控标记，claim_next 排除）
 }
 
 // A3 直播间任务流图
@@ -119,7 +121,7 @@ export interface TaskGraphEdge {
   id: string
   source: string
   target: string
-  kind: "parent" | "inbox"
+  kind: "parent" | "inbox" | "suggest"
   refs?: TaskGraphEdgeRef[]
 }
 

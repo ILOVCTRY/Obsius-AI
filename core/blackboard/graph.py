@@ -1,12 +1,11 @@
 """任务流图组装（A3，DESIGN.md §12 直播间任务流视图）。
 
-只读组装，不写存储。两类边：
+只读组装，不写存储。三类边：
 - parent 实线：tasks.parent_id（人/编排/子代理分解结构）；
 - inbox 虚线：session_inbox 按 (kind, ref_id) 聚类——同一依据（被撤回/增补的 finding）
-  触达 ≥2 个会话，而会话各自映射到「最近任务」后，任务两两连边。
-
-会话→最近任务映射是单条 set-based 窗口 SQL（claimed 行优先，否则 updated_at 最新）；
-closed 会话不映射。建议（proposal）协作边依赖 B1 workset，本模块不含（TODO B1）。
+  触达 ≥2 个会话，而会话各自映射到「最近任务」后，任务两两连边；
+- suggest 点虚线（B1）：同父任务或 context_refs 相交、却尚无私信记录的两个已认领
+  任务——机器猜测"这两个子代理很可能需要交流"，不落库、前端可关。
 
 查询条数固定（tasks/sessions/窗口映射/inbox/finding 标题共 5 条以内），与任务量无关，
 无 N+1（tests/test_blackboard.py 用 set_trace_callback 守查询条数上限）。
@@ -135,5 +134,21 @@ def task_graph(bb: Any, project_id: str) -> dict[str, Any]:
                 uniq.append(ref)
         edges.append({"id": f"inbox:{a}:{b}", "source": a, "target": b,
                       "kind": "inbox", "refs": uniq})
+
+    # B1 建议私信边：同父或依据（context_refs）相交、都已认领、且尚无 inbox 边——
+    # 点虚线提示"很可能需要交流"，机器猜测不落库（inbox 边出现后自然消失）
+    task_by_id = {t["id"]: t for t in tasks}
+    inbox_pairs = {(e["source"], e["target"]) for e in edges if e["kind"] == "inbox"}
+    parent_pairs = {(e["source"], e["target"]) for e in edges if e["kind"] == "parent"}
+    claimed = [t for t in tasks if t.get("claimed_by")]
+    for a, b in combinations(sorted(t["id"] for t in claimed), 2):
+        if (a, b) in inbox_pairs or (a, b) in parent_pairs:
+            continue
+        ta, tb = task_by_id[a], task_by_id[b]
+        same_parent = ta.get("parent_id") and ta["parent_id"] == tb.get("parent_id")
+        shared_refs = set(ta.get("context_refs", [])) & set(tb.get("context_refs", []))
+        if same_parent or shared_refs:
+            edges.append({"id": f"suggest:{a}:{b}", "source": a, "target": b,
+                          "kind": "suggest"})
 
     return {"nodes": nodes, "edges": edges}
