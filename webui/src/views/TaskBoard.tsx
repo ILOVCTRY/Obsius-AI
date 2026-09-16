@@ -340,6 +340,13 @@ function TaskCard({ task, onChanged, onDelete, onResolve, focused, focusNonce }:
             ⏸ 待人工
           </Badge>
         )}
+        {(task.context?.attempts?.length ?? 0) >= 2 && (
+          <Badge variant="outline" className="text-[10px] text-muted-foreground"
+                 title={task.context!.attempts.map((a) =>
+                   `${a.session_name ?? a.session_id} ${a.outcome}${a.blocked_reason ? `（${a.blocked_reason}）` : ""}：${a.result_note.slice(0, 80)}`).join("\n")}>
+            ↻ {task.context!.attempts.length} 次尝试
+          </Badge>
+        )}
         <span className="flex-1" />
         <span className="font-mono text-[10px] text-muted-foreground">P{task.priority}</span>
       </div>

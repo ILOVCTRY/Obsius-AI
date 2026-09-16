@@ -59,6 +59,21 @@ def _loads(text: str, default: Any) -> Any:
         return default
 
 
+def render_attempts_lines(attempts: list[dict]) -> list[str]:
+    """C10 任务执行履历 → 中文行列表（agent 接手提示与任务窗摘要共用渲染；
+    纯函数无 DB 访问）。空履历返回空列表。"""
+    lines: list[str] = []
+    for i, a in enumerate(attempts or [], 1):
+        who = a.get("session_name") or a.get("session_id") or "?"
+        outcome = a.get("outcome") or "?"
+        when = (a.get("ended_at") or "")[:19]
+        extra = f"（{a['blocked_reason']}）" if a.get("blocked_reason") else ""
+        note = (a.get("result_note") or "").splitlines()[0][:120] if a.get("result_note") else ""
+        lines.append(f"- {chr(0x2460 + i - 1)} {who} {outcome}{extra}"
+                     f"{('：' + note) if note else ''} @{when}")
+    return lines
+
+
 class TaskQueue:
     def __init__(self, bb: Blackboard):
         self.bb = bb
@@ -351,10 +366,32 @@ class TaskQueue:
                 raise ValueError(f"任务不存在: {task_id}")
             if row["claimed_by"] != session_id:
                 raise ClaimError(f"任务 {task_id} 不由会话 {session_id} 持有，无权收尾")
+            # C10：任务执行履历——每次收尾追加一条 attempt（cap 20），并登记现场
+            # 文件名（transcript 由 agent 层每步落盘，此处只做声明性登记）。
+            # context 列唯一写点就是这里（complete/fail/awaiting_human/重启清扫
+            # 全部收尾路径都收敛于 _finish）。
+            ctx = _loads(row["context"] if "context" in row.keys() else "{}", {})
+            if not isinstance(ctx, dict):
+                ctx = {}
+            attempts = ctx.get("attempts") or []
+            sess = self.bb.conn.execute(
+                "SELECT name, role FROM sessions WHERE id=?", (session_id,)).fetchone()
+            attempts.append({
+                "session_id": session_id,
+                "session_name": (sess["name"] if sess else None),
+                "role": (sess["role"] if sess else None),
+                "outcome": status,
+                "result_note": (result_note or "")[:500],
+                "blocked_reason": blocked_reason if status == "failed" else None,
+                "ended_at": now(),
+            })
+            ctx["attempts"] = attempts[-20:]
+            ctx["transcript"] = f"task-{task_id}.json"
             self.bb.conn.execute(
                 "UPDATE tasks SET status=?, result_note=?, lease_until=NULL,"
-                " blocked_reason=?, updated_at=? WHERE id=?",
-                (status, result_note, blocked_reason or "error", now(), task_id),
+                " blocked_reason=?, context=?, updated_at=? WHERE id=?",
+                (status, result_note, blocked_reason or "error",
+                 json.dumps(ctx, ensure_ascii=False), now(), task_id),
             )
             self._release_and_revalidate(row["project_id"], task_id)  # 机制 1.4 释放+重校验
             stale_refs = _loads(row["stale_refs"], [])
@@ -813,6 +850,7 @@ class TaskQueue:
             d["plan"] = _loads(d.get("plan", "[]"), [])
             d["workset"] = _loads(d.get("workset", "[]"), [])
             d["wait_for"] = _loads(d.get("wait_for", "[]"), [])
+            d["context"] = _loads(d.get("context", "{}"), {})
             out.append(d)
         return out
 
@@ -827,4 +865,5 @@ class TaskQueue:
         d["plan"] = _loads(d.get("plan", "[]"), [])
         d["workset"] = _loads(d.get("workset", "[]"), [])
         d["wait_for"] = _loads(d.get("wait_for", "[]"), [])
+        d["context"] = _loads(d.get("context", "{}"), {})
         return d

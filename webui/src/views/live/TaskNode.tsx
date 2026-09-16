@@ -76,6 +76,11 @@ export function TaskNode({ data }: NodeProps<TaskFlowNodeType>) {
         <span className="min-w-0 flex-1 truncate rounded bg-muted px-1 font-mono text-[9px] text-muted-foreground">
           {n.task_type}
         </span>
+        {(n.attempts ?? 0) >= 2 && (
+          <span className="shrink-0 font-mono text-[9px] text-muted-foreground" title="任务多次执行（上下文随任务保留，跨会话接手）">
+            ↻{n.attempts}
+          </span>
+        )}
         <span className="font-mono text-[9px]" style={{ color }}>{STATUS_LABEL[n.status]}</span>
         <span className="font-mono text-[9px] text-muted-foreground">P{n.priority}</span>
       </div>

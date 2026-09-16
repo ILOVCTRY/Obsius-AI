@@ -124,6 +124,7 @@ def test_spawn_task_window_idempotent_with_context(client):
     assert len(inbox) == 1 and inbox[0]["kind"] == "human_note"
     note = inbox[0]["payload"]["text"]
     assert "逆向 check_flag" in note and "三处字符串引用已核对" in note
+    assert "历次尝试" in note  # C10：履历（_finish 落库的 attempt）进任务窗摘要
     # 会话列表补 worker 状态灯字段
     rows = {s["id"]: s for s in client.get(f"/api/projects/{pid}/sessions").json()}
     assert rows[sid]["worker_armed"] is False

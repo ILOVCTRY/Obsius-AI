@@ -93,12 +93,13 @@ def test_schema_v7_migration(tmp_path):
     try:
         ver = board.conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
-        assert int(ver) == SCHEMA_VERSION == 8
+        assert int(ver) == SCHEMA_VERSION == 9
         task_cols = {r[1] for r in board.conn.execute("PRAGMA table_info(tasks)")}
         os_cols = {r[1] for r in board.conn.execute(
             "PRAGMA table_info(orchestrator_state)")}
         assert "plan" in task_cols and "last_replan_at" in os_cols
         assert {"workset", "dedup_fp", "wait_for", "lease_cooldown_until"} <= task_cols
+        assert "context" in task_cols  # v9（C10 任务执行履历）
         tables = {r[0] for r in board.conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
         assert "resource_leases" in tables
@@ -107,6 +108,7 @@ def test_schema_v7_migration(tmp_path):
         tq = TaskQueue(board)
         tid = tq.publish(proj["id"], "旧库新任务")
         assert tq.get_task(tid)["plan"] == []  # 旧行默认空计划
+        assert tq.get_task(tid)["context"] == {}  # v9 旧行默认空履历
         saved = orch_state.save_fields(
             board, proj["id"], last_replan_at="2026-09-15T00:00:00+00:00")
         assert saved["last_replan_at"] == "2026-09-15T00:00:00+00:00"

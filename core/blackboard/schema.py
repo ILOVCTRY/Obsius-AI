@@ -9,7 +9,11 @@
 
 import sqlite3
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
+
+# v8→v9（C10 任务上下文归任务所有）：tasks 幂等补 context（JSON：任务执行履历
+# {transcript, attempts[]}，唯一写点 TaskQueue._finish；完整对话现场在
+# <workspace>/<pid>/snapshots/task-<tid>.json，agent 层每步落盘）。
 
 # v7→v8（C1 任务暂停语义统一，§6.1）：tasks 幂等补 blocked_reason（error|awaiting_human，缺省 error 向后兼容）。
 
@@ -160,6 +164,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     wait_for      TEXT NOT NULL DEFAULT '[]',  -- v7 JSON：被占资源键（open 行门控标记，claim_next 排除，机制 1.4）
     lease_cooldown_until TEXT,                 -- v7：死锁牺牲者冷却（到期前 claim_next 跳过，机制 1.4）
     blocked_reason TEXT NOT NULL DEFAULT 'error',  -- v8：fail 通道结构化原因 error|awaiting_human（C1）
+    context       TEXT NOT NULL DEFAULT '{}',      -- v9 JSON：任务执行履历 {transcript, attempts[]}（C10 跨会话接手，唯一写点 _finish）
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL
 );
@@ -256,7 +261,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     - v4→v5：旧库的 orchestrator_state 幂等 ALTER 补编排状态/租约 9 列（批 3）；
     - v5→v6：tasks 幂等补 plan 列（A2），orchestrator_state 补 last_replan_at（A5）。
     - v6→v7：tasks 幂等补 workset/dedup_fp/wait_for/lease_cooldown_until（机制 1.1/机制 1.4），
-      resource_leases 由 DDL 的 IF NOT EXISTS 直接建表。"""
+      resource_leases 由 DDL 的 IF NOT EXISTS 直接建表。
+    - v7→v8：tasks 幂等补 blocked_reason（C1）。
+    - v8→v9：tasks 幂等补 context（C10 任务执行履历）。"""
     cols = {r[1] for r in conn.execute("PRAGMA table_info(projects)")}
     if "track" not in cols:
         conn.execute("ALTER TABLE projects ADD COLUMN track TEXT NOT NULL DEFAULT ''")
@@ -281,6 +288,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "blocked_reason" not in task_cols:  # v8（C1 暂停语义统一）
         conn.execute(
             "ALTER TABLE tasks ADD COLUMN blocked_reason TEXT NOT NULL DEFAULT 'error'")
+    if "context" not in task_cols:  # v9（C10 任务执行履历：{transcript, attempts[]}）
+        conn.execute(
+            "ALTER TABLE tasks ADD COLUMN context TEXT NOT NULL DEFAULT '{}'")
     os_tables = {r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='orchestrator_state'")}
     if os_tables:

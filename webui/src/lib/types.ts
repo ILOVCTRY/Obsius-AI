@@ -94,6 +94,23 @@ export interface Task {
   workset?: string[]   // B1 工作集软声明（advisory，供避让不阻塞）
   wait_for?: string[]  // B2 被占资源键（open 行门控标记，claim_next 排除）
   blocked_reason?: "error" | "awaiting_human"  // C1：fail 通道结构化原因（v8）
+  context?: TaskContext | null                  // C10 任务执行履历（v9，唯一写点 _finish）
+}
+
+// C10：任务执行履历——完整对话现场在 workspace 文件（task-<tid>.json），此处只存履历
+export interface TaskAttempt {
+  session_id: string
+  session_name: string | null
+  role: string | null
+  outcome: "done" | "failed"
+  result_note: string
+  blocked_reason: "error" | "awaiting_human" | null
+  ended_at: string
+}
+
+export interface TaskContext {
+  transcript: string | null
+  attempts: TaskAttempt[]
 }
 
 // A3 直播间任务流图
@@ -114,6 +131,7 @@ export interface TaskGraphNode {
   claimed_by: string | null
   plan: TaskPlanStep[]
   updated_at?: string
+  attempts?: number  // C10 历次尝试数（task.context.attempts 长度，看板/任务流 ↻N 徽章）
   session: TaskGraphSession | null
 }
 

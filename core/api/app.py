@@ -34,12 +34,12 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from core import autonomy
 from core.agent import AgentConfig, AgentSession
-from core.agent.loop import persisted_snapshot_path
+from core.agent.loop import persisted_snapshot_path, task_transcript_path
 from core.blackboard import TaskQueue
 from core.blackboard.assets import register_asset
 from core.blackboard.graph import task_graph
 from core.blackboard.store import Blackboard, BlackboardClosedError
-from core.blackboard.tasks import dedup_fp
+from core.blackboard.tasks import dedup_fp, render_attempts_lines
 from core.intel import config as intel_config
 from core.intel import vault as intel_vault
 from core.intel.intel_service import (
@@ -2102,11 +2102,20 @@ def create_app(
     @app.delete("/api/tasks/{task_id}")
     def delete_task(task_id: str):
         pid = _pid_of_task(task_id)
-        tq = TaskQueue(_project(pid).bb)
+        proj = _project(pid)
+        tq = TaskQueue(proj.bb)
         try:
             tq.delete(task_id, by="human")
         except ValueError as e:
             raise HTTPException(409, str(e))
+        transcript = task_transcript_path(proj.artifacts_dir, task_id)  # C10 现场随任务删
+        if transcript is not None:
+            try:
+                transcript.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                log.warning("任务现场文件清理失败（任务 %s）", task_id)  # 孤儿文件无行引用，永不载入
         return {"deleted": task_id}
 
     def _pid_of_task(task_id: str) -> str:
@@ -2118,6 +2127,38 @@ def create_app(
             if p.bb.conn.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,)).fetchone():
                 return proj["id"]
         raise HTTPException(404, f"任务不存在: {task_id}")
+
+    def _task_context_digest(bb: Blackboard, pid: str, task: dict) -> str:
+        """任务上下文摘要（F9 任务窗 human_note 用；C10 起补历次尝试履历）：
+        目标/状态/结果注记/blocked_reason/plan 前 10 步/context_refs 命中发现前 10 条。"""
+        task_id = task["id"]
+        lines = [f"📋 任务上下文（双击任务流卡片开窗，task={task_id}）",
+                 f"目标：{task['objective'][:500]}",
+                 f"状态：{task['status']}"]
+        if task.get("result_note"):
+            lines.append(f"结果注记：{task['result_note'][:500]}")
+        if task.get("blocked_reason"):
+            lines.append(f"受阻原因：{task['blocked_reason']}")
+        plan_steps = task.get("plan") or []
+        if plan_steps:
+            lines.append("计划步：" + "；".join(
+                f"{s.get('id')} {s.get('title')}({s.get('status')})"
+                for s in plan_steps[:10]))
+        attempts = (task.get("context") or {}).get("attempts") or []
+        if attempts:
+            lines.append(f"历次尝试（共 {len(attempts)} 次）：")
+            lines += render_attempts_lines(attempts)
+        refs = task.get("context_refs") or []
+        if refs:
+            by_id = {f["id"]: f for f in bb.list_findings(pid)}
+            hits = [by_id[r] for r in refs if r in by_id][:10]
+            if hits:
+                lines.append("相关发现：")
+                for f in hits:
+                    lines.append(
+                        f"- {f.get('vuln_class', '?')} [{f.get('severity', '?')}] "
+                        f"{(f.get('title') or '')[:120]} ({f['id']})")
+        return "\n".join(lines)
 
     @app.post("/api/tasks/{task_id}/spawn-window")
     def spawn_task_window(task_id: str):
@@ -2164,29 +2205,7 @@ def create_app(
         sid = agent.session["id"]
         bb.set_session_meta(sid, {"spawn_task_id": task_id, "worker_armed": False})
         # 上下文注入：E8 human_note 通道，worker 起跑后首个控制点 drain
-        lines = [f"📋 任务上下文（双击任务流卡片开窗，task={task_id}）",
-                 f"目标：{task['objective'][:500]}",
-                 f"状态：{task['status']}"]
-        if task.get("result_note"):
-            lines.append(f"结果注记：{task['result_note'][:500]}")
-        if task.get("blocked_reason"):
-            lines.append(f"受阻原因：{task['blocked_reason']}")
-        plan_steps = task.get("plan") or []
-        if plan_steps:
-            lines.append("计划步：" + "；".join(
-                f"{s.get('id')} {s.get('title')}({s.get('status')})"
-                for s in plan_steps[:10]))
-        refs = task.get("context_refs") or []
-        if refs:
-            by_id = {f["id"]: f for f in bb.list_findings(pid)}
-            hits = [by_id[r] for r in refs if r in by_id][:10]
-            if hits:
-                lines.append("相关发现：")
-                for f in hits:
-                    lines.append(
-                        f"- {f.get('vuln_class', '?')} [{f.get('severity', '?')}] "
-                        f"{(f.get('title') or '')[:120]} ({f['id']})")
-        text = "\n".join(lines)
+        text = _task_context_digest(bb, pid, task)
         try:
             bb.post_human_note(pid, sid, text)
         except ValueError:  # noqa: BLE001 —— 刚创建的会话不会不存在；防御性吞掉

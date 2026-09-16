@@ -11,7 +11,7 @@
 ## 文件
 
 - `TaskFlow.tsx` — 主视图（自带 ReactFlowProvider）：3s 轮询 `api.taskGraph` + wsBump 300ms 去抖重拉（**本组件不另开 WS**）；选中私信边浮卡；节点删除 AlertDialog（四态可删、claimed 硬中断文案、409 子任务错误直显）。
-- `TaskNode.tsx` — 任务卡：四态色条/边框（open 灰、claimed 青、done 绿、failed 红）、objective 两行截断、`▦ done/total` + doing 标题 + blocked 琥珀原因、认领会话名（claimed 且暂停时 ⏸ 琥珀）、hover 显删除钮；**双击**=有活会话挂回直播、否则派 window `goto-tasks` 事件（App.tsx 监听后切任务看板并高亮卡片）。
+- `TaskNode.tsx` — 任务卡：四态色条/边框（open 灰、claimed 青、done 绿、failed 红）、objective 两行截断、`▦ done/total` + doing 标题 + blocked 琥珀原因、认领会话名（claimed 且暂停时 ⏸ 琥珀）、hover 显删除钮；**双击**=有活会话挂回直播、否则派 window `goto-tasks` 事件（App.tsx 监听后切任务看板并高亮卡片）；**C10** `↻N` 徽章（node.attempts≥2，来自 graph.py 节点字段）。
 - `TaskFlowEdge.tsx` — parent 灰实线箭头（不可点）；inbox 紫虚边 + EdgeLabelRenderer 内 ✉/✉n 圆形标签，点击选中出浮卡（basis_stale=⚠依据撤回 / finding_update=🔵发现增补，refs 全列）。
 - `flowModel.ts` — 纯函数：`layoutTasks` parent 深度分列（左→右 DAG），同列按 claimed→open→failed→done、priority、updated_at 堆叠；`planStats`。
 - `flow.css` — `.tf-dark` 深色控件覆盖，必须在 xyflow style.css 之后 import（plain CSS 压 Tailwind 层）。

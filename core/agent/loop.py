@@ -12,8 +12,10 @@
 
 import json
 import logging
+import os
 import threading
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +73,16 @@ def persisted_snapshot_path(artifacts_dir, sid: str) -> "Path | None":
     if artifacts_dir is None:
         return None
     return Path(artifacts_dir).parent / "snapshots" / f"{sid}.json"
+
+
+def task_transcript_path(artifacts_dir, task_id: str) -> "Path | None":
+    """C10 任务现场文件路径（模块级形态，API 层删任务清理用）：
+    <workspace>/<pid>/snapshots/task-<tid>.json——与 E8 会话快照同目录。
+    文件名由 task_id 确定性推导，agent 层读写无需查 DB 指针；
+    artifacts_dir 为 None 返回 None。"""
+    if artifacts_dir is None:
+        return None
+    return Path(artifacts_dir).parent / "snapshots" / f"task-{task_id}.json"
 
 
 class _LeaseHeartbeat(threading.Thread):
@@ -338,21 +350,35 @@ class AgentSession:
         system = self.build_system_prompt(
             objective, self.skill_context_for(objective, features, file_features,
                                               task_id=task_id))
-        messages: list[dict[str, Any]] = []
-        if stale_refs and task_id not in self._stale_alerted:
+        # C10 跨会话接手：先载入任务现场（上一会话每步 checkpoint 落盘的对话历史，
+        # 不含 system——由本会话角色重建）。文件缺失/损坏/任务不符 → 空列表降级，
+        # 履历仍经接手提示注入。E8 resume 路径不经 run_task，与本案天然互斥。
+        transcript_msgs = self._load_task_transcript(task_id) if task_id else []
+        messages: list[dict[str, Any]] = list(transcript_msgs)
+        # 认领期无条件 drain（修缺口：原先被 if stale_refs 包裹，跨会话接手时
+        # 任务窗 human_note/私信要等首个控制点才注入）；basis_stale 通知仍仅
+        # stale_refs 非空时拼（open 任务只挂标无私信，这里按 stale_refs 现场补水）。
+        if task_id and task_id not in self._stale_alerted:
             drained = self.bb.inbox_drain(self.project_id, self.session["id"])
-            notice = self._basis_stale_notice(stale_refs, drained)
-            if notice:
-                messages.append({"role": "user", "content": notice})
-                self._stale_alerted.add(task_id)
+            if stale_refs:
+                notice = self._basis_stale_notice(stale_refs, drained)
+                if notice:
+                    messages.append({"role": "user", "content": notice})
+                    self._stale_alerted.add(task_id)
             update_notice = self._finding_update_notice(drained)
             if update_notice:
                 messages.append({"role": "user", "content": update_notice})
+        handover = (self._handover_notice(task, bool(transcript_msgs))
+                    if task_id else None)  # C10：第 N 次尝试接手提示
+        if handover:
+            messages.append({"role": "user", "content": handover})
         if old_plan_notice:
             messages.append({"role": "user", "content": old_plan_notice})
         if dead_end_notice:
             messages.append({"role": "user", "content": dead_end_notice})
         messages.append({"role": "user", "content": objective})
+        if task_id:
+            self._checkpoint_task_transcript(messages, objective)  # 认领即有现场
         summary = self._loop(system, messages, objective)
         if summary is None:  # 暂停（心跳保留，继续占任务）/中断（_abort_current_task 已停心跳）
             return ""
@@ -361,7 +387,8 @@ class AgentSession:
 
     def run_next_task(self) -> str | None:
         """Worker 循环入口：认领下一个匹配角色 task_types 的任务并执行。
-        暂停/中断请求 → 不领新任务并落状态；有快照 → 优先续跑被暂停的任务。"""
+        暂停/中断请求 → 不领新任务并落状态；有快照 → 优先续跑被暂停的任务。
+        C10：快照续跑（E8）不经 run_task，与任务现场（transcript）接手路径天然互斥。"""
         if self._abort_req.is_set():
             self._abort_current_task()   # 空闲路径：无任务则只清标志 + 落审计
             return None
@@ -481,6 +508,27 @@ class AgentSession:
             lines += fsums
         return "\n".join(lines)
 
+    def _handover_notice(self, task: dict, has_transcript: bool) -> str | None:
+        """C10 跨会话接手提示：有现场或履历才注入。对上面的对话现场做元说明
+        （可续做、已有结论不必重查；历史工具结果属于当时现场不可重放），
+        并注入历次尝试履历（outcome/result_note/blocked_reason，黑板侧落库）。"""
+        ctx = task.get("context") or {}
+        attempts = ctx.get("attempts") or []
+        if not has_transcript and not attempts:
+            return None
+        n = len(attempts) + 1
+        lines: list[str] = []
+        if has_transcript:
+            lines.append(
+                f"🔁 第 {n} 次尝试接手：以上对话现场来自此前执行（可直接续做，"
+                "已有结论不必重查）；注意历史里的工具结果属于当时现场，"
+                "不可重放，需要时重新取证。")
+        if attempts:
+            lines.append(f"本任务共 {n - 1} 次历史尝试：")
+            from core.blackboard.tasks import render_attempts_lines
+            lines += render_attempts_lines(attempts)
+        return "\n".join(lines) if lines else None
+
     def _loop(self, system: str, messages: list[dict[str, Any]], objective: str,
               start_step: int = 1) -> str | None:
         """返回 None = 暂停/中断退出（调用方不得 finalize）；其余返回任务总结。
@@ -526,6 +574,7 @@ class AgentSession:
                     result_text = self.dispatcher.dispatch(tc.name, tc.arguments)
                     messages.append(self.llm.tool_result_message(tc, result_text))
                 self._trim(messages)
+            self._checkpoint_task_transcript(messages, objective)  # C10 每步落盘任务现场
             if getattr(self.dispatcher, "awaiting_human", False):
                 # C1：Agent 自主挂起（awaiting_human）——快照落盘 + 任务 fail
                 # （blocked_reason=awaiting_human，resumable=True），现场保留，
@@ -597,6 +646,7 @@ class AgentSession:
         note_notice = self._human_note_notice(fresh)
         if note_notice:
             messages.append({"role": "user", "content": note_notice})
+        self._checkpoint_task_transcript(messages, objective)  # C10：注入的私信/引导也进现场
         return None
 
     def _human_note_notice(self, inbox_rows: list[dict[str, Any]]) -> str | None:
@@ -735,6 +785,69 @@ class AgentSession:
                                      {"resume_snapshot": path.name})
         except Exception:  # noqa: BLE001
             log.exception("暂停快照落盘失败（会话 %s）", self.session["id"])
+
+    # ---------- 任务现场落盘（C10：上下文归任务所有，跨会话接手） ----------
+
+    def _checkpoint_task_transcript(self, messages: list[dict[str, Any]],
+                                    objective: str) -> None:
+        """C10 每步任务现场落盘：写 <snapshots>/task-<tid>.json（temp+replace
+        原子替换，防崩溃撕裂/并发读者读到半截）。只认 current_task_id——无任务
+        （纯 objective 直跑）不落盘；失败降级不影响主循环。"""
+        task_id = self.dispatcher.current_task_id
+        path = task_transcript_path(self.artifacts_dir, task_id or "") if task_id else None
+        if path is None:
+            return  # 无任务（纯 objective 直跑）不落盘；防 task-.json 空名残file（走查发现）
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(
+                {"task_id": task_id, "objective": objective,
+                 "session_id": self.session["id"], "messages": messages,
+                 "updated_at": datetime.now(timezone.utc).isoformat()},
+                ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, path)
+        except Exception:  # noqa: BLE001
+            log.exception("任务现场落盘失败（任务 %s）", task_id)
+
+    def _load_task_transcript(self, task_id: str) -> list[dict[str, Any]]:
+        """C10 跨会话接手：读任务现场文件为初始对话历史。防御点：JSON 损坏/
+        task_id 不符/messages 结构异常 → 空列表降级（履历仍经接手提示注入）；
+        只取末尾 60 条（≈30 步完整对话，更早内容以黑板 finding/事件为准）。"""
+        path = task_transcript_path(self.artifacts_dir, task_id)
+        if path is None:
+            return []
+        try:
+            st = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        if not isinstance(st, dict) or st.get("task_id") != task_id:
+            return []
+        msgs = st.get("messages")
+        if not isinstance(msgs, list):
+            return []
+        msgs = [m for m in msgs
+                if isinstance(m, dict) and m.get("role") in {"user", "assistant"}
+                and m.get("content") is not None]
+        if not msgs:
+            return []
+
+        def _is_tool_result(m: dict) -> bool:
+            c = m.get("content")
+            return (isinstance(c, list) and any(
+                isinstance(b, dict) and b.get("type") == "tool_result" for b in c))
+
+        omitted = len(msgs) - 60
+        if omitted > 0:
+            msgs = msgs[-60:]
+            # 截断边界不得拆开 tool_use/tool_result 对（首条若是 tool_result，
+            # 其配对的 tool_use 已在被省略段里，API 会拒）——继续丢弃到非 result 为止
+            while msgs and _is_tool_result(msgs[0]):
+                msgs.pop(0)
+                omitted += 1
+            msgs = [{"role": "user",
+                     "content": f"（此前 {omitted} 条对话历史已省略，"
+                                "完整结论以黑板 finding/事件为准）"}] + msgs
+        return msgs
 
     def _load_persisted_snapshot(self) -> dict | None:
         """rehydrate：按 sessions.meta 指针读回暂停快照；命中即置回暂停态。

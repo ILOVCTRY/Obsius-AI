@@ -69,6 +69,7 @@ def task_graph(bb: Any, project_id: str) -> dict[str, Any]:
             "claimed_by": sid,
             "plan": t.get("plan", []),
             "updated_at": t.get("updated_at"),
+            "attempts": len((t.get("context") or {}).get("attempts") or []),  # C10 履历数
             "session": sessions.get(sid) if sid else None,
         })
 
