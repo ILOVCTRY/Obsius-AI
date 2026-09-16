@@ -119,14 +119,19 @@ AGENT_TOOLS: list[dict[str, Any]] = [
         "description": "登记发现。无证据时 status 必须为 unverified（红线：无证据不下结论）；"
                        "status=verified 必须已稳定复现（连续 3 次触发），evidence.poc 按"
                        "{type: http_raw|python|steps, http_raw?, artifact_id?, target, "
-                       "stability: '3/3'} 约定落（§5.2）。",
+                       "stability: '3/3'} 约定落（§5.2）。"
+                       "CTF 轨语义：severity 字段填线索级别——critical=关键突破（直接导向 flag/"
+                       "大幅推进）、high=有效线索（可行动）、low/medium/info=背景信息（记录备查）；"
+                       "vuln_class 填线索类别（信息点/隐写疑似/编码疑似/flag 候选…）；"
+                       "status=false-positive=死路（已排除的方向，evidence 必写清原因与已尝试清单，"
+                       "防重走弯路）。解题脚本/writeup 用 bb_add_artifact 落产物，不要写裸文件。",
         "input_schema": {
             "type": "object",
             "properties": {
                 "vuln_class": {"type": "string"},
                 "title": {"type": "string"},
                 "severity": {"type": "string", "enum": ["info", "low", "medium", "high", "critical"]},
-                "status": {"type": "string", "enum": ["unverified", "verified"]},
+                "status": {"type": "string", "enum": ["unverified", "verified", "false-positive"]},
                 "target_asset_id": {"type": "string",
                                     "description": "挂到目标资产 id（URL 先 bb_add_asset 拿 id）"},
                 "evidence": {"type": "object", "description": "证据：请求响应摘要等；"
@@ -157,7 +162,10 @@ AGENT_TOOLS: list[dict[str, Any]] = [
         "name": "bb_add_artifact",
         "description": "落产物文件（POC 脚本 / 抓包 / 输出）：写项目产物目录 + sha256 落库。"
                        "Python 复现脚本用 kind='poc'（**仅限 .py**，其他语言拒绝）——"
-                       "报文打不稳的漏洞才用脚本复现（§5.2）。",
+                       "报文打不稳的漏洞才用脚本复现（§5.2）。"
+                       "CTF 纪律：解题/复现脚本与 writeup **必须落 artifact**（复现必要的产物"
+                       "才落，附一句『是什么/怎么得到』）——不要写裸文件，队友与续跑会话"
+                       "靠黑板找现场。",
         "input_schema": {
             "type": "object",
             "properties": {

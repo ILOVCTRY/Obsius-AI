@@ -313,6 +313,7 @@ class AgentSession:
         返回空串 = 暂停/中断退出（任务收尾已由检查点处理，不得再走 _finalize）。"""
         stale_refs: list[str] = []
         old_plan_notice: str | None = None  # C1：重认领旧任务的计划/发现注入
+        dead_end_notice: str | None = None  # C3：跨轨路标三级注入
         if task_id:
             task = self.tq.get_task(task_id)
             if task is None:
@@ -333,6 +334,7 @@ class AgentSession:
             self.dispatcher.current_task_id = task_id
             self._start_heartbeat(task_id)
             old_plan_notice = self._old_plan_notice(task)  # C1：重认领任务的旧计划/发现注入
+            dead_end_notice = self._dead_end_notice(task)
         system = self.build_system_prompt(
             objective, self.skill_context_for(objective, features, file_features,
                                               task_id=task_id))
@@ -348,6 +350,8 @@ class AgentSession:
                 messages.append({"role": "user", "content": update_notice})
         if old_plan_notice:
             messages.append({"role": "user", "content": old_plan_notice})
+        if dead_end_notice:
+            messages.append({"role": "user", "content": dead_end_notice})
         messages.append({"role": "user", "content": objective})
         summary = self._loop(system, messages, objective)
         if summary is None:  # 暂停（心跳保留，继续占任务）/中断（_abort_current_task 已停心跳）
@@ -404,6 +408,52 @@ class AgentSession:
         return self.run_task(task["objective"], task_id=task_id)
 
     # ---------- 内部 ----------
+
+    def _dead_end_notice(self, task: dict) -> str | None:
+        """C3 跨轨路标三级注入（§5.2 定稿）：已排除方向/死路（status=false-positive
+        findings）注入认领会话——① scope/资产精确匹配全文（cap 5）② 同 host 聚合
+        一行动态摘要（跨端口可见、未覆盖目标显形）③ 项目级计数 + 查询纪律。
+        渗透=已排除攻击路径、CTF=死路线索、逆向=已排除假设。"""
+        fps = [f for f in self.bb.list_findings(self.project_id)
+               if f["status"] == "false-positive"]
+        if not fps:
+            return None
+        assets = {a["id"]: a for a in self.bb.list_assets(self.project_id)}
+
+        def host_val(aid: str | None) -> str:
+            a = assets.get(aid)
+            while a:
+                if a["type"] == "host":
+                    return a["value"]
+                a = assets.get(a.get("parent_id") or "")
+            return ""
+
+        scope_text = ((task.get("scope") or "") + " " +
+                      (task.get("objective") or "")).lower()
+        exact: list[str] = []
+        by_host: dict[str, list[str]] = {}
+        for f in fps:
+            av = (assets.get(f.get("target_asset_id")) or {}).get("value", "").lower()
+            hv = host_val(f.get("target_asset_id"))
+            blob = (f["title"] + " " + json.dumps(f.get("evidence", {}),
+                                                  ensure_ascii=False)[:200]).lower()
+            line = f"⛔ {f['title']}"
+            if av and (av in scope_text or (hv and hv in scope_text)):
+                exact.append(line)
+            elif hv:
+                by_host.setdefault(hv, []).append(f["title"][:40])
+            else:
+                by_host.setdefault("(其他)", []).append(f["title"][:40])
+        lines: list[str] = ["🚫 路标——以下方向已被排除（勿重走，动手前先 bb_query 查死路）："]
+        for f in exact[:5]:
+            lines.append(f"  {f}")
+        for hv, titles in list(by_host.items())[:10]:
+            lines.append(f"  ⛔ {hv}：已排除 {len(titles)} 条（{'、'.join(titles[:2])}…）"
+                         if len(titles) > 2 else
+                         f"  ⛔ {hv}：已排除 {len(titles)} 条（{'、'.join(titles)}）")
+        if len(exact) > 5:
+            lines.append(f"  （另有 {len(exact) - 5} 条精确匹配路标未展开）")
+        return "\n".join(lines)
 
     def _old_plan_notice(self, task: dict) -> str | None:
         """C1：重新认领曾执行过的任务时，注入旧计划与依据发现摘要——

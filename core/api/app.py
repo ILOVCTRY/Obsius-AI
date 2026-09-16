@@ -1434,6 +1434,10 @@ def create_app(
         svc = _rev_service(proj)
         if svc.read_cached(sha) is not None:
             return {"cached": True, "job_id": None, "sha": sha, "asset_id": asset["id"]}
+        # C2 CTF 线索板补缺：非 binary 能力包（如 ctf/misc 项目）不上 headless 分诊——
+        # 样本按附件落 samples/ + binary 资产即可（无 headless 后端时同款 no-tool 降级）
+        if "binary" not in (proj.capabilities or []):
+            return {"cached": False, "job_id": None, "sha": sha, "asset_id": asset["id"]}
         return {"cached": False, "job_id": _submit_triage(proj, sha, rel),
                 "sha": sha, "asset_id": asset["id"]}
 

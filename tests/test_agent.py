@@ -1357,3 +1357,19 @@ def test_reclaim_notice_injects_old_plan(env):
     agent2.run_task("被接手的任务", task_id=t1)
     injected = json.dumps(llm2.calls[0]["messages"], ensure_ascii=False)
     assert "旧计划仅供参考" in injected and "p1 [todo] 摸底" in injected
+
+
+def test_dead_end_notice_injected_on_claim(env):
+    """C3 跨轨路标三级注入：认领时 FP 发现按 scope 精确/同 host 聚合/计数注入。"""
+    bb, project, gw, tq, _ = env
+    a = bb.upsert_asset(project["id"], "host", "10.0.0.8")["id"]
+    fid = bb.add_finding(project["id"], "死路", "8080 端口无服务", target_asset_id=a,
+                          status="false-positive", author="s0")["id"]
+    tq.publish(project["id"], "打 10.0.0.8 的 443", task_type="recon")
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("t1", "finish", {"summary": "知道了"})]},
+    ])
+    agent = make_agent(env, llm)
+    agent.run_next_task()
+    injected = json.dumps(llm.calls[0]["messages"], ensure_ascii=False)
+    assert "路标" in injected and "勿重走" in injected

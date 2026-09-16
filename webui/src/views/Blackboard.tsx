@@ -46,7 +46,7 @@ export function Blackboard({ pid, compact = false, track, capabilities }: {
       </TabsList>
       <TabsContent value="findings" className="min-h-0 flex-1">
         {/* 子视图切换仅 assessment track 且非 compact 侧栏时渲染 */}
-        <Findings pid={pid} compact={compact} showCanvas={!compact && track === "assessment"} />
+        <Findings pid={pid} compact={compact} track={track} showCanvas={!compact && track === "assessment"} />
       </TabsContent>
       <TabsContent value="assets" className="min-h-0 flex-1">
         <Assets pid={pid} compact={compact} tree={track === "assessment"} />
@@ -74,18 +74,32 @@ function Chip({ active, onClick, children }: { active: boolean; onClick: () => v
   )
 }
 
-function Findings({ pid, compact, showCanvas }: { pid: string; compact?: boolean; showCanvas: boolean }) {
+// CTF 线索级别（C2 换词表）：severity 字段在 ctf 轨的语义映射与展示色
+const CTF_LEVEL: Record<string, { label: string; cls: string }> = {
+  critical: { label: "关键突破", cls: "text-[--status-error]" },
+  high: { label: "有效线索", cls: "text-[--status-approval]" },
+  medium: { label: "背景信息", cls: "text-muted-foreground" },
+  low: { label: "背景信息", cls: "text-muted-foreground" },
+  info: { label: "背景信息", cls: "text-muted-foreground" },
+}
+const CTF_LEVEL_ORDER = ["critical", "high", "medium", "low", "info"]
+
+function Findings({ pid, compact, track, showCanvas }: {
+  pid: string; compact?: boolean; track?: string; showCanvas: boolean
+}) {
+  const isCtf = track === "ctf"
   const [items, setItems] = useState<Finding[]>([])
   const [assets, setAssets] = useState<Asset[]>([])
   const [assetFilter, setAssetFilter] = useState("")
   const [sevFilter, setSevFilter] = useState("")      // ""=全部，否则作为 min_severity 下发
   const [statusFilter, setStatusFilter] = useState("") // "" | unverified | verified
+  const [levelFilter, setLevelFilter] = useState("")   // C2：ctf 线索级别筛选（""=全部未折叠）
   const [detail, setDetail] = useState<Finding | null>(null)  // 弹窗展示复现步骤/POC
   const [assetOpen, setAssetOpen] = useState(false)   // 资产筛选下拉展开态
   const [assetQuery, setAssetQuery] = useState("")     // 下拉内搜索词
   const [subView, setSubView] = useState<"list" | "canvas">("list")
   const [title, setTitle] = useState("")
-  const [vulnClass, setVulnClass] = useState("triage")
+  const [vulnClass, setVulnClass] = useState("")
 
   // 筛选全局生效；数据恒为当前项目（API 按 pid 查，无跨项目混杂）。
   // 资产维度客户端过滤（下拉只列 host，选中时展开后代 service/url 一并匹配
@@ -117,12 +131,23 @@ function Findings({ pid, compact, showCanvas }: { pid: string; compact?: boolean
 
   const visible = useMemo(() => {
     const rank = (s: string) => {
-      const i = SEVERITY_ORDER.indexOf(s)
+      const i = (isCtf ? CTF_LEVEL_ORDER : SEVERITY_ORDER).indexOf(s)
       return i === -1 ? SEVERITY_ORDER.length : i
     }
     let filtered = statusFilter === "unverified"
       ? items.filter((f) => f.status === "unverified")
       : items
+    if (isCtf) {
+      // C2 死路默认折叠：status=false-positive 仅在「死路」筛选下显示
+      filtered = levelFilter === "dead"
+        ? filtered.filter((f) => f.status === "false-positive")
+        : filtered.filter((f) => f.status !== "false-positive")
+      if (levelFilter === "bg") {
+        filtered = filtered.filter((f) => ["low", "medium", "info"].includes(f.severity))
+      } else if (levelFilter && levelFilter !== "dead") {
+        filtered = filtered.filter((f) => f.severity === levelFilter)
+      }
+    }
     if (assetFilter) {
       // 选中 host → 展开其全部后代（service/url），挂在子树内的 finding 都算
       const subtree = new Set<string>([assetFilter])
@@ -140,11 +165,11 @@ function Findings({ pid, compact, showCanvas }: { pid: string; compact?: boolean
     }
     return [...filtered].sort((a, b) =>
       rank(a.severity) - rank(b.severity) || b.created_at.localeCompare(a.created_at))
-  }, [items, assets, statusFilter, assetFilter])
+  }, [items, assets, statusFilter, assetFilter, isCtf, levelFilter])
 
   const add = async () => {
     if (!title.trim()) return
-    await api.addFinding(pid, { vuln_class: vulnClass, title: title.trim(), status: "unverified" })
+    await api.addFinding(pid, { vuln_class: vulnClass || "clue", title: title.trim(), status: "unverified" })
     setTitle("")
     refresh()
   }
@@ -209,12 +234,30 @@ function Findings({ pid, compact, showCanvas }: { pid: string; compact?: boolean
         )}
       </div>
       <div className="flex items-center gap-0.5">
-        <Chip active={sevFilter === ""} onClick={() => setSevFilter("")}>全部</Chip>
-        {SEVERITY_ORDER.map((s) => (
-          <Chip key={s} active={sevFilter === s} onClick={() => setSevFilter(sevFilter === s ? "" : s)}>
-            <span className={cn("uppercase", SEVERITY_COLOR[s])}>{s}</span>
-          </Chip>
-        ))}
+        {isCtf ? (
+          <>
+            <Chip active={levelFilter === ""} onClick={() => setLevelFilter("")}>全部</Chip>
+            <Chip active={levelFilter === "critical"} onClick={() => setLevelFilter(levelFilter === "critical" ? "" : "critical")}>
+              <span className="text-[--status-error]">关键突破</span>
+            </Chip>
+            <Chip active={levelFilter === "high"} onClick={() => setLevelFilter(levelFilter === "high" ? "" : "high")}>
+              <span className="text-[--status-approval]">有效线索</span>
+            </Chip>
+            <Chip active={levelFilter === "bg"} onClick={() => setLevelFilter(levelFilter === "bg" ? "" : "bg")}>背景信息</Chip>
+            <Chip active={levelFilter === "dead"} onClick={() => setLevelFilter(levelFilter === "dead" ? "" : "dead")}>
+              死路 {items.filter((f) => f.status === "false-positive").length || ""}
+            </Chip>
+          </>
+        ) : (
+          <>
+            <Chip active={sevFilter === ""} onClick={() => setSevFilter("")}>全部</Chip>
+            {SEVERITY_ORDER.map((s) => (
+              <Chip key={s} active={sevFilter === s} onClick={() => setSevFilter(sevFilter === s ? "" : s)}>
+                <span className={cn("uppercase", SEVERITY_COLOR[s])}>{s}</span>
+              </Chip>
+            ))}
+          </>
+        )}
       </div>
       <div className="flex items-center gap-0.5">
         <Chip active={statusFilter === ""} onClick={() => setStatusFilter("")}>全部状态</Chip>
@@ -280,11 +323,14 @@ function Findings({ pid, compact, showCanvas }: { pid: string; compact?: boolean
               onClick={() => setDetail(f)}
             >
               <div className="flex items-center gap-2">
-                <span className={cn("text-[10px] font-medium uppercase", SEVERITY_COLOR[f.severity])}>
-                  {f.severity}
+                <span className={cn("text-[10px] font-medium", isCtf ? CTF_LEVEL[f.severity]?.cls : SEVERITY_COLOR[f.severity])}>
+                  {isCtf ? (CTF_LEVEL[f.severity]?.label ?? f.severity) : f.severity}
                 </span>
                 <span className="text-sm">{f.title}</span>
                 {f.status === "verified" && <Badge variant="outline" className="text-[10px]">verified</Badge>}
+                {f.status === "false-positive" && isCtf && (
+                  <Badge variant="outline" className="text-[10px] text-muted-foreground">死路</Badge>
+                )}
                 {f.poc_artifact_id && <Badge variant="outline" className="text-[10px]">POC</Badge>}
                 <span className="flex-1" />
                 <span className="font-mono text-[10px] text-muted-foreground">{f.author}</span>
@@ -299,7 +345,7 @@ function Findings({ pid, compact, showCanvas }: { pid: string; compact?: boolean
       </ScrollArea>
       {!compact && (
         <div className="flex gap-2 border-t p-2">
-          <Input className="w-28" value={vulnClass} onChange={(e) => setVulnClass(e.target.value)} placeholder="类别" />
+          <Input className="w-28" value={vulnClass} onChange={(e) => setVulnClass(e.target.value)} placeholder={isCtf ? "线索类别" : "类别"} />
           <Input className="flex-1" value={title} onChange={(e) => setTitle(e.target.value)}
                  placeholder="手动添加发现（human 共写，§6.5）" onKeyDown={(e) => e.key === "Enter" && add()} />
           <Button size="sm" onClick={add} disabled={!title.trim()}>添加</Button>
