@@ -7,6 +7,10 @@ config/providers.json
 __pycache__/
 *.pyc
 .pytest_cache/
+.venv/
+cyberstrike_pro.egg-info/
+# 反编译临时目录缺省名（调用方应显式指入项目 workspace，防逃逸，§7）
+.ghidra-tmp/
 
 # 运行时数据
 workspaces/
@@ -23,3 +27,12 @@ tools/installed/
 # 临时产物
 *.tmp
 *.log
+
+# 工具与编辑器产物 / 运行时治理状态（不入库，2026-09-21）
+.claudian/
+.obsidian/
+Cyber-pro/
+mcp-servers/.playwright-mcp/
+packs/.proposals/
+webui/webui/
+.history/
