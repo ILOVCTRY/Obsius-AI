@@ -10,6 +10,9 @@ dependencies = []
 dev = ["pytest>=8.0"]
 # API 层额外依赖（核心引擎保持零依赖；唯一 import fastapi 的地方是 core/api/）
 api = ["fastapi>=0.110", "uvicorn>=0.29", "httpx>=0.27", "python-multipart>=0.0.9"]
+# 浏览器能力（F6，DESIGN.md §7）：Playwright 托管 Chromium + httpx 重放/爆破客户端。
+# 未安装时 core/browser 全链 no-tool 降级（import 不炸、工具回填安装指引、端点 503）
+browser = ["playwright>=1.45", "httpx>=0.27"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
@@ -20,4 +23,4 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["core", "core.blackboard"]
+packages = ["core", "core.blackboard", "core.browser"]

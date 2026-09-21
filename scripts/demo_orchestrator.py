@@ -94,7 +94,7 @@ def main() -> None:
             packs_root="packs", track="ctf", capabilities=proj.capabilities,
             role=role,
             capability_prompt=inventory.to_prompt(),
-            config=AgentConfig(max_steps=10, task_types=r.get("task_types")),
+            config=AgentConfig(max_steps=10),
         )
 
     orch = Orchestrator(project_id=pid, bb=bb, llm=planner,

@@ -20,7 +20,7 @@ WORKSPACES = Path(__file__).resolve().parent.parent / "workspaces"
 
 def main() -> None:
     store = ProjectStore(WORKSPACES)
-    proj = store.create_project("端到端演示", "assessment", ["web"],
+    proj = store.create_project("端到端演示", "pentest", ["web"],
                                 config={"cross_target": "ask-orchestrator"})
     bb = proj.bb
     pid = proj.id
@@ -39,7 +39,7 @@ def main() -> None:
     agent = AgentSession(
         project_id=pid, bb=bb, gateway=gateway,
         llm=llm, planner_llm=planner,
-        track="assessment", capabilities=["web"], role="_generalist",
+        track="pentest", capabilities=["web"], role="_generalist",
         capability_prompt=inventory.to_prompt(),
         config=AgentConfig(max_steps=8),
     )
