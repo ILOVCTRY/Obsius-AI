@@ -1,0 +1,4 @@
+kind: capability
+name: social
+label: "社工"
+description: "红队社工演练（架构位，§6.9.1）：授权范围内的钓鱼模拟与凭据捕获演练；合规红线强制，默认禁用"

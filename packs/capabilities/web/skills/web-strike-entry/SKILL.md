@@ -9,8 +9,8 @@ task_types: exploit, privesc, lateral-movement
 # web-strike-entry —— 渗透入口：双模式判定 + 特征路由
 
 > 分层纪律：本技能只做**入口路由**。方法论在 src-strike 快照
-> （kb_open 前缀 `src-strike/知识库/`），弹药在
-> `src-strike/references/playbooks/`。**按需 kb_open 单篇，禁止通读。**
+> （kb_open 前缀 `playbooks/知识库/`），弹药在
+> `playbooks/`。**按需 kb_open 单篇，禁止通读。**
 
 ## 0. 双模式先判（必做第一动作）
 
@@ -22,19 +22,19 @@ task_types: exploit, privesc, lateral-movement
 ## 1. 目标特征 → 模块路由对照表
 
 进站先识别特征，按下表用 **`kb_open(module=…)`** 打开对应模块（module 均带
-`src-strike/` 快照前缀；不存在时服务端回可选清单，照清单改选，禁止猜名）。
+`playbooks/` 快照前缀；不存在时服务端回可选清单，照清单改选，禁止猜名）。
 
-| 目标特征（features） | 方法论（`src-strike/知识库/` 下） | 弹药（`src-strike/references/playbooks/` 下） |
+| 目标特征（features） | 方法论（`playbooks/知识库/` 下） | 弹药（`playbooks/` 下） |
 |---|---|---|
-| has_user_system（有注册/登录） | `src-strike/知识库/idor-test.md` + `authbypass-test.md` | `arbitrary-x-authz.md` |
-| has_search / has_filter | `src-strike/知识库/injection-test.md` | `sqli.md` |
-| has_upload（文件上传） | `src-strike/知识库/file-upload-test.md` | `file-upload/00-index.md` |
-| has_pay（支付/优惠券/积分） | `src-strike/知识库/logic-test.md` + `race-condition-test.md` | `logic-flaws/00-index.md` |
-| has_graphql | `src-strike/知识库/graphql-test.md` | `graphql.md` |
-| has_oauth / JWT / SAML | `src-strike/知识库/oauth-jwt-test.md` | `oauth-saml-jwt/00-index.md` |
-| has_websocket | `src-strike/知识库/websocket-test.md` | `api-rest/13-websocket.md` |
+| has_user_system（有注册/登录） | `web/webapp/idor/手册.md` + `web/webapp/authbypass/手册.md` | `arbitrary-x-authz.md` |
+| has_search / has_filter | `web/webapp/sqli/手册.md` | `sqli.md` |
+| has_upload（文件上传） | `web/webapp/file-upload/手册.md` | `file-upload/00-index.md` |
+| has_pay（支付/优惠券/积分） | `web/webapp/logic/手册.md` + `web/webapp/race-condition/手册.md` | `logic-flaws/00-index.md` |
+| has_graphql | `web/webapp/graphql/手册.md` | `graphql.md` |
+| has_oauth / JWT / SAML | `web/webapp/jwt/手册.md` | `oauth-saml-jwt/00-index.md` |
+| has_websocket | `web/webapp/websocket/手册.md` | `api-rest/13-websocket.md` |
 | returns_401/403 | 分清登录页 vs 业务 API；path/METHOD/头现场改 | — |
-| waf_detected | `src-strike/知识库/waf-bypass.md`（被拦再开，禁开场丢探针） | `src-strike/references/methodology/02-bypass-toolkit.md` |
+| waf_detected | `web/webapp/waf-bypass/手册.md`（被拦再开，禁开场丢探针） | `web/playbooks/methodology/02-bypass-toolkit.md` |
 
 **平台归属 → `meta.owner`**：登记/更新资产时按特征打标（`.edu.cn` 系 → `edusrc`；
 萤石 → `ysrc`；OPPO/realme/OnePlus → `osrc`；无归属不打）——命中的平台规则
@@ -56,7 +56,7 @@ task_types: exploit, privesc, lateral-movement
 
 - 发现 → findings（无证据 = unverified）；POC → artifacts（kind=poc）。
   跨资产指纹的洞可参考快照沉淀规范（kb_open
-  `src-strike/poc/README.md`），但**只读参考**——POC 一律落黑板 artifact，
+  `web/refs/poc/README.md`），但**只读参考**——POC 一律落黑板 artifact，
   不写进 kb/ 快照目录；
 - 越界/发现他人资产有价值线索 → 发现即上报协议（DESIGN.md §6.3），不私自跨目标。
 

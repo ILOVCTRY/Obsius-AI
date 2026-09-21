@@ -34,9 +34,10 @@ SKILL_BODY = (
 )
 
 
-def _build_packs(root: Path, *, two_sources: bool = False) -> Path:
+def _build_packs(root: Path) -> Path:
+    """M0 kb 全局单根：packs/kb/web/ctf-web/...（单域单源，kb_sources.json 已退役）。"""
     packs = root / "packs"
-    kb = packs / "capabilities" / "web" / "kb"
+    kb = packs / "kb" / "web"
     (kb / "ctf-web" / "sqli").mkdir(parents=True)
     (kb / "ctf-web" / "sqli" / "README.md").write_text(
         "# SQL 注入方法论\n\n原始英文快照风格内容。", encoding="utf-8")
@@ -46,29 +47,21 @@ def _build_packs(root: Path, *, two_sources: bool = False) -> Path:
     (kb / "ctf-web" / "sqli" / "notes.md").write_text(
         "完整路径 `ctf-web/sqli/auth.md`；相对链接见 [auth](./auth.md)。",
         encoding="utf-8")
-    sources = [{"id": "web-kb", "root": "kb", "recursive": True}]
-    if two_sources:
-        extra = packs / "capabilities" / "web" / "extra" / "other-snap"
-        extra.mkdir(parents=True)
-        (extra / "extra.md").write_text("# 第二源", encoding="utf-8")
-        sources.append({"id": "web-extra", "root": "extra", "recursive": True})
-    (packs / "capabilities" / "web" / "kb_sources.json").write_text(
-        json.dumps({"sources": sources}, ensure_ascii=False), encoding="utf-8")
     (packs / "capabilities" / "web" / "rules").mkdir(parents=True, exist_ok=True)
     (packs / "capabilities" / "web" / "rules" / "redlines.md").write_text(
         "# web 红线", encoding="utf-8")
     sk = packs / "capabilities" / "web" / "skills" / "web-skill"
     sk.mkdir(parents=True)
     (sk / "SKILL.md").write_text(SKILL_BODY, encoding="utf-8")
-    role_dir = packs / "tracks" / "assessment" / "roles"
+    role_dir = packs / "tracks" / "pentest" / "roles"
     role_dir.mkdir(parents=True)
     (role_dir / "_generalist.yaml").write_text(
         'name: _generalist\npersona: "通用测试员。"', encoding="utf-8")
     return packs
 
 
-def _client(tmp_path: Path, *, two_sources: bool = False, **app_kw):
-    packs = _build_packs(tmp_path, two_sources=two_sources)
+def _client(tmp_path: Path, **app_kw):
+    packs = _build_packs(tmp_path)
     app = create_app(workspace_root=str(tmp_path / "workspaces"),
                      packs_root=str(packs), tools_root=None,
                      providers_config=str(tmp_path / "providers.json"), **app_kw)
@@ -77,7 +70,7 @@ def _client(tmp_path: Path, *, two_sources: bool = False, **app_kw):
 
 def _project(c: TestClient, name: str = "测试项目") -> str:
     r = c.post("/api/projects",
-               json={"name": name, "track": "assessment", "capabilities": ["web"]})
+               json={"name": name, "track": "pentest", "capabilities": ["web"]})
     assert r.status_code == 201, r.text
     return r.json()["id"]
 
@@ -132,30 +125,20 @@ def test_kb_search_api(tmp_path):
 
 def test_search_kb_unit(tmp_path):
     packs = tmp_path / "packs"
-    kb = packs / "capabilities" / "web" / "kb"
+    kb = packs / "kb" / "web"  # M0 单源 packs/kb/web，恒递归
     (kb / "a").mkdir(parents=True)
     (kb / "a" / "x.md").write_text("Foo bar FOO", encoding="utf-8")
     (kb / "a" / ".history").mkdir()
     (kb / "a" / ".history" / "old.md").write_text("foo", encoding="utf-8")
     (kb / "b.md").write_text("foo foo foo", encoding="utf-8")
-    flat = packs / "capabilities" / "web" / "flat"
-    (flat / "inner").mkdir(parents=True)
-    (flat / "inner" / "nested.md").write_text("foo", encoding="utf-8")
-    (flat / "top.md").write_text("foo", encoding="utf-8")
-    (packs / "capabilities" / "web" / "kb_sources.json").write_text(json.dumps({
-        "sources": [{"id": "web-kb", "root": "kb", "recursive": True},
-                    {"id": "web-flat", "root": "flat", "recursive": False}],
-    }, ensure_ascii=False), encoding="utf-8")
 
     res = writing.search_kb(packs, "web", "FOO")
     by_path = {(r["source"], r["path"]): r for r in res}
-    # 大小写不敏感；.history 排除；平铺源不递归（inner/nested.md 不出现）
+    # 大小写不敏感；.history 排除
     assert ("web-kb", "b.md") in by_path and ("web-kb", "a/x.md") in by_path
-    assert ("web-flat", "top.md") in by_path
-    assert not any(p.endswith("old.md") or p.endswith("nested.md") for _, p in by_path)
+    assert not any(p.endswith("old.md") for _, p in by_path)
     assert by_path[("web-kb", "b.md")]["matches"] == 3
     assert by_path[("web-kb", "a/x.md")]["matches"] == 2
-    assert by_path[("web-flat", "top.md")]["matches"] == 1
     # 按命中次数降序
     assert [r["matches"] for r in res] == sorted(
         (r["matches"] for r in res), reverse=True)
@@ -163,6 +146,29 @@ def test_search_kb_unit(tmp_path):
     # limit 截断 + 空 q
     assert len(writing.search_kb(packs, "web", "foo", limit=2)) == 2
     assert writing.search_kb(packs, "web", "  ") == []
+
+
+def test_search_kb_multi_keyword(tmp_path):
+    """K3：空格分词 AND 语义；AND 零结果回退 OR；snippet 锚定首个命中词。"""
+    packs = tmp_path / "packs"
+    kb = packs / "kb" / "web"
+    (kb / "jwt").mkdir(parents=True)
+    (kb / "jwt" / "none-alg.md").write_text(
+        "JWT none 算法绕过签名校验", encoding="utf-8")
+    (kb / "jwt" / "weak-key.md").write_text(
+        "JWT 弱密钥可用 hashcat 爆破", encoding="utf-8")
+    (kb / "jwt" / "hashcat-only.md").write_text(
+        "hashcat 也能跑 zip 字典", encoding="utf-8")
+
+    # AND：jwt + hashcat 都命中的只有 weak-key.md
+    res = writing.search_kb(packs, "web", "jwt hashcat")
+    assert [r["path"] for r in res] == ["jwt/weak-key.md"]
+    # snippet 锚定正文中最早出现的命中词（JWT 在 hashcat 之前）
+    assert res[0]["snippet"].index("JWT") < res[0]["snippet"].index("hashcat")
+    # AND 零结果（none 与 zip 无共现文件）→ OR 回退：各收各的
+    res = writing.search_kb(packs, "web", "none zip")
+    assert {r["path"] for r in res} == {"jwt/none-alg.md", "jwt/hashcat-only.md"}
+    assert "jwt/weak-key.md" not in [r["path"] for r in res]
 
 
 def test_kb_create_chinese_path_and_conflicts(tmp_path):
@@ -175,12 +181,17 @@ def test_kb_create_chinese_path_and_conflicts(tmp_path):
     r = c.post("/api/capabilities/web/kb/file", json=body)
     assert r.status_code == 409
 
-    # 非法路径一律 422
-    for bad in ["../escape.md", "/abs/x.md", "ctf-web/x.txt",
+    # 非法路径一律 422（K5 白名单放开 .py/.txt/.json 后，.txt 改合法、.exe 仍拒）
+    for bad in ["../escape.md", "/abs/x.md", "ctf-web/x.exe",
                 "ctf-web/a:b.md", ".history/x.md", "", "ctf-web/x*.md"]:
         r = c.post("/api/capabilities/web/kb/file",
                    json={"path": bad, "content": "x"})
         assert r.status_code == 422, f"{bad} 应 422，实得 {r.status_code}"
+    # K5 弹药扩展名白名单：.py/.txt/.json 可建
+    for good in ["ctf-web/x.txt", "ctf-web/payloads/y.py", "ctf-web/payloads/z.json"]:
+        r = c.post("/api/capabilities/web/kb/file",
+                   json={"path": good, "content": "x"})
+        assert r.status_code == 201, f"{good} 应 201，实得 {r.status_code}"
     # 空内容 / 超 1 MiB
     r = c.post("/api/capabilities/web/kb/file",
                json={"path": "ctf-web/big.md", "content": "  "})
@@ -236,12 +247,12 @@ def test_kb_delete_blocked_by_refs_then_force(tmp_path):
                  params={"path": path, "force": True})
     assert r.status_code == 200
     assert c.get("/api/capabilities/web/kb/file", params={"path": path}).status_code == 404
-    trash = list((_packs / "capabilities/web/kb/.history/kb-trash").glob("*.bak"))
+    trash = list((_packs / "kb/web/.history/kb-trash").glob("*.bak"))
     assert len(trash) == 1
 
 
-def test_kb_rename_cascade_backups_and_cross_source(tmp_path):
-    packs, c = _client(tmp_path, two_sources=True)
+def test_kb_rename_cascade_and_backups(tmp_path):
+    packs, c = _client(tmp_path)
     old, new = "ctf-web/sqli/auth.md", "ctf-web/sqli/auth-v2.md"
     r = c.post("/api/capabilities/web/kb/rename", json={"path": old, "new_path": new})
     assert r.status_code == 200, r.text
@@ -253,19 +264,19 @@ def test_kb_rename_cascade_backups_and_cross_source(tmp_path):
     assert any(f.endswith("ctf-web/sqli/notes.md") for f in data["skipped_relative"])
 
     skill = (packs / "capabilities/web/skills/web-skill/SKILL.md").read_text(encoding="utf-8")
-    notes = (packs / "capabilities/web/kb/ctf-web/sqli/notes.md").read_text(encoding="utf-8")
+    notes = (packs / "kb/web/ctf-web/sqli/notes.md").read_text(encoding="utf-8")
     assert new in skill and old not in skill
     assert new in notes
     # 两类被改文件各自留备份
     assert list((packs / "capabilities/web/skills/web-skill/.history").glob("*_SKILL.md"))
-    assert list((packs / "capabilities/web/kb/.history/kb-backups").glob("*notes.md.bak"))
+    assert list((packs / "kb/web/.history/kb-backups").glob("*notes.md.bak"))
     # 新名文件在，旧名不在；refs 端点跟到新路径
-    assert (packs / "capabilities/web/kb/ctf-web/sqli/auth-v2.md").is_file()
-    assert not (packs / "capabilities/web/kb/ctf-web/sqli/auth.md").exists()
+    assert (packs / "kb/web/ctf-web/sqli/auth-v2.md").is_file()
+    assert not (packs / "kb/web/ctf-web/sqli/auth.md").exists()
     assert c.get("/api/capabilities/web/kb/refs",
                  params={"path": new}).json()["count"] >= 2
 
-    # 跨源改名 → 422
+    # 不存在的文件改名 → 422（M0 单域单源，跨源语义随 kb_sources 退役）
     r = c.post("/api/capabilities/web/kb/rename",
                json={"path": "other-snap/extra.md",
                      "new_path": "ctf-web/extra-moved.md"})
@@ -304,7 +315,7 @@ def test_proposal_lifecycle_all_kb_modes_and_skill_edit(tmp_path):
                   json={"decided_by": "skynet"}).status_code == 422
     assert c.post(f"/api/proposals/{pending_one['id']}/reject",
                   json={"decided_by": "human", "note": "不需要"}).status_code == 200
-    assert list((packs / "capabilities/web/kb/.history/kb-backups").glob("*README.md.bak"))
+    assert list((packs / "kb/web/.history/kb-backups").glob("*README.md.bak"))
 
     # 2) kb create：新经验写新 md
     r = c.post("/api/proposals", json={
@@ -315,7 +326,7 @@ def test_proposal_lifecycle_all_kb_modes_and_skill_edit(tmp_path):
     p_create = r.json()
     assert c.post(f"/api/proposals/{p_create['id']}/apply",
                   json={"decided_by": "human"}).status_code == 200
-    assert (packs / "capabilities/web/kb/ctf-web/案例/新经验.md").is_file()
+    assert (packs / "kb/web/ctf-web/案例/新经验.md").is_file()
 
     # 3) kb rename：应用时移动 + 引用联动
     r = c.post("/api/proposals", json={
@@ -330,7 +341,7 @@ def test_proposal_lifecycle_all_kb_modes_and_skill_edit(tmp_path):
     assert detail["live"]["refs"]  # rename 暴露引用面
     r = c.post(f"/api/proposals/{p_rename['id']}/apply", json={})
     assert r.status_code == 200
-    assert (packs / "capabilities/web/kb/ctf-web/sqli/auth-renamed.md").is_file()
+    assert (packs / "kb/web/ctf-web/sqli/auth-renamed.md").is_file()
     skill = (packs / "capabilities/web/skills/web-skill/SKILL.md").read_text(encoding="utf-8")
     assert "auth-renamed.md" in skill
 
@@ -342,7 +353,7 @@ def test_proposal_lifecycle_all_kb_modes_and_skill_edit(tmp_path):
     p_del = r.json()
     assert c.post(f"/api/proposals/{p_del['id']}/apply",
                   json={"decided_by": "demo-script(auto)"}).status_code == 200
-    assert not (packs / "capabilities/web/kb/ctf-web/sqli/notes.md").exists()
+    assert not (packs / "kb/web/ctf-web/sqli/notes.md").exists()
 
     # 5) skill edit：frontmatter name 必须一致；应用走技能备份
     new_skill = SKILL_BODY.replace("另见", "补充一段方法论后另见")
@@ -365,6 +376,62 @@ def test_proposal_lifecycle_all_kb_modes_and_skill_edit(tmp_path):
     assert c.get("/api/proposals", params={"status": "pending"}).json() == []
     assert len(c.get("/api/proposals", params={"status": "rejected"}).json()) == 1
     assert c.get("/api/proposals", params={"status": "bogus"}).status_code == 422
+
+
+def test_case_proposal_success_chain_sediment(tmp_path):
+    """K6 成功链沉淀（升级项 A）：case edit 补 成功案例.md 段、case create 落
+    payloads/ 弹药（.txt/.py/.json 白名单内）；rename/delete 拒收归人类；
+    校验/应用与 kb 同管道（存在性/内容校验一致）。"""
+    packs, c = _client(tmp_path)
+    pid = _project(c)
+    # 先建成功案例.md（edit 目标，与弹药共置测试包）
+    assert c.post("/api/capabilities/web/kb/file", json={
+        "path": "ctf-web/sqli/成功案例.md",
+        "content": "# 成功案例\n"}).status_code == 201
+
+    # 1) case edit：补「已验证路径」段
+    r = c.post("/api/proposals", json={
+        "target": {"kind": "case", "cap": "web",
+                   "path": "ctf-web/sqli/成功案例.md"},
+        "mode": "edit", "content": "# 成功案例\n\n## 已验证路径\n- payload X 三次复现\n",
+        "summary": "SQLi 成功链补段", "reason": "任务 t-9 verified", "project": pid})
+    assert r.status_code == 201, r.text
+    p_edit = r.json()
+    assert p_edit["status"] == "pending"
+    detail = c.get(f"/api/proposals/{p_edit['id']}").json()
+    assert "+## 已验证路径" in detail["live"]["diff"]
+    assert c.post(f"/api/proposals/{p_edit['id']}/apply",
+                  json={"decided_by": "human"}).status_code == 200
+    assert "payload X" in (packs / "kb/web/ctf-web/sqli/成功案例.md"
+                           ).read_text(encoding="utf-8")
+
+    # 2) case create：payloads/ 补弹药
+    r = c.post("/api/proposals", json={
+        "target": {"kind": "case", "cap": "web",
+                   "path": "ctf-web/sqli/payloads/sqli-bypass.txt"},
+        "mode": "create", "content": "' OR 1=1--\n",
+        "summary": "跑通弹药沉淀", "reason": "任务 t-9 打穿", "project": pid})
+    assert r.status_code == 201, r.text
+    p_ammo = r.json()
+    assert c.post(f"/api/proposals/{p_ammo['id']}/apply",
+                  json={"decided_by": "human"}).status_code == 200
+    assert (packs / "kb/web/ctf-web/sqli/payloads/sqli-bypass.txt"
+            ).is_file()
+
+    # 3) rename/delete 拒收（归人类）；edit 目标不存在拒收
+    assert c.post("/api/proposals", json={
+        "target": {"kind": "case", "cap": "web", "path": "ctf-web/sqli/成功案例.md",
+                   "new_path": "ctf-web/sqli/x.md"},
+        "mode": "rename", "summary": "x", "reason": "y", "project": pid
+    }).status_code == 422
+    assert c.post("/api/proposals", json={
+        "target": {"kind": "case", "cap": "web", "path": "ctf-web/sqli/成功案例.md"},
+        "mode": "delete", "summary": "x", "reason": "y", "project": pid
+    }).status_code == 422
+    assert c.post("/api/proposals", json={
+        "target": {"kind": "case", "cap": "web", "path": "ctf-web/sqli/missing.md"},
+        "mode": "edit", "content": "x", "summary": "x", "reason": "y",
+        "project": pid}).status_code == 422
 
 
 def test_proposal_illegal_rejected_without_landing(tmp_path):
@@ -441,12 +508,12 @@ def _make_session(tmp_path: Path):
     packs = _build_packs(tmp_path)
     db = tmp_path / "a.db"
     bb = Blackboard(str(db))
-    project = bb.create_project("提案项目", "assessment", ["web"])
+    project = bb.create_project("提案项目", "pentest", ["web"])
     gw = ExecutionGateway(bb=bb, backends={"host": NativeBackend()})
     tq = TaskQueue(bb)
     agent = AgentSession(
         project_id=project["id"], bb=bb, gateway=gw, llm=_FakeLLM(),
-        packs_root=packs, track="assessment", capabilities=["web"],
+        packs_root=packs, track="pentest", capabilities=["web"],
         capability_prompt="## 能力清单\n- host: 可用",
         config=AgentConfig(max_steps=5))
     return packs, bb, project, tq, agent
@@ -481,7 +548,7 @@ def test_agent_propose_tool_only_pending_and_cap(tmp_path):
     assert len(pending) == 3
     assert all(p["status"] == "pending" for p in pending)
     # 文件确实没被 Agent 直接改
-    assert not (packs / "capabilities/web/kb/ctf-web/agent-note-0.md").exists()
+    assert not (packs / "kb/web/ctf-web/agent-note-0.md").exists()
     # 审计事件
     events = bb.recent_events(project["id"])
     assert sum(1 for e in events if e["kind"] == "proposal.created") == 3
@@ -526,7 +593,7 @@ def test_skill_routed_event_hit_and_miss(tmp_path):
 def test_route_preview_breakdown_and_vocab(tmp_path):
     _packs, c = _client(tmp_path)
     r = c.post("/api/skills/route-preview", json={
-        "query": "SQL 注入 sqli", "track": "assessment", "capabilities": ["web"]})
+        "query": "SQL 注入 sqli", "track": "pentest", "capabilities": ["web"]})
     assert r.status_code == 200
     top = r.json()[0]
     assert top["name"] == "web-skill"

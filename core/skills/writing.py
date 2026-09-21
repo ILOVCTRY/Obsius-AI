@@ -30,6 +30,13 @@ _PACK_WRITE_LOCK = threading.RLock()
 
 # kb 文件硬上限（1 MiB：方法论文档足够，防误传大文件进 packs）
 KB_MAX_BYTES = 1 << 20
+# kb 允许的扩展名（K5 测试包分类制，DESIGN.md §4）：.md 手册参与 kbindex
+# 全量索引（hints）；.py/.txt/.json 弹药只进 kb_search 全文与 kb_open 可读，
+# 不进 hints（防脚本名噪声进提示行）。kb 内脚本只是文本，无执行面——
+# 执行仍只经 run() 网关 + 沙箱（红线不变）。
+KB_FILE_SUFFIXES = {".md", ".py", ".txt", ".json"}
+# kb 根下平台自维护文件（非知识内容，树/搜索里不出现）
+_KB_NON_CONTENT_FILES = {"route.json"}
 # Windows 非法文件名字符（/ 是分隔符不算）；其余中文/字母数字/-_.() 空格允许
 _KB_FORBIDDEN_CHARS = set('<>:"|?*\x00')
 _KB_NAME_RE = re.compile(r"^[\w][\w .()-]{0,127}$")
@@ -116,7 +123,8 @@ class KbTarget:
 
 
 def _validate_rel(rel_path: str) -> Path:
-    """kb 模块相对路径校验：非空、非绝对、无 ..、限 .md、中文多级目录允许、
+    """kb 模块相对路径校验：非空、非绝对、无 ..、限 KB_FILE_SUFFIXES
+    （K5：.md 手册 + .py/.txt/.json 弹药）、中文多级目录允许、
     拒绝 Windows 非法字符与空字节；不允许落到 .history（备份区永不接受编辑）。"""
     if not rel_path or not rel_path.strip():
         raise KbError("路径不能为空")
@@ -128,8 +136,8 @@ def _validate_rel(rel_path: str) -> Path:
     for seg in p.parts:
         if not seg or seg in {".", ""} or any(c in seg for c in _KB_FORBIDDEN_CHARS):
             raise KbError(f"非法路径段: {seg!r}")
-    if p.suffix.lower() != ".md":
-        raise KbError("知识库只接受 .md 文件")
+    if p.suffix.lower() not in KB_FILE_SUFFIXES:
+        raise KbError("知识库只接受 .md/.py/.txt/.json 文件")
     if not _KB_NAME_RE.fullmatch(p.stem):
         raise KbError(f"文件名不合法: {p.name!r}")
     return p
@@ -138,32 +146,41 @@ def _validate_rel(rel_path: str) -> Path:
 def _sources(packs_root: str | Path, cap: str) -> list[KbSource]:
     sources = load_kb_sources(packs_root, [cap])
     if not sources:
-        raise KbError(f"能力包 {cap} 未登记 kb_sources.json（无知识库源）")
+        raise KbError(f"能力域 {cap} 无知识库（packs/kb/{cap}/ 不存在）")
     return sources
 
 
 def resolve_kb(packs_root: str | Path, cap: str, rel_path: str) -> KbTarget:
-    """把 (能力包, 源内相对模块路径) 解析为落盘目标。
+    """把 (能力域, 模块路径) 解析为落盘目标（expert-pool M0）。
 
-    已存在文件按落点归属源；新文件默认落第一个源（现网均为单源 root=kb）。
-    resolve+commonpath 双保险防穿越。"""
+    module 支持两形态，存在性消歧、全局形态优先：
+    - 全局 ``<域>/<快照>/<路径>``（首段==cap，剥域后按源内相对解析）——kb_open 主形态；
+    - 域内相对 ``<快照>/<路径>``（首段≠cap 或单段）——向后兼容旧引用。
+    已存在文件按落点归属源；新文件默认落第一个源（全局形态剥域后落盘，
+    KbTarget.rel 恒为源内相对）。resolve+parents 双保险防穿越。"""
     rel = _validate_rel(rel_path)
     root = Path(packs_root)
     sources = _sources(root, cap)
-    # 已存在文件按真实落点归属源（多源同名消歧靠存在性，不靠猜）
-    for src in sources:
-        candidate = (src.root / rel).resolve()
-        if candidate.is_file() and src.root in candidate.parents:
-            return KbTarget(cap=cap, source=src, rel=rel, path=candidate)
-    # 新文件默认落登记的第一个源（现网均单源 root=kb）
+    # 全局形态（首段==域）剥域为源内相对；与原样形态都按存在性归属
+    candidates: list[Path] = []
+    if len(rel.parts) > 1 and rel.parts[0] == cap:
+        candidates.append(Path(*rel.parts[1:]))
+    candidates.append(rel)
+    for cand in candidates:
+        for src in sources:
+            resolved = (src.root / cand).resolve()
+            if resolved.is_file() and src.root in resolved.parents:
+                return KbTarget(cap=cap, source=src, rel=cand, path=resolved)
+    # 新文件默认落登记的第一个源（现网均为单源 root=kb/<域>）
     chosen = sources[0]
-    resolved = (chosen.root / rel).resolve()
+    chosen_rel = candidates[0]
+    resolved = (chosen.root / chosen_rel).resolve()
     try:
         if resolved != chosen.root and chosen.root not in resolved.parents:
             raise KbError("路径越出知识库根")
     except OSError as e:
         raise KbError(f"非法路径: {e}") from e
-    return KbTarget(cap=cap, source=chosen, rel=rel, path=resolved)
+    return KbTarget(cap=cap, source=chosen, rel=chosen_rel, path=resolved)
 
 
 def _validate_content(content: str) -> str:
@@ -178,21 +195,47 @@ def _validate_content(content: str) -> str:
 
 # ---------- kb 列举/读 ----------
 
+def _iter_kb_files(src: KbSource):
+    """遍历一个 kb 源的全部内容文件（K5：.md/.py/.txt/.json，排除 .history 与
+    route.json 等平台自维护文件）。"""
+    if not src.root.is_dir():
+        return
+    iterator = src.root.rglob("*") if src.recursive else src.root.glob("*")
+    for f in sorted(iterator):
+        if not f.is_file():
+            continue
+        rel = f.relative_to(src.root)
+        if ".history" in rel.parts:
+            continue
+        if f.suffix.lower() not in KB_FILE_SUFFIXES:
+            continue
+        if f.name in _KB_NON_CONTENT_FILES and f.parent == src.root:
+            continue
+        yield f
+
+
 def list_kb(packs_root: str | Path, cap: str) -> list[dict]:
-    """列某能力包知识库：每个源一棵树（只列 .md，排除 .history），按 posix 相对路径排序。"""
+    """列某能力包知识库：每个源一棵树（K5：.md/.py/.txt/.json，排除 .history），
+    按 posix 相对路径排序。
+
+    每文件带 title（kbindex 同口径：frontmatter title > 第一个 # H1 > 文件名 stem），
+    供前端树行显中文标题——kb 树重做后文件名不再含编号语义（DESIGN.md §4 F15）。
+    """
+    from core.skills.kbindex import _extract_title  # kbindex 不反向依赖 writing，就地导入防环
+
+    head_bytes = 2048  # title/H1 都在文件头部，读首部即可（kbindex 段落索引才需全文）
+
     out = []
     for src in _sources(Path(packs_root), cap):
         files: list[dict] = []
-        if src.root.is_dir():
-            iterator = src.root.rglob("*.md") if src.recursive else src.root.glob("*.md")
-            for f in sorted(iterator):
-                if ".history" in f.relative_to(src.root).parts:
-                    continue
-                st = f.stat()
-                files.append({"path": f.relative_to(src.root).as_posix(),
-                              "size": st.st_size,
-                              "mtime": time.strftime("%Y-%m-%dT%H:%M:%SZ",
-                                                     time.gmtime(st.st_mtime))})
+        for f in _iter_kb_files(src):
+            st = f.stat()
+            head = f.open("rb").read(head_bytes).decode("utf-8", errors="replace")
+            files.append({"path": f.relative_to(src.root).as_posix(),
+                          "size": st.st_size,
+                          "title": _extract_title(head, f.stem),
+                          "mtime": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                                 time.gmtime(st.st_mtime))})
         out.append({"id": src.id, "recursive": src.recursive,
                     "root": src.root.name, "files": files})
     return out
@@ -206,37 +249,71 @@ _KB_SEARCH_COUNT_CAP = 20
 _KB_SNIPPET_CHARS = 60
 
 
-def search_kb(packs_root: str | Path, cap: str, q: str, limit: int = 50) -> list[dict]:
-    """kb 正文搜索（只读，与 list_kb 同一源遍历口径）。
-
-    大小写不敏感 substring；kb 文件量级为数百篇 × ≤1 MiB，全量遍历即可，不建索引。
-    每命中文件回 {path, source, matches, snippet}；按命中次数降序、同分按路径，cap limit。
-    空 q 返回空列表（交由调用方决定是否提示）。"""
-    needle = (q or "").strip().lower()
-    if not needle:
-        return []
+def _kb_scan(packs_root: str | Path, cap: str, needles: list[str],
+             require_all: bool) -> list[dict]:
+    """单遍 kb 源树扫描：require_all=True 为 AND（各词都命中才算），
+    False 为 OR（任一词命中即收）。snippet 锚定最先出现的命中词。"""
     out: list[dict] = []
     for src in _sources(Path(packs_root), cap):
-        if not src.root.is_dir():
-            continue
-        iterator = src.root.rglob("*.md") if src.recursive else src.root.glob("*.md")
-        for f in sorted(iterator):
-            if ".history" in f.relative_to(src.root).parts:
-                continue
+        for f in _iter_kb_files(src):
             try:
                 text = f.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
                 continue
-            hits = text.lower().count(needle)
-            if not hits:
+            low = text.lower()
+            counts = [low.count(n) for n in needles]
+            if require_all and not all(counts):
                 continue
-            pos = text.lower().find(needle)
+            if not any(counts):
+                continue
+            # 锚点=正文中最先出现的命中词（snippet 从它展开）
+            firsts = [(low.find(n), i) for i, n in enumerate(needles) if counts[i]]
+            pos, ai = min(firsts)
+            anchor = needles[ai]
             start = max(0, pos - _KB_SNIPPET_CHARS)
-            end = min(len(text), pos + len(needle) + _KB_SNIPPET_CHARS)
+            end = min(len(text), pos + len(anchor) + _KB_SNIPPET_CHARS)
             out.append({"path": f.relative_to(src.root).as_posix(),
                         "source": src.id,
-                        "matches": min(hits, _KB_SEARCH_COUNT_CAP),
+                        "matches": min(sum(counts), _KB_SEARCH_COUNT_CAP),
                         "snippet": text[start:end].replace("\n", " ").strip()})
+    return out
+
+
+def _facets_of(packs_root: Path, cap: str, module: str) -> set[str]:
+    """读单文件的 frontmatter 分面标签（phase/vuln_class，K5 升级项 C），
+    归一成小写集合；无 frontmatter/读盘失败返空集。"""
+    from core.skills.kbindex import parse_facets  # 就地导入防环
+    try:
+        target = resolve_kb(packs_root, cap, module)
+        if not target.path.is_file():
+            return set()
+        head = target.path.open("rb").read(2048).decode("utf-8", errors="replace")
+        return parse_facets(head)
+    except (KbError, OSError):
+        return set()
+
+
+def search_kb(packs_root: str | Path, cap: str, q: str, limit: int = 50,
+              tag: str | None = None) -> list[dict]:
+    """kb 正文搜索（只读，与 list_kb 同一源遍历口径）。
+
+    大小写不敏感 substring；kb 文件量级为数百篇 × ≤1 MiB，全量遍历即可，不建索引。
+    K3 多关键词：空格分词后 AND 语义（各词都命中才算），零结果回退 OR
+    （任一词命中，按总命中数排）——「jwt none 验证」类组合查询先精确后放宽。
+    K5 分面过滤：tag 非空时只留 frontmatter phase/vuln_class 命中该标签的文件
+    （正交于目录单轴的跨轴检索，Anthropic-Cybersecurity-Skills 模式）。
+    每命中文件回 {path, source, matches, snippet}；按命中次数降序、同分按路径，
+    cap limit。空 q 返回空列表（交由调用方决定是否提示）。"""
+    needles = [t for t in (q or "").strip().lower().split() if t]
+    if not needles:
+        return []
+    out = _kb_scan(packs_root, cap, needles, require_all=True)
+    if not out and len(needles) > 1:
+        out = _kb_scan(packs_root, cap, needles, require_all=False)
+    if tag and tag.strip():
+        t = tag.strip().lower()
+        root = Path(packs_root)
+        out = [r for r in out if t in _facets_of(root, cap, r["path"])]
     out.sort(key=lambda r: (-r["matches"], r["path"]))
     return out[:max(1, limit)]
 

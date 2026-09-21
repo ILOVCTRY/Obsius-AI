@@ -12,10 +12,16 @@ CAPABILITIES_DIR = "capabilities"
 TRACKS_DIR = "tracks"
 
 # 旧平铺领域包 → (track, capabilities) 读兼容映射（§4.5.5）
+# R1（2026-09-17）：assessment 轨分解为 pentest/redteam，本表目标轨同步更新
 LEGACY_DOMAIN_MAP: dict[str, tuple[str, list[str]]] = {
-    "pentest": ("assessment", ["web"]),
+    "pentest": ("pentest", ["web"]),
     "ctf": ("ctf", ["binary"]),
     "reverse": ("research", ["binary"]),
+}
+
+# 旧 track 值读兼容映射（R1：assessment 键退役 → pentest，盘上 project.json 不改）
+LEGACY_TRACK_MAP: dict[str, str] = {
+    "assessment": "pentest",
 }
 
 # 内置兜底任务类型（任何轨都合法，默认 passive）
@@ -25,17 +31,22 @@ GENERIC_TASK_TYPE = "generic"
 def project_binding(meta: dict) -> tuple[str, list[str]]:
     """从 project.json meta 解析 (track, capabilities)。
 
-    新字段优先；只有旧 domain 时走映射；未知 domain 轨名沿用、能力包为空
-    （调用方负责提示/兜底）。"""
+    新字段优先；只有旧 domain 时走映射；track 值 "assessment" 经
+    LEGACY_TRACK_MAP 映射为 pentest（盘上不改，读兼容）；未知 domain 轨名
+    沿用、能力包为空（调用方负责提示/兜底）。"""
     track = meta.get("track")
     caps = meta.get("capabilities")
     if track and caps is not None:
-        return str(track), list(caps)
+        t = str(track)
+        return LEGACY_TRACK_MAP.get(t, t), list(caps)
+    if track:
+        t = str(track)
+        return LEGACY_TRACK_MAP.get(t, t), []
     domain = meta.get("domain")
     if domain in LEGACY_DOMAIN_MAP:
         t, cs = LEGACY_DOMAIN_MAP[domain]
         return t, list(cs)
-    return str(domain or "ctf"), []
+    return LEGACY_TRACK_MAP.get(str(domain or "ctf"), str(domain or "ctf")), []
 
 
 def capability_dir(packs_root: str | Path, cap: str) -> Path:

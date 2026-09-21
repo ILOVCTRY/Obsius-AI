@@ -5,6 +5,7 @@
 """
 
 import json
+import shutil
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -12,8 +13,9 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from core.agent import AgentConfig, AgentSession
-from core.agent.loop import _LeaseHeartbeat
+from core.agent.loop import CHAT_TOOLS, _LeaseHeartbeat, sanitize_snapshot_tail
 from core.blackboard import Blackboard, TaskQueue
+from core.llm import LLMError
 from core.llm.anthropic_compat import AnthropicCompatProvider
 from core.runtime import ExecutionGateway, NativeBackend
 
@@ -28,9 +30,26 @@ class ScriptedLLM(AnthropicCompatProvider):
         self.script = list(script)
         self.calls: list[dict] = []
 
-    def chat(self, messages, *, system=None, tools=None, max_tokens=4096, temperature=None):
-        self.calls.append({"messages": json.loads(json.dumps(messages)), "system": system})
+    def chat(self, messages, *, system=None, tools=None, max_tokens=16384, temperature=None,
+             on_thinking=None, on_text=None, should_cancel=None):
+        self.calls.append({"messages": json.loads(json.dumps(messages)), "system": system,
+                           "stream": on_thinking is not None,
+                           "stream_text": on_text is not None})
         item = self.script.pop(0)
+        if isinstance(item, Exception):  # 剧本可放异常实例（截断重试测试用）
+            raise item
+        # 思考/回复流式回放：deltas 逐段回调，每段后停一拍让主线程轮询把增量落成事件
+        if item.get("deltas") and on_thinking is not None:
+            for d in item["deltas"]:
+                on_thinking(d)
+                time.sleep(0.5)
+            if should_cancel is not None and should_cancel():
+                from core.llm import LLMError
+                raise LLMError("已中断")
+        if item.get("text_deltas") and on_text is not None:
+            for d in item["text_deltas"]:
+                on_text(d)
+                time.sleep(0.5)
         content: list[dict] = []
         if "thinking" in item:
             content.append({"type": "thinking", "thinking": item["thinking"]})
@@ -59,7 +78,7 @@ class FakeDockerBackend:
 @pytest.fixture()
 def env(tmp_path):
     bb = Blackboard(str(tmp_path / "a.db"))
-    project = bb.create_project("测试项目", "assessment", ["web"])
+    project = bb.create_project("测试项目", "pentest", ["web"])
     gw = ExecutionGateway(bb=bb, backends={"host": NativeBackend(), "sandbox": FakeDockerBackend()})
     tq = TaskQueue(bb)
     yield bb, project, gw, tq, tmp_path
@@ -67,30 +86,31 @@ def env(tmp_path):
 
 
 def make_agent(env, llm, planner=None, config=None, role="_generalist", artifacts_dir=None,
-               capabilities=("web",)):
+               capabilities=("web",), enable_sediment=False):
     bb, project, gw, tq, tmp_path = env
     packs = tmp_path / "packs"
     # 轨级演示技能（pack_set = capabilities ∪ {track} 内可见）
-    (packs / "tracks" / "assessment" / "skills" / "demo").mkdir(parents=True, exist_ok=True)
-    (packs / "tracks" / "assessment" / "skills" / "demo" / "SKILL.md").write_text(
+    (packs / "tracks" / "pentest" / "skills" / "demo").mkdir(parents=True, exist_ok=True)
+    (packs / "tracks" / "pentest" / "skills" / "demo" / "SKILL.md").write_text(
         "---\nname: demo\ndescription: 演示技能\nkeywords: 测试\n---\n按步骤执行。",
         encoding="utf-8")
-    roles = packs / "tracks" / "assessment" / "roles"
+    roles = packs / "tracks" / "pentest" / "roles"
     roles.mkdir(parents=True, exist_ok=True)
     (roles / "_generalist.yaml").write_text(
         'name: _generalist\npersona: "通用测试员。"\n', encoding="utf-8")
     return AgentSession(project_id=project["id"], bb=bb, gateway=gw, llm=llm,
-                        planner_llm=planner, packs_root=packs, track="assessment",
+                        planner_llm=planner, packs_root=packs, track="pentest",
                         capabilities=list(capabilities),
                         role=role, capability_prompt="## 能力清单\n- Docker: 可用",
                         config=config or AgentConfig(max_steps=10),
-                        artifacts_dir=artifacts_dir)
+                        artifacts_dir=artifacts_dir,
+                        enable_sediment=enable_sediment)
 
 
 def write_role(env, name, body):
     """测试夹具里写一个轨角色 yaml。"""
     _, _, _, _, tmp_path = env
-    f = tmp_path / "packs" / "tracks" / "assessment" / "roles" / f"{name}.yaml"
+    f = tmp_path / "packs" / "tracks" / "pentest" / "roles" / f"{name}.yaml"
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text(body, encoding="utf-8")
 
@@ -194,6 +214,33 @@ def test_advisor_invoked_when_stuck(env):
     assert injected
 
 
+def test_advisor_intervention_event_and_session_scope(env):
+    """顾问可观测（2026-09-20）：①发言落 `advisor.intervention` 事件（此前只进
+    messages，直播间只见 token 行不知顾问说了什么）；②顾问视野收窄到本会话事件
+    （此前全项目 limit=30，多窗时顾问满眼别人的上下文，执行者正确地当噪声拒掉）。"""
+    bb, project, gw, tq, _ = env
+    planner = ScriptedLLM([{"text": "建议：换一个未尝试的攻击面。"}])
+    llm = ScriptedLLM([])
+    agent = make_agent(env, llm, planner=planner, config=AgentConfig(max_steps=5))
+    pid = project["id"]
+    # 本会话与「别人会话」各留一条带标记的事件
+    mine, other = agent.session["id"], "sess-someone-else"
+    bb.append_event(pid, "tool.call", {"name": "run_cmd", "cmd": "MINE_MARKER"},
+                    session_id=mine)
+    bb.append_event(pid, "tool.call", {"name": "run_cmd", "cmd": "OTHER_MARKER"},
+                    session_id=other)
+
+    out = agent._advisor_prompt([], "目标")
+    assert out.startswith("[策略顾问]") and "换一个未尝试的攻击面" in out
+    # ① 事件落流：正文可见（直播间不再只有 token 行）
+    ev = [e for e in bb.recent_events(pid) if e["kind"] == "advisor.intervention"]
+    assert len(ev) == 1 and ev[-1]["payload"]["text"] == "建议：换一个未尝试的攻击面。"
+    assert ev[-1]["session_id"] == mine
+    # ② 视野收窄：digest 只含本会话事件
+    seen = json.dumps(planner.calls[-1]["messages"], ensure_ascii=False)
+    assert "MINE_MARKER" in seen and "OTHER_MARKER" not in seen
+
+
 # ---------- 上下文裁剪 ----------
 
 def test_context_trimming(env):
@@ -202,26 +249,113 @@ def test_context_trimming(env):
     class BigHostBackend:
         name = "host"
 
-        def execute(self, cmd, timeout=120.0, cwd=None, env=None):
+        def execute(self, cmd, timeout=120.0, cwd=None, env=None, abort_event=None):
             return type("O", (), {"exit_code": 0, "stdout": "A" * 5000,
-                                  "stderr": "", "timed_out": False, "meta": {}})()
+                                  "stderr": "", "timed_out": False,
+                                  "interrupted": False, "meta": {}})()
 
     gw.backends["host"] = BigHostBackend()
+    # 剧本给足余量（run×40 + finish）：G3 摘要调用也按序消费剧本（test_context_
+    # summarization 的既定契约），触发次数随结果长度/阈值动态浮动；循环由
+    # max_steps 收尾。
     llm = ScriptedLLM([
         {"tool_use": [ScriptedLLM.tool_call(f"t{i}", "run_cmd",
                                             {"cmd": f"cmd{i}", "runtime": "host",
                                              "threat_class": "trusted"})]}
-        for i in range(12)
+        for i in range(40)
     ] + [{"tool_use": [ScriptedLLM.tool_call("tz", "finish", {"summary": "ok"})]}])
     cfg = AgentConfig(max_steps=20, context_char_budget=10_000)
     agent = make_agent(env, llm, config=cfg)
     agent.run_task("裁剪测试")
-    # 网关 brief() 已截到 2000 字符/条，12 条 ≈ 25k > 10k 预算 → 旧结果应被截断
-    last = llm.calls[-1]["messages"]
-    truncated = [b for m in last if isinstance(m.get("content"), list)
-                 for b in m["content"]
-                 if b.get("type") == "tool_result" and "[已截断]" in b.get("content", "")]
+    # 网关 brief() 已截到 2000 字符/条，总历史远超 10k 预算 → _trim 必然把某次
+    # 调用里的旧结果替换成占位（后续若被 G3 摘要整体替换也属正常压缩路径）
+    truncated = [c for c in llm.calls
+                 if "[已截断]" in json.dumps(c["messages"], ensure_ascii=False)]
     assert truncated
+
+
+def test_context_summarization(env):
+    """G3 结构化摘要压缩：过 context_summary_chars 阈值 → 旧历史经 LLM 压成
+    一段摘要替换（近 8 条逐字保留），llm.compact 事件落流；机械 _trim 不触发。"""
+    bb, project, gw, tq, _ = env
+
+    class BigHostBackend:
+        name = "host"
+
+        def execute(self, cmd, timeout=120.0, cwd=None, env=None, abort_event=None):
+            return type("O", (), {"exit_code": 0, "stdout": "B" * 20_000,
+                                  "stderr": "", "timed_out": False,
+                                  "interrupted": False, "meta": {}})()
+
+    gw.backends["host"] = BigHostBackend()
+    llm = ScriptedLLM([
+        *[{"tool_use": [ScriptedLLM.tool_call(f"t{i}", "run_cmd",
+                                              {"cmd": f"cmd{i}", "runtime": "host",
+                                               "threat_class": "trusted"})]}
+          for i in range(1, 5)],
+        # 第 5 项被摘要压缩调用消费（ScriptedLLM 按调用顺序出剧本）
+        {"text": "## 1. 任务目标与用户意图\n用户要测；已跑 cmd1..cmd4。"},
+        {"tool_use": [ScriptedLLM.tool_call("tz", "finish", {"summary": "ok"})]},
+    ])
+    cfg = AgentConfig(max_steps=20, context_summary_chars=1_500,
+                      context_char_budget=1_000_000)  # 机械 _trim 不触发
+    agent = make_agent(env, llm, config=cfg)
+    agent.run_task("摘要压缩测试")
+    # 4 次任务 chat + 1 次摘要 chat + 1 次 finish chat
+    assert len(llm.calls) == 6
+    summ = [c for c in llm.calls
+            if "请把以下 Agent 执行历史" in json.dumps(c["messages"], ensure_ascii=False)]
+    assert len(summ) == 1
+    hist = json.dumps(summ[0]["messages"], ensure_ascii=False)
+    assert "[工具结果]" in hist and "cmd1" in hist          # 旧历史进摘要输入
+    # 最后一次任务调用：开头是历史摘要 + 助手确认
+    msgs = llm.calls[-1]["messages"]
+    assert "历史摘要" in json.dumps(msgs[0], ensure_ascii=False)
+    assert msgs[1]["role"] == "assistant"
+    # 近端超长工具结果被截断兜底（压后总量仍超阈值时）——保证一次压回触发线以下，
+    # 否则下一步立即再压成死循环（实测：保留段大 tool_result 压不下去，5 分钟连压 4 次）
+    assert "[已截断]" in json.dumps(msgs, ensure_ascii=False)
+    total_after = sum(len(json.dumps(m, ensure_ascii=False)) for m in msgs)
+    # 压缩后接近触发线（结构性内容——摘要文本+tool_use 块——约 1.8k 不可再压；
+    # 生产阈值 60k 下该下限可忽略，两道截断后必然回到线下）
+    assert total_after < 2_000
+    evs = [e for e in bb.recent_events(project["id"]) if e["kind"] == "llm.compact"]
+    assert len(evs) == 1
+    assert evs[0]["payload"]["summarized"] >= 3
+    assert evs[0]["payload"]["chars_after"] < evs[0]["payload"]["chars_before"]
+
+
+def test_context_summarization_keeps_small_recent_verbatim(env):
+    """压后总量已在阈值内 → 近段工具结果逐字保留（不引入截断标记）。"""
+    bb, project, gw, tq, _ = env
+    llm = ScriptedLLM([
+        *[{"tool_use": [ScriptedLLM.tool_call(f"t{i}", "run_cmd",
+                                              {"cmd": f"cmd{i}", "runtime": "host",
+                                               "threat_class": "trusted"})]}
+          for i in range(1, 5)],
+        {"text": "## 1. 任务目标与用户意图\n用户要测；已跑 cmd1..cmd4。"},
+        {"tool_use": [ScriptedLLM.tool_call("tz", "finish", {"summary": "ok"})]},
+    ])
+    cfg = AgentConfig(max_steps=20, context_summary_chars=120_000,
+                      context_char_budget=1_000_000)
+    agent = make_agent(env, llm, config=cfg)
+    agent.run_task("小结果保留测试")
+    msgs = llm.calls[-1]["messages"]
+    assert "[已截断]" not in json.dumps(msgs, ensure_ascii=False)
+
+
+def test_context_summarization_skips_small_history(env):
+    """G3 边界：历史没超过阈值 / 消息太少 → 不调用摘要 LLM，直接跳过。"""
+    agent = make_agent(env, ScriptedLLM([{"text": "不该被消费"}]))
+    assert agent._maybe_summarize([{"role": "user", "content": "hi"}]) is False
+    agent2 = make_agent(env, ScriptedLLM([]),
+                        config=AgentConfig(max_steps=5, context_summary_chars=3_000))
+    # 消息数 ≤ keep_recent+2 → 不触发
+    small = [{"role": "user", "content": "x" * 5000},
+             {"role": "assistant", "content": "y"},
+             {"role": "user", "content": "z"}]
+    assert agent2._maybe_summarize(small) is False
+    assert len(agent2.llm.script) == 0  # 剧本未被消费
 
 
 # ---------- 思考事件（DESIGN.md §12：llm.thinking 折叠摘要 + 展开全文） ----------
@@ -249,6 +383,137 @@ def test_no_thinking_no_event(env):
     agent = make_agent(env, llm)
     agent.run_task("测一下")
     assert not any(e["kind"] == "llm.thinking" for e in bb.recent_events(project["id"]))
+
+
+# ---------- 思考流式（2026-09-19：llm.thinking.delta 增量 → 终稿清剪） ----------
+
+def test_thinking_stream_deltas_then_final_prunes(env):
+    """流式思考：增量事件文本递增（累计全文），终稿带 stream_id，且终稿落库后
+    delta 行被清剪——审计只留终稿一条（delta 经 bus 捕获，直播窗口内可见）。"""
+    bb, project, gw, tq, _ = env
+    llm = ScriptedLLM([
+        {"thinking": "终稿思考内容。", "deltas": ["先" + "A" * 130, "后" + "B" * 130],
+         "tool_use": [ScriptedLLM.tool_call("t1", "finish", {"summary": "完"})]},
+    ])
+    agent = make_agent(env, llm)
+    seen: list[dict] = []
+    unsub = bb.bus.subscribe(seen.append)
+    try:
+        agent.run_task("测一下")
+    finally:
+        unsub()
+    deltas = [e for e in seen if e["kind"] == "llm.thinking.delta"]
+    assert len(deltas) == 2, "两拍增量应各落一条 delta 事件"
+    # 累计全文自愈：每条 delta payload.thinking = 此前所有片段拼接
+    assert deltas[0]["payload"]["thinking"] == "先" + "A" * 130
+    assert deltas[-1]["payload"]["thinking"] == "先" + "A" * 130 + "后" + "B" * 130
+    assert deltas[-1]["payload"]["seq"] > deltas[0]["payload"]["seq"]
+    assert len({d["payload"]["stream_id"] for d in deltas}) == 1
+    finals = [e for e in seen if e["kind"] == "llm.thinking"]
+    assert len(finals) == 1
+    assert finals[0]["payload"]["thinking"] == "终稿思考内容。"
+    assert finals[0]["payload"]["stream_id"] == deltas[0]["payload"]["stream_id"]
+    # 终稿落库后 delta 行被清剪（recent_events 直查 DB）
+    assert not [e for e in bb.recent_events(project["id"])
+                if e["kind"] == "llm.thinking.delta"]
+
+
+def test_thinking_stream_no_deltas_no_delta_events(env):
+    """非流式路径（模型不吐 thinking / llm 未声明 stream_capable）不落 delta 行。"""
+    bb, project, gw, tq, _ = env
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("t1", "finish", {"summary": "完"})]},
+    ])
+    agent = make_agent(env, llm)
+    agent.run_task("测一下")
+    evs = bb.recent_events(project["id"])
+    assert not any(e["kind"] == "llm.thinking.delta" for e in evs)
+
+
+# ---------- 工具参数流截断整轮重试（2026-09-20 事故修复） ----------
+
+def test_truncated_stream_retries_whole_turn(env):
+    """LLMError.truncated（工具参数流截断）→ 整轮重试：第一次截断、第二次成功，
+    任务正常完成且重发消息与首轮一致（同一对话现场重建）。"""
+    bb, project, gw, tq, _ = env
+    llm = ScriptedLLM([
+        LLMError("工具参数流截断（stop_reason=max_tokens，已收 7 字符）",
+                 truncated=True),
+        {"tool_use": [ScriptedLLM.tool_call("t1", "finish", {"summary": "完"})]},
+    ])
+    agent = make_agent(env, llm)
+    assert agent.run_task("测截断重试") == "完"
+    assert len(llm.calls) == 2
+    assert llm.calls[0]["messages"] == llm.calls[1]["messages"]
+
+
+def test_truncated_stream_retries_exhausted_fails_task(env):
+    """连续截断超上限（2 次）→ 异常穿出走 worker 异常退出兜底（已认领任务 fail），
+    共 3 次调用。"""
+    bb, project, gw, tq, _ = env
+    llm = ScriptedLLM([LLMError("截断", truncated=True)] * 3)
+    agent = make_agent(env, llm)
+    tid = tq.publish(project["id"], "截断耗尽任务", created_by="human")
+    with pytest.raises(LLMError, match="截断"):
+        agent.run_task("截断耗尽任务", task_id=tid)
+    assert len(llm.calls) == 3
+    assert any(e["kind"] == "task.failed" for e in bb.recent_events(project["id"]))
+
+
+def test_truncated_stream_final_retry_falls_back_to_non_stream(env):
+    """连续截断：前两轮重试保持流式，最后一轮降级非流式（不带 on_thinking——
+    网关 SSE 连续断流时整包响应不受影响）。非流式轮成功即任务正常完成。"""
+    bb, project, gw, tq, _ = env
+    llm = ScriptedLLM([
+        LLMError("工具参数流截断（stop_reason=tool_use，已收 80 字符）",
+                 truncated=True),
+        LLMError("工具参数流截断（stop_reason=tool_use，已收 80 字符）",
+                 truncated=True),
+        {"tool_use": [ScriptedLLM.tool_call("t1", "finish", {"summary": "非流式救回"})]},
+    ])
+    agent = make_agent(env, llm)
+    assert agent.run_task("测截断降级") == "非流式救回"
+    assert len(llm.calls) == 3
+    assert [c["stream"] for c in llm.calls] == [True, True, False]
+
+
+def test_plain_llm_error_no_retry(env):
+    """非截断类 LLMError（网络重试耗尽等）不触发整轮重试——原样穿出。"""
+    bb, project, gw, tq, _ = env
+    llm = ScriptedLLM([LLMError("网络错误（已重试 3 次）")])
+    agent = make_agent(env, llm)
+    with pytest.raises(LLMError, match="网络错误"):
+        agent.run_task("测不重试")
+    assert len(llm.calls) == 1
+
+
+# ---------- 任务叙述落事件（2026-09-19 直播间终端化） ----------
+
+def test_task_loop_narration_lands_as_agent_chat(env):
+    """任务循环 assistant text 叙述落 agent.chat（带 step；有 tool_calls 的步也落）。"""
+    bb, project, gw, tq, _ = env
+    llm = ScriptedLLM([
+        {"text": "先探测 Web 指纹，再决定突破口。",
+         "tool_use": [ScriptedLLM.tool_call("t1", "finish", {"summary": "完"})]},
+    ])
+    agent = make_agent(env, llm)
+    agent.run_task("测一下")
+    evs = [e for e in bb.recent_events(project["id"]) if e["kind"] == "agent.chat"]
+    assert len(evs) == 1
+    p = evs[0]["payload"]
+    assert p["text"] == "先探测 Web 指纹，再决定突破口。"
+    assert p["step"] == 1 and p["session_id"] == agent.session["id"]
+
+
+def test_task_loop_no_text_no_narration(env):
+    """纯工具步（无 text 块）不落 agent.chat，避免空行噪音。"""
+    bb, project, gw, tq, _ = env
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("t1", "finish", {"summary": "完"})]},
+    ])
+    agent = make_agent(env, llm)
+    agent.run_task("测一下")
+    assert not any(e["kind"] == "agent.chat" for e in bb.recent_events(project["id"]))
 
 
 # ---------- 会话控制（DESIGN.md §3：暂停/恢复/中断） ----------
@@ -328,6 +593,37 @@ def test_abort_fails_task_with_human_note(env):
     # 一次性闸门：worker 下一次 run_next_task 返回 None 且不认领新任务
     assert agent.run_next_task() is None
     assert agent._stop_after_task is False
+
+
+def test_abort_interrupts_blocked_llm_call_immediately(env):
+    """■ 即点即停（2026-09-19）：LLM 调用阻塞中 request_abort → 不等响应返回
+    （旧步边界语义要等当前步做完），任务立刻 fail「人工中断」；阻塞的旁路线程
+    被放弃（放行后自行结束，结果丢弃）。"""
+    bb, project, gw, tq, _ = env
+    started, gate = threading.Event(), threading.Event()
+    llm = ScriptedLLM([])  # 剧本空——中断后不会真正取到响应
+    orig_chat = llm.chat
+
+    def chat(messages, **kw):
+        started.set()
+        assert gate.wait(10), "gate 超时"
+        return orig_chat(messages, **kw)
+
+    llm.chat = chat
+    agent = make_agent(env, llm)
+    tid = tq.publish(project["id"], "阻塞中断任务", task_type="generic")
+
+    th = threading.Thread(target=lambda: agent.run_task("阻塞中断", task_id=tid))
+    th.start()
+    assert started.wait(5), "chat 未开始"
+    agent.request_abort()  # LLM 调用阻塞中：不 set gate，立即中断
+    th.join(5)
+    assert not th.is_alive()  # 不等 gate 放行即退出
+    gate.set()  # 放行被放弃的旁路线程，让它自然结束
+    task = tq.get_task(tid)
+    assert task["status"] == "failed"
+    assert "人工中断" in task["result_note"]
+    assert agent._abort_req.is_set() is False
 
 
 def test_worker_never_claims_after_pause(env):
@@ -451,11 +747,11 @@ def test_add_finding_relates_to_passthrough_and_dangling_reported(env):
     llm = ScriptedLLM([
         {"tool_use": [ScriptedLLM.tool_call(
             "t1", "bb_add_finding",
-            {"vuln_class": "sqli", "title": "注入升级",
+            {"vuln_class": "sqli", "title": "注入升级", "severity": "low",
              "relates_to": [{"finding_id": base, "note": "同目标升级"}]})]},
         {"tool_use": [ScriptedLLM.tool_call(
             "t2", "bb_add_finding",
-            {"vuln_class": "xss", "title": "幻觉强边",
+            {"vuln_class": "xss", "title": "幻觉强边", "severity": "low",
              "relates_to": [{"finding_id": "find-deadbeef", "note": "悬空"}]})]},
         {"tool_use": [ScriptedLLM.tool_call("t3", "finish", {"summary": "完"})]},
     ])
@@ -469,6 +765,63 @@ def test_add_finding_relates_to_passthrough_and_dangling_reported(env):
     # 错误文本回填给 LLM，循环未中断（finish 正常收尾）
     assert any("不存在或不属于本项目" in json.dumps(m, ensure_ascii=False)
                for m in llm.calls[2]["messages"])
+
+
+def test_update_finding_tool_downgrade_and_gates(env):
+    """bb_update_finding：降级+rating_basis 落库；显式改 info 被门禁拒绝回填；
+    不存在的发现回填错误。"""
+    bb, project, gw, tq, _ = env
+    fid = bb.add_finding(project["id"], "exposure", "WinRM 公网暴露",
+                         severity="high", track="pentest")["id"]
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call(
+            "t1", "bb_update_finding",
+            {"finding_id": fid, "severity": "low", "category": "intel",
+             "rating_basis": "rating:edu-rating 低危#1 非核心数据"})]},
+        {"tool_use": [ScriptedLLM.tool_call(
+            "t2", "bb_update_finding",
+            {"finding_id": fid, "severity": "info"})]},
+        {"tool_use": [ScriptedLLM.tool_call(
+            "t3", "bb_update_finding",
+            {"finding_id": "find-deadbeef", "severity": "low"})]},
+        {"tool_use": [ScriptedLLM.tool_call("t4", "finish", {"summary": "完"})]},
+    ])
+    agent = make_agent(env, llm)
+    agent.run_task("发现修订")
+    row = bb.get_finding(project["id"], fid)
+    assert row["severity"] == "low" and row["category"] == "intel"
+    assert row["rating_basis"].startswith("rating:edu-rating 低危#1")
+    # t2 门禁拒收回填、t3 不存在错误回填，循环未中断
+    back = json.dumps(llm.calls, ensure_ascii=False)
+    assert "不再收录 severity=info" in back
+    assert "发现不存在" in back
+
+
+def test_delete_finding_tool_guards(env):
+    """bb_delete_finding：verified 拒删、reason 必填、unverified+reason 删除成功。"""
+    bb, project, gw, tq, _ = env
+    v = bb.add_finding(project["id"], "sqli", "已验证注入", severity="high",
+                       status="verified", poc_artifact_id=None,
+                       evidence={"poc": {"type": "steps", "stability": "3/3"}},
+                       track="pentest")["id"]
+    g = bb.add_finding(project["id"], "noise", "走查垃圾", severity="low",
+                       track="pentest")["id"]
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call(
+            "t1", "bb_delete_finding", {"finding_id": g})]},
+        {"tool_use": [ScriptedLLM.tool_call(
+            "t2", "bb_delete_finding", {"finding_id": v, "reason": "想删"})]},
+        {"tool_use": [ScriptedLLM.tool_call(
+            "t3", "bb_delete_finding", {"finding_id": g, "reason": "重复噪声"})]},
+        {"tool_use": [ScriptedLLM.tool_call("t4", "finish", {"summary": "完"})]},
+    ])
+    agent = make_agent(env, llm)
+    agent.run_task("发现删除")
+    assert bb.get_finding(project["id"], g) is None  # t3 成功删除
+    assert bb.get_finding(project["id"], v) is not None  # t2 verified 拒删
+    back = json.dumps(llm.calls, ensure_ascii=False)
+    assert "删除必须说明原因" in back  # t1 无 reason 拒
+    assert "verified 发现不可删除" in back
 
 
 def test_add_artifact_poc_python_only(env):
@@ -494,38 +847,24 @@ def test_add_artifact_poc_python_only(env):
 
 
 def test_kb_open_module(env):
-    """kb_open：多源命中返回绝对路径 + kb.open 审计；不存在返回清单（防幻觉）；未登记报错。"""
+    """kb_open：M0 合成源命中返回绝对路径 + kb.open 审计；不存在返回清单（防幻觉）；无 kb 域报错。"""
     bb, project, gw, tq, tmp_path = env
-    # 两个源：main 递归（含子目录）、flat 非递归
-    kb_main = tmp_path / "kb-main"
-    (kb_main / "sub").mkdir(parents=True)
-    (kb_main / "xss-test.md").write_text("# XSS 测试", encoding="utf-8")
-    (kb_main / "sub" / "deep.md").write_text("深层模块", encoding="utf-8")
-    kb_flat = tmp_path / "kb-flat"
-    kb_flat.mkdir()
-    (kb_flat / "only.md").write_text("flat", encoding="utf-8")
-    cap_dir = tmp_path / "packs" / "capabilities" / "web"
-    cap_dir.mkdir(parents=True, exist_ok=True)
-    sources_file = cap_dir / "kb_sources.json"
+    # M0：单域单源（packs/kb/web，恒递归含子目录）
+    kb = tmp_path / "packs" / "kb" / "web"
+    (kb / "sub").mkdir(parents=True)
+    (kb / "xss-test.md").write_text("# XSS 测试", encoding="utf-8")
+    (kb / "sub" / "deep.md").write_text("深层模块", encoding="utf-8")
 
-    def write_sources():
-        sources_file.write_text(json.dumps({"sources": [
-            {"id": "main", "root": str(kb_main), "recursive": True},
-            {"id": "flat", "root": str(kb_flat), "recursive": False},
-        ]}, ensure_ascii=False), encoding="utf-8")
-
-    write_sources()
-
-    # 命中（含递归深层路径）
+    # 命中（全局形态带域前缀，含递归深层路径）
     llm = ScriptedLLM([
-        {"tool_use": [ScriptedLLM.tool_call("t1", "kb_open", {"module": "sub/deep.md"})]},
+        {"tool_use": [ScriptedLLM.tool_call("t1", "kb_open", {"module": "web/sub/deep.md"})]},
         {"tool_use": [ScriptedLLM.tool_call("t2", "finish", {"summary": "完"})]},
     ])
     agent = make_agent(env, llm)
     agent.run_task("开知识库")
     result = json.dumps(llm.calls[1]["messages"], ensure_ascii=False)
     assert "deep.md" in result               # 返回了模块绝对路径（JSON 内 \\ 转义）
-    assert "main" in result and "禁止通读" in result
+    assert "知识库模块（域 web）" in result and "禁止通读" in result
     events = [e["kind"] for e in bb.recent_events(project["id"])]
     assert "kb.open" in events
 
@@ -537,7 +876,7 @@ def test_kb_open_module(env):
     agent2 = make_agent(env, llm2)
     agent2.run_task("幻觉模块名")
     result2 = json.dumps(llm2.calls[1]["messages"], ensure_ascii=False)
-    assert "防幻觉" in result2 and "xss-test.md" in result2 and "sub/deep.md" in result2
+    assert "防幻觉" in result2 and "xss-test.md" in result2 and "web/sub/deep.md" in result2
 
     # .. 穿越直接拒绝
     llm_t = ScriptedLLM([
@@ -552,8 +891,8 @@ def test_kb_open_module(env):
     assert not [e for e in bb.recent_events(project["id"])
                 if e["kind"] == "kb.open" and e["session_id"] == agent_t.session["id"]]
 
-    # 未登记 kb_sources → 错误文本不断循环
-    sources_file.unlink()
+    # 域无 kb 目录 → 错误文本不断循环
+    shutil.rmtree(kb)
     llm3 = ScriptedLLM([
         {"tool_use": [ScriptedLLM.tool_call("t1", "kb_open", {"module": "x.md"})]},
         {"tool_use": [ScriptedLLM.tool_call("t2", "finish", {"summary": "完"})]},
@@ -561,7 +900,7 @@ def test_kb_open_module(env):
     agent3 = make_agent(env, llm3)
     agent3.run_task("无知识库")
     result3 = json.dumps(llm3.calls[1]["messages"], ensure_ascii=False)
-    assert "未登记" in result3
+    assert "无知识库" in result3
 
 
 # ---------- 角色软边界（DESIGN.md §6.6：tools / max_runtime / default_noise） ----------
@@ -605,27 +944,21 @@ def test_role_max_runtime_blocks_level(env):
     assert "[越界拒绝]" in msgs and "max_runtime=host" in msgs
 
 
-def test_role_default_noise_filters_claim(env):
-    """角色 default_noise=passive：claim_next 不认领 low 噪声任务，passive 任务可认领。"""
+def test_role_default_noise_no_longer_filters_claim(env):
+    """2026-09-18 窗口去 role 限制：default_noise=passive 的底色角色**不再过滤认领**，
+    low 噪声任务照常认领（噪声上限只是系统提示自陈，边界随任务换装生效）。"""
     bb, project, gw, tq, _ = env
     write_role(env, "quiet",
                'name: quiet\npersona: "安静"\ndefault_noise: passive\n')
     # active 任务需要 conflict_keys（§6.2）
     loud = tq.publish(project["id"], "主动打点", task_type="generic",
                       noise_budget="low", conflict_keys=["ip:10.0.0.9"], created_by="human")
-    agent = make_agent(env, ScriptedLLM([]), role="quiet")
-    assert agent.run_next_task() is None
-    assert tq.get_task(loud)["status"] == "open"      # 高噪声任务不被被动角色认领
-    quiet = tq.publish(project["id"], "被动收集", task_type="generic",
-                       noise_budget="passive", created_by="human")
-    llm2 = ScriptedLLM([
+    agent = make_agent(env, ScriptedLLM([
         {"tool_use": [ScriptedLLM.tool_call("t1", "complete_task", {"result_note": "done"})]},
         {"tool_use": [ScriptedLLM.tool_call("t2", "finish", {"summary": "完"})]},
-    ])
-    agent.llm = llm2
+    ]), role="quiet")
     assert agent.run_next_task() == "完"
-    assert tq.get_task(quiet)["status"] == "done"
-    assert tq.get_task(loud)["status"] == "open"      # loud 仍在队列
+    assert tq.get_task(loud)["status"] == "done"      # 无噪声过滤：low 任务被认领并完成
 
 
 # ---------- A1：任务租约心跳（长任务防 TTL 过期被重领双跑） ----------
@@ -639,7 +972,8 @@ class _SlowFirstLLM(ScriptedLLM):
         self.on_start = on_start
         self.on_wake = on_wake
 
-    def chat(self, messages, *, system=None, tools=None, max_tokens=4096, temperature=None):
+    def chat(self, messages, *, system=None, tools=None, max_tokens=4096, temperature=None,
+             on_thinking=None, on_text=None, should_cancel=None):
         if not self.calls:
             if self.on_start:
                 self.on_start()
@@ -722,6 +1056,98 @@ def test_agent_abort_stops_heartbeat_and_fails_task(env):
     assert row["status"] == "failed" and row["result_note"] == "人工中断"
     assert row["lease_until"] is None
     assert agent._heartbeat is None and not _heartbeat_alive()
+
+
+def test_llm_exception_fails_task_and_stops_heartbeat(env):
+    """worker 异常兜底：llm.chat 抛出（典型=传输层重试耗尽）穿出 _loop 时任务必须
+    fail（含异常注记）且心跳停止——否则任务悬 claimed + 孤儿心跳续租占坑，
+    expire_leases 永不回收，看板永久「执行中」（2026-09-17 真机事故根因）。"""
+    bb, project, gw, tq, _ = env
+    tid = tq.publish(project["id"], "将被 LLM 异常打断的任务")
+    llm = ScriptedLLM([])
+
+    def boom(messages, **kw):
+        raise RuntimeError("connection reset（重试 3 次耗尽）")
+    llm.chat = boom
+    config = AgentConfig(max_steps=10, lease_minutes=1, lease_renew_seconds=0.05)
+    agent = make_agent(env, llm, config=config)
+
+    with pytest.raises(RuntimeError):
+        agent.run_next_task()  # 认领该任务后首步即炸
+    row = tq.get_task(tid)
+    assert row["status"] == "failed"
+    assert "RuntimeError" in (row["result_note"] or "")
+    assert row["lease_until"] is None  # 心跳已停，租约随收尾释放
+    assert agent._heartbeat is None and not _heartbeat_alive()
+    # 审计：task.failed 落事件
+    assert any(e["kind"] == "task.failed"
+               for e in bb.recent_events(project["id"]))
+
+
+def test_salvage_on_error_saves_partial_conclusions(env):
+    """fail 抢救收尾（2026-09-20，借鉴 Intentest 降级段）：worker 异常兜底 fail 前，
+    用一轮无工具纯文本 LLM 把现场里的部分结论落盘为 salvage 产物——任务虽败，
+    已验证事实/失败方向不陪葬。断言：artifact(kind=salvage) 落库 + salvage 产物
+    文件落盘 + task.salvaged 事件 + 抢救调用 system=SALVAGE_SYSTEM 且无工具。"""
+    bb, project, gw, tq, tmp_path = env
+    tid = tq.publish(project["id"], "异常中断但有结论的任务")
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("t1", "bb_add_asset",
+                                            {"type": "domain", "value": "x.com"})]},
+        {"tool_use": [ScriptedLLM.tool_call("t2", "bb_add_asset",
+                                            {"type": "subdomain", "value": "dev.x.com"})]},
+        RuntimeError("connection reset（重试 3 次耗尽）"),  # 主循环炸在这里
+        {"text": "## 已确认事实\n- x.com 已登记（asset，见黑板）\n"
+                 "## 失败/死路方向\n无\n## 接手建议\n续查 DNS CNAME。"},
+    ])
+    config = AgentConfig(max_steps=10, lease_minutes=1, lease_renew_seconds=0.05)
+    agent = make_agent(env, llm, config=config,
+                       artifacts_dir=str(tmp_path / "artifacts"))
+
+    with pytest.raises(RuntimeError):
+        agent.run_next_task()
+    row = tq.get_task(tid)
+    assert row["status"] == "failed"  # 抢救不影响 fail 本身
+    arts = bb.list_artifacts(project["id"], task_id=tid)
+    assert len(arts) == 1 and arts[0]["kind"] == "salvage"
+    assert "connection reset" in arts[0]["description"]  # 描述含终止原因
+    salvage_file = tmp_path / "artifacts" / "salvage" / f"salvage-{tid}.md"
+    assert salvage_file.is_file()
+    assert "已确认事实" in salvage_file.read_text(encoding="utf-8")
+    ev = [e for e in bb.recent_events(project["id"]) if e["kind"] == "task.salvaged"]
+    assert len(ev) == 1 and ev[-1]["payload"]["task_id"] == tid
+    # 抢救调用形态：无工具（纯文本）、system 是抢救员提示、prompt 含终止原因
+    last = llm.calls[-1]
+    assert "抢救" in last["system"] and last["messages"][-1]["role"] == "user"
+    assert "connection reset" in json.dumps(last["messages"], ensure_ascii=False)
+
+
+def test_salvage_llm_failure_does_not_break_fail(env):
+    """抢救 LLM 也炸（典型=配额故障）→ 静默跳过，fail 照常完成、无 salvage 产物。"""
+    bb, project, gw, tq, tmp_path = env
+    tid = tq.publish(project["id"], "抢救也救不了的任务")
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("t1", "bb_add_asset",
+                                            {"type": "domain", "value": "y.com"})]},
+        {"tool_use": [ScriptedLLM.tool_call("t2", "bb_add_asset",
+                                            {"type": "domain", "value": "z.com"})]},
+        RuntimeError("主循环炸"),
+        RuntimeError("抢救 LLM 也炸（配额 429）"),
+    ])
+    config = AgentConfig(max_steps=10, lease_minutes=1, lease_renew_seconds=0.05)
+    agent = make_agent(env, llm, config=config,
+                       artifacts_dir=str(tmp_path / "artifacts"))
+
+    with pytest.raises(RuntimeError):
+        agent.run_next_task()
+    row = tq.get_task(tid)
+    assert row["status"] == "failed" and "RuntimeError" in (row["result_note"] or "")
+    assert agent._heartbeat is None
+    assert bb.list_artifacts(project["id"]) == []
+    assert not any(e["kind"] == "task.salvaged"
+                   for e in bb.recent_events(project["id"]))
+    # 现场清空：正常路径（含暂停）不留陈旧 salvage 现场
+    assert agent._salvage_ctx is None
 
 
 def test_deleted_claimed_task_aborts_at_control_point(env):
@@ -876,6 +1302,61 @@ def test_plan_gate_inactive_without_current_task(env):
     assert d.current_task_id is None
     r = d.dispatch("run_cmd", {"cmd": "whoami", "runtime": "host", "threat_class": "trusted"})
     assert not r.startswith("[计划闸]")
+
+
+# ---------- tool.call 审计事件（2026-09-19「工具」tab） ----------
+
+def _tool_calls(bb, pid):
+    return [e for e in bb.recent_events(pid) if e["kind"] == "tool.call"]
+
+
+def test_tool_call_event_success_and_gates(env):
+    """普通工具调用落 tool.call（name/args/耗时/成败/结果头）；拒绝路径 ok=False 也落。"""
+    from core.agent.tools import ToolDispatcher
+    bb, project, gw, tq, _ = env
+    sid = bb.register_session(project["id"], "auditor")["id"]
+    d = ToolDispatcher(bb, gateway=gw, tq=tq, project_id=project["id"],
+                       session_id=sid, author=sid)
+    d.dispatch("bb_query", {"what": "tasks"})
+    evs = _tool_calls(bb, project["id"])
+    assert len(evs) == 1
+    p = evs[0]["payload"]
+    assert p["name"] == "bb_query" and p["args"] == {"what": "tasks"}
+    assert p["ok"] is True and isinstance(p["duration_s"], (int, float))
+    assert isinstance(p["result_head"], str) and p["result_head"]
+
+    # 计划闸等拒绝路径同样可观测且 ok=False（run_cmd 虽被闸拦但不落 tool.call，见下测）
+    d2, _tid = _plan_dispatcher(env, session_name="auditor2")
+    r = d2.dispatch("bb_add_asset", {"type": "domain", "value": "x.com"})
+    assert r.startswith("[计划闸]")
+    evs2 = [e for e in _tool_calls(bb, project["id"]) if e["session_id"] != sid]
+    assert len(evs2) == 1 and evs2[0]["payload"]["ok"] is False
+    assert "[计划闸]" in evs2[0]["payload"]["result_head"]
+
+
+def test_tool_call_skips_run_cmd_and_truncates_args(env):
+    """run_cmd 不落 tool.call（gateway 已有 command/command.result）；长入参截断。"""
+    from core.agent.tools import ToolDispatcher
+    bb, project, gw, tq, _ = env
+    sid = bb.register_session(project["id"], "auditor3")["id"]
+    d = ToolDispatcher(bb, gateway=gw, tq=tq, project_id=project["id"],
+                       session_id=sid, author=sid)
+    d.dispatch("run_cmd", {"cmd": "whoami", "runtime": "host", "threat_class": "trusted"})
+    assert _tool_calls(bb, project["id"]) == []
+
+    d.dispatch("bb_add_finding", {"title": "长" * 500, "severity": "low",
+                                  "detail": "x" * 500})
+    evs = _tool_calls(bb, project["id"])
+    assert len(evs) == 1
+    a = evs[0]["payload"]["args"]
+    assert len(a["title"]) < 500 and a["title"].endswith("(截断)")
+    assert a["severity"] == "low"  # 短值原样
+
+    # 未知工具：拒绝路径落事件 ok=False
+    d.dispatch("no_such_tool", {"x": 1})
+    evs = _tool_calls(bb, project["id"])
+    assert len(evs) == 2 and evs[-1]["payload"]["ok"] is False
+    assert "[错误]" in evs[-1]["payload"]["result_head"]
 
 
 # ---------- A5.1：子代理分解发任务（parent/created_by 服务端钉死） ----------
@@ -1045,15 +1526,17 @@ def test_budget_exhaustion_self_rescue_via_request_steps(env):
     assert ev and ev[-1]["payload"]["by"] == "agent"
 
 
-def test_human_note_injected_at_step_boundary(env):
-    """human_note（E8）：步边界 drain 注入「💬 人类引导」user 消息，不打断工具调用。"""
+def test_human_note_deferred_to_round_end(env):
+    """human_note 轮末语义（2026-09-19）：任务中途投递的引导**不**在步边界注入
+    （不打断当前任务思路），留收件箱未读，延迟到下一轮认领期注入。"""
     bb, project, gw, tq, _ = env
     tid = tq.publish(project["id"], "被引导的任务", task_type="generic")
     llm = ScriptedLLM([
         {"tool_use": [ScriptedLLM.tool_call("t1", "run_cmd",
                                             {"cmd": "whoami", "runtime": "host",
                                              "threat_class": "trusted"})]},
-        {"tool_use": [ScriptedLLM.tool_call("t2", "finish", {"summary": "收到引导"})]},
+        {"tool_use": [ScriptedLLM.tool_call("t2", "finish", {"summary": "本轮完成"})]},
+        {"tool_use": [ScriptedLLM.tool_call("t3", "finish", {"summary": "下轮收到引导"})]},
     ])
     agent = make_agent(env, llm)
     orig_chat = llm.chat
@@ -1062,14 +1545,222 @@ def test_human_note_injected_at_step_boundary(env):
     def chat(messages, **kw):
         n["c"] += 1
         r = orig_chat(messages, **kw)
-        if n["c"] == 1:
+        if n["c"] == 1:  # 第 1 步期间投递引导（旧行为会在第 2 步边界注入）
             bb.post_human_note(project["id"], agent.session["id"], "优先看备份文件")
         return r
     llm.chat = chat
 
-    assert agent.run_task("引导演练", task_id=tid) == "收到引导"
+    assert agent.run_task("引导演练", task_id=tid) == "本轮完成"
     second = json.dumps(llm.calls[1]["messages"], ensure_ascii=False)
-    assert "💬 人类引导" in second and "优先看备份文件" in second
+    assert "💬 人类引导" not in second and "优先看备份文件" not in second
+    # 下一轮认领期 drain：开场消息即携带引导
+    tid2 = tq.publish(project["id"], "下轮任务", task_type="generic")
+    assert agent.run_task("下一轮", task_id=tid2) == "下轮收到引导"
+    first = json.dumps(llm.calls[2]["messages"], ensure_ascii=False)
+    assert "💬 人类引导" in first and "优先看备份文件" in first
+
+
+def test_run_chat_replies_without_task(env):
+    """空闲对话轮（2026-09-19）：无任务上下文直接对话——drain 未读 human_note →
+    LLM 回复落 `agent.chat` 事件并返回文本；可带工具查黑板；finish 不在工具集。"""
+    bb, project, gw, tq, _ = env
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("c1", "run_cmd",
+                                            {"cmd": "whoami", "runtime": "host",
+                                             "threat_class": "trusted"})]},
+        {"text": "你好，我是通用测试员。"},
+    ])
+    agent = make_agent(env, llm)
+    sid = agent.session["id"]
+    bb.post_human_note(project["id"], sid, "介绍下自己")
+    reply = agent.run_chat()
+    assert reply == "你好，我是通用测试员。"
+    # 回复落事件流（💬 Agent 回复）
+    chat_evs = [e for e in bb.recent_events(project["id"]) if e["kind"] == "agent.chat"]
+    assert chat_evs and "通用测试员" in chat_evs[-1]["payload"]["text"]
+    # 工具真的执行了（command 事件），消息历史带 tool_result
+    assert "command" in [e["kind"] for e in bb.recent_events(project["id"])]
+    assert json.dumps(llm.calls[1]["messages"], ensure_ascii=False).count("tool_result") >= 1
+    # 收件箱 human_note 已被 drain
+    unread = bb.inbox_list(project["id"], sid, unread_only=True)
+    assert all(r["kind"] != "human_note" for r in unread)
+    # 任务轮互斥：对话轮没动 dispatcher.current_task_id / 不产生任务事件
+    assert agent.dispatcher.current_task_id is None
+    # finish 不在对话轮工具集
+    names = [t["name"] for t in CHAT_TOOLS]
+    assert "finish" not in names and "run_cmd" in names
+
+
+def test_run_chat_aborts_and_skips_when_not_idle(env):
+    """对话轮 guard：暂停/中断置位时不消费引导（留收件箱）；对话中被中断则
+    放弃回复（drain 已消费）。"""
+    bb, project, gw, tq, _ = env
+    llm = ScriptedLLM([{"text": "不该被消费"}])
+    agent = make_agent(env, llm)
+    sid = agent.session["id"]
+    # 暂停态：不 drain、不回复
+    agent.request_pause()
+    bb.post_human_note(project["id"], sid, "等恢复")
+    assert agent.run_chat() is None
+    assert [r["kind"] for r in bb.inbox_list(project["id"], sid, unread_only=True)] == ["human_note"]
+    agent.paused = False
+    agent._pause_req.clear()
+    # 对话中中断：置位 abort → 回复丢弃、标志被清
+    orig_chat = llm.chat
+
+    def chat(messages, **kw):
+        agent.request_abort()
+        return orig_chat(messages, **kw)
+
+    llm.chat = chat
+    assert agent.run_chat() is None
+    assert not agent._abort_req.is_set()
+    assert not [e for e in bb.recent_events(project["id"]) if e["kind"] == "agent.chat"]
+
+
+def test_run_chat_task_continuation_with_context(env):
+    """v0.71 延续模式（2026-09-20）：绑定窗终态续聊——run_chat(task_id=) 从 C10
+    任务现场文件载入既往对话作上下文（模型看得到任务目标与既往结论）；回复后
+    问答回写现场文件，下轮续聊/重启后仍带全上下文。"""
+    bb, project, gw, tq, tmp_path = env
+    tid = tq.publish(project["id"], "找 flag", task_type="generic")
+    artifacts = tmp_path / "proj" / "artifacts"
+    # 预置任务现场文件（模拟任务轮每步落盘的 transcript）
+    tpath = artifacts.parent / "snapshots" / f"task-{tid}.json"
+    tpath.parent.mkdir(parents=True, exist_ok=True)
+    tpath.write_text(json.dumps(
+        {"task_id": tid, "objective": "找 flag", "session_id": "s",
+         "messages": [
+             {"role": "user", "content": "任务目标：找 flag"},
+             {"role": "assistant",
+              "content": [{"type": "text", "text": "已在 p1 确认 strings 输出"}]},
+         ]}, ensure_ascii=False), encoding="utf-8")
+    llm = ScriptedLLM([{"text": "接着 p1 的结论，p2 反编译主函数。"}])
+    agent = make_agent(env, llm, artifacts_dir=artifacts)
+    sid = agent.session["id"]
+    bb.post_human_note(project["id"], sid, "继续 p2")
+    reply = agent.run_chat(task_id=tid)
+    assert reply == "接着 p1 的结论，p2 反编译主函数。"
+    # 上下文注入：首轮 messages 含任务既往对话（目标 + 既往结论）
+    first = json.dumps(llm.calls[0]["messages"], ensure_ascii=False)
+    assert "找 flag" in first and "strings 输出" in first
+    # 问答回写现场文件（下轮续聊/重启后仍带全上下文）
+    st = json.loads(tpath.read_text(encoding="utf-8"))
+    assert "继续 p2" in st["messages"][-2]["content"]  # 人类引导 notice 原文回写
+    assert "p2 反编译主函数" in json.dumps(st["messages"][-1], ensure_ascii=False)
+    # 回复照常落 agent.chat 事件
+    chat_evs = [e for e in bb.recent_events(project["id"]) if e["kind"] == "agent.chat"]
+    assert chat_evs and "p2" in chat_evs[-1]["payload"]["text"]
+
+
+def test_run_chat_streams_reply_and_prunes_deltas(env):
+    """对话化（2026-09-20）：run_chat 流式回复——ScriptedLLM 回放 text_deltas，
+    主线程节流落 agent.chat.delta（累计全文、seq 递增、同 stream_id）；终稿
+    agent.chat 带同 stream_id，落库后同流 delta 行被清剪（审计只留终稿）。"""
+    bb, project, gw, tq, _ = env
+    llm = ScriptedLLM([
+        {"text_deltas": ["甲" * 200, "乙" * 200], "text": "甲" * 200 + "乙" * 200},
+    ])
+    agent = make_agent(env, llm)
+    sid = agent.session["id"]
+    bb.post_human_note(project["id"], sid, "说说思路")
+    # 旁路记录 delta（终稿后会被清剪，只能落库瞬间抓）
+    seen: list[tuple[str, dict]] = []
+    orig_append = bb.append_event
+
+    def append(pid, kind, payload, **kw):
+        seen.append((kind, dict(payload)))
+        return orig_append(pid, kind, payload, **kw)
+
+    bb.append_event = append
+    reply = agent.run_chat()
+    assert reply and "甲" in reply and "乙" in reply
+    deltas = [p for k, p in seen if k == "agent.chat.delta"]
+    assert len(deltas) >= 2  # 两段各 200 字 ≥80 阈值，0.5s 间隔必各落一拍
+    seqs = [d["seq"] for d in deltas]
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)  # 严格递增
+    assert len({d["stream_id"] for d in deltas}) == 1            # 同流
+    assert deltas[-1]["text"].startswith(deltas[0]["text"])       # 累计全文
+    assert len(deltas[-1]["text"]) > len(deltas[0]["text"])
+    finals = [p for k, p in seen if k == "agent.chat"]
+    assert finals and finals[-1].get("stream_id") == deltas[0]["stream_id"]
+    # 终稿落库后清剪：事件表不再有该流 delta 行
+    assert not [e for e in bb.recent_events(project["id"], limit=500)
+                if e["kind"] == "agent.chat.delta"]
+
+
+def test_run_chat_registers_finding(env):
+    """对话化（2026-09-20）干活纪律放开：对话轮有价值的阶段性结论可
+    bb_add_finding 入黑板——author=会话 id（P4 图上「对话产出」徽章数据源），
+    无任务上下文不挂任务；prompt 不再含「不登记发现」且明确点名入图纪律。"""
+    bb, project, gw, tq, _ = env
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call(
+            "c1", "bb_add_finding",
+            {"vuln_class": "weak_password", "title": "后台弱口令 admin/admin",
+             "severity": "high", "evidence": {"note": "登录成功且返回管理面板"}})]},
+        {"text": "已确认后台存在弱口令并登记 finding。"},
+    ])
+    agent = make_agent(env, llm)
+    sid = agent.session["id"]
+    bb.post_human_note(project["id"], sid, "试试 admin/admin 能不能登后台")
+    reply = agent.run_chat()
+    assert "弱口令" in reply
+    fs = bb.list_findings(project["id"])
+    assert len(fs) == 1
+    assert fs[0]["author"] == sid
+    assert fs[0]["title"] == "后台弱口令 admin/admin"
+    # prompt 纪律断言（沿用首轮 system）
+    sys = llm.calls[0]["system"]
+    assert "不登记发现" not in sys
+    assert "bb_add_finding" in sys
+
+
+def test_run_chat_step_cap(env):
+    """对话轮步数上限：min(dispatcher.max_steps, config.chat_max_steps)——
+    chat_max_steps=3 时最多 3 次 LLM 调用即退出（剧本 3 轮工具调用，若上限
+    失效第 4 次调用会 pop 空剧本直接崩测试）。"""
+    bb, project, gw, tq, _ = env
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("c1", "run_cmd",
+                                            {"cmd": "c1", "runtime": "host",
+                                             "threat_class": "trusted"})]},
+        {"tool_use": [ScriptedLLM.tool_call("c2", "run_cmd",
+                                            {"cmd": "c2", "runtime": "host",
+                                             "threat_class": "trusted"})]},
+        {"tool_use": [ScriptedLLM.tool_call("c3", "run_cmd",
+                                            {"cmd": "c3", "runtime": "host",
+                                             "threat_class": "trusted"})]},
+    ])
+    agent = make_agent(env, llm, config=AgentConfig(chat_max_steps=3))
+    sid = agent.session["id"]
+    bb.post_human_note(project["id"], sid, "随便聊")
+    assert agent.run_chat() is None  # 上限内没给出文字回复 → 空退
+    assert len(llm.calls) == 3
+
+
+def test_run_chat_session_history_persists(env):
+    """对话化（2026-09-20）：非绑定窗对话历史存 chat-<sid>.json——第一轮问答
+    回写文件，第二轮载入上下文（模型看得到上轮问答），跨轮、跨重启连续。"""
+    bb, project, gw, tq, tmp_path = env
+    artifacts = tmp_path / "proj" / "artifacts"
+    llm = ScriptedLLM([
+        {"text": "第一轮：目标站是WordPress。"},
+        {"text": "接着上轮：WordPress 建议跑 wpscan。"},
+    ])
+    agent = make_agent(env, llm, artifacts_dir=artifacts)
+    sid = agent.session["id"]
+    bb.post_human_note(project["id"], sid, "识别下CMS")
+    assert agent.run_chat() == "第一轮：目标站是WordPress。"
+    cpath = artifacts.parent / "snapshots" / f"chat-{sid}.json"
+    assert cpath.exists()
+    st = json.loads(cpath.read_text(encoding="utf-8"))
+    assert st["session_id"] == sid and len(st["messages"]) == 2
+    bb.post_human_note(project["id"], sid, "那下一步呢")
+    assert agent.run_chat() == "接着上轮：WordPress 建议跑 wpscan。"
+    # 第二轮首轮 messages 含上轮问答全文
+    first = json.dumps(llm.calls[1]["messages"], ensure_ascii=False)
+    assert "识别下CMS" in first and "目标站是WordPress" in first
 
 
 def test_snapshot_persisted_and_rehydrates(env):
@@ -1113,7 +1804,7 @@ def test_snapshot_persisted_and_rehydrates(env):
     ])
     reborn = AgentSession(
         project_id=project["id"], bb=bb, gateway=gw, llm=llm2,
-        packs_root=tmp_path / "packs", track="assessment", capabilities=["web"],
+        packs_root=tmp_path / "packs", track="pentest", capabilities=["web"],
         role="_generalist", capability_prompt="", config=AgentConfig(max_steps=10),
         artifacts_dir=tmp_path / "proj" / "artifacts", existing_session=row)
     assert reborn.paused is True
@@ -1128,6 +1819,118 @@ def test_snapshot_persisted_and_rehydrates(env):
     assert tq.get_task(tid)["status"] == "done"
     assert not snap.exists()
     assert json.loads(bb.get_session(sid)["meta"])["resume_snapshot"] is None
+
+
+def test_pause_request_persists_snapshot_immediately(env):
+    """v0.64 暂停请求/停机即时落盘：worker 还在步内（未到边界）时
+    pause_snapshot_now() 已双写会话键+任务键快照，任务保持 claimed；模拟断电
+    （worker 永远停在下一步）后 rehydrate 回 paused，可直接断点续跑至完成——
+    重启不再把任务 fail 成「待人工」。"""
+    bb, project, gw, tq, tmp_path = env
+    tid = tq.publish(project["id"], "即时落盘任务", task_type="generic")
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("t1", "run_cmd",
+                                            {"cmd": "c1", "runtime": "host",
+                                             "threat_class": "trusted"})]},
+    ])
+    agent = make_agent(env, llm, config=AgentConfig(max_steps=10),
+                       artifacts_dir=tmp_path / "proj" / "artifacts")
+    orig_chat = llm.chat
+    n = {"c": 0}
+    entered = threading.Event()
+    release = threading.Event()
+    killed = {"v": False}
+    hang = threading.Event()
+
+    def chat(messages, **kw):
+        n["c"] += 1
+        if n["c"] == 1:
+            entered.set()
+            release.wait()
+            return orig_chat(messages, **kw)
+        if killed["v"]:
+            hang.wait()  # 模拟断电：worker 永远停在第二步（守护线程被弃）
+        return orig_chat(messages, **kw)
+    llm.chat = chat
+
+    th = threading.Thread(target=lambda: agent.run_task("即时落盘", task_id=tid),
+                          daemon=True)
+    th.start()
+    assert entered.wait(5)
+    # API 线程视角（pause 端点/停机钩子同款调用）：worker 尚在步 1 内
+    assert agent.dispatcher.current_task_id == tid
+    assert agent.pause_snapshot_now() is True
+    sid = agent.session["id"]
+    snap_dir = tmp_path / "proj" / "snapshots"
+    snap = snap_dir / f"{sid}.json"
+    task_snap = snap_dir / f"task-{tid}.resume.json"
+    assert snap.is_file() and task_snap.is_file()
+    persisted = json.loads(snap.read_text(encoding="utf-8"))
+    assert persisted["task_id"] == tid and persisted["reason"] == "pause"
+    assert persisted["next_step"] == 2
+    assert json.loads(bb.get_session(sid)["meta"])["resume_snapshot"] == snap.name
+    assert tq.get_task(tid)["status"] == "claimed"     # 不 fail 不动任务
+    assert agent.paused is False                       # 不动 worker 生命周期
+
+    # 模拟断电：worker 永远出不了第二步
+    killed["v"] = True
+    release.set()
+
+    # 重启：rehydrate（清扫已豁免其 claimed 任务——本测试直接验快照链路）
+    reborn = AgentSession(
+        project_id=project["id"], bb=bb, gateway=gw,
+        llm=ScriptedLLM([
+            {"tool_use": [ScriptedLLM.tool_call("t2", "complete_task",
+                                                {"result_note": "断电后续跑"})]},
+            {"tool_use": [ScriptedLLM.tool_call("t3", "finish",
+                                                {"summary": "即时快照续跑成功"})]},
+        ]),
+        packs_root=tmp_path / "packs", track="pentest", capabilities=["web"],
+        role="_generalist", capability_prompt="", config=AgentConfig(max_steps=10),
+        artifacts_dir=tmp_path / "proj" / "artifacts", existing_session=bb.get_session(sid))
+    assert reborn.paused is True
+    assert reborn._resume_state["task_id"] == tid
+    assert reborn._resume_state["reason"] == "pause"
+    assert reborn.paused and tq.get_task(tid)["status"] == "claimed"
+    reborn.paused = False
+    assert reborn.run_next_task() == "即时快照续跑成功"
+    assert tq.get_task(tid)["status"] == "done"
+    assert not snap.exists() and not task_snap.exists()   # 消费即清理（含任务键）
+
+
+def test_snapshot_tail_sanitize():
+    """v0.64 快照尾部 sanitize：半步悬空 tool_use/tool_result 被截到上一完整边界。"""
+    tool_use_a = {"type": "tool_use", "id": "a", "name": "run_cmd", "input": {}}
+    tool_use_b = {"type": "tool_use", "id": "b", "name": "run_cmd", "input": {}}
+    tool_use_c = {"type": "tool_use", "id": "c", "name": "run_cmd", "input": {}}
+    result = lambda i: {"role": "user", "content": [  # noqa: E731
+        {"type": "tool_result", "tool_use_id": i, "content": "ok"}]}
+    base = [
+        {"role": "user", "content": "目标"},
+        {"role": "assistant", "content": [tool_use_a]},
+        result("a"),
+    ]
+    # 完整对不动
+    out = sanitize_snapshot_tail(base + [
+        {"role": "assistant", "content": [tool_use_b]}, result("b")])
+    assert out[-1] == result("b") and len(out) == 5
+    # 半步：assistant(tool_use b,c) 后只落了 b 的 result → 截到 result("a") 为止
+    out = sanitize_snapshot_tail(base + [
+        {"role": "assistant", "content": [tool_use_b, tool_use_c]}, result("b")])
+    assert len(out) == 3 and out[-1] == result("a")
+    # 纯文本尾不动
+    out = sanitize_snapshot_tail(base + [{"role": "assistant", "content": [{"type": "text", "text": "hi"}]}])
+    assert len(out) == 4
+
+
+def test_live_state_cleared_after_run(env):
+    """_loop 退出（含正常收尾）必清 _live_state，防陈旧现场被快照。"""
+    bb, project, gw, tq, _ = env
+    llm = ScriptedLLM([{"tool_use": [ScriptedLLM.tool_call(
+        "t1", "finish", {"summary": "完"})]}])
+    agent = make_agent(env, llm)
+    assert agent.run_task("现场清理") == "完"
+    assert agent._live_state is None
 
 
 def test_abort_keeps_snapshot_and_task_resumable(env):
@@ -1373,3 +2176,954 @@ def test_dead_end_notice_injected_on_claim(env):
     agent.run_next_task()
     injected = json.dumps(llm.calls[0]["messages"], ensure_ascii=False)
     assert "路标" in injected and "勿重走" in injected
+
+
+# ---------- v14 认领即换装（任务绑定角色） ----------
+
+RECON_YAML = 'name: 侦察专才\npersona: "侦察专才人设。"\ntools: [run_cmd]\n'
+
+
+def test_persona_switch_on_claim_and_restore(env):
+    """认领带 role 任务即换装：prompt 段/工具白名单/执行 persona 切到任务角色；
+    跑完恢复底色；事件与 attempts 履历贯穿。"""
+    bb, project, gw, tq, _ = env
+    write_role(env, "recon", RECON_YAML)
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("t1", "complete_task",
+                                            {"result_note": "完成"})]},
+        {"tool_use": [ScriptedLLM.tool_call("t2", "finish", {"summary": "干完了"})]},
+    ])
+    agent = make_agent(env, llm)
+    assert agent.base_role_name == "_generalist"
+    tid = tq.publish(project["id"], "侦察任务", role="recon")
+    agent.run_next_task()  # 窗口无 role 限制：底色窗直接认领 role 任务
+    assert tq.get_task(tid)["status"] == "done"
+    # 换装生效：system prompt 含任务角色 persona；工具白名单段切到角色集
+    assert "侦察专才人设。" in llm.calls[0]["system"]
+    assert "通用测试员。" not in llm.calls[0]["system"]
+    assert "工具白名单 run_cmd" in llm.calls[0]["system"]
+    assert agent.dispatcher.current_persona_role is None  # 收尾已恢复
+    # 恢复底色（幂等出口后状态干净）
+    assert agent.role_name == "_generalist"
+    assert agent._persona_saved is None
+    # 事件 + 履历
+    kinds = [e["kind"] for e in bb.recent_events(project["id"])]
+    assert "session.persona_switched" in kinds
+    att = tq.get_task(tid)["context"]["attempts"][0]
+    assert att["role"] == "recon"  # 实际执行 persona，而非底色
+
+
+def test_no_role_task_runs_in_base_persona(env):
+    """无 role 任务按底色跑：不换装、不发 persona_switched。"""
+    bb, project, gw, tq, _ = env
+    write_role(env, "recon", RECON_YAML)
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("t1", "complete_task", {"result_note": "完"})]},
+        {"tool_use": [ScriptedLLM.tool_call("t2", "finish", {"summary": "完"})]},
+    ])
+    agent = make_agent(env, llm)
+    tid = tq.publish(project["id"], "普通任务")
+    agent.run_next_task()
+    assert tq.get_task(tid)["status"] == "done"
+    assert agent.role_name == "_generalist"
+    assert agent._persona_saved is None
+    assert not any(e["kind"] == "session.persona_switched"
+                   for e in bb.recent_events(project["id"]))
+
+
+def test_persona_restore_after_fail_and_idle_claim(env):
+    """失败收尾恢复底色；run_next_task 顶部兜底闸——换装态空手认领也先复位。"""
+    bb, project, gw, tq, _ = env
+    write_role(env, "recon", RECON_YAML)
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("t1", "fail_task", {"result_note": "炸了"})]},
+        {"tool_use": [ScriptedLLM.tool_call("t2", "finish", {"summary": "失败收尾"})]},
+    ])
+    agent = make_agent(env, llm)
+    tid = tq.publish(project["id"], "会炸的任务", role="recon")
+    agent.run_next_task()
+    assert tq.get_task(tid)["status"] == "failed"
+    assert agent.role_name == "_generalist"  # fail 路径恢复底色
+    # 兜底闸：人为制造换装残留（模拟泄漏路径），下一次 run_next_task 前强制复位
+    agent._persona_saved = {"role_name": "_generalist", "role": {}, "max_noise": None,
+                            "allowed_tools": None, "max_runtime": None,
+                            "dispatcher_allowed_tools": None,
+                            "dispatcher_max_runtime": None}
+    agent.role_name = "recon"
+    agent.dispatcher.current_persona_role = "recon"
+    assert agent.run_next_task() is None  # 队列空
+    assert agent.role_name == "_generalist"
+    assert agent.dispatcher.current_persona_role is None
+
+
+def test_persona_missing_role_file_runs_defensively(env):
+    """任务 role 对应文件不存在（发布后被删）：防御性按当前角色跑，不换装不炸。"""
+    bb, project, gw, tq, _ = env
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("t1", "complete_task", {"result_note": "完"})]},
+        {"tool_use": [ScriptedLLM.tool_call("t2", "finish", {"summary": "完"})]},
+    ])
+    agent = make_agent(env, llm)
+    tid = tq.publish(project["id"], "幽灵角色任务", role="ghost-role")
+    agent.run_next_task()
+    assert tq.get_task(tid)["status"] == "done"
+    assert agent.role_name == "_generalist"
+    assert not any(e["kind"] == "session.persona_switched"
+                   for e in bb.recent_events(project["id"]))
+
+
+# ---------- 路由增强（2026-09-18）：未命中 kb 兜底 / task_type 加分 / kb 提示行 / kb_search ----------
+
+def _kb_env(tmp_path):
+    """给 packs/kb/web 配 kb 源（中文 H1 + frontmatter title + 首行摘要）。"""
+    kb = tmp_path / "packs" / "kb" / "web"
+    (kb / "poc").mkdir(parents=True, exist_ok=True)
+    (kb / "poc" / "越权检测.md").write_text(
+        "# 越权检测方法\n本篇汇总越权检测的完整路径。\n"
+        "X9BODY_MARKER 完整正文细节只随 kb_open 注入", encoding="utf-8")
+    (kb / "poc" / "tduck.md").write_text(
+        "---\ntitle: 问卷系统越权合集\n---\n正文内容", encoding="utf-8")
+
+
+def test_skill_miss_injects_kb_sources(env):
+    """路由未命中不再返回空串：注入 kb 源清单 + kb_search 指引（此前 Agent 不知道 kb 存在）。"""
+    bb, project, gw, tq, tmp_path = env
+    _kb_env(tmp_path)
+    llm = ScriptedLLM([{"tool_use": [ScriptedLLM.tool_call("t1", "finish",
+                                                           {"summary": "完"})]}])
+    agent = make_agent(env, llm)
+    agent.run_task("整理资产清单")  # 不含 demo 技能关键词「测试」→ 未命中
+    system = llm.calls[0]["system"]
+    assert "未命中技能指引" in system and "kb_search" in system
+    assert "可用知识库源" in system and "web-kb" in system
+    routed = [e for e in bb.recent_events(project["id"]) if e["kind"] == "skill.routed"]
+    assert routed and routed[-1]["payload"]["name"] is None
+    assert routed[-1]["payload"].get("kb_hits") is not None
+
+
+def test_task_type_bonus_and_scope_in_claim_path(env):
+    """认领队列任务：task_type 加分选中 task_types 技能；scope 拼进路由 query；
+    skill.routed 事件带 task_type。"""
+    bb, project, gw, tq, tmp_path = env
+    exp = tmp_path / "packs" / "capabilities" / "web" / "skills" / "exp"
+    exp.mkdir(parents=True)
+    (exp / "SKILL.md").write_text(
+        "---\nname: exp\ndescription: 专用利用技能\ntask_types: exploit\n---\n利用步骤。",
+        encoding="utf-8")
+    tid = tq.publish(project["id"], "处理工单", scope="target.com",
+                     task_type="exploit", created_by="human")
+    llm = ScriptedLLM([{"tool_use": [ScriptedLLM.tool_call("t1", "finish",
+                                                           {"summary": "完"})]}])
+    agent = make_agent(env, llm)
+    agent.run_next_task()
+    system = llm.calls[0]["system"]
+    assert "当前命中技能: exp" in system  # task_type +10 翻盘（文本 0 分）
+    routed = [e for e in bb.recent_events(project["id"]) if e["kind"] == "skill.routed"]
+    assert "target.com" in routed[-1]["payload"]["query"]  # 路由 query 拼 scope
+    assert routed[-1]["payload"]["task_type"] == "exploit"
+    assert f"task_type:exploit" in routed[-1]["payload"]["matched"]
+
+
+def test_kb_module_hint_lines(env):
+    """认领/执行时按 objective 中文 2-gram 命中 kb 标题索引 → 📚 提示行。
+    K3：注入一行摘要，但 kb 正文（X9BODY_MARKER 之后的细节）不整体注入。"""
+    bb, project, gw, tq, tmp_path = env
+    _kb_env(tmp_path)
+    llm = ScriptedLLM([{"tool_use": [ScriptedLLM.tool_call("t1", "finish",
+                                                           {"summary": "完"})]}])
+    agent = make_agent(env, llm)
+    agent.run_task("排查问卷系统越权问题")  # demo 技能关键词「测试」不在 → 未命中分支
+    system = llm.calls[0]["system"]
+    assert "📚 相关知识库模块" in system
+    assert "web/poc/tduck.md" in system and "问卷系统越权合集" in system
+    assert "本篇汇总越权检测的完整路径" in system  # K3 一行摘要进 hints
+    assert "X9BODY_MARKER" not in system  # 只给路径+摘要，不注入 kb 正文
+    routed = [e for e in bb.recent_events(project["id"]) if e["kind"] == "skill.routed"]
+    assert "web/poc/tduck.md" in routed[-1]["payload"]["kb_hits"]
+
+
+def test_kb_search_tool(env):
+    """kb_search：多源全文检索 → path 即 kb_open module（M0 全局形态带域前缀）；落 kb.search 审计；空/无命中分支。"""
+    bb, project, gw, tq, tmp_path = env
+    _kb_env(tmp_path)
+    llm = ScriptedLLM([])
+    agent = make_agent(env, llm)
+    d = agent.dispatcher
+    r = d.dispatch("kb_search", {"query": "越权"})
+    assert "web/poc/tduck.md" in r and "kb_open 的 module 参数" in r
+    assert "kb.search" in [e["kind"] for e in bb.recent_events(project["id"])]
+    assert "[拒绝]" in d.dispatch("kb_search", {"query": "  "})
+    assert "[无命中]" in d.dispatch("kb_search", {"query": "不存在的专题xyz"})
+
+
+def test_kb_search_plan_gate_and_whitelist(env):
+    """kb_search 与 kb_open 同类：计划闸恒放行；角色 tools 白名单非空且不含它则拒绝。"""
+    bb, project, gw, tq, tmp_path = env
+    _kb_env(tmp_path)
+    llm = ScriptedLLM([])
+    agent = make_agent(env, llm)
+    d = agent.dispatcher
+    # 计划闸放行：认领无计划任务后 kb_search 仍可调（只读侦察）
+    tid = tq.publish(project["id"], "检索知识", created_by="human")
+    tq.claim(tid, agent.session["id"])
+    d.current_task_id = tid
+    assert "[计划闸]" not in d.dispatch("kb_search", {"query": "越权"})
+    # 角色白名单约束：tools 非空且不含 kb_search → 越界拒绝
+    write_role(env, "narrow", 'name: narrow\npersona: "窄白名单。"\ntools: [run_cmd]\n')
+    agent2 = make_agent(env, ScriptedLLM([]), role="narrow")
+    r = agent2.dispatcher.dispatch("kb_search", {"query": "越权"})
+    assert "[越界拒绝]" in r
+
+
+# ---------- v0.65：测试点路由索引 / 卡壳召回 / done 自动沉淀 ----------
+
+_INDEX_YAML = (
+    "entries:\n"
+    "  - point: 文件上传测试\n"
+    "    match: [文件上传, upload]\n"
+    "    kb: web/poc/文件上传.md\n"
+    "    tags: [demo]\n"
+    "  - point: 越权检测\n"
+    "    kb: web/poc/越权.md\n"
+)
+
+
+def _write_web_pack(env, index_yaml=_INDEX_YAML):
+    """tmp packs 里建 web 域 kb 源与全局 route_index.yaml（M0 单表）。"""
+    _, _, _, _, tmp_path = env
+    (tmp_path / "packs" / "capabilities" / "web").mkdir(parents=True, exist_ok=True)
+    kb = tmp_path / "packs" / "kb" / "web"
+    (kb / "poc").mkdir(parents=True, exist_ok=True)
+    (kb / "poc" / "文件上传.md").write_text(
+        "# 文件上传测试手册\n先测后缀黑白名单，再测解析漏洞。\n", encoding="utf-8")
+    (kb / "poc" / "越权.md").write_text(
+        "# 越权检测\n换 id 做差分对比。\n", encoding="utf-8")
+    if index_yaml is not None:
+        (tmp_path / "packs" / "kb" / "route_index.yaml").write_text(
+            index_yaml, encoding="utf-8")
+    return kb
+
+
+def test_skill_context_injects_route_index(env):
+    """认领注入（G1 Top-K）：query 命中条目才注入，未匹配只剩指引行；
+    条目 tags 按角色白名单裁剪。"""
+    _write_web_pack(env)
+    agent = make_agent(env, ScriptedLLM([]))  # _generalist：skills=null 全可见
+    ctx = agent.skill_context_for("处理文件上传")
+    assert "🧭 测试点路由索引" in ctx
+    assert "文件上传测试" in ctx and "web/poc/文件上传.md" in ctx
+    assert "route_lookup" in ctx       # 其余条目经 route_lookup 查询
+    # 未匹配 query → 只剩指引行，不注入全表
+    ctx_none = agent.skill_context_for("随便看看")
+    assert "文件上传测试" not in ctx_none and "route_lookup" in ctx_none
+    # 白名单角色：tags=[demo] 条目仍可见（交集非空）
+    write_role(env, "strike", 'name: 打点\nskills: [demo]\n')
+    agent2 = make_agent(env, ScriptedLLM([]), role="strike")
+    ctx2 = agent2.skill_context_for("处理文件上传")
+    assert "文件上传测试" in ctx2
+    # 交集为空 → 即使 query 命中也裁掉
+    write_role(env, "recon", 'name: 侦察\nskills: [别的技能]\n')
+    agent3 = make_agent(env, ScriptedLLM([]), role="recon")
+    ctx3 = agent3.skill_context_for("处理文件上传")
+    assert "- 文件上传测试 → " not in ctx3   # 交集为空 → 路由索引条目裁掉
+    assert "route_lookup" in ctx3
+
+
+def test_route_lookup_and_skill_open_tools(env):
+    """G1 只读查询工具：route_lookup 按关键词查索引（角色裁剪同口径）；
+    skill_open 打开技能全量正文；未知名回可用清单防幻觉。"""
+    _write_web_pack(env)
+    agent = make_agent(env, ScriptedLLM([]))
+    d = agent.dispatcher
+    out = d.dispatch("route_lookup", {"query": "文件上传"})
+    assert "文件上传测试" in out and "kb_open" in out
+    assert d.dispatch("route_lookup", {"query": "zzz无关键词"}) .startswith("[无命中]")
+    assert d.dispatch("route_lookup", {"query": ""}).startswith("[拒绝]")
+    out_skill = d.dispatch("skill_open", {"name": "demo"})  # 轨级 demo 技能
+    assert "按步骤执行" in out_skill
+    assert d.dispatch("skill_open", {"name": "nope"}).startswith("[防幻觉]")
+    bb0, project0 = env[0], env[1]
+    evs = [e["kind"] for e in bb0.recent_events(project0["id"])]
+    # skill.open 审计事件落了（route_lookup 走 tool.call 通用审计）
+    assert "skill.open" in evs
+
+
+def test_skill_context_digest_not_full_body(env):
+    """G1 渐进披露：命中技能正文不整段进 system——只给目录 + skill_open 指针。"""
+    _write_web_pack(env)
+    skill_dir = env[4] / "packs" / "capabilities" / "web" / "skills" / "up"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: up\ndescription: 上传测试\nkeywords: 上传\n---\n"
+        "## 适用场景\n上传点打测。\n## 步骤\n先黑白名单。\n## 坑\n解析漏洞别漏。\n"
+        + "正文密度填充。" * 40, encoding="utf-8")
+    agent = make_agent(env, ScriptedLLM([]))
+    ctx = agent.skill_context_for("上传测试怎么打")
+    assert "当前命中技能: up" in ctx
+    assert "- 步骤" in ctx and "- 坑" in ctx       # 目录注入
+    assert "先黑白名单" not in ctx                  # 正文不整段注入
+    assert 'skill_open("up")' in ctx
+
+
+def test_kb_recall_for_advisor(env):
+    """卡壳召回：对话尾部命中手册 → 摘要注入；不相关/无 kb → 空串静默。"""
+    _write_web_pack(env)
+    agent = make_agent(env, ScriptedLLM([]))
+    recall = agent._kb_recall_for_advisor(
+        [{"role": "user", "content": "发现了文件上传点，试了几种后缀都被拦"}])
+    assert "知识库相关经验" in recall and "文件上传测试手册" in recall
+    assert agent._kb_recall_for_advisor(
+        [{"role": "user", "content": "zzz 无关内容"}]) == ""
+
+
+def test_advisor_with_kb_recall_still_recovers(env):
+    """召回接入顾问主链：stuck 触发时 planner 收到手册摘要，流程不断。"""
+    _write_web_pack(env)
+    planner = ScriptedLLM([{"text": "建议：按文件上传手册先测后缀黑白名单。"}])
+    script = [{"text": "……继续观察"} for _ in range(8)]
+    script.append({"tool_use": [ScriptedLLM.tool_call("t9", "finish", {"summary": "完成"})]})
+    llm = ScriptedLLM(script)
+    agent = make_agent(env, llm, planner=planner,
+                       config=AgentConfig(max_steps=15, stuck_after=3))
+    agent.run_task("文件上传点卡住了")
+    seen = json.dumps(planner.calls, ensure_ascii=False)
+    assert "文件上传测试手册" in seen
+    assert any("[策略顾问]" in json.dumps(c["messages"], ensure_ascii=False)
+               for c in llm.calls)
+
+
+def _sediment_planner(payload_json):
+    return ScriptedLLM([{"text": payload_json}])
+
+
+_PROPOSAL_JSON = json.dumps({
+    "kind": "kb", "mode": "create",
+    "target": {"kind": "kb", "cap": "web", "path": "poc/新经验.md"},
+    "content": "# 新经验\n已验证路径：换 id 差分。\n",
+    "summary": "差分法验证有效", "reason": "任务证据：t1 换 id 命中"
+}, ensure_ascii=False)
+
+
+def test_sediment_auto_proposal_on_complete(env):
+    """done 自动提案：complete_task 成功 → planner 复盘产 kb 提案草稿（人审批）。"""
+    from core.skills import proposals
+    _write_web_pack(env)
+    bb, project, gw, tq, tmp_path = env
+    task_id = tq.publish(project["id"], "越权测试", task_type="exploit", created_by="human")
+    planner = _sediment_planner(_PROPOSAL_JSON)
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("t1", "complete_task",
+                                            {"result_note": "换 id 差分验证成功"})]},
+        {"tool_use": [ScriptedLLM.tool_call("t2", "finish", {"summary": "完"})]},
+    ])
+    agent = make_agent(env, llm, planner=planner, enable_sediment=True)
+    agent.run_task("越权", task_id=task_id)
+    pending = proposals.list_proposals(tmp_path / "packs", "pending")
+    assert len(pending) == 1 and pending[0]["origin"] == "agent"
+    assert pending[0]["task"] == task_id and pending[0]["target"]["cap"] == "web"
+    kinds = [e["payload"]["kind"] for e in
+             map(dict, bb.recent_events(project["id"], limit=50))
+             if e["kind"] == "proposal.created"]
+    assert "kb" in kinds  # 审计事件落了（origin=sediment 在 payload 里）
+
+
+def test_sediment_index_proposal_on_complete(env):
+    """K4 沉淀回流：复盘产出 index 增补提案（planner 输出 kind=index）→
+    落 pending index 提案，待人审批同步 route_index.yaml。"""
+    from core.skills import proposals
+    _write_web_pack(env)  # route_index.yaml 已存在 → index 只能 edit
+    bb, project, gw, tq, tmp_path = env
+    task_id = tq.publish(project["id"], "越权测试", task_type="exploit", created_by="human")
+    index_json = json.dumps({
+        "kind": "index", "mode": "edit",
+        "target": {"kind": "index", "cap": "web"},
+        "content": "entries:\n  - point: 越权测试\n    kb: web/poc/越权.md\n",
+        "summary": "补越权条目", "reason": "任务验证有效",
+    }, ensure_ascii=False)
+    planner = _sediment_planner(index_json)
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("t1", "complete_task",
+                                            {"result_note": "越权差分验证成功"})]},
+        {"tool_use": [ScriptedLLM.tool_call("t2", "finish", {"summary": "完"})]},
+    ])
+    agent = make_agent(env, llm, planner=planner, enable_sediment=True)
+    agent.run_task("越权", task_id=task_id)
+    pending = proposals.list_proposals(tmp_path / "packs", "pending")
+    assert len(pending) == 1
+    assert pending[0]["target"]["kind"] == "index" and pending[0]["mode"] == "edit"
+
+
+def test_sediment_none_and_silent_failure(env):
+    """复盘输出 NONE / planner 缺席 / 校验拒绝 → 无提案、任务照常收尾。"""
+    from core.skills import proposals
+    _write_web_pack(env)
+    bb, project, gw, tq, tmp_path = env
+    t1 = tq.publish(project["id"], "任务一", task_type="generic", created_by="human")
+    t2 = tq.publish(project["id"], "任务二", task_type="generic", created_by="human")
+    planner = _sediment_planner("NONE")
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("t1", "complete_task", {"result_note": "无沉淀"})]},
+        {"tool_use": [ScriptedLLM.tool_call("t2", "finish", {"summary": "完"})]},
+    ])
+    agent = make_agent(env, llm, planner=planner, enable_sediment=True)
+    agent.run_task("一", task_id=t1)
+    assert proposals.list_proposals(tmp_path / "packs", "pending") == []
+    # 非法提案 JSON（cap 不存在）→ 创建被拒静默跳过
+    planner2 = _sediment_planner(_PROPOSAL_JSON.replace('"cap": "web"', '"cap": "nope"'))
+    llm2 = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("t1", "complete_task", {"result_note": "x"})]},
+        {"tool_use": [ScriptedLLM.tool_call("t2", "finish", {"summary": "完"})]},
+    ])
+    agent2 = make_agent(env, llm2, planner=planner2, enable_sediment=True)
+    agent2.run_task("二", task_id=t2)
+    assert proposals.list_proposals(tmp_path / "packs", "pending") == []
+    assert tq.get_task(t2)["status"] == "done"  # 收尾不受影响
+
+
+# ---------- H1：spill 落盘与豁免（借鉴 dsh tool-output-spill-files） ----------
+
+def test_dispatch_spills_oversized_result(env):
+    """超 8000 字符的工具结果：全量落 workspace/spill/，回填预览+定位器。"""
+    bb, project, gw, tq, tmp_path = env
+    agent = make_agent(env, ScriptedLLM([]), artifacts_dir=tmp_path / "artifacts")
+    d = agent.dispatcher
+    d._tool_big = lambda **k: "X" * 20000  # 假工具绕过 run_cmd 的 gateway brief
+    out = d.dispatch("big", {})
+    assert "[结果超限已落盘]" in out and "[省略" in out
+    assert "完整内容" in out and "../spill/" in out  # scratch 相对路径定位器
+    files = list((tmp_path / "spill").glob("*-big.txt"))
+    assert len(files) == 1
+    assert files[0].read_text(encoding="utf-8") == "X" * 20000  # 落盘是全量
+    # tool.call 审计事件照落，result_head 即预览（不吞全量）
+    ev = [e for e in bb.recent_events(project["id"]) if e["kind"] == "tool.call"]
+    assert ev and ev[-1]["payload"]["name"] == "big"
+
+
+def test_dispatch_spill_skip_kb_open(env):
+    """kb_open 豁免：正文即取用目的，再长也不 spill（run_cmd/kb_open/skill_open/
+    route_lookup 同一豁免清单）。"""
+    bb, project, gw, tq, tmp_path = env
+    agent = make_agent(env, ScriptedLLM([]), artifacts_dir=tmp_path / "artifacts")
+    d = agent.dispatcher
+    d._tool_kb_open = lambda module: "Y" * 20000
+    out = d.dispatch("kb_open", {"module": "x"})
+    assert out == "Y" * 20000
+    assert not (tmp_path / "spill").exists()
+
+
+# ---------- H1：剪枝先行（借鉴 dsh pruning-before-summary） ----------
+
+def test_prune_before_summary_mechanical_only(env):
+    """老区超长 tool_result 机械剪（head 400 + tail 200 + 省略注脚）即可回到
+    触发线时，不动用 LLM 摘要——llm.compact 落 summarized=0/pruned=N。"""
+    bb, project, gw, tq, _ = env
+    llm = ScriptedLLM([{"text": "摘要调用不该发生"}])
+    agent = make_agent(env, llm, config=AgentConfig(
+        max_steps=5, context_summary_chars=10_000, context_char_budget=1_000_000))
+    msgs: list[dict] = [{"role": "user", "content": "目标"}]
+    for i in range(7):  # len=15，cut=15-8=7，old=前 7 条（含 i=0 的大结果）
+        msgs.append({"role": "assistant", "content": [
+            {"type": "tool_use", "id": f"c{i}", "name": "run_cmd", "input": {}}]})
+        big = "R" * 30000 if i == 0 else "短结果"
+        msgs.append({"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": f"c{i}", "content": big}]})
+    assert agent._maybe_summarize(msgs) is True
+    pruned_text = msgs[2]["content"][0]["content"]
+    assert len(pruned_text) < 1000 and "省略 29400 字符" in pruned_text
+    assert llm.calls == []  # 机械剪即达标，LLM 剧本未被消费
+    compacts = [e for e in bb.recent_events(project["id"])
+                if e["kind"] == "llm.compact"]
+    assert len(compacts) == 1
+    assert compacts[0]["payload"]["summarized"] == 0
+    assert compacts[0]["payload"]["pruned"] == 1
+
+
+# ---------- H3：request_escalation（deny-driven 一次性升级） ----------
+
+def test_request_escalation_rejections(env):
+    """四类不受理：本就允许/工作区隔离红线/限速自助/隔离等级红线 + 空理由。"""
+    bb, project, gw, tq, tmp_path = env
+    d = make_agent(env, ScriptedLLM([])).dispatcher
+    # ① 当前策略允许 → 无需升级
+    out = d.dispatch("request_escalation",
+                     {"cmd": "echo hi", "runtime": "host", "reason": "试试"})
+    assert out.startswith("[拒绝]") and "直接 run_cmd" in out
+    # ② 工作区隔离是红线（需装配 artifacts_dir 才有工作区判定）
+    d2 = make_agent(env, ScriptedLLM([]),
+                    artifacts_dir=tmp_path / "art").dispatcher
+    out = d2.dispatch("request_escalation",
+                      {"cmd": "echo x > ../../evil.txt", "runtime": "host",
+                       "reason": "写工作区外"})
+    assert "工作区隔离" in out and "红线" in out
+    # ③ 限速拒因可自助补参（拒因自带放行参数），不允许升级
+    out = d.dispatch("request_escalation",
+                     {"cmd": "nmap -p- 1.2.3.4", "runtime": "host",
+                      "reason": "全端口"})
+    assert "限速纪律" in out
+    # ④ 隔离等级是红线（宁严勿松）：untrusted 不允许 host
+    out = d.dispatch("request_escalation",
+                     {"cmd": "echo hi", "runtime": "host",
+                      "threat_class": "untrusted", "reason": "x"})
+    assert "隔离等级策略" in out
+    # ⑤ 空理由拒绝
+    out = d.dispatch("request_escalation",
+                     {"cmd": "echo hi", "runtime": "host", "reason": "  "})
+    assert "升级理由" in out
+    # 全程没有产生审批单
+    assert bb.conn.execute("SELECT COUNT(*) c FROM approvals").fetchone()["c"] == 0
+
+
+def test_request_escalation_net_real_creates_approval(env):
+    """net=real：提交 high 风险审批单（kind=net_real），命令只等批准不执行。"""
+    bb, project, gw, tq, _ = env
+    agent = make_agent(env, ScriptedLLM([]))
+    out = agent.dispatcher.dispatch("request_escalation", {
+        "cmd": "wget http://10.0.0.5/x", "runtime": "host", "net": "real",
+        "reason": "需要真实出网验证 SSRF"})
+    assert out.startswith("[已提交审批]")
+    row = bb.conn.execute("SELECT * FROM approvals").fetchone()
+    assert row is not None and row["status"] == "pending"
+    assert row["risk"] == "high" and row["session_id"] == agent.session["id"]
+    action = json.loads(row["action"])
+    assert action["op"] == "escalation" and action["kind"] == "net_real"
+    assert action["net"] == "real" and "SSRF" in action["reason"]
+
+
+def test_request_escalation_role_runtime(env):
+    """runtime 超角色 max_runtime 软上限：medium 审批单（kind=role_runtime）。"""
+    bb, project, gw, tq, _ = env
+    write_role(env, "limited",
+               'name: limited\npersona: "受限。"\nmax_runtime: host\n')
+    agent = make_agent(env, ScriptedLLM([]), role="limited")
+    assert agent.dispatcher.max_runtime == "host"
+    out = agent.dispatcher.dispatch("request_escalation", {
+        "cmd": "echo hi", "runtime": "wsl", "reason": "需要 wsl 工具链"})
+    assert out.startswith("[已提交审批]")
+    row = bb.conn.execute("SELECT action, risk FROM approvals").fetchone()
+    action = json.loads(row["action"])
+    assert action["kind"] == "role_runtime" and row["risk"] == "medium"
+
+
+def test_escalation_result_reaches_chat_round(env):
+    """空闲对话轮注入升级回执：escalation_result 经收件箱 drain → 首消息拼回执
+    → 纯文本回复落 agent.chat 事件。"""
+    bb, project, gw, tq, _ = env
+    llm = ScriptedLLM([{"text": "已收到升级回执，出网验证通过。"}])
+    agent = make_agent(env, llm)
+    sid = agent.session["id"]
+    bb.inbox_post(project["id"], sid, "escalation_result", "appr-1",
+                  {"text": "[host] exit=0", "cmd": "wget http://x"})
+    out = agent.run_chat()
+    assert out == "已收到升级回执，出网验证通过。"
+    first = json.dumps(llm.calls[0]["messages"][0], ensure_ascii=False)
+    assert "升级命令已执行" in first and "exit=0" in first
+    # 收件箱已消费 + 回复落事件流
+    assert bb.inbox_list(project["id"], sid, unread_only=True) == []
+    assert any(e["kind"] == "agent.chat"
+               for e in bb.recent_events(project["id"]))
+
+
+# ---------- P3 多智能体协调：bb_notify 私信 / agent_message 注入 / 子任务回执 ----------
+
+def test_bb_notify_tool_target_and_broadcast(env):
+    """bb_notify（B1）：to_session 定向优先；to_role 广播活跃同角色窗（跳过自己
+    与已关闭）；两者皆空/text 空/不存在/已关闭 → [错误]；统一落 tool.call 审计。"""
+    from core.agent.tools import ToolDispatcher
+    bb, project, gw, tq, _ = env
+    s1 = bb.register_session(project["id"], "发信窗")["id"]
+    peer = bb.register_session(project["id"], "收信窗")["id"]
+    closed = bb.register_session(project["id"], "已关窗")["id"]
+    bb.close_session(closed)
+    d = ToolDispatcher(bb, gateway=gw, tq=tq, project_id=project["id"],
+                       session_id=s1, author=s1)
+    r = d.dispatch("bb_notify", {"to_session": peer, "kind": "intel",
+                                 "text": "8080 有 swagger 未鉴权"})
+    assert r.startswith("已送达"), r
+    rows = bb.inbox_list(project["id"], peer)
+    assert rows and rows[0]["kind"] == "agent_message"
+    assert rows[0]["payload"]["text"] == "8080 有 swagger 未鉴权"
+    assert rows[0]["payload"]["from"] == s1
+    # to_role 广播：活跃同角色送达（closed 查询即滤掉、自己循环内跳过不计数）
+    r = d.dispatch("bb_notify", {"to_role": "_generalist", "kind": "assist",
+                                 "text": "谁有靶机出口权限？"})
+    assert "已广播" in r and "送达 1 窗" in r, r
+    last = bb.inbox_list(project["id"], peer)[-1]["payload"]
+    assert last["subkind"] == "assist" and last["from"] == s1
+    assert bb.inbox_list(project["id"], s1) == []  # 自己不收
+    assert bb.inbox_list(project["id"], closed) == []  # 已关闭不投
+    # 错误路径
+    assert d.dispatch("bb_notify", {"text": "   "}).startswith("[错误]")
+    assert d.dispatch("bb_notify", {"text": "x"}).startswith("[错误]")
+    assert d.dispatch("bb_notify", {"to_session": "sess-nope", "text": "x"}).startswith("[错误]")
+    assert d.dispatch("bb_notify", {"to_session": closed, "text": "x"}).startswith("[错误]")
+    assert d.dispatch("bb_notify", {"to_role": "no-role", "text": "x"}).startswith("[错误]")
+    # 审计：dispatch 统一落 tool.call（payload.name=工具名）
+    assert any(e["kind"] == "tool.call" and e["payload"].get("name") == "bb_notify"
+               for e in bb.recent_events(project["id"]))
+
+
+def test_agent_message_injected_at_step_boundary_and_claim(env):
+    """agent_message 注入（P3.4）：任务中途到达的私信在**步边界**信息式注入
+    （与 human_note 轮末语义不同——私信与任务现场相关）；空闲期到达的私信随
+    下一轮认领期 drain 进开场。"""
+    bb, project, gw, tq, _ = env
+    tid = tq.publish(project["id"], "被私信的任务", task_type="generic")
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("t1", "run_cmd",
+                                            {"cmd": "whoami", "runtime": "host",
+                                             "threat_class": "trusted"})]},
+        {"tool_use": [ScriptedLLM.tool_call("t2", "finish", {"summary": "本轮完成"})]},
+        {"tool_use": [ScriptedLLM.tool_call("t3", "finish", {"summary": "下轮收到私信"})]},
+    ])
+    agent = make_agent(env, llm)
+    peer = bb.register_session(project["id"], "peer")["id"]
+    orig_chat = llm.chat
+    n = {"c": 0}
+
+    def chat(messages, **kw):
+        n["c"] += 1
+        r = orig_chat(messages, **kw)
+        if n["c"] == 1:  # 第 1 步期间投递私信 → 第 2 步边界注入
+            bb.post_agent_message(project["id"], peer, agent.session["id"],
+                                  "intel", "8080 有 swagger 未鉴权")
+        return r
+    llm.chat = chat
+
+    assert agent.run_task("私信演练", task_id=tid) == "本轮完成"
+    second = json.dumps(llm.calls[1]["messages"], ensure_ascii=False)
+    assert "📨 Agent 私信" in second and "swagger" in second
+    # 空闲期到达的私信随下一轮认领期注入
+    bb.post_agent_message(project["id"], peer, agent.session["id"],
+                          "assist", "把 80 端口结果发我一份")
+    tid2 = tq.publish(project["id"], "下轮任务", task_type="generic")
+    assert agent.run_task("下一轮", task_id=tid2) == "下轮收到私信"
+    first = json.dumps(llm.calls[2]["messages"], ensure_ascii=False)
+    assert "📨 Agent 私信" in first and "80 端口" in first
+
+
+def test_run_chat_consumes_agent_message(env):
+    """对话轮消费私信（P3.4）：run_chat only_kinds 扩 4 kind——agent_message 注入
+    对话轮（含 subkind 中文标注），回复后收件箱清空。"""
+    bb, project, gw, tq, _ = env
+    llm = ScriptedLLM([{"text": "收到，8080 的 swagger 我这就复核。"}])
+    agent = make_agent(env, llm)
+    sid = agent.session["id"]
+    peer = bb.register_session(project["id"], "peer")["id"]
+    bb.post_agent_message(project["id"], peer, sid, "intel", "8080 有 swagger 未鉴权")
+    out = agent.run_chat()
+    assert out and "复核" in out
+    first = json.dumps(llm.calls[0]["messages"][0], ensure_ascii=False)
+    assert "📨 Agent 私信" in first and "情报" in first and "swagger" in first
+    assert bb.inbox_list(project["id"], sid, unread_only=True) == []
+
+
+def test_task_receipt_reaches_parent_chat(env):
+    """端到端回执链（P3）：子窗收尾 → task_receipt 投父窗收件箱 → 父窗空闲
+    run_chat 对话轮收到 ✅ 完成摘要与发现清单。"""
+    bb, project, gw, tq, _ = env
+    llm = ScriptedLLM([{"text": "子任务结论已收录，接管链已上图。"}])
+    agent = make_agent(env, llm)
+    sid = agent.session["id"]
+    parent = tq.publish(project["id"], "父任务：打 target.com", task_type="generic")
+    tq.claim(parent, sid)
+    child = tq.publish(project["id"], "子任务：子域枚举", task_type="generic",
+                       parent_id=parent, created_by=sid)
+    peer = bb.register_session(project["id"], "子窗")["id"]
+    tq.claim(child, peer)
+    bb.add_finding(project["id"], "info-leak", "悬空 CNAME 可接管",
+                   severity="high", author=peer)
+    tq.complete(child, peer, "枚举完成，接管成立")
+    out = agent.run_chat()
+    assert out and "上图" in out
+    first = json.dumps(llm.calls[0]["messages"][0], ensure_ascii=False)
+    assert "✅ 子任务完成" in first and "子域枚举" in first and "悬空 CNAME" in first
+    assert bb.inbox_list(project["id"], sid, unread_only=True) == []
+
+
+# ---------- 收件箱订阅声明化 + 中断落盘（2026-09-21） ----------
+
+def test_resume_drains_escalation_result(env):
+    """恢复期补齐 escalation_result（订阅声明化）：暂停期送达的升级回执随快照
+    恢复注入——原实现全量 drain 但渲染漏 esc，回执被标记已读后静默吞掉。"""
+    bb, project, gw, tq, tmp_path = env
+    tid = tq.publish(project["id"], "恢复收回执任务", task_type="generic")
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("t1", "run_cmd",
+                                            {"cmd": "c1", "runtime": "host",
+                                             "threat_class": "trusted"})]},
+    ])
+    agent = make_agent(env, llm, config=AgentConfig(max_steps=10),
+                       artifacts_dir=tmp_path / "proj" / "artifacts")
+    orig_chat = llm.chat
+    n = {"c": 0}
+
+    def chat(messages, **kw):
+        n["c"] += 1
+        r = orig_chat(messages, **kw)
+        if n["c"] == 1:
+            agent.request_pause()   # 暂停 → 快照落盘（可续现场）
+        return r
+    llm.chat = chat
+
+    assert agent.run_task("恢复演练", task_id=tid) == ""
+    sid = agent.session["id"]
+    # 暂停态硬中断（E12 同款：任务 failed「人工中断」、快照+指针保留）
+    agent._abort_current_task()
+    agent._pause_req.clear()  # request_abort 才会清暂停请求；此处手动清以放行续跑
+    assert tq.get_task(tid)["status"] == "failed"
+    # 暂停期间送达的升级回执（API 层批准执行后投递同款形态）
+    bb.inbox_post(project["id"], sid, "escalation_result", "appr-r1",
+                  {"text": "[host] exit=0", "cmd": "wget http://x"})
+    st = agent.revive_snapshot(tid)
+    assert st is not None
+    tq.reopen(tid, by="human")
+    tq.claim(tid, sid, lease_minutes=agent.config.lease_minutes)
+    agent._stop_after_task = False  # 清中断一次性闸门（E12 同款）
+    llm2 = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("t2", "finish", {"summary": "续跑收到回执"})]},
+    ])
+    agent.llm = llm2
+    assert agent.run_next_task() == "续跑收到回执"
+    first = json.dumps(llm2.calls[0]["messages"], ensure_ascii=False)
+    assert "升级命令已执行" in first and "exit=0" in first
+
+
+def test_claim_renders_pure_inbox_basis_stale(env):
+    """认领期纯私信 basis_stale 不再被 stale_refs 门控吞掉（订阅声明化）：任务行
+    无挂标（stale_refs 空）但收件箱有撤回私信 → 认领期照常渲染强制自评三选一。"""
+    bb, project, gw, tq, _ = env
+    tid = tq.publish(project["id"], "收撤回私信任务", task_type="generic")
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("t1", "finish", {"summary": "完成"})]},
+    ])
+    agent = make_agent(env, llm)
+    sid = agent.session["id"]
+    # 纯私信形态：任务行 stale_refs 为空，只有收件箱行（撤回路由投递的 payload）
+    bb.inbox_post(project["id"], sid, "basis_stale", "find-abc123def456",
+                  {"finding_id": "find-abc123def456", "title": "弱口令后台",
+                   "vuln_class": "weak-cred", "by": "human", "note": "口令已轮换"})
+    assert agent.run_task("纯私信演练", task_id=tid) == "完成"
+    first = json.dumps(llm.calls[0]["messages"], ensure_ascii=False)
+    assert "依据撤回" in first and "弱口令后台" in first and "三选一" in first
+
+
+def test_unknown_inbox_kind_not_swallowed(env):
+    """未登记 kind 绝不被静默吞（订阅声明化）：四消费点 only_kinds 从订阅表构造
+    ——未登记 kind 经认领期+步边界后仍滞留收件箱未读（红点可见，提示先登记）。"""
+    bb, project, gw, tq, _ = env
+    tid = tq.publish(project["id"], "未知kind任务", task_type="generic")
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("t1", "run_cmd",
+                                            {"cmd": "c1", "runtime": "host",
+                                             "threat_class": "trusted"})]},
+        {"tool_use": [ScriptedLLM.tool_call("t2", "finish", {"summary": "完成"})]},
+    ])
+    agent = make_agent(env, llm)
+    sid = agent.session["id"]
+    bb.inbox_post(project["id"], sid, "future_kind", "ref-x", {"text": "未来私信"})
+    assert agent.run_task("未知kind演练", task_id=tid) == "完成"
+    unread = bb.inbox_list(project["id"], sid, unread_only=True)
+    assert [r["kind"] for r in unread] == ["future_kind"]
+
+
+def test_chat_scenario_leaves_task_kinds_unread(env):
+    """对话轮场景口径（订阅声明化）：run_chat 只消费无任务上下文也能响应的 kind
+    ——finding_update/basis_stale 留收件箱未读，下一轮认领期再消费（不是丢失）。"""
+    bb, project, gw, tq, _ = env
+    llm = ScriptedLLM([{"text": "收到引导。"},
+                       {"tool_use": [ScriptedLLM.tool_call("t1", "finish",
+                                                           {"summary": "补收完成"})]}])
+    agent = make_agent(env, llm)
+    sid = agent.session["id"]
+    bb.post_human_note(project["id"], sid, "请复核 8080")
+    bb.inbox_post(project["id"], sid, "finding_update", "find-abc123def456",
+                  {"finding_id": "find-abc123def456", "title": "弱口令后台"})
+    bb.inbox_post(project["id"], sid, "basis_stale", "find-def456abc123",
+                  {"finding_id": "find-def456abc123", "title": "旧依据"})
+    assert agent.run_chat() == "收到引导。"
+    unread = sorted(r["kind"] for r in bb.inbox_list(project["id"], sid, unread_only=True))
+    assert unread == ["basis_stale", "finding_update"]
+    # 下一轮认领期补收：两条都进开场（信息式 + 强制三选一）
+    tid = tq.publish(project["id"], "补收任务", task_type="generic")
+    assert agent.run_task("补收演练", task_id=tid) == "补收完成"
+    first = json.dumps(llm.calls[1]["messages"], ensure_ascii=False)
+    assert "弱口令后台" in first and "依据撤回" in first
+
+
+def test_interrupted_reply_flushed_in_chat(env):
+    """中断落盘（对话轮）：流式回复中途 abort——半截回复落 agent.chat 终稿
+    （interrupted=true + stream_id，无 step），run_chat 返 None，turn 有收口回复。"""
+    bb, project, gw, tq, _ = env
+    llm = ScriptedLLM([
+        {"text_deltas": ["分析", "结论一半"], "text": "分析结论一半"},
+    ])
+    agent = make_agent(env, llm)
+    sid = agent.session["id"]
+    bb.post_human_note(project["id"], sid, "说说思路")
+    orig_chat = llm.chat
+    fired = {"v": False}
+
+    def chat(messages, **kw):
+        on_text = kw.get("on_text")
+        if on_text is not None:
+            def wrapped(d):
+                on_text(d)
+                if not fired["v"]:
+                    fired["v"] = True
+                    agent.request_abort()   # 首个 text delta 后置中断
+            kw["on_text"] = wrapped
+        return orig_chat(messages, **kw)
+    llm.chat = chat
+
+    assert agent.run_chat() is None
+    finals = [e for e in bb.recent_events(project["id"]) if e["kind"] == "agent.chat"]
+    assert len(finals) == 1
+    p = finals[0]["payload"]
+    assert p["interrupted"] is True and "分析" in p["text"]
+    assert p.get("step") is None and p.get("stream_id")
+    assert not [e for e in bb.recent_events(project["id"])
+                if e["kind"] == "agent.chat.delta"]  # delta 已清剪（镜像成功路径）
+
+
+def test_interrupted_narrative_flushed_in_task(env):
+    """中断落盘（任务轮）：叙述流式中 abort——半截叙述落 agent.chat（step=1 +
+    interrupted=true），任务 fail「人工中断」；任务轮不发 delta 事件（只攒不发）。"""
+    bb, project, gw, tq, _ = env
+    tid = tq.publish(project["id"], "叙述中断任务", task_type="generic")
+    llm = ScriptedLLM([
+        {"text_deltas": ["第一步", "正在分析"], "text": "第一步正在分析",
+         "tool_use": [ScriptedLLM.tool_call("t1", "finish", {"summary": "不该到达"})]},
+    ])
+    agent = make_agent(env, llm)
+    orig_chat = llm.chat
+    fired = {"v": False}
+
+    def chat(messages, **kw):
+        on_text = kw.get("on_text")
+        if on_text is not None:
+            def wrapped(d):
+                on_text(d)
+                if not fired["v"]:
+                    fired["v"] = True
+                    agent.request_abort()
+            kw["on_text"] = wrapped
+        return orig_chat(messages, **kw)
+    llm.chat = chat
+
+    assert agent.run_task("叙述中断演练", task_id=tid) == ""
+    row = tq.get_task(tid)
+    assert row["status"] == "failed" and row["result_note"] == "人工中断"
+    finals = [e for e in bb.recent_events(project["id"]) if e["kind"] == "agent.chat"]
+    assert len(finals) == 1
+    p = finals[0]["payload"]
+    assert p["interrupted"] is True and p["step"] == 1 and "第一步" in p["text"]
+    assert not [e for e in bb.recent_events(project["id"])
+                if e["kind"] == "agent.chat.delta"]
+
+
+# ---------- 蓝图工具（R4 逆向开发管线） ----------
+
+def test_blueprint_tools_create_update_and_status_guard(env):
+    """bb_blueprint_create/update 全链路：建骨架 → 模块写回 → 整表/正文；
+    蓝图整体 status 不暴露给 Agent（拒绝引导走人类）。"""
+    bb, project, gw, tq, _ = env
+    agent = make_agent(env, ScriptedLLM([]))
+    d = agent.dispatcher
+    out = d.dispatch("bb_blueprint_create", {
+        "name": "聊天客户端", "goal": "重建客户端",
+        "binary_sha256": "abc123",
+        "modules": [{"name": "网络通信", "desc": "TCP",
+                     "func_addresses": ["0x401000"]},
+                    {"name": "加密校验", "desc": "AES"}]})
+    assert out.startswith("blueprint=") and "网络通信" in out
+    bid = out.split("blueprint=")[1].split()[0]
+    out = d.dispatch("bb_blueprint_update", {
+        "blueprint_id": bid, "module_name": "网络通信",
+        "spec": "def send(pkt): ...", "notes": "心跳 30s",
+        "module_status": "specd"})
+    assert "updated" in out
+    bp = bb.get_blueprint(project["id"], bid)
+    mod = next(m for m in bp["modules"] if m["name"] == "网络通信")
+    assert mod["spec"] == "def send(pkt): ..." and mod["status"] == "specd"
+    # 正文追加（汇总任务用）
+    out = d.dispatch("bb_blueprint_update", {
+        "blueprint_id": bid, "content_append": "## 数据流\n客户端→服务端 AES 包"})
+    assert "updated" in out
+    assert "AES" in bb.get_blueprint(project["id"], bid)["content_md"]
+    # 未知模块 → [错误]
+    out = d.dispatch("bb_blueprint_update", {
+        "blueprint_id": bid, "module_name": "没有的模块", "notes": "x"})
+    assert out.startswith("[错误]") and "模块不存在" in out
+    # 整体 status 不可由 Agent 直改
+    out = d.dispatch("bb_blueprint_update", {
+        "blueprint_id": bid, "module_status": "tested"})
+    assert out.startswith("[拒绝]")
+    # 整体流转白名单兜底：Agent 侧无从触达（工具无 status 入口），
+    # 人类侧经 store 直改验证白名单仍成立
+    with pytest.raises(ValueError, match="不可从 draft"):
+        bb.set_blueprint_status(project["id"], bid, "building")
+    # 重名蓝图拒收（同项目同样本同名）
+    out = d.dispatch("bb_blueprint_create",
+                     {"name": "聊天客户端", "binary_sha256": "abc123"})
+    assert out.startswith("[错误]") and "重名" in out
+
+
+def test_bb_query_blueprint(env):
+    """bb_query what=blueprint：列表给摘要（模块名/状态/地址），单份给全文。"""
+    bb, project, gw, tq, _ = env
+    agent = make_agent(env, ScriptedLLM([]))
+    d = agent.dispatcher
+    bp = bb.create_blueprint(project["id"], "查询样例", modules=[
+        {"name": "许可校验", "func_addresses": ["0x401000"]}])
+    out = d.dispatch("bb_query", {"what": "blueprint"})
+    rows = json.loads(out)
+    assert rows[0]["id"] == bp["id"] and rows[0]["modules"][0]["name"] == "许可校验"
+    out = d.dispatch("bb_query", {"what": "blueprint", "blueprint_id": bp["id"]})
+    full = json.loads(out)
+    assert full["content_md"] == "" and full["goal"] == ""
+    out = d.dispatch("bb_query", {"what": "blueprint", "blueprint_id": "bp-nope"})
+    assert out.startswith("[错误]")
+
+
+# ---------- read_file 工具（2026-09-20：只读工作区文件，host 原生直读） ----------
+
+def _read_dispatcher(env):
+    bb, project, gw, tq, tmp_path = env
+    artifacts = tmp_path / "ws" / "artifacts"
+    scratch = tmp_path / "ws" / "scratch"
+    scratch.mkdir(parents=True, exist_ok=True)
+    d, _tid = _plan_dispatcher(env, session_name="reader", artifacts_dir=artifacts)
+    return d, scratch, artifacts
+
+
+def test_read_file_lines_and_windows(env):
+    d, scratch, _ = _read_dispatcher(env)
+    f = scratch / "disasm.txt"
+    f.write_text("\n".join(f"line-{i}" for i in range(1, 51)), encoding="utf-8")
+    r = d.dispatch("read_file", {"path": "disasm.txt"})
+    assert "1\tline-1" in r and "50\tline-50" in r          # cat -n 风格
+    r = d.dispatch("read_file", {"path": "disasm.txt", "offset": 10, "limit": 5})
+    assert "10\tline-10" in r and "14\tline-14" in r and "line-15" not in r
+    assert "共 50 行" in r and "10-14" in r                  # 续读标记带总行数
+
+
+def test_read_file_tail_and_long_line(env):
+    d, scratch, _ = _read_dispatcher(env)
+    f = scratch / "log.txt"
+    f.write_text("\n".join(f"l{i}" for i in range(1, 31)) + "\n" + "x" * 900,
+                 encoding="utf-8")
+    r = d.dispatch("read_file", {"path": "log.txt", "offset": -3})
+    assert "31\t" in r and "l29" in r                        # 末尾 N 行（tail 语义）
+    assert "行截断" in r and "共 900 字符" in r               # 超长行切尾标注
+
+
+def test_read_file_rejects_missing_and_outside(env):
+    d, scratch, artifacts = _read_dispatcher(env)
+    r = d.dispatch("read_file", {"path": "nope.txt"})
+    assert r.startswith("[错误]") and "不存在" in r
+    (scratch.parent.parent / "outside.txt").write_text("secret", encoding="utf-8")
+    r = d.dispatch("read_file", {"path": "../../outside.txt"})   # 工作区外
+    assert r.startswith("[拒绝]")
+    (scratch / "tiny.txt").write_text("only\n", encoding="utf-8")
+    r = d.dispatch("read_file", {"path": "tiny.txt", "offset": 99})
+    assert r.startswith("[错误]") and "共 1 行" in r          # 越界报总行数

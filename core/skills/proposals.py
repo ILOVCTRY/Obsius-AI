@@ -5,7 +5,9 @@
 - 提案落 ``packs/.proposals/pp_<UTCts>_<6hex>.json``，三态
   pending/approved/rejected；
 - **不存旧内容快照**——审批时对照磁盘现状实时做 unified diff（磁盘已变就如实展示）；
-- AI 对技能只有 edit 提案权；kb 允许全部 4 模式；
+- AI 对技能有 edit 提案权 + suggest（拆分建议，产文档由人执行）；kb 允许全部 4 模式；
+  index edit + create（K4，为无索引包建骨架；删除归人类）；
+  case edit + create（K6 成功链沉淀：测试包 成功案例.md 补段 / payloads/ 补弹药）；
 - 应用复用 writing.py 的同一套备份与 refs.py 的改名引用联动；
 - 状态转移只在本模块发生，零 fastapi 依赖，Agent 工具/API/job 共用。
 
@@ -25,9 +27,16 @@ from pathlib import Path
 from core.skills import writing
 from core.skills.registry import SkillRegistry, parse_frontmatter
 
-# 模式权限：技能 AI 只许编辑（结构变更归人）；kb 四模式全允许
+# 模式权限：技能 edit（编辑）+ suggest（拆分建议，产文档由人执行）；kb 四模式全允许；
+# index 仅 edit（M0 全局单表 packs/kb/route_index.yaml 恒存在，K4 的 create 退役；
+# 条目 kb 路径须带本域前缀，apply 时按域归并写回，删除仍归人类）
 KB_MODES = {"edit", "create", "rename", "delete"}
-SKILL_MODES = {"edit"}
+SKILL_MODES = {"edit", "suggest"}
+INDEX_MODES = {"edit"}
+# K6（2026-09-20 外部对标升级项 A，RapidPen 成功案例复用）：成功链沉淀——
+# verified 攻击链补测试包 成功案例.md（edit）或 payloads/ 补弹药（create）；
+# rename/delete 归人类。校验/应用管道与 kb 同源，人审闸门防 EVOMAL 自投毒。
+CASE_MODES = {"edit", "create"}
 STATUSES = {"pending", "approved", "rejected"}
 ORIGINS = {"agent", "review", "human"}
 _PROPOSAL_RE = re.compile(r"^(pp_\d{8}T\d{6}Z_[0-9a-f]{6})$")
@@ -105,8 +114,10 @@ def _validate_common(p: dict) -> None:
     _require(isinstance(p.get("reason"), str) and p["reason"].strip(),
              "reason 必填且不能为空（为什么改/凭什么）")
     _require(len(p["summary"]) <= 300, "summary 限 300 字")
-    _require(t.get("kind") in {"kb", "skill"}, "target.kind 仅 kb|skill")
-    _require(p["mode"] in (KB_MODES | SKILL_MODES), f"非法 mode: {p['mode']}")
+    _require(t.get("kind") in {"kb", "skill", "index", "case"},
+             "target.kind 仅 kb|skill|index|case")
+    _require(p["mode"] in (KB_MODES | SKILL_MODES | INDEX_MODES | CASE_MODES),
+             f"非法 mode: {p['mode']}")
     if p.get("origin", "agent") not in ORIGINS:
         raise ProposalError(f"非法 origin: {p.get('origin')}")
 
@@ -119,10 +130,14 @@ def _validate_target(packs_root: Path, p: dict, *, applying: bool) -> None:
     kind, mode = t["kind"], p["mode"]
     content = p.get("content")
 
-    if kind == "kb":
+    if kind in {"kb", "case"}:
+        if kind == "case":
+            _require(mode in CASE_MODES,
+                     "case 提案仅 edit（成功案例.md 补段）/create（payloads/ 补弹药），"
+                     "rename/delete 归人类")
         cap = t.get("cap")
         path = t.get("path")
-        _require(cap and path, "kb 提案必须给 target.cap 与 target.path")
+        _require(cap and path, f"{kind} 提案必须给 target.cap 与 target.path")
         target = writing.resolve_kb(packs_root, cap, path)
         exists = target.path.is_file()
         if mode in {"edit", "delete", "rename"}:
@@ -144,9 +159,28 @@ def _validate_target(packs_root: Path, p: dict, *, applying: bool) -> None:
                      f"目标已存在: {new_target.module}")
         if mode == "delete" and applying:
             pass  # 存在性上面已查
+    elif kind == "index":
+        cap = t.get("cap")
+        _require(cap, "index 提案必须给 target.cap")
+        _require((packs_root / "capabilities" / cap).is_dir(),
+                 f"能力包不存在: {cap}")
+        _require(mode in INDEX_MODES,
+                 "index 提案仅 edit（增补全局索引中本域条目；M0 后全局单表恒存在，"
+                 "create 已退役），删除归人类")
+        _require((packs_root / "kb" / "route_index.yaml").is_file(),
+                 "全局 route_index.yaml 不存在（packs/kb/ 树异常）")
+        writing._validate_content(content or "")
+        from core.skills import routeindex
+        try:
+            entries = routeindex.parse_entries(content or "")
+        except Exception as e:  # noqa: BLE001
+            raise ProposalError(f"索引内容解析失败: {e}") from e
+        bad = [e.kb for e in entries if e.kb.split("/", 1)[0] != cap]
+        _require(not bad, f"条目 kb 路径须带本域前缀 {cap}/: {'、'.join(bad[:3])}")
     else:
         _require(mode in SKILL_MODES,
-                 "AI 对技能只有 edit 提案权（新建/改名/删除归人类直接操作）")
+                 "技能提案仅 edit（改正文）或 suggest（拆分建议，产文档由人执行），"
+                 "新建/改名/删除归人类直接操作")
         sk = _find_skill(packs_root, t.get("skill_kind", "capability"),
                          t.get("owner", ""), t.get("name", ""))
         if mode == "edit":
@@ -154,6 +188,8 @@ def _validate_target(packs_root: Path, p: dict, *, applying: bool) -> None:
             meta = parse_frontmatter(content)
             _require(meta.get("name") == sk.name,
                      f"frontmatter name 必须与技能目录名一致: {sk.name!r}")
+        elif mode == "suggest":
+            writing._validate_content(content or "")
 
 
 # ---------------- 创建（只落 pending） ----------------
@@ -196,12 +232,30 @@ def create_proposal(packs_root: str | Path, proposal: dict,
 
 # ---------------- 审批视图（实时 diff + 引用面） ----------------
 
+def _index_path(packs_root: Path, cap: str) -> Path:
+    """M0：全局单表（cap 参数保留调用方兼容，域归并在 apply 侧区分）。"""
+    return packs_root / "kb" / "route_index.yaml"
+
+
 def _current_text(packs_root: Path, p: dict) -> str | None:
     t = p["target"]
     try:
-        if t["kind"] == "kb":
+        if t["kind"] in {"kb", "case"}:
             target = writing.resolve_kb(packs_root, t["cap"], t["path"])
             return target.path.read_text(encoding="utf-8") if target.path.is_file() else None
+        if t["kind"] == "index":
+            # M0：返回本域过滤视图（与提案 content 同视野，diff 不误报他域条目被删）
+            path = _index_path(packs_root, t["cap"])
+            if not path.is_file():
+                return None
+            try:
+                from core.skills import routeindex
+                dom_e = [e for e in routeindex.parse_entries(
+                    path.read_text(encoding="utf-8"))
+                    if e.kb.split("/", 1)[0] == t["cap"]]
+                return routeindex.serialize_entries(dom_e)
+            except Exception:  # noqa: BLE001 —— 解析失败回退全文
+                return path.read_text(encoding="utf-8")
         sk = _find_skill(packs_root, t.get("skill_kind", "capability"),
                          t.get("owner", ""), t.get("name", ""))
         return sk.path.read_text(encoding="utf-8") if sk.path.is_file() else None
@@ -215,8 +269,8 @@ def live_diff(packs_root: str | Path, p: dict) -> dict:
     t = p["target"]
     mode = p["mode"]
     current = _current_text(packs_root, p)
-    label = (f"{t.get('cap') + '/' if t['kind'] == 'kb' else ''}"
-             f"{t.get('path') or t.get('name')}")
+    label = (f"{t.get('cap') + '/' if t['kind'] in {'kb', 'index', 'case'} else ''}"
+             f"{t.get('path') or t.get('name') or 'route_index.yaml'}")
     if mode == "create":
         old_name, new_name = "(不存在)", label
         old_lines, new_lines = [], (p.get("content") or "").splitlines()
@@ -233,7 +287,7 @@ def live_diff(packs_root: str | Path, p: dict) -> dict:
     diff = "\n".join(difflib.unified_diff(
         old_lines, new_lines, fromfile=old_name, tofile=new_name, lineterm=""))
     refs = None
-    if t["kind"] == "kb" and mode in {"rename", "delete"}:
+    if t["kind"] in {"kb", "case"} and mode in {"rename", "delete"}:
         from core.skills import refs
         refs = [h.to_dict() for h in refs.find_module_refs(packs_root, t["path"])]
     return {"exists_now": current is not None or (
@@ -279,7 +333,7 @@ def apply_proposal(packs_root: str | Path, pid: str, decided_by: str) -> dict:
     t = p["target"]
     result: dict = {}
     with writing.pack_write_lock():
-        if t["kind"] == "kb":
+        if t["kind"] in {"kb", "case"}:  # case（K6）校验/应用与 kb 同源，模式仅 edit/create
             cap, module, mode = t["cap"], t["path"], p["mode"]
             if mode == "edit":
                 result = writing.write_kb_file(
@@ -294,12 +348,37 @@ def apply_proposal(packs_root: str | Path, pid: str, decided_by: str) -> dict:
                     packs_root, cap, module, t["new_path"])
                 cascade = refs_rewrite(packs_root, cap, module, t["new_path"])
                 result = {**move, **cascade}
+        elif t["kind"] == "index":
+            # M0 全局单表：提案 content=本域条目，与其他域条目归并后全文写回
+            # （Agent 只看得见本域视野，直接覆盖会丢其他域条目）
+            from core.skills import routeindex
+            path = _index_path(packs_root, t["cap"])
+            cap = t["cap"]
+            try:
+                keep = [e for e in routeindex.parse_entries(
+                    path.read_text(encoding="utf-8"))
+                    if e.kb.split("/", 1)[0] != cap]
+                merged = routeindex.serialize_entries(
+                    keep + routeindex.parse_entries(p["content"]))
+            except Exception as e:  # noqa: BLE001 —— 归并失败不写盘
+                raise ProposalError(f"索引归并失败: {e}") from e
+            backup = writing.backup_and_write(path, merged)
+            result = {"path": str(path),
+                      "backup": backup.name if backup else None}
         else:
             sk = _find_skill(packs_root, t.get("skill_kind", "capability"),
                              t.get("owner", ""), t.get("name", ""))
-            backup = writing.backup_and_write(sk.path, p["content"])
-            result = {"path": str(sk.path),
-                      "backup": backup.name if backup else None}
+            if p["mode"] == "suggest":
+                # K4 拆分建议：产建议文档落技能目录（注册表只扫 SKILL.md，不干扰路由），
+                # 由人按文档执行实际拆分
+                sug = sk.path.parent / "拆分建议.md"
+                backup = writing.backup_and_write(sug, p["content"])
+                result = {"path": str(sug),
+                          "backup": backup.name if backup else None}
+            else:
+                backup = writing.backup_and_write(sk.path, p["content"])
+                result = {"path": str(sk.path),
+                          "backup": backup.name if backup else None}
         p["status"] = "approved"
         p["decided_at"] = _now()
         p["decided_by"] = decided_by

@@ -3,11 +3,14 @@
 把 Knowledge/ 下两套外部知识源原样融入正交包布局（快照不翻译、不进 registry、
 不就地修改；AI 只能经 kb_open 按需打开）：
 
-- ctf-skills（MIT，Lukasz Jagiello）：按类别拆散进各能力包 kb/<snapshot>/，
-  根 LICENSE 复制为每包 kb/CTF-SKILLS-LICENSE。
-- src-strike（内部知识源，无 LICENSE，按项目主授权使用）：拍平
-  skills/src-strike/* → capabilities/web/kb/src-strike/，rules/ 17 篇随快照保存；
-  其中 4 篇平台规则的完整版覆盖 tracks/assessment/rules/owners/（覆盖前自动
+- ctf-skills（MIT，Lukasz Jagiello）：按类别拆散进各能力域 kb/<snapshot>/
+  （web 域落 kb/web/refs/ctf-web，F15 结构），根 LICENSE 上收 packs/kb/licenses/
+  （expert-pool M0，2026-09-21 树重组：能力包 kb 树已并入 packs/kb/<域>/ 全局单根，
+  本脚本内的 kb_sources.json 生成与 capabilities/<cap>/kb 落点为旧布局遗产——
+  重导前须先把输出目录改写到新树，或仅作素材参考）。
+- src-strike（内部知识源，无 LICENSE，按项目主授权使用）：按 F15 重映射落
+  web 域 kb（打法→playbooks/、资料→refs/、散篇→notes/，见 STRIKE_TOP_MAP）；
+  其中 4 篇平台规则的完整版覆盖 tracks/pentest/rules/owners/（覆盖前自动
   备份到该目录 .history/）。
 
 幂等：快照目录已存在默认跳过，--force 删除重建；生成文件（kb_sources.json、
@@ -29,20 +32,23 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # ctf-skills/<技能目录> -> (能力包, 快照目录名)
+# web 包 2026-09-19 F15 结构重做：ctf-web 快照落 refs/ctf-web（资料区）
 CTF_MAP: list[tuple[str, str, str]] = [
-    ("ctf-web", "web", "ctf-web"),
-    ("ctf-pwn", "binary", "ctf-pwn"),
-    ("ctf-reverse", "binary", "ctf-reverse"),
-    ("ctf-malware", "binary", "ctf-malware"),
-    ("ctf-crypto", "crypto", "ctf-crypto"),
-    ("ctf-forensics", "forensics", "ctf-forensics"),
-    ("ctf-osint", "forensics", "ctf-osint"),
-    ("ctf-misc", "misc", "ctf-misc"),
-    ("ctf-ai-ml", "misc", "ctf-ai-ml"),
-    ("ctf-writeup", "misc", "ctf-writeup"),
+    # K2 重排后：快照原件一律落 kb/refs/<snap>/ 保鲜（收编合并版在 kb/<domain>/，
+    # 为迁移产物人工维护；--force 重建只动 refs/ 下的快照原件，绝不碰收编版）
+    ("ctf-web", "web", "refs/ctf-web"),
+    ("ctf-pwn", "binary", "refs/ctf-pwn"),
+    ("ctf-reverse", "binary", "refs/ctf-reverse"),
+    ("ctf-malware", "binary", "refs/ctf-malware"),
+    ("ctf-crypto", "crypto", "refs/ctf-crypto"),
+    ("ctf-forensics", "forensics", "refs/ctf-forensics"),
+    ("ctf-osint", "forensics", "refs/ctf-osint"),
+    ("ctf-misc", "misc", "refs/ctf-misc"),
+    ("ctf-ai-ml", "misc", "refs/ctf-ai-ml"),
+    ("ctf-writeup", "misc", "refs/ctf-writeup"),
 ]
 
-# src-strike rules/<文件> -> assessment 轨 owners/<tag>.md（完整版覆盖摘编版）
+# src-strike rules/<文件> -> pentest 轨 owners/<tag>.md（完整版覆盖摘编版）
 OWNER_RULES: list[tuple[str, str]] = [
     ("edusrc-rules.md", "edusrc.md"),
     ("edu-rating-rules.md", "edu-rating.md"),
@@ -59,6 +65,139 @@ STRIKE_EXCLUDE_FILES = {
     "AGENTS.md", "CLAUDE.md", ".mcp.json", ".gitignore",
 }
 COPY_EXCLUDE_DIRS = {".git", "__pycache__", "target", ".pytest_cache", "node_modules"}
+
+# src-strike 顶层项 -> web/kb 内落点（F15 结构，DESIGN.md §4 定稿块）：
+# 打法进 playbooks/、资料进 refs/；未映射顶层项收编 notes/（宁收编不复活旧平铺）
+STRIKE_TOP_MAP = {
+    "知识库": "playbooks/知识库",
+    "poc": "refs/poc",
+    "SKILL.md": "playbooks/SKILL.md",
+}
+
+# K5 测试包分类制（2026-09-20，DESIGN.md §4）：知识库/ 下的测试点手册按
+# 「阶段/测试包/手册.md」三层落位，其余（README、打穿短表）留守 playbooks/知识库/。
+# 表：手册 stem（去 .md）→ (测试包目录, phase, vuln_class 分面)；手册文件名统一改 手册.md。
+# 迁移脚本 scripts/migrate_kb_test_packages.py 复用本表，保证两侧口径一致。
+STRIKE_KB_REMAP = {
+    "401-403-bypass": ("webapp/401-403-bypass", "webapp", ["auth-bypass"]),
+    "agent-tool-exec-test": ("webapp/agent-tool-exec", "webapp", ["ai"]),
+    "api-gateway-test": ("webapp/api-gateway", "webapp", ["api", "gateway"]),
+    "authbypass-test": ("webapp/authbypass", "webapp", ["auth-bypass", "auth"]),
+    "cache-poisoning-test": ("webapp/cache-poisoning", "webapp", ["cache"]),
+    "captcha-ocr-test": ("webapp/captcha-ocr", "webapp", ["captcha"]),
+    "clickjacking-test": ("webapp/clickjacking", "webapp", ["clickjacking"]),
+    "cloud-ide-codex-rce-chain": ("webapp/cloud-ide-rce-chain", "webapp", ["rce", "chain"]),
+    "cors-test": ("webapp/cors", "webapp", ["cors"]),
+    "crlf-injection-test": ("webapp/crlf-injection", "webapp", ["crlf", "injection"]),
+    "csp-bypass-test": ("webapp/csp-bypass", "webapp", ["csp"]),
+    "csrf-test": ("webapp/csrf", "webapp", ["csrf"]),
+    "csv-formula-injection-test": ("webapp/csv-formula-injection", "webapp", ["csv", "injection"]),
+    "dangling-markup-test": ("webapp/dangling-markup", "webapp", ["xss", "markup"]),
+    "dependency-confusion-test": ("webapp/dependency-confusion", "webapp", ["supply-chain"]),
+    "deserialization-test": ("webapp/deserialization", "webapp", ["deserialization", "injection"]),
+    "dns-rebinding-test": ("webapp/dns-rebinding", "webapp", ["dns", "ssrf"]),
+    "dnslog-oob": ("webapp/dnslog-oob", "webapp", ["oob", "dnslog"]),
+    "el-injection-test": ("webapp/el-injection", "webapp", ["ssti", "injection"]),
+    "email-header-injection-test": ("webapp/email-header-injection", "webapp", ["smtp", "injection"]),
+    "file-upload-test": ("webapp/file-upload", "webapp", ["file-upload"]),
+    "ghost-bits-cast-test": ("webapp/ghost-bits-cast", "webapp", ["misc"]),
+    "graphql-test": ("webapp/graphql", "webapp", ["graphql", "api"]),
+    "hpp-test": ("webapp/hpp", "webapp", ["hpp"]),
+    "http-host-header-test": ("webapp/host-header", "webapp", ["host-header"]),
+    "http-smuggling-test": ("webapp/http-smuggling", "webapp", ["smuggling"]),
+    "http2-attacks-test": ("webapp/http2-attacks", "webapp", ["http2", "smuggling"]),
+    "idor-test": ("webapp/idor", "webapp", ["idor", "authz"]),
+    "info-leak-test": ("webapp/info-leak", "webapp", ["info-leak"]),
+    "injection-test": ("webapp/sqli", "webapp", ["sqli", "injection"]),
+    "insecure-scm-test": ("webapp/insecure-scm", "webapp", ["info-leak", "scm"]),
+    "jndi-injection-test": ("webapp/jndi-injection", "webapp", ["jndi", "injection", "rce"]),
+    "js-reverse-guide": ("webapp/js-reverse", "webapp", ["reverse"]),
+    "llm-security-test": ("webapp/llm-security", "webapp", ["ai", "llm"]),
+    "logic-test": ("webapp/logic", "webapp", ["logic"]),
+    "oauth-jwt-test": ("webapp/jwt", "webapp", ["jwt", "oauth", "auth"]),
+    "open-redirect-test": ("webapp/open-redirect", "webapp", ["open-redirect"]),
+    "path-traversal-lfi-test": ("webapp/path-traversal", "webapp", ["path-traversal", "lfi"]),
+    "prototype-pollution-test": ("webapp/prototype-pollution", "webapp", ["prototype-pollution"]),
+    "race-condition-test": ("webapp/race-condition", "webapp", ["race"]),
+    "recon-methodology": ("recon/methodology", "recon", []),
+    "ssrf-test": ("webapp/ssrf", "webapp", ["ssrf"]),
+    "subdomain-takeover-test": ("webapp/subdomain-takeover", "webapp", ["takeover", "recon"]),
+    "type-juggling-test": ("webapp/type-juggling", "webapp", ["type-juggling"]),
+    "waf-bypass": ("webapp/waf-bypass", "webapp", ["waf"]),
+    "websocket-test": ("webapp/websocket", "webapp", ["websocket"]),
+    "xslt-injection-test": ("webapp/xslt-injection", "webapp", ["xslt", "injection"]),
+    "xss-test": ("webapp/xss", "webapp", ["xss"]),
+    "xxe-test": ("webapp/xxe", "webapp", ["xxe"]),
+}
+# 留守 playbooks/知识库/ 不迁的文件（stem 集合，反向校验用）
+STRIKE_KB_STAY = {"README", "打穿短表"}
+
+
+def _kb_frontmatter(stem: str) -> str:
+    """K5 分面 frontmatter（升级项 C）：phase 单值 + vuln_class 行内列表。"""
+    _dir, phase, vcls = STRIKE_KB_REMAP[stem]
+    lines = ["---", f"phase: {phase}"]
+    if vcls:
+        lines.append(f"vuln_class: [{', '.join(vcls)}]")
+    return "\n".join(lines) + "\n---\n"
+# src-strike/references/<子项> -> 落点；playbooks 特殊：其子项上提一级进 playbooks/；
+# 未映射子项（含 compliance.md 等散文件）落 refs/<名>
+STRIKE_REF_MAP = {
+    "methodology": "playbooks/methodology",
+    "h1-reports": "refs/h1-reports",
+    "dictionaries": "refs/dictionaries",
+    "industry": "refs/industry",
+    "payloader": "refs/payloader",
+    "templates": "refs/templates",
+}
+
+
+def _stage_strike(strike_root: Path) -> list[tuple[Path, str]]:
+    """src-strike 上游展开为文件级 (源文件, web/kb 内相对落点)。
+    知识库/ 下命中 STRIKE_KB_REMAP 的手册按 K5 测试包分类改落
+    `<阶段>/<测试包>/手册.md`（内容加 phase/vuln_class frontmatter，
+    见 _import_strike），未命中（README/打穿短表）留守 playbooks/知识库/。"""
+    staged: list[tuple[Path, str]] = []
+    skill_root = strike_root / "skills" / "src-strike"
+
+    def _walk(src: Path, rel_base: str, remap_kb: bool = False) -> None:
+        if src.is_file():
+            if src.name in STRIKE_EXCLUDE_FILES:
+                return
+            rel = rel_base
+            if remap_kb and src.stem in STRIKE_KB_REMAP:
+                rel = f"{STRIKE_KB_REMAP[src.stem][0]}/手册.md"
+            staged.append((src, rel))
+            return
+        for child in sorted(src.iterdir()):
+            if child.name in COPY_EXCLUDE_DIRS:
+                continue
+            _walk(child, f"{rel_base}/{child.name}" if rel_base else child.name,
+                  remap_kb=remap_kb)
+
+    for item in sorted(skill_root.iterdir()):
+        if item.name in STRIKE_EXCLUDE_TOP or item.name in COPY_EXCLUDE_DIRS:
+            continue
+        if item.name == "references":
+            for ref in sorted(item.iterdir()):
+                if ref.name in COPY_EXCLUDE_DIRS:
+                    continue
+                if ref.name == "playbooks":  # 打法上提一级进 playbooks/
+                    _walk(ref, "playbooks")
+                elif ref.name in STRIKE_REF_MAP:
+                    _walk(ref, STRIKE_REF_MAP[ref.name])
+                else:
+                    _walk(ref, f"refs/{ref.name}")
+        elif item.name in STRIKE_TOP_MAP:
+            _walk(item, STRIKE_TOP_MAP[item.name],
+                  remap_kb=(item.name == "知识库"))
+        else:  # 未知散篇/目录收编 notes/
+            _walk(item, f"notes/{item.name}")
+
+    rules_src = strike_root / "rules"
+    if rules_src.is_dir():
+        _walk(rules_src, "playbooks/rules")
+    return staged
 
 
 def _log(msg: str) -> None:
@@ -192,49 +331,43 @@ def _import_ctf(ctf_root: Path, packs: Path, force: bool, stats: dict) -> set[st
 
 def _import_strike(strike_root: Path, packs: Path, force: bool,
                    stats: dict, import_owners: bool) -> None:
-    """拍平导入 src-strike 到 web/kb/src-strike/。"""
+    """导入 src-strike 到 web/kb/（F15 重映射：playbooks/refs/notes 三层，见 _stage_strike）。"""
     _log("[src-strike] 开始")
-    dst = packs / "capabilities" / "web" / "kb" / "src-strike"
-    staged: list[tuple[Path, Path]] = []  # (src, dst) 先收集后统一落盘
-
-    skill_root = strike_root / "skills" / "src-strike"
-    for item in sorted(skill_root.iterdir()):
-        if item.name in COPY_EXCLUDE_DIRS:
-            continue
-        staged.append((item, dst / item.name))
-
+    dst = packs / "capabilities" / "web" / "kb"
+    staged = _stage_strike(strike_root)  # 文件级 (源, 落点相对路径)
     rules_src = strike_root / "rules"
-    if rules_src.is_dir():
-        staged.append((rules_src, dst / "rules"))
 
-    exists = dst.exists()
-    if exists and not force:
+    # 跳过判定按 staged 落点是否已齐（dst 是 kb 根，恒存在，不能当完成标志）
+    done = bool(staged) and all((dst / rel).is_file() for _src, rel in staged)
+    if done and not force:
         stats["skipped"].append(str(dst))
-        _log(f"  跳过（已存在，--force 可重建）: {dst}")
+        _log(f"  跳过（已导入，--force 可原位覆盖重建）: {dst}")
     else:
-        # 上游同构根：skills/src-strike/* 拍平到 dst/*、rules/ 整目录到 dst/rules
-        upstream_roots = [(skill_root, ""), (rules_src, "rules")]
-        preserved = _preserve_local(dst, upstream_roots, stats) if exists else None
-        if exists:
-            shutil.rmtree(dst)
-        dst.mkdir(parents=True, exist_ok=True)
-        for src, target in staged:
-            if src.is_dir():
-                shutil.copytree(src, target, ignore=_ignore_factory,
-                                copy_function=_safe_copy_factory(stats))
+        # 覆盖式落盘：只写上游管辖落点（kb 根还含 route.json/refs 等非 strike
+        # 内容，绝不整体 rmtree）；本地其它文件不受影响
+        for src, rel in staged:
+            target = dst / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if src.stem in STRIKE_KB_REMAP and src.suffix == ".md" \
+                    and "知识库" in src.parent.name:
+                # K5 测试包手册：内容加 phase/vuln_class frontmatter 再落盘
+                text = src.read_text(encoding="utf-8")
+                fm = _kb_frontmatter(src.stem)
+                text = text if text.startswith("---") else fm + "\n" + text
+                target.write_text(text, encoding="utf-8")
+                _log(f"  复制(测试包+frontmatter): {src} -> {target}")
             else:
-                shutil.copyfile(src, target)
-            _log(f"  复制: {src} -> {target}")
-        _restore_local(preserved, dst)
+                _safe_copy_factory(stats)(src, target)
+                _log(f"  复制: {src} -> {target}")
         stats["copied"].append(str(dst))
 
-    # 平台规则完整版 -> assessment 轨 owners/（不随 --force 跳过，独立幂等）
+    # 平台规则完整版 -> pentest 轨 owners/（不随 --force 跳过，独立幂等）
     if import_owners:
         _merge_owners(rules_src, packs, stats)
 
 
 def _merge_owners(rules_src: Path, packs: Path, stats: dict) -> None:
-    owners_dir = packs / "tracks" / "assessment" / "rules" / "owners"
+    owners_dir = packs / "tracks" / "pentest" / "rules" / "owners"
     history = owners_dir / ".history"
     for src_name, dst_name in OWNER_RULES:
         src = rules_src / src_name
@@ -260,17 +393,25 @@ def _merge_owners(rules_src: Path, packs: Path, stats: dict) -> None:
 def _write_kb_index(packs: Path, caps: set[str], sources_ok: dict[str, bool]) -> None:
     """每包生成 kb/README.md（中文快照索引，我们自己的维护文件，非快照内容）。"""
     index = {
-        "web": [("ctf-web", "ctf-skills（MIT）· Web 题方法论与脚本"),
-                ("src-strike", "src-strike 快照（内部知识源）· SRC 方法论/弹药/poc/rules")],
-        "binary": [("ctf-pwn", "ctf-skills（MIT）· Pwn"),
-                   ("ctf-reverse", "ctf-skills（MIT）· 逆向"),
-                   ("ctf-malware", "ctf-skills（MIT）· 恶意样本分析")],
-        "crypto": [("ctf-crypto", "ctf-skills（MIT）· 密码学")],
-        "forensics": [("ctf-forensics", "ctf-skills（MIT）· 取证/流量/内存"),
-                      ("ctf-osint", "ctf-skills（MIT）· OSINT")],
-        "misc": [("ctf-misc", "ctf-skills（MIT）· MISC"),
-                 ("ctf-ai-ml", "ctf-skills（MIT）· AI/ML 题"),
-                 ("ctf-writeup", "ctf-skills（MIT）· writeup 收尾方法论")],
+        "web": [("recon", "信息收集：passive 被动 / active 主动"),
+                ("webapp", "Web 漏洞族：authn 认证 / injection 注入 / 客户端"),
+                ("post-exp", "后渗透（占位）"),
+                ("notes", "实战散篇：网关陷阱 / 字段笔记"),
+                ("playbooks", "src-strike 快照（内部知识源）· SRC 方法论/弹药/rules"),
+                ("refs", "参考资料：h1-reports/字典/poc/cves + refs/ctf-web（ctf-skills MIT）")],
+        "binary": [("pwn", "Pwn 收编版（快照原件在 refs/ctf-pwn）· 栈/堆/内核/沙箱/scripts"),
+                   ("reverse", "逆向收编版（快照原件在 refs/ctf-reverse）· 语言/模式/工具/平台"),
+                   ("malware", "恶意样本收编版（快照原件在 refs/ctf-malware）· PE/C2/混淆"),
+                   ("refs", "ctf-skills（MIT）快照原件：ctf-pwn / ctf-reverse / ctf-malware")],
+        "crypto": [("crypto", "密码学收编版（快照原件在 refs/ctf-crypto）· RSA/ECC/分组/格"),
+                   ("refs", "ctf-skills（MIT）快照原件：ctf-crypto")],
+        "forensics": [("forensics", "取证收编版（快照原件在 refs/ctf-forensics）· 磁盘/内存/流量/隐写"),
+                      ("osint", "OSINT 收编版（快照原件在 refs/ctf-osint）"),
+                      ("refs", "ctf-skills（MIT）快照原件：ctf-forensics / ctf-osint")],
+        "misc": [("misc", "MISC 收编版（快照原件在 refs/ctf-misc）· jail/编码/游戏"),
+                 ("ai-ml", "AI/ML 题收编版（快照原件在 refs/ctf-ai-ml）"),
+                 ("writeup", "writeup 收尾方法论（快照原件在 refs/ctf-writeup）"),
+                 ("refs", "ctf-skills（MIT）快照原件：ctf-misc / ctf-ai-ml / ctf-writeup")],
     }
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     for cap in caps:
@@ -360,7 +501,7 @@ def _argv() -> argparse.Namespace:
     ap.add_argument("--force", action="store_true",
                     help="快照目录已存在时删除重建（owners 不受此开关影响）")
     ap.add_argument("--no-owners", action="store_true",
-                    help="不覆盖 assessment 轨 owners/ 平台规则")
+                    help="不覆盖 pentest 轨 owners/ 平台规则")
     return ap.parse_args()
 
 

@@ -62,3 +62,17 @@ def load_role(packs_root: str | Path, track: str, role_name: str) -> dict:
         key, _, value = line.partition(":")
         out[key.strip()] = _parse_inline_value(value)
     return out
+
+
+def role_exists(packs_root: str | Path, track: str, role_name: str) -> bool:
+    """角色 yaml 是否真实存在（v14 发布链路 role 校验用）。
+    不用 load_role 判存在——它对缺失角色静默回退 _generalist，会放行拼错的角色。"""
+    return (Path(packs_root) / "tracks" / track / "roles" / f"{role_name}.yaml").is_file()
+
+
+def list_roles(packs_root: str | Path, track: str) -> list[str]:
+    """本轨已注册角色 id 清单（tracks/<track>/roles/*.yaml 的 stem；含 _generalist）。"""
+    base = Path(packs_root) / "tracks" / track / "roles"
+    if not base.is_dir():
+        return []
+    return sorted(p.stem for p in base.glob("*.yaml"))

@@ -1,12 +1,12 @@
-"""kb 引用扫描与改名联动（只读扫描 + 受控改写，C3）。
+"""kb 引用扫描与改名联动（只读扫描 + 受控改写，C3；M0 全局形态 2026-09-21）。
 
 doctor 历史上认两种引用形态，本模块把它们统一成一个共享扫描器：
 
-1. 显式调用：``kb_open(module="ctf-web/foo/bar.md")``；
-2. 引号/反引号里的完整快照路径：`` `ctf-web/foo/bar.md` ``（仅当第一段是
-   已导入快照名才认，普通路径不误报）。
+1. 显式调用：``kb_open(module="web/webapp/idor/手册.md")``；
+2. 引号/反引号里的完整路径：`` `web/webapp/idor/手册.md` ``（仅当第一段是
+   域名或已导入快照名才认，普通路径不误报）。
 
-扫描范围：全部技能 SKILL.md + 各能力包 kb 源内的 *.md（排除 .history）。
+扫描范围：全部技能 SKILL.md + packs/kb/<域>/ 源内的 *.md（排除 .history）。
 改名时对引用文件做**完整路径字面替换**，每个被改文件各自留备份；
 相对链接（``](./x.md)`` 等）无法安全自动改写，列入 skipped_relative 由人处理。
 """
@@ -27,20 +27,22 @@ _MD_LINK_RE = re.compile(r"\]\((\.\.?/[^)#\s]+\.md)(?:#[^)]*)?\)")
 
 
 def snapshot_index(root: str | Path) -> dict[str, str]:
-    """扫 capabilities/<cap>/kb/* 建 {快照顶层目录名: cap}（不硬编码清单，新增自动生效）。
+    """扫 packs/kb/<域>/* 建 {首段名: 域}（expert-pool M0）。
 
-    kb_sources 声明的其它 root 一并纳入（root 目录名→cap）。"""
+    快照顶层目录名→域 + 域名→自身（后者让引用扫描/正则认得全局形态
+    `<域>/…` 打头的引用）；同名跨域取首见——旧形态引用的消歧主要靠
+    classify_module 的 prefer_cap（引用方域优先）。"""
     root = Path(root)
     index: dict[str, str] = {}
-    caps = root / "capabilities"
-    if not caps.is_dir():
+    kb = root / "kb"
+    if not kb.is_dir():
         return index
-    for cap_dir in sorted(p for p in caps.iterdir() if p.is_dir()):
-        for src in load_kb_sources(root, [cap_dir.name]):
-            if src.root.is_dir():
-                for snap in sorted(p for p in src.root.iterdir() if p.is_dir()
-                                   and p.name != ".history"):
-                    index.setdefault(snap.name, cap_dir.name)
+    for dom_dir in sorted(p for p in kb.iterdir()
+                          if p.is_dir() and p.name != "licenses"):
+        for snap in sorted(p for p in dom_dir.iterdir() if p.is_dir()
+                           and p.name != ".history"):
+            index.setdefault(snap.name, dom_dir.name)
+        index.setdefault(dom_dir.name, dom_dir.name)
     return index
 
 
@@ -51,19 +53,36 @@ def _quoted_pattern(snaps: dict[str, str]) -> re.Pattern:
 
 
 def classify_module(module: str, snaps: dict[str, str],
-                    caps_root: Path) -> tuple[str, str] | None:
-    """单个模块引用 → (code, message)；有效引用返回 None（doctor 复用）。"""
-    snap, _, rel = module.partition("/")
+                    caps_root: Path, prefer_cap: str | None = None,
+                    ) -> tuple[str, str] | None:
+    """单个模块引用 → (code, message)；有效引用返回 None（doctor 复用）。
+
+    M0 全局形态 `<域>/<快照>/<路径>` 与旧快照形态 `<快照>/<路径>` 都认：
+    候选域顺序 = 引用方域（prefer_cap）→ 首段若为域目录 → snaps 消歧域；
+    逐域走 writing.resolve_kb（剥域/域内相对/存在性同口径）。"""
+    first, _, rel = module.partition("/")
     if not rel:
         return None
-    cap = snaps.get(snap)
-    if cap is None:
+    root = caps_root.parent
+    kb_root = root / "kb"
+    doms = ([p.name for p in kb_root.iterdir() if p.is_dir()]
+            if kb_root.is_dir() else [])
+    order: list[str] = []
+    for d in (prefer_cap, first if first in doms else None,
+              snaps.get(first)):
+        if d and d in doms and d not in order:
+            order.append(d)
+    if not order:
         return ("kb-snapshot-unknown",
-                f"快照未导入任何能力包的 kb/：{module}")
-    if not (caps_root / cap / "kb" / snap / rel).is_file():
-        return ("kb-module-broken",
-                f"引用的 kb 模块不存在：{module}（应在 capabilities/{cap}/kb/）")
-    return None
+                f"快照未导入任何能力域的 kb/：{module}")
+    for dom in order:
+        try:
+            if writing.resolve_kb(root, dom, module).path.is_file():
+                return None
+        except writing.KbError:
+            continue
+    return ("kb-module-broken",
+            f"引用的 kb 模块不存在：{module}")
 
 
 def extract_modules(text: str, snaps: dict[str, str]) -> list[str]:

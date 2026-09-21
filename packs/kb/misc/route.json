@@ -1,0 +1,11 @@
+{
+  "misc|杂项|脑洞": [
+    "misc/misc/"
+  ],
+  "writeup|复盘|wp": [
+    "misc/writeup/"
+  ],
+  "ai|大模型|llm|提示词": [
+    "misc/ai-ml/"
+  ]
+}

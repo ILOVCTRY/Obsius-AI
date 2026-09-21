@@ -12,6 +12,8 @@ from core.skills.rules import (
     load_kb_sources,
     owner_rules,
     pack_rules,
+    rating_rules,
+    resolve_rule_profiles,
     role_rules,
 )
 from core.skills.taxonomy import (
@@ -29,6 +31,8 @@ __all__ = [
     "SkillRouter",
     "pack_rules",
     "owner_rules",
+    "rating_rules",
+    "resolve_rule_profiles",
     "role_rules",
     "load_kb_sources",
     "KbSource",

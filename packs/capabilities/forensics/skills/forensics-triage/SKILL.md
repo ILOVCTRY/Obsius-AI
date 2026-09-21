@@ -11,8 +11,8 @@ task_types: solve, triage
 
 # forensics-triage —— 取证与 OSINT 分诊路由
 
-> 分层纪律：本技能只做**介质判定 → 开专题**。操作细节在 ctf-forensics /
-> ctf-osint 英文知识库，用 `kb_open(module=…)` 按表开单篇，禁止通读。
+> 分层纪律：本技能只做**介质判定 → 开专题**。操作细节在 forensics /
+> osint 英文知识库，用 `kb_open(module=…)` 按表开单篇，禁止通读。
 > 附件先过 file-triage（magic/strings），介质明确后回本技能选模块。
 
 ## 0. 先看附件是什么
@@ -23,7 +23,7 @@ task_types: solve, triage
 
 ## 1. 介质 → 专题对照表
 
-**ctf-forensics（kb_open module 前缀 `ctf-forensics/`）**
+**forensics（kb_open module 前缀 `forensics/`）**
 
 | 附件形态/题目关键词 | 模块 |
 |---|---|
@@ -31,12 +31,12 @@ task_types: solve, triage
 | 磁盘镜像、分区、删除恢复、文件雕刻 | `disk-and-memory.md`；恢复 `disk-recovery.md`；进阶 `disk-advanced.md` |
 | 内存镜像、进程/网络连接提取、volatility | `disk-and-memory.md`；Windows 侧 `windows.md`，Linux 侧 `linux-forensics.md` |
 | 注册表、事件日志 evtx、Windows 时间线 | `windows.md` |
-| 图片隐写（LSB/EXIF/附加数据/binwalk） | `stego-image.md`；总览 `steganography.md`；进阶 `stego-advanced.md`、`stego-advanced-2.md` |
+| 图片隐写（LSB/EXIF/附加数据/binwalk） | `stego-image.md`；总览 `steganography.md`；进阶 `stego-advanced.md`（两段连载合一篇） |
 | 音频/频谱图/摩斯/DTMF/多音轨 | `signals-and-hardware.md`（题目描述含 spectrogram/audio tracks/MKV 也走此篇） |
 | 键盘/USB/HID 流量、外设抓包、逻辑分析仪 | `peripheral-capture.md`、`signals-and-hardware.md` |
 | 3D 打印文件（冷门，先 binwalk） | `3d-printing.md` |
 
-**ctf-osint（前缀 `ctf-osint/`）**——题目只有"找人/找位置/找时间"，没有可分析附件：
+**osint（前缀 `osint/`）**——题目只有"找人/找位置/找时间"，没有可分析附件：
 
 | 线索 | 模块 |
 |---|---|

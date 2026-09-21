@@ -1,0 +1,58 @@
+{
+  "sql注入|sqli|sql_injection": [
+    "web/webapp/injection/sql-injection.md",
+    "web/webapp/sqli/手册.md"
+  ],
+  "认证|登录|越权|未授权|auth|jwt": [
+    "web/webapp/authn/",
+    "web/webapp/authbypass/手册.md"
+  ],
+  "反序列化|deser|deserialization": [
+    "web/webapp/injection/server-side-deser.md",
+    "web/webapp/deserialization/手册.md"
+  ],
+  "命令执行|rce|代码执行|exec": [
+    "web/webapp/injection/server-side-exec.md"
+  ],
+  "ssti|模板注入|服务端高级": [
+    "web/webapp/injection/server-side-advanced.md"
+  ],
+  "服务端漏洞|web漏洞|server-side": [
+    "web/webapp/injection/"
+  ],
+  "前端|xss|原型链|prototype|客户端": [
+    "web/webapp/client-side.md",
+    "web/webapp/client-side-advanced.md",
+    "web/webapp/node-and-prototype.md",
+    "web/webapp/xss/手册.md"
+  ],
+  "信息收集|子域|指纹|侦察|recon": [
+    "web/recon/"
+  ],
+  "渗透测试|src|众测|资产": [
+    "web/playbooks/",
+    "web/notes/"
+  ],
+  "边界入口|webvpn|统一认证|sso": [
+    "web/webapp/authbypass/手册.md",
+    "web/webapp/jwt/手册.md"
+  ],
+  "api|接口|脚本|requests": [
+    "web/notes/python-requests.md",
+    "web/playbooks/api-rest/"
+  ],
+  "cve|历史漏洞": [
+    "web/refs/cves.md"
+  ],
+  "web3|区块链|合约": [
+    "web/webapp/web3.md"
+  ],
+  "payload|字典|fuzz": [
+    "web/refs/payloader/",
+    "web/refs/dictionaries/"
+  ],
+  "内网|横向|后渗透": [
+    "web/playbooks/intranet-postexp/",
+    "web/post-exp/"
+  ]
+}

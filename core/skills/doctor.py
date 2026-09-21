@@ -2,13 +2,14 @@
 
 只读 packs，零 fastapi 依赖。三级结论：
 - error   绑定断裂：角色引用不存在的技能、task_type 未注册、frontmatter name 与
-           目录名不一致、kb_sources 声明的 root 不存在；
-- warning 软问题：角色引用已禁用技能、缺 redlines / task_types.yaml、kb_sources
-           坏 JSON、技能正文引用的 kb 快照模块失效；
-- info    编辑提示：孤儿技能（无角色显式引用）、.history/trash 有待清理项。
+           目录名不一致；
+- warning 软问题：角色引用已禁用技能、缺 redlines / task_types.yaml、技能正文
+           引用的 kb 模块失效、全局 route_index.yaml 解析失败或条目 kb 域前缀/
+           模块路径失效/标签技能不存在；
+- info    编辑提示：孤儿技能（无角色显式引用）、能力包无 kb 域目录（占位包属
+           预期）、.history/trash 有待清理项。
 """
 
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -54,12 +55,14 @@ def _rel(path: Path, root: Path) -> str:
 # doctor 只保留"判定失效并报 issue"这一层。
 
 def _broken_kb_refs(skill_path: Path, snaps: dict[str, str],
-                    caps_root: Path) -> list[tuple[str, str, str]]:
-    """返回 [(code, 模块, 说明)]：kb_open 指向未导入快照 / 引用模块文件不存在。"""
+                    caps_root: Path, cap: str | None = None,
+                    ) -> list[tuple[str, str, str]]:
+    """返回 [(code, 模块, 说明)]：kb_open 指向未导入快照 / 引用模块文件不存在。
+    cap=技能所属能力包（快照目录名跨包碰撞时先按引用方自身 kb 解析）。"""
     text = skill_path.read_text(encoding="utf-8")
     out: list[tuple[str, str, str]] = []
     for module in refs.extract_modules(text, snaps):
-        verdict = refs.classify_module(module, snaps, caps_root)
+        verdict = refs.classify_module(module, snaps, caps_root, prefer_cap=cap)
         if verdict:
             out.append((verdict[0], module, verdict[1]))
     return out
@@ -80,6 +83,13 @@ def diagnose(packs_root: str | Path) -> DoctorReport:
     snaps = refs.snapshot_index(root)
     caps_root = root / "capabilities"
 
+    # task_type 值域并集（路由 task_type 加分的对侧防线：拼错=加分静默失效）
+    registered_task_types: set[str] = set()
+    tracks_base_all = root / "tracks"
+    if tracks_base_all.is_dir():
+        for tdir in sorted(p for p in tracks_base_all.iterdir() if p.is_dir()):
+            registered_task_types |= set(load_task_types(root, tdir.name))
+
     # ---- 技能自身：name 一致性、kb 引用失效、孤儿统计 ----
     referenced: set[str] = set()
     for sk in skills:
@@ -88,7 +98,14 @@ def diagnose(packs_root: str | Path) -> DoctorReport:
             rep.issues.append(Issue(
                 "error", "skill-name-mismatch", _rel(sk.path, root),
                 f"frontmatter name={meta['name']!r} 与目录名 {sk.path.parent.name!r} 不一致"))
-        for code, module, msg in _broken_kb_refs(sk.path, snaps, caps_root):
+        for tt in sk.task_types or []:
+            if tt not in registered_task_types:
+                rep.issues.append(Issue(
+                    "warning", "skill-tasktype-unregistered", _rel(sk.path, root),
+                    f"技能 frontmatter task_types 含未注册类型: {tt}"
+                    "（路由 task_type 加分不会命中，检查拼写或各轨 task_types.yaml）"))
+        for code, module, msg in _broken_kb_refs(sk.path, snaps, caps_root,
+                                                 cap=sk.pack):
             rep.issues.append(Issue("warning", code, _rel(sk.path, root), msg))
 
     # ---- 场景轨：角色绑定、task_type 注册、redlines、trash ----
@@ -105,6 +122,16 @@ def diagnose(packs_root: str | Path) -> DoctorReport:
                 rep.issues.append(Issue(
                     "warning", "missing-redlines", f"tracks/{track}/rules/redlines.md",
                     f"轨 {track} 缺 rules/redlines.md"))
+            # F11：评级 tag 无授权边界配套（迁移后 edu-rating 等纯评级 tag 常驻此
+            # warning 属预期——语义即「该评级口径无 owners 授权红线配套」）
+            rating_dir = tdir / "rules" / "rating"
+            if rating_dir.is_dir():
+                owners_dir = tdir / "rules" / "owners"
+                for rf in sorted(rating_dir.glob("*.md")):
+                    if not (owners_dir / rf.name).is_file():
+                        rep.issues.append(Issue(
+                            "warning", "rating-without-owner", _rel(rf, root),
+                            f"评级规则 rating/{rf.stem} 无同名 owners/ 授权边界配套"))
             roles_dir = tdir / "roles"
             if roles_dir.is_dir():
                 for rp in sorted(roles_dir.glob("*.yaml")):
@@ -131,7 +158,8 @@ def diagnose(packs_root: str | Path) -> DoctorReport:
                                 "error", "role-tasktype-unregistered", _rel(rp, root),
                                 f"角色 {rp.stem} 的 task_type 未在轨注册表: {tt}"))
 
-    # ---- 能力包：redlines、kb_sources root ----
+    # ---- 能力包：redlines、kb 域目录 ----
+    kb_root_dir = root / "kb"
     if caps_root.is_dir():
         for cdir in sorted(p for p in caps_root.iterdir() if p.is_dir()):
             cap = cdir.name
@@ -139,23 +167,49 @@ def diagnose(packs_root: str | Path) -> DoctorReport:
                 rep.issues.append(Issue(
                     "warning", "missing-redlines", f"capabilities/{cap}/rules/redlines.md",
                     f"能力包 {cap} 缺 rules/redlines.md"))
-            src_file = cdir / "kb_sources.json"
-            if src_file.is_file():
+            # M0：kb 全局单根，五域知识域目录在 packs/kb/<cap>（占位包无 kb 属预期，info）
+            if not (kb_root_dir / cap).is_dir():
+                rep.issues.append(Issue(
+                    "info", "kb-domain-missing", f"kb/{cap}",
+                    f"能力包 {cap} 无 packs/kb/{cap}/ 知识域目录（占位包属预期）"))
+
+    # ---- 全局 route_index.yaml 体检（M0 单表：解析失败 / kb 路径失效 / 标签技能不存在）----
+    index_file = kb_root_dir / "route_index.yaml"
+    if index_file.is_file():
+        from core.skills import routeindex, writing as _writing
+        try:
+            entries = routeindex.parse_entries(
+                index_file.read_text(encoding="utf-8"))
+        except Exception as e:  # noqa: BLE001
+            rep.issues.append(Issue(
+                "warning", "route-index-bad-yaml", _rel(index_file, root),
+                f"route_index.yaml 解析失败（索引按空处理，不影响任务）: {e}"))
+            entries = []
+        kb_doms = ({p.name for p in kb_root_dir.iterdir() if p.is_dir()}
+                   if kb_root_dir.is_dir() else set())
+        skill_names = {s.name for s in skills}
+        for e in entries:
+            dom = e.kb.split("/", 1)[0]
+            if dom not in kb_doms:
+                rep.issues.append(Issue(
+                    "warning", "route-index-kb-missing", _rel(index_file, root),
+                    f"索引条目「{e.point}」的 kb 域前缀无效: {e.kb}"))
+            else:
                 try:
-                    data = json.loads(src_file.read_text(encoding="utf-8"))
-                except json.JSONDecodeError as e:
+                    kb_ok = _writing.resolve_kb(root, dom, e.kb).path.is_file()
+                except _writing.KbError:
+                    kb_ok = False
+                if not kb_ok:
                     rep.issues.append(Issue(
-                        "warning", "kb-sources-bad-json", _rel(src_file, root),
-                        f"kb_sources.json 解析失败: {e}"))
-                    data = None
-                if isinstance(data, dict):
-                    for src in data.get("sources", []):
-                        kb_root = cdir / str(src.get("root", ""))
-                        if not kb_root.is_dir():
-                            rep.issues.append(Issue(
-                                "error", "kb-source-root-missing", _rel(src_file, root),
-                                f"知识源 {src.get('id')!r} 的 root 不存在: "
-                                f"{src.get('root')!r}（应在 capabilities/{cap}/ 下）"))
+                        "warning", "route-index-kb-missing", _rel(index_file, root),
+                        f"索引条目「{e.point}」的 kb 模块不存在: {e.kb}"))
+            for tag in e.tags:
+                if tag not in skill_names:
+                    rep.issues.append(Issue(
+                        "warning", "route-index-skill-missing",
+                        _rel(index_file, root),
+                        f"索引条目「{e.point}」的 tags 引用不存在技能: {tag}"
+                        "（裁剪按空交集处理，该条目仅全放行角色可见）"))
 
     # ---- 近重复技能（info；Jaccard ≥0.6 且共有词 ≥2，提示合并/区分边界）----
     enabled_skills = [s for s in skills if s.enabled]

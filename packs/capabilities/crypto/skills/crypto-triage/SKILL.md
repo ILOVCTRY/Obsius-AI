@@ -11,9 +11,9 @@ task_types: solve, triage
 
 # crypto-triage —— 密码题分诊与攻击路由
 
-> 分层纪律：本技能只做**题型判定 → 开专题**。攻击细节与可运行代码在 ctf-crypto
+> 分层纪律：本技能只做**题型判定 → 开专题**。攻击细节与可运行代码在 crypto
 > 英文知识库（每篇一个技术族），用 `kb_open(module=…)` 按表开单篇，禁止通读。
-> 拿不准题型先翻 `ctf-crypto/SKILL.md` 的总索引。
+> 拿不准题型先翻 `crypto/crypto/index.md` 的总索引。
 
 ## 0. 先看题面给了什么
 
@@ -27,20 +27,20 @@ task_types: solve, triage
 
 ## 1. 特征 → 专题对照表（module 路径）
 
-| 题面特征 | kb_open 模块（ctf-crypto/） |
+| 题面特征 | kb_open 模块（crypto/） |
 |---|---|
-| RSA：小 e 开方、共模、Wiener、Pollard p-1、Håstad 广播、Franklin-Reiter、Fermat | `rsa-attacks.md` |
-| RSA：dp/dq 部分泄露、多素数、批 GCD、CRT 故障注入、低指数签名伪造、Manger | `rsa-attacks-2.md` |
+| RSA：小 e 开方、共模、Wiener、Pollard p-1、Håstad 广播、Franklin-Reiter、Fermat | `rsa-attacks.md` 前半 |
+| RSA：dp/dq 部分泄露、多素数、批 GCD、CRT 故障注入、低指数签名伪造、Manger | `rsa-attacks.md` Part 2 |
 | ECC：小群/无效曲线/异常曲线 Smart、ECDSA nonce 复用、Pohlig-Hellman | `ecc-attacks.md` |
 | DH：平凡生成元、平滑阶、小群 confinement、Logjam | `dh-attacks.md` |
-| 分组：ECB 泄露/逐字节、CBC padding oracle、CBC bit-flip、Bleichenbacher(ROBOT) | `modern-ciphers.md` |
-| 分组进阶：Blum-Goldwasser、长度扩展、压缩预言、ECB cut-and-paste、Rabin LSB | `modern-ciphers-2.md`、`modern-ciphers-3.md` |
-| AEAD：AES-GCM nonce 复用、ChaCha20-Poly1305、key-committing 分割格攻击 | `modern-ciphers-4.md` |
+| 分组：ECB 泄露/逐字节、CBC padding oracle、CBC bit-flip、Bleichenbacher(ROBOT) | `modern-ciphers.md` 前半 |
+| 分组进阶：Blum-Goldwasser、长度扩展、压缩预言、ECB cut-and-paste、Rabin LSB | `modern-ciphers.md` Part 2/3 |
+| AEAD：AES-GCM nonce 复用、ChaCha20-Poly1305、key-committing 分割格攻击 | `modern-ciphers.md` Part 4 |
 | 流密码：LFSR（Berlekamp-Massey/相关攻击）、RC4 偏置 | `stream-ciphers.md` |
 | PRNG：MT19937 预测、LCG、时间种子、V8 Math.random、randcrack | `prng.md`、`prng-attacks.md` |
 | 古典：维吉尼亚/凯撒/埃特巴什/XOR 多字节频率分析/书密码/OTP 复用 | `classic-ciphers.md` |
 | 格：LLL/BKZ/Babai、HNP、截短 LCG、LWE/Ring-LWE、NTRU、背包、Coppersmith | `lattice-and-lwe.md`、`advanced-math.md` |
-| ZKP / 秘密分享 / 异或协议 / 杂项代数结构（Paillier 等） | `zkp-and-advanced.md`、`exotic-crypto.md`（→`-2.md`） |
+| ZKP / 秘密分享 / 异或协议 / 杂项代数结构（Paillier 等） | `zkp-and-advanced.md`、`exotic-crypto.md` |
 | 后量子识别（Kyber/ML-DSA/Falcon/NTT） | `post-quantum.md` |
 | 历史密码机（Lorenz 等） | `historical.md` |
 

@@ -1,0 +1,309 @@
+entries:
+  - point: 栈溢出基础
+    match: [栈溢出, 溢出, overflow, ret2*, bof]
+    kb: binary/pwn/overflow-basics.md
+  - point: 堆利用 / FSOP
+    match: [堆利用, heap, tcache, fastbin, unlink, fsop]
+    kb: binary/pwn/heap-fsop.md
+  - point: 格式化字符串
+    match: [格式化字符串, format, fmt, printf]
+    kb: binary/pwn/format-string.md
+  - point: ROP / shellcode
+    match: [rop, shellcode, gadget, ret2libc, srop]
+    kb: binary/pwn/rop-and-shellcode.md
+  - point: 进阶利用技术
+    match: [高级利用, advanced, one_gadget, house*]
+    kb: binary/pwn/advanced-exploits.md
+  - point: 逆向模式识别
+    match: [逆向, 反编译, 静态分析, 混淆, patterns]
+    kb: binary/reverse/patterns.md
+  - point: 反调试 / 反分析
+    match: [反调试, 反分析, anti, 脱壳, 加壳]
+    kb: binary/reverse/anti-analysis.md
+  - point: 恶意样本 PE / .NET
+    match: [pe, 恶意样本, dotnet, 样本分析, 捆绑]
+    kb: binary/malware/pe-and-dotnet.md
+  - point: C2 协议分析
+    match: [c2, 回连, 协议分析, beacon]
+    kb: binary/malware/c2-and-protocols.md
+  - point: RSA 攻击
+    match: [rsa, 共模, e与phi, 维纳, coppersmith]
+    kb: crypto/crypto/rsa-attacks.md
+  - point: 现代分组密码
+    match: [aes, des, 分组密码, ecb, cbc, padding]
+    kb: crypto/crypto/modern-ciphers.md
+  - point: 格与 LWE
+    match: [格, lwe, lll, 背包, knapsack]
+    kb: crypto/crypto/lattice-and-lwe.md
+  - point: 椭圆曲线
+    match: [ecc, 椭圆曲线, ecdlp, 曲线]
+    kb: crypto/crypto/ecc-attacks.md
+  - point: Diffie-Hellman
+    match: [dh, diffie, 密钥交换, 离散对数]
+    kb: crypto/crypto/dh-attacks.md
+  - point: 随机数攻击
+    match: [随机数, prng, mt19937, seed, 熵]
+    kb: crypto/crypto/prng-attacks.md
+  - point: 流密码
+    match: [流密码, rc4, lfsr, xor]
+    kb: crypto/crypto/stream-ciphers.md
+  - point: 古典密码
+    match: [古典, 凯撒, 维吉尼亚, 栅栏, 摩斯, 替换]
+    kb: crypto/crypto/classic-ciphers.md
+  - point: 磁盘与内存取证
+    match: [磁盘, 内存, 取证, volativity, dd, 镜像]
+    kb: forensics/forensics/disk-and-memory.md
+  - point: 流量分析
+    match: [流量, pcap, wireshark, 网络取证]
+    kb: forensics/forensics/network.md
+  - point: 图片隐写
+    match: [隐写, stego, 图片, lsb, binwalk]
+    kb: forensics/forensics/stego-image.md
+  - point: 隐写进阶
+    match: [隐写进阶, 音频, 频谱, 深度隐写]
+    kb: forensics/forensics/stego-advanced.md
+  - point: Windows 取证
+    match: [windows, 注册表, 事件日志, mft, 取证]
+    kb: forensics/forensics/windows.md
+  - point: Linux 取证
+    match: [linux, 日志, history, 计划任务, 取证]
+    kb: forensics/forensics/linux-forensics.md
+  - point: 社工信息收集
+    match: [osint, 社工, 开源情报, 情报]
+    kb: forensics/osint/social-media.md
+  - point: 地理定位与媒体
+    match: [定位, 地理, 照片, exif, 经纬度]
+    kb: forensics/osint/geolocation-and-media.md
+  - point: Python 沙箱逃逸
+    match: [pyjail, 沙箱, 逃逸, python, eval, 过滤]
+    kb: misc/misc/pyjails.md
+  - point: Bash 沙箱
+    match: [bashjail, bash, shell 逃逸]
+    kb: misc/misc/bashjails.md
+  - point: 编码与解码
+    match: [编码, 解码, base64, hex, 编码链]
+    kb: misc/misc/encodings.md
+  - point: 游戏与 VM 题材
+    match: [游戏, vm, wasm, factorio, minecraft]
+    kb: misc/misc/games-and-vms.md
+  - point: LLM 攻击面
+    match: [llm, prompt, 越狱, 提示注入, ai]
+    kb: misc/ai-ml/llm-attacks.md
+  - point: 对抗样本
+    match: [对抗样本, adversarial, 模型攻击]
+    kb: misc/ai-ml/adversarial-ml.md
+  - point: Linux 提权杂项
+    match: [linux 提权, suid, 权限提升, privesc]
+    kb: misc/misc/linux-privesc.md
+  - point: 文件上传测试
+    match: [文件上传, 上传点, upload, 附件, 头像, 导入]
+    kb: web/webapp/file-upload/手册.md
+    tags: [web-strike-entry]
+  - point: SQL 注入
+    match: [sql注入, sqli, 注入点, sql, 盲注]
+    kb: web/webapp/sqli/手册.md
+    tags: [web-strike-entry]
+  - point: XSS 跨站脚本
+    match: [xss, 跨站脚本, 反射型, 存储型, dom]
+    kb: web/webapp/xss/手册.md
+    tags: [web-strike-entry]
+  - point: SSRF 服务端请求伪造
+    match: [ssrf, 服务端请求伪造, 内网探测, webhook]
+    kb: web/webapp/ssrf/手册.md
+    tags: [web-strike-entry]
+  - point: XXE 实体注入
+    match: [xxe, 实体注入, xml]
+    kb: web/webapp/xxe/手册.md
+    tags: [web-strike-entry]
+  - point: 反序列化
+    match: [反序列化, deserialization, java, php]
+    kb: web/webapp/deserialization/手册.md
+    tags: [web-strike-entry]
+  - point: IDOR / 越权
+    match: [越权, idor, 未授权, 水平越权, 垂直越权]
+    kb: web/webapp/idor/手册.md
+    tags: [web-strike-entry]
+  - point: 认证绕过 / 登录测试
+    match: [登录, 认证, authbypass, 弱口令, 爆破]
+    kb: web/webapp/authbypass/手册.md
+    tags: [web-strike-entry]
+  - point: OAuth / JWT
+    match: [oauth, jwt, token, 单点登录]
+    kb: web/webapp/jwt/手册.md
+    tags: [web-strike-entry]
+  - point: 路径穿越 / LFI
+    match: [路径穿越, 目录穿越, lfi, 文件读取, ../]
+    kb: web/webapp/path-traversal/手册.md
+    tags: [web-strike-entry]
+  - point: 命令注入 / RCE
+    match: [命令注入, rce, 代码执行, exec, system]
+    kb: web/webapp/sqli/手册.md
+    tags: [web-strike-entry]
+  - point: SSTI 模板注入
+    match: [ssti, 模板注入, jinja, twig, smarty]
+    kb: web/webapp/el-injection/手册.md
+    tags: [web-strike-entry]
+  - point: CORS 配置错误
+    match: [cors, 跨域, origin]
+    kb: web/webapp/cors/手册.md
+    tags: [web-strike-entry]
+  - point: CSRF 跨站请求伪造
+    match: [csrf, 跨站请求]
+    kb: web/webapp/csrf/手册.md
+    tags: [web-strike-entry]
+  - point: 401/403 绕过
+    match: [401, 403, forbidden, 访问拒绝, 绕过认证]
+    kb: web/webapp/401-403-bypass/手册.md
+    tags: [web-strike-entry]
+  - point: CRLF 注入
+    match: [crlf, 换行注入, 响应拆分]
+    kb: web/webapp/crlf-injection/手册.md
+    tags: [web-strike-entry]
+  - point: CSP 绕过
+    match: [csp, 内容安全策略]
+    kb: web/webapp/csp-bypass/手册.md
+    tags: [web-strike-entry]
+  - point: 点击劫持
+    match: [clickjacking, 点击劫持, iframe]
+    kb: web/webapp/clickjacking/手册.md
+    tags: [web-strike-entry]
+  - point: 缓存投毒
+    match: [缓存投毒, cache poisoning, web缓存]
+    kb: web/webapp/cache-poisoning/手册.md
+    tags: [web-strike-entry]
+  - point: HTTP 请求走私
+    match: [请求走私, smuggling, cl-te, te-cl]
+    kb: web/webapp/http-smuggling/手册.md
+    tags: [web-strike-entry]
+  - point: HTTP/2 攻击
+    match: [http2, h2c, 请求走私]
+    kb: web/webapp/http2-attacks/手册.md
+    tags: [web-strike-entry]
+  - point: Host 头攻击
+    match: [host头, host header, 密码重置投毒]
+    kb: web/webapp/host-header/手册.md
+    tags: [web-strike-entry]
+  - point: GraphQL 测试
+    match: [graphql, introspection, batch]
+    kb: web/webapp/graphql/手册.md
+    tags: [web-strike-entry]
+  - point: WebSocket 测试
+    match: [websocket, ws, socket]
+    kb: web/webapp/websocket/手册.md
+    tags: [web-strike-entry]
+  - point: 业务逻辑漏洞
+    match: [逻辑漏洞, 业务逻辑, 支付, 越权下单, 竞态]
+    kb: web/webapp/logic/手册.md
+    tags: [web-strike-entry]
+  - point: 竞态条件
+    match: [竞态, race condition, 并发]
+    kb: web/webapp/race-condition/手册.md
+    tags: [web-strike-entry]
+  - point: 开放重定向
+    match: [开放重定向, open redirect, redirect, 跳转]
+    kb: web/webapp/open-redirect/手册.md
+    tags: [web-strike-entry]
+  - point: 信息泄露
+    match: [信息泄露, info leak, 泄露, 报错, .git, .env, 备份]
+    kb: web/webapp/info-leak/手册.md
+    tags: [web-strike-entry]
+  - point: 子域名接管
+    match: [子域名接管, takeover, cname, 失效指向]
+    kb: web/webapp/subdomain-takeover/手册.md
+    tags: [web-strike-entry]
+  - point: WAF 绕过
+    match: [waf, 绕过, 拦截, 安全狗, 宝塔]
+    kb: web/webapp/waf-bypass/手册.md
+    tags: [web-strike-entry]
+  - point: 参数污染 HPP
+    match: [参数污染, hpp, http parameter]
+    kb: web/webapp/hpp/手册.md
+    tags: [web-strike-entry]
+  - point: 验证码绕过 / OCR
+    match: [验证码, captcha, 短信轰炸]
+    kb: web/webapp/captcha-ocr/手册.md
+    tags: [web-strike-entry]
+  - point: 类型戏法
+    match: [类型戏法, type juggling, 弱比较, md5碰撞]
+    kb: web/webapp/type-juggling/手册.md
+    tags: [web-strike-entry]
+  - point: 原型链污染
+    match: [原型链, prototype pollution, merge]
+    kb: web/webapp/prototype-pollution/手册.md
+    tags: [web-strike-entry]
+  - point: JNDI 注入
+    match: [jndi, log4j, lookup]
+    kb: web/webapp/jndi-injection/手册.md
+    tags: [web-strike-entry]
+  - point: XSLT 注入
+    match: [xslt, xsl, 样式表注入]
+    kb: web/webapp/xslt-injection/手册.md
+    tags: [web-strike-entry]
+  - point: CSV 公式注入
+    match: [csv, 公式注入, 导出]
+    kb: web/webapp/csv-formula-injection/手册.md
+    tags: [web-strike-entry]
+  - point: 邮件头注入
+    match: [邮件头, mail header, smtp注入]
+    kb: web/webapp/email-header-injection/手册.md
+    tags: [web-strike-entry]
+  - point: DNS 重绑定
+    match: [dns重绑定, rebinding, dns]
+    kb: web/webapp/dns-rebinding/手册.md
+    tags: [web-strike-entry]
+  - point: DNSLog / 带外通道
+    match: [dnslog, 带外, oob, 回显]
+    kb: web/webapp/dnslog-oob/手册.md
+    tags: [web-strike-entry]
+  - point: 悬垂标记攻击
+    match: [悬垂, dangling markup]
+    kb: web/webapp/dangling-markup/手册.md
+    tags: [web-strike-entry]
+  - point: 依赖混淆
+    match: [依赖混淆, dependency confusion, 内部包]
+    kb: web/webapp/dependency-confusion/手册.md
+    tags: [web-strike-entry]
+  - point: SCM / CI 配置泄露
+    match: [scm, .svn, ci, jenkins, gitlab 泄露]
+    kb: web/webapp/insecure-scm/手册.md
+    tags: [web-strike-entry]
+  - point: JS 逆向入门
+    match: [js逆向, 加密参数, sign, 前端加密]
+    kb: web/webapp/js-reverse/手册.md
+    tags: [web-strike-entry]
+  - point: LLM/AI 应用安全测试
+    match: [llm, prompt注入, ai应用, 大模型]
+    kb: web/webapp/llm-security/手册.md
+    tags: [web-strike-entry]
+  - point: Agent 工具执行测试
+    match: [agent工具, 工具调用, mcp]
+    kb: web/webapp/agent-tool-exec/手册.md
+    tags: [web-strike-entry]
+  - point: API 网关测试
+    match: [api网关, kong, apigw, gateway]
+    kb: web/webapp/api-gateway/手册.md
+    tags: [web-strike-entry]
+  - point: 侦察方法论
+    match: [侦察, 信息收集, recon, 资产收集, 子域名]
+    kb: web/recon/methodology/手册.md
+    tags: [recon-asset-enum]
+  - point: 教育行业被动侦察
+    match: [教育, 高校, 学院, 被动侦察, edu]
+    kb: web/recon/passive/cn-education-passive-recon.md
+    tags: [recon-asset-enum]
+  - point: Spring Boot Actuator 绕过
+    match: [actuator, spring, heapdump, env端点]
+    kb: web/recon/active/actuator-root-context-bypass.md
+    tags: [recon-asset-enum]
+  - point: 漏洞利用载荷参考
+    match: [payload, 载荷, poc, exp]
+    kb: web/refs/payloader/index.md
+  - point: 渗透 Playbook 总目录
+    match: [playbook, 打法, 手册目录]
+    kb: web/playbooks/00-index.md
+  - point: 漏洞报告格式
+    match: [报告, 提交漏洞, 漏洞报告, 复现步骤]
+    kb: web/playbooks/rules/vuln-report-format.md
+  - point: SRC 挖洞价值优先级
+    match: [价值, 优先级, 挖洞策略, src]
+    kb: web/playbooks/rules/src-value-hunting.md

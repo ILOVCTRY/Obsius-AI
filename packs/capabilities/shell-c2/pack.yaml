@@ -1,0 +1,4 @@
+kind: capability
+name: shell-c2
+label: "Shell 管理"
+description: "红队战果会话化管理（架构位，§6.9.1）：被攻陷目标的 shell 清单、长连接受控通道、经网关命令通道与全程审计；复用既有会话设施，不建独立 C2 框架"

@@ -1,7 +1,10 @@
 """Skill 路由器（DESIGN.md §4 + §4.5 + §6.6）。
 
-组合关系：角色先窄化（白名单），路由器在窄域内按 特征/标签 + 关键词 评分。
-评分：目标特征/文件特征/分类标签命中 ×3（对照表是主判据）> 关键词命中 ×2 > 描述 ×1。
+组合关系：角色白名单是排序偏好（v0.65 降级，白名单内 +5），路由器按
+特征/标签 + 关键词 评分。
+评分：目标特征/文件特征/分类标签命中 ×3（对照表是主判据）> task_type 命中 +10
+（2026-09-18 认领队列任务的确定性信号，非硬直选）> 角色白名单偏好 +5 > 关键词
+命中 ×2 > 描述 ×1。
 候选集 = 项目启用能力包技能 ∪ 轨技能（packs 集合），默认排除 enabled:false。
 """
 
@@ -22,9 +25,11 @@ class RoutedSkill:
     def breakdown(self) -> list[dict]:
         """评分明细（route-preview/前端试算器展示为什么选中它）：
         features/file_features/labels +3、keywords +2、description +1。"""
-        order = ("features", "file_features", "labels", "keywords", "description")
+        order = ("features", "file_features", "labels", "task_type", "role",
+                 "keywords", "description")
         labels_zh = {"features": "目标特征", "file_features": "文件特征",
-                     "labels": "分类标签", "keywords": "关键词",
+                     "labels": "分类标签", "task_type": "任务类型",
+                     "role": "角色偏好", "keywords": "关键词",
                      "description": "描述"}
         out = []
         for key in order:
@@ -50,14 +55,20 @@ class SkillRouter:
         packs: list[str] | set[str] | None = None,
         top_k: int = 3,
         include_disabled: bool = False,
+        task_type: str | None = None,
     ) -> list[RoutedSkill]:
         """query=用户输入/目标描述。
 
         features      进站识别的 Web 目标特征（has_upload/returns_401…）。
         file_features 文件特征（ELF/NX/Canary/PE…），与 sk.file_features 匹配。
         labels        分类标签（platforms/formats/vuln_classes，§4.5.3）。
-        role_skills   非空时只在白名单内路由（§6.6 软边界；白名单外走越界审批）。
+        role_skills   角色偏好（v0.65 降级）：不再是硬裁剪——白名单内技能 +5
+                      排前，白名单外仍可正常命中注入（能力提升而非限制）。
         packs         允许的来源包（项目 caps ∪ track）；None=不限（设置页试算用）。
+        task_type     任务类型加分项（2026-09-18）：认领队列任务时传 task.task_type，
+                      frontmatter task_types 命中 +10——keywords×2 常见累计 ≤6，
+                      +10 保证命中者几乎必然排前；多个同命中技能间仍由文本分定胜负
+                      （加法叠加，非硬直选）。值域校验在 doctor（越注册表 warning）。
         """
         features = features or []
         file_features = file_features or []
@@ -70,12 +81,15 @@ class SkillRouter:
                 continue
             if pack_set is not None and sk.pack not in pack_set:
                 continue
-            if role_skills is not None and sk.name not in role_skills:
-                continue
             score, matched = 0.0, []
             contrib = {k: {"weight": w, "hits": []} for k, w in (
                 ("features", 3), ("file_features", 3), ("labels", 3),
-                ("keywords", 2), ("description", 1))}
+                ("task_type", 10), ("role", 5), ("keywords", 2),
+                ("description", 1))}
+            if role_skills is not None and sk.name in role_skills:
+                score += 5.0
+                matched.append("role:preferred")
+                contrib["role"]["hits"].append(sk.name)
             for f in features:
                 if f in sk.features:
                     score += 3.0
@@ -91,6 +105,10 @@ class SkillRouter:
                     score += 3.0
                     matched.append(f"label:{lb}")
                     contrib["labels"]["hits"].append(lb)
+            if task_type and task_type.lower() in {t.lower() for t in sk.task_types}:
+                score += 10.0
+                matched.append(f"task_type:{task_type}")
+                contrib["task_type"]["hits"].append(task_type)
             for kw in sk.keywords:
                 if kw.lower() in q:
                     score += 2.0
