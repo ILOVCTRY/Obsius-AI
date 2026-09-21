@@ -3,10 +3,10 @@ import { Link2 } from "lucide-react"
 import type { Finding } from "@/lib/types"
 import { hasPoc } from "@/components/blackboard/FindingDetailDialog"
 import { cn } from "@/lib/utils"
-import { COL_W, LANE_W } from "./canvasModel"
 
-// 评估画布发现卡片（E1）：severity 色条 + 标题（2 行截断）+ vuln_class
+// 评估画布发现卡片（E1）：severity 色条 + 标题（3 行截断）+ vuln_class
 // + 状态角标（✓ verified / 虚线框 unverified / ✕ false-positive）+ POC 角标。
+// 2026-09-18：C2 紧凑形态（info/low 单行）已废（info 停收后前提消失），统一完整卡。
 
 const SEV: Record<string, string> = {
   critical: "#f85149",
@@ -19,8 +19,6 @@ const SEV: Record<string, string> = {
 export type FindingNodeData = {
   f: Finding
   dim: boolean
-  /** C2 降噪：info/low 紧凑形态（高度减半，只显色条+标题一行） */
-  compact?: boolean
   onOpen: (f: Finding) => void
   onQuickAdd: (f: Finding) => void
 }
@@ -28,13 +26,14 @@ export type FindingNodeData = {
 export type FindingFlowNode = Node<FindingNodeData, "finding">
 
 export function FindingNode({ data }: NodeProps<FindingFlowNode>) {
-  const { f, dim, compact, onQuickAdd } = data
+  const { f, dim, onQuickAdd } = data
   const sevColor = SEV[f.severity] ?? SEV.info
   return (
     <div
+      title={f.rating_basis ? `判级依据: ${f.rating_basis}` : undefined}
       className={cn(
-        "group relative w-56 rounded-md border bg-popover shadow-sm transition-opacity",
-        compact ? "px-2.5 py-1" : "px-2.5 py-2",
+        "group relative w-80 rounded-md border bg-popover shadow-sm transition-opacity",
+        "px-3 py-2.5",
         f.status === "false-positive"
           ? "border-dashed border-muted-foreground/40"
           : f.status === "unverified"
@@ -50,31 +49,30 @@ export function FindingNode({ data }: NodeProps<FindingFlowNode>) {
         type="button"
         title="加入攻击链"
         onClick={(e) => { e.stopPropagation(); onQuickAdd(f) }}
-        className="absolute right-1 top-1 hidden rounded text-muted-foreground hover:text-[#39c5cf] group-hover:block"
+        className="absolute right-1.5 top-1.5 hidden rounded text-muted-foreground hover:text-[#39c5cf] group-hover:block"
       >
         <Link2 className="size-3.5" />
       </button>
 
-      <p className={cn("pr-5 text-[11px] font-medium leading-tight", compact ? "truncate" : "line-clamp-2")}>
+      {/* C2 紧凑卡已废（2026-09-18）：info 停收后前提消失，全部完整卡形态 */}
+      <p className="pr-5 text-[13px] font-medium leading-snug line-clamp-3">
         {f.title}
       </p>
-      {!compact && (
-      <div className="mt-1 flex items-center gap-1">
-        <span className="min-w-0 flex-1 truncate rounded bg-muted px-1 font-mono text-[9px] text-muted-foreground">
+      <div className="mt-1.5 flex items-center gap-1">
+        <span className="min-w-0 flex-1 truncate rounded bg-muted px-1 font-mono text-[10px] text-muted-foreground">
           {f.vuln_class}
         </span>
-        <span className="font-mono text-[9px] uppercase" style={{ color: sevColor }}>{f.severity}</span>
+        <span className="font-mono text-[10px] uppercase" style={{ color: sevColor }}>{f.severity}</span>
         {f.status === "verified" && (
-          <span className="text-[10px] text-[#3fb950]" title="verified">✓</span>
+          <span className="text-[11px] text-[#3fb950]" title="verified">✓</span>
         )}
         {f.status === "false-positive" && (
-          <span className="text-[10px] text-muted-foreground" title="false-positive">✕</span>
+          <span className="text-[11px] text-muted-foreground" title="false-positive">✕</span>
         )}
         {hasPoc(f) && (
-          <span className="rounded bg-[#39c5cf]/15 px-1 text-[9px] text-[#39c5cf]">POC</span>
+          <span className="rounded bg-[#39c5cf]/15 px-1 text-[10px] text-[#39c5cf]">POC</span>
         )}
       </div>
-      )}
       <Handle type="source" position={Position.Right} className="!h-2 !w-2 !border-0 !bg-[#39c5cf]" />
     </div>
   )
@@ -91,30 +89,15 @@ export function LaneBackground() {
 
 export type LaneHeaderData = {
   label: string
-  counts: [number, number, number, number] // 四列（info/low｜medium｜high｜critical）发现数
+  width: number // 泳道宽 = 总列数 * COL_W（三分区布局，各泳道可不同）
 }
 
 export type LaneHeaderNode = Node<LaneHeaderData, "laneHeader">
 
-const COL_LABEL = ["信息/低危", "中危", "高危", "严重"]
-
 export function LaneHeader({ data }: NodeProps<LaneHeaderNode>) {
   return (
-    <div className="relative h-10 rounded-md border border-[#30363d] bg-[#0d1117]/90" style={{ width: LANE_W }}>
-      <div className="flex h-5 items-center px-2">
-        <span className="truncate font-mono text-[11px] font-semibold text-foreground">🖧 {data.label}</span>
-      </div>
-      <div className="relative h-5 border-t border-[#30363d]">
-        {COL_LABEL.map((label, i) => (
-          <span
-            key={i}
-            className="absolute top-0.5 -translate-x-1/2 text-[9px] text-muted-foreground"
-            style={{ left: i * COL_W + 112 }}
-          >
-            {label}{data.counts[i] > 0 && <span className="ml-1 text-muted-foreground/70">{data.counts[i]}</span>}
-          </span>
-        ))}
-      </div>
+    <div className="flex h-11 items-center rounded-md border border-[#30363d] bg-[#0d1117]/90 px-2" style={{ width: data.width }}>
+      <span className="truncate font-mono text-[12px] font-semibold text-foreground">🖧 {data.label}</span>
     </div>
   )
 }

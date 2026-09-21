@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react"
+import { Group, Panel, Separator, useDefaultLayout } from "react-resizable-panels"
 import { api, ApiError } from "@/lib/api"
 import type { ProjectDetail } from "@/lib/types"
 import { Badge } from "@/components/ui/badge"
@@ -12,24 +13,56 @@ import { useEvents } from "@/lib/useEvents"
 import { ProjectsView } from "@/views/ProjectsView"
 import { IntelView } from "@/views/IntelView"
 import { TaskBoard } from "@/views/TaskBoard"
+import { BrowserView } from "@/views/browser/BrowserView"
 import { ApprovalsView } from "@/views/ApprovalsView"
 import { SettingsView } from "@/views/SettingsView"
 import { cn } from "@/lib/utils"
 import { bindingBadge } from "@/lib/taxonomy"
 
 // 三栏指挥台（DESIGN.md §12 定稿）：左窄导航 / 中主区 / 直播间页右侧黑板常驻侧栏
+// F1（2026-09-17）：左导航与右侧黑板侧栏 react-resizable-panels v4 可拖拽调宽
+// （左 48–220px、右 288–640px），宽度 localStorage 持久化（ui.nav / ui.live-board）。
 
-type View = "projects" | "intel" | "live" | "board" | "tasks" | "approvals" | "settings"
+type View = "projects" | "intel" | "live" | "board" | "tasks" | "approvals" | "browser" | "settings"
 
 const NAV: { key: View; label: string; icon: string; needsProject: boolean }[] = [
   { key: "projects", label: "项目", icon: "◈", needsProject: false },
   { key: "intel", label: "情报", icon: "📡", needsProject: false },
-  { key: "live", label: "直播间", icon: "◉", needsProject: true },
+  { key: "live", label: "会话", icon: "◉", needsProject: true },
   { key: "board", label: "黑板", icon: "▤", needsProject: true },
   { key: "tasks", label: "任务", icon: "▦", needsProject: true },
+  { key: "browser", label: "浏览器", icon: "🌐", needsProject: true },
   { key: "approvals", label: "审批", icon: "⚑", needsProject: true },
   { key: "settings", label: "技能/设置", icon: "⚙", needsProject: false },
 ]
+
+function NavRail({ active, onSelect, locked, className }: {
+  active: View
+  onSelect: (key: View) => void
+  locked: boolean // pid 缺失时 needsProject 项禁用
+  className?: string
+}) {
+  return (
+    <nav className={cn("flex shrink-0 flex-col items-center gap-1 border-r py-3", className)}>
+      {NAV.map((n) => (
+        <button
+          key={n.key}
+          disabled={n.needsProject && locked}
+          onClick={() => onSelect(n.key)}
+          title={n.label}
+          className={cn(
+            "flex w-12 flex-col items-center gap-0.5 rounded-md py-2 text-[10px]",
+            active === n.key ? "bg-secondary text-primary" : "text-muted-foreground hover:bg-accent",
+            n.needsProject && locked && "opacity-30",
+          )}
+        >
+          <span className="text-base leading-none">{n.icon}</span>
+          {n.label}
+        </button>
+      ))}
+    </nav>
+  )
+}
 
 export default function App() {
   const [pid, setPid] = useState<string | null>(null)
@@ -43,6 +76,8 @@ export default function App() {
   } | null>(null)
   // A3 任务流双击无会话节点 → 跳任务看板并高亮定位卡片（focus nonce 触发滚动）
   const [taskNav, setTaskNav] = useState<{ id: string; n: number } | null>(null)
+  // v0.71 任务即窗口：任务卡/任务流双击 → 跳会话页并直开专属执行窗页签
+  const [sessionNav, setSessionNav] = useState<{ sid: string; n: number } | null>(null)
 
   useEffect(() => {
     const h = (e: Event) => {
@@ -65,6 +100,18 @@ export default function App() {
     }
     window.addEventListener("goto-tasks", h)
     return () => window.removeEventListener("goto-tasks", h)
+  }, [])
+
+  // v0.71 任务即窗口：双击任务卡/任务流节点直开会话页签（detail.sessionId 必带）
+  useEffect(() => {
+    const h = (e: Event) => {
+      const sid = (e as CustomEvent<{ sessionId?: string }>).detail?.sessionId
+      if (!sid) return
+      setView("live")
+      setSessionNav({ sid, n: Date.now() })
+    }
+    window.addEventListener("goto-session", h)
+    return () => window.removeEventListener("goto-session", h)
   }, [])
 
   // 情报页「查看全部」等跨视图跳转（goto-* 自定义事件模式）
@@ -133,30 +180,27 @@ export default function App() {
   // 工作台 profile：research+binary ⇒ rev-generic 逆向工作台（其他轨保持渗透模板）
   const profile = deriveWorkbenchProfile(meta)
 
-  // 无项目上下文的视图（项目列表 / 全局情报页 §16.4）：左导航 + 主区
-  if (!pid || view === "projects" || view === "intel") {
+  // F1：三栏宽度持久化（localStorage；仅用户拖拽后的布局保存）
+  const navLayout = useDefaultLayout({
+    id: "app-nav", panelIds: ["nav", "main"], storage: window.localStorage,
+    onlySaveAfterUserInteractions: true,
+  })
+  const liveBoardLayout = useDefaultLayout({
+    id: "live-board", panelIds: ["live-main", "live-aside"], storage: window.localStorage,
+    onlySaveAfterUserInteractions: true,
+  })
+
+  // 无项目上下文的视图（项目列表 / 全局情报页 / 设置 §16.4）：左导航 + 主区
+  if (!pid || view === "projects" || view === "intel" || view === "settings" && !pid) {
     return (
       <div className="flex h-screen">
-        <nav className="flex w-14 shrink-0 flex-col items-center gap-1 border-r py-3">
-          {NAV.map((n) => (
-            <button
-              key={n.key}
-              disabled={n.needsProject && !pid}
-              onClick={() => setView(n.key)}
-              title={n.label}
-              className={cn(
-                "flex w-12 flex-col items-center gap-0.5 rounded-md py-2 text-[10px]",
-                view === n.key ? "bg-secondary text-primary" : "text-muted-foreground hover:bg-accent",
-                n.needsProject && !pid && "opacity-30",
-              )}
-            >
-              <span className="text-base leading-none">{n.icon}</span>
-              {n.label}
-            </button>
-          ))}
-        </nav>
+        <NavRail active={view} onSelect={setView} locked={!pid} className="w-14" />
         <main className="min-w-0 flex-1 overflow-auto">
-          {view === "intel" ? <IntelView /> : <ProjectsView onOpen={openProject} />}
+          {view === "intel"
+            ? <IntelView />
+            : view === "settings" && !pid
+              ? <SettingsView nav={settingsNav} />
+              : <ProjectsView onOpen={openProject} />}
         </main>
       </div>
     )
@@ -193,38 +237,40 @@ export default function App() {
       </header>
 
       <div className="flex min-h-0 flex-1">
-        {/* 左：窄导航 */}
-        <nav className="flex w-14 shrink-0 flex-col items-center gap-1 border-r py-3">
-          {NAV.map((n) => (
-            <button
-              key={n.key}
-              disabled={n.needsProject && !pid}
-              onClick={() => setView(n.key)}
-              title={n.label}
-              className={cn(
-                "flex w-12 flex-col items-center gap-0.5 rounded-md py-2 text-[10px]",
-                view === n.key ? "bg-secondary text-primary" : "text-muted-foreground hover:bg-accent",
-                n.needsProject && !pid && "opacity-30",
-              )}
-            >
-              <span className="text-base leading-none">{n.icon}</span>
-              {n.label}
-            </button>
-          ))}
-        </nav>
-
-        {/* 中：主区（直播间在 live 视图与黑板同屏共存） */}
-        <main className={cn("min-w-0 flex-1", view === "live" ? "flex" : "overflow-auto")}>
+        <Group orientation="horizontal" className="flex min-h-0 w-full"
+               defaultLayout={navLayout.defaultLayout}
+               onLayoutChanged={navLayout.onLayoutChanged}>
+          {/* 左：窄导航（F1 可拖拽 48–220px） */}
+          <Panel id="nav" minSize={48} maxSize={220} defaultSize={56}>
+            <NavRail active={view} onSelect={setView} locked={!pid} className="h-full w-full" />
+          </Panel>
+          <Separator className="w-0.5 shrink-0 bg-transparent transition-colors hover:bg-accent data-[active]:bg-accent" />
+          {/* 中：主区（直播间在 live 视图与黑板同屏共存） */}
+          <Panel id="main">
+            <main className={cn("h-full min-w-0", view === "live" ? "flex" : "overflow-auto")}>
           {view === "live" && (
             <>
-              <div className="min-w-0 flex-1"><LiveRoom pid={pid} /></div>
-              {boardOpen && (
-                <aside className="w-96 shrink-0 border-l">
-                  {profile === "rev-generic"
-                    ? <RevCompact pid={pid} onOpenWorkbench={() => setView("board")} />
-                    : <Blackboard pid={pid} compact track={meta?.track} capabilities={meta?.capabilities} />}
-                </aside>
-              )}
+              <Group orientation="horizontal" className="flex min-h-0 w-full"
+                     defaultLayout={liveBoardLayout.defaultLayout}
+                     onLayoutChanged={liveBoardLayout.onLayoutChanged}>
+                <Panel id="live-main" minSize={320}>
+                  <div className="h-full min-w-0">
+                    <LiveRoom pid={pid} focusSession={sessionNav} />
+                  </div>
+                </Panel>
+                {boardOpen && (
+                  <>
+                    <Separator className="w-0.5 shrink-0 bg-transparent transition-colors hover:bg-accent" />
+                    <Panel id="live-aside" minSize={288} maxSize={640} defaultSize={384}>
+                      <aside className="h-full w-full border-l">
+                        {profile === "rev-generic"
+                          ? <RevCompact pid={pid} onOpenWorkbench={() => setView("board")} />
+                          : <Blackboard pid={pid} compact track={meta?.track} capabilities={meta?.capabilities} />}
+                      </aside>
+                    </Panel>
+                  </>
+                )}
+              </Group>
               <button
                 onClick={() => setBoardOpen(!boardOpen)}
                 className="w-5 shrink-0 border-l text-[10px] text-muted-foreground hover:bg-accent"
@@ -245,9 +291,18 @@ export default function App() {
             </div>
           )}
           {view === "tasks" && <TaskBoard pid={pid} focused={taskNav} />}
-          {view === "approvals" && <ApprovalsView pid={pid} />}
-          {view === "settings" && <SettingsView nav={settingsNav} />}
-        </main>
+          {view === "browser" && (
+            // F6 内置浏览器：轨门控（非 pentest/redteam 整页灰显）在视图内部处理；
+            // 定高视图（面板组），照 rev 走 h-full + overflow-hidden
+            <div className="h-full w-full overflow-hidden">
+              <BrowserView pid={pid} track={meta?.track} />
+            </div>
+          )}
+          {view === "approvals" && <ApprovalsView pid={pid} onGotoTasks={() => setView("tasks")} />}
+          {view === "settings" && <SettingsView nav={settingsNav} pid={pid} />}
+            </main>
+          </Panel>
+        </Group>
       </div>
     </div>
   )

@@ -1,7 +1,7 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useState, type ReactNode } from "react"
 import { ChevronDown, ChevronRight } from "lucide-react"
 import { api } from "@/lib/api"
-import type { Asset, Finding, FuncEntry } from "@/lib/types"
+import type { Asset, Finding, FindingCategory, FuncEntry } from "@/lib/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -11,6 +11,7 @@ import { cn } from "@/lib/utils"
 import { hexAddr } from "@/lib/workbench"
 import { fmtDateTime, utcTitle } from "@/lib/datetime"
 import { FindingDetailDialog } from "@/components/blackboard/FindingDetailDialog"
+import { CTF_LEVEL, CTF_LEVEL_ORDER } from "./blackboard/ctfLevel"
 
 // 黑板视图（DESIGN.md §12 页面 4）：发现 / 资产 / 函数库 + human 共写入口
 // 发现 tab 内 assessment 轨额外提供「列表｜链路」子视图（攻击链画布，E1）。
@@ -26,33 +27,55 @@ const SEVERITY_COLOR: Record<string, string> = {
 // 攻击链画布懒加载：@xyflow/react ~192KB 不进主包（与逆向 ChainView 同策略）
 const FindingsCanvas = lazy(() =>
   import("./blackboard/FindingsCanvas").then((m) => ({ default: m.FindingsCanvas })))
+// 黑板链路图（全景 tab）懒加载：同策略，五类对象 × 类型分层 DAG
+const BoardGraphCanvas = lazy(() =>
+  import("./blackboard/boardGraph/BoardGraphCanvas").then((m) => ({ default: m.BoardGraphCanvas })))
 
 // 函数库 tab 仅 capabilities 含 binary 时挂载（func_kb 只由二进制分析产生；
 // assessment web-only 项目里永远空数据）。判据是能力不是轨。
+// 全景 tab（黑板链路图）全轨开放，compact 侧栏除外。
 export function Blackboard({ pid, compact = false, track, capabilities }: {
   pid: string; compact?: boolean; track?: string; capabilities?: string[]
 }) {
-  const tabs = capabilities?.includes("binary")
-    ? ["findings", "assets", "funcs"] as const
-    : ["findings", "assets"] as const
+  const tabs = [
+    "findings", "assets",
+    ...(capabilities?.includes("binary") ? ["funcs"] as const : []),
+    ...(!compact ? ["board"] as const : []),
+  ] as const
   return (
     <Tabs defaultValue="findings" className="flex h-full flex-col gap-0">
       <TabsList className="w-full justify-start rounded-none border-b bg-transparent p-0">
         {tabs.map((t) => (
           <TabsTrigger key={t} value={t} className="rounded-none border-b-2 px-3 py-1.5 text-xs">
-            {t === "findings" ? "发现" : t === "assets" ? "资产" : "函数库"}
+            {t === "findings" ? "发现" : t === "assets" ? "资产" : t === "funcs" ? "函数库" : "全景"}
           </TabsTrigger>
         ))}
       </TabsList>
       <TabsContent value="findings" className="min-h-0 flex-1">
-        {/* 子视图切换仅 assessment track 且非 compact 侧栏时渲染 */}
-        <Findings pid={pid} compact={compact} track={track} showCanvas={!compact && track === "assessment"} />
+        {/* 子视图切换仅渗透/红队轨（R2 拆轨前判断 assessment）且非 compact 侧栏时渲染 */}
+        <Findings pid={pid} compact={compact} track={track}
+                  showCanvas={!compact && (track === "pentest" || track === "redteam")} />
       </TabsContent>
       <TabsContent value="assets" className="min-h-0 flex-1">
-        <Assets pid={pid} compact={compact} tree={track === "assessment"} />
+        {/* 树视图全轨启用（2026-09-20）：E6 自动挂载全轨生效，ctf 等轨同样有 parent 树；
+            无 parent 的行自然退化平铺 */}
+        <Assets pid={pid} compact={compact} tree />
       </TabsContent>
       {capabilities?.includes("binary") && (
         <TabsContent value="funcs" className="min-h-0 flex-1"><Funcs pid={pid} /></TabsContent>
+      )}
+      {/* relative 定位上下文必须挂在 TabsContent 上：画布是 absolute inset-0，
+          缺了它锚到更外层、把 tab 栏整个盖住（用户被困在全景里切不回去） */}
+      {!compact && (
+        <TabsContent value="board" className="relative min-h-0 flex-1">
+          <Suspense fallback={
+            <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
+              加载全景链路…
+            </div>
+          }>
+            <BoardGraphCanvas pid={pid} track={track} />
+          </Suspense>
+        </TabsContent>
       )}
     </Tabs>
   )
@@ -74,15 +97,7 @@ function Chip({ active, onClick, children }: { active: boolean; onClick: () => v
   )
 }
 
-// CTF 线索级别（C2 换词表）：severity 字段在 ctf 轨的语义映射与展示色
-const CTF_LEVEL: Record<string, { label: string; cls: string }> = {
-  critical: { label: "关键突破", cls: "text-(--status-error)" },
-  high: { label: "有效线索", cls: "text-(--status-approval)" },
-  medium: { label: "背景信息", cls: "text-muted-foreground" },
-  low: { label: "背景信息", cls: "text-muted-foreground" },
-  info: { label: "背景信息", cls: "text-muted-foreground" },
-}
-const CTF_LEVEL_ORDER = ["critical", "high", "medium", "low", "info"]
+// CTF 线索级别词表已提出共享：./blackboard/ctfLevel（列表视图与全景链路图共用）
 
 function Findings({ pid, compact, track, showCanvas }: {
   pid: string; compact?: boolean; track?: string; showCanvas: boolean
@@ -93,6 +108,11 @@ function Findings({ pid, compact, track, showCanvas }: {
   const [assetFilter, setAssetFilter] = useState("")
   const [sevFilter, setSevFilter] = useState("")      // ""=全部，否则作为 min_severity 下发
   const [statusFilter, setStatusFilter] = useState("") // "" | unverified | verified
+  // C6 分两类硬切换（仅渗透/红队轨）：vuln=漏洞 / intel=有效发现·关键发现，互不混显
+  const isSplit = track === "pentest" || track === "redteam"
+  const [catView, setCatView] = useState<FindingCategory>("vuln")
+  // 手动添加的严重度（漏洞视图不含 info——门禁①）
+  const [addSev, setAddSev] = useState("low")
   const [levelFilter, setLevelFilter] = useState("")   // C2：ctf 线索级别筛选（""=全部未折叠）
   const [detail, setDetail] = useState<Finding | null>(null)  // 弹窗展示复现步骤/POC
   const [assetOpen, setAssetOpen] = useState(false)   // 资产筛选下拉展开态
@@ -137,6 +157,8 @@ function Findings({ pid, compact, track, showCanvas }: {
     let filtered = statusFilter === "unverified"
       ? items.filter((f) => f.status === "unverified")
       : items
+    // C6 分两类硬切换：渗透/红队轨按 catView 严格过滤（两侧互不混显）
+    if (isSplit) filtered = filtered.filter((f) => (f.category ?? "vuln") === catView)
     if (isCtf) {
       // C2 死路默认折叠：status=false-positive 仅在「死路」筛选下显示
       filtered = levelFilter === "dead"
@@ -165,11 +187,14 @@ function Findings({ pid, compact, track, showCanvas }: {
     }
     return [...filtered].sort((a, b) =>
       rank(a.severity) - rank(b.severity) || b.created_at.localeCompare(a.created_at))
-  }, [items, assets, statusFilter, assetFilter, isCtf, levelFilter])
+  }, [items, assets, statusFilter, assetFilter, isCtf, levelFilter, catView, isSplit])
 
   const add = async () => {
     if (!title.trim()) return
-    await api.addFinding(pid, { vuln_class: vulnClass || "clue", title: title.trim(), status: "unverified" })
+    await api.addFinding(pid, {
+      vuln_class: vulnClass || "clue", title: title.trim(), status: "unverified",
+      category: isSplit ? catView : undefined, severity: addSev,
+    })
     setTitle("")
     refresh()
   }
@@ -251,7 +276,8 @@ function Findings({ pid, compact, track, showCanvas }: {
         ) : (
           <>
             <Chip active={sevFilter === ""} onClick={() => setSevFilter("")}>全部</Chip>
-            {SEVERITY_ORDER.map((s) => (
+            {/* 渗透/红队轨 info 停收（2026-09-18）：筛选 chips 同步剔除 info 档 */}
+            {SEVERITY_ORDER.filter((s) => !isSplit || s !== "info").map((s) => (
               <Chip key={s} active={sevFilter === s} onClick={() => setSevFilter(sevFilter === s ? "" : s)}>
                 <span className={cn("uppercase", SEVERITY_COLOR[s])}>{s}</span>
               </Chip>
@@ -264,6 +290,25 @@ function Findings({ pid, compact, track, showCanvas }: {
         <Chip active={statusFilter === "unverified"} onClick={() => setStatusFilter(statusFilter === "unverified" ? "" : "unverified")}>unverified</Chip>
         <Chip active={statusFilter === "verified"} onClick={() => setStatusFilter(statusFilter === "verified" ? "" : "verified")}>verified</Chip>
       </div>
+      {/* C6 分两类硬切换：漏洞 / 有效发现 两视图互不混显（仅渗透/红队轨） */}
+      {isSplit && (
+        <div className="ml-auto flex items-center rounded border p-0.5 text-[11px]">
+          <button
+            type="button"
+            className={cn("rounded px-2 py-0.5", catView === "vuln" ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-accent/40")}
+            onClick={() => setCatView("vuln")}
+          >
+            漏洞
+          </button>
+          <button
+            type="button"
+            className={cn("rounded px-2 py-0.5", catView === "intel" ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-accent/40")}
+            onClick={() => setCatView("intel")}
+          >
+            有效发现
+          </button>
+        </div>
+      )}
       {showCanvas && (
         <div className="ml-auto flex items-center rounded border p-0.5 text-[11px]">
           <button
@@ -295,15 +340,18 @@ function Findings({ pid, compact, track, showCanvas }: {
               加载攻击链画布…
             </div>
           }>
-            <FindingsCanvas pid={pid} findings={visible} assets={assets} assetFilter={assetFilter} onMutated={refresh} />
+            <FindingsCanvas pid={pid} findings={visible} assets={assets} assetFilter={assetFilter} onMutated={refresh} track={track} />
           </Suspense>
         </div>
         {detail && (
           <FindingDetailDialog
+            key={detail.id}
             pid={pid}
             finding={detail}
             assetLabel={assetName(detail.target_asset_id)}
+            track={track}
             onClose={() => setDetail(null)}
+            onMutated={refresh}
           />
         )}
       </div>
@@ -323,10 +371,18 @@ function Findings({ pid, compact, track, showCanvas }: {
               onClick={() => setDetail(f)}
             >
               <div className="flex items-center gap-2">
-                <span className={cn("text-[10px] font-medium", isCtf ? CTF_LEVEL[f.severity]?.cls : SEVERITY_COLOR[f.severity])}>
+                <span className={cn("text-[10px] font-medium", isCtf ? CTF_LEVEL[f.severity]?.cls : SEVERITY_COLOR[f.severity])}
+                      title={f.rating_basis ? `判级依据: ${f.rating_basis}` : undefined}>
                   {isCtf ? (CTF_LEVEL[f.severity]?.label ?? f.severity) : f.severity}
                 </span>
                 <span className="text-sm">{f.title}</span>
+                {isSplit && (
+                  <Badge variant="outline"
+                         className={cn("text-[10px]",
+                           (f.category ?? "vuln") === "intel" ? "text-(--status-ok)" : "text-(--status-error)")}>
+                    {(f.category ?? "vuln") === "intel" ? "📌 有效发现" : "漏洞"}
+                  </Badge>
+                )}
                 {f.status === "verified" && <Badge variant="outline" className="text-[10px]">verified</Badge>}
                 {f.status === "false-positive" && isCtf && (
                   <Badge variant="outline" className="text-[10px] text-muted-foreground">死路</Badge>
@@ -338,6 +394,7 @@ function Findings({ pid, compact, track, showCanvas }: {
               <div className="mt-0.5 font-mono text-[10px] text-muted-foreground">
                 {f.vuln_class} · <span title={utcTitle(f.created_at)}>{fmtDateTime(f.created_at)}</span>
                 {assetName(f.target_asset_id) && <> · {assetName(f.target_asset_id)}</>}
+                {(f.rating_basis ?? "").trim() && <> · <span title={`判级依据: ${f.rating_basis}`}>{f.rating_basis.length > 40 ? `${f.rating_basis.slice(0, 40)}…` : f.rating_basis}</span></>}
               </div>
             </div>
           ))}
@@ -345,8 +402,16 @@ function Findings({ pid, compact, track, showCanvas }: {
       </ScrollArea>
       {!compact && (
         <div className="flex gap-2 border-t p-2">
-          <Input className="w-28" value={vulnClass} onChange={(e) => setVulnClass(e.target.value)} placeholder={isCtf ? "线索类别" : "类别"} />
-          <Input className="flex-1" value={title} onChange={(e) => setTitle(e.target.value)}
+          <select className="h-8 w-20 shrink-0 rounded-md border bg-background px-2 text-xs"
+                  value={addSev} onChange={(e) => setAddSev(e.target.value)}
+                  title="严重度">
+            {(isSplit
+              ? ["low", "medium", "high", "critical"] // 渗透/红队轨 info 停收（2026-09-18，全类别）
+              : ["info", "low", "medium", "high", "critical"]
+            ).map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+          <Input className="min-w-0 flex-1" value={vulnClass} onChange={(e) => setVulnClass(e.target.value)} placeholder="类别（如 暴露面/远程管理服务、信息点）" />
+          <Input className="min-w-0 flex-1" value={title} onChange={(e) => setTitle(e.target.value)}
                  placeholder="手动添加发现（human 共写，§6.5）" onKeyDown={(e) => e.key === "Enter" && add()} />
           <Button size="sm" onClick={add} disabled={!title.trim()}>添加</Button>
         </div>
@@ -354,18 +419,22 @@ function Findings({ pid, compact, track, showCanvas }: {
       {/* 点击卡片 → 弹窗展示复现步骤 + POC（一键复制） */}
       {detail && (
         <FindingDetailDialog
+          key={detail.id}
           pid={pid}
           finding={detail}
           assetLabel={assetName(detail.target_asset_id)}
+          track={track}
           onClose={() => setDetail(null)}
+          onMutated={refresh}
         />
       )}
     </div>
   )
 }
 
-// E7 资产状态徽章（§5.2）：open 不显；旧数据 meta.scanned=true 映射「已访问」；
-// 「有发现」= 该资产挂 verified finding 的前端反查（结论以 findings 为准，AI 不自报）
+// E7 资产状态徽章（§5.2；2026-09-19 扩六态）：open 不显；旧数据 meta.scanned=true 映射「已访问」；
+// 「有发现」= 该资产挂 verified finding 的前端反查（结论以 findings 为准，AI 不自报）；
+// budget_stop/na（借鉴 dsh AttackAtlas 覆盖态）回答「哪里没挖完、为什么」
 function AssetBadges({ a, hasFinding }: { a: Asset; hasFinding?: boolean }) {
   if (hasFinding)
     return <Badge variant="outline" className="text-[10px] text-(--status-error)">有发现</Badge>
@@ -376,19 +445,64 @@ function AssetBadges({ a, hasFinding }: { a: Asset; hasFinding?: boolean }) {
     return <Badge variant="outline" className="text-[10px] text-amber-400">扫描中</Badge>
   if (s === "tested_clean")
     return <Badge variant="outline" className="text-[10px] text-primary">已测试·干净</Badge>
+  if (s === "budget_stop")
+    return (
+      <Badge variant="outline" className="text-[10px] text-(--status-paused)"
+             title="预算/配额用尽被迫停手（原因见事件流 asset.status_changed 的 note）">
+        ⏸ 预算停手
+      </Badge>
+    )
+  if (s === "na")
+    return (
+      <Badge variant="outline" className="text-[10px] text-muted-foreground/70"
+             title="确认不适用（原因见事件流 asset.status_changed 的 note）">
+        ⊘ 不适用
+      </Badge>
+    )
   return null
 }
 
-function AssetRow({ a, indent = false, hasFinding }: { a: Asset; indent?: boolean; hasFinding?: boolean }) {
+/** 资产标签 chips（W 后续/态势增强：meta.tags；「高价值」资产会进编排器每轮态势注入） */
+function AssetTags({ tags }: { tags: string[] }) {
+  if (!tags.length) return null
+  return (
+    <>
+      {tags.map((t) => (
+        <Badge key={t} variant="outline"
+               className={cn("text-[10px]",
+                 t === "高价值" ? "border-amber-400/60 text-amber-400" : "text-muted-foreground")}>
+          {t === "高价值" ? "⭐高价值" : `#${t}`}
+        </Badge>
+      ))}
+    </>
+  )
+}
+
+function AssetRow({ a, indent = false, hasFinding, onToggleHvt }:
+                  { a: Asset; indent?: boolean; hasFinding?: boolean; onToggleHvt?: (a: Asset) => void }) {
   const meta = a.meta ?? {}
   const hint = (meta.module ?? meta.platform ?? meta.source) as string | undefined
   const title = meta.title as string | undefined
+  const tags = (meta.tags as string[] | undefined) ?? []
   return (
     <div className={cn("rounded px-1 py-1 hover:bg-accent/40", indent && "ml-5")}>
       <div className="flex items-center gap-2">
         <Badge variant="outline" className="font-mono text-[10px]">{a.type}</Badge>
-        <span className="min-w-0 flex-1 truncate font-mono text-xs">{a.value}</span>
+        {/* 状态徽章紧贴值（用户定稿 2026-09-19）；flex-1 占位在徽章之后，右侧只留标签/⭐/hint/会话 */}
+        <span className="min-w-0 shrink truncate font-mono text-xs">{a.value}</span>
         <AssetBadges a={a} hasFinding={hasFinding} />
+        <span className="min-w-0 flex-1" />
+        <AssetTags tags={tags} />
+        {onToggleHvt && (
+          <button
+            title={tags.includes("高价值") ? "取消高价值标记" : "标记为高价值（⭐ 进编排器每轮态势注入）"}
+            className={cn("shrink-0 rounded px-1 text-[10px] hover:bg-accent",
+              tags.includes("高价值") ? "text-amber-400" : "text-muted-foreground/50")}
+            onClick={(e) => { e.stopPropagation(); onToggleHvt(a) }}
+          >
+            ⭐
+          </button>
+        )}
         {hint && <span className="max-w-32 truncate text-[10px] text-muted-foreground">{hint}</span>}
         <span className="font-mono text-[10px] text-muted-foreground">{a.author}</span>
       </div>
@@ -406,6 +520,9 @@ function Assets({ pid, compact, tree = false }: { pid: string; compact?: boolean
   const [value, setValue] = useState("")
   const [err, setErr] = useState("")
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  // 态势增强：资产标签（meta.tags）+「高价值」筛选；标签随编排器每轮态势注入
+  const [tagFilter, setTagFilter] = useState("")
+  const [tagErr, setTagErr] = useState<string | null>(null)
   // E7「有发现」徽章数据源：verified findings 的 target_asset_id 反查集合
   const [verifiedIds, setVerifiedIds] = useState<Set<string>>(new Set())
 
@@ -448,6 +565,34 @@ function Assets({ pid, compact, tree = false }: { pid: string; compact?: boolean
       return next
     })
 
+  const allTags = useMemo(() => {
+    const s = new Map<string, number>()
+    for (const a of items) {
+      for (const t of (a.meta?.tags as string[] | undefined) ?? []) {
+        const k = t.trim()
+        if (k) s.set(k, (s.get(k) ?? 0) + 1)
+      }
+    }
+    return [...s.entries()].sort((x, y) => y[1] - x[1]).map(([t]) => t)
+  }, [items])
+  const visible = tagFilter
+    ? items.filter((a) => ((a.meta?.tags as string[] | undefined) ?? [])
+        .some((t) => t.trim() === tagFilter))
+    : items
+  const toggleHvt = async (a: Asset) => {
+    const cur = (a.meta?.tags as string[] | undefined) ?? []
+    const tags = cur.includes("高价值")
+      ? cur.filter((t) => t !== "高价值")
+      : [...cur, "高价值"]
+    setTagErr(null)
+    try {
+      await api.patchAsset(pid, a.id, { meta: { tags } })
+      refresh()
+    } catch (e) {
+      setTagErr(`标签保存失败：${e instanceof Error ? e.message : e}`)
+    }
+  }
+
   const add = async () => {
     if (!value.trim()) return
     try {
@@ -463,7 +608,16 @@ function Assets({ pid, compact, tree = false }: { pid: string; compact?: boolean
 
   const renderRows = () => {
     if (items.length === 0) return <Empty />
-    if (!tree) return items.map((a) => <AssetRow key={a.id} a={a} hasFinding={verifiedIds.has(a.id)} />)
+    if (tagFilter) {
+      // 标签筛选时退平铺（树内子孙可能不满足筛选条件）
+      if (visible.length === 0) return <p className="p-2 text-xs text-muted-foreground">该标签下暂无资产</p>
+      return visible.map((a) => (
+        <AssetRow key={a.id} a={a} hasFinding={verifiedIds.has(a.id)} onToggleHvt={!compact ? toggleHvt : undefined} />
+      ))
+    }
+    if (!tree) return items.map((a) => (
+      <AssetRow key={a.id} a={a} hasFinding={verifiedIds.has(a.id)} onToggleHvt={!compact ? toggleHvt : undefined} />
+    ))
     // 递归渲染（host → service → url 多层）：任意带子行的节点都可展开
     const countDesc = (id: string): number =>
       (childrenOf.get(id) ?? []).reduce((n, c) => n + 1 + countDesc(c.id), 0)
@@ -484,8 +638,23 @@ function Assets({ pid, compact, tree = false }: { pid: string; compact?: boolean
                    : <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
             ) : <span className="size-3.5 shrink-0" />}
             <Badge variant="outline" className="font-mono text-[10px]">{a.type}</Badge>
-            <span className="min-w-0 flex-1 truncate font-mono text-xs">{a.value}</span>
+            {/* 状态徽章紧贴值（用户定稿 2026-09-19）；flex-1 占位在徽章之后 */}
+            <span className="min-w-0 shrink truncate font-mono text-xs">{a.value}</span>
             <AssetBadges a={a} hasFinding={verifiedIds.has(a.id)} />
+            <span className="min-w-0 flex-1" />
+            <AssetTags tags={(meta.tags as string[] | undefined) ?? []} />
+            {!compact && (
+              <button
+                title={(meta.tags as string[] | undefined)?.includes("高价值")
+                  ? "取消高价值标记" : "标记为高价值（⭐ 进编排器每轮态势注入）"}
+                className={cn("shrink-0 rounded px-1 text-[10px] hover:bg-accent",
+                  (meta.tags as string[] | undefined)?.includes("高价值")
+                    ? "text-amber-400" : "text-muted-foreground/50")}
+                onClick={(e) => { e.stopPropagation(); toggleHvt(a) }}
+              >
+                ⭐
+              </button>
+            )}
             {children.length > 0 && (
               <Badge variant="outline" className="font-mono text-[10px] text-muted-foreground">
                 {countDesc(a.id)}
@@ -510,6 +679,25 @@ function Assets({ pid, compact, tree = false }: { pid: string; compact?: boolean
 
   return (
     <div className="flex h-full flex-col">
+      {!compact && (
+        <div className="flex flex-wrap items-center gap-1 border-b px-3 py-1.5">
+          <button className={cn("rounded px-2 py-0.5 text-[10px]",
+            tagFilter === "" ? "bg-primary/15 text-primary" : "text-muted-foreground hover:bg-accent")}
+            onClick={() => setTagFilter("")}>
+            全部
+          </button>
+          {tagErr && <span className="text-[10px] text-(--status-error)">{tagErr}</span>}
+          {["高价值", ...allTags.filter((t) => t !== "高价值")].map((t) => (
+            <button key={t}
+              className={cn("rounded px-2 py-0.5 text-[10px]",
+                tagFilter === t ? "bg-primary/15 text-primary" : "text-muted-foreground hover:bg-accent",
+                t === "高价值" && "text-amber-400")}
+              onClick={() => setTagFilter(tagFilter === t ? "" : t)}>
+              {t === "高价值" ? `⭐${t}` : `#${t}`}
+            </button>
+          ))}
+        </div>
+      )}
       <ScrollArea className="min-h-0 flex-1">
         <div className="space-y-1 p-3">{renderRows()}</div>
       </ScrollArea>

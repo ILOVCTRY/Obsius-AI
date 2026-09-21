@@ -1,6 +1,7 @@
 """core API 测试（TestClient，不触网；LLM 缺失时 Agent 端点应 503）。"""
 
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -21,8 +22,8 @@ def client(tmp_path):
         yield c
 
 
-def _make_project(client) -> str:
-    r = client.post("/api/projects", json={"name": "API 测试项目", "track": "ctf",
+def _make_project(client, track: str = "ctf") -> str:
+    r = client.post("/api/projects", json={"name": "API 测试项目", "track": track,
                                            "capabilities": ["binary"], "config": {"x": 1}})
     assert r.status_code == 201
     return r.json()["id"]
@@ -40,17 +41,24 @@ def test_project_lifecycle(client):
 
 
 def test_project_binding_validation_and_legacy_domain(client):
-    """建项：非法轨/能力包 422；旧客户端 domain 入参透明映射。"""
-    r = client.post("/api/projects", json={"name": "坏轨", "track": "redteam"})
+    """建项：非法轨/能力包 422；红队扩展包仅 redteam 轨；旧 domain 透明映射（R1/R2）。"""
+    r = client.post("/api/projects", json={"name": "坏轨", "track": "nope"})
     assert r.status_code == 422 and "场景轨" in r.json()["detail"]
     r = client.post("/api/projects", json={"name": "坏包", "track": "ctf",
                                            "capabilities": ["quantum"]})
     assert r.status_code == 422 and "能力包" in r.json()["detail"]
-    # 旧客户端 domain=pentest → assessment/web
+    # R1：redteam 轨合法创建
+    r = client.post("/api/projects", json={"name": "红队轨", "track": "redteam"})
+    assert r.status_code == 201 and r.json()["track"] == "redteam"
+    # R3/R4：social/shell-c2 仅 redteam 轨可挂载
+    r = client.post("/api/projects", json={"name": "越轨挂载", "track": "pentest",
+                                           "capabilities": ["social"]})
+    assert r.status_code == 422 and "redteam" in r.json()["detail"]
+    # 旧客户端 domain=pentest → pentest/web（R1 目标轨更新）
     r = client.post("/api/projects", json={"name": "旧客户端", "domain": "pentest"})
     assert r.status_code == 201
     meta = r.json()
-    assert meta["track"] == "assessment" and meta["capabilities"] == ["web"]
+    assert meta["track"] == "pentest" and meta["capabilities"] == ["web"]
 
 
 def test_project_usage_defaults_and_config_patch(client):
@@ -101,9 +109,9 @@ def test_taxonomy_endpoint(client):
     caps = {c["name"] for c in data["capabilities"]}
     tracks = {t["name"] for t in data["tracks"]}
     assert {"web", "binary"} <= caps
-    assert {"ctf", "assessment"} <= tracks
+    assert {"ctf", "pentest", "redteam"} <= tracks
     assert data["task_types"]["ctf"]["solve"] == "passive"
-    assert data["task_types"]["assessment"]["exploit"] == "low"
+    assert data["task_types"]["pentest"]["exploit"] == "low"
 
 
 def test_blackboard_human_cowrite(client):
@@ -252,6 +260,25 @@ def test_task_publish_edit_reopen_delete(client):
     assert client.delete(f"/api/tasks/{tid}x").status_code == 404     # 不存在
 
 
+def test_events_tail_and_before_paging(client):
+    """直播间事件流分页（2026-09-17）：tail=最新 N 条、before_id=更早一页（升序返回），
+    首屏不全量回放 + 上翻懒加载的数据面；since_id 增量语义不变。"""
+    pid = _make_project(client)
+    bb = client.app.state.projects[pid].bb
+    base = client.get(f"/api/projects/{pid}/events").json()
+    for i in range(60):
+        bb.append_event(pid, "test.ev", {"i": i}, author="human")
+    tail = client.get(f"/api/projects/{pid}/events?tail=50").json()
+    assert len(tail) == 50 and tail[0]["id"] < tail[-1]["id"]  # 升序、最新 50 条
+    older = client.get(
+        f"/api/projects/{pid}/events?before_id={tail[0]['id']}&limit=50").json()
+    assert len(older) == len(base) + 60 - 50  # 尾页之前的全部更早事件
+    assert older[-1]["id"] < tail[0]["id"] and older == sorted(older, key=lambda e: e["id"])
+    # since_id 增量不受影响
+    inc = client.get(f"/api/projects/{pid}/events?since_id={tail[-1]['id']}").json()
+    assert inc == []
+
+
 def test_task_graph_endpoint(client):
     """A3：GET task-graph 返回节点（含空 plan/session 占位）+ parent 实线。"""
     pid = _make_project(client)
@@ -269,6 +296,26 @@ def test_task_graph_endpoint(client):
     assert client.get("/api/projects/proj-nope/task-graph").status_code in (403, 404)
 
 
+def test_board_graph_endpoint(client):
+    """黑板链路图（2026-09-20）：五类节点 + 跨实体边；跨项目 404。"""
+    pid = _make_project(client)
+    bb = client.app.state.projects[pid].bb
+    url_id = bb.upsert_asset(pid, "url", "http://10.0.0.9/")["id"]
+    f = bb.add_finding(pid, "sqli", "注入", target_asset_id=url_id)["id"]
+    client.post(f"/api/projects/{pid}/tasks",
+                json={"objective": "验证", "task_type": "generic"}).json()["task_id"]
+
+    r = client.get(f"/api/projects/{pid}/board-graph")
+    assert r.status_code == 200
+    g = r.json()
+    types = {n["node_type"] for n in g["nodes"]}
+    assert types == {"asset", "finding", "task"}
+    assert {n["label"] for n in g["nodes"] if n["node_type"] == "asset"} == {"http://10.0.0.9/"}
+    pairs = {(e["kind"], e["source"], e["target"]) for e in g["edges"]}
+    assert ("targets", f, url_id) in pairs
+    assert client.get("/api/projects/proj-nope/board-graph").status_code in (403, 404)
+
+
 def test_events_endpoint_and_websocket(client):
     pid = _make_project(client)
     client.post(f"/api/projects/{pid}/tasks",
@@ -279,11 +326,15 @@ def test_events_endpoint_and_websocket(client):
     client.post(f"/api/projects/{pid}/tasks",
                 json={"objective": "再分诊", "task_type": "triage"})
     delta = client.get(f"/api/projects/{pid}/events", params={"since_id": since}).json()
-    assert len(delta) == 1 and delta[0]["payload"]["objective"] == "再分诊"
+    # v0.71 发布即建窗：delta 除 task.published 外还有绑窗事件（task.window_bound/
+    # session.spawned），数条目不再恒为 1
+    pub = [e for e in delta if e["kind"] == "task.published"]
+    assert len(pub) == 1 and pub[0]["payload"]["objective"] == "再分诊"
     # WS：从 0 回放全部事件（该项目恰好 2 条 task.published）
+    total = len(client.get(f"/api/projects/{pid}/events").json())
     with client.websocket_connect(f"/api/ws/projects/{pid}?since_id=0") as ws:
-        got = [ws.receive_json() for _ in range(2)]
-        assert all(e["kind"] == "task.published" for e in got)
+        got = [ws.receive_json() for _ in range(total)]
+        assert sum(1 for e in got if e["kind"] == "task.published") == 2
 
 
 def test_agent_endpoints_503_without_llm(tmp_path, monkeypatch):
@@ -467,7 +518,7 @@ def test_list_roles_endpoint(client):
     pid = rp.json()["id"]
     roles = client.get(f"/api/projects/{pid}/roles").json()
     names = {r["role"] for r in roles}
-    assert {"_generalist", "recon", "external-entry", "privesc", "lateral"} <= names
+    assert {"_generalist", "recon", "external-entry", "osint", "report-writer"} <= names
     recon = next(r for r in roles if r["role"] == "recon")
     assert recon["task_types"] == ["recon", "asset-enum"]
     assert recon["persona"] and recon["default_noise"] == "passive"
@@ -500,9 +551,9 @@ def test_close_session_endpoint(client):
     assert client.post("/api/sessions/sess-nope/close").status_code == 404
 
 
-def test_close_session_drains_while_job_running(client):
-    """F9 优雅关窗：worker 在跑不再 409——置 close_pending 排水标记 + 解除武装，
-    返回 draining；空闲时立即关。"""
+def test_close_session_aborts_while_job_running(client):
+    """关窗=硬中断（2026-09-19，F9 优雅排水退役）：worker 在跑时 close →
+    request_abort + close_pending（返回 closing）；空闲时立即关。"""
     pid = _make_project(client)
     proj = client.app.state.projects[pid]
     sess = proj.bb.register_session(pid, "忙碌窗口", role="reverse")
@@ -513,14 +564,15 @@ def test_close_session_drains_while_job_running(client):
         "agent-work", gate.wait,  # 挂起直到测试放行
         meta={"project_id": pid, "session_id": sid})
     r = client.post(f"/api/sessions/{sid}/close")
-    assert r.status_code == 200 and r.json()["status"] == "draining"
+    assert r.status_code == 200 and r.json()["status"] == "closing"
     rows = client.get(f"/api/projects/{pid}/sessions").json()
     meta = json.loads(rows[0]["meta"]) if isinstance(rows[0].get("meta"), str) else rows[0].get("meta") or {}
     assert meta["close_pending"] is True and meta["worker_armed"] is False
-    # 事件审计：session.work_state（armed=false + close_pending=true）
+    # 事件审计：session.work_state（armed=false + close_pending=true + abort 标记）
     events = client.get(f"/api/projects/{pid}/events").json()
     ws = [e for e in events if e["kind"] == "session.work_state"]
     assert ws and ws[-1]["payload"]["close_pending"] is True
+    assert ws[-1]["payload"]["abort"] is True
     gate.set()
     # 空闲关窗照旧立即 closed
     r2 = client.post(f"/api/sessions/{sid}/close")
@@ -539,7 +591,7 @@ def _spawn_test_agent(client, pid):
     client.app.state.projects[pid] = proj
     agent = AgentSession(project_id=pid, bb=proj.bb,
                          gateway=ExecutionGateway(bb=proj.bb), llm=object(),
-                         packs_root="packs", track="assessment",
+                         packs_root="packs", track="pentest",
                          capabilities=["web"], role="_generalist")
     client.app.state.agents[agent.session["id"]] = agent
     return agent
@@ -547,7 +599,7 @@ def _spawn_test_agent(client, pid):
 
 def test_pause_resume_abort_endpoints(client):
     pid = _make_project(client)
-    rp = client.post("/api/projects", json={"name": "渗透-控制", "track": "assessment",
+    rp = client.post("/api/projects", json={"name": "渗透-控制", "track": "pentest",
                                             "capabilities": ["web"]})
     pid = rp.json()["id"]
     agent = _spawn_test_agent(client, pid)
@@ -624,7 +676,14 @@ def test_session_note_endpoint(client):
     events = client.get(f"/api/projects/{pid}/events").json()
     assert any(e["kind"] == "message.inbox" and e["author"] == "human"
                and e["payload"]["kind"] == "human_note" for e in events)
-    # 红点/已读复用 inbox read 端点
+    # 红点/已读复用 inbox read 端点。对话化（2026-09-20）后未武装无绑定窗 note
+    # 即踢对话轮消化未读——已读断言改用「绑 open 任务的待命窗」（宁严勿松：
+    # note 不 kick，引导滞留未读等起跑轮注入）
+    from core.blackboard.tasks import TaskQueue
+    tid = TaskQueue(proj.bb).publish(pid, "待审批任务")
+    proj.bb.set_session_meta(sid, {"bound_task_id": tid})
+    assert client.post(f"/api/sessions/{sid}/note",
+                       json={"text": "等着"}).status_code == 201
     assert client.post(f"/api/sessions/{sid}/inbox/read").json()["marked"] == 1
     assert client.post(f"/api/sessions/{sid}/note", json={"text": "  "}).status_code == 422
     assert client.post("/api/sessions/sess-nope/note",
@@ -637,7 +696,7 @@ def test_resume_budget_pause_note_and_extra_steps(client):
     """预算暂停恢复（E8）：引导语随快照注入；增补缺省 +200、可显式指定、0=不加；
     每次增补落 step.budget_extended（by=human）。"""
     pid = client.post("/api/projects", json={"name": "渗透-恢复增补",
-                                              "track": "assessment",
+                                              "track": "pentest",
                                               "capabilities": ["web"]}).json()["id"]
     agent = _spawn_test_agent(client, pid)
     sid = agent.session["id"]
@@ -679,7 +738,7 @@ def test_close_session_fails_paused_snapshot_task(client):
     """关窗守卫：暂停快照里的任务仍 claimed → 关窗前先 fail 防占坑（§6.4）。"""
     from core.blackboard import TaskQueue
 
-    rp = client.post("/api/projects", json={"name": "渗透-关窗", "track": "assessment",
+    rp = client.post("/api/projects", json={"name": "渗透-关窗", "track": "pentest",
                                             "capabilities": ["web"]})
     pid = rp.json()["id"]
     agent = _spawn_test_agent(client, pid)
@@ -709,7 +768,7 @@ def _orphan_session_row(client, pid):
 
 def test_work_rehydrates_orphan_session(client):
     """POST /work 对内存缺失会话：从黑板行 rehydrate 注册后开跑（旧行为 404）。"""
-    rp = client.post("/api/projects", json={"name": "渗透-rehydrate", "track": "assessment",
+    rp = client.post("/api/projects", json={"name": "渗透-rehydrate", "track": "pentest",
                                             "capabilities": ["web"]})
     pid = rp.json()["id"]
     sess = _orphan_session_row(client, pid)
@@ -726,7 +785,7 @@ def test_work_rehydrates_orphan_session(client):
 
 def test_pause_abort_rehydrate_orphan_session(client):
     """暂停/中断端点同样对孤儿窗 rehydrate（旧行为一律 404）；空闲未武装暂停 409。"""
-    rp = client.post("/api/projects", json={"name": "渗透-控制孤儿", "track": "assessment",
+    rp = client.post("/api/projects", json={"name": "渗透-控制孤儿", "track": "pentest",
                                             "capabilities": ["web"]})
     pid = rp.json()["id"]
     sid = _orphan_session_row(client, pid)["id"]
@@ -743,6 +802,85 @@ def test_pause_abort_rehydrate_orphan_session(client):
     # 中断把暂停态收尾回 idle
     r = client.post(f"/api/sessions/{sid}/abort")
     assert r.status_code == 200 and r.json()["status"] == "aborted"
+
+
+def test_sweep_keeps_claimed_tasks_of_snapshot_sessions(client):
+    """v0.64 重启清扫豁免：持有落盘暂停快照（指针+文件在场）的会话其 claimed
+    任务不 fail，行归位 paused 等继续续跑；无快照/指针悬空的照旧 fail(awaiting_human)
+    + 归 idle（悬空指针顺带清掉）。"""
+    from core.blackboard import TaskQueue
+
+    rp = client.post("/api/projects", json={"name": "清扫豁免", "track": "pentest",
+                                            "capabilities": ["web"]})
+    pid = rp.json()["id"]
+    proj = client.app.state.projects[pid]
+    bb = proj.bb
+    tq = TaskQueue(bb)
+    sa = bb.register_session(pid, "快照窗", role="_generalist")["id"]
+    sb = bb.register_session(pid, "悬空指针窗", role="_generalist")["id"]
+    sc = bb.register_session(pid, "裸奔窗", role="_generalist")["id"]
+    snap_dir = Path(proj.path) / "snapshots"
+    snap_dir.mkdir(parents=True, exist_ok=True)
+    (snap_dir / f"{sa}.json").write_text(
+        json.dumps({"messages": [], "task_id": None, "reason": "pause"}), encoding="utf-8")
+    bb.set_session_meta(sa, {"resume_snapshot": f"{sa}.json"})
+    bb.set_session_meta(sb, {"resume_snapshot": f"{sb}.json"})   # 指针在、文件缺
+    for sid in (sa, sb, sc):
+        bb.set_session_status(sid, "running")                    # 模拟重启前的在跑窗
+    ta = tq.publish(pid, "豁免任务", task_type="generic")
+    tb = tq.publish(pid, "悬空任务", task_type="generic")
+    tc = tq.publish(pid, "裸奔任务", task_type="generic")
+    for tid, sid in ((ta, sa), (tb, sb), (tc, sc)):
+        tq.claim(tid, sid)
+
+    # 模拟重启：摘内存缓存 → 下一请求触发惰性首开清扫
+    client.app.state.projects.pop(pid)
+    assert client.get(f"/api/projects/{pid}").status_code == 200
+
+    assert tq.get_task(ta)["status"] == "claimed"       # 快照在场 → 豁免
+    assert tq.get_task(tb)["status"] == "failed"        # 指针悬空 → 照 fail
+    assert tq.get_task(tc)["status"] == "failed"
+    proj2 = client.app.state.projects[pid]
+    rows = {s["id"]: s for s in client.get(f"/api/projects/{pid}/sessions").json()}
+    assert rows[sa]["status"] == "paused"
+    assert rows[sb]["status"] == "idle"
+    assert rows[sc]["status"] == "idle"
+    assert json.loads(proj2.bb.get_session(sb)["meta"])["resume_snapshot"] is None
+
+
+def test_shutdown_hook_persists_live_snapshots(client):
+    """v0.64 优雅停机钩子：在跑（有任务、未暂停、现场在册）的会话落即时快照；
+    已暂停 / 无任务的会话跳过。"""
+    rp = client.post("/api/projects", json={"name": "停机快照", "track": "pentest",
+                                            "capabilities": ["web"]})
+    pid = rp.json()["id"]
+    bb = client.app.state.projects[pid].bb
+    s_run = bb.register_session(pid, "在跑窗", role="_generalist")["id"]
+    s_paused = bb.register_session(pid, "已暂停窗", role="_generalist")["id"]
+    s_idle = bb.register_session(pid, "空闲窗", role="_generalist")["id"]
+    wrote: list[str] = []
+
+    class _Disp:
+        def __init__(self, tid):
+            self.current_task_id = tid
+
+    class _FakeAgent:
+        def __init__(self, sid, tid, paused, live=True):
+            self.session = {"id": sid}
+            self.paused = paused
+            self.dispatcher = _Disp(tid)
+            self._live = live
+
+        def pause_snapshot_now(self):
+            assert self._live
+            wrote.append(self.session["id"])
+            return True
+
+    client.app.state.agents[s_run] = _FakeAgent(s_run, "task-x", paused=False)
+    client.app.state.agents[s_paused] = _FakeAgent(s_paused, "task-y", paused=True)
+    client.app.state.agents[s_idle] = _FakeAgent(s_idle, None, paused=False)
+    assert client.app.state.shutdown_persist() == [s_run]
+    assert wrote == [s_run]
 
 
 def test_approvals_action_parsed_as_object(client):
@@ -762,7 +900,7 @@ def test_approvals_action_parsed_as_object(client):
 def test_retraction_inbox_api(client):
     """撤回传播 HTTP 链路：PATCH 误报 → 作者会话收件箱有信、sessions 带 unread；
     POST read 清零。会话收件箱与审批收件箱分设，互不混入。"""
-    rp = client.post("/api/projects", json={"name": "撤回-API", "track": "assessment",
+    rp = client.post("/api/projects", json={"name": "撤回-API", "track": "pentest",
                                             "capabilities": ["web"]})
     pid = rp.json()["id"]
     proj = client.app.state.projects[pid]
@@ -804,10 +942,10 @@ def test_orchestrator_spawn_registers_agent(tmp_path):
                      executor_llm=exec_llm, planner_llm=orch_llm,
                      providers_config=str(tmp_path / "providers.json"))
     with TestClient(app) as c:
-        rp = c.post("/api/projects", json={"name": "编排开窗注册", "track": "assessment",
+        rp = c.post("/api/projects", json={"name": "编排开窗注册", "track": "pentest",
                                           "capabilities": ["web"]})
         pid = rp.json()["id"]
-        # assessment 默认 L1（spawn 转审批）；本测覆盖直接开窗路径，显式升 L2
+        # pentest 默认 L1（spawn 转审批）；本测覆盖直接开窗路径，显式升 L2
         pr = c.patch(f"/api/projects/{pid}/config",
                      json={"config": {"autonomy": {"level": "L2"}}})
         assert pr.status_code == 200
@@ -834,7 +972,7 @@ def test_orchestrator_spawn_registers_agent(tmp_path):
 
 
 def _l1_tick_app(tmp_path, role="recon", reason="核查 8080 旁站低噪信息", exec_llm=None):
-    """批 4：assessment 默认 L1 的 tick app——planner 剧本开一扇窗后 done。"""
+    """批 4：pentest 默认 L1 的 tick app——planner 剧本开一扇窗后 done。"""
     from test_orchestrator import ScriptedLLM
 
     orch_llm = ScriptedLLM([
@@ -845,7 +983,8 @@ def _l1_tick_app(tmp_path, role="recon", reason="核查 8080 旁站低噪信息"
     return create_app(workspace_root=str(tmp_path / "workspaces"),
                       tools_root=None,
                       executor_llm=exec_llm or ScriptedLLM([]), planner_llm=orch_llm,
-                      providers_config=str(tmp_path / "providers.json"))
+                      providers_config=str(tmp_path / "providers.json"),
+                      sediment_proposals=False)  # 共享剧本：复盘 chat 会偷 orch 剧本项
 
 
 def _l1_tick_to_pending(c, pid):
@@ -859,8 +998,9 @@ def _l1_tick_to_pending(c, pid):
 
 
 def test_l1_spawn_approved_creates_and_runs(tmp_path):
-    """批准 spawn_session（有 open 任务）：当场注册建窗 + 提交 agent-work job +
-    session.spawned 带 approval_id；worker 认领该任务跑至完成。"""
+    """批准 spawn_session 纯开窗单（编排器侦查窗）：当场注册建窗 + 提交 agent-work
+    job + session.spawned 带 approval_id；v0.72 公共池认领退役——无绑侦查窗
+    认领恒空，任务仍归自己的专属待命窗（等执行审批）。"""
     from test_orchestrator import ScriptedLLM
 
     app = _l1_tick_app(tmp_path, exec_llm=ScriptedLLM([
@@ -869,19 +1009,19 @@ def test_l1_spawn_approved_creates_and_runs(tmp_path):
         {"tool_use": [ScriptedLLM.tool_call("w2", "finish", {"summary": "开跑成功"})]},
     ]))
     with TestClient(app) as c:
-        rp = c.post("/api/projects", json={"name": "L1批准", "track": "assessment",
+        rp = c.post("/api/projects", json={"name": "L1批准", "track": "pentest",
                                            "capabilities": ["web"]})
         pid = rp.json()["id"]
         item = _l1_tick_to_pending(c, pid)
         assert item["action"] == {"op": "spawn_session", "role": "recon",
                                   "reason": "核查 8080 旁站低噪信息"}
-        # 批准前：tick 未开窗（窗未开，不计 spawned）
-        assert [s for s in c.app.state.agents.values() if s.project_id == pid] == []
-        # 批准前留一个 open 任务（赛跑终检要求；recon 角色可认领 recon 类型）
+        # 赛跑终检要求有 open 任务：发布后 v0.72 即建专属待命窗（不计入本次审批）
         pr = c.post(f"/api/projects/{pid}/tasks",
                     json={"objective": "新窗要跑的任务", "task_type": "recon"})
         assert pr.status_code == 201
         task_id = pr.json()["task_id"]
+        agents = [s for s in c.app.state.agents.values() if s.project_id == pid]
+        assert len(agents) == 1  # 任务自己的待命窗（绑定段已建）
 
         r = c.post(f"/api/approvals/{item['id']}/decide", json={"decision": "approved"})
         assert r.status_code == 200
@@ -890,16 +1030,17 @@ def test_l1_spawn_approved_creates_and_runs(tmp_path):
         job = _wait_job(c, body["job_id"])
         assert job["status"] == "done"
         agents = [s for s in c.app.state.agents.values() if s.project_id == pid]
-        assert len(agents) == 1 and agents[0].session["id"] == body["session_id"]
-        assert c.app.state.projects[pid].bb  # 任务已被新窗跑完
-        row = c.app.state.projects[pid].bb.conn.execute(
-            "SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
-        assert row["status"] == "done"
+        assert len(agents) == 2 and body["session_id"] in {a.session["id"] for a in agents}
+        # v0.72：无绑侦查窗认领恒空——任务保持 open，归自己的待命窗
+        tq = c.app.state.projects[pid].bb
+        row = tq.conn.execute(
+            "SELECT status, target_session FROM tasks WHERE id=?", (task_id,)).fetchone()
+        assert row["status"] == "open" and row["target_session"] != body["session_id"]
 
         kinds = {}
         for e in c.app.state.projects[pid].bb.recent_events(pid):
             kinds.setdefault(e["kind"], []).append(e.get("payload") or {})
-        spawns = kinds.get("session.spawned", [])
+        spawns = [p for p in kinds.get("session.spawned", []) if p.get("approval_id")]
         assert len(spawns) == 1 and spawns[0]["approval_id"] == item["id"]
         assert "approval.approved" in kinds
 
@@ -909,7 +1050,7 @@ def test_l1_spawn_approved_no_open_task_skipped(tmp_path):
     不建窗，落 approval.exec_failed，响应 executed:false。"""
     app = _l1_tick_app(tmp_path)
     with TestClient(app) as c:
-        rp = c.post("/api/projects", json={"name": "L1赛跑跳过", "track": "assessment",
+        rp = c.post("/api/projects", json={"name": "L1赛跑跳过", "track": "pentest",
                                            "capabilities": ["web"]})
         pid = rp.json()["id"]
         item = _l1_tick_to_pending(c, pid)
@@ -917,7 +1058,7 @@ def test_l1_spawn_approved_no_open_task_skipped(tmp_path):
         r = c.post(f"/api/approvals/{item['id']}/decide", json={"decision": "approved"})
         assert r.status_code == 200
         body = r.json()
-        assert body["executed"] is False and "无待认领任务" in body["error"]
+        assert body["executed"] is False and "无待执行任务，未建窗" in body["error"]
         # 没有建窗（agents/sessions 均空）
         assert [s for s in c.app.state.agents.values() if s.project_id == pid] == []
         assert c.get(f"/api/projects/{pid}/sessions").json() == []
@@ -932,7 +1073,7 @@ def test_l1_spawn_rejected_no_session(tmp_path):
     """拒绝：只翻状态 + approval.rejected，不开窗、不提交 job。"""
     app = _l1_tick_app(tmp_path)
     with TestClient(app) as c:
-        rp = c.post("/api/projects", json={"name": "L1拒绝", "track": "assessment",
+        rp = c.post("/api/projects", json={"name": "L1拒绝", "track": "pentest",
                                            "capabilities": ["web"]})
         pid = rp.json()["id"]
         item = _l1_tick_to_pending(c, pid)
@@ -951,7 +1092,7 @@ def test_l1_spawn_approved_but_cap_full_exec_failed(tmp_path):
     """批准时 cap 已满：不回滚批准，落 approval.exec_failed，响应 executed:false + error。"""
     app = _l1_tick_app(tmp_path)
     with TestClient(app) as c:
-        rp = c.post("/api/projects", json={"name": "L1批时满cap", "track": "assessment",
+        rp = c.post("/api/projects", json={"name": "L1批时满cap", "track": "pentest",
                                            "capabilities": ["web"]})
         pid = rp.json()["id"]
         item = _l1_tick_to_pending(c, pid)
@@ -998,11 +1139,12 @@ def _chain_app(tmp_path, planner_script, executor_script=None):
                       tools_root=None,
                       executor_llm=ScriptedLLM(executor_script or []),
                       planner_llm=ScriptedLLM(planner_script),
-                      providers_config=str(tmp_path / "providers.json"))
+                      providers_config=str(tmp_path / "providers.json"),
+                      sediment_proposals=False)  # 剧本式 planner：复盘 chat 会偷剧本项
 
 
 def _l2_project(c, name, **autonomy_extra):
-    pid = c.post("/api/projects", json={"name": name, "track": "assessment",
+    pid = c.post("/api/projects", json={"name": name, "track": "pentest",
                                         "capabilities": ["web"]}).json()["id"]
     r = c.patch(f"/api/projects/{pid}/config",
                 json={"config": {"autonomy": {"level": "L2", **autonomy_extra}}})
@@ -1083,7 +1225,9 @@ def test_l2_chain_full_cycle(tmp_path, monkeypatch):
         kinds = [e["kind"] for e in c.app.state.projects[pid].bb.recent_events(pid)]
         assert kinds.count("orch.chain_started") == 1
         task = c.get(f"/api/projects/{pid}/tasks").json()[0]
-        assert task["status"] == "done" and task["claimed_by"] == sid
+        # v0.71：任务由自己的专属执行窗认领完成（手动 recon 窗无绑定，不接公共池）
+        assert task["status"] == "done" and task["claimed_by"] == task["target_session"]
+        assert task["claimed_by"] != sid
         from core.orchestrator import state as ost
         st = ost.load_or_create(c.app.state.projects[pid].bb, pid)
         assert st["chain_active"] == 0 and st["chain_ticks"] == 1
@@ -1096,23 +1240,29 @@ def test_l2_chain_full_cycle(tmp_path, monkeypatch):
                          "estranged": False}
 
 
-def test_l2_chain_stops_without_sessions(tmp_path, monkeypatch):
-    """有任务产出但零会话：没有执行者，链以 no_sessions 停，不起自动 tick。"""
+def test_l2_publish_always_binds_executor_window(tmp_path, monkeypatch):
+    """v0.72 全局一窗一任务：编排发布任务必有专属执行窗（发布即建待命窗并起跑），
+    「有产出零会话」不再可能——no_sessions 停链退役，链照常收敛。"""
     monkeypatch.setattr("core.api.app.AUTO_TICK_MIN_INTERVAL", 0)
     from test_orchestrator import ScriptedLLM as S
     planner = _orch_scripted(
         [S.tool_call("t1", "publish_task",
                      {"objective": "核查 8080", "task_type": "recon",
-                      "noise_budget": "passive"})])
-    app = _chain_app(tmp_path, planner)
+                      "noise_budget": "passive"})],
+        [],  # 自动 tick：零产出 → 收敛
+    )
+    app = _chain_app(tmp_path, planner, _exec_finish_script(1))
     with TestClient(app) as c:
-        pid = _l2_project(c, "L2无窗")
+        pid = _l2_project(c, "L2必有窗")
         r = c.post(f"/api/projects/{pid}/orchestrator/tick", json={})
         _wait_job(c, r.json()["job_id"])
         stop = _wait_chain_stopped(c, pid)
-        assert stop["payload"]["reason"] == "no_sessions"
-        assert _project_jobs(c, pid, "orchestrator-auto-tick") == []
-        assert c.get(f"/api/projects/{pid}/tasks").json()[0]["status"] == "open"
+        assert stop["payload"]["reason"] == "converged"
+        task = c.get(f"/api/projects/{pid}/tasks").json()[0]
+        assert task["status"] == "done" and task["claimed_by"] == task["target_session"]
+        bb = c.app.state.projects[pid].bb
+        stops = [e for e in bb.recent_events(pid) if e["kind"] == "orch.chain_stopped"]
+        assert all(s["payload"]["reason"] != "no_sessions" for s in stops)
 
 
 def test_l2_chain_max_chain_ticks(tmp_path, monkeypatch):
@@ -1154,21 +1304,22 @@ def _arm_active_chain(c, pid, ticks=0):
 
 
 def test_l2_chain_paused_blocks_auto_but_human_overrides(tmp_path, monkeypatch):
-    """闸②：暂停时 C/D 不自动起 worker；但人显式「跑队列」是 override 照常认领完成；
-    worker 收尾的 A 触发仍被闸门②拦住，落 chain_stopped{paused}。"""
+    """闸②：暂停时自动挡不起跑（任务留待命窗）；但人显式对绑定窗「跑队列」是
+    override 照常认领完成；worker 收尾的 A 触发仍被闸门②拦住，落 chain_stopped{paused}。"""
     monkeypatch.setattr("core.api.app.AUTO_TICK_MIN_INTERVAL", 0)
     app = _chain_app(tmp_path, [], _exec_finish_script(1))
     with TestClient(app) as c:
         pid = _l2_project(c, "L2暂停", paused=True)
-        sp = c.post(f"/api/projects/{pid}/agents", json={"role": "recon", "armed": True})
-        assert sp.status_code == 201 and "job_id" not in sp.json()  # 触发点 C 暂停不开工
-        sid = sp.json()["id"]
         r = c.post(f"/api/projects/{pid}/tasks",
                    json={"objective": "核查 8080", "task_type": "recon"})
-        assert r.json()["kicked"] == []  # 触发点 D 暂停时不 kick
+        # v0.72：暂停不挡建窗——待命窗已建好，只是不起跑
+        assert r.json()["kicked"] == [] and r.json()["session_id"]
+        sid = r.json()["session_id"]
+        rows = {s["id"]: s for s in c.get(f"/api/projects/{pid}/sessions").json()}
+        assert rows[sid]["worker_armed"] is False  # 待命未武装
         assert c.get(f"/api/projects/{pid}/tasks").json()[0]["status"] == "open"
         _arm_active_chain(c, pid, ticks=1)
-        w = c.post(f"/api/agents/{sid}/work")  # 人工显式 override
+        w = c.post(f"/api/agents/{sid}/work")  # 人工显式 override 自己的绑定窗
         job = _wait_job(c, w.json()["job_id"])
         assert job["result"] == 1  # 暂停不拦人工动作：认领并完成
         stop = _wait_chain_stopped(c, pid)
@@ -1270,59 +1421,132 @@ def test_l2_chain_throttle_wait_then_continue(tmp_path, monkeypatch):
 
 
 def test_l0_l1_trigger_gates_c_d_e(tmp_path):
-    """触发点 C/D/E 的档位分流：L0 全部不自动；L1 插话/审批后自动 kick。"""
+    """档位分流（v0.72 全局一窗一任务）：L0 发布建待命窗但全手动（无审批单）；
+    L1 发布建待命窗+执行审批单，手动窗跑队列认领不到别人的任务（公共池退役），
+    批准=启动任务自己的待命窗跑完。"""
     from test_orchestrator import ScriptedLLM as S
-    # L0：开窗不自起 worker；插话 kicked=[]，任务保持 open
+    # L0：发布建待命窗（不起跑、无审批单），任务保持 open 等人工点跑
     app0 = create_app(workspace_root=str(tmp_path / "ws0"), tools_root=None,
                       executor_llm=S([]), planner_llm=S([]),
                       providers_config=str(tmp_path / "p0.json"))
     with TestClient(app0) as c0:
         pid0 = c0.post("/api/projects", json={"name": "L0", "track": "ctf",
                                               "capabilities": ["binary"]}).json()["id"]
-        sp = c0.post(f"/api/projects/{pid0}/agents", json={"role": "_generalist"})
-        assert sp.status_code == 201 and "job_id" not in sp.json()
         r = c0.post(f"/api/projects/{pid0}/tasks",
                     json={"objective": "逆一下", "task_type": "generic"})
-        assert r.json()["kicked"] == []
+        assert r.json()["kicked"] == [] and r.json()["session_id"]  # 待命窗已建
+        rows = c0.get(f"/api/projects/{pid0}/sessions").json()
+        assert rows[0]["worker_armed"] is False
         assert c0.get(f"/api/projects/{pid0}/tasks").json()[0]["status"] == "open"
+        assert c0.get(f"/api/projects/{pid0}/approvals").json() == []  # L0 无审批
 
-    # L1：先有一扇 idle 旧窗；插话后旧窗自动认领；审批后 E 再 kick 空闲窗
-    planner = [
-        {"tool_use": [S.tool_call("s1", "spawn_session",
-                                  {"role": "recon", "reason": "核查 8080"}),
-                      S.tool_call("d1", "done", {})]},
-    ]
+    # L1：发布建待命窗+执行审批单；手动窗跑队列认领恒空；批准=启动原窗
     app1 = create_app(workspace_root=str(tmp_path / "ws1"), tools_root=None,
-                      executor_llm=S(_exec_finish_script(1)), planner_llm=S(planner),
-                      providers_config=str(tmp_path / "p1.json"))
+                      executor_llm=S(_exec_finish_script(1)), planner_llm=S([]),
+                      providers_config=str(tmp_path / "p1.json"),
+                      sediment_proposals=False)  # 完成任务会触发复盘 chat 偷剧本项
     with TestClient(app1) as c1:
-        pid1 = c1.post("/api/projects", json={"name": "L1触发", "track": "assessment",
+        pid1 = c1.post("/api/projects", json={"name": "L1触发", "track": "pentest",
                                               "capabilities": ["web"]}).json()["id"]
-        old = c1.post(f"/api/projects/{pid1}/agents", json={"role": "recon", "armed": True})
-        old_sid = old.json()["id"]
-        assert old.json().get("job_id")  # L1 开窗触发点 C 自起
-        _wait_no_running(c1, pid1)
-        item = _l1_tick_to_pending(c1, pid1)  # 提交开窗审批（不发任务）
-        _wait_no_running(c1, pid1)  # tick 的 B 触发对旧窗空 kick 收尾
+        manual = c1.post(f"/api/projects/{pid1}/agents", json={"role": "recon"})
+        manual_sid = manual.json()["id"]
+        assert "job_id" not in manual.json()  # 手动窗默认未武装不开工
         dr = c1.post(f"/api/projects/{pid1}/tasks",
                      json={"objective": "核查 8080", "task_type": "recon"})
-        assert dr.json()["kicked"] == [old_sid]  # 触发点 D
+        assert dr.json()["kicked"] == []  # 触发点 D 退役：不 kick 手动窗
         t1 = dr.json()["task_id"]
-        # 第二个任务用 recon 角色认领不了的类型（exploit 不在 [recon, asset-enum]
-        # 白名单），确定性保证 decide 时仍有 open 任务（赛跑终检不跳过）
-        dr2 = c1.post(f"/api/projects/{pid1}/tasks",
-                      json={"objective": "提权演练", "task_type": "exploit",
-                            "noise_budget": "passive"})
-        t2 = dr2.json()["task_id"]
+        bound_sid = dr.json()["session_id"]
+        assert bound_sid and bound_sid != manual_sid
+        _wait_no_running(c1, pid1)
+        assert c1.get(f"/api/projects/{pid1}/tasks").json()[0]["status"] == "open"
+        # 手动窗跑队列（=人工武装启动）：认领恒空，别人的任务不被碰
+        w = c1.post(f"/api/agents/{manual_sid}/work")
+        assert w.status_code == 200 and w.json().get("job_id")
+        _wait_job(c1, w.json()["job_id"])
+        _wait_no_running(c1, pid1)
+        assert c1.get(f"/api/projects/{pid1}/tasks").json()[0]["status"] == "open"
+        # 执行审批单已就绪：批准=启动任务自己的待命窗（不新建）
+        items = c1.get(f"/api/projects/{pid1}/approvals").json()
+        item = next(a for a in items if a["action"].get("task_id") == t1)
+        assert item["status"] == "pending"
         decided = c1.post(f"/api/approvals/{item['id']}/decide",
                           json={"decision": "approved"})
-        # 触发点 E：响应带 kicked（新窗自带在跑 job 被去重）
         assert decided.status_code == 200 and decided.json()["executed"] is True
-        assert isinstance(decided.json().get("kicked"), list)
+        assert decided.json()["session_id"] == bound_sid  # 同一扇待命窗被启动
         _wait_no_running(c1, pid1)
         by_id = {t["id"]: t for t in c1.get(f"/api/projects/{pid1}/tasks").json()}
         assert by_id[t1]["status"] == "done"
-        assert by_id[t2]["status"] == "open"  # recon 角色不可认领 exploit，留作终检素材
+        assert by_id[t1]["claimed_by"] == bound_sid
+
+
+def test_reopen_awaiting_human_kicks_workers(tmp_path):
+    """C1 放回触发点 D（2026-09-17 修复；v0.72 只踢绑定窗）：worker 在队列空时
+    已退出，reopen 放回的 awaiting_human 任务若不 kick 则永久悬 open 无人认领
+    （用户所见「放回后不跑」）。L2 未暂停时 reopen 应唤醒原绑定窗并真正跑完
+    （fail→reopen→done 闭环）。"""
+    from test_orchestrator import ScriptedLLM as S
+    executor = [
+        # 第一轮：认领后 awaiting_human 挂起（C1：落快照 fail，会话继续认领）
+        {"tool_use": [S.tool_call("a1", "fail_task",
+                                  {"result_note": "缺授权凭据，需要人类补充",
+                                   "blocked_reason": "awaiting_human"})]},
+        # 放回后被同一会话认领 → 走 C1 快照续跑路径（断点恢复旧对话），回复完成收尾
+        {"tool_use": [S.tool_call("c1", "complete_task", {"result_note": "人工已解决"})]},
+    ]
+    app = create_app(workspace_root=str(tmp_path / "ws"), tools_root=None,
+                     executor_llm=S(executor), planner_llm=S([]),
+                     providers_config=str(tmp_path / "p.json"))
+    with TestClient(app) as c:
+        pid = c.post("/api/projects", json={"name": "C1放回", "track": "pentest",
+                                            "capabilities": ["web"]}).json()["id"]
+        assert c.patch(f"/api/projects/{pid}/config",
+                       json={"config": {"autonomy": {"level": "L2"}}}).status_code == 200
+        r = c.post(f"/api/projects/{pid}/tasks",
+                   json={"objective": "测一把", "task_type": "generic"})
+        sid = r.json()["session_id"]  # 任务自己的专属执行窗（L2 自动起跑）
+        assert sid
+        # 轮询代替 _wait_no_running+直断：负载下 worker 认领可落在 job 结束之后（套跑时序竞态）
+        deadline = time.time() + 30
+        tasks = []
+        while time.time() < deadline:
+            tasks = c.get(f"/api/projects/{pid}/tasks").json()
+            if tasks and tasks[0]["status"] == "failed":
+                break
+            time.sleep(0.05)
+        assert len(tasks) == 1
+        assert tasks[0]["status"] == "failed"
+        assert tasks[0]["blocked_reason"] == "awaiting_human"
+        assert tasks[0]["claimed_by"] == sid
+        # 放回：触发点 D 唤醒原绑定窗（v0.72 kick 只服务绑定任务未终态的实现窗）
+        rr = c.post(f"/api/tasks/{tasks[0]['id']}/reopen", json={"note": "凭证已补"})
+        assert rr.status_code == 200 and rr.json()["kicked"] == [sid]
+        # 轮询终态（L2 下 worker-idle 的 replan-wait 30s job 与断言无关）
+        for _ in range(300):
+            tasks = c.get(f"/api/projects/{pid}/tasks").json()
+            if tasks[0]["status"] == "done":
+                break
+            time.sleep(0.02)
+        assert tasks[0]["status"] == "done"
+
+
+def test_browser_pool_injection_by_track(tmp_path):
+    """v0.70 F6 扩展：浏览器实例池按轨注入——ctf 轨开窗即注入（Web 题需真实
+    浏览器渲染 reCAPTCHA/JS 挑战）；research 轨仍轨外（dispatcher.browser 保持
+    None → browser_* no-tool 降级）。"""
+    from test_orchestrator import ScriptedLLM as S
+    app = create_app(workspace_root=str(tmp_path / "ws"), tools_root=None,
+                     executor_llm=S([{"tool_use": []}]), planner_llm=S([]),
+                     providers_config=str(tmp_path / "p.json"))
+    with TestClient(app) as c:
+        for track, caps, expect in (("ctf", ["web"], True),
+                                    ("research", ["binary"], False)):
+            pid = c.post("/api/projects", json={"name": f"浏览器注入{track}",
+                                                "track": track,
+                                                "capabilities": caps}).json()["id"]
+            sid = c.post(f"/api/projects/{pid}/agents",
+                         json={"role": "_generalist", "armed": True}).json()["id"]
+            agent = c.app.state.agents[sid]
+            assert (agent.dispatcher.browser is not None) is expect, track
 
 
 def test_l2_net_real_without_approval_denied(tmp_path):
@@ -1345,18 +1569,21 @@ def test_l2_net_real_without_approval_denied(tmp_path):
     app = _chain_app(tmp_path, planner, executor)
     with TestClient(app) as c:
         pid = _l2_project(c, "L2红线")
-        sp = c.post(f"/api/projects/{pid}/agents", json={"role": "_generalist", "armed": True})
-        sid = sp.json()["id"]
-        _wait_no_running(c, pid)
         r = c.post(f"/api/projects/{pid}/tasks",
                    json={"objective": "取个外网文件", "task_type": "generic"})
-        assert r.json()["kicked"] == [sid]  # 触发点 D
-        _wait_no_running(c, pid)
+        assert r.json()["kicked"] == []  # v0.72 触发点 D 退役：发布不 kick
+        # 轮询任务终态（不用 _wait_no_running：replan-wait 30s 节流 job 与断言无关）
+        for _ in range(300):
+            tasks = c.get(f"/api/projects/{pid}/tasks").json()
+            if tasks[0]["status"] == "done":
+                break
+            time.sleep(0.02)
         denies = [e for e in c.app.state.projects[pid].bb.recent_events(pid)
                   if e["kind"] == "audit.deny"]
         assert len(denies) == 1 and "net=real" in denies[0]["payload"]["reason"]
         task = c.get(f"/api/projects/{pid}/tasks").json()[0]
-        assert task["status"] == "done" and task["claimed_by"] == sid
+        # 任务由自己的专属执行窗完成（v0.72 一窗一任务）
+        assert task["status"] == "done" and task["claimed_by"] == task["target_session"]
 
 
 # ---------- 批 6：L0 提案模式（ctf 默认档；tick 只提案，人采纳走既有写口） ----------
@@ -1457,7 +1684,10 @@ def test_l0_proposal_adoption_human_attributed(tmp_path):
                     json={"role": spawn_prop["args"]["role"]})
         assert sr.status_code == 201 and "job_id" not in sr.json()
         sessions = c.get(f"/api/projects/{pid}/sessions").json()
-        assert len(sessions) == 1 and sessions[0]["role"] == "reverse"
+        # v0.71 任务即窗口：采纳任务提案发布时已同步建专属待命窗（+1），
+        # 加人手 reverse 窗共 2 扇，均未自起 job（L0 手动挡）
+        assert len(sessions) == 2
+        assert [s["role"] for s in sessions if s["role"] == "reverse"] == ["reverse"]
         _wait_no_running(c, pid)
         assert _project_jobs(c, pid, kind="agent-work") == []
 
@@ -1478,7 +1708,7 @@ def test_orchestrator_tick_lease_409_and_state_persists(tmp_path):
                      executor_llm=ScriptedLLM([]), planner_llm=done_once(),
                      providers_config=str(tmp_path / "providers.json"))
     with TestClient(app) as c:
-        rp = c.post("/api/projects", json={"name": "租约409", "track": "assessment",
+        rp = c.post("/api/projects", json={"name": "租约409", "track": "pentest",
                                           "capabilities": ["web"]})
         pid = rp.json()["id"]
         bb = c.app.state.projects[pid].bb
@@ -1522,7 +1752,7 @@ def test_orchestrator_tick_cycles_persist_across_ticks(tmp_path):
                      providers_config=str(tmp_path / "providers.json"))
     with TestClient(app) as c:
         pid = c.post("/api/projects",
-                     json={"name": "cycles 持久", "track": "assessment",
+                     json={"name": "cycles 持久", "track": "pentest",
                            "capabilities": ["web"]}).json()["id"]
         bb = c.app.state.projects[pid].bb
         j1 = _wait_job(c, c.post(f"/api/projects/{pid}/orchestrator/tick",
@@ -1558,7 +1788,7 @@ def test_spawn_agent_with_model_override(client, monkeypatch):
         return orig(name, model)
 
     monkeypatch.setattr(store, "build", fake_build)
-    rp = client.post("/api/projects", json={"name": "渗透-模型", "track": "assessment",
+    rp = client.post("/api/projects", json={"name": "渗透-模型", "track": "pentest",
                                             "capabilities": ["web"]})
     pid = rp.json()["id"]
     r = client.post(f"/api/projects/{pid}/agents",
@@ -1730,9 +1960,9 @@ def test_artifact_content_endpoint(client, tmp_path):
 
 
 def _packs_app(tmp_path):
-    """构造正交布局的最小 packs（web 能力包 + assessment 轨）并返回 TestClient。"""
+    """构造正交布局的最小 packs（web 能力包 + pentest 轨）并返回 TestClient。"""
     root = tmp_path / "packs"
-    role_dir = root / "tracks" / "assessment" / "roles"
+    role_dir = root / "tracks" / "pentest" / "roles"
     role_dir.mkdir(parents=True)
     (role_dir / "tester.yaml").write_text(
         'name: tester\npersona: "旧人设。"\n'
@@ -1754,38 +1984,38 @@ def test_packs_roles_and_skills_endpoints(tmp_path, monkeypatch):
     packs_root, c = _packs_app(tmp_path)
     with c:
         # 轨角色列表 + 表单改写
-        roles = c.get("/api/tracks/assessment/roles").json()
+        roles = c.get("/api/tracks/pentest/roles").json()
         assert roles[0]["name"] == "tester" and roles[0]["skills"] == ["demo-skill"]
-        r = c.put("/api/tracks/assessment/roles/tester",
+        r = c.put("/api/tracks/pentest/roles/tester",
                   json={"name": "测试员", "persona": "新人设。", "skills": None,
                         "task_types": ["recon"], "tools": ["bb_query"],
                         "max_runtime": "docker", "max_steps": 20})
         assert r.json()["status"] == "ok"
         from core.skills.roles import load_role
-        role = load_role(packs_root, "assessment", "tester")
+        role = load_role(packs_root, "pentest", "tester")
         assert role["persona"] == "新人设。" and role["skills"] is None  # null = 白名单关闭
         assert role["tools"] == ["bb_query"] and role["max_runtime"] == "docker"
         assert role["max_steps"] == 20
         assert role["name"] == "测试员"
         # 显示名与 stem 解耦：不提交 name 的 PUT 保留显示名（回滚 bug 回归锁）；空串=重置
-        r = c.put("/api/tracks/assessment/roles/tester", json={"persona": "再改。"})
+        r = c.put("/api/tracks/pentest/roles/tester", json={"persona": "再改。"})
         assert r.json()["name"] == "测试员"
-        assert load_role(packs_root, "assessment", "tester")["name"] == "测试员"
-        r = c.put("/api/tracks/assessment/roles/tester", json={"name": ""})
+        assert load_role(packs_root, "pentest", "tester")["name"] == "测试员"
+        r = c.put("/api/tracks/pentest/roles/tester", json={"name": ""})
         assert r.json()["name"] == "tester"
-        assert load_role(packs_root, "assessment", "tester")["name"] == "tester"
+        assert load_role(packs_root, "pentest", "tester")["name"] == "tester"
         # 非法显示名（# / :）→ 422
-        assert c.put("/api/tracks/assessment/roles/tester",
+        assert c.put("/api/tracks/pentest/roles/tester",
                      json={"name": "含#井"}).status_code == 422
-        assert c.put("/api/tracks/assessment/roles/tester",
+        assert c.put("/api/tracks/pentest/roles/tester",
                      json={"name": "含:号"}).status_code == 422
         # 值域校验：非法 max_runtime / max_steps → 422
-        assert c.put("/api/tracks/assessment/roles/tester",
+        assert c.put("/api/tracks/pentest/roles/tester",
                      json={"max_runtime": "metal"}).status_code == 422
-        assert c.put("/api/tracks/assessment/roles/tester",
+        assert c.put("/api/tracks/pentest/roles/tester",
                      json={"max_steps": 0}).status_code == 422
         # 改写留历史
-        hist = packs_root / "tracks" / "assessment" / "roles" / ".history"
+        hist = packs_root / "tracks" / "pentest" / "roles" / ".history"
         assert any("tester.yaml" in f.name for f in hist.iterdir())
         # 能力包 skill 详情 + 全文改写（frontmatter name 不一致 → 422）
         sk = c.get("/api/capabilities/web/skills/demo-skill").json()
@@ -1799,40 +2029,40 @@ def test_packs_roles_and_skills_endpoints(tmp_path, monkeypatch):
         assert r.json()["status"] == "ok"
         # 路由试算：track+caps 定候选集，关键词命中 demo-skill
         r = c.post("/api/skills/route-preview",
-                   json={"query": "做一个演示任务", "track": "assessment",
+                   json={"query": "做一个演示任务", "track": "pentest",
                          "capabilities": ["web"], "role": "tester"})
         assert r.status_code == 200
         assert r.json()[0]["name"] == "demo-skill" and r.json()[0]["matched"]
         # 文件特征 ×3 命中（P0：file_features 路由断裂修复后的 API 面）
         r = c.post("/api/skills/route-preview",
-                   json={"track": "assessment", "capabilities": ["web"],
+                   json={"track": "pentest", "capabilities": ["web"],
                          "file_features": ["NX"]})
         assert r.json()[0]["name"] == "demo-skill"
-        # 候选集外不可见：只选 assessment 轨（demo-skill 在 web 包）
+        # 候选集外不可见：只选 pentest 轨（demo-skill 在 web 包）
         r = c.post("/api/skills/route-preview",
-                   json={"query": "演示", "track": "assessment"})
+                   json={"query": "演示", "track": "pentest"})
         assert all(h["name"] != "demo-skill" for h in r.json())
         # 防穿越：非法包名 → 422
         assert c.get("/api/capabilities/bad%20name/skills").status_code == 422
         # 轨任务类型注册表：generic 恒在
-        assert c.get("/api/tracks/assessment/task-types").json()["generic"] == "passive"
+        assert c.get("/api/tracks/pentest/task-types").json()["generic"] == "passive"
 
 
 def test_rules_and_mcp_endpoints(client, tmp_path, monkeypatch):
     """轨红线读写（.history 备份）+ MCP 配置层 roundtrip。"""
     monkeypatch.chdir(tmp_path)
     packs = tmp_path / "packs"
-    rules_dir = packs / "tracks" / "assessment" / "rules"
+    rules_dir = packs / "tracks" / "pentest" / "rules"
     rules_dir.mkdir(parents=True)
     (rules_dir / "redlines.md").write_text("旧红线", encoding="utf-8")
     app = create_app(workspace_root=str(tmp_path / "workspaces"),
                      packs_root=str(packs), tools_root=None,
                      providers_config=str(tmp_path / "providers.json"))
     with TestClient(app) as c:
-        assert c.get("/api/tracks/assessment/rules").json()["content"] == "旧红线"
-        r = c.put("/api/tracks/assessment/rules", json={"content": "新红线"})
+        assert c.get("/api/tracks/pentest/rules").json()["content"] == "旧红线"
+        r = c.put("/api/tracks/pentest/rules", json={"content": "新红线"})
         assert r.json()["status"] == "ok"
-        assert c.get("/api/tracks/assessment/rules").json()["content"] == "新红线"
+        assert c.get("/api/tracks/pentest/rules").json()["content"] == "新红线"
         assert any("redlines.md" in f.name
                    for f in (rules_dir / ".history").iterdir())
         # 能力包红线同构
@@ -1880,31 +2110,31 @@ def test_owners_crud_and_mcp_stdio(client, tmp_path, monkeypatch):
     """平台规则 owners CRUD（轨级；删=停用、.history 留回滚件）+ MCP stdio roundtrip。"""
     monkeypatch.chdir(tmp_path)
     packs = tmp_path / "packs"
-    track_rules = packs / "tracks" / "assessment" / "rules"
+    track_rules = packs / "tracks" / "pentest" / "rules"
     track_rules.mkdir(parents=True)
     app = create_app(workspace_root=str(tmp_path / "workspaces"),
                      packs_root=str(packs), tools_root=None,
                      providers_config=str(tmp_path / "providers.json"))
     with TestClient(app) as c:
         # 空列表
-        assert c.get("/api/tracks/assessment/owners").json() == []
+        assert c.get("/api/tracks/pentest/owners").json() == []
         # 新建（父目录自动建）
-        r = c.put("/api/tracks/assessment/owners/edusrc",
+        r = c.put("/api/tracks/pentest/owners/edusrc",
                   json={"content": "# edusrc 无害化三原则"})
         assert r.json()["status"] == "ok"
         # 改写（备份进 .history）
-        c.put("/api/tracks/assessment/owners/edusrc", json={"content": "v2"})
-        rows = c.get("/api/tracks/assessment/owners").json()
+        c.put("/api/tracks/pentest/owners/edusrc", json={"content": "v2"})
+        rows = c.get("/api/tracks/pentest/owners").json()
         assert [o["tag"] for o in rows] == ["edusrc"] and rows[0]["content"] == "v2"
         assert any("edusrc" in f.name
                    for f in (track_rules / "owners" / ".history").iterdir())
         # 非法 tag（_NAME_RE 白名单）→ 422
-        assert c.put("/api/tracks/assessment/owners/bad%20name",
+        assert c.put("/api/tracks/pentest/owners/bad%20name",
                      json={"content": "x"}).status_code == 422
         # 删除后 404，.history 有回滚件
-        assert c.delete("/api/tracks/assessment/owners/edusrc").json()["status"] == "ok"
-        assert c.delete("/api/tracks/assessment/owners/edusrc").status_code == 404
-        assert c.get("/api/tracks/assessment/owners").json() == []
+        assert c.delete("/api/tracks/pentest/owners/edusrc").json()["status"] == "ok"
+        assert c.delete("/api/tracks/pentest/owners/edusrc").status_code == 404
+        assert c.get("/api/tracks/pentest/owners").json() == []
         # MCP stdio：command/args roundtrip，url 可留空
         r = c.put("/api/mcp", json={"servers": [
             {"name": "fofa", "transport": "stdio", "command": "uv",
@@ -1913,6 +2143,56 @@ def test_owners_crud_and_mcp_stdio(client, tmp_path, monkeypatch):
         s = c.get("/api/mcp").json()["servers"][0]
         assert s["command"] == "uv" and s["args"] == ["run", "fofa.py"]
         assert s["transport"] == "stdio" and s["url"] == ""
+
+
+def test_ratings_crud_and_rating_basis(client, tmp_path, monkeypatch):
+    """F11：ratings 三端点 CRUD（镜像 owners）+ FindingIn severity Literal 422 + rating_basis 透传/清空。"""
+    monkeypatch.chdir(tmp_path)
+    packs = tmp_path / "packs"
+    track_rules = packs / "tracks" / "pentest" / "rules"
+    track_rules.mkdir(parents=True)
+    app = create_app(workspace_root=str(tmp_path / "workspaces"),
+                     packs_root=str(packs), tools_root=None,
+                     providers_config=str(tmp_path / "providers.json"))
+    with TestClient(app) as c:
+        # --- ratings 三端点（owners 镜像） ---
+        assert c.get("/api/tracks/pentest/ratings").json() == []
+        assert c.put("/api/tracks/pentest/ratings/edu-rating",
+                     json={"content": "# edu-rating 评级与价值口径"}).json()["status"] == "ok"
+        c.put("/api/tracks/pentest/ratings/edu-rating", json={"content": "v2"})
+        rows = c.get("/api/tracks/pentest/ratings").json()
+        assert [o["tag"] for o in rows] == ["edu-rating"] and rows[0]["content"] == "v2"
+        assert (track_rules / "rating" / "edu-rating.md").is_file()
+        assert any("edu-rating" in f.name
+                   for f in (track_rules / "rating" / ".history").iterdir())
+        assert c.put("/api/tracks/pentest/ratings/bad%20name",
+                     json={"content": "x"}).status_code == 422
+        assert c.delete("/api/tracks/pentest/ratings/edu-rating").json()["status"] == "ok"
+        assert c.delete("/api/tracks/pentest/ratings/edu-rating").status_code == 404
+        assert c.get("/api/tracks/pentest/ratings").json() == []
+
+        # --- findings：severity 非 Literal 422；rating_basis 透传 / PATCH / 空串清空 ---
+        pr = c.post("/api/projects", json={"name": "F11 判级", "track": "pentest"})
+        assert pr.status_code == 201, pr.json()
+        pid = pr.json()["id"]
+        base = f"/api/projects/{pid}/findings"
+        r = c.post(base, json={"vuln_class": "sqli", "title": "判级越界",
+                               "severity": "P1"})
+        assert r.status_code == 422  # Literal 白名单拦在 API 层
+        r = c.post(base, json={"vuln_class": "sqli", "title": "核心站 SQLi",
+                               "severity": "critical",
+                               "rating_basis": "rating:edu-rating 严重#1 核心业务注入"})
+        assert r.status_code == 201
+        fid = r.json()["id"]
+        assert r.json()["rating_basis"] == "rating:edu-rating 严重#1 核心业务注入"
+        row = next(f for f in c.get(base).json() if f["id"] == fid)
+        assert row["rating_basis"] == "rating:edu-rating 严重#1 核心业务注入"
+        # PATCH 改依据 / 空串清空 / None 不动
+        r = c.patch(f"{base}/{fid}", json={"rating_basis": "rating:osrc 高危#2 越权读"})
+        assert r.json()["rating_basis"] == "rating:osrc 高危#2 越权读"
+        r = c.patch(f"{base}/{fid}", json={"severity": "high"})
+        assert r.json()["rating_basis"] == "rating:osrc 高危#2 越权读"  # None=不动
+        assert c.patch(f"{base}/{fid}", json={"rating_basis": ""}).json()["rating_basis"] == ""
 
 
 # ---------- rev-generic 逆向工作台（样本上传/headless/人机共写全链路） ----------
@@ -2146,6 +2426,19 @@ def test_rev_workbench_full_chain(client):
                         json={"status": "nope"}).status_code == 422
     assert client.patch(f"/api/projects/{pid}/findings/find-dead",
                         json={"status": "verified"}).status_code == 404
+
+    # F10 人工修订：三字段 patch 200（响应完整行）/空 title 422/空体 200 原样返回
+    r = client.patch(f"/api/projects/{pid}/findings/{finding_id}",
+                     json={"title": "人工修正的标题", "severity": "high",
+                            "vuln_class": ""})
+    assert r.status_code == 200
+    row = r.json()
+    assert row["title"] == "人工修正的标题" and row["severity"] == "high"
+    assert row["vuln_class"] == ""
+    assert client.patch(f"/api/projects/{pid}/findings/{finding_id}",
+                        json={"title": "   "}).status_code == 422
+    assert client.patch(f"/api/projects/{pid}/findings/{finding_id}",
+                        json={}).status_code == 200
 
     # 调试日志回流：上传（≤16MB）→ 4MB 内可读取
     r = client.post(f"/api/projects/{pid}/artifacts/upload",
@@ -2462,7 +2755,7 @@ def _replan_llm(getter):
             self._get = get_updates
 
         def chat(self, messages, *, system=None, tools=None, max_tokens=4096,
-                 temperature=None):
+                 temperature=None, on_thinking=None, on_text=None, should_cancel=None):
             self.calls.append({"messages": json.loads(json.dumps(messages)),
                                "system": system})
             item = [self.tool_call("r1", "set_priorities",
@@ -2482,8 +2775,10 @@ def test_l2_human_publish_triggers_replan_and_updates_open(tmp_path, monkeypatch
     app = _replan_app(tmp_path, llm)
     with TestClient(app) as c:
         llm._get = _open_task_updates(c, pid_holder)  # 闭包绑到实际 client
-        pid = _l2_project(c, "L2重排D")
+        # cap 占满：发布建窗失败 → 任务无绑 open（防专属窗抢跑干扰重排断言）
+        pid = _l2_project(c, "L2重排D", sessions_cap=1)
         pid_holder.append(pid)
+        c.app.state.projects[pid].bb.register_session(pid, "占位会话", role="_generalist")
         r = c.post(f"/api/projects/{pid}/tasks",
                    json={"objective": "核查 8080 旁站低噪信息", "task_type": "recon",
                          "priority": 2})
@@ -2512,8 +2807,8 @@ def test_auto_replan_blocked_below_l2_and_when_paused(tmp_path, monkeypatch):
     monkeypatch.setattr("core.api.app.REPLAN_MIN_INTERVAL", 0)
     app = _chain_app(tmp_path, [])
     with TestClient(app) as c:
-        # L1 assessment（默认档是 L1，显式钉死）
-        pid1 = c.post("/api/projects", json={"name": "L1不重排", "track": "assessment",
+        # L1 pentest（默认档是 L1，显式钉死）
+        pid1 = c.post("/api/projects", json={"name": "L1不重排", "track": "pentest",
                                              "capabilities": ["web"]}).json()["id"]
         assert c.patch(f"/api/projects/{pid1}/config",
                        json={"config": {"autonomy": {"level": "L1"}}}).status_code == 200
@@ -2545,7 +2840,9 @@ def test_l2_replan_throttle_wait_then_reenter(tmp_path, monkeypatch):
                                          {"updates": []})]}]
     app = _chain_app(tmp_path, planner)
     with TestClient(app) as c:
-        pid = _l2_project(c, "L2重排节流")
+        # cap 占满：发布建窗失败 → 任务无绑 open，节流行为断言不受执行干扰
+        pid = _l2_project(c, "L2重排节流", sessions_cap=1)
+        c.app.state.projects[pid].bb.register_session(pid, "占位会话", role="_generalist")
         bb = c.app.state.projects[pid].bb
         ost.save_fields(bb, pid,
                         last_replan_at=datetime.now(timezone.utc).isoformat())
@@ -2559,9 +2856,17 @@ def test_l2_replan_throttle_wait_then_reenter(tmp_path, monkeypatch):
         waits = _project_jobs(c, pid, "orchestrator-replan-wait")
         assert len(waits) == 1
         assert _project_jobs(c, pid, "orchestrator-replan") == []  # 还没真跑
-        _wait_no_running(c, pid)
-        replans = _project_jobs(c, pid, "orchestrator-replan")
-        assert len(replans) == 1 and replans[0]["status"] == "done"
+        # 轮询到 replan 到 done：wait job 的 on_done 才提交 replan，负载下
+        # replan 线程可能尚未起步（_wait_no_running 只保证无 running）
+        deadline = time.time() + 10
+        replans = []
+        while time.time() < deadline:
+            replans = [j for j in _project_jobs(c, pid, "orchestrator-replan")
+                       if j["status"] == "done"]
+            if len(replans) == 1:
+                break
+            time.sleep(0.05)
+        assert len(replans) == 1
         assert replans[0]["result"]["reason"].endswith(":throttled")
         assert ost.load_or_create(bb, pid)["last_replan_at"]
 
@@ -2708,13 +3013,19 @@ def test_l2_budget_pause_auto_resumes(tmp_path):
         pid = c.post("/api/projects", json={"name": "L2自续", "track": "ctf",
                                             "capabilities": ["binary"]}).json()["id"]
         assert c.patch(f"/api/projects/{pid}/config",
-                       json={"config": {"autonomy": {"level": "L2", "paused": False}}}
+                       json={"config": {"autonomy": {"level": "L2", "paused": True}}}
                        ).status_code == 200
         tid = c.post(f"/api/projects/{pid}/tasks",
                      json={"objective": "自续任务", "task_type": "generic"}).json()["task_id"]
-        sp = c.post(f"/api/projects/{pid}/agents",
-                    json={"role": "_generalist", "max_steps": 1, "armed": True})  # 一步即耗尽 → budget pause
-        assert sp.status_code == 201
+        # 暂停挡住自动起跑：把任务专属待命窗的步数预算压到 1（一步即耗尽 → budget pause）
+        sid = next(t["target_session"] for t in c.get(f"/api/projects/{pid}/tasks").json()
+                   if t["id"] == tid)
+        c.app.state.agents[sid].dispatcher.max_steps = 1
+        assert c.patch(f"/api/projects/{pid}/config",
+                       json={"config": {"autonomy": {"level": "L2", "paused": False}}}
+                       ).status_code == 200
+        w = c.post(f"/api/agents/{sid}/work")  # 启动绑定窗（人工 override，与自动挡去重安全）
+        assert w.status_code == 200
 
         deadline = time.time() + 10
         done = False
@@ -2729,6 +3040,100 @@ def test_l2_budget_pause_auto_resumes(tmp_path):
         evs = [(e["kind"], e["payload"]) for e in bb.recent_events(pid)]
         assert any(k == "step.budget_extended" and p.get("by") == "l2-auto" for k, p in evs)
         assert any(k == "session.resumed" and p.get("by") == "l2-auto" for k, p in evs)
+
+
+def test_auto_spawn_l2_publish_opens_window_and_claims(tmp_path):
+    """v0.71 发布即建窗 L2：publish 同步建专属待命窗（origin=task-window，
+    reason=human-publish），调度器武装起跑，worker 只认领自己的任务并跑完。"""
+    app = _chain_app(tmp_path, [], _exec_finish_script(1))
+    with TestClient(app) as c:
+        pid = _l2_project(c, "L2自动补窗")
+        r = c.post(f"/api/projects/{pid}/tasks",
+                   json={"objective": "补窗即跑的任务", "task_type": "recon"})
+        assert r.status_code == 201
+        _wait_no_running(c, pid)
+        tasks = c.get(f"/api/projects/{pid}/tasks").json()
+        assert [t["status"] for t in tasks] == ["done"]  # 专属窗认领并完成
+        bb = c.app.state.projects[pid].bb
+        evs = [(e["kind"], e["payload"]) for e in bb.recent_events(pid)]
+        spawns = [p for k, p in evs
+                  if k == "session.spawned" and p.get("origin") == "task-window"]
+        assert len(spawns) == 1
+        assert spawns[0]["role"] == "_generalist"  # open 任务未绑角色 → 兜底
+        assert spawns[0]["reason"] == "human-publish"
+        from core.autonomy import count_active_sessions
+        assert count_active_sessions(bb, pid) == 1
+
+
+def test_l1_publish_standby_window_and_execution_approval(tmp_path):
+    """v0.72 L1：发布即建专属待命窗（零 LLM）+ 按任务提执行审批单
+    （action 带 task_id，批准=启动该窗）；每任务一单，不互相去重合并。"""
+    app = _chain_app(tmp_path, [])
+    with TestClient(app) as c:
+        pid = c.post("/api/projects", json={"name": "L1补窗审批", "track": "pentest",
+                                            "capabilities": ["web"]}).json()["id"]
+        r = c.post(f"/api/projects/{pid}/tasks",
+                   json={"objective": "待认领一", "task_type": "recon"})
+        assert r.status_code == 201
+        c.post(f"/api/projects/{pid}/tasks",
+               json={"objective": "待认领二", "task_type": "recon"})
+        _wait_no_running(c, pid)
+        items = c.get(f"/api/projects/{pid}/approvals").json()
+        spawns = [a for a in items if a["action"].get("op") == "spawn_session"]
+        assert len(spawns) == 2  # 每个任务一张执行审批单（带各自 task_id）
+        assert all(a["status"] == "pending" for a in spawns)
+        assert all(a["requested_by"] == "auto-spawn" for a in spawns)
+        assert {a["action"]["task_id"] for a in spawns} == {
+            t["id"] for t in c.get(f"/api/projects/{pid}/tasks").json()}
+        assert all(a["action"]["role"] == "_generalist" for a in spawns)
+        # 待命窗已建（不耗 LLM、未武装不起跑）；批准才启动
+        from core.autonomy import count_active_sessions
+        assert count_active_sessions(c.app.state.projects[pid].bb, pid) == 2
+        rows = {s["id"]: s for s in c.get(f"/api/projects/{pid}/sessions").json()}
+        assert all(s["worker_armed"] is False for s in rows.values())
+
+
+def test_legacy_auto_spawn_key_ignored_window_still_binds(tmp_path):
+    """v0.72 auto_spawn 旗标退役：旧配置残留键被静默忽略——L2 发布照常建专属窗
+    并自动起跑（挡位语义统一，项目级补窗开关不复存在）。"""
+    app = _chain_app(tmp_path, [], _exec_finish_script(1))
+    with TestClient(app) as c:
+        pid = _l2_project(c, "L2补窗关", auto_spawn=False)  # 残留键 no-op
+        r = c.post(f"/api/projects/{pid}/tasks",
+                   json={"objective": "照常建窗", "task_type": "recon"})
+        assert r.status_code == 201 and r.json()["session_id"]
+        _wait_no_running(c, pid)
+        from core.autonomy import count_active_sessions
+        assert count_active_sessions(c.app.state.projects[pid].bb, pid) == 1
+        assert c.get(f"/api/projects/{pid}/approvals").json() == []
+        assert c.get(f"/api/projects/{pid}/tasks").json()[0]["status"] == "done"
+
+
+def test_sessions_cap_full_task_waits_then_rebinds_on_close(tmp_path):
+    """已达 sessions_cap 不补窗（不超卖）：建窗失败任务暂无绑，人手窗不接公共池
+    （认领恒空）；关掉占坑窗后调度器立即重绑新窗并自动起跑（L2）。"""
+    app = _chain_app(tmp_path, [], _exec_finish_script(1))
+    with TestClient(app) as c:
+        pid = _l2_project(c, "L2补窗封顶", sessions_cap=1)
+        sp = c.post(f"/api/projects/{pid}/agents", json={"role": "recon", "armed": True})
+        assert sp.status_code == 201
+        _wait_no_running(c, pid)
+        r = c.post(f"/api/projects/{pid}/tasks",
+                   json={"objective": "暂无窗的任务", "task_type": "recon"})
+        assert r.status_code == 201 and r.json()["session_id"] is None
+        _wait_no_running(c, pid)
+        assert c.get(f"/api/projects/{pid}/tasks").json()[0]["status"] == "open"
+        bb = c.app.state.projects[pid].bb
+        evs = [(e["kind"], e["payload"]) for e in bb.recent_events(pid)]
+        assert [p for k, p in evs if k == "session.spawned" and p.get("auto")] == []
+        # 关掉占坑人手窗 → cap 释放 → 调度器（关窗收尾触发）重绑新窗并起跑
+        assert c.post(f"/api/sessions/{sp.json()['id']}/close").status_code == 200
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            if c.get(f"/api/projects/{pid}/tasks").json()[0]["status"] == "done":
+                break
+            time.sleep(0.05)
+        assert c.get(f"/api/projects/{pid}/tasks").json()[0]["status"] == "done"
 
 
 def test_publish_parent_id_and_depth_422(client):
@@ -2752,32 +3157,41 @@ def test_publish_parent_id_and_depth_422(client):
     assert r.status_code == 201
 
 
-def test_mode_switch_roe_and_mission(client):
-    """C2 作战模式：无 ROE 切 redteam 422；带 ROE 200+mode.changed；usage 出口带 mode。"""
-    pid = _make_project(client)
-    r = client.patch(f"/api/projects/{pid}/config",
-                     json={"config": {"mode": "redteam"}})
-    assert r.status_code == 422 and "ROE" in r.json()["detail"]
+def test_redteam_roe_semantics_by_track(client):
+    """R2 轨级语义（mode 退役）：pentest 轨传 ROE 被忽略；redteam 轨 ROE 可选
+    （缺=roe_complete False），mission/ROE 归一化入 usage；mode 键退役剥离。"""
+    pid = _make_project(client)  # pentest 轨
     r = client.patch(f"/api/projects/{pid}/config", json={"config": {
-        "mode": "redteam",
+        "mode": "redteam",  # mode 键退役：静默剥离不报错
         "mission": {"text": "打穿 mission", "criteria": "□ 判据一\n□ 判据二"},
+        "redteam_roe": {"targets": "*.t.com", "window": "w",
+                         "exclusions": "e", "approver": "a"}}})
+    assert r.status_code == 200
+    detail = client.get(f"/api/projects/{pid}").json()
+    assert "mode" not in detail["config"]  # mode 退役剥离
+    assert detail["usage"]["mission"]["text"] == "打穿 mission"
+    assert detail["usage"].get("redteam_roe") is None  # pentest 轨忽略 ROE
+
+    # redteam 轨：无 ROE 建项目成功，roe_complete=False（pentest 上限兜底）
+    rp = client.post("/api/projects", json={"name": "红队-无ROE", "track": "redteam"})
+    assert rp.status_code == 201
+    rpid = rp.json()["id"]
+    rdetail = client.get(f"/api/projects/{rpid}").json()
+    assert rdetail["usage"]["roe_complete"] is False
+    # 补全 ROE → roe_complete=True
+    r = client.patch(f"/api/projects/{rpid}/config", json={"config": {
         "redteam_roe": {"targets": "*.t.com", "window": "2026-09-16~09-18",
                          "exclusions": "无", "approver": "owner"}}})
     assert r.status_code == 200
-    bb = client.app.state.projects[pid].bb
-    ev = [e for e in bb.recent_events(pid) if e["kind"] == "mode.changed"][-1]
-    assert ev["payload"]["new"] == "redteam" and ev["payload"]["roe"]["approver"] == "owner"
-    detail = client.get(f"/api/projects/{pid}").json()
-    assert detail["usage"]["mode"] == "redteam"
-    assert detail["usage"]["mission"]["text"] == "打穿 mission"
+    rdetail = client.get(f"/api/projects/{rpid}").json()
+    assert rdetail["usage"]["roe_complete"] is True
+    assert rdetail["usage"]["redteam_roe"]["approver"] == "owner"
 
 
-def test_mode_prompt_fixed_at_session_creation(client):
-    """C2：mode 在会话创建时固化——redteam 项目的会话系统提示含红队语义与 ROE。"""
-    from core.agent import AgentConfig
-    pid = _make_project(client)
+def test_redteam_prompt_fixed_at_session_creation(client):
+    """R2：redteam 轨会话系统提示含红队语义与 ROE；ROE 未核验=按 pentest 上限兜底提示。"""
+    pid = _make_project(client, track="redteam")
     client.patch(f"/api/projects/{pid}/config", json={"config": {
-        "mode": "redteam",
         "redteam_roe": {"targets": "*.t.com", "window": "w", "exclusions": "e",
                           "approver": "a"}}})
     sp = client.post(f"/api/projects/{pid}/agents", json={"role": "_generalist"})
@@ -2785,6 +3199,12 @@ def test_mode_prompt_fixed_at_session_creation(client):
     sid = sp.json()["id"]
     agent = client.app.state.agents[sid]
     assert "红队行动" in agent.capability_prompt and "*.t.com" in agent.capability_prompt
+    # 无 ROE 的 redteam 项目：兜底提示出现
+    rp = client.post("/api/projects", json={"name": "红队-无ROE2", "track": "redteam"})
+    rpid = rp.json()["id"]
+    sp2 = client.post(f"/api/projects/{rpid}/agents", json={"role": "_generalist"})
+    agent2 = client.app.state.agents[sp2.json()["id"]]
+    assert "ROE 未核验" in agent2.capability_prompt or "按渗透测试上限兜底" in agent2.capability_prompt
 
 
 def test_directive_endpoint_and_auto_derive(tmp_path):
@@ -2854,3 +3274,516 @@ def test_judgment_templates_crud(client, tmp_path):
     r = client.delete("/api/judgment-templates/我的模板")
     assert r.status_code == 200
     assert client.get("/api/judgment-templates").json()["user"] == {}
+
+
+def _wait_derive_result(client, pid: str, prefix: str, tries: int = 200) -> dict:
+    """轮询 usage.derive.last_result 直到以 prefix 开头（派生在后台 job 里跑）。"""
+    for _ in range(tries):
+        detail = client.get(f"/api/projects/{pid}").json()
+        last = (detail["usage"].get("derive") or {}).get("last_result") or ""
+        if last.startswith(prefix):
+            return detail["usage"]["derive"]
+        time.sleep(0.05)
+    raise AssertionError(f"derive.last_result 未以 {prefix} 开头（实际: {last!r}）")
+
+
+def test_mission_poll_sweep_derives_when_idle(tmp_path):
+    """①兜底轮询：队列空 + auto_derive（L1）→ 直调 sweep 自动派生新任务并落
+    last_derive_*；队列有 open 任务时 sweep 不触发（require_idle）。"""
+    from test_orchestrator import ScriptedLLM as S
+    app = create_app(
+        workspace_root=str(tmp_path / "ws"), tools_root=None,
+        executor_llm=S([{"text": "ok"}]),
+        planner_llm=S([
+            {"tool_use": [S.tool_call("p1", "publish_task",
+                                      {"objective": "轮询派生任务", "task_type": "generic"})]},
+            {"tool_use": [S.tool_call("d1", "done", {})]},
+        ]),
+        providers_config=str(tmp_path / "p.json"))
+    app.state.judgments_dir = tmp_path / "cfg"  # 测试隔离判据模板文件
+    with TestClient(app) as c:
+        pid = c.post("/api/projects", json={"name": "轮询派生", "track": "ctf"}).json()["id"]
+        assert c.patch(f"/api/projects/{pid}/config", json={"config": {
+            "autonomy": {"level": "L1", "auto_derive": True},
+            "mission": {"text": "挖洞", "criteria": "□ 全覆盖"}}}).status_code == 200
+        # 变体 A：队列有 open 任务 → sweep 不判跳（不产新任务）
+        tid = c.post(f"/api/projects/{pid}/tasks",
+                     json={"objective": "人手任务", "task_type": "generic"}).json()["task_id"]
+        app.state.mission_poll_sweep()
+        time.sleep(0.3)
+        assert not any(t["objective"] == "轮询派生任务"
+                       for t in c.get(f"/api/projects/{pid}/tasks").json())
+        # 变体 B：队列清空 → sweep 触发派生，发布 1 任务
+        assert c.delete(f"/api/tasks/{tid}").status_code == 200
+        app.state.mission_poll_sweep()
+        derive = _wait_derive_result(c, pid, "published:")
+        assert derive["last_result"] == "published:1" and derive["last_at"]
+        tasks = c.get(f"/api/projects/{pid}/tasks").json()
+        assert any(t["objective"] == "轮询派生任务" for t in tasks)
+        # 事件留痕：mission.derive（判定）+ mission.derive.result（结果）
+        bb = c.app.state.projects[pid].bb
+        kinds = [e["kind"] for e in bb.recent_events(pid)]
+        assert "mission.derive" in kinds and "mission.derive.result" in kinds
+
+
+def test_mission_derive_error_visible_and_throttled(tmp_path):
+    """②/error 路径：LLM 失败 → last_derive_result 以 error 开头 + mission.derive.result
+    + llm.error 事件（429 特征 → kind_hint=quota）；连续失败同文案 60s 节流只发一条。"""
+    from test_orchestrator import ScriptedLLM as S
+
+    class QuotaLLM(S):
+        def chat(self, messages, **kw):  # noqa: ANN001,ANN003
+            raise RuntimeError("HTTP 429: quota insufficient, 余额不足")
+
+    app = create_app(
+        workspace_root=str(tmp_path / "ws"), tools_root=None,
+        executor_llm=S([{"text": "ok"}]),
+        planner_llm=QuotaLLM([]),
+        providers_config=str(tmp_path / "p.json"))
+    app.state.judgments_dir = tmp_path / "cfg"
+    with TestClient(app) as c:
+        pid = c.post("/api/projects", json={"name": "派生失败", "track": "ctf"}).json()["id"]
+        assert c.patch(f"/api/projects/{pid}/config", json={"config": {
+            "autonomy": {"level": "L1", "auto_derive": True},
+            "mission": {"text": "挖洞", "criteria": "□ 全覆盖"}}}).status_code == 200
+        bb = c.app.state.projects[pid].bb
+
+        def llm_errors() -> list[dict]:
+            return [e for e in bb.recent_events(pid) if e["kind"] == "llm.error"]
+
+        # 第一次派生：失败可见
+        app.state.mission_poll_sweep()
+        derive = _wait_derive_result(c, pid, "error:")
+        assert "429" in derive["last_result"] or "quota" in derive["last_result"]
+        assert len(llm_errors()) == 1
+        assert llm_errors()[0]["payload"].get("kind_hint") == "quota"
+        assert any(e["kind"] == "mission.derive.result" and e["payload"].get("error")
+                   for e in bb.recent_events(pid))
+        # 第二次派生（error 后 st.empty 复位允许重试）：同样失败，但 llm.error 节流不再发
+        app.state.mission_poll_sweep()
+        _wait_derive_result(c, pid, "error:")
+        assert len(llm_errors()) == 1  # 节流：同文案 60s 内只一条
+
+
+def test_orch_tick_started_event_on_manual_tick(tmp_path):
+    """⑤编排开始日志可见：手动 tick 端点落 orch.tick.started 事件（事件流实时可见）。"""
+    from test_orchestrator import ScriptedLLM as S
+    app = create_app(
+        workspace_root=str(tmp_path / "ws"), tools_root=None,
+        executor_llm=S([{"text": "ok"}]),
+        planner_llm=S([{"tool_use": [S.tool_call("d1", "done", {})]}]),
+        providers_config=str(tmp_path / "p.json"))
+    with TestClient(app) as c:
+        pid = c.post("/api/projects", json={"name": "tick 日志", "track": "ctf"}).json()["id"]
+        r = c.post(f"/api/projects/{pid}/orchestrator/tick", json={})
+        assert r.status_code == 200
+        _wait_job(c, r.json()["job_id"])
+        bb = c.app.state.projects[pid].bb
+        started = [e for e in bb.recent_events(pid) if e["kind"] == "orch.tick.started"]
+        assert started and started[0]["payload"]["reason"] == "manual"
+
+
+# ---------- v14 任务绑定角色：POST /tasks role 贯穿 ----------
+
+def test_task_publish_role_validation_and_bypass(client):
+    """v14 POST /tasks：带合法 role 201 且入库；非法 role 422；force 同时旁路
+    dedup 与同 target 防碎闸。"""
+    pid = _make_project(client)
+    # pentest 轨已注册角色（真实 packs）
+    roles = client.get(f"/api/projects/{pid}/roles").json()
+    assert roles, "测试前置：pentest 轨应有已注册角色"
+    role_id = roles[0]["role"]
+    r = client.post(f"/api/projects/{pid}/tasks",
+                    json={"objective": "带角色任务", "task_type": "generic",
+                          "role": role_id})
+    assert r.status_code == 201
+    task = client.get(f"/api/projects/{pid}/tasks").json()[0]
+    assert task["role"] == role_id
+    # 非法 role → 422
+    r = client.post(f"/api/projects/{pid}/tasks",
+                    json={"objective": "拼错角色", "task_type": "generic",
+                          "role": "no-such-role"})
+    assert r.status_code == 422 and "role" in r.json()["detail"]
+    # 同 target 防碎闸：同 IP 第 5 个任务 422；force 旁路放行
+    for i in range(4):
+        assert client.post(
+            f"/api/projects/{pid}/tasks",
+            json={"objective": f"打点 {i}", "noise_budget": "low",
+                  "conflict_keys": ["ip:2.2.2.2"]}).status_code == 201
+    r = client.post(f"/api/projects/{pid}/tasks",
+                    json={"objective": "打点 5", "noise_budget": "low",
+                          "conflict_keys": ["ip:2.2.2.2"]})
+    assert r.status_code == 422 and "任务已达" in r.json()["detail"]
+    r = client.post(f"/api/projects/{pid}/tasks",
+                    json={"objective": "打点 5", "noise_budget": "low",
+                          "conflict_keys": ["ip:2.2.2.2"], "force": True})
+    assert r.status_code == 201
+
+
+# ---------- 附件随发（2026-09-19）：上传/去重/下载 + 任务与引导携带 ----------
+
+
+def test_attachment_upload_dedup_and_download(client):
+    """POST /attachments（输入行附件随发）：任意类型落 artifacts/attachments，
+    artifact 行 kind=attachment（meta.original_name/size）；同内容 sha 去重返回
+    既有 id；下载端点 FileResponse 全量回传（原文件名）。"""
+    pid = _make_project(client)
+    blob = b"\x7fELF" + os.urandom(64)
+    r = client.post(f"/api/projects/{pid}/attachments",
+                    files={"file": ("sample.elf", blob, "application/octet-stream")})
+    assert r.status_code == 201
+    att = r.json()
+    assert att["name"] == "sample.elf" and att["size"] == len(blob)
+    arts = client.get(f"/api/projects/{pid}/artifacts").json()
+    assert arts[0]["kind"] == "attachment" and arts[0]["path"].startswith("artifacts/attachments/")
+    assert json.loads(arts[0]["meta"])["original_name"] == "sample.elf"
+    # 同内容去重：返回同一 artifact id，不新增行
+    r2 = client.post(f"/api/projects/{pid}/attachments",
+                     files={"file": ("sample.elf", blob, "application/octet-stream")})
+    assert r2.status_code == 201 and r2.json()["id"] == att["id"]
+    assert len(client.get(f"/api/projects/{pid}/artifacts").json()) == 1
+    # 下载：内容与原文件名一致
+    d = client.get(f"/api/projects/{pid}/artifacts/{att['id']}/download")
+    assert d.status_code == 200 and d.content == blob
+    assert "sample.elf" in d.headers.get("content-disposition", "")
+    # 不存在 404
+    assert client.get(f"/api/projects/{pid}/artifacts/art-nope/download").status_code == 404
+    # 空文件 422（_spool_upload 护栏）
+    assert client.post(f"/api/projects/{pid}/attachments",
+                       files={"file": ("empty.bin", b"", "application/x")}).status_code == 422
+
+
+def test_task_and_note_with_attachments(client):
+    """发任务/引导会话携带附件：attachment_ids 校验（坏 id 422）→ 任务落
+    context.attachments；human_note payload 带 attachments（纯附件无文本可发）。"""
+    pid = _make_project(client)
+    att = client.post(f"/api/projects/{pid}/attachments",
+                      files={"file": ("poc.py", b"print(1)", "text/x-python")}).json()
+    # 坏 id 422（发布前拦截）
+    r = client.post(f"/api/projects/{pid}/tasks",
+                    json={"objective": "分析", "attachment_ids": ["art-nope"]})
+    assert r.status_code == 422 and "附件" in r.json()["detail"]
+    # 发任务带附件 → context.attachments
+    tid = client.post(f"/api/projects/{pid}/tasks",
+                      json={"objective": "分析样本", "attachment_ids": [att["id"]]}
+                      ).json()["task_id"]
+    task = client.get(f"/api/projects/{pid}/tasks").json()[0]
+    atts = task["context"]["attachments"]
+    assert len(atts) == 1 and atts[0]["id"] == att["id"]
+    assert atts[0]["path"] == att["path"] and atts[0]["name"] == "poc.py"
+    # 引导会话：纯附件（text 空）可发；payload 带 attachments
+    proj = client.app.state.projects[pid]
+    sid = proj.bb.register_session(pid, "附件引导", role="_generalist")["id"]
+    r = client.post(f"/api/sessions/{sid}/note",
+                    json={"text": "", "attachment_ids": [att["id"]]})
+    assert r.status_code == 201
+    inbox = client.get(f"/api/sessions/{sid}/inbox").json()
+    assert inbox[0]["payload"]["attachments"][0]["id"] == att["id"]
+    # 空文本且无附件仍 422
+    assert client.post(f"/api/sessions/{sid}/note",
+                       json={"text": "", "attachment_ids": []}).status_code == 422
+
+
+# ---------- H3：escalation 审批执行（deny-driven 一次性升级，API 层） ----------
+
+def test_decide_escalation_executes_once_and_inboxes(client):
+    """批准 escalation 单 → 网关直跑一次 → approval consumed + 收件箱回执 +
+    message.inbox 事件；同单二次决策 422（一次性消费）。"""
+    pid = _make_project(client, track="pentest")
+    proj = client.app.state.projects[pid]
+    appr = proj.bb.request_approval(
+        pid, {"op": "escalation", "kind": "net_real",
+              "cmd": "Write-Output escalation-ok", "runtime": "host",
+              "threat_class": "trusted", "net": "bridge", "reason": "API 层测试"},
+        risk="high", requested_by="sess-test", session_id="sess-test")
+    r = client.post(f"/api/approvals/{appr['id']}/decide",
+                    json={"decision": "approved"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["executed"] is True and data["exit_code"] == 0
+    # 审批已被一次性消费（approved → consumed，同单不可复用）
+    row = proj.bb.conn.execute(
+        "SELECT status FROM approvals WHERE id=?", (appr["id"],)).fetchone()
+    assert row["status"] == "consumed"
+    # 回执投递请求会话收件箱 + 事件流 message.inbox 同步可见
+    inbox = proj.bb.inbox_list(pid, "sess-test")
+    hit = [m for m in inbox
+           if m["kind"] == "escalation_result" and m["ref_id"] == appr["id"]]
+    assert len(hit) == 1 and "escalation-ok" in hit[0]["payload"]["text"]
+    events = proj.bb.recent_events(pid)
+    assert any(e["kind"] == "message.inbox"
+               and e["payload"].get("kind") == "escalation_result"
+               for e in events)
+    # 已 consumed 的单再决策 → 422
+    r2 = client.post(f"/api/approvals/{appr['id']}/decide",
+                     json={"decision": "approved"})
+    assert r2.status_code == 422
+
+
+def test_decide_escalation_invalid_action_marks_exec_failed(client):
+    """action 不合法（缺 cmd）：批准不回滚，落 approval.exec_failed 事件。"""
+    pid = _make_project(client)
+    proj = client.app.state.projects[pid]
+    appr = proj.bb.request_approval(
+        pid, {"op": "escalation", "runtime": "host"},
+        risk="high", requested_by="sess-x")
+    r = client.post(f"/api/approvals/{appr['id']}/decide",
+                    json={"decision": "approved"})
+    assert r.status_code == 200 and r.json()["executed"] is False
+    assert "RuntimeError" in r.json()["error"]
+    ev = [e for e in proj.bb.recent_events(pid)
+          if e["kind"] == "approval.exec_failed"]
+    assert ev and ev[0]["payload"]["op"] == "escalation"
+    row = proj.bb.conn.execute(
+        "SELECT status FROM approvals WHERE id=?", (appr["id"],)).fetchone()
+    assert row["status"] == "approved"  # 执行失败不回滚批准
+
+
+# ---------- 蓝图（R4 逆向开发管线） ----------
+
+def test_blueprints_crud_and_status_flow(client):
+    """蓝图 API：建 → 列表 → 详情 → PATCH 正文/goal → status 白名单流转 → 422/404。"""
+    pid = _make_project(client, track="research")
+    r = client.post(f"/api/projects/{pid}/blueprints", json={
+        "name": "聊天客户端", "goal": "重建", "binary_sha256": "abc",
+        "modules": [{"name": "网络通信", "func_addresses": ["0x401000"]}]})
+    assert r.status_code == 201
+    bp = r.json()
+    bid = bp["id"]
+    assert bp["status"] == "draft" and bp["modules"][0]["name"] == "网络通信"
+    assert len(client.get(f"/api/projects/{pid}/blueprints").json()) == 1
+    assert client.get(f"/api/projects/{pid}/blueprints/{bid}").status_code == 200
+    assert client.get(f"/api/projects/{pid}/blueprints/bp-nope").status_code == 404
+    # PATCH 正文追加 + goal
+    r = client.patch(f"/api/projects/{pid}/blueprints/{bid}",
+                     json={"content_append": "## 数据流", "goal": "重建 v2"})
+    assert r.status_code == 200 and "数据流" in r.json()["content_md"]
+    # 状态白名单：draft→ready 一步跳 → 422
+    r = client.patch(f"/api/projects/{pid}/blueprints/{bid}", json={"status": "ready"})
+    assert r.status_code == 422
+    r = client.patch(f"/api/projects/{pid}/blueprints/{bid}", json={"status": "reviewed"})
+    assert r.status_code == 200 and r.json()["status"] == "reviewed"
+    r = client.patch(f"/api/projects/{pid}/blueprints/{bid}", json={"status": "ready"})
+    assert r.status_code == 200 and r.json()["status"] == "ready"
+    # 非法状态值 422
+    r = client.patch(f"/api/projects/{pid}/blueprints/{bid}", json={"status": "shipped"})
+    assert r.status_code == 422
+    # 重名（同样本同名）422；不同样本同名允许
+    r = client.post(f"/api/projects/{pid}/blueprints",
+                    json={"name": "聊天客户端", "binary_sha256": "abc"})
+    assert r.status_code == 422
+    r = client.post(f"/api/projects/{pid}/blueprints",
+                    json={"name": "聊天客户端", "binary_sha256": "def"})
+    assert r.status_code == 201
+    # 模块 patch：正常与 404
+    r = client.patch(f"/api/projects/{pid}/blueprints/{bid}/modules/网络通信",
+                     json={"status": "specd", "spec": "def send(): ..."})
+    assert r.status_code == 200
+    assert r.json()["modules"][0]["status"] == "specd"
+    r = client.patch(f"/api/projects/{pid}/blueprints/{bid}/modules/没有的模块",
+                     json={"notes": "x"})
+    assert r.status_code == 404
+    # 项目隔离
+    pid2 = _make_project(client, track="research")
+    assert client.get(f"/api/projects/{pid2}/blueprints/{bid}").status_code == 404
+
+
+def test_blueprints_events_streamed(client):
+    """蓝图写路径落事件流（blueprint.created/status_changed），前端 tick 刷新可见。"""
+    pid = _make_project(client, track="research")
+    bid = client.post(f"/api/projects/{pid}/blueprints",
+                      json={"name": "蓝图事件"}).json()["id"]
+    client.patch(f"/api/projects/{pid}/blueprints/{bid}", json={"status": "reviewed"})
+    kinds = [e["kind"] for e in client.get(f"/api/projects/{pid}/events").json()]
+    assert "blueprint.created" in kinds and "blueprint.status_changed" in kinds
+
+
+# ---------- v18 向指定会话直接发任务（target_session 认领门控） ----------
+
+
+def _pentest_project(c, name: str) -> str:
+    return c.post("/api/projects", json={"name": name, "track": "pentest",
+                                         "capabilities": ["web"]}).json()["id"]
+
+
+def test_task_target_session_publish_and_claim_gate(client):
+    """v18 门控：指派任务只有目标窗能认领（claim_next WHERE 过滤 + claim 硬拒绝）。"""
+    from core.blackboard import ClaimError, TaskQueue
+
+    pid = _pentest_project(client, "指派门控")
+    bb = client.app.state.projects[pid].bb
+    sa = bb.register_session(pid, "窗甲", role="_generalist")["id"]
+    sb = bb.register_session(pid, "窗乙", role="_generalist")["id"]
+    tq = TaskQueue(bb)
+
+    tid = tq.publish(pid, "指派任务", target_session=sa)
+    # task.published 事件带 target_session（前端看板 chip 数据源）
+    pub = [e for e in bb.recent_events(pid)
+           if e["kind"] == "task.published" and e["payload"]["task_id"] == tid]
+    assert pub and pub[-1]["payload"]["target_session"] == sa
+    # 乙窗认领不到指派任务；甲窗能
+    assert tq.claim_next(pid, sb) is None
+    assert tq.claim_next(pid, sa) == tid
+    # 乙窗绕过 claim_next 直接 claim → 硬门控拒绝
+    tid2 = tq.publish(pid, "指派任务二", target_session=sa)
+    with pytest.raises(ClaimError):
+        tq.claim(tid2, sb)
+    # 公共池任务不受影响：两窗都能认领
+    t3 = tq.publish(pid, "公共池任务")
+    assert tq.claim_next(pid, sb) == t3
+
+
+def test_task_target_session_deprecated_ignored(client):
+    """v0.71 任务即窗口：API target_session 字段退役（保留兼容旧前端但忽略）——
+    传任意值都不落指派；v0.72 发布一律建专属待命窗并双向绑定，绑定窗由
+    发布路径返回的 session_id 决定，与传入值无关。"""
+    pid = _pentest_project(client, "指派字段弃用")
+    r = client.post(f"/api/projects/{pid}/tasks",
+                    json={"objective": "x", "task_type": "recon",
+                          "target_session": "sess-nope"})
+    assert r.status_code == 201
+    rows = client.get(f"/api/projects/{pid}/tasks").json()
+    assert len(rows) == 1 and rows[0]["target_session"] == r.json()["session_id"]
+
+
+def test_task_target_session_arms_idle_window(tmp_path):
+    """v0.71 发布即建窗：L2 发布同步建专属待命窗（响应带 session_id、meta
+    bound_task_id 双向绑定），调度器武装起跑，绑定窗只认领自己的任务并跑完。"""
+    app = _chain_app(tmp_path, [], _exec_finish_script(1))
+    with TestClient(app) as c:
+        pid = _l2_project(c, "L2发布即建窗")
+        r = c.post(f"/api/projects/{pid}/tasks",
+                   json={"objective": "发布即建窗的任务", "task_type": "recon"})
+        assert r.status_code == 201
+        body = r.json()
+        sid = body.get("session_id")
+        assert sid and body["deduplicated"] is False
+        sess = c.app.state.projects[pid].bb.get_session(sid)
+        meta = sess.get("meta")
+        meta = json.loads(meta) if isinstance(meta, str) else (meta or {})
+        assert meta.get("bound_task_id") == body["task_id"]
+        _wait_no_running(c, pid)
+        task = next(t for t in c.get(f"/api/projects/{pid}/tasks").json()
+                    if t["id"] == body["task_id"])
+        assert task["status"] == "done" and task["claimed_by"] == sid  # 专属窗自己跑完
+
+
+def test_close_session_releases_task_and_rebinds(client):
+    """v18 关窗退绑 + v0.72 调度器立即重绑：关待执行窗清 target_session
+    （事件 reason=session-closed），绑定段马上给 open 任务补建新待命窗（L1），
+    任务不再悬空饿死。"""
+    from core.blackboard import TaskQueue
+
+    pid = _pentest_project(client, "关窗退池")
+    bb = client.app.state.projects[pid].bb
+    sid = bb.register_session(pid, "拆迁窗", role="_generalist")["id"]
+    tq = TaskQueue(bb)
+    tid = tq.publish(pid, "随窗指派的任务", target_session=sid)
+
+    assert client.post(f"/api/sessions/{sid}/close").status_code == 200
+    task = tq.get_task(tid)
+    assert task["status"] == "open" and task["target_session"] != sid  # 已重绑新待命窗
+    upd = [e for e in bb.recent_events(pid)
+           if e["kind"] == "task.updated" and e["payload"].get("task_id") == tid]
+    assert upd and upd[-1]["payload"]["changes"] == {"target_session": sid}
+    assert upd[-1]["payload"]["reason"] == "session-closed"
+
+
+def test_reopen_clears_target_session(client):
+    """v0.71 放回不清指派：失败任务归原绑定窗（窗是任务的延续现场，同窗续跑）；
+    task.reopened 事件不再带 unassigned_from。"""
+    from core.blackboard import TaskQueue
+
+    pid = _pentest_project(client, "放回归原窗")
+    bb = client.app.state.projects[pid].bb
+    sid = bb.register_session(pid, "失败窗", role="_generalist")["id"]
+    tq = TaskQueue(bb)
+    tid = tq.publish(pid, "失败后放回的任务", target_session=sid)
+    tq.claim(tid, sid)
+    tq.fail(tid, sid, "炸了")
+
+    tq.reopen(tid, by="human")
+    task = tq.get_task(tid)
+    assert task["status"] == "open" and task["target_session"] == sid
+    ev = [e for e in bb.recent_events(pid)
+          if e["kind"] == "task.reopened" and e["payload"]["task_id"] == tid][-1]
+    assert "unassigned_from" not in ev["payload"]
+
+
+def test_auto_spawn_ignores_assigned_tasks(tmp_path):
+    """v0.71 绑定模型：手动注册的既有窗（无绑定）不接任务——公共池为空，
+    各任务只由自己的专属窗执行，手动窗保持闲置。"""
+    app = _chain_app(tmp_path, [], _exec_finish_script(1))
+    with TestClient(app) as c:
+        pid = _l2_project(c, "L2手动窗不抢活")
+        bb = c.app.state.projects[pid].bb
+        sm = bb.register_session(pid, "手动窗", role="_generalist")["id"]
+        r = c.post(f"/api/projects/{pid}/tasks",
+                   json={"objective": "只归专属窗的任务", "task_type": "recon"})
+        assert r.status_code == 201
+        tid = r.json()["task_id"]
+        _wait_no_running(c, pid)
+        task = next(t for t in c.get(f"/api/projects/{pid}/tasks").json()
+                    if t["id"] == tid)
+        assert task["status"] == "done" and task["claimed_by"] != sm
+        # 专属窗跑完即任务终态（窗保留待命）；手动窗从未动过任务
+        assert task["claimed_by"] == r.json()["session_id"]
+
+
+def test_dedup_ignores_target_session(tmp_path):
+    """dedup_fp 不含 target_session（v14「role 不入指纹」同案：投递偏好非任务本体）。
+    force 指派乙后 worker（剧本式 executor）认领跑完，收尾无悬置 job。"""
+    app = _chain_app(tmp_path, [], _exec_finish_script(1))
+    with TestClient(app) as c:
+        pid = _pentest_project(c, "指派去重")
+        bb = c.app.state.projects[pid].bb
+        from core.blackboard import TaskQueue
+        from core.blackboard.tasks import dedup_fp
+
+        sa = bb.register_session(pid, "去重甲", role="_generalist")["id"]
+        sb = bb.register_session(pid, "去重乙", role="_generalist")["id"]
+        tq = TaskQueue(bb)
+        t1 = tq.publish(pid, "同文任务", task_type="recon", target_session=sa)
+        tq.publish(pid, "同文任务", task_type="recon", target_session=sb)
+        dup = tq.find_dedup_target(pid, dedup_fp("recon", "", "同文任务"))
+        assert dup["id"] == t1  # 指派不同不改指纹：仍命中先发的
+
+        # API 层：同文再发（target_session 字段已弃用被忽略）→ 200 deduplicated；
+        # force → 201（v0.71：不指派既有窗，kicked 不再指向 sb）
+        body = {"objective": "同文任务", "task_type": "recon", "target_session": sb}
+        r = c.post(f"/api/projects/{pid}/tasks", json=body)
+        assert r.status_code == 200 and r.json()["deduplicated"] is True
+        r = c.post(f"/api/projects/{pid}/tasks", json={**body, "force": True})
+        assert r.status_code == 201
+        _wait_no_running(c, pid)
+
+
+def test_schema_v18_migration_adds_target_session(tmp_path):
+    """v17 旧库打开幂等补列：target_session 在且默认 ''。"""
+    app = create_app(workspace_root=str(tmp_path / "ws"), tools_root=None,
+                     executor_llm=None, planner_llm=None,
+                     providers_config=str(tmp_path / "providers.json"))
+    with TestClient(app) as c:
+        pid = c.post("/api/projects", json={"name": "迁移项目",
+                                            "track": "pentest"}).json()["id"]
+        tid = c.post(f"/api/projects/{pid}/tasks",
+                     json={"objective": "旧库任务", "task_type": "recon"}).json()["task_id"]
+    import sqlite3
+
+    db = next(tmp_path.rglob("blackboard.db"))  # 工作区目录布局解耦：直接找库文件
+    conn = sqlite3.connect(db)
+    conn.execute("ALTER TABLE tasks DROP COLUMN target_session")  # 模拟 v17 库
+    conn.execute("UPDATE meta SET value='17' WHERE key='schema_version'")
+    conn.commit()
+    conn.close()
+
+    app2 = create_app(workspace_root=str(tmp_path / "ws"), tools_root=None,
+                      executor_llm=None, planner_llm=None,
+                      providers_config=str(tmp_path / "providers2.json"))
+    with TestClient(app2) as c2:
+        bb = (c2.app.state.projects.get(pid) or c2.app.state.store.open_project(pid)).bb
+        cols = [r["name"] for r in bb.conn.execute("PRAGMA table_info(tasks)")]
+        assert "target_session" in cols
+        row = bb.conn.execute(
+            "SELECT target_session FROM tasks WHERE id=?", (tid,)).fetchone()
+        assert row["target_session"] == ""  # 旧库存量任务全部落公共池

@@ -1,7 +1,0 @@
-# 外网打点角色：Web 漏洞挖掘与利用入口
-name: external-entry
-description: "外网打点：按目标特征路由打法，最小伤害验证，发现即上报"
-persona: "外网打点手：按目标特征路由打法，最小伤害验证，发现即上报。"
-skills: [web-strike-entry]
-task_types: [exploit, recon]
-default_noise: low

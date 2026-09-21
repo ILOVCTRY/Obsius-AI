@@ -1,5 +1,8 @@
 import type {
-  Approval, Artifact, ArtifactUploadResponse, Asset, BBEvent, BinaryOverview, BinaryStrings,
+  Approval, Artifact, ArtifactUploadResponse, Asset, AttachmentInfo, BBEvent, BinaryOverview, BinaryStrings,
+  BrowserState, BrowserStatus, HttpHistoryRow, InterceptState,
+  Blueprint, BlueprintModuleStatus, BlueprintStatus,
+  IntruderPayloadSpec, IntruderTemplate,
   CachedFuncRow, CachedFunction, Chain, ChainLink, ChainNodeType, ChainStatus, ChainSummary,
   DecideApprovalResult, DoctorReport, DiscoveredModel, Finding, FindingPatchBody, FuncCreateBody, FuncEntry,
   FuncPatchBody, HistoryList, InboxMessage, Job, KbRead, KbRefHit, KbRenameResult,
@@ -7,10 +10,10 @@ import type {
   KbWriteResult, LlmProvider, McpServer, ModelInfo, IntelArticle, IntelBrief, IntelBriefMeta,
   IntelFeed, IntelOverview, IntelProfile, IntelVaultConfig, IntelVaultInfo, VaultNode,
   VaultSearchHit, IntelLearningProfile, IntelPlan, IntelPlanMeta,
-  OwnerRule, PackRole, ProjectDetail, ProjectMeta,
+  OwnerRule, PackRole, ProjectDetail, ProjectMeta, RatingRule,
   Proposal, ProposalOrigin, RoleCreateBody, RoleInfo, RouteHit,
   RoutePreviewBody, RoleUpdateBody, SampleUploadResponse, Session, SkillCreateBody, SkillDef,
-  SkillDetail, SkillVocab, Task, TaskGraph, WritebackItem, XrefData,
+  SkillDetail, SkillVocab, Task, TaskGraph, BoardGraph, WritebackItem, XrefData,
 } from "./types"
 import type { Taxonomy } from "./taxonomy"
 
@@ -76,19 +79,34 @@ export const api = {
   artifactContent: (pid: string, ref: string) =>
     http<{ id: string | null; path: string; kind: string; sha256: string; content: string }>(
       `/api/projects/${pid}/artifacts/content?ref=${encodeURIComponent(ref)}`),
-  findings: (pid: string, opts?: { target_asset_id?: string; min_severity?: string; verified_only?: boolean }) => {
+  findings: (pid: string, opts?: { target_asset_id?: string; min_severity?: string; verified_only?: boolean; category?: string }) => {
     const q = new URLSearchParams()
     if (opts?.target_asset_id) q.set("target_asset_id", opts.target_asset_id)
     if (opts?.min_severity) q.set("min_severity", opts.min_severity)
     if (opts?.verified_only) q.set("verified_only", "true")
+    if (opts?.category) q.set("category", opts.category)
     const qs = q.toString()
     return http<Finding[]>(`/api/projects/${pid}/findings${qs ? `?${qs}` : ""}`)
   },
-  assets: (pid: string) => http<Asset[]>(`/api/projects/${pid}/assets`),
+  assets: (pid: string, filter?: { tag?: string }) => {
+    const q = new URLSearchParams()
+    if (filter?.tag) q.set("tag", filter.tag)
+    const qs = q.toString()
+    return http<Asset[]>(`/api/projects/${pid}/assets${qs ? `?${qs}` : ""}`)
+  },
+  patchAsset: (_pid: string, assetId: string, body: { meta?: Record<string, unknown>; parent_id?: string | null }) =>
+    http<Asset>(`/api/assets/${assetId}`, {
+      method: "PATCH", body: JSON.stringify(body),
+    }),
   funcs: (pid: string, sha?: string) =>
     http<FuncEntry[]>(`/api/projects/${pid}/funcs${sha ? `?binary_sha256=${sha}` : ""}`),
   events: (pid: string, sinceId = 0) =>
     http<BBEvent[]>(`/api/projects/${pid}/events?since_id=${sinceId}`),
+  // 直播间分页（2026-09-17）：tail=最新 N 条（首屏不全量回放）；before_id=更早一页（升序）
+  eventsTail: (pid: string, limit = 50) =>
+    http<BBEvent[]>(`/api/projects/${pid}/events?tail=${limit}`),
+  eventsBefore: (pid: string, beforeId: number, limit = 50) =>
+    http<BBEvent[]>(`/api/projects/${pid}/events?before_id=${beforeId}&limit=${limit}`),
   sessions: (pid: string) => http<Session[]>(`/api/projects/${pid}/sessions`),
 
   // 黑板（人机共写，author=human）
@@ -143,11 +161,34 @@ export const api = {
     http<Finding>(`/api/projects/${pid}/findings/${findingId}`, {
       method: "PATCH", body: JSON.stringify(body),
     }),
+  deleteFinding: (pid: string, findingId: string) =>
+    http<{ deleted: string }>(`/api/projects/${pid}/findings/${findingId}`, { method: "DELETE" }),
   uploadDebugLog: (pid: string, file: File) => {
     const form = new FormData()
     form.append("kind", "debug-log")
     form.append("file", file)
     return httpUpload<ArtifactUploadResponse>(`/api/projects/${pid}/artifacts/upload`, form)
+  },
+  // 附件随发（2026-09-19）：≤64MB 任意类型，落 artifact（kind=attachment，同 sha 服务端去重）
+  uploadAttachment: (pid: string, file: File) => {
+    const form = new FormData()
+    form.append("file", file)
+    return httpUpload<AttachmentInfo>(`/api/projects/${pid}/attachments`, form)
+  },
+  // 附件下载（原始文件名经 content-disposition）
+  downloadArtifact: async (pid: string, aid: string) => {
+    const r = await fetch(`/api/projects/${pid}/artifacts/${aid}/download`)
+    if (!r.ok) return raise(r)
+    const cd = r.headers.get("content-disposition") ?? ""
+    const m = /filename\*?=(?:UTF-8''|")?([^";]+)/i.exec(cd)
+    const name = m ? decodeURIComponent(m[1]) : aid
+    const blob = await r.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement("a")
+    a.href = url
+    a.download = name
+    a.click()
+    URL.revokeObjectURL(url)
   },
 
   // 攻击链（人工建链）
@@ -176,33 +217,70 @@ export const api = {
   deleteChainLink: (pid: string, lid: string) =>
     http<{ chain_id: string; link_id: string }>(
       `/api/projects/${pid}/chains/links/${lid}`, { method: "DELETE" }),
-  artifacts: (pid: string) => http<Artifact[]>(`/api/projects/${pid}/artifacts`),
+
+  // 蓝图（R4 逆向开发管线）
+  blueprints: (pid: string) => http<Blueprint[]>(`/api/projects/${pid}/blueprints`),
+  createBlueprint: (pid: string, body: {
+    name: string; goal?: string; binary_sha256?: string; content_md?: string
+  }) =>
+    http<Blueprint>(`/api/projects/${pid}/blueprints`, {
+      method: "POST", body: JSON.stringify(body),
+    }),
+  updateBlueprint: (pid: string, bid: string, body: {
+    name?: string; goal?: string; status?: BlueprintStatus;
+    content_md?: string; content_append?: string
+  }) =>
+    http<Blueprint>(`/api/projects/${pid}/blueprints/${bid}`, {
+      method: "PATCH", body: JSON.stringify(body),
+    }),
+  patchBlueprintModule: (pid: string, bid: string, moduleName: string, body: {
+    desc?: string; spec?: string; notes?: string;
+    func_addresses?: string[]; status?: BlueprintModuleStatus
+  }) =>
+    http<Blueprint>(`/api/projects/${pid}/blueprints/${bid}/modules/${encodeURIComponent(moduleName)}`, {
+      method: "PATCH", body: JSON.stringify(body),
+    }),
+  artifacts: (pid: string, filter?: { task_id?: string; session_id?: string }) => {
+    const q = new URLSearchParams()
+    if (filter?.task_id) q.set("task_id", filter.task_id)
+    if (filter?.session_id) q.set("session_id", filter.session_id)
+    const qs = q.toString()
+    return http<Artifact[]>(`/api/projects/${pid}/artifacts${qs ? `?${qs}` : ""}`)
+  },
+  // 工作区隔离（W3）：清空 scratch + .tmp（正式产物 artifacts/ 不动）
+  clearScratch: (pid: string) =>
+    http<{ removed: number; failed: string[] }>(`/api/projects/${pid}/scratch/clear`, { method: "POST" }),
 
   // 任务
   tasks: (pid: string) => http<Task[]>(`/api/projects/${pid}/tasks`),
   taskGraph: (pid: string) =>
     http<TaskGraph>(`/api/projects/${pid}/task-graph`),
+  // 黑板链路图（2026-09-20）：五类对象 × 类型分层 DAG
+  boardGraph: (pid: string) =>
+    http<BoardGraph>(`/api/projects/${pid}/board-graph`),
   publishTask: (pid: string, body: {
-    objective: string; scope?: string; task_type?: string; noise_budget?: string;
+    objective: string; scope?: string; task_type?: string; role?: string; noise_budget?: string;
     priority?: number; conflict_keys?: string[]; refs?: string[];
-    workset?: string[]; force?: boolean; parent_id?: string
+    workset?: string[]; force?: boolean; parent_id?: string; attachment_ids?: string[];
+    acceptance?: string[]; target_session?: string   // v18：指派会话（''/缺省=公共池）
   }) =>
-    http<{ task_id: string; kicked: string[]; deduplicated?: boolean; existed_status?: string }>(
+    http<{ task_id: string; kicked: string[]; deduplicated?: boolean; existed_status?: string; already_running?: boolean; session_id?: string | null }>(
       `/api/projects/${pid}/tasks`, { method: "POST", body: JSON.stringify(body) }),
   updateTask: (taskId: string, body: {
     objective?: string; task_type?: string; noise_budget?: string;
     priority?: number; conflict_keys?: string[]
+    role?: string  // v0.71：执行中任务仅可改角色（热换装，下个步进生效）
   }) =>
     http<Task>(`/api/tasks/${taskId}`, {
       method: "PATCH", body: JSON.stringify(body),
     }),
-  reopenTask: (taskId: string, note?: string) =>
-    http<{ status: string }>(`/api/tasks/${taskId}/reopen`, {
-      method: "POST", body: JSON.stringify({ note: note ?? "" }),
+  reopenTask: (taskId: string, note?: string, drop_scene = false) =>
+    http<{ status: string; kicked?: string[] }>(`/api/tasks/${taskId}/reopen`, {
+      method: "POST", body: JSON.stringify({ note: note ?? "", drop_scene }),
     }),
-  // E12 意外终止续跑（限原会话）：reopen + 原会话载落盘快照 + 提交 worker
+  // C6 失败任务跨会话完整续跑：snapshot=⚡带现场复活 / transcript=↩接手现场续跑
   resumeTask: (taskId: string) =>
-    http<{ task_id: string; session_id: string; status: string }>(
+    http<{ task_id: string; session_id: string; status: string; resume_mode: "snapshot" | "transcript" }>(
       `/api/tasks/${taskId}/resume`, { method: "POST" }),
   deleteTask: (taskId: string) =>
     http<{ deleted: string }>(`/api/tasks/${taskId}`, { method: "DELETE" }),
@@ -229,9 +307,11 @@ export const api = {
   deleteJudgmentTemplate: (name: string) =>
     http<{ deleted: string }>(`/api/judgment-templates/${encodeURIComponent(name)}`, { method: "DELETE" }),
   // E8 人工引导通道：human_note 私信直达会话，worker 步边界注入
-  sessionNote: (sid: string, text: string) =>
+  // （2026-09-19 支持附件随发：attachment_ids 经 API 层校验后并入 inbox payload）
+  sessionNote: (sid: string, text: string, attachmentIds: string[] = []) =>
     http<{ note_id: string; session_id: string }>(`/api/sessions/${sid}/note`, {
-      method: "POST", body: JSON.stringify({ text }),
+      method: "POST",
+      body: JSON.stringify({ text, attachment_ids: attachmentIds.length ? attachmentIds : undefined }),
     }),
   sessionInbox: (sid: string, unread = false) =>
     http<InboxMessage[]>(`/api/sessions/${sid}/inbox${unread ? "?unread=true" : ""}`),
@@ -329,6 +409,16 @@ export const api = {
     http<{ status: string; tag: string }>(`/api/tracks/${track}/owners/${encodeURIComponent(tag)}`, {
       method: "DELETE",
     }),
+  // F11 评级与价值口径（rating/，注入带判级硬指令）
+  trackRatings: (track: string) => http<RatingRule[]>(`/api/tracks/${track}/ratings`),
+  updateTrackRating: (track: string, tag: string, content: string) =>
+    http<{ status: string; tag: string }>(`/api/tracks/${track}/ratings/${encodeURIComponent(tag)}`, {
+      method: "PUT", body: JSON.stringify({ content }),
+    }),
+  deleteTrackRating: (track: string, tag: string) =>
+    http<{ status: string; tag: string }>(`/api/tracks/${track}/ratings/${encodeURIComponent(tag)}`, {
+      method: "DELETE",
+    }),
   // 能力包
   capSkills: (cap: string) => http<SkillDef[]>(`/api/capabilities/${cap}/skills`),
   createCapSkill: (cap: string, body: SkillCreateBody) =>
@@ -367,6 +457,9 @@ export const api = {
   kbSearch: (cap: string, q: string, limit = 50) =>
     http<{ cap: string; q: string; results: KbSearchHit[] }>(
       `/api/capabilities/${cap}/kb/search?q=${encodeURIComponent(q)}&limit=${limit}`),
+  kbRoutes: (cap: string) =>
+    http<{ cap: string; routes: Record<string, string[]> }>(
+      `/api/capabilities/${cap}/kb/routes`),
   kbRead: (cap: string, path: string) =>
     http<KbRead>(`/api/capabilities/${cap}/kb/file?path=${encodeURIComponent(path)}`),
   kbCreate: (cap: string, path: string, content: string) =>
@@ -446,12 +539,15 @@ export const api = {
 
   // LLM 供应商（DESIGN.md §8）
   llmProviders: () =>
-    http<{ providers: LlmProvider[]; default: { provider: string; model: string } | null }>(
+    http<{ providers: LlmProvider[]; default: { provider: string; model: string } | null;
+           default_provider: string | null }>(
       "/api/llm/providers"),
-  saveLlmProviders: (providers: LlmProvider[]) =>
-    http<{ providers: LlmProvider[]; default: { provider: string; model: string } | null }>(
+  saveLlmProviders: (providers: LlmProvider[], defaultProvider?: string) =>
+    http<{ providers: LlmProvider[]; default: { provider: string; model: string } | null;
+           default_provider: string | null }>(
       "/api/llm/providers", {
-        method: "PUT", body: JSON.stringify({ providers }),
+        method: "PUT", body: JSON.stringify(
+          defaultProvider !== undefined ? { providers, default_provider: defaultProvider } : { providers }),
       }),
   discoverLlm: (body: { name?: string; base_url?: string; api_key?: string }) =>
     http<{ listed: boolean; models: DiscoveredModel[]; probed?: string[] }>(
@@ -515,6 +611,76 @@ export const api = {
     http<IntelPlan>(`/api/intel/learning/plan${week ? `?week=${encodeURIComponent(week)}` : ""}`),
   intelLearningPlans: () =>
     http<{ plans: IntelPlanMeta[] }>("/api/intel/learning/plans"),
+
+  // ---------- F6 内置浏览器（pentest/redteam 轨；F6-v3 去会话化——后端自动
+  // human-main 隐式会话，前端零会话 UI；爆破/重发为人类 UI 专属） ----------
+  browserStatus: () => http<BrowserStatus>("/api/browser/status"),
+  browserState: (pid: string) =>
+    http<BrowserState>(`/api/projects/${pid}/browser/state`),
+  browserNavigate: (pid: string, url: string) =>
+    http<{ final_url: string; title: string; status: number; target_host: string; duration_ms: number }>(
+      `/api/projects/${pid}/browser/navigate`,
+      { method: "POST", body: JSON.stringify({ url }) }),
+  browserAction: (pid: string, body: {
+    action: "click" | "type" | "back"
+    selector?: string; text?: string; x?: number; y?: number
+  }) =>
+    http<{ final_url?: string; title?: string; content?: string; truncated?: boolean }>(
+      `/api/projects/${pid}/browser/action`,
+      { method: "POST", body: JSON.stringify(body) }),
+  browserScreenshot: (pid: string) =>
+    http<{ png: string; ts: number }>(`/api/projects/${pid}/browser/screenshot`),
+  browserHistory: (pid: string, opts?: {
+    since_id?: number; limit?: number; batch_id?: string; source?: string; session_id?: string
+  }) => {
+    const q = new URLSearchParams()
+    if (opts?.since_id) q.set("since_id", String(opts.since_id))
+    if (opts?.limit) q.set("limit", String(opts.limit))
+    if (opts?.batch_id) q.set("batch_id", opts.batch_id)
+    if (opts?.source) q.set("source", opts.source)
+    if (opts?.session_id) q.set("session_id", opts.session_id)
+    const qs = q.toString()
+    return http<HttpHistoryRow[]>(`/api/projects/${pid}/browser/history${qs ? `?${qs}` : ""}`)
+  },
+  browserHistoryRow: (pid: string, rowId: number) =>
+    http<HttpHistoryRow>(`/api/projects/${pid}/browser/history/${rowId}`),
+  clearBrowserHistory: (pid: string, batchId?: string) =>
+    http<{ removed: number }>(
+      `/api/projects/${pid}/browser/history${batchId ? `?batch_id=${encodeURIComponent(batchId)}` : ""}`,
+      { method: "DELETE" }),
+  /** 202 返回 job_id，pollJob 轮询；job.result = 重发结果 HttpHistoryRow。
+   *  F6-v3：原始报文 raw（解析在后端）或 capture_id 模板。 */
+  browserReplay: (pid: string, body: {
+    capture_id?: number; raw?: string
+  }) =>
+    http<{ job_id: string }>(`/api/projects/${pid}/browser/replay`, {
+      method: "POST", body: JSON.stringify(body),
+    }),
+  /** F6-v3 拦截（仅人工浏览流量可挂起）：快照 / 开关 / 裁决 */
+  browserIntercept: (pid: string) =>
+    http<InterceptState>(`/api/projects/${pid}/browser/intercept`),
+  browserInterceptToggle: (pid: string, direction: "request" | "response", enabled: boolean) =>
+    http<InterceptState>(`/api/projects/${pid}/browser/intercept/toggle`, {
+      method: "POST", body: JSON.stringify({ direction, enabled }),
+    }),
+  browserInterceptDecide: (pid: string, holdId: string, body: {
+    action: "forward" | "drop"; raw?: string
+  }) =>
+    http<{ decided: boolean; hold_id: string; action: string }>(
+      `/api/projects/${pid}/browser/intercept/${encodeURIComponent(holdId)}/decide`,
+      { method: "POST", body: JSON.stringify(body) }),
+  /** 爆破（人类 UI 专属，Agent 无发起入口）：202 + batch_id，结果按 batch 拉历史 */
+  browserIntruder: (pid: string, body: {
+    template: IntruderTemplate; payloads: IntruderPayloadSpec[]
+    concurrency?: number; rate_per_sec?: number; max_requests?: number
+  }) =>
+    http<{ job_id: string; batch_id: string; max_concurrency: number }>(
+      `/api/projects/${pid}/browser/intruder`,
+      { method: "POST", body: JSON.stringify(body) }),
+  intruderStop: (pid: string, batchId: string) =>
+    http<{ stopped: boolean }>(
+      `/api/projects/${pid}/browser/intruder/${encodeURIComponent(batchId)}/stop`,
+      { method: "POST" }),
 }
 
 // 长耗时 Job 轮询（Agent work / orchestrator tick）
@@ -534,4 +700,10 @@ export async function pollJob(
 export function wsUrl(pid: string, sinceId: number): string {
   const proto = location.protocol === "https:" ? "wss" : "ws"
   return `${proto}://${location.host}/api/ws/projects/${pid}?since_id=${sinceId}`
+}
+
+// F6-v2 浏览器实时画面流：帧推送（服务端→客户端）+ 接管输入（客户端→服务端）
+export function browserWsUrl(pid: string): string {
+  const proto = location.protocol === "https:" ? "wss" : "ws"
+  return `${proto}://${location.host}/api/projects/${pid}/browser/ws`
 }

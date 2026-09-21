@@ -9,6 +9,7 @@
 import json
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -35,8 +36,9 @@ def client(tmp_path):
 
 
 def test_armed_gate_blocks_auto_and_work_starts(client):
-    """L1：人手开窗默认未武装 → 触发点 D 不派活；跑任务队列=启动接单；暂停解除武装。"""
-    pid = client.post("/api/projects", json={"name": "armed闸", "track": "assessment",
+    """L1：任务由发布建的待命窗承接（无人手开窗也建）；人手窗跑队列=武装启动但
+    认领恒空（v0.72 公共池退役）；执行审批批准=启动待命窗；暂停解除武装。"""
+    pid = client.post("/api/projects", json={"name": "armed闸", "track": "pentest",
                                              "capabilities": ["web"]}).json()["id"]
     client.patch(f"/api/projects/{pid}/config",
                  json={"config": {"autonomy": {"level": "L1"}}})
@@ -44,33 +46,46 @@ def test_armed_gate_blocks_auto_and_work_starts(client):
     assert sp.status_code == 201 and "job_id" not in sp.json()  # 未武装不开工
     sid = sp.json()["id"]
     rows = client.get(f"/api/projects/{pid}/sessions").json()
-    assert rows[0]["worker_armed"] is False and rows[0]["worker_running"] is False
+    assert all(r["worker_armed"] is False and r["worker_running"] is False
+               for r in rows)
 
-    # 触发点 D：发任务后不 kick 未武装窗，任务保持 open
+    # 触发点 D 退役：发任务后不 kick 任何人手窗；任务归自己的待命窗，保持 open
     r = client.post(f"/api/projects/{pid}/tasks",
                     json={"objective": "侦查目标", "task_type": "generic"})
     assert r.status_code == 201 and r.json()["kicked"] == []
+    task_id = r.json()["task_id"]
+    bound_sid = r.json()["session_id"]
+    assert bound_sid and bound_sid != sid
     assert client.get(f"/api/projects/{pid}/tasks").json()[0]["status"] == "open"
 
-    # 「跑任务队列」= 启动：armed=true + 起 worker 认领完成
+    # 人手窗「跑任务队列」= 武装启动：认领恒空（一窗一任务），任务不被碰
     w = client.post(f"/api/agents/{sid}/work")
     assert w.status_code == 200 and w.json().get("job_id")
     _wait_job(client, w.json()["job_id"])
     _wait_no_running(client, pid)
-    rows = client.get(f"/api/projects/{pid}/sessions").json()
-    assert rows[0]["worker_armed"] is True
+    rows = {s["id"]: s for s in client.get(f"/api/projects/{pid}/sessions").json()}
+    assert rows[sid]["worker_armed"] is True
+    assert client.get(f"/api/projects/{pid}/tasks").json()[0]["status"] == "open"
+
+    # 执行审批单就绪：批准=启动任务自己的待命窗（不新建）→ 认领完成
+    items = client.get(f"/api/projects/{pid}/approvals").json()
+    item = next(a for a in items if a["action"].get("task_id") == task_id)
+    d = client.post(f"/api/approvals/{item['id']}/decide", json={"decision": "approved"})
+    assert d.status_code == 200 and d.json()["executed"] is True
+    assert d.json()["session_id"] == bound_sid
+    _wait_no_running(client, pid)
     task = client.get(f"/api/projects/{pid}/tasks").json()[0]
-    assert task["status"] == "done" and task["claimed_by"] == sid
+    assert task["status"] == "done" and task["claimed_by"] == bound_sid
 
-    # 启动态重复点「跑任务队列」→ 去重不重复起（当前空闲，再起会空跑一轮，允许）
     # 空闲暂停 → 解除武装
-    client.post(f"/api/sessions/{sid}/pause")
-    rows = client.get(f"/api/projects/{pid}/sessions").json()
-    assert rows[0]["worker_armed"] is False
+    client.post(f"/api/sessions/{bound_sid}/pause")
+    rows = {s["id"]: s for s in client.get(f"/api/projects/{pid}/sessions").json()}
+    assert rows[bound_sid]["worker_armed"] is False
 
 
-def test_armed_gate_allows_kick_when_armed(tmp_path):
-    """武装窗在触发点 D 正常被 kick（闸只拦未武装，不改变 L1 自动语义）。"""
+def test_publish_does_not_kick_manual_window_own_window_runs(tmp_path):
+    """v0.72 触发点 D 退役：armed 手动窗发布时不被 kick、也认领不到公共池任务；
+    任务由自己的专属窗自动跑完（L2）。"""
     from test_api import _make_project  # noqa: F401 —— 复用 _chain_app 即可
     app = _chain_app(tmp_path, [], _exec_finish_script(1))
     with TestClient(app) as c:
@@ -82,14 +97,22 @@ def test_armed_gate_allows_kick_when_armed(tmp_path):
         _wait_no_running(c, pid)
         r = c.post(f"/api/projects/{pid}/tasks",
                    json={"objective": "侦查目标", "task_type": "generic"})
-        assert r.json()["kicked"] == [sid]  # 触发点 D 放行
-        _wait_no_running(c, pid)
-        task = c.get(f"/api/projects/{pid}/tasks").json()[0]
+        assert r.json()["kicked"] == []  # 触发点 D 退役
+        # 轮询终态（L2 下 replan-wait 30s 节流 job 与断言无关）
+        task = None
+        for _ in range(300):
+            task = c.get(f"/api/projects/{pid}/tasks").json()[0]
+            if task["status"] == "done":
+                break
+            time.sleep(0.02)
+        # 任务由自己的专属窗跑完，手动窗从未碰过
         assert task["status"] == "done"
+        assert task["claimed_by"] == task["target_session"] != sid
 
 
 def _task_window_env(client, pid):
-    """注册原认领者会话 + 发任务 + 直认领完成（不经 worker，避免 LLM 依赖）。"""
+    """发任务 + 退绑发布建的待命窗 + 让「原窗口」认领完成（不经 worker，避免 LLM 依赖）。
+    返回 (sess, tid, bound_sid)——bound_sid 是发布建的待命窗（保持存活）。"""
     bb = client.app.state.projects[pid].bb
     sess = bb.register_session(pid, "原窗口", role="recon")
     r = client.post(f"/api/projects/{pid}/tasks",
@@ -97,17 +120,27 @@ def _task_window_env(client, pid):
                           "noise_budget": "passive"})
     tid = r.json()["task_id"]
     tq = TaskQueue(bb)
+    bound = tq.get_task(tid)["target_session"]
+    if bound:  # v0.72：发布即建待命窗，退绑后任务让给测试窗
+        tq.unassign_session(bound)
     tq.claim(tid, sess["id"])
     tq.complete(tid, sess["id"], result_note="三处字符串引用已核对")
-    return sess, tid
+    return sess, tid, bound
 
 
 def test_spawn_task_window_idempotent_with_context(client):
     """任务窗：done 任务开新窗（角色沿用/上下文 human_note/meta.spawn_task_id）；
     重复双击幂等返回既有窗；claimed 任务 422；不存在 404。"""
-    pid = client.post("/api/projects", json={"name": "任务窗", "track": "assessment",
+    pid = client.post("/api/projects", json={"name": "任务窗", "track": "pentest",
                                              "capabilities": ["web"]}).json()["id"]
-    sess, tid = _task_window_env(client, pid)
+    sess, tid, bound_sid = _task_window_env(client, pid)
+
+    # v0.72 一窗一任务：任务自己的窗还活着 → 双击任务卡幂等挂回原窗
+    r0 = client.post(f"/api/tasks/{tid}/spawn-window")
+    assert r0.status_code == 200 and r0.json() == {"session_id": bound_sid,
+                                                   "created": False}
+    # 原窗已关 → 双击开新复盘窗（角色沿用原认领者/上下文 human_note 注入）
+    assert client.post(f"/api/sessions/{bound_sid}/close").status_code == 200
 
     r = client.post(f"/api/tasks/{tid}/spawn-window")
     assert r.status_code == 200 and r.json()["created"] is True
@@ -140,7 +173,11 @@ def test_spawn_task_window_idempotent_with_context(client):
                      json={"objective": "还在跑", "task_type": "generic",
                            "noise_budget": "passive"})
     tid3 = r3.json()["task_id"]
-    TaskQueue(bb2).claim(tid3, sess2["id"])
+    tq3 = TaskQueue(bb2)
+    bound3 = tq3.get_task(tid3)["target_session"]
+    if bound3:  # v0.72：发布即建待命窗，退绑后手动认领（claimed 422 路径）
+        tq3.unassign_session(bound3)
+    tq3.claim(tid3, sess2["id"])
     assert client.post(f"/api/tasks/{tid3}/spawn-window").status_code == 422
     assert client.post("/api/tasks/task-nope123456/spawn-window").status_code == 404
 
@@ -160,27 +197,110 @@ class _GatedScriptedLLM(ScriptedLLM):
         return super().chat(*args, **kwargs)
 
 
-def test_drain_close_finishes_current_task_then_closes(tmp_path):
-    """优雅关窗全链：任务执行中途 close → draining（不 409）→ 当前任务完整跑完
-    → worker 自关（不再认领后续任务）。"""
+def test_idle_note_triggers_chat_round(tmp_path):
+    """对话化（2026-09-20，翻转 09-19「未武装不 kick」）：空闲窗 note → 端点自动
+    踢 worker 跑对话轮直接回应（agent.chat 事件，无任务认领），**未武装无绑定窗
+    也回对话**；**绑 open 任务的待命窗绝不 kick**（宁严勿松：L0/L1 审批语义，
+    引导滞留收件箱等起跑轮注入）；note 事件带全文；对话轮后任务链照常。"""
     from test_orchestrator import ScriptedLLM as S
+    # 剧本：①② 两条对话轮文本回复（未武装 kick 轮消化「你好」、第二轮消化长引导）
+    # ③④ 后续任务的 complete_task → finish
+    script = [
+        {"text": "你好，我是通用测试员。"},
+        {"text": "收到，我是通用测试员。"},
+        {"tool_use": [S.tool_call("c0", "complete_task", {"result_note": "核查完成"})]},
+        {"tool_use": [S.tool_call("f0", "finish", {"summary": "完成"})]},
+    ]
+    app = create_app(workspace_root=str(tmp_path / "workspaces"), tools_root=None,
+                     executor_llm=ScriptedLLM(script), planner_llm=ScriptedLLM([]),
+                     providers_config=str(tmp_path / "providers.json"))
+    with TestClient(app) as c:
+        pid = c.post("/api/projects", json={"name": "空闲对话", "track": "pentest",
+                                            "capabilities": ["web"]}).json()["id"]
+        c.patch(f"/api/projects/{pid}/config",
+                json={"config": {"autonomy": {"level": "L1"}}})
+        sp = c.post(f"/api/projects/{pid}/agents", json={"role": "_generalist"})
+        sid = sp.json()["id"]
+        bb = c.app.state.projects[pid].bb
+
+        def work_jobs_of(sid_):
+            return [j for j in c.app.state.jobs.all_jobs()
+                    if j["kind"] == "agent-work" and j["meta"].get("session_id") == sid_]
+
+        # 未武装无绑定窗：note → kick 对话轮直接回应（无任务认领）
+        c.post(f"/api/sessions/{sid}/note", json={"text": "你好"})
+        _wait_no_running(c, pid)
+        chat_evs = [e for e in bb.recent_events(pid) if e["kind"] == "agent.chat"]
+        assert chat_evs and "通用测试员" in chat_evs[-1]["payload"]["text"]
+
+        # 第二轮：>80 字长引导（事件 payload.text 须带全文，title 仍截 80 向后兼容）
+        long_text = "介绍下自己，并说明你能查黑板、跑命令、登记发现，举例说明。"
+        long_text = long_text * 3  # 29 字 ×3 > 80
+        c.post(f"/api/sessions/{sid}/note", json={"text": long_text})
+        _wait_no_running(c, pid)
+        chat_evs = [e for e in bb.recent_events(pid) if e["kind"] == "agent.chat"]
+        assert len(chat_evs) == 2
+        notes = [e for e in bb.recent_events(pid) if e["kind"] == "message.inbox"
+                 and (e["payload"] or {}).get("kind") == "human_note"]
+        assert notes and notes[-1]["payload"]["text"] == long_text
+        assert len(notes[-1]["payload"]["title"]) == 80
+
+        # 宁严勿松：绑 open 任务的待命窗（发布即建、未武装）note 不 kick——
+        # 无新 agent-work job，引导滞留收件箱未读
+        r2 = c.post(f"/api/projects/{pid}/tasks",
+                    json={"objective": "侦查目标", "task_type": "generic"})
+        assert r2.json()["kicked"] == []  # v0.72 触发点 D 退役：不 kick 人手窗
+        tid = r2.json()["task_id"]
+        bound_sid = r2.json()["session_id"]
+        before = len(work_jobs_of(bound_sid))
+        assert c.post(f"/api/sessions/{bound_sid}/note",
+                      json={"text": "先别动，等审批"}).status_code == 201
+        assert len(work_jobs_of(bound_sid)) == before
+        inbox = bb.inbox_list(pid, bound_sid, unread_only=True)
+        assert any(r["kind"] == "human_note" for r in inbox)
+
+        # 任务链照常：执行审批批准 → 启动原待命窗认领完成（起跑轮消化滞留引导）
+        items = c.get(f"/api/projects/{pid}/approvals").json()
+        item = next(a for a in items if a["action"].get("task_id") == tid)
+        d = c.post(f"/api/approvals/{item['id']}/decide", json={"decision": "approved"})
+        assert d.status_code == 200 and d.json()["executed"] is True
+        assert d.json()["session_id"] == bound_sid
+        _wait_no_running(c, pid)
+        task = c.get(f"/api/projects/{pid}/tasks").json()[0]
+        assert task["status"] == "done"
+
+
+def test_close_finishes_current_step_then_aborts_and_closes(tmp_path):
+    """关窗=硬中断全链（2026-09-19，排水退役；■ 即点即停后中断不等当前步——
+    LLM 阻塞中 abort 直接放弃等待）：任务执行中途 close → closing（不 409）→
+    任务 fail（人工中断）→ worker 自关（不再认领后续任务），后续任务留在队列。"""
+    from test_orchestrator import ScriptedLLM as S
+    # 两步剧本：第 1 步执行命令（在首个 LLM 调用处阻塞），第 2 步才收尾——
+    # 放行后步边界恰好在任务进行中触发 abort（单步 complete 剧本会直接跑完变 done）
+    script = [
+        {"tool_use": [S.tool_call("c0", "run_cmd",
+                                  {"cmd": "whoami", "runtime": "host",
+                                   "threat_class": "trusted"})]},
+        {"tool_use": [S.tool_call("f0", "finish", {"summary": "完成"})]},
+    ]
     gate = threading.Event()
-    executor = _GatedScriptedLLM(_exec_finish_script(1), gate)
+    executor = _GatedScriptedLLM(script, gate)
     app = create_app(workspace_root=str(tmp_path / "workspaces"), tools_root=None,
                      executor_llm=executor, planner_llm=ScriptedLLM([]),
                      providers_config=str(tmp_path / "providers.json"))
     with TestClient(app) as c:
-        pid = _l2_project(c, "排水关窗")
-        sp = c.post(f"/api/projects/{pid}/agents",
-                    json={"role": "_generalist", "armed": True})
-        sid = sp.json()["id"]
-        _wait_no_running(c, pid)
-        # 任务一（会被 worker 认领并在首个 LLM 调用处阻塞）+ 任务二（排水后不得认领）
+        # 暂停隔离：发布建待命窗但不起跑（本测验证关窗中断语义，任务二须留在自己的待命窗）
+        pid = _l2_project(c, "中断关窗", paused=True)
         r1 = c.post(f"/api/projects/{pid}/tasks",
                     json={"objective": "任务一", "task_type": "generic"})
-        assert r1.json()["kicked"] == [sid]
-        c.post(f"/api/projects/{pid}/tasks",
-               json={"objective": "任务二", "task_type": "generic"})
+        sid = r1.json()["session_id"]
+        assert r1.json()["kicked"] == []
+        r2 = c.post(f"/api/projects/{pid}/tasks",
+                    json={"objective": "任务二", "task_type": "generic"})
+        sid2 = r2.json()["session_id"]
+        # 人工 override 启动任务一的绑定窗（暂停不拦人手动作），阻塞在首个 LLM 调用处
+        w = c.post(f"/api/agents/{sid}/work")
+        assert w.status_code == 200 and w.json().get("job_id")
         # 等 worker 真正认领任务一
         for _ in range(300):
             tasks = {t["objective"]: t for t in c.get(f"/api/projects/{pid}/tasks").json()}
@@ -188,25 +308,28 @@ def test_drain_close_finishes_current_task_then_closes(tmp_path):
                 break
             time.sleep(0.02)
         assert tasks["任务一"]["claimed_by"] == sid
-        # 执行中途关窗 → draining + close_pending
+        # 执行中途关窗 → closing（abort + close_pending）
         r = c.post(f"/api/sessions/{sid}/close")
-        assert r.status_code == 200 and r.json()["status"] == "draining"
-        # 放行执行 → 当前任务完整收尾 → worker 自关
+        assert r.status_code == 200 and r.json()["status"] == "closing"
+        # 放行当前步 → 步边界 abort → 任务 fail（人工中断）→ worker 自关
         gate.set()
         _wait_no_running(c, pid)
         for _ in range(300):
             tasks = {t["objective"]: t for t in c.get(f"/api/projects/{pid}/tasks").json()}
-            if tasks["任务一"]["status"] == "done":
+            if tasks["任务一"]["status"] == "failed":
                 break
             time.sleep(0.02)
-        assert tasks["任务一"]["status"] == "done"
+        assert tasks["任务一"]["status"] == "failed"
+        assert "人工中断" in (tasks["任务一"].get("result_note") or "")
         for _ in range(300):
-            rows = c.get(f"/api/projects/{pid}/sessions").json()
-            if rows[0]["status"] == "closed":
+            rows = {s["id"]: s for s in c.get(f"/api/projects/{pid}/sessions").json()}
+            if rows[sid]["status"] == "closed":
                 break
             time.sleep(0.02)
-        assert rows[0]["status"] == "closed"
-        assert tasks["任务二"]["status"] == "open"  # 排水后不再认领
+        assert rows[sid]["status"] == "closed"
+        # 任务二留在自己的待命窗（暂停不挡建窗、不起跑，中断关窗不影响它）
+        assert tasks["任务二"]["status"] == "open"
+        assert tasks["任务二"]["target_session"] == sid2 != sid
         events = c.app.state.projects[pid].bb.recent_events(pid)
         assert any(e["kind"] == "session.closed" for e in events)
 
@@ -224,7 +347,7 @@ def test_restart_sweep_interrupts_orphan_claims(tmp_path):
                           providers_config=prov)
 
     with TestClient(_app()) as c1:
-        pid = c1.post("/api/projects", json={"name": "重启走查", "track": "assessment",
+        pid = c1.post("/api/projects", json={"name": "重启走查", "track": "pentest",
                                              "capabilities": ["web"]}).json()["id"]
         bb = c1.app.state.projects[pid].bb
         sess = bb.register_session(pid, "旧窗", role="recon")
@@ -236,10 +359,20 @@ def test_restart_sweep_interrupts_orphan_claims(tmp_path):
         sess3 = bb.register_session(pid, "快照窗", role="recon")
         bb.set_session_status(sess3["id"], "running")
         bb.set_session_meta(sess3["id"], {"resume_snapshot": "resume-x.json"})
+        # v0.64：清扫只认「指针+文件」双在场——补真实快照文件
+        (Path(c1.app.state.projects[pid].path) / "snapshots").mkdir(parents=True,
+                                                                    exist_ok=True)
+        (Path(c1.app.state.projects[pid].path) / "snapshots" / "resume-x.json"
+         ).write_text(json.dumps({"messages": [], "task_id": None}),
+                      encoding="utf-8")
         tid = c1.post(f"/api/projects/{pid}/tasks",
                       json={"objective": "重启前任务", "task_type": "generic"}
                       ).json()["task_id"]
-        TaskQueue(bb).claim(tid, sid)
+        tq = TaskQueue(bb)
+        bound = tq.get_task(tid)["target_session"]
+        if bound:  # v0.72：发布已建待命窗，退绑后让「旧窗」持有孤儿认领
+            tq.unassign_session(bound)
+        tq.claim(tid, sid)
 
     # 「重启」：同 workspace 新 app 实例，首开项目触发清扫
     with TestClient(_app()) as c2:

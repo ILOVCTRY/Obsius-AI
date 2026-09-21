@@ -32,6 +32,7 @@
   --status-error: oklch(0.62 0.2 25);       /* 异常=红 */
   --status-idle: oklch(0.6 0.01 260);       /* 空闲=灰 */
   --status-paused: oklch(0.75 0.1 240);     /* 暂停=青蓝（与运行青区分） */
+  --status-ok: oklch(0.72 0.15 155);        /* 正常=绿（2026-09-18 补齐：此前缺失致 bg-(--status-ok) 全部静默透明） */
 }
 
 @theme inline {
@@ -70,5 +71,29 @@
     background: var(--background);
     color: var(--foreground);
     font-family: var(--font-sans);
+  }
+  /* 全局滚动条（2026-09-18）：暗底上默认亮轨白框太扎眼——透明轨道无边框，只留暗色滑块 */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: oklch(0.38 0.006 260) transparent;
+  }
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+    border: none;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: oklch(0.38 0.006 260);
+    border-radius: 4px;
+    border: none;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: oklch(0.48 0.008 260);
+  }
+  ::-webkit-scrollbar-corner {
+    background: transparent;
   }
 }

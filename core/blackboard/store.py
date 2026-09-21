@@ -25,6 +25,48 @@ UNSET = object()
 
 # findings 状态机白名单（研究轨 verified = 人工确认或带日志产物的动态验证）
 FINDING_STATUSES = ("unverified", "verified", "false-positive")
+FINDING_SEVERITIES = ("info", "low", "medium", "high", "critical")
+# C6 发现分两类：vuln=漏洞（可验证的安全问题）/ intel=有效发现·关键发现（信息点、
+# 防误报提示、合规提示、噪声管理等有价值的非漏洞结论）
+FINDING_CATEGORIES = ("vuln", "intel")
+
+
+def _check_vuln_gates(*, category: str, severity: str, status: str,
+                      evidence: dict | None, poc_artifact_id: str | None,
+                      track: str | None = None) -> None:
+    """C6 漏洞门禁（防误报，宁严勿松）：category=vuln 的发现必须满足红线结构化条款，
+    违例 raise ValueError（Agent 回填条款引用改道；人工路径同样拦截）。
+    仅渗透/红队轨生效（track 参数；CTF/研究轨黑板不拦）。
+
+    ① severity=info 全类别拒收（2026-09-18 起，不止 vuln）——渗透/红队轨不再
+       收录 info 级内容（漏洞只收 low..critical，信息提示归 intel 线索且须
+       >=low）；检查在 category 早退之前，拦截 add_finding 的 info→intel 兜底；
+    ② category=vuln 且 severity=info（被①覆盖，防御性保留语义）；
+    ③ status=verified → 必须有 POC（evidence.poc/pocs 或 poc_artifact_id）——
+       红线「无证据不下结论」硬化为门禁；unverified 不拦（待验证是合法初态）。"""
+    if track not in ("pentest", "redteam"):
+        return
+    if severity == "info":
+        # 2026-09-18 起 info 全类别拒收（不止 vuln）：渗透/红队轨不再收录
+        # info 级内容，有漏洞条款的按 low+补证据登记，口径外信息按 intel
+        # 线索登记或不登记（须显式传 severity>=low）。放在 category 早退前，
+        # 才能拦住 add_finding 的 info→intel 兜底路径。
+        raise ValueError(
+            "收录门禁：渗透/红队轨不再收录 severity=info——有评级条款的按 "
+            "low 并补充交互性实证登记，口径外信息（暴露面/合规提示）按 intel "
+            "线索（severity>=low）登记或不登记")
+    if category != "vuln":
+        return
+    if status == "verified":
+        has_poc = bool(poc_artifact_id) or (
+            isinstance(evidence, dict) and (
+                (isinstance(evidence.get("poc"), dict) and evidence["poc"])
+                or (isinstance(evidence.get("pocs"), list) and evidence["pocs"])))
+        if not has_poc:
+            raise ValueError(
+                "漏洞门禁：verified 漏洞必须带 POC（evidence.poc/pocs 或 "
+                "poc_artifact_id）——红线「无证据不下结论」；先稳定复现再登记，"
+                "或先按 unverified/有效发现登记")
 
 # 攻击链状态机：假说 → 验证 → 已利用
 CHAIN_STATUSES = ("hypothesis", "validated", "exploited")
@@ -283,6 +325,25 @@ class Blackboard:
                 raise LookupError(f"项目不存在: {project_id}")
         return self.get_project(project_id)  # type: ignore[return-value]
 
+    def update_project_track(self, project_id: str, track: str,
+                             capabilities: list[str] | None = None) -> dict:
+        """更新 projects 行场景轨（R1 轨退役迁移用）；domain 列同步写 track 值兜底。
+        project.json 由调用方（ProjectStore/迁移脚本）双写；capabilities 省略时不改。
+        不存在抛 LookupError。track 合法性由调用方经 project_binding 保证。"""
+        caps_json = (json.dumps(sorted(capabilities), ensure_ascii=False)
+                     if capabilities is not None else None)
+        set_clause = "track=:track, domain=:track"
+        if caps_json is not None:
+            set_clause += ", capabilities=:caps"
+        with self._tx():
+            cur = self.conn.execute(
+                f"UPDATE projects SET {set_clause} WHERE id=:id",
+                {"id": project_id, "track": track,
+                 **({"caps": caps_json} if caps_json is not None else {})})
+            if cur.rowcount == 0:
+                raise LookupError(f"项目不存在: {project_id}")
+        return self.get_project(project_id)  # type: ignore[return-value]
+
     # ---------- 编排器状态 / 用量记账（v4，DESIGN §6.8） ----------
 
     def usage_state_get(self, project_id: str) -> dict:
@@ -411,20 +472,39 @@ class Blackboard:
             out.append(d)
         return out
 
-    def inbox_drain(self, project_id: str, session_id: str) -> list[dict]:
-        """取出全部未读并标记已读（worker 认领开场白/步边界注入用），原子完成。"""
+    def inbox_drain(self, project_id: str, session_id: str,
+                    exclude_kinds: tuple[str, ...] = (),
+                    only_kinds: tuple[str, ...] = ()) -> list[dict]:
+        """取出全部未读并标记已读（worker 认领开场白/步边界注入/空闲对话轮用），
+        原子完成。
+
+        exclude_kinds（2026-09-19 轮末语义）：指定 kind 的未读私信滞留收件箱
+        不取走——步边界 drain 用它排除 human_note（人类引导延迟到下一轮认领期
+        /恢复期注入，不在任务中途打断思路），其余调用不传参行为不变。
+        only_kinds（2026-09-19 空闲对话轮）：反向过滤，只取指定 kind——对话轮
+        drain 用它只取 human_note（basis_stale/finding_update 留给任务认领注入）。
+        两参互斥，同时传 ValueError。"""
+        if exclude_kinds and only_kinds:
+            raise ValueError("inbox_drain: exclude_kinds 与 only_kinds 互斥")
         ts = now()
+        where = "project_id=? AND to_session=? AND read_at IS NULL"
+        params: list = [project_id, session_id]
+        if exclude_kinds:
+            where += " AND kind NOT IN (" + ",".join("?" * len(exclude_kinds)) + ")"
+            params += list(exclude_kinds)
+        if only_kinds:
+            where += " AND kind IN (" + ",".join("?" * len(only_kinds)) + ")"
+            params += list(only_kinds)
         with self._tx():
             rows = self.conn.execute(
-                "SELECT * FROM session_inbox WHERE project_id=? AND to_session=?"
-                " AND read_at IS NULL ORDER BY created_at",
-                (project_id, session_id),
+                f"SELECT * FROM session_inbox WHERE {where} ORDER BY created_at",
+                params,
             ).fetchall()
             if rows:
                 self.conn.execute(
-                    "UPDATE session_inbox SET read_at=? WHERE project_id=? AND to_session=?"
-                    " AND read_at IS NULL",
-                    (ts, project_id, session_id),
+                    f"UPDATE session_inbox SET read_at=? WHERE {where}"
+                    " AND id IN (" + ",".join("?" * len(rows)) + ")",
+                    [ts, *params, *[r["id"] for r in rows]],
                 )
         out = []
         for r in rows:
@@ -512,12 +592,16 @@ class Blackboard:
         sess["meta"] = _loads(sess.get("meta"), {})
         return sess
 
-    def post_human_note(self, project_id: str, to_session: str, text: str) -> dict | None:
+    def post_human_note(self, project_id: str, to_session: str, text: str,
+                        attachments: list[dict] | None = None) -> dict | None:
         """人类引导私信（E8 人工引导通道）：kind=human_note，作者=human。
 
         ref_id 用唯一 note id（不参与未读去重，连发多条各自投递）；落 message.inbox
         审计事件（作者 human，页签红点/已读全复用）。会话不存在抛 ValueError，
-        已关闭返回 None（不投递）；成功返回 {id, text}。"""
+        已关闭返回 None（不投递）；成功返回 {id, text}。
+        attachments（2026-09-19 附件随发）：[{id,path,name,size}]（API 层已校验
+        artifact 存在且 kind=attachment），随 payload 投递，agent 层 _human_note_notice
+        渲染成 📎 附件行；text 与 attachments 至少一项非空由调用方保证。"""
         row = self.conn.execute(
             "SELECT status FROM sessions WHERE id=?", (to_session,)).fetchone()
         if row is None:
@@ -526,14 +610,70 @@ class Blackboard:
             return None
         note_id = new_id("note")
         if not self.inbox_post(project_id, to_session, "human_note", note_id,
-                               {"text": text}):
+                               {"text": text,
+                                "attachments": list(attachments or [])}):
             return None
         self.append_event(
             project_id, "message.inbox",
             {"to_session": to_session, "kind": "human_note", "ref_id": note_id,
-             "title": text[:80], "by": "human"},
+             "title": text[:80] or (f"📎 附件×{len(attachments or [])}"
+                                    if attachments else ""),
+             "text": text,  # 2026-09-20 对话窗：事件带全文（title 保留向后兼容）
+             "by": "human"},
             session_id=to_session, author="human")
         return {"id": note_id, "kind": "human_note", "text": text}
+
+    def post_agent_message(
+        self, project_id: str, from_session: str, to_session: str,
+        subkind: str, text: str, refs: list[str] | None = None,
+    ) -> dict | None:
+        """Agent 私信（2026-09-20 会话窗对话化，§17 B1 落地）：会话窗之间的知会
+        通道，kind=agent_message 单一收件箱 kind，三分类进 payload.subkind——
+        intel（情报同步：新攻击面/新发现线索）/ handoff（工作移交：谁接手什么）/
+        assist（协助请求：要数据/要复核）。三分类只影响前端样式与统计口径，
+        投递语义一致；后续加分类零迁移。
+
+        仍走黑板/收件箱**异步模型**（DESIGN G 组定稿：不做同步对话接力）——收件
+        方在认领期/步边界/对话轮 drain 注入。from/to 不存在抛 ValueError；to 已
+        关闭返回 None；text 截 4000 字符防事件表膨胀；ref_id 用唯一 msg id（不
+        参与未读去重，连发多条各自投递）。落 message.inbox 审计事件（author=
+        from_session，payload 全文）；成功返回 {id, subkind, text}。"""
+        if subkind not in {"intel", "handoff", "assist"}:
+            raise ValueError(f"未知 agent_message 分类: {subkind}")
+        for sid_ in (from_session, to_session):
+            row = self.conn.execute(
+                "SELECT status FROM sessions WHERE id=?", (sid_,)).fetchone()
+            if row is None:
+                raise ValueError(f"会话不存在: {sid_}")
+        if self.conn.execute(
+                "SELECT status FROM sessions WHERE id=?", (to_session,)
+        ).fetchone()["status"] == "closed":
+            return None
+        msg_id = new_id("msg")
+        payload = {"subkind": subkind, "from": from_session,
+                   "text": (text or "")[:4000], "refs": list(refs or [])}
+        if not self.inbox_post(project_id, to_session, "agent_message",
+                               msg_id, payload):
+            return None
+        self.append_event(
+            project_id, "message.inbox",
+            {"to_session": to_session, "kind": "agent_message", "ref_id": msg_id,
+             **payload, "by": from_session},
+            session_id=to_session, author=from_session)
+        return {"id": msg_id, "kind": "agent_message", **payload}
+
+    def list_active_sessions_by_role(self, project_id: str, role: str) -> list[dict]:
+        """按角色列活跃会话（bb_notify to_role 广播的送达名单）：
+        status != 'closed'，created_at 升序。role 为空串返回空列表（防全量误广播）。"""
+        if not role:
+            return []
+        rows = self.conn.execute(
+            "SELECT id, role, name, status FROM sessions"
+            " WHERE project_id=? AND role=? AND status!='closed'"
+            " ORDER BY created_at",
+            (project_id, role),
+        ).fetchall()
+        return [_row_to_dict(r) or {} for r in rows]
 
     # ---------- 审批（§12 收件箱：创建/决策的唯一 core 入口） ----------
 
@@ -630,18 +770,34 @@ class Blackboard:
     def recent_events(
         self, project_id: str, since_id: int = 0, limit: int = 200,
         session_id: str | None = None,
+        before_id: int | None = None, tail: int = 0,
     ) -> list[dict]:
         """增量拉取：id > since_id，升序。WS 断线重连回放也走这里。
 
+        before_id 非 None：向前翻页——取 id < before_id 的最后 limit 条（升序返回），
+        直播间「上翻加载更早」分页用；tail>0：只取最新 tail 条（升序），直播间首屏
+        增量加载用，不再全量回放历史（2026-09-17）。两者优先于 since_id。
         session_id 非 None 时只取该会话落的事件（会话级复盘取材，F8）。"""
-        sql = "SELECT * FROM events WHERE project_id=? AND id>?"
-        args: list = [project_id, since_id]
+        sql = "SELECT * FROM events WHERE project_id=?"
+        args: list = [project_id]
         if session_id is not None:
             sql += " AND session_id=?"
             args.append(session_id)
-        sql += " ORDER BY id LIMIT ?"
+        desc = False
+        if tail > 0:
+            desc, limit = True, tail
+        elif before_id is not None:
+            sql += " AND id<?"
+            args.append(before_id)
+            desc = True
+        else:
+            sql += " AND id>?"
+            args.append(since_id)
+        sql += f" ORDER BY id {'DESC' if desc else 'ASC'} LIMIT ?"
         args.append(limit)
         rows = self.conn.execute(sql, args).fetchall()
+        if desc:
+            rows = list(reversed(rows))
         out = []
         for r in rows:
             d = _row_to_dict(r)
@@ -655,6 +811,136 @@ class Blackboard:
         row = self.conn.execute(
             "SELECT MAX(id) FROM events WHERE project_id=?", (project_id,)).fetchone()
         return int(row[0] or 0)
+
+    def prune_thinking_deltas(self, project_id: str, stream_id: str) -> int:
+        """思考流式增量行清剪（2026-09-19）：终稿 llm.thinking 落库后删掉同流
+        的 llm.thinking.delta 过渡行——审计只留终稿一条，事件表与流式化之前
+        一样干净；中断/异常路径不调用（残留 delta = 被中断思考的现场审计）。"""
+        with self._tx():
+            cur = self.conn.execute(
+                "DELETE FROM events WHERE project_id=? AND kind='llm.thinking.delta'"
+                " AND json_extract(payload,'$.stream_id')=?",
+                (project_id, stream_id))
+            return cur.rowcount
+
+    def prune_chat_deltas(self, project_id: str, stream_id: str) -> int:
+        """回复流式增量行清剪（2026-09-20 对话窗）：终稿 agent.chat 落库后删掉
+        同流的 agent.chat.delta 过渡行——语义同 prune_thinking_deltas；中断/
+        异常路径不调用（残留 delta = 被中断回复的现场审计）。"""
+        with self._tx():
+            cur = self.conn.execute(
+                "DELETE FROM events WHERE project_id=? AND kind='agent.chat.delta'"
+                " AND json_extract(payload,'$.stream_id')=?",
+                (project_id, stream_id))
+            return cur.rowcount
+
+    # ---------- HTTP 历史（v15，F6：浏览器抓包/重发/爆破统一入库） ----------
+
+    def add_http_history(
+        self, project_id: str, *, source: str, method: str, url: str,
+        session_id: str | None = None, task_id: str | None = None,
+        batch_id: str = "", meta: dict | None = None,
+        status: int | None = None, req_headers: dict | None = None,
+        req_body: str | None = None, resp_headers: dict | None = None,
+        resp_body: str | None = None, resp_mime: str = "",
+        body_truncated: bool = False, is_binary: bool = False,
+        duration_ms: int | None = None,
+    ) -> int:
+        """写入一条 HTTP 交互历史。source：browser（Playwright 拦截）/
+        replay（重发）/ intruder（爆破）。唯一写入口（黑板写红线）；
+        body 截断/二进制归一化由调用方（core/browser/capture.py）完成。"""
+        if source not in ("browser", "replay", "intruder"):
+            raise ValueError(f"非法 http_history source: {source}")
+        with self._tx():
+            cur = self.conn.execute(
+                "INSERT INTO http_history(project_id,session_id,task_id,source,batch_id,"
+                "meta,method,url,status,req_headers,req_body,resp_headers,resp_body,"
+                "resp_mime,body_truncated,is_binary,duration_ms,created_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    project_id, session_id, task_id, source, batch_id,
+                    json.dumps(meta or {}, ensure_ascii=False),
+                    method, url, status,
+                    json.dumps(req_headers or {}, ensure_ascii=False),
+                    req_body,
+                    json.dumps(resp_headers or {}, ensure_ascii=False),
+                    resp_body, resp_mime,
+                    1 if body_truncated else 0,
+                    1 if is_binary else 0,
+                    duration_ms, now(),
+                ),
+            )
+            return int(cur.lastrowid)
+
+    def list_http_history(
+        self, project_id: str, *, since_id: int = 0, limit: int = 100,
+        batch_id: str | None = None, source: str | None = None,
+        session_id: str | None = None,
+    ) -> list[dict]:
+        """增量拉取（id > since_id 升序，同 recent_events 游标模式）。
+        返回行 body 默认截短预览（full=False 语义恒定；全量走 get_http_history）。"""
+        sql = "SELECT * FROM http_history WHERE project_id=?"
+        args: list = [project_id]
+        if since_id > 0:
+            sql += " AND id>?"
+            args.append(since_id)
+        if batch_id is not None:
+            sql += " AND batch_id=?"
+            args.append(batch_id)
+        if source is not None:
+            sql += " AND source=?"
+            args.append(source)
+        if session_id is not None:
+            sql += " AND session_id=?"
+            args.append(session_id)
+        sql += " ORDER BY id ASC LIMIT ?"
+        args.append(limit)
+        out = []
+        for r in self.conn.execute(sql, args).fetchall():
+            d = _row_to_dict(r)
+            assert d is not None
+            d["meta"] = _loads(d["meta"], {})
+            d["req_headers"] = _loads(d["req_headers"], {})
+            d["resp_headers"] = _loads(d["resp_headers"], {})
+            d["req_body"] = (d["req_body"] or "")[:200]
+            d["resp_body"] = (d["resp_body"] or "")[:200]
+            d["body_truncated"] = bool(d["body_truncated"])
+            d["is_binary"] = bool(d["is_binary"])
+            out.append(d)
+        return out
+
+    def get_http_history(self, project_id: str, row_id: int) -> dict | None:
+        """单条全量（body 不截短；跨项目 id 一律 None 防 id 越权拉取）。"""
+        r = self.conn.execute(
+            "SELECT * FROM http_history WHERE id=? AND project_id=?",
+            (row_id, project_id)).fetchone()
+        if r is None:
+            return None
+        d = _row_to_dict(r)
+        assert d is not None
+        d["meta"] = _loads(d["meta"], {})
+        d["req_headers"] = _loads(d["req_headers"], {})
+        d["resp_headers"] = _loads(d["resp_headers"], {})
+        d["body_truncated"] = bool(d["body_truncated"])
+        d["is_binary"] = bool(d["is_binary"])
+        return d
+
+    def clear_http_history(
+        self, project_id: str, *, batch_id: str | None = None,
+        before_id: int | None = None,
+    ) -> int:
+        """清空/按批清/清 id<before_id 的旧行，返回删除行数。"""
+        sql = "DELETE FROM http_history WHERE project_id=?"
+        args: list = [project_id]
+        if batch_id is not None:
+            sql += " AND batch_id=?"
+            args.append(batch_id)
+        if before_id is not None:
+            sql += " AND id<?"
+            args.append(before_id)
+        with self._tx():
+            cur = self.conn.execute(sql, args)
+            return cur.rowcount
 
     # ---------- 资产 ----------
 
@@ -755,7 +1041,7 @@ class Blackboard:
                 raise ValueError(f"资产不存在: {asset_id}")
             merged = {**_loads(row["meta"], {}), **patch}
             self.conn.execute(
-                "UPDATE assets SET meta=? WHERE id=?",
+                "UPDATE assets SET meta=?, revision=revision+1 WHERE id=?",
                 (json.dumps(merged, ensure_ascii=False), asset_id))
         return self.get_asset(asset_id)  # type: ignore[return-value]
 
@@ -792,7 +1078,8 @@ class Blackboard:
         return {"id": asset_id, **snapshot}
 
     def list_assets(self, project_id: str, type_: str | None = None,
-                    status: str | None = None) -> list[dict]:
+                    status: str | None = None, tag: str | None = None) -> list[dict]:
+        """tag 过滤（编排器态势增强）：meta.tags 数组包含该标签的资产（大小写不敏感）。"""
         sql = "SELECT * FROM assets WHERE project_id=?"
         params: list[Any] = [project_id]
         if type_:
@@ -806,32 +1093,66 @@ class Blackboard:
         for r in self.conn.execute(sql, params):
             d = _row_to_dict(r) or {}
             d["meta"] = _loads(d.get("meta"), {})  # meta 列是 JSON 文本，读出解析回 dict
+            if tag is not None:
+                tags = [str(t).strip().lower()
+                        for t in (d["meta"].get("tags") or []) if str(t).strip()]
+                if tag.strip().lower() not in tags:
+                    continue
             out.append(d)
         return out
 
-    def set_asset_status(self, asset_id: str, status: str, note: str | None = None,
-                         author: str = "system") -> dict:
-        """资产扫描/测试状态机（E7，§5.2）：复活 assets.status 死列。
+    def latest_digest(self, project_id: str) -> dict | None:
+        """最新一份 project.digest（编排器态势常驻注入用）；无则 None。"""
+        row = self.conn.execute(
+            "SELECT id, payload, created_at FROM events "
+            "WHERE project_id=? AND kind='project.digest' "
+            "ORDER BY id DESC LIMIT 1", (project_id,)).fetchone()
+        if row is None:
+            return None
+        try:
+            payload = _loads(row["payload"], {})
+        except Exception:  # noqa: BLE001
+            payload = {}
+        return {"event_id": row["id"], "digest": str(payload.get("digest") or ""),
+                "created_at": row["created_at"]}
 
-        白名单四态 open/visited/scanning/tested_clean，非法值抛 ValueError；
-        **tested_clean 必带 note**（测了什么/怎么测，服务端强制——防 AI 虚标干净）；
-        同状态重复流转是 no-op；每次实际流转落 asset.status_changed 审计事件。
+    def set_asset_status(self, asset_id: str, status: str, note: str | None = None,
+                         author: str = "system",
+                         expected_revision: int | None = None) -> dict:
+        """资产扫描/测试状态机（E7，§5.2；2026-09-19 扩六态）：复活 assets.status 死列。
+
+        白名单六态 open/visited/scanning/tested_clean/budget_stop/na（借鉴 dsh
+        AttackAtlas 覆盖四态），非法值抛 ValueError；
+        **tested_clean/budget_stop/na 必带 note**（服务端强制——测了什么/为什么停/
+        为什么不适用，防 AI 虚标干净）；
+        同状态重复流转是 no-op（不 bump revision）；每次实际流转落 asset.status_changed
+        审计事件。expected_revision（H2 乐观锁）：非空时与行 revision 比对，不符抛
+        ValueError（多窗并发改同一资产防丢失更新——冲突方重新读取后再改）。
         「有发现」不由 AI 标：verified findings 由前端反查显徽章，结论以 findings 为准。
         资产不存在抛 LookupError（→API 404）。
         """
-        if status not in ("open", "visited", "scanning", "tested_clean"):
-            raise ValueError(f"非法资产状态: {status}（open/visited/scanning/tested_clean）")
-        if status == "tested_clean" and not (note and note.strip()):
-            raise ValueError("tested_clean 必须附 note（测了什么/怎么测）")
+        if status not in ("open", "visited", "scanning", "tested_clean",
+                          "budget_stop", "na"):
+            raise ValueError(
+                f"非法资产状态: {status}（open/visited/scanning/tested_clean/budget_stop/na）")
+        if status in ("tested_clean", "budget_stop", "na") and not (note and note.strip()):
+            raise ValueError(f"{status} 必须附 note（测了什么/为什么停/为什么不适用）")
         with self._tx():
             row = self.conn.execute(
-                "SELECT project_id, status FROM assets WHERE id=?", (asset_id,)).fetchone()
+                "SELECT project_id, status, revision FROM assets WHERE id=?",
+                (asset_id,)).fetchone()
             if row is None:
                 raise LookupError(f"资产不存在: {asset_id}")
+            if expected_revision is not None and \
+                    int(row["revision"] or 1) != int(expected_revision):
+                raise ValueError(
+                    f"乐观锁冲突：资产已被他人修改（当前 revision={row['revision']}，"
+                    f"请求基于 {expected_revision}）——请重新读取后再改")
             if row["status"] == status:
                 return self.get_asset(asset_id)  # type: ignore[return-value]
             self.conn.execute(
-                "UPDATE assets SET status=? WHERE id=?", (status, asset_id))
+                "UPDATE assets SET status=?, revision=revision+1 WHERE id=?",
+                (status, asset_id))
         self.append_event(
             row["project_id"], "asset.status_changed",
             {"asset_id": asset_id, "old": row["status"], "new": status,
@@ -861,13 +1182,16 @@ class Blackboard:
         description: str = "",
         sha256: str = "",
         author: str = "system",
+        meta: dict | None = None,
     ) -> str:
+        import json as _json
         artifact_id = new_id("art")
         with self._tx():
             self.conn.execute(
-                "INSERT INTO artifacts(id,project_id,path,kind,description,sha256,author,created_at)"
-                " VALUES(?,?,?,?,?,?,?,?)",
-                (artifact_id, project_id, path, kind, description, sha256, author, now()),
+                "INSERT INTO artifacts(id,project_id,path,kind,description,sha256,author,meta,created_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?)",
+                (artifact_id, project_id, path, kind, description, sha256, author,
+                 _json.dumps(meta or {}, ensure_ascii=False), now()),
             )
         return artifact_id
 
@@ -879,12 +1203,39 @@ class Blackboard:
         ).fetchone()
         return _row_to_dict(row)
 
-    def list_artifacts(self, project_id: str) -> list[dict]:
+    def find_artifact_by_sha(self, project_id: str, sha256: str,
+                             kind: str) -> dict | None:
+        """按内容指纹取产物（附件上传去重用，2026-09-19）：同项目同 kind 同
+        sha256 的最早一行；不存在返回 None。"""
+        row = self.conn.execute(
+            "SELECT * FROM artifacts WHERE project_id=? AND kind=? AND sha256=?"
+            " ORDER BY created_at, id LIMIT 1",
+            (project_id, kind, sha256),
+        ).fetchone()
+        return _row_to_dict(row)
+
+    def list_artifacts(self, project_id: str, *, task_id: str | None = None,
+                       session_id: str | None = None) -> list[dict]:
+        """产物清单（工作区隔离 W3）：可按归属元数据过滤（meta JSON 列，v10）。"""
         rows = self.conn.execute(
             "SELECT * FROM artifacts WHERE project_id=? ORDER BY created_at DESC",
             (project_id,),
         ).fetchall()
-        return [_row_to_dict(r) or {} for r in rows]
+        import json as _json
+        out: list[dict] = []
+        for r in rows:
+            d = _row_to_dict(r) or {}
+            if task_id is not None or session_id is not None:
+                try:
+                    meta = _json.loads(d.get("meta") or "{}")
+                except (ValueError, TypeError):
+                    meta = {}
+                if task_id is not None and meta.get("task_id") != task_id:
+                    continue
+                if session_id is not None and meta.get("session_id") != session_id:
+                    continue
+            out.append(d)
+        return out
 
     # ---------- 发现（findings，指纹去重合并） ----------
 
@@ -901,14 +1252,38 @@ class Blackboard:
         confidence: float = 0.5,
         dedup_key: str | None = None,
         author: str = "system",
+        rating_basis: str = "",
+        category: str | None = None,
+        track: str | None = None,
     ) -> dict:
         """重复发现（同 target+vuln_class+dedup_key）走证据并集（§5.3）：
 
         - evidence 列表键去重追加、notes 分段追加、其余键空缺补入（merge_finding_evidence）；
         - severity 就高、status 不因新报告降级（新报 verified 可升级）、confidence 取最大、
           poc_artifact_id 缺者回填；updated_at 刷新。
-        返回 {"id":..., "merged": bool}。merged=True 表示命中既有记录。
+        - rating_basis（F11 判级依据）随 severity 就高覆盖：新报级别更高 → 取新报
+          （空=清空，basis 必须证成当前 severity）；不高于旧级 → 保留旧值。
+        - category（C6 分两类，全手动选）：vuln=漏洞 / intel=有效发现·关键发现；
+          未传兜底 vuln；合并分支保留既有 category（同类发现不因重报换类）。
+        - track（C6 漏洞门禁）：pentest/redteam 轨过漏洞门禁（vuln+info 拒、
+          verified 无 POC 拒）；CTF/研究轨不拦。
+        返回 {"id":..., "merged": bool, "rating_basis":..., "category":...}。
+        merged=True 表示命中既有记录。
         """
+        # F11 severity 白名单硬化：strip+lower 归一容错后必须命中五档（add 与 patch 同规）
+        severity = str(severity).strip().lower()
+        if severity not in FINDING_SEVERITIES:
+            raise ValueError(f"非法 severity: {severity}（允许 {FINDING_SEVERITIES}）")
+        # C6 category（全手动选）：显式传参生效；未传时按 severity 兜底——
+        # info 本就不能是漏洞（门禁①），归 intel 才能让默认登记畅通
+        if category is None:
+            category = "intel" if severity == "info" else "vuln"
+        if category not in FINDING_CATEGORIES:
+            raise ValueError(f"非法 category: {category}（允许 {FINDING_CATEGORIES}）")
+        # C6 漏洞门禁（仅渗透/红队轨）：vuln+info 拒、vuln+verified 无 POC 拒（宁严勿松）
+        _check_vuln_gates(category=category, severity=severity, status=status,
+                          evidence=evidence, poc_artifact_id=poc_artifact_id,
+                          track=track)
         # rev 发现的类别在 evidence.category（五类），vuln_class 可空；
         # 无任何去重键时不做合并（否则空 key 的发现会全并成一条）。
         key = dedup_key or vuln_class or None
@@ -943,8 +1318,11 @@ class Blackboard:
                     len(old_ev.get("relates_to") or []) if isinstance(old_ev, dict) else 0)
                 merged_ev = merge_finding_evidence(old_ev, evidence or {})
                 new_severity = row["severity"]
+                # F11：basis 随 severity 就高覆盖（新报更高=取新报含空清空；否则保留旧值）
+                new_basis = row["rating_basis"]
                 if SEVERITY_RANK.get(severity, 0) > SEVERITY_RANK.get(new_severity, 0):
                     new_severity = severity
+                    new_basis = rating_basis
                 new_status = row["status"]
                 if status == "verified":
                     new_status = "verified"
@@ -960,12 +1338,14 @@ class Blackboard:
                 if len(merged_ev.get("relates_to") or []) > old_rel_n:
                     update_changes.append("新增关联发现")
                 self.conn.execute(
-                    "UPDATE findings SET evidence=?, severity=?, status=?, poc_artifact_id=?,"
-                    " confidence=MAX(confidence,?), updated_at=? WHERE id=?",
-                    (json.dumps(merged_ev, ensure_ascii=False), new_severity, new_status,
-                     new_poc, confidence, created, row["id"]),
+                    "UPDATE findings SET evidence=?, severity=?, rating_basis=?, status=?,"
+                    " poc_artifact_id=?, confidence=MAX(confidence,?), updated_at=?,"
+                    " revision=revision+1 WHERE id=?",
+                    (json.dumps(merged_ev, ensure_ascii=False), new_severity, new_basis,
+                     new_status, new_poc, confidence, created, row["id"]),
                 )
                 finding_id, merged = row["id"], True
+                category = row["category"]  # C6：合并保留既有分类（同类发现不因重报换类）
             else:
                 finding_id = new_id("find")
                 merged = False
@@ -973,8 +1353,8 @@ class Blackboard:
                     key = finding_id
                 self.conn.execute(
                     "INSERT INTO findings(id,project_id,target_asset_id,vuln_class,title,"
-                    "severity,status,evidence,poc_artifact_id,confidence,dedup_key,author,"
-                    "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "severity,rating_basis,status,category,evidence,poc_artifact_id,confidence,"
+                    "dedup_key,author,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         finding_id,
                         project_id,
@@ -982,7 +1362,9 @@ class Blackboard:
                         vuln_class,
                         title,
                         severity,
+                        rating_basis,
                         status,
+                        category,
                         json.dumps(evidence or {}, ensure_ascii=False),
                         poc_artifact_id,
                         confidence,
@@ -992,17 +1374,21 @@ class Blackboard:
                         created,
                     ),
                 )
+                new_basis = rating_basis
+                new_severity = severity  # 生效级（合并分支已算就高值；首报=本报归一值）
         self.append_event(
             project_id,
             "finding.new" if not merged else "finding.merged",
-            {"finding_id": finding_id, "vuln_class": vuln_class, "severity": severity},
+            {"finding_id": finding_id, "vuln_class": vuln_class, "severity": new_severity,
+             "rating_basis": new_basis, "category": category},
             author=author,
             # Agent 产出的 finding 才有会话归属（author=会话 id）；人工/系统写入不标
             session_id=author if isinstance(author, str) and author.startswith("sess-") else None,
         )
         if merged and update_changes:  # 首次创建不通知；纯重复上报无变化不通知
             self._notify_finding_updates(project_id, finding_id, update_changes, author)
-        return {"id": finding_id, "merged": merged}
+        return {"id": finding_id, "merged": merged, "severity": new_severity,
+                "rating_basis": new_basis, "category": category}
 
     def list_findings(
         self,
@@ -1010,6 +1396,7 @@ class Blackboard:
         target_asset_id: str | None = None,
         min_severity: str | None = None,
         verified_only: bool = False,
+        category: str | None = None,
     ) -> list[dict]:
         severity_rank = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
         sql = "SELECT * FROM findings WHERE project_id=?"
@@ -1024,6 +1411,9 @@ class Blackboard:
             params.extend(above)
         if verified_only:
             sql += " AND status='verified'"
+        if category:  # C6 分两类过滤：vuln=漏洞 / intel=有效发现·关键发现
+            sql += " AND category=?"
+            params.append(category)
         sql += " ORDER BY created_at"
         out = []
         for r in self.conn.execute(sql, params):
@@ -1050,10 +1440,23 @@ class Blackboard:
         *,
         status: str | None = None,
         evidence: dict | None = None,
+        title: str | None = None,
+        severity: str | None = None,
+        vuln_class: str | None = None,
+        rating_basis: str | None = None,
+        category: str | None = None,
+        track: str | None = None,
         author: str = "human",
+        expected_revision: int | None = None,
     ) -> dict | None:
         """人类修订发现：status 走白名单（非法 ValueError），evidence 浅层 merge。
-        发 finding.updated；不存在返回 None；无字段可改时原样返回。
+        F10（§6.5 人工修订）：title 非空 / severity 五档白名单（strip+lower 归一容错）/
+        vuln_class 自由文本可空；F11：rating_basis None=不动、空串=清空——**纯字段编辑零打扰**（不触发撤回传播与 finding_update
+        私信，update_changes 只认 pocs/relates 增长与 verified 升级）。
+        dedup_key 不重算（定稿）：指纹=创建时刻语义；改类别后同主题新发现仍并入旧指纹条目。
+        expected_revision（H2 乐观锁）：非空时与行 revision 比对，不符抛 ValueError
+        （多窗并发改同一发现防丢失更新——冲突方重新读取后再改）。
+        发 finding.updated（新字段进 changed）；不存在返回 None；无字段可改时原样返回。
 
         read-modify-write 整体在单个 _tx() 内（A2：消除锁外读→锁内写的丢失更新）。"""
         changed: list[str] = []
@@ -1068,6 +1471,11 @@ class Blackboard:
             ).fetchone()
             if row is None:
                 return None
+            if expected_revision is not None and \
+                    int(row["revision"] or 1) != int(expected_revision):
+                raise ValueError(
+                    f"乐观锁冲突：发现已被他人修改（当前 revision={row['revision']}，"
+                    f"请求基于 {expected_revision}）——请重新读取后再改")
             old_status = row["status"]
             old_ev = _loads(row["evidence"], {})
             old_poc_n = len(old_ev.get("pocs") or []) if isinstance(old_ev, dict) else 0
@@ -1096,8 +1504,64 @@ class Blackboard:
                     update_changes.append("新增 POC")
                 if len(merged.get("relates_to") or []) > old_rel_n:
                     update_changes.append("新增关联发现")
+            if title is not None:  # F10 人工修订：strip 后非空（空标题→直接删除该发现）
+                t = str(title).strip()
+                if not t:
+                    raise ValueError("title 不能为空（空标题请直接删除该发现）")
+                sets.append("title=?")
+                params.append(t)
+                changed.append("title")
+            if severity is not None:
+                s = str(severity).strip().lower()  # 归一容错
+                if s not in FINDING_SEVERITIES:
+                    raise ValueError(f"非法 severity: {severity}（允许 {FINDING_SEVERITIES}）")
+                sets.append("severity=?")
+                params.append(s)
+                changed.append("severity")
+            if vuln_class is not None:  # 自由文本可空（rev 轨发现 vuln_class='' 合法）
+                sets.append("vuln_class=?")
+                params.append(str(vuln_class).strip())
+                changed.append("vuln_class")
+            if rating_basis is not None:  # F11：None=不动，空串=清空（basis 必须证成当前 severity）
+                sets.append("rating_basis=?")
+                params.append(str(rating_basis).strip())
+                changed.append("rating_basis")
+            if category is not None:  # C6 分两类：vuln=漏洞 / intel=有效发现·关键发现
+                c = str(category).strip().lower()
+                if c not in FINDING_CATEGORIES:
+                    raise ValueError(f"非法 category: {category}（允许 {FINDING_CATEGORIES}）")
+                sets.append("category=?")
+                params.append(c)
+                changed.append("category")
+            # C6 漏洞门禁（渗透/红队轨）：
+            # ① 显式把 severity 改成 info → 拒（2026-09-18 起 info 全类别停收；
+            #    只拦显式传 severity——纯标题/备注变更不受影响）
+            # ② 分类/严重度变更后 vuln 不可为 info（漏洞只收 low~critical）
+            # ③ 改判 verified → 必须有 POC（红线：无证据不下结论）
+            # FP 出口（status=FP）不受门禁影响（误报是合法出口）；纯标题/备注变更放行
+            if track in ("pentest", "redteam"):
+                if severity is not None and str(severity).strip().lower() == "info":
+                    raise ValueError(
+                        "收录门禁：渗透/红队轨不再收录 severity=info——口径外信息"
+                        "（暴露面/合规提示）请删除或保留 intel 线索原级别")
+                eff_cat = category if category is not None else (row["category"] or "vuln")
+                eff_sev = severity if severity is not None else row["severity"]
+                if (category is not None or severity is not None) \
+                        and eff_cat == "vuln" and eff_sev == "info":
+                    raise ValueError(
+                        "漏洞门禁：severity=info 不能登记为漏洞（info 是信息提示）——"
+                        "按「有效发现 intel」登记，或补充证据后提升严重度")
+                if status is not None and status == "verified":
+                    eff_ev = merged if evidence is not None else old_ev
+                    has_poc = bool(row["poc_artifact_id"]) or (
+                        isinstance(eff_ev.get("poc"), dict) and eff_ev["poc"])
+                    if not has_poc:
+                        raise ValueError(
+                            "漏洞门禁：verified 漏洞必须带 POC——红线「无证据不下结论」；"
+                            "先稳定复现再登记，或先按 unverified/有效发现登记")
             if sets:
                 sets.append("updated_at=?")
+                sets.append("revision=revision+1")
                 params.extend([now(), finding_id])
                 self.conn.execute(
                     f"UPDATE findings SET {', '.join(sets)} WHERE id=?", params)
@@ -1701,3 +2165,219 @@ class Blackboard:
         ).fetchall()
         d["links"] = [_row_to_dict(l) or {} for l in links]
         return d
+
+    # ---------- 蓝图（R4 逆向开发管线，DESIGN §9 R4） ----------
+
+    # 蓝图状态流转白名单：只进不退；draft→reviewed→ready 三步是人类/审批职责
+    # （Agent 工具不暴露 status 入口），ready→building→built 由重建侧驱动。
+    BLUEPRINT_STATUSES = ("draft", "reviewed", "ready", "building", "built")
+    BLUEPRINT_TRANSITIONS = {
+        "draft": {"reviewed"},
+        "reviewed": {"ready"},
+        "ready": {"building"},
+        "building": {"built"},
+        "built": set(),
+    }
+    # 模块状态：pending 划分产出 → analyzed 深析完成 → specd 接口 spec 钉死 →
+    # tested 容器自测通过（自测不过不得标 tested，纪律进 redlines）
+    BLUEPRINT_MODULE_STATUSES = ("pending", "analyzed", "specd", "tested")
+
+    @staticmethod
+    def _normalize_modules(modules: Any) -> list[dict]:
+        """modules JSON 归一化：必须是对象数组，每项有非空 name；未知字段丢弃、
+        缺省补齐。供 create/modules_set/模块 patch 共用。"""
+        if not isinstance(modules, list):
+            raise ValueError("modules 必须是数组（每项含非空 name）")
+        out: list[dict] = []
+        seen: set[str] = set()
+        for m in modules:
+            if not isinstance(m, dict) or not str(m.get("name", "")).strip():
+                raise ValueError("modules 每项必须是含非空 name 的对象")
+            name = str(m["name"]).strip()
+            if name in seen:
+                raise ValueError(f"模块名重复: {name}")
+            seen.add(name)
+            addrs = m.get("func_addresses", [])
+            if not isinstance(addrs, list):
+                raise ValueError(f"模块 {name} 的 func_addresses 必须是数组")
+            out.append({
+                "name": name,
+                "desc": str(m.get("desc", "")),
+                "func_addresses": [str(a) for a in addrs],
+                "spec": str(m.get("spec", "")),
+                "notes": str(m.get("notes", "")),
+                "status": m.get("status", "pending"),
+            })
+            if out[-1]["status"] not in Blackboard.BLUEPRINT_MODULE_STATUSES:
+                raise ValueError(
+                    f"模块 {name} 非法状态: {out[-1]['status']}，"
+                    f"允许: {list(Blackboard.BLUEPRINT_MODULE_STATUSES)}")
+        return out
+
+    def _owned_blueprint(self, project_id: str, bp_id: str) -> sqlite3.Row | None:
+        """蓝图归属校验：跨项目访问等同不存在。"""
+        return self.conn.execute(
+            "SELECT * FROM blueprints WHERE id=? AND project_id=?", (bp_id, project_id)
+        ).fetchone()
+
+    @staticmethod
+    def _bp_row_to_dict(row: sqlite3.Row | None) -> dict | None:
+        d = _row_to_dict(row)
+        if d is not None:
+            d["modules"] = _loads(d.get("modules", "[]"), [])
+        return d
+
+    def create_blueprint(
+        self, project_id: str, name: str, goal: str = "",
+        binary_sha256: str = "", modules: Any = None,
+        content_md: str = "", author: str = "human",
+    ) -> dict:
+        name = str(name).strip()
+        if not name:
+            raise ValueError("蓝图 name 不能为空")
+        mods = self._normalize_modules(modules if modules is not None else [])
+        bp_id = new_id("bp")
+        with self._tx():
+            try:
+                self.conn.execute(
+                    "INSERT INTO blueprints(id,project_id,binary_sha256,name,goal,"
+                    "status,content_md,modules,created_at,updated_at)"
+                    " VALUES(?,?,?,?,?,'draft',?,?,?,?)",
+                    (bp_id, project_id, str(binary_sha256), name, goal,
+                     content_md, json.dumps(mods, ensure_ascii=False), now(), now()),
+                )
+            except sqlite3.IntegrityError as e:
+                raise ValueError(
+                    f"同项目同样本下蓝图重名: {name}（换名或复用既有蓝图）") from e
+        self.append_event(
+            project_id, "blueprint.created",
+            {"blueprint_id": bp_id, "name": name, "goal": goal,
+             "binary_sha256": binary_sha256, "modules": len(mods), "status": "draft"},
+            author=author,
+        )
+        d = self.get_blueprint(project_id, bp_id)
+        assert d is not None
+        return d
+
+    def get_blueprint(self, project_id: str, bp_id: str) -> dict | None:
+        row = self._owned_blueprint(project_id, bp_id)
+        return self._bp_row_to_dict(row)
+
+    def list_blueprints(self, project_id: str) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM blueprints WHERE project_id=? ORDER BY updated_at DESC",
+            (project_id,),
+        ).fetchall()
+        return [self._bp_row_to_dict(r) or {} for r in rows]
+
+    def update_blueprint_content(
+        self, project_id: str, bp_id: str, *,
+        content_md: Any = UNSET, content_append: Any = UNSET,
+        goal: Any = UNSET, name: Any = UNSET,
+        modules_set: Any = UNSET, author: str = "human",
+    ) -> dict | None:
+        """蓝图分区更新。content_append=追加正文（深析/汇总增量写）；content_md=整体
+        替换；modules_set=整表替换模块（重划分）。Agent 侧经 tools 调本方法——
+        status 不在此处（走 set_blueprint_status，Agent 无入口）。"""
+        row = self._owned_blueprint(project_id, bp_id)
+        if row is None:
+            return None
+        sets, args, changed = [], [], {}
+        if name is not UNSET:
+            if not str(name).strip():
+                raise ValueError("蓝图 name 不能为空")
+            sets.append("name=?"); args.append(str(name).strip()); changed["name"] = str(name).strip()
+        if goal is not UNSET:
+            sets.append("goal=?"); args.append(str(goal)); changed["goal"] = str(goal)
+        if content_md is not UNSET:
+            sets.append("content_md=?"); args.append(str(content_md)); changed["content_md"] = True
+        if content_append is not UNSET and str(content_append):
+            sets.append("content_md=?")
+            args.append(str(row["content_md"]) + str(content_append))
+            changed["content_appended_chars"] = len(str(content_append))
+        if modules_set is not UNSET:
+            mods = self._normalize_modules(modules_set)
+            sets.append("modules=?")
+            args.append(json.dumps(mods, ensure_ascii=False))
+            changed["modules"] = len(mods)
+        if not sets:
+            return self._bp_row_to_dict(row)
+        sets.append("updated_at=?"); args.append(now()); args.append(bp_id)
+        with self._tx():
+            self.conn.execute(
+                f"UPDATE blueprints SET {', '.join(sets)} WHERE id=?", args)
+        self.append_event(
+            project_id, "blueprint.updated", {"blueprint_id": bp_id, **changed},
+            author=author,
+        )
+        return self.get_blueprint(project_id, bp_id)
+
+    def update_blueprint_module(
+        self, project_id: str, bp_id: str, module_name: str, *,
+        desc: Any = UNSET, spec: Any = UNSET, notes: Any = UNSET,
+        func_addresses: Any = UNSET, status: Any = UNSET,
+        author: str = "human",
+    ) -> dict | None:
+        """模块级 set（事务内读改写整个 modules JSON）：深析 agent 写回
+        spec/notes/status 的单一入口。模块不存在抛 LookupError（API 404）。"""
+        row = self._owned_blueprint(project_id, bp_id)
+        if row is None:
+            return None
+        mods = _loads(row["modules"], [])
+        target = next((m for m in mods if m.get("name") == module_name), None)
+        if target is None:
+            raise LookupError(f"模块不存在: {module_name}（现有: "
+                              f"{[m.get('name') for m in mods]}）")
+        changed: dict[str, Any] = {"module": module_name}
+        if desc is not UNSET:
+            target["desc"] = str(desc); changed["desc"] = True
+        if spec is not UNSET:
+            target["spec"] = str(spec); changed["spec"] = True
+        if notes is not UNSET:
+            target["notes"] = str(notes); changed["notes"] = True
+        if func_addresses is not UNSET:
+            if not isinstance(func_addresses, list):
+                raise ValueError("func_addresses 必须是数组")
+            target["func_addresses"] = [str(a) for a in func_addresses]
+            changed["func_addresses"] = len(target["func_addresses"])
+        if status is not UNSET:
+            if status not in self.BLUEPRINT_MODULE_STATUSES:
+                raise ValueError(
+                    f"模块非法状态: {status}，允许: {list(self.BLUEPRINT_MODULE_STATUSES)}")
+            target["status"] = status; changed["module_status"] = status
+        with self._tx():
+            self.conn.execute(
+                "UPDATE blueprints SET modules=?, updated_at=? WHERE id=?",
+                (json.dumps(mods, ensure_ascii=False), now(), bp_id))
+        self.append_event(
+            project_id, "blueprint.updated", {"blueprint_id": bp_id, **changed},
+            author=author,
+        )
+        return self.get_blueprint(project_id, bp_id)
+
+    def set_blueprint_status(
+        self, project_id: str, bp_id: str, status: str, author: str = "human",
+    ) -> dict | None:
+        """状态流转（白名单校验，只进不退）。Agent 工具不暴露本入口——
+        draft→reviewed→ready 是人类/审批职责；API 层 author='human'。"""
+        row = self._owned_blueprint(project_id, bp_id)
+        if row is None:
+            return None
+        if status not in self.BLUEPRINT_STATUSES:
+            raise ValueError(
+                f"非法蓝图状态: {status}，允许: {list(self.BLUEPRINT_STATUSES)}")
+        cur = row["status"]
+        if status != cur and status not in self.BLUEPRINT_TRANSITIONS[cur]:
+            raise ValueError(
+                f"蓝图状态不可从 {cur} 流转到 {status}（白名单: "
+                f"{sorted(self.BLUEPRINT_TRANSITIONS[cur]) or '无——已终态'}）")
+        with self._tx():
+            self.conn.execute(
+                "UPDATE blueprints SET status=?, updated_at=? WHERE id=?",
+                (status, now(), bp_id))
+        self.append_event(
+            project_id, "blueprint.status_changed",
+            {"blueprint_id": bp_id, "name": row["name"], "from": cur, "to": status},
+            author=author,
+        )
+        return self.get_blueprint(project_id, bp_id)

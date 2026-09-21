@@ -3,7 +3,20 @@ import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 
 // 只读 Markdown 渲染（深色黑客风）。标题带 slug id 供大纲 scrollIntoView；
-// idPrefix 防同页技能正文与 kb 文档撞 id。链接限本机/相对，原样新开页签。
+// idPrefix 防同页技能正文与 kb 文档撞 id。链接分三路（2026-09-19）：#锚点=页内
+// scrollIntoView（原实现一律 target=_blank，点目录会新开首页页签）；.md 相对链接
+// =解析相对当前文档路径后经 onOpenKb 打开该 kb 文件；其余（http/https）才新开页签。
+
+/** 解析 md 相对链接为源内 posix 路径（剥 #锚点，. / .. 逐段归一） */
+export function resolveKbRel(currentPath: string, href: string): string {
+  const segs = currentPath.split("/").slice(0, -1)
+  for (const seg of decodeURIComponent(href.split("#")[0]).split("/")) {
+    if (seg === "." || seg === "") continue
+    if (seg === "..") segs.pop()
+    else segs.push(seg)
+  }
+  return segs.join("/")
+}
 
 export function slugify(text: string): string {
   return text.toLowerCase()
@@ -57,8 +70,12 @@ export function headingId(prefix: string, slug: string): string {
 }
 
 export const MarkdownView = memo(function MarkdownView(
-  { content, prefix = "doc", className }:
-  { content: string; prefix?: string; className?: string },
+  { content, prefix = "doc", className, currentPath, onOpenKb }:
+  { content: string; prefix?: string; className?: string;
+    /** 当前文档源内路径（.md 相对链接解析基准，kb 预览传入） */
+    currentPath?: string
+    /** 相对 .md 链接点击时打开目标 kb 文件（不传则退化为新开页签） */
+    onOpenKb?: (path: string) => void },
 ) {
   return (
     <div className={className ?? "text-[13px] text-foreground/90"}>
@@ -81,9 +98,34 @@ export const MarkdownView = memo(function MarkdownView(
           ul: ({ children }) => <ul className={CLS.ul}>{children}</ul>,
           ol: ({ children }) => <ol className={CLS.ol}>{children}</ol>,
           li: ({ children }) => <li className={CLS.li}>{children}</li>,
-          a: ({ href, children }) => (
-            <a href={href} className={CLS.a} target="_blank" rel="noreferrer">{children}</a>
-          ),
+          a: ({ href, children }) => {
+            const h = href ?? ""
+            // #锚点：页内滚动到同 slug 标题（与 extractHeadings/headingId 同口径）
+            if (h.startsWith("#")) {
+              return (
+                <a href={h} className={CLS.a}
+                   onClick={(e) => {
+                     e.preventDefault()
+                     document.getElementById(headingId(prefix, h.slice(1)))
+                       ?.scrollIntoView({ block: "start" })
+                   }}>
+                  {children}
+                </a>
+              )
+            }
+            // .md 相对链接：kb 内跳转（交父组件打开目标文件）；
+            // 排除带协议/协议相对/纯锚点形态
+            if (currentPath && onOpenKb && /\.md($|#)/.test(h) && !/^(#|[a-z][a-z0-9+.-]*:|\/\/)/i.test(h)) {
+              const target = resolveKbRel(currentPath, h)
+              return (
+                <a href={h} className={CLS.a} title={target}
+                   onClick={(e) => { e.preventDefault(); onOpenKb(target) }}>
+                  {children}
+                </a>
+              )
+            }
+            return <a href={h} className={CLS.a} target="_blank" rel="noreferrer">{children}</a>
+          },
           code: ({ children }) => <code className={CLS.code}>{children}</code>,
           pre: ({ children }) => <pre className={CLS.pre}>{children}</pre>,
           blockquote: ({ children }) => <blockquote className={CLS.blockquote}>{children}</blockquote>,

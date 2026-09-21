@@ -57,8 +57,9 @@ function DangerNote({ children }: { children: React.ReactNode }) {
 
 const selectCls = "rounded border bg-background px-1.5 py-0.5 text-xs [color-scheme:dark] [&>option]:bg-popover [&>option]:text-popover-foreground"
 
-export function SettingsView({ nav }: {
+export function SettingsView({ nav, pid }: {
   nav?: { tab: string; n: number; skill?: { source: SkillSource; pack: string; name: string } } | null
+  pid?: string | null
 } = {}) {
   const [tax, setTax] = useState<Taxonomy | null>(null)
   const [track, setTrack] = useState("ctf")
@@ -70,16 +71,28 @@ export function SettingsView({ nav }: {
   const [pendingN, setPendingN] = useState(0)
   // 深链已指定轨/包时，taxonomy 异步回填的缺省值不得覆盖（晚于 nav effect 落地会冲掉深链）
   const navAppliedRef = useRef(false)
+  // 项目上下文缺省：从项目内打开设置 → 轨/能力包跟随当前项目（优先级低于深链）
+  const projectAppliedRef = useRef(false)
 
   useEffect(() => {
     api.taxonomy().then((t) => {
       setTax(t)
-      if (!navAppliedRef.current) {
+      if (!navAppliedRef.current && !projectAppliedRef.current) {
         if (t.tracks[0]) setTrack(t.tracks[0].name)
         if (t.capabilities[0]) setCap(t.capabilities[0].name)
       }
     }).catch(() => {})
   }, [])
+
+  // 从项目内打开（pid 存在）：轨/能力包缺省跟随当前项目——不再每次都显示 CTF
+  useEffect(() => {
+    if (!pid || navAppliedRef.current) return
+    projectAppliedRef.current = true
+    api.getProject(pid).then((p) => {
+      if (p.track) setTrack(p.track)
+      if (p.capabilities?.length) setCap(p.capabilities[0])
+    }).catch(() => {})
+  }, [pid])
 
   // 提案角标数：挂载即拉 + 提案变化（审批/复盘 Job 落地）时刷新
   useEffect(() => {
@@ -127,6 +140,11 @@ export function SettingsView({ nav }: {
       setRuleFocus({ kind: m[1] === "tracks" ? "track-redlines" : "cap-redlines", name: m[2], n: Date.now() })
       return true
     }
+    if ((m = target.match(/^tracks\/([\w.-]+)\/rules\/rating\/([\w.-]+)\.md$/))) {
+      setTrack(m[1]); setTab("rules")
+      setRuleFocus({ kind: "rating", name: m[1], tag: m[2], n: Date.now() })
+      return true
+    }
     return false
   }
 
@@ -168,7 +186,7 @@ export function SettingsView({ nav }: {
                         setSkillFocus({ source, pack, name, n: Date.now() })
                       }} />
         </TabsContent>
-        <TabsContent value="rules" className="min-h-0 flex-1"><RulesPane track={track} cap={cap} focus={ruleFocus} /></TabsContent>
+        <TabsContent value="rules" className="min-h-0 flex-1"><RulesPane track={track} cap={cap} focus={ruleFocus} pid={pid} /></TabsContent>
         <TabsContent value="llm" className="min-h-0 flex-1"><LlmPane /></TabsContent>
         <TabsContent value="mcp" className="min-h-0 flex-1"><McpPane /></TabsContent>
         <TabsContent value="intel" className="min-h-0 flex-1"><IntelSourcePane /></TabsContent>
@@ -203,12 +221,17 @@ function RolesPane({ track, focus }: { track: string; focus: RoleFocus | null })
   const [confirmDel, setConfirmDel] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
-  const reload = useCallback(() =>
+  const reload = useCallback(() => {
+    // 竞态守卫：切轨后旧轨响应晚到不得覆盖新轨列表（进设置页先默认 ctf 再跟项目切轨，双请求竞速）
+    let alive = true
     api.trackRoles(track).then((rs) => {
+      if (!alive) return
       setRoles(rs)
       setSelected((cur) => cur && rs.some((r) => r.file === cur) ? cur : (rs[0]?.file ?? null))
-    }).catch(() => {}), [track])
-  useEffect(() => { reload() }, [reload])
+    }).catch(() => {})
+    return () => { alive = false }
+  }, [track])
+  useEffect(() => reload(), [reload])
 
   // doctor/矩阵跳转：选中指定角色
   useEffect(() => {
@@ -419,12 +442,17 @@ function SkillsPane({ tax, track, cap, focus }: {
   const detailApi = source === "cap" ? api.capSkillDetail : api.trackSkillDetail
   const updateApi = source === "cap" ? api.updateCapSkill : api.updateTrackSkill
 
-  const reload = useCallback(() =>
+  const reload = useCallback(() => {
+    // 竞态守卫：切包/切轨后旧响应晚到不得覆盖新列表（同 RolesPane）
+    let alive = true
     listApi(packName).then((ss) => {
+      if (!alive) return
       setSkills(ss)
       setSelected((cur) => cur && ss.some((s) => s.name === cur) ? cur : (ss[0]?.name ?? null))
-    }).catch(() => setSkills([])), [listApi, packName])
-  useEffect(() => { reload() }, [reload])
+    }).catch(() => { if (alive) setSkills([]) })
+    return () => { alive = false }
+  }, [listApi, packName])
+  useEffect(() => reload(), [reload])
   useEffect(() => { api.skillsVocab().then(setVocab).catch(() => {}) }, [])
 
   const reloadKb = useCallback(() => {
@@ -445,6 +473,8 @@ function SkillsPane({ tax, track, cap, focus }: {
   // doctor/矩阵/直播间深链跳转：切到指定来源并选中技能
   // （守卫按 focus.source 对应的包比较——packName 依赖本 pane 的 source state，
   //   轨技能深链时 source 仍是 "cap"，用 packName 会永远不命中）
+  // viaFocus：深链选中的技能以预览模式打开（F12 配套）；手动点选/保存后回编辑默认
+  const [viaFocus, setViaFocus] = useState(false)
   useEffect(() => {
     if (!focus) return
     const focusPack = focus.source === "cap" ? cap : track
@@ -452,6 +482,7 @@ function SkillsPane({ tax, track, cap, focus }: {
       setSource(focus.source)
       setMode("skill")
       setSelected(focus.name)
+      setViaFocus(true)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focus?.n])
@@ -468,6 +499,7 @@ function SkillsPane({ tax, track, cap, focus }: {
     if (mode === "kb" && !guardKb()) return
     setMode("skill")
     setSelected(n)
+    setViaFocus(false)
   }
   const pickKb = (p: string) => {
     if (mode === "skill" && !guardSkill()) return
@@ -488,6 +520,7 @@ function SkillsPane({ tax, track, cap, focus }: {
       setSaved(true)
       setTimeout(() => setSaved(false), 1500)
       packsChanged()
+      setViaFocus(false) // 保存后重载 detail 会触发编辑器重置，回到编辑模式
       reload()
       detailApi(packName, selected).then(setDetail).catch(() => {})
     } catch (e) {
@@ -632,7 +665,8 @@ function SkillsPane({ tax, track, cap, focus }: {
                     onContent={setKbContent}
                     onSaved={() => { packsChanged(); reloadKb() }}
                     onRename={setKbRenamePath}
-                    onDelete={(p) => setKbDel({ path: p, refs: [] })} />
+                    onDelete={(p) => setKbDel({ path: p, refs: [] })}
+                    onOpenKb={pickKb} />
           ) : mode === "kb" ? (
             <p className="p-4 text-xs text-muted-foreground">
               从左下知识库树选择文档；英文上游快照只读纪律：不翻译、不覆盖，新经验点「＋」写新 md。
@@ -663,7 +697,8 @@ function SkillsPane({ tax, track, cap, focus }: {
                 {sk?.description ?? detail.meta.description as string}
               </p>
               <SkillEditor key={detail.name} ref={editorRef} detail={detail} vocab={vocab}
-                           onDirtyChange={setDirty} />
+                           onDirtyChange={setDirty}
+                           startMode={viaFocus ? "preview" : "edit"} resetKey={focus?.n} />
               <DangerNote>表单保存时合并回写 frontmatter（name 锁定与目录一致，改名请新建+删除）；正文是 Agent 入口纪律，写坏会导致路由失效。</DangerNote>
             </div>
           ) : (
@@ -844,6 +879,8 @@ type DiscState = { ids: string[]; checked: string[]; listed: boolean; msg?: stri
 function LlmPane() {
   const [providers, setProviders] = useState<LlmProvider[]>([])
   const [def, setDef] = useState<{ provider: string; model: string } | null>(null)
+  // 可选默认供应商（全局默认 = 它的第一个模型；未设置 = 第一个启用供应商）
+  const [defaultProvider, setDefaultProvider] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [busyIdx, setBusyIdx] = useState<number | null>(null)
@@ -852,7 +889,11 @@ function LlmPane() {
   const [newModel, setNewModel] = useState<Record<number, string>>({})
 
   useEffect(() => {
-    api.llmProviders().then((r) => { setProviders(r.providers); setDef(r.default) }).catch(() => {})
+    api.llmProviders().then((r) => {
+      setProviders(r.providers)
+      setDef(r.default)
+      setDefaultProvider(r.default_provider ?? null)
+    }).catch(() => {})
   }, [])
 
   const patch = (i: number, p: Partial<LlmProvider>) =>
@@ -881,9 +922,11 @@ function LlmPane() {
     setError(null)
     try {
       const r = await api.saveLlmProviders(
-        providers.map(({ has_key: _h, ...rest }) => rest))
+        providers.map(({ has_key: _h, ...rest }) => rest),
+        defaultProvider ?? undefined)
       setProviders(r.providers)
       setDef(r.default)
+      setDefaultProvider(r.default_provider ?? null)
       setSaved(true)
       setTimeout(() => setSaved(false), 1500)
     } catch (e) {
@@ -940,6 +983,18 @@ function LlmPane() {
       <div className="flex items-center gap-2">
         <span className="font-mono text-sm">config/providers.json</span>
         <span className="flex-1" />
+        <span className="text-[10px] text-muted-foreground">默认供应商</span>
+        <select
+          className="h-8 rounded-md border bg-background px-2 text-xs"
+          value={defaultProvider ?? ""}
+          onChange={(e) => setDefaultProvider(e.target.value || null)}
+          title="全局默认供应商（开窗/编排/分类器缺省用它；未设置=第一个启用供应商）"
+        >
+          <option value="">（自动：第一个启用供应商）</option>
+          {providers.filter((p) => p.enabled).map((p) => (
+            <option key={p.name} value={p.name}>{p.name}</option>
+          ))}
+        </select>
         <span className="text-[10px] text-muted-foreground">
           全局默认：{def ? `${def.provider} / ${def.model}` : "无（至少启用一个供应商）"}
         </span>
@@ -975,12 +1030,24 @@ function LlmPane() {
                        className="font-mono text-xs"
                        placeholder={p.has_key ? "已配置（留空保存=不修改）" : "api_key"} />
               </div>
-              {/* 模型有序清单：第一个=该供应商默认模型 */}
+              {/* 模型有序清单：第一个=该供应商默认模型；上下文=该模型最大窗口（token，
+                  可选，驱动 Agent 上下文预算；留空=默认） */}
               <div className="mt-1.5 rounded bg-card/40 p-1.5">
                 {p.models.map((m, mi) => (
                   <div key={m} className="flex items-center gap-1 py-0.5 text-xs">
                     {mi === 0 && <Badge className="text-[9px]">默认</Badge>}
                     <span className="font-mono">{m}</span>
+                    <Input type="number" min={0.1} step={1} className="ml-1 h-6 w-28 px-1 font-mono text-[10px]"
+                           placeholder="上下文 K"
+                           value={p.model_context?.[m] ? String(p.model_context[m] / 1000) : ""}
+                           title="该模型最大上下文，单位 K token（填 128 = 128k token）。驱动会话历史预算（≈K×2000 字符）与摘要压缩阈值；留空=默认 256K"
+                           onChange={(e) => {
+                             const raw = e.target.value
+                             const ctx = { ...(p.model_context ?? {}) }
+                             if (raw === "") delete ctx[m]
+                             else ctx[m] = Math.round(Number(raw) * 1000)
+                             patch(i, { model_context: ctx })
+                           }} />
                     <span className="flex-1" />
                     <span className="w-16 text-[10px]" title="最小调用测活">
                       {testRes[`${i}/${m}`] ?? ""}
@@ -1047,7 +1114,9 @@ function LlmPane() {
       </Button>
       <DangerNote>
         勾选保存的模型按顺序可用，第一个是该供应商默认；第一个启用供应商的默认模型=全局默认（新开窗使用）。
-        在跑会话可在直播间「切换模型」即时生效。密钥存 config/providers.json（已 gitignore），读出只显示是否已配置。
+        在跑会话可在会话页「切换模型」即时生效。密钥存 config/providers.json（已 gitignore），读出只显示是否已配置。
+        「上下文 K」为该模型最大窗口（单位 K token，填 128 = 128k），驱动会话历史预算与摘要压缩时机；
+        不填默认 256K。已在跑会话切换模型时随之生效。
       </DangerNote>
     </div>
   )

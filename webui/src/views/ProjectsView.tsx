@@ -200,8 +200,11 @@ export function ProjectsView({ onOpen }: { onOpen: (pid: string) => void }) {
             <AlertDialogCancel asChild>
               <Button variant="outline" size="sm">取消</Button>
             </AlertDialogCancel>
+            {/* preventDefault 拦下 Radix 的点击即关弹——否则失败原因写进 delError 时弹窗已关，
+                用户只见「关了没删」无任何反馈；成功由 del 内 setConfirmTarget(null) 收口 */}
             <AlertDialogAction asChild>
-              <Button variant="destructive" size="sm" onClick={del} disabled={deleting}>
+              <Button variant="destructive" size="sm"
+                      onClick={(e) => { e.preventDefault(); del() }} disabled={deleting}>
                 {deleting ? "删除中…" : "删除"}
               </Button>
             </AlertDialogAction>

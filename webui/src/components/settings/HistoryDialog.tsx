@@ -3,7 +3,6 @@ import { api } from "@/lib/api"
 import type { HistoryVersion } from "@/lib/types"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog"
-import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
 import { fmtDateTime, utcTitle } from "@/lib/datetime"
 import { DiffView } from "./DiffView"
@@ -93,7 +92,8 @@ export function HistoryButton({ file, onRolledBack, className, source, label = "
           {versions.length === 0
             ? <p className="py-6 text-center text-xs text-muted-foreground">暂无历史版本（每次保存/回滚自动备份）</p>
             : (
-              <ScrollArea className="max-h-[60vh]">
+              // 普通块级滚动容器：Radix ScrollArea 的 viewport 是 display:table，会被超长 diff 行撑宽，把回滚按钮排到视口外
+              <div className="max-h-[60vh] overflow-y-auto">
                 <div className="space-y-1 pr-3">
                   {versions.map((v) => (
                     <div key={v.version} className="rounded border p-1.5">
@@ -124,7 +124,7 @@ export function HistoryButton({ file, onRolledBack, className, source, label = "
                     </div>
                   ))}
                 </div>
-              </ScrollArea>
+              </div>
             )}
           <p className="text-[10px] text-muted-foreground">
             回滚前会自动再备份当前版（生成新版本），因此回滚可逆；两种备份命名（时间戳前缀 / .bak 后缀）都会列出。

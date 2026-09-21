@@ -33,8 +33,8 @@ task_types: triage
 | `.py/.sage/.txt` 里是大整数 / `.pem/.pub` | crypto | crypto 包：crypto-triage |
 | `.pcap/.raw/.dd/.evtx/.vmem`、看不到内容的图片音视频 | forensics | forensics 包：forensics-triage |
 | `.apk/.wasm/.pyc` | reverse（先） | binary-rev |
-| `.safetensors/.pt/.pth/.onnx`、prompt/LoRA 字眼 | ai-ml | misc 包（kb_open `ctf-ai-ml/SKILL.md`） |
-| 编码套娃/jail/受限 shell/信号/游戏/小众语言 | misc | misc 包（kb_open `ctf-misc/SKILL.md`） |
+| `.safetensors/.pt/.pth/.onnx`、prompt/LoRA 字眼 | ai-ml | misc 包（kb_open `misc/ai-ml/index.md`） |
+| 编码套娃/jail/受限 shell/信号/游戏/小众语言 | misc | misc 包（kb_open `misc/misc/index.md`） |
 | 只有"找谁/在哪/什么时间"线索 | osint | forensics 包：forensics-triage 的 OSINT 段 |
 | 混淆脚本/C2 流量/疑似恶意 PE | malware | binary 包：binary-pwn §1（**默认恶意，只静态**） |
 
@@ -52,6 +52,6 @@ CTF 题常跨类：Web 题的 JWT 伪造要 crypto；pcap 里可能裹着待重�
 
 ## Step 4：收尾
 
-解出后按 `misc` 包 writeup 方法论产出可复现 writeup：
-`kb_open(module="ctf-writeup/SKILL.md")`——精简、可复现、队友照做能验证。
+解出后按 `misc/misc` 包 writeup 方法论产出可复现 writeup：
+`kb_open(module="misc/writeup/index.md")`——精简、可复现、队友照做能验证。
 多个 flag 候选时做全库唯一性核对，报出来源文件/路径，不取疑似干扰串。

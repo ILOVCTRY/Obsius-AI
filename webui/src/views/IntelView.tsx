@@ -246,14 +246,26 @@ export function IntelView() {
                       尚未配置 vault——到设置页「情报源」填入 Obsidian 库路径并索引。
                     </p>
                   ) : (
-                    <div className="flex flex-wrap gap-1">
-                      {Object.entries(learning.vault.by_direction).filter(([, v]) => v.notes > 0).map(([d, v]) => (
-                        <Badge key={d} variant="outline" className="text-[10px]" title={`最近活跃 ${v.last_active ? fmtDateTimeMin(v.last_active) : "—"}`}>
-                          {DIRECTION_LABELS[d] ?? d} {v.notes} 篇
-                        </Badge>
-                      ))}
-                      <span className="font-mono text-[10px] text-muted-foreground">共 {learning.vault.total} 篇</span>
-                    </div>
+                    <>
+                      <div className="flex flex-wrap gap-1">
+                        {Object.entries(learning.vault.by_direction).filter(([, v]) => v.notes > 0).map(([d, v]) => (
+                          <Badge key={d} variant="outline" className="text-[10px]" title={`最近活跃 ${v.last_active ? fmtDateTimeMin(v.last_active) : "—"}`}>
+                            {DIRECTION_LABELS[d] ?? d} {v.notes} 篇
+                          </Badge>
+                        ))}
+                        <span className="font-mono text-[10px] text-muted-foreground">共 {learning.vault.total} 篇</span>
+                      </div>
+                      {(learning.vault.top_tags ?? []).length > 0 && (
+                        <div className="mt-1.5 flex flex-wrap items-center gap-1">
+                          <span className="text-[10px] text-muted-foreground">高频主题：</span>
+                          {(learning.vault.top_tags ?? []).map((t) => (
+                            <Badge key={t.tag} variant="outline" className="text-[10px] text-muted-foreground">
+                              {t.tag}×{t.count}
+                            </Badge>
+                          ))}
+                        </div>
+                      )}
+                    </>
                   )}
                 </div>
                 <div>

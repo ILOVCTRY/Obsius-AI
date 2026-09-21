@@ -30,6 +30,8 @@ _STATE_DEFAULTS: dict[str, object] = {
     "chain_ticks": 0,
     "last_auto_tick_at": "",
     "auto_ticks_total": 0,
+    "last_derive_at": "",
+    "last_derive_result": "",
     "tick_owner": "",
     "tick_lease_until": "",
     "last_replan_at": "",
@@ -40,6 +42,8 @@ _EDITABLE_FIELDS = {
     "event_cursor", "cycles", "last_digest_cycle",
     "chain_active", "chain_ticks", "last_auto_tick_at", "auto_ticks_total",
     "last_replan_at",
+    # v13（2026-09-18）：mission 自动派生上次判定时间/结果（published:n / empty / error:…）
+    "last_derive_at", "last_derive_result",
 }
 _INCREMENTAL = {"chain_ticks", "auto_ticks_total"}
 

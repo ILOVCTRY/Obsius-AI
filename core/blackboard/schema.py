@@ -9,7 +9,37 @@
 
 import sqlite3
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 18
+
+# v17→v18（向指定会话直接发任务，DESIGN §6.4 定稿块 2026-09-20）：tasks 幂等补
+# target_session（''=公共池；非空=仅该窗可认领——claim 硬门控、claim_next WHERE
+# 过滤；发布即武装目标窗并单窗 kick，关窗退回公共池，reopen 清指派）。
+
+# v16→v17（R4 逆向开发管线，DESIGN §9 R4 定稿块）：新表 blueprints 由 DDL 的
+# IF NOT EXISTS 直接建表（无 ALTER，幂等）——逆向重建的开发蓝图：
+# modules 为 JSON 数组 [{name, desc, func_addresses[], spec, notes,
+# status(pending/analyzed/specd/tested)}]，status 流转 draft→reviewed→ready→
+# building→built（ready 仅人类/审批可置，Agent 工具不暴露 status 入口）。
+# 唯一写入口 Blackboard.create_blueprint 等方法。
+
+# v14→v15（F6 浏览器能力，DESIGN §7）：新表 http_history 由 DDL 的 IF NOT EXISTS
+# 直接建表（无 ALTER，幂等）——浏览器抓包/重发/爆破的请求响应历史，唯一写入口
+# Blackboard.add_http_history；source 区分来源（browser/replay/intruder），
+# batch_id 分组（爆破批次/重发单发），body 超 64KB 截断（body_truncated）、
+# 二进制 base64（is_binary）。
+
+# v13→v14（任务绑定角色：认领即换装，DESIGN §6.4 定稿块）：tasks 幂等补 role
+# （建议认领角色 id；''=不限。会话窗保留底色角色，认领带 role 任务时按任务角色
+# 换装执行——prompt/工具边界/噪声/运行时上限，跑完恢复底色）。
+
+# v11→v12（发现分两类）：findings 幂等补 category（vuln=漏洞 / intel=有效发现·关键发现；
+# 缺省 'vuln'，存量行不动——历史数据以 vuln_class/severity 语义自辨）。
+
+# v10→v11（F11 评级落地）：findings 幂等补 rating_basis（判级依据，如
+# 「rating:edu-rating 高危#2 任意文件覆盖写」；合并就高时随 severity 覆盖）。
+
+# v9→v10（工作区隔离 W3）：artifacts 幂等补 meta（JSON 归属元数据
+# {task_id?, session_id?}，bb_add_artifact 自动挂认领任务/会话；清单按 meta 过滤）。
 
 # v8→v9（C10 任务上下文归任务所有）：tasks 幂等补 context（JSON：任务执行履历
 # {transcript, attempts[]}，唯一写点 TaskQueue._finish；完整对话现场在
@@ -73,6 +103,7 @@ CREATE TABLE IF NOT EXISTS assets (
     meta       TEXT NOT NULL DEFAULT '{}',
     author     TEXT NOT NULL DEFAULT 'system',
     created_at TEXT NOT NULL,
+    revision   INTEGER NOT NULL DEFAULT 1,  -- H2 乐观锁：每次写 +1，写前可比对 expected_revision
     UNIQUE(project_id, type, value, parent_id)
 );
 
@@ -84,6 +115,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
     description TEXT NOT NULL DEFAULT '',
     sha256      TEXT NOT NULL DEFAULT '',
     author      TEXT NOT NULL DEFAULT 'system',
+    meta        TEXT NOT NULL DEFAULT '{}',   -- 归属元数据（W3）：{task_id?, session_id?}
     created_at  TEXT NOT NULL
 );
 
@@ -94,7 +126,9 @@ CREATE TABLE IF NOT EXISTS findings (
     vuln_class      TEXT NOT NULL DEFAULT '',  -- 渗透类；逆向发现留 ''（类别在 evidence.category 五类）
     title           TEXT NOT NULL,
     severity        TEXT NOT NULL DEFAULT 'info',  -- info / low / medium / high / critical
+    rating_basis    TEXT NOT NULL DEFAULT '',  -- 判级依据（F11）：规则名+条款+一句话依据
     status          TEXT NOT NULL DEFAULT 'unverified',  -- unverified / verified / false-positive
+    category        TEXT NOT NULL DEFAULT 'vuln',  -- C6 分两类：vuln=漏洞 / intel=有效发现·关键发现
     evidence        TEXT NOT NULL DEFAULT '{}',  -- JSON：引用 event、请求响应、截图
     poc_artifact_id TEXT REFERENCES artifacts(id),
     confidence      REAL NOT NULL DEFAULT 0.5,
@@ -102,6 +136,7 @@ CREATE TABLE IF NOT EXISTS findings (
     author          TEXT NOT NULL DEFAULT 'system',
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL,
+    revision        INTEGER NOT NULL DEFAULT 1,  -- H2 乐观锁：每次写 +1，写前可比对 expected_revision
     UNIQUE(project_id, target_asset_id, dedup_key)
 );
 
@@ -155,6 +190,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     lease_until   TEXT,
     parent_id     TEXT REFERENCES tasks(id),
     created_by    TEXT NOT NULL DEFAULT 'human',     -- human / orchestrator / session-x
+    role          TEXT NOT NULL DEFAULT '',          -- v14：建议认领角色 id（''=不限；认领即换装）
+    target_session TEXT NOT NULL DEFAULT '',         -- v18：指派会话（''=公共池；非空=仅该窗可认领）
     result_note   TEXT NOT NULL DEFAULT '',
     context_refs  TEXT NOT NULL DEFAULT '[]',  -- v3 JSON：任务依据的 finding id（显式 refs ∪ 正文自动抽取）
     stale_refs    TEXT NOT NULL DEFAULT '[]',  -- v3 JSON：已被推翻待自评的依据（撤回传播挂标，收尾后留审计）
@@ -223,6 +260,8 @@ CREATE TABLE IF NOT EXISTS orchestrator_state (
     tick_owner            TEXT NOT NULL DEFAULT '',    -- v5：tick 租约所有者（''=空闲）
     tick_lease_until      TEXT NOT NULL DEFAULT '',
     last_replan_at        TEXT NOT NULL DEFAULT '',    -- v6：L2 自动重排节流时间戳（A5）
+    last_derive_at        TEXT NOT NULL DEFAULT '',    -- v13：mission 自动派生上次判定时间（2026-09-18）
+    last_derive_result    TEXT NOT NULL DEFAULT '',    -- v13：上次判定结果 published:n / empty / error:…
     updated_at            TEXT NOT NULL DEFAULT ''
 );
 
@@ -249,6 +288,50 @@ CREATE TABLE IF NOT EXISTS approvals (
     created_at  TEXT NOT NULL,
     decided_at  TEXT
 );
+
+-- v15 浏览器抓包/重发/爆破历史（F6，DESIGN §7）：所有明文 HTTP 交互统一入此表；
+-- 写入口只有 Blackboard.add_http_history（黑板唯一写入口红线）。
+CREATE TABLE IF NOT EXISTS http_history (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id     TEXT NOT NULL,
+    session_id     TEXT,                       -- 来源会话（AI 会话 id / human-<uuid>）
+    task_id        TEXT,                       -- AI 动作挂认领任务；人类=NULL
+    source         TEXT NOT NULL DEFAULT 'browser',  -- browser / replay / intruder
+    batch_id       TEXT NOT NULL DEFAULT '',   -- 爆破批次分组；重发填自身批 id
+    meta           TEXT NOT NULL DEFAULT '{}', -- JSON：payload/改写说明等附加信息
+    method         TEXT NOT NULL,
+    url            TEXT NOT NULL,
+    status         INTEGER,
+    req_headers    TEXT NOT NULL DEFAULT '{}', -- JSON
+    req_body       TEXT,
+    resp_headers   TEXT NOT NULL DEFAULT '{}', -- JSON
+    resp_body      TEXT,                       -- 文本原样 / 二进制 base64(is_binary) / 超 64KB 截断
+    resp_mime      TEXT NOT NULL DEFAULT '',
+    body_truncated INTEGER NOT NULL DEFAULT 0,
+    is_binary      INTEGER NOT NULL DEFAULT 0,
+    duration_ms    INTEGER,
+    created_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_http_history_project ON http_history(project_id, id);
+CREATE INDEX IF NOT EXISTS idx_http_history_batch ON http_history(project_id, batch_id);
+
+-- v17 逆向开发蓝图（R4，DESIGN §9 R4 定稿块）：从分析产物重建程序的中枢——
+-- 模块划分任务产骨架、模块深析写回 spec/notes、蓝图汇总产 content_md，
+-- ready 后派生 reconstruct 重建子任务。一个样本一个项目可有多份蓝图（重划分）。
+CREATE TABLE IF NOT EXISTS blueprints (
+    id             TEXT PRIMARY KEY,
+    project_id     TEXT NOT NULL REFERENCES projects(id),
+    binary_sha256  TEXT NOT NULL DEFAULT '',   -- 目标样本 sha256（''=非单样本蓝图）
+    name           TEXT NOT NULL,
+    goal           TEXT NOT NULL DEFAULT '',   -- 重建目标（要造一个什么样的程序）
+    status         TEXT NOT NULL DEFAULT 'draft',  -- draft/reviewed/ready/building/built
+    content_md     TEXT NOT NULL DEFAULT '',   -- 蓝图正文：数据流/接口表/算法/协议/状态机
+    modules        TEXT NOT NULL DEFAULT '[]', -- JSON 数组：[{name,desc,func_addresses[],spec,notes,status}]
+    created_at     TEXT NOT NULL,
+    updated_at     TEXT NOT NULL,
+    UNIQUE(project_id, binary_sha256, name)
+);
+CREATE INDEX IF NOT EXISTS idx_blueprints_project ON blueprints(project_id, id);
 """
 
 
@@ -263,7 +346,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
     - v6→v7：tasks 幂等补 workset/dedup_fp/wait_for/lease_cooldown_until（机制 1.1/机制 1.4），
       resource_leases 由 DDL 的 IF NOT EXISTS 直接建表。
     - v7→v8：tasks 幂等补 blocked_reason（C1）。
-    - v8→v9：tasks 幂等补 context（C10 任务执行履历）。"""
+    - v8→v9：tasks 幂等补 context（C10 任务执行履历）。
+    - v9→v10：artifacts 幂等补 meta（W3 产物归属 {task_id?, session_id?}）。
+    - v10→v11：findings 幂等补 rating_basis（F11 判级依据，空串=未标注）。
+    - v14→v15：http_history 由 DDL 的 IF NOT EXISTS 直接建表（F6 浏览器抓包/重发/爆破），
+      无 ALTER，旧库打开即建。
+    - v15→v16：assets/findings 幂等补 revision（H2 乐观锁：多窗并发改同一行时
+      写前比对 expected_revision，防丢失更新；每次写 +1）。"""
     cols = {r[1] for r in conn.execute("PRAGMA table_info(projects)")}
     if "track" not in cols:
         conn.execute("ALTER TABLE projects ADD COLUMN track TEXT NOT NULL DEFAULT ''")
@@ -291,6 +380,27 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "context" not in task_cols:  # v9（C10 任务执行履历：{transcript, attempts[]}）
         conn.execute(
             "ALTER TABLE tasks ADD COLUMN context TEXT NOT NULL DEFAULT '{}'")
+    if "role" not in task_cols:  # v14（任务绑定角色：认领即换装）
+        conn.execute(
+            "ALTER TABLE tasks ADD COLUMN role TEXT NOT NULL DEFAULT ''")
+    if "target_session" not in task_cols:  # v18（指派任务：认领门控）
+        conn.execute(
+            "ALTER TABLE tasks ADD COLUMN target_session TEXT NOT NULL DEFAULT ''")
+    art_cols = {r[1] for r in conn.execute("PRAGMA table_info(artifacts)")}
+    if art_cols and "meta" not in art_cols:  # v10（W3 产物归属元数据）
+        conn.execute("ALTER TABLE artifacts ADD COLUMN meta TEXT NOT NULL DEFAULT '{}'")
+    fin_cols = {r[1] for r in conn.execute("PRAGMA table_info(findings)")}
+    if fin_cols and "rating_basis" not in fin_cols:  # v11（F11 判级依据）
+        conn.execute(
+            "ALTER TABLE findings ADD COLUMN rating_basis TEXT NOT NULL DEFAULT ''")
+    if fin_cols and "category" not in fin_cols:  # v12（发现分两类：vuln/intel）
+        conn.execute(
+            "ALTER TABLE findings ADD COLUMN category TEXT NOT NULL DEFAULT 'vuln'")
+    for tbl in ("assets", "findings"):  # v16（H2 乐观锁 revision 列）
+        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({tbl})")}
+        if cols and "revision" not in cols:
+            conn.execute(
+                f"ALTER TABLE {tbl} ADD COLUMN revision INTEGER NOT NULL DEFAULT 1")
     os_tables = {r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='orchestrator_state'")}
     if os_tables:
@@ -303,6 +413,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "ALTER TABLE orchestrator_state ADD COLUMN"
                 " last_replan_at TEXT NOT NULL DEFAULT ''")
+        for col in ("last_derive_at", "last_derive_result"):  # v13（mission 派生结果）
+            if col not in os_cols:
+                conn.execute(
+                    f"ALTER TABLE orchestrator_state ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
 
 
 def init_schema(conn: sqlite3.Connection) -> None:

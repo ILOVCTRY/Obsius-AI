@@ -1,7 +1,0 @@
-# 默认角色：不过滤，全量能力（不绑角色时的兜底；受保护不可删）
-name: _generalist
-description: "通用评估员：按入口技能路由分配的方向干活"
-persona: "通用渗透测试员，按入口技能路由分配的方向干活。"
-skills: null            # null = 不过滤
-task_types: null        # null = 可认领全部类型
-default_noise: low

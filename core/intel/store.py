@@ -13,7 +13,7 @@ from pathlib import Path
 
 from core.blackboard.store import new_id  # 复用 <前缀>-<12hex> 约定
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 4
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -30,6 +30,8 @@ CREATE TABLE IF NOT EXISTS articles (
     score REAL NOT NULL DEFAULT 0,
     direction TEXT NOT NULL DEFAULT '',    -- 打分命中的主方向
     is_priority INTEGER NOT NULL DEFAULT 0,-- KEV / 有公开 POC 优先标
+    has_poc INTEGER NOT NULL DEFAULT 0,    -- 启发式判定有公开 POC / KEV 在野利用（证据合并后）
+    poc_url TEXT NOT NULL DEFAULT '',      -- 最优 PoC 链接（KEV 无补充证据时为 ''）
     score_detail TEXT NOT NULL DEFAULT '', -- JSON（llm/规则、明细）
     brief_date TEXT,               -- 已并入哪份简报
     read INTEGER NOT NULL DEFAULT 0,
@@ -46,6 +48,7 @@ CREATE TABLE IF NOT EXISTS vault_notes (          -- E10：vault 元数据索引
     path TEXT PRIMARY KEY,         -- vault 根相对 POSIX 路径
     title TEXT NOT NULL DEFAULT '',
     tags TEXT NOT NULL DEFAULT '', -- JSON 数组
+    category TEXT NOT NULL DEFAULT '', -- F5：frontmatter category（归一化小写；方向判定优先命中）
     mtime TEXT NOT NULL DEFAULT '',
     size INTEGER NOT NULL DEFAULT 0,
     content TEXT NOT NULL DEFAULT '', -- 正文仅本地搜索用，绝不进 LLM 入参（隐私红线）
@@ -64,6 +67,19 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _migrate(conn: sqlite3.Connection) -> None:
+    """按 PRAGMA 实测列集幂等迁移（不按版本号分支——9515da9 教训：并行编辑掉落
+    ALTER + 启动无条件升版本号会掩盖缺列）。版本号 upsert 由调用方在迁移后执行。"""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(articles)")}
+    if "has_poc" not in cols:
+        conn.execute("ALTER TABLE articles ADD COLUMN has_poc INTEGER NOT NULL DEFAULT 0")
+    if "poc_url" not in cols:
+        conn.execute("ALTER TABLE articles ADD COLUMN poc_url TEXT NOT NULL DEFAULT ''")
+    vcols = {r[1] for r in conn.execute("PRAGMA table_info(vault_notes)")}
+    if vcols and "category" not in vcols:  # F5：frontmatter category 入索引
+        conn.execute("ALTER TABLE vault_notes ADD COLUMN category TEXT NOT NULL DEFAULT ''")
+
+
 class IntelStore:
     def __init__(self, intel_dir: str | Path = "config/intel"):
         self.dir = Path(intel_dir)
@@ -76,6 +92,7 @@ class IntelStore:
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(_DDL)
+        _migrate(self._conn)
         self._conn.execute(
             "INSERT INTO meta(key,value) VALUES('schema_version',?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(SCHEMA_VERSION),))
@@ -88,18 +105,28 @@ class IntelStore:
     # ---- 文章池 ----
 
     def upsert_articles(self, items: list[dict]) -> int:
-        """按 URL 幂等入池（已存在则跳过，不动打分/已读状态）。返回新入池条数。"""
+        """按 URL 入池；已存在只升不降地补 has_poc/poc_url（NVD 后补 Exploit 标签的
+        窗口差回填），不动打分/已读状态。返回新入池条数。"""
         n = 0
         with self._lock:
             cur = self._conn.cursor()
             for it in items:
-                r = cur.execute(
-                    "INSERT OR IGNORE INTO articles(id,url,title,source,kind,summary,"
-                    "published_at,fetched_at,is_priority) VALUES(?,?,?,?,?,?,?,?,?)",
+                exists = cur.execute("SELECT 1 FROM articles WHERE url=?",
+                                     (it["url"],)).fetchone() is not None
+                if not exists:
+                    n += 1
+                cur.execute(
+                    "INSERT INTO articles(id,url,title,source,kind,summary,"
+                    "published_at,fetched_at,is_priority,has_poc,poc_url) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(url) DO UPDATE SET "
+                    "has_poc=MAX(articles.has_poc, excluded.has_poc), "
+                    "poc_url=CASE WHEN excluded.has_poc=1 AND articles.has_poc=0 "
+                    "THEN excluded.poc_url ELSE articles.poc_url END",
                     (new_id("art"), it["url"], it["title"], it["source"], it["kind"],
                      it.get("summary", ""), it.get("published_at", ""), now(),
-                     1 if it.get("is_priority") else 0))
-                n += r.rowcount
+                     1 if it.get("is_priority") else 0,
+                     1 if it.get("has_poc") else 0, it.get("poc_url", "")))
             self._conn.commit()
         return n
 
@@ -209,9 +236,11 @@ class IntelStore:
             for n in notes:
                 self._conn.execute(
                     "INSERT OR REPLACE INTO vault_notes"
-                    "(path,title,tags,mtime,size,content,indexed_at) VALUES(?,?,?,?,?,?,?)",
+                    "(path,title,tags,category,mtime,size,content,indexed_at) "
+                    "VALUES(?,?,?,?,?,?,?,?)",
                     (n["path"], n.get("title", ""),
                      json.dumps(n.get("tags", []), ensure_ascii=False),
+                     n.get("category", ""),
                      n.get("mtime", ""), n.get("size", 0),
                      n.get("content", ""), now()))
             self._conn.commit()
@@ -220,7 +249,7 @@ class IntelStore:
     def list_notes(self, limit: int = 2000) -> list[dict]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT path,title,tags,mtime,size,indexed_at FROM vault_notes "
+                "SELECT path,title,tags,category,mtime,size,indexed_at FROM vault_notes "
                 "ORDER BY path LIMIT ?", (limit,)).fetchall()
         out = []
         for r in rows:

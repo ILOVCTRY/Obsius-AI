@@ -36,12 +36,15 @@ class LLMResponse:
 
 
 class LLMError(RuntimeError):
-    """调用失败（HTTP 非 2xx / 响应不可解析）。携带 status 与响应片段。"""
+    """调用失败（HTTP 非 2xx / 响应不可解析）。携带 status 与响应片段。
+    truncated=True 表示流式响应中途截断（工具参数 JSON 残缺等）——可整轮重试。"""
 
-    def __init__(self, message: str, status: int = 0, body: str = ""):
+    def __init__(self, message: str, status: int = 0, body: str = "",
+                 truncated: bool = False):
         super().__init__(message)
         self.status = status
         self.body = body
+        self.truncated = truncated
 
 
 class LLMProvider(Protocol):
@@ -51,6 +54,9 @@ class LLMProvider(Protocol):
         *,
         system: str | None = None,
         tools: list[dict[str, Any]] | None = None,
-        max_tokens: int = 4096,
+        max_tokens: int = 16384,
         temperature: float | None = None,
+        on_thinking: Any = None,      # SSE thinking_delta 回调（流式实现可选支持）
+        on_text: Any = None,          # SSE text_delta 回调（回复流式，2026-09-20；可选支持）
+        should_cancel: Any = None,    # 逐帧轮询取消探测（流式实现可选支持）
     ) -> LLMResponse: ...

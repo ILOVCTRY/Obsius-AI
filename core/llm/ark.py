@@ -38,11 +38,13 @@ class ArkCodingProvider(AnthropicCompatProvider):
         model: str = DEFAULT_EXECUTOR_MODEL,
         api_key: str | None = None,
         base_url: str = DEFAULT_BASE_URL,
+        enable_thinking: bool = True,  # 思考链路默认开（不支持时基类 400 去参降级）
         **kwargs,
     ):
         super().__init__(
             base_url=base_url,
             api_key=resolve_api_key(api_key),
             model=model,
+            enable_thinking=enable_thinking,
             **kwargs,
         )

@@ -155,7 +155,9 @@ export function ProposalsPane({ onPendingChange }: { onPendingChange?: (n: numbe
         {!detail ? (
           <p className="p-4 text-xs text-muted-foreground">选择左侧提案查看实时 diff 并审批</p>
         ) : (
-          <ScrollArea className="h-full">
+          // 普通块级滚动容器：Radix ScrollArea 的 viewport 是 display:table，会被超长 diff 行撑宽——
+          // 按钮行 justify-end 被排到视口右缘之外（水平无滚动条不可达），表现为「批准/拒绝按钮消失」
+          <div className="h-full min-h-0 overflow-y-auto">
             <div className="flex flex-col gap-2 p-3">
               <div className="flex flex-wrap items-center gap-1.5">
                 <Badge variant="outline" className="text-[10px]">{MODE_LABEL[detail.mode] ?? detail.mode}</Badge>
@@ -286,7 +288,7 @@ export function ProposalsPane({ onPendingChange }: { onPendingChange?: (n: numbe
                 </p>
               )}
             </div>
-          </ScrollArea>
+          </div>
         )}
       </div>
     </div>

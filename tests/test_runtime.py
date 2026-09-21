@@ -67,7 +67,7 @@ def test_gateway_denies_real_net_without_approval(bb):
                project_id=pid, net="real")
     # 有已批准的 approval → 放行（后端 fake，不真跑 docker）
     class FakeSandbox:
-        def run_once(self, image, cmd, *, net, sandbox, timeout):
+        def run_once(self, image, cmd, *, net, sandbox, timeout, abort_event=None):
             assert net == "real"
             return ExecOutcome(exit_code=0, stdout="done")
     gw2 = ExecutionGateway(bb=bb, backends={"sandbox": FakeSandbox()})
@@ -108,6 +108,42 @@ def test_gateway_timeout_kills(bb):
     assert r.timed_out and not r.ok
 
 
+def test_gateway_abort_kills_running_command(bb):
+    """■ 即点即停（2026-09-19）：abort_event 置位 → 运行中命令立刻被杀
+    （不等超时/自然结束），结果 interrupted、ok=False；command.result 事件
+    带中断标记。"""
+    import threading
+    pid = bb.create_project("t5b", "ctf")["id"]
+    gw = ExecutionGateway(bb=bb)
+    abort = threading.Event()
+    timer = threading.Timer(0.5, abort.set)
+    timer.start()
+    r = gw.run("Start-Sleep -Seconds 20", runtime="host", threat_class="trusted",
+               project_id=pid, timeout=30, abort_event=abort)
+    timer.join()
+    assert r.interrupted and not r.ok
+    assert "被人手中断" in r.brief()
+    ev = [e for e in bb.recent_events(pid) if e["kind"] == "command.result"][-1]
+    assert ev["payload"].get("interrupted") is True
+
+
+def test_brief_truncation_marker():
+    """截断可见化（2026-09-20）：stdout/stderr 被切时尾部带显式标注（显示/总字符数），
+    Agent 不必靠语义猜输出不完整。"""
+    from core.runtime.gateway import ExecutionResult
+    r = ExecutionResult(ok=True, exit_code=0, stdout="x" * 3000, stderr="",
+                        runtime="host", duration_s=0.1)
+    b = r.brief(limit=2000)
+    assert "stdout 已截断" in b and "2000/3000 字符" in b and b.count("x" * 10) >= 1
+    r2 = ExecutionResult(ok=True, exit_code=0, stdout="short", stderr="e" * 2500,
+                         runtime="host", duration_s=0.1)
+    b2 = r2.brief(limit=2000)
+    assert "stderr 已截断" in b2 and "2000/2500 字符" in b2
+    r3 = ExecutionResult(ok=True, exit_code=0, stdout="short", stderr="",
+                         runtime="host", duration_s=0.1)
+    assert "已截断" not in r3.brief()
+
+
 # ---------- docker 后端：参数构造（fake subprocess） ----------
 
 def test_sandbox_docker_args(monkeypatch):
@@ -122,15 +158,19 @@ def test_sandbox_docker_args(monkeypatch):
 def test_docker_run_once_sandbox_invocation(monkeypatch):
     calls = []
 
-    def fake_run(argv, **kwargs):
+    def fake_popen(argv, **kwargs):
         calls.append(argv)
         class P:
             returncode = 0
-            stdout = "ok"
-            stderr = ""
+
+            def poll(self):
+                return 0
+
+            def communicate(self):
+                return ("ok", "")
         return P()
 
-    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
     d = DockerBackend()
     d.run_once("anal-image", "id", net="none", sandbox=True)
     argv = calls[0]
@@ -176,3 +216,52 @@ def test_detector_tools_manifest_probe(tmp_path, monkeypatch):
     assert inv.tools[0].name == "ghidra" and not inv.tools[0].available
     # 缺失工具出现在提示中，引导安装
     assert "ghidra" in inv.to_prompt()
+
+
+# ---------- H3：would_deny 干跑 + 审批一次性消费（2026-09-19） ----------
+
+def test_gateway_would_deny_pure_function(bb):
+    """would_deny 不执行不审计，只返回拒因；与 run() 同口径。"""
+    pid = bb.create_project("t-wd", "pentest")["id"]
+    gw = ExecutionGateway(bb=bb)
+    before = len(bb.recent_events(pid))
+    # 隔离等级拒绝
+    assert "策略拒绝" in gw.would_deny("echo hi", "host", threat_class="untrusted")
+    # 未知 runtime
+    assert "未知 runtime" in gw.would_deny("echo hi", "quantum")
+    # 限速纪律（nmap 全端口无限速参数）
+    assert "限速纪律" in gw.would_deny("nmap -p- 1.2.3.4", "host")
+    # 限速参数补上 → 放行
+    assert gw.would_deny("nmap -p- -T3 1.2.3.4", "host") is None
+    # 普通命令放行
+    assert gw.would_deny("echo hi", "host") is None
+    assert len(bb.recent_events(pid)) == before  # 干跑不落任何事件
+
+
+def test_gateway_consumes_approval_once(bb):
+    """H3 一次性审批：net=real 跑完 approval 即 consumed，同 id 二次使用被拒。"""
+    pid = bb.create_project("t-consume", "pentest")["id"]
+    approval_id = "appr-once"
+
+    class FakeSandbox:
+        def run_once(self, image, cmd, *, net, sandbox, timeout, abort_event=None):
+            return ExecOutcome(exit_code=0, stdout="ok")
+
+    gw = ExecutionGateway(bb=bb, backends={"sandbox": FakeSandbox()})
+    with bb._tx():
+        bb.conn.execute(
+            "INSERT INTO approvals(id,project_id,session_id,action,risk,status,requested_by,created_at)"
+            " VALUES(?,?,?,?,?,?,?,?)",
+            (approval_id, pid, None, '{"op":"escalation"}', "high", "approved",
+             "sess-x", "2026-09-19T00:00:00+00:00"),
+        )
+    r = gw.run("wget http://x.example", runtime="sandbox", threat_class="trusted",
+               project_id=pid, net="real", approval_id=approval_id)
+    assert r.ok
+    row = bb.conn.execute("SELECT status FROM approvals WHERE id=?",
+                          (approval_id,)).fetchone()
+    assert row["status"] == "consumed"
+    # 同 approval_id 二次使用 → 拒（approved 已不在）
+    with pytest.raises(GatewayDenied, match="须人工审批"):
+        gw.run("wget http://x.example", runtime="sandbox", threat_class="trusted",
+               project_id=pid, net="real", approval_id=approval_id)

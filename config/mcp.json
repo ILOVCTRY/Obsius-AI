@@ -23,7 +23,8 @@
       "name": "playwright",
       "url": "",
       "transport": "stdio",
-      "enabled": true,
+      "enabled": false,
+      "_note": "F6 已内置原生 Playwright（core/browser/，Agent 六个 browser_* 工具 + 人类浏览器页），外接 playwright-mcp 废弃",
       "domains": ["pentest"],
       "command": "node",
       "args": ["E:\\ILOVCTRY\\SRC\\src-strike\\mcp-servers\\playwright-mcp\\node_modules\\@playwright\\mcp\\cli.js"]

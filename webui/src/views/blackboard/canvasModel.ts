@@ -7,31 +7,24 @@ import type { Asset, Chain, Finding } from "@/lib/types"
 export const UNASSIGNED = "__unassigned__"
 export const GLOBAL_LANE = "__global__"   // C2 降噪：无筛选时单一全局泳道（severity 四列共用）
 
-export const CARD_W = 224          // w-56
-export const COL_W = 252           // 列宽（卡 224 + 列间距 28）
-export const LANE_GAP = 36
-export const LANE_W = COL_W * 4    // 四列严重度带（info/low｜medium｜high｜critical）
+export const CARD_W = 320          // w-80（2026-09-18 放大，替代 w-56）
+export const COL_W = 348           // 列宽（卡 320 + 列间距 28）
+export const LANE_GAP = 44
 export const HEADER_H = 40
-export const CARD_STEP = 118       // 同列卡纵向步距
-export const CARD_STEP_COMPACT = 64 // info/low 紧凑卡步距（C2 降噪）
+export const CARD_STEP = 148       // 同列卡纵向步距（完整卡统一，C2 紧凑卡已废）
 export const CARD_Y0 = 92          // 顶部留 44px 给画布工具条：泳道头 y=44/高40
+export const BAND_ROWS = 8         // 噪声/孤立区折行行数上限，也是串联区货架（strip）的行高
 
 export const SEV_RANK: Record<string, number> = {
   critical: 0, high: 1, medium: 2, low: 3, info: 4,
 }
 
-// info/low｜medium｜high｜critical 四带
-export function sevColumn(sev: string): 0 | 1 | 2 | 3 {
-  if (sev === "medium") return 1
-  if (sev === "high") return 2
-  if (sev === "critical") return 3
-  return 0
-}
-
 export interface Lane {
-  key: string          // host asset id，或 UNASSIGNED
-  label: string        // IP（未归属=「未归属」）
+  key: string          // host asset id，UNASSIGNED 或 GLOBAL_LANE
+  label: string        // IP（全局=「全部发现」）
   x: number
+  width: number        // 泳道宽 = 总列数 * COL_W（各泳道可不同；最终放置阶段回填）
+  height: number       // 泳道高（laneBg 用；按实际内容算，空泳道保底 420）
 }
 
 /** host 归属：从叶子资产沿 parent_id 爬到 type==='host'；找不到 → UNASSIGNED */
@@ -50,17 +43,22 @@ export function hostOf(f: Finding, byId: Map<string, Asset>): string {
 
 export interface LaneModel {
   lanes: Lane[]
-  /** finding.id → {laneX, col, y（同列按 created_at 升序的堆叠序）} */
-  place: Map<string, { x: number; y: number; laneKey: string; col: 0 | 1 | 2 | 3 }>
+  /** finding.id → 槽位（col/row 网格已换算成 x/y；place 不再带严重度列语义） */
+  place: Map<string, { x: number; y: number; laneKey: string }>
   /** finding.id → host id/UNASSIGNED（全局布局=GLOBAL_LANE） */
   laneOf: Map<string, string>
+  /** F13：真孤点 id 集合（强边/链边连通分量=1）——工具条计数/过滤用 */
+  isolatedIds: Set<string>
 }
 
 export interface BuildLanesOptions {
-  /** 无资产筛选：单一全局泳道（所有发现共用 severity 四列，不按 host 分块） */
+  /** 无资产筛选：单一全局泳道（所有发现共用一个三分区画布，不按 host 分块） */
   globalLayout?: boolean
-  /** 强边+链边——供重心排序减少交叉（弱边不参与：纯推导联想边） */
+  /** 强边+链边——连通分量/串联分层依据（弱边不参与：纯推导联想边） */
   orderEdges?: ModelEdge[]
+  /** F13：孤立节点显示开关（缺省 true=显示）。false 时跳过 noise/orphans
+   * 分区——真孤点（连通分量=1）不进 place，泳道宽高只按串联区收缩。 */
+  showIsolated?: boolean
 }
 
 export function buildLanes(findings: Finding[], assets: Asset[],
@@ -68,10 +66,12 @@ export function buildLanes(findings: Finding[], assets: Asset[],
   const byId = new Map(assets.map((a) => [a.id, a]))
   const laneOf = new Map<string, string>()
   const lanes: Lane[] = []
+  const showIsolated = opts.showIsolated !== false
 
   if (opts.globalLayout) {
-    // C2 降噪：无筛选时全部发现共用一个严重度四列分块（不按 IP 分泳道）
-    lanes.push({ key: GLOBAL_LANE, label: "全部发现", x: 0 })
+    // C2 降噪：无筛选时全部发现共用一个三分区画布（不按 IP 分泳道）
+    // x/width/height 在最终放置阶段统一回填
+    lanes.push({ key: GLOBAL_LANE, label: "全部发现", x: 0, width: 0, height: 420 })
     for (const f of findings) laneOf.set(f.id, GLOBAL_LANE)
   } else {
     const hosts = new Map<string, Asset>()
@@ -83,30 +83,21 @@ export function buildLanes(findings: Finding[], assets: Asset[],
         if (h) hosts.set(hk, h)
       }
     }
-    // 泳道按 IP 排序，「未归属」垫底
+    // 泳道按 IP 排序，「未归属」垫底；x/width 在最终放置阶段按实际宽度累计
     const hostLanes = [...hosts.values()].sort((a, b) => a.value.localeCompare(b.value))
     const keys = hostLanes.map((h) => h.id)
     if (laneOfContains(laneOf, UNASSIGNED)) keys.push(UNASSIGNED)
-    keys.forEach((k, i) => lanes.push({
+    keys.forEach((k) => lanes.push({
       key: k,
       label: k === UNASSIGNED ? "未归属" : (byId.get(k)?.value ?? k),
-      x: i * (LANE_W + LANE_GAP),
+      x: 0, width: 0, height: 420,
     }))
   }
 
-  // 列内初始分组（created_at 升序）
-  const cols = new Map<string, Finding[]>()
-  const laneX = new Map(lanes.map((l) => [l.key, l.x]))
   const sorted = [...findings].sort((a, b) =>
     a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id))
-  for (const f of sorted) {
-    const lk = laneOf.get(f.id)!
-    const col = sevColumn(f.severity)
-    const ck = `${lk}:${col}`
-    ;(cols.get(ck) ?? cols.set(ck, []).get(ck)!).push(f)
-  }
 
-  // 分量聚簇：强边/链边连通的发现作为一个排序单元（并查集，簇内不被打散）
+  // 连通分量：强边/链边连通的发现归为一个串联单元（并查集）
   const orderEdges = opts.orderEdges ?? []
   const compParent = new Map<string, string>()
   const compFind = (x: string): string => {
@@ -123,6 +114,11 @@ export function buildLanes(findings: Finding[], assets: Asset[],
   for (const e of orderEdges) {
     if (laneOf.has(e.source) && laneOf.has(e.target)) compUnion(e.source, e.target)
   }
+  const compSize = new Map<string, number>()
+  for (const f of sorted) {
+    const r = compFind(f.id)
+    compSize.set(r, (compSize.get(r) ?? 0) + 1)
+  }
   const compMinCreated = new Map<string, string>()
   for (const f of sorted) {
     const r = compFind(f.id)
@@ -130,67 +126,135 @@ export function buildLanes(findings: Finding[], assets: Asset[],
     if (!min || f.created_at < min) compMinCreated.set(r, f.created_at)
   }
 
-  // 列内排序：分量（簇间按最早发现时间）→ created_at → id
-  for (const list of cols.values()) {
-    list.sort((a, b) => {
-      const ca = compMinCreated.get(compFind(a.id)) ?? a.created_at
-      const cb = compMinCreated.get(compFind(b.id)) ?? b.created_at
-      return ca.localeCompare(cb) ||
-        a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id)
-    })
+  // 串联分层：层 = 距链头（无入边节点）的最长路径；边方向 source→target（基→新 / 链 seq）。
+  // 头层 0 在最左，往后每跳右移一列——链条从左到右读，头在最左边。
+  const preds = new Map<string, string[]>()
+  for (const e of orderEdges) {
+    if (!laneOf.has(e.source) || !laneOf.has(e.target)) continue
+    ;(preds.get(e.target) ?? preds.set(e.target, []).get(e.target)!).push(e.source)
+  }
+  const layerMemo = new Map<string, number>()
+  const layerVisiting = new Set<string>()
+  const layerOf = (id: string): number => {
+    const memo = layerMemo.get(id)
+    if (memo !== undefined) return memo
+    if (layerVisiting.has(id)) return 0 // 环路防御（relates_to 理论上可能成环）
+    layerVisiting.add(id)
+    let l = 0
+    for (const p of preds.get(id) ?? []) l = Math.max(l, layerOf(p) + 1)
+    layerVisiting.delete(id)
+    layerMemo.set(id, l)
+    return l
   }
 
-  // 重心排序（barycenter，2 轮往返）：按强边/链边邻接的列内位置均值排——
-  // 强边两端对齐，交叉典型降 50%+。位置 = 各自列内下标。
-  if (orderEdges.length) {
-    const adj = new Map<string, string[]>()
-    for (const e of orderEdges) {
-      if (!laneOf.has(e.source) || !laneOf.has(e.target)) continue
-      ;(adj.get(e.source) ?? adj.set(e.source, []).get(e.source)!).push(e.target)
-      ;(adj.get(e.target) ?? adj.set(e.target, []).get(e.target)!).push(e.source)
-    }
-    const pos = new Map<string, number>()
-    const rebuildPos = () => {
-      for (const list of cols.values()) list.forEach((f, i) => pos.set(f.id, i))
-    }
-    rebuildPos()
-    const colKeys = [...cols.keys()].sort((a, b) => a.localeCompare(b))
-    for (let pass = 0; pass < 4; pass++) {
-      const l2r = pass % 2 === 0
-      for (const key of l2r ? colKeys : [...colKeys].reverse()) {
-        const list = cols.get(key)!
-        const bary = new Map<string, number>()
-        for (const f of list) {
-          const ns = (adj.get(f.id) ?? []).filter((n) => pos.has(n))
-          bary.set(f.id, ns.length
-            ? ns.reduce((s, n) => s + (pos.get(n) ?? 0), 0) / ns.length
-            : (pos.get(f.id) ?? 0))
-        }
-        list.sort((a, b) =>
-          (bary.get(a.id)! - bary.get(b.id)!) ||
-          a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id))
-        rebuildPos()
-      }
-    }
-  }
-
-  // 最终按列游标堆叠（info/low 紧凑卡矮步距）
-  const place = new Map<string, { x: number; y: number; laneKey: string; col: 0 | 1 | 2 | 3 }>()
+  // 三分区放置（每泳道独立）：噪声（无连接的 info/low）最左 ｜ 串联居中 ｜ 孤立中高危最右。
+  // 先给网格坐标 (col,row)，再按行统一定 y（C2 紧凑卡已废 2026-09-18，全部完整卡统一 CARD_STEP）。
+  const place = new Map<string, { x: number; y: number; laneKey: string }>()
   const isCompact = (f: Finding) => f.severity === "low" || f.severity === "info"
+  const grid = new Map<string, { col: number; row: number }>()
+
   for (const lane of lanes) {
-    for (let col = 0 as 0 | 1 | 2 | 3; col <= 3; col++) {
-      const list = cols.get(`${lane.key}:${col}`) ?? []
-      let y = CARD_Y0
-      for (const f of list) {
-        place.set(f.id, {
-          x: (laneX.get(lane.key) ?? 0) + col * COL_W, y,
-          laneKey: lane.key, col,
-        })
-        y += isCompact(f) ? CARD_STEP_COMPACT : CARD_STEP
-      }
+    const members = sorted.filter((f) => laneOf.get(f.id) === lane.key)
+    const linked = members.filter((f) => (compSize.get(compFind(f.id)) ?? 1) >= 2)
+    // F13：showIsolated=false 时跳过噪声/孤立分区——真孤点不进 place（节点组装自然跳过）
+    const noise = showIsolated ? members.filter((f) =>
+      (compSize.get(compFind(f.id)) ?? 1) === 1 && isCompact(f)) : []
+    // 孤立中高危：严重度从高到低（critical→high→medium），再按时间
+    const orphans = showIsolated ? members.filter((f) =>
+      (compSize.get(compFind(f.id)) ?? 1) === 1 && !isCompact(f))
+      .sort((a, b) => (SEV_RANK[a.severity] ?? 9) - (SEV_RANK[b.severity] ?? 9) ||
+        a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id)) : []
+
+    // 噪声区（最左）：列优先折行，最多 BAND_ROWS 行
+    noise.forEach((f, i) =>
+      grid.set(f.id, { col: Math.floor(i / BAND_ROWS), row: i % BAND_ROWS }))
+    const noiseCols = Math.ceil(noise.length / BAND_ROWS)
+
+    // 串联区（居中）：分量按最早发现时间排序，货架式 packing——
+    // 同一货架行高 BAND_ROWS，放不下换下一货架（右移）；分量内层=列、行=链对齐。
+    const laneComps = new Map<string, Finding[]>()
+    for (const f of linked) {
+      const r = compFind(f.id)
+      ;(laneComps.get(r) ?? laneComps.set(r, []).get(r)!).push(f)
     }
+    const comps = [...laneComps.entries()].sort((a, b) =>
+      (compMinCreated.get(a[0]) ?? "").localeCompare(compMinCreated.get(b[0]) ?? ""))
+    let stripCol = noiseCols
+    let stripW = 0
+    let rowCursor = 0
+    for (const [, list] of comps) {
+      // 行分配：链上节点优先跟前任同行（边呈水平直线一一对照），被占则找本层最小空行
+      const ordered = [...list].sort((a, b) =>
+        layerOf(a.id) - layerOf(b.id) ||
+        a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id))
+      const localRow = new Map<string, number>()
+      const usedLocal = new Set<string>()
+      let rowsUsed = 0
+      for (const n of ordered) {
+        const L = layerOf(n.id)
+        const freeAt = (r: number) => !usedLocal.has(`${L}:${r}`)
+        let r = -1
+        for (const p of preds.get(n.id) ?? []) {
+          const pr = localRow.get(p)
+          if (pr !== undefined && freeAt(pr)) { r = pr; break }
+        }
+        if (r < 0) { r = 0; while (!freeAt(r)) r++ }
+        usedLocal.add(`${L}:${r}`)
+        localRow.set(n.id, r)
+        rowsUsed = Math.max(rowsUsed, r + 1)
+      }
+      const width = Math.max(...ordered.map((n) => layerOf(n.id))) + 1
+      if (rowCursor > 0 && rowCursor + rowsUsed > BAND_ROWS) {
+        stripCol += stripW
+        stripW = 0
+        rowCursor = 0
+      }
+      for (const n of ordered) {
+        grid.set(n.id, { col: stripCol + layerOf(n.id), row: rowCursor + (localRow.get(n.id) ?? 0) })
+      }
+      stripW = Math.max(stripW, width)
+      rowCursor += rowsUsed
+    }
+    const chainEnd = stripCol + stripW
+
+    // 孤立中高危区（最右）：列优先折行
+    orphans.forEach((f, i) =>
+      grid.set(f.id, { col: chainEnd + Math.floor(i / BAND_ROWS), row: i % BAND_ROWS }))
+    const orphanCols = Math.ceil(orphans.length / BAND_ROWS)
+
+    // 行 y = 前缀和（统一 CARD_STEP）；泳道宽 = 总列数 × COL_W（lane.x 在循环外按前序宽度累计）
+    const maxRow = Math.max(0, ...[...grid.values()].map((g) => g.row))
+    const rowY = new Map<number, number>()
+    let acc = CARD_Y0
+    for (let r = 0; r <= maxRow; r++) {
+      rowY.set(r, acc)
+      acc += CARD_STEP
+    }
+    for (const f of members) {
+      const g = grid.get(f.id)
+      if (!g) continue
+      place.set(f.id, { x: g.col * COL_W, y: rowY.get(g.row) ?? CARD_Y0, laneKey: lane.key })
+    }
+    lane.width = Math.max(1, chainEnd + orphanCols) * COL_W
+    lane.height = Math.max(420, acc + 24)
   }
-  return { lanes, place, laneOf }
+
+  // 泳道 x：全局单泳道 x=0；host 模式按前序泳道实际宽度累计 + LANE_GAP。
+  // place.x 此时是泳道内相对列坐标，最后统一加泳道 x。
+  const laneX = new Map(lanes.map((l) => [l.key, l.x]))
+  let cursorX = 0
+  for (const lane of lanes) {
+    lane.x = cursorX
+    laneX.set(lane.key, lane.x)
+    cursorX = lane.x + lane.width + LANE_GAP
+  }
+  for (const [id, p] of place) {
+    place.set(id, { ...p, x: p.x + (laneX.get(p.laneKey) ?? 0) })
+  }
+  // F13：真孤点集合（连通分量=1）——工具条「孤立节点」计数
+  const isolatedIds = new Set(
+    sorted.filter((f) => (compSize.get(compFind(f.id)) ?? 1) === 1).map((f) => f.id))
+  return { lanes, place, laneOf, isolatedIds }
 }
 
 function laneOfContains(laneOf: Map<string, string>, key: string): boolean {

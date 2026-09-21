@@ -23,7 +23,7 @@ from test_agent import ScriptedLLM
 @pytest.fixture()
 def env(tmp_path):
     bb = Blackboard(str(tmp_path / "a.db"))
-    project = bb.create_project("上下文项目", "assessment", ["web"])
+    project = bb.create_project("上下文项目", "pentest", ["web"])
     gw = ExecutionGateway(bb=bb, backends={"host": NativeBackend()})
     tq = TaskQueue(bb)
     yield bb, project, gw, tq, tmp_path
@@ -33,11 +33,11 @@ def env(tmp_path):
 def make_agent(env, llm, artifacts_dir=None):
     bb, project, gw, tq, tmp_path = env
     packs = tmp_path / "packs"
-    (packs / "tracks" / "assessment" / "roles").mkdir(parents=True, exist_ok=True)
-    (packs / "tracks" / "assessment" / "roles" / "_generalist.yaml").write_text(
+    (packs / "tracks" / "pentest" / "roles").mkdir(parents=True, exist_ok=True)
+    (packs / "tracks" / "pentest" / "roles" / "_generalist.yaml").write_text(
         'name: _generalist\npersona: "通用测试员。"\n', encoding="utf-8")
     return AgentSession(project_id=project["id"], bb=bb, gateway=gw, llm=llm,
-                        planner_llm=None, packs_root=packs, track="assessment",
+                        planner_llm=None, packs_root=packs, track="pentest",
                         capabilities=["web"], role="_generalist",
                         capability_prompt="## 能力清单\n- 测试",
                         config=AgentConfig(max_steps=10),
@@ -102,9 +102,9 @@ def test_no_artifacts_dir_degrades(env):
 
 
 def test_crash_keeps_transcript_and_sweep_records_attempt(env):
-    """「崩溃」：第二步 LLM 抛异常 → 任务保持 claimed、现场文件停在最近一步；
-    fail_interrupted_claims（重启清扫）收尾 → attempt 记「后端重启，任务中断」，
-    现场文件仍在，新会话可接手。"""
+    """「崩溃」：第二步 LLM 抛异常 → worker 异常兜底立即 fail（不悬 claimed，
+    防孤儿心跳续租把看板钉死在「执行中」），现场文件停在最近一步；真进程死亡
+    （兜底没机会跑）的裸认领 claimed 仍由 fail_interrupted_claims 重启清扫收尾。"""
     bb, project, gw, tq, tmp_path = env
     art = tmp_path / "artifacts"
     tid = tq.publish(project["id"], "会崩的任务", created_by="human")
@@ -119,17 +119,24 @@ def test_crash_keeps_transcript_and_sweep_records_attempt(env):
     agent = make_agent(env, llm, artifacts_dir=art)
     with pytest.raises(RuntimeError):
         agent.run_task("侦查", task_id=tid)
-    assert tq.get_task(tid)["status"] == "claimed"
+    task = tq.get_task(tid)
+    assert task["status"] == "failed"
+    assert task["blocked_reason"] == "error"
+    assert "worker 异常退出" in task["context"]["attempts"][-1]["result_note"]
     path = task_transcript_path(art, tid)
     st = json.loads(path.read_text(encoding="utf-8"))
     assert any("10.0.0.1" in json.dumps(m, ensure_ascii=False) for m in st["messages"])
 
+    # 重启清扫只收真孤儿（上面崩溃任务已被兜底收尾，不再 claimed）
+    sess = bb.register_session(project["id"], "旧窗", role="_generalist")
+    tid2 = tq.publish(project["id"], "孤儿认领", created_by="human")
+    tq.claim(tid2, sess["id"])
     interrupted = tq.fail_interrupted_claims(project["id"])
-    assert interrupted == [tid]
-    task = tq.get_task(tid)
-    assert task["status"] == "failed"
-    assert task["blocked_reason"] == "awaiting_human"
-    assert "后端重启" in task["context"]["attempts"][-1]["result_note"]
+    assert interrupted == [tid2]
+    task2 = tq.get_task(tid2)
+    assert task2["status"] == "failed"
+    assert task2["blocked_reason"] == "awaiting_human"
+    assert "后端重启" in task2["context"]["attempts"][-1]["result_note"]
     assert path.exists()  # 现场不随进程消失，新会话可接手
 
 
@@ -220,7 +227,7 @@ def test_delete_task_removes_transcript_file(tmp_path):
                      executor_llm=OrchLLM([]), planner_llm=OrchLLM([]),
                      providers_config=str(tmp_path / "providers.json"))
     with TestClient(app) as c:
-        pid = c.post("/api/projects", json={"name": "删除清理", "track": "assessment",
+        pid = c.post("/api/projects", json={"name": "删除清理", "track": "pentest",
                                             "capabilities": ["web"]}).json()["id"]
         bb = c.app.state.projects[pid].bb
         proj = c.app.state.projects[pid]

@@ -24,7 +24,7 @@ def bb(tmp_path):
 
 @pytest.fixture()
 def project(bb):
-    return bb.create_project("撤回测试", "assessment", ["web"])
+    return bb.create_project("撤回测试", "pentest", ["web"])
 
 
 def _sess(bb, pid, name):
@@ -191,7 +191,7 @@ def test_basis_stale_done_only_on_complete(bb, project):
 
 def _agent_env(tmp_path):
     bb = Blackboard(str(tmp_path / "a.db"))
-    project = bb.create_project("撤回 agent 测试", "assessment", ["web"])
+    project = bb.create_project("撤回 agent 测试", "pentest", ["web"])
     gw = ExecutionGateway(bb=bb, backends={"host": NativeBackend()})
     tq = TaskQueue(bb)
     return bb, project, gw, tq, tmp_path

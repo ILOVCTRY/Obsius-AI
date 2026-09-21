@@ -94,19 +94,47 @@ class ProviderStore:
         providers = data.get("providers", [])
         return providers
 
-    def save(self, providers: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """整表保存（PUT 语义）。api_key 空串=沿用库中同名供应商原 key。返回落库后的明文表。"""
+    def _read_default_provider(self) -> str | None:
+        """JSON 顶层 default_provider（用户可选的全局默认供应商）；未设置返回 None。"""
+        if not self.path.is_file():
+            return None
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        v = data.get("default_provider")
+        return str(v) if v else None
+
+    def default_provider_name(self) -> str | None:
+        """已设置的默认供应商名（UI 下拉用）；未设置返回 None。"""
+        return self._read_default_provider()
+
+    def save(self, providers: list[dict[str, Any]],
+             default_provider: str | None = None) -> list[dict[str, Any]]:
+        """整表保存（PUT 语义）。api_key 空串=沿用库中同名供应商原 key。
+        default_provider 给定时必须命中提交清单中的**启用**供应商（否则 ProviderError）；
+        缺省沿用已存设置。返回落库后的明文表。"""
         normalized = [self._validate(p) for p in providers]
         if not any(p["enabled"] for p in normalized):
             raise ProviderError("至少保留一个启用供应商，否则 Agent 无模型可用")
+        if default_provider is not None:
+            hit = next((p for p in normalized if p["name"] == default_provider), None)
+            if hit is None:
+                raise ProviderError(f"默认供应商不存在: {default_provider}")
+            if not hit["enabled"]:
+                raise ProviderError(f"默认供应商 {default_provider} 已停用，不能设为默认")
         old = {p["name"]: p for p in self.load()}
         for p in normalized:
             if not p.get("api_key") and p["name"] in old:
                 p["api_key"] = old[p["name"]].get("api_key", "")
+        if default_provider is None:
+            default_provider = self._read_default_provider()
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        payload: dict[str, Any] = {"providers": normalized}
+        if default_provider:
+            payload["default_provider"] = default_provider
         self.path.write_text(
-            json.dumps({"providers": normalized}, ensure_ascii=False, indent=2),
-            encoding="utf-8")
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return normalized
 
     @staticmethod
@@ -120,12 +148,26 @@ class ProviderStore:
         models = [str(m).strip() for m in p.get("models", []) if str(m).strip()]
         if not models:
             raise ProviderError(f"{name}: 至少勾选/填写一个模型")
+        # 每模型最大上下文（token，可选）：models 保持纯字符串列表不破坏兼容；
+        # 非法项（非正数/超大/未勾选的模型）静默剔除，宁少勿滥
+        raw_ctx = p.get("model_context") or {}
+        ctx: dict[str, int] = {}
+        if isinstance(raw_ctx, dict):
+            for m, v in raw_ctx.items():
+                m = str(m).strip()
+                try:
+                    n = int(v)
+                except (TypeError, ValueError):
+                    continue
+                if m in models and 0 < n <= 10_000_000:
+                    ctx[m] = n
         return {
             "name": name,
             "base_url": base_url,
             "api_key": str(p.get("api_key", "")),
             "models": models,
             "enabled": bool(p.get("enabled", True)),
+            "model_context": ctx,
         }
 
     def masked(self) -> list[dict[str, Any]]:
@@ -144,6 +186,15 @@ class ProviderStore:
         raise ProviderError(f"供应商不存在: {name}")
 
     def default(self) -> dict[str, Any]:
+        """全局默认供应商：用户显式选择的 default_provider 优先（须启用），
+        未设置/已失效 → 第一个启用供应商（旧行为兜底）。"""
+        named = self._read_default_provider()
+        if named:
+            for p in self.load():
+                if p["name"] == named:
+                    if p.get("enabled", True):
+                        return p
+                    break  # 选中的供应商已停用 → 兜底第一个启用
         for p in self.load():
             if p.get("enabled", True):
                 return p
@@ -171,8 +222,16 @@ class ProviderStore:
         if not p.get("enabled", True):
             raise ProviderError(f"供应商 {p['name']} 已停用")
         model = model or p["models"][0]
+        # 思考开关（2026-09-19 直播间终端化）：供应商条目 "thinking": true/false 显式控制；
+        # 缺省时 Ark coding 网关默认开启（思考链路可见），其余网关默认关。模型不支持时
+        # anthropic_compat 层 400 去参降级兜底，不会炸调用。
+        thinking = p.get("thinking")
+        if thinking is None:
+            thinking = "ark" in str(p.get("base_url", "")).lower()
         return AnthropicCompatProvider(
-            base_url=p["base_url"], api_key=self.resolve_key(p), model=model)
+            base_url=p["base_url"], api_key=self.resolve_key(p), model=model,
+            enable_thinking=bool(thinking),
+            context_tokens=(p.get("model_context") or {}).get(model))
 
     # ---------- 发现 / 探活 ----------
 

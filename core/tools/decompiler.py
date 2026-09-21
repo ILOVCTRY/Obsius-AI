@@ -27,6 +27,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from typing import Callable
 
 EXPORT_VERSION = 3
 
@@ -122,9 +123,11 @@ def _default_runner(args: list[str]) -> tuple[int, str, str]:
 
 
 def gateway_runner(gateway, *, project_id: str, session_id: str, author: str,
-                   timeout: float | None = None):
+                   timeout: float | None = None, workspace=None):
     """把执行网关包成 runner：反编译命令也走审计（threat_class=trusted——
     Ghidra/IDA 是可信工具解析样本文件，不执行样本）。
+
+    workspace 传入时走工作区隔离（cwd=scratch + TEMP 重定向；§7 2026-09-17）。
 
     Windows 宿主经 `powershell -Command <cmd>` 执行：PowerShell 会把
     ``-S"script out"`` 的引号挪到整个参数外面（实测 RAW 变成 "-Sscript out"），
@@ -140,7 +143,7 @@ def gateway_runner(gateway, *, project_id: str, session_id: str, author: str,
         kwargs = {"timeout": timeout} if timeout else {}
         r = gateway.run(cmd, "host", threat_class="trusted",
                         project_id=project_id, session_id=session_id, author=author,
-                        **kwargs)
+                        workspace=workspace, **kwargs)
         return r.exit_code, r.stdout, r.stderr
     return run
 
@@ -726,6 +729,7 @@ class DecompilerService:
 
     def __init__(self, *, cache_dir: str | Path,
                  mcp_endpoint: str | None = None,
+                 mcp_provider: Callable[[str], str | None] | None = None,
                  ghidra: GhidraHeadlessBackend | None = None,
                  ida: IDAHeadlessBackend | None = None):
         self.cache_dir = Path(cache_dir)
@@ -740,6 +744,11 @@ class DecompilerService:
                 self.backends.append(self.mcp)
             except ValueError:
                 self.mcp = None
+        # 样本实例桥（2026-09-20 按需拉起）：binary -> endpoint 动态解析回调
+        # （IdaMcpManager.ensure）；与固定桥正交——工作台连人手实例用固定端点，
+        # Agent 点查走 provider 拉起的样本实例。失败回调 None 一律降级 headless。
+        self.mcp_provider = mcp_provider
+        self._sample_mcp_inst: MCPBackend | None = None
         for backend in (ghidra, ida):
             if backend is None:
                 continue
@@ -802,6 +811,29 @@ class DecompilerService:
             if name and f.get("name") == name:
                 return f
         return None
+
+    def _sample_mcp(self, binary: str) -> MCPBackend | None:
+        """点查用样本实例桥（2026-09-20 按需拉起）：mcp_provider 按 binary 动态
+        取端点（IdaMcpManager.ensure，含拉起等待；失败 None 降级）。与固定桥同
+        端点时直接复用；端点桥缓存复用（MCPBackend 自带探活 TTL，不重握手）。"""
+        if self.mcp_provider is None:
+            return self.mcp
+        try:
+            endpoint = self.mcp_provider(binary)
+        except Exception:  # noqa: BLE001 —— provider 失败视为离线，降级不抛死
+            return self.mcp
+        if not endpoint:
+            return self.mcp
+        if self.mcp is not None and self.mcp.endpoint == endpoint:
+            return self.mcp
+        if self._sample_mcp_inst is not None \
+                and self._sample_mcp_inst.endpoint == endpoint:
+            return self._sample_mcp_inst
+        try:
+            self._sample_mcp_inst = MCPBackend(endpoint)
+        except ValueError:
+            return self.mcp
+        return self._sample_mcp_inst
 
     # ---------- 工作台接口（研究轨 rev profile） ----------
 
@@ -922,7 +954,13 @@ class DecompilerService:
         return DECOMPILE_GUIDANCE + (f"\n失败详情: {errors}" if errors else "")
 
     def decompile(self, binary: str, address: int | None = None, name: str | None = None) -> str:
-        for backend in self.backends:
+        # 点查候选：样本实例桥（按需拉起）优先，其次固定桥；去重后与原选路一致
+        sample = self._sample_mcp(binary)
+        backends: list = []
+        for backend in ([sample] if sample is not None else []) + self.backends:
+            if not any(backend is b for b in backends):
+                backends.append(backend)
+        for backend in backends:
             if backend.name == "mcp":
                 # 仅点查走 MCP（人在回路，当前库即目标）；全量概览不做 MCP 全量拉取
                 if address is None and name is None:
@@ -964,9 +1002,11 @@ class DecompilerService:
         return f"已记录（headless sidecar）: {name}——正式结论请同步 bb_upsert_func"
 
     def xrefs(self, binary: str, func: str) -> str:
-        # MCP 在线：func_profile 按函数名实时取（xref_profile 吃名/地址）
-        if self.mcp is not None:
-            live = self.mcp.xref_profile(func)
+        # MCP 在线：func_profile 按函数名实时取（xref_profile 吃名/地址）；
+        # 样本实例桥（按需拉起）优先，其次固定桥
+        mcp = self._sample_mcp(binary)
+        if mcp is not None:
+            live = mcp.xref_profile(func)
             if live is not None:
                 return json.dumps(
                     {"function": func,
@@ -989,9 +1029,11 @@ def build_headless_service(cache_dir: str | Path, *, runner,
                            ida_db_dir: str | Path | None = None,
                            ghidra_tmp_dir: str | Path | None = None,
                            mcp_endpoint: str | None = None,
+                           mcp_provider: Callable[[str], str | None] | None = None,
                            available: bool | None = None) -> DecompilerService:
     """研究工作台工厂：headless 后端按 prefer 顺序选路；mcp_endpoint 非空时加装
-    MCP 实时桥（懒探活，工作台经 select_mcp_endpoint 给值；Agent 工厂默认不装）。
+    MCP 实时桥（懒探活，工作台经 select_mcp_endpoint 给值）；mcp_provider 装配
+    样本实例桥（IdaMcpManager.ensure 按需拉起，Agent 会话工厂接线用）。
 
     available=None 时真实探测 PATH；测试可注入 available=True 走假 runner。
     """
@@ -1003,7 +1045,8 @@ def build_headless_service(cache_dir: str | Path, *, runner,
                                                 tmp_project_dir=ghidra_tmp_dir,
                                                 available=available),
     }
-    svc = DecompilerService(cache_dir=cache_dir, mcp_endpoint=mcp_endpoint)
+    svc = DecompilerService(cache_dir=cache_dir, mcp_endpoint=mcp_endpoint,
+                            mcp_provider=mcp_provider)
     for key in prefer:
         build = constructors.get(key)
         if build is None:

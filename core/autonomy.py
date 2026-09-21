@@ -19,9 +19,12 @@ from core.llm.provider import Usage
 LEVELS = ("L0", "L1", "L2")
 
 # 建项默认档（malware 轨落地前只给 L0；research 默认全 passive）
+# R1（2026-09-17）：assessment 分解为 pentest/redteam——pentest 继承 L1、redteam=L0（宁严勿松）
 TRACK_DEFAULT_LEVEL: dict[str, str] = {
     "ctf": "L0",
-    "assessment": "L1",
+    "pentest": "L1",
+    "redteam": "L0",
+    "assessment": "L1",  # 旧 track 值（LEGACY_TRACK_MAP→pentest），兜底保留
     "research": "L1",
     "malware": "L0",
 }
@@ -32,6 +35,7 @@ _DEFAULTS: dict[str, Any] = {
     "max_chain_ticks": 3,
     "token_budget": None,   # None = 不限；否则正整数（token 总数）
     "task_budget": None,    # None = 不限；否则正整数（编排自主发布任务数）
+    "max_concurrent_tasks": 3,  # v0.71 任务即窗口：自动挡同时执行任务数上限
 }
 CAP_MIN, CAP_MAX = 1, 20
 SOFT_WARN_RATIO = 0.8
@@ -68,6 +72,11 @@ def normalize_autonomy(raw: dict | None, *, track: str | None = "ctf") -> dict:
     auto_derive = raw.get("auto_derive", False)
     if not isinstance(auto_derive, bool):
         raise ValueError("auto_derive 须为布尔值")
+    # v0.71 任务即窗口：自动挡同时执行任务数上限（独立于 sessions_cap——
+    # 待命窗不耗 LLM，窗数资源上限与执行并发是两个旋钮）
+    max_concurrent_tasks = _bounded_int(
+        raw.get("max_concurrent_tasks", _DEFAULTS["max_concurrent_tasks"]),
+        "max_concurrent_tasks", 1, CAP_MAX)
     if level not in LEVELS:
         raise ValueError(f"非法自主级别: {level}（合法: {LEVELS}）")
     paused = raw.get("paused", _DEFAULTS["paused"])
@@ -85,12 +94,49 @@ def normalize_autonomy(raw: dict | None, *, track: str | None = "ctf") -> dict:
         "token_budget": _pos_int_or_none(raw.get("token_budget"), "token_budget"),
         "task_budget": _pos_int_or_none(raw.get("task_budget"), "task_budget"),
         "auto_derive": auto_derive,  # C2 mission 自动派生开关（§6.9）
+        "max_concurrent_tasks": max_concurrent_tasks,  # v0.71 并发执行上限（缺省 3）
     }
 
 
 def autonomy_of(config: dict | None, *, track: str | None = "ctf") -> dict:
     """从项目 config 读 autonomy 并归一化（无段/旧库 → 按轨默认档）。"""
     return normalize_autonomy((config or {}).get("autonomy"), track=track)
+
+
+def normalize_rule_profiles(raw: Any) -> dict:
+    """F11 rule_profiles 归一化：合法形态 {"owners": "*" | [tag…], "rating": [tag…]}。
+
+    None / {} → {}（调用方剥键恢复缺省态）；owners 仅 "*" 或字符串列表
+    （"all" 等其他字符串非法）；rating 仅字符串列表（空列表=关闭，合法）；
+    tag strip 非空、去重保序；未知键剥除；非法抛 ValueError（API 层转 422）。"""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("rule_profiles 必须是对象")
+
+    def _tags(v: list) -> list[str]:
+        out: list[str] = []
+        for x in v:
+            t = x.strip()
+            if t and t not in out:
+                out.append(t)
+        return out
+
+    out: dict = {}
+    if "owners" in raw:
+        v = raw["owners"]
+        if v == "*":
+            out["owners"] = "*"
+        elif isinstance(v, list) and all(isinstance(x, str) for x in v):
+            out["owners"] = _tags(v)
+        else:
+            raise ValueError('rule_profiles.owners 仅支持 "*" 或字符串列表')
+    if "rating" in raw:
+        v = raw["rating"]
+        if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+            raise ValueError("rule_profiles.rating 必须是字符串列表")
+        out["rating"] = _tags(v)
+    return out
 
 
 # ---------- 用量记账 ----------
@@ -177,56 +223,63 @@ def human_warning(bb, project_id: str) -> str | None:
     return None
 
 
-MODES = ("pentest", "redteam")
 ROE_KEYS = ("targets", "window", "exclusions", "approver")
 
 
-def normalize_mode_config(config: dict) -> dict:
-    """C2 作战模式（§6.9）：mode/mission/redteam_roe 归一化。
-    mode 白名单（缺省 pentest）；切 redteam 必须携带 ROE 四要素
-    （授权目标清单/时间窗口/禁止事项/授权人，全非空否则 ValueError→422）。"""
-    mode = (config.get("mode") or "pentest")
-    if mode not in MODES:
-        raise ValueError(f"非法 mode: {mode!r}（白名单 pentest/redteam）")
-    out: dict = {"mode": mode}
+def normalize_track_semantics(config: dict, *, track: str) -> dict:
+    """轨级行为语义归一化（R2：mode 退役→轨级，§6.9 2026-09-17）。
+
+    - config.mode 键退役：由调用方剥离（盘上旧值忽略）；
+    - mission {text, criteria} 为两轨通用配置；
+    - redteam 轨：redteam_roe 四要素**不再强制**——缺省=按 pentest 上限兜底
+      （usage.roe_complete=False 提示补全，§6.9 ROE 语义）；传入即归一化，
+      只保留非空键，四要素全非空才算完整（roe_complete）；
+    - 非 redteam 轨：忽略 redteam_roe（行为本就是 pentest 上限）。"""
+    out: dict = {}
     mission = config.get("mission")
     if isinstance(mission, dict) and (mission.get("text") or mission.get("criteria")):
         out["mission"] = {"text": str(mission.get("text") or ""),
                           "criteria": str(mission.get("criteria") or "")}
-    roe = config.get("redteam_roe")
-    if isinstance(roe, dict):
-        missing = [k for k in ROE_KEYS if not str(roe.get(k) or "").strip()]
-        if missing:
-            raise ValueError(f"redteam ROE 四要素缺失: {missing}")
-        out["redteam_roe"] = {k: str(roe[k]).strip() for k in ROE_KEYS}
-    elif mode == "redteam":
-        raise ValueError("切换 redteam 必须携带 ROE 四要素"
-                         "（targets/window/exclusions/approver）")
+    if track == "redteam":
+        roe = config.get("redteam_roe")
+        if isinstance(roe, dict):
+            out["redteam_roe"] = {k: str(roe.get(k) or "").strip() for k in ROE_KEYS
+                                  if str(roe.get(k) or "").strip()}
     return out
+
+
+def roe_complete(roe: dict | None) -> bool:
+    """redteam ROE 四要素是否齐全（不齐全=行为按 pentest 上限兜底）。"""
+    return bool(roe) and all(str(roe.get(k) or "").strip() for k in ROE_KEYS)
 
 
 def usage_view(bb, project_id: str) -> dict:
     """GET 项目用量视图：autonomy 全字段 + 实时计数/百分比。"""
     proj = bb.get_project(project_id)
-    auto = autonomy_of(proj["config"], track=proj.get("track"))
+    track = proj.get("track") or "ctf"
+    auto = autonomy_of(proj["config"], track=track)
     st = bb.usage_state_get(project_id)
     used = total_tokens(st)
     tb, tkb = auto["token_budget"], auto["task_budget"]
     published = int(st.get("tasks_published", 0))
-    mode_view = normalize_mode_config(proj["config"] or {})
+    sem = normalize_track_semantics(proj["config"] or {}, track=track)
+    roe = sem.get("redteam_roe")
     return {
         **auto,
         "auto_derive": bool(auto.get("auto_derive")),
         "criteria_template": str((proj["config"] or {}).get("criteria_template") or ""),
-        "mode": mode_view["mode"],
-        "mission": mode_view.get("mission"),
-        "redteam_roe": mode_view.get("redteam_roe"),
+        "mission": sem.get("mission"),
+        "redteam_roe": roe,
+        "roe_complete": roe_complete(roe) if track == "redteam" else None,
         "active_sessions": count_active_sessions(bb, project_id),
         "llm_calls": int(st.get("llm_calls", 0)),
         "tokens": {"used": used, "budget": tb,
                    "pct": round(used / tb, 4) if tb else None},
         "tasks": {"published": published, "budget": tkb,
                   "pct": round(published / tkb, 4) if tkb else None},
+        # mission 自动派生上次判定（2026-09-18）：last_result=published:n / empty / error:…
+        "derive": {"last_at": st.get("last_derive_at") or "",
+                   "last_result": st.get("last_derive_result") or ""},
     }
 
 

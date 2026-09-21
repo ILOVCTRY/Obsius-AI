@@ -52,7 +52,10 @@ def index_vault(root: str | Path) -> list[dict]:
                 seen.add(t.lower())
                 tags.append(t)
         mtime = datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc)
+        # F5：结构化 frontmatter category 入索引（归一化小写；方向判定优先精确命中）
+        category = str(fm.get("category") or "").strip().lower()
         out.append({"path": rel, "title": title[:200], "tags": tags[:20],
+                    "category": category[:64],
                     "mtime": mtime.isoformat(timespec="seconds"),
                     "size": p.stat().st_size, "content": text})
     return out

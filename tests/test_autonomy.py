@@ -15,7 +15,8 @@ from core.projects import ProjectStore
 
 def test_default_level_by_track():
     assert normalize_autonomy(None, track="ctf")["level"] == "L0"
-    assert normalize_autonomy(None, track="assessment")["level"] == "L1"
+    assert normalize_autonomy(None, track="pentest")["level"] == "L1"
+    assert normalize_autonomy(None, track="redteam")["level"] == "L0"  # R1：红队宁严勿松
     assert normalize_autonomy(None, track="research")["level"] == "L1"
     assert normalize_autonomy(None, track="malware")["level"] == "L0"
     # 未知轨/旧库：保守 L0
@@ -26,7 +27,8 @@ def test_normalize_fills_defaults_and_validates():
     a = normalize_autonomy({"level": "L2"}, track="ctf")
     assert a == {"level": "L2", "paused": False, "sessions_cap": 4,
                  "max_chain_ticks": 3, "token_budget": None, "task_budget": None,
-                 "auto_derive": False}  # C2 mission 自动派生开关（缺省关）
+                 "auto_derive": False,  # C2 mission 自动派生开关（缺省关）
+                 "max_concurrent_tasks": 3}  # v0.71 并发执行上限（缺省 3）
     with pytest.raises(ValueError):
         normalize_autonomy({"level": "L9"})
     with pytest.raises(ValueError):
@@ -44,7 +46,7 @@ def test_normalize_fills_defaults_and_validates():
 
 def test_autonomy_of_old_project_without_section():
     # 旧项目 config 无 autonomy 段：读时按轨补默认，不抛错
-    assert autonomy_of({}, track="assessment")["level"] == "L1"
+    assert autonomy_of({}, track="pentest")["level"] == "L1"
 
 
 # ---------- 双写 ----------
@@ -55,7 +57,7 @@ def pstore(tmp_path):
 
 
 def test_create_project_writes_autonomy_both_places(pstore):
-    proj = pstore.create_project("评估演练", "assessment")
+    proj = pstore.create_project("评估演练", "pentest")
     disk = json.loads((proj.path / "project.json").read_text(encoding="utf-8"))
     assert disk["config"]["autonomy"]["level"] == "L1"
     row = proj.bb.get_project(proj.id)
@@ -101,7 +103,7 @@ def test_update_config_rejects_bad_value(pstore):
 @pytest.fixture()
 def bb(tmp_path):
     b = Blackboard(str(tmp_path / "u.db"))
-    pid = b.create_project("用量", "assessment")["id"]
+    pid = b.create_project("用量", "pentest")["id"]
     yield b, pid
     b.close()
 
@@ -200,7 +202,7 @@ def test_hard_block_task_budget_only_publish(bb):
 def test_usage_view_shape(bb):
     b, pid = bb
     view = autonomy.usage_view(b, pid)
-    assert view["level"] == "L1"  # assessment 默认
+    assert view["level"] == "L1"  # pentest（原 pentest）默认
     assert view["active_sessions"] == 0
     assert view["tokens"] == {"used": 0, "budget": None, "pct": None}
     assert view["tasks"]["published"] == 0

@@ -100,6 +100,63 @@ def test_retry_exhausts_then_raises(monkeypatch):
         p.chat([{"role": "user", "content": "hi"}])
 
 
+# ---------- 思考开关（2026-09-19 直播间终端化） ----------
+
+def test_thinking_param_injected_when_enabled():
+    """enable_thinking=True：请求 body 带 thinking 参数；默认关不注入。"""
+    captured = []
+    p = AnthropicCompatProvider(
+        "https://fake", "key", "m", transport=_fake_transport(
+            _anthropic_response([{"type": "thinking", "thinking": "推理中"},
+                                 {"type": "text", "text": "好"}]), capture=captured),
+        enable_thinking=True)
+    r = p.chat([{"role": "user", "content": "hi"}])
+    assert captured[0]["body"]["thinking"] == {"type": "enabled", "budget_tokens": 8192}
+    assert r.thinking == "推理中"
+
+    captured2 = []
+    p2 = AnthropicCompatProvider(
+        "https://fake", "key", "m", transport=_fake_transport(
+            _anthropic_response([{"type": "text", "text": "好"}]), capture=captured2))
+    p2.chat([{"role": "user", "content": "hi"}])
+    assert "thinking" not in captured2[0]["body"]
+
+
+def test_thinking_param_fallback_on_400():
+    """模型不认 thinking 参数（400 文案含 thinking）→ 去参重试成功且本实例不再注入。"""
+    responses = iter([
+        (400, {"error": {"message": "thinking is not supported by this model"}}),
+        (200, _anthropic_response([{"type": "text", "text": "ok"}])),
+        (200, _anthropic_response([{"type": "text", "text": "ok"}])),
+    ])
+    calls: list[dict] = []
+
+    def transport(url, headers, body):
+        calls.append(json.loads(body))
+        return next(responses)
+
+    p = AnthropicCompatProvider("https://fake", "key", "m",
+                                transport=transport, enable_thinking=True)
+    r = p.chat([{"role": "user", "content": "hi"}])
+    assert r.text == "ok"
+    assert "thinking" in calls[0] and "thinking" not in calls[1]
+    p.chat([{"role": "user", "content": "hi"}])
+    assert "thinking" not in calls[2]  # 实例级记住：后续不再注入
+
+
+def test_reasoning_content_fallback():
+    """OpenAI 式 reasoning_content 兜底：content 无 thinking block 时接住思考字段。"""
+    transport = _fake_transport({
+        "stop_reason": "end_turn", "model": "fake-model",
+        "content": [{"type": "text", "text": "答"}],
+        "reasoning_content": "隐藏推理链",
+        "usage": {"input_tokens": 1, "output_tokens": 1},
+    })
+    p = AnthropicCompatProvider("https://fake", "key", "m", transport=transport)
+    r = p.chat([{"role": "user", "content": "hi"}])
+    assert r.thinking == "隐藏推理链" and r.text == "答"
+
+
 def test_retry_on_timeout(monkeypatch):
     """网络超时同样重试（演练中真实发生的故障形态）。"""
     monkeypatch.setattr("core.llm.anthropic_compat.RETRY_BACKOFF", 0)
@@ -124,6 +181,165 @@ def test_tool_result_message_roundtrip():
     assert msg["content"][0]["tool_use_id"] == "tc-9"
     err = p.tool_result_message(tc, "权限不足", is_error=True)
     assert err["content"][0]["is_error"] is True
+
+
+# ---------- 思考流式（2026-09-19：SSE stream:true，thinking_delta 逐帧回调） ----------
+
+_SSE_LINES = [
+    'event: message_start',
+    'data: {"type":"message_start","message":{"usage":{"input_tokens":42}}}',
+    '',
+    'event: content_block_start',
+    'data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}',
+    'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"先想"}}',
+    'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"一下"}}',
+    'data: {"type":"content_block_stop","index":0}',
+    'data: {"type":"content_block_start","index":1,"content_block":{"type":"text"}}',
+    'data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"答案"}}',
+    'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7}}',
+    'data: {"type":"message_stop"}',
+]
+
+
+def _sse_transport(lines=None, responses=None, capture=None):
+    """伪 SSE stream transport：lines=成功响应的 SSE 行；responses=按次弹出的
+    (status, payload|lines)。"""
+    queue = list(responses or [])
+    def transport(url, headers, body):
+        if capture is not None:
+            capture.append(json.loads(body))
+        if queue:
+            return queue.pop(0)
+        return 200, iter(lines if lines is not None else _SSE_LINES)
+    return transport
+
+
+def test_stream_thinking_deltas_and_final_response():
+    captured, deltas = [], []
+    p = AnthropicCompatProvider("https://fake", "key", "m",
+                                stream_transport=_sse_transport(capture=captured),
+                                transport=_fake_transport({}),
+                                enable_thinking=True)
+    r = p.chat([{"role": "user", "content": "hi"}],
+               on_thinking=deltas.append, should_cancel=lambda: False)
+    assert deltas == ["先想", "一下"]
+    assert r.thinking == "先想一下" and r.text == "答案"
+    assert r.stop_reason == "end_turn"
+    assert r.usage.input_tokens == 42 and r.usage.output_tokens == 7
+    assert captured[0]["stream"] is True and "thinking" in captured[0]
+
+
+def test_stream_tool_use_assembly():
+    """tool_use 增量 JSON（input_json_delta）拼回 input dict，_parse 出 ToolCall。"""
+    lines = [
+        'data: {"type":"message_start","message":{"usage":{"input_tokens":1}}}',
+        'data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t1","name":"run_cmd"}}',
+        'data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"cmd\\": \\"id\\""}}',
+        'data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":", \\"runtime\\": \\"host\\"}"}}',
+        'data: {"type":"content_block_stop","index":0}',
+        'data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":5}}',
+    ]
+    p = AnthropicCompatProvider("https://fake", "key", "m", stream_transport=_sse_transport(lines))
+    r = p.chat([{"role": "user", "content": "hi"}], on_thinking=lambda _: None)
+    assert r.stop_reason == "tool_use"
+    assert r.tool_calls[0].name == "run_cmd"
+    assert r.tool_calls[0].arguments == {"cmd": "id", "runtime": "host"}
+
+
+def test_stream_truncated_tool_args_raises_marked_error():
+    """2026-09-20 事故：input_json_delta 只收到 {"cmd": 就结束（max_tokens 耗尽/
+    网关断流）→ 抛带 truncated 标记的 LLMError（含 stop_reason），而非裸
+    JSONDecodeError 穿到 agent 循环炸任务。"""
+    lines = [
+        'data: {"type":"message_start","message":{"usage":{"input_tokens":1}}}',
+        'data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t1","name":"run_cmd"}}',
+        'data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"cmd\\":"}}',
+        'data: {"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":16384}}',
+    ]
+    p = AnthropicCompatProvider("https://fake", "key", "m",
+                                stream_transport=_sse_transport(lines))
+    with pytest.raises(LLMError, match="截断") as ei:
+        p.chat([{"role": "user", "content": "hi"}], on_thinking=lambda _: None)
+    assert ei.value.truncated is True
+    assert "max_tokens" in str(ei.value)
+
+
+def test_default_max_tokens_raised_to_16384():
+    """2026-09-20 事故修正：缺省 max_tokens 16384（原 4096 与思考 budget 8192
+    倒挂，GLM 长思考+长工具参数被打爆截断）。"""
+    captured = []
+    p = AnthropicCompatProvider(
+        "https://fake", "key", "m",
+        transport=_fake_transport(
+            _anthropic_response([{"type": "text", "text": "ok"}]), capture=captured))
+    p.chat([{"role": "user", "content": "hi"}])
+    assert captured[0]["body"]["max_tokens"] == 16384
+
+
+def test_stream_cancel_between_frames():
+    """should_cancel 逐行轮询：命中即抛 LLMError 且流被关闭（不再读后续帧）。"""
+    closed = {"n": 0}
+
+    class FakeStream:
+        def __init__(self):
+            self._lines = iter(_SSE_LINES)
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            return next(self._lines)
+
+        def close(self):
+            closed["n"] += 1
+
+    p = AnthropicCompatProvider("https://fake", "key", "m",
+                                stream_transport=lambda *a: (200, FakeStream()))
+    with pytest.raises(LLMError, match="已中断"):
+        p.chat([{"role": "user", "content": "hi"}],
+               on_thinking=lambda _: None, should_cancel=lambda: True)
+    assert closed["n"] == 1
+
+
+def test_stream_non_sse_json_fallback():
+    """网关无视 stream:true 返回整份 JSON → 兜底按普通响应解析，不报错。"""
+    body = json.dumps(_anthropic_response([{"type": "thinking", "thinking": "整份思考"}]))
+    p = AnthropicCompatProvider(
+        "https://fake", "key", "m",
+        stream_transport=lambda *a: (200, iter([body])))
+    r = p.chat([{"role": "user", "content": "hi"}], on_thinking=lambda _: None)
+    assert r.thinking == "整份思考" and r.text == ""
+
+
+def test_stream_thinking_400_degrade_still_works():
+    """流式模式下 thinking 400 去参降级：去 thinking 参数后以流式重试成功。"""
+    captured = []
+    p = AnthropicCompatProvider(
+        "https://fake", "key", "m",
+        stream_transport=_sse_transport(
+            responses=[(400, {"error": {"message": "thinking is not supported"}})],
+            capture=captured),
+        transport=_fake_transport({}),
+        enable_thinking=True)
+    r = p.chat([{"role": "user", "content": "hi"}],
+               on_thinking=lambda _: None, should_cancel=lambda: False)
+    assert r.thinking == "先想一下"
+    assert "thinking" in captured[0] and "thinking" not in captured[1]
+
+
+def test_stream_disabled_falls_back_to_plain_transport():
+    """_stream_disabled 置位后 chat 走非流式 transport（不再发 stream:true）。"""
+    captured = []
+    p = AnthropicCompatProvider(
+        "https://fake", "key", "m",
+        stream_transport=_sse_transport(responses=[
+            (400, {"error": {"message": "stream is not supported"}})]),
+        transport=_fake_transport(
+            _anthropic_response([{"type": "text", "text": "好"}]), capture=captured))
+    r = p.chat([{"role": "user", "content": "hi"}], on_thinking=lambda _: None)
+    assert r.text == "好"
+    assert "stream" not in captured[0]
+    assert p._stream_disabled is True
 
 
 # ---------- 模型路由 ----------
@@ -218,6 +434,74 @@ def test_provider_store_build(tmp_path, monkeypatch):
     with pytest.raises(ProviderError):
         s.build("ark-coding")  # 已停用
     assert s.default_target() == ("ark-plan", "p")
+
+
+def test_provider_store_model_context(tmp_path, monkeypatch):
+    """每模型最大上下文（F16）：_validate 归一（非法/未勾选剔除）、build 带给实例、
+    未声明= None。"""
+    from core.llm.providers import ProviderStore
+    monkeypatch.setenv("ARK_API_KEY", "env-key")
+    s = ProviderStore(tmp_path / "providers.json")
+    s.save([{"name": "ark-coding", "base_url": "https://x/api", "api_key": "k1",
+             "models": ["a", "b"], "enabled": True,
+             "model_context": {"a": 128000, "b": -5, "c": 999, "a2": "x"}}])
+    p = s.get("ark-coding")
+    # 只留已勾选模型且为正整数的项（c 未勾选、b 非法、"a2" 非数）
+    assert p["model_context"] == {"a": 128000}
+    assert s.build("ark-coding", "a").context_tokens == 128000
+    assert s.build("ark-coding", "b").context_tokens is None
+    # 缺省条目 → 空 dict，build 仍可用
+    s.save([{"name": "ark-coding", "base_url": "https://x/api", "api_key": "k1",
+             "models": ["a"], "enabled": True}])
+    assert s.get("ark-coding")["model_context"] == {}
+
+
+def test_apply_context_budget(tmp_path):
+    """模型声明上下文 → 会话预算换算（tokens×2 字符，摘要阈值取半）；
+    未声明=默认 256K（预算 512k 字符）。"""
+    from core.agent.loop import AgentConfig, apply_context_budget
+
+    cfg = AgentConfig()
+    apply_context_budget(cfg, type("L", (), {"context_tokens": 128000})())
+    assert cfg.context_char_budget == 256000
+    assert cfg.context_summary_chars == 128000
+    # 未声明（None）/无属性 → 默认 256K
+    cfg2 = AgentConfig()
+    apply_context_budget(cfg2, type("L", (), {"context_tokens": None})())
+    apply_context_budget(cfg2, object())
+    assert cfg2.context_char_budget == 512_000
+    assert cfg2.context_summary_chars == 256_000
+
+
+def test_provider_store_default_provider_selection(tmp_path):
+    """可选默认供应商：default_provider 优先于「第一个启用供应商」；
+    未启用/不存在 → 422；未设置 → 旧行为兜底。"""
+    from core.llm.providers import ProviderError, ProviderStore
+    s = ProviderStore(tmp_path / "providers.json")
+    base = [
+        {"name": "ark-coding", "base_url": "https://x/api", "api_key": "k1",
+         "models": ["a"], "enabled": True},
+        {"name": "ark-plan", "base_url": "https://y/api", "api_key": "k2",
+         "models": ["p"], "enabled": True},
+    ]
+    s.save(base)  # 未设置 default_provider → 第一个启用供应商兜底
+    assert s.default_target() == ("ark-coding", "a")
+    # 显式选 ark-plan 为默认（顺序不变，coding 仍是列表第一个）
+    s.save(base, default_provider="ark-plan")
+    assert s.default_provider_name() == "ark-plan"
+    assert s.default_target() == ("ark-plan", "p")
+    # 停用被选中的默认供应商 → 保存 422
+    disabled = [dict(base[0], enabled=False), dict(base[1], enabled=True)]
+    with pytest.raises(ProviderError, match="已停用"):
+        s.save(disabled, default_provider="ark-coding")
+    # default_provider 不在清单 → 422
+    with pytest.raises(ProviderError, match="不存在"):
+        s.save(base, default_provider="nope")
+    # 不传 default_provider → 沿用已存设置
+    s.save(base)
+    assert s.default_provider_name() == "ark-plan"
+    # build() 跟随默认供应商
+    assert s.build().model == "p"
 
 
 def test_provider_discover_listed_and_fallback(tmp_path):

@@ -9,7 +9,8 @@ import "./flow.css" // 必须在 xyflow css 之后：深色覆盖（plain CSS �
 import { Maximize2, RotateCcw, X } from "lucide-react"
 import { api } from "@/lib/api"
 import { sessionLabel } from "@/lib/roles"
-import type { TaskGraph, TaskGraphEdge, TaskGraphNode } from "@/lib/types"
+import { fmtDateTimeMin, utcTitle } from "@/lib/datetime"
+import type { TaskGraph, TaskGraphEdge, TaskGraphNode, TaskPlanStatus } from "@/lib/types"
 import { Button } from "@/components/ui/button"
 import {
   AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
@@ -41,17 +42,30 @@ const NODE_STATUS_COLOR: Record<TaskGraphNode["status"], string> = {
   failed: "#f85149",
 }
 
+const STATUS_LABEL: Record<TaskGraphNode["status"], string> = {
+  open: "待认领",
+  claimed: "执行中",
+  done: "完成",
+  failed: "失败",
+}
+
+// 步骤状态图标对齐后端 _render_plan 与 PlanPanel（core/agent/tools.py）
+const STEP_ICON: Record<TaskPlanStatus, string> = { todo: "○", doing: "▶", done: "●", blocked: "■" }
+const STEP_CLS: Record<TaskPlanStatus, string> = {
+  todo: "text-muted-foreground",
+  doing: "text-primary",
+  done: "text-emerald-400/80",
+  blocked: "text-amber-400",
+}
+
 export type TaskFlowProps = {
   pid: string
   pausedSids: ReadonlySet<string>
   /** LiveRoom 过滤后的相关事件计数（task 前缀 / message.inbox / session 前缀）；变化即去抖重拉 */
   wsBump: number
-  onAttachSession: (sid: string) => void
-  /** F9 任务窗：双击已收尾（done/failed）任务卡 → 开带任务上下文的新窗（幂等） */
-  onSpawnTaskWindow: (taskId: string) => void
 }
 
-function Flow({ pid, pausedSids, wsBump, onAttachSession, onSpawnTaskWindow }: TaskFlowProps) {
+function Flow({ pid, pausedSids, wsBump }: TaskFlowProps) {
   const rf = useReactFlow()
   const updateNodeInternals = useUpdateNodeInternals()
   const [graph, setGraph] = useState<TaskGraph | null>(null)
@@ -161,17 +175,25 @@ function Flow({ pid, pausedSids, wsBump, onAttachSession, onSpawnTaskWindow }: T
     () => graph?.edges.find((e) => e.id === selectedEdgeId) ?? null,
     [graph, selectedEdgeId])
 
-  // 双击三分支（F9）：执行中 → 挂回正在跑的会话页签；done/failed → 开带任务上下文
-  // 的新「任务窗」（幂等，服务端已有窗直接返回）；open/会话已关 → 跳任务看板定位
+  // 单击节点 → 详情浮卡（objective 全文 + plan 全步骤）；数据轮询更新时浮卡内容自动跟进。
+  // 会话名与 flowNodes 同源映射角色中文名（TaskNode 直读 n.session.name）。
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
+  const selectedNode: TaskGraphNode | null = useMemo(() => {
+    const n = graph?.nodes.find((x) => x.id === selectedNodeId) ?? null
+    if (!n) return null
+    return n.session ? { ...n, session: { ...n.session, name: sessionLabel(n.session, roleNames) } } : n
+  }, [graph, selectedNodeId, roleNames])
+
+  // 双击节点（v0.71 任务即窗口）：统一 goto-session 直开专属执行窗页签
+  // （target_session 优先，缺省回退认领会话；两者皆无才回退任务看板定位）
   const activateNode = useCallback((n: TaskGraphNode) => {
-    if (n.claimed_by && n.session && n.session.status !== "closed") {
-      onAttachSession(n.claimed_by)
-    } else if (n.status === "done" || n.status === "failed") {
-      onSpawnTaskWindow(n.id)
+    const sid = n.target_session || n.claimed_by
+    if (sid) {
+      window.dispatchEvent(new CustomEvent("goto-session", { detail: { sessionId: sid } }))
     } else {
       window.dispatchEvent(new CustomEvent("goto-tasks", { detail: { taskId: n.id } }))
     }
-  }, [onAttachSession, onSpawnTaskWindow])
+  }, [])
 
   // 节点删除（四态皆可；claimed 警示，409 子任务错误留在对话框内）
   const [deleteTarget, setDeleteTarget] = useState<TaskGraphNode | null>(null)
@@ -225,7 +247,8 @@ function Flow({ pid, pausedSids, wsBump, onAttachSession, onSpawnTaskWindow }: T
       kind: e.kind,
       refs: e.refs,
       selected: e.id === selectedEdgeId,
-      onSelect: (id: string) => setSelectedEdgeId(id),
+      // 两个浮卡互斥：选边清节点详情，选节点（onNodeClick）也清边
+      onSelect: (id: string) => { setSelectedEdgeId(id); setSelectedNodeId(null) },
     },
     style: e.kind === "parent"
       ? { stroke: "#6e7681", strokeWidth: 1.5, opacity: 0.9 }
@@ -251,7 +274,9 @@ function Flow({ pid, pausedSids, wsBump, onAttachSession, onSpawnTaskWindow }: T
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
         onNodesChange={onNodesChangeCb}
-        onPaneClick={() => setSelectedEdgeId(null)}
+        // 单击节点弹详情（xyflow 层挂：拖拽后不误触发，节点内删除钮 stopPropagation 天然隔离）
+        onNodeClick={(_, node) => { setSelectedEdgeId(null); setSelectedNodeId(node.id) }}
+        onPaneClick={() => { setSelectedEdgeId(null); setSelectedNodeId(null) }}
         minZoom={0.15}
         proOptions={{ hideAttribution: true }}
       >
@@ -276,7 +301,7 @@ function Flow({ pid, pausedSids, wsBump, onAttachSession, onSpawnTaskWindow }: T
           <span className="inline-block w-5 border-t-2 border-dashed border-[#a371f7]" />
           ✉ 私信
         </span>
-        <span className="hidden md:inline">双击节点挂回会话 / 跳看板</span>
+        <span className="hidden md:inline">单击节点看详情 · 双击挂回会话 / 跳看板</span>
         <button
           type="button" title="重置布局（清除手动位置）"
           className="rounded p-1 hover:bg-accent/40 hover:text-foreground"
@@ -303,7 +328,7 @@ function Flow({ pid, pausedSids, wsBump, onAttachSession, onSpawnTaskWindow }: T
       ) : graph.nodes.length === 0 && (
         <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
           <p className="rounded border border-dashed border-[#30363d] px-4 py-2 text-xs text-muted-foreground">
-            还没有任务——在任务看板或直播间插话发布一个，分解结构和私信会在这里成图
+            还没有任务——在任务看板或会话页插话发布一个，分解结构和私信会在这里成图
           </p>
         </div>
       )}
@@ -340,6 +365,82 @@ function Flow({ pid, pausedSids, wsBump, onAttachSession, onSpawnTaskWindow }: T
               </li>
             ))}
           </ul>
+        </div>
+      )}
+
+      {/* 单击节点：详情浮卡（objective 全文 + plan 全步骤；随 3s 轮询实时跟进） */}
+      {selectedNode && (
+        <div
+          className="absolute bottom-3 left-1/2 z-20 w-[30rem] max-w-[90%] -translate-x-1/2 rounded-md border bg-[#1c2128]/95 p-2.5 shadow-lg"
+          style={{ borderColor: `${NODE_STATUS_COLOR[selectedNode.status]}66` }}
+        >
+          <div className="flex items-center gap-1.5">
+            <span className="min-w-0 truncate rounded bg-muted px-1 font-mono text-[9px] text-muted-foreground">
+              {selectedNode.task_type}
+            </span>
+            {(selectedNode.attempts ?? 0) >= 2 && (
+              <span className="shrink-0 font-mono text-[9px] text-muted-foreground" title="任务多次执行（上下文随任务保留，跨会话接手）">
+                ↻{selectedNode.attempts}
+              </span>
+            )}
+            <span className="shrink-0 font-mono text-[9px]" style={{ color: NODE_STATUS_COLOR[selectedNode.status] }}>
+              {STATUS_LABEL[selectedNode.status]}
+            </span>
+            <span className="shrink-0 font-mono text-[9px] text-muted-foreground">P{selectedNode.priority}</span>
+            {selectedNode.session && (
+              <span className="min-w-0 flex-1 truncate text-right font-mono text-[9px] text-primary" title={`认领会话：${selectedNode.session.name || selectedNode.session.id}`}>
+                ● {selectedNode.session.name || selectedNode.session.id.slice(0, 14)}
+              </span>
+            )}
+            <span className="flex-1" />
+            <button
+              type="button" title="关闭"
+              className="shrink-0 rounded p-0.5 text-muted-foreground hover:text-foreground"
+              onClick={() => setSelectedNodeId(null)}
+            >
+              <X className="size-3.5" />
+            </button>
+          </div>
+
+          <p className="mt-1 text-[10px] font-medium text-muted-foreground">任务描述</p>
+          <p className="mt-0.5 max-h-32 overflow-auto whitespace-pre-wrap break-words text-[11px] leading-snug">
+            {selectedNode.objective}
+          </p>
+
+          <p className="mt-2 text-[10px] font-medium text-muted-foreground">
+            任务计划
+            {planStats(selectedNode.plan).total > 0 && (
+              <span className="ml-1.5 font-mono text-sky-400">
+                ▦ {planStats(selectedNode.plan).done}/{planStats(selectedNode.plan).total}
+              </span>
+            )}
+          </p>
+          {planStats(selectedNode.plan).total === 0 ? (
+            <p className="mt-0.5 text-[11px] text-muted-foreground">
+              未制定计划（认领后经 A2 计划闸先写计划再动手）
+            </p>
+          ) : (
+            <ol className="mt-0.5 max-h-40 space-y-1 overflow-auto">
+              {selectedNode.plan.map((s) => (
+                <li key={s.id} className="flex items-start gap-1.5 text-[11px]">
+                  <span className={`shrink-0 font-mono ${STEP_CLS[s.status]}`} title={s.status}>
+                    {STEP_ICON[s.status]}
+                  </span>
+                  <span className={`min-w-0 flex-1 ${s.status === "done" ? "text-muted-foreground line-through decoration-muted-foreground/40" : ""}`}>
+                    {s.title}
+                    {s.status === "blocked" && s.note && (
+                      <span className="ml-1 text-amber-400">— {s.note}</span>
+                    )}
+                  </span>
+                  <span className="shrink-0 font-mono text-[9px] text-muted-foreground" title={utcTitle(s.ts)}>
+                    {fmtDateTimeMin(s.ts)}
+                  </span>
+                </li>
+              ))}
+            </ol>
+          )}
+
+          <p className="mt-1.5 text-[9px] text-muted-foreground">双击节点挂回会话 / 跳看板</p>
         </div>
       )}
 

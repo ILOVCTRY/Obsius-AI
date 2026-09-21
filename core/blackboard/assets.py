@@ -85,6 +85,8 @@ def register_asset(bb, project_id: str, value: str, type_: str = "auto",
       merge，不插新行（修人工路径重复行）。
     - domain 且未显式给 parent → 自动 DNS 解析挂 host；同 IP 已有主域名时
       本域名标 meta.alias=true，首个域名写 host.meta.primary_domain。
+    - url/service 主机部为域名时：不猜 DNS 也不造行，同名 domain 资产已存在
+      才精确挂其下（存量孤儿行走 scripts/adopt_orphan_assets.py 补挂）。
     """
     value = value.strip()
     if not value:
@@ -100,7 +102,8 @@ def register_asset(bb, project_id: str, value: str, type_: str = "auto",
     host_id = None
     host_existed = False
 
-    # 自动挂载（§5.2）：url/service 值里含 IP 主机部 → 建/复用 host 挂其下
+    # 自动挂载（§5.2）：url/service 值里含 IP 主机部 → 建/复用 host 挂其下；
+    # 域名主机部不猜 DNS，但同名 domain 资产已存在时精确挂其下
     if parent_id is None and type_ in ("url", "service"):
         host_part = None
         if type_ == "url":
@@ -114,7 +117,9 @@ def register_asset(bb, project_id: str, value: str, type_: str = "auto",
                                                      author, session_id)
                 parent_id = host_id
             except ValueError:
-                pass  # 域名主机部：不猜 DNS，保持独立行
+                d = bb.find_asset(project_id, "domain", host_part)
+                if d is not None:
+                    parent_id = d["id"]  # 精确匹配既有 domain；缺失保持独立行
 
     # domain 自动 DNS 挂载 + 主域名/别名标记（E6 ③⑤）
     dns_resolved = False

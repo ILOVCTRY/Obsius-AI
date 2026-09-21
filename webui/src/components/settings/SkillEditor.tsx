@@ -42,7 +42,11 @@ export const SkillEditor = forwardRef<SkillEditorHandle, {
   detail: SkillDetail
   vocab: SkillVocab | null
   onDirtyChange: (dirty: boolean) => void
-}>(function SkillEditor({ detail, vocab, onDirtyChange }, ref) {
+  /** 初始/重置后的正文模式：深链跳转（直播间路由名/doctor）传 "preview"（F12 配套） */
+  startMode?: "edit" | "preview"
+  /** 变化时强制重置一次（同一技能重复深链跳转时 detail 不变、effect 不触发，靠它驱动） */
+  resetKey?: unknown
+}>(function SkillEditor({ detail, vocab, onDirtyChange, startMode, resetKey }, ref) {
   const [form, setForm] = useState<SkillFormState>(emptyForm)
   const [passthrough, setPassthrough] = useState<string[]>([])
   const [name, setName] = useState("")
@@ -55,11 +59,11 @@ export const SkillEditor = forwardRef<SkillEditorHandle, {
     setPassthrough(parsed.passthrough)
     setName(parsed.hasFm ? parsed.name : detail.name)
     setFormOpen(false)
-    setBodyMode("edit")
+    setBodyMode(startMode ?? "edit")
     onDirtyChange(false)
-    // 仅在切换技能/重载时重置（detail.raw 在保存后也会变，正好复位 dirty）
+    // 仅在切换技能/重载/深链重置时重置（detail.raw 在保存后也会变，正好复位 dirty）
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [detail.name, detail.raw])
+  }, [detail.name, detail.raw, resetKey])
 
   useImperativeHandle(ref, () => ({
     getRaw: () => {

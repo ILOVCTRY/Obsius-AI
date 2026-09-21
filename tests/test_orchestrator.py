@@ -19,7 +19,8 @@ class ScriptedLLM(AnthropicCompatProvider):
         self.script = list(script)
         self.calls: list[dict] = []
 
-    def chat(self, messages, *, system=None, tools=None, max_tokens=4096, temperature=None):
+    def chat(self, messages, *, system=None, tools=None, max_tokens=4096, temperature=None,
+             on_thinking=None, on_text=None, should_cancel=None):
         self.calls.append({"messages": json.loads(json.dumps(messages)), "system": system})
         item = self.script.pop(0)
         if "text" in item:
@@ -52,6 +53,71 @@ def make_orch(env, llm, factory=None, config=None, track=None, packs_root="packs
                         gate=gate, on_task_published=on_task_published,
                         state_loader=state_loader, state_saver=state_saver,
                         heartbeat=heartbeat, autonomy_provider=autonomy_provider)
+
+
+def test_stats_injection_hvt_surface_recent_tasks_and_digest(env):
+    """态势增强：HVT（meta.tags 高价值）段/攻击面进度（HVT 优先排序+in_progress）
+    /recent_closed（result_note）+ digest 常驻注入。"""
+    from core.blackboard.assets import register_asset
+    bb, project = env
+    pid = project["id"]
+    tq = TaskQueue(bb)
+    hvt_covered = register_asset(bb, pid, "10.205.1.10", type_="host")
+    bb.update_asset_meta(hvt_covered["id"], {"tags": ["高价值"]})
+    hvt_open = register_asset(bb, pid, "10.205.9.9", type_="host")
+    bb.update_asset_meta(hvt_open["id"], {"tags": ["高价值"]})
+    register_asset(bb, pid, "10.205.1.20", type_="host")
+    half = register_asset(bb, pid, "https://a.t.com/admin", type_="url")
+    bb.set_asset_status(half["id"], "visited", note="看过首页")
+
+    tq.publish(pid, "扫 10.205.1.10 全端口", task_type="generic",
+               conflict_keys=["host:10.205.1.10"])
+    done_id = tq.publish(pid, "已完成任务", task_type="generic")
+    sess = bb.register_session(pid, "w1", role="_generalist")
+    tq.claim(done_id, sess["id"])
+    tq.complete(done_id, sess["id"], result_note="全端口扫完，135/443 开")
+    prog_id = tq.publish(pid, "进行中任务", task_type="generic")
+    sess2 = bb.register_session(pid, "w2", role="_generalist")
+    tq.claim(prog_id, sess2["id"])
+    tq.set_plan(prog_id, sess2["id"], [{"title": "步骤一"}, {"title": "步骤二"}])
+    tq.step_plan(prog_id, sess2["id"], "p1", "done")
+    bb.append_event(pid, "project.digest",
+                    {"digest": "# 上轮简报\n覆盖 40%"}, author="orchestrator")
+
+    llm = ScriptedLLM([{"tool_use": [ScriptedLLM.tool_call("d1", "done", {})]}])
+    orch = make_orch(env, llm, track="pentest")
+    stats = orch._stats()
+    assert stats["assets"]["uncovered"][0]["value"] == "10.205.9.9"  # HVT 优先排序
+    assert stats["assets"]["done_count"] == 0
+    assert [i["value"] for i in stats["assets"]["in_progress"]] == \
+        ["https://a.t.com/admin"]
+    hv = {h["value"]: h for h in stats["high_value"]}
+    assert hv["10.205.1.10"]["covered"] is True
+    assert hv["10.205.9.9"]["covered"] is False
+    rc = {r["id"]: r for r in stats["tasks"]["recent_closed"]}
+    assert "全端口扫完，135/443 开" in rc[done_id]["result_note"]
+    assert stats["tasks"]["claimed_now"][0]["plan_done"] == 1
+
+    orch.tick()
+    system = llm.calls[0]["system"]
+    assert '"high_value"' in system and "10.205.9.9" in system \
+        and "10.205.1.10" in system
+    assert "in_progress" in system and "https://a.t.com/admin" in system
+    assert "recent_closed" in system and "全端口扫完，135/443 开" in system
+    assert "上一份简报（常驻" in system and "覆盖 40%" in system
+
+
+def test_stats_no_hvt_no_section(env):
+    """无高价值标签资产时 high_value 为空列表（资产本体仍走 uncovered 注入，属正常）。"""
+    from core.blackboard.assets import register_asset
+    bb, project = env
+    register_asset(bb, project["id"], "10.0.0.1", type_="host")
+    llm = ScriptedLLM([{"tool_use": [ScriptedLLM.tool_call("d1", "done", {})]}])
+    orch = make_orch(env, llm, track="pentest")
+    stats = orch._stats()
+    assert stats["high_value"] == []
+    orch.tick()
+    assert '"high_value": []' in llm.calls[0]["system"]
 
 
 def test_tick_recycles_expired_lease_and_surfaces_it(env):
@@ -268,7 +334,7 @@ def test_track_rejects_unregistered_task_type(env):
 
 
 def test_publish_noise_defaults_from_registry(env):
-    """noise_budget 缺省取轨注册表该类型默认值（assessment: exploit=low）。"""
+    """noise_budget 缺省取轨注册表该类型默认值（pentest: exploit=low）。"""
     bb, project = env
     llm = ScriptedLLM([
         {"tool_use": [ScriptedLLM.tool_call("p1", "publish_task",
@@ -276,7 +342,7 @@ def test_publish_noise_defaults_from_registry(env):
                                              "conflict_keys": ["ip:10.0.0.9"]})]},
         {"tool_use": [ScriptedLLM.tool_call("d1", "done", {})]},
     ])
-    orch = make_orch(env, llm, track="assessment")
+    orch = make_orch(env, llm, track="pentest")
     orch.tick()
     tasks = TaskQueue(bb).list_tasks(project["id"])
     assert len(tasks) == 1 and tasks[0]["noise_budget"] == "low"
@@ -361,7 +427,7 @@ def test_publish_success_calls_counter(env):
         {"tool_use": [ScriptedLLM.tool_call("d1", "done", {})]},
     ])
     orch = make_orch(env, llm,
-                     on_task_published=lambda: bb.usage_inc_tasks(project["id"]))
+                     on_task_published=lambda task_id=None: bb.usage_inc_tasks(project["id"]))
     orch.tick()
     assert bb.usage_state_get(project["id"])["tasks_published"] == 1
 
@@ -556,7 +622,7 @@ def test_l0_publish_task_only_proposes(env):
                                              "conflict_keys": ["ip:10.0.0.9"]})]},
         {"tool_use": [ScriptedLLM.tool_call("d1", "done", {})]},
     ])
-    orch = make_orch(env, llm, track="assessment",
+    orch = make_orch(env, llm, track="pentest",
                      config=OrchestratorConfig(propose_only=True),
                      gate=boom_gate, on_task_published=boom_counter)
     result = orch.tick()
@@ -566,7 +632,7 @@ def test_l0_publish_task_only_proposes(env):
     prop = result["proposals"][0]
     assert prop["op"] == "publish_task"
     assert prop["args"] == {
-        "objective": "外网打点 10.0.0.9", "scope": "", "task_type": "exploit",
+        "objective": "外网打点 10.0.0.9", "role": "", "scope": "", "task_type": "exploit",
         "noise_budget": "low", "priority": 2,
         "conflict_keys": ["ip:10.0.0.9"], "refs": [], "parent_id": None}
     assert isinstance(prop["event_id"], int)
@@ -637,7 +703,7 @@ def test_l0_proposal_requires_conflict_keys(env):
                                             {"objective": "外网打点", "task_type": "exploit"})]},
         {"tool_use": [ScriptedLLM.tool_call("d1", "done", {})]},
     ])
-    orch = make_orch(env, llm, track="assessment",
+    orch = make_orch(env, llm, track="pentest",
                      config=OrchestratorConfig(propose_only=True))
     result = orch.tick()
     assert result["proposals"] == []
@@ -833,7 +899,7 @@ def test_decompose_parent_child_and_depth_limit(env):
     ])
 
     captured: dict[str, str] = {}
-    orch = make_orch(env, llm, track="assessment")
+    orch = make_orch(env, llm, track="pentest")
     # 借 dispatch 层拿到第一发 parent task_id 再喂给后续子任务
     orig_dispatch = orch._dispatch
 
@@ -891,36 +957,159 @@ def test_publish_per_tick_gate_and_l0_same_gate(env):
 
 
 def test_assets_view_uncovered_and_by_type(env):
-    """C1：_stats 资产视图——by_type 计数 + 未覆盖清单（被任务提及的资产不算未覆盖）。"""
+    """C1：_stats 资产视图——by_type 计数 + 未覆盖清单（2026-09-18 新口径：
+    被任务提及的资产 **或** status ∈ visited/scanning/tested_clean 都不算未覆盖，
+    任务 done 后资产状态回流，uncovered 才能收敛）。"""
     bb, project = env
     tq = TaskQueue(bb)
     a_cov = bb.upsert_asset(project["id"], "domain", "covered.com")["id"]
     a_unc = bb.upsert_asset(project["id"], "domain", "uncovered.com")["id"]
+    a_vis = bb.upsert_asset(project["id"], "domain", "visited.com")["id"]
     bb.upsert_asset(project["id"], "host", "10.0.0.8")
+    bb.set_asset_status(a_vis, "visited", note="已访问")
     tq.publish(project["id"], "扫 covered.com", task_type="recon")
     orch = make_orch(env, ScriptedLLM([{"tool_use": [ScriptedLLM.tool_call("d1", "done", {})]}]))
     stats = orch._stats()
     av = stats["assets"]
-    assert av["by_type"]["domain"] == 2 and av["by_type"]["host"] == 1
+    assert av["by_type"]["domain"] == 3 and av["by_type"]["host"] == 1
     ids = {u["id"] for u in av["uncovered"]}
-    assert a_unc in ids and a_cov not in ids
+    assert a_unc in ids and a_cov not in ids and a_vis not in ids
     assert av["uncovered_total"] >= 2  # 10.0.0.8 也未覆盖
+    # visited 视为覆盖 → 不进 uncovered；scanning/tested_clean 同口径（set_asset_status 已测四态）
 
 
 def test_mission_view_in_stats_and_prompt(env):
-    """C2 作战模式：mission/ROE 进 _stats 与系统提示（编排器对照判据评估收敛）。"""
+    """R2 轨级语义：mission/ROE 进 _stats 与系统提示（编排器对照判据评估收敛）。"""
     bb, project = env
     bb.update_project_config(project["id"], {
-        "mode": "redteam",
         "mission": {"text": "拿到域控", "criteria": "□ 拿到域管哈希\n□ 截图留证"},
         "redteam_roe": {"targets": "*.corp.local", "window": "w",
                           "exclusions": "工控段", "approver": "owner"},
     })
     llm = ScriptedLLM([{"tool_use": [ScriptedLLM.tool_call("d1", "done", {})]}])
-    orch = make_orch(env, llm, track="assessment")
+    orch = make_orch(env, llm, track="redteam")
     stats = orch._stats()
-    assert stats["mission"]["mode"] == "redteam"
+    assert stats["mission"]["track"] == "redteam"
     assert stats["mission"]["roe"]["targets"] == "*.corp.local"
     orch.tick()
     system = llm.calls[0]["system"]
-    assert "作战模式：redteam" in system and "拿到域控" in system and "□ 拿到域管哈希" in system
+    assert "行动边界：红队行动" in system and "拿到域控" in system and "□ 拿到域管哈希" in system
+
+
+# ---------- v14：发布去重预检 + role 贯穿 + targets 态势 + role 饿死告警 ----------
+
+def _role_packs(tmp_path):
+    """临时 packs：demo 轨含 _generalist + recon 两个角色。"""
+    packs = tmp_path / "rp"
+    role_dir = packs / "tracks" / "demo" / "roles"
+    role_dir.mkdir(parents=True)
+    (role_dir / "_generalist.yaml").write_text("name: _generalist\npersona: 兜底\n", encoding="utf-8")
+    (role_dir / "recon.yaml").write_text(
+        'name: recon\npersona: 侦察专才\n', encoding="utf-8")
+    (role_dir / "privesc.yaml").write_text(
+        'name: privesc\npersona: 提权专才\n', encoding="utf-8")
+    return packs
+
+
+def test_orch_publish_dedup_precheck_direct_and_l0(env, tmp_path):
+    """编排器发布 dedup 预检（v14 补缺口）：同指纹 open 任务在，直接发布与
+    L0 提案分支都不再产新任务/新提案，回填 [复用]。"""
+    bb, project = env
+    pid = project["id"]
+    tq = TaskQueue(bb)
+    t1 = tq.publish(pid, "扫一遍", task_type="generic")
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("p1", "publish_task",
+                                            {"objective": "扫一遍", "task_type": "generic"})]},
+        {"tool_use": [ScriptedLLM.tool_call("d1", "done", {})]},
+    ])
+    orch = make_orch(env, llm)
+    orch.tick()
+    dumped = json.dumps(llm.calls[1]["messages"], ensure_ascii=False)
+    assert "[复用]" in dumped and t1 in dumped
+    assert len(tq.list_tasks(pid)) == 1  # 没有第二条
+    # L0 提案分支同样先查重：命中不产提案
+    orch2 = make_orch(env, ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("p2", "publish_task",
+                                            {"objective": "扫一遍", "task_type": "generic"})]},
+        {"tool_use": [ScriptedLLM.tool_call("d2", "done", {})]},
+    ]), config=OrchestratorConfig(propose_only=True))
+    orch2.tick()
+    assert orch2._proposals == []
+
+
+def test_orch_publish_role_validation_and_passthrough(env, tmp_path):
+    """role 贯穿：合法 role 入库/回执带出；非法 role 拒收（直接与 L0 同闸）；
+    工具 schema 含 role；系统提示用 role 参数口径。"""
+    bb, project = env
+    pid = project["id"]
+    packs = _role_packs(tmp_path)
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("p1", "publish_task",
+                                            {"objective": "侦察 A", "task_type": "generic",
+                                             "role": "recon"})]},
+        {"tool_use": [ScriptedLLM.tool_call("p2", "publish_task",
+                                            {"objective": "侦察 B", "task_type": "generic",
+                                             "role": "typo"})]},
+        {"tool_use": [ScriptedLLM.tool_call("d1", "done", {})]},
+    ])
+    orch = make_orch(env, llm, track="demo", packs_root=packs)
+    orch.tick()
+    tasks = {t["objective"]: t for t in TaskQueue(bb).list_tasks(pid)}
+    assert tasks["侦察 A"]["role"] == "recon"
+    assert "侦察 B" not in tasks  # 非法 role 未入库
+    dumped = json.dumps(llm.calls[-1]["messages"], ensure_ascii=False)
+    assert "未注册的 role" in dumped
+    # 工具 schema 与系统提示口径
+    pub = next(t for t in orch._orch_tools() if t["name"] == "publish_task")
+    assert "role" in pub["input_schema"]["properties"]
+    assert "role 参数" in llm.calls[0]["system"]
+    # L0 提案 args 带 role
+    orch2 = make_orch(env, ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("p3", "publish_task",
+                                            {"objective": "侦察 C", "task_type": "generic",
+                                             "role": "recon"})]},
+        {"tool_use": [ScriptedLLM.tool_call("d2", "done", {})]},
+    ]), track="demo", packs_root=packs, config=OrchestratorConfig(propose_only=True))
+    orch2.tick()
+    assert orch2._proposals[0]["args"]["role"] == "recon"
+
+
+def test_orch_stats_targets_aggregation(env):
+    """_stats.tasks.targets：open+claimed 按归一化目标键聚合 top5，达阈值标 at_limit。"""
+    bb, project = env
+    pid = project["id"]
+    tq = TaskQueue(bb)
+    for i in range(4):
+        tq.publish(pid, f"打 {i}", noise_budget="low", conflict_keys=["ip:1.2.3.4"])
+    tq.publish(pid, "别的目标", noise_budget="low", conflict_keys=["ip:5.6.7.8"])
+    orch = make_orch(env, ScriptedLLM([{"tool_use": [ScriptedLLM.tool_call("d1", "done", {})]}]))
+    targets = {t["target"]: t for t in orch._stats()["tasks"]["targets"]}
+    assert targets["ip:1.2.3.4"]["in_queue"] == 4 and targets["ip:1.2.3.4"]["at_limit"] is True
+    assert targets["ip:5.6.7.8"]["in_queue"] == 1 and targets["ip:5.6.7.8"]["at_limit"] is False
+    # 第 5 个同目标任务被防碎闸拒收（编排器同样受闸）
+    out = orch._tool_publish_task(objective="打爆", task_type="generic",
+                                  noise_budget="low", conflict_keys=["ip:1.2.3.4"])
+    assert "[拒绝]" in out and "任务已达" in out
+
+
+def test_orch_starvation_role_dimension(env, tmp_path):
+    """role 饿死告警（v0.71 任务即窗口修订）：role 未注册 → 告警；「无底色匹配
+    会话在岗」分支退役（每任务发布即有专属窗）；绑定窗 closed → 重绑提醒告警。"""
+    bb, project = env
+    pid = project["id"]
+    packs = _role_packs(tmp_path)
+    tq = TaskQueue(bb)
+    tq.publish(pid, "幽灵角色", task_type="generic", role="ghost", created_by="human")
+    recon_id = tq.publish(pid, "侦察活", task_type="generic", role="recon", created_by="human")
+    # 注册角色但绑定窗已关（closed 会话）→ 等调度器重绑的告警
+    closed = bb.register_session(pid, "已关侦察", role="recon")
+    bb.close_session(closed["id"])
+    tq.bind_session(recon_id, closed["id"])
+    orch = make_orch(env, ScriptedLLM([{"tool_use": [ScriptedLLM.tool_call("d1", "done", {})]}]),
+                     track="demo", packs_root=packs)
+    orch.tick()
+    starv = [e for e in bb.recent_events(pid) if e["kind"] == "task.starvation"]
+    reasons = {w["objective"]: w["reason"] for e in starv for w in e["payload"]["warnings"]}
+    assert "未在 demo 轨 roles/ 注册" in reasons["幽灵角色"]
+    assert "侦察活" in reasons and "重绑新窗" in reasons["侦察活"]

@@ -1,8 +1,11 @@
-# 研究轨任务类型注册表（DESIGN.md §4.5.5）
+# 研究轨任务类型注册表（DESIGN.md §4.5.5；R4 逆向开发管线新增 blueprint/reconstruct）
 # 格式：<type>: <默认噪声预算>。generic 为内置兜底类型，始终合法。
 # 研究轨全部被动：静态分析/反编译不接触真实目标，无主动流量。
+# blueprint=模块划分与蓝图汇总；reconstruct=重建子任务与组装集成（生成代码一律 untrusted 容器执行）。
 generic: passive
 triage: passive
 reverse: passive
 analyze: passive
 verify: passive
+blueprint: passive
+reconstruct: passive

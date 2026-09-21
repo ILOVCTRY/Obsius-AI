@@ -53,7 +53,7 @@ def test_relative_store_root_is_resolved(tmp_path, monkeypatch):
 
 
 def test_slugify_rules():
-    assert slugify("Web 渗透 A1", "assessment") == "web-a1"
+    assert slugify("Web 渗透 A1", "pentest") == "web-a1"
     assert slugify("  --特殊!@#--", "ctf").startswith("ctf-")  # 无 ASCII → 回退
     s = slugify("x" * 100, "ctf")
     assert len(s) <= 48
@@ -70,7 +70,7 @@ def test_slug_collision_suffix(store):
 def test_list_and_open_roundtrip(store):
     p1 = store.create_project("alpha", "ctf")
     p2 = store.create_project("beta-项目", "pentest")  # 旧域名透明映射
-    assert p2.track == "assessment" and p2.capabilities == ["web"]
+    assert p2.track == "pentest" and p2.capabilities == ["web"]
     listed = {m["id"]: m for m in store.list_projects()}
     assert set(listed) == {p1.id, p2.id}
     assert listed[p2.id]["name"] == "beta-项目"
@@ -95,9 +95,9 @@ def test_legacy_domain_project_json_mapped(store, tmp_path):
     }, ensure_ascii=False), encoding="utf-8")
     proj = store.open_project("legacy-pentest")
     assert isinstance(proj, Project)
-    assert proj.track == "assessment"
+    assert proj.track == "pentest"
     assert proj.capabilities == ["web"]
-    assert proj.domain == "assessment"        # 弃用属性值 = track
+    assert proj.domain == "pentest"        # 弃用属性值 = track
     # 旧 ctf domain
     ctf_dir = store.root / "legacy-ctf"
     ctf_dir.mkdir()
@@ -119,11 +119,11 @@ def test_legacy_domain_project_json_mapped(store, tmp_path):
 
     # list_projects / view_meta 的响应也必须补齐（前端 profile 推导依赖）
     listed = {m["id"]: m for m in store.list_projects()}
-    assert listed["proj-legacy0001"]["track"] == "assessment"
+    assert listed["proj-legacy0001"]["track"] == "pentest"
     assert listed["proj-legacy0001"]["capabilities"] == ["web"]
     assert (listed["proj-legacy0003"]["track"],
             listed["proj-legacy0003"]["capabilities"]) == ("research", ["binary"])
-    assert proj.view_meta["track"] == "assessment" and proj.view_meta["capabilities"] == ["web"]
+    assert proj.view_meta["track"] == "pentest" and proj.view_meta["capabilities"] == ["web"]
     # 磁盘原样：只读补齐，绝不回写
     assert json.loads((legacy_dir / "project.json").read_text(encoding="utf-8")).get("track") is None
 
@@ -219,6 +219,80 @@ def test_list_trashed(store, tmp_path):
 def test_delete_missing_raises(store):
     with pytest.raises(FileNotFoundError):
         store.delete_project("nope")
+
+
+def test_update_project_track(store):
+    """R1 轨退役迁移：update_project_track 改黑板行 track/domain（domain 同步写 track 值）。"""
+    proj = store.create_project("旧评估", "assessment", capabilities=["web"])
+    pid = proj.id
+    # capabilities 省略 → 不动；改 track
+    proj.bb.update_project_track(pid, "pentest")
+    row = proj.bb.get_project(pid)
+    assert row["track"] == "pentest"
+    assert row["domain"] == "pentest"  # 旧列同步兜底
+    assert row["capabilities"] == ["web"]  # 省略时原样保留
+    # 带 capabilities 更新
+    proj.bb.update_project_track(pid, "pentest", ["web", "binary"])
+    row = proj.bb.get_project(pid)
+    assert row["capabilities"] == ["binary", "web"]  # 排序写入
+    # 不存在的项目
+    with pytest.raises(LookupError):
+        proj.bb.update_project_track("proj-0000000000000", "pentest")
+
+
+def test_normalize_rule_profiles_matrix():
+    """F11 rule_profiles 归一化矩阵：合法三态 / 非法 / 未知键剥除 / None→{}。"""
+    from core.autonomy import normalize_rule_profiles
+
+    assert normalize_rule_profiles(None) == {}
+    assert normalize_rule_profiles({}) == {}
+    assert normalize_rule_profiles({"owners": "*"}) == {"owners": "*"}
+    assert normalize_rule_profiles({"rating": []}) == {"rating": []}
+    assert normalize_rule_profiles({"owners": ["b", "a", "b", " "]}) == {"owners": ["b", "a"]}
+    assert normalize_rule_profiles({"owners": "*", "rating": ["x"]}) == {
+        "owners": "*", "rating": ["x"]}
+    # 未知键剥除
+    assert normalize_rule_profiles({"owners": "*", "junk": 1}) == {"owners": "*"}
+    # 非法形态
+    with pytest.raises(ValueError):
+        normalize_rule_profiles({"owners": "all"})
+    with pytest.raises(ValueError):
+        normalize_rule_profiles({"owners": [1, 2]})
+    with pytest.raises(ValueError):
+        normalize_rule_profiles({"rating": "*"})
+    with pytest.raises(ValueError):
+        normalize_rule_profiles("bad")
+    # 全空白 tag strip 后被剔除 → 合法空清单（非异常）
+    assert normalize_rule_profiles({"rating": ["  "]}) == {"rating": []}
+
+
+def test_update_config_rule_profiles(store):
+    """rule_profiles PATCH：非法 422（ValueError）；合法双写一致；null 清键恢复缺省态。"""
+    proj = store.create_project("rp", "pentest", capabilities=["web"])
+    pid = proj.id
+    # 合法：写入并双写
+    store.update_config(pid, {"rule_profiles": {"owners": "*", "rating": ["edu-rating"]}})
+    meta = json.loads((proj.path / "project.json").read_text(encoding="utf-8"))
+    assert meta["config"]["rule_profiles"] == {"owners": "*", "rating": ["edu-rating"]}
+    assert proj.bb.get_project(pid)["config"]["rule_profiles"] == {
+        "owners": "*", "rating": ["edu-rating"]}
+    # 归一化写入（去重保序）
+    store.update_config(pid, {"rule_profiles": {"rating": ["b", "a", "b"]}})
+    assert proj.bb.get_project(pid)["config"]["rule_profiles"] == {"rating": ["b", "a"]}
+    # 非法 → ValueError（API 层转 422）
+    with pytest.raises(ValueError):
+        store.update_config(pid, {"rule_profiles": {"owners": "all"}})
+    # 空对象 / null → 剥键恢复缺省态
+    store.update_config(pid, {"rule_profiles": {}})
+    meta = json.loads((proj.path / "project.json").read_text(encoding="utf-8"))
+    assert "rule_profiles" not in meta["config"]
+    store.update_config(pid, {"rule_profiles": {"rating": ["x"]}})
+    assert "rule_profiles" in proj.bb.get_project(pid)["config"]
+    store.update_config(pid, {"rule_profiles": None})
+    assert "rule_profiles" not in proj.bb.get_project(pid)["config"]
+    assert "rule_profiles" not in json.loads(
+        (proj.path / "project.json").read_text(encoding="utf-8"))["config"]
+    proj.close()
 
 
 def test_close_blocks_bb_reinstantiation(store):

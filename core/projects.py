@@ -212,21 +212,20 @@ class ProjectStore:
         else:
             new_config["autonomy"] = normalize_autonomy(
                 new_config.get("autonomy"), track=track)
-        # C2 作战模式（§6.9）：mode/mission/redteam_roe 归一化；mode 翻转时审计
-        old_mode = (meta.get("config") or {}).get("mode", "pentest")
-        if any(k in (patch or {}) for k in ("mode", "mission", "redteam_roe")):
-            from core.autonomy import normalize_mode_config
-            merged_mode = normalize_mode_config(new_config)
-            new_config.update(merged_mode)
-            if merged_mode["mode"] != old_mode:
-                meta["config"] = new_config
-                (p.path / PROJECT_FILE).write_text(
-                    json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-                p.bb.append_event(
-                    meta["id"], "mode.changed",
-                    {"old": old_mode, "new": merged_mode["mode"],
-                     "roe": merged_mode.get("redteam_roe")},
-                    author="human")
+        # 轨级语义（R2，§6.9 mode 退役 2026-09-17）：mission/redteam_roe 按轨归一化，
+        # mode 键退役剥离（盘上旧值清除）；ROE 不再强制 422（缺省按 pentest 上限兜底）
+        new_config.pop("mode", None)
+        if "mission" in new_config or "redteam_roe" in new_config:
+            from core.autonomy import normalize_track_semantics
+            new_config.update(normalize_track_semantics(new_config, track=track))
+        # F11 评级生效档案：归一化（非法 ValueError→422）；结果 {} 则剥键恢复缺省态
+        if "rule_profiles" in (patch or {}):
+            from core.autonomy import normalize_rule_profiles
+            profiles = normalize_rule_profiles(patch["rule_profiles"])
+            if profiles:
+                new_config["rule_profiles"] = profiles
+            else:
+                new_config.pop("rule_profiles", None)
         meta["config"] = new_config
         (p.path / PROJECT_FILE).write_text(
             json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")

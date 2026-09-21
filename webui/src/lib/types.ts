@@ -32,11 +32,14 @@ export interface ChainState {
 /** GET /api/projects/{pid} 的 usage：autonomy 全字段 + 实时计数 */
 export interface ProjectUsage extends Autonomy {
   active_sessions: number
-  mode?: "pentest" | "redteam"  // C2 作战模式（§6.9）
   auto_derive?: boolean         // C2 mission 自动派生开关（状态灯数据源）
   criteria_template?: string    // C2 所选判据模板名
   mission?: { text: string; criteria: string }
   redteam_roe?: { targets: string; window: string; exclusions: string; approver: string }
+  /** R2（mode 退役→轨级）：redteam 轨 ROE 四要素是否核验齐全（false=行为按 pentest 上限兜底） */
+  roe_complete?: boolean | null
+  /** C2（2026-09-18）：mission 自动派生上次判定（last_result=published:n / empty / error:…） */
+  derive?: { last_at: string; last_result: string }
   llm_calls: number
   tokens: { used: number; budget: number | null; pct: number | null }
   tasks: { published: number; budget: number | null; pct: number | null }
@@ -76,6 +79,8 @@ export interface Task {
   project_id: string
   scope: string
   task_type: string
+  role?: string   // v14：建议认领角色（''/缺省=不限；认领即换装）
+  target_session?: string   // v18：指派会话 → v0.71 起恒为专属执行窗（''/缺省=未绑窗）
   objective: string
   status: "open" | "claimed" | "done" | "failed"
   priority: number
@@ -90,7 +95,8 @@ export interface Task {
   plan: TaskPlanStep[]
   created_at: string
   updated_at: string
-  resumable?: boolean  // E12：failed 行派生（原会话落盘快照在 → 看板可「带现场续跑」）
+  resumable?: boolean  // C6：failed 恒 true（任何失败卡都可续跑）
+  resume_mode?: "snapshot" | "transcript"  // C6：snapshot=⚡带现场续跑 / transcript=↩接手现场续跑
   workset?: string[]   // B1 工作集软声明（advisory，供避让不阻塞）
   wait_for?: string[]  // B2 被占资源键（open 行门控标记，claim_next 排除）
   blocked_reason?: "error" | "awaiting_human"  // C1：fail 通道结构化原因（v8）
@@ -111,6 +117,8 @@ export interface TaskAttempt {
 export interface TaskContext {
   transcript: string | null
   attempts: TaskAttempt[]
+  reconcile?: { id: number; text: string; state: "pending" | "met" | "failed" | "blocked"; note: string }[]
+  attachments?: AttachmentInfo[]  // 附件随发（2026-09-19）：publish 落库的附件清单（认领首条消息渲染 📎）
 }
 
 // A3 直播间任务流图
@@ -130,6 +138,7 @@ export interface TaskGraphNode {
   noise_budget: string
   parent_id: string | null
   claimed_by: string | null
+  target_session?: string  // v0.71：专属执行窗（双击任务卡直开会话）
   plan: TaskPlanStep[]
   updated_at?: string
   attempts?: number  // C10 历次尝试数（task.context.attempts 长度，看板/任务流 ↻N 徽章）
@@ -155,6 +164,47 @@ export interface TaskGraph {
   edges: TaskGraphEdge[]
 }
 
+// 黑板链路图（2026-09-20）：五类对象 × 类型分层 DAG；label/sub 服务端拼好，前端零二次映射
+export type BoardNodeType = "asset" | "func_kb" | "finding" | "artifact" | "task"
+
+export interface BoardGraphNode {
+  id: string
+  node_type: BoardNodeType
+  label: string
+  sub: string
+  status: string | null
+  created_at?: string
+  // 类型专属（按 node_type 取用）
+  type?: string; value?: string; parent_id?: string | null          // asset
+  name?: string; address?: number | string; risk_tags?: string[]    // func_kb
+  binary_sha256?: string
+  title?: string; severity?: string; category?: string; vuln_class?: string  // finding
+  author?: string | null  // finding 作者（sess- 前缀=对话轮产出，2026-09-20）
+  target_asset_id?: string | null; poc_artifact_id?: string | null
+  path?: string; kind?: string; description?: string; task_id?: string | null // artifact
+  objective?: string; task_type?: string; priority?: number; claimed_by?: string | null  // task
+}
+
+export type BoardEdgeKind =
+  | "asset_parent" | "func_of" | "targets" | "relates_to" | "poc"
+  | "basis" | "task_parent" | "artifact_task" | "chain"
+
+export interface BoardGraphEdge {
+  id: string
+  source: string
+  target: string
+  kind: BoardEdgeKind
+  label?: string            // relates_to note / chain edge_note
+  stale?: boolean | null    // basis 边：依据已撤回（收录+标记）
+  chain_id?: string; chain_name?: string; chain_status?: string  // chain 边专属
+  seq?: number; edge_note?: string
+}
+
+export interface BoardGraph {
+  nodes: BoardGraphNode[]
+  edges: BoardGraphEdge[]
+}
+
 export interface LlmProvider {
   name: string
   base_url: string
@@ -162,6 +212,8 @@ export interface LlmProvider {
   has_key?: boolean
   models: string[]
   enabled: boolean
+  /** 每模型最大上下文（token，可选；空=用系统默认预算） */
+  model_context?: Record<string, number>
 }
 
 export interface ModelInfo {
@@ -181,13 +233,19 @@ export interface DiscoverResult {
   probed?: string[]
 }
 
+export type FindingCategory = "vuln" | "intel"
+
 export interface Finding {
   id: string
   project_id: string
   vuln_class: string
   title: string
   severity: string
+  /** F11 判级依据（如「rating:edu-rating 高危#2 任意文件覆盖写」），空=未标注 */
+  rating_basis: string
   status: string
+  /** C6 分两类：vuln=漏洞 / intel=有效发现·关键发现（缺省迁移行=vuln） */
+  category: FindingCategory
   evidence: Record<string, unknown>
   target_asset_id: string | null
   poc_artifact_id: string | null
@@ -333,6 +391,14 @@ export interface ArtifactUploadResponse {
   size: number
 }
 
+/** 附件随发（2026-09-19）：上传落 artifact（kind=attachment），随任务/引导下发 */
+export interface AttachmentInfo {
+  id: string
+  path: string
+  name: string
+  size: number
+}
+
 export interface FuncCreateBody {
   binary_sha256: string
   address: number | string
@@ -350,6 +416,14 @@ export interface FuncPatchBody {
 export interface FindingPatchBody {
   status?: string
   evidence?: Record<string, unknown>
+  /** F10 人工修订：title 非空 / severity 五档 / vuln_class 可空 */
+  title?: string
+  severity?: string
+  vuln_class?: string
+  /** F11 判级依据：None=不动，空串=清空 */
+  rating_basis?: string
+  /** C6 分两类：vuln=漏洞 / intel=有效发现·关键发现 */
+  category?: FindingCategory
 }
 
 export interface JudgmentTemplates {
@@ -370,6 +444,8 @@ export interface Session {
   /** F9 worker 启动制：armed=已启动自动接任务；running=worker 在跑 */
   worker_armed?: boolean
   worker_running?: boolean
+  /** v0.71 任务即窗口：绑定的任务 id（''=无绑定手动窗） */
+  bound_task_id?: string
 }
 
 /** 会话收件箱私信（DESIGN §6.7 的 1.5/1.6；本切片只有系统投递的 basis_stale） */
@@ -409,7 +485,8 @@ export interface Approval {
   session_id: string | null
   action: Record<string, unknown>
   risk: string
-  status: "pending" | "approved" | "rejected"
+  /** H3：escalation 执行完置 consumed（一次性消费，语义上属已批准分支） */
+  status: "pending" | "approved" | "rejected" | "consumed"
   requested_by: string
   decided_by?: string | null
   created_at: string
@@ -424,12 +501,14 @@ export interface SpawnSessionAction {
 }
 
 // decide 响应：命中 op 处理器才带 executed；失败不回滚批准（executed:false + error）
+// H3：escalation 执行完 approval 置 consumed（一次性消费），响应多 exit_code
 export interface DecideApprovalResult {
   approval_id: string
   status: "approved" | "rejected"
   executed?: boolean
   session_id?: string
   job_id?: string
+  exit_code?: number
   /** 批 5 触发点 E：批准后顺带唤醒的空闲窗 sid 列表 */
   kicked?: string[]
   error?: string
@@ -557,6 +636,37 @@ export interface Chain {
 /** 列表行：链头 + link_count */
 export type ChainSummary = Chain & { link_count: number }
 
+// ---- R4 逆向开发蓝图（DESIGN.md §9 R4） ----
+
+/** 蓝图整体状态：只进不退；reviewed/ready 由人类流转（Agent 无入口） */
+export type BlueprintStatus = "draft" | "reviewed" | "ready" | "building" | "built"
+/** 模块状态：划分产出 pending → 深析 analyzed → spec 钉死 specd → 容器自测过 tested */
+export type BlueprintModuleStatus = "pending" | "analyzed" | "specd" | "tested"
+
+export interface BlueprintModule {
+  name: string
+  desc: string
+  /** hex 地址串（与工作台 hexAddr 同口径） */
+  func_addresses: string[]
+  /** 接口约定：函数签名/数据结构/协议格式（并行深析与组装的防冲突锚） */
+  spec: string
+  notes: string
+  status: BlueprintModuleStatus
+}
+
+export interface Blueprint {
+  id: string
+  project_id: string
+  binary_sha256: string
+  name: string
+  goal: string
+  status: BlueprintStatus
+  content_md: string
+  modules: BlueprintModule[]
+  created_at: string
+  updated_at: string
+}
+
 export interface Artifact {
   id: string
   project_id: string
@@ -565,6 +675,8 @@ export interface Artifact {
   description: string
   sha256: string
   author: string
+  /** 归属元数据（工作区隔离 W3）：{task_id?, session_id?} */
+  meta?: { task_id?: string; session_id?: string }
   created_at: string
 }
 
@@ -632,6 +744,8 @@ export interface KbFile {
   path: string
   size: number
   mtime: string
+  /** 展示标题（frontmatter title > # H1 > stem，kbindex 同口径；F15） */
+  title: string
 }
 
 export interface KbSourceTree {
@@ -787,6 +901,16 @@ export interface OwnerRule {
   content: string
 }
 
+/** F11 评级与价值口径（tracks/<track>/rules/rating/<tag>.md），形状同 OwnerRule */
+export type RatingRule = OwnerRule
+
+/** F11 rule_profiles 项目级生效档案（config.rule_profiles）：
+ * owners 缺省 "*"=自动命中全注入；rating 键缺失=自动（按 owner 命中），[] =关闭 */
+export interface RuleProfiles {
+  owners?: "*" | string[]
+  rating?: string[]
+}
+
 // ---------- 阶段 3B：CRUD / doctor / 历史版本 ----------
 
 /** POST 新建角色（clone_from 缺省=空白模板） */
@@ -914,7 +1038,12 @@ export interface VaultSearchHit {
 
 export interface IntelLearningProfile {
   declared: { directions: Record<string, number>; stage: string }
-  vault: { total: number; by_direction: Record<string, { notes: number; last_active: string }> }
+  vault: {
+    total: number
+    by_direction: Record<string, { notes: number; last_active: string }>
+    /** F5：高频笔记主题 tag 频次（cap 15，仅元数据） */
+    top_tags?: { tag: string; count: number }[]
+  }
   platform: Record<string, { notes: number; total: number; read: number; starred: number }>
 }
 
@@ -927,3 +1056,99 @@ export interface IntelPlanMeta {
 export interface IntelPlan extends IntelPlanMeta {
   content: string
 }
+
+// ---------- F6 内置浏览器（DESIGN.md §7；pentest/redteam 轨专属） ----------
+
+export interface BrowserStatus {
+  playwright_installed: boolean
+  chromium_installed: boolean
+  install_cmd: string
+  instances: { project_id: string; sessions: BrowserSessionInfo[] }[]
+}
+
+export interface BrowserSessionInfo {
+  sid: string
+  owner: string
+  task_id: string | null
+  url: string | null
+  title: string | null
+}
+
+export interface BrowserState {
+  sessions: BrowserSessionInfo[]
+  profile_dir: string
+  running: boolean
+  playwright_installed: boolean
+  track: string
+}
+
+/** http_history 行（列表 body 截短 200 预览；全量走 detail） */
+export interface HttpHistoryRow {
+  id: number
+  project_id: string
+  session_id: string | null
+  task_id: string | null
+  source: "browser" | "replay" | "intruder"
+  batch_id: string
+  meta: Record<string, unknown>
+  method: string
+  url: string
+  status: number | null
+  req_headers: Record<string, string>
+  req_body: string | null
+  resp_headers: Record<string, string>
+  resp_body: string | null
+  resp_mime: string
+  body_truncated: boolean
+  is_binary: boolean
+  duration_ms: number | null
+  created_at: string
+}
+
+/** 导航/重发/爆破目标未登记资产时的 422 detail（前端一键登记用） */
+export interface AssetMissingDetail {
+  reason: string
+  host: string
+  asset_missing: boolean
+}
+
+/** 爆破 payload 集：list=候选串 / range=整数区间 */
+export interface IntruderPayloadSpec {
+  position: string
+  type: "list" | "range"
+  values?: string[]
+  start?: number
+  stop?: number
+  step?: number
+}
+
+/** 爆破模板：HTTP 请求四要素，url/headers/body 中用 §标记§ 占位 */
+export interface IntruderTemplate {
+  method: string
+  url: string
+  headers?: Record<string, string>
+  body?: string | null
+}
+
+/** F6-v3 拦截挂起包（仅人工浏览流量；快照形态，raw 为后端渲染的完整报文） */
+export interface InterceptPending {
+  hold_id: string
+  direction: "request" | "response"
+  method: string
+  url: string
+  status: number | null
+  raw: string
+  editable: boolean
+  is_binary: boolean
+  size: number
+  created_at: number
+  expires_in_ms: number
+}
+
+/** 拦截快照：两开关 + 挂起列表 */
+export interface InterceptState {
+  request_enabled: boolean
+  response_enabled: boolean
+  pending: InterceptPending[]
+}
+

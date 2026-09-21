@@ -2,9 +2,12 @@
 
 出站 HTTP 走标准库 urllib（不经执行网关——平台自身可信出站，与 Agent 命令通道无关），
 getter 可注入供测试（永不触网）。数据源（定稿）：
-- NVD API 2.0（近 2 日新 CVE）/ CISA KEV（已在利用打优先标）/ GitHub Advisory（经
-  api.github.com/advisories 免 key REST，按发布日倒序取近页）
+- NVD API 2.0（近 7 日新 CVE，与 KEV 窗口对齐便于证据合并）/ CISA KEV（已在利用）/ GitHub
+  Advisory（经 api.github.com/advisories 免 key REST，按发布日倒序取近页）
 - 中文/技术社区 RSS（feeds.json 源清单）
+- POC 启发式判定在 fetch 层（references 只在抓取响应里，不落库即丢失）：
+  NVD "Exploit" 标签 + PoC 站点域名白名单；KEV 条目经 _enrich 按 CVE id 合并 NVD/GHSA
+  证据，无证据的 KEV 条目 has_poc=False（不进简报，宁缺毋滥，DESIGN.md §16.1）。
 单源失败只记 error 不中断整批。
 """
 
@@ -28,6 +31,64 @@ def _urllib_get(url: str, timeout: float = 20.0) -> tuple[int, str]:
 
 def _strip_html(text: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", text or "")).strip()
+
+
+# ---------- POC 启发式判定 ----------
+
+_CVE_RE = re.compile(r"CVE-\d{4}-\d{4,7}", re.I)
+
+_POC_DOMAINS = ("github.com", "gitlab.com",           # 含 gist / PoC 仓库
+                "exploit-db.com",
+                "packetstormsecurity.com", "packetstormsecurity.net",
+                "seclists.org", "securityfocus.com",
+                "huntr.dev", "huntr.com")
+_POC_URL_EXCLUDES = ("github.com/advisories",          # GHSA 详情页，非 PoC
+                     "github.com/CVEProject",          # cvelistV5 仓库，几乎每条 CVE 都带
+                     "github.com/advisory-database",
+                     "nvd.nist.gov", "cve.org")
+_GIT_PATH_RE = re.compile(r"(?i)\b(poc|exploit|cve-\d{4}-\d{4,7})")
+
+
+def _poc_url_signal(url: str) -> bool:
+    """URL 域名白名单判定（github/gitlab 还要求路径含 PoC 关键词，防补丁 commit 误报）。"""
+    if not url or any(x in url.lower() for x in _POC_URL_EXCLUDES):
+        return False
+    host = url.split("//", 1)[-1].split("/", 1)[0].lower()
+    if not any(host == d or host.endswith("." + d) for d in _POC_DOMAINS):
+        return False
+    if host == "github.com" or host.endswith(".github.com") or \
+            host == "gitlab.com" or host.endswith(".gitlab.com"):
+        path = url.split("//", 1)[-1].split("/", 1)
+        return bool(len(path) == 2 and _GIT_PATH_RE.search(path[1]))
+    return True
+
+
+def _poc_signal(refs: list) -> tuple[bool, str]:
+    """references → (has_poc, 最优 poc_url)。
+
+    refs 两种形态：NVD [{"url","source","tags":[...]}]，GHSA ["url", ...]（无 tag，容错跳过）。
+    tag "Exploit" 命中 > 白名单 URL；任一命中即 has_poc=True。
+    """
+    best_tagged = ""
+    best_domain = ""
+    for ref in refs:
+        if isinstance(ref, str):
+            url, tags = ref, []
+        elif isinstance(ref, dict):
+            url, tags = ref.get("url", ""), ref.get("tags") or []
+        else:
+            continue
+        tagged = any(t.lower() == "exploit" for t in tags if isinstance(t, str))
+        in_domain = _poc_url_signal(url)
+        if tagged and not best_tagged:
+            best_tagged = url
+        elif in_domain and not best_domain:
+            best_domain = url
+    if best_tagged:
+        return True, best_tagged
+    if best_domain:
+        return True, best_domain
+    return False, ""
 
 
 # ---------- RSS / Atom ----------
@@ -64,13 +125,17 @@ def _nvd_date(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S.000")
 
 
-def fetch_nvd(getter: RawGetter, *, days: int = 2) -> list[dict]:
-    """NVD 2.0 近 days 天新 CVE（无 key 限速 5 req/30s，抓取频率人工触发足够）。"""
+def fetch_nvd(getter: RawGetter, *, days: int = 7) -> list[dict]:
+    """NVD 2.0 近 days 天新 CVE（无 key 限速 5 req/30s，抓取频率人工触发足够）。
+
+    窗口取 7 天与 KEV 对齐（_enrich 按 CVE id 合并 POC 证据）；perPage=200 不分页，
+    全球周新增可能截断——只影响池完整度，不影响简报正确性（DESIGN.md §16.1 注记）。
+    """
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=days)
     url = ("https://services.nvd.nist.gov/rest/json/cves/2.0"
            f"?pubStartDate={_nvd_date(start)}&pubEndDate={_nvd_date(end)}"
-           "&resultsPerPage=50")
+           "&resultsPerPage=200")
     status, text = getter(url, 30.0)
     if status != 200:
         raise RuntimeError(f"NVD HTTP {status}")
@@ -80,15 +145,22 @@ def fetch_nvd(getter: RawGetter, *, days: int = 2) -> list[dict]:
         cid = cve.get("id", "")
         descs = [d.get("value", "") for d in cve.get("descriptions", [])
                  if d.get("lang") == "en"]
+        has_poc, poc_url = _poc_signal(cve.get("references") or [])
         out.append({"url": f"https://nvd.nist.gov/vuln/detail/{cid}", "title": cid,
                     "source": "nvd", "kind": "cve",
                     "summary": (descs[0] if descs else "")[:800],
-                    "published_at": cve.get("published", ""), "is_priority": False})
+                    "published_at": cve.get("published", ""),
+                    "is_priority": has_poc,     # 有公开 POC 打优先标（§16.1 既有声明）
+                    "has_poc": has_poc, "poc_url": poc_url})
     return out
 
 
 def fetch_kev(getter: RawGetter) -> list[dict]:
-    """CISA KEV 全量目录（已在利用 = 优先标；以 dateAdded 近 2 天为新条目）。"""
+    """CISA KEV 全量目录（已在利用 = 优先标；以 dateAdded 近 7 天为新条目）。
+
+    KEV JSON 本身无 references，has_poc 由 _enrich 按 CVE id 合并 NVD/GHSA 证据回填；
+    无证据保持 False——严格语义：没有公开 POC 的 KEV 条目不进简报（宁缺毋滥）。
+    """
     status, text = getter(
         "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json",
         30.0)
@@ -104,13 +176,14 @@ def fetch_kev(getter: RawGetter) -> list[dict]:
                     "title": f"[KEV] {cid} {v.get('vulnerabilityName', '')}".strip(),
                     "source": "kev", "kind": "cve",
                     "summary": v.get("shortDescription", "")[:800],
-                    "published_at": v.get("dateAdded", ""), "is_priority": True})
+                    "published_at": v.get("dateAdded", ""), "is_priority": True,
+                    "has_poc": False, "poc_url": ""})
     return out
 
 
 def fetch_github_advisories(getter: RawGetter) -> list[dict]:
-    """GitHub Advisory（免 key REST，published 倒序近页）；is_priority 在打分层按
-    exploit/KEV 线索补标，这里只入池。"""
+    """GitHub Advisory（免 key REST，published 倒序近页）；POC 证据取自 references
+    （URL 字符串数组，无 tag，_poc_signal 容错）。"""
     status, text = getter(
         "https://api.github.com/advisories?per_page=40", 30.0)
     if status != 200:
@@ -119,17 +192,39 @@ def fetch_github_advisories(getter: RawGetter) -> list[dict]:
     for a in json.loads(text):
         ghsa = a.get("ghsa_id", "")
         cve = a.get("cve_id") or ghsa
+        has_poc, poc_url = _poc_signal(a.get("references") or [])
         out.append({"url": a.get("html_url") or f"https://github.com/advisories/{ghsa}",
                     "title": f"[GHSA] {cve} {a.get('summary', '')}".strip(),
                     "source": "ghsa", "kind": "cve",
                     "summary": (a.get("description") or "")[:800],
                     "published_at": a.get("published", ""),
                     "is_priority": bool(a.get("type") == "reviewed"
-                                        and a.get("credits"))})
+                                        and a.get("credits")) or has_poc,
+                    "has_poc": has_poc, "poc_url": poc_url})
     return out
 
 
 # ---------- 整批抓取 ----------
+
+def _enrich(items: list[dict]) -> None:
+    """按 CVE id 把 NVD/GHSA 的 POC 证据合并到 KEV 条目（原地修改）。
+
+    KEV JSON 无 references，唯一免费证据来自同批 NVD/GHSA。扩展点：若未来要补
+    NVD 单 CVE 限速补查（5 req/30s），在 `not has_poc and source=="kev"` 分支接入。
+    """
+    poc_map: dict[str, str] = {}
+    for it in items:
+        if it.get("has_poc") and it.get("source") in ("nvd", "ghsa"):
+            m = _CVE_RE.search(f"{it.get('title', '')} {it.get('url', '')}")
+            if m:
+                poc_map.setdefault(m.group(0).upper(), it["poc_url"] or it["url"])
+    for it in items:
+        if it.get("source") == "kev" and not it.get("has_poc"):
+            m = _CVE_RE.search(f"{it.get('title', '')} {it.get('url', '')}")
+            if m and m.group(0).upper() in poc_map:
+                it["has_poc"] = True
+                it["poc_url"] = poc_map[m.group(0).upper()]
+
 
 def fetch_all(getter: RawGetter | None = None,
               feeds: list[dict] | None = None) -> tuple[list[dict], list[str]]:
@@ -150,4 +245,5 @@ def fetch_all(getter: RawGetter | None = None,
             items.extend(parse_rss(text, f["name"]))
         except Exception as e:  # noqa: BLE001
             errors.append(f"{f.get('name', f.get('url', '?'))}: {type(e).__name__}: {e}")
+    _enrich(items)
     return items, errors

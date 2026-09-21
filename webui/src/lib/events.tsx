@@ -14,7 +14,7 @@ export function eventStyle(kind: string, payload?: Record<string, unknown>): Eve
       "task.published": { label: "📋 发布任务", className: "text-primary", defaultOpen: true },
       "task.claimed": { label: "🔧 认领任务", className: "text-muted-foreground", defaultOpen: false },
       "task.done": { label: "✅ 任务完成", className: "text-primary", defaultOpen: true },
-      "task.failed": { label: "❌ 任务失败", className: "text-(--status-error)", defaultOpen: true },
+      "task.failed": { label: "❌ 任务失败", className: "text-(--status-error)", defaultOpen: false },
       "task.updated": { label: "✏️ 编辑任务", className: "text-muted-foreground", defaultOpen: true },
       "task.reopened": { label: "♻️ 放回待认领", className: "text-primary", defaultOpen: true },
       "task.deleted": { label: "🗑 删除任务", className: "text-muted-foreground", defaultOpen: true },
@@ -23,11 +23,14 @@ export function eventStyle(kind: string, payload?: Record<string, unknown>): Eve
       "task.plan_set": { label: "📐 制定计划", className: "text-sky-400", defaultOpen: true },
       "task.plan_revised": { label: "📐 修订计划", className: "text-sky-400", defaultOpen: true },
       "task.step": { label: "▦ 计划步进", className: "text-muted-foreground", defaultOpen: false },
+      // ⑤ 完成对账硬拦：complete 被拒，列出未收口条目
+      "task.reconcile_blocked": { label: "☑ 完成对账未收口", className: "text-amber-400", defaultOpen: true },
     }
     return map[kind] ?? { label: `task`, className: "text-muted-foreground", defaultOpen: false }
   }
   if (kind === "command") return { label: "⚡ 执行命令", className: "text-foreground/80", defaultOpen: false }
   if (kind === "command.result") return { label: "↳ 命令输出", className: "text-muted-foreground", defaultOpen: false }
+  if (kind === "tool.call") return { label: "🛠 工具调用", className: "text-muted-foreground", defaultOpen: false }
   if (kind === "audit.deny") return { label: "🛡 网关拒绝", className: "text-(--status-approval)", defaultOpen: true }
   if (kind === "finding.new" || kind === "finding.merged")
     return { label: "🔍 新发现", className: "text-primary", defaultOpen: true }
@@ -43,8 +46,22 @@ export function eventStyle(kind: string, payload?: Record<string, unknown>): Eve
       return { label: "🔵 发现增补", className: "text-sky-400", defaultOpen: true }
     if (payload?.kind === "basis_stale")
       return { label: "⚠ 依据撤回", className: "text-amber-400", defaultOpen: true }
+    if (payload?.kind === "escalation_result")
+      return { label: "🛫 升级命令已执行", className: "text-sky-400", defaultOpen: true }
     return { label: "🔔 会话私信", className: "text-(--status-approval)", defaultOpen: true }
   }
+  if (kind === "agent.chat")
+    // Agent 回复（2026-09-19）：空闲对话轮回复 + 任务循环叙述行（工具调用间「做了什么」），
+    // 与 💭 思考同居「思考」tab；渲染走 EventRow 专属 prose 行（正文即行，本表 label 仅供 tab/筛选）
+    return { label: "🤖 Agent 回复", className: "text-primary", defaultOpen: true }
+  if (kind === "agent.chat.delta")
+    // 回复流式增量行（2026-09-20 对话化）：直播中在对话轮气泡内滚动，终稿 agent.chat
+    // 到达后该组跳过/后端清剪——同 llm.thinking.delta 先例；本样式仅供孤儿 delta 兜底行
+    return { label: "🤖 回复中…", className: "text-primary", defaultOpen: true }
+  if (kind === "advisor.intervention")
+    // 策略顾问发言（2026-09-20）：卡壳干预的正文落事件流，人工可判断顾问说了什么、
+    // 建议是否合理；渲染同样走 prose 行（正文即行），同居「决策」tab
+    return { label: "🧭 策略顾问", className: "text-amber-400", defaultOpen: true }
   if (kind === "task.basis_stale_done")
     return { label: "⚠ 推翻依据下完成", className: "text-amber-400", defaultOpen: true }
   if (kind === "binary.triaged")
@@ -65,6 +82,8 @@ export function eventStyle(kind: string, payload?: Record<string, unknown>): Eve
   if (kind === "llm.switched") return { label: "🔀 切换模型", className: "text-primary", defaultOpen: true }
   if (kind === "llm.usage")
     return { label: "∑ token", className: "text-muted-foreground", defaultOpen: false }
+  if (kind === "llm.error")
+    return { label: "🚨 LLM 调用失败", className: "text-(--status-error)", defaultOpen: true }
   if (kind === "budget.soft_warning")
     return { label: "🟡 预算预警", className: "text-amber-400", defaultOpen: true }
   // E8 步数预算：自助/人工增补与耗尽自动暂停
@@ -73,7 +92,16 @@ export function eventStyle(kind: string, payload?: Record<string, unknown>): Eve
   if (kind === "session.budget_paused")
     return { label: "⏸ 步数预算用尽", className: "text-amber-400", defaultOpen: true }
   if (kind === "kb.open") return { label: "📖 打开知识库", className: "text-muted-foreground", defaultOpen: false }
+  if (kind === "kb.search") return { label: "🔍 搜索知识库", className: "text-muted-foreground", defaultOpen: false }
+  if (kind === "skill.open") return { label: "📖 打开技能正文", className: "text-muted-foreground", defaultOpen: false }
   if (kind === "skill.routed") return { label: "🎯 技能路由", className: "text-muted-foreground", defaultOpen: false }
+  if (kind === "llm.thinking.delta")
+    // 思考流式增量行（2026-09-19）：直播中默认展开看思考滚动，终稿 llm.thinking
+    // 到达后该组跳过/后端清剪——本样式只活在直播窗口内
+    return { label: "💭 思考中…", className: "text-primary", defaultOpen: true }
+  if (kind === "llm.compact")
+    // G3 上下文摘要压缩（2026-09-19）：N 条旧历史压成摘要；展开看前后规模
+    return { label: "🧹 上下文压缩", className: "text-muted-foreground", defaultOpen: false }
   if (kind === "proposal.created") return { label: "📝 变更提案", className: "text-(--status-approval)", defaultOpen: true }
   if (kind === "proposal.applied") return { label: "✅ 提案应用", className: "text-primary", defaultOpen: true }
   if (kind === "proposal.rejected") return { label: "⊘ 提案拒绝", className: "text-muted-foreground", defaultOpen: false }
@@ -81,11 +109,17 @@ export function eventStyle(kind: string, payload?: Record<string, unknown>): Eve
   if (kind === "session.work_state") return { label: "⚙ worker 状态", className: "text-muted-foreground", defaultOpen: false }
   if (kind === "session.paused") return { label: "⏸ 已暂停", className: "text-(--status-paused)", defaultOpen: true }
   if (kind === "session.resumed") return { label: "▶ 已恢复", className: "text-primary", defaultOpen: true }
-  if (kind === "session.aborted") return { label: "⛔ 人工中断", className: "text-(--status-error)", defaultOpen: true }
+  if (kind === "session.aborted") return { label: "⛔ 人工中断", className: "text-(--status-error)", defaultOpen: false }
   if (kind === "session.finished") return { label: "⚪ 会话收尾", className: "text-muted-foreground", defaultOpen: true }
   if (kind === "approval.requested") return { label: "🔔 请求审批", className: "text-(--status-approval)", defaultOpen: true }
   if (kind.startsWith("approval.")) return { label: "🔔 审批决定", className: "text-(--status-approval)", defaultOpen: true }
   if (kind === "orch.proposed") return { label: "💡 编排提案", className: "text-amber-400", defaultOpen: true }
+  if (kind === "orch.tick.started")
+    return { label: "⚙ 编排启动", className: "text-primary", defaultOpen: false }
+  if (kind === "mission.derive")
+    return { label: "🎯 自动派生判定", className: "text-primary", defaultOpen: false }
+  if (kind === "mission.derive.result")
+    return { label: "🎯 派生结果", className: "text-primary", defaultOpen: true }
   if (kind === "orch.chain_started") return { label: "⛓🤖 L2 自动链启动", className: "text-primary", defaultOpen: true }
   // 停止原因（含急停/预算/异常）由 eventSummary 中文行呈现
   if (kind === "orch.chain_stopped") return { label: "⛓⏹ L2 自动链停止", className: "text-amber-400", defaultOpen: true }
@@ -96,6 +130,10 @@ export function eventStyle(kind: string, payload?: Record<string, unknown>): Eve
   if (kind === "chain.deleted") return { label: "🔗 删除攻击链", className: "text-muted-foreground", defaultOpen: true }
   if (kind === "chain.link_added") return { label: "🔗 链上挂节点", className: "text-[#bc8cff]", defaultOpen: true }
   if (kind === "chain.link_removed") return { label: "🔗 链上移节点", className: "text-muted-foreground", defaultOpen: false }
+  // 蓝图（R4 逆向开发管线）
+  if (kind === "blueprint.created") return { label: "📐 新建蓝图", className: "text-primary", defaultOpen: true }
+  if (kind === "blueprint.updated") return { label: "📐 蓝图更新", className: "text-muted-foreground", defaultOpen: false }
+  if (kind === "blueprint.status_changed") return { label: "📐 蓝图状态流转", className: "text-primary", defaultOpen: true }
   return { label: kind, className: "text-muted-foreground", defaultOpen: false }
 }
 
@@ -110,6 +148,33 @@ const CHAIN_STOP_REASON: Record<string, string> = {
   budget_blocked: "预算硬闸拦截",
   restart: "服务重启急停（需手动恢复）",
   error: "自动编排异常",
+}
+
+// tool.call 摘要用：工具名 → 中文图标+名（未登记的原样显工具名）；
+// TOOL_ARG_KEY 取该工具最有定位价值的一个参数字段（缺省取 args 第一个字符串值）
+const TOOL_LABELS: Record<string, string> = {
+  kb_open: "📖 知识库模块", kb_search: "🔍 知识库检索",
+  bb_add_asset: "🎯 登记资产", bb_asset_status: "🎯 资产状态",
+  bb_add_finding: "📋 新增发现", bb_update_finding: "📋 更新发现",
+  bb_delete_finding: "📋 删除发现", bb_add_artifact: "📦 落产物",
+  bb_query: "🔎 查黑板", bb_upsert_func: "⚙ 函数知识",
+  propose_pack_edit: "📝 变更提案", decompile: "⚙ 反编译",
+  list_symbols: "⚙ 符号表", task_plan: "📐 写计划",
+  task_step: "▦ 计划步进", publish_task: "📨 派发任务",
+  complete_task: "✅ 完成任务", fail_task: "✗ 任务失败",
+  finish: "🏁 收尾会话", request_steps: "⏳ 申请增补步数",
+  browser_navigate: "🌐 打开网页", browser_click: "🖱 点击",
+  browser_type: "⌨ 输入", browser_screenshot: "📸 截图",
+  browser_content: "📄 取页面内容", browser_back: "↩ 后退",
+}
+const TOOL_ARG_KEY: Record<string, string> = {
+  kb_open: "module", kb_search: "query", browser_navigate: "url",
+  bb_add_finding: "title", bb_update_finding: "finding_id",
+  bb_delete_finding: "finding_id", bb_asset_status: "asset_id",
+  bb_add_artifact: "filename", publish_task: "objective",
+  decompile: "binary", list_symbols: "binary", browser_click: "selector",
+  browser_type: "selector", bb_upsert_func: "func_id",
+  propose_pack_edit: "target", task_step: "step_id",
 }
 
 export function eventSummary(payload: Record<string, unknown>,
@@ -167,6 +232,57 @@ export function eventSummary(payload: Record<string, unknown>,
     const line = (payload.thinking.split("\n").find((l) => l.trim()) ?? "").trim()
     return line.length > 80 ? line.slice(0, 80) + "…" : line || undefined
   }
+  // agent.chat（空闲对话轮回复，2026-09-19）：正常渲染走 EventRow 专属 prose 行不经过这里；
+  // 本摘要仅作无 text 载荷回退通用 JSON 行时的标题
+  if (typeof payload.text === "string" && typeof payload.session_id === "string"
+      && payload.thinking === undefined && payload.step_id === undefined) {
+    const line = (payload.text.split("\n").find((l) => l.trim()) ?? "").trim()
+    return line.length > 80 ? line.slice(0, 80) + "…" : line || undefined
+  }
+  // kb 读取摘要（kb.open={source,module,path} / kb.search={query,hits}，与 skill.routed
+  // 同居「路由」tab——2026-09-19 定稿）
+  if (typeof payload.module === "string" && typeof payload.source === "string") {
+    return (
+      <span className="font-mono text-xs">
+        源 {payload.source} · {payload.module}
+      </span>
+    )
+  }
+  if (typeof payload.query === "string" && typeof payload.hits === "number") {
+    return (
+      <span className="font-mono text-xs">
+        检索 “{payload.query}” · 命中 {payload.hits} 篇
+      </span>
+    )
+  }
+  // tool.call（2026-09-19「工具」tab）：Claude Code 式一行摘要——工具图标+关键参数+耗时，
+  // 失败/拒绝（ok=false）整段红色 ✗。未登记工具显名原样；关键参数取该工具最有定位价值的一个字段
+  if (typeof payload.name === "string" && payload.args !== undefined
+      && typeof payload.duration_s === "number") {
+    const a = (payload.args ?? {}) as Record<string, unknown>
+    const key = TOOL_ARG_KEY[String(payload.name)] ?? ""
+    let detail = typeof a[key] === "string" ? (a[key] as string) : ""
+    if (!detail) {
+      const first = Object.values(a).find((v) => typeof v === "string" && v)
+      detail = typeof first === "string" ? first : ""
+    }
+    detail = detail.length > 60 ? detail.slice(0, 60) + "…" : detail
+    const dur = payload.duration_s >= 0.05 ? ` · ${payload.duration_s}s` : ""
+    if (payload.ok === false) {
+      return (
+        <span className="font-mono text-xs text-(--status-error)">
+          ✗ {TOOL_LABELS[String(payload.name)] ?? String(payload.name)}
+          {detail ? ` · ${detail}` : ""}
+        </span>
+      )
+    }
+    return (
+      <span className="font-mono text-xs">
+        {TOOL_LABELS[String(payload.name)] ?? String(payload.name)}
+        {detail ? ` · ${detail}` : ""}{dur}
+      </span>
+    )
+  }
   // 技能路由审计：命中=技能名+分数+命中词；未命中 name=null，显查询首段
   if (typeof payload.score === "number" && Array.isArray(payload.matched) && typeof payload.query === "string") {
     if (typeof payload.name === "string") {
@@ -192,6 +308,9 @@ export function eventSummary(payload: Record<string, unknown>,
     const why = typeof payload.rev_reason === "string" && payload.rev_reason ? `（${payload.rev_reason}）` : ""
     return <span className="font-mono text-xs">{payload.plan.length} 步 · 完成 {done}/{payload.plan.length}{why}</span>
   }
+  // E8 人类引导（2026-09-20 对话化）：事件 payload 现带全文（title 仍截 80 向后
+  // 兼容），摘要读全文——对话气泡行直读 text 不经过这里，此为筛选视图/兜底通用行
+  if (payload.kind === "human_note" && typeof payload.text === "string") return payload.text
   if (payload.kind === "finding_update" && typeof payload.title === "string") {
     const changes = Array.isArray(payload.changes) ? `（${payload.changes.join("、")}）` : ""
     return `${payload.title}${changes}`
@@ -225,6 +344,8 @@ export function eventSummary(payload: Record<string, unknown>,
     )
   }
   if (typeof payload.summary === "string") return payload.summary
+  // 自由文本正文（advisor.intervention 等；message.inbox 的 payload 自带 kind 先被上面分支接住）
+  if (typeof payload.text === "string" && payload.kind === undefined) return payload.text
   if (typeof payload.objective === "string") return payload.objective
   if (typeof payload.cmd === "string")
     return <code className="font-mono text-xs">{payload.cmd}</code>
@@ -242,6 +363,28 @@ export function eventSummary(payload: Record<string, unknown>,
       </span>
     )
   }
+  // llm.error：来源 + 截断错误文案；配额类（kind_hint=quota）加提示前缀
+  if (typeof payload.source === "string" && typeof payload.error === "string") {
+    const who = payload.source === "orchestrator" ? "编排"
+      : payload.source === "planner" ? "顾问"
+      : payload.source === "worker" ? "Agent" : payload.source
+    return (
+      <span className="font-mono text-xs">
+        {payload.kind_hint === "quota" ? "⚠ 配额不足或限流 · " : ""}
+        {who} · {payload.error.slice(0, 120)}
+      </span>
+    )
+  }
+  // mission.derive.result：发布 n 任务 · 开 m 窗
+  if (typeof payload.published === "number") {
+    return (
+      <span className="font-mono text-xs">
+        发布 {payload.published} 任务
+        {payload.spawned ? ` · 开 ${payload.spawned} 窗` : ""}
+      </span>
+    )
+  }
+  if (typeof payload.error === "string") return payload.error
   if (typeof payload.provider === "string" && typeof payload.model === "string")
     return <code className="font-mono text-xs">{payload.provider}/{payload.model}</code>
   if (typeof payload.sha === "string") {

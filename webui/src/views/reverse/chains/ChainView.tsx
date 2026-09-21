@@ -96,10 +96,16 @@ export function ChainView({ pid, tick, onLocate }: Props) {
     setEditing(null); reloadList(); reloadDetail()
   }
 
+  const [delErr, setDelErr] = useState<string | null>(null)
   const confirmDelete = async () => {
     if (!deleting) return
-    await api.deleteChain(pid, deleting.id)
-    setDeleting(null); reloadList()
+    try {
+      await api.deleteChain(pid, deleting.id)
+      setDeleting(null); reloadList()
+    } catch (e) {
+      // 失败保持弹窗显示原因（同 ProjectsView 删除弹窗的坑：Action 默认点击即关弹）
+      setDelErr(String(e))
+    }
   }
 
   const removeLink = async (link: ChainLink) => {
@@ -280,11 +286,13 @@ export function ChainView({ pid, tick, onLocate }: Props) {
             <AlertDialogDescription>
               只删链与连线，链上的函数知识/发现/产物实体不受影响。
             </AlertDialogDescription>
+            {delErr && <p className="text-sm text-(--status-error)">{delErr}</p>}
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>取消</AlertDialogCancel>
+            {/* preventDefault 拦下 Radix 点击即关弹：失败原因要留在弹窗里（同 ProjectsView） */}
             <AlertDialogAction
-              onClick={confirmDelete}
+              onClick={(e) => { e.preventDefault(); setDelErr(null); confirmDelete() }}
               className="bg-(--status-error) text-(--background) hover:opacity-90"
             >
               删除

@@ -53,9 +53,12 @@ def save_user_templates(config_dir: str | Path, templates: dict[str, str]) -> No
     path.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def resolve_criteria(config: dict, config_dir: str | Path = "config") -> dict:
+def resolve_criteria(config: dict, config_dir: str | Path = "config",
+                     track: str | None = None) -> dict:
     """解析项目生效判据。返回 {source: mission|template|builtin, criteria, name?}。
-    优先级：项目手写 mission > 所选用户模板 > mode 内置默认模板。"""
+    优先级：项目手写 mission > 所选用户模板 > 轨内置默认模板。
+    track 给定时按轨选内置默认（redteam→红队默认，其余→渗透默认）；
+    未给 track 时回退读 config.mode（旧调用兼容，mode 已退役仅兜底）。"""
     cfg = config or {}
     mission = cfg.get("mission") or {}
     if str(mission.get("criteria") or "").strip():
@@ -65,10 +68,12 @@ def resolve_criteria(config: dict, config_dir: str | Path = "config") -> dict:
         user = load_user_templates(config_dir)
         if chosen in user and user[chosen].strip():
             return {"source": "template", "criteria": user[chosen], "name": chosen}
-        if chosen in BUILTIN_TEMPLATES:  # 内置模板名被显式选定时精确命中（跨 mode 也尊重）
+        if chosen in BUILTIN_TEMPLATES:  # 内置模板名被显式选定时精确命中（跨轨也尊重）
             return {"source": "builtin", "criteria": BUILTIN_TEMPLATES[chosen], "name": chosen}
-    mode = cfg.get("mode", "pentest")
-    builtin_name = "红队默认" if mode == "redteam" else "渗透默认"
+    if track is not None:
+        builtin_name = "红队默认" if track == "redteam" else "渗透默认"
+    else:
+        builtin_name = "红队默认" if cfg.get("mode") == "redteam" else "渗透默认"
     return {"source": "builtin",
             "criteria": BUILTIN_TEMPLATES[builtin_name],
             "name": builtin_name}

@@ -5,13 +5,23 @@
 
 import json
 import sqlite3
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
 
 from core.api.app import create_app
 from core.intel.config import load_feeds, load_profile, save_profile
-from core.intel.fetch import fetch_all, fetch_kev, fetch_nvd, fetch_github_advisories, parse_rss
+from core.intel.fetch import (
+    _enrich,
+    _poc_signal,
+    _poc_url_signal,
+    fetch_all,
+    fetch_kev,
+    fetch_nvd,
+    fetch_github_advisories,
+    parse_rss,
+)
 from core.intel.intel_service import (
     compose_brief,
     compose_weekly_plan,
@@ -103,7 +113,11 @@ def test_structured_sources_with_fake_getter():
         if "nvd" in url:
             return 200, json.dumps({"vulnerabilities": [
                 {"cve": {"id": "CVE-2026-0001", "published": "2026-09-15T00:00:00.000",
-                         "descriptions": [{"lang": "en", "value": "bad bug"}]}}]})
+                         "descriptions": [{"lang": "en", "value": "bad bug"}],
+                         "references": [
+                             {"url": "https://cve.org/cve", "tags": []},
+                             {"url": "https://www.exploit-db.com/exploits/9999",
+                              "tags": ["Exploit"]}]}}]})
         if "known_exploited" in url:
             return 200, json.dumps({"vulnerabilities": [
                 {"cveID": "CVE-2026-0002", "dateAdded": "2026-09-15",
@@ -115,10 +129,86 @@ def test_structured_sources_with_fake_getter():
 
     nvd = fetch_nvd(fake_getter)
     assert nvd[0]["title"] == "CVE-2026-0001" and "bad bug" in nvd[0]["summary"]
+    assert nvd[0]["has_poc"] is True and "exploit-db" in nvd[0]["poc_url"]
+    assert nvd[0]["is_priority"] is True  # 有公开 POC 打优先标
     kev = fetch_kev(fake_getter)
     assert kev[0]["is_priority"] is True and kev[0]["title"].startswith("[KEV]")
+    assert kev[0]["has_poc"] is False  # KEV 自身无 references，等 _enrich 合并
     ghsa = fetch_github_advisories(fake_getter)
     assert ghsa[0]["source"] == "ghsa" and "CVE-2026-0003" in ghsa[0]["title"]
+    assert ghsa[0]["has_poc"] is False and ghsa[0]["poc_url"] == ""
+
+
+def test_poc_signal_excludes_and_enrich():
+    # 白名单 + 排除前缀 + github 路径关键词
+    assert _poc_url_signal("https://www.exploit-db.com/exploits/1") is True
+    assert _poc_url_signal("https://github.com/attacker/CVE-2026-1001-poc") is True
+    assert _poc_url_signal("https://gist.github.com/x/abc") is False  # 无关键词路径
+    assert _poc_url_signal("https://github.com/advisories/GHSA-xxx") is False  # GHSA 详情页
+    assert _poc_url_signal("https://github.com/CVEProject/cvelistV5") is False  # cvelist
+    assert _poc_url_signal("https://example.com/poc") is False  # 非白名单域
+    # tag "Exploit" 优先于白名单 URL
+    has, url = _poc_signal([
+        {"url": "https://github.com/a/poc", "tags": []},
+        {"url": "https://www.exploit-db.com/exploits/9", "tags": ["Exploit"]}])
+    assert has and url == "https://www.exploit-db.com/exploits/9"
+    # GHSA references 为纯字符串数组
+    has2, url2 = _poc_signal(["https://packetstormsecurity.com/files/1"])
+    assert has2 and url2 == "https://packetstormsecurity.com/files/1"
+    assert _poc_signal([]) == (False, "")
+    # _enrich：NVD/GHSA 证据按 CVE id 合并到 KEV；无证据 KEV 保持 False
+    items = [
+        {"title": "CVE-2026-1001", "url": "https://nvd.nist.gov/vuln/detail/CVE-2026-1001",
+         "source": "nvd", "has_poc": True, "poc_url": "https://e.db/1"},
+        {"title": "[KEV] CVE-2026-1001 x", "url": "https://nvd.nist.gov/vuln/detail/CVE-2026-1001",
+         "source": "kev", "has_poc": False, "poc_url": ""},
+        {"title": "[KEV] CVE-2026-1002 y", "url": "https://nvd.nist.gov/vuln/detail/CVE-2026-1002",
+         "source": "kev", "has_poc": False, "poc_url": ""},
+    ]
+    _enrich(items)
+    assert items[1]["has_poc"] is True and items[1]["poc_url"] == "https://e.db/1"
+    assert items[2]["has_poc"] is False  # 无证据 KEV 不进简报（宁缺毋滥）
+
+
+def test_store_schema_v3_migration_and_upgrade_upsert(tmp_path):
+    # 手工搭 v2 形状库（articles 无 has_poc/poc_url），IntelStore 打开须幂等补列
+    db = tmp_path / "intel.db"
+    raw = sqlite3.connect(str(db))
+    raw.executescript("""
+    CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE articles (
+        id TEXT PRIMARY KEY, url TEXT NOT NULL UNIQUE, title TEXT NOT NULL,
+        source TEXT NOT NULL, kind TEXT NOT NULL, summary TEXT NOT NULL DEFAULT '',
+        published_at TEXT NOT NULL DEFAULT '', fetched_at TEXT NOT NULL,
+        score REAL NOT NULL DEFAULT 0, direction TEXT NOT NULL DEFAULT '',
+        is_priority INTEGER NOT NULL DEFAULT 0, score_detail TEXT NOT NULL DEFAULT '',
+        brief_date TEXT, read INTEGER NOT NULL DEFAULT 0, starred INTEGER NOT NULL DEFAULT 0);
+    INSERT INTO meta VALUES('schema_version','2');
+    """)
+    raw.execute("INSERT INTO articles(id,url,title,source,kind,fetched_at) "
+                "VALUES('art-old','https://e/old','旧KEV','kev','cve','t')")
+    raw.commit()
+    raw.close()
+    s = IntelStore(tmp_path)
+    cols = {r[1] for r in sqlite3.connect(str(db)).execute(
+        "PRAGMA table_info(articles)").fetchall()}
+    assert {"has_poc", "poc_url"} <= cols
+    rows = s.list_articles(kind="cve")
+    assert rows[0]["has_poc"] == 0 and rows[0]["poc_url"] == ""  # 存量不回填，等重抓补证
+    # 升级式 upsert：无证据入池 → 带证据重抓 → 补上且不新增行
+    assert s.upsert_articles([{"url": "https://e/old", "title": "旧KEV", "source": "kev",
+                               "kind": "cve"}]) == 0
+    assert s.upsert_articles([{"url": "https://e/old", "title": "旧KEV", "source": "kev",
+                               "kind": "cve", "has_poc": True,
+                               "poc_url": "https://e.db/poc"}]) == 0
+    row = s.list_articles(kind="cve")[0]
+    assert row["has_poc"] == 1 and row["poc_url"] == "https://e.db/poc"
+    assert len(s.list_articles()) == 1
+    # 只升不降：无证据重抓不清掉已有证据
+    s.upsert_articles([{"url": "https://e/old", "title": "旧KEV", "source": "kev",
+                        "kind": "cve"}])
+    assert s.list_articles(kind="cve")[0]["has_poc"] == 1
+    s.close()
 
 
 def test_fetch_all_tolerates_source_errors():
@@ -192,6 +282,85 @@ def test_run_refresh_pipeline(tmp_path):
     stats2 = run_refresh(store, profile, feeds, getter=fake_getter, date="2026-09-16")
     assert stats2["new"] == 0 and stats2["scored"] == 0
     store.close()
+
+
+POC_RSS_FIXTURE = """<?xml version="1.0"?>
+<rss version="2.0"><channel>
+<item><title>CVE-2026-1003 详细复现分析</title><link>https://xz.example/repro-1003</link>
+<description>poc 复现全过程</description></item>
+<item><title>CVE-2026-9999 复现笔记</title><link>https://xz.example/repro-9999</link>
+<description>利用链分析</description></item>
+</channel></rss>"""
+
+
+def test_run_refresh_poc_filter_and_repro_assoc(tmp_path):
+    """简报「新漏洞 / 在野利用」只收确认 POC 条目；复现文章挂子行或提进板块。"""
+    store = IntelStore(tmp_path / "intel")
+    recent = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    def fake_getter(url, timeout):
+        if "nvd" in url:
+            return 200, json.dumps({"vulnerabilities": [
+                {"cve": {"id": "CVE-2026-1001", "published": f"{recent}T00:00:00.000",
+                         "descriptions": [{"lang": "en", "value": "pwned"}],
+                         "references": [{"url": "https://www.exploit-db.com/exploits/7",
+                                         "tags": ["Exploit"]}]}}]})
+        if "known_exploited" in url:
+            return 200, json.dumps({"vulnerabilities": [
+                {"cveID": "CVE-2026-1001", "dateAdded": recent,
+                 "vulnerabilityName": "With POC", "shortDescription": "exploited"},
+                {"cveID": "CVE-2026-1002", "dateAdded": recent,
+                 "vulnerabilityName": "No POC", "shortDescription": "no public poc"}]})
+        if "advisories" in url:
+            return 200, json.dumps([
+                {"ghsa_id": "GHSA-p", "cve_id": "CVE-2026-1003", "summary": "s",
+                 "html_url": "https://github.com/advisories/GHSA-p",
+                 "published": f"{recent}T00:00:00Z", "type": "reviewed",
+                 "references": ["https://github.com/a/CVE-2026-1003-poc"]},
+                {"ghsa_id": "GHSA-n", "cve_id": "CVE-2026-1004", "summary": "s2",
+                 "html_url": "https://github.com/advisories/GHSA-n",
+                 "published": f"{recent}T00:00:00Z", "type": "reviewed",
+                 "references": ["https://github.com/advisories/GHSA-n"]}])
+        return 200, POC_RSS_FIXTURE
+
+    profile = load_profile(tmp_path)
+    feeds = [{"name": "复现源", "url": "https://fake/rss"}]
+    stats = run_refresh(store, profile, feeds, getter=fake_getter, date="2026-09-16")
+    assert stats["errors"] == []  # 三个结构化源 + RSS 全成功
+    brief = store.get_brief("2026-09-16")
+    content = brief["content"]
+    # 有 POC 的进简报：1001（NVD tag）、1003（GHSA 白名单）
+    assert "CVE-2026-1001" in content and "exploit-db" in content  # POC 子行
+    assert "CVE-2026-1003" in content and "复现分析" in content \
+        and "repro-1003" in content  # 复现文章子行
+    # 无 POC 的不进简报（1002 KEV 无证据、1004 GHSA 仅 advisory 页）
+    assert "CVE-2026-1002" not in content and "CVE-2026-1004" not in content
+    assert "No POC" not in content
+    # 9999 不在池且已排进文章板块 → 不重复提升，留在「社区热点与技术文章」
+    assert "CVE-2026-9999" in content and "repro-9999" in content
+    assert "社区热点与技术文章" in content
+    assert brief["stats"]["repro_articles"] == 1  # 仅 repro-1003 关联命中
+    # 被过滤条目仍在池中（只是不进简报）
+    pool_titles = {r["title"] for r in store.list_articles(kind="cve", limit=50)}
+    assert any("CVE-2026-1002" in t for t in pool_titles)
+    assert any("CVE-2026-1004" in t for t in pool_titles)
+    store.close()
+
+
+def test_compose_brief_repro_extra_and_empty_section():
+    # repro_extra 提进板块；CVE 无 POC 且无 repro_extra 时整段省略
+    repro = [{"title": "CVE-2026-7777 复现", "url": "https://xz.example/1",
+              "summary": "详细复现", "source": "先知社区"}]
+    content, stats = compose_brief([], [], "2026-09-16", llm=None,
+                                   repro_extra=repro)
+    assert "## 新漏洞 / 在野利用" in content and "复现文章" in content \
+        and "CVE-2026-7777" in content
+    assert stats["repro_articles"] == 1
+    content2, _ = compose_brief([], [{"title": "文章", "url": "https://e/2",
+                                      "source": "FreeBuf"}], "2026-09-16", llm=None)
+    assert "新漏洞" not in content2  # 无 POC 日板块留空（不写聚合提示）
+    content3, _ = compose_brief([], [], "2026-09-16", llm=None)
+    assert "今日暂无入库内容" in content3
 
 
 # ---------- API 端点 ----------
@@ -314,7 +483,7 @@ def test_vault_index_and_search(tmp_path):
     (vault / "notes" / "web").mkdir(parents=True)
     (vault / ".obsidian").mkdir()
     (vault / "notes" / "web" / "proxy.md").write_text(
-        "---\ntitle: 代理探测笔记\ntags: web, proxy\n---\n# 标题无用\n"
+        "---\ntitle: 代理探测笔记\ntags: web, proxy\ncategory: Web\n---\n# 标题无用\n"
         "正文含 SECRET_BODY_TOKEN 不外发。#内联标签\n", encoding="utf-8")
     (vault / "notes" / "pwn.md").write_text("# 堆题入门\nheap 基础\n", encoding="utf-8")
     (vault / ".obsidian" / "app.json.md").write_text("配置", encoding="utf-8")
@@ -325,6 +494,8 @@ def test_vault_index_and_search(tmp_path):
     assert by_path["notes/web/proxy.md"]["title"] == "代理探测笔记"
     assert "web" in by_path["notes/web/proxy.md"]["tags"]
     assert "内联标签" in by_path["notes/web/proxy.md"]["tags"]
+    assert by_path["notes/web/proxy.md"]["category"] == "web"  # F5：fm category 归一小写入
+    assert by_path["notes/pwn.md"]["category"] == ""  # 无 frontmatter → 空
     assert by_path["notes/pwn.md"]["title"] == "堆题入门"  # 无 frontmatter 取首个 h1
 
     s = IntelStore(tmp_path / "intel")
@@ -367,6 +538,53 @@ def test_learning_profile_aggregation(tmp_path):
     s.close()
 
 
+def test_learning_profile_category_priority_and_top_tags(tmp_path):
+    """F5：category 精确命中 DIRECTIONS 优先（不被关键词推断覆盖）；未命中回退
+    infer_direction；top_tags 频次（cap 15）。全元数据，正文不入参。"""
+    s = IntelStore(tmp_path / "intel")
+    s.replace_notes([
+        # category="web" 精确命中：即使标题全是 pwn 词也归 web（用户手工维护最可靠）
+        {"path": "a.md", "title": "堆溢出利用笔记", "tags": ["pwn"], "category": "web",
+         "mtime": "2026-09-10T00:00:00+00:00"},
+        # category 不在 DIRECTIONS → 回退关键词推断（标题含 pwn 词 → pwn）
+        {"path": "b.md", "title": "堆题练习", "tags": ["pwn"], "category": "meow",
+         "mtime": "2026-09-11T00:00:00+00:00"},
+        {"path": "c.md", "title": "XSS 挖掘", "tags": ["web", "xss"],
+         "mtime": "2026-09-12T00:00:00+00:00"},
+    ])
+    prof = {"directions": {"web": 1.0}, "stage": ""}
+    agg = learning_profile(s, prof)
+    assert agg["vault"]["by_direction"]["web"]["notes"] == 2  # a(category) + c(推断)
+    assert agg["vault"]["by_direction"]["pwn"]["notes"] == 1  # b 回退推断
+    tags = {t["tag"]: t["count"] for t in agg["vault"]["top_tags"]}
+    assert tags == {"pwn": 2, "web": 1, "xss": 1}
+    s.close()
+
+
+def test_vault_category_migration_from_v3(tmp_path):
+    """F5：v3 旧库（vault_notes 无 category 列）打开后幂等补列。"""
+    import sqlite3
+    db = tmp_path / "old" / "intel.db"
+    (tmp_path / "old").mkdir(parents=True)
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE vault_notes(path TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '',
+            tags TEXT NOT NULL DEFAULT '', mtime TEXT NOT NULL DEFAULT '',
+            size INTEGER NOT NULL DEFAULT 0, content TEXT NOT NULL DEFAULT '',
+            indexed_at TEXT NOT NULL);
+        INSERT INTO meta VALUES('schema_version', '3');
+        """
+    )
+    conn.commit()
+    conn.close()
+    s = IntelStore(tmp_path / "old")
+    s.replace_notes([{"path": "a.md", "title": "t", "category": "web"}])
+    assert s.list_notes()[0]["category"] == "web"
+    s.close()
+
+
 def test_week_start_iso_monday():
     assert week_start("2026-09-16") == "2026-09-14"  # 周三 → 周一
     assert week_start("2026-09-14") == "2026-09-14"
@@ -391,7 +609,8 @@ def test_weekly_plan_privacy_and_fallback():
 
     agg = {"declared": {"directions": {"web": 2.0}, "stage": "实战"},
            "vault": {"total": 1, "by_direction": {
-               "web": {"notes": 1, "last_active": "2026-09-12T00:00:00+00:00"}}},
+               "web": {"notes": 1, "last_active": "2026-09-12T00:00:00+00:00"}},
+               "top_tags": [{"tag": "xss", "count": 3}]},
            "platform": {"web": {"total": 1, "read": 1, "starred": 0}}}
     articles = [{"title": "Java 反序列化复现", "source": "FreeBuf", "direction": "web",
                  "score": 90.0, "is_priority": False}]
@@ -400,6 +619,7 @@ def test_weekly_plan_privacy_and_fallback():
     assert len(captured) == 1
     assert "SECRET_BODY_TOKEN" not in captured[0]  # 正文不出本机
     assert "实战" in captured[0] and "Java 反序列化复现" in captured[0]  # 元数据在
+    assert "xss" in captured[0] and "tag 频次" in captured[0]  # F5：tag 频次入参在
     # LLM 失败 → 模板降级
     content2, stats2 = compose_weekly_plan(agg, None, articles, "2026-09-14",
                                            llm=BoomLLM())

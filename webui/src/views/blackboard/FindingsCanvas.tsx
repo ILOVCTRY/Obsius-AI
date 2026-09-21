@@ -18,8 +18,7 @@ import {
 import { FindingEdge, type FindingFlowEdge } from "./FindingEdge"
 import {
   buildChainEdges, buildLanes, buildStrongEdges, buildWeakEdges,
-  CARD_STEP, CARD_Y0, LANE_W,
-  type ModelEdge,
+  CARD_W, type ModelEdge,
 } from "./canvasModel"
 import { AddChainEdgeDialog, type ChainEdgeRequest } from "./AddChainEdgeDialog"
 import { ChainToolbar, STATUS_DOT } from "./ChainToolbar"
@@ -40,12 +39,13 @@ function loadOffsets(pid: string): Offsets {
   catch { return {} }
 }
 
-function Canvas({ pid, findings, assets, assetFilter, onMutated }: {
+function Canvas({ pid, findings, assets, assetFilter, onMutated, track }: {
   pid: string
   findings: Finding[]      // 已过 IP/sev/status 共享筛选
   assets: Asset[]
   assetFilter?: string     // C2 降噪：选中 host → 泳道模式；空 → 全局严重度分块
   onMutated: () => void
+  track?: string
 }) {
   const wrapperRef = useRef<HTMLDivElement>(null)
   const rf = useReactFlow()
@@ -94,6 +94,14 @@ function Canvas({ pid, findings, assets, assetFilter, onMutated }: {
     try { localStorage.setItem(EDGE_MODE_KEY(pid), m) } catch { /* 忽略 */ }
   }, [pid])
   const [focusOn, setFocusOn] = useState(true)     // C2 聚焦：hover/点选节点 → 只亮一跳邻接
+  // F13 孤立节点开关：默认隐藏真孤点（连通分量=1：噪声/孤立分区），localStorage 持久
+  const [showIsolated, setShowIsolated] = useState<boolean>(() => {
+    try { return localStorage.getItem(`findings-showisolated:${pid}`) === "1" } catch { return false }
+  })
+  const changeShowIsolated = useCallback((v: boolean) => {
+    setShowIsolated(v)
+    try { localStorage.setItem(`findings-showisolated:${pid}`, v ? "1" : "0") } catch { /* 忽略 */ }
+  }, [pid])
   const [hoverNodeId, setHoverNodeId] = useState<string | null>(null)
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null)
@@ -116,9 +124,12 @@ function Canvas({ pid, findings, assets, assetFilter, onMutated }: {
   const model = useMemo(
     () => buildLanes(findings, assets, {
       globalLayout, orderEdges: [...strongEdgesPre, ...chainEdgesPre],
+      showIsolated,
     }),
-    [findings, assets, globalLayout, strongEdgesPre, chainEdgesPre])
+    [findings, assets, globalLayout, showIsolated, strongEdgesPre, chainEdgesPre])
   const assetById = useMemo(() => new Map(assets.map((a) => [a.id, a])), [assets])
+  // F13：真孤点计数（工具条开关显示；隐藏时这些发现不进 place，节点组装自然跳过）
+  const isolatedCount = model.isolatedIds.size
 
   // 受控 ReactFlow 契约：节点由 model+offsets 派生，但内部测量/拖拽变化必须回写——
   // 否则任一重渲染都会用不带 measured 的 props 节点把内部 measured/handleBounds
@@ -196,19 +207,18 @@ function Canvas({ pid, findings, assets, assetFilter, onMutated }: {
   const selectedEdgeStale = !!selectedEdge
     && (fpIds.has(selectedEdge.source) || fpIds.has(selectedEdge.target))
 
-  const flowEdges: FindingFlowEdge[] = useMemo(() => edges.map((e): FindingFlowEdge => {
+  const flowEdges: FindingFlowEdge[] = useMemo(() => edges.map((e): FindingFlowEdge | null => {
     const connected = !focusNodeId
       || e.source === focusNodeId || e.target === focusNodeId
     const chainDim = e.kind === "chain" && !!selectedChainId && e.chainId !== selectedChainId
     const stale = fpIds.has(e.source) || fpIds.has(e.target)
     const dim = !connected || chainDim
     const color = edgeColor(e)
-    // C2 路由：同泳道同列直线 / 同泳道跨列平滑折线 / 跨泳道贝塞尔
+    // C2 路由：同泳道同排（水平一一对照）或同列直线 / 跨列跨排平滑折线 / 跨泳道贝塞尔
     const sp = model.place.get(e.source)
     const tp = model.place.get(e.target)
-    const route = sp && tp
-      ? sp.laneKey === tp.laneKey ? (sp.col === tp.col ? "straight" : "step") : "bezier"
-      : "bezier"
+    if (!sp || !tp) return null  // F13：端点被隐藏（孤立节点关闭）→ 不渲染该边
+    const route = sp.laneKey === tp.laneKey ? (sp.x === tp.x || sp.y === tp.y ? "straight" : "step") : "bezier"
     return {
       id: e.id, source: e.source, target: e.target, type: "findingEdge",
       data: {
@@ -225,7 +235,7 @@ function Canvas({ pid, findings, assets, assetFilter, onMutated }: {
       markerEnd: { type: MarkerType.ArrowClosed, color, width: 14, height: 14 },
       interactionWidth: 0,
     }
-  }), [edges, fpIds, focusNodeId, focusOn, selectedChainId, selectedEdgeId, selectEdge, model.place])
+  }).filter((e): e is FindingFlowEdge => e !== null), [edges, fpIds, focusNodeId, focusOn, selectedChainId, selectedEdgeId, selectEdge, model.place])
 
   // ---------- 节点 ----------
   const openDetail = useCallback((f: Finding) => setDetail(f), [])
@@ -233,30 +243,27 @@ function Canvas({ pid, findings, assets, assetFilter, onMutated }: {
 
   const flowNodes = useMemo(() => {
     const nodes: Node[] = []
-    // 泳道背景（最底层，不可交互）
+    // F13：隐藏孤立节点时，无串联发现的空泳道整条跳过（背景/头部都不渲染）
+    const laneHasNodes = new Map<string, boolean>()
+    for (const [, p] of model.place) laneHasNodes.set(p.laneKey, true)
+    // 泳道背景（最底层，不可交互；宽高由模型按实际内容回填）
     model.lanes.forEach((lane) => {
-      const inLane = findings.filter((f) => model.laneOf.get(f.id) === lane.key)
-      const h = Math.max(420, (inLane.length + 1) * CARD_STEP + CARD_Y0)
+      if (!showIsolated && !laneHasNodes.get(lane.key)) return
       nodes.push({
         id: `bg:${lane.key}`, type: "laneBg", position: { x: lane.x - 12, y: 0 },
         draggable: false, selectable: false, focusable: false,
         data: {}, zIndex: -10,
         measured: measuredById[`bg:${lane.key}`],
-        style: { width: LANE_W + 24, height: h, pointerEvents: "none" },
+        style: { width: lane.width + 32, height: lane.height, pointerEvents: "none" },
       })
     })
-    // 泳道头（host IP + 四列标签）
+    // 泳道头（host IP；布局已是三分区，不再有严重度带标签）
     model.lanes.forEach((lane) => {
-      const counts = [0, 0, 0, 0] as [number, number, number, number]
-      for (const f of findings) {
-        if (model.laneOf.get(f.id) !== lane.key) continue
-        const p = model.place.get(f.id)
-        if (p) counts[p.col]++
-      }
+      if (!showIsolated && !laneHasNodes.get(lane.key)) return
       const hdr: LaneHeaderNode = {
         id: `lane:${lane.key}`, type: "laneHeader",
         position: { x: lane.x, y: 44 }, draggable: false, selectable: false, focusable: false,
-        data: { label: lane.label, counts },
+        data: { label: lane.label, width: lane.width },
         measured: measuredById[`lane:${lane.key}`],
       }
       nodes.push(hdr)
@@ -270,9 +277,9 @@ function Canvas({ pid, findings, assets, assetFilter, onMutated }: {
       const node: FindingFlowNode = {
         id: f.id, type: "finding",
         position: { x: p.x + off.dx, y: p.y + off.dy },
-        data: { f, dim, compact: f.severity === "low" || f.severity === "info", onOpen: openDetail, onQuickAdd: quickAdd },
+        data: { f, dim, onOpen: openDetail, onQuickAdd: quickAdd },
         measured: measuredById[f.id],
-        style: { width: 224 },
+        style: { width: CARD_W },
       }
       nodes.push(node)
     }
@@ -347,6 +354,19 @@ function Canvas({ pid, findings, assets, assetFilter, onMutated }: {
           mutating={mutating}
         />
         <span className="flex-1" />
+        {/* F13 孤立节点开关：默认隐藏真孤点（连通分量=1），打开恢复三分区全量 */}
+        <button
+          type="button"
+          title={showIsolated
+            ? "孤立节点显示中：点击隐藏无任何连接的发现（噪声/孤立分区）"
+            : "孤立节点已隐藏：仅显示成链发现；点击恢复全量"}
+          className={cn("rounded border border-[#30363d] px-2 py-0.5 text-[11px] transition-colors",
+            showIsolated ? "text-muted-foreground hover:bg-accent/40"
+              : "bg-primary/15 font-medium text-primary")}
+          onClick={() => changeShowIsolated(!showIsolated)}
+        >
+          孤立节点{isolatedCount > 0 ? ` (${isolatedCount})` : ""}
+        </button>
         {/* C2 聚焦：hover/点选节点 → 只亮一跳邻接（默认开） */}
         <label className="flex cursor-pointer items-center gap-1 text-[11px] text-muted-foreground">
           <input type="checkbox" checked={focusOn} onChange={(e) => setFocusOn(e.target.checked)} />
@@ -376,7 +396,7 @@ function Canvas({ pid, findings, assets, assetFilter, onMutated }: {
         <button
           type="button" title="适应视图"
           className="rounded p-1 text-muted-foreground hover:bg-accent/40 hover:text-foreground"
-          onClick={() => rf.fitView({ padding: 0.15, maxZoom: 1 })}
+          onClick={() => rf.fitView({ padding: 0.15, maxZoom: 1.4 })}
         >
           <Maximize2 className="size-3.5" />
         </button>
@@ -418,7 +438,7 @@ function Canvas({ pid, findings, assets, assetFilter, onMutated }: {
         }}
         onPaneClick={() => { setSelectedNodeId(null); setSelectedEdgeId(null) }}
         fitView
-        fitViewOptions={{ padding: 0.15, maxZoom: 1 }}
+        fitViewOptions={{ padding: 0.15, maxZoom: 1.4 }}
         minZoom={0.15}
         proOptions={{ hideAttribution: true }}
       >
@@ -513,10 +533,13 @@ function Canvas({ pid, findings, assets, assetFilter, onMutated }: {
       {/* 发现详情（复用列表同款弹窗） */}
       {detail && (
         <FindingDetailDialog
+          key={detail.id}
           pid={pid}
           finding={detail}
           assetLabel={detail.target_asset_id ? assetById.get(detail.target_asset_id)?.value : undefined}
+          track={track}
           onClose={() => setDetail(null)}
+          onMutated={onMutated}
         />
       )}
     </div>
@@ -524,7 +547,7 @@ function Canvas({ pid, findings, assets, assetFilter, onMutated }: {
 }
 
 export function FindingsCanvas(props: {
-  pid: string; findings: Finding[]; assets: Asset[]; assetFilter?: string; onMutated: () => void
+  pid: string; findings: Finding[]; assets: Asset[]; assetFilter?: string; onMutated: () => void; track?: string
 }) {
   return (
     <ReactFlowProvider>

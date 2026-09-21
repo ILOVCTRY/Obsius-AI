@@ -22,7 +22,7 @@ function RefBadge({ refs }: { refs: KbRefHit[] }) {
 }
 
 export function KbPane({ cap, path, reloadKey, onDirtyChange, onSaved,
-                         onRename, onDelete, onContent }: {
+                         onRename, onDelete, onContent, onOpenKb }: {
   cap: string
   path: string
   reloadKey: number
@@ -31,6 +31,8 @@ export function KbPane({ cap, path, reloadKey, onDirtyChange, onSaved,
   onRename: (path: string) => void
   onDelete: (path: string) => void
   onContent?: (content: string) => void
+  /** 预览内 .md 相对链接跳转：打开目标 kb 文件（SettingsView 传 pickKb） */
+  onOpenKb?: (path: string) => void
 }) {
   const [doc, setDoc] = useState<KbRead | null>(null)
   const [content, setContent] = useState("")
@@ -123,7 +125,7 @@ export function KbPane({ cap, path, reloadKey, onDirtyChange, onSaved,
         />
       ) : (
         <ScrollArea className="min-h-0 flex-1 rounded border bg-background/40 p-2">
-          <MarkdownView content={content} prefix={`kb-${cap}`} />
+          <MarkdownView content={content} prefix={`kb-${cap}`} currentPath={path} onOpenKb={onOpenKb} />
         </ScrollArea>
       )}
       <p className="shrink-0 text-[10px] text-muted-foreground">

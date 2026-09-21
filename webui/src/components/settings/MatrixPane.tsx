@@ -26,6 +26,8 @@ export function MatrixPane({ tax, track, onFocusSkill }: {
   const reload = useCallback(() => {
     if (!tax) return
     setErr(null)
+    // 竞态守卫：切轨后旧轨聚合响应晚到不得覆盖新轨矩阵（同 RolesPane）
+    let alive = true
     const roleP: Promise<PackRole[]> = api.trackRoles(track).catch(() => [] as PackRole[])
     const skillPs: Promise<SkillCol[]>[] = [
       ...tax.capabilities.map((c) =>
@@ -37,14 +39,16 @@ export function MatrixPane({ tax, track, onFocusSkill }: {
         .catch(() => [] as SkillCol[]),
     ]
     Promise.all([roleP, ...skillPs]).then(([rs, ...skillGroups]) => {
+      if (!alive) return
       setRoles(rs)
       // 同名以后加载的轨技能覆盖（与 registry 语义一致）
       const map = new Map<string, SkillCol>()
       for (const group of skillGroups) for (const s of group) map.set(s.name, s)
       setCols([...map.values()])
-    }).catch((e) => setErr(String(e)))
+    }).catch((e) => { if (alive) setErr(String(e)) })
+    return () => { alive = false }
   }, [tax, track])
-  useEffect(() => { reload() }, [reload])
+  useEffect(() => reload(), [reload])
 
   const knownNames = useMemo(() => new Set(cols.map((c) => c.name)), [cols])
   const validTypes = new Set(Object.keys(tax?.task_types?.[track] ?? { generic: "passive" }))

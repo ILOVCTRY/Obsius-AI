@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { api } from "@/lib/api"
-import type { Task } from "@/lib/types"
+import type { Artifact, RoleInfo, Task } from "@/lib/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -11,14 +11,15 @@ import {
 import { cn } from "@/lib/utils"
 
 // 任务看板（DESIGN.md §12 页面 5 / §6.4 人类插手通道）：
-// 四态 open/claimed/done/failed——open/failed 可编辑；failed 可放回待认领；
+// 四态 open/claimed/done/failed——open/failed 可编辑；failed 可放回待执行；
 // 四态皆可物理删除（A1：留 task.deleted 审计，claimed 当前步结束即硬中断，有子任务 409）。
 // claimed 卡显示认领者计划进度（A2：task.plan，done/total + blocked 原因）。
+// v0.71 任务即窗口：双击任务卡直开专属执行窗（四态通用；终态窗=延续模式可续聊）。
 
 const COLUMNS: { status: Task["status"]; label: string }[] = [
-  { status: "open", label: "待认领" },
+  { status: "open", label: "待执行" },
   { status: "claimed", label: "执行中" },
-  { status: "done", label: "完成" },
+  { status: "done", label: "已完成" },
   { status: "failed", label: "失败" },
 ]
 
@@ -32,12 +33,22 @@ export function TaskBoard({ pid, focused }: {
   const [tasks, setTasks] = useState<Task[]>([])
   const [objective, setObjective] = useState("")
   const [taskType, setTaskType] = useState("generic")
+  const [publishRole, setPublishRole] = useState("")
   const [noise, setNoise] = useState("passive")
   const [conflictKeys, setConflictKeys] = useState("")
+  // ⑤ 验收条目（一行一条，存 context.reconcile；Agent 全部收口前 complete 被硬拦）
+  const [acceptance, setAcceptance] = useState("")
   const [priority, setPriority] = useState(2)
   const [error, setError] = useState<string | null>(null)
+  // C1 放回后无 worker 被唤醒（paused/L0）→ 提示任务已排队等恢复，不会自动执行
+  const [reopenNotice, setReopenNotice] = useState<string | null>(null)
   // 轨任务类型注册表（task_types.yaml + generic）：输入框 datalist 提示，非法值后端 422
   const [typeOptions, setTypeOptions] = useState<Record<string, string>>({ generic: "passive" })
+  // v14 任务绑定角色：发布栏角色下拉（GET /roles）+ 任务卡 🎭 显示名映射
+  const [roles, setRoles] = useState<RoleInfo[]>([])
+  const roleNames = useMemo(
+    () => Object.fromEntries(roles.map((r) => [r.role, r.name])) as Record<string, string>,
+    [roles])
   // B1 发布去重：命中同指纹 open/claimed 任务 → 确认"仍要发布"后 force 重发
   const [dupPending, setDupPending] = useState<{
     body: Parameters<typeof api.publishTask>[1]; existed: string; taskId: string
@@ -45,11 +56,14 @@ export function TaskBoard({ pid, focused }: {
   // C1：「已解决，放回继续」附注（写进任务行 result_note 落审计）
   const [resolveTarget, setResolveTarget] = useState<Task | null>(null)
   const [resolveNote, setResolveNote] = useState("")
+  // C6：放回时可选「丢弃现场，从零重做」（reopen drop_scene）
+  const [dropScene, setDropScene] = useState(false)
 
   useEffect(() => {
     Promise.all([api.getProject(pid), api.taxonomy()])
       .then(([proj, tax]) => setTypeOptions({ generic: "passive", ...(tax.task_types[proj.track] ?? {}) }))
       .catch(() => {})
+    api.listRoles(pid).then(setRoles).catch(() => {})
   }, [pid])
 
   // 删除确认（claimed 任务有警示文案；删除失败 409/422 时对话框保持打开）
@@ -71,9 +85,11 @@ export function TaskBoard({ pid, focused }: {
     const body = {
       objective: objective.trim(),
       task_type: taskType.trim(),
+      role: publishRole || undefined,
       noise_budget: noise,
       priority,
       conflict_keys: noise === "passive" ? undefined : keys,
+      acceptance: acceptance.split("\n").map((s) => s.trim()).filter(Boolean),
       force: force || undefined,
     }
     try {
@@ -84,6 +100,7 @@ export function TaskBoard({ pid, focused }: {
       }
       setObjective("")
       setConflictKeys("")
+      setAcceptance("")
       refresh()
     } catch (e) {
       setError(String(e))
@@ -125,6 +142,18 @@ export function TaskBoard({ pid, focused }: {
             <option key={n} value={n}>{n}{n === "passive" ? "" : "（active）"}</option>
           ))}
         </select>
+        {/* v14 任务绑定角色：底色匹配窗排序优先，任何窗均可即时认领（认领即换装，无宽限兜底——v0.63） */}
+        <select
+          value={publishRole}
+          onChange={(e) => setPublishRole(e.target.value)}
+          className="h-9 rounded-md border bg-card px-2 text-sm"
+          title="建议认领角色（可选）：专属执行窗按该角色装配，中途可改（热换装）"
+        >
+          <option value="">角色不限</option>
+          {roles.map((r) => (
+            <option key={r.role} value={r.role}>{r.name || r.role}</option>
+          ))}
+        </select>
         <Input
           type="number" min={0} max={9} className="w-16 text-center font-mono"
           value={priority} onChange={(e) => setPriority(Number(e.target.value))}
@@ -137,6 +166,13 @@ export function TaskBoard({ pid, focused }: {
         <Input className="min-w-64 flex-1" value={objective} onChange={(e) => setObjective(e.target.value)}
                placeholder="任务目标…" onKeyDown={(e) => e.key === "Enter" && objective.trim() && publish()} />
         <Button size="sm" onClick={() => publish()} disabled={!objective.trim()}>发布</Button>
+        <textarea
+          value={acceptance}
+          onChange={(e) => setAcceptance(e.target.value)}
+          rows={2}
+          className="h-9 w-full resize-y rounded-md border bg-card p-1.5 text-xs"
+          placeholder="验收条目（可选，一行一条）：发布后执行者须逐条 task_reconcile 收口，全部收口前 complete_task 被硬拦"
+        />
       </div>
 
       {/* C1：「已解决，放回继续」——附注写进任务行落审计 */}
@@ -160,6 +196,10 @@ export function TaskBoard({ pid, focused }: {
                   className="w-full rounded-md border bg-background p-1.5 text-xs"
                   placeholder="人类已做了什么 / 需要执行者接下来注意什么（可空）"
                 />
+                <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <input type="checkbox" checked={dropScene} onChange={(e) => setDropScene(e.target.checked)} />
+                  丢弃现场，从零重做（删除任务快照与对话现场；默认保留，认领即断点续接）
+                </label>
               </div>
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -173,8 +213,14 @@ export function TaskBoard({ pid, focused }: {
                 const t = resolveTarget
                 setResolveTarget(null)
                 if (t) {
-                  api.reopenTask(t.id, resolveNote.trim())
-                    .then(() => { setResolveNote(""); refresh() })
+                  api.reopenTask(t.id, resolveNote.trim(), dropScene)
+                    .then((r) => {
+                      setResolveNote("")
+                      setDropScene(false)
+                      setReopenNotice((r.kicked?.length ?? 0) > 0 ? null :
+                        "任务已放回待认领，但没有空闲窗被唤醒（自主编排处于暂停或 L0 手动档）——到会话「跑任务队列」或恢复编排后才会开始执行")
+                      refresh()
+                    })
                     .catch((e) => setError(String(e)))
                 }
               }}
@@ -221,6 +267,9 @@ export function TaskBoard({ pid, focused }: {
         </AlertDialogContent>
       </AlertDialog>
       {error && <p className="px-3 pt-2 text-xs text-(--status-error)">{error}</p>}
+      {reopenNotice && (
+        <p className="px-3 pt-2 text-xs text-(--status-approval)">{reopenNotice}</p>
+      )}
 
       {/* 看板列 */}
       <div className="grid min-h-0 flex-1 grid-cols-4 gap-3 overflow-auto p-3">
@@ -236,7 +285,10 @@ export function TaskBoard({ pid, focused }: {
               {tasks.filter((t) => t.status === status).map((t) => (
                 <TaskCard
                   key={t.id}
+                  pid={pid}
                   task={t}
+                  roles={roles}
+                  roleNames={roleNames}
                   onChanged={refresh}
                   onDelete={setDeleteTarget}
                   onResolve={setResolveTarget}
@@ -292,15 +344,20 @@ export function TaskBoard({ pid, focused }: {
       </AlertDialog>
 
       <p className="border-t px-3 py-1.5 text-[10px] text-muted-foreground">
-        待认领/失败任务可编辑（目标/类型/噪声/优先级/互斥键）；失败任务可放回待认领；
-        四态任务均可删除（A1：claimed 取消在当前步结束即硬中断，done 战果快照进审计）；有子任务需先处理子任务（§6.4）
+        任务即窗口（v0.71）：发布即建专属执行窗，一窗一任务；双击任务卡直开会话（终态窗=延续模式可续聊）；
+        待执行/失败任务可编辑（目标/类型/噪声/优先级/角色/互斥键）；执行中任务仅可改角色（热换装，下个步进生效）；
+        失败任务可放回原窗续跑；四态任务均可删除（A1：claimed 取消在当前步结束即硬中断，done 战果快照进审计）；
+        有子任务需先处理子任务（§6.4）
       </p>
     </div>
   )
 }
 
-function TaskCard({ task, onChanged, onDelete, onResolve, focused, focusNonce }: {
+function TaskCard({ pid, task, roles, roleNames, onChanged, onDelete, onResolve, focused, focusNonce }: {
+  pid: string
   task: Task
+  roles: RoleInfo[]
+  roleNames: Record<string, string>
   onChanged: () => void
   onDelete: (t: Task) => void
   onResolve: (t: Task) => void
@@ -310,6 +367,22 @@ function TaskCard({ task, onChanged, onDelete, onResolve, focused, focusNonce }:
   const editable = task.status === "open" || task.status === "failed"
   const [editing, setEditing] = useState(false)
   const [resumeErr, setResumeErr] = useState<string | null>(null)
+  // v0.71：执行中任务中途改角色（PATCH 仅放行 role，热换装下个步进生效）
+  const [roleEditing, setRoleEditing] = useState(false)
+  const [newRole, setNewRole] = useState(task.role ?? "")
+  const [roleErr, setRoleErr] = useState<string | null>(null)
+  // 双击直开会话（v0.71 任务即窗口，四态通用）：有专属窗开窗，无窗回退任务看板定位
+  const openSession = () => {
+    const sid = task.target_session || task.claimed_by
+    if (sid) {
+      window.dispatchEvent(new CustomEvent("goto-session", { detail: { sessionId: sid } }))
+    } else {
+      window.dispatchEvent(new CustomEvent("goto-tasks", { detail: { taskId: task.id } }))
+    }
+  }
+  // 工作区隔离（W3）：按任务归属查看产物清单
+  const [arts, setArts] = useState<Artifact[] | null>(null)
+  const [showArts, setShowArts] = useState(false)
   const cardRef = useRef<HTMLDivElement>(null)
 
   // A3：任务流跳来——滚动到卡片并高亮（nonce 变化即重新触发，同卡二次跳转也生效）
@@ -318,18 +391,45 @@ function TaskCard({ task, onChanged, onDelete, onResolve, focused, focusNonce }:
     cardRef.current?.scrollIntoView({ behavior: "smooth", block: "center" })
   }, [focused, focusNonce])
 
+  const saveRole = async () => {
+    setRoleErr(null)
+    try {
+      await api.updateTask(task.id, { role: newRole })
+      setRoleEditing(false)
+      onChanged()
+    } catch (e) {
+      setRoleErr(e instanceof Error ? e.message : String(e))
+    }
+  }
+
   if (editing && editable) {
-    return <TaskEdit task={task} onDone={() => { setEditing(false); onChanged() }} onCancel={() => setEditing(false)} />
+    return <TaskEdit task={task} roles={roles} onDone={() => { setEditing(false); onChanged() }} onCancel={() => setEditing(false)} />
   }
 
   return (
     <div
       ref={cardRef}
-      className={cn("rounded-md border bg-card p-2 transition-shadow",
+      onDoubleClick={openSession}
+      title="双击打开会话窗（待执行=待命窗 / 执行中=在跑窗 / 已结束=延续模式续聊）"
+      className={cn("cursor-pointer rounded-md border bg-card p-2 transition-shadow",
         focused && "ring-2 ring-primary")}
     >
       <div className="flex items-center gap-1.5">
         <Badge variant="outline" className="font-mono text-[10px]">{task.task_type}</Badge>
+        {task.role && (
+          <Badge variant="outline" className="text-[10px] text-(--status-paused)"
+                 title={`建议认领角色 ${task.role}：底色匹配窗排序优先，任何窗均可即时认领（认领即换装）`}>
+            🎭 {roleNames[task.role] || task.role}
+          </Badge>
+        )}
+        {(task.context?.attachments?.length ?? 0) > 0 && (
+          <Badge variant="outline" className="text-[10px] text-muted-foreground"
+                 title={task.context!.attachments!.map((a) => `${a.name}（${a.size}B）`).join("\n")}>
+            📎 {task.context!.attachments!.length === 1
+              ? task.context!.attachments![0].name
+              : `${task.context!.attachments!.length} 个附件`}
+          </Badge>
+        )}
         <Badge variant="outline" className={cn("font-mono text-[10px]",
           task.noise_budget === "passive" ? "text-muted-foreground" : "text-(--status-approval)")}>
           {task.noise_budget}
@@ -347,6 +447,21 @@ function TaskCard({ task, onChanged, onDelete, onResolve, focused, focusNonce }:
             ↻ {task.context!.attempts.length} 次尝试
           </Badge>
         )}
+        {(task.status === "done" || task.status === "failed") && (
+          <Badge variant="outline"
+                 className="cursor-pointer text-[10px] text-muted-foreground hover:bg-accent"
+                 title="本任务产物清单（工作区隔离 W3：产物按任务归属，正式产物在 artifacts/）"
+                 onClick={async () => {
+                   if (!showArts) {
+                     try {
+                       setArts(await api.artifacts(pid, { task_id: task.id }))
+                     } catch { setArts([]) }
+                   }
+                   setShowArts((v) => !v)
+                 }}>
+            📎 产物
+          </Badge>
+        )}
         <span className="flex-1" />
         <span className="font-mono text-[10px] text-muted-foreground">P{task.priority}</span>
       </div>
@@ -355,6 +470,25 @@ function TaskCard({ task, onChanged, onDelete, onResolve, focused, focusNonce }:
         <p className="mt-1 rounded border border-(--status-approval)/40 bg-(--status-approval)/5 p-1.5 text-[10px] leading-relaxed">
           <span className="font-medium">需要人工：</span>{task.result_note}
         </p>
+      )}
+      {showArts && (
+        <div className="mt-1.5 rounded border bg-background p-1.5 text-[10px]">
+          {arts === null ? (
+            <span className="text-muted-foreground">加载中…</span>
+          ) : arts.length === 0 ? (
+            <span className="text-muted-foreground">本任务暂无产物（Agent 落正式产物走 bb_add_artifact）</span>
+          ) : (
+            <ul className="space-y-0.5">
+              {arts.map((a) => (
+                <li key={a.id} className="truncate font-mono text-muted-foreground"
+                    title={`${a.path} · sha256=${a.sha256.slice(0, 16)} · ${a.author}`}>
+                  📄 {a.path}
+                  <span className="ml-1 text-muted-foreground/60">{a.created_at.slice(11, 19)}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       )}
       {task.plan.length > 0 && (
         <p className="mt-1 truncate font-mono text-[10px] text-sky-400"
@@ -367,6 +501,23 @@ function TaskCard({ task, onChanged, onDelete, onResolve, focused, focusNonce }:
           )}
         </p>
       )}
+      {(task.context?.reconcile?.length ?? 0) > 0 && (() => {
+        const rec = task.context!.reconcile!
+        const done = rec.filter((r) => r.state !== "pending").length
+        const label = { met: "✅", failed: "❌", blocked: "⛔", pending: "☐" } as const
+        return (
+          <p className="mt-1 truncate font-mono text-[10px] text-emerald-400"
+             title={`验收对账 ${done}/${rec.length}（全部收口前 complete_task 被硬拦）\n` +
+               rec.map((r) => `${label[r.state]} #${r.id} ${r.text}${r.note ? `（${r.note}）` : ""}`).join("\n")}>
+            ☑ {done}/{rec.length}
+            {rec.some((r) => r.state === "blocked") && (
+              <span className="text-amber-400">
+                {" "}■ {rec.find((r) => r.state === "blocked")?.note || "受阻"}
+              </span>
+            )}
+          </p>
+        )
+      })()}
       {task.conflict_keys.length > 0 && (
         <p className="mt-1 truncate font-mono text-[10px] text-muted-foreground"
            title={task.conflict_keys.join(", ")}>
@@ -396,7 +547,19 @@ function TaskCard({ task, onChanged, onDelete, onResolve, focused, focusNonce }:
       )}
       <div className="mt-1.5 flex items-center gap-2">
         {task.claimed_by && (
-          <span className="font-mono text-[10px] text-primary">{task.claimed_by.slice(0, 14)}</span>
+          <button
+            className="rounded border px-1 font-mono text-[10px] text-primary hover:bg-accent"
+            title={`执行窗 ${task.claimed_by}（点击打开会话页签）`}
+            onClick={() => window.dispatchEvent(new CustomEvent("goto-session", { detail: { sessionId: task.claimed_by } }))}
+          >
+            ⧉ {task.claimed_by.slice(0, 14)}
+          </button>
+        )}
+        {task.status === "open" && task.target_session && !task.claimed_by && (
+          <Badge variant="outline" className="font-mono text-[10px] text-(--status-approval)"
+                 title="已指派给该窗口（v18 认领门控：仅该窗可认领；关窗自动退回公共池）">
+            → {task.target_session.slice(0, 14)}
+          </Badge>
         )}
         {task.result_note && (
           <span className="min-w-0 flex-1 truncate text-[10px] text-muted-foreground" title={task.result_note}>
@@ -404,7 +567,7 @@ function TaskCard({ task, onChanged, onDelete, onResolve, focused, focusNonce }:
           </span>
         )}
         <span className="flex-1" />
-        {task.status === "failed" && task.resumable && (
+        {task.status === "failed" && (
           <button
             onClick={async () => {
               setResumeErr(null)
@@ -416,9 +579,11 @@ function TaskCard({ task, onChanged, onDelete, onResolve, focused, focusNonce }:
               }
             }}
             className="text-[10px] text-primary hover:underline"
-            title="带现场续跑（E12）：原会话从落盘快照与步数断点恢复，上下文不丢"
+            title={task.resume_mode === "snapshot"
+              ? "⚡ 带现场续跑（C6）：从任务键断点快照恢复对话与步数预算，可跨会话/跨角色"
+              : "↩ 接手现场续跑（C6）：恢复最近对话现场（末 60 条）与尝试履历，重新认领"}
           >
-            ▶ 续跑
+            {task.resume_mode === "snapshot" ? "⚡ 带现场续跑" : "↩ 接手现场续跑"}
           </button>
         )}
         {task.status === "failed" && task.blocked_reason === "awaiting_human" && (
@@ -450,6 +615,13 @@ function TaskCard({ task, onChanged, onDelete, onResolve, focused, focusNonce }:
             ✏ 编辑
           </button>
         )}
+        {task.status === "claimed" && (
+          <button onClick={() => { setNewRole(task.role ?? ""); setRoleEditing((v) => !v); setRoleErr(null) }}
+                  className="text-[10px] text-muted-foreground hover:text-foreground"
+                  title="执行中任务仅可改角色：保存后对在跑会话立即热换装（prompt 下个步进生效）">
+            🎭 改角色
+          </button>
+        )}
         <button
           onClick={() => onDelete(task)}
           title={task.status === "claimed"
@@ -460,13 +632,35 @@ function TaskCard({ task, onChanged, onDelete, onResolve, focused, focusNonce }:
           {task.status === "claimed" ? "🗑 取消" : "🗑 删除"}
         </button>
       </div>
+      {roleEditing && task.status === "claimed" && (
+        <div className="mt-1.5 flex items-center gap-1.5 rounded border border-primary/40 bg-background p-1.5">
+          <select
+            value={newRole}
+            onChange={(e) => setNewRole(e.target.value)}
+            className="h-7 flex-1 rounded border bg-card px-1.5 text-xs"
+            title="热换装角色：保存后对在跑会话立即生效（prompt 下个步进重建）"
+          >
+            <option value="">角色不限</option>
+            {roles.map((r) => (
+              <option key={r.role} value={r.role}>{r.name || r.role}</option>
+            ))}
+          </select>
+          <Button size="sm" variant="ghost" className="h-7 text-xs"
+                  onClick={() => setRoleEditing(false)} disabled={roleErr !== null}>
+            取消
+          </Button>
+          <Button size="sm" className="h-7 text-xs" onClick={saveRole}>换装</Button>
+          {roleErr && <span className="truncate text-[10px] text-(--status-error)">{roleErr}</span>}
+        </div>
+      )}
     </div>
   )
 }
 
-// 内联编辑（open/failed）：五字段；failed 额外提供「保存并放回」
-function TaskEdit({ task, onDone, onCancel }: {
+// 内联编辑（open/failed）：六字段（v0.71 加角色）；failed 额外提供「保存并放回」
+function TaskEdit({ task, roles, onDone, onCancel }: {
   task: Task
+  roles: RoleInfo[]
   onDone: () => void
   onCancel: () => void
 }) {
@@ -474,6 +668,7 @@ function TaskEdit({ task, onDone, onCancel }: {
   const [taskType, setTaskType] = useState(task.task_type)
   const [noise, setNoise] = useState(task.noise_budget)
   const [priority, setPriority] = useState(task.priority)
+  const [editRole, setEditRole] = useState(task.role ?? "")
   const [conflictKeys, setConflictKeys] = useState(task.conflict_keys.join(", "))
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -485,6 +680,7 @@ function TaskEdit({ task, onDone, onCancel }: {
       task_type: taskType.trim(),
       noise_budget: noise,
       priority,
+      role: editRole || "",
       conflict_keys: noise === "passive" ? [] : keys,
     }
   }
@@ -527,6 +723,17 @@ function TaskEdit({ task, onDone, onCancel }: {
           type="number" min={0} max={9} className="h-8 w-16 text-center font-mono text-xs"
           value={priority} onChange={(e) => setPriority(Number(e.target.value))}
         />
+        <select
+          value={editRole}
+          onChange={(e) => setEditRole(e.target.value)}
+          className="h-8 flex-1 rounded-md border bg-background px-1.5 text-xs"
+          title="专属执行窗按该角色装配（v0.71 任务即窗口）"
+        >
+          <option value="">角色不限</option>
+          {roles.map((r) => (
+            <option key={r.role} value={r.role}>{r.name || r.role}</option>
+          ))}
+        </select>
       </div>
       <textarea
         value={objective}

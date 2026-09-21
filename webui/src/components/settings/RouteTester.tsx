@@ -22,7 +22,12 @@ export function RouteTester({ tax, track }: { tax: Taxonomy | null; track: strin
   const [hits, setHits] = useState<RouteHit[]>([])
   const [expanded, setExpanded] = useState<string | null>(null)
 
-  useEffect(() => { api.trackRoles(track).then(setRoles).catch(() => {}) }, [track])
+  // 竞态守卫：切轨后旧轨角色下拉晚到不覆盖（同 RolesPane）
+  useEffect(() => {
+    let alive = true
+    api.trackRoles(track).then((rs) => { if (alive) setRoles(rs) }).catch(() => {})
+    return () => { alive = false }
+  }, [track])
 
   const preview = async () => {
     if (!query.trim() && !features.trim() && !fileFeatures.trim() && !labels.trim()) return

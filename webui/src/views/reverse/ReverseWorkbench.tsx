@@ -19,6 +19,9 @@ import { NotesPane } from "./NotesPane"
 // React Flow 较重，攻击链视图按需切包，不拖慢工作台首屏
 const ChainView = lazy(() =>
   import("./chains/ChainView").then((m) => ({ default: m.ChainView })))
+// 蓝图视图（R4）同样按需切包
+const BlueprintsView = lazy(() =>
+  import("./blueprints/BlueprintsView").then((m) => ({ default: m.BlueprintsView })))
 
 // rev-generic 逆向理解工作台（DESIGN.md §12）：
 // 样本条 + 三栏（函数浏览器｜结论+伪码｜xref/发现/笔记）。
@@ -44,8 +47,8 @@ export function ReverseWorkbench({ pid }: { pid: string }) {
   const [uploading, setUploading] = useState(false)
   const [busyAi, setBusyAi] = useState(false)
 
-  // subnav：逆向分析｜攻击链（切链不卸载分析状态，同级条件渲染）
-  const [mode, setMode] = useState<"rev" | "chains">("rev")
+  // subnav：逆向分析｜攻击链｜蓝图（切页不卸载分析状态，同级条件渲染）
+  const [mode, setMode] = useState<"rev" | "chains" | "blueprint">("rev")
   const [rightTab, setRightTab] = useState("xref")
   const [focusFinding, setFocusFinding] = useState<string | null>(null)
 
@@ -222,9 +225,9 @@ export function ReverseWorkbench({ pid }: { pid: string }) {
         onUpload={handleUpload} onRetry={handleRetry} onAiTriage={handleAiTriage}
         onPullNames={handlePullNames}
       />
-      {/* subnav：逆向分析｜攻击链（DESIGN §12） */}
+      {/* subnav：逆向分析｜攻击链｜蓝图（DESIGN §12 / §9 R4） */}
       <div className="flex shrink-0 items-center gap-1 border-b px-2 py-1">
-        {([["rev", "逆向分析"], ["chains", "攻击链"]] as const).map(([k, label]) => (
+        {([["rev", "逆向分析"], ["chains", "攻击链"], ["blueprint", "蓝图"]] as const).map(([k, label]) => (
           <button
             key={k} type="button" onClick={() => setMode(k)}
             className={cn("rounded px-3 py-1 text-[11px]",
@@ -237,6 +240,15 @@ export function ReverseWorkbench({ pid }: { pid: string }) {
       {mode === "chains" ? (
         <Suspense fallback={<div className="flex flex-1 items-center justify-center text-xs text-muted-foreground">加载攻击链视图…</div>}>
           <ChainView pid={pid} tick={tick} onLocate={locateFromChain} />
+        </Suspense>
+      ) : mode === "blueprint" ? (
+        <Suspense fallback={<div className="flex flex-1 items-center justify-center text-xs text-muted-foreground">加载蓝图视图…</div>}>
+          <BlueprintsView pid={pid} tick={tick}
+                          onLocate={(bpSha, bpAddr) => {
+                            if (bpSha && bpSha !== sha) setSha(bpSha)
+                            setAddr(bpAddr)
+                            setMode("rev")
+                          }} />
         </Suspense>
       ) : !sha ? (
         <EmptyUpload onUpload={handleUpload} uploading={uploading} />
