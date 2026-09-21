@@ -9,14 +9,15 @@
 | [`skills/`](skills/CLAUDE.md) | 能力包×场景轨分类学：注册表 / 路由评分 / 规则链 / 角色加载 / task_types 注册表 |
 | [`agent/`](agent/CLAUDE.md) | AgentSession 主循环 + 工具分发 + 角色软边界（tools/max_runtime/default_noise）+ kb_open + 认领后计划闸（A2）+ 子代理分解 publish_task（A5） |
 | [`orchestrator/`](orchestrator/CLAUDE.md) | 主代理 tick：监控/派生/开窗/汇总 + 轨注册表拒收 + 饿死告警 + gate 预算闸门 + **replan_priorities 优先级重排（A5）** + state.py（tick 租约/状态持久化） |
-| [`blackboard/`](blackboard/CLAUDE.md) | SQLite 单一写入口 + 任务队列 + 事件总线 + 任务图 graph.py（A3）（schema v6：tasks.plan 计划步、orchestrator_state last_replan_at；v3 session_inbox/撤回+finding_update 私信） |
+| [`blackboard/`](blackboard/CLAUDE.md) | SQLite 单一写入口 + 任务队列 + 事件总线 + 任务图 graph.py（A3）（schema v11：tasks.plan 计划步、session_inbox/撤回私信、artifacts.meta、findings.rating_basis 判级依据 F11） |
+| [`browser/`](browser/CLAUDE.md) | F6 内置浏览器（渗透/红队轨）：Playwright 托管 Chromium 实例池（每项目常驻，Page=会话）+ 资产白名单 + 抓包（路由拦截入 http_history v15）+ 重发/爆破（人类 UI 专属） |
 | [`intel/`](intel/CLAUDE.md) | 情报面板（E9，§16）：全局 config/intel/ 存储 + 触发式抓取（NVD/KEV/GHSA/RSS，getter 可注入不经网关）+ classifier 打分/简报（LLM 缺席降级规则，不 503） |
 | [`api/`](api/CLAUDE.md) | FastAPI 唯一 HTTP 入口（全项目唯一 import fastapi 处）+ WS + Job |
 | `runtime/` | Level L0-L3 / policy / gateway / backends / detector；unknown 按 malware_live，默认 net=none |
 | `llm/` | Anthropic /v1/messages 内部标准；Ark 接入 + 多供应商（config/providers.json）+ ModelRouter |
 | `tools/` | 组合服务（decompiler：headless v3 全量导出含 strings，IDA→Ghidra 选路；P2 IDA 双向写回 writeback/refresh_db_cache/diff_pulled_names；`MCPBackend` 实时桥=streamable-http 懒握手/3s TTL 探活，只做写回直写+缓存缺席单函数 decompile+xref 降级，绝不替代全量缓存，断了静默降级）+ detector |
 | `projects.py` | ProjectStore：`create_project(name, track="ctf", capabilities=None, config=None)`（注入 autonomy 默认档归一化）；`update_config` 双写 project.json+黑板行；旧 domain 透明映射；回收站式删除（删前 close_all 双层关闭闸门 + rename 0.05–0.2s 退避重试）；`Project.close()` 后 `proj.bb` 抛 BlackboardClosedError 不重建 |
-| `autonomy.py` | 自主档 L0/L1/L2（§6.8）+ **auto_derive mission 自动派生开关（C2 §6.9）**：默认档按轨、normalize/autonomy_of、sessions_cap 计数、`record_llm_usage`（记账+llm.usage+80% 软警）、`hard_block_reason`/`human_warning` 闸门（每次实时重读，不缓存）、usage_view（批 5 起被 api L2 链状态机消费，本文件无链逻辑） |
+| `autonomy.py` | 自主档 L0/L1/L2（§6.8）+ **auto_derive mission 自动派生开关（C2 §6.9）**：默认档按轨、normalize/autonomy_of、sessions_cap 计数、`record_llm_usage`（记账+llm.usage+80% 软警）、`hard_block_reason`/`human_warning` 闸门（每次实时重读，不缓存）、usage_view（批 5 起被 api L2 链状态机消费，本文件无链逻辑；**出口带 `derive:{last_at,last_result}`——mission 自动派生上次判定，v13 orchestrator_state 新列，前端状态灯消费**）、**`normalize_rule_profiles`（F11：rule_profiles 三态归一化，projects.update_config 与 API 层共用）** |
 
 ## 全局约定
 

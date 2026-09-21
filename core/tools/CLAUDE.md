@@ -5,6 +5,15 @@
 
 ## 文件
 
+## 文件
+
+- `ida_mcp_manager.py` — **IDA-MCP 实例生命周期管理器（2026-09-20，DESIGN.md §9「MCP 按需拉起」）**：
+  按 `(project_id, binary_sha256)` 管无窗口 idat 实例。`ensure(pid, binary, db_dir=)`：在线复用 →
+  无 idat/锁占用失败一律 None（headless 降级，绝不抛 500）→ detached 拉起 `idat -A -S<bootstrap>
+  -o<db_stem> <binary>`（**-S 无空格单参数**，端口走环境变量 `CYBERSTRIKE_IDA_MCP_PORT`）。
+  就绪探活 180s 超时杀；空闲 600s reaper 自动关；上限 2 LRU；`shutdown_all` 平台 shutdown 兜关；
+  `online_for_project` 供 overview 三态灯。拉起前查 DB_LOCK_EXTS（GUI 开着该库绝不抢）。
+  bootstrap 在 `tools/mcp/ida-pro-mcp/bootstrap_mcp.py`（自有文件，同步队列设计见该文件头注释）。
 - `decompiler.py` — 反编译组合服务（DESIGN.md §9），三个层次：
 
 ### 1. Headless 后端（全量客观缓存的唯一生产者）
@@ -36,6 +45,10 @@
   （五元组 ok/locked/no-db/no-tool/unsupported）。
 - Agent 四接口（list_functions/decompile/annotate/xrefs）：list 与全量概览跳过 MCP；
   annotate 只落 sidecar 不直写 MCP。
+- **动态端点（2026-09-20）**：`DecompilerService(mcp_provider=callback)` / `build_headless_service(...,
+  mcp_provider=)`——decompile 点查与 xrefs 每次先调 `provider(binary)` 取端点（接
+  `IdaMcpManager.ensure`，按需拉起 IDA-MCP）；provider None/异常/同端点一律回退固定桥或
+  headless 缓存，选路行为与现状不变。**红线不变**：全量概览跳过 MCP（不触发拉起）。
 - 地址纪律：内部 int；出服务/事件一律小写 hex 串；MCP 入参 `_addr_arg` 统一 hex 串。
 
 ## 测试

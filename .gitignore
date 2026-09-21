@@ -36,3 +36,5 @@ mcp-servers/.playwright-mcp/
 packs/.proposals/
 webui/webui/
 .history/
+# 外部素材库（收编源材料，第三方许可，绝不整库入库）
+开源优秀项目/

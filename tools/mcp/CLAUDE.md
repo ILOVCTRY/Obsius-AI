@@ -11,6 +11,8 @@ tools/mcp/
 ├─ ida-pro-mcp/          # mrexodia/ida-pro-mcp 快照（勿手改，升级=重新复制）
 │  ├─ VENDOR.md          # 上游/日期/依赖/升级方式（改快照先看它）
 │  ├─ ida_mcp.py         # IDA 插件入口（PLUGIN_ENTRY，Ctrl-Alt-M，127.0.0.1:13337）
+│  ├─ bootstrap_mcp.py   # ★ 自有文件：idat 无窗口 MCP bootstrap（IdaMcpManager 拉起件，
+│  │                     #   自建同步队列；修改走 core/tools/ida_mcp_manager.py 联动）
 │  └─ ida_mcp/           # 实现：api_*.py 71 工具 + zeromcp/（自带 MCP/SSE，零 pip）
 └─ CLAUDE.md
 ```
@@ -45,7 +47,10 @@ tools/mcp/
 
 ## 红线（不可越）
 
-- **只连 127.0.0.1**；不做 stdio 自动拉起（config 里 stdio server 与本桥无关）。
+- **只连 127.0.0.1**；不做 stdio。平台可**按需拉起本地 idat 实例**（`IdaMcpManager`，专属
+  端口 13338+，空闲 10min 自动关）并连其 http 端点——拉起件是本目录 `bootstrap_mcp.py`
+  （自有文件，不动 vendor 任何文件）；仍不连远程、不连人手 GUI 之外的 stdio 进程
+  （config 里 stdio server 与本桥无关）。
 - MCP 只做**实时点查/实时写当前 GUI 库**：写回 annotate、缓存缺席的单函数 decompile、
   xref 降级。**绝不用 MCP 全量函数列表替换 headless 缓存**（三层数据纪律不变）。
 - MCP 在线是 headless 的**增强不是替代**：断了一切降级回 headless，三态灯变灰，不报 500。

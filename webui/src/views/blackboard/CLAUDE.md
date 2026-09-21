@@ -3,9 +3,15 @@
 > 发现 tab「链路」子视图：finding 卡片 × host IP 泳道 × 严重度列，弱/强/链三级边。
 > 与逆向 `views/reverse/chains/` **互不复用组件**，只共用依赖（@xyflow/react v12）与 chains API。
 
+# views/blackboard/（评估攻击链画布 E1 + 黑板链路图，DESIGN §12）
+
+> 发现 tab「链路」子视图：finding 卡片 × host IP 泳道 × 严重度列，弱/强/链三级边。
+> 与逆向 `views/reverse/chains/` **互不复用组件**，只共用依赖（@xyflow/react v12）与 chains API。
+> `boardGraph/` 子目录=黑板链路图（2026-09-20，全轨第 4 tab「全景」），见文末。
+
 ## 入口与门控
 
-- `Blackboard.tsx`：发现 tab 过滤行右侧 `[列表｜链路]` 子切换；**仅 `track === "assessment"` 且非 compact 侧栏**才渲染（`showCanvas={!compact && track === "assessment"}`）。compact 直播间侧栏永不挂画布。
+- `Blackboard.tsx`：发现 tab 过滤行右侧 `[列表｜链路]` 子切换；**仅 pentest/redteam 轨且非 compact 侧栏**才渲染（`showCanvas={!compact && (track === "pentest" || track === "redteam")}`；历史上写 assessment，R2 拆轨后按轨名判断）。compact 直播间侧栏永不挂画布。
 - `React.lazy` 动态 import，@xyflow/react（约 192KB）与本画布都不进主包。
 - findings/assets 由 Blackboard 父级持有：4s 轮询 + WS bump，IP/sev/status 三件套筛选列表与画布**共用同一 `visible`**；画布只展示、不自己拉 findings。chains 由画布自拉（4s）。
 - 画布根 `absolute inset-0`，父级 Blackboard 画布分支须给 `relative min-h-0 flex-1` 定高（高度链见 webui/CLAUDE.md 坑）。
@@ -14,9 +20,10 @@
 
 - `FindingsCanvas.tsx` — 主视图（ReactFlowProvider 包一层）：工具条 + ReactFlow + 选中边浮卡 + 两个对话框；所有 chains 写操作走 `lib/api`（addChainLink/updateChain/deleteChainLink/createChain），无旁路。
 - `canvas.css` — 深色主题覆盖（控件/小地图）。**xyflow 样式表是未分层 plain CSS，层叠压过 Tailwind v4 utilities layer（任意选择器带 `!` 也不稳）**；必须 import 在 `@xyflow/react/dist/style.css` 之后，用根类 `.fc-dark` 提特异性覆盖。泳道背景节点必须注册自定义 `laneBg` 类型（见 FindingNode）——无 type 的节点被 xyflow 按内置 default 渲染成**白卡片+连接点**，深色画布穿帮。
-- **C2 画布降噪（2026-09-16）**：①布局双模式——无资产筛选=单一全局泳道（所有发现共用 severity 四列，不按 IP 分块），选 host 才按泳道；②重心排序（barycenter 2 轮往返）+ 强/链边连通分量聚簇——强边两端对齐减少交叉；③info/low 紧凑卡（步距 64）+ 聚焦开关（hover/点选只亮一跳邻接，其余 opacity 0.08）+ 边三态（全部/仅强边/仅链边，localStorage 持久，缺省仅强边）+ 路由（同列直线/跨列平滑折线/跨泳道贝塞尔）+ onlyRenderVisibleElements。
-- `canvasModel.ts` — 纯函数模型：`buildLanes`（host 子树→泳道，无 host 归属→「未归属」；泳道内 info/low｜medium｜high｜critical 四列（`sevColumn`，2026-09-15 由三列拆开，LANE_W=COL_W*4；泳道头标签居中公式 `i*COL_W+112` 对任意列数通用）、created_at 堆叠，同时产出 `place` id→槽位与 `laneOf`）、`buildWeakEdges`（同泳道同 vuln_class/同父任务且严重度升级，灰虚，纯推导不入库）、`buildStrongEdges`（evidence.relates_to，青实，label=note）、`buildChainEdges`（链详情相邻 visible finding 成边，label=edge_note，按链状态着色）。
-- `FindingNode.tsx` — finding 卡（severity 色条/✓ verified/虚线框 unverified/✕ false-positive/POC 角标，hover Link2=快捷入链）+ LaneHeader（泳道头不占节点）+ LaneBackground（泳道底板，深色无边连接点）；卡片左右两个青色 Handle。data 类型必须 `type` 不用 `interface`（xyflow 的 Record<string,unknown> 约束）。
+- **C2 画布降噪（2026-09-16）**：①布局双模式——无资产筛选=单一全局泳道（所有发现共用一个三分区画布，不按 IP 分块），选 host 才按泳道；②重心排序（barycenter 2 轮往返）+ 强/链边连通分量聚簇——强边两端对齐减少交叉；③~~info/low 紧凑卡~~（**2026-09-18 已废**：info 停收后前提消失，全部统一完整卡，行距恒 CARD_STEP——`isCompact` 仅剩三分区「噪声/孤立」分拣用途）+ 聚焦开关（hover/点选只亮一跳邻接，其余 opacity 0.08）+ 边三态（全部/仅强边/仅链边，localStorage 持久，缺省仅强边）+ 路由（同泳道**同排或同列直线**/同泳道跨列跨排平滑折线/跨泳道贝塞尔；判定比 `place.x`/`place.y` 相等——串联区同排对齐的链边走水平直线）+ onlyRenderVisibleElements。**卡片放大（2026-09-18）**：CARD_W 224→320（w-80）、CARD_STEP 118→148、LANE_GAP→44、fitView maxZoom 1→1.4（节点少时初始/适应视图放大而非缩小留白）；尺寸常量单源在 `canvasModel.ts`，FindingsCanvas 用 `CARD_W` 组装节点勿再硬编码。
+- **F13 孤立节点默认隐藏（2026-09-17 落地）**：工具条「孤立节点 (N)」开关（localStorage `findings-showisolated:<pid>`，**缺省隐藏**）——N=model.isolatedIds.size（强/链边连通分量=1 的真孤点）；隐藏时 buildLanes 收 `showIsolated:false` 跳过 noise/orphans 分区（真孤点不进 place，泳道宽高只按串联区收缩），**端点被隐藏的边在 flowEdges 里过滤**（place 缺失→null）；打开恢复三分区全量。
+- `canvasModel.ts` — 纯函数模型：`buildLanes`（host 子树→泳道，无 host 归属→「未归属」；全局模式=单泳道「全部发现」。**三分区布局（2026-09-17，替代旧严重度四带/带内折行）**：泳道内按强边/链边连通分量（并查集）分三区——①**噪声区最左**=无任何连接的 info/low（compact 卡，列优先折行 `BAND_ROWS=8` 行）；②**串联区居中**=连通分量按最早发现时间排序、货架式 packing（行高 BAND_ROWS 放不下右移换货架）；分量内**层=距链头的最长路径**（`layerOf`，边方向 source→target=基→新/链 seq，环路防御 fallback 0），链头在最左、每跳右移一列；行分配贪心——优先跟前任同行（边呈水平直线一一对照），被占取本层最小空行；③**孤立中高危区最右**=无连接的 critical/high/medium（SEV_RANK 升序，折行）。行 y=前缀和，**行步距按行内内容判定**（有普通卡整行 CARD_STEP 否则 COMPACT）——构造上保证卡片零重叠（DOM 几何已验证）；泳道 width/height/各 lane x 由最终放置阶段回填（host 泳道 x 按前序实际宽度累计 + LANE_GAP）；产出 `place` id→槽位（无 col 字段）与 `laneOf`；`sevColumn`/barycenter 已随旧布局移除）、`buildWeakEdges`（同泳道同 vuln_class/同父任务且严重度升级，灰虚，纯推导不入库）、`buildStrongEdges`（evidence.relates_to，青实，label=note）、`buildChainEdges`（链详情相邻 visible finding 成边，label=edge_note，按链状态着色）。
+- `FindingNode.tsx` — finding 卡（w-80 完整形态：severity 色条/标题 3 行截断/vuln_class/✓ verified/虚线框 unverified/✕ false-positive/POC 角标，hover Link2=快捷入链；compact 形态已废）+ LaneHeader（泳道头不占节点）+ LaneBackground（泳道底板，深色无边连接点）；卡片左右两个青色 Handle。data 类型必须 `type` 不用 `interface`（xyflow 的 Record<string,unknown> 约束）。
 - `FindingEdge.tsx` — 自定义边：14px 透明命中带 + BaseEdge + EdgeLabelRenderer 标签。
 - `AddChainEdgeDialog.tsx` — 手拖连线/强边确认对话框：选已有链或新建（名+goal），**edge_note 必填**；来源不在链先补挂链首（无 note），目标带 note 追加链尾。
 - `ChainToolbar.tsx` — 链下拉（名+goal+状态灯+link_count）、＋新建链、状态单向流转 hypothesis→validated→exploited（终态按钮禁用，宁严勿松）。导出 `STATUS_DOT`（黄 #d29922 / 蓝 #58a6ff / 红 #f85149）供边着色共用。
@@ -29,3 +36,9 @@
 - 选中联动：选中节点 → 非上下游卡 `opacity-20`、非相关边 opacity 0.15；选中边 → 底部浮卡（strong=加入链，chain=删除链边，window.confirm 后软删 link，相邻边随之变化）；onPaneClick 清空选择。
 - **误报边淡出（批 1B，§6.7 的 1.6）**：`findings` 推派生 `fpIds`（status=false-positive），flowEdges 中任一端点命中的边（主要是 strong relates_to；弱边本就不起源于 FP）置 `stale`：opacity 0.25 + `strokeDasharray "3 4"` 点虚线，FindingEdge 标签加 opacity-30+line-through 与「依据已被推翻」title；选中边浮卡对 strong/chain 显琥珀警告。4s 轮询重拉 findings 即生效，无新订阅。
 - 详情弹窗复用 `components/blackboard/FindingDetailDialog`（列表同款，POC 复制在里面）。
+
+## boardGraph/（黑板链路图，2026-09-20，DESIGN §12 定稿块）
+
+- `BoardGraphCanvas.tsx` 第 4 tab「全景」：五类对象（asset/func_kb/finding/artifact/task）× 类型分层 DAG 只读视图；`api.boardGraph` 4s 轮询（label/sub 服务端拼好）。悬停/点选聚焦一跳邻接、finding 点击复用 FindingDetailDialog、其余底部浮卡；死路/孤立缺省折叠（localStorage `board-deadend:<pid>`/`board-isolated:<pid>`）；chain 边 STATUS_DOT 着色、stale basis 点虚线 0.25。**坑（2026-09-20 实测）**：画布是 `absolute inset-0`，TabsContent 必须自带 `relative`（Blackboard.tsx board 分支）——缺了锚到更外层把顶部 tab 栏整个盖住，用户被困在全景里切不回去；补 relative 后 tab 栏可见即可切回，退出钮冗余（曾加过又移除）。
+- `boardModel.ts` 布局纯函数：五列固定序、空列左移、行 packing 跟已放置邻居同行（edge 方向无关）；独立常量 `BOARD_*` **勿 import canvasModel**（布局结构不同，只复制不抽象）。
+- `BoardNode.tsx` 五类节点卡 + `boardColHeader`/`boardColBg` 自定义 type（无 type 节点=白卡穿帮坑同上）；`BoardEdge.tsx` 复制 FindingEdge 骨架。受控节点契约同上（节点不可拖也必须回收 dimensions）。

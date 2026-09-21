@@ -1,10 +1,11 @@
 # cyberstrike-pro
 
-AI 驱动的全能安全平台（能力包 web/binary/crypto/forensics/misc × 场景轨 ctf/assessment/research/malware，覆盖 CTF / 授权评估 / 逆向 Pwn / IoT 工控车联网研究 / 恶意样本分析），**原生 Windows 优先**，按能力自动降级 Docker/WSL2。
+AI 驱动的全能安全平台（能力包 web/binary/crypto/forensics/misc × 场景轨 ctf/pentest/redteam/research/malware，覆盖 CTF / 渗透测试 SRC / 红队行动 / 逆向 Pwn / IoT 工控车联网研究 / 恶意样本分析），**原生 Windows 优先**，按能力自动降级 Docker/WSL2。
 
 ## 文档地图
 
-- **`DESIGN.md`** — 全部设计决策的唯一真相源。改设计先改它，代码向它对齐。
+- **`DESIGN.md`** — 功能导向参考手册，当前已实施功能的唯一真相源（一级=系统、二级=功能、速览+展开区渐进填充）；未实施方向在 `docs/plans/`，实施落地时决策回写它，代码向它对齐。
+- **`docs/plans/`** — 方案目录：设计讨论收敛的待实施设计（一方案一文件），走「细化打磨 → 实施」路线；实施落地时决策才回写 DESIGN.md。
 - 各大文件夹的 `CLAUDE.md` — 该目录代码的接手指南（本文件末尾的维护约束）。
 
 ## 技术栈速查
@@ -19,7 +20,7 @@ AI 驱动的全能安全平台（能力包 web/binary/crypto/forensics/misc × �
 ## 一键启动（Windows 双击）
 
 - **`启动平台.bat`**（项目根，双击即用）：自动起后端 `scripts/serve.py`（127.0.0.1:8420）与前端 Vite（localhost:5173，仅 IPv6），端口已在监听则跳过，首次运行自动 `npm install`，两服务就绪后自动开浏览器。各服务独立窗口，日志看对应窗口。
-- **`停止平台.bat`**：按端口结束 8420/5173 进程。
+- **`停止平台.bat`**：先对 8420 优雅停机（`POST /api/admin/shutdown`，shutdown 钩子给在跑会话落任务现场快照，等端口释放最多 15s），超时才按端口硬杀；5173 照旧硬杀。
 - 两脚本为 **UTF-8 + CRLF**，开头 `chcp 65001` 自举（call 自身重读）以兼容双击时的 GBK 控制台；改动后必须保持 CRLF（LF 会导致 cmd 解析错乱）。
 
 ## 文档维护约束（强制，每个会话必须遵守）
