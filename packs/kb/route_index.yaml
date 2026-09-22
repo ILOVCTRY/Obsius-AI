@@ -26,6 +26,18 @@ entries:
   - point: C2 协议分析
     match: [c2, 回连, 协议分析, beacon]
     kb: binary/malware/c2-and-protocols.md
+  - point: Android 分层分诊
+    match: [android, apk, 安卓, dex, smali]
+    kb: binary/android/triage-and-layering.md
+  - point: JNI / native 分析（移动）
+    match: [jni, ndk, native, so, so库, hook]
+    kb: binary/android/native-five-lines.md
+  - point: 移动加固与脱壳
+    match: [加固, 脱壳, packed, upx, 壳]
+    kb: binary/android/unpacking.md
+  - point: Godot 引擎 APK
+    match: [godot, gdc, sparsepck, 引擎]
+    kb: binary/android/godot.md
   - point: RSA 攻击
     match: [rsa, 共模, e与phi, 维纳, coppersmith]
     kb: crypto/crypto/rsa-attacks.md

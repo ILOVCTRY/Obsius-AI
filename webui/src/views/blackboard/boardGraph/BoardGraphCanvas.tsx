@@ -22,10 +22,13 @@ import { BoardEdge, type BoardFlowEdge } from "./BoardEdge"
 import {
   BOARD_CARD_W, buildBoardLayout, COLUMN_ICON, type BoardLayout,
 } from "./boardModel"
+import { MainlineView } from "./MainlineView"
 
 // 黑板链路图（任务 E，DESIGN.md §12 黑板链路图）：五类对象 × 类型分层 DAG 只读视图。
 // 数据 = GET /api/projects/{pid}/board-graph（边口径服务端定稿）4s 轮询；
 // 交互 = 悬停/点选聚焦一跳邻接、finding 点详情弹窗、其余底部浮卡、死路/孤立折叠。
+// 同页切换档「全景 | 主线」（execution-trace-chain R7，2026-09-22）：主线档渲染
+// MainlineView 过滤子图，ReactFlow 整体卸载省渲染。
 // 由 Blackboard 第 4 tab「全景」懒加载（@xyflow/react 不进主包）。
 
 const nodeTypes = { boardNode: BoardNode, boardColHeader: BoardColHeader, boardColBg: BoardColBg }
@@ -82,6 +85,8 @@ function Canvas({ pid, track }: { pid: string; track?: string }) {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null)
   const [detail, setDetail] = useState<Finding | null>(null)
+  // 全景 | 主线 切换档（R7）：主线=战果过滤子图（MainlineView），全景=五列 DAG
+  const [mode, setMode] = useState<"panorama" | "mainline">("panorama")
   const [isFs, setIsFs] = useState(false)
   useEffect(() => {
     const h = () => setIsFs(!!document.fullscreenElement)
@@ -104,6 +109,13 @@ function Canvas({ pid, track }: { pid: string; track?: string }) {
       requestAnimationFrame(() => rf.fitView({ padding: 0.15, maxZoom: 1.2 }))
     }
   }, [graph, layout.columns.length, rf])
+
+  // 切回全景时重适应视图（主线档卸载了 ReactFlow，视口会重置）
+  useEffect(() => {
+    if (mode !== "panorama") return
+    const t = setTimeout(() => rf.fitView({ padding: 0.15, maxZoom: 1.2 }), 120)
+    return () => clearTimeout(t)
+  }, [mode, rf])
 
   // 受控 ReactFlow 契约：节点由 layout 派生，但内部测量变化必须回写——否则任一
   // 重渲染都会用不带 measured 的 props 节点清空内部 measured/handleBounds，
@@ -227,41 +239,64 @@ function Canvas({ pid, track }: { pid: string; track?: string }) {
     <div ref={wrapperRef} className="fc-dark absolute inset-0 bg-[#0d1117]">
       {/* 顶部工具条 */}
       <div className="absolute inset-x-0 top-0 z-20 flex flex-wrap items-center gap-2 border-b border-[#21262d] bg-[#0d1117]/90 px-2 py-1.5">
+        {/* 全景 | 主线 切换档（R7） */}
+        <div className="flex overflow-hidden rounded border border-[#30363d]">
+          <button type="button"
+                  className={cn("px-2 py-0.5 text-[11px] transition-colors",
+                    mode === "panorama" ? "bg-primary/15 font-medium text-primary"
+                      : "text-muted-foreground hover:bg-accent/40")}
+                  onClick={() => setMode("panorama")}>
+            全景
+          </button>
+          <button type="button"
+                  className={cn("px-2 py-0.5 text-[11px] transition-colors",
+                    mode === "mainline" ? "bg-primary/15 font-medium text-primary"
+                      : "text-muted-foreground hover:bg-accent/40")}
+                  onClick={() => setMode("mainline")}>
+            主线
+          </button>
+        </div>
         <span className="text-[11px] font-medium text-muted-foreground">
-          全景链路（资产 → 函数 → 发现 → 产物 → 任务）
+          {mode === "panorama"
+            ? "全景链路（资产 → 函数 → 发现 → 产物 → 任务）"
+            : "战果主线（目标 → verified 发现 → exploited 链）"}
         </span>
         <span className="flex-1" />
-        <button
-          type="button"
-          title={showDeadEnds ? "死路显示中：点击折叠 false-positive 发现" : "死路已折叠：点击展开误报/死路发现"}
-          className={cn("rounded border border-[#30363d] px-2 py-0.5 text-[11px] transition-colors",
-            showDeadEnds ? "text-muted-foreground hover:bg-accent/40"
-              : "bg-primary/15 font-medium text-primary")}
-          onClick={() => changeDeadEnds(!showDeadEnds)}
-        >
-          死路{layout.deadEndIds.size > 0 ? ` (${layout.deadEndIds.size})` : ""}
-        </button>
-        <button
-          type="button"
-          title={showIsolated ? "孤立节点显示中：点击隐藏无任何连接的节点" : "孤立节点已隐藏：仅显示有连接的节点"}
-          className={cn("rounded border border-[#30363d] px-2 py-0.5 text-[11px] transition-colors",
-            showIsolated ? "text-muted-foreground hover:bg-accent/40"
-              : "bg-primary/15 font-medium text-primary")}
-          onClick={() => changeIsolated(!showIsolated)}
-        >
-          孤立节点{layout.isolatedIds.size > 0 ? ` (${layout.isolatedIds.size})` : ""}
-        </button>
-        <label className="flex cursor-pointer items-center gap-1 text-[11px] text-muted-foreground">
-          <input type="checkbox" checked={focusOn} onChange={(e) => setFocusOn(e.target.checked)} />
-          聚焦
-        </label>
-        <button
-          type="button" title="适应视图"
-          className="rounded p-1 text-muted-foreground hover:bg-accent/40 hover:text-foreground"
-          onClick={() => rf.fitView({ padding: 0.15, maxZoom: 1.2 })}
-        >
-          <Maximize2 className="size-3.5" />
-        </button>
+        {mode === "panorama" && (
+          <>
+            <button
+              type="button"
+              title={showDeadEnds ? "死路显示中：点击折叠 false-positive 发现" : "死路已折叠：点击展开误报/死路发现"}
+              className={cn("rounded border border-[#30363d] px-2 py-0.5 text-[11px] transition-colors",
+                showDeadEnds ? "text-muted-foreground hover:bg-accent/40"
+                  : "bg-primary/15 font-medium text-primary")}
+              onClick={() => changeDeadEnds(!showDeadEnds)}
+            >
+              死路{layout.deadEndIds.size > 0 ? ` (${layout.deadEndIds.size})` : ""}
+            </button>
+            <button
+              type="button"
+              title={showIsolated ? "孤立节点显示中：点击隐藏无任何连接的节点" : "孤立节点已隐藏：仅显示有连接的节点"}
+              className={cn("rounded border border-[#30363d] px-2 py-0.5 text-[11px] transition-colors",
+                showIsolated ? "text-muted-foreground hover:bg-accent/40"
+                  : "bg-primary/15 font-medium text-primary")}
+              onClick={() => changeIsolated(!showIsolated)}
+            >
+              孤立节点{layout.isolatedIds.size > 0 ? ` (${layout.isolatedIds.size})` : ""}
+            </button>
+            <label className="flex cursor-pointer items-center gap-1 text-[11px] text-muted-foreground">
+              <input type="checkbox" checked={focusOn} onChange={(e) => setFocusOn(e.target.checked)} />
+              聚焦
+            </label>
+            <button
+              type="button" title="适应视图"
+              className="rounded p-1 text-muted-foreground hover:bg-accent/40 hover:text-foreground"
+              onClick={() => rf.fitView({ padding: 0.15, maxZoom: 1.2 })}
+            >
+              <Maximize2 className="size-3.5" />
+            </button>
+          </>
+        )}
         <button
           type="button" title="全屏"
           className="rounded p-1 text-muted-foreground hover:bg-accent/40 hover:text-foreground"
@@ -274,6 +309,10 @@ function Canvas({ pid, track }: { pid: string; track?: string }) {
         </button>
       </div>
 
+      {mode === "mainline" ? (
+        <MainlineView pid={pid} track={track} graph={graph} openFinding={openFinding} />
+      ) : (
+        <>
       <ReactFlow
         nodes={flowNodes}
         edges={flowEdges as Edge[]}
@@ -368,8 +407,10 @@ function Canvas({ pid, track }: { pid: string; track?: string }) {
           )}
         </div>
       )}
+        </>
+      )}
 
-      {/* 发现详情（复用列表同款弹窗） */}
+      {/* 发现详情（复用列表同款弹窗；全景/主线两档共用，主线档从卡点入） */}
       {detail && (
         <FindingDetailDialog
           key={detail.id}

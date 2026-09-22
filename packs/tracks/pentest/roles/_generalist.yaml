@@ -1,8 +1,0 @@
-name: "通用"
-description: "通用评估员：按入口技能路由分配的方向干活"
-persona: "通用渗透测试员，按入口技能路由分配的方向干活。"
-skills: null
-task_types: null
-default_noise: medium
-tools: null
-max_steps: 200

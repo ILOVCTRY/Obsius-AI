@@ -1,0 +1,8 @@
+# 场景档：单窗通用（expert-pool M4a 内置；_generalist 全量可见，轻量单人赛/快速验证）
+name: 单窗通用
+description: "只开 _generalist 一个全量专家：轻量单窗推进，题型简单或想全程手控时用"
+experts: [_generalist]
+board_view: findings
+playbook: "单窗按题推进：读题→查知识库→解题→flag 落黑板"
+artifacts: [writeup]
+knowledge: []

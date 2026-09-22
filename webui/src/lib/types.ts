@@ -7,6 +7,8 @@ export interface ProjectMeta {
   track: string
   /** 能力包（多选） */
   capabilities: string[]
+  /** 专家组队（expert-pool M2）：空/缺省=存量直通（按轨全池），非空=绑定清单 */
+  experts?: string[]
   created_at: string
   config?: Record<string, unknown>
 }
@@ -205,6 +207,49 @@ export interface BoardGraph {
   edges: BoardGraphEdge[]
 }
 
+// 执行轨迹（execution-trace-chain M1，2026-09-22）：任务详情内嵌时间链（R1+R2 现算）
+export type TraceStepKind = "skill" | "kb" | "tools" | "finding"
+
+export interface TraceStep {
+  kind: TraceStepKind
+  ts: string
+  ts_end?: string                          // tools 组专属
+  // skill
+  name?: string | null; hit?: boolean; score?: number | null; matched?: string[]
+  // kb
+  module?: string; source?: string | null; count?: number
+  // tools 组
+  ok?: number; fail?: number; cmds?: string[]
+  // finding（服务端已富化）
+  finding_id?: string; title?: string; severity?: string; status?: string
+  vuln_class?: string; category?: string
+}
+
+export interface TaskTraceWindow {
+  task_id: string; session_id: string
+  lo: number; hi: number | null; open: boolean
+}
+
+export interface TaskTrace {
+  task: {
+    id: string; objective: string; task_type: string; status: string
+    priority: number; claimed_by: string | null; result_note: string
+  }
+  windows: TaskTraceWindow[]
+  steps: TraceStep[]
+  idle: TraceStep[]                        // 游离段（未挂任务活动）
+  truncated: boolean
+}
+
+// 打法效果榜（M3/R4，基于物化侧轨迹链）
+export interface TraceEffectCombo {
+  skill: string; kb: string; chains: number; verified_findings: number
+}
+
+export interface TraceEffect {
+  trace_chains: number; validated_chains: number; combos: TraceEffectCombo[]
+}
+
 export interface LlmProvider {
   name: string
   base_url: string
@@ -243,6 +288,10 @@ export interface Finding {
   severity: string
   /** F11 判级依据（如「rating:edu-rating 高危#2 任意文件覆盖写」），空=未标注 */
   rating_basis: string
+  /** 收录格式三件套·危害描述（schema v20），空=待补充 */
+  impact: string
+  /** 收录格式三件套·修复建议（schema v20），空=待补充 */
+  remediation: string
   status: string
   /** C6 分两类：vuln=漏洞 / intel=有效发现·关键发现（缺省迁移行=vuln） */
   category: FindingCategory
@@ -695,6 +744,70 @@ export interface PackRole {
   file: string // yaml 文件名（去 .yaml 后即角色 id，sessions.role/URL/日志标识）
 }
 
+/** 专家（expert-pool M1/M3，GET /api/experts 视图；数据源 packs/experts/<id>.yaml） */
+export interface Expert {
+  id: string // yaml stem = 专家 id（sessions.role 等标识沿用同一值域）
+  name?: string | null // 中文显示名，缺省回退 id
+  description?: string | null
+  persona?: string | null
+  tracks?: string[] | null // null/缺省 = 服务全部轨
+  skills?: string[] | null // null = 全量专家（不限定）
+  task_types?: string[] | null
+  default_noise?: string | null
+  tools?: string[] | null
+  max_runtime?: string | null
+  max_steps?: number | null
+  protected?: boolean // _generalist 兜底专家，拒删
+  variants?: Record<string, Record<string, unknown>> // {track: {field: value}} 轨变体
+  file?: string // "experts/<id>.yaml"（HistoryButton 用；virtual 虚拟单例无文件）
+  kind?: "virtual" // 对话化编排器 M3：虚拟单例（id=orchestrator，不入 yaml 池、不认领任务）
+}
+
+/** 阶段目标（对话化编排器 M2，§4.3：meta.phase_goal，GET/PUT /projects/{pid}/goal） */
+export interface PhaseGoal {
+  text: string
+  criteria?: string[] // 人话验收口径（非机读）
+  phase?: string | null
+  source: string // "chat"
+  created_at: string
+  confirmed_by: string // "human"
+}
+
+/** 编排器拟人身份（M3，§4.4：meta.orchestrator_persona） */
+export interface OrchPersona {
+  display_name: string
+  persona: string
+}
+
+/** 专家写表单（POST/PUT /api/experts）：全字段提交式覆写，None/缺省=不落键（skills 缺键=全量专家语义） */
+export interface ExpertBody {
+  name?: string | null
+  description?: string | null
+  persona?: string | null
+  tracks?: string[] | null
+  skills?: string[] | null
+  task_types?: string[] | null
+  default_noise?: string | null
+  tools?: string[] | null
+  max_runtime?: string | null
+  max_steps?: number | null
+  variants?: Record<string, Record<string, unknown>> | null
+}
+
+/** 场景档（expert-pool M4a，GET /api/tracks/{track}/profiles）：五件套 + 看板默认视图 */
+export interface TrackProfile {
+  id: string
+  name?: string | null
+  description?: string | null
+  experts?: string[] // 组队预设（建项时物化进 meta.experts）
+  rule_profiles_owners?: string[] | null
+  rule_profiles_rating?: string[] | null
+  board_view?: string | null // findings | assets | funcs | board
+  playbook?: string | null
+  artifacts?: string[] | null
+  knowledge?: string[] | null
+}
+
 export interface SkillDef {
   name: string
   kind: "capability" | "track"
@@ -861,19 +974,6 @@ export interface ReviewProposalsResult {
   raw_head?: string
 }
 
-/** PUT /api/tracks/{track}/roles/{name} 表单（未提交字段保留原值；列表显式 null=白名单关闭） */
-export interface RoleUpdateBody {
-  name?: string | null // 中文显示名；null 不动，空串重置为 stem
-  description?: string | null
-  persona?: string | null
-  skills?: string[] | null
-  task_types?: string[] | null
-  default_noise?: string | null
-  tools?: string[] | null
-  max_runtime?: string | null
-  max_steps?: number | null
-}
-
 /** POST /api/skills/route-preview 试算入参 */
 export interface RoutePreviewBody {
   query?: string
@@ -912,13 +1012,6 @@ export interface RuleProfiles {
 }
 
 // ---------- 阶段 3B：CRUD / doctor / 历史版本 ----------
-
-/** POST 新建角色（clone_from 缺省=空白模板） */
-export interface RoleCreateBody {
-  name: string // 文件 slug（ASCII）
-  display_name?: string | null // 中文显示名（yaml name 行），缺省用 slug
-  clone_from?: string | null
-}
 
 /** POST 新建技能向导 */
 export interface SkillCreateBody {

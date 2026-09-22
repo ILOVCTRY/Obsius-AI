@@ -14,6 +14,7 @@
 
 import json
 import re
+import shutil
 import time
 import uuid
 from datetime import datetime, timezone
@@ -80,8 +81,14 @@ class Project:
 
     @property
     def capabilities(self) -> list[str]:
-        """启用能力包（多选）。"""
+        """启用能力包（多选）。专家绑定项目的运行时可见范围用 caps_effective 推导
+        （app 层 core.skills.experts.caps_effective），本属性恒返回盘上原始绑定。"""
         return project_binding(self.meta)[1]
+
+    @property
+    def experts(self) -> list[str]:
+        """绑定专家 id 清单（expert-pool M2，§4.4）。无绑定（存量项目）= 空表。"""
+        return [e for e in (self.meta.get("experts") or []) if str(e).strip()]
 
     @property
     def domain(self) -> str:
@@ -134,11 +141,15 @@ class ProjectStore:
         track: str = "ctf",
         capabilities: list[str] | None = None,
         config: dict | None = None,
+        experts: list[str] | None = None,
     ) -> Project:
         """创建项目目录与黑板库。id 全局唯一（project.json 与 projects 行同 id）。
 
         v2 绑定：track（场景轨单选）+ capabilities（能力包多选）。
-        旧域名（pentest/ctf）作 track 传入时透明映射（读兼容、写新值，§4.5.5）。"""
+        旧域名（pentest/ctf）作 track 传入时透明映射（读兼容、写新值，§4.5.5）。
+        专家绑定（expert-pool M2，§4.4）：experts 非空才写 meta["experts"]
+        （缺省不写键 = 存量直通语义，caps_effective 走 meta.capabilities）；
+        专家存在性/轨校验在 API 层做（422），存储层只归一化。"""
         caps = sorted(capabilities or [])
         if track in LEGACY_DOMAIN_MAP:
             track, mapped_caps = LEGACY_DOMAIN_MAP[track]
@@ -161,6 +172,9 @@ class ProjectStore:
             "created_at": _now(),
             "config": config or {},
         }
+        bound = sorted({str(e).strip() for e in (experts or []) if str(e).strip()})
+        if bound:
+            meta["experts"] = bound
         (path / PROJECT_FILE).write_text(
             json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
         proj = Project(path)
@@ -232,6 +246,128 @@ class ProjectStore:
         p.bb.update_project_config(meta["id"], new_config)
         p.meta = meta
         return view_meta(meta)
+
+    def update_experts(self, key: str, experts: list[str] | None, *,
+                       project: Project | None = None) -> dict:
+        """换将（expert-pool M2，§4.4）：重写 meta["experts"] 并即时生效于
+        下轮会话构造（构造链每次实时读 meta，无需重启）。空清单剥键 = 恢复
+        存量直通态（caps_effective 走 meta.capabilities）。专家存在性/轨校验
+        在 API 层做（422）；黑板 projects 行无此列，单一真相源 project.json。"""
+        p = project or self.open_project(key)
+        meta = json.loads((p.path / PROJECT_FILE).read_text(encoding="utf-8"))
+        bound = sorted({str(e).strip() for e in (experts or []) if str(e).strip()})
+        if bound:
+            meta["experts"] = bound
+        else:
+            meta.pop("experts", None)
+        (p.path / PROJECT_FILE).write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        p.meta = meta
+        return view_meta(meta)
+
+    # ---------- 对话化编排器 meta（M2/M3，§6.4；单一真相源 project.json） ----------
+
+    def update_phase_goal(self, key: str, goal: dict | None, *,
+                          project: Project | None = None) -> dict:
+        """阶段目标（对话化编排器 M2）：整键写 meta["phase_goal"]；None=清空重议
+        （剥键）。goal 确认/清空的事件留痕（goal.confirm/goal.clear）由 API 层落
+        （payload 带全文快照，变更历史=事件流可回放）；黑板 projects 行无此列。"""
+        p = project or self.open_project(key)
+        meta = json.loads((p.path / PROJECT_FILE).read_text(encoding="utf-8"))
+        if goal:
+            meta["phase_goal"] = goal
+        else:
+            meta.pop("phase_goal", None)
+        (p.path / PROJECT_FILE).write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        p.meta = meta
+        return view_meta(meta)
+
+    def update_orchestrator_persona(self, key: str, persona: dict | None, *,
+                                    project: Project | None = None) -> dict:
+        """编排器拟人身份（M3）：meta["orchestrator_persona"]={display_name, persona}
+        整键写；None=恢复缺省（剥键）。persona 只注入对话轮系统提示，display_name
+        由前端贯穿页签/气泡。"""
+        p = project or self.open_project(key)
+        meta = json.loads((p.path / PROJECT_FILE).read_text(encoding="utf-8"))
+        if persona:
+            meta["orchestrator_persona"] = persona
+        else:
+            meta.pop("orchestrator_persona", None)
+        (p.path / PROJECT_FILE).write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        p.meta = meta
+        return view_meta(meta)
+
+    # ---------- 知识继承（expert-pool M4b，§4.8） ----------
+
+    def inherit_knowledge(self, src_key: str, dst: Project) -> dict:
+        """建项目时从源项目继承知识（同 binary_sha256 语义 = 样本资产本体 +
+        其 func_kb 行 + 蓝图）。方向定稿（§4.8）：**只新增不覆盖**（目标已有
+        同键条目一律跳过）、**源项目只读**（样本文件 shutil.copy2，绝不移动/
+        改写源盘）。黑板写走各自 bb 方法（单一写入口）；物理样本文件复制在
+        本层（store 只管 DB 行）。临时打开的源句柄 finally 关闭（Windows 句柄
+        不落残留）。返回统计 {binaries, func_kb, blueprints, skipped}。"""
+        src = self.open_project(src_key)
+        if src.id == dst.id:
+            src.close()
+            raise ValueError("知识继承源不能是目标项目自身")
+        stats = {"binaries": 0, "func_kb": 0, "blueprints": 0, "skipped": 0}
+        try:
+            src_bb, dst_bb = src.bb, dst.bb
+            # 1) binary 资产（sha256 存 value 列）+ samples/ 文件复制
+            for a in src_bb.list_assets(src.id):
+                if a.get("type") != "binary":
+                    continue
+                sha = a.get("value") or ""
+                if dst_bb.find_asset(dst.id, "binary", sha) is not None:
+                    stats["skipped"] += 1
+                    continue
+                meta = dict(a.get("meta") or {})
+                rel = str(meta.get("path") or "")
+                safe = rel and not rel.startswith(("/", "\\")) and ".." not in Path(rel).parts
+                sfile = src.samples_dir / rel if safe else None
+                if sfile is not None and sfile.is_file():
+                    dpath = dst.samples_dir / rel
+                    dpath.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(sfile, dpath)
+                else:
+                    meta.pop("path", None)  # 源文件缺失：只继承资产行与知识行
+                meta["inherited_from"] = src.id
+                dst_bb.upsert_asset(dst.id, "binary", sha, meta=meta,
+                                    author=a.get("author") or "system")
+                stats["binaries"] += 1
+            # 2) func_kb 行（analysis 笔记/风险标签/演变史随行）
+            for f in src_bb.list_funcs(src.id):
+                if dst_bb.lookup_func(dst.id, f["binary_sha256"], f["address"]):
+                    stats["skipped"] += 1
+                    continue
+                dst_bb.upsert_func(dst.id, f["binary_sha256"], f["address"],
+                                   f.get("name") or "", f.get("analysis") or "",
+                                   f.get("risk_tags") or [], f.get("confidence", 0.5),
+                                   analyzed_by=f.get("analyzed_by") or "inherit")
+                stats["func_kb"] += 1
+            # 3) 蓝图（modules/content_md 随行；状态尽力保留，不可跳级则留 draft）
+            existing = {b["name"] for b in dst_bb.list_blueprints(dst.id)}
+            for b in src_bb.list_blueprints(src.id):
+                if b["name"] in existing:
+                    stats["skipped"] += 1
+                    continue
+                row = dst_bb.create_blueprint(
+                    dst.id, b["name"], goal=b.get("goal") or "",
+                    binary_sha256=b.get("binary_sha256") or "",
+                    modules=b.get("modules") or [], content_md=b.get("content_md") or "",
+                    author="inherit")
+                if b.get("status") and b["status"] != "draft":
+                    try:
+                        dst_bb.set_blueprint_status(dst.id, row["id"], b["status"],
+                                                    author="inherit")
+                    except ValueError:
+                        pass
+                stats["blueprints"] += 1
+        finally:
+            src.close()
+        return stats
 
     # ---------- 删除（回收站式） ----------
 

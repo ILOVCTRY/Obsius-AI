@@ -1,6 +1,6 @@
 # 方案：编排器专家化——可对话编排（对话窗 + goal 商议 + 虚拟单例）
 
-- **状态**：**已定稿，待排期**（2026-09-21 收敛；同日九条打磨定稿见 §5，C2 修订=对话窗全替代）
+- **状态**：**已实施（2026-09-21）**——M1 对话通道 + M2 goal 闭环 + M3 专家拟人全量落地（后端 chat_turn/goal/persona/virtual 专家 + 前端编排页签三段式/composer orch 态/C2 态退役）；**M4 异常订阅唤醒后置**未实施；定稿决策已沉淀 DESIGN.md §四「对话化编排器（2026-09-21）」
 - **拍板记录**：§3（3 项决策）+ §5（九条打磨定稿，整批拍板）
 - **关联代码**：`core/orchestrator/orchestrator.py`（tick LLM 工具循环 :718 / ORCH_TOOLS / `_pending_directives` :403 / 态势 `_stats._overview` / A5 replan）、`core/orchestrator/state.py`（tick 租约三函数 / 游标 cycles 白名单）、`core/autonomy.py`（record_llm_usage :157，source 自由字符串、预算不分 source）、`core/api/app.py`（`_build_orchestrator` :4103 装配 / tick·directive·replan 端点 / 审批）、`core/orchestrator/judgments.py`（判据三层）、`webui/src/views/LiveRoom.tsx`（__orch 页签 :539 事件流筛选 / composer 四态含「指挥编排」:37）、project.json meta（`Project.meta`，core/projects.py）
 - **实施后**：定稿决策沉淀回 DESIGN.md（新版「四、任务与编排系统」下加功能条目），同步 core/orchestrator/CLAUDE.md；本文保留作方案背景
@@ -130,9 +130,7 @@ meta.phase_goal = {
 | 8 | 虚拟单例呈现 | 不入 experts/\*.yaml 文件池，运行态注册；专家池 API 恒追加 virtual 条目；绑定页不出现；meta.orchestrator_persona 定制，persona 只注入对话轮 |
 | 9 | mission/goal/C2 关系 | 分层互补（4.7 表）；**C2 退役路线=对话窗全替代**（用户修订：composer「指挥编排」态删除，API 标 deprecated 保留兼容，存量指令仍被 tick 消费） |
 
-## 6. 实施切分建议（已定稿，待用户排期）
+## 6. 实施切分（M1-M3 已实施 2026-09-21，详见 DESIGN.md §四「对话化编排器」）
 
-- **M1 对话通道**：orch.chat 事件 + POST /orchestrator/chat（租约 acquire/409/心跳续租）+ 对话轮 chat_turn()（只读态势/40 条上下文/全闸门工具面/source=orchestrator-chat）+ 编排页签对话流渲染 + composer 第五态 + C2 态退役（前端删态，API 标 deprecated）。
-- **M2 goal 闭环**：goal schema（meta.phase_goal）+ PUT /projects/{pid}/goal + goal.confirm/clear 事件 + goal_section 注入（tick+对话轮）+ 顶部 goal 条。
-- **M3 专家拟人**：meta.orchestrator_persona + persona 注入对话轮 + display_name 贯穿（页签/头像/气泡）+ 专家池 API virtual 追加（衔接 expert-pool M2，可后置）。
-- **M4（后置）**：异常订阅唤醒（触发白名单 5 项 + 聚合窗口 + 编排侧声明表）。
+- ~~M1 对话通道 / M2 goal 闭环 / M3 专家拟人~~——**已实施剔除**（chat 插队轮租约 409 / goal 闭环 goal.confirm 留痕 / 虚拟单例 persona + 前端编排页签三段式 + composer orch 态 + C2 态退役）。
+- **M4（待排期，本方案唯一剩余计划）**：异常订阅唤醒（触发白名单 5 项：task.failed 聚合 / starvation / 绑窗关闭 / budget.soft_warning / goal 阶段门满足 + 聚合窗口 + 编排侧声明表，见 §4.6）。

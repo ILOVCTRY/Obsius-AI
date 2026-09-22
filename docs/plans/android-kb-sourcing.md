@@ -1,6 +1,6 @@
 # 方案：binary 包 Android 子域收编（r0re）
 
-- **状态**：**已打磨定稿，待排期**（2026-09-21 收敛；同日 6 条待打磨全部消化见 §5）
+- **状态**：**M1+M3 已实施（2026-09-21），M2 工具链待排期**（打磨两轮共十条消化见 §5；实施记录见 §6）
 - **拍板记录**：见 §3（5 项决策）
 - **素材库**：`开源优秀项目/逆向/r0re-main`（Android 逆向与 CTF 编排服务，Cairn 血统二开 + muteki 黑板借鉴；许可已由用户确认可直接收编，2026-09-21）
 - **关联代码**：`packs/capabilities/binary/`（K2 收编版 pwn/reverse/malware + file-triage/binary-rev/binary-pwn 技能）、`core/tools/decompiler.py`（DECOMPILE_GUIDANCE 引导先例）、[toolchain-registry.md](toolchain-registry.md)（python-tool 类落位）、[dsh-kb-sourcing.md](dsh-kb-sourcing.md)（dsh mobile 分类归并此处）
@@ -65,7 +65,7 @@ Docker 化 Android 分析 worker（scripts/skills/test_apk）——我方 L3 Doc
 
 | 手册 | 素材来源 | 章节骨架 |
 |---|---|---|
-| `triage-and-layering.md` 分诊与分层 | android-ctf/bootstrap + android-reverse/bootstrap + SKILL.md | ①关键层四分判据表（Java/smali only / JNI bridge / native validator / dynamic-only blocker）②快速分诊命令序列（aapt dump badging / apktool d / jadx / readelf -h / strings 扫 so）③分析状态字段模型（ctf_state 字段集提炼）④stop-early 纪律（分诊结论进 finding，不在低价值层空转） |
+| `triage-and-layering.md` 分诊与分层 | android-ctf/bootstrap + android-reverse/bootstrap + SKILL.md | ①关键层四分判据表（Java/smali only / JNI bridge / native validator / dynamic-only blocker）②快速分诊命令序列（aapt dump badging / apktool d / jadx / readelf -h / strings 扫 so；**特征词声明对照**：file_features 由 Agent 分诊声明传入路由 ×3，非自动探测——手册给「观察到什么→声明什么」对照表，与 android-rev frontmatter 对齐：APK 容器→is_apk、lib/*.so→has_native_lib、JNI 导出→has_jni、.godot markers→godot_engine、加固 so→packed_so）③分析状态字段模型（ctf_state 字段集提炼）④stop-early 纪律（分诊结论进 finding，不在低价值层空转） |
 | `native-five-lines.md` native 五线 | explore_native{,_jni,_smc,_constants,_verify} + reason_native | ①JNI 桥定位（RegisterNatives vs `Java_<pkg>_` 命名）②常量提取线（init_array `movz/movk` 建常量 + XOR 循环 = init 期解混淆）③SMC 线 ④verify 线（到达 final compare 的证明义务）⑤诱饵清单（Morse/Base64/MD5-like、字符串是候选不是证据、固定缓冲区保留未动后缀） |
 | `unpacking.md` 壳与脱壳 | explore_native_packed + android-reverse 对应篇 | ①UPX-shlib fold 识别四征（.text 高熵/内嵌 `\x7fELF`/节表矛盾/init_array 裸 syscall）②unicorn 脱壳工程（auxv/memfd/mmap；MAP_SHARED 写回 munmap 同步丢数据坑）③`R_AARCH64_RELATIVE` 重定位修复（不修则 vtable 读零）④packed 字符串不可信，只信脱壳镜像 ⑤capstone 线性扫描失步→adrp+add 手工逐字解码 |
 | `godot.md` Godot 专项 | explore_native_packed Godot 节 + godot-sec2026 案例 | ①markers 清单 ②逻辑在小自定义 GDExtension（`assets/ext/*.gdextension` 指名），不在大引擎库 ③诱饵函数表（godot-cpp 同名陷阱）④`.gdc`/sparsepck 加密信封（格式 + 32 字节 key 位置 + CFB 变体）⑤变常量检测（ChaCha20 `expand 32-byte k` 换脸，先对参考常量再复用库代码）⑥godot_ctf_runner 一键路径与手工兜底 |
@@ -78,12 +78,13 @@ Docker 化 Android 分析 worker（scripts/skills/test_apk）——我方 L3 Doc
 name: android-rev
 description: Android/移动端逆向：APK 分层分诊、JNI/native 五线、加固脱壳、Godot 专项
 keywords: android, apk, 安卓, jni, ndk, dex, smali, 加固, 脱壳, godot, crackme, frida, so
-features: is_apk, has_native_lib, has_jni, godot_engine, packed_so
+file_features: is_apk, has_native_lib, has_jni, godot_engine, packed_so
 task_types: triage, reverse, verify
 ---
 ```
 
   去重说明：`crackme` 与 binary-rev 双方声明——Android 场景 `is_apk` 特征（×3 权重）压过 keywords 撞分；`is_elf/is_pe` 不与 `is_apk` 撞（APK 是 zip 容器）；`packed_so`（加固 so）≠ `packed_binary`（通用壳）。正文=特征→手册对照表（`android/triage-and-layering.md` 等四指针）+ 反空转规则（native 存在优先 JNI 线、诱饵不止步、候选必须验证）。手册 frontmatter 照 K5 分面约定（phase/vuln_class）。
+- **专家挂载（复查补定稿）**：`reverse-analyst`（research 轨逆向分析师）+ `reverse`（ctf 轨逆向解题）两专家 skills 白名单新增 `android-rev`——对照 binary-rev 现挂载面（code-auditor / pwn-solver / rebuilder / reverse-analyst）对称收窄：Android crackme 偏逆向不偏利用，pwn-solver 不挂。两专家已因 binary-rev 覆盖 binary 包能力面，挂载只增技能偏好与正文可达性，caps_effective 域面不变；未挂载场景下 kb 手册仍可经 route_index 按域注入，但 ×3 特征偏好与反空转正文不进运行时面。
 
 ### 4.2 工具注册表草案（衔接 toolchain-registry）
 
@@ -101,11 +102,11 @@ task_types: triage, reverse, verify
 
 ### 4.3 案例库（落点定稿）
 
-- 落点 `cases/godot-sec2026/`（树后 `kb/binary/android/cases/godot-sec2026/{README.md,flag_algo.py}`；树前落 `binary/kb/android/cases/` 随 M0 迁移）——`cases/` 子目录隔离「已解案例」与「方法论手册」。
-- **K6 沉淀路径约定定稿**：`<域>/<子域>/cases/<案例id>/`（成功案例 verified 后的沉淀目标路径），godot-sec2026 为首例；其五段式（识别 markers / 解题路径 / 验证向量 / solver / 复用提示）写入 K6 案例格式约定作 Android 题参照。
+- 落点 `kb/binary/android/cases/godot-sec2026/{README.md,flag_algo.py}`（M0 已实施，直接新树形态）——`cases/` 子目录隔离「已解案例」与「方法论手册」。
+- **K6 沉淀路径约定定稿**：`<域>/<子域>/cases/<案例id>/`（成功案例 verified 后的沉淀目标路径），godot-sec2026 为首例；其五段式（识别 markers / 解题路径 / 验证向量 / solver / 复用提示）写入 K6 案例格式约定，**约定定义处 = DESIGN.md §4 知识库定稿块**（实施 M3 时随收编写入）。
 - ali_crackme3 / wbox 两个 solver 落 `cases/` 同级独立目录（r0re 未附完整案例 README，标注「solver 现成、案例待补」）。
 
-### 4.4 binary 包 route_index 增补草案（4 条，kb 路径按实施时树形态落前缀）
+### 4.4 binary 包 route_index 增补草案（4 条，全局单表前缀形态 `binary/android/<手册>.md`）
 
 | point | match | kb |
 |---|---|---|
@@ -116,19 +117,30 @@ task_types: triage, reverse, verify
 
 「脱壳/壳」与 reverse/anti-analysis 条目 match 撞词——Top-5 评分按上下文自然分流（APK vs ELF），可接受；后续按 K7 zero-hit 追踪精简。无 tags 全角色可见（对齐 binary K2 骨架惯例）；doctor `route-index-kb-missing` 兜底。
 
-## 5. 打磨定稿记录（2026-09-21 六条全部消化）
+## 5. 打磨定稿记录（2026-09-21，两轮共十条全部消化）
 
 | # | 打磨点 | 定稿 |
 |---|--------|------|
 | 1 | 4 篇手册成文 | §4.1：文件名（英文，跟 binary 域现状）+ 章节骨架 + 术语表定稿；正文成文属 M1 实施动作 |
-| 2 | android-rev frontmatter | §4.1 定稿：features=`is_apk/has_native_lib/has_jni/godot_engine/packed_so`；`crackme` 与 binary-rev 撞词保留（is_apk 特征 ×3 压过）；`packed_so`≠`packed_binary` |
+| 2 | android-rev frontmatter | §4.1 定稿：file_features=`is_apk/has_native_lib/has_jni/godot_engine/packed_so`；`crackme` 与 binary-rev 撞词保留（is_apk 特征 ×3 压过）；`packed_so`≠`packed_binary`。**实施期修正（2026-09-21）**：核实 router 匹配语义（core/skills/router.py）——分诊声明的文件特征走 `file_features` 查询参数、只匹配技能 `file_features` 字段（`features` 字段对应情景特征查询），故特征词从 `features` 改落 `file_features` 字段，否则 ×3 加权为死标签 |
 | 3 | 工具 registry schema | M2 与 toolchain-registry M1 **谁先落地谁定 schema，后落方对齐**（§4.2 草案作基线）；unicorn 依赖 venv 形态随之 |
 | 4 | 案例落点 | §4.3 定稿：`<域>/<子域>/cases/<案例id>/` 为 K6 沉淀路径约定，godot-sec2026 首例 |
 | 5 | redlines 条款 | **零新增**：research 轨「样本 untrusted/仅授权样本」已覆盖；frida/动态调试属执行类操作走 run() 网关既有策略；噪声档研究轨已有 passive 默认 |
 | 6 | dsh mobile 归并 | mobile 5 篇改归本子域（渗透向篇目，refs/ 快照纪律照旧）；dsh 方案 §2.1/§4.4 已同步；miniprogram 5 篇仍归 web 包不变 |
+| 7 | 专家挂载清单 | §4.1 定稿：reverse-analyst + reverse 挂 android-rev（对照 binary-rev 现挂载面对称收窄，pwn-solver 不挂；caps_effective 域面不变） |
+| 8 | 特征词一致性 | file_features 由 Agent 分诊声明传入（非自动探测）——triage-and-layering 手册②加特征词声明对照表，声明词与 android-rev frontmatter 对齐保 ×3 命中 |
+| 9 | K6 约定定义处 | §4.3 定稿：五段式案例格式约定落 DESIGN.md §4 知识库定稿块（M3 实施时写入） |
+| 10 | 树形态残留清理 | M0 已实施，§4.3/§4.4/§6「树前/树后」两形态旧表述清理，一律直接按新树 `kb/binary/android/`（拍板记录 #1 保留历史原貌，头部已声明作废） |
 
-## 6. 实施切分建议（打磨定稿后由用户排期）
+## 6. 实施记录
 
-- **M1 知识与技能**：4 篇手册 + android-rev 技能 + route_index 增补 4 条（kb 路径按实施时树形态落前缀）+ doctor 全绿。
-- **M2 工具**：tools/py/android/ 落位 + registry 声明 + venv 依赖 + Agent 引导文本。
-- **M3 案例库**：godot-sec2026 收编 + K6 格式参照落约定。
+### M1+M3 已实施（2026-09-21，同日一批准）
+
+- **M1 知识与技能**：`packs/kb/binary/android/` 落 4 篇手册（30 篇 prompt 提炼改写，剥 r0re 机制，术语首现括注英文，frontmatter 照 K5 分面 phase）+ index.md 子域入口；`capabilities/binary/skills/android-rev/SKILL.md`（§4.1 定稿 frontmatter 原样 + 手册对照表 + 反空转规则 + 特征词声明 + 与 binary-rev 分工）；专家挂载 reverse-analyst / reverse 两 yaml；route_index 增 4 条（全局形态 `binary/android/<手册>.md`，binary 9→13）+ `binary/route.json` 增 android 键；test_skills.py reverse-analyst skills 断言同步。
+- **M3 案例库**：`kb/binary/android/cases/`——godot-sec2026 完整五段式（README + flag_algo.py 原样收编，**正反向向量自测通过**）；ali-crackme3 / wbox 两 solver 原样收编 + 「solver 现成、案例待补」stub README（识别 markers + 已知求解链）；cases/README.md 条目索引。K6 案例格式约定（五段式 + `<域>/<子域>/cases/<案例id>/`）落 DESIGN.md §六（方案原文写「§4」为旧编号，实际知识体系=§六）。
+- **验证**：`scripts/pack_doctor.py` 0 error（1 warning=edu-rating 已知预期）；pytest test_skills + test_experts 49 passed。
+- **文档同步**：DESIGN.md §六 四层知识体系段、本文件、docs/plans/CLAUDE.md、packs/CLAUDE.md（binary 包行/薄路由 15 个/route_index 计数）。
+
+### M2 工具（待排期）
+
+tools/py/android/ 落位（android_ctf_runner / godot_ctf_runner / upx_shlib_emu + apply_relocs + nrv2b 三件套）+ registry 声明（schema 与 toolchain-registry M1 谁先落地谁定，§4.2 草案作基线）+ unicorn venv 依赖 + Agent 引导文本（DECOMPILE_GUIDANCE 先例）。

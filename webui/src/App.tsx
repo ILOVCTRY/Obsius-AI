@@ -25,6 +25,12 @@ import { bindingBadge } from "@/lib/taxonomy"
 
 type View = "projects" | "intel" | "live" | "board" | "tasks" | "approvals" | "browser" | "settings"
 
+/** M4c 场景档 board_view 默认视图（config.board_view.default；黑板上自行校验可用 tab 回退） */
+const boardViewOf = (m: ProjectDetail | null): string | undefined => {
+  const v = (m?.config as { board_view?: { default?: unknown } } | undefined)?.board_view?.default
+  return typeof v === "string" && v ? v : undefined
+}
+
 const NAV: { key: View; label: string; icon: string; needsProject: boolean }[] = [
   { key: "projects", label: "项目", icon: "◈", needsProject: false },
   { key: "intel", label: "情报", icon: "📡", needsProject: false },
@@ -210,7 +216,7 @@ export default function App() {
     <div className="flex h-screen flex-col">
       {/* 全局顶栏：项目名 + 审批铃铛 */}
       <header className="flex h-11 shrink-0 items-center gap-3 border-b px-4">
-        <Badge variant="outline" className="font-mono">{meta ? bindingBadge(meta.track, meta.capabilities) : "…"}</Badge>
+        <Badge variant="outline" className="font-mono">{meta ? bindingBadge(meta.track, meta.experts) : "…"}</Badge>
         <h1 className="text-sm font-semibold">{meta?.name ?? "…"}</h1>
         {meta && (
           <span className="font-mono text-[10px] text-muted-foreground">
@@ -265,7 +271,8 @@ export default function App() {
                       <aside className="h-full w-full border-l">
                         {profile === "rev-generic"
                           ? <RevCompact pid={pid} onOpenWorkbench={() => setView("board")} />
-                          : <Blackboard pid={pid} compact track={meta?.track} capabilities={meta?.capabilities} />}
+                          : <Blackboard pid={pid} compact track={meta?.track}
+                                        capabilities={meta?.capabilities} defaultView={boardViewOf(meta)} />}
                       </aside>
                     </Panel>
                   </>
@@ -287,7 +294,8 @@ export default function App() {
             <div className={profile === "rev-generic" ? "h-full w-full overflow-hidden" : "h-full w-full"}>
               {profile === "rev-generic"
                 ? <ReverseWorkbench pid={pid} />
-                : <Blackboard pid={pid} track={meta?.track} capabilities={meta?.capabilities} />}
+                : <Blackboard pid={pid} track={meta?.track} capabilities={meta?.capabilities}
+                              defaultView={boardViewOf(meta)} />}
             </div>
           )}
           {view === "tasks" && <TaskBoard pid={pid} focused={taskNav} />}

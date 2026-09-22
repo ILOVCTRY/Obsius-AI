@@ -1,0 +1,8 @@
+# 场景档：代码审计队（expert-pool M4a 内置；源码审计为主的研究组队）
+name: 代码审计队
+description: "代码审计专家主攻、逆向分析辅助：源码/固件静态研究，漏洞模式为主线"
+experts: [code-auditor, reverse-analyst]
+board_view: findings
+playbook: "code-auditor 按漏洞模式过源码 → 命中点落发现（evidence 带定位）→ reverse-analyst 补二进制侧佐证"
+artifacts: [审计记录, 发现记录]
+knowledge: [binary, web]

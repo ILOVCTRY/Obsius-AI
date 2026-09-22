@@ -53,7 +53,8 @@ def _build_packs(root: Path) -> Path:
     sk = packs / "capabilities" / "web" / "skills" / "web-skill"
     sk.mkdir(parents=True)
     (sk / "SKILL.md").write_text(SKILL_BODY, encoding="utf-8")
-    role_dir = packs / "tracks" / "pentest" / "roles"
+    (packs / "tracks" / "pentest").mkdir(parents=True, exist_ok=True)  # 轨校验要见目录
+    role_dir = packs / "experts"
     role_dir.mkdir(parents=True)
     (role_dir / "_generalist.yaml").write_text(
         'name: _generalist\npersona: "通用测试员。"', encoding="utf-8")

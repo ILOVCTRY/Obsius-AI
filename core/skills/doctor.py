@@ -2,18 +2,30 @@
 
 只读 packs，零 fastapi 依赖。三级结论：
 - error   绑定断裂：角色引用不存在的技能、task_type 未注册、frontmatter name 与
-           目录名不一致；
+           目录名不一致；专家池同型断裂（expert-skill-missing /
+           expert-tasktype-unregistered / expert-track-unknown /
+           expert-generalist-missing）；场景档组队引用断裂或轨外
+           （profile-expert-missing）；阶段剧本解析失败/剧本任务类型未注册/
+           剧本角色不在池/next 指向不存在的阶段（phase-bad-yaml /
+           phase-tasktype-unregistered / phase-expert-missing / phase-next-missing）；
 - warning 软问题：角色引用已禁用技能、缺 redlines / task_types.yaml、技能正文
            引用的 kb 模块失效、全局 route_index.yaml 解析失败或条目 kb 域前缀/
-           模块路径失效/标签技能不存在；
-- info    编辑提示：孤儿技能（无角色显式引用）、能力包无 kb 域目录（占位包属
+           模块路径失效/标签技能不存在；专家池软问题（expert-skill-disabled /
+           expert-skill-ambiguous / expert-name-missing / role-rules-orphan）；
+           场景档 board_view 值域外（profile-board-view-unknown）；阶段剧本
+           软问题（phase-field-missing / phase-gate-unknown-key /
+           phase-gatetype-unregistered）；
+- info    编辑提示：孤儿技能（无角色/专家显式引用）、能力包无 kb 域目录（占位包属
            预期）、.history/trash 有待清理项。
 """
 
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from core.phases import GATE_KEYS, parse_phase_file, phase_spec
 from core.skills import refs
+from core.skills.experts import GENERALIST, expert_exists
+from core.skills.profiles import BOARD_VIEWS
 from core.skills.roles import _parse_inline_value
 from core.skills.registry import SkillRegistry, parse_frontmatter
 from core.skills.taxonomy import GENERIC_TASK_TYPE, load_task_types
@@ -157,6 +169,142 @@ def diagnose(packs_root: str | Path) -> DoctorReport:
                             rep.issues.append(Issue(
                                 "error", "role-tasktype-unregistered", _rel(rp, root),
                                 f"角色 {rp.stem} 的 task_type 未在轨注册表: {tt}"))
+            # ---- 阶段剧本（pentest-phased-workflow M1）：解析/引用完整性 ----
+            # 剧本任务条目缺 task_type/objective 由 phase_spec 整体拒收 → 落
+            # phase-bad-yaml（不单列 task-missing-field 码，加载侧同口径跳过）
+            phases_dir = tdir / "phases"
+            if phases_dir.is_dir():
+                phase_ids = {p.stem for p in phases_dir.glob("*.yaml")}
+                for pp in sorted(phases_dir.glob("*.yaml")):
+                    try:
+                        spec = phase_spec(pp.stem, parse_phase_file(pp))
+                    except ValueError as e:
+                        rep.issues.append(Issue(
+                            "error", "phase-bad-yaml", _rel(pp, root),
+                            f"阶段剧本解析失败（加载侧跳过，该轨阶段机制缺此环节）: {e}"))
+                        continue
+                    for key in ("name", "goal"):
+                        if not spec.get(key):
+                            rep.issues.append(Issue(
+                                "warning", "phase-field-missing", _rel(pp, root),
+                                f"阶段 {pp.stem} 缺 {key}"
+                                + ("（展示名回退阶段 id）" if key == "name" else "（系统提示无阶段目标）")))
+                    for gk in spec.get("gate") or {}:
+                        if gk not in GATE_KEYS:
+                            rep.issues.append(Issue(
+                                "warning", "phase-gate-unknown-key", _rel(pp, root),
+                                f"阶段 {pp.stem} 的 gate 含未知指标: {gk}（合法: {sorted(GATE_KEYS)}，判定忽略）"))
+                    for tt in spec.get("gate_types") or []:
+                        if tt not in valid_types:
+                            rep.issues.append(Issue(
+                                "warning", "phase-gatetype-unregistered", _rel(pp, root),
+                                f"阶段 {pp.stem} 的 gate_types 未在轨注册表: {tt}（门永不可达）"))
+                    for t in spec.get("tasks") or []:
+                        if t["task_type"] not in valid_types:
+                            rep.issues.append(Issue(
+                                "error", "phase-tasktype-unregistered", _rel(pp, root),
+                                f"阶段 {pp.stem} 剧本任务的 task_type 未在轨注册表: {t['task_type']}（首发被拒收）"))
+                        if t["role"] and not expert_exists(root, t["role"], track):
+                            rep.issues.append(Issue(
+                                "error", "phase-expert-missing", _rel(pp, root),
+                                f"阶段 {pp.stem} 剧本任务角色 {t['role']} 不在专家池或不服务本轨"))
+                    for nid in spec.get("next") or []:
+                        if nid not in phase_ids:
+                            rep.issues.append(Issue(
+                                "error", "phase-next-missing", _rel(pp, root),
+                                f"阶段 {pp.stem} 的 next 指向不存在的阶段: {nid}"
+                                "（流转 API 422 / 自动过门无目标）"))
+
+    # ---- 专家池（expert-pool M1）：skills 归属/跨包唯一、task_type 并集注册、tracks 合法性 ----
+    # experts/ 目录缺省时整段跳过（专家池为可选层，M2 才接运行时）
+    experts_base = root / "experts"
+    if experts_base.is_dir():
+        valid_tracks = ({p.name for p in tracks_base_all.iterdir() if p.is_dir()}
+                        if tracks_base_all.is_dir() else set())
+        # 跨包同名扫描必须绕开注册表去重（同名轨覆盖包后 all() 只剩一条）——
+        # 直接扫 capabilities/tracks 双根取 frontmatter name 归包
+        skill_packs: dict[str, set[str]] = {}
+        for group in ("capabilities", "tracks"):
+            for smd in root.glob(f"{group}/*/skills/*/SKILL.md"):
+                nm = parse_frontmatter(smd.read_text(encoding="utf-8")).get("name") \
+                    or smd.parent.name
+                skill_packs.setdefault(nm, set()).add(smd.relative_to(root).parts[1])
+        expert_ids: set[str] = set()
+        expert_tracks: dict[str, list | None] = {}
+        for ep in sorted(experts_base.glob("*.yaml")):
+            expert_ids.add(ep.stem)
+            expert = _parse_role(ep)
+            expert_tracks[ep.stem] = expert.get("tracks")
+            if not expert.get("name"):
+                rep.issues.append(Issue(
+                    "warning", "expert-name-missing", _rel(ep, root),
+                    f"专家 {ep.stem} yaml 缺 name 行（显示名缺失，界面回退文件名）"))
+            # variant_<track>_* 的 track 合法性（轨名不含下划线，取前缀首段）
+            variant_tracks = {k[len("variant_"):].split("_", 1)[0]
+                              for k in expert if k.startswith("variant_")}
+            for tr in sorted({*(expert.get("tracks") or []), *variant_tracks}):
+                if tr not in valid_tracks:
+                    rep.issues.append(Issue(
+                        "error", "expert-track-unknown", _rel(ep, root),
+                        f"专家 {ep.stem} 引用未知轨域: {tr}"
+                        "（tracks 字段或 variant_<track>_* 前缀）"))
+            for sk_name in expert.get("skills") or []:
+                referenced.add(sk_name)  # 专家引用也算可达（M2 后专家是唯一引用源）
+                sk = reg.get(sk_name)
+                if sk is None:
+                    rep.issues.append(Issue(
+                        "error", "expert-skill-missing", _rel(ep, root),
+                        f"专家 {ep.stem} 引用了不存在的技能: {sk_name}"))
+                elif not sk.enabled:
+                    rep.issues.append(Issue(
+                        "warning", "expert-skill-disabled", _rel(ep, root),
+                        f"专家 {ep.stem} 引用了已禁用技能: {sk_name}"))
+                packs_of = skill_packs.get(sk_name, set())
+                if len(packs_of) > 1:
+                    rep.issues.append(Issue(
+                        "warning", "expert-skill-ambiguous", _rel(ep, root),
+                        f"专家 {ep.stem} 引用的技能 {sk_name} 存在于多个能力包: "
+                        f"{sorted(packs_of)}（归属不唯一，能力面推导将重复计入）"))
+            for tt in expert.get("task_types") or []:
+                if tt not in registered_task_types:
+                    rep.issues.append(Issue(
+                        "error", "expert-tasktype-unregistered", _rel(ep, root),
+                        f"专家 {ep.stem} 的 task_type 未在任何轨注册表: {tt}"
+                        "（专家跨轨服务，按各轨注册表并集体检）"))
+        if GENERALIST not in expert_ids:
+            rep.issues.append(Issue(
+                "error", "expert-generalist-missing", "experts/_generalist.yaml",
+                "专家池缺 _generalist 兜底专家（load_expert 回退依赖，必须存在）"))
+        # role-rules 悬空（M2 roles 退役前按双源核对：文件既无同名专家也无同名角色
+        # 时永远不会注入任何会话）
+        role_ids: set[str] = set()
+        for tdir in tracks_base.iterdir() if tracks_base.is_dir() else []:
+            rd = tdir / "roles"
+            if rd.is_dir():
+                role_ids |= {p.stem for p in rd.glob("*.yaml")}
+        for rr in sorted(tracks_base.glob("*/rules/role-rules/*.md")) if tracks_base.is_dir() else []:
+            if rr.stem not in expert_ids and rr.stem not in role_ids:
+                rep.issues.append(Issue(
+                    "warning", "role-rules-orphan", _rel(rr, root),
+                    f"role-rules/{rr.stem} 无同名专家或角色（该规则不会注入任何会话）"))
+        # ---- 场景档（expert-pool M4a）：组队引用可达且可服务本轨、board_view 值域 ----
+        for prof in sorted(tracks_base.glob("*/profiles/*.yaml")) if tracks_base.is_dir() else []:
+            track_name = prof.relative_to(root).parts[1]
+            p = _parse_role(prof)
+            for ename in p.get("experts") or []:
+                if ename not in expert_ids:
+                    rep.issues.append(Issue(
+                        "error", "profile-expert-missing", _rel(prof, root),
+                        f"场景档 {prof.stem} 引用了不存在的专家: {ename}"))
+                elif (ets := expert_tracks.get(ename)) is not None and track_name not in ets:
+                    rep.issues.append(Issue(
+                        "error", "profile-expert-missing", _rel(prof, root),
+                        f"场景档 {prof.stem} 引用的专家 {ename} 不服务 {track_name} 轨"
+                        f"（tracks: {ets}）"))
+            if (bv := p.get("board_view")) and bv not in BOARD_VIEWS:
+                rep.issues.append(Issue(
+                    "warning", "profile-board-view-unknown", _rel(prof, root),
+                    f"场景档 {prof.stem} 的 board_view 不在值域: {bv}（合法: {BOARD_VIEWS}）"))
 
     # ---- 能力包：redlines、kb 域目录 ----
     kb_root_dir = root / "kb"

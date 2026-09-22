@@ -1,4 +1,9 @@
-"""角色加载（DESIGN.md §6.6）。
+"""角色加载（已退役，expert-pool M2 2026-09-21）。
+
+**M2 起 tracks/*/roles/ 已删除（git 历史可查），运行时角色源切 experts/
+（core.skills.experts）。本模块仅保留：①极简解析原语 `_parse_inline_value`
+（experts.py 复用）②load_role/role_exists/list_roles 供历史脚本与测试夹具
+使用——生产链路（loop/tools/app/orchestrator）已全部切换，勿再新接。
 
 roles/*.yaml 用极简解析：平铺 key: value、内联列表 [a, b]、null = 不过滤。
 不支持嵌套结构（角色文件刻意保持扁平）。

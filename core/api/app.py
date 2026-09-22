@@ -34,6 +34,7 @@ from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from core import autonomy
+from core import phases as phases_mod
 from core.browser import BrowserConfig, BrowserPool, BrowserError
 from core.browser.pool import browser_available, chromium_available
 from core.browser.replay import Intruder, ReplayClient
@@ -42,6 +43,7 @@ from core.agent.loop import clear_task_resume, persisted_snapshot_path, task_res
 from core.blackboard import TaskQueue
 from core.blackboard.assets import register_asset
 from core.blackboard.graph import board_graph, task_graph
+from core.blackboard import traces
 from core.blackboard.store import Blackboard, BlackboardClosedError
 from core.blackboard.tasks import dedup_fp, render_attempts_lines
 from core.intel import config as intel_config
@@ -66,9 +68,18 @@ from core.skills import proposals as proposals_mod
 from core.skills import refs as refs_mod
 from core.skills import writing
 from core.skills.doctor import diagnose
+from core.skills.experts import (
+    allowed_roles as expert_allowed_roles,
+)
+from core.skills.experts import (
+    _parse_expert as _parse_expert_yaml,
+    caps_effective,
+    expert_exists,
+    list_experts,
+    load_expert,
+)
+from core.skills.profiles import BOARD_VIEWS, load_profile, load_track_profiles, profile_snapshot
 from core.skills.registry import SkillRegistry, parse_frontmatter
-from core.skills.roles import _parse_inline_value, load_role, role_exists
-from core.skills.roles import list_roles as list_registered_roles
 from core.skills.router import SkillRouter
 from core.skills.taxonomy import (
     LEGACY_DOMAIN_MAP,
@@ -112,6 +123,9 @@ class ProjectIn(BaseModel):
     name: str
     track: str = "ctf"                       # 场景轨（单选）
     capabilities: list[str] = Field(default_factory=list)  # 能力包（多选）
+    experts: list[str] = Field(default_factory=list)  # 绑定专家（expert-pool M2；M3 起创建页提交，空=存量直通）
+    profile: str | None = None               # 场景档 id（M4a：五件套快照物化，D6 物化即弃）
+    inherit_from: str | None = None          # 知识继承源项目 id/slug（M4b：只增不覆盖，源只读）
     config: dict = Field(default_factory=dict)
     domain: str | None = None                # 兼容旧客户端：pentest/ctf 透明映射
 
@@ -119,6 +133,33 @@ class ProjectIn(BaseModel):
 class ConfigPatchIn(BaseModel):
     """PATCH 项目 config：顶层键浅合并；本批只消费 autonomy 段（§6.8）。"""
     config: dict = Field(default_factory=dict)
+
+
+class ExpertsPatchIn(BaseModel):
+    """换将（expert-pool M2）：绑定专家清单整体替换；空清单=解绑存量直通。"""
+    experts: list[str] = Field(default_factory=list)
+
+
+class ExpertSaveIn(BaseModel):
+    """专家池写模型（expert-pool M3，packs/experts/ 单文件池 CRUD）。
+    全字段提交式覆写（表单即最终态）；None/空 = 不落键（平铺约定 = 不过滤语义，
+    skills 缺键即全量专家）。variants={track: {field: value}} 序列化为
+    variant_<track>_<field> 平铺键。"""
+    name: str | None = None
+    description: str | None = None
+    persona: str | None = None
+    tracks: list[str] | None = None
+    skills: list[str] | None = None
+    task_types: list[str] | None = None
+    default_noise: str | None = None
+    tools: list[str] | None = None
+    max_runtime: str | None = None
+    max_steps: int | None = None
+    variants: dict[str, dict[str, Any]] | None = None
+
+
+class ExpertCreateIn(ExpertSaveIn):
+    id: str
 
 
 class ReopenIn(BaseModel):
@@ -131,6 +172,30 @@ class ReopenIn(BaseModel):
 class DirectiveIn(BaseModel):
     """C2 指挥编排器：人类一次性目标指令（自动触发一轮编排，最高优先落实）。"""
     text: str
+
+
+class OrchChatIn(BaseModel):
+    """对话化编排器（M1，§6.4）：与编排器对话（插队轮，busy 409 不排队）。"""
+    text: str
+
+
+class PhaseGoalIn(BaseModel):
+    """阶段目标（M2，§4.3）：确认落盘 meta.phase_goal；text 为空 = 清空重议。"""
+    text: str = ""
+    criteria: list[str] = []
+    phase: str | None = None
+
+
+class OrchPersonaIn(BaseModel):
+    """编排器拟人身份（M3，§4.4）：display_name 贯穿前端，persona 只注入对话轮。"""
+    display_name: str = ""
+    persona: str = ""
+
+
+class PhaseTransitionIn(BaseModel):
+    """分阶段工作流（M2）：人工流转阶段（目标限当前阶段剧本 next 清单内）。"""
+    to: str
+    reason: str = ""
 
 
 class TaskIn(BaseModel):
@@ -174,6 +239,8 @@ class FindingIn(BaseModel):
     target_asset_id: str | None = None
     severity: Literal["info", "low", "medium", "high", "critical"] = "info"  # F11 白名单
     rating_basis: str = ""  # F11 判级依据（注入评级口径时必填）
+    impact: str = ""  # 收录格式三件套·危害描述（v20，不进门禁）
+    remediation: str = ""  # 收录格式三件套·修复建议（v20，不进门禁）
     status: str = "unverified"
     category: Literal["vuln", "intel"] | None = None  # C6 分两类；缺省按 vuln_class/severity 自动判
     evidence: dict = Field(default_factory=dict)
@@ -235,6 +302,8 @@ class FindingPatchIn(BaseModel):
     vuln_class: str | None = None
     category: str | None = None
     rating_basis: str | None = None  # F11：None=不动，空串=清空
+    impact: str | None = None  # 收录格式三件套·危害描述：None=不动，空串=清空
+    remediation: str | None = None  # 收录格式三件套·修复建议：None=不动，空串=清空
 
 
 class ChainIn(BaseModel):
@@ -336,29 +405,6 @@ class WritebackItemIn(BaseModel):
 
 class WritebackIn(BaseModel):
     items: list[WritebackItemIn] = Field(min_length=1, max_length=500)
-
-
-class RoleUpdateIn(BaseModel):
-    """PUT 角色字段（表单编辑，不做自由 yaml 文本；未提交字段保留原值）。
-    skills/task_types 显式传 null = 白名单关闭（不过滤）。
-    name = 中文显示名（可 ≠ 文件 stem；缺省/None 不动，空串 = 重置为 stem）。"""
-    name: str | None = None
-    description: str | None = None
-    persona: str | None = None
-    skills: list[str] | None = None
-    task_types: list[str] | None = None
-    default_noise: str | None = None
-    tools: list[str] | None = None
-    max_runtime: str | None = None
-    max_steps: int | None = None
-
-
-class RoleCreateIn(BaseModel):
-    """新建角色：空白模板，或克隆同轨现有角色（字段照抄）。name = 文件 slug（ASCII）；
-    display_name = 中文显示名（写 yaml name 行，缺省用 slug）。"""
-    name: str
-    display_name: str | None = None
-    clone_from: str | None = None
 
 
 class SkillUpdateIn(BaseModel):
@@ -470,7 +516,6 @@ class McpConfigIn(BaseModel):
 # ---------------- packs 管理辅助（设置页：角色 / Skill / 红线 / MCP） ----------------
 
 _NAME_RE = re.compile(r"^[\w][\w.-]{0,63}$")  # 名称白名单（防穿越；\w Unicode-aware 会放行中文——技能/包名等沿用）
-_SLUG_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$")  # 角色 slug（文件名）ASCII 白名单：中文走 display_name，防中文文件名进 URL/路径段
 MCP_CONFIG_PATH = Path("config/mcp.json")     # 与 llm.json 同级（cwd = 项目根）
 
 # MCP server 允许声明的领域；http server 只连本机 loopback（红线，见 decompiler._is_loopback_url）
@@ -643,24 +688,6 @@ def _check_name(value: str, label: str) -> None:
         raise HTTPException(422, f"非法{label}: {value}")
 
 
-def _check_slug(value: str, label: str) -> None:
-    if not _SLUG_RE.fullmatch(value):
-        raise HTTPException(422, f"非法{label}: {value}（只允许英文字母/数字/_-/.，1-64 字符）")
-
-
-def _check_display_name(value: str | None) -> str | None:
-    """角色中文显示名校验（写进 yaml name 行的值）：strip 后空返回 None（调用方回退
-    slug）；禁 #/:/换行——# 触发行内注释截断、: 破坏极简 partition(":") 解析。"""
-    if value is None:
-        return None
-    v = value.strip()
-    if not v:
-        return None
-    if len(v) > 64 or any(c in v for c in "#:\n\r"):
-        raise HTTPException(422, f"非法显示名: {value}（≤64 字符，且不含 # 与 :）")
-    return v
-
-
 def _cap_path(app: Any, cap: str, *parts: str) -> Path:
     """packs/capabilities/<cap>/... 路径校验（各段过白名单，防穿越）。"""
     _check_name(cap, "能力包")
@@ -675,68 +702,6 @@ def _track_path(app: Any, track: str, *parts: str) -> Path:
     for p in parts:
         _check_name(p, "名称")
     return track_dir(app.state.packs_root, track).joinpath(*parts)
-
-
-def _parse_flat_yaml(path: Path) -> dict:
-    """角色 yaml 解析（与 core.skills.roles 同一套极简约定，复用其值解析器）。"""
-    out: dict = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.rstrip()
-        if not line or line.lstrip().startswith("#") or ":" not in line:
-            continue
-        key, _, value = line.partition(":")
-        out[key.strip()] = _parse_inline_value(value)
-    return out
-
-
-_ROLE_LIST_KEYS = ("skills", "task_types", "tools")
-_ROLE_SCALAR_KEYS = ("description", "persona", "default_noise", "max_runtime", "max_steps")
-_ROLE_KEY_ORDER = ("description", "persona", "skills", "task_types", "default_noise",
-                   "tools", "max_runtime", "max_steps")
-_NOISE_VALUES = {"passive", "low", "medium", "high"}
-_RUNTIME_VALUES = {"host", "wsl", "docker", "sandbox"}
-
-
-def _validate_role_fields(changes: dict) -> None:
-    """角色表单值域校验（非法值 422，宁严勿松）。"""
-    if changes.get("default_noise") is not None and changes["default_noise"] not in _NOISE_VALUES:
-        raise HTTPException(422, f"非法 default_noise: {changes['default_noise']}")
-    if changes.get("max_runtime") is not None and changes["max_runtime"] not in _RUNTIME_VALUES:
-        raise HTTPException(422, f"非法 max_runtime: {changes['max_runtime']}")
-    if changes.get("max_steps") is not None and not (
-            isinstance(changes["max_steps"], int) and changes["max_steps"] > 0):
-        raise HTTPException(422, "max_steps 须为正整数")
-    for key in _ROLE_LIST_KEYS:
-        v = changes.get(key)
-        if v is not None and not all(isinstance(x, str) and x for x in v):
-            raise HTTPException(422, f"{key} 必须是非空字符串列表")
-
-
-def _dump_role_yaml(name: str, existing: dict, changes: dict) -> str:
-    """角色 yaml 序列化（极简约定：平铺 key + 内联列表）。
-
-    name 是 yaml name 行的**显示名**（可中文，与文件 stem 解耦——调用方决定传什么），
-    加双引号写（_parse_inline_value 会剥引号）杜绝值内 #/空格 边角问题。
-    existing 与 changes 合并后重写——表单只提交改动字段，未提交字段（如
-    description/tools）必须保留，不能因 PUT 丢字段。三个列表键缺省输出 null。"""
-    data = {k: existing.get(k) for k in _ROLE_KEY_ORDER}
-    data.update(changes)
-    lines = [f'name: "{name}"']
-    for key in _ROLE_KEY_ORDER:
-        v = data.get(key)
-        if v is None:
-            if key in _ROLE_LIST_KEYS:
-                lines.append(f"{key}: null")
-            continue
-        if key in _ROLE_LIST_KEYS:
-            lines.append(f"{key}: [" + ", ".join(v) + "]")
-        elif key == "max_steps":
-            lines.append(f"{key}: {v}")
-        elif key in {"default_noise", "max_runtime"}:
-            lines.append(f"{key}: {v}")
-        else:  # description / persona：沿用极简约定加双引号
-            lines.append(f'{key}: "{v}"')
-    return "\n".join(lines) + "\n"
 
 
 class AgentIn(BaseModel):
@@ -901,13 +866,17 @@ def create_app(
     intel_dir: str | Path = "config/intel",
     mission_poll_interval: float = 60.0,
     sediment_proposals: bool = True,
+    static_dir: str | Path | None = None,
 ) -> FastAPI:
     """executor_llm / planner_llm 缺省时按供应商配置（config/providers.json）+
     llm.json 文件级覆写构建 provider；测试可注入假 provider。
     两者都为 None 且无法构建 → Agent 相关端点返回 503。
     mission_poll_interval：mission 自动派生兜底轮询秒数（0=不启动，测试用）。
     sediment_proposals：v0.65 done 自动提案开关——剧本式 planner 的测试必须关
-    （复盘 chat 会额外消费 planner 剧本项导致编排错位）。"""
+    （复盘 chat 会额外消费 planner 剧本项导致编排错位）。
+    static_dir：vite build 产物目录（webui/dist）——非 None 时挂 SPA 同源静态托管
+    （desktop-app-shell M2，DESIGN §1）：真实文件直出、其余 GET 回 index.html
+    （history fallback）；/api、/docs、/openapi.json 不受兜底影响。"""
 
     app = FastAPI(title="cyberstrike-pro core API", version="0.1")
 
@@ -1343,7 +1312,7 @@ def create_app(
             from core.tools.decompiler import build_headless_service, gateway_runner
 
             gateway = ExecutionGateway(bb=proj.bb)
-            r = load_role(app.state.packs_root, proj.track, role)
+            r = load_expert(app.state.packs_root, role, proj.track)
             # 轨级行为语义（R2，§6.9 mode 退役）：redteam 轨注入红队语义 + ROE 摘要
             # （ROE 未核验齐全=按 pentest 上限兜底+提示补全）；其余轨注入影响证明级上限。
             cfg = proj.bb.get_project(pid)["config"] or {}
@@ -1377,7 +1346,16 @@ def create_app(
                 llm=exec_llm, planner_llm=plan_llm,
                 enable_sediment=sediment_proposals,
                 packs_root=app.state.packs_root,
-                track=proj.track, capabilities=proj.capabilities, role=role,
+                # expert-pool M2（§4.4）：capabilities=caps_effective 推导值——
+                # 有绑定→专家面（绑定专家 skills 并集∪轨技能的所属包），无绑定→盘上直通；
+                # allowed_roles=绑定专家清单（发布链 publish_task 校验数据源）
+                track=proj.track,
+                capabilities=caps_effective(
+                    app.state.packs_root, proj.track, proj.experts,
+                    fallback=proj.capabilities),
+                role=role,
+                allowed_roles=expert_allowed_roles(
+                    app.state.packs_root, proj.track, proj.experts),
                 session_name=session_name or r.get("name") or role,
                 capability_prompt=(inventory.to_prompt() + "\n" + mode_prompt).strip(),
                 # 角色 yaml 的 default_noise/tools/max_runtime/max_steps 在
@@ -1442,9 +1420,19 @@ def create_app(
 
     # ---------- 项目 ----------
 
+    def _expert_meta_view(view: dict) -> dict:
+        """meta 读视图补专家绑定推导值（expert-pool M2，§4.4）：
+        "experts" = 绑定清单；"capabilities" = caps_effective（有绑定→专家面推导，
+        无绑定→盘上 capabilities 直通）。仅响应层，盘上 meta 不改。"""
+        experts = [e for e in (view.get("experts") or []) if str(e).strip()]
+        return {**view, "experts": experts,
+                "capabilities": caps_effective(
+                    app.state.packs_root, view.get("track") or "ctf", experts,
+                    fallback=view.get("capabilities") or [])}
+
     @app.get("/api/projects")
     def list_projects():
-        return store.list_projects()
+        return [_expert_meta_view(m) for m in store.list_projects()]
 
     @app.post("/api/projects", status_code=201)
     def create_project(body: ProjectIn):
@@ -1474,9 +1462,71 @@ def create_app(
         if off_track:
             raise HTTPException(
                 422, f"能力包 {off_track} 仅限 redteam 轨挂载（§6.9.1 合规红线）")
-        proj = store.create_project(body.name, track, caps, body.config)
+        # 场景档（expert-pool M4a，§4.8/D6）：档提供组队预设与五件套缺省，
+        # 请求体显式值优先；物化进项目配置后即弃（模板升级不影响存量项目）。
+        profile = None
+        if body.profile:
+            profile = load_profile(app.state.packs_root, track, body.profile.strip())
+            if profile is None:
+                avail = [p["id"] for p in load_track_profiles(app.state.packs_root, track)]
+                raise HTTPException(
+                    422, f"场景档不存在: {body.profile}（{track} 轨内置: {avail}）")
+            bv = profile.get("board_view")
+            if bv and bv not in BOARD_VIEWS:
+                raise HTTPException(422, f"场景档 board_view 非法: {bv}（合法: {BOARD_VIEWS}）")
+        # 专家绑定校验（expert-pool M2，§4.4）：须在池内且可服务该轨（422）；
+        # 选档未显式传组队时用档内预设兜底（M3 前端总是提交定稿清单）
+        experts = list(body.experts) if body.experts else \
+            [str(e) for e in (profile.get("experts") or [])] if profile else []
+        bad_experts = [e for e in experts
+                       if not expert_exists(app.state.packs_root, str(e).strip(), track)]
+        if bad_experts:
+            pool = list_experts(app.state.packs_root, track)
+            raise HTTPException(
+                422, f"非法专家: {sorted(set(bad_experts))}"
+                     f"（{track} 轨可用: {pool}）")
+        # 知识继承源预检（M4b）：先 404 再建项目，避免建了项目才发现源不存在
+        if body.inherit_from:
+            try:
+                store.open_project(body.inherit_from.strip())
+            except FileNotFoundError as e:
+                raise HTTPException(404, str(e))
+        # 五件套物化（D6）：rule_profiles/board_view 立即生效，playbook/artifacts/
+        # knowledge（暂未对接机制）随 config.profile 快照留档不丢
+        cfg = dict(body.config)
+        if profile is not None:
+            cfg.setdefault("profile", {**profile_snapshot(profile),
+                                       "materialized_at": _utc_now()})
+            owners, rating = profile.get("rule_profiles_owners"), profile.get("rule_profiles_rating")
+            if "rule_profiles" not in body.config and (owners is not None or rating is not None):
+                cfg["rule_profiles"] = {k: v for k, v in
+                                        (("owners", owners), ("rating", rating)) if v is not None}
+            if profile.get("board_view"):
+                cfg.setdefault("board_view", {"default": profile["board_view"]})
+        proj = store.create_project(body.name, track, caps, cfg, experts=experts)
         app.state.projects[proj.id] = proj
-        return proj.meta
+        # 分阶段工作流（M1，D3）：轨有阶段剧本 → 创建即登记初始阶段（不发剧本
+        # 任务——mission/目标商议前不发静态任务，首发随显式流转触发；publish
+        # ≠起跑，起跑仍按自主档/人工）
+        _book = phases_mod.load_track_phases(app.state.packs_root, proj.track,
+                                             proj.meta.get("config") or {})
+        if _book:
+            try:
+                phases_mod.enter_phase(proj, phases_mod.default_phase_id(_book),
+                                       by="system", packs_root=app.state.packs_root,
+                                       publish=False,
+                                       reason="项目创建进入初始阶段")
+            except Exception:  # noqa: BLE001 —— 初始登记失败不回滚建项
+                log.exception("初始阶段进入失败 pid=%s", proj.id)
+        # 知识继承（M4b）：创建后复制（只增不覆盖）；失败不回滚建项，响应里带错误
+        out = _expert_meta_view(proj.view_meta)
+        if body.inherit_from:
+            try:
+                out["inherited"] = store.inherit_knowledge(body.inherit_from.strip(), proj)
+            except (ValueError, OSError, sqlite3.Error) as e:
+                log.warning("知识继承失败 %s -> %s: %s", body.inherit_from, proj.id, e)
+                out["inherit_error"] = str(e)
+        return out
 
     @app.get("/api/projects/{pid}")
     def get_project(pid: str):
@@ -1499,7 +1549,7 @@ def create_app(
             "auto_ticks_total": int(cst["auto_ticks_total"]),
             "estranged": bool(cst["chain_active"]) and pid not in app.state.active_chains,
         }
-        return {**proj.view_meta, "task_stats": stats,
+        return {**_expert_meta_view(proj.view_meta), "task_stats": stats,
                 "findings": len(proj.bb.list_findings(pid)),
                 "assets": len(proj.bb.list_assets(pid)),
                 "usage": usage,
@@ -1515,6 +1565,20 @@ def create_app(
         except ValueError as e:
             raise HTTPException(422, str(e)) from e
         return meta
+
+    @app.patch("/api/projects/{pid}/experts")
+    def patch_project_experts(pid: str, body: ExpertsPatchIn):
+        """换将（expert-pool M2，§4.4）：重写绑定专家清单，下轮会话构造即生效
+        （构造链实时读 meta）。校验专家在池内且可服务项目轨（422）；空清单=解绑
+        恢复存量直通态。响应带推导后的 meta 视图（capabilities=caps_effective）。"""
+        proj = _project(pid)
+        bad = [e for e in body.experts
+               if not expert_exists(app.state.packs_root, str(e).strip(), proj.track)]
+        if bad:
+            pool = list_experts(app.state.packs_root, proj.track)
+            raise HTTPException(
+                422, f"非法专家: {sorted(set(bad))}（{proj.track} 轨可用: {pool}）")
+        return _expert_meta_view(store.update_experts(pid, body.experts, project=proj))
 
     def _project_busy(pid: str) -> str | None:
         """项目是否在运行中（删除前置检查）。忙则返回原因，空闲返回 None。"""
@@ -1824,6 +1888,7 @@ def create_app(
                 pid, body.vuln_class, body.title, target_asset_id=body.target_asset_id,
                 severity=body.severity, status=body.status, evidence=body.evidence,
                 dedup_key=body.dedup_key, author="human", rating_basis=body.rating_basis,
+                impact=body.impact, remediation=body.remediation,
                 category=body.category, track=proj.track)
         except ValueError as e:  # relates_to 悬空/跨项目等（E0）
             raise HTTPException(422, str(e)) from e
@@ -1967,7 +2032,10 @@ def create_app(
             return {"cached": True, "job_id": None, "sha": sha, "asset_id": asset["id"]}
         # C2 CTF 线索板补缺：非 binary 能力包（如 ctf/misc 项目）不上 headless 分诊——
         # 样本按附件落 samples/ + binary 资产即可（无 headless 后端时同款 no-tool 降级）
-        if "binary" not in (proj.capabilities or []):
+        # expert-pool M2：按 caps_effective 推导值判（专家绑定项目的可见范围）
+        if "binary" not in caps_effective(
+                app.state.packs_root, proj.track, proj.experts,
+                fallback=proj.capabilities):
             return {"cached": False, "job_id": None, "sha": sha, "asset_id": asset["id"]}
         return {"cached": False, "job_id": _submit_triage(proj, sha, rel),
                 "sha": sha, "asset_id": asset["id"]}
@@ -2240,8 +2308,22 @@ def create_app(
         return chain
 
     @app.get("/api/projects/{pid}/chains")
-    def list_chains(pid: str):
-        return _project(pid).bb.list_chains(pid)
+    def list_chains(pid: str, origin: str | None = None):
+        # v19 origin 过滤：manual=人工链（默认视图）/ trace=任务轨迹自动链（沉淀侧消费）
+        return _project(pid).bb.list_chains(pid, origin=origin)
+
+    @app.get("/api/projects/{pid}/trace/{task_id}")
+    def get_task_trace(pid: str, task_id: str):
+        """执行轨迹（M1，R1+R2 现算零写入）：任务区间切分 + 过程聚合时间链。"""
+        trace = traces.build_task_trace(_project(pid).bb, pid, task_id)
+        if trace is None:
+            raise HTTPException(404, f"任务不存在: {task_id}")
+        return trace
+
+    @app.get("/api/projects/{pid}/trace-effect")
+    def get_trace_effect(pid: str, top: int = 20):
+        """打法效果榜（M3，R4 基于物化侧）：轨迹链 (skill × kb) × verified finding。"""
+        return traces.effect_stats(_project(pid).bb, pid, top=max(1, min(top, 50)))
 
     @app.post("/api/projects/{pid}/chains", status_code=201)
     def create_chain(pid: str, body: ChainIn):
@@ -2638,12 +2720,34 @@ def create_app(
                 log.exception("escalation 回执 kick 失败 approval=%s", approval_id)
         return {"exit_code": r.exit_code, "session_id": sid}
 
+    def _exec_approved_phase_transition(
+            bb: Blackboard, pid: str, action: dict, approval_id: str) -> dict:
+        """批准阶段流转审批单（分阶段工作流 M2）：批准即流转。生产方唯一=API 层
+        `_phase_gate_check` 的 L1 分流。目标阶段缺失/等待期人工已流转过 → 视为
+        已处理直接通过（审批终检语义，不落 exec_failed）。"""
+        proj = _project(pid)
+        book = _phase_book_of(proj)
+        to = str(action.get("to") or "").strip()
+        if to not in book:
+            return {"skipped": f"目标阶段不存在: {to}"}
+        cur = phases_mod.current_spec(book, proj.meta or {})
+        if cur and cur[0] == to:
+            return {"skipped": "已处于目标阶段"}
+        idle = int(orch_state.load_or_create(bb, pid)["derive_idle_rounds"])
+        r = phases_mod.enter_phase(proj, to, by="approval",
+                                   packs_root=app.state.packs_root,
+                                   reason=f"审批 {approval_id} 批准", idle_rounds=idle)
+        _schedule(pid, reason="phase-entered")
+        return {"phase": to, "published": r["published"]}
+
     # 审批 op 处理器白名单（批 4，红线）：批准后动作只准字典分派，绝不 eval。
     # spawn_session 的唯一生产方是 Orchestrator 的 L1 分流；escalation（H3）的唯一
-    # 生产方是 Agent 的 request_escalation 工具——各 op 生产方不混用。
+    # 生产方是 Agent 的 request_escalation 工具；phase_transition 的唯一生产方是
+    # API 层 _phase_gate_check 的 L1 分流——各 op 生产方不混用。
     _APPROVAL_OP_HANDLERS = {
         "spawn_session": _exec_approved_spawn_session,
         "escalation": _exec_approved_escalation,
+        "phase_transition": _exec_approved_phase_transition,
     }
 
     @app.post("/api/approvals/{approval_id}/decide")
@@ -2731,6 +2835,15 @@ def create_app(
         noise = body.noise_budget or table.get(body.task_type, "passive")
         tq = _tq(pid)
         att_refs = _attachment_refs(pid, body.attachment_ids)  # 坏 id 422（先于 dedup）
+        # 分阶段工作流（M2，§4.4 双层拦截之二）：入场门未过时 gate_types 内类型
+        # 422 带原因（编排器派单侧是第一层；认领侧不拦；人工流转阶段是放行阀）
+        proj = _project(pid)
+        _blocked = phases_mod.gate_block_reason(
+            proj.bb, pid, proj.meta, proj.track, app.state.packs_root,
+            task_type=body.task_type,
+            idle_rounds=int(orch_state.load_or_create(proj.bb, pid)["derive_idle_rounds"]))
+        if _blocked:
+            raise HTTPException(422, _blocked)
         # 机制 1.1 发布去重：同指纹（type+归一化 scope+objective）命中 open/claimed →
         # 返回 200 + deduplicated，前端确认框"仍要发布"后带 force 重发才真发
         if not body.force:
@@ -2749,8 +2862,10 @@ def create_app(
                 attachments=att_refs, acceptance=body.acceptance,
                 parent_id=body.parent_id,
                 role=body.role,   # v14：任务绑定角色（认领即换装）
-                allowed_roles=(list_registered_roles(app.state.packs_root, _project(pid).track)
-                               if _project(pid).track else None),
+                # expert-pool M2（§4.6）：值域=绑定专家清单；未绑定=按轨过滤的池
+                allowed_roles=(expert_allowed_roles(
+                    app.state.packs_root, _project(pid).track, _project(pid).experts)
+                    if _project(pid).track else None),
                 bypass_target_guard=body.force)   # force 旁路 dedup 与同 target 闸
         except ValueError as e:
             raise HTTPException(422, str(e))
@@ -2794,8 +2909,9 @@ def create_app(
         if cur["status"] not in {"open", "failed", "claimed"}:
             raise HTTPException(409, f"任务状态为 {cur['status']}，不可编辑")
         if "role" in changes and str(changes["role"] or "").strip():
-            if not role_exists(app.state.packs_root, _project(pid).track, changes["role"]):
-                raise HTTPException(422, f"角色未在轨注册: {changes['role']}")
+            if not expert_exists(app.state.packs_root,
+                                 str(changes["role"]).strip(), _project(pid).track):
+                raise HTTPException(422, f"专家不在池内或不可服务该轨: {changes['role']}")
         try:
             updated = tq.update_task(
                 task_id, by="human",
@@ -2888,8 +3004,8 @@ def create_app(
             if autonomy.hard_block_reason(bb, pid, "spawn_session"):
                 return None
             role = (task.get("role") or "").strip()
-            if role and not role_exists(app.state.packs_root, proj.track, role):
-                role = ""  # 角色文件缺失 → 底色 _generalist（同自动补窗口径）
+            if role and not expert_exists(app.state.packs_root, role, proj.track):
+                role = ""  # 专家缺失/不服务该轨 → 底色 _generalist（同自动补窗口径）
             agent, sid = _spawn_session_for_task(
                 pid, task, armed=False, role=role or "_generalist")
         except HTTPException as e:  # cap 409 / 角色 yaml 422 / LLM 503
@@ -3306,22 +3422,21 @@ def create_app(
 
     @app.get("/api/projects/{pid}/roles")
     def list_roles(pid: str):
-        """角色清单（WebUI 开窗下拉 / 编排 allowed_roles 多选的数据源）。
-        扫 packs/tracks/<track>/roles/*.yaml（§4.5）。"""
+        """专家清单（WebUI 开窗下拉 / 编排 allowed_roles 多选的数据源）。
+        expert-pool M2：数据源=experts/ 池按项目轨过滤，响应键保持角色视图兼容
+        （role=专家 id，name=中文显示名），前端零改动；M3 换将页跟进。"""
         track = _project(pid).track
-        roles_dir = track_dir(app.state.packs_root, track) / "roles"
         out = []
-        if roles_dir.is_dir():
-            for f in sorted(roles_dir.glob("*.yaml")):
-                r = load_role(app.state.packs_root, track, f.stem)
-                out.append({"role": f.stem, "name": r.get("name") or f.stem,
-                            "description": r.get("description"),
-                            "persona": r.get("persona"),
-                            "task_types": r.get("task_types"),
-                            "default_noise": r.get("default_noise"),
-                            "tools": r.get("tools"),
-                            "max_runtime": r.get("max_runtime"),
-                            "max_steps": r.get("max_steps")})
+        for name in list_experts(app.state.packs_root, track):
+            e = load_expert(app.state.packs_root, name, track)
+            out.append({"role": name, "name": e.get("name") or name,
+                        "description": e.get("description"),
+                        "persona": e.get("persona"),
+                        "task_types": e.get("task_types"),
+                        "default_noise": e.get("default_noise"),
+                        "tools": e.get("tools"),
+                        "max_runtime": e.get("max_runtime"),
+                        "max_steps": e.get("max_steps")})
         return out
 
     @app.get("/api/models")
@@ -3959,6 +4074,11 @@ def create_app(
         except Exception:  # noqa: BLE001
             log.exception("_maybe_auto_tick 判定异常 pid=%s reason=%s", pid, reason)
 
+    # 调度决策互斥：HTTP/on_done/sweep 多线程触发时串行化。RLock 而非 Lock——
+    # 锁内有合法递归链：_schedule → _bind_task_window → 绑定竞态回收孤儿窗
+    # _do_close_session → _schedule("session-closed")，同线程重入须放行。
+    _schedule_lock = threading.RLock()
+
     def _schedule(pid: str, reason: str) -> None:
         """任务窗调度器（v0.71 任务即窗口；v0.72 全局一窗一任务挡位统一）——
         机械规则、不经编排 LLM，两段式：
@@ -3979,6 +4099,7 @@ def create_app(
             proj = _project(pid)
         except HTTPException:
             return
+        _schedule_lock.acquire()
         try:
             bb = proj.bb
             cfg = autonomy.autonomy_of(bb.get_project(pid)["config"], track=proj.track)
@@ -4032,7 +4153,10 @@ def create_app(
                 meta = row.get("meta")
                 meta = json.loads(meta) if isinstance(meta, str) else (meta or {})
                 if _session_job_running(sid):
-                    continue  # 该窗 worker 在跑（自己任务执行中，已计入 claimed_n）
+                    # 该窗 worker 在跑但任务尚未落 claimed（提交与认领的间隙）——
+                    # 同样占一个并发槽，防连发多单时启动段读旧 claimed 计数超卖
+                    claimed_n += 1
+                    continue
                 if not meta.get("worker_armed"):
                     if cfg["level"] != "L2":
                         continue  # v0.72：L1 待命窗等审批，不自动武装
@@ -4057,6 +4181,8 @@ def create_app(
                 claimed_n += 1
         except Exception:  # noqa: BLE001
             log.exception("_schedule 调度异常 pid=%s reason=%s", pid, reason)
+        finally:
+            _schedule_lock.release()
 
     def _schedule_request_approval(bb, pid: str, task: dict, reason: str) -> None:
         """L1 档执行审批单（v0.72 语义：窗已由绑定段建好，批准=启动该窗执行
@@ -4152,13 +4278,93 @@ def create_app(
         orch.state_loader = lambda: orch_state.load_or_create(proj.bb, pid)
         orch.state_saver = lambda **fields: orch_state.save_fields(proj.bb, pid, **fields)
         orch.heartbeat = lambda: orch_state.renew_tick_lease(proj.bb, pid, owner)
+        # 对话化编排器（M1/M2）：goal_section/persona 段实时读 project.json meta
+        orch.meta_loader = lambda: _project(pid).meta or {}
         return orch
+
+    # ---------- 分阶段工作流：过门分流（M2，§6.8 自主档） ----------
+
+    def _phase_gate_check(pid: str) -> None:
+        """阶段门已达 → 过门动作按自主档分流（每次 tick 出口调用）。
+        L0=事件提示（人工点「进入渗透测试」）；L1=审批单（批准即流转）；
+        L2=自动流转。同目标已分流过（gate_open_notified）不重复。"""
+        proj = _project(pid)
+        book = _phase_book_of(proj)
+        if not book:
+            return
+        cur = phases_mod.current_spec(book, proj.meta or {})
+        if cur is None:
+            return
+        cur_id, spec = cur
+        gate = spec.get("gate") or {}
+        fwd = phases_mod.forward_targets(book, spec)
+        if not gate or not fwd:
+            return
+        target = fwd[0]
+        if phases_mod.read_state(proj.meta or {})["notified"] == target:
+            return  # 已分流过（等人工/等审批），抵达目标阶段时重置
+        idle = int(orch_state.load_or_create(proj.bb, pid)["derive_idle_rounds"])
+        metrics = phases_mod.gate_metrics(proj.bb, pid, idle_rounds=idle)
+        met, _unmet = phases_mod.evaluate_gate(gate, metrics)
+        if not met:
+            return
+        cfg = _auto_cfg(pid)
+        summary = (f"阶段流转：{spec['name']} → {book[target]['name']}"
+                   f"（资产 {metrics['assets']}、高价值 {metrics['high_value']}、"
+                   f"verified {metrics['verified']}、空闲 {metrics['idle_rounds']} 轮）")
+        if cfg["level"] == "L2":
+            phases_mod.enter_phase(proj, target, by="orchestrator", auto=True,
+                                   packs_root=app.state.packs_root,
+                                   reason="门指标达成自动流转", idle_rounds=idle)
+            _schedule(pid, reason="phase-entered")
+            return
+        if cfg["level"] == "L1":
+            pending = proj.bb.conn.execute(
+                "SELECT action FROM approvals WHERE project_id=? AND status='pending'",
+                (pid,)).fetchall()
+            for row in pending:
+                try:
+                    a = json.loads(row["action"])
+                except ValueError:
+                    continue
+                if isinstance(a, dict) and a.get("op") == "phase_transition" \
+                        and a.get("to") == target:
+                    return  # 同目标审批单在途，不重复提
+            proj.bb.request_approval(
+                pid, {"op": "phase_transition", "from": cur_id, "to": target,
+                      "summary": summary, "metrics": metrics},
+                risk="low", requested_by="orchestrator")
+        else:
+            proj.bb.append_event(pid, "phase.gate_open",
+                                 {"from": cur_id, "to": target, "summary": summary,
+                                  "metrics": metrics}, author="orchestrator")
+        phases_mod.set_gate_notified(proj, target)
+
+    def _phase_post_tick(pid: str, result: dict) -> None:
+        """tick 出口的阶段维护：空闲轮计数（零发布 +1 / 有发布复位）+ 过门分流。
+        先于挡位闸——L0 项目也要事件提示。"""
+        proj = _project(pid)
+        published = bool(result.get("published"))
+        idle = int(orch_state.load_or_create(proj.bb, pid)["derive_idle_rounds"])
+        orch_state.save_fields(
+            proj.bb, pid, derive_idle_rounds=0 if published else idle + 1)
+        _phase_gate_check(pid)
+
+    app.state.phase_gate_check = _phase_gate_check  # 测试直调口
+    app.state.phase_post_tick = _phase_post_tick    # 测试直调口
 
     def _post_tick(pid: str, result: dict, *, manual: bool) -> None:
         """触发点 B（手动/自动 tick 共用后处理）：自动 kick + L2 链状态机。
 
         零产出：自动 tick=收敛停链；手动 tick 仅在链已活跃时收敛停链。
         有产出：确保链启动并 kick；全项目零非 closed 会话 → no_sessions 停链。"""
+        # 分阶段工作流（M2）：空闲轮计数 + 过门分流（先于挡位闸，异常不炸链）
+        try:
+            _phase_post_tick(pid, result)
+        except HTTPException:
+            return  # 项目删除中/不存在
+        except Exception:  # noqa: BLE001 —— 阶段护栏故障不阻断链后处理
+            log.exception("阶段过门分流失败 pid=%s", pid)
         cfg = _auto_cfg(pid)
         if cfg["level"] not in {"L1", "L2"} or cfg["paused"]:
             return
@@ -4305,10 +4511,143 @@ def create_app(
 
     # ---------- Orchestrator ----------
 
-    @app.post("/api/projects/{pid}/orchestrator/directive")
+    @app.post("/api/projects/{pid}/orchestrator/chat")
+    def orchestrator_chat(pid: str, body: OrchChatIn):
+        """对话化编排器（M1，§6.4）：与编排器对话——插队轮。租约同步 acquire
+        （busy → 409 不排队），人类消息落 orch.chat {role:"human"}，回复由
+        chat_turn 落 {role:"orch", text(截2000), tool_trace}；工具面与 tick 全
+        闸门同源（dedup/gate/L0 提案/L1 审批），对话轮只读态势不推进游标。"""
+        text = body.text.strip()
+        if not text:
+            raise HTTPException(422, "消息不能为空")
+        proj = _project(pid)
+        owner = f"chat-{uuid.uuid4().hex}"
+        try:
+            orch_state.acquire_tick_lease(proj.bb, pid, owner)
+        except orch_state.TickLeaseError as e:
+            raise HTTPException(409, "编排器正在思考（巡检/对话/重排任一在跑），稍后再发") from e
+        try:
+            orch = _build_orchestrator(pid, TickIn(), owner)
+        except HTTPException:
+            orch_state.release_tick_lease(proj.bb, pid, owner)
+            raise
+        proj.bb.append_event(
+            pid, "orch.chat", {"role": "human", "text": text[:2000]}, author="human")
+
+        def _run_chat() -> dict:
+            try:
+                return orch.chat_turn(text)
+            except Exception as exc:
+                _emit_llm_error(pid, "orchestrator", exc)
+                raise
+            finally:
+                orch_state.release_tick_lease(proj.bb, pid, owner)
+
+        job_id = app.state.jobs.submit(
+            "orchestrator-chat", _run_chat, meta={"project_id": pid})
+        return {"job_id": job_id}
+
+    @app.get("/api/projects/{pid}/goal")
+    def get_project_goal(pid: str):
+        """阶段目标 + 编排器拟人身份（M2/M3 前端数据源；读 project.json meta）。"""
+        proj = _project(pid)
+        meta = proj.meta or {}
+        return {"phase_goal": meta.get("phase_goal"),
+                "persona": meta.get("orchestrator_persona")}
+
+    @app.put("/api/projects/{pid}/goal")
+    def set_project_goal(pid: str, body: PhaseGoalIn):
+        """阶段目标确认（M2，§4.3）：写 meta.phase_goal + goal.confirm 事件
+        （payload 带全文快照，变更历史=事件流可回放）；text 为空 = 清空重议
+        （goal.clear）。criteria 是人话验收口径（LLM 评估用），不做机读联动。"""
+        text = body.text.strip()
+        proj = _project(pid)
+        if not text:
+            store.update_phase_goal(pid, None, project=proj)
+            proj.bb.append_event(pid, "goal.clear", {}, author="human")
+            return {"status": "cleared"}
+        goal = {
+            "text": text[:2000],
+            "criteria": [str(c).strip()[:300]
+                         for c in (body.criteria or []) if str(c).strip()][:20],
+            "phase": (body.phase or "").strip()[:40] or None,
+            "source": "chat",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "confirmed_by": "human",
+        }
+        store.update_phase_goal(pid, goal, project=proj)
+        proj.bb.append_event(pid, "goal.confirm", {"goal": goal}, author="human")
+        return {"status": "confirmed", "goal": goal}
+
+    @app.put("/api/projects/{pid}/orchestrator/persona")
+    def set_orchestrator_persona(pid: str, body: OrchPersonaIn):
+        """编排器拟人身份（M3，§4.4）：meta.orchestrator_persona={display_name,
+        persona}；两字段全空 = 恢复缺省（剥键）。persona 只注入对话轮系统提示。"""
+        proj = _project(pid)
+        display = body.display_name.strip()
+        persona = body.persona.strip()
+        if not display and not persona:
+            store.update_orchestrator_persona(pid, None, project=proj)
+            return {"status": "cleared"}
+        persona_val = {"display_name": display[:40] or "编排器",
+                       "persona": persona[:2000]}
+        store.update_orchestrator_persona(pid, persona_val, project=proj)
+        return {"status": "ok", "persona": persona_val}
+
+    # ---------- 分阶段工作流（pentest-phased-workflow M1/M2） ----------
+
+    def _phase_book_of(proj: Project) -> dict[str, dict]:
+        """项目轨阶段剧本（轨级默认 + 项目 config.phases 覆写；空=未启用）。"""
+        return phases_mod.load_track_phases(
+            app.state.packs_root, proj.track, (proj.meta or {}).get("config"))
+
+    @app.get("/api/projects/{pid}/phase")
+    def get_project_phase(pid: str):
+        """阶段工作流状态（M4 前端阶段条数据源）：当前阶段/门进度/历史/分流标记。"""
+        proj = _project(pid)
+        book = _phase_book_of(proj)
+        if not book:
+            return {"enabled": False}
+        cur_id, spec = phases_mod.current_spec(book, proj.meta or {})
+        st = phases_mod.read_state(proj.meta or {})
+        idle = int(orch_state.load_or_create(proj.bb, pid)["derive_idle_rounds"])
+        metrics = phases_mod.gate_metrics(proj.bb, pid, idle_rounds=idle)
+        met, unmet = phases_mod.evaluate_gate(spec.get("gate") or {}, metrics)
+        return {"enabled": True, "current": cur_id, "spec": spec,
+                "gate": {"metrics": metrics, "met": met, "unmet": unmet,
+                         "forward": phases_mod.forward_targets(book, spec)},
+                "history": st["history"], "notified": st["notified"]}
+
+    @app.post("/api/projects/{pid}/phase")
+    def transition_project_phase(pid: str, body: PhaseTransitionIn):
+        """人工流转阶段（人工最终——不走门；目标限当前阶段剧本 next 清单内）。
+        剧本首发任务发布后 _schedule 建专属窗（起跑与否按自主档）。"""
+        proj = _project(pid)
+        book = _phase_book_of(proj)
+        if not book:
+            raise HTTPException(
+                422, f"项目轨 {proj.track} 无阶段剧本，阶段工作流未启用")
+        cur_id, spec = phases_mod.current_spec(book, proj.meta or {})
+        to = body.to.strip()
+        if to not in book:
+            raise HTTPException(422, f"目标阶段不存在: {to}（本轨阶段: {sorted(book)}）")
+        if to not in (spec.get("next") or []):
+            raise HTTPException(
+                422, f"不允许的流转: {cur_id} → {to}（允许: {spec.get('next') or []}）")
+        idle = int(orch_state.load_or_create(proj.bb, pid)["derive_idle_rounds"])
+        r = phases_mod.enter_phase(proj, to, by="human",
+                                   packs_root=app.state.packs_root,
+                                   reason=body.reason.strip()[:200], idle_rounds=idle)
+        _schedule(pid, reason="phase-entered")  # 首发任务建窗（起跑按挡位/人工）
+        return {"from": r["from"], "to": to, "published": r["published"],
+                "spec": r["spec"]}
+
+    @app.post("/api/projects/{pid}/orchestrator/directive", deprecated=True)
     def orchestrator_directive(pid: str, body: DirectiveIn):
         """C2 指挥编排器（§6.4）：人类一次性目标指令——落 orch.directive 事件
-        （最高优先注入下一轮 tick）+ 自动触发一轮编排。持久方向走 mission。"""
+        （最高优先注入下一轮 tick）+ 自动触发一轮编排。持久方向走 mission。
+        **deprecated（对话化编排器 M1，2026-09-21）**：对话窗全替代——UI 入口已删，
+        本端点仅保留兼容 CLI/脚本；存量未消费指令仍由 tick 消费。"""
         text = body.text.strip()
         if not text:
             raise HTTPException(422, "指令不能为空")
@@ -4644,82 +4983,203 @@ def create_app(
 
     @app.get("/api/tracks/{track}/roles")
     def list_track_roles(track: str):
-        base = _track_path(app, track, "roles")
-        if not base.is_dir():
-            raise HTTPException(404, f"场景轨无角色目录: {track}")
+        """专家池清单（expert-pool M2：roles/ 退役，数据源切 experts/ 按轨过滤，
+        响应形状与旧角色视图兼容——前端只读消费零改动；写端点退役返 410，
+        专家管理 UI 随 M3 落地）。"""
+        _check_name(track, "场景轨")
         out = []
-        for p in sorted(base.glob("*.yaml")):
-            fields = _parse_flat_yaml(p)
-            fields["file"] = p.stem
-            out.append(fields)
+        for name in list_experts(app.state.packs_root, track):
+            e = load_expert(app.state.packs_root, name, track)
+            out.append({"name": e.get("name") or name,
+                        "description": e.get("description"),
+                        "persona": e.get("persona"),
+                        "skills": e.get("skills"),
+                        "task_types": e.get("task_types"),
+                        "default_noise": e.get("default_noise"),
+                        "tools": e.get("tools"),
+                        "max_runtime": e.get("max_runtime"),
+                        "max_steps": e.get("max_steps"),
+                        "file": name})
         return out
 
     @app.put("/api/tracks/{track}/roles/{role_name}")
-    def update_track_role(track: str, role_name: str, body: RoleUpdateIn):
-        """表单编辑角色：只提交改动字段，与既有 yaml merge 后整写（备份留 .history）。
-        yaml name 行=中文显示名（与 stem 解耦）：未提交 name 时**保留原值**——
-        否则每次保存都会把显示名回滚成英文 stem（历史 bug）；空串=重置为 stem。"""
-        path = _track_path(app, track, "roles", f"{role_name}.yaml")
-        if not path.is_file():
-            raise HTTPException(404, f"角色不存在: tracks/{track}/roles/{role_name}")
-        changes = body.model_dump(exclude_unset=True)
-        name_in = changes.pop("name", None)
-        _validate_role_fields(changes)
-        with pack_write_lock():  # 读 yaml→merge→写整文件同一临界区（防并发保存丢字段）
-            existing = _parse_flat_yaml(path)
-            if name_in is None:            # 未提交 → 保留 yaml 现有显示名
-                shown = existing.get("name") or role_name
-            elif name_in.strip() == "":    # 空串 → 重置为 stem
-                shown = role_name
-            else:                          # 改显示名（禁 #/:，见 _check_display_name）
-                shown = _check_display_name(name_in) or role_name
-            _pack_history_backup(path)
-            path.write_text(_dump_role_yaml(shown, existing, changes), encoding="utf-8")
-        return {"status": "ok", "file": path.name, "name": shown}
+    def update_track_role(track: str, role_name: str, body: dict):
+        raise HTTPException(
+            410, "角色已退役（expert-pool M2）：专家由 packs/experts/ 单文件池管理，"
+                 "专家管理前端随 M3 落地")
 
-    @app.post("/api/tracks/{track}/roles", status_code=201)
-    def create_track_role(track: str, body: RoleCreateIn):
-        """新建角色（空白模板或克隆同轨角色）。重名 409、非法名 422、克隆源缺失 404。
-        文件 slug 走 ASCII 白名单 _SLUG_RE（防中文文件名进 URL/路径段）；中文显示名
-        走 display_name（写 yaml name 行，缺省=slug）。"""
-        _check_name(track, "场景轨")
-        _check_slug(body.name, "角色名")
-        display_name = _check_display_name(body.display_name) or body.name
-        tdir = track_dir(app.state.packs_root, track)
-        if not tdir.is_dir():
-            raise HTTPException(404, f"场景轨不存在: {track}")
-        roles_dir = tdir / "roles"
-        dest = roles_dir / f"{body.name}.yaml"
-        with pack_write_lock():  # 重名检查+克隆读取+写文件同一临界区
-            if dest.exists():
-                raise HTTPException(409, f"角色已存在: {track}/{body.name}")
-            if body.clone_from:
-                _check_slug(body.clone_from, "克隆源角色名")
-                src = roles_dir / f"{body.clone_from}.yaml"
-                if not src.is_file():
-                    raise HTTPException(404, f"克隆源角色不存在: {track}/{body.clone_from}")
-                existing = _parse_flat_yaml(src)
-                changes = {k: existing.get(k) for k in _ROLE_KEY_ORDER if k in existing}
-                _validate_role_fields(changes)
-                content = _dump_role_yaml(display_name, {}, changes)
-            else:
-                content = _dump_role_yaml(display_name, {}, {})
-            roles_dir.mkdir(parents=True, exist_ok=True)
-            dest.write_text(content, encoding="utf-8")
-        return {"status": "ok", "file": dest.name, "name": display_name,
-                "cloned": body.clone_from}
+    @app.post("/api/tracks/{track}/roles")
+    def create_track_role(track: str, body: dict):
+        raise HTTPException(
+            410, "角色已退役（expert-pool M2）：专家由 packs/experts/ 单文件池管理，"
+                 "专家管理前端随 M3 落地")
 
     @app.delete("/api/tracks/{track}/roles/{role_name}")
     def delete_track_role(track: str, role_name: str):
-        """删除角色：_generalist 受保护（409）；其余移入 roles/.history/trash/ 可恢复。"""
-        if role_name == "_generalist":
-            raise HTTPException(409, "_generalist 是兜底角色，不可删除")
-        path = _track_path(app, track, "roles", f"{role_name}.yaml")
+        raise HTTPException(
+            410, "角色已退役（expert-pool M2）：专家由 packs/experts/ 单文件池管理，"
+                 "管理端点见 /api/experts（M3）")
+
+    # ---- 专家池管理（expert-pool M3）：packs/experts/ 单文件池 CRUD ----
+
+    def _experts_base() -> Path:
+        return Path(app.state.packs_root) / "experts"
+
+    def _expert_view(name: str) -> dict:
+        """专家全字段读视图（管理 UI 编辑回填；raw 平铺解析，不应用轨变体）。
+        variant_<track>_<field> 重组回 {track: {field: value}}。"""
+        path = _experts_base() / f"{name}.yaml"
+        raw = _parse_expert_yaml(path)
+        variants: dict[str, dict] = {}
+        for k, v in raw.items():
+            if k.startswith("variant_"):
+                tr, _, field = k[len("variant_"):].partition("_")
+                variants.setdefault(tr, {})[field] = v
+        return {"id": name,
+                "name": raw.get("name") or name,
+                "description": raw.get("description"),
+                "persona": raw.get("persona"),
+                "tracks": raw.get("tracks"),
+                "skills": raw.get("skills"),
+                "task_types": raw.get("task_types"),
+                "default_noise": raw.get("default_noise"),
+                "tools": raw.get("tools"),
+                "max_runtime": raw.get("max_runtime"),
+                "max_steps": raw.get("max_steps"),
+                "protected": bool(raw.get("protected")),
+                "variants": variants,
+                "file": f"experts/{name}.yaml"}
+
+    def _validate_expert_body(body: ExpertSaveIn) -> None:
+        """写端点前置校验（宁严勿松，doctor 同口径前移）：tracks 合法轨、
+        variants 轨名/字段名、max_steps 正整数、skills 注册表存在
+        （doctor expert-skill-missing）、task_types 越各轨注册表并集
+        （doctor expert-tasktype-unregistered）。"""
+        valid_tracks = {t["name"] for t in list_packs(app.state.packs_root, "track")}
+        bad = sorted(set(body.tracks or []) - valid_tracks)
+        if bad:
+            raise HTTPException(422, f"非法场景轨: {bad}（合法: {sorted(valid_tracks)}）")
+        for vt, fields in (body.variants or {}).items():
+            if vt not in valid_tracks:
+                raise HTTPException(422, f"轨变体非法场景轨: {vt}（合法: {sorted(valid_tracks)}）")
+            if not isinstance(fields, dict) or not fields:
+                raise HTTPException(422, f"轨变体 {vt} 必须是非空字段对象")
+            if any(not re.fullmatch(r"[a-z_]+", str(k)) for k in fields):
+                raise HTTPException(422, f"轨变体 {vt} 字段名非法（仅小写字母/下划线）")
+        if body.max_steps is not None and body.max_steps <= 0:
+            raise HTTPException(422, "max_steps 必须为正整数")
+        if body.skills:
+            reg = _loaded_registry()
+            unknown = sorted({s for s in body.skills if reg.get(s.strip()) is None})
+            if unknown:
+                raise HTTPException(422, f"未知技能: {unknown}（先建技能或修正拼写）")
+        if body.task_types:
+            known: set[str] = set()
+            for t in valid_tracks:
+                known |= set(load_task_types(app.state.packs_root, t))
+            unknown = sorted(set(body.task_types) - known)
+            if unknown:
+                raise HTTPException(422, f"未注册任务类型: {unknown}（各轨注册表并集: {sorted(known)}）")
+
+    def _dump_expert_yaml(body: ExpertSaveIn) -> str:
+        """专家 yaml 序列化（平铺约定：key: value、内联列表 [a, b]、空值不落键
+        = null 语义）。值含 ": " 或行内注释风险时双引号包裹（解析端剥外层引号）。"""
+        def _emit(key: str, val: Any, lines: list[str]) -> None:
+            if val is None or val == "" or val == []:
+                return
+            if isinstance(val, list):
+                lines.append(f"{key}: [{', '.join(str(v).strip() for v in val)}]")
+                return
+            s = str(val).strip()
+            if ": " in s or " #" in s or s.startswith(("'", '"', "[", "{", "-", "?", "!", "&", "*")):
+                s = f'"{s}"'
+            lines.append(f"{key}: {s}")
+        lines: list[str] = []
+        for key in ("name", "description", "tracks", "persona", "skills",
+                    "task_types", "default_noise", "tools", "max_runtime", "max_steps"):
+            _emit(key, getattr(body, key), lines)
+        for vt in sorted(body.variants or {}):
+            for field in sorted(body.variants[vt] or {}):
+                _emit(f"variant_{vt}_{field}", body.variants[vt][field], lines)
+        return "\n".join(lines) + "\n"
+
+    @app.get("/api/experts")
+    def list_all_experts(pid: str | None = None):
+        """全池清单（管理 UI；不按轨过滤，tracks 字段由前端分组/过滤）。
+        对话化编排器 M3（§4.4）：恒追加虚拟单例 {id:"orchestrator", kind:"virtual"}
+        ——不入 experts/*.yaml 文件池、不认领任务不执行命令、删不掉（运行态注册，
+        名字/persona 存项目 meta）；绑定页/组队选择器/管理面板按 kind 过滤。
+        带 pid 时 name 取该项目 meta.orchestrator_persona.display_name。"""
+        base = _experts_base()
+        rows = [] if not base.is_dir() else [
+            _expert_view(p.stem) for p in sorted(base.glob("*.yaml"))]
+        display = "编排器"
+        if pid:
+            try:
+                persona = (_project(pid).meta or {}).get("orchestrator_persona") or {}
+                display = str(persona.get("display_name") or "编排器")
+            except HTTPException:
+                pass  # 未知 pid 宽容：虚拟条目仍以缺省名返回
+        rows.append({"id": "orchestrator", "name": display, "kind": "virtual",
+                     "description": "编排器虚拟专家（不认领任务、不执行命令）",
+                     "tracks": None, "protected": True})
+        return rows
+
+    @app.get("/api/experts/{expert_id}")
+    def get_expert(expert_id: str):
+        path = _experts_base() / f"{expert_id}.yaml"
+        if not path.is_file():
+            raise HTTPException(404, f"专家不存在: {expert_id}")
+        return _expert_view(expert_id)
+
+    @app.post("/api/experts", status_code=201)
+    def create_expert(body: ExpertCreateIn):
+        """新建专家 yaml。重名 409；id 强制 ASCII slug（文件名/命令引用面）。"""
+        eid = body.id.strip()
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,47}", eid):
+            raise HTTPException(422, f"非法专家 id: {eid}（小写字母/数字/连字符，≤48 字符）")
+        _validate_expert_body(body)
+        base = _experts_base()
+        with pack_write_lock():  # 存在性检查+写文件同一临界区（防并发重名）
+            dest = base / f"{eid}.yaml"
+            if dest.exists():
+                raise HTTPException(409, f"专家已存在: {eid}")
+            payload = body.model_copy(update={"name": body.name or eid})
+            base.mkdir(parents=True, exist_ok=True)
+            dest.write_text(_dump_expert_yaml(payload), encoding="utf-8")
+        return {"status": "ok", "id": eid, "file": f"experts/{eid}.yaml"}
+
+    @app.put("/api/experts/{expert_id}")
+    def update_expert(expert_id: str, body: ExpertSaveIn):
+        """全字段覆写（表单即最终态）。_generalist 可编辑不可删。"""
+        path = _experts_base() / f"{expert_id}.yaml"
+        _validate_expert_body(body)
         with pack_write_lock():
             if not path.is_file():
-                raise HTTPException(404, f"角色不存在: tracks/{track}/roles/{role_name}")
+                raise HTTPException(404, f"专家不存在: {expert_id}")
+            _pack_history_backup(path)
+            path.write_text(_dump_expert_yaml(body), encoding="utf-8")
+        return {"status": "ok", "id": expert_id, "file": f"experts/{expert_id}.yaml"}
+
+    @app.delete("/api/experts/{expert_id}")
+    def delete_expert(expert_id: str):
+        """删除专家：移入 experts/.history/trash/ 可恢复；protected 拒删。"""
+        path = _experts_base() / f"{expert_id}.yaml"
+        with pack_write_lock():
+            if not path.is_file():
+                raise HTTPException(404, f"专家不存在: {expert_id}")
+            if _parse_expert_yaml(path).get("protected"):
+                raise HTTPException(409, f"受保护专家不可删除: {expert_id}")
             dest = _trash_move(path)
-        return {"status": "ok", "file": role_name, "trash": dest.name}
+        return {"status": "ok", "id": expert_id, "trash": dest.name}
+
+    # ---- 场景档（expert-pool M4a）：tracks/<track>/profiles/ 只读清单 ----
+
+    @app.get("/api/tracks/{track}/profiles")
+    def list_track_profiles_ep(track: str):
+        """轨内置场景档清单（创建页选档数据源；档案=文件，写走 packs 直改）。"""
+        _check_name(track, "场景轨")
+        return load_track_profiles(app.state.packs_root, track)
 
     @app.get("/api/tracks/{track}/task-types")
     def get_track_task_types(track: str):
@@ -4915,10 +5375,10 @@ def create_app(
         role_skills = None
         if body.role and track:
             try:
-                role_skills = load_role(
-                    app.state.packs_root, track, body.role).get("skills")
+                role_skills = load_expert(
+                    app.state.packs_root, body.role, track).get("skills")
             except FileNotFoundError:
-                raise HTTPException(404, f"角色不存在: {track}/{body.role}")
+                raise HTTPException(404, f"专家不存在: {track}/{body.role}")
         hits = SkillRouter(registry=_loaded_registry()).route(
             query=body.query, features=body.features,
             file_features=body.file_features, labels=body.labels,
@@ -5209,8 +5669,12 @@ def create_app(
                               "status": f.get("status")}
                              for f in bb.list_findings(pid) if f.get("author") == sid][:50]
             # 显式文件清单：LLM 只能在清单内给路径，防猜名（越界提案校验时也会被拒）
+            # expert-pool M2：能力面按 caps_effective 推导（专家绑定项目同口径）
+            eff_caps = caps_effective(
+                app.state.packs_root, proj.track, proj.experts,
+                fallback=proj.capabilities)
             file_list: dict[str, list[str]] = {}
-            for cap in proj.capabilities:
+            for cap in eff_caps:
                 try:
                     file_list[cap] = [f["path"]
                                       for src in writing.list_kb(root, cap)
@@ -5229,7 +5693,7 @@ def create_app(
                 '只输出 JSON：{"proposals":[{"kind":"kb|skill","mode":"edit|create|rename|delete",'
                 '"target":{...},"content":"...","summary":"≤300字","reason":"证据"}]}')
             user_msg = json.dumps(
-                {"capabilities": proj.capabilities,
+                {"capabilities": eff_caps,
                  "session": {"id": sid, "role": sess.get("role")},
                  "kb_files": file_list, "skills": skills_list,
                  "kb_open_sequence": kb_opens[-50:],
@@ -5632,5 +6096,28 @@ def create_app(
                 await run_in_threadpool(inst.detach_screencast, sid, _sink)
             except Exception:  # noqa: BLE001 —— 实例已停等：清理降级
                 pass
+
+    # SPA 同源静态托管（desktop-app-shell M2，DESIGN §1）：前端本就走相对路径
+    # （/api/* 与 location.host 拼 WS），同源后零改动；Vite dev 代理仅开发期保留。
+    # 挂载点在 return 前=路由注册序最后，全部 API/WS/docs 路由先匹配，兜底不遮蔽。
+    if static_dir is not None:
+        dist = Path(static_dir)
+        index_html = dist / "index.html"
+        if not index_html.is_file():
+            raise ValueError(f"static_dir 缺 index.html：{dist}")
+
+        @app.get("/{full_path:path}", include_in_schema=False)
+        def _spa_fallback(full_path: str) -> FileResponse:
+            top = full_path.split("/", 1)[0]
+            # API/Swagger 例外不兜底（未知 API GET 回 404 而非 index.html，别坑调试）
+            if top in ("api", "docs", "redoc") or full_path == "openapi.json":
+                raise HTTPException(status_code=404, detail="Not Found")
+            candidate = (dist / full_path).resolve()
+            # 防穿越（路径参数解码后可能含 ..\ 等分隔符）：resolve 后必须仍在产物目录内
+            if (full_path
+                    and str(candidate).startswith(str(dist.resolve()) + os.sep)
+                    and candidate.is_file()):
+                return FileResponse(candidate)
+            return FileResponse(index_html)
 
     return app

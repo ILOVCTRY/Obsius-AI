@@ -194,7 +194,8 @@ def board_graph(bb: Any, project_id: str) -> dict[str, Any]:
         "SELECT l.node_type, l.node_id, l.seq, l.edge_note,"
         " c.id AS chain_id, c.name AS chain_name, c.status AS chain_status"
         " FROM chains c JOIN chain_links l ON l.chain_id=c.id"
-        " WHERE c.project_id=? ORDER BY c.id, l.seq", (project_id,)).fetchall()
+        " WHERE c.project_id=? AND c.origin='manual' ORDER BY c.id, l.seq",
+        (project_id,)).fetchall()  # v19：origin 过滤（R6）——任务轨迹自动链（origin='trace'）不进全景图
 
     def _short(text: Any, cap: int = 48) -> str:
         s = str(text or "")

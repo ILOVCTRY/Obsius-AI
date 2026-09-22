@@ -1,4 +1,4 @@
-import { Suspense, lazy, useCallback, useEffect, useMemo, useState, type ReactNode } from "react"
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { ChevronDown, ChevronRight } from "lucide-react"
 import { api } from "@/lib/api"
 import type { Asset, Finding, FindingCategory, FuncEntry } from "@/lib/types"
@@ -34,16 +34,27 @@ const BoardGraphCanvas = lazy(() =>
 // 函数库 tab 仅 capabilities 含 binary 时挂载（func_kb 只由二进制分析产生；
 // assessment web-only 项目里永远空数据）。判据是能力不是轨。
 // 全景 tab（黑板链路图）全轨开放，compact 侧栏除外。
-export function Blackboard({ pid, compact = false, track, capabilities }: {
-  pid: string; compact?: boolean; track?: string; capabilities?: string[]
+// M4c 场景档 board_view：defaultView（config.board_view.default）不在可用集合时回退 findings。
+export function Blackboard({ pid, compact = false, track, capabilities, defaultView }: {
+  pid: string; compact?: boolean; track?: string; capabilities?: string[]; defaultView?: string
 }) {
   const tabs = [
     "findings", "assets",
     ...(capabilities?.includes("binary") ? ["funcs"] as const : []),
     ...(!compact ? ["board"] as const : []),
   ] as const
+  const allTabs: readonly string[] = tabs
+  const initial = defaultView && allTabs.includes(defaultView) ? defaultView : "findings"
+  const [tab, setTab] = useState(initial)
+  // meta 异步晚到：defaultView 首次可用且用户尚未手动切过 tab 时补切一次
+  const touched = useRef(false)
+  useEffect(() => {
+    if (!touched.current && defaultView && allTabs.includes(defaultView)) {
+      setTab(defaultView)
+    }
+  }, [defaultView]) // eslint-disable-line react-hooks/exhaustive-deps
   return (
-    <Tabs defaultValue="findings" className="flex h-full flex-col gap-0">
+    <Tabs value={tab} onValueChange={(v) => { touched.current = true; setTab(v) }} className="flex h-full flex-col gap-0">
       <TabsList className="w-full justify-start rounded-none border-b bg-transparent p-0">
         {tabs.map((t) => (
           <TabsTrigger key={t} value={t} className="rounded-none border-b-2 px-3 py-1.5 text-xs">

@@ -4,13 +4,14 @@ import { ArrowUp, GitFork, Paperclip, Square, X } from "lucide-react"
 // A3 任务流视图（第三个 React Flow 图）：懒加载，@xyflow/react 不进直播间主包
 const TaskFlow = lazy(() => import("./live/TaskFlow").then((m) => ({ default: m.TaskFlow })))
 import { PlanPanel } from "./live/PlanPanel"
+import { OrchChatPane } from "./live/OrchChatPane"
 import { EventRow, type StreamItem } from "./live/EventRow"
 import { ApiError, api, pollJob } from "@/lib/api"
 import { eventStyle } from "@/lib/events"
 import { roleName, sessionLabel } from "@/lib/roles"
 import { useEvents } from "@/lib/useEvents"
 import { fmtDateTimeMin, parseTs } from "@/lib/datetime"
-import type { AttachmentInfo, Autonomy, BBEvent, ModelInfo, OrchProposal, OrchTickResult, ProjectUsage, ReplanResult, RoleInfo, Session, Task } from "@/lib/types"
+import type { AttachmentInfo, Autonomy, BBEvent, Expert, ModelInfo, OrchPersona, OrchProposal, OrchTickResult, PhaseGoal, ProjectUsage, ReplanResult, RoleInfo, Session, Task } from "@/lib/types"
 import { StatusDot, type SessionStatus } from "@/components/StatusDot"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
@@ -29,21 +30,22 @@ type PendingFile = {
   att?: AttachmentInfo
 }
 
-// 输入行模式徽章（2026-09-19 Claude Code 化；2026-09-20 会话窗对话化改双模式）：
+// 输入行模式徽章（2026-09-19 Claude Code 化；2026-09-20 会话窗对话化改双模式；
+// 2026-09-21 对话化编排器 M1：编排器态 C2 指令退役 → 「与编排对话」插队轮）：
 // 会话态=「对话/引导」+「指派任务」两态循环，**显徽章**（双模式必须可辨——偏离
-// 09-19 单模式不显徽章定稿，定稿翻转随对话化落地）；编排器态=「发任务/指挥编排」。
-type InputMode = "task" | "note" | "assign" | "directive"
+// 09-19 单模式不显徽章定稿，定稿翻转随对话化落地）；编排器态=「与编排对话/发任务」。
+type InputMode = "task" | "note" | "assign" | "orch"
 const MODE_LABELS: Record<InputMode, string> = {
-  task: "发任务", note: "对话/引导", assign: "指派任务", directive: "指挥编排",
+  task: "发任务", note: "对话/引导", assign: "指派任务", orch: "与编排对话",
 }
 const MODE_HINTS: Record<InputMode, string> = {
   task: "以 human 名义向黑板发布一个 passive 任务（插话）；Enter 发送，Shift+Enter 换行",
   note: "与当前选中会话对话（Claude Code 式）：空闲 Agent 直接流式回复，可跑命令/查黑板/登记结论；任务进行中则轮末注入不打断当前工作；可携带附件",
   assign: "指派任务给当前选中会话：target_session 锁定该窗，后端自动武装并立即起跑；Enter 发送，可携带附件",
-  directive: "指挥编排器（C2）：一次性目标指令，自动触发一轮编排；不支持附件",
+  orch: "与编排器对话（插队轮）：问态势/问下一步/纠正方向，回复见上方对话流；编排器在忙时返回 409 不排队；不支持附件",
 }
 const modesForCtx = (hasSession: boolean): InputMode[] =>
-  hasSession ? ["note", "assign"] : ["task", "directive"]
+  hasSession ? ["note", "assign"] : ["orch", "task"]
 
 function fmtBytes(n: number): string {
   if (n >= 1_048_576) return `${(n / 1_048_576).toFixed(1)}MB`
@@ -170,6 +172,223 @@ function BudgetPopover({ usage, onClose, onSave }: {
       <Button size="sm" className="mt-3 w-full" disabled={saving} onClick={save}>
         {saving ? "保存中…" : "保存"}
       </Button>
+    </div>
+  )
+}
+
+/** 组队换将弹层（expert-pool M3）：轨过滤专家多选 → PATCH experts；
+ *  保存回执带推导能力包（caps_effective，M2）只读展示。绑定空=按轨全池存量直通。 */
+function TeamPopover({ track, current, onClose, onSave }: {
+  track: string | null
+  current: string[]
+  onClose: () => void
+  onSave: (experts: string[]) => Promise<{ capabilities?: string[] } | void>
+}) {
+  const [pool, setPool] = useState<Expert[]>([])
+  const [sel, setSel] = useState<Set<string>>(() => new Set(current))
+  const [q, setQ] = useState("")
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const [savedCaps, setSavedCaps] = useState<string[] | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    api.listExperts().then((es) => { if (alive) setPool(es.filter((e) => e.kind !== "virtual")) }).catch(() => {})
+    return () => { alive = false }
+  }, [])
+
+  const serves = (e: Expert) => !track || !e.tracks?.length || e.tracks.includes(track)
+  const matchQ = (e: Expert) => {
+    const s = q.trim().toLowerCase()
+    return !s || e.id.toLowerCase().includes(s) || (e.name ?? "").toLowerCase().includes(s)
+      || (e.description ?? "").toLowerCase().includes(s)
+  }
+  const groups = ([
+    ["通用", (e: Expert) => !e.tracks?.length],
+    ["轨专属", (e: Expert) => !!e.tracks?.length],
+  ] as const).map(([label, pred]) => ({
+    label,
+    members: pool.filter((e) => serves(e) && pred(e) && matchQ(e)),
+  })).filter((g) => g.members.length > 0)
+
+  const toggle = (id: string) =>
+    setSel((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n })
+
+  const save = async () => {
+    setSaving(true); setErr(null)
+    try {
+      const meta = await onSave([...sel])
+      setSavedCaps(meta?.capabilities ?? [])
+    } catch (e) {
+      setErr(String(e))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="absolute bottom-9 left-0 z-10 w-80 rounded-lg border bg-popover p-3 text-xs shadow-md">
+      <p className="mb-1">专家组队{track ? `（${track} 轨）` : ""}</p>
+      <p className="mb-2 text-[10px] text-muted-foreground">
+        换将即时生效于下一轮开窗/会话构造；能力包由专家技能自动推导，不可直改。清空 = 按轨全池直通。
+      </p>
+      <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜索专家…"
+             className="mb-2 h-7 w-full rounded-md border bg-background px-2 text-xs" />
+      <div className="max-h-64 space-y-2 overflow-y-auto pr-1">
+        {groups.map((g) => (
+          <div key={g.label}>
+            <p className="mb-1 text-[10px] text-muted-foreground">{g.label}</p>
+            <div className="space-y-1">
+              {g.members.map((e) => (
+                <label key={e.id} className="flex cursor-pointer items-start gap-2 rounded px-1 py-0.5 hover:bg-accent/50">
+                  <input type="checkbox" className="mt-0.5" checked={sel.has(e.id)}
+                         onChange={() => toggle(e.id)} />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate">{e.name || e.id}
+                      {e.skills == null && <span className="ml-1 text-[9px] text-muted-foreground">全量</span>}
+                    </span>
+                    {(e.persona ?? e.description) && (
+                      <span className="block truncate text-[10px] text-muted-foreground"
+                            title={e.persona ?? e.description ?? ""}>
+                        {(e.persona ?? e.description ?? "").split("\n")[0]}
+                      </span>
+                    )}
+                  </span>
+                </label>
+              ))}
+            </div>
+          </div>
+        ))}
+        {groups.length === 0 && (
+          <p className="text-[11px] text-muted-foreground">专家池为空或无匹配</p>
+        )}
+      </div>
+      {savedCaps && (
+        <p className="mt-2 text-[10px] text-muted-foreground">
+          能力包（推导，只读）：{savedCaps.length ? savedCaps.join(" / ") : "（无）"}
+        </p>
+      )}
+      {err && <p className="mt-2 text-(--status-error)">{err}</p>}
+      <div className="mt-2 flex items-center gap-2">
+        <span className="flex-1 text-[10px] text-muted-foreground">已选 {sel.size} 位</span>
+        <Button size="sm" variant="ghost" onClick={onClose}>关闭</Button>
+        <Button size="sm" disabled={saving} onClick={save}>{saving ? "保存中…" : "保存组队"}</Button>
+      </div>
+    </div>
+  )
+}
+
+/** 阶段目标编辑弹层（对话化编排器 M2，§4.3）：text 一句话 + criteria 人话验收
+ *  口径（一行一条）+ phase 可空；保存=goal.confirm、清空=goal.clear（事件留痕，
+ *  变更历史可回放）。goal 注入编排 tick 与对话轮系统提示。 */
+function GoalEditor({ initial, onClose, onSave, onClear }: {
+  initial: PhaseGoal | null
+  onClose: () => void
+  onSave: (body: { text: string; criteria?: string[]; phase?: string | null }) => Promise<void>
+  onClear: () => Promise<void>
+}) {
+  const [text, setText] = useState(initial?.text ?? "")
+  const [criteria, setCriteria] = useState((initial?.criteria ?? []).join("\n"))
+  const [phase, setPhase] = useState(initial?.phase ?? "")
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+
+  const save = async () => {
+    setSaving(true); setErr(null)
+    try {
+      await onSave({
+        text: text.trim(),
+        criteria: criteria.split("\n").map((s) => s.trim()).filter(Boolean),
+        phase: phase.trim() || null,
+      })
+      onClose()
+    } catch (e) {
+      setErr(String(e))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="w-96 rounded-lg border bg-popover p-4 text-xs shadow-lg">
+      <p className="mb-1">🎯 阶段目标（人类确认口径）</p>
+      <p className="mb-2 text-[10px] leading-relaxed text-muted-foreground">
+        确认后注入编排 tick 与对话轮系统提示——编排器朝它推进，判据达成或资产穷尽才收工。
+        变更历史在事件流（goal.confirm / goal.clear）。
+      </p>
+      <textarea rows={2} value={text} onChange={(e) => setText(e.target.value)}
+        placeholder="一句话目标（如：本周打穿靶场 3 台主机）"
+        className="mb-2 w-full resize-y rounded-md border bg-background px-2 py-1 leading-relaxed" />
+      <label className="mb-1 block text-muted-foreground">验收口径（一行一条，人话即可，非机读）</label>
+      <textarea rows={3} value={criteria} onChange={(e) => setCriteria(e.target.value)}
+        placeholder={"拿到 3 台主机的 flag\n输出复现报告"}
+        className="mb-2 w-full resize-y rounded-md border bg-background px-2 py-1 leading-relaxed" />
+      <label className="mb-1 block text-muted-foreground">阶段标记（可空，如 initial-access）</label>
+      <input value={phase} onChange={(e) => setPhase(e.target.value)}
+        className="mb-2 h-7 w-full rounded-md border bg-background px-2" />
+      {err && <p className="mb-1 text-(--status-error)">{err}</p>}
+      <div className="flex items-center gap-2">
+        <Button size="sm" variant="ghost" onClick={onClose}>取消</Button>
+        <Button size="sm" variant="outline" disabled={saving || !initial}
+          title={initial ? "清空目标（goal.clear 留痕，编排器回到无目标态）" : "当前无目标"}
+          onClick={async () => {
+            setSaving(true); setErr(null)
+            try { await onClear(); onClose() } catch (e) { setErr(String(e)) } finally { setSaving(false) }
+          }}>
+          清空
+        </Button>
+        <span className="flex-1" />
+        <Button size="sm" disabled={saving || !text.trim()} onClick={save}>
+          {saving ? "保存中…" : "确认目标"}
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+/** 编排器拟人身份弹层（M3，§4.4）：display_name 贯穿页签/气泡，persona 只注入
+ *  对话轮系统提示（tick 不受影响）。清空 persona 文本=剥键回退缺省。 */
+function PersonaEditor({ initial, onClose, onSave }: {
+  initial: OrchPersona | null
+  onClose: () => void
+  onSave: (body: { display_name: string; persona: string }) => Promise<void>
+}) {
+  const [name, setName] = useState(initial?.display_name ?? "")
+  const [persona, setPersona] = useState(initial?.persona ?? "")
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+
+  const save = async () => {
+    setSaving(true); setErr(null)
+    try {
+      await onSave({ display_name: name.trim() || "编排器", persona: persona.trim() })
+      onClose()
+    } catch (e) {
+      setErr(String(e))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="w-96 rounded-lg border bg-popover p-4 text-xs shadow-lg">
+      <p className="mb-1">🎭 编排器身份（拟人）</p>
+      <p className="mb-2 text-[10px] leading-relaxed text-muted-foreground">
+        显示名贯穿页签与对话气泡；人设只注入对话轮（「与编排对话」），编排 tick 的决策语气不受影响。
+      </p>
+      <label className="mb-1 block text-muted-foreground">显示名</label>
+      <input value={name} onChange={(e) => setName(e.target.value)} placeholder="编排器"
+        className="mb-2 h-7 w-full rounded-md border bg-background px-2" />
+      <label className="mb-1 block text-muted-foreground">人设（persona，可空）</label>
+      <textarea rows={4} value={persona} onChange={(e) => setPersona(e.target.value)}
+        placeholder="如：老编——先给结论再给依据，不打官腔，拿不准就直说"
+        className="mb-2 w-full resize-y rounded-md border bg-background px-2 py-1 leading-relaxed" />
+      {err && <p className="mb-1 text-(--status-error)">{err}</p>}
+      <div className="flex items-center gap-2">
+        <Button size="sm" variant="ghost" onClick={onClose}>取消</Button>
+        <span className="flex-1" />
+        <Button size="sm" disabled={saving} onClick={save}>{saving ? "保存中…" : "保存"}</Button>
+      </div>
     </div>
   )
 }
@@ -377,7 +596,8 @@ const FILTERS = [
   { key: "decision", label: "决策", match: (k: string) =>
       k.startsWith("task.") || k.startsWith("session.") || k.startsWith("approval.") ||
       k.startsWith("orch.") || k.startsWith("mission.") ||
-      k === "project.digest" || k === "finding.new" || k === "advisor.intervention" },
+      k === "project.digest" || k === "finding.new" || k === "advisor.intervention" ||
+      k === "goal.confirm" || k === "goal.clear" },
   { key: "route", label: "路由", match: (k: string) =>
       k === "skill.routed" || k === "skill.open" || k === "kb.open" || k === "kb.search" },
   { key: "command", label: "命令", match: (k: string) =>
@@ -455,13 +675,30 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
   // 作战模式弹层（R2 退役切换：redteam 轨专属 ROE/mission 编辑）
   const [modeOpen, setModeOpen] = useState(false)
   const [budgetOpen, setBudgetOpen] = useState(false)
+  // 专家组队（expert-pool M3）：换将弹层 + 当前绑定（meta.experts，空=按轨全池）
+  const [teamOpen, setTeamOpen] = useState(false)
+  const [experts, setExperts] = useState<string[]>([])
   // 编排器工具栏并入 composer（2026-09-19）：开窗/自主档/更多三枚新弹层开关
   const [winOpen, setWinOpen] = useState(false)
   const [autoOpen, setAutoOpen] = useState(false)
   const [moreOpen, setMoreOpen] = useState(false)
   const [savingAuto, setSavingAuto] = useState(false)
+  // 对话化编排器（M1/M2/M3，2026-09-21）：对话轮在跑（输入不禁用，busy 409 提示）
+  // + goal/persona 元数据 + 编排页签三段式的运行记录折叠区与编辑弹层开关
+  const [orchBusy, setOrchBusy] = useState(false)
+  const [orchMeta, setOrchMeta] = useState<{ phase_goal: PhaseGoal | null; persona: OrchPersona | null } | null>(null)
+  const [showRunLog, setShowRunLog] = useState(false)
+  const [goalOpen, setGoalOpen] = useState(false)
+  const [personaOpen, setPersonaOpen] = useState(false)
+  const refreshOrchMeta = () =>
+    api.projectGoal(pid).then(setOrchMeta).catch(() => {})
+  useEffect(() => {
+    refreshOrchMeta()
+  }, [pid])
   const refreshUsage = () =>
-    api.getProject(pid).then((p) => { setUsage(p.usage); setTrack(p.track ?? null) }).catch(() => {})
+    api.getProject(pid).then((p) => {
+      setUsage(p.usage); setTrack(p.track ?? null); setExperts(p.experts ?? [])
+    }).catch(() => {})
   useEffect(() => {
     refreshUsage()
     const t = setInterval(refreshUsage, 5000)
@@ -533,13 +770,13 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
   const roleNames = useMemo(
     () => Object.fromEntries(roles.map((r) => [r.role, r.name || r.role])),
     [roles])
-  // 页签：全部 / 编排（无 session_id 的编排事件）/ 各会话（已关闭的隐藏；2026-09-19 起 ×=结束会话，A1 摘离退役）
+  // 页签：全部 / 编排（无 session_id 的编排事件；M3 起显拟人显示名）/ 各会话（已关闭的隐藏；2026-09-19 起 ×=结束会话，A1 摘离退役）
   const tabs: Tab[] = useMemo(() => [
     { key: "__all", label: "全部", sessionId: null },
-    { key: "__orch", label: "编排", sessionId: "__orch" },
+    { key: "__orch", label: orchMeta?.persona?.display_name || "编排", sessionId: "__orch" },
     ...sessions.filter((s) => s.status !== "closed")
       .map((s) => ({ key: s.id, label: sessionLabel(s, roleNames), sessionId: s.id })),
-  ], [sessions, roleNames])
+  ], [sessions, roleNames, orchMeta])
   // 会话收件箱未读数（撤回传播系统私信；与审批收件箱分设，DESIGN §6.7 的 1.5）
   const unreadBySid = useMemo(
     () => new Map(sessions.map((s) => [s.id, s.unread ?? 0])), [sessions])
@@ -750,6 +987,12 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
   // 上翻阅读的位置稳定交给浏览器 scroll anchoring。DOM 只渲染已加载的分页
   // （首屏 50 条，上翻按 50 条/批从后端补），不再内存全量+窗口切片。
   const shown = useMemo(() => [...items].reverse(), [items])
+  // 编排页签运行记录（对话化编排器 M1，2026-09-21）：对话流已渲染 orch.chat，
+  // 折叠区剔除该 kind 只留编排动作事件（任务派发生命周期/orch.*/goal.*/llm.error…）
+  const orchItems = useMemo(
+    () => items.filter((it) => it.type !== "single" || it.event.kind !== "orch.chat"),
+    [items])
+  const orchShown = useMemo(() => [...orchItems].reverse(), [orchItems])
   // 切上下文（会话页签/类型筛选）= 用户要看最新：回到滚动原点（最底部）
   useEffect(() => {
     const el = listRef.current
@@ -1044,12 +1287,13 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
     }
   }
 
-  // 输入框（E8，2026-09-19 附件随发；2026-09-20 对话化改双模式）：会话态
-  // 「对话/引导」= human_note 私信直达当前选中会话（空闲=后端踢对话轮流式回复，
-  // 在跑=轮末注入不打断当前工作，可纯附件无文字）；「指派任务」= 显式指派
-  // （target_session 锁定该窗，后端自动武装起跑）。编排器态「发任务」= 以 human
-  // 名义发布 passive 任务；「指挥编排」（C2）= 一次性目标指令（不支持附件）。
-  // 发送时携带就绪附件，成功后清 chips。
+  // 输入框（E8，2026-09-19 附件随发；2026-09-20 对话化改双模式；2026-09-21
+  // 对话化编排器 M1 编排器态改「与编排对话」）：会话态「对话/引导」= human_note
+  // 私信直达当前选中会话（空闲=后端踢对话轮流式回复，在跑=轮末注入不打断当前
+  // 工作，可纯附件无文字）；「指派任务」= 显式指派（target_session 锁定该窗，
+  // 后端自动武装起跑）。编排器态「与编排对话」= orch.chat 插队轮（busy 409 不
+  // 排队）；「发任务」= 以 human 名义发布 passive 任务。发送时携带就绪附件，
+  // 成功后清 chips（对话/指挥不支持附件）。
   const sendRemark = async () => {
     const text = remark.trim()
     const readyIds = pendingFiles.filter((f) => f.status === "ready" && f.att).map((f) => f.att!.id)
@@ -1099,15 +1343,26 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
       }
       return
     }
-    if (inputMode === "directive") {
-      if (!text) return
+    if (inputMode === "orch") {
+      // 对话化编排器 M1（2026-09-21，§4.2）：与编排器对话——插队轮。C2 指令
+      // 「一次性目标+自动 tick」退役（orchDirective API 留 deprecated），目标
+      // 固化走 M2 goal 闭环（对话流顶部「设定阶段目标」）。busy 409 不排队
+      //（定稿 #6）：只提示，不禁用输入。
+      if (!text || orchBusy) return
       setRemark("")
-      setJobInfo("指令下发中，编排器拆解任务/分资产/开窗…")
+      setOrchBusy(true)
       try {
-        const r = await api.orchDirective(pid, text)
-        setJobInfo(`指令已下达（#${r.event_id}），编排进行中——结果看任务看板与事件流`)
+        const r = await api.orchChat(pid, text)
+        setJobInfo(`已发送：${orchMeta?.persona?.display_name || "编排器"}思考中…（回复见对话流）`)
+        const job = await pollJob(r.job_id, () => {}, 1500)
+        if (job.status === "done") setJobInfo("编排器已回复（见对话流）")
+        else setJobInfo(`编排器回复失败：${job.error ?? job.status}`)
       } catch (e) {
-        setJobInfo(`指令失败：${e}`)
+        setJobInfo(e instanceof ApiError && e.status === 409
+          ? "编排器正在思考（编排一轮/其他对话占用中），请稍候再发"
+          : `发送失败：${e}`)
+      } finally {
+        setOrchBusy(false)
       }
       return
     }
@@ -1175,7 +1430,7 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
   const uploadingAtt = pendingFiles.some((f) => f.status === "uploading")
   const hasReadyAtt = pendingFiles.some((f) => f.status === "ready")
   const canSend = uploadingAtt ? false
-    : inputMode === "directive" ? remark.trim().length > 0
+    : inputMode === "orch" ? remark.trim().length > 0 && !orchBusy
     : inputMode === "note" ? (!!activeSession && (remark.trim().length > 0 || hasReadyAtt))
     : remark.trim().length > 0
   // E8：步数预算用尽自动暂停的会话集（恢复/中断/收尾即移出）——composer 显「▶ 继续」
@@ -1192,10 +1447,10 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
   // 发送钮双态（2026-09-19）：会话有任务在身（running/paused）时 ■=中断本轮，否则 ↑=发送
   const canAbort = activeStatus === "running" || activeStatus === "paused"
   // 模式随上下文收敛（2026-09-19 用户定稿）：选中会话=引导会话（**不显徽章**，写消息即引导）；
-  // 回到编排器=发任务，徽章只在编排器态显示。上下文切换即归位缺省模式。
+  // 回到编排器=与编排对话（M1 缺省，对话化编排器定稿），徽章只在编排器态显示。上下文切换即归位缺省模式。
   const hasSessionCtx = activeSession != null
   useEffect(() => {
-    setInputMode(hasSessionCtx ? "note" : "task")
+    setInputMode(hasSessionCtx ? "note" : "orch")
   }, [hasSessionCtx])
 
   // 排队引导条自动清理：会话下一轮 task.claimed 到达 = 认领期 drain 已把引导注入
@@ -1229,8 +1484,68 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
     setJobInfo("已中断本轮：引导将在下一轮认领时注入（队列已空则等下次「跑任务队列」）")
   }
 
+  // 事件流渲染体（2026-09-21 抽出复用）：会话页签主区与编排页签「运行记录」折叠区
+  // 共用同一套 EventRow/加载更早逻辑，仅列表数据不同（shown vs orchShown）。
+  const renderStream = (list: StreamItem[]) => (
+    <>
+      {list.map((item) => {
+        const primary = item.type === "pair" ? item.command
+          : item.type === "turn" ? item.note : item.event
+        const primaryKind = item.type === "pair" ? "command"
+          : item.type === "turn" ? "message.inbox" : item.event.kind
+        const style = eventStyle(primaryKind, primary.payload)
+        // turn 的 open=过程组折叠态（默认收起；键复用 note.id，与顶层折叠记忆统一）
+        const open = item.type === "turn"
+          ? overrides.get(primary.id) ?? false
+          : overrides.get(primary.id) ?? style.defaultOpen
+        return (
+          <EventRow
+            key={primary.id}
+            item={item}
+            open={open}
+            onToggle={toggleRow}
+            roleNames={roleNames}
+            action={item.type === "single" && item.event.kind === "orch.proposed" ? (
+              <button
+                type="button"
+                title="以人类名义采纳：走与手动发任务/开窗相同的写口（created_by=human）"
+                onClick={(click) => { click.stopPropagation(); void adoptProposal(item.event) }}
+                disabled={adopted.has(item.event.id) || adoptingId !== null}
+                className={cn(
+                  "shrink-0 rounded border px-1.5 py-px text-[11px] leading-tight",
+                  adopted.has(item.event.id)
+                    ? "border-muted-foreground/40 text-muted-foreground"
+                    : "border-amber-400/60 text-amber-400 hover:bg-amber-400/10",
+                )}
+              >
+                {adopted.has(item.event.id) ? "✓ 已采纳" : adoptingId === item.event.id ? "采纳中…" : "采纳"}
+              </button>
+            ) : undefined}
+            onRouteJump={handleRouteJump}
+          />
+        )
+      })}
+      {!loadedAll ? (
+        <button
+          type="button"
+          onClick={() => void loadEarlier()}
+          disabled={loadingEarlier}
+          className="shrink-0 rounded border bg-card px-2 py-1 text-center text-xs text-muted-foreground hover:bg-accent disabled:opacity-50"
+        >
+          {loadingEarlier ? "加载中…" : "↑ 加载更早"}
+        </button>
+      ) : (
+        events.length > 0 && (
+          <span className="shrink-0 py-1 text-center text-[10px] text-muted-foreground">
+            已到最早
+          </span>
+        )
+      )}
+    </>
+  )
+
   return (
-    <div className="flex h-full flex-col">
+    <div className="relative flex h-full flex-col">
       {/* 第一行：会话页签（多了横向滚动，不换行）+ live 状态点 */}
       <div className="flex h-9 shrink-0 items-center gap-1 border-b px-2">
         <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
@@ -1342,65 +1657,37 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
       {/* 「计划」标签：结构化计划/进度面板替代事件流（GET /tasks，3s 轮询仅在本标签激活时跑） */}
       {filter === "plan" ? (
         <PlanPanel pid={pid} activeTab={activeTab} sessions={sessions} />
+      ) : activeTab === "__orch" ? (
+      // 对话化编排器（M1/M2/M3，2026-09-21）：编排页签三段式——顶部 goal 条 + 中部
+      // 对话流（OrchChatPane）+ 底部「运行记录」折叠区（编排动作事件流，剔除 orch.chat）
+      <div className="flex min-h-0 flex-1 flex-col">
+        <OrchChatPane
+          events={events}
+          busy={orchBusy}
+          persona={orchMeta?.persona ?? null}
+          goal={orchMeta?.phase_goal ?? null}
+          onEditGoal={() => setGoalOpen(true)}
+          onEditPersona={() => setPersonaOpen(true)}
+        />
+        <div className="shrink-0 border-t">
+          <button type="button" onClick={() => setShowRunLog((v) => !v)}
+            className="flex w-full items-center gap-1 px-3 py-1.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground">
+            {showRunLog ? "▾" : "▸"} 运行记录（任务派发 / 编排动作；对话在上方流里）
+          </button>
+          {showRunLog && (
+            <div ref={listRef} onScroll={onListScroll} className="h-64 overflow-y-auto px-3">
+              {renderStream(orchShown)}
+            </div>
+          )}
+        </div>
+      </div>
       ) : (
       <div
         ref={listRef}
         onScroll={onListScroll}
         className="flex min-h-0 flex-1 flex-col-reverse overflow-auto px-3"
       >
-        {shown.map((item) => {
-            const primary = item.type === "pair" ? item.command
-              : item.type === "turn" ? item.note : item.event
-            const primaryKind = item.type === "pair" ? "command"
-              : item.type === "turn" ? "message.inbox" : item.event.kind
-            const style = eventStyle(primaryKind, primary.payload)
-            // turn 的 open=过程组折叠态（默认收起；键复用 note.id，与顶层折叠记忆统一）
-            const open = item.type === "turn"
-              ? overrides.get(primary.id) ?? false
-              : overrides.get(primary.id) ?? style.defaultOpen
-            return (
-              <EventRow
-                key={primary.id}
-                item={item}
-                open={open}
-                onToggle={toggleRow}
-                roleNames={roleNames}
-                action={item.type === "single" && item.event.kind === "orch.proposed" ? (
-                  <button
-                    type="button"
-                    title="以人类名义采纳：走与手动发任务/开窗相同的写口（created_by=human）"
-                    onClick={(click) => { click.stopPropagation(); void adoptProposal(item.event) }}
-                    disabled={adopted.has(item.event.id) || adoptingId !== null}
-                    className={cn(
-                      "shrink-0 rounded border px-1.5 py-px text-[11px] leading-tight",
-                      adopted.has(item.event.id)
-                        ? "border-muted-foreground/40 text-muted-foreground"
-                        : "border-amber-400/60 text-amber-400 hover:bg-amber-400/10",
-                    )}
-                  >
-                    {adopted.has(item.event.id) ? "✓ 已采纳" : adoptingId === item.event.id ? "采纳中…" : "采纳"}
-                  </button>
-                ) : undefined}
-                onRouteJump={handleRouteJump}
-              />
-            )
-          })}
-          {!loadedAll ? (
-            <button
-              type="button"
-              onClick={() => void loadEarlier()}
-              disabled={loadingEarlier}
-              className="shrink-0 rounded border bg-card px-2 py-1 text-center text-xs text-muted-foreground hover:bg-accent disabled:opacity-50"
-            >
-              {loadingEarlier ? "加载中…" : "↑ 加载更早"}
-            </button>
-          ) : (
-            events.length > 0 && (
-              <span className="shrink-0 py-1 text-center text-[10px] text-muted-foreground">
-                已到最早
-              </span>
-            )
-          )}
+        {renderStream(shown)}
       </div>
       )}
 
@@ -1447,9 +1734,9 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
             </button>
           </div>
         ))}
-        {/* 附件 chips 行（指挥编排模式下半透明保留 + 提示） */}
+        {/* 附件 chips 行（与编排对话模式下半透明保留 + 提示） */}
         {pendingFiles.length > 0 && (
-          <div className={cn("mb-2 flex flex-wrap items-center gap-1.5", inputMode === "directive" && "opacity-50")}>
+          <div className={cn("mb-2 flex flex-wrap items-center gap-1.5", inputMode === "orch" && "opacity-50")}>
             {pendingFiles.map((f) => (
               <span key={f.key}
                 className={cn("inline-flex max-w-64 items-center gap-1 rounded-md border px-2 py-1 text-xs",
@@ -1469,8 +1756,8 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
                 </button>
               </span>
             ))}
-            {inputMode === "directive" && (
-              <span className="text-[10px] text-muted-foreground">指挥编排不支持附件</span>
+            {inputMode === "orch" && (
+              <span className="text-[10px] text-muted-foreground">与编排对话不支持附件</span>
             )}
           </div>
         )}
@@ -1479,8 +1766,8 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
           ref={taRef}
           rows={1}
           value={remark}
-          placeholder={inputMode === "directive"
-            ? "指挥编排器：一句话目标（如「对已登记资产做漏洞挖掘」）——自动触发编排拆解/分资产/开窗…"
+          placeholder={inputMode === "orch"
+            ? "与编排器对话：问态势/问下一步/纠正方向——插队轮即时回复，可让它发任务、开窗（同闸门）…"
             : inputMode === "assign"
             ? (activeSession
                 ? `指派任务给「${sessionLabel(activeSession, roleNames)}」：锁定该窗执行，后端自动武装并立即起跑…`
@@ -1506,16 +1793,17 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
         {/* 底部工具行（与输入区之间一条细分隔线）：+ 附件 → 模式徽章 → 模型徽章（仅选中会话）→ 圆形 ↑ 发送 */}
         <div className="mt-1.5 flex items-center gap-1.5 border-t border-white/10 pt-1.5">
           <button type="button"
-            disabled={inputMode === "directive"}
-            title={inputMode === "directive" ? "指挥编排不支持附件"
+            disabled={inputMode === "orch"}
+            title={inputMode === "orch" ? "与编排对话不支持附件"
               : "添加附件（exe/elf/图片等，单文件 ≤64MB，随「发任务/引导会话」下发，Agent 可 run_cmd 读取）"}
             onClick={() => fileInputRef.current?.click()}
             className={cn("flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
-              inputMode === "directive" && "cursor-not-allowed opacity-40 hover:bg-transparent hover:text-muted-foreground")}>
+              inputMode === "orch" && "cursor-not-allowed opacity-40 hover:bg-transparent hover:text-muted-foreground")}>
             <Paperclip className="size-4" />
           </button>
           {/* 模式徽章（2026-09-20 对话化：会话态恢复显徽章——对话/指派双模式必须可辨，
-              偏离 09-19「单模式不显徽章」定稿；编排器态=task/directive 循环不变）。
+              偏离 09-19「单模式不显徽章」定稿；2026-09-21 编排器态=orch/task 循环，
+              C2 指挥编排退役）。
               assign 态高亮（写消息=动任务，需醒目），其余弱化 */}
           <button type="button" title={MODE_HINTS[inputMode]}
             onClick={() => setInputMode((m) => {
@@ -1655,6 +1943,29 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
                         if ((patch.autonomy as { auto_derive?: boolean } | undefined)?.auto_derive) {
                           void orchTick()
                         }
+                      }}
+                    />
+                  )}
+                </div>
+              )}
+              {/* 👥 组队（expert-pool M3）：换将弹层，chip 显绑定专家数（空=全池） */}
+              {track && (
+                <div className="relative">
+                  <button type="button" onClick={() => setTeamOpen((v) => !v)}
+                          title="专家组队（换将即时生效于下轮开窗；能力面由专家技能自动推导）"
+                          className={ORCH_CHIP_CLS}>
+                    👥 组队{experts.length > 0 ? ` · ${experts.length}` : ""}
+                  </button>
+                  {teamOpen && (
+                    <TeamPopover
+                      track={track}
+                      current={experts}
+                      onClose={() => setTeamOpen(false)}
+                      onSave={async (list) => {
+                        const meta = await api.patchProjectExperts(pid, list)
+                        await refreshUsage()
+                        setJobInfo(`组队已更新（${list.length ? `${list.length} 位专家` : "按轨全池直通"}），下轮开窗生效`)
+                        return meta
                       }}
                     />
                   )}
@@ -1918,6 +2229,33 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
       )}
 
       {/* E12 中断确认弹窗已退役（2026-09-19）：中断并入输入行 ■ 钮，单击直接中断（快照保留可续跑） */}
+
+      {/* 阶段目标 / 拟人身份编辑弹层（M2/M3，入口在编排页签 goal 条） */}
+      {goalOpen && (
+        <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/50 p-4"
+             onClick={() => setGoalOpen(false)}>
+          <div onClick={(e) => e.stopPropagation()}>
+            <GoalEditor
+              initial={orchMeta?.phase_goal ?? null}
+              onClose={() => setGoalOpen(false)}
+              onSave={async (body) => { await api.setGoal(pid, body); await refreshOrchMeta() }}
+              onClear={async () => { await api.setGoal(pid, { text: "" }); await refreshOrchMeta() }}
+            />
+          </div>
+        </div>
+      )}
+      {personaOpen && (
+        <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/50 p-4"
+             onClick={() => setPersonaOpen(false)}>
+          <div onClick={(e) => e.stopPropagation()}>
+            <PersonaEditor
+              initial={orchMeta?.persona ?? null}
+              onClose={() => setPersonaOpen(false)}
+              onSave={async (body) => { await api.setOrchPersona(pid, body); await refreshOrchMeta() }}
+            />
+          </div>
+        </div>
+      )}
     </div>
   )
 }

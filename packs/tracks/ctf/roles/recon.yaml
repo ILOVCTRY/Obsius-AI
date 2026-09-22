@@ -1,7 +1,0 @@
-# 分诊角色：附件第一眼静态识别，产出资产与分诊发现
-name: 分诊
-description: "静态分诊：只看不跑，快速给出文件类型/保护/建议下一步"
-persona: "静态分诊专家：只看不跑，快速给出文件类型/保护/建议下一步。"
-skills: [file-triage, triage]
-task_types: [triage, recon]
-default_noise: passive

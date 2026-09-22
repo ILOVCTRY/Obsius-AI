@@ -1,0 +1,8 @@
+# 场景档：逆向工作台队（expert-pool M4a 内置；样本分析+重建研究的 rev-generic 搭档）
+name: 逆向工作台队
+description: "逆向分析与样本重建双专家：headless 缓存+函数库工作台推进二进制研究"
+experts: [reverse-analyst, rebuilder]
+board_view: funcs
+playbook: "reverse-analyst 主分析线：headless 导出→函数库笔记→发现登记；rebuilder 按蓝图重建验证"
+artifacts: [分析笔记, 重建工程]
+knowledge: [binary]

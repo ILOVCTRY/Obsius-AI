@@ -8,6 +8,7 @@ import {
   AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
   AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
+import { TaskTraceList } from "@/components/blackboard/TaskTraceList"
 import { cn } from "@/lib/utils"
 
 // 任务看板（DESIGN.md §12 页面 5 / §6.4 人类插手通道）：
@@ -383,6 +384,8 @@ function TaskCard({ pid, task, roles, roleNames, onChanged, onDelete, onResolve,
   // 工作区隔离（W3）：按任务归属查看产物清单
   const [arts, setArts] = useState<Artifact[] | null>(null)
   const [showArts, setShowArts] = useState(false)
+  // 执行轨迹（execution-trace-chain M1）：认领过的任务才可展开（未被认领无区间）
+  const [showTrace, setShowTrace] = useState(false)
   const cardRef = useRef<HTMLDivElement>(null)
 
   // A3：任务流跳来——滚动到卡片并高亮（nonce 变化即重新触发，同卡二次跳转也生效）
@@ -462,6 +465,14 @@ function TaskCard({ pid, task, roles, roleNames, onChanged, onDelete, onResolve,
             📎 产物
           </Badge>
         )}
+        {task.claimed_by && (
+          <Badge variant="outline"
+                 className="cursor-pointer text-[10px] text-muted-foreground hover:bg-accent"
+                 title="本任务执行轨迹（会话任务区间内的过程聚合：技能/知识库/工具/产出）"
+                 onClick={() => setShowTrace((v) => !v)}>
+            🧭 轨迹
+          </Badge>
+        )}
         <span className="flex-1" />
         <span className="font-mono text-[10px] text-muted-foreground">P{task.priority}</span>
       </div>
@@ -490,6 +501,7 @@ function TaskCard({ pid, task, roles, roleNames, onChanged, onDelete, onResolve,
           )}
         </div>
       )}
+      {showTrace && <TaskTraceList pid={pid} taskId={task.id} className="mt-1.5 rounded border bg-background p-1.5" />}
       {task.plan.length > 0 && (
         <p className="mt-1 truncate font-mono text-[10px] text-sky-400"
            title={task.plan.map((s) => `${s.id} ${s.title}：${s.status}${s.note ? `（${s.note}）` : ""}`).join("\n")}>

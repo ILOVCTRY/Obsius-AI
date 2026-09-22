@@ -32,6 +32,7 @@ _STATE_DEFAULTS: dict[str, object] = {
     "auto_ticks_total": 0,
     "last_derive_at": "",
     "last_derive_result": "",
+    "derive_idle_rounds": 0,
     "tick_owner": "",
     "tick_lease_until": "",
     "last_replan_at": "",
@@ -44,6 +45,8 @@ _EDITABLE_FIELDS = {
     "last_replan_at",
     # v13（2026-09-18）：mission 自动派生上次判定时间/结果（published:n / empty / error:…）
     "last_derive_at", "last_derive_result",
+    # v21（2026-09-22）：连续零发布调度轮次（分阶段工作流 recon 门 idle_rounds 现值源）
+    "derive_idle_rounds",
 }
 _INCREMENTAL = {"chain_ticks", "auto_ticks_total"}
 

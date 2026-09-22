@@ -17,11 +17,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from core import phases
 from core.autonomy import record_llm_usage
 from core.blackboard import Blackboard, TaskQueue
 from core.blackboard.tasks import _check_task_type, dedup_fp, target_keys_of, MAX_TASKS_PER_TARGET
-from core.skills.roles import load_role, role_exists
-from core.skills.taxonomy import GENERIC_TASK_TYPE, load_task_types, track_dir
+from core.skills.experts import expert_exists, list_experts, load_expert
+from core.skills.taxonomy import GENERIC_TASK_TYPE, load_task_types
 
 log = logging.getLogger(__name__)
 
@@ -32,7 +33,7 @@ ORCH_SYSTEM_PROMPT = """你是项目主代理（Orchestrator），职责是监�
 ## 本轮态势
 {overview}
 {role_catalog}
-{autonomy_notice}{mission_section}{campaign_section}
+{autonomy_notice}{goal_section}{phase_section}{mission_section}{campaign_section}
 ## 可用工具
 - publish_task：发布任务。task_type 必须是场景轨 task_types.yaml 已注册类型（未注册会被拒收——拼错的类型会让任务饿死），决定哪些角色能认领（先看角色目录与已有会话）；noise_budget 缺省取该类型注册表默认值；会产生噪声的动作（主动探测/执行样本）必须给 conflict_keys；任务若以某发现为依据（如「验证 find-x」），把该发现 id 填 refs——该发现事后被推翻时，执行者会立刻收到强制自评通知。**任务即窗口（v0.71）**：发布成功后系统自动为该任务建立专属执行窗（按建议角色装配），无需也不应再为执行窗调 spawn_session。
 - spawn_session：开一个新 AI 会话（受角色白名单 {allowed_roles} 与上限 {max_sessions} 个约束）；**仅用于纯侦查/纯对话辅助窗**（不挂任务，如常驻态势问答、交叉质询）；任务的执行窗由 publish_task 自动建立，不要用本工具代替。
@@ -192,6 +193,31 @@ REPLAN_SYSTEM_PROMPT = """你是项目主代理（Orchestrator）的优先级重
 """
 
 
+# 对话化编排器（M1，§4.2）：对话插队轮系统提示——复用 tick 态势组装槽 +
+# goal_section + persona_section，纪律段换成对话口径（可对话/可发布/走闸门/
+# goal 变更须人类确认）。发布走与 tick 完全相同的工具闸门（dedup/gate/L0 提案/
+# L1 审批），对话只是起草方式变了。
+CHAT_SYSTEM_PROMPT = """你是项目主代理（Orchestrator），现在处于**对话轮**：人类正在与你直接交流。
+你可以回答问题、商议目标、给出计划；需要动手时用工具——发布任务与开窗走全部闸门
+（预算硬闸/去重/L0 提案/L1 审批，与巡检 tick 同源），被拒就向人类转述原因。
+
+## 当前态势
+{overview}
+{role_catalog}
+{autonomy_notice}{goal_section}{phase_section}{mission_section}{campaign_section}{persona_section}
+## 对话纪律
+1. 用人类的语言简洁作答，结论先行；问下一步计划时用上方态势作答（门没过就说还差什么）。
+2. 执行者看不到对话上下文：publish_task 的 objective 必须自包含；任务即窗口机制
+   会自动建专属执行窗，不要为执行窗调 spawn_session。
+3. 阶段目标（goal）的变更须由人类确认：你可以在对话里给出结构化草案
+   （text/criteria/phase），由人类在编排页签 goal 条确认落盘；未确认前不要当作已生效。
+4. 回答完毕调用 done 结束本轮；纯问答（无需动手）直接 done。
+"""
+
+# 对话轮 LLM 步上限（插队轮不跑长决策链；发布分批语义不适用——人类在场可连续对话）
+CHAT_MAX_STEPS = 8
+
+
 @dataclass
 class OrchestratorConfig:
     max_steps: int = 12
@@ -225,6 +251,7 @@ class Orchestrator:
         heartbeat: Callable[[], None] | None = None,
         autonomy_provider: Callable[[], dict] | None = None,
         campaign=None,  # ⑥ 战役记忆全局库（CampaignMemory；None=不召回）
+        meta_loader: Callable[[], dict] | None = None,  # 对话化 M1/M2：读 project.json meta（goal/persona）
     ):
         self.project_id = project_id
         self.bb = bb
@@ -248,6 +275,10 @@ class Orchestrator:
         # 不接线（直接开窗），本模块不 import core.autonomy。
         self.autonomy_provider = autonomy_provider
         self.campaign = campaign  # ⑥ 战役记忆（tick 态势召回；None=关闭）
+        # 对话化编排器（M1/M2，§6.4）：meta_loader 实时返回 project.json meta
+        # （phase_goal 阶段目标 / orchestrator_persona 拟人身份）；None=不注入
+        # （脚本/旧测试兼容，_goal_section/_persona_section 返空段）。
+        self.meta_loader = meta_loader
         self.packs_root = Path(packs_root)
         self.track = track  # 项目场景轨：任务类型注册表 / 角色目录 / 饿死检测的数据源
         # 轨注册表（{type: 默认噪声}，含内置 generic）；无 track 时仅 generic
@@ -285,16 +316,14 @@ class Orchestrator:
         return tools
 
     def _load_role_catalog(self) -> list[dict]:
-        """扫轨 roles/*.yaml 的 name+description（spawn 开窗决策不再只见角色名）。"""
+        """专家池按轨过滤的 id+description（expert-pool M2：roles/ 退役后
+        spawn 开窗决策的数据源切 experts/）。"""
         if not self.track:
             return []
-        base = track_dir(self.packs_root, self.track) / "roles"
         out: list[dict] = []
-        if not base.is_dir():
-            return out
-        for f in sorted(base.glob("*.yaml")):
-            data = load_role(self.packs_root, self.track, f.stem)
-            out.append({"name": f.stem,
+        for name in list_experts(self.packs_root, self.track):
+            data = load_expert(self.packs_root, name, self.track)
+            out.append({"name": name,
                         "description": str(data.get("description") or "")})
         return out
 
@@ -308,6 +337,77 @@ class Orchestrator:
         return "\n".join(lines)
 
     # ---------- 态势收集 ----------
+
+    def _goal_section(self) -> str:
+        """阶段目标注入（对话化编排器 M2，§4.3）：meta.phase_goal（人类确认过）
+        以「当前阶段目标」段注入 tick 与对话轮系统提示——槽序 C2 指令（overview 内）
+        > goal_section > mission_section（mission=行动边界，goal=当下）。"""
+        meta = self.meta_loader() if self.meta_loader is not None else {}
+        goal = (meta or {}).get("phase_goal") or {}
+        text = str(goal.get("text") or "").strip()
+        if not text:
+            return ""
+        lines = ["## 当前阶段目标（人类确认）", f"- {text[:500]}"]
+        for c in goal.get("criteria") or []:
+            if str(c).strip():
+                lines.append(f"  □ {str(c).strip()[:200]}")
+        phase = str(goal.get("phase") or "").strip()
+        if phase:
+            lines.append(f"- 阶段: {phase}")
+        return "\n".join(lines) + "\n"
+
+    def _phase_section(self) -> str:
+        """阶段工作流注入（pentest-phased-workflow M1，§4.1 重心配额）：当前阶段
+        + goal + focus 配比建议 + 出口门进度——tick 与对话轮同槽（{phase_section}）。
+        重心配比是软引导（任何阶段可发任何类型）；门未过时 gate_types 内类型由
+        _tool_publish_task 硬拒（此处只预告）。轨无阶段剧本/meta 未接线=空段。"""
+        if self.meta_loader is None or not self.track:
+            return ""
+        try:
+            meta = self.meta_loader() or {}
+            book = phases.load_track_phases(self.packs_root, self.track,
+                                            meta.get("config"))
+            cur = phases.current_spec(book, meta)
+            if cur is None:
+                return ""
+            pid, spec = cur
+            lines = [f"## 阶段工作流：当前处于「{spec['name']}」（{pid}）",
+                     f"- 阶段目标：{spec['goal'] or '（未声明）'}"]
+            if spec["focus"]:
+                lines.append("- 重心配额建议（软引导，publish_task 类型配比向此倾斜）："
+                             + "、".join(f"{k}×{v}" for k, v in spec["focus"].items()))
+            fwd = phases.forward_targets(book, spec)
+            gate = spec.get("gate") or {}
+            if gate and fwd:
+                idle = 0
+                if self.state_loader is not None:
+                    try:
+                        idle = int(self.state_loader().get("derive_idle_rounds", 0))
+                    except Exception:  # noqa: BLE001
+                        idle = 0
+                metrics = phases.gate_metrics(self.bb, self.project_id, idle_rounds=idle)
+                met, unmet = phases.evaluate_gate(gate, metrics)
+                head = f"- 出口门（进入「{book[fwd[0]]['name']}」）："
+                if met:
+                    lines.append(head + "已过门——等待阶段流转（按自主档分流，勿自行重复推进）")
+                else:
+                    lines.append(head + f"未过（{'；'.join(unmet)}）"
+                                 + (f"——{'/'.join(spec['gate_types'])} 类任务会被拒收"
+                                    if spec["gate_types"] else ""))
+            return "\n".join(lines) + "\n"
+        except Exception:  # noqa: BLE001 —— 阶段段绝不阻断编排
+            log.exception("阶段工作流段组装失败（跳过）")
+            return ""
+
+    def _persona_section(self) -> str:
+        """拟人身份注入（M3，§4.4）：meta.orchestrator_persona 只进**对话轮**
+        系统提示（tick 巡检不需要脸）；display_name 由前端贯穿页签/气泡。"""
+        meta = self.meta_loader() if self.meta_loader is not None else {}
+        p = (meta or {}).get("orchestrator_persona") or {}
+        persona = str(p.get("persona") or "").strip()
+        if not persona:
+            return ""
+        return f"## 你的身份\n{persona[:600]}\n"
 
     def _mission_section(self) -> str:
         """轨级行为语义注入（R2，§6.9 mode 退役）：mission/ROE 人读摘要；
@@ -398,6 +498,27 @@ class Orchestrator:
             out += ("\n\n## 上一份简报（常驻，写于 "
                     + latest["created_at"][:10] + "）\n"
                     + latest["digest"][:2000])
+        return out
+
+    def _overview_for_chat(self) -> str:
+        """对话轮只读态势（对话化 M1，§4.2）：stats 全量 + 固定最近 100 条事件窗
+        （**不推进 event_cursor**）+ 最新简报常驻。与 tick 的 _overview 差异：
+        不注入过期租约（对话轮不做回收动作）、不注入也不消费 C2 指令（存量指令
+        仍由 tick 消费）、不写 _last_stats_starvation（不触发饿死告警事件）。"""
+        stats = self._stats()
+        tip = self.bb.latest_event_id(self.project_id)
+        new_events = self.bb.recent_events(
+            self.project_id, since_id=tip - 100, limit=100)
+        event_lines = [
+            f"  #{e['id']} [{e['kind']}] {e['author']}: {json.dumps(e['payload'], ensure_ascii=False)[:120]}"
+            for e in new_events[-40:]
+        ]
+        out = json.dumps(stats, ensure_ascii=False, indent=1) + (
+            "\n\n## 最近事件（只读窗口，不推进游标）\n" + ("\n".join(event_lines) or "  （无）"))
+        latest = self.bb.latest_digest(self.project_id)
+        if latest and latest["digest"].strip():
+            out += ("\n\n## 上一份简报（常驻，写于 "
+                    + latest["created_at"][:10] + "）\n" + latest["digest"][:2000])
         return out
 
     def _pending_directives(self) -> list[dict]:
@@ -613,7 +734,7 @@ class Orchestrator:
         for r in self.role_catalog:
             if r["name"] == "_generalist":
                 continue
-            data = load_role(self.packs_root, self.track, r["name"])
+            data = load_expert(self.packs_root, r["name"], self.track)
             for tt in data.get("task_types") or []:
                 covered.setdefault(tt, []).append(r["name"])
         warnings: list[dict] = []
@@ -634,7 +755,7 @@ class Orchestrator:
             for t in open_tasks:
                 r = (t.get("role") or "").strip()
                 if r and r not in names:
-                    reason = f"role {r!r} 未在 {self.track} 轨 roles/ 注册（认领后无法换装）"
+                    reason = f"role {r!r} 不在 experts/ 池（认领后无法换装）"
                 elif t.get("target_session") and t["target_session"] in closed_sids:
                     # v0.71 任务即窗口：绑定窗被人工关闭，任务悬 open 等 scheduler 重绑
                     reason = ("任务绑定的执行窗已关闭，等待调度器重绑新窗"
@@ -701,6 +822,8 @@ class Orchestrator:
             digest_every=self.config.digest_every,
             max_publish_per_tick=self.config.max_publish_per_tick,
             max_tasks_per_target=MAX_TASKS_PER_TARGET,
+            goal_section=self._goal_section(),
+            phase_section=self._phase_section(),
             mission_section=self._mission_section(),
             campaign_section=self._campaign_section(),
         )
@@ -729,6 +852,115 @@ class Orchestrator:
             if self._finished:
                 return self._finish_tick()
         return self._finish_tick(exhausted=True)
+
+    # ---------- 对话插队轮（对话化编排器 M1，§4.2） ----------
+
+    def _chat_history(self) -> list[dict[str, Any]]:
+        """对话上下文 = events 表 orch.chat 最近 40 条按序组装（单一来源，零新表
+        零文件）。human→user / orch→assistant；开头连续的 orch 消息跳过（保证
+        messages 首条是 user）。"""
+        rows = self.bb.conn.execute(
+            "SELECT payload FROM events WHERE project_id=? AND kind='orch.chat'"
+            " ORDER BY id DESC LIMIT 40", (self.project_id,)).fetchall()
+        out: list[dict[str, Any]] = []
+        for r in reversed(rows):
+            try:
+                payload = json.loads(r["payload"])
+            except ValueError:
+                continue
+            text = str(payload.get("text") or "").strip()
+            if not text:
+                continue
+            role = "user" if payload.get("role") == "human" else "assistant"
+            out.append({"role": role, "content": text})
+        while out and out[0]["role"] != "user":
+            out.pop(0)
+        return out
+
+    @staticmethod
+    def _assistant_text(raw: dict) -> str:
+        """取一轮 assistant 回复里的纯文本块（与工具调用并存时只取 text）。"""
+        blocks = (raw or {}).get("content") or []
+        return "".join(
+            str(b.get("text") or "") for b in blocks
+            if isinstance(b, dict) and b.get("type") == "text").strip()
+
+    def chat_turn(self, text: str) -> dict[str, Any]:
+        """一轮对话插队轮：人类消息 → LLM 工具循环（ORCH_TOOLS 全闸门同源）→
+        回复落 orch.chat {role:"orch", text(截2000), tool_trace}。
+
+        与 tick 的边界（打磨定稿 #2，全部只读）：
+        - 态势走 _overview_for_chat（固定最近 100 条事件窗，**不推进 event_cursor**）；
+        - 不计 cycles、不动 last_digest_cycle（digest_every 节奏只数 tick 轮次）、
+          不消费 C2 指令、不落饿死告警事件、**不写 state_saver**；
+        - 租约由 API 层 acquire/release；本方法每步 heartbeat 续租（未注入则跳过）。
+        返回 {reply, published, spawned, digest, proposals}。"""
+        self._finished = False
+        self._actions = []
+        self._published: list[str] = []
+        self._spawned: list[dict[str, str]] = []
+        self._proposals = []
+        self._digest: str | None = None
+        self._publish_count = 0
+        tool_trace: list[dict[str, str]] = []
+        auto = self.autonomy_provider() if self.autonomy_provider is not None else None
+        if self.config.propose_only:
+            autonomy_notice = L0_AUTONOMY_NOTICE
+        elif (auto or {}).get("level") == "L1":
+            autonomy_notice = L1_AUTONOMY_NOTICE
+        else:
+            autonomy_notice = ""
+        system = CHAT_SYSTEM_PROMPT.format(
+            overview=self._overview_for_chat(),
+            role_catalog=self._role_catalog_prompt(),
+            autonomy_notice=autonomy_notice,
+            goal_section=self._goal_section(),
+            phase_section=self._phase_section(),
+            mission_section=self._mission_section(),
+            campaign_section=self._campaign_section(),
+            persona_section=self._persona_section(),
+        )
+        messages = self._chat_history()
+        messages.append({"role": "user", "content": text})
+        reply = ""
+        for _step in range(1, CHAT_MAX_STEPS + 1):
+            if self.heartbeat is not None:
+                try:
+                    self.heartbeat()
+                except Exception:  # noqa: BLE001 —— 续租失败不阻断对话
+                    log.exception("对话轮租约心跳失败")
+            resp = self.llm.chat(messages, system=system, tools=self._orch_tools())
+            record_llm_usage(
+                self.bb, self.project_id, resp.usage, source="orchestrator-chat",
+                session_id=None, model=getattr(self.llm, "model", ""))
+            messages.append({"role": "assistant", "content": resp.raw.get("content", [])})
+            step_text = self._assistant_text(resp.raw)
+            if step_text:
+                reply = step_text
+            if not resp.tool_calls:
+                break  # 纯文本回复 = 回答完毕（对话轮与 tick 不同：文本即答案）
+            for tc in resp.tool_calls:
+                result = self._dispatch(tc.name, tc.arguments)
+                tool_trace.append({
+                    "name": tc.name,
+                    "args": json.dumps(tc.arguments, ensure_ascii=False)[:200],
+                    "result": str(result)[:200],
+                })
+                messages.append(self.llm.tool_result_message(tc, result))
+            if self._finished:
+                break
+        if reply:
+            self.bb.append_event(
+                self.project_id, "orch.chat",
+                {"role": "orch", "text": reply[:2000], "tool_trace": tool_trace},
+                author="orchestrator")
+        return {
+            "reply": reply,
+            "published": list(self._published),
+            "spawned": list(self._spawned),
+            "digest": self._digest,
+            "proposals": list(self._proposals),
+        }
 
     def _finish_tick(self, *, exhausted: bool = False) -> dict[str, Any]:
         """落盘持久游标/轮数并组装结构化结果（两条 tick 出口共用）。
@@ -879,12 +1111,13 @@ class Orchestrator:
             return (f"[拒绝] 本轮发布已达上限 max_publish_per_tick="
                     f"{self.config.max_publish_per_tick}；分批发布——本轮先 done，"
                     "队列空退后下一轮 tick 续批（态势含 uncovered 资产清单）")
-        # v14 role 前置校验：不用 load_role 判存在（缺失静默回退 _generalist 会放行拼错角色）；
-        # 无 track 不校验（对称 allowed_types 的未接线语义）。非法即拒，直接发布与 L0 提案同闸。
+        # expert-pool M2 role 前置校验：不用 load_expert 判存在（缺失静默回退
+        # _generalist 会放行拼错专家）；无 track 不校验（对称 allowed_types 的
+        # 未接线语义）。非法即拒，直接发布与 L0 提案同闸。
         role = (role or "").strip()
-        if role and self.track and not role_exists(self.packs_root, self.track, role):
-            return (f"[拒绝] 未注册的 role: {role!r}；请使用本轨 roles/ 已注册角色 id"
-                    f"（或留空不限）")
+        if role and self.track and not expert_exists(self.packs_root, role, self.track):
+            return (f"[拒绝] 专家不在池内或不可服务本轨: {role!r}；"
+                    f"请使用 experts/ 池内专家 id（或留空不限）")
         # 机制 1.1 发布去重（v14 补编排器缺口）：命中同指纹 open/claimed 任务 →
         # 复用不新建（直接发布与 L0 提案都先查重，防编排器重复派活）
         fp = dedup_fp(task_type, scope, objective)
@@ -892,6 +1125,11 @@ class Orchestrator:
         if dup is not None:
             return (f"[复用] 已存在同目标任务 {dup['id']}（status={dup['status']}），"
                     f"本轮不重复发布；认领/避让请参考其 workset 与 conflict_keys")
+        # 分阶段工作流（M2，§4.4 唯一硬约束）：入场门——当前阶段门未过时
+        # gate_types 内类型拒收（直接发布与 L0 提案同闸；发布 API 422 是第二层）
+        gate_msg = self._phase_gate_reject(task_type)
+        if gate_msg:
+            return gate_msg
         # 批 6 L0 提案模式：校验照跑（噪声/conflict_keys/注册表），但不走预算闸、
         # 不发布、不计数，只发 orch.proposed（人采纳时以 created_by=human 走 POST /tasks）
         if self.config.propose_only:
@@ -944,6 +1182,28 @@ class Orchestrator:
         return (f"task={task_id} 已发布（{task_type}/{noise_budget}"
                 + (f"/role={role}" if role else "") + "）"
                 + "；系统将自动为该任务建立专属执行窗")
+
+    def _phase_gate_reject(self, task_type: str) -> str:
+        """入场门校验（M2）：被拦返回 [拒绝] 原因串，放行返回空串。
+        meta/state 未接线（脚本/旧测试）一律放行；校验自身异常也放行
+        （门是工作流护栏非安全边界，发布 API 侧还有第二层拦截兜底）。"""
+        if self.meta_loader is None or not self.track:
+            return ""
+        try:
+            meta = self.meta_loader() or {}
+            idle = 0
+            if self.state_loader is not None:
+                try:
+                    idle = int(self.state_loader().get("derive_idle_rounds", 0))
+                except Exception:  # noqa: BLE001
+                    idle = 0
+            reason = phases.gate_block_reason(
+                self.bb, self.project_id, meta, self.track, self.packs_root,
+                task_type=task_type, idle_rounds=idle)
+            return f"[拒绝] {reason}" if reason else ""
+        except Exception:  # noqa: BLE001
+            log.exception("阶段入场门校验失败（放行）")
+            return ""
 
     def _tool_spawn_session(self, role: str, reason: str = "") -> str:
         if self.config.allowed_roles is not None and role not in self.config.allowed_roles:

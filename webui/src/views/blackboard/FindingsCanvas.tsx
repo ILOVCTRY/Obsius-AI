@@ -6,7 +6,7 @@ import {
 } from "@xyflow/react"
 import "@xyflow/react/dist/style.css"
 import "./canvas.css" // 必须在 xyflow css 之后：深色覆盖（plain CSS 压层叠层）
-import { Maximize2, Minimize2, RotateCcw } from "lucide-react"
+import { Maximize2, Minimize2, Map as MapIcon } from "lucide-react"
 import { api } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import type { Asset, Chain, ChainStatus, ChainSummary, Finding } from "@/lib/types"
@@ -15,29 +15,24 @@ import {
   FindingNode, LaneBackground, LaneHeader,
   type FindingFlowNode, type LaneHeaderNode,
 } from "./FindingNode"
-import { FindingEdge, type FindingFlowEdge } from "./FindingEdge"
+import { FindingEdge, type FindingFlowEdge, type FindingRoute } from "./FindingEdge"
 import {
   buildChainEdges, buildLanes, buildStrongEdges, buildWeakEdges,
-  CARD_W, type ModelEdge,
+  isRightward, longRunY, CARD_W, type ModelEdge,
 } from "./canvasModel"
 import { AddChainEdgeDialog, type ChainEdgeRequest } from "./AddChainEdgeDialog"
 import { ChainToolbar, STATUS_DOT } from "./ChainToolbar"
 
 // 评估攻击链画布（E1，DESIGN §12 评估画布）：
 // host IP 泳道 × 严重度四列 × 时间堆叠；弱边/relates_to 强边/chain 边三级；
+// 单向零重叠（findings-canvas-dag-layout，2026-09-22）：布局锁定网格不可拖（D3），
+// 边注记 hover/选中才显（D1），MiniMap 默认收起（D4），弱边只画右向、长边空行带
+// 路由不穿卡（R1/R2）。
 // 手拖连线/强边快捷确认 → AddChainEdgeDialog（edge_note 必填）→ 现成 chains API。
 // 由 Blackboard 发现 tab 的「链路」子视图懒加载（@xyflow/react 不进主包）。
 
 const nodeTypes = { finding: FindingNode, laneHeader: LaneHeader, laneBg: LaneBackground }
 const edgeTypes = { findingEdge: FindingEdge }
-
-const OFFSETS_KEY = (pid: string) => `findings-canvas-offsets-v1:${pid}`
-type Offsets = Record<string, { dx: number; dy: number }>
-
-function loadOffsets(pid: string): Offsets {
-  try { return JSON.parse(localStorage.getItem(OFFSETS_KEY(pid)) ?? "{}") as Offsets }
-  catch { return {} }
-}
 
 function Canvas({ pid, findings, assets, assetFilter, onMutated, track }: {
   pid: string
@@ -75,12 +70,13 @@ function Canvas({ pid, findings, assets, assetFilter, onMutated, track }: {
     }
   }, [summaries, selectedChainId])
 
-  // 节点手动偏移（localStorage 按项目持久；相对自动槽位，筛泳道不错位）
-  const [offsets, setOffsets] = useState<Offsets>(() => loadOffsets(pid))
-  useEffect(() => { setOffsets(loadOffsets(pid)) }, [pid])
-  const saveOffsets = useCallback((next: Offsets) => {
-    setOffsets(next)
-    try { localStorage.setItem(OFFSETS_KEY(pid), JSON.stringify(next)) } catch { /* 满/隐私模式忽略 */ }
+  // D4：MiniMap 默认收起，工具条开关（localStorage 记忆）
+  const [miniOpen, setMiniOpen] = useState<boolean>(() => {
+    try { return localStorage.getItem(`findings-minimap:${pid}`) === "1" } catch { return false }
+  })
+  const changeMiniOpen = useCallback((v: boolean) => {
+    setMiniOpen(v)
+    try { localStorage.setItem(`findings-minimap:${pid}`, v ? "1" : "0") } catch { /* 忽略 */ }
   }, [pid])
 
   // C2 边显示三态：全部（含弱边）/ 仅强边（弱边隐藏，缺省）/ 仅链边（只看人工确认链）
@@ -105,6 +101,7 @@ function Canvas({ pid, findings, assets, assetFilter, onMutated, track }: {
   const [hoverNodeId, setHoverNodeId] = useState<string | null>(null)
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null)
+  const [hoveredEdgeId, setHoveredEdgeId] = useState<string | null>(null)  // D1：注记 hover 才显
   const [detail, setDetail] = useState<Finding | null>(null)
   const [dlg, setDlg] = useState<ChainEdgeRequest | null>(null)
   const [mutating, setMutating] = useState(false)
@@ -131,37 +128,20 @@ function Canvas({ pid, findings, assets, assetFilter, onMutated, track }: {
   // F13：真孤点计数（工具条开关显示；隐藏时这些发现不进 place，节点组装自然跳过）
   const isolatedCount = model.isolatedIds.size
 
-  // 受控 ReactFlow 契约：节点由 model+offsets 派生，但内部测量/拖拽变化必须回写——
-  // 否则任一重渲染都会用不带 measured 的 props 节点把内部 measured/handleBounds
-  // 清空（xyflow 对受控节点重建 internalNode），边会因此被整体卸载。
+  // 受控 ReactFlow 契约：节点由 model 派生，但内部测量变化必须回写——否则任一重渲染
+  // 都会用不带 measured 的 props 节点把内部 measured/handleBounds 清空（xyflow 对受控
+  // 节点重建 internalNode），边会因此被整体卸载。D3 锁定网格后 position change 不再产生
+  // （拖拽退役），只回收 dimensions。
   const [measuredById, setMeasuredById] = useState<Record<string, { width: number; height: number }>>({})
   const onNodesChangeCb = useCallback((changes: NodeChange[]) => {
     let dims: Record<string, { width: number; height: number }> | null = null
-    const moved: Offsets = {}
-    let hasMove = false
-    let dragEnd: { dx: number; dy: number } | null = null
     for (const ch of changes) {
       if (ch.type === "dimensions" && ch.dimensions?.width && ch.dimensions?.height) {
         ;(dims ??= {})[ch.id] = { width: ch.dimensions.width, height: ch.dimensions.height }
-      } else if (ch.type === "position" && ch.position && model.place.has(ch.id)) {
-        const slot = model.place.get(ch.id)!
-        const off = { dx: ch.position.x - slot.x, dy: ch.position.y - slot.y }
-        moved[ch.id] = off
-        hasMove = true
-        if (ch.dragging === false) dragEnd = off
       }
     }
     if (dims) setMeasuredById((m) => ({ ...m, ...dims }))
-    if (hasMove) {
-      setOffsets((prev) => {
-        const next = { ...prev, ...moved }
-        if (dragEnd) {
-          try { localStorage.setItem(OFFSETS_KEY(pid), JSON.stringify(next)) } catch { /* 忽略 */ }
-        }
-        return next
-      })
-    }
-  }, [model.place, pid])
+  }, [])
 
   // ---------- 边 ----------
   const edges = useMemo(() => {
@@ -170,6 +150,45 @@ function Canvas({ pid, findings, assets, assetFilter, onMutated, track }: {
     const chain = edgeMode === "all" || edgeMode === "strong" ? chainEdgesPre : []
     return [...weak, ...strong, ...chain]
   }, [edgeMode, findings, model.laneOf, strongEdgesPre, chainEdgesPre])
+
+  // R1/R2 边路由辅助：同走廊（泳道×列间隙）多边垂直段按边序 ±3px 阶梯（方案 §3.2）；
+  // g1=源列后走廊（同泳道层差≥1 与跨泳道都用），gd=目标列前走廊（长边/跨泳道用）。
+  const corridorOff = useMemo(() => {
+    const groups = new Map<string, string[]>()
+    const push = (key: string, id: string) => {
+      ;(groups.get(key) ?? groups.set(key, []).get(key)!).push(id)
+    }
+    for (const e of edges) {
+      const s = model.place.get(e.source)
+      const t = model.place.get(e.target)
+      if (!s || !t) continue
+      if (s.laneKey === t.laneKey) {
+        if (t.col - s.col >= 1) push(`g1:${s.laneKey}:${s.col}`, e.id)
+        if (t.col - s.col >= 2) push(`gd:${t.laneKey}:${t.col}`, e.id)
+      } else {
+        push(`g1:${s.laneKey}:${s.col}`, e.id)
+        push(`gd:${t.laneKey}:${t.col}`, e.id)
+      }
+    }
+    const off = new Map<string, { g1: number; gd: number }>()
+    for (const [key, ids] of groups) {
+      ids.forEach((id, i) => {
+        const v = (i - (ids.length - 1) / 2) * 3
+        const cur = off.get(id) ?? { g1: 0, gd: 0 }
+        off.set(id, key.startsWith("g1:") ? { ...cur, g1: v } : { ...cur, gd: v })
+      })
+    }
+    return off
+  }, [edges, model.place])
+  // 跨泳道绕行带：取所有泳道内容之下的 y——水平长跑横穿中间泳道也不穿卡
+  const crossBandY = useMemo(
+    () => (model.lanes.length ? Math.max(...model.lanes.map((l) => l.height)) + 24 : 464),
+    [model.lanes])
+  const maxRow = useMemo(() => {
+    let m = 0
+    for (const [, p] of model.place) m = Math.max(m, p.row)
+    return m
+  }, [model.place])
 
   // C2 聚焦：hover/点选的当前焦点节点（聚焦关闭时仅点选生效）
   const focusNodeId = focusOn ? (selectedNodeId ?? hoverNodeId) : null
@@ -212,30 +231,55 @@ function Canvas({ pid, findings, assets, assetFilter, onMutated, track }: {
       || e.source === focusNodeId || e.target === focusNodeId
     const chainDim = e.kind === "chain" && !!selectedChainId && e.chainId !== selectedChainId
     const stale = fpIds.has(e.source) || fpIds.has(e.target)
-    const dim = !connected || chainDim
+    const hovered = e.id === hoveredEdgeId
+    const dim = (!connected || chainDim) && !hovered  // hover 边在聚焦态下也点亮
     const color = edgeColor(e)
-    // C2 路由：同泳道同排（水平一一对照）或同列直线 / 跨列跨排平滑折线 / 跨泳道贝塞尔
+    // 单向零重叠路由（R1/R2）：同泳道层差=1 走中缝、>1 走空行带长跑、跨泳道走
+    // 全泳道底绕行带——正交折线，水平段不穿卡（构造保证）。
     const sp = model.place.get(e.source)
     const tp = model.place.get(e.target)
     if (!sp || !tp) return null  // F13：端点被隐藏（孤立节点关闭）→ 不渲染该边
-    const route = sp.laneKey === tp.laneKey ? (sp.x === tp.x || sp.y === tp.y ? "straight" : "step") : "bezier"
+    if (e.kind === "weak" && !isRightward(e, model.place)) return null  // R1② 弱边只画右向
+    const offs = corridorOff.get(e.id)
+    let route: FindingRoute
+    let longY: number | undefined
+    if (sp.laneKey !== tp.laneKey) {
+      route = "cross"
+      longY = crossBandY + (offs?.g1 ?? 0) * 1.5
+    } else if (tp.col - sp.col >= 2) {
+      route = "long"
+      longY = longRunY({
+        sCol: sp.col, sRow: sp.row, tCol: tp.col, tRow: tp.row,
+        occupiedIn: (col, row) => model.occupied.has(`${sp.laneKey}:${col}:${row}`),
+        maxRow,
+      }) + (offs?.g1 ?? 0) * 1.5
+    } else {
+      route = "adjacent"
+    }
     return {
       id: e.id, source: e.source, target: e.target, type: "findingEdge",
       data: {
         kind: e.kind, label: e.label, selected: e.id === selectedEdgeId,
-        dimmed: dim, stale, route, onSelect: selectEdge,
+        hovered, dimmed: dim, stale, route, longY,
+        g1off: offs?.g1, gdoff: offs?.gd, onSelect: selectEdge,
       },
       style: {
         stroke: color,
-        strokeWidth: e.kind === "chain" ? 1.8 : e.kind === "strong" ? 1.6 : 1,
+        strokeWidth: hovered && e.kind !== "weak"
+          ? (e.kind === "chain" ? 2.2 : 2)
+          : e.kind === "chain" ? 1.8 : e.kind === "strong" ? 1.6 : 1,
         strokeDasharray: stale ? "3 4" : e.kind === "weak" ? "5 4" : undefined,
         opacity: dim ? (focusOn ? 0.08 : 0.15)
-          : stale ? 0.25 : e.kind === "weak" ? 0.4 : 0.95,
+          : stale ? 0.25
+          : hovered ? (e.kind === "weak" ? 0.85 : 1)
+          : e.kind === "weak" ? 0.4 : 0.95,
       },
       markerEnd: { type: MarkerType.ArrowClosed, color, width: 14, height: 14 },
-      interactionWidth: 0,
+      interactionWidth: 14,
     }
-  }).filter((e): e is FindingFlowEdge => e !== null), [edges, fpIds, focusNodeId, focusOn, selectedChainId, selectedEdgeId, selectEdge, model.place])
+  }).filter((e): e is FindingFlowEdge => e !== null),
+  [edges, fpIds, focusNodeId, focusOn, hoveredEdgeId, selectedChainId, selectedEdgeId, selectEdge,
+   model.place, model.occupied, corridorOff, crossBandY, maxRow])
 
   // ---------- 节点 ----------
   const openDetail = useCallback((f: Finding) => setDetail(f), [])
@@ -268,15 +312,14 @@ function Canvas({ pid, findings, assets, assetFilter, onMutated, track }: {
       }
       nodes.push(hdr)
     })
-    // 发现卡片
+    // 发现卡片（D3 锁定网格：位置恒为布局算法产物，不可拖）
     for (const f of findings) {
       const p = model.place.get(f.id)
       if (!p) continue
-      const off = offsets[f.id] ?? { dx: 0, dy: 0 }
       const dim = focusNodeId !== null && !adjacent.has(f.id)
       const node: FindingFlowNode = {
         id: f.id, type: "finding",
-        position: { x: p.x + off.dx, y: p.y + off.dy },
+        position: { x: p.x, y: p.y },
         data: { f, dim, onOpen: openDetail, onQuickAdd: quickAdd },
         measured: measuredById[f.id],
         style: { width: CARD_W },
@@ -284,18 +327,7 @@ function Canvas({ pid, findings, assets, assetFilter, onMutated, track }: {
       nodes.push(node)
     }
     return nodes
-  }, [model, findings, offsets, focusNodeId, adjacent, openDetail, quickAdd, measuredById])
-
-  const onNodeDragStop = useCallback((_: unknown, node: Node) => {
-    // 位置已在 onNodesChangeCb 实时回写并在拖拽结束时落盘；这里只兜底再持久化一次
-    const p = model.place.get(node.id)
-    if (!p) return
-    setOffsets((prev) => {
-      const next = { ...prev, [node.id]: { dx: node.position.x - p.x, dy: node.position.y - p.y } }
-      try { localStorage.setItem(OFFSETS_KEY(pid), JSON.stringify(next)) } catch { /* 忽略 */ }
-      return next
-    })
-  }, [model.place, pid])
+  }, [model, findings, focusNodeId, adjacent, openDetail, quickAdd, measuredById])
 
   const onConnect = useCallback((c: Connection) => {
     if (!c.source || !c.target || c.source === c.target) return
@@ -386,12 +418,14 @@ function Canvas({ pid, findings, assets, assetFilter, onMutated, track }: {
             </button>
           ))}
         </div>
+        {/* D4：MiniMap 默认收起（曾恒显右下角盖卡片），开关状态 localStorage 记忆 */}
         <button
-          type="button" title="重置布局（清除手动位置）"
-          className="rounded p-1 text-muted-foreground hover:bg-accent/40 hover:text-foreground"
-          onClick={() => saveOffsets({})}
+          type="button" title={miniOpen ? "收起小地图" : "展开小地图"}
+          className={cn("rounded p-1 transition-colors",
+            miniOpen ? "bg-primary/15 text-primary" : "text-muted-foreground hover:bg-accent/40 hover:text-foreground")}
+          onClick={() => changeMiniOpen(!miniOpen)}
         >
-          <RotateCcw className="size-3.5" />
+          <MapIcon className="size-3.5" />
         </button>
         <button
           type="button" title="适应视图"
@@ -417,11 +451,13 @@ function Canvas({ pid, findings, assets, assetFilter, onMutated, track }: {
         edges={flowEdges as Edge[]}
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
-        nodesDraggable
+        nodesDraggable={false}
         nodesConnectable
         onNodesChange={onNodesChangeCb}
         onConnect={onConnect}
-        onNodeDragStop={onNodeDragStop}
+        onEdgeClick={(_, edge) => selectEdge(edge.id)}
+        onEdgeMouseEnter={(_, edge) => setHoveredEdgeId(edge.id)}
+        onEdgeMouseLeave={(_, edge) => setHoveredEdgeId((cur) => (cur === edge.id ? null : cur))}
         onNodeMouseEnter={(_, node) => {
           if (node.type === "finding") setHoverNodeId(node.id)
         }}
@@ -443,16 +479,18 @@ function Canvas({ pid, findings, assets, assetFilter, onMutated, track }: {
         proOptions={{ hideAttribution: true }}
       >
         <Background color="#30363d" gap={20} size={1} />
-        <MiniMap
-          nodeColor={(n) => {
-            if (n.type === "finding") {
-              const f = (n.data as { f?: Finding }).f
-              if (!f) return "#30363d"
-              return { critical: "#f85149", high: "#f85149", medium: "#d29922", low: "#58a6ff", info: "#8b949e" }[f.severity] ?? "#8b949e"
-            }
-            return "#21262d"
-          }}
-        />
+        {miniOpen && (
+          <MiniMap
+            nodeColor={(n) => {
+              if (n.type === "finding") {
+                const f = (n.data as { f?: Finding }).f
+                if (!f) return "#30363d"
+                return { critical: "#f85149", high: "#f85149", medium: "#d29922", low: "#58a6ff", info: "#8b949e" }[f.severity] ?? "#8b949e"
+              }
+              return "#21262d"
+            }}
+          />
+        )}
         {/* 深色覆盖样式见 canvas.css（xyflow 未分层 CSS 压不住 Tailwind 层） */}
         <Controls showInteractive={false} />
       </ReactFlow>

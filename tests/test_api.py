@@ -61,6 +61,171 @@ def test_project_binding_validation_and_legacy_domain(client):
     assert meta["track"] == "pentest" and meta["capabilities"] == ["web"]
 
 
+# ---------- expert-pool M2：项目专家绑定（§4.4 推导 / §4.6 allowed_roles，2026-09-21） ----------
+
+def test_project_experts_binding_lifecycle(client):
+    """创建绑定 → meta 推导（响应层装饰，盘上不动）→ 换将 → 解绑恢复存量直通；池外/轨外 422。"""
+    r = client.post("/api/projects", json={"name": "绑专家", "track": "ctf",
+                                           "capabilities": ["binary"],
+                                           "experts": ["web-solver"]})
+    assert r.status_code == 201, r.text
+    meta = r.json()
+    pid = meta["id"]
+    assert meta["experts"] == ["web-solver"]
+    assert meta["capabilities"] == ["web"]  # caps_effective：web-solver 技能全在 web 包
+    # 盘上原始绑定不动（Project.capabilities 恒返回盘上值，推导只发生在响应/构造层）
+    raw = client.app.state.store.open_project(pid)
+    assert raw.capabilities == ["binary"] and raw.experts == ["web-solver"]
+    # 列表/详情同样带推导值
+    listed = next(p for p in client.get("/api/projects").json() if p["id"] == pid)
+    assert listed["experts"] == ["web-solver"] and listed["capabilities"] == ["web"]
+
+    # 换将：全量专家 → capabilities/ 目录全集
+    expected_all = sorted(d.name for d in Path("packs/capabilities").iterdir() if d.is_dir())
+    r = client.patch(f"/api/projects/{pid}/experts", json={"experts": ["_generalist"]})
+    assert r.status_code == 200 and r.json()["experts"] == ["_generalist"]
+    assert r.json()["capabilities"] == expected_all
+    # 解绑（空清单剥键）：恢复存量直通（fallback = 盘上绑定 binary）
+    r = client.patch(f"/api/projects/{pid}/experts", json={"experts": []})
+    assert r.status_code == 200 and r.json()["experts"] == []
+    assert r.json()["capabilities"] == ["binary"]
+    # 池外 / 轨外（osint 服务 pentest/redteam，不服务 ctf）→ 422
+    assert client.patch(f"/api/projects/{pid}/experts",
+                        json={"experts": ["ghost-expert"]}).status_code == 422
+    r = client.patch(f"/api/projects/{pid}/experts", json={"experts": ["osint"]})
+    assert r.status_code == 422 and "osint" in r.json()["detail"]
+
+
+def test_project_create_rejects_unknown_expert(client):
+    """创建时专家校验同口径：池外 422 且提示轨可用池。"""
+    r = client.post("/api/projects", json={"name": "坏专家", "track": "ctf",
+                                           "experts": ["ghost-expert"]})
+    assert r.status_code == 422 and "专家" in r.json()["detail"]
+
+
+def test_session_factory_derives_caps_and_publish_allowed_roles(tmp_path):
+    """M2 构造/发布链：工厂按绑定专家推导会话能力面；发布 allowed_roles=绑定清单
+    （绑定外专家发布被拒，未绑定项目回落全池）。"""
+    from test_orchestrator import ScriptedLLM
+    app = create_app(workspace_root=str(tmp_path / "workspaces"),
+                     tools_root=None,
+                     executor_llm=ScriptedLLM([]), planner_llm=ScriptedLLM([]),
+                     providers_config=str(tmp_path / "providers.json"))
+    with TestClient(app) as c:
+        pid = c.post("/api/projects", json={"name": "推导", "track": "ctf",
+                                            "capabilities": ["binary"],
+                                            "experts": ["web-solver"]}).json()["id"]
+        sid = c.post(f"/api/projects/{pid}/agents",
+                     json={"role": "web-solver"}).json()["id"]
+        agent = c.app.state.agents[sid]
+        assert agent.capabilities == ["web"]          # 推导面（非盘上 fallback）
+        assert agent.dispatcher.allowed_roles == ["web-solver"]  # 绑定清单优先
+        # 发布校验：绑定外专家被拒（ValueError→422），绑定内放行
+        r = c.post(f"/api/projects/{pid}/tasks",
+                   json={"objective": "越权发布", "task_type": "generic",
+                         "role": "reverse"})
+        assert r.status_code == 422
+        r = c.post(f"/api/projects/{pid}/tasks",
+                   json={"objective": "正常发布", "task_type": "generic",
+                         "role": "web-solver"})
+        assert r.status_code == 201, r.text
+        # 未绑定项目：allowed_roles=按轨全池，池内任意专家可发布
+        pid2 = c.post("/api/projects", json={"name": "未绑定", "track": "ctf"}).json()["id"]
+        r = c.post(f"/api/projects/{pid2}/tasks",
+                   json={"objective": "全池发布", "task_type": "generic",
+                         "role": "reverse"})
+        assert r.status_code == 201, r.text
+
+
+# ---------- expert-pool M3/M4：场景档物化（M4a）+ 知识继承（M4b），2026-09-21 ----------
+
+def test_track_profiles_builtins(client):
+    """轨内置场景档清单（真实 packs，每轨 0~3 个；GET /api/tracks/{track}/profiles）。"""
+    profs = client.get("/api/tracks/ctf/profiles").json()
+    ids = {p["id"] for p in profs}
+    assert {"full-squad", "solo-generalist"} <= ids
+    assert all(p.get("name") and isinstance(p.get("experts"), list) for p in profs)
+
+
+def test_create_project_with_profile_materializes_snapshot(client):
+    """M4a：选档创建 → 组队预设兜底生效 + board_view / config.profile 快照物化
+    （D6 快照即弃：模板升级不影响存量项目）；未知档 422。"""
+    r = client.post("/api/projects", json={"name": "档建项目", "track": "ctf",
+                                           "profile": "full-squad"})
+    assert r.status_code == 201, r.text
+    meta = r.json()
+    pid = meta["id"]
+    # 档组队兜底（请求未带 experts 时用档内预设；建项时归一化排序）
+    assert meta["experts"] == ["crypto-solver", "forensics-solver", "pwn-solver",
+                               "reverse", "triage", "web-solver"]
+    assert "web" in meta["capabilities"]  # 专家面推导（响应层）
+    cfg = meta["config"]
+    assert cfg["board_view"] == {"default": "findings"}
+    snap = cfg["profile"]
+    assert snap["id"] == "full-squad" and snap["name"] == "全栈解题队"
+    assert snap["artifacts"] == ["writeup", "flag 记录"] and snap["materialized_at"]
+    # 显式 experts 优先于档预设；显式 config 优先于物化缺省
+    r = client.post("/api/projects", json={"name": "显式优先", "track": "ctf",
+                                           "profile": "solo-generalist",
+                                           "experts": ["pwn-solver"],
+                                           "config": {"board_view": {"default": "assets"}}})
+    assert r.status_code == 201
+    meta2 = r.json()
+    assert meta2["experts"] == ["pwn-solver"]
+    assert meta2["config"]["board_view"] == {"default": "assets"}
+    assert meta2["config"]["profile"]["id"] == "solo-generalist"
+    # 未知档 422 提示轨内置清单
+    r = client.post("/api/projects", json={"name": "坏档", "track": "ctf", "profile": "nope"})
+    assert r.status_code == 422 and "场景档" in r.json()["detail"]
+
+
+def test_create_project_inherits_knowledge(client):
+    """M4b：建项目选源 → binary 资产+样本文件+func_kb+蓝图复制（源只读）；
+    重跑全 skipped（只增不覆盖）；源不存在 404 且不建项目。"""
+    src = _make_project(client, track="ctf")
+    proj = client.app.state.store.open_project(src)
+    sha = "ab" * 32
+    (proj.samples_dir / "simp.exe").write_bytes(b"MZ inherit-me")
+    proj.bb.upsert_asset(src, "binary", sha,
+                         meta={"filename": "simp.exe", "path": "simp.exe", "size": 13},
+                         author="human")
+    proj.bb.upsert_func(src, sha, 0x401000, "sub_401000", "初始化例程", ["crypto"], 0.8,
+                        analyzed_by="analyst")
+    bp = proj.bb.create_blueprint(src, "重建蓝图", goal="验证重建",
+                                  binary_sha256=sha, modules=[{"name": "m1"}],
+                                  content_md="# 蓝图")
+    proj.bb.set_blueprint_status(src, bp["id"], "reviewed")
+
+    r = client.post("/api/projects", json={"name": "继承项目", "track": "ctf",
+                                           "inherit_from": src})
+    assert r.status_code == 201, r.text
+    dst_meta = r.json()
+    dst_id = dst_meta["id"]
+    assert dst_meta["inherited"] == {"binaries": 1, "func_kb": 1, "blueprints": 1,
+                                     "skipped": 0}
+    dproj = client.app.state.store.open_project(dst_id)
+    asset = dproj.bb.find_asset(dst_id, "binary", sha)
+    assert asset and asset["meta"]["path"] == "simp.exe"
+    assert asset["meta"]["inherited_from"] == src
+    assert (dproj.samples_dir / "simp.exe").read_bytes() == b"MZ inherit-me"
+    assert (proj.samples_dir / "simp.exe").read_bytes() == b"MZ inherit-me"  # 源只读
+    f = dproj.bb.lookup_func(dst_id, sha, 0x401000)
+    assert f and f["analysis"] == "初始化例程" and f["risk_tags"] == ["crypto"]
+    bps = dproj.bb.list_blueprints(dst_id)
+    assert len(bps) == 1 and bps[0]["name"] == "重建蓝图" and bps[0]["status"] == "reviewed"
+
+    # 只增不覆盖：对已继承项目再跑一次 → 全 skipped，无重复行
+    stats = client.app.state.store.inherit_knowledge(src, dproj)
+    assert stats == {"binaries": 0, "func_kb": 0, "blueprints": 0, "skipped": 3}
+    assert len(dproj.bb.list_blueprints(dst_id)) == 1
+
+    # 源不存在：404，且项目不落建
+    n_before = len(client.get("/api/projects").json())
+    r = client.post("/api/projects", json={"name": "坏源", "inherit_from": "proj-ghost"})
+    assert r.status_code == 404
+    assert len(client.get("/api/projects").json()) == n_before
+
+
 def test_project_usage_defaults_and_config_patch(client):
     """批 2（§6.8）：GET 项目带 usage；PATCH config 双写 autonomy，非法值 422。"""
     pid = _make_project(client)  # ctf → 默认 L0
@@ -959,8 +1124,12 @@ def test_orchestrator_spawn_registers_agent(tmp_path):
         _wait_no_running(c, pid)
 
         agents = [s for s in c.app.state.agents.values() if s.project_id == pid]
-        assert len(agents) == 1, "编排开窗未注册进 app.state.agents（孤儿窗回归）"
-        sid = agents[0].session["id"]
+        # 空 pentest 项目两轮 tick 零产出 → idle 逃生过门 → L2 自动流转 pentest
+        # 并首发剧本任务（任务窗=第二个 agent，属分阶段 M2 预期行为）；孤儿窗
+        # 回归断言锚定编排器开的 recon 窗必须注册在册。
+        recon_agents = [s for s in agents if s.session["role"] == "recon"]
+        assert len(recon_agents) == 1, "编排开窗未注册进 app.state.agents（孤儿窗回归）"
+        sid = recon_agents[0].session["id"]
         # 旧根因：这两个操作对编排开窗 404
         w = c.post(f"/api/agents/{sid}/work")
         assert w.status_code == 200
@@ -1960,11 +2129,11 @@ def test_artifact_content_endpoint(client, tmp_path):
 
 
 def _packs_app(tmp_path):
-    """构造正交布局的最小 packs（web 能力包 + pentest 轨）并返回 TestClient。"""
+    """构造正交布局的最小 packs（web 能力包 + pentest 轨 + 专家池）并返回 TestClient。"""
     root = tmp_path / "packs"
-    role_dir = root / "tracks" / "pentest" / "roles"
-    role_dir.mkdir(parents=True)
-    (role_dir / "tester.yaml").write_text(
+    expert_dir = root / "experts"  # expert-pool M2：运行时角色源=experts/
+    expert_dir.mkdir(parents=True)
+    (expert_dir / "tester.yaml").write_text(
         'name: tester\npersona: "旧人设。"\n'
         'skills: [demo-skill]\ntask_types: [recon]\n', encoding="utf-8")
     sk_dir = root / "capabilities" / "web" / "skills" / "demo-skill"
@@ -1979,44 +2148,19 @@ def _packs_app(tmp_path):
 
 
 def test_packs_roles_and_skills_endpoints(tmp_path, monkeypatch):
-    """包管理端点：轨角色表单改写 / 能力包 skill 全文改写 / 路由试算（正交分类学）。"""
+    """包管理端点：轨角色读端点（experts 源）+ 写退役 410 / 能力包 skill 全文改写 / 路由试算。"""
     monkeypatch.chdir(tmp_path)  # MCP 等相对路径配置不污染仓库
     packs_root, c = _packs_app(tmp_path)
     with c:
-        # 轨角色列表 + 表单改写
+        # 轨角色读端点：数据源已切 experts/ 池（PackRole 兼容形状，role 键=专家 id）
         roles = c.get("/api/tracks/pentest/roles").json()
         assert roles[0]["name"] == "tester" and roles[0]["skills"] == ["demo-skill"]
+        # 写端点退役（expert-pool M2）：410 + 中文提示
         r = c.put("/api/tracks/pentest/roles/tester",
-                  json={"name": "测试员", "persona": "新人设。", "skills": None,
-                        "task_types": ["recon"], "tools": ["bb_query"],
-                        "max_runtime": "docker", "max_steps": 20})
-        assert r.json()["status"] == "ok"
-        from core.skills.roles import load_role
-        role = load_role(packs_root, "pentest", "tester")
-        assert role["persona"] == "新人设。" and role["skills"] is None  # null = 白名单关闭
-        assert role["tools"] == ["bb_query"] and role["max_runtime"] == "docker"
-        assert role["max_steps"] == 20
-        assert role["name"] == "测试员"
-        # 显示名与 stem 解耦：不提交 name 的 PUT 保留显示名（回滚 bug 回归锁）；空串=重置
-        r = c.put("/api/tracks/pentest/roles/tester", json={"persona": "再改。"})
-        assert r.json()["name"] == "测试员"
-        assert load_role(packs_root, "pentest", "tester")["name"] == "测试员"
-        r = c.put("/api/tracks/pentest/roles/tester", json={"name": ""})
-        assert r.json()["name"] == "tester"
-        assert load_role(packs_root, "pentest", "tester")["name"] == "tester"
-        # 非法显示名（# / :）→ 422
-        assert c.put("/api/tracks/pentest/roles/tester",
-                     json={"name": "含#井"}).status_code == 422
-        assert c.put("/api/tracks/pentest/roles/tester",
-                     json={"name": "含:号"}).status_code == 422
-        # 值域校验：非法 max_runtime / max_steps → 422
-        assert c.put("/api/tracks/pentest/roles/tester",
-                     json={"max_runtime": "metal"}).status_code == 422
-        assert c.put("/api/tracks/pentest/roles/tester",
-                     json={"max_steps": 0}).status_code == 422
-        # 改写留历史
-        hist = packs_root / "tracks" / "pentest" / "roles" / ".history"
-        assert any("tester.yaml" in f.name for f in hist.iterdir())
+                  json={"name": "测试员", "persona": "新人设。"})
+        assert r.status_code == 410 and "退役" in r.json()["detail"]
+        assert c.post("/api/tracks/pentest/roles", json={"name": "x"}).status_code == 410
+        assert c.delete("/api/tracks/pentest/roles/tester").status_code == 410
         # 能力包 skill 详情 + 全文改写（frontmatter name 不一致 → 422）
         sk = c.get("/api/capabilities/web/skills/demo-skill").json()
         assert "正文。" in sk["raw"] and sk["skill"]["pack"] == "web"
@@ -3787,3 +3931,173 @@ def test_schema_v18_migration_adds_target_session(tmp_path):
         row = bb.conn.execute(
             "SELECT target_session FROM tasks WHERE id=?", (tid,)).fetchone()
         assert row["target_session"] == ""  # 旧库存量任务全部落公共池
+def test_spa_static_hosting(tmp_path):
+    """desktop-app-shell M2：static_dir 挂同源静态托管——真实文件直出、其余 GET 回
+    index.html（history fallback）；/api、/docs、/openapi.json 不被兜底遮蔽。"""
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text("<html>SPA-INDEX</html>", encoding="utf-8")
+    (dist / "assets" / "app.js").write_text("console.log(1)", encoding="utf-8")
+    (dist / "favicon.ico").write_bytes(b"ico")
+    (tmp_path / "secret.txt").write_text("SECRET", encoding="utf-8")  # dist 外
+
+    app = create_app(workspace_root=str(tmp_path / "ws"), tools_root=None,
+                     executor_llm=None, planner_llm=None,
+                     providers_config=str(tmp_path / "providers.json"),
+                     static_dir=str(dist))
+    with TestClient(app) as c:
+        assert c.get("/").text == "<html>SPA-INDEX</html>"          # 根 = index
+        assert "SPA-INDEX" in c.get("/projects/some-view").text      # history fallback
+        assert c.get("/assets/app.js").text == "console.log(1)"      # 静态产物直出
+        assert c.get("/favicon.ico").content == b"ico"
+        # 未知 API GET 回 404 而非 index（调试不被兜底坑）
+        r = c.get("/api/definitely-missing")
+        assert r.status_code == 404 and "SPA-INDEX" not in r.text
+        assert c.get("/openapi.json").json()["openapi"]              # Swagger 三件不受影响
+        assert c.get("/docs").status_code == 200
+        # 真实 API 路由注册序在前，优先于兜底
+        assert c.get("/api/projects").status_code == 200
+        # 防穿越：dist 外文件绝不透出（无论 URL 归一化走哪条路，内容都是 index）
+        for evil in ("/..%2fsecret.txt", "/%2e%2e/secret.txt", "/..%5Csecret.txt"):
+            r = c.get(evil)
+            assert r.status_code == 200 and "SECRET" not in r.text
+
+    # 缺 index.html 的 static_dir 直接报错，不留半挂载状态
+    bad = tmp_path / "empty"
+    bad.mkdir()
+    with pytest.raises(ValueError, match="index.html"):
+        create_app(workspace_root=str(tmp_path / "ws2"), tools_root=None,
+                   executor_llm=None, planner_llm=None,
+                   providers_config=str(tmp_path / "providers.json"),
+                   static_dir=str(bad))
+
+
+# ---------- 对话化编排器（M1/M2/M3）：chat 端点 / goal 闭环 / 拟人 / virtual 专家 ----------
+
+def test_orchestrator_chat_endpoint(tmp_path):
+    """对话化编排器 chat：租约同步 acquire（占用 409 不产 job）→ 人类消息落
+    orch.chat（author=human）→ Job chat_turn 回复落 {role:"orch"}；第二轮历史
+    含第一轮（messages 连续）；空文本 422。"""
+    from test_orchestrator import ScriptedLLM
+    planner = ScriptedLLM([
+        {"text": "编排器在线。"},
+        {"text": "现在是第二轮。"},
+    ])
+    app = create_app(workspace_root=str(tmp_path / "workspaces"),
+                     tools_root=None, executor_llm=ScriptedLLM([]),
+                     planner_llm=planner,
+                     providers_config=str(tmp_path / "providers.json"))
+    with TestClient(app) as c:
+        pid = c.post("/api/projects", json={"name": "对话编排", "track": "pentest",
+                                            "capabilities": ["web"]}).json()["id"]
+        bb = c.app.state.projects[pid].bb
+        r = c.post(f"/api/projects/{pid}/orchestrator/chat", json={"text": "在吗？"})
+        assert r.status_code == 200
+        job = _wait_job(c, r.json()["job_id"])
+        assert job["status"] == "done"
+        assert job["result"]["reply"].startswith("编排器在线")
+        chats = [e for e in bb.recent_events(pid) if e["kind"] == "orch.chat"]
+        assert [e["payload"]["role"] for e in chats] == ["human", "orch"]
+        assert chats[0]["author"] == "human" and chats[1]["author"] == "orchestrator"
+        # 第二轮：历史窗口含第一轮（_chat_history 组装连续对话）
+        r2 = c.post(f"/api/projects/{pid}/orchestrator/chat", json={"text": "再说一遍"})
+        job2 = _wait_job(c, r2.json()["job_id"])
+        assert job2["result"]["reply"].startswith("现在是第二轮")
+        first_msgs = planner.calls[1]["messages"]
+        assert first_msgs[0] == {"role": "user", "content": "在吗？"}
+        assert first_msgs[1]["role"] == "assistant"
+        assert first_msgs[-1] == {"role": "user", "content": "再说一遍"}
+
+        # 租约被占 → 409，不产 job（不排队）
+        from core.orchestrator import state as ost
+        ost.acquire_tick_lease(bb, pid, "stuck-owner")
+        before = _project_jobs(c, pid)
+        r3 = c.post(f"/api/projects/{pid}/orchestrator/chat", json={"text": "又来"})
+        assert r3.status_code == 409 and "思考" in r3.json()["detail"]
+        assert _project_jobs(c, pid) == before
+        ost.release_tick_lease(bb, pid, "stuck-owner")
+        # 空文本 422
+        assert c.post(f"/api/projects/{pid}/orchestrator/chat",
+                      json={"text": "   "}).status_code == 422
+
+
+def test_goal_persona_and_virtual_expert_endpoints(tmp_path):
+    """M2/M3：PUT goal 确认/清空留痕 + project.json 单一真相源落盘；persona PUT
+    与剥键；GET /api/experts 恒追加 virtual 编排器条目（带 pid 时取显示名）。"""
+    from test_orchestrator import ScriptedLLM
+    app = create_app(workspace_root=str(tmp_path / "workspaces"),
+                     tools_root=None, executor_llm=ScriptedLLM([]),
+                     planner_llm=ScriptedLLM([]),
+                     providers_config=str(tmp_path / "providers.json"))
+    with TestClient(app) as c:
+        pid = c.post("/api/projects", json={"name": "目标闭环", "track": "pentest",
+                                            "capabilities": ["web"]}).json()["id"]
+        proj = c.app.state.projects[pid]
+        bb = proj.bb
+        # 初始：无 goal 无 persona
+        g = c.get(f"/api/projects/{pid}/goal")
+        assert g.status_code == 200
+        assert g.json()["phase_goal"] is None and g.json()["persona"] is None
+        # PUT 确认 → meta + goal.confirm 事件（payload 全文快照）
+        r = c.put(f"/api/projects/{pid}/goal", json={
+            "text": "打穿 3 台主机", "criteria": ["拿到 flag"], "phase": "initial-access"})
+        assert r.status_code == 200
+        got = c.get(f"/api/projects/{pid}/goal").json()["phase_goal"]
+        assert got["text"] == "打穿 3 台主机"
+        assert got["criteria"] == ["拿到 flag"] and got["phase"] == "initial-access"
+        assert got["confirmed_by"] == "human" and got["source"] == "chat"
+        confirms = [e for e in bb.recent_events(pid) if e["kind"] == "goal.confirm"]
+        assert len(confirms) == 1 and confirms[0]["author"] == "human"
+        assert confirms[0]["payload"]["goal"]["text"] == "打穿 3 台主机"
+        # project.json 落盘（黑板 projects 行无此列，单一真相源）
+        on_disk = json.loads((proj.path / "project.json").read_text(encoding="utf-8"))
+        assert on_disk["phase_goal"]["text"] == "打穿 3 台主机"
+        # 清空（text 空）→ 剥键 + goal.clear
+        assert c.put(f"/api/projects/{pid}/goal", json={"text": ""}).json()["status"] == "cleared"
+        assert c.get(f"/api/projects/{pid}/goal").json()["phase_goal"] is None
+        on_disk = json.loads((proj.path / "project.json").read_text(encoding="utf-8"))
+        assert "phase_goal" not in on_disk
+        assert [e for e in bb.recent_events(pid) if e["kind"] == "goal.clear"]
+        # persona PUT + 恢复缺省（两字段全空剥键）
+        r = c.put(f"/api/projects/{pid}/orchestrator/persona",
+                  json={"display_name": "老编", "persona": "说话直接"})
+        assert r.json()["persona"] == {"display_name": "老编", "persona": "说话直接"}
+        assert c.get(f"/api/projects/{pid}/goal").json()["persona"]["display_name"] == "老编"
+        c.put(f"/api/projects/{pid}/orchestrator/persona", json={"display_name": "", "persona": ""})
+        assert c.get(f"/api/projects/{pid}/goal").json()["persona"] is None
+        # virtual 专家条目：带 pid 取 meta.display_name；不带 pid 缺省名
+        virt = [e for e in c.get("/api/experts", params={"pid": pid}).json()
+                if e.get("kind") == "virtual"]
+        assert len(virt) == 1 and virt[0]["id"] == "orchestrator"
+        assert virt[0]["name"] == "编排器" and virt[0]["protected"] is True
+        c.put(f"/api/projects/{pid}/orchestrator/persona",
+              json={"display_name": "老编", "persona": "x"})
+        virt2 = [e for e in c.get("/api/experts", params={"pid": pid}).json()
+                 if e.get("kind") == "virtual"]
+        assert virt2[0]["name"] == "老编"
+
+
+def test_goal_sections_reach_live_prompts(tmp_path):
+    """端到端：goal 确认后（经 API 写 project.json），chat/tick 的系统提示
+    都能实时看到（meta_loader 实时读 meta，换目标即时生效不靠重启）。"""
+    from test_orchestrator import ScriptedLLM
+    planner = ScriptedLLM([
+        {"text": "收到目标。"},
+        {"tool_use": [ScriptedLLM.tool_call("d1", "done", {})]},
+    ])
+    app = create_app(workspace_root=str(tmp_path / "workspaces"),
+                     tools_root=None, executor_llm=ScriptedLLM([]),
+                     planner_llm=planner,
+                     providers_config=str(tmp_path / "providers.json"))
+    with TestClient(app) as c:
+        pid = c.post("/api/projects", json={"name": "目标贯通", "track": "pentest",
+                                            "capabilities": ["web"]}).json()["id"]
+        c.put(f"/api/projects/{pid}/goal", json={"text": "拿下 admin 面板"})
+        job = _wait_job(c, c.post(f"/api/projects/{pid}/orchestrator/chat",
+                                  json={"text": "目标是什么？"}).json()["job_id"])
+        assert job["result"]["reply"] == "收到目标。"
+        assert "拿下 admin 面板" in planner.calls[0]["system"]
+        tjob = _wait_job(c, c.post(f"/api/projects/{pid}/orchestrator/tick",
+                                   json={}).json()["job_id"])
+        assert tjob["status"] == "done"
+        assert "拿下 admin 面板" in planner.calls[1]["system"]

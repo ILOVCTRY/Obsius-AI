@@ -40,3 +40,8 @@
 .fc-dark .react-flow__minimap-mask {
   fill: rgba(13, 17, 23, 0.7);
 }
+
+/* 边可点选（交互带 interactionWidth=14 由 xyflow 内部渲染，cursor 这里给） */
+.fc-dark .react-flow__edge {
+  cursor: pointer;
+}

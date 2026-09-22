@@ -10,10 +10,11 @@ import type {
   KbWriteResult, LlmProvider, McpServer, ModelInfo, IntelArticle, IntelBrief, IntelBriefMeta,
   IntelFeed, IntelOverview, IntelProfile, IntelVaultConfig, IntelVaultInfo, VaultNode,
   VaultSearchHit, IntelLearningProfile, IntelPlan, IntelPlanMeta,
-  OwnerRule, PackRole, ProjectDetail, ProjectMeta, RatingRule,
-  Proposal, ProposalOrigin, RoleCreateBody, RoleInfo, RouteHit,
-  RoutePreviewBody, RoleUpdateBody, SampleUploadResponse, Session, SkillCreateBody, SkillDef,
+  Expert, ExpertBody, OrchPersona, OwnerRule, PackRole, PhaseGoal, ProjectDetail, ProjectMeta, RatingRule,
+  Proposal, ProposalOrigin, RoleInfo, RouteHit,
+  RoutePreviewBody, SampleUploadResponse, Session, SkillCreateBody, SkillDef, TrackProfile,
   SkillDetail, SkillVocab, Task, TaskGraph, BoardGraph, WritebackItem, XrefData,
+  TaskTrace, TraceEffect,
 } from "./types"
 import type { Taxonomy } from "./taxonomy"
 
@@ -60,9 +61,12 @@ async function http<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   // 项目
   listProjects: () => http<ProjectMeta[]>("/api/projects"),
-  createProject: (name: string, track: string, capabilities: string[] = []) =>
+  // expert-pool M3：capabilities 多选退役，改专家组队（profile=场景档、inherit_from=知识继承源，M4）
+  createProject: (name: string, track: string, experts: string[] = [],
+                  extra?: { profile?: string | null; inherit_from?: string | null }) =>
     http<ProjectMeta>("/api/projects", {
-      method: "POST", body: JSON.stringify({ name, track, capabilities }),
+      method: "POST",
+      body: JSON.stringify({ name, track, experts, ...extra }),
     }),
   taxonomy: () => http<Taxonomy>("/api/taxonomy"),
   getProject: (pid: string) => http<ProjectDetail>(`/api/projects/${pid}`),
@@ -70,6 +74,11 @@ export const api = {
     http<ProjectMeta>(`/api/projects/${pid}/config`, {
       method: "PATCH",
       body: JSON.stringify({ config }),
+    }),
+  // 换将（M2）：PATCH experts，空清单=剥键恢复存量直通
+  patchProjectExperts: (pid: string, experts: string[]) =>
+    http<ProjectMeta>(`/api/projects/${pid}/experts`, {
+      method: "PATCH", body: JSON.stringify({ experts }),
     }),
   deleteProject: (pid: string) =>
     http<{ status: string; trash_path: string }>(`/api/projects/${pid}`, { method: "DELETE" }),
@@ -258,6 +267,12 @@ export const api = {
   // 黑板链路图（2026-09-20）：五类对象 × 类型分层 DAG
   boardGraph: (pid: string) =>
     http<BoardGraph>(`/api/projects/${pid}/board-graph`),
+  // 执行轨迹（execution-trace-chain M1，2026-09-22）：任务区间切分+过程聚合现算
+  taskTrace: (pid: string, taskId: string) =>
+    http<TaskTrace>(`/api/projects/${pid}/trace/${taskId}`),
+  // 打法效果榜（M3/R4，物化侧统计）
+  traceEffect: (pid: string, top = 20) =>
+    http<TraceEffect>(`/api/projects/${pid}/trace-effect?top=${top}`),
   publishTask: (pid: string, body: {
     objective: string; scope?: string; task_type?: string; role?: string; noise_budget?: string;
     priority?: number; conflict_keys?: string[]; refs?: string[];
@@ -295,10 +310,28 @@ export const api = {
     }),
   abortSession: (sid: string) =>
     http<{ status: string }>(`/api/sessions/${sid}/abort`, { method: "POST" }),
-  // C2 指挥编排器：一次性目标指令（自动触发一轮编排，最高优先落实）
+  // C2 指挥编排器：一次性目标指令（**deprecated**：对话窗全替代，端点仅存兼容 CLI）
   orchDirective: (pid: string, text: string) =>
     http<{ event_id: number; job_id: string; status: string }>(
       `/api/projects/${pid}/orchestrator/directive`, { method: "POST", body: JSON.stringify({ text }) }),
+  // 对话化编排器（M1，§6.4）：与编排器对话——插队轮；busy 409 不排队（编排器正在思考）
+  orchChat: (pid: string, text: string) =>
+    http<{ job_id: string }>(`/api/projects/${pid}/orchestrator/chat`, {
+      method: "POST", body: JSON.stringify({ text }),
+    }),
+  // M2 goal 闭环：阶段目标确认/清空（GET/PUT /goal）+ M3 拟人身份（PUT persona）
+  projectGoal: (pid: string) =>
+    http<{ phase_goal: PhaseGoal | null; persona: OrchPersona | null }>(
+      `/api/projects/${pid}/goal`),
+  setGoal: (pid: string, body: { text: string; criteria?: string[]; phase?: string | null }) =>
+    http<{ status: string; goal?: PhaseGoal }>(`/api/projects/${pid}/goal`, {
+      method: "PUT", body: JSON.stringify(body),
+    }),
+  setOrchPersona: (pid: string, body: { display_name: string; persona: string }) =>
+    http<{ status: string; persona?: OrchPersona }>(
+      `/api/projects/${pid}/orchestrator/persona`, {
+        method: "PUT", body: JSON.stringify(body),
+      }),
   // C2 判据模板：内置 + 用户自定义（全局）
   judgmentTemplates: () =>
     http<{ builtin: Record<string, string>; user: Record<string, string> }>(`/api/judgment-templates`),
@@ -363,19 +396,26 @@ export const api = {
       method: "POST", body: JSON.stringify({ decision }),
     }),
 
-  // packs 管理（正交分类学 §4.5：角色/owners/任务类型属轨，Skill/红线轨与包各有一份）
+  // packs 管理（正交分类学 §4.5：owners/任务类型属轨，Skill/红线轨与包各有一份）
   // 场景轨
-  trackRoles: (track: string) => http<PackRole[]>(`/api/tracks/${track}/roles`),
-  createTrackRole: (track: string, body: RoleCreateBody) =>
-    http<{ status: string; file: string; cloned: string | null }>(
-      `/api/tracks/${track}/roles`, { method: "POST", body: JSON.stringify(body) }),
-  updateTrackRole: (track: string, name: string, body: RoleUpdateBody) =>
-    http<{ status: string; file: string }>(`/api/tracks/${track}/roles/${name}`, {
+  // 专家池（expert-pool M3：packs/experts/ 单文件池，角色写端点已退役 410）
+  // 带 pid 时响应尾部追加 virtual 编排器条目（name 取该项目 meta 拟人显示名）
+  listExperts: (pid?: string) =>
+    http<Expert[]>(`/api/experts${pid ? `?pid=${encodeURIComponent(pid)}` : ""}`),
+  getExpert: (id: string) => http<Expert>(`/api/experts/${id}`),
+  createExpert: (id: string, body: ExpertBody) =>
+    http<{ status: string; id: string; file: string }>("/api/experts", {
+      method: "POST", body: JSON.stringify({ id, ...body }),
+    }),
+  updateExpert: (id: string, body: ExpertBody) =>
+    http<{ status: string; id: string; file: string }>(`/api/experts/${id}`, {
       method: "PUT", body: JSON.stringify(body),
     }),
-  deleteTrackRole: (track: string, name: string) =>
-    http<{ status: string; file: string; trash: string }>(
-      `/api/tracks/${track}/roles/${name}`, { method: "DELETE" }),
+  deleteExpert: (id: string) =>
+    http<{ status: string; trash: string }>(`/api/experts/${id}`, { method: "DELETE" }),
+  // 场景档（M4a：只读清单，建项页预填组队/看板视图）
+  trackProfiles: (track: string) => http<TrackProfile[]>(`/api/tracks/${track}/profiles`),
+  trackRoles: (track: string) => http<PackRole[]>(`/api/tracks/${track}/roles`),
   trackSkills: (track: string) => http<SkillDef[]>(`/api/tracks/${track}/skills`),
   createTrackSkill: (track: string, body: SkillCreateBody) =>
     http<{ status: string; name: string; path: string }>(`/api/tracks/${track}/skills`, {

@@ -347,11 +347,11 @@ def test_real_k1_thin_entry_skills():
         assert "kb_open" in body and "|---" in body
 
 
-def test_real_pentest_roles_yaml():
-    """pentest 轨 5 角色 yaml 护栏（极简 YAML 无 schema，解析错了这里报警）。"""
-    from core.skills.roles import load_role
+def test_real_pentest_experts_yaml():
+    """pentest 轨专家护栏（expert-pool M2；极简 YAML 无 schema，解析错了这里报警）。"""
+    from core.skills.experts import load_expert
 
-    recon = load_role("packs", "pentest", "recon")
+    recon = load_expert("packs", "recon", "pentest")
     assert recon["skills"] == ["recon-asset-enum"]  # recon 已与打点技能分离
     assert recon["task_types"] == ["recon", "asset-enum"]
     assert recon["default_noise"] == "passive"
@@ -362,26 +362,26 @@ def test_real_pentest_roles_yaml():
         ("osint", ["recon", "asset-enum"], ["recon-asset-enum"]),
         ("report-writer", ["report"], None),  # skills: null 全可见
     ]:
-        r = load_role("packs", "pentest", role_name)
+        r = load_expert("packs", role_name, "pentest")
         assert r["task_types"] == expected_types, role_name
         assert r["skills"] == expected_skills, role_name  # K1 绑定细粒度技能
     tt = load_task_types("packs", "pentest")
     assert tt["report"] == "passive"  # J 组新类型
     # 2026-09-21 红队向退场：内网/提权类型不再注册（内容归 redteam 轨）
     assert not {"privesc", "lateral-movement", "credential-access"} & set(tt)
-    g = load_role("packs", "pentest", "_generalist")
-    assert g["skills"] is None and g["task_types"] is None  # 兜底角色不过滤
+    g = load_expert("packs", "_generalist", "pentest")
+    assert g["skills"] is None and g["task_types"] is None  # 兜底专家不过滤
 
 
-def test_real_ctf_roles_yaml():
-    """ctf 轨 7 角色 + 注册表可读。"""
-    from core.skills.roles import load_role
+def test_real_ctf_experts_yaml():
+    """ctf 轨专家 + 注册表可读（原 ctf/recon 已换 id 为 triage，§4.3 映射）。"""
+    from core.skills.experts import load_expert
 
     assert load_task_types("packs", "ctf")["solve"] == "passive"
-    g = load_role("packs", "ctf", "_generalist")
-    assert g.get("default_noise") == "passive"
-    for name in ("recon", "reverse"):
-        load_role("packs", "ctf", name)  # 存在且可解析
+    g = load_expert("packs", "_generalist", "ctf")
+    assert g.get("default_noise") == "passive"  # variant_ctf_default_noise 覆写
+    for name in ("triage", "reverse"):
+        load_expert("packs", name, "ctf")  # 存在且可解析
     # J 组（2026-09-20 开源对标扩充）：四个分类解题手（对标 CAI/EnIGMA 按类分工）
     solvers = {
         "web-solver": (["solve", "verify"], ["triage", "web-strike-entry", "web-injection", "web-authn-session"]),
@@ -391,50 +391,51 @@ def test_real_ctf_roles_yaml():
                              ["forensics-triage", "misc-triage", "file-triage"]),
     }
     for name, (types, skills) in solvers.items():
-        r = load_role("packs", "ctf", name)
+        r = load_expert("packs", name, "ctf")
         assert r["task_types"] == types, name
         assert r["skills"] == skills, name
         assert r["default_noise"] == "passive", name
         assert r.get("persona"), name
 
 
-def test_real_redteam_roles_j_batch():
-    """redteam 轨 J 组镜像角色（osint/report-writer，2026-09-20）+ 四轨 doctor 零 error。"""
+def test_real_redteam_experts_j_batch():
+    """redteam 镜像专家（osint/report-writer）+ doctor 对 tracks/ 与 experts/ 零 error。"""
     from core.skills.doctor import diagnose
-    from core.skills.roles import load_role
+    from core.skills.experts import load_expert
 
     assert load_task_types("packs", "redteam")["report"] == "passive"
-    osint = load_role("packs", "redteam", "osint")
+    osint = load_expert("packs", "osint", "redteam")
     assert osint["task_types"] == ["recon", "asset-enum"]
     assert osint["skills"] == ["recon-asset-enum"]
     assert osint["default_noise"] == "passive"
-    rw = load_role("packs", "redteam", "report-writer")
+    rw = load_expert("packs", "report-writer", "redteam")
     assert rw["task_types"] == ["report"] and rw["skills"] is None
     # 新角色全落位后 doctor 零 error（skills/task_types 引用不悬空）
     rep = diagnose(Path("packs"))
     bad = [i for i in rep.issues if i.level == "error"
-           and (i.target or "").replace("\\", "/").startswith("tracks/")]
+           and ((i.target or "").replace("\\", "/").startswith("tracks/")
+                or (i.target or "").replace("\\", "/").startswith("experts/"))]
     assert not bad, [(i.level, i.code, i.target) for i in bad]
 
 
 def test_real_research_track_landed():
     """research 轨已落地（2026-09-14 P1）：全 passive 注册表 + reverse-analyst + doctor 零告警。"""
     from core.skills.doctor import diagnose
-    from core.skills.roles import load_role
+    from core.skills.experts import load_expert
 
     table = load_task_types("packs", "research")
     assert table == {"generic": "passive", "triage": "passive", "reverse": "passive",
                      "analyze": "passive", "verify": "passive",
                      "blueprint": "passive", "reconstruct": "passive"}  # R4 新增两类型
-    analyst = load_role("packs", "research", "reverse-analyst")
-    assert analyst["skills"] == ["file-triage", "binary-rev"]
+    analyst = load_expert("packs", "reverse-analyst", "research")
+    assert analyst["skills"] == ["file-triage", "binary-rev", "android-rev"]  # android-kb-sourcing M1 挂载
     assert analyst["task_types"] == ["triage", "reverse", "analyze", "verify"]
     assert analyst["default_noise"] == "passive"
     assert analyst.get("persona")  # 数据纪律 persona 必填护栏
-    auditor = load_role("packs", "research", "code-auditor")  # J 组：代码审计员
+    auditor = load_expert("packs", "code-auditor", "research")  # J 组：代码审计员
     assert auditor["task_types"] == ["analyze", "verify"]
     assert auditor["skills"] == ["file-triage", "binary-rev"]
-    g = load_role("packs", "research", "_generalist")
+    g = load_expert("packs", "_generalist", "research")
     assert g["skills"] is None
 
     # 白名单技能真实存在（不悬空）
@@ -481,11 +482,11 @@ def test_real_thin_router_skills_stage2():
     assert hits and {h.skill.name for h in hits[:1]} & {"web-strike-entry",
                                                         "web-injection"}
 
-    # 角色白名单引用真实存在的技能（不悬空）
-    from core.skills.roles import load_role
+    # 专家白名单引用真实存在的技能（不悬空；expert-pool M2）
+    from core.skills.experts import load_expert
     names = set(by_name)
-    for track, role in [("ctf", "recon"), ("ctf", "reverse")]:
-        for s in (load_role("packs", track, role).get("skills") or []):
+    for track, role in [("ctf", "triage"), ("ctf", "reverse")]:
+        for s in (load_expert("packs", role, track).get("skills") or []):
             assert s in names, f"{track}/{role} 悬空引用 {s}"
 
 

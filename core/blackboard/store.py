@@ -8,6 +8,7 @@
 """
 
 import json
+import logging
 import sqlite3
 import threading
 import uuid
@@ -17,6 +18,8 @@ from typing import Any
 
 from core.blackboard.events import EventBus
 from core.blackboard.schema import init_schema
+
+log = logging.getLogger(__name__)
 
 NODE_TABLES = {"finding": "findings", "func_kb": "func_kb", "artifact": "artifacts"}
 
@@ -42,8 +45,11 @@ def _check_vuln_gates(*, category: str, severity: str, status: str,
        收录 info 级内容（漏洞只收 low..critical，信息提示归 intel 线索且须
        >=low）；检查在 category 早退之前，拦截 add_finding 的 info→intel 兜底；
     ② category=vuln 且 severity=info（被①覆盖，防御性保留语义）；
-    ③ status=verified → 必须有 POC（evidence.poc/pocs 或 poc_artifact_id）——
-       红线「无证据不下结论」硬化为门禁；unverified 不拦（待验证是合法初态）。"""
+    ③ status=verified → 必须带复现证据——收录格式新口径（finding-report-format
+       2026-09-22）：evidence.repro_steps 至少一步 code（或 artifact_id）非空且
+       该步 expected 非空；或旧结构（evidence.poc/pocs 或 poc_artifact_id，兼容
+       存量直通）——红线「无证据不下结论」硬化为门禁；unverified 不拦（待验证
+       是合法初态）。"""
     if track not in ("pentest", "redteam"):
         return
     if severity == "info":
@@ -58,15 +64,80 @@ def _check_vuln_gates(*, category: str, severity: str, status: str,
     if category != "vuln":
         return
     if status == "verified":
-        has_poc = bool(poc_artifact_id) or (
-            isinstance(evidence, dict) and (
-                (isinstance(evidence.get("poc"), dict) and evidence["poc"])
-                or (isinstance(evidence.get("pocs"), list) and evidence["pocs"])))
-        if not has_poc:
+        if not has_repro_evidence(evidence, poc_artifact_id):
             raise ValueError(
-                "漏洞门禁：verified 漏洞必须带 POC（evidence.poc/pocs 或 "
-                "poc_artifact_id）——红线「无证据不下结论」；先稳定复现再登记，"
-                "或先按 unverified/有效发现登记")
+                "漏洞门禁：verified 漏洞必须带复现证据——按复现步骤登记"
+                "（evidence.repro_steps：[{desc, type, code, expected}]，至少一步"
+                " code/artifact_id 非空且该步预期结果 expected 非空），或旧结构 "
+                "poc/pocs/poc_artifact_id（legacy）——红线「无证据不下结论」；"
+                "先稳定复现再登记，或先按 unverified/有效发现登记")
+
+
+# 收录格式（finding-report-format M1，2026-09-22）：evidence.repro_steps 步骤类型
+# 白名单——http（原始报文）/ python（脚本）/ cmd（命令行，渲染 ```bash 围栏）/
+# image（无代码块，artifact_id 必填指向图片产物，渲染嵌入）；旧值 http_raw 读时
+# 映射 http、steps 视为纯文字步骤（写入不再产生）。
+REPRO_STEP_TYPES = ("http", "python", "cmd", "image")
+# 写入口宽容集：白名单 + 旧值（读时降级映射，不拒存量形态重写）
+_REPRO_STEP_TYPES_WRITE = REPRO_STEP_TYPES + ("http_raw", "steps")
+
+
+def validate_repro_steps(evidence: dict | None) -> None:
+    """校验 evidence.repro_steps 复现步骤结构（收录格式一等结构，宁严勿松）：
+    形态必须为 [{desc, type?, code?, expected?, artifact_id?, stability?, target?}]——
+    desc 必填非空字符串（步骤描述）；type 白名单 {http,python,cmd,image}+
+    旧值 {http_raw,steps}（image 步骤 artifact_id 必填）；expected/code 等须为
+    字符串。非法一律 ValueError（API 422 / Agent 工具回填 [拒绝]）。"""
+    steps = (evidence or {}).get("repro_steps")
+    if steps is None:
+        return
+    if not isinstance(steps, list):
+        raise ValueError(
+            "evidence.repro_steps 必须是步骤数组 [{desc, type, code, expected, …}]")
+    for i, s in enumerate(steps, 1):
+        if not isinstance(s, dict):
+            raise ValueError(f"repro_steps 第 {i} 步必须是对象"
+                             " {desc, type?, code?, expected?, artifact_id?, …}")
+        desc = s.get("desc")
+        if not isinstance(desc, str) or not desc.strip():
+            raise ValueError(f"repro_steps 第 {i} 步缺非空 desc（步骤描述）")
+        t = s.get("type")
+        if t is not None and t != "" and t not in _REPRO_STEP_TYPES_WRITE:
+            raise ValueError(
+                f"repro_steps 第 {i} 步非法 type: {t}（允许 {REPRO_STEP_TYPES}）")
+        if t == "image" and not s.get("artifact_id"):
+            raise ValueError(f"repro_steps 第 {i} 步 type=image 必须带 artifact_id"
+                             "（指向图片产物，渲染时嵌入）")
+        for k in ("code", "expected", "stability", "target"):
+            if s.get(k) is not None and not isinstance(s[k], str):
+                raise ValueError(f"repro_steps 第 {i} 步 {k} 必须是字符串")
+
+
+def has_repro_evidence(evidence: dict | None, poc_artifact_id: str | None = None) -> bool:
+    """verified 门禁的证据判定（收录格式新口径 + 旧结构兼容，add/patch 共用）：
+    - 新口径：evidence.repro_steps 非空，且至少一步 code（或 artifact_id）非空
+      且该步 expected 非空（复现自证锚点）；
+    - 旧结构兼容（存量直通）：evidence.poc（dict）/ evidence.pocs（list）/
+      poc_artifact_id。
+    """
+    if poc_artifact_id:
+        return True
+    if not isinstance(evidence, dict):
+        return False
+    if isinstance(evidence.get("poc"), dict) and evidence["poc"]:
+        return True
+    if isinstance(evidence.get("pocs"), list) and evidence["pocs"]:
+        return True
+    steps = evidence.get("repro_steps")
+    if not isinstance(steps, list):
+        return False
+    for s in steps:
+        if not isinstance(s, dict):
+            continue
+        has_body = bool(str(s.get("code") or "").strip() or s.get("artifact_id"))
+        if has_body and str(s.get("expected") or "").strip():
+            return True
+    return False
 
 # 攻击链状态机：假说 → 验证 → 已利用
 CHAIN_STATUSES = ("hypothesis", "validated", "exploited")
@@ -74,8 +145,11 @@ CHAIN_STATUSES = ("hypothesis", "validated", "exploited")
 # 严重度排序（severity 就高不就低）
 SEVERITY_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 
-# 重复发现合并时做"按内容去重追加"的 evidence 列表键（§5.3 证据并集）
-EVIDENCE_LIST_UNION_KEYS = ("pocs", "requests", "relates_to", "screenshots")
+# 重复发现合并时做"按内容去重追加"的 evidence 列表键（§5.3 证据并集）；
+# repro_steps（收录格式复现步骤）同列——多来源步骤并存、按内容指纹去重，
+# 重复上报不重复堆步（人工修订步骤走 patch evidence 浅层合并整键替换）
+EVIDENCE_LIST_UNION_KEYS = ("pocs", "repro_steps", "requests", "relates_to",
+                            "screenshots")
 
 
 def _evidence_item_fp(item: Any) -> str:
@@ -91,7 +165,8 @@ def _evidence_item_fp(item: Any) -> str:
 def merge_finding_evidence(old: dict, new: dict) -> dict:
     """重复发现的证据并集语义（§5.3；A2 修复旧实现"新 evidence 整体丢弃"）：
 
-    - 列表键（pocs/requests/relates_to/screenshots）：按内容去重追加，多来源并存；
+    - 列表键（pocs/repro_steps/requests/relates_to/screenshots）：按内容去重追加，
+      多来源并存；
     - notes 字符串：双方非空时分段追加（不覆盖前人笔记）；
     - 其余键：已有真值保留，空缺由新证据补入（不覆盖前人结论）。
     """
@@ -1253,20 +1328,25 @@ class Blackboard:
         dedup_key: str | None = None,
         author: str = "system",
         rating_basis: str = "",
+        impact: str = "",
+        remediation: str = "",
         category: str | None = None,
         track: str | None = None,
     ) -> dict:
         """重复发现（同 target+vuln_class+dedup_key）走证据并集（§5.3）：
 
         - evidence 列表键去重追加、notes 分段追加、其余键空缺补入（merge_finding_evidence）；
+          evidence.repro_steps（收录格式复现步骤）在并集键内按内容指纹去重；
         - severity 就高、status 不因新报告降级（新报 verified 可升级）、confidence 取最大、
           poc_artifact_id 缺者回填；updated_at 刷新。
         - rating_basis（F11 判级依据）随 severity 就高覆盖：新报级别更高 → 取新报
           （空=清空，basis 必须证成当前 severity）；不高于旧级 → 保留旧值。
+        - impact/remediation（收录格式三件套·危害描述/修复建议，v20）：合并分支
+          旧值非空保留、空缺由新报补入（不覆盖前人结论）。
         - category（C6 分两类，全手动选）：vuln=漏洞 / intel=有效发现·关键发现；
           未传兜底 vuln；合并分支保留既有 category（同类发现不因重报换类）。
         - track（C6 漏洞门禁）：pentest/redteam 轨过漏洞门禁（vuln+info 拒、
-          verified 无 POC 拒）；CTF/研究轨不拦。
+          verified 须带复现证据——repro_steps 或旧结构 POC）；CTF/研究轨不拦。
         返回 {"id":..., "merged": bool, "rating_basis":..., "category":...}。
         merged=True 表示命中既有记录。
         """
@@ -1280,15 +1360,18 @@ class Blackboard:
             category = "intel" if severity == "info" else "vuln"
         if category not in FINDING_CATEGORIES:
             raise ValueError(f"非法 category: {category}（允许 {FINDING_CATEGORIES}）")
-        # C6 漏洞门禁（仅渗透/红队轨）：vuln+info 拒、vuln+verified 无 POC 拒（宁严勿松）
+        # C6 漏洞门禁（仅渗透/红队轨）：vuln+info 拒、vuln+verified 无复现证据拒（宁严勿松）
         _check_vuln_gates(category=category, severity=severity, status=status,
                           evidence=evidence, poc_artifact_id=poc_artifact_id,
                           track=track)
+        # 收录格式复现步骤结构校验（写入口全轨生效：坏结构宁拒不存，读侧零兜底）
+        validate_repro_steps(evidence)
         # rev 发现的类别在 evidence.category（五类），vuln_class 可空；
         # 无任何去重键时不做合并（否则空 key 的发现会全并成一条）。
         key = dedup_key or vuln_class or None
         created = now()
         update_changes: list[str] = []  # A4：merge 分支的实质增补（事务后发 finding_update）
+        merged_verified = False  # 执行轨迹钩子（R3）：merge 分支升 verified 后重物化
         with self._tx():
             # relates_to 强关系：悬空/跨项目/形态非法一律拒（E0，防幻觉 422）；
             # 合并分支里并集只追加本批新边，校验传入部分即可
@@ -1314,6 +1397,8 @@ class Blackboard:
                 # read-modify-write 全在本事务内（BEGIN IMMEDIATE 串行化，无丢失更新）
                 old_ev = _loads(row["evidence"], {})
                 old_poc_n = len(old_ev.get("pocs") or []) if isinstance(old_ev, dict) else 0
+                old_steps_n = (
+                    len(old_ev.get("repro_steps") or []) if isinstance(old_ev, dict) else 0)
                 old_rel_n = (
                     len(old_ev.get("relates_to") or []) if isinstance(old_ev, dict) else 0)
                 merged_ev = merge_finding_evidence(old_ev, evidence or {})
@@ -1327,22 +1412,30 @@ class Blackboard:
                 if status == "verified":
                     new_status = "verified"
                 new_poc = row["poc_artifact_id"] or poc_artifact_id
+                # impact/remediation（v20 三件套）：旧值非空保留、空缺由新报补入
+                new_impact = row["impact"] or impact
+                new_remediation = row["remediation"] or remediation
                 # A4 变化检测（事务内算标志，事务后投递，多变化聚合一条 finding_update）
                 if len(merged_ev.get("pocs") or []) > old_poc_n or (
                         not row["poc_artifact_id"] and poc_artifact_id):
                     update_changes.append("新增 POC")
+                if len(merged_ev.get("repro_steps") or []) > old_steps_n:
+                    update_changes.append("新增复现步骤")
                 if new_severity != row["severity"]:
                     update_changes.append(f"严重度升至 {new_severity}")
                 if row["status"] != "verified" and new_status == "verified":
                     update_changes.append("升级为已验证")
+                    merged_verified = True
                 if len(merged_ev.get("relates_to") or []) > old_rel_n:
                     update_changes.append("新增关联发现")
                 self.conn.execute(
                     "UPDATE findings SET evidence=?, severity=?, rating_basis=?, status=?,"
-                    " poc_artifact_id=?, confidence=MAX(confidence,?), updated_at=?,"
+                    " poc_artifact_id=?, impact=?, remediation=?,"
+                    " confidence=MAX(confidence,?), updated_at=?,"
                     " revision=revision+1 WHERE id=?",
                     (json.dumps(merged_ev, ensure_ascii=False), new_severity, new_basis,
-                     new_status, new_poc, confidence, created, row["id"]),
+                     new_status, new_poc, new_impact, new_remediation, confidence,
+                     created, row["id"]),
                 )
                 finding_id, merged = row["id"], True
                 category = row["category"]  # C6：合并保留既有分类（同类发现不因重报换类）
@@ -1353,8 +1446,9 @@ class Blackboard:
                     key = finding_id
                 self.conn.execute(
                     "INSERT INTO findings(id,project_id,target_asset_id,vuln_class,title,"
-                    "severity,rating_basis,status,category,evidence,poc_artifact_id,confidence,"
-                    "dedup_key,author,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "severity,rating_basis,status,category,impact,remediation,evidence,"
+                    "poc_artifact_id,confidence,dedup_key,author,created_at,updated_at)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         finding_id,
                         project_id,
@@ -1365,6 +1459,8 @@ class Blackboard:
                         rating_basis,
                         status,
                         category,
+                        impact.strip(),
+                        remediation.strip(),
                         json.dumps(evidence or {}, ensure_ascii=False),
                         poc_artifact_id,
                         confidence,
@@ -1387,6 +1483,14 @@ class Blackboard:
         )
         if merged and update_changes:  # 首次创建不通知；纯重复上报无变化不通知
             self._notify_finding_updates(project_id, finding_id, update_changes, author)
+        if merged_verified:
+            # 执行轨迹重物化（R3，同 patch_finding 钩子）：重报升级 verified →
+            # 重物化所属任务轨迹链并升链状态；失败只 log 不挡登记主路径。
+            try:
+                from core.blackboard import traces
+                traces.materialize_for_finding(self, project_id, finding_id, author=author)
+            except Exception:  # noqa: BLE001
+                log.exception("verified 触发轨迹重物化失败 finding=%s", finding_id)
         return {"id": finding_id, "merged": merged, "severity": new_severity,
                 "rating_basis": new_basis, "category": category}
 
@@ -1444,6 +1548,8 @@ class Blackboard:
         severity: str | None = None,
         vuln_class: str | None = None,
         rating_basis: str | None = None,
+        impact: str | None = None,
+        remediation: str | None = None,
         category: str | None = None,
         track: str | None = None,
         author: str = "human",
@@ -1451,8 +1557,10 @@ class Blackboard:
     ) -> dict | None:
         """人类修订发现：status 走白名单（非法 ValueError），evidence 浅层 merge。
         F10（§6.5 人工修订）：title 非空 / severity 五档白名单（strip+lower 归一容错）/
-        vuln_class 自由文本可空；F11：rating_basis None=不动、空串=清空——**纯字段编辑零打扰**（不触发撤回传播与 finding_update
-        私信，update_changes 只认 pocs/relates 增长与 verified 升级）。
+        vuln_class 自由文本可空；F11：rating_basis None=不动、空串=清空；收录格式
+        （v20）：impact/remediation None=不动、空串=清空（不进门禁，报告侧校验齐备）
+        ——**纯字段编辑零打扰**（不触发撤回传播与 finding_update
+        私信，update_changes 只认 pocs/复现步骤/relates 增长与 verified 升级）。
         dedup_key 不重算（定稿）：指纹=创建时刻语义；改类别后同主题新发现仍并入旧指纹条目。
         expected_revision（H2 乐观锁）：非空时与行 revision 比对，不符抛 ValueError
         （多窗并发改同一发现防丢失更新——冲突方重新读取后再改）。
@@ -1479,6 +1587,8 @@ class Blackboard:
             old_status = row["status"]
             old_ev = _loads(row["evidence"], {})
             old_poc_n = len(old_ev.get("pocs") or []) if isinstance(old_ev, dict) else 0
+            old_steps_n = (
+                len(old_ev.get("repro_steps") or []) if isinstance(old_ev, dict) else 0)
             old_rel_n = (
                 len(old_ev.get("relates_to") or []) if isinstance(old_ev, dict) else 0)
             sets: list[str] = []
@@ -1494,6 +1604,8 @@ class Blackboard:
             if evidence is not None:
                 # 强关系同样防幻觉：PATCH 携带 relates_to 时逐边校验存在性/同项目（E0）
                 validate_relates_to(self.conn, project_id, evidence)
+                # 复现步骤结构校验（收录格式，写入口全轨生效）
+                validate_repro_steps(evidence)
                 # 人类 PATCH = 浅层 merge（键级覆盖；列表并集只发生在 add_finding 合并路径）
                 merged = {**old_ev, **evidence}
                 sets.append("evidence=?")
@@ -1502,6 +1614,8 @@ class Blackboard:
                 # A4：列表键增长算实质增补（浅层 merge 下列表为整键覆盖，比长度即可）
                 if len(merged.get("pocs") or []) > old_poc_n:
                     update_changes.append("新增 POC")
+                if len(merged.get("repro_steps") or []) > old_steps_n:
+                    update_changes.append("新增复现步骤")
                 if len(merged.get("relates_to") or []) > old_rel_n:
                     update_changes.append("新增关联发现")
             if title is not None:  # F10 人工修订：strip 后非空（空标题→直接删除该发现）
@@ -1526,6 +1640,14 @@ class Blackboard:
                 sets.append("rating_basis=?")
                 params.append(str(rating_basis).strip())
                 changed.append("rating_basis")
+            if impact is not None:  # v20 三件套·危害描述：None=不动，空串=清空（不进门禁）
+                sets.append("impact=?")
+                params.append(str(impact).strip())
+                changed.append("impact")
+            if remediation is not None:  # v20 三件套·修复建议：None=不动，空串=清空
+                sets.append("remediation=?")
+                params.append(str(remediation).strip())
+                changed.append("remediation")
             if category is not None:  # C6 分两类：vuln=漏洞 / intel=有效发现·关键发现
                 c = str(category).strip().lower()
                 if c not in FINDING_CATEGORIES:
@@ -1537,7 +1659,7 @@ class Blackboard:
             # ① 显式把 severity 改成 info → 拒（2026-09-18 起 info 全类别停收；
             #    只拦显式传 severity——纯标题/备注变更不受影响）
             # ② 分类/严重度变更后 vuln 不可为 info（漏洞只收 low~critical）
-            # ③ 改判 verified → 必须有 POC（红线：无证据不下结论）
+            # ③ 改判 verified → 必须带复现证据（repro_steps 或旧结构 POC，与 add 同口径）
             # FP 出口（status=FP）不受门禁影响（误报是合法出口）；纯标题/备注变更放行
             if track in ("pentest", "redteam"):
                 if severity is not None and str(severity).strip().lower() == "info":
@@ -1553,12 +1675,14 @@ class Blackboard:
                         "按「有效发现 intel」登记，或补充证据后提升严重度")
                 if status is not None and status == "verified":
                     eff_ev = merged if evidence is not None else old_ev
-                    has_poc = bool(row["poc_artifact_id"]) or (
-                        isinstance(eff_ev.get("poc"), dict) and eff_ev["poc"])
-                    if not has_poc:
+                    if not has_repro_evidence(eff_ev, row["poc_artifact_id"]):
                         raise ValueError(
-                            "漏洞门禁：verified 漏洞必须带 POC——红线「无证据不下结论」；"
-                            "先稳定复现再登记，或先按 unverified/有效发现登记")
+                            "漏洞门禁：verified 漏洞必须带复现证据——按复现步骤登记"
+                            "（evidence.repro_steps：[{desc, type, code, expected}]，"
+                            "至少一步 code/artifact_id 非空且该步 expected 非空），"
+                            "或旧结构 poc/pocs/poc_artifact_id（legacy）——红线"
+                            "「无证据不下结论」；先稳定复现再登记，"
+                            "或先按 unverified/有效发现登记")
             if sets:
                 sets.append("updated_at=?")
                 sets.append("revision=revision+1")
@@ -1585,6 +1709,15 @@ class Blackboard:
             self._propagate_retraction(project_id, finding_id, author, updated)
         elif do_update and update_changes:
             self._notify_finding_updates(project_id, finding_id, update_changes, author)
+        if do_update and old_status != "verified" and new_status == "verified":
+            # 执行轨迹重物化（execution-trace-chain R3，2026-09-22）：finding 升
+            # verified → 重物化所属任务轨迹链并升链状态（trace_ref 幂等）。惰性
+            # import 防循环依赖；失败只 log 不挡 PATCH 主路径（同 _finish 先例）。
+            try:
+                from core.blackboard import traces
+                traces.materialize_for_finding(self, project_id, finding_id, author=author)
+            except Exception:  # noqa: BLE001
+                log.exception("verified 触发轨迹重物化失败 finding=%s", finding_id)
         return updated
 
     def delete_finding(
@@ -1995,27 +2128,33 @@ class Blackboard:
 
     # ---------- 攻击链（chains，人工建链；节点必须引用本项目既有实体，防幻觉防跨项目） ----------
 
-    def create_chain(self, project_id: str, name: str, goal: str = "", author: str = "human") -> str:
+    def create_chain(self, project_id: str, name: str, goal: str = "", author: str = "human",
+                     origin: str = "manual") -> str:
+        """origin：manual=人工策划 / trace=任务轨迹自动物化（traces.py，board_graph 只画 manual）。"""
         chain_id = new_id("chain")
         with self._tx():
             self.conn.execute(
-                "INSERT INTO chains(id,project_id,name,goal,status,created_at,updated_at)"
-                " VALUES(?,?,?,?, 'hypothesis', ?, ?)",
-                (chain_id, project_id, name, goal, now(), now()),
+                "INSERT INTO chains(id,project_id,name,goal,status,origin,created_at,updated_at)"
+                " VALUES(?,?,?,?, 'hypothesis', ?, ?, ?)",
+                (chain_id, project_id, name, goal, origin, now(), now()),
             )
         self.append_event(
             project_id, "chain.created",
-            {"chain_id": chain_id, "name": name, "goal": goal, "status": "hypothesis"},
+            {"chain_id": chain_id, "name": name, "goal": goal, "status": "hypothesis",
+             "origin": origin},
             author=author,
         )
         return chain_id
 
-    def list_chains(self, project_id: str) -> list[dict]:
-        rows = self.conn.execute(
-            "SELECT c.*, (SELECT COUNT(*) FROM chain_links l WHERE l.chain_id=c.id) AS link_count"
-            " FROM chains c WHERE c.project_id=? ORDER BY c.updated_at DESC",
-            (project_id,),
-        ).fetchall()
+    def list_chains(self, project_id: str, origin: str | None = None) -> list[dict]:
+        sql = ("SELECT c.*, (SELECT COUNT(*) FROM chain_links l WHERE l.chain_id=c.id) AS link_count"
+               " FROM chains c WHERE c.project_id=?")
+        params: list = [project_id]
+        if origin is not None:  # v19：轨迹自动链与人工链分流（前端人工链视图默认只看 manual）
+            sql += " AND c.origin=?"
+            params.append(origin)
+        sql += " ORDER BY c.updated_at DESC"
+        rows = self.conn.execute(sql, params).fetchall()
         return [_row_to_dict(r) or {} for r in rows]
 
     def _owned_chain(self, project_id: str, chain_id: str) -> sqlite3.Row | None:

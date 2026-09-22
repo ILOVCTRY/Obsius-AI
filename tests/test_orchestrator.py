@@ -45,14 +45,15 @@ def env(tmp_path):
 
 def make_orch(env, llm, factory=None, config=None, track=None, packs_root="packs",
               gate=None, on_task_published=None, state_loader=None, state_saver=None,
-              heartbeat=None, autonomy_provider=None):
+              heartbeat=None, autonomy_provider=None, meta_loader=None):
     bb, project = env
     return Orchestrator(project_id=project["id"], bb=bb, llm=llm,
                         session_factory=factory, config=config or OrchestratorConfig(),
                         packs_root=packs_root, track=track,
                         gate=gate, on_task_published=on_task_published,
                         state_loader=state_loader, state_saver=state_saver,
-                        heartbeat=heartbeat, autonomy_provider=autonomy_provider)
+                        heartbeat=heartbeat, autonomy_provider=autonomy_provider,
+                        meta_loader=meta_loader)
 
 
 def test_stats_injection_hvt_surface_recent_tasks_and_digest(env):
@@ -369,10 +370,12 @@ def test_starvation_warns_no_specialist(tmp_path, env):
     """类型已注册但只有 _generalist 兜底 → 饿死告警（专才覆盖缺失）。"""
     bb, project = env
     packs = tmp_path / "tp"
-    role_dir = packs / "tracks" / "lonely" / "roles"
+    role_dir = packs / "experts"
     role_dir.mkdir(parents=True)
     (role_dir / "_generalist.yaml").write_text("name: _generalist\npersona: 兜底\n", encoding="utf-8")
-    (packs / "tracks" / "lonely" / "task_types.yaml").write_text(
+    tt = packs / "tracks" / "lonely"
+    tt.mkdir(parents=True, exist_ok=True)
+    (tt / "task_types.yaml").write_text(
         "lonely-work: passive\n", encoding="utf-8")
     TaskQueue(bb).publish(project["id"], "孤活", task_type="lonely-work", created_by="human")
     llm = ScriptedLLM([{"tool_use": [ScriptedLLM.tool_call("d1", "done", {})]}])
@@ -387,7 +390,7 @@ def test_role_catalog_injected_into_prompt(env):
     llm = ScriptedLLM([{"tool_use": [ScriptedLLM.tool_call("d1", "done", {})]}])
     orch = make_orch(env, llm, track="ctf")
     names = {r["name"] for r in orch.role_catalog}
-    assert {"_generalist", "recon", "reverse"} <= names
+    assert {"_generalist", "triage", "reverse"} <= names
     orch.tick()
     system = llm.calls[0]["system"]
     assert "可开角色目录" in system and "静态分诊" in system
@@ -1001,7 +1004,7 @@ def test_mission_view_in_stats_and_prompt(env):
 def _role_packs(tmp_path):
     """临时 packs：demo 轨含 _generalist + recon 两个角色。"""
     packs = tmp_path / "rp"
-    role_dir = packs / "tracks" / "demo" / "roles"
+    role_dir = packs / "experts"
     role_dir.mkdir(parents=True)
     (role_dir / "_generalist.yaml").write_text("name: _generalist\npersona: 兜底\n", encoding="utf-8")
     (role_dir / "recon.yaml").write_text(
@@ -1059,7 +1062,7 @@ def test_orch_publish_role_validation_and_passthrough(env, tmp_path):
     assert tasks["侦察 A"]["role"] == "recon"
     assert "侦察 B" not in tasks  # 非法 role 未入库
     dumped = json.dumps(llm.calls[-1]["messages"], ensure_ascii=False)
-    assert "未注册的 role" in dumped
+    assert "专家不在池内" in dumped
     # 工具 schema 与系统提示口径
     pub = next(t for t in orch._orch_tools() if t["name"] == "publish_task")
     assert "role" in pub["input_schema"]["properties"]
@@ -1111,5 +1114,228 @@ def test_orch_starvation_role_dimension(env, tmp_path):
     orch.tick()
     starv = [e for e in bb.recent_events(pid) if e["kind"] == "task.starvation"]
     reasons = {w["objective"]: w["reason"] for e in starv for w in e["payload"]["warnings"]}
-    assert "未在 demo 轨 roles/ 注册" in reasons["幽灵角色"]
+    assert "不在 experts/ 池" in reasons["幽灵角色"]
     assert "侦察活" in reasons and "重绑新窗" in reasons["侦察活"]
+
+
+# ---------- 对话化编排器（M1/M2/M3，§4.2-§4.4：对话插队轮 / goal 闭环 / 拟人） ----------
+
+def test_chat_turn_replies_logs_and_heartbeats(env):
+    """对话轮：文本回复落 orch.chat（author=orchestrator）+ 记账 source=orchestrator-chat
+    + 每步前 heartbeat 续租。"""
+    bb, project = env
+    beats: list[int] = []
+    llm = ScriptedLLM([{"text": "编排器在线，当前无未覆盖资产。"}])
+    orch = make_orch(env, llm, heartbeat=lambda: beats.append(1))
+    result = orch.chat_turn("在吗？")
+    assert result["reply"].startswith("编排器在线")
+    chats = [e for e in bb.recent_events(project["id"]) if e["kind"] == "orch.chat"]
+    assert len(chats) == 1
+    assert chats[0]["payload"]["role"] == "orch"
+    assert chats[0]["author"] == "orchestrator"
+    assert chats[0]["payload"]["tool_trace"] == []
+    assert len(beats) == 1
+    usages = [e for e in bb.recent_events(project["id"]) if e["kind"] == "llm.usage"]
+    assert usages and usages[-1]["payload"]["source"] == "orchestrator-chat"
+
+
+def test_chat_turn_can_publish_via_gates(env):
+    """对话轮工具面与 tick 同源：publish_task 全校验+计数回调照走。"""
+    bb, project = env
+    counted: list[str] = []
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("p1", "publish_task",
+                                            {"objective": "对话里发的活", "task_type": "generic",
+                                             "noise_budget": "passive"})]},
+        {"text": "已发布 1 个静态核查任务。"},
+    ])
+    orch = make_orch(env, llm,
+                     on_task_published=lambda task_id=None: counted.append(task_id))
+    result = orch.chat_turn("发个静态核查任务")
+    tasks = TaskQueue(bb).list_tasks(project["id"])
+    assert len(tasks) == 1 and tasks[0]["objective"] == "对话里发的活"
+    assert tasks[0]["created_by"] == "orchestrator"
+    assert result["published"] == [tasks[0]["id"]] and counted == [tasks[0]["id"]]
+    chats = [e for e in bb.recent_events(project["id"]) if e["kind"] == "orch.chat"]
+    assert [t["name"] for t in chats[-1]["payload"]["tool_trace"]] == ["publish_task"]
+
+
+def test_chat_turn_gate_still_blocks(env):
+    """对话轮同走预算闸门：gate 拒绝 → 不入队，拒绝文本回填 LLM。"""
+    bb, project = env
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("p1", "publish_task",
+                                            {"objective": "被闸的活", "task_type": "generic"})]},
+        {"text": "预算闸门拒绝了。"},
+    ])
+    orch = make_orch(env, llm, gate=lambda action: f"blocked:{action}")
+    orch.chat_turn("发任务")
+    assert TaskQueue(bb).list_tasks(project["id"]) == []
+    assert "blocked:publish_task" in json.dumps(llm.calls[-1]["messages"], ensure_ascii=False)
+
+
+def test_chat_turn_is_readonly_over_tick_state(env):
+    """插队轮只读边界：不写 state_saver、不推进 event_cursor、不计 cycles、
+    不消费 C2 指令、不发饿死告警；下一轮 tick 照常看到全部。"""
+    bb, project = env
+    pid = project["id"]
+    saved: dict = {}
+
+    def saver(**fields):
+        saved.update(fields)
+
+    bb.append_event(pid, "orch.directive", {"text": "先做 A"}, author="human")
+    TaskQueue(bb).publish(pid, "没人能干的活", task_type="exploit", created_by="human")
+    llm = ScriptedLLM([{"text": "收到，情况如下。"}])
+    orch = make_orch(env, llm, track="ctf", state_loader=lambda: {},
+                     state_saver=saver)
+    orch.chat_turn("现在什么情况？")
+    assert saved == {}
+    assert orch.cycles == 0 and orch._last_event_id == 0
+    kinds = [e["kind"] for e in bb.recent_events(pid)]
+    assert "orch.directive.done" not in kinds
+    assert "task.starvation" not in kinds
+    # 下一个 tick 照常消费：指令进提示、饿死告警落、游标落盘
+    orch.llm = ScriptedLLM([{"tool_use": [ScriptedLLM.tool_call("d1", "done", {})]}])
+    orch.tick()
+    tick_sys = orch.llm.calls[0]["system"]
+    assert "先做 A" in tick_sys
+    assert "task.starvation" in [e["kind"] for e in bb.recent_events(pid)]
+    assert saved.get("cycles") == 1
+
+
+def test_chat_history_window_cap_40(env):
+    """上下文 = 最近 40 条 orch.chat + 本次 user 消息在末尾；最旧被窗口挤掉。"""
+    bb, project = env
+    pid = project["id"]
+    for i in range(42):
+        bb.append_event(pid, "orch.chat", {"role": "human", "text": f"旧消息{i}"},
+                        author="human")
+    llm = ScriptedLLM([{"text": "ok"}])
+    orch = make_orch(env, llm)
+    orch.chat_turn("最新一条")
+    msgs = llm.calls[0]["messages"]
+    assert len(msgs) == 41
+    assert msgs[0]["role"] == "user" and msgs[0]["content"] == "旧消息2"
+    assert msgs[-1] == {"role": "user", "content": "最新一条"}
+
+
+def test_chat_history_roles_and_lead_orch_skip(env):
+    """human→user / orch→assistant 组装；开头连续 orch 消息跳过（首条必 user）。"""
+    bb, project = env
+    pid = project["id"]
+    bb.append_event(pid, "orch.chat", {"role": "orch", "text": "孤立回复"},
+                    author="orchestrator")
+    bb.append_event(pid, "orch.chat", {"role": "human", "text": "第一问"}, author="human")
+    bb.append_event(pid, "orch.chat", {"role": "orch", "text": "第一答"},
+                    author="orchestrator")
+    llm = ScriptedLLM([{"text": "第二答"}])
+    orch = make_orch(env, llm)
+    orch.chat_turn("第二问")
+    msgs = llm.calls[0]["messages"]
+    assert [(m["role"], m["content"]) for m in msgs] == [
+        ("user", "第一问"), ("assistant", "第一答"), ("user", "第二问")]
+
+
+def test_goal_and_persona_injection_chat_and_tick(env):
+    """goal_section 进 tick+chat 系统提示；persona 只进 chat（tick 不需要脸）。"""
+    bb, project = env
+    meta = {"phase_goal": {"text": "本周打穿靶场 3 台主机",
+                           "criteria": ["拿到 flag", "截图留证"],
+                           "phase": "initial-access", "source": "chat"},
+            "orchestrator_persona": {"display_name": "老编", "persona": "说话直接，先给结论"}}
+    llm = ScriptedLLM([{"text": "好的，记住了。"}])
+    orch = make_orch(env, llm, meta_loader=lambda: meta)
+    orch.chat_turn("阶段目标是什么？")
+    chat_sys = llm.calls[0]["system"]
+    assert "当前阶段目标" in chat_sys and "本周打穿靶场 3 台主机" in chat_sys
+    assert "拿到 flag" in chat_sys and "阶段: initial-access" in chat_sys
+    assert "你的身份" in chat_sys and "先给结论" in chat_sys
+    orch.llm = ScriptedLLM([{"tool_use": [ScriptedLLM.tool_call("d1", "done", {})]}])
+    orch.tick()
+    tick_sys = orch.llm.calls[0]["system"]
+    assert "当前阶段目标" in tick_sys and "本周打穿靶场 3 台主机" in tick_sys
+    assert "你的身份" not in tick_sys  # persona 不进 tick
+
+
+# ---------- 分阶段工作流（pentest-phased-workflow M1+M2） ----------
+
+def _phase_packs(root) -> str:
+    """最小 pentest 阶段剧本 packs（与 test_phases.py 夹具同构，保持本文件独立可跑）。"""
+    ph = root / "tracks" / "pentest" / "phases"
+    ph.mkdir(parents=True)
+    (ph / "recon.yaml").write_text(
+        "name: 信息收集\ngoal: 摸清资产面\norder: 1\n"
+        "gate:\n  min_assets: 10\n  min_high_value: 1\n  idle_rounds: 2\n"
+        "gate_types: [exploit]\nnext: [pentest]\n", encoding="utf-8")
+    (ph / "pentest.yaml").write_text(
+        "name: 渗透测试\ngoal: 产出 verified 发现\norder: 2\ngate:\n  min_verified: 1\n"
+        "next: [recon, report]\n", encoding="utf-8")
+    (root / "tracks" / "pentest" / "task_types.yaml").write_text(
+        "recon: passive\nasset-enum: passive\nexploit: low\nreport: passive\n",
+        encoding="utf-8")
+    ex = root / "experts"
+    ex.mkdir()
+    for eid in ("_generalist", "external-entry"):
+        (ex / f"{eid}.yaml").write_text(
+            f"name: {eid}\ndescription: 测试专家\ntracks: [pentest]\n", encoding="utf-8")
+    return str(root)
+
+
+def test_phase_gate_rejects_publish_task(env, tmp_path):
+    """M2 入场门：当前阶段 gate_types 命中且门未过 → publish_task 拒收不写实体。"""
+    packs = _phase_packs(tmp_path / "packs")
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call(
+            "p1", "publish_task",
+            {"task_type": "exploit", "objective": "尝试利用", "role": "external-entry"})]},
+        {"tool_use": [ScriptedLLM.tool_call("d1", "done", {})]},
+    ])
+    orch = make_orch(env, llm, track="pentest", packs_root=packs,
+                     meta_loader=lambda: {"current_phase": "recon"})
+    orch.tick()
+    assert TaskQueue(env[0]).list_tasks(env[1]["id"]) == []  # 门拦下，任务未入队
+    assert "拒绝" in json.dumps(llm.calls[1]["messages"], ensure_ascii=False)
+    assert "入场门" in json.dumps(llm.calls[1]["messages"], ensure_ascii=False)
+
+
+def test_phase_gate_allows_after_transition(env, tmp_path):
+    """阶段流转后（pentest 无 gate_types）同类型放行；非 passive 照旧要 conflict_keys。"""
+    packs = _phase_packs(tmp_path / "packs")
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call(
+            "p1", "publish_task",
+            {"task_type": "exploit", "objective": "尝试利用",
+             "conflict_keys": ["host:10.0.0.5"]})]},
+        {"tool_use": [ScriptedLLM.tool_call("d1", "done", {})]},
+    ])
+    orch = make_orch(env, llm, track="pentest", packs_root=packs,
+                     meta_loader=lambda: {"current_phase": "pentest"})
+    orch.tick()
+    tasks = TaskQueue(env[0]).list_tasks(env[1]["id"])
+    assert len(tasks) == 1 and tasks[0]["task_type"] == "exploit"
+
+
+def test_phase_section_injection(env, tmp_path):
+    """{phase_section} 槽：阶段名/goal/配比/门进度与拒收预告进 tick 系统提示；
+    meta 未接线=空段（脚本/旧测试零影响）。"""
+    packs = _phase_packs(tmp_path / "packs")
+    llm = ScriptedLLM([{"tool_use": [ScriptedLLM.tool_call("d1", "done", {})]}])
+    orch = make_orch(env, llm, track="pentest", packs_root=packs,
+                     meta_loader=lambda: {"current_phase": "recon"})
+    orch.tick()
+    system = llm.calls[0]["system"]
+    assert "当前处于「信息收集」（recon）" in system
+    assert "阶段目标：摸清资产面" in system
+    assert "未过" in system and "exploit 类任务会被拒收" in system
+    # 门已过 → 「等待阶段流转」
+    from core.blackboard.assets import register_asset
+    register_asset(env[0], env[1]["id"], "10.0.0.9", type_="host")
+    llm2 = ScriptedLLM([{"tool_use": [ScriptedLLM.tool_call("d1", "done", {})]}])
+    orch2 = make_orch(env, llm2, track="pentest", packs_root=packs,
+                      meta_loader=lambda: {"current_phase": "recon"})
+    assert "已过门" not in orch2._phase_section()  # 1 资产 < 10，仍未过
+    # meta 未接线（None loader）→ 空段
+    orch3 = make_orch(env, ScriptedLLM([{"tool_use": []}]), track="pentest",
+                      packs_root=packs)
+    assert orch3._phase_section() == ""

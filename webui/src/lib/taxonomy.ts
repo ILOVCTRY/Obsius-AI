@@ -49,14 +49,14 @@ export const capLabel = (c?: string | null): string =>
 export const domainLabel = (d?: string | null): string =>
   d ? (LEGACY_DOMAIN_LABELS[d] ?? TRACK_LABELS[d] ?? d) : ""
 
-/** 顶栏/列表徽章：「渗透测试 · Web」 */
-export const bindingBadge = (track?: string | null, caps?: string[] | null): string => {
+/** 顶栏/列表徽章（expert-pool M3）：「渗透测试 · 专家×4」；无绑定=存量直通，只显轨名 */
+export const bindingBadge = (track?: string | null, experts?: string[] | null): string => {
   const head = trackLabel(track)
-  const tail = (caps ?? []).map(capLabel).join("/")
-  return tail ? `${head} · ${tail}` : head
+  const n = experts?.length ?? 0
+  return n > 0 ? `${head} · 专家×${n}` : head
 }
 
-/** 选轨后的推荐能力包（新建向导弹窗默认勾选；可手动改） */
+/** 选轨后的推荐能力包（建项默认绑定；专家池 M3 后仅作存量展示与 captcha 门控兜底） */
 export const RECOMMENDED_CAPS: Record<string, string[]> = {
   ctf: ["binary"],
   pentest: ["web"],

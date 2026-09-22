@@ -114,6 +114,11 @@ export function eventStyle(kind: string, payload?: Record<string, unknown>): Eve
   if (kind === "approval.requested") return { label: "🔔 请求审批", className: "text-(--status-approval)", defaultOpen: true }
   if (kind.startsWith("approval.")) return { label: "🔔 审批决定", className: "text-(--status-approval)", defaultOpen: true }
   if (kind === "orch.proposed") return { label: "💡 编排提案", className: "text-amber-400", defaultOpen: true }
+  // 对话化编排器（M1/M2，§6.4）：对话流主渲染走 OrchChatPane 气泡（本样式供
+  // 「运行记录」/审计平铺兜底）；goal 确认/清空是人类决策留痕
+  if (kind === "orch.chat") return { label: "💬 编排对话", className: "text-primary", defaultOpen: false }
+  if (kind === "goal.confirm") return { label: "🎯 阶段目标确认", className: "text-amber-400", defaultOpen: true }
+  if (kind === "goal.clear") return { label: "🎯 阶段目标清空", className: "text-muted-foreground", defaultOpen: false }
   if (kind === "orch.tick.started")
     return { label: "⚙ 编排启动", className: "text-primary", defaultOpen: false }
   if (kind === "mission.derive")
@@ -343,6 +348,9 @@ export function eventSummary(payload: Record<string, unknown>,
       </span>
     )
   }
+  // 对话化编排器（M2）：goal.confirm/clear 摘要 = 目标文本（payload={goal:{text,…}}）
+  if (payload.goal && typeof (payload.goal as { text?: unknown }).text === "string")
+    return (payload.goal as { text: string }).text
   if (typeof payload.summary === "string") return payload.summary
   // 自由文本正文（advisor.intervention 等；message.inbox 的 payload 自带 kind 先被上面分支接住）
   if (typeof payload.text === "string" && payload.kind === undefined) return payload.text

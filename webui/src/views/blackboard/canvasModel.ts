@@ -9,6 +9,8 @@ export const GLOBAL_LANE = "__global__"   // C2 降噪：无筛选时单一全�
 
 export const CARD_W = 320          // w-80（2026-09-18 放大，替代 w-56）
 export const COL_W = 348           // 列宽（卡 320 + 列间距 28）
+export const COL_GAP = COL_W - CARD_W // 列间中缝宽 28（单向零重叠：垂直走廊在缝内）
+export const GAP_HALF = COL_GAP / 2   // 14：走廊 x 相对卡缘的偏移
 export const LANE_GAP = 44
 export const HEADER_H = 40
 export const CARD_STEP = 148       // 同列卡纵向步距（完整卡统一，C2 紧凑卡已废）
@@ -43,12 +45,14 @@ export function hostOf(f: Finding, byId: Map<string, Asset>): string {
 
 export interface LaneModel {
   lanes: Lane[]
-  /** finding.id → 槽位（col/row 网格已换算成 x/y；place 不再带严重度列语义） */
-  place: Map<string, { x: number; y: number; laneKey: string }>
+  /** finding.id → 槽位（col/row 网格已换算成 x/y；col/row 供边路由与弱边右向过滤） */
+  place: Map<string, { x: number; y: number; laneKey: string; col: number; row: number }>
   /** finding.id → host id/UNASSIGNED（全局布局=GLOBAL_LANE） */
   laneOf: Map<string, string>
   /** F13：真孤点 id 集合（强边/链边连通分量=1）——工具条计数/过滤用 */
   isolatedIds: Set<string>
+  /** 泳道网格占用：key `${laneKey}:${col}:${row}`（长边路由选空行带用） */
+  occupied: Set<string>
 }
 
 export interface BuildLanesOptions {
@@ -149,9 +153,10 @@ export function buildLanes(findings: Finding[], assets: Asset[],
 
   // 三分区放置（每泳道独立）：噪声（无连接的 info/low）最左 ｜ 串联居中 ｜ 孤立中高危最右。
   // 先给网格坐标 (col,row)，再按行统一定 y（C2 紧凑卡已废 2026-09-18，全部完整卡统一 CARD_STEP）。
-  const place = new Map<string, { x: number; y: number; laneKey: string }>()
+  const place = new Map<string, { x: number; y: number; laneKey: string; col: number; row: number }>()
   const isCompact = (f: Finding) => f.severity === "low" || f.severity === "info"
   const grid = new Map<string, { col: number; row: number }>()
+  const occupied = new Set<string>()  // `${laneKey}:${col}:${row}`——长边路由选空行带用
 
   for (const lane of lanes) {
     const members = sorted.filter((f) => laneOf.get(f.id) === lane.key)
@@ -183,34 +188,50 @@ export function buildLanes(findings: Finding[], assets: Asset[],
     let stripW = 0
     let rowCursor = 0
     for (const [, list] of comps) {
-      // 行分配：链上节点优先跟前任同行（边呈水平直线一一对照），被占则找本层最小空行
-      const ordered = [...list].sort((a, b) =>
-        layerOf(a.id) - layerOf(b.id) ||
-        a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id))
+      // 行分配（R3 类重心）：前驱同行优先保留（层差=1 同行=水平直线一一对照）；
+      // 同层多节点排序从 created_at 改按前继行均值升序（一轮类重心，减少边交叉）——
+      // 前驱均在更早层，逐层「排序→放置」，排序时全部前驱行已定。
       const localRow = new Map<string, number>()
       const usedLocal = new Set<string>()
       let rowsUsed = 0
-      for (const n of ordered) {
-        const L = layerOf(n.id)
-        const freeAt = (r: number) => !usedLocal.has(`${L}:${r}`)
-        let r = -1
-        for (const p of preds.get(n.id) ?? []) {
-          const pr = localRow.get(p)
-          if (pr !== undefined && freeAt(pr)) { r = pr; break }
+      const baryOf = (id: string): number => {
+        let s = 0
+        let c = 0
+        for (const p of preds.get(id) ?? []) {
+          const r = localRow.get(p)
+          if (r !== undefined) { s += r; c++ }
         }
-        if (r < 0) { r = 0; while (!freeAt(r)) r++ }
-        usedLocal.add(`${L}:${r}`)
-        localRow.set(n.id, r)
-        rowsUsed = Math.max(rowsUsed, r + 1)
+        return c ? s / c : Number.POSITIVE_INFINITY  // 无已布前驱 → 排层内末尾
       }
-      const width = Math.max(...ordered.map((n) => layerOf(n.id))) + 1
+      const byLayer = new Map<number, Finding[]>()
+      for (const n of list) {
+        const L = layerOf(n.id)
+        ;(byLayer.get(L) ?? byLayer.set(L, []).get(L)!).push(n)
+      }
+      for (const L of [...byLayer.keys()].sort((a, b) => a - b)) {
+        const freeAt = (r: number) => !usedLocal.has(`${L}:${r}`)
+        for (const n of byLayer.get(L)!.sort((a, b) =>
+          baryOf(a.id) - baryOf(b.id) ||
+          a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id))) {
+          let r = -1
+          for (const p of preds.get(n.id) ?? []) {
+            const pr = localRow.get(p)
+            if (pr !== undefined && freeAt(pr)) { r = pr; break }
+          }
+          if (r < 0) { r = 0; while (!freeAt(r)) r++ }
+          usedLocal.add(`${L}:${r}`)
+          localRow.set(n.id, r)
+          rowsUsed = Math.max(rowsUsed, r + 1)
+        }
+      }
+      const width = Math.max(...byLayer.keys()) + 1
       if (rowCursor > 0 && rowCursor + rowsUsed > BAND_ROWS) {
         stripCol += stripW
         stripW = 0
         rowCursor = 0
       }
-      for (const n of ordered) {
-        grid.set(n.id, { col: stripCol + layerOf(n.id), row: rowCursor + (localRow.get(n.id) ?? 0) })
+      for (const [id, lr] of localRow) {
+        grid.set(id, { col: stripCol + layerOf(id), row: rowCursor + lr })
       }
       stripW = Math.max(stripW, width)
       rowCursor += rowsUsed
@@ -233,7 +254,8 @@ export function buildLanes(findings: Finding[], assets: Asset[],
     for (const f of members) {
       const g = grid.get(f.id)
       if (!g) continue
-      place.set(f.id, { x: g.col * COL_W, y: rowY.get(g.row) ?? CARD_Y0, laneKey: lane.key })
+      place.set(f.id, { x: g.col * COL_W, y: rowY.get(g.row) ?? CARD_Y0, laneKey: lane.key, col: g.col, row: g.row })
+      occupied.add(`${lane.key}:${g.col}:${g.row}`)
     }
     lane.width = Math.max(1, chainEnd + orphanCols) * COL_W
     lane.height = Math.max(420, acc + 24)
@@ -254,12 +276,50 @@ export function buildLanes(findings: Finding[], assets: Asset[],
   // F13：真孤点集合（连通分量=1）——工具条「孤立节点」计数
   const isolatedIds = new Set(
     sorted.filter((f) => (compSize.get(compFind(f.id)) ?? 1) === 1).map((f) => f.id))
-  return { lanes, place, laneOf, isolatedIds }
+  return { lanes, place, laneOf, isolatedIds, occupied }
 }
 
 function laneOfContains(laneOf: Map<string, string>, key: string): boolean {
   for (const v of laneOf.values()) if (v === key) return true
   return false
+}
+
+// ---------- 边路由（单向零重叠：findings-canvas-dag-layout R1/R2，2026-09-22） ----------
+
+export interface Bend { x: number; y: number }
+
+/**
+ * 同泳道长边（层差>1）水平长跑的 y：取「中间列全空」的行带中心——该行带在所有
+ * 中间列都没有卡片，长跑构造上不穿卡；取距源/目标行中点最近者。全占用则落到
+ * 最后一行之下（r=maxRow+1 恒空）。渲染端按实测锚点在源列后/目标列前走廊垂直拐弯。
+ */
+export function longRunY(opts: {
+  sCol: number; sRow: number; tCol: number; tRow: number
+  occupiedIn: (col: number, row: number) => boolean
+  maxRow: number
+}): number {
+  const mid = (opts.sRow + opts.tRow) / 2
+  let best = opts.maxRow + 1
+  let bestDist = Math.abs(best - mid)
+  for (let r = 0; r <= opts.maxRow; r++) {
+    let free = true
+    for (let c = opts.sCol + 1; c < opts.tCol; c++) {
+      if (opts.occupiedIn(c, r)) { free = false; break }
+    }
+    const d = Math.abs(r - mid)
+    if (free && d < bestDist) { best = r; bestDist = d }
+  }
+  return CARD_Y0 + best * CARD_STEP + CARD_STEP / 2
+}
+
+/** R1②：弱边只画右向——col(target) ≤ col(source) 的不画（升级关系仍可从发现详情看）。 */
+export function isRightward(
+  e: { source: string; target: string },
+  place: LaneModel["place"],
+): boolean {
+  const s = place.get(e.source)
+  const t = place.get(e.target)
+  return !!s && !!t && t.col > s.col
 }
 
 // ---------- 三级边 ----------

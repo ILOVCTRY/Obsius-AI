@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from "react"
 import { Trash2 } from "lucide-react"
 import { api, pollJob } from "@/lib/api"
-import type { IntelOverview, ProjectMeta } from "@/lib/types"
-import { RECOMMENDED_CAPS, bindingBadge, capLabel, trackLabel, type Taxonomy } from "@/lib/taxonomy"
+import type { Expert, IntelOverview, ProjectMeta, TrackProfile } from "@/lib/types"
+import { bindingBadge, trackLabel, type Taxonomy } from "@/lib/taxonomy"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -15,7 +15,10 @@ import { cn } from "@/lib/utils"
 import { fmtDate, utcTitle } from "@/lib/datetime"
 
 // 页面 1（DESIGN.md §12）：项目列表 + 创建 + 删除（回收站式，DESIGN.md §5.3）
-// 项目绑定 = 场景轨（单选）× 能力包（多选）（DESIGN.md §4.5）
+// 项目绑定 = 场景轨（单选）× 专家组队（expert-pool M3：空=按轨全池存量直通）；
+// 场景档（M4a）预填组队/看板视图，知识继承（M4b）复用同源项目资产。
+
+const expertName = (e: Expert) => e.name || e.id
 
 export function ProjectsView({ onOpen }: { onOpen: (pid: string) => void }) {
   const [projects, setProjects] = useState<ProjectMeta[]>([])
@@ -23,7 +26,13 @@ export function ProjectsView({ onOpen }: { onOpen: (pid: string) => void }) {
   const [error, setError] = useState<string | null>(null)
   const [name, setName] = useState("")
   const [track, setTrack] = useState<string>("ctf")
-  const [caps, setCaps] = useState<string[]>(["binary"])
+  const [pool, setPool] = useState<Expert[]>([])
+  const [selected, setSelected] = useState<string[]>(["_generalist"])
+  const [expertSearch, setExpertSearch] = useState("")
+  const [profiles, setProfiles] = useState<TrackProfile[]>([])
+  const [profile, setProfile] = useState<string | null>(null)
+  const [inheritFrom, setInheritFrom] = useState<string | null>(null)
+  const [inheritOpen, setInheritOpen] = useState(false)
   const [creating, setCreating] = useState(false)
   const [confirmTarget, setConfirmTarget] = useState<ProjectMeta | null>(null)
   const [deleting, setDeleting] = useState(false)
@@ -36,25 +45,49 @@ export function ProjectsView({ onOpen }: { onOpen: (pid: string) => void }) {
   useEffect(() => {
     api.taxonomy().then((t) => {
       setTax(t)
-      const t0 = t.tracks[0]?.name ?? "ctf"
-      setTrack(t0)
-      setCaps(RECOMMENDED_CAPS[t0] ?? [])
+      setTrack(t.tracks[0]?.name ?? "ctf")
     }).catch(() => {})
+    // M3 virtual（编排器单例）不进组队多选
+    api.listExperts().then((es) => setPool(es.filter((e) => e.kind !== "virtual"))).catch(() => {})
   }, [])
 
+  // 专家是否服务本轨：tracks 缺省/null=全轨
+  const serves = (e: Expert, t: string) => !e.tracks || e.tracks.length === 0 || e.tracks.includes(t)
+
+  // 切轨：清场景档；组队剔除轨外专家，全剔则回退 _generalist（后端 422 前的前端兜底）
   const pickTrack = (t: string) => {
     setTrack(t)
-    setCaps(RECOMMENDED_CAPS[t] ?? [])
+    setProfile(null)
+    setProfiles([]) // 先清再拉，防旧轨档残留闪现
+    let alive = true
+    api.trackProfiles(t).then((ps) => { if (alive) setProfiles(ps) }).catch(() => {})
+    return () => { alive = false }
   }
-  const toggleCap = (c: string) =>
-    setCaps((cs) => cs.includes(c) ? cs.filter((x) => x !== c) : [...cs, c])
+  useEffect(() => pickTrack(track), [track]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    setSelected((sel) => {
+      const kept = sel.filter((id) => pool.find((e) => e.id === id && serves(e, track)))
+      return kept.length > 0 ? kept : ["_generalist"]
+    })
+  }, [track, pool]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const toggleExpert = (id: string) =>
+    setSelected((sel) => sel.includes(id) ? sel.filter((x) => x !== id) : [...sel, id])
+
+  // 场景档：预填组队（显式勾选优先于档缺省，勾后仍可微调）
+  const pickProfile = (p: TrackProfile) => {
+    if (profile === p.id) { setProfile(null); return }
+    setProfile(p.id)
+    if (p.experts?.length) setSelected(p.experts.filter((id) => id === "_generalist" || pool.find((e) => e.id === id && serves(e, track))))
+  }
 
   const create = async () => {
     if (!name.trim()) return
     setCreating(true)
     setError(null)
     try {
-      const p = await api.createProject(name.trim(), track, caps)
+      const p = await api.createProject(name.trim(), track, selected,
+        { profile, inherit_from: inheritFrom })
       setName("")
       onOpen(p.id)
     } catch (e) {
@@ -85,7 +118,7 @@ export function ProjectsView({ onOpen }: { onOpen: (pid: string) => void }) {
       <div className="mx-auto w-full max-w-3xl space-y-4 p-6">
       <div>
         <h1 className="text-lg font-semibold">项目</h1>
-        <p className="text-sm text-muted-foreground">项目 = 场景轨（单选）× 能力包（多选）；数据随 workspaces/ 项目目录隔离</p>
+        <p className="text-sm text-muted-foreground">项目 = 场景轨（单选）× 专家组队（不选=按轨全池）；能力面由专家技能自动推导，数据随 workspaces/ 项目目录隔离</p>
       </div>
 
       <Card>
@@ -112,7 +145,7 @@ export function ProjectsView({ onOpen }: { onOpen: (pid: string) => void }) {
                 key={t.name}
                 size="sm"
                 variant={track === t.name ? "default" : "outline"}
-                onClick={() => pickTrack(t.name)}
+                onClick={() => setTrack(t.name)}
                 title={t.description}
               >
                 {t.label || trackLabel(t.name)}
@@ -120,24 +153,100 @@ export function ProjectsView({ onOpen }: { onOpen: (pid: string) => void }) {
             ))}
           </div>
           <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-[10px] text-muted-foreground">能力包</span>
-            {(tax?.capabilities ?? []).map((c) => (
+            <span className="text-[10px] text-muted-foreground">场景档</span>
+            {profiles.map((p) => (
               <button
-                key={c.name}
-                onClick={() => toggleCap(c.name)}
-                title={c.description}
+                key={p.id}
+                onClick={() => pickProfile(p)}
+                title={p.description ?? p.id}
                 className={cn(
                   "rounded-md border px-2 py-0.5 text-xs",
-                  caps.includes(c.name)
+                  profile === p.id
                     ? "border-primary/50 bg-primary/10 text-primary"
                     : "text-muted-foreground hover:bg-accent/50",
                 )}
               >
-                {c.label || capLabel(c.name)}
+                {p.name || p.id}
               </button>
             ))}
-            {caps.length === 0 && (
-              <span className="text-[10px] text-(--status-approval)">未勾能力包：只有轨级技能/规则生效</span>
+            {profiles.length === 0 && (
+              <span className="text-[10px] text-muted-foreground">（本轨无内置档，手选组队）</span>
+            )}
+          </div>
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-muted-foreground">专家组队</span>
+              <Input
+                placeholder="搜索专家…"
+                className="h-6 w-40 text-[11px]"
+                value={expertSearch}
+                onChange={(e) => setExpertSearch(e.target.value)}
+              />
+              {selected.length === 0 && (
+                <span className="text-[10px] text-(--status-approval)">未选专家：按轨全池直通</span>
+              )}
+            </div>
+            {(["通用", "轨专属"] as const).map((group) => {
+              const members = pool
+                .filter((e) => group === "通用"
+                  ? !e.tracks || e.tracks.length === 0
+                  : (e.tracks?.length ?? 0) > 0 && e.tracks!.includes(track))
+                .filter((e) => {
+                  const q = expertSearch.trim().toLowerCase()
+                  if (!q) return true
+                  return e.id.toLowerCase().includes(q)
+                    || (e.name ?? "").toLowerCase().includes(q)
+                    || (e.description ?? "").toLowerCase().includes(q)
+                })
+              if (members.length === 0) return null
+              return (
+                <div key={group} className="flex items-start gap-1.5">
+                  <span className="mt-0.5 w-10 shrink-0 text-[10px] text-muted-foreground">{group}</span>
+                  {/* 等宽网格（2026-09-21）：chips 定宽列对齐，不再随内容长短参差 */}
+                  <div className="grid min-w-0 flex-1 grid-cols-[repeat(auto-fill,minmax(11rem,1fr))] gap-1.5">
+                    {members.map((e) => {
+                      const on = selected.includes(e.id)
+                      const persona = (e.persona ?? e.description ?? "").split("\n")[0]
+                      return (
+                        <button
+                          key={e.id}
+                          onClick={() => toggleExpert(e.id)}
+                          title={`${e.id}${persona ? `：${persona}` : ""}`}
+                          className={cn(
+                            "min-w-0 rounded-md border px-2 py-0.5 text-left text-xs",
+                            on
+                              ? "border-primary/50 bg-primary/10 text-primary"
+                              : "text-muted-foreground hover:bg-accent/50",
+                          )}
+                        >
+                          <span className="block truncate">{on ? "✓ " : ""}{expertName(e)}</span>
+                          {persona && (
+                            <span className="block truncate text-[10px] font-normal opacity-70">{persona}</span>
+                          )}
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+          <div>
+            <button className="text-[11px] text-muted-foreground hover:text-foreground"
+                    onClick={() => setInheritOpen((v) => !v)}>
+              {inheritOpen ? "▾" : "▸"} 知识继承{inheritFrom ? "（已选源）" : ""}
+            </button>
+            {inheritOpen && (
+              <div className="mt-1.5 flex items-center gap-2">
+                <span className="text-[10px] text-muted-foreground">从既有项目继承 binary 资产 / 函数库 / 蓝图（只增不覆盖）</span>
+                <select value={inheritFrom ?? ""} onChange={(e) => setInheritFrom(e.target.value || null)}
+                        className="rounded border bg-background px-1.5 py-0.5 text-xs [color-scheme:dark] [&>option]:bg-popover [&>option]:text-popover-foreground">
+                  <option value="">不继承</option>
+                  {projects.filter((p) => p.id).map((p) => (
+                    <option key={p.id} value={p.id}>{p.name}</option>
+                  ))}
+                </select>
+              </div>
             )}
           </div>
         </CardContent>
@@ -161,7 +270,7 @@ export function ProjectsView({ onOpen }: { onOpen: (pid: string) => void }) {
               "hover:border-(--ring) hover:bg-accent/50",
             )}
           >
-            <Badge variant="outline" className="font-mono">{bindingBadge(p.track, p.capabilities)}</Badge>
+            <Badge variant="outline" className="font-mono">{bindingBadge(p.track, p.experts)}</Badge>
             <div className="min-w-0 flex-1">
               <div className="truncate text-sm font-medium">{p.name}</div>
               <div className="font-mono text-xs text-muted-foreground">{p.id}</div>

@@ -1,0 +1,8 @@
+# 场景档：全栈解题队（expert-pool M4a 内置，§4.8 五件套；D6 快照物化即弃）
+name: 全栈解题队
+description: "六专家全上：triage 分诊后按题型直达各解题手，适合题型未知的比赛/刷题"
+experts: [triage, web-solver, crypto-solver, pwn-solver, reverse, forensics-solver]
+board_view: findings
+playbook: "triage 先行分诊全题 → 按题型分发各解题手并行推进 → flag 即报、思路落黑板汇 writeup"
+artifacts: [writeup, flag 记录]
+knowledge: [web, binary, crypto, forensics]

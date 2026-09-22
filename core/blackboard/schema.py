@@ -9,7 +9,22 @@
 
 import sqlite3
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 21
+
+# v20→v21（渗透分阶段工作流 M2，docs/plans/pentest-phased-workflow.md，2026-09-22）：
+# orchestrator_state 幂等补 derive_idle_rounds（auto_derive 连续 N 轮零发布的
+# 调度轮次计数——recon 门指标 idle_rounds 的现值源；任意有发布轮复位为 0）。
+
+# v19→v20（漏洞收录格式三件套，docs/plans/finding-report-format.md M1，2026-09-22）：
+# findings 幂等补 impact（危害描述：影响事实）/ remediation（修复建议：可落地）
+# 两列——报告「逐发现详情」三节模板的数据承载（复现步骤走 evidence.repro_steps
+# 约定键，不占列）。两列不进 verified 门禁（写入放行），报告侧才校验齐备。
+
+# v18→v19（执行轨迹链路 M2，docs/plans/execution-trace-chain.md §3.1 R3/R6，2026-09-22）：
+# chains 幂等补 origin（manual=人工策划链 / trace=任务收尾·verified 自动物化的轨迹链，
+# board_graph 链边查询显式只取 manual）+ chain_links 幂等补 trace_ref（物化幂等键
+# ='task-<task_id>'，人工链空串——重物化单事务按它 DELETE+重插，人工行零感知）。
+# node_type 扩 task/step（TEXT 列无 CHECK 约束，写新值零迁移）。
 
 # v17→v18（向指定会话直接发任务，DESIGN §6.4 定稿块 2026-09-20）：tasks 幂等补
 # target_session（''=公共池；非空=仅该窗可认领——claim 硬门控、claim_next WHERE
@@ -129,7 +144,9 @@ CREATE TABLE IF NOT EXISTS findings (
     rating_basis    TEXT NOT NULL DEFAULT '',  -- 判级依据（F11）：规则名+条款+一句话依据
     status          TEXT NOT NULL DEFAULT 'unverified',  -- unverified / verified / false-positive
     category        TEXT NOT NULL DEFAULT 'vuln',  -- C6 分两类：vuln=漏洞 / intel=有效发现·关键发现
-    evidence        TEXT NOT NULL DEFAULT '{}',  -- JSON：引用 event、请求响应、截图
+    impact          TEXT NOT NULL DEFAULT '',  -- v20 危害描述：影响事实（拿到什么/影响面，报告三件套）
+    remediation     TEXT NOT NULL DEFAULT '',  -- v20 修复建议：可落地（报告三件套）
+    evidence        TEXT NOT NULL DEFAULT '{}',  -- JSON：引用 event、请求响应、截图、repro_steps 复现步骤
     poc_artifact_id TEXT REFERENCES artifacts(id),
     confidence      REAL NOT NULL DEFAULT 0.5,
     dedup_key       TEXT NOT NULL,        -- 指纹：vuln_class/dedup_key；无键时=自身 id（永不合并）
@@ -162,6 +179,7 @@ CREATE TABLE IF NOT EXISTS chains (
     name       TEXT NOT NULL,
     goal       TEXT NOT NULL DEFAULT '',
     status     TEXT NOT NULL DEFAULT 'hypothesis',  -- hypothesis / validated / exploited
+    origin     TEXT NOT NULL DEFAULT 'manual',  -- v19：manual=人工策划 / trace=任务轨迹自动物化（board_graph 只画 manual）
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -170,9 +188,10 @@ CREATE TABLE IF NOT EXISTS chain_links (
     id         TEXT PRIMARY KEY,
     chain_id   TEXT NOT NULL REFERENCES chains(id),
     seq        INTEGER NOT NULL,
-    node_type  TEXT NOT NULL,            -- finding / func_kb / artifact
+    node_type  TEXT NOT NULL,            -- finding / func_kb / artifact / task / step（v19 扩后两类，无 CHECK 零迁移）
     node_id    TEXT NOT NULL,
     edge_note  TEXT NOT NULL DEFAULT '', -- 这条边为什么成立（如"溢出可覆盖返回地址"）
+    trace_ref  TEXT NOT NULL DEFAULT '', -- v19：物化幂等键（='task-<task_id>'；人工链空串——重物化按它整删重插）
     created_at TEXT NOT NULL
 );
 
@@ -262,6 +281,7 @@ CREATE TABLE IF NOT EXISTS orchestrator_state (
     last_replan_at        TEXT NOT NULL DEFAULT '',    -- v6：L2 自动重排节流时间戳（A5）
     last_derive_at        TEXT NOT NULL DEFAULT '',    -- v13：mission 自动派生上次判定时间（2026-09-18）
     last_derive_result    TEXT NOT NULL DEFAULT '',    -- v13：上次判定结果 published:n / empty / error:…
+    derive_idle_rounds    INTEGER NOT NULL DEFAULT 0,  -- v21：连续零发布调度轮次（阶段门 idle_rounds 现值源）
     updated_at            TEXT NOT NULL DEFAULT ''
 );
 
@@ -352,7 +372,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
     - v14→v15：http_history 由 DDL 的 IF NOT EXISTS 直接建表（F6 浏览器抓包/重发/爆破），
       无 ALTER，旧库打开即建。
     - v15→v16：assets/findings 幂等补 revision（H2 乐观锁：多窗并发改同一行时
-      写前比对 expected_revision，防丢失更新；每次写 +1）。"""
+      写前比对 expected_revision，防丢失更新；每次写 +1）。
+    - v18→v19：chains 幂等补 origin、chain_links 幂等补 trace_ref（执行轨迹链路，
+      见文件头版本注释）。
+    - v19→v20：findings 幂等补 impact/remediation（收录格式三件套的危害描述与
+      修复建议，写入放行不进门禁，见文件头版本注释）。"""
     cols = {r[1] for r in conn.execute("PRAGMA table_info(projects)")}
     if "track" not in cols:
         conn.execute("ALTER TABLE projects ADD COLUMN track TEXT NOT NULL DEFAULT ''")
@@ -396,11 +420,23 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if fin_cols and "category" not in fin_cols:  # v12（发现分两类：vuln/intel）
         conn.execute(
             "ALTER TABLE findings ADD COLUMN category TEXT NOT NULL DEFAULT 'vuln'")
+    for col in ("impact", "remediation"):  # v20（收录格式三件套：危害描述/修复建议）
+        if fin_cols and col not in fin_cols:
+            conn.execute(
+                f"ALTER TABLE findings ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
     for tbl in ("assets", "findings"):  # v16（H2 乐观锁 revision 列）
         cols = {r[1] for r in conn.execute(f"PRAGMA table_info({tbl})")}
         if cols and "revision" not in cols:
             conn.execute(
                 f"ALTER TABLE {tbl} ADD COLUMN revision INTEGER NOT NULL DEFAULT 1")
+    chain_cols = {r[1] for r in conn.execute("PRAGMA table_info(chains)")}
+    if chain_cols and "origin" not in chain_cols:  # v19（自动轨迹链隔离标）
+        conn.execute(
+            "ALTER TABLE chains ADD COLUMN origin TEXT NOT NULL DEFAULT 'manual'")
+    clink_cols = {r[1] for r in conn.execute("PRAGMA table_info(chain_links)")}
+    if clink_cols and "trace_ref" not in clink_cols:  # v19（物化幂等键）
+        conn.execute(
+            "ALTER TABLE chain_links ADD COLUMN trace_ref TEXT NOT NULL DEFAULT ''")
     os_tables = {r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='orchestrator_state'")}
     if os_tables:
@@ -417,6 +453,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
             if col not in os_cols:
                 conn.execute(
                     f"ALTER TABLE orchestrator_state ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+        if "derive_idle_rounds" not in os_cols:  # v21（阶段门空闲轮计数）
+            conn.execute(
+                "ALTER TABLE orchestrator_state ADD COLUMN"
+                " derive_idle_rounds INTEGER NOT NULL DEFAULT 0")
 
 
 def init_schema(conn: sqlite3.Connection) -> None:

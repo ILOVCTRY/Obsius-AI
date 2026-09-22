@@ -93,7 +93,7 @@ def test_schema_v7_migration(tmp_path):
     try:
         ver = board.conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
-        assert int(ver) == SCHEMA_VERSION == 18
+        assert int(ver) == SCHEMA_VERSION == 21
         task_cols = {r[1] for r in board.conn.execute("PRAGMA table_info(tasks)")}
         os_cols = {r[1] for r in board.conn.execute(
             "PRAGMA table_info(orchestrator_state)")}
@@ -108,6 +108,7 @@ def test_schema_v7_migration(tmp_path):
         assert "category" in fin_cols  # v12（发现分两类）
         fin_cols = {r[1] for r in board.conn.execute("PRAGMA table_info(findings)")}
         assert "rating_basis" in fin_cols  # v11（F11 判级依据）
+        assert {"impact", "remediation"} <= fin_cols  # v20（收录格式三件套）
         tables = {r[0] for r in board.conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
         assert "resource_leases" in tables
@@ -1096,7 +1097,7 @@ def test_schema_v11_migration_idempotent(tmp_path):
         board = Blackboard(str(db_path))
         ver = board.conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
-        assert int(ver) == SCHEMA_VERSION == 18
+        assert int(ver) == SCHEMA_VERSION == 21
         cols = {r[1] for r in board.conn.execute("PRAGMA table_info(findings)")}
         assert "rating_basis" in cols
         assert "category" in cols  # v12（发现分两类）
@@ -2163,6 +2164,96 @@ def test_gate_info_still_allowed_on_ctf(bb):
     assert r["severity"] == "info"
     r2 = bb.patch_finding(pid, r["id"], severity="low", track="ctf")
     assert r2["severity"] == "low"
+
+
+# ---------- 收录格式三件套（finding-report-format M1，2026-09-22） ----------
+
+def test_verified_gate_repro_steps(bb, project):
+    """渗透轨 verified 门禁新口径：repro_steps 至少一步 code/artifact_id 非空且
+    该步 expected 非空；旧结构 poc/pocs/poc_artifact_id 兼容直通；add/patch 同口径。"""
+    pid = project["id"]
+    good = [{"desc": "登录低权账号", "type": "http",
+             "code": "POST /login HTTP/1.1", "expected": "200 返回 token"}]
+    r = bb.add_finding(pid, "sqli", "注入", severity="low", status="verified",
+                       evidence={"repro_steps": good}, track="pentest")
+    assert r["id"]
+    # 只有 desc 无 code/artifact_id → 拒
+    with pytest.raises(ValueError, match="复现证据"):
+        bb.add_finding(pid, "sqli2", "注入2", severity="low", status="verified",
+                       evidence={"repro_steps": [{"desc": "打开页面", "expected": "x"}]},
+                       track="pentest")
+    # 有 code 无 expected → 拒（复现自证锚点缺失）
+    with pytest.raises(ValueError, match="复现证据"):
+        bb.add_finding(pid, "sqli3", "注入3", severity="low", status="verified",
+                       evidence={"repro_steps": [{"desc": "发包", "type": "cmd",
+                                                  "code": "curl http://x"}]},
+                       track="pentest")
+    # image 步骤（artifact_id 但 expected 空）不算过门禁
+    with pytest.raises(ValueError, match="复现证据"):
+        bb.add_finding(pid, "sqli6", "注入6", severity="low", status="verified",
+                       evidence={"repro_steps": [{"desc": "截图", "type": "image",
+                                                  "artifact_id": "art-img"}]},
+                       track="pentest")
+    # 旧结构兼容直通：pocs / poc_artifact_id（artifact 外键，须真实行）
+    assert bb.add_finding(pid, "sqli4", "注入4", severity="low", status="verified",
+                          evidence={"pocs": [{"http_raw": "GET /"}]},
+                          track="pentest")["id"]
+    art = bb.add_artifact(pid, "poc/x.py", kind="poc")
+    assert bb.add_finding(pid, "sqli5", "注入5", severity="low", status="verified",
+                          poc_artifact_id=art, track="pentest")["id"]
+    # patch 路径同口径：repro_steps 合规可升 verified，不合格拒
+    fid = bb.add_finding(pid, "authz", "越权", severity="low", track="pentest")["id"]
+    r = bb.patch_finding(pid, fid, status="verified", track="pentest",
+                         evidence={"repro_steps": good})
+    assert r["status"] == "verified"
+    with pytest.raises(ValueError, match="复现证据"):
+        bb.patch_finding(pid, fid, status="verified", track="pentest",
+                         evidence={"repro_steps": [{"desc": "看看"}]})
+
+
+def test_repro_steps_validation(bb, project):
+    """repro_steps 结构校验（全轨写入口）：非数组/缺 desc/非法 type/image 缺
+    artifact_id 一律 ValueError；旧值 http_raw 写入宽容（读时映射 http）。"""
+    pid = project["id"]
+    base = dict(severity="low", track="pentest")
+    with pytest.raises(ValueError, match="必须是步骤数组"):
+        bb.add_finding(pid, "s", "t", evidence={"repro_steps": "bad"}, **base)
+    with pytest.raises(ValueError, match="desc"):
+        bb.add_finding(pid, "s", "t",
+                       evidence={"repro_steps": [{"type": "http"}]}, **base)
+    with pytest.raises(ValueError, match="非法 type"):
+        bb.add_finding(pid, "s", "t",
+                       evidence={"repro_steps": [{"desc": "x", "type": "sql"}]}, **base)
+    with pytest.raises(ValueError, match="artifact_id"):
+        bb.add_finding(pid, "s", "t",
+                       evidence={"repro_steps": [{"desc": "x", "type": "image"}]}, **base)
+    r = bb.add_finding(pid, "s2", "t2",
+                       evidence={"repro_steps": [{"desc": "x", "type": "http_raw"}]}, **base)
+    assert r["id"]
+
+
+def test_repro_steps_union_merge_and_impact_remediation(bb, project):
+    """repro_steps 进证据并集（内容指纹去重追加，重复上报不堆步）；impact/
+    remediation 合并旧值非空保留、空缺由新报补入；patch 修订（空串=清空）。"""
+    pid = project["id"]
+    s1 = {"desc": "步骤一", "type": "http", "code": "GET / HTTP/1.1", "expected": "200"}
+    s2 = {"desc": "步骤二", "type": "cmd", "code": "curl -X POST http://x",
+          "expected": "admin"}
+    a = bb.add_finding(pid, "sqli", "注入", severity="low", impact="读库",
+                       evidence={"repro_steps": [s1]}, dedup_key="k1")["id"]
+    r = bb.add_finding(pid, "sqli", "注入", severity="medium", impact="读全库+拖库",
+                       remediation="参数化查询",
+                       evidence={"repro_steps": [dict(s1), s2]}, dedup_key="k1")
+    assert r["merged"] is True and r["severity"] == "medium"
+    row = bb.get_finding(pid, a)
+    assert row["evidence"]["repro_steps"] == [s1, s2]
+    assert row["impact"] == "读库"  # 旧值非空保留（不覆盖前人结论）
+    assert row["remediation"] == "参数化查询"  # 空缺由新报补入
+    # patch 修订：impact 清空 / remediation 改写，changed 进事件
+    out = bb.patch_finding(pid, a, impact="", remediation="升级 ORM 后参数化")
+    assert out["impact"] == "" and out["remediation"] == "升级 ORM 后参数化"
+    ev = [e for e in bb.recent_events(pid) if e["kind"] == "finding.updated"][-1]
+    assert {"impact", "remediation"} <= set(ev["payload"]["changed"])
 
 
 # ---------- v14 任务绑定角色 + 同 target 防碎闸 ----------

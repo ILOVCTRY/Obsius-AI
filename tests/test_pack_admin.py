@@ -1,6 +1,7 @@
-"""阶段 3A：角色/技能 CRUD + enabled 开关 + .history 版本管理 + doctor 端点。"""
+"""阶段 3A：技能 CRUD + enabled 开关 + .history 版本管理 + doctor 端点。
 
-import time
+角色 CRUD 已退役（expert-pool M2，2026-09-21）：写端点 410 护栏保留，
+角色盘上夹具随之移除；doctor 悬空引用改走专家口径。"""
 
 import pytest
 from fastapi.testclient import TestClient
@@ -26,10 +27,6 @@ def client(tmp_path):
     _write(packs / "tracks/ctf/track.yaml", "name: ctf\n")
     _write(packs / "tracks/ctf/rules/redlines.md", "# ctf 红线\n")
     _write(packs / "tracks/ctf/task_types.yaml", "generic: passive\nrecon: passive\n")
-    _write(packs / "tracks/ctf/roles/_generalist.yaml",
-           'name: _generalist\ndescription: "兜底"\nskills: null\ntask_types: null\n')
-    _write(packs / "tracks/ctf/roles/recon.yaml",
-           'name: recon\ndescription: "侦察"\nskills: [demo-skill]\ntask_types: [recon]\n')
 
     app = create_app(workspace_root=str(tmp_path / "workspaces"),
                      packs_root=str(packs), tools_root=None,
@@ -40,63 +37,95 @@ def client(tmp_path):
         yield c
 
 
-# ---------------- 角色：新建 / 克隆 / 删除 ----------------
+# ---------------- 角色 CRUD 退役（expert-pool M2）：写端点 410，读端点切 experts 源 ----------------
 
-def test_role_create_clone_and_trash_delete(client):
-    # 空白模板
-    r = client.post("/api/tracks/ctf/roles", json={"name": "spare"})
-    assert r.status_code == 201 and r.json()["cloned"] is None
-    roles = {x["file"]: x for x in client.get("/api/tracks/ctf/roles").json()}
-    assert "spare" in roles
-    assert roles["spare"]["name"] == "spare"  # 无 display_name → 显示名回退 slug
-
-    # 中文显示名（display_name 写 yaml name 行；slug 仍 ASCII）
-    assert client.post("/api/tracks/ctf/roles",
-                       json={"name": "spy", "display_name": "备胎"}).status_code == 201
-    roles = {x["file"]: x for x in client.get("/api/tracks/ctf/roles").json()}
-    assert roles["spy"]["name"] == "备胎"
-
-    # 重名 409 / 非法名 422（slug 拒中文；display_name 禁 #）/ 未知轨 404
-    assert client.post("/api/tracks/ctf/roles", json={"name": "spare"}).status_code == 409
-    assert client.post("/api/tracks/ctf/roles", json={"name": "../x"}).status_code == 422
-    assert client.post("/api/tracks/ctf/roles", json={"name": "中文角色"}).status_code == 422
-    assert client.post("/api/tracks/ctf/roles",
-                       json={"name": "a1", "display_name": "含#井号"}).status_code == 422
-    assert client.post("/api/tracks/ctf/roles",
-                       json={"name": "a2", "display_name": "含:冒号"}).status_code == 422
-    assert client.post("/api/tracks/nope/roles", json={"name": "spare"}).status_code == 404
-
-    # 克隆：字段照抄，显示名换新值
-    r = client.post("/api/tracks/ctf/roles",
-                    json={"name": "recon-copy", "display_name": "侦察二号",
-                          "clone_from": "recon"})
-    assert r.status_code == 201 and r.json()["cloned"] == "recon"
-    copied = {x["file"]: x for x in client.get("/api/tracks/ctf/roles").json()}["recon-copy"]
-    assert copied["skills"] == ["demo-skill"] and copied["task_types"] == ["recon"]
-    assert copied["name"] == "侦察二号"
-    assert client.post("/api/tracks/ctf/roles",
-                       json={"name": "c2", "clone_from": "ghost"}).status_code == 404
-
-    # _generalist 受保护
-    assert client.delete("/api/tracks/ctf/roles/_generalist").status_code == 409
-    # 删除进回收站，可在磁盘找到 .bak；再删 404
-    r = client.delete("/api/tracks/ctf/roles/recon-copy")
-    assert r.status_code == 200 and r.json()["trash"].endswith(".bak")
-    assert client.delete("/api/tracks/ctf/roles/recon-copy").status_code == 404
-    trash = list((client.packs / "tracks/ctf/roles/.history/trash").glob("*"))
-    assert any(p.name.startswith("recon-copy.") and p.is_file() for p in trash)
-    roles_now = client.get("/api/tracks/ctf/roles").json()
-    assert all(x["file"] != "recon-copy" for x in roles_now)
+def test_role_crud_retired_410(client):
+    """角色由 packs/experts/ 单文件池管理，轨角色写端点退役返 410（专家管理 UI 随 M3 落地）。"""
+    assert client.post("/api/tracks/ctf/roles", json={"name": "spare"}).status_code == 410
+    assert client.put("/api/tracks/ctf/roles/recon",
+                      json={"description": "x"}).status_code == 410
+    assert client.delete("/api/tracks/ctf/roles/recon").status_code == 410
+    # 读端点仍在：数据源已切 experts/ 池（本夹具无专家 → 空清单）
+    assert client.get("/api/tracks/ctf/roles").status_code == 200
+    assert client.get("/api/tracks/ctf/roles").json() == []
 
 
-def test_role_delete_same_second_never_overwrites(client):
-    """同秒二次删除（删→建→删）回收站不得覆盖首件。"""
-    client.post("/api/tracks/ctf/roles", json={"name": "temp"})
-    client.delete("/api/tracks/ctf/roles/temp")
-    client.post("/api/tracks/ctf/roles", json={"name": "temp"})
-    client.delete("/api/tracks/ctf/roles/temp")
-    trash = list((client.packs / "tracks/ctf/roles/.history/trash").glob("temp.*"))
-    assert len(trash) == 2
+# ---------------- 专家池 CRUD（expert-pool M3：packs/experts/ 单文件池管理） ----------------
+
+def _expert_payload(**over):
+    body = {"name": "测试专家", "description": "M3 CRUD 测试", "persona": "测试 persona",
+            "tracks": ["ctf"], "skills": ["demo-skill"], "task_types": ["generic"],
+            "default_noise": "passive", "tools": ["run_cmd"], "max_runtime": "long",
+            "max_steps": 120,
+            "variants": {"ctf": {"persona": "ctf 专属 persona"}}}
+    body.update(over)
+    return body
+
+
+def test_expert_crud_lifecycle(client):
+    """新建（yaml 平铺序列化 + variants 平铺键）→ 读视图 → PUT 全字段覆写
+    （None 不落键=全量语义）→ 删除进回收站；重名 409、protected 拒删。"""
+    _write(client.packs / "experts/_generalist.yaml",
+           "name: 通用\nskills: null\nprotected: true\n")
+    r = client.post("/api/experts", json={"id": "test-expert", **_expert_payload()})
+    assert r.status_code == 201, r.text
+    raw = (client.packs / "experts/test-expert.yaml").read_text(encoding="utf-8")
+    assert "name: 测试专家" in raw and "skills: [demo-skill]" in raw
+    assert "variant_ctf_persona: ctf 专属 persona" in raw and "max_steps: 120" in raw
+
+    view = client.get("/api/experts/test-expert").json()
+    assert view["name"] == "测试专家" and view["tracks"] == ["ctf"]
+    assert view["skills"] == ["demo-skill"] and view["max_steps"] == 120
+    assert view["variants"] == {"ctf": {"persona": "ctf 专属 persona"}}
+    assert view["file"] == "experts/test-expert.yaml"
+    assert {"test-expert", "_generalist"} <= {e["id"] for e in client.get("/api/experts").json()}
+
+    # PUT 全字段覆写：未提交字段不落键（skills 缺键 = 全量专家语义）
+    r = client.put("/api/experts/test-expert",
+                   json={"name": "改名", "tracks": ["ctf"], "variants": {}})
+    assert r.status_code == 200
+    raw = (client.packs / "experts/test-expert.yaml").read_text(encoding="utf-8")
+    assert "name: 改名" in raw and "skills" not in raw and "persona" not in raw
+    view = client.get("/api/experts/test-expert").json()
+    assert view["skills"] is None and view["variants"] == {}
+
+    assert client.post("/api/experts",
+                       json={"id": "test-expert", **_expert_payload()}).status_code == 409
+    assert client.delete("/api/experts/_generalist").status_code == 409
+    assert client.delete("/api/experts/test-expert").status_code == 200
+    assert client.get("/api/experts/test-expert").status_code == 404
+    assert client.delete("/api/experts/test-expert").status_code == 404
+    assert list((client.packs / "experts/.history/trash").glob("test-expert.*.bak"))
+
+
+def test_expert_crud_validation(client):
+    """写端点前置校验（doctor 同口径前移）：id 形制 / 未知技能 / 未知轨 /
+    轨变体轨名 / 未注册任务类型 / max_steps / PUT 不存在 404。"""
+    r = client.post("/api/experts", json={"id": "Bad_ID", "name": "x"})
+    assert r.status_code == 422 and "专家 id" in r.json()["detail"]
+    r = client.post("/api/experts", json={"id": "t1", "skills": ["ghost-skill"]})
+    assert r.status_code == 422 and "未知技能" in r.json()["detail"]
+    r = client.post("/api/experts", json={"id": "t1", "tracks": ["nope"]})
+    assert r.status_code == 422 and "场景轨" in r.json()["detail"]
+    r = client.post("/api/experts",
+                    json={"id": "t1", "variants": {"pentest": {"persona": "x"}}})
+    assert r.status_code == 422 and "轨变体" in r.json()["detail"]
+    r = client.post("/api/experts", json={"id": "t1", "task_types": ["nope-type"]})
+    assert r.status_code == 422 and "任务类型" in r.json()["detail"]
+    assert client.post("/api/experts", json={"id": "t1", "max_steps": 0}).status_code == 422
+    assert client.put("/api/experts/ghost", json={"name": "x"}).status_code == 404
+
+
+def test_track_profiles_endpoint(client):
+    """场景档清单端点（M4a）：目录缺省=空；档案=文件，读视图带 id/name 五件套字段。"""
+    assert client.get("/api/tracks/ctf/profiles").json() == []
+    _write(client.packs / "tracks/ctf/profiles/p1.yaml",
+           "name: 档一\nexperts: [_generalist]\nboard_view: board\n"
+           "playbook: 一句话剧本\nartifacts: [writeup]\n")
+    profs = client.get("/api/tracks/ctf/profiles").json()
+    assert len(profs) == 1 and profs[0]["id"] == "p1"
+    assert profs[0]["name"] == "档一" and profs[0]["board_view"] == "board"
+    assert profs[0]["experts"] == ["_generalist"] and profs[0]["playbook"] == "一句话剧本"
 
 
 # ---------------- 技能：向导新建 / enabled 开关 / 删除 ----------------
@@ -193,11 +222,12 @@ def test_history_list_diff_rollback_roundtrip(client):
 
 
 def test_history_put_creates_version_and_rejects_traversal(client):
-    # PUT 编辑自动留版本（<ts>_<file> 命名）
-    client.put("/api/tracks/ctf/roles/recon", json={"description": "改过了"})
+    # PUT 编辑自动留版本（<ts>_<file> 命名；角色 PUT 已退役 M2，改用技能 PUT 验同一备份链路）
+    client.put("/api/capabilities/web/skills/demo-skill",
+               json={"content": _SKILL.replace("BODY_MARKER", "改过了")})
     versions = client.get("/api/packs/history", params={
-        "file": "tracks/ctf/roles/recon.yaml"}).json()["versions"]
-    assert len(versions) == 1 and versions[0]["version"].endswith("_recon.yaml")
+        "file": "capabilities/web/skills/demo-skill/SKILL.md"}).json()["versions"]
+    assert len(versions) == 1 and versions[0]["version"].endswith("_SKILL.md")
 
     # 防穿越：越层 / 非 packs 前缀 / 伪造 version 段
     assert client.get("/api/packs/history",
@@ -232,9 +262,10 @@ def test_rules_missing_returns_200_with_exists_false(client):
 # ---------------- doctor 端点 ----------------
 
 def test_doctor_endpoint_flags_dangling_reference(client):
-    r = client.put("/api/tracks/ctf/roles/recon", json={"skills": ["ghost-skill"]})
-    assert r.status_code == 200
+    # expert-pool M2：悬空引用体检走专家口径（role-skill-missing 随 roles/ 退役）
+    _write(client.packs / "experts/bad-expert.yaml",
+           "name: bad-expert\nskills: [ghost-skill]\n")
     rep = client.get("/api/packs/doctor").json()
     assert rep["counts"]["error"] >= 1
-    assert any(i["code"] == "role-skill-missing" and "ghost-skill" in i["message"]
+    assert any(i["code"] == "expert-skill-missing" and "ghost-skill" in i["message"]
                for i in rep["issues"])

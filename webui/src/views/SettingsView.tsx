@@ -2,11 +2,10 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { Group, Panel, Separator } from "react-resizable-panels"
 import { api } from "@/lib/api"
 import type {
-  KbRefHit, KbSourceTree, LlmProvider, McpServer, PackRole,
+  Expert, KbRefHit, KbSourceTree, LlmProvider, McpServer,
   SkillDef, SkillDetail, SkillVocab,
 } from "@/lib/types"
 import { capLabel, trackLabel, type Taxonomy } from "@/lib/taxonomy"
-import { roleLabel } from "@/lib/roles"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -21,7 +20,7 @@ import { DoctorBar } from "@/components/settings/DoctorBar"
 import { HistoryButton } from "@/components/settings/HistoryDialog"
 import { MatrixPane } from "@/components/settings/MatrixPane"
 import {
-  KbCreateDialog, KbRenameDialog, RoleCreateDialog, SkillCreateDialog, type SkillSource,
+  ExpertCreateDialog, KbCreateDialog, KbRenameDialog, SkillCreateDialog, type SkillSource,
 } from "@/components/settings/CreateDialogs"
 import { SkillEditor, SKILL_MD_PREFIX, type SkillEditorHandle } from "@/components/settings/SkillEditor"
 import { KbPane, refsFromError } from "@/components/settings/KbPane"
@@ -39,11 +38,11 @@ function packsChanged() {
   window.dispatchEvent(new Event("packs-changed"))
 }
 
-// doctor 跳转指令（跨 tab/轨/包选中具体角色或技能）
-interface RoleFocus { track: string; role: string; n: number }
+// doctor 跳转指令（跨 tab/轨/包选中具体专家或技能）
+interface ExpertFocus { id: string; n: number }
 interface SkillFocus { source: SkillSource; pack: string; name: string; n: number }
 
-// 设置页（DESIGN.md §12 页面 6-9）：角色（轨）/ Skill（轨+能力包，含路由试算）/
+// 设置页（DESIGN.md §12 页面 6-9）：专家池（packs/experts/ 单文件池）/ Skill（轨+能力包，含路由试算）/
 // 红线（轨+能力包）/ owners（轨）/ 模型 / MCP。
 // 修改经 core API 写 packs 文件（写入前留 .history）；改动在下次开窗生效，在跑会话不受影响。
 
@@ -64,8 +63,8 @@ export function SettingsView({ nav, pid }: {
   const [tax, setTax] = useState<Taxonomy | null>(null)
   const [track, setTrack] = useState("ctf")
   const [cap, setCap] = useState("web")
-  const [tab, setTab] = useState("roles")
-  const [roleFocus, setRoleFocus] = useState<RoleFocus | null>(null)
+  const [tab, setTab] = useState("experts")
+  const [expertFocus, setExpertFocus] = useState<ExpertFocus | null>(null)
   const [skillFocus, setSkillFocus] = useState<SkillFocus | null>(null)
   const [ruleFocus, setRuleFocus] = useState<RuleFocus | null>(null)
   const [pendingN, setPendingN] = useState(0)
@@ -119,9 +118,9 @@ export function SettingsView({ nav, pid }: {
   // doctor 详情跳转：按 target 路径切 tab/轨/包并选中具体条目
   const navigateTarget = (target: string): boolean => {
     let m: RegExpMatchArray | null
-    if ((m = target.match(/^tracks\/([\w.-]+)\/roles\/([\w.-]+)\.yaml$/))) {
-      setTrack(m[1]); setTab("roles")
-      setRoleFocus({ track: m[1], role: m[2], n: Date.now() })
+    if ((m = target.match(/^experts\/([\w.-]+)\.yaml$/))) {
+      setTab("experts")
+      setExpertFocus({ id: m[1], n: Date.now() })
       return true
     }
     if ((m = target.match(/^tracks\/([\w.-]+)\/skills\/([\w.-]+)\/SKILL\.md$/))) {
@@ -165,7 +164,7 @@ export function SettingsView({ nav, pid }: {
       <Tabs value={tab} onValueChange={setTab} className="min-h-0 flex-1 flex-col gap-0">
         <TabsList className="w-full shrink-0 justify-start rounded-none border-b bg-transparent p-0">
           {[
-            ["roles", "角色"], ["skills", "Skill"], ["matrix", "矩阵"], ["rules", "红线"],
+            ["experts", "专家"], ["skills", "Skill"], ["matrix", "矩阵"], ["rules", "红线"],
             ["llm", "模型"], ["mcp", "MCP"], ["intel", "情报源"], ["proposals", "提案"],
           ].map(([k, label]) => (
             <TabsTrigger key={k} value={k} className="rounded-none border-b-2 px-3 py-1.5 text-xs">
@@ -176,7 +175,7 @@ export function SettingsView({ nav, pid }: {
             </TabsTrigger>
           ))}
         </TabsList>
-        <TabsContent value="roles" className="min-h-0 flex-1"><RolesPane track={track} focus={roleFocus} /></TabsContent>
+        <TabsContent value="experts" className="min-h-0 flex-1"><ExpertsPane tax={tax} focus={expertFocus} /></TabsContent>
         <TabsContent value="skills" className="min-h-0 flex-1"><SkillsPane tax={tax} track={track} cap={cap} focus={skillFocus} /></TabsContent>
         <TabsContent value="matrix" className="min-h-0 flex-1">
           <MatrixPane tax={tax} track={track}
@@ -198,18 +197,19 @@ export function SettingsView({ nav, pid }: {
   )
 }
 
-// ---------- 角色（轨级）：列表 + 表单编辑 ----------
+// ---------- 专家池（expert-pool M3）：packs/experts/ 单文件池，全池列表 + 全字段覆写表单 ----------
 
 const RUNTIME_LEVELS = ["", "host", "wsl", "docker", "sandbox"]
 const NOISE_LEVELS = ["", "passive", "low", "medium", "high"]
 
-function RolesPane({ track, focus }: { track: string; focus: RoleFocus | null }) {
-  const [roles, setRoles] = useState<PackRole[]>([])
+function ExpertsPane({ tax, focus }: { tax: Taxonomy | null; focus: ExpertFocus | null }) {
+  const [experts, setExperts] = useState<Expert[]>([])
   const [selected, setSelected] = useState<string | null>(null)
-  const [displayName, setDisplayName] = useState("")   // 中文显示名；留空 = 重置为文件名
+  const [displayName, setDisplayName] = useState("")   // 中文显示名；留空 = 用专家 id
   const [description, setDescription] = useState("")
   const [persona, setPersona] = useState("")
-  const [skills, setSkills] = useState("")       // 逗号分隔；空 = 白名单关闭（null）
+  const [trackSel, setTrackSel] = useState<string[]>([]) // 空 = null = 服务全轨
+  const [skills, setSkills] = useState("")       // 逗号分隔；空 = 不落键（全量专家语义）
   const [taskTypes, setTaskTypes] = useState("")
   const [tools, setTools] = useState("")
   const [noise, setNoise] = useState("")
@@ -222,48 +222,56 @@ function RolesPane({ track, focus }: { track: string; focus: RoleFocus | null })
   const [busy, setBusy] = useState(false)
 
   const reload = useCallback(() => {
-    // 竞态守卫：切轨后旧轨响应晚到不得覆盖新轨列表（进设置页先默认 ctf 再跟项目切轨，双请求竞速）
     let alive = true
-    api.trackRoles(track).then((rs) => {
+    // M3 virtual（编排器单例，不入 experts/*.yaml）不进专家池管理
+    api.listExperts().then((es) => {
       if (!alive) return
-      setRoles(rs)
-      setSelected((cur) => cur && rs.some((r) => r.file === cur) ? cur : (rs[0]?.file ?? null))
+      const pool = es.filter((e) => e.kind !== "virtual")
+      setExperts(pool)
+      setSelected((cur) => cur && pool.some((e) => e.id === cur) ? cur : (pool[0]?.id ?? null))
     }).catch(() => {})
     return () => { alive = false }
-  }, [track])
+  }, [])
   useEffect(() => reload(), [reload])
 
-  // doctor/矩阵跳转：选中指定角色
+  // doctor 跳转：选中指定专家
   useEffect(() => {
-    if (focus && focus.track === track) setSelected(focus.role)
-  }, [focus, track])
+    if (focus) setSelected(focus.id)
+  }, [focus])
+
+  const cur = experts.find((e) => e.id === selected)
 
   useEffect(() => {
-    const r = roles.find((x) => x.file === selected)
-    if (!r) return
-    setDisplayName(r.name && r.name !== r.file ? r.name : "")
-    setDescription(r.description ?? "")
-    setPersona(r.persona ?? "")
-    setSkills((r.skills ?? []).join(", "))
-    setTaskTypes((r.task_types ?? []).join(", "))
-    setTools((r.tools ?? []).join(", "))
-    setNoise(r.default_noise ?? "")
-    setRuntime(r.max_runtime ?? "")
-    setSteps(r.max_steps != null ? String(r.max_steps) : "")
+    if (!cur) return
+    setDisplayName(cur.name && cur.name !== cur.id ? cur.name : "")
+    setDescription(cur.description ?? "")
+    setPersona(cur.persona ?? "")
+    setTrackSel(cur.tracks ?? [])
+    setSkills((cur.skills ?? []).join(", "))
+    setTaskTypes((cur.task_types ?? []).join(", "))
+    setTools((cur.tools ?? []).join(", "))
+    setNoise(cur.default_noise ?? "")
+    setRuntime(cur.max_runtime ?? "")
+    setSteps(cur.max_steps != null ? String(cur.max_steps) : "")
     setSaved(false)
     setErr(null)
-  }, [roles, selected])
+  }, [cur])
+
+  const toggleTrack = (t: string) =>
+    setTrackSel((ts) => ts.includes(t) ? ts.filter((x) => x !== t) : [...ts, t])
 
   const save = async () => {
-    if (!selected) return
+    if (!cur) return
     const toList = (s: string) => s.split(/[,，]/).map((x) => x.trim()).filter(Boolean)
     const stepsTrim = steps.trim()
     try {
-      await api.updateTrackRole(track, selected, {
-        name: displayName.trim(),   // 空串 = 重置为文件名（后端语义）
-        description,
-        persona,
-        skills: skills.trim() ? toList(skills) : null,        // 空 = 白名单关闭
+      // 全字段覆写（表单即最终态）：空值=null 不落键（skills 缺键 = 全量专家语义）
+      await api.updateExpert(cur.id, {
+        name: displayName.trim() || null,
+        description: description.trim() || null,
+        persona: persona.trim() || null,
+        tracks: trackSel.length ? trackSel : null,
+        skills: skills.trim() ? toList(skills) : null,
         task_types: taskTypes.trim() ? toList(taskTypes) : null,
         tools: tools.trim() ? toList(tools) : null,
         default_noise: noise.trim() || null,
@@ -284,8 +292,8 @@ function RolesPane({ track, focus }: { track: string; focus: RoleFocus | null })
     setBusy(true)
     setErr(null)
     try {
-      await api.deleteTrackRole(track, confirmDel)
-      setSelected((cur) => cur === confirmDel ? null : cur)
+      await api.deleteExpert(confirmDel)
+      setSelected((c) => c === confirmDel ? null : c)
       packsChanged()
       reload()
     } catch (e) {
@@ -301,46 +309,65 @@ function RolesPane({ track, focus }: { track: string; focus: RoleFocus | null })
       <ScrollArea className="w-52 shrink-0 border-r">
         <div className="p-2">
           <Button size="sm" variant="outline" className="mb-1 h-7 w-full text-[11px]"
-                  onClick={() => setCreateOpen(true)}>＋ 新建 / 克隆角色</Button>
-          {roles.map((r) => (
-            <div key={r.file}
+                  onClick={() => setCreateOpen(true)}>＋ 新建专家</Button>
+          {experts.map((e) => (
+            <div key={e.id}
                  className={cn("group flex items-center rounded text-xs",
-                   selected === r.file && "bg-primary/10 text-primary")}>
+                   selected === e.id && "bg-primary/10 text-primary")}>
               <button
                 className="min-w-0 flex-1 truncate rounded px-2 py-1.5 text-left font-mono hover:bg-accent/40"
-                onClick={() => setSelected(r.file)}
-                title={r.description ?? undefined}>
-                {roleLabel(r)}
+                onClick={() => setSelected(e.id)}
+                title={`${e.id}${e.description ? ` · ${e.description}` : ""}`}>
+                {e.name || e.id}
+                <span className="ml-1 text-[9px] text-muted-foreground">
+                  {!e.tracks?.length ? "全轨" : e.tracks.join("/")}
+                </span>
               </button>
-              {r.file !== "_generalist" && (
+              {!e.protected && (
                 <button className="px-1.5 text-[10px] text-(--status-error) opacity-0 transition-opacity group-hover:opacity-100"
-                        title="删除（移入 .history/trash，可恢复）"
-                        onClick={() => setConfirmDel(r.file)}>✕</button>
+                        title="删除（移入 experts/.history/trash，可恢复）"
+                        onClick={() => setConfirmDel(e.id)}>✕</button>
               )}
             </div>
           ))}
-          {roles.length === 0 && <p className="p-2 text-xs text-muted-foreground">该轨暂无角色</p>}
+          {experts.length === 0 && <p className="p-2 text-xs text-muted-foreground">专家池为空</p>}
         </div>
       </ScrollArea>
-      <div className="flex min-w-0 flex-1 flex-col gap-2 p-3">
-        {selected ? (
+      <div className="flex min-w-0 flex-1 flex-col gap-2 overflow-y-auto p-3">
+        {cur ? (
           <>
             <div className="flex items-center gap-2">
-              <span className="font-mono text-sm">{track}/{selected}</span>
+              <span className="font-mono text-sm">{cur.file}</span>
+              {cur.protected && <span className="text-[10px] text-muted-foreground">受保护（拒删，可编辑）</span>}
               <span className="flex-1" />
               {err && <span className="text-[10px] text-(--status-error)">{err}</span>}
               <Saved saved={saved} />
-              <HistoryButton file={`tracks/${track}/roles/${selected}.yaml`} onRolledBack={reload} />
+              {cur.file && <HistoryButton file={cur.file} onRolledBack={reload} />}
               <Button size="sm" onClick={save}>保存</Button>
             </div>
-            <label className="text-[10px] text-muted-foreground">显示名（可中文；留空 = 用文件名 {selected}；界面各处展示用）</label>
+            <label className="text-[10px] text-muted-foreground">显示名（可中文；留空 = 用专家 id {cur.id}；界面各处展示用）</label>
             <Input value={displayName} onChange={(e) => setDisplayName(e.target.value)} className="text-xs"
-                   placeholder={`如：${selected.replace(/^_/, "")}`} />
-            <label className="text-[10px] text-muted-foreground">职责 description（编排开窗目录的一句话说明）</label>
+                   placeholder={`如：${cur.id.replace(/^_/, "")}`} />
+            <label className="text-[10px] text-muted-foreground">职责 description（编排开窗目录与组队列表的一句话说明）</label>
             <Input value={description} onChange={(e) => setDescription(e.target.value)} className="text-xs"
                    placeholder="如：外网打点与入口利用" />
-            <label className="text-[10px] text-muted-foreground">人设 persona（注入系统提示）</label>
+            <label className="text-[10px] text-muted-foreground">人设 persona（注入系统提示；轨变体可按轨覆写）</label>
             <Textarea value={persona} onChange={(e) => setPersona(e.target.value)} className="min-h-16 text-xs" />
+            <div>
+              <label className="text-[10px] text-muted-foreground">服务轨 tracks（不选 = 全轨通用）</label>
+              <div className="mt-1 flex flex-wrap gap-1">
+                {(tax?.tracks ?? []).map((t) => (
+                  <button key={t.name}
+                          onClick={() => toggleTrack(t.name)}
+                          className={cn("rounded border px-2 py-0.5 text-[11px]",
+                            trackSel.includes(t.name)
+                              ? "border-primary/50 bg-primary/10 text-primary"
+                              : "text-muted-foreground hover:bg-accent/50")}>
+                    {t.label || trackLabel(t.name)}
+                  </button>
+                ))}
+              </div>
+            </div>
             <div className="grid grid-cols-2 gap-2">
               <div>
                 <label className="text-[10px] text-muted-foreground">默认噪声预算 default_noise</label>
@@ -355,27 +382,36 @@ function RolesPane({ track, focus }: { track: string; focus: RoleFocus | null })
                 </select>
               </div>
             </div>
-            <label className="text-[10px] text-muted-foreground">技能白名单 skills（逗号分隔；留空 = 不过滤，自由竞争）</label>
+            <label className="text-[10px] text-muted-foreground">技能白名单 skills（逗号分隔；留空 = 不限定（全量专家，能力面=全部能力包））</label>
             <Input value={skills} onChange={(e) => setSkills(e.target.value)} className="font-mono text-xs" placeholder="recon-asset-enum, web-strike-entry" />
-            <label className="text-[10px] text-muted-foreground">任务类型 task_types（Worker 认领过滤器；留空 = 不限）</label>
+            <label className="text-[10px] text-muted-foreground">任务类型 task_types（Worker 认领过滤器；按各轨注册表并集体检；留空 = 不限）</label>
             <Input value={taskTypes} onChange={(e) => setTaskTypes(e.target.value)} className="font-mono text-xs" placeholder="recon, exploit" />
             <label className="text-[10px] text-muted-foreground">工具白名单 tools（逗号分隔；留空 = 不限制；complete/fail/finish 永远放行）</label>
             <Input value={tools} onChange={(e) => setTools(e.target.value)} className="font-mono text-xs" placeholder="bb_query, run_cmd" />
             <label className="text-[10px] text-muted-foreground">最大步数 max_steps（正整数；留空 = 不设）</label>
-            <Input value={steps} onChange={(e) => setSteps(e.target.value)} className="w-48 font-mono text-xs" inputMode="numeric" placeholder="30" />
+            <Input value={steps} onChange={(e) => setSteps(e.target.value)} className="w-48 font-mono text-xs" inputMode="numeric" placeholder="200" />
+            {Object.keys(cur.variants ?? {}).length > 0 && (
+              <div className="rounded border bg-card/40 p-2">
+                <p className="mb-1 text-[10px] text-muted-foreground">轨变体 variants（只读——yaml 中以 variant_&lt;轨&gt;_&lt;字段&gt; 平铺键维护）</p>
+                {Object.entries(cur.variants!).map(([tr, fields]) => (
+                  <p key={tr} className="font-mono text-[10px] text-muted-foreground">
+                    {tr}: {Object.entries(fields).map(([k, v]) => `${k}=${String(v)}`).join("、")}
+                  </p>
+                ))}
+              </div>
+            )}
           </>
-        ) : <p className="text-xs text-muted-foreground">选择左侧角色</p>}
+        ) : <p className="text-xs text-muted-foreground">选择左侧专家</p>}
       </div>
-      <RoleCreateDialog open={createOpen} onOpenChange={setCreateOpen} track={track}
-                        roles={roles}
-                        onCreated={(name) => { setSelected(name); reload() }} />
+      <ExpertCreateDialog open={createOpen} onOpenChange={setCreateOpen}
+                          onCreated={(id) => { setSelected(id); reload() }} />
       <AlertDialog open={confirmDel !== null} onOpenChange={(v) => !v && setConfirmDel(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>删除角色 {confirmDel}？</AlertDialogTitle>
+            <AlertDialogTitle>删除专家 {confirmDel}？</AlertDialogTitle>
             <AlertDialogDescription>
-              yaml 将移入 tracks/{track}/roles/.history/trash/（带时间戳，可手工恢复）。
-              正在运行的会话不受影响；下次开窗生效。_generalist 不可删除。
+              yaml 将移入 experts/.history/trash/（带时间戳，可手工恢复）。
+              正在运行的会话不受影响；下次开窗生效。受保护专家（_generalist）不可删除。
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

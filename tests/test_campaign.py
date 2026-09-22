@@ -86,8 +86,8 @@ def _make_agent_run_done(tmp_path, camp):
     gw = ExecutionGateway(bb=bb, backends={"host": NativeBackend()})
     tq = TaskQueue(bb)
     packs = tmp_path / "packs"
-    (packs / "tracks" / "pentest" / "roles").mkdir(parents=True, exist_ok=True)
-    (packs / "tracks" / "pentest" / "roles" / "_generalist.yaml").write_text(
+    (packs / "experts").mkdir(parents=True, exist_ok=True)
+    (packs / "experts" / "_generalist.yaml").write_text(
         'name: _generalist\npersona: "通用测试员。"\n', encoding="utf-8")
     tid = tq.publish(project["id"], "打 10.0.0.1", created_by="human",
                      task_type="generic", scope="ip:10.0.0.1")

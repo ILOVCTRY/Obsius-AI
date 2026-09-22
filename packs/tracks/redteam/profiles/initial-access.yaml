@@ -1,0 +1,8 @@
+# 场景档：入口突破队（expert-pool M4a 内置；只打初始访问阶段的聚焦组队）
+name: 入口突破队
+description: "只开 external-entry 与 recon：聚焦初始访问突破，不展开内网动作"
+experts: [external-entry, recon]
+board_view: assets
+playbook: "recon 圈定暴露面 → external-entry 集中打边界入口 → 立足点与凭据线索落黑板待后续链"
+artifacts: [资产清单, 发现记录]
+knowledge: [web]

@@ -94,9 +94,9 @@ def make_agent(env, llm, planner=None, config=None, role="_generalist", artifact
     (packs / "tracks" / "pentest" / "skills" / "demo" / "SKILL.md").write_text(
         "---\nname: demo\ndescription: 演示技能\nkeywords: 测试\n---\n按步骤执行。",
         encoding="utf-8")
-    roles = packs / "tracks" / "pentest" / "roles"
-    roles.mkdir(parents=True, exist_ok=True)
-    (roles / "_generalist.yaml").write_text(
+    experts = packs / "experts"
+    experts.mkdir(parents=True, exist_ok=True)
+    (experts / "_generalist.yaml").write_text(
         'name: _generalist\npersona: "通用测试员。"\n', encoding="utf-8")
     return AgentSession(project_id=project["id"], bb=bb, gateway=gw, llm=llm,
                         planner_llm=planner, packs_root=packs, track="pentest",
@@ -108,9 +108,9 @@ def make_agent(env, llm, planner=None, config=None, role="_generalist", artifact
 
 
 def write_role(env, name, body):
-    """测试夹具里写一个轨角色 yaml。"""
+    """测试夹具里写一个专家 yaml（expert-pool M2：运行时角色源=experts/）。"""
     _, _, _, _, tmp_path = env
-    f = tmp_path / "packs" / "tracks" / "pentest" / "roles" / f"{name}.yaml"
+    f = tmp_path / "packs" / "experts" / f"{name}.yaml"
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text(body, encoding="utf-8")
 

@@ -180,7 +180,9 @@ def record_llm_usage(
          "cache_read_tokens": cr, "cache_creation_tokens": cc,
          "total_tokens": used},
         session_id=session_id,
-        author=session_id or ("orchestrator" if source == "orchestrator" else "system"))
+        # 对话化编排器（M1）：orchestrator-chat 与 tick 预算同池，作者同挂 orchestrator
+        author=session_id or ("orchestrator" if source in ("orchestrator",
+                                                           "orchestrator-chat") else "system"))
     if st.get("budget_warn") and auto["token_budget"]:
         bb.append_event(
             project_id, "budget.soft_warning",

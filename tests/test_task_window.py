@@ -189,10 +189,11 @@ def test_scheduler_respects_max_concurrent_tasks(tmp_path):
                        json={"objective": f"并发任务{i}", "task_type": "recon"})
             assert r.status_code == 201
             tids.append(r.json()["task_id"])
-        # 采样同时 running 的 agent-work job 峰值
+        # 采样同时 running 的 agent-work job 峰值（预算放宽：全量回归负载下
+        # 600 次偶发超时误报「未到终态」，与超卖断言无关）
         peak = 0
         rows = None
-        for _ in range(600):
+        for _ in range(2000):
             running = [j for j in c.app.state.jobs.all_jobs()
                        if j["meta"].get("project_id") == pid
                        and j["kind"] == "agent-work" and j["status"] == "running"]

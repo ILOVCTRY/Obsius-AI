@@ -1,0 +1,8 @@
+# 场景档：全链路攻击队（expert-pool M4a 内置；entry→lateral→privesc 全链红队组队）
+name: 全链路攻击队
+description: "侦察、入口、横向、提权与报告五专家全链路组队，覆盖初始访问到域内到达"
+experts: [recon, external-entry, lateral, privesc, report-writer]
+board_view: findings
+playbook: "recon 测绘选点 → external-entry 打初始立足点 → lateral 横向扩散 → privesc 攀升 → 关键路径落发现"
+artifacts: [攻击链记录, 发现记录, 红队报告]
+knowledge: [web]

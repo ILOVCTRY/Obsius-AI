@@ -25,7 +25,7 @@ from core.llm import ArkCodingProvider, ModelRouter
 from core.orchestrator import Orchestrator, OrchestratorConfig
 from core.projects import ProjectStore
 from core.runtime import ExecutionGateway, HostDetector
-from core.skills.roles import load_role
+from core.skills.experts import load_expert
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKSPACES = ROOT / "workspaces"
@@ -87,7 +87,7 @@ def main() -> None:
     gateway = ExecutionGateway(bb=bb)
 
     def session_factory(role: str) -> AgentSession:
-        r = load_role("packs", "ctf", role)
+        r = load_expert("packs", role, "ctf")
         return AgentSession(
             project_id=pid, bb=bb, gateway=gateway,
             llm=llm, planner_llm=planner,

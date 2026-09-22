@@ -6,7 +6,7 @@
 
 | 脚本 | 用途 |
 |------|------|
-| `serve.py` | core API 启动入口（uvicorn，127.0.0.1:8420；WebUI 先起这个）；**v0.64 持 uvicorn Server 句柄**并注册 `POST /api/admin/shutdown`（置 should_exit 优雅退出，shutdown 钩子给在跑会话落断点快照）——端点只在本进程注册，库/测试用法不受影响 |
+| `serve.py` | core API 启动入口（uvicorn，127.0.0.1:8420）；**v0.64 持 uvicorn Server 句柄**并注册 `POST /api/admin/shutdown`（置 should_exit 优雅退出，shutdown 钩子给在跑会话落断点快照）——端点只在本进程注册，库/测试用法不受影响。**桌面窗口壳（desktop-app-shell M1，2026-09-21）**：`--window` 起桌面窗口（pywebview/WebView2，`--debug` 右键开 DevTools）+ 子线程 uvicorn——**owner/attach 双语义**（探测端口：未在跑=owner 拉服务，最后一窗 closed → 进程内置 should_exit 优雅停机；已在跑=attach 附窗关窗只退自己，二次双击「启动平台（窗口）.bat」=再开一窗）；加载地址探测 `--url` 显式 > webui/dist 静态版 > Vite dev 5173（::1/IPv4 双探测）> 窗内指引占位页；WebView2 缺失注册表探测 → 弹窗提示 + 回退无窗（pywebview 未装同理）；**`os.chdir(项目根)` cwd 兜底是硬要求**（config/packs/workspaces 全 cwd 相对路径）；pythonw 下 stdout/stderr 为 None → 重定向 serve-window.log。M2：自动探测 webui/dist 传 `create_app(static_dir=)` 同源托管。**改 serve.py 后勿忘：真机僵尸 serve.py 残留会占 8420（TaskStop 只杀跟踪壳），先 `Get-CimInstance` 找出强杀再起新版** |
 | `pack_doctor.py` | packs 静态体检（`core/skills/doctor.py` 的 CLI 壳）：列 error/warning/info；有 error 退出码 1（`--strict` 连 warning 也算失败），可挂 CI/钩子。当前真包零 error |
 | `demo_agent.py` | 单会话 Agent 端到端演练（**pentest 轨 × web 包**，`_generalist` 角色：列目录→写发现→finish，验证软边界/路由/审计链） |
 | `demo_orchestrator.py` | 编排闭环演练（**ctf 轨 × binary 包**：tick 开窗 → 并行 Worker → 派生 → digest）；`load_role("packs","ctf",role)`，Orchestrator 构造传 `packs_root/track` |

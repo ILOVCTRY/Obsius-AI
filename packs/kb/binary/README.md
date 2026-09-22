@@ -14,6 +14,8 @@
 | `pwn/` | K2 收编改编 · 堆/FSOP、格式化串、ROP、沙箱逃逸等利用手法 |
 | `reverse/` | K2 收编改编 · 静态/动态分析、脱壳、混淆还原 |
 | `malware/` | K2 收编改编 · PE/.NET、C2 协议、脚本混淆（默认恶意，只静态） |
+| `android/` | **r0re 收编改编（2026-09-21）** · APK 分层分诊、JNI/native 五线、加固脱壳、Godot 专项 + `cases/` 已解案例（K6 沉淀） |
 | `refs/` | 快照原件：ctf-pwn / ctf-reverse / ctf-malware（ctf-skills，MIT） |
 
-许可：ctf-skills 快照为 MIT（见 `../licenses/CTF-SKILLS-LICENSE`）。
+许可：ctf-skills 快照为 MIT（见 `../licenses/CTF-SKILLS-LICENSE`）；android/ 收编自
+r0re（上游无 LICENSE 文件，经用户确认可直接收编，2026-09-21）。

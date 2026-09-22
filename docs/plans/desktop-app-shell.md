@@ -1,7 +1,7 @@
 # 方案：桌面化壳（exe 双击开窗，Windows 原生）
 
-- **状态**：讨论收敛，待打磨（2026-09-21）；**优先级低，不着急**（用户定调）
-- **拍板记录**：见 §3（4 项决策已确认）
+- **状态**：**M1+M2 已实施（2026-09-21），M3 打包后置另排**（M1 窗口壳：`serve.py --window` owner/attach + 最后一窗优雅停机 + URL 探测 + 「启动平台（窗口）.bat」；M2 静态托管：`create_app(static_dir=)` SPA 同源托管 + 启动平台.bat 静态优先分支；真机冒烟三形态全过〔attach 关窗只退自己 / owner 窗口加载静态版全链 200 / WM_CLOSE 优雅停机端口释放〕；待打磨清单 1/2/3/6 已消化见 §5；定稿决策已回写 DESIGN.md §一「部署形态」）
+- **拍板记录**：见 §3（7 项决策已确认）
 - **关联代码**：`scripts/serve.py`（启动入口 + 优雅停机句柄）、`core/api/app.py`（create_app，**尚未挂 StaticFiles**）、`启动平台.bat` / `停止平台.bat`（现行双击入口）、`webui/`（React+Vite SPA）
 - **实施后**：定稿决策沉淀回 `DESIGN.md`（§1 部署形态或新增小节），本文保留作方案背景
 
@@ -10,6 +10,8 @@
 现状是「bat 拉起两个服务窗口 + 开浏览器」：`启动平台.bat` 起 `serve.py`（127.0.0.1:8420）与 Vite dev server（localhost:5173，仅 IPv6），就绪后自动开浏览器。目标形态：**双击一个 exe → 直接弹应用窗口**，无 cmd 窗口、无浏览器标签页。
 
 项目架构对此天然友好：后端 FastAPI + 前端 SPA 本就是「本地服务 + 壳」形态，换壳不动核心逻辑；优雅停机链路（`POST /api/admin/shutdown` → shutdown 钩子给在跑会话落断点快照）已有现成语义，关窗时衔接即可。
+
+**窗口与打包解耦**是本方案的主轴：pywebview 只是 pip 依赖，**源码状态即可弹窗**；打包只是把源码 + Python 环境固化成 exe 用于分发。因此里程碑重切为「M1 源码弹窗（开发测试即用）→ M2 静态托管 → M3 打包（后置）」。
 
 ## 2. 现状盘点（2026-09-21 核实）
 
@@ -22,10 +24,13 @@
 
 | # | 决策点 | 结论 |
 |---|--------|------|
-| 1 | 目标形态 | **exe 双击直接出窗口**（Windows 原生优先，与项目定位一致） |
-| 2 | 技术主线 | **档 2：pywebview（WebView2）+ PyInstaller onedir**；Tauri 暂缓（分发对象就是自己这台 Windows，不值得引入 Rust 链） |
-| 3 | 共同地基 | **前端静态托管先行**（阶段 A）——无论将来选哪条壳路线都必须做，且独立有价值：落地后 bat 不再需要 npm/5173，后端单进程自足 |
-| 4 | 优先级 | **低，不着急**；A/B/C 三阶段可独立排期，顺序无硬依赖（B 依赖 A） |
+| 1 | 目标形态 | exe 双击直接出窗口（长期）；**源码弹窗（`serve.py --window`）提前为第一里程碑**，开发测试即用 |
+| 2 | 技术主线 | **pywebview（WebView2）+ PyInstaller onedir**；Tauri 暂缓（分发对象就是自己这台 Windows，不值得引入 Rust 链） |
+| 3 | 窗口/打包解耦 | 源码即可弹窗，M1 不依赖 M2/M3；开发期三形态并存：无窗浏览器（现状）/ 源码弹窗 / exe |
+| 4 | 优先级 | **提前（二次拍板）：下一个实施计划**；原「低，不着急」作废 |
+| 5 | 关窗行为 | **owner 关最后一窗 = 优雅停机**：`--window` 进程自己拉起的服务，最后一个窗口关闭触发 shutdown 落会话快照再退出；attach 附窗关闭仅退出自身；无窗 `serve.py` 模式照旧自主管理 |
+| 6 | 二次双击 | **再开一个窗口连已有服务**（attach 新窗，探测 8420 已在跑则不建服务直接开窗，零跨进程通信；多窗并行可看不同页面） |
+| 7 | 里程碑顺序 | M1 窗口壳 → M2 前端静态托管 → M3 打包（后置）；M1 可加载 Vite dev 5173，不受 M2 未做影响 |
 
 ## 4. 设计详述
 
@@ -33,27 +38,29 @@
 
 | 档 | 形态 | 改造内容 | 结论 |
 |----|------|---------|------|
-| 1. 伪桌面 | Edge 无边框独立窗口（`msedge --app=http://127.0.0.1:8420`） | 仅启动脚本改造 | **不单独做**；静态托管（阶段 A）落地后它顺带可得 |
-| 2. 真 exe | 双击 exe → pywebview 窗口 | 阶段 B + C | **主线** |
+| 1. 伪桌面 | Edge 无边框独立窗口（`msedge --app=http://127.0.0.1:8420`） | 仅启动脚本改造 | **不单独做**；静态托管（M2）落地后它顺带可得 |
+| 2. 真 exe | 双击 exe → pywebview 窗口 | M1 + M3 | **主线** |
 | 3. Tauri 2 壳 | 同上，体积小/可托盘/自更新 | Rust 工具链 + sidecar | 暂缓，需分发他人时再评估 |
 
-### 4.2 阶段 A：前端静态托管（共同地基）
+### 4.2 M1：窗口壳——源码弹窗最小闭环（已实施，见 §6）
+
+- `serve.py --window`：子线程跑 uvicorn，主线程 `webview.start()`；`debug=True` 支持右键开 DevTools；`--url`/`--port` 参数透传。
+- **owner / attach 双语义**（决策 #5/#6 的落地）：
+  - 启动探测 8420：**未在跑 = owner**——拉起服务并跟踪活动窗数，最后一窗 `closed` 事件 → 置 `server.should_exit`（进程内直调句柄，不必走 HTTP）优雅停机；
+  - **已在跑 = attach 附窗**——不建服务，仅开窗连过去，关窗只退出本进程；owner 的服务与窗数不受影响。
+  - 无窗模式（不传 `--window`）行为完全不变。
+- **URL 探测顺序**：`webui/dist` 存在 → 加载 8420 静态版；无 dist 且 5173 可达 → 加载 Vite dev（热更新照常）；都不满足 → 显式 `--url` 或窗内指引。
+- 启动时 `os.chdir` 到脚本/exe 所在目录——**cwd 兜底是硬要求**：全项目大量 cwd 相对路径惯例（`config/`、`packs/`、`workspaces/`、providers.json 等），从快捷方式/别处启动时路径不能飘。
+- WebView2 缺失检测 → 提示安装一次。
+- 可选：新增「启动平台（窗口）.bat」——起服务后开窗口替代开浏览器（是否本里程碑做见待打磨 #2）。
+
+### 4.3 M2：前端静态托管（共同地基）
 
 - `vite build` 产物由 FastAPI StaticFiles 托管 + SPA history fallback（非 `/api`、非 `/docs` 路径回 index.html）。
 - `serve.py` 启动时检测产物存在 → 单进程自足；**开发期保留 Vite dev 模式**（bat 分支：有产物走静态、无产物走 dev）。
 - 前端清理写死 5173 的硬编码；前后端同源后 CORS/代理配置消失，WS 与 API 前缀核对一遍。
 
-### 4.3 阶段 B：窗口壳（serve.py --window 模式）
-
-> **窗口与打包解耦**：pywebview 只是 pip 依赖，**源码状态即可弹窗**（`python scripts/serve.py --window`），无需先打包。开发期三形态并存：无窗浏览器（现状日常开发）/ 源码弹窗（验壳行为：关窗停机、双击幂等）/ exe（分发专用，阶段 C 才做）。前端无 dist 产物时窗口加载 Vite dev server（5173）热更新照常，有产物加载 8420 静态版；pywebview `debug=True` 可开 DevTools。
-
-- `serve.py --window`：子线程跑 uvicorn，主线程 `webview.start()` 加载 `http://127.0.0.1:8420`。
-- **双击幂等**：启动先探测 8420——已在跑则不开第二个服务，直接再开一个窗口连过去（pywebview 支持多窗）；端口检测逻辑从 bat 收进 Python 侧。
-- **关窗行为**：窗口关闭事件里先 `POST /api/admin/shutdown`（落会话快照）再退出进程，不裸杀；托盘常驻作为待打磨选项（§5）。
-- 启动时 `os.chdir` 到脚本/exe 所在目录——**cwd 兜底是硬要求**：全项目大量 cwd 相对路径惯例（`config/`、`packs/`、`workspaces/`、providers.json 等），从快捷方式/别处启动时路径不能飘。
-- WebView2 缺失检测 → 提示安装一次。
-
-### 4.4 阶段 C：PyInstaller onedir 打包
+### 4.4 M3：打包（后置，不着急）
 
 - **干净 venv 只装 requirements 打包**，不打 Miniconda 全家（体积爆炸）；onedir 形态预期 100-150MB。
 - 资源目录随包：webui 构建产物、`packs/`、`config/`（种子）、tools 脚本；`workspaces/` 首启自动建。
@@ -65,17 +72,17 @@
 - SQLite WAL + 黑板单一写入口不受影响；WS 在 WebView2 下正常工作。
 - 不做跨平台（Windows 原生优先）、不做自动更新、Tauri 暂缓。
 
-## 5. 待打磨清单
+## 5. 待打磨清单（实施时消化，2026-09-21）
 
-1. 关窗行为定稿：直接优雅停机退出 vs 最小化到托盘常驻（pystray）vs 弹确认。
-2. 二次双击交互：新开窗口连已有服务 vs 唤起聚焦已有窗口（跨进程唤起需加本地信号管道，评估是否值得）。
-3. Playwright 是否进包：Chromium 体积大，倾向 exe 外按需安装（首启检测+提示）。
-4. 打包 venv 的 requirements 固定清单与冻结方式。
-5. bat 退役节奏：静态托管落地后保留「无产物走 dev」分支多久；`停止平台.bat` 是否被 exe 自身关窗语义取代。
-6. 前端 5173/8420 硬编码清点范围（webui/ 全扫）。
+1. **URL 都不可达的窗内指引**：✅ 取**内嵌占位 HTML**（深色风指引页：构建产物 `npm run build` / 起 Vite dev / 后端 8420 三条路，附「本窗口关闭不影响已运行的服务」说明）——自包含、不丢上下文，胜过回退系统浏览器。
+2. **「启动平台（窗口）.bat」**：✅ 随 M1 一并交付——pythonw 起 `serve.py --window`（无控制台黑窗，日志落 serve-window.log），pythonw 缺失退 python.exe；体量十几行。
+3. **M2 bat 退役节奏**：✅ 「无产物走 dev」分支**保留**（开发期 HMR 不可替代，`npm run build` 后自动切静态，无感）；`停止平台.bat` **保留**（无窗模式与 dev 模式仍需要，窗口模式关最后一窗即优雅停机、两者并存）。
+4. M3 Playwright 是否进包：后置（维持倾向 exe 外按需安装，首启检测+提示）。
+5. M3 workspaces 初始化随包策略：后置。
+6. **前端 5173/8420 硬编码清点**：✅ 已全扫——`webui/src` 零硬编码（全部相对路径 `/api/*` + `location.host` 拼 WS），仅 vite.config.ts dev 代理与端口配置（开发期保留，M2 不动前端）；同源后 CORS/代理问题天然消失。
 
-## 6. 实施切分建议（打磨定稿后由用户排期）
+## 6. 实施记录
 
-- **阶段 A 静态托管**：独立有价值，可单独先排（1-2 天）。
-- **阶段 B 窗口壳**：`--window` 模式 + 幂等探测 + 关窗停机（依赖 A，约 2-3 天）。
-- **阶段 C 打包**：venv 固化 + PyInstaller onedir + 资源布局（约 2-3 天，含踩坑余量）。
+- **M1 窗口壳（已实施 2026-09-21）**：`scripts/serve.py` 重写——argparse（port 位置参数兼容旧用法 + `--window/--url/--debug`）；owner/attach 双语义（socket 探测 127.0.0.1:port）；owner=子线程 uvicorn（等 `server.started` 最多 30s）+ 主线程 `webview.start()`，`window.events.closed` 计数、最后一窗进程内置 `should_exit`（webview.start 返回后 join(20s) 等快照落盘）；URL 探测 `_pick_url`（--url > dist 静态 > 5173〔::1/IPv4 双探测〕> 占位页）；WebView2 注册表探测（HKLM WOW6432Node/HKCU 三键）缺失弹窗+回退无窗；pywebview 未装同回退；pythonw stdout/stderr 为 None → 重定向 serve-window.log；`os.chdir(项目根)` cwd 兜底（frozen 分支 M3 预留）。「启动平台（窗口）.bat」新增（pythonw 无控制台）。**真机冒烟**：attach 关窗只退自己（服务 8420 不动）/ owner 窗口加载静态版全链 200（assets+api 流量见 uvicorn 日志）/ PostMessage WM_CLOSE → 优雅停机端口释放 → 进程 exit 0。
+- **M2 静态托管（已实施 2026-09-21）**：`create_app(static_dir=)` ——兜底 GET 路由注册序最后（API/WS/docs 先匹配）；真实文件 resolve 防穿越直出、其余回 index.html；`/api|/docs|/redoc|/openapi.json` 例外 404；缺 index.html 抛 ValueError 防半挂载。`serve.py` 自动探测 dist 决定 static_dir。前端零改动（本就走相对路径）。「启动平台.bat」改造：有 `webui\dist\index.html` → 只起后端开 8420 静态版；无 → 回退原 Vite dev 全流程。测试 `test_api.py::test_spa_static_hosting`（直出/fallback/例外/防穿越/真实 API 优先/坏 static_dir 报错）。真机 curl 冒烟六项全过；全量回归 767 passed。
+- **M3 打包**：后置另排（venv 固化 + PyInstaller onedir + 资源布局）。

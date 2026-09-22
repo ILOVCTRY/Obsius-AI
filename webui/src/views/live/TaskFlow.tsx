@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/alert-dialog"
 import { TaskNode, type TaskFlowNodeType } from "./TaskNode"
 import { TaskFlowEdge, type TaskFlowEdgeType } from "./TaskFlowEdge"
+import { TaskTraceList } from "@/components/blackboard/TaskTraceList"
 import { layoutTasks, NODE_W, planStats } from "./flowModel"
 
 // A3 直播间任务流（DESIGN §12）：第三个 React Flow 图，经 React.lazy 分包。
@@ -439,6 +440,9 @@ function Flow({ pid, pausedSids, wsBump }: TaskFlowProps) {
               ))}
             </ol>
           )}
+
+          <p className="mt-2 text-[10px] font-medium text-muted-foreground">执行轨迹</p>
+          <TaskTraceList pid={pid} taskId={selectedNode.id} className="mt-0.5 max-h-44 overflow-auto" />
 
           <p className="mt-1.5 text-[9px] text-muted-foreground">双击节点挂回会话 / 跳看板</p>
         </div>

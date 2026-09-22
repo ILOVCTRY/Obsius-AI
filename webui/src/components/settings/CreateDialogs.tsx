@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react"
 import { api } from "@/lib/api"
-import type { KbRenameResult, PackRole } from "@/lib/types"
-import { roleLabel } from "@/lib/roles"
+import type { KbRenameResult } from "@/lib/types"
 import { Textarea } from "@/components/ui/textarea"
 
 /** 技能归属来源：能力包 / 场景轨 */
@@ -10,43 +9,37 @@ import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 
-// 新建角色（空白/克隆）与新建技能（薄路由向导）对话框。slug 只允许字母数字 _-.，
-// 服务端另有同一套白名单（422）与重名（409）校验，错误消息直接展示后端 detail。
+// 新建专家（expert-pool M3）与新建技能（薄路由向导）对话框。专家 slug 只允许小写
+// 字母数字与 -（ASCII 文件名/命令引用面），服务端同口径 422 + 重名 409，错误直接展示 detail。
 
 const SLUG_HINT = "英文 slug：字母/数字/_-/.，1-64 字符（如 web-recon）"
+const EXPERT_ID_HINT = "小写字母/数字开头，仅小写字母数字与 -，≤48 字符（如 web-solver）"
 
 function ErrorLine({ err }: { err: string | null }) {
   if (!err) return null
   return <p className="break-all text-[11px] text-(--status-error)">{err}</p>
 }
 
-export function RoleCreateDialog({ open, onOpenChange, track, roles, onCreated }: {
+export function ExpertCreateDialog({ open, onOpenChange, onCreated }: {
   open: boolean
   onOpenChange: (v: boolean) => void
-  track: string
-  roles: PackRole[]
-  onCreated: (name: string) => void
+  onCreated: (id: string) => void
 }) {
-  const [name, setName] = useState("")
+  const [id, setId] = useState("")
   const [displayName, setDisplayName] = useState("")
-  const [cloneFrom, setCloneFrom] = useState("")
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
 
   useEffect(() => {
-    if (open) { setName(""); setDisplayName(""); setCloneFrom(""); setErr(null); setBusy(false) }
+    if (open) { setId(""); setDisplayName(""); setErr(null); setBusy(false) }
   }, [open])
 
   const submit = async () => {
     setBusy(true)
     setErr(null)
     try {
-      await api.createTrackRole(track, {
-        name: name.trim(),
-        display_name: displayName.trim() || null,
-        clone_from: cloneFrom || null,
-      })
-      onCreated(name.trim())
+      await api.createExpert(id.trim(), { name: displayName.trim() || null })
+      onCreated(id.trim())
       onOpenChange(false)
     } catch (e) {
       setErr(String(e))
@@ -58,26 +51,19 @@ export function RoleCreateDialog({ open, onOpenChange, track, roles, onCreated }
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
-        <DialogTitle>新建角色</DialogTitle>
-        <DialogDescription>tracks/{track}/roles/ 下新增一个角色 yaml；删除进回收站可恢复。</DialogDescription>
-        <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="角色 slug，如 web-recon"
+        <DialogTitle>新建专家</DialogTitle>
+        <DialogDescription>packs/experts/ 下新增一个专家 yaml；其余字段建后在校对表单补齐，删除进回收站可恢复。</DialogDescription>
+        <Input value={id} onChange={(e) => setId(e.target.value)} placeholder="专家 id，如 web-solver"
                className="font-mono text-xs" autoFocus
-               onKeyDown={(e) => e.key === "Enter" && name.trim() && submit()} />
-        <p className="-mt-1 text-[10px] text-muted-foreground">{SLUG_HINT}</p>
+               onKeyDown={(e) => e.key === "Enter" && id.trim() && submit()} />
+        <p className="-mt-1 text-[10px] text-muted-foreground">{EXPERT_ID_HINT}</p>
         <Input value={displayName} onChange={(e) => setDisplayName(e.target.value)}
-               placeholder="显示名（可中文，留空 = 用 slug）" className="text-xs"
-               onKeyDown={(e) => e.key === "Enter" && name.trim() && submit()} />
-        <p className="-mt-1 text-[10px] text-muted-foreground">界面各处展示用；不含 # 与 :</p>
-        <label className="text-[10px] text-muted-foreground">起始模板（克隆会照抄 skills/task_types 等字段）</label>
-        <select value={cloneFrom} onChange={(e) => setCloneFrom(e.target.value)}
-                className="rounded border bg-background px-1.5 py-1 text-xs [color-scheme:dark]">
-          <option value="">空白模板（列表字段为 null=不过滤）</option>
-          {roles.map((r) => <option key={r.file} value={r.file}>{roleLabel(r)}</option>)}
-        </select>
+               placeholder="显示名（可中文，留空 = 用 id）" className="text-xs"
+               onKeyDown={(e) => e.key === "Enter" && id.trim() && submit()} />
         <ErrorLine err={err} />
         <div className="flex justify-end gap-2">
           <Button size="sm" variant="ghost" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button size="sm" disabled={busy || !name.trim()} onClick={submit}>
+          <Button size="sm" disabled={busy || !id.trim()} onClick={submit}>
             {busy ? "创建中…" : "创建"}
           </Button>
         </div>

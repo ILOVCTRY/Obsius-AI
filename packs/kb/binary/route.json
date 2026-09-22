@@ -5,6 +5,9 @@
   "逆向|reverse|脱壳|反编译": [
     "binary/reverse/"
   ],
+  "android|apk|安卓|移动逆向": [
+    "binary/android/"
+  ],
   "恶意样本|malware|病毒分析": [
     "binary/malware/"
   ]

@@ -33,8 +33,8 @@ def env(tmp_path):
 def make_agent(env, llm, artifacts_dir=None):
     bb, project, gw, tq, tmp_path = env
     packs = tmp_path / "packs"
-    (packs / "tracks" / "pentest" / "roles").mkdir(parents=True, exist_ok=True)
-    (packs / "tracks" / "pentest" / "roles" / "_generalist.yaml").write_text(
+    (packs / "experts").mkdir(parents=True, exist_ok=True)
+    (packs / "experts" / "_generalist.yaml").write_text(
         'name: _generalist\npersona: "通用测试员。"\n', encoding="utf-8")
     return AgentSession(project_id=project["id"], bb=bb, gateway=gw, llm=llm,
                         planner_llm=None, packs_root=packs, track="pentest",

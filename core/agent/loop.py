@@ -38,7 +38,7 @@ from core.skills import (
 )
 from core.skills.judge import judge_finding
 from core.skills.kbindex import kb_module_hints, kb_route_hints
-from core.skills.roles import load_role, role_exists
+from core.skills.experts import expert_exists, load_expert
 from core.skills.routeindex import read_kb_module, render_route_index_top
 
 log = logging.getLogger(__name__)
@@ -355,6 +355,7 @@ class AgentSession:
         track: str = "ctf",
         capabilities: list[str] | None = None,
         role: str = "_generalist",
+        allowed_roles: list[str] | None = None,  # 发布链 publish_task 值域（expert-pool M2，§4.6）
         session_name: str | None = None,
         capability_prompt: str = "",
         config: AgentConfig | None = None,
@@ -376,10 +377,10 @@ class AgentSession:
         apply_context_budget(self.config, self.llm)  # 模型声明上下文 → 预算换算（无声明=默认）
         self.artifacts_dir = Path(artifacts_dir) if artifacts_dir else None
 
-        role_data = load_role(self.packs_root, track, role)
-        # 角色文件缺失时 load_role 已回退 _generalist；role-rules/会话名按实际角色走
+        role_data = load_expert(self.packs_root, role, track)
+        # 专家缺失时 load_expert 已回退 _generalist；role-rules/会话名按实际专家走
         self.role_name = role if (
-            self.packs_root / "tracks" / track / "roles" / f"{role}.yaml").is_file() \
+            self.packs_root / "experts" / f"{role}.yaml").is_file() \
             else "_generalist"
         self.role = role_data
         self._apply_role_limits(role_data)
@@ -417,6 +418,7 @@ class AgentSession:
             max_steps=self.config.max_steps,
             abort_event=self._abort_req,
             role_skills=self.role.get("skills"),
+            allowed_roles=allowed_roles,
         )
         self.registry: SkillRegistry | None = None
         self.capability_prompt = capability_prompt
@@ -505,7 +507,7 @@ class AgentSession:
         want = str((task or {}).get("role") or "").strip()
         if not want or want == self.role_name:
             return
-        if not role_exists(self.packs_root, self.track, want):
+        if not expert_exists(self.packs_root, want, self.track):
             return
         saved = {
             "role_name": self.role_name, "role": self.role,
@@ -515,7 +517,7 @@ class AgentSession:
             "dispatcher_allowed_tools": self.dispatcher.allowed_tools,
             "dispatcher_max_runtime": self.dispatcher.max_runtime,
         }
-        rd = load_role(self.packs_root, self.track, want)
+        rd = load_expert(self.packs_root, want, self.track)
         self.role_name, self.role = want, rd
         self.config.max_noise = None
         self.config.allowed_tools = None
@@ -561,13 +563,13 @@ class AgentSession:
         want = str((task or {}).get("role") or "").strip()
         if not want or want == self.role_name:
             return
-        if not role_exists(self.packs_root, self.track, want):
+        if not expert_exists(self.packs_root, want, self.track):
             return
         prev = self.role_name
         if self._persona_saved is None:
             self._apply_task_persona(task, task_id)
         else:
-            rd = load_role(self.packs_root, self.track, want)
+            rd = load_expert(self.packs_root, want, self.track)
             self.role_name, self.role = want, rd
             self.config.max_noise = None
             self.config.allowed_tools = None

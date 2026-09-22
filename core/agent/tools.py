@@ -15,13 +15,13 @@ from typing import Any, Callable, Iterable
 from core.agent.retention import omitted_note, retain, spill_text
 from core.blackboard import Blackboard, ClaimError, TaskQueue
 from core.blackboard.assets import register_asset
-from core.blackboard.store import UNSET
+from core.blackboard.store import UNSET, has_repro_evidence
 from core.blackboard.tasks import dedup_fp
 from core.runtime.gateway import ExecutionGateway, GatewayDenied
 from core.skills import proposals
 from core.skills.proposals import ProposalError
 from core.skills.registry import SkillRegistry
-from core.skills.roles import list_roles
+from core.skills.experts import list_experts
 from core.skills.routeindex import top_route_entries
 from core.skills.rules import load_kb_sources
 from core.skills.writing import resolve_kb, search_kb
@@ -159,11 +159,18 @@ AGENT_TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "bb_add_finding",
-        "description": "登记发现。无证据 status=unverified（无证据不下结论，红线见规则段）；"
-                       "verified 必须已稳定复现（3/3），evidence.poc 按 "
-                       "{type: http_raw|python|steps, http_raw?, artifact_id?, target, "
-                       "stability: '3/3'} 落。注入评级口径（rule:rating:*）时 severity "
-                       "必须按口径判级并填 rating_basis（见评级硬指令段）。"
+        "description": "登记发现。复现步骤用 evidence.repro_steps="
+                       "[{desc, type: http|python|cmd|image, code, expected, "
+                       "artifact_id?, stability?, target?}]——desc/expected 必填，"
+                       "code 填 HTTP 原始报文/python 脚本/bash 命令（type=image 时"
+                       " artifact_id 必填指向图片产物、无 code），多步利用链按数组顺序；"
+                       "渗透/红队轨 verified 门禁=至少一步 code（或 artifact_id）非空"
+                       "且该步 expected 非空（旧结构 evidence.poc/pocs/poc_artifact_id "
+                       "兼容但已 legacy）。危害描述 impact（影响事实：拿到什么/影响面）"
+                       "与修复建议 remediation（可落地）直接落字段，报告按三件套渲染。"
+                       "无证据 status=unverified（无证据不下结论，红线见规则段）；"
+                       "注入评级口径（rule:rating:*）时 severity 必须按口径判级并填 "
+                       "rating_basis（见评级硬指令段）。"
                        "CTF 轨语义：severity=线索级别（critical=关键突破/high=可行动线索/"
                        "其余=背景备查），vuln_class=线索类别；false-positive=死路"
                        "（evidence 写清原因与已尝试清单，防重走弯路）。"
@@ -180,8 +187,10 @@ AGENT_TOOLS: list[dict[str, Any]] = [
                 "status": {"type": "string", "enum": ["unverified", "verified", "false-positive"]},
                 "target_asset_id": {"type": "string",
                                     "description": "挂到目标资产 id（URL 先 bb_add_asset 拿 id）"},
-                "evidence": {"type": "object", "description": "证据：请求响应摘要等；"
-                           "verified 时必带 evidence.poc（复现方法，§5.2 约定）"},
+                "evidence": {"type": "object", "description": "证据对象；复现步骤"
+                           " repro_steps=[{desc,type,code,expected,…}] 是 verified "
+                           "门禁认可结构（desc/expected 必填，多步链按数组顺序）；"
+                           "旧 poc/pocs 字段 legacy 兼容，勿再新写"},
                 "relates_to": {
                     "type": "array",
                     "description": "强相关发现（攻击链强边）：[{finding_id, note}]，"
@@ -197,7 +206,13 @@ AGENT_TOOLS: list[dict[str, Any]] = [
                     },
                 },
                 "poc_artifact_id": {"type": "string",
-                                    "description": "Python 脚本 POC 的产物 id（bb_add_artifact 返回）"},
+                                    "description": "Python 脚本 POC 的产物 id（bb_add_artifact 返回；legacy，"
+                                                   "复现步骤优先写 repro_steps+步骤内 artifact_id）"},
+                "impact": {"type": "string",
+                           "description": "危害描述（报告三件套）：影响事实——实际拿到什么"
+                                          "数据/权限、影响面多大"},
+                "remediation": {"type": "string",
+                                "description": "修复建议（报告三件套）：可落地的修复措施"},
                 "rating_basis": {"type": "string",
                                  "description": "判级依据（F11）：注入评级口径时必填，格式"
                                                 "「规则名+条款+一句话依据」，如"
@@ -214,9 +229,10 @@ AGENT_TOOLS: list[dict[str, Any]] = [
                        "「规则名+条款+一句话依据」，否则宁可不改；② 口径外内容（纯暴露面/"
                        "过期组件等）→ category=intel + severity=low 转有效线索，不要删除；"
                        "③ 误报/死路 → status=false-positive（触发撤回传播通知引用方）；"
-                       "④ evidence 浅层合并（键级覆盖，列表键整键替换）。"
-                       "rating_basis 不传=不动，传空串=清空。渗透/红队轨不收 severity=info"
-                       "（服务端拒收，CTF 轨可用）。",
+                       "④ evidence 浅层合并（键级覆盖，列表键整键替换——补复现步骤请整组"
+                       "传 repro_steps 全量）。"
+                       "rating_basis/impact/remediation 不传=不动，传空串=清空。"
+                       "渗透/红队轨不收 severity=info（服务端拒收，CTF 轨可用）。",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -228,9 +244,14 @@ AGENT_TOOLS: list[dict[str, Any]] = [
                 "category": {"type": "string", "enum": ["vuln", "intel"],
                              "description": "vuln=漏洞 / intel=有效发现·线索"},
                 "evidence": {"type": "object",
-                             "description": "浅层合并：键级覆盖、未传键不动"},
+                             "description": "浅层合并：键级覆盖、未传键不动；repro_steps "
+                                            "为列表键=整键替换，修订步骤须传全量数组"},
                 "rating_basis": {"type": "string",
                                  "description": "判级依据：改 severity 时必填；空串=清空，不传=不动"},
+                "impact": {"type": "string",
+                           "description": "危害描述（报告三件套）：空串=清空，不传=不动"},
+                "remediation": {"type": "string",
+                                "description": "修复建议（报告三件套）：空串=清空，不传=不动"},
                 "expected_revision": {"type": "integer",
                                       "description": "乐观锁：bb_query 读到的 rev 值。"
                                                      "多窗同时改同一发现时防覆盖，冲突回 [冲突]"},
@@ -801,7 +822,8 @@ class ToolDispatcher:
                  allowed_task_types: Iterable[str] | None = None,
                  max_steps: int = 0,
                  abort_event: threading.Event | None = None,
-                 role_skills: list[str] | None = None):
+                 role_skills: list[str] | None = None,
+                 allowed_roles: list[str] | None = None):
         self.bb = bb
         self.gateway = gateway
         self.tq = tq
@@ -821,6 +843,8 @@ class ToolDispatcher:
         self.capabilities = capabilities or []
         # 角色 skills 白名单（G1：route_lookup 按其裁剪路由索引条目；None=全可见）
         self.role_skills = role_skills or None
+        # 发布链 role 值域（expert-pool M2，§4.6）：绑定专家清单；None=按轨过滤的池
+        self.allowed_roles = list(allowed_roles) if allowed_roles else None
         # skill_open 用技能注册表（懒加载缓存；与 AgentSession.registry 同口径）
         self._skill_registry = None
         # 角色 tools 白名单（§6.6 软边界）：None/空=不限；收尾协议工具永远放行
@@ -1038,7 +1062,8 @@ class ToolDispatcher:
                              target_asset_id: str | None = None,
                              poc_artifact_id: str | None = None,
                              confidence: float = 0.5, dedup_key: str | None = None,
-                             rating_basis: str = "",
+                             rating_basis: str = "", impact: str = "",
+                             remediation: str = "",
                              category: str | None = None) -> str:
         # relates_to 是顶层入参（LLM 不必懂 evidence 内部结构），并入 evidence 走
         # add_finding 的存在性/同项目校验（悬空/跨项目 ValueError → 回填错误不中断）
@@ -1053,8 +1078,8 @@ class ToolDispatcher:
                 ok, reason = self.vuln_gate({
                     "title": title, "vuln_class": vuln_class, "severity": severity,
                     "status": status,
-                    "has_poc": bool(poc_artifact_id) or bool(
-                        (evidence or {}).get("poc") or (evidence or {}).get("pocs")),
+                    # has_poc=复现证据判定（收录格式新口径 repro_steps + 旧结构兼容）
+                    "has_poc": has_repro_evidence(evidence, poc_artifact_id),
                     "evidence_head": json.dumps(evidence or {}, ensure_ascii=False)[:600],
                     "rating_basis": rating_basis,
                 })
@@ -1068,7 +1093,8 @@ class ToolDispatcher:
             evidence=ev, target_asset_id=target_asset_id,
             poc_artifact_id=poc_artifact_id,
             confidence=confidence, dedup_key=dedup_key, author=self.author,
-            rating_basis=rating_basis, category=category, track=self.track,
+            rating_basis=rating_basis, impact=impact, remediation=remediation,
+            category=category, track=self.track,
         )
         self.last_progress_step = self._step
         # 回显生效判级依据（合并就高后可能与本报不同），供 agent 自检
@@ -1082,6 +1108,8 @@ class ToolDispatcher:
                                 evidence: dict | None = None,
                                 category: str | None = None,
                                 rating_basis: str | None = None,
+                                impact: str | None = None,
+                                remediation: str | None = None,
                                 expected_revision: int | None = None) -> str:
         """修订已有发现（F11/C6）：降级、转 intel 线索、标误报等，走 patch_finding
         单一写入口（track 感知门禁——渗透/红队轨显式改 info 会被拒并回填）。"""
@@ -1103,6 +1131,10 @@ class ToolDispatcher:
             kwargs["category"] = category
         if rating_basis is not None:
             kwargs["rating_basis"] = rating_basis
+        if impact is not None:
+            kwargs["impact"] = impact
+        if remediation is not None:
+            kwargs["remediation"] = remediation
         if not kwargs:
             return "[拒绝] 未提供任何要修改的字段"
         try:
@@ -1617,8 +1649,11 @@ class ToolDispatcher:
                 created_by=self.session_id,
                 allowed_types=self.allowed_task_types, refs=refs, workset=workset,
                 role=role,
-                allowed_roles=(list_roles(self.packs_root, self.track)
-                               if self.packs_root and self.track else None),
+                # expert-pool M2（§4.6）：绑定专家清单优先（工厂注入）；
+                # 未注入=按轨过滤的池内专家（等价退役前 list_roles 行为）
+                allowed_roles=(self.allowed_roles
+                               or (list_experts(self.packs_root, self.track)
+                                   if self.packs_root and self.track else None)),
                 parent_depth_limit=1,             # v14：分解深度 1 层（子任务不可再拆）
                 max_children_per_parent=3,        # v14：每父任务子任务上限（防偷懒下包）
             )

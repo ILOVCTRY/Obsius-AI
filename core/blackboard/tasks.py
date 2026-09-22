@@ -664,6 +664,16 @@ class TaskQueue:
                                 session_id=to_sid, author=session_id)
         except Exception:  # noqa: BLE001 —— 回执失败不影响收尾主路径
             log.exception("子任务回执投递失败 task=%s", task_id)
+        # 执行轨迹物化（execution-trace-chain R3，2026-09-22）：任务收尾 done 时把
+        # 会话事件轨迹物化进 origin='trace' 自动链（trace_ref 幂等，重跑安全）。
+        # 惰性 import 防循环依赖；失败只 log 不挡收尾（同上 task_receipt 先例）。
+        if status == "done":
+            try:
+                from core.blackboard import traces
+                traces.materialize_task_trace(self.bb, row["project_id"], task_id,
+                                              author=session_id)
+            except Exception:  # noqa: BLE001 —— 物化失败不影响收尾主路径
+                log.exception("任务轨迹物化失败 task=%s", task_id)
 
     def add_stale_ref(self, task_id: str, ref_id: str) -> bool:
         """撤回传播挂标：把被推翻 finding 幂等并入任务 stale_refs。
