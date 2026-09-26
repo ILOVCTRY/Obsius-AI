@@ -1,0 +1,36 @@
+{
+  "name": "@sec/workspace",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "安全版 dsh（sec profile）插件工作区：packages/sec/* 为正式插件包",
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "pnpm -r test"
+  },
+  "dependencies": {
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsdown": "^0.22.2",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3",
+    "@deepseek-ai/cordis": "link:E:/ILOVCTRY/deepseek-harness/vendor/cordis",
+    "@deepseek-ai/schemastery": "link:E:/ILOVCTRY/deepseek-harness/vendor/schemastery",
+    "@deepseek-ai/dsh-shell": "link:E:/ILOVCTRY/deepseek-harness/packages/shell/shell",
+    "@deepseek-ai/dsh-bash-local": "link:E:/ILOVCTRY/deepseek-harness/packages/shell/bash-local",
+    "@deepseek-ai/dsh-sandbox": "link:E:/ILOVCTRY/deepseek-harness/packages/sandbox/sandbox",
+    "@deepseek-ai/dsh-subprocess": "link:E:/ILOVCTRY/deepseek-harness/packages/subprocess/subprocess",
+    "@deepseek-ai/dsh-tools": "link:E:/ILOVCTRY/deepseek-harness/packages/core/tools",
+    "@deepseek-ai/dsh-storage": "link:E:/ILOVCTRY/deepseek-harness/packages/storage/storage",
+    "@deepseek-ai/dsh-storage-json": "link:E:/ILOVCTRY/deepseek-harness/packages/storage/storage-json",
+    "@deepseek-ai/dsh-storage-sqlite": "link:E:/ILOVCTRY/deepseek-harness/packages/storage/storage-sqlite",
+    "@deepseek-ai/dsh-storage-domain": "link:E:/ILOVCTRY/deepseek-harness/packages/storage/storage-domain",
+    "@deepseek-ai/dsh-typert-protocol": "link:E:/ILOVCTRY/deepseek-harness/packages/typert/protocol",
+    "@deepseek-ai/dsh-typert-registry": "link:E:/ILOVCTRY/deepseek-harness/packages/typert/registry",
+    "@deepseek-ai/dsh-typert-generator": "link:E:/ILOVCTRY/deepseek-harness/packages/typert/generator",
+    "@deepseek-ai/dsh-api-gateway": "link:E:/ILOVCTRY/deepseek-harness/packages/api/gateway",
+    "@deepseek-ai/dsh-client-connection": "link:E:/ILOVCTRY/deepseek-harness/packages/client/connection"
+  }
+}

@@ -157,6 +157,123 @@ def task_graph(bb: Any, project_id: str) -> dict[str, Any]:
     return {"nodes": nodes, "edges": edges}
 
 
+def session_graph(bb: Any, project_id: str) -> dict[str, Any]:
+    """会话协作流（会话中心化 M4，2026-09-25）：节点=编排器+全部会话窗；
+    边三类——delegate（orch→窗：无父委托/父委托不指任何窗）、derive
+    （窗→窗：子委托父委托各自指窗）、inbox（同窗依据聚类）/dm（agent_message
+    定向私信，有向）。同节点对聚合成一条边、refs 带明细。查询条数固定。"""
+    tq = TaskQueue(bb)
+    tasks = tq.list_tasks(project_id)
+    sess_rows = bb.conn.execute(
+        "SELECT id, name, role, status FROM sessions WHERE project_id=?",
+        (project_id,)).fetchall()
+    sessions = {r["id"]: dict(r) for r in sess_rows}
+
+    nodes: list[dict[str, Any]] = [
+        {"id": "__orch", "kind": "orch", "label": "编排器",
+         "name": "编排器", "role": "", "status": "orch"}]
+    queue_by_sid: dict[str, int] = {}
+    current_by_sid: dict[str, str] = {}
+    for t in tasks:
+        sid = t.get("target_session") or ""
+        if not sid:
+            continue
+        if t["status"] == "claimed":
+            current_by_sid.setdefault(sid, t["objective"])
+        elif t["status"] == "open":
+            queue_by_sid[sid] = queue_by_sid.get(sid, 0) + 1
+    for sid, s in sessions.items():
+        nodes.append({
+            "id": sid, "kind": "session", "label": s["name"] or s["role"],
+            "name": s["name"], "role": s["role"], "status": s["status"],
+            "current": current_by_sid.get(sid, ""),
+            "queue": queue_by_sid.get(sid, 0),
+        })
+
+    task_by_id = {t["id"]: t for t in tasks}
+
+    def _task_ref(t: dict[str, Any]) -> dict[str, Any]:
+        return {"task_id": t["id"][:18], "objective": t["objective"][:80],
+                "status": t["status"]}
+
+    pair_refs: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+
+    def _add_pair(kind: str, a: str, b: str, ref: dict[str, Any]) -> None:
+        pair_refs.setdefault((kind, a, b), []).append(ref)
+
+    for t in tasks:
+        sid = t.get("target_session") or ""
+        if not sid or sid not in sessions:
+            continue
+        parent = task_by_id.get(t.get("parent_id") or "")
+        psid = (parent.get("target_session") or "") if parent else ""
+        if parent and psid and psid in sessions and psid != sid:
+            _add_pair("derive", psid, sid, _task_ref(t))
+        else:
+            _add_pair("delegate", "__orch", sid, _task_ref(t))
+
+    # inbox 依据聚类（basis_stale/finding_update）：直接会话两两成边，closed 不参与
+    placeholders = ",".join("?" * len(_INBOX_KINDS))
+    inbox_rows = bb.conn.execute(
+        f"SELECT to_session, kind, ref_id, payload FROM session_inbox"
+        f" WHERE project_id=? AND kind IN ({placeholders})",
+        (project_id, *_INBOX_KINDS)).fetchall()
+    clusters: dict[tuple[str, str], dict[str, list[str]]] = {}
+    payload_titles: dict[str, str] = {}
+    for r in inbox_rows:
+        key = (r["kind"], r["ref_id"])
+        clusters.setdefault(key, {"sessions": []})
+        if r["to_session"] not in clusters[key]["sessions"]:
+            clusters[key]["sessions"].append(r["to_session"])
+        title = _loads(r["payload"], {}).get("title")
+        if isinstance(title, str) and title and r["ref_id"] not in payload_titles:
+            payload_titles[r["ref_id"]] = title
+
+    ref_ids = sorted({ref for _, ref in clusters})
+    finding_titles: dict[str, str] = {}
+    if ref_ids:
+        ph = ",".join("?" * len(ref_ids))
+        finding_titles = {
+            r["id"]: r["title"]
+            for r in bb.conn.execute(
+                f"SELECT id, title FROM findings WHERE project_id=? AND id IN ({ph})",
+                (project_id, *ref_ids))}
+
+    for (kind, ref_id), info in clusters.items():
+        sids = [s for s in info["sessions"]
+                if sessions.get(s, {}).get("status") != "closed"]
+        if len(sids) < 2:
+            continue
+        ref = {"kind": kind, "ref_id": ref_id[:18],
+               "title": finding_titles.get(ref_id) or payload_titles.get(ref_id, "")}
+        for a, b in combinations(sorted(sids), 2):
+            _add_pair("inbox", a, b, ref)
+
+    # agent_message 私信：有向 dm 边（payload.from → to_session）
+    dm_rows = bb.conn.execute(
+        "SELECT to_session, payload FROM session_inbox"
+        " WHERE project_id=? AND kind='agent_message'",
+        (project_id,)).fetchall()
+    seen_dm: set[tuple[str, str, str]] = set()
+    for r in dm_rows:
+        p = _loads(r["payload"], {})
+        frm = p.get("from")
+        if not frm or frm not in sessions or r["to_session"] not in sessions:
+            continue
+        dedup = (frm, r["to_session"], str(p.get("text", "")[:60]))
+        if dedup in seen_dm:
+            continue
+        seen_dm.add(dedup)
+        _add_pair("dm", frm, r["to_session"],
+                  {"subkind": p.get("subkind", ""),
+                   "text": str(p.get("text", ""))[:120]})
+
+    edges = [{"id": f"{kind}:{a}:{b}", "source": a, "target": b,
+              "kind": kind, "refs": refs}
+             for (kind, a, b), refs in sorted(pair_refs.items())]
+    return {"nodes": nodes, "edges": edges}
+
+
 # ---------------------------------------------------------------------------
 # 黑板链路图（2026-09-20，DESIGN.md §12「黑板链路图」定稿块）
 #

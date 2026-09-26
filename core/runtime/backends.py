@@ -4,6 +4,8 @@
 超时必须 kill（挂死的样本进程不允许遗留）。
 ■ 即点即停（2026-09-19）：execute 支持 abort_event（threading.Event）——
 Popen 轮询等待，置位即杀进程树返回 interrupted，不等命令自然结束。
+排水线程（2026-09-23）：stdout/stderr=PIPE 时由 `_execute_piped` 的 daemon
+线程持续消费，防 64KB 管道缓冲写阻塞死锁（见 docs/plans/exec-gateway-pipe-deadlock.md）。
 """
 
 import platform
@@ -16,6 +18,13 @@ from typing import Any
 #: 中断/超时轮询间隔（秒）——即 ■ 中断的最大响应延迟
 POLL_INTERVAL = 0.2
 
+# Windows 子进程统一隐藏窗口（2026-09-23）：窗口模式（pythonw/打包 exe）下父进程
+# 无控制台可继承，不带标志则每条命令弹 PowerShell 窗；POSIX 传 0 合法无副作用。
+# 实测定论：CREATE_NO_WINDOW 对孙进程链生效，只需覆盖平台自身创建点。
+NO_WINDOW_FLAGS = (
+    subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0
+)
+
 
 def _kill_tree(proc: subprocess.Popen) -> None:
     """杀进程树：Windows 用 taskkill /T /F（PowerShell/bash 会拉起子进程，
@@ -23,7 +32,8 @@ def _kill_tree(proc: subprocess.Popen) -> None:
     try:
         if platform.system() == "Windows":
             subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                           capture_output=True, timeout=10)
+                           capture_output=True, timeout=10,
+                           creationflags=NO_WINDOW_FLAGS)
         else:
             proc.kill()
     except Exception:
@@ -43,26 +53,59 @@ class ExecOutcome:
     meta: dict[str, Any] = field(default_factory=dict)
 
 
-def _wait_or_kill(proc: subprocess.Popen, timeout: float,
-                  abort_event: threading.Event | None) -> ExecOutcome | None:
-    """Popen 轮询等待：正常退出返回 None（调方再 communicate 收尸）；超时或
-    abort 置位杀进程树并返回带标记的 ExecOutcome（timeout → timed_out，
-    abort → interrupted）。返回 None 表示跑完了。"""
+def _execute_piped(proc: subprocess.Popen, timeout: float,
+                   abort_event: threading.Event | None) -> ExecOutcome:
+    """Popen 全生命周期（2026-09-23 管道死锁修复）：排水 daemon 线程持续消费
+    stdout/stderr——stdout=PIPE + poll() 轮询不读管道时，输出超 Windows 管道
+    缓冲（64KB）子进程写阻塞、父进程等退出 = 双方死锁到超时杀树（实验复现，
+    见 docs/plans/exec-gateway-pipe-deadlock.md）。排水后轮询语义不变：
+    正常结束 join 排水线程取输出；abort → interrupted；超时 → 杀树 timed_out。"""
+    def _drain(pipe, sink: list) -> None:
+        try:
+            for chunk in pipe:
+                sink.append(chunk)
+        except Exception:  # noqa: BLE001 —— 排水绝不反向影响执行
+            pass
+
+    out_buf: list[str] = []
+    err_buf: list[str] = []
+    threads: list[threading.Thread] = []
+    for pipe, sink in ((getattr(proc, "stdout", None), out_buf),
+                       (getattr(proc, "stderr", None), err_buf)):
+        if pipe is not None:
+            t = threading.Thread(target=_drain, args=(pipe, sink), daemon=True)
+            t.start()
+            threads.append(t)
+
+    interrupted = False
+    timed_out = False
     deadline = time.monotonic() + timeout
     while proc.poll() is None:
         if abort_event is not None and abort_event.is_set():
+            interrupted = True
             _kill_tree(proc)
-            out, err = proc.communicate()
-            return ExecOutcome(exit_code=proc.returncode, stdout=out or "",
-                               stderr=err or "", interrupted=True,
-                               meta={"interrupted": True})
+            break
         if time.monotonic() >= deadline:
+            timed_out = True
             _kill_tree(proc)
-            out, err = proc.communicate()
-            return ExecOutcome(timed_out=True, stdout=out or "", stderr=err or "",
-                               meta={"killed": True})
+            break
         time.sleep(POLL_INTERVAL)
-    return None
+    for t in threads:
+        t.join(timeout=5)
+    try:
+        proc.wait(timeout=5)
+    except Exception:  # noqa: BLE001
+        pass
+    rc = proc.returncode if proc.returncode is not None else -1
+    meta: dict[str, Any] = {}
+    if interrupted:
+        meta["interrupted"] = True
+    if timed_out:
+        meta["killed"] = True
+    return ExecOutcome(exit_code=-1 if timed_out else rc,
+                       stdout="".join(out_buf), stderr="".join(err_buf),
+                       timed_out=timed_out, interrupted=interrupted,
+                       meta=meta)
 
 
 class BackendError(RuntimeError):
@@ -91,14 +134,11 @@ class NativeBackend:
                 argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 cwd=cwd, encoding="utf-8", errors="replace",
                 env={**env} if env else None,
+                creationflags=NO_WINDOW_FLAGS,
             )
         except FileNotFoundError as e:
             raise BackendError(f"后端解释器不可用: {e}") from e
-        early = _wait_or_kill(proc, timeout, abort_event)
-        if early is not None:
-            return early
-        out, err = proc.communicate()
-        return ExecOutcome(exit_code=proc.returncode, stdout=out or "", stderr=err or "")
+        return _execute_piped(proc, timeout, abort_event)
 
 
 class WSLBackend(NativeBackend):
@@ -123,8 +163,16 @@ class WSLBackend(NativeBackend):
             argv += ["-d", self.distro]
         if cwd:
             argv += ["--cd", cwd]
-        argv += ["bash", "-lc", cmd]
+        # --exec argv 直通（2026-09-23）：默认包装层重新引用命令行时会剥引号，
+        # bash 拿到裸命令把 $var/awk $1/$$ 按 Linux 环境展开吞掉（实验实锤，
+        # 见 docs/plans/wsl-dollar-swallow.md）；--exec 后参数不经包装层，引号保真。
+        argv += ["--exec", "bash", "-lc", cmd]
         return self._run(argv, timeout, None, None, abort_event)
+
+
+#: L2 默认容器镜像（pentest-tools-container-m0）：Debian slim + 渗透工具箱，
+#: 构建脚本 scripts/build_pentest_box.py（tools/pentest-box/Dockerfile 三层：基础/web/python）
+DEFAULT_PENTEST_IMAGE = "cyberstrike/pentest-box:0.1"
 
 
 def sandbox_docker_args(net: str) -> list[str]:
@@ -156,23 +204,27 @@ class DockerBackend:
                 abort_event: threading.Event | None = None) -> ExecOutcome:
         proc = subprocess.Popen([self.docker_cmd, *argv], stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True, encoding="utf-8",
-                                errors="replace")
-        early = _wait_or_kill(proc, timeout, abort_event)
-        if early is not None:
-            return early
-        out, err = proc.communicate()
-        return ExecOutcome(exit_code=proc.returncode, stdout=out or "", stderr=err or "")
+                                errors="replace", creationflags=NO_WINDOW_FLAGS)
+        return _execute_piped(proc, timeout, abort_event)
 
     def run_once(self, image: str, cmd: str, *, net: str = "none", sandbox: bool = False,
-                 timeout: float = 300.0,
-                 abort_event: threading.Event | None = None) -> ExecOutcome:
-        """一次性容器执行。sandbox=True 时强制 L3 加固参数（无宿主挂载）。
+                 timeout: float = 300.0, abort_event: threading.Event | None = None,
+                 mounts: list[tuple[str, str]] | None = None,
+                 cwd: str | None = None) -> ExecOutcome:
+        """一次性容器执行。sandbox=True 时强制 L3 加固参数（忽略 mounts——L3 零挂载）。
+        mounts=[(宿主路径, 容器路径), ...]（L2 workspace 卷挂载，pentest-tools-container-m0）；
+        cwd=容器内工作目录（网关固定 /workspace/scratch，对齐 host/wsl 相对路径习惯）。
         中断杀 docker CLI 客户端；--rm 容器侧残留由容器生命周期兜底（已知局限）。"""
         argv = ["run"]
         if sandbox:
             argv += sandbox_docker_args(net)
         else:
             argv += ["--network", net if net in {"none", "bridge"} else "none"]
+            for host_path, cpath in (mounts or []):
+                # 宿主路径转正斜杠：docker -v 在 Windows 上两种斜杠都收，正斜杠免转义
+                argv += ["-v", f"{str(host_path).replace(chr(92), '/')}:{cpath}"]
+            if cwd:
+                argv += ["-w", cwd]
         argv += [image, "sh", "-c", cmd]
         return self._docker(argv, timeout, abort_event)
 

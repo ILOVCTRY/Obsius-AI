@@ -2,12 +2,18 @@
 .env
 *.local.json
 config/providers.json
+config/fofa.json
+config/tools.json
 
 # Python
 __pycache__/
 *.pyc
 .pytest_cache/
 .venv/
+# 桌面打包（desktop-app-shell M3）：打包 venv / PyInstaller 工作目录与产物
+.build-venv/
+build/
+dist/
 cyberstrike_pro.egg-info/
 # 反编译临时目录缺省名（调用方应显式指入项目 workspace，防逃逸，§7）
 .ghidra-tmp/
@@ -15,6 +21,13 @@ cyberstrike_pro.egg-info/
 # 运行时数据
 workspaces/
 config/intel/
+# 全局运行时数据归口（campaign.db 等，workspace-hygiene D1）
+# 锚定项目根：勿写成 data/——会误伤随包资源目录 packs/data/、tools/data/
+/data/
+# 服务日志归口（workspace-hygiene D2；*.log 已全局覆盖，此处防非日志文件）
+logs/
+# Agent 产物总库（per-project 在 workspaces/ 下；项目根历史遗物见 .trash，D3）
+artifacts/
 # packs 编辑备份与回收站（.history/trash），API 写入自动生成
 packs/**/.history/
 *.db

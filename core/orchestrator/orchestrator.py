@@ -13,11 +13,14 @@
 import copy
 import json
 import logging
+import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
 from core import phases
+from core.coverage import coverage_report, effective_status_map
 from core.autonomy import record_llm_usage
 from core.blackboard import Blackboard, TaskQueue
 from core.blackboard.tasks import _check_task_type, dedup_fp, target_keys_of, MAX_TASKS_PER_TARGET
@@ -39,6 +42,10 @@ ORCH_SYSTEM_PROMPT = """你是项目主代理（Orchestrator），职责是监�
 - spawn_session：开一个新 AI 会话（受角色白名单 {allowed_roles} 与上限 {max_sessions} 个约束）；**仅用于纯侦查/纯对话辅助窗**（不挂任务，如常驻态势问答、交叉质询）；任务的执行窗由 publish_task 自动建立，不要用本工具代替。
 - write_digest：写项目简报（给人类看的全局摘要：进展/发现/风险/下一步）。
 - done：结束本轮协调。
+- 只读查询四工具（task_detail / bb_overview / budget_status / session_list）：
+  用于核对与决策——对执行者结论存疑时先 task_detail 拉全文再判断，不要只凭
+  态势摘要下结论；**它们不用于替代派单执行**（你仍不亲自干活，查询是为了
+  派得更准、验收得更实）。
 
 ## 主代理纪律（硬规则）
 1. 不执行命令、不写分析结论——一切经任务派发。
@@ -57,9 +64,13 @@ ORCH_SYSTEM_PROMPT = """你是项目主代理（Orchestrator），职责是监�
 7. 任务拆解与分批（C1）：大目标（如全资产侦察）拆解为自足子任务——先发布父任务拿到
    task_id，再发布子任务并把 parent_id 指向它（**深度 1 层**：子任务不可再拆）；每轮
    发布 ≤{max_publish_per_tick} 个（分批 3-5 个/轮，按建议角色与优先级）；队列空退后
-   下一轮 tick 续批（态势里有 uncovered 资产清单可对照发批）。
+   下一轮 tick 续批（态势里有 uncovered 资产清单可对照发批）。长探测/扫描类 objective
+   写明建议超时秒数（run_cmd 默认 120s，不提醒会被截杀，C3）。
 8. 收敛判据（轨级行为语义）：mission 判据全部达成、或资产穷尽（uncovered=0 且无可推进
    发现）才 done——不要因为单轮零产出就提前收摊；对照上方行动边界段的判据清单逐条评估。
+9. 生命周期收编（M4）：方向变更/目标已达成/前提失效 → cancel_task（reason 写清；
+   在跑窗自动打断）；预算恢复/前提补齐/人类已解决挂起 → requeue_task 放回原任务
+   （履历保留）——**不要取消后重发同款任务**（丢执行履历且污染发布去重）。
 """
 
 
@@ -75,57 +86,105 @@ spawn_session（纯侦查/对话辅助窗，不挂任务）不会立刻开窗：
 
 # L0（全手动）系统提示追加段（批 6）：publish/spawn 只产提案，不写实体
 L0_AUTONOMY_NOTICE = """## 自主档位 L0（全手动·提案模式）
-你不能直接派任务或开窗：publish_task / spawn_session 只生成人类提案（orch.proposed 事件），
+你不能直接派任务或开窗：publish_task / spawn_session / cancel_task / requeue_task
+只生成人类提案（orch.proposed 事件），
 人类在事件流逐条「采纳」后才真正落地（任务以人类名义入队、窗由人类开）。
 - 提案不消耗任何预算、不占会话上限，但参数校验照跑：task_type 必须是本轨注册类型、
   非 passive 仍须 conflict_keys、role 仍受白名单/上限约束，填错会被拒收；
 - 一轮可提多条；write_digest 照常写简报；决策完毕 done。"""
 
 
+def mission_boundary_lines(track: str | None, config: dict | None) -> list[str]:
+    """行动边界纯文本行（M5 D2，orchestrator-efficiency §0-10）：编排器
+    _mission_section（系统提示注入）与 API approvals 出口 boundary 字段（审批卡
+    人类对照当前边界审授权申请）同源——改这里两处一起变。redteam=ROE 四要素
+    （缺要素给兜底提醒）；其余轨=验证上限一行。"""
+    track = track or "pentest"
+    if track == "redteam":
+        roe = (config or {}).get("redteam_roe") or {}
+        lines = [f"ROE 授权目标: {roe.get('targets', '-')}",
+                 f"时间窗口: {roe.get('window', '-')}",
+                 f"禁止事项: {roe.get('exclusions', '-')}",
+                 f"授权人: {roe.get('approver', '-')}"]
+        from core.autonomy import roe_complete
+        if not roe_complete(roe):
+            lines.append("⚠ ROE 四要素未核验齐全：本阶段行为按渗透测试上限兜底，"
+                         "请提醒人类补全 ROE。")
+        return lines
+    return ["验证上限=影响证明级；禁驻留/持久化/横向/提权推进。"]
+
+
 ORCH_TOOLS: list[dict[str, Any]] = [
     {
-        "name": "publish_task",
-        "description": "发布任务到队列，由匹配的 Agent 会话认领。",
+        "name": "delegate",
+        "description": "向某个会话窗委派一件委托（像人类给 AI 发一条消息让他干活）。"
+                       "默认由系统选窗：优先复用「空闲且干过同类委托/与目标有关联"
+                       "上下文」的窗，无合适窗则开新窗；也可用 target_session 指定"
+                       "窗、force_new_window=true 强制开窗。窗空闲 → 委托进窗后起跑；"
+                       "窗忙 → 进该窗队列，当前活干完自动接下一件。长探测/扫描/"
+                       "口令喷洒类 objective 请写明建议超时（如「nmap 全端口建议 "
+                       "run_cmd timeout 传 600」）——run_cmd 默认 120s，长命令不提醒"
+                       "会被截杀（C3）。",
         "input_schema": {
             "type": "object",
             "properties": {
-                "objective": {"type": "string", "description": "任务目标（自包含，执行者看不到对话上下文）"},
-                "task_type": {"type": "string", "description": "任务类型，必须是场景轨注册表内的合法类型"},
+                "objective": {"type": "string", "description": "委托内容（自包含）"},
+                "task_type": {"type": "string",
+                              "description": "委托类型，必须是场景轨 task_types.yaml "
+                                             "注册表内的合法类型",
+                              "default": "generic"},
                 "role": {"type": "string",
-                         "description": "建议认领角色（可选）：本轨 roles/ 已注册角色 id；"
-                                        "带角色任务由底色匹配的会话窗优先认领，10 分钟后其他窗可兜底；留空=不限"},
+                         "description": "建议执行专家（可选）：本轨 experts/ 池内专家 "
+                                        "id；选窗时优先匹配该专家的窗，开窗时按它装配；"
+                                        "留空=不限。执行者中途可被人类换人接手"},
+                "target_session": {"type": "string",
+                                   "description": "指定委派给已有会话窗（窗 id）；不传="
+                                                  "系统按复用规则选窗/开窗"},
+                "force_new_window": {"type": "boolean",
+                                     "description": "true=不复用窗、强制开新窗",
+                                     "default": False},
                 "scope": {"type": "string", "description": "限定范围（如目标资产）"},
                 "noise_budget": {"type": "string", "enum": ["passive", "low", "medium", "high"],
                                  "description": "缺省取 task_types.yaml 中该类型的默认噪声预算"},
                 "conflict_keys": {"type": "array", "items": {"type": "string"},
-                                  "description": "非 passive 必填，如 [\"binary:crackme.elf\"]"},
+                                  "description": "非 passive 必填，如 [\"ip:1.2.3.4\"]；"
+                                                 "跨窗 active 委托键交集自动排队等待"},
                 "priority": {"type": "integer", "description": "0 最高，2 默认"},
                 "refs": {"type": "array", "items": {"type": "string"},
-                         "description": "本任务依据的既有发现 id（find- 前缀）；"
-                                        "依据被推翻时执行者会收到强制自评通知。正文里"
-                                        "直接写 find-id 也会被服务端自动抽取，显式填写更准"},
-                "parent_id": {"type": "string",
-                              "description": "父任务 id（C1 任务拆解）：大目标拆解时先发布父任务，"
-                                             "再把子任务的 parent_id 指向它（深度 1 层，子任务不可再拆）"},
+                         "description": "本委托依据的既有发现 id（find- 前缀）；依据"
+                                        "被推翻时执行者会收到强制自评通知。正文里直接"
+                                        "写 find-id 也会被服务端自动抽取，显式填写更准"},
             },
-            "required": ["objective", "task_type"],
+            "required": ["objective"],
         },
     },
     {
-        "name": "spawn_session",
-        "description": "启动一个新 AI 会话（开窗）。role 决定领域人设。"
-                       "仅用于纯侦查/纯对话辅助窗（不挂任务）：任务发布即自动建专属"
-                       "执行窗，无需也不应为本任务调本工具。",
+        "name": "cancel_task",
+        "description": "取消任务（open/claimed → failed）：被更高优先级方向取代、"
+                       "目标已达成、前提失效时用——方向性收编，不占执行窗。claimed "
+                       "任务的在跑窗会被打断（现场快照保留可续跑）。reason 必填"
+                       "（审计与父子任务回执依据）。预算被泡掉的任务请用 requeue_task "
+                       "而不是取消后再重发（避免丢履历）。",
         "input_schema": {
             "type": "object",
             "properties": {
-                "role": {"type": "string"},
+                "task_id": {"type": "string"},
                 "reason": {"type": "string",
-                           "description": "开窗理由（为什么开这个角色、要它做什么）；"
-                                          "L1 档必须填写——请求会进人类审批收件箱，"
-                                          "审批人只看得到 role+reason"},
+                           "description": "取消原因（写清为什么，人类在事件流审计）"},
             },
-            "required": ["role"],
+            "required": ["task_id", "reason"],
+        },
+    },
+    {
+        "name": "requeue_task",
+        "description": "把 failed/awaiting_human 任务放回待认领（清认领持有，"
+                       "attempts 履历保留，原绑定窗优先续跑）——预算恢复、前提补齐、"
+                       "人类解决挂起原因后重试用；不要取消后重发同款任务（丢履历且"
+                       "污染 dedup）。",
+        "input_schema": {
+            "type": "object",
+            "properties": {"task_id": {"type": "string"}},
+            "required": ["task_id"],
         },
     },
     {
@@ -140,6 +199,58 @@ ORCH_TOOLS: list[dict[str, Any]] = [
     {
         "name": "done",
         "description": "结束本轮协调。",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+]
+
+
+# M2 编排器只读查询工具（orchestrator-efficiency A1，2026-09-22）：零写权红线——
+# 四工具全是只读 bb 查询（_dispatch 层按 _tool_ 命名自动接线，无任何写实体路径）。
+# 补齐「编排器验证不了执行者结论」缺口：态势注入是聚合+截断的被动只读，
+# 本工具面给按 id 拉详情的主动通道（渐进披露：态势看摘要，存疑拉全文）。
+ORCH_QUERY_TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "task_detail",
+        "description": "按 id 拉取单个任务的全量详情：objective/scope 全文、执行现场"
+                       " context（计划、完成对账、历次尝试 attempts）、result_note 全文"
+                       "（态势里只有 300 字截断）。用于核对执行者结论——不要凭态势摘要下判断。",
+        "input_schema": {
+            "type": "object",
+            "properties": {"task_id": {"type": "string"}},
+            "required": ["task_id"],
+        },
+    },
+    {
+        "name": "bb_overview",
+        "description": "黑板分区总览（只读）：assets=资产终态覆盖分布；findings=分级统计"
+                       "+最新 20 条全标题；events=最近 50 条事件（payload 截 300 字）。"
+                       "资产多时用 asset_type/asset_status/limit 过滤，勿整表拉取。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "section": {"type": "string", "enum": ["all", "assets", "findings", "events"],
+                            "description": "缺省 all 全量"},
+                "asset_type": {"type": "string",
+                               "enum": ["host", "domain", "url", "service", "binary"],
+                               "description": "按资产类型过滤（仅 assets/all 分区）"},
+                "asset_status": {"type": "string",
+                                 "enum": ["open", "visited", "scanning", "tested_clean",
+                                          "budget_stop", "na"],
+                                 "description": "按资产状态过滤（仅 assets/all 分区）"},
+                "limit": {"type": "integer",
+                          "description": "过滤命中条数上限，缺省 50（防全量回传烧 token）"},
+            },
+        },
+    },
+    {
+        "name": "budget_status",
+        "description": "项目预算用量（只读）：token 四项用量与预算余量、自主发布任务数"
+                       "与任务预算、80% 软警状态。补齐「余量只能被动等 80% 警告事件」缺口。",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "session_list",
+        "description": "会话窗清单（只读）：各窗状态/角色/绑定任务/未读数/最后活动时间。",
         "input_schema": {"type": "object", "properties": {}},
     },
 ]
@@ -303,12 +414,14 @@ class Orchestrator:
 
     def _orch_tools(self) -> list[dict[str, Any]]:
         """工具表副本：把本轨合法 task_type 作为 enum 下发（让 LLM 一次填对，
-        服务端注册表拒收仍是最终护栏）；无 track 时退回原表。"""
+        服务端注册表拒收仍是最终护栏）；无 track 时退回原表。
+        M2（2026-09-22）：追加只读查询四工具（与轨无关，无 enum 注入需求）。"""
+        base = ORCH_TOOLS + ORCH_QUERY_TOOLS
         if not self.track:
-            return ORCH_TOOLS
-        tools = copy.deepcopy(ORCH_TOOLS)
+            return base
+        tools = copy.deepcopy(base)
         for t in tools:
-            if t["name"] == "publish_task":
+            if t["name"] == "delegate":
                 prop = t["input_schema"]["properties"]["task_type"]
                 prop["enum"] = list(self.task_types.keys())
                 prop["description"] += (
@@ -379,18 +492,18 @@ class Orchestrator:
             fwd = phases.forward_targets(book, spec)
             gate = spec.get("gate") or {}
             if gate and fwd:
-                idle = 0
-                if self.state_loader is not None:
-                    try:
-                        idle = int(self.state_loader().get("derive_idle_rounds", 0))
-                    except Exception:  # noqa: BLE001
-                        idle = 0
-                metrics = phases.gate_metrics(self.bb, self.project_id, idle_rounds=idle)
-                met, unmet = phases.evaluate_gate(gate, metrics)
+                # B3 单一事实源：只读 meta 的 phase_gate_state（API 层 _phase_gate_check
+                # 每轮评估后落盘、enter_phase 流转顺写新阶段），此处不重算——
+                # 消除「注入 tick 开始用上轮 idle、判定 tick 结束 idle 已 +1」矛盾窗口；
+                # 派单撞门的实时拒绝仍由 _phase_gate_reject 现算（动作侧确定性不变）。
+                st = phases.read_gate_state(meta)
                 head = f"- 出口门（进入「{book[fwd[0]]['name']}」）："
-                if met:
+                if st is None or st.get("phase") != pid:
+                    lines.append(head + "门进度待编排校准（下轮编排评估后显示）")
+                elif st.get("passed"):
                     lines.append(head + "已过门——等待阶段流转（按自主档分流，勿自行重复推进）")
                 else:
+                    unmet = st.get("unmet") or []
                     lines.append(head + f"未过（{'；'.join(unmet)}）"
                                  + (f"——{'/'.join(spec['gate_types'])} 类任务会被拒收"
                                     if spec["gate_types"] else ""))
@@ -410,58 +523,65 @@ class Orchestrator:
         return f"## 你的身份\n{persona[:600]}\n"
 
     def _mission_section(self) -> str:
-        """轨级行为语义注入（R2，§6.9 mode 退役）：mission/ROE 人读摘要；
-        redteam 缺 ROE 时按 pentest 上限兜底提醒；pentest 缺省给一行上限提醒。"""
+        """行动边界注入（R2 轨级行为语义，goal 统一后本段只管边界不管目标）：
+        redteam ROE 四要素（缺 ROE 时按 pentest 上限兜底提醒）；pentest 给一行
+        上限提醒。目标与判据由 goal_section 承担（meta.phase_goal，§4.3）。
+        边界正文与 API approvals 出口 boundary 同源（mission_boundary_lines）。"""
         cfg = self.bb.get_project(self.project_id)["config"] or {}
         track = self.track or "pentest"
         label = "红队行动" if track == "redteam" else "渗透测试"
-        lines: list[str] = [f"## 行动边界：{label}（{track} 轨）"]
+        body = mission_boundary_lines(track, cfg)
+        lines = [f"## 行动边界：{label}（{track} 轨）"] + [f"- {x}" for x in body]
         if track == "redteam":
-            roe = cfg.get("redteam_roe") or {}
-            lines.append(f"- ROE 授权目标: {roe.get('targets', '-')}")
-            lines.append(f"- 时间窗口: {roe.get('window', '-')}")
-            lines.append(f"- 禁止事项: {roe.get('exclusions', '-')}")
-            lines.append(f"- 授权人: {roe.get('approver', '-')}")
-            from core.autonomy import roe_complete
-            if not roe_complete(roe):
-                lines.append("- ⚠ ROE 四要素未核验齐全：本阶段行为按渗透测试上限兜底，"
-                             "请提醒人类补全 ROE。")
-        else:
-            lines.append("- 验证上限=影响证明级；禁驻留/持久化/横向/提权推进。")
-        mission = cfg.get("mission") or {}
-        if mission.get("text"):
-            lines.append(f"- mission: {str(mission['text'])[:200]}")
-        if mission.get("criteria"):
-            lines.append("- 判据清单：")
-            for c in str(mission["criteria"]).splitlines():
-                if c.strip():
-                    lines.append(f"  □ {c.strip()[:120]}")
-        return "\n".join(lines) + "\n" if len(lines) > 1 else ""
+            lines.append("- ⚠ 边界即红线：授权申请走 request_authorization，勿自行越界。")
+        return "\n".join(lines) + "\n"
 
     def _campaign_section(self) -> str:
         """⑥ 战役记忆召回（简版，跨项目）：既往打法 top-5 注入态势——
-        关键词取 mission 文本 + 高价值目标/同目标负载；track/capability 优先；
-        热度×时间衰减排序，单条截 300 字。campaign 未注入或零命中给空段。"""
+        关键词取阶段目标 goal 文本（mission 存量回退）+ 高价值目标/同目标负载；
+        track/capability 优先；热度×时间衰减排序，单条截 300 字。campaign 未注入或零命中给空段。"""
         if self.campaign is None:
             return ""
         try:
             proj = self.bb.get_project(self.project_id)
-            cfg = proj["config"] or {}
-            mission = str((cfg.get("mission") or {}).get("text") or "")
+            meta = self.meta_loader() if self.meta_loader is not None else {}
+            goal_text = str(((meta or {}).get("phase_goal") or {}).get("text") or "")
+            mission = str(((proj["config"] or {}).get("mission") or {}).get("text") or "")
             caps = proj.get("capabilities") or []
             targets = self._target_load(self.tq.list_tasks(self.project_id))
             hv = " ".join(a["value"] for a in self._stats().get("high_value", []))
-            query = mission + " " + hv + " " + " ".join(
+            query = (goal_text or mission) + " " + hv + " " + " ".join(
                 t["target"] for t in targets[:5])
             hits = self.campaign.recall(
                 query, track=self.track or "", capability=caps[0] if caps else "",
                 limit=5)
             if not hits:
                 return ""
-            lines = ["## 既往战役打法（跨项目记忆，仅参考——贴合当前目标再采用）"]
-            for h in hits:
+            # experience-sedimentation M2 元信息行：campaign 条件写入后（只收
+            # verified 产出的任务），注入本项目的已验证产出量给编排器参照，
+            # 零产出项目看到跨项目打法时知道本项目还什么都没验证过
+            try:
+                row = self.bb.conn.execute(
+                    "SELECT COUNT(*) AS n FROM findings WHERE project_id=?"
+                    " AND status='verified'", (self.project_id,)).fetchone()
+                n_verified = row["n"]
+            except Exception:  # noqa: BLE001
+                n_verified = 0
+            # M6 F1（§0-11）：死路条目（tags 含 dead_end）单独成组——负知识防重走，
+            # 不能混在「打法」里误导成正面经验；recall 池不拆，组内照旧打分排序
+            normal = [h for h in hits if "dead_end" not in (h.get("tags") or [])]
+            dead = [h for h in hits if "dead_end" in (h.get("tags") or [])]
+            lines = ["## 既往战役打法（跨项目记忆，仅参考——贴合当前目标再采用）",
+                     f"- 本项目 verified 发现 {n_verified} 个（campaign 收 verified"
+                     " 产出/exploited 链打法与死路记账负知识）"]
+            for h in normal:
                 lines.append(f"- [{h['track'] or '?'}·{h['capability'] or '?'}·热{h['usage_count']}] "
                              f"{h['title'][:80]}\n  {h['content'][:300]}")
+            if dead:
+                lines.append("- ⚠ 既往死路（勿重走；确需重走先确认前提已变化）：")
+                for h in dead:
+                    lines.append(f"- [{h['track'] or '?'}·{h['capability'] or '?'}] "
+                                 f"{h['title'][:80]}\n  {h['content'][:300]}")
             return "\n".join(lines) + "\n"
         except Exception:  # noqa: BLE001 —— 记忆召回绝不阻断编排
             log.exception("战役记忆召回失败（跳过）")
@@ -479,8 +599,10 @@ class Orchestrator:
             new_events = self.bb.recent_events(
                 self.project_id, since_id=self._last_event_id, limit=100)
         self._last_event_id = max(tip, self._last_event_id)
+        # A2 截断放宽（orchestrator-efficiency，2026-09-22）：事件行 payload
+        # [:120]→[:300]——编排器反馈事件行过短无法判读，全文兜底走 bb_overview
         event_lines = [
-            f"  #{e['id']} [{e['kind']}] {e['author']}: {json.dumps(e['payload'], ensure_ascii=False)[:120]}"
+            f"  #{e['id']} [{e['kind']}] {e['author']}: {json.dumps(e['payload'], ensure_ascii=False)[:300]}"
             for e in new_events[-40:]
         ]
         out = json.dumps(stats, ensure_ascii=False, indent=1) + (
@@ -510,7 +632,7 @@ class Orchestrator:
         new_events = self.bb.recent_events(
             self.project_id, since_id=tip - 100, limit=100)
         event_lines = [
-            f"  #{e['id']} [{e['kind']}] {e['author']}: {json.dumps(e['payload'], ensure_ascii=False)[:120]}"
+            f"  #{e['id']} [{e['kind']}] {e['author']}: {json.dumps(e['payload'], ensure_ascii=False)[:300]}"
             for e in new_events[-40:]
         ]
         out = json.dumps(stats, ensure_ascii=False, indent=1) + (
@@ -572,17 +694,26 @@ class Orchestrator:
         assets_view = self._assets_view(tasks)
         hvt_ids: set = assets_view.pop("_hvt_ids")
         covered_ids: set = assets_view.pop("_covered_ids")
-        # 高价值目标段（态势增强）：meta.tags 含「高价值」的资产全量列出——
-        # 即使被任务覆盖，未到 tested_clean 就持续呈现（"挖完"口径= tested_clean）
+        # 高价值目标段（态势增强）：两类来源并集——
+        # ①meta.tags 含「高价值」（人工标注，既有口径）；
+        # ②自动推导（2026-09-24）：承载 verified 且 severity≥high 的发现的资产——
+        #   实证高危的资产不该在面板缺席（此前只认 tag，verified HIGH 无入口呈现）。
+        # 即使被任务覆盖，未到 tested_clean 就持续呈现（"挖完"口径= tested_clean）。
+        by_asset: dict[str, list[dict]] = {}
+        for f in findings:
+            if f.get("target_asset_id"):
+                by_asset.setdefault(f["target_asset_id"], []).append(f)
+        sev_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+        derived_ids: set[str] = set()
+        for aid, fs in by_asset.items():
+            if any(f.get("status") == "verified"
+                   and f.get("severity") in ("high", "critical") for f in fs):
+                derived_ids.add(aid)
+        hv_ids_all = hvt_ids | derived_ids
         high_value = []
-        if hvt_ids:
-            by_asset: dict[str, list[dict]] = {}
-            for f in findings:
-                if f.get("target_asset_id"):
-                    by_asset.setdefault(f["target_asset_id"], []).append(f)
-            sev_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+        if hv_ids_all:
             for a in self.bb.list_assets(self.project_id):
-                if a["id"] not in hvt_ids:
+                if a["id"] not in hv_ids_all:
                     continue
                 rel = sorted(by_asset.get(a["id"], []),
                              key=lambda f: sev_rank.get(f.get("severity"), 9))[:3]
@@ -590,6 +721,7 @@ class Orchestrator:
                     "id": a["id"], "type": a["type"], "value": a["value"][:60],
                     "status": a.get("status") or "open",
                     "covered": a["id"] in covered_ids,
+                    "derived": a["id"] in derived_ids and a["id"] not in hvt_ids,
                     "findings": [{"id": f["id"], "title": f["title"][:50],
                                   "severity": f["severity"], "status": f["status"]}
                                  for f in rel],
@@ -630,13 +762,16 @@ class Orchestrator:
         （2026-09-18 对齐判据文案「含 visited/scanning 状态排除」；旧口径只看任务
         文本，任务 done 后资产回流 uncovered 导致判据永不收敛）。"""
         assets = self.bb.list_assets(self.project_id)
+        # asset-tree-derived-clean M2：状态以读时派生为准（父节点显式 status 被子树覆盖）
+        eff_map = effective_status_map(assets, self.bb.list_findings(self.project_id))
         by_type: dict[str, int] = {}
         by_status: dict[str, int] = {}
         targetable = []
         hvt_ids: set[str] = set()
         for a in assets:
             by_type[a["type"]] = by_type.get(a["type"], 0) + 1
-            st = (a.get("status") or "open")
+            eff = eff_map.get(a["id"])
+            st = eff["status"] if eff else (a.get("status") or "open")
             by_status[st] = by_status.get(st, 0) + 1
             if a["type"] in ("host", "domain", "url", "service"):
                 targetable.append(a)
@@ -656,19 +791,52 @@ class Orchestrator:
                 v = v.split("://", 1)[-1].rstrip("/")
             return [v]
 
+        # covered（M2 新口径）：effective settled（全终态/挂 finding 收口）或
+        # 半程（visited/scanning）或任务文本命中。零子根行的显式 tested_clean
+        # 照常算 covered（D5，AI 管理语义不变）。
+        def _status_covered(a: dict) -> bool:
+            eff = eff_map.get(a["id"])
+            if eff is None:
+                return (a.get("status") or "open") in (
+                    "visited", "scanning", "tested_clean", "na")
+            return eff["settled"] or eff["status"] in ("visited", "scanning")
+
         covered_ids = {
             a["id"] for a in targetable
-            if (a.get("status") or "open") in ("visited", "scanning", "tested_clean")
-            or any(k in covered_text for k in _asset_keys(a))
+            if _status_covered(a) or any(k in covered_text for k in _asset_keys(a))
         }
         uncovered = [a for a in targetable if a["id"] not in covered_ids]
         # 排序：HVT 优先 → 未访问（open，此时 uncovered 里只剩 open 态）
         uncovered.sort(key=lambda a: (a["id"] not in hvt_ids, 0))
         in_progress = [
             {"id": a["id"], "type": a["type"], "value": a["value"][:60],
-             "status": a.get("status") or "open"}
-            for a in targetable if (a.get("status") or "open") in ("visited", "scanning")
+             "status": eff_map[a["id"]]["status"]}
+            for a in targetable
+            if a["id"] in eff_map and eff_map[a["id"]]["status"] in ("visited", "scanning")
         ][:20]
+        # B2 覆盖度对账（M3）：分组收敛摘要——终态含 finding 挂链/dead_end/na，
+        # 组内子资产传播收敛，uncovered open 优先。「全景对账」类数数任务归零；
+        # 对账失败不阻断态势注入。
+        try:
+            cov = coverage_report(self.bb, self.project_id, assets=assets)
+            cov_groups = []
+            for g in cov["by_group"]:
+                row = f"{g['group']} 收敛 {g['converged']}/{g['total']}"
+                if g["done"]:
+                    row += "（已收口）"
+                elif g["uncovered"]:
+                    row += " · 未收口: " + "、".join(
+                        f"{u['type']}:{u['value'][:40]}({u['state']})"
+                        for u in g["uncovered"][:5])
+                cov_groups.append(row)
+            coverage_view = {
+                "groups_done": f"{cov['overall']['groups_done']}/{cov['overall']['groups']}",
+                "converged": f"{cov['overall']['converged']}/{cov['overall']['assets']}",
+                "by_group": cov_groups,
+            }
+        except Exception:  # noqa: BLE001
+            log.exception("覆盖度对账组装失败（coverage 段跳过）")
+            coverage_view = None
         return {
             "assets": {
                 "total": len(assets), "by_type": by_type, "by_status": by_status,
@@ -677,6 +845,7 @@ class Orchestrator:
                 "uncovered": [{"id": a["id"], "type": a["type"], "value": a["value"][:60]}
                               for a in uncovered[:30]],
                 "in_progress": in_progress,
+                "coverage": coverage_view,
             },
             "_hvt_ids": hvt_ids,        # 内部复用（_stats 组装 high_value 段），出口前剔除
             "_covered_ids": covered_ids,
@@ -704,7 +873,9 @@ class Orchestrator:
                     reverse=True)
         recent_closed = [
             {"id": t["id"], "type": t["task_type"], "status": t["status"],
-             "result_note": (t.get("result_note") or "")[:100],
+             # A2 截断放宽（orchestrator-efficiency，2026-09-22）：[:100]→[:300]；
+             # 全文兜底走 task_detail
+             "result_note": (t.get("result_note") or "")[:300],
              "ended_at": t.get("updated_at") or t.get("created_at") or ""}
             for t in closed[:30]
         ]
@@ -853,6 +1024,116 @@ class Orchestrator:
                 return self._finish_tick()
         return self._finish_tick(exhausted=True)
 
+    # ---------- 异常订阅唤醒（对话化编排器 M4，§4.6） ----------
+
+    # 白名单 kind → 冷却窗秒数。只有这里列出的事件才可能唤醒编排器；
+    # 绑窗关闭复用 task.starvation（调度器重绑分支），不单独设 kind。
+    WAKE_TRIGGERS: dict[str, float] = {
+        "task.failed": 600.0,          # 任务失败聚合（一次唤醒合并锚点后全部失败）
+        "task.starvation": 600.0,      # 新饿死告警（含绑窗关闭待重绑）
+        "budget.soft_warning": 3600.0,  # 预算 80% 软警（低频，1h 冷却）
+        "phase.gate_open": 600.0,      # 阶段出口门满足（五触发之一：goal 阶段门）
+    }
+    WAKE_LOOKBACK = 1800.0   # 首启回看窗：无历史唤醒锚点时只看最近 30 分钟事件
+    WAKE_MAX_EVENTS = 300    # 扫描上限：锚点之后最多回看多少条事件
+    WAKE_CHAT_WINDOW = 200   # 在 orch.chat 里找 proactive 锚点的回看条数
+
+    @staticmethod
+    def _event_epoch(s: Any) -> float:
+        """事件 created_at（UTC ISO）→ epoch 秒；解析失败返 0.0（永不触发冷却）。"""
+        try:
+            return datetime.fromisoformat(
+                str(s).replace("Z", "+00:00")).timestamp()
+        except (ValueError, TypeError):
+            return 0.0
+
+    @classmethod
+    def collect_wake_triggers(
+        cls, bb: Any, project_id: str, *, now: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """扫描白名单事件，返回待唤醒触发清单 [{kind, event_id, summary, ts}]。
+
+        纯函数（零新表零列）：唤醒锚点 = 最近 proactive orch.chat 事件——
+        - 无锚点：只报 WAKE_LOOKBACK 窗内的白名单事件（首启防翻旧账）；
+        - 有锚点：`id <= anchor_id` 跳过（上次唤醒已覆盖）+ `now - ts < 冷却窗`
+          跳过（冷却期内静默，事件攒着冷却后随下次唤醒一并简报）。"""
+        if now is None:
+            now = time.time()
+        # 1) 找各 kind 的最新唤醒锚点（proactive orch.chat 事件的 triggers 字段）
+        anchors: dict[str, tuple[int, float]] = {}
+        chat_rows = bb.conn.execute(
+            "SELECT id, payload, created_at FROM events"
+            " WHERE project_id=? AND kind='orch.chat'"
+            " ORDER BY id DESC LIMIT ?", (project_id, cls.WAKE_CHAT_WINDOW)).fetchall()
+        for r in chat_rows:
+            try:
+                p = json.loads(r["payload"])
+            except ValueError:
+                continue
+            if not p.get("proactive"):
+                continue
+            ts = cls._event_epoch(r["created_at"])
+            for k in p.get("triggers") or []:
+                if isinstance(k, str):
+                    anchors.setdefault(k, (int(r["id"]), ts))
+        # 2) 旧→新扫白名单事件
+        out: list[dict[str, Any]] = []
+        kinds = list(cls.WAKE_TRIGGERS)
+        marks = ",".join("?" * len(kinds))
+        rows = bb.conn.execute(
+            f"SELECT id, kind, payload, created_at FROM events"
+            f" WHERE project_id=? AND kind IN ({marks})"
+            f" ORDER BY id DESC LIMIT ?",
+            (project_id, *kinds, cls.WAKE_MAX_EVENTS)).fetchall()
+        for r in reversed(rows):
+            kind = r["kind"]
+            anchor = anchors.get(kind)
+            if anchor is not None:
+                if int(r["id"]) <= anchor[0]:
+                    continue  # 锚点前的事件：上次唤醒已覆盖
+                if now - anchor[1] < cls.WAKE_TRIGGERS[kind]:
+                    continue  # 冷却窗内：静默攒着
+            else:
+                if now - cls._event_epoch(r["created_at"]) > cls.WAKE_LOOKBACK:
+                    continue  # 无锚点且超出首启回看窗：不翻旧账
+            try:
+                p = json.loads(r["payload"])
+            except ValueError:
+                p = {}
+            if kind == "task.starvation":  # payload={warnings:[{task_id,objective,reason}]}
+                parts: list[str] = []
+                for w in (p.get("warnings") or [])[:5]:
+                    if isinstance(w, dict):
+                        line = f"{w.get('reason') or ''}（{w.get('objective') or ''}）"
+                        if line.strip("（） ") and line not in parts:
+                            parts.append(line)
+                summary = "；".join(parts)
+            else:  # task.failed/budget.soft_warning=note、phase.gate_open=summary
+                summary = str(p.get("note") or p.get("summary")
+                              or p.get("reason") or "")
+            out.append({"kind": kind, "event_id": r["id"],
+                        "summary": summary[:160], "ts": r["created_at"]})
+        return out
+
+    @classmethod
+    def wake_brief_text(cls, triggers: list[dict[str, Any]]) -> str:
+        """把触发清单合成一条 user 消息（只进 LLM messages，不落 orch.chat 历史）。"""
+        lines = ["〔主动唤醒〕以下异常事件达到白名单触发条件，请向人类简报现状并给出"
+                 "处理建议；若无需处理请明确说明。"]
+        for t in triggers:
+            kind = t["kind"]
+            if kind == "task.failed":
+                lines.append(f"- 任务失败：{t['summary']}")
+            elif kind == "task.starvation":
+                lines.append(f"- 饿死/重绑告警：{t['summary']}")
+            elif kind == "budget.soft_warning":
+                lines.append("- 预算软警：LLM 用量已达 80%，请评估消耗与剩余任务量")
+            elif kind == "phase.gate_open":
+                lines.append("- 阶段出口门满足：当前阶段门指标达标，可考虑流转下一阶段")
+            else:
+                lines.append(f"- {kind}：{t['summary']}")
+        return "\n".join(lines)
+
     # ---------- 对话插队轮（对话化编排器 M1，§4.2） ----------
 
     def _chat_history(self) -> list[dict[str, Any]]:
@@ -885,9 +1166,15 @@ class Orchestrator:
             str(b.get("text") or "") for b in blocks
             if isinstance(b, dict) and b.get("type") == "text").strip()
 
-    def chat_turn(self, text: str) -> dict[str, Any]:
+    def chat_turn(
+        self, text: str, *, wake: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         """一轮对话插队轮：人类消息 → LLM 工具循环（ORCH_TOOLS 全闸门同源）→
         回复落 orch.chat {role:"orch", text(截2000), tool_trace}。
+
+        wake 非空 = 异常订阅唤醒轮（M4 §4.6）：同一条循环，仅落盘 payload 加
+        proactive=True + triggers（前端 🔔 徽章与下次唤醒锚点双用途）；
+        text 由调用方经 wake_brief_text 合成，只进 messages 不落历史。
 
         与 tick 的边界（打磨定稿 #2，全部只读）：
         - 态势走 _overview_for_chat（固定最近 100 条事件窗，**不推进 event_cursor**）；
@@ -950,10 +1237,13 @@ class Orchestrator:
             if self._finished:
                 break
         if reply:
+            payload: dict[str, Any] = {
+                "role": "orch", "text": reply[:2000], "tool_trace": tool_trace}
+            if wake:
+                payload["proactive"] = True
+                payload["triggers"] = [t["kind"] for t in wake]
             self.bb.append_event(
-                self.project_id, "orch.chat",
-                {"role": "orch", "text": reply[:2000], "tool_trace": tool_trace},
-                author="orchestrator")
+                self.project_id, "orch.chat", payload, author="orchestrator")
         return {
             "reply": reply,
             "published": list(self._published),
@@ -1100,88 +1390,361 @@ class Orchestrator:
         return (f"已提案 #{event_id}（{op}）：不写实体，等待人类在事件流「采纳」；"
                 "本轮可继续提案或 done。")
 
-    def _tool_publish_task(
-        self, objective: str, task_type: str, role: str = "", scope: str = "",
-        noise_budget: str | None = None, conflict_keys: list[str] | None = None,
-        priority: int = 2, refs: list[str] | None = None,
-        parent_id: str | None = None,
+    # ---------- 只读查询四工具（M2 orchestrator-efficiency A1，2026-09-22） ----------
+
+    def _tool_task_detail(self, task_id: str) -> str:
+        """按 id 拉任务全量：get_task 出口已解析 context（plan/reconcile/attempts），
+        result_note 全文不截断——核对执行者结论的唯一可信通道。"""
+        task = self.tq.get_task(task_id)
+        if task is None or task.get("project_id") != self.project_id:
+            return f"[错误] 任务不存在或不在本项目: {task_id}"
+        out = {k: task.get(k) for k in (
+            "id", "status", "task_type", "role", "objective", "scope",
+            "claimed_by", "blocked_reason", "result_note", "created_at",
+            "updated_at", "plan", "context")}
+        return json.dumps(out, ensure_ascii=False, indent=1)
+
+    def _tool_bb_overview(self, section: str = "all", *,
+                          asset_type: str = "", asset_status: str = "",
+                          limit: int = 0) -> str:
+        """黑板分区总览。assets 复用 _assets_view（剔除内部键）；findings 给
+        分级统计+最新 20 条全标题；events 给尾部 50 条（payload 截 300）。
+        asset_type/asset_status/limit 给定时 assets 分区换成精简过滤清单
+        （不回传全量覆盖视图，省 token）。"""
+        section = (section or "all").strip().lower()
+        if section not in {"all", "assets", "findings", "events"}:
+            return f"[错误] 未知 section: {section}（可选 all/assets/findings/events）"
+        asset_filtered = bool(asset_type or asset_status)
+        limit = limit if (isinstance(limit, int) and limit > 0) else 50
+        parts: list[str] = []
+        if section in ("all", "assets"):
+            if asset_filtered:
+                if asset_type and asset_type not in ("host", "domain", "url", "service", "binary"):
+                    return f"[错误] 非法 asset_type: {asset_type}"
+                if asset_status and asset_status not in (
+                        "open", "visited", "scanning", "tested_clean", "budget_stop", "na"):
+                    return f"[错误] 非法 asset_status: {asset_status}"
+                rows = self.bb.list_assets(self.project_id,
+                                           type_=asset_type or None,
+                                           status=asset_status or None)
+                shown = [{"id": a["id"], "type": a["type"], "value": a["value"][:80],
+                          "status": a.get("status") or "open"}
+                         for a in rows[:limit]]
+                parts.append("## 资产过滤清单\n" + json.dumps(
+                    {"filter": {"type": asset_type or None, "status": asset_status or None},
+                     "matched_total": len(rows), "shown": len(shown), "items": shown},
+                    ensure_ascii=False, indent=1))
+            else:
+                tasks = self.tq.list_tasks(self.project_id)
+                av = self._assets_view(tasks)
+                av.pop("_hvt_ids", None)
+                av.pop("_covered_ids", None)
+                parts.append("## 资产覆盖\n" + json.dumps(av, ensure_ascii=False, indent=1))
+        if section in ("all", "findings"):
+            stats = self.bb.conn.execute(
+                "SELECT severity, COUNT(*) AS n FROM findings WHERE project_id=?"
+                " GROUP BY severity", (self.project_id,)).fetchall()
+            ver = self.bb.conn.execute(
+                "SELECT COUNT(*) AS n FROM findings WHERE project_id=?"
+                " AND status='verified'", (self.project_id,)).fetchone()
+            recent = self.bb.conn.execute(
+                "SELECT id, title, severity, status, category, created_at"
+                " FROM findings WHERE project_id=?"
+                " ORDER BY created_at DESC LIMIT 20", (self.project_id,)).fetchall()
+            parts.append("## 发现\n" + json.dumps(
+                {"by_severity": {r["severity"]: r["n"] for r in stats},
+                 "verified_total": ver["n"],
+                 "recent": [dict(r) for r in recent]},
+                ensure_ascii=False, indent=1))
+        if section in ("all", "events"):
+            evs = self.bb.recent_events(self.project_id, tail=50)
+            lines = [
+                f"  #{e['id']} [{e['kind']}] {e['author']}: "
+                f"{json.dumps(e['payload'], ensure_ascii=False)[:300]}"
+                for e in evs
+            ]
+            parts.append("## 事件尾部 50 条\n" + ("\n".join(lines) or "  （无）"))
+        return "\n\n".join(parts)
+
+    def _tool_budget_status(self) -> str:
+        """预算用量（gate 同数据源：orchestrator_state 用量行 + 项目 config 的
+        autonomy 预算项；不做闸门判定——闸门仍是 API 注入的 gate 回调）。"""
+        usage = self.bb.usage_state_get(self.project_id)
+        auto: dict[str, Any] = {}
+        row = self.bb.conn.execute(
+            "SELECT config FROM projects WHERE id=?", (self.project_id,)).fetchone()
+        if row and row["config"]:
+            try:
+                auto = (json.loads(row["config"]) or {}).get("autonomy") or {}
+            except Exception:  # noqa: BLE001
+                auto = {}
+        used = (usage.get("tokens_in") or 0) + (usage.get("tokens_out") or 0)
+        tb_raw = auto.get("token_budget")
+        tkb_raw = auto.get("task_budget")
+        # null 显式解释为「不限」（2026-09-24）：此前裸抛 null，调用方（含 LLM）
+        # 普遍误读为「预算没接线」。原值保留 + *_effective 给确定语义。
+        tb_eff = tb_raw if (isinstance(tb_raw, int) and tb_raw > 0) else "unlimited"
+        tkb_eff = tkb_raw if (isinstance(tkb_raw, int) and tkb_raw > 0) else "unlimited"
+        out: dict[str, Any] = {
+            "tokens": {
+                "in": usage.get("tokens_in") or 0, "out": usage.get("tokens_out") or 0,
+                "cache_read": usage.get("tokens_cache_read") or 0,
+                "cache_creation": usage.get("tokens_cache_creation") or 0,
+                "llm_calls": usage.get("llm_calls") or 0,
+            },
+            "token_budget": tb_raw,
+            "token_budget_effective": tb_eff,   # unlimited=不限（硬闸不拦、80% 警不发）
+            "tasks_published": usage.get("tasks_published") or 0,
+            "task_budget": tkb_raw,
+            "task_budget_effective": tkb_eff,   # unlimited=不限（只计自主发布）
+            "budget_warned": bool(usage.get("budget_warned")),
+        }
+        tb = out["token_budget"]
+        if isinstance(tb, int) and tb > 0:
+            out["tokens"]["used"] = used
+            out["tokens"]["remaining"] = max(tb - used, 0)
+            out["tokens"]["pct"] = round(used / tb, 4)
+        tkb = out["task_budget"]
+        if isinstance(tkb, int) and tkb > 0:
+            out["tasks_remaining"] = max(tkb - out["tasks_published"], 0)
+        return json.dumps(out, ensure_ascii=False, indent=1)
+
+    def _tool_session_list(self) -> str:
+        """会话窗清单：状态/角色/绑定任务/未读数/最后活动时间（事件表 GROUP BY
+        一条 SQL，无 N+1）。步数为会话内存态，此处不展示。"""
+        sessions = self.bb.list_sessions(self.project_id)
+        last_act = {
+            r["session_id"]: r["last_at"] for r in self.bb.conn.execute(
+                "SELECT session_id, MAX(created_at) AS last_at FROM events"
+                " WHERE project_id=? AND session_id IS NOT NULL AND session_id!=''"
+                " GROUP BY session_id", (self.project_id,)).fetchall()
+        }
+        out = []
+        for s in sessions:
+            meta = s.get("meta")
+            if isinstance(meta, str):
+                try:
+                    meta = json.loads(meta or "{}")
+                except Exception:  # noqa: BLE001
+                    meta = {}
+            out.append({
+                "id": s.get("id"), "name": s.get("name"), "role": s.get("role"),
+                "status": s.get("status"),
+                "bound_task_id": (meta or {}).get("bound_task_id"),
+                "worker_armed": (meta or {}).get("worker_armed"),
+                "unread": s.get("unread") or 0,
+                "last_event_at": last_act.get(s.get("id")),
+            })
+        return json.dumps({"sessions": out}, ensure_ascii=False, indent=1)
+
+    def _tool_delegate(
+        self, objective: str, task_type: str = "generic", role: str = "",
+        target_session: str = "", force_new_window: bool = False,
+        scope: str = "", noise_budget: str | None = None,
+        conflict_keys: list[str] | None = None, priority: int = 2,
+        refs: list[str] | None = None, parent_id: str | None = None,
     ) -> str:
-        # C1 单轮发布硬闸：直接发布与 L0 提案同闸（拆解/分批 3-5/轮，防一轮刷爆队列）
+        """向会话窗委派委托（docs/plans/session-centric-orchestration.md §4.3）。
+        选窗：target_session 指定 > 复用同类 idle 武装窗 > 开新窗；L1 开窗走
+        审批（批准=开窗+写入委托+带活起跑），L2 直接开窗；窗忙且被指定 →
+        委托进窗内队列。"""
+        # C1 单轮委派硬闸：分批 3-5/轮，防一轮刷爆（与提案同闸）
         if self._publish_count >= self.config.max_publish_per_tick:
-            return (f"[拒绝] 本轮发布已达上限 max_publish_per_tick="
-                    f"{self.config.max_publish_per_tick}；分批发布——本轮先 done，"
-                    "队列空退后下一轮 tick 续批（态势含 uncovered 资产清单）")
-        # expert-pool M2 role 前置校验：不用 load_expert 判存在（缺失静默回退
-        # _generalist 会放行拼错专家）；无 track 不校验（对称 allowed_types 的
-        # 未接线语义）。非法即拒，直接发布与 L0 提案同闸。
+            return (f"[拒绝] 本轮委派已达上限 max_publish_per_tick="
+                    f"{self.config.max_publish_per_tick}；分批委派——本轮先 done，"
+                    "窗空退后下一轮 tick 续批（态势含 uncovered 资产清单）")
+        # role 前置校验（拼错专家不静默回退）；无 track 不校验
         role = (role or "").strip()
         if role and self.track and not expert_exists(self.packs_root, role, self.track):
             return (f"[拒绝] 专家不在池内或不可服务本轨: {role!r}；"
                     f"请使用 experts/ 池内专家 id（或留空不限）")
-        # 机制 1.1 发布去重（v14 补编排器缺口）：命中同指纹 open/claimed 任务 →
-        # 复用不新建（直接发布与 L0 提案都先查重，防编排器重复派活）
+        # 角色白名单（config.allowed_roles 配置时生效，None=不限）：开窗前拦，
+        # 不提审批、不建窗（track 过滤已由 expert_exists 把关）
+        if role and self.config.allowed_roles is not None \
+                and role not in self.config.allowed_roles:
+            return (f"[拒绝] 角色 {role!r} 不在白名单 {self.config.allowed_roles}；"
+                    "请改用白名单内专家或先调整配置")
+        # 去重：命中同指纹 open/claimed 委托 → 复用不新建
         fp = dedup_fp(task_type, scope, objective)
         dup = self.tq.find_dedup_target(self.project_id, fp)
         if dup is not None:
-            return (f"[复用] 已存在同目标任务 {dup['id']}（status={dup['status']}），"
-                    f"本轮不重复发布；认领/避让请参考其 workset 与 conflict_keys")
-        # 分阶段工作流（M2，§4.4 唯一硬约束）：入场门——当前阶段门未过时
-        # gate_types 内类型拒收（直接发布与 L0 提案同闸；发布 API 422 是第二层）
+            return (f"[复用] 已存在同目标委托 {dup['id']}（status={dup['status']}），"
+                    f"本轮不重复委派；避让请参考其 conflict_keys")
+        # 分阶段入场门（直接委派与提案同闸；发布 API 422 是第二层）
         gate_msg = self._phase_gate_reject(task_type)
         if gate_msg:
             return gate_msg
-        # 批 6 L0 提案模式：校验照跑（噪声/conflict_keys/注册表），但不走预算闸、
-        # 不发布、不计数，只发 orch.proposed（人采纳时以 created_by=human 走 POST /tasks）
+        # task_type 注册校验前置（与 L0 提案同护栏）：未注册直接拒绝，不开窗、
+        # 不提审批、不发提案（否则会留下「窗建了、委托写不进」的孤儿窗）
+        if self.track:
+            try:
+                _check_task_type(task_type, self.task_types.keys())
+            except ValueError as e:
+                return f"[拒绝] {e}"
+        # 父子关系 + 编排拆解深度 1 层前置（与 tq.publish 同护栏）：开窗前拦
+        if parent_id:
+            try:
+                self.tq.check_parent(self.project_id, parent_id, enforce_depth=True)
+            except ValueError as e:
+                return f"[拒绝] {e}"
+        # L0 提案模式：校验照跑、不写实体，只发 orch.proposed
         if self.config.propose_only:
             if noise_budget is None:
                 noise_budget = self.task_types.get(task_type, "passive")
             if noise_budget not in {"passive", "low", "medium", "high"}:
                 return f"[拒绝] 非法 noise_budget: {noise_budget}"
             if noise_budget != "passive" and not conflict_keys:
-                return "[拒绝] 非 passive 任务必须提供 conflict_keys（active 互斥的依据）"
+                return "[拒绝] 非 passive 委托必须提供 conflict_keys（active 互斥的依据）"
             try:
                 _check_task_type(task_type,
                                  self.task_types.keys() if self.track else None)
-                if parent_id:
-                    self.tq.check_parent(self.project_id, parent_id,
-                                         enforce_depth=True)  # 编排拆解深度 1
             except ValueError as e:
                 return f"[拒绝] {e}"
             self._publish_count += 1
-            return self._propose("publish_task", {
+            return self._propose("delegate", {
                 "objective": objective, "role": role, "scope": scope,
                 "task_type": task_type,
                 "noise_budget": noise_budget, "priority": priority,
                 "conflict_keys": conflict_keys or [], "refs": refs or [],
+                "target_session": target_session,
+                "force_new_window": force_new_window,
                 "parent_id": parent_id})
-        # 自主预算硬闸（§6.8）：每闸门经 gate 回调重读项目配置（task_budget/token_budget）
+        # 自主预算硬闸（回调实时重读项目配置）
         if self.gate is not None:
-            reason = self.gate("publish_task")
+            reason = self.gate("delegate")
             if reason:
                 return f"[拒绝] {reason}"
-        # 噪声缺省 = 注册表该类型默认值（§4.5.5）；轨未接线时回退 passive
+        # 噪声缺省 = 注册表该类型默认值；轨未接线回退 passive
         if noise_budget is None:
             noise_budget = self.task_types.get(task_type, "passive")
+        if noise_budget not in {"passive", "low", "medium", "high"}:
+            return f"[拒绝] 非法 noise_budget: {noise_budget}"
+        # active 委托冲突键前置校验（与 tq.publish / L0 提案同护栏）：开窗前拦，
+        # 不留「窗开了、委托写不进」的孤儿窗
+        if noise_budget != "passive" and not conflict_keys:
+            return "[拒绝] 非 passive 委托必须提供 conflict_keys（active 互斥的依据）"
+        # 同目标防碎闸前置（镜像 tasks.py 事务内计数）：达阈值不开窗、不提审批
+        target_keys = target_keys_of(scope, conflict_keys)
+        if target_keys:
+            n_target = 0
+            for r in self.bb.conn.execute(
+                "SELECT scope, conflict_keys FROM tasks"
+                " WHERE project_id=? AND status IN ('open','claimed')",
+                (self.project_id,),
+            ).fetchall():
+                try:
+                    row_keys = json.loads(r["conflict_keys"] or "[]")
+                except ValueError:
+                    row_keys = []
+                if target_keys & target_keys_of(r["scope"], row_keys):
+                    n_target += 1
+            if n_target >= MAX_TASKS_PER_TARGET:
+                return (f"[拒绝] 同目标 {'、'.join(sorted(target_keys))} 在队"
+                        f"（open+claimed）任务已达 {n_target} 个（阈值 "
+                        f"{MAX_TASKS_PER_TARGET}）——请先消化存量或合并范围")
+        # ---- 选窗 ----
+        sid = (target_session or "").strip()
+        if sid:
+            srow = self.bb.get_session(sid)
+            if srow is None or srow.get("status") == "closed":
+                return f"[拒绝] 指定会话窗不存在或已关闭: {sid}"
+            if srow.get("status") == "paused":
+                return f"[拒绝] 会话窗 {sid} 处于暂停态，暂不接委托"
+        elif not force_new_window:
+            sid = self._pick_reusable_window(role, task_type)
+        created = False
+        if not sid:
+            auto = self.autonomy_provider() if self.autonomy_provider is not None else None
+            if auto is not None and auto.get("level") == "L1":
+                # L1 开窗审批：批准后处理器开窗 + 写入委托 + 带活起跑
+                appr = self.bb.request_approval(
+                    self.project_id,
+                    {"op": "delegate_window", "role": role or "_generalist",
+                     "objective": objective, "task_type": task_type,
+                     "scope": scope, "noise_budget": noise_budget,
+                     "conflict_keys": conflict_keys or [], "priority": priority,
+                     "refs": refs or []},
+                    risk="low" if noise_budget == "passive" else "medium",
+                    requested_by="orchestrator")
+                self._publish_count += 1
+                return (f"已提交委派审批 {appr['id']}（开 {role or '通用'} 窗执行）："
+                        "人类批准后系统自动开窗、写入委托并带活起跑；本轮可继续其他"
+                        "决策或 done，审批结果下轮 tick 经事件可见")
+            if self.session_factory is None:
+                return "[错误] 未配置 session_factory，无法开窗"
+            if len(self.live_sessions) >= self.config.max_sessions:
+                return (f"[拒绝] 活跃会话已达上限 {self.config.max_sessions}，"
+                        "请复用现有会话")
+            try:
+                sess = self.session_factory(role or "_generalist")
+            except FileNotFoundError as e:
+                return f"[拒绝] {e}"
+            except Exception as e:  # noqa: BLE001
+                return f"[错误] 开窗失败: {type(e).__name__}: {e}"
+            sid = sess.session["id"]
+            self.live_sessions[sid] = sess
+            created = True
+            self._spawned.append({"session_id": sid, "role": role or "_generalist"})
+            # 开窗即事件（与 API 侧 _bind_task_window 同口径）：审计/新壳会话流据此呈现
+            self.bb.append_event(
+                self.project_id, "session.spawned",
+                {"role": role or "_generalist", "session_id": sid,
+                 "origin": "orchestrator-delegate"},
+                session_id=sid, author="orchestrator")
+        # ---- 写委托（归属窗已定） ----
         try:
             task_id = self.tq.publish(
                 self.project_id, objective, scope=scope, task_type=task_type,
                 noise_budget=noise_budget, priority=priority,
                 conflict_keys=conflict_keys, created_by="orchestrator",
                 allowed_types=(self.task_types.keys() if self.track else None),
-                refs=refs, parent_id=parent_id, parent_depth_limit=1,
-                role=role)
+                refs=refs, role=role, target_session=sid, parent_id=parent_id,
+                parent_depth_limit=1)
         except ValueError as e:
             return f"[拒绝] {e}"
         self._publish_count += 1
         self._published.append(task_id)
+        # 委托事件：会话流呈现「🧭 编排器委派」
+        self.bb.append_event(
+            self.project_id, "delegation.posted",
+            {"task_id": task_id, "objective": objective, "task_type": task_type,
+             "created_by": "orchestrator", "role": role, "new_window": created},
+            session_id=sid, author="orchestrator")
+        # 回调（API 侧）：usage 计数 + idle 窗起跑 / 忙窗排队
         if self.on_task_published is not None:
             try:
-                self.on_task_published(task_id)  # v0.71：带 task_id 供绑专属执行窗
-            except Exception:  # noqa: BLE001 —— 计数/绑窗失败不回滚已发布任务
+                self.on_task_published(task_id)
+            except Exception:  # noqa: BLE001
                 log.exception("tasks_published 回调失败")
-        return (f"task={task_id} 已发布（{task_type}/{noise_budget}"
-                + (f"/role={role}" if role else "") + "）"
-                + "；系统将自动为该任务建立专属执行窗")
+        return (f"task={task_id} 已委派给会话 {sid}（{task_type}/{noise_budget}"
+                + (f"/role={role}" if role else "")
+                + ("，新窗" if created else "，复用窗")
+                + "）：窗空闲已起跑 / 窗忙已排队")
+
+    def _pick_reusable_window(self, role: str, task_type: str) -> str:
+        """选复用窗（保守规则）：armed + idle、role 给定时窗角色匹配、且干过同
+        task_type 终态委托；多个按最近终态时间取新。无 → ''（交调用方开窗）。"""
+        sessions = {s["id"]: s for s in self.bb.list_sessions(self.project_id)}
+        last_done: dict[str, str] = {}
+        for t in self.tq.list_tasks(self.project_id):
+            if t.get("target_session") and t["status"] in {"done", "failed"} \
+                    and t.get("task_type") == task_type:
+                wsid = t["target_session"]
+                ts = t.get("updated_at") or t.get("created_at") or ""
+                if wsid not in last_done or ts > last_done[wsid]:
+                    last_done[wsid] = ts
+        candidates: list[tuple[str, str]] = []
+        for wsid, row in sessions.items():
+            if row.get("status") != "idle" or wsid not in last_done:
+                continue
+            if role and row.get("role") != role:
+                continue
+            meta = row.get("meta")
+            meta = json.loads(meta) if isinstance(meta, str) else (meta or {})
+            if not meta.get("worker_armed"):
+                continue
+            candidates.append((last_done[wsid], wsid))
+        return sorted(candidates)[-1][1] if candidates else ""
 
     def _phase_gate_reject(self, task_type: str) -> str:
         """入场门校验（M2）：被拦返回 [拒绝] 原因串，放行返回空串。
@@ -1205,50 +1768,77 @@ class Orchestrator:
             log.exception("阶段入场门校验失败（放行）")
             return ""
 
-    def _tool_spawn_session(self, role: str, reason: str = "") -> str:
-        if self.config.allowed_roles is not None and role not in self.config.allowed_roles:
-            return f"[拒绝] 角色 {role} 不在白名单 {self.config.allowed_roles}（开窗约束，§6.4）"
-        if len(self.live_sessions) >= self.config.max_sessions:
-            return f"[拒绝] 活跃会话已达上限 {self.config.max_sessions}，请复用现有会话"
-        # 批 6 L0 提案模式：白名单/上限照校，sessions_cap/预算不走（不占资源；
-        # 人采纳时 POST /agents 的 409/警告兜底），只发 orch.proposed。
+    def _tool_cancel_task(self, task_id: str, reason: str = "") -> str:
+        """取消委托（M4 C1，orchestrator-efficiency）：open/claimed → failed
+        （blocked_reason=cancelled）。自主档三分流：L0 提案 / L1 审批卡 /
+        L2 直接执行 + 打断在跑窗。打断复用人工中断原语 request_abort（当前步
+        做完收口，现场快照保留）——窗保持待命可复用，cancel ≠ 关窗。"""
+        task = self.tq.get_task(task_id)
+        if task is None or task["project_id"] != self.project_id:
+            return f"[错误] 任务不存在: {task_id}"
+        reason = (reason or "").strip()
+        if not reason:
+            return "[拒绝] 取消必须填 reason（写清为什么，人类在事件流审计）"
+        if task["status"] not in ("open", "claimed"):
+            return (f"[拒绝] 任务 {task_id} 状态为 {task['status']}"
+                    f"（{task.get('blocked_reason') or 'error'}），仅 open/claimed 可取消；"
+                    "failed/awaiting_human 请用 requeue_task 放回")
         if self.config.propose_only:
-            return self._propose("spawn_session",
-                                 {"role": role, "reason": (reason or "").strip()})
-        # 项目级持久上限 sessions_cap + token 预算硬闸（§6.8；回调内实时重读配置）。
-        # L1 预检同样走这里：cap/预算已超时不建审批单，LLM 立即改道。
-        if self.gate is not None:
-            blocked = self.gate("spawn_session")
-            if blocked:
-                return f"[拒绝] {blocked}"
-        # L1（任务自动·开窗审批，批 4）：不调工厂，转人工审批；批准后由
-        # decide 端点的 op 处理器建窗+开跑。L2/未接线维持直接开窗；
-        # L0 在上面的 propose_only 分支只发提案（批 6）。
+            return self._propose("cancel_task", {"task_id": task_id, "reason": reason})
         auto = self.autonomy_provider() if self.autonomy_provider is not None else None
         if auto is not None and auto.get("level") == "L1":
-            if not (reason or "").strip():
-                return ("[拒绝] L1 开窗必须填 reason：审批人只看得到 role+reason，"
-                        "请写清为什么开这个角色、要它做什么")
             appr = self.bb.request_approval(
                 self.project_id,
-                {"op": "spawn_session", "role": role,
-                 "reason": (reason or "").strip()},
+                {"op": "cancel_task", "task_id": task_id,
+                 "objective": (task["objective"] or "")[:120], "reason": reason},
                 risk="low", requested_by="orchestrator")
-            return (f"已提交开窗审批 {appr['id']}（role={role}）：人类批准后系统自动建窗"
-                    "并提交 agent-work 开跑；本轮可继续 publish passive 任务或 done，"
-                    "审批结果下轮 tick 经事件可见")
-        if self.session_factory is None:
-            return "[错误] 未配置 session_factory，无法开窗"
+            return (f"已提交取消审批 {appr['id']}：人类批准后任务转 failed（cancelled）"
+                    "并打断在跑窗；本轮可继续其他决策或 done")
+        res = self.tq.cancel_task(task_id, by="orchestrator", reason=reason)
+        self._interrupt_window(res.get("claimed_by"))
+        tail = "；在跑窗已打断（快照保留可续跑）" if res.get("claimed_by") else ""
+        return f"task={task_id} 已取消（cancelled）{tail}"
+
+    def _tool_requeue_task(self, task_id: str) -> str:
+        """放回待认领（M4 C1）：failed/awaiting_human → open（reopen 原语——
+        awaiting_human 本就是 failed+blocked_reason 档；attempts 履历保留，
+        target_session 保留=原绑定窗优先续跑）。自主档三分流同 cancel_task。"""
+        task = self.tq.get_task(task_id)
+        if task is None or task["project_id"] != self.project_id:
+            return f"[错误] 任务不存在: {task_id}"
+        if task["status"] != "failed":
+            return (f"[拒绝] 任务 {task_id} 状态为 {task['status']}，"
+                    "仅 failed/awaiting_human 可放回")
+        if self.config.propose_only:
+            return self._propose("requeue_task", {"task_id": task_id})
+        auto = self.autonomy_provider() if self.autonomy_provider is not None else None
+        if auto is not None and auto.get("level") == "L1":
+            appr = self.bb.request_approval(
+                self.project_id,
+                {"op": "requeue_task", "task_id": task_id,
+                 "objective": (task["objective"] or "")[:120],
+                 "blocked_reason": task.get("blocked_reason") or "error"},
+                risk="low", requested_by="orchestrator")
+            return (f"已提交放回审批 {appr['id']}：人类批准后任务回到待认领"
+                    "（原绑定窗优先续跑）；本轮可继续其他决策或 done")
+        self.tq.reopen(task_id, by="orchestrator")
+        return "task={} 已放回待认领（原绑定窗优先续跑，调度器自动重开窗）".format(task_id)
+
+    def _interrupt_window(self, sid: str | None) -> None:
+        """打断在跑窗（M4 cancel 链路）：request_abort 让当前步尽快收口——
+        在跑窗走 _abort_current_task（fail 撞 ClaimError 被吞、会话空闲），
+        空闲窗标志在下次检查点自清（loop.py 无任务只清标志先例）。
+        只打断不关窗：窗保持待命可接新任务。失败只 log——任务行已取消，
+        主语义已达成，打断失败不回滚。"""
+        if not sid:
+            return
+        sess = self.live_sessions.get(sid)
+        if sess is None:
+            return
         try:
-            sess = self.session_factory(role)
-        except Exception as e:  # noqa: BLE001
-            return f"[错误] 开窗失败: {type(e).__name__}: {e}"
-        self.live_sessions[sess.session["id"]] = sess
-        self._spawned.append({"session_id": sess.session["id"], "role": role})
-        self.bb.append_event(
-            self.project_id, "session.spawned",
-            {"role": role, "session_id": sess.session["id"]}, author="orchestrator")
-        return f"session={sess.session['id']} role={role} 已启动"
+            sess.request_abort()
+        except Exception:  # noqa: BLE001
+            log.exception("打断在跑窗失败 sid=%s", sid)
 
     def _tool_write_digest(self, summary: str) -> str:
         self.bb.append_event(

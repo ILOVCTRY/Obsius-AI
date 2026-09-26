@@ -186,14 +186,26 @@ function Flow({ pid, pausedSids, wsBump }: TaskFlowProps) {
   }, [graph, selectedNodeId, roleNames])
 
   // 双击节点（v0.71 任务即窗口）：统一 goto-session 直开专属执行窗页签
-  // （target_session 优先，缺省回退认领会话；两者皆无才回退任务看板定位）
+  // （target_session 优先，缺省回退认领会话；open 无绑 → spawn-window 补绑
+  // 待命窗 2026-09-23，失败回退任务看板定位）。open 节点挂回后**立刻起跑**
+  // （2026-09-24，与 TaskBoard 双击同口径；起跑失败静默=页内可手动跑队列）
   const activateNode = useCallback((n: TaskGraphNode) => {
     const sid = n.target_session || n.claimed_by
     if (sid) {
       window.dispatchEvent(new CustomEvent("goto-session", { detail: { sessionId: sid } }))
-    } else {
-      window.dispatchEvent(new CustomEvent("goto-tasks", { detail: { taskId: n.id } }))
+      if (n.status === "open") api.agentWork(sid).catch(() => {})
+      return
     }
+    if (n.status === "open") {
+      api.spawnWindow(n.id).then((r) => {
+        window.dispatchEvent(new CustomEvent("goto-session", { detail: { sessionId: r.session_id } }))
+        api.agentWork(r.session_id).catch(() => {})
+      }).catch(() => {
+        window.dispatchEvent(new CustomEvent("goto-tasks", { detail: { taskId: n.id } }))
+      })
+      return
+    }
+    window.dispatchEvent(new CustomEvent("goto-tasks", { detail: { taskId: n.id } }))
   }, [])
 
   // 节点删除（四态皆可；claimed 警示，409 子任务错误留在对话框内）
@@ -458,7 +470,7 @@ function Flow({ pid, pausedSids, wsBump }: TaskFlowProps) {
             <AlertDialogTitle>删除任务「{deleteTarget?.task_type}」？</AlertDialogTitle>
             <AlertDialogDescription asChild>
               <div className="space-y-2">
-                <p className="line-clamp-3 rounded border bg-card p-2 font-mono text-xs">
+                <p className="line-clamp-3 wrap-anywhere rounded border bg-card p-2 font-mono text-xs">
                   {deleteTarget?.objective}
                 </p>
                 {deleteTarget && planStats(deleteTarget.plan).total > 0 && (

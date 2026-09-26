@@ -20,9 +20,11 @@ AI 驱动的全能安全平台（能力包 web/binary/crypto/forensics/misc × �
 ## 一键启动（Windows 双击）
 
 - **`启动平台.bat`**（项目根，双击即用）：自动起后端 `scripts/serve.py`（127.0.0.1:8420）并开浏览器。**静态优先（desktop-app-shell M2）**：`webui/dist/index.html` 存在 → 后端同源托管前端（8420 即 WebUI，不起 Vite）；无产物 → 回退起前端 Vite（localhost:5173，仅 IPv6）的 dev 全流程（首次自动 `npm install`）。端口已在监听则跳过，各服务独立窗口，日志看对应窗口。
-- **`启动平台（窗口）.bat`**：桌面窗口模式——pythonw 起 `serve.py --window`（pywebview/WebView2，无控制台黑窗，日志落 serve-window.log）。8420 在跑=attach 附窗（关窗只退自己，可多开），无服务=owner（**关最后一窗=优雅停机并落任务现场快照**）；加载地址自动探测 dist 静态版 > Vite dev > 窗内指引。
+- **`启动平台（窗口）.bat`**：桌面窗口模式——pythonw 起 `serve.py --window`（pywebview/WebView2，无控制台黑窗，日志落 logs/serve-window.log）。8420 在跑=attach 附窗（关窗只退自己，可多开），无服务=owner（**关最后一窗=优雅停机并落任务现场快照**）；加载地址自动探测 dist 静态版 > Vite dev > 窗内指引。
 - **`停止平台.bat`**：先对 8420 优雅停机（`POST /api/admin/shutdown`，shutdown 钩子给在跑会话落任务现场快照，等端口释放最多 15s），超时才按端口硬杀；5173 照旧硬杀。
-- 三个脚本为 **UTF-8 + CRLF**，开头 `chcp 65001` 自举（call 自身重读）以兼容双击时的 GBK 控制台；改动后必须保持 CRLF（LF 会导致 cmd 解析错乱）。
+- **`启动新壳.bat`**：与 `启动平台.bat` 同流程（静态优先+Vite 回退），区别只在浏览器开 `?shell=2`——强制进 TRAE 化新壳并落 localStorage 记住（想回旧壳用侧栏「旧壳」或 `?shell=1`）。
+- **桌面打包（desktop-app-shell M3）**：`E:\Miniconda3\python.exe scripts\build_exe.py` 四步一键（干净 .build-venv 钉版依赖 + PyInstaller onedir + packs/tools/webui.dist 资源随包），产物 `dist/cyberstrike-pro/`（~59MB）双击 exe 即弹窗；config/、workspaces/ 不随包首启自建，**敏感凭据绝不进包**。
+- 启动类 .bat 为 **UTF-8（无 BOM）+ CRLF**，开头 `chcp 65001` 自举（call 自身重读）以兼容双击时的 GBK 控制台；改动后必须保持 CRLF（LF 会导致 cmd 解析错乱）。
 
 ## 文档维护约束（强制，每个会话必须遵守）
 

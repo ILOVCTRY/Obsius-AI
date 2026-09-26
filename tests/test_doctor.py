@@ -161,3 +161,44 @@ def test_doctor_missing_root(tmp_path):
     rep = diagnose(tmp_path / "nope")
     assert rep.counts["error"] == 1
     assert rep.issues[0].code == "packs-root-missing"
+
+
+# ---------- M2 同义词表体检（retrieval-upgrade，2026-09-23） ----------
+
+def test_doctor_synonyms_missing_and_dead_group(tmp_path):
+    """词表缺失=info 提示；解析不出组=warning；死组（全成员 kb 零命中）=warning；
+    空转成员=info。"""
+    import pytest as _pytest
+    from core.skills.doctor import diagnose
+    root = tmp_path / "packs"
+    root.mkdir()
+    rep = diagnose(root)
+    codes = {(i.code, i.target) for i in rep.issues}
+    assert ("synonyms-missing", "kb/synonyms.yaml") in codes
+    # 词表存在但解析不出组 → warning
+    _write(root / "kb" / "synonyms.yaml", "groups: []\n")
+    rep = diagnose(root)
+    assert any(i.code == "synonyms-empty" for i in rep.issues)
+    # 好组 + 死组并存（好组成员全部能命中 kb 文档，否则也会被报空转）
+    _write(root / "kb" / "web" / "poc" / "越权检测.md", "# 越权检测方法\n正文")
+    _write(root / "kb" / "synonyms.yaml", (
+        "groups:\n"
+        "  - id: good\n"
+        "    terms: [越权, 越权检测]\n"
+        "  - id: dead\n"
+        "    terms: [量子纠缠, 玄学漏洞]\n"))
+    rep = diagnose(root)
+    msgs = {i.code: i.message for i in rep.issues}
+    assert not any(i.code == "synonyms-missing" for i in rep.issues)
+    assert "synonyms-dead-group" in msgs
+    assert "dead" in msgs["synonyms-dead-group"]
+    assert not any("good" == i.target.split("#")[-1] for i in rep.issues
+                   if i.code.startswith("synonyms"))
+    # 空转成员：好组混入一个 kb 零命中词
+    _write(root / "kb" / "synonyms.yaml", (
+        "groups:\n"
+        "  - id: good\n"
+        "    terms: [越权, 玄学漏洞]\n"))
+    rep = diagnose(root)
+    idle = [i for i in rep.issues if i.code == "synonyms-idle-term"]
+    assert len(idle) == 1 and "玄学漏洞" in idle[0].message

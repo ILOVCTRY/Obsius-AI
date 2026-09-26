@@ -18,6 +18,16 @@ from core.browser.pool import BrowserConfig, BrowserError
 from core.browser.replay import Intruder, ReplayClient
 
 
+def test_browser_config_ignore_https_default_and_override(tmp_path):
+    """证书错误开关：默认放行（2026-09-24 用户定稿），config 可显式关回严格。"""
+    assert BrowserConfig().ignore_https_errors is True
+    cfg_path = tmp_path / "browser.json"
+    cfg_path.write_text(json.dumps({"ignore_https_errors": False}), encoding="utf-8")
+    assert BrowserConfig.from_file(cfg_path).ignore_https_errors is False
+    cfg_path.write_text(json.dumps({"ignore_https_errors": True}), encoding="utf-8")
+    assert BrowserConfig.from_file(cfg_path).ignore_https_errors is True
+
+
 @pytest.fixture()
 def server():
     """回环 echo 服务：/echo 回显 method/path/query；/login 对 admin/123456 返回 200。"""
@@ -163,6 +173,18 @@ def test_replay_raw_bad_message(bb, pid):
     rc = ReplayClient(bb, config=BrowserConfig())
     with pytest.raises(BrowserError, match="原始报文解析失败"):
         rc.replay(pid, raw="GETonly\n\n")
+
+
+def test_replay_ignores_system_proxy(bb, pid, server, monkeypatch):
+    """重放流量不交系统代理（trust_env=False，2026-09-23）：假代理指向死端口，
+    直连本地 server 应照常成功——若 httpx 回落 trust_env=True 会走假代理而失败。"""
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:1")
+    rc = ReplayClient(bb, config=BrowserConfig())
+    row = rc.replay(pid, raw=f"GET {server}/echo?p=1 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+                    author="human")
+    assert row["status"] == 200
+    assert json.loads(row["resp_body"])["query"] == {"p": ["1"]}
 
 
 def test_replay_missing_capture(bb, pid):

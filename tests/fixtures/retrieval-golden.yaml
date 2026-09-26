@@ -1,0 +1,78 @@
+# 检索黄金集（retrieval-upgrade M3，2026-09-23 人工标注 20 条起步）
+# 断言：三层匹配链（route_index 静态导航 → kbindex 2-gram+同义词扩展 → 提示行）
+# 以 recall@4 ≥ 0.8 回归——**匹配链任何改动（词表/索引/停用词）必须跑本集防退化**；
+# M2 词表增补的收益也用它度量。
+# 约定：query 模拟典型中文任务 objective（用户怎么说话，不是关键词堆砌）；
+# expect = 期望出现在提示行的 kb 模块路径（hints 的 module 形态，kb 源内相对路径），
+# 命中判定 = hints cap=4 内出现任一 expect（其余命中不算错，路径是良性的）。
+# 维护：语料/词表演化导致某条持续 miss 时，先修词表或文档标题，确属标注过时才改本集。
+entries:
+  # ---- web ----
+  - query: 测试这个系统有没有越权漏洞，能不能看到别的用户的订单
+    cap: web
+    expect: [web/playbooks/arbitrary-x-authz.md]
+  - query: jwt token 没有校验签名，能不能伪造管理员身份
+    cap: web
+    # 良性命中扩标：jwt 专题/authn 模块/api-rest 第 12 篇同样正确（2026-09-23 标注修订）
+    expect: [web/playbooks/oauth-saml-jwt/12-jwt.md, web/webapp/authn/auth-jwt.md,
+             web/playbooks/api-rest/12-jwt-api.md]
+  - query: 文件上传功能试试能不能传 webshell 拿权限
+    cap: web
+    expect: [web/playbooks/file-upload/10-upload-bypass.md,
+             web/playbooks/file-upload/00-index.md]
+  - query: 看看有没有路径穿越，能不能读 etc passwd
+    cap: web
+    expect: [web/playbooks/path-traversal/10-traversal-lfi.md]
+  - query: 这个接口反序列化用户输入，试试 java 反序列化利用链
+    cap: web
+    expect: [web/playbooks/rce/12-deserialization.md]
+  - query: 参数里拼了系统命令，试试命令注入反弹 shell
+    cap: web
+    expect: [web/playbooks/rce/11-command-injection.md]
+  - query: ssti 模板注入测试，jinja2 的 payload 都打一遍
+    cap: web
+    expect: [web/playbooks/rce/14-ssti.md]
+  - query: graphql 接口未鉴权，做内省枚举
+    cap: web
+    expect: [web/playbooks/graphql.md, web/playbooks/unauth-access.md]
+  - query: 短信验证码可以绕过，挖一挖业务逻辑漏洞
+    cap: web
+    expect: [web/playbooks/logic-flaws/11-business-logic.md]
+  - query: oauth 回调 redirect_uri 校验不严，试试跳转劫持
+    cap: web
+    expect: [web/playbooks/oauth-saml-jwt/10-oauth-redirect.md,
+             web/playbooks/oauth-saml-jwt/00-index.md]
+  # ---- binary ----
+  - query: 栈溢出 ret2libc 打法，先找 gadget 再写 exp
+    cap: binary
+    expect: [binary/pwn/rop-and-shellcode.md]
+  - query: 堆题用 tcache poisoning 拿 shell
+    cap: binary
+    expect: [binary/pwn/heap-techniques.md]
+  - query: 格式化字符串漏洞泄露 canary 和 libc 基址
+    cap: binary
+    expect: [binary/pwn/format-string.md]
+  - query: apk 脱壳之后用 frida hook 目标函数
+    cap: binary
+    expect: [binary/android/unpacking.md, binary/android/triage-and-layering.md]
+  - query: 恶意样本会回连远端，做 c2 协议分析
+    cap: binary
+    expect: [binary/malware/c2-and-protocols.md]
+  - query: ida 反编译出来的函数全是混淆，静态分析还原算法
+    cap: binary
+    # 2026-09-23 修正：去混淆专题在 tools-advanced；patterns 主题是反编译产物分类识别
+    expect: [binary/reverse/tools-advanced.md]
+  # ---- cloud ----
+  - query: 云环境有 ssrf，试试打元数据接口拿临时凭证
+    cap: cloud
+    expect: [cloud/vendors/aws/ssrf-metadata.md]
+  - query: 对象存储 bucket 做枚举，看有没有未授权访问
+    cap: cloud
+    expect: [cloud/vendors/aliyun/oss.md]
+  # ---- forensics / misc ----
+  - query: 流量包里找攻击痕迹，wireshark 逐包分析
+    cap: forensics
+    expect: [forensics/forensics/network.md]
+  - query: 图片里疑似藏了信息，做一下隐写分析
+    cap: forensics
+    expect: [forensics/forensics/stego-image.md]

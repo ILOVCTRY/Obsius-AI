@@ -127,6 +127,23 @@ def test_gateway_abort_kills_running_command(bb):
     assert ev["payload"].get("interrupted") is True
 
 
+def test_native_backend_large_output_drained():
+    """管道死锁回归（2026-09-23）：stdout 超 Windows 管道缓冲（64KB）时排水
+    线程必须持续消费、进程正常退出；旧实现 poll 轮询不读管道 → 双方死锁到
+    timeout 杀树（实战 wsl grep 单行 120KB spill JSON 两条命令各挂 120.8s）。"""
+    if platform.system() != "Windows":
+        pytest.skip("host 后端 PowerShell 大输出")
+    import time as _t
+    from core.runtime.backends import NativeBackend
+    b = NativeBackend()
+    t0 = _t.monotonic()
+    r = b.execute("$s='A'*200000; Write-Output $s", timeout=30.0)
+    dt = _t.monotonic() - t0
+    assert r.exit_code == 0 and not r.timed_out and not r.interrupted
+    assert len(r.stdout) >= 200_000
+    assert dt < 15  # 旧实现挂满 30s（timed_out）；排水后秒级返回
+
+
 def test_brief_truncation_marker():
     """截断可见化（2026-09-20）：stdout/stderr 被切时尾部带显式标注（显示/总字符数），
     Agent 不必靠语义猜输出不完整。"""
@@ -182,11 +199,77 @@ def test_docker_run_once_sandbox_invocation(monkeypatch):
     assert "-v" not in argv and "--volume" not in argv
 
 
+def test_docker_run_once_mounts_and_cwd(monkeypatch):
+    """pentest-tools-container-m0：L2 workspace 卷挂载 + 容器 cwd 落 argv
+    （宿主路径反斜杠转正斜杠）；sandbox 忽略 mounts（L3 零挂载铁律）。"""
+    calls = []
+
+    def fake_popen(argv, **kwargs):
+        calls.append(argv)
+        class P:
+            returncode = 0
+
+            def poll(self):
+                return 0
+        return P()
+
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+    d = DockerBackend()
+    d.run_once("img", "id", net="bridge", mounts=[(r"E:\proj\ws", "/workspace")],
+               cwd="/workspace/scratch")
+    argv = calls[0]
+    assert argv[argv.index("-v") + 1] == "E:/proj/ws:/workspace"
+    assert argv[argv.index("-w") + 1] == "/workspace/scratch"
+    d.run_once("img", "id", net="none", sandbox=True,
+               mounts=[(r"E:\proj\ws", "/workspace")], cwd="/workspace/scratch")
+    argv2 = calls[1]
+    assert "-v" not in argv2 and "-w" not in argv2  # L3 零挂载且 cwd 参数被忽略
+
+
+def test_gateway_docker_workspace_mount_and_deny(bb, tmp_path):
+    """docker runtime workspace（容器化 M0）：默认 pentest-box 镜像 + 整卷挂载 +
+    cwd=/workspace/scratch；pathguard 校验切容器内路径语义，逃逸仍拦。"""
+    from core.runtime.backends import DEFAULT_PENTEST_IMAGE
+
+    pid = bb.create_project("t-dk", "pentest")["id"]
+
+    class FakeDocker:
+        def __init__(self):
+            self.calls = []
+
+        def run_once(self, image, cmd, *, net, sandbox, timeout,
+                     abort_event=None, mounts=None, cwd=None):
+            self.calls.append({"image": image, "cmd": cmd, "net": net,
+                               "sandbox": sandbox, "mounts": mounts, "cwd": cwd})
+            return ExecOutcome(exit_code=0, stdout="ok")
+
+    fd = FakeDocker()
+    gw = ExecutionGateway(bb=bb, backends={"docker": fd})
+    ws = tmp_path / "ws"
+    r = gw.run("nmap -T3 -p 80 target", runtime="docker", threat_class="trusted",
+               project_id=pid, workspace=ws)
+    assert r.exit_code == 0
+    call = fd.calls[-1]
+    assert call["image"] == DEFAULT_PENTEST_IMAGE
+    assert call["mounts"] == [(str(ws), "/workspace")]
+    assert call["cwd"] == "/workspace/scratch"
+    assert call["net"] == "bridge" and call["sandbox"] is False
+    # 相对路径写 scratch 放行（posix 语义）
+    gw.run("echo hi > out.txt", runtime="docker", threat_class="trusted",
+           project_id=pid, workspace=ws)
+    # 容器内绝对路径写 /workspace 外仍拦
+    with pytest.raises(GatewayDenied, match="工作区隔离"):
+        gw.run("curl -o /etc/evil x", runtime="docker", threat_class="trusted",
+               project_id=pid, workspace=ws)
+
+
 # ---------- detector ----------
 
 def test_detector_inventory_prompt(tmp_path, monkeypatch):
     """探测结果 → 能力清单文本（注入系统提示用）。"""
     def fake_probe(cmd, timeout=10.0):
+        if cmd[0] == "docker" and cmd[1] == "image":
+            return True, "sha256:abc"  # pentest-box 镜像在
         if cmd[0] == "docker":
             return True, "29.6.1"
         if cmd[0] == "wsl.exe":
@@ -196,26 +279,52 @@ def test_detector_inventory_prompt(tmp_path, monkeypatch):
     inv = HostDetector().probe()
     text = inv.to_prompt()
     assert "Docker: 可用" in text and "29.6.1" in text
+    assert "pentest-box 镜像就绪" in inv.docker.detail
     assert "WSL2: 可用" in text
     assert "工具清单: 暂无注册" in text
 
 
-def test_detector_tools_manifest_probe(tmp_path, monkeypatch):
-    """tools/**/manifest.yaml 的 probe 字段逐一探测（§7 工具目录联动）。"""
-    tdir = tmp_path / "tools" / "decompiler" / "ghidra"
-    tdir.mkdir(parents=True)
-    (tdir / "manifest.yaml").write_text(
-        'name: ghidra\nprobe: "where analyzeHeadless"\n', encoding="utf-8")
-    calls = []
+def test_detector_pentest_box_image_missing_guides_build(monkeypatch):
+    """docker 热而 pentest-box 镜像缺失：detail 带构建指引（容器化 M0）。"""
     def fake_probe(cmd, timeout=10.0):
-        calls.append(cmd)
+        if cmd[0] == "docker" and cmd[1] == "image":
+            return False, "No such image"
+        if cmd[0] == "docker":
+            return True, "29.6.1"
+        if cmd[0] == "wsl.exe":
+            return False, "skip"
         return False, "not found"
     monkeypatch.setattr("core.runtime.detector._run_probe", fake_probe)
-    inv = HostDetector().probe(tools_root=tmp_path / "tools")
-    assert [c for c in calls if "analyzeHeadless" in " ".join(c)]
-    assert inv.tools[0].name == "ghidra" and not inv.tools[0].available
-    # 缺失工具出现在提示中，引导安装
-    assert "ghidra" in inv.to_prompt()
+    inv = HostDetector().probe()
+    assert inv.docker.available
+    assert "pentest-box 镜像缺失" in inv.docker.detail
+    assert "build_pentest_box" in inv.to_prompt()
+
+
+def test_detector_tools_registry_probe(tmp_path, monkeypatch):
+    """工具链注册表驱动探测（toolchain-registry M1，2026-09-23）：
+    registry.json 条目逐一四来源检测，缺失工具入提示引导安装。"""
+    import json
+    tdir = tmp_path / "tools"
+    tdir.mkdir()
+    (tdir / "registry.json").write_text(json.dumps({
+        "zap-xyz": {"kind": "binary", "search": ["zap-xyz.exe"], "guide": "装一下"},
+    }), encoding="utf-8")
+    monkeypatch.setattr("core.toolchain.shutil.which", lambda name, path=None: None)
+    inv = HostDetector().probe(tools_root=tdir)
+    assert inv.tools[0].name == "zap-xyz" and not inv.tools[0].available
+    assert "装一下" in inv.tools[0].detail
+    assert "zap-xyz" in inv.to_prompt()
+
+
+def test_detector_bad_registry_degrades(tmp_path):
+    """registry 坏结构降级为单条 issue 行，不阻断 docker/wsl 主探测。"""
+    tdir = tmp_path / "tools"
+    tdir.mkdir()
+    (tdir / "registry.json").write_text("{ bad json", encoding="utf-8")
+    inv = HostDetector().probe(tools_root=tdir)
+    assert inv.tools[0].name == "registry" and not inv.tools[0].available
+    assert "registry 读取失败" in inv.tools[0].detail
 
 
 # ---------- H3：would_deny 干跑 + 审批一次性消费（2026-09-19） ----------

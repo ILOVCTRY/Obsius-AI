@@ -236,6 +236,11 @@ export function ApprovalsView({ pid, onGotoTasks }: { pid: string; onGotoTasks?:
                   {JSON.stringify(a.action, null, 2)}
                 </pre>
               )}
+              {a.boundary && (
+                <p className="mt-2 rounded border border-(--status-approval)/40 bg-(--status-approval)/10 p-2 text-[11px] text-(--status-approval)">
+                  当前行动边界（对照申请是否越界）：{a.boundary}
+                </p>
+              )}
               {execNote(a)}
               <div className="mt-2 flex justify-end gap-2">
                 <Button size="sm" variant="outline" onClick={() => decide(a.id, "rejected")}>拒绝</Button>

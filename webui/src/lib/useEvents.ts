@@ -15,6 +15,10 @@ import type { BBEvent } from "./types"
 //   HYDRATE_LIMIT 条，更早的留缓存（loadEarlier 先吃缓存再打网络）；缓存超过
 //   CACHE_LIMIT 裁最旧并把 loadedAll 降级 false（内存不再覆盖全部历史，头部
 //   交回网络分页重取，语义保持正确）。
+// - 会话维度分页（2026-09-23 直播间会话窗口）：sessionId 非空=会话源——tail/
+//   before 按 session_id 过滤（store 层 F8 既支持），cache 键 `${pid}:${sid}`
+//   每会话独立窗口；WS 增量按 sid 过滤（不属于本会话的事件只推游标不进窗口，
+//   断线重连回放不重复）。sessionId=null 走全局流（__all/编排页签/其他调用点）。
 
 const PAGE = 50
 const HYDRATE_LIMIT = 300
@@ -37,19 +41,20 @@ function mergeSorted(a: BBEvent[], b: BBEvent[]): BBEvent[] {
   return out
 }
 
-function writeCache(pid: string, incoming: BBEvent[], loadedAll?: boolean): BBEvent[] {
-  const cur = cache.get(pid) ?? { events: [], loadedAll: true }
+function writeCache(key: string, incoming: BBEvent[], loadedAll?: boolean): BBEvent[] {
+  const cur = cache.get(key) ?? { events: [], loadedAll: true }
   let events = mergeSorted(cur.events, incoming)
   let all = loadedAll ?? cur.loadedAll
   if (events.length > CACHE_LIMIT) {
     events = events.slice(-CACHE_LIMIT)
     all = false // 头部被裁：内存不再覆盖全部历史，上翻交回网络分页重取
   }
-  cache.set(pid, { events, loadedAll: all })
+  cache.set(key, { events, loadedAll: all })
   return events
 }
 
-export function useEvents(pid: string | null) {
+export function useEvents(pid: string | null, sessionId?: string | null) {
+  const cacheKey = sessionId ? `${pid}:${sessionId}` : `${pid ?? ""}`
   const [events, setEvents] = useState<BBEvent[]>([])
   const [connected, setConnected] = useState(false)
   // 更早历史是否已取尽（取尽后上翻不再请求）；loadingEarlier=翻页请求在途
@@ -57,7 +62,6 @@ export function useEvents(pid: string | null) {
   const [loadingEarlier, setLoadingEarlier] = useState(false)
   // 断线重连要用的游标放 ref，避免闭包拿到旧值
   const cursorRef = useRef(0)
-  const closedRef = useRef(false)
   const loadingRef = useRef(false)
   // loadEarlier 要读当前展示窗口的头 id；用 ref 镜像 state（effect 同步，读侧不触发重渲）
   const eventsRef = useRef<BBEvent[]>([])
@@ -65,8 +69,14 @@ export function useEvents(pid: string | null) {
 
   useEffect(() => {
     if (!pid) return
-    closedRef.current = false
-    const cached = cache.get(pid)
+    // effect 局部存活标记（2026-09-24）：本 effect 内所有异步路径（tail 响应/
+    // WS onmessage·onclose/flush/重连）一律只认它。**不能用共享 ref 守卫**——
+    // cleanup 置位后新 effect 同步重置，旧页签迟到的 tail 响应、旧 WS 异步
+    // onclose（握手在重置后才完成）会穿透守卫：tail 覆盖新页签内容，onclose
+    // 还会用旧闭包调度 connect 产生自我续命的孤儿 WebSocket，把旧会话事件混进
+    // 新页签（切页签偶发不刷新的根因）。
+    let alive = true
+    const cached = cache.get(cacheKey)
     let needTail = true
     if (cached && cached.events.length) {
       // 常驻缓存命中：只水合尾部 HYDRATE_LIMIT 条（长跑项目缓存数千条，全量水合=
@@ -91,10 +101,10 @@ export function useEvents(pid: string | null) {
     let buf: BBEvent[] = []
     const flush = () => {
       flushTimer = null
-      if (!buf.length) return
+      if (!alive || !buf.length) return
       const batch = buf
       buf = []
-      writeCache(pid, batch)
+      writeCache(cacheKey, batch)
       setEvents((prev) => {
         const last = prev.length ? prev[prev.length - 1].id : 0
         const fresh = batch.filter((e) => e.id > last)
@@ -103,57 +113,62 @@ export function useEvents(pid: string | null) {
     }
 
     const connect = () => {
-      if (closedRef.current) return
+      if (!alive) return
       ws = new WebSocket(wsUrl(pid, cursorRef.current))
-      ws.onopen = () => setConnected(true)
+      ws.onopen = () => { if (alive) setConnected(true) }
       ws.onmessage = (m) => {
+        if (!alive) return
         const e = JSON.parse(m.data as string) as BBEvent
         if (e.id <= cursorRef.current) return
         cursorRef.current = e.id
+        // 会话源：不属于本会话的事件只推游标不进窗口（游标恒前进，
+        // 断线重连回放不重复；切回全局源时这些事件经缓存/翻页自然可见）
+        if (sessionId && e.session_id !== sessionId) return
         buf.push(e)
         if (flushTimer == null) flushTimer = setTimeout(flush, 100)
       }
       ws.onclose = (ev) => {
+        if (!alive) return // 旧 effect 的异步 onclose：不 setConnected、不重连（防孤儿 WS）
         setConnected(false)
         // 1008 = 服务端主动拒绝（项目删除中/已删除），停止重连，避免对已删项目无限刷错
-        if (!closedRef.current && ev.code !== 1008) {
+        if (ev.code !== 1008) {
           retryTimer = setTimeout(connect, 2000)
         }
       }
-      ws.onerror = () => ws?.close()
+      ws.onerror = () => { if (alive) ws?.close() }
     }
 
     if (needTail) {
       // 首次：先取最新一页再连 WS（WS 带尾页游标，只推增量），失败也照连（降级为全量回放）
-      api.eventsTail(pid, PAGE)
+      api.eventsTail(pid, PAGE, sessionId ?? undefined)
         .then((tail) => {
-          if (closedRef.current) return
+          if (!alive) return
           const all = tail.length < PAGE
           setLoadedAll(all)
           cursorRef.current = tail.length ? tail[tail.length - 1].id : 0
-          setEvents(writeCache(pid, tail, all).slice(-HYDRATE_LIMIT))
+          setEvents(writeCache(cacheKey, tail, all).slice(-HYDRATE_LIMIT))
         })
         .catch(() => {})
-        .finally(() => { if (!closedRef.current) connect() })
+        .finally(() => { if (alive) connect() })
     } else {
       connect()
     }
 
     return () => {
-      closedRef.current = true
+      alive = false
       if (retryTimer) clearTimeout(retryTimer)
       if (flushTimer != null) clearTimeout(flushTimer)
-      if (buf.length) writeCache(pid, buf) // 未 flush 的增量落缓存（setState 已无意义）
+      if (buf.length) writeCache(cacheKey, buf) // 未 flush 的增量落缓存（setState 已无意义）
       buf = []
       ws?.close()
     }
-  }, [pid])
+  }, [pid, sessionId, cacheKey])
 
   // 上翻加载更早一页：返回是否有更多（滚动触发与「加载更早」按钮共用）。
   // 先吃缓存（水合截断留在 cache 里的更早事件，零网络），缓存不够再打 before_id 翻页。
   const loadEarlier = useCallback(async (): Promise<boolean> => {
     if (!pid || loadingRef.current) return false
-    const cur = cache.get(pid)
+    const cur = cache.get(cacheKey)
     const headId = eventsRef.current.length ? eventsRef.current[0].id : 0
     if (!headId || !cur || !cur.events.length) return false
     loadingRef.current = true
@@ -172,8 +187,8 @@ export function useEvents(pid: string | null) {
         // 缓存被裁过（CACHE_LIMIT）时 cache 头可能比展示窗口头还新——起点取两者
         // 较小值，保证取回的全是未展示区间
         const fetchFrom = Math.min(cur.events[0].id, headId)
-        const fetched = await api.eventsBefore(pid, fetchFrom, PAGE)
-        writeCache(pid, fetched)
+        const fetched = await api.eventsBefore(pid, fetchFrom, PAGE, sessionId ?? undefined)
+        writeCache(cacheKey, fetched)
         all = fetched.length < PAGE
         older = [...fetched.filter((e) => e.id < headId), ...cachedOlder].slice(-PAGE)
       }
@@ -190,7 +205,13 @@ export function useEvents(pid: string | null) {
       loadingRef.current = false
       setLoadingEarlier(false)
     }
-  }, [pid])
+  }, [pid, sessionId, cacheKey])
 
-  return { events, connected, loadedAll, loadingEarlier, loadEarlier }
+  // 展示窗口裁剪（滑动窗口上界，2026-09-23 会话窗口）：只裁组件 state，模块
+  // cache 不动——cache 始终是展示窗口超集，loadEarlier 可从缓存补回被裁的头部。
+  const trimDom = useCallback((max: number, keep: number) => {
+    setEvents((prev) => (prev.length > max ? prev.slice(prev.length - max + keep) : prev))
+  }, [])
+
+  return { events, connected, loadedAll, loadingEarlier, loadEarlier, trimDom }
 }

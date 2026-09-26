@@ -240,6 +240,24 @@ class ProjectStore:
                 new_config["rule_profiles"] = profiles
             else:
                 new_config.pop("rule_profiles", None)
+        # D10 策略顾问段（2026-09-24）：整段替换+归一化；结果 {} 剥键恢复代码缺省
+        if "advisor" in (patch or {}):
+            from core.autonomy import normalize_advisor
+            advisor = normalize_advisor(patch["advisor"])
+            if advisor:
+                new_config["advisor"] = advisor
+            else:
+                new_config.pop("advisor", None)
+        # 项目 executor 模型覆写（TRAE 新壳 M3，2026-09-25）：整段替换；
+        # None/{} 剥键恢复跟随路由缺省（API 层先校验供应商/模型可构建再落盘）
+        if "executor_llm" in (patch or {}):
+            ov = patch["executor_llm"]
+            if isinstance(ov, dict) and str(ov.get("provider") or "").strip():
+                new_config["executor_llm"] = {
+                    "provider": str(ov["provider"]).strip(),
+                    "model": str(ov.get("model") or "").strip()}
+            else:
+                new_config.pop("executor_llm", None)
         meta["config"] = new_config
         (p.path / PROJECT_FILE).write_text(
             json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")

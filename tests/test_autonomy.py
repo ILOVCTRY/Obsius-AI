@@ -204,5 +204,6 @@ def test_usage_view_shape(bb):
     view = autonomy.usage_view(b, pid)
     assert view["level"] == "L1"  # pentest（原 pentest）默认
     assert view["active_sessions"] == 0
-    assert view["tokens"] == {"used": 0, "budget": None, "pct": None}
+    assert view["tokens"] == {"used": 0, "budget": None, "pct": None,
+                            "cache_read": 0, "cache_creation": 0, "cache_hit": None}
     assert view["tasks"]["published"] == 0

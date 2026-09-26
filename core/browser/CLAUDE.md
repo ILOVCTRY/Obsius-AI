@@ -12,7 +12,9 @@
   从左剥标签 ≤2 层（`_SUBDOMAIN_MAX_STEPS`），`domain_scope="exact"` 收紧 / url 资产
   hostname 相等）+ `deny_event`（browser.deny）。**导航前零网络副作用（不做 DNS）**。
 - `pool.py` 实例池：`BrowserConfig`（config/browser.json 缺文件全默认；v3 补
-  `intercept_timeout_s=120.0`）、`HUMAN_MAIN_SID="human-main"`、`ensure_human_session()`
+  `intercept_timeout_s=120.0`；**2026-09-24 补 `ignore_https_errors=True` 默认放行
+  证书过期/自签——launch_persistent_context 传入；check_target 白名单兜边界，
+  config 可关回严格**）、`HUMAN_MAIN_SID="human-main"`、`ensure_human_session()`
   （API 层懒创建唯一入口）、`BrowserInstance`（每项目一个常驻，Page=会话，并发上限 2
   **只数 AI 页**；`__init__` 注入 `self._intercept=InterceptHub(...)`，会话关/实例停
   `cancel_all` 放行未裁决包）、`BrowserPool`、`browser_available()`/`chromium_available()`。
@@ -34,7 +36,11 @@
 - `replay.py` 重发+爆破（纯 httpx 零 playwright，恒可测）：`ReplayClient.replay`
   （v3 签名 `capture_id?/raw?`——raw 经 parse_raw_request 解析 modified=True）；
   `Intruder.run`（§POS§ 标记、token-bucket 限速、并发硬顶 5、max_requests/stop_event/
-  连续 10 次连接失败三停）。
+  连续 10 次连接失败三停）。两处 `httpx.Client` 恒 `trust_env=False`（2026-09-23）：
+  重放/爆破打授权目标（常为内网/localhost），流量**绝不交系统代理**——httpx
+  trust_env 经 urllib 读 Windows 注册表，Clash 等开着会把请求全转发（目标失真+
+  响应被拦改+连续失败停止失效，实锤后修复；测试 test_replay_ignores_system_proxy
+  用假代理环境变量防回归）。
 
 ## 红线
 

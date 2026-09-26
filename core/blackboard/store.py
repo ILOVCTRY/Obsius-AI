@@ -618,8 +618,19 @@ class Blackboard:
         if row["status"] == "closed":
             raise ValueError(f"会话已关闭: {session_id}")
         with self._tx():
-            self.conn.execute(
-                "UPDATE sessions SET status='closed' WHERE id=?", (session_id,))
+            # 运行期标记随关窗清掉（2026-09-24）：closed 窗残留 worker_armed=true
+            # 是状态垃圾（活跃计数不看它，但 session_list/meta 语义失真）；
+            # close_pending 是排水关窗的临时标记，同样不进终态。
+            meta = _loads(row["meta"], {})
+            if "worker_armed" in meta or "close_pending" in meta:
+                meta.pop("worker_armed", None)
+                meta.pop("close_pending", None)
+                self.conn.execute(
+                    "UPDATE sessions SET status='closed', meta=? WHERE id=?",
+                    (json.dumps(meta, ensure_ascii=False), session_id))
+            else:
+                self.conn.execute(
+                    "UPDATE sessions SET status='closed' WHERE id=?", (session_id,))
         self.append_event(
             row["project_id"], "session.closed",
             {"session_id": session_id, "summary": "人类关闭会话窗口"},
@@ -641,6 +652,23 @@ class Blackboard:
         with self._tx():
             self.conn.execute(
                 "UPDATE sessions SET status=? WHERE id=?", (status, session_id))
+        updated = self.conn.execute(
+            "SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
+        return _row_to_dict(updated) or {}
+
+    def set_session_role(self, session_id: str, role: str) -> dict:
+        """会话级换人留痕（会话中心化 §4.4，2026-09-25）：更新会话行当前身份。
+        对话历史/黑板不动；closed 窗拒绝。换装动作与事件由 AgentSession / API 侧
+        完成，本方法只落「当前身份」事实。"""
+        row = self.conn.execute(
+            "SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"会话不存在: {session_id}")
+        if row["status"] == "closed":
+            raise ValueError(f"会话已关闭: {session_id}")
+        with self._tx():
+            self.conn.execute(
+                "UPDATE sessions SET role=? WHERE id=?", (role, session_id))
         updated = self.conn.execute(
             "SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
         return _row_to_dict(updated) or {}
@@ -846,18 +874,23 @@ class Blackboard:
         self, project_id: str, since_id: int = 0, limit: int = 200,
         session_id: str | None = None,
         before_id: int | None = None, tail: int = 0,
+        kinds: list[str] | None = None,
     ) -> list[dict]:
         """增量拉取：id > since_id，升序。WS 断线重连回放也走这里。
 
         before_id 非 None：向前翻页——取 id < before_id 的最后 limit 条（升序返回），
         直播间「上翻加载更早」分页用；tail>0：只取最新 tail 条（升序），直播间首屏
         增量加载用，不再全量回放历史（2026-09-17）。两者优先于 since_id。
-        session_id 非 None 时只取该会话落的事件（会话级复盘取材，F8）。"""
+        session_id 非 None 时只取该会话落的事件（会话级复盘取材，F8）。
+        kinds 非空时只取这些事件类型（bb-query-filters M2，与上面三分支正交）。"""
         sql = "SELECT * FROM events WHERE project_id=?"
         args: list = [project_id]
         if session_id is not None:
             sql += " AND session_id=?"
             args.append(session_id)
+        if kinds:
+            sql += f" AND kind IN ({','.join('?' * len(kinds))})"
+            args.extend(kinds)
         desc = False
         if tail > 0:
             desc, limit = True, tail
@@ -1225,6 +1258,26 @@ class Blackboard:
                     f"请求基于 {expected_revision}）——请重新读取后再改")
             if row["status"] == status:
                 return self.get_asset(asset_id)  # type: ignore[return-value]
+            # asset-tree-derived-clean M2（D3）：有子资产的节点，tested_clean 由
+            # 子树全部终态读时派生，AI/人工显式写入一律拒绝（na 不挡——人工裁定）
+            if status == "tested_clean":
+                child = self.conn.execute(
+                    "SELECT 1 FROM assets WHERE parent_id=? LIMIT 1",
+                    (asset_id,)).fetchone()
+                if child is not None:
+                    raise ValueError(
+                        "该资产存在子资产：父节点 tested_clean 由子树全部终态自动派生，"
+                        "请流转子节点（不适用的面可对子节点标 na）")
+                # tested-clean-intent-backing（2026-09-25）：叶子 clean 须有
+                # closed/dead_end 意图背书（直接命中 / target 子树批次覆盖）——
+                # 死路收尾自带 dead_reason + 证据门禁，防粗略判净
+                from core.blackboard.intents import dead_end_backing_target
+                if dead_end_backing_target(
+                        self.conn, row["project_id"], asset_id) is None:
+                    raise ValueError(
+                        "tested_clean 须有死路意图背书：先 declare_intent 声明可证伪假设，"
+                        "close_intent(outcome=dead_end) 带证据收尾后再标；批量面（站群/"
+                        "宿主）可对父节点立一条死路意图覆盖子树")
             self.conn.execute(
                 "UPDATE assets SET status=?, revision=revision+1 WHERE id=?",
                 (status, asset_id))
@@ -1476,7 +1529,9 @@ class Blackboard:
             project_id,
             "finding.new" if not merged else "finding.merged",
             {"finding_id": finding_id, "vuln_class": vuln_class, "severity": new_severity,
-             "rating_basis": new_basis, "category": category},
+             "rating_basis": new_basis, "category": category,
+             # live-stream-ux C1（2026-09-23）：事件行人话渲染——title/资产归属/验证状态
+             "title": title, "target_asset_id": target_asset_id, "status": status},
             author=author,
             # Agent 产出的 finding 才有会话归属（author=会话 id）；人工/系统写入不标
             session_id=author if isinstance(author, str) and author.startswith("sess-") else None,
@@ -1491,8 +1546,22 @@ class Blackboard:
                 traces.materialize_for_finding(self, project_id, finding_id, author=author)
             except Exception:  # noqa: BLE001
                 log.exception("verified 触发轨迹重物化失败 finding=%s", finding_id)
-        return {"id": finding_id, "merged": merged, "severity": new_severity,
-                "rating_basis": new_basis, "category": category}
+        out = {"id": finding_id, "merged": merged, "severity": new_severity,
+               "rating_basis": new_basis, "category": category}
+        # M5 D1 疑似重复警告（orchestrator-efficiency §0-9）：同目标+同类
+        # （vuln_class）但 dedup_key 不同 = 可能被不同指纹分裂的重复——只提示不阻塞
+        # （Agent 可坚持新增）；合并分支（同 key 已自动并集）不算；无 target 或
+        # vuln_class 空（逆向发现留 ''，同目标多函数发现是常态）不查。
+        if target_asset_id and vuln_class:
+            dups = self.conn.execute(
+                "SELECT id, title FROM findings WHERE project_id=? AND"
+                " target_asset_id IS ? AND vuln_class=? AND dedup_key != ?"
+                " AND id != ? ORDER BY created_at DESC LIMIT 3",
+                (project_id, target_asset_id, vuln_class, key, finding_id)).fetchall()
+            if dups:
+                out["dedup_warning"] = [{"id": d["id"], "title": d["title"]}
+                                        for d in dups]
+        return out
 
     def list_findings(
         self,

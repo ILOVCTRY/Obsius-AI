@@ -1,0 +1,53 @@
+# 领域同义词表（retrieval-upgrade M2，2026-09-23 定稿并实施）
+# 用途：任务描述命中组内任一成员 → 全组成员切段参与 kbindex 2-gram 匹配与
+# route.json 静态路由键匹配（查询侧扩展，索引侧零改动）——补跨语言盲区
+#（越权↔IDOR、反序列化↔deserialization）与同义不同写（OA 系统↔办公自动化）。
+# 纪律：组内语义一致；成员宁缺勿滥（命一扩全组，过泛成员会放大误报）；
+# 匹配前统一 lower（英文词请写小写）。增补走提案制（M3 missed 清单人工审阅后转增补）。
+groups:
+  # web —— 访问控制与注入族
+  - id: access-control
+    terms: [越权, 未授权访问, 水平越权, 垂直越权, idor, access-control, 权限绕过, 鉴权]
+  - id: deserialization
+    terms: [反序列化, deserialization, unserialize, phar, shiro, fastjson, jackson]
+  - id: sqli
+    terms: [sql注入, sqli, 盲注, 报错注入, 布尔盲注, 时间盲注, 堆叠注入, sqlmap, 万能密码]
+  - id: xss
+    terms: [xss, 跨站脚本, 反射型, 存储型, domxss, csp, beef]
+  - id: ssrf
+    terms: [ssrf, 服务端请求伪造, 内网探测, gopher, url跳转, csurf]
+  - id: command-injection
+    terms: [命令注入, 命令执行, 代码执行, rce, 远程代码执行, 反弹shell, webshell, 一句话木马]
+  - id: file-operations
+    terms: [文件包含, 任意文件读取, 任意文件上传, 目录遍历, 路径穿越, lfi, rfi, traversal, 文件上传]
+  - id: auth-weakness
+    terms: [弱口令, 默认口令, 认证绕过, 逻辑漏洞, 业务逻辑, 验证码绕过, 爆破, 撞库, session固定]
+  # web —— 框架与组件指纹
+  - id: middleware
+    terms: [中间件, tomcat, weblogic, jboss, nginx, apache, iis, 环境搭建, 搭建]
+  - id: cms
+    terms: [cms, wordpress, thinkphp, dedecms, phpstudy, 组件漏洞, 历史漏洞]
+  # binary —— pwn / 逆向
+  - id: stack-overflow
+    terms: [栈溢出, 溢出, overflow, bof, ret2, rop, shellcode, got, plt]
+  - id: heap-exploit
+    terms: [堆利用, 堆, tcache, fastbin, unlink, fsop, house-of, off-by-one, uaf, 释放后重用]
+  - id: format-string
+    terms: [格式化字符串, format-string, fmt, printf漏洞]
+  - id: reverse-analysis
+    terms: [逆向, 反编译, 脱壳, 加壳, 混淆, 静态分析, 动态调试, ida, ghidra, od, x64dbg]
+  - id: android-rev
+    terms: [安卓, android, apk, dex, smali, frida, xposed, hook, 抓包, 脱壳]
+  # malware / forensics
+  - id: malware-analysis
+    terms: [恶意样本, 样本分析, 病毒, 木马, 勒索, c2, 回连, beacon, 行为分析]
+  - id: forensics
+    terms: [取证, 流量分析, 流量包, wireshark, 内存取证, volatility, 日志分析, 镜像, 数据恢复]
+  # crypto / misc
+  - id: crypto-classic
+    terms: [密码学, 加密, 解密, rsa, aes, des, 异或, 维吉尼亚, 栅栏, 摩斯, base64, 哈希, 摘要]
+  - id: encoding
+    terms: [编码, 解码, base64, url编码, hex, unicode, 隐写, 图片隐写, LSB]
+  # cloud
+  - id: cloud-security
+    terms: [云安全, 对象存储, oss, s3, bucket, 容器逃逸, k8s, docker, 云原生, iam]

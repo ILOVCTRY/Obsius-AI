@@ -1,8 +1,9 @@
-"""v0.71 任务即窗口：绑定原语 / 一窗一任务 / 并发上限 / 终态续聊保护。
+"""会话中心化（2026-09-25）：委托定窗 / 窗内队列 / 串行承接 / 关窗退回 / 并发上限。
 
-黑板层用例直接打 TaskQueue（bind_session / claim_next(only_task) /
-unassign_session 终态保护）；调度层用例经 app.state.schedule_sweep 直调
-（触发点与 publish 路径已由 test_api.py 覆盖，这里验证并发上限语义）。
+黑板层用例直接打 TaskQueue（target_session 定窗 / session_queue /
+take_session_next / unassign_session）；调度层用例经 app.state.schedule_sweep
+直调（触发点与 publish 路径已由 test_api.py 覆盖，这里验证并发上限语义）。
+bind_session 为未指派 open 行的遗留定窗口，用例保留。
 """
 
 import time
@@ -62,39 +63,34 @@ def test_bind_session_rejects_double_bind_and_non_open(bb, project):
         tq.bind_session(tid, w3)
 
 
-# ---------- claim_next(only_task)：一窗一任务核心闸 ----------
+# ---------- 窗内队列：定窗隔离核心闸 ----------
 
-def test_claim_next_only_task_isolates_windows(bb, project):
-    """only_task 非空时只认领该任务：别人的任务认领不到；自己的任务认领得到。"""
+def test_session_queue_isolates_windows(bb, project):
+    """委托只在归属窗的队列可见可取；别的窗连起跑都摸不到（claim 硬门控兜底）。"""
     pid = project["id"]
     tq = _tq(bb)
     w1, w2 = _win(bb, project, "甲"), _win(bb, project, "乙")
-    t1 = tq.publish(pid, "窗甲的任务")
-    t2 = tq.publish(pid, "窗乙的任务")
-    tq.bind_session(t1, w1)
-    tq.bind_session(t2, w2)
-    # 甲窗只认领 t1；乙窗连别人的任务占位都拿不到
-    assert tq.claim_next(pid, w1, only_task=t1) == t1
-    assert tq.claim_next(pid, w2, only_task=t1) is None
-
-
-def test_bound_window_exits_after_own_task_terminal(bb, project):
-    """绑定窗跑完自己的任务（终态）后 claim_next(only_task) 恒空——
-    不接公共池新任务（终态续聊窗与任务收尾窗共用的退出语义）。"""
-    pid = project["id"]
-    tq = _tq(bb)
-    w1, w2 = _win(bb, project, "甲"), _win(bb, project, "乙")
-    t1 = tq.publish(pid, "自己的任务")
-    tq.bind_session(t1, w1)
-    assert tq.claim_next(pid, w1, only_task=t1) == t1
-    tq.complete(t1, w1, "完成")
-    assert tq.claim_next(pid, w1, only_task=t1) is None
-    # 即使后来又发布了别的 open 任务（无论有无绑定），该窗都拿不到
-    t2 = tq.publish(pid, "别人的新任务")
-    tq.bind_session(t2, w2)
-    assert tq.claim_next(pid, w1, only_task=t1) is None
+    t1 = tq.publish(pid, "窗甲的委托", target_session=w1)
+    t2 = tq.publish(pid, "窗乙的委托", target_session=w2)
+    assert [t["id"] for t in tq.session_queue(pid, w1)] == [t1]
+    assert [t["id"] for t in tq.session_queue(pid, w2)] == [t2]
+    assert tq.take_session_next(pid, w1) == t1
     with pytest.raises(ClaimError):
         tq.claim(t2, w1)  # target_session 门控兜底
+
+
+def test_window_keeps_taking_serially_after_terminal(bb, project):
+    """会话中心化：委托到终态后窗保持待命——后续委托照样进窗起跑
+    （窗不退役、不退出；队列空时 take_session_next 返 None）。"""
+    pid = project["id"]
+    tq = _tq(bb)
+    w1 = _win(bb, project, "甲")
+    t1 = tq.publish(pid, "第一件委托", target_session=w1)
+    assert tq.take_session_next(pid, w1) == t1
+    tq.complete(t1, w1, "完成")
+    assert tq.take_session_next(pid, w1) is None  # 队列空
+    t2 = tq.publish(pid, "第二件委托", target_session=w1)
+    assert tq.take_session_next(pid, w1) == t2  # 窗复用，照常起跑
 
 
 def test_unassign_session_spares_terminal_tasks(bb, project):
@@ -127,14 +123,14 @@ def test_reopen_keeps_binding_for_original_window(bb, project):
     tq.reopen(tid, by="human")
     row = tq.get_task(tid)
     assert row["status"] == "open" and row["target_session"] == w1
-    # 放回后原窗能再次认领（同窗续跑路径）
-    assert tq.claim_next(pid, w1, only_task=tid) == tid
+    # 放回后原窗能再次起跑（同窗续跑路径）
+    assert tq.take_session_next(pid, w1) == tid
 
 
 # ---------- 并发上限（max_concurrent_tasks） ----------
 
 def test_patch_claimed_role_only(tmp_path):
-    """执行中任务 PATCH 仅放行 role（热换装通道）：改 objective 等 409；
+    """执行中委托 PATCH 仅放行 role（热换装通道）：改 objective 等 409；
     未注册角色 422；Agent 不在内存时热换装钩子静默跳过不报错。"""
     from fastapi.testclient import TestClient
 
@@ -142,16 +138,17 @@ def test_patch_claimed_role_only(tmp_path):
 
     app = _chain_app(tmp_path, [])
     with TestClient(app) as c:
-        # paused：发布建待命窗但不起跑（本用例只验 PATCH 规则，不要 worker 干扰）
+        # paused：本用例只验 PATCH 规则，不要 worker 干扰——直接建窗+定窗委托+
+        # 手动 claim（不经 publish 端点，避免 human-delegate 手动 override 起跑）
         pid = _l2_project(c, "L2改角色", paused=True)
-        r = c.post(f"/api/projects/{pid}/tasks",
-                   json={"objective": "要换角色的任务", "task_type": "recon"})
-        tid = r.json()["task_id"]
         bb = c.app.state.projects[pid].bb
         from core.blackboard import TaskQueue
+        sp = c.post(f"/api/projects/{pid}/agents",
+                    json={"role": "_generalist", "armed": False})
+        sid = sp.json()["id"]
         tq = TaskQueue(bb)
-        # v0.72 一窗一任务：发布即建待命窗，任务由其绑定窗自身认领（外部窗认领被门控拒）
-        sid = tq.get_task(tid)["target_session"]
+        tid = tq.publish(pid, "要换角色的委托", task_type="recon",
+                         target_session=sid)
         tq.claim(tid, sid)
         # 仅 role：放行（200）
         r = c.patch(f"/api/tasks/{tid}", json={"role": "recon"})
@@ -174,21 +171,28 @@ def _wait_terminal(c, pid, task_ids, tries=600):
 
 
 def test_scheduler_respects_max_concurrent_tasks(tmp_path):
-    """自动挡同时执行任务数 ≤ max_concurrent_tasks：跑动过程中同时 running 的
-    agent-work job 数不超过上限；最终全部任务到终态（不因上限饿死）。"""
+    """自动挡同时执行委托数 ≤ max_concurrent_tasks：sweep 只武装+起跑上限内的窗，
+    跑动过程中同时 running 的 agent-work job 数不超过上限；窗内委托随收尾释放
+    名额补起（最终全部到终态，不因上限饿死）。"""
     from fastapi.testclient import TestClient
 
-    from test_api import _chain_app, _l2_project, _exec_finish_script
+    from test_api import _chain_app, _l2_project, _exec_delegation_script
 
-    app = _chain_app(tmp_path, [], _exec_finish_script(3))
+    app = _chain_app(tmp_path, [], _exec_delegation_script(3))
     with TestClient(app) as c:
-        pid = _l2_project(c, "L2并发上限")
+        # 显式上限 2（全局缺省 3，假设上限 2 必须自设，防再次漂移）
+        pid = _l2_project(c, "L2并发上限", max_concurrent_tasks=2)
+        bb = c.app.state.projects[pid].bb
+        tq = TaskQueue(bb)
         tids = []
         for i in range(3):
-            r = c.post(f"/api/projects/{pid}/tasks",
-                       json={"objective": f"并发任务{i}", "task_type": "recon"})
-            assert r.status_code == 201
-            tids.append(r.json()["task_id"])
+            sp = c.post(f"/api/projects/{pid}/agents",
+                        json={"role": "_generalist", "armed": False})
+            sid = sp.json()["id"]
+            tids.append(tq.publish(pid, f"并发任务{i}", task_type="recon",
+                                   target_session=sid))
+        # 直调调度器：未武装 L2 窗当场武装起跑，只起 cap=2 个
+        c.app.state.schedule_sweep(pid, "poll-sweep")
         # 采样同时 running 的 agent-work job 峰值（预算放宽：全量回归负载下
         # 600 次偶发超时误报「未到终态」，与超卖断言无关）
         peak = 0
@@ -211,47 +215,43 @@ def test_scheduler_respects_max_concurrent_tasks(tmp_path):
 
 # ---------- v0.72 全局一窗一任务：审批=执行 / kick 收窄 ----------
 
-def test_l1_approval_rebinds_closed_window_and_starts(tmp_path):
-    """L1 执行审批（v0.72）：发布建待命窗+执行审批单；批准时窗已被人工关闭 →
-    退绑重绑新窗当场起跑（批准=「该任务被授权执行」，不拘泥哪扇窗）。"""
+def test_delegate_window_approval_creates_window_and_runs(tmp_path):
+    """L1 delegate_window 审批（会话中心化）：编排器委托开窗的唯一自动路径——
+    批准时才开窗（armed）+ 委托写入新窗 + 带活起跑；批准前无窗无委托。"""
     from fastapi.testclient import TestClient
 
-    from test_api import _chain_app, _exec_finish_script
+    from test_api import _chain_app, _exec_delegation_script
 
-    app = _chain_app(tmp_path, [], _exec_finish_script(1))
+    app = _chain_app(tmp_path, [], _exec_delegation_script(1))
     with TestClient(app) as c:
-        pid = c.post("/api/projects", json={"name": "批准重绑", "track": "pentest",
+        pid = c.post("/api/projects", json={"name": "批准开窗", "track": "pentest",
                                             "capabilities": ["web"]}).json()["id"]
-        r = c.post(f"/api/projects/{pid}/tasks",
-                   json={"objective": "等审批的任务", "task_type": "recon"})
-        tid = r.json()["task_id"]
-        bound = r.json()["session_id"]
-        assert bound
-        items = c.get(f"/api/projects/{pid}/approvals").json()
-        item = next(a for a in items if a["action"].get("task_id") == tid)
-        assert item["status"] == "pending"
-        # 人工关掉待命窗（绕过 API 直接退绑+关窗，不触发调度重绑——重绑留给批准时）
         bb = c.app.state.projects[pid].bb
-        tq = TaskQueue(bb)
-        tq.unassign_session(bound)
-        bb.close_session(bound)
-
-        d = c.post(f"/api/approvals/{item['id']}/decide", json={"decision": "approved"})
+        # L1 编排器 delegate 无复用窗 → request_approval（用例直写审批单）
+        action = {"op": "delegate_window", "role": "_generalist",
+                  "objective": "等批准开窗的委托", "task_type": "recon",
+                  "noise_budget": "passive", "priority": 2}
+        aid = bb.request_approval(pid, action, risk="low",
+                                  requested_by="orchestrator")["id"]
+        assert bb.list_sessions(pid) == []
+        d = c.post(f"/api/approvals/{aid}/decide", json={"decision": "approved"})
         assert d.status_code == 200 and d.json()["executed"] is True
-        new_sid = d.json()["session_id"]
-        assert new_sid and new_sid != bound  # 重绑了新窗
+        sid = d.json()["session_id"]
+        assert sid
+        tq = TaskQueue(bb)
         for _ in range(300):
-            row = tq.get_task(tid)
-            if row["status"] in {"done", "failed"}:
+            rows = tq.list_tasks(pid)
+            if rows and rows[0]["status"] in {"done", "failed"}:
                 break
             time.sleep(0.02)
-        row = tq.get_task(tid)
-        assert row["status"] == "done" and row["claimed_by"] == new_sid
+        rows = tq.list_tasks(pid)
+        assert len(rows) == 1 and rows[0]["status"] == "done"
+        assert rows[0]["target_session"] == sid and rows[0]["claimed_by"] == sid
 
 
-def test_reopen_kick_skips_unbound_manual_window(tmp_path):
-    """v0.72 _kick_workers 收窄：reopen（触发点 D 保留）只踢绑定任务未终态的
-    实现窗；armed 无绑手动窗不被踢、也认领不到放回的任务（公共池退役）。"""
+def test_reopen_kicks_all_armed_windows(tmp_path):
+    """会话中心化 _kick_workers：reopen（触发点 D）踢全部 armed 且无 job 的会话——
+    原执行窗起跑；别的 armed 窗无委托无消息则零成本空退（不消费 LLM）。"""
     from fastapi.testclient import TestClient
 
     from test_api import _chain_app, _l2_project, _wait_no_running
@@ -261,31 +261,85 @@ def test_reopen_kick_skips_unbound_manual_window(tmp_path):
         {"tool_use": [S.tool_call("a1", "fail_task",
                                   {"result_note": "缺授权凭据，需要人类补充",
                                    "blocked_reason": "awaiting_human"})]},
+        # D6 收尾确认：首次 complete 被闸拦（注入收尾清单），再来一轮零新增后
+        # 第二次 complete 才真 done
         {"tool_use": [S.tool_call("c1", "complete_task", {"result_note": "人工已解决"})]},
+        {"tool_use": [S.tool_call("c1b", "complete_task", {"result_note": "人工已解决"})]},
     ]
     app = _chain_app(tmp_path, [], executor)
     with TestClient(app) as c:
-        pid = _l2_project(c, "kick收窄")
+        pid = _l2_project(c, "kick开窗")
         sp = c.post(f"/api/projects/{pid}/agents",
                     json={"role": "_generalist", "armed": True})
         manual_sid = sp.json()["id"]
         assert sp.json().get("job_id")  # 触发点 C：armed + L2 即起（空退）
         _wait_no_running(c, pid)
-        r = c.post(f"/api/projects/{pid}/tasks",
-                   json={"objective": "会挂起的任务", "task_type": "generic"})
-        bound_sid = r.json()["session_id"]
+        # 人类给 manual_sid 显式委派：委托进该窗起跑、脚本无关——故建一个独立执行窗
+        ep = c.post(f"/api/projects/{pid}/agents",
+                    json={"role": "_generalist", "armed": False})
+        bound_sid = ep.json()["id"]
+        bb = c.app.state.projects[pid].bb
+        tid = TaskQueue(bb).publish(
+            pid, "会挂起的委托", task_type="generic", target_session=bound_sid)
+        # 起跑该窗（manual override）
+        c.post(f"/api/agents/{bound_sid}/work")
         for _ in range(300):
-            tasks = c.get(f"/api/projects/{pid}/tasks").json()
-            if tasks[0]["status"] == "failed":
+            task = TaskQueue(bb).get_task(tid)
+            if task["status"] == "failed":
                 break
             time.sleep(0.02)
-        assert tasks[0]["status"] == "failed"
-        # 放回：只踢原绑定窗，armed 手动窗不在列
-        rr = c.post(f"/api/tasks/{tasks[0]['id']}/reopen", json={"note": "凭证已补"})
-        assert rr.status_code == 200 and rr.json()["kicked"] == [bound_sid]
+        assert task["status"] == "failed"
+        # 等原执行窗 worker 退出（fail 落盘先于 job 收尾，reopen 抢跑会因 job
+        # 在跑漏掉 bound_sid 的 kick——on_done 的 _schedule 仍会兜起跑，但 kicked
+        # 断言需要稳定口径）
+        for _ in range(300):
+            running = [j for j in c.app.state.jobs.all_jobs()
+                       if j["kind"] == "agent-work"
+                       and j["meta"].get("session_id") == bound_sid
+                       and j["status"] == "running"]
+            if not running:
+                break
+            time.sleep(0.02)
+        # 放回：原执行窗必在 kicked；manual armed 窗也被踢（空退）
+        rr = c.post(f"/api/tasks/{tid}/reopen", json={"note": "凭证已补"})
+        kicked = rr.json()["kicked"]
+        assert rr.status_code == 200 and bound_sid in kicked
+        assert manual_sid in kicked
         # 轮询终态（L2 下 replan-wait 30s 节流 job 与断言无关）
         for _ in range(300):
-            if c.get(f"/api/projects/{pid}/tasks").json()[0]["status"] == "done":
+            if TaskQueue(bb).get_task(tid)["status"] == "done":
                 break
             time.sleep(0.02)
-        assert c.get(f"/api/projects/{pid}/tasks").json()[0]["status"] == "done"
+        assert TaskQueue(bb).get_task(tid)["status"] == "done"
+
+
+def test_l0_scheduler_never_opens_windows(tmp_path):
+    """L0 调度器不自动开窗（会话中心化 2026-09-25）：关窗退回的未指派委托，
+    sweep 不重绑不建窗——窗只经人类拍板出现（人开窗/审批 delegate_window/
+    提案采纳）。"""
+    from fastapi.testclient import TestClient
+
+    from test_api import _chain_app
+
+    app = _chain_app(tmp_path, [])
+    with TestClient(app) as c:
+        pid = c.post("/api/projects", json={"name": "L0不自动开窗", "track": "pentest"}
+                     ).json()["id"]
+        r = c.patch(f"/api/projects/{pid}/config",
+                    json={"config": {"autonomy": {"level": "L0"}}})
+        assert r.status_code == 200
+        # 人先开窗（L0 下不自跑），委托直接定窗该窗
+        sp = c.post(f"/api/projects/{pid}/agents",
+                    json={"role": "_generalist", "armed": False})
+        sid = sp.json()["id"]
+        bb = c.app.state.projects[pid].bb
+        tid = TaskQueue(bb).publish(pid, "人工窗的委托", task_type="recon",
+                                    target_session=sid)
+        # 关窗退指派：委托回 open+未指派，L0 sweep 不得自动开窗重绑
+        assert c.post(f"/api/sessions/{sid}/close").status_code == 200
+        c.app.state.schedule_sweep(pid, "poll-sweep")
+        task = next(t for t in c.get(f"/api/projects/{pid}/tasks").json()
+                    if t["id"] == tid)
+        assert task["status"] == "open" and not task.get("target_session")
+        sessions = c.get(f"/api/projects/{pid}/sessions").json()
+        assert [s["id"] for s in sessions] == [sid]  # 只剩原窗行，无新窗冒出

@@ -50,6 +50,8 @@ _AWAIT = {"tool_use": [ScriptedLLM.tool_call("t2", "fail_task",
                                               "blocked_reason": "awaiting_human"})]}
 _DONE = {"tool_use": [ScriptedLLM.tool_call("t4", "complete_task",
                                             {"result_note": "复活后完成"})]}
+_DONE2 = {"tool_use": [ScriptedLLM.tool_call("t4b", "complete_task",
+                                             {"result_note": "复活后完成"})]}
 _FINISH = {"tool_use": [ScriptedLLM.tool_call("t5", "finish", {"summary": "收尾"})]}
 
 
@@ -108,7 +110,7 @@ def test_claim_revives_across_sessions(failed_with_task_key):
     续接 + 任务键快照消费即删 + 任务完成。"""
     bb, project, gw, tq, tmp_path, tid, art, agent = failed_with_task_key
     tq.reopen(tid, by="human")  # failed → open（现场保留）
-    llm2 = ScriptedLLM([_DONE, _FINISH])
+    llm2 = ScriptedLLM([_DONE, _DONE2, _FINISH])
     agent2 = make_agent((bb, project, gw, tq, tmp_path), llm2,
                         artifacts_dir=art, max_steps=3)  # 预算更低
     agent2.run_task("渗透侦查任务", task_id=tid)
@@ -129,7 +131,7 @@ def test_objective_changed_degrades_to_transcript(failed_with_task_key):
     tq.update_task(tid, objective="改成完全不同的目标", by="human")
     assert task_resume_path(art, tid).exists()  # 改前还在
     tq.reopen(tid, by="human")  # failed → open 才能被新会话认领
-    llm2 = ScriptedLLM([_DONE, _FINISH])
+    llm2 = ScriptedLLM([_DONE, _DONE2, _FINISH])
     agent2 = make_agent((bb, project, gw, tq, tmp_path), llm2,
                         artifacts_dir=art, max_steps=10)
     agent2.run_task("改成完全不同的目标", task_id=tid)
@@ -143,7 +145,7 @@ def test_done_consumes_task_key_snapshot(failed_with_task_key):
     """done 生命周期：任务完成 → 任务键快照清理（transcript 保留供复盘）。"""
     bb, project, gw, tq, tmp_path, tid, art, agent = failed_with_task_key
     tq.reopen(tid, by="human")
-    llm2 = ScriptedLLM([_DONE, _FINISH])
+    llm2 = ScriptedLLM([_DONE, _DONE2, _FINISH])
     agent2 = make_agent((bb, project, gw, tq, tmp_path), llm2,
                         artifacts_dir=art, max_steps=10)
     agent2.run_task("渗透侦查任务", task_id=tid)
@@ -155,12 +157,12 @@ def test_done_consumes_task_key_snapshot(failed_with_task_key):
 def test_e8_resume_consumes_task_key_too(paused_with_task_key):
     """E8 会话键恢复消费时同步删任务键（防「恢复后又 fail」rewind 到旧暂停点）。"""
     bb, project, gw, tq, tmp_path, tid, art, agent = paused_with_task_key
-    llm2 = ScriptedLLM([_DONE, _FINISH])
+    llm2 = ScriptedLLM([_DONE, _DONE2, _FINISH])
     agent.llm = llm2  # 同会话恢复：换脚本供续跑步骤
     agent.session = dict(bb.get_session(agent.session["id"]))  # 刷新 meta 指针（API resume 同款）
     agent._resume_state = agent._load_persisted_snapshot()  # API resume 的恢复动作
     agent.paused = False
-    agent.run_next_task()  # _resume_state 在内存 → E8 恢复路径
+    agent.run_session()  # _resume_state 在内存 → E8 恢复路径
     assert tq.get_task(tid)["status"] == "done"
     assert not task_resume_path(art, tid).exists()  # C6 同步删任务键
 
@@ -171,7 +173,7 @@ def test_abort_resumable_via_task_key(paused_with_task_key):
     bb, project, gw, tq, tmp_path, tid, art, agent = paused_with_task_key
     os.unlink(persisted_snapshot_path(art, agent.session["id"]))  # 删会话键
     agent.request_abort()
-    agent.run_next_task()  # 触发 _abort_current_task
+    agent.run_session()  # 触发 _abort_current_task
     task = tq.get_task(tid)
     assert task["status"] == "failed"  # 人工中断
     ev = [e for e in bb.recent_events(project["id"]) if e["kind"] == "task.failed"][-1]
@@ -186,7 +188,7 @@ def test_resume_cross_session_spawns_armed_window(tmp_path):
 
     from core.api.app import create_app
 
-    llm = ScriptedLLM([_DONE, _FINISH])
+    llm = ScriptedLLM([_DONE, _DONE2, _FINISH])
     app = create_app(workspace_root=str(tmp_path / "ws"), tools_root=None,
                      executor_llm=llm, planner_llm=ScriptedLLM([]),
                      providers_config=str(tmp_path / "p.json"))
@@ -233,3 +235,87 @@ def test_resume_cross_session_spawns_armed_window(tmp_path):
         assert status == "done"
         # 快照消费即删
         assert not task_resume_path(proj.artifacts_dir, tid).exists()
+
+
+def test_resume_transcript_takes_over_origin_window(tmp_path):
+    """resume-origin-window（2026-09-23）：transcript 模式 + 原窗存活 → 原窗就近
+    接手（不再飘新窗）——reopen 后 worker 首轮认领，接手现场续跑完成。"""
+    from fastapi.testclient import TestClient
+
+    from core.api.app import create_app
+
+    llm = ScriptedLLM([_DONE, _DONE2, _FINISH])
+    app = create_app(workspace_root=str(tmp_path / "ws"), tools_root=None,
+                     executor_llm=llm, planner_llm=ScriptedLLM([]),
+                     providers_config=str(tmp_path / "p.json"))
+    with TestClient(app) as c:
+        pid = c.post("/api/projects", json={"name": "原窗接手",
+                                            "track": "pentest"}).json()["id"]
+        tid = c.post(f"/api/projects/{pid}/tasks",
+                     json={"objective": "渗透侦查任务"}).json()["task_id"]
+        proj = app.state.projects[pid]
+        tq = TaskQueue(proj.bb)
+        # 会话中心化：发布不自动建窗——显式开原窗并绑定委托（armed 语义与本测无关）
+        bound = proj.bb.register_session(pid, "原任务窗", role="_generalist")["id"]
+        tq.bind_session(tid, bound)
+        # 构造失败窗现场：原窗认领后失败，无任务键快照（=transcript 模式），窗未关
+        tq.claim(tid, bound)
+        tq.fail(tid, bound, "构造失败现场")
+        n_sessions = len(proj.bb.list_sessions(pid))
+
+        r = c.post(f"/api/tasks/{tid}/resume")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["resume_mode"] == "transcript"
+        assert body["session_id"] == bound  # 原窗就近接手（不建新窗）
+        import time
+        status = None
+        for _ in range(60):
+            status = tq.get_task(tid)["status"]
+            if status == "done":
+                break
+            time.sleep(0.1)
+        assert status == "done"
+        # 会话数不增：任务回原窗跑，没有新窗
+        assert len(proj.bb.list_sessions(pid)) == n_sessions
+
+
+def test_resume_transcript_closed_window_still_spawns_new(tmp_path):
+    """transcript 模式 + 原窗已关 → 跨会话新 armed 任务窗（现状行为防回归）。"""
+    from fastapi.testclient import TestClient
+
+    from core.api.app import create_app
+
+    llm = ScriptedLLM([_DONE, _DONE2, _FINISH])
+    app = create_app(workspace_root=str(tmp_path / "ws"), tools_root=None,
+                     executor_llm=llm, planner_llm=ScriptedLLM([]),
+                     providers_config=str(tmp_path / "p.json"))
+    with TestClient(app) as c:
+        pid = c.post("/api/projects", json={"name": "原窗已关续跑",
+                                            "track": "pentest"}).json()["id"]
+        tid = c.post(f"/api/projects/{pid}/tasks",
+                     json={"objective": "渗透侦查任务"}).json()["task_id"]
+        proj = app.state.projects[pid]
+        tq = TaskQueue(proj.bb)
+        # 会话中心化：显式开原窗+绑定委托，再退绑+关原窗（模拟原窗已被人工
+        # 关闭的旧现场）；无任务键快照=transcript
+        bound = proj.bb.register_session(pid, "原任务窗", role="_generalist")["id"]
+        tq.bind_session(tid, bound)
+        tq.unassign_session(bound)
+        tq.claim(tid, bound)
+        tq.fail(tid, bound, "构造失败现场")
+        proj.bb.close_session(bound)
+
+        r = c.post(f"/api/tasks/{tid}/resume")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["resume_mode"] == "transcript"
+        assert body["session_id"] != bound  # 原窗已关 → 新 armed 任务窗
+        import time
+        status = None
+        for _ in range(60):
+            status = tq.get_task(tid)["status"]
+            if status == "done":
+                break
+            time.sleep(0.1)
+        assert status == "done"

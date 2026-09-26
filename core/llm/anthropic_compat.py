@@ -85,6 +85,7 @@ class AnthropicCompatProvider:
         stream_transport: StreamTransport | None = None,
         api_version: str = "2023-06-01",
         enable_thinking: bool = False,
+        enable_cache: bool = True,
         context_tokens: int | None = None,  # 模型最大上下文（providers.json model_context；预算换算用）
     ):
         self.base_url = base_url.rstrip("/")
@@ -93,9 +94,16 @@ class AnthropicCompatProvider:
         self.timeout = timeout
         self.api_version = api_version
         self._enable_thinking = enable_thinking
+        # prompt caching（2026-09-23 retrieval-upgrade M1）：system 块打
+        # cache_control ephemeral 断点，稳定前缀跨步命中缓存（Agent 每步重发
+        # 同一 system 是最大成本项）。缓存 token 仍计数只是更便宜，预算不动。
+        self._enable_cache = enable_cache
         self.context_tokens = context_tokens
         # 模型不支持 thinking 参数时自动降级（HTTP 400 去参重试后置位，本实例不再注入）
         self._thinking_disabled = False
+        # 网关拒收 cache_control 标记（400 文案含 cache_control）时置位——本实例
+        # system 不再打标（镜像 thinking/stream 降级先例）
+        self._cache_disabled = False
         self._transport = transport or _default_transport(timeout)
         self._stream_transport = stream_transport or _default_stream_transport(timeout)
         # 网关不认 stream 参数（400 文案含 stream）时置位，本实例回退非流式
@@ -110,7 +118,7 @@ class AnthropicCompatProvider:
         self,
         messages: list[dict[str, Any]],
         *,
-        system: str | None = None,
+        system: str | list[dict[str, Any] | str] | None = None,
         tools: list[dict[str, Any]] | None = None,
         # max_tokens 缺省 16384（2026-09-20 事故修正，原 4096）：思考 budget 8192
         # 与 4096 倒挂（协议要求 budget < max_tokens），GLM 长思考+长工具参数把
@@ -124,14 +132,15 @@ class AnthropicCompatProvider:
         """on_thinking：SSE thinking_delta 逐帧回调（思考流式上屏，2026-09-19）；
         on_text：SSE text_delta 逐帧回调（回复流式，2026-09-20 对话窗）；
         should_cancel：逐帧间轮询，命中即掐断连接抛 LLMError——全缺省走原
-        非流式路径。"""
+        非流式路径。system：str（自动包装单块打 cache_control，M1 默认路径）或
+        块数组（str 元素自动包装不打标 / dict 原样——调用方精细控制断点位置）。"""
         body: dict[str, Any] = {
             "model": self.model,
             "max_tokens": max_tokens,
             "messages": messages,
         }
         if system:
-            body["system"] = system
+            body["system"] = self._system_payload(system)
         if tools:
             body["tools"] = tools
         if temperature is not None:
@@ -176,6 +185,15 @@ class AnthropicCompatProvider:
                         use_stream = False
                         body.pop("stream", None)
                         payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+                        continue
+                    # cache_control 优雅降级（2026-09-23 M1）：网关拒收缓存标记
+                    # （400 文案含 cache_control）→ 本实例 system 不再打标重试
+                    if (status == 400 and not self._cache_disabled
+                            and "cache_control" in str(err.get("message", "")).lower()):
+                        self._cache_disabled = True
+                        if system:
+                            body["system"] = self._system_payload(system)
+                            payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
                         continue
                     if status in RETRYABLE_STATUS and attempt < MAX_RETRIES:
                         last_err = LLMError(msg, status=status,
@@ -287,6 +305,24 @@ class AnthropicCompatProvider:
                     pass
 
     # ---------- 内部 ----------
+
+    def _system_payload(self, system: str | list[dict[str, Any] | str]) -> list[dict[str, Any]]:
+        """system 归一化为块数组（M1 prompt caching，2026-09-23）：str → 单
+        text 块，enable_cache 且未降级时打 cache_control ephemeral 断点；list
+        → str 元素包装为 text 块（不打标，断点位置由调用方 dict 元素自行声明），
+        dict 元素浅拷贝透传。_cache_disabled（网关拒收降级）时剥除全部标记。
+        每次调用新建块对象，不污染调用方传入的列表。"""
+        if isinstance(system, str):
+            block: dict[str, Any] = {"type": "text", "text": system}
+            if self._enable_cache and not self._cache_disabled:
+                block["cache_control"] = {"type": "ephemeral"}
+            return [block]
+        blocks = [dict(b) if isinstance(b, dict) else {"type": "text", "text": b}
+                  for b in system]
+        if self._cache_disabled:
+            for b in blocks:
+                b.pop("cache_control", None)
+        return blocks
 
     def _headers(self) -> dict[str, str]:
         return {

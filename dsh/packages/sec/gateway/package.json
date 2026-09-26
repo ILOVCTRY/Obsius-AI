@@ -1,0 +1,31 @@
+{
+  "name": "@sec/gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "sec profile 安全执行网关：威胁矩阵 + ShellExecutor + Docker SandboxProvider + pre-execute 守卫",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "import": "./lib/index.js"
+    },
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "files": ["lib"],
+  "scripts": {
+    "build": "tsdown && tsc -p tsconfig.json",
+    "test": "node --import tsx --test \"src/**/*.test.ts\""
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/schemastery": "*",
+    "@deepseek-ai/dsh-shell": "*",
+    "@deepseek-ai/dsh-bash-local": "*",
+    "@deepseek-ai/dsh-sandbox": "*",
+    "@deepseek-ai/dsh-subprocess": "*",
+    "@deepseek-ai/dsh-tools": "*"
+  }
+}

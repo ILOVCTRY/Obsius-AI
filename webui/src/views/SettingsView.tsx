@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { Group, Panel, Separator } from "react-resizable-panels"
 import { api } from "@/lib/api"
 import type {
-  Expert, KbRefHit, KbSourceTree, LlmProvider, McpServer,
+  Expert, KbRefHit, KbSourceTree, LlmProvider,
   SkillDef, SkillDetail, SkillVocab,
 } from "@/lib/types"
 import { capLabel, trackLabel, type Taxonomy } from "@/lib/taxonomy"
@@ -11,6 +11,8 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { GatewayPane } from "@/components/settings/GatewayPane"
+import { AdvisorPane } from "@/components/settings/AdvisorPane"
 import { Textarea } from "@/components/ui/textarea"
 import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
@@ -30,6 +32,8 @@ import { MarkdownOutline } from "@/components/settings/MarkdownOutline"
 import { ProposalsPane } from "@/components/settings/ProposalsPane"
 import { IntelSourcePane } from "@/components/settings/IntelSourcePane"
 import { RulesPane, type RuleFocus } from "@/components/settings/RulesPane"
+import { AgentToolsPane } from "@/components/settings/AgentToolsPane"
+import { McpPane } from "@/components/McpPane"
 import { parseSkill } from "@/lib/skillfm"
 import { cn } from "@/lib/utils"
 
@@ -70,6 +74,8 @@ export function SettingsView({ nav, pid }: {
   const [pendingN, setPendingN] = useState(0)
   // 深链已指定轨/包时，taxonomy 异步回填的缺省值不得覆盖（晚于 nav effect 落地会冲掉深链）
   const navAppliedRef = useRef(false)
+  // 深链只钉一个维度（track 或 cap），另一维仍由项目缺省补
+  const navPinnedRef = useRef<{ track?: boolean; cap?: boolean }>({})
   // 项目上下文缺省：从项目内打开设置 → 轨/能力包跟随当前项目（优先级低于深链）
   const projectAppliedRef = useRef(false)
 
@@ -88,8 +94,12 @@ export function SettingsView({ nav, pid }: {
     if (!pid || navAppliedRef.current) return
     projectAppliedRef.current = true
     api.getProject(pid).then((p) => {
-      if (p.track) setTrack(p.track)
-      if (p.capabilities?.length) setCap(p.capabilities[0])
+      // 守卫须在异步回调内按维度复查：请求在飞期间深链可能已落地（nav effect 晚于入口检查）；
+      // 深链只钉一维，另一维仍按项目补（cap 深链时 track 仍应=pentest）
+      if (p.track && !navPinnedRef.current.track) setTrack(p.track)
+      // 用盘上绑定包：effective 在 _generalist 项目=全部包，[0] 会错落到 binary
+      const caps = p.capabilities_bound?.length ? p.capabilities_bound : p.capabilities
+      if (caps?.length && !navPinnedRef.current.cap) setCap(caps[0])
     }).catch(() => {})
   }, [pid])
 
@@ -109,6 +119,7 @@ export function SettingsView({ nav, pid }: {
     const s = nav.skill
     if (s) {
       navAppliedRef.current = true
+      navPinnedRef.current = s.source === "track" ? { track: true } : { cap: true }
       if (s.source === "track") setTrack(s.pack); else setCap(s.pack)
       setSkillFocus({ source: s.source, pack: s.pack, name: s.name, n: nav.n })
     }
@@ -165,7 +176,9 @@ export function SettingsView({ nav, pid }: {
         <TabsList className="w-full shrink-0 justify-start rounded-none border-b bg-transparent p-0">
           {[
             ["experts", "专家"], ["skills", "Skill"], ["matrix", "矩阵"], ["rules", "红线"],
-            ["llm", "模型"], ["mcp", "MCP"], ["intel", "情报源"], ["proposals", "提案"],
+            ["advisor", "顾问"],
+            ["llm", "模型"], ["mcp", "MCP"], ["gateway", "网关"], ["tools", "工具"],
+            ["intel", "情报源"], ["proposals", "提案"],
           ].map(([k, label]) => (
             <TabsTrigger key={k} value={k} className="rounded-none border-b-2 px-3 py-1.5 text-xs">
               {label}
@@ -186,8 +199,11 @@ export function SettingsView({ nav, pid }: {
                       }} />
         </TabsContent>
         <TabsContent value="rules" className="min-h-0 flex-1"><RulesPane track={track} cap={cap} focus={ruleFocus} pid={pid} /></TabsContent>
+        <TabsContent value="advisor" className="min-h-0 flex-1"><AdvisorPane pid={pid} /></TabsContent>
         <TabsContent value="llm" className="min-h-0 flex-1"><LlmPane /></TabsContent>
         <TabsContent value="mcp" className="min-h-0 flex-1"><McpPane /></TabsContent>
+        <TabsContent value="gateway" className="min-h-0 flex-1"><GatewayPane pid={pid} /></TabsContent>
+        <TabsContent value="tools" className="min-h-0 flex-1"><AgentToolsPane /></TabsContent>
         <TabsContent value="intel" className="min-h-0 flex-1"><IntelSourcePane /></TabsContent>
         <TabsContent value="proposals" className="min-h-0 flex-1">
           <ProposalsPane onPendingChange={setPendingN} />
@@ -830,80 +846,6 @@ function SkillsPane({ tax, track, cap, focus }: {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </div>
-  )
-}
-
-// ---------- MCP 配置层 ----------
-
-function McpPane() {
-  const [servers, setServers] = useState<McpServer[]>([])
-  const [saved, setSaved] = useState(false)
-
-  useEffect(() => {
-    api.mcpServers().then((r) => setServers(r.servers)).catch(() => {})
-  }, [])
-
-  const patch = (i: number, p: Partial<McpServer>) =>
-    setServers((ss) => ss.map((s, j) => j === i ? { ...s, ...p } : s))
-
-  const save = async () => {
-    // http server 需 url；stdio 需 command
-    const valid = servers.filter((s) => s.name.trim() &&
-      (s.transport === "stdio" ? (s.command ?? "").trim() : s.url.trim()))
-    await api.updateMcpServers(valid)
-    setSaved(true)
-    setTimeout(() => setSaved(false), 1500)
-    setServers(valid)
-  }
-
-  return (
-    <div className="flex h-full flex-col gap-2 p-3">
-      <div className="flex items-center gap-2">
-        <span className="font-mono text-sm">config/mcp.json</span>
-        <span className="flex-1" />
-        <Saved saved={saved} />
-        <Button size="sm" onClick={save}>保存</Button>
-      </div>
-      <div className="space-y-1.5">
-        {servers.map((s, i) => (
-          <div key={i} className="rounded border p-2">
-            <div className="flex items-center gap-2">
-              <Input value={s.name} onChange={(e) => patch(i, { name: e.target.value })}
-                     className="w-36 font-mono text-xs" placeholder="名称" />
-              <select value={s.transport} onChange={(e) => patch(i, { transport: e.target.value })}
-                      className={cn(selectCls, "h-7")}>
-                <option value="streamable-http">http</option>
-                <option value="stdio">stdio</option>
-              </select>
-              {s.transport === "stdio" ? (
-                <>
-                  <Input value={s.command ?? ""} onChange={(e) => patch(i, { command: e.target.value })}
-                         className="w-28 font-mono text-xs" placeholder="命令，如 uv" />
-                  <Input value={(s.args ?? []).join(" ")} onChange={(e) => patch(i, { args: e.target.value.split(" ").filter(Boolean) })}
-                         className="flex-1 font-mono text-xs" placeholder="参数（空格分隔）" />
-                </>
-              ) : (
-                <Input value={s.url} onChange={(e) => patch(i, { url: e.target.value })}
-                       className="flex-1 font-mono text-xs" placeholder="http://127.0.0.1:8081/mcp" />
-              )}
-              <Input value={s.domains.join(",")} onChange={(e) => patch(i, { domains: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) })}
-                     className="w-32 font-mono text-xs" placeholder="适用范围(空=全部)" />
-              <label className="flex items-center gap-1 text-[10px] text-muted-foreground">
-                <input type="checkbox" checked={s.enabled} onChange={(e) => patch(i, { enabled: e.target.checked })} />
-                启用
-              </label>
-              <Button size="sm" variant="ghost" className="text-[10px] text-(--status-error)"
-                      onClick={() => setServers((ss) => ss.filter((_, j) => j !== i))}>删除</Button>
-            </div>
-          </div>
-        ))}
-      </div>
-      <Button size="sm" variant="outline" className="w-fit"
-              onClick={() => setServers((ss) => [...ss, { name: "", url: "", transport: "stdio", enabled: true, domains: [], command: "", args: [] }])}>
-        + 添加 server
-      </Button>
-      <DangerNote>MCP 配置层（stdio 填命令+参数，http 填 URL）：记录端点与启动方式。Agent 运行时工具桥（把 MCP 工具注入会话工具集）是后续批次——现在改配置不会改变 Agent 可用工具。</DangerNote>
     </div>
   )
 }

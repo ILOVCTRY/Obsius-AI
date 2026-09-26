@@ -238,6 +238,97 @@ def test_rating_rules_and_rule_profiles(packs):
     assert "评级硬指令" in pre
 
 
+def test_parse_rule_doc_frontmatter(tmp_path):
+    """四段一体模板解析：frontmatter+正文分离；缺失/坏 yaml/未闭合 → ({}, 原文) 容错。"""
+    from core.skills.rules import parse_rule_doc
+    p = tmp_path / "t.md"
+    p.write_text("---\ntrigger: t\nforbidden: [内网渗透]\n---\n正文段落", encoding="utf-8")
+    meta, body = parse_rule_doc(p)
+    assert meta == {"trigger": "t", "forbidden": ["内网渗透"]} and body == "正文段落"
+    p2 = tmp_path / "plain.md"
+    p2.write_text("# 无 frontmatter\n正文", encoding="utf-8")
+    assert parse_rule_doc(p2) == ({}, "# 无 frontmatter\n正文")
+    p3 = tmp_path / "bad.md"
+    p3.write_text("---\nforbidden: [坏\n---\n正文", encoding="utf-8")
+    meta3, body3 = parse_rule_doc(p3)
+    assert meta3 == {} and "正文" in body3
+    p4 = tmp_path / "unclosed.md"
+    p4.write_text("---\ntrigger: t\n正文", encoding="utf-8")
+    assert parse_rule_doc(p4)[0] == {}
+
+
+def test_validate_rule_meta_schema():
+    """schema fail-fast：未知键/坏 scope/坏数组/坏噪声档/坏 rating_ref 都 ValueError。"""
+    from core.skills.rules import validate_rule_meta
+    validate_rule_meta("t", {  # 合法全字段不抛
+        "trigger": "t",
+        "scope": {"in": ["*.a.com"], "out": ["mail.a.com"]},
+        "forbidden": ["DoS"], "uncollectable": ["用户名枚举"],
+        "noise_caps": {"recon": "passive", "exploit": "low"},
+        "rating_ref": "self"})
+    with pytest.raises(ValueError, match="未知字段"):
+        validate_rule_meta("t", {"nope": 1})
+    with pytest.raises(ValueError, match="scope"):
+        validate_rule_meta("t", {"scope": {"middle": ["x"]}})
+    with pytest.raises(ValueError, match="scope.out"):
+        validate_rule_meta("t", {"scope": {"out": [3]}})
+    with pytest.raises(ValueError, match="forbidden"):
+        validate_rule_meta("t", {"forbidden": "DoS"})  # 须数组
+    with pytest.raises(ValueError, match="noise_caps"):
+        validate_rule_meta("t", {"noise_caps": {"recon": "loudest"}})
+    with pytest.raises(ValueError, match="rating_ref"):
+        validate_rule_meta("t", {"rating_ref": " "})
+    with pytest.raises(ValueError, match="trigger"):
+        validate_rule_meta("t", {"trigger": ""})
+
+
+def test_load_rule_templates(tmp_path):
+    """轨模板库加载：名称序、坏 schema 降级空 meta（读取侧容错，doctor 出体检）。"""
+    from core.skills.rules import load_rule_templates
+    tpl = tmp_path / "tracks" / "pentest" / "rules" / "templates"
+    tpl.mkdir(parents=True)
+    (tpl / "b.md").write_text("---\ntrigger: b\n---\nB 正文", encoding="utf-8")
+    (tpl / "a.md").write_text("无 frontmatter 的 A", encoding="utf-8")
+    (tpl / "c.md").write_text("---\nnoise_caps: {x: loudest}\n---\nC", encoding="utf-8")
+    rows = load_rule_templates(tmp_path, "pentest")
+    assert [r["name"] for r in rows] == ["a", "b", "c"]
+    assert rows[0]["meta"] == {} and "A" in rows[0]["body"]
+    assert rows[1]["meta"]["trigger"] == "b"
+    assert rows[2]["meta"] == {}  # 坏 noise_caps 档 → 降级
+    assert load_rule_templates(tmp_path, "ctf") == []  # 无 templates 目录
+
+
+def test_repo_osrc_template_pilot():
+    """真仓 pilot 守卫：pentest 轨 osrc 四段一体模板（M1）schema+内容，零探测副作用。"""
+    from core.skills.rules import load_rule_templates, validate_rule_meta
+    root = Path(__file__).resolve().parent.parent / "packs"
+    tpls = {t["name"]: t for t in load_rule_templates(root, "pentest")}
+    assert "osrc" in tpls
+    t = tpls["osrc"]
+    validate_rule_meta("osrc", t["meta"])  # 不抛=入库声明合法
+    assert t["meta"]["trigger"] == "osrc" and t["meta"]["rating_ref"] == "self"
+    assert {"内网渗透", "主机提权", "DoS", "社工"} <= set(t["meta"]["forbidden"])
+    assert {"用户名枚举", "0day 冷静期"} <= set(t["meta"]["uncollectable"])
+    assert any(x.startswith("*.oppo") for x in t["meta"]["scope"]["in"])
+    assert "范围段" in t["body"] and "规则段" in t["body"] and "评级段" in t["body"]
+
+
+def test_doctor_rule_template_checks(tmp_path):
+    """doctor 体检：坏 schema=error rule-template-invalid；缺 trigger=warning。"""
+    from core.skills.doctor import diagnose
+    tpl = tmp_path / "packs" / "tracks" / "pentest" / "rules" / "templates"
+    tpl.mkdir(parents=True)
+    (tpl / "bad.md").write_text("---\nwhat: 1\n---\n正文", encoding="utf-8")
+    (tpl / "no-trigger.md").write_text("---\nforbidden: [x]\n---\n正文", encoding="utf-8")
+    (tpl / "ok.md").write_text("---\ntrigger: ok\nforbidden: [内网渗透]\n---\n正文",
+                               encoding="utf-8")
+    rep = diagnose(tmp_path / "packs")
+    issues = {(i.code, i.level): i for i in rep.issues if i.code.startswith("rule-template")}
+    assert ("rule-template-invalid", "error") in issues
+    assert ("rule-template-no-trigger", "warning") in issues
+    assert not [i for i in rep.issues if i.target.endswith("ok.md")]
+
+
 def test_kb_sources_synthetic(packs):
     """M0 合成源：packs/kb/<域> 一域一根（id=<域>-kb、recursive 恒 True）；
     未建 kb 目录的能力域（含占位包）→ 空清单，不再读 kb_sources.json。"""
@@ -357,7 +448,10 @@ def test_real_pentest_experts_yaml():
     assert recon["default_noise"] == "passive"
     assert recon.get("description")  # v0.2：职责描述必填护栏
     for role_name, expected_types, expected_skills in [
-        ("external-entry", ["exploit", "recon"], ["web-strike-entry"]),
+        ("external-entry", ["exploit", "recon"],
+         # 2026-09-23 技能面补全：入口路由 + K1 五专精（去 web-post-exp）+ 云入口
+         ["web-strike-entry", "web-injection", "web-authn-session",
+          "web-api-attack", "web-client-side", "cloud-entry"]),
         # J 组（2026-09-20 开源对标扩充）：OSINT 情报 + 报告工程师
         ("osint", ["recon", "asset-enum"], ["recon-asset-enum"]),
         ("report-writer", ["report"], None),  # skills: null 全可见
@@ -365,6 +459,10 @@ def test_real_pentest_experts_yaml():
         r = load_expert("packs", role_name, "pentest")
         assert r["task_types"] == expected_types, role_name
         assert r["skills"] == expected_skills, role_name  # K1 绑定细粒度技能
+    # redteam 轨变体：+ web-post-exp（pentest 轨红线禁内网纵深，不挂）
+    rt_entry = load_expert("packs", "external-entry", "redteam")
+    assert "web-post-exp" in rt_entry["skills"]
+    assert "web-strike-entry" in rt_entry["skills"]
     tt = load_task_types("packs", "pentest")
     assert tt["report"] == "passive"  # J 组新类型
     # 2026-09-21 红队向退场：内网/提权类型不再注册（内容归 redteam 轨）
@@ -632,8 +730,11 @@ def test_kb_route_hints(tmp_path):
                                           "web/ctf-web/auth-jwt.md"]
     # task_type 直配 + query 中文命中
     hits = kb_route_hints(root, ["web"], "auth_bypass", "检测后台越权")
-    keys = [k for k, _ in hits]
+    keys = [k for k, _p, _d in hits]
     assert "越权|未授权|auth" in keys
+    # 文件型值（物理不存在时透传声明）展开为该路径，dir_total=0
+    hit = next(h for h in hits if h[0] == "越权|未授权|auth")
+    assert hit[1][0] == "web/ctf-web/auth-and-access.md" and hit[2] == 0
     # cap 限组数
     hits = kb_route_hints(root, ["web"], None, "sql注入 auth 越权 未授权 sqli", cap=1)
     assert len(hits) == 1
@@ -744,6 +845,104 @@ def test_doctor_route_index_checks(tmp_path):
     assert "route-index-bad-yaml" in codes
 
 
+# ---------- route-injection-hardening（2026-09-24）：匹配口径/误命中/展开 ----------
+
+def test_term_matches_caliber():
+    """term_matches 定稿口径：ASCII 词边界、中文子串、* 前缀、空值。"""
+    from core.skills.matching import term_matches as m
+    # ASCII 短词不做长单词的子串（此前 PoC 误命中根因）
+    assert not m("ak", "backup and make a snapshot")
+    assert not m("sk", "the whole stack and tasks")
+    assert not m("ai", "main domain in the email")
+    assert not m("pe", "open expense report for operations")
+    assert not m("sql", "mysql and postgresql")
+    assert not m("401", "4012 records found")
+    # 独立词/边界形态命中
+    assert m("ak", "ak leaked from console")
+    assert m("s3", "s3 bucket policy")
+    assert m("401", "returns 401 unauth")
+    assert m("ai", "use ai_tools here")          # underscore 视为边界
+    assert m("ai", "ai-first design")            # hyphen 视为边界
+    # 中文保持子串（中文无词边界）
+    assert m("越权", "检测后台越权访问")
+    # * = 前缀语义
+    assert m("ret2*", "ret2text exploit path")
+    assert not m("ret2*", "greenhouse effect")
+    assert m("house*", "the house-of cards")
+    # 空值不命中
+    assert not m("", "anything") and not m("ak", "")
+
+
+def test_score_entry_word_boundary():
+    """score_entry：英文句子里的子串不再命中短触发词；真任务仍命中；中文双向子串。"""
+    from core.skills.routeindex import IndexEntry, score_entry
+    pe = IndexEntry(point="恶意样本 PE", kb="misc/malware/pe.md", match=["pe"])
+    assert score_entry(pe, "open expense report for operations team") == 0
+    assert score_entry(pe, "分析 pe 样本脱壳") >= 2
+    up = IndexEntry(point="文件上传", kb="web/poc/upload.md")
+    assert score_entry(up, "文件上传测试") == 1      # point 中文子串 ×1
+
+
+def test_top_route_entries_no_pe_for_expense(tmp_path):
+    """top_route_entries 回归：「open expense」不再注入 PE 条目。"""
+    from core.skills.routeindex import top_route_entries
+    root = tmp_path / "packs"
+    (root / "kb").mkdir(parents=True)
+    (root / "kb" / "route_index.yaml").write_text(
+        "entries:\n"
+        "  - point: 恶意样本 PE / .NET\n    match: [pe]\n"
+        "    kb: misc/malware/pe-dotnet.md\n", encoding="utf-8")
+    hits, total = top_route_entries(root, ["misc"], None,
+                                    "open expense report for operations team")
+    assert hits == [] and total == 1
+
+
+def test_kb_route_hints_short_ascii_false_positive(tmp_path):
+    """kb_route_hints 回归：英文运维句子不命中 ak|sk 键；真泄露任务仍命中。"""
+    from core.skills.kbindex import kb_route_hints
+    root = tmp_path / "packs"
+    kbdir = root / "kb" / "cloud"
+    kbdir.mkdir(parents=True)
+    (kbdir / "route.json").write_text(json.dumps({
+        "ak|sk|accesskey|凭证泄露": ["cloud/knowledge/ak-leak.md"],
+        "rds|快照|snapshot": ["cloud/knowledge/rds-snapshot.md"],
+    }, ensure_ascii=False), encoding="utf-8")
+    # make/stack 不再子串命中 ak|sk；句中独立词 snapshot 命中 rds 键属正确
+    hits = kb_route_hints(
+        root, ["cloud"], None,
+        "backup the whole stack and make a snapshot of everything")
+    keys = [k for k, _p, _d in hits]
+    assert "ak|sk|accesskey|凭证泄露" not in keys
+    assert "rds|快照|snapshot" in keys
+    hits = kb_route_hints(root, ["cloud"], None, "发现凭证泄露，AK 疑似外泄")
+    assert "ak|sk|accesskey|凭证泄露" in [k for k, _p, _d in hits]
+
+
+def test_expand_prefix_shapes(tmp_path):
+    """_expand_prefix：文件型透传；缺失声明透传；目录型前 cap 篇 + 总篇数。"""
+    from core.skills.kbindex import _expand_prefix
+    root = _kb_fixture(tmp_path)
+    # 文件型（物理存在）→ 原样，total=0
+    assert _expand_prefix(root, "web/poc/tduck.md") == (["web/poc/tduck.md"], 0)
+    # 声明目标不存在 → 原样透传（存在性归 doctor 体检）
+    assert _expand_prefix(root, "web/poc/ghost.md") == (["web/poc/ghost.md"], 0)
+    # 目录型：poc 共 3 篇 md，cap=2
+    paths, total = _expand_prefix(root, "web/poc/", cap=2)
+    assert total == 3 and len(paths) == 2 and all(p.startswith("web/poc/") for p in paths)
+    assert ".history" not in " ".join(paths)
+
+
+def test_router_keyword_word_boundary(packs):
+    """router keywords 回归：英文句子不再子串命中短关键词；真任务正常路由。"""
+    reg = SkillRegistry(packs)
+    assert reg.load()
+    router = SkillRouter(reg)
+    assert router.route(query="explain the main idea in the email",
+                        packs={"web", "pentest"}) == []
+    hits = router.route(query="检测一下 upload 点", packs={"web", "pentest"})
+    assert hits and hits[0].skill.name == "file-upload-test"
+
+
 def test_proposals_index_edit_flow(tmp_path):
     """index 提案（M0 全局单表）：edit 走通（备份+落盘+域归并——content 只含本域
     条目，apply 与他域条目合并写回）；create 已退役被拒；条目须带本域域前缀。"""
@@ -834,3 +1033,74 @@ def test_proposals_skill_suggest_flow(tmp_path):
                        "owner": "web", "name": "ghost"},
             "mode": "create", "content": "---\nname: ghost\n---\nx",
             "summary": "s", "reason": "r"}, origin="agent")
+
+
+# ---------- M2 同义词表：查询扩展（retrieval-upgrade，2026-09-23） ----------
+
+def _syn_fixture(tmp_path):
+    """kb + 词表：中文文档（越权检测）+ 英文文档（idor），词表 idor 组把两者接上。"""
+    root = _kb_fixture(tmp_path)
+    (root / "kb" / "web" / "poc" / "idor-cheatsheet.md").write_text(
+        "# IDOR cheatsheet\naccess control notes", encoding="utf-8")
+    (root / "kb" / "synonyms.yaml").write_text(
+        "groups:\n"
+        "  - id: idor\n"
+        "    terms: [越权, 水平越权, idor, access-control]\n",
+        encoding="utf-8")
+    return root
+
+
+def test_synonyms_load_missing_and_bad(tmp_path):
+    """缺文件/坏 YAML 静默降级空表（增强层永不阻断主链）。"""
+    from core.skills.kbindex import load_synonyms
+    assert load_synonyms(tmp_path) == []
+    root = _kb_fixture(tmp_path)
+    (root / "kb" / "synonyms.yaml").write_text("not: [valid", encoding="utf-8")
+    assert load_synonyms(root) == []
+
+
+def test_synonyms_expansion_cross_language(tmp_path):
+    """查询扩展核心场景：query 说「水平越权」（中文），文档名是 idor（英文）——
+    词表组命中后全成员切段参与匹配，跨语言盲区打通。"""
+    from core.skills.kbindex import hit_synonym_groups, synonym_expansion
+    root = _syn_fixture(tmp_path)
+    hits = hit_synonym_groups(root, "水平越权检测")
+    assert [g for g, _ in hits] == ["idor"]
+    segs = synonym_expansion(root, "水平越权检测")
+    assert "idor" in segs and "access" in segs and "control" in segs
+    # 未命中零扩展（不加噪声）
+    assert synonym_expansion(root, "扫一下目录结构") == []
+    # 端到端：中文 query 命中英文 idor 文档
+    from core.skills.kbindex import kb_module_hints
+    pairs = kb_module_hints(root, ["web"], "水平越权怎么测")
+    assert any(e.module == "web/poc/idor-cheatsheet.md" for e, _sec in pairs)
+
+
+def test_synonyms_route_hints_expansion(tmp_path):
+    """kb_route_hints 挂同义词：route 键写「idor」，query 说「越权」也命中。"""
+    from core.skills.kbindex import kb_route_hints
+    root = _syn_fixture(tmp_path)
+    (root / "kb" / "web" / "route.json").write_text(
+        '{"idor": ["web/poc/"]}', encoding="utf-8")
+    hits = kb_route_hints(root, ["web"], None, "水平越权检测")
+    # 目录前缀展开为前 3 篇具体 md（按名排序），dir_total=目录总篇数 4
+    assert hits and hits[0][1] == [
+        "web/poc/buffer-overflow.md", "web/poc/idor-cheatsheet.md",
+        "web/poc/tduck.md"] and hits[0][2] == 4
+    # 无词表时同 query 不命中（扩展层归零）
+    import json as _json
+    (root / "kb" / "synonyms.yaml").write_text("groups: []", encoding="utf-8")
+    assert kb_route_hints(root, ["web"], None, "水平越权检测") == []
+
+
+def test_synonyms_match_detailed_extra_segments(tmp_path):
+    """match_kb_index_detailed extra_segments 参数：与原始段同权参与评分。"""
+    from core.skills.kbindex import build_kb_index, match_kb_index_detailed
+    root = _kb_fixture(tmp_path)
+    index = build_kb_index(root, ["web"])
+    # 直接给扩展段（绕开词表）：「越权」query 加英文段 idor 命中对应文档
+    (root / "kb" / "web" / "poc" / "idor-cheatsheet.md").write_text(
+        "# IDOR cheatsheet\naccess control notes", encoding="utf-8")
+    index = build_kb_index(root, ["web"])
+    pairs = match_kb_index_detailed(index, "水平越权", extra_segments=["idor"])
+    assert any(e.module == "web/poc/idor-cheatsheet.md" for e, _ in pairs)

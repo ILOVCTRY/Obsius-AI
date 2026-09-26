@@ -1,6 +1,6 @@
 import { memo, useState, type ReactNode } from "react"
 import { eventStyle, eventSummary } from "@/lib/events"
-import { parseTs, utcTitle } from "@/lib/datetime"
+import { fmtDateTime, fmtTime, fmtUtcDateTime, parseTs } from "@/lib/datetime"
 import type { BBEvent } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import { MarkdownView } from "@/components/settings/MarkdownView"
@@ -28,7 +28,34 @@ export interface EventRowProps {
   action?: ReactNode
   /** skill.routed 命中技能：单击路由名跳设置页（deep link 由 LiveRoom dispatch，F12） */
   onRouteJump?: (e: BBEvent, name: string) => void
+  /** 摘要资产反查（live-stream-ux A3）：LiveRoom 自建 assets 映射传入 */
+  assetName?: (id: string) => string | undefined
 }
+
+// ---------- live-stream-ux D1/E1（2026-09-23）共用小件 ----------
+
+/** 行点击展开/折叠的 selection 守卫：拖选松键后的 click 会触发行折叠把选择丢掉
+ * （用户反馈 #5）——选区非空时跳过 toggle，宁多一次点击不丢选择 */
+export function selectionCollapsed(): boolean {
+  const s = window.getSelection()
+  return !s || s.isCollapsed
+}
+
+/** E1/E2 行内本地时间微标：HH:mm:ss（本地）小字；悬停双标=本地完整时间为主、
+ * UTC 原值对照（消除「差 8 小时」错觉源，用户反馈 #6） */
+export function TimeTag({ ts }: { ts?: string | null }) {
+  if (!ts) return null
+  return (
+    <span className="shrink-0 font-mono text-[10px] text-muted-foreground/50"
+          title={timeTitle(ts)}>
+      {fmtTime(ts)}
+    </span>
+  )
+}
+
+/** E2 悬停双标：本地完整时间为主、UTC 原值对照（替代原 utcTitle 单 UTC 标） */
+export const timeTitle = (ts?: string | null): string | undefined =>
+  ts ? `${fmtDateTime(ts)}（本地） · UTC ${fmtUtcDateTime(ts)}` : undefined
 
 type DotState = "running" | "ok" | "error" | "warn" | "idle"
 
@@ -98,8 +125,8 @@ function CommandPairRow({ command, result, open, onToggle }: {
   const dur = result?.payload.duration_s
   return (
     <div className="w-full shrink-0 py-0.5">
-      <div className="cursor-pointer rounded px-2 py-1 hover:bg-accent/40" title={utcTitle(command.created_at)}
-           onClick={() => onToggle(command.id, false)}>
+      <div className="cursor-pointer rounded px-2 py-1 hover:bg-accent/40" title={timeTitle(command.created_at)}
+           onClick={() => { if (selectionCollapsed()) onToggle(command.id, false) }}>
         <div className="flex items-baseline gap-2 text-xs">
           <Dot state={state} />
           <span className="font-mono text-[11px] text-foreground/80">
@@ -108,6 +135,7 @@ function CommandPairRow({ command, result, open, onToggle }: {
           <span className="min-w-0 flex-1 truncate font-mono text-muted-foreground">
             {firstLine(cmd)}
           </span>
+          <TimeTag ts={command.created_at} />
         </div>
         {open && (
           <div className="ml-5 border-l border-border/60 pl-3">
@@ -161,8 +189,8 @@ function ThinkingRow({ event, open, onToggle, streaming }: { event: BBEvent; ope
     <div className="w-full shrink-0 py-0.5">
       <div
         className="cursor-pointer rounded px-2 py-1 hover:bg-accent/40"
-        title={utcTitle(event.created_at)}
-        onClick={() => onToggle(event.id, false)}
+        title={timeTitle(event.created_at)}
+        onClick={() => { if (selectionCollapsed()) onToggle(event.id, false) }}
       >
         <div className="flex items-baseline gap-2 text-xs">
           <Dot state={streaming ? "running" : "idle"} />
@@ -173,6 +201,7 @@ function ThinkingRow({ event, open, onToggle, streaming }: { event: BBEvent; ope
               <span className="ml-2 not-italic text-muted-foreground/60">{preview}</span>
             )}
           </span>
+          <TimeTag ts={event.created_at} />
         </div>
         {open && (
           <div className="ml-5 border-l border-border/60 pl-3">
@@ -192,12 +221,13 @@ function ThinkingRow({ event, open, onToggle, streaming }: { event: BBEvent; ope
 function AgentChatRow({ event }: { event: BBEvent }) {
   return (
     <div className="w-full shrink-0 py-0.5">
-      <div className="rounded px-2 py-1" title={utcTitle(event.created_at)}>
+      <div className="rounded px-2 py-1" title={timeTitle(event.created_at)}>
         <div className="flex items-start gap-2 text-xs">
           <Dot state="idle" />
           <div className="min-w-0 flex-1 whitespace-pre-wrap break-words leading-relaxed text-foreground/90">
             {str(event.payload.text)}
           </div>
+          <TimeTag ts={event.created_at} />
           <span className="shrink-0 pt-0.5 font-mono text-[10px] text-muted-foreground/60">{event.author}</span>
         </div>
       </div>
@@ -213,7 +243,8 @@ function AgentChatRow({ event }: { event: BBEvent }) {
 function HumanNoteRow({ event }: { event: BBEvent }) {
   const text = str(event.payload.text) || str(event.payload.title)
   return (
-    <div className="flex justify-end pr-1" title={utcTitle(event.created_at)}>
+    <div className="flex items-center justify-end gap-1.5 pr-1" title={timeTitle(event.created_at)}>
+      <TimeTag ts={event.created_at} />
       <div className="max-w-[85%] rounded-2xl rounded-br-sm bg-primary/10 px-3 py-1.5 text-sm leading-relaxed text-foreground">
         <span className="whitespace-pre-wrap break-words">{text}</span>
       </div>
@@ -234,17 +265,18 @@ function AgentReplyRow({ event, streaming }: { event: BBEvent; streaming?: boole
     )
   }
   return (
-    <div className="flex justify-start pl-1" title={utcTitle(event.created_at)}>
+    <div className="flex items-start justify-start gap-1.5 pl-1" title={timeTitle(event.created_at)}>
       <div className="max-w-[92%] rounded-2xl rounded-bl-sm bg-accent/40 px-3 py-1.5">
         {/* 超长回复内部滚动（审计全文仍可展开过程组行看 JSON） */}
         <MarkdownView content={text} prefix={`chat-${event.id}`}
           className="max-h-96 overflow-auto text-sm leading-relaxed text-foreground/90" />
       </div>
+      <TimeTag ts={event.created_at} />
     </div>
   )
 }
 
-function TurnRow({ item, open, onToggle, roleNames, onRouteJump }:
+function TurnRow({ item, open, onToggle, roleNames, onRouteJump, assetName }:
   EventRowProps & { item: Extract<StreamItem, { type: "turn" }> }) {
   // 过程组内行展开态自管（局部 map，不进 LiveRoom overrides——轮内细节不污染顶层折叠记忆）
   const [innerOpen, setInnerOpen] = useState<Map<number, boolean>>(new Map())
@@ -257,8 +289,8 @@ function TurnRow({ item, open, onToggle, roleNames, onRouteJump }:
       {hasProcess && (
         <div>
           <button type="button" className="flex w-full items-baseline gap-2 rounded px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent/40"
-            title={utcTitle(item.note.created_at)}
-            onClick={() => onToggle(item.note.id, false)}>
+            title={timeTitle(item.note.created_at)}
+            onClick={() => { if (selectionCollapsed()) onToggle(item.note.id, false) }}>
             <Dot state={item.reply ? "ok" : "running"} />
             <span>{open ? "▾" : "▸"} ⚙ 过程 · {item.process.length} 步</span>
           </button>
@@ -272,7 +304,8 @@ function TurnRow({ item, open, onToggle, roleNames, onRouteJump }:
                 const st = eventStyle(pk, pe.payload)
                 return <EventRowImpl key={pe.id} item={p}
                   open={innerOpen.get(pe.id) ?? st.defaultOpen}
-                  onToggle={innerToggle} roleNames={roleNames} onRouteJump={onRouteJump} />
+                  onToggle={innerToggle} roleNames={roleNames} onRouteJump={onRouteJump}
+                  assetName={assetName} />
               })}
             </div>
           )}
@@ -286,7 +319,7 @@ function TurnRow({ item, open, onToggle, roleNames, onRouteJump }:
 
 // ---------- 其余：简洁单行 / 错误审批醒目行（展开 JSON 详情） ----------
 
-function EventRowImpl({ item, open, onToggle, roleNames, action, onRouteJump }: EventRowProps) {
+function EventRowImpl({ item, open, onToggle, roleNames, action, onRouteJump, assetName }: EventRowProps) {
   if (item.type === "turn") {
     return <TurnRow item={item} open={open} onToggle={onToggle} roleNames={roleNames} onRouteJump={onRouteJump} />
   }
@@ -315,7 +348,7 @@ function EventRowImpl({ item, open, onToggle, roleNames, action, onRouteJump }: 
   }
 
   const style = eventStyle(e.kind, e.payload)
-  const summary = eventSummary(e.payload, roleNames)
+  const summary = eventSummary(e.payload, roleNames, { assetName }, e.kind)
   const alert = alertState(e.kind)
   const routedName = e.kind === "skill.routed" && typeof e.payload.name === "string" ? e.payload.name : null
   // F12：命中行路由名链接化——悬停变色+下划线，单击 stopPropagation 直跳技能（不触发行的
@@ -343,8 +376,8 @@ function EventRowImpl({ item, open, onToggle, roleNames, action, onRouteJump }: 
           alert === "error" && "border-l-2 border-(--status-error)/60",
           alert === "warn" && "border-l-2 border-(--status-approval)/60",
         )}
-        onClick={() => onToggle(e.id, style.defaultOpen)}
-        title={utcTitle(e.created_at)}
+        onClick={() => { if (selectionCollapsed()) onToggle(e.id, style.defaultOpen) }}
+        title={timeTitle(e.created_at)}
       >
         <div className="flex items-baseline gap-2 text-xs">
           {alert && <Dot state={alert} />}
@@ -366,6 +399,7 @@ function EventRowImpl({ item, open, onToggle, roleNames, action, onRouteJump }: 
                   title={`结论已入黑板链路图 ${mappedId}`}>📌 结论已上图</span>
           )}
           {action}
+          <TimeTag ts={e.created_at} />
           <span className="shrink-0 font-mono text-[10px] text-muted-foreground/60">{e.author}</span>
         </div>
         {open && detail !== "{}" && (
@@ -385,7 +419,8 @@ function EventRowImpl({ item, open, onToggle, roleNames, action, onRouteJump }: 
 // （LiveRoom 侧已收口），action JSX 仅 orch.proposed 行传入（量少，放行重渲无妨）。
 function areRowEqual(a: EventRowProps, b: EventRowProps): boolean {
   if (a.open !== b.open || a.roleNames !== b.roleNames || a.action !== b.action
-      || a.onToggle !== b.onToggle || a.onRouteJump !== b.onRouteJump) return false
+      || a.onToggle !== b.onToggle || a.onRouteJump !== b.onRouteJump
+      || a.assetName !== b.assetName) return false
   if (a.item.type !== b.item.type) return false
   if (a.item.type === "pair" && b.item.type === "pair") {
     return a.item.command === b.item.command && a.item.result === b.item.result

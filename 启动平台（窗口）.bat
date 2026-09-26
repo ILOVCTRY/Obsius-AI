@@ -9,7 +9,7 @@ if not defined _CS_BOOT (
 title cyberstrike-pro 窗口启动器
 cd /d "%~dp0"
 
-REM ---- 选择 Python：pythonw 优先（无控制台黑窗，日志落 serve-window.log），缺则退 python.exe ----
+REM ---- 选择 Python：pythonw 优先（无控制台黑窗，日志落 logs\serve-window.log），缺则退 python.exe ----
 set "PYW=E:\Miniconda3\pythonw.exe"
 if not exist "%PYW%" set "PYW=E:\Miniconda3\python.exe"
 if not exist "%PYW%" (

@@ -139,12 +139,65 @@ def normalize_rule_profiles(raw: Any) -> dict:
     return out
 
 
+# ---------- 策略顾问配置（advisor-settings-ui D10，2026-09-24） ----------
+
+ADVISOR_DEFAULTS = {"stuck_after": 12, "stuck_max_extensions": 2, "closing_max_rounds": 2}
+ADVISOR_RANGES = {
+    "stuck_after": (6, 30),
+    "stuck_max_extensions": (0, 4),
+    "closing_max_rounds": (0, 3),
+}
+
+
+def normalize_advisor(raw: Any) -> dict:
+    """config.advisor 段归一化（非法值 ValueError→API 422）。
+
+    None / {} → {}（调用方剥键恢复全部代码缺省）；三整数键缺键补默认、
+    越界拒绝（bool 经 _bounded_int 天然拒绝）；provider 若在须非空字符串，
+    model 须与 provider 同时出现且非空；未知键剥除。"""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("advisor 必须是对象")
+    if not raw:
+        return {}
+    out: dict = {}
+    for field, (lo, hi) in ADVISOR_RANGES.items():
+        if field in raw:
+            out[field] = _bounded_int(raw[field], f"advisor.{field}", lo, hi)
+        else:
+            out[field] = ADVISOR_DEFAULTS[field]
+    provider = raw.get("provider")
+    if provider is not None:
+        if not isinstance(provider, str) or not provider.strip():
+            raise ValueError("advisor.provider 必须是非空字符串")
+        out["provider"] = provider.strip()
+    model = raw.get("model")
+    if model is not None:
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError("advisor.model 必须是非空字符串")
+        if "provider" not in out:
+            raise ValueError("advisor.model 必须与 provider 同时出现")
+        out["model"] = model.strip()
+    return out
+
+
 # ---------- 用量记账 ----------
 
 def total_tokens(row: dict) -> int:
     return (int(row.get("tokens_in", 0)) + int(row.get("tokens_out", 0))
             + int(row.get("tokens_cache_read", 0))
             + int(row.get("tokens_cache_creation", 0)))
+
+
+def _cache_hit(row: dict) -> float | None:
+    """M1 prompt caching 观测（2026-09-23）：缓存命中率 = cache_read / 输入侧
+    全量（input + cache_read + cache_creation），分母 0 返 None（尚未打标或
+    网关未回缓存字段）。"""
+    cr = int(row.get("tokens_cache_read", 0))
+    denom = (int(row.get("tokens_in", 0)) + cr
+             + int(row.get("tokens_cache_creation", 0)))
+    return round(cr / denom, 4) if denom and cr else (0.0 if denom else None)
 
 
 def count_active_sessions(bb, project_id: str) -> int:
@@ -232,7 +285,8 @@ def normalize_track_semantics(config: dict, *, track: str) -> dict:
     """轨级行为语义归一化（R2：mode 退役→轨级，§6.9 2026-09-17）。
 
     - config.mode 键退役：由调用方剥离（盘上旧值忽略）；
-    - mission {text, criteria} 为两轨通用配置；
+    - mission {text, criteria} 为两轨通用配置（goal 统一后写入口已退役——
+      前端目标层走 meta.phase_goal；存量读兼容，判据解析居 goal 之下）；
     - redteam 轨：redteam_roe 四要素**不再强制**——缺省=按 pentest 上限兜底
       （usage.roe_complete=False 提示补全，§6.9 ROE 语义）；传入即归一化，
       只保留非空键，四要素全非空才算完整（roe_complete）；
@@ -276,7 +330,11 @@ def usage_view(bb, project_id: str) -> dict:
         "active_sessions": count_active_sessions(bb, project_id),
         "llm_calls": int(st.get("llm_calls", 0)),
         "tokens": {"used": used, "budget": tb,
-                   "pct": round(used / tb, 4) if tb else None},
+                   "pct": round(used / tb, 4) if tb else None,
+                   # M1 prompt caching 观测（2026-09-23）：命中率 = 缓存读 / 全部输入侧
+                   "cache_read": int(st.get("tokens_cache_read", 0)),
+                   "cache_creation": int(st.get("tokens_cache_creation", 0)),
+                   "cache_hit": _cache_hit(st)},
         "tasks": {"published": published, "budget": tkb,
                   "pct": round(published / tkb, 4) if tkb else None},
         # mission 自动派生上次判定（2026-09-18）：last_result=published:n / empty / error:…

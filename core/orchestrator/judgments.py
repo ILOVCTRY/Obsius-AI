@@ -1,9 +1,10 @@
 """判据模板与判据解析（C2 作战模式自动派生，DESIGN.md §6.9）。
 
-判据解析三层优先级（自动派生开启时永远有判据，不存在空转真空）：
-1. 项目手写 mission 判据（自定义目标）；
-2. 项目所选判据模板（用户模板，🎯 弹层随时切换）；
-3. mode 内置默认模板（渗透/红队各一套，永远兜底）。
+判据解析四层优先级（自动派生开启时永远有判据，不存在空转真空）：
+1. 项目阶段目标 goal（meta.phase_goal，人类确认口径——goal 统一后的第一源）；
+2. 项目手写 mission 判据（旧「作战计划」存量兼容，写入口已退役）；
+3. 项目所选判据模板（用户模板）；
+4. mode 内置默认模板（渗透/红队各一套，永远兜底）。
 
 用户自定义模板存全局 `config/judgment_templates.json`（{name: criteria}），
 与 providers.json 同款 cwd 相对路径惯例；全部函数可注入路径供测试。
@@ -54,12 +55,19 @@ def save_user_templates(config_dir: str | Path, templates: dict[str, str]) -> No
 
 
 def resolve_criteria(config: dict, config_dir: str | Path = "config",
-                     track: str | None = None) -> dict:
-    """解析项目生效判据。返回 {source: mission|template|builtin, criteria, name?}。
-    优先级：项目手写 mission > 所选用户模板 > 轨内置默认模板。
+                     track: str | None = None,
+                     goal: dict | None = None) -> dict:
+    """解析项目生效判据。返回 {source: goal|mission|template|builtin, criteria, name?}。
+    优先级：阶段目标 goal（criteria 非空才算源）> 项目手写 mission（存量兼容）
+    > 所选用户模板 > 轨内置默认模板。
+    goal 传 meta.phase_goal（{criteria: [...]}，数组组装成多行文本）。
     track 给定时按轨选内置默认（redteam→红队默认，其余→渗透默认）；
     未给 track 时回退读 config.mode（旧调用兼容，mode 已退役仅兜底）。"""
     cfg = config or {}
+    gl = goal or {}
+    lines = [str(c).strip() for c in (gl.get("criteria") or []) if str(c).strip()]
+    if lines:
+        return {"source": "goal", "criteria": "\n".join(lines)}
     mission = cfg.get("mission") or {}
     if str(mission.get("criteria") or "").strip():
         return {"source": "mission", "criteria": str(mission["criteria"])}

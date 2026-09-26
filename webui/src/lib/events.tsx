@@ -17,6 +17,7 @@ export function eventStyle(kind: string, payload?: Record<string, unknown>): Eve
       "task.failed": { label: "❌ 任务失败", className: "text-(--status-error)", defaultOpen: false },
       "task.updated": { label: "✏️ 编辑任务", className: "text-muted-foreground", defaultOpen: true },
       "task.reopened": { label: "♻️ 放回待认领", className: "text-primary", defaultOpen: true },
+      "task.cancelled": { label: "🚫 任务已取消", className: "text-muted-foreground", defaultOpen: true },
       "task.deleted": { label: "🗑 删除任务", className: "text-muted-foreground", defaultOpen: true },
       "task.lease_expired": { label: "⏰ 租约过期", className: "text-(--status-approval)", defaultOpen: true },
       // A2 先规划后动手
@@ -30,6 +31,11 @@ export function eventStyle(kind: string, payload?: Record<string, unknown>): Eve
   }
   if (kind === "command") return { label: "⚡ 执行命令", className: "text-foreground/80", defaultOpen: false }
   if (kind === "command.result") return { label: "↳ 命令输出", className: "text-muted-foreground", defaultOpen: false }
+  // 独立验证 M1：验证器对 verify 验收条目的判定回执（未过默认展开，脱敏摘要）
+  if (kind === "verify.result")
+    return payload?.passed
+      ? { label: "🔬 独立验证通过", className: "text-emerald-400", defaultOpen: false }
+      : { label: "🔬 独立验证未过", className: "text-(--status-error)", defaultOpen: true }
   if (kind === "tool.call") return { label: "🛠 工具调用", className: "text-muted-foreground", defaultOpen: false }
   if (kind === "audit.deny") return { label: "🛡 网关拒绝", className: "text-(--status-approval)", defaultOpen: true }
   if (kind === "finding.new" || kind === "finding.merged")
@@ -48,6 +54,10 @@ export function eventStyle(kind: string, payload?: Record<string, unknown>): Eve
       return { label: "⚠ 依据撤回", className: "text-amber-400", defaultOpen: true }
     if (payload?.kind === "escalation_result")
       return { label: "🛫 升级命令已执行", className: "text-sky-400", defaultOpen: true }
+    if (payload?.kind === "authorization_result")
+      return { label: "✅ 授权申请已批准", className: "text-emerald-400", defaultOpen: true }
+    if (payload?.kind === "approval_rejected")
+      return { label: "❌ 申请被拒绝", className: "text-(--status-error)", defaultOpen: true }
     return { label: "🔔 会话私信", className: "text-(--status-approval)", defaultOpen: true }
   }
   if (kind === "agent.chat")
@@ -62,6 +72,21 @@ export function eventStyle(kind: string, payload?: Record<string, unknown>): Eve
     // 策略顾问发言（2026-09-20）：卡壳干预的正文落事件流，人工可判断顾问说了什么、
     // 建议是否合理；渲染同样走 prose 行（正文即行），同居「决策」tab
     return { label: "🧭 策略顾问", className: "text-amber-400", defaultOpen: true }
+  // D9 活跃探索静默延长（2026-09-24）：未叫顾问、仅重置观察窗——默认展开让人工
+  // 看得见为什么没打断；file.read 是其取材源，默认折叠
+  if (kind === "agent.stuck_extend")
+    return { label: "⏱ 活跃探索，观察窗延长", className: "text-emerald-400", defaultOpen: true }
+  if (kind === "file.read")
+    return { label: "📄 读取文件", className: "text-muted-foreground", defaultOpen: false }
+  if (kind === "file.search")
+    return { label: "🔎 内容检索", className: "text-muted-foreground", defaultOpen: false }
+  // 计划闸教练链（2026-09-24）：强提示默认展开、挂起/熔断红色默认展开
+  if (kind === "agent.plan_nudge")
+    return { label: "📋 请先写计划", className: "text-amber-400", defaultOpen: true }
+  if (kind === "agent.plan_gate_block")
+    return { label: "🚫 拒写计划，挂起", className: "text-(--status-error)", defaultOpen: true }
+  if (kind === "agent.reject_breaker")
+    return { label: "🚫 拒绝熔断挂起", className: "text-(--status-error)", defaultOpen: true }
   if (kind === "task.basis_stale_done")
     return { label: "⚠ 推翻依据下完成", className: "text-amber-400", defaultOpen: true }
   if (kind === "binary.triaged")
@@ -75,6 +100,9 @@ export function eventStyle(kind: string, payload?: Record<string, unknown>): Eve
   if (kind === "func.updated")
     return { label: "ƒ 函数更新", className: "text-muted-foreground", defaultOpen: false }
   if (kind === "asset.new") return { label: "📦 资产", className: "text-muted-foreground", defaultOpen: false }
+  // 资产批量导入汇总（cyberspace-mapping M1）：整批单条，摘要行即全量信息
+  if (kind === "asset.imported")
+    return { label: "📥 资产导入", className: "text-muted-foreground", defaultOpen: false }
   if (kind === "asset.status_changed") return { label: "🔄 资产状态", className: "text-muted-foreground", defaultOpen: false }
   if (kind === "func.upsert") return { label: "ƒ 函数分析", className: "text-muted-foreground", defaultOpen: false }
   if (kind === "llm.thinking")
@@ -96,9 +124,10 @@ export function eventStyle(kind: string, payload?: Record<string, unknown>): Eve
   if (kind === "skill.open") return { label: "📖 打开技能正文", className: "text-muted-foreground", defaultOpen: false }
   if (kind === "skill.routed") return { label: "🎯 技能路由", className: "text-muted-foreground", defaultOpen: false }
   if (kind === "llm.thinking.delta")
-    // 思考流式增量行（2026-09-19）：直播中默认展开看思考滚动，终稿 llm.thinking
-    // 到达后该组跳过/后端清剪——本样式只活在直播窗口内
-    return { label: "💭 思考中…", className: "text-primary", defaultOpen: true }
+    // 思考流式增量行（2026-09-19；E3 折叠 2026-09-22）：原直播中默认展开全文——
+    // 长思考逐帧刷屏淹没工具结果（视觉权重倒挂）。改默认折叠单行（点开可看全文），
+    // 终稿 llm.thinking 到达后该组跳过/后端清剪——本样式只活在直播窗口内
+    return { label: "💭 思考中…", className: "text-muted-foreground italic", defaultOpen: false }
   if (kind === "llm.compact")
     // G3 上下文摘要压缩（2026-09-19）：N 条旧历史压成摘要；展开看前后规模
     return { label: "🧹 上下文压缩", className: "text-muted-foreground", defaultOpen: false }
@@ -106,6 +135,11 @@ export function eventStyle(kind: string, payload?: Record<string, unknown>): Eve
   if (kind === "proposal.applied") return { label: "✅ 提案应用", className: "text-primary", defaultOpen: true }
   if (kind === "proposal.rejected") return { label: "⊘ 提案拒绝", className: "text-muted-foreground", defaultOpen: false }
   if (kind === "session.spawned") return { label: "🟢 会话开窗", className: "text-primary", defaultOpen: true }
+  // 会话中心化（2026-09-25）：编排器委派 + 中途换人留痕
+  if (kind === "delegation.posted")
+    return { label: "🧭 编排器委派", className: "text-primary", defaultOpen: true }
+  if (kind === "session.persona_switched")
+    return { label: "🔄 切换智能体", className: "text-primary", defaultOpen: true }
   if (kind === "session.work_state") return { label: "⚙ worker 状态", className: "text-muted-foreground", defaultOpen: false }
   if (kind === "session.paused") return { label: "⏸ 已暂停", className: "text-(--status-paused)", defaultOpen: true }
   if (kind === "session.resumed") return { label: "▶ 已恢复", className: "text-primary", defaultOpen: true }
@@ -119,6 +153,9 @@ export function eventStyle(kind: string, payload?: Record<string, unknown>): Eve
   if (kind === "orch.chat") return { label: "💬 编排对话", className: "text-primary", defaultOpen: false }
   if (kind === "goal.confirm") return { label: "🎯 阶段目标确认", className: "text-amber-400", defaultOpen: true }
   if (kind === "goal.clear") return { label: "🎯 阶段目标清空", className: "text-muted-foreground", defaultOpen: false }
+  // 分阶段工作流（pentest M4）：阶段流转留痕与过门开门事件（门开启摘要走 payload.summary 通用分支）
+  if (kind === "phase.changed") return { label: "🔄 阶段流转", className: "text-primary", defaultOpen: true }
+  if (kind === "phase.gate_open") return { label: "🚪 渗透门开启", className: "text-amber-400", defaultOpen: true }
   if (kind === "orch.tick.started")
     return { label: "⚙ 编排启动", className: "text-primary", defaultOpen: false }
   if (kind === "mission.derive")
@@ -182,8 +219,158 @@ const TOOL_ARG_KEY: Record<string, string> = {
   propose_pack_edit: "target", task_step: "step_id",
 }
 
+// severity 徽章共用（live-stream-ux C2，2026-09-23）：色值从 Blackboard.tsx 提升，
+// 发现页签与事件流同源；中文标签事件流专用
+export const SEVERITY_COLOR: Record<string, string> = {
+  critical: "text-(--status-error)",
+  high: "text-(--status-error)",
+  medium: "text-(--status-approval)",
+  low: "text-muted-foreground",
+  info: "text-muted-foreground",
+}
+const SEVERITY_LABEL: Record<string, string> = {
+  critical: "严重", high: "高危", medium: "中危", low: "低危", info: "信息",
+}
+
+// 摘要长度分级（A2）：默认 60，长文案字段（note/result_note/summary）200——
+// 与后端 _truncate_args 上限对齐，展开体可看全
+const LEN_SHORT = 60
+const LEN_LONG = 200
+const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n) + "…" : s)
+
+// 摘要上下文（A3 资产反查）：LiveRoom 自建 assets 映射经 EventRow 传入；
+// 反查不到显 id 尾 6 位，不阻塞渲染
+export interface SummaryCtx {
+  assetName?: (id: string) => string | undefined
+}
+const assetLabel = (id: unknown, ctx?: SummaryCtx): string => {
+  if (typeof id !== "string" || !id) return ""
+  return ctx?.assetName?.(id) ?? `…${id.slice(-6)}`
+}
+
+// per-tool 语义摘要（A1，live-stream-ux 2026-09-23）：登记高频工具；未登记的
+// 走 TOOL_ARG_KEY 单字段兜底（现状不变）。入参 a=截断后的 args
+const TOOL_SUMMARIZERS: Record<string, (a: Record<string, unknown>, ctx?: SummaryCtx) => ReactNode> = {
+  bb_asset_status: (a, ctx) => {
+    const label = assetLabel(a.asset_id, ctx) || String(a.asset_id ?? "")
+    const note = typeof a.note === "string" && a.note ? `（${clip(a.note, LEN_SHORT)}）` : ""
+    return `资产状态 · ${label} → ${String(a.status ?? "?")}${note}`
+  },
+  bb_query: (a, ctx) => {
+    const filters: string[] = []
+    const target = assetLabel(a.target_asset_id, ctx)
+    if (target) filters.push(`目标 ${target}`)
+    for (const k of ["type", "status", "risk_tag", "what"] as const) {
+      if (typeof a[k] === "string" && a[k]) filters.push(`${k === "what" ? "" : `${k} `}${a[k]}`)
+    }
+    return `查 ${filters.length ? `（${filters.join(" · ")}）` : "（无过滤）"}`
+  },
+  bb_add_asset: (a) =>
+    `${String(a.value ?? "")}（${String(a.type ?? "auto")}）`,
+  complete_task: (a) => clip(String(a.result_note ?? ""), LEN_LONG),
+  fail_task: (a) => {
+    const why = a.blocked_reason === "awaiting_human" ? "（待人类处理）" : ""
+    return `${clip(String(a.result_note ?? ""), LEN_LONG)}${why}`
+  },
+  finish: (a) => clip(String(a.summary ?? ""), LEN_LONG),
+  bb_add_finding: (a) => {
+    const sev = String(a.severity ?? "")
+    const badge = sev ? (
+      <span className={SEVERITY_COLOR[sev] ?? ""}>[{SEVERITY_LABEL[sev] ?? sev}]</span>
+    ) : null
+    return (
+      <>
+        {badge}
+        {typeof a.title === "string" && a.title ? ` ${clip(a.title, LEN_SHORT)}` : ""}
+        {typeof a.vuln_class === "string" && a.vuln_class ? `（${a.vuln_class}）` : ""}
+      </>
+    )
+  },
+}
+
+// B3（live-stream-ux）：task.done/task.failed 事件行专属摘要——「动作」与「结果」
+// 分行一眼可辨；blocked_reason=awaiting_human 标注「待人类处理」
+function taskDoneSummary(payload: Record<string, unknown>): ReactNode {
+  const note = typeof payload.note === "string" ? payload.note : ""
+  return clip(note, LEN_LONG) || undefined
+}
+function taskFailedSummary(payload: Record<string, unknown>): ReactNode {
+  const note = typeof payload.note === "string" ? clip(payload.note, LEN_LONG) : ""
+  const why = payload.blocked_reason === "awaiting_human" ? "（待人类处理）" : ""
+  return (note || why) ? `${note}${why}` : undefined
+}
+
 export function eventSummary(payload: Record<string, unknown>,
-                              roleNames?: Record<string, string>): ReactNode {
+                              roleNames?: Record<string, string>,
+                              ctx?: SummaryCtx,
+                              kind?: string): ReactNode {
+  // B3（live-stream-ux）：task.done/task.failed 专属摘要——与收尾 tool.call 行
+  // 图标呼应，一眼分清「动作」与「结果」；note 空（纯 awaiting_human）也有标注
+  if (kind === "task.done") {
+    const s = taskDoneSummary(payload)
+    if (s !== undefined) return s
+  }
+  if (kind === "task.failed") {
+    const s = taskFailedSummary(payload)
+    if (s !== undefined) return s
+  }
+  // 资产批量导入（cyberspace-mapping M1）：N 行 → 新建/合并/跳过/失败 单行摘要
+  if (kind === "asset.imported") {
+    const skipped = typeof payload.skipped === "number" && payload.skipped > 0
+      ? ` · ${payload.skipped} 跳过` : ""
+    const failed = typeof payload.failed_count === "number" && payload.failed_count > 0
+      ? ` · ${payload.failed_count} 失败` : ""
+    return (
+      <span className="font-mono text-xs">
+        {String(payload.source ?? "unknown")} 导入 {String(payload.total ?? 0)} 行 ·{" "}
+        {String(payload.created ?? 0)} 新建 / {String(payload.merged ?? 0)} 合并{skipped}{failed}
+      </span>
+    )
+  }
+  // 独立验证 M1（independent-verification-audit）：验证器判定回执摘要
+  // 会话中心化（2026-09-25）：委派卡摘要 + 换人摘要
+  if (kind === "delegation.posted") {
+    const role = typeof payload.role === "string" && payload.role ? `/${payload.role}` : ""
+    return (
+      <span className="font-mono text-xs">
+        🧭 {String(payload.objective ?? "")}（{String(payload.task_type ?? "generic")}
+        {role}，{payload.new_window ? "新窗" : "复用窗"}）
+      </span>
+    )
+  }
+  const PERSONA_REASON: Record<string, string> = {
+    "manual-switch": "人工换人", "role-change": "委托改角色",
+  }
+  if (kind === "session.persona_switched") {
+    const why = typeof payload.reason === "string"
+      ? ` · ${PERSONA_REASON[payload.reason] ?? payload.reason}` : ""
+    return (
+      <span className="font-mono text-xs">
+        {String(payload.from ?? "?")} → {String(payload.to ?? "?")}{why}
+      </span>
+    )
+  }
+  if (kind === "verify.result") {
+    return (
+      <span className="font-mono text-xs">
+        [{String(payload.strategy ?? "?")}] 条目#{String(payload.item_id ?? "?")}{" "}
+        {payload.passed ? "✅ 通过" : "❌ 未过"}
+        {typeof payload.evidence_head === "string" ? ` · ${payload.evidence_head}` : ""}
+      </span>
+    )
+  }
+  // D9 活跃探索延长（2026-09-24）：摘要呈现第几次延长 + 命中信号
+  if (kind === "agent.stuck_extend") {
+    const sig = (payload.signals ?? {}) as Record<string, unknown>
+    const parts = [`第 ${String(payload.extension ?? "?")} 次`]
+    if (Array.isArray(sig.new_files) && sig.new_files.length)
+      parts.push(`新文件 ×${sig.new_files.length}`)
+    if (typeof sig.unique_commands === "number")
+      parts.push(`命令 ${String(sig.command_count)}（${sig.unique_commands} 种）`)
+    return <span className="font-mono text-xs">{parts.join(" · ")}</span>
+  }
+  if (kind === "file.read")
+    return <span className="font-mono text-xs">{String(payload.path ?? "")}</span>
   // roleNames：role id → 中文显示名映射（LiveRoom 由 GET /api/projects/{pid}/roles 建）；
   // 缺省兜底显 role id。
   // 批 6 L0 提案：{op, args}，按动作给一行人话摘要（行内「采纳」按钮在 LiveRoom 挂）
@@ -261,29 +448,47 @@ export function eventSummary(payload: Record<string, unknown>,
     )
   }
   // tool.call（2026-09-19「工具」tab）：Claude Code 式一行摘要——工具图标+关键参数+耗时，
-  // 失败/拒绝（ok=false）整段红色 ✗。未登记工具显名原样；关键参数取该工具最有定位价值的一个字段
+  // 失败/拒绝（ok=false）整段红色 ✗。per-tool 语义摘要（A1）优先，未登记工具走
+  // TOOL_ARG_KEY 单字段兜底（再退首字符串值）
   if (typeof payload.name === "string" && payload.args !== undefined
       && typeof payload.duration_s === "number") {
     const a = (payload.args ?? {}) as Record<string, unknown>
-    const key = TOOL_ARG_KEY[String(payload.name)] ?? ""
+    const tool = String(payload.name)
+    const dur = payload.duration_s >= 0.05 ? ` · ${payload.duration_s}s` : ""
+    const summarizer = TOOL_SUMMARIZERS[tool]
+    if (summarizer) {
+      const custom = summarizer(a, ctx)
+      if (payload.ok === false) {
+        return (
+          <span className="font-mono text-xs text-(--status-error)">
+            ✗ {TOOL_LABELS[tool] ?? tool} · {custom}
+          </span>
+        )
+      }
+      return (
+        <span className="font-mono text-xs">
+          {TOOL_LABELS[tool] ?? tool} · {custom}{dur}
+        </span>
+      )
+    }
+    const key = TOOL_ARG_KEY[tool] ?? ""
     let detail = typeof a[key] === "string" ? (a[key] as string) : ""
     if (!detail) {
       const first = Object.values(a).find((v) => typeof v === "string" && v)
       detail = typeof first === "string" ? first : ""
     }
-    detail = detail.length > 60 ? detail.slice(0, 60) + "…" : detail
-    const dur = payload.duration_s >= 0.05 ? ` · ${payload.duration_s}s` : ""
+    detail = clip(detail, LEN_SHORT)
     if (payload.ok === false) {
       return (
         <span className="font-mono text-xs text-(--status-error)">
-          ✗ {TOOL_LABELS[String(payload.name)] ?? String(payload.name)}
+          ✗ {TOOL_LABELS[tool] ?? tool}
           {detail ? ` · ${detail}` : ""}
         </span>
       )
     }
     return (
       <span className="font-mono text-xs">
-        {TOOL_LABELS[String(payload.name)] ?? String(payload.name)}
+        {TOOL_LABELS[tool] ?? tool}
         {detail ? ` · ${detail}` : ""}{dur}
       </span>
     )
@@ -348,6 +553,20 @@ export function eventSummary(payload: Record<string, unknown>,
       </span>
     )
   }
+  // 分阶段工作流（pentest M4）：phase.changed {from,to,by,auto,published,reason?}——
+  // auto=true 是过门自动流转，false 看生产方（human=人工 / approval=L1 审批）
+  if (typeof payload.to === "string" && typeof payload.from === "string"
+      && typeof payload.auto === "boolean") {
+    const published = Array.isArray(payload.published) ? payload.published.length : 0
+    return (
+      <span className="font-mono text-xs">
+        {String(payload.from)} → {String(payload.to)}
+        {" · "}{payload.auto ? "门达标自动流转" : `by ${String(payload.by ?? "?")}`}
+        {published > 0 ? ` · 首发 ${published} 剧本任务` : ""}
+        {typeof payload.reason === "string" && payload.reason ? ` · ${payload.reason}` : ""}
+      </span>
+    )
+  }
   // 对话化编排器（M2）：goal.confirm/clear 摘要 = 目标文本（payload={goal:{text,…}}）
   if (payload.goal && typeof (payload.goal as { text?: unknown }).text === "string")
     return (payload.goal as { text: string }).text
@@ -409,9 +628,27 @@ export function eventSummary(payload: Record<string, unknown>,
       </code>
     )
   }
-  if (typeof payload.node_type === "string" && typeof payload.node_id === "string")
-    return <code className="font-mono text-xs">{payload.node_type}:{String(payload.node_id).slice(0, 14)}</code>
+  // C2（live-stream-ux）：finding.new/merged 人话渲染——[高危] title（vuln_class）· 目标 x。
+  // finding.updated（payload={finding_id,changed,status} 无 vuln_class）不经此分支；
+  // C1 前的旧事件无 title 回退显 vuln_class，target 反查不到显 id 尾 6 位
+  if (typeof payload.finding_id === "string" && typeof payload.vuln_class === "string") {
+    const sev = String(payload.severity ?? "")
+    const label = assetLabel(payload.target_asset_id, ctx)
+    return (
+      <span className="font-mono text-xs">
+        <span className={SEVERITY_COLOR[sev] ?? ""}>[{SEVERITY_LABEL[sev] ?? (sev || "?")}]</span>
+        {" "}{typeof payload.title === "string" && payload.title ? clip(payload.title, LEN_SHORT) : payload.vuln_class}
+        {`（${payload.vuln_class}）`}
+        {label ? <> · 目标 {label}</> : null}
+      </span>
+    )
+  }
   const keys = Object.keys(payload)
   if (keys.length === 0) return null
+  // C3（live-stream-ux）：终兜底从「键名罗列」改「首个字符串值截 60」——任何事件行
+  // 至少给一条可读信息；纯结构化对象才显键名
+  const firstStr = Object.values(payload).find((v) => typeof v === "string" && v)
+  if (typeof firstStr === "string")
+    return <span className="font-mono text-xs">{clip(firstStr, LEN_SHORT)}</span>
   return <span className="font-mono text-xs text-muted-foreground">{keys.join(", ")}</span>
 }

@@ -14,12 +14,12 @@ AI 驱动的全能安全平台：能力包 × 场景轨正交架构覆盖 CTF �
 
 core API（127.0.0.1:8420，FastAPI）+ WebUI（生产=同源静态托管于 8420 的「/」，开发期走 Vite dev 5173）+ SQLite(WAL) 黑板单写入口 + LLM 三角色路由；多个 AI 会话与 WebUI/CLI 是平等的 API 消费者，协调由服务端保证。服务起停：`启动平台.bat`（有 dist 走静态同源，无产物回退 dev）或「启动平台（窗口）.bat」桌面窗口（`serve.py --window`，见下节）；`停止平台.bat` 优雅停机。
 
-## 部署形态（桌面壳 + 静态托管，desktop-app-shell M1+M2，2026-09-21 实施）
+## 部署形态（桌面壳 + 静态托管 + 打包，desktop-app-shell M1-M3 全量实施）
 
-三形态并存（窗口与打包解耦是主轴）：无窗浏览器（现状）/ 源码窗口（开发测试即用）/ exe 打包（M3 后置）。
-- **M1 窗口壳 `serve.py --window`**：pywebview(WebView2) 窗口 + 子线程 uvicorn，主线程 GUI 循环。**owner/attach 双语义**：启动探测 127.0.0.1:<port>——未在跑=owner（本进程拉服务，最后一窗 closed 事件 → 进程内直置 `server.should_exit` 优雅停机，shutdown 钩子落会话快照，不走 HTTP）；已在跑=attach 附窗（不建服务只开窗，关窗仅退本进程；二次双击「启动平台（窗口）.bat」= 再开一窗连已有服务，多窗并行）。**加载地址探测**：`--url` 显式 > `webui/dist` 存在 → 静态版 8420 > Vite dev 5173 可达（IPv6 ::1 探测）→ dev 版 > 都不满足 → 窗内指引占位页（内嵌 HTML）。`--debug` 右键开 DevTools；cwd 兜底 `os.chdir(项目根)`（frozen 分支为 M3 预留）；pythonw（无控制台）下 stdout/stderr 重定向 `serve-window.log`；WebView2 运行时注册表探测，缺失弹窗提示装一次 + 回退无窗模式（pywebview 未装同理）。
+三形态并存（窗口与打包解耦是主轴）：无窗浏览器（现状）/ 源码窗口（开发测试即用）/ exe 打包（M3，2026-09-23 实施）。
+- **M1 窗口壳 `serve.py --window`**：pywebview(WebView2) 窗口 + 子线程 uvicorn，主线程 GUI 循环。**owner/attach 双语义**：启动探测 127.0.0.1:<port>——未在跑=owner（本进程拉服务，最后一窗 closed 事件 → 进程内直置 `server.should_exit` 优雅停机，shutdown 钩子落会话快照，不走 HTTP）；已在跑=attach 附窗（不建服务只开窗，关窗仅退本进程；二次双击「启动平台（窗口）.bat」= 再开一窗连已有服务，多窗并行）。**加载地址探测**：`--url` 显式 > `webui/dist` 存在 → 静态版 8420 > Vite dev 5173 可达（IPv6 ::1 探测）→ dev 版 > 都不满足 → 窗内指引占位页（内嵌 HTML）。`--debug` 右键开 DevTools；cwd 兜底 `os.chdir(项目根)`；pythonw（无控制台）下 stdout/stderr 重定向 `logs/serve-window.log`（`_redirect_stdio_if_none`，frozen windowed exe 同样适配）；WebView2 运行时注册表探测，缺失弹窗提示装一次 + 回退无窗模式（pywebview 未装同理）。
 - **M2 静态托管（共同地基）**：`create_app(static_dir="webui/dist")` 挂 **SPA 同源静态托管**——兜底路由注册序最后（全部 API/WS/docs 先匹配不遮蔽）：真实文件直出（resolve 防穿越）、其余 GET 回 index.html（history fallback）；`/api`、`/docs`、`/openapi.json` 例外 404 不兜底（未知 API 调试不被坑）。前端本就走相对路径（`/api/*` + `location.host` 拼 WS），同源后**零改动**；Vite dev 代理仅开发期保留（vite.config.ts）。「启动平台（窗口）.bat」用 pythonw 起窗（无控制台黑窗）。
-- **M3 打包（后置另排）**：干净 venv 只装 requirements + PyInstaller onedir，资源随包（webui/dist、packs/、config/ 种子；workspaces/ 首启自建）；未签名 exe SmartScreen 首次「仍要运行」。
+- **M3 打包（2026-09-23 实施）**：`scripts/build_exe.py` 四步一键——①ensure_frontend（dist 缺失自动 npm install+build）；②ensure_venv 干净 `.build-venv` 只装 8 个 BUILD_DEPS（不打 Miniconda 全家；**fastapi/uvicorn 钉版** ==0.116.1/==0.35.0——fastapi 0.12x 移除 Starlette add_event_handler 会打出坏包）；③PyInstaller onedir+windowed（根目录 cyberstrike-pro.spec；hiddenimports 兜底 collect webview/clr_loader/pythonnet；excludes playwright/tkinter/pytest）；④copy_resources packs/、tools/、webui/dist 随包（排 .history/__pycache__/kb-backups）。产物 dist/cyberstrike-pro/ ~59MB，双击 exe 即弹窗（**frozen 强制 window 模式**，`_ROOT`=exe 目录 cwd 相对路径全部命中）。**config/、workspaces/ 不随包**：首启自建（providers 种子/intel 目录/项目库），**敏感凭据（providers key / fofa.json）绝不进包**。未签名 exe SmartScreen 首次「仍要运行」。
 
 ## 技术栈
 
@@ -27,7 +27,11 @@ Python 3.11+ / FastAPI、React + TypeScript + Vite SPA、SQLite (WAL)（可平�
 
 ## 目录结构
 
-`core/`（核心引擎：agent / blackboard / orchestrator / runtime / skills / llm / tools / api / intel）、`packs/`（capabilities 能力包 × tracks 场景轨）、`tools/`（反编译脚本区 + MCP 适配）、`webui/`（React SPA）、`workspaces/`（项目数据目录）、`config/`、`scripts/`、`docs/`。
+`core/`（核心引擎：agent / blackboard / orchestrator / runtime / skills / llm / tools / api / intel）、`packs/`（capabilities 能力包 × tracks 场景轨）、`tools/`（反编译脚本区 + MCP 适配）、`webui/`（React SPA）、`workspaces/`（项目数据目录，**顶层契约=只允许项目目录 + `.trash/` + CLAUDE.md**）、`data/`（全局运行时数据归口：campaign.db）、`logs/`（服务日志归口：serve-window.log + archive/ 历史散落日志）、`config/`、`scripts/`、`docs/`。
+
+## 顶层目录契约与卫生体检（workspace-hygiene，2026-09-23 实施）
+
+**目录归位（D1/D2）**：全局战役记忆库 `workspaces/campaign.db` → `data/campaign.db`（`_migrate_legacy_db` 默认构造惰性迁移：主库 rename 先行、失败降级留老位置下次启动重试〔shutdown 僵尸场景天然自愈〕，主库成功后 -wal/-shm 尽力而为绝不回退——老位置无主库时回退会 sqlite 新建空库丢数据；app 工厂传 workspace_root 同级 data/，测试传 tmp workspace 保持 hermetic）；serve 窗口模式日志 → `logs/serve-window.log`；workspaces 根四份历史散落日志一次性归档 `logs/archive/`。**遗物收编（D3/D4）**：项目根 `artifacts/` 早期调试遗物（曾被 git 误跟踪）mv 进 `workspaces/.trash/artifacts-legacy-<ts>/` + `git rm --cached` 解跟踪，re1_probe 空壳 ×5 同收；`.gitignore` 补 `data/`/`logs/`/`artifacts/`（防遗物再入库，恢复=从 .trash 手动移回）。**膨胀感知（D6）**：`GET /api/workspace-hygiene` 纯只读三段体检——workspaces 根陌生条目（无 project.json 目录/散文件，白名单 .trash/CLAUDE.md，迁移降级残留从这可见）/ 各项目 `.tmp/scratch/spill/browser-profile` 超阈（100MB warning、500MB error）/ .trash 规模；只报告不处置（处置入口=已有 scratch/clear 与手动移回）。**明确不做**：自动删除/自动老化任何产物、.trash 自动清空、存量项目内部布局治理（归 task-workspace 方案域）。
 
 ## 开发硬约束
 
@@ -41,7 +45,15 @@ Python 3.11+ / FastAPI、React + TypeScript + Vite SPA、SQLite (WAL)（可平�
 
 ## 单步流水线
 
-每步按序过：persona 热换装 → 步号预算提醒 → 卡死检测（8 步无进展召唤 planner 顾问）→ 可中断 LLM 调用（即点即停 + thinking/回复双流式 + 截断整轮重试 + 中断落盘）→ 记账审计 → 工具串行分发 → 每步落盘现场文件 → 控制点。步数耗尽走预算暂停（保持 claimed 等人工续跑），宁停不丢现场。
+每步按序过：persona 热换装 → 步号预算提醒 → 卡死检测（12 步无进展先机械预检活跃探索=静默延长≤2 次，否则召唤 planner 顾问，第 2 轮交顾问裁决，第 3 轮硬闸停轮，见下；阈值 2026-09-24 由 8 调为 12）→ 可中断 LLM 调用（即点即停 + thinking/回复双流式 + 截断整轮重试 + 中断落盘）→ 记账审计 → 工具串行分发 → 每步落盘现场文件 → 控制点。步数耗尽走预算暂停（保持 claimed 等人工续跑），宁停不丢现场。
+
+## 卡死升级与收尾收敛（stuck-convergence M1 + D7 + D9，2026-09-24 实施）
+
+**D9 活跃探索静默延长（同日定稿实施）**：观察窗到期且 **waves=0**（顾问未介入）时不立即叫顾问，先零 LLM 成本机械预检 `_active_exploration`：取窗 (lps,step] 内本会话 command/file.read 事件，命中任一信号即**静默延长**（last_progress_step=step、extensions+1、落 `agent.stuck_extend` 事件），不叫顾问、不注入。信号口径保守：①**新文件**——读到本会话此前未读过的路径；②**命令演进**——窗内命令 n≥2、去重 ≥2、最高重复 ≤n/2（半数以上同一条=打转；预检在步开始执行，窗内动作最多 stuck_after−1 个，下限取 2）。延长上限 2 次，用满后走原顾问链；夹一次真黑板进展，extensions 与 waves 一并清零。有界时间线：真打转 12→24→36 步链不变；活跃长任务 12/24 步不打断 → 36 步 suggest → 48 步 verdict → 60 步硬闸（planner ≤2 次、断路器不拆）。配套：command 事件补 step 字段（gateway.run 透传）、read_file 成功落 `file.read` 轻事件（只记路径/步号不存内容）；js-reverse 手册补「长程逆向留痕纪律」（先粗 task_plan、中间脚本即 artifact——artifact 按内容指纹去重自动算进展）。
+
+**D7 顾问裁决（D1 修订，同日定稿实施）**：D1 初版第 2 轮卡死是**机械终止**；当日修订为——第 2 轮卡死改调顾问**裁决模式**（`advisor.verdict`，与自由文本建议模式 `advisor.suggest` 分立）：输入=上次建议全文 + 之后实际命令（tail 窗）+「自第 N 步零黑板写入」硬事实 + kb 召回；结构化三选一 `terminate`/`continue`/`human`。terminate 走原停轮落点（带裁决理由）；continue 的新指令以**半强制**注入（要求本轮先回应如何执行/为何不适用，不锁工具面）、重开 12 步窗（waves=2）；human=顾问自认信息不足直接挂起。**硬闸后移不拆除**：continue 后再满窗（第 3 轮，累计 36 步无写入）→ 无条件机械终止（trigger=hard_backstop），planner 全程 ≤2 次调用；裁决解析/调用失败一律回落终止（宁严勿松，回落即机械停轮）。裁决事件带 decision/reason/wave，升级事件带 trigger（advisor_terminate/hard_backstop/mechanical）。
+
+**D1 卡死波次升级**：顾问干预重置观察窗时记 `_stuck_waves`（每任务复位，夹一次黑板进展即清零）；初版同任务第 2 轮卡死机械停轮（同日由上方 D7 取代——第 2 轮交顾问裁决、第 3 轮硬闸）。**D2 顾问视野**：`_advisor_prompt` 注入「最近重复命令」排行（本会话 command 事件、命令原文精确计数 ×≥2、降序 cap 10），收敛性判断交 LLM，**不自研相似度/归一化算法**。**D6 收尾确认轮**：reconcile 闸之后 complete 首次申报被拦截，注入 findings/assets/artifacts + plan 完成度清单问「对照目标还有遗漏吗」；一轮零新增黑板写入后再次 complete 才落 done（零新增机械计数、非模型自报），确认轮封顶 2、全程落 `agent.closing_confirm` 事件；**干尾巴启发式**——complete 时最近 `stuck_after−2`（=10）步零新增直接放行，常态任务零额外成本；阈值与 D1 的 12 步观察窗错位（干满 12 步先撞 D1，10–11 步申报走干尾巴），两判定无竞态。与验收条目正交：reconcile 管真伪、D6 管遗漏。**D10 顾问参数项目级配置（2026-09-24 定稿实施，方案 advisor-settings-ui）**：卡死/顾问四参数下放到 `project.config.advisor` 段（经现有 PATCH config 整段替换写入、双写，不新增端点），归一化在 `core/autonomy.py:normalize_advisor`（非法值→422）。schema：`stuck_after`（缺省 12，6-30）、`stuck_max_extensions`（D9 静默延长上限，缺省 2，0-4，0=关闭静默延长）、`closing_max_rounds`（D6 收尾确认轮，缺省 2，0-3，**0=首次 complete 申报即放行**——放行分支在 `_closing_gate` round==0 干尾巴判定之前，pathway=cap_zero）、`provider`/`model`（顾问模型项目级覆写，缺省=跟随全局 planner，model 须与 provider 同时出现）。**工厂构造期消费**：全部 6 个建窗点经 `_registered_session_factory` 内层 `factory()` 读取——**在跑会话不生效，下次新建会话窗生效**。planner 覆写必须在 factory() 内层：外层会污染 Orchestrator 自身的 plan_llm；覆写同时作用于顾问建议/顾问裁决/收尾复盘三个消费点，Orchestrator 编排器自身恒用外层 plan_llm。保存时不硬校验供应商存在；供应商事后被删/停用致 `ProviderStore.build` 失败 → 记 warning 静默回退全局 planner，绝不开窗失败。**明确不做**：顾问总开关（D8 撤回决定不变；waves≥2 机械硬闸不可关闭、不可调）、暴露硬闸阈值与 dry_tail（由 stuck_after−2 派生）。**明确不做**：任务中途零新增退出（中途退出权归 stuck/预算）、停轮自动重派、编排器方向粒度去重。M2（D3 跨窗方向指纹）待排期。**事件窗方向修复（2026-09-24，真实事故 task-97e1d5d6c597 复盘）**：`recent_events(limit=N)` since_id=0 取**最早** N 条——长会话（113 事件）升级时 recent_commands/重复排行/顾问 digest 全看到会话开头的 spill 调试，人工误判卡点；四处（`_command_repeat_stats`/`_recent_command_summary`/`_advisor_prompt`/sediment digest）与 bb_query 的 events 查询统一改 `tail=N`（升序返回，下游口径不变）。
 
 ## 注入语义（订阅声明表）
 
@@ -49,15 +61,15 @@ Python 3.11+ / FastAPI、React + TypeScript + Vite SPA、SQLite (WAL)（可平�
 
 ## 现场持久化与恢复
 
-四层：内存态 → 任务现场文件 task-<tid>.json（每步落盘）→ 会话暂停快照 → 任务键快照（跨会话认领即复活）。恢复按优先级（会话快照 → 任务键快照 → transcript 末 60 条接手 → 全新），装载前 sanitize 清悬空 tool_use 半对防 API 拒。
+四层：内存态 → 任务现场文件 task-<tid>.json（每步落盘）→ 会话暂停快照 → 任务键快照（跨会话认领即复活）。恢复按优先级（会话快照 → 任务键快照 → transcript 末 60 条接手 → 全新），装载前 sanitize 清悬空 tool_use 半对防 API 拒。**续跑原窗就近接手（resume-origin-window，2026-09-23 实施）**：resume 端点三级瀑布——原窗存活（非 closed）即原窗接手，两种 mode 皆然（snapshot=revive 快照+reopen+claim 断点复活，budget +200 兼容；transcript=reopen+清延续闸门+worker 首轮认领零搬运，任务现场文件归任务所有不随窗走）；仅原窗已关才新建 armed 任务窗。
 
 ## 收尾路径五分支
 
-finish / 异常穿出（停心跳→salvage 抢救→fail，幂等）/ awaiting_human（快照+fail(resumable)）/ 步数耗尽（预算暂停保持 claimed）/ 人工中断（当前步作废+快照保留）——全部收敛到幂等。
+finish / 异常穿出（停心跳→salvage 抢救→fail，幂等）/ awaiting_human（快照+fail(resumable)）/ 步数耗尽（预算暂停保持 claimed）/ 人工中断（当前步作废+快照保留）——全部收敛到幂等。**停轮保护双来源（orchestrator-efficiency M1+搭车项，2026-09-22）**：①**E2 拒绝熔断（2026-09-24 口径重构，plan-gate-breaker-refine）**——拒绝分两类、计数单位从「回执张数」改为「**模型步**」（并行批多张拒绝票只计 1，模型始终拿到下一轮改道机会）：**硬拒绝**（[越界拒绝]/[网关拒绝]/[拒绝]，tools.py `HARD_REJECT_PREFIXES`；[错误]/[冲突] 是业务失败不算）连续 ≥3 个模型步出现即撞闸循环，置 awaiting_human 停轮保护+落 `agent.reject_breaker`，任何不含硬拒绝的步（含纯文本步）清零；**教练类**（[计划闸]）不进硬熔断——同一任务累计 2 个模型步撞计划闸 → 注入强提示 + 工具面临时收缩到计划/控制原语（`agent.plan_nudge`），强提示后下一模型步末计划仍空 → 挂人（`agent.plan_gate_block`），计划落黑板即清状态。配套三项：`skill_open` 纳入计划前放行（读手册非动手）；新增非 shell 的工作区只读检索工具 **`search_files`**（正则/子串，替代计划前 run_cmd grep——修掉「bb_query 溢出落盘提示教模型 run_cmd、计划闸又禁 run_cmd」的自相矛盾）；run_cmd 被闸挡回时照落 tool.call 审计（payload `gated=true`，此前这类拒绝在事件流完全隐形）。拒绝死循环不再靠烧完 max_steps=200 兜底；②**LLM 传输层失败**——LLMError（429/5xx/重试 3 次耗尽）不 salvage（提炼也要调 LLM 必炸），现场快照双写会话键+任务键、fail(awaiting_human, resumable)，与人工续跑链路（C6/看板⚡续跑）无缝衔接；failed 恒可续跑语义不变。spill 落盘带 uuid 后缀（同工具同秒互覆修复，E1）。
 
 ## 会话窗对话化
 
-空闲窗打字=对话回复（Claude Code 式，chat_max_steps=24 不认领任务），有价值的阶段性结论随手 `bb_add_finding` 入黑板可追溯；agent_message 私信（三分类 subkind）+ task_receipt 子任务回执走异步收件箱，不做同步对话接力。绑 open/claimed 任务的待命窗绝不 kick（审批语义，宁严勿松）。
+空闲窗打字=对话回复（Claude Code 式，chat_max_steps=24 不认领任务），有价值的阶段性结论随手 `bb_add_finding` 入黑板可追溯；agent_message 私信（三分类 subkind）+ task_receipt 子任务回执走异步收件箱，不做同步对话接力。绑 open/claimed 任务的待命窗绝不 kick（审批语义，宁严勿松）。**回执三路径完整投递（E4，2026-09-22）**：父窗可投正常投（ref_id=`<task_id>:<status>` 状态后缀，fail→reopen→complete 的成功回执不再被未读去重吞掉）；自收落 `task.receipt_self` 事件替代静默；父未认领/父窗 closed 挂父任务 `context.pending_receipts`，父被认领时补投（零 schema 变更）。
 
 ## 技能命中审计
 
@@ -67,7 +79,7 @@ finish / 异常穿出（停心跳→salvage 抢救→fail，幂等）/ awaiting_
 
 ## 数据模型
 
-17 张表，SCHEMA_VERSION=20，每版迁移幂等（PRAGMA 检缺列 ALTER / IF NOT EXISTS，绝不破坏性改）。去重：findings/func_kb 用 UNIQUE 指纹、任务用 dedup_fp，重复写走合并而非新增；含 blueprints（v17 蓝图）与 http_history（v15 浏览器抓包）扩展表；v19 增 chains.origin（manual/trace）与 chain_links.trace_ref（轨迹物化幂等键）两列，存量行 DEFAULT 兜底；v20 增 findings.impact/remediation（收录格式三件套，v19→v20——方案原文写 v18→v19，v19 已被轨迹链占用故顺延）。
+18 张表，SCHEMA_VERSION=22，每版迁移幂等（PRAGMA 检缺列 ALTER / IF NOT EXISTS，绝不破坏性改）。去重：findings/func_kb 用 UNIQUE 指纹、任务用 dedup_fp，重复写走合并而非新增；含 blueprints（v17 蓝图）与 http_history（v15 浏览器抓包）扩展表；v19 增 chains.origin（manual/trace）与 chain_links.trace_ref（轨迹物化幂等键）两列，存量行 DEFAULT 兜底；v20 增 findings.impact/remediation（收录格式三件套，v19→v20——方案原文写 v18→v19，v19 已被轨迹链占用故顺延）；v21 增 orchestrator_state.derive_idle_rounds（阶段门派单空闲轮数）；v22 增 intents 表（渗透链路图意图规划产物，零 ALTER 建表，见「单站攻击链路图」）。
 
 ## 单一写入口
 
@@ -79,11 +91,19 @@ WAL + 线程局部连接 + `_tx()`（进程内写锁 + BEGIN IMMEDIATE）串行�
 
 ## 任务队列
 
-一窗一任务（v0.72，公共池退役）：claim_next SQL 三参数正交收窄（target_session 指派 / only_task 绑定 / assigned_only），归属锁死在 SQL 侧。租约双轨（任务 30min TTL 心跳续租 + 资源 X/S 锁）、wait_for 等待-唤醒与死锁环检测、发布闸（dedup_fp 去重 / 同 target 防碎 / acceptance 对账硬拦）。
+一窗一任务（v0.72，公共池退役）：claim_next SQL 三参数正交收窄（target_session 指派 / only_task 绑定 / assigned_only），归属锁死在 SQL 侧。租约双轨（任务 30min TTL 心跳续租 + 资源 X/S 锁）、wait_for 等待-唤醒与死锁环检测、发布闸（dedup_fp 去重 / 同 target 防碎 / acceptance 对账硬拦）。**v24 会话中心化口径（2026-09-25，见 §四「会话中心化」）**：tasks 表语义=窗内「委托」，窗存活即待命、可串行接多件委托，窗内队列读时派生；`meta.bound_task_id` 退役。
+
+## 独立验证器（independent-verification-audit M1，2026-09-23 实施）
+
+**收口判定独立化**：题目做对了没有，不是 Agent 自己说了算的。验收条目从纯字符串升级为 `str | {text, verify}`（向后兼容零迁移）——带 verify 规格的条目其 met/failed 由服务端验证器自动判定，**Agent 自报被存储层拒绝**（`set_reconcile_state` 红线，只能置 blocked 附不适用理由；人工可审计）。规格受约束 schema（未知键拒绝，仿阶段剧本精神）四策略（core/verify.py，地位仿 phases.py）：flag_capture（file: 工作区相对路径防穿越 / cmd 取输出，exact/contains/regex 三匹配）/ effect_proof（检查清单逐项）/ poc_crash（signal 退出码启发 / asan 特征）/ oracle（脚本输出 `{pass, detail}` JSON 兜底）。**执行面**：平台身份 trusted + host + 工作区隔离经执行网关全量策略校验（审计事件照落）；**收尾钩子**：complete 先跑未判定条目（failed 也重跑=「修正后重新 complete 重验」，blocked 跳过），未过 ValueError 拦下本次 done——零新闸复用对账硬拦；逐条 `verify.result` 事件（author=verifier）。**脱敏红线（照抄 VulnHouse VE）**：判定回执只含 passed + 结构化摘要（长度/sha256 前 12），输出原文/预期值/oracle detail 绝不回显——防 Agent 经验证接口反套答案；规格异常/网关拒绝一律 fail-closed 判未过。M2 Auditor / M3 交棒 / M4 重派注入见 docs/plans/independent-verification-audit.md。
 
 ## 业务语义层
 
-发现门禁（info 全类别拒收、verified 无复现证据拒〔repro_steps 新口径或旧 POC legacy 直通，has_repro_evidence add/patch 共用〕、rating_basis 随 severity 就高覆盖——「无证据不下结论」写进存储层）；合并=证据并集；撤回传播（四类目标+私信）；TOCTOU 防护（读-合并-写整体单事务 + 乐观锁 CAS）；资产状态回流（tested_clean 才算挖完）、high_value 标记。
+发现门禁（info 全类别拒收、verified 无复现证据拒〔repro_steps 新口径或旧 POC legacy 直通，has_repro_evidence add/patch 共用〕、rating_basis 随 severity 就高覆盖——「无证据不下结论」写进存储层）；合并=证据并集；撤回传播（四类目标+私信）；TOCTOU 防护（读-合并-写整体单事务 + 乐观锁 CAS）；资产状态回流（tested_clean 才算挖完）、high_value 标记。**疑似重复警告（orchestrator-efficiency M5 D1，2026-09-23）**：add_finding 返回值附 `dedup_warning`（cap 3 最新优先）——同 target_asset_id + 同 vuln_class（非空）但 dedup_key 不同的行=可能被指纹分裂的重复，只提示不阻塞（Agent 可坚持新增）；合并分支被并入的本体行不算、同目标无键行（dedup_key=自身 id）参与；无 target 或 vuln_class 空（逆向常态）不查；警告只进工具返回值（单次按需），不落事件无频控。
+
+## 黑板查询过滤（bb-query-filters，2026-09-24 实施）
+
+**取数从「全量拉回本地找」改为「按条件精确取」**：`bb_query` 接出底层早已实现、工具层没暴露的过滤——findings：`min_severity`（info/low/medium/high/critical，语义=不低于该级）、`verified_only`、`category`；tasks：`status`（open/claimed/done/failed/blocked/cancelled）；assets：`tag`（meta.tags 大小写不敏感）。events：`kinds`（多值 IN 过滤，store `recent_events` 新入参，与 session_id/tail/before_id 三分支正交）、`session_id`；输出增量带出 id/session_id/created_at（查事件即可知归属，不必反查落盘）。六面统一 `limit`（1-200；events 走 tail 默认 50、其余应用层裁剪默认全量——**默认行为全部不动**）。闭集入参（severity/两 status/type）非法值显式返 `[错误] 非法 X（允许: …）`，修掉「拼错参数静默返回 [] 被误判为没有」；limit 非法钳 1-200 不报错。M3 关键词 `q=`（LIKE/FTS5）后置观察：看实战是否仍频繁全量查询再立项。
 
 ## 漏洞收录格式（finding-report-format，2026-09-22 实施）
 
@@ -91,69 +111,130 @@ WAL + 线程局部连接 + `_tx()`（进程内写锁 + BEGIN IMMEDIATE）串行�
 
 ## 链路与全景图
 
-chains/chain_links 攻击链（假设→验证→利用）+ board_graph 黑板全景图（5 类节点 9 种边，全来自既有字段，只读聚合）；全景 chain 边只取 origin='manual'——任务轨迹自动链（origin='trace'）不进全景图（R6 防御过滤）。
+chains/chain_links 攻击链（假设→验证→利用）+ board_graph 黑板全景图（5 类节点 9 种边，全来自既有字段，只读聚合）；全景 chain 边只取 origin='manual'——任务轨迹自动链（origin='trace'）不进全景图（R6 防御过滤）。**会话协作图 session_graph**（编排器+会话窗 × delegate/derive/inbox/dm 边）见 §四「会话中心化」。**单站攻击过程图**（对某 IP/域名的全部探测归一化）见下文「单站攻击链路图」。
 
 ## 执行轨迹链路（execution-trace-chain，2026-09-22 实施）
 
 双轨制（traces.py）：**轨 A 轨迹视图（build_task_trace，查询时现算零写入）**——会话事件按 events.id 时间序以 `task.claimed → task.done/failed` 区间切分归属（区间外=游离段 idle）；区间内聚合四类节点：技能（每任务一节点，未命中记灰显反例）/ 知识库（同 module 归并+次数）/ 工具组（相邻间隔 ≤120s 并组，组不跨任务与窗口边界）/ 发现产出（区间内 finding.new，富化标题状态）。**轨 B 持久链（materialize_task_trace，双触发物化）**——任务收尾 done（`_finish` 钩子，try/except 不挡收尾）与发现 verified（patch_finding / add_finding 合并分支）两路径重物化；每任务一链（origin='trace'），node_type=task/step/finding，node_id=`{task_id}#{kind}:{value}` 机器可读；trace_ref=`task-<task_id>` 幂等键单事务 DELETE+重插，人工补挂链边（trace_ref=''）零感知保留；链状态只升不降（hypothesis<validated<exploited）。**沉淀（effect_stats）**：基于物化侧统计 (skill × kb 模块) 组合 × verified finding 计数（打法效果榜）。API 面：GET /trace/{task_id}（404=任务不存在）与 GET /trace-effect。前端（R5/R7）：任务详情内嵌执行轨迹段（TaskFlow 详情浮卡 + 任务看板认领过任务 🧭 徽章，不做项目级独立 tab）；全景图同页切换档「全景 | 主线」——主线=过滤子图三列（目标资产 → verified 发现 → exploited 链，unverified/FP 不上主线）+ 底部效果榜 top5。
 
+## 单站攻击链路图（website-attack-path-graph v3，2026-09-24 实施）
+
+发现页「链路」子视图由旧 findings DAG 画布（FindingsCanvas 两套渲染图退役）替换为**单站攻击链路图 v3**。用户定稿语义：「思考，规划，执行——**意图就是规划产物，每个意图必须收尾：要么发现，要么漏洞，要么死路**」。
+
+**主脊（D8）**：``目标 → 意图（规划产物·可证伪假设）→ 收尾：漏洞 | 有效发现 | 死路``；产出可回流出新意图/新目标。目标=选定的 host/domain 资产根（未选显 TargetGuide 引导，只按 IP/域名搜索）。意图=一句可证伪假设，独立轻表 `intents`（**schema v22**，零 ALTER 建表；不复用 tasks/chains），字段 statement/target_asset_id/basis_refs/status/open|closed/outcome_type/outcome_refs/dead_reason/evidence_refs/revision。
+
+**四条硬规则（D10）**：①**意图必收尾**——Agent 五处快照带 open_intents 清单，`finish` 首次有未收尾意图拒绝并列清单（**第二次 finish 允许**，人工兜底），续跑注入收尾提醒；②**收尾必带证据（宁严勿松）**——vuln 收尾引用 finding 必须存在/同项目/非 FP/**category=vuln**，finding 收尾要求 category=intel；FP 发现拒收并指引走 dead_end；死路必须带非空 dead_reason（什么证据排除假设）+ ≥1 条 http/event/artifact 证据引用；证据不足保持 open；③**边仍是逻辑推导**——derive（target/finding → intent，basis_refs 是数据源，无主依据由 target 起边）、outcome（intent → finding）；服务端 Kahn 断言主脊无环（端点缺失同样 AssertionError）；时间先后只影响布局；④**死路是意图关闭态**——持久在意图上，default_hidden 默认隐藏，服务端预复合 bypass 穿通边（入边×出边，已有直连不重复造）；新证据/被引发现标 FP → reopen，**只重开自身不级联下游**，reopen 清收尾字段但保留 evidence_refs；AI 可自收尾，人类侧栏可驳回/重开。
+
+**执行层（读时归属，不改造写入链）**：http_history 按 M1 归一为测试点尝试组——method+路径模板（数字→{id}/UUID→{uuid}/≥8hex→{hash}）+ query 键排序去重、同点 30min 窗折叠、五档 found/hint/blocked/no_reaction/skipped、跨任务跨会话不切割。attempt.intent_id 查询时按意图存活窗 `[created_at, closed_at]`（open 尾端 +∞）归属；重叠窗归**最新声明**意图；无时间的 curl 缺口合成节点（request_count=0）按收尾发现反查 owner。执行层时间序相邻边单独出 `exec_edges`（同意图桶，含无主桶），前端点意图卡才展开为尝试条。站点边界=目标全后代子树；意图入图=target_asset_id 在子树或 basis_refs 命中子树。
+
+**API**：GET /api/projects/{pid}/attack-path?target=（返回 target/nodes/edges/attempts/exec_edges/counts；目标不存在 404）、GET …/intents?status=、POST …/intents/{iid}/reopen；Agent 工具 declare_intent（计划组）/close_intent/reopen_intent（控制组）；写全走 intents.py → `bb._tx()`，事件 intent.declared/closed/reopened。**保留不动**（只弃渲染图不弃功能）：漏洞/有效发现硬切换、catView 列表硬过滤、category 徽章；全景 BoardGraphCanvas 不变。M4 跨站泳道联动**后置**——等 vuln-chain-graph provides/requires 人工确认链边。
+
 ## 战役记忆
 
-campaign.db 独立全局库（仿 intel 先例，跨项目不绑项目），按 mission + 目标值召回历史打法注入编排态势。
+campaign.db 独立全局库（仿 intel 先例，跨项目不绑项目；**落 `data/campaign.db`——workspace-hygiene D1 2026-09-23 从 workspaces/ 根归位，老位置惰性迁移**），按 mission + 目标值召回历史打法注入编排态势。**条件写入（experience-sedimentation M1，2026-09-22；M6 F1 扩档 2026-09-23）**：campaign 收窄为「成功打法索引层」——任务收尾经 `AgentSession._sediment_verdict` 单一判定（campaign 写入与复盘触发共用一套口径）：done 且任务窗内有 verified finding（`traces._session_task_windows` (lo,hi] 区间 + author=session_id 双约束查 finding.new/finding.merged 事件）或 exploited 链（origin='trace' 且节点挂该任务）→ 写入，content=result_note 纯净收尾（原 findings 标题拼接退役）；**done 且 FP-only（本任务 finding 全 false-positive，无 verified/exploited）→ 死路记账档**：写入 `tags=["dead_end"]` 负知识（表结构零变更），content 优先 result_note、空则 `〔死路〕FP title` 兜底，不复盘——**status='false-positive' 本身就是死路的结构化口径**（撤回传播/死路徽章/coverage FP-only 全在消费，零新约定，M6 打磨推翻 category 结构化建议）；done 无产出但 result_note ≥500 字 → **高质量复盘档**：只跑 kb 复盘提案（reason 引用任务 id 过证据锚点闸），每会话上限 1 条（`_sediment_lite_used` 内存计数在产提案前占用，重启清零可接受）；failed+error 只走失败复盘提案不写 campaign（失败教训沉淀 kb「坑」段）；aborted（人工中断/关窗未收尾/worker 异常兜底三调用点）/ awaiting_human / 其余无产出 done 一律不写；判定异常按无产出处理（宁少勿滥）。**recall 马太修正（M2）**：usage 热度权重改 `decay × log1p(usage_count) × 1.5`（原 min(usage,10)×0.5 让老记录恒霸榜），新验证打法可凭近期命中上位；召回即对全部命中条目 bump usage。
 
 ## 会话与事件流
 
 events 表全量审计 + EventBus 同步落库、尽力广播；前端按游标增量消费。
 
+## 资产批量导入与网络空间测绘（cyberspace-mapping M1+M2，2026-09-23 实施）
+
+黑板资产的批量入口，落库恒走 register_asset 单一入口（E6 语义全复用，零旁路）。**M1 文件导入**：`core/assetimport.py` 解析器（表头别名匹配 0.9 优先 / 无表头逐列内容投票 ≥0.8 / 首条文本列兜底 title 0.5；CSV utf-8-sig→gbk 回退恒可用、xlsx openpyxl import-guard 缺失端点 503）→ `import_assets`（assets.py）：quiet=True 静音逐行 asset.new、整批单条 `asset.imported` 汇总事件（带 `batch_id` 预留按批撤销）；行路由 url（主机部域名无既有行先补登）/ host（**FOFA host 常回「ip:port」**——剥端口后 IP 形态有端口→service 无→host；域名→domain 且行带端点时域名+端点双锚点）/ ip+port→service / 仅 ip→host；domain 行先行排序提高 url 挂载率；**DNS 线程池预热**（16 workers 填充批次内缓存 `_DNS_WARM`，finally 即清——不做进程级负缓存，防 DNS 恢复后域名永远挂不上）。**M2 FOFA 中转查询**：`core/fofa.py` 纯客户端（qbase64 + fields 白名单 `ip,port,protocol,host,domain,title,product`〔不含 header/banner/cert 保 1 万档〕+ size clamp 1000 + 页×条≤1 万 clamp）；错误四态签名分类——「已用完」QuotaExhausted **熔断绝换端点不重试**（防封号）/「账号无效」ConfigError /「key 不存在」AuthError /「[官方错误信息]」OfficialRetryable 换备用重试；网络错误/HTTP 非 200/非 JSON 也切备用（主 fofoapi.com 备 107.173.248.139）。端点面：GET/PUT /api/fofa/config（key 脱敏前4后4，PUT 空串=不修改防回显误覆盖）、POST /api/fofa/test（info_my 免费）、POST …/fofa/search（结果逐行 existing 三锚点 domain/service/host 标注，熔断 429/配置 400/其余 502）、POST …/assets/import/preview（multipart，不落库）、POST …/assets/import（mapping 二维数组或 dict 行两形态，≤5000 行，source 白名单 xlsx/csv/fofa/manual）。**key 安全**：只存 config/fofa.json（.gitignore），不入库不入日志；**信任边界**：查询语句与 key 明文流经第三方中转——敏感项目慎用（页面常驻注记）。**轨适用**：黑板「测绘」页签 CTF 轨不挂载（2026-09-23 用户反馈：CTF 无资产收集场景；track!=="ctf" 才进 tabs，与 funcs 按能力条件挂载同模式；M4c board_view 指向 mapping 时按既有回退机制落 findings）。
+
+## 资产树归并、CDN 判定与根状态读时派生（asset-tree-derived-clean M1+M2，2026-09-24 实施）
+
+**树形态**：host(IP) 为根 → domain 子节点 → url/service 再挂。register_asset 为唯一登记入口：domain 自动 DNS 解析挂 host，url/service 的 IP 主机部挂 host，域名主机部只精确挂既有 domain（不猜 DNS、不造行）；同 IP 首域名记 `host.meta.primary_domain`、其余 `meta.alias`。**CDN 判定**（core/blackboard/cdn.py）：共享 CDN IP 上的域名彼此无关——解析命中 CDN 的 domain **保持根行、不建 host、不挂树**；优先级 `meta.cdn` 人工覆盖（True/False）> CNAME 后缀 > IP CIDR；清单= `packs/data/cdn_ranges.json` 随包基线 + `config/cdn.json` 同结构增补，坏文件 ValueError fail-fast；**拿不准默认非 CDN**（不并只是保守，误并才会错绑结论）。DNS 漂移（重报解析到新 IP/CDN）经 `set_asset_parent` 改挂/摘挂并发 `asset.reparent` 事件。
+
+**根状态读时派生（effective_status，core/coverage.py `effective_status_map`）**：有子资产节点的 tested_clean 不由 AI/人工显式设置——叶子 effective=显式状态（basis=explicit）；父节点 effective 由全部子节点终态读时派生：孩子全 settled → tested_clean/basis=derived，任一非终态 → open（宁严；na/dead_end/finding 挂链同为收口味）；**新增子资产立即破除 derived clean**，无需事件联动；has_findings 沿子树向上传播。写入门：有子资产节点显式写 tested_clean 一律 ValueError（na 不挡——人工裁定）。前端黑板资产筛选器**只列 host/domain（IP/域名）按值搜索**（2026-09-24 用户定稿，推翻同日早先「四类放开」口径——过滤只按 IP 和域名），选中后沿子树展开过滤，url/service 叶子 finding 不漏。存量处理：`scripts/rebuild_asset_trees.py`——DoH（默认 223.5.5.5，避开 Clash fake-ip 198.18/15 与系统代理）重解析挂树，CDN 根行无操作、有子根行 tested_clean→reset-open；默认 dry-run，`--apply` 落库，全经 Blackboard 方法。
+
+## tested_clean 意图死路背书（tested-clean-intent-backing，2026-09-25 实施）
+
+**「这个资产没洞」是被证据证伪的假设，不是访问观感。** 触发：中原工学院项目两个会话把 109 个叶子以「80/443 各 1 GET 见登录页」「同模板 200 随批次收口」粗略标 clean，盘上零意图零证据。写入门禁：叶子资产标 tested_clean（在「note 非空」「无子节点」两检查之后）服务端强制存在同项目 `status=closed AND outcome_type=dead_end` 且覆盖该资产的意图——**直接背书**：意图 target_asset_id == 资产；**批次背书**：资产位于意图 target 的资产子树内（沿 parent_id 祖先链校验，站群/宿主一条死路意图覆盖子树，不要求一 vhost 一意图）。死路收尾在 close_intent 已强制 dead_reason 非空 + ≥1 真实证据引用（http/event/artifact），证据语义由意图层继承不重复造。无背书 → ValueError 指引「先 declare_intent 声明可证伪假设，close_intent(dead_end) 带证据收尾后再标；批量面对父节点立一条意图覆盖子树」（工具层 `[拒绝]`、API 422）。查询助手 `intents.dead_end_backing_target(conn, pid, aid)` 纯读收 conn（store 已在事务内）。na（人工裁定）/budget_stop（被迫停手）口径不动；父节点 tested_clean 读时派生不动；同状态 no-op 在背书检查之前返回=存量行兼容。存量处理：`scripts/reset_cursory_clean.py`——按会话（默认上述两会话）回退当前仍为 tested_clean 的资产至收口事件 old 值（open/visited），默认 dry-run，`--apply` 落库（已执行：109 个全部回退，其余会话的 136 个未授权不动）。
+
+## 指定资产删除（2026-09-25 补 UI 入口）
+
+走查垃圾/误登记资产的人工清理通道，**物理删除不进回收站、不级联**。后端早已就位：`Blackboard.delete_asset(aid, author)`（store，2026-09-15）——门控：仍被 finding.target_asset_id 引用，或存在子资产 → ValueError（API 409，文案指名先处理发现/子资产）；不存在 → LookupError（404）；删后落 `asset.deleted` 审计事件（含 value/parent_id 快照）。API：`DELETE /api/projects/{pid}/assets/{aid}`（404 资产不属于本项目 / 409 门控）。**误报走 PATCH false-positive 不走删**（发现口径不变）。前端 [Blackboard.tsx](webui/src/views/Blackboard.tsx) 资产行内 🗑 按钮（平铺 AssetRow / 树 renderNode / 标签筛选三路径，`api.deleteAsset`）：点击先 confirm 确认窗，409 文案落底部错误行；compact 侧栏不挂删除入口。
+
 # 四、任务与编排系统（core/orchestrator + 调度）
+
+## 会话中心化（任务即委托，2026-09-25 定稿）
+
+取消「任务池/接任务」心智：**一个窗口就是一个智能体会话**（Claude Code 式对话框），可中途切换智能体，全员公用黑板；编排器不再「发布任务等人抢」，而是像人类与 AI 交互一样**开窗/复用窗 + 委派委托**（人类同样可在看板开窗、发消息、跑队列）。方案 docs/plans/session-centric-orchestration.md。
+
+- **tasks 表零新列、语义=委托**：委托经 `target_session` 归属唯一窗；窗存活即待命，可串行接收多件委托，窗内队列读时派生（`target_session=? AND status='open' ORDER BY priority,created_at`）；租约 30min 过期回收仍落同窗；无公共池、无认领竞争（v18 指派门控沿用）。
+- **中途换智能体两条通道（严格分语义）**：①`apply_role_change(task)`——委托建议角色热换装，委托结束 `_restore_base_persona` 回窗底色；②`switch_session_role(role)`（`POST /api/sessions/{sid}/role`）——重定义「这个窗是谁」，底色身份跨委托持续。两者都**完整保留对话历史与黑板**（接手，不是关窗重开）；人设脏标记 `_persona_dirty` 在步边界重建 system prompt。
+- **会话协作图 `session_graph`**（`GET /api/projects/{pid}/session-graph`）：节点=编排器+会话窗（带当前委托/队列数）；边四类——`delegate`（orch→窗的直属委派）/`derive`（窗→窗：父委托挂在另一存活窗）/`inbox`（同依据/更新在 ≥2 个窗聚类，无向）/`dm`（agent_message 私信，有向）。
+- **schema v24：纯语义迁移、零物理改动与数据搬迁**；`meta.bound_task_id` 双向绑定退役（新窗不写，存量残留按「上一件」历史字段忽略）；`spawn_task_id` 保留服务 resume 复盘窗幂等。**聊天安全口径**：人类消息踢 worker 时，未武装窗仅当窗内无 open/claimed 委托（`session_has_live_work`）才踢——一条聊天永远不能替未批准的委托起跑。
+- **事件**：`delegation.posted`（编排器/API 委派落账）、`session.persona_switched`（两种换装共用，payload.reason 区分）。**旧壳冻结**（不删代码）：旧壳只保证不崩 + 顶部冻结条引导新壳；会话看板/协作流/中途换人只进新壳。
 
 ## 主代理 tick
 
-态势收集 → LLM 工具循环（publish_task / spawn_session / write_digest / done）→ 结构化落盘；tick 租约单飞（TTL 900s + 每 LLM 步心跳续租）是编排层唯一硬互斥。
+态势收集 → LLM 工具循环（publish_task / spawn_session / write_digest / done / **只读查询四工具** / **生命周期两工具**）→ 结构化落盘；tick 租约单飞（TTL 900s + 每 LLM 步心跳续租）是编排层唯一硬互斥。**只读工具面（M2，2026-09-22）**：`task_detail`（任务全量核对，result_note 全文）/ `bb_overview`（资产覆盖/发现分级统计/事件尾部分区总览）/ `budget_status`（预算余量数字，不做闸门判定）/ `session_list`（窗清单）——**零写权红线**，tick 与 chat_turn 共用；用于核对执行者结论与自主决策，不替代派单执行。态势截断配套放宽：事件行/近期任务 result_note 截断统一 [:300]（全文兜底走 task_detail，渐进披露）。**覆盖度对账并入态势（M3 B2，2026-09-22）**：`_assets_view` 出口新增 `assets.coverage` = `core/coverage.py` `coverage_report` 分组收敛摘要（groups_done/converged 比值 + 每组一行「domain:x 收敛 n/m · 未收口: …」）——「全景对账」类数数任务归零；对账异常置 None 不阻断态势注入。
 
-## 任务派生与判据
+### 覆盖度对账（M3 B1，2026-09-22）
 
-mission + 判据三层（mission 直配 > judgment_templates.json 用户模板 > 内置默认）驱动 auto_derive 自动派单；v14 防碎发布闸 dedup_fp。
+`core/coverage.py` 纯函数查询层（地位仿 phases.py，不 import core.orchestrator），**对账面 = host/domain/url/service 四类资产**（与 _assets_view targetable 同口径，binary 不入组）。口径（宁严勿松）：
+
+- **终态四味**：`status ∈ {tested_clean, na}` ∪ `meta.dead_end` ∪ 有 finding 挂链——**FP-only 发现=死路味**（这条路被否了）；`visited/scanning` 算半程；**budget_stop 算 open**（预算停 ≠ 测完）。判定顺序：状态机终态 > 死路标记 > 发现挂链。
+- **收敛传播**：叶子 converged=自身 terminal；父节点 converged=自身 terminal OR（自身至少 visited AND 全部子 converged）——**借子收敛必须有自身 visited 佐证**（host 还有 IP 直连面/服务面未摸；domain 同规则不豁免，DNS 面测完应标 tested_clean）。
+- **归组 group_key**：沿 parent_id 链走到根——根 domain → `domain:<value>`、根 host → `host:<value>`、孤儿自成组 `<type>:<value>`（与 target_keys_of 归一化键口径对齐）。
+- **输出**：`coverage_report(bb, pid)` → `{overall:{groups,groups_done,assets,converged}, by_group:[{group,total,terminal,converged,done,uncovered[]}]}（uncovered open 态优先排序）`。agent 侧 dead_end 标记路径随 M5/M6 的 F1 死路记账口径一起收口。
+- 同文件另有 `effective_status_map` / `attach_effective_status`：资产树节点的根状态读时派生（口径见 §三「资产树归并」定稿块），与分组收敛对账是两个消费面，勿混用。
+
+### 生命周期收编（M4 C1，2026-09-22）
+
+编排器补「方向性收编」两工具（自主档三分流照 spawn_session 先例：L0 提案 / L1 审批卡 risk=low / L2 直执）：
+
+- **cancel_task(task_id, reason 必填)**：`TaskQueue.cancel_task`——open/claimed → failed（**blocked_reason='cancelled' 新档**，与 aborted 同属不进复盘与战役记忆；区别于执行者自报 error），清 claimed_by/租约（防 worker 事后收尾覆写取消态）、attempts 履历照记、资源租约释放镜像 _finish；返回 `{claimed_by, target_session}`（取消前值）供调用方打断。**事件独立 kind `task.cancelled`（不复用 task.failed——后者是异常唤醒触发器，主动取消不该触发唤醒）**，payload.by 区分发起方（human 人工端点 / orchestrator 编排器 L2 / approval 审批处理器）。
+- **打断链路复用 request_abort，窗不关**：cancel ≠ 关窗——在跑窗走 _abort_current_task（fail 撞 ClaimError 被吞=既有容错先例），窗保持 open 待命可接新任务；API 人工口 `POST /api/tasks/{id}/cancel`（已终态 409）镜像 /abort 原语，前端 LiveRoom 行内采纳 cancel_task/requeue_task 提案映射该端点与 reopenTask。
+- **requeue_task(task_id)**：复用 reopen 原语（awaiting_human 本就是 failed+blocked_reason 档，failed→open 零新代码），原绑定窗优先续跑；审批处理器带终态跳过语义（任务在审批等待期已被人工处理 → 视为已处理不报错）。
+- **C3 timeout 提示**：run_cmd 有 timeout 参数（默认 120s）——提示单点落 publish_task 工具描述与决策纪律（长任务显式给 timeout+拆步），不铺 expert yaml 防内容漂移。
+
+## 任务派生与判据（goal 统一，2026-09-22）
+
+**goal=唯一目标判据层**：meta.phase_goal（阶段目标，人类确认）判据居四层之首（goal > mission 存量 > judgment_templates.json 用户模板 > 内置默认，resolve_criteria）驱动 auto_derive 自动派单；v14 防碎发布闸 dedup_fp。原「作战计划/红队行动」弹层退役——mission {text, criteria} 写入口关闭（存量读兼容，判据解析居 goal 之下），目标编辑唯一入口=对话窗「🎯 设定阶段目标」（GoalEditor，含「应用模板」下拉；存删模板 API 端点保留）；auto_derive 开关与派生状态灯迁自主档弹层（🧠）。**行动边界段与目标解耦**（_mission_section 只管轨级行为语义）：redteam ROE 四要素注入（缺省按 pentest 上限兜底提醒；前端「🛡 行动边界」弹层编辑留档，仅 redteam）；pentest 恒注入「验证上限=影响证明级；禁驻留/持久化/横向/提权推进」。campaign 召回 query 换 goal.text 优先（mission 存量回退）。
 
 ## 进程调度两段式
 
-绑定段（全挡位无条件建待命窗，零 LLM 成本）+ 启动段（L1/L2 起跑，逐个重算防超卖）；六路触发点 + 60s sweep 兜底，纯事件驱动无长驻调度线程。
+绑定段（**L1/L2 与暂停**无条件建待命窗，零 LLM 成本；**L0 跳过**——2026-09-23 用户拍板：L0=编排动作全降级提案，后台 sweep/关窗退池自动冒窗违背「人类拍板才开窗」心智，窗只经人工发布/审批批准/提案采纳三口直调绑窗出现）+ 启动段（L1/L2 起跑，逐个重算防超卖）；六路触发点 + 60s sweep 兜底，纯事件驱动无长驻调度线程。
 
 ## 自主档与审批收件箱
 
-L0 提案模式（propose_only）/ L1 建窗待命 + 执行审批单（批准=启动既有窗，窗关则退绑重绑）/ L2 自动武装起跑；预算闸门 gate(action)；paused 项目级一次性闸，配置实时重读无缓存。
+L0 提案模式（propose_only）/ L1 建窗待命 + 执行审批单（批准=启动既有窗，窗关则退绑重绑）/ L2 自动武装起跑；预算闸门 gate(action)；paused 项目级一次性闸，配置实时重读无缓存。**op 处理器白名单字典分派**（批准后动作只准分派绝不 eval）：spawn_session / escalation / phase_transition / cancel_task / requeue_task / **authorization（M5 D2，2026-09-23）**。**authorization 审批（行为边界授权申请）**：Agent 工具 `request_authorization(kind, scope_request, justification, evidence_finding_ids?)` 三 kind（scope_expand 扩大授权目标 / impact_escalate 影响证明升级 / rating_override 突破收录口径），risk 恒 high、恒人类决策（L2 无自动批路径）；批准=**纯回流**——处理器不做任何平台动作（scope_expand 后 Agent 自行 bb_add_asset 登记、rating_override 后按更高口径重新登记/patch），authorization_result 收件箱回流+message.inbox 事件；这是「打不上去」的显式出口（替代默默死路记账）。**rejected 回流**：escalation/authorization 被拒统一落 `approval_rejected` 收件箱（此前 rejected 无回流=Agent 空等真缺口），其余 op 拒绝维持只翻状态。**行动边界随审批卡出口**：`mission_boundary_lines(track, config)` 模块级共享（编排器 _mission_section 与 API approvals 出口同源），审批单每条附 server 拼好的 `boundary` 全文，前端审批卡对照当前边界审申请。
 
 ## C2 指挥指令
 
 人类指令经 `_pending_directives` 以「⚠ 人类指令（最高优先）」注入编排器态势，轮末落 directive.done 留痕。**2026-09-21 对话化编排器上线后人机入口由对话窗替代**：`POST /orchestrator/directive` API 标 deprecated 兼容保留，tick 内指令消费机制不变（对话轮不消费指令）。
 
-## 对话化编排器（M1-M3，2026-09-21）
+## 对话化编排器（M1-M4 全量，2026-09-22）
 
 编排器专家化=给脸不重构：派单主循环（tick + 门控/配额/优先级）原样保留，对话是插队轮。
 
 - **M1 对话通道**：`POST /orchestrator/chat` 同步抢 tick 租约（busy 409 不排队，前端不禁用输入只提示）→ 人类消息落 events `orch.chat {role:"human",text[:2000]}`（author=human）→ Job `orchestrator-chat` → `chat_turn()` LLM 工具循环（ORCH_TOOLS 与 tick 全闸门同源：dedup/gate/L0 提案/L1 审批；发布/开窗动作留 tool_trace）→ 回复落 `orch.chat {role:"orch",text[:2000],tool_trace}`。**无 tool_calls 即 break**（纯文本=回答完毕，与 tick 催促调工具的退出语义不同）；步数上限 `CHAT_MAX_STEPS=8`；每 LLM 步 heartbeat 续租；记账 source="orchestrator-chat"。对话历史 = events orch.chat 最近 40 条单一来源（human→user / orch→assistant，开头连续 orch 跳过），零新表零文件。
 - **插队轮只读边界**：不推进 event_cursor（态势走 `_overview_for_chat` 固定最近 100 条事件窗）、不计 cycles、不动 last_digest_cycle、不消费 C2 指令（不标 directive.done）、不发饿死告警、不写 state_saver——巡检节奏状态零触碰。
-- **M2 goal 闭环**：`meta.phase_goal={text, criteria[]（人话验收口径，非机读）, phase?, source:"chat", created_at, confirmed_by}`；`GET/PUT /goal`（text 空=剥键=清空重议）；`goal.confirm`/`goal.clear` 事件留痕（payload 全文快照，变更历史可回放）；goal 段「当前阶段目标（人类确认）」注入 tick 与对话轮系统提示；meta_loader 实时读 project.json meta（确认即生效，无需重启）。
+- **M2 goal 闭环**：`meta.phase_goal={text, criteria[]（验收判据；goal 统一后为判据四层之首，自动派生朝它推进）, phase?, source:"chat", created_at, confirmed_by}`；`GET/PUT /goal`（text 空=剥键=清空重议）；`goal.confirm`/`goal.clear` 事件留痕（payload 全文快照，变更历史可回放）；goal 段「当前阶段目标（人类确认）」注入 tick 与对话轮系统提示；meta_loader 实时读 project.json meta（确认即生效，无需重启）。**goal 统一（2026-09-22）**：goal 升格唯一目标判据层（见「任务派生与判据」），判据来源经 resolve_criteria 四层解析供 L1 判跳闸与提示共用。
 - **M3 虚拟单例专家**：`GET /api/experts` 恒追加 `{id:"orchestrator", kind:"virtual", protected:true}`（不入 experts/\*.yaml 文件池、不认领任务不执行命令、删不掉；带 pid 时 name 读 meta）；`PUT /orchestrator/persona` 写 `meta.orchestrator_persona`（display_name 贯穿页签/气泡，不注入提示；persona 只注入对话轮系统提示「## 你的身份」段，tick 决策语气不受影响）；专家池消费点（组队/管理面板/建项多选）按 kind=virtual 过滤。
 - **前端编排页签三段式**：顶部 goal 条（引导设定 / 展示 text+criteria+phase，编辑/清空弹层）→ 中部对话流（OrchChatPane：human 右气泡 / orch 左气泡 MarkdownView + tool_trace 折叠，busy 显思考行，接近底部才自动跟随）→ 「运行记录」折叠区（原事件流剔除 orch.chat，防对话重复渲染）。composer 编排器态改双态「与编排对话（orch，缺省）/发任务」，**C2 指令态退役**；「决策」筛选含 goal.confirm/goal.clear。
-- **M4 异常订阅唤醒后置**（黑板异常时编排器主动开口）未实施，见方案文档。
+- **M4 异常订阅唤醒（2026-09-22 实施）**：黑板异常时编排器主动开口向人类简报——**触发白名单 4 kind**（`task.failed` 任务失败聚合 / `task.starvation` 新饿死告警〔含绑窗关闭待重绑，复用同 kind 不单设〕/ `budget.soft_warning` 预算 80% 软警 / `phase.gate_open` 阶段出口门满足），kind 独立冷却窗（600s / 3600s）防轰炸；**零新表**——上次唤醒锚点 = proactive `orch.chat` 事件（`triggers` 字段 kind 级 id 防重 + created_at 冷却双维度），无锚点只看 `WAKE_LOOKBACK=1800s` 回看窗；`Orchestrator.collect_wake_triggers`（模块级纯函数）+ `wake_brief_text`（合成「〔主动唤醒〕…请向人类简报现状」user 消息，**只进 LLM messages 不落历史**——简报语境随轮消散属定稿口径）+ `chat_turn(wake=)`（唯一差异 = 回复 payload 加 `proactive:true, triggers:[kind]`）；API 层 `_maybe_orch_wake`：`_post_tick` 挡位闸前插入（**paused 不打扰，L0/L1/L2 全唤醒**），`app.state.orch_wake_pending` 防同项目重复提交，Job `orchestrator-wake` 内抢 tick 租约（占用静默放弃=宁少勿扰）+ 构造失败放弃 + LLM 异常 `_emit_llm_error`；前端 orch 气泡 🔔 主动唤醒徽章（amber，triggers 中文映射）。测试直调口 `app.state.orch_wake_check`。
 
-## 分阶段工作流（pentest-phased-workflow M1+M2，2026-09-22）
+## 分阶段工作流（pentest-phased-workflow M1-M4 全量，2026-09-22）
 
 渗透测试项目三阶段推进：信息收集 recon ⇄ 渗透测试 pentest → 报告 report（可逆流转）。**重心+配额软引导，入场门是唯一硬约束**（方案 docs/plans/pentest-phased-workflow.md，实施修正注记见其 §0）。当前仅 pentest 轨配剧本。
 
 - **阶段剧本**：`packs/tracks/<track>/phases/<phase>.yaml`（文件名 stem=阶段 id，`name` 中文显示；项目 `config.phases` 同名条目整体覆写、坏条目加载侧跳过不走 doctor）。字段 `name/goal/order/focus`（重心配额）`/gate`（min_assets / min_high_value / min_verified / idle_rounds）`/gate_types/tasks`（task_type/role/objective/acceptance）`/next`。解析为受约束 yaml 子集（零 PyYAML，0/2 空格缩进 + tasks 项 4 空格续键）；doctor 体检 7 码（phase-bad-yaml / phase-tasktype-unregistered / phase-expert-missing / phase-next-missing / phase-field-missing / phase-gate-unknown-key / phase-gatetype-unregistered）。
-- **引擎 `core/phases.py`**：load_track_phases / gate_metrics / evaluate_gate / enter_phase 等原语；不 import core.orchestrator（其反向依赖本模块），空闲轮数由调用方读 `orchestrator_state.derive_idle_rounds`（schema v21）传入。阶段状态存项目 meta（project.json 单一真相源）：`current_phase / phase_history / playbook_fired / gate_open_notified`。
-- **重心配额注入**：当前阶段 focus 按 task_type 权重拼「## 阶段工作流」段（阶段目标 / 配额建议 / 门进度）注入编排器态势（`_phase_section`），纯软引导——任何阶段可发任何任务类型。
+- **引擎 `core/phases.py`**：load_track_phases / gate_metrics / evaluate_gate / enter_phase 等原语；**门评估状态原语 read/save_gate_state（M3 B3）**；不 import core.orchestrator（其反向依赖本模块），空闲轮数由调用方读 `orchestrator_state.derive_idle_rounds`（schema v21）传入。阶段状态存项目 meta（project.json 单一真相源）：`current_phase / phase_history / playbook_fired / gate_open_notified / phase_gate_state`（M3 门评估状态 `{phase, gate, passed, unmet[]}`）。
+- **重心配额注入**：当前阶段 focus 按 task_type 权重拼「## 阶段工作流」段（阶段目标 / 配额建议 / 门进度）注入编排器态势（`_phase_section`），纯软引导——任何阶段可发任何任务类型。**门进度只读不重算（M3 B3 单一事实源）**：出口门行读 meta `phase_gate_state`（无状态/阶段不符=「待编排校准」）——注入在 tick 开始、判定在 tick 末，现算会用上轮 idle 制造矛盾窗口；派单撞门的实时拒绝仍由 `_phase_gate_reject` 现算（动作侧确定性不变）。
 - **入场门（双层拦截）**：当前阶段 gate 未过且 task_type ∈ 该阶段 `gate_types` → 编排器派单侧拒收（`_phase_gate_reject`，拒绝原因回 tool_result）+ 发布 API 422（detail 带未达标明细）；认领侧不动。判定纯确定性；非 idle 指标全达标=过门，未达标但 idle_rounds 达标=收集饱和逃生。gate_types 每阶段自声明（recon=[exploit]、pentest/report 无）——若全局拦 exploit 会鸡生蛋（exploit 正是 verified 的生产者）。
-- **过门分流（自主档）**：API 层 `_post_tick` 开头 `_phase_gate_check`（先于挡位闸，L0 也计；轮内 published→idle 计数归零否则 +1）：L0 落事件 `phase.gate_open` / L1 提审批单 `op=phase_transition`（pending 去重，批准即流转 by=approval）/ L2 自动流转（by=orchestrator）。set_gate_notified 抵达校准：进入新阶段时其门已过则标记已分流，防人工回退后被 L2 秒弹回；人工流转抵达剥键。
-- **流转 API**：`GET /projects/{pid}/phase`（enabled/current/spec/gate 进度/history）+ `POST /projects/{pid}/phase`（人工最终，不强制门但限 spec.next 内）；方向以 order 定：前向（递增）走门与自动分流，回退（递减）不走门只留痕。事件 `phase.changed` 留痕。
+- **过门分流（自主档）**：API 层 `_post_tick` 开头 `_phase_gate_check`（先于挡位闸，L0 也计；轮内 published→idle 计数归零否则 +1）：L0 落事件 `phase.gate_open` / L1 提审批单 `op=phase_transition`（pending 去重，批准即流转 by=approval）/ L2 自动流转（by=orchestrator）。**每次评估后无论过门与否都写 meta `phase_gate_state`**（M3 B3：无门阶段 gate=False；内容不变跳过写盘）——注入侧单一事实源；`enter_phase` 流转顺写新阶段状态，零空窗。set_gate_notified 抵达校准：进入新阶段时其门已过则标记已分流，防人工回退后被 L2 秒弹回；人工流转抵达剥键。
+- **流转 API**：`GET /projects/{pid}/phase`（enabled/current/spec/**phases 全阶段序**〔M4 阶段条渲染用，按 order 排序〕/gate 进度/history）+ `POST /projects/{pid}/phase`（人工最终，不强制门但限 spec.next 内）；方向以 order 定：前向（递增）走门与自动分流，回退（递减）不走门只留痕。事件 `phase.changed` 留痕。
 - **剧本首发**：显式流转进入阶段时 tasks[] 原样发布（`created_by=playbook`、acceptance→判据、**noise=passive**——阶段引导 objective 级不占 active 互斥键、priority=1）；`playbook_fired` 按（阶段，指纹）去重——回退重进不重发，同款已在队（find_dedup_target）=吸收指纹。**建项只登记初始阶段不直发**（`publish=False`；mission/目标商议前不发静态任务），首发随显式流转触发；读侧 current_spec 回落首阶段，门拦截与重心注入不依赖登记。
-- **M3 专家与内容 / M4 前端阶段条后置**，见方案 §6。
+- **前端呈现（M4）**：项目顶栏阶段条 `webui/src/views/live/PhaseBar.tsx`——三阶段序 chips（当前高亮/到访过亮字/未到灰）+ 当前阶段门进度（达标绿「已达标」/未达标琥珀显 unmet 明细）+ 前向流转按钮（人工流转不强制门，422 原因行内显；到访过的阶段回退重进、剧本已发任务不重发），GET /phase 5s 轮询、轨无剧本（enabled=false）渲染 null；挂直播间页签行下，直播/任务流两视图共用。任务卡「📋 剧本」徽章（created_by=playbook）。事件样式：`phase.changed`「🔄 阶段流转」/ `phase.gate_open`「🚪 渗透门开启」（摘要=summary）默认展开，进「决策」筛选组。
+- **报告链（finding-report-format M3，随本批落地）**：report 阶段剧本 acceptance = 出报告前逐条盘点 verified 发现收录三件套（impact 非空 / evidence.repro_steps 每步 desc+code+expected 齐备 / remediation 非空），缺项落事件流回补清单且报告附录列「待回补」项——不现编、不卡黑板写入；report-writer 专家 persona 按三节模板取字段渲染（危害描述取 impact、复现步骤按 repro_steps 逐步、修复建议取 remediation；pentest 主 persona 与 redteam 变体同步）。
+- **M3 专家与内容（2026-09-22，内容专题见 dsh-kb-sourcing 方案）**：三剧本 tasks[] 充实——recon 三条（被动测绘 / 资产重要性评级 / 云面盘点〔role=cloud-security〕：对象存储·云控制台·云 API 暴露与前端 AKIA/ASIA/LTAI/AKID 凭证泄露面，凭据明文不落黑板）、pentest 两条（外部入口漏洞验证 / 云面凭证与配置缺陷验证〔role=cloud-security〕：只读 API 优先、变更性动作先过审批、verified 附四要素闭环可到达性证明）、report 一条（三件套盘点）；云安全专家 `packs/experts/cloud-security.yaml`（skills:[cloud-entry]，task_types:[recon,asset-enum,exploit]，default_noise:passive，tracks:[pentest]）落池。miniapp 面按 D5 后置（种子已入 web 包 kb，角色等内容攒够再挂）。
 
 ## 战役记忆召回
 
-按 mission + 目标值从 campaign.db 召回 top-5 历史打法注入编排态势。
+按 mission + 目标值从 campaign.db 召回 top-5 历史打法注入编排态势（单条截 300 字）；段头带元信息行「本项目 verified 发现 N 个（campaign 收 verified 产出/exploited 链打法与死路记账负知识）」+「仅参考——贴合当前目标再采用」提示（experience-sedimentation M2）——零产出项目看到跨项目打法时知道本项目还什么都没验证过。**注入侧按 tags 分两组（M6 F1，2026-09-23）**：死路条目（tags 含 dead_end）单独成「⚠ 既往死路（勿重走；确需重走先确认前提已变化）」组防误当正面经验，正向打法照旧带热度标——recall 池不拆（死路也是贴合目标的记忆），组内照旧打分排序。未注入/零命中/异常一律空段，召回失败绝不阻断编排。**打分升级（retrieval-upgrade M4，2026-09-23 实施）**：切分复用 kbindex `_query_segments`（就地导入防环；中文 2-gram+停用词替代整段 LIKE，「办公自动化系统」↔「OA 系统」靠共段跨写法命中；ASCII 词 ≥3 字符整词）；**字段加权 title 命中 2.0 > 正文独有 1.0**（双现段按 title 计不重复加分）；轨/能力加成与 `decay(线性 30 天)×log1p(usage)×1.5` 热度项沿用。campaign 黄金集 `tests/fixtures/campaign-golden.yaml`（mission 口吻 query→期望召回条目，top-3 必含）进 pytest 防打分链回归。
 
 ## 优先级重排 A5
 
@@ -169,17 +250,25 @@ L0 提案模式（propose_only）/ L1 建窗待命 + 执行审批单（批准=�
 
 L0 host < L1 wsl < L2 docker < L3 sandbox（--rm 一次性 / 断网 / 512m / cap-drop ALL 加固容器）；trusted 全等级、untrusted 仅容器、unknown 按 malware_live 最严处理。三条硬规则写死代码：WSL 信任级=宿主机、未知按活体恶意样本、net=real 永不默认。
 
+## 渗透命令容器化（pentest-tools-container-m0 M1，2026-09-23 定稿并实施）
+
+**大脑宿主、容器为手**：LLM/agent loop/编排器留 Windows 宿主（F6 浏览器/桌面壳/打包线/Windows 特调/调试链路五理由）；trusted 渗透命令引导走 Linux 容器——`docker` runtime 默认镜像 `cyberstrike/pentest-box:0.1`（Debian slim 三层：基础 curl/jq/dnsutils 等 → web 渗透 nmap/sqlmap/dirsearch/ffuf → python3+requests/pymssql/pycryptodome 等；tools/pentest-box/Dockerfile，`scripts/build_pentest_box.py` 构建）。workspace 传入时挂载 `<ws>:/workspace` 读写 + cwd=`/workspace/scratch`（对齐 host/wsl 相对路径习惯），pathguard 切容器内 posix 语义校验；sandbox 忽略挂载（L3 零挂载铁律）。引导面：run_cmd 描述 + STRICT_PROMPT_TAIL 第 9 条（docker=渗透首选镜像就绪时 / host=Windows 特调 / wsl=bash 兜底）；detector 查镜像缺失给构建指引。实战动机：环境摩擦耗 1/3 步数（PowerShell 转义/编码/工具链现装），容器一次性消除整类问题。M2 默认切换待实战反馈。
+
+## 内置浏览器证书口径（2026-09-24 定稿并实施）
+
+F6 内置浏览器持久化上下文（`core/browser/pool.py` launch_persistent_context）**默认 `ignore_https_errors=True`**——证书过期/自签/CN 不符一律放行加载（用户定稿）。风险边界可控：导航前必经 `check_target` 资产白名单硬校验，MITM 面只可能发生在已登记授权目标，且浏览器流量全程经 route 抓落入 http_history 可审计；`config/browser.json` 可设 `ignore_https_errors:false` 关回严格口径（`BrowserConfig` 白名单字段）。背景事故：目标 booklocation.zut.edu.cn 证书 2026-05-06 过期，Chromium `ERR_CERT_DATE_INVALID` 致 Agent 三次合理换路重试被错计为「拒绝熔断」挂起任务；与 curl `-k` 侦察口径对齐。
+
 ## 网关流水线
 
-`run(cmd, runtime)` 九步序：would_deny 干跑（与真实执行同口径，杜绝两处校验漂移）→ net=real 审批校验 → 工作区隔离改造（cwd/TEMP 重定向）→ 限速检查 → 执行前审计事件 → 按后端执行 → 结果审计 → 审批一次性消费（封死长期通行证）→ 拒绝统一协议（GatewayDenied 回填改道不炸循环）。
+`run(cmd, runtime)` 九步序：would_deny 干跑（与真实执行同口径，杜绝两处校验漂移）→ net=real 审批校验 → 工作区隔离改造（cwd/TEMP 重定向；docker 卷挂载）→ 限速检查 → 执行前审计事件 → 按后端执行 → 结果审计 → 审批一次性消费（封死长期通行证）→ 拒绝统一协议（GatewayDenied 回填改道不炸循环）。
 
 ## 静态护栏双子星
 
-pathguard 写逃逸静态判定（只拦写不拦读）+ rateguard 扫描频控（拦的是「不限速地扫」，拒因文案自带放行配方）。
+pathguard 写逃逸静态判定（只拦写不拦读；**命令词跟踪：管道/分号重置命令边界，grep 族 `-o*` only-matching 豁免**——模式串前导 / 曾被当写目标误拒，nmap -oG 写文件仍拦，2026-09-23；**重定向目标在引号外 `;|&` 处截断**——`2>/dev/null;` 粘连写法曾把 `/dev/null;` 当绝对路径误判逃逸，实战 43 条拦截中 23 条误拦，2026-09-25 修复）+ rateguard 扫描频控（拦的是「不限速地扫」，拒因文案自带放行配方）。
 
 ## 后端三实现
 
-host（PowerShell/bash）/ WSL（env 不透传）/ Docker（run_once + exec_in pwn 交互）；协作取消三入口收 abort_event，0.2s 轮询杀进程树，宁误杀勿悬挂。
+host（PowerShell/bash）/ WSL（env 不透传；**`--exec` argv 直通**——包装层剥引号吞 `$var`/awk `$1`，2026-09-23）/ Docker（run_once 挂载+cwd + exec_in pwn 交互）；协作取消三入口收 abort_event，0.2s 轮询杀进程树，宁误杀勿悬挂；**管道排水**（stdout=PIPE 时 daemon 线程持续消费，防 64KB 管道缓冲写阻塞死锁，2026-09-23）；**NO_WINDOW_FLAGS** 全创建点隐藏窗口（pythonw 桌面模式弹 PowerShell 窗根治，2026-09-23）。
 
 ## 双层权限模型
 
@@ -189,29 +278,47 @@ host（PowerShell/bash）/ WSL（env 不透传）/ Docker（run_once + exec_in p
 
 command / command.result 事件时序协议（BackendError 时悬空运行中=语义诚实）；截断可见化标记（防 Agent 语义猜）；detector 能力探测结果注入系统提示（Agent 不许自己猜环境）。
 
+## 策略快照可视化（gateway-config-view M1，2026-09-23 定稿并实施）
+
+## Agent 工具目录可视化（agent-tools-view，2026-09-24 定稿并实施）
+
+设置页新增「工具」页签（网关之后）：Agent 工具**静态只读目录**——`GET /api/agent-tools` 直出 `AGENT_TOOLS` 全集（name/description/input_schema）+ 静态分组，无项目依赖、无 IO、无敏感字段。分组由 `core/agent/tools.py::agent_tool_group` 按集合+前缀推导，组序固定：**执行/文件/黑板/知识/浏览器/协作/计划/控制**（控制=`_CONTROL_TOOLS`、计划=`_PLAN_TOOLS` 复用现有集合；协作=`publish_task`/`request_authorization`/`request_escalation`，实施时细化）。前端 `AgentToolsPane`：名称/描述搜索 + 分组卡片 + 参数表（类型/必填*/enum chips/说明，类型字段按数组/anyOf 兜底渲染）。端点测试断言「无工具落其他」=新工具漏配分组规则的拦截器。**不做**：工具编辑（定义是代码）、角色 yaml 白名单/browser 依赖/网关 runtime 的动态可用性标注（后置观察）。
+
+设置页新增「网关」页签（MCP 之后）：**只读快照 + backends 实况**，单一事实源仍是代码——`GET /api/gateway/config` 做代码→JSON 映射（runtime_levels 直出 policy 语义 / threat×runtime 放行矩阵〔unknown 按恶意行〕/ 网络三档 real 标「须审批」/ pathguard 手工语义摘要〔测试断言条数防遗漏〕/ rate_rules 直出 `rateguard.RATE_RULES` 表〔与 `_RULES` 校验函数表键一致性测试，防新增工具忘登记；masscan 阈值等数值参数从函数体迁入表，校验函数读表〕/ exec_params）。**backends 实况**：复用 `app.state.inventory`（启动探测结果）+ `POST /api/gateway/probe` 手动重探测（替换 app.state.inventory 即生效——后续新开窗系统提示注入随之更新，不做 TTL 缓存）；顶部结论化告警条：docker 不可用=「⚠ L2/L3 通道不可用：不可信代码与恶意样本任务将被拒绝（宁严勿松：拒绝不降级 host）」硬警告、wsl 不可用=弱提示（与 host 同信任级影响有限）、全绿=四通道就绪；四通道卡（L0-L3 徽章+可用性圆点+detector detail）+ 工具探测清单（工具面板最终归 toolchain-registry，此处只读快照为临时归宿）。**安全红线**：THREAT_ALLOWED / unknown→按恶意 / real 须审批等宁严勿松策略**永不前端可编辑**——前端改安全边界=配置漂移破坏 §7 纵深，页签底部显性注记。后置不做：参数可配置化（等 fakenet/专用分析镜像/toolchain-registry 里程碑）、直播间拒绝事件深链跳页签。
+
 # 六、技能与知识体系（core/skills + packs/）
 
 ## 能力包×场景轨正交
 
-能力包（web/binary/crypto/forensics/misc）=方法论技能（怎么干）；场景轨（ctf/pentest/redteam/research，单选）=规则+任务类型（什么语境）；平台/格式/漏洞类只走 frontmatter 标签不建包。LEGACY_TRACK_MAP 读取层兼容旧轨名。**kb 知识库全局单根 `packs/kb/`（M0，2026-09-21 定稿并实施，源自 expert-pool 方案）**：一级=能力域，原 `capabilities/<cap>/kb/` 原样搬迁（不翻译不就地改）；kb 源按启用域合成恒递归（`load_kb_sources`，kb_sources.json 登记退役），kb_open module 用全局形态 `<域>/<快照>/<路径>`，上游 LICENSE 收编 `kb/licenses/`。**能力包隐退为知识组织单位（M2，2026-09-21）**：项目不再显式多选包，改为绑定专家（project.json `experts` 字段，无绑定=存量直通 meta.capabilities 零翻译）；运行时知识可见范围由 `caps_effective(packs_root, track, experts, fallback)` 推导——绑定专家技能并集（经轨变体）∪ 轨技能中 capability 类技能的所属包集合，任一全量专家（skills=null）=capabilities/ 全集，绑定专家 yaml 全缺=空面宁严勿松；推导只发生在 API meta 响应层与 AgentSession 构造层，盘上原始绑定不动（Project.capabilities 恒返回盘上值）。**M3 起创建页 caps 多选 UI 退役**（前端仅剩存量项目只读展示与门控兜底，RECOMMENDED_CAPS 保留此用途）。
+能力包（web/binary/crypto/forensics/misc/cloud）=方法论技能（怎么干）；场景轨（ctf/pentest/redteam/research，单选）=规则+任务类型（什么语境）；平台/格式/漏洞类只走 frontmatter 标签不建包。LEGACY_TRACK_MAP 读取层兼容旧轨名。**kb 知识库全局单根 `packs/kb/`（M0，2026-09-21 定稿并实施，源自 expert-pool 方案）**：一级=能力域，原 `capabilities/<cap>/kb/` 原样搬迁（不翻译不就地改）；kb 源按启用域合成恒递归（`load_kb_sources`，kb_sources.json 登记退役），kb_open module 用全局形态 `<域>/<快照>/<路径>`，上游 LICENSE 收编 `kb/licenses/`。**能力包隐退为知识组织单位（M2，2026-09-21）**：项目不再显式多选包，改为绑定专家（project.json `experts` 字段，无绑定=存量直通 meta.capabilities 零翻译）；运行时知识可见范围由 `caps_effective(packs_root, track, experts, fallback)` 推导——绑定专家技能并集（经轨变体）∪ 轨技能中 capability 类技能的所属包集合，任一全量专家（skills=null）=capabilities/ 全集，绑定专家 yaml 全缺=空面宁严勿松；推导只发生在 API meta 响应层与 AgentSession 构造层，盘上原始绑定不动（Project.capabilities 恒返回盘上值；2026-09-24 起项目 meta 响应另出 `capabilities_bound`=盘上原始绑定，供设置页跟随项目缺省——effective 在全量专家项目=全包，取首项会错落到 binary）。**M3 起创建页 caps 多选 UI 退役**（前端仅剩存量项目只读展示与门控兜底，RECOMMENDED_CAPS 保留此用途）。
 
 ## 四层知识体系
 
-SKILL.md 薄路由入口 → kb/route.json 任务导航表（**M0 留域内** `packs/kb/<cap>/route.json`，值带域前缀）→ `packs/kb/route_index.yaml` 全局单表测试点索引（**M0**：条目 kb 全局形态，load_route_index 按启用域过滤视图注入）→ kb/ 厚方法论手册与弹药。
+SKILL.md 薄路由入口 → kb/route.json 任务导航表（**M0 留域内** `packs/kb/<cap>/route.json`，值带域前缀）→ `packs/kb/route_index.yaml` 全局单表测试点索引（**M0**：条目 kb 全局形态，load_route_index 按启用域过滤视图注入）→ kb/ 厚方法论手册与弹药。route.json 值为目录前缀（如 `cloud/native/k8s/`）时，**渲染时展开为具体文件**（route-injection-hardening，2026-09-24：`kbindex._expand_prefix` 取前 3 篇 `*.md`〔排除 .history〕+ 目录总篇数提示，数据形态不改；声明目标物理不存在则原样透传，由 doctor 兜底）。
 
-**Android 子域与 K6 案例沉淀（2026-09-21 实施，源自 android-kb-sourcing 方案 M1+M3）**：binary 域新增 `android/` 子域（r0re 收编改编，上游无 LICENSE 文件经用户确认可直接收编）——4 篇手册 `triage-and-layering` / `native-five-lines` / `unpacking` / `godot` + index + cases/；binary 第 4 技能 `android-rev`（file_features=`is_apk/has_native_lib/has_jni/godot_engine/packed_so`——实施期核实路由匹配语义：分诊 Agent 声明走 `file_features` 查询参数，只匹配技能 frontmatter `file_features` 字段，故特征词须落该字段而非 `features`〔情景特征〕，挂 reverse-analyst〔research〕/reverse〔ctf〕两专家白名单，caps_effective 域面不变）；route_index 全局单表增 4 条（binary 域 9→13）。**K6 案例格式约定**：已解案例沉淀 `<域>/<子域>/cases/<案例id>/`，五段式（识别 markers / 解题路径 / 验证向量 / solver / 复用提示），verified 攻击链经人审闸门沉淀防自投毒——与既有 case 提案（测试包 `成功案例.md` 段 + `payloads/` 弹药）并存：kb 树内 cases/ 是方法论文档形态，首例 godot-sec2026（flag_algo.py 正反向向量自测通过）。
+**Android 子域与 K6 案例沉淀（2026-09-21 实施，源自 android-kb-sourcing 方案 M1+M3）**：binary 域新增 `android/` 子域（r0re 收编改编，上游无 LICENSE 文件经用户确认可直接收编）——4 篇手册 `triage-and-layering` / `native-five-lines` / `unpacking` / `godot` + index + cases/；binary 第 4 技能 `android-rev`（file_features=`is_apk/has_native_lib/has_jni/godot_engine/packed_so`——实施期核实路由匹配语义：分诊 Agent 声明走 `file_features` 查询参数，只匹配技能 frontmatter `file_features` 字段，故特征词须落该字段而非 `features`〔情景特征〕，挂 reverse-analyst〔research〕/reverse〔ctf〕两专家白名单，caps_effective 域面不变）；route_index 全局单表增 4 条（binary 域 9→13）。**M2 工具收编（2026-09-23）**：r0re 的 5 件 python 分析脚本落位 `tools/py/android/`（分诊 runner android_ctf_runner / godot_ctf_runner / 脱壳三件套 upx_shlib_emu+apply_relocs+nrv2b，纯 stdlib 或仅依赖 unicorn），registry 声明三件 bundled python-tool（见 §工具链注册表）；android-rev 技能补「自动化工具面」引导段——缺失/依赖未装**不空等安装，降级手册手工路径**（DECOMPILE_GUIDANCE 先例）。**K6 案例格式约定**：已解案例沉淀 `<域>/<子域>/cases/<案例id>/`，五段式（识别 markers / 解题路径 / 验证向量 / solver / 复用提示），verified 攻击链经人审闸门沉淀防自投毒——与既有 case 提案（测试包 `成功案例.md` 段 + `payloads/` 弹药）并存：kb 树内 cases/ 是方法论文档形态，首例 godot-sec2026（flag_algo.py 正反向向量自测通过）。
+
+**cloud 域与 dsh 知识库收编（2026-09-22 实施，源自 dsh-kb-sourcing 方案）**：第 6 能力包 `packs/capabilities/cloud/`（pack.yaml + 薄路由技能 `cloud-entry`〔唯一改写件：dsh cloud-playbook 剥离七门门禁/operation-state 台账/子代理编排等平台机制，保留四要素闭环攻击主线 + 六源凭证入口 + 提级序/凭证循环/信任链横向战法 + 8 行特征→kb 路由表 + 反空转规则；frontmatter features 8 项 has_cloud_meta/has_aksk_leak/has_bucket_public 等〕+ rules/redlines.md 草案〔AI 起草待人审〕）。kb 新建 cloud 域（快照纪律原样搬运）：knowledge 5 + native 16 + vendors 36（aliyun/aws/azure/gcp/huawei/tencent × 6）+ detection 4 = 61 篇 + README 索引；`kb/cloud/NOTICE.md`（MIT © 2026 SeaOf0 声明 + detection 蓝队辅助视角标注）与 `kb/licenses/dsh-redteam-model-MIT` 双落点；域内 route.json 12 键 + route_index 全局表增 9 条（90→99，无 tags 全角色可见）。miniapp 种子 5 篇并入 web 包 `kb/web/miniprogram/`（独立包等内容攒够再拆）。指纹包首批 `tools/data/fpdb/fpdb_seed.json`（dsh asset-mapping，规则制 83 规则 + 16 path_rules，pentest 指纹三段式第二段「本地指纹包」落位；registry data 类声明随 toolchain-registry M1）。专家池 +cloud-security（16→17，见上节）。
 
 ## 运行时路由链路
 
-评分公式（features/标签 ×3 > task_type 命中 +10 > 角色偏好 +5 > keywords ×2）每次落 skill.routed 审计；kb hints 中文 2-gram 段落级索引；测试点 Top-5 注入 + route_lookup 按需查，命中技能正文不整段进 system（控上下文膨胀）。
+评分公式（features/标签 ×3 > task_type 命中 +10 > 角色偏好 +5 > keywords ×2）每次落 skill.routed 审计（payload 携带 kb_hits 供检索对账）；kb hints 中文 2-gram 段落级索引；测试点 Top-5 注入 + route_lookup 按需查，命中技能正文不整段进 system（控上下文膨胀）。
+
+**匹配口径统一（route-injection-hardening，2026-09-24 实施）**：router keywords、route.json 键（kb_route_hints）、route_index match（score_entry）三处收口到共享原语 `core/skills/matching.py::term_matches`——ASCII 词走**词边界**正则 `(?<![a-z0-9])…(?![a-z0-9])`（underscore/连字符/标点=边界；短词 `ak/sk/ai/pe` 不再误命中 `make/stack/main/expense`），中文词=子串（中文无词边界，行为不变），尾缀 `*`=前缀语义（ASCII 只保留 lookbehind，现行仅 `ret2*`/`house*`）；各增强层坏了静默降级不阻断主链，route_index.yaml 单文件解析**维持 fail-fast**（doctor 立即报 route-index-bad-yaml）。注入标题去歧义：测试点注入 head=「📖 测试点手册索引」。Agent `read_file` 允许根=本项目工作区 + **启用域 kb 源根**（`load_kb_sources` 中 is_dir 的 `packs/kb/<域>/`，不放开整个 packs——experts/ 等仍拒），与 kb_open 回执「Read 手册」闭环。
+
+**检索质量升级（retrieval-upgrade M2+M3，2026-09-23 实施）**：**同义词查询扩展**——`packs/kb/synonyms.yaml` 全局单表（groups: [{id, terms}]，21 组起步，提案制演进），objective 命中组内任一成员（lower 子串）→ 全组成员各自 2-gram 切段并入匹配（查询侧扩展、索引侧零改动；SkillRouter keywords 暂不挂防误报面扩大）；doctor 体检四档（synonyms-missing info / empty warning / dead-group warning 全成员零命中 / idle-term info 部分空转）。**漏召回对账**——`GET /api/projects/{pid}/retrieval-stats` 离线统计（traces.retrieval_stats，扫近 5000 事件，per 任务窗切分）：hinted_opened（提示∩打开）/ hinted_not_opened（低优，提示质量）/ opened_no_output（正常试错）/ **missed**（打开且产 verified 但未进 kb_hits=漏召回信号，审阅后转同义词/route_index 增补提案）。**检索黄金集**——`tests/fixtures/retrieval-golden.yaml` 20 条人工标注（中文任务口吻 query→期望命中 kb 模块，命中判定=cap4 hints 内出现任一 expect，良性命中扩 expect 不算错），pytest 断言 recall@4≥0.8 + expect 路径存在自检；**匹配链任何改动（词表/索引/停用词/切分）必须跑黄金集防退化**。
 
 ## 角色与规则链
 
 角色（M2 起实现为专家，见下节）字段全是软边界（skills/task_types 为 null=不过滤），缺专家静默回退 _generalist，expert_exists 防拼错放行；规则链 redlines（硬红线）/ owners（授权边界，按资产 owner tag）/ rating（判级口径）/ role-rules（按专家 id 匹配）分层注入，resolve_rule_profiles 三态解析。
 
+## 项目规则四段一体（rules-four-section M1，2026-09-23 定稿并实施）
+
+**目标形态三级模型**（轨默认 redlines → 模板库 → 项目实例，与 judgments 三级优先同构）：规则从散文转「frontmatter 结构化 + md 正文」（D1），owner 标签变模板选择器（D2），判据并入四段（范围/规则/评级/判据，D3）。**M1 已实施部分**：`core/skills/rules.py` 增 `parse_rule_doc`（frontmatter PyYAML + 正文分离，缺失/坏 yaml 容错回空 meta——散文永远可注入，结构化是增量红利）+ `validate_rule_meta`（schema fail-fast 对齐 registry 惯例：`trigger`〔=文件 stem，owner 标签命中即选〕/`scope.in·out`/`forbidden`/`uncollectable`/`noise_caps`〔键=task_type、值 ∈ {passive,low,medium,high}=噪声**上限**档〕/`rating_ref`〔self=正文含判级条款〕）+ `load_rule_templates`（`tracks/<轨>/rules/templates/*.md` → [{name, meta, body}]，读取侧降级容错）。doctor 增两体检：rule-template-invalid（error，schema 不过）/ rule-template-no-trigger（warning，M2 选择器按 trigger 命中，缺了等于死件）。pilot 模板 `tracks/pentest/rules/templates/osrc.md`（owners/osrc.md + rating/osrc.md 四段一体合并，scope.in=15 域名通配、forbidden §10 硬禁、uncollectable §6 白话清单、noise_caps 不臆造留空、rating_ref: self）；F11 残留 owners/edu-rating.md（与 rating 版正文逐字重复）入 `rules/.history/trash/` 回收站。**打磨定稿七项**（模板选择器多标签宁严勿松消解：forbidden/uncollectable 并集、noise_caps 取最严档、scope 交集/并集；用户模板 `config/rule_templates/*.md`；实例存 `workspaces/<pid>/project-rules.md` 独立文件整体压过模板；机器消费 M3 顺序=编排器 forbidden 收窄先行；role-rules 通道保留零迁移〔四轨均无存量〕；注入三级合成序与 legacy owners/rating 回退）见方案文档 §5——**M2（实例层+注入切换+前端规则一页）/M3（机器消费）待排期，现状注入面零改动**。
+
 ## 专家池与项目绑定（M1-M4）
 
-**专家池 `packs/experts/<id>.yaml`（M1，2026-09-21 定稿并实施，源自 expert-pool 方案）**：16 个扁平单文件（23 角色按方案 §4.3 映射合并——4 对 pentest/redteam 镜像合并走轨变体、_generalist 四合一、ctf/recon 独立为 triage 专家），字段与角色 yaml 全兼容，新增 tracks（可服务轨域，缺省=全轨）/protected（仅 _generalist）/variant_<track>_*（轨变体字段级覆写，零解析器改动）。`load_expert(root, name, track)` 加载时按当前轨应用前缀键覆写、产出与角色同形状 dict（下游 system 组装零改动），缺失回退 _generalist；`expert_exists`=池内存在且 track∈tracks（发布链路校验，判存在勿用 load_expert——静默回退会放行拼错 id）；`list_experts(track)` 轨过滤清单（组队 UI 数据源）。doctor 专家体检段：skills 归属存在（error）/已禁用（warning）/跨包重名归属不唯一（warning）、task_type 越各轨注册表并集（error）、tracks 与 variant_ 前缀轨名合法性（error）、expert-name-missing（warning）、缺 _generalist 兜底（error）、role-rules 悬空（warning，专家/角色双源核对）。
+**专家池 `packs/experts/<id>.yaml`（M1，2026-09-21 定稿并实施，源自 expert-pool 方案）**：17 个扁平单文件（23 角色按方案 §4.3 映射合并——4 对 pentest/redteam 镜像合并走轨变体、_generalist 四合一、ctf/recon 独立为 triage 专家；**2026-09-22 dsh-kb-sourcing 增补第 17 位 cloud-security 云安全专家**，tracks:[pentest]、skills:[cloud-entry]），字段与角色 yaml 全兼容，新增 tracks（可服务轨域，缺省=全轨）/protected（仅 _generalist）/variant_<track>_*（轨变体字段级覆写，零解析器改动）。`load_expert(root, name, track)` 加载时按当前轨应用前缀键覆写、产出与角色同形状 dict（下游 system 组装零改动），缺失回退 _generalist；`expert_exists`=池内存在且 track∈tracks（发布链路校验，判存在勿用 load_expert——静默回退会放行拼错 id）；`list_experts(track)` 轨过滤清单（组队 UI 数据源）。doctor 专家体检段：skills 归属存在（error）/已禁用（warning）/跨包重名归属不唯一（warning）、task_type 越各轨注册表并集（error）、tracks 与 variant_ 前缀轨名合法性（error）、expert-name-missing（warning）、缺 _generalist 兜底（error）、role-rules 悬空（warning，专家/角色双源核对）。
 
 **M2 项目绑定（2026-09-21 实施）**：运行时唯一角色源=experts/，`packs/tracks/*/roles/`（23 yaml）退役删除（roles.py 模块保留供 `_parse_inline_value` 复用与历史脚本）。项目绑定专家：创建（`experts` 字段，池外/轨外 422 提示可用池）与换将（`PATCH /api/projects/{pid}/experts`，空清单剥键恢复存量直通态；即时生效于下轮会话构造，黑板行无此列、单一真相源 project.json）。API meta 响应层装饰补 `experts` + 推导 `capabilities`（`_expert_meta_view`）；轨 roles 读端点数据源切 `list_experts`（PackRole 兼容形状），角色写端点退役返 410。发布/开窗 role 值域=**绑定专家清单优先**（`allowed_roles`，宁严勿松），未绑定=按轨全池；构造链把 caps_effective 推导面与 allowed_roles 贯穿 AgentSession→ToolDispatcher（认领即换装经 expert_exists 校验，绑窗角色失效回退 _generalist）。
 
@@ -226,9 +333,13 @@ SKILL.md 薄路由入口 → kb/route.json 任务导航表（**M0 留域内** `p
 
 Agent 永不直写 packs，全部经治理通道：统一提案落 packs/.proposals/ 人审应用（只认 decided_by=human）；受控写通道（pack_write_lock / .history 同秒避让备份 / trash 可恢复 / 1 MiB 上限 / 防穿越校验）；K6 成功链沉淀人审闸门防自投毒。
 
+**任务收尾自动复盘（experience-sedimentation M1+M2，2026-09-22）**：complete_task（done+verified 产出）与 fail_task（blocked_reason=error）双路径条件触发 `_sediment_proposal`——aborted（人工中断/关窗未收尾/worker 异常兜底）/ awaiting_human / 无产出 done 不触发；planner LLM 复盘产出 kb/index/case 三去向提案草稿（K4/K6 口径）或 NONE，与 AI 自主提案共用每会话 3 条 pending 上限。**M2 提纯**：①复盘前 kb 对账（kb_module_hints 注入既有相关模块，已有手册引导 edit 补「已验证路径」「坑」段不 create 重复新建）；②失败模式只提炼方法论避坑教训、环境/临时性问题一律 NONE；③reason 证据锚点双层校验——解析后先验真实 finding id（LLM 编造/漏引用静默跳过），`proposals._validate_agent_kb` 机械 lint 再拦（origin=agent 的 kb create 提案：reason 须引用 find-/task- 证据锚点、content 须有「## 」段落且至少一段命中沉淀口径「坑|注意|已验证|适用…」；human origin 与 revise/apply 不校验——人审专注内容质量）。输出 NONE / 任何失败都静默跳过，绝不影响任务收尾。
+
 ## 改名联动与体检
 
-refs.py kb 改名全库引用扫描+重写；doctor 体检（error：悬空引用/未注册 task_type；warning：route_index 三类体检/rating 无 owners 配套；info：孤儿技能；**M1 专家池段**：skills 归属/跨包唯一、task_type 越轨并集、tracks 合法性、role-rules 悬空——experts/ 缺省整段跳过）零 error 才健康，K7 零命中统计在 API 端点后处理。
+refs.py kb 改名全库引用扫描+重写；doctor 体检（error：悬空引用/未注册 task_type；warning：route_index 三类体检/rating 无 owners 配套；info：孤儿技能；**M1 专家池段**：skills 归属/跨包唯一、task_type 越轨并集、tracks 合法性、role-rules 悬空——experts/ 缺省整段跳过；**experience-sedimentation M3 kb-structure-thin**：>800 字符且标题行（# 开头）<2 的单段长文报 warning——缺「## 」分节结构不利 kb 对账与沉淀补段，`.history`/kb-trash/refs/ 子树豁免、短条目不检）零 error 才健康，K7 零命中统计在 API 端点后处理（**route-injection-hardening，2026-09-24 改真使用口径**：`info route-index-zero-hit` 只报「曾被注入路由索引（skill.routed 且 route_index>0）但对应手册从未被 kb_open 打开」的测试点——跨项目聚合，任一项目打开过即算 used；不再是「从未被注入」）。
+
+**kb 待清理建议段（experience-sedimentation M3，doctor 端点后处理）**：`traces.kb_module_feedback` 三象限（opened=kb.open 全历史计数 / positive=verified finding 任务窗 origin='trace' 链内开启的模块 / negative=真失败〔error〕任务窗内开启的模块，弱信号）→ positive=0 且（opened≥3 或 negative≥2）报 info `kb-cleanup-candidate`（negative≥2 标「优先复核」）——只呈现建议、不自动处置；feedback 统计纯只读。
 
 # 七、LLM 接入层（core/llm）
 
@@ -239,6 +350,8 @@ refs.py kb 改名全库引用扫描+重写；doctor 体检（error：悬空引�
 ## anthropic_compat
 
 协议转换核心：重试矩阵（{429,5xx} 最多 3 次线性退避）、thinking/stream 400 实例级降级（去参重发）、SSE 状态机（工具参数 JSON 分片拼装）、首帧后不重试（SSE 不可重放）、truncated 截断防御（区分「说完」与「流断」）。
+
+**Prompt caching（retrieval-upgrade M1，2026-09-23 实施）**：请求侧 system 改块数组——`build_system_parts` 拆 stable（规则链+角色+能力清单，会话内字节稳定）/ dynamic（技能指引+任务目标+纪律尾）两块，stable 块末尾打 `cache_control: {"type":"ephemeral"}` 断点；Ark Anthropic 兼容层实测直接接受（同前缀第二跑 cache_read>0 前缀缓存生效），400 文案含 cache_control 时实例级降级剥标重发作保险（`_cache_disabled` 置位后不再打标）。观测面：usage_view 补 cache_read/creation 与命中率 `cr/(in+cr+cc)`（LiveRoom 预算弹窗展示）；预算逻辑不动（缓存 token 仍计数，只是便宜）。消息历史增量断点后置观察。
 
 ## ProviderStore
 
@@ -254,13 +367,19 @@ planner/executor/classifier 三角色→模型映射（executor 稳定性>智力
 
 # 八、工具体系（tools/ + config/mcp.json）
 
+## 工具链注册表（toolchain-registry M1，2026-09-23 实施）
+
+**registry 单表 `tools/registry.json`（入库，机器无关声明）+ 本机路径覆盖层 `config/tools.json`（gitignore，仿 mcp.json 模式）**，消费方探测经 `core/toolchain.py`（纯 stdlib）。kind 四类：binary / runtime（python、jre 基础环境）/ python-tool（venv）/ data（指纹包）。**四来源检测顺序**（每条目命中即止）：①config/tools.json paths 指认（既有安装纳管，最高优先）→ ②tools/ bin 规范位（可下载落位；kind=runtime 且 acquire=bundled 即「开包自带」位，source=bundled/downloaded）→ ③registry fallback glob（常见安装目录；`?:/` 前缀=盘符通配 C-H 逐一尝试）→ ④PATH（search 文件名清单）。**探测只查文件存在性零副作用**，verify 试跑深检留设置页工具面板（M3）；status=ready（source 标注获取来源）/missing（detail 带 guide 指引）。
+
+registry 校验 fail-fast（kind 白名单/数组字段/平台键 bin，坏条目 ValueError——入库声明出错不静默吞）；覆盖层坏文件 `{}` 宁容错。消费三接线：**detector**（能力清单注入 Agent 系统提示，registry 驱动替代原 manifest.yaml 通道——零使用者随之退役；坏 registry 降级单条不阻断 docker/wsl 主探测）、**doctor**（`tool-missing` info / `tool-registry-invalid` error / 探测异常 warning 不阻断）、**decompiler**（`resolve_ida_headless` 前置 registry、新增 `resolve_ghidra_headless` registry→PATH——解「Ghidra 装了探测不到」）。首批 19 条目：ida/ghidra（binary+fallback 本机实位）、jre/python（runtime acquire=bundled 占位，M2 落位 tools/runtime/）、jadx/apktool/adb（binary search+download）、nmap/httpx/nuclei/ffuf/sqlmap/masscan/hydra（pentest 域）、impacket（python-tool pip 声明，M2 venv）、android-ctf-runner/godot-ctf-runner/android-unpack-kit（bundled python-tool，`bin {"*": "py/android/…"}` 相对 tools/ 规范位，随仓自带——android-kb-sourcing M2 收编）、fpdb（data）。网关注入（PATH/JAVA_HOME/venv）与工具面板在 M2/M3。
+
 ## MCP 接入
 
 外部服务型工具经 config/mcp.json 注册（FOFA 资产测绘等），domains 校验白名单；禁写密钥（FOFA 账号轮换在 src-strike 侧 .env）。
 
 ## 反编译双通道
 
-统一抽象 core/tools/decompiler.py：IDA headless 优先 → Ghidra analyzeHeadless 兜底（按 sha256 缓存全量导出，export_version=3 契约）+ IDA GUI MCP 实时桥（只连 loopback，13337 人手实例）+ 按需拉起 IdaMcpManager（无窗口 idat、13338+ 空闲端口、锁检测不抢 GUI 库、LRU 回收）；全不可用退纯静态并出 DECOMPILE_GUIDANCE 安装引导。
+统一抽象 core/tools/decompiler.py：IDA headless 优先 → Ghidra analyzeHeadless 兜底（按 sha256 缓存全量导出，export_version=3 契约）+ IDA GUI MCP 实时桥（只连 loopback，13337 人手实例）+ 按需拉起 IdaMcpManager（无窗口 idat、13338+ 空闲端口、锁检测不抢 GUI 库、LRU 回收）；全不可用退纯静态并出 DECOMPILE_GUIDANCE 安装引导。两腿路径解析（2026-09-23 toolchain-registry M1 起）：registry 四来源优先 → 原生兜底（IDA：PATH→`_IDA_INSTALL_GLOBS`；Ghidra：PATH），registry 命中与原生兜底同源并存，双通道冗余无害。
 
 ## 双向写回
 
@@ -268,7 +387,7 @@ func_kb→.i64（apply_names 后台 Job，锁检测结构化降级）与 .i64→
 
 ## 工具目录 tools/
 
-decompiler/{ida,ghidra} 脚本区 + mcp/ida-pro-mcp 适配区；地址一律 hex 字符串出 API（JS Number 无法安全表示 64 位地址）。
+decompiler/{ida,ghidra} 脚本区 + mcp/ida-pro-mcp 适配区 + registry.json 注册表（§八工具链注册表）；地址一律 hex 字符串出 API（JS Number 无法安全表示 64 位地址）。`data/fpdb/fpdb_seed.json` = 本地指纹包首批（dsh asset-mapping 收编，规则制：loc+kws AND 语义+path_rules；pentest 指纹三段式第二段，registry data 类首批成员）。
 
 # 九、情报系统（core/intel）
 
@@ -300,11 +419,30 @@ Obsidian 只读圣域，隐私红线三重落实：出参剥正文只回 snippet
 
 ## 数据获取与实时层
 
-api.ts 唯一 fetch 出口（约 130 端点方法，ApiError 结构化错误）；useEvents 模块级手写 query cache——REST tail + WS 增量（since_id 游标）、100ms 批量 flush、回入水合截断 300 条、缓存 2000 条上限裁旧。
+api.ts 唯一 fetch 出口（约 130 端点方法，ApiError 结构化错误）；useEvents 模块级手写 query cache——REST tail + WS 增量（since_id 游标）、100ms 批量 flush、回入水合截断 300 条、缓存 2000 条上限裁旧。**会话维度分页（live-event-stream-session-window，2026-09-23 实施）**：签名 `useEvents(pid, sessionId?)`——会话页签走会话源（tail/before 带 session_id，store 层 F8 既支持 API 一行透出；cache 键 `pid:sid` 每会话独立窗口；WS 增量按 sid 过滤、游标恒前进防断线重连回放重复），`__all`/编排页签走全局流——修「已结束会话页签近乎空白」（全局最新 50 条里该会话可能零事件）。
+
+## TRAE 化新壳（shell2，M1–M6，2026-09-25 实施）
+
+对标 TRAE Work 的**对话即工作台**信息架构重收纳（M1/M2/M4/M5 纯前端；M3 后端小补丁，协调模型/绑定/安全闸口不动；方案与拍板表 `docs/plans/webui-trae-shell.md`）。
+
+- **三姿态**（非按场景轨）：工作台（goal 条+对话流+常驻 composer）/ 画布 / 工具；姿态内=主区顶部窄 tab；侧栏=项目折叠分组+任务行，编排器固定首行 🧭。
+- **M6 起新壳默认、旧壳并存观察**：选择优先级=`?shell=1/2` 参数 > localStorage `ui.shell` > **从未选过（null）=新壳**，仅显式 `"1"` 为旧壳；参数落账剥参统一在 App 层。两壳双向通道（旧壳「新壳 →」两帧可见 / 新壳「旧壳」），旧壳全量保留不退役，退役时点由用户观察一版本后决定。里程碑 M1 空壳✓→M2 工作台✓→M3 chip 全通✓→M4 画布/工具✓→M5 欢迎态+模板✓→**M6 切默认✓（全部完成）**；主区切对话 hidden 保活（草稿/滚动不丢）。
+- **M2 工作台**：`ConversationPane` 两边共用抽件（`lib/turnStream.ts` 事件→turn 纯函数、`views/live/editors.tsx`），LiveRoom 仅改引用、旧壳零行为变化；写口全部收编现有 api。
+- **对话内审批**（拍板：侧栏铃铛+审批卡，无独立页）：**`request_approval` 不发事件**，pending 靠 4s 轮询、按归属 sid+`created_at` 时间位注入；裁决后卡片以回执态留 120s（extras），超时由全量审批（20s）派生的紧凑审计 chip 接档；铃铛有 pending→跳首条归属会话，仅 `awaiting_human` 无 pending→回落旧审批页。
+- **chip 混合语义**（M3 已实施）：chip 改默认、Agent 单次工具入参可临时覆盖、chip 可一键重置。三 chip：**自主档**（编排态，写 `config.autonomy` 持久；L0/L1/L2+暂停/自动派生开关）/ **runtime**（会话态，写任务 `preferred_runtime`——schema v23，任务期默认；run_cmd 入参 runtime 缺省按任务补，空默认须显式传）/ **模型**（写 `config.executor_llm` 持久，PUT 后热换在跑会话；GET/PUT/DELETE `/executor-llm`）。
+- **M3 附件与产物**：composer 附件上传 E2E（随对话/指派/任务下发，告示含 📎 工作区相对路径）；`FilesView` 侧栏「文件」资源入口——artifacts 注册表只读浏览（kind 过滤/名称搜索/文本预览/下载），主区切换、对话 hidden 保活。
+- **M4 画布/工具**（后端零改动）：共用 `NarrowTabs` 窄 tab（选中态持久化）。画布=黑板全景/任务流/攻击路径/轨迹链（**2026-09-26 补「发现/资产」两 tab**：复用旧壳 `views/Blackboard.tsx` 导出的 `Findings`/`Assets`，showCanvas=false 不重复攻击路径入口），重型组件壳层与姿态层两级 React.lazy（@xyflow 不进主包）；TaskFlow 无 WS 计数喂空集/0 退自带 3s 轮询；攻击路径/轨迹链由壳内最小 Host 补 assets 拉取与任务选择；**逆向工作台随画布条件重生**（`deriveWorkbenchProfile`=rev-generic：research+binary 或 config 显式覆盖）。工具=浏览器/测绘/情报/产物文件/插件·MCP；McpPane 从 SettingsView 抽公共件两处共用；🔌插件资源直跳工具·MCP；画布节点双击经 `goto-session` 事件回工作台会话。旧 NAV 全部有新归宿、旧入口摘除；全局 header 退役。
+- **M5 欢迎态+模板**（拍板两项，后端零改动——原估物化口已由 M4a/phases 提前提供）：欢迎页 `WelcomePane`=名称输入+四轨+场景档卡（名称空禁用，选档建项/回车全池直通）；模板中心 `TemplatesView`=8 场景档卡（四轨分组，卡内名称即建项）+ 三类录入向导：**渗透目标录入**（建项+目标逐行登记，auto 分型）/ **样本 triage**（建项+传样本，headless triage 自动跑）/ **CTF 向导**（建项+题面发编排器）。建项弹窗同步加场景档位。
+- **M6 切默认附带修复**（后端零改动）：NewShell `expanded` 持久态随项目删除剪枝——旧行为下死 pid 每 5s 永久 404 轮询；现落地态对账按 live 项目集合剪枝（项目清空连 target 清），仅启动首帧或有一轮 404。
+- 明确不做：大 composer LLM 判轨（M5 拍板用名称+模板）、同步对话接力、按轨做模式、跨项目聚合、旧壳现在退役（仅保留观察）。
 
 ## 事件渲染管线
 
 四层分工：筛选/样式层（eventStyle 纯映射）→ 布局层（EventRow 五形态）→ 装配层（命令对配对/中断去重/流式终稿遮蔽/对话轮 turn 分组）→ 圈定层（页签×类型两步串联）。DB 行是真相、事件流是有损视图（页签状态灯取数 DB 优先）。
+
+事件行人话摘要（live-stream-ux，2026-09-23 实施，方案归档 `docs/plans/归档-已完成/`）：`TOOL_SUMMARIZERS` per-tool 语义摘要表（7 工具，未命中回落 TOOL_ARG_KEY 兜底，LEN_SHORT 60/LEN_LONG 200 分级截断）；SummaryCtx 资产反查（LiveRoom 持 assets 映射 + asset.new 增量，反查不到显 id 尾 6）；task.done/failed 专属摘要（eventSummary 加 kind 参数，failed 含 blocked_reason、awaiting_human 标注）；finding.new/merged payload 补 title/target_asset_id/status（store 侧），前端 severity 徽章渲染 `[高危] 标题（漏洞类） · 目标`，终兜底 payload 首字符串截 60；行 onClick `selectionCollapsed()` 守卫（拖选文本不触发折叠）；TimeTag 本地时间微标 + 悬停「本地 + UTC」双标。
+
+直播间消息区窗口三态（live-event-stream-session-window，2026-09-23 实施，方案归档同上）：**铺满视口**——内容不足一屏且未取尽时 effect 循环 loadEarlier（每批 50，通常 1-3 轮）直到铺满或取尽，已结束会话页签打开即满不再手点；**上翻自动加载**——距视觉顶约 200px 触发 loadEarlier（先吃模块缓存零网络）；**滑动窗口裁剪**——DOM 上界 MAX_DOM=300、粒度 PAGE=50，滚回底部附近（column-reverse 贴底 |scrollTop|<200）裁头部一批留余量（贴底视觉零跳动：column-reverse 滚动原点在底部，顶部缩减不位移），裁剪经 `trimDom` 只动展示 state、模块缓存不动（再上翻缓存补回），用户在上方阅读时不裁（atBottomRef）；全局页签（__all/编排）同样套用，长跑项目 DOM 恒有上界。跨会话事件派生（tabStatus/budgetPausedSids/flowBump）依赖 DB 稳定事实与轮询兜底，不依赖全局流窗口。
 
 ## 视图组织与重画布
 
@@ -325,7 +463,7 @@ React.lazy 隔离 @xyflow 重依赖（画布永不进主包）；布局算法抽
 
 ## 页签与设置页
 
-会话页签状态灯；对话轮渲染（human_note 开 turn / 过程折叠组 / 终稿 MarkdownView 不渲染 raw HTML 防注入）；设置页（LLM 供应商 / MCP / 情报源 / 技能矩阵 / 规则 / 提案 / doctor）。
+会话页签状态灯；对话轮渲染（human_note 开 turn / 过程折叠组 / 终稿 MarkdownView 不渲染 raw HTML 防注入）；设置页（LLM 供应商 / MCP / **网关**〔gateway-config-view M1，2026-09-23——策略只读快照+探测实况+重新探测按钮，见 §五〕 / **工具**〔agent-tools-view，2026-09-24——Agent 工具静态只读目录+参数表，见 §五〕 / 情报源 / 技能矩阵 / 规则 / 顾问 / 提案 / doctor）；黑板页新增「**测绘**」页签（cyberspace-mapping M1+M2，2026-09-23；CTF 轨不挂载——见 §资产批量导入轨适用注记；`MappingPane` 三区自持：FOFA 设置条〔key 脱敏回显/空串不覆盖/测试连接〕+ 查询工作区〔size=配额消耗显式提示，结果勾选导入、existing 三锚点灰显〕+ 表格导入工作区〔列映射下拉可改嗅探建议，全量行回传前端内存持有确认导入〕；紧凑侧栏不挂；资产行来源徽章 🛰fofa/📥文件 + 指纹 chips ≤3+N；事件流 `asset.imported`「N 行 · x 新建/y 合并」摘要行）。
 
 ## 设计系统与工程纪律
 
@@ -357,7 +495,7 @@ blueprints 表（schema v17）与 store CRUD/事件已落；逆向开发管线�
 
 ## 启动/停机
 
-启动平台.bat（UTF-8 + CRLF，chcp 65001 自举兼容 GBK 控制台；端口已监听则跳过，首次自动 npm install，就绪后开浏览器）；停止平台.bat（先优雅停机 POST /api/admin/shutdown——在跑会话落任务现场快照，等端口释放最多 15s，超时才按端口硬杀）。
+启动平台.bat（UTF-8 + CRLF，chcp 65001 自举兼容 GBK 控制台；端口已监听则跳过，首次自动 npm install，就绪后开浏览器）；启动平台（窗口）.bat（pythonw 弹窗模式）；停止平台.bat（先优雅停机 POST /api/admin/shutdown——在跑会话落任务现场快照，等端口释放最多 15s，超时才按端口硬杀）；`scripts/build_exe.py` 桌面打包一键（干净 venv + PyInstaller + 资源随包，见 §一 M3）。
 
 ## 文档制度
 

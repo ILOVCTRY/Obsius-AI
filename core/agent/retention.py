@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import time
+import uuid
 from pathlib import Path
 
 
@@ -38,12 +39,14 @@ def omitted_note(omitted: int) -> str:
 def spill_text(text: str, name: str, spill_dir: Path) -> Path | None:
     """全量结果落盘到 spill_dir，返回文件路径；IO 失败返回 None（不阻断）。
 
-    文件名 ``<本地时间>-<name>.txt``；name 先做文件名安全化（非
-    ``[A-Za-z0-9_-]`` 折线，防工具名带怪字符）。
+    文件名 ``<本地时间>-<name>-<uuid6>.txt``；name 先做文件名安全化（非
+    ``[A-Za-z0-9_-]`` 折线，防工具名带怪字符）。uuid 后缀（orchestrator-efficiency
+    E1，2026-09-22）：原名仅（秒级时间戳+工具名）两维，同工具同秒两次超限
+    （如同一轮先查 findings 再查 tasks，同为 bb_query）必互相覆盖丢数据。
     """
     safe = "".join(c if c.isalnum() or c in "-_" else "-" for c in name) or "tool"
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    path = spill_dir / f"{stamp}-{safe}.txt"
+    path = spill_dir / f"{stamp}-{safe}-{uuid.uuid4().hex[:6]}.txt"
     try:
         spill_dir.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")

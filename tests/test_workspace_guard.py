@@ -55,6 +55,28 @@ def test_scan_false_positives():
     assert pathguard.scan_write_targets('echo "a>b"') == []
 
 
+def test_scan_grep_only_matching_not_write():
+    """grep 族 -o*（only-matching）是输出开关不写文件，模式串/文件名不被当
+    写目标（2026-09-23 误报修复）；curl/nmap 风格 -o 写文件仍拦。"""
+    assert pathguard.scan_write_targets("grep -oE '\"session_id\":\"[^\"]*\"' spill.json") == []
+    assert pathguard.scan_write_targets("cat spill.json | grep -o pat") == []
+    assert pathguard.scan_write_targets("cat spill.json|grep -oE pat") == []  # 连写形态
+    assert pathguard.scan_write_targets("rg --only-matching 'pat' f.json") == []
+    assert pathguard.scan_write_targets("grep.exe -o pat f.log") == []
+    # 写文件的 -o 仍拦：nmap -oG / curl -o
+    assert any("out.gnmap" in t for t in pathguard.scan_write_targets("nmap -oG out.gnmap x"))
+    assert any("o.json" in t for t in pathguard.scan_write_targets("curl -o o.json http://a.b"))
+
+
+def test_escapes_grep_pattern_allowed_redirect_still_enforced():
+    """实战误报场景（sess-da36bf37d645）：grep -oE 模式串（前导 /）不再判逃逸；
+    grep 的重定向写目标照常拦。"""
+    assert pathguard.workspace_escapes(
+        'grep -oE "/api/v[0-9]+/" spill.json', scratch=SCRATCH, workspace=WS) == []
+    assert pathguard.workspace_escapes(
+        "grep -o pat > D:\\evil.txt", scratch=SCRATCH, workspace=WS)
+
+
 def test_escapes_absolute_outside():
     esc = pathguard.workspace_escapes(
         "curl.exe -o C:\\Temp\\evil.bin http://a.b", scratch=SCRATCH, workspace=WS)
@@ -88,6 +110,30 @@ def test_allows_variable_and_devnull_targets():
                                        workspace=WS) == []
     assert pathguard.workspace_escapes("run 2>&1 > log.txt", scratch=SCRATCH,
                                        workspace=WS) == []
+
+
+def test_allows_devnull_with_glued_separator():
+    """shell 习惯写法 2>/dev/null;（分隔符无空格）整串是一个 token——目标必须在
+    引号外的 ; | & 处截断，否则 /dev/null; 被当绝对路径误判逃逸
+    （2026-09-25 实战 23/43 条误拦实锤）。"""
+    assert pathguard.scan_write_targets("wc -c f 2>/dev/null; echo x",
+                                        posix=True) == ["/dev/null"]
+    assert pathguard.workspace_escapes(
+        "wc -c f 2>/dev/null; head f 2>/dev/null;",
+        scratch="/mnt/e/proj/ws/scratch", workspace="/mnt/e/proj/ws",
+        posix=True) == []
+    assert pathguard.workspace_escapes(
+        "ls f 2>/dev/null && grep x f 2>/dev/null",
+        scratch="/mnt/e/proj/ws/scratch", workspace="/mnt/e/proj/ws",
+        posix=True) == []
+    # 真逃逸仍拦：写 /tmp
+    assert pathguard.workspace_escapes(
+        "curl -o /tmp/x http://a; echo",
+        scratch="/mnt/e/proj/ws/scratch", workspace="/mnt/e/proj/ws",
+        posix=True) == ["/tmp/x"]
+    # 引号内分隔符不切（引号感知）
+    assert pathguard.scan_write_targets('echo x >"a;b.txt"', posix=True) == \
+        ['"a;b.txt"']
 
 
 def test_escapes_posix_wsl():

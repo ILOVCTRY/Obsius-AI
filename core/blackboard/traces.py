@@ -475,3 +475,190 @@ def effect_stats(bb: Blackboard, pid: str, top: int = 20) -> dict:
                     key=lambda x: (-x["verified_findings"], -x["chains"]))[:top]
     return {"trace_chains": len(chains), "validated_chains": n_validated,
             "combos": ranked}
+
+
+def kb_module_feedback(conn, pid: str) -> dict[str, dict]:
+    """kb 模块三象限反馈统计（experience-sedimentation M3 甲，效果榜负向侧）。
+
+    纯只读聚合零写入零事件；conn 传 ``Blackboard.conn`` 或 doctor 跨项目扫描的
+    只读 sqlite 连接均可（须 row_factory=sqlite3.Row）。口径：
+    - opened：kb.open 事件按 module 计数（全历史累计，v1 拍板不做时间窗）；
+    - positive：该模块出现在「有 verified finding 的轨迹链」中的链数
+      （effect_stats 同源口径，链级去重）；
+    - negative：真失败任务（failed + blocked_reason='error'）任务窗内的 kb.open
+      次数——「打开且失败」≠「手册误导」（试错正常），只作弱信号供人工复核。
+    返回 {module: {opened, positive, negative}}。"""
+    failed_ids = {r["id"] for r in conn.execute(
+        "SELECT id FROM tasks WHERE project_id=? AND status='failed'"
+        " AND blocked_reason='error'", (pid,)).fetchall()}
+    pos: dict[str, int] = {}
+    for c in conn.execute(
+            "SELECT id FROM chains WHERE project_id=? AND origin='trace'",
+            (pid,)).fetchall():
+        links = conn.execute(
+            "SELECT node_type, node_id FROM chain_links WHERE chain_id=? ORDER BY seq",
+            (c["id"],)).fetchall()
+        kbs: set[str] = set()
+        verified = 0
+        for l in links:
+            if l["node_type"] == "step":
+                key = str(l["node_id"]).split("#", 1)[-1]
+                if key.startswith("kb:"):
+                    kbs.add(key[3:])
+            elif l["node_type"] == "finding":
+                f = conn.execute(
+                    "SELECT status FROM findings WHERE id=? AND project_id=?",
+                    (l["node_id"], pid)).fetchone()
+                if f and f["status"] == "verified":
+                    verified += 1
+        if verified:
+            for kb in kbs:
+                pos[kb] = pos.get(kb, 0) + 1
+    opened: dict[str, int] = {}
+    neg: dict[str, int] = {}
+    windows_cache: dict[str, dict[str, tuple[int, int]]] = {}
+    for r in conn.execute(
+            "SELECT id, session_id, payload FROM events"
+            " WHERE project_id=? AND kind='kb.open' ORDER BY id", (pid,)).fetchall():
+        try:
+            module = str((json.loads(r["payload"] or "{}")).get("module") or "")
+        except ValueError:
+            continue
+        if not module:
+            continue
+        opened[module] = opened.get(module, 0) + 1
+        sid = r["session_id"]
+        if not sid or not failed_ids:
+            continue
+        if sid not in windows_cache:
+            windows_cache[sid] = {
+                w["task_id"]: (w["lo"], w["hi"])
+                for w in _session_task_windows(conn, pid, sid) if w.get("hi")}
+        for tid, (lo, hi) in windows_cache[sid].items():
+            if tid in failed_ids and lo < r["id"] <= hi:
+                neg[module] = neg.get(module, 0) + 1
+                break
+    out: dict[str, dict] = {}
+    for m in set(opened) | set(pos) | set(neg):
+        out[m] = {"opened": opened.get(m, 0), "positive": pos.get(m, 0),
+                  "negative": neg.get(m, 0)}
+    return out
+
+
+# ---------------- 检索对账三象限（M3 retrieval-upgrade，2026-09-23） ----------------
+
+#: 对账事件回放窗口（与 TRACE_MAX_EVENTS 同量级；三象限是近期质量仪表不是全量审计）
+RETRIEVAL_STATS_WINDOW = 5000
+
+
+def retrieval_stats(bb: Blackboard, pid: str,
+                    window: int = RETRIEVAL_STATS_WINDOW) -> dict:
+    """漏召回对账（M3，纯只读离线统计）：per 任务对比「提示了什么」与
+    「打开了什么」与「产出了什么 verified 发现」。
+
+    数据源：skill.routed payload.kb_hits（G2 批次已随路由事件落库）+
+    tool.call name=kb_open（Agent 主动检索）+ findings 表 verified 集。
+    任务归属：会话事件按 task.claimed→done/failed 区间切分（同 R1 口径——
+    一个会话同时只持一个任务），区间外的路由/打开（对话轮等）不归属。
+
+    三象限（独立判定，一个任务可同时进多格）：
+    - hinted_opened：kb_hits ∩ opened ≠ ∅——提示链路正常；
+    - hinted_not_opened：有提示且全没打开——提示质量/摘要问题，低优；
+    - opened_no_output：打开过但无 verified 产出——正常试错，不算 missed；
+    - missed：打开的模块里 kb_hits 没提示的且任务有 verified 产出——**漏召回
+      信号**（Agent 自己找到手册并打穿），审阅后经提案制增补同义词/keywords/
+      route_index，与 M2 词表互喂。"""
+    conn = bb.conn
+    rows = conn.execute(
+        "SELECT id, session_id, kind, payload FROM events"
+        " WHERE project_id=? AND kind IN"
+        " ('skill.routed','tool.call','finding.new','task.claimed','task.done','task.failed')"
+        f" ORDER BY id DESC LIMIT {int(window)}", (pid,)).fetchall()
+    evs: list[dict] = []
+    for r in reversed(rows):  # 回升序
+        try:
+            payload = json.loads(r["payload"] or "{}")
+        except ValueError:
+            payload = {}
+        evs.append({"id": r["id"], "session_id": r["session_id"],
+                    "kind": r["kind"], "payload": payload})
+    verified = {r["id"]: (r["title"] or "") for r in conn.execute(
+        "SELECT id, title FROM findings WHERE project_id=? AND status='verified'",
+        (pid,)).fetchall()}
+    tasks: dict[str, dict] = {}   # task_id -> 聚合记录
+    cur: dict[str, dict] = {}     # session_id -> 进行中任务记录
+    for ev in evs:
+        sid = ev["session_id"]
+        k = ev["kind"]
+        if k == "task.claimed":
+            tid = str(ev["payload"].get("task_id") or "")
+            if tid and sid:
+                cur[sid] = tasks.setdefault(
+                    tid, {"task_id": tid, "kb_hits": set(), "opened": set(),
+                          "verified": set(), "failed": False})
+        elif k in ("task.done", "task.failed") and sid and sid in cur:
+            rec = cur[sid]
+            if str(ev["payload"].get("task_id") or "") == rec["task_id"]:
+                rec["failed"] = k == "task.failed"
+                cur.pop(sid)
+        elif not sid or sid not in cur:
+            continue  # 区间外（对话轮/游离）：不归属任务
+        elif k == "skill.routed":
+            rec = cur[sid]
+            rec["kb_hits"] |= {str(m) for m in (ev["payload"].get("kb_hits") or [])
+                               if isinstance(m, str) and m}
+        elif k == "tool.call" and ev["payload"].get("name") == "kb_open":
+            rec = cur[sid]
+            args = ev["payload"].get("args") or {}
+            module = str(args.get("module") or "").strip() if isinstance(args, dict) else ""
+            if module:
+                rec["opened"].add(module)
+        elif k == "finding.new":
+            rec = cur[sid]
+            fid = str(ev["payload"].get("finding_id") or "")
+            if fid in verified:
+                rec["verified"].add(fid)
+    missed: dict[str, dict] = {}
+    hinted_not_opened: list[dict] = []
+    opens_all: dict[str, int] = {}
+    quad = {"hinted_opened": 0, "hinted_not_opened": 0, "opened_no_output": 0,
+            "missed": 0}
+    task_rows = {r["id"]: r["objective"] for r in conn.execute(
+        "SELECT id, objective FROM tasks WHERE project_id=?", (pid,)).fetchall()}
+    for rec in tasks.values():
+        hits, opened = rec["kb_hits"], rec["opened"]
+        for m in opened:
+            opens_all[m] = opens_all.get(m, 0) + 1
+        if hits & opened:
+            quad["hinted_opened"] += 1
+        elif hits:
+            quad["hinted_not_opened"] += 1
+            hinted_not_opened.append({
+                "task_id": rec["task_id"],
+                "objective": (task_rows.get(rec["task_id"]) or "")[:80],
+                "kb_hits": sorted(hits)[:6]})
+        if opened and not rec["verified"]:
+            quad["opened_no_output"] += 1
+        if not rec["verified"]:
+            continue
+        unseen = opened - hits
+        if not unseen:
+            continue
+        quad["missed"] += 1
+        for m in unseen:
+            e = missed.setdefault(m, {"module": m, "task_id": rec["task_id"],
+                                      "objective": (task_rows.get(rec["task_id"]) or "")[:80],
+                                      "verified": 0, "finding": ""})
+            e["verified"] += 1
+            if not e["finding"]:
+                e["finding"] = next((verified[f] for f in rec["verified"]), "")
+    return {
+        "tasks_scanned": len(tasks),
+        "quadrants": quad,
+        "missed": sorted(missed.values(),
+                         key=lambda x: -x["verified"])[:20],
+        "hinted_not_opened": hinted_not_opened[:10],
+        "top_modules": sorted(
+            ({"module": m, "opens": n} for m, n in opens_all.items()),
+            key=lambda x: -x["opens"])[:10],
+    }

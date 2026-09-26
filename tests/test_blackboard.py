@@ -93,7 +93,7 @@ def test_schema_v7_migration(tmp_path):
     try:
         ver = board.conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
-        assert int(ver) == SCHEMA_VERSION == 21
+        assert int(ver) == SCHEMA_VERSION == 24
         task_cols = {r[1] for r in board.conn.execute("PRAGMA table_info(tasks)")}
         os_cols = {r[1] for r in board.conn.execute(
             "PRAGMA table_info(orchestrator_state)")}
@@ -112,6 +112,7 @@ def test_schema_v7_migration(tmp_path):
         tables = {r[0] for r in board.conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
         assert "resource_leases" in tables
+        assert "intents" in tables  # v22（渗透链路图：意图规划产物）
 
         proj = board.create_project("迁移项目", "ctf", ["binary"])
         tq = TaskQueue(board)
@@ -173,6 +174,39 @@ def test_rev_finding_without_vuln_class_no_merge(bb, project):
     r2 = bb.add_finding(pid, title="通信协议", evidence={"category": "protocol"})
     assert not r1["merged"] and not r2["merged"] and r1["id"] != r2["id"]
     assert len(bb.list_findings(pid)) == 2
+
+
+# ---------- M5 D1 疑似重复警告（orchestrator-efficiency §0-9） ----------
+
+def test_add_finding_dedup_warning(bb, project):
+    """同目标+同类（vuln_class）但 dedup_key 不同（显式指纹分裂）→ 返回 dedup_warning
+    指路旧条目；同 key 重报走合并无警告；无 target 或 vuln_class 空不查。"""
+    pid = project["id"]
+    a = bb.upsert_asset(pid, "domain", "a.com")["id"]
+    r1 = bb.add_finding(pid, "sqli", "id 注入", target_asset_id=a, dedup_key="k-time")
+    r2 = bb.add_finding(pid, "sqli", "order 注入", target_asset_id=a, dedup_key="k-order")
+    assert not r2["merged"]
+    assert r2["dedup_warning"] == [{"id": r1["id"], "title": "id 注入"}]
+    # 同 key 重报走合并分支：并入的本体行（k-time）不算，但另一条分裂指纹（k-order）仍提示
+    r3 = bb.add_finding(pid, "sqli", "id 注入（复现）", target_asset_id=a, dedup_key="k-time")
+    assert r3["merged"]
+    assert r3["dedup_warning"] == [{"id": r2["id"], "title": "order 注入"}]
+    # 无 target → 不查
+    r4 = bb.add_finding(pid, "sqli", "无目标发现", dedup_key="k-x")
+    assert "dedup_warning" not in r4
+    # vuln_class 空（逆向常态：同目标多函数发现）→ 不查
+    r5 = bb.add_finding(pid, "", "校验算法", target_asset_id=a, dedup_key="k-y")
+    assert "dedup_warning" not in r5
+
+
+def test_add_finding_dedup_warning_cap3(bb, project):
+    """警告列表 cap 3（最新优先）。"""
+    pid = project["id"]
+    a = bb.upsert_asset(pid, "domain", "a.com")["id"]
+    for i in range(5):
+        bb.add_finding(pid, "sqli", f"f{i}", target_asset_id=a, dedup_key=f"k{i}")
+    r = bb.add_finding(pid, "sqli", "新发现", target_asset_id=a, dedup_key="k-new")
+    assert len(r["dedup_warning"]) == 3
 
 
 # ---------- relates_to 强关系（E0） ----------
@@ -471,11 +505,12 @@ def test_reopen_failed_task(bb, project):
     tq = TaskQueue(bb)
     t = tq.publish(pid, "再试一次", noise_budget="low", conflict_keys=["ip:8.8.8.8"])
     tq.claim(t, s["id"])
-    tq.fail(t, s["id"], "会话结束但任务未收尾")
+    tq.fail(t, s["id"], "会话结束但任务未收尾", blocked_reason="aborted")
     tq.reopen(t)
     row = tq.get_task(t)
     assert row["status"] == "open" and row["claimed_by"] is None
     assert row["lease_until"] is None
+    assert row["blocked_reason"] == "error"  # 放回复位上一轮 blocked（2026-09-24，防 open+aborted 死锁）
     assert row["result_note"] == "会话结束但任务未收尾"  # 保留在库（open 卡片不渲染）
     assert "task.reopened" in [e["kind"] for e in bb.recent_events(pid)]
     with pytest.raises(ValueError, match="仅失败任务可放回"):
@@ -623,6 +658,22 @@ def test_plan_step_refs_grounding(bb, project):
     # 非法 refs 拒绝后计划不被破坏（校验在写库前抛出，_tx 回滚）
     assert tq.get_task(t)["plan"][0]["title"] == "x"
 
+    # 接地容错（2026-09-23，task-0805336bbffc 三连拒熔断）：裸短 id 自动补实际
+    # 前缀命中（finding→find-，kind≠id 前缀按实情映射）；规范化串落盘
+    short = f["id"].removeprefix("find-")
+    plan2 = tq.set_plan(t, s["id"], [{"title": "y", "refs": [f"finding:{short}"]}])
+    assert plan2[0]["refs"] == [f"finding:{f['id']}"]  # 补前缀后存完整形态
+    # 已带完整前缀的写法不受影响（不二次补）
+    plan3 = tq.set_plan(t, s["id"], [{"title": "z", "refs": [f"finding:{f['id']}"]}])
+    assert plan3[0]["refs"] == [f"finding:{f['id']}"]
+    # 补前缀后仍不存在 → 照旧悬空拒绝（不吞编造 id）
+    with pytest.raises(ValueError, match="悬空"):
+        tq.set_plan(t, s["id"], [{"title": "x", "refs": ["finding:0123456789ab"]}])
+    # event 为自增整数（无前缀歧义），裸 id 直接命中
+    ev_id = bb.append_event(pid, "note.manual", {"text": "t"}, author="human")
+    ok2 = tq.set_plan(t, s["id"], [{"title": "e", "refs": [f"event:{ev_id}"]}])
+    assert ok2[0]["refs"] == [f"event:{ev_id}"]
+
 
 def test_delete_task_physical_and_side_effects(bb, project):
     """删除：物理删行 + task.deleted 快照事件；done 不可删；claimed 删除释放互斥；子任务防护。"""
@@ -663,19 +714,19 @@ def test_delete_task_physical_and_side_effects(bb, project):
         tq.delete(parent)
 
 
-def test_claim_next_no_role_filter_priority(bb, project):
-    """Worker 循环（2026-09-18 窗口去 role 限制）：认领无类型过滤——exploit 底色窗
-    照常按优先级认领 P0 recon 任务（换装在认领后生效）；P0 优先。"""
+def test_take_session_next_no_role_filter_priority(bb, project):
+    """Worker 循环（会话中心化 2026-09-25）：窗内队列无类型过滤——exploit 底色窗
+    照常按优先级取 P0 recon 委托（换装在起跑后生效）；P0 优先。"""
     pid = project["id"]
     s = _session(bb, project, "exploit-worker")
     tq = TaskQueue(bb)
     t_recon = tq.publish(pid, "信息收集", task_type="recon", priority=0,
-                         created_by="orchestrator")
+                         created_by="orchestrator", target_session=s["id"])
     t_exploit = tq.publish(pid, "打点利用", task_type="exploit", priority=2,
-                           created_by="orchestrator")
-    got = tq.claim_next(pid, s["id"], session_role="exploit")
-    assert got == t_recon  # 无类型过滤：P0 recon 直接可认领
-    got = tq.claim_next(pid, s["id"], session_role="exploit")
+                           created_by="orchestrator", target_session=s["id"])
+    got = tq.take_session_next(pid, s["id"])
+    assert got == t_recon  # 无类型过滤：P0 recon 直接可取
+    got = tq.take_session_next(pid, s["id"])
     assert got == t_exploit
 
 
@@ -1097,12 +1148,14 @@ def test_schema_v11_migration_idempotent(tmp_path):
         board = Blackboard(str(db_path))
         ver = board.conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
-        assert int(ver) == SCHEMA_VERSION == 21
+        assert int(ver) == SCHEMA_VERSION == 24
         cols = {r[1] for r in board.conn.execute("PRAGMA table_info(findings)")}
         assert "rating_basis" in cols
         assert "category" in cols  # v12（发现分两类）
         assert "revision" in cols  # v16（H2 乐观锁）
         assert "role" in {r[1] for r in board.conn.execute("PRAGMA table_info(tasks)")}  # v14
+        assert "intents" in {r[0] for r in board.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}  # v22
         board.close()
 
 
@@ -1151,6 +1204,10 @@ def test_finding_rating_basis_roundtrip_and_events(bb, project):
     new_ev = [e for e in bb.recent_events(pid) if e["kind"] == "finding.new"][-1]
     assert new_ev["payload"]["rating_basis"] == "rating:edu-rating 高危#2"
     assert new_ev["payload"]["severity"] == "high"
+    # live-stream-ux C1：payload 带 title/target_asset_id/status（事件行人话渲染）
+    assert new_ev["payload"]["title"] == "注入"
+    assert new_ev["payload"]["target_asset_id"] is None
+    assert new_ev["payload"]["status"] == "unverified"
     # 人工 PATCH 改依据 + 事件 changed 携带
     bb.patch_finding(pid, r["id"], rating_basis="人工复核：改判 rating:osrc 高危#5", author="human")
     assert bb.get_finding(pid, r["id"])["rating_basis"] == "人工复核：改判 rating:osrc 高危#5"
@@ -1240,6 +1297,26 @@ def test_concurrent_asset_meta_and_finding_patch_no_lost_keys(bb, project):
 
 
 # ---------- 删除项目：close_all 关闭闸门（防惰性重连锁死 db） ----------
+
+def test_close_session_clears_runtime_meta(bb, project):
+    """关窗清运行期标记（2026-09-24）：worker_armed/close_pending 残留不进 closed
+    态；其余 meta 原样保留；无运行期标记的窗走普通 UPDATE 路径。"""
+    import json
+    pid = project["id"]
+    s1 = bb.register_session(pid, "窗一")
+    bb.set_session_meta(s1["id"], {"worker_armed": True, "bound_task_id": "task-x"})
+    bb.close_session(s1["id"])
+    m1 = json.loads(bb.get_session(s1["id"])["meta"])
+    assert "worker_armed" not in m1 and m1.get("bound_task_id") == "task-x"
+    s2 = bb.register_session(pid, "窗二")
+    bb.set_session_meta(s2["id"], {"close_pending": True})
+    bb.close_session(s2["id"])
+    assert "close_pending" not in json.loads(bb.get_session(s2["id"])["meta"])
+    s3 = bb.register_session(pid, "窗三")
+    bb.set_session_meta(s3["id"], {"note": "留着"})
+    bb.close_session(s3["id"])
+    assert json.loads(bb.get_session(s3["id"])["meta"]).get("note") == "留着"
+
 
 def test_close_all_rejects_reconnect(bb):
     """close_all 后访问 .conn 必须抛 BlackboardClosedError，不再惰性重连。
@@ -1741,8 +1818,9 @@ def test_task_receipt_on_complete_and_fail(bb, project):
 
 
 def test_task_receipt_guards_and_dedup(bb, project):
-    """父任务未认领/自收（父窗=收尾窗）不投递；同任务未读期间重复收尾
-    （reopen 重跑）不重复投递（ref_id=task_id 未读去重）。"""
+    """父任务未认领/自收（父窗=收尾窗）不投递；同状态未读期间重复收尾不重复投
+    （ref_id=<task_id>:<status>，E4-③ 状态后缀——fail→reopen→complete 的成功回执
+    不再被旧 ref_id 未读去重吞掉，失败与成功各投一条）。"""
     pid = project["id"]
     s1 = _session(bb, project, "回执A")
     s2 = _session(bb, project, "回执B")
@@ -1762,7 +1840,8 @@ def test_task_receipt_guards_and_dedup(bb, project):
     tq.claim(child2, s1["id"])
     tq.complete(child2, s1["id"], "完成")
     assert [r for r in bb.inbox_list(pid, s1["id"]) if r["kind"] == "task_receipt"] == []
-    # reopen 重跑：第一次失败回执未读 → 重跑完成后再收尾，去重不重复投
+    # reopen 重跑：失败回执先投 1 条；重跑完成后再收尾，E4-③ 状态后缀下
+    # 成功回执是独立 ref_id（child3:done）→ 父窗共 2 条（1 failed + 1 done）
     parent3 = tq.publish(pid, "重跑父任务", task_type="generic")
     tq.claim(parent3, s2["id"])
     child3 = tq.publish(pid, "重跑子任务", task_type="generic",
@@ -1774,7 +1853,8 @@ def test_task_receipt_guards_and_dedup(bb, project):
     tq.claim(child3, s1["id"])
     tq.complete(child3, s1["id"], "重跑完成")
     rcpts = [r for r in bb.inbox_list(pid, s2["id"]) if r["kind"] == "task_receipt"]
-    assert len(rcpts) == 1
+    assert len(rcpts) == 2
+    assert {r["payload"]["status"] for r in rcpts} == {"failed", "done"}
 
 
 # ---------- E6 统一资产登记 ----------
@@ -1860,6 +1940,14 @@ def test_set_asset_status_whitelist_note_and_audit(bb, project):
 
     bb.set_asset_status(aid, "visited", author="s1")
     bb.set_asset_status(aid, "scanning", author="s1")
+    # tested_clean 须死路意图背书（2026-09-25 门禁）
+    from core.blackboard.intents import close_intent, declare_intent
+    hid = bb.add_http_history(pid, source="browser", method="GET",
+                              url="http://10.1.1.1/probe", status=404,
+                              resp_body="")
+    iid = declare_intent(bb, pid, "该主机入口无洞", target_asset_id=aid)["id"]
+    close_intent(bb, pid, iid, "dead_end", dead_reason="全模板探测无异常",
+                 evidence_refs=[f"http:{hid}"])
     bb.set_asset_status(aid, "tested_clean", note="nikto 全模板 + 手测上传点",
                         author="s1")
     assert bb.get_asset(aid)["status"] == "tested_clean"
@@ -1893,6 +1981,28 @@ def test_set_asset_status_budget_stop_and_na(bb, project):
     ev = [e for e in bb.recent_events(pid) if e["kind"] == "asset.status_changed"]
     assert [(e["payload"]["old"], e["payload"]["new"]) for e in ev] == \
         [("open", "budget_stop"), ("budget_stop", "na")]
+
+
+def test_parent_clean_rejected_leaf_transitions_ok(bb, project):
+    """⑫ 有子资产节点写 tested_clean 被 ValueError（状态由子树读时派生）；
+    na 不挡（人工裁定）。⑬ 叶子节点流转完全不变。"""
+    pid = project["id"]
+    host = bb.upsert_asset(pid, "host", "10.2.2.2")["id"]
+    leaf = bb.upsert_asset(pid, "url", "http://10.2.2.2/", parent_id=host)["id"]
+    with pytest.raises(ValueError, match="子树"):
+        bb.set_asset_status(host, "tested_clean", note="试图批量标干净")
+    # na 人工裁定不被门拦
+    bb.set_asset_status(host, "na", note="该 IP 整段不适用")
+    assert bb.get_asset(host)["status"] == "na"
+    # 叶子：tested_clean 正常流转（带死路意图背书）
+    from core.blackboard.intents import close_intent, declare_intent
+    hid = bb.add_http_history(pid, source="browser", method="GET",
+                              url="http://10.2.2.2/", status=404, resp_body="")
+    iid = declare_intent(bb, pid, "叶子面无洞", target_asset_id=leaf)["id"]
+    close_intent(bb, pid, iid, "dead_end", dead_reason="探测无异常",
+                 evidence_refs=[f"http:{hid}"])
+    bb.set_asset_status(leaf, "tested_clean", note="叶子单点测完")
+    assert bb.get_asset(leaf)["status"] == "tested_clean"
 
 
 # ---------- 机制 1.1 发布去重 + workset / 机制 1.4 资源租约与 wait_for 门控 ----------
@@ -1950,16 +2060,16 @@ def test_publish_scope_normalized_in_fp(bb, project):
 
 
 def test_claim_grants_leases_x_x_conflict_marks_wait_for(bb, project):
-    """机制 1.4：认领转写 X 租约；第二个同键 active 任务认领被拒并写 wait_for；
-    前者收尾释放 → wait_for 清空、可认领（释放重校验同事务，不重领）。"""
+    """机制 1.4：起跑转写 X 租约；第二个同键 active 委托起跑被拒并写 wait_for；
+    前者收尾释放 → wait_for 清空、可起跑（释放重校验同事务，不重领）。"""
     pid = project["id"]
     tq = TaskQueue(bb)
+    s1, s2 = _session(bb, project, "A"), _session(bb, project, "B")
     k = ["ip:10.0.0.8"]
     t1 = tq.publish(pid, "打点 10.0.0.8", task_type="exploit", noise_budget="low",
-                    conflict_keys=k)
+                    conflict_keys=k, target_session=s1["id"])
     t2 = tq.publish(pid, "再打 10.0.0.8", task_type="exploit", noise_budget="low",
-                    conflict_keys=k)
-    s1, s2 = _session(bb, project, "A"), _session(bb, project, "B")
+                    conflict_keys=k, target_session=s2["id"])
     tq.claim(t1, s1["id"])
     rows = bb.conn.execute(
         "SELECT * FROM resource_leases WHERE task_id=?", (t1,)).fetchall()
@@ -1969,7 +2079,7 @@ def test_claim_grants_leases_x_x_conflict_marks_wait_for(bb, project):
         tq.claim(t2, s2["id"])
     row2 = tq.get_task(t2)
     assert row2["wait_for"] == ["ip:10.0.0.8"]           # 门控标记（UI ⏳）
-    assert tq.claim_next(pid, s2["id"]) is None          # 预过滤：等待行不占线程
+    assert tq.take_session_next(pid, s2["id"]) is None   # 预过滤：等待行不占线程
     tq.complete(t1, s1["id"], "完")                      # 释放 → 重校验清 wait_for
     assert tq.get_task(t2)["wait_for"] == []
     tq.claim(t2, s2["id"])
@@ -1995,20 +2105,20 @@ def test_lease_s_mode_shares_x_blocks(bb, project):
     assert tq.get_task(tc)["wait_for"] == ["domain:target.com"]
 
 
-def test_claim_next_releases_then_claims(bb, project):
-    """机制 1.4：占用者收尾后，等待者经 claim_next 正常认领（FIFO 不重领冲突）。"""
+def test_take_session_next_releases_then_claims(bb, project):
+    """机制 1.4：占用者收尾后，等待者经 take_session_next 正常起跑（FIFO 不重领冲突）。"""
     pid = project["id"]
     tq = TaskQueue(bb)
-    tq.publish(pid, "占用者", task_type="exploit", noise_budget="low",
-               conflict_keys=["ip:10.0.0.9"])
-    tq.publish(pid, "等待者", task_type="exploit", noise_budget="low",
-               conflict_keys=["ip:10.0.0.9"])
     s1, s2 = _session(bb, project, "A"), _session(bb, project, "B")
-    tq.claim_next(pid, s1["id"])   # 占用者认领并拿 X 租约
-    assert tq.claim_next(pid, s2["id"]) is None  # 等待者被排除
+    tq.publish(pid, "占用者", task_type="exploit", noise_budget="low",
+               conflict_keys=["ip:10.0.0.9"], target_session=s1["id"])
+    tq.publish(pid, "等待者", task_type="exploit", noise_budget="low",
+               conflict_keys=["ip:10.0.0.9"], target_session=s2["id"])
+    assert tq.take_session_next(pid, s1["id"])          # 占用者起跑并拿 X 租约
+    assert tq.take_session_next(pid, s2["id"]) is None  # 等待者被排除
     occupier = next(t["id"] for t in tq.list_tasks(pid) if t["objective"] == "占用者")
     tq.complete(occupier, s1["id"], "完")
-    got = tq.claim_next(pid, s2["id"])
+    got = tq.take_session_next(pid, s2["id"])
     assert got and tq.get_task(got)["objective"] == "等待者"
 
 
@@ -2106,6 +2216,54 @@ def test_reopen_note_appended(bb, project):
     assert "人类补充（human）: ROE 已核验，继续" in row["result_note"]
     ev = [e for e in bb.recent_events(pid) if e["kind"] == "task.reopened"][-1]
     assert ev["payload"]["note"] == "ROE 已核验，继续"
+
+
+def test_cancel_task(bb, project):
+    """M4 C1：cancel_task——open/claimed → failed（blocked_reason=cancelled），
+    清持有方与租约（防 worker 事后收尾覆写取消态）、attempts 履历照记、
+    资源租约同步释放；返回被清前的持有窗供调用方打断在跑会话；
+    非 open/claimed（done/failed）不可取消（走 requeue）。"""
+    pid = project["id"]
+    tq = TaskQueue(bb)
+    s1 = _session(bb, project)
+    # claimed 场景：返回打断目标 + 清持有方
+    t1 = tq.publish(pid, "在跑任务", created_by="orchestrator")
+    tq.claim(t1, s1["id"])
+    res = tq.cancel_task(t1, by="orchestrator", reason="方向变更，作废重排")
+    assert res["claimed_by"] == s1["id"]
+    row = tq.get_task(t1)
+    assert row["status"] == "failed" and row["blocked_reason"] == "cancelled"
+    assert row["claimed_by"] is None and row["lease_until"] is None
+    att = (row["context"] or {}).get("attempts") or []
+    assert att and att[-1]["outcome"] == "failed"
+    assert att[-1]["blocked_reason"] == "cancelled"
+    assert att[-1]["session_id"] == s1["id"]
+    ev = [e for e in bb.recent_events(pid) if e["kind"] == "task.cancelled"][-1]
+    assert ev["payload"]["by"] == "orchestrator"
+    assert ev["payload"]["reason"] == "方向变更，作废重排"
+    assert ev["payload"]["had_runner"] is True
+    # open 场景：无持有窗
+    t2 = tq.publish(pid, "排队任务")
+    res2 = tq.cancel_task(t2, by="human", reason="人工收编")
+    assert res2["claimed_by"] is None
+    assert tq.get_task(t2)["blocked_reason"] == "cancelled"
+    ev2 = [e for e in bb.recent_events(pid) if e["kind"] == "task.cancelled"][-1]
+    assert ev2["payload"]["had_runner"] is False
+    # 资源租约随取消释放（claimed 时占住的 host 冲突键可被新任务复用）
+    t3 = tq.publish(pid, "占 1.2.3.4", conflict_keys=["ip:1.2.3.4"])
+    tq.claim(t3, s1["id"])
+    tq.cancel_task(t3, by="orchestrator", reason="换路")
+    t4 = tq.publish(pid, "再占 1.2.3.4", conflict_keys=["ip:1.2.3.4"])
+    s2 = _session(bb, project)
+    tq.claim(t4, s2["id"])  # 不因租约未释放而 ClaimError
+    # 终态不可取消
+    t5 = tq.publish(pid, "会完成任务")
+    tq.claim(t5, s1["id"])
+    tq.complete(t5, s1["id"], "收工")
+    with pytest.raises(ValueError, match="仅 open/claimed 可取消"):
+        tq.cancel_task(t5)
+    with pytest.raises(ValueError, match="仅 open/claimed 可取消"):
+        tq.cancel_task(t1)  # 已是 failed（cancelled）
 
 
 def test_lifecycle_events_carry_created_by(bb, project):
@@ -2341,52 +2499,38 @@ def test_target_guard_passive_scope_derived(bb, project):
         tq.publish(pid, "第 5 个", scope="https://t.example.com/login")
 
 
-def test_claim_next_preference_ordering(bb, project):
-    """claim_next 偏好排序（2026-09-18 窗口去 role 限制，取代 v14 宽限/过滤）：
-    ①无过滤——任何窗立即认领任何任务；②底色匹配任务排前（减少无谓换装）；
-    ③同秩时 priority → created_at。"""
+def test_session_queue_ordering_by_priority_then_created_at(bb, project):
+    """窗内队列读时派生（会话中心化 2026-09-25）：priority → created_at 排序；
+    无 role 偏好（选窗在编排器 delegate 侧，队列只做排序）。"""
     pid = project["id"]
     tq = TaskQueue(bb)
-    s_spec = _session(bb, project, "spec")
-    s_other = _session(bb, project, "other")
-    t_role = tq.publish(pid, "侦察任务", task_type="recon", role="recon",
-                        created_by="orchestrator")
-    t_plain = tq.publish(pid, "通用任务", task_type="generic", created_by="orchestrator")
-    # ① 无过滤：任何窗立即认领任何任务；role='' 任务对所有窗都排秩 0（先出）
-    got = tq.claim_next(pid, s_other["id"], session_role="web-exploit")
-    assert got == t_plain
-    got = tq.claim_next(pid, s_spec["id"], session_role="recon")
-    assert got == t_role
-    assert tq.get_task(t_role)["claimed_by"] == s_spec["id"]
-    # ② 偏好排序：匹配底色的 role 任务排秩 0，先于他人 role 任务（即便发布更晚）
-    t_role2 = tq.publish(pid, "报告任务", task_type="report", role="report",
-                         created_by="orchestrator")
-    t_role3 = tq.publish(pid, "再侦察", task_type="recon", role="recon",
-                         created_by="orchestrator")
-    got = tq.claim_next(pid, s_spec["id"], session_role="recon")
-    assert got == t_role3  # recon 底色窗跳过更早的报告任务先拿匹配的
-    got = tq.claim_next(pid, s_other["id"], session_role="web-exploit")
-    assert got == t_role2
+    s = _session(bb, project, "worker")
+    t_late_p0 = tq.publish(pid, "P0 晚发", priority=0,
+                           created_by="orchestrator", target_session=s["id"])
+    t_early_p2 = tq.publish(pid, "P2 早发", priority=2,
+                            created_by="orchestrator", target_session=s["id"])
+    t_later_p2 = tq.publish(pid, "P2 更晚", priority=2,
+                            created_by="orchestrator", target_session=s["id"])
+    assert tq.take_session_next(pid, s["id"]) == t_late_p0
+    assert tq.take_session_next(pid, s["id"]) == t_early_p2
+    assert tq.take_session_next(pid, s["id"]) == t_later_p2
+    assert tq.take_session_next(pid, s["id"]) is None
 
 
-def test_claim_next_assigned_only_never_pool(bb, project):
-    """v0.72 assigned_only 挡位（全局一窗一任务）：无绑定手动窗不进公共池——
-    target_session='' 的任务不可见、不认领；显式指派给本窗的任务照常可认领。
-    默认挡位（assigned_only=False）公共池行为不变。"""
+def test_untargeted_open_delegations_never_auto_run(bb, project):
+    """会话中心化：target_session='' 的 open 行（L0 提案残留/关窗退回）不自动
+    起跑——任何窗 take_session_next 都不可见；显式指给本窗的委托照常可取。"""
     pid = project["id"]
     tq = TaskQueue(bb)
     s_manual = _session(bb, project, "manual")
-    t_pool = tq.publish(pid, "无绑任务", task_type="generic", created_by="human")
-    # 手动窗挡位：公共池任务不可见
-    assert tq.claim_next(pid, s_manual["id"], assigned_only=True) is None
+    t_pool = tq.publish(pid, "未指派委托", task_type="generic", created_by="human")
+    assert tq.take_session_next(pid, s_manual["id"]) is None
     assert tq.get_task(t_pool)["status"] == "open"
-    # 显式指派给本窗的任务：assigned_only 照常认领
-    t_bound = tq.publish(pid, "指派任务", task_type="generic", created_by="human",
+    t_bound = tq.publish(pid, "指派委托", task_type="generic", created_by="human",
                          target_session=s_manual["id"])
-    assert tq.claim_next(pid, s_manual["id"], assigned_only=True) == t_bound
-    # 默认挡位不变：其他窗仍可从公共池认领
+    assert tq.take_session_next(pid, s_manual["id"]) == t_bound
     s_other = _session(bb, project, "other")
-    assert tq.claim_next(pid, s_other["id"]) == t_pool
+    assert tq.take_session_next(pid, s_other["id"]) is None
 
 
 def test_finish_records_persona_role(bb, project):
@@ -2617,3 +2761,33 @@ def test_blueprint_modules_normalization_on_create(bb, project):
         bb.create_blueprint(pid, "B2", modules=[{"name": "m", "func_addresses": "0x40"}])
     with pytest.raises(ValueError, match="非法状态"):
         bb.create_blueprint(pid, "B3", modules=[{"name": "m", "status": "done"}])
+
+
+# ---------- recent_events kinds 过滤（bb-query-filters M2） ----------
+
+def test_recent_events_kinds_filter(bb, project):
+    pid = project["id"]
+    s1 = bb.register_session(pid, "S1")["id"]
+    s2 = bb.register_session(pid, "S2")["id"]
+    bb.append_event(pid, "command", {"x": 1}, session_id=s1, author=s1)
+    bb.append_event(pid, "finding.new", {"x": 2}, session_id=s1, author=s1)
+    bb.append_event(pid, "command", {"x": 3}, session_id=s2, author=s2)
+    bb.append_event(pid, "task.published", {"x": 4}, author="orchestrator")
+    # 单值 / 多值
+    only_cmd = bb.recent_events(pid, kinds=["command"])
+    assert [e["payload"]["x"] for e in only_cmd] == [1, 3]
+    two = bb.recent_events(pid, kinds=["command", "finding.new"])
+    assert [e["payload"]["x"] for e in two] == [1, 2, 3]
+    # 与 session_id 正交
+    one_sess = bb.recent_events(pid, kinds=["command", "finding.new"],
+                                session_id=s1)
+    assert [e["payload"]["x"] for e in one_sess] == [1, 2]
+    # 与 tail 正交：最新 2 条 command → x=3 之后……只有两条 command（1,3），
+    # tail=1 取最新一条 command
+    tail = bb.recent_events(pid, kinds=["command"], tail=1)
+    assert [e["payload"]["x"] for e in tail] == [3]
+    # 无命中
+    assert bb.recent_events(pid, kinds=["nope"]) == []
+    # None / 空列表 = 不过滤（默认行为零变化）
+    assert len(bb.recent_events(pid, kinds=None)) == 4
+    assert len(bb.recent_events(pid, kinds=[])) == 4

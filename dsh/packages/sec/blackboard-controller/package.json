@@ -1,0 +1,50 @@
+{
+  "name": "@sec/blackboard-controller",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "sec 黑板对外 Remote API：@Remote 薄委托 BlackboardService（namespace=blackboard）",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "import": "./lib/index.js"
+    },
+    "./types": "./src/types.ts",
+    "./typert": {
+      "types": "./lib/typert.host.d.ts",
+      "default": "./lib/typert.host.js"
+    },
+    "./remote": {
+      "types": "./lib/typert.remote-client.d.ts",
+      "default": "./lib/typert.remote-client.js"
+    },
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/typert.host.js",
+    "lib/typert.host.d.ts",
+    "lib/typert.remote-client.js",
+    "lib/typert.remote-client.d.ts"
+  ],
+  "scripts": {
+    "build": "tsdown && tsc -p tsconfig.json",
+    "test": "node --import tsx --test \"src/**/*.test.ts\""
+  },
+  "peerDependencies": {
+    "@sec/blackboard-core": "*",
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/schemastery": "*",
+    "@deepseek-ai/dsh-typert-protocol": "*"
+  },
+  "devDependencies": {
+    "@sec/blackboard-core": "workspace:*",
+    "@deepseek-ai/cordis": "link:E:/ILOVCTRY/deepseek-harness/vendor/cordis",
+    "@deepseek-ai/schemastery": "link:E:/ILOVCTRY/deepseek-harness/vendor/schemastery",
+    "@deepseek-ai/dsh-typert-protocol": "link:E:/ILOVCTRY/deepseek-harness/packages/typert/protocol",
+    "@deepseek-ai/dsh-typert-generator": "link:E:/ILOVCTRY/deepseek-harness/packages/typert/generator"
+  }
+}

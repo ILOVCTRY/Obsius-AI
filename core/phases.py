@@ -221,6 +221,24 @@ def _save_meta(proj, meta: dict) -> None:
     proj.meta = meta
 
 
+def read_gate_state(meta: dict) -> dict | None:
+    """读 meta 的出口门评估状态（B3 单一事实源；缺键/阶段不符由调用方判断）。"""
+    st = meta.get("phase_gate_state")
+    if isinstance(st, dict) and st.get("phase"):
+        return dict(st)
+    return None
+
+
+def save_gate_state(proj, state: dict) -> None:
+    """出口门评估状态落 meta（B3：注入侧 _phase_section 只读不重算，与动作同源）。
+    内容不变跳过写盘——_phase_gate_check 每轮 tick 都评估，防无谓重写 project.json。"""
+    meta = _load_meta(proj)
+    if meta.get("phase_gate_state") == state:
+        return
+    meta["phase_gate_state"] = state
+    _save_meta(proj, meta)
+
+
 def set_gate_notified(proj, target: str) -> None:
     """过门动作已分流（事件/审批/自动）标记：target 阶段 id。抵达目标阶段时
     由 enter_phase 重置。"""
@@ -337,13 +355,22 @@ def enter_phase(proj, to: str, *, by: str, packs_root: str | Path,
                                 **({"reason": reason} if reason else {})}]
     meta["phase_history"] = history
     meta["playbook_fired"] = {**st["fired"], to: fired}
-    # 抵达校准：新阶段门已过（含空闲逃生）→ 标记已分流，抑制 L2 抵达即弹回
+    # 抵达校准：新阶段门已过（含空闲逃生）→ 标记已分流，抑制 L2 抵达即弹回。
+    # 同处顺写 phase_gate_state（B3 单一事实源）：流转即落新阶段门状态，注入侧
+    # 第一轮就有真值，无「清空空窗」；gate_metrics 本就在此计算，零额外开销。
     notified = None
-    if forward_targets(book, book[to]):
+    fwd = forward_targets(book, book[to])
+    gate = book[to].get("gate") or {}
+    if fwd and gate:
         metrics = gate_metrics(proj.bb, proj.id, idle_rounds=idle_rounds)
-        met, _ = evaluate_gate(book[to].get("gate") or {}, metrics)
+        met, unmet = evaluate_gate(gate, metrics)
+        meta["phase_gate_state"] = {"phase": to, "gate": True,
+                                    "passed": met, "unmet": unmet}
         if met:
-            notified = forward_targets(book, book[to])[0]
+            notified = fwd[0]
+    else:
+        meta["phase_gate_state"] = {"phase": to, "gate": False,
+                                    "passed": False, "unmet": []}
     if notified:
         meta["gate_open_notified"] = notified
     else:

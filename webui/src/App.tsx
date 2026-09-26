@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react"
+import { NewShell } from "@/shell2/NewShell"
 import { Group, Panel, Separator, useDefaultLayout } from "react-resizable-panels"
 import { api, ApiError } from "@/lib/api"
 import type { ProjectDetail } from "@/lib/types"
@@ -70,7 +71,53 @@ function NavRail({ active, onSelect, locked, className }: {
   )
 }
 
+/**
+ * 壳选择（M6 起默认新壳，2026-09-25）：
+ * ?shell=1/2 显式参数优先；其次 localStorage ui.shell；
+ * 从未选过（null）= 新壳。旧壳保留观察、不退役。
+ */
+function shell2Wanted(): boolean {
+  const q = new URLSearchParams(location.search).get("shell")
+  if (q === "1" || q === "2") return q === "2"
+  try {
+    const v = localStorage.getItem("ui.shell")
+    return v === "1" ? false : true // null / "2" 皆新壳
+  } catch {
+    return true
+  }
+}
+
 export default function App() {
+  const [shell2] = useState(shell2Wanted)
+
+  // ?shell= 参数落 localStorage 并剥参数（1/2 统一处理；两壳刷新后语义稳定）
+  useEffect(() => {
+    const u = new URL(location.href)
+    const s = u.searchParams.get("shell")
+    if (s !== "1" && s !== "2") return
+    try { localStorage.setItem("ui.shell", s) } catch { /* 隐私模式 */ }
+    u.searchParams.delete("shell")
+    history.replaceState(null, "", u.toString())
+  }, [])
+
+  if (shell2) return <NewShell />
+  return <LegacyApp />
+}
+
+/** 旧壳 → 新壳（M6：并存观察期的双向通道，与新壳 SideBar「旧壳」对称） */
+function ToShell2Button({ className }: { className?: string }) {
+  const go = () => {
+    try { localStorage.setItem("ui.shell", "2") } catch { /* 隐私模式 */ }
+    location.reload()
+  }
+  return (
+    <Button size="sm" variant="ghost" onClick={go} className={className}>
+      新壳 →
+    </Button>
+  )
+}
+
+function LegacyApp() {
   const [pid, setPid] = useState<string | null>(null)
   const [meta, setMeta] = useState<ProjectDetail | null>(null)
   const [view, setView] = useState<View>("projects")
@@ -82,6 +129,8 @@ export default function App() {
   } | null>(null)
   // A3 任务流双击无会话节点 → 跳任务看板并高亮定位卡片（focus nonce 触发滚动）
   const [taskNav, setTaskNav] = useState<{ id: string; n: number } | null>(null)
+  // 会话中心化（2026-09-25）：旧壳冻结提示条，本会话内可关
+  const [frozenHidden, setFrozenHidden] = useState(false)
   // v0.71 任务即窗口：任务卡/任务流双击 → 跳会话页并直开专属执行窗页签
   const [sessionNav, setSessionNav] = useState<{ sid: string; n: number } | null>(null)
 
@@ -201,7 +250,10 @@ export default function App() {
     return (
       <div className="flex h-screen">
         <NavRail active={view} onSelect={setView} locked={!pid} className="w-14" />
-        <main className="min-w-0 flex-1 overflow-auto">
+        <main className="relative min-w-0 flex-1 overflow-auto">
+          <div className="absolute right-2 top-2 z-10">
+            <ToShell2Button />
+          </div>
           {view === "intel"
             ? <IntelView />
             : view === "settings" && !pid
@@ -240,7 +292,29 @@ export default function App() {
           )}
         </button>
         <Button size="sm" variant="ghost" onClick={() => setView("projects")}>← 项目</Button>
+        <ToShell2Button />
       </header>
+
+      {/* 旧壳冻结条：会话中心化后新功能只进新壳，旧壳仅保证不崩 */}
+      {!frozenHidden && (
+        <div className="flex h-7 shrink-0 items-center gap-2 border-b border-amber-400/30 bg-amber-400/10 px-3 text-[11px]">
+          <span className="text-amber-300">⚠ 旧壳已冻结——会话看板、会话协作流、中途换智能体等新能力请在新壳使用。</span>
+          <span className="flex-1" />
+          <button
+            onClick={() => {
+              try { localStorage.setItem("ui.shell", "2") } catch { /* 隐私模式 */ }
+              location.reload()
+            }}
+            className="rounded-full bg-primary px-2 text-[10px] text-primary-foreground hover:opacity-90"
+          >
+            进入新壳
+          </button>
+          <button onClick={() => setFrozenHidden(true)}
+            className="text-muted-foreground hover:text-foreground" title="本会话内隐藏">
+            ✕
+          </button>
+        </div>
+      )}
 
       <div className="flex min-h-0 flex-1">
         <Group orientation="horizontal" className="flex min-h-0 w-full"

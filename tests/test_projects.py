@@ -295,6 +295,78 @@ def test_update_config_rule_profiles(store):
     proj.close()
 
 
+def test_normalize_advisor_matrix():
+    """D10 advisor 归一化矩阵：None/{}→{}、缺键补默认、边界合法、未知键剥除、
+    provider/model 组合；bool 拒绝。"""
+    from core.autonomy import ADVISOR_DEFAULTS, normalize_advisor
+
+    assert normalize_advisor(None) == {}
+    assert normalize_advisor({}) == {}
+    # 缺键全补默认
+    assert normalize_advisor({"junk": 1}) == ADVISOR_DEFAULTS
+    # 边界合法
+    out = normalize_advisor({
+        "stuck_after": 6, "stuck_max_extensions": 0, "closing_max_rounds": 0})
+    assert out["stuck_after"] == 6 and out["stuck_max_extensions"] == 0
+    assert out["closing_max_rounds"] == 0
+    out = normalize_advisor({"stuck_after": 30, "stuck_max_extensions": 4,
+                             "closing_max_rounds": 3})
+    assert out["stuck_after"] == 30 and out["stuck_max_extensions"] == 4
+    assert out["closing_max_rounds"] == 3
+    # provider/model 组合 + strip
+    assert normalize_advisor({"provider": " ark "}) == {
+        **ADVISOR_DEFAULTS, "provider": "ark"}
+    assert normalize_advisor({"provider": "ark", "model": " glm "}) == {
+        **ADVISOR_DEFAULTS, "provider": "ark", "model": "glm"}
+    # 非法形态
+    for bad in (
+        {"stuck_after": 5}, {"stuck_after": 31}, {"stuck_after": 6.5},
+        {"stuck_after": True}, {"stuck_max_extensions": -1},
+        {"closing_max_rounds": 4},
+    ):
+        with pytest.raises(ValueError):
+            normalize_advisor(bad)
+    with pytest.raises(ValueError):
+        normalize_advisor("bad")
+    with pytest.raises(ValueError):
+        normalize_advisor({"provider": ""})
+    with pytest.raises(ValueError):
+        normalize_advisor({"provider": 1})
+    with pytest.raises(ValueError):
+        normalize_advisor({"model": "glm"})  # model 无 provider
+    with pytest.raises(ValueError):
+        normalize_advisor({"provider": "ark", "model": ""})
+
+
+def test_update_config_advisor(store):
+    """advisor PATCH：合法双写一致；部分提交缺键补默认；非法 ValueError；
+    null/{} 剥键恢复代码缺省。"""
+    proj = store.create_project("adv", "pentest", capabilities=["web"])
+    pid = proj.id
+    store.update_config(pid, {"advisor": {
+        "stuck_after": 8, "stuck_max_extensions": 1, "closing_max_rounds": 1}})
+    assert proj.bb.get_project(pid)["config"]["advisor"] == {
+        "stuck_after": 8, "stuck_max_extensions": 1, "closing_max_rounds": 1}
+    assert json.loads((proj.path / "project.json").read_text(
+        encoding="utf-8"))["config"]["advisor"] == {
+        "stuck_after": 8, "stuck_max_extensions": 1, "closing_max_rounds": 1}
+    # 部分提交：缺键补默认（整段替换语义）
+    store.update_config(pid, {"advisor": {"stuck_after": 10}})
+    assert proj.bb.get_project(pid)["config"]["advisor"] == {
+        "stuck_after": 10, "stuck_max_extensions": 2, "closing_max_rounds": 2}
+    # 非法 → ValueError
+    with pytest.raises(ValueError):
+        store.update_config(pid, {"advisor": {"stuck_after": 3}})
+    # null / {} → 剥键
+    store.update_config(pid, {"advisor": None})
+    assert "advisor" not in proj.bb.get_project(pid)["config"]
+    store.update_config(pid, {"advisor": {"stuck_after": 10}})
+    store.update_config(pid, {"advisor": {}})
+    assert "advisor" not in json.loads(
+        (proj.path / "project.json").read_text(encoding="utf-8"))["config"]
+    proj.close()
+
+
 def test_close_blocks_bb_reinstantiation(store):
     """close() 后 proj.bb 必须抛 BlackboardClosedError，不得惰性重建黑板。
 

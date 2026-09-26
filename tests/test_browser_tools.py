@@ -170,7 +170,8 @@ def test_close_browser_session_lifecycle(env):
                              "blocked_reason": "awaiting_human"})
     assert not any(c[0] == "close" for c in pool.inst.calls)
     pool.inst.calls.clear()
-    d.dispatch("complete_task", {"result_note": "done"})
+    d.dispatch("complete_task", {"result_note": "done"})  # D6：首次被收尾确认拦截
+    d.dispatch("complete_task", {"result_note": "done"})  # 零新增放行真收尾
     assert ("close", d.session_id) in pool.inst.calls
     pool.inst.calls.clear()
     d.current_task_id = "t-1"  # complete 已消费认领，重设再测 error 分支

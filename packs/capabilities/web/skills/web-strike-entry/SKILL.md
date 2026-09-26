@@ -1,16 +1,16 @@
 ---
 name: web-strike-entry
 description: Web/SRC 渗透入口技能：双模式判定（锁面/自由跳）+ 目标特征路由对照表
-keywords: 渗透, src, 挖洞, 测试, 漏洞, 目标, 网站, 注入, sql, sqli, xss, 上传, 越权, idor, ssrf, csrf, jwt, oauth, graphql, 逻辑漏洞, rce, 命令执行, 文件包含, webshell, 打点, 利用
+keywords: 渗透, src, 挖洞, 测试, 漏洞, 目标, 网站, 外网, 打点, 入口, 利用, 上传, 越权, idor, 未授权, 登录, 弱口令, 验证码, 支付, 竞态, 逻辑漏洞, jwt, oauth, graphql, websocket, waf, 401, 403
 features: has_user_system, has_upload, has_search, has_pay, has_graphql, has_oauth, has_websocket, returns_401, waf_detected
 task_types: exploit, privesc, lateral-movement
 ---
 
 # web-strike-entry —— 渗透入口：双模式判定 + 特征路由
 
-> 分层纪律：本技能只做**入口路由**。方法论在 src-strike 快照
-> （kb_open 前缀 `playbooks/知识库/`），弹药在
-> `playbooks/`。**按需 kb_open 单篇，禁止通读。**
+> 分层纪律：本技能只做**入口路由**。方法论 = webapp 测试包手册
+> （下表 module 直开单篇），弹药在 `playbooks/`。**按需 kb_open
+> 单篇，禁止通读。**
 
 ## 0. 双模式先判（必做第一动作）
 
@@ -21,20 +21,44 @@ task_types: exploit, privesc, lateral-movement
 
 ## 1. 目标特征 → 模块路由对照表
 
-进站先识别特征，按下表用 **`kb_open(module=…)`** 打开对应模块（module 均带
-`playbooks/` 快照前缀；不存在时服务端回可选清单，照清单改选，禁止猜名）。
+进站先识别特征，按下表用 **`kb_open(module=…)`** 打开对应手册（module 为
+kb 域内路径；不存在时服务端回可选清单，照清单改选，禁止猜名）。
+打面家族分工：注入类专精 `web-injection`、认证会话专精 `web-authn-session`、
+API 面 `web-api-attack`、客户端面 `web-client-side`（均已挂载，按 query 择优注入）。
 
-| 目标特征（features） | 方法论（`playbooks/知识库/` 下） | 弹药（`playbooks/` 下） |
+| 目标特征（features） | 方法论手册（`kb_open` 单篇） | 弹药（`playbooks/` 下） |
 |---|---|---|
-| has_user_system（有注册/登录） | `web/webapp/idor/手册.md` + `web/webapp/authbypass/手册.md` | `arbitrary-x-authz.md` |
-| has_search / has_filter | `web/webapp/sqli/手册.md` | `sqli.md` |
-| has_upload（文件上传） | `web/webapp/file-upload/手册.md` | `file-upload/00-index.md` |
+| has_user_system（有注册/登录） | `web/webapp/idor/手册.md` + `web/webapp/authbypass/手册.md`（验证码见 `captcha-ocr/手册.md`，弱比较见 `type-juggling/手册.md`） | `arbitrary-x-authz.md` |
+| has_search / has_filter（查询/列表过滤） | `web/webapp/sqli/手册.md` | `sqli.md` |
+| has_upload（文件上传/导入/附件） | `web/webapp/file-upload/手册.md` | `file-upload/00-index.md` |
 | has_pay（支付/优惠券/积分） | `web/webapp/logic/手册.md` + `web/webapp/race-condition/手册.md` | `logic-flaws/00-index.md` |
 | has_graphql | `web/webapp/graphql/手册.md` | `graphql.md` |
 | has_oauth / JWT / SAML | `web/webapp/jwt/手册.md` | `oauth-saml-jwt/00-index.md` |
 | has_websocket | `web/webapp/websocket/手册.md` | `api-rest/13-websocket.md` |
-| returns_401/403 | 分清登录页 vs 业务 API；path/METHOD/头现场改 | — |
-| waf_detected | `web/webapp/waf-bypass/手册.md`（被拦再开，禁开场丢探针） | `web/playbooks/methodology/02-bypass-toolkit.md` |
+| returns_401/403 | `web/webapp/401-403-bypass/手册.md`（分清登录页 vs 业务 API，path/METHOD/头现场改） | — |
+| waf_detected | `web/webapp/waf-bypass/手册.md`（被拦再开，禁开场丢探针） | `methodology/02-bypass-toolkit.md` |
+| 参数回显点（搜索词/昵称/UA 等进 HTML/属性/JS） | `web/webapp/xss/手册.md`（CSP 拦了再开 `csp-bypass/手册.md`） | `xss/00-index.md` |
+| 跳转参数（redirect/url/next/goto） | `web/webapp/open-redirect/手册.md` | — |
+| 请求出网点（webhook/URL 导入/外链头像/PDF 渲染） | `web/webapp/ssrf/手册.md` | `ssrf-cache-host/00-index.md` |
+| 文件下载/预览/包含点（download/file/path 参数） | `web/webapp/path-traversal/手册.md` | `path-traversal/00-index.md` |
+| XML/SOAP 接口（xml 请求体/wsdl） | `web/webapp/xxe/手册.md` | `rce/15-xxe.md` |
+| Java 栈特征（jsp/struts/序列化串/JNDI 报错） | `web/webapp/deserialization/手册.md` + `web/webapp/jndi-injection/手册.md` | `rce/12-deserialization.md` |
+| 模板/表达式可配置点（自定义模板/邮件签名） | `web/webapp/el-injection/手册.md`（SSTI 弹药见下格） | `rce/14-ssti.md` |
+| 报错栈/.git/.env/备份/SCM 路径 | `web/webapp/info-leak/手册.md` + `web/webapp/insecure-scm/手册.md` | `info-disclosure.md` |
+| 前端加密参数/厚 JS（sign/token 前端生成） | `web/webapp/js-reverse/手册.md` | — |
+| 邮件功能（注册/找回密码/邀请） | `web/webapp/email-header-injection/手册.md` + `web/webapp/host-header/手册.md`（重置投毒） | — |
+| 缓存层特征（CDN/X-Cache/Age 头） | `web/webapp/cache-poisoning/手册.md` | `ssrf-cache-host/12-cache.md` |
+| 导出报表（CSV/Excel） | `web/webapp/csv-formula-injection/手册.md` | — |
+| AI 功能面（对话窗/文档问答/Agent 工具） | `web/webapp/llm-security/手册.md` | — |
+| swagger/kong/actuator 暴露 | `web/webapp/api-gateway/手册.md` | — |
+| API 面厚（REST 批量接口/多端点） | 转交 `web-api-attack`（走私/Host 头/HPP/邮件头路由表） | `api-rest/00-index.md` |
+
+**纵深转交**：SSRF 打通内网 / RCE 拿下落点后需要推进时——redteam 轨转
+`web-post-exp`（落点后阶段路由）；pentest 轨到发现即止（owners 红线禁内网
+渗透/主机提权），证据齐即上报。
+
+**云入口**：metadata SSRF / AK-SK 泄露 / 对象存储公开读——caps 含 cloud
+时直开 `cloud/` 域 kb 单篇验证；否则落 findings(unverified) 上报，勿盲打。
 
 **平台归属 → `meta.owner`**：登记/更新资产时按特征打标（`.edu.cn` 系 → `edusrc`；
 萤石 → `ysrc`；OPPO/realme/OnePlus → `osrc`；无归属不打）——命中的平台规则

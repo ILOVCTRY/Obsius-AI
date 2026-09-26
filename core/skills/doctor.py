@@ -14,7 +14,8 @@
            expert-skill-ambiguous / expert-name-missing / role-rules-orphan）；
            场景档 board_view 值域外（profile-board-view-unknown）；阶段剧本
            软问题（phase-field-missing / phase-gate-unknown-key /
-           phase-gatetype-unregistered）；
+           phase-gatetype-unregistered）；kb 长手册缺段落结构
+           （kb-structure-thin，experience-sedimentation M3 丁）；
 - info    编辑提示：孤儿技能（无角色/专家显式引用）、能力包无 kb 域目录（占位包属
            预期）、.history/trash 有待清理项。
 """
@@ -28,9 +29,14 @@ from core.skills.experts import GENERALIST, expert_exists
 from core.skills.profiles import BOARD_VIEWS
 from core.skills.roles import _parse_inline_value
 from core.skills.registry import SkillRegistry, parse_frontmatter
+from core.skills.rules import parse_rule_doc
 from core.skills.taxonomy import GENERIC_TASK_TYPE, load_task_types
 
 _LEVEL_ORDER = {"error": 0, "warning": 1, "info": 2}
+
+# 丁 kb 结构体检（experience-sedimentation M3）：长手册单段长文检测阈值
+# （>800 字符且标题行 <2 才报；沉淀口径段要求在 agent 新建侧，见 proposals）
+_KB_STRUCTURE_MIN_CHARS = 800
 
 
 @dataclass
@@ -80,8 +86,12 @@ def _broken_kb_refs(skill_path: Path, snaps: dict[str, str],
     return out
 
 
-def diagnose(packs_root: str | Path) -> DoctorReport:
-    """对 packs 目录做全量体检。只读，不产生任何副作用。"""
+def diagnose(packs_root: str | Path,
+             tools_root: str | Path | None = None) -> DoctorReport:
+    """对 packs 目录做全量体检。只读，不产生任何副作用。
+
+    tools_root 非空时追加工具链注册表体检（toolchain-registry M1：
+    tool-missing info / tool-registry-invalid error）。"""
     root = Path(packs_root)
     rep = DoctorReport()
     if not root.is_dir():
@@ -144,6 +154,23 @@ def diagnose(packs_root: str | Path) -> DoctorReport:
                         rep.issues.append(Issue(
                             "warning", "rating-without-owner", _rel(rf, root),
                             f"评级规则 rating/{rf.stem} 无同名 owners/ 授权边界配套"))
+            # 四段一体模板（rules-four-section M1）：schema fail-fast + trigger 缺失提示
+            tpl_dir = tdir / "rules" / "templates"
+            if tpl_dir.is_dir():
+                from core.skills.rules import validate_rule_meta as _vr_meta
+                for tf in sorted(tpl_dir.glob("*.md")):
+                    meta, _ = parse_rule_doc(tf)
+                    try:
+                        _vr_meta(tf.stem, meta)
+                    except ValueError as e:
+                        rep.issues.append(Issue(
+                            "error", "rule-template-invalid", _rel(tf, root), str(e)))
+                        continue
+                    if str(meta.get("trigger") or "").strip() != tf.stem:
+                        rep.issues.append(Issue(
+                            "warning", "rule-template-no-trigger", _rel(tf, root),
+                            f"规则模板 {tf.stem} frontmatter 缺 trigger 或与文件名不一致"
+                            "（M2 选择器按 trigger 命中，缺了等于死件）"))
             roles_dir = tdir / "roles"
             if roles_dir.is_dir():
                 for rp in sorted(roles_dir.glob("*.yaml")):
@@ -359,6 +386,74 @@ def diagnose(packs_root: str | Path) -> DoctorReport:
                         f"索引条目「{e.point}」的 tags 引用不存在技能: {tag}"
                         "（裁剪按空交集处理，该条目仅全放行角色可见）"))
 
+    # ---- kb 手册结构体检（experience-sedimentation M3 丁；nuclei 质检门借鉴）----
+    # 回扫口径（2026-09-22 实施校准，现网数据定标）：>800 字符且标题行（#/##/###…）
+    # 少于 2 行=单段长文才报——H1 分节（payloader playbook 导入风格）/H2/H3 任一
+    # 分节形态都算有结构；refs/ 子树豁免（上游快照原文不动是既有约定）；短条目/
+    # 存根不检。沉淀口径段（已验证路径/坑/…）要求只约束 agent 新建侧
+    # （proposals._validate_agent_kb），不强制存量手册改标题。
+    if kb_root_dir.is_dir():
+        for md in sorted(kb_root_dir.rglob("*.md")):
+            if ".history" in md.parts or "kb-trash" in md.parts or "refs" in md.parts:
+                continue
+            try:
+                text = md.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            if len(text) <= _KB_STRUCTURE_MIN_CHARS:
+                continue
+            if sum(1 for ln in text.splitlines() if ln.startswith("#")) >= 2:
+                continue
+            rep.issues.append(Issue(
+                "warning", "kb-structure-thin", _rel(md, root),
+                "长手册为单段长文（无任何标题分节）——建议按「适用条件/步骤/坑」"
+                "加标题结构，便于路由命中与段落级引用（K3 hints 定位）"))
+
+    # ---- 同义词表体检（M2 retrieval-upgrade，2026-09-23；反向校验防死组）----
+    # 每个成员词对 kb 索引跑一次匹配：零命中的成员=空转词（扩展了也命不中任何
+    # 文档），整组全空转=死组（词表条目纯占位）。词表缺失只提示不报错（增强层）。
+    from core.skills.kbindex import (DEFAULT_HINT_CAP, build_kb_index,
+                                     hit_synonym_groups, load_synonyms,
+                                     match_kb_index, _query_segments)
+    groups = load_synonyms(root)
+    if not groups:
+        if (root / "kb" / "synonyms.yaml").exists():
+            rep.issues.append(Issue(
+                "warning", "synonyms-empty", "kb/synonyms.yaml",
+                "同义词表存在但解析不出任何组（groups 列表为空或格式不符）"))
+        else:
+            rep.issues.append(Issue(
+                "info", "synonyms-missing", "kb/synonyms.yaml",
+                "领域同义词表未配置（retrieval-upgrade M2 查询扩展层退化）——"
+                "跨语言盲区（越权↔IDOR 类）靠它补，建议参照文档建组"))
+    else:
+        kb_root_dir2 = root / "kb"
+        # capabilities=None 不展开任何源——体检是全 packs 视角，枚举 kb/ 全部
+        # 域目录（licenses 是许可文档非能力域，排除）
+        all_caps = ([d.name for d in kb_root_dir2.iterdir()
+                     if d.is_dir() and d.name != "licenses"]
+                    if kb_root_dir2.is_dir() else [])
+        kb_index = build_kb_index(root, all_caps)
+        for gid, terms in groups:
+            dead: list[str] = []
+            for term in terms:
+                segs = _query_segments(term)
+                if not segs:
+                    dead.append(term)   # 切不出有效段（纯停用泛词）同样空转
+                    continue
+                if not match_kb_index(kb_index, term, cap=DEFAULT_HINT_CAP):
+                    dead.append(term)
+            if len(dead) == len(terms):
+                rep.issues.append(Issue(
+                    "warning", "synonyms-dead-group", f"kb/synonyms.yaml#{gid}",
+                    f"同义词组「{gid}」全部成员对当前 kb 零命中（死组）——"
+                    f"成员：{'、'.join(dead)[:100]}；确认 kb 域覆盖或删组"))
+            elif dead:
+                rep.issues.append(Issue(
+                    "info", "synonyms-idle-term", f"kb/synonyms.yaml#{gid}",
+                    f"组「{gid}」空转成员（kb 零命中，扩展无效）：{'、'.join(dead)}；"
+                    "确认拼写/语料覆盖，或移出组防噪声"))
+
     # ---- 近重复技能（info；Jaccard ≥0.6 且共有词 ≥2，提示合并/区分边界）----
     enabled_skills = [s for s in skills if s.enabled]
     signatures = {
@@ -406,6 +501,26 @@ def diagnose(packs_root: str | Path) -> DoctorReport:
                     f"回收站有 {len(items)} 项可清理或恢复: "
                     + "、".join(sorted(p.name for p in items)[:5])
                     + ("…" if len(items) > 5 else "")))
+
+    # ---- 工具链注册表（toolchain-registry M1，2026-09-23；tools_root=None 跳过）----
+    # 缺失条目 info 级（按能力降级哲学，工具缺失不是错误；guide 文案随条目给出）；
+    # registry 结构坏 = error（入库声明出错是 bug，fail-fast 显性化）。
+    if tools_root is not None:
+        try:
+            from core.toolchain import load_tool_overrides, probe_tools as _registry_probe
+            for row in _registry_probe(tools_root, overrides=load_tool_overrides()):
+                if row["status"] == "ready":
+                    continue
+                rep.issues.append(Issue(
+                    "info", "tool-missing", f"tools/registry.json#{row['name']}",
+                    f"工具 {row['name']}（{row.get('kind')}）未检出——{row.get('detail') or '无指引'}"))
+        except ValueError as e:
+            rep.issues.append(Issue(
+                "error", "tool-registry-invalid", "tools/registry.json", str(e)))
+        except Exception as e:  # noqa: BLE001 —— 体检不阻断主流程
+            rep.issues.append(Issue(
+                "warning", "tool-registry-error", "tools/registry.json",
+                f"registry 探测异常: {e}"))
 
     return rep
 

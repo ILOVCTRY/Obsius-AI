@@ -5,18 +5,26 @@ import { ArrowUp, GitFork, Paperclip, Square, X } from "lucide-react"
 const TaskFlow = lazy(() => import("./live/TaskFlow").then((m) => ({ default: m.TaskFlow })))
 import { PlanPanel } from "./live/PlanPanel"
 import { OrchChatPane } from "./live/OrchChatPane"
+import { GoalEditor, PersonaEditor } from "./live/editors"
+import { PhaseBar } from "./live/PhaseBar"
 import { EventRow, type StreamItem } from "./live/EventRow"
 import { ApiError, api, pollJob } from "@/lib/api"
 import { eventStyle } from "@/lib/events"
 import { roleName, sessionLabel } from "@/lib/roles"
 import { useEvents } from "@/lib/useEvents"
+import { buildStreamItems } from "@/lib/turnStream"
 import { fmtDateTimeMin, parseTs } from "@/lib/datetime"
-import type { AttachmentInfo, Autonomy, BBEvent, Expert, ModelInfo, OrchPersona, OrchProposal, OrchTickResult, PhaseGoal, ProjectUsage, ReplanResult, RoleInfo, Session, Task } from "@/lib/types"
+import type { AttachmentInfo, Asset, Autonomy, BBEvent, Expert, ModelInfo, OrchPersona, OrchProposal, OrchTickResult, PhaseGoal, ProjectUsage, ReplanResult, RoleInfo, Session, Task } from "@/lib/types"
 import { StatusDot, type SessionStatus } from "@/components/StatusDot"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
 // 核心页（DESIGN.md §12）：Agent 直播间——多会话页签 + 状态点 + 事件流 + 插话
+
+// 滑动窗口（2026-09-23 会话窗口定稿）：DOM 展示上界与裁剪粒度（PAGE 与 useEvents 对齐；
+// 超上界裁头部一批留余量，避免每条事件都触发裁剪）
+const PAGE = 50
+const MAX_DOM = 300
 
 type Tab = { key: string; label: string; sessionId: string | null }
 
@@ -75,7 +83,7 @@ function quotaHint(msg: string | null | undefined): boolean {
   return !!msg && /429|quota|insufficient|余额|配额|rate.?limit/i.test(msg)
 }
 
-/** C2 作战计划状态灯四态（§6.9，2026-09-18）：灯色反映真实派生状态——
+/** C2 自动派生状态灯四态（§6.9，2026-09-18；goal 统一后挂 🧠 自主档 chip）：
  *  灰=auto_derive 关；琥珀=paused/Token 预算耗尽/上次派生 error·empty；绿=其余（运行中）。
  *  label=状态词（弹层内点+文字直接可读）；title=悬停详情。 */
 function deriveLamp(usage: ProjectUsage | null | undefined): { cls: string; textCls: string; title: string; label: string } {
@@ -153,9 +161,18 @@ function BudgetPopover({ usage, onClose, onSave }: {
   }
 
   const field = "h-7 w-full rounded-md border bg-background px-2 text-xs font-mono"
+  const hit = usage.tokens.cache_hit
   return (
     <div className="absolute right-0 top-9 z-20 w-60 rounded-lg border bg-popover p-3 text-xs shadow-md">
       <p className="mb-2 text-muted-foreground">资源上限与预算（任何档位安全层不放松）</p>
+      {/* M1 prompt caching 观测（2026-09-23）：累计用量 + 缓存命中率 */}
+      <p className="mb-2 rounded-md bg-accent/40 px-2 py-1 font-mono text-[11px] text-muted-foreground">
+        累计 {fmtTokens(usage.tokens.used)}
+        {usage.tokens.budget ? ` / ${fmtTokens(usage.tokens.budget)}（${Math.round((usage.tokens.pct ?? 0) * 100)}%）` : ""}
+        {hit != null && hit > 0
+          ? <> · 缓存命中 <span className="text-(--status-ok)">{Math.round(hit * 100)}%</span></>
+          : ""}
+      </p>
       <label className="mb-1 block text-muted-foreground">活跃会话上限 sessions_cap</label>
       <input className={field} type="number" min={1} max={20} value={cap}
              onChange={(e) => setCap(e.target.value)} />
@@ -278,197 +295,38 @@ function TeamPopover({ track, current, onClose, onSave }: {
   )
 }
 
-/** 阶段目标编辑弹层（对话化编排器 M2，§4.3）：text 一句话 + criteria 人话验收
- *  口径（一行一条）+ phase 可空；保存=goal.confirm、清空=goal.clear（事件留痕，
- *  变更历史可回放）。goal 注入编排 tick 与对话轮系统提示。 */
-function GoalEditor({ initial, onClose, onSave, onClear }: {
-  initial: PhaseGoal | null
-  onClose: () => void
-  onSave: (body: { text: string; criteria?: string[]; phase?: string | null }) => Promise<void>
-  onClear: () => Promise<void>
-}) {
-  const [text, setText] = useState(initial?.text ?? "")
-  const [criteria, setCriteria] = useState((initial?.criteria ?? []).join("\n"))
-  const [phase, setPhase] = useState(initial?.phase ?? "")
-  const [saving, setSaving] = useState(false)
-  const [err, setErr] = useState<string | null>(null)
-
-  const save = async () => {
-    setSaving(true); setErr(null)
-    try {
-      await onSave({
-        text: text.trim(),
-        criteria: criteria.split("\n").map((s) => s.trim()).filter(Boolean),
-        phase: phase.trim() || null,
-      })
-      onClose()
-    } catch (e) {
-      setErr(String(e))
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <div className="w-96 rounded-lg border bg-popover p-4 text-xs shadow-lg">
-      <p className="mb-1">🎯 阶段目标（人类确认口径）</p>
-      <p className="mb-2 text-[10px] leading-relaxed text-muted-foreground">
-        确认后注入编排 tick 与对话轮系统提示——编排器朝它推进，判据达成或资产穷尽才收工。
-        变更历史在事件流（goal.confirm / goal.clear）。
-      </p>
-      <textarea rows={2} value={text} onChange={(e) => setText(e.target.value)}
-        placeholder="一句话目标（如：本周打穿靶场 3 台主机）"
-        className="mb-2 w-full resize-y rounded-md border bg-background px-2 py-1 leading-relaxed" />
-      <label className="mb-1 block text-muted-foreground">验收口径（一行一条，人话即可，非机读）</label>
-      <textarea rows={3} value={criteria} onChange={(e) => setCriteria(e.target.value)}
-        placeholder={"拿到 3 台主机的 flag\n输出复现报告"}
-        className="mb-2 w-full resize-y rounded-md border bg-background px-2 py-1 leading-relaxed" />
-      <label className="mb-1 block text-muted-foreground">阶段标记（可空，如 initial-access）</label>
-      <input value={phase} onChange={(e) => setPhase(e.target.value)}
-        className="mb-2 h-7 w-full rounded-md border bg-background px-2" />
-      {err && <p className="mb-1 text-(--status-error)">{err}</p>}
-      <div className="flex items-center gap-2">
-        <Button size="sm" variant="ghost" onClick={onClose}>取消</Button>
-        <Button size="sm" variant="outline" disabled={saving || !initial}
-          title={initial ? "清空目标（goal.clear 留痕，编排器回到无目标态）" : "当前无目标"}
-          onClick={async () => {
-            setSaving(true); setErr(null)
-            try { await onClear(); onClose() } catch (e) { setErr(String(e)) } finally { setSaving(false) }
-          }}>
-          清空
-        </Button>
-        <span className="flex-1" />
-        <Button size="sm" disabled={saving || !text.trim()} onClick={save}>
-          {saving ? "保存中…" : "确认目标"}
-        </Button>
-      </div>
-    </div>
-  )
-}
-
-/** 编排器拟人身份弹层（M3，§4.4）：display_name 贯穿页签/气泡，persona 只注入
- *  对话轮系统提示（tick 不受影响）。清空 persona 文本=剥键回退缺省。 */
-function PersonaEditor({ initial, onClose, onSave }: {
-  initial: OrchPersona | null
-  onClose: () => void
-  onSave: (body: { display_name: string; persona: string }) => Promise<void>
-}) {
-  const [name, setName] = useState(initial?.display_name ?? "")
-  const [persona, setPersona] = useState(initial?.persona ?? "")
-  const [saving, setSaving] = useState(false)
-  const [err, setErr] = useState<string | null>(null)
-
-  const save = async () => {
-    setSaving(true); setErr(null)
-    try {
-      await onSave({ display_name: name.trim() || "编排器", persona: persona.trim() })
-      onClose()
-    } catch (e) {
-      setErr(String(e))
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <div className="w-96 rounded-lg border bg-popover p-4 text-xs shadow-lg">
-      <p className="mb-1">🎭 编排器身份（拟人）</p>
-      <p className="mb-2 text-[10px] leading-relaxed text-muted-foreground">
-        显示名贯穿页签与对话气泡；人设只注入对话轮（「与编排对话」），编排 tick 的决策语气不受影响。
-      </p>
-      <label className="mb-1 block text-muted-foreground">显示名</label>
-      <input value={name} onChange={(e) => setName(e.target.value)} placeholder="编排器"
-        className="mb-2 h-7 w-full rounded-md border bg-background px-2" />
-      <label className="mb-1 block text-muted-foreground">人设（persona，可空）</label>
-      <textarea rows={4} value={persona} onChange={(e) => setPersona(e.target.value)}
-        placeholder="如：老编——先给结论再给依据，不打官腔，拿不准就直说"
-        className="mb-2 w-full resize-y rounded-md border bg-background px-2 py-1 leading-relaxed" />
-      {err && <p className="mb-1 text-(--status-error)">{err}</p>}
-      <div className="flex items-center gap-2">
-        <Button size="sm" variant="ghost" onClick={onClose}>取消</Button>
-        <span className="flex-1" />
-        <Button size="sm" disabled={saving} onClick={save}>{saving ? "保存中…" : "保存"}</Button>
-      </div>
-    </div>
-  )
-}
-
-/** 轨级行动边界编辑弹层（R2：mode 退役→轨级，§6.9 2026-09-17）。
- * redteam 轨（红队行动：ROE 四要素 + mission）与 pentest 轨（作战计划：
- * mission + 默认判据「渗透默认」）两轨渲染；ROE 四要素块仅 redteam，
- * 不再强制（缺省=按 pentest 上限兜底，usage.roe_complete 提示补全）。 */
-function ModePopover({ usage, track, onClose, onSave }: {
+/** 阶段目标编辑弹层（对话化编排器 M2，§4.3；goal 统一后=唯一目标判据层）：
+ *  text 一句话 + criteria 验收判据（一行一条，判据第一优先源——自动派生 L1
+ *  判跳吃它）+ phase 可空；保存=goal.confirm、清空=goal.clear（事件留痕，
+ *  变更历史可回放）。goal 注入编排 tick 与对话轮系统提示。
+ *  「应用模板」下拉把内置/用户判据模板内容填入判据框（存删模板 API 端点保留）。 */
+/** 行动边界编辑弹层（goal 统一 2026-09-22：原「作战计划/红队行动」两轨弹层
+ *  退役——目标与判据归 🎯 阶段目标（GoalEditor），自动派生开关归 🧠 自主档；
+ *  本弹层只留轨级行动边界：redteam ROE 四要素留档编辑。ROE 不再强制
+ *  （缺省=按 pentest 上限兜底，usage.roe_complete 提示补全）。仅 redteam 渲染。 */
+function RoePopover({ usage, onClose, onSave }: {
   usage: ProjectUsage
-  track: "pentest" | "redteam"
   onClose: () => void
   onSave: (patch: Record<string, unknown>) => Promise<void>
 }) {
-  const isRedteam = track === "redteam"
-  const builtinName = isRedteam ? "红队默认" : "渗透默认"
-  const builtinKey = isRedteam ? "__b_redteam" : "__b_pentest"
-  const [text, setText] = useState(usage.mission?.text ?? "")
-  const [criteria, setCriteria] = useState(usage.mission?.criteria ?? "")
-  const [autoDerive, setAutoDerive] = useState(usage.auto_derive ?? false)
-  const [templateName, setTemplateName] = useState(usage.criteria_template ?? "")
-  const [tplName, setTplName] = useState("")
-  const [templates, setTemplates] = useState<{ builtin: Record<string, string>; user: Record<string, string> }>({ builtin: {}, user: {} })
   const [targets, setTargets] = useState(usage.redteam_roe?.targets ?? "")
   const [window_, setWindow_] = useState(usage.redteam_roe?.window ?? "")
   const [exclusions, setExclusions] = useState(usage.redteam_roe?.exclusions ?? "")
   const [approver, setApprover] = useState(usage.redteam_roe?.approver ?? "")
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState("")
-  // 已应用的内置模板（""=无）：下拉选择后保持显示所选项，不复位回占位符
-  const [appliedBuiltin, setAppliedBuiltin] = useState<"" | "__b_redteam" | "__b_pentest">(
-    () => (usage.criteria_template === "红队默认" ? "__b_redteam"
-      : usage.criteria_template === "渗透默认" ? "__b_pentest" : ""))
-  const prefilledRef = useRef(false)
-
-  useEffect(() => {
-    api.judgmentTemplates().then(setTemplates).catch(() => {})
-  }, [])
-
-  // 打开弹层时判据为空 → 自动预填轨内置默认判据（templates 首包到位后一次）；
-  // pentest 轨 mission 目标同时预填默认作战计划「挖掘更多漏洞」
-  useEffect(() => {
-    if (prefilledRef.current || !Object.keys(templates.builtin).length) return
-    if (!criteria.trim()) {
-      const text0 = templates.builtin[builtinName]
-      if (text0) {
-        setCriteria(text0)
-        setAppliedBuiltin(builtinKey)
-      }
-    }
-    if (!isRedteam && !text.trim()) setText("挖掘更多漏洞")
-    prefilledRef.current = true
-  }, [templates.builtin, criteria])
 
   const save = async () => {
-    // R2：ROE 不再强制——留空的键会被服务端归一化剥除（行为按 pentest 上限兜底）
+    // ROE 不再强制——留空的键会被服务端归一化剥除（行为按 pentest 上限兜底）
     setSaving(true)
     setErr("")
     try {
-      const patch: Record<string, unknown> = {
-        criteria_template: templateName
-          || (appliedBuiltin === "__b_redteam" ? "红队默认"
-            : appliedBuiltin === "__b_pentest" ? "渗透默认" : ""),
-        autonomy: {
-          level: usage.level, paused: usage.paused,
-          sessions_cap: usage.sessions_cap, max_chain_ticks: usage.max_chain_ticks,
-          token_budget: usage.token_budget, task_budget: usage.task_budget,
-          auto_derive: autoDerive,
-        },
-      }
-      if (text.trim() || criteria.trim()) {
-        patch.mission = { text: text.trim(), criteria: criteria.trim() }
-      }
-      if (isRedteam) {
-        patch.redteam_roe = {
+      await onSave({
+        redteam_roe: {
           targets: targets.trim(), window: window_.trim(),
           exclusions: exclusions.trim(), approver: approver.trim(),
-        }
-      }
-      await onSave(patch)
+        },
+      })
       onClose()
     } catch (e) {
       setErr(String(e))
@@ -480,106 +338,22 @@ function ModePopover({ usage, track, onClose, onSave }: {
   const field = "w-full rounded border bg-background p-1.5 text-[11px]"
   return (
     <div className="absolute left-0 top-9 z-20 w-80 rounded-lg border bg-popover p-3 text-xs shadow-md">
-      <p className="mb-2 flex items-center gap-1.5 text-muted-foreground">
-        <span
-          className={cn("inline-block size-2 rounded-full", deriveLamp(usage).cls)}
-          title={deriveLamp(usage).title}
-        />
-        <span className={cn("shrink-0", deriveLamp(usage).textCls)}
-              title={deriveLamp(usage).title}>
-          {deriveLamp(usage).label}
-        </span>
-        行动边界：{isRedteam ? "红队行动" : "作战计划"}与 mission（§6.9；安全红线不放松）
+      <p className="mb-2 text-muted-foreground">
+        行动边界：红队 ROE 留档（§6.9；安全红线不放松）——目标与判据在 🎯 阶段目标
       </p>
-      <label className="mb-2 flex cursor-pointer items-center gap-1.5">
-        <input type="checkbox" checked={autoDerive} onChange={(e) => setAutoDerive(e.target.checked)} />
-        <span>任务空时自动派生新任务（L1/L2 生效）</span>
-      </label>
-      {isRedteam && <div className="mb-2 space-y-1 rounded border border-(--status-approval)/40 p-2">
+      <div className="mb-2 space-y-1 rounded border border-(--status-approval)/40 p-2">
         <p className="text-[10px] text-(--status-approval)">
           ROE 四要素{usage.roe_complete === false ? "（未核验齐全：行动按渗透测试上限兜底）" : "（留档审计；留空的项按未授权处理）"}
         </p>
-          <input className={field} value={targets} onChange={(e) => setTargets(e.target.value)}
-                 placeholder="① 授权目标清单" />
-          <input className={field} value={window_} onChange={(e) => setWindow_(e.target.value)}
-                 placeholder="② 时间窗口" />
-          <input className={field} value={exclusions} onChange={(e) => setExclusions(e.target.value)}
-                 placeholder="③ 禁止事项" />
-          <input className={field} value={approver} onChange={(e) => setApprover(e.target.value)}
-                 placeholder="④ 授权人" />
-      </div>}
-      <label className="mb-1 block text-muted-foreground">判据（自动派生的方向；每行一条）</label>
-      <div className="mb-1 flex gap-1">
-        <select
-          className="h-7 min-w-0 flex-1 rounded border bg-background px-1 text-[11px]"
-          value={templateName ? templateName : appliedBuiltin}
-          onChange={(e) => {
-            const name = e.target.value
-            if (!name) return
-            if (name === "__b_redteam" || name === "__b_pentest") {
-              setCriteria(templates.builtin[name === "__b_redteam" ? "红队默认" : "渗透默认"] ?? "")
-              setTemplateName("")
-              setAppliedBuiltin(name)
-              return
-            }
-            if (name in templates.user) {
-              setCriteria(templates.user[name])
-              setTemplateName(name)
-              setAppliedBuiltin("")
-            }
-          }}
-        >
-          <option value="">应用判据模板…</option>
-          <optgroup label="内置">
-            {isRedteam
-              ? <option value="__b_redteam">内置：红队默认</option>
-              : <option value="__b_pentest">内置：渗透默认</option>}
-          </optgroup>
-          {Object.keys(templates.user).length > 0 && (
-            <optgroup label="我的模板">
-              {Object.keys(templates.user).map((n) => (
-                <option key={n} value={n}>{n}</option>
-              ))}
-            </optgroup>
-          )}
-        </select>
+        <input className={field} value={targets} onChange={(e) => setTargets(e.target.value)}
+               placeholder="① 授权目标清单" />
+        <input className={field} value={window_} onChange={(e) => setWindow_(e.target.value)}
+               placeholder="② 时间窗口" />
+        <input className={field} value={exclusions} onChange={(e) => setExclusions(e.target.value)}
+               placeholder="③ 禁止事项" />
+        <input className={field} value={approver} onChange={(e) => setApprover(e.target.value)}
+               placeholder="④ 授权人" />
       </div>
-      <textarea className={field} rows={8} value={criteria} onChange={(e) => setCriteria(e.target.value)}
-                placeholder="□ 判据一&#10;□ 判据二（写判据 = 授权自动派生往此方向打）" />
-      <div className="mb-2 mt-1 flex gap-1">
-        <input className={cn(field, "min-w-0 flex-1")} value={tplName} onChange={(e) => setTplName(e.target.value)}
-               placeholder="存为模板（名称）" />
-        <Button size="sm" variant="outline"
-                disabled={!tplName.trim() || !criteria.trim()}
-                onClick={async () => {
-                  const merged = { ...templates.user, [tplName.trim()]: criteria }
-                  setTemplates((t) => ({ ...t, user: merged }))
-                  setTemplateName(tplName.trim())
-                  await api.saveJudgmentTemplates(merged)
-                }}>
-          存模板
-        </Button>
-        {templateName && templates.user[templateName] !== undefined && (
-          <Button size="sm" variant="outline"
-                  onClick={async () => {
-                    const merged = { ...templates.user }
-                    delete merged[templateName]
-                    setTemplates((t) => ({ ...t, user: merged }))
-                    setTemplateName("")
-                    await api.deleteJudgmentTemplate(templateName)
-                  }}>
-            删
-          </Button>
-        )}
-      </div>
-      <label className="mb-1 block text-muted-foreground">{isRedteam ? "mission 目标" : "作战计划目标"}（可选；留空则只用判据驱动）</label>
-      <textarea className={field} rows={3} value={text} onChange={(e) => setText(e.target.value)}
-                placeholder={isRedteam ? "战役目标一句话" : "默认：挖掘更多漏洞"} />
-      <p className="mt-2 rounded border bg-card p-2 text-[10px] leading-relaxed text-muted-foreground">
-        <span className="font-medium text-foreground">启动方式：</span>
-        ① 勾选「任务空时自动派生」② 点保存——勾选状态下会立即启动一轮编排，之后任务空了自动续批；
-        也可用输入框「指挥编排」直接下达一次性指令。判据全部达成或资产穷尽（uncovered=0）时自动收工。
-      </p>
       {err && <p className="mt-2 text-(--status-error)">{err}</p>}
       <Button size="sm" className="mt-2 w-full" disabled={saving} onClick={save}>
         {saving ? "保存中…" : "保存"}
@@ -597,7 +371,9 @@ const FILTERS = [
       k.startsWith("task.") || k.startsWith("session.") || k.startsWith("approval.") ||
       k.startsWith("orch.") || k.startsWith("mission.") ||
       k === "project.digest" || k === "finding.new" || k === "advisor.intervention" ||
-      k === "goal.confirm" || k === "goal.clear" },
+      k === "goal.confirm" || k === "goal.clear" ||
+      k === "phase.changed" || k === "phase.gate_open" ||
+      k === "verify.result" },
   { key: "route", label: "路由", match: (k: string) =>
       k === "skill.routed" || k === "skill.open" || k === "kb.open" || k === "kb.search" },
   { key: "command", label: "命令", match: (k: string) =>
@@ -614,6 +390,7 @@ const FILTERS = [
 // 关联；计划步进属会话内部执行细节，留会话页签——2026-09-18 定稿）
 const ORCH_TASK_EVENTS = new Set([
   "task.claimed", "task.done", "task.failed", "task.reopened", "task.lease_expired",
+  "task.cancelled",  // M4 C1：取消（编排器/审批/人工，payload.by 区分）
 ])
 
 function sessionStatus(mine: BBEvent[]): SessionStatus {
@@ -633,10 +410,13 @@ function sessionStatus(mine: BBEvent[]): SessionStatus {
 }
 
 export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { sid: string; n: number } | null }) {
-  // 事件流分页（2026-09-17）：首屏最新 50 条，上翻懒加载更早；已加载缓存常驻不重拉
-  const { events, connected, loadedAll, loadingEarlier, loadEarlier } = useEvents(pid)
   const [sessions, setSessions] = useState<Session[]>([])
   const [activeTab, setActiveTab] = useState<string>("__all")
+  // 事件流分页（2026-09-17）：首屏最新 50 条，上翻懒加载更早；已加载缓存常驻不重拉。
+  // 会话维度分页（2026-09-23 会话窗口）：会话页签走会话源（打开即拉本会话历史，
+  // 修「已结束会话页签近乎空白」——全局最新 50 条里该会话可能零事件），__all/编排走全局源
+  const dataSid = activeTab !== "__all" && activeTab !== "__orch" ? activeTab : null
+  const { events, connected, loadedAll, loadingEarlier, loadEarlier, trimDom } = useEvents(pid, dataSid)
   const [filter, setFilter] = useState<string>("all")
   const [overrides, setOverrides] = useState<Map<number, boolean>>(new Map())
   const [remark, setRemark] = useState("")
@@ -770,6 +550,38 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
   const roleNames = useMemo(
     () => Object.fromEntries(roles.map((r) => [r.role, r.name || r.role])),
     [roles])
+  // live-stream-ux A3（2026-09-23）：资产 id→value 反查映射——工具摘要（bb_asset_status/
+  // bb_query/finding 行「目标 x」）显资产值不显不可读 id；WS asset.new 增量维护
+  const [assets, setAssets] = useState<Asset[]>([])
+  useEffect(() => {
+    // dataSid 入依赖：会话源下 WS 增量只捕获本会话的 asset.new，切页签重拉全量
+    // 补齐跨页签映射（资产 id→value 反查是全项目维度）
+    api.assets(pid).then(setAssets).catch(() => {})
+  }, [pid, dataSid])
+  useEffect(() => {
+    if (!events.length) return
+    setAssets((prev) => {
+      let changed = false
+      const next = [...prev]
+      for (const e of events) {
+        if (e.kind === "asset.new" && typeof e.payload.asset_id === "string"
+            && typeof e.payload.value === "string") {
+          const id = e.payload.asset_id
+          if (!next.some((a) => a.id === id)) {
+            next.push({
+              id, project_id: pid, type: String(e.payload.type ?? ""),
+              value: e.payload.value, parent_id: null, status: "open",
+              meta: {}, author: String(e.author ?? ""), created_at: e.created_at,
+            })
+            changed = true
+          }
+        }
+      }
+      return changed ? next : prev
+    })
+  }, [events, pid])
+  const assetName = useCallback(
+    (id: string) => assets.find((a) => a.id === id)?.value, [assets])
   // 页签：全部 / 编排（无 session_id 的编排事件；M3 起显拟人显示名）/ 各会话（已关闭的隐藏；2026-09-19 起 ×=结束会话，A1 摘离退役）
   const tabs: Tab[] = useMemo(() => [
     { key: "__all", label: "全部", sessionId: null },
@@ -811,177 +623,8 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
   // 一条折叠行。新数据按 payload.call_id 配对；存量旧事件无 call_id，降级为「同会话最近
   // 未闭合 command」游标配对（run_cmd 串行执行，会话内相邻性成立），session_id 不符宁走
   // 孤儿渲染不错配。visible 升序 = 落库序（events 表 id 单调，WS 按 id 推进），无需处理乱序。
-  const items = useMemo<StreamItem[]>(() => {
-    const out: StreamItem[] = []
-    // call_id → pair 位置 [ti, pi]：ti=-1 = out 顶层，否则 = 所在 turn 下标
-    // （命令对可能入轮过程组，顶层下标不再指向 pair 本体）
-    const pendingIdx = new Map<string, [number, number]>()
-    let legacy: { loc: [number, number]; event: BBEvent } | null = null
-    // 中断双事件去重（任务中断时 task.failed 与 session.aborted 成对落库，见
-    // loop.py _abort_finish）：按（会话， 任务）配对，渲染层只留「❌ 任务失败」；
-    // 纯会话中断（无同任务失败行，如空闲窗被打断）仍显示「⛔ 人工中断」。审计两条都在。
-    const failedKeys = new Set<string>()
-    // 思考流式（2026-09-19）：已有终稿 llm.thinking 的 stream_id 集合——终稿到达后
-    // 该流的 delta 过渡行跳过（终稿行自带全文+耗时；delta 行后端已清剪，此处兜底旧视图）
-    const finalStreams = new Set<string>()
-    // 回复流式（2026-09-20 对话化）：终稿 agent.chat 的 stream_id 集合，同上先例
-    const finalChats = new Set<string>()
-    for (const e of visible) {
-      if (e.kind === "task.failed") {
-        const tid = typeof e.payload.task_id === "string" ? e.payload.task_id : ""
-        if (!tid) continue
-        const sid = typeof e.session_id === "string" ? e.session_id
-          : typeof e.payload.session_id === "string" ? e.payload.session_id : ""
-        failedKeys.add(`${sid} ${tid}`)
-      } else if (e.kind === "llm.thinking" && typeof e.payload.stream_id === "string") {
-        finalStreams.add(e.payload.stream_id)
-      } else if (e.kind === "agent.chat" && typeof e.payload.stream_id === "string") {
-        finalChats.add(e.payload.stream_id)
-      }
-    }
-    const liveThinking = new Map<string, number>() // stream_id -> out 中 delta 组下标
-    const liveOrphanChat = new Map<string, number>() // 无轮上下文回复 delta → out 下标
-    // 对话轮分组（2026-09-20）：human_note 开轮（同会话未收口轮先收口），过程事件
-    // （thinking/命令对/tool.call/任务轮叙述）入 process，无 step 的 agent.chat 收口
-    // reply。非「全部」筛选下 note/process/reply 不齐 → 空轮回落平铺审计行，零回退。
-    const liveChatTurn = new Map<string, number>() // 回复 stream_id → turn 下标
-    const liveThinkTurn = new Map<string, [number, number]>() // 思考 stream_id → [turn 下标, process 下标]
-    const openTurn = new Map<string, number>() // 会话 → 未收口 turn 下标
-    const skey = (ev: BBEvent) => typeof ev.session_id === "string" ? ev.session_id : ""
-    type Turn = Extract<StreamItem, { type: "turn" }>
-    const turnAt = (idx: number) => out[idx] as Turn
-    for (const e of visible) {
-      if (e.kind === "command") {
-        const cid = typeof e.payload.call_id === "string" ? e.payload.call_id : ""
-        let loc: [number, number]
-        if (openTurn.has(skey(e))) {
-          const ti = openTurn.get(skey(e))!
-          turnAt(ti).process.push({ type: "pair", command: e })
-          loc = [ti, turnAt(ti).process.length - 1]
-        } else {
-          out.push({ type: "pair", command: e })
-          loc = [-1, out.length - 1]
-        }
-        if (cid) pendingIdx.set(cid, loc)
-        else legacy = { loc, event: e }
-      } else if (e.kind === "command.result") {
-        const cid = typeof e.payload.call_id === "string" ? e.payload.call_id : ""
-        const loc = cid ? pendingIdx.get(cid)
-          : legacy && legacy.event.session_id === e.session_id ? legacy.loc : undefined
-        if (loc !== undefined) {
-          const [ti, pi] = loc
-          const cmd = (ti === -1
-            ? (out[pi] as Extract<StreamItem, { type: "pair" }>).command
-            : (turnAt(ti).process[pi] as Extract<StreamItem, { type: "pair" }>).command)
-          const pair: StreamItem = { type: "pair", command: cmd, result: e }
-          if (ti === -1) out[pi] = pair
-          else turnAt(ti).process[pi] = pair
-          if (cid) pendingIdx.delete(cid)
-          else legacy = null
-        } else {
-          out.push({ type: "single", event: e }) // 孤儿 result：单独渲染
-        }
-      } else if (e.kind === "session.aborted" && e.payload.note === "人工中断") {
-        const tid = typeof e.payload.task_id === "string" ? e.payload.task_id : ""
-        const sid = typeof e.session_id === "string" ? e.session_id
-          : typeof e.payload.session_id === "string" ? e.payload.session_id : ""
-        if (!tid || !failedKeys.has(`${sid} ${tid}`)) out.push({ type: "single", event: e })
-      } else if (e.kind === "message.inbox" && e.payload.kind === "human_note") {
-        const prev = openTurn.get(skey(e))
-        if (prev !== undefined) {
-          const t = turnAt(prev)
-          if (!t.reply && !t.replyStream && t.process.length === 0) {
-            out[prev] = { type: "single", event: t.note } // 空轮回落平铺审计行
-          }
-          openTurn.delete(skey(e))
-        }
-        out.push({ type: "turn", note: e, process: [] })
-        openTurn.set(skey(e), out.length - 1)
-      } else if (e.kind === "llm.thinking.delta") {
-        // 思考流式增量（2026-09-19）：按 stream_id 组装成一行滚动「思考中…」；
-        // 轮上下文在场时入过程组原位替换（liveThinkTurn 记 [轮下标, process 下标]）
-        const sid = typeof e.payload.stream_id === "string" ? e.payload.stream_id : ""
-        if (!sid || finalStreams.has(sid)) continue
-        const inTurn = liveThinkTurn.get(sid)
-        if (inTurn && openTurn.get(skey(e)) === inTurn[0]) {
-          const t = turnAt(inTurn[0])
-          const prev = t.process[inTurn[1]] as Extract<StreamItem, { type: "single" }>
-          t.process[inTurn[1]] = { type: "single", event: { ...e, id: prev.event.id } }
-        } else if (openTurn.has(skey(e))) {
-          const ti = openTurn.get(skey(e))!
-          turnAt(ti).process.push({ type: "single", event: e })
-          liveThinkTurn.set(sid, [ti, turnAt(ti).process.length - 1])
-        } else {
-          const idx = liveThinking.get(sid)
-          if (idx !== undefined) {
-            const prev = out[idx] as Extract<StreamItem, { type: "single" }>
-            out[idx] = { type: "single", event: { ...e, id: prev.event.id } }
-          } else {
-            out.push({ type: "single", event: e })
-            liveThinking.set(sid, out.length - 1)
-          }
-        }
-      } else if (e.kind === "agent.chat.delta") {
-        // 回复流式增量（2026-09-20）：轮内 replyStream 原位替换（累计全文自愈）；
-        // 无轮上下文的孤儿 delta 单行流式渲染（escalation-only 回复等）
-        const sid = typeof e.payload.stream_id === "string" ? e.payload.stream_id : ""
-        if (!sid || finalChats.has(sid)) continue
-        const ti = liveChatTurn.get(sid)
-        if (ti !== undefined) {
-          turnAt(ti).replyStream = e
-        } else if (openTurn.has(skey(e))) {
-          const t = openTurn.get(skey(e))!
-          turnAt(t).replyStream = e
-          liveChatTurn.set(sid, t)
-        } else {
-          const idx = liveOrphanChat.get(sid)
-          if (idx !== undefined) {
-            const prev = out[idx] as Extract<StreamItem, { type: "single" }>
-            out[idx] = { type: "single", event: { ...e, id: prev.event.id } }
-          } else {
-            out.push({ type: "single", event: e })
-            liveOrphanChat.set(sid, out.length - 1)
-          }
-        }
-      } else if (e.kind === "agent.chat") {
-        if (e.payload.step === undefined) {
-          // 对话轮回复（无 step）：收口轮；已按 stream_id 关联的先清 replyStream
-          const sid = typeof e.payload.stream_id === "string" ? e.payload.stream_id : ""
-          const ti = sid ? liveChatTurn.get(sid) : undefined
-          if (ti !== undefined) {
-            const t = turnAt(ti)
-            t.reply = e
-            t.replyStream = undefined
-            openTurn.delete(skey(e))
-          } else if (openTurn.has(skey(e))) {
-            const t = openTurn.get(skey(e))!
-            turnAt(t).reply = e
-            openTurn.delete(skey(e))
-          } else {
-            out.push({ type: "single", event: e })
-          }
-        } else if (openTurn.has(skey(e))) {
-          // 任务轮叙述行（带 step）：轮在场入过程组，否则平铺（任务页签现状不变）
-          turnAt(openTurn.get(skey(e))!).process.push({ type: "single", event: e })
-        } else {
-          out.push({ type: "single", event: e })
-        }
-      } else if ((e.kind === "llm.thinking" || e.kind === "tool.call")
-                 && openTurn.has(skey(e))) {
-        turnAt(openTurn.get(skey(e))!).process.push({ type: "single", event: e })
-      } else {
-        out.push({ type: "single", event: e })
-      }
-    }
-    // 流扫尾：仍未收口且空过程的轮 → 平铺（引导被任务轮消化/纯排队场景，审计不缺行）
-    for (const idx of openTurn.values()) {
-      const t = turnAt(idx)
-      if (!t.reply && !t.replyStream && t.process.length === 0) {
-        out[idx] = { type: "single", event: t.note }
-      }
-    }
-    return out
-  }, [visible])
+  // 装配逻辑 2026-09-25 抽至 lib/turnStream.ts（ConversationPane 共用，行为不变）
+  const items = useMemo<StreamItem[]>(() => buildStreamItems(visible), [visible])
   // 倒序：最新事件 = DOM 首子 = column-reverse 视觉最底 = 滚动原点 0。
   // 贴底由浏览器布局保证（scrollTop 初始/钳制在 0 即最新），零脚本滚动零竞态；
   // 上翻阅读的位置稳定交给浏览器 scroll anchoring。DOM 只渲染已加载的分页
@@ -1001,12 +644,31 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
   // 上翻到视觉顶部附近自动加载更早一页。column-reverse 的滚动原点在最底（最新），
   // Chrome 走负值域（scrollTop=0 贴底，视觉顶部=-max）；取 |scrollTop| 兼容正负两套实现，
   // 距顶 = 可滚动总距离 - 已上翻距离。
+  // 滑动窗口（2026-09-23 会话窗口定稿）：DOM 上界 MAX_DOM——滚回底部附近裁掉
+  // 头部一批（贴底视觉零跳动：column-reverse 原点在底部，顶部内容缩减不位移）；
+  // 裁掉的更早消息留模块缓存，再上翻 loadEarlier 先吃缓存零网络补回。
+  const atBottomRef = useRef(true)
   const onListScroll = () => {
     const el = listRef.current
     if (!el) return
     const distTop = el.scrollHeight - el.clientHeight - Math.abs(el.scrollTop)
     if (distTop < 200) void loadEarlier()
+    atBottomRef.current = Math.abs(el.scrollTop) < 200
   }
+  // 铺满视口：内容不足一屏且未取尽 → 继续补批直到铺满或取尽（会话源首屏 50 条
+  // 常不够铺满，循环 1-3 轮；loadEarlier 取尽即置 loadedAll 停）。
+  useEffect(() => {
+    const el = listRef.current
+    if (!el || loadedAll || loadingEarlier) return
+    if (el.scrollHeight > el.clientHeight + 40) return // 已铺满
+    void loadEarlier()
+  }, [events, loadedAll, loadingEarlier, loadEarlier])
+  // 裁剪只动展示 state（visible/items 派生自动瘦身），模块缓存不动；
+  // 用户在上方阅读时不裁（atBottomRef），防视觉跳动。
+  useEffect(() => {
+    if (!atBottomRef.current) return
+    trimDom(MAX_DOM, PAGE)
+  }, [events, trimDom])
 
   const toggleRow = useCallback((id: number, defaultValue: boolean) =>
     setOverrides((prev) => new Map(prev).set(id, !(prev.get(id) ?? defaultValue))), [])
@@ -1408,6 +1070,14 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
         await refreshSessions()
         void refreshUsage()
         setJobInfo(r.warning ? `已采纳开窗提案（⚠ ${r.warning}）` : "已采纳开窗提案：以人类名义开了窗（L0 不自动跑队列）")
+      } else if (p.op === "cancel_task") {
+        // M4 C1：取消提案采纳——走人工取消端点（同源写口，打断在跑窗不关窗）
+        await api.cancelTask(String(p.args.task_id ?? ""), String(p.args.reason ?? ""))
+        setJobInfo("已采纳取消提案：任务转 failed（cancelled），在跑窗已打断")
+      } else if (p.op === "requeue_task") {
+        // M4 C1：放回提案采纳——走人工 reopen 端点（履历保留，原绑定窗优先续跑）
+        await api.reopenTask(String(p.args.task_id ?? ""))
+        setJobInfo("已采纳放回提案：任务回到待认领（原绑定窗优先续跑）")
       }
       setAdopted((prev) => new Set(prev).add(ev.id))
     } catch (e) {
@@ -1425,6 +1095,23 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
        ?? tasks.find((t) => t.target_session === activeSession.id))
     : null
   const continuing = !!activeTask && (activeTask.status === "done" || activeTask.status === "failed")
+  // 延续徽章「续跑」按钮（2026-09-22）：failed 任务经 C6 resume 端点复活——原窗可复用即原窗续跑，
+  // 否则后端新建 armed 任务窗（响应 session_id 区分提示）；成功即主动刷任务行（5s 轮询兜底）
+  const [resumingTask, setResumingTask] = useState(false)
+  async function resumeBoundTask(taskId: string) {
+    setResumingTask(true)
+    try {
+      const r = await api.resumeTask(taskId)
+      api.tasks(pid).then(setTasks).catch(() => {})
+      setJobInfo(r.session_id && r.session_id !== activeSession?.id
+        ? `任务已续跑（快照缺失，已在新任务窗 ${r.session_id.slice(0, 16)} 接手现场）`
+        : "任务已续跑，本窗恢复执行")
+    } catch (e) {
+      setJobInfo(`续跑失败：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setResumingTask(false)
+    }
+  }
   // 输入行模型徽章（2026-09-19）：当前会话记忆中的模型（无值=后端默认）与发送可用性
   const sessionModelOf = activeSession ? sessionModel[activeSession.id] : undefined
   const uploadingAtt = pendingFiles.some((f) => f.status === "uploading")
@@ -1522,6 +1209,7 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
               </button>
             ) : undefined}
             onRouteJump={handleRouteJump}
+            assetName={assetName}
           />
         )
       })}
@@ -1615,6 +1303,8 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
           {connected ? "● live" : "○ 重连中"}
         </span>
       </div>
+      {/* 分阶段工作流阶段条（pentest M4）：轨无剧本自渲染 null，直播/任务流两视图共用 */}
+      <PhaseBar pid={pid} />
       {viewMode === "live" && (
       <>
 
@@ -1701,15 +1391,34 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
           "rounded-xl border border-white/25 bg-background/30 px-3 py-2",
           "transition-[border-color,box-shadow] duration-200",
           "focus-within:border-white/60 focus-within:shadow-[0_0_18px_rgba(255,255,255,0.15)]")}>
-        {/* v0.71 延续模式徽章：绑定任务已终态，窗保留可续聊（不接新任务，页签 × 才真关） */}
+        {/* v0.71 延续模式徽章：绑定任务已终态，窗保留可续聊（不接新任务，页签 × 才真关）。
+            failed 分色红 + 带「续跑」入口（C6 resume 端点原窗复活）——此前窗内无任何续跑入口，
+            LLM 429 等传输层失败后任务只能去看板找按钮，发「继续」只触发延续聊天（2026-09-22） */}
         {continuing && activeTask && (
-          <div className="mb-2 flex items-center gap-2 rounded-md border border-emerald-400/40 bg-emerald-400/5 px-2 py-1 text-[11px] text-emerald-300">
-            ✅ 任务已结束 · 延续模式
-            <span className="min-w-0 flex-1 truncate text-emerald-300/70"
+          <div className={cn(
+            "mb-2 flex items-center gap-2 rounded-md border px-2 py-1 text-[11px]",
+            activeTask.status === "failed"
+              ? "border-red-400/40 bg-red-400/5 text-red-300"
+              : "border-emerald-400/40 bg-emerald-400/5 text-emerald-300")}>
+            {activeTask.status === "failed" ? "❌ 任务失败 · 延续模式" : "✅ 任务已结束 · 延续模式"}
+            <span className={cn("min-w-0 flex-1 truncate", activeTask.status === "failed" ? "text-red-300/70" : "text-emerald-300/70")}
                   title={activeTask.objective}>
               {activeTask.objective}
             </span>
-            <span className="shrink-0 text-emerald-300/60">继续聊属于该任务的延续，不会接新任务</span>
+            {activeTask.status === "failed" && (
+              <button type="button" disabled={resumingTask}
+                      className="shrink-0 rounded border border-red-400/60 px-1.5 py-px text-[11px] hover:bg-red-400/10 disabled:opacity-50"
+                      title={activeTask.resume_mode === "snapshot"
+                        ? "⚡ 带现场续跑（C6）：从任务键断点快照恢复对话与步数预算（原窗存活即本窗复活）"
+                        : "↩ 接手现场续跑（C6）：恢复最近对话现场与尝试履历重新认领（原窗存活即本窗接手，仅原窗已关时才在新任务窗执行）"}
+                      onClick={() => void resumeBoundTask(activeTask.id)}>
+                {resumingTask ? "续跑中…"
+                  : activeTask.resume_mode === "snapshot" ? "⚡ 带现场续跑" : "↩ 接手现场续跑"}
+              </button>
+            )}
+            <span className={cn("shrink-0", activeTask.status === "failed" ? "text-red-300/60" : "text-emerald-300/60")}>
+              继续聊属于该任务的延续，不会接新任务
+            </span>
           </div>
         )}
         {/* 排队引导条（2026-09-19 轮末语义）：note 发送后等本轮结束注入，可「立即发送」中断当前轮提前注入 */}
@@ -1818,7 +1527,7 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
             {MODE_LABELS[inputMode]}
           </button>
           {/* 编排器态 chips（2026-09-19 顶部第二行工具栏并入 composer，整行删除）：
-              ＋开窗 / ⚡编排一轮 / 🎯作战计划 / 🧠自主档 / ∑用量 / ⛓链状态 / ⋯更多，弹层统一向上 */}
+              ＋开窗 / ⚡编排一轮 / 🛡行动边界(redteam) / 🧠自主档 / ∑用量 / ⛓链状态 / ⋯更多，弹层统一向上 */}
           {!hasSessionCtx && (
             <>
               {/* ＋ 开窗：低频动作收弹层——角色/供应商/模型/步数 + 开窗钮 */}
@@ -1911,38 +1620,24 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
                   </div>
                 )}
               </div>
-              {/* 🎯 作战计划/红队行动（R2/C2 两轨弹层 + deriveLamp 状态灯）原样迁入 */}
-              {(track === "redteam" || track === "pentest") && (
+              {/* 🛡 行动边界（goal 统一：原「作战计划/红队行动」弹层退役，本弹层
+                  只留 redteam ROE 留档编辑；目标与判据在「🎯 设定阶段目标」） */}
+              {track === "redteam" && (
                 <div className="relative">
                   <button type="button"
-                          className={cn(ORCH_CHIP_CLS, "gap-1.5", usage?.roe_complete === false && "text-(--status-approval)")}
-                          title={track === "redteam"
-                            ? "行动边界：红队 ROE 四要素与 mission（§6.9；ROE 未核验齐全时行为按渗透测试上限兜底）"
-                            : "作战计划：mission 目标 + 判据 + 自动派生（§6.9；保存即启动一轮编排）"}
+                          className={cn(ORCH_CHIP_CLS, usage?.roe_complete === false && "text-(--status-approval)")}
+                          title="行动边界：红队 ROE 四要素留档（§6.9；未核验齐全时行为按渗透测试上限兜底）"
                           onClick={() => setModeOpen((o) => !o)}>
-                    <span
-                      className={cn("inline-block size-2 rounded-full", deriveLamp(usage).cls)}
-                      title={deriveLamp(usage).title}
-                    />
-                    🎯 {track === "redteam"
-                          ? (usage?.roe_complete === false ? "红队行动 · ROE 未核验" : "红队行动")
-                          : "作战计划"}
+                    🛡 {usage?.roe_complete === false ? "行动边界 · ROE 未核验" : "行动边界"}
                   </button>
                   {modeOpen && usage && (
-                    <ModePopover
+                    <RoePopover
                       usage={usage}
-                      track={track as "pentest" | "redteam"}
                       onClose={() => setModeOpen(false)}
                       onSave={async (patch) => {
                         await api.patchProjectConfig(pid, patch)
                         void refreshUsage()
-                        setJobInfo(track === "redteam"
-                          ? "红队行动边界已更新（ROE 未核验齐全时行为按渗透测试上限兜底；在跑会话维持创建时固化语义）"
-                          : "作战计划已更新（自动派生开启时任务空时自动续派）")
-                        // C2：保存即启动——勾选自动派生时立即触发一轮编排
-                        if ((patch.autonomy as { auto_derive?: boolean } | undefined)?.auto_derive) {
-                          void orchTick()
-                        }
+                        setJobInfo("行动边界已更新（ROE 未核验齐全时行为按渗透测试上限兜底；在跑会话维持创建时固化语义）")
                       }}
                     />
                   )}
@@ -1971,12 +1666,17 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
                   )}
                 </div>
               )}
-              {/* 🧠 自主档：L0/L1/L2 三选 + 暂停自动收弹层；chip 显当前档与暂停态 */}
+              {/* 🧠 自主档：L0/L1/L2 三选 + 暂停 + 自动派生开关（goal 统一后从
+                  退役弹层迁入）；chip 显当前档与暂停态，状态灯=自动派生四态 */}
               {usage && (
                 <div className="relative">
                   <button type="button" onClick={() => setAutoOpen((v) => !v)}
-                    title="项目自主级别与自动消费开关（§6.8）"
-                    className={cn(ORCH_CHIP_CLS, usage.paused && "text-(--status-paused)")}>
+                    title="项目自主档（§6.8）：级别 / 暂停 / 自动派生开关"
+                    className={cn(ORCH_CHIP_CLS, "gap-1.5", usage.paused && "text-(--status-paused)")}>
+                    <span
+                      className={cn("inline-block size-2 rounded-full", deriveLamp(usage).cls)}
+                      title={deriveLamp(usage).title}
+                    />
                     🧠 {usage.level}{usage.paused ? " ⏸" : ""}
                   </button>
                   {autoOpen && (
@@ -2014,6 +1714,17 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
                       >
                         {usage.paused ? "⏸ 自动已暂停（点击恢复）" : "⏸ 暂停自动"}
                       </button>
+                      <label className="mt-2 flex cursor-pointer items-center gap-1.5 border-t pt-2 text-xs"
+                             title={deriveLamp(usage).title}>
+                        <input type="checkbox" disabled={savingAuto}
+                               checked={usage.auto_derive ?? false}
+                               onChange={(e) => {
+                                 saveAutonomy({ auto_derive: e.target.checked })
+                                 // C2：开启即启动——立即触发一轮编排（原「保存即启动」语义）
+                                 if (e.target.checked) void orchTick()
+                               }} />
+                        <span>任务空时自动派生（L1 生效）</span>
+                      </label>
                     </div>
                   )}
                 </div>
@@ -2024,7 +1735,7 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
                   <button
                     type="button"
                     onClick={() => setBudgetOpen((v) => !v)}
-                    title="会话上限 / Token / 任务预算（点击编辑）"
+                    title={`会话上限 / Token / 任务预算（点击编辑）${usage.tokens.cache_hit ? ` · 缓存命中 ${Math.round(usage.tokens.cache_hit * 100)}%` : ""}`}
                     className="flex h-7 items-center gap-2 rounded-full border px-2.5 font-mono text-xs hover:bg-accent"
                   >
                     <span className={usage.tokens.budget

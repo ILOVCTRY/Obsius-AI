@@ -105,15 +105,15 @@ def main() -> None:
                         packs_root="packs", track="ctf")
 
     def run_workers() -> None:
-        """所有活跃窗口并行跑 run_next_task 循环，直到队列为空。"""
+        """所有活跃窗口并行跑会话轮（run_session：只接自己窗内队列），直到空退。"""
         threads = []
         for sid, sess in list(orch.live_sessions.items()):
             def worker(s=sess, name=sid):
                 while True:
-                    got = s.run_next_task()
+                    got = s.run_session()
                     if got is None:
                         break
-                    log(f"  [{name}] 完成任务")
+                    log(f"  [{name}] 完成委托")
             t = threading.Thread(target=worker, name=sid)
             threads.append(t)
             t.start()

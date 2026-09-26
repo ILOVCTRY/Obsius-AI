@@ -1,9 +1,9 @@
 # 方案：漏洞收录格式与报告渲染模板（危害描述 / 复现步骤 / 修复建议）
 
-- **状态**：**已实施（M1+M2，2026-09-22；M3 报告链随 pentest-phased-workflow M4 合并实施）**（2026-09-21 收敛，一轮商议定稿；定稿决策已回写 DESIGN.md「三、黑板系统→漏洞收录格式」）
+- **状态**：**已全量实施（M1+M2+M3，2026-09-22）**（2026-09-21 收敛，一轮商议定稿；定稿决策已回写 DESIGN.md「三、黑板系统→漏洞收录格式」）
 - **实施修正**：方案原文写 schema v18→v19，v19 已被执行轨迹链路（2026-09-22）占用，**实际 v19→v20**（findings 补 impact/remediation 两列）；实施中顺带修复 patch_finding 旧门禁漏查 `evidence.pocs` 列表的不一致（统一走 `has_repro_evidence`）
 - **拍板记录**：§3（4 项决策用户拍板）
-- **关联代码**：`core/blackboard/schema.py`（findings 表 DDL）、`core/blackboard/store.py`（`add_finding` 门禁 :34 / `merge_finding_evidence` :91 / `EVIDENCE_LIST_UNION_KEYS` :78）、`core/agent/tools.py`（`bb_add_finding` :161 / `bb_update_finding` :212 工具描述）、`webui/src/components/blackboard/FindingDetailDialog.tsx`（`pocsOf`/`reproText` 渲染 :46/:83）、`packs/tracks/pentest/roles/report-writer.yaml`（报告消费）
+- **关联代码**：`core/blackboard/schema.py`（findings 表 DDL）、`core/blackboard/store.py`（`add_finding` 门禁 :34 / `merge_finding_evidence` :91 / `EVIDENCE_LIST_UNION_KEYS` :78）、`core/agent/tools.py`（`bb_add_finding` :161 / `bb_update_finding` :212 工具描述）、`webui/src/components/blackboard/FindingDetailDialog.tsx`（`pocsOf`/`reproText` 渲染 :46/:83）、`packs/experts/report-writer.yaml`（报告消费，M2 起角色迁专家池）
 - **实施后**：定稿决策沉淀回 `DESIGN.md`（「三、黑板系统」发现门禁段旁新增收录格式条目），同步 `core/blackboard/CLAUDE.md`；本文保留作方案背景
 
 ## 1. 愿景与背景
@@ -126,7 +126,7 @@
 
 - **M1 数据层（已落地）**：schema **v20**（原文写 v19，被轨迹链占用顺延；findings 补 `impact`/`remediation` 两列）+ `add_finding`/`patch_finding` 支持 `impact`/`remediation`（None=不动/空串=清空，合并旧值非空保留、空缺补入）+ `validate_repro_steps`（全轨写入口）+ `has_repro_evidence`（verified 门禁判定，add/patch 共用，顺带修 patch 漏查 pocs 的旧不一致）+ `repro_steps` 进并集键 + `bb_add_finding`/`bb_update_finding` 工具描述与入参改写。测试：`test_verified_gate_repro_steps` / `test_repro_steps_validation` / `test_repro_steps_union_merge_and_impact_remediation`（全量 794 passed）。
 - **M2 前端（已落地）**：FindingDetailDialog 三段渲染（危害描述/复现步骤/修复建议，空节「（待补充）」）+ `reproStepsOf` 统一步骤视图（repro_steps 优先、旧 pocs 映射追加）+ image 步嵌图 / 其余 artifact 步 ScriptBlock / 文稿含围栏代码块与预期结果 + 编辑表单 impact/remediation textarea + 「复制复现文稿」；`hasPoc` 扩为任意复现证据。`npm run build` 零 TS 错误。
-- **M3 报告链（后置）**：report-writer persona 微调 + report 阶段三件套校验（随 pentest 方案 M4 排期合并实施）。
+- **M3 报告链（已落地，随 pentest-phased-workflow M4 合并实施，2026-09-22）**：`packs/experts/report-writer.yaml` persona 微调（pentest 主 persona + `variant_redteam_persona` 同步）——逐发现详情按三节模板（危害描述取 `impact`、复现步骤按 `evidence.repro_steps` 逐步渲染即编号步骤+代码块+预期返回结果、修复建议取 `remediation`；字段缺失不现编、缺项列回补清单）；`packs/tracks/pentest/phases/report.yaml` acceptance 改写——出报告前先逐条核对 verified 发现三件套（impact 非空 / repro_steps 每步 desc+code+expected 齐备 / remediation 非空），缺项落事件流回补清单且报告附录列「待回补」项，不现编不卡黑板写入。
 
 ## 6. 边界与未覆盖（独立讨论，勿混入本方案）
 

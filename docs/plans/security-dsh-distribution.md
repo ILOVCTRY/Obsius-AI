@@ -1,6 +1,6 @@
 # 安全版 dsh 发行版：能力全量插件化（可行性研究）
 
-> **状态：打磨中**（2026-09-26 讨论收敛，待用户过目；不进 DESIGN.md、不挂账、不排期）
+> **状态：部分实施——M0 尖兵 + M1 网关底座已落地验收（2026-09-26），M2–M8 待用户排期**
 >
 > **拍板记录：**
 >
@@ -120,8 +120,8 @@
 
 | 里程碑 | 内容 | 验证 | 粗估人周 |
 |---|---|---|---|
-| **M0 尖兵验证** | fork dsh、pnpm 全构建跑通（Windows 原生）；sec profile + toy bundle；Ark LlmAdapter；headless 跑通 | profile/patch/adapter/构建四个最大不确定点落地 | 1–2 |
-| **M1 网关底座** | B1：ShellExecutor + docker SandboxProvider + pre-execute 闸 + run_cmd 单工具 | 宿主/容器双世界、策略否决、fail-closed 冒烟 | 2–3 |
+| ~~M0 尖兵验证~~ ✅ 2026-09-26 | 见下方「M0 实施结论」：构建/profile/patch/外部插件/Ark 模型端到端全部落地 | 模型实调 sec_hello 成功并回报原文 | 实耗约 1 |
+| ~~M1 网关底座~~ ✅ 2026-09-26 | 见下方「M1 实施结论」：ShellExecutor + docker SandboxProvider + pre-execute 闸 + run_cmd 单工具全部落地 | 宿主/容器双世界、策略否决、fail-closed 冒烟（61+12 检查全绿、Ark 双会话） | 实耗约 2 |
 | **M2 黑板域** | B2：sec 域 v1（projects/assets/findings/tasks/events 子集）+ 控制器 + Remote | 单写纪律、域版本、Client 读写通 | 3–4 |
 | **M3 packs 内容** | B4：skill 包适配 + kb 资源 + kb/route/skill 工具 | 31 技能目录可发现可注入、kb_search 召回 | 1–2 |
 | **M4 专家池** | B5：17 yaml → presets + persona/toolFilter | 专家会话差异化、工具可见性 | 2 |
@@ -130,7 +130,34 @@
 | **M7 集成件** | B8：MCP 全家、浏览器/Replay、FOFA/情报、goal/schedule、设置 | 各集成件冒烟 | 3–4 |
 | **M8 切流退役** | v24→sec 域迁移、双跑对账、启动器替换、Python 线只读保留 | 存量项目完整搬迁、新启动器一键起 | 2 |
 
-排序纪律：**M1 不通过不写业务层**；M2/M3 可并行；M6 可随 M2 后提前起步（单页面随域对象落地）。
+### M0 实施结论（2026-09-26）
+
+1. **构建链**：从源码起 web 须跑完整 `pnpm build`（`pnpm typecheck` 不含 client tsdown，会报 63 client packages failed to compose）；3080 被占时 `--port 3081` 避开，sec web 正常启动。
+2. **装配链**：sec profile（web 模板）→ `pnpm dsh plugin --profile sec add` 链入外部包 → cordis.patch.yml `insert`；`pluginManager/listPlugins` 显示 `@sec/sec-toy` enabled/active。
+3. **工具链**：无 tools 查询 RPC（插件面板只列官方精选），写 [dsh/scripts/check-tools.mts](../../dsh/scripts/check-tools.mts) 引导 sec（剔除 web-app 层免起服务）枚举注册表：共 25 工具含 `sec_hello`，execute 回显 `hello sec — sec toy plugin live`。
+4. **模型实调已打通（2026-09-26 下午）**：**无需写新 adapter**——dsh-base 自带的 `llm-deepseek-api-key` 走的就是 Anthropic Messages 协议（默认端点即 `api.deepseek.com/anthropic`），在 profile patch 覆盖 id=`llm-deepseek` 行的 config：`baseURL=https://ark.cn-beijing.volces.com/api/coding`、`apiKeyEnv=ARK_API_KEY`、models 换成 `ark-code-latest`、`maxTokens=131072`（Ark 硬上限，默认 256000 会被拒）；key 由启动 shell 环境注入。模型成功调用 sec_hello 并原文回报，12 秒、15.5K tok。
+5. 引导期 typert-loader 的 "parameter codec has no create() factory" 为非致命日志，不影响挂载。
+6. **TaskStop 杀 pnpm 不杀 node 孙进程**：端口会被残留 node（hermes 发行版）继续占用，需按端口查出 PID 强杀。
+
+### M1 实施结论（2026-09-26）
+
+交付三包：`@sec/gateway`（入口插件：SecShellExecutor 替 ctx.shell + DockerSandboxProvider 替 ctx.sandbox + tools/pre-execute 守卫）、`@sec/gateway-tools`（`run_cmd` 模型唯一命令口），sec-toy 保留。policy/pathguard/rateguard 从 Python 侧逐行移植为纯函数，`wouldDeny` 为拒因唯一来源。
+
+**验收记录（全绿，未提交）：**
+
+1. **主冒烟 [dsh/scripts/m1-smoke.mts](../../dsh/scripts/m1-smoke.mts) 61/61**：威胁矩阵三威胁类×四 runtime、未知/非法值归 malware_live、net=real M1 显式拒绝；pathguard 写逃逸拦截（Windows 绝对路径/UNC/`~`/相对逃逸/`-o`/Out-File/tee，host 与 docker 双风味）与放例（重定向到现场、`%TMP%`/`$var`、`2>&1`、NUL、URL、`grep -o` 不误伤）；rateguard 拒/放全矩阵；**拒因三方逐字一致**——pre-execute 钩子 == runCommand 直调兜底 == wouldDeny 纯函数；生产层 web-app patch 禁用 tool-bash/tool-pwsh 已加机械断言。
+2. **真实 Docker 冒烟 [dsh/scripts/m1-docker-smoke.mts](../../dsh/scripts/m1-docker-smoke.mts) 12/12**：L2 pentest-box 内 uname/nmap/ffuf/python3 真跑 exit 0；nmap 全端口合规命令放行真跑；ffuf `-t 1` 放行真跑；中文 UTF-8 无乱码；容器写入 `x.txt` 在宿主 `<profile>/workspace/scratch/` 真实存在且内容一致；**L3 零挂载**——`/workspace` 不存在、不可见宿主文件；malware_live 走 L2 被矩阵拒不触容器。
+3. **fail-closed 实证**：daemon 停止时 docker/sandbox 一律 `SANDBOX_UNAVAILABLE`（daemon/镜像缺失三态可操作指引），**零降级到 host/wsl**；冒烟按 daemon 实时状态分支断言。
+4. **Ark 真实 LLM 端到端**：经 dsh web（127.0.0.1:3081）完成两次模型自主会话——host 输出 `llm-host-ok`、docker 输出 `llm-docker-ok`，命令均经 run_cmd 工具与守卫链。
+5. Python 侧同步：rateguard ffuf 接受 `-t`（[core/runtime/rateguard.py](../../core/runtime/rateguard.py) + tests/test_rateguard.py，12 passed），TS/Python 单源口径不变。
+
+**实施修正（相对原方案/冒烟初稿）：**
+
+- 容器内 `--cap-drop ALL` 下 nmap 无 raw socket：必须 `-sT` TCP connect 扫；**不加 `-T2`**——sneaky 模板发包间隔把全端口扫拖到数分钟，`--max-rate` 本身即 rateguard 认可的有效节流；`-n` 免反向 DNS（net=none 下 DNS 拖超时）。
+- pentest-box 镜像内 ffuf 为 1.1.0，无 `-rate` 也无 `-rl`：rateguard 改为接受 `-t` 限并发，拒因 hint 保留新版文案 `-rl 50` 并注明旧版用 `-t 5`。
+- L2 挂载/工作目录最终定为 `<ws>:/workspace` + `-w /workspace/scratch`；pathguard 各 runtime 按路径语义（host Windows / wsl /mnt / docker /workspace；L3 零挂载不检查）传边界。
+
+排序纪律：**M1 不通过不写业务层**（已通过）；M2/M3 可并行；M6 可随 M2 后提前起步（单页面随域对象落地）。
 
 ## 6. 风险登记
 

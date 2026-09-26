@@ -529,8 +529,8 @@ def test_agent_propose_tool_only_pending_and_cap(tmp_path):
         out = d.dispatch("propose_pack_edit", {
             "kind": "kb", "mode": "create",
             "target": {"cap": "web", "path": f"ctf-web/agent-note-{i}.md"},
-            "content": f"# Agent 经验 {i}\n",
-            "summary": f"经验 {i}", "reason": "任务 t-100 中验证有效"})
+            "content": f"# Agent 经验 {i}\n\n## 已验证路径\n- 差分法验证有效。\n",
+            "summary": f"经验 {i}", "reason": "任务 task-aaaaaaaaaaaa 中验证有效"})
         assert "pending" in out, out
         ids.append(out)
     # 第 4 条：每会话上限 3
@@ -555,6 +555,40 @@ def test_agent_propose_tool_only_pending_and_cap(tmp_path):
     assert sum(1 for e in events if e["kind"] == "proposal.created") == 3
     payload = next(e["payload"] for e in events if e["kind"] == "proposal.created")
     assert payload["origin"] == "agent" and payload["id"].startswith("pp_")
+    bb.close()
+
+
+def test_agent_kb_proposal_structure_lint(tmp_path):
+    """M2/M3 机械质检（agent kb create 限定，experience-sedimentation）：
+    reason 缺 find-/task- 证据锚点、content 无「## 」段落结构 → 拒绝不落地；
+    origin=human 不受限（复核放宽，human 改后采纳不被拦）。"""
+    packs, bb, project, _tq, agent = _make_session(tmp_path)
+    d: ToolDispatcher = agent.dispatcher
+    base = {"kind": "kb", "mode": "create",
+            "target": {"cap": "web", "path": "ctf-web/lint.md"},
+            "summary": "x"}
+    # reason 无证据锚点
+    out = d.dispatch("propose_pack_edit",
+                     {**base, "content": "# a\n\n## 已验证路径\n- b\n",
+                      "reason": "感觉有效"})
+    assert out.startswith("[拒绝]") and "证据锚点" in out
+    # content 无 H2 段落结构
+    out = d.dispatch("propose_pack_edit",
+                     {**base, "content": "# a\n纯单段长文，无任何分节。\n",
+                      "reason": "任务 task-aaaaaaaaaaaa 证得"})
+    assert out.startswith("[拒绝]")
+    # H2 有但标题不命中沉淀口径关键词
+    out = d.dispatch("propose_pack_edit",
+                     {**base, "content": "# a\n\n## 随笔感想\n- b\n",
+                      "reason": "任务 task-aaaaaaaaaaaa 证得"})
+    assert out.startswith("[拒绝]")
+    assert pm.list_proposals(packs, "pending") == []
+    # origin=human 同形态内容直建不拦（复核放宽）
+    p = pm.create_proposal(packs, {
+        "target": {"kind": "kb", "cap": "web", "path": "ctf-web/human.md"},
+        "mode": "create", "content": "# 人写的\n纯单段。\n",
+        "summary": "x", "reason": "y", "project": None}, origin="human")
+    assert p["status"] == "pending"
     bb.close()
 
 

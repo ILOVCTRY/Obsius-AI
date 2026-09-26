@@ -41,11 +41,16 @@ from core.browser.replay import Intruder, ReplayClient
 from core.agent import AgentConfig, AgentSession
 from core.agent.loop import clear_task_resume, persisted_snapshot_path, task_resume_path, task_transcript_path
 from core.blackboard import TaskQueue
-from core.blackboard.assets import register_asset
-from core.blackboard.graph import board_graph, task_graph
+from core.blackboard.assets import import_assets, register_asset
+from core.coverage import attach_effective_status
+from core.blackboard.graph import board_graph, session_graph, task_graph
+from core.blackboard.attackpath import build_attack_path
+from core.blackboard.intents import list_intents, reopen_intent
 from core.blackboard import traces
 from core.blackboard.store import Blackboard, BlackboardClosedError
 from core.blackboard.tasks import dedup_fp, render_attempts_lines
+from core import assetimport
+from core import fofa as fofa_mod
 from core.intel import config as intel_config
 from core.intel import vault as intel_vault
 from core.intel.intel_service import (
@@ -104,6 +109,16 @@ REPLAN_MIN_INTERVAL = 30.0
 # 任务窗调度器 sweep（v0.71 任务即窗口，§6.8）：绑定段/启动段除事件触发点外
 # 的兜底轮询周期——绑定失败（cap 满/预算硬闸/LLM 未就绪）的任务靠 sweep 重试。
 SCHEDULE_POLL_INTERVAL = 60.0
+
+# 工作区卫生体检膨胀阈值（workspace-hygiene D6）：候选目录（.tmp/scratch/spill/
+# browser-profile）超过 100MB 报 warning、超 500MB 升 error；模块级常量供测试
+# monkeypatch（测试造 KB 级小文件配低阈值）。
+HYGIENE_BLOAT_MB = 100.0
+HYGIENE_BLOAT_ERROR_MB = 500.0
+
+# FOFA 中转配置文件路径（cyberspace-mapping M2）：模块级常量供测试 monkeypatch
+# （真实 config/fofa.json 含 key，不入库，测试绝不触达）。
+FOFA_CONFIG_PATH = fofa_mod.CONFIG_PATH
 
 
 def _loads_meta(art: dict) -> dict:
@@ -169,6 +184,11 @@ class ReopenIn(BaseModel):
     drop_scene: bool = False
 
 
+class CancelTaskIn(BaseModel):
+    """M4 C1：人工取消任务的原因（task.cancelled 事件审计用）。"""
+    reason: str = ""
+
+
 class DirectiveIn(BaseModel):
     """C2 指挥编排器：人类一次性目标指令（自动触发一轮编排，最高优先落实）。"""
     text: str
@@ -198,6 +218,13 @@ class PhaseTransitionIn(BaseModel):
     reason: str = ""
 
 
+class AcceptanceIn(BaseModel):
+    """验收条目结构化形态（独立验证 M1）：text + 可选 verify 规格（原样透传
+    publish，发布期由 validate_verify_spec 校验，未知键/缺键 422）。"""
+    text: str
+    verify: dict | None = None
+
+
 class TaskIn(BaseModel):
     objective: str
     task_type: str = "generic"
@@ -212,7 +239,10 @@ class TaskIn(BaseModel):
     refs: list[str] | None = None   # 任务依据的 finding id（显式层；正文 find-id 自动抽取）
     workset: list[str] | None = None   # 机制 1.1 工作集软声明（advisory，不阻塞认领）
     attachment_ids: list[str] = []     # 2026-09-19 附件随发：kind=attachment 的 artifact id
-    acceptance: list[str] | None = None   # ⑤ 验收条目（一行一条，存 context.reconcile；全收口才可 complete）
+    acceptance: list[str | AcceptanceIn] | None = None
+    # ⑤ 验收条目（存 context.reconcile；全收口才可 complete）。独立验证 M1：条目
+    # 支持 str 或 {text, verify}——verify 规格由验证器在 complete 时自动判定
+    # （core/verify.py 四策略），Agent 自报 met/failed 被拒（宁严勿松）
     force: bool = False                # 机制 1.1：True 跳过发布去重（人类"仍要发布"确认后）
 
 
@@ -230,6 +260,7 @@ class TaskPatch(BaseModel):
     priority: int | None = None
     conflict_keys: list[str] | None = None
     role: str | None = None
+    preferred_runtime: str | None = None  # v23：任务默认运行时（''=重置；open/failed 可改）
 
 
 class FindingIn(BaseModel):
@@ -259,6 +290,29 @@ class AssetPatchIn(BaseModel):
     exclude_unset 区分「不传（不动）」与「传 null（摘挂）」。"""
     parent_id: str | None = None
     meta: dict | None = None
+
+
+class FofaConfigIn(BaseModel):
+    """PUT /api/fofa/config：key 传空串/缺省 = 不修改（防回显误覆盖）；"""
+    base_url: str | None = None
+    key: str | None = None
+
+
+class FofaSearchIn(BaseModel):
+    """POST /api/projects/{pid}/fofa/search：FOFA 语法原样（如
+    `domain="example.com"`）；size 单次消耗等量配额，前端提示后选。"""
+    query: str
+    size: int = 100
+    page: int = 1
+
+
+class AssetImportIn(BaseModel):
+    """POST /api/projects/{pid}/assets/import：mapping 给出 → rows 为表格二维
+    数组先 normalize_rows；mapping 缺省 → rows 为已归一化行 dict（FOFA 勾选/
+    手工 JSON 导入）。"""
+    source: str = "manual"  # xlsx/csv/fofa/manual
+    rows: list[Any] = Field(default_factory=list)
+    mapping: list[str] | None = None
 
 
 class FuncCreateIn(BaseModel):
@@ -785,6 +839,10 @@ class SessionNoteIn(BaseModel):
     attachment_ids: list[str] = []     # 附件随发：kind=attachment 的 artifact id
 
 
+class SessionRoleIn(BaseModel):
+    role: str                          # 会话中心化：换人目标专家 id（§4.4）
+
+
 class IntelFeedItem(BaseModel):
     name: str = ""
     url: str
@@ -908,9 +966,13 @@ def create_app(
 
     store = ProjectStore(workspace_root)
     app.state.store = store
-    # ⑥ 战役记忆全局库（workspaces/campaign.db，跨项目召回；仿 intel 全局 DB 先例）
+    # ⑥ 战役记忆全局库（data/campaign.db，workspace-hygiene D1 归位全局运行时数据；
+    # 仿 intel 全局 DB 先例）。落 workspace_root 同级 data/（workspaces/ 契约只收项目），
+    # 构造内含老位置 workspaces/campaign.db 惰性迁移；测试传 tmp workspace_root 时库
+    # 落 tmp 同级，保持 hermetic。
     from core.blackboard.campaign import CampaignMemory
-    app.state.campaign = CampaignMemory(Path(workspace_root) / "campaign.db")
+    app.state.campaign = CampaignMemory(
+        Path(workspace_root).parent / "data" / "campaign.db")
     app.state.projects: dict[str, Project] = {}      # pid -> Project（连接复用）
     # 删除中的项目闸门：删除窗口内 _project 拒绝重入（防 pop 缓存后被轮询/open_project
     # 重建 Blackboard 实例重新锁死 db）；WS tick 见到即自行退出。
@@ -921,6 +983,7 @@ def create_app(
     app.state.active_chains: set[str] = set()
     app.state.jobs = JobRegistry()
     app.state.inventory = HostDetector().probe(tools_root=tools_root)
+    app.state.tools_root = tools_root  # gateway-config-view：probe 刷新端点复用
     app.state.packs_root = packs_root
     app.state.llm_store = ProviderStore(providers_config)
     # 研究工作台反编译服务（pid -> DecompilerService，项目级复用）；
@@ -1341,9 +1404,40 @@ def create_app(
                     "## 行动边界：渗透测试（pentest 轨）\n"
                     "验证上限=影响证明级（如 SQL 注入读敏感表/RCE 一次性回显）；"
                     "禁驻留/持久化/横向/提权推进；主动利用未认领目标默认禁止（发现即上报）。")
+            # D10 策略顾问项目级配置（2026-09-24）：缺省段补代码默认；三整数
+            # 透传 AgentConfig；provider/model 覆写本会话 planner（顾问建议/裁决/
+            # 收尾复盘三消费点同时生效）。必须在 factory() 内层——外层会污染
+            # Orchestrator 自身的 plan_llm。
+            from core.autonomy import ADVISOR_DEFAULTS
+            adv = {**ADVISOR_DEFAULTS, **(cfg.get("advisor") or {})}
+            session_plan_llm = plan_llm
+            if adv.get("provider") and plan_llm is not None:
+                try:
+                    session_plan_llm = app.state.llm_store.build(
+                        adv["provider"], adv.get("model"))
+                except Exception as e:  # noqa: BLE001
+                    # 供应商后变更（删除/停用/删模型）致坏值 → 静默回退全局 planner，
+                    # 绝不开窗失败
+                    log.warning(
+                        "项目顾问模型覆写构建失败，回退全局 planner: pid=%s %s", pid, e)
+                    session_plan_llm = plan_llm
+            # 项目 executor 覆写（TRAE 新壳 M3，2026-09-25）：cfg.executor_llm
+            # 非空时本项目新开/重附着窗的 executor 按覆写构建，坏值静默回退全局
+            # executor（与 advisor 同口径；在跑窗的即时切换走专用 PUT 端点）。
+            exec_ov = cfg.get("executor_llm") or {}
+            session_exec_llm = exec_llm
+            if isinstance(exec_ov, dict) and str(exec_ov.get("provider") or "").strip():
+                try:
+                    session_exec_llm = app.state.llm_store.build(
+                        str(exec_ov["provider"]).strip(),
+                        str(exec_ov.get("model") or "") or None)
+                except Exception as e:  # noqa: BLE001
+                    log.warning(
+                        "项目 executor 覆写构建失败，回退全局 executor: pid=%s %s", pid, e)
+                    session_exec_llm = exec_llm
             agent = AgentSession(
                 project_id=pid, bb=proj.bb, gateway=gateway,
-                llm=exec_llm, planner_llm=plan_llm,
+                llm=session_exec_llm, planner_llm=session_plan_llm,
                 enable_sediment=sediment_proposals,
                 packs_root=app.state.packs_root,
                 # expert-pool M2（§4.4）：capabilities=caps_effective 推导值——
@@ -1363,7 +1457,10 @@ def create_app(
                 # （窗口不设 role 限制：角色 task_types 不再注入，认领无过滤）
                 config=AgentConfig(max_steps=max_steps or 200,
                                    owner_tags=proj.bb.owner_tags(pid),
-                                   rule_profiles=cfg.get("rule_profiles")),
+                                   rule_profiles=cfg.get("rule_profiles"),
+                                   stuck_after=adv["stuck_after"],
+                                   stuck_max_extensions=adv["stuck_max_extensions"],
+                                   closing_max_rounds=adv["closing_max_rounds"]),
                 artifacts_dir=proj.artifacts_dir,
                 existing_session=existing_session,
                 campaign=app.state.campaign,
@@ -1423,9 +1520,12 @@ def create_app(
     def _expert_meta_view(view: dict) -> dict:
         """meta 读视图补专家绑定推导值（expert-pool M2，§4.4）：
         "experts" = 绑定清单；"capabilities" = caps_effective（有绑定→专家面推导，
-        无绑定→盘上 capabilities 直通）。仅响应层，盘上 meta 不改。"""
+        无绑定→盘上 capabilities 直通）；"capabilities_bound" = 盘上原始绑定包
+        （设置页「能力包跟随项目」缺省用——effective 在 _generalist 项目=全部包，
+        取 [0] 会错落到 binary）。仅响应层，盘上 meta 不改。"""
         experts = [e for e in (view.get("experts") or []) if str(e).strip()]
         return {**view, "experts": experts,
+                "capabilities_bound": list(view.get("capabilities") or []),
                 "capabilities": caps_effective(
                     app.state.packs_root, view.get("track") or "ctf", experts,
                     fallback=view.get("capabilities") or [])}
@@ -1553,7 +1653,7 @@ def create_app(
                 "findings": len(proj.bb.list_findings(pid)),
                 "assets": len(proj.bb.list_assets(pid)),
                 "usage": usage,
-                "capability": app.state.inventory.to_json()}
+                "capability": app.state.inventory.to_dict()}
 
     @app.patch("/api/projects/{pid}/config")
     def patch_project_config(pid: str, body: ConfigPatchIn):
@@ -1896,7 +1996,14 @@ def create_app(
     @app.get("/api/projects/{pid}/assets")
     def list_assets(pid: str, type: str | None = None, status: str | None = None,
                     tag: str | None = None):
-        return _project(pid).bb.list_assets(pid, type_=type, status=status, tag=tag)
+        bb = _project(pid).bb
+        rows = bb.list_assets(pid, type_=type, status=status, tag=tag)
+        # effective 派生须基于全量树：带过滤参数时子资产可能不在 rows，
+        # 用全量资产算好后按 rows 顺序挂回（binary 等非 coverage 类型原样返回）
+        base = rows if not (type or status or tag) else bb.list_assets(pid)
+        decorated = {a["id"]: a for a in
+                     attach_effective_status(base, bb.list_findings(pid))}
+        return [decorated[a["id"]] for a in rows if a["id"] in decorated]
 
     @app.post("/api/projects/{pid}/assets", status_code=201)
     def add_asset(pid: str, body: AssetIn):
@@ -1908,6 +2015,122 @@ def create_app(
                                   author="human")
         except ValueError as e:
             raise HTTPException(422, str(e))
+
+    # ---------- 网络空间测绘（cyberspace-mapping M2，2026-09-23） ----------
+
+    @app.get("/api/fofa/config")
+    def get_fofa_config():
+        cfg = fofa_mod.load_fofa_config(FOFA_CONFIG_PATH)
+        key = str(cfg.get("key") or "")
+        return {"base_url": cfg.get("base_url") or fofa_mod.DEFAULT_BASE_URL,
+                "key": fofa_mod.mask_key(key), "key_set": bool(key.strip())}
+
+    @app.put("/api/fofa/config")
+    def put_fofa_config(body: FofaConfigIn):
+        cfg = fofa_mod.load_fofa_config(FOFA_CONFIG_PATH)
+        if body.base_url is not None:
+            cfg["base_url"] = body.base_url.strip() or fofa_mod.DEFAULT_BASE_URL
+        if body.key:  # 空串/缺省 = 不修改（防回显脱敏值误覆盖真 key）
+            cfg["key"] = body.key.strip()
+        fofa_mod.save_fofa_config(FOFA_CONFIG_PATH, cfg)
+        return get_fofa_config()
+
+    @app.post("/api/fofa/test")
+    def test_fofa():
+        """测试连接：info_my 免费不耗配额。失败不抛（200 + ok:false），
+        错误文案直接可展示。"""
+        client = fofa_mod.FofaClient.from_config(FOFA_CONFIG_PATH)
+        if not client.configured:
+            raise HTTPException(400, "FOFA 未配置 key——先填入并保存")
+        try:
+            info = client.info_my()
+        except fofa_mod.FofaError as e:
+            return {"ok": False, "error": str(e), "base_url": client.base_url}
+        return {"ok": True, "remain": info["remain"], "expire": info["expire"],
+                "base_url": client.base_url}
+
+    @app.post("/api/projects/{pid}/fofa/search")
+    def fofa_search(pid: str, body: FofaSearchIn):
+        """FOFA 查询（消耗等量配额）：结果逐行标注 existing（domain/service/host
+        三锚点是否已在黑板），前端灰显免重复导入。错误分流：配额耗尽 429（必须
+        立即停）、key/base url 配置类 400、其余中转错误 502。"""
+        proj = _project(pid)
+        client = fofa_mod.FofaClient.from_config(FOFA_CONFIG_PATH)
+        if not client.configured:
+            raise HTTPException(400, "FOFA 未配置 key——先在「网络空间测绘」设置里填入")
+        q = body.query.strip()
+        if not q:
+            raise HTTPException(422, "查询语句为空")
+        try:
+            res = client.search(q, size=body.size, page=body.page)
+        except fofa_mod.QuotaExhausted as e:
+            raise HTTPException(429, str(e)) from e
+        except (fofa_mod.ConfigError, fofa_mod.AuthError) as e:
+            raise HTTPException(400, str(e)) from e
+        except fofa_mod.FofaError as e:
+            raise HTTPException(502, str(e)) from e
+        rows = []
+        for row in res["rows"]:
+            ip = str(row.get("ip") or "").strip()
+            port = str(row.get("port") or "").strip()
+            host = str(row.get("host") or "").strip()
+            domain = str(row.get("domain") or "").strip()
+            dom = domain or (host if "." in host and ":" not in host else "")
+            rows.append({**row, "existing": {
+                "domain": bool(dom and proj.bb.find_asset(pid, "domain", dom)),
+                "service": bool(ip and port
+                                and proj.bb.find_asset(pid, "service", f"{ip}:{port}")),
+                "host": bool(ip and proj.bb.find_asset(pid, "host", ip)),
+            }})
+        return {**res, "rows": rows}
+
+    @app.post("/api/projects/{pid}/assets/import/preview")
+    def asset_import_preview(pid: str, file: UploadFile = File(...)):
+        """导入预览（multipart）：解析 + 列映射嗅探建议 + 全量行回传（前端内存
+        持有，确认导入时随 mapping 回传——服务端不存文件状态）。"""
+        _project(pid)
+        suffix = Path(file.filename or "").suffix
+        data = file.file.read(10 * 1024 * 1024 + 1)
+        if len(data) > 10 * 1024 * 1024:
+            raise HTTPException(413, "文件过大（>10MB）")
+        try:
+            parsed = assetimport.parse_table(data, suffix)
+        except assetimport.XlsxUnavailable as e:
+            raise HTTPException(503, str(e)) from e
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+        return {"filename": file.filename, "header": parsed["header"],
+                "columns": parsed["columns"], "rows": parsed["rows"],
+                "total_rows": parsed["total_rows"], "truncated": parsed["truncated"]}
+
+    @app.post("/api/projects/{pid}/assets/import")
+    def asset_import(pid: str, body: AssetImportIn):
+        """批量导入（register_asset 单一入口 quiet=True，整批单条
+        asset.imported 汇总事件）：mapping 给出 → 表格二维数组先归一化；
+        缺省 → rows 为已归一化 dict 行（FOFA 勾选/手工 JSON）。"""
+        proj = _project(pid)
+        source = (body.source or "").strip().lower()
+        if source not in ("xlsx", "csv", "fofa", "manual"):
+            raise HTTPException(422, f"source 非法: {source}（限 xlsx/csv/fofa/manual）")
+        if len(body.rows) > assetimport.MAX_IMPORT_ROWS:
+            raise HTTPException(422,
+                                f"单批导入超上限（>{assetimport.MAX_IMPORT_ROWS} 行）")
+        skipped = 0
+        if body.mapping is not None:
+            try:
+                norm_rows, skipped = assetimport.normalize_rows(
+                    body.rows, body.mapping)
+            except (TypeError, KeyError, ValueError) as e:
+                raise HTTPException(422, f"行格式无法归一化: {e}") from e
+        else:
+            norm_rows = [r for r in body.rows if isinstance(r, dict)]
+            if len(norm_rows) != len(body.rows):
+                raise HTTPException(422, "rows 含非对象行（dict 形态导入需逐行对象）")
+        if not norm_rows:
+            raise HTTPException(422, "没有可导入的行（全空或映射后为空）")
+        summary = import_assets(proj.bb, pid, norm_rows, source, author="human")
+        summary["skipped_parse"] = skipped
+        return summary
 
     @app.get("/api/projects/{pid}/artifacts/content")
     def artifact_content(pid: str, ref: str):
@@ -2325,6 +2548,12 @@ def create_app(
         """打法效果榜（M3，R4 基于物化侧）：轨迹链 (skill × kb) × verified finding。"""
         return traces.effect_stats(_project(pid).bb, pid, top=max(1, min(top, 50)))
 
+    @app.get("/api/projects/{pid}/retrieval-stats")
+    def get_retrieval_stats(pid: str):
+        """检索对账三象限（retrieval-upgrade M3，2026-09-23）：提示×打开×verified
+        产出离线对账，missed 清单是同义词/route_index 增补的信号源（与 M2 互喂）。"""
+        return traces.retrieval_stats(_project(pid).bb, pid)
+
     @app.post("/api/projects/{pid}/chains", status_code=201)
     def create_chain(pid: str, body: ChainIn):
         bb = _project(pid).bb
@@ -2550,11 +2779,13 @@ def create_app(
 
     @app.get("/api/projects/{pid}/events")
     def list_events(pid: str, since_id: int = 0, limit: int = 200,
-                    before_id: int | None = None, tail: int = 0):
-        # tail/before_id：直播间首屏增量 + 上翻分页（不全量回放，2026-09-17）
+                    before_id: int | None = None, tail: int = 0,
+                    session_id: str | None = None):
+        # tail/before_id：直播间首屏增量 + 上翻分页（不全量回放，2026-09-17）；
+        # session_id：会话维度分页（2026-09-23 直播间会话窗口，store 层 F8 既支持）
         return _project(pid).bb.recent_events(
             pid, since_id=since_id, limit=limit,
-            before_id=before_id, tail=tail)
+            session_id=session_id, before_id=before_id, tail=tail)
 
     # ---------- 审批收件箱（§12 一等公民：越界/net:real 等待批动作） ----------
 
@@ -2567,10 +2798,17 @@ def create_app(
             sql += " AND status=?"
             params.append(status)
         sql += " ORDER BY created_at DESC"
+        # M5 D2：行动边界全文随审批卡出口（§0-10）——人类在审批卡里对照当前
+        # 边界审授权/升级申请；server 拼好（与编排器 _mission_section 同源），
+        # 前端存在才渲染。项目级常量，N 条重复 N 次可接受。
+        from core.orchestrator.orchestrator import mission_boundary_lines
+        proj_row = proj.bb.get_project(pid)
+        boundary = "；".join(mission_boundary_lines(proj_row.get("track"), proj_row["config"]))
         # action 库存 JSON 字符串，出口解析为对象（与前端 types.ts Approval.action 对齐）
         out = []
         for r in proj.bb.conn.execute(sql, params).fetchall():
             d = dict(r)
+            d["boundary"] = boundary
             try:
                 d["action"] = json.loads(d["action"])
             except (TypeError, ValueError, KeyError):
@@ -2740,14 +2978,152 @@ def create_app(
         _schedule(pid, reason="phase-entered")
         return {"phase": to, "published": r["published"]}
 
+    def _interrupt_claimed_window(pid: str, sid: str | None) -> None:
+        """打断任务持有窗（M4 C1 cancel 链路共用：人工端点 + 审批处理器）。
+        request_abort 让在跑步尽快收口（随后 fail 撞 ClaimError 被吞=任务已取消，
+        _abort_current_task 有先例）；空闲窗（job 已退）直接 _abort_current_task
+        清标志——与 /abort 端点同原语。**只打断不关窗**：窗保持待命可接新任务。
+        会话不在注册表（重启后陈旧认领）→ 跳过（任务行已取消，无东西在跑）。"""
+        if not sid:
+            return
+        agent = app.state.agents.get(sid)
+        if agent is None:
+            return
+        agent.request_abort()
+        if not _session_job_running(sid):
+            agent._abort_current_task()
+
+    def _exec_approved_cancel_task(
+            bb: Blackboard, pid: str, action: dict, approval_id: str) -> dict:
+        """批准取消任务审批单（M4 C1）：任务转 failed（blocked_reason=cancelled）
+        + 打断在跑窗。任务缺失/已终态（等待期被人处理过）→ 视为已处理跳过。"""
+        tid = str(action.get("task_id") or "")
+        tq = TaskQueue(bb)
+        row = tq.get_task(tid)
+        if row is None or row["project_id"] != pid:
+            return {"skipped": f"任务不存在: {tid}"}
+        if row["status"] not in ("open", "claimed"):
+            return {"skipped": f"任务状态为 {row['status']}，视为已处理"}
+        res = tq.cancel_task(tid, by="approval",
+                             reason=f"审批 {approval_id} 批准：{action.get('reason', '')}")
+        _interrupt_claimed_window(pid, res.get("claimed_by"))
+        # 键名用 task_status——decide 响应的 status 键承载批准决定，勿覆写
+        return {"task_id": tid, "task_status": "failed"}
+
+    def _exec_approved_requeue_task(
+            bb: Blackboard, pid: str, action: dict, approval_id: str) -> dict:
+        """批准放回审批单（M4 C1）：failed/awaiting_human → open（履历保留，
+        原绑定窗优先续跑）。任务缺失/非 failed → 视为已处理跳过。"""
+        tid = str(action.get("task_id") or "")
+        tq = TaskQueue(bb)
+        row = tq.get_task(tid)
+        if row is None or row["project_id"] != pid:
+            return {"skipped": f"任务不存在: {tid}"}
+        if row["status"] != "failed":
+            return {"skipped": f"任务状态为 {row['status']}，视为已处理"}
+        tq.reopen(tid, by="approval")
+        _schedule(pid, reason="task-requeued")
+        return {"task_id": tid, "task_status": "open"}
+
+    def _exec_approved_authorization(
+            bb: Blackboard, pid: str, action: dict, approval_id: str) -> dict:
+        """批准授权申请审批单（M5 D2，orchestrator-efficiency §0-10）：**纯回流**
+        ——批准即人类授权，处理器不做任何平台动作（scope_expand 后 Agent 自行
+        bb_add_asset 登记、rating_override 后按更高口径重新登记/patch）；结果经
+        收件箱 authorization_result 回流提交会话。恒 human 决策在架构上已成立
+        （Agent 产的审批单只有人类 decide），L2 无自动批路径。"""
+        sid = str(action.get("session_id") or "")
+        if sid:
+            try:
+                ok = bb.inbox_post(
+                    pid, sid, "authorization_result", approval_id,
+                    {"op": "authorization", "kind": action.get("kind"),
+                     "scope_request": str(action.get("scope_request") or "")[:300],
+                     "approved": True})
+                if ok:  # 事件流同步可见（与 escalation 回执同款 message.inbox 卡）
+                    bb.append_event(
+                        pid, "message.inbox",
+                        {"to_session": sid, "kind": "authorization_result",
+                         "ref_id": approval_id,
+                         "title": f"✅ 授权申请已批准（{action.get('kind')}）",
+                         "by": "system"},
+                        session_id=sid, author="system")
+            except Exception:  # noqa: BLE001 —— 回流失败不影响批准
+                log.exception("authorization 回流失败 approval=%s", approval_id)
+        return {"notified": sid or None}
+
+    def _exec_approved_delegate_window(
+        bb: Blackboard, pid: str, action: dict, approval_id: str,
+    ) -> dict:
+        """批准 delegate_window（L1 委派开窗，2026-09-25 会话中心化）：开窗
+        （armed）+ 写入委托（target_session=新窗）+ 带活起跑——批准即「窗+活」
+        一次到位。cap 赛跑终检、dedup 终检；任何失败抛异常落 exec_failed。"""
+        proj = _project(pid)
+        tq = TaskQueue(bb)
+        active = autonomy.count_active_sessions(bb, pid)
+        auto = autonomy.autonomy_of(bb.get_project(pid)["config"], track=proj.track)
+        if active >= auto["sessions_cap"]:
+            raise RuntimeError(
+                f"活跃会话已达项目上限 sessions_cap={auto['sessions_cap']}"
+                f"（当前 {active} 个非 closed 会话）；请先关窗或调高上限后重新申请")
+        objective = str(action.get("objective") or "").strip()
+        if not objective:
+            raise RuntimeError("delegate_window action 缺 objective")
+        task_type = str(action.get("task_type") or "generic")
+        scope = str(action.get("scope") or "")
+        role = str(action.get("role") or "").strip()
+        if tq.find_dedup_target(pid, dedup_fp(task_type, scope, objective)) is not None:
+            return {"skipped": "审批等待期已存在同指纹委托，未重复开窗"}
+        try:
+            exec_llm, plan_llm = _llms()
+        except HTTPException as e:
+            raise RuntimeError(e.detail) from e
+        factory = _registered_session_factory(pid, exec_llm, plan_llm)
+        try:
+            agent = factory(role or "_generalist")
+        except FileNotFoundError as e:
+            raise RuntimeError(str(e)) from e
+        sid = agent.session["id"]
+        bb.set_session_meta(sid, {"worker_armed": True})
+        bb.append_event(
+            pid, "session.spawned",
+            {"role": role or "_generalist", "session_id": sid,
+             "origin": "approval-delegate", "approval_id": approval_id},
+            session_id=sid, author="orchestrator")
+        try:
+            task_id = tq.publish(
+                pid, objective, scope=scope, task_type=task_type,
+                noise_budget=str(action.get("noise_budget") or "passive"),
+                priority=int(action.get("priority") or 2),
+                conflict_keys=action.get("conflict_keys") or None,
+                created_by="orchestrator",
+                allowed_types=_task_type_table(pid).keys(),
+                refs=action.get("refs") or None,
+                role=role, target_session=sid)
+        except ValueError as e:
+            raise RuntimeError(str(e)) from e
+        bb.append_event(
+            pid, "delegation.posted",
+            {"task_id": task_id, "objective": objective, "task_type": task_type,
+             "created_by": "orchestrator",
+             "role": role, "new_window": True, "approval_id": approval_id},
+            session_id=sid, author="orchestrator")
+        job_id = _submit_worker(pid, agent, auto=True, origin="approval-delegate")
+        return {"session_id": sid, "task_id": task_id, "job_id": job_id}
+
     # 审批 op 处理器白名单（批 4，红线）：批准后动作只准字典分派，绝不 eval。
-    # spawn_session 的唯一生产方是 Orchestrator 的 L1 分流；escalation（H3）的唯一
-    # 生产方是 Agent 的 request_escalation 工具；phase_transition 的唯一生产方是
-    # API 层 _phase_gate_check 的 L1 分流——各 op 生产方不混用。
+    # delegate_window 的唯一生产方=Orchestrator 的 L1 委派分流；spawn_session
+    # 为旧版待决单兼容保留；escalation（H3）唯一生产方=Agent 的
+    # request_escalation 工具；phase_transition 唯一生产方=API 层
+    # _phase_gate_check 的 L1 分流——各 op 生产方不混用。
     _APPROVAL_OP_HANDLERS = {
+        "delegate_window": _exec_approved_delegate_window,
         "spawn_session": _exec_approved_spawn_session,
         "escalation": _exec_approved_escalation,
         "phase_transition": _exec_approved_phase_transition,
+        "cancel_task": _exec_approved_cancel_task,
+        "requeue_task": _exec_approved_requeue_task,
+        "authorization": _exec_approved_authorization,
     }
 
     @app.post("/api/approvals/{approval_id}/decide")
@@ -2760,6 +3136,24 @@ def create_app(
         result: dict[str, Any] = {"approval_id": approval_id, "status": body.decision}
         # 批 4：approved 且 action.op 命中白名单才执行处理器；
         # rejected / 无 op / 未知 op 维持旧语义——只翻状态（rejected 由 orch 下轮经事件改道）
+        if body.decision == "rejected":
+            # M5 D2 搭车（§0-10）：escalation/authorization 被拒后回流提交会话
+            # （此前 rejected 无回流=Agent 空等）；回流失败不影响拒绝
+            action = row.get("action")
+            if isinstance(action, str):
+                try:
+                    action = json.loads(action)
+                except ValueError:
+                    action = None
+            op = action.get("op") if isinstance(action, dict) else None
+            sid = str((action or {}).get("session_id") or "") if isinstance(action, dict) else ""
+            if op in ("escalation", "authorization") and sid:
+                try:
+                    proj_bb.inbox_post(
+                        row["project_id"], sid, "approval_rejected", approval_id,
+                        {"op": op, "kind": (action or {}).get("kind")})
+                except Exception:  # noqa: BLE001
+                    log.exception("拒绝回流失败 approval=%s", approval_id)
         if body.decision == "approved":
             action = row.get("action")
             if isinstance(action, str):
@@ -2824,10 +3218,38 @@ def create_app(
         # A3 直播间任务流：节点=全部任务+认领会话；parent 实线 / 私信协作虚线
         return task_graph(_project(pid).bb, pid)
 
+    @app.get("/api/projects/{pid}/session-graph")
+    def get_session_graph(pid: str):
+        # 会话中心化 M4：节点=编排器+会话窗；delegate/derive/inbox/dm 边（见 graph.session_graph）
+        return session_graph(_project(pid).bb, pid)
+
     @app.get("/api/projects/{pid}/board-graph")
     def get_board_graph(pid: str):
         # 黑板链路图（2026-09-20）：五类对象类型分层 DAG；边口径见 graph.board_graph docstring
         return board_graph(_project(pid).bb, pid)
+
+    @app.get("/api/projects/{pid}/attack-path")
+    def get_attack_path(pid: str, target: str):
+        # 单站攻击链路图 v3（2026-09-24）：目标→意图→漏洞/发现/死路，只读
+        try:
+            return build_attack_path(_project(pid).bb, pid, target)
+        except LookupError:
+            raise HTTPException(404, "目标资产不存在")
+
+    @app.get("/api/projects/{pid}/intents")
+    def get_intents(pid: str, status: str | None = None):
+        # 意图清单（人类侧，供收尾核对）；?status=open/closed 过滤
+        proj = _project(pid)
+        return list_intents(proj.bb, pid, status=status)
+
+    @app.post("/api/projects/{pid}/intents/{iid}/reopen")
+    def post_reopen_intent(pid: str, iid: str, payload: dict | None = None):
+        # 人类否决收尾：漏洞被证伪/有新证据 → 重开意图（AI 须重新收尾）
+        try:
+            return reopen_intent(_project(pid).bb, pid, iid, author="human",
+                                 note=(payload or {}).get("note", ""))
+        except LookupError:
+            raise HTTPException(404, "意图不存在")
 
     @app.post("/api/projects/{pid}/tasks", status_code=201)
     def publish_task(pid: str, body: TaskIn):
@@ -2854,45 +3276,63 @@ def create_app(
                     "task_id": dup["id"], "deduplicated": True,
                     "existed_status": dup["status"], "kicked": []})
         try:
+            acceptance = body.acceptance
+            if acceptance is not None:
+                # 独立验证 M1：结构化条目归一化为 dict（str 原样），verify 规格的
+                # 校验在 publish→_initial_context（validate_verify_spec，违例 422）
+                acceptance = [a if isinstance(a, str) else
+                              {"text": a.text, **({"verify": a.verify} if a.verify else {})}
+                              for a in acceptance]
             task_id = tq.publish(
                 pid, body.objective, scope=body.scope, task_type=body.task_type,
                 noise_budget=noise, priority=body.priority,
                 conflict_keys=body.conflict_keys, created_by="human",
                 allowed_types=table.keys(), refs=body.refs, workset=body.workset,
-                attachments=att_refs, acceptance=body.acceptance,
+                attachments=att_refs, acceptance=acceptance,
                 parent_id=body.parent_id,
-                role=body.role,   # v14：任务绑定角色（认领即换装）
+                role=body.role,   # 委托建议角色（开窗/分派挑专家用；非强制换装）
                 # expert-pool M2（§4.6）：值域=绑定专家清单；未绑定=按轨过滤的池
                 allowed_roles=(expert_allowed_roles(
                     app.state.packs_root, _project(pid).track, _project(pid).experts)
                     if _project(pid).track else None),
-                bypass_target_guard=body.force)   # force 旁路 dedup 与同 target 闸
+                bypass_target_guard=body.force,  # force 旁路 dedup 与同 target 闸
+                # 会话中心化：委托归属窗（人在某会话窗发活时由前端写入）；
+                # ''=未指派，不自动起跑，交编排器重新委派
+                target_session=body.target_session)
         except ValueError as e:
             raise HTTPException(422, str(e))
-        # v0.72：触发点 D 退役——发布即建专属窗，kick 不再有公共池可认领
-        # （起跑统一走 _schedule 启动段/审批/人手 work 端点）。
-        # 触发点 D（A5）：L2 下人类发任务后去抖重排优先级（30s 合并一轮）
+        # 触发点 D（A5）：L2 下人类发委托后去抖重排（30s 合并一轮）
         _maybe_replan(pid, reason="human-publish")
-        # v0.71 任务即窗口；v0.72 全局一窗一任务：发布一律建专属执行窗并双向
-        # 绑定（同步做，响应带回 session_id 供前端双击直开）；失败不拖垮发布
-        # ——调度器 sweep 兜底重试。所有挡位（L0/L1/L2）与暂停下都建窗（待命
-        # 窗零成本；起跑与否由挡位决定）。
-        session_id: str | None = None
-        try:
-            task = tq.get_task(task_id)
-            if task is not None:
-                session_id = _bind_task_window(pid, task, reason="human-publish")
-                if session_id:
-                    # 任务已绑住，_schedule 绑定段不会再看到它——L1 执行审批单
-                    # 在此直接补提（批准=启动该待命窗）
-                    proj = _project(pid)
-                    cfg = autonomy.autonomy_of(
-                        proj.bb.get_project(pid)["config"], track=proj.track)
-                    if cfg["level"] == "L1":
-                        _schedule_request_approval(proj.bb, pid, task, "human-publish")
-        except Exception:  # noqa: BLE001 —— 建窗失败绝不影响发布结果
-            log.exception("发布后建绑窗失败 pid=%s task=%s", pid, task_id)
-        _schedule(pid, reason="human-publish")  # 启动段按挡位/并发上限起跑
+        # 会话中心化：不再自动建专属窗。target_session 有效 → 委托进该窗队列；
+        # 人类显式委托=武装授权（未武装窗当场武装），无 worker 在跑即手动起跑
+        # （manual override，不受挡位/paused 约束）；窗忙=排队，当前活干完自动
+        # 接。目标窗已关/不存在 → 退回未指派，交编排器重新委派。
+        session_id = body.target_session or None
+        if session_id:
+            srow = proj.bb.get_session(session_id)
+            if srow is None or srow.get("status") == "closed":
+                try:
+                    tq.unassign_session(session_id)
+                except Exception:  # noqa: BLE001
+                    log.exception("目标窗失效退回失败 task=%s", task_id)
+                session_id = None
+            else:
+                try:
+                    task = tq.get_task(task_id)
+                    proj.bb.append_event(
+                        pid, "delegation.posted",
+                        {"task_id": task_id,
+                         "objective": (task or {}).get("objective", body.objective),
+                         "task_type": body.task_type, "created_by": "human"},
+                        session_id=session_id, author=session_id)
+                    proj.bb.set_session_meta(
+                        session_id, {"worker_armed": True, "close_pending": None})
+                    if not _session_job_running(session_id):
+                        _submit_worker(
+                            pid, _ensure_agent(pid, session_id),
+                            origin="human-delegate")
+                except Exception:  # noqa: BLE001 —— 起跑失败不拖垮发布
+                    log.exception("委托起跑失败 pid=%s task=%s", pid, task_id)
         return {"task_id": task_id, "kicked": [], "deduplicated": False,
                 "session_id": session_id}
 
@@ -2929,6 +3369,22 @@ def create_app(
                 log.exception("改角色热换装失败 task=%s", task_id)
         return updated
 
+    @app.post("/api/tasks/{task_id}/cancel")
+    def cancel_task(task_id: str, body: CancelTaskIn | None = None):
+        """人工取消任务（M4 C1 人工口，编排器 L2 直执与审批处理器的同源写口）：
+        open/claimed → failed（blocked_reason=cancelled）+ 打断在跑窗（复用
+        /abort 原语，**窗不关**——保持待命可接新任务）。已终态 409。"""
+        pid = _pid_of_task(task_id)
+        tq = TaskQueue(_project(pid).bb)
+        try:
+            res = tq.cancel_task(task_id, by="human",
+                                 reason=(body.reason if body else "") or "人工取消")
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+        _interrupt_claimed_window(pid, res.get("claimed_by"))
+        return {"task_id": task_id, "status": "failed",
+                "interrupted": bool(res.get("claimed_by"))}
+
     @app.post("/api/tasks/{task_id}/reopen")
     def reopen_task(task_id: str, body: ReopenIn | None = None):
         pid = _pid_of_task(task_id)
@@ -2960,6 +3416,16 @@ def create_app(
             _schedule(pid, reason="task-reopen")  # v0.71 调度器：原窗保留绑定，closed 才重绑
         return {"task_id": task_id, "status": "open", "kicked": kicked}
 
+    def _session_meta(bb, sid: str) -> dict:
+        """读会话 meta（JSON 文本→dict；损坏/缺失→{}）。"""
+        raw = (bb.get_session(sid) or {}).get("meta")
+        if isinstance(raw, str):
+            try:
+                return json.loads(raw)
+            except ValueError:
+                return {}
+        return raw or {}
+
     def _spawn_session_for_task(pid: str, task: dict, *, armed: bool = True,
                                 role: str | None = None):
         """C6：为任务新建执行会话（角色沿用原认领者，读不到→通用角色；
@@ -2985,10 +3451,10 @@ def create_app(
         except FileNotFoundError as e:
             raise HTTPException(422, str(e))
         sid = agent.session["id"]
-        # v0.71 任务即窗口：bound_task_id 与 spawn_task_id 并存（后者仅服务
-        # resume 复盘窗幂等语义）；绑定窗据此 only_task 锁死认领
-        bb.set_session_meta(sid, {"worker_armed": armed, "spawn_task_id": task["id"],
-                                  "bound_task_id": task["id"]})
+        # v24（会话中心化）：任务即窗语义改为 target_session 单绑（bind_session 落），
+        # 不再写 meta.bound_task_id；spawn_task_id 保留服务 resume 复盘窗幂等
+        bb.set_session_meta(sid, {"worker_armed": armed,
+                                  "spawn_task_id": task["id"]})
         return agent, sid
 
     def _bind_task_window(pid: str, task: dict, reason: str = "schedule") -> str | None:
@@ -3050,44 +3516,61 @@ def create_app(
         mode = _resume_mode_of(proj, task_id)
         sid = task.get("claimed_by")
         orig_row = proj.bb.get_session(sid) if sid else None
-        reusable = bool(
-            mode == "snapshot" and sid and orig_row
-            and orig_row.get("status") != "closed")
+        # 原窗就近接手（2026-09-23 resume-origin-window 定稿：原窗存活即原窗跑，
+        # 对齐 reopen v0.71「失败任务归原绑定窗」既有定稿——此前只认 snapshot 模式，
+        # transcript 恒新窗，LiveRoom 失败窗点续跑任务飘走旧窗空挂）。
+        reusable = bool(sid and orig_row
+                        and orig_row.get("status") != "closed")
 
         if reusable:
-            # 原会话复活（E12 路径）：revive 快照 → reopen+claim → 断点续跑
             agent = _ensure_agent(pid, sid)
             if _session_job_running(sid):
                 raise HTTPException(409, "原会话有任务在跑，稍后再续跑")
-            st = agent.revive_snapshot(task_id)
-            if st is None:
-                raise HTTPException(409, "原会话快照不可复活，请改用「放回」重新派发")
-            try:
-                tq.reopen(task_id, by="human", scene="kept")
-                tq.claim(task_id, sid, lease_minutes=agent.config.lease_minutes)
-            except ValueError as e:
-                raise HTTPException(409, str(e))
-            if st.get("reason") == "budget":
-                old = agent.dispatcher.max_steps
-                agent.dispatcher.max_steps = old + 200
-                proj.bb.append_event(
-                    pid, "step.budget_extended",
-                    {"session_id": sid, "task_id": task_id,
-                     "old_max": old, "new_max": old + 200, "by": "human"},
-                    session_id=sid, author="human")
+            if mode == "snapshot":
+                # ⚡ 带现场续跑（E12 路径）：revive 快照 → reopen+claim → 断点续跑
+                st = agent.revive_snapshot(task_id)
+                if st is None:
+                    raise HTTPException(409, "原会话快照不可复活，请改用「放回」重新派发")
+                try:
+                    tq.reopen(task_id, by="human", scene="kept")
+                    tq.claim(task_id, sid, lease_minutes=agent.config.lease_minutes)
+                except ValueError as e:
+                    raise HTTPException(409, str(e))
+                if st.get("reason") == "budget":
+                    old = agent.dispatcher.max_steps
+                    agent.dispatcher.max_steps = old + 200
+                    proj.bb.append_event(
+                        pid, "step.budget_extended",
+                        {"session_id": sid, "task_id": task_id,
+                         "old_max": old, "new_max": old + 200, "by": "human"},
+                        session_id=sid, author="human")
+            else:
+                # ↩ 接手现场续跑：现场就在本窗（C10 任务现场文件归任务所有，
+                # 零搬运）；认领由 worker 首轮 run_next_task 执行（与跨会话
+                # 新窗分支同时点，run_task 接手路径重建末 60 条上下文）
+                try:
+                    tq.reopen(task_id, by="human", scene="kept")
+                except ValueError as e:
+                    raise HTTPException(409, str(e))
             agent._stop_after_task = False  # 清中断一次性闸门，否则 worker 领任务前即退出
             agent._pause_req.clear()
             agent._abort_req.clear()
             proj.bb.set_session_status(sid, "running")
             _submit_worker(pid, agent, origin="human-resume")
             return {"task_id": task_id, "session_id": sid,
-                    "status": "resumed", "resume_mode": "snapshot"}
+                    "status": "resumed", "resume_mode": mode}
 
         # 跨会话：新建 armed 任务窗（snapshot=认领即复活；transcript=接手现场续跑）
         agent, new_sid = _spawn_session_for_task(pid, task, armed=True)
         try:
             tq.reopen(task_id, by="human", scene="kept")
-            # 认领由 worker 首轮执行（run_next_task→run_task 认领即复活/接手）
+            # 会话中心化：委托随窗迁移——旧窗已关，原 target（若有）先退回再
+            # 绑新窗（worker run_session 只取 target=本窗 的委托）
+            row_now = tq.get_task(task_id)
+            old_target = ((row_now or {}).get("target_session") or "")
+            if old_target and old_target != new_sid:
+                tq.unassign_session(old_target)
+            tq.bind_session(task_id, new_sid, by="resume-spawn")
         except ValueError as e:
             raise HTTPException(409, str(e))
         _submit_worker(pid, agent, origin="task-resume")
@@ -3158,19 +3641,47 @@ def create_app(
 
     @app.post("/api/tasks/{task_id}/spawn-window")
     def spawn_task_window(task_id: str):
-        """F9 任务窗：双击已收尾（done/failed）任务卡开新窗复盘/续研。
-        不自动接任务（armed=False）；上下文经 human_note 注入（worker 首个
-        控制点 drain）。幂等：同任务已有非 closed 任务窗则直接返回该会话。"""
+        """F9 任务窗：双击任务卡直开窗（四态闭环，2026-09-23 放开非终态）：
+        - open 无绑 = 手动补绑待命窗（_bind_task_window，armed=false 不起跑，
+          起跑走跑队列/挡位），cap 满 409（人手开窗同口径）；
+        - open/claimed 已绑 = 幂等挂回该窗；claimed 窗已关 = 409 引导放回；
+        - done/failed = 复盘/续研开新窗（armed=False；上下文经 human_note 注入，
+          worker 首个控制点 drain）。幂等：同任务已有非 closed 任务窗直接返回。"""
         pid = _pid_of_task(task_id)
         proj = _project(pid)
         bb = proj.bb
-        task = TaskQueue(bb).get_task(task_id)
+        tq = TaskQueue(bb)
+        task = tq.get_task(task_id)
         if task is None:
             raise HTTPException(404, f"任务不存在: {task_id}")
-        if task["status"] not in {"done", "failed"}:
-            raise HTTPException(
-                422, f"任务状态为 {task['status']}：执行中的任务请挂回其会话页签，"
-                     "未认领的任务请到任务看板操作")
+        status = task["status"]
+        if status in {"open", "claimed"}:
+            sid = task.get("target_session") or ""
+            row = bb.get_session(sid) if sid else None
+            if row is not None and row.get("status") != "closed":
+                return {"session_id": sid, "created": False}
+            if status == "claimed":
+                raise HTTPException(
+                    409, "任务的执行窗已关闭；请先「放回」任务再重新派发")
+            auto = autonomy.autonomy_of(bb.get_project(pid)["config"], track=proj.track)
+            active = autonomy.count_active_sessions(bb, pid)
+            if active >= auto["sessions_cap"]:
+                raise HTTPException(
+                    409, f"活跃会话已达项目上限 sessions_cap={auto['sessions_cap']}"
+                         f"（当前 {active} 个非 closed 会话）；请先关窗或调高上限后重试")
+            new_sid = _bind_task_window(pid, task, reason="human:spawn-window")
+            if not new_sid:
+                # 竞态兜底：预检与绑窗之间调度器 sweep 抢先绑上 → 挂回即可
+                fresh = tq.get_task(task_id)
+                sid2 = (fresh.get("target_session") or "") if fresh else ""
+                row2 = bb.get_session(sid2) if sid2 else None
+                if row2 is not None and row2.get("status") != "closed":
+                    return {"session_id": sid2, "created": False}
+                raise HTTPException(
+                    503, "补绑执行窗失败（预算硬闸或 LLM 未就绪），稍后重试")
+            return {"session_id": new_sid, "created": True}
+        if status not in {"done", "failed"}:
+            raise HTTPException(422, f"任务状态为 {status}，无法开窗")
         # 幂等：已有该任务的任务窗（非 closed）→ 直接挂回
         for row in bb.list_sessions(pid):
             if row.get("status") == "closed":
@@ -3386,27 +3897,42 @@ def create_app(
             raise HTTPException(404, str(e))
         if r is None:
             raise HTTPException(409, "会话已关闭，无法投递引导")
-        # 空闲对话轮（2026-09-19）：armed 且无 worker 在跑 → 立即踢 worker 跑
-        # 对话轮直接回应；轮进行中投递的引导维持轮末注入（worker 循环认领期 drain）。
-        # 无 auto=manual 语义：人手对话不受 autonomy.paused 认领约束。
-        # 2026-09-20 对话化放宽：未武装窗也回对话——但**绑 open/claimed 任务的
-        # 待命窗绝不 kick**（宁严勿松：kick 会 run_next_task(only_task=bound) 起
-        # 跑完整任务，破坏 L0/L1 审批语义）：仅当无绑定任务 / 绑定任务已终态
-        # （done/failed）/ 任务行不存在时才视作「对话安全」放行。
-        meta_raw = (_project(pid).bb.get_session(sid) or {}).get("meta")
-        meta = json.loads(meta_raw) if isinstance(meta_raw, str) else (meta_raw or {})
+        # 空闲对话轮（2026-09-19；v24 会话中心化口径）：无 worker 在跑时——armed
+        # 窗一律踢（自动接单语义）；未武装窗仅当**窗内无 open/claimed 委托**才踢
+        # （宁严勿松：不能让一条聊天消息替未批准的委托起跑），窗内有活则引导滞留
+        # 收件箱、等窗起跑轮注入。轮进行中投递的引导维持轮末注入。
         if not _session_job_running(sid):
-            chat_safe = bool(meta.get("worker_armed"))
-            if not chat_safe:
-                bound = meta.get("bound_task_id") or ""
-                if not bound:
-                    chat_safe = True  # 无绑定：纯 chat 窗，worker 空退自然回对话
-                else:
-                    t = TaskQueue(_project(pid).bb).get_task(bound)
-                    chat_safe = t is None or t.get("status") in {"done", "failed"}
+            tq = TaskQueue(_project(pid).bb)
+            chat_safe = bool(_session_meta(_project(pid).bb, sid)
+                             .get("worker_armed")) \
+                or not tq.session_has_live_work(pid, sid)
             if chat_safe:
                 _submit_worker(pid, _ensure_agent(pid, sid), origin="human-note")
         return {"note_id": r["id"], "session_id": sid}
+
+    @app.post("/api/sessions/{sid}/role")
+    def switch_session_role(sid: str, body: SessionRoleIn):
+        """会话级换智能体（会话中心化 §4.4，2026-09-25）：会话行身份更新 +
+        对在内存会话热换装（下个步边界重建 system/工具白名单）——对话历史与
+        黑板全保留、新身份跨委托持续。closed 窗 409；专家不在池 422。"""
+        pid = _pid_of_session(sid)
+        role = body.role.strip()
+        if not role:
+            raise HTTPException(422, "role 不能为空")
+        proj = _project(pid)
+        if not expert_exists(app.state.packs_root, role, proj.track):
+            raise HTTPException(422, f"专家不在池内或不可服务该轨: {role}")
+        try:
+            row = proj.bb.set_session_role(sid, role)
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+        agent = app.state.agents.get(sid)
+        if agent is not None:
+            try:
+                agent.switch_session_role(role)
+            except Exception:  # noqa: BLE001
+                log.exception("会话级换人热换装失败 sid=%s", sid)
+        return row
 
     def _pid_of_session(sid: str) -> str:
         for proj in store.list_projects():
@@ -3438,6 +3964,91 @@ def create_app(
                         "max_runtime": e.get("max_runtime"),
                         "max_steps": e.get("max_steps")})
         return out
+
+    # ---------------- 网关策略快照（gateway-config-view M1，2026-09-23）----------------
+    # 单一事实源仍是代码：本端点做代码→JSON 映射，改规则必须走代码+测试，页面永不漂移。
+
+    @app.get("/api/gateway/config")
+    def gateway_config():
+        """执行网关策略快照（设置页「网关」页签数据源，DESIGN §7）。
+        runtime/threat/net 直出 policy 常量；pathguard 为手工语义摘要（测试断言
+        条数防遗漏）；rate_rules 直出 rateguard.RATE_RULES 表。"""
+        from core.runtime import pathguard, policy, rateguard
+        runtime_levels = [
+            {"name": "host", "level": 0, "label": "宿主原生",
+             "desc": "本项目自身代码、静态分析"},
+            {"name": "wsl", "level": 1, "label": "WSL2 半可信",
+             "desc": "与宿主同信任级（不可信代码不因 wsl 降险）"},
+            {"name": "docker", "level": 2, "label": "普通容器",
+             "desc": "不可信代码默认环境"},
+            {"name": "sandbox", "level": 3, "label": "加固沙箱",
+             "desc": "活体恶意样本专用（L3+fakenet）"},
+        ]
+        threat_matrix = [
+            {"threat_class": tc, "allowed": sorted(policy.allowed_runtimes(tc)),
+             "note": note}
+            for tc, note in [
+                ("trusted", "可信：本项目自身代码与静态分析"),
+                ("untrusted", "不可信：来源不明代码/下载工具，只允许容器"),
+                ("unknown", "未知按恶意样本处理（宁严勿松，§7 安全默认值）"),
+                ("malware_live", "活体恶意样本：仅 L3 加固沙箱"),
+            ]
+        ]
+        pathguard_rules = [
+            "只拦写不拦读（核心诉求=产物归置，读另行审计）",
+            "PowerShell 写 cmdlet 清单：out-file / set-content / add-content / "
+            "tee-object / new-item / export-csv / export-clixml / "
+            "export-pfxcertificate / set-variable",
+            "参数式写目标同拦：curl/wget/iwr 的 -o / --output / -OutFile 及 "
+            "nmap 风格 -oG/-oN 连写、bash tee",
+            "重定向 > >> 1> 2> 1>> 2>> 同拦",
+            "豁免特殊目标：&1 &2 /dev/null nul con $null",
+            "变量间接静态不可判：~ 一律视为逃逸；$env: / %VAR% 放行"
+            "（TEMP/TMP 已被网关重定向进项目）",
+            "相对路径按 cwd=scratch 解析，越出 scratch 即拒；正式产物走 bb_add_artifact",
+        ]
+        return {
+            "runtime_levels": runtime_levels,
+            "threat_matrix": threat_matrix,
+            "net_modes": {"modes": ["none", "fakenet", "real"],
+                          "default": policy.DEFAULT_NET_MODE,
+                          "note": "real 永不默认，须人工审批；fakenet 为后续里程碑"},
+            "pathguard_rules": pathguard_rules,
+            "rate_rules": [
+                {"tool": tool, "requirement": r["requirement"],
+                 "params": r["params"], "hint": r["hint"]}
+                for tool, r in rateguard.RATE_RULES.items()
+            ],
+            "exec_params": {"default_timeout": 120,
+                            "sandbox_image": "python:3.11-alpine"
+                            "（占位，专用分析镜像后续经 tools/ 管理）"},
+        }
+
+    @app.post("/api/gateway/probe")
+    def gateway_probe():
+        """手动重跑宿主能力探测，替换 app.state.inventory 并返回新清单
+        （结构与 GET /api/projects/{pid}.capability 完全一致）。同步执行，
+        最坏 ~20s（docker+wsl 各 10s 超时），仅用户主动点击触发；刷新即生效
+        ——后续新开窗经 app.state.inventory 引用取到新清单。"""
+        app.state.inventory = HostDetector().probe(tools_root=app.state.tools_root)
+        return json.loads(app.state.inventory.to_json())
+
+    @app.get("/api/agent-tools")
+    def agent_tools():
+        """Agent 工具目录（设置页「工具」页签数据源，agent-tools-view 2026-09-24）：
+        直出 AGENT_TOOLS 静态全集 + 静态分组；无项目依赖、无 IO、无敏感字段。"""
+        from core.agent.tools import (
+            AGENT_TOOLS, TOOL_GROUPS, agent_tool_group)
+        return {
+            "groups": TOOL_GROUPS,
+            "tools": [
+                {"name": t["name"], "description": t["description"],
+                 "group": agent_tool_group(t["name"]),
+                 "input_schema": t.get(
+                     "input_schema", {"type": "object", "properties": {}})}
+                for t in AGENT_TOOLS
+            ],
+        }
 
     @app.get("/api/models")
     def list_models():
@@ -3541,6 +4152,100 @@ def create_app(
             session_id=sid, author="human")
         return {"status": "ok", "provider": body.provider, "model": new_llm.model}
 
+    # ---------- 项目级 executor 模型覆写（TRAE 新壳 M3，2026-09-25） ----------
+
+    def _default_executor_target() -> dict | None:
+        """路由缺省 executor（ModelRouter 覆写 ∪ ProviderStore 默认）。"""
+        try:
+            t = ModelRouter().target_for("executor")
+            if t is not None:
+                return {"provider": t[0], "model": t[1]}
+        except Exception:  # noqa: BLE001 —— 配置损坏时回落供应商默认
+            pass
+        try:
+            dname, dmodel = app.state.llm_store.default_target()
+            return {"provider": dname, "model": dmodel}
+        except ProviderError:
+            return None
+
+    def _executor_override_of(pid: str) -> dict | None:
+        cfg = _project(pid).bb.get_project(pid)["config"] or {}
+        ov = cfg.get("executor_llm")
+        if isinstance(ov, dict) and str(ov.get("provider") or "").strip():
+            return {"provider": str(ov["provider"]).strip(),
+                    "model": str(ov.get("model") or "").strip()}
+        return None
+
+    def _apply_executor_llm_live(pid: str, new_llm, *, provider: str,
+                                 model: str, scope: str) -> list[str]:
+        """把新 llm 装到本项目全部在内存的会话上（下次 LLM 调用即生效；
+        与全局 llm 跨会话共享同实例的既有口径一致），落一条 llm.switched 审计。"""
+        from core.agent.loop import apply_context_budget
+        touched: list[str] = []
+        for sid, agent in list(app.state.agents.items()):
+            if agent.project_id != pid:
+                continue
+            agent.llm = new_llm
+            apply_context_budget(agent.config, new_llm)
+            touched.append(sid)
+        if touched:
+            _project(pid).bb.append_event(
+                pid, "llm.switched",
+                {"session_ids": touched, "provider": provider, "model": model,
+                 "scope": scope}, author="human")
+        return touched
+
+    @app.get("/api/projects/{pid}/executor-llm")
+    def get_project_executor_llm(pid: str):
+        """executor 模型三态视图：default=路由缺省 / override=项目覆写 /
+        effective=当前实际（chip 默认值/覆盖/重置的数据源）。"""
+        default = _default_executor_target()
+        override = _executor_override_of(pid)
+        return {"default": default, "override": override,
+                "effective": override or default}
+
+    @app.put("/api/projects/{pid}/executor-llm")
+    def set_project_executor_llm(pid: str, body: SwitchLlmIn):
+        """项目 executor 覆写：先实测构建供应商/模型（坏值 422 不落盘），
+        经项目 config 单一写口持久化（project.json+黑板双写），并对在内存会话
+        即时换装。"""
+        proj = _project(pid)
+        try:
+            new_llm = app.state.llm_store.build(body.provider, body.model)
+        except ProviderError as e:
+            raise HTTPException(422, str(e)) from e
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(503, f"供应商/模型不可用（{e}）") from e
+        override = {"provider": body.provider, "model": new_llm.model}
+        store.update_config(pid, {"executor_llm": override}, project=proj)
+        touched = _apply_executor_llm_live(
+            pid, new_llm, provider=body.provider, model=new_llm.model,
+            scope="project-executor-override")
+        return {"status": "ok", "override": override, "effective": override,
+                "touched_sessions": touched}
+
+    @app.delete("/api/projects/{pid}/executor-llm")
+    def reset_project_executor_llm(pid: str):
+        """重置：剥 config.executor_llm（恢复跟随路由缺省），在内存会话换装回
+        缺省 executor。"""
+        proj = _project(pid)
+        store.update_config(pid, {"executor_llm": None}, project=proj)
+        default = _default_executor_target()
+        new_llm = None
+        if default is not None:
+            try:
+                new_llm = app.state.llm_store.build(
+                    default["provider"], default["model"] or None)
+            except Exception:  # noqa: BLE001 —— 缺省构建失败保留各窗现状
+                new_llm = None
+        touched: list[str] = []
+        if new_llm is not None and default is not None:
+            touched = _apply_executor_llm_live(
+                pid, new_llm, provider=default["provider"],
+                model=default["model"], scope="project-executor-reset")
+        return {"status": "ok", "default": default, "override": None,
+                "effective": default, "touched_sessions": touched}
+
     @app.post("/api/projects/{pid}/agents", status_code=201)
     def spawn_agent(pid: str, body: AgentIn):
         proj = _project(pid)
@@ -3572,6 +4277,13 @@ def create_app(
         # L0 不自起；paused 时只开窗不消费。
         extra: dict[str, Any] = {}
         proj.bb.set_session_meta(agent.session["id"], {"worker_armed": body.armed})
+        # 会话中心化：人开窗与编排开窗同审计（此前 POST /agents 无 session.spawned，
+        # 事件流查不到人开的窗）；先于 worker 起跑事件。
+        proj.bb.append_event(
+            pid, "session.spawned",
+            {"role": agent.session["role"], "session_id": agent.session["id"],
+             "origin": "human"},
+            session_id=agent.session["id"], author="human")
         if body.armed and auto["level"] in {"L1", "L2"} and not auto["paused"]:
             extra["job_id"] = _submit_worker(
                 pid, agent, auto=True, origin="human-spawn")  # 触发点 C
@@ -3614,20 +4326,9 @@ def create_app(
         def run() -> int:
             done = 0
             stopped_by_pause = False
-            # v0.71 任务即窗口：绑定窗只认领自己绑定的任务（meta.bound_task_id，
-            # SQL 侧 only_task 过滤无竞态）——跑完即空退，不进公共池续单；
-            # v0.72 全局一窗一任务：无绑定手动窗（spawn_agent 纯 chat/侦查窗）
-            # assigned_only=True 永不进公共池（公共池认领机制退役，恒空退）。
-            bound_task: str | None = None
-            try:
-                _mraw = (agent.bb.get_session(agent.session["id"]) or {}).get("meta")
-                _m = json.loads(_mraw) if isinstance(_mraw, str) else (_mraw or {})
-                bound_task = _m.get("bound_task_id") or None
-            except Exception:  # noqa: BLE001 —— 读 meta 失败不该杀死 worker
-                bound_task = None
             while True:
-                # F9 优雅关窗：排水标记命中（close_pending）→ 不再认领，自关后退出。
-                # 检查点在任务收尾之后、下一轮认领之前——当前任务完整跑完。
+                # F9 优雅关窗：排水标记命中（close_pending）→ 不再接活，自关后退出。
+                # 检查点在委托收尾之后、下一轮会话轮之前——当前委托完整跑完。
                 try:
                     meta_raw = (agent.bb.get_session(agent.session["id"])
                                 or {}).get("meta")
@@ -3638,31 +4339,20 @@ def create_app(
                 except Exception:  # noqa: BLE001 —— 读 meta 失败不该杀死 worker
                     pass
                 # paused 只约束自动消费（C/kick/批准即跑）；人显式「跑队列」/恢复
-                # 是人工 override，暂停下照常认领（DESIGN §6.8 行为表：人手动作照常）
+                # 是人工 override，暂停下照常接活（DESIGN §6.8 行为表：人手动作照常）
                 if not manual and _paused():
                     stopped_by_pause = True
                     break
                 try:
-                    claimed = agent.run_next_task(
-                        only_task=bound_task,
-                        # v0.72 全局一窗一任务：无绑定手动窗永不进公共池
-                        # （assigned_only 收窄 target_session 门控，认领恒空）
-                        assigned_only=bound_task is None)
-                    if claimed is None:
-                        # 空闲对话轮（2026-09-19）：队列空转（last_claim_idle）且
-                        # 收件箱有未读 human_note → 跑对话轮直接回应，回应完
-                        # continue 再认领（空闲期连发引导逐轮回应=连续对话）。
-                        # 暂停/中断早退路径 last_claim_idle=False，不受影响。
-                        # v0.71 延续模式：绑定窗续聊带绑定任务既往对话上下文；
-                        # 无绑定手动窗 task_id=None 行为不变。
-                        if agent.last_claim_idle and \
-                                agent.run_chat(task_id=bound_task) is not None:
-                            done += 1
-                            continue
+                    # 会话轮（2026-09-25 会话中心化）：有委托干活 / 无委托对话，
+                    # 工具面一致；委托做完 while 再入自动接窗内下一件；都没有
+                    # 返回 None 空退、窗回待命。
+                    turned = agent.run_session()
+                    if turned is None:
                         break
-                except Exception:  # noqa: BLE001 —— 任务级兜底在 _fail_task_on_error
-                    # （认领/收尾阶段的意外异常也不得静默杀死 worker 线程：
-                    #   任务悬 claimed + 孤儿心跳续租，看板永远「执行中」）
+                except Exception:  # noqa: BLE001 —— 委托级兜底在 _fail_task_on_error
+                    # （起跑/收尾阶段的意外异常也不得静默杀死 worker 线程：
+                    #   委托悬 claimed + 孤儿心跳续租，看板永远「执行中」）
                     log.exception("worker 循环异常退出 pid=%s sid=%s", pid, agent.session["id"])
                     _emit_llm_error(pid, "worker", "worker 循环异常退出（详见后端日志）")
                     break
@@ -3800,17 +4490,14 @@ def create_app(
         return True
 
     def _kick_workers(pid: str) -> list[str]:
-        """给每个没有在跑 worker 的非关闭/非暂停会话提交一个 agent-work job。
-        空队列 worker 只花一次 claim SQL 即零成本退出。返回新提交的 sid 列表。
-        F9 armed 闸：未启动（meta.worker_armed 非 true）的窗不自动接任务——
-        所有自动唤醒（D/E/B/tick）统一在此被拦。
-        v0.71：绑定任务已终态（done/failed）的续聊窗跳过——延续模式不参与任务
-        消费，防空转 worker。
-        v0.72 全局一窗一任务：无绑定手动窗一律跳过——手动窗公共池认领机制退役，
-        kick 只服务「绑定任务未终态」的实现窗（reopen 放回等场景）。"""
+        """给每个没有在跑 worker 的非关闭/非暂停武装会话提交一个 agent-work job。
+        无委托无消息的会话轮零成本空退。返回新提交的 sid 列表。
+        F9 armed 闸：未启动（meta.worker_armed 非 true）的窗不自动接活——所有
+        自动唤醒（D/E/B/tick）统一在此被拦。
+        会话中心化（2026-09-25）：不再有「无绑定/绑定终态跳过」——武装 idle 窗
+        都可能有窗内排队委托或待回应消息，一律踢；终态「续聊窗」=普通待命窗。"""
         proj = _project(pid)
         submitted: list[str] = []
-        tq = TaskQueue(proj.bb)
         for row in proj.bb.list_sessions(pid):
             sid = row["id"]
             if row.get("status") in {"closed", "paused"} or _session_job_running(sid):
@@ -3818,13 +4505,7 @@ def create_app(
             meta = row.get("meta")
             meta = json.loads(meta) if isinstance(meta, str) else (meta or {})
             if not meta.get("worker_armed"):
-                continue  # F9：未启动，不自动接任务
-            bound = meta.get("bound_task_id")
-            if not bound:
-                continue  # v0.72：无绑定手动窗不参与任务消费
-            trow = tq.get_task(bound)
-            if trow is None or trow["status"] in {"done", "failed"}:
-                continue  # v0.71 续聊窗：不参与任务消费
+                continue  # F9：未启动，不自动接活
             try:
                 agent = _ensure_agent(pid, sid)  # 重启后 rehydrate；陈旧 running→idle
             except HTTPException:
@@ -3868,8 +4549,9 @@ def create_app(
 
     def _maybe_mission_auto_tick(pid: str, reason: str, *,
                                  require_idle: bool = False) -> None:
-        """C2 mission 自动派生（§6.9）：L1 档专属补位——auto_derive 开启 + mission
-        判据存在 + worker 空退 → 自动编排一轮派生下一批任务（开窗仍走 L1 审批）。
+        """C2 mission 自动派生（§6.9）：L1 档专属补位——auto_derive 开启 + 判据存在
+        （goal>mission>模板>内置，永远有判据）+ worker 空退 → 自动编排一轮派生下一批
+        任务（开窗仍走 L1 审批）。
         L2 不走此路径（既有自动链已覆盖）。闸全部实时重读；防空转：上轮派生
         tick 零发布且此后无新事件 → 跳过，直到黑板有变化。
         require_idle=True（轮询触发专用）：额外要求任务队列无 open/claimed 行——
@@ -3892,10 +4574,10 @@ def create_app(
             # 闸②档位：仅 L1 补位（L2 由既有自动链覆盖；L0 全手动）
             if cfg["level"] != "L1" or cfg["paused"]:
                 return
-            # 闸③判据存在（三层解析：mission > 所选模板 > 轨内置默认）
+            # 闸③判据存在（四层解析：goal > mission 存量 > 所选模板 > 轨内置默认）
             resolved = judgments.resolve_criteria(
                 bb.get_project(pid)["config"], app.state.judgments_dir,
-                track=proj.track)
+                track=proj.track, goal=(proj.meta or {}).get("phase_goal"))
             # 闸④token 预算硬阻
             tok = autonomy.usage_view(bb, pid).get("tokens", {})
             if tok.get("pct") is not None and tok["pct"] >= 100:
@@ -4080,21 +4762,20 @@ def create_app(
     _schedule_lock = threading.RLock()
 
     def _schedule(pid: str, reason: str) -> None:
-        """任务窗调度器（v0.71 任务即窗口；v0.72 全局一窗一任务挡位统一）——
-        机械规则、不经编排 LLM，两段式：
-        - **绑定段**（无条件，含 L0/暂停——待命窗零成本）：open 且无绑
-          （target_session=''）的任务逐个 `_bind_task_window` 建 armed=false
-          待命窗并双向绑定；L1 档建窗后提 spawn_session **执行**审批单
-          （action 带 task_id，批准=启动该窗）；预算硬闸/sessions_cap 满即停
-          （sweep 兜底重试）。
-        - **启动段**（L1/L2 且未暂停）：claimed 计数 < autonomy.max_concurrent_tasks
-          时按优先级起跑绑定窗；**L2 待命窗（未武装）武装+起跑，L1 待命窗不自动
-          武装（等审批批准）**；已武装窗 worker 早退补起（各挡位，armed=审批/
-          人工点跑过的授权凭据）；绑定窗已被人工关闭 → 退回无绑重绑新窗（L2
-          当场起跑、L1 重提审批）；窗 paused 跳过；逐个重算防并发超卖。
-          L0 启动段跳过（人工「跑队列」=手动 override）。
-        触发点=publish/reopen 端点、worker-idle、worker on_done、post-tick、
-        关窗收尾 + SCHEDULE_POLL_INTERVAL sweep 兜底。任何异常吞掉记 log。"""
+        """会话窗调度器（会话中心化，docs/plans/session-centric-orchestration.md
+        §4；2026-09-25）——机械规则、不经编排 LLM，单段：
+
+        窗内队列读时派生。对每个「有 open 委托的目标窗」：closed/已删 → 委托
+        退回未指派（unassign；**不自动开窗重绑**，交编排器重新委派）；paused/
+        worker 在跑 → 跳过；未武装：L2 武装+起跑、L1 等审批；已武装 idle →
+        补起 worker。并发口径=活跃窗去重数 < max_concurrent_tasks（一窗串行
+        一件，窗内其余排队）。L0/暂停整段跳过（人工「跑队列」=手动 override
+        不经此函数）。
+
+        **无 target_session 的 open 行不处理**（L0 提案残留/关窗退回——不自动
+        起跑，交编排器重新委派）。触发点=publish/委派端点、worker-idle、
+        worker on_done、post-tick + SCHEDULE_POLL_INTERVAL sweep 兜底。任何
+        异常吞掉记 log。"""
         try:
             proj = _project(pid)
         except HTTPException:
@@ -4103,64 +4784,49 @@ def create_app(
         try:
             bb = proj.bb
             cfg = autonomy.autonomy_of(bb.get_project(pid)["config"], track=proj.track)
-            tq = TaskQueue(bb)
-            tasks = tq.list_tasks(pid)
-            open_tasks = [t for t in tasks if t["status"] == "open"]
-            unbound = [t for t in open_tasks if not t.get("target_session")]
-            # ---- 绑定段：给无绑任务建专属待命窗（登记动作，零成本，含 L0/暂停） ----
-            for t in sorted(unbound, key=lambda t: (t["priority"], t["created_at"], t["id"])):
-                if autonomy.hard_block_reason(bb, pid, "spawn_session"):
-                    break
-                if autonomy.count_active_sessions(bb, pid) >= int(cfg["sessions_cap"]):
-                    break
-                _bind_task_window(pid, t, reason=reason)  # 单个失败不拖垮其余
-                if cfg["level"] == "L1":
-                    _schedule_request_approval(bb, pid, t, reason)  # 执行审批单
-            # ---- 启动段：并发上限内起跑绑定窗（L0/暂停跳过：人工 override） ----
             if cfg["level"] not in {"L1", "L2"} or cfg["paused"]:
                 return
-            # 绑定段刚建绑的窗对启动段可见（关窗重绑/补绑后当场起跑，不等 sweep）
+            tq = TaskQueue(bb)
             tasks = tq.list_tasks(pid)
-            open_tasks = [t for t in tasks if t["status"] == "open"]
             limit = int(cfg["max_concurrent_tasks"])
-            claimed_n = sum(1 for t in tasks if t["status"] == "claimed")
-            for t in sorted(open_tasks, key=lambda t: (t["priority"], t["created_at"], t["id"])):
-                if claimed_n >= limit:
+            # 在跑 worker 窗快照（认领间隙/收尾期都算占槽；worker-idle 自触时
+            # 自己=这形态，不计它会超卖）。
+            running_sids = {j["meta"].get("session_id")
+                            for j in app.state.jobs.all_jobs()
+                            if j["kind"] == "agent-work" and j["status"] == "running"
+                            and j["meta"].get("project_id") == pid}
+            # 活跃窗=有 claimed 委托的窗 + 有在跑 worker 的窗（去重计数）
+            claimed_sids = {t.get("target_session") for t in tasks
+                            if t["status"] == "claimed" and t.get("target_session")}
+            active_n = len(claimed_sids | running_sids)
+            # 候选窗：open 委托的 target_session 去重，按每窗队首
+            # （priority, created_at）排序——窗内队列顺序即 session_queue 口径。
+            head_by_sid: dict[str, tuple] = {}
+            for t in tasks:
+                if t["status"] != "open" or not t.get("target_session"):
+                    continue
+                key = (t["priority"], t["created_at"], t["id"])
+                if t["target_session"] not in head_by_sid \
+                        or key < head_by_sid[t["target_session"]]:
+                    head_by_sid[t["target_session"]] = key
+            for sid in sorted(head_by_sid, key=lambda s: head_by_sid[s]):
+                if active_n >= limit:
                     break
-                sid = t.get("target_session")
-                if not sid:
-                    continue  # 绑定段刚失败（cap 满/预算闸）的，不硬起跑
                 row = bb.get_session(sid)
                 if row is None or row.get("status") == "closed":
-                    # 绑定窗已被人工关闭：任务退回无绑（unassign 仅动 open 行）重绑
-                    # 新窗——L2 当场起跑；L1 重提执行审批（批准=启动）
+                    # 目标窗已关：委托退回未指派，交编排器重新委派（不自动开窗）
                     try:
                         tq.unassign_session(sid)
-                        new_sid = _bind_task_window(pid, t, reason=f"{reason}:rebind")
-                        if new_sid and claimed_n < limit:
-                            if cfg["level"] == "L2":
-                                bb.set_session_meta(new_sid, {"worker_armed": True})
-                                _submit_worker(pid, _ensure_agent(pid, new_sid),
-                                               auto=True, origin="schedule")
-                                claimed_n += 1
-                            else:
-                                _schedule_request_approval(bb, pid, t, reason)
                     except Exception:  # noqa: BLE001
-                        log.exception("绑定窗已关，重绑失败 task=%s", t["id"])
+                        log.exception("关窗退回失败 sid=%s", sid)
                     continue
-                if row.get("status") == "paused":
+                if row.get("status") == "paused" or sid in running_sids:
                     continue
                 meta = row.get("meta")
                 meta = json.loads(meta) if isinstance(meta, str) else (meta or {})
-                if _session_job_running(sid):
-                    # 该窗 worker 在跑但任务尚未落 claimed（提交与认领的间隙）——
-                    # 同样占一个并发槽，防连发多单时启动段读旧 claimed 计数超卖
-                    claimed_n += 1
-                    continue
                 if not meta.get("worker_armed"):
                     if cfg["level"] != "L2":
-                        continue  # v0.72：L1 待命窗等审批，不自动武装
-                    # L2 待命窗：武装+起跑（调度器是 armed 的编排侧授权口）
+                        continue  # L1 待命窗等审批，不自动武装
                     try:
                         agent = _ensure_agent(pid, sid)
                     except HTTPException:
@@ -4170,7 +4836,7 @@ def create_app(
                     bb.set_session_meta(sid, {"worker_armed": True, "close_pending": None})
                     _submit_worker(pid, agent, auto=True, origin="schedule")
                 else:
-                    # 已武装待命窗（租约过期回收/worker 早退）：补起 worker
+                    # 已武装待命窗（崩溃回收/worker 早退）：补起 worker
                     try:
                         agent = _ensure_agent(pid, sid)
                     except HTTPException:
@@ -4178,7 +4844,7 @@ def create_app(
                     if agent.paused:
                         continue
                     _submit_worker(pid, agent, auto=True, origin="schedule")
-                claimed_n += 1
+                active_n += 1
         except Exception:  # noqa: BLE001
             log.exception("_schedule 调度异常 pid=%s reason=%s", pid, reason)
         finally:
@@ -4253,23 +4919,32 @@ def create_app(
 
         def _on_published(task_id: str | None = None) -> None:
             _project(pid).bb.usage_inc_tasks(pid)
-            # v0.71 任务即窗口；v0.72 全局一窗一任务：编排发布一律建专属执行窗
-            # （失败由调度器 sweep 兜底；不回滚发布）。所有挡位/暂停都建（待命
-            # 窗零成本；起跑与否由 _schedule 启动段按挡位决定）
-            if task_id:
-                try:
-                    bb = _project(pid).bb
-                    t = TaskQueue(bb).get_task(task_id)
-                    if t is not None:
-                        _bind_task_window(pid, t, reason="orch-publish")
-                        # 任务已绑住，_schedule 绑定段不会再看到它——L1 执行
-                        # 审批单在此直接补提（批准=启动该待命窗）
-                        cfg = autonomy.autonomy_of(
-                            bb.get_project(pid)["config"], track=_project(pid).track)
-                        if cfg["level"] == "L1":
-                            _schedule_request_approval(bb, pid, t, "orch-publish")
-                except Exception:  # noqa: BLE001
-                    log.exception("编排发布绑窗失败 task=%s", task_id)
+            # 会话中心化：委托在 _tool_delegate 内已带 target_session 写入（选窗
+            # /开窗先行）。此处只负责起跑——idle 武装窗提 worker；未武装窗
+            # （L2 自动开的窗由工厂武装；L1 开窗走审批不到这）_schedule 按
+            # 挡位武装+起跑；窗忙=窗内排队，worker 会自动接。失败不回滚委托，
+            # worker-done/sweep 兜底。
+            if not task_id:
+                return
+            try:
+                bb = _project(pid).bb
+                t = TaskQueue(bb).get_task(task_id)
+                sid = (t or {}).get("target_session") if t else ""
+                if not t or not sid:
+                    return
+                srow = bb.get_session(sid)
+                if srow is None or srow.get("status") in {"closed", "paused"} \
+                        or _session_job_running(sid):
+                    return
+                meta_raw = srow.get("meta")
+                meta = json.loads(meta_raw) if isinstance(meta_raw, str) else (meta_raw or {})
+                if meta.get("worker_armed"):
+                    _submit_worker(pid, _ensure_agent(pid, sid),
+                                   auto=True, origin="orch-delegate")
+                else:
+                    _schedule(pid, reason="orch-delegate")
+            except Exception:  # noqa: BLE001
+                log.exception("编排委派起跑失败 task=%s", task_id)
 
         orch.gate = _gate
         orch.on_task_published = _on_published
@@ -4287,7 +4962,11 @@ def create_app(
     def _phase_gate_check(pid: str) -> None:
         """阶段门已达 → 过门动作按自主档分流（每次 tick 出口调用）。
         L0=事件提示（人工点「进入渗透测试」）；L1=审批单（批准即流转）；
-        L2=自动流转。同目标已分流过（gate_open_notified）不重复。"""
+        L2=自动流转。同目标已分流过（gate_open_notified）不重复。
+        B3 单一事实源：无论过门与否都把评估结论写 project meta
+        phase_gate_state——注入侧 _phase_section 只读该状态不重算，消除
+        「注入用上轮 idle、判定在轮末」的矛盾窗口；动作侧 gate_block_reason
+        保持 publish 时现算确定性。内容不变跳过写盘（save_gate_state 内判）。"""
         proj = _project(pid)
         book = _phase_book_of(proj)
         if not book:
@@ -4297,15 +4976,21 @@ def create_app(
             return
         cur_id, spec = cur
         gate = spec.get("gate") or {}
+        if not gate:
+            phases_mod.save_gate_state(
+                proj, {"phase": cur_id, "gate": False, "passed": False, "unmet": []})
+            return
+        idle = int(orch_state.load_or_create(proj.bb, pid)["derive_idle_rounds"])
+        metrics = phases_mod.gate_metrics(proj.bb, pid, idle_rounds=idle)
+        met, unmet = phases_mod.evaluate_gate(gate, metrics)
+        phases_mod.save_gate_state(
+            proj, {"phase": cur_id, "gate": True, "passed": met, "unmet": unmet})
         fwd = phases_mod.forward_targets(book, spec)
-        if not gate or not fwd:
+        if not fwd:
             return
         target = fwd[0]
         if phases_mod.read_state(proj.meta or {})["notified"] == target:
             return  # 已分流过（等人工/等审批），抵达目标阶段时重置
-        idle = int(orch_state.load_or_create(proj.bb, pid)["derive_idle_rounds"])
-        metrics = phases_mod.gate_metrics(proj.bb, pid, idle_rounds=idle)
-        met, _unmet = phases_mod.evaluate_gate(gate, metrics)
         if not met:
             return
         cfg = _auto_cfg(pid)
@@ -4353,6 +5038,57 @@ def create_app(
     app.state.phase_gate_check = _phase_gate_check  # 测试直调口
     app.state.phase_post_tick = _phase_post_tick    # 测试直调口
 
+    # ---------- 异常订阅唤醒（对话化编排器 M4，§4.6） ----------
+
+    app.state.orch_wake_pending: set[str] = set()  # 已提交唤醒待完成的项目（防重复）
+
+    def _maybe_orch_wake(pid: str) -> str:
+        """白名单事件扫描 → 提交自起对话轮（Job orchestrator-wake）。
+        返回 submitted/duplicate/empty；租约占用/构造失败在 runner 内静默放弃
+        （宁少勿扰），唤醒轮完成才摘 pending（期间重复触发不再提交）。"""
+        proj = _project(pid)
+        triggers = Orchestrator.collect_wake_triggers(proj.bb, pid)
+        if not triggers:
+            return "empty"
+        if pid in app.state.orch_wake_pending:
+            return "duplicate"
+        app.state.orch_wake_pending.add(pid)
+
+        def run() -> dict:
+            owner = f"wake-{uuid.uuid4().hex}"
+            try:
+                bb = _project(pid).bb
+            except Exception:  # noqa: BLE001 —— 项目已删：直接放弃
+                app.state.orch_wake_pending.discard(pid)
+                return {"skipped": "gone"}
+            try:
+                orch_state.acquire_tick_lease(bb, pid, owner)
+            except orch_state.TickLeaseError:
+                return {"skipped": "lease"}  # tick/对话在跑：静默跳过
+            try:
+                try:
+                    orch = _build_orchestrator(pid, TickIn(), owner)
+                except Exception:  # noqa: BLE001 —— LLM 缺席等：放弃不重试
+                    log.exception("唤醒轮构造编排器失败 pid=%s", pid)
+                    return {"skipped": "build"}
+                try:
+                    return orch.chat_turn(
+                        Orchestrator.wake_brief_text(triggers), wake=triggers)
+                except Exception as exc:  # noqa: BLE001
+                    _emit_llm_error(pid, "orchestrator", exc)
+                    return {"error": str(exc)[:200]}
+            finally:
+                try:
+                    orch_state.release_tick_lease(bb, pid, owner)
+                except Exception:  # noqa: BLE001
+                    log.exception("唤醒轮释放租约失败 pid=%s", pid)
+                app.state.orch_wake_pending.discard(pid)
+
+        app.state.jobs.submit("orchestrator-wake", run, meta={"project_id": pid})
+        return "submitted"
+
+    app.state.orch_wake_check = _maybe_orch_wake  # 测试直调口
+
     def _post_tick(pid: str, result: dict, *, manual: bool) -> None:
         """触发点 B（手动/自动 tick 共用后处理）：自动 kick + L2 链状态机。
 
@@ -4366,6 +5102,12 @@ def create_app(
         except Exception:  # noqa: BLE001 —— 阶段护栏故障不阻断链后处理
             log.exception("阶段过门分流失败 pid=%s", pid)
         cfg = _auto_cfg(pid)
+        # 异常订阅唤醒（M4）：paused 不打扰，L0/L1/L2 全唤醒（挡位闸之前）
+        if not cfg["paused"]:
+            try:
+                _maybe_orch_wake(pid)
+            except Exception:  # noqa: BLE001 —— 唤醒失败不阻断链后处理
+                log.exception("异常唤醒提交失败 pid=%s", pid)
         if cfg["level"] not in {"L1", "L2"} or cfg["paused"]:
             return
         _kick_workers(pid)
@@ -4614,6 +5356,10 @@ def create_app(
         metrics = phases_mod.gate_metrics(proj.bb, pid, idle_rounds=idle)
         met, unmet = phases_mod.evaluate_gate(spec.get("gate") or {}, metrics)
         return {"enabled": True, "current": cur_id, "spec": spec,
+                # 全阶段序（M4 阶段条渲染三阶段步骤条用，按 order 排序）
+                "phases": [{"id": _id, "name": book[_id].get("name") or _id,
+                            "order": int(book[_id].get("order") or 0)}
+                           for _id in sorted(book, key=lambda k: int(book[k].get("order") or 0))],
                 "gate": {"metrics": metrics, "met": met, "unmet": unmet,
                          "forward": phases_mod.forward_targets(book, spec)},
                 "history": st["history"], "notified": st["notified"]}
@@ -5251,20 +5997,29 @@ def create_app(
     # ---- pack doctor（角色/技能/知识源静态体检，三级 error/warning/info） ----
 
     def _route_zero_hit_issues() -> list[dict]:
-        """K7 路由效果追踪（2026-09-20 外部对标升级项 B）：扫 workspaces 各项目
-        blackboard.db 的 skill.routed 事件，聚合 route_points/kb_hits 使用记录；
-        route_index 里被注入过却从未被使用的条目 → info issue 提示清理。
+        """K7 路由效果追踪（2026-09-20；2026-09-24 修正为真使用口径）：扫
+        workspaces 各项目 blackboard.db——skill.routed 的 route_points（真注入过，
+        route_index>0）与 kb.open 的 module（手册真被打开）逐项目配对；point 被
+        注入过且其 kb 在任一项目被打开过才算 used，否则 → info issue。
+
+        旧实现 used 只由 route_points 构建，实际报的是「从未被注入」，注入后
+        被忽略的条目永远报不出来。
 
         只读旁路（直接 sqlite mode=ro，不经 Blackboard），扫不动就静默跳过——
         doctor 的静态体检永远不能被动态统计拖垮。"""
-        from core.skills.routeindex import load_route_index
+        from core.skills.routeindex import parse_entries
         from core.skills.doctor import Issue, _LEVEL_ORDER
         root = Path(app.state.packs_root)
-        caps_root = root / "capabilities"
-        if not caps_root.is_dir():
+        index_file = root / "kb" / "route_index.yaml"
+        if not index_file.is_file():
             return []
-        used: set[str] = set()          # 出现过 route_points 的测试点名
-        injected_any = False
+        try:
+            point_kb = {e.point: e.kb for e in parse_entries(
+                index_file.read_text(encoding="utf-8"))}
+        except Exception:  # noqa: BLE001 —— 坏索引由静态体检报，本段跳过
+            return []
+        all_injected: set[str] = set()
+        used: set[str] = set()
         ws = Path(workspace_root)
         for proj_file in ws.glob("*/project.json"):
             db = proj_file.parent / "blackboard.db"
@@ -5273,47 +6028,117 @@ def create_app(
             try:
                 conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
                 try:
-                    rows = conn.execute(
+                    routed = conn.execute(
                         "SELECT payload FROM events WHERE kind='skill.routed'"
+                    ).fetchall()
+                    opened_rows = conn.execute(
+                        "SELECT payload FROM events WHERE kind='kb.open'"
                     ).fetchall()
                 finally:
                     conn.close()
             except (sqlite3.Error, OSError):
                 continue
-            for (raw,) in rows:
-                try:
-                    p = json.loads(raw)
-                except ValueError:
-                    continue
-                if not isinstance(p, dict):
-                    continue
+
+            def _payloads(rows):
+                out = []
+                for (raw,) in rows:
+                    try:
+                        p = json.loads(raw)
+                    except ValueError:
+                        continue
+                    if isinstance(p, dict):
+                        out.append(p)
+                return out
+
+            injected = set()
+            for p in _payloads(routed):
                 # 只统计真的注入过路由索引条目的事件（route_index>0）
                 if int(p.get("route_index") or 0) > 0:
-                    injected_any = True
-                pts = p.get("route_points")
-                if isinstance(pts, list):
-                    used.update(str(x) for x in pts if x)
+                    pts = p.get("route_points")
+                    if isinstance(pts, list):
+                        injected.update(str(x) for x in pts if x)
+            opened = {str(p.get("module") or "").strip().replace("\\", "/")
+                      for p in _payloads(opened_rows)}
+            all_injected.update(injected)
+            for point in injected:
+                kb = point_kb.get(point)
+                if kb and kb in opened:
+                    used.add(point)
         issues: list[Issue] = []
-        if injected_any:
-            # M0：全局单表 kb/route_index.yaml，按启用域过滤视图逐域报
-            for cap_dir in sorted(p for p in caps_root.iterdir() if p.is_dir()):
-                for e in load_route_index(root, cap_dir.name):
-                    if e.point not in used:
-                        issues.append(Issue(
-                            "info", "route-index-zero-hit",
-                            f"kb/route_index.yaml:{cap_dir.name}",
-                            f"测试点「{e.point}」→ {e.kb}：历史上注入过路由索引"
-                            "但从未被使用（Skill Shadowing 防遮蔽，考虑精简"
-                            "触发词或合并条目）"))
+        for point in sorted(all_injected - used):
+            dom = (point_kb.get(point) or "").split("/", 1)[0]
+            issues.append(Issue(
+                "info", "route-index-zero-hit",
+                f"kb/route_index.yaml:{dom}",
+                f"测试点「{point}」→ {point_kb.get(point)}：曾被注入路由索引"
+                "但对应手册从未被 kb_open 打开（提示被忽略，考虑精简触发词"
+                "或合并条目）"))
+        return [i.__dict__ for i in sorted(
+            issues, key=lambda x: (_LEVEL_ORDER[x.level], x.code, x.target))]
+
+    def _kb_cleanup_issues() -> list[dict]:
+        """经验沉淀 M3「kb 模块待清理建议」段：跨项目聚合 kb 模块三象限反馈
+        （traces.kb_module_feedback 同源口径）——长期打开但从无 verified 贡献
+        （正向零）提示人工复核；真失败任务窗内打开多次（甲负向反馈）标「优先」。
+        阈值：opened≥3 或 negative≥2 才报（打开且失败≠手册误导，试错正常，
+        宁少勿滥）；处置（降权/归档/删除）一律走提案制人工决策，只呈现不自动动。
+
+        只读旁路照抄 _route_zero_hit_issues 先例（sqlite mode=ro，扫不动静默跳过）。"""
+        from core.blackboard.traces import kb_module_feedback
+        from core.skills.doctor import Issue, _LEVEL_ORDER
+        agg: dict[str, dict] = {}
+        ws = Path(workspace_root)
+        for proj_file in ws.glob("*/project.json"):
+            db = proj_file.parent / "blackboard.db"
+            if not db.is_file():
+                continue
+            try:
+                conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+                conn.row_factory = sqlite3.Row
+                try:
+                    rows = conn.execute("SELECT id FROM projects").fetchall()
+                    for r in rows:
+                        for m, d in kb_module_feedback(conn, r["id"]).items():
+                            a = agg.setdefault(
+                                m, {"opened": 0, "positive": 0, "negative": 0})
+                            for k in a:
+                                a[k] += d.get(k, 0)
+                finally:
+                    conn.close()
+            except (sqlite3.Error, OSError):
+                continue
+        issues: list[Issue] = []
+        for m, d in sorted(agg.items()):
+            if d["positive"] > 0:
+                continue  # 有 verified 贡献，不在清理视野
+            if d["opened"] < 3 and d["negative"] < 2:
+                continue
+            priority = d["negative"] >= 2
+            issues.append(Issue(
+                "info", "kb-cleanup-candidate", f"kb:{m}",
+                f"kb 模块 {m}：{'正向零贡献且负向多次（优先复核）' if priority else '正向零贡献'}"
+                f"——累计打开 {d['opened']} 次 / 真失败任务中打开 {d['negative']} 次 / "
+                "verified 贡献 0。仅提示人工复核（打开且失败≠手册误导，试错正常）；"
+                "降权/归档/删除走提案制人工决策"))
         return [i.__dict__ for i in sorted(
             issues, key=lambda x: (_LEVEL_ORDER[x.level], x.code, x.target))]
 
     @app.get("/api/packs/doctor")
     def packs_doctor():
-        report = diagnose(app.state.packs_root).to_dict()
+        report = diagnose(app.state.packs_root,
+                          tools_root=app.state.tools_root).to_dict()
         try:  # K7 零命中统计只增补 info，失败不拖垮静态体检
             existing = {x["target"] for x in report["issues"]}
             extra = [i for i in _route_zero_hit_issues() if i["target"] not in existing]
+            report["issues"] += extra
+            report["counts"]["info"] += len(extra)
+            report["issues"].sort(key=lambda x: ({"error": 0, "warning": 1, "info": 2}[x["level"]],
+                                                 x["code"], x["target"]))
+        except Exception:  # noqa: BLE001
+            pass
+        try:  # 经验沉淀 M3：kb 模块待清理建议（info，失败不拖垮静态体检）
+            extra = [i for i in _kb_cleanup_issues()
+                     if i["target"] not in {x["target"] for x in report["issues"]}]
             report["issues"] += extra
             report["counts"]["info"] += len(extra)
             report["issues"].sort(key=lambda x: ({"error": 0, "warning": 1, "info": 2}[x["level"]],
@@ -5429,6 +6254,78 @@ def create_app(
     def campaign_memory(limit: int = Query(50, ge=1, le=200)):
         """⑥ 战役记忆全局库浏览（按时间倒序；召回注入在编排 tick 态势里）。"""
         return {"items": app.state.campaign.list_recent(limit)}
+
+    @app.get("/api/workspace-hygiene")
+    def workspace_hygiene():
+        """工作区卫生体检（workspace-hygiene D6，纯只读不处置）：①workspaces 根
+        陌生条目（无 project.json 的目录/散文件，白名单 .trash/CLAUDE.md——
+        campaign.db 迁移失败降级留老位置时从这里可见）；②各项目膨胀目录
+        （.tmp/scratch/spill/browser-profile 超阈值报条目+大小）；③.trash 规模。
+        处置入口指向已有能力（scratch/clear、回收站手动移回），端点零写副作用。"""
+        def _du_mb(path: Path) -> float:
+            total = 0
+            for p in path.rglob("*"):
+                try:
+                    if p.is_file():
+                        total += p.stat().st_size
+                except OSError:
+                    continue
+            return total / (1024 * 1024)
+
+        ws = Path(workspace_root)
+        strays: list[dict] = []
+        projects: list[dict] = []
+        try:
+            entries = sorted(ws.iterdir(), key=lambda p: p.name)
+        except OSError:
+            entries = []
+        for entry in entries:
+            if entry.name == ".trash":
+                continue
+            if entry.is_dir():
+                if (entry / "project.json").is_file():
+                    bloat = []
+                    for d in (".tmp", "scratch", "spill", "browser-profile"):
+                        p = entry / d
+                        if not p.is_dir():
+                            continue
+                        mb = _du_mb(p)
+                        if mb >= HYGIENE_BLOAT_MB:
+                            bloat.append({
+                                "dir": d, "mb": round(mb, 1),
+                                "level": "error" if mb >= HYGIENE_BLOAT_ERROR_MB
+                                else "warning"})
+                    projects.append({"slug": entry.name, "bloat": bloat})
+                else:
+                    strays.append({"name": entry.name, "kind": "dir", "size": 0})
+            else:
+                if entry.name == "CLAUDE.md":
+                    continue  # 契约内合法文件
+                try:
+                    size = entry.stat().st_size
+                except OSError:
+                    size = 0
+                strays.append({"name": entry.name, "kind": "file", "size": size})
+        trash_dir = ws / ".trash"
+        trash_count, trash_mb = 0, 0.0
+        if trash_dir.is_dir():
+            try:
+                trash_count = sum(1 for _ in trash_dir.iterdir())
+            except OSError:
+                pass
+            trash_mb = round(_du_mb(trash_dir), 1)
+        bloat_rows = [b for pr in projects for b in pr["bloat"]]
+        return {
+            "root": str(ws),
+            "strays": strays,
+            "projects": projects,
+            "trash": {"count": trash_count, "mb": trash_mb},
+            "summary": {
+                "strays": len(strays),
+                "bloats": len(bloat_rows),
+                "errors": sum(1 for b in bloat_rows if b["level"] == "error"),
+            },
+        }
 
     @app.get("/api/capabilities/{cap}/kb/search")
     def kb_search(cap: str, q: str = Query(""), limit: int = Query(50, ge=1, le=200),

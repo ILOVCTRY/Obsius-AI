@@ -1,11 +1,15 @@
-"""任务队列（DESIGN.md §6）——多会话协调的核心原语。
+"""会话内委托（DESIGN.md §6；方案 docs/plans/session-centric-orchestration.md）
+——多会话协调的核心原语。物理表仍叫 tasks，语义=派给某个会话窗的一件委托。
 
 关键规则：
-- 认领互斥：noise_budget != passive 的任务带 conflict_keys（如 ["ip:1.2.3.4"]），
-  同项目内 active 任务 conflict_keys 有交集则拒绝认领（§6.2 噪声预算 / WAF 对策）。
-  passive 任务（逆向分析、被动收集）可任意共享。
-- lease 租约：认领带 TTL，过期由 expire_leases() 回收为 open，防会话挂死占坑。
-- 认领/完成/失败均落事件流，Orchestrator 消费这些事件做监控派生。
+- 指派即定窗：委托创建时 target_session=归属窗（编排器开窗/复用窗时写入），
+  窗内队列读时派生：target_session=? AND status='open' ORDER BY priority, created_at。
+- 跨窗互斥：noise_budget != passive 的委托带 conflict_keys（如 ["ip:1.2.3.4"]），
+  跨窗 active 委托 conflict_keys 有交集则排队等待（X/S 租约矩阵）；窗内排队天然
+  不撞。passive 委托（逆向分析、被动收集）可任意共享。
+- 崩溃检测：起跑带 lease TTL + 心跳，worker 异常退出由 expire_leases() 回收为
+  open——仍指原窗、排队重试，不回公共池。
+- 起跑/完成/失败均落事件流，Orchestrator 消费这些事件做监控派生。
 """
 
 import ipaddress
@@ -18,6 +22,7 @@ from urllib.parse import urlsplit
 from core.blackboard import leases
 from core.blackboard.store import Blackboard, new_id, now
 from core.skills.taxonomy import GENERIC_TASK_TYPE
+from core.verify import validate_verify_spec  # 独立验证 M1：verify 规格发布期校验（stdlib-only 不成环）
 
 log = logging.getLogger(__name__)
 
@@ -129,14 +134,30 @@ def render_attempts_lines(attempts: list[dict]) -> list[str]:
 
 
 def _initial_context(attachments: list[dict] | None,
-                     acceptance: list[str] | None) -> dict:
+                     acceptance: "list[str | dict] | None") -> dict:
     """tasks.context 初始载荷（attachments 附件清单 + reconcile 对账分母）。
 
     reconcile 条目 id 从 1 起（task_reconcile 按 id 收口）；空 acceptance 不落键
-    （旧任务无对账，complete 直通）。"""
+    （旧任务无对账，complete 直通）。
+    独立验证 M1：条目支持 ``str | {text, verify}`` 两种形态（向后兼容）——带
+    verify 规格的条目发布期经 validate_verify_spec 校验（违例 ValueError），其
+    met/failed 由服务端验证器判定（Agent 自报被 set_reconcile_state 拒绝）。"""
     ctx: dict = {"attachments": list(attachments or [])}
-    items = [{"id": i + 1, "text": str(t).strip()[:300], "state": "pending", "note": ""}
-             for i, t in enumerate(acceptance or []) if str(t).strip()]
+    items: list[dict] = []
+    for t in acceptance or []:
+        if isinstance(t, dict):
+            text = str(t.get("text") or "").strip()
+            spec = t.get("verify")
+            if spec is not None:
+                spec = validate_verify_spec(spec)
+        else:
+            text = str(t).strip()
+            spec = None
+        if text:
+            ent = {"id": len(items) + 1, "text": text[:300], "state": "pending", "note": ""}
+            if spec is not None:
+                ent["verify"] = spec
+            items.append(ent)
     if items:
         ctx["reconcile"] = items
     return ctx
@@ -184,7 +205,7 @@ class TaskQueue:
         allowed_roles: Iterable[str] | None = None,
         max_children_per_parent: int | None = None,
         bypass_target_guard: bool = False,
-        acceptance: list[str] | None = None,
+        acceptance: "list[str | dict] | None" = None,
         target_session: str = "",
     ) -> str:
         """发布任务。created_by: human / orchestrator / session-x。
@@ -210,12 +231,16 @@ class TaskQueue:
         artifact 存在且 kind=attachment），原样落 tasks.context.attachments，
         认领首条消息由 agent 层渲染成 📎 附件清单。
         acceptance（2026-09-19 完成对账，借鉴 dsh stage-gate 覆盖度分母）：
-        验收条目清单（一行一条），落 tasks.context.reconcile=[{id,text,state,note}]；
+        验收条目清单，落 tasks.context.reconcile=[{id,text,state,note}]；
         complete 前必须逐条收口（task_reconcile 置 met/failed/blocked），未收口
         硬拦 done（task.reconcile_blocked 事件）——防模型虚报完成。
-        target_session（2026-09-20 指派任务，DESIGN.md §6.4）：任务认领门控，
-        ''=公共池（任意窗可认领）；非空=仅该窗可认领（claim 硬校验抛 ClaimError、
-        claim_next WHERE 过滤）。store 层不校验会话存在性，归调用方（与 role 同口径）。
+        条目形态 str | {text, verify}（独立验证 M1）：带 verify 规格的条目其
+        met/failed 由验证器在 complete 时自动判定（core/verify.py），Agent 自报
+        被拒（只能置 blocked）；规格发布期校验，违例 ValueError。
+        target_session（会话中心化，DESIGN.md §6.4）：委托归属窗——编排器开窗/
+        复用窗时写入；''=未指派（L0 提案残留/原窗关闭退回，不自动起跑，交编排器
+        重新委派）。非空=仅该窗会话轮可见可取（claim 硬校验、session_queue 过滤）。
+        store 层不校验会话存在性，归调用方（与 role 同口径）。
         """
         if noise_budget not in {"passive", "low", "medium", "high"}:
             raise ValueError(f"非法 noise_budget: {noise_budget}")
@@ -315,7 +340,7 @@ class TaskQueue:
             "task.published",
             {"task_id": task_id, "objective": objective, "task_type": task_type,
              "role": role,
-             "target_session": str(target_session or ""),  # v18 指派（''=公共池，前端看板 chip）
+             "target_session": str(target_session or ""),  # 委托归属窗（''=未指派，前端看板 chip）
              "attachments": [a.get("name", "") for a in (attachments or [])]},  # 附件随发：事件流可见（本体在 context.attachments）
             author=created_by,
         )
@@ -332,8 +357,63 @@ class TaskQueue:
 
     # ---------- 认领 ----------
 
+    def _defer_receipt(self, parent_id: str, rcpt: dict) -> None:
+        """E4-①（orchestrator-efficiency，2026-09-22）：父任务未被认领/父窗已关闭
+        时，子任务回执挂父行 context.pending_receipts（消费点=claim 后补投），
+        并落 task.receipt_deferred 事件兜底给人类/编排器可见——替代原「不投且
+        永不补投」的静默丢失。调用方在回执 try 段内，失败只 log。"""
+        with self.bb._tx():
+            prow = self.bb.conn.execute(
+                "SELECT project_id, context FROM tasks WHERE id=?", (parent_id,)).fetchone()
+            if prow is None:
+                return  # 父任务已被删除：deferred 事件也不发（无实体可挂）
+            ctx = _loads(prow["context"], {})
+            if not isinstance(ctx, dict):
+                ctx = {}
+            ctx.setdefault("pending_receipts", []).append(rcpt)
+            self.bb.conn.execute(
+                "UPDATE tasks SET context=? WHERE id=?",
+                (json.dumps(ctx, ensure_ascii=False), parent_id))
+        self.bb.append_event(
+            prow["project_id"], "task.receipt_deferred",
+            {"task_id": rcpt.get("task_id"), "parent_id": parent_id,
+             "status": rcpt.get("status"),
+             "result_note": (rcpt.get("result_note") or "")[:200]},
+            session_id=rcpt.get("session_id"), author=rcpt.get("session_id"))
+
+    def _flush_pending_receipts(self, project_id: str, task_id: str,
+                                to_session: str) -> None:
+        """E4-①补投（2026-09-22）：父任务被认领时把挂账的子任务回执逐条投递
+        （inbox_post + message.inbox 事件，ref_id=task_id:status 状态后缀同口径），
+        投完清挂账数组。单事务取走再投；投递失败只 log（与回执段尽力而为同口径）。"""
+        with self.bb._tx():
+            r = self.bb.conn.execute(
+                "SELECT context FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if r is None:
+                return
+            ctx = _loads(r["context"], {})
+            if not isinstance(ctx, dict):
+                return
+            pend = ctx.pop("pending_receipts", None)
+            if not pend:
+                return
+            self.bb.conn.execute(
+                "UPDATE tasks SET context=? WHERE id=?",
+                (json.dumps(ctx, ensure_ascii=False), task_id))
+        for rcpt in pend:
+            if not isinstance(rcpt, dict):
+                continue
+            ref_id = f"{rcpt.get('task_id')}:{rcpt.get('status')}"
+            if self.bb.inbox_post(project_id, to_session, "task_receipt", ref_id, rcpt):
+                self.bb.append_event(
+                    project_id, "message.inbox",
+                    {"to_session": to_session, "kind": "task_receipt",
+                     "ref_id": ref_id, **rcpt, "by": rcpt.get("session_id") or "system"},
+                    session_id=to_session, author=rcpt.get("session_id") or "system")
+
     def claim(self, task_id: str, session_id: str, lease_minutes: int = 30) -> None:
-        """认领任务。失败抛 ClaimError（调用方据此让 Agent 改道，见 §6.2 硬规则）。"""
+        """委托起跑（open→claimed）。归属窗在会话轮调用，claimed_by 直接置本窗；
+        跨窗 X/S 冲突时写 wait_for 并抛 ClaimError（调用方跳过试队列下一件）。"""
         from datetime import datetime, timedelta, timezone
 
         lease_until = (
@@ -409,71 +489,64 @@ class TaskQueue:
              "role": row["role"]},  # v14 任务绑定角色（认领即换装，前端任务卡 🎭 chip）
             session_id=session_id,
         )
+        # E4-①补投（2026-09-22）：认领即成为父任务执行者——把挂账的子任务回执
+        # 补投到本窗收件箱。事务外尽力而为，失败只 log 不影响认领。
+        try:
+            self._flush_pending_receipts(row["project_id"], task_id, session_id)
+        except Exception:  # noqa: BLE001
+            log.exception("补投 pending_receipts 失败 task=%s", task_id)
 
-    def claim_next(
+    def session_queue(self, project_id: str, session_id: str) -> list[dict]:
+        """窗内待办队列（读时派生，零冗余存储）：open 且指派给本窗，
+        按 priority, created_at 排序——会话轮与前端队列展开共用。"""
+        return [t for t in self.list_tasks(project_id, status="open")
+                if t.get("target_session") == session_id]
+
+    def session_has_live_work(self, project_id: str, session_id: str) -> bool:
+        """窗内是否存在 open/claimed 委托（v24 口径，取代旧 meta.bound_task_id）。"""
+        row = self.bb.conn.execute(
+            "SELECT 1 FROM tasks WHERE project_id=? AND target_session=?"
+            " AND status IN ('open','claimed') LIMIT 1",
+            (project_id, session_id)).fetchone()
+        return row is not None
+
+    def take_session_next(
         self,
         project_id: str,
         session_id: str,
         lease_minutes: int = 30,
-        session_role: str | None = None,
-        only_task: str | None = None,
-        assigned_only: bool = False,
     ) -> str | None:
-        """Worker 循环入口：按优先级（P0 最高）认领第一个 open 任务；无匹配返回 None。
+        """会话轮入口：取窗内队列队首起跑（open→claimed、claimed_by 直接置本窗）；
+        无可用返回 None。
 
-        窗口不设 role 限制（2026-09-18 用户定稿：任务才是本体）——认领无类型/噪声
-        过滤，任务绑定的 role 经「认领即换装」在认领后生效。
-        session_role 仅作**偏好排序**（非过滤）：底色匹配或 role='' 的任务排前，
-        减少无谓换装；任何窗都能立即认领任何任务。
-        v0.71 任务即窗口：only_task 非空时只认领该任务（绑定窗一窗一任务的核心闸，
-        配合 target_session 门控锁死归属——SQL 侧过滤是唯一无竞态的写法）。
-        v0.72 全局一窗一任务：assigned_only=True 时公共池认领机制退役——SQL 门控
-        收窄为 `AND target_session=?`（target_session='' 的任务不可见），无绑定
-        手动窗专用挡位：手动窗永不认领公共池任务，每个任务必有专属窗。
+        wait_for 键仍被有效租约持有（跨窗 X/S 占用）、死锁牺牲者冷却未到的行
+        直接跳过（等待不占线程；键已空闲后 claim() 内 wait_for 已由收尾方重校验
+        清空）。窗内排队天然不撞——不做同窗过滤。
         """
-        if assigned_only:
-            sql = ("SELECT id, wait_for, lease_cooldown_until, role, created_at FROM tasks"
-                   " WHERE project_id=? AND status='open'"
-                   " AND target_session=?")  # v0.72：只见显式指派给本窗的任务
-        else:
-            sql = ("SELECT id, wait_for, lease_cooldown_until, role, created_at FROM tasks"
-                   " WHERE project_id=? AND status='open'"
-                   " AND (target_session='' OR target_session=?)")  # v18：指派门控（仅目标窗见指派任务）
-        params: list[Any] = [project_id, session_id]
-        if only_task:
-            sql += " AND id=?"
-            params.append(only_task)
-        if session_role is None:
-            sql += " ORDER BY CASE WHEN target_session=? THEN 0 ELSE 1 END, priority, created_at"
-            params.append(session_id)
-        else:
-            sql += (" ORDER BY CASE WHEN target_session=? THEN 0 ELSE 1 END,"
-                    " CASE WHEN role = '' OR role = ? THEN 0 ELSE 1 END,"
-                    " priority, created_at")
-            params.extend([session_id, session_role])
-        # 机制 1.4：预过滤——wait_for 键仍被有效租约持有的行、死锁牺牲者冷却未到的行
-        # 直接跳过（等待不占线程；键已空闲的 stale wait_for 仍走正常认领路径）
         held_union: set[str] = set()
         for keys in leases.held_keys_by_task(self.bb, project_id).values():
             held_union |= keys
         ts = now()
-        for row in self.bb.conn.execute(sql, params).fetchall():
-            if row["lease_cooldown_until"] and row["lease_cooldown_until"] > ts:
+        for t in self.session_queue(project_id, session_id):
+            if t.get("lease_cooldown_until") and t["lease_cooldown_until"] > ts:
                 continue
-            wf = _loads(row["wait_for"], [])
-            if wf and (set(wf) & held_union):
+            if set(t.get("wait_for") or []) & held_union:
                 continue
             try:
-                self.claim(row["id"], session_id, lease_minutes)
-                return row["id"]
+                self.claim(t["id"], session_id, lease_minutes)
+                return t["id"]
             except ClaimError:
-                continue  # 被别人抢了/互斥，试下一个
+                continue  # 跨窗互斥/状态竞态，试下一个
         return None
 
     # ---------- 收尾 ----------
 
     def complete(self, task_id: str, session_id: str, result_note: str = "",
                  persona_role: str | None = None) -> None:
+        from core.verify import run_reconcile_verifications  # 惰性：verify→gateway→blackboard.store 成环
+        # 独立验证 M1：verify 条目先经服务端判定（pending/failed 重跑），未过抛
+        # ValueError 拦下本次 complete——写口全部走 set_reconcile_state（见 verify.py）
+        run_reconcile_verifications(self, task_id, session_id)
         self._check_reconcile(task_id, session_id)
         self._finish(task_id, session_id, "done", result_note, persona_role=persona_role)
 
@@ -506,8 +579,13 @@ class TaskQueue:
             "不要虚报完成。")
 
     def set_reconcile_state(self, task_id: str, session_id: str, item_id: int,
-                            state: str, note: str = "") -> list[dict]:
-        """收口一条验收对账条目（仅任务持有者；claimed 态）。返回收口后的全表。"""
+                            state: str, note: str = "",
+                            as_verifier: bool = False) -> list[dict]:
+        """收口一条验收对账条目（仅任务持有者；claimed 态）。返回收口后的全表。
+
+        独立验证 M1 红线：带 verify 规格的条目 met/failed 只能由验证器写
+        （as_verifier=True，core/verify.py 收尾钩子专用），Agent/人工自报直接
+        ValueError——宁严勿松；blocked（附不适用理由）仍开放给持有者。"""
         if state not in ("met", "failed", "blocked"):
             raise ValueError(f"非法对账状态: {state}（met/failed/blocked）")
         with self.bb._tx():
@@ -526,8 +604,15 @@ class TaskQueue:
             if ent is None:
                 raise ValueError(f"对账条目不存在: {item_id}"
                                  f"（共 {len(entries)} 条；本任务未登记对账分母则无需收口）")
+            if ent.get("verify") and state in ("met", "failed") and not as_verifier:
+                raise ValueError(
+                    f"验收条目 #{item_id} 由验证器自动判定（独立验证红线），不可自报 "
+                    f"met/failed——修正后重新 complete 触发重验；确不适用可置 blocked"
+                    f"（note 附原因）。")
             ent["state"] = state
             ent["note"] = (note or "").strip()[:300]
+            if as_verifier:
+                ent["by"] = "verifier"
             self.bb.conn.execute(
                 "UPDATE tasks SET context=?, updated_at=? WHERE id=?",
                 (json.dumps({**ctx, "reconcile": entries}, ensure_ascii=False),
@@ -539,11 +624,13 @@ class TaskQueue:
              persona_role: str | None = None) -> None:
         """E12：resumable=True 表示中断保留了落盘快照（task.failed 事件带标记，
         看板 failed 卡出「▶ 续跑」——reopen+原会话载快照复活）。
-        C1：blocked_reason 结构化失败原因——error（真失败）| awaiting_human（等
-        人类输入，保留现场可续跑，看板出「待人工」徽章与「已解决，放回继续」）。
+        C1：blocked_reason 结构化失败原因——error（真失败，Agent 主动 fail_task 归因）
+        | awaiting_human（等人类输入，保留现场可续跑，看板出「待人工」徽章与
+        「已解决，放回继续」）| aborted（experience-sedimentation M1：人工中断/关窗/
+        worker 异常兜底——非方法论性失败，不进复盘与战役记忆，与 error 严格分档）。
         persona_role（v14）：实际执行 persona（换装中=任务角色，底色=底色角色），
         attempts 履历区分「会话底色」与「本单实际角色」。"""
-        if blocked_reason not in {"error", "awaiting_human"}:
+        if blocked_reason not in {"error", "awaiting_human", "aborted"}:
             raise ValueError(f"非法 blocked_reason: {blocked_reason}")
         self._finish(task_id, session_id, "failed", result_note,
                      extra={"resumable": True} if resumable else None,
@@ -551,7 +638,7 @@ class TaskQueue:
 
     def _release_and_revalidate(self, project_id: str, task_id: str) -> None:
         """机制 1.4：释放任务的全部资源租约行，并重校验本项目 open 行的 wait_for——
-        键已全部空闲的等待者清门控标记（重新可被 claim_next 认领）。
+        键已全部空闲的等待者清门控标记（归属窗会话轮重新可取）。
         必须在调用方的 _tx() 内执行。"""
         self.bb.conn.execute("DELETE FROM resource_leases WHERE task_id=?", (task_id,))
         held_union: set[str] = set()
@@ -625,43 +712,62 @@ class TaskQueue:
                 {"task_id": task_id, "session_id": session_id,
                  "stale_refs": stale_refs, "note": result_note},
                 session_id=session_id, author=session_id)
-        # 子任务回执（2026-09-20 会话窗对话化，P3 多智能体协调）：本任务有 parent
-        # 且父任务已由其他活跃窗认领 → 私信 task_receipt 到父窗——子任务完成/失败
-        # 自动回执，父 agent 收件箱注入派生结果摘要（异步模型，不打断父窗工作）。
-        # ref_id 复用 task_id：同一子任务未读期间重复收尾（reopen 重跑）不重复投递；
-        # findings=本会话（作者视角）最近登记的发现 cap 10。整段只 log 不影响收尾。
+        # 子任务回执（2026-09-20 会话窗对话化，P3 多智能体协调；E4 三路径修复
+        # 2026-09-22）：本任务有 parent → 私信 task_receipt 到父窗——子任务完成/
+        # 失败自动回执，父 agent 收件箱注入派生结果摘要（异步模型，不打断父窗
+        # 工作）。findings=本会话（作者视角）最近登记的发现 cap 10。整段只 log
+        # 不影响收尾。三路径：
+        # ① 父未认领（或父窗已 closed）→ 原直接不投且永不补投——改为挂父任务行
+        #    context.pending_receipts，父被认领时 _flush_pending_receipts 补投 +
+        #    task.receipt_deferred 事件兜底可见；
+        # ② 父子同窗（自收）→ 原静默跳过无替代通知——落 task.receipt_self 事件；
+        # ③ ref_id 加状态后缀（task_id:status）——原 ref_id=task_id 复用未读去重，
+        #    fail→reopen→complete 的成功回执被旧 fail 回执的未读唯一索引吞掉；
+        #    状态后缀后同状态重收尾仍去重（重跑重复 fail 只投一次），跨状态必达。
         try:
             parent_id = row["parent_id"] if "parent_id" in row.keys() else None
             if parent_id:
                 prow = self.bb.conn.execute(
                     "SELECT claimed_by FROM tasks WHERE id=?", (parent_id,)).fetchone()
                 to_sid = prow["claimed_by"] if prow else None
-                if to_sid and to_sid != session_id:
+                finds = [
+                    {"id": r["id"], "title": r["title"], "severity": r["severity"]}
+                    for r in self.bb.conn.execute(
+                        "SELECT id, title, severity FROM findings"
+                        " WHERE project_id=? AND author=?"
+                        " ORDER BY created_at DESC LIMIT 10",
+                        (row["project_id"], session_id)).fetchall()
+                ]
+                rcpt = {
+                    "task_id": task_id, "session_id": session_id, "status": status,
+                    "objective": (row["objective"] or "")[:200],
+                    "result_note": (result_note or "")[:500],
+                    "findings": finds,
+                    "blocked_reason": blocked_reason if status == "failed" else None,
+                }
+                ref_id = f"{task_id}:{status}"  # E4-③
+                if to_sid == session_id:
+                    # E4-②：父子同窗自收——落事件替代静默（父窗 agent 下轮对话可见）
+                    self.bb.append_event(
+                        row["project_id"], "task.receipt_self",
+                        {"parent_id": parent_id, **rcpt},
+                        session_id=session_id, author=session_id)
+                elif to_sid:
                     srow = self.bb.conn.execute(
                         "SELECT status FROM sessions WHERE id=?", (to_sid,)).fetchone()
                     if srow and srow["status"] != "closed":
-                        finds = [
-                            {"id": r["id"], "title": r["title"], "severity": r["severity"]}
-                            for r in self.bb.conn.execute(
-                                "SELECT id, title, severity FROM findings"
-                                " WHERE project_id=? AND author=?"
-                                " ORDER BY created_at DESC LIMIT 10",
-                                (row["project_id"], session_id)).fetchall()
-                        ]
-                        rcpt = {
-                            "task_id": task_id, "status": status,
-                            "objective": (row["objective"] or "")[:200],
-                            "result_note": (result_note or "")[:500],
-                            "findings": finds,
-                            "blocked_reason": blocked_reason if status == "failed" else None,
-                        }
                         if self.bb.inbox_post(row["project_id"], to_sid,
-                                              "task_receipt", task_id, rcpt):
+                                              "task_receipt", ref_id, rcpt):
                             self.bb.append_event(
                                 row["project_id"], "message.inbox",
                                 {"to_session": to_sid, "kind": "task_receipt",
-                                 "ref_id": task_id, **rcpt, "by": session_id},
+                                 "ref_id": ref_id, **rcpt, "by": session_id},
                                 session_id=to_sid, author=session_id)
+                    else:
+                        self._defer_receipt(parent_id, rcpt)
+                else:
+                    # E4-①：父任务无人认领——挂账等父被认领时补投
+                    self._defer_receipt(parent_id, rcpt)
         except Exception:  # noqa: BLE001 —— 回执失败不影响收尾主路径
             log.exception("子任务回执投递失败 task=%s", task_id)
         # 执行轨迹物化（execution-trace-chain R3，2026-09-22）：任务收尾 done 时把
@@ -707,8 +813,21 @@ class TaskQueue:
         "blueprint": "blueprints",
     }
 
+    # kind → 完整黑板 id 的前缀（new_id 约定 `<前缀>-<12hex>`）。与 kind 同名的
+    # 只有 asset/func/task；finding/artifact/blueprint 分别是 find-/art-/bp-
+    # （2026-09-23 接地容错定稿按实情映射）。event 为自增整数无前缀（None=不补）。
+    _REF_ID_PREFIX: dict[str, str | None] = {
+        "asset": "asset", "finding": "find", "artifact": "art",
+        "func": "func", "event": None, "task": "task", "blueprint": "bp",
+    }
+
     def _resolve_step_refs(self, project_id: str, refs: Any) -> list[str]:
-        """校验计划步接地引用：格式 <kind>:<id>、对象存在且同项目。返回规范化列表。"""
+        """校验计划步接地引用：格式 <kind>:<id>、对象存在且同项目。返回规范化列表。
+
+        接地容错（2026-09-23，task-0805336bbffc 16 秒三连拒熔断事故）：id 写
+        完整黑板 id（asset:asset-<12hex>）或裸短 id（asset:<12hex>）都通——精确
+        未命中时按 kind 实际前缀自动补全重试一次（LLM 最自然的拼法不再整类失败）。
+        """
         if refs is None:
             return []
         if not isinstance(refs, list) or len(refs) > 5:
@@ -717,7 +836,8 @@ class TaskQueue:
         for r in refs:
             if not isinstance(r, str) or ":" not in r:
                 raise ValueError(
-                    f"接地引用格式非法: {r!r}（应为 kind:id，如 finding:f1a2…）")
+                    f"接地引用格式非法: {r!r}（应为 kind:id，且 id 为完整黑板 id，"
+                    "如 asset:asset-784aac03d41c）")
             kind, _, oid = r.partition(":")
             kind, oid = kind.strip(), oid.strip()
             table = self._REF_TABLES.get(kind)
@@ -728,11 +848,23 @@ class TaskQueue:
                 f"SELECT 1 FROM {table} WHERE id=? AND project_id=?",
                 (oid, project_id)).fetchone()
             if hit is None:
+                # 容错规范化：裸短 id 补实际前缀（finding→find-…）重试一次
+                pfx = self._REF_ID_PREFIX.get(kind)
+                if pfx and not oid.startswith(pfx + "-"):
+                    hit = self.bb.conn.execute(
+                        f"SELECT 1 FROM {table} WHERE id=? AND project_id=?",
+                        (f"{pfx}-{oid}", project_id)).fetchone()
+                    if hit is not None:
+                        oid = f"{pfx}-{oid}"
+            if hit is None:
                 raise ValueError(
                     f"接地引用悬空（不存在或跨项目）: {kind}:{oid}"
-                    "——先 bb_query 查真实对象 id，或先 bb_add_asset/bb_add_finding 登记")
-            if r not in out:
-                out.append(r)
+                    "——id 写完整黑板 id（如 asset-784aac03d41c）或裸短 id（"
+                    "784aac03d41c）均可；先 bb_query 查真实对象 id，"
+                    "或先 bb_add_asset/bb_add_finding 登记")
+            norm = f"{kind}:{oid}"
+            if norm not in out:
+                out.append(norm)
         return out
 
     def set_plan(
@@ -873,8 +1005,9 @@ class TaskQueue:
     # ---------- 人类管理（§6.4 插手通道：编辑 / 删除 / 失败放回） ----------
 
     _UPDATABLE = {"objective", "task_type", "noise_budget", "priority", "conflict_keys",
-                  "role"}  # v0.71：role 可改（任务即窗口——中途改角色立即热换装）
+                  "role", "preferred_runtime"}  # v23：任务默认运行时可改（M3 chip）
     _NOISE_VALUES = {"passive", "low", "medium", "high"}
+    _RUNTIME_VALUES = {"", "host", "wsl", "docker", "sandbox"}  # v23：''=重置回未设
 
     def update_task(
         self, task_id: str, by: str = "human", *,
@@ -912,6 +1045,10 @@ class TaskQueue:
                 _check_task_type(str(merged["task_type"]), allowed_types)
             if merged["noise_budget"] not in self._NOISE_VALUES:
                 raise ValueError(f"非法 noise_budget: {merged['noise_budget']}")
+            if str(merged.get("preferred_runtime", "")) not in self._RUNTIME_VALUES:
+                raise ValueError(
+                    f"非法 preferred_runtime: {merged['preferred_runtime']}"
+                    "（仅 host/wsl/docker/sandbox，空串=重置）")
             if not isinstance(merged["priority"], int) or not 0 <= merged["priority"] <= 9:
                 raise ValueError("priority 须为 0-9 的整数")
             if merged["noise_budget"] != "passive" and not merged["conflict_keys"]:
@@ -924,7 +1061,8 @@ class TaskQueue:
                                           str(merged["scope"]), str(merged["objective"]))
             sets: list[str] = []
             params: list[Any] = []
-            for col in ("objective", "task_type", "noise_budget", "priority", "role"):
+            for col in ("objective", "task_type", "noise_budget", "priority", "role",
+                        "preferred_runtime"):
                 if col in changes:
                     sets.append(f"{col}=?")
                     params.append(merged[col])
@@ -968,9 +1106,13 @@ class TaskQueue:
             if note.strip():
                 result_note = (result_note + "\n" if result_note else "") + \
                     f"人类补充（{by}）: {note.strip()}"
+            # blocked_reason 复位（2026-09-24）：失败原因（aborted/cancelled
+            # 等）属于上一轮尝试，残留会让 open 任务带 aborted 标，且原绑窗被关
+            # unassign 后无任何窗可认领、requeue 又只收 failed——状态机死锁。
+            # 列 NOT NULL，open 态空态惯例值 'error'（同 publish/claim 路径）。
             self.bb.conn.execute(
                 "UPDATE tasks SET status='open', claimed_by=NULL, lease_until=NULL,"
-                " result_note=?, updated_at=? WHERE id=?",
+                " blocked_reason='error', result_note=?, updated_at=? WHERE id=?",
                 (result_note, now(), task_id),
             )
             project_id = row["project_id"]
@@ -981,6 +1123,62 @@ class TaskQueue:
              "created_by": created_by},  # 前端编排页签按发布者关联任务全生命周期
             author=by,
         )
+
+    def cancel_task(self, task_id: str, *, by: str = "orchestrator",
+                    reason: str = "") -> dict:
+        """编排器/人类取消任务（orchestrator-efficiency M4 C1）：open/claimed →
+        failed（blocked_reason=cancelled）。与 aborted（人工中断，非方法论性失败）
+        同属不进复盘与战役记忆的档位；方向性收编——被更高优先级方向取代、目标
+        已达成、前提失效时用，区别于执行者自报的 error。
+
+        清 claimed_by/租约（执行窗收尾撞 ClaimError 被吞、会话自然空闲——
+        _abort_current_task 的 fail 异常路径已有先例）；attempts 履历照记
+        （outcome=failed/blocked_reason=cancelled）；资源租约释放 + wait_for
+        重校验（镜像 _finish）。事件 task.cancelled（**不复用 task.failed**——
+        后者是 M4 唤醒触发器，主动取消不该触发异常唤醒）。
+
+        返回 {"claimed_by", "target_session"}——取消前的持有窗/绑定窗（已清），
+        调用方据此 request_abort 打断在跑窗（本方法只写黑板，不碰会话线程）。
+        """
+        with self.bb._tx():
+            row = self.bb.conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if row is None:
+                raise ValueError(f"任务不存在: {task_id}")
+            if row["status"] not in ("open", "claimed"):
+                raise ValueError(
+                    f"任务 {task_id} 状态为 {row['status']}，仅 open/claimed 可取消")
+            had_runner = bool(row["claimed_by"])
+            ctx = _loads(row["context"] if "context" in row.keys() else "{}", {})
+            if not isinstance(ctx, dict):
+                ctx = {}
+            attempts = ctx.get("attempts") or []
+            attempts.append({
+                "session_id": row["claimed_by"] or None,
+                "session_name": None,
+                "role": None,
+                "outcome": "failed",
+                "result_note": (reason or "编排器取消")[:500],
+                "blocked_reason": "cancelled",
+                "ended_at": now(),
+            })
+            ctx["attempts"] = attempts[-20:]
+            self.bb.conn.execute(
+                "UPDATE tasks SET status='failed', blocked_reason='cancelled',"
+                " claimed_by=NULL, lease_until=NULL, context=?, updated_at=? WHERE id=?",
+                (json.dumps(ctx, ensure_ascii=False), now(), task_id),
+            )
+            self._release_and_revalidate(row["project_id"], task_id)  # 机制 1.4
+            out = {"claimed_by": row["claimed_by"] or None,
+                   "target_session": (row["target_session"] or None)
+                   if "target_session" in row.keys() else None}
+        self.bb.append_event(
+            row["project_id"], "task.cancelled",
+            {"task_id": task_id, "by": by, "reason": (reason or "")[:500],
+             "created_by": row["created_by"],  # 前端编排页签按发布者关联生命周期
+             "had_runner": had_runner},
+            author=by,
+        )
+        return out
 
     def bind_session(self, task_id: str, session_id: str, by: str = "system") -> None:
         """v0.71 任务即窗口：把 open 任务绑定到专属执行窗（写 target_session）。
@@ -1008,12 +1206,12 @@ class TaskQueue:
         )
 
     def unassign_session(self, session_id: str) -> list[str]:
-        """v18 关窗退回公共池：该会话指派的所有 open 任务清 target_session。
+        """关窗退回未指派：该窗 open 委托清 target_session（不自动起跑，交编排器
+        重新委派/挂起）。
 
-        仅动 open 行——claimed 行租约仍有效（持有窗继续跑，或 expire_leases
-        回收为 open 后保留指派、由目标窗再认领，语义正确）。返回被清空指派的
-        任务 id 列表；每个任务在事务外落 task.updated 事件（前端 events.tsx
-        既有标签直接可见），reason=session-closed 标明来源。
+        仅动 open 行——claimed 行由 expire_leases 崩溃回收为 open 后仍指原窗，
+        但原窗已关时由调度启动段发现 closed → 再走本方法。返回被清空指派的
+        任务 id 列表；每个任务在事务外落 task.updated 事件，reason=session-closed。
         """
         with self.bb._tx():
             rows = self.bb.conn.execute(
@@ -1077,7 +1275,7 @@ class TaskQueue:
 
         图：wait_for 非空的任务 → 持有其被占键的租约任务（resource_leases 全量行，
         不做有效性过滤——安全网要看的是不一致状态）。检出环 → 牺牲者=环内
-        created_at 最晚的任务：清 wait_for + 冷却 5 分钟（claim_next 跳过）+
+        created_at 最晚的任务：清 wait_for + 冷却 5 分钟（会话轮跳过）+
         落 lock.deadlock_victim 审计。返回牺牲者 task_id 列表。"""
         from datetime import datetime, timedelta, timezone
 
@@ -1158,8 +1356,9 @@ class TaskQueue:
                 raise ClaimError(f"续租失败：任务 {task_id} 未由 {session_id} 持有")
 
     def expire_leases(self) -> list[str]:
-        """回收过期租约 → 任务回到 open。Orchestrator 周期调用（§6.4 监控）。
-        机制 1.4：过期任务的资源租约行随行释放，并重校验等待者。"""
+        """崩溃回收：心跳/lease 过期（worker 异常退出）→ 委托回 open，**仍指原窗**
+        在窗内队列重试（不回公共池、不换窗）。Orchestrator 周期调用（§6.4 监控）。
+        资源租约行随行释放，并重校验等待者。"""
         expired: list[str] = []
         ts = now()
         with self.bb._tx():

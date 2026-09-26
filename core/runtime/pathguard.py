@@ -3,6 +3,9 @@
 静态提取命令文本中的**写目标**并判定是否逃逸工作区。设计取舍（2026-09-17 定稿）：
 - 只拦「写」，读不拦（核心诉求=产物归置；读审计另行记录）；
 - 硬拒绝落在网关层（gateway.run → GatewayDenied），Agent 收到指引后可改道重试；
+- grep 族 `-o*`（only-matching）是输出开关不写文件，按命令词跟踪豁免
+  （2026-09-23 误报修复：模式串前导 / 曾被当写目标拒「工作区逃逸」）；
+  nmap 风格 -oG/-oN/-oX/-oA 写文件仍拦；
 - 诚实边界：PowerShell/bash 任意构造（变量间接、编码、别名）无法静态穷尽，
   本模块是**强护栏不是沙箱**——真文件系统边界由持久 workspace 容器（E4b）承载。
 
@@ -23,6 +26,9 @@ _PS_WRITE_CMDS = {
 _PARAM_WRITE_FLAGS = {"-o", "--output", "-o=", "--output=", "-o ", "-outfile",
                       "--outfile", "-o=", "--output-document", "-o="}
 _FLAG_PREFIXES = ("-o", "--output", "-outfile", "--outfile")
+
+# grep 族（-o/-oE/-oN/--only-matching = only-matching 输出开关，不写文件）
+_GREP_CMDS = {"grep", "egrep", "fgrep", "zgrep", "rg", "ripgrep"}
 
 # 重定向操作符：> >> 1> 2> 1>> 2>>（在 token 边界或 token 内）
 _REDIRECT_RE = re.compile(r"(?:(?<=^)|(?<=\s))(\d?){1,2}?>{1,2}")
@@ -58,28 +64,64 @@ def _clean(tok: str) -> str:
     return tok.strip().strip("\"'").strip()
 
 
+def _trim_shell_separator(target: str) -> str:
+    """重定向目标在**引号外**的首个 shell 分隔符（; | &）处结束。
+    2>/dev/null;、>f.txt|wc 这类无空格粘连写法整串是一个 token，不切掉会把
+    /dev/null; 误判逃逸（2026-09-25 实战 23/43 条误拦实锤）。"""
+    quote: str | None = None
+    for i, ch in enumerate(target):
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+        elif ch in ";|&":
+            return target[:i]
+    return target
+
+
 def _is_flag(tok: str, posix: bool = False) -> bool:
     if posix:
         return tok.startswith("-")  # POSIX 下 /path 是路径不是 flag
     return tok.startswith("-") or tok.startswith("/")
 
 
+def _cmd_word(low: str) -> str:
+    """命令词归一：剥路径段与 .exe 后缀（/usr/bin/grep、grep.exe → grep）。"""
+    w = re.split(r"[/\\]", low)[-1]
+    return w[:-4] if w.endswith(".exe") else w
+
+
 def scan_write_targets(cmd: str, posix: bool = False) -> list[str]:
     """提取命令中的写目标 token（原始串，含引号）。启发式：宁可多报不漏报。
 
     posix=True 时按 bash 语义解析（/path 是绝对路径不是 flag，如 WSL 命令）。
+    2026-09-23 增命令词跟踪：管道/分号重置命令边界，当前段命令词属于
+    grep 族时豁免 -o* 写判定（only-matching 不写文件）。
     """
     targets: list[str] = []
     toks = _split_tokens(cmd)
     i = 0
+    cur_cmd: str | None = None  # 当前段命令词（管道/分号重置；grep 族豁免用）
     while i < len(toks):
         raw = toks[i]
         low = _clean(raw).lower()
+
+        # ⓪ 命令边界跟踪：管道/分号/逻辑符重置（含 |grep 连写形态，& 兼顾
+        #    cmd1&&cmd2 与 URL 查询串的保守退化）；每段首个非 flag token 记为命令词
+        if low in {"|", "||", "&&", ";"}:
+            cur_cmd = None
+        elif "|" in raw or ";" in raw or "&" in raw:
+            seg = _clean(re.split(r"[|;&]", raw)[-1]).lower()
+            cur_cmd = _cmd_word(seg) if seg and not _is_flag(seg, posix=posix) else None
+        elif cur_cmd is None and not _is_flag(_clean(raw), posix=posix):
+            cur_cmd = _cmd_word(low)
 
         # ① 重定向：> >> 1> 2> 1>>（独立 token 或 token 内，如 ">out.txt"、"2>err"）
         stripped = raw.lstrip("0123456789")  # 剥流号前缀 1> 2>
         if stripped.startswith(">"):
             rest = stripped[1:].lstrip(">")
+            rest = _trim_shell_separator(rest)
             if rest.strip("\"'"):
                 targets.append(rest)
             elif i + 1 < len(toks):
@@ -91,14 +133,17 @@ def scan_write_targets(cmd: str, posix: bool = False) -> list[str]:
         #    curl -o/--output、iwr -OutFile、--output=path 连写）：目标在下一个非 flag token
         #    low.lstrip("-").startswith("o") 同时覆盖 -o / --output / -outfile / -oG
         if low in _PS_WRITE_CMDS or low.lstrip("-").startswith("o"):
-            if "=" in low:
-                val = _clean(raw).split("=", 1)[1]
-                if val:
-                    targets.append(val)
-            elif i + 1 < len(toks):
-                nxt = toks[i + 1]
-                if not _is_flag(_clean(nxt), posix=posix):
-                    targets.append(nxt)
+            # grep 族豁免（2026-09-23 误报修复）：-o/-oE/-oN/--only-matching 是
+            # only-matching 输出开关不写文件；nmap 风格 -oG/-oN 写文件仍拦
+            if not (cur_cmd in _GREP_CMDS and low.startswith("-")):
+                if "=" in low:
+                    val = _clean(raw).split("=", 1)[1]
+                    if val:
+                        targets.append(val)
+                elif i + 1 < len(toks):
+                    nxt = toks[i + 1]
+                    if not _is_flag(_clean(nxt), posix=posix):
+                        targets.append(nxt)
             i += 1
             continue
 

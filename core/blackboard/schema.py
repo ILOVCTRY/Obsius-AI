@@ -9,7 +9,23 @@
 
 import sqlite3
 
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 24
+
+# v23→v24（会话中心化 M4，docs/plans/session-centric-orchestration.md，2026-09-25）：
+# **纯语义迁移、零物理改动与数据搬迁**——tasks 表即「委托」；会话窗经
+# tasks.target_session 串当前/排队委托；meta.bound_task_id 旧双向绑定退役
+# （新窗不再写，存量残留只作「上一件」历史字段忽略）；租约过期回收仍指同窗。
+
+# v22→v23（TRAE 新壳 M3 chip 全通，docs/plans/webui-trae-shell.md，2026-09-25）：
+# tasks 幂等补 preferred_runtime（''=未设；host/wsl/docker/sandbox）——runtime chip
+# 写入的任务级默认运行时：run_cmd 省略 runtime 时由工具调度层按此回填，单条命令
+# 显式传 runtime 仍可临时覆盖（角色 max_runtime 软上限照常生效）。
+
+# v21→v22（渗透链路图 v3，docs/plans/website-attack-path-graph.md，2026-09-24）：
+# 新表 intents 由 DDL 的 IF NOT EXISTS 直接建表（无 ALTER，幂等）——意图（规划
+# 产物·可证伪假设）的持久记录：每个意图必须收尾（outcome_type=vuln/finding/
+# dead_end），漏洞/发现收尾引用 findings 行、死路收尾必带死因+证据引用；
+# basis_refs 记录推导依据（边=逻辑推导）。写入口 core/blackboard/intents.py。
 
 # v20→v21（渗透分阶段工作流 M2，docs/plans/pentest-phased-workflow.md，2026-09-22）：
 # orchestrator_state 幂等补 derive_idle_rounds（auto_derive 连续 N 轮零发布的
@@ -211,6 +227,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     created_by    TEXT NOT NULL DEFAULT 'human',     -- human / orchestrator / session-x
     role          TEXT NOT NULL DEFAULT '',          -- v14：建议认领角色 id（''=不限；认领即换装）
     target_session TEXT NOT NULL DEFAULT '',         -- v18：指派会话（''=公共池；非空=仅该窗可认领）
+    preferred_runtime TEXT NOT NULL DEFAULT '',     -- v23：任务默认运行时（''=未设；host/wsl/docker/sandbox）
     result_note   TEXT NOT NULL DEFAULT '',
     context_refs  TEXT NOT NULL DEFAULT '[]',  -- v3 JSON：任务依据的 finding id（显式 refs ∪ 正文自动抽取）
     stale_refs    TEXT NOT NULL DEFAULT '[]',  -- v3 JSON：已被推翻待自评的依据（撤回传播挂标，收尾后留审计）
@@ -352,6 +369,32 @@ CREATE TABLE IF NOT EXISTS blueprints (
     UNIQUE(project_id, binary_sha256, name)
 );
 CREATE INDEX IF NOT EXISTS idx_blueprints_project ON blueprints(project_id, id);
+
+-- v22 意图表（渗透链路图 v3，2026-09-24）：思考/规划产物=可证伪假设。
+-- 意图必收尾：status open→closed 时 outcome_type 三选一——
+-- vuln/finding（漏洞/有效发现，outcome_refs 指向 findings 行）/
+-- dead_end（死路，dead_reason 死因 + evidence_refs 证据引用）。
+-- basis_refs=推导依据（逻辑推导边的数据源：finding:/asset:/…）。
+-- 唯一写入口 core/blackboard/intents.py（仿 assets.py 模块函数经 bb 写）。
+CREATE TABLE IF NOT EXISTS intents (
+    id              TEXT PRIMARY KEY,
+    project_id      TEXT NOT NULL REFERENCES projects(id),
+    statement       TEXT NOT NULL,            -- 假设一句话（可证伪）
+    target_asset_id TEXT REFERENCES assets(id),  -- 意图针对的根目标（host/domain，可空）
+    basis_refs      TEXT NOT NULL DEFAULT '[]',  -- JSON：推导依据 ["finding:<id>",...]
+    status          TEXT NOT NULL DEFAULT 'open',  -- open / closed
+    outcome_type    TEXT NOT NULL DEFAULT '',  -- vuln / finding / dead_end（closed 时非空）
+    outcome_refs    TEXT NOT NULL DEFAULT '[]',  -- JSON：收尾 finding ids
+    dead_reason     TEXT NOT NULL DEFAULT '',  -- 死路死因（什么证据排除了假设）
+    evidence_refs   TEXT NOT NULL DEFAULT '[]',  -- JSON：证据引用 ["http:<id>","event:<id>"]
+    author          TEXT NOT NULL DEFAULT 'system',
+    created_at      TEXT NOT NULL,
+    closed_at       TEXT,
+    updated_at      TEXT NOT NULL,
+    revision        INTEGER NOT NULL DEFAULT 1  -- H2 乐观锁同口径
+);
+CREATE INDEX IF NOT EXISTS idx_intents_project ON intents(project_id, id);
+CREATE INDEX IF NOT EXISTS idx_intents_open ON intents(project_id, status);
 """
 
 
@@ -376,7 +419,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     - v18→v19：chains 幂等补 origin、chain_links 幂等补 trace_ref（执行轨迹链路，
       见文件头版本注释）。
     - v19→v20：findings 幂等补 impact/remediation（收录格式三件套的危害描述与
-      修复建议，写入放行不进门禁，见文件头版本注释）。"""
+      修复建议，写入放行不进门禁，见文件头版本注释）。
+    - v21→v22：intents 由 DDL 的 IF NOT EXISTS 直接建表（无 ALTER，旧库打开即建）。
+    - v22→v23：tasks 幂等补 preferred_runtime（任务默认运行时，见文件头版本注释）。"""
     cols = {r[1] for r in conn.execute("PRAGMA table_info(projects)")}
     if "track" not in cols:
         conn.execute("ALTER TABLE projects ADD COLUMN track TEXT NOT NULL DEFAULT ''")
@@ -410,6 +455,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "target_session" not in task_cols:  # v18（指派任务：认领门控）
         conn.execute(
             "ALTER TABLE tasks ADD COLUMN target_session TEXT NOT NULL DEFAULT ''")
+    if "preferred_runtime" not in task_cols:  # v23（TRAE 新壳 M3：任务默认运行时）
+        conn.execute(
+            "ALTER TABLE tasks ADD COLUMN preferred_runtime TEXT NOT NULL DEFAULT ''")
     art_cols = {r[1] for r in conn.execute("PRAGMA table_info(artifacts)")}
     if art_cols and "meta" not in art_cols:  # v10（W3 产物归属元数据）
         conn.execute("ALTER TABLE artifacts ADD COLUMN meta TEXT NOT NULL DEFAULT '{}'")

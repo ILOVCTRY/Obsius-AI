@@ -1,0 +1,153 @@
+{
+  "ida": {
+    "kind": "binary",
+    "domains": ["binary"],
+    "search": ["idat64.exe", "idat.exe"],
+    "fallback": [
+      "C:/Program Files/IDA*/idat.exe",
+      "C:/Program Files (x86)/IDA*/idat.exe",
+      "D:/Program Files/IDA*/idat.exe",
+      "?:/Tools/IDA*/idat.exe",
+      "?:/IDA*/idat.exe"
+    ],
+    "guide": "IDA Pro 商业软件：安装后确保 idat64/idat 可达（PATH 或 config/tools.json paths 指认）",
+    "note": "反编译主力腿（core/tools/decompiler.py IDA 后端）；9.x 统一 idat、8.x idat64，GUI 同目录 ida.exe 自动关联"
+  },
+  "ghidra": {
+    "kind": "binary",
+    "domains": ["binary"],
+    "runtime": "jre",
+    "search": ["analyzeHeadless.bat", "analyzeHeadless"],
+    "fallback": [
+      "C:/Program Files/ghidra*/support/analyzeHeadless.bat",
+      "D:/Program Files/ghidra*/support/analyzeHeadless.bat",
+      "?:/Tools/ghidra*/support/analyzeHeadless.bat",
+      "?:/ghidra*/support/analyzeHeadless.bat"
+    ],
+    "download": "https://github.com/NationalSecurityAgency/ghidra/releases",
+    "guide": "下载 release 解压到任意目录（PATH / config/tools.json paths / 自动扫描均可）",
+    "note": "反编译兜底腿（GhidraHeadlessBackend）；跑 analyzeHeadless 需 Java（jre 运行时）"
+  },
+  "jre": {
+    "kind": "runtime",
+    "acquire": "bundled",
+    "bin": {"windows": "runtime/jre-temurin-17/bin/java.exe", "linux": "runtime/jre-temurin-17/bin/java"},
+    "download": "https://adoptium.net/temurin/releases/?version=17",
+    "guide": "M2 计划随包自带 tools/runtime/jre-temurin-17；当前可 config/tools.json paths 指认系统 JRE 17+",
+    "note": "Ghidra/Java 系工具运行时（M2 落位 tools/runtime/ 并网关注入 JAVA_HOME）"
+  },
+  "python": {
+    "kind": "runtime",
+    "acquire": "bundled",
+    "bin": {"windows": "runtime/python-3.13/python.exe", "linux": "runtime/python-3.13/bin/python3"},
+    "guide": "M2 计划随包自带 tools/runtime/；当前 Agent python 命令走网关 env 注入（M2 接线）",
+    "note": "rev/pwn venv 的基础解释器（M2 落位 tools/runtime/）"
+  },
+  "jadx": {
+    "kind": "binary",
+    "domains": ["binary"],
+    "search": ["jadx.bat", "jadx.exe", "jadx"],
+    "download": "https://github.com/skylot/jadx/releases",
+    "guide": "下载 release 解压后 jadx 可达（PATH / config/tools.json paths 指认）",
+    "note": "APK→Java 反编译（Android 分诊腿）"
+  },
+  "apktool": {
+    "kind": "binary",
+    "domains": ["binary"],
+    "search": ["apktool.bat", "apktool"],
+    "download": "https://apktool.org/",
+    "guide": "apktool.bat + apktool.jar 同目录放置；或 config/tools.json paths 指认",
+    "note": "APK 资源/清单解码（Android 分诊腿）"
+  },
+  "adb": {
+    "kind": "binary",
+    "domains": ["binary", "research"],
+    "search": ["adb.exe", "adb"],
+    "download": "https://developer.android.com/tools/releases/platform-tools",
+    "guide": "platform-tools 解压后 adb 可达；设备连接策略另议（方案 §4.7）",
+    "note": "Android 设备/模拟器桥（二进制可纳管，设备来源属宿主硬件环境）"
+  },
+  "nmap": {
+    "kind": "binary",
+    "domains": ["pentest"],
+    "search": ["nmap.exe", "nmap"],
+    "download": "https://nmap.org/download.html",
+    "note": "主机/端口扫描（rateguard 有限速规则）"
+  },
+  "httpx": {
+    "kind": "binary",
+    "domains": ["pentest"],
+    "search": ["httpx.exe", "httpx"],
+    "download": "https://github.com/projectdiscovery/httpx/releases",
+    "note": "Web 存活探测（projectdiscovery 系）"
+  },
+  "nuclei": {
+    "kind": "binary",
+    "domains": ["pentest"],
+    "search": ["nuclei.exe", "nuclei"],
+    "download": "https://github.com/projectdiscovery/nuclei/releases",
+    "note": "POC 批量验证（模板库随工具自更新）"
+  },
+  "ffuf": {
+    "kind": "binary",
+    "domains": ["pentest"],
+    "search": ["ffuf.exe", "ffuf"],
+    "download": "https://github.com/ffuf/ffuf/releases",
+    "note": "目录/参数模糊枚举"
+  },
+  "sqlmap": {
+    "kind": "binary",
+    "domains": ["pentest"],
+    "search": ["sqlmap.exe", "sqlmap"],
+    "download": "https://sqlmap.org/",
+    "note": "SQL 注入自动化"
+  },
+  "masscan": {
+    "kind": "binary",
+    "domains": ["pentest"],
+    "search": ["masscan.exe", "masscan"],
+    "download": "https://github.com/robertdavidgraham/masscan",
+    "note": "全网段快扫（rateguard 限速规则严格，缺装=规则空转，doctor 提示）"
+  },
+  "hydra": {
+    "kind": "binary",
+    "domains": ["pentest"],
+    "search": ["hydra.exe", "hydra"],
+    "download": "https://github.com/vanhauser-thc/thc-hydra",
+    "note": "在线爆破（rateguard 限速规则，缺装提示）"
+  },
+  "impacket": {
+    "kind": "python-tool",
+    "domains": ["pentest"],
+    "pip": ["impacket"],
+    "note": "内网套件（psexec/wmiexec/secretsdump）——M2 venv 落位；2026-09-22 盘点双端全缺为已登记缺口"
+  },
+  "android-ctf-runner": {
+    "kind": "python-tool",
+    "acquire": "bundled",
+    "domains": ["binary", "ctf"],
+    "bin": {"*": "py/android/android_ctf_runner.py"},
+    "note": "APK 自动分诊（r0re 收编）：清单/权限/native/JNI 线索 → 工作区+JSON+Markdown 报告；纯 stdlib，host python 直跑（python android_ctf_runner.py --help）"
+  },
+  "godot-ctf-runner": {
+    "kind": "python-tool",
+    "acquire": "bundled",
+    "domains": ["binary", "ctf"],
+    "bin": {"*": "py/android/godot_ctf_runner.py"},
+    "pip": ["unicorn"],
+    "note": "Godot APK 全自动：markers 识别→壳检测→unicorn 脱壳→reloc 修复→常量提取；依赖 unicorn（tools/venv 落位随 toolchain-registry M2，缺则 Agent 降级手工脱壳——android/godot.md ⑥）"
+  },
+  "android-unpack-kit": {
+    "kind": "python-tool",
+    "acquire": "bundled",
+    "domains": ["binary"],
+    "bin": {"*": "py/android/upx_shlib_emu.py"},
+    "pip": ["unicorn"],
+    "note": "UPX-shlib unicorn 脱壳三件套（upx_shlib_emu 主入口 + apply_relocs R_AARCH64_RELATIVE 修复 + nrv2b 解压，同目录 import）；依赖 unicorn（M2 venv）"
+  },
+  "fpdb": {
+    "kind": "data",
+    "bin": {"windows": "data/fpdb", "linux": "data/fpdb"},
+    "note": "本地指纹包首批（dsh 收编 2026-09-22，registry data 类首批成员）"
+  }
+}

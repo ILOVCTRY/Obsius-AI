@@ -1,14 +1,16 @@
 """F6 浏览器端到端（需 playwright + chromium，缺任一自动跳过）。
 
-覆盖：导航→白名单拒绝→登记后重试→抓包入库→截图→click/type。
+覆盖：导航→白名单拒绝→登记后重试→抓包入库→截图→click/type→自签 HTTPS 放行。
 本地 http.server 起回环靶站，资产登记 127.0.0.1（DNS 断网放行回环）。
 """
 
 import base64
 import socket
+import ssl
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 
@@ -46,6 +48,33 @@ def server():
     srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{srv.server_address[1]}"
+    srv.shutdown()
+    srv.server_close()
+
+
+@pytest.fixture()
+def https_server():
+    """回环 HTTPS 靶站：自签证书（fixtures/selfsigned-127.0.0.1.pem）。"""
+    html = b"<html><body><h1>HTTPS WORKS</h1></body></html>"
+
+    class H(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(html)))
+            self.end_headers()
+            self.wfile.write(html)
+
+        def log_message(self, *a):
+            pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(
+        str(Path(__file__).parent / "fixtures" / "selfsigned-127.0.0.1.pem"))
+    srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield f"https://127.0.0.1:{srv.server_address[1]}"
     srv.shutdown()
     srv.server_close()
 
@@ -117,6 +146,33 @@ def test_navigate_capture_screenshot_whitelist(pool, server):
     actions = {e["payload"]["action"] for e in events}
     assert {"navigate", "screenshot", "content"} <= actions
     assert all(e["author"] == sid for e in events)
+
+
+def test_navigate_self_signed_https_ignored(pool, https_server, tmp_path):
+    """证书过期/自签默认放行：自签 HTTPS 目标导航 200；ignore_https_errors=False
+    的独立严格实例对同一目标必须报证书错误。"""
+    from core.browser.pool import BrowserError
+    bpool, bb, pid = pool
+    inst = bpool.get_instance(pid)
+    sid = "sess-" + "h" * 12
+    inst.open_session(sid, sid)
+    r = inst.navigate(sid, f"{https_server}/")
+    assert r["status"] == 200 and r["target_host"] == "127.0.0.1"
+    c = inst.act(sid, "content")
+    assert "HTTPS WORKS" in c["content"]
+    inst.close_session(sid)
+
+    strict = BrowserPool(tmp_path / "strict", bb_getter=lambda pid: bb,
+                         config=BrowserConfig(ignore_https_errors=False,
+                                             intercept_timeout_s=2.0))
+    try:
+        sinst = strict.get_instance(pid)
+        ssid = "sess-" + "g" * 12
+        sinst.open_session(ssid, ssid)
+        with pytest.raises(BrowserError, match="ERR_CERT"):
+            sinst.navigate(ssid, f"{https_server}/")
+    finally:
+        strict.close_all()
 
 
 def test_persistent_profile_dir_created(pool):

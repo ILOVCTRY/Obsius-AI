@@ -8,31 +8,26 @@ import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { cn } from "@/lib/utils"
+import { SEVERITY_COLOR } from "@/lib/events"
 import { hexAddr } from "@/lib/workbench"
 import { fmtDateTime, utcTitle } from "@/lib/datetime"
 import { FindingDetailDialog } from "@/components/blackboard/FindingDetailDialog"
 import { CTF_LEVEL, CTF_LEVEL_ORDER } from "./blackboard/ctfLevel"
+import { MappingPane, ProductChips } from "./blackboard/MappingPane"
 
 // 黑板视图（DESIGN.md §12 页面 4）：发现 / 资产 / 函数库 + human 共写入口
 // 发现 tab 内 assessment 轨额外提供「列表｜链路」子视图（攻击链画布，E1）。
 
-const SEVERITY_COLOR: Record<string, string> = {
-  critical: "text-(--status-error)",
-  high: "text-(--status-error)",
-  medium: "text-(--status-approval)",
-  low: "text-muted-foreground",
-  info: "text-muted-foreground",
-}
-
-// 攻击链画布懒加载：@xyflow/react ~192KB 不进主包（与逆向 ChainView 同策略）
-const FindingsCanvas = lazy(() =>
-  import("./blackboard/FindingsCanvas").then((m) => ({ default: m.FindingsCanvas })))
+// 单站攻击链路图懒加载：@xyflow/react ~192KB 不进主包（与逆向 ChainView 同策略）
+const AttackPathCanvas = lazy(() =>
+  import("./blackboard/AttackPath").then((m) => ({ default: m.AttackPath })))
 // 黑板链路图（全景 tab）懒加载：同策略，五类对象 × 类型分层 DAG
 const BoardGraphCanvas = lazy(() =>
   import("./blackboard/boardGraph/BoardGraphCanvas").then((m) => ({ default: m.BoardGraphCanvas })))
 
 // 函数库 tab 仅 capabilities 含 binary 时挂载（func_kb 只由二进制分析产生；
 // assessment web-only 项目里永远空数据）。判据是能力不是轨。
+// 测绘 tab CTF 轨不挂载（2026-09-23 用户反馈：CTF 无资产收集场景，FOFA/表格导入用不上）。
 // 全景 tab（黑板链路图）全轨开放，compact 侧栏除外。
 // M4c 场景档 board_view：defaultView（config.board_view.default）不在可用集合时回退 findings。
 export function Blackboard({ pid, compact = false, track, capabilities, defaultView }: {
@@ -40,6 +35,7 @@ export function Blackboard({ pid, compact = false, track, capabilities, defaultV
 }) {
   const tabs = [
     "findings", "assets",
+    ...(track !== "ctf" ? ["mapping"] as const : []),
     ...(capabilities?.includes("binary") ? ["funcs"] as const : []),
     ...(!compact ? ["board"] as const : []),
   ] as const
@@ -53,12 +49,18 @@ export function Blackboard({ pid, compact = false, track, capabilities, defaultV
       setTab(defaultView)
     }
   }, [defaultView]) // eslint-disable-line react-hooks/exhaustive-deps
+  // tabs 集合变化（如 meta 到齐后 CTF 轨剔除 mapping）时，选中值悬空则回退——防困在空白内容区
+  const tabsKey = allTabs.join("|")
+  useEffect(() => {
+    setTab((prev) => (allTabs.includes(prev) ? prev : initial))
+  }, [tabsKey]) // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <Tabs value={tab} onValueChange={(v) => { touched.current = true; setTab(v) }} className="flex h-full flex-col gap-0">
       <TabsList className="w-full justify-start rounded-none border-b bg-transparent p-0">
         {tabs.map((t) => (
           <TabsTrigger key={t} value={t} className="rounded-none border-b-2 px-3 py-1.5 text-xs">
-            {t === "findings" ? "发现" : t === "assets" ? "资产" : t === "funcs" ? "函数库" : "全景"}
+            {t === "findings" ? "发现" : t === "assets" ? "资产" : t === "mapping" ? "测绘"
+              : t === "funcs" ? "函数库" : "全景"}
           </TabsTrigger>
         ))}
       </TabsList>
@@ -72,6 +74,13 @@ export function Blackboard({ pid, compact = false, track, capabilities, defaultV
             无 parent 的行自然退化平铺 */}
         <Assets pid={pid} compact={compact} tree />
       </TabsContent>
+      {track !== "ctf" && (
+        <TabsContent value="mapping" className="min-h-0 flex-1">
+          {/* 网络空间测绘（cyberspace-mapping M1+M2）：FOFA 查询导入 + 表格导入；
+              compact 侧栏不挂（配置/表格类操作不适合窄栏） */}
+          {!compact && <MappingPane pid={pid} />}
+        </TabsContent>
+      )}
       {capabilities?.includes("binary") && (
         <TabsContent value="funcs" className="min-h-0 flex-1"><Funcs pid={pid} /></TabsContent>
       )}
@@ -110,7 +119,7 @@ function Chip({ active, onClick, children }: { active: boolean; onClick: () => v
 
 // CTF 线索级别词表已提出共享：./blackboard/ctfLevel（列表视图与全景链路图共用）
 
-function Findings({ pid, compact, track, showCanvas }: {
+export function Findings({ pid, compact, track, showCanvas }: {
   pid: string; compact?: boolean; track?: string; showCanvas: boolean
 }) {
   const isCtf = track === "ctf"
@@ -133,8 +142,8 @@ function Findings({ pid, compact, track, showCanvas }: {
   const [vulnClass, setVulnClass] = useState("")
 
   // 筛选全局生效；数据恒为当前项目（API 按 pid 查，无跨项目混杂）。
-  // 资产维度客户端过滤（下拉只列 host，选中时展开后代 service/url 一并匹配
-  // ——findings 挂的 target_asset_id 是叶子资产，按 host id 精确匹配会漏）。
+  // 资产维度客户端过滤（下拉只列 host/domain，选中时展开后代 service/url 一并匹配
+  // ——findings 挂的 target_asset_id 是叶子资产，按根 id 精确匹配会漏）。
   const refresh = useCallback(() =>
     api.findings(pid, {
       min_severity: sevFilter || undefined,
@@ -154,11 +163,14 @@ function Findings({ pid, compact, track, showCanvas }: {
   const assetName = useCallback((id: string | null) =>
     id ? assets.find((a) => a.id === id)?.value : undefined, [assets])
 
-  // 资产筛选下拉数据源：只列 host（IP），按搜索词过滤
-  const hostOptions = useMemo(
-    () => assets.filter((a) => a.type === "host")
-      .filter((a) => !assetQuery.trim() || a.value.toLowerCase().includes(assetQuery.trim().toLowerCase())),
-    [assets, assetQuery])
+  // 资产筛选下拉只列 host/domain（2026-09-24 用户定稿：过滤只按 IP/域名），
+  // 按值子串搜索；选中后沿 parent_id 展开子树过滤（url/service 叶子 finding 不漏）
+  const assetOptions = useMemo(() => {
+    const kw = assetQuery.trim().toLowerCase()
+    return assets
+      .filter((a) => ["host", "domain"].includes(a.type))
+      .filter((a) => !kw || a.value.toLowerCase().includes(kw))
+  }, [assets, assetQuery])
 
   const visible = useMemo(() => {
     const rank = (s: string) => {
@@ -217,7 +229,7 @@ function Findings({ pid, compact, track, showCanvas }: {
       <div className="relative">
         <button
           type="button"
-          title="按资产筛选（host/IP）"
+          title="按资产筛选（IP/域名/URL/服务）"
           onClick={() => { setAssetOpen((o) => !o); setAssetQuery("") }}
           className={cn("flex h-6 min-w-32 max-w-44 items-center justify-between gap-1 rounded border px-1.5 font-mono text-[11px]",
             assetFilter ? "border-primary/50 text-primary" : "text-foreground")}
@@ -237,7 +249,7 @@ function Findings({ pid, compact, track, showCanvas }: {
                   autoFocus
                   value={assetQuery}
                   onChange={(e) => setAssetQuery(e.target.value)}
-                  placeholder="搜索 IP…"
+                  placeholder="搜索 IP/域名…"
                   className="h-6 text-[11px]"
                 />
               </div>
@@ -250,7 +262,7 @@ function Findings({ pid, compact, track, showCanvas }: {
                 >
                   全部资产
                 </button>
-                {hostOptions.map((a) => (
+                {assetOptions.map((a) => (
                   <button
                     key={a.id}
                     type="button"
@@ -258,10 +270,13 @@ function Findings({ pid, compact, track, showCanvas }: {
                       assetFilter === a.id && "bg-primary/10 text-primary")}
                     onClick={() => { setAssetFilter(a.id); setAssetOpen(false) }}
                   >
+                    <span className="mr-1 rounded border border-[#30363d] px-0.5 text-[9px] text-muted-foreground">
+                      {a.type}
+                    </span>
                     {a.value}
                   </button>
                 ))}
-                {hostOptions.length === 0 && (
+                {assetOptions.length === 0 && (
                   <p className="px-2 py-1 text-[11px] text-muted-foreground">无匹配资产</p>
                 )}
               </div>
@@ -348,23 +363,13 @@ function Findings({ pid, compact, track, showCanvas }: {
         <div className="relative min-h-0 flex-1">
           <Suspense fallback={
             <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
-              加载攻击链画布…
+              加载攻击链路…
             </div>
           }>
-            <FindingsCanvas pid={pid} findings={visible} assets={assets} assetFilter={assetFilter} onMutated={refresh} track={track} />
+            {/* 列表资产过滤态贯通：选中 IP/域名后切链路直接作为目标；未选 → 组件内目标引导 */}
+            <AttackPathCanvas pid={pid} assets={assets} target={assetFilter || undefined} />
           </Suspense>
         </div>
-        {detail && (
-          <FindingDetailDialog
-            key={detail.id}
-            pid={pid}
-            finding={detail}
-            assetLabel={assetName(detail.target_asset_id)}
-            track={track}
-            onClose={() => setDetail(null)}
-            onMutated={refresh}
-          />
-        )}
       </div>
     )
   }
@@ -489,12 +494,15 @@ function AssetTags({ tags }: { tags: string[] }) {
   )
 }
 
-function AssetRow({ a, indent = false, hasFinding, onToggleHvt }:
-                  { a: Asset; indent?: boolean; hasFinding?: boolean; onToggleHvt?: (a: Asset) => void }) {
+function AssetRow({ a, indent = false, hasFinding, onToggleHvt, onDelete }:
+                  { a: Asset; indent?: boolean; hasFinding?: boolean
+                    onToggleHvt?: (a: Asset) => void; onDelete?: (a: Asset) => void }) {
   const meta = a.meta ?? {}
-  const hint = (meta.module ?? meta.platform ?? meta.source) as string | undefined
+  const src = meta.source as string | undefined
+  const hint = (meta.module ?? meta.platform ?? (src ? undefined : meta.source)) as string | undefined
   const title = meta.title as string | undefined
   const tags = (meta.tags as string[] | undefined) ?? []
+  const products = (meta.products as string[] | undefined) ?? []
   return (
     <div className={cn("rounded px-1 py-1 hover:bg-accent/40", indent && "ml-5")}>
       <div className="flex items-center gap-2">
@@ -504,6 +512,10 @@ function AssetRow({ a, indent = false, hasFinding, onToggleHvt }:
         <AssetBadges a={a} hasFinding={hasFinding} />
         <span className="min-w-0 flex-1" />
         <AssetTags tags={tags} />
+        {/* 来源徽章（cyberspace-mapping M1：fofa=测绘 🛰 / xlsx|csv=文件导入 📥） */}
+        {src === "fofa" && <span title="来源：FOFA 测绘导入" className="shrink-0 text-[10px]">🛰</span>}
+        {(src === "xlsx" || src === "csv") && <span title={`来源：${src} 文件导入`} className="shrink-0 text-[10px]">📥</span>}
+        <ProductChips products={products} />
         {onToggleHvt && (
           <button
             title={tags.includes("高价值") ? "取消高价值标记" : "标记为高价值（⭐ 进编排器每轮态势注入）"}
@@ -512,6 +524,15 @@ function AssetRow({ a, indent = false, hasFinding, onToggleHvt }:
             onClick={(e) => { e.stopPropagation(); onToggleHvt(a) }}
           >
             ⭐
+          </button>
+        )}
+        {onDelete && (
+          <button
+            title="删除该资产：仅叶子且无发现引用可删（有子资产/发现引用请先处理）"
+            className="shrink-0 rounded px-1 text-[10px] text-muted-foreground/50 hover:bg-accent hover:text-(--status-error)"
+            onClick={(e) => { e.stopPropagation(); onDelete(a) }}
+          >
+            🗑
           </button>
         )}
         {hint && <span className="max-w-32 truncate text-[10px] text-muted-foreground">{hint}</span>}
@@ -525,7 +546,7 @@ function AssetRow({ a, indent = false, hasFinding, onToggleHvt }:
   )
 }
 
-function Assets({ pid, compact, tree = false }: { pid: string; compact?: boolean; tree?: boolean }) {
+export function Assets({ pid, compact, tree = false }: { pid: string; compact?: boolean; tree?: boolean }) {
   const [items, setItems] = useState<Asset[]>([])
   const [type, setType] = useState("auto")   // E6：默认自动识别（修旧默认 binary bug）
   const [value, setValue] = useState("")
@@ -617,13 +638,28 @@ function Assets({ pid, compact, tree = false }: { pid: string; compact?: boolean
     }
   }
 
+  // 删除指定资产（2026-09-25）：确认后走 DELETE 端点；409（有子资产/被发现引用）
+  // 文案落底部 err 行
+  const remove = async (a: Asset) => {
+    if (!window.confirm(`确认删除资产「${a.value}」？\n仅叶子资产且无发现引用可删除，删除后不可恢复。`)) return
+    try {
+      await api.deleteAsset(pid, a.id)
+      setErr("")
+      refresh()
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    }
+  }
+
   const renderRows = () => {
     if (items.length === 0) return <Empty />
     if (tagFilter) {
       // 标签筛选时退平铺（树内子孙可能不满足筛选条件）
       if (visible.length === 0) return <p className="p-2 text-xs text-muted-foreground">该标签下暂无资产</p>
       return visible.map((a) => (
-        <AssetRow key={a.id} a={a} hasFinding={verifiedIds.has(a.id)} onToggleHvt={!compact ? toggleHvt : undefined} />
+        <AssetRow key={a.id} a={a} hasFinding={verifiedIds.has(a.id)}
+                  onToggleHvt={!compact ? toggleHvt : undefined}
+                  onDelete={!compact ? remove : undefined} />
       ))
     }
     if (!tree) return items.map((a) => (
@@ -664,6 +700,15 @@ function Assets({ pid, compact, tree = false }: { pid: string; compact?: boolean
                 onClick={(e) => { e.stopPropagation(); toggleHvt(a) }}
               >
                 ⭐
+              </button>
+            )}
+            {!compact && (
+              <button
+                title="删除该资产：仅叶子且无发现引用可删（有子资产/发现引用请先处理）"
+                className="shrink-0 rounded px-1 text-[10px] text-muted-foreground/50 hover:bg-accent hover:text-(--status-error)"
+                onClick={(e) => { e.stopPropagation(); remove(a) }}
+              >
+                🗑
               </button>
             )}
             {children.length > 0 && (

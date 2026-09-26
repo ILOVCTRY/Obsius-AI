@@ -50,13 +50,15 @@ def test_publish_refs_explicit_plus_autoextract(bb, project):
 
 def test_orch_tool_threads_refs(bb, project):
     pid = project["id"]
+    sid = bb.register_session(pid, "承接窗")["id"]
     orch = Orchestrator(project_id=pid, bb=bb, llm=object())
-    out = orch._tool_publish_task(
+    out = orch._tool_delegate(
         objective="复查 find-0123456789ab", task_type="generic",
-        refs=["find-bbbbbbbbbbbb"])
-    assert "已发布" in out
+        refs=["find-bbbbbbbbbbbb"], target_session=sid)
+    assert "已委派" in out
     task = TaskQueue(bb).list_tasks(pid)[0]
     assert task["context_refs"] == ["find-0123456789ab", "find-bbbbbbbbbbbb"]
+    assert task["target_session"] == sid
 
 
 # ---------- 撤回触发一次，不重放 ----------
@@ -211,10 +213,13 @@ def test_agent_claim_injects_stale_notice(tmp_path):
     llm = ScriptedLLM([
         {"tool_use": [ScriptedLLM.tool_call("t1", "complete_task",
                                             {"result_note": "改道成功"})]},
-        {"tool_use": [ScriptedLLM.tool_call("t2", "finish", {"summary": "改道"})]},
+        {"tool_use": [ScriptedLLM.tool_call("t1b", "complete_task",
+                                            {"result_note": "改道成功"})]},
     ])
     agent = make_agent((bb, project, gw, tq, tmp_path), llm)
-    assert agent.run_next_task() == "改道"
+    # 会话中心化：未指派委托定窗给本会话后 run_session 起跑
+    tq.bind_session(tid, agent.session["id"])
+    assert agent.run_session() == "改道成功"
 
     first = json.dumps(llm.calls[0]["messages"], ensure_ascii=False)
     assert "依据撤回" in first and fid in first and "三选一" in first

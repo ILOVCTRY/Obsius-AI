@@ -269,3 +269,17 @@ def test_doctor_endpoint_flags_dangling_reference(client):
     assert rep["counts"]["error"] >= 1
     assert any(i["code"] == "expert-skill-missing" and "ghost-skill" in i["message"]
                for i in rep["issues"])
+
+
+def test_doctor_kb_structure_thin(client):
+    """M3 丁结构体检（experience-sedimentation）：>800 字符且标题行 <2 的单段长文
+    报 warning；有分节/refs/ 子树豁免；短条目不检。"""
+    _write(client.packs / "kb/web/poc/单段.md", "# 单段手册\n" + "正文内容一长串。" * 150)
+    _write(client.packs / "kb/web/poc/分节.md",
+           "# 分节手册\n\n## 已验证路径\n" + "正文一长串。" * 150)
+    _write(client.packs / "kb/web/refs/上游.md", "# 上游快照\n" + "原文一长串。" * 150)
+    _write(client.packs / "kb/web/poc/短条目.md", "# 短条目\n存根。")
+    rep = client.get("/api/packs/doctor").json()
+    targets = [i["target"] for i in rep["issues"] if i["code"] == "kb-structure-thin"]
+    assert any("单段.md" in t for t in targets)
+    assert not any("分节.md" in t or "上游.md" in t or "短条目.md" in t for t in targets)

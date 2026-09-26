@@ -7,6 +7,8 @@
 - rating_rules(track, tags)：评级与价值口径（rating/<tag>.md，F11 判级依据注入）。
 - resolve_rule_profiles(...)：rule_profiles 三态解析 → (生效 owners, 生效 ratings)。
 - role_rules(track, role)：角色专属红线（role-rules/<role>.md，仅绑定角色注入）。
+- parse_rule_doc / validate_rule_meta / load_rule_templates：四段一体模板
+  （rules-four-section M1：frontmatter 结构化字段 + 正文；M2 接注入与实例层）。
 - load_kb_sources(capabilities)：合成启用能力域的 kb 源（packs/kb/<域>/，kb_open 消费）。
 
 rules/*.md glob 不递归：owners/、role-rules/、rating/ 子目录天然不进全量注入。
@@ -16,6 +18,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from core.skills.taxonomy import capability_dir, track_dir
+
+# noise_caps 值域（与 tasks.noise_budget 同枚举）；语义=噪声上限档，叠加取最严
+NOISE_LEVELS = ("passive", "low", "medium", "high")
 
 
 @dataclass
@@ -55,6 +60,95 @@ def role_rules(packs_root: str | Path, track: str, role: str) -> tuple[str, str]
     if f.is_file():
         return f"role:{role}", f.read_text(encoding="utf-8")
     return None
+
+
+# ---------- 四段一体模板（rules-four-section M1，2026-09-23）----------
+
+_VALID_META_KEYS = {"trigger", "scope", "forbidden", "noise_caps", "uncollectable", "rating_ref"}
+
+
+def parse_rule_doc(path: str | Path) -> tuple[dict, str]:
+    """规则/模板 md → (frontmatter meta, 正文)。frontmatter 缺失/坏 yaml → ({}, 原文)。
+
+    宁容错：散文层永远可注入，结构化 meta 是增量红利不是前置条件。
+    """
+    p = Path(path)
+    try:
+        text = p.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return {}, ""
+    if not text.startswith("---"):
+        return {}, text
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return {}, text  # 只有开栏没有闭栏 → 当无 frontmatter
+    try:
+        import yaml
+        meta = yaml.safe_load(parts[1])
+    except Exception:  # noqa: BLE001 —— 坏 yaml 容错为无 meta
+        return {}, text
+    return (meta if isinstance(meta, dict) else {}), parts[2].lstrip("\n")
+
+
+def validate_rule_meta(name: str, meta: dict) -> None:
+    """frontmatter schema 校验（fail-fast，入库声明出错不静默吞——对齐 registry 惯例）。
+
+    合法键：trigger / scope / forbidden / noise_caps / uncollectable / rating_ref。
+    scope={in:[str], out:[str]}；forbidden/uncollectable=[str]；
+    noise_caps={task_type: 档}，档 ∈ NOISE_LEVELS；rating_ref=str；trigger=str。
+    """
+    def _str_list(key: str, v) -> None:
+        if not (isinstance(v, list) and all(isinstance(x, str) and x.strip() for x in v)):
+            raise ValueError(f"规则模板 {name}.{key} 须为非空字符串数组")
+
+    unknown = set(meta) - _VALID_META_KEYS
+    if unknown:
+        raise ValueError(f"规则模板 {name} 含未知字段: {sorted(unknown)}")
+    trig = meta.get("trigger")
+    if trig is not None and not (isinstance(trig, str) and trig.strip()):
+        raise ValueError(f"规则模板 {name}.trigger 须为非空字符串")
+    scope = meta.get("scope")
+    if scope is not None:
+        if not isinstance(scope, dict):
+            raise ValueError(f"规则模板 {name}.scope 须为对象")
+        for k in scope:
+            if k not in ("in", "out"):
+                raise ValueError(f"规则模板 {name}.scope 含未知键 {k!r}（仅 in/out）")
+            _str_list(f"scope.{k}", scope[k])
+    for key in ("forbidden", "uncollectable"):
+        if meta.get(key) is not None:
+            _str_list(key, meta[key])
+    caps = meta.get("noise_caps")
+    if caps is not None:
+        if not isinstance(caps, dict):
+            raise ValueError(f"规则模板 {name}.noise_caps 须为对象")
+        for k, v in caps.items():
+            if v not in NOISE_LEVELS:
+                raise ValueError(
+                    f"规则模板 {name}.noise_caps[{k}] 须为 {'/'.join(NOISE_LEVELS)} 之一")
+    ref = meta.get("rating_ref")
+    if ref is not None and not (isinstance(ref, str) and ref.strip()):
+        raise ValueError(f"规则模板 {name}.rating_ref 须为非空字符串")
+
+
+def load_rule_templates(packs_root: str | Path, track: str) -> list[dict]:
+    """轨模板库：tracks/<track>/rules/templates/*.md → [{name, meta, body}]（名称序）。
+
+    坏 frontmatter 字段静默降级为空 meta（validate_rule_meta 由 doctor 显式调用
+    出体检项，读取侧宁容错不阻断注入）。
+    """
+    base = track_dir(packs_root, track) / "rules" / "templates"
+    out: list[dict] = []
+    if not base.is_dir():
+        return out
+    for f in sorted(base.glob("*.md")):
+        meta, body = parse_rule_doc(f)
+        try:
+            validate_rule_meta(f.stem, meta)
+        except ValueError:
+            meta = {}
+        out.append({"name": f.stem, "meta": meta, "body": body})
+    return out
 
 
 def rating_rules(packs_root: str | Path, track: str, tags: list[str]) -> list[tuple[str, str]]:

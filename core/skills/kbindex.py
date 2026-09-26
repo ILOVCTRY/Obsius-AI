@@ -26,6 +26,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
+from core.skills.matching import term_matches
 from core.skills.registry import parse_frontmatter
 from core.skills.rules import load_kb_sources
 
@@ -199,14 +200,16 @@ def _query_segments(text: str) -> list[str]:
 
 def match_kb_index_detailed(index: list[KbEntry], text: str,
                             cap: int = DEFAULT_HINT_CAP,
+                            extra_segments: list[str] | None = None,
                             ) -> list[tuple[KbEntry, str]]:
     """K3：与 match_kb_index 同评分，另返回每个命中的「相关段落」。
 
     段落判定：query 段落在 entry 某个 H2 标题（lower）里命中则记该标题
     （取第一个命中的，多段命中时靠前的信息密度更高）——hints 行借此把
     「去看这篇」升级为「去看这篇的哪一节」。无段落命中则记空串。
-    """
-    segs = _query_segments(text)
+    extra_segments（M2 查询扩展）：同义词命中组展开的追加切段，与原始段
+    一同参与评分（score 按命中段计，扩展段与原始段同权）。"""
+    segs = _query_segments(text) + list(extra_segments or [])
     if not segs:
         return []
     scored: list[tuple[float, str, KbEntry, str]] = []
@@ -271,7 +274,9 @@ def kb_module_hints(packs_root: str | Path, capabilities: list[str] | None,
                     ) -> list[tuple[KbEntry, str]]:
     """带缓存的对外口：mtime 快检不一致才重建索引，然后匹配 query_text。
     路由未命中/命中都调它——hint 行让 Agent 知道 kb 里有相关专题。
-    （K3：返回 (entry, 相关段落) 对，段落可能为空串。）"""
+    （K3：返回 (entry, 相关段落) 对，段落可能为空串。
+    M2：query 先经同义词表查询扩展——命中组全成员切段参与匹配，
+    跨语言盲区（越权↔IDOR）由词表补。）"""
     key = (str(packs_root), tuple(capabilities or []))
     with _CACHE_LOCK:
         cached = _CACHE.get(key)
@@ -279,7 +284,74 @@ def kb_module_hints(packs_root: str | Path, capabilities: list[str] | None,
         if cached is None or cached[1] != mtimes:
             cached = (build_kb_index(packs_root, capabilities), mtimes)
             _CACHE[key] = cached
-    return match_kb_index_detailed(cached[0], query_text, cap=cap)
+    extra = synonym_expansion(packs_root, query_text)
+    return match_kb_index_detailed(cached[0], query_text, cap=cap,
+                                   extra_segments=extra)
+
+
+# ---------- 领域同义词表（M2 retrieval-upgrade，2026-09-23） ----------
+# packs/kb/synonyms.yaml 全局单表：objective 命中组内任一成员 → 全组成员切段
+# 参与匹配（查询侧扩展，索引侧零改动）。维护：人工起步；M3 missed 清单审阅
+# 后经提案制增补。SkillRouter keywords 有意不挂（frontmatter keywords 已人工
+# 双语登记，再挂误报面扩大）。
+
+_SYN_CACHE: dict[str, tuple[tuple[int, int], list[tuple[str, tuple[str, ...]]]]] = {}
+
+
+def load_synonyms(packs_root: str | Path) -> list[tuple[str, tuple[str, ...]]]:
+    """packs/kb/synonyms.yaml 全局单表 → [(组id, 成员词元组)]。
+
+    缺文件/坏 YAML 一律静默降级空表（提示增强层永不阻断主链）；
+    mtime+size 快检缓存（与 _ROUTE_CACHE 同款消歧策略）。"""
+    p = Path(packs_root) / "kb" / "synonyms.yaml"
+    try:
+        st = p.stat()
+    except OSError:
+        return []
+    stamp = (st.st_mtime_ns, st.st_size)
+    key = str(packs_root)
+    with _CACHE_LOCK:
+        cached = _SYN_CACHE.get(key)
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+    groups: list[tuple[str, tuple[str, ...]]] = []
+    try:
+        import yaml
+        data = yaml.safe_load(p.read_text(encoding="utf-8"))
+    except Exception:  # 缺 yaml 库/坏文件——词表是增强层，降级空表
+        data = None
+    if isinstance(data, dict):
+        for g in (data.get("groups") or []):
+            if not isinstance(g, dict):
+                continue
+            gid = str(g.get("id") or "").strip()
+            terms = tuple(str(t).strip() for t in (g.get("terms") or [])
+                          if str(t).strip())
+            if gid and terms:
+                groups.append((gid, terms))
+    with _CACHE_LOCK:
+        _SYN_CACHE[key] = (stamp, groups)
+    return groups
+
+
+def hit_synonym_groups(packs_root: str | Path, text: str
+                       ) -> list[tuple[str, tuple[str, ...]]]:
+    """text 命中的组：组内任一成员（lower 子串）出现在 text 中。"""
+    t = (text or "").lower()
+    if not t.strip():
+        return []
+    return [(gid, terms) for gid, terms in load_synonyms(packs_root)
+            if any(m.lower() in t for m in terms)]
+
+
+def synonym_expansion(packs_root: str | Path, text: str) -> list[str]:
+    """查询扩展切段（M2）：命中组全成员各自的 _query_segments 并入原始切段。
+    组未命中零扩展（不加噪声）；组命中才扩展该组成员——语义对齐方案草案。"""
+    out: list[str] = []
+    for _gid, terms in hit_synonym_groups(packs_root, text):
+        for m in terms:
+            out.extend(_query_segments(m))
+    return out
 
 
 # ---------- 任务导航路由（kb/route.json 静态路由，2026-09-19） ----------
@@ -333,22 +405,62 @@ def load_kb_routes(packs_root: str | Path,
     return routes
 
 
+def _expand_prefix(packs_root: str | Path, prefix: str,
+                   cap: int = 3) -> tuple[list[str], int]:
+    """route.json 值展开：文件型→(该全局路径, 0)；目录型→(前 cap 篇 md 全局
+    路径, 目录总篇数)。目录先列顶层 *.md、空再递归；排除 .history。
+
+    route.json 目录前缀（如 web/webapp/authn/）不是合法 kb_open 参数（后缀
+    白名单拒收），注入前必须展开成具体文件。"""
+    raw = prefix.strip().rstrip("/")
+    physical = Path(packs_root) / "kb" / raw
+    if physical.is_file():
+        return [raw], 0
+    if not physical.is_dir():
+        # 声明目标不存在：原样透传（存在性由 doctor/route-index 体检兜底）
+        return [raw], 0
+    top = sorted(physical.glob("*.md"))
+    files = top if top else sorted(physical.rglob("*.md"))
+    files = [f for f in files
+             if ".history" not in f.relative_to(physical).parts]
+    if not files:
+        return [raw], 0
+    rels = [f"{raw}/{f.relative_to(physical).as_posix()}" for f in files]
+    return rels[:max(1, cap)], len(files)
+
+
 def kb_route_hints(packs_root: str | Path, capabilities: list[str] | None,
                    task_type: str | None, query_text: str,
-                   cap: int = DEFAULT_ROUTE_CAP) -> list[tuple[str, list[str]]]:
-    """route.json 键匹配（子串，多选一 | 分隔）task_type+query。
-    返回 [(命中键, 前缀列表)]，最多 cap 组（确定性优先于 2-gram hints）。"""
+                   cap: int = DEFAULT_ROUTE_CAP
+                   ) -> list[tuple[str, list[str], int]]:
+    """route.json 键匹配 term_matches（多选一 | 分隔）task_type+query。
+    返回 [(命中键, 展开后的具体文件路径, 目录总篇数)]，最多 cap 组；
+    dir_total>0 表示命中值含目录前缀（渲染时提示「共 N 篇」）。
+    M2：命中同义词组成员词拼进匹配串，未命中零变化。"""
     routes = load_kb_routes(packs_root, capabilities)
     if not routes:
         return []
     combined = f"{task_type or ''} {query_text or ''}".lower()
+    for _gid, terms in hit_synonym_groups(packs_root,
+                                          f"{task_type or ''} {query_text or ''}"):
+        combined += " " + " ".join(m.lower() for m in terms)
     if not combined.strip():
         return []
-    hits: list[tuple[str, list[str]]] = []
+    hits: list[tuple[str, list[str], int]] = []
     for k, prefixes in routes.items():
-        if any(alt.strip() and alt.strip().lower() in combined
-               for alt in k.split("|")):
-            hits.append((k, prefixes))
-            if len(hits) >= max(1, cap):
-                break
+        if not any(alt.strip() and term_matches(alt, combined)
+                   for alt in k.split("|")):
+            continue
+        paths: list[str] = []
+        dir_total = 0
+        for pref in prefixes:
+            rels, total = _expand_prefix(packs_root, pref)
+            for r in rels:
+                if r not in paths:
+                    paths.append(r)
+            dir_total += total
+        if paths:
+            hits.append((k, paths, dir_total))
+        if len(hits) >= max(1, cap):
+            break
     return hits

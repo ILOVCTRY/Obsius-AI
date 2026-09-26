@@ -1,0 +1,17 @@
+{
+  "name": "@sec/sec-toy",
+  "version": "0.0.0",
+  "private": true,
+  "description": "M0 尖兵验证：sec profile 外部插件装配链路最小样例",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-tools": "*"
+  }
+}

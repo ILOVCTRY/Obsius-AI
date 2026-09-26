@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from core import fofa
 from core.api.app import create_app
 
 
@@ -232,7 +233,9 @@ def test_project_usage_defaults_and_config_patch(client):
     detail = client.get(f"/api/projects/{pid}").json()
     assert detail["usage"]["level"] == "L0"
     assert detail["usage"]["sessions_cap"] == 4
-    assert detail["usage"]["tokens"] == {"used": 0, "budget": None, "pct": None}
+    assert detail["usage"]["tokens"] == {"used": 0, "budget": None, "pct": None,
+                                         "cache_read": 0, "cache_creation": 0,
+                                         "cache_hit": None}
     # 建项时的未知 config 键保留
     assert detail["config"]["x"] == 1
 
@@ -425,6 +428,40 @@ def test_task_publish_edit_reopen_delete(client):
     assert client.delete(f"/api/tasks/{tid}x").status_code == 404     # 不存在
 
 
+def test_task_publish_acceptance_with_verify_spec(client):
+    """独立验证 M1：acceptance 混排 str/{text, verify}——好规格入库（reconcile 带
+    verify），坏规格 422 拒发；任务行脱敏可见由前端/Agent 消费。"""
+    pid = _make_project(client)
+    r = client.post(f"/api/projects/{pid}/tasks", json={
+        "objective": "拿 flag", "noise_budget": "passive",
+        "acceptance": [
+            "登基稳定复现",
+            {"text": "拿到真 flag", "verify": {"strategy": "flag_capture",
+                                               "cmd": "type flag.txt",
+                                               "match": "contains",
+                                               "value": "CTF{real}"}}]})
+    assert r.status_code == 201
+    tid = r.json()["task_id"]
+    task = client.get(f"/api/projects/{pid}/tasks").json()[0]
+    entries = task["context"]["reconcile"]
+    assert [e["id"] for e in entries] == [1, 2]
+    assert entries[0]["state"] == "pending" and "verify" not in entries[0]
+    assert entries[1]["verify"]["strategy"] == "flag_capture"
+    assert entries[1]["verify"]["value"] == "CTF{real}"
+    # 坏规格（未知键）→ 422（validate_verify_spec 在 publish 入库前拒收）
+    r = client.post(f"/api/projects/{pid}/tasks", json={
+        "objective": "坏规格", "noise_budget": "passive",
+        "acceptance": [{"text": "x", "verify": {"strategy": "oracle", "cmd": "j",
+                                                "hack": 1}}]})
+    assert r.status_code == 422 and "未知键" in r.json()["detail"]
+    # 未知策略 → 422
+    r = client.post(f"/api/projects/{pid}/tasks", json={
+        "objective": "坏策略", "noise_budget": "passive",
+        "acceptance": [{"text": "x", "verify": {"strategy": "vibes", "cmd": "j"}}]})
+    assert r.status_code == 422 and "未知验证策略" in r.json()["detail"]
+    client.delete(f"/api/tasks/{tid}")
+
+
 def test_events_tail_and_before_paging(client):
     """直播间事件流分页（2026-09-17）：tail=最新 N 条、before_id=更早一页（升序返回），
     首屏不全量回放 + 上翻懒加载的数据面；since_id 增量语义不变。"""
@@ -444,6 +481,36 @@ def test_events_tail_and_before_paging(client):
     assert inc == []
 
 
+def test_events_session_filter(client):
+    """会话维度分页（2026-09-23 直播间会话窗口）：tail/before_id 带 session_id
+    各取各的（store 层 F8 既支持，API 透传）；不带参数仍是全局流（__all 语义不变）。"""
+    pid = _make_project(client)
+    bb = client.app.state.projects[pid].bb
+    s1 = bb.register_session(pid, "会话甲")["id"]
+    s2 = bb.register_session(pid, "会话乙")["id"]
+    for i in range(8):
+        bb.append_event(pid, "test.a", {"i": i}, session_id=s1, author=s1)
+    for i in range(5):
+        bb.append_event(pid, "test.b", {"i": i}, session_id=s2, author=s2)
+    bb.append_event(pid, "test.orch", {}, author="human")  # 无会话归属（编排事件）
+
+    # tail 带会话：只落本会话事件，升序
+    a = client.get(f"/api/projects/{pid}/events", params={"tail": 50, "session_id": s1}).json()
+    assert [e["session_id"] for e in a] == [s1] * 8
+    assert a == sorted(a, key=lambda e: e["id"])
+    b = client.get(f"/api/projects/{pid}/events", params={"tail": 50, "session_id": s2}).json()
+    assert [e["session_id"] for e in b] == [s2] * 5
+    # before_id 带会话：从窗口尾部翻更早一页，同样只落本会话
+    older = client.get(f"/api/projects/{pid}/events",
+                       params={"before_id": a[-1]["id"], "limit": 3, "session_id": s1}).json()
+    assert len(older) == 3 and older == sorted(older, key=lambda e: e["id"])
+    assert all(e["session_id"] == s1 for e in older) and older[-1]["id"] < a[-1]["id"]
+    # 不带参数 = 全局流：两会话 + 编排事件全可见
+    glob = client.get(f"/api/projects/{pid}/events", params={"tail": 100}).json()
+    sids = {e.get("session_id") for e in glob if e["kind"].startswith("test.")}
+    assert sids == {s1, s2, None}
+
+
 def test_task_graph_endpoint(client):
     """A3：GET task-graph 返回节点（含空 plan/session 占位）+ parent 实线。"""
     pid = _make_project(client)
@@ -459,6 +526,35 @@ def test_task_graph_endpoint(client):
     assert node["plan"] == [] and node["session"] is None and node["status"] == "open"
     assert g["edges"] == []  # scope 字段不产生 parent 边
     assert client.get("/api/projects/proj-nope/task-graph").status_code in (403, 404)
+
+
+def test_session_graph_endpoint(client):
+    """会话中心化 M4：GET session-graph——节点=编排器+会话窗（带队列计数）；
+    delegate（orch→窗）/ derive（父窗→子窗）/ dm（私信）边与 refs 明细。"""
+    pid = _make_project(client)
+    bb = client.app.state.projects[pid].bb
+    from core.blackboard.tasks import TaskQueue
+    tq = TaskQueue(bb)
+    s1 = bb.register_session(pid, "窗1", role="_generalist")["id"]
+    s2 = bb.register_session(pid, "窗2", role="_generalist")["id"]
+    t1 = tq.publish(pid, "第一件", target_session=s1)
+    tq.publish(pid, "派生件", target_session=s2, parent_id=t1)
+    assert bb.post_agent_message(pid, s1, s2, "intel", "同步情报") is not None
+
+    r = client.get(f"/api/projects/{pid}/session-graph")
+    assert r.status_code == 200
+    g = r.json()
+    assert {n["id"] for n in g["nodes"]} == {"__orch", s1, s2}
+    assert next(n for n in g["nodes"] if n["id"] == "__orch")["kind"] == "orch"
+    pairs = {(e["kind"], e["source"], e["target"]) for e in g["edges"]}
+    assert ("delegate", "__orch", s1) in pairs
+    assert ("derive", s1, s2) in pairs
+    assert ("dm", s1, s2) in pairs
+    deleg = next(e for e in g["edges"] if e["kind"] == "delegate")
+    assert deleg["refs"][0]["objective"] == "第一件"
+    n1 = next(n for n in g["nodes"] if n["id"] == s1)
+    assert n1["queue"] == 1 and n1["current"] == ""
+    assert client.get("/api/projects/proj-nope/session-graph").status_code in (403, 404)
 
 
 def test_board_graph_endpoint(client):
@@ -841,12 +937,13 @@ def test_session_note_endpoint(client):
     events = client.get(f"/api/projects/{pid}/events").json()
     assert any(e["kind"] == "message.inbox" and e["author"] == "human"
                and e["payload"]["kind"] == "human_note" for e in events)
-    # 红点/已读复用 inbox read 端点。对话化（2026-09-20）后未武装无绑定窗 note
-    # 即踢对话轮消化未读——已读断言改用「绑 open 任务的待命窗」（宁严勿松：
-    # note 不 kick，引导滞留未读等起跑轮注入）
+    # 红点/已读复用 inbox read 端点。v24（会话中心化）后未武装、窗内无委托的窗
+    # note 即踢对话轮消化未读——已读断言改用「target_session 指 open 委托的
+    # 待命窗」（宁严勿松：note 不 kick，引导滞留未读等起跑轮注入）
     from core.blackboard.tasks import TaskQueue
-    tid = TaskQueue(proj.bb).publish(pid, "待审批任务")
-    proj.bb.set_session_meta(sid, {"bound_task_id": tid})
+    tq_ = TaskQueue(proj.bb)
+    tid = tq_.publish(pid, "待审批任务")
+    tq_.bind_session(tid, sid)
     assert client.post(f"/api/sessions/{sid}/note",
                        json={"text": "等着"}).status_code == 201
     assert client.post(f"/api/sessions/{sid}/inbox/read").json()["marked"] == 1
@@ -1096,12 +1193,20 @@ def test_orchestrator_spawn_registers_agent(tmp_path):
     from test_orchestrator import ScriptedLLM
 
     orch_llm = ScriptedLLM([
-        {"tool_use": [ScriptedLLM.tool_call("s1", "spawn_session", {"role": "recon"})]},
+        {"tool_use": [ScriptedLLM.tool_call("s1", "delegate", {
+            "objective": "核查 8080 旁站低噪信息", "task_type": "recon",
+            "role": "recon", "noise_budget": "passive"})]},
         {"tool_use": [ScriptedLLM.tool_call("d1", "done", {})]},
         # 批 5：L2 tick 有产出会起链，自动续 tick 以零产出收敛（防止剧本耗尽炸链）
         {"tool_use": [ScriptedLLM.tool_call("d2", "done", {})]},
     ])
-    exec_llm = ScriptedLLM([])  # 只构造不跑（tick 不执行 worker）
+    # 会话中心化：delegate 开窗并把委托指派给新窗，worker 当场起跑，需收尾剧本
+    exec_llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("w1", "complete_task",
+                                            {"result_note": "核查完成"})]},
+        {"tool_use": [ScriptedLLM.tool_call("w2", "complete_task",
+                                            {"result_note": "核查完成"})]},
+    ])
     app = create_app(workspace_root=str(tmp_path / "workspaces"),
                      tools_root=None,
                      executor_llm=exec_llm, planner_llm=orch_llm,
@@ -1124,9 +1229,8 @@ def test_orchestrator_spawn_registers_agent(tmp_path):
         _wait_no_running(c, pid)
 
         agents = [s for s in c.app.state.agents.values() if s.project_id == pid]
-        # 空 pentest 项目两轮 tick 零产出 → idle 逃生过门 → L2 自动流转 pentest
-        # 并首发剧本任务（任务窗=第二个 agent，属分阶段 M2 预期行为）；孤儿窗
-        # 回归断言锚定编排器开的 recon 窗必须注册在册。
+        # 会话中心化：编排器开的唯一一扇窗就是 recon 委托窗（自动续 tick 零产出，
+        # 阶段剧本任务无指派不自动开窗）；孤儿窗回归断言锚定它必须注册在册。
         recon_agents = [s for s in agents if s.session["role"] == "recon"]
         assert len(recon_agents) == 1, "编排开窗未注册进 app.state.agents（孤儿窗回归）"
         sid = recon_agents[0].session["id"]
@@ -1140,13 +1244,15 @@ def test_orchestrator_spawn_registers_agent(tmp_path):
         assert "session.spawned" in kinds
 
 
-def _l1_tick_app(tmp_path, role="recon", reason="核查 8080 旁站低噪信息", exec_llm=None):
-    """批 4：pentest 默认 L1 的 tick app——planner 剧本开一扇窗后 done。"""
+def _l1_tick_app(tmp_path, role="recon", objective="核查 8080 旁站低噪信息", exec_llm=None):
+    """批 4：pentest 默认 L1 的 tick app——planner 剧本委派一扇窗（转 delegate_window
+    审批）后 done。"""
     from test_orchestrator import ScriptedLLM
 
     orch_llm = ScriptedLLM([
-        {"tool_use": [ScriptedLLM.tool_call("s1", "spawn_session",
-                                            {"role": role, "reason": reason})]},
+        {"tool_use": [ScriptedLLM.tool_call("s1", "delegate",
+                                            {"objective": objective, "task_type": "recon",
+                                             "role": role, "noise_budget": "passive"})]},
         {"tool_use": [ScriptedLLM.tool_call("d1", "done", {})]},
     ])
     return create_app(workspace_root=str(tmp_path / "workspaces"),
@@ -1166,31 +1272,28 @@ def _l1_tick_to_pending(c, pid):
     return items[0]
 
 
-def test_l1_spawn_approved_creates_and_runs(tmp_path):
-    """批准 spawn_session 纯开窗单（编排器侦查窗）：当场注册建窗 + 提交 agent-work
-    job + session.spawned 带 approval_id；v0.72 公共池认领退役——无绑侦查窗
-    认领恒空，任务仍归自己的专属待命窗（等执行审批）。"""
+def test_l1_delegate_approved_creates_window_and_runs(tmp_path):
+    """批准 delegate_window（编排器 L1 委派）：批准即「窗+委托」一次到位——
+    当场建窗注册 + 写入委托指派给新窗 + 提交 agent-work job 跑完；
+    session.spawned 带 approval_id。"""
     from test_orchestrator import ScriptedLLM
 
     app = _l1_tick_app(tmp_path, exec_llm=ScriptedLLM([
         {"tool_use": [ScriptedLLM.tool_call("w1", "complete_task",
                                             {"result_note": "新窗完成"})]},
-        {"tool_use": [ScriptedLLM.tool_call("w2", "finish", {"summary": "开跑成功"})]},
+        {"tool_use": [ScriptedLLM.tool_call("w2", "complete_task",
+                                            {"result_note": "新窗完成"})]},
     ]))
     with TestClient(app) as c:
         rp = c.post("/api/projects", json={"name": "L1批准", "track": "pentest",
                                            "capabilities": ["web"]})
         pid = rp.json()["id"]
         item = _l1_tick_to_pending(c, pid)
-        assert item["action"] == {"op": "spawn_session", "role": "recon",
-                                  "reason": "核查 8080 旁站低噪信息"}
-        # 赛跑终检要求有 open 任务：发布后 v0.72 即建专属待命窗（不计入本次审批）
-        pr = c.post(f"/api/projects/{pid}/tasks",
-                    json={"objective": "新窗要跑的任务", "task_type": "recon"})
-        assert pr.status_code == 201
-        task_id = pr.json()["task_id"]
-        agents = [s for s in c.app.state.agents.values() if s.project_id == pid]
-        assert len(agents) == 1  # 任务自己的待命窗（绑定段已建）
+        assert item["action"] == {
+            "op": "delegate_window", "role": "recon",
+            "objective": "核查 8080 旁站低噪信息", "task_type": "recon",
+            "scope": "", "noise_budget": "passive",
+            "conflict_keys": [], "priority": 2, "refs": []}
 
         r = c.post(f"/api/approvals/{item['id']}/decide", json={"decision": "approved"})
         assert r.status_code == 200
@@ -1199,12 +1302,14 @@ def test_l1_spawn_approved_creates_and_runs(tmp_path):
         job = _wait_job(c, body["job_id"])
         assert job["status"] == "done"
         agents = [s for s in c.app.state.agents.values() if s.project_id == pid]
-        assert len(agents) == 2 and body["session_id"] in {a.session["id"] for a in agents}
-        # v0.72：无绑侦查窗认领恒空——任务保持 open，归自己的待命窗
+        assert len(agents) == 1 and body["session_id"] in {a.session["id"] for a in agents}
+        # 委托由新窗认领完成
+        from core.blackboard import TaskQueue
         tq = c.app.state.projects[pid].bb
-        row = tq.conn.execute(
-            "SELECT status, target_session FROM tasks WHERE id=?", (task_id,)).fetchone()
-        assert row["status"] == "open" and row["target_session"] != body["session_id"]
+        rows = TaskQueue(tq).list_tasks(pid)
+        assert len(rows) == 1 and rows[0]["status"] == "done"
+        assert rows[0]["target_session"] == body["session_id"]
+        assert rows[0]["claimed_by"] == body["session_id"]
 
         kinds = {}
         for e in c.app.state.projects[pid].bb.recent_events(pid):
@@ -1214,31 +1319,36 @@ def test_l1_spawn_approved_creates_and_runs(tmp_path):
         assert "approval.approved" in kinds
 
 
-def test_l1_spawn_approved_no_open_task_skipped(tmp_path):
-    """赛跑终检（E12 后继）：批准时项目已无 open 任务（被既有 worker 抢走）→
-    不建窗，落 approval.exec_failed，响应 executed:false。"""
+def test_l1_delegate_approved_dedup_skipped(tmp_path):
+    """审批等待期已有同指纹 open 委托（人手先发布了同一目标）→ 批准时不重复
+    开窗：处理器返回 skipped，响应 executed:true 但无 session_id/job_id。"""
     app = _l1_tick_app(tmp_path)
     with TestClient(app) as c:
-        rp = c.post("/api/projects", json={"name": "L1赛跑跳过", "track": "pentest",
+        rp = c.post("/api/projects", json={"name": "L1同指纹跳过", "track": "pentest",
                                            "capabilities": ["web"]})
         pid = rp.json()["id"]
         item = _l1_tick_to_pending(c, pid)
+        # 审批待决期间，人手发布同一目标委托（无指派，不自动开窗）
+        pr = c.post(f"/api/projects/{pid}/tasks",
+                    json={"objective": "核查 8080 旁站低噪信息", "task_type": "recon"})
+        assert pr.status_code == 201 and pr.json()["session_id"] is None
 
         r = c.post(f"/api/approvals/{item['id']}/decide", json={"decision": "approved"})
         assert r.status_code == 200
         body = r.json()
-        assert body["executed"] is False and "无待执行任务，未建窗" in body["error"]
+        assert body["executed"] is True and "同指纹" in body["skipped"]
+        assert "session_id" not in body and "job_id" not in body
         # 没有建窗（agents/sessions 均空）
         assert [s for s in c.app.state.agents.values() if s.project_id == pid] == []
         assert c.get(f"/api/projects/{pid}/sessions").json() == []
         kinds = [e["kind"] for e in c.app.state.projects[pid].bb.recent_events(pid)]
-        assert "session.spawned" not in kinds and "approval.exec_failed" in kinds
+        assert "session.spawned" not in kinds
         # 审批保持 approved（不回滚）
         decided = c.get(f"/api/projects/{pid}/approvals").json()[0]
         assert decided["status"] == "approved"
 
 
-def test_l1_spawn_rejected_no_session(tmp_path):
+def test_l1_delegate_rejected_no_session(tmp_path):
     """拒绝：只翻状态 + approval.rejected，不开窗、不提交 job。"""
     app = _l1_tick_app(tmp_path)
     with TestClient(app) as c:
@@ -1257,7 +1367,7 @@ def test_l1_spawn_rejected_no_session(tmp_path):
         assert "approval.rejected" in kinds and "session.spawned" not in kinds
 
 
-def test_l1_spawn_approved_but_cap_full_exec_failed(tmp_path):
+def test_l1_delegate_approved_but_cap_full_exec_failed(tmp_path):
     """批准时 cap 已满：不回滚批准，落 approval.exec_failed，响应 executed:false + error。"""
     app = _l1_tick_app(tmp_path)
     with TestClient(app) as c:
@@ -1283,7 +1393,7 @@ def test_l1_spawn_approved_but_cap_full_exec_failed(tmp_path):
         failed = [e for e in c.app.state.projects[pid].bb.recent_events(pid)
                   if e["kind"] == "approval.exec_failed"]
         assert len(failed) == 1
-        assert failed[0]["payload"] == {"approval_id": item["id"], "op": "spawn_session",
+        assert failed[0]["payload"] == {"approval_id": item["id"], "op": "delegate_window",
                                         "error": failed[0]["payload"]["error"]}
 
 
@@ -1354,29 +1464,32 @@ def _orch_scripted(*calls):
     return script
 
 
-def _exec_finish_script(n=1):
-    """worker 完成 n 个任务的剧本：complete_task → finish 重复 n 轮。"""
+def _exec_delegation_script(n=1):
+    """worker 完成 n 件委托的剧本（会话中心化：委托收尾不结束会话，无 finish）：
+    complete_task（D6 首次拦截）→ 再 complete_task 零新增放行，重复 n 轮。"""
     from test_orchestrator import ScriptedLLM as S
     out = []
     for i in range(n):
         out.append({"tool_use": [S.tool_call(f"c{i}", "complete_task",
                                              {"result_note": "核查完成"})]})
-        out.append({"tool_use": [S.tool_call(f"f{i}", "finish", {"summary": "完成"})]})
+        out.append({"tool_use": [S.tool_call(f"c{i}b", "complete_task",
+                                             {"result_note": "核查完成"})]})
     return out
 
 
 def test_l2_chain_full_cycle(tmp_path, monkeypatch):
-    """全链：人手开窗(C 起 worker)→手动 tick 发任务(B)→worker 完成空退(A)
-    →自动续 tick→零产出 converged 停。chain_ticks/auto_ticks_total 各 1。"""
+    """全链：人手开窗(C 起 worker 空退)→手动 tick 委派(B：delegate 开第二扇窗)
+    →worker 完成空退(A)→自动续 tick→零产出 converged 停。
+    chain_ticks/auto_ticks_total 各 1。"""
     monkeypatch.setattr("core.api.app.AUTO_TICK_MIN_INTERVAL", 0)
     from test_orchestrator import ScriptedLLM as S
     planner = _orch_scripted(
-        [S.tool_call("t1", "publish_task",
+        [S.tool_call("t1", "delegate",
                      {"objective": "核查 8080 旁站低噪信息", "task_type": "recon",
-                      "noise_budget": "passive"})],
+                      "role": "recon", "noise_budget": "passive"})],
         [],  # 自动 tick：只 done，零产出 → 收敛
     )
-    app = _chain_app(tmp_path, planner, _exec_finish_script(1))
+    app = _chain_app(tmp_path, planner, _exec_delegation_script(1))
     with TestClient(app) as c:
         pid = _l2_project(c, "L2全链")
         sp = c.post(f"/api/projects/{pid}/agents", json={"role": "recon", "armed": True})
@@ -1386,7 +1499,10 @@ def test_l2_chain_full_cycle(tmp_path, monkeypatch):
 
         r = c.post(f"/api/projects/{pid}/orchestrator/tick", json={})
         tick_job = _wait_job(c, r.json()["job_id"])
-        assert len(tick_job["result"]["published"]) == 1 and tick_job["result"]["spawned"] == []
+        # delegate=开窗+委托一次到位：published 1、spawned 1
+        assert len(tick_job["result"]["published"]) == 1
+        assert len(tick_job["result"]["spawned"]) == 1
+        assert tick_job["result"]["spawned"][0]["role"] == "recon"
 
         stop = _wait_chain_stopped(c, pid)
         assert stop["payload"]["reason"] == "converged"
@@ -1394,7 +1510,8 @@ def test_l2_chain_full_cycle(tmp_path, monkeypatch):
         kinds = [e["kind"] for e in c.app.state.projects[pid].bb.recent_events(pid)]
         assert kinds.count("orch.chain_started") == 1
         task = c.get(f"/api/projects/{pid}/tasks").json()[0]
-        # v0.71：任务由自己的专属执行窗认领完成（手动 recon 窗无绑定，不接公共池）
+        # 会话中心化：手动 recon 窗无同型履历不复用——delegate 另开新窗，
+        # 委托由该新窗认领完成
         assert task["status"] == "done" and task["claimed_by"] == task["target_session"]
         assert task["claimed_by"] != sid
         from core.orchestrator import state as ost
@@ -1409,18 +1526,18 @@ def test_l2_chain_full_cycle(tmp_path, monkeypatch):
                          "estranged": False}
 
 
-def test_l2_publish_always_binds_executor_window(tmp_path, monkeypatch):
-    """v0.72 全局一窗一任务：编排发布任务必有专属执行窗（发布即建待命窗并起跑），
+def test_l2_delegate_always_opens_executor_window(tmp_path, monkeypatch):
+    """会话中心化：编排委派必有执行窗（delegate 开窗+委托+起跑一次到位），
     「有产出零会话」不再可能——no_sessions 停链退役，链照常收敛。"""
     monkeypatch.setattr("core.api.app.AUTO_TICK_MIN_INTERVAL", 0)
     from test_orchestrator import ScriptedLLM as S
     planner = _orch_scripted(
-        [S.tool_call("t1", "publish_task",
+        [S.tool_call("t1", "delegate",
                      {"objective": "核查 8080", "task_type": "recon",
-                      "noise_budget": "passive"})],
+                      "role": "recon", "noise_budget": "passive"})],
         [],  # 自动 tick：零产出 → 收敛
     )
-    app = _chain_app(tmp_path, planner, _exec_finish_script(1))
+    app = _chain_app(tmp_path, planner, _exec_delegation_script(1))
     with TestClient(app) as c:
         pid = _l2_project(c, "L2必有窗")
         r = c.post(f"/api/projects/{pid}/orchestrator/tick", json={})
@@ -1439,14 +1556,14 @@ def test_l2_chain_max_chain_ticks(tmp_path, monkeypatch):
     monkeypatch.setattr("core.api.app.AUTO_TICK_MIN_INTERVAL", 0)
     from test_orchestrator import ScriptedLLM as S
     planner = _orch_scripted(
-        [S.tool_call("t1", "publish_task",
+        [S.tool_call("t1", "delegate",
                      {"objective": "任务一", "task_type": "recon",
-                      "noise_budget": "passive"})],
-        [S.tool_call("t2", "publish_task",
+                      "role": "recon", "noise_budget": "passive"})],
+        [S.tool_call("t2", "delegate",
                      {"objective": "任务二", "task_type": "recon",
-                      "noise_budget": "passive"})],
+                      "role": "recon", "noise_budget": "passive"})],
     )
-    app = _chain_app(tmp_path, planner, _exec_finish_script(2))
+    app = _chain_app(tmp_path, planner, _exec_delegation_script(2))
     with TestClient(app) as c:
         pid = _l2_project(c, "L2预算", max_chain_ticks=1)
         sp = c.post(f"/api/projects/{pid}/agents", json={"role": "recon", "armed": True})
@@ -1473,19 +1590,25 @@ def _arm_active_chain(c, pid, ticks=0):
 
 
 def test_l2_chain_paused_blocks_auto_but_human_overrides(tmp_path, monkeypatch):
-    """闸②：暂停时自动挡不起跑（任务留待命窗）；但人显式对绑定窗「跑队列」是
-    override 照常认领完成；worker 收尾的 A 触发仍被闸门②拦住，落 chain_stopped{paused}。"""
+    """闸②（会话中心化）：暂停时人发委托不自动开窗起跑——委托留无指派 open；
+    人双击开窗（待命未武装）；再显式「跑」绑定窗是 override，暂停下照常认领
+    完成；worker 收尾的 A 触发仍被闸②拦住，落 chain_stopped{paused}。"""
     monkeypatch.setattr("core.api.app.AUTO_TICK_MIN_INTERVAL", 0)
-    app = _chain_app(tmp_path, [], _exec_finish_script(1))
+    app = _chain_app(tmp_path, [], _exec_delegation_script(1))
     with TestClient(app) as c:
         pid = _l2_project(c, "L2暂停", paused=True)
         r = c.post(f"/api/projects/{pid}/tasks",
                    json={"objective": "核查 8080", "task_type": "recon"})
-        # v0.72：暂停不挡建窗——待命窗已建好，只是不起跑
-        assert r.json()["kicked"] == [] and r.json()["session_id"]
-        sid = r.json()["session_id"]
+        # 会话中心化：暂停不自动开窗——无指派、不起跑
+        assert r.json()["kicked"] == [] and r.json()["session_id"] is None
+        tid = r.json()["task_id"]
+        assert c.get(f"/api/projects/{pid}/sessions").json() == []
+        # 人双击任务卡开待命窗（暂停只挡起跑，不挡开窗），未武装
+        sw = c.post(f"/api/tasks/{tid}/spawn-window")
+        assert sw.status_code == 200 and sw.json()["created"] is True
+        sid = sw.json()["session_id"]
         rows = {s["id"]: s for s in c.get(f"/api/projects/{pid}/sessions").json()}
-        assert rows[sid]["worker_armed"] is False  # 待命未武装
+        assert rows[sid]["worker_armed"] is False
         assert c.get(f"/api/projects/{pid}/tasks").json()[0]["status"] == "open"
         _arm_active_chain(c, pid, ticks=1)
         w = c.post(f"/api/agents/{sid}/work")  # 人工显式 override 自己的绑定窗
@@ -1589,12 +1712,12 @@ def test_l2_chain_throttle_wait_then_continue(tmp_path, monkeypatch):
         assert ost.load_or_create(c.app.state.projects[pid].bb, pid)["chain_ticks"] == 1
 
 
-def test_l0_l1_trigger_gates_c_d_e(tmp_path):
-    """档位分流（v0.72 全局一窗一任务）：L0 发布建待命窗但全手动（无审批单）；
-    L1 发布建待命窗+执行审批单，手动窗跑队列认领不到别人的任务（公共池退役），
-    批准=启动任务自己的待命窗跑完。"""
+def test_l0_l1_manual_and_delegate_gates(tmp_path):
+    """档位分流（会话中心化）：L0/L1 人手发委托都不自动开窗——委托留无指派
+    open、无审批单，既有窗跑队列也看不到（无指派不进任何会话轮）；L1 编排器
+    delegate 才产生 delegate_window 审批，批准=开窗+委托+起跑，手动窗抢不走。"""
     from test_orchestrator import ScriptedLLM as S
-    # L0：发布建待命窗（不起跑、无审批单），任务保持 open 等人工点跑
+    # L0：人发委托无指派 → 无窗、无审批、不起跑；另开的未武装窗也不碰它
     app0 = create_app(workspace_root=str(tmp_path / "ws0"), tools_root=None,
                       executor_llm=S([]), planner_llm=S([]),
                       providers_config=str(tmp_path / "p0.json"))
@@ -1603,17 +1726,17 @@ def test_l0_l1_trigger_gates_c_d_e(tmp_path):
                                               "capabilities": ["binary"]}).json()["id"]
         r = c0.post(f"/api/projects/{pid0}/tasks",
                     json={"objective": "逆一下", "task_type": "generic"})
-        assert r.json()["kicked"] == [] and r.json()["session_id"]  # 待命窗已建
-        rows = c0.get(f"/api/projects/{pid0}/sessions").json()
-        assert rows[0]["worker_armed"] is False
+        assert r.json()["kicked"] == [] and r.json()["session_id"] is None
+        assert c0.get(f"/api/projects/{pid0}/sessions").json() == []
         assert c0.get(f"/api/projects/{pid0}/tasks").json()[0]["status"] == "open"
         assert c0.get(f"/api/projects/{pid0}/approvals").json() == []  # L0 无审批
+        # 另开未武装窗：委托仍 open，不被自动碰
+        c0.post(f"/api/projects/{pid0}/agents", json={"role": "_generalist"})
+        assert c0.get(f"/api/projects/{pid0}/tasks").json()[0]["status"] == "open"
 
-    # L1：发布建待命窗+执行审批单；手动窗跑队列认领恒空；批准=启动原窗
-    app1 = create_app(workspace_root=str(tmp_path / "ws1"), tools_root=None,
-                      executor_llm=S(_exec_finish_script(1)), planner_llm=S([]),
-                      providers_config=str(tmp_path / "p1.json"),
-                      sediment_proposals=False)  # 完成任务会触发复盘 chat 偷剧本项
+    # L1：无指派委托手动窗跑队列看不到；编排 tick delegate → 审批；
+    # 批准=开新窗+委托+起跑，手动窗始终抢不走
+    app1 = _l1_tick_app(tmp_path, exec_llm=S(_exec_delegation_script(1)))
     with TestClient(app1) as c1:
         pid1 = c1.post("/api/projects", json={"name": "L1触发", "track": "pentest",
                                               "capabilities": ["web"]}).json()["id"]
@@ -1621,37 +1744,40 @@ def test_l0_l1_trigger_gates_c_d_e(tmp_path):
         manual_sid = manual.json()["id"]
         assert "job_id" not in manual.json()  # 手动窗默认未武装不开工
         dr = c1.post(f"/api/projects/{pid1}/tasks",
-                     json={"objective": "核查 8080", "task_type": "recon"})
-        assert dr.json()["kicked"] == []  # 触发点 D 退役：不 kick 手动窗
-        t1 = dr.json()["task_id"]
-        bound_sid = dr.json()["session_id"]
-        assert bound_sid and bound_sid != manual_sid
+                     json={"objective": "另一件无指派委托", "task_type": "generic"})
+        assert dr.json()["kicked"] == [] and dr.json()["session_id"] is None
         _wait_no_running(c1, pid1)
-        assert c1.get(f"/api/projects/{pid1}/tasks").json()[0]["status"] == "open"
-        # 手动窗跑队列（=人工武装启动）：认领恒空，别人的任务不被碰
+        # 手动窗跑队列：无指派委托不进它的会话轮，谁都不被碰
         w = c1.post(f"/api/agents/{manual_sid}/work")
         assert w.status_code == 200 and w.json().get("job_id")
-        _wait_job(c1, w.json()["job_id"])
+        job = _wait_job(c1, w.json()["job_id"])
+        assert job["result"] == 0
         _wait_no_running(c1, pid1)
-        assert c1.get(f"/api/projects/{pid1}/tasks").json()[0]["status"] == "open"
-        # 执行审批单已就绪：批准=启动任务自己的待命窗（不新建）
-        items = c1.get(f"/api/projects/{pid1}/approvals").json()
-        item = next(a for a in items if a["action"].get("task_id") == t1)
-        assert item["status"] == "pending"
+        for t in c1.get(f"/api/projects/{pid1}/tasks").json():
+            assert t["status"] == "open" and not t["claimed_by"]
+
+        # 编排 tick：delegate 转 delegate_window 审批
+        item = _l1_tick_to_pending(c1, pid1)
+        assert item["action"]["op"] == "delegate_window"
         decided = c1.post(f"/api/approvals/{item['id']}/decide",
                           json={"decision": "approved"})
         assert decided.status_code == 200 and decided.json()["executed"] is True
-        assert decided.json()["session_id"] == bound_sid  # 同一扇待命窗被启动
+        bound_sid = decided.json()["session_id"]
+        assert bound_sid and bound_sid != manual_sid
         _wait_no_running(c1, pid1)
         by_id = {t["id"]: t for t in c1.get(f"/api/projects/{pid1}/tasks").json()}
+        t1 = decided.json()["task_id"]
         assert by_id[t1]["status"] == "done"
         assert by_id[t1]["claimed_by"] == bound_sid
+        # 无指派委托仍 open（编排器下轮重新委派，不被批准后的开窗顺手抢）
+        assert all(by["status"] == "open" for tid2, by in by_id.items()
+                   if tid2 != t1)
 
 
 def test_reopen_awaiting_human_kicks_workers(tmp_path):
-    """C1 放回触发点 D（2026-09-17 修复；v0.72 只踢绑定窗）：worker 在队列空时
-    已退出，reopen 放回的 awaiting_human 任务若不 kick 则永久悬 open 无人认领
-    （用户所见「放回后不跑」）。L2 未暂停时 reopen 应唤醒原绑定窗并真正跑完
+    """会话中心化：人先开窗、再把委托指派给该窗（human-delegate 起跑）→ worker
+    awaiting_human 挂起；reopen 放回若不 kick 则永久悬 open（用户所见「放回后
+    不跑」）。L2 未暂停时 reopen 唤醒原绑定窗，走快照续跑真正完成
     （fail→reopen→done 闭环）。"""
     from test_orchestrator import ScriptedLLM as S
     executor = [
@@ -1661,6 +1787,7 @@ def test_reopen_awaiting_human_kicks_workers(tmp_path):
                                    "blocked_reason": "awaiting_human"})]},
         # 放回后被同一会话认领 → 走 C1 快照续跑路径（断点恢复旧对话），回复完成收尾
         {"tool_use": [S.tool_call("c1", "complete_task", {"result_note": "人工已解决"})]},
+        {"tool_use": [S.tool_call("c1b", "complete_task", {"result_note": "人工已解决"})]},
     ]
     app = create_app(workspace_root=str(tmp_path / "ws"), tools_root=None,
                      executor_llm=S(executor), planner_llm=S([]),
@@ -1670,10 +1797,14 @@ def test_reopen_awaiting_human_kicks_workers(tmp_path):
                                             "capabilities": ["web"]}).json()["id"]
         assert c.patch(f"/api/projects/{pid}/config",
                        json={"config": {"autonomy": {"level": "L2"}}}).status_code == 200
+        # 会话中心化：先开窗（未武装），再把委托指派给它 → human-delegate 起跑
+        sp = c.post(f"/api/projects/{pid}/agents", json={"role": "_generalist"})
+        assert sp.status_code == 201
+        sid = sp.json()["id"]
         r = c.post(f"/api/projects/{pid}/tasks",
-                   json={"objective": "测一把", "task_type": "generic"})
-        sid = r.json()["session_id"]  # 任务自己的专属执行窗（L2 自动起跑）
-        assert sid
+                   json={"objective": "测一把", "task_type": "generic",
+                         "target_session": sid})
+        assert r.json()["session_id"] == sid
         # 轮询代替 _wait_no_running+直断：负载下 worker 认领可落在 job 结束之后（套跑时序竞态）
         deadline = time.time() + 30
         tasks = []
@@ -1730,6 +1861,7 @@ def test_l2_net_real_without_approval_denied(tmp_path):
                                   {"cmd": "curl http://10.0.0.1/x", "runtime": "host",
                                    "threat_class": "trusted", "net": "real"})]},
         {"tool_use": [S.tool_call("c1", "complete_task", {"result_note": "被网关拒绝，改道"})]},
+        {"tool_use": [S.tool_call("c1b", "complete_task", {"result_note": "被网关拒绝，改道"})]},
         {"tool_use": [S.tool_call("f1", "finish", {"summary": "改道完成"})]},
     ]
     # A5：触发点 D 会在 L2 下跑一轮去抖重排（消费 planner 一条 set_priorities）
@@ -1738,9 +1870,13 @@ def test_l2_net_real_without_approval_denied(tmp_path):
     app = _chain_app(tmp_path, planner, executor)
     with TestClient(app) as c:
         pid = _l2_project(c, "L2红线")
+        # 会话中心化：先开窗（未武装），再把委托指派给它 → human-delegate 起跑
+        sp = c.post(f"/api/projects/{pid}/agents", json={"role": "_generalist"})
+        sid = sp.json()["id"]
         r = c.post(f"/api/projects/{pid}/tasks",
-                   json={"objective": "取个外网文件", "task_type": "generic"})
-        assert r.json()["kicked"] == []  # v0.72 触发点 D 退役：发布不 kick
+                   json={"objective": "取个外网文件", "task_type": "generic",
+                         "target_session": sid})
+        assert r.json()["kicked"] == [] and r.json()["session_id"] == sid
         # 轮询任务终态（不用 _wait_no_running：replan-wait 30s 节流 job 与断言无关）
         for _ in range(300):
             tasks = c.get(f"/api/projects/{pid}/tasks").json()
@@ -1758,20 +1894,21 @@ def test_l2_net_real_without_approval_denied(tmp_path):
 # ---------- 批 6：L0 提案模式（ctf 默认档；tick 只提案，人采纳走既有写口） ----------
 
 def test_l0_tick_only_emits_proposals(tmp_path):
-    """ctf 项目默认 L0：tick 中 publish_task/spawn_session 只落 orch.proposed——
-    tasks/sessions 表无新增、无 task.published/session.spawned、无链无自动 job、
-    结构化 proposals 正确、write_digest 照常。"""
+    """ctf 项目默认 L0：tick 中 delegate 只落 orch.proposed——tasks/sessions 表
+    无新增、无 delegation.posted/session.spawned、无链无自动 job、结构化
+    proposals（op=delegate，11 参数）正确、write_digest 照常。"""
     from test_orchestrator import ScriptedLLM as S
     planner = [
         {"tool_use": [
-            S.tool_call("p1", "publish_task",
+            S.tool_call("p1", "delegate",
                         {"objective": "静态逆 check_flag", "task_type": "reverse",
-                         "noise_budget": "passive"}),
-            S.tool_call("s1", "spawn_session",
-                        {"role": "reverse", "reason": "提案开逆向窗"}),
+                         "role": "reverse", "noise_budget": "passive"}),
+            S.tool_call("p2", "delegate",
+                        {"objective": "开辅助逆向窗梳理符号", "task_type": "generic",
+                         "role": "reverse", "noise_budget": "passive"}),
         ]},
         {"tool_use": [S.tool_call("g1", "write_digest",
-                                  {"summary": "L0 提案轮：1 任务 1 开窗待采纳"})]},
+                                  {"summary": "L0 提案轮：2 件委派待采纳"})]},
         {"tool_use": [S.tool_call("d1", "done", {})]},
     ]
     app = create_app(workspace_root=str(tmp_path / "ws"), tools_root=None,
@@ -1789,9 +1926,12 @@ def test_l0_tick_only_emits_proposals(tmp_path):
         assert job["status"] == "done"
         result = job["result"]
         assert result["published"] == [] and result["spawned"] == []
-        assert [p["op"] for p in result["proposals"]] == ["publish_task", "spawn_session"]
+        assert [p["op"] for p in result["proposals"]] == ["delegate", "delegate"]
         pargs = result["proposals"][0]["args"]
         assert pargs["objective"] == "静态逆 check_flag" and pargs["task_type"] == "reverse"
+        assert set(pargs) == {"objective", "role", "scope", "task_type",
+                              "noise_budget", "priority", "conflict_keys", "refs",
+                              "target_session", "force_new_window", "parent_id"}
         assert isinstance(result["proposals"][0]["event_id"], int)
         # 实体表零新增
         assert c.get(f"/api/projects/{pid}/tasks").json() == []
@@ -1799,12 +1939,12 @@ def test_l0_tick_only_emits_proposals(tmp_path):
         bb = c.app.state.projects[pid].bb
         kinds = [e["kind"] for e in bb.recent_events(pid)]
         assert kinds.count("orch.proposed") == 2
-        assert "task.published" not in kinds
+        assert "delegation.posted" not in kinds
         assert "session.spawned" not in kinds
         assert not any(k.startswith("orch.chain") for k in kinds)
         # digest 照常
         digests = [e for e in bb.recent_events(pid) if e["kind"] == "project.digest"]
-        assert len(digests) == 1 and "L0 提案轮" in digests[0]["payload"]["digest"]
+        assert len(digests) == 1 and "2 件委派" in digests[0]["payload"]["digest"]
         # 无任何自动 job（L0 不续 tick、不自起 worker）
         _wait_no_running(c, pid)
         assert [j for j in _project_jobs(c, pid)
@@ -1814,17 +1954,15 @@ def test_l0_tick_only_emits_proposals(tmp_path):
 
 
 def test_l0_proposal_adoption_human_attributed(tmp_path):
-    """人在事件流采纳提案：发任务走 POST /tasks（created_by=human、kicked=[]），
-    开窗走 POST /agents（201、无 job_id）——责任清晰，编排不沾写口。"""
+    """人在事件流采纳 delegate 提案：编排不沾写口——委托走 POST /tasks
+    （created_by=human、无指派不自动起跑），开窗走 POST /agents（201、无 job_id）。"""
     from test_orchestrator import ScriptedLLM as S
     planner = [
         {"tool_use": [
-            S.tool_call("p1", "publish_task",
-                        {"objective": "低噪核查 8080", "task_type": "verify",
-                         "noise_budget": "passive", "priority": 3,
-                         "conflict_keys": [], "refs": []}),
-            S.tool_call("s1", "spawn_session",
-                        {"role": "reverse", "reason": "采纳后开逆向窗"}),
+            S.tool_call("p1", "delegate", {
+                "objective": "低噪核查 8080", "task_type": "verify",
+                "role": "reverse", "noise_budget": "passive", "priority": 3,
+                "conflict_keys": [], "refs": []}),
         ]},
         {"tool_use": [S.tool_call("d1", "done", {})]},
     ]
@@ -1836,27 +1974,25 @@ def test_l0_proposal_adoption_human_attributed(tmp_path):
                                             "capabilities": ["binary"]}).json()["id"]
         tick = _wait_job(c, c.post(f"/api/projects/{pid}/orchestrator/tick",
                                    json={"allowed_roles": ["reverse"]}).json()["job_id"])
-        pub_prop, spawn_prop = tick["result"]["proposals"]
+        proposals = tick["result"]["proposals"]
+        assert len(proposals) == 1 and proposals[0]["op"] == "delegate"
 
-        # 采纳任务提案 → 人类写口
-        a = pub_prop["args"]
+        # 采纳委托 → 人类写口（无指派：不起跑、session_id None）
+        a = proposals[0]["args"]
         tr = c.post(f"/api/projects/{pid}/tasks", json={
             "objective": a["objective"], "task_type": a["task_type"],
             "noise_budget": a["noise_budget"], "priority": a["priority"],
             "conflict_keys": a["conflict_keys"], "refs": a["refs"]})
-        assert tr.status_code == 201 and tr.json()["kicked"] == []  # L0 不自起 worker
+        assert tr.status_code == 201 and tr.json()["kicked"] == []
+        assert tr.json()["session_id"] is None  # L0 不自起 worker、不自动开窗
         task = c.get(f"/api/projects/{pid}/tasks").json()[0]
         assert task["created_by"] == "human" and task["status"] == "open"
 
-        # 采纳开窗提案 → 人类开窗，201 且无自起 job
-        sr = c.post(f"/api/projects/{pid}/agents",
-                    json={"role": spawn_prop["args"]["role"]})
+        # 采纳开窗 → 人类开窗，201 且无自起 job；窗与委托各自独立（未指派）
+        sr = c.post(f"/api/projects/{pid}/agents", json={"role": a["role"]})
         assert sr.status_code == 201 and "job_id" not in sr.json()
         sessions = c.get(f"/api/projects/{pid}/sessions").json()
-        # v0.71 任务即窗口：采纳任务提案发布时已同步建专属待命窗（+1），
-        # 加人手 reverse 窗共 2 扇，均未自起 job（L0 手动挡）
-        assert len(sessions) == 2
-        assert [s["role"] for s in sessions if s["role"] == "reverse"] == ["reverse"]
+        assert len(sessions) == 1 and sessions[0]["role"] == "reverse"
         _wait_no_running(c, pid)
         assert _project_jobs(c, pid, kind="agent-work") == []
 
@@ -1971,6 +2107,133 @@ def test_spawn_agent_with_model_override(client, monkeypatch):
     assert r.json()["id"] in client.app.state.agents
 
 
+# ---------- D10 策略顾问项目级配置（advisor-settings-ui，2026-09-24） ----------
+
+def test_d10_advisor_config_consumed_at_session_factory(tmp_path):
+    """⑧PATCH advisor 段后开窗：三整数透传 AgentConfig 与 dispatcher；
+    无 advisor 段项目吃代码缺省（12/2/2）。"""
+    from test_orchestrator import ScriptedLLM
+    outer_planner = ScriptedLLM([])
+    app = create_app(workspace_root=str(tmp_path / "workspaces"),
+                     tools_root=None, executor_llm=ScriptedLLM([]),
+                     planner_llm=outer_planner,
+                     providers_config=str(tmp_path / "providers.json"))
+    with TestClient(app) as c:
+        pid = c.post("/api/projects", json={"name": "顾问定制", "track": "pentest",
+                                            "capabilities": ["web"]}).json()["id"]
+        r = c.patch(f"/api/projects/{pid}/config", json={"config": {"advisor": {
+            "stuck_after": 8, "stuck_max_extensions": 1, "closing_max_rounds": 0}}})
+        assert r.status_code == 200, r.text
+        sid = c.post(f"/api/projects/{pid}/agents",
+                     json={"role": "_generalist"}).json()["id"]
+        agent = c.app.state.agents[sid]
+        assert agent.config.stuck_after == 8
+        assert agent.config.stuck_max_extensions == 1
+        assert agent.config.closing_max_rounds == 0
+        assert agent.dispatcher.closing_max_rounds == 0  # 实际消费点
+        # 无 advisor 段 → 代码缺省 12/2/2
+        pid2 = c.post("/api/projects", json={"name": "缺省", "track": "pentest",
+                                             "capabilities": ["web"]}).json()["id"]
+        sid2 = c.post(f"/api/projects/{pid2}/agents",
+                      json={"role": "_generalist"}).json()["id"]
+        a2 = c.app.state.agents[sid2]
+        assert (a2.config.stuck_after, a2.config.stuck_max_extensions,
+                a2.config.closing_max_rounds) == (12, 2, 2)
+        assert a2.dispatcher.closing_max_rounds == 2
+        assert a2.planner_llm is outer_planner  # 无覆写=外层全局 planner
+
+
+def test_d10_advisor_provider_override_applies_to_session_planner(tmp_path, monkeypatch):
+    """⑨advisor.provider/model → 会话 planner_llm 被覆写为 build() 产物；
+    无覆写项目不变。"""
+    from test_orchestrator import ScriptedLLM
+    outer_planner = ScriptedLLM([])
+    app = create_app(workspace_root=str(tmp_path / "workspaces"),
+                     tools_root=None, executor_llm=ScriptedLLM([]),
+                     planner_llm=outer_planner,
+                     providers_config=str(tmp_path / "providers.json"))
+    marker = ScriptedLLM([])
+    build_calls: list[tuple] = []
+
+    def fake_build(name=None, model=None):
+        build_calls.append((name, model))
+        return marker
+
+    monkeypatch.setattr(app.state.llm_store, "build", fake_build)
+    with TestClient(app) as c:
+        pid = c.post("/api/projects", json={"name": "覆写", "track": "pentest",
+                                            "capabilities": ["web"]}).json()["id"]
+        assert c.patch(f"/api/projects/{pid}/config", json={"config": {"advisor": {
+            "provider": "ark-plan", "model": "glm-x"}}}).status_code == 200
+        sid = c.post(f"/api/projects/{pid}/agents",
+                     json={"role": "_generalist"}).json()["id"]
+        agent = c.app.state.agents[sid]
+        assert agent.planner_llm is marker and agent.llm is not marker
+        assert ("ark-plan", "glm-x") in build_calls
+        # executor 不受影响（覆写只作用于顾问三消费点）
+        pid2 = c.post("/api/projects", json={"name": "无覆写", "track": "pentest",
+                                             "capabilities": ["web"]}).json()["id"]
+        sid2 = c.post(f"/api/projects/{pid2}/agents",
+                      json={"role": "_generalist"}).json()["id"]
+        assert c.app.state.agents[sid2].planner_llm is outer_planner
+
+
+def test_d10_advisor_override_build_failure_falls_back(tmp_path, monkeypatch):
+    """⑩build 抛错（供应商事后被删/停用）→ 开窗仍 200，静默回退全局 planner。"""
+    from test_orchestrator import ScriptedLLM
+    outer_planner = ScriptedLLM([])
+    app = create_app(workspace_root=str(tmp_path / "workspaces"),
+                     tools_root=None, executor_llm=ScriptedLLM([]),
+                     planner_llm=outer_planner,
+                     providers_config=str(tmp_path / "providers.json"))
+
+    def boom(name=None, model=None):
+        raise RuntimeError("供应商已删除")
+
+    monkeypatch.setattr(app.state.llm_store, "build", boom)
+    with TestClient(app) as c:
+        pid = c.post("/api/projects", json={"name": "坏覆写", "track": "pentest",
+                                            "capabilities": ["web"]}).json()["id"]
+        assert c.patch(f"/api/projects/{pid}/config", json={"config": {"advisor": {
+            "provider": "ghost", "model": "m"}}}).status_code == 200
+        r = c.post(f"/api/projects/{pid}/agents", json={"role": "_generalist"})
+        assert r.status_code == 201, r.text
+        assert c.app.state.agents[r.json()["id"]].planner_llm is outer_planner
+
+
+def test_d10_advisor_override_does_not_reach_orchestrator(tmp_path, monkeypatch):
+    """⑪Orchestrator 自身的 llm 恒为外层 plan_llm——覆写代码必须在 factory()
+    内层；chat 轮由外层 planner 应答，标记对象零调用。"""
+    from test_orchestrator import ScriptedLLM
+    planner = ScriptedLLM([{"text": "编排器在线。"}])
+
+    class _MarkerLLM:
+        used = False
+
+        def chat(self, *a, **k):
+            type(self).used = True
+            raise AssertionError("顾问覆写泄漏到 Orchestrator")
+
+    marker = _MarkerLLM()
+    app = create_app(workspace_root=str(tmp_path / "workspaces"),
+                     tools_root=None, executor_llm=ScriptedLLM([]),
+                     planner_llm=planner,
+                     providers_config=str(tmp_path / "providers.json"))
+    monkeypatch.setattr(app.state.llm_store, "build",
+                        lambda name=None, model=None: marker)
+    with TestClient(app) as c:
+        pid = c.post("/api/projects", json={"name": "隔离", "track": "pentest",
+                                            "capabilities": ["web"]}).json()["id"]
+        assert c.patch(f"/api/projects/{pid}/config", json={"config": {"advisor": {
+            "provider": "ark-plan", "model": "glm-x"}}}).status_code == 200
+        r = c.post(f"/api/projects/{pid}/orchestrator/chat", json={"text": "在吗？"})
+        assert r.status_code == 200
+        job = _wait_job(c, r.json()["job_id"])
+        assert job["status"] == "done"
+        assert job["result"]["reply"].startswith("编排器在线")
+        assert planner.calls and marker.used is False
+
+
 def test_llm_providers_crud_and_switch(client):
     """供应商管理 API：脱敏/整表保存/校验；在跑会话动态切换落 llm.switched。"""
     # 初始种子 + 默认 + 脱敏
@@ -2018,6 +2281,43 @@ def test_llm_providers_crud_and_switch(client):
                        json={"provider": "ark-plan"}).status_code == 404
     assert client.post(f"/api/agents/{sid}/llm",
                        json={"provider": "nope"}).status_code == 422
+
+
+def test_project_executor_llm_override(client):
+    """项目级 executor 覆写（TRAE 新壳 M3）：GET 三态 / PUT 坏值 422 不落盘+
+    好值持久且内存会话即时换装 / DELETE 剥键重置回缺省。"""
+    pid = _make_project(client)
+    r = client.get(f"/api/projects/{pid}/executor-llm")
+    data = r.json()
+    assert data["override"] is None and data["effective"] == data["default"]
+
+    sid = client.post(f"/api/projects/{pid}/agents",
+                      json={"role": "_generalist"}).json()["id"]
+    # PUT 覆写
+    r = client.put(f"/api/projects/{pid}/executor-llm",
+                   json={"provider": "ark-plan", "model": "ark-code-latest"})
+    assert r.status_code == 200
+    ov = {"provider": "ark-plan", "model": "ark-code-latest"}
+    rj = r.json()
+    assert rj["override"] == ov and sid in rj["touched_sessions"]
+    assert client.app.state.agents[sid].llm.base_url.endswith("/api/plan")
+    cfg = client.app.state.projects[pid].bb.get_project(pid)["config"]
+    assert cfg["executor_llm"] == ov
+
+    # 坏供应商：422 且原覆写不动
+    assert client.put(f"/api/projects/{pid}/executor-llm",
+                      json={"provider": "nope"}).status_code == 422
+    cfg = client.app.state.projects[pid].bb.get_project(pid)["config"]
+    assert cfg["executor_llm"] == ov
+    g = client.get(f"/api/projects/{pid}/executor-llm").json()
+    assert g["override"] == ov and g["effective"] == ov
+
+    # DELETE 重置：键剥离 + 内存会话回缺省
+    r = client.delete(f"/api/projects/{pid}/executor-llm")
+    assert r.status_code == 200 and r.json()["override"] is None
+    cfg = client.app.state.projects[pid].bb.get_project(pid)["config"]
+    assert "executor_llm" not in cfg
+    assert client.app.state.agents[sid].llm.base_url.endswith("/api/coding")
 
 
 # ---------- 资产更新端点（DESIGN.md §5.2：PATCH 补挂/合并 meta） ----------
@@ -3150,7 +3450,7 @@ def test_l2_budget_pause_auto_resumes(tmp_path):
         executor_llm=S([
             {"tool_use": [S.tool_call("p1", "task_plan", {"steps": [{"title": "摸底"}]})]},
             {"tool_use": [S.tool_call("c1", "complete_task", {"result_note": "自动续跑后完成"})]},
-            {"tool_use": [S.tool_call("f1", "finish", {"summary": "续跑成功"})]},
+            {"tool_use": [S.tool_call("c1b", "complete_task", {"result_note": "自动续跑后完成"})]},
         ]),
         planner_llm=S([]), providers_config=str(tmp_path / "p.json"))
     with TestClient(app) as c:
@@ -3159,17 +3459,18 @@ def test_l2_budget_pause_auto_resumes(tmp_path):
         assert c.patch(f"/api/projects/{pid}/config",
                        json={"config": {"autonomy": {"level": "L2", "paused": True}}}
                        ).status_code == 200
-        tid = c.post(f"/api/projects/{pid}/tasks",
-                     json={"objective": "自续任务", "task_type": "generic"}).json()["task_id"]
-        # 暂停挡住自动起跑：把任务专属待命窗的步数预算压到 1（一步即耗尽 → budget pause）
-        sid = next(t["target_session"] for t in c.get(f"/api/projects/{pid}/tasks").json()
-                   if t["id"] == tid)
+        # 会话中心化：先开一扇未武装窗（暂停期只开窗不消费），再把委托指给它
+        sid = c.post(f"/api/projects/{pid}/agents", json={"role": "recon"}).json()["id"]
+        # 步数预算压到 1：起跑后一步即耗尽 → budget pause
         c.app.state.agents[sid].dispatcher.max_steps = 1
         assert c.patch(f"/api/projects/{pid}/config",
                        json={"config": {"autonomy": {"level": "L2", "paused": False}}}
                        ).status_code == 200
-        w = c.post(f"/api/agents/{sid}/work")  # 启动绑定窗（人工 override，与自动挡去重安全）
-        assert w.status_code == 200
+        r = c.post(f"/api/projects/{pid}/tasks",
+                   json={"objective": "自续任务", "task_type": "generic",
+                         "target_session": sid})
+        assert r.status_code == 201 and r.json()["session_id"] == sid  # 人显式委托即武装起跑
+        tid = r.json()["task_id"]
 
         deadline = time.time() + 10
         done = False
@@ -3186,98 +3487,125 @@ def test_l2_budget_pause_auto_resumes(tmp_path):
         assert any(k == "session.resumed" and p.get("by") == "l2-auto" for k, p in evs)
 
 
-def test_auto_spawn_l2_publish_opens_window_and_claims(tmp_path):
-    """v0.71 发布即建窗 L2：publish 同步建专属待命窗（origin=task-window，
-    reason=human-publish），调度器武装起跑，worker 只认领自己的任务并跑完。"""
-    app = _chain_app(tmp_path, [], _exec_finish_script(1))
+def test_human_delegate_l2_window_runs_delegation(tmp_path):
+    """会话中心化 L2：人开窗（未武装）→ 发委托指给该窗（target_session）：
+    委托即武装授权并起跑，worker 只跑自己队列里的委托并完成，窗保持待命。"""
+    app = _chain_app(tmp_path, [], _exec_delegation_script(1))
     with TestClient(app) as c:
-        pid = _l2_project(c, "L2自动补窗")
+        pid = _l2_project(c, "L2人委托")
+        sid = c.post(f"/api/projects/{pid}/agents", json={"role": "recon"}).json()["id"]
         r = c.post(f"/api/projects/{pid}/tasks",
-                   json={"objective": "补窗即跑的任务", "task_type": "recon"})
-        assert r.status_code == 201
+                   json={"objective": "指窗即跑的委托", "task_type": "recon",
+                         "target_session": sid})
+        assert r.status_code == 201 and r.json()["session_id"] == sid
         _wait_no_running(c, pid)
         tasks = c.get(f"/api/projects/{pid}/tasks").json()
-        assert [t["status"] for t in tasks] == ["done"]  # 专属窗认领并完成
+        assert [t["status"] for t in tasks] == ["done"]  # 目标窗认领并完成
+        assert tasks[0]["claimed_by"] == sid
         bb = c.app.state.projects[pid].bb
         evs = [(e["kind"], e["payload"]) for e in bb.recent_events(pid)]
-        spawns = [p for k, p in evs
-                  if k == "session.spawned" and p.get("origin") == "task-window"]
+        spawns = [p for k, p in evs if k == "session.spawned"]
         assert len(spawns) == 1
-        assert spawns[0]["role"] == "_generalist"  # open 任务未绑角色 → 兜底
-        assert spawns[0]["reason"] == "human-publish"
+        assert spawns[0]["role"] == "recon"
+        assert spawns[0].get("origin") == "human"  # 人开的窗，无 task-window 自动补
         from core.autonomy import count_active_sessions
-        assert count_active_sessions(bb, pid) == 1
+        assert count_active_sessions(bb, pid) == 1  # 委托收尾不退窗
+        rows = {s["id"]: s for s in c.get(f"/api/projects/{pid}/sessions").json()}
+        assert rows[sid]["worker_armed"] is True and rows[sid]["status"] == "idle"
 
 
-def test_l1_publish_standby_window_and_execution_approval(tmp_path):
-    """v0.72 L1：发布即建专属待命窗（零 LLM）+ 按任务提执行审批单
-    （action 带 task_id，批准=启动该窗）；每任务一单，不互相去重合并。"""
-    app = _chain_app(tmp_path, [])
+def test_l1_untargeted_human_tasks_need_explicit_delegation(tmp_path):
+    """会话中心化 L1：人发未指派委托不再自动建待命窗、不落 auto-spawn 审批单
+    ——「每个任务一张执行单」机制取消。开窗与起跑都需显式：人开窗后指窗委托
+    （manual override 立即起跑，L1 无审批），或编排器 tick 提 delegate_window。"""
+    app = _chain_app(tmp_path, [], _exec_delegation_script(1))
     with TestClient(app) as c:
-        pid = c.post("/api/projects", json={"name": "L1补窗审批", "track": "pentest",
+        pid = c.post("/api/projects", json={"name": "L1显式委托", "track": "pentest",
                                             "capabilities": ["web"]}).json()["id"]
         r = c.post(f"/api/projects/{pid}/tasks",
-                   json={"objective": "待认领一", "task_type": "recon"})
-        assert r.status_code == 201
+                   json={"objective": "待指派一", "task_type": "recon"})
+        assert r.status_code == 201 and r.json()["session_id"] is None
         c.post(f"/api/projects/{pid}/tasks",
-               json={"objective": "待认领二", "task_type": "recon"})
+               json={"objective": "待指派二", "task_type": "recon"})
         _wait_no_running(c, pid)
-        items = c.get(f"/api/projects/{pid}/approvals").json()
-        spawns = [a for a in items if a["action"].get("op") == "spawn_session"]
-        assert len(spawns) == 2  # 每个任务一张执行审批单（带各自 task_id）
-        assert all(a["status"] == "pending" for a in spawns)
-        assert all(a["requested_by"] == "auto-spawn" for a in spawns)
-        assert {a["action"]["task_id"] for a in spawns} == {
-            t["id"] for t in c.get(f"/api/projects/{pid}/tasks").json()}
-        assert all(a["action"]["role"] == "_generalist" for a in spawns)
-        # 待命窗已建（不耗 LLM、未武装不起跑）；批准才启动
+        assert c.get(f"/api/projects/{pid}/approvals").json() == []  # 无 auto-spawn 单
         from core.autonomy import count_active_sessions
-        assert count_active_sessions(c.app.state.projects[pid].bb, pid) == 2
-        rows = {s["id"]: s for s in c.get(f"/api/projects/{pid}/sessions").json()}
-        assert all(s["worker_armed"] is False for s in rows.values())
+        assert count_active_sessions(c.app.state.projects[pid].bb, pid) == 0
+        assert all(t["status"] == "open" and t["target_session"] == ""
+                   for t in c.get(f"/api/projects/{pid}/tasks").json())
 
-
-def test_legacy_auto_spawn_key_ignored_window_still_binds(tmp_path):
-    """v0.72 auto_spawn 旗标退役：旧配置残留键被静默忽略——L2 发布照常建专属窗
-    并自动起跑（挡位语义统一，项目级补窗开关不复存在）。"""
-    app = _chain_app(tmp_path, [], _exec_finish_script(1))
-    with TestClient(app) as c:
-        pid = _l2_project(c, "L2补窗关", auto_spawn=False)  # 残留键 no-op
+        # 人开窗 → 指窗委托：立即武装起跑（无审批），窗完成委托后保持待命
+        sid = c.post(f"/api/projects/{pid}/agents", json={"role": "recon"}).json()["id"]
         r = c.post(f"/api/projects/{pid}/tasks",
-                   json={"objective": "照常建窗", "task_type": "recon"})
-        assert r.status_code == 201 and r.json()["session_id"]
+                   json={"objective": "指窗的委托", "task_type": "recon",
+                         "target_session": sid})
+        assert r.status_code == 201 and r.json()["session_id"] == sid
+        _wait_no_running(c, pid)
+        done = [t for t in c.get(f"/api/projects/{pid}/tasks").json()
+                if t["status"] == "done"]
+        assert len(done) == 1 and done[0]["claimed_by"] == sid
+        # 编排器未参与：仍无审批单；另两件未指派委托依旧 open
+        assert c.get(f"/api/projects/{pid}/approvals").json() == []
+        assert count_active_sessions(c.app.state.projects[pid].bb, pid) == 1
+
+
+def test_legacy_auto_spawn_key_ignored(tmp_path):
+    """auto_spawn 旗标退役：旧配置残留键静默忽略（no-op）——会话中心化下不再有
+    「发布自动补窗」，但也不挡人显式开窗/委托（挡位语义统一）。"""
+    app = _chain_app(tmp_path, [], _exec_delegation_script(1))
+    with TestClient(app) as c:
+        pid = _l2_project(c, "L2残留键", auto_spawn=False)  # 残留键 no-op
+        r = c.post(f"/api/projects/{pid}/tasks",
+                   json={"objective": "未指派委托", "task_type": "recon"})
+        assert r.status_code == 201 and r.json()["session_id"] is None
+        _wait_no_running(c, pid)
+        assert c.get(f"/api/projects/{pid}/tasks").json()[0]["status"] == "open"
+        assert c.get(f"/api/projects/{pid}/approvals").json() == []
+        # 人显式开窗+委托照常工作
+        sid = c.post(f"/api/projects/{pid}/agents", json={"role": "recon"}).json()["id"]
+        r = c.post(f"/api/projects/{pid}/tasks",
+                   json={"objective": "显式委托", "task_type": "recon",
+                         "target_session": sid})
+        assert r.status_code == 201 and r.json()["session_id"] == sid
         _wait_no_running(c, pid)
         from core.autonomy import count_active_sessions
         assert count_active_sessions(c.app.state.projects[pid].bb, pid) == 1
-        assert c.get(f"/api/projects/{pid}/approvals").json() == []
-        assert c.get(f"/api/projects/{pid}/tasks").json()[0]["status"] == "done"
+        rows = {t["objective"]: t for t in c.get(f"/api/projects/{pid}/tasks").json()}
+        assert rows["显式委托"]["status"] == "done"
+        assert rows["未指派委托"]["status"] == "open"
 
 
-def test_sessions_cap_full_task_waits_then_rebinds_on_close(tmp_path):
-    """已达 sessions_cap 不补窗（不超卖）：建窗失败任务暂无绑，人手窗不接公共池
-    （认领恒空）；关掉占坑窗后调度器立即重绑新窗并自动起跑（L2）。"""
-    app = _chain_app(tmp_path, [], _exec_finish_script(1))
+def test_sessions_cap_full_task_stays_unbound_until_explicit(tmp_path):
+    """会话中心化：已达 sessions_cap 时未指派委托不补窗（不超卖），且关窗不再
+    自动重绑新窗——关窗收尾只退回未指派。人显式 spawn-window 补绑+起跑才完成。"""
+    app = _chain_app(tmp_path, [], _exec_delegation_script(1))
     with TestClient(app) as c:
-        pid = _l2_project(c, "L2补窗封顶", sessions_cap=1)
+        pid = _l2_project(c, "L2封顶不自动", sessions_cap=1)
         sp = c.post(f"/api/projects/{pid}/agents", json={"role": "recon", "armed": True})
         assert sp.status_code == 201
         _wait_no_running(c, pid)
         r = c.post(f"/api/projects/{pid}/tasks",
-                   json={"objective": "暂无窗的任务", "task_type": "recon"})
+                   json={"objective": "暂无窗的委托", "task_type": "recon"})
         assert r.status_code == 201 and r.json()["session_id"] is None
         _wait_no_running(c, pid)
         assert c.get(f"/api/projects/{pid}/tasks").json()[0]["status"] == "open"
-        bb = c.app.state.projects[pid].bb
-        evs = [(e["kind"], e["payload"]) for e in bb.recent_events(pid)]
-        assert [p for k, p in evs if k == "session.spawned" and p.get("auto")] == []
-        # 关掉占坑人手窗 → cap 释放 → 调度器（关窗收尾触发）重绑新窗并起跑
+        # 关掉占坑窗 → cap 释放，但不自动重绑/不起跑（与旧调度器语义的关键差异）
         assert c.post(f"/api/sessions/{sp.json()['id']}/close").status_code == 200
-        deadline = time.time() + 10
-        while time.time() < deadline:
-            if c.get(f"/api/projects/{pid}/tasks").json()[0]["status"] == "done":
-                break
-            time.sleep(0.05)
-        assert c.get(f"/api/projects/{pid}/tasks").json()[0]["status"] == "done"
+        _wait_no_running(c, pid)
+        task = c.get(f"/api/projects/{pid}/tasks").json()[0]
+        assert task["status"] == "open" and task["target_session"] == ""
+        from core.autonomy import count_active_sessions
+        assert count_active_sessions(c.app.state.projects[pid].bb, pid) == 0
+        # 人显式补绑窗（cap 已空）→ created:true；再点亮起跑 → 委托完成
+        sr = c.post(f"/api/tasks/{task['id']}/spawn-window")
+        assert sr.status_code == 200 and sr.json()["created"] is True
+        new_sid = sr.json()["session_id"]
+        w = c.post(f"/api/agents/{new_sid}/work")
+        assert w.status_code == 200
+        _wait_job(c, w.json()["job_id"])
+        _wait_no_running(c, pid)
+        task = c.get(f"/api/projects/{pid}/tasks").json()[0]
+        assert task["status"] == "done" and task["claimed_by"] == new_sid
 
 
 def test_publish_parent_id_and_depth_422(client):
@@ -3353,16 +3681,16 @@ def test_redteam_prompt_fixed_at_session_creation(client):
 
 def test_directive_endpoint_and_auto_derive(tmp_path):
     """C2：指挥编排器——directive 落事件+自动 tick+注入 overview+轮末标 done；
-    L1 auto_derive 开启时 worker 空退 → mission 自动派生新任务。"""
+    L2 下第一轮 tick 按指令 delegate 开窗委派并跑完。"""
     from test_orchestrator import ScriptedLLM as S
     app = create_app(
         workspace_root=str(tmp_path / "ws"), tools_root=None,
-        executor_llm=S([{"text": "ok"}]),
+        executor_llm=S(_exec_delegation_script(1)),
         planner_llm=S([
-            # directive 触发的第一轮：按指令发布任务
-            {"tool_use": [S.tool_call("p1", "publish_task",
-                                       {"objective": "对已登记资产做漏洞挖掘",
-                                        "task_type": "generic"})]},
+            # directive 触发的第一轮：按指令委派（会话中心化：无 publish_task）
+            {"tool_use": [S.tool_call("p1", "delegate", {
+                "objective": "对已登记资产做漏洞挖掘",
+                "task_type": "generic", "role": ""})]},
             {"tool_use": [S.tool_call("d1", "done", {})]},
         ]),
         providers_config=str(tmp_path / "p.json"))
@@ -3370,26 +3698,29 @@ def test_directive_endpoint_and_auto_derive(tmp_path):
     with TestClient(app) as c:
         pid = c.post("/api/projects", json={"name": "指挥", "track": "ctf",
                                             "capabilities": ["binary"]}).json()["id"]
-        # 开自动派生（L1，ctf 缺省 L0 → PATCH 提档）+ mission 判据
+        # L2（ctf 缺省 L0 → PATCH 提档）+ mission 判据
         assert c.patch(f"/api/projects/{pid}/config", json={"config": {
-            "autonomy": {"level": "L1", "auto_derive": True},
+            "autonomy": {"level": "L2", "auto_derive": True},
             "mission": {"text": "挖洞", "criteria": "□ 全覆盖"}}}).status_code == 200
         r = c.post(f"/api/projects/{pid}/orchestrator/directive",
                    json={"text": "对已登记资产做漏洞挖掘"})
         assert r.status_code == 200
         _wait_job(c, r.json()["job_id"])
+        _wait_no_running(c, pid)
         bb = c.app.state.projects[pid].bb
         evs = [e["kind"] for e in bb.recent_events(pid)]
         assert "orch.directive" in evs and "orch.directive.done" in evs
-        # 第一轮按指令派生了任务
-        assert any(t["objective"] == "对已登记资产做漏洞挖掘"
-                   for t in c.get(f"/api/projects/{pid}/tasks").json())
+        # 第一轮按指令委派了委托（已完成）
+        rows = [t for t in c.get(f"/api/projects/{pid}/tasks").json()
+                if t["objective"] == "对已登记资产做漏洞挖掘"]
+        assert len(rows) == 1 and rows[0]["status"] == "done"
         detail = c.get(f"/api/projects/{pid}").json()
         assert detail["usage"]["auto_derive"] is True
 
 
 def test_judgment_templates_crud(client, tmp_path):
-    """C2 判据模板：默认全 user 空；PUT 整表保存；DELETE 删除；resolve 三层优先级。"""
+    """C2 判据模板：默认全 user 空；PUT 整表保存；DELETE 删除；
+    resolve 四层优先级（goal 统一后：goal > mission 存量 > template > builtin）。"""
     from core.orchestrator.judgments import resolve_criteria
     pid = _make_project(client)
     app_jud = client.app.state.judgments_dir
@@ -3399,11 +3730,11 @@ def test_judgment_templates_crud(client, tmp_path):
     # PUT 保存
     r = client.put("/api/judgment-templates", json={"我的模板": "□ 自定义判据"})
     assert r.status_code == 200 and r.json()["saved"] == 1
-    # 三层优先级：mission > template > builtin
+    # 四层优先级：goal > mission（存量兼容） > template > builtin
     proj = client.app.state.projects[pid]
     cfg_empty = proj.bb.get_project(pid)["config"]
     res = resolve_criteria(cfg_empty, client.app.state.judgments_dir)
-    assert res["source"] == "builtin"  # 无 mission 无选模板 → 内置兜底
+    assert res["source"] == "builtin"  # 无 goal 无 mission 无选模板 → 内置兜底
     client.patch(f"/api/projects/{pid}/config",
                  json={"config": {"criteria_template": "我的模板"}})
     res = resolve_criteria(proj.bb.get_project(pid)["config"],
@@ -3413,6 +3744,21 @@ def test_judgment_templates_crud(client, tmp_path):
                  json={"config": {"mission": {"criteria": "□ 手写判据"}}})
     res = resolve_criteria(proj.bb.get_project(pid)["config"],
                            client.app.state.judgments_dir)
+    assert res["source"] == "mission"
+    # goal 居首：阶段目标确认（PUT /goal）后 goal 判据压过 mission/模板
+    r = client.put(f"/api/projects/{pid}/goal",
+                   json={"text": "打穿靶场", "criteria": ["□ goal 判据一", "□ goal 判据二"]})
+    assert r.status_code == 200
+    g = client.get(f"/api/projects/{pid}/goal").json()["phase_goal"]
+    res = resolve_criteria(proj.bb.get_project(pid)["config"],
+                           client.app.state.judgments_dir, goal=g)
+    assert res["source"] == "goal"
+    assert "□ goal 判据一" in res["criteria"] and "□ goal 判据二" in res["criteria"]
+    # goal 清空（criteria 空不算源）→ 回退 mission 存量层
+    client.put(f"/api/projects/{pid}/goal", json={"text": ""})
+    g = client.get(f"/api/projects/{pid}/goal").json()["phase_goal"]
+    res = resolve_criteria(proj.bb.get_project(pid)["config"],
+                           client.app.state.judgments_dir, goal=g)
     assert res["source"] == "mission"
     # DELETE
     r = client.delete("/api/judgment-templates/我的模板")
@@ -3432,15 +3778,18 @@ def _wait_derive_result(client, pid: str, prefix: str, tries: int = 200) -> dict
 
 
 def test_mission_poll_sweep_derives_when_idle(tmp_path):
-    """①兜底轮询：队列空 + auto_derive（L1）→ 直调 sweep 自动派生新任务并落
-    last_derive_*；队列有 open 任务时 sweep 不触发（require_idle）。"""
+    """①兜底轮询：队列空 + auto_derive（L1）→ sweep 触发一次编排派生 tick 并落
+    last_derive_*；队列有 open 任务时 sweep 不触发（require_idle）。
+    会话中心化：L1 delegate 不直发委托——tick 落 pending delegate_window 审批，
+    last_result=published:0，待人类批准后才开窗写委托。"""
     from test_orchestrator import ScriptedLLM as S
     app = create_app(
         workspace_root=str(tmp_path / "ws"), tools_root=None,
         executor_llm=S([{"text": "ok"}]),
         planner_llm=S([
-            {"tool_use": [S.tool_call("p1", "publish_task",
-                                      {"objective": "轮询派生任务", "task_type": "generic"})]},
+            {"tool_use": [S.tool_call("p1", "delegate", {
+                "objective": "轮询派生任务", "task_type": "generic",
+                "role": ""})]},
             {"tool_use": [S.tool_call("d1", "done", {})]},
         ]),
         providers_config=str(tmp_path / "p.json"))
@@ -3450,24 +3799,64 @@ def test_mission_poll_sweep_derives_when_idle(tmp_path):
         assert c.patch(f"/api/projects/{pid}/config", json={"config": {
             "autonomy": {"level": "L1", "auto_derive": True},
             "mission": {"text": "挖洞", "criteria": "□ 全覆盖"}}}).status_code == 200
-        # 变体 A：队列有 open 任务 → sweep 不判跳（不产新任务）
+        # 变体 A：队列有 open 任务 → sweep 不判跳（不产审批/委托）
         tid = c.post(f"/api/projects/{pid}/tasks",
                      json={"objective": "人手任务", "task_type": "generic"}).json()["task_id"]
         app.state.mission_poll_sweep()
         time.sleep(0.3)
-        assert not any(t["objective"] == "轮询派生任务"
-                       for t in c.get(f"/api/projects/{pid}/tasks").json())
-        # 变体 B：队列清空 → sweep 触发派生，发布 1 任务
+        assert c.get(f"/api/projects/{pid}/approvals").json() == []
+        # 变体 B：队列清空 → sweep 触发派生 tick → L1 落 1 张 delegate_window 审批
         assert c.delete(f"/api/tasks/{tid}").status_code == 200
         app.state.mission_poll_sweep()
         derive = _wait_derive_result(c, pid, "published:")
-        assert derive["last_result"] == "published:1" and derive["last_at"]
-        tasks = c.get(f"/api/projects/{pid}/tasks").json()
-        assert any(t["objective"] == "轮询派生任务" for t in tasks)
+        assert derive["last_result"] == "published:0" and derive["last_at"]
+        pending = [a for a in c.get(f"/api/projects/{pid}/approvals").json()
+                   if a["status"] == "pending"]
+        assert len(pending) == 1
+        assert pending[0]["action"]["op"] == "delegate_window"
+        assert pending[0]["action"]["objective"] == "轮询派生任务"
+        # 委托尚未写入（批准后才开窗写委托）
+        assert not any(t["objective"] == "轮询派生任务"
+                       for t in c.get(f"/api/projects/{pid}/tasks").json())
         # 事件留痕：mission.derive（判定）+ mission.derive.result（结果）
         bb = c.app.state.projects[pid].bb
         kinds = [e["kind"] for e in bb.recent_events(pid)]
         assert "mission.derive" in kinds and "mission.derive.result" in kinds
+
+
+def test_mission_poll_sweep_derives_from_goal(tmp_path):
+    """goal 统一（2026-09-22）：判据第一优先源=阶段目标——无 mission 存量时
+    PUT /goal 判据即可驱动 L1 自动派生，mission.derive 事件 criteria_source=goal。
+    会话中心化：派生 tick 落 delegate_window 审批（published:0），不直发委托。"""
+    from test_orchestrator import ScriptedLLM as S
+    app = create_app(
+        workspace_root=str(tmp_path / "ws"), tools_root=None,
+        executor_llm=S([{"text": "ok"}]),
+        planner_llm=S([
+            {"tool_use": [S.tool_call("p1", "delegate", {
+                "objective": "goal 派生任务", "task_type": "generic",
+                "role": ""})]},
+            {"tool_use": [S.tool_call("d1", "done", {})]},
+        ]),
+        providers_config=str(tmp_path / "p.json"))
+    app.state.judgments_dir = tmp_path / "cfg"
+    with TestClient(app) as c:
+        pid = c.post("/api/projects", json={"name": "goal 派生", "track": "ctf"}).json()["id"]
+        assert c.patch(f"/api/projects/{pid}/config", json={"config": {
+            "autonomy": {"level": "L1", "auto_derive": True}}}).status_code == 200
+        assert c.put(f"/api/projects/{pid}/goal",
+                     json={"text": "打穿靶场", "criteria": ["□ goal 判据"]}).status_code == 200
+        app.state.mission_poll_sweep()
+        derive = _wait_derive_result(c, pid, "published:")
+        assert derive["last_result"] == "published:0"
+        pending = [a for a in c.get(f"/api/projects/{pid}/approvals").json()
+                   if a["status"] == "pending"]
+        assert len(pending) == 1 and pending[0]["action"]["op"] == "delegate_window"
+        assert pending[0]["action"]["objective"] == "goal 派生任务"
+        bb = c.app.state.projects[pid].bb
+        assert any(e["kind"] == "mission.derive"
+                   and e["payload"].get("criteria_source") == "goal"
+                   for e in bb.recent_events(pid))
 
 
 def test_mission_derive_error_visible_and_throttled(tmp_path):
@@ -3628,6 +4017,40 @@ def test_task_and_note_with_attachments(client):
                        json={"text": "", "attachment_ids": []}).status_code == 422
 
 
+def test_worker_chat_notice_carries_attachment_path(client, monkeypatch):
+    """M3 附件 E2E 末环（网络不可用时 hermetic 验证）：idle 窗收到带附件 human_note
+    → run_chat 注入的消息含 📎 + 工作区相对路径（Agent 可 run_cmd 直接读取）。"""
+    from test_orchestrator import ScriptedLLM
+
+    pid = _make_project(client)
+    att = client.post(f"/api/projects/{pid}/attachments",
+                      files={"file": ("notes.txt", b"M3ATT_READABLE_42\n",
+                                      "text/plain")}).json()
+    sid = client.app.state.projects[pid].bb.register_session(
+        pid, "附件会话", role="_generalist")["id"]
+
+    seen: list = []
+
+    class RecLLM(ScriptedLLM):
+        def chat(self, messages, *, system=None, tools=None, max_tokens=4096,
+                 temperature=None, on_thinking=None, on_text=None, should_cancel=None):
+            seen.append(json.loads(json.dumps(messages)))
+            return self._parse({"content": [{"type": "text", "text": "已收到附件。"}],
+                                "stop_reason": "end_turn",
+                                "usage": {"input_tokens": 1, "output_tokens": 1}})
+
+    rec = RecLLM([])
+    monkeypatch.setattr(client.app.state.llm_store, "build",
+                        lambda name=None, model=None: rec)
+    assert client.post(f"/api/sessions/{sid}/note",
+                       json={"text": "请读附件", "attachment_ids": [att["id"]]}
+                       ).status_code == 201
+    client.post(f"/api/agents/{sid}/work")
+    _wait_no_running(client, pid)
+    blob = json.dumps(seen, ensure_ascii=False)
+    assert "📎" in blob and att["path"] in blob and "notes.txt" in blob
+
+
 # ---------- H3：escalation 审批执行（deny-driven 一次性升级，API 层） ----------
 
 def test_decide_escalation_executes_once_and_inboxes(client):
@@ -3683,6 +4106,86 @@ def test_decide_escalation_invalid_action_marks_exec_failed(client):
     assert row["status"] == "approved"  # 执行失败不回滚批准
 
 
+# ---------- M5 D2：authorization 审批（纯回流）与 rejected 回流 / boundary 出口 ----------
+
+def test_decide_authorization_approved_inboxes_result(client):
+    """批准 authorization 单 → 纯回流处理器：无平台动作，仅向提交会话收件箱投
+    authorization_result（payload 带 kind/scope_request[:300]/approved）+ 事件流。"""
+    pid = _make_project(client, track="pentest")
+    proj = client.app.state.projects[pid]
+    appr = proj.bb.request_approval(
+        pid, {"op": "authorization", "kind": "scope_expand",
+              "scope_request": "追加 target.com 全部子域进授权范围",
+              "justification": "主域打不进去，子域有旁路",
+              "evidence_finding_ids": [], "task_id": None,
+              "session_id": "sess-auth"},
+        risk="high", requested_by="sess-auth", session_id="sess-auth")
+    r = client.post(f"/api/approvals/{appr['id']}/decide",
+                    json={"decision": "approved"})
+    assert r.status_code == 200
+    assert r.json()["status"] == "approved"  # 处理器 task_status 键名坑不复现
+    assert r.json()["executed"] is True
+    inbox = proj.bb.inbox_list(pid, "sess-auth")
+    hit = [m for m in inbox
+           if m["kind"] == "authorization_result" and m["ref_id"] == appr["id"]]
+    assert len(hit) == 1
+    p = hit[0]["payload"]
+    assert p["approved"] is True and p["kind"] == "scope_expand"
+    assert "target.com" in p["scope_request"]
+    assert any(e["kind"] == "message.inbox"
+               and e["payload"].get("kind") == "authorization_result"
+               for e in proj.bb.recent_events(pid))
+
+
+def test_decide_rejected_inboxes_approval_rejected(client):
+    """拒绝 escalation/authorization 单 → approval_rejected 回流提交会话
+    （此前 rejected 无回流=Agent 空等）；其余 op 拒绝不回流。"""
+    pid = _make_project(client, track="pentest")
+    proj = client.app.state.projects[pid]
+    appr1 = proj.bb.request_approval(
+        pid, {"op": "escalation", "kind": "net_real", "cmd": "wget http://x",
+              "runtime": "host", "reason": "x", "session_id": "sess-r1"},
+        risk="high", requested_by="sess-r1", session_id="sess-r1")
+    appr2 = proj.bb.request_approval(
+        pid, {"op": "authorization", "kind": "impact_escalate",
+              "scope_request": "证明到接管会话", "justification": "y",
+              "session_id": "sess-r2"},
+        risk="high", requested_by="sess-r2", session_id="sess-r2")
+    # 其余 op（无 session 语义的杂项）拒绝不回流
+    appr3 = proj.bb.request_approval(
+        pid, {"op": "misc_custom", "session_id": "sess-r3"}, risk="low",
+        requested_by="sess-r3", session_id="sess-r3")
+    for appr in (appr1, appr2, appr3):
+        r = client.post(f"/api/approvals/{appr['id']}/decide",
+                        json={"decision": "rejected"})
+        assert r.status_code == 200
+    k1 = [m["kind"] for m in proj.bb.inbox_list(pid, "sess-r1")]
+    k2 = [m["kind"] for m in proj.bb.inbox_list(pid, "sess-r2")]
+    assert "approval_rejected" in k1 and "approval_rejected" in k2
+    assert k1.count("approval_rejected") == 1 and k2.count("approval_rejected") == 1
+    assert proj.bb.inbox_list(pid, "sess-r3") == []
+    p2 = [m for m in proj.bb.inbox_list(pid, "sess-r2")
+          if m["kind"] == "approval_rejected"][0]["payload"]
+    assert p2["op"] == "authorization" and p2["kind"] == "impact_escalate"
+
+
+def test_approvals_endpoint_carries_boundary(client):
+    """approvals 出口每条附 server 拼好的 boundary 全文（与编排器 mission 段同源）
+    ——人类在审批卡对照当前边界审授权/升级申请。"""
+    pid = _make_project(client, track="pentest")
+    proj = client.app.state.projects[pid]
+    proj.bb.request_approval(
+        pid, {"op": "authorization", "kind": "scope_expand",
+              "scope_request": "x", "justification": "y", "session_id": "sess-b"},
+        risk="high", requested_by="sess-b", session_id="sess-b")
+    items = client.get(f"/api/projects/{pid}/approvals").json()
+    assert items and all(it.get("boundary") for it in items)
+    from core.orchestrator.orchestrator import mission_boundary_lines
+    expected = "；".join(mission_boundary_lines(
+        "pentest", proj.bb.get_project(pid)["config"]))
+    assert items[0]["boundary"] == expected
+
+
 # ---------- 蓝图（R4 逆向开发管线） ----------
 
 def test_blueprints_crud_and_status_flow(client):
@@ -3732,6 +4235,60 @@ def test_blueprints_crud_and_status_flow(client):
     assert client.get(f"/api/projects/{pid2}/blueprints/{bid}").status_code == 404
 
 
+# ---------- K7 路由零命中（route-injection-hardening，2026-09-24：真使用口径） ----------
+
+def test_doctor_k7_route_zero_hit_real_usage(tmp_path):
+    """K7：只报「曾注入但手册从未被 kb_open 打开」的测试点——两个点注入、只打开
+    一个的手册 → 只报另一个；无注入历史不报。"""
+    from core.blackboard import Blackboard
+    packs = tmp_path / "packs"
+    kb = packs / "kb"
+    (kb / "web" / "poc").mkdir(parents=True)
+    (kb / "web" / "poc" / "a.md").write_text("a", encoding="utf-8")
+    (kb / "web" / "poc" / "b.md").write_text("b", encoding="utf-8")
+    # 最小 track/pack 描述文件（建项校验扫这两处）
+    (packs / "tracks" / "ctf").mkdir(parents=True)
+    (packs / "tracks" / "ctf" / "track.yaml").write_text(
+        "kind: track\nname: ctf\nlabel: CTF\n", encoding="utf-8")
+    (packs / "capabilities" / "web").mkdir(parents=True)
+    (packs / "capabilities" / "web" / "pack.yaml").write_text(
+        "kind: capability\nname: web\nlabel: Web\n", encoding="utf-8")
+    (kb / "route_index.yaml").write_text(
+        "entries:\n"
+        "  - point: 测试点甲\n    kb: web/poc/a.md\n"
+        "  - point: 测试点乙\n    kb: web/poc/b.md\n", encoding="utf-8")
+    ws = tmp_path / "workspaces"
+    app = create_app(workspace_root=str(ws), packs_root=str(packs), tools_root=None,
+                     executor_llm=None, planner_llm=None,
+                     providers_config=str(tmp_path / "providers.json"))
+    with TestClient(app) as c:
+        r = c.post("/api/projects", json={"name": "K7 项目", "track": "ctf",
+                                          "capabilities": ["web"]})
+        assert r.status_code == 201, r.text
+        pid = r.json()["id"]
+        # 无注入历史 → 不报
+        issues = c.get("/api/packs/doctor").json()["issues"]
+        assert not any(i["code"] == "route-index-zero-hit" for i in issues)
+        # 测试夹具直挂黑板写事件：一次路由注入两个测试点（route_index=2）
+        proj_dir = next(d for d in ws.iterdir()
+                        if (d / "project.json").is_file()
+                        and json.loads((d / "project.json").read_text(
+                            encoding="utf-8"))["id"] == pid)
+        db = proj_dir / "blackboard.db"
+        bb = Blackboard(str(db))
+        try:
+            bb.append_event(pid, "skill.routed", {
+                "route_index": 2, "route_points": ["测试点甲", "测试点乙"]})
+            # 只 kb_open 甲的手册
+            bb.append_event(pid, "kb.open", {"module": "web/poc/a.md"})
+        finally:
+            bb.close()
+        issues = c.get("/api/packs/doctor").json()["issues"]
+        zh = [i for i in issues if i["code"] == "route-index-zero-hit"]
+        assert len(zh) == 1 and "测试点乙" in zh[0]["message"]
+        assert "测试点甲" not in zh[0]["message"]
+
+
 def test_blueprints_events_streamed(client):
     """蓝图写路径落事件流（blueprint.created/status_changed），前端 tick 刷新可见。"""
     pid = _make_project(client, track="research")
@@ -3751,7 +4308,8 @@ def _pentest_project(c, name: str) -> str:
 
 
 def test_task_target_session_publish_and_claim_gate(client):
-    """v18 门控：指派任务只有目标窗能认领（claim_next WHERE 过滤 + claim 硬拒绝）。"""
+    """会话中心化门控：窗内委托只有目标窗能起跑（session_queue/take_session_next
+    队列过滤 + claim 硬拒绝）；未指派委托不进任何窗的自动队列，只能显式 claim。"""
     from core.blackboard import ClaimError, TaskQueue
 
     pid = _pentest_project(client, "指派门控")
@@ -3761,64 +4319,80 @@ def test_task_target_session_publish_and_claim_gate(client):
     tq = TaskQueue(bb)
 
     tid = tq.publish(pid, "指派任务", target_session=sa)
-    # task.published 事件带 target_session（前端看板 chip 数据源）
+    # task.published 事件带 target_session（前端会话看板 chip 数据源）
     pub = [e for e in bb.recent_events(pid)
            if e["kind"] == "task.published" and e["payload"]["task_id"] == tid]
     assert pub and pub[-1]["payload"]["target_session"] == sa
-    # 乙窗认领不到指派任务；甲窗能
-    assert tq.claim_next(pid, sb) is None
-    assert tq.claim_next(pid, sa) == tid
-    # 乙窗绕过 claim_next 直接 claim → 硬门控拒绝
+    # 乙窗队列里没有；甲窗队首起跑
+    assert tq.take_session_next(pid, sb) is None
+    assert tq.take_session_next(pid, sa) == tid
+    # 乙窗绕过队列直接 claim 第二件指派 → 硬门控拒绝
     tid2 = tq.publish(pid, "指派任务二", target_session=sa)
     with pytest.raises(ClaimError):
         tq.claim(tid2, sb)
-    # 公共池任务不受影响：两窗都能认领
-    t3 = tq.publish(pid, "公共池任务")
-    assert tq.claim_next(pid, sb) == t3
+    # tid2 仍在甲窗队列（乙窗 claim 失败不改状态）：甲窗正常起跑
+    assert tq.take_session_next(pid, sa) == tid2
+    # 未指派委托：不进任何窗的自动队列（take 恒空）
+    t3 = tq.publish(pid, "未指派任务")
+    assert tq.take_session_next(pid, sb) is None
+    assert tq.take_session_next(pid, sa) is None
+    # 显式 claim（run_task(task_id) 口径，target_session='' 不拦）
+    tq.claim(t3, sb)
+    assert tq.get_task(t3)["claimed_by"] == sb
 
 
-def test_task_target_session_deprecated_ignored(client):
-    """v0.71 任务即窗口：API target_session 字段退役（保留兼容旧前端但忽略）——
-    传任意值都不落指派；v0.72 发布一律建专属待命窗并双向绑定，绑定窗由
-    发布路径返回的 session_id 决定，与传入值无关。"""
-    pid = _pentest_project(client, "指派字段弃用")
+def test_task_target_session_invalid_window_falls_back(client):
+    """会话中心化：target_session 是正式字段（旧「弃用忽略」语义翻转）——指向
+    不存在/已关窗时委托退回未指派（session_id=None、target_session=''），
+    交编排器重新委派；绝不偷偷开窗或指给别的窗。"""
+    pid = _pentest_project(client, "指派失效退回")
     r = client.post(f"/api/projects/{pid}/tasks",
                     json={"objective": "x", "task_type": "recon",
                           "target_session": "sess-nope"})
-    assert r.status_code == 201
+    assert r.status_code == 201 and r.json()["session_id"] is None
     rows = client.get(f"/api/projects/{pid}/tasks").json()
-    assert len(rows) == 1 and rows[0]["target_session"] == r.json()["session_id"]
+    assert len(rows) == 1 and rows[0]["target_session"] == ""
+    assert client.get(f"/api/projects/{pid}/sessions").json() == []
 
 
 def test_task_target_session_arms_idle_window(tmp_path):
-    """v0.71 发布即建窗：L2 发布同步建专属待命窗（响应带 session_id、meta
-    bound_task_id 双向绑定），调度器武装起跑，绑定窗只认领自己的任务并跑完。"""
-    app = _chain_app(tmp_path, [], _exec_finish_script(1))
+    """会话中心化：人给一扇已存在的未武装 idle 窗发委托（target_session）→
+    当场武装（worker_armed）并起跑，窗只跑自己的委托并完成，不另开新窗、
+    不产生 bound_task_id（旧「任务专属窗」绑定语义退役）。"""
+    app = _chain_app(tmp_path, [], _exec_delegation_script(1))
     with TestClient(app) as c:
-        pid = _l2_project(c, "L2发布即建窗")
+        pid = _l2_project(c, "L2指窗武装")
+        sid = c.post(f"/api/projects/{pid}/agents",
+                     json={"role": "recon"}).json()["id"]
+        row = c.app.state.projects[pid].bb.get_session(sid)
+        meta = row.get("meta")
+        meta = json.loads(meta) if isinstance(meta, str) else (meta or {})
+        assert meta.get("worker_armed") is False and "bound_task_id" not in meta
+
         r = c.post(f"/api/projects/{pid}/tasks",
-                   json={"objective": "发布即建窗的任务", "task_type": "recon"})
-        assert r.status_code == 201
-        body = r.json()
-        sid = body.get("session_id")
-        assert sid and body["deduplicated"] is False
+                   json={"objective": "指窗武装的委托", "task_type": "recon",
+                         "target_session": sid})
+        assert r.status_code == 201 and r.json()["session_id"] == sid
+        _wait_no_running(c, pid)
+        task = next(t for t in c.get(f"/api/projects/{pid}/tasks").json()
+                    if t["id"] == r.json()["task_id"])
+        assert task["status"] == "done" and task["claimed_by"] == sid  # 被指窗自己跑完
         sess = c.app.state.projects[pid].bb.get_session(sid)
         meta = sess.get("meta")
         meta = json.loads(meta) if isinstance(meta, str) else (meta or {})
-        assert meta.get("bound_task_id") == body["task_id"]
-        _wait_no_running(c, pid)
-        task = next(t for t in c.get(f"/api/projects/{pid}/tasks").json()
-                    if t["id"] == body["task_id"])
-        assert task["status"] == "done" and task["claimed_by"] == sid  # 专属窗自己跑完
+        assert meta.get("worker_armed") is True and "bound_task_id" not in meta
+        assert sess["status"] == "idle"  # 委托收尾不退窗
+        from core.autonomy import count_active_sessions
+        assert count_active_sessions(c.app.state.projects[pid].bb, pid) == 1
 
 
-def test_close_session_releases_task_and_rebinds(client):
-    """v18 关窗退绑 + v0.72 调度器立即重绑：关待执行窗清 target_session
-    （事件 reason=session-closed），绑定段马上给 open 任务补建新待命窗（L1），
-    任务不再悬空饿死。"""
+def test_close_session_unassigns_without_rebind(client):
+    """会话中心化：关窗 → 该窗 open 委托清 target_session 退回未指派
+    （task.updated reason=session-closed），但不再自动补绑新窗——交编排器
+    重新委派（人也可 spawn-window 显式补）。"""
     from core.blackboard import TaskQueue
 
-    pid = _pentest_project(client, "关窗退池")
+    pid = _pentest_project(client, "关窗退指派")
     bb = client.app.state.projects[pid].bb
     sid = bb.register_session(pid, "拆迁窗", role="_generalist")["id"]
     tq = TaskQueue(bb)
@@ -3826,11 +4400,56 @@ def test_close_session_releases_task_and_rebinds(client):
 
     assert client.post(f"/api/sessions/{sid}/close").status_code == 200
     task = tq.get_task(tid)
-    assert task["status"] == "open" and task["target_session"] != sid  # 已重绑新待命窗
+    assert task["status"] == "open" and task["target_session"] == ""
     upd = [e for e in bb.recent_events(pid)
            if e["kind"] == "task.updated" and e["payload"].get("task_id") == tid]
     assert upd and upd[-1]["payload"]["changes"] == {"target_session": sid}
     assert upd[-1]["payload"]["reason"] == "session-closed"
+    # 未自动补窗：除刚关掉的窗外无新会话、无审批单
+    sess_rows = client.get(f"/api/projects/{pid}/sessions").json()
+    assert [s["id"] for s in sess_rows] == [sid]
+    assert sess_rows[0]["status"] == "closed"
+    assert client.get(f"/api/projects/{pid}/approvals").json() == []
+
+
+def test_switch_session_role_updates_row_and_live_agent(client):
+    """会话中心化 §4.4：POST /sessions/{sid}/role 中途换人——会话行身份更新 +
+    在内存会话热换装（下个步边界重建 prompt/工具白名单），对话历史与黑板不动，
+    新身份跨委托保留。"""
+    pid = _pentest_project(client, "会话换人")
+    bb = client.app.state.projects[pid].bb
+    r = client.post(f"/api/projects/{pid}/agents",
+                    json={"role": "recon", "armed": False})
+    sid = r.json()["id"]
+
+    rr = client.post(f"/api/sessions/{sid}/role", json={"role": "external-entry"})
+    assert rr.status_code == 200 and rr.json()["role"] == "external-entry"
+    # 会话列表（侧栏数据源）同步新身份
+    rows = client.get(f"/api/projects/{pid}/sessions").json()
+    assert next(s for s in rows if s["id"] == sid)["role"] == "external-entry"
+    # 在内存会话已热换装
+    assert client.app.state.agents[sid].role_name == "external-entry"
+    evs = [e for e in bb.recent_events(pid)
+           if e["kind"] == "session.persona_switched"]
+    assert len(evs) == 1
+    p = evs[-1]["payload"]
+    assert p["session_id"] == sid and p["from"] == "recon"
+    assert p["to"] == "external-entry" and p["reason"] == "manual-switch"
+    assert not p["task_id"]  # idle 窗：无在跑委托
+
+
+def test_switch_session_role_rejects_unknown_and_closed(client):
+    """换人校验：专家不在池 → 422；closed 窗 → 409；空 role → 422。"""
+    pid = _pentest_project(client, "换人校验")
+    sid = client.post(f"/api/projects/{pid}/agents",
+                      json={"role": "recon", "armed": False}).json()["id"]
+    assert client.post(f"/api/sessions/{sid}/role",
+                       json={"role": "ghost-role"}).status_code == 422
+    assert client.post(f"/api/sessions/{sid}/role",
+                       json={"role": "   "}).status_code == 422
+    assert client.post(f"/api/sessions/{sid}/close").status_code == 200
+    assert client.post(f"/api/sessions/{sid}/role",
+                       json={"role": "external-entry"}).status_code == 409
 
 
 def test_reopen_clears_target_session(client):
@@ -3854,30 +4473,38 @@ def test_reopen_clears_target_session(client):
     assert "unassigned_from" not in ev["payload"]
 
 
-def test_auto_spawn_ignores_assigned_tasks(tmp_path):
-    """v0.71 绑定模型：手动注册的既有窗（无绑定）不接任务——公共池为空，
-    各任务只由自己的专属窗执行，手动窗保持闲置。"""
-    app = _chain_app(tmp_path, [], _exec_finish_script(1))
+def test_untargeted_task_not_auto_claimed(tmp_path):
+    """会话中心化：未指派委托（target_session=''）不进任何既有窗的自动队列——
+    手动注册的窗保持闲置，委托保持 open；人显式把委托指给该窗后才起跑完成。"""
+    app = _chain_app(tmp_path, [], _exec_delegation_script(1))
     with TestClient(app) as c:
-        pid = _l2_project(c, "L2手动窗不抢活")
+        pid = _l2_project(c, "L2不抢未指派")
         bb = c.app.state.projects[pid].bb
         sm = bb.register_session(pid, "手动窗", role="_generalist")["id"]
         r = c.post(f"/api/projects/{pid}/tasks",
-                   json={"objective": "只归专属窗的任务", "task_type": "recon"})
-        assert r.status_code == 201
+                   json={"objective": "未指派的委托", "task_type": "recon"})
+        assert r.status_code == 201 and r.json()["session_id"] is None
         tid = r.json()["task_id"]
         _wait_no_running(c, pid)
         task = next(t for t in c.get(f"/api/projects/{pid}/tasks").json()
                     if t["id"] == tid)
-        assert task["status"] == "done" and task["claimed_by"] != sm
-        # 专属窗跑完即任务终态（窗保留待命）；手动窗从未动过任务
-        assert task["claimed_by"] == r.json()["session_id"]
+        assert task["status"] == "open" and not task["claimed_by"]
+
+        # 人显式指给既有窗 → 武装起跑
+        r = c.post(f"/api/projects/{pid}/tasks",
+                   json={"objective": "指给手动窗的委托", "task_type": "recon",
+                         "target_session": sm})
+        assert r.status_code == 201 and r.json()["session_id"] == sm
+        _wait_no_running(c, pid)
+        task = next(t for t in c.get(f"/api/projects/{pid}/tasks").json()
+                    if t["id"] == r.json()["task_id"])
+        assert task["status"] == "done" and task["claimed_by"] == sm
 
 
 def test_dedup_ignores_target_session(tmp_path):
     """dedup_fp 不含 target_session（v14「role 不入指纹」同案：投递偏好非任务本体）。
     force 指派乙后 worker（剧本式 executor）认领跑完，收尾无悬置 job。"""
-    app = _chain_app(tmp_path, [], _exec_finish_script(1))
+    app = _chain_app(tmp_path, [], _exec_delegation_script(1))
     with TestClient(app) as c:
         pid = _pentest_project(c, "指派去重")
         bb = c.app.state.projects[pid].bb
@@ -4101,3 +4728,372 @@ def test_goal_sections_reach_live_prompts(tmp_path):
                                    json={}).json()["job_id"])
         assert tjob["status"] == "done"
         assert "拿下 admin 面板" in planner.calls[1]["system"]
+
+
+def test_task_cancel_endpoint(client):
+    """M4 C1 人工取消端点：open → failed（blocked_reason=cancelled），返回
+    interrupted 打断标记；已终态 409、任务不存在 404；task.cancelled 事件落审计。"""
+    pid = _make_project(client)
+    tid = client.post(f"/api/projects/{pid}/tasks",
+                      json={"objective": "扫 1.1.1.1", "noise_budget": "low",
+                            "conflict_keys": ["ip:1.1.1.1"]}).json()["task_id"]
+    r = client.post(f"/api/tasks/{tid}/cancel", json={"reason": "方向变更"})
+    assert r.status_code == 200
+    assert r.json() == {"task_id": tid, "status": "failed", "interrupted": False}
+    row = client.get(f"/api/projects/{pid}/tasks").json()[0]
+    assert row["status"] == "failed" and row["blocked_reason"] == "cancelled"
+    assert any(e["kind"] == "task.cancelled"
+               for e in client.get(f"/api/projects/{pid}/events").json())
+    # 已终态不可再取消 → 409；任务不存在 → 404
+    assert client.post(f"/api/tasks/{tid}/cancel",
+                       json={"reason": "x"}).status_code == 409
+    assert client.post("/api/tasks/task-none/cancel",
+                       json={"reason": "x"}).status_code == 404
+
+
+def test_cancel_requeue_approval_handlers(client):
+    """M4 审批链路：L1 审批卡批准后由 API 层处理器执行——cancel 转 failed
+    （cancelled）、requeue 回 open（调度器重开窗）；任务等待期已被人工处理
+    （状态不符）→ 视为已处理跳过，批准不报错。"""
+    pid = _make_project(client)
+    proj = client.app.state.projects[pid]
+    tid = client.post(f"/api/projects/{pid}/tasks",
+                      json={"objective": "扫 2.2.2.2", "noise_budget": "low",
+                            "conflict_keys": ["ip:2.2.2.2"]}).json()["task_id"]
+    # cancel 审批批准 → failed（cancelled）
+    appr = proj.bb.request_approval(
+        pid, {"op": "cancel_task", "task_id": tid, "reason": "编排改向"},
+        risk="low", requested_by="orchestrator")
+    r = client.post(f"/api/approvals/{appr['id']}/decide",
+                    json={"decision": "approved"})
+    assert r.status_code == 200 and r.json()["status"] == "approved"
+    assert r.json()["task_status"] == "failed"  # 处理器结果回填（不覆写 status）
+    row = client.get(f"/api/projects/{pid}/tasks").json()[0]
+    assert row["status"] == "failed" and row["blocked_reason"] == "cancelled"
+    # requeue 审批批准 → open
+    appr2 = proj.bb.request_approval(
+        pid, {"op": "requeue_task", "task_id": tid},
+        risk="low", requested_by="orchestrator")
+    client.post(f"/api/approvals/{appr2['id']}/decide",
+                json={"decision": "approved"})
+    assert client.get(f"/api/projects/{pid}/tasks").json()[0]["status"] == "open"
+    # 状态不符（open 非 failed）→ 处理器视为已处理跳过，批准仍成功
+    appr3 = proj.bb.request_approval(
+        pid, {"op": "requeue_task", "task_id": tid},
+        risk="low", requested_by="orchestrator")
+    r3 = client.post(f"/api/approvals/{appr3['id']}/decide",
+                     json={"decision": "approved"})
+    assert r3.status_code == 200
+    assert client.get(f"/api/projects/{pid}/tasks").json()[0]["status"] == "open"
+
+
+# ---------------- 网关策略快照（gateway-config-view M1）----------------
+
+def test_gateway_config_snapshot(client):
+    """策略快照端点：runtime/threat/net 直出 policy 常量；pathguard 语义摘要
+    条数固定（防遗漏）；rate_rules 与 rateguard.RATE_RULES 同源。"""
+    r = client.get("/api/gateway/config")
+    assert r.status_code == 200
+    cfg = r.json()
+    # runtime_levels：四通道与等级
+    assert [x["name"] for x in cfg["runtime_levels"]] == ["host", "wsl", "docker", "sandbox"]
+    assert [x["level"] for x in cfg["runtime_levels"]] == [0, 1, 2, 3]
+    # threat 矩阵：unknown 按恶意（宁严勿松），malware_live 仅 sandbox
+    by_tc = {x["threat_class"]: x for x in cfg["threat_matrix"]}
+    assert by_tc["unknown"]["allowed"] == by_tc["malware_live"]["allowed"] == ["sandbox"]
+    assert by_tc["trusted"]["allowed"] == ["docker", "host", "sandbox", "wsl"]
+    assert by_tc["untrusted"]["allowed"] == ["docker", "sandbox"]
+    # net：real 永不默认
+    assert cfg["net_modes"]["modes"] == ["none", "fakenet", "real"]
+    assert cfg["net_modes"]["default"] == "none"
+    # pathguard 语义摘要 7 条（加条目须同步更新断言与页面）
+    assert len(cfg["pathguard_rules"]) == 7
+    # rateguard 规则表同源
+    assert {x["tool"] for x in cfg["rate_rules"]} == {"nmap", "masscan", "ffuf", "hydra"}
+    nmap = next(x for x in cfg["rate_rules"] if x["tool"] == "nmap")
+    assert nmap["hint"] and "-T3 --max-rate 200" in nmap["hint"]
+    # 执行参数
+    assert cfg["exec_params"]["default_timeout"] == 120
+    assert "占位" in cfg["exec_params"]["sandbox_image"]
+
+
+def test_agent_tools_catalog(client):
+    """GET /api/agent-tools：直出 AGENT_TOOLS 静态全集+分组（agent-tools-view）。"""
+    from core.agent.tools import AGENT_TOOLS
+    r = client.get("/api/agent-tools")
+    assert r.status_code == 200
+    data = r.json()
+    tools = data["tools"]
+    # 条数/字段与总表一致
+    assert len(tools) == len(AGENT_TOOLS)
+    assert {t["name"] for t in tools} == {t["name"] for t in AGENT_TOOLS}
+    for t in tools:
+        assert t["description"] and t["group"]
+        assert t["input_schema"]["type"] == "object"
+        assert "properties" in t["input_schema"]
+    # 分组集合与顺序
+    assert data["groups"] == ["执行", "文件", "黑板", "知识", "浏览器", "协作", "计划", "控制"]
+    # 无工具落「其他」（防新工具漏配分组规则）
+    assert all(t["group"] != "其他" for t in tools)
+    # bb_query：what 参数 enum 含六查询面
+    bbq = next(t for t in tools if t["name"] == "bb_query")
+    assert bbq["input_schema"]["properties"]["what"]["enum"] == [
+        "findings", "assets", "events", "tasks", "func", "blueprint"]
+
+
+def test_agent_tool_group_rules():
+    """分组函数关键落点（集合+前缀两类规则）。"""
+    from core.agent.tools import agent_tool_group
+    cases = {
+        "run_cmd": "执行",
+        "read_file": "文件", "search_files": "文件",
+        "bb_query": "黑板", "bb_notify": "黑板",
+        "kb_search": "知识", "decompile": "知识", "skill_open": "知识",
+        "browser_click": "浏览器",
+        "publish_task": "协作", "request_authorization": "协作",
+        "task_plan": "计划", "task_reconcile": "计划",
+        "complete_task": "控制", "finish": "控制", "request_steps": "控制",
+    }
+    for name, group in cases.items():
+        assert agent_tool_group(name) == group, name
+
+
+def test_gateway_probe_replaces_inventory(client, monkeypatch):
+    """POST /api/gateway/probe：假 detector 替换 app.state.inventory，
+    返回结构与 GET /api/projects/{pid}.capability 完全一致。"""
+    from core.runtime.detector import CapabilityInventory, ProbeResult
+    fake = CapabilityInventory(
+        docker=ProbeResult("docker", True, "27.0.3"),
+        wsl=ProbeResult("wsl", False, "no wsl"),
+        tools=[ProbeResult("ghidra", True, "PATH 可达")])
+    seen = {}
+
+    class FakeDetector:
+        def probe(self, tools_root=None):
+            seen["tools_root"] = tools_root
+            return fake
+
+    monkeypatch.setattr("core.api.app.HostDetector", FakeDetector)
+    r = client.post("/api/gateway/probe")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["docker"]["available"] is True and body["docker"]["detail"] == "27.0.3"
+    assert body["wsl"]["available"] is False
+    assert body["tools"][0]["name"] == "ghidra"
+    # app.state.inventory 已替换（后续 GET /api/projects/{pid}.capability 拿到新清单）
+    app = client.app
+    assert app.state.inventory is fake
+    pid = _make_project(client)
+    assert client.get(f"/api/projects/{pid}").json()["capability"] == body
+    # tools_root 走 app.state（上移后 probe 刷新复用同一来源）
+    assert seen["tools_root"] is None  # client fixture tools_root=None
+
+
+# ---------------- 网络空间测绘（cyberspace-mapping M1+M2，2026-09-23）----------------
+
+@pytest.fixture()
+def fofa_cfg(tmp_path, monkeypatch):
+    """FOFA 配置路径重定向到临时文件——真实 config/fofa.json 含 key，测试绝不触达。"""
+    from core.api import app as app_mod
+    p = tmp_path / "fofa.json"
+    monkeypatch.setattr(app_mod, "FOFA_CONFIG_PATH", p)
+    return p
+
+
+class _FakeFofaClient:
+    """镜像 FofaClient 接口的最小假客户端（from_config + search/info_my）。"""
+
+    def __init__(self, base_url, key, timeout=20.0, transport=None):
+        self.key = key
+        self.base_url = base_url
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.key)
+
+    @classmethod
+    def from_config(cls, path, timeout=20.0, transport=None):
+        cfg = fofa.load_fofa_config(path)
+        return cls(cfg.get("base_url") or fofa.DEFAULT_BASE_URL, cfg.get("key") or "")
+
+    def search(self, query, size=100, page=1):
+        return {"total": 2, "size": size, "page": page, "rows": [
+            {"ip": "10.0.0.1", "port": "443", "protocol": "tcp", "host": "",
+             "domain": "aaa.example.com", "title": "A", "products": ["Nginx"]},
+            {"ip": "10.0.0.2", "port": "80", "protocol": "tcp", "host": "10.0.0.2:80",
+             "domain": "", "title": "B", "products": []},
+        ]}
+
+    def info_my(self):
+        if not self.key:
+            raise fofa.ConfigError("FOFA 未配置 key")
+        return {"raw": {}, "remain": 999, "expire": "2026-12-31"}
+
+
+def test_fofa_config_endpoints(client, fofa_cfg):
+    """GET 缺省 → PUT 设 key → GET 脱敏回显 → key 空串不覆盖（防回显误写）。"""
+    from core import fofa
+    r = client.get("/api/fofa/config")
+    assert r.status_code == 200
+    assert r.json() == {"base_url": fofa.DEFAULT_BASE_URL, "key": "", "key_set": False}
+    r = client.put("/api/fofa/config", json={"key": "abcd1234efgh5678"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["key_set"] is True
+    assert body["key"].startswith("abcd") and body["key"].endswith("5678")
+    assert "1234efgh" not in body["key"]  # 中段不回显
+    # key 传空串 = 不修改；base_url 可改
+    r = client.put("/api/fofa/config", json={"key": "", "base_url": "https://relay.example"})
+    body = r.json()
+    assert body["key_set"] is True and body["base_url"] == "https://relay.example"
+    assert fofa.load_fofa_config(fofa_cfg)["key"] == "abcd1234efgh5678"
+
+
+def test_fofa_search_smoke_and_existing(client, fofa_cfg, monkeypatch):
+    """未配置 400 → 配好假客户端查询 → existing 三锚点标注（domain 已登记灰显）。"""
+    def _no_dns(*a, **k):
+        raise OSError("dns off (hermetic)")
+    monkeypatch.setattr("socket.getaddrinfo", _no_dns)
+    pid = _make_project(client)
+    r = client.post(f"/api/projects/{pid}/fofa/search", json={"query": "a"})
+    assert r.status_code == 400 and "未配置" in r.json()["detail"]
+    client.put("/api/fofa/config", json={"key": "k" * 32})
+    # 预登记 aaa.example.com（域名单独可建，DNS 断网独立成行）
+    r = client.post(f"/api/projects/{pid}/assets",
+                    json={"value": "aaa.example.com", "type": "domain"})
+    assert r.status_code == 201, r.text
+    monkeypatch.setattr("core.api.app.fofa_mod.FofaClient", _FakeFofaClient)
+    r = client.post(f"/api/projects/{pid}/fofa/search",
+                    json={"query": 'domain="x.com"', "size": 100})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["total"] == 2 and len(body["rows"]) == 2
+    assert body["rows"][0]["existing"]["domain"] is True   # 已在黑板 → 前端灰显
+    assert body["rows"][1]["existing"]["service"] is False
+    # 空查询 422
+    r = client.post(f"/api/projects/{pid}/fofa/search", json={"query": "  "})
+    assert r.status_code == 422
+
+
+def test_fofa_search_quota_429(client, fofa_cfg, monkeypatch):
+    """配额耗尽 → 429（熔断语义，绝不能重试）。"""
+    class _QuotaClient(_FakeFofaClient):
+        def search(self, query, size=100, page=1):
+            raise fofa.QuotaExhausted("FOFA 配额已用完")
+
+    pid = _make_project(client)
+    client.put("/api/fofa/config", json={"key": "k" * 32})
+    monkeypatch.setattr("core.api.app.fofa_mod.FofaClient", _QuotaClient)
+    r = client.post(f"/api/projects/{pid}/fofa/search", json={"query": "a"})
+    assert r.status_code == 429 and "已用完" in r.json()["detail"]
+
+
+def test_fofa_test_endpoint(client, fofa_cfg, monkeypatch):
+    pid = _make_project(client)
+    r = client.post("/api/fofa/test")
+    assert r.status_code == 400 and "未配置" in r.json()["detail"]
+    client.put("/api/fofa/config", json={"key": "k" * 32})
+    monkeypatch.setattr("core.api.app.fofa_mod.FofaClient", _FakeFofaClient)
+    r = client.post("/api/fofa/test")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True and body["remain"] == 999
+
+
+def test_asset_import_preview_and_import(client):
+    """预览（multipart CSV + 嗅探）→ mapping 形态导入 → dict 形态导入（FOFA 勾选）。"""
+    pid = _make_project(client)
+    csv_bytes = "IP地址,端口,标题\n10.0.0.9,80,首页\n".encode("utf-8")
+    r = client.post(f"/api/projects/{pid}/assets/import/preview",
+                    files={"file": ("targets.csv", csv_bytes, "text/csv")})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["header"] == ["IP地址", "端口", "标题"]
+    assert [c["kind"] for c in body["columns"]] == ["ip", "port", "title"]
+    assert body["total_rows"] == 1 and body["truncated"] is False
+    # mapping 形态导入：ip+port 行 → service + host（created 含自动挂载 host）
+    r = client.post(f"/api/projects/{pid}/assets/import",
+                    json={"source": "csv", "rows": [["10.0.0.9", "80", "首页"]],
+                          "mapping": ["ip", "port", "title"]})
+    assert r.status_code == 200, r.text
+    summary = r.json()
+    assert summary["source"] == "csv" and summary["created"] == 2
+    assert summary["batch_id"].startswith("imp-")
+    # dict 形态导入（FOFA 勾选行直传）
+    r = client.post(f"/api/projects/{pid}/assets/import",
+                    json={"source": "fofa",
+                          "rows": [{"ip": "10.0.0.10", "port": "443", "title": "X"}]})
+    assert r.status_code == 200 and r.json()["created"] == 2
+    values = {(a["type"], a["value"])
+              for a in client.get(f"/api/projects/{pid}/assets").json()}
+    assert ("service", "10.0.0.9:80") in values
+    assert ("host", "10.0.0.9") in values
+    assert ("service", "10.0.0.10:443") in values
+
+
+def test_asset_import_rejects_bad_source_and_over_limit(client):
+    pid = _make_project(client)
+    r = client.post(f"/api/projects/{pid}/assets/import",
+                    json={"source": "hacker", "rows": [{"ip": "10.0.0.1"}]})
+    assert r.status_code == 422 and "source" in r.json()["detail"]
+    r = client.post(f"/api/projects/{pid}/assets/import",
+                    json={"source": "manual",
+                          "rows": [{"ip": f"10.{i}.0.1"} for i in range(5001)]})
+    assert r.status_code == 422 and "上限" in r.json()["detail"]
+
+
+# ---------- workspace-hygiene D6：工作区卫生体检（2026-09-23） ----------
+
+def test_workspace_hygiene_report(client, tmp_path, monkeypatch):
+    """陌生条目 / 项目膨胀目录 / .trash 三段口径；纯只读，处置指向既有入口。"""
+    ws = tmp_path / "workspaces"
+    pid = _make_project(client)
+    slug = next(d.name for d in ws.iterdir()
+                if d.is_dir() and d.name != ".trash"
+                and (d / "project.json").is_file())
+    # 陌生条目：无 project.json 的目录 + 散文件；白名单 CLAUDE.md 不报
+    (ws / "mystery-dir").mkdir()
+    (ws / "orphan.log").write_text("x", encoding="utf-8")
+    (ws / "CLAUDE.md").write_text("# 契约", encoding="utf-8")
+    # 膨胀：项目 .tmp 放小文件，monkeypatch 阈值到 0.01MB 触发 warning 档
+    bloat_dir = ws / slug / ".tmp"
+    bloat_dir.mkdir()
+    (bloat_dir / "chunk.bin").write_bytes(b"\0" * (30 * 1024))  # 30KB ≈ 0.03MB
+    monkeypatch.setattr("core.api.app.HYGIENE_BLOAT_MB", 0.01)
+    # 回收站：两条目
+    trash = ws / ".trash"
+    trash.mkdir()
+    (trash / "gone-1").mkdir()
+    (trash / "gone-2.txt").write_text("y", encoding="utf-8")
+
+    r = client.get("/api/workspace-hygiene")
+    assert r.status_code == 200
+    body = r.json()
+    names = {(s["name"], s["kind"]) for s in body["strays"]}
+    assert ("mystery-dir", "dir") in names and ("orphan.log", "file") in names
+    assert all(n != "CLAUDE.md" for n, _ in names) and ".trash" not in [n for n, _ in names]
+    proj = next(p for p in body["projects"] if p["slug"] == slug)
+    assert proj["bloat"] == [{"dir": ".tmp", "mb": 0.0, "level": "warning"}]
+    assert body["trash"]["count"] == 2
+    assert body["summary"]["strays"] == 2 and body["summary"]["bloats"] == 1
+    assert body["summary"]["errors"] == 0
+    # 端点零写副作用：体检后条目原样在场
+    assert (ws / "mystery-dir").is_dir() and (ws / "orphan.log").exists()
+
+
+def test_workspace_hygiene_bloat_error_level(client, tmp_path, monkeypatch):
+    """膨胀超 error 阈值（monkeypatch 500MB 档到 0.5MB）升 error；无膨胀项目零条目。"""
+    ws = tmp_path / "workspaces"
+    _make_project(client)
+    slug = next(d.name for d in ws.iterdir()
+                if d.is_dir() and d.name != ".trash"
+                and (d / "project.json").is_file())
+    spill = ws / slug / "spill"
+    spill.mkdir()
+    (spill / "big.txt").write_bytes(b"\0" * (600 * 1024))  # 600KB
+    monkeypatch.setattr("core.api.app.HYGIENE_BLOAT_MB", 0.1)
+    monkeypatch.setattr("core.api.app.HYGIENE_BLOAT_ERROR_MB", 0.5)
+    body = client.get("/api/workspace-hygiene").json()
+    proj = next(p for p in body["projects"] if p["slug"] == slug)
+    assert proj["bloat"][0]["level"] == "error"
+    assert body["summary"]["errors"] == 1

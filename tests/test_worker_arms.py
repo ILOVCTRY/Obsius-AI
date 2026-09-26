@@ -18,17 +18,17 @@ from fastapi.testclient import TestClient
 from core.api.app import create_app
 from core.blackboard.tasks import TaskQueue
 
-from test_api import (_chain_app, _exec_finish_script, _l2_project,
+from test_api import (_chain_app, _exec_delegation_script, _l2_project,
                       _wait_job, _wait_no_running)
 from test_orchestrator import ScriptedLLM
 
 
 @pytest.fixture()
 def client(tmp_path):
-    # executor 剧本一轮 finish（armed 测试里「跑任务队列」要真跑完一个任务）
+    # executor 剧本一件委托（armed 测试里「跑任务队列」要真跑完一个任务）
     app = create_app(workspace_root=str(tmp_path / "workspaces"),
                      tools_root=None,
-                     executor_llm=ScriptedLLM(_exec_finish_script(1)),
+                     executor_llm=ScriptedLLM(_exec_delegation_script(1)),
                      planner_llm=ScriptedLLM([]),
                      providers_config=str(tmp_path / "providers.json"))
     with TestClient(app) as c:
@@ -36,8 +36,9 @@ def client(tmp_path):
 
 
 def test_armed_gate_blocks_auto_and_work_starts(client):
-    """L1：任务由发布建的待命窗承接（无人手开窗也建）；人手窗跑队列=武装启动但
-    认领恒空（v0.72 公共池退役）；执行审批批准=启动待命窗；暂停解除武装。"""
+    """L1 会话中心化：人手开窗默认不武装不开工；未指派委托发布后不建窗不 kick；
+    人手窗「跑队列」=武装启动但 run_session 只取本窗委托（未指派的摸不到）；
+    人给委托开窗（spawn-window）+ 跑窗=像人类使唤 AI 一样跑完；暂停解除武装。"""
     pid = client.post("/api/projects", json={"name": "armed闸", "track": "pentest",
                                              "capabilities": ["web"]}).json()["id"]
     client.patch(f"/api/projects/{pid}/config",
@@ -49,16 +50,16 @@ def test_armed_gate_blocks_auto_and_work_starts(client):
     assert all(r["worker_armed"] is False and r["worker_running"] is False
                for r in rows)
 
-    # 触发点 D 退役：发任务后不 kick 任何人手窗；任务归自己的待命窗，保持 open
+    # 发布未指派委托：不建窗、不 kick，session_id=None，任务保持 open
     r = client.post(f"/api/projects/{pid}/tasks",
                     json={"objective": "侦查目标", "task_type": "generic"})
     assert r.status_code == 201 and r.json()["kicked"] == []
     task_id = r.json()["task_id"]
-    bound_sid = r.json()["session_id"]
-    assert bound_sid and bound_sid != sid
+    assert r.json()["session_id"] is None
     assert client.get(f"/api/projects/{pid}/tasks").json()[0]["status"] == "open"
 
-    # 人手窗「跑任务队列」= 武装启动：认领恒空（一窗一任务），任务不被碰
+    # 人手窗「跑队列」= 武装启动：run_session 只取 target=本窗 的委托，未指派
+    # 任务不被碰，worker 空退
     w = client.post(f"/api/agents/{sid}/work")
     assert w.status_code == 200 and w.json().get("job_id")
     _wait_job(client, w.json()["job_id"])
@@ -67,12 +68,15 @@ def test_armed_gate_blocks_auto_and_work_starts(client):
     assert rows[sid]["worker_armed"] is True
     assert client.get(f"/api/projects/{pid}/tasks").json()[0]["status"] == "open"
 
-    # 执行审批单就绪：批准=启动任务自己的待命窗（不新建）→ 认领完成
-    items = client.get(f"/api/projects/{pid}/approvals").json()
-    item = next(a for a in items if a["action"].get("task_id") == task_id)
-    d = client.post(f"/api/approvals/{item['id']}/decide", json={"decision": "approved"})
-    assert d.status_code == 200 and d.json()["executed"] is True
-    assert d.json()["session_id"] == bound_sid
+    # 人给委托开专属窗（spawn-window：open 无绑→补绑待命窗，armed=false），
+    # 再点「跑窗」武装起跑 → 认领完成
+    sw = client.post(f"/api/tasks/{task_id}/spawn-window")
+    assert sw.status_code == 200 and sw.json()["created"] is True
+    bound_sid = sw.json()["session_id"]
+    assert bound_sid and bound_sid != sid
+    w2 = client.post(f"/api/agents/{bound_sid}/work")
+    assert w2.status_code == 200 and w2.json().get("job_id")
+    _wait_job(client, w2.json()["job_id"])
     _wait_no_running(client, pid)
     task = client.get(f"/api/projects/{pid}/tasks").json()[0]
     assert task["status"] == "done" and task["claimed_by"] == bound_sid
@@ -83,11 +87,10 @@ def test_armed_gate_blocks_auto_and_work_starts(client):
     assert rows[bound_sid]["worker_armed"] is False
 
 
-def test_publish_does_not_kick_manual_window_own_window_runs(tmp_path):
-    """v0.72 触发点 D 退役：armed 手动窗发布时不被 kick、也认领不到公共池任务；
-    任务由自己的专属窗自动跑完（L2）。"""
-    from test_api import _make_project  # noqa: F401 —— 复用 _chain_app 即可
-    app = _chain_app(tmp_path, [], _exec_finish_script(1))
+def test_publish_does_not_kick_manual_window_untargeted_never_runs(tmp_path):
+    """会话中心化：armed 手动窗发布未指派委托时不被 kick，run_session 也摸不到
+    未指派委托（任务保持 open）；委托显式指派给另一窗时该窗跑完，手动窗不碰。"""
+    app = _chain_app(tmp_path, [], _exec_delegation_script(1))
     with TestClient(app) as c:
         pid = _l2_project(c, "armed放行")
         sp = c.post(f"/api/projects/{pid}/agents", json={"role": "_generalist",
@@ -97,50 +100,67 @@ def test_publish_does_not_kick_manual_window_own_window_runs(tmp_path):
         _wait_no_running(c, pid)
         r = c.post(f"/api/projects/{pid}/tasks",
                    json={"objective": "侦查目标", "task_type": "generic"})
-        assert r.json()["kicked"] == []  # 触发点 D 退役
+        assert r.json()["kicked"] == []  # 未指派：不 kick
+        assert r.json()["session_id"] is None
+        # 等一拍确认手动窗没碰它（无新 job 起、任务仍 open）
+        time.sleep(0.2)
+        assert c.get(f"/api/projects/{pid}/tasks").json()[0]["status"] == "open"
+
+        # 显式开另一窗并把委托指给它（人类委托=武装+起跑），手动窗从未碰过
+        ep = c.post(f"/api/projects/{pid}/agents",
+                    json={"role": "_generalist", "armed": False})
+        target = ep.json()["id"]
+        r2 = c.post(f"/api/projects/{pid}/tasks",
+                    json={"objective": "第二个目标", "task_type": "generic",
+                          "target_session": target})
+        assert r2.status_code == 201 and r2.json()["session_id"] == target
         # 轮询终态（L2 下 replan-wait 30s 节流 job 与断言无关）
         task = None
         for _ in range(300):
-            task = c.get(f"/api/projects/{pid}/tasks").json()[0]
+            task = next(t for t in c.get(f"/api/projects/{pid}/tasks").json()
+                        if t["id"] == r2.json()["task_id"])
             if task["status"] == "done":
                 break
             time.sleep(0.02)
-        # 任务由自己的专属窗跑完，手动窗从未碰过
+        # 任务由被指派窗跑完，手动窗从未碰过
         assert task["status"] == "done"
-        assert task["claimed_by"] == task["target_session"] != sid
+        assert task["claimed_by"] == task["target_session"] == target != sid
+        # 第一件未指派委托还原样留着
+        first = next(t for t in c.get(f"/api/projects/{pid}/tasks").json()
+                     if t["objective"] == "侦查目标")
+        assert first["status"] == "open" and first["target_session"] == ""
 
 
 def _task_window_env(client, pid):
-    """发任务 + 退绑发布建的待命窗 + 让「原窗口」认领完成（不经 worker，避免 LLM 依赖）。
-    返回 (sess, tid, bound_sid)——bound_sid 是发布建的待命窗（保持存活）。"""
+    """开「原窗口」+ 发委托直接指派该窗 + 认领完成（不经 worker，避免 LLM 依赖）。
+    返回 (sess, tid)——sess 就是委托的归属窗（保持存活）。"""
     bb = client.app.state.projects[pid].bb
     sess = bb.register_session(pid, "原窗口", role="recon")
-    r = client.post(f"/api/projects/{pid}/tasks",
-                    json={"objective": "逆向 check_flag", "task_type": "generic",
-                          "noise_budget": "passive"})
-    tid = r.json()["task_id"]
     tq = TaskQueue(bb)
-    bound = tq.get_task(tid)["target_session"]
-    if bound:  # v0.72：发布即建待命窗，退绑后任务让给测试窗
-        tq.unassign_session(bound)
+    tid = tq.publish(pid, "逆向 check_flag", task_type="generic",
+                     noise_budget="passive", created_by="human",
+                     target_session=sess["id"])
+    # 与 _spawn_session_for_task 建窗同口径：done 复盘窗幂等检查认 spawn_task_id
+    bb.set_session_meta(sess["id"], {"spawn_task_id": tid, "bound_task_id": tid})
     tq.claim(tid, sess["id"])
     tq.complete(tid, sess["id"], result_note="三处字符串引用已核对")
-    return sess, tid, bound
+    return sess, tid
 
 
 def test_spawn_task_window_idempotent_with_context(client):
-    """任务窗：done 任务开新窗（角色沿用/上下文 human_note/meta.spawn_task_id）；
-    重复双击幂等返回既有窗；claimed 任务 422；不存在 404。"""
+    """任务窗：done 任务归属窗还活着→双击幂等挂回；归属窗关了→开新复盘窗
+    （角色沿用/上下文 human_note/meta.spawn_task_id）；重复双击幂等；
+    claimed 无活窗 → 409 引导放回；不存在 404。"""
     pid = client.post("/api/projects", json={"name": "任务窗", "track": "pentest",
                                              "capabilities": ["web"]}).json()["id"]
-    sess, tid, bound_sid = _task_window_env(client, pid)
+    sess, tid = _task_window_env(client, pid)
 
-    # v0.72 一窗一任务：任务自己的窗还活着 → 双击任务卡幂等挂回原窗
+    # 任务归属窗还活着 → 双击任务卡幂等挂回原窗
     r0 = client.post(f"/api/tasks/{tid}/spawn-window")
-    assert r0.status_code == 200 and r0.json() == {"session_id": bound_sid,
+    assert r0.status_code == 200 and r0.json() == {"session_id": sess["id"],
                                                    "created": False}
     # 原窗已关 → 双击开新复盘窗（角色沿用原认领者/上下文 human_note 注入）
-    assert client.post(f"/api/sessions/{bound_sid}/close").status_code == 200
+    assert client.post(f"/api/sessions/{sess['id']}/close").status_code == 200
 
     r = client.post(f"/api/tasks/{tid}/spawn-window")
     assert r.status_code == 200 and r.json()["created"] is True
@@ -166,20 +186,55 @@ def test_spawn_task_window_idempotent_with_context(client):
     r2 = client.post(f"/api/tasks/{tid}/spawn-window")
     assert r2.status_code == 200 and r2.json() == {"session_id": sid, "created": False}
 
-    # claimed 任务 → 422；不存在 → 404
+    # claimed 且无活窗 → 409 引导放回（2026-09-23：不再 422）；不存在 → 404
     bb2 = client.app.state.projects[pid].bb
     sess2 = bb2.register_session(pid, "窗口乙", role="recon")
-    r3 = client.post(f"/api/projects/{pid}/tasks",
-                     json={"objective": "还在跑", "task_type": "generic",
-                           "noise_budget": "passive"})
-    tid3 = r3.json()["task_id"]
     tq3 = TaskQueue(bb2)
-    bound3 = tq3.get_task(tid3)["target_session"]
-    if bound3:  # v0.72：发布即建待命窗，退绑后手动认领（claimed 422 路径）
-        tq3.unassign_session(bound3)
-    tq3.claim(tid3, sess2["id"])
-    assert client.post(f"/api/tasks/{tid3}/spawn-window").status_code == 422
+    tid3 = tq3.publish(pid, "还在跑", task_type="generic",
+                       noise_budget="passive", created_by="human")
+    tq3.claim(tid3, sess2["id"])  # 未指派 open 行可直接认领
+    assert client.post(f"/api/tasks/{tid3}/spawn-window").status_code == 409
     assert client.post("/api/tasks/task-nope123456/spawn-window").status_code == 404
+
+
+def test_spawn_task_window_open_rebind(client):
+    """open 无绑任务双击 = 手动补绑待命窗（armed=false 双向绑定，2026-09-23
+    放开非终态）；再次双击幂等挂回；退绑后可再补新窗；cap 满 409（人手开窗同口径）。"""
+    pid = client.post("/api/projects", json={"name": "补绑窗", "track": "pentest",
+                                             "capabilities": ["web"]}).json()["id"]
+    bb = client.app.state.projects[pid].bb
+    tq = TaskQueue(bb)
+    tid = tq.publish(pid, "补绑目标", task_type="generic",
+                     noise_budget="passive", created_by="human")
+    assert tq.get_task(tid)["target_session"] == ""  # 会话中心化：发布不建窗
+    # open 无绑 → 双击补绑待命窗，双向绑定回填
+    r1 = client.post(f"/api/tasks/{tid}/spawn-window")
+    assert r1.status_code == 200 and r1.json()["created"] is True
+    sid = r1.json()["session_id"]
+    assert tq.get_task(tid)["target_session"] == sid
+    row = bb.get_session(sid)
+    meta = json.loads(row["meta"]) if isinstance(row["meta"], str) else row["meta"]
+    assert meta.get("worker_armed") is False  # 待命不起跑（起跑走跑队列/挡位）
+    # 再次双击 → 幂等挂回
+    r2 = client.post(f"/api/tasks/{tid}/spawn-window")
+    assert r2.status_code == 200 and r2.json() == {"session_id": sid,
+                                                   "created": False}
+    # 退绑（模拟 cap 满绑定失败的拥塞暂态）→ 双击再补一扇新待命窗
+    tq.unassign_session(sid)
+    client.post(f"/api/sessions/{sid}/close")
+    r2b = client.post(f"/api/tasks/{tid}/spawn-window")
+    assert r2b.status_code == 200 and r2b.json()["created"] is True
+    sid = r2b.json()["session_id"]
+    assert tq.get_task(tid)["target_session"] == sid
+
+    # cap 压满（活跃窗 sid 占 1）→ 新任务无绑，补绑 409
+    client.patch(f"/api/projects/{pid}/config",
+                 json={"config": {"autonomy": {"level": "L0", "paused": True,
+                                               "sessions_cap": 1}}})
+    tid3 = tq.publish(pid, "超额目标", task_type="generic",
+                      noise_budget="passive", created_by="human")
+    assert tq.get_task(tid3)["target_session"] == ""
+    assert client.post(f"/api/tasks/{tid3}/spawn-window").status_code == 409
 
 
 class _GatedScriptedLLM(ScriptedLLM):
@@ -209,6 +264,7 @@ def test_idle_note_triggers_chat_round(tmp_path):
         {"text": "你好，我是通用测试员。"},
         {"text": "收到，我是通用测试员。"},
         {"tool_use": [S.tool_call("c0", "complete_task", {"result_note": "核查完成"})]},
+        {"tool_use": [S.tool_call("c0b", "complete_task", {"result_note": "核查完成"})]},
         {"tool_use": [S.tool_call("f0", "finish", {"summary": "完成"})]},
     ]
     app = create_app(workspace_root=str(tmp_path / "workspaces"), tools_root=None,
@@ -245,13 +301,17 @@ def test_idle_note_triggers_chat_round(tmp_path):
         assert notes and notes[-1]["payload"]["text"] == long_text
         assert len(notes[-1]["payload"]["title"]) == 80
 
-        # 宁严勿松：绑 open 任务的待命窗（发布即建、未武装）note 不 kick——
-        # 无新 agent-work job，引导滞留收件箱未读
+        # 宁严勿松：发未指派委托，再 spawn-window 开绑定它的待命窗（armed=false）
+        # ——绑 open 任务的待命窗 note 绝不 kick：无新 agent-work job，引导滞留
+        # 收件箱未读
         r2 = c.post(f"/api/projects/{pid}/tasks",
                     json={"objective": "侦查目标", "task_type": "generic"})
-        assert r2.json()["kicked"] == []  # v0.72 触发点 D 退役：不 kick 人手窗
+        assert r2.json()["kicked"] == []  # 未指派发布不 kick
         tid = r2.json()["task_id"]
-        bound_sid = r2.json()["session_id"]
+        assert r2.json()["session_id"] is None
+        sw = c.post(f"/api/tasks/{tid}/spawn-window")
+        assert sw.status_code == 200 and sw.json()["created"] is True
+        bound_sid = sw.json()["session_id"]
         before = len(work_jobs_of(bound_sid))
         assert c.post(f"/api/sessions/{bound_sid}/note",
                       json={"text": "先别动，等审批"}).status_code == 201
@@ -259,14 +319,12 @@ def test_idle_note_triggers_chat_round(tmp_path):
         inbox = bb.inbox_list(pid, bound_sid, unread_only=True)
         assert any(r["kind"] == "human_note" for r in inbox)
 
-        # 任务链照常：执行审批批准 → 启动原待命窗认领完成（起跑轮消化滞留引导）
-        items = c.get(f"/api/projects/{pid}/approvals").json()
-        item = next(a for a in items if a["action"].get("task_id") == tid)
-        d = c.post(f"/api/approvals/{item['id']}/decide", json={"decision": "approved"})
-        assert d.status_code == 200 and d.json()["executed"] is True
-        assert d.json()["session_id"] == bound_sid
+        # 任务链照常：人点「跑窗」武装起跑 → 认领完成（起跑轮消化滞留引导）
+        w = c.post(f"/api/agents/{bound_sid}/work")
+        assert w.status_code == 200 and w.json().get("job_id")
         _wait_no_running(c, pid)
-        task = c.get(f"/api/projects/{pid}/tasks").json()[0]
+        task = next(t for t in c.get(f"/api/projects/{pid}/tasks").json()
+                    if t["id"] == tid)
         assert task["status"] == "done"
 
 
@@ -289,15 +347,22 @@ def test_close_finishes_current_step_then_aborts_and_closes(tmp_path):
                      executor_llm=executor, planner_llm=ScriptedLLM([]),
                      providers_config=str(tmp_path / "providers.json"))
     with TestClient(app) as c:
-        # 暂停隔离：发布建待命窗但不起跑（本测验证关窗中断语义，任务二须留在自己的待命窗）
+        # 暂停隔离：显式开两窗、委托经 tq 直接定窗（不起跑）——本测验证关窗中断
+        # 语义，任务二须留在自己的待命窗
         pid = _l2_project(c, "中断关窗", paused=True)
-        r1 = c.post(f"/api/projects/{pid}/tasks",
-                    json={"objective": "任务一", "task_type": "generic"})
-        sid = r1.json()["session_id"]
-        assert r1.json()["kicked"] == []
-        r2 = c.post(f"/api/projects/{pid}/tasks",
-                    json={"objective": "任务二", "task_type": "generic"})
-        sid2 = r2.json()["session_id"]
+        bb = c.app.state.projects[pid].bb
+        tq = TaskQueue(bb)
+
+        def _window_with_task(objective):
+            sp = c.post(f"/api/projects/{pid}/agents",
+                        json={"role": "_generalist", "armed": False})
+            wsid = sp.json()["id"]
+            wtid = tq.publish(pid, objective, task_type="generic",
+                              created_by="human", target_session=wsid)
+            return wsid, wtid
+
+        sid, tid1 = _window_with_task("任务一")
+        sid2, _ = _window_with_task("任务二")
         # 人工 override 启动任务一的绑定窗（暂停不拦人手动作），阻塞在首个 LLM 调用处
         w = c.post(f"/api/agents/{sid}/work")
         assert w.status_code == 200 and w.json().get("job_id")

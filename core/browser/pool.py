@@ -88,6 +88,9 @@ class BrowserConfig:
     intruder_max_concurrency: int = 5     # 爆破并发硬顶（config 可降不可升，replay.py 消费）
     intruder_rate_per_sec: float = 10.0
     intruder_max_requests: int = 1000
+    ignore_https_errors: bool = True      # 授权目标默认放行证书错误（过期/自签；
+                                          # 2026-09-24 用户定稿——导航前必经 check_target
+                                          # 白名单，MITM 面只在已登记授权范围）
     screencast_quality: int = 60          # CDP 实时帧 JPEG 质量（F6-v2）
     screencast_max_width: int = 1280      # 实时帧最大宽（超出缩帧）
     screencast_max_height: int = 720
@@ -104,7 +107,8 @@ class BrowserConfig:
                    "max_sessions_per_project", "body_max_bytes",
                    "action_timeout_s", "domain_scope",
                    "intruder_max_concurrency", "intruder_rate_per_sec",
-                   "intruder_max_requests", "screencast_quality",
+                   "intruder_max_requests", "ignore_https_errors",
+                   "screencast_quality",
                    "screencast_max_width", "screencast_max_height",
                    "intercept_timeout_s"}
         for k, v in data.items():
@@ -245,6 +249,7 @@ class BrowserInstance:
                 viewport={"width": self.config.viewport_width,
                           "height": self.config.viewport_height},
                 accept_downloads=True,
+                ignore_https_errors=self.config.ignore_https_errors,
             )
         except BrowserError:
             raise

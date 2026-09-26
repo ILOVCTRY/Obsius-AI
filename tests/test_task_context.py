@@ -51,6 +51,8 @@ _FAIL = {"tool_use": [ScriptedLLM.tool_call("t2", "fail_task",
 _FINISH = {"tool_use": [ScriptedLLM.tool_call("t3", "finish", {"summary": "收尾"})]}
 _DONE = {"tool_use": [ScriptedLLM.tool_call("t4", "complete_task",
                                             {"result_note": "接手完成"})]}
+_DONE2 = {"tool_use": [ScriptedLLM.tool_call("t4b", "complete_task",
+                                             {"result_note": "接手完成"})]}
 
 
 def test_no_task_direct_run_writes_nothing(env):
@@ -94,7 +96,9 @@ def test_no_artifacts_dir_degrades(env):
     bb, project, gw, tq, tmp_path = env
     tid = tq.publish(project["id"], "无目录任务", created_by="human")
     llm = ScriptedLLM([_STEP, {"tool_use": [ScriptedLLM.tool_call(
-        "t5", "complete_task", {"result_note": "完成"})]}, _FINISH])
+        "t5", "complete_task", {"result_note": "完成"})]},
+        {"tool_use": [ScriptedLLM.tool_call(
+            "t5b", "complete_task", {"result_note": "完成"})]}, _FINISH])
     agent = make_agent(env, llm)  # 不传 artifacts_dir
     agent.run_task("侦查", task_id=tid)
     assert tq.get_task(tid)["status"] == "done"
@@ -121,7 +125,9 @@ def test_crash_keeps_transcript_and_sweep_records_attempt(env):
         agent.run_task("侦查", task_id=tid)
     task = tq.get_task(tid)
     assert task["status"] == "failed"
-    assert task["blocked_reason"] == "error"
+    # experience-sedimentation M1：worker 异常兜底（LLM 传输层炸）属 aborted 档——
+    # 非方法论性失败，不进失败复盘与战役记忆
+    assert task["blocked_reason"] == "aborted"
     assert "worker 异常退出" in task["context"]["attempts"][-1]["result_note"]
     path = task_transcript_path(art, tid)
     st = json.loads(path.read_text(encoding="utf-8"))
@@ -151,7 +157,7 @@ def test_handover_to_new_session(env):
     agent_a.run_task("侦查内网", task_id=tid)
 
     tq.reopen(tid)  # 人工「放回继续」
-    llm_b = ScriptedLLM([_DONE, _FINISH])
+    llm_b = ScriptedLLM([_DONE, _DONE2, _FINISH])
     agent_b = make_agent(env, llm_b, artifacts_dir=art)
     agent_b.run_task("侦查内网", task_id=tid)
 
@@ -184,7 +190,7 @@ def test_load_transcript_degrades_on_corrupt_or_mismatch(env):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"task_id": "task-other000000", "messages": [
         {"role": "user", "content": "别家任务的现场"}]}), encoding="utf-8")
-    llm = ScriptedLLM([_DONE, _FINISH])
+    llm = ScriptedLLM([_DONE, _DONE2, _FINISH])
     agent = make_agent(env, llm, artifacts_dir=art)
     agent.run_task("重新来", task_id=tid)
     msgs = llm.calls[0]["messages"]
@@ -197,7 +203,7 @@ def test_load_transcript_degrades_on_corrupt_or_mismatch(env):
     tid2 = tq.publish(project["id"], "损坏任务", created_by="human")
     p2 = task_transcript_path(art, tid2)
     p2.write_text("{not json", encoding="utf-8")
-    llm2 = ScriptedLLM([_DONE, _FINISH])
+    llm2 = ScriptedLLM([_DONE, _DONE2, _FINISH])
     make_agent(env, llm2, artifacts_dir=art).run_task("再来", task_id=tid2)
     assert "not json" not in json.dumps(llm2.calls[0]["messages"], ensure_ascii=False)
 

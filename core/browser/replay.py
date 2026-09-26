@@ -89,7 +89,11 @@ class ReplayClient:
         batch_id = f"rp-{uuid.uuid4().hex[:12]}"
         t0 = time.monotonic()
         try:
-            resp = httpx.Client(timeout=15.0, follow_redirects=True).request(
+            # trust_env=False：重放/爆破打授权目标（常为内网/localhost），流量
+            # 绝不交给系统代理——httpx trust_env 经 urllib 读 Windows 注册表，
+            # 系统代理（如 Clash）开着会把请求全转发走（目标失真+响应被拦改）
+            resp = httpx.Client(timeout=15.0, follow_redirects=True,
+                                trust_env=False).request(
                 m, u, headers=hs, content=b if b else None)
             status = resp.status_code
             resp_headers = dict(resp.headers)
@@ -242,7 +246,9 @@ class Intruder:
             t0 = time.monotonic()
             ok = False
             try:
-                resp = httpx.Client(timeout=15.0, follow_redirects=True).request(
+                # trust_env=False 同重放（见上）：爆破流量不交系统代理
+                resp = httpx.Client(timeout=15.0, follow_redirects=True,
+                                    trust_env=False).request(
                     method, req_url, headers=headers,
                     content=req_body if req_body else None)
                 status = resp.status_code

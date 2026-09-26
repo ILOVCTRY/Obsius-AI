@@ -1,0 +1,19 @@
+{
+  "//": "构建期 shim：仅供 dsh-typert-generator 把上游协议源码（钉 477b4f4 复制固化于 src/）注册为工作区同名包。generator 对 packages/ 下所有 projectReference 包强制 validateExport（只校验 manifest 声明、不查文件存在），故按其契约声明 ./typert；shim 本身无 @Remote 方法，绝不声明 ./remote。不在 pnpm-workspace glob 内，pnpm 不安装、运行时不可见；运行时仍走 profile 里的真实包。",
+  "name": "@deepseek-ai/dsh-typert-protocol",
+  "version": "0.0.0-shim",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./typert": {
+      "types": "./lib/typert.host.d.ts",
+      "default": "./lib/typert.host.js"
+    }
+  },
+  "files": [
+    "lib/typert.host.js",
+    "lib/typert.host.d.ts"
+  ]
+}

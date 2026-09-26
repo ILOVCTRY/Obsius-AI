@@ -311,7 +311,8 @@ export function TaskBoard({ pid, focused }: {
             <AlertDialogTitle>删除任务「{deleteTarget?.task_type}」？</AlertDialogTitle>
             <AlertDialogDescription asChild>
               <div className="space-y-2">
-                <p className="line-clamp-3 rounded border bg-card p-2 font-mono text-xs">
+                {/* wrap-anywhere：超长不可断 token（URL/base64）会沿 grid 链路撑爆 min-content 致弹窗溢出，anywhere 才收窄 min-content（break-words 无效） */}
+                <p className="line-clamp-3 wrap-anywhere rounded border bg-card p-2 font-mono text-xs">
                   {deleteTarget?.objective}
                 </p>
                 <p>
@@ -345,7 +346,7 @@ export function TaskBoard({ pid, focused }: {
       </AlertDialog>
 
       <p className="border-t px-3 py-1.5 text-[10px] text-muted-foreground">
-        任务即窗口（v0.71）：发布即建专属执行窗，一窗一任务；双击任务卡直开会话（终态窗=延续模式可续聊）；
+        任务即窗口（v0.71）：发布即建专属执行窗，一窗一任务；双击任务卡直开会话（待执行=跳转并立刻起跑，无窗自动补绑待命窗后起跑；终态窗=延续模式可续聊）；
         待执行/失败任务可编辑（目标/类型/噪声/优先级/角色/互斥键）；执行中任务仅可改角色（热换装，下个步进生效）；
         失败任务可放回原窗续跑；四态任务均可删除（A1：claimed 取消在当前步结束即硬中断，done 战果快照进审计）；
         有子任务需先处理子任务（§6.4）
@@ -372,14 +373,35 @@ function TaskCard({ pid, task, roles, roleNames, onChanged, onDelete, onResolve,
   const [roleEditing, setRoleEditing] = useState(false)
   const [newRole, setNewRole] = useState(task.role ?? "")
   const [roleErr, setRoleErr] = useState<string | null>(null)
-  // 双击直开会话（v0.71 任务即窗口，四态通用）：有专属窗开窗，无窗回退任务看板定位
-  const openSession = () => {
-    const sid = task.target_session || task.claimed_by
+  // 双击直开会话（v0.71 任务即窗口，四态通用）：有专属窗挂回；open 无绑 →
+  // 手动补绑待命窗（2026-09-23）成功即挂回，失败提示留卡上；其余回看板定位。
+  // 待执行（open）任务挂回后**立刻起跑**（2026-09-24）：人工双击=显式启动，
+  // 等同会话内「跑任务队列」；其余态只跳转。
+  const [spawnErr, setSpawnErr] = useState<string | null>(null)
+  const startWork = (sid: string) => {
+    api.agentWork(sid).catch((e) =>
+      setSpawnErr(`自动启动失败：${e instanceof Error ? e.message : String(e)}`))
+  }
+  const openSession = async () => {
+    let sid = task.target_session || task.claimed_by
     if (sid) {
       window.dispatchEvent(new CustomEvent("goto-session", { detail: { sessionId: sid } }))
-    } else {
-      window.dispatchEvent(new CustomEvent("goto-tasks", { detail: { taskId: task.id } }))
+      if (task.status === "open") startWork(sid)
+      return
     }
+    if (task.status === "open") {
+      try {
+        setSpawnErr(null)
+        const r = await api.spawnWindow(task.id)
+        sid = r.session_id
+        window.dispatchEvent(new CustomEvent("goto-session", { detail: { sessionId: sid } }))
+        startWork(sid)
+        return
+      } catch (e) {
+        setSpawnErr(e instanceof Error ? e.message : String(e))
+      }
+    }
+    window.dispatchEvent(new CustomEvent("goto-tasks", { detail: { taskId: task.id } }))
   }
   // 工作区隔离（W3）：按任务归属查看产物清单
   const [arts, setArts] = useState<Artifact[] | null>(null)
@@ -413,12 +435,18 @@ function TaskCard({ pid, task, roles, roleNames, onChanged, onDelete, onResolve,
     <div
       ref={cardRef}
       onDoubleClick={openSession}
-      title="双击打开会话窗（待执行=待命窗 / 执行中=在跑窗 / 已结束=延续模式续聊）"
+      title="双击打开会话窗（待执行=跳转并立刻起跑·无窗自动补绑 / 执行中=在跑窗 / 已结束=延续模式续聊）"
       className={cn("cursor-pointer rounded-md border bg-card p-2 transition-shadow",
         focused && "ring-2 ring-primary")}
     >
       <div className="flex items-center gap-1.5">
         <Badge variant="outline" className="font-mono text-[10px]">{task.task_type}</Badge>
+        {task.created_by === "playbook" && (
+          <Badge variant="outline" className="text-[10px] text-primary"
+                 title="阶段剧本首发任务（分阶段工作流：阶段启动时照剧本原样发布，回退重进不重发）">
+            📋 剧本
+          </Badge>
+        )}
         {task.role && (
           <Badge variant="outline" className="text-[10px] text-(--status-paused)"
                  title={`建议认领角色 ${task.role}：底色匹配窗排序优先，任何窗均可即时认领（认领即换装）`}>
@@ -520,7 +548,8 @@ function TaskCard({ pid, task, roles, roleNames, onChanged, onDelete, onResolve,
         return (
           <p className="mt-1 truncate font-mono text-[10px] text-emerald-400"
              title={`验收对账 ${done}/${rec.length}（全部收口前 complete_task 被硬拦）\n` +
-               rec.map((r) => `${label[r.state]} #${r.id} ${r.text}${r.note ? `（${r.note}）` : ""}`).join("\n")}>
+               `🔬=独立验证条目：met/failed 由服务端验证器判定，Agent 不可自报\n` +
+               rec.map((r) => `${label[r.state]} #${r.id}${r.verify ? "🔬" : ""} ${r.text}${r.note ? `（${r.note}）` : ""}`).join("\n")}>
             ☑ {done}/{rec.length}
             {rec.some((r) => r.state === "blocked") && (
               <span className="text-amber-400">
@@ -555,6 +584,11 @@ function TaskCard({ pid, task, roles, roleNames, onChanged, onDelete, onResolve,
       {resumeErr && (
         <p className="mt-1 truncate text-[10px] text-(--status-error)" title={resumeErr}>
           续跑失败：{resumeErr}（可改用「放回」重新派发）
+        </p>
+      )}
+      {spawnErr && (
+        <p className="mt-1 truncate text-[10px] text-(--status-error)" title={spawnErr}>
+          开窗失败：{spawnErr}
         </p>
       )}
       <div className="mt-1.5 flex items-center gap-2">

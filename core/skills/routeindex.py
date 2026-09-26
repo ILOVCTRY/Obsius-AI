@@ -23,6 +23,7 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from core.skills.matching import term_matches
 from core.skills.writing import resolve_kb
 
 log = logging.getLogger(__name__)
@@ -170,22 +171,25 @@ def render_route_index(packs_root: str | Path, capabilities: list[str] | None,
             lines.append(f"- {e.point} → {e.kb}")
     if not lines:
         return ""
-    return ("\n\n## 🧭 测试点路由索引（发现对应测试点时，先 kb_open 打开对应"
+    return ("\n\n## 📖 测试点手册索引（发现对应测试点时，先 kb_open 打开对应"
             "手册再动手，走已验证路径避免试错）\n" + "\n".join(lines))
 
 
 # ---------- G1 Top-K 注入（2026-09-19，§4 渐进披露） ----------
 
 def score_entry(e: IndexEntry, query: str) -> int:
-    """条目与任务 query 的相关性：match 触发词双向子串命中 ×2，point 命中 ×1。
-    双向是因为 query 与 point 长短不定（「文件上传」⊂「文件上传测试」）。"""
+    """条目与任务 query 的相关性：match 触发词命中 ×2，point 命中 ×1。
+
+    匹配走 term_matches 统一口径（ASCII 词边界、中文子串——双向子串因
+    「文件上传」⊂「文件上传测试」自然成立；* 为前缀）。"""
     if not query:
         return 0
+    q = query.lower()
     s = 0
     for w in e.match:
-        if w and (w in query or query in w):
+        if w and term_matches(w, q):
             s += 2
-    if e.point and (e.point in query or query in e.point):
+    if e.point and term_matches(e.point, q):
         s += 1
     return s
 
@@ -220,7 +224,7 @@ def render_route_index_top(packs_root: str | Path, capabilities: list[str] | Non
                                     query=query, top_k=top_k)
     if total == 0:
         return "", 0, 0, []
-    head = ("\n\n## 🧭 测试点路由索引（发现对应测试点时，先 kb_open 打开对应手册"
+    head = ("\n\n## 📖 测试点手册索引（发现对应测试点时，先 kb_open 打开对应手册"
             "再动手，走已验证路径避免试错；下面只列与本任务最相关的条目）")
     lines = [f"- {e.point} → {e.kb}" for e in hits]
     if not hits:

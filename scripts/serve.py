@@ -14,7 +14,8 @@
 - 二次双击「启动平台（窗口）.bat」= 再开一个窗口连已有服务（attach，多窗并行）。
 - 加载地址探测顺序：--url 显式 > webui/dist 存在 → 同源静态版 8420（M2）>
   Vite dev 5173 可达 → dev 版（热更新照常）> 都不满足 → 窗内指引占位页。
-- pythonw（无控制台）下 stdout/stderr 为 None，重定向到项目根 serve-window.log。
+- pythonw（无控制台）下 stdout/stderr 为 None，重定向到 logs/serve-window.log。
+- windowed exe（M3 打包，scripts/build_exe.py）同样适配：frozen 时默认窗口模式。
 
 v0.64 优雅停机：进程持有 uvicorn Server 句柄并挂 POST /api/admin/shutdown
 （置 should_exit 优雅退出）——FastAPI shutdown 钩子借机给所有在跑会话落
@@ -160,12 +161,18 @@ def _warn_dialog(msg: str) -> None:
         pass
 
 
-def _run_window(port: int, explicit_url: str | None, debug: bool) -> int:
-    # pythonw（无控制台）下 stdout/stderr 为 None，print/uvicorn 日志会炸 → 落文件
+def _redirect_stdio_if_none() -> None:
+    """windowed exe/pythonw（无控制台）下 stdout/stderr 为 None，
+    print/uvicorn 日志/argparse 输出均会炸 → 落 logs/serve-window.log（幂等）。"""
     if sys.stdout is None or sys.stderr is None:
-        log_path = _ROOT / "serve-window.log"
+        log_path = _ROOT / "logs" / "serve-window.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
         sys.stdout = open(log_path, "a", encoding="utf-8", buffering=1)  # noqa: SIM115
         sys.stderr = sys.stdout
+
+
+def _run_window(port: int, explicit_url: str | None, debug: bool) -> int:
+    _redirect_stdio_if_none()
 
     owner = not _port_open(port)
 
@@ -246,8 +253,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def main() -> None:
+    _redirect_stdio_if_none()  # windowed exe：进 main 即落日志（argparse 也可能输出）
     os.chdir(_ROOT)  # cwd 兜底：全项目 cwd 相对路径惯例，从别处启动不飘
     args = _parse_args(sys.argv[1:])
+    if getattr(sys, "frozen", False):
+        args.window = True  # M3 打包 exe：双击即弹窗（无窗形态用源码 serve.py，不设开关）
     if not args.window:
         _run_headless(args.port)
         return

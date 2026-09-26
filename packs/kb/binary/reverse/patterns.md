@@ -1,4 +1,4 @@
-# CTF Reverse - Patterns & Techniques
+# 逆向模式识别（Patterns & Techniques）—— 反编译产物分类 / 混淆识别 / 静态分析套路
 
 ## Table of Contents
 - [Custom VM Reversing](#custom-vm-reversing)

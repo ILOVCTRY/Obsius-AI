@@ -342,6 +342,37 @@ def test_effect_stats_ignores_unverified_only_chains(bb, pid):
     assert stats["trace_chains"] == 1 and stats["combos"] == []
 
 
+# ---------- M3 kb 模块三象限反馈（experience-sedimentation） ----------
+
+def test_kb_module_feedback_three_quadrants(bb, pid):
+    """opened=kb.open 全历史计数；positive=「有 verified 发现的轨迹链」内 kb
+    （链级去重）；negative=真失败（error）任务窗内 kb.open——aborted 失败不算。"""
+    tq = TaskQueue(bb)
+    # 成功任务：web/nmap-recipes 开 2 次 + verified 发现 → opened=2, positive=1
+    s1 = _session(bb, pid, "S1")
+    t1 = _run_task(bb, pid, s1, "成功任务")
+    _emit(bb, pid, s1, "kb.open", {"source": "pack", "module": "web/nmap-recipes", "path": "a.md"})
+    _emit(bb, pid, s1, "kb.open", {"source": "pack", "module": "web/nmap-recipes", "path": "a.md"})
+    _add_finding(bb, pid, s1, status="verified", with_poc=True)
+    tq.complete(t1, s1)
+
+    # 真失败任务（error）：web/xss-anti 开 1 次 → negative=1
+    s2 = _session(bb, pid, "S2")
+    t2 = _run_task(bb, pid, s2, "失败任务")
+    _emit(bb, pid, s2, "kb.open", {"source": "pack", "module": "web/xss-anti", "path": "b.md"})
+    tq.fail(t2, s2, "payload 全被拦")  # blocked_reason 默认 error
+
+    # aborted 失败：web/xss-anti 再开 1 次 → opened 计、negative 不计
+    s3 = _session(bb, pid, "S3")
+    t3 = _run_task(bb, pid, s3, "中断任务")
+    _emit(bb, pid, s3, "kb.open", {"source": "pack", "module": "web/xss-anti", "path": "b.md"})
+    tq.fail(t3, s3, "人工中断", blocked_reason="aborted")
+
+    fb = traces.kb_module_feedback(bb.conn, pid)
+    assert fb["web/nmap-recipes"] == {"opened": 2, "positive": 1, "negative": 0}
+    assert fb["web/xss-anti"] == {"opened": 2, "positive": 0, "negative": 1}
+
+
 # ---------- v19 迁移 ----------
 
 def test_v19_columns_present_and_legacy_upgrade(tmp_path):

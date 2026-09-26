@@ -7,14 +7,18 @@ import type {
   DecideApprovalResult, DoctorReport, DiscoveredModel, Finding, FindingPatchBody, FuncCreateBody, FuncEntry,
   FuncPatchBody, HistoryList, InboxMessage, Job, KbRead, KbRefHit, KbRenameResult,
   KbSearchHit, KbSourceTree,
-  KbWriteResult, LlmProvider, McpServer, ModelInfo, IntelArticle, IntelBrief, IntelBriefMeta,
+  KbWriteResult, LlmProvider, McpServer, ModelInfo, ExecutorLlmView,
+  IntelArticle, IntelBrief, IntelBriefMeta,
   IntelFeed, IntelOverview, IntelProfile, IntelVaultConfig, IntelVaultInfo, VaultNode,
   VaultSearchHit, IntelLearningProfile, IntelPlan, IntelPlanMeta,
-  Expert, ExpertBody, OrchPersona, OwnerRule, PackRole, PhaseGoal, ProjectDetail, ProjectMeta, RatingRule,
+  Expert, ExpertBody, GatewayConfig, CapabilityInventory, OrchPersona, OwnerRule, PackRole, PhaseGoal, PhaseInfo, ProjectDetail, ProjectMeta, RatingRule,
+  AgentToolsResponse,
   Proposal, ProposalOrigin, RoleInfo, RouteHit,
   RoutePreviewBody, SampleUploadResponse, Session, SkillCreateBody, SkillDef, TrackProfile,
-  SkillDetail, SkillVocab, Task, TaskGraph, BoardGraph, WritebackItem, XrefData,
+  SkillDetail, SkillVocab, Task, TaskGraph, SessionGraph, BoardGraph, AttackPath, IntentInfo,
+  WritebackItem, XrefData,
   TaskTrace, TraceEffect,
+  FofaConfig, FofaTestResult, FofaSearchResult, ImportPreview, ImportSummary,
 } from "./types"
 import type { Taxonomy } from "./taxonomy"
 
@@ -107,15 +111,21 @@ export const api = {
     http<Asset>(`/api/assets/${assetId}`, {
       method: "PATCH", body: JSON.stringify(body),
     }),
+  // 物理删除叶子资产（有子资产/被发现引用 → 409，文案直接展示）
+  deleteAsset: (pid: string, assetId: string) =>
+    http<{ deleted: string; id: string }>(`/api/projects/${pid}/assets/${assetId}`, {
+      method: "DELETE",
+    }),
   funcs: (pid: string, sha?: string) =>
     http<FuncEntry[]>(`/api/projects/${pid}/funcs${sha ? `?binary_sha256=${sha}` : ""}`),
   events: (pid: string, sinceId = 0) =>
     http<BBEvent[]>(`/api/projects/${pid}/events?since_id=${sinceId}`),
-  // 直播间分页（2026-09-17）：tail=最新 N 条（首屏不全量回放）；before_id=更早一页（升序）
-  eventsTail: (pid: string, limit = 50) =>
-    http<BBEvent[]>(`/api/projects/${pid}/events?tail=${limit}`),
-  eventsBefore: (pid: string, beforeId: number, limit = 50) =>
-    http<BBEvent[]>(`/api/projects/${pid}/events?before_id=${beforeId}&limit=${limit}`),
+  // 直播间分页（2026-09-17）：tail=最新 N 条（首屏不全量回放）；before_id=更早一页（升序）；
+  // sid 可选=会话维度分页（2026-09-23 直播间会话窗口）
+  eventsTail: (pid: string, limit = 50, sid?: string) =>
+    http<BBEvent[]>(`/api/projects/${pid}/events?tail=${limit}${sid ? `&session_id=${encodeURIComponent(sid)}` : ""}`),
+  eventsBefore: (pid: string, beforeId: number, limit = 50, sid?: string) =>
+    http<BBEvent[]>(`/api/projects/${pid}/events?before_id=${beforeId}&limit=${limit}${sid ? `&session_id=${encodeURIComponent(sid)}` : ""}`),
   sessions: (pid: string) => http<Session[]>(`/api/projects/${pid}/sessions`),
 
   // 黑板（人机共写，author=human）
@@ -126,6 +136,27 @@ export const api = {
   addAsset: (pid: string, type: string, value: string, meta: Record<string, unknown> = {}) =>
     http<Asset>(`/api/projects/${pid}/assets`, {
       method: "POST", body: JSON.stringify({ type, value, meta }),
+    }),
+
+  // ---------- 网络空间测绘（cyberspace-mapping M1+M2） ----------
+  fofaConfig: () => http<FofaConfig>("/api/fofa/config"),
+  saveFofaConfig: (body: { base_url?: string; key?: string }) =>
+    http<FofaConfig>("/api/fofa/config", { method: "PUT", body: JSON.stringify(body) }),
+  // info_my 免费；ok=false 时 error 文案可直接展示
+  fofaTest: () => http<FofaTestResult>("/api/fofa/test", { method: "POST" }),
+  // 消耗等量配额：size 由调用方显式选择并提示
+  fofaSearch: (pid: string, query: string, size: number, page = 1) =>
+    http<FofaSearchResult>(`/api/projects/${pid}/fofa/search`, {
+      method: "POST", body: JSON.stringify({ query, size, page }),
+    }),
+  assetImportPreview: (pid: string, file: File) => {
+    const form = new FormData()
+    form.append("file", file)
+    return httpUpload<ImportPreview>(`/api/projects/${pid}/assets/import/preview`, form)
+  },
+  assetImport: (pid: string, body: { source: string; rows: unknown[]; mapping?: string[] }) =>
+    http<ImportSummary>(`/api/projects/${pid}/assets/import`, {
+      method: "POST", body: JSON.stringify(body),
     }),
 
   // ---------- 逆向工作台（样本 / headless 缓存 / 人机共写） ----------
@@ -267,6 +298,18 @@ export const api = {
   // 黑板链路图（2026-09-20）：五类对象 × 类型分层 DAG
   boardGraph: (pid: string) =>
     http<BoardGraph>(`/api/projects/${pid}/board-graph`),
+  // 单站攻击链路图 v3（website-attack-path-graph，2026-09-24）：
+  // 目标 → 意图 → 收尾（漏洞/发现/死路），执行层展开
+  attackPath: (pid: string, target: string) =>
+    http<AttackPath>(`/api/projects/${pid}/attack-path?target=${encodeURIComponent(target)}`),
+  // 意图清单（人类收尾核对，?status=open/closed）
+  intents: (pid: string, status?: string) =>
+    http<IntentInfo[]>(`/api/projects/${pid}/intents${status ? `?status=${encodeURIComponent(status)}` : ""}`),
+  // 人类否决收尾：漏洞被证伪/有新证据 → 重开意图
+  reopenIntent: (pid: string, intentId: string, note = "") =>
+    http<IntentInfo>(`/api/projects/${pid}/intents/${encodeURIComponent(intentId)}/reopen`, {
+      method: "POST", body: JSON.stringify({ note }),
+    }),
   // 执行轨迹（execution-trace-chain M1，2026-09-22）：任务区间切分+过程聚合现算
   taskTrace: (pid: string, taskId: string) =>
     http<TaskTrace>(`/api/projects/${pid}/trace/${taskId}`),
@@ -285,6 +328,7 @@ export const api = {
     objective?: string; task_type?: string; noise_budget?: string;
     priority?: number; conflict_keys?: string[]
     role?: string  // v0.71：执行中任务仅可改角色（热换装，下个步进生效）
+    preferred_runtime?: string  // v23：任务默认运行时（''=重置；open/failed 可改）
   }) =>
     http<Task>(`/api/tasks/${taskId}`, {
       method: "PATCH", body: JSON.stringify(body),
@@ -293,10 +337,20 @@ export const api = {
     http<{ status: string; kicked?: string[] }>(`/api/tasks/${taskId}/reopen`, {
       method: "POST", body: JSON.stringify({ note: note ?? "", drop_scene }),
     }),
+  // M4 C1：人工取消任务（open/claimed → failed cancelled，打断在跑窗不关窗）
+  cancelTask: (taskId: string, reason = "") =>
+    http<{ task_id: string; status: string; interrupted: boolean }>(
+      `/api/tasks/${taskId}/cancel`, {
+        method: "POST", body: JSON.stringify({ reason }),
+      }),
   // C6 失败任务跨会话完整续跑：snapshot=⚡带现场复活 / transcript=↩接手现场续跑
   resumeTask: (taskId: string) =>
     http<{ task_id: string; session_id: string; status: string; resume_mode: "snapshot" | "transcript" }>(
       `/api/tasks/${taskId}/resume`, { method: "POST" }),
+  // F9 任务窗：双击任务卡直开窗（open 无绑=补绑待命窗 / 已绑=幂等挂回 / 终态=复盘窗）
+  spawnWindow: (taskId: string) =>
+    http<{ session_id: string; created: boolean }>(
+      `/api/tasks/${taskId}/spawn-window`, { method: "POST" }),
   deleteTask: (taskId: string) =>
     http<{ deleted: string }>(`/api/tasks/${taskId}`, { method: "DELETE" }),
   closeSession: (sid: string) =>
@@ -310,6 +364,14 @@ export const api = {
     }),
   abortSession: (sid: string) =>
     http<{ status: string }>(`/api/sessions/${sid}/abort`, { method: "POST" }),
+  // 会话中心化 M4：会话协作流（编排器+窗，delegate/derive/inbox/dm）
+  sessionGraph: (pid: string) =>
+    http<SessionGraph>(`/api/projects/${pid}/session-graph`),
+  // 会话中心化（§4.4）：中途换智能体——会话行身份更新 + 热换装，历史/黑板全保留
+  switchSessionRole: (sid: string, role: string) =>
+    http<Session>(`/api/sessions/${sid}/role`, {
+      method: "POST", body: JSON.stringify({ role }),
+    }),
   // C2 指挥编排器：一次性目标指令（**deprecated**：对话窗全替代，端点仅存兼容 CLI）
   orchDirective: (pid: string, text: string) =>
     http<{ event_id: number; job_id: string; status: string }>(
@@ -331,6 +393,16 @@ export const api = {
     http<{ status: string; persona?: OrchPersona }>(
       `/api/projects/${pid}/orchestrator/persona`, {
         method: "PUT", body: JSON.stringify(body),
+      }),
+  // 分阶段工作流（pentest-phased-workflow M4）：阶段条数据源 + 人工流转
+  // （人工最终不强制门；目标限当前阶段 next 清单内，违规 422）
+  projectPhase: (pid: string) =>
+    http<PhaseInfo>(`/api/projects/${pid}/phase`),
+  transitionPhase: (pid: string, to: string, reason?: string) =>
+    http<{ from: string; to: string; published: string[] }>(
+      `/api/projects/${pid}/phase`, {
+        method: "POST",
+        body: JSON.stringify({ to, ...(reason ? { reason } : {}) }),
       }),
   // C2 判据模板：内置 + 用户自定义（全局）
   judgmentTemplates: () =>
@@ -355,6 +427,17 @@ export const api = {
 
   // Agent / 编排
   models: () => http<ModelInfo>("/api/models"),
+  // 项目级 executor 模型覆写（TRAE 新壳 M3，2026-09-25）
+  executorLlm: (pid: string) => http<ExecutorLlmView>(
+    `/api/projects/${pid}/executor-llm`),
+  setExecutorLlm: (pid: string, provider: string, model?: string) =>
+    http<ExecutorLlmView & { touched_sessions: string[] }>(
+      `/api/projects/${pid}/executor-llm`, {
+        method: "PUT", body: JSON.stringify({ provider, model: model ?? null }),
+      }),
+  resetExecutorLlm: (pid: string) =>
+    http<ExecutorLlmView & { touched_sessions: string[] }>(
+      `/api/projects/${pid}/executor-llm`, { method: "DELETE" }),
   spawnAgent: (pid: string, role: string, sessionName?: string, model?: string,
                provider?: string, maxSteps?: number) =>
     http<Session & { warning?: string; job_id?: string }>(`/api/projects/${pid}/agents`, {
@@ -576,6 +659,13 @@ export const api = {
     http<{ status: string; count: number }>("/api/mcp", {
       method: "PUT", body: JSON.stringify({ servers }),
     }),
+
+  // 网关策略快照（gateway-config-view M1，DESIGN §7）：只读快照 + 手动重探测
+  gatewayConfig: () => http<GatewayConfig>("/api/gateway/config"),
+  // Agent 工具目录（只读静态全集+分组，设置页「工具」tab）
+  agentTools: () => http<AgentToolsResponse>("/api/agent-tools"),
+  gatewayProbe: () =>
+    http<CapabilityInventory>("/api/gateway/probe", { method: "POST" }),
 
   // LLM 供应商（DESIGN.md §8）
   llmProviders: () =>

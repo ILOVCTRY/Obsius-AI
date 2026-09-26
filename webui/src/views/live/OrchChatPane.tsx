@@ -48,12 +48,30 @@ function HumanBubble({ ev }: { ev: BBEvent }) {
   )
 }
 
+const WAKE_LABELS: Record<string, string> = {
+  "task.failed": "任务失败",
+  "task.starvation": "饿死/重绑告警",
+  "budget.soft_warning": "预算软警",
+  "phase.gate_open": "阶段出口门满足",
+}
+
 function OrchBubble({ ev, name }: { ev: BBEvent; name: string }) {
   const trace = traceOf(ev)
+  const p = ev.payload as { proactive?: unknown; triggers?: unknown } | null
+  const triggers = Array.isArray(p?.triggers)
+    ? p!.triggers.filter((x): x is string => typeof x === "string") : []
   return (
     <div className="flex justify-start pl-1" title={utcTitle(ev.created_at)}>
       <div className="max-w-[92%] rounded-2xl rounded-bl-sm bg-accent/40 px-3 py-1.5">
-        <p className="mb-0.5 text-[10px] text-muted-foreground">{name} · {fmtDateTimeMin(ev.created_at)}</p>
+        <p className="mb-0.5 text-[10px] text-muted-foreground">
+          {p?.proactive === true && (
+            <span className="mr-1 rounded bg-amber-500/20 px-1 py-px text-amber-400"
+              title={`异常订阅唤醒：${triggers.map(t => WAKE_LABELS[t] ?? t).join("、") || "异常事件"}`}>
+              🔔 主动唤醒
+            </span>
+          )}
+          {name} · {fmtDateTimeMin(ev.created_at)}
+        </p>
         <MarkdownView content={textOf(ev)} prefix={`orch-chat-${ev.id}`}
           className="max-h-96 overflow-auto text-sm leading-relaxed text-foreground/90" />
         {trace.length > 0 && (

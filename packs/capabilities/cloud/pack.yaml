@@ -1,0 +1,4 @@
+kind: capability
+name: cloud
+label: "云安全"
+description: "云平台与云原生攻防：六厂商服务（阿里/腾讯/华为/AWS/Azure/GCP）+ K8s/容器/Serverless/CI-CD（收编自 dsh-redteam-model，MIT © 2026 SeaOf0，版权声明见 kb/cloud/NOTICE.md）"

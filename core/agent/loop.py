@@ -24,9 +24,18 @@ from pathlib import Path
 from typing import Any
 
 from core.agent.retention import omitted_note, retain
-from core.agent.tools import AGENT_TOOLS, ToolDispatcher
+from core.agent.tools import (
+    AGENT_TOOLS,
+    HARD_REJECT_PREFIXES,
+    PLAN_GATE_PREFIX,
+    ToolDispatcher,
+    _CLOSING_MAX_ROUNDS,
+    _CONTROL_TOOLS,
+    _PLAN_TOOLS,
+)
 from core.autonomy import record_llm_usage
 from core.blackboard import Blackboard, TaskQueue
+from core.blackboard.intents import list_intents
 from core.llm.provider import LLMError
 from core.runtime.gateway import ExecutionGateway
 from core.skills import (
@@ -52,6 +61,35 @@ CHAT_TOOLS: list[dict[str, Any]] = [t for t in AGENT_TOOLS if t.get("name") != "
 # 消息重发；上限 2 次，仍截断才放给 _fail_task_on_error。
 _CHAT_TRUNC_RETRIES = 2
 
+# E2 硬拒绝熔断阈值（orchestrator-efficiency，2026-09-22；2026-09-24 口径重构，
+# plan-gate-breaker-refine）：连续 N 个**模型步**含硬拒绝（越界/网关/服务端拒收，
+# tools.HARD_REJECT_PREFIXES）= 撞闸循环（行为错误）。计数单位从「回执张数」改为
+# 「模型步」——并行批 3 张拒绝票只计 1，模型始终拿到下一轮改道机会；任何不含硬
+# 拒绝的步（含纯文本步）清零。触发即置 awaiting_human 走 C1 挂起
+# （快照+fail(awaiting_human)+人工承接），不是 budget paused（拒绝循环是行为错误
+# 不是预算问题，宁严勿松交人工）。
+_REJECT_BREAK_LIMIT = 3
+
+# 计划闸教练阈值（2026-09-24）：同一任务累计 N 个**模型步**含计划闸回执 →
+# 进入 plan-only 模式（工具面收缩 + 强提示注入）；模式内下一步末计划仍空 → 挂人。
+_PLAN_GATE_STEPS = 2
+_PLAN_ONLY_NUDGE = (
+    "【强提示】你已两次在未写计划的情况下尝试实质动作并被计划闸挡回。"
+    "下一步**只能调用 task_plan** 写下本任务的解决计划（3-8 个可验证小步）；"
+    "其余工具已临时收回。若确实无法规划，任务将挂起交由人类承接。")
+
+# plan-only 模式下发给 LLM 的工具面：计划原语 + 收尾控制原语
+_PLAN_ONLY_TOOL_NAMES = _PLAN_TOOLS | _CONTROL_TOOLS
+
+# stuck-convergence D9（2026-09-24）：观察窗到期但仍在活跃探索时的静默延长上限。
+# 真打转 12 步照走顾问链；活跃长任务最多延 2 个窗（12/24 步不打断），之后顾问
+# 介入、第 60 步硬闸兜底——断路器始终不拆。
+_STUCK_MAX_EXTENSIONS = 2
+# M6 F1 高质量复盘档（orchestrator-efficiency §0-11）：done 零产出但收尾总结
+# ≥500 字 → 只复盘；每会话上限 1 条防刷量（内存计数，重启清零可接受——人工审批关兜底）
+_SEDIMENT_LITE_MIN_NOTE = 500
+_SEDIMENT_LITE_CAP = 1
+
 # ■ 收件箱订阅声明（2026-09-21）：kind → 消费场景。四处消费点（认领期 claim /
 # 恢复期 resume / 步边界 step / 对话轮 chat）统一从 AgentSession._drain_inbox
 # 取信，渲染顺序=表内声明序；新增 kind 必须先在此登记——未登记的私信滞留
@@ -63,6 +101,8 @@ _INBOX_SUBSCRIPTIONS: dict[str, tuple[str, ...]] = {
     "basis_stale": ("claim", "resume", "step"),
     "finding_update": ("claim", "resume", "step"),
     "escalation_result": ("claim", "resume", "step", "chat"),
+    "authorization_result": ("claim", "resume", "step", "chat"),
+    "approval_rejected": ("claim", "resume", "step", "chat"),
     "human_note": ("claim", "resume", "chat"),
     "agent_message": ("claim", "resume", "step", "chat"),
     "task_receipt": ("claim", "resume", "step", "chat"),
@@ -101,13 +141,24 @@ STRICT_PROMPT_TAIL = """
 8. 工具调用策略：无依赖的调用在同一轮**并行发出**（如同时查多个资产、多个 kb 模块）；
    专用工具优先于 run_cmd 拼命令（查黑板走 bb_query、查知识库走 kb_search/kb_open、
    查路由索引走 route_lookup）；大段正文按需取用（技能正文 skill_open），不要凭记忆复述文档。
-9. 执行环境速查：cwd 已由服务端固定到本项目 scratch（host 与 wsl 均是）——命令一律
-   **用相对路径，禁止手动 cd**（尤其不要拼 cd /mnt/...）。runtime 语义：host=宿主
-   原生（Windows 上是 PowerShell，sed/awk 等 unix 语法在此不可用）；wsl=bash + unix
-   工具链（sed/grep/objdump，进程启动与盘 IO 有开销，纯文本读取优先 host 原生）；
-   docker/sandbox=不可信样本执行（铁律：样本绝不跑 host/wsl）。run_cmd 输出上限
+9. 执行环境速查：cwd 已由服务端固定到本项目 scratch（host/wsl/docker 均是，docker
+   容器内对应 /workspace/scratch）——命令一律 **用相对路径，禁止手动 cd**（尤其不要拼
+   cd /mnt/...）。runtime 语义：docker=Linux 渗透工具箱（bash + nmap/sqlmap/dirsearch/
+   ffuf/python3 全套，能力清单显示 pentest-box 镜像就绪时渗透/扫描/文本命令首选）；
+   host=宿主原生（Windows 上是 PowerShell，sed/awk 等 unix 语法在此不可用——仅 Windows
+   目标特调）；wsl=bash + unix 工具链（docker 不可用时的兜底）；sandbox=加固沙箱
+   （不可信/活体样本；铁律：样本绝不跑 host/wsl）。run_cmd 输出上限
    2000 字符（截断有标注，不要靠语义猜）；读工作区文件用 read_file（带行号、可分段）；
    超大工具结果自动落盘 spill/（回填含定位器，按提示分段取回）。
+10. **意图纪律（渗透链路图，思考→规划→执行→收尾）**：渗透/红队每开一个探测方向，
+    先 declare_intent 把规划落成一句可证伪假设（如「验证 /admin 是否存在未授权
+    访问」，basis_refs 写推导依据），再围绕它执行；http/工具动作按时间归入该意图
+    （执行层是图的展开细节）。**每个意图必须 close_intent 收尾，三选一**：
+    vuln（漏洞，引用已登记的非误报 vuln 发现）/ finding（有效发现，引用非误报
+    intel 发现，一意图可挂多条同类发现）/ dead_end（死路：写清死因+至少一条
+    http:/event: 证据引用，且零发现）。证据不足就保持 open（宁严勿松）——
+    收尾所依据的发现后来被标误报、或有新证据，先 reopen_intent 重开再收。
+    不得留下悬挂意图（会话现场会列出未收尾项）。
 """
 
 # G3 结构化摘要压缩（2026-09-19，对齐 Claude Code /compact 与 HackSynth）：
@@ -143,7 +194,10 @@ class AgentConfig:
     # G3 结构化摘要压缩触发阈值（2026-09-19）：超过即把旧历史经 LLM 压成九要素
     # 摘要（近 8 条逐字保留）；硬上限仍由 context_char_budget 的机械 _trim 兜底
     context_summary_chars: int = 60_000
-    stuck_after: int = 8          # 连续 N 步无进展 → 召唤策略顾问
+    stuck_after: int = 12         # 连续 N 步无进展 → 召唤策略顾问（2026-09-24：8→12，用户拍板）
+    # D10（2026-09-24）：D9 静默延长上限与 D6 收尾确认轮项目级可配
+    stuck_max_extensions: int = _STUCK_MAX_EXTENSIONS  # 0=关闭活跃探索静默延长
+    closing_max_rounds: int = _CLOSING_MAX_ROUNDS      # 0=首次 complete 申报即放行
     owner_tags: list[str] = field(default_factory=list)
     rule_profiles: dict | None = None     # F11：评级/owner 生效档案三态（None=缺省自动）
     # 角色增强（§6.6，由 yaml 注入；None = 不限制）
@@ -416,6 +470,8 @@ class AgentSession:
             allowed_tools=self.config.allowed_tools, max_runtime=self.config.max_runtime,
             allowed_task_types=load_task_types(self.packs_root, track).keys(),
             max_steps=self.config.max_steps,
+            stuck_after=self.config.stuck_after,
+            closing_max_rounds=self.config.closing_max_rounds,
             abort_event=self._abort_req,
             role_skills=self.role.get("skills"),
             allowed_roles=allowed_roles,
@@ -448,6 +504,16 @@ class AgentSession:
         self._salvage_ctx: dict[str, Any] | None = None
         self.paused = False            # 暂停态（含快照暂停与空闲暂停），恢复/中断后复位
         self._stop_after_task = False  # 硬中断后让 worker 循环退出的一次性闸门
+        # E2 硬拒绝熔断计数：连续含硬拒绝的模型步数（每任务复位，见 _loop_body 开头）
+        self._reject_streak = 0
+        # 计划闸教练计数：含计划闸回执的模型步数（每任务/计划落黑板时复位）
+        self._plan_gate_count = 0
+        # stuck-convergence D1：卡死波次（每任务复位）——第 1 轮召唤顾问，
+        # 第 2 轮不再召唤、升级停轮保护（宁停不烧，见 _stuck_escalate）
+        self._stuck_waves = 0
+        # stuck-convergence D9：活跃探索静默延长次数（每任务复位，上限见常量；
+        # 观察窗到期但命令/读文件在演进 → 延长不叫顾问，见 _active_exploration）
+        self._stuck_extensions = 0
         # 批 5（§6.8）：worker 退出原因信号——True=最后一次 claim 队列为空（可触发
         # L2 续 tick）；暂停/中断退出保持 False。run_next_task 每次认领前置 False。
         self.last_claim_idle = False
@@ -585,10 +651,62 @@ class AgentSession:
              "from": prev, "to": want, "reason": "role-change"},
             session_id=self.session["id"], author=self.session["id"])
 
+    def switch_session_role(self, role: str, reason: str = "manual-switch") -> bool:
+        """会话级中途换人（会话中心化 §4.4）：重定义「这个窗是谁」——区别于
+        apply_role_change（改在跑委托的建议角色、委托完恢复底色）：本切换把底色
+        身份本身重定义，**跨委托保留**，对话历史与黑板全保留。
+
+        - 无换装层（idle/对话态）：直接按新专家重装配底色 config/dispatcher。
+        - 有换装层（委托在跑）：换装层换为新身份接手当前委托，saved 底色同步
+          重定义并落具体边界（否则收尾 _restore_base_persona 回旧底色/空边界）。
+        专家不存在 → ValueError（API 层转 422）；同名/空 → no-op 返 False。"""
+        want = str(role or "").strip()
+        if not want or want == self.role_name:
+            return False
+        if not expert_exists(self.packs_root, want, self.track):
+            raise ValueError(f"专家不在池内或不可服务该轨: {want}")
+        rd = load_expert(self.packs_root, want, self.track)
+        prev = self.role_name
+        task_id = self.dispatcher.current_task_id
+        if self._persona_saved is not None:
+            # 委托在跑：不重存底色，换装层直接换身份；saved 底色一并重定义
+            s = self._persona_saved
+            s["role_name"] = want
+            s["role"] = rd
+        # 当前身份重装配（底色或换装层同一套四面）
+        self.role_name, self.role = want, rd
+        self.config.max_noise = None
+        self.config.allowed_tools = None
+        self.config.max_runtime = None
+        self._apply_role_limits(rd)
+        self.dispatcher.allowed_tools = self.config.allowed_tools
+        self.dispatcher.max_runtime = self.config.max_runtime
+        self.dispatcher.current_persona_role = want
+        if self._persona_saved is not None:
+            # 存具体边界（restore 不重跑 _apply_role_limits）
+            s = self._persona_saved
+            s["max_noise"] = self.config.max_noise
+            s["allowed_tools"] = (
+                list(self.config.allowed_tools) if self.config.allowed_tools else None)
+            s["max_runtime"] = self.config.max_runtime
+            s["dispatcher_allowed_tools"] = self.dispatcher.allowed_tools
+            s["dispatcher_max_runtime"] = self.dispatcher.max_runtime
+        self._persona_dirty = True
+        self.bb.append_event(
+            self.project_id, "session.persona_switched",
+            {"session_id": self.session["id"], "task_id": task_id,
+             "from": prev, "to": want, "reason": reason},
+            session_id=self.session["id"], author=self.session["id"])
+        return True
+
     # ---------- 系统提示 ----------
 
-    def build_system_prompt(self, objective: str, skill_context: str = "") -> str:
-        parts = [
+    def build_system_parts(self, objective: str, skill_context: str = "") -> tuple[str, str]:
+        """system 拆分（M1 prompt caching，2026-09-23）：stable=规则链+角色+能力
+        清单（会话生命周期内稳定，换装后变一次缓存 miss 一次可接受）；dynamic=
+        技能指引+任务目标+纪律尾（每任务变化，置于缓存断点之后不破稳定前缀）。
+        组装内容与顺序同旧 build_system_prompt，纯拆分零语义变化。"""
+        stable_parts = [
             build_rules_preamble(
                 self.packs_root, track=self.track, capabilities=self.capabilities,
                 owner_tags=self.config.owner_tags, role=self.role_name,
@@ -596,12 +714,28 @@ class AgentSession:
             self._role_block(),
         ]
         if self.capability_prompt:
-            parts.append(self.capability_prompt)
+            stable_parts.append(self.capability_prompt)
+        dynamic_parts: list[str] = []
         if skill_context:
-            parts.append(f"# 技能指引\n{skill_context}")
-        parts.append(f"# 当前任务\n{objective}")
-        parts.append(STRICT_PROMPT_TAIL)
-        return "\n\n".join(parts)
+            dynamic_parts.append(f"# 技能指引\n{skill_context}")
+        dynamic_parts.append(f"# 当前任务\n{objective}")
+        dynamic_parts.append(STRICT_PROMPT_TAIL)
+        return "\n\n".join(stable_parts), "\n\n".join(dynamic_parts)
+
+    def build_system_blocks(self, objective: str, skill_context: str = "") -> list[dict]:
+        """M1 prompt caching（retrieval-upgrade，2026-09-23）：system 两块——
+        stable 大块末尾打 cache_control ephemeral 断点（Anthropic 协议显式缓存
+        标记，Ark 前缀缓存同按前缀命中），dynamic 每任务变化不破稳定前缀。
+        provider 侧网关拒收 cache_control 自动降级（400 文案匹配）。"""
+        stable, dynamic = self.build_system_parts(objective, skill_context)
+        return [
+            {"type": "text", "text": stable, "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": dynamic},
+        ]
+
+    def build_system_prompt(self, objective: str, skill_context: str = "") -> str:
+        stable, dynamic = self.build_system_parts(objective, skill_context)
+        return f"{stable}\n\n{dynamic}"
 
     def _role_block(self) -> str:
         """角色块：职责（description）+ 人设（persona）+ 软边界自陈。"""
@@ -684,10 +818,13 @@ class AgentSession:
             route_hits = []
         route_block = ""
         if route_hits:
-            rlines = "\n".join(f"- 「{k}」→ {', '.join(ps)}" for k, ps in route_hits)
+            rrows = []
+            for k, ps, dir_total in route_hits:
+                note = f"（目录共 {dir_total} 篇，更多用 kb_search）" if dir_total else ""
+                rrows.append(f"- 「{k}」→ {', '.join(ps)}{note}")
             route_block = (
-                "\n\n## 🧭 知识库任务导航（按任务类型静态路由；kb_open 打开）\n"
-                f"{rlines}")
+                "\n\n## 🧭 知识库任务导航（按任务类型静态路由；kb_open 打开下列具体文件）\n"
+                + "\n".join(rrows))
         # 🧭 测试点路由索引 Top-K 注入（G1 2026-09-19：全表 222 行 → 最相关 3-5 行，
         # 其余经 route_lookup 工具查询；条目 tags 与角色白名单裁剪口径不变）
         try:
@@ -696,10 +833,11 @@ class AgentSession:
         except Exception:  # 索引失败不影响技能路由主链
             index_block, index_count, index_total, route_points = "", 0, 0, []
         sources = [{"id": s.id, "domain": s.root.name, "root": str(s.root)}
-                   for s in load_kb_sources(self.packs_root, self.capabilities)]
+                   for s in load_kb_sources(self.packs_root, self.capabilities)
+                   if s.root.is_dir()]
         source_json = json.dumps(sources, ensure_ascii=False)
         kb_hits = [e.module for e, _sec in hint_pairs]
-        kb_hits += [p for _, ps in route_hits for p in ps]
+        kb_hits += [p for _k, ps, _d in route_hits for p in ps]
         if not hits:
             self.bb.append_event(
                 self.project_id, "skill.routed",
@@ -830,7 +968,7 @@ class AgentSession:
             task_type=(task or {}).get("task_type") if task_id else None,
             scope=(task or {}).get("scope") if task_id else None)
         self._last_skill_context = skill_ctx  # v0.71：热换装重建 system 时复用
-        system = self.build_system_prompt(objective, skill_ctx)
+        system = self.build_system_blocks(objective, skill_ctx)
         # C6：复活时 messages 整体取快照（不与 transcript 拼接，防 tool_use/result
         # 错位）；否则 C10 transcript 接手（末 60 条）。E8 resume 路径不经 run_task，互斥。
         transcript_msgs: list[dict[str, Any]] = []
@@ -875,6 +1013,14 @@ class AgentSession:
                 messages.append({"role": "user", "content":
                     "📎 任务附件（可用 run_cmd 读取，只读勿改写，工作区相对路径）：\n"
                     + "\n".join(att_lines)})
+            pref_runtime = str(task.get("preferred_runtime") or "") if task_id else ""
+            if pref_runtime:
+                # v23（TRAE 新壳 M3）：任务默认运行时——run_cmd 省略 runtime 即按此
+                # 执行；单条命令显式传 runtime 仍可临时覆盖（max_runtime 软上限照常）
+                messages.append({"role": "user", "content":
+                    f"🎛️ 本任务默认执行运行时={pref_runtime}：run_cmd 可省略 runtime"
+                    f"（按 {pref_runtime} 执行）；单条命令确需其他运行时时显式传 "
+                    "runtime 即临时覆盖（仍受角色 max_runtime 约束）。"})
             messages.append({"role": "user", "content": objective})
         if task_id:
             self._checkpoint_task_transcript(messages, objective)  # 认领即有现场
@@ -887,25 +1033,34 @@ class AgentSession:
             raise
         if summary is None:  # 暂停（心跳保留，继续占任务）/中断（_abort_current_task 已停心跳）
             return ""
-        self._finalize()
+        if self.dispatcher.finished:
+            self._finalize()
+            return summary
+        # 委托收尾、会话存活：先恢复底色 persona（防带任务角色待命），再把
+        # 「委托目标 + 收尾摘要」沉淀进会话对话历史——后续对话轮即带本件上下文
+        # （格式与 run_chat 问答对一致）。
+        self._restore_base_persona()
+        self._append_chat_to_session(
+            [f"🧭 委托：{objective}"],
+            summary or self.dispatcher.last_delegation_note or "委托已收尾")
         return summary
 
-    def run_next_task(self, only_task: str | None = None,
-                      assigned_only: bool = False) -> str | None:
-        """Worker 循环入口：认领下一个匹配角色 task_types 的任务并执行。
+    def run_session(self) -> str | None:
+        """会话轮（会话中心化编排，docs/plans/session-centric-orchestration.md §4.2）：
+        ① 窗内有 open 委托 → 取队首起跑执行（完整工具面）；
+        ② 无委托但收件箱有可回应消息 → 对话回应（工具面一致）；
+        ③ 都没有 → None 空退（窗回待命，事件驱动，非常驻进程）。
+        委托做完由 worker while 再入本方法，自动接窗内队列下一件。
+
         暂停/中断请求 → 不领新任务并落状态；有快照 → 优先续跑被暂停的任务。
-        C10：快照续跑（E8）不经 run_task，与任务现场（transcript）接手路径天然互斥。
-        v0.71 任务即窗口：only_task 非空 = 绑定窗只认领自己绑定的任务（一窗一
-        任务核心闸，SQL 侧过滤无竞态）；跑完即空，不进公共池续单。
-        v0.72 全局一窗一任务：assigned_only=True（无绑定手动窗挡位）——公共池
-        认领机制退役，只认领显式指派给本窗的任务（实际恒空）。"""
-        self._restore_base_persona()  # v14 兜底闸：任何遗漏恢复路径不得带 persona 认领新任务
+        快照续跑（E8）不经 run_task，与任务现场（transcript）接手路径天然互斥。"""
+        self._restore_base_persona()  # v14 兜底闸：任何遗漏恢复路径不得带 persona 接新委托
         if self._abort_req.is_set():
             self._abort_current_task()   # 空闲路径：无任务则只清标志 + 落审计
             return None
         if self._pause_req.is_set():
             self._pause_req.clear()
-            self._enter_paused()         # 任务间暂停：无快照，恢复后正常认领
+            self._enter_paused()         # 任务间暂停：无快照，恢复后正常取队列
             return None
         if self._stop_after_task or self.paused:
             self._stop_after_task = False
@@ -933,6 +1088,15 @@ class AgentSession:
                 notices, _dr = self._drain_inbox("resume")
                 for _kind, notice in notices:
                     st["messages"].append({"role": "user", "content": notice})
+                pending_intents = st.get("open_intents") or []
+                if pending_intents:  # 意图纪律①：续跑即提醒照单收尾
+                    lines = "\n".join(
+                        f"- {it.get('statement', '')}（{it.get('id', '')}）"
+                        for it in pending_intents[:10]
+                        if isinstance(it, dict))
+                    st["messages"].append({"role": "user", "content":
+                        f"🧾 收尾提醒：本项目有 {len(pending_intents)} 个意图未收尾，"
+                        f"续跑中必须逐个 close_intent：\n{lines}"})
                 try:
                     summary = self._loop(st["system"], st["messages"], st["objective"],
                                          start_step=st["next_step"])
@@ -941,49 +1105,63 @@ class AgentSession:
                     raise
                 if summary is None:
                     return None          # 恢复后立刻又被暂停/中断
-                self._finalize()
+                if self.dispatcher.finished:
+                    self._finalize()
+                else:  # 委托收尾、会话存活：恢复底色 + 沉淀进会话对话历史
+                    self._restore_base_persona()
+                    self._append_chat_to_session(
+                        [f"🧭 委托：{st['objective']}"],
+                        summary or self.dispatcher.last_delegation_note or "委托已收尾")
                 return summary
-            # 快照失效（租约被回收/他人持有）：丢弃快照，落到正常认领
-        self.last_claim_idle = False  # 进入认领：暂停/中断早退路径不得残留旧 True
-        task_id = self.tq.claim_next(
+            # 快照失效（租约被回收/他人持有）：丢弃快照，落到正常取队列
+        self.last_claim_idle = False  # 进入会话轮：暂停/中断早退路径不得残留旧 True
+        task_id = self.tq.take_session_next(
             self.project_id, self.session["id"],
-            lease_minutes=self.config.lease_minutes,
-            session_role=self.base_role_name,  # 偏好排序：底色匹配任务优先，无过滤
-            only_task=only_task,  # v0.71：绑定窗锁死只认领自己任务
-            assigned_only=assigned_only)  # v0.72：手动窗不进公共池（认领机制退役）
-        if task_id is None:
-            self.last_claim_idle = True  # 批 5：仅这种退出才允许触发 L2 续 tick
-            return None
-        task = self.tq.get_task(task_id)
-        try:
-            return self.run_task(task["objective"], task_id=task_id)
-        except Exception as e:
-            # 覆盖 run_task 内认领后、_loop 前的异常窗口（_fail_task_on_error 幂等，
-            # _loop 内已兜过则此处只重复停心跳）
-            self._fail_task_on_error(e)
-            raise
+            lease_minutes=self.config.lease_minutes)
+        if task_id is not None:
+            task = self.tq.get_task(task_id)
+            try:
+                return self.run_task(task["objective"], task_id=task_id)
+            except Exception as e:
+                # 覆盖 run_task 内起跑后、_loop 前的异常窗口（_fail_task_on_error 幂等，
+                # _loop 内已兜过则此处只重复停心跳）
+                self._fail_task_on_error(e)
+                raise
+        # 无委托：对话回应——无消息可回应 → run_chat None → 真空闲空退
+        reply = self.run_chat()
+        if reply is not None:
+            return reply
+        # 真空闲：DB 状态回 idle（旧流路由 _finalize 落，现委托收尾不结束会话，
+        # 在此统一落）。closed/paused 不覆盖。
+        cur = self.bb.get_session(self.session["id"])
+        if (cur or {}).get("status") not in ("closed", "paused"):
+            try:
+                self.bb.set_session_status(self.session["id"], "idle")
+            except Exception:  # noqa: BLE001
+                log.exception("set_session_status(idle) 失败")
+        self.last_claim_idle = True  # 批 5：仅真空闲退出才允许触发 L2 续 tick
+        return None
 
-    def run_chat(self, task_id: str | None = None) -> str | None:
-        """空闲对话轮（2026-09-19，E8 引导通道补完）：队列无任务可认领且收件箱有
-        未读 human_note 时，直接对话——drain 引导 → LLM 循环（可带工具查黑板/
-        知识库/资产）→ 纯文本回复落 `agent.chat` 事件并返回文本。
+    def run_chat(self) -> str | None:
+        """会话对话轮（会话中心化编排，docs/plans/session-centric-orchestration.md
+        §4.2）：窗内无 open 委托且收件箱有可回应消息（human_note 人类引导 /
+        agent_message 私信 / 回执等，口径走 _INBOX_SUBSCRIPTIONS chat 档）时，
+        drain 消息 → LLM 循环（完整工具面，与委托轮一致）→ 纯文本回复落
+        agent.chat 事件并返回文本。
 
-        v0.71 延续模式（2026-09-20）：task_id 非空（绑定窗终态续聊）时先从 C10
-        任务现场文件（task-<tid>.json，每步落盘）载入末 60 条既往对话作为上下文，
-        回合结束把本次问答**回写现场文件**——续聊跨轮、跨重启不丢上下文。
-
-        会话窗对话化（2026-09-20 一期）：非绑定窗历史改存会话级 chat-<sid>.json
-        （同样末 60 条、轮末回写问答对）；回复流式（stream_text=True，
+        历史统一存会话级 chat-<sid>.json（末 60 条上下文、轮末回写问答对；
+        已完成委托的「目标+收尾摘要」由 run_task 收尾时沉淀进同一文件，对话
+        天然带着干过的活的上下文）。回复流式（stream_text=True，
         agent.chat.delta 过渡行 + 终稿清剪）；步数上限
-        min(dispatcher.max_steps, config.chat_max_steps)；干活纪律放开——有价值的
-        阶段性结论可 bb_add_finding 入图（对话轮产 finding 无任务上下文 → 无
-        basis 边，图上以 targets/relates_to 连通，DESIGN §6）。
+        min(dispatcher.max_steps, config.chat_max_steps)；干活纪律：有价值的
+        阶段性结论 bb_add_finding 入图（无委托上下文 → 无 basis 边，图上以
+        targets/relates_to 连通，DESIGN §6）。
 
-        返回 None = 无引导可回应 / 暂停·中断置位不消费 / 对话中被中断（drain 掉
-        的引导已消费、回复丢弃）。与任务轮互斥点：不认领任务、不落快照、不起
-        心跳、不动 dispatcher.current_task_id / finished / awaiting_human；
-        finish 不在 CHAT_TOOLS，纯文本回复即终止。worker 在本方法返回非 None 后
-        continue 再认领——空闲期连发多条引导逐轮回应，天然成连续对话。"""
+        返回 None = 无消息可回应 / 暂停·中断置位不消费 / 对话中被中断（drain
+        掉的消息已消费、回复丢弃）。本方法不落快照、不起心跳、不动
+        dispatcher.current_task_id / finished；finish 不在 CHAT_TOOLS，纯文本
+        回复即终止。worker while 在返回非 None 后再入会话轮——连发消息逐轮回
+        应，天然成连续对话。"""
         if self._abort_req.is_set() or self._pause_req.is_set() or self.paused:
             return None  # 暂停/中断/暂停态：不消费引导（留给任务轮/恢复期）
         # 收件箱消费口径统一走订阅声明表 _INBOX_SUBSCRIPTIONS（2026-09-21）：对话
@@ -996,29 +1174,22 @@ class AgentSession:
         note_text = "\n".join(
             str((r.get("payload") or {}).get("text", "")).strip()
             for r in drained if r.get("kind") == "human_note").strip()
-        # 历史上下文分流（2026-09-20 对话化）：绑定窗=任务现场文件（v0.71）；
-        # 非绑定窗=会话级 chat 文件。sanitize_snapshot_tail 截掉末尾悬空 tool_use
-        # 半对防 API 拒；损坏/缺失 → 空降级，行为同首轮
-        history: list[dict[str, Any]] = []
-        hist_label = "本会话"
-        if task_id:
-            history = sanitize_snapshot_tail(self._load_task_transcript(task_id))
-            hist_label = "本任务"
-        else:
-            history = sanitize_snapshot_tail(self._load_session_chat())
+        # 历史：会话级 chat 文件（含已完成委托的沉淀问答对）。sanitize_snapshot_tail
+        # 截掉末尾悬空 tool_use 半对防 API 拒；损坏/缺失 → 空降级，行为同首轮。
+        history = sanitize_snapshot_tail(self._load_session_chat())
         if history:
-            chat_mode = (f"延续模式：以下是{hist_label}既往对话记录（截尾保留），"
-                         "接着此上下文回应人类引导；可继续用工具查黑板/读工作区文件。"
-                         "不认领任务、不改资产终态；有价值的阶段性结论随手 bb_add_finding"
-                         " 登记（带 evidence，relates_to 串起推导链自动上图；没验证过的"
-                         "标 unverified）。干完必须给人类文字结论。回答简洁，直接回应人类。")
+            chat_mode = ("延续模式：以下是本会话既往对话记录（截尾保留，含此前委托的"
+                         "收尾摘要），接着此上下文回应；可继续用工具查黑板/读工作区文件、"
+                         "跑命令核实。有价值的阶段性结论随手 bb_add_finding 登记（带 "
+                         "evidence，relates_to 串起推导链自动上图；没验证过的标 "
+                         "unverified）。干完必须给人类文字结论。回答简洁，直接回应人类。")
         else:
             chat_mode = ("与人类直接对话（Claude Code 式工作窗）：回答引导/提问，需要时"
                          "用工具查黑板（资产/发现/事件/知识库）或跑命令核实再作答。"
-                         "不认领任务、不改资产终态；有价值的阶段性结论随手 bb_add_finding"
-                         " 登记（带 evidence，relates_to 串起推导链自动上图；没验证过的"
-                         "标 unverified）。干完必须给人类文字结论。回答简洁，直接回应人类。")
-        system = self.build_system_prompt(chat_mode, self.skill_context_for(note_text))
+                         "有价值的阶段性结论随手 bb_add_finding 登记（带 evidence，"
+                         "relates_to 串起推导链自动上图；没验证过的标 unverified）。"
+                         "干完必须给人类文字结论。回答简洁，直接回应人类。")
+        system = self.build_system_blocks(chat_mode, self.skill_context_for(note_text))
         messages: list[dict[str, Any]] = list(history)
         messages.append({"role": "user", "content": "\n".join(parts)})
         final_text: str | None = None
@@ -1067,34 +1238,10 @@ class AgentSession:
                 messages.append(self.llm.tool_result_message(tc, result_text))
             self._trim(messages)
         if final_text:
-            # 问答对回写历史（下轮续聊/重启后仍带全上下文）；本轮带工具的中间步
-            # 不回写（只留问答对）。绑定窗→任务现场文件（v0.71 原样）；
-            # 非绑定窗→会话级 chat 文件（2026-09-20 对话化新增）
-            if task_id:
-                self._append_chat_to_transcript(task_id, parts, final_text)
-            else:
-                self._append_chat_to_session(parts, final_text)
+            # 问答对回写会话历史（下轮对话/重启后仍带全上下文）；本轮带工具的
+            # 中间步不回写（只留问答对）。
+            self._append_chat_to_session(parts, final_text)
         return final_text
-
-    def _append_chat_to_transcript(self, task_id: str, notes: list[str],
-                                   reply: str) -> None:
-        """延续模式：把一轮续聊问答追加进 task-<tid>.json 现场文件（原子写，
-        失败降级不影响回复送达）。messages 只追加 user/assistant 两条。"""
-        path = task_transcript_path(self.artifacts_dir, task_id)
-        if path is None or not path.exists():
-            return
-        try:
-            st = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(st, dict) or st.get("task_id") != task_id \
-                    or not isinstance(st.get("messages"), list):
-                return
-            st["messages"].append({"role": "user", "content": "\n".join(notes)})
-            st["messages"].append({"role": "assistant", "content": reply})
-            tmp = path.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
-            os.replace(tmp, path)
-        except Exception:  # noqa: BLE001
-            log.exception("续聊问答回写任务现场失败（任务 %s）", task_id)
 
     def _load_session_chat(self) -> list[dict[str, Any]]:
         """会话级对话历史（2026-09-20 对话化）：非绑定窗 run_chat 的上下文来源。
@@ -1140,7 +1287,8 @@ class AgentSession:
         except Exception:  # noqa: BLE001
             log.exception("会话对话历史回写失败（会话 %s）", self.session["id"])
 
-    def _chat_interruptible(self, messages: list[dict[str, Any]], *, system: str,
+    def _chat_interruptible(self, messages: list[dict[str, Any]],
+                            *, system: str | list[dict[str, Any]],
                             tools: list[dict[str, Any]],
                             stream_text: bool = False, step: int | None = None):
         """■ 即点即停（2026-09-19）：chat 在旁路线程跑，主线程每 0.3s 查 abort——
@@ -1408,7 +1556,10 @@ class AgentSession:
         清除，只有异常路径保留给 `_fail_task_on_error` 消费。"""
         self._live_state = {"system": system, "messages": messages,
                             "objective": objective}
-        self._salvage_ctx = {"objective": objective, "messages": messages}
+        # system 字段供 429 挂起快照（_fail_task_on_error LLMError 分支，
+        # 2026-09-22）——_salvage_attempt 不读它，多带字段无害
+        self._salvage_ctx = {"objective": objective, "messages": messages,
+                             "system": system}
         try:
             result = self._loop_body(system, messages, objective, start_step)
         finally:
@@ -1428,14 +1579,24 @@ class AgentSession:
         # 首步命中 stale finished → 返回旧总结并被 _finalize 误标失败）
         self.dispatcher.finished = False
         self.dispatcher.awaiting_human = False
+        self.dispatcher.plan_only_mode = False
         self.dispatcher.summary = ""
+        self.dispatcher.delegation_just_finished = False  # 委托收尾信号随委托复位
+        self.dispatcher.last_delegation_note = ""
+        self.dispatcher._finish_open_intents_ack = False  # 意图纪律①确认态随任务复位
+        self._reject_streak = 0  # E2 硬拒绝熔断计数随任务复位
+        self._plan_gate_count = 0  # 计划闸教练计数随任务复位
+        self._stuck_waves = 0  # D1 卡死波次随任务复位
+        self._stuck_extensions = 0  # D9 活跃探索延长次数随任务复位
+        # D6 收尾确认轮状态随任务复位（上一任务残留的确认态不得带进新任务）
+        self.dispatcher.reset_closing()
         # while 而非 range（E8）：request_steps 在步内增补预算后，循环上界随之
         # 前移——耗尽轮当场自救（步号不增）也成立，不会因 range 预计算被截断。
         while step <= max_steps:
             if self._persona_dirty:
                 # v0.71 中途改角色热换装：下个步进前重建 system prompt
                 #（config/dispatcher 边界已在 apply_role_change 即时生效）
-                system = self.build_system_prompt(objective, self._last_skill_context)
+                system = self.build_system_blocks(objective, self._last_skill_context)
                 self._persona_dirty = False
             self.dispatcher.set_step(step)
             # 步数感知（E8）：剩余 <20 步起每步边界注入提醒——模型对预算无感是
@@ -1446,12 +1607,33 @@ class AgentSession:
                     f"⏳ 预算剩余 {remaining} 步，请规划收尾；如确需更多步数，"
                     "调 request_steps 申请增补（一次 +200，剩余 ≤20 步才放行）。"})
             if self._stuck(step):
-                messages.append({"role": "user", "content": self._advisor_prompt(messages, objective)})
-                self.dispatcher.last_progress_step = step  # 顾问干预后重置观察窗
+                if self._stuck_waves >= 2:
+                    # D7 硬闸：顾问裁决「继续」后又干满一个观察窗仍无进展——
+                    # 机械终止兜底（断路器不拆），awaiting_human 由下方 C1 分支落快照
+                    self._stuck_escalate(step)
+                elif self._stuck_waves == 1:
+                    # D7：同任务第 2 轮卡死交顾问裁决（终止/继续/请求人工）
+                    decision = self._advisor_verdict(messages, objective, step)
+                    if decision == "continue":
+                        self.dispatcher.last_progress_step = step  # 裁决继续：重开观察窗
+                        self._stuck_waves = 2
+                else:
+                    # waves=0：D9 先做零成本机械预检——命令/读文件在演进=活跃探索
+                    # 且延长次数未满 → 静默延长；否则召唤顾问建议（现有路径）
+                    signals = (self._active_exploration(
+                                   self.dispatcher.last_progress_step, step)
+                               if self._stuck_extensions < self.config.stuck_max_extensions
+                               else None)
+                    if signals is not None:
+                        self._extend_stuck_window(step, signals)
+                    else:
+                        messages.append({"role": "user", "content": self._advisor_prompt(messages, objective)})
+                        self.dispatcher.last_progress_step = step  # 顾问干预后重置观察窗
+                        self._stuck_waves += 1
             _chat_t0 = time.monotonic()
             try:
                 resp = self._chat_interruptible(messages, system=system,
-                                                tools=AGENT_TOOLS, step=step)
+                                                tools=self._task_tool_schemas(), step=step)
             except _StepInterrupted:
                 # ■ 即点即停（2026-09-19）：LLM 调用等待中被人手中断——不等本步
                 # 完成，立刻按硬中断收尾（任务 fail「人工中断」，快照保留可续跑）。
@@ -1478,13 +1660,28 @@ class AgentSession:
                     {"session_id": self.session["id"], "text": _narr[:2000], "step": step},
                     session_id=self.session["id"], author=self.session["id"])
             if not resp.tool_calls:
-                # 纯文本回复：视为停等，提示其用 finish 或继续干活
-                messages.append({"role": "user",
-                                 "content": "（请继续执行：调用工具干活，或调用 finish 结束并总结）"})
+                # 纯文本步也过拒绝分类：硬拒绝计数清零；plan-only 模式下纯文本
+                # 而计划仍空 → 挂人（2026-09-24）
+                self._classify_step_rejections([], messages)
+                if not self.dispatcher.awaiting_human:
+                    # 纯文本回复：视为停等，提示其用 finish 或继续干活
+                    messages.append({"role": "user",
+                                     "content": "（请继续执行：调用工具干活，或调用 finish 结束并总结）"})
             else:
+                _progress_before = self.dispatcher.last_progress_step
+                step_results: list[str] = []
                 for tc in resp.tool_calls:
                     result_text = self.dispatcher.dispatch(tc.name, tc.arguments)
+                    step_results.append(result_text)
                     messages.append(self.llm.tool_result_message(tc, result_text))
+                # 拒绝按「模型步」分类处理（2026-09-24 口径重构，
+                # plan-gate-breaker-refine；原逻辑在工具内联处按回执张数计，
+                # 并行批可当场熔断，模型拿不到改道机会）
+                self._classify_step_rejections(step_results, messages)
+                # D1：夹一次实质进展，卡死波次清零（镜像 E2 夹非拒绝即清零）
+                if self.dispatcher.last_progress_step > _progress_before:
+                    self._stuck_waves = 0
+                    self._stuck_extensions = 0  # D9：延长计数随真进展一并清零
                 self._trim(messages)
                 # G3：过阈值先 LLM 摘要压缩，_trim 硬上限兜底；任务已收尾不再压缩
                 if not self.dispatcher.finished:
@@ -1501,6 +1698,7 @@ class AgentSession:
                     "task_id": self.dispatcher.current_task_id,
                     "next_step": step + 1, "max_steps": self.dispatcher.max_steps,
                     "reason": "awaiting",
+                    "open_intents": self._open_intent_snapshot(),
                 }
                 self._persist_snapshot()
                 try:
@@ -1515,6 +1713,12 @@ class AgentSession:
                 self._resume_state = None  # 快照只留在磁盘（内存态泄漏会被下轮 run_next_task 误消费清盘）
                 self._stop_heartbeat()
                 return None  # 任务收尾已处理（同暂停/中断语义，不走 _finalize）
+            if self.dispatcher.delegation_just_finished:
+                # 委托真收尾（done/failed/删除）：本轮结束、会话保留待命——run_task
+                # 不走 _finalize；worker while 再入会话轮接窗内队列下一件。
+                self.dispatcher.delegation_just_finished = False
+                self._stop_heartbeat()
+                return self.dispatcher.last_delegation_note or "委托已收尾"
             if self.dispatcher.finished:
                 return self.dispatcher.summary
             ctrl = self._control_point(system, messages, objective, step)
@@ -1526,6 +1730,78 @@ class AgentSession:
         # 心跳继续，等人类在直播间「继续」（恢复时可附引导语/追加预算）。
         self._budget_pause(system, messages, objective, self.dispatcher.max_steps)
         return None
+
+    # ---------- 拒绝分类（2026-09-24，plan-gate-breaker-refine） ----------
+
+    def _task_tool_schemas(self) -> list[dict[str, Any]]:
+        """plan-only 教练模式：发给 LLM 的工具面收缩到计划/控制原语；其余全量。"""
+        if not self.dispatcher.plan_only_mode:
+            return AGENT_TOOLS
+        return [t for t in AGENT_TOOLS if t.get("name") in _PLAN_ONLY_TOOL_NAMES]
+
+    def _classify_step_rejections(self, results: list[str],
+                                  messages: list[dict[str, Any]]) -> None:
+        """按**模型步**（非回执张数）分类处理本步拒绝：
+
+        - 计划本步已落黑板（并行批里 task_plan 与被闸调用并存）→ 教练态全清；
+        - 硬拒绝（越界/网关/拒收）→ 硬熔断计数，连续 ≥3 步 → awaiting_human；
+          不含硬拒绝的步（含纯文本步）→ 计数清零；
+        - 计划闸 → 教练计数，累计 2 步 → 进 plan-only（强提示注入 + 工具面收缩）；
+          plan-only 之后下一模型步末计划仍空 → awaiting_human（进入模式的当步不挂）。
+        """
+        cur = self.dispatcher.current_task_id
+        task = self.tq.get_task(cur) if cur else None
+        plan_written = task is not None and bool(task.get("plan"))
+        if plan_written:
+            self._plan_gate_count = 0
+            self.dispatcher.plan_only_mode = False
+
+        hard_hit = any(r.startswith(HARD_REJECT_PREFIXES) for r in results)
+        gate_hit = any(r.startswith(PLAN_GATE_PREFIX) for r in results)
+
+        if hard_hit:
+            self._reject_streak += 1
+            if self._reject_streak >= _REJECT_BREAK_LIMIT \
+                    and not self.dispatcher.awaiting_human:
+                last = next(r for r in results
+                            if r.startswith(HARD_REJECT_PREFIXES))
+                self.dispatcher.summary = (
+                    f"拒绝熔断挂起：连续 {self._reject_streak} 个模型步出现硬拒绝，"
+                    f"最后回执：{last[:200]}")
+                self.dispatcher.awaiting_human = True
+                self.bb.append_event(
+                    self.project_id, "agent.reject_breaker",
+                    {"session_id": self.session["id"], "task_id": cur,
+                     "streak": self._reject_streak, "last_result": last[:300]},
+                    session_id=self.session["id"], author=self.session["id"])
+        else:
+            self._reject_streak = 0
+
+        entered_mode = False
+        if gate_hit and not plan_written \
+                and not self.dispatcher.plan_only_mode:
+            self._plan_gate_count += 1
+            if self._plan_gate_count >= _PLAN_GATE_STEPS:
+                self.dispatcher.plan_only_mode = True
+                entered_mode = True
+                messages.append({"role": "user", "content": _PLAN_ONLY_NUDGE})
+                self.bb.append_event(
+                    self.project_id, "agent.plan_nudge",
+                    {"session_id": self.session["id"], "task_id": cur,
+                     "count": self._plan_gate_count},
+                    session_id=self.session["id"], author=self.session["id"])
+
+        # plan-only 强提示后的模型步结束、计划仍空 → 挂人（进入模式的当步除外）
+        if self.dispatcher.plan_only_mode and not entered_mode \
+                and not plan_written and not self.dispatcher.awaiting_human:
+            self.dispatcher.summary = (
+                "计划闸强提示后仍未写出 task_plan，挂起待人工承接")
+            self.dispatcher.awaiting_human = True
+            self.bb.append_event(
+                self.project_id, "agent.plan_gate_block",
+                {"session_id": self.session["id"], "task_id": cur,
+                 "count": self._plan_gate_count},
+                session_id=self.session["id"], author=self.session["id"])
 
     # ---------- 会话控制（DESIGN.md §3：暂停/恢复/中断） ----------
 
@@ -1542,6 +1818,7 @@ class AgentSession:
                 "task_id": self.dispatcher.current_task_id, "next_step": step + 1,
                 "max_steps": self.dispatcher.max_steps,  # E8：暂停时预算随快照走
                 "reason": "pause",
+                "open_intents": self._open_intent_snapshot(),
             }
             self._enter_paused()
             return "paused"
@@ -1637,6 +1914,41 @@ class AgentSession:
             cmd = str(p.get("cmd", ""))[:200]
             out = str(p.get("text", ""))[:2500]
             lines.append(f"🛫 升级命令已执行（人类批准，一次性）：{cmd}\n{out}")
+        if not lines:
+            return None
+        return "\n---\n".join(lines)
+
+    def _authorization_result_notice(self, inbox_rows: list[dict[str, Any]]) -> str | None:
+        """拼「授权申请已批准」消息（M5 D2，kind='authorization_result'）：
+        request_authorization 经人类批准后回流——信息式注入，Agent 按批准内容
+        继续作业。批准后无平台动作：scope_expand 自行 bb_add_asset 登记。"""
+        lines: list[str] = []
+        for r in inbox_rows:
+            if r.get("kind") != "authorization_result":
+                continue
+            p = r.get("payload") or {}
+            kind = str(p.get("kind", ""))
+            req = str(p.get("scope_request", ""))[:300]
+            lines.append(f"✅ 授权申请已批准（{kind}）：{req}\n"
+                         "按批准内容继续作业（scope_expand 类请先 bb_add_asset 登记）。")
+        if not lines:
+            return None
+        return "\n---\n".join(lines)
+
+    def _approval_rejected_notice(self, inbox_rows: list[dict[str, Any]]) -> str | None:
+        """拼「申请被拒绝」消息（M5 D2 搭车，kind='approval_rejected'）：
+        escalation/authorization 被人类拒绝后回流（此前 rejected 无回流=Agent
+        空等）——信息式注入，Agent 换路不要再等。"""
+        lines: list[str] = []
+        for r in inbox_rows:
+            if r.get("kind") != "approval_rejected":
+                continue
+            p = r.get("payload") or {}
+            op = str(p.get("op", ""))
+            head = {"authorization": "授权申请", "escalation": "升级命令申请"}.get(op, op)
+            note = str(p.get("note", "")).strip()
+            tail = f"：{note[:300]}" if note else "（未附理由）"
+            lines.append(f"❌ {head}被人类拒绝{tail}——不要继续等待，按当前边界换路。")
         if not lines:
             return None
         return "\n---\n".join(lines)
@@ -1775,6 +2087,7 @@ class AgentSession:
             "task_id": self.dispatcher.current_task_id,
             "next_step": self.dispatcher.step,  # 耗尽步号 = 恢复断点
             "max_steps": max_steps, "reason": "budget",
+            "open_intents": self._open_intent_snapshot(),
         }
         self._enter_paused()
         self.bb.append_event(
@@ -1827,6 +2140,17 @@ class AgentSession:
         except Exception:  # noqa: BLE001
             log.exception("任务键快照双写失败（任务 %s）", task_id)
 
+    def _open_intent_snapshot(self) -> list[dict[str, str]]:
+        """意图纪律①：快照带未收尾意图清单（停机/关窗后照单收尾，不留悬挂）。
+        只摘 id/陈述/时间三字段；异常降级空清单不阻快照。"""
+        try:
+            return [{"id": it["id"], "statement": it["statement"],
+                     "created_at": it.get("created_at") or ""}
+                    for it in list_intents(self.bb, self.project_id, status="open")]
+        except Exception:  # noqa: BLE001
+            log.exception("未收尾意图清单构建失败（会话 %s）", self.session.get("id"))
+            return []
+
     def pause_snapshot_now(self) -> bool:
         """v0.64 暂停请求即时落盘（关「暂停未到步边界就关后端」的窗口期）：
         从 _loop 在册的 `_live_state` 构建断点快照（尾部 sanitize 掉半步悬空的
@@ -1846,6 +2170,7 @@ class AgentSession:
             "next_step": self.dispatcher.step + 1,
             "max_steps": self.dispatcher.max_steps,
             "reason": "pause",
+            "open_intents": self._open_intent_snapshot(),
         }
         self._persist_snapshot(st)
         return True
@@ -2031,6 +2356,7 @@ class AgentSession:
                 try:
                     self.tq.fail(task_id, self.session["id"], "人工中断",
                                  resumable=resumable,
+                                 blocked_reason="aborted",
                                  persona_role=self.dispatcher.current_persona_role)
                 except Exception:  # noqa: BLE001
                     log.exception("中断 fail 任务失败")
@@ -2050,6 +2376,121 @@ class AgentSession:
         return (self.planner_llm is not None
                 and step - self.dispatcher.last_progress_step >= self.config.stuck_after)
 
+    def _active_exploration(self, lps: int, step: int) -> dict | None:
+        """D9 卡死预检（纯机械、零 LLM）：窗 (lps,step] 内本会话的 command /
+        file.read 事件命中以下任一信号 → 返回信号明细；否则 None（走顾问链）。
+
+        ① 新文件：读到本会话此前（step≤lps）未读过的路径；
+        ② 命令演进：窗内命令 n≥2、去重后 ≥2、最高重复次数 ≤n/2——半数以上同一条
+           即判打转。预检在步**开始**执行，窗内动作最多 stuck_after−1 个（本步尚未
+           跑），故下限取 2。无 step 字段的旧事件一律不参与（宁叫顾问也不假延长）。"""
+        events = self.bb.recent_events(self.project_id, tail=200,
+                                       session_id=self.session["id"])
+        cmds: list[str] = []
+        new_paths: list[str] = []
+        old_paths: set[str] = set()
+        for e in events:
+            st = int(e["payload"].get("step") or 0)
+            if e["kind"] == "command":
+                cmd = str(e["payload"].get("cmd", "")).strip()
+                if st > lps and cmd:
+                    cmds.append(cmd)
+            elif e["kind"] == "file.read":
+                path = str(e["payload"].get("path", "")).strip()
+                if not path:
+                    continue
+                if st > lps:
+                    new_paths.append(path)
+                elif 0 < st <= lps:
+                    old_paths.add(path)
+        signals: dict[str, Any] = {}
+        unseen = sorted({p for p in new_paths if p not in old_paths})
+        if unseen:
+            signals["new_files"] = unseen[:5]
+        n = len(cmds)
+        if n >= 2:
+            counts: dict[str, int] = {}
+            for c in cmds:
+                counts[c] = counts.get(c, 0) + 1
+            unique, top = len(counts), max(counts.values())
+            if unique >= 2 and top <= n // 2:
+                signals["command_count"] = n
+                signals["unique_commands"] = unique
+                signals["top_repeat"] = top
+        return signals or None
+
+    def _extend_stuck_window(self, step: int, signals: dict) -> None:
+        """D9：活跃探索静默延长——重置观察窗、extensions+1、落 agent.stuck_extend
+        事件。不叫顾问、不注入消息、零 LLM 成本。"""
+        self.dispatcher.last_progress_step = step
+        self._stuck_extensions += 1
+        self.bb.append_event(
+            self.project_id, "agent.stuck_extend",
+            {"session_id": self.session["id"],
+             "task_id": self.dispatcher.current_task_id,
+             "step": step, "extension": self._stuck_extensions,
+             "signals": signals},
+            session_id=self.session["id"], author=self.session["id"])
+
+    def _stuck_escalate(self, step: int, verdict_reason: str = "") -> None:
+        """卡死升级停轮：落 ``agent.stuck_escalate`` + awaiting_human，复用 C1/E2
+        停轮保护语义（快照+fail resumable，人工可续跑/重开/改目标），宁停不烧。
+        三种触发（payload.trigger）：
+        - advisor_terminate：D7 顾问裁决终止（带裁决理由 verdict_reason）；
+        - hard_backstop：D7 顾问裁决「继续」后又满窗，第 3 轮机械硬闸；
+        - mechanical：无顾问介入的机械升级（兼容路径）。"""
+        waves = self._stuck_waves + 1
+        lps = self.dispatcher.last_progress_step
+        if verdict_reason:
+            trigger, tail_text = (
+                "advisor_terminate", f"策略顾问裁决终止：{verdict_reason}")
+        elif self._stuck_waves >= 2:
+            trigger, tail_text = (
+                "hard_backstop", "策略顾问裁决「继续」后仍无进展，硬闸停轮")
+        else:
+            trigger, tail_text = (
+                "mechanical", "策略顾问已介入一轮未打破僵局")
+        self.dispatcher.summary = (
+            f"卡死升级挂起：第 {waves} 轮卡死仍无进展"
+            f"（上次进展在第 {lps} 步），{tail_text}")
+        self.dispatcher.awaiting_human = True
+        self.bb.append_event(
+            self.project_id, "agent.stuck_escalate",
+            {"session_id": self.session["id"],
+             "task_id": self.dispatcher.current_task_id,
+             "waves": waves, "step": step,
+             "last_progress_step": lps,
+             "trigger": trigger, "verdict_reason": verdict_reason,
+             "repeated_commands": self._command_repeat_stats(),
+             "recent_commands": self._recent_command_summary()},
+            session_id=self.session["id"], author=self.session["id"])
+
+    def _command_repeat_stats(self, event_window: int = 100,
+                              cap: int = 10) -> list[dict]:
+        """D2：本会话最近事件窗内 **完全相同命令 ×N** 排行（从 command 事件
+        机械聚合，只保留 ×≥2，cap 10）——纯计数不做归一化/相似度，收敛性
+        判断交 LLM。"""
+        events = self.bb.recent_events(self.project_id, tail=event_window,
+                                       session_id=self.session["id"])
+        counts: dict[str, int] = {}
+        for e in events:
+            if e["kind"] == "command":
+                cmd = str(e["payload"].get("cmd", "")).strip()
+                if cmd:
+                    counts[cmd] = counts.get(cmd, 0) + 1
+        rows = sorted(((n, c) for c, n in counts.items() if n >= 2),
+                      key=lambda x: -x[0])[:cap]
+        return [{"cmd": c[:200], "times": n} for n, c in rows]
+
+    def _recent_command_summary(self, event_window: int = 50,
+                                cap: int = 5) -> list[str]:
+        """D1：最近命令摘要（stuck_escalate 事件给人工快速判断卡在哪）。"""
+        events = self.bb.recent_events(self.project_id, tail=event_window,
+                                       session_id=self.session["id"])
+        cmds = [str(e["payload"].get("cmd", ""))[:200]
+                for e in events if e["kind"] == "command"]
+        return cmds[-cap:]
+
     def _advisor_prompt(self, messages: list[dict], objective: str) -> str:
         """策略顾问（§3）：规划上下文看执行摘要，给换思路建议——不是换 Agent。
         v0.65 卡壳召回：用对话尾部做 query 检索知识库，把最相关 1-2 篇手册摘要
@@ -2059,17 +2500,24 @@ class AgentSession:
         调用）；②顾问发言落 `advisor.intervention` 事件——此前只进 messages，
         直播间只见 token 行不见说了什么（人工无法判断顾问干了什么、建议是否
         被采纳）。"""
-        events = self.bb.recent_events(self.project_id, limit=30,
+        events = self.bb.recent_events(self.project_id, tail=30,
                                        session_id=self.session["id"])
         digest = json.dumps(
             [{"kind": e["kind"], "payload_head": json.dumps(e["payload"], ensure_ascii=False)[:120]}
              for e in events], ensure_ascii=False)
         kb_recall = self._kb_recall_for_advisor(messages)
+        # D2：完全相同命令 ×N 排行注入（收敛性判断交 LLM，不自研相似度算法）
+        repeats = self._command_repeat_stats()
+        repeat_section = ""
+        if repeats:
+            lines = "\n".join(f"  ×{r['times']} {r['cmd']}" for r in repeats)
+            repeat_section = ("\n最近重复命令（完全相同 ×N——自查是否在原地打转，"
+                              f"建议必须避开这些路径）：\n{lines}\n")
         try:
             resp = self.planner_llm.chat(
                 [{"role": "user", "content":
                   f"目标: {objective}\n最近事件摘要: {digest}\n"
-                  f"{kb_recall}\n执行已多步无进展。给出 3 条以内换思路建议，"
+                  f"{kb_recall}{repeat_section}\n执行已多步无进展。给出 3 条以内换思路建议，"
                   "直接可执行。若知识库经验段有已验证路径，优先参考。"}],
                 system="你是策略顾问，负责打破执行僵局。简洁、具体、不重复已失败路径。")
             advice = resp.text
@@ -2121,21 +2569,221 @@ class AgentSession:
             log.warning("卡壳 kb 召回失败（忽略）: %s", e)
             return ""
 
-    # ---------- v0.65 done 自动提案（T4 沉淀飞轮） ----------
+    # ---------- D7 顾问裁决模式（2026-09-24；D1 修订） ----------
+
+    def _advisor_verdict(self, messages: list[dict], objective: str,
+                         step: int) -> str:
+        """波次 2 顾问**裁决模式**（advisor.verdict，与建议模式 advisor.suggest
+        分立）：对照上次建议与之后的实际执行，结构化三选一——
+        terminate / continue / human。
+
+        - terminate / human：本方法已置 awaiting_human（C1 分支落快照+fail
+          resumable）；terminate 复用 `_stuck_escalate` 落点并带裁决理由。
+        - continue：半强制指令注入消息，调用方重开观察窗、waves=2。
+        任何 LLM/解析失败一律回落 terminate（宁严勿松——回落即 D7 之前的
+        机械停轮行为，绝不回落 continue）。全程留 ``advisor.verdict`` 事件。"""
+        events = self.bb.recent_events(self.project_id, tail=40,
+                                       session_id=self.session["id"])
+        prior_advice = ""
+        for e in events:  # 升序：取最后一条顾问建议
+            if e["kind"] == "advisor.intervention":
+                prior_advice = str(e["payload"].get("text", ""))
+        window_cmds = self._recent_command_summary(event_window=40, cap=12)
+        lps = self.dispatcher.last_progress_step
+        kb_recall = self._kb_recall_for_advisor(messages)
+        cmd_block = "\n".join(f"  - {c}" for c in window_cmds) \
+            or "  （无命令记录）"
+        prompt = (
+            f"目标: {objective}\n"
+            f"## 你上次给出的建议\n{prior_advice or '（未检索到上次建议记录）'}\n"
+            f"## 上次建议之后执行者实际执行的命令（最近）\n{cmd_block}\n"
+            f"## 硬事实\n自第 {lps} 步起无黑板写入，当前第 {step} 步"
+            f"（已连续 {step - lps} 步无进展）。\n{kb_recall}\n"
+            "## 裁决\n对照上次建议与后续事实判断：建议已被执行但仍失败 → "
+            "terminate；建议被无视或未被正确执行 → continue，且 instruction 必须"
+            "是与上次不同、具体可执行的新指令；关键信息缺失、你无法判断 → human。\n"
+            "只输出一个 JSON 对象，不要任何其他文字：\n"
+            '{"decision": "terminate|continue|human", "reason": "一句话理由",'
+            ' "instruction": "continue 时必填的具体新指令，否则留空"}')
+        try:
+            resp = self.planner_llm.chat(
+                [{"role": "user", "content": prompt}],
+                system="你是策略顾问，对卡死任务做最终裁决。诚实、克制，"
+                       "不为失败的路线辩护，不重复已失败路径。")
+            decision, reason, instruction = self._parse_verdict(resp.text)
+            self._record_usage(resp, source="planner", llm_obj=self.planner_llm)
+        except Exception as e:  # noqa: BLE001
+            log.warning("策略顾问裁决调用失败，回落终止: %s", e)
+            decision, reason, instruction = (
+                "terminate",
+                f"顾问裁决调用失败（{type(e).__name__}），按终止处理", "")
+        self.bb.append_event(
+            self.project_id, "advisor.verdict",
+            {"session_id": self.session["id"],
+             "task_id": self.dispatcher.current_task_id,
+             "wave": self._stuck_waves + 1, "step": step,
+             "decision": decision, "reason": reason,
+             "instruction": instruction[:300]},
+            session_id=self.session["id"], author=self.session["id"])
+        if decision == "continue":
+            messages.append({"role": "user", "content":
+                f"[策略顾问·裁决：继续]\n裁决理由：{reason}\n"
+                "新方向（半强制——本轮先回应将如何执行，或说明为何不适用）：\n"
+                f"{instruction}"})
+            return "continue"
+        if decision == "human":
+            self.dispatcher.summary = (
+                f"顾问裁决请求人工：{reason or '策略顾问认为关键信息不足，无法裁决'}")
+            self.dispatcher.awaiting_human = True
+            return "human"
+        self._stuck_escalate(step, verdict_reason=reason)
+        return "terminate"
+
+    def _parse_verdict(self, raw_text: str) -> tuple[str, str, str]:
+        """解析顾问裁决 JSON；任何不合规一律回落 terminate（宁严勿松）。
+        continue 缺具体 instruction → 同样回落 terminate。"""
+        fallback = ("terminate", "顾问裁决输出无法解析，按终止处理", "")
+        m = re.search(r"\{.*\}", raw_text or "", re.DOTALL)
+        if not m:
+            return fallback
+        try:
+            data = json.loads(m.group(0))
+        except (json.JSONDecodeError, ValueError):
+            return fallback
+        if not isinstance(data, dict):
+            return fallback
+        decision = str(data.get("decision", "")).strip().lower()
+        if decision not in ("terminate", "continue", "human"):
+            return fallback
+        reason = str(data.get("reason", "")).strip()[:500]
+        instruction = str(data.get("instruction", "")).strip()[:800]
+        if decision == "continue" and not instruction:
+            return ("terminate", "顾问判继续但未给出具体指令，按终止处理", "")
+        return decision, reason, instruction
+
+    # ---------- v0.65 done 自动提案（T4 沉淀飞轮；experience-sedimentation 提纯） ----------
+
+    def _task_finding_ids(self, task_id: str) -> list[str]:
+        """本任务区间（最近一次认领→收尾）内本会话产出的 finding id（事件反查）。
+        用 _session_task_windows 的 (lo,hi] 区间 + session_id=author 双约束精确到
+        本任务——多任务会话的历史 verified 不误伤后续常规任务。判定失败按无产出
+        处理（宁少勿滥）。"""
+        from core.blackboard.traces import _session_task_windows
+        try:
+            wins = [w for w in _session_task_windows(
+                        self.bb.conn, self.project_id, self.session["id"])
+                    if w["task_id"] == task_id and w.get("hi")]
+            if not wins:
+                return []
+            w = wins[-1]
+            rows = self.bb.conn.execute(
+                "SELECT DISTINCT json_extract(payload,'$.finding_id') AS fid FROM events"
+                " WHERE project_id=? AND session_id=? AND kind IN"
+                " ('finding.new','finding.merged') AND id>? AND id<=?",
+                (self.project_id, self.session["id"], w["lo"], w["hi"])).fetchall()
+            return [r["fid"] for r in rows if r["fid"]]
+        except Exception:  # noqa: BLE001
+            return []
+
+    def _sediment_verdict(self, task_id: str, result_note: str = "") -> dict:
+        """沉淀条件判定（experience-sedimentation §4.1 口径表，单一实现——campaign
+        条件写入与复盘条件触发共用，勿在别处再写第二份口径）：
+        - done + 本任务产出 verified finding（或含本任务节点的 exploited 链）→
+          campaign 写入 + 复盘（打法沉淀）；
+        - done + 本任务产出 FP finding 且无 verified/exploited 链 → campaign 写入
+          死路条目（tags=["dead_end"]）、不复盘（M6 F1：负知识跨项目复用——
+          死路的结构化口径就是 status='false-positive'，orchestrator-efficiency §0-11）；
+        - done 无产出但 result_note ≥500 字 → 只复盘（高质量收尾，每会话上限
+          _SEDIMENT_LITE_CAP 条防刷量）；
+        - failed + error（真失败，Agent 自填归因）→ 只复盘（失败模式，提炼避坑教训）；
+        - failed + aborted/awaiting_human、done 其余零产出 → 都不（非方法论性失败
+          与常规收尾不值得沉淀）。
+        返回 {campaign, review, finding_ids, dead_end}。"""
+        task = self.tq.get_task(task_id) or {}
+        status = task.get("status")
+        if status == "failed":
+            real = (task.get("blocked_reason") or "error") == "error"
+            return {"campaign": False, "review": real, "finding_ids": [],
+                    "dead_end": False}
+        if status != "done":
+            return {"campaign": False, "review": False, "finding_ids": [],
+                    "dead_end": False}
+        finding_ids = self._task_finding_ids(task_id)
+        if finding_ids:
+            marks = ",".join("?" for _ in finding_ids)
+            row = self.bb.conn.execute(
+                f"SELECT 1 FROM findings WHERE project_id=? AND status='verified'"
+                f" AND id IN ({marks}) LIMIT 1",
+                (self.project_id, *finding_ids)).fetchone()
+            if row is not None:
+                return {"campaign": True, "review": True, "finding_ids": finding_ids,
+                        "dead_end": False}
+        # exploited 链兜底：任务无 verified finding 但轨迹链打穿（链节点 id =
+        # `{task_id}#{kind}:{value}`，origin='trace' 为任务轨迹自动链）
+        try:
+            row = self.bb.conn.execute(
+                "SELECT 1 FROM chains c JOIN chain_links l ON l.chain_id=c.id"
+                " WHERE c.project_id=? AND c.origin='trace' AND c.status='exploited'"
+                " AND l.node_id LIKE ? LIMIT 1",
+                (self.project_id, f"{task_id}#%")).fetchone()
+        except Exception:  # noqa: BLE001
+            row = None
+        verified = row is not None
+        if verified:
+            return {"campaign": True, "review": True, "finding_ids": finding_ids,
+                    "dead_end": False}
+        # M6 F1 死路记账档：本任务 FP-only → 负知识入 campaign（content 取死路
+        # 原因），不产 kb 复盘提案（避坑方法论可走下方高质量复盘档）
+        if finding_ids:
+            marks = ",".join("?" for _ in finding_ids)
+            fp = self.bb.conn.execute(
+                f"SELECT 1 FROM findings WHERE project_id=? AND status='false-positive'"
+                f" AND id IN ({marks}) LIMIT 1",
+                (self.project_id, *finding_ids)).fetchone()
+            if fp is not None:
+                return {"campaign": True, "review": False,
+                        "finding_ids": finding_ids, "dead_end": True}
+        # M6 F1 高质量复盘档：零产出但收尾总结够长 → 只复盘（每会话上限防刷量；
+        # 额度在 _sediment_proposal 实际产提案时消耗，这里只读）
+        note = (result_note or "").strip()
+        if len(note) >= _SEDIMENT_LITE_MIN_NOTE:
+            used = getattr(self, "_sediment_lite_used", 0)
+            if used < _SEDIMENT_LITE_CAP:
+                return {"campaign": False, "review": True, "finding_ids": [],
+                        "dead_end": False}
+        return {"campaign": False, "review": False, "finding_ids": [],
+                "dead_end": False}
 
     def _campaign_memory(self, task_id: str, result_note: str) -> None:
-        """⑥ 战役记忆写入（complete_task 并联 hook）：result_note + 本次任务
-        期间新增 findings 摘成 ≤500 字打法写全局库（跨项目召回）；项目事件流
-        append campaign.memory（双写不保强一致：先全局库，事件失败仅记日志）。"""
+        """⑥ 战役记忆写入（complete_task 并联 hook；experience-sedimentation M1
+        条件收窄）：campaign 只存「成功打法索引层」——产出过 verified 发现或
+        exploited 链的任务才写；无产出任务/常规操作全量退役（失败教训走 kb 复盘）。
+        M6 F1 扩死路记账档（tags=["dead_end"]，§0-11）：FP-only 任务负知识入全局库，
+        content 优先 result_note、空则 fallback FP finding title。
+        content=result_note 纯净收尾（M1 瘦身：发现明细本就在黑板，砍「最近 5 条」
+        拼接——那是检索语境噪声）。写全局库（跨项目召回）+ 项目事件流
+        campaign.memory（双写不保强一致）。"""
+        verdict = self._sediment_verdict(task_id, result_note)
+        if not verdict["campaign"]:
+            return
+        content = (result_note or "").strip()
+        if not content and verdict.get("dead_end"):
+            # 死路条目无收尾总结 → 取 FP finding title 兜底（负知识必须有内容可召回）
+            fid = verdict["finding_ids"]
+            if fid:
+                marks = ",".join("?" for _ in fid)
+                try:
+                    row = self.bb.conn.execute(
+                        f"SELECT title FROM findings WHERE project_id=? AND"
+                        f" status='false-positive' AND id IN ({marks})"
+                        f" ORDER BY created_at DESC LIMIT 1",
+                        (self.project_id, *fid)).fetchone()
+                    content = f"〔死路〕{row['title']}" if row else ""
+                except Exception:  # noqa: BLE001
+                    content = ""
+        if not content:
+            return  # 无收尾总结=无可复用打法
         task = self.tq.get_task(task_id) or {}
-        # 本次任务期间的发现（简版口径：按作者/时间不严格界定，取最近 5 条；
-        # 打法摘要重在「怎么打的」，发现明细本就在项目黑板可查）
-        findings = self.bb.list_findings(self.project_id)[-5:]
-        flines = "\n".join(
-            f"- [{f.get('severity', 'info')}] {f.get('title', '')[:80]}"
-            for f in findings if f.get("title"))
-        content = (f"收尾：{result_note[:300]}\n"
-                   + (f"产出发现：\n{flines}" if flines else "")).strip()
         try:
             row = self.campaign.add(
                 project_id=self.project_id, track=self.track,
@@ -2143,7 +2791,8 @@ class AgentSession:
                 task_type=task.get("task_type", ""),
                 title=task.get("objective", "")[:200] or task_id,
                 content=content,
-                target_key=(task.get("scope") or "")[:200])
+                target_key=(task.get("scope") or "")[:200],
+                tags=["dead_end"] if verdict.get("dead_end") else None)
         except Exception as e:  # noqa: BLE001
             log.warning("战役记忆写入失败（跳过）: %s", e)
             return
@@ -2151,19 +2800,35 @@ class AgentSession:
             self.bb.append_event(
                 self.project_id, "campaign.memory",
                 {"id": row["id"], "title": row["title"],
-                 "content_head": row["content"][:120]},
+                 "content_head": row["content"][:120],
+                 "dead_end": bool(verdict.get("dead_end"))},
                 session_id=self.session["id"], author=self.session["id"])
         except Exception:  # noqa: BLE001 —— 事件失败不回滚全局库
             log.warning("campaign.memory 事件落库失败（全局库已写入）")
 
-    def _sediment_proposal(self, task_id: str, result_note: str) -> None:
-        """任务 done 后自动复盘（§4 沉淀飞轮）：planner LLM 复盘执行过程，验证过
-        的有效手法/踩坑 → 产 kb 提案草稿（origin=agent，人批准后进知识库并更新索引）。
-        输出 NONE / 任何失败都静默跳过——绝不影响任务收尾；与 AI 自主提案共用
-        每会话 3 条 pending 上限（不挤占自主额度）。"""
+    def _sediment_proposal(self, task_id: str, result_note: str,
+                           *, failure: bool = False) -> None:
+        """任务收尾自动复盘（§4 沉淀飞轮；experience-sedimentation M1 条件触发 +
+        M2 提纯）：条件见 _sediment_verdict（done+产出=打法沉淀；failed+error=失败
+        避坑教训；aborted/无产出 done 不跑）。planner LLM 复盘 → kb/index/case 提案
+        草稿（origin=agent，人批准后进知识库）。M2 提纯三件：①复盘前 kb 对账
+        （既有相关模块清单注入，已有手册引导 edit 补段不 create 重复新建）；②失败
+        模式 instruction（只提炼方法论教训，环境问题 NONE）；③reason 证据锚点要求
+        （解析后机器校验，缺引用静默跳过）。输出 NONE / 任何失败都静默跳过——绝不
+        影响任务收尾；与 AI 自主提案共用每会话 3 条 pending 上限。"""
         from core.skills import proposals  # 延迟导入避开 tools↔loop 环
         if not self.packs_root:
             return
+        verdict = self._sediment_verdict(task_id, result_note)
+        if not verdict["review"]:
+            return
+        # M6 高质量复盘档额度：零产出长收尾的复盘实际要跑 LLM，产提案前占用额度
+        # （verified/failed 档不占——它们不是防刷量对象）
+        lite = (not verdict["finding_ids"] and not failure)
+        if lite:
+            if getattr(self, "_sediment_lite_used", 0) >= _SEDIMENT_LITE_CAP:
+                return
+            self._sediment_lite_used = getattr(self, "_sediment_lite_used", 0) + 1
         try:
             pending = [p for p in proposals.list_proposals(self.packs_root, "pending")
                        if p.get("session") == self.session["id"]]
@@ -2171,18 +2836,46 @@ class AgentSession:
                 return
         except Exception:  # noqa: BLE001
             return
-        events = self.bb.recent_events(self.project_id, limit=30)
+        task = self.tq.get_task(task_id) or {}
+        # M2 kb 对账前置：既有相关模块清单（K3 同款口径），已有手册 → edit 补段
+        kb_block = ""
+        try:
+            pairs = kb_module_hints(self.packs_root, self.capabilities,
+                                    task.get("objective") or result_note, cap=3)
+            lines = []
+            for entry, _sec in pairs:
+                row = f"- {entry.module} —— {entry.title}"
+                if entry.summary:
+                    row += f"｜{entry.summary}"
+                lines.append(row)
+            if lines:
+                kb_block = ("已有相关知识库模块（相关经验请走 mode=edit 补「已验证路径」"
+                            "「坑」段，不要 create 重复新建）：\n" + "\n".join(lines))
+        except Exception:  # noqa: BLE001
+            pass
+        events = self.bb.recent_events(self.project_id, tail=30)
         digest = json.dumps(
             [{"kind": e["kind"], "payload_head": json.dumps(e["payload"], ensure_ascii=False)[:120]}
              for e in events], ensure_ascii=False)
         caps = "、".join(self.capabilities) or "(无)"
+        if failure:
+            mode_line = (
+                "本任务以真失败告终（blocked_reason=error）：只提炼可复用的避坑教训"
+                "（错误假设/被证伪的手法/更优路径）；环境或临时性问题（网络超时、配额"
+                "限流、平台异常等非方法论因素）一律输出 NONE。"
+                "reason 必须引用本任务 id（task-xxxxxxxxxxxx）作为证据锚点。")
+        else:
+            mode_line = (
+                "reason 必须引用本任务产出的 finding id（形如 find-xxxxxxxxxxxx）"
+                "作为证据锚点；无产出证据引用的提案不合法。")
         instruction = (
             "复盘任务执行过程：是否验证了可复用的有效手法、踩坑或更优路径？\n"
+            f"{mode_line}\n"
             "有则只输出一个提案 JSON（无其他文字），三类去向三选一：\n"
             '① kb 打法沉淀：{"kind": "kb", "mode": "create" 或 "edit", '
             '"target": {"kind": "kb", "cap": "能力包", "path": "kb内相对路径.md"}, '
-            '"content": "提案文件全文", "summary": "一句话", '
-            '"reason": "任务证据（任务id+关键观察）"}\n'
+            '"content": "提案文件全文（须有「## 」段落结构，含「已验证路径」或「坑」段）", '
+            '"summary": "一句话", "reason": "证据锚点+关键观察"}\n'
             '② index 增补：本任务验证的测试点在 kb 中有对应手册、且全局 route_index.yaml '
             '缺本域这条目 → {"kind": "index", "mode": "edit", '
             '"target": {"kind": "index", "cap": "能力包"}, '
@@ -2195,7 +2888,8 @@ class AgentSession:
             '"content": "文件全文", "summary": "…", "reason": "…"}\n'
             f"cap 只能取本会话能力包之一（{caps}）；kb 新经验补对应测试包手册的"
             "「已验证路径」「坑」段或写成 payloads/ 弹药；英文快照原文不覆盖不翻译。"
-            "无则只输出 NONE。")
+            + (f"\n{kb_block}" if kb_block else "")
+            + "\n无则只输出 NONE。")
         try:
             resp = self.planner_llm.chat(
                 [{"role": "user", "content":
@@ -2206,7 +2900,7 @@ class AgentSession:
             self._record_usage(resp, source="planner", llm_obj=self.planner_llm)
             text = (resp.text or "").strip()
         except Exception as e:  # noqa: BLE001
-            log.warning("done 复盘调用失败（跳过沉淀）: %s", e)
+            log.warning("收尾复盘调用失败（跳过沉淀）: %s", e)
             return
         if not text or text.upper().startswith("NONE"):
             return
@@ -2225,10 +2919,19 @@ class AgentSession:
             payload["project"] = self.project_id
             payload["session"] = self.session["id"]
             payload["task"] = task_id
-            payload["evidence"] = f"任务 {task_id}（done 自动复盘沉淀）"
+            label = "failed（error）自动复盘沉淀" if failure else "done 自动复盘沉淀"
+            payload["evidence"] = f"任务 {task_id}（{label}）"
+            # M2 解析后证据校验：打法沉淀（kb 类）reason 必须引用任务真实产出的
+            # finding id——机器可校验的部分在这里拦，防 LLM 编造/漏引用
+            if kind == "kb" and not failure:
+                fids = verdict["finding_ids"]
+                if fids and not any(f in (payload.get("reason") or "") for f in fids):
+                    log.warning("done 复盘提案缺 finding 证据引用（跳过沉淀）task=%s",
+                                task_id)
+                    return
             p = proposals.create_proposal(self.packs_root, payload, origin="agent")
         except Exception as e:  # noqa: BLE001  # JSONDecodeError/ProposalError 均静默
-            log.warning("done 自动提案未落地（跳过）: %s", e)
+            log.warning("收尾自动提案未落地（跳过）: %s", e)
             return
         self.bb.append_event(
             self.project_id, "proposal.created",
@@ -2452,19 +3155,56 @@ class AgentSession:
         """Worker 异常兜底：llm.chat 传输层重试耗尽 / 未预期异常穿出 _loop 时，
         任务绝不能悬在 claimed——① 停心跳（否则孤儿心跳线程继续每 10 分钟续租，
         租约永不过期、expire_leases 不回收，任务在本进程内永久卡「执行中」）；
-        ② salvage 抢救收尾（2026-09-20）：把现场里的部分结论落盘为产物再 fail；
-        ③ 任务 fail(error) 落审计（看板出失败卡可人工放回）；④ 清 current_task_id。
+        ② 传输类异常（LLMError，429/5xx/超时重试耗尽）转 **awaiting_human 挂起**
+        （orchestrator-efficiency，2026-09-22）：外部条件失败不是打法失败——现场
+        快照双写落盘（任务键+会话键，C6 resume 可「⚡ 带现场续跑」），恢复靠人工
+        （换模型/等配额），替代原 fail(aborted) 直接终态化（曾致任务只能去
+        看板人工兜底）；挂起链路自身失败再退回 aborted 终态兜底。
+        ③ 非传输类异常：salvage 抢救收尾（2026-09-20）把现场部分结论落盘为产物
+        再 fail(aborted) 落审计——非方法论性失败（experience-sedimentation M1：
+        不进失败复盘）。④ 清 current_task_id。
         幂等：current_task_id 已清时只停心跳。"""
         self._stop_heartbeat()
         task_id = self.dispatcher.current_task_id
         if task_id:
             note = f"worker 异常退出（{type(exc).__name__}: {exc}）"[:400]
-            self._salvage_attempt(note)
-            try:
-                self.tq.fail(task_id, self.session["id"], note,
-                             persona_role=self.dispatcher.current_persona_role)
-            except Exception:  # noqa: BLE001
-                log.exception("异常兜底 fail 任务失败 task=%s", task_id)
+            if isinstance(exc, LLMError):
+                # 不 salvage：提炼也要调 LLM 必炸；快照本身已是完整现场
+                hung = False
+                try:
+                    live = self._salvage_ctx or {}
+                    self._persist_snapshot({
+                        "system": live.get("system", ""),
+                        "messages": sanitize_snapshot_tail(live.get("messages") or []),
+                        "objective": live.get("objective", ""),
+                        "task_id": task_id,
+                        "next_step": self.dispatcher.step + 1,
+                        "max_steps": self.dispatcher.max_steps,
+                        "reason": "awaiting",
+                        "open_intents": self._open_intent_snapshot(),
+                    })
+                    self.tq.fail(task_id, self.session["id"], note, resumable=True,
+                                 blocked_reason="awaiting_human",
+                                 persona_role=self.dispatcher.current_persona_role)
+                    hung = True
+                except Exception:  # noqa: BLE001
+                    log.exception("传输异常 awaiting_human 挂起失败，退回 aborted task=%s",
+                                  task_id)
+                if not hung:
+                    try:
+                        self.tq.fail(task_id, self.session["id"], note,
+                                     blocked_reason="aborted",
+                                     persona_role=self.dispatcher.current_persona_role)
+                    except Exception:  # noqa: BLE001
+                        log.exception("异常兜底 fail 任务失败 task=%s", task_id)
+            else:
+                self._salvage_attempt(note)
+                try:
+                    self.tq.fail(task_id, self.session["id"], note,
+                                 blocked_reason="aborted",
+                                 persona_role=self.dispatcher.current_persona_role)
+                except Exception:  # noqa: BLE001
+                    log.exception("异常兜底 fail 任务失败 task=%s", task_id)
             self.dispatcher.current_task_id = None
         self._restore_base_persona()  # v14：异常兜底恢复底色（幂等）
         self.dispatcher._close_browser_session()  # F6-v3：任务结束清浏览器 Page
@@ -2477,6 +3217,7 @@ class AgentSession:
             try:
                 self.tq.fail(self.dispatcher.current_task_id, self.session["id"],
                              "会话结束但任务未收尾，自动标记失败",
+                             blocked_reason="aborted",
                              persona_role=self.dispatcher.current_persona_role)
             except Exception:  # noqa: BLE001
                 log.exception("自动 fail 任务失败")
@@ -2487,3 +3228,12 @@ class AgentSession:
             {"session_id": self.session["id"], "summary": self.dispatcher.summary[:500]},
             session_id=self.session["id"], author=self.session["id"],
         )
+        # 状态机对齐（2026-09-24）：正常收尾 DB status 也要回 idle——此前只落
+        # session.finished 事件，status 残留 running（session_list 与事件流打架，
+        # 也误占活跃语义）。closed 窗不覆盖（排水关窗不经 _finalize，双保险）。
+        cur = self.bb.get_session(self.session["id"])
+        if (cur or {}).get("status") != "closed":
+            try:
+                self.bb.set_session_status(self.session["id"], "idle")
+            except Exception:  # noqa: BLE001
+                log.exception("set_session_status(idle) 失败")

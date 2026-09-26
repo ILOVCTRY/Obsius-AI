@@ -5,12 +5,23 @@ export interface ProjectMeta {
   name: string
   /** 场景轨（单选）；旧项目 domain 由后端读取时透明映射 */
   track: string
-  /** 能力包（多选） */
+  /** 知识可见能力包（多选）：有专家绑定时=caps_effective 推导面，未绑定=盘上绑定 */
   capabilities: string[]
+  /** 盘上原始绑定能力包（设置页跟随项目缺省用；2026-09-24） */
+  capabilities_bound?: string[]
   /** 专家组队（expert-pool M2）：空/缺省=存量直通（按轨全池），非空=绑定清单 */
   experts?: string[]
   created_at: string
   config?: Record<string, unknown>
+  /** 宿主运行时实测（GET /api/projects/{pid} 返回；M3 runtime chip 可用性门） */
+  capability?: HostCapability
+}
+
+/** 宿主能力清单（HostDetector.to_dict 形状） */
+export interface HostCapability {
+  docker: { available: boolean; detail: string }
+  wsl: { available: boolean; detail: string }
+  tools: { name: string; available: boolean; detail: string }[]
 }
 
 /** 项目自主配置（DESIGN §6.8，批 2；存于 project.config.autonomy，双写 project.json+黑板） */
@@ -21,6 +32,16 @@ export interface Autonomy {
   max_chain_ticks: number
   token_budget: number | null
   task_budget: number | null
+  auto_derive?: boolean         // C2 自动派生开关（任务空时 L1 判跳续派；缺省关）
+}
+
+/** D10 策略顾问项目级配置（2026-09-24，存 project.config.advisor） */
+export interface AdvisorConfig {
+  stuck_after: number
+  stuck_max_extensions: number
+  closing_max_rounds: number
+  provider?: string
+  model?: string
 }
 
 /** L2 自动链视图（批 5，§6.8）；estranged=DB 活但本进程无标记（重启急停） */
@@ -34,7 +55,6 @@ export interface ChainState {
 /** GET /api/projects/{pid} 的 usage：autonomy 全字段 + 实时计数 */
 export interface ProjectUsage extends Autonomy {
   active_sessions: number
-  auto_derive?: boolean         // C2 mission 自动派生开关（状态灯数据源）
   criteria_template?: string    // C2 所选判据模板名
   mission?: { text: string; criteria: string }
   redteam_roe?: { targets: string; window: string; exclusions: string; approver: string }
@@ -43,7 +63,9 @@ export interface ProjectUsage extends Autonomy {
   /** C2（2026-09-18）：mission 自动派生上次判定（last_result=published:n / empty / error:…） */
   derive?: { last_at: string; last_result: string }
   llm_calls: number
-  tokens: { used: number; budget: number | null; pct: number | null }
+  tokens: { used: number; budget: number | null; pct: number | null
+    /** M1 prompt caching 观测（2026-09-23）：缓存读/写 token 与命中率（分母 0 = 尚未打标） */
+    cache_read?: number; cache_creation?: number; cache_hit?: number | null }
   tasks: { published: number; budget: number | null; pct: number | null }
   chain?: ChainState
 }
@@ -53,7 +75,7 @@ export interface ProjectDetail extends ProjectMeta {
   findings: number
   assets: number
   usage: ProjectUsage
-  capability: Record<string, unknown>
+  capability: HostCapability
 }
 
 export interface BBEvent {
@@ -83,6 +105,7 @@ export interface Task {
   task_type: string
   role?: string   // v14：建议认领角色（''/缺省=不限；认领即换装）
   target_session?: string   // v18：指派会话 → v0.71 起恒为专属执行窗（''/缺省=未绑窗）
+  preferred_runtime?: string  // v23：任务默认运行时（''/缺省=未设；host/wsl/docker/sandbox）
   objective: string
   status: "open" | "claimed" | "done" | "failed"
   priority: number
@@ -101,7 +124,7 @@ export interface Task {
   resume_mode?: "snapshot" | "transcript"  // C6：snapshot=⚡带现场续跑 / transcript=↩接手现场续跑
   workset?: string[]   // B1 工作集软声明（advisory，供避让不阻塞）
   wait_for?: string[]  // B2 被占资源键（open 行门控标记，claim_next 排除）
-  blocked_reason?: "error" | "awaiting_human"  // C1：fail 通道结构化原因（v8）
+  blocked_reason?: "error" | "awaiting_human" | "aborted" | "cancelled"  // C1：fail 通道结构化原因（v8；aborted=人工中断 E12，cancelled=编排器/人类取消 M4）
   context?: TaskContext | null                  // C10 任务执行履历（v9，唯一写点 _finish）
 }
 
@@ -112,14 +135,14 @@ export interface TaskAttempt {
   role: string | null
   outcome: "done" | "failed"
   result_note: string
-  blocked_reason: "error" | "awaiting_human" | null
+  blocked_reason: "error" | "awaiting_human" | "aborted" | "cancelled" | null
   ended_at: string
 }
 
 export interface TaskContext {
   transcript: string | null
   attempts: TaskAttempt[]
-  reconcile?: { id: number; text: string; state: "pending" | "met" | "failed" | "blocked"; note: string }[]
+  reconcile?: { id: number; text: string; state: "pending" | "met" | "failed" | "blocked"; note: string; verify?: Record<string, unknown>; by?: string }[]
   attachments?: AttachmentInfo[]  // 附件随发（2026-09-19）：publish 落库的附件清单（认领首条消息渲染 📎）
 }
 
@@ -207,6 +230,90 @@ export interface BoardGraph {
   edges: BoardGraphEdge[]
 }
 
+// 单站攻击链路图 v3（website-attack-path-graph，2026-09-24）：
+// 目标 → 意图（规划产物）→ 执行（展开层）→ 收尾：漏洞 | 发现 | 死路
+export type AttackResult = "blocked" | "no_reaction" | "hint" | "found" | "skipped"
+
+export interface AttackAttempt {
+  id: string
+  key: string                              // METHOD 路径模板?query键
+  method: string
+  path_template: string
+  query_keys: string[]
+  started_at: string | null
+  ended_at: string | null
+  request_count: number
+  result: AttackResult
+  status_codes: number[]
+  finding_ids: string[]
+  intent_id: string | null                 // 读时按意图存活窗归属（无主=null）
+  session_ids: string[]
+  sources: string[]
+  representative: {
+    method?: string; url?: string; status?: number | null
+    resp_mime?: string; snippet?: string; history_id?: number
+    title?: string; note?: string
+  }
+}
+
+export type AttackNodeType = "target" | "intent" | "finding"
+export type AttackEdgeKind = "outcome" | "derive" | "bypass" | "exec"
+export type IntentOutcome = "" | "vuln" | "finding" | "dead_end"
+
+export interface AttackNode {
+  id: string
+  type: AttackNodeType
+  // target
+  label?: string; asset_type?: string
+  // intent
+  statement?: string
+  // 意图 open/closed；finding 节点同字段复用 finding 状态（unverified/verified/false-positive）
+  status?: "open" | "closed" | "unverified" | "verified" | "false-positive"
+  outcome?: IntentOutcome
+  finding_ids?: string[]
+  dead_reason?: string
+  created_at?: string | null; closed_at?: string | null
+  request_count?: number
+  default_hidden?: boolean                 // closed dead_end：默认隐藏
+  // finding
+  title?: string; severity?: string
+  category?: string                        // vuln=漏洞 / intel=有效发现
+}
+
+export interface AttackEdge {
+  source: string
+  target: string
+  kind: AttackEdgeKind
+}
+
+export interface AttackPath {
+  target: { id: string; type: string; value: string }
+  nodes: AttackNode[]
+  edges: AttackEdge[]
+  attempts: AttackAttempt[]
+  exec_edges: AttackEdge[]
+  counts: {
+    intents: number; open: number; closed: number; dead_end: number
+    findings: number; total_requests: number
+  }
+}
+
+// 意图行（GET /api/projects/{pid}/intents，人类收尾核对）
+export interface IntentInfo {
+  id: string; project_id: string
+  statement: string
+  target_asset_id: string | null
+  basis_refs: string[]
+  status: "open" | "closed"
+  outcome_type: IntentOutcome
+  outcome_refs: string[]
+  dead_reason: string
+  evidence_refs: string[]
+  author: string
+  created_at: string; closed_at: string | null; updated_at: string
+  revision: number
+}
+
 // 执行轨迹（execution-trace-chain M1，2026-09-22）：任务详情内嵌时间链（R1+R2 现算）
 export type TraceStepKind = "skill" | "kb" | "tools" | "finding"
 
@@ -265,6 +372,17 @@ export interface ModelInfo {
   models: string[]
   providers: LlmProvider[]
   default: { provider: string; model: string } | null
+}
+
+/** 项目 executor 模型三态（TRAE 新壳 M3 模型 chip 数据源） */
+export interface ExecutorLlmView {
+  /** 路由/供应商缺省 */
+  default: { provider: string; model: string } | null
+  /** 项目覆写（null=跟随缺省） */
+  override: { provider: string; model: string } | null
+  /** 当前实际生效 */
+  effective: { provider: string; model: string } | null
+  touched_sessions?: string[]
 }
 
 export interface DiscoveredModel {
@@ -534,12 +652,39 @@ export interface Approval {
   session_id: string | null
   action: Record<string, unknown>
   risk: string
+  /** M5 D2：行动边界全文（server 拼好，与编排器 _mission_section 同源），审批卡对照显示 */
+  boundary?: string
   /** H3：escalation 执行完置 consumed（一次性消费，语义上属已批准分支） */
   status: "pending" | "approved" | "rejected" | "consumed"
   requested_by: string
   decided_by?: string | null
   created_at: string
   decided_at?: string | null
+}
+
+// 会话协作流（会话中心化 M4）：编排器+会话窗节点；delegate/derive/inbox/dm 边
+export interface SessionGraphNode {
+  id: string
+  kind: "orch" | "session"
+  label: string
+  name: string
+  role: string
+  status: string
+  /** 窗内当前委托 objective */
+  current?: string
+  /** 窗内排队委托数 */
+  queue?: number
+}
+export interface SessionGraphEdge {
+  id: string
+  source: string
+  target: string
+  kind: "delegate" | "derive" | "inbox" | "dm"
+  refs: Record<string, unknown>[]
+}
+export interface SessionGraph {
+  nodes: SessionGraphNode[]
+  edges: SessionGraphEdge[]
 }
 
 // 审批 action.op 判别（批 4：spawn_session 走专属处理器，其余 op 只翻状态）
@@ -560,6 +705,8 @@ export interface DecideApprovalResult {
   exit_code?: number
   /** 批 5 触发点 E：批准后顺带唤醒的空闲窗 sid 列表 */
   kicked?: string[]
+  /** 赛跑终检跳过（如任务已不处于待执行）：executed=true 但无实际动作 */
+  skipped?: string
   error?: string
 }
 
@@ -724,8 +871,8 @@ export interface Artifact {
   description: string
   sha256: string
   author: string
-  /** 归属元数据（工作区隔离 W3）：{task_id?, session_id?} */
-  meta?: { task_id?: string; session_id?: string }
+  /** 归属元数据（工作区隔离 W3）：{task_id?, session_id?}；附件另带 original_name/size */
+  meta?: { task_id?: string; session_id?: string; original_name?: string; size?: number }
   created_at: string
 }
 
@@ -763,10 +910,11 @@ export interface Expert {
   kind?: "virtual" // 对话化编排器 M3：虚拟单例（id=orchestrator，不入 yaml 池、不认领任务）
 }
 
-/** 阶段目标（对话化编排器 M2，§4.3：meta.phase_goal，GET/PUT /projects/{pid}/goal） */
+/** 阶段目标（对话化编排器 M2，§4.3：meta.phase_goal，GET/PUT /projects/{pid}/goal；
+ *  goal 统一后=唯一目标判据层，criteria 为判据第一优先源） */
 export interface PhaseGoal {
   text: string
-  criteria?: string[] // 人话验收口径（非机读）
+  criteria?: string[] // 验收判据（一行一条；判据四层优先级之首 goal>mission>模板>内置）
   phase?: string | null
   source: string // "chat"
   created_at: string
@@ -777,6 +925,42 @@ export interface PhaseGoal {
 export interface OrchPersona {
   display_name: string
   persona: string
+}
+
+/** 分阶段工作流（pentest-phased-workflow，§四）：GET /projects/{pid}/phase。
+ * 轨无阶段剧本时 enabled=false（其余字段缺省）。 */
+export interface PhaseSpec {
+  id: string
+  name: string
+  goal?: string
+  order?: number
+  focus?: Record<string, number> // 阶段配额：编排器派单配比建议（软引导）
+  gate?: Record<string, number> // 出口门指标（min_assets/min_high_value/min_verified/idle_rounds）
+  gate_types?: string[] // 被本阶段门拦的任务类型
+  tasks?: { task_type: string; role?: string; objective: string; acceptance?: string }[]
+  next?: string[]
+}
+
+/** 阶段全序项（阶段条步骤渲染用，按 order 排序） */
+export interface PhaseSummary {
+  id: string
+  name: string
+  order: number
+}
+
+export interface PhaseInfo {
+  enabled: boolean
+  phases?: PhaseSummary[]
+  current?: string
+  spec?: PhaseSpec
+  gate?: {
+    metrics: { assets: number; high_value: number; verified: number; idle_rounds: number }
+    met: boolean
+    unmet: string[] // 人读未达标明细（「资产 3/10」）
+    forward: string[] // order 递增的前向目标（过门分流方向）
+  }
+  history?: { phase: string; entered_at: string; by: string; auto: boolean; reason?: string }[]
+  notified?: string | null // gate_open_notified：过门动作已分流的 target
 }
 
 /** 专家写表单（POST/PUT /api/experts）：全字段提交式覆写，None/缺省=不落键（skills 缺键=全量专家语义） */
@@ -1245,3 +1429,125 @@ export interface InterceptState {
   pending: InterceptPending[]
 }
 
+
+// ---- 网关策略快照（gateway-config-view M1，DESIGN §7）----
+
+export interface GatewayRuntimeLevel {
+  name: string
+  level: number
+  label: string
+  desc: string
+}
+export interface GatewayThreatRow {
+  threat_class: string
+  allowed: string[]
+  note: string
+}
+export interface GatewayRateRule {
+  tool: string
+  requirement: string
+  params: string[]
+  hint: string
+}
+export interface GatewayConfig {
+  runtime_levels: GatewayRuntimeLevel[]
+  threat_matrix: GatewayThreatRow[]
+  net_modes: { modes: string[]; default: string; note: string }
+  pathguard_rules: string[]
+  rate_rules: GatewayRateRule[]
+  exec_params: { default_timeout: number; sandbox_image: string }
+}
+
+/** Agent 工具目录（GET /api/agent-tools，agent-tools-view 2026-09-24） */
+export interface AgentToolParam {
+  type?: string | string[]
+  description?: string
+  enum?: string[]
+  items?: { type?: string; enum?: string[] }
+}
+export interface AgentTool {
+  name: string
+  description: string
+  group: string
+  input_schema: {
+    type?: string
+    properties: Record<string, AgentToolParam>
+    required?: string[]
+  }
+}
+export interface AgentToolsResponse {
+  groups: string[]
+  tools: AgentTool[]
+}
+
+/** 宿主能力探测（GET /api/projects/{pid}.capability 与 POST /api/gateway/probe 同构） */
+export interface ProbeRow {
+  name?: string
+  available: boolean
+  detail: string
+}
+export interface CapabilityInventory {
+  docker: ProbeRow
+  wsl: ProbeRow
+  tools: ProbeRow[]
+}
+
+// ---------- 网络空间测绘（cyberspace-mapping M1+M2，2026-09-23） ----------
+
+/** FOFA 中转配置（GET/PUT /api/fofa/config；key 永远脱敏回显，前4后4） */
+export interface FofaConfig {
+  base_url: string
+  key: string
+  key_set: boolean
+}
+
+export interface FofaTestResult {
+  ok: boolean
+  remain?: number | null
+  expire?: string | null
+  base_url: string
+  error?: string
+}
+
+/** FOFA 查询行（fields 白名单序归一化 + existing 三锚点既有标注） */
+export interface FofaSearchRow {
+  ip: string
+  port: string
+  protocol: string
+  host: string
+  domain: string
+  title: string
+  products: string[]
+  existing: { domain: boolean; service: boolean; host: boolean }
+}
+
+export interface FofaSearchResult {
+  total: number
+  size: number
+  page: number
+  rows: FofaSearchRow[]
+}
+
+/** 资产导入预览（parse_table + 列映射嗅探建议） */
+export interface ImportPreview {
+  filename: string | null
+  header: string[] | null
+  columns: { kind: string; confidence: number }[]
+  rows: string[][]
+  total_rows: number
+  truncated: boolean
+}
+
+/** 导入汇总（asset.imported 事件同构） */
+export interface ImportSummary {
+  batch_id: string
+  source: string
+  total: number
+  created: number
+  merged: number
+  skipped: number
+  failed_count: number
+  failed: { index: number; reason: string }[]
+  author: string
+  skipped_parse?: number
+}

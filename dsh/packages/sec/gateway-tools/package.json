@@ -1,0 +1,31 @@
+{
+  "name": "@sec/gateway-tools",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "sec profile 模型命令工具：run_cmd 唯一命令口",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "import": "./lib/index.js"
+    },
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "files": ["lib"],
+  "scripts": {
+    "build": "tsdown && tsc -p tsconfig.json",
+    "test": "node --import tsx --test \"src/**/*.test.ts\""
+  },
+  "peerDependencies": {
+    "@sec/gateway": "*",
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-shell": "*",
+    "@deepseek-ai/dsh-tools": "*"
+  },
+  "devDependencies": {
+    "@sec/gateway": "workspace:*"
+  }
+}

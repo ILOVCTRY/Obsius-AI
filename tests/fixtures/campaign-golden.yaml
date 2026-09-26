@@ -1,0 +1,71 @@
+# campaign 召回黄金集（retrieval-upgrade M4，2026-09-23 人工标注 6 条起步）
+# 断言：campaign.recall 打分链（kbindex 2-gram+停用词切分 → title 2.0/正文 1.0
+# 字段加权 → 轨/能力加成 → 热度 log1p×时间衰减）——打分链任何改动必须跑本集防退化。
+# 约定：query 模拟编排器态势召回的 mission/goal 口吻（不是关键词堆砌）；
+# entries 为跨项目沉淀池（per-case 独立临时库播种，防 usage 飞轮互染）；
+# expect = 召回 top-3 必须出现的历史条目 id（expect 外命中不算错，是良性的）。
+# 维护：打分链演化导致某条持续 miss 时，先查切分/加权是否退化，确属标注过时才改本集。
+entries:
+  - id: oa-sso-replay
+    track: pentest
+    capability: web
+    title: OA 办公系统 SSO ticket 重放接管管理员
+    content: 统一认证 ticket 未绑定会话，重放即可免登录；后台低权限用户遍历越权；从系统设置处上传 webshell 落地
+  - id: nmap-fingerprint
+    track: pentest
+    capability: web
+    title: 外网资产 nmap 服务指纹慢扫
+    content: 对目标段 nmap -sV --max-rate 500 做服务与版本指纹，避开全端口；web 指纹另用 whatweb 补
+  - id: weak-password-backend
+    track: pentest
+    capability: web
+    title: 后台弱口令进管理端
+    content: admin/admin123 登录管理后台；后台存在任意文件下载，可拉配置拿数据库口令
+  - id: redis-unauth
+    track: pentest
+    capability: infra
+    title: redis 未授权直接写 webshell
+    content: 6379 未授权访问，config set dir 写 crontab/web 目录；主从复制 RCE 备选
+  - id: rsa-common-modulus
+    track: ctf
+    capability: crypto
+    title: RSA 共模攻击模板
+    content: 两份密文相同模数不同指数，gcd(n1,n2) 恢复；扩展欧几里得脚本见 crypto 手册
+  - id: apk-frida-hook
+    track: ctf
+    capability: binary
+    title: 安卓 frida hook 套路
+    content: 脱壳后定位关键类，frida -U -l hook.js attach；ssl pinning 绕过用 objection
+  - id: sqlmap-waf-deadend
+    track: pentest
+    capability: web
+    title: sqlmap 过 waf 失败
+    content: 目标 waf 全拦 tamper 无效，此路不通（dead_end 记账）
+    tags: [dead_end]
+cases:
+  # 跨写法命中：query 说「办公自动化」，条目写「OA 办公系统」——共段命中
+  - query: 测试办公自动化系统的统一登录有没有越权或免登录漏洞
+    track: pentest
+    expect: [oa-sso-replay]
+  # ASCII 整词 + 字段加权：title 含服务指纹的条目应压过只正文提到的
+  - query: 对外网目标做服务和版本指纹识别
+    track: pentest
+    expect: [nmap-fingerprint]
+  # 未授权服务换措辞：条目写 redis 未授权，query 说中间件缓存服务
+  - query: 中间件缓存服务有没有未授权访问可以打
+    track: pentest
+    expect: [redis-unauth]
+  # 轨/能力加成：crypto 条目在 ctf 轨召回
+  - query: 两个密文模数一样能不能解出私钥
+    track: ctf
+    capability: crypto
+    expect: [rsa-common-modulus]
+  # 移动端跨写法：脱壳/动态调试措辞对上 frida hook 套路
+  - query: 安卓 app 脱壳后动态调试 hook 关键函数
+    track: ctf
+    capability: binary
+    expect: [apk-frida-hook]
+  # 死路负知识可召回（防重走）
+  - query: 注入点被 waf 拦了怎么办，还能不能继续
+    track: pentest
+    expect: [sqlmap-waf-deadend]

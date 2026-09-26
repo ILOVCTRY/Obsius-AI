@@ -52,12 +52,58 @@ def test_parse_text_thinking_and_tool_use():
     assert r.tool_calls[0].arguments["runtime"] == "sandbox"
     assert r.stop_reason == "tool_use"
     assert r.usage.input_tokens == 10
-    # 请求侧检查：system / tools / 协议头
+    # 请求侧检查：system / tools / 协议头（M1 prompt caching：str 自动包装单块打标）
     req = captured[0]
     assert req["url"].endswith("/v1/messages")
     assert req["headers"]["Authorization"] == "Bearer key"
-    assert req["body"]["system"] == "你是逆向专家"
+    assert req["body"]["system"] == [
+        {"type": "text", "text": "你是逆向专家", "cache_control": {"type": "ephemeral"}}]
     assert req["body"]["tools"][0]["name"] == "run_cmd"
+
+
+def test_system_blocks_passthrough_and_cache_disabled():
+    """M1 prompt caching：块数组透传（dict 原样/str 包装不打标）+ enable_cache=False。"""
+    captured = []
+    transport = _fake_transport(_anthropic_response([{"type": "text", "text": "ok"}]),
+                                capture=captured)
+    blocks = [
+        {"type": "text", "text": "稳定块", "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": "动态块"},
+    ]
+    p = AnthropicCompatProvider("https://fake", "k", "m", transport=transport)
+    p.chat([{"role": "user", "content": "hi"}], system=blocks)
+    assert captured[0]["body"]["system"] == blocks
+    # 传入列表不被污染（浅拷贝透传）
+    assert blocks[0]["cache_control"] == {"type": "ephemeral"}
+    # enable_cache=False：str 不打标
+    captured.clear()
+    p2 = AnthropicCompatProvider("https://fake", "k", "m", transport=transport,
+                                 enable_cache=False)
+    p2.chat([{"role": "user", "content": "hi"}], system="纯文本")
+    assert captured[0]["body"]["system"] == [{"type": "text", "text": "纯文本"}]
+
+
+def test_cache_control_degrade_on_400():
+    """M1：网关拒收 cache_control（400 文案含 cache_control）→ 去标重试成功，
+    实例置位后续请求不再打标（镜像 thinking 降级先例）。"""
+    calls = []
+
+    def flaky(url, headers, body):
+        req = json.loads(body)
+        calls.append(req)
+        if "cache_control" in json.dumps(req):
+            return 400, {"error": {"code": "", "message": "unknown field cache_control"}}
+        return 200, _anthropic_response([{"type": "text", "text": "ok"}])
+
+    p = AnthropicCompatProvider("https://fake", "k", "m", transport=flaky)
+    r = p.chat([{"role": "user", "content": "hi"}], system="稳定前缀")
+    assert r.text == "ok"
+    assert len(calls) == 2
+    assert "cache_control" in json.dumps(calls[0]["system"])  # 首次带标被网关拒
+    assert calls[1]["system"] == [{"type": "text", "text": "稳定前缀"}]  # 去标重试
+    # 第二次请求直接不带标（降级一次性置位）
+    p.chat([{"role": "user", "content": "hi"}], system="稳定前缀")
+    assert "cache_control" not in json.dumps(calls[2]["system"])
 
 
 def test_error_raises_llmerror():

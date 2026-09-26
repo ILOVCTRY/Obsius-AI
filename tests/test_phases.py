@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 from core.blackboard import TaskQueue
 from core.blackboard.assets import register_asset
 from core.blackboard.store import Blackboard
+from core import phases
 from core.phases import (
     default_phase_id,
     enter_phase,
@@ -25,7 +26,9 @@ from core.phases import (
     parse_phase_file,
     phase_enabled,
     phase_spec,
+    read_gate_state,
     read_state,
+    save_gate_state,
 )
 from core.projects import ProjectStore
 from core.skills.doctor import diagnose
@@ -246,6 +249,50 @@ def test_enter_phase_dedup_target_and_calibration(proj, packs):
     # 进入 pentest：其门（min_verified）未过 → 校准剥键（防 L2 秒弹回的对称面）
     enter_phase(proj, "pentest", by="human", packs_root=packs)
     assert read_state(proj.meta)["notified"] is None
+
+
+def test_gate_state_single_source(proj, packs, monkeypatch):
+    """B3 单一事实源（M3）：enter_phase 流转即写新阶段 phase_gate_state（零空窗）；
+    save_gate_state 内容不变跳过写盘（防每 tick 重写 project.json）。"""
+    enter_phase(proj, "recon", by="system", packs_root=packs)
+    st = read_gate_state(proj.meta)
+    assert st == {"phase": "recon", "gate": True, "passed": False,
+                  "unmet": ["资产 0/10", "高价值资产 0/1"]}
+    # report 无门 → gate False（注入侧跳过门进度行）
+    enter_phase(proj, "report", by="system", packs_root=packs)
+    assert read_gate_state(proj.meta) == {"phase": "report", "gate": False,
+                                          "passed": False, "unmet": []}
+    # 内容不变跳过写盘；变化才落
+    writes: list[int] = []
+    monkeypatch.setattr(phases, "_save_meta", lambda p, m: writes.append(1))
+    save_gate_state(proj, proj.meta["phase_gate_state"])
+    assert writes == []
+    save_gate_state(proj, {**proj.meta["phase_gate_state"], "passed": True})
+    assert writes == [1]
+
+
+def test_phase_gate_state_written_by_check(client):
+    """B3（M3）：_phase_gate_check 每轮评估后落 meta phase_gate_state（过门与否
+    都写）；L0 项目过门时 state.passed=True 且 phase.gate_open 事件照常分流。"""
+    pid = _mk(client)
+    app = client.app.state
+    proj = app.projects[pid]
+    # 建项 enter_phase 已写 recon 门状态（0 资产未过）
+    st = proj.meta["phase_gate_state"]
+    assert st["phase"] == "recon" and st["gate"] is True and st["passed"] is False
+    # 未过门再 check → 状态原样（内容不变跳过写盘）
+    app.phase_gate_check(pid)
+    assert proj.meta["phase_gate_state"] == st
+    # 灌资产过门 → check 后 state.passed=True + L1（pentest 默认档）审批单分流
+    _seed_assets(proj.bb, pid, n=10, hv=1)
+    app.phase_gate_check(pid)
+    st2 = proj.meta["phase_gate_state"]
+    assert st2["passed"] is True and st2["unmet"] == []
+    pending = proj.bb.conn.execute(
+        "SELECT action FROM approvals WHERE project_id=? AND status='pending'",
+        (pid,)).fetchall()
+    assert any(json.loads(r["action"]).get("op") == "phase_transition"
+               for r in pending)
 
 
 # ---------- doctor phase-* 码 ----------

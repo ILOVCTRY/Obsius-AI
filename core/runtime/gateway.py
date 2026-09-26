@@ -17,9 +17,21 @@ from typing import Any
 
 from core.blackboard.store import Blackboard
 from core.runtime import pathguard, rateguard
-from core.runtime.backends import BackendError, DockerBackend, ExecOutcome, NativeBackend, WSLBackend
+from core.runtime.backends import (
+    DEFAULT_PENTEST_IMAGE,
+    BackendError,
+    DockerBackend,
+    ExecOutcome,
+    NativeBackend,
+    WSLBackend,
+)
 from core.runtime.pathguard import windows_to_wsl_path
 from core.runtime.policy import DEFAULT_NET_MODE, NET_MODES, RUNTIME_LEVELS, Level, allowed_levels
+
+#: docker runtime 的 workspace 挂载约定（pentest-tools-container-m0）：
+#: 宿主 <workspace> 挂容器 /workspace 读写，cwd 固定 /workspace/scratch
+_DOCKER_WS_MOUNT = "/workspace"
+_DOCKER_WS_SCRATCH = "/workspace/scratch"
 
 
 class GatewayDenied(PermissionError):
@@ -105,15 +117,18 @@ class ExecutionGateway:
         approval_id: str | None = None,
         workspace: str | Path | None = None,
         abort_event: threading.Event | None = None,
+        step: int | None = None,
     ) -> ExecutionResult:
         """执行一条命令。第②层防线（服务端校验）在此实现：
         runtime 不在 threat_class 允许集 → GatewayDenied + audit.deny 事件。
 
-        workspace（工作区隔离，§7 2026-09-17）：host/wsl 执行时传项目 workspace 根——
+        workspace（工作区隔离，§7 2026-09-17）：host/wsl/docker 执行时传项目
+        workspace 根——
         ①写目标逃逸工作区 → 网关硬拒（pathguard，只拦写不拦读）；
         ②cwd 强制 = <workspace>/scratch（临时中间文件统一去处）；
-        ③TEMP/TMP 重定向 = <workspace>/.tmp（host）；WSL 用 TMPDIR 前缀等价处理。
-        docker/sandbox 零挂载本不落盘，workspace 不生效。
+        ③TEMP/TMP 重定向 = <workspace>/.tmp（host）；WSL 用 TMPDIR 前缀等价处理；
+        docker（2026-09-23 容器化 M0）挂载 <workspace>:/workspace 读写、
+        cwd=/workspace/scratch，bash+工具链全 Linux 语义；sandbox 零挂载不落盘。
         """
         timeout = timeout or self.default_timeout
         started = time.monotonic()
@@ -145,26 +160,31 @@ class ExecutionGateway:
                     f"net=real 须人工审批：approval_id={approval_id} 缺失或未批准"
                 )
 
-        # ③' 工作区隔离（§7 2026-09-17）：仅 host/wsl 有宿主文件系统边界问题
+        # ③' 工作区隔离（§7 2026-09-17）：host/wsl/docker 有文件系统边界问题；
+        #     docker 容器化 M0（2026-09-23）挂 workspace 卷并对齐 scratch 相对路径习惯
         exec_cmd = cmd
         cwd: str | None = None
         env: dict[str, str] | None = None
+        mounts: list[tuple[str, str]] | None = None
         scratch_str = ""
-        if workspace is not None and runtime in ("host", "wsl"):
+        if workspace is not None and runtime in ("host", "wsl", "docker"):
             ws = Path(workspace)
             scratch = ws / "scratch"
             tmp = ws / ".tmp"
             scratch.mkdir(parents=True, exist_ok=True)
             tmp.mkdir(parents=True, exist_ok=True)
-            posix = runtime == "wsl"
-            scratch_str = windows_to_wsl_path(scratch) if posix else str(scratch)
+            posix = runtime in ("wsl", "docker")
+            scratch_str = windows_to_wsl_path(scratch) if runtime == "wsl" else str(scratch)
             if runtime == "host":
                 cwd = str(scratch)
                 env = {**os.environ, "TEMP": str(tmp), "TMP": str(tmp)}
-            else:  # wsl：cwd 走 --cd（WSL 侧路径）；TMPDIR 前缀重定向
+            elif runtime == "wsl":  # wsl：cwd 走 --cd（WSL 侧路径）；TMPDIR 前缀重定向
                 cwd = scratch_str
                 wsl_tmp = windows_to_wsl_path(tmp)
                 exec_cmd = f"export TMPDIR={shlex.quote(wsl_tmp)}; {cmd}"
+            else:  # docker：整卷挂载（容器内 bash/Linux 语义，路径以 /workspace 为根）
+                cwd = _DOCKER_WS_SCRATCH
+                mounts = [(str(ws), _DOCKER_WS_MOUNT)]
 
         # ③'' 扫描限速纪律（借鉴 dsh-scanner-tools rateDiscipline，2026-09-19）：
         # 裸奔扫描一跑就是数万包——补限速参数即可重试，拒因文案自带放行配方
@@ -180,14 +200,17 @@ class ExecutionGateway:
                 project_id, "command",
                 {"call_id": call_id, "cmd": cmd, "runtime": runtime,
                  "threat_class": threat_class, "net": net,
-                 **({"cwd": cwd} if cwd else {})},
+                 # step（D9 卡死预检的区间切分用）：仅执行器链路透传，其余调用方无
+                 **({"cwd": cwd} if cwd else {}),
+                 **({"step": step} if step is not None else {})},
                 session_id=session_id, author=author,
             )
         try:
             # abort_event（■ 即点即停 2026-09-19）：命令执行中置位 → 后端杀进程树
             # 立即返回 interrupted，不等命令自然结束；结果 ok=False 进 command.result
             outcome = self._dispatch(exec_cmd, runtime, timeout, net, image,
-                                     cwd=cwd, env=env, abort_event=abort_event)
+                                     cwd=cwd, env=env, abort_event=abort_event,
+                                     mounts=mounts)
         except BackendError as e:
             raise _audit_deny(f"后端不可用: {e}") from e
         except NotImplementedError as e:
@@ -245,15 +268,17 @@ class ExecutionGateway:
             )
         if net is not None and net not in NET_MODES and net != "bridge":
             return f"非法网络模式: {net}"
-        if workspace is not None and runtime in ("host", "wsl"):
+        if workspace is not None and runtime in ("host", "wsl", "docker"):
             ws = Path(workspace)
-            posix = runtime == "wsl"
-            scratch_str = (windows_to_wsl_path(ws / "scratch") if posix
-                           else str(ws / "scratch"))
+            posix = runtime in ("wsl", "docker")
+            # docker 容器侧路径以 /workspace 为根（挂载约定，pentest-tools-container-m0）
+            scratch_str = (windows_to_wsl_path(ws / "scratch") if runtime == "wsl"
+                           else str(ws / "scratch") if runtime == "host"
+                           else _DOCKER_WS_SCRATCH)
+            ws_str = (windows_to_wsl_path(ws) if runtime == "wsl"
+                      else str(ws) if runtime == "host" else _DOCKER_WS_MOUNT)
             escapes = pathguard.workspace_escapes(
-                cmd, scratch=scratch_str,
-                workspace=windows_to_wsl_path(ws) if posix else str(ws),
-                posix=posix,
+                cmd, scratch=scratch_str, workspace=ws_str, posix=posix,
             )
             if escapes:
                 return (
@@ -267,7 +292,8 @@ class ExecutionGateway:
     def _dispatch(self, cmd: str, runtime: str, timeout: float, net: str,
                   image: str | None, cwd: str | None = None,
                   env: dict[str, str] | None = None,
-                  abort_event: threading.Event | None = None) -> ExecOutcome:
+                  abort_event: threading.Event | None = None,
+                  mounts: list[tuple[str, str]] | None = None) -> ExecOutcome:
         backend = self.backends.get(runtime)
         if backend is None:
             raise BackendError(f"runtime {runtime} 无对应后端")
@@ -277,8 +303,10 @@ class ExecutionGateway:
                 abort_event=abort_event
             )
         if runtime == "docker":
-            return backend.run_once(image or "alpine", cmd, net=net, sandbox=False,
-                                    timeout=timeout, abort_event=abort_event)
+            return backend.run_once(image or DEFAULT_PENTEST_IMAGE, cmd, net=net,
+                                    sandbox=False, timeout=timeout,
+                                    abort_event=abort_event,
+                                    mounts=mounts, cwd=cwd)
         return backend.execute(cmd, timeout=timeout, cwd=cwd, env=env,
                                abort_event=abort_event)
 

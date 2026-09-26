@@ -10,6 +10,7 @@
 
 from dataclasses import dataclass, field
 
+from core.skills.matching import term_matches
 from core.skills.registry import SkillMeta, SkillRegistry
 
 
@@ -110,7 +111,7 @@ class SkillRouter:
                 matched.append(f"task_type:{task_type}")
                 contrib["task_type"]["hits"].append(task_type)
             for kw in sk.keywords:
-                if kw.lower() in q:
+                if term_matches(kw, q):
                     score += 2.0
                     matched.append(kw)
                     contrib["keywords"]["hits"].append(kw)

@@ -10,6 +10,8 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from core.runtime.backends import DEFAULT_PENTEST_IMAGE, NO_WINDOW_FLAGS
+
 
 @dataclass
 class ProbeResult:
@@ -40,19 +42,24 @@ class CapabilityInventory:
             lines.append("- 工具清单: 暂无注册（tools/ 为空）")
         return "\n".join(lines)
 
-    def to_json(self) -> str:
-        return json.dumps({
+    def to_dict(self) -> dict:
+        """API 响应形状（GET /api/projects/{pid}.capability 与 POST /api/gateway/probe 同构）。"""
+        return {
             "docker": {"available": self.docker.available, "detail": self.docker.detail},
             "wsl": {"available": self.wsl.available, "detail": self.wsl.detail},
             "tools": [{"name": t.name, "available": t.available, "detail": t.detail}
                       for t in self.tools],
-        }, ensure_ascii=False, indent=2)
+        }
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict(), ensure_ascii=False, indent=2)
 
 
 def _run_probe(cmd: list[str], timeout: float = 10.0) -> tuple[bool, str]:
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
-                              encoding="utf-8", errors="replace")
+                              encoding="utf-8", errors="replace",
+                              creationflags=NO_WINDOW_FLAGS)
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
         return False, str(e)[:120]
     if proc.returncode == 0:
@@ -64,6 +71,15 @@ def _run_probe(cmd: list[str], timeout: float = 10.0) -> tuple[bool, str]:
 class HostDetector:
     def probe(self, tools_root: str | Path | None = None) -> CapabilityInventory:
         docker_ok, docker_detail = _run_probe(["docker", "version", "--format", "{{.Server.Version}}"])
+        if docker_ok:
+            # pentest-tools-container-m0：docker 引擎热时顺带查渗透工具箱镜像，
+            # 缺失即在能力清单给出构建指引（Agent/前端都消费同一份文本）
+            img_ok, _ = _run_probe(
+                ["docker", "image", "inspect", DEFAULT_PENTEST_IMAGE,
+                 "--format", "{{.Id}}"])
+            docker_detail += (
+                "；pentest-box 镜像就绪" if img_ok
+                else "；pentest-box 镜像缺失（构建：python scripts/build_pentest_box.py）")
         wsl_ok, wsl_detail = _run_probe(["wsl.exe", "--status"]) if _is_windows() else (False, "非 Windows 宿主")
         tools = self.probe_tools(tools_root) if tools_root else []
         return CapabilityInventory(
@@ -74,45 +90,24 @@ class HostDetector:
 
     @staticmethod
     def probe_tools(tools_root: str | Path) -> list[ProbeResult]:
-        """扫描 tools/**/manifest.yaml 的 probe 字段逐一探测（DESIGN.md §7 工具目录）。
-
-        manifest 形如：
-            name: ghidra
-            probe: "where analyzeHeadless"   # Windows
-        """
-        results: list[ProbeResult] = []
-        root = Path(tools_root)
-        if not root.is_dir():
-            return results
-        for manifest in sorted(root.glob("**/manifest.yaml")):
-            meta = _load_simple_yaml(manifest)
-            name = meta.get("name", manifest.parent.name)
-            probe = meta.get("probe", "")
-            if not probe:
-                results.append(ProbeResult(name, False, "manifest 无 probe 字段"))
-                continue
-            ok, detail = _run_probe(probe.split())
-            results.append(ProbeResult(name, ok, detail if not ok else "PATH 可达"))
-        return results
+        """工具链注册表驱动探测（toolchain-registry M1，2026-09-23）：四来源检测
+        （config/tools.json 覆盖层 → tools/ 规范位 → fallback glob → PATH），
+        机制见 core/toolchain.py。原 manifest.yaml 通道零使用者，随之退役。
+        registry 坏结构降级为单条 issue 行，不阻断 docker/wsl 主探测。"""
+        try:
+            from core.toolchain import load_tool_overrides, probe_tools as registry_probe
+            rows = registry_probe(tools_root, overrides=load_tool_overrides())
+        except Exception as e:  # noqa: BLE001 —— 探测面故障不影响能力清单主体
+            return [ProbeResult("registry", False, f"registry 读取失败: {e}")]
+        return [
+            ProbeResult(
+                r["name"], r["status"] == "ready",
+                (f"{r['source']}: {r['path']}" if r["status"] == "ready"
+                 else (r["detail"] or "缺失")))
+            for r in rows
+        ]
 
 
 def _is_windows() -> bool:
     import platform
     return platform.system() == "Windows"
-
-
-def _load_simple_yaml(path: Path) -> dict[str, str]:
-    """极简 YAML（仅顶层 key: value，够 manifest 用；引入 PyYAML 前的占位）。"""
-    meta: dict[str, str] = {}
-    try:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.rstrip()
-            if not line or line.lstrip().startswith("#") or ":" not in line:
-                continue
-            if line.startswith((" ", "\t")):
-                continue  # 跳过嵌套（platforms 等复杂结构后续接 PyYAML 再解析）
-            key, _, value = line.partition(":")
-            meta[key.strip()] = value.strip().strip('"').strip("'")
-    except OSError:
-        pass
-    return meta

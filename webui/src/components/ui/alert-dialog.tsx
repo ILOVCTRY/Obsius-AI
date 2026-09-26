@@ -40,6 +40,8 @@ function AlertDialogContent({
         data-slot="alert-dialog-content"
         className={cn(
           "fixed top-1/2 left-1/2 z-50 grid w-full max-w-md -translate-x-1/2 -translate-y-1/2",
+          // max-h+overflow：超宽/超高内容在弹窗内滚动，而不是溢出弹窗画到页面上（overflow-y 非 visible 会把 overflow-x 从 visible 折算成 auto，横向同样兜底）
+          "max-h-[85dvh] overflow-y-auto",
           "gap-4 rounded-lg border bg-popover p-6 shadow-lg",
           className,
         )}

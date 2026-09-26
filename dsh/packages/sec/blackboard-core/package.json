@@ -1,0 +1,37 @@
+{
+  "name": "@sec/blackboard-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "sec 黑板域核心：sec 存储域定义 + BlackboardService 单一写入口 + 图/树查询",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "import": "./lib/index.js"
+    },
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "files": ["lib"],
+  "scripts": {
+    "build": "tsdown && tsc -p tsconfig.json",
+    "test": "node --import tsx --test \"src/**/*.test.ts\""
+  },
+  "dependencies": {
+    "zod": "4.4.3"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/schemastery": "*",
+    "@deepseek-ai/dsh-storage": "*",
+    "@deepseek-ai/dsh-storage-domain": "*"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "link:E:/ILOVCTRY/deepseek-harness/vendor/cordis",
+    "@deepseek-ai/schemastery": "link:E:/ILOVCTRY/deepseek-harness/vendor/schemastery",
+    "@deepseek-ai/dsh-storage": "link:E:/ILOVCTRY/deepseek-harness/packages/storage/storage",
+    "@deepseek-ai/dsh-storage-domain": "link:E:/ILOVCTRY/deepseek-harness/packages/storage/storage-domain"
+  }
+}

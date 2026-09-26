@@ -1,6 +1,7 @@
 # 方案：链路画布单向零重叠布局（因果流水线）
 
 - **状态**：已实施（2026-09-22，D1-D4/R1-R4 全量；实施记录见文末 §7）
+  - **2026-09-24 组件已退役**：本文涉及的 FindingsCanvas/canvasModel/FindingEdge/FindingNode 已随 website-attack-path-graph M1 删除（用户判定两套 findings 渲染图没用，只弃渲染图、漏洞/有效发现开关与列表过滤保留）；替代件=单站攻击链路图 `AttackPath.tsx`，其单向 DAG 布局策略沿用本文精神。
 - **拍板记录**：用户四项拍板（D1-D4）+ 设计决策（R1-R4）见 §2
 - **关联代码**：`webui/src/views/blackboard/canvasModel.ts`（布局纯函数）、`FindingsCanvas.tsx`（组装/工具条）、`FindingEdge.tsx`（自定义边）、`FindingNode.tsx`（不动卡片本体）
 - **实施后**：定稿决策已回写 `DESIGN.md` §12 评估画布块，本文保留作方案背景

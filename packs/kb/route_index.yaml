@@ -149,15 +149,11 @@ entries:
     tags: [web-strike-entry]
   - point: 命令注入 / RCE
     match: [命令注入, rce, 代码执行, exec, system]
-    kb: web/webapp/sqli/手册.md
+    kb: web/playbooks/rce/00-index.md
     tags: [web-strike-entry]
   - point: SSTI 模板注入
     match: [ssti, 模板注入, jinja, twig, smarty]
-    kb: web/webapp/el-injection/手册.md
-    tags: [web-strike-entry]
-  - point: CORS 配置错误
-    match: [cors, 跨域, origin]
-    kb: web/webapp/cors/手册.md
+    kb: web/playbooks/rce/14-ssti.md
     tags: [web-strike-entry]
   - point: CSRF 跨站请求伪造
     match: [csrf, 跨站请求]
@@ -319,3 +315,30 @@ entries:
   - point: SRC 挖洞价值优先级
     match: [价值, 优先级, 挖洞策略, src]
     kb: web/playbooks/rules/src-value-hunting.md
+  - point: 元数据 SSRF
+    match: [ssrf, 元数据, metadata, imds, 169.254]
+    kb: cloud/knowledge/metadata-service-endpoints.md
+  - point: AK/SK 泄露利用
+    match: [accesskey, ak/sk, 凭证泄露, lta, akia]
+    kb: cloud/knowledge/cloud-api-readonly-probing.md
+  - point: IAM 权限提权
+    match: [iam, ram, cam, 提权, assume-role]
+    kb: cloud/knowledge/iam-policy-language-cheatsheet.md
+  - point: 对象存储配置缺陷
+    match: [oss, s3, cos, obs, 桶, bucket, 公开读]
+    kb: cloud/vendors/aliyun/oss.md
+  - point: 云控制台接管
+    match: [控制台, console, 接管]
+    kb: cloud/vendors/aliyun/ssrf-console.md
+  - point: K8s 集群攻防
+    match: [k8s, kubernetes, rbac, pod, 集群]
+    kb: cloud/native/k8s/01-cluster-exposure-mapping.md
+  - point: 容器逃逸
+    match: [容器, docker逃逸, container, escape]
+    kb: cloud/native/container/01-container-escape-paths.md
+  - point: CI/CD 攻击面
+    match: [cicd, 流水线, pipeline, jenkins, github action]
+    kb: cloud/native/cicd/01-pipeline-attack-surface.md
+  - point: Serverless
+    match: [serverless, 函数计算, lambda, faas]
+    kb: cloud/native/serverless/01-function-permission-trigger-abuse.md

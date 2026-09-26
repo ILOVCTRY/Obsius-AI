@@ -1,0 +1,44 @@
+{
+  "元数据|ssrf|imds|169.254|instance身份": [
+    "cloud/knowledge/metadata-service-endpoints.md",
+    "cloud/vendors/aliyun/ssrf-console.md"
+  ],
+  "ak|sk|accesskey|凭证泄露|lta|akia|秘钥": [
+    "cloud/knowledge/cloud-api-readonly-probing.md",
+    "cloud/knowledge/cloud-security-tool-cards.md"
+  ],
+  "iam|ram|cam|策略|提权|assume-role|角色": [
+    "cloud/knowledge/iam-policy-language-cheatsheet.md",
+    "cloud/vendors/aliyun/ram.md"
+  ],
+  "oss|s3|cos|obs|桶|bucket|对象存储|公开读": [
+    "cloud/vendors/aliyun/oss.md",
+    "cloud/vendors/aws/s3.md"
+  ],
+  "k8s|kubernetes|rbac|pod|集群|serviceaccount": [
+    "cloud/native/k8s/",
+    "cloud/native/k8s/01-cluster-exposure-mapping.md"
+  ],
+  "容器|docker|逃逸|container|镜像|privileged": [
+    "cloud/native/container/"
+  ],
+  "cicd|流水线|pipeline|jenkins|github action|制品|iac|terraform": [
+    "cloud/native/cicd/"
+  ],
+  "serverless|函数计算|lambda|faas|函数url|触发器": [
+    "cloud/native/serverless/"
+  ],
+  "rds|数据库|快照|snapshot|云数据库": [
+    "cloud/vendors/aliyun/rds.md",
+    "cloud/vendors/aws/rds.md"
+  ],
+  "检测|审计日志|告警|detection|cloudtrail|蓝队": [
+    "cloud/detection/"
+  ],
+  "att&ck|attck|矩阵|t编号|映射": [
+    "cloud/knowledge/attck-cloud-matrix.md"
+  ],
+  "工具|scoutsuite|prowler|pacu|cloudfox|gitleaks|trufflehog": [
+    "cloud/knowledge/cloud-security-tool-cards.md"
+  ]
+}

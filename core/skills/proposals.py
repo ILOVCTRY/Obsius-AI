@@ -41,6 +41,9 @@ STATUSES = {"pending", "approved", "rejected"}
 ORIGINS = {"agent", "review", "human"}
 _PROPOSAL_RE = re.compile(r"^(pp_\d{8}T\d{6}Z_[0-9a-f]{6})$")
 _UTC_FMT = "%Y-%m-%dT%H:%M:%SZ"
+# experience-sedimentation M2/M3：agent 产 kb 新建提案的机械质检（人审减负层）
+_EVIDENCE_REF_RE = re.compile(r"\b(?:find|task)-[0-9a-f]{12}\b")
+_KB_SECTION_RE = re.compile(r"坑|注意|已验证|路径|步骤|适用|流程|复现|前提")
 
 
 class ProposalError(ValueError):
@@ -192,6 +195,29 @@ def _validate_target(packs_root: Path, p: dict, *, applying: bool) -> None:
             writing._validate_content(content or "")
 
 
+def _validate_agent_kb(p: dict) -> None:
+    """agent 产 kb 新建提案的机械质检（experience-sedimentation M2 证据锚点 +
+    M3 丁结构 lint；origin=human/review 不校验，edit 修订既有手册以目标文件为锚
+    同样不强制）。只拦机械问题，人审专注内容质量；放 create_proposal 内而非
+    _validate_common——revise/apply 复用 _validate_*（human 改后采纳不应被 agent
+    证据要求拦）。"""
+    if p.get("origin") != "agent":
+        return
+    t = p["target"] or {}
+    if t.get("kind") != "kb" or p.get("mode") != "create":
+        return
+    if not _EVIDENCE_REF_RE.search(p.get("reason") or ""):
+        raise ProposalError(
+            "kb 新建提案的 reason 必须引用证据锚点（本任务产出的 finding id 形如 "
+            "find-xxxxxxxxxxxx，或任务 id task-…）；无产出证据的常规操作不值得沉淀")
+    content = p.get("content") or ""
+    h2 = [ln[3:].strip() for ln in content.splitlines() if ln.startswith("## ")]
+    if not h2 or not any(_KB_SECTION_RE.search(h) for h in h2):
+        raise ProposalError(
+            "kb 新建手册须有「## 」段落结构，且至少一段标题命中沉淀口径"
+            "（已验证路径/坑/适用条件/步骤/复现等）；纯 H1 单段文档不便于路由与段落级引用")
+
+
 # ---------------- 创建（只落 pending） ----------------
 
 def create_proposal(packs_root: str | Path, proposal: dict,
@@ -222,6 +248,7 @@ def create_proposal(packs_root: str | Path, proposal: dict,
     }
     _validate_common(p)
     _validate_target(packs_root, p, applying=False)
+    _validate_agent_kb(p)  # experience-sedimentation：agent 产 kb create 的机械质检
     ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     pid = f"pp_{ts}_{secrets.token_hex(3)}"
     p["id"] = pid

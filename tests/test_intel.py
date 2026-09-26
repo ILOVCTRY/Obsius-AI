@@ -109,6 +109,9 @@ def test_parse_rss_and_atom():
 
 
 def test_structured_sources_with_fake_getter():
+    # KEV 只收近 7 天新入条目（fetch_kev 防全量灌池）——日期须动态生成，否则时间炸弹
+    recent = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+
     def fake_getter(url, timeout):
         if "nvd" in url:
             return 200, json.dumps({"vulnerabilities": [
@@ -120,7 +123,7 @@ def test_structured_sources_with_fake_getter():
                               "tags": ["Exploit"]}]}}]})
         if "known_exploited" in url:
             return 200, json.dumps({"vulnerabilities": [
-                {"cveID": "CVE-2026-0002", "dateAdded": "2026-09-15",
+                {"cveID": "CVE-2026-0002", "dateAdded": recent,
                  "vulnerabilityName": "In-the-wild bug",
                  "shortDescription": "exploited"}]})
         return 200, json.dumps([{"ghsa_id": "GHSA-xxxx", "cve_id": "CVE-2026-0003",

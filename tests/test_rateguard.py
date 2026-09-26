@@ -46,6 +46,8 @@ def test_ffuf_requires_rate():
     assert rateguard.check_rate("ffuf -u http://x/FUZZ -w words.txt")
     assert rateguard.check_rate("ffuf -u http://x/FUZZ -w words.txt -rate 50") is None
     assert rateguard.check_rate("ffuf -u http://x/FUZZ -w words.txt -rl 30") is None
+    # 旧版 ffuf（镜像 1.1）无速率旗标，-t 限并发即可
+    assert rateguard.check_rate("ffuf -u http://x/FUZZ -w words.txt -t 5") is None
 
 
 def test_hydra_requires_t():
@@ -92,3 +94,21 @@ def test_gateway_denies_unthrottled_scan(bb):
     deny = [e for e in bb.recent_events(pid) if e["kind"] == "audit.deny"]
     assert len(deny) == 1
     assert "限速纪律" in deny[0]["payload"]["reason"]
+
+
+# ---------- 快照表一致性（gateway-config-view M1）----------
+
+def test_rate_rules_table_covers_all_tools():
+    """RATE_RULES 快照表与 _RULES 校验函数表键一致——新增工具忘登记即红；
+    表字段齐备（requirement/params/hint），拒因文案可从表组装。"""
+    assert set(rateguard.RATE_RULES) == set(rateguard._RULES)
+    for tool, r in rateguard.RATE_RULES.items():
+        assert r["requirement"] and r["params"] and r["hint"], tool
+        assert "限速纪律" in rateguard._reject(tool)
+
+
+def test_masscan_threshold_read_from_table():
+    """阈值活在表里（校验函数不再硬编码）：1000 放行 / 1001 拦的边界不变形。"""
+    assert rateguard.RATE_RULES["masscan"]["threshold"] == 1000
+    assert rateguard.check_rate("masscan 10.0.0.0/24 -p80 --rate 1000") is None
+    assert rateguard.check_rate("masscan 10.0.0.0/24 -p80 --rate 1001")

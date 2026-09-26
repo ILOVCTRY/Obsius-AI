@@ -29,6 +29,8 @@ import uuid
 from pathlib import Path
 from typing import Callable
 
+from core.runtime.backends import NO_WINDOW_FLAGS
+
 EXPORT_VERSION = 3
 
 # headless 大样本自动分析可能很久（自动分析+全量反编译），网关侧给 15 分钟
@@ -77,8 +79,19 @@ _IDA_INSTALL_GLOBS = (
 def resolve_ida_headless() -> str | None:
     """探测 headless IDA：8.x 是 idat64，9.x 统一为 idat。
 
-    顺序：PATH(idat64→idat) → 常见安装目录 glob。找不到返回 None。
+    顺序：工具链注册表四来源（core/toolchain，M1 起；config/tools.json 指认 →
+    tools/ 规范位 → fallback glob → PATH）→ 原生兜底（PATH → 常见安装目录 glob）。
+    找不到返回 None。
     """
+    try:  # registry 命中直接返回（fallback glob 与 _IDA_INSTALL_GLOBS 同源，registry 优先）
+        from core.toolchain import load_registry, load_tool_overrides, resolve_tool
+        entry = load_registry().get("ida")
+        if entry:
+            row = resolve_tool("ida", entry, overrides=load_tool_overrides())
+            if row["status"] == "ready":
+                return row["path"]
+    except Exception:  # noqa: BLE001 —— registry 故障回退原生探测，不阻断
+        pass
     for cand in ("idat64", "idat"):
         found = shutil.which(cand)
         if found:
@@ -91,6 +104,22 @@ def resolve_ida_headless() -> str | None:
             if hits:
                 return hits[0]
     return None
+
+
+def resolve_ghidra_headless() -> str | None:
+    """探测 headless Ghidra（analyzeHeadless）：工具链注册表四来源
+    （core/toolchain，M1 起）→ PATH 兜底。找不到返回 None。
+    解「Ghidra 装在自定义目录、PATH 未配置导致后端永不可用」错位。"""
+    try:
+        from core.toolchain import load_registry, load_tool_overrides, resolve_tool
+        entry = load_registry().get("ghidra")
+        if entry:
+            row = resolve_tool("ghidra", entry, overrides=load_tool_overrides())
+            if row["status"] == "ready":
+                return row["path"]
+    except Exception:  # noqa: BLE001
+        pass
+    return shutil.which("analyzeHeadless")
 
 
 def resolve_ida_gui(headless_path: str | None = None) -> str | None:
@@ -116,7 +145,8 @@ def sha256_file(path: str | Path) -> str:
 def _default_runner(args: list[str]) -> tuple[int, str, str]:
     try:
         proc = subprocess.run(args, capture_output=True, text=True, timeout=HEADLESS_TIMEOUT,
-                              encoding="utf-8", errors="replace")
+                              encoding="utf-8", errors="replace",
+                              creationflags=NO_WINDOW_FLAGS)
         return proc.returncode, proc.stdout or "", proc.stderr or ""
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
         return -1, "", str(e)
@@ -1041,9 +1071,10 @@ def build_headless_service(cache_dir: str | Path, *, runner,
         "ida": lambda: IDAHeadlessBackend(idat_cmd=resolve_ida_headless() or "idat64",
                                           runner=runner, db_dir=ida_db_dir,
                                           available=available),
-        "ghidra": lambda: GhidraHeadlessBackend(runner=runner,
-                                                tmp_project_dir=ghidra_tmp_dir,
-                                                available=available),
+        "ghidra": lambda: GhidraHeadlessBackend(
+            headless_cmd=resolve_ghidra_headless() or "analyzeHeadless",
+            runner=runner, tmp_project_dir=ghidra_tmp_dir,
+            available=available),
     }
     svc = DecompilerService(cache_dir=cache_dir, mcp_endpoint=mcp_endpoint,
                             mcp_provider=mcp_provider)

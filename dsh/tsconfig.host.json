@@ -1,0 +1,17 @@
+{
+  "//": "sec 工作区 host 聚合：typert 生成器的 workspace root 标记。paths 把协议名解析到 vendored shim 源码（钉上游 477b4f4 复制固化，运行时仍走 profile 里的真实包，shim 仅构建期）；挂 @Remote 的控制器包在 references 登记。",
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "paths": {
+      "@deepseek-ai/dsh-typert-protocol": [
+        "./packages/shims/dsh-typert-protocol/src/index.ts"
+      ]
+    }
+  },
+  "files": [],
+  "references": [
+    { "path": "./packages/shims/dsh-typert-protocol" },
+    { "path": "./packages/sec/blackboard-controller" }
+  ]
+}

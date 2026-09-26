@@ -43,3 +43,19 @@ binary-rev 的 `is_elf/is_pe` 不冲突（APK 是 zip 容器）；`packed_so`（
 通用 ELF/PE 逆向纪律（func_kb 查重落库、大文件读取纪律、变换速查、docker 验证）
 沿 binary-rev 技能，本技能只补 Android 容器层（APK/DEX/JNI/壳/引擎）与移动专项
 知识。样本 untrusted 红线不变：样本执行只进 docker/sandbox，宿主只做静态解析。
+
+## 自动化工具面（registry 纳管，缺失即降级）
+
+工具链注册表（tools/registry.json）声明三件（`tools/py/android/` 随仓自带，
+`run_cmd host python <tools>/py/android/<脚本>.py …` 经网关执行）：
+
+- `android-ctf-runner`：APK 自动分诊（清单/权限/native/JNI 线索 → 工作区 + JSON +
+  Markdown 报告），纯 stdlib。分诊起步先跑它，输出作分诊判据输入，**结论仍由你声明**。
+- `godot-ctf-runner`：Godot APK 全自动（markers→壳检测→脱壳→reloc→常量提取），
+  依赖 unicorn。
+- `android-unpack-kit`：UPX-shlib 脱壳三件套（upx_shlib_emu 主入口 + apply_relocs +
+  nrv2b），依赖 unicorn。
+
+**降级纪律**：工具缺失或依赖（unicorn）未装时**不空等安装**——回手册手工路径
+（`unpacking.md` ②脱壳工程 / `godot.md` ⑥手工兜底），结论照常落 finding；
+环境能力清单（detector）已列缺什么，不要自己猜。

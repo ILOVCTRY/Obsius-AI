@@ -55,8 +55,54 @@ def _full_range(v: str) -> bool:
     return v in _FULL_RANGE
 
 
+def _hydra_reason(low: list[str]) -> str | None:
+    has_t = any(re.fullmatch(r"-t\d+", t) for t in low) or any(
+        t == "-t" and i + 1 < len(low) and low[i + 1].isdigit()
+        for i, t in enumerate(low)
+    )
+    if not has_t:
+        return _reject("hydra")
+    return None
+
+
+# 限速规则表（gateway-config-view M1，2026-09-23）：tool → 快照与校验共用单一事实源。
+# requirement=纪律要求；params=放行参数集（快照表展示）；hint=拒因文案的放行指引尾巴；
+# threshold=数值阈值（有则校验函数读表）。新增 _RULES 工具必须同步登记本表
+# （test_runtime 键一致性测试防漏）。
+RATE_RULES: dict[str, dict] = {
+    "nmap": {
+        "requirement": "全端口扫描未带限速参数（一跑就是 65535 端口全速发包）",
+        "params": ["-T0..3", "--max-rate", "--max-parallelism", "--scan-delay"],
+        "hint": "补任一即可放行：-T3 --max-rate 200（推荐）/ -T0..2 / --max-parallelism / --scan-delay",
+    },
+    "masscan": {
+        "requirement": "--rate 超过阈值 1000（p/s）",
+        "params": ["--rate"],
+        "hint": "降到 --rate 1000 及以下（保守默认 500）再执行",
+        "threshold": 1000,
+    },
+    "ffuf": {
+        "requirement": "未带速率限制（默认不限速全速跑）",
+        "params": ["-rate", "-rl", "-t"],
+        # pentest-box 自带 ffuf 1.1 无任何速率旗标，只能 -t 限并发
+        "hint": "补任一：-rl 50 / -rate 50（新版按秒限速），旧版（如镜像内 ffuf 1.1）用 -t 5 限并发",
+    },
+    "hydra": {
+        "requirement": "未带并发任务数 -t（默认 16 并发易触发账户锁定/封禁）",
+        "params": ["-t"],
+        "hint": "补 -t 8（推荐）及以下再执行",
+    },
+}
+
+
+def _reject(tool: str) -> str:
+    """按表组装拒因文案（requirement + hint，单一事实源）。"""
+    r = RATE_RULES[tool]
+    return f"限速纪律：{tool} {r['requirement']}。{r['hint']}"
+
+
 def _nmap_reason(low: list[str]) -> str | None:
-    """全端口扫描必须带限速参数（-T0..3 / --max-rate / --max-parallelism / --scan-delay）。"""
+    """全端口扫描必须带限速参数（参数集读 RATE_RULES 表）。"""
     full = False
     for i, t in enumerate(low):
         if t == "-p-":
@@ -75,39 +121,31 @@ def _nmap_reason(low: list[str]) -> str | None:
     throttled = any(re.fullmatch(r"-t[0-3]", t) for t in low) or (
         "-t" in low and any(low[i + 1] in {"0", "1", "2", "3"}
                             for i, t in enumerate(low) if t == "-t" and i + 1 < len(low))
-    ) or _has_flag(low, "--max-rate", "--max-parallelism", "--scan-delay")
+    ) or _has_flag(low, *RATE_RULES["nmap"]["params"][1:])
     if throttled:
         return None
-    return ("限速纪律：nmap 全端口扫描未带限速参数（一跑就是 65535 端口全速发包）。"
-            "补任一即可放行：-T3 --max-rate 200（推荐）/ -T0..2 / --max-parallelism / --scan-delay")
+    return _reject("nmap")
 
 
 def _masscan_reason(low: list[str]) -> str | None:
+    threshold = RATE_RULES["masscan"]["threshold"]
     for i, t in enumerate(low):
         if t.split("=", 1)[0] == "--rate":
             v = _flag_value(low, i)
-            if v.isdigit() and int(v) > 1000:
-                return (f"限速纪律：masscan --rate {v} 超过阈值 1000（p/s）。"
-                        "降到 --rate 1000 及以下（保守默认 500）再执行")
+            if v.isdigit() and int(v) > threshold:
+                return (f"限速纪律：masscan --rate {v} 超过阈值 {threshold}（p/s）。"
+                        f"{RATE_RULES['masscan']['hint']}")
     return None
 
 
 def _ffuf_reason(low: list[str]) -> str | None:
-    if not _has_flag(low, "-rate", "-rl"):
-        return ("限速纪律：ffuf 未带速率限制（默认不限速全速跑）。"
-                "补 -rate 50（推荐）或 -rl <每秒请求数> 再执行")
-    return None
-
-
-def _hydra_reason(low: list[str]) -> str | None:
-    has_t = any(re.fullmatch(r"-t\d+", t) for t in low) or any(
+    throttled = _has_flag(low, "-rate", "-rl") or any(
+        re.fullmatch(r"-t\d+", t) for t in low
+    ) or any(
         t == "-t" and i + 1 < len(low) and low[i + 1].isdigit()
         for i, t in enumerate(low)
     )
-    if not has_t:
-        return ("限速纪律：hydra 未带并发任务数 -t（默认 16 并发易触发账户锁定/封禁）。"
-                "补 -t 8（推荐）及以下再执行")
-    return None
+    return None if throttled else _reject("ffuf")
 
 
 # 工具名 → 校验函数（校验失败返回拒因文案）

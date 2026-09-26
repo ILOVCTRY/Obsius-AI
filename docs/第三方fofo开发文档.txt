@@ -1,0 +1,266 @@
+公告（网站有问题会在这里说明-没有说明的时候可以提醒我更新）
+接口1【可用】：https://fofoapi.com
+接口2【可用】：http://107.173.248.139:18999
+
+---
+注意！！！注意！！！！注意！！！！
+只要提示"账号无效"就是没改接口！！！！！
+只要提示"账号无效"就是没改接口！！！！！
+只要提示"账号无效"就是没改接口！！！！！
+提示"key 不存在"表示配置正确，但是key填错了！！！（注意检查是否需要引号，是否有空格）
+提示"key 不存在"表示配置正确，但是key填错了！！！（注意检查是否需要引号，是否有空格）
+提示"key 不存在"表示配置正确，但是key填错了！！！（注意检查是否需要引号，是否有空格）
+只要是开源工具就可以改接口，如果不会改提供工具名字给管理员。稍后会更新修改教程。
+注意：如果使用的是打包好或编译好的程序，比如：.exe 如果程序自身没有提供更改方式，那么就无法更改。建议换工具或使用未编译或打包的程序。自己有编译打包能力的，可以更源码后自行编译打包。
+特别提示：fofoapi.com速度更快建议优先使用
+系统简介
+本系统是FOFA的中转代理平台，支持在线网页查询和API查询，其中API查询接口调用方式与官网完全一致，并且兼容各种第三方查询工具。
+使用第三方工具时，只需要将官网的api地址换成本站的api地址（https://fofoapi.com）即可。
+符号、语法、字段支持与否
+支持查的询符号（6个）：=、==、&&、||、!=、()
+
+不支持的查询符号（1个）：*=
+
+支持的查询语法（54个）：ip、port、domain、host、os、server、asn、org、is_domain、is_ipv6、app、fid、product、category、type、cloud_name、is_cloud、is_fraud、is_honeypot、protocol、banner、base_protocol、title、header、header_hash、body、body_hash、js_name、js_md5、cname、cname_domain、icon_hash、status_code、icp、country、region、city、cert、cert.subject、cert.issuer、cert.subject.org、cert.subject.cn、cert.issuer.org、cert.issuer.cn、cert.domain、cert.is_equal、cert.is_valid、cert.is_match、cert.is_expired、jarm、tls.version、tls.ja3s、after、before
+
+不支持的查询语法（11个）：sdk_hash、after && before、port_size、port_size_gt、port_size_lt、ip_ports、ip_country、ip_region、ip_city、ip_after、ip_before
+
+支持展示的字段（40个）：ip-IP地址、port-端口、protocol-协议名、location.country-国家代码、location.country_name-国家名、location.region-区域、location.city-城市、location.longitude-经度、location.latitude-纬度、asn-ASN编号、org-ASN组织、host-主机名、domain-域名、os-操作系统、server-Server、icp-ICP备案号、title-网站标题、jarm-JARM指纹、header-Header、banner-Banner、cert-证书、base_protocol-基础协议、Iink-URL链接、cert.issuer.org-证书颁发者组织、cert.issuer.cn-证书颁发者CN、cert.subject.org-证书持有者组织、cert.subject.cn-证书持有者、CNtls.ja3s-JA3S指纹、tls.version-TLs版本、cert.sn-证书序列号、cert.not before-证书生效时间、cert.not_after-证书到期时间、cert.domain-证书根域名、header hash-Header Hash、banner hash-Banner Hash、banner fid-Banner FlD、cname-CNAME、lastupdatetime-最后更新时间、product-产品名、product_category-产品分类
+
+不支持展示的字段（10个）：product.version-产品版本、icon hash - lcon Hash、cert.is_valid-证书是否有效、cname_domain-CNAME域名、body-网站正文、cert.is_match-证书颁发者匹配、cert.is_equal-证书域名匹配、icon -lcon图标、fid - FID、structinfo-结构化信息
+特别提醒：默认最大支持输出10000条数据，当展示字段中包含以下字段时，最大输出数据条数会减少：
+header: size = 2000 
+banner: size = 2000 
+cert: size = 2000 
+API 概览
+本系统提供以下API接口：
+1. 查询接口 (/api/v1/search/all) - 与 FOFA 搜索功能对应
+2. 连续翻页接口 (/api/v1/search/next) - 与 FOFA 搜索功能对应
+3. 统计数据接口 (/api/v1/search/stats) - 获取查询结果统计信息
+4. Host查询接口 (/api/v1/host/{host}) - 获取指定主机的详细信息
+5. 用户信息接口 (/api/v1/info/my) - 支持返回实际套餐剩余和到期时间
+配额限制
+- 查询接口（/api/v1/search/all）消耗：与返回结果数量相等的查询配额 / 一次查询次数
+- 连续翻页接口（/api/v1/search/next）消耗：与返回结果数量相等的查询配额 / 一次查询次数
+- 统计聚合接口（/api/v1/search/stats）消耗：固定消耗1000个查询配额 / 一次查询次数
+- Host查询接口（/api/v1/host/{host}）消耗：固定消耗1000个查询配额 / 一次查询次数
+- 用户信息接口（/api/v1/info/my）不消耗查询配额
+每日查询限制
+- 根据不同套餐限制，可在fofoapi.com实时查看配额信息
+- 用户信息接口（/api/v1/info/my）不消耗配额
+- 每日限制在北京时间0点重置
+请求速率限制
+- 理论不限制请求速度，根据自身查询语句情况酌情调整。
+- 每个key允许的并发数量由总活跃用户决定，动态调整。
+- 系统会根据请求压力动态启用备用key。
+- 请控制并发池在一个合理的范围，请求过快也会被扣除相应的查询配额
+- 且用且珍惜
+- 脚本请检查返回内容中是否包含"已用完"的字样，如果包含请停止脚本，否则有可能遭遇封禁。
+关于套餐 
+以月卡举例分为两种套餐：
+1. 每天200次，无总条数限制。适合查询大资产用的，但是它的次数少一点
+  1. 除了每天次数以外无其他限制。
+2. 每天500次，有总条数限制（有效期内100万条数据），但是不适合查大资产
+  1. 如果每次查询都是大资产，都有 1 万条以上的内容，那么极限情况下，100 次查询就会消耗完毕。
+自己适合使用啥样的套餐自己酌情选择
+
+自定义脚本调用
+注意：在开源工具中，只需要将 https://fofa.info/  替换成下方其中一个 Base Urlf 即可，/api/ 后面部分保持原样（如有）。
+- Base Url_1: http://107.173.248.139:18999
+- Base Url_2: https://fofoapi.com
+- Endpoint_1: /api/v1/search/all
+- Endpoint_2: /api/v1/search/next
+- Data Example: 参考官方用例【https://fofa.info/api】
+https://fofoapi.com
+http://107.173.248.139:18999
+这两个url既是可以直接访问的web页面，又是API接口。直接使用浏览器访问就是web页面。
+
+在浏览器按照以下方式访问即可得到API数据：
+https://fofoapi.com/api/v1/search/all?qbase64=dGl0bGU9IjEyMyI=&key=这里填你的key
+http://107.173.248.139:18999/api/v1/search/all?qbase64=dGl0bGU9IjEyMyI=&key=这里填你的key
+
+下面是最简单的脚本使用方式：
+import requests
+print(requests.get("https://fofoapi.com/api/v1/search/all?qbase64=dGl0bGU9IjEyMyI=&key=这里填你的key").text)
+关于翻页问题
+总数（页码*每页数量）超过一万条不可翻页，除非付费，官方价格35元一万条。
+[图片]
+提供有偿代导出，每一万条/一元，50万起步（低消50元）。
+关于 after && before 
+只能单个使用，不能两个一起使用。
+WEB 端使用
+直接访问：https://fofoapi.com 或者 http://107.173.248.139:18999
+各种开源工具使用方式
+fofa_viewer
+配置 -> fofa配置 -> fofa api 填入订单中任意使用网址 -> fofa key 填入订单中的key
+[图片]
+密探（mitan）
+https://fofoapi.com 不可用的话可以用：http://107.173.248.139:18999
+API 填入订单中任意使用网址 -> Email 随意填 -> Key 填入订单中的key
+注意：重启后可能配置文件会丢失
+[图片]
+OneForAll
+一款功能强大的子域收集工具
+- 需要到找到 modules/search/fofa_api.py 
+- 找到文件中的 'https://fofa.info/api/v1/search/all'  
+  - 将 Base Url 改成给你的API接口，比如：'http://xx.xx.xx:1234/'，或者'https://xx.com'
+- 修改配置文件 config/api.py 
+  - fofa_api_email = '12323@qq.com'  # 随意填比如：12323@qq.com
+  - fofa_api_key = 'aa1234'  # 给你的key比如：aa1234
+注意：只将 https://fofa.info 替换成 https://fofoapi.com 或 http://107.173.248.139:18999 其余不要动！！！！！
+TscanPlus（无影）
+一款综合性网络安全检测和运维工具，旨在快速资产发现、识别、检测，构建基础资产信息库，协助甲方安全团队或者安全运维人员有效侦察和检索资产，发现存在的薄弱点和攻击面。
+注意：提示无效的时候检查接口是否带有协议，需要填写完整。
+注意：新版本没有邮箱这个参数了格式【key||接口】
+- 使用示例：
+  - 123@qq.com:key到这里||改成API接口
+- 替换示例
+  - key：ask123（从聊天记录中复制）
+  - 邮箱：1234qq.com（可随意填）
+  - API接口1：http://107.173.248.139:18999（那个快用哪个）
+  - API接口2：https://fofoapi.com（那个快用哪个）
+- 替换完成最终形态：
+  - 1234qq.com:ask123||https://fofoapi.com
+  - 1234qq.com:ask123||http://107.173.248.139:18999
+- 注意：使用方式和其他软件不一样
+  - 先选择要查询的字段，后面搜索框直接输入查询条件
+  - 关键词不要加引号等符号，直接输入即可，如:tidesec.com
+  - 多个查询条件可用英文逗号(1)隔开，如:tidesec.com,tidesec.net使用ICON查询时，直接输入ICON的URL可，如:http://www.abc.com/icon.ico
+  - 因兼容较多测绘平台，所以自定义语法一般只适用于某一测绘平台，需自行调试配置
+[图片]
+testnet
+TestNet资产管理系统（资产管理|信息收集|暴露面管理|子域名扫描|C段扫描|端口扫描|漏洞扫描|Hunter|Fofa）
+  1.需要找到 testnet/db/testnet.sql  文件，然后将找到下方截图位置
+[图片]
+  2.将 "fofa.info" 改成 "fofoapi.com" 或 "107.173.248.183:18888"（使用ip接口记得将 https 中的 s去掉）
+注意：只改提到部分。改完后在启动 docker
+方法2（未验证，只是根据代码推断）：
+1. 进入 "资产管理" → "空间引擎配置"
+2. 找到 Fofa 引擎，点击"编辑"（以下地址任选其一，推荐域名）
+- 引擎地址：https://fofoapi.com/api/v1/search/all?key=%s&qbase64=%s&page=%d&size=%d&fields=%s
+- 引擎地址：http://107.173.248.139:18999/api/v1/search/all?key=%s&qbase64=%s&page=%d&size=%d&fields=%s
+- 引擎Token： 订单中的 Key
+DTGO
+DTGO (灯塔狩猎者) 是一个用于批量管理和监控资产灯塔系统任务的图形化工具。它能够自动发现灯塔系统、批量提交任务、监控任务状态，并支持导出任务结果。
+1. 找到：DTGO/dtgo_main.py 文件。
+  1. 将 https://fofa.info 改成 https://fofoapi.com 或者 http://107.173.248.139:18999
+  2. 注意：只改上面提到的，后面的路径不要改。
+[图片]
+2. 然后正常在设置中填入我给的key。
+[图片]
+
+
+
+fofaEX
+fofa url 填入订单中任意使用网址 -> Email 随意填 -> fofa key 填入订单中的key
+注意：一定将他 输入框内的东西删除完 后在填入，否则会报错。每次 重启 都需要重新设置 API
+[图片]
+SmallProxyPool
+找到 main.go 文件。
+1. 搜索 fofa.info ,会看到这样一行代码：req, err := http.NewRequest("GET", "https://fofa.info/api/v1/search/all", nil)
+2. 只将 https://fofa.info 替换成 https://fofoapi.com 或 http://107.173.248.139:18999 其余不要动！！！！！
+找到 config.ini 文件
+1. email = 【填入订单里给的】
+2. key = 【填入订单里给的】
+rotateproxy
+1. 找到 crawler.go 文件
+注意：只将 https://fofa.info 替换成 https://fofoapi.com 或 http://107.173.248.139:18999 其余不要动
+[图片]
+2. key和邮箱按照订单里面给的配置。
+Milkyway
+找到 fofa.go 文件，路劲：Milkyway/internal/utils/fofa/fofa.go
+1. 搜索 fofa.info ,会看到这样一行代码：urlStr := "https://fofa.info/api/v1/search/all" + "?" + params.Encode()
+2. 将 fofa.info 改成 fofoapi.com
+注意：只将 https://fofa.info 替换成 https://fofoapi.com 或 http://107.173.248.139:18999 其余不要动
+Dddd
+dddd是一款使用简单的批量信息收集,供应链漏洞探测工具，旨在优化红队工作流，减少伤肝的机械性操作。支持从Hunter、Fofa批量拉取目标
+注意：需要自己编译，编译好的版本不支持更改。
+1. 找到 dddd/common/uncover/fofa.go
+2. 将 "https://fofa.info" 替换成"https://fofoapi.com"或者"http://107.173.248.139:18999"
+主意：没提到的不要动
+ARL 灯塔
+1. 找到 arl/docker/config-docker.yaml
+2. 将 "https://fofa.info" 替换成"https://fofoapi.com"或者"http://107.173.248.139:18999"
+[图片]
+注意：一定要更改完配置后才启动docker。如果忘记没改就启动了，建议删除docker重新配置。
+fine
+1. 找到 "backend/service/service/fofa/fofa.go" 文件
+2. 将 "https://fofa.info" 替换成"https://fofoapi.com"或者"http://107.173.248.139:18999"
+[图片]
+注意：只将 https://fofa.info 替换成 https://fofoapi.com 或 http://107.173.248.139:18999 其余不要动
+fine （exe版本）
+网络空间资产测绘、ICP备案、天眼查股权结构图、端口扫描、指纹识别、小程序敏感信息提取。
+fofa 填入订单中的key  ->  BaseURL url 填入订单中任意使用网址
+[图片]
+注意：保存后查看配置文件`config.yaml`中的如下参数是否有做对应的修改。确定已经修改后，退出软件重启。否则配置文件不生效。
+fofa:
+    token: "订单中的 key"
+    baseurl: "订单中的接口"
+fofax
+FOFAX是一个基于fofa.info的API命令行查询工具
+1. 找到文件 "fofax/internal/cli/parser.go" 
+2. 将 "https://fofa.info" 替换成"https://fofoapi.com"或者"http://107.173.248.139:18999"
+[图片]
+kscan
+Kscan是一款纯go开发的全方位扫描器，具备端口扫描、协议检测、指纹识别，暴力破解等功能。
+1. 找到文件 kscan/lib/fofa/fofa.go 
+2. 将 "https://fofa.info" 替换成"https://fofoapi.com"或者"http://107.173.248.139:18999"
+[图片]
+subfinder
+About Fast passive subdomain enumeration tool.
+1. 找到文件：subfinder/v2/pkg/subscraping/sources/fofa/fofa.go
+2. 将 "https://fofa.info" 替换成"https://fofoapi.com"或者"http://107.173.248.139:18999"
+注意：只将 https://fofa.info 替换成 https://fofoapi.com 或 http://107.173.248.139:18999 其余不要动，后面的 "/api/vi/xx/xx/xx" 保留不要删除
+[图片]
+ShuiZe
+1. 找到文件：Plugins/infoGather/WebspaceSearchEngine/fofaApi.py
+2. 将 "https://fofa.info" 替换成"https://fofoapi.com"或者"http://107.173.248.139:18999"
+3. 正常填写其他信息：订单中的 key，email
+注意：只将 https://fofa.info 替换成 https://fofoapi.com 或 http://107.173.248.139:18999 其余不要动，后面的 "/api/vi/xx/xx/xx" 保留不要删除
+[图片]
+fine
+网络空间资产测绘、ICP备案、天眼查股权结构图、IP138域名解析与IP反查、外部HTTP调用与小程序反编译。
+1. 找到文件： backend/service/service/fofa/fofa.go
+2. 将 "https://fofa.info" 替换成"https://fofoapi.com"或者"http://107.173.248.139:18999"
+3. 正常填写其他信息：订单中的 key
+注意：只将 https://fofa.info 替换成 https://fofoapi.com 或 http://107.173.248.139:18999 其余不要动，后面的 "/api/vi/xx/xx/xx" 保留不要删除
+[图片]
+FofaMap
+FofaMap是一款基于Python3开发的跨平台FOFA API数据采集器，支持普通查询、网站存活检测、统计聚合查询、Host聚合查询、网站图标查询、批量查询等查询功能。同时FofaMap还能够自定义查询FOFA数据，并根据查询结果自动去重和筛选关键字，生成对应的Excel表格。另外春节特别版还可以调用Nuclei对FofaMap查询出来的目标进行漏洞扫描，让你在挖洞路上快人一步。
+1. 找到文件：FofaMap/fofa.py
+2. 将 "https://fofa.info" 替换成"https://fofoapi.com"或者"http://107.173.248.139:18999"
+3. 正常填写其他信息：订单中的 key
+[图片]
+FofaMap(带AI版本的)
+FofaMap v2.0 是一款基于 Python3 开发的全网首个 AI 驱动红队资产测绘智能体。在延续原有 FOFA 数据采集、存活检测、统计聚合、图标 Hash 及批量查询等核心功能的基础上，2.0 版本原生支持 MCP 协议，可无缝接入 Cursor、Claude 等 AI 平台。其核心内置了 AI 自我反思机制，能根据查询结果自动调优语法，并智能联动 Nuclei 推荐精准扫描策略，实现从“被动采集”到“主动智能决策”的红队作业进化。
+1. 找到文件：FofaMap/core/client.py
+2. 将 "https://fofa.info" 替换成"https://fofoapi.com"或者"http://107.173.248.139:18999"
+3. 正常填写其他信息：订单中的 key
+[图片]
+Search_Viewer
+集Fofa、Hunter鹰图、Shodan、360 quake、Zoomeye 钟馗之眼、censys 为一体的空间测绘gui图形界面化工具，支持一键采集爬取和导出fofa、shodan等数据，方便快捷查看
+ fofa 域名 填入订单中任意使用网址 -> fofa_key 填入订单中的key
+[图片]
+MultiplePupils
+没有看到项目。不确定是否能支持。
+[图片]
+各种错误合集
+账号无效
+- 如果报错账号无效，检查 fofa api 项目是否更改。
+- 更改后需要将当前查询页面关闭后再次查询，否则查询不生效。
+[图片]
+在win中编辑配置文件
+注意：需要给 “:” 加上转义符，比如：http\://192.168.31.51\:5000
+FAQ
+1、是否提供账号？
+不提供账号，提供api key
+2、永久多少钱？
+999元，每天200次，无总数条数限制，拍下后联系管理改价。或购买后联系补差价。
+3、关于退款
+使用不超过10次，获取数据条数不超过5w，可以无理由退款，申请退款的时候请选择：
+  "退款" -> "已收到货" -> "协商一致"
+4、文档地址(教程、api教程)：https://cw3rmkslj1l.feishu.cn/docx/CwzLd3smIorfsGxuR0DcqfLXnOR
+5、关于续费问题：目前没有续费功能，过期或用完后需要重新拍。
+6、报错：【[官方错误信息] [-501] 服务错误,请稍候重试】属于官方问题，等待或者重试即可，只要携带"[官方错误信息] "字样的都属于是官方问题。
+7、关于F点：不支持使用F点权益。
+8、是否官方：非官方
