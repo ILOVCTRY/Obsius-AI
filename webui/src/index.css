@@ -1,38 +1,35 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
-/* 克制黑客风（DESIGN.md §12 定稿）：深灰底 + 青色强调；状态色：运行=青 / 审批=琥珀 / 异常=红 */
 @custom-variant dark (&:is(.dark *));
 
 :root {
   --radius: 0.5rem;
-  /* 仅深色主题：:root 即深色取值 */
-  --background: oklch(0.17 0.005 260);
-  --foreground: oklch(0.93 0.003 260);
-  --card: oklch(0.21 0.006 260);
-  --card-foreground: oklch(0.93 0.003 260);
-  --popover: oklch(0.21 0.006 260);
-  --popover-foreground: oklch(0.93 0.003 260);
-  --primary: oklch(0.82 0.13 195);          /* 青 */
-  --primary-foreground: oklch(0.17 0.005 260);
-  --secondary: oklch(0.26 0.006 260);
-  --secondary-foreground: oklch(0.9 0.003 260);
-  --muted: oklch(0.26 0.006 260);
-  --muted-foreground: oklch(0.62 0.008 260);
-  --accent: oklch(0.26 0.006 260);
-  --accent-foreground: oklch(0.93 0.003 260);
-  --destructive: oklch(0.62 0.2 25);        /* 异常红 */
+  --background: oklch(0.15 0.012 250);
+  --foreground: oklch(0.94 0.012 250);
+  --card: oklch(0.19 0.014 250);
+  --card-foreground: oklch(0.94 0.012 250);
+  --popover: oklch(0.2 0.015 250);
+  --popover-foreground: oklch(0.94 0.012 250);
+  --primary: oklch(0.8 0.13 190);
+  --primary-foreground: oklch(0.14 0.012 250);
+  --secondary: oklch(0.24 0.018 250);
+  --secondary-foreground: oklch(0.92 0.012 250);
+  --muted: oklch(0.23 0.014 250);
+  --muted-foreground: oklch(0.62 0.018 250);
+  --accent: oklch(0.27 0.025 190);
+  --accent-foreground: oklch(0.94 0.012 250);
+  --destructive: oklch(0.62 0.2 25);
   --destructive-foreground: oklch(0.98 0 0);
-  --border: oklch(0.3 0.006 260);
-  --input: oklch(0.3 0.006 260);
-  --ring: oklch(0.82 0.13 195);
-  /* 状态语义色 */
-  --status-running: oklch(0.82 0.13 195);   /* 运行=青 */
-  --status-approval: oklch(0.8 0.14 75);    /* 审批=琥珀 */
-  --status-error: oklch(0.62 0.2 25);       /* 异常=红 */
-  --status-idle: oklch(0.6 0.01 260);       /* 空闲=灰 */
-  --status-paused: oklch(0.75 0.1 240);     /* 暂停=青蓝（与运行青区分） */
-  --status-ok: oklch(0.72 0.15 155);        /* 正常=绿（2026-09-18 补齐：此前缺失致 bg-(--status-ok) 全部静默透明） */
+  --border: oklch(0.29 0.018 250);
+  --input: oklch(0.29 0.018 250);
+  --ring: oklch(0.8 0.13 190);
+  --status-running: oklch(0.8 0.13 190);
+  --status-approval: oklch(0.8 0.14 75);
+  --status-error: oklch(0.62 0.2 25);
+  --status-idle: oklch(0.6 0.01 250);
+  --status-paused: oklch(0.75 0.1 240);
+  --status-ok: oklch(0.72 0.15 155);
 }
 
 @theme inline {
@@ -59,41 +56,65 @@
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
-  --font-mono: "Cascadia Code", ui-monospace, Consolas, monospace;
-  --font-sans: "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  --font-sans: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
 }
 
 @layer base {
-  * {
-    border-color: var(--border);
-  }
+  * { border-color: var(--border); }
   body {
     background: var(--background);
     color: var(--foreground);
     font-family: var(--font-sans);
   }
-  /* 全局滚动条（2026-09-18）：暗底上默认亮轨白框太扎眼——透明轨道无边框，只留暗色滑块 */
-  * {
-    scrollbar-width: thin;
-    scrollbar-color: oklch(0.38 0.006 260) transparent;
-  }
-  ::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
-  }
-  ::-webkit-scrollbar-track {
-    background: transparent;
-    border: none;
-  }
-  ::-webkit-scrollbar-thumb {
-    background: oklch(0.38 0.006 260);
-    border-radius: 4px;
-    border: none;
-  }
-  ::-webkit-scrollbar-thumb:hover {
-    background: oklch(0.48 0.008 260);
-  }
-  ::-webkit-scrollbar-corner {
-    background: transparent;
-  }
+  * { scrollbar-width: thin; scrollbar-color: oklch(0.38 0.01 250) transparent; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: oklch(0.38 0.01 250); border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: oklch(0.48 0.015 250); }
+}
+
+.app-shell { background: radial-gradient(circle at 70% -20%, oklch(0.25 0.04 190 / 0.18), transparent 34%), var(--background); }
+.app-nav { background: oklch(0.135 0.012 250 / 0.88); border-color: oklch(0.32 0.02 250); }
+.nav-brand { display: flex; align-items: center; gap: 10px; height: 64px; border-bottom: 1px solid var(--border); color: var(--foreground); font-size: 13px; font-weight: 650; letter-spacing: .02em; }
+.brand-mark { display: grid; width: 27px; height: 27px; place-items: center; border: 1px solid oklch(0.8 0.13 190 / .6); border-radius: 7px; color: var(--primary); background: oklch(0.8 0.13 190 / .08); }
+.nav-scroll { flex: 1; padding: 18px 10px; overflow-y: auto; }
+.nav-group + .nav-group { margin-top: 25px; }
+.nav-group-label, .eyebrow { display: block; color: var(--muted-foreground); font-size: 9px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; }
+.nav-group-label { padding: 0 10px 8px; }
+.nav-item { position: relative; display: flex; align-items: center; gap: 11px; width: 100%; min-height: 38px; margin: 3px 0; border: 1px solid transparent; border-radius: 7px; color: var(--muted-foreground); font-size: 12px; transition: background .16s, color .16s, border-color .16s; }
+.nav-item:hover:not(:disabled) { color: var(--foreground); background: oklch(0.24 0.018 250 / .72); }
+.nav-item.is-active { color: var(--primary); background: oklch(0.8 0.13 190 / .1); border-color: oklch(0.8 0.13 190 / .17); }
+.nav-item.is-active::before { position: absolute; left: -11px; width: 2px; height: 18px; border-radius: 2px; background: var(--primary); content: ""; }
+.nav-item.is-locked { opacity: .3; cursor: not-allowed; }
+.nav-count, .approval-count { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; background: var(--status-approval); color: var(--background); font-size: 10px; font-weight: 750; }
+.nav-count { margin-left: auto; }
+.nav-footer { display: flex; align-items: center; gap: 8px; padding: 15px 16px; border-top: 1px solid var(--border); color: var(--muted-foreground); font-size: 11px; }
+.status-dot, .project-pulse { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--status-running); box-shadow: 0 0 0 3px oklch(0.8 0.13 190 / .12); }
+.nav-footer .status-dot { margin-left: auto; }
+.context-bar { display: flex; align-items: center; justify-content: space-between; min-height: 70px; padding: 0 32px; border-bottom: 1px solid var(--border); }
+.context-label { display: flex; align-items: baseline; gap: 14px; }
+.context-title { font-size: 18px; font-weight: 650; letter-spacing: -.02em; }
+.context-status { display: flex; align-items: center; gap: 9px; color: var(--muted-foreground); font-size: 11px; }
+.topbar { background: oklch(0.16 0.014 250 / .9); }
+.mobile-brand { display: none; align-items: center; gap: 8px; font-size: 13px; font-weight: 650; }
+.project-context { display: grid; gap: 5px; min-width: 190px; }
+.project-title { display: flex; align-items: center; gap: 9px; }
+.project-title h1 { max-width: 270px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 650; }
+.project-badge { margin-left: 3px; font-size: 10px; }
+.project-stats { display: flex; gap: 16px; padding-left: 20px; border-left: 1px solid var(--border); color: var(--muted-foreground); font-family: var(--font-mono); font-size: 10px; }
+.project-stats span { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.project-stats svg { color: var(--primary); }
+.approval-action { display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 10px; border: 1px solid transparent; border-radius: 6px; color: var(--muted-foreground); font-size: 12px; transition: .16s; }
+.approval-action:hover, .approval-action.is-active { border-color: var(--border); background: var(--secondary); color: var(--foreground); }
+.back-project { gap: 6px; color: var(--muted-foreground); }
+
+@media (max-width: 760px) {
+  .topbar { padding: 0 12px; }
+  .mobile-brand { display: flex; }
+  .project-context { min-width: 0; }
+  .project-context .eyebrow, .project-stats, .back-project span { display: none; }
+  .project-title h1 { max-width: 150px; }
+  .approval-action span:not(.approval-count) { display: none; }
+  .context-bar { padding: 0 18px; }
 }

@@ -1,5 +1,22 @@
 import { useCallback, useEffect, useState } from "react"
 import { Group, Panel, Separator, useDefaultLayout } from "react-resizable-panels"
+import type { LucideIcon } from "lucide-react"
+import {
+  Activity,
+  ArrowLeft,
+  Bell,
+  Blocks,
+  CheckCircle2,
+  FolderKanban,
+  Globe2,
+  Inbox,
+  LayoutDashboard,
+  ListChecks,
+  Radio,
+  Settings2,
+  ShieldCheck,
+  Sparkles,
+} from "lucide-react"
 import { api, ApiError } from "@/lib/api"
 import type { ProjectDetail } from "@/lib/types"
 import { Badge } from "@/components/ui/badge"
@@ -33,41 +50,72 @@ const boardViewOf = (m: ProjectDetail | null): string | undefined => {
   return typeof v === "string" && v ? v : undefined
 }
 
-const NAV: { key: View; label: string; icon: string; needsProject: boolean }[] = [
-  { key: "projects", label: "项目", icon: "◈", needsProject: false },
-  { key: "intel", label: "情报", icon: "📡", needsProject: false },
-  { key: "live", label: "会话", icon: "◉", needsProject: true },
-  { key: "board", label: "黑板", icon: "▤", needsProject: true },
-  { key: "tasks", label: "任务", icon: "▦", needsProject: true },
-  { key: "browser", label: "浏览器", icon: "🌐", needsProject: true },
-  { key: "approvals", label: "审批", icon: "⚑", needsProject: true },
-  { key: "settings", label: "技能/设置", icon: "⚙", needsProject: false },
+type NavItem = { key: View; label: string; icon: LucideIcon; needsProject: boolean }
+
+const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
+  {
+    label: "工作区",
+    items: [
+      { key: "projects", label: "项目", icon: FolderKanban, needsProject: false },
+      { key: "intel", label: "情报", icon: Inbox, needsProject: false },
+      { key: "live", label: "会话", icon: Radio, needsProject: true },
+      { key: "board", label: "黑板", icon: LayoutDashboard, needsProject: true },
+      { key: "tasks", label: "任务", icon: ListChecks, needsProject: true },
+    ],
+  },
+  {
+    label: "工具",
+    items: [
+      { key: "browser", label: "浏览器", icon: Globe2, needsProject: true },
+      { key: "approvals", label: "审批", icon: ShieldCheck, needsProject: true },
+      { key: "settings", label: "技能与设置", icon: Settings2, needsProject: false },
+    ],
+  },
 ]
 
-function NavRail({ active, onSelect, locked, className }: {
+function NavRail({ active, onSelect, locked, className, expanded = false, pendingApprovals = 0 }: {
   active: View
   onSelect: (key: View) => void
-  locked: boolean // pid 缺失时 needsProject 项禁用
+  locked: boolean
   className?: string
+  expanded?: boolean
+  pendingApprovals?: number
 }) {
+  const groups = locked
+    ? [{ label: "", items: NAV_GROUPS.flatMap((group) => group.items).filter((item) => !item.needsProject && ["projects", "intel", "settings"].includes(item.key)) }]
+    : NAV_GROUPS
+
   return (
-    <nav className={cn("flex shrink-0 flex-col items-center gap-1 border-r py-3", className)}>
-      {NAV.map((n) => (
-        <button
-          key={n.key}
-          disabled={n.needsProject && locked}
-          onClick={() => onSelect(n.key)}
-          title={n.label}
-          className={cn(
-            "flex w-12 flex-col items-center gap-0.5 rounded-md py-2 text-[10px]",
-            active === n.key ? "bg-secondary text-primary" : "text-muted-foreground hover:bg-accent",
-            n.needsProject && locked && "opacity-30",
-          )}
-        >
-          <span className="text-base leading-none">{n.icon}</span>
-          {n.label}
-        </button>
-      ))}
+    <nav className={cn("app-nav flex shrink-0 flex-col border-r", expanded ? "items-stretch" : "items-center", className)}>
+      <div className={cn("nav-brand", expanded ? "justify-start px-4" : "justify-center")}>
+        <div className="brand-mark"><Sparkles size={15} /></div>
+        {expanded && <span>Cyberstrike</span>}
+      </div>
+      <div className="nav-scroll">
+        {groups.map((group) => (
+          <div className="nav-group" key={group.label || "home"}>
+            {expanded && group.label && <span className="nav-group-label">{group.label}</span>}
+            {group.items.map((n) => {
+              const Icon = n.icon
+              const disabled = n.needsProject && locked
+              return (
+                <button
+                  key={n.key}
+                  disabled={disabled}
+                  onClick={() => onSelect(n.key)}
+                  title={expanded ? undefined : n.label}
+                  className={cn("nav-item", expanded ? "justify-start px-3" : "justify-center", active === n.key && "is-active", disabled && "is-locked")}
+                >
+                  <Icon size={17} strokeWidth={1.8} />
+                  {expanded && <span>{n.key === "settings" && locked ? "设置" : n.label}</span>}
+                  {n.key === "approvals" && pendingApprovals > 0 && <span className="nav-count">{pendingApprovals}</span>}
+                </button>
+              )
+            })}
+          </div>
+        ))}
+      </div>
+      {expanded && <div className="nav-footer"><Activity size={14} /><span>系统在线</span><span className="status-dot" /></div>}
     </nav>
   )
 }
@@ -201,9 +249,13 @@ export default function App() {
   // 无项目上下文的视图（项目列表 / 全局情报页 / 设置 §16.4）：左导航 + 主区
   if (!pid || view === "projects" || view === "intel" || view === "settings" && !pid) {
     return (
-      <div className="flex h-screen">
-        <NavRail active={view} onSelect={setView} locked={!pid} className="w-14" />
-        <main className="relative min-w-0 flex-1 overflow-auto">
+      <div className="app-shell flex h-screen">
+        <NavRail active={view} onSelect={setView} locked={!pid} className="w-16" />
+        <main className="app-content relative min-w-0 flex-1 overflow-auto">
+          <div className="context-bar">
+            <div className="context-label"><span className="eyebrow">CYBERSTRIKE / CONTROL CENTER</span><span className="context-title">{view === "intel" ? "情报中心" : view === "settings" ? "设置" : "项目空间"}</span></div>
+            <div className="context-status"><span className="status-dot" />在线</div>
+          </div>
           {view === "intel"
             ? <IntelView />
             : view === "settings" && !pid
@@ -215,33 +267,21 @@ export default function App() {
   }
 
   return (
-    <div className="flex h-screen flex-col">
-      {/* 全局顶栏：项目名 + 审批铃铛 */}
-      <header className="flex h-11 shrink-0 items-center gap-3 border-b px-4">
-        <Badge variant="outline" className="font-mono">{meta ? bindingBadge(meta.track, meta.experts) : "…"}</Badge>
-        <h1 className="text-sm font-semibold">{meta?.name ?? "…"}</h1>
-        {meta && (
-          <span className="font-mono text-[10px] text-muted-foreground">
-            任务 {meta.task_stats.done ?? 0}/{Object.values(meta.task_stats).reduce((a, b) => a + b, 0)} ·
-            发现 {meta.findings} · 资产 {meta.assets}
-          </span>
-        )}
+    <div className="app-shell flex h-screen flex-col">
+      <header className="topbar flex h-16 shrink-0 items-center gap-4 border-b px-5">
+        <div className="mobile-brand"><div className="brand-mark"><Sparkles size={15} /></div><span>Cyberstrike</span></div>
+        <div className="project-context">
+          <span className="eyebrow">ACTIVE PROJECT</span>
+          <div className="project-title"><span className="project-pulse" /><h1>{meta?.name ?? "加载项目"}</h1><Badge variant="outline" className="project-badge">{meta ? bindingBadge(meta.track, meta.experts) : "…"}</Badge></div>
+        </div>
+        {meta && <div className="project-stats"><span><CheckCircle2 size={13} />{meta.task_stats.done ?? 0}/{Object.values(meta.task_stats).reduce((a, b) => a + b, 0)} 任务</span><span><Blocks size={13} />{meta.findings} 发现</span><span><Globe2 size={13} />{meta.assets} 资产</span></div>}
         <span className="flex-1" />
-        <button
-          onClick={() => setView("approvals")}
-          className={cn(
-            "flex items-center gap-1 rounded-md px-2 py-1 text-xs",
-            view === "approvals" ? "bg-secondary" : "hover:bg-accent",
-          )}
-        >
-          🔔 审批
-          {pendingApprovals > 0 && (
-            <span className="rounded-full bg-(--status-approval) px-1.5 text-[10px] font-bold text-(--background)">
-              {pendingApprovals}
-            </span>
-          )}
+        <button onClick={() => setView("approvals")} className={cn("approval-action", view === "approvals" && "is-active")}>
+          <Bell size={16} />
+          <span>审批</span>
+          {pendingApprovals > 0 && <span className="approval-count">{pendingApprovals}</span>}
         </button>
-        <Button size="sm" variant="ghost" onClick={() => setView("projects")}>← 项目</Button>
+        <Button size="sm" variant="ghost" className="back-project" onClick={() => setView("projects")}><ArrowLeft size={15} />项目</Button>
       </header>
 
       <div className="flex min-h-0 flex-1">
@@ -249,8 +289,8 @@ export default function App() {
                defaultLayout={navLayout.defaultLayout}
                onLayoutChanged={navLayout.onLayoutChanged}>
           {/* 左：窄导航（F1 可拖拽 48–220px） */}
-          <Panel id="nav" minSize={48} maxSize={220} defaultSize={56}>
-            <NavRail active={view} onSelect={setView} locked={!pid} className="h-full w-full" />
+          <Panel id="nav" minSize={48} maxSize={220} defaultSize={72}>
+            <NavRail active={view} onSelect={setView} locked={!pid} pendingApprovals={pendingApprovals} expanded className="h-full w-full" />
           </Panel>
           <Separator className="w-0.5 shrink-0 bg-transparent transition-colors hover:bg-accent data-[active]:bg-accent" />
           {/* 中：主区（直播间在 live 视图与黑板同屏共存） */}
