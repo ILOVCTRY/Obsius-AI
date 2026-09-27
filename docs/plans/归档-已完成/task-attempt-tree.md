@@ -22,6 +22,14 @@
 4. **current 指针**：claimed 态取最新声明的 open 意图——**按事件 id 序取**（SQL `ORDER BY created_at, rowid`；now() 秒级精度同秒并列时纯 created_at 序不稳定）。
 5. **测试**：test_tasktree.py 重写 6 例（归属三分支/嵌套防环/门禁/端点 410）；test_agent 夹具 make_agent 与 test_campaign 直构 AgentSession 处预置 open 意图适配门禁。
 
+### §0-ter agent-loop 修复（2026-09-27 当日复盘）
+
+门禁上线后暴露三处 agent 循环回归，同日修复：
+
+1. **declare_intent 合并按作者收口**（intents.py）：原合并按全项目去重，会话 B 撞上 A 的 open 同陈述意图拿到 merged 复用（意图仍是 A 的），而门禁只认 author——B 从此永远建不出自己的 open 意图，`bb_add_finding` 全部硬拒 → E2 熔断挂任务（不可恢复拒绝循环）。改：合并条件加 `author=?`，跨会话同陈述各自落意图行；同会话重复声明仍去重复用。
+2. **门禁只对任务上下文生效**（tools.py `_tool_bb_add_finding`）：对话轮/无委托窗没有任务树可挂（树按 task_id 现算），且对话轮无 E2 熔断/awaiting_human 逃生——硬拦让对话轮在 24 步里反复被拒白烧 LLM、消息被 drain 后无回复（「石沉大海」）。改：`current_task_id` 为空时跳过门禁，对话发现正常登记（走黑板上图，无任务树节点）。
+3. **finish 意图闸按会话收口**（tools.py `_tool_finish`）：原按全项目扫 open 意图，A 会话遗留的意图会堵住 B 会话的 finish（B 无法合法关闭 A 的意图，只能被逼二次 finish 绕过）。改：只列本会话 open 意图。
+
 ## §0 实施修正（2026-09-27）
 
 1. **tool.call 的 step 字段语义修正**：§2 原判「tool.call 缺 step 是唯一缺口」不成立——command 事件已有的 step 是 **agent 轮次号**（loop round），非计划步 id，无法用于归组。实际归组口径改为 **task.step(status=doing) 事件时间线**（doing 后的动作归该步，直至下一个 doing；无 doing 覆盖进「未归类」桶）。tool.call 审计仍补了 step 字段（轮次号，与 command 对齐的观测价值，1 行）。

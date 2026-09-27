@@ -99,9 +99,17 @@ def _str_list(values, field: str) -> list[str]:
 def declare_intent(bb, project_id: str, statement: str, *,
                    target_asset_id: str | None = None,
                    basis_refs=None, author: str = "system") -> dict:
-    """声明意图（规划产物）。同项目存在 status=open 的同陈述意图 → 返回既有行
+    """声明意图（规划产物）。同作者存在 status=open 的同陈述意图 → 返回既有行
     （merged=True，不重复登记、不发事件）。target_asset_id 与 basis_refs 都做
-    同项目存在性校验。"""
+    同项目存在性校验。
+
+    **合并按作者收口（2026-09-27 agent-loop 修复）**：合并只认同作者——跨会话
+    撞同陈述必须各自落意图行。此前按全项目去重，会话 B 撞上会话 A 的 open 意图
+    会拿到 merged 复用（意图仍是 A 的），而 bb_add_finding 的「必挂本会话 open
+    意图」门禁只认 author，B 从此永远无法登记发现（硬拒绝死循环 → E2 熔断挂
+    任务）；close_intent 又不校验 author，B 还可能误关 A 的意图。作者收口后：
+    同会话重复声明 → 去重复用；跨会话同陈述 → 各建各的意图，树按会话展示
+    各自的尝试分支。"""
     stmt = statement.strip() if isinstance(statement, str) else ""
     if not stmt:
         raise ValueError("意图陈述 statement 必填非空（一句可证伪假设）")
@@ -120,8 +128,8 @@ def declare_intent(bb, project_id: str, statement: str, *,
                     f"目标资产不存在或不属于本项目: {target_asset_id}")
         row = bb.conn.execute(
             "SELECT * FROM intents WHERE project_id=? AND status='open'"
-            " AND statement=?",
-            (project_id, stmt),
+            " AND statement=? AND author=?",
+            (project_id, stmt, author),
         ).fetchone()
         if row:
             out = _row_to_dict(row) or {}

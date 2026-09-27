@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react"
-import { Trash2 } from "lucide-react"
+import { ArrowRight, Layers3, Trash2, Users } from "lucide-react"
 import { api, pollJob } from "@/lib/api"
 import type { Expert, IntelOverview, ProjectMeta, TrackProfile } from "@/lib/types"
 import { bindingBadge, trackLabel, type Taxonomy } from "@/lib/taxonomy"
@@ -18,8 +18,6 @@ import { fmtDate, utcTitle } from "@/lib/datetime"
 // 项目绑定 = 场景轨（单选）× 专家组队（expert-pool M3：空=按轨全池存量直通）；
 // 场景档（M4a）预填组队/看板视图，知识继承（M4b）复用同源项目资产。
 
-const expertName = (e: Expert) => e.name || e.id
-
 export function ProjectsView({ onOpen }: { onOpen: (pid: string) => void }) {
   const [projects, setProjects] = useState<ProjectMeta[]>([])
   const [tax, setTax] = useState<Taxonomy | null>(null)
@@ -27,8 +25,6 @@ export function ProjectsView({ onOpen }: { onOpen: (pid: string) => void }) {
   const [name, setName] = useState("")
   const [track, setTrack] = useState<string>("ctf")
   const [pool, setPool] = useState<Expert[]>([])
-  const [selected, setSelected] = useState<string[]>(["_generalist"])
-  const [expertSearch, setExpertSearch] = useState("")
   const [profiles, setProfiles] = useState<TrackProfile[]>([])
   const [profile, setProfile] = useState<string | null>(null)
   const [inheritFrom, setInheritFrom] = useState<string | null>(null)
@@ -47,46 +43,25 @@ export function ProjectsView({ onOpen }: { onOpen: (pid: string) => void }) {
       setTax(t)
       setTrack(t.tracks[0]?.name ?? "ctf")
     }).catch(() => {})
-    // M3 virtual（编排器单例）不进组队多选
     api.listExperts().then((es) => setPool(es.filter((e) => e.kind !== "virtual"))).catch(() => {})
   }, [])
 
-  // 专家是否服务本轨：tracks 缺省/null=全轨
-  const serves = (e: Expert, t: string) => !e.tracks || e.tracks.length === 0 || e.tracks.includes(t)
+  const trackExperts = pool.filter((e) => !e.tracks || e.tracks.length === 0 || e.tracks.includes(track))
 
-  // 切轨：清场景档；组队剔除轨外专家，全剔则回退 _generalist（后端 422 前的前端兜底）
   const pickTrack = (t: string) => {
     setTrack(t)
     setProfile(null)
-    setProfiles([]) // 先清再拉，防旧轨档残留闪现
-    let alive = true
-    api.trackProfiles(t).then((ps) => { if (alive) setProfiles(ps) }).catch(() => {})
-    return () => { alive = false }
+    setProfiles([])
+    api.trackProfiles(t).then(setProfiles).catch(() => {})
   }
   useEffect(() => pickTrack(track), [track]) // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => {
-    setSelected((sel) => {
-      const kept = sel.filter((id) => pool.find((e) => e.id === id && serves(e, track)))
-      return kept.length > 0 ? kept : ["_generalist"]
-    })
-  }, [track, pool]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  const toggleExpert = (id: string) =>
-    setSelected((sel) => sel.includes(id) ? sel.filter((x) => x !== id) : [...sel, id])
-
-  // 场景档：预填组队（显式勾选优先于档缺省，勾后仍可微调）
-  const pickProfile = (p: TrackProfile) => {
-    if (profile === p.id) { setProfile(null); return }
-    setProfile(p.id)
-    if (p.experts?.length) setSelected(p.experts.filter((id) => id === "_generalist" || pool.find((e) => e.id === id && serves(e, track))))
-  }
 
   const create = async () => {
     if (!name.trim()) return
     setCreating(true)
     setError(null)
     try {
-      const p = await api.createProject(name.trim(), track, selected,
+      const p = await api.createProject(name.trim(), track, [],
         { profile, inherit_from: inheritFrom })
       setName("")
       onOpen(p.id)
@@ -113,144 +88,34 @@ export function ProjectsView({ onOpen }: { onOpen: (pid: string) => void }) {
     }
   }
 
-  return (
-    <div className="flex min-h-screen">
-      <div className="mx-auto w-full max-w-3xl space-y-4 p-6">
-      <div>
-        <h1 className="text-lg font-semibold">项目</h1>
-        <p className="text-sm text-muted-foreground">项目 = 场景轨（单选）× 专家组队（不选=按轨全池）；能力面由专家技能自动推导，数据随 workspaces/ 项目目录隔离</p>
-      </div>
+  const capabilityNames = Array.from(new Set(trackExperts.flatMap((expert) => expert.skills ?? [])))
 
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-sm">新建项目</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-2">
-          <div className="flex flex-wrap items-center gap-2">
-            <Input
-              placeholder="项目名（可用中文）"
-              className="w-64"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && create()}
-            />
-            <Button size="sm" onClick={create} disabled={creating || !name.trim()}>
-              创建
-            </Button>
-          </div>
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-[10px] text-muted-foreground">场景轨</span>
-            {(tax?.tracks ?? []).map((t) => (
-              <Button
-                key={t.name}
-                size="sm"
-                variant={track === t.name ? "default" : "outline"}
-                onClick={() => setTrack(t.name)}
-                title={t.description}
-              >
-                {t.label || trackLabel(t.name)}
-              </Button>
-            ))}
-          </div>
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-[10px] text-muted-foreground">场景档</span>
-            {profiles.map((p) => (
-              <button
-                key={p.id}
-                onClick={() => pickProfile(p)}
-                title={p.description ?? p.id}
-                className={cn(
-                  "rounded-md border px-2 py-0.5 text-xs",
-                  profile === p.id
-                    ? "border-primary/50 bg-primary/10 text-primary"
-                    : "text-muted-foreground hover:bg-accent/50",
-                )}
-              >
-                {p.name || p.id}
-              </button>
-            ))}
-            {profiles.length === 0 && (
-              <span className="text-[10px] text-muted-foreground">（本轨无内置档，手选组队）</span>
-            )}
-          </div>
-          <div className="space-y-1.5">
-            <div className="flex items-center gap-2">
-              <span className="text-[10px] text-muted-foreground">专家组队</span>
-              <Input
-                placeholder="搜索专家…"
-                className="h-6 w-40 text-[11px]"
-                value={expertSearch}
-                onChange={(e) => setExpertSearch(e.target.value)}
-              />
-              {selected.length === 0 && (
-                <span className="text-[10px] text-(--status-approval)">未选专家：按轨全池直通</span>
-              )}
-            </div>
-            {(["通用", "轨专属"] as const).map((group) => {
-              const members = pool
-                .filter((e) => group === "通用"
-                  ? !e.tracks || e.tracks.length === 0
-                  : (e.tracks?.length ?? 0) > 0 && e.tracks!.includes(track))
-                .filter((e) => {
-                  const q = expertSearch.trim().toLowerCase()
-                  if (!q) return true
-                  return e.id.toLowerCase().includes(q)
-                    || (e.name ?? "").toLowerCase().includes(q)
-                    || (e.description ?? "").toLowerCase().includes(q)
-                })
-              if (members.length === 0) return null
-              return (
-                <div key={group} className="flex items-start gap-1.5">
-                  <span className="mt-0.5 w-10 shrink-0 text-[10px] text-muted-foreground">{group}</span>
-                  {/* 等宽网格（2026-09-21）：chips 定宽列对齐，不再随内容长短参差 */}
-                  <div className="grid min-w-0 flex-1 grid-cols-[repeat(auto-fill,minmax(11rem,1fr))] gap-1.5">
-                    {members.map((e) => {
-                      const on = selected.includes(e.id)
-                      const persona = (e.persona ?? e.description ?? "").split("\n")[0]
-                      return (
-                        <button
-                          key={e.id}
-                          onClick={() => toggleExpert(e.id)}
-                          title={`${e.id}${persona ? `：${persona}` : ""}`}
-                          className={cn(
-                            "min-w-0 rounded-md border px-2 py-0.5 text-left text-xs",
-                            on
-                              ? "border-primary/50 bg-primary/10 text-primary"
-                              : "text-muted-foreground hover:bg-accent/50",
-                          )}
-                        >
-                          <span className="block truncate">{on ? "✓ " : ""}{expertName(e)}</span>
-                          {persona && (
-                            <span className="block truncate text-[10px] font-normal opacity-70">{persona}</span>
-                          )}
-                        </button>
-                      )
-                    })}
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-          <div>
-            <button className="text-[11px] text-muted-foreground hover:text-foreground"
-                    onClick={() => setInheritOpen((v) => !v)}>
-              {inheritOpen ? "▾" : "▸"} 知识继承{inheritFrom ? "（已选源）" : ""}
-            </button>
-            {inheritOpen && (
-              <div className="mt-1.5 flex items-center gap-2">
-                <span className="text-[10px] text-muted-foreground">从既有项目继承 binary 资产 / 函数库 / 蓝图（只增不覆盖）</span>
-                <select value={inheritFrom ?? ""} onChange={(e) => setInheritFrom(e.target.value || null)}
-                        className="rounded border bg-background px-1.5 py-0.5 text-xs [color-scheme:dark] [&>option]:bg-popover [&>option]:text-popover-foreground">
-                  <option value="">不继承</option>
-                  {projects.filter((p) => p.id).map((p) => (
-                    <option key={p.id} value={p.id}>{p.name}</option>
-                  ))}
-                </select>
+  return (
+    <div className="min-h-screen bg-[radial-gradient(circle_at_top_right,oklch(0.22_0.04_210/0.35),transparent_42%),linear-gradient(135deg,oklch(0.12_0.015_250),oklch(0.09_0.01_250))]">
+      <div className="mx-auto grid w-full max-w-6xl gap-8 p-6 lg:grid-cols-[minmax(0,1fr)_21rem] lg:p-10">
+        <div className="space-y-7">
+          <header className="max-w-2xl space-y-3">
+            <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.22em] text-cyan-300/75"><span className="status-dot" />Mission control</div>
+            <h1 className="text-3xl font-semibold tracking-tight text-foreground sm:text-4xl">从一个清晰的目标开始。</h1>
+            <p className="max-w-xl text-sm leading-6 text-muted-foreground">创建一个隔离的安全研究空间。选择场景方向后，系统会自动装配完整专家池与对应能力，不需要手动编排。</p>
+          </header>
+
+          <Card className="overflow-hidden border-cyan-300/20 bg-white/[0.04] shadow-2xl shadow-cyan-950/20">
+            <CardHeader className="border-b border-white/10 pb-5">
+              <div className="flex items-center justify-between gap-3">
+                <div><CardTitle className="text-base">新建项目</CardTitle><p className="mt-1 text-xs text-muted-foreground">配置项目上下文，剩余工作交给自动编排。</p></div>
+                <Layers3 className="text-cyan-300/80" size={20} />
               </div>
-            )}
-          </div>
-        </CardContent>
-      </Card>
+            </CardHeader>
+            <CardContent className="space-y-6 p-5">
+              <div className="space-y-2"><label className="text-xs font-medium text-muted-foreground">项目名称</label><Input placeholder="例如：支付系统安全评估" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && create()} /></div>
+              <div className="space-y-2"><label className="text-xs font-medium text-muted-foreground">场景方向</label><div className="grid gap-2 sm:grid-cols-3">{(tax?.tracks ?? []).map((t) => <button key={t.name} onClick={() => setTrack(t.name)} title={t.description} className={cn("rounded-lg border px-3 py-3 text-left transition", track === t.name ? "border-cyan-300/60 bg-cyan-300/10 text-cyan-100" : "border-white/10 text-muted-foreground hover:border-white/25 hover:bg-white/[0.04]")}><span className="block text-sm font-medium">{t.label || trackLabel(t.name)}</span><span className="mt-1 block line-clamp-2 text-[11px] opacity-65">{t.description || "自动匹配研究能力"}</span></button>)}</div></div>
+              <div className="space-y-2"><label className="text-xs font-medium text-muted-foreground">场景档 <span className="font-normal opacity-60">可选</span></label><div className="flex flex-wrap gap-2">{profiles.map((p) => <button key={p.id} onClick={() => setProfile(profile === p.id ? null : p.id)} title={p.description ?? p.id} className={cn("rounded-full border px-3 py-1.5 text-xs transition", profile === p.id ? "border-cyan-300/60 bg-cyan-300/10 text-cyan-100" : "border-white/10 text-muted-foreground hover:border-white/25")}>{p.name || p.id}</button>)}{profiles.length === 0 && <span className="text-xs text-muted-foreground">当前方向暂无预设，将使用默认编排。</span>}</div></div>
+              <div className="rounded-xl border border-cyan-300/15 bg-cyan-300/[0.05] p-4"><div className="flex items-start gap-3"><Users size={18} className="mt-0.5 shrink-0 text-cyan-300" /><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><span className="text-sm font-medium">自动专家池</span><Badge variant="outline" className="border-cyan-300/25 text-cyan-200">{trackExperts.length} 位可用</Badge></div><p className="mt-1 text-xs leading-5 text-muted-foreground">创建后将按场景方向加载全部匹配专家，无需手动选择。</p><div className="mt-3 flex flex-wrap gap-1.5">{capabilityNames.slice(0, 12).map((skill) => <span key={skill} className="rounded bg-black/20 px-2 py-1 text-[10px] text-cyan-100/75">{skill}</span>)}{capabilityNames.length > 12 && <span className="px-1 py-1 text-[10px] text-muted-foreground">+{capabilityNames.length - 12} 能力</span>}{trackExperts.length === 0 && <span className="text-xs text-muted-foreground">专家池加载中…</span>}</div></div></div></div>
+              <div className="space-y-3"><button className="text-xs text-muted-foreground transition hover:text-foreground" onClick={() => setInheritOpen((v) => !v)}>{inheritOpen ? "▾" : "▸"} 知识继承{inheritFrom ? "（已选源）" : ""}</button>{inheritOpen && <div className="flex flex-wrap items-center gap-3 rounded-lg border border-white/10 bg-black/10 p-3"><span className="text-xs text-muted-foreground">从既有项目继承资产、函数库与蓝图</span><select value={inheritFrom ?? ""} onChange={(e) => setInheritFrom(e.target.value || null)} className="rounded border border-white/10 bg-background px-2 py-1.5 text-xs [color-scheme:dark] [&>option]:bg-popover [&>option]:text-popover-foreground"><option value="">不继承</option>{projects.filter((p) => p.id).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select></div>}</div>
+              <Button className="w-full justify-between bg-cyan-300 text-slate-950 hover:bg-cyan-200" onClick={create} disabled={creating || !name.trim()}>{creating ? "创建中…" : "创建项目"}<ArrowRight size={16} /></Button>
+            </CardContent>
+          </Card>
 
       {error && <p className="text-sm text-(--status-error)">{error}</p>}
 
@@ -322,6 +187,7 @@ export function ProjectsView({ onOpen }: { onOpen: (pid: string) => void }) {
       </AlertDialog>
       </div>
       <IntelBriefCard />
+      </div>
     </div>
   )
 }

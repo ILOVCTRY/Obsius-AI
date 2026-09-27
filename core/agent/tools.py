@@ -1547,9 +1547,14 @@ class ToolDispatcher:
         if relates_to:
             ev["relates_to"] = relates_to
         # 发现必挂意图（任务尝试树 v2 门禁，2026-09-27）：发现是意图假设的检验
-        # 产物，不允许游离——Agent（sess-）登记前本会话必须有 open 意图；
-        # 人类/系统路径不经此工具，不受限。store 层不设闸（测试/人工 PATCH 零感知）。
-        if self.author.startswith("sess-"):
+        # 产物，不允许游离——Agent（sess-）**在认领任务期间**登记前本会话必须有
+        # open 意图；人类/系统路径不经此工具，不受限。store 层不设闸（测试/人工
+        # PATCH 零感知）。
+        # 2026-09-27 agent-loop 修复：门禁只对任务上下文生效（current_task_id 非
+        # 空）——对话轮/无委托窗没有任务树可挂（树按 task_id 现算），且对话轮无
+        # E2 拒绝熔断/awaiting_human 逃生，硬拦会让对话轮在 24 步里反复被拒白烧
+        # LLM、消息被 drain 后无回复（「石沉大海」）。
+        if self.current_task_id and self.author.startswith("sess-"):
             has_open = self.bb.conn.execute(
                 "SELECT 1 FROM intents WHERE project_id=? AND status='open'"
                 " AND author=? LIMIT 1", (self.project_id, self.author)).fetchone()
@@ -2536,10 +2541,15 @@ class ToolDispatcher:
     def _tool_finish(self, summary: str) -> str:
         # 意图纪律①（宁严勿松）：有未收尾意图首次 finish 拦截，列清单要求收尾；
         # 二次 finish 放行（客观无法收尾时须在 summary 写明）。
+        # 2026-09-27 agent-loop 修复：只查**本会话**的未收尾意图——此前按全项目
+        # 扫，A 会话遗留的 open 意图会堵住 B 会话的 finish（B 无法合法关闭 A 的
+        # 意图，只能被逼二次 finish 绕过，报错文案还误导 B 去关别人的意图）。
         if not self._finish_open_intents_ack:
             try:
                 from core.blackboard.intents import list_intents as _list_open
-                open_intents = _list_open(self.bb, self.project_id, status="open")
+                open_intents = [it for it in _list_open(
+                    self.bb, self.project_id, status="open")
+                    if it.get("author") == self.author]
             except Exception:  # noqa: BLE001
                 open_intents = []
             if open_intents:

@@ -98,6 +98,20 @@ def test_declare_identical_after_closed_is_new(ctx):
     assert second["id"] != first["id"] and "merged" not in second
 
 
+def test_declare_cross_author_identical_not_merged(ctx):
+    """2026-09-27 agent-loop 修复：合并按作者收口——B 撞上 A 的 open 同陈述
+    意图必须各自落行，否则 B 永远建不出自己的 open 意图，bb_add_finding 门禁
+    会把它锁死在硬拒绝循环里。"""
+    bb, pid = ctx["bb"], ctx["pid"]
+    a = declare_intent(bb, pid, "对登录口进行 sql 注入尝试", author="sess-a" * 3)
+    b = declare_intent(bb, pid, "对登录口进行 sql 注入尝试", author="sess-b" * 3)
+    assert b["id"] != a["id"] and "merged" not in b
+    assert b["author"] == "sess-b" * 3 and a["author"] == "sess-a" * 3
+    # 同作者重复声明仍去重复用（原语义保留）
+    again = declare_intent(bb, pid, "对登录口进行 sql 注入尝试", author="sess-b" * 3)
+    assert again["id"] == b["id"] and again.get("merged") is True
+
+
 # ---------- declare：目标资产 + basis refs 存在性 ----------
 
 def test_declare_target_asset_must_exist(ctx):
