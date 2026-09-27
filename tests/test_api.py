@@ -979,6 +979,103 @@ def test_resume_budget_pause_note_and_extra_steps(client):
     assert len(ext) == 2  # 只落了前两次的增补事件
 
 
+def test_session_note_wakes_paused_session(client):
+    """暂停会话的人工引导=显式唤醒（2026-09-27 修「引导石沉大海」）：此前
+    armed 窗被暂停时 note 仍踢 worker——rehydrate 载回快照即 paused=True，
+    run_session 暂停闸静默空退（无事件无日志无 LLM），引导滞留收件箱永无
+    回应。现走恢复语义：session.resumed(by=human-note) + worker 起跑 +
+    重新点亮武装；预算暂停比照 resume 缺省 +200（by=human-note）。"""
+    pid = client.post("/api/projects", json={"name": "渗透-引导唤醒",
+                                             "track": "pentest",
+                                             "capabilities": ["web"]}).json()["id"]
+    agent = _spawn_test_agent(client, pid)
+    sid = agent.session["id"]
+
+    # 暂停（reason=pause，有快照态）→ note 唤醒
+    agent.paused = True
+    agent._resume_state = {"system": "s", "messages": [], "objective": "x",
+                           "task_id": None, "next_step": 1, "max_steps": 10,
+                           "reason": "pause"}
+    r = client.post(f"/api/sessions/{sid}/note", json={"text": "继续"})
+    assert r.status_code == 201 and r.json()["wake"] == "resumed"
+    assert agent.paused is False
+    assert client.get(f"/api/projects/{pid}/sessions").json()[0]["status"] == "running"
+    events = client.get(f"/api/projects/{pid}/events").json()
+    resumed = [e for e in events if e["kind"] == "session.resumed"]
+    assert resumed and resumed[-1]["payload"]["by"] == "human-note"
+    assert any(j["kind"] == "agent-work" and j["meta"].get("session_id") == sid
+               for j in client.app.state.jobs.all_jobs())
+    # F9：唤醒重新点亮武装
+    sessions = client.get(f"/api/projects/{pid}/sessions").json()
+    assert sessions[0]["worker_armed"] is True
+
+    # 等唤醒轮 job 收尾（假 agent 无 LLM 会异常退出）：否则下一条 note 命中
+    # _session_job_running → deferred（轮中投递轮末注入，语义正确但断言不了）
+    import time
+    deadline = time.time() + 5
+    while (any(j["status"] == "running" and j["meta"].get("session_id") == sid
+               for j in client.app.state.jobs.all_jobs())
+           and time.time() < deadline):
+        time.sleep(0.05)
+
+    # 预算暂停 → 缺省 +200，增补事件 by=human-note
+    agent._resume_state = {"system": "s", "messages": [], "objective": "x",
+                           "task_id": None, "next_step": 20, "max_steps": 20,
+                           "reason": "budget"}
+    agent.dispatcher.max_steps = 20
+    agent.paused = True
+    r = client.post(f"/api/sessions/{sid}/note", json={"text": "接着来"})
+    assert r.status_code == 201 and r.json()["wake"] == "resumed"
+    assert agent.dispatcher.max_steps == 220
+    ext = [e for e in client.get(f"/api/projects/{pid}/events").json()
+           if e["kind"] == "step.budget_extended"]
+    assert ext and ext[-1]["payload"]["by"] == "human-note"
+    assert ext[-1]["payload"]["old_max"] == 20 and ext[-1]["payload"]["new_max"] == 220
+
+
+def test_session_note_wake_kinds(client):
+    """wake 分支补全：未暂停 armed 窗=kicked；窗内有 open 委托未武装=queued
+    （宁严勿松，引导滞留等起跑轮注入）。"""
+    from core.blackboard import TaskQueue
+
+    pid = client.post("/api/projects", json={"name": "渗透-引导分支",
+                                             "track": "pentest",
+                                             "capabilities": ["web"]}).json()["id"]
+    agent = _spawn_test_agent(client, pid)
+    sid = agent.session["id"]
+    bb = client.app.state.projects[pid].bb
+
+    bb.set_session_meta(sid, {"worker_armed": True})
+    r = client.post(f"/api/sessions/{sid}/note", json={"text": "在吗"})
+    assert r.status_code == 201 and r.json()["wake"] == "kicked"
+
+    # queued 分支换新窗：kicked 分支的 worker job 可能仍在跑（_session_job_running
+    # 命中 → deferred），queued 语义必须在没有在跑 job 的窗上验证
+    agent2 = _spawn_test_agent(client, pid)
+    sid2 = agent2.session["id"]
+    bb.set_session_meta(sid2, {"worker_armed": False})
+    tid = TaskQueue(bb).publish(pid, "待审批任务")
+    TaskQueue(bb).bind_session(tid, sid2)
+    r = client.post(f"/api/sessions/{sid2}/note", json={"text": "等着"})
+    assert r.status_code == 201 and r.json()["wake"] == "queued"
+
+
+def test_paused_gate_emits_work_state_audit(client):
+    """暂停闸空退留审计（2026-09-27）：踢到暂停会话的 worker 在 run_session
+    暂停闸 return None 前落 session.work_state(paused=True)——静默黑洞不再
+    无迹可循（上游闸漏时事件流必须可见）。"""
+    pid = client.post("/api/projects", json={"name": "渗透-暂停闸审计",
+                                             "track": "pentest",
+                                             "capabilities": ["web"]}).json()["id"]
+    agent = _spawn_test_agent(client, pid)
+    agent.paused = True
+    assert agent.run_session() is None
+    events = client.get(f"/api/projects/{pid}/events").json()
+    hits = [e for e in events if e["kind"] == "session.work_state"
+            and e["payload"].get("paused")]
+    assert hits and hits[-1]["author"] == agent.session["id"]
+
+
 def test_close_session_fails_paused_snapshot_task(client):
     """关窗守卫：暂停快照里的任务仍 claimed → 关窗前先 fail 防占坑（§6.4）。"""
     from core.blackboard import TaskQueue

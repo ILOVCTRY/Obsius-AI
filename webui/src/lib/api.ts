@@ -420,7 +420,7 @@ export const api = {
   // E8 人工引导通道：human_note 私信直达会话，worker 步边界注入
   // （2026-09-19 支持附件随发：attachment_ids 经 API 层校验后并入 inbox payload）
   sessionNote: (sid: string, text: string, attachmentIds: string[] = []) =>
-    http<{ note_id: string; session_id: string }>(`/api/sessions/${sid}/note`, {
+    http<{ note_id: string; session_id: string; wake?: "resumed" | "kicked" | "queued" | "deferred" }>(`/api/sessions/${sid}/note`, {
       method: "POST",
       body: JSON.stringify({ text, attachment_ids: attachmentIds.length ? attachmentIds : undefined }),
     }),

@@ -1064,6 +1064,19 @@ class AgentSession:
             return None
         if self._stop_after_task or self.paused:
             self._stop_after_task = False
+            if self.paused:
+                # 暂停闸空退留审计（2026-09-27 修「引导石沉大海」排查难）：
+                # 此前静默 return，出问题只能靠快照 mtime 反推；正常流不该
+                # 踢到暂停会话（note 端点已改走恢复语义、调度器跳过 paused
+                # 行），触发即说明上游有闸漏，事件流必须可见。
+                try:
+                    self.bb.append_event(
+                        self.project_id, "session.work_state",
+                        {"session_id": self.session["id"], "armed": False,
+                         "paused": True, "note": "暂停闸拦截：踢起 worker 空退"},
+                        session_id=self.session["id"], author=self.session["id"])
+                except Exception:  # noqa: BLE001 —— 审计失败不影响空退路径
+                    log.exception("暂停闸审计事件落盘失败 sid=%s", self.session["id"])
             return None                  # 中断收尾闸门 / 暂停态不领新任务
         if self._resume_state is not None:
             st, self._resume_state = self._resume_state, None

@@ -3909,7 +3909,10 @@ def create_app(
     def post_session_note(sid: str, body: SessionNoteIn):
         """人工引导通道（E8）：human_note 私信直达会话，worker 步边界 drain
         注入「💬 人类引导：…」user 消息（不打断当前工具调用）；暂停期投递的
-        引导在恢复随快照一并注入。页签红点/已读/事件流审计全复用。"""
+        引导在恢复随快照一并注入。页签红点/已读/事件流审计全复用。
+        返回 wake（2026-09-27）=后端实际处置：resumed=暂停会话被引导唤醒走
+        恢复语义；kicked=空闲踢对话轮；queued=窗内有活滞留收件箱等注入；
+        deferred=轮进行中维持轮末注入。"""
         pid = _pid_of_session(sid)
         text = body.text.strip()
         att_refs = _attachment_refs(pid, body.attachment_ids)
@@ -3926,14 +3929,52 @@ def create_app(
         # 窗一律踢（自动接单语义）；未武装窗仅当**窗内无 open/claimed 委托**才踢
         # （宁严勿松：不能让一条聊天消息替未批准的委托起跑），窗内有活则引导滞留
         # 收件箱、等窗起跑轮注入。轮进行中投递的引导维持轮末注入。
+        #
+        # 暂停会话（2026-09-27 修「引导石沉大海」）：此前 armed 窗被暂停时不看
+        # paused 直接踢 worker——rehydrate 载回快照即 paused=True，run_session
+        # 暂停闸静默空退（无事件无日志无 LLM），引导滞留收件箱永无回应。人工
+        # 引导本身即显式人手动作 → 走 ▶继续 恢复语义：引导已入收件箱，恢复轮
+        # drain 随注；预算暂停比照 resume 缺省 +200 步（chat 轮步数取
+        # min(dispatcher, chat_max_steps)，不增补则连回应步都没有）。
+        resp = {"note_id": r["id"], "session_id": sid}
         if not _session_job_running(sid):
+            agent = _ensure_agent(pid, sid)
+            if agent.paused:
+                agent.paused = False
+                agent._pause_req.clear()
+                agent._abort_req.clear()
+                bb = _project(pid).bb
+                st = agent._resume_state
+                if st is not None and st.get("reason") == "budget":
+                    old = agent.dispatcher.max_steps
+                    agent.dispatcher.max_steps = old + 200
+                    bb.append_event(
+                        pid, "step.budget_extended",
+                        {"session_id": sid, "task_id": st.get("task_id"),
+                         "old_max": old, "new_max": old + 200, "by": "human-note"},
+                        session_id=sid, author="human")
+                bb.append_event(pid, "session.resumed",
+                                {"session_id": sid, "by": "human-note"},
+                                session_id=sid, author="human")
+                # F9：恢复是显式「跑」动作 → 重新点亮武装（比照 resume 端点）
+                bb.set_session_meta(sid, {"worker_armed": True, "close_pending": None})
+                if st is not None:
+                    bb.set_session_status(sid, "running")
+                _submit_worker(pid, agent, origin="human-note-resume")
+                resp["wake"] = "resumed"
+                return resp
             tq = TaskQueue(_project(pid).bb)
             chat_safe = bool(_session_meta(_project(pid).bb, sid)
                              .get("worker_armed")) \
                 or not tq.session_has_live_work(pid, sid)
             if chat_safe:
-                _submit_worker(pid, _ensure_agent(pid, sid), origin="human-note")
-        return {"note_id": r["id"], "session_id": sid}
+                _submit_worker(pid, agent, origin="human-note")
+                resp["wake"] = "kicked"
+            else:
+                resp["wake"] = "queued"
+        else:
+            resp["wake"] = "deferred"
+        return resp
 
     @app.post("/api/sessions/{sid}/role")
     def switch_session_role(sid: str, body: SessionRoleIn):

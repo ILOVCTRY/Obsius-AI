@@ -995,18 +995,23 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
       const sid = activeSession.id
       setRemark("")
       try {
-        await api.sessionNote(sid, text, readyIds)
-        const sent = new Set(pendingFiles.filter((f) => f.status === "ready").map((f) => f.key))
-        setPendingFiles((fs) => fs.filter((f) => !sent.has(f.key)))
+        const sent = await api.sessionNote(sid, text, readyIds)
+        const sentFiles = new Set(pendingFiles.filter((f) => f.status === "ready").map((f) => f.key))
+        setPendingFiles((fs) => fs.filter((f) => !sentFiles.has(f.key)))
         // 轮末语义（2026-09-19）：轮进行中（canAbort）→ human_note 等下一轮认领期
         // 注入，卡片上方排队可见、可「立即发送」提前注入；空闲 → 后端直接踢对话轮
         //（run_chat），Agent 回复落事件流 agent.chat，不显排队条。task.claimed 到达
-        // 自动清条（游标 effect 只看新事件）
+        // 自动清条（游标 effect 只看新事件）。wake（2026-09-27）= 后端实际处置：
+        // resumed=暂停会话被引导唤醒走恢复；queued/deferred=滞留收件箱等注入。
         if (canAbort) {
           setQueuedNotes((qs) => [...qs, {
             key: `qn-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
             sid, text, attCount: readyIds.length,
           }])
+        } else if (sent.wake === "resumed") {
+          setJobInfo("已发送：会话此前处于暂停，已随引导恢复续跑（事件流可见「会话已恢复」）")
+        } else if (sent.wake === "queued" || sent.wake === "deferred") {
+          setJobInfo("已发送：引导已入收件箱，等会话下一轮注入（窗内有活未踢）")
         } else {
           setJobInfo("已发送：Agent 正在回复（看事件流「🤖 Agent 回复」）")
         }
