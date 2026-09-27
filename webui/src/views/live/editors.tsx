@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button"
 import type { OrchPersona, PhaseGoal } from "@/lib/types"
 
 // 编排器弹层组件（2026-09-25 从 LiveRoom 抽出，webui-trae-shell M2）：
-// LiveRoom 与 shell2/ConversationPane 共用，内容与行为原样搬迁。
+// LiveRoom 专用（原为与已移除的 shell2/ConversationPane 共用件，2026-09-26 新壳移除后归一）。
 
 /** 阶段目标弹层：确认口径注入编排 tick 与对话轮；变更落 goal.confirm/clear 事件 */
 export function GoalEditor({ initial, onClose, onSave, onClear }: {

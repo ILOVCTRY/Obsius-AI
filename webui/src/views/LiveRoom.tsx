@@ -1,8 +1,8 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { ArrowUp, GitFork, Paperclip, Square, X } from "lucide-react"
+import { ArrowUp, ListTree, Paperclip, Square, X } from "lucide-react"
 
-// A3 任务流视图（第三个 React Flow 图）：懒加载，@xyflow/react 不进直播间主包
-const TaskFlow = lazy(() => import("./live/TaskFlow").then((m) => ({ default: m.TaskFlow })))
+// 任务尝试树视图（task-attempt-tree，2026-09-27 替代 A3 任务流）：懒加载，@xyflow/react 不进直播间主包
+const TaskTreeView = lazy(() => import("./live/TaskTree").then((m) => ({ default: m.TaskTreeView })))
 import { PlanPanel } from "./live/PlanPanel"
 import { OrchChatPane } from "./live/OrchChatPane"
 import { GoalEditor, PersonaEditor } from "./live/editors"
@@ -417,6 +417,22 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
   // 修「已结束会话页签近乎空白」——全局最新 50 条里该会话可能零事件），__all/编排走全局源
   const dataSid = activeTab !== "__all" && activeTab !== "__orch" ? activeTab : null
   const { events, connected, loadedAll, loadingEarlier, loadEarlier, trimDom } = useEvents(pid, dataSid)
+  // 编排器对话历史按 kind 全量补拉（2026-09-26）：首屏只水合尾部 300 条全局事件，
+  // 长跑项目 orch.chat 轮几乎必然落窗外——编排页签打开时单独拉全，与直播流按 id 归并
+  // （新增 orch.chat 经 WS/轮询进 events，归并去重不重复渲染）
+  const [orchHistory, setOrchHistory] = useState<BBEvent[]>([])
+  useEffect(() => {
+    if (activeTab !== "__orch") return
+    let alive = true
+    api.eventsByKind(pid, "orch.chat").then((es) => { if (alive) setOrchHistory(es) }).catch(() => {})
+    return () => { alive = false }
+  }, [pid, activeTab])
+  const orchEvents = useMemo(() => {
+    if (orchHistory.length === 0) return events
+    const seen = new Set(orchHistory.map((e) => e.id))
+    return [...orchHistory, ...events.filter((e) => !seen.has(e.id))]
+      .sort((a, b) => a.id - b.id)
+  }, [orchHistory, events])
   const [filter, setFilter] = useState<string>("all")
   const [overrides, setOverrides] = useState<Map<number, boolean>>(new Map())
   const [remark, setRemark] = useState("")
@@ -443,8 +459,8 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
   // 排队引导条（2026-09-19 轮末语义）：note 发送后 human_note 留收件箱等下一轮
   // 认领期注入，此处仅组件内存的可见排队态；task.claimed 事件到达即清（已注入）
   const [queuedNotes, setQueuedNotes] = useState<{ key: string; sid: string; text: string; attCount: number }[]>([])
-  // A3：直播｜任务流 顶栏切换（任务流双击节点挂回会话时自动切回直播）
-  const [viewMode, setViewMode] = useState<"live" | "flow">("live")
+  // 直播｜任务树 顶栏切换（任务流已由任务树退役替代，2026-09-27）
+  const [viewMode, setViewMode] = useState<"live" | "tree">("live")
   // 批 6 L0 提案采纳态只存内存（刷新后可再次采纳，不做服务端去重）
   const [adopted, setAdopted] = useState<Set<number>>(new Set())
   const [adoptingId, setAdoptingId] = useState<number | null>(null)
@@ -898,13 +914,7 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
     if (s?.worker_armed && (st === "idle" || st === "finished")) return "armed"
     return st
   }, [eventsBySid, sessionsById])
-  // A3 任务流入参：暂停会话集（tabStatus 稳定事实感知，节点 paused 琥珀态）
-  const pausedSids = useMemo(
-    () => new Set(sessions
-      .filter((s) => s.status !== "closed" && tabStatus(s.id) === "paused")
-      .map((s) => s.id)),
-    [sessions, tabStatus])
-  // A3 任务流 WS bump：只数图关心的事件（3s 轮询兜底，组件内去抖重拉）
+  // 任务树 WS bump：只数树关心的事件（3s 轮询兜底，组件内去抖重拉）
   const flowBump = useMemo(
     () => events.filter((e) =>
       e.kind.startsWith("task.") || e.kind === "message.inbox" || e.kind.startsWith("session.")).length,
@@ -1275,7 +1285,7 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
             </button>
           ))}
         </div>
-        {/* A3：直播｜任务流 分段切换（原生 button，避开 radix Tabs mousedown 激活坑） */}
+        {/* 直播｜任务树 分段切换（原生 button，避开 radix Tabs mousedown 激活坑） */}
         <div className="mr-1 ml-1 flex shrink-0 items-center rounded-md border p-0.5 text-[11px]">
           <button
             type="button"
@@ -1289,21 +1299,21 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
           </button>
           <button
             type="button"
-            title="任务流：parent 分解实线 + 会话私信虚线（节点持久，双击挂回/定位）"
-            onClick={() => setViewMode("flow")}
+            title="任务树：目标 → 意图 → 检验结果，新发现下长新意图（当前意图实时高亮）"
+            onClick={() => setViewMode("tree")}
             className={cn(
               "flex items-center gap-1 rounded px-2 py-0.5 whitespace-nowrap",
-              viewMode === "flow" ? "bg-secondary font-medium text-foreground" : "text-muted-foreground hover:bg-accent",
+              viewMode === "tree" ? "bg-secondary font-medium text-foreground" : "text-muted-foreground hover:bg-accent",
             )}
           >
-            <GitFork className="size-3" />任务流
+            <ListTree className="size-3" />任务树
           </button>
         </div>
         <span className={cn("ml-1 shrink-0 font-mono text-[10px]", connected ? "text-primary" : "text-(--status-error)")}>
           {connected ? "● live" : "○ 重连中"}
         </span>
       </div>
-      {/* 分阶段工作流阶段条（pentest M4）：轨无剧本自渲染 null，直播/任务流两视图共用 */}
+      {/* 分阶段工作流阶段条（pentest M4）：轨无剧本自渲染 null，直播/任务树两视图共用 */}
       <PhaseBar pid={pid} />
       {viewMode === "live" && (
       <>
@@ -1352,7 +1362,7 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
       // 对话流（OrchChatPane）+ 底部「运行记录」折叠区（编排动作事件流，剔除 orch.chat）
       <div className="flex min-h-0 flex-1 flex-col">
         <OrchChatPane
-          events={events}
+          events={orchEvents}
           busy={orchBusy}
           persona={orchMeta?.persona ?? null}
           goal={orchMeta?.phase_goal ?? null}
@@ -1921,18 +1931,18 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
       </>
       )}
 
-      {/* A3 任务流视图（懒加载分包；页签行常驻，双击有会话节点挂回本视图） */}
-      {viewMode === "flow" && (
+      {/* 任务树视图（task-attempt-tree；懒加载分包，页签行常驻） */}
+      {viewMode === "tree" && (
         <div className="min-h-0 flex-1 border-t">
           <Suspense fallback={
             <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
-              任务流加载中…
+              任务树加载中…
             </div>
           }>
-            <TaskFlow
+            <TaskTreeView
               key={pid}
               pid={pid}
-              pausedSids={pausedSids}
+              initialTaskId={activeTask?.id ?? null}
               wsBump={flowBump}
             />
           </Suspense>

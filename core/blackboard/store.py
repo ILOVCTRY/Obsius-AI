@@ -639,6 +639,47 @@ class Blackboard:
             "SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
         return _row_to_dict(updated) or {}
 
+    def delete_session(self, session_id: str, author: str = "human") -> dict:
+        """物理删除会话窗（2026-09-26 侧栏悬停删除）：仅 closed 可删——活窗必须
+        先走 API 层正规关窗（排水 worker + 摘 app.state.agents + open 任务退回
+        公共池都发生在关窗路径上）。行级清除 sessions + 收件箱私信；
+        tasks.claimed_by 外键引用清空（done/failed 的历史归属随事件快照留痕，
+        session.deleted 事件即审计）。不可逆。"""
+        row = self.conn.execute(
+            "SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"会话不存在: {session_id}")
+        if row["status"] != "closed":
+            raise ValueError(f"会话未关闭（{row['status']}），先关窗再删除")
+        project_id = row["project_id"]
+        with self._tx():
+            # FK 引用清空：仍在认领（关窗路径异常残留）→ 释放回 open；
+            # 已收尾任务只清归属指针（任务行与履历保留）
+            claimed = [r["id"] for r in self.conn.execute(
+                "SELECT id FROM tasks WHERE claimed_by=?", (session_id,)).fetchall()]
+            if claimed:
+                ph = ",".join("?" * len(claimed))
+                self.conn.execute(
+                    f"UPDATE tasks SET status='open', claimed_by=NULL,"
+                    f" lease_until=NULL, updated_at=? WHERE id IN ({ph})",
+                    (now(), *claimed))
+                self.conn.execute(
+                    f"DELETE FROM resource_leases WHERE task_id IN ({ph})",
+                    claimed)
+            self.conn.execute(
+                "UPDATE tasks SET claimed_by=NULL WHERE claimed_by=?",
+                (session_id,))
+            self.conn.execute(
+                "DELETE FROM session_inbox WHERE to_session=?", (session_id,))
+            self.conn.execute("DELETE FROM sessions WHERE id=?", (session_id,))
+        self.append_event(
+            project_id, "session.deleted",
+            {"session_id": session_id, "name": row["name"], "role": row["role"],
+             "claimed_task_ids": claimed,
+             "summary": f"人类删除会话窗「{row['name']}」"},
+            session_id=session_id, author=author)
+        return {"id": session_id, "deleted": True}
+
     def set_session_status(self, session_id: str, status: str) -> dict:
         """会话状态流转（§3 会话控制）。closed 只走 close_session，不在此开放。"""
         if status not in {"idle", "running", "paused", "blocked"}:
@@ -875,6 +916,7 @@ class Blackboard:
         session_id: str | None = None,
         before_id: int | None = None, tail: int = 0,
         kinds: list[str] | None = None,
+        exclude_kinds: list[str] | None = None,
     ) -> list[dict]:
         """增量拉取：id > since_id，升序。WS 断线重连回放也走这里。
 
@@ -882,7 +924,9 @@ class Blackboard:
         直播间「上翻加载更早」分页用；tail>0：只取最新 tail 条（升序），直播间首屏
         增量加载用，不再全量回放历史（2026-09-17）。两者优先于 since_id。
         session_id 非 None 时只取该会话落的事件（会话级复盘取材，F8）。
-        kinds 非空时只取这些事件类型（bb-query-filters M2，与上面三分支正交）。"""
+        kinds 非空时只取这些事件类型（bb-query-filters M2，与上面三分支正交）；
+        exclude_kinds 非空时剔除这些事件类型（orch-context-budget，2026-09-27——
+        编排器事件窗剔除纯观测 kind，游标照推不重放）。"""
         sql = "SELECT * FROM events WHERE project_id=?"
         args: list = [project_id]
         if session_id is not None:
@@ -891,6 +935,9 @@ class Blackboard:
         if kinds:
             sql += f" AND kind IN ({','.join('?' * len(kinds))})"
             args.extend(kinds)
+        if exclude_kinds:
+            sql += f" AND kind NOT IN ({','.join('?' * len(exclude_kinds))})"
+            args.extend(exclude_kinds)
         desc = False
         if tail > 0:
             desc, limit = True, tail

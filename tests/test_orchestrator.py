@@ -1712,3 +1712,63 @@ def test_campaign_section_dead_end_grouping(env):
         assert not any("·热" in ln for ln in lines[dead_idx:])
     finally:
         camp.close()
+
+
+# ---------- orch-context-budget：态势全量段裁剪（2026-09-27） ----------
+
+def test_stats_findings_sessions_context_budget(env):
+    """findings 只进 top 20（verified/exploited 优先 → severity 降序）+
+    findings_total/findings_truncated 字段；closed 会话出清只留活跃 + sessions_closed 计数。"""
+    bb, project = env
+    pid = project["id"]
+    # 25 条：2 open high（必进）+ 1 verified low（verified 优先必进）+ 22 open low（挤出）
+    for i in range(2):
+        bb.add_finding(pid, "sqli", f"高危注入 {i}", severity="high", dedup_key=f"dk-h{i}")
+    bb.add_finding(pid, "info-leak", "已验证低危", severity="low", status="verified",
+                   dedup_key="dk-v")
+    for i in range(22):
+        bb.add_finding(pid, "info-leak", f"低危 {i}", severity="low", dedup_key=f"dk-l{i}")
+    # 会话：2 活跃 + 3 已关
+    for i in range(2):
+        bb.register_session(pid, f"live-{i}")
+    for i in range(3):
+        s = bb.register_session(pid, f"gone-{i}")
+        bb.close_session(s["id"])
+
+    orch = Orchestrator(project_id=pid, bb=bb, llm=ScriptedLLM([]),
+                        config=OrchestratorConfig(), packs_root="packs", track="ctf")
+    stats = orch._stats()
+
+    assert len(stats["findings"]) == 20
+    assert stats["findings_total"] == 25 and stats["findings_truncated"] is True
+    ids = {f["id"] for f in stats["findings"]}
+    # verified 与 high 优先保进
+    assert next(f["id"] for f in bb.list_findings(pid) if f["status"] == "verified") in ids
+    highs = {f["id"] for f in bb.list_findings(pid) if f["severity"] == "high"}
+    assert highs <= ids
+    # 排序：verified/exploited 在前、severity 降序
+    top = stats["findings"]
+    assert top[0]["status"] == "verified" or top[0]["severity"] in ("critical", "high")
+
+    assert len(stats["sessions"]) == 2
+    assert all(s["status"] != "closed" for s in stats["sessions"])
+    assert stats["sessions_closed"] == 3
+
+
+def test_overview_event_window_excludes_observation_kinds(env):
+    """事件窗剔除纯观测 kind（llm.usage/llm.thinking.delta）——游标照推不重放，
+    有信息量事件照常进窗。"""
+    bb, project = env
+    pid = project["id"]
+    orch = Orchestrator(project_id=pid, bb=bb, llm=ScriptedLLM([]),
+                        config=OrchestratorConfig(), packs_root="packs", track="ctf")
+    bb.append_event(pid, "llm.usage", {"total_tokens": 1})
+    bb.append_event(pid, "llm.thinking.delta", {"text": "x"})
+    bb.append_event(pid, "task.published", {"task_id": "t1"})
+    bb.append_event(pid, "llm.usage", {"total_tokens": 2})
+
+    overview = orch._overview([])
+    assert "task.published" in overview
+    assert "llm.usage" not in overview and "llm.thinking.delta" not in overview
+    # 游标推进到 tip：下轮不再回放
+    assert orch._last_event_id == bb.latest_event_id(pid)

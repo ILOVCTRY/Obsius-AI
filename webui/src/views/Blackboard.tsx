@@ -21,23 +21,23 @@ import { MappingPane, ProductChips } from "./blackboard/MappingPane"
 // 单站攻击链路图懒加载：@xyflow/react ~192KB 不进主包（与逆向 ChainView 同策略）
 const AttackPathCanvas = lazy(() =>
   import("./blackboard/AttackPath").then((m) => ({ default: m.AttackPath })))
-// 黑板链路图（全景 tab）懒加载：同策略，五类对象 × 类型分层 DAG
-const BoardGraphCanvas = lazy(() =>
-  import("./blackboard/boardGraph/BoardGraphCanvas").then((m) => ({ default: m.BoardGraphCanvas })))
 
 // 函数库 tab 仅 capabilities 含 binary 时挂载（func_kb 只由二进制分析产生；
 // assessment web-only 项目里永远空数据）。判据是能力不是轨。
 // 测绘 tab CTF 轨不挂载（2026-09-23 用户反馈：CTF 无资产收集场景，FOFA/表格导入用不上）。
-// 全景 tab（黑板链路图）全轨开放，compact 侧栏除外。
+// compact 侧栏（直播间右侧窄栏）渗透轨不挂测绘/函数库（2026-09-26 用户要求：
+// 渗透项目右侧用不上这两个 tab；主黑板视图不受影响）。
+// 全景 tab（黑板链路图）2026-09-26 用户要求下线：tab 移除、boardGraph/ 前端删除；
+// 后端 board-graph 只读端点保留。
 // M4c 场景档 board_view：defaultView（config.board_view.default）不在可用集合时回退 findings。
 export function Blackboard({ pid, compact = false, track, capabilities, defaultView }: {
   pid: string; compact?: boolean; track?: string; capabilities?: string[]; defaultView?: string
 }) {
+  const compactPentest = compact && track === "pentest"
   const tabs = [
     "findings", "assets",
-    ...(track !== "ctf" ? ["mapping"] as const : []),
-    ...(capabilities?.includes("binary") ? ["funcs"] as const : []),
-    ...(!compact ? ["board"] as const : []),
+    ...(track !== "ctf" && !compactPentest ? ["mapping"] as const : []),
+    ...(capabilities?.includes("binary") && !compactPentest ? ["funcs"] as const : []),
   ] as const
   const allTabs: readonly string[] = tabs
   const initial = defaultView && allTabs.includes(defaultView) ? defaultView : "findings"
@@ -59,8 +59,7 @@ export function Blackboard({ pid, compact = false, track, capabilities, defaultV
       <TabsList className="w-full justify-start rounded-none border-b bg-transparent p-0">
         {tabs.map((t) => (
           <TabsTrigger key={t} value={t} className="rounded-none border-b-2 px-3 py-1.5 text-xs">
-            {t === "findings" ? "发现" : t === "assets" ? "资产" : t === "mapping" ? "测绘"
-              : t === "funcs" ? "函数库" : "全景"}
+            {t === "findings" ? "发现" : t === "assets" ? "资产" : t === "mapping" ? "测绘" : "函数库"}
           </TabsTrigger>
         ))}
       </TabsList>
@@ -74,28 +73,15 @@ export function Blackboard({ pid, compact = false, track, capabilities, defaultV
             无 parent 的行自然退化平铺 */}
         <Assets pid={pid} compact={compact} tree />
       </TabsContent>
-      {track !== "ctf" && (
+      {track !== "ctf" && !compactPentest && (
         <TabsContent value="mapping" className="min-h-0 flex-1">
           {/* 网络空间测绘（cyberspace-mapping M1+M2）：FOFA 查询导入 + 表格导入；
               compact 侧栏不挂（配置/表格类操作不适合窄栏） */}
           {!compact && <MappingPane pid={pid} />}
         </TabsContent>
       )}
-      {capabilities?.includes("binary") && (
+      {capabilities?.includes("binary") && !compactPentest && (
         <TabsContent value="funcs" className="min-h-0 flex-1"><Funcs pid={pid} /></TabsContent>
-      )}
-      {/* relative 定位上下文必须挂在 TabsContent 上：画布是 absolute inset-0，
-          缺了它锚到更外层、把 tab 栏整个盖住（用户被困在全景里切不回去） */}
-      {!compact && (
-        <TabsContent value="board" className="relative min-h-0 flex-1">
-          <Suspense fallback={
-            <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
-              加载全景链路…
-            </div>
-          }>
-            <BoardGraphCanvas pid={pid} track={track} />
-          </Suspense>
-        </TabsContent>
       )}
     </Tabs>
   )

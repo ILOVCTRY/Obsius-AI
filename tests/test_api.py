@@ -511,23 +511,6 @@ def test_events_session_filter(client):
     assert sids == {s1, s2, None}
 
 
-def test_task_graph_endpoint(client):
-    """A3：GET task-graph 返回节点（含空 plan/session 占位）+ parent 实线。"""
-    pid = _make_project(client)
-    parent = client.post(f"/api/projects/{pid}/tasks",
-                         json={"objective": "父", "task_type": "generic"}).json()["task_id"]
-    child = client.post(f"/api/projects/{pid}/tasks",
-                        json={"objective": "子", "task_type": "generic",
-                              "scope": parent}).json()["task_id"]
-    # scope 不是 parent_id；parent 链目前只经黑板 publish/orchestrator 产生，直接验空图边安全
-    g = client.get(f"/api/projects/{pid}/task-graph").json()
-    assert {n["id"] for n in g["nodes"]} == {parent, child}
-    node = next(n for n in g["nodes"] if n["id"] == child)
-    assert node["plan"] == [] and node["session"] is None and node["status"] == "open"
-    assert g["edges"] == []  # scope 字段不产生 parent 边
-    assert client.get("/api/projects/proj-nope/task-graph").status_code in (403, 404)
-
-
 def test_session_graph_endpoint(client):
     """会话中心化 M4：GET session-graph——节点=编排器+会话窗（带队列计数）；
     delegate（orch→窗）/ derive（父窗→子窗）/ dm（私信）边与 refs 明细。"""
@@ -3423,24 +3406,6 @@ def test_publish_invalid_conflict_key_422(client):
     assert r.status_code == 422 and "ip:*" in r.json()["detail"]
 
 
-def test_task_graph_suggest_edge(client):
-    """机制 1.1：同依据（context_refs 相交）且已认领、无 inbox 边的任务对出 suggest 点虚线边。"""
-    pid = _make_project(client)
-    proj = client.app.state.projects[pid]
-    from core.blackboard import TaskQueue
-    tq = TaskQueue(proj.bb)
-    s1 = proj.bb.register_session(pid, "S1")
-    s2 = proj.bb.register_session(pid, "S2")
-    t1 = tq.publish(pid, "分析 find-aaaaaaaaaaaa 的结论", task_type="generic")
-    t2 = tq.publish(pid, "复核 find-aaaaaaaaaaaa 的证据", task_type="generic")
-    tq.claim(t1, s1["id"])
-    tq.claim(t2, s2["id"])
-    graph = client.get(f"/api/projects/{pid}/task-graph").json()
-    suggest = [e for e in graph["edges"] if e["kind"] == "suggest"]
-    pair = {(e["source"], e["target"]) for e in suggest}
-    assert ((t1, t2) in pair) or ((t2, t1) in pair)
-
-
 def test_l2_budget_pause_auto_resumes(tmp_path):
     """C4：L2 档 budget_paused 自动续跑（缺省 +200，by=l2-auto；token 预算即总闸），
     任务不经人工最终完成；L0/L1 不受影响（保持人工「▶ 继续」）。"""
@@ -4835,10 +4800,10 @@ def test_agent_tools_catalog(client):
     assert data["groups"] == ["执行", "文件", "黑板", "知识", "浏览器", "协作", "计划", "控制"]
     # 无工具落「其他」（防新工具漏配分组规则）
     assert all(t["group"] != "其他" for t in tools)
-    # bb_query：what 参数 enum 含六查询面
+    # bb_query：what 参数 enum 含七查询面（site=单站全貌，2026-09-26）
     bbq = next(t for t in tools if t["name"] == "bb_query")
     assert bbq["input_schema"]["properties"]["what"]["enum"] == [
-        "findings", "assets", "events", "tasks", "func", "blueprint"]
+        "findings", "assets", "events", "tasks", "func", "blueprint", "site"]
 
 
 def test_agent_tool_group_rules():

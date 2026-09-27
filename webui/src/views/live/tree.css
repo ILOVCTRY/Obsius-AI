@@ -1,7 +1,7 @@
-/* 任务流画布深色化（DESIGN §12 克制黑客风）：
+/* 任务树画布深色化（task-attempt-tree，2026-09-27）：
    xyflow 自带样式表是未分层 plain CSS，层叠优先级高于 Tailwind v4 utilities layer；
    必须在 @xyflow/react/dist/style.css 之后引入本文件，用 .tf-dark 提高特异性
-   覆盖其白底控件（与 views/blackboard/canvas.css 同手法）。 */
+   覆盖其白底控件（与原任务流 flow.css 同手法，TaskFlow 退役后由本文件承接）。 */
 
 .tf-dark .react-flow__controls {
   border-radius: 6px;

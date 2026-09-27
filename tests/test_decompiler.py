@@ -100,6 +100,48 @@ def test_headless_export_and_cache(tmp_path, sample):
     assert overview.count("== ") == 2
 
 
+# ---------- Agent 检索面（2026-09-27：strings_for / xrefs_for_func / list_functions 过滤） ----------
+
+def test_list_functions_filters(tmp_path, sample):
+    """list_functions 过滤参数：按名（大小写不敏感）/按大小筛；无命中回空表。"""
+    runner, _calls = fake_ghidra_runner(tmp_path)
+    svc = make_service(tmp_path, sample, runner)
+    by_name = json.loads(svc.list_functions(str(sample), name_contains="FLAG"))
+    assert [s["name"] for s in by_name] == ["check_flag"]
+    by_size = json.loads(svc.list_functions(str(sample), min_size=150))
+    assert [s["name"] for s in by_size] == ["main"]
+    assert json.loads(svc.list_functions(str(sample), name_contains="zzz")) == []
+
+
+def test_strings_for_filter_and_limit(tmp_path, sample):
+    """strings_for：子串过滤带地址+引用函数；limit 截断计数；无后端回引导文本。"""
+    runner, _calls = fake_ghidra_runner(tmp_path)
+    svc = make_service(tmp_path, sample, runner)
+    hit = json.loads(svc.strings_for(str(sample), q="correct"))
+    assert hit["count"] == 1 and hit["truncated"] is False
+    row = hit["items"][0]
+    assert row["address"] == "0x2010" and row["string"] == "Correct!"
+    assert row["refs"][0]["func_name"] == "main"
+    capped = json.loads(svc.strings_for(str(sample), limit=2))
+    assert capped["count"] == 2 and capped["total_matched"] == 3
+    assert capped["truncated"] is True
+    bare = DecompilerService(cache_dir=tmp_path / "c2")
+    assert bare.strings_for(str(sample)).startswith("[反编译器不可用]")
+
+
+def test_xrefs_for_func_name_address_and_unknown(tmp_path, sample):
+    """xrefs_for_func：name 直查 / address 先解析成函数名 / 未知地址回指引。"""
+    runner, _calls = fake_ghidra_runner(tmp_path)
+    svc = make_service(tmp_path, sample, runner)
+    by_name = json.loads(svc.xrefs_for_func(str(sample), name="check_flag"))
+    assert by_name["callers"] == ["main"]
+    assert by_name["callees"] == ["strlen", "puts"]
+    by_addr = json.loads(svc.xrefs_for_func(str(sample), address=0x1189))
+    assert by_addr["function"] == "check_flag"
+    miss = svc.xrefs_for_func(str(sample), address=0x9999)
+    assert miss.startswith("[错误]") and "list_symbols" in miss
+
+
 # ---------- MCP 实时桥（streamable-http 会话 / 真机工具别名 / 降级） ----------
 
 class FakeMCPTransport:

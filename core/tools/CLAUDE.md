@@ -45,6 +45,7 @@
   （五元组 ok/locked/no-db/no-tool/unsupported）。
 - Agent 四接口（list_functions/decompile/annotate/xrefs）：list 与全量概览跳过 MCP；
   annotate 只落 sidecar 不直写 MCP。
+- **Agent 检索面（2026-09-27）**：`strings_for(binary, q, limit)`（复用 build_strings，limit 默认 200 上限 1000 防淹没上下文）+ `xrefs_for_func(binary, name|address)`（地址先经缓存 `_find_func` 解析函数名再走 xrefs，MCP 在线优先实时）+ `list_functions` 加 `name_contains/min_size` 过滤——对应 Agent 工具 strings_search/func_xrefs/list_symbols 过滤参数（core/agent/tools.py），治 Agent run_cmd 直读全量缓存 JSON 的低效模式。
 - **动态端点（2026-09-20）**：`DecompilerService(mcp_provider=callback)` / `build_headless_service(...,
   mcp_provider=)`——decompile 点查与 xrefs 每次先调 `provider(binary)` 取端点（接
   `IdaMcpManager.ensure`，按需拉起 IDA-MCP）；provider None/异常/同端点一律回退固定桥或

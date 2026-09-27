@@ -43,10 +43,10 @@ from core.agent.loop import clear_task_resume, persisted_snapshot_path, task_res
 from core.blackboard import TaskQueue
 from core.blackboard.assets import import_assets, register_asset
 from core.coverage import attach_effective_status
-from core.blackboard.graph import board_graph, session_graph, task_graph
+from core.blackboard.graph import board_graph, session_graph
 from core.blackboard.attackpath import build_attack_path
 from core.blackboard.intents import list_intents, reopen_intent
-from core.blackboard import traces
+from core.blackboard import traces, tasktree
 from core.blackboard.store import Blackboard, BlackboardClosedError
 from core.blackboard.tasks import dedup_fp, render_attempts_lines
 from core import assetimport
@@ -2548,6 +2548,16 @@ def create_app(
         """打法效果榜（M3，R4 基于物化侧）：轨迹链 (skill × kb) × verified finding。"""
         return traces.effect_stats(_project(pid).bb, pid, top=max(1, min(top, 50)))
 
+    @app.get("/api/projects/{pid}/tree/{task_id}")
+    def get_task_tree(pid: str, task_id: str):
+        """任务尝试树 v2（task-attempt-tree，现算零写入）：目标 → 意图 → 检验结果，
+        新发现下长新意图；发现归属 outcome_refs>存活窗>游离兜底。"""
+        tree = tasktree.build_task_tree(_project(pid).bb, pid, task_id)
+        if tree is None:
+            raise HTTPException(404, f"任务不存在: {task_id}")
+        return tree
+
+
     @app.get("/api/projects/{pid}/retrieval-stats")
     def get_retrieval_stats(pid: str):
         """检索对账三象限（retrieval-upgrade M3，2026-09-23）：提示×打开×verified
@@ -2780,12 +2790,15 @@ def create_app(
     @app.get("/api/projects/{pid}/events")
     def list_events(pid: str, since_id: int = 0, limit: int = 200,
                     before_id: int | None = None, tail: int = 0,
-                    session_id: str | None = None):
+                    session_id: str | None = None, kinds: str | None = None):
         # tail/before_id：直播间首屏增量 + 上翻分页（不全量回放，2026-09-17）；
-        # session_id：会话维度分页（2026-09-23 直播间会话窗口，store 层 F8 既支持）
+        # session_id：会话维度分页（2026-09-23 直播间会话窗口，store 层 F8 既支持）；
+        # kinds：逗号分隔事件类型过滤（编排器对话历史按 kind=orch.chat 全量拉取用，
+        # 2026-09-26——首屏只水合尾部 300 条，长跑项目 orch.chat 落窗外显空）
+        kind_list = [k.strip() for k in kinds.split(",") if k.strip()] if kinds else None
         return _project(pid).bb.recent_events(
             pid, since_id=since_id, limit=limit,
-            session_id=session_id, before_id=before_id, tail=tail)
+            session_id=session_id, before_id=before_id, tail=tail, kinds=kind_list)
 
     # ---------- 审批收件箱（§12 一等公民：越界/net:real 等待批动作） ----------
 
@@ -3215,8 +3228,9 @@ def create_app(
 
     @app.get("/api/projects/{pid}/task-graph")
     def get_task_graph(pid: str):
-        # A3 直播间任务流：节点=全部任务+认领会话；parent 实线 / 私信协作虚线
-        return task_graph(_project(pid).bb, pid)
+        # 退役过渡（task-attempt-tree M2，2026-09-27）：TaskFlow 已由任务树替代，
+        # 端点先回 410 一版，下版连同 graph.task_graph 函数与相关测试一并删除。
+        raise HTTPException(410, "task-graph 已退役：请改用 GET /tree/{task_id}（任务尝试树）")
 
     @app.get("/api/projects/{pid}/session-graph")
     def get_session_graph(pid: str):
@@ -3785,6 +3799,17 @@ def create_app(
             return {"session_id": sid, "status": "closing"}
         return _do_close_session(sid)
 
+    @app.delete("/api/sessions/{sid}")
+    def delete_session(sid: str):
+        """物理删除会话窗（2026-09-26 新壳侧栏悬停删除）：仅 closed 可删——活窗
+        必须先 POST /close 正规关窗（排水/摘 agents/open 任务退回公共池都在关窗
+        路径上）；这里只做黑板行级清除，events 留审计（session.deleted）。不可逆。"""
+        pid = _pid_of_session(sid)
+        try:
+            return _project(pid).bb.delete_session(sid)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+
     # ---------- 会话控制（DESIGN.md §3：暂停/恢复/中断） ----------
 
     @app.post("/api/sessions/{sid}/pause")
@@ -4350,11 +4375,14 @@ def create_app(
                     turned = agent.run_session()
                     if turned is None:
                         break
-                except Exception:  # noqa: BLE001 —— 委托级兜底在 _fail_task_on_error
+                except Exception as exc:  # noqa: BLE001 —— 委托级兜底在 _fail_task_on_error
                     # （起跑/收尾阶段的意外异常也不得静默杀死 worker 线程：
                     #   委托悬 claimed + 孤儿心跳续租，看板永远「执行中」）
+                    # 2026-09-26：真实异常文案+会话归属进 llm.error——429 配额
+                    # 耗尽杀死的对话轮此前只留笼统文案且无 session_id，用户侧
+                    # 表现为「已发送→正在回复→石沉大海」。
                     log.exception("worker 循环异常退出 pid=%s sid=%s", pid, agent.session["id"])
-                    _emit_llm_error(pid, "worker", "worker 循环异常退出（详见后端日志）")
+                    _emit_llm_error(pid, "worker", exc, session_id=agent.session["id"])
                     break
                 done += 1
             # 批 5（§6.8）：自动 worker 遇暂停退出 → 停链；队列空退出
@@ -4526,10 +4554,13 @@ def create_app(
         except ValueError:
             return None
 
-    def _emit_llm_error(pid: str, source: str, err: Any) -> None:
+    def _emit_llm_error(pid: str, source: str, err: Any,
+                        session_id: str | None = None) -> None:
         """LLM 调用失败落 llm.error 事件（2026-09-18：此前只有 job error+后端 log，
         额度/限流对用户完全不可见）。同 pid+错误文案 60s 节流防重试风暴刷屏；
-        文案命中配额特征加 kind_hint=quota（前端据此提示）。"""
+        文案命中配额特征加 kind_hint=quota（前端据此提示）。
+        session_id（2026-09-26）：带上归属会话——新壳会话流按 session_id 圈定，
+        不带则对话轮的死亡对用户仍不可见（只能翻事件流）。"""
         msg = str(err)[:300]
         key = f"{pid}:{msg}"
         now_t = time.monotonic()
@@ -4543,7 +4574,7 @@ def create_app(
                 pid, "llm.error",
                 {"source": source, "error": msg,
                  **({"kind_hint": hint} if hint else {})},
-                author="system")
+                session_id=session_id, author="system")
         except Exception:  # noqa: BLE001 —— 事件落库失败不掩盖原始错误
             log.exception("llm.error 事件落库失败 pid=%s", pid)
 

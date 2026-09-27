@@ -328,6 +328,11 @@ CHAT_SYSTEM_PROMPT = """你是项目主代理（Orchestrator），现在处于**
 # 对话轮 LLM 步上限（插队轮不跑长决策链；发布分批语义不适用——人类在场可连续对话）
 CHAT_MAX_STEPS = 8
 
+# 编排器事件窗剔除的纯观测 kind（orch-context-budget，2026-09-27）：
+# llm.usage=流量计费行、llm.thinking.delta=思考流式碎片——对派单决策零信息量，
+# 实测占事件总量 25%+ 却挤占 40 行窗口坑位；游标照推不重放，细节需要走 bb_overview。
+_ORCH_EVENT_EXCLUDE = ("llm.usage", "llm.thinking.delta")
+
 
 @dataclass
 class OrchestratorConfig:
@@ -594,10 +599,13 @@ class Orchestrator:
         # 当前末端——旧 backlog 永不逐轮回放（走查发现：从 0 起每轮 +100 的爬行 bug）。
         tip = self.bb.latest_event_id(self.project_id)
         if tip - self._last_event_id > 100:
-            new_events = self.bb.recent_events(self.project_id, since_id=tip - 100, limit=100)
+            new_events = self.bb.recent_events(
+                self.project_id, since_id=tip - 100, limit=100,
+                exclude_kinds=_ORCH_EVENT_EXCLUDE)
         else:
             new_events = self.bb.recent_events(
-                self.project_id, since_id=self._last_event_id, limit=100)
+                self.project_id, since_id=self._last_event_id, limit=100,
+                exclude_kinds=_ORCH_EVENT_EXCLUDE)
         self._last_event_id = max(tip, self._last_event_id)
         # A2 截断放宽（orchestrator-efficiency，2026-09-22）：事件行 payload
         # [:120]→[:300]——编排器反馈事件行过短无法判读，全文兜底走 bb_overview
@@ -630,7 +638,8 @@ class Orchestrator:
         stats = self._stats()
         tip = self.bb.latest_event_id(self.project_id)
         new_events = self.bb.recent_events(
-            self.project_id, since_id=tip - 100, limit=100)
+            self.project_id, since_id=tip - 100, limit=100,
+            exclude_kinds=_ORCH_EVENT_EXCLUDE)
         event_lines = [
             f"  #{e['id']} [{e['kind']}] {e['author']}: {json.dumps(e['payload'], ensure_ascii=False)[:300]}"
             for e in new_events[-40:]
@@ -727,6 +736,14 @@ class Orchestrator:
                                  for f in rel],
                 })
         recent_tasks = self._recent_tasks_view(tasks)
+        # 上下文预算（orch-context-budget，2026-09-27）：findings/sessions 全量段
+        # 随项目线性膨胀失控——findings 只进 top 20（verified/exploited 优先 →
+        # severity 降序），closed 会话出清；计数行给参照，细节走 bb_overview 按需拉。
+        findings_top = sorted(
+            findings,
+            key=lambda f: (0 if f["status"] in ("verified", "exploited") else 1,
+                           sev_rank.get(f.get("severity"), 9)))[:20]
+        sessions_live = [s for s in sessions if s["status"] != "closed"]
         return {
             "mission": mission_view,
             "high_value": high_value,
@@ -745,9 +762,12 @@ class Orchestrator:
             },
             "findings": [{"id": f["id"], "vuln_class": f["vuln_class"], "title": f["title"][:60],
                           "severity": f["severity"], "status": f["status"],
-                          "category": f.get("category") or "vuln"} for f in findings],
+                          "category": f.get("category") or "vuln"} for f in findings_top],
+            "findings_total": len(findings),
+            "findings_truncated": len(findings) > len(findings_top),
             "sessions": [{"id": s["id"], "role": s["role"], "status": s["status"]}
-                         for s in sessions],
+                         for s in sessions_live],
+            "sessions_closed": len(sessions) - len(sessions_live),
             "live_windows": len(self.live_sessions),
             **assets_view,
         }

@@ -164,8 +164,11 @@ export function buildStreamItems(visible: BBEvent[]): StreamItem[] {
       } else {
         out.push({ type: "single", event: e })
       }
-    } else if ((e.kind === "llm.thinking" || e.kind === "tool.call")
+    } else if ((e.kind === "llm.thinking" || e.kind === "tool.call"
+                || e.kind === "llm.error")
                && openTurn.has(skey(e))) {
+      // llm.error 入轮（2026-09-26）：429/配额类失败挂在引发该轮的引导语下，
+      // 用户侧不再「已发送→正在回复→石沉大海」；轮外孤儿错误走平铺兜底
       turnAt(openTurn.get(skey(e))!).process.push({ type: "single", event: e })
     } else {
       out.push({ type: "single", event: e })

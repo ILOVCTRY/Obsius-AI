@@ -23,7 +23,7 @@ const X_STEP = 300
 const CARD_W = 248
 const Y_GAP = 20
 const TARGET_H = 60
-const INTENT_H = 100
+const INTENT_H = 108 // 2026-09-26 100→108：流式布局下三行陈述+徽章行不再挤压重叠
 const FINDING_H = 72
 
 // 执行层
@@ -86,7 +86,7 @@ function IntentNode({ data }: { data: Record<string, unknown> }) {
     <button
       type="button"
       onClick={() => onToggle(n.id)}
-      className="rounded-md border bg-[#161b22] px-3 py-2 text-left transition-colors hover:bg-[#1c2128]"
+      className="flex flex-col rounded-md border bg-[#161b22] px-3 py-2 text-left transition-colors hover:bg-[#1c2128]"
       style={{
         width: CARD_W, height: INTENT_H,
         borderColor: isDeadEnd ? "#6e7681" : n.status === "open" ? "#1f6feb55" : "#30363d",
@@ -105,8 +105,9 @@ function IntentNode({ data }: { data: Record<string, unknown> }) {
           {n.request_count ? `${n.request_count} 请求 · ` : ""}{expanded ? "收起 ▾" : "执行 ▸"}
         </span>
       </div>
-      <p className="mt-1.5 line-clamp-3 text-[11.5px] leading-snug">{n.statement}</p>
-      <div className="absolute inset-x-3 bottom-1.5 flex items-center gap-1">
+      {/* 流式布局（2026-09-26 修文字重叠）：陈述占剩余高度，徽章行常规流不再 absolute 压字 */}
+      <p className="mt-1.5 min-h-0 flex-1 overflow-hidden text-[11.5px] leading-snug [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:3]">{n.statement}</p>
+      <div className="flex items-center gap-1 pt-0.5">
         {badge
           ? <span className="rounded px-1 text-[10px]"
                    style={{ background: `${badge.color}22`, color: badge.color }}>
@@ -114,7 +115,7 @@ function IntentNode({ data }: { data: Record<string, unknown> }) {
             </span>
           : <span className="text-[10px] text-muted-foreground">假设待验证</span>}
         {n.created_at && (
-          <span className="ml-auto font-mono text-[10px] text-muted-foreground/70">
+          <span className="ml-auto shrink-0 font-mono text-[10px] text-muted-foreground/70">
             {fmtDateTime(n.created_at).slice(5, 16)}
           </span>
         )}

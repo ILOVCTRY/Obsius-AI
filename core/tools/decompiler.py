@@ -964,24 +964,62 @@ class DecompilerService:
 
     # ---------- Agent 接口（§9 四接口） ----------
 
-    def list_functions(self, binary: str) -> str:
+    def list_functions(self, binary: str, name_contains: str | None = None,
+                       min_size: int | None = None) -> str:
         # MCP 插件只反映 IDA 当前打开的库、无 binary 维度，绝不用它的全量列表
         # 替换本样本的 headless 缓存（三层数据纪律）——列表只走 headless。
+        # 2026-09-27：加 name_contains/min_size 过滤（Agent 免直读全量缓存 JSON）。
         errors = ""
         for backend in self.backends:
             if backend.name == "mcp":
                 continue
             data, err, _info = self._export_json(binary)
             if data:
+                needle = (name_contains or "").lower()
                 return json.dumps(
                     [{"address": hex(int(f["address"])), "name": f["name"],
                       "size": f.get("size", 0),
                       "pseudocode": bool(f.get("pseudocode"))}
-                     for f in data.get("functions", [])],
+                     for f in data.get("functions", [])
+                     if (not needle or needle in f["name"].lower())
+                     and (not min_size or (f.get("size", 0) or 0) >= min_size)],
                     ensure_ascii=False)
             if err:
                 errors = err
         return DECOMPILE_GUIDANCE + (f"\n失败详情: {errors}" if errors else "")
+
+    def strings_for(self, binary: str, q: str | None = None,
+                    limit: int = 200) -> str:
+        """Agent strings 检索（2026-09-27）：复用 build_strings（大小写不敏感
+        子串过滤，行带地址+引用函数），limit 截断防淹没上下文——治 Agent 用
+        run_cmd 直读全量缓存 JSON 的低效模式（实测 b1nary 会话反复 Get-Content
+        66KB 文件十余次）。"""
+        data, _err, _info = self._export_json(binary)
+        if not data:
+            return DECOMPILE_GUIDANCE
+        view = build_strings(data, q)
+        total = len(view["items"])
+        items = view["items"][:max(1, min(int(limit or 200), 1000))]
+        return json.dumps({"count": len(items), "total_matched": total,
+                           "truncated": total > len(items), "items": items},
+                          ensure_ascii=False)
+
+    def xrefs_for_func(self, binary: str, address: int | None = None,
+                       name: str | None = None) -> str:
+        """Agent xref 点查（2026-09-27）：地址入参先经缓存解析成函数名，再走
+        xrefs（MCP 在线优先实时 func_profile，降级缓存全量 calls 反查）。"""
+        if name is None:
+            if address is None:
+                return "[错误] func_xrefs 需要 name 或 address 至少其一"
+            data, _err, _info = self._export_json(binary)
+            if not data:
+                return DECOMPILE_GUIDANCE
+            f = self._find_func(data, address, None)
+            if f is None:
+                return (f"[错误] 地址 {hex(address)} 不在任何已知函数入口上"
+                        f"——先 list_symbols(name_contains=…) 定位函数名")
+            name = f["name"]
+        return self.xrefs(binary, name)
 
     def decompile(self, binary: str, address: int | None = None, name: str | None = None) -> str:
         # 点查候选：样本实例桥（按需拉起）优先，其次固定桥；去重后与原选路一致

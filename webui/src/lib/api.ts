@@ -15,7 +15,7 @@ import type {
   AgentToolsResponse,
   Proposal, ProposalOrigin, RoleInfo, RouteHit,
   RoutePreviewBody, SampleUploadResponse, Session, SkillCreateBody, SkillDef, TrackProfile,
-  SkillDetail, SkillVocab, Task, TaskGraph, SessionGraph, BoardGraph, AttackPath, IntentInfo,
+  SkillDetail, SkillVocab, Task, TaskTree, SessionGraph, AttackPath, IntentInfo,
   WritebackItem, XrefData,
   TaskTrace, TraceEffect,
   FofaConfig, FofaTestResult, FofaSearchResult, ImportPreview, ImportSummary,
@@ -126,6 +126,10 @@ export const api = {
     http<BBEvent[]>(`/api/projects/${pid}/events?tail=${limit}${sid ? `&session_id=${encodeURIComponent(sid)}` : ""}`),
   eventsBefore: (pid: string, beforeId: number, limit = 50, sid?: string) =>
     http<BBEvent[]>(`/api/projects/${pid}/events?before_id=${beforeId}&limit=${limit}${sid ? `&session_id=${encodeURIComponent(sid)}` : ""}`),
+  // 按类型全量拉取（2026-09-26）：编排器对话历史用——首屏只水合尾部 300 条，
+  // 长跑项目 orch.chat 落窗外，须按 kind 单独拉全
+  eventsByKind: (pid: string, kinds: string, limit = 2000) =>
+    http<BBEvent[]>(`/api/projects/${pid}/events?kinds=${encodeURIComponent(kinds)}&limit=${limit}`),
   sessions: (pid: string) => http<Session[]>(`/api/projects/${pid}/sessions`),
 
   // 黑板（人机共写，author=human）
@@ -293,11 +297,10 @@ export const api = {
 
   // 任务
   tasks: (pid: string) => http<Task[]>(`/api/projects/${pid}/tasks`),
-  taskGraph: (pid: string) =>
-    http<TaskGraph>(`/api/projects/${pid}/task-graph`),
-  // 黑板链路图（2026-09-20）：五类对象 × 类型分层 DAG
-  boardGraph: (pid: string) =>
-    http<BoardGraph>(`/api/projects/${pid}/board-graph`),
+  // 任务尝试树 v2（task-attempt-tree，2026-09-27，替代 task-graph/TaskFlow）：
+  // 目标 → 意图 → 检验结果，新发现下长新意图，后端现算零写入
+  taskTree: (pid: string, taskId: string) =>
+    http<TaskTree>(`/api/projects/${pid}/tree/${taskId}`),
   // 单站攻击链路图 v3（website-attack-path-graph，2026-09-24）：
   // 目标 → 意图 → 收尾（漏洞/发现/死路），执行层展开
   attackPath: (pid: string, target: string) =>
@@ -355,6 +358,9 @@ export const api = {
     http<{ deleted: string }>(`/api/tasks/${taskId}`, { method: "DELETE" }),
   closeSession: (sid: string) =>
     http<{ status: string }>(`/api/sessions/${sid}/close`, { method: "POST" }),
+  // 物理删除会话窗：仅 closed 可删（活窗先 close），黑板行级清除，events 留审计
+  deleteSession: (sid: string) =>
+    http<{ id: string; deleted: boolean }>(`/api/sessions/${sid}`, { method: "DELETE" }),
   pauseSession: (sid: string) =>
     http<{ status: string }>(`/api/sessions/${sid}/pause`, { method: "POST" }),
   // E8：恢复可附引导语（随快照注入）与增补步数；预算暂停缺省自动 +200

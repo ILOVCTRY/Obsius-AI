@@ -101,9 +101,11 @@ WAL + 线程局部连接 + `_tx()`（进程内写锁 + BEGIN IMMEDIATE）串行�
 
 发现门禁（info 全类别拒收、verified 无复现证据拒〔repro_steps 新口径或旧 POC legacy 直通，has_repro_evidence add/patch 共用〕、rating_basis 随 severity 就高覆盖——「无证据不下结论」写进存储层）；合并=证据并集；撤回传播（四类目标+私信）；TOCTOU 防护（读-合并-写整体单事务 + 乐观锁 CAS）；资产状态回流（tested_clean 才算挖完）、high_value 标记。**疑似重复警告（orchestrator-efficiency M5 D1，2026-09-23）**：add_finding 返回值附 `dedup_warning`（cap 3 最新优先）——同 target_asset_id + 同 vuln_class（非空）但 dedup_key 不同的行=可能被指纹分裂的重复，只提示不阻塞（Agent 可坚持新增）；合并分支被并入的本体行不算、同目标无键行（dedup_key=自身 id）参与；无 target 或 vuln_class 空（逆向常态）不查；警告只进工具返回值（单次按需），不落事件无频控。
 
-## 黑板查询过滤（bb-query-filters，2026-09-24 实施）
+## 黑板查询过滤（bb-query-filters，2026-09-24 实施；site 单站全貌 2026-09-26 增补）
 
 **取数从「全量拉回本地找」改为「按条件精确取」**：`bb_query` 接出底层早已实现、工具层没暴露的过滤——findings：`min_severity`（info/low/medium/high/critical，语义=不低于该级）、`verified_only`、`category`；tasks：`status`（open/claimed/done/failed/blocked/cancelled）；assets：`tag`（meta.tags 大小写不敏感）。events：`kinds`（多值 IN 过滤，store `recent_events` 新入参，与 session_id/tail/before_id 三分支正交）、`session_id`；输出增量带出 id/session_id/created_at（查事件即可知归属，不必反查落盘）。六面统一 `limit`（1-200；events 走 tail 默认 50、其余应用层裁剪默认全量——**默认行为全部不动**）。闭集入参（severity/两 status/type）非法值显式返 `[错误] 非法 X（允许: …）`，修掉「拼错参数静默返回 [] 被误判为没有」；limit 非法钳 1-200 不报错。M3 关键词 `q=`（LIKE/FTS5）后置观察：看实战是否仍频繁全量查询再立项。
+
+**`what=site` 单站全貌（2026-09-26 增补）**：`asset` 入参（根资产 id 或精确 value，host/domain 优先消歧）一次返回 `{root, counts, assets（子树全部）, findings（挂在子树上）, intents（target/basis 命中子树）, hint}`——子树与意图归属复用 attackpath 的 `_subtree_ids`/`_intent_in_site`（单一口径）。动机：实战（vpn.zut.edu.cn 核实，2026-09-26）agent 按 type 分片全量拉（host/service/url/domain 各一把、条数多还漏看）再本地过滤，两分钟烧近 20 次查询；小 limit 试探漏看后重查、spill 解析踩坑再重查进一步放大。配套把「查站点一律用 site、findings 带 target_asset_id、events 带 kinds、limit 勿小值试探」写进工具 description 显眼处（不加 result 侧提示——回执尾部拼文本会毒化模型对 spill 文件的 json.load）。
 
 ## 漏洞收录格式（finding-report-format，2026-09-22 实施）
 
@@ -111,11 +113,15 @@ WAL + 线程局部连接 + `_tx()`（进程内写锁 + BEGIN IMMEDIATE）串行�
 
 ## 链路与全景图
 
-chains/chain_links 攻击链（假设→验证→利用）+ board_graph 黑板全景图（5 类节点 9 种边，全来自既有字段，只读聚合）；全景 chain 边只取 origin='manual'——任务轨迹自动链（origin='trace'）不进全景图（R6 防御过滤）。**会话协作图 session_graph**（编排器+会话窗 × delegate/derive/inbox/dm 边）见 §四「会话中心化」。**单站攻击过程图**（对某 IP/域名的全部探测归一化）见下文「单站攻击链路图」。
+chains/chain_links 攻击链（假设→验证→利用）+ board_graph 黑板全景图（5 类节点 9 种边，全来自既有字段，只读聚合）；全景 chain 边只取 origin='manual'——任务轨迹自动链（origin='trace'）不进全景图（R6 防御过滤）。**黑板全景图前端 UI 已下线（2026-09-26 用户要求）**：旧壳「全景」tab（含同页「主线」切换档）与新壳「黑板全景」tab 移除、boardGraph/ 前端删除；board_graph 只读聚合端点 GET /projects/{pid}/board-graph 与 `graph.board_graph` 保留（数据接口，tests 不动）。**会话协作图 session_graph**（编排器+会话窗 × delegate/derive/inbox/dm 边）见 §四「会话中心化」。**单站攻击过程图**（对某 IP/域名的全部探测归一化）见下文「单站攻击链路图」。
 
 ## 执行轨迹链路（execution-trace-chain，2026-09-22 实施）
 
-双轨制（traces.py）：**轨 A 轨迹视图（build_task_trace，查询时现算零写入）**——会话事件按 events.id 时间序以 `task.claimed → task.done/failed` 区间切分归属（区间外=游离段 idle）；区间内聚合四类节点：技能（每任务一节点，未命中记灰显反例）/ 知识库（同 module 归并+次数）/ 工具组（相邻间隔 ≤120s 并组，组不跨任务与窗口边界）/ 发现产出（区间内 finding.new，富化标题状态）。**轨 B 持久链（materialize_task_trace，双触发物化）**——任务收尾 done（`_finish` 钩子，try/except 不挡收尾）与发现 verified（patch_finding / add_finding 合并分支）两路径重物化；每任务一链（origin='trace'），node_type=task/step/finding，node_id=`{task_id}#{kind}:{value}` 机器可读；trace_ref=`task-<task_id>` 幂等键单事务 DELETE+重插，人工补挂链边（trace_ref=''）零感知保留；链状态只升不降（hypothesis<validated<exploited）。**沉淀（effect_stats）**：基于物化侧统计 (skill × kb 模块) 组合 × verified finding 计数（打法效果榜）。API 面：GET /trace/{task_id}（404=任务不存在）与 GET /trace-effect。前端（R5/R7）：任务详情内嵌执行轨迹段（TaskFlow 详情浮卡 + 任务看板认领过任务 🧭 徽章，不做项目级独立 tab）；全景图同页切换档「全景 | 主线」——主线=过滤子图三列（目标资产 → verified 发现 → exploited 链，unverified/FP 不上主线）+ 底部效果榜 top5。
+双轨制（traces.py）：**轨 A 轨迹视图（build_task_trace，查询时现算零写入）**——会话事件按 events.id 时间序以 `task.claimed → task.done/failed` 区间切分归属（区间外=游离段 idle）；区间内聚合四类节点：技能（每任务一节点，未命中记灰显反例）/ 知识库（同 module 归并+次数）/ 工具组（相邻间隔 ≤120s 并组，组不跨任务与窗口边界）/ 发现产出（区间内 finding.new，富化标题状态）。**轨 B 持久链（materialize_task_trace，双触发物化）**——任务收尾 done（`_finish` 钩子，try/except 不挡收尾）与发现 verified（patch_finding / add_finding 合并分支）两路径重物化；每任务一链（origin='trace'），node_type=task/step/finding，node_id=`{task_id}#{kind}:{value}` 机器可读；trace_ref=`task-<task_id>` 幂等键单事务 DELETE+重插，人工补挂链边（trace_ref=''）零感知保留；链状态只升不降（hypothesis<validated<exploited）。**沉淀（effect_stats）**：基于物化侧统计 (skill × kb 模块) 组合 × verified finding 计数（打法效果榜）。API 面：GET /trace/{task_id}（404=任务不存在）与 GET /trace-effect。前端（R5/R7）：任务详情内嵌执行轨迹段（任务看板认领过任务 🧭 徽章 + TaskTraceList 共用组件；原 TaskFlow 详情浮卡已随任务树退役，2026-09-27）；全景图同页切换档「全景 | 主线」——主线=过滤子图三列（目标资产 → verified 发现 → exploited 链，unverified/FP 不上主线）+ 底部效果榜 top5。（主线视图已随黑板全景 2026-09-26 下线，效果榜数据接口 GET /trace-effect 保留）
+
+## 任务尝试树（task-attempt-tree，2026-09-27 实施；同日 v2 意图驱动改版）
+
+单向树**被动派生**（零打扰）：把 agent 针对一个目标的尝试路径画成 `目标 → 意图 → 检验结果` 的实时树——**意图=一句可证伪假设**（如「对 xxx 进行 sql 注入尝试」「对 xxx 函数进行 hook」），检验结果=发现（🔵）或死路（✕），**新发现下再长出新意图**（递归成树）。v1 的「计划步主干+命令/工具动作叶」当日内被用户反馈整体退役（树里不看命令，直播流自会显示）。全部数据读时现算零写入零事件（`core/blackboard/tasktree.py`）。**发现必挂意图门禁**：Agent（sess-）经 bb_add_finding 登记发现前本会话必须有 open 意图，否则拒绝并指路 declare_intent（工具层闸，人类/系统路径不经此工具不受限；declare_intent 在 _PLAN_TOOLS 恒放行保证全轨可先声明）——新数据不允许游离发现，树侧「未挂意图发现」桶仅兜历史数据。**发现归属优先级**：①意图 outcome_refs 显式引用（close_intent 存的 finding ids）→ ②存活窗归属（finding.new 事件时刻 ∈ 意图 [created_at, closed_at]，作者会话一致优先取最新声明）→ ③游离兜底桶。**子意图嵌套**：intent.basis_refs 引用 `finding:<fid>` 且 fid 已在树上 → 子意图挂那条发现节点下（发现同挂多意图=分叉）。任务归属复用 traces 的 R1 会话区间切分，多会话接力按事件 id 全序合并。API：GET /api/projects/{pid}/tree/{task_id}（{task, nodes, current, truncated_findings}；current.intent_id 仅 claimed 态取最新声明的 open 意图——按事件 id 序取，收尾后归位 None）。前端 `webui/src/views/live/TaskTree.tsx`（React.lazy 分包 + tree.css 深色化）：xyflow tidy-tree 深度分列布局（目标根 → 意图卡（进行中脉冲高亮=当前节点、✕死路带死因/✅漏洞/🔵发现徽章）→ 发现卡（severity 五档左边条）→ 子意图…），当前意图自动跟随（拖画布即停、「当前」钮恢复）；3s 轮询 + LiveRoom wsBump 去抖重拉；默认选中激活会话绑定任务、选择器可切全项目任务。**替代并退役任务流**：TaskFlow/TaskNode/TaskFlowEdge/flowModel/flow.css 五件套删除、`graph.task_graph` 函数与 GET /task-graph 端点退役（端点 410 过渡一版）、lib 类型 TaskGraph* → TaskTree*；会话页页签「直播｜任务流」→「直播｜任务树」。
 
 ## 单站攻击链路图（website-attack-path-graph v3，2026-09-24 实施）
 
@@ -127,7 +133,7 @@ chains/chain_links 攻击链（假设→验证→利用）+ board_graph 黑板�
 
 **执行层（读时归属，不改造写入链）**：http_history 按 M1 归一为测试点尝试组——method+路径模板（数字→{id}/UUID→{uuid}/≥8hex→{hash}）+ query 键排序去重、同点 30min 窗折叠、五档 found/hint/blocked/no_reaction/skipped、跨任务跨会话不切割。attempt.intent_id 查询时按意图存活窗 `[created_at, closed_at]`（open 尾端 +∞）归属；重叠窗归**最新声明**意图；无时间的 curl 缺口合成节点（request_count=0）按收尾发现反查 owner。执行层时间序相邻边单独出 `exec_edges`（同意图桶，含无主桶），前端点意图卡才展开为尝试条。站点边界=目标全后代子树；意图入图=target_asset_id 在子树或 basis_refs 命中子树。
 
-**API**：GET /api/projects/{pid}/attack-path?target=（返回 target/nodes/edges/attempts/exec_edges/counts；目标不存在 404）、GET …/intents?status=、POST …/intents/{iid}/reopen；Agent 工具 declare_intent（计划组）/close_intent/reopen_intent（控制组）；写全走 intents.py → `bb._tx()`，事件 intent.declared/closed/reopened。**保留不动**（只弃渲染图不弃功能）：漏洞/有效发现硬切换、catView 列表硬过滤、category 徽章；全景 BoardGraphCanvas 不变。M4 跨站泳道联动**后置**——等 vuln-chain-graph provides/requires 人工确认链边。
+**API**：GET /api/projects/{pid}/attack-path?target=（返回 target/nodes/edges/attempts/exec_edges/counts；目标不存在 404）、GET …/intents?status=、POST …/intents/{iid}/reopen；Agent 工具 declare_intent（计划组）/close_intent/reopen_intent（控制组）；写全走 intents.py → `bb._tx()`，事件 intent.declared/closed/reopened。**保留不动**（只弃渲染图不弃功能）：漏洞/有效发现硬切换、catView 列表硬过滤、category 徽章。M4 跨站泳道联动**后置**——等 vuln-chain-graph provides/requires 人工确认链边。
 
 ## 战役记忆
 
@@ -165,11 +171,11 @@ events 表全量审计 + EventBus 同步落库、尽力广播；前端按游标�
 - **中途换智能体两条通道（严格分语义）**：①`apply_role_change(task)`——委托建议角色热换装，委托结束 `_restore_base_persona` 回窗底色；②`switch_session_role(role)`（`POST /api/sessions/{sid}/role`）——重定义「这个窗是谁」，底色身份跨委托持续。两者都**完整保留对话历史与黑板**（接手，不是关窗重开）；人设脏标记 `_persona_dirty` 在步边界重建 system prompt。
 - **会话协作图 `session_graph`**（`GET /api/projects/{pid}/session-graph`）：节点=编排器+会话窗（带当前委托/队列数）；边四类——`delegate`（orch→窗的直属委派）/`derive`（窗→窗：父委托挂在另一存活窗）/`inbox`（同依据/更新在 ≥2 个窗聚类，无向）/`dm`（agent_message 私信，有向）。
 - **schema v24：纯语义迁移、零物理改动与数据搬迁**；`meta.bound_task_id` 双向绑定退役（新窗不写，存量残留按「上一件」历史字段忽略）；`spawn_task_id` 保留服务 resume 复盘窗幂等。**聊天安全口径**：人类消息踢 worker 时，未武装窗仅当窗内无 open/claimed 委托（`session_has_live_work`）才踢——一条聊天永远不能替未批准的委托起跑。
-- **事件**：`delegation.posted`（编排器/API 委派落账）、`session.persona_switched`（两种换装共用，payload.reason 区分）。**旧壳冻结**（不删代码）：旧壳只保证不崩 + 顶部冻结条引导新壳；会话看板/协作流/中途换人只进新壳。
+- **事件**：`delegation.posted`（编排器/API 委派落账）、`session.persona_switched`（两种换装共用，payload.reason 区分）。**配套前端 UI 随新壳移除（2026-09-26 用户定稿「新壳移除、不再维护」）**：会话看板/协作流/中途换人入口（shell2 SessionBoard/SessionFlow/RoleSwitchButton）已删，后端 `switch_session_role`/`session-graph` 端点保留；旧壳为唯一壳。
 
 ## 主代理 tick
 
-态势收集 → LLM 工具循环（publish_task / spawn_session / write_digest / done / **只读查询四工具** / **生命周期两工具**）→ 结构化落盘；tick 租约单飞（TTL 900s + 每 LLM 步心跳续租）是编排层唯一硬互斥。**只读工具面（M2，2026-09-22）**：`task_detail`（任务全量核对，result_note 全文）/ `bb_overview`（资产覆盖/发现分级统计/事件尾部分区总览）/ `budget_status`（预算余量数字，不做闸门判定）/ `session_list`（窗清单）——**零写权红线**，tick 与 chat_turn 共用；用于核对执行者结论与自主决策，不替代派单执行。态势截断配套放宽：事件行/近期任务 result_note 截断统一 [:300]（全文兜底走 task_detail，渐进披露）。**覆盖度对账并入态势（M3 B2，2026-09-22）**：`_assets_view` 出口新增 `assets.coverage` = `core/coverage.py` `coverage_report` 分组收敛摘要（groups_done/converged 比值 + 每组一行「domain:x 收敛 n/m · 未收口: …」）——「全景对账」类数数任务归零；对账异常置 None 不阻断态势注入。
+态势收集 → LLM 工具循环（publish_task / spawn_session / write_digest / done / **只读查询四工具** / **生命周期两工具**）→ 结构化落盘；tick 租约单飞（TTL 900s + 每 LLM 步心跳续租）是编排层唯一硬互斥。**只读工具面（M2，2026-09-22）**：`task_detail`（任务全量核对，result_note 全文）/ `bb_overview`（资产覆盖/发现分级统计/事件尾部分区总览）/ `budget_status`（预算余量数字，不做闸门判定）/ `session_list`（窗清单）——**零写权红线**，tick 与 chat_turn 共用；用于核对执行者结论与自主决策，不替代派单执行。态势截断配套放宽：事件行/近期任务 result_note 截断统一 [:300]（全文兜底走 task_detail，渐进披露）。**覆盖度对账并入态势（M3 B2，2026-09-22）**：`_assets_view` 出口新增 `assets.coverage` = `core/coverage.py` `coverage_report` 分组收敛摘要（groups_done/converged 比值 + 每组一行「domain:x 收敛 n/m · 未收口: …」）——「全景对账」类数数任务归零；对账异常置 None 不阻断态势注入。**上下文预算（orch-context-budget，2026-09-27）**：全量段压常数级——`_stats.findings` 只进 top 20（verified/exploited 优先 → severity 降序，带 findings_total/findings_truncated）、`_stats.sessions` closed 出清只留活跃（带 sessions_closed 计数）、事件窗（tick 与 chat 两处）剔除纯观测 kind `llm.usage`/`llm.thinking.delta`（`recent_events` 新增 `exclude_kinds` 参数，游标照推不重放）——被裁细节走 `bb_overview`/`task_detail` 按需拉；**不做事件表归档/分表**（SQLite 查询非瓶颈，动表破坏 traces/tasktree 事件回放语义）。
 
 ### 覆盖度对账（M3 B1，2026-09-22）
 
@@ -421,20 +427,9 @@ Obsidian 只读圣域，隐私红线三重落实：出参剥正文只回 snippet
 
 api.ts 唯一 fetch 出口（约 130 端点方法，ApiError 结构化错误）；useEvents 模块级手写 query cache——REST tail + WS 增量（since_id 游标）、100ms 批量 flush、回入水合截断 300 条、缓存 2000 条上限裁旧。**会话维度分页（live-event-stream-session-window，2026-09-23 实施）**：签名 `useEvents(pid, sessionId?)`——会话页签走会话源（tail/before 带 session_id，store 层 F8 既支持 API 一行透出；cache 键 `pid:sid` 每会话独立窗口；WS 增量按 sid 过滤、游标恒前进防断线重连回放重复），`__all`/编排页签走全局流——修「已结束会话页签近乎空白」（全局最新 50 条里该会话可能零事件）。
 
-## TRAE 化新壳（shell2，M1–M6，2026-09-25 实施）
+## TRAE 化新壳（shell2，2026-09-25 实施 → **2026-09-26 移除**）
 
-对标 TRAE Work 的**对话即工作台**信息架构重收纳（M1/M2/M4/M5 纯前端；M3 后端小补丁，协调模型/绑定/安全闸口不动；方案与拍板表 `docs/plans/webui-trae-shell.md`）。
-
-- **三姿态**（非按场景轨）：工作台（goal 条+对话流+常驻 composer）/ 画布 / 工具；姿态内=主区顶部窄 tab；侧栏=项目折叠分组+任务行，编排器固定首行 🧭。
-- **M6 起新壳默认、旧壳并存观察**：选择优先级=`?shell=1/2` 参数 > localStorage `ui.shell` > **从未选过（null）=新壳**，仅显式 `"1"` 为旧壳；参数落账剥参统一在 App 层。两壳双向通道（旧壳「新壳 →」两帧可见 / 新壳「旧壳」），旧壳全量保留不退役，退役时点由用户观察一版本后决定。里程碑 M1 空壳✓→M2 工作台✓→M3 chip 全通✓→M4 画布/工具✓→M5 欢迎态+模板✓→**M6 切默认✓（全部完成）**；主区切对话 hidden 保活（草稿/滚动不丢）。
-- **M2 工作台**：`ConversationPane` 两边共用抽件（`lib/turnStream.ts` 事件→turn 纯函数、`views/live/editors.tsx`），LiveRoom 仅改引用、旧壳零行为变化；写口全部收编现有 api。
-- **对话内审批**（拍板：侧栏铃铛+审批卡，无独立页）：**`request_approval` 不发事件**，pending 靠 4s 轮询、按归属 sid+`created_at` 时间位注入；裁决后卡片以回执态留 120s（extras），超时由全量审批（20s）派生的紧凑审计 chip 接档；铃铛有 pending→跳首条归属会话，仅 `awaiting_human` 无 pending→回落旧审批页。
-- **chip 混合语义**（M3 已实施）：chip 改默认、Agent 单次工具入参可临时覆盖、chip 可一键重置。三 chip：**自主档**（编排态，写 `config.autonomy` 持久；L0/L1/L2+暂停/自动派生开关）/ **runtime**（会话态，写任务 `preferred_runtime`——schema v23，任务期默认；run_cmd 入参 runtime 缺省按任务补，空默认须显式传）/ **模型**（写 `config.executor_llm` 持久，PUT 后热换在跑会话；GET/PUT/DELETE `/executor-llm`）。
-- **M3 附件与产物**：composer 附件上传 E2E（随对话/指派/任务下发，告示含 📎 工作区相对路径）；`FilesView` 侧栏「文件」资源入口——artifacts 注册表只读浏览（kind 过滤/名称搜索/文本预览/下载），主区切换、对话 hidden 保活。
-- **M4 画布/工具**（后端零改动）：共用 `NarrowTabs` 窄 tab（选中态持久化）。画布=黑板全景/任务流/攻击路径/轨迹链（**2026-09-26 补「发现/资产」两 tab**：复用旧壳 `views/Blackboard.tsx` 导出的 `Findings`/`Assets`，showCanvas=false 不重复攻击路径入口），重型组件壳层与姿态层两级 React.lazy（@xyflow 不进主包）；TaskFlow 无 WS 计数喂空集/0 退自带 3s 轮询；攻击路径/轨迹链由壳内最小 Host 补 assets 拉取与任务选择；**逆向工作台随画布条件重生**（`deriveWorkbenchProfile`=rev-generic：research+binary 或 config 显式覆盖）。工具=浏览器/测绘/情报/产物文件/插件·MCP；McpPane 从 SettingsView 抽公共件两处共用；🔌插件资源直跳工具·MCP；画布节点双击经 `goto-session` 事件回工作台会话。旧 NAV 全部有新归宿、旧入口摘除；全局 header 退役。
-- **M5 欢迎态+模板**（拍板两项，后端零改动——原估物化口已由 M4a/phases 提前提供）：欢迎页 `WelcomePane`=名称输入+四轨+场景档卡（名称空禁用，选档建项/回车全池直通）；模板中心 `TemplatesView`=8 场景档卡（四轨分组，卡内名称即建项）+ 三类录入向导：**渗透目标录入**（建项+目标逐行登记，auto 分型）/ **样本 triage**（建项+传样本，headless triage 自动跑）/ **CTF 向导**（建项+题面发编排器）。建项弹窗同步加场景档位。
-- **M6 切默认附带修复**（后端零改动）：NewShell `expanded` 持久态随项目删除剪枝——旧行为下死 pid 每 5s 永久 404 轮询；现落地态对账按 live 项目集合剪枝（项目清空连 target 清），仅启动首帧或有一轮 404。
-- 明确不做：大 composer LLM 判轨（M5 拍板用名称+模板）、同步对话接力、按轨做模式、跨项目聚合、旧壳现在退役（仅保留观察）。
+**已移除，不再维护（用户定稿）**：`webui/src/shell2/` 全部代码、App.tsx 壳选择（`?shell=`/`ui.shell`）、旧壳「新壳 →」入口、根目录 `启动新壳.bat` 均删，旧壳为唯一壳。实施记录（M1–M6 三姿态/欢迎页/模板中心/三 chip 等）见方案归档 `docs/plans/归档-已完成/webui-trae-shell.md` 与 git 历史。**后端留存资产**：schema v23（任务 preferred_runtime + `GET/PUT/DELETE /executor-llm` 项目级模型覆写）与 M2 抽件 `lib/turnStream.ts`（事件→turn 纯函数，旧壳 LiveRoom 同在用）、`views/live/editors.tsx`。会话中心化配套 UI 的去留见 §四。
 
 ## 事件渲染管线
 
@@ -446,7 +441,7 @@ api.ts 唯一 fetch 出口（约 130 端点方法，ApiError 结构化错误）�
 
 ## 视图组织与重画布
 
-React.lazy 隔离 @xyflow 重依赖（画布永不进主包）；布局算法抽纯函数模型（canvasModel 泳道+重心 / boardModel 五列 packing / flowModel DAG 分列），组件只消费 place 槽位；黑板全景图同页切换档「全景 | 主线」（主线=DOM 三列过滤子图+效果榜，不进 xyflow）。
+React.lazy 隔离 @xyflow 重依赖（画布永不进主包）；布局算法抽纯函数模型（canvasModel 泳道+重心 / flowModel DAG 分列），组件只消费 place 槽位。（boardModel 五列 packing 随黑板全景 2026-09-26 下线删除）
 
 ## 链路画布单向零重叠（findings-canvas-dag-layout，2026-09-22 实施）
 
@@ -459,7 +454,7 @@ React.lazy 隔离 @xyflow 重依赖（画布永不进主包）；布局算法抽
 
 ## 状态管理哲学
 
-无状态库；useState+props 下行、CustomEvent 上行、模块级缓存跨实例；轮询为底 WS 为翼（WS 断了照常用），单 WS 连接多消费者（TaskFlow 用 wsBump 去抖重拉）。
+无状态库；useState+props 下行、CustomEvent 上行、模块级缓存跨实例；轮询为底 WS 为翼（WS 断了照常用），单 WS 连接多消费者（TaskTree/直播间用 wsBump 去抖重拉）。
 
 ## 页签与设置页
 

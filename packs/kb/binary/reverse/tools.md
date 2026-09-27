@@ -581,6 +581,11 @@ boolector -m --output-format=smt2 hash.smt2
 - **优先用平台的 `decompile` / `list_symbols` 工具**（IDA MCP 桥或 headless 导出缓存），
   而不是手动 objdump 全量反汇编——伪代码一屏顶百行汇编，且结果自动落 func_kb 共享。
   平台会在需要时自动拉起无窗口 IDA（idat）并启动 MCP，分析完空闲自动关闭，无需人工干预。
+- **字符串/调用关系检索用平台工具（2026-09-27 新增）**：`strings_search(binary, pattern)`
+  查字符串表（带地址+引用函数，找提示/密钥/flag 线索第一步）、`func_xrefs(binary, name|address)`
+  查调用关系、`list_symbols` 支持 `name_contains/min_size` 过滤。
+  **禁止用 run_cmd 直读 decompiler-cache 的 JSON**——全量文件大，反复读会灌爆上下文；
+  上述工具返回的是过滤后的切片。
 - unix 文本工具链（grep/sed/objdump）在 **wsl** runtime（`run_cmd wsl`，有进程启动与
   /mnt 盘 IO 开销）；宿主是 Windows，host runtime 为 **PowerShell**（sed/awk 不可用）。
   纯文本读取用平台 `read_file` 工具（带行号、可分段、零启动开销）。

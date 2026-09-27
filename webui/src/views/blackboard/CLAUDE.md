@@ -1,13 +1,15 @@
-# views/blackboard/（黑板：单站攻击链路图 + 黑板全景图，DESIGN §三/§12）
+# views/blackboard/（黑板：单站攻击链路图 + 测绘/函数库，DESIGN §三/§12）
 
 > 发现 tab「链路」子视图 = **单站攻击链路图**（AttackPath，2026-09-24 替换旧
-> FindingsCanvas）；第 4 tab「全景」= boardGraph/ 黑板全景图，见文末。
+> FindingsCanvas）。
 > 与逆向 `views/reverse/chains/` 互不复用组件，只共用依赖（@xyflow/react v12）。
 
 ## 入口与门控
 
 - `Blackboard.tsx`：发现 tab 过滤行右侧 `[列表｜链路]` 子切换；**仅 pentest/redteam
   轨且非 compact 侧栏**才渲染。compact 直播间侧栏永不挂画布。
+- **compact 侧栏渗透轨不挂测绘/函数库 tab**（2026-09-26 用户要求：渗透项目右侧
+  窄栏用不上；主黑板视图不受影响）。
 - `React.lazy` 动态 import，@xyflow/react（约 192KB）与画布都不进主包。
 - findings/assets 由 Blackboard 父级持有（4s 轮询 + WS bump）；**资产筛选器
   只列 host/domain（IP/域名）按值搜索**（2026-09-24 定稿：过滤只按 IP 和域名；
@@ -24,6 +26,9 @@
     request_count、`OUTCOME_BADGE` 漏洞/有效发现/死路；死路虚线灰卡）/
     `FindingNode`（SEV_COLOR 五档+category）；边 derive/outcome/bypass
     smoothstep 单向（bypass 仅死路隐藏时参与保持连通）。
+    **IntentNode/卡片内部用 flex 流式布局（2026-09-26 修文字重叠）**：陈述
+    `flex-1 overflow-hidden` 占剩余高度、徽章行常规流——勿改回 absolute
+    底部定位（INTENT_H 内三行陈述会压住徽章/时间戳）；INTENT_H=108。
   - **执行层展开**：点意图卡 toggles 展开（data.expanded/onToggle）——该意图
     attempts 按 `exec_edges` 时间相邻连成尝试带（连接边 `<intent>-><attempt>:conn`）；
     `AttemptNode` 五档色标（found/hint/blocked/no_reaction/skipped）、路径模板、
@@ -36,32 +41,16 @@
   - M4（跨站泳道联动）后置，等 vuln-chain-graph provides/requires 人工确认边。
 - `canvas.css` — 深色主题覆盖。xyflow 样式是未分层 plain CSS，层叠压过 Tailwind
   v4 utilities；必须 import 在 `@xyflow/react/dist/style.css` 之后，用根类
-  `.fc-dark` 提特异性。AttackPath 与 boardGraph 共用。
-- `ChainToolbar.tsx` — 导出 `STATUS_DOT`（hypothesis 黄/validated 蓝/exploited 红）
-  供 boardGraph chain 边着色；本视图不渲染工具栏。
+  `.fc-dark` 提特异性。AttackPath 使用。
 - `MappingPane.tsx` — 「测绘」tab（cyberspace-mapping，CTF 轨不挂载）。
 
-## 已删除（2026-09-24，勿复活）
+## 已删除（勿复活）
 
-`FindingsCanvas.tsx` / `canvasModel.tsx` / `FindingNode.tsx` / `FindingEdge.tsx` /
-`AddChainEdgeDialog.tsx`——旧 findings DAG 两套渲染图退役。**硬切换开关、catView
-列表过滤、category 徽章保留在 Blackboard.tsx（只弃图不弃功能）**。
-
-## boardGraph/（黑板全景图，2026-09-20，DESIGN §12 定稿块）
-
-- `BoardGraphCanvas.tsx` 第 4 tab「全景」：五类对象（asset/func_kb/finding/
-  artifact/task）× 类型分层 DAG 只读视图；`api.boardGraph` 4s 轮询（label/sub
-  服务端拼好）。悬停/点选聚焦一跳邻接、finding 点击复用 FindingDetailDialog、
-  其余底部浮卡；死路/孤立缺省折叠（localStorage `board-deadend:<pid>`/
-  `board-isolated:<pid>`）；chain 边 STATUS_DOT 着色、stale basis 点虚线 0.25。
-  **同页切换档「全景 | 主线」**：主线档渲染 `MainlineView`（ReactFlow 卸载），
-  FindingDetailDialog 两档共用；切回全景 setTimeout 120ms 补一次 fitView。
-  **坑**：画布 `absolute inset-0`，TabsContent 必须自带 `relative`——缺了盖住
-  顶部 tab 栏，用户被困在全景里。
-- `MainlineView.tsx` — 战果主线：DOM 三列（目标资产 → verified 发现 → exploited
-  链，unverified/FP 不上主线）+ 底部打法效果榜（`api.traceEffect` top5）。
-- `boardModel.ts` 布局纯函数：五列固定序、空列左移、行 packing；独立常量
-  BOARD_*，勿 import 已删的 canvasModel。
-- `BoardNode.tsx` 五类节点卡 + `boardColHeader`/`boardColBg` 自定义 type（无 type
-  节点=白卡穿帮）；`BoardEdge.tsx` 独立骨架。受控节点 onNodesChange 回收
-  dimensions（ch.dimensions）回灌派生节点的 v12 契约在本画布适用。
+- 2026-09-26 **黑板全景图 boardGraph/**（`BoardGraphCanvas`/`MainlineView`/
+  `boardModel`/`BoardNode`/`BoardEdge`，2026-09-20 上线的第 4 tab「全景」+
+  「主线」切换档）——用户要求下线，tab 与前端文件全删；后端
+  GET /projects/{pid}/board-graph 只读端点与 `graph.board_graph` 保留（tests
+  覆盖不动）。同删无引用的 `ChainToolbar.tsx`。
+- 2026-09-24 `FindingsCanvas.tsx` / `canvasModel.tsx` / `FindingNode.tsx` /
+  `FindingEdge.tsx` / `AddChainEdgeDialog.tsx`——旧 findings DAG 两套渲染图退役。
+  **硬切换开关、catView 列表过滤、category 徽章保留在 Blackboard.tsx（只弃图不弃功能）**。

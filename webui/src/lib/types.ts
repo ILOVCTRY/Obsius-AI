@@ -146,88 +146,47 @@ export interface TaskContext {
   attachments?: AttachmentInfo[]  // 附件随发（2026-09-19）：publish 落库的附件清单（认领首条消息渲染 📎）
 }
 
-// A3 直播间任务流图
-export interface TaskGraphSession {
-  id: string
-  name: string
-  role: string
-  status: string
-}
+// 任务尝试树 v2（task-attempt-tree，2026-09-27 意图驱动改版）：
+// 根=任务 → 意图（一句可证伪假设）→ 检验结果（发现/死路）→ 新发现下再长新意图。
+// 后端现算零写入 GET /tree/{task_id}；nodes 平铺带 parent（""=挂根），前端组树。
+// v1 的计划步主干+命令/工具动作叶已整体退役（用户拍板：树里不看命令）。
+export type TaskTreeNode =
+  | {
+      kind: "intent"
+      id: string
+      parent: string
+      statement: string
+      status: "open" | "closed"
+      outcome_type: string   // vuln / finding / dead_end（closed 时非空）
+      dead_reason: string
+      created_at: string
+      closed_at: string | null
+    }
+  | {
+      kind: "finding"
+      id: string
+      parent: string         // 挂的意图 id；""=游离（进兜底桶，仅历史数据）
+      title: string
+      severity: string
+      status: string
+      vuln_class: string
+      created_at: string
+    }
+  | { kind: "bucket"; id: string; parent: string; title: string }  // "_orphan" 游离发现兜底桶
 
-export interface TaskGraphNode {
-  id: string
-  objective: string
-  task_type: string
-  status: Task["status"]
-  priority: number
-  noise_budget: string
-  parent_id: string | null
-  claimed_by: string | null
-  target_session?: string  // v0.71：专属执行窗（双击任务卡直开会话）
-  plan: TaskPlanStep[]
-  updated_at?: string
-  attempts?: number  // C10 历次尝试数（task.context.attempts 长度，看板/任务流 ↻N 徽章）
-  session: TaskGraphSession | null
-}
-
-export interface TaskGraphEdgeRef {
-  kind: "basis_stale" | "finding_update" | string
-  ref_id: string
-  title: string
-}
-
-export interface TaskGraphEdge {
-  id: string
-  source: string
-  target: string
-  kind: "parent" | "inbox" | "suggest"
-  refs?: TaskGraphEdgeRef[]
-}
-
-export interface TaskGraph {
-  nodes: TaskGraphNode[]
-  edges: TaskGraphEdge[]
-}
-
-// 黑板链路图（2026-09-20）：五类对象 × 类型分层 DAG；label/sub 服务端拼好，前端零二次映射
-export type BoardNodeType = "asset" | "func_kb" | "finding" | "artifact" | "task"
-
-export interface BoardGraphNode {
-  id: string
-  node_type: BoardNodeType
-  label: string
-  sub: string
-  status: string | null
-  created_at?: string
-  // 类型专属（按 node_type 取用）
-  type?: string; value?: string; parent_id?: string | null          // asset
-  name?: string; address?: number | string; risk_tags?: string[]    // func_kb
-  binary_sha256?: string
-  title?: string; severity?: string; category?: string; vuln_class?: string  // finding
-  author?: string | null  // finding 作者（sess- 前缀=对话轮产出，2026-09-20）
-  target_asset_id?: string | null; poc_artifact_id?: string | null
-  path?: string; kind?: string; description?: string; task_id?: string | null // artifact
-  objective?: string; task_type?: string; priority?: number; claimed_by?: string | null  // task
-}
-
-export type BoardEdgeKind =
-  | "asset_parent" | "func_of" | "targets" | "relates_to" | "poc"
-  | "basis" | "task_parent" | "artifact_task" | "chain"
-
-export interface BoardGraphEdge {
-  id: string
-  source: string
-  target: string
-  kind: BoardEdgeKind
-  label?: string            // relates_to note / chain edge_note
-  stale?: boolean | null    // basis 边：依据已撤回（收录+标记）
-  chain_id?: string; chain_name?: string; chain_status?: string  // chain 边专属
-  seq?: number; edge_note?: string
-}
-
-export interface BoardGraph {
-  nodes: BoardGraphNode[]
-  edges: BoardGraphEdge[]
+export interface TaskTree {
+  task: {
+    id: string
+    objective: string
+    task_type: string
+    status: Task["status"]
+    priority: number
+    claimed_by: string | null
+    result_note: string
+  }
+  nodes: TaskTreeNode[]
+  current: { intent_id: string | null; last_activity_ts: string | null }
+  truncated_findings: boolean
 }
 
 // 单站攻击链路图 v3（website-attack-path-graph，2026-09-24）：

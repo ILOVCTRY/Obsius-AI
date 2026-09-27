@@ -16,8 +16,10 @@ from typing import Any, Callable, Iterable
 from core.agent.retention import omitted_note, retain, spill_text
 from core.blackboard import Blackboard, ClaimError, TaskQueue
 from core.blackboard.assets import register_asset
+from core.blackboard.attackpath import _intent_in_site, _subtree_ids
 from core.blackboard.intents import (declare_intent as _declare_intent,
                                      close_intent as _close_intent,
+                                     list_intents as _list_intents,
                                      reopen_intent as _reopen_intent)
 from core.blackboard.store import UNSET, has_repro_evidence
 from core.blackboard.tasks import dedup_fp
@@ -46,6 +48,8 @@ _PLAN_TOOLS = {"task_plan", "task_step", "task_reconcile",
 # task_step 放行是为了让修订/纠正类回填不被自己的闸挡住（空计划下它会被服务端正常拒）。
 _PLAN_PRE_ALLOWED = _PLAN_TOOLS | {
     "bb_query", "kb_open", "kb_search", "list_symbols", "decompile",
+    # strings_search/func_xrefs 只读缓存检索（2026-09-27，侦察先行同 list_symbols）
+    "strings_search", "func_xrefs",
     # read_file 只读工作区文件（侦察先行，2026-09-20）
     "read_file",
     # search_files 非 shell 的工作区内容检索（2026-09-24，替代计划前 run_cmd grep）
@@ -356,18 +360,30 @@ AGENT_TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "bb_query",
-        "description": "查黑板：findings / assets / events / tasks / func（函数知识库）/ "
-                       "blueprint（开发蓝图）。"
+        "description": "查黑板：findings / assets / events / tasks / func（函数知识库）/"
+                       "blueprint（开发蓝图）/ site（单站全貌）。"
+                       "**查某站点的资产+发现+意图现状，一律用 what=site**（一次返回"
+                       "根资产子树全貌）——不要按 type 分片拉全量再本地过滤（host/url/"
+                       "domain 各拉一把、条数多还漏看）。"
+                       "findings 尽量带 target_asset_id 精确过滤；events 尽量带 kinds/"
+                       "session_id；limit 传小值会截断漏看（漏看了仍要重查，得不偿失）。"
                        "逆向场景硬规则：反编译任何函数前必须先查 func 防重复劳动。",
         "input_schema": {
             "type": "object",
             "properties": {
                 "what": {"type": "string",
                          "enum": ["findings", "assets", "events", "tasks", "func",
-                                  "blueprint"]},
+                                  "blueprint", "site"]},
+                "asset": {"type": "string",
+                          "description": "site 查询必填：根资产 id 或精确 value"
+                                         "（host/domain，如 202.196.32.142）——"
+                                         "返回其子树全部资产+各自发现+相关意图+终态"},
                 "blueprint_id": {"type": "string",
                                  "description": "blueprint 查询：单份蓝图（缺省列全部）"},
-                "target_asset_id": {"type": "string"},
+                "target_asset_id": {"type": "string",
+                                    "description": "findings：只回挂在该资产上的发现"
+                                                   "（精确匹配；查站点全貌请改用"
+                                                   " what=site）"},
                 "binary_sha256": {"type": "string", "description": "func 查询必填"},
                 "address": {"type": ["integer", "string"],
                             "description": f"func 单点查询。{_ADDR_DESC}"},
@@ -592,11 +608,47 @@ AGENT_TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "list_symbols",
-        "description": "列出二进制函数符号表（地址/名字/大小/是否已导出伪码）。",
+        "description": "列出二进制函数符号表（地址/名字/大小/是否已导出伪码）。"
+                       "支持按名/按大小过滤——找关键函数先用它缩小范围，勿整表吞。",
         "input_schema": {
             "type": "object",
             "properties": {
                 "binary": {"type": "string"},
+                "name_contains": {"type": "string",
+                                  "description": "按符号名子串过滤（大小写不敏感）"},
+                "min_size": {"type": "integer",
+                             "description": "只回大于等于该字节数的函数（过滤 stub/thunk）"},
+            },
+            "required": ["binary"],
+        },
+    },
+    {
+        "name": "strings_search",
+        "description": "检索二进制字符串表（大小写不敏感子串），行带地址+引用函数。"
+                       "逆向找提示/密钥/flag 线索第一步用它，不要用 run_cmd 直读缓存 JSON。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "binary": {"type": "string", "description": "二进制文件路径"},
+                "pattern": {"type": "string",
+                            "description": "子串过滤（大小写不敏感）；缺省=全量（会被 limit 截断）"},
+                "limit": {"type": "integer",
+                          "description": "最多返回条数（默认 200，上限 1000）"},
+            },
+            "required": ["binary"],
+        },
+    },
+    {
+        "name": "func_xrefs",
+        "description": "查函数调用关系（callers/callees）。给 name 或 address 其一；"
+                       "地址会先解析成函数名。判断关键函数被谁调/调了谁时用它。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "binary": {"type": "string", "description": "二进制文件路径"},
+                "name": {"type": "string", "description": "按符号名查"},
+                "address": {"type": ["integer", "string"],
+                            "description": f"按函数入口地址查。{_ADDR_DESC}"},
             },
             "required": ["binary"],
         },
@@ -989,7 +1041,8 @@ AGENT_TOOLS: list[dict[str, Any]] = [
 TOOL_GROUPS = ["执行", "文件", "黑板", "知识", "浏览器", "协作", "计划", "控制"]
 _COLLAB_TOOLS = {"publish_task", "request_authorization", "request_escalation"}
 _KNOWLEDGE_EXTRA = {"kb_open", "kb_search", "skill_open", "route_lookup",
-                    "propose_pack_edit", "list_symbols", "decompile"}
+                    "propose_pack_edit", "list_symbols", "decompile",
+                    "strings_search", "func_xrefs"}
 _FILE_TOOLS = {"read_file", "search_files"}
 
 
@@ -1130,6 +1183,7 @@ class ToolDispatcher:
         if name != "run_cmd" or gated:
             try:
                 payload = {"name": name, "args": _truncate_args(args),
+                           "step": self._step,  # 轮次号（观测对齐 command 事件；非计划步 id）
                            "ok": not result.startswith(_TOOL_FAIL_PREFIXES),
                            "duration_s": round(time.perf_counter() - t0, 2),
                            "result_head": result[:400]}
@@ -1199,6 +1253,25 @@ class ToolDispatcher:
                 return ("[计划闸] 请先调 task_plan 写下本任务的解决计划（3-8 个可验证小步），"
                         "再开始实质动作。只读侦察（bb_query/kb_open/kb_search/"
                         "list_symbols/decompile）允许先行，但 run_cmd、写黑板等须在计划之后。")
+        # raw_arguments 解包垫片（2026-09-26）：部分模型在长文本参数上会把全部参数
+        # 包成 {"raw_arguments": "<JSON 字符串>"}（实测 ark-code-latest 调
+        # bb_upsert_func 连发 6 次全中），平铺解包的裸 TypeError 只会让模型空转重试。
+        # 原则：能解就解、能修就修、修好照常执行成功返回；实在到不了 handler
+        # 才回 [参数格式] 提示（写入类工具幂等，多修多执行无副作用）。
+        if set(args.keys()) == {"raw_arguments"}:
+            raw = args["raw_arguments"]
+            if isinstance(raw, str):
+                raw = _loads_lenient_json(raw)
+            if raw is None:
+                return (f"[参数格式] {name} 的参数被包在 raw_arguments 里，且内容"
+                        f"不是合法 JSON（已尝试裸十六进制自动修复仍失败——常见于 "
+                        f"0x… 没加引号之外的语法残缺）。请以顶级平铺参数直接调用 "
+                        f"{name}，不要嵌套任何外层对象。")
+            if not isinstance(raw, dict):
+                return (f"[参数格式] {name} 的 raw_arguments 应为平铺参数对象，"
+                        f"实际收到 {type(raw).__name__}——请以顶级平铺参数直接调用 "
+                        f"{name}，不要嵌套。")
+            args = raw
         try:
             return handler(**args)
         except GatewayDenied as e:
@@ -1473,6 +1546,19 @@ class ToolDispatcher:
         ev = dict(evidence or {})
         if relates_to:
             ev["relates_to"] = relates_to
+        # 发现必挂意图（任务尝试树 v2 门禁，2026-09-27）：发现是意图假设的检验
+        # 产物，不允许游离——Agent（sess-）登记前本会话必须有 open 意图；
+        # 人类/系统路径不经此工具，不受限。store 层不设闸（测试/人工 PATCH 零感知）。
+        if self.author.startswith("sess-"):
+            has_open = self.bb.conn.execute(
+                "SELECT 1 FROM intents WHERE project_id=? AND status='open'"
+                " AND author=? LIMIT 1", (self.project_id, self.author)).fetchone()
+            if has_open is None:
+                self.last_progress_step = self._step
+                return ("[拒绝] 本会话当前没有 open 意图，不允许游离登记发现——"
+                        "先 declare_intent(statement=\"对 <对象> 进行 <什么尝试>…\")"
+                        " 声明假设，再围绕它执行并登记发现；"
+                        "意图最终须 close_intent 收尾（漏洞/发现/死路）")
         # C6 漏洞核对 hook：AI 登记漏洞前自我对照红线/评级规则——
         # 不合格降级 intel（不进漏洞视图）；核对失败降级跳过（不阻断）。
         gate_note = ""
@@ -1659,6 +1745,7 @@ class ToolDispatcher:
                        category: str | None = None, tag: str | None = None,
                        kinds: list[str] | str | None = None,
                        session_id: str | None = None,
+                       asset: str | None = None,
                        limit: int | None = None) -> str:
         if address is not None:
             try:
@@ -1689,6 +1776,65 @@ class ToolDispatcher:
         # kinds 容错：模型偶发传单字符串，包成列表
         if isinstance(kinds, str):
             kinds = [kinds]
+        if what == "site":
+            # 单站全貌（2026-09-26）：根资产子树 + 各自发现 + 相关意图一把返回。
+            # 动机：agent 曾按 type 分片全量拉（host/service/url/domain 各一把）
+            # 再本地过滤，一个站点核实烧近 20 次查询——这里一次到位。
+            if not asset or not str(asset).strip():
+                return "[错误] site 查询必须提供 asset（根资产 id 或精确 value，host/domain）"
+            assets = self.bb.list_assets(self.project_id)
+            key = str(asset).strip()
+            root = next((a for a in assets if a["id"] == key), None)
+            if root is None:  # id 未命中 → 精确 value（大小写不敏感），host/domain 优先
+                vals = [a for a in assets
+                        if (a.get("value") or "").strip().lower() == key.lower()]
+                vals.sort(key=lambda a: 0 if a.get("type") in ("host", "domain") else 1)
+                root = vals[0] if vals else None
+            if root is None:
+                sample = sorted({a["value"] for a in assets
+                                 if a.get("type") in ("host", "domain")})[:8]
+                return (f"[错误] 找不到资产: {asset}"
+                        f"（可先 what=assets 选定，host/domain 如: {', '.join(sample)}…）")
+            subtree = _subtree_ids(assets, root["id"])
+            site_assets = [a for a in assets if a["id"] in subtree]
+            findings = [f for f in self.bb.list_findings(self.project_id)
+                        if f.get("target_asset_id") in subtree]
+            intents = [it for it in _list_intents(self.bb, self.project_id)
+                       if _intent_in_site(it, subtree)]
+            if limit is not None:  # 钳制过的 limit 分别作用于三张清单
+                site_assets = site_assets[:limit]
+                findings = findings[:limit]
+                intents = intents[:limit]
+            return json.dumps({
+                "hint": "单站全貌一次拉全；核对站点现状用 what=site，勿按 type 分片全量拉。",
+                "root": {"id": root["id"], "type": root["type"],
+                         "value": root["value"], "status": root.get("status", "open")},
+                "counts": {
+                    "assets": len(site_assets), "findings": len(findings),
+                    "intents": len(intents),
+                    "open_intents": sum(1 for it in intents
+                                        if it.get("status") == "open"),
+                },
+                "assets": [{"id": a["id"], "type": a["type"], "value": a["value"],
+                            "parent_id": a.get("parent_id"),
+                            "status": a.get("status", "open")} for a in site_assets],
+                "findings": [{"id": f["id"], "title": f.get("title", ""),
+                              "severity": f.get("severity", "info"),
+                              "status": f.get("status", "unverified"),
+                              "category": f.get("category", "vuln"),
+                              "vuln_class": f.get("vuln_class", ""),
+                              "target_asset_id": f.get("target_asset_id")}
+                             for f in findings],
+                "intents": [{"id": it["id"], "status": it.get("status", "open"),
+                             "outcome": it.get("outcome_type") or None,
+                             "statement": (it.get("statement") or "")[:160],
+                             "target_asset_id": it.get("target_asset_id"),
+                             "outcome_refs": it.get("outcome_refs") or [],
+                             "dead_reason": (it.get("dead_reason") or "")[:120],
+                             "created_at": it.get("created_at"),
+                             "closed_at": it.get("closed_at")}
+                            for it in intents],
+            }, ensure_ascii=False)
         if what == "findings":
             rows = self.bb.list_findings(
                 self.project_id, target_asset_id=target_asset_id,
@@ -2528,11 +2674,43 @@ class ToolDispatcher:
             return result + hint
         return result
 
-    def _tool_list_symbols(self, binary: str) -> str:
+    _DECOMPILER_UNWIRED = "[未装配] 本会话未接入反编译服务（DecompilerService），请用 run_cmd 手动静态分析"
+
+    @staticmethod
+    def _decompile_result_ok(result: str) -> bool:
+        """服务层成功=JSON 数据/伪码文本；引导文本以 [反编译器不可用]/[错误] 开头。"""
+        return not result.startswith(("[反编译器不可用]", "[错误]"))
+
+    def _tool_list_symbols(self, binary: str, name_contains: str | None = None,
+                           min_size: int | None = None) -> str:
         if self.decompiler is None:
-            return "[未装配] 本会话未接入反编译服务（DecompilerService）"
-        result = self.decompiler.list_functions(binary)
-        if not result.startswith("["):
+            return self._DECOMPILER_UNWIRED
+        result = self.decompiler.list_functions(binary, name_contains=name_contains,
+                                                min_size=min_size)
+        if self._decompile_result_ok(result):
+            self.last_progress_step = self._step
+        return result
+
+    def _tool_strings_search(self, binary: str, pattern: str | None = None,
+                             limit: int | None = None) -> str:
+        if self.decompiler is None:
+            return self._DECOMPILER_UNWIRED
+        result = self.decompiler.strings_for(binary, q=pattern, limit=limit or 200)
+        if self._decompile_result_ok(result):
+            self.last_progress_step = self._step
+        return result
+
+    def _tool_func_xrefs(self, binary: str, name: str | None = None,
+                         address: int | str | None = None) -> str:
+        if self.decompiler is None:
+            return self._DECOMPILER_UNWIRED
+        if address is not None:
+            try:
+                address = _coerce_addr(address)
+            except ValueError as e:
+                return f"[错误] {e}"
+        result = self.decompiler.xrefs_for_func(binary, address=address, name=name)
+        if self._decompile_result_ok(result):
             self.last_progress_step = self._step
         return result
 
@@ -2666,7 +2844,8 @@ class ToolDispatcher:
 # tool.call 成败判定：失败回填的已知前缀（bb_query 空结果返回 JSON "[]" 也以 "[" 开头，
 # 故不能用 startswith("[") 一刀切；[无命中] 是合法空检索结果，不算失败）
 _TOOL_FAIL_PREFIXES = ("[错误]", "[拒绝]", "[越界拒绝]", "[计划闸]",
-                       "[网关拒绝]", "[工具异常]", "[防幻觉]", "[冲突]")
+                       "[网关拒绝]", "[工具异常]", "[防幻觉]", "[冲突]",
+                       "[参数格式]")
 
 # E2 拒绝熔断检测集（orchestrator-efficiency，2026-09-22；2026-09-24 口径重构）：
 # 拒绝分两类——
@@ -2690,6 +2869,59 @@ def _truncate_args(args: dict[str, Any], limit: int = 200) -> dict[str, Any]:
                     else v) for k, v in args.items()}
     except Exception:  # noqa: BLE001
         return {"_raw": str(args)[:500]}
+
+
+def _repair_bare_hex_json(s: str) -> str | None:
+    """容错修复 LLM 工具参数最常见的一类非法 JSON：字符串外裸十六进制（实测
+    ark-code-latest 退化输出 `"address":0x401160` 未加引号）。逐字符扫，只改
+    字符串外的 0x… 字面量（转十进制 int，address 类入参本就收 int|str，语义
+    等价）；其余语法错误不动。没有改动返回 None（表示修不了）。"""
+    out: list[str] = []
+    i, n = 0, len(s)
+    in_str = False
+    changed = False
+    while i < n:
+        c = s[i]
+        if in_str:
+            out.append(c)
+            if c == "\\" and i + 1 < n:
+                out.append(s[i + 1])
+                i += 2
+                continue
+            if c == '"':
+                in_str = False
+            i += 1
+            continue
+        if c == '"':
+            in_str = True
+            out.append(c)
+            i += 1
+            continue
+        m = re.match(r"0[xX][0-9a-fA-F]+", s[i:])
+        if m and (i == 0 or not (s[i - 1].isalnum() or s[i - 1] in '_."')):
+            out.append(str(int(m.group(0), 16)))
+            changed = True
+            i += len(m.group(0))
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out) if changed else None
+
+
+def _loads_lenient_json(s: str) -> Any | None:
+    """json.loads 失败时做一轮已知退化修复再试（当前只治裸十六进制）；
+    仍失败返回 None。"""
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError:
+        pass
+    fixed = _repair_bare_hex_json(s)
+    if fixed is None:
+        return None
+    try:
+        return json.loads(fixed)
+    except json.JSONDecodeError:
+        return None
 
 
 def _file_sha(path: str) -> str | None:

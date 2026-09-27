@@ -15,6 +15,7 @@ import pytest
 from core.agent import AgentConfig, AgentSession
 from core.agent.loop import CHAT_TOOLS, _LeaseHeartbeat, sanitize_snapshot_tail
 from core.blackboard import Blackboard, TaskQueue
+from core.blackboard.intents import declare_intent
 from core.llm import LLMError
 from core.llm.anthropic_compat import AnthropicCompatProvider
 from core.runtime import ExecutionGateway, NativeBackend
@@ -141,9 +142,13 @@ def test_full_loop_run_cmd_finding_finish(env, monkeypatch):
         {"tool_use": [ScriptedLLM.tool_call("t3", "bb_add_finding",
                                             {"vuln_class": "info-leak", "title": "备份泄露",
                                              "severity": "low"})]},
+        # 意图纪律：finish 撞未收尾意图首次被拦，二次 finish 放行（ack 机制）
         {"tool_use": [ScriptedLLM.tool_call("t4", "finish", {"summary": "干完了"})]},
+        {"tool_use": [ScriptedLLM.tool_call("t5", "finish", {"summary": "干完了"})]},
     ])
     agent = make_agent(env, llm)
+    declare_intent(bb, project["id"], "对 x.com 进行备份文件探测尝试",
+                   author=agent.session["id"])  # 过 bb_add_finding 必挂意图门禁
     summary = agent.run_task("测 x.com")
     assert summary == "干完了"
     assert len(bb.list_findings(project["id"])) == 1
@@ -1316,8 +1321,11 @@ def test_add_finding_with_poc_artifact(env):
              "status": "verified", "poc_artifact_id": art_id,
              "evidence": {"poc": {"type": "python", "stability": "3/3"}}})]},
         {"tool_use": [ScriptedLLM.tool_call("t2", "finish", {"summary": "完"})]},
+        {"tool_use": [ScriptedLLM.tool_call("t3", "finish", {"summary": "完"})]},
     ])
     agent = make_agent(env, llm)
+    declare_intent(bb, project["id"], "对登录框进行 sql 注入尝试",
+                   author=agent.session["id"])  # 过 bb_add_finding 必挂意图门禁
     agent.run_task("带 POC 引用的发现")
     rows = [f for f in bb.list_findings(project["id"]) if f["vuln_class"] == "sqli"]
     assert len(rows) == 1
@@ -1339,8 +1347,11 @@ def test_add_finding_relates_to_passthrough_and_dangling_reported(env):
             {"vuln_class": "xss", "title": "幻觉强边", "severity": "low",
              "relates_to": [{"finding_id": "find-deadbeef", "note": "悬空"}]})]},
         {"tool_use": [ScriptedLLM.tool_call("t3", "finish", {"summary": "完"})]},
+        {"tool_use": [ScriptedLLM.tool_call("t4", "finish", {"summary": "完"})]},
     ])
     agent = make_agent(env, llm)
+    declare_intent(bb, project["id"], "对注入点进行升级利用尝试",
+                   author=agent.session["id"])  # 过 bb_add_finding 必挂意图门禁
     agent.run_task("强关系登记")
     rows = {f["vuln_class"]: f for f in bb.list_findings(project["id"])}
     assert rows["sqli"]["evidence"]["relates_to"] == [
@@ -1906,6 +1917,101 @@ def _plan_dispatcher(env, session_name="planner", **kw):
     return d, tid
 
 
+def test_raw_arguments_wrapper_unwrapped(env):
+    """raw_arguments 解包垫片（2026-09-26）：单键 raw_arguments 包裹（dict 或
+    JSON 字符串）自动解包平铺重派；内层裸十六进制等已知退化先容错修复再执行
+    （写成功直接正常返回，不回提示——ark-code-latest 调 bb_upsert_func 连发
+    6 次全中的退化序列化，模型自己改不掉，须平台兜底）；修复不了的语法残缺
+    → [参数格式] 精确指引。"""
+    bb, project, gw, tq, _ = env
+    from core.agent.tools import ToolDispatcher
+    sid = "sess-" + "r" * 12
+    d = ToolDispatcher(bb, gateway=gw, tq=tq, project_id=project["id"],
+                       session_id=sid, author=sid)
+    inner = {"type": "domain", "value": "wrap.com"}
+    # dict 形包裹：解包后正常执行
+    r = d.dispatch("bb_add_asset", {"raw_arguments": dict(inner)})
+    assert "[错误]" not in r and "[工具异常]" not in r and "[参数格式]" not in r
+    # JSON 字符串形包裹：同样解包
+    r = d.dispatch("bb_add_asset", {"raw_arguments": json.dumps(inner)})
+    assert "[错误]" not in r and "[工具异常]" not in r
+    assert "wrap.com" in d.dispatch("bb_query", {"what": "assets"})
+    # 内层裸十六进制（实测事故形态）：容错修复后照常执行成功
+    r = d.dispatch("bb_upsert_func", {"raw_arguments":
+                   '{"binary_sha256":"deadbeef","address":0x401160,'
+                   '"name":"main_check","analysis":"裸 0x 地址在字符串外"}'})
+    assert "[参数格式]" not in r and "[工具异常]" not in r and "func=" in r
+    # 字符串内的 0x 不受修复影响；内层是 JSON 标量而非对象 → 指引
+    r = d.dispatch("bb_add_asset",
+                   {"raw_arguments": json.dumps({"type": "domain",
+                                                 "value": "0xdeadbeef.com"})})
+    assert "[错误]" not in r and "[参数格式]" not in r
+    # 修复不了的语法残缺 → [参数格式] 精确指引
+    r = d.dispatch("bb_add_asset", {"raw_arguments": '{"type": "domain",,}'})
+    assert r.startswith("[参数格式]") and "平铺" in r
+    # 内层是 JSON 标量 → 同样指引
+    r = d.dispatch("bb_add_asset", {"raw_arguments": json.dumps("oops")})
+    assert r.startswith("[参数格式]") and "平铺" in r
+
+
+# ---------- 逆向检索工具面（2026-09-27：strings_search / func_xrefs / list_symbols 过滤） ----------
+
+class _FakeDecomp:
+    """最小 DecompilerService 桩：只覆盖新工具面用到的三个方法。"""
+
+    def list_functions(self, binary, name_contains=None, min_size=None):
+        rows = [{"address": "0x1000", "name": "main", "size": 293, "pseudocode": True},
+                {"address": "0x1100", "name": "sub_1100", "size": 12, "pseudocode": False}]
+        if name_contains:
+            rows = [r for r in rows if name_contains.lower() in r["name"].lower()]
+        if min_size:
+            rows = [r for r in rows if r["size"] >= min_size]
+        return json.dumps(rows)
+
+    def strings_for(self, binary, q=None, limit=200):
+        items = [{"address": "0x2000", "string": "Mht!^okHGfdCbn!@4t>", "refs": []}]
+        if q:
+            items = [i for i in items if q.lower() in i["string"].lower()]
+        return json.dumps({"count": len(items), "total_matched": len(items),
+                           "truncated": False, "items": items})
+
+    def xrefs_for_func(self, binary, address=None, name=None):
+        return json.dumps({"function": name or hex(address or 0),
+                           "callers": ["main"], "callees": []})
+
+
+def test_reverse_search_tools(env):
+    """strings_search/func_xrefs 正常回填 JSON；list_symbols 过滤参数透传；
+    未装配回 [未装配]；三个只读工具都在计划闸预放行集。"""
+    bb, project, gw, tq, _ = env
+    from core.agent.tools import ToolDispatcher
+    sid = "sess-" + "v" * 12
+    d = ToolDispatcher(bb, gateway=gw, tq=tq, project_id=project["id"],
+                       session_id=sid, author=sid, decompiler=_FakeDecomp())
+    r = json.loads(d.dispatch("strings_search",
+                              {"binary": "b.exe", "pattern": "MHT"}))
+    assert r["count"] == 1 and r["items"][0]["address"] == "0x2000"  # 大小写不敏感
+    r = json.loads(d.dispatch("func_xrefs", {"binary": "b.exe", "name": "check"}))
+    assert r["callers"] == ["main"]
+    r = json.loads(d.dispatch("func_xrefs", {"binary": "b.exe", "address": "0x1189"}))
+    assert r["function"] == "0x1189"  # 字符串地址经 _coerce_addr 转整数传给服务层
+    r = json.loads(d.dispatch("list_symbols",
+                              {"binary": "b.exe", "name_contains": "MAIN"}))
+    assert [x["name"] for x in r] == ["main"]
+    # 未装配
+    d2 = ToolDispatcher(bb, gateway=gw, tq=tq, project_id=project["id"],
+                        session_id="sess-" + "w" * 12, author="x")
+    for name, args in (("strings_search", {"binary": "b"}),
+                       ("func_xrefs", {"binary": "b", "name": "f"}),
+                       ("list_symbols", {"binary": "b"})):
+        assert d2.dispatch(name, args).startswith("[未装配]")
+    # 只读侦察：认领后无计划也不撞计划闸
+    d3, tid = _plan_dispatcher(env, session_name="revsearch",
+                               decompiler=_FakeDecomp())
+    r = d3.dispatch("strings_search", {"binary": "b.exe"})
+    assert not r.startswith("[计划闸]") and json.loads(r)["count"] == 1
+
+
 def test_plan_gate_blocks_until_planned(env):
     """空计划：实质工具被计划闸回填引导，命令不执行；只读工具放行；交计划后全放行。"""
     bb, project, gw, tq, _ = env
@@ -2004,6 +2110,7 @@ def test_tool_call_skips_run_cmd_and_truncates_args(env):
     sid = bb.register_session(project["id"], "auditor3")["id"]
     d = ToolDispatcher(bb, gateway=gw, tq=tq, project_id=project["id"],
                        session_id=sid, author=sid)
+    declare_intent(bb, project["id"], "对目标执行登记尝试", author=sid)  # 过必挂意图门禁
     d.dispatch("run_cmd", {"cmd": "whoami", "runtime": "host", "threat_class": "trusted"})
     assert _tool_calls(bb, project["id"]) == []
 
@@ -2377,6 +2484,50 @@ def test_bb_query_findings_filters_passthrough(env):
                            "status", "confidence"}
 
 
+def test_bb_query_site_subtree_aggregate(env):
+    """单站全貌查询（2026-09-26）：what=site 一次返回根资产子树+各自发现+
+    相关意图——替代按 type 分片全量拉回本地过滤（实测一个站点核实曾烧
+    近 20 次 bb_query）。asset 支持 id 或精确 value（host/domain 优先）。"""
+    from core.blackboard.assets import register_asset
+    from core.blackboard.intents import close_intent, declare_intent
+    bb, project, gw, tq, _ = env
+    agent = make_agent(env, ScriptedLLM([]))
+    d = agent.dispatcher
+    pid = project["id"]
+    host = register_asset(bb, pid, "5.6.7.8", "host", quiet=True)["id"]
+    url1 = register_asset(bb, pid, "http://5.6.7.8/admin", "url",
+                          parent_id=host, quiet=True)["id"]
+    other = register_asset(bb, pid, "9.9.9.9", "host", quiet=True)["id"]
+    f1 = bb.add_finding(pid, "暴露面", "后台暴露", severity="high",
+                        target_asset_id=url1, category="vuln")
+    bb.add_finding(pid, "无关", "别站发现", severity="low",
+                   target_asset_id=other, category="vuln")
+    it = declare_intent(bb, pid, "假设后台存在弱口令",
+                        target_asset_id=url1, author="tester")
+    close_intent(bb, pid, it["id"], outcome="vuln", finding_ids=[f1["id"]],
+                 author="tester")
+    # 旁站意图不应混入
+    declare_intent(bb, pid, "假设旁站有洞", target_asset_id=other, author="tester")
+    rows = lambda s: json.loads(s)
+    # 按 value 解析（host/domain 优先）与按 id 解析等价
+    by_val = rows(d.dispatch("bb_query", {"what": "site", "asset": "5.6.7.8"}))
+    by_id = rows(d.dispatch("bb_query", {"what": "site", "asset": host}))
+    assert by_val["root"]["id"] == by_id["root"]["id"] == host
+    # 子树资产：host + url，不含旁站；发现/意图只收子树相关
+    assert [a["value"] for a in by_val["assets"]] == ["5.6.7.8", "http://5.6.7.8/admin"]
+    assert [f["id"] for f in by_val["findings"]] == [f1["id"]]
+    assert [i["id"] for i in by_val["intents"]] == [it["id"]]
+    assert by_val["counts"] == {"assets": 2, "findings": 1, "intents": 1,
+                                "open_intents": 0}
+    assert by_val["intents"][0]["outcome"] == "vuln"
+    assert by_val["hint"]
+    # 找不到资产 → 显式错误（附可选值样例），不静默空
+    r = d.dispatch("bb_query", {"what": "site", "asset": "no.such.host"})
+    assert r.startswith("[错误]") and "5.6.7.8" in r
+    # 缺 asset 参数 → 显式错误
+    assert d.dispatch("bb_query", {"what": "site"}).startswith("[错误]")
+
+
 def test_bb_query_tasks_assets_filters_and_closed_set_errors(env):
     """M1：tasks status、assets tag 过滤；闭集非法值显式 [错误]
     （不静默返回空结果被误判为「没有」）。"""
@@ -2639,6 +2790,8 @@ def test_run_chat_registers_finding(env):
     ])
     agent = make_agent(env, llm)
     sid = agent.session["id"]
+    declare_intent(bb, project["id"], "对后台登录口进行弱口令尝试",
+                   author=sid)  # 过 bb_add_finding 必挂意图门禁（对话轮同受约束）
     bb.post_human_note(project["id"], sid, "试试 admin/admin 能不能登后台")
     reply = agent.run_chat()
     assert "弱口令" in reply
@@ -3520,6 +3673,8 @@ def test_sediment_auto_proposal_on_complete(env):
         {"tool_use": [ScriptedLLM.tool_call("t2", "finish", {"summary": "完"})]},
     ])
     agent = make_agent(env, llm, planner=planner, enable_sediment=True)
+    declare_intent(bb, project["id"], "对订单接口进行越权差分尝试",
+                   author=agent.session["id"])  # 过 bb_add_finding 必挂意图门禁
     agent.run_task("越权", task_id=task_id)
     pending = proposals.list_proposals(tmp_path / "packs", "pending")
     assert len(pending) == 1 and pending[0]["origin"] == "agent"
@@ -3609,6 +3764,8 @@ def test_sediment_index_proposal_on_complete(env):
         {"tool_use": [ScriptedLLM.tool_call("t2", "finish", {"summary": "完"})]},
     ])
     agent = make_agent(env, llm, planner=planner, enable_sediment=True)
+    declare_intent(bb, project["id"], "对订单接口进行越权差分尝试",
+                   author=agent.session["id"])  # 过 bb_add_finding 必挂意图门禁
     agent.run_task("越权", task_id=task_id)
     pending = proposals.list_proposals(tmp_path / "packs", "pending")
     assert len(pending) == 1
@@ -3874,6 +4031,8 @@ def test_add_finding_dedup_warning_text(env):
     bb, project, gw, tq, _ = env
     agent = make_agent(env, ScriptedLLM([]))
     d = agent.dispatcher
+    declare_intent(bb, project["id"], "对目标资产进行注入参数探测尝试",
+                   author=agent.session["id"])  # 过 bb_add_finding 必挂意图门禁
     a = bb.upsert_asset(project["id"], "domain", "a.com")["id"]
     d.dispatch("bb_add_finding", {"vuln_class": "sqli", "title": "id 注入",
                                   "severity": "low",
