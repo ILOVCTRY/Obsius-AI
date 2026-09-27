@@ -2779,7 +2779,10 @@ def test_run_chat_streams_reply_and_prunes_deltas(env):
 def test_run_chat_registers_finding(env):
     """对话化（2026-09-20）干活纪律放开：对话轮有价值的阶段性结论可
     bb_add_finding 入黑板——author=会话 id（P4 图上「对话产出」徽章数据源），
-    无任务上下文不挂任务；prompt 不再含「不登记发现」且明确点名入图纪律。"""
+    无任务上下文不挂任务；prompt 不再含「不登记发现」且明确点名入图纪律。
+    2026-09-27 agent-loop 修复：对话轮（无认领任务）登记发现**不要求先声明
+    意图**——任务尝试树按 task_id 现算，对话发现无处可挂；此前硬拦会让对话
+    轮在 24 步内反复被拒（无 E2 熔断逃生）白烧 LLM、消息被 drain 后无回复。"""
     bb, project, gw, tq, _ = env
     llm = ScriptedLLM([
         {"tool_use": [ScriptedLLM.tool_call(
@@ -2790,8 +2793,6 @@ def test_run_chat_registers_finding(env):
     ])
     agent = make_agent(env, llm)
     sid = agent.session["id"]
-    declare_intent(bb, project["id"], "对后台登录口进行弱口令尝试",
-                   author=sid)  # 过 bb_add_finding 必挂意图门禁（对话轮同受约束）
     bb.post_human_note(project["id"], sid, "试试 admin/admin 能不能登后台")
     reply = agent.run_chat()
     assert "弱口令" in reply
@@ -2803,6 +2804,67 @@ def test_run_chat_registers_finding(env):
     sys = llm.calls[0]["system"]
     assert "不登记发现" not in sys
     assert "bb_add_finding" in sys
+
+
+def test_bb_add_finding_task_requires_own_intent(env):
+    """2026-09-27 agent-loop 修复：意图门禁只对任务上下文生效——认领任务期间
+    没有本会话 open 意图时登记发现仍被硬拒（任务尝试树不允许游离发现）。"""
+    bb, project, gw, tq, _ = env
+    from core.agent.tools import ToolDispatcher
+    sidA = bb.register_session(project["id"], "intent-gate-a")["id"]
+    dA = ToolDispatcher(bb, gateway=gw, tq=tq, project_id=project["id"],
+                        session_id=sidA, author=sidA)
+    tid = tq.publish(project["id"], "带意图纪律的任务", task_type="generic")
+    tq.claim(tid, sidA)
+    dA.current_task_id = tid
+    dA.dispatch("task_plan", {"steps": [{"id": "p1", "title": "探测", "status": "todo"}]})  # 先过 A2 计划闸
+    # 无本会话 open 意图 → 拒绝
+    r = dA.dispatch("bb_add_finding", {"vuln_class": "info-leak", "title": "T",
+                                       "severity": "low"})
+    assert r.startswith("[拒绝]") and "open 意图" in r
+    # 声明意图后放行
+    r = dA.dispatch("declare_intent", {"statement": "对目标进行备份探测尝试"})
+    assert r.startswith("intent=")
+    r = dA.dispatch("bb_add_finding", {"vuln_class": "info-leak", "title": "T",
+                                       "severity": "low"})
+    assert r.startswith("finding=")
+    # 他人意图不算数：B 撞 A 的同陈述，B 必须有自己的意图才能登记
+    sidB = bb.register_session(project["id"], "intent-gate-b")["id"]
+    dB = ToolDispatcher(bb, gateway=gw, tq=tq, project_id=project["id"],
+                        session_id=sidB, author=sidB)
+    tidB = tq.publish(project["id"], "B 的任务", task_type="generic")
+    tq.claim(tidB, sidB)
+    dB.current_task_id = tidB
+    dB.dispatch("task_plan", {"steps": [{"id": "p1", "title": "探测", "status": "todo"}]})
+    r = dB.dispatch("declare_intent", {"statement": "对目标进行备份探测尝试"})
+    assert r.startswith("intent=") and "复用" not in r  # 跨作者不再合并
+    r = dB.dispatch("bb_add_finding", {"vuln_class": "info-leak", "title": "B",
+                                       "severity": "low"})
+    assert r.startswith("finding=")
+
+
+def test_finish_gate_scoped_to_own_intents(env):
+    """2026-09-27 agent-loop 修复：finish 意图闸只拦**本会话**未收尾意图——
+    他人会话遗留的 open 意图不得堵住本会话收尾（B 无法合法关闭 A 的意图，
+    此前只能被逼二次 finish 绕过，文案还误导 B 去关别人的意图）。"""
+    bb, project, gw, tq, _ = env
+    from core.agent.tools import ToolDispatcher
+    sidA = bb.register_session(project["id"], "finish-gate-a")["id"]
+    dA = ToolDispatcher(bb, gateway=gw, tq=tq, project_id=project["id"],
+                        session_id=sidA, author=sidA)
+    declare_intent(bb, project["id"], "A 的遗留假设", author=sidA)  # A 遗留 open
+    sidB = bb.register_session(project["id"], "finish-gate-b")["id"]
+    dB = ToolDispatcher(bb, gateway=gw, tq=tq, project_id=project["id"],
+                        session_id=sidB, author=sidB)
+    # B 无任何未收尾意图 → 首次 finish 直接放行（不被 A 的遗留堵住）
+    r = dB.dispatch("finish", {"summary": "B 收工"})
+    assert r == "会话即将结束" and dB.finished
+    # A 自己有未收尾意图 → 首次 finish 被拦，二次放行
+    r = dA.dispatch("finish", {"summary": "A 收工"})
+    assert r.startswith("[拒绝]") and "未收尾" in r
+    assert not dA.finished
+    r = dA.dispatch("finish", {"summary": "A 收工"})
+    assert r == "会话即将结束" and dA.finished
 
 
 def test_run_chat_step_cap(env):

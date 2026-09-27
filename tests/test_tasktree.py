@@ -139,11 +139,15 @@ def test_tree_empty_and_missing(bb, pid):
 # ---------- bb_add_finding 必挂意图门禁 ----------
 
 def test_add_finding_requires_open_intent(bb, pid):
+    """bb_add_finding 必挂意图门禁（2026-09-27 agent-loop 修复后口径：门禁对
+    任务上下文生效——对话轮/无委托窗无任务树可挂，不设拦）。"""
     from core.agent.tools import ToolDispatcher
     sid = _session(bb, pid)
     tid = _run_task(bb, pid, sid)
     d = ToolDispatcher(bb, gateway=None, tq=TaskQueue(bb),
                        project_id=pid, session_id=sid, author=sid, track="ctf")
+    d.current_task_id = tid  # 认领任务上下文（此前门禁不区分任务/对话轮）
+    d.dispatch("task_plan", {"steps": [{"id": "p1", "title": "探测", "status": "todo"}]})  # 先过 A2 计划闸
 
     out = d.dispatch("bb_add_finding", {"vuln_class": "sqli", "title": "x", "severity": "high"})
     assert out.startswith("[拒绝]") and "declare_intent" in out  # 无 open 意图 → 拒
@@ -153,6 +157,12 @@ def test_add_finding_requires_open_intent(bb, pid):
     declare_intent(bb, pid, "对登录口进行 sql 注入尝试", author=sid)
     out = d.dispatch("bb_add_finding", {"vuln_class": "sqli", "title": "x", "severity": "high"})
     assert out.startswith("finding=")  # 挂上意图后放行
+
+    # 无任务（对话轮）登记发现不受意图门禁约束（agent-loop 修复）
+    d.current_task_id = None
+    out = d.dispatch("bb_add_finding", {"vuln_class": "info-leak", "title": "y",
+                                        "severity": "low"})
+    assert out.startswith("finding=")
 
 
 # ---------- API 端点 ----------
