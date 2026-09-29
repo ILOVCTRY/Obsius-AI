@@ -228,7 +228,8 @@ def _run_window(port: int, explicit_url: str | None, debug: bool) -> int:
 
     win = webview.create_window(
         "Obsius", url or _PLACEHOLDER_HTML,
-        width=1480, height=920, min_size=(1100, 700))
+        width=1480, height=920, min_size=(1100, 700),
+        text_select=True)  # 全窗口放开左键选择复制（pywebview 默认 False 全禁）
     remaining[0] += 1
     win.events.closed += _on_closed
     webview.start(debug=debug)  # 阻塞至全部窗口关闭
