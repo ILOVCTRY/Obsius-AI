@@ -70,6 +70,18 @@ FOREIGN KEY constraint failed → 曾致删有子线程的线程 500）。
   挂在 `GET /api/projects/{pid}`（进项目页必经，新进程 chat_running 空集 →
   扫到的 running 必是僵尸；与任务侧 estranged「重启急停」同构）。
   回归测试 test_recover_running_threads。
+- **工作区/重装备装配（2026-09-29，与任务链对齐）**：ChatTurn 构造接
+  `artifacts_dir`/`browser_pool`/`decompiler_factory`，`_build_dispatcher`
+  传 artifacts_dir + role_skills（专家 yaml skills 字段），构造后挂
+  browser（按轨池，轨外 app.py 传 None）与 decompiler（每线程一实例，
+  工厂闭包携带自建 gateway/ida_mcp 上下文，失败降级 None）。首版漏传
+  artifacts_dir——read_file/search_files/bb_add_artifact 全拒「未装配工作
+  区」、run_cmd workspace=None cwd 漂移（nmap -oN 输出写丢且 docker 无挂载
+  随容器销毁）；任务队列系参数（allowed_roles/allowed_task_types/max_steps/
+  stuck_after/closing_max_rounds）**不装**——消费者 publish_task/request_steps/
+  finish 已被 _EXPERT_EXCLUDED 排除，装了无消费者。回归测试
+  test_expert_thread_workspace_tools / test_workspace_params_propagate_to_
+  spawned_expert。
 - max_steps：主控 24 / 子专家 32。线程 status：running 起、idle 正常收、
   error 异常收（异常也落一条 chat.message 事件，前端可见）。
 

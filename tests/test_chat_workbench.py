@@ -360,6 +360,82 @@ def test_rule_preamble_propagates_to_spawned_expert(tmp_path):
     assert "owner:edusrc" in llm.calls[1]["system"]
 
 
+# ---------- 工作区/重装备装配（回归） ----------
+
+def test_expert_thread_workspace_tools(tmp_path):
+    """回归（工作区装配）：对话链 ChatTurn 构造 ToolDispatcher 漏传
+    artifacts_dir——read_file/search_files/bb_add_artifact 全拒「未装配工作区」，
+    run_cmd workspace=None cwd 漂移（nmap -oN 输出写丢，截图 bug）。修复：与
+    任务链同款传 artifacts_dir（workspace=其父目录）+ browser/decompiler 构造
+    后挂载 + role_skills 对齐专家 yaml skills 字段。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    ws = tmp_path / "proj"
+    (ws / "scratch" / "gygll113").mkdir(parents=True)
+    (ws / "scratch" / "gygll113" / "ports_fast.txt").write_text(
+        "8080  open  http", encoding="utf-8")
+    llm = FakeLLM([_resp(text="ok")])
+    thread = chat_store.create_thread(bb, "p1", "web-solver")
+    decomp = object()
+    builds: list[dict] = []
+    turn = ChatTurn(bb=bb, llm=llm, project_id="p1", thread_id=thread["id"],
+                    packs_root="packs", track="ctf", capabilities=["web"],
+                    mcp_bridge=None, expert_names=["web-solver"],
+                    artifacts_dir=ws / "artifacts",
+                    browser_pool=object(),
+                    decompiler_factory=lambda **kw: (builds.append(kw), decomp)[1])
+    d = turn._build_dispatcher()
+    assert d is not None
+    # read_file 相对 scratch 闭环（截图场景：run_cmd 产物读得回）
+    out = d._tool_read_file("gygll113/ports_fast.txt")
+    assert "[错误]" not in out and "8080" in out
+    # 工作区与重装备挂载
+    assert Path(d.artifacts_dir) == ws / "artifacts"
+    assert d.browser is not None
+    assert d.decompiler is decomp
+    # 工厂收到会话标识（runner 审计落点）
+    assert builds and "chat-" in builds[0]["session_id"]
+    # role_skills 自专家 yaml（web-solver.yaml skills 字段）
+    assert "web-injection" in (d.role_skills or [])
+
+
+def test_workspace_params_propagate_to_spawned_expert(tmp_path):
+    """透传链：主控 call_expert spawn 的子线程必须继承 artifacts_dir/
+    browser_pool/decompiler_factory，否则子专家工作区工具全灭（同规则链
+    透传缺口模式）。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    ws = tmp_path / "proj"
+    (ws / "scratch" / "gygll113").mkdir(parents=True)
+    (ws / "scratch" / "gygll113" / "ports_fast.txt").write_text(
+        "8080  open  http", encoding="utf-8")
+    llm = FakeLLM([
+        _resp(tool_calls=[_tc("t1", "call_expert",
+                              {"expert": "web-solver",
+                               "task": "读取 nmap 扫描结果文件"})]),
+        _resp(tool_calls=[_tc("t2", "read_file",
+                              {"path": "gygll113/ports_fast.txt"})]),
+        _resp(text="专家摘要：读到扫描结果。"),
+        _resp(text="汇总完成。"),
+    ])
+    thread = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID)
+    turn = ChatTurn(bb=bb, llm=llm, project_id="p1", thread_id=thread["id"],
+                    packs_root="packs", track="ctf", capabilities=["web"],
+                    mcp_bridge=None,
+                    expert_names=["web-solver", ORCHESTRATOR_ID],
+                    artifacts_dir=ws / "artifacts",
+                    browser_pool=object(),
+                    decompiler_factory=lambda **kw: object())
+    turn.run("让专家读扫描结果")
+    sub = next(t for t in chat_store.list_threads(bb, "p1")
+               if t["parent_thread_id"] == thread["id"])
+    sub_msgs = chat_store.list_messages(bb, sub["id"])
+    # 子线程 read_file 成功：tool 消息带文件内容，无「未装配工作区」
+    tool_msgs = [m for m in sub_msgs if m["role"] == "tool"]
+    assert tool_msgs and "8080" in tool_msgs[0]["content"]
+    assert "未装配工作区" not in tool_msgs[0]["content"]
+
+
 # ---------- 中止（停止按钮） ----------
 
 def test_chat_turn_abort_between_steps(tmp_path):

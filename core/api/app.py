@@ -7296,6 +7296,25 @@ def create_app(
         def _run() -> None:
             try:
                 cfg = proj.bb.get_project(pid)["config"] or {}
+                # 重装备工厂（与任务链会话工厂同款材料）：decompiler 每线程一
+                # 实例（runner 走自建 gateway 审计、ida_db/ghidra_tmp 落项目
+                # artifacts），browser 按轨注入共享池（轨外 None → no-tool 降级）
+                from core.tools.decompiler import build_headless_service, gateway_runner
+
+                def _decompiler_factory(session_id: str, author: str):
+                    return build_headless_service(
+                        proj.artifacts_dir / "decompiler-cache",
+                        runner=gateway_runner(ExecutionGateway(bb=proj.bb),
+                                              project_id=pid,
+                                              session_id=session_id,
+                                              author=author, timeout=900,
+                                              workspace=proj.path),
+                        ida_db_dir=proj.artifacts_dir / "decompiler-db",
+                        ghidra_tmp_dir=proj.artifacts_dir / ".ghidra-tmp",
+                        mcp_provider=lambda binary: app.state.ida_mcp_manager.ensure(
+                            pid, binary,
+                            db_dir=proj.artifacts_dir / "decompiler-db"))
+
                 turn = ChatTurn(
                     bb=proj.bb, llm=exec_llm, project_id=pid, thread_id=tid,
                     packs_root=app.state.packs_root, track=proj.track,
@@ -7306,7 +7325,12 @@ def create_app(
                     expert_names=expert_names,
                     abort_event=abort_ev,
                     owner_tags=proj.bb.owner_tags(pid),
-                    rule_profiles=cfg.get("rule_profiles"))
+                    rule_profiles=cfg.get("rule_profiles"),
+                    artifacts_dir=proj.artifacts_dir,
+                    browser_pool=(app.state.browser_pool
+                                  if proj.track in ("pentest", "redteam", "ctf")
+                                  else None),
+                    decompiler_factory=_decompiler_factory)
                 turn.run(text, refs=body.refs)
             except Exception as e:  # noqa: BLE001 —— 状态已在 ChatTurn.run 归位
                 log.exception("chat 轮后台执行失败 thread=%s", tid)

@@ -109,7 +109,10 @@ class ChatTurn:
                  expert_names: list[str] | None = None,
                  abort_event: threading.Event | None = None,
                  owner_tags: list[str] | None = None,
-                 rule_profiles: dict[str, Any] | None = None):
+                 rule_profiles: dict[str, Any] | None = None,
+                 artifacts_dir: str | Path | None = None,
+                 browser_pool=None,
+                 decompiler_factory=None):
         self.bb = bb
         self.llm = llm
         self.project_id = project_id
@@ -122,6 +125,9 @@ class ChatTurn:
         self.abort_event = abort_event or threading.Event()
         self.owner_tags = owner_tags or []
         self.rule_profiles = rule_profiles
+        self.artifacts_dir = artifacts_dir
+        self.browser_pool = browser_pool
+        self.decompiler_factory = decompiler_factory
         self.thread = chat_store.get_thread(bb, thread_id) or {}
         self.agent_id = str(self.thread.get("agent_id") or ORCHESTRATOR_ID)
         self.is_orchestrator = self.agent_id == ORCHESTRATOR_ID
@@ -154,7 +160,7 @@ class ChatTurn:
         expert = load_expert(self.packs_root, self.agent_id, self.track) \
             if not self.is_orchestrator else {}
         try:
-            return ToolDispatcher(
+            dispatcher = ToolDispatcher(
                 self.bb, ExecutionGateway(bb=self.bb), TaskQueue(self.bb),
                 project_id=self.project_id,
                 session_id=f"chat-{self.thread_id[-12:]}",
@@ -163,10 +169,24 @@ class ChatTurn:
                 capabilities=self.capabilities,
                 allowed_tools=allowed,
                 max_runtime=expert.get("max_runtime"),
-                abort_event=self.abort_event)
+                abort_event=self.abort_event,
+                artifacts_dir=self.artifacts_dir,
+                role_skills=expert.get("skills"))
         except Exception:  # noqa: BLE001 —— 装配失败降级为无黑板工具
             log.exception("chat ToolDispatcher 装配失败 thread=%s", self.thread_id)
             return None
+        # 重装备构造后挂载（与任务链会话工厂同款）：browser 按轨注入共享池
+        # （轨外 app.py 传 None）；decompiler 每线程一实例（工厂闭包携带
+        # gateway/ida_mcp 上下文），失败降级 None（headless 缓存语义不破）
+        dispatcher.browser = self.browser_pool
+        if self.decompiler_factory is not None:
+            try:
+                dispatcher.decompiler = self.decompiler_factory(
+                    session_id=f"chat-{self.thread_id[-12:]}",
+                    author=f"chat-{self.thread_id[-12:]}")
+            except Exception:  # noqa: BLE001
+                log.exception("chat decompiler 装配失败 thread=%s", self.thread_id)
+        return dispatcher
 
     def _tool_specs(self) -> list[dict[str, Any]]:
         if self.is_orchestrator:
@@ -565,7 +585,10 @@ class ChatTurn:
             mcp_bridge=self.mcp_bridge, expert_names=[],
             abort_event=self.abort_event,  # 停主控连带停执行中的子专家轮
             owner_tags=self.owner_tags,
-            rule_profiles=self.rule_profiles)
+            rule_profiles=self.rule_profiles,
+            artifacts_dir=self.artifacts_dir,
+            browser_pool=self.browser_pool,
+            decompiler_factory=self.decompiler_factory)
         try:
             summary = sub_turn.run(task)
         except Exception as e:  # noqa: BLE001 —— 专家失败回文本，主控可改派
