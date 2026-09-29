@@ -439,7 +439,10 @@ def list_funcs(
     queries = normalize_dict_list(
         queries, lambda s: {"offset": 0, "count": 50, "filter": s}
     )
-    all_functions = [get_function(addr) for addr in idautils.Functions()]
+    # 惰性分页（2026-09-30 性能修复）：先取全量地址表（廉价），无 filter 时只对
+    # 当页切片构建 Function——原先每次调用都全量构建整库（O(N×页数)），大库
+    # 分页遍历被自身重复劳动拖垮（数万函数拉几十页 = 分钟级）。
+    all_addrs = list(idautils.Functions())
 
     results = []
     for query in queries:
@@ -451,10 +454,28 @@ def list_funcs(
         if filter_pattern in ("", "*"):
             filter_pattern = ""
 
-        filtered = pattern_filter(all_functions, filter_pattern, "name")
+        if not filter_pattern and offset >= 0:
+            if count == 0:
+                count = len(all_addrs)
+            page = [get_function(addr) for addr in all_addrs[offset:offset + count]]
+            next_offset = offset + count
+            if next_offset >= len(all_addrs):
+                next_offset = None
+            results.append(Page(data=page, next_offset=next_offset))
+            continue
+
+        filtered = pattern_filter(
+            [get_function(addr) for addr in all_addrs], filter_pattern, "name")
         results.append(paginate(filtered, offset, count))
 
     return results
+
+
+@tool
+@idasync
+def count_funcs() -> dict:
+    """Count functions in the current database (cheap: no per-function work)."""
+    return {"count": len(list(idautils.Functions()))}
 
 
 @tool

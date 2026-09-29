@@ -22,7 +22,9 @@ AI驱动的智能体协作工具，用于逆向，渗透测试等。
 
 <img width="1920" height="1057" alt="image" src="https://github.com/user-attachments/assets/a67723e4-d734-408c-8cd8-40996c63e719" />
 
-逆向拆分业务逻辑，构造重建蓝图。
+逆向拆分业务逻辑，构造重建蓝图。拉取IDA函数，避免多agent导致大项目卡死。
+
+![](https://raw.githubusercontent.com/ILOVCTRY/note-gen-image-sync/main/blog-img/2026-09-29/image_1790707221_d689.png)
 
 <img width="1920" height="1057" alt="image" src="https://github.com/user-attachments/assets/c4733fe3-8c49-4a01-8b8b-e321df4f1f85" />
 

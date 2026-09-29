@@ -1030,6 +1030,9 @@ def create_app(
     # rev_service_factory 供测试注入假后端（签名 factory(proj) -> service）
     app.state.rev_services: dict[str, Any] = {}
     app.state.rev_service_factory = None
+    # IDA 拉取停止信号（sha -> threading.Event，页间检查点；job 结束残留无害，
+    # 下次 submit 覆盖——2026-09-30 断点续拉）
+    app.state.pull_cancel: dict[str, threading.Event] = {}
     # 情报面板（E9，全局模块）：惰性建 IntelStore（首访问情报端点才落 config/intel/）；
     # intel_getter / intel_llm 为测试注入口（None = urllib 真抓 / classifier 路由）
     app.state.intel_dir = str(intel_dir)
@@ -1215,6 +1218,9 @@ def create_app(
     # ---------- 逆向工作台辅助（研究轨 rev profile，DESIGN.md §12） ----------
 
     SAMPLE_MAX_BYTES = 256 * 1024 * 1024
+    # 大样本阈值（2026-09-29 用户口径）：>20MB headless 全量导出（自动分析+
+    # 全量反编译）耗时可能很久——前端「开始分析」二次确认并建议走 IDA 拉取
+    SAMPLE_LARGE_BYTES = 20 * 1024 * 1024
     DEBUGLOG_MAX_BYTES = 16 * 1024 * 1024
     ATTACHMENT_MAX_BYTES = 64 * 1024 * 1024   # 直播间输入行附件随发（2026-09-19）
     PACKER_ENTROPY = 7.2
@@ -1376,6 +1382,152 @@ def create_app(
         return app.state.jobs.submit(
             "binary-pull-names",
             lambda: _run_pull_names(proj.id, sha),
+            meta={"project_id": proj.id, "sha": sha},
+        )
+
+    PULL_PAGE = 1000  # list_funcs 每页函数数（每页刷一次进度 + 落一次部分缓存）
+
+    def _run_pull_ida_functions(pid: str, sha: str, progress: dict | None = None,
+                                cancel: threading.Event | None = None) -> dict:
+        """GUI IDA MCP → 轻量缓存（断点续拉，2026-09-30）：count_funcs 先拿总数
+        做进度分母（旧插件无此工具→None，进度退化为无分母）；list_funcs 分页
+        遍历（配惰性分页插件，1000/页），每页 progress 更新（job meta 可变 dict
+        → 前端轮询可见）+ 部分缓存落盘（左栏渐进长出）；停止/翻页失败保住已拉
+        部分（partial 缓存），再点拉取从 next_offset 续传（count_funcs 对账，
+        总数变了自动从头）。diff 回拉在完成与停止时都做（IDA 人工名 > AI 名 >
+        自动名，自动名绝不覆盖）。"""
+        from core.tools.decompiler import MCPBackend, diff_pulled_names
+
+        proj = _project(pid)
+        bb, svc = proj.bb, _rev_service(proj)
+        if svc.mcp is None or not svc.mcp_online():
+            return {"status": "no-mcp",
+                    "hint": "未检测到 IDA MCP server——在 IDA 中打开样本后按 "
+                            "Ctrl-Alt-M 启动插件（仅连本机 127.0.0.1:13337）"}
+        total = svc.mcp.count_funcs()
+
+        # 断点续拉：已有 ida-mcp 部分缓存 → 从 next_offset 继续；总数对账防
+        # 错位（IDA 重分析/连了别的库）——不一致时旧部分不可信，自动从头重拉
+        functions: list[dict] = []
+        offset, restarted = 0, False
+        data = svc.read_cached(sha)
+        if data is not None:
+            meta = data.get("meta") or {}
+            if meta.get("source") == "ida-mcp" and meta.get("partial"):
+                if total is not None and meta.get("total_functions") != total:
+                    restarted = True
+                else:
+                    functions = list(data.get("functions") or [])
+                    offset = int(meta.get("next_offset") or len(functions))
+
+        stopped = False
+        while True:
+            if cancel is not None and cancel.is_set():
+                stopped = True  # 已拉部分上轮已落盘，直接收尾
+                break
+            pages = svc.mcp.call_tool(MCPBackend.T_LIST_FUNCS, {"queries": [
+                {"offset": offset, "count": PULL_PAGE, "filter": ""}]})
+            rows = pages[0].get("data") if isinstance(pages, list) and pages \
+                and isinstance(pages[0], dict) else None
+            if rows is None:
+                if offset == 0 and not functions:
+                    return {"status": "no-mcp",
+                            "hint": "IDA MCP 在线但 list_funcs 不可用"
+                                    "（插件版本过旧？）"}
+                stopped = True  # 中途翻页失败：保住已拉部分
+                break
+            for f in rows:
+                try:  # vendor Function 是 hex 字符串；坏行跳过不拖垮整次拉取
+                    functions.append({"address": int(str(f.get("addr")), 16),
+                                      "name": str(f.get("name") or ""),
+                                      "size": int(str(f.get("size") or "0x0"), 16)})
+                except (ValueError, TypeError):
+                    continue
+            nxt = pages[0].get("next_offset")
+            done = nxt is None or nxt <= offset or len(functions) > 500_000
+            binary_name = (bb.find_asset(pid, "binary", sha)
+                           or {}).get("meta", {}).get("filename") or ""
+            # 每页落盘：partial 缓存（渐进可见 + 断点）；完成页 partial=False
+            svc.import_ida_mcp_cache(sha, functions, binary_name=binary_name,
+                                     partial=not done, total=total,
+                                     next_offset=None if done else int(nxt))
+            if progress is not None:
+                progress.update(pulled=len(functions), total=total)
+            if done:
+                break
+            offset = int(nxt)
+
+        data = svc.read_cached(sha) or {"functions": functions}
+        changed = diff_pulled_names(data, bb.list_funcs(pid, sha))
+        for ch in changed:
+            bb.patch_func(pid, ch["func_id"], name=ch["new_name"],
+                          author="ida-pull")
+        pairs = [{"address": c["address"], "old_name": c["old_name"],
+                  "new_name": c["new_name"]} for c in changed]
+        bb.append_event(pid, "binary.pulled_from_ida",
+                        {"sha": sha, "function_count": len(functions),
+                         "changed": pairs, "stopped": stopped}, author="human")
+        if stopped:
+            pos = f"{len(functions)}/{total}" if total is not None \
+                else f"{len(functions)}"
+            return {"status": "stopped", "sha": sha, "pulled": len(functions),
+                    "total": total, "changed": pairs,
+                    "hint": f"已停止：已拉 {pos} 个函数（已生效），"
+                            "再次拉取将从断点继续"}
+        res = {"status": "ok", "sha": sha, "function_count": len(functions),
+               "total": total, "changed": pairs}
+        if restarted:
+            res["hint"] = "IDA 库与上次拉取不一致（函数总数变了），已自动从头重拉"
+        return res
+
+    def _submit_pull_ida_functions(proj: Project, sha: str) -> str:
+        if _rev_job_running(proj.id, sha, "binary-pull-ida-functions"):
+            raise HTTPException(409, "该样本正在从 IDA 拉取中")
+        # progress 是可变 dict：塞进 job meta（引用共享），Job 循环里逐页 update
+        # → 前端 GET /api/jobs/{id} 轮询自动带出，零新增端点；cancel Event 页间检查
+        progress: dict = {"pulled": 0, "total": None}
+        cancel = threading.Event()
+        app.state.pull_cancel[sha] = cancel
+        return app.state.jobs.submit(
+            "binary-pull-ida-functions",
+            lambda: _run_pull_ida_functions(proj.id, sha, progress, cancel),
+            meta={"project_id": proj.id, "sha": sha, "progress": progress},
+        )
+
+    def _run_push_names_to_ida(pid: str, sha: str) -> dict:
+        """func_kb 有效命名 → GUI IDA（反向，2026-09-29）：AI/人工分析成果批量
+        rename 写回当前库（自动名不推）；writeback_items 只改 GUI 内存库不落盘
+        ——完成后提示用户在 IDA 里保存（库存活由用户掌控，与 writeback 同纪律）。"""
+        from core.tools.decompiler import is_auto_name
+
+        proj = _project(pid)
+        bb, svc = proj.bb, _rev_service(proj)
+        if svc.mcp is None or not svc.mcp_online():
+            return {"status": "no-mcp",
+                    "hint": "未检测到 IDA MCP server——在 IDA 中打开样本后按 "
+                            "Ctrl-Alt-M 启动插件（仅连本机 127.0.0.1:13337）"}
+        items = [{"address": hex(int(f["address"])), "name": f["name"]}
+                 for f in bb.list_funcs(pid, sha)
+                 if f.get("name") and not is_auto_name(f["name"])]
+        if not items:
+            return {"status": "ok", "applied": 0,
+                    "hint": "func_kb 无有效命名（只有自动名）——无可同步"}
+        res = svc.mcp.writeback_items(items)
+        if res is None:
+            return {"status": "no-mcp", "hint": "IDA MCP 写回失败（离线/拒连）"}
+        bb.append_event(pid, "binary.names_pushed",
+                        {"sha": sha, "applied": res.get("applied", 0)},
+                        author="human")
+        return {"status": "ok", "applied": res.get("applied", 0),
+                "results": res.get("results") or [],
+                "hint": "已写入 IDA 当前库（内存）——请在 IDA 中保存数据库落盘"}
+
+    def _submit_push_names_to_ida(proj: Project, sha: str) -> str:
+        if _rev_job_running(proj.id, sha, "binary-push-names"):
+            raise HTTPException(409, "该样本正在同步命名中")
+        return app.state.jobs.submit(
+            "binary-push-names",
+            lambda: _run_push_names_to_ida(proj.id, sha),
             meta={"project_id": proj.id, "sha": sha},
         )
 
@@ -2402,10 +2554,13 @@ def create_app(
 
     @app.post("/api/projects/{pid}/samples", status_code=202)
     def upload_sample(pid: str, file: UploadFile = File(...)):
-        """样本上传（multipart，≤256MB，流式 sha）→ binary 资产 → 自动投 headless 分诊。
+        """样本上传（multipart，≤256MB，流式 sha）→ binary 资产登记。
 
         样本是 untrusted 输入：只写 samples/，平台绝不在任何路径执行它；
         反编译是 trusted 解析（idat/analyzeHeadless 只解析不执行）。
+        2026-09-29：上传不再自动投 headless 分诊——大样本分析很久，由用户
+        点「开始分析」确认后触发（POST /binaries/{sha}/triage）或走
+        「从 IDA 拉取函数」MCP 通道。job_id 恒为 None（前端 awaitJob 已兼容）。
         """
         proj = _project(pid)
         name = _safe_upload_name(file.filename or "sample.bin")
@@ -2428,15 +2583,9 @@ def create_app(
         svc = _rev_service(proj)
         if svc.read_cached(sha) is not None:
             return {"cached": True, "job_id": None, "sha": sha, "asset_id": asset["id"]}
-        # C2 CTF 线索板补缺：非 binary 能力包（如 ctf/misc 项目）不上 headless 分诊——
-        # 样本按附件落 samples/ + binary 资产即可（无 headless 后端时同款 no-tool 降级）
-        # expert-pool M2：按 caps_effective 推导值判（专家绑定项目的可见范围）
-        if "binary" not in caps_effective(
-                app.state.packs_root, proj.track, proj.experts,
-                fallback=proj.capabilities):
-            return {"cached": False, "job_id": None, "sha": sha, "asset_id": asset["id"]}
-        return {"cached": False, "job_id": _submit_triage(proj, sha, rel),
-                "sha": sha, "asset_id": asset["id"]}
+        # 2026-09-29：不再自动投分诊——分析动作由用户显式确认（大样本 headless
+        # 可能很久）；重传已分析样本上方 read_cached 短路照旧直接可用
+        return {"cached": False, "job_id": None, "sha": sha, "asset_id": asset["id"]}
 
     @app.post("/api/projects/{pid}/binaries/{sha}/triage", status_code=202)
     def retry_triage(pid: str, sha: str):
@@ -2626,6 +2775,40 @@ def create_app(
         if proj.bb.find_asset(pid, "binary", sha) is None:
             raise HTTPException(404, f"样本资产不存在: {sha}")
         return {"job_id": _submit_pull_names(proj, sha), "sha": sha}
+
+    @app.post("/api/projects/{pid}/binaries/{sha}/pull-ida-functions",
+              status_code=202)
+    def pull_ida_functions(pid: str, sha: str):
+        """从 GUI IDA 拉取函数清单（Job，2026-09-29）：MCP list_funcs 分页 →
+        轻量缓存（函数名/地址/大小，无伪码）+ 有效命名 diff 回拉 func_kb。
+        前置：IDA 已打开样本并启动 MCP 插件（三态灯 MCP 亮）。"""
+        proj = _project(pid)
+        if proj.bb.find_asset(pid, "binary", sha) is None:
+            raise HTTPException(404, f"样本资产不存在: {sha}")
+        return {"job_id": _submit_pull_ida_functions(proj, sha), "sha": sha}
+
+    @app.post("/api/projects/{pid}/binaries/{sha}/pull-ida-functions/cancel")
+    def cancel_pull_ida_functions(pid: str, sha: str):
+        """停止进行中的 IDA 拉取（2026-09-30 断点续拉）：Event 页间检查点生效，
+        已拉部分保持生效（partial 缓存），再点拉取从断点继续。无在跑 job 幂等。"""
+        proj = _project(pid)
+        if proj.bb.find_asset(pid, "binary", sha) is None:
+            raise HTTPException(404, f"样本资产不存在: {sha}")
+        ev = app.state.pull_cancel.get(sha)
+        if ev is None or ev.is_set():
+            return {"cancelling": False, "hint": "没有进行中的拉取"}
+        ev.set()
+        return {"cancelling": True}
+
+    @app.post("/api/projects/{pid}/binaries/{sha}/push-names-to-ida",
+              status_code=202)
+    def push_names_to_ida(pid: str, sha: str):
+        """func_kb 有效命名 → GUI IDA（反向，Job）：批量 rename 写当前库，
+        只改内存不落盘（完成后提示在 IDA 保存）。"""
+        proj = _project(pid)
+        if proj.bb.find_asset(pid, "binary", sha) is None:
+            raise HTTPException(404, f"样本资产不存在: {sha}")
+        return {"job_id": _submit_push_names_to_ida(proj, sha), "sha": sha}
 
     @app.post("/api/projects/{pid}/funcs", status_code=201)
     def create_func(pid: str, body: FuncCreateIn):

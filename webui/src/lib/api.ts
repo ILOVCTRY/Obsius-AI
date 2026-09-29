@@ -207,6 +207,18 @@ export const api = {
   pullNames: (pid: string, sha: string) =>
     http<{ job_id: string; sha: string }>(
       `/api/projects/${pid}/binaries/${sha}/pull-names`, { method: "POST" }),
+  // GUI IDA MCP → 轻量函数清单缓存（无伪码）+ 有效命名 diff 回拉
+  pullIdaFunctions: (pid: string, sha: string) =>
+    http<{ job_id: string; sha: string }>(
+      `/api/projects/${pid}/binaries/${sha}/pull-ida-functions`, { method: "POST" }),
+  // 停止进行中的 IDA 拉取（已拉部分保持生效，可断点续拉）
+  cancelPullIdaFunctions: (pid: string, sha: string) =>
+    http<{ cancelling: boolean; hint?: string }>(
+      `/api/projects/${pid}/binaries/${sha}/pull-ida-functions/cancel`, { method: "POST" }),
+  // 反向：func_kb 有效命名批量写回 GUI IDA 当前库（只改内存，不落盘）
+  pushNamesToIda: (pid: string, sha: string) =>
+    http<{ job_id: string; sha: string }>(
+      `/api/projects/${pid}/binaries/${sha}/push-names-to-ida`, { method: "POST" }),
   createFunc: (pid: string, body: FuncCreateBody) =>
     http<FuncEntry>(`/api/projects/${pid}/funcs`, {
       method: "POST", body: JSON.stringify(body),

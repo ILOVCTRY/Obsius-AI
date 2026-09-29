@@ -5,6 +5,8 @@ Agent 工具面的 func_kb 机制级查重。
 """
 
 import json
+import os
+import time
 
 import pytest
 
@@ -629,6 +631,80 @@ def test_writeback_states_no_db_no_tool_unsupported(tmp_path, sample):
     only_g = DecompilerService(cache_dir=tmp_path / "c3", ghidra=g)
     assert only_g.writeback(sha, [{"address": 1, "name": "x"}])["status"] == "unsupported"
     assert only_g.refresh_db_cache(sha)["status"] == "unsupported"
+
+
+# ---------- 大样本防崩（2026-09-29）：缓存驻留 / 轻量导入 / 列表截断 ----------
+
+def test_read_cached_resident_and_mtime_invalidation(tmp_path, sample):
+    """read_cached 单槽驻留（同 dict 对象复用，防大缓存逐请求 re-parse）；
+    mtime 变化失效重读，删文件回 None。"""
+    runner, _calls = fake_ghidra_runner(tmp_path)
+    svc = make_service(tmp_path, sample, runner)
+    data, _info = svc.export_to_cache(str(sample))
+    sha = sha256_file(str(sample))
+    first = svc.read_cached(sha)
+    assert first == data
+    again = svc.read_cached(sha)
+    assert again is first  # 驻留命中：零 re-parse
+    # mtime 变化 → 失效重读（新对象、新内容）
+    cache_file = tmp_path / "cache" / f"{sha}.json"
+    stale = cache_file.read_text(encoding="utf-8")
+    cache_file.write_text(stale.replace("check_flag", "renamed_flag"),
+                          encoding="utf-8")
+    os.utime(cache_file, (time.time() + 10, time.time() + 10))
+    fresh = svc.read_cached(sha)
+    assert fresh is not again and fresh["functions"][0]["name"] == "renamed_flag"
+    # 损坏缓存 → 删除并回 None，驻留同步清理
+    cache_file.write_text("{broken", encoding="utf-8")
+    os.utime(cache_file, (time.time() + 20, time.time() + 20))
+    assert svc.read_cached(sha) is None and not cache_file.exists()
+    assert svc.read_cached(sha) is None  # 文件已不在
+    assert svc.read_cached("b" * 64) is None
+
+
+def test_import_ida_mcp_cache_lightweight(tmp_path):
+    """GUI IDA 拉取的轻量缓存落盘：v3 契约兼容、无伪码/strings/sections/imports
+    （数据大头不落平台盘，点查走 MCP 实时降级）。"""
+    svc = DecompilerService(cache_dir=tmp_path / "cache")
+    funcs = [{"address": 0x1189, "name": "check_flag", "size": 96}]
+    data = svc.import_ida_mcp_cache("a" * 64, funcs, binary_name="x.elf")
+    assert data["export_version"] == dc.EXPORT_VERSION
+    assert data["meta"]["source"] == "ida-mcp" and data["binary"] == "x.elf"
+    assert data["functions"] == funcs
+    assert data["strings"] == [] and data["sections"] == [] and data["imports"] == {}
+    # 落盘可回读（导入后驻留已失效，read_cached 从盘上重 parse）
+    back = svc.read_cached("a" * 64)
+    assert back["functions"] == funcs and back["meta"]["source"] == "ida-mcp"
+    assert (tmp_path / "cache" / f"{'a' * 64}.json").is_file()
+    # partial 落盘（断点续拉）：partial/total_functions/next_offset 进 meta；
+    # 完成态（partial=False）不写这些字段
+    svc.import_ida_mcp_cache("c" * 64, funcs, partial=True, total=99, next_offset=100)
+    part = svc.read_cached("c" * 64)
+    assert part["meta"]["partial"] is True and part["meta"]["total_functions"] == 99
+    assert part["meta"]["next_offset"] == 100
+    assert "partial" not in svc.read_cached("a" * 64)["meta"]
+
+
+def test_list_functions_truncates_large_result(tmp_path, sample):
+    """数万函数全量 dump 淹没上下文——>500 行截断并提示用过滤参数（大样本防崩）。"""
+    runner, _calls = fake_ghidra_runner(tmp_path)
+    svc = make_service(tmp_path, sample, runner)
+    sha = sha256_file(str(sample))
+    big = {"export_version": dc.EXPORT_VERSION, "binary": "big.elf",
+           "meta": {}, "sections": [], "imports": {},
+           "functions": [{"address": 0x1000 + i, "name": f"fn_{i:05d}",
+                          "size": 16, "calls": [], "pseudocode": "x"}
+                         for i in range(600)],
+           "strings": []}
+    (tmp_path / "cache" / f"{sha}.json").write_text(json.dumps(big),
+                                                   encoding="utf-8")
+    text = svc.list_functions(str(sample))
+    assert "已截断" in text and "name_contains" in text
+    rows = json.loads(text.split("\n…")[0])
+    assert len(rows) == 500
+    # 过滤后不触顶则无截断（fn_00010 不含 fn_00001 子串）
+    hit = json.loads(svc.list_functions(str(sample), name_contains="fn_00001"))
+    assert len(hit) == 1 and hit[0]["name"] == "fn_00001"
 
 
 def test_refresh_db_cache_exports_without_rebuild(tmp_path, sample):

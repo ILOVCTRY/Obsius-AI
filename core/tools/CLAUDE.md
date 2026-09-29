@@ -50,6 +50,22 @@
   mcp_provider=)`——decompile 点查与 xrefs 每次先调 `provider(binary)` 取端点（接
   `IdaMcpManager.ensure`，按需拉起 IDA-MCP）；provider None/异常/同端点一律回退固定桥或
   headless 缓存，选路行为与现状不变。**红线不变**：全量概览跳过 MCP（不触发拉起）。
+- **大样本防崩 + GUI IDA 轻缓存（2026-09-29，用户口径 >20MB 算大样本）**：
+  ① `read_cached(sha)` 解析结果**单槽驻留**（`_parsed_cache`，mtime 失效，只驻留最近一个
+  样本）——大缓存 JSON 的 re-parse 是 overview 4s 轮询 + 全部点查的公共热点；
+  ② `import_ida_mcp_cache(sha, functions, binary_name, *, partial=False, total=None,
+  next_offset=None)` 落 **v3 契约兼容轻量缓存**（meta.source="ida-mcp"，函数名/地址/大小
+  全量，无伪码/calls/strings/imports——数据大头不落平台盘，点查走既有 MCP 实时降级），
+  落盘后驻留失效；**partial=True（2026-09-30 断点续拉）**：meta 追加 `partial:true`/
+  `total_functions`/`next_offset`——拉取中途每页落盘一次，停止后已拉部分立即可见生效，
+  再拉时从 next_offset 续传（app.py 对账 total_functions 不一致则从头重拉）；拉完
+  partial=False 落盘即清除三字段；
+  ③ `list_functions` >500 行截断并提示用 `name_contains/min_size` 缩小范围（防数万函数
+  dump 淹没 Agent 上下文）。
+  ④ `MCPBackend.count_funcs()`（2026-09-30）：vendor 新增 `count_funcs` 微工具（毫秒级，
+  不逐个建函数对象）返回当前库函数总数——拉取进度分母；旧插件无此工具/离线返 None，
+  调用方退化为无分母进度。配套治本：vendor `list_funcs` 惰性分页（先取廉价地址表再只
+  构建当页切片，原先每页全量重建整库 O(N×页数)，数万函数快约 50 倍）。
 - 地址纪律：内部 int；出服务/事件一律小写 hex 串；MCP 入参 `_addr_arg` 统一 hex 串。
 
 ## 测试

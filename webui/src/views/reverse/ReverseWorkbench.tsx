@@ -4,7 +4,7 @@ import { api, pollJob } from "@/lib/api"
 import { useEvents } from "@/lib/useEvents"
 import type {
   Asset, BinaryOverview, CachedFuncRow, CachedFunction, Finding, FuncEntry,
-  PullNamesResult, XrefData,
+  PullIdaFunctionsResult, PullNamesResult, PushNamesToIdaResult, XrefData,
 } from "@/lib/types"
 import { hexAddr } from "@/lib/workbench"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
@@ -30,6 +30,17 @@ const LogicBlocksView = lazy(() =>
 // 样本条 + 三栏（函数浏览器｜结论+伪码｜xref/发现/笔记）。
 // 三层数据：headless 缓存（全量客观）/ func_kb（分析过的）/ findings（挂 binary 资产）。
 
+// 大样本阈值（2026-09-29 用户口径，与后端 SAMPLE_LARGE_BYTES 对齐）：
+// >20MB headless 全量导出可能很久——上传/开始分析前二次确认，建议走 IDA 拉取
+const SAMPLE_LARGE_BYTES = 20 * 1024 * 1024
+
+function largeSampleConfirm(mb: number): boolean {
+  return window.confirm(
+    `该样本约 ${mb}MB，属于大样本：headless 全量分析（自动分析+全量反编译）可能耗时很久。\n` +
+    "更快的路子：在 IDA 里打开样本按 Ctrl-Alt-M 启动 MCP 插件，再用「从 IDA 拉取函数」（秒级拿全量函数清单）。\n" +
+    "仍要继续 headless 分析吗？")
+}
+
 export function ReverseWorkbench({ pid }: { pid: string }) {
   const { events } = useEvents(pid)
   const [tick, setTick] = useState(0)
@@ -49,6 +60,8 @@ export function ReverseWorkbench({ pid }: { pid: string }) {
   const [triaging, setTriaging] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [busyAi, setBusyAi] = useState(false)
+  // IDA 拉取进度（2026-09-30）：job 轮询带出 {pulled,total}；null=没在拉
+  const [pullProgress, setPullProgress] = useState<{ pulled: number; total: number | null } | null>(null)
 
   // subnav：逆向分析｜攻击链｜蓝图｜业务逻辑（切页不卸载分析状态，同级条件渲染）
   const [mode, setMode] = useState<"rev" | "chains" | "blueprint" | "logic">("rev")
@@ -162,6 +175,8 @@ export function ReverseWorkbench({ pid }: { pid: string }) {
   }
 
   const handleUpload = async (file: File) => {
+    const mb = Math.round(file.size / 1024 / 1024)
+    if (file.size > SAMPLE_LARGE_BYTES && !largeSampleConfirm(mb)) return
     setUploading(true)
     try {
       const r = await api.uploadSample(pid, file)
@@ -175,6 +190,9 @@ export function ReverseWorkbench({ pid }: { pid: string }) {
 
   const handleRetry = async () => {
     if (!sha) return
+    const size = overview?.asset_meta?.size
+    if (typeof size === "number" && size > SAMPLE_LARGE_BYTES &&
+        !largeSampleConfirm(Math.round(size / 1024 / 1024))) return
     const r = await api.retryTriage(pid, sha)
     await awaitJob(r.job_id)
   }
@@ -193,6 +211,74 @@ export function ReverseWorkbench({ pid }: { pid: string }) {
       if (res.status === "locked") return "IDA 正开着该库，请先关闭后再同步"
       if (res.status === "no-db") return "尚无 IDA 数据库，请先完成分诊"
       return res.guidance ?? `同步未执行：${res.status}`
+    } catch (e) {
+      return String(e)
+    }
+  }
+
+  // GUI IDA MCP → 轻量缓存：list_funcs 全量清单（无伪码）+ IDA 手改名 diff 回拉
+  // 拉取中 job 轮询（1s）带 progress（按钮进度环）；已有 headless 全量缓存时先确认覆盖
+  const handlePullIdaFunctions = async (): Promise<string> => {
+    if (!sha) return "无样本"
+    const meta = overview?.meta
+    if (meta?.source && meta.source !== "ida-mcp" && !meta.partial &&
+        !window.confirm("该样本已有 headless 全量分析缓存（含伪码）。\n" +
+          "从 IDA 拉取会把它替换成轻量清单缓存（伪码可重跑「开始分析」恢复）。继续吗？")) {
+      return "已取消拉取"
+    }
+    setPullProgress({ pulled: 0, total: null })
+    try {
+      const r = await api.pullIdaFunctions(pid, sha)
+      const job = await pollJob(r.job_id, (j) => {
+        const p = j.meta?.progress
+        if (p) setPullProgress({ pulled: p.pulled ?? 0, total: p.total ?? null })
+      }, 1000)
+      bump()
+      const res = job.result as PullIdaFunctionsResult | null
+      if (job.status === "error") return `拉取失败：${job.error}`
+      if (!res) return "拉取失败：无结果"
+      if (res.status === "ok") {
+        return `已拉取 ${res.function_count ?? 0} 个函数（回拉改名 ${res.changed?.length ?? 0} 个）`
+      }
+      if (res.status === "stopped") return res.hint ?? "已停止拉取"
+      return res.hint ?? `拉取未执行：${res.status}`
+    } catch (e) {
+      return String(e)
+    } finally {
+      setPullProgress(null)
+    }
+  }
+
+  // 停止拉取：后端页间检查点生效，已拉部分保持生效（partial），再点从断点继续
+  const handleStopPull = async () => {
+    if (!sha) return
+    try {
+      await api.cancelPullIdaFunctions(pid, sha)
+    } catch { /* 轮询结束分支兜底 */ }
+  }
+
+  // 拉取中每 2s bump：overview/函数行/func_kb 轮询跟着重载 → 左栏列表渐进长出
+  useEffect(() => {
+    if (!pullProgress) return
+    const t = setInterval(bump, 2000)
+    return () => clearInterval(t)
+  }, [!!pullProgress, bump]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 反向：func_kb 有效命名批量写回 GUI IDA 当前库（只改内存，提示用户落盘）
+  const handlePushNames = async (): Promise<string> => {
+    if (!sha) return "无样本"
+    try {
+      const r = await api.pushNamesToIda(pid, sha)
+      const job = await pollJob(r.job_id, () => {}, 1500)
+      bump()
+      const res = job.result as PushNamesToIdaResult | null
+      if (job.status === "error") return `同步失败：${job.error}`
+      if (!res) return "同步失败：无结果"
+      if (res.status === "ok") {
+        const base = `已同步 ${res.applied ?? 0} 个命名到 IDA`
+        return res.applied ? `${base}——请在 IDA 中保存数据库落盘` : (res.hint ?? base)
+      }
+      return res.hint ?? `同步未执行：${res.status}`
     } catch (e) {
       return String(e)
     }
@@ -227,6 +313,8 @@ export function ReverseWorkbench({ pid }: { pid: string }) {
         triaging={triaging} uploading={uploading} busyAi={busyAi}
         onUpload={handleUpload} onRetry={handleRetry} onAiTriage={handleAiTriage}
         onPullNames={handlePullNames}
+        onPullIdaFunctions={handlePullIdaFunctions} onPushNames={handlePushNames}
+        pullProgress={pullProgress} onStopPull={handleStopPull}
       />
       {/* subnav：逆向分析｜攻击链｜蓝图｜业务逻辑（DESIGN §12 / §9 R4） */}
       <div className="flex shrink-0 items-center gap-1 border-b px-2 py-1">
@@ -332,7 +420,8 @@ function EmptyUpload({ onUpload, uploading }: { onUpload: (f: File) => void; upl
         <Upload className="mx-auto mb-3 size-8 text-muted-foreground" />
         <h2 className="mb-1 text-sm font-medium">上传第一个样本</h2>
         <p className="mb-4 text-[11px] leading-relaxed text-muted-foreground">
-          上传后自动跑 headless 反编译（IDA 优先，Ghidra 兜底），全量客观函数进缓存；
+          上传后点「开始分析」跑 headless 全量导出（IDA 优先，Ghidra 兜底）；
+          也可以在 IDA 里打开样本按 Ctrl-Alt-M，直接「从 IDA 拉取函数」。
           样本按 untrusted 处理，平台只做静态解析，<b>绝不在任何路径执行样本</b>。
         </p>
         <label className="inline-flex cursor-pointer items-center gap-1 rounded-md bg-primary px-3 py-1.5 text-xs text-primary-foreground">

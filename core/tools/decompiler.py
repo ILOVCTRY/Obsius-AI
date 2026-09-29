@@ -269,6 +269,7 @@ class MCPBackend:
     # 真机工具名（vendor api_*.py 的 @tool 函数名；改名同步 tools/mcp/CLAUDE.md 与测试）
     T_DECOMPILE = "decompile"
     T_LIST_FUNCS = "list_funcs"
+    T_COUNT_FUNCS = "count_funcs"
     T_RENAME = "rename"
     T_SET_COMMENTS = "set_comments"
     T_FUNC_PROFILE = "func_profile"
@@ -427,6 +428,15 @@ class MCPBackend:
                                  timeout=60.0)
         if isinstance(payload, dict) and payload.get("code") and not payload.get("error"):
             return payload["code"]
+        return None
+
+    def count_funcs(self) -> int | None:
+        """当前库函数总数（毫秒级，2026-09-30 进度分母用）。
+        工具缺失（旧插件）/离线返回 None——调用方退化为无分母进度。"""
+        res = self.call_tool(self.T_COUNT_FUNCS, {})
+        if isinstance(res, dict) and isinstance(res.get("count"), int) \
+                and res["count"] >= 0:
+            return res["count"]
         return None
 
     def xref_profile(self, addr: int | str) -> dict | None:
@@ -779,6 +789,9 @@ class DecompilerService:
         # Agent 点查走 provider 拉起的样本实例。失败回调 None 一律降级 headless。
         self.mcp_provider = mcp_provider
         self._sample_mcp_inst: MCPBackend | None = None
+        # 缓存解析结果单槽驻留：大缓存 JSON 的 re-parse 是 overview 4s 轮询 +
+        # 函数/xref/字符串点查的公共热点（1G 级样本防崩，mtime 失效）
+        self._parsed_cache: dict[str, tuple[float, dict]] = {}
         for backend in (ghidra, ida):
             if backend is None:
                 continue
@@ -872,11 +885,57 @@ class DecompilerService:
         return [b for b in self.backends if getattr(b, "export", None) is not None]
 
     def read_cached(self, sha: str) -> dict | None:
-        """按 sha 读 v2 缓存；不存在/损坏/旧版返回 None（不触发导出）。"""
+        """按 sha 读 v3 缓存；不存在/损坏/旧版返回 None（不触发导出）。
+        解析结果单槽驻留（mtime 失效）——大样本防崩：每请求 re-parse 几十 MB
+        级 JSON 会把 overview 轮询和所有点查拖垮。"""
         cached = self._cache_file(sha)
         if not cached.is_file():
+            self._parsed_cache.pop(sha, None)
             return None
-        return self._load_cache(cached)
+        mtime = cached.stat().st_mtime
+        hit = self._parsed_cache.get(sha)
+        if hit is not None and hit[0] == mtime:
+            return hit[1]
+        data = self._load_cache(cached)
+        if data is None:
+            self._parsed_cache.pop(sha, None)
+            return None
+        self._parsed_cache.clear()  # 只驻留最近一个样本（工作台单样本活跃）
+        self._parsed_cache[sha] = (mtime, data)
+        return data
+
+    def import_ida_mcp_cache(self, sha: str, functions: list[dict],
+                             binary_name: str = "", *, partial: bool = False,
+                             total: int | None = None,
+                             next_offset: int | None = None) -> dict:
+        """GUI IDA MCP 拉取的轻量缓存落盘（v3 契约兼容）：函数名/地址/大小
+        全量；无伪码/calls/strings/imports——点查伪码与 xref 由既有「缓存缺席
+        → MCP 实时降级」通道按需取，大样本的数据大头（伪码）不落平台盘。
+        partial=True：断点续拉的部分缓存——meta.partial/total_functions/
+        next_offset 供前端渐进展示与续传对账（拉完一页落一次盘）。"""
+        meta: dict = {"source": "ida-mcp",
+                      "pulled_at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00",
+                                                 time.gmtime())}
+        if partial:
+            meta["partial"] = True
+            if total is not None:
+                meta["total_functions"] = total
+            if next_offset is not None:
+                meta["next_offset"] = next_offset
+        data = {
+            "export_version": EXPORT_VERSION,
+            "binary": binary_name,
+            "meta": meta,
+            "functions": functions,
+            "sections": [],
+            "imports": {},
+            "strings": [],
+        }
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self._cache_file(sha).write_text(json.dumps(data, ensure_ascii=False),
+                                         encoding="utf-8")
+        self._parsed_cache.clear()  # 驻留失效
+        return data
 
     def export_to_cache(self, binary: str) -> tuple[dict, dict]:
         """确保样本已导出（缺缓存/旧版则跑 headless）；无后端可用抛 RuntimeError。
@@ -976,14 +1035,19 @@ class DecompilerService:
             data, err, _info = self._export_json(binary)
             if data:
                 needle = (name_contains or "").lower()
-                return json.dumps(
-                    [{"address": hex(int(f["address"])), "name": f["name"],
-                      "size": f.get("size", 0),
-                      "pseudocode": bool(f.get("pseudocode"))}
-                     for f in data.get("functions", [])
-                     if (not needle or needle in f["name"].lower())
-                     and (not min_size or (f.get("size", 0) or 0) >= min_size)],
-                    ensure_ascii=False)
+                rows = [{"address": hex(int(f["address"])), "name": f["name"],
+                         "size": f.get("size", 0),
+                         "pseudocode": bool(f.get("pseudocode"))}
+                        for f in data.get("functions", [])
+                        if (not needle or needle in f["name"].lower())
+                        and (not min_size or (f.get("size", 0) or 0) >= min_size)]
+                # 大样本防崩：数万函数全量 dump 淹没上下文——500 行截断提示过滤
+                tail = ""
+                if len(rows) > 500:
+                    rows = rows[:500]
+                    tail = ("\n…（结果超 500 行已截断：请用 name_contains/"
+                            "min_size 缩小范围）")
+                return json.dumps(rows, ensure_ascii=False) + tail
             if err:
                 errors = err
         return DECOMPILE_GUIDANCE + (f"\n失败详情: {errors}" if errors else "")

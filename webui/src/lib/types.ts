@@ -425,6 +425,11 @@ export interface BinaryMeta {
   imagebase?: string
   entry?: string
   filename?: string
+  // ida-mcp 轻量缓存 meta（2026-09-30 断点续拉）：partial=部分缓存
+  source?: string
+  partial?: boolean
+  total_functions?: number
+  next_offset?: number
 }
 
 export interface BinarySection {
@@ -679,6 +684,9 @@ export interface Job {
   status: "running" | "done" | "error"
   result: unknown
   error: string | null
+  // IDA 拉取进度（2026-09-30）：meta.progress 是后端可变 dict 的引用，
+  // 轮询时每次读到最新值（pulled=已拉函数数，total=null=分母未知）
+  meta?: { progress?: { pulled: number; total: number | null } }
 }
 
 // 编排一轮（orchestrator-tick job）的结构化结果（批 3，DESIGN §6.8/机制 1.9）
@@ -743,6 +751,25 @@ export interface PullNamesResult {
   status: "ok" | "locked" | "no-db" | "no-tool" | "unsupported"
   changed?: PullNameChange[]
   guidance?: string
+}
+
+/** POST .../pull-ida-functions 结果（stopped=中途停止，已拉部分已生效，可断点续拉） */
+export interface PullIdaFunctionsResult {
+  status: "ok" | "no-mcp" | "stopped"
+  sha?: string
+  function_count?: number
+  pulled?: number
+  total?: number | null
+  changed?: PullNameChange[]
+  hint?: string
+}
+
+/** POST .../push-names-to-ida 结果（func_kb 有效命名反向写回 GUI IDA，只改内存库） */
+export interface PushNamesToIdaResult {
+  status: "ok" | "no-mcp"
+  applied?: number
+  results?: unknown
+  hint?: string
 }
 
 // ---------- 攻击链（chains，人工建链 P2） ----------

@@ -2885,9 +2885,12 @@ def test_rev_workbench_full_chain(client):
                     files={"file": ("crackme.elf", blob, "application/octet-stream")})
     assert r.status_code == 202
     up = r.json()
-    assert up["cached"] is False and up["job_id"] and len(up["sha"]) == 64
+    # 2026-09-29：上传不再自动分诊——job_id 恒 None，分析由用户显式确认
+    assert up["cached"] is False and up["job_id"] is None and len(up["sha"]) == 64
     sha = up["sha"]
-    job = _wait_job(client, up["job_id"])
+    tr = client.post(f"/api/projects/{pid}/binaries/{sha}/triage")
+    assert tr.status_code == 202
+    job = _wait_job(client, tr.json()["job_id"])
     assert job["status"] == "done" and job["result"]["status"] == "ok"
     assert job["result"]["function_count"] == 2
 
@@ -3078,11 +3081,7 @@ def test_rev_workbench_no_tool_structured(client, monkeypatch):
     r = client.post(f"/api/projects/{pid}/samples",
                     files={"file": ("crackme.elf", CRACKME.read_bytes())})
     assert r.status_code == 202 and r.json()["cached"] is False
-    job = _wait_job(client, r.json()["job_id"])
-    # 无工具是结构化降级而非 Job 失败
-    assert job["result"]["status"] == "no-tool" and job["result"]["reason"] == "no-tool"
-    kinds = [e["kind"] for e in client.get(f"/api/projects/{pid}/events").json()]
-    assert "binary.triage_failed" in kinds and "binary.triaged" not in kinds
+    assert r.json()["job_id"] is None  # 上传不再自动分诊
 
     sha = r.json()["sha"]
     # 缓存缺席：overview 仍 200；函数/xref 409
@@ -3093,6 +3092,13 @@ def test_rev_workbench_no_tool_structured(client, monkeypatch):
     assert client.get(f"/api/projects/{pid}/binaries/{sha}/strings").status_code == 409
     # 无 IDA 库 → 打开 409（在解析 GUI 之前）
     assert client.post(f"/api/projects/{pid}/binaries/{sha}/open").status_code == 409
+    # 显式分诊：无工具是结构化降级而非 Job 失败
+    r = client.post(f"/api/projects/{pid}/binaries/{sha}/triage")
+    assert r.status_code == 202
+    job = _wait_job(client, r.json()["job_id"])
+    assert job["result"]["status"] == "no-tool" and job["result"]["reason"] == "no-tool"
+    kinds = [e["kind"] for e in client.get(f"/api/projects/{pid}/events").json()]
+    assert "binary.triage_failed" in kinds and "binary.triaged" not in kinds
     # 重新分诊仍是结构化 no-tool
     r = client.post(f"/api/projects/{pid}/binaries/{sha}/triage")
     assert r.status_code == 202
@@ -3124,7 +3130,9 @@ def test_rev_open_ida_requires_gui(client, monkeypatch):
     pid = r.json()["id"]
     up = client.post(f"/api/projects/{pid}/samples",
                      files={"file": ("crackme.elf", CRACKME.read_bytes())}).json()
-    _wait_job(client, up["job_id"])
+    assert up["job_id"] is None  # 上传不再自动分诊
+    _wait_job(client, client.post(
+        f"/api/projects/{pid}/binaries/{up['sha']}/triage").json()["job_id"])
     import core.tools.decompiler as dc
     monkeypatch.setattr(dc, "resolve_ida_gui", lambda *a, **k: None)
     assert client.post(f"/api/projects/{pid}/binaries/{up['sha']}/open").status_code == 422
@@ -3137,7 +3145,9 @@ def test_rev_open_ida_with_addr_jump_script(client, monkeypatch):
         "name": "跳址研究", "track": "research", "capabilities": ["binary"]}).json()["id"]
     up = client.post(f"/api/projects/{pid}/samples",
                      files={"file": ("crackme.elf", CRACKME.read_bytes())}).json()
-    _wait_job(client, up["job_id"])
+    assert up["job_id"] is None  # 上传不再自动分诊
+    _wait_job(client, client.post(
+        f"/api/projects/{pid}/binaries/{up['sha']}/triage").json()["job_id"])
     sha = up["sha"]
 
     import core.api.app as appmod
@@ -3222,8 +3232,10 @@ def test_rev_writeback_locked_ok_and_pull_names(client):
         "name": "写回研究", "track": "research", "capabilities": ["binary"]}).json()["id"]
     up = client.post(f"/api/projects/{pid}/samples",
                      files={"file": ("crackme.elf", CRACKME.read_bytes())}).json()
+    assert up["job_id"] is None  # 上传不再自动分诊
+    _wait_job(client, client.post(
+        f"/api/projects/{pid}/binaries/{up['sha']}/triage").json()["job_id"])
     sha = up["sha"]
-    _wait_job(client, up["job_id"])
 
     # func_kb 先有 main 行（人在平台侧还没改名）
     fid_main = client.post(f"/api/projects/{pid}/funcs",
@@ -3285,12 +3297,232 @@ def test_rev_funcs_cross_project_404(client):
         "name": "p2", "track": "research", "capabilities": ["binary"]}).json()["id"]
     up = client.post(f"/api/projects/{p1}/samples",
                      files={"file": ("crackme.elf", CRACKME.read_bytes())}).json()
-    _wait_job(client, up["job_id"])
+    assert up["job_id"] is None  # 上传不再自动分诊（funcs 建行不依赖缓存）
     fid = client.post(f"/api/projects/{p1}/funcs",
                       json={"binary_sha256": up["sha"], "address": "0x401189",
                             "name": "check_flag"}).json()["id"]
     assert client.patch(f"/api/projects/{p2}/funcs/{fid}",
                         json={"note": "越界"}).status_code == 404
+
+
+class FakeIdaMcp:
+    """假 GUI IDA MCP 桥（不触网）：count_funcs + list_funcs 分页队列 + writeback 抓包。
+
+    writeback=False 模拟传输级失败（writeback_items 回 None）；
+    gate：第一次 call_tool 出页后阻塞（测试窗口内置 stop，模拟中途停止）。
+    """
+
+    def __init__(self, pages=None, writeback=True, total=None, gate=None):
+        self.pages = list(pages or [])
+        self.calls: list[tuple[str, dict]] = []
+        self.pushed: list[dict] | None = None
+        self._writeback_ok = writeback
+        self._total = total
+        self._gate = gate
+
+    def available(self) -> bool:
+        return True
+
+    def count_funcs(self):
+        return self._total
+
+    def call_tool(self, name, args):
+        self.calls.append((name, args))
+        # vendor list_funcs 签名：单 query → list[Page]（每页 {"data", "next_offset"}）
+        page = self.pages.pop(0) if self.pages else None
+        if page is not None and self._gate is not None:
+            gate, self._gate = self._gate, None
+            gate.wait(timeout=10)  # 测试窗口：页已出、停止信号尚未置
+        return [page] if page is not None else []
+
+    def writeback_items(self, items):
+        self.pushed = items
+        if not self._writeback_ok:
+            return None
+        return {"status": "ok", "channel": "mcp", "applied": len(items),
+                "results": {"rename": [{"ok": True}] * len(items),
+                            "comments": []}}
+
+
+def test_rev_pull_ida_functions_and_push_names(client):
+    """GUI IDA 拉取（2026-09-29）：list_funcs 分页 → 轻量缓存 + diff 回拉
+    （自动名不覆盖）；反向 push：func_kb 有效命名批量写回（自动名不推）；
+    无 MCP / 写回失败均结构化降级。"""
+    _install_rev_factory(client, set())
+    pid = client.post("/api/projects", json={
+        "name": "拉取研究", "track": "research", "capabilities": ["binary"]}).json()["id"]
+    up = client.post(f"/api/projects/{pid}/samples",
+                     files={"file": ("crackme.elf", CRACKME.read_bytes())}).json()
+    assert up["job_id"] is None
+    sha = up["sha"]
+    _wait_job(client, client.post(
+        f"/api/projects/{pid}/binaries/{sha}/triage").json()["job_id"])
+
+    # func_kb 预置：main（待被 IDA 名覆盖）/ 自动名（diff 与 push 都跳过）/
+    # IDA 未见过的猜测名（diff 跳过、push 照推）
+    fid_main = client.post(f"/api/projects/{pid}/funcs",
+                           json={"binary_sha256": sha, "address": "0x401234",
+                                 "name": "main"}).json()["id"]
+    client.post(f"/api/projects/{pid}/funcs",
+                json={"binary_sha256": sha, "address": "0x401300",
+                      "name": "sub_401300"})
+    client.post(f"/api/projects/{pid}/funcs",
+                json={"binary_sha256": sha, "address": "0x401600",
+                      "name": "early_guess"})
+
+    # ① 无 MCP → 结构化降级（提示 Ctrl-Alt-M），不发事件
+    r = client.post(f"/api/projects/{pid}/binaries/{sha}/pull-ida-functions")
+    assert r.status_code == 202
+    job = _wait_job(client, r.json()["job_id"])
+    assert job["result"]["status"] == "no-mcp" and "Ctrl-Alt-M" in job["result"]["hint"]
+    r = client.post(f"/api/projects/{pid}/binaries/{sha}/push-names-to-ida")
+    assert _wait_job(client, r.json()["job_id"])["result"]["status"] == "no-mcp"
+    kinds = [e["kind"] for e in client.get(f"/api/projects/{pid}/events").json()]
+    assert "binary.pulled_from_ida" not in kinds and "binary.names_pushed" not in kinds
+
+    # ② 挂假 MCP：单页 list_funcs（vendor hex 字符串）→ 轻量缓存 + diff 回拉
+    svc = client.app.state.rev_services[pid]
+    mcp = FakeIdaMcp(total=3, pages=[{"data": [
+        {"addr": "0x401234", "name": "win_main", "size": "0xc8"},
+        {"addr": "0x401300", "name": "sub_401300", "size": "0x8"},
+        {"addr": "0x401500", "name": "ida_helper", "size": "0x20"},
+        {"addr": "zz", "name": "bad_row", "size": "0x1"},  # 坏行跳过不拖垮
+    ], "next_offset": None}])
+    svc.mcp = mcp
+    r = client.post(f"/api/projects/{pid}/binaries/{sha}/pull-ida-functions")
+    job = _wait_job(client, r.json()["job_id"])
+    res = job["result"]
+    assert res["status"] == "ok" and res["function_count"] == 3  # 坏行不计
+    assert res["total"] == 3 and job["meta"]["progress"]["pulled"] == 3
+    assert res["changed"] == [{"address": "0x401234",
+                               "old_name": "main", "new_name": "win_main"}]
+    assert mcp.calls and mcp.calls[0][0] == "list_funcs"
+    # 轻量缓存：meta.source=ida-mcp，无伪码/strings/sections（数据大头不落盘）；
+    # 完成态无 partial 标记
+    data = svc.read_cached(sha)
+    assert data["meta"]["source"] == "ida-mcp" and len(data["functions"]) == 3
+    assert "partial" not in data["meta"]
+    assert data["strings"] == [] and data["sections"] == []
+    assert all("pseudocode" not in f for f in data["functions"])
+    # func_kb：IDA 有效命名回拉（author=ida-pull）；自动名与缺行不动
+    rows = {f["id"]: f for f in
+            client.get(f"/api/projects/{pid}/funcs?binary_sha256={sha}").json()}
+    assert rows[fid_main]["name"] == "win_main"
+    assert rows[fid_main]["name_history"][-1]["by"] == "ida-pull"
+    ev = next(e for e in client.get(f"/api/projects/{pid}/events").json()
+              if e["kind"] == "binary.pulled_from_ida")
+    assert ev["payload"]["function_count"] == 3
+
+    # ③ 反向 push：有效命名（win_main/early_guess）推 IDA，自动名过滤
+    r = client.post(f"/api/projects/{pid}/binaries/{sha}/push-names-to-ida")
+    job = _wait_job(client, r.json()["job_id"])
+    res = job["result"]
+    assert res["status"] == "ok" and res["applied"] == 2
+    assert "保存" in res["hint"]  # 只改 GUI 内存库，提示用户在 IDA 落盘
+    assert sorted((i["address"], i["name"]) for i in mcp.pushed) == \
+        [("0x401234", "win_main"), ("0x401600", "early_guess")]
+    ev = next(e for e in client.get(f"/api/projects/{pid}/events").json()
+              if e["kind"] == "binary.names_pushed")
+    assert ev["payload"]["applied"] == 2
+
+    # ④ 写回传输失败 → no-mcp 结构化降级
+    svc.mcp = FakeIdaMcp(writeback=False)
+    r = client.post(f"/api/projects/{pid}/binaries/{sha}/push-names-to-ida")
+    job = _wait_job(client, r.json()["job_id"])
+    assert job["result"]["status"] == "no-mcp"
+
+    # ⑤ 防越界：未知样本 404
+    assert client.post(
+        f"/api/projects/{pid}/binaries/{'f' * 64}/pull-ida-functions").status_code == 404
+    assert client.post(
+        f"/api/projects/{pid}/binaries/{'f' * 64}/push-names-to-ida").status_code == 404
+
+
+def test_rev_pull_ida_resume_stop_and_stale(client):
+    """断点续拉（2026-09-30）：每页部分缓存落盘（渐进可见）→ 停止保住已拉部分
+    → 再点从 next_offset 续传；count_funcs 总数对账不一致自动从头；
+    cancel 端点语义（无 job 幂等 / 置停止信号）。"""
+    import threading as _threading
+
+    _install_rev_factory(client, set())
+    pid = client.post("/api/projects", json={
+        "name": "续拉研究", "track": "research", "capabilities": ["binary"]}).json()["id"]
+    up = client.post(f"/api/projects/{pid}/samples",
+                     files={"file": ("crackme.elf", CRACKME.read_bytes())}).json()
+    sha = up["sha"]
+    svc = client.app.state.rev_services[pid]
+    # 停止端点：无在跑 job → 幂等 False
+    r = client.post(f"/api/projects/{pid}/binaries/{sha}/pull-ida-functions/cancel")
+    assert r.status_code == 200 and r.json()["cancelling"] is False
+
+    # ① 第一页后置停止 → stopped，已拉部分 partial 缓存生效（渐进可见）
+    gate = _threading.Event()
+    svc.mcp = FakeIdaMcp(total=4, gate=gate, pages=[
+        {"data": [{"addr": "0x401234", "name": "win_main", "size": "0xc8"},
+                  {"addr": "0x401189", "name": "check_flag", "size": "0x60"}],
+         "next_offset": 2},
+        {"data": [{"addr": "0x401300", "name": "sub_401300", "size": "0x8"},
+                  {"addr": "0x401500", "name": "ida_helper", "size": "0x20"}],
+         "next_offset": None},
+    ])
+    r = client.post(f"/api/projects/{pid}/binaries/{sha}/pull-ida-functions")
+    job_id = r.json()["job_id"]
+    client.post(f"/api/projects/{pid}/binaries/{sha}/pull-ida-functions/cancel")
+    assert client.app.state.pull_cancel[sha].is_set()
+    gate.set()  # 放行第一页（页已出队，循环顶检查点命中）
+    job = _wait_job(client, job_id)
+    res = job["result"]
+    assert res["status"] == "stopped" and res["pulled"] == 2 and res["total"] == 4
+    assert "断点" in res["hint"]
+    data = svc.read_cached(sha)
+    assert data["meta"]["partial"] is True and data["meta"]["total_functions"] == 4
+    assert data["meta"]["next_offset"] == 2 and len(data["functions"]) == 2
+    ev = next(e for e in client.get(f"/api/projects/{pid}/events").json()
+              if e["kind"] == "binary.pulled_from_ida")
+    assert ev["payload"]["stopped"] is True
+
+    # ② 再点拉取 → 从 next_offset=2 续传（不重复拉前两个），拉完 partial 清除
+    mcp2 = FakeIdaMcp(total=4, pages=[
+        {"data": [{"addr": "0x401300", "name": "sub_401300", "size": "0x8"},
+                  {"addr": "0x401500", "name": "ida_helper", "size": "0x20"}],
+         "next_offset": None},
+    ])
+    svc.mcp = mcp2
+    r = client.post(f"/api/projects/{pid}/binaries/{sha}/pull-ida-functions")
+    job = _wait_job(client, r.json()["job_id"])
+    res = job["result"]
+    assert res["status"] == "ok" and res["function_count"] == 4
+    assert mcp2.calls[0][1]["queries"][0]["offset"] == 2  # 断点续传关键断言
+    data = svc.read_cached(sha)
+    assert "partial" not in data["meta"] and len(data["functions"]) == 4
+
+    # ③ 总数对账：残留 partial（total=10）与现库（4）不一致 → 自动从头重拉
+    svc.import_ida_mcp_cache(sha, data["functions"][:2], binary_name="x",
+                             partial=True, total=10, next_offset=2)
+    mcp3 = FakeIdaMcp(total=4, pages=[
+        {"data": [{"addr": f"0x40{600 + i:02d}", "name": f"fn_{i}", "size": "0x10"}
+                  for i in range(2)], "next_offset": 2},
+        {"data": [{"addr": f"0x40{700 + i:02d}", "name": f"gn_{i}", "size": "0x10"}
+                  for i in range(2)], "next_offset": None},
+    ])
+    svc.mcp = mcp3
+    r = client.post(f"/api/projects/{pid}/binaries/{sha}/pull-ida-functions")
+    job = _wait_job(client, r.json()["job_id"])
+    res = job["result"]
+    assert res["status"] == "ok" and res["function_count"] == 4
+    assert "从头" in (res.get("hint") or "")
+    assert mcp3.calls[0][1]["queries"][0]["offset"] == 0  # 对账失败：从头
+    assert "partial" not in svc.read_cached(sha)["meta"]
+
+    # ④ 旧插件（无 count_funcs）→ total=None，进度退化无分母但拉取照常
+    svc.mcp = FakeIdaMcp(total=None, pages=[
+        {"data": [{"addr": "0x401234", "name": "win_main", "size": "0xc8"}],
+         "next_offset": None}])
+    r = client.post(f"/api/projects/{pid}/binaries/{sha}/pull-ida-functions")
+    job = _wait_job(client, r.json()["job_id"])
+    res = job["result"]
+    assert res["status"] == "ok" and res["total"] is None
+    assert job["meta"]["progress"]["total"] is None
 
 
 
