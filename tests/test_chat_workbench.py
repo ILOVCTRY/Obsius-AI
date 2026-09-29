@@ -176,6 +176,32 @@ def test_chat_orchestrator_turn_todo_and_call_expert(tmp_path):
     assert {"chat.message", "chat.tool", "chat.spawn", "chat.todo"} <= kinds
 
 
+def test_usage_breakdown_calibrated(tmp_path):
+    """K10 上下文构成（Claude Code /context 式）：usage.breakdown 四块
+    （系统提示/本轮注入/工具定义/会话消息）按字符估算比例、LLM 真值归一，
+    总和恒等于窗口占用，随 usage 一起持久化。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    llm = FakeLLM([
+        LLMResponse(text="", tool_calls=[_tc("t1", "bb_query", {"q": "assets"})],
+                    usage=Usage(input_tokens=9000, output_tokens=50)),
+        LLMResponse(text="黑板暂无资产记录。", tool_calls=[],
+                    usage=Usage(input_tokens=9500, output_tokens=30)),
+    ])
+    thread = chat_store.create_thread(bb, "p1", "recon")
+    turn = ChatTurn(bb=bb, llm=llm, project_id="p1", thread_id=thread["id"],
+                    packs_root="packs", track="ctf", capabilities=["web"],
+                    mcp_bridge=None, expert_names=None)
+    turn.run("查一下黑板资产")
+    usage = chat_store.get_thread(bb, thread["id"])["usage"]
+    assert usage["input"] == 9500
+    bk = usage.get("breakdown")
+    assert bk is not None and set(bk) == {"system", "refs", "tools", "messages"}
+    assert bk["system"] > 0 and bk["tools"] > 0 and bk["messages"] > 0
+    assert bk["refs"] == 0
+    assert bk["system"] + bk["refs"] + bk["tools"] + bk["messages"] == usage["input"]
+
+
 def test_chat_expert_thread_cannot_call_expert_and_history_replays(tmp_path):
     bb = Blackboard(str(tmp_path / "bb.db"))
     _mk_project(bb, "p1")

@@ -47,6 +47,12 @@ FOREIGN KEY constraint failed → 曾致删有子线程的线程 500）。
   并落 `chat.usage` 事件；前端按 input/256K 画卡头圆环。`POST messages` 可带
   `refs {skills:[], mcps:[]}`（人类本轮指定）——当轮系统提示注入「人类本轮指定」
   段（优先按技能 X 打法 / 优先用 MCP Y 的工具），**不入库不污染历史**。
+- **上下文构成（2026-09-29，K10，Claude Code /context 式）**：`usage.breakdown`
+  = {system,refs,tools,messages} 四块——`_loop` 每步按字符估算各块比例
+  （~3 字符/token，`_est_tokens`/`_msg_text`），再用 LLM 真值 input_total 归一
+  （scale 缩放 + messages 余数兜底，**四块之和恒等于 input**）。refs 块对应
+  「人类本轮指定」注入段（无引用时为 0）。前端浮层画分段彩条+分类清单，
+  剩余空间 = 窗口(256K) − input。估算非精确计数：比例可信、绝对值是近似。
 - max_steps：主控 24 / 子专家 32。线程 status：running 起、idle 正常收、
   error 异常收（异常也落一条 chat.message 事件，前端可见）。
 

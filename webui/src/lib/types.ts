@@ -1576,6 +1576,12 @@ export interface ChatUsage {
   steps?: number
   cache_read?: number
   cache_creation?: number
+  breakdown?: {
+    system: number
+    refs: number
+    tools: number
+    messages: number
+  }
 }
 
 export interface ChatThread {

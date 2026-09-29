@@ -62,6 +62,28 @@ _DELTA_MIN_INTERVAL = 1.0
 _TOOL_RESULT_HEAD = 400
 
 
+def _est_tokens(text: str) -> int:
+    """粗估 token 数（中英混合 ~3 字符/token）。仅用于上下文构成分解的比例
+    估算，不做精确计数——真值由 LLM usage 归一校准（见 _loop 的 breakdown）。"""
+    return max(1, len(text) // 3) if text else 0
+
+
+def _msg_text(m: dict[str, Any]) -> str:
+    """提取消息可估文本：字符串直取；assistant blocks 取 text+tool_use 入参。"""
+    c = m.get("content")
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        out: list[str] = []
+        for b in c:
+            if isinstance(b, dict):
+                out.append(str(b.get("text") or ""))
+                if b.get("input"):
+                    out.append(json.dumps(b["input"], ensure_ascii=False))
+        return "".join(out)
+    return ""
+
+
 def _specs_by_names(names: set[str]) -> list[dict[str, Any]]:
     return [s for s in AGENT_TOOLS if s.get("name") in names]
 
@@ -307,6 +329,7 @@ class ChatTurn:
     def _loop(self, user_text: str) -> str:
         system = self._system_prompt()
         # 人类引用指定（/skill、/mcp chip）：当轮注入系统提示，不入库不污染历史
+        refs_tail = ""
         if self._refs.get("skills") or self._refs.get("mcps"):
             parts = ["", "## 人类本轮指定"]
             if self._refs.get("skills"):
@@ -315,7 +338,8 @@ class ChatTurn:
             if self._refs.get("mcps"):
                 parts.append("- 优先使用 MCP server "
                              + "、".join(self._refs["mcps"]) + " 的工具完成相关任务")
-            system += "\n".join(parts)
+            refs_tail = "\n".join(parts)
+            system += refs_tail
         messages = self._load_history()
         tools = self._tool_specs()
         max_steps = _ORCH_MAX_STEPS if self.is_orchestrator else _EXPERT_MAX_STEPS
@@ -341,18 +365,39 @@ class ChatTurn:
                 _pub["at"] = now
                 self._emit("chat.delta", {"text": text, "seq": _pub["seq"]})
 
+            # 上下文构成估算（每步重估：messages 随 tool_result 增长）；
+            # 真值归一：块比例来自字符估算，总和强制等于 LLM 报告的窗口占用
+            sys_len = len(system) - len(refs_tail)
+            est_system = max(1, sys_len // 3) if sys_len else 0
+            est_refs = _est_tokens(refs_tail)
+            est_tools = _est_tokens(json.dumps(tools, ensure_ascii=False))
+            est_msgs = sum(_est_tokens(_msg_text(m)) for m in messages)
             resp = self.llm.chat(messages, system=system, tools=tools or None,
                                  on_text=on_text,
                                  should_cancel=self._aborted)
             # 上下文用量：input(+cache)=当步窗口占用，output/steps 跨步累计
             u = resp.usage
+            input_total = u.input_tokens + u.cache_read_tokens \
+                + u.cache_creation_tokens
+            scale = input_total / max(1, est_system + est_refs
+                                      + est_tools + est_msgs)
+            b_system = round(est_system * scale)
+            b_refs = round(est_refs * scale)
+            b_tools = round(est_tools * scale)
             self._usage = {
-                "input": u.input_tokens + u.cache_read_tokens
-                + u.cache_creation_tokens,
+                "input": input_total,
                 "output": self._usage.get("output", 0) + u.output_tokens,
                 "steps": self._usage.get("steps", 0) + 1,
                 "cache_read": u.cache_read_tokens,
                 "cache_creation": u.cache_creation_tokens,
+                "breakdown": {
+                    "system": b_system,
+                    "refs": b_refs,
+                    "tools": b_tools,
+                    # 余数兜底：四块之和恒等于 input_total
+                    "messages": max(0, input_total - b_system - b_refs
+                                    - b_tools),
+                },
             }
             chat_store.update_thread(self.bb, self.thread_id, usage=self._usage)
             self._emit("chat.usage", dict(self._usage))

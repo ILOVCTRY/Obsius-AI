@@ -180,6 +180,17 @@ export function AgentWorkbenchView({ pid, meta }: { pid: string; meta: ProjectDe
   const usage = thread?.usage ?? null
   const usagePct = Math.min(100, Math.round(((usage?.input ?? 0) / CTX_LIMIT) * 100))
   const usageLevel = usagePct >= 90 ? "is-high" : usagePct >= 70 ? "is-warn" : "is-ok"
+  // 上下文构成（Claude Code /context 式）：后端估算+真值归一的分类 breakdown
+  const bk = usage?.breakdown
+  const usageFree = Math.max(0, CTX_LIMIT - (usage?.input ?? 0))
+  const usageSegs = bk
+    ? ([
+        { key: "system", label: "系统提示", tokens: bk.system, cls: "seg-sys" },
+        { key: "tools", label: "工具定义", tokens: bk.tools, cls: "seg-tools" },
+        { key: "refs", label: "本轮注入", tokens: bk.refs, cls: "seg-refs" },
+        { key: "messages", label: "会话消息", tokens: bk.messages, cls: "seg-msgs" },
+      ] as const).filter((s) => s.tokens > 0)
+    : []
 
   // 切线程时收起斜杠面板与用量浮层
   useEffect(() => { setUsageOpen(false); setSlash(null) }, [tid])
@@ -554,12 +565,43 @@ export function AgentWorkbenchView({ pid, meta }: { pid: string; meta: ProjectDe
                 </div>
                 {usage ? (
                   <>
-                    <div className="wb-usage-bar"><i className={usageLevel} style={{ width: `${usagePct}%` }} /></div>
-                    <div className="wb-kv"><b className="shrink-0">输入（窗口占用）</b><span className="wb-usage-num">{fmtTokens(usage.input ?? 0)} / {CTX_LIMIT / 1024}K · {usagePct}%</span></div>
+                    <div className="wb-usage-head-row">
+                      <b className="wb-usage-total">{fmtTokens(usage.input ?? 0)} / {CTX_LIMIT / 1024}K</b>
+                      <span className={cn("wb-usage-pct-big", usageLevel)}>{usagePct}%</span>
+                    </div>
+                    {bk ? (
+                      <>
+                        <div className="wb-usage-segs" role="img" aria-label="上下文构成分段条">
+                          {usageSegs.map((s) => (
+                            <i key={s.key} className={s.cls}
+                              style={{ width: `${(s.tokens / CTX_LIMIT) * 100}%` }}
+                              title={`${s.label} ${fmtTokens(s.tokens)}（${Math.round((s.tokens / CTX_LIMIT) * 100)}%）`} />
+                          ))}
+                          {usageFree > 0 && <i className="seg-free" style={{ width: `${(usageFree / CTX_LIMIT) * 100}%` }} title={`剩余 ${fmtTokens(usageFree)}`} />}
+                        </div>
+                        <div className="wb-usage-legend">
+                          {usageSegs.map((s) => (
+                            <div className="wb-usage-li" key={s.key}>
+                              <i className={cn("wb-usage-dot", s.cls)} />
+                              <b className="shrink-0">{s.label}</b>
+                              <span className="wb-usage-num">{fmtTokens(s.tokens)} · {Math.round((s.tokens / CTX_LIMIT) * 100)}%</span>
+                            </div>
+                          ))}
+                          <div className="wb-usage-li">
+                            <i className={cn("wb-usage-dot", "seg-free")} />
+                            <b className="shrink-0">剩余空间</b>
+                            <span className="wb-usage-num">{fmtTokens(usageFree)} · {Math.max(0, 100 - usagePct)}%</span>
+                          </div>
+                        </div>
+                      </>
+                    ) : (
+                      <div className="wb-usage-bar"><i className={usageLevel} style={{ width: `${usagePct}%` }} /></div>
+                    )}
                     <div className="wb-kv"><b className="shrink-0">输出（累计）</b><span className="wb-usage-num">{fmtTokens(usage.output ?? 0)}</span></div>
                     <div className="wb-kv"><b className="shrink-0">模型步数</b><span className="wb-usage-num">{usage.steps ?? 0}</span></div>
                     <div className="wb-kv"><b className="shrink-0">缓存读取</b><span className="wb-usage-num">{fmtTokens(usage.cache_read ?? 0)}</span></div>
                     <div className="wb-kv"><b className="shrink-0">缓存写入</b><span className="wb-usage-num">{fmtTokens(usage.cache_creation ?? 0)}</span></div>
+                    {!bk && <div className="wb-kv is-hint">发送一条消息后生成分类构成（系统提示/工具/消息占比）</div>}
                   </>
                 ) : (
                   <div className="wb-kv">本轮会话还没有用量数据，发送一条消息后生成</div>
