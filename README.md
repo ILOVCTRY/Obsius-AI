@@ -17,3 +17,8 @@ AI驱动的智能体协作工具，用于逆向，渗透测试等。
 
 <img width="1920" height="1057" alt="image" src="https://github.com/user-attachments/assets/c4733fe3-8c49-4a01-8b8b-e321df4f1f85" />
 
+项目还处于迭代期间，关键功能还未收尾，存在较多bug。
+
+未来预期：
+- 完善各模块功能
+
