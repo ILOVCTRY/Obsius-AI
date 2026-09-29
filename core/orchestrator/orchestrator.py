@@ -14,6 +14,7 @@ import copy
 import json
 import logging
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -81,7 +82,9 @@ publish_task 发布即自动建专属待命窗（待命不耗 LLM），并自动
 spawn_session（纯侦查/对话辅助窗，不挂任务）不会立刻开窗：请求进入人类审批收件箱，
 人类批准后系统自动建窗并开跑。
 - spawn_session 的 reason 必须写清（为什么开这个角色、要它做什么），审批人只看得到 role+reason；
-- 等待审批期间可继续 publish passive 任务，或 done 结束本轮；批准/拒绝结果下轮 tick 经事件可见。"""
+- 等待审批期间可继续 publish passive 任务，或 done 结束本轮；批准/拒绝结果下轮 tick 经事件可见。
+- 委派审批积压达 max_publish_per_tick 时会停发新委派（先让人类消化，下轮恢复）——
+  态势里见 pending_delegate 计数即「有审批卡排队」，别再提同款/同目标。"""
 
 
 # L0（全手动）系统提示追加段（批 6）：publish/spawn 只产提案，不写实体
@@ -92,6 +95,20 @@ L0_AUTONOMY_NOTICE = """## 自主档位 L0（全手动·提案模式）
 - 提案不消耗任何预算、不占会话上限，但参数校验照跑：task_type 必须是本轨注册类型、
   非 passive 仍须 conflict_keys、role 仍受白名单/上限约束，填错会被拒收；
 - 一轮可提多条；write_digest 照常写简报；决策完毕 done。"""
+
+# 自动渗透启动前研判模式（auto-attack 2026-09-28）：只读分析，产出渗透计划文本。
+# 双保险：工具面只留只读查询+done（写类工具根本不下发），system 提示同步收紧。
+ANALYZE_ONLY_NOTICE = """## 本轮：自动渗透启动前态势研判（只读·分析模式）
+这是一轮启动前研判，不是常规协调轮：不要执行任何派单/开窗/取消动作
+（delegate / cancel_task / requeue_task / write_digest 已全部禁用，调用会失败）。
+请通读当前态势（阶段目标、资产、发现、死路、意图、任务与窗口状态），输出一份
+渗透测试计划，内容包括：
+1. 态势小结：已掌握什么、缺什么、当前瓶颈；
+2. 建议攻击路径：按优先级列出 2-4 条候选路径，每条说明依据（引用发现 id）、
+   预期产出与风险/噪声等级；
+3. 首轮动作建议：开跑后第一轮应该派什么任务、为什么。
+计划写完整、写具体——人类将根据这份计划决定是否启动自动渗透。
+计划正文直接作为回复输出，然后 done 结束（done 不需要带任何参数）。"""
 
 
 def mission_boundary_lines(track: str | None, config: dict | None) -> list[str]:
@@ -345,6 +362,9 @@ class OrchestratorConfig:
     # 批 6（§6.8）：L0 提案模式——publish_task/spawn_session 只发 orch.proposed
     # 事件、不写实体（校验照跑）；API 按实时档位 level=="L0" 注入。
     propose_only: bool = False
+    # 自动渗透研判模式（auto-attack 2026-09-28）：工具面只留只读查询+done，
+    # 产出为渗透计划文本（result.analysis）——启动前「先分析后确认」的后半段。
+    analyze_only: bool = False
 
 
 class Orchestrator:
@@ -420,8 +440,14 @@ class Orchestrator:
     def _orch_tools(self) -> list[dict[str, Any]]:
         """工具表副本：把本轨合法 task_type 作为 enum 下发（让 LLM 一次填对，
         服务端注册表拒收仍是最终护栏）；无 track 时退回原表。
-        M2（2026-09-22）：追加只读查询四工具（与轨无关，无 enum 注入需求）。"""
+        M2（2026-09-22）：追加只读查询四工具（与轨无关，无 enum 注入需求）。
+        auto-attack 研判模式（2026-09-28）：只下发只读查询 + done——写类工具
+        （delegate/cancel_task/requeue_task/write_digest）根本不出现在工具面，
+        LLM 想调也调不了（硬约束，比提示词约束可靠）。"""
         base = ORCH_TOOLS + ORCH_QUERY_TOOLS
+        if self.config.analyze_only:
+            return [t for t in ORCH_QUERY_TOOLS if t["name"] != "done"] + [
+                t for t in ORCH_TOOLS if t["name"] == "done"]
         if not self.track:
             return base
         tools = copy.deepcopy(base)
@@ -769,6 +795,9 @@ class Orchestrator:
                          for s in sessions_live],
             "sessions_closed": len(sessions) - len(sessions_live),
             "live_windows": len(self.live_sessions),
+            # L1 待审批委派（2026-09-28）：批准前不进 tasks 表，若不摆进态势，
+            # 编排器把「审批排队」误判为「队列空」无限续派——计数 + 摘要注入
+            "approvals": self._approvals_view(),
             **assets_view,
         }
 
@@ -986,6 +1015,7 @@ class Orchestrator:
             log.info("回收过期租约: %s", expired)
         self._finished = False
         self._summary = ""
+        self._analysis_text = ""  # auto-attack 研判模式：最后一条 assistant 文本=渗透计划
         self._actions = []
         self._published: list[str] = []
         self._spawned: list[dict[str, str]] = []
@@ -998,7 +1028,10 @@ class Orchestrator:
         self._emit_starvation_events(self._last_stats_starvation)
         auto = self.autonomy_provider() if self.autonomy_provider is not None else None
         # 批 6：config.propose_only（API 按 L0 注入）优先；无 provider 的单测也可直配
-        if self.config.propose_only:
+        # auto-attack：研判模式优先级最高（只读分析，覆盖一切档位提示）
+        if self.config.analyze_only:
+            autonomy_notice = ANALYZE_ONLY_NOTICE
+        elif self.config.propose_only:
             autonomy_notice = L0_AUTONOMY_NOTICE
         elif (auto or {}).get("level") == "L1":
             autonomy_notice = L1_AUTONOMY_NOTICE
@@ -1023,17 +1056,40 @@ class Orchestrator:
             "content": "第 %d 轮协调开始。请决策本轮动作（监控/派生/开窗/汇总），完成后 done。"
                        % self.cycles,
         }]
+        if self.config.analyze_only:
+            # auto-attack 研判轮：指令换成态势分析（产出即计划文本，人类确认后开跑）
+            messages = [{
+                "role": "user",
+                "content": "自动渗透启动前研判：请按系统提示中的研判要求，通读当前态势"
+                           "并输出完整渗透测试计划，写完后 done 结束。",
+            }]
         for _step in range(1, self.config.max_steps + 1):
             if self.heartbeat is not None:
                 try:
                     self.heartbeat()
                 except Exception:  # noqa: BLE001 —— 续租失败不阻断编排
                     log.exception("tick 租约心跳失败")
-            resp = self.llm.chat(messages, system=system, tools=self._orch_tools())
+            skwargs, stream_id = self._stream_kwargs()
+            resp = self.llm.chat(messages, system=system, tools=self._orch_tools(),
+                                 **skwargs)
             record_llm_usage(
                 self.bb, self.project_id, resp.usage, source="orchestrator",
                 session_id=None, model=getattr(self.llm, "model", ""))
+            self._emit_thinking(resp, _step,
+                                "analyze" if self.config.analyze_only else "tick",
+                                stream_id=stream_id)
             messages.append({"role": "assistant", "content": resp.raw.get("content", [])})
+            if self.config.analyze_only:
+                # 研判轮：捕获最后一条 assistant 文本（content 可能是 blocks 或纯串）
+                raw = resp.raw.get("content", [])
+                if isinstance(raw, str):
+                    self._analysis_text = raw
+                elif isinstance(raw, list):
+                    buf = " ".join(
+                        b.get("text", "") for b in raw
+                        if isinstance(b, dict) and b.get("type") == "text")
+                    if buf.strip():
+                        self._analysis_text = buf.strip()
             if not resp.tool_calls:
                 messages.append({"role": "user", "content": "（请调用工具执行动作，或 done 结束本轮）"})
                 continue
@@ -1186,6 +1242,62 @@ class Orchestrator:
             str(b.get("text") or "") for b in blocks
             if isinstance(b, dict) and b.get("type") == "text").strip()
 
+    def _emit_thinking(self, resp, step: int, source: str,
+                       stream_id: str = "") -> None:
+        """编排器思考终稿落库：resp.thinking 非空时落 llm.thinking（author=
+        orchestrator），带 stream_id 时清剪该流的 llm.thinking.delta 过渡行
+        （worker loop._emit_final_thinking 同型——审计只留终稿一条）。"""
+        thinking = getattr(resp, "thinking", None)
+        if not (thinking and str(thinking).strip()):
+            return
+        try:
+            self.bb.append_event(
+                self.project_id, "llm.thinking",
+                {"thinking": str(thinking)[:4000], "step": step, "source": source,
+                 **({"stream_id": stream_id} if stream_id else {})},
+                session_id=None, author="orchestrator")
+            if stream_id:
+                try:
+                    self.bb.prune_thinking_deltas(self.project_id, stream_id)
+                except Exception:  # noqa: BLE001 —— 清剪失败只多留过渡行
+                    log.exception("编排器 llm.thinking.delta 清剪失败")
+        except Exception:  # noqa: BLE001 —— 观测性事件，失败不影响编排
+            log.exception("编排器 llm.thinking 落库失败 step=%s", step)
+
+    def _stream_kwargs(self) -> tuple[dict[str, Any], str]:
+        """思考流式上下文（2026-09-28 选项B，Trae/CC 式逐字进度）：stream_capable
+        的 llm 返回带 on_thinking 的 chat kwargs——回调攒增量，节流（≥120 新字符
+        或距上次 ≥1.0s，worker loop 同款阈值）落 llm.thinking.delta（累计全文+
+        seq+stream_id，author=orchestrator；编排 tick 单线程顺序执行，回调内直接
+        落库无并发写风险，无需 worker 的旁路线程）。非流式 llm 返回 ({}, "")——
+        终稿思考仍由 _emit_thinking 落库，进度退化为步进式。"""
+        if not getattr(self.llm, "stream_capable", False):
+            return {}, ""
+        stream_id = uuid.uuid4().hex[:12]
+        buf: list[str] = []
+        pub = {"chars": 0, "seq": 0, "at": 0.0}
+
+        def _on_thinking(delta: str) -> None:
+            buf.append(delta)
+            text = "".join(buf)
+            now = time.monotonic()
+            grown = len(text) - pub["chars"]
+            if not text or (grown < 120 and (now - pub["at"] < 1.0 or grown <= 0)):
+                return
+            pub["chars"] = len(text)
+            pub["seq"] += 1
+            pub["at"] = now
+            try:
+                self.bb.append_event(
+                    self.project_id, "llm.thinking.delta",
+                    {"stream_id": stream_id, "thinking": text,
+                     "seq": pub["seq"]},
+                    session_id=None, author="orchestrator")
+            except Exception:  # noqa: BLE001 —— 观测事件失败不影响编排
+                log.exception("编排器 llm.thinking.delta 落库失败")
+
+        return {"on_thinking": _on_thinking}, stream_id
+
     def chat_turn(
         self, text: str, *, wake: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
@@ -1236,10 +1348,13 @@ class Orchestrator:
                     self.heartbeat()
                 except Exception:  # noqa: BLE001 —— 续租失败不阻断对话
                     log.exception("对话轮租约心跳失败")
-            resp = self.llm.chat(messages, system=system, tools=self._orch_tools())
+            skwargs, stream_id = self._stream_kwargs()
+            resp = self.llm.chat(messages, system=system, tools=self._orch_tools(),
+                                 **skwargs)
             record_llm_usage(
                 self.bb, self.project_id, resp.usage, source="orchestrator-chat",
                 session_id=None, model=getattr(self.llm, "model", ""))
+            self._emit_thinking(resp, _step, "chat", stream_id=stream_id)
             messages.append({"role": "assistant", "content": resp.raw.get("content", [])})
             step_text = self._assistant_text(resp.raw)
             if step_text:
@@ -1291,13 +1406,18 @@ class Orchestrator:
             except Exception:  # noqa: BLE001 —— 落盘失败不丢本轮已落地的实体
                 log.exception("编排状态落盘失败")
         fallback = "（步数上限，本轮未显式 done）" if exhausted else "（本轮无动作）"
-        return {
+        out: dict[str, Any] = {
             "summary": self._summary or "；".join(self._actions) or fallback,
             "published": list(self._published),
             "spawned": list(self._spawned),
             "digest": self._digest,
             "proposals": list(self._proposals),  # 批 6：仅 L0 propose_only 非空
         }
+        if self.config.analyze_only:
+            # auto-attack 研判轮（2026-09-28）：渗透计划全文；非研判轮不带此键
+            # （tick 结果键集合是既有契约，严格断言不收多余键）
+            out["analysis"] = getattr(self, "_analysis_text", "")
+        return out
 
     # ---------- A5：优先级重排（手动 / L2 自动去抖共用） ----------
 
@@ -1334,12 +1454,14 @@ class Orchestrator:
                     if blocked_lines else "",
             role_catalog=self._role_catalog_prompt(),
         )
+        skwargs, stream_id = self._stream_kwargs()
         resp = self.llm.chat(
             [{"role": "user", "content": "请按排序原则重排待认领任务优先级，调用一次 set_priorities。"}],
-            system=system, tools=REPLAN_TOOLS)
+            system=system, tools=REPLAN_TOOLS, **skwargs)
         record_llm_usage(
             self.bb, self.project_id, resp.usage, source="orchestrator",
             session_id=None, model=getattr(self.llm, "model", ""))
+        self._emit_thinking(resp, 1, "replan", stream_id=stream_id)
 
         raw_updates: list[dict[str, Any]] = []
         for tc in getattr(resp, "tool_calls", None) or []:
@@ -1557,6 +1679,40 @@ class Orchestrator:
             })
         return json.dumps({"sessions": out}, ensure_ascii=False, indent=1)
 
+    def _pending_delegate_approvals(self) -> list[dict]:
+        """L1 待审批委派卡（2026-09-28）：approvals 表 status='pending' 且
+        op='delegate_window'。L1 委派批准前任务不写 tasks 表、不落事件，编排器
+        _stats/去重/防碎全看不见——这里把「在途审批」捞出来补闸（积压上限、
+        同指纹去重、同目标防碎）。返回 action 已解析的卡列表。"""
+        rows = self.bb.conn.execute(
+            "SELECT id, action FROM approvals"
+            " WHERE project_id=? AND status='pending'",
+            (self.project_id,)).fetchall()
+        out = []
+        for r in rows:
+            try:
+                action = json.loads(r["action"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            if action.get("op") == "delegate_window":
+                out.append({"id": r["id"], **action})
+        return out
+
+    def _approvals_view(self) -> dict:
+        """态势审批段：待审批委派卡计数 + 摘要（cap 10）——LLM 收敛判据
+        把「审批排队」当作在途工作（L1 下任务批准前不进 tasks 表）。"""
+        pending = self._pending_delegate_approvals()
+        return {
+            "pending_delegate": len(pending),
+            "pending": [{
+                "id": p["id"],
+                "objective": str(p.get("objective") or "")[:80],
+                "role": p.get("role") or "",
+                "task_type": p.get("task_type") or "generic",
+                "risk": p.get("risk") or "medium",
+            } for p in pending[:10]],
+        }
+
     def _tool_delegate(
         self, objective: str, task_type: str = "generic", role: str = "",
         target_session: str = "", force_new_window: bool = False,
@@ -1676,6 +1832,36 @@ class Orchestrator:
         if not sid:
             auto = self.autonomy_provider() if self.autonomy_provider is not None else None
             if auto is not None and auto.get("level") == "L1":
+                # L1 待审批（2026-09-28）：审批卡批准前不写 tasks 表、不落事件，
+                # 编排器每轮看队列空会无限续提。闸序：先同指纹去重（同款给「复用」
+                # 具体理由），再积压上限（pending 达单轮上限停发，等人类消化）
+                pending = self._pending_delegate_approvals()
+                # 同指纹去重（待审批在途）：同款已提审批 → 复用不重复提审
+                fp = dedup_fp(task_type, scope, objective)
+                for p in pending:
+                    if dedup_fp(p.get("task_type") or "generic",
+                                p.get("scope") or "",
+                                p.get("objective") or "") == fp:
+                        return (f"[复用] 同款委派已在审批中 {p['id']}，"
+                                "本轮不重复提审（审批结果下轮 tick 可见）")
+                # 待审批积压硬闸：pending 达单轮上限即停发
+                if len(pending) >= self.config.max_publish_per_tick:
+                    return (f"[拒绝] 已有 {len(pending)} 张委派审批待人类处理"
+                            f"（≥max_publish_per_tick={self.config.max_publish_per_tick}）；"
+                            "请先审批消化，下轮再续派")
+                # 同目标防碎（待审批在途并入）：pending 卡 scope/conflict_keys
+                # 也算在队，防对同一目标无限提审批卡
+                if target_keys:
+                    n_pend = 0
+                    for p in pending:
+                        row_keys = set(p.get("conflict_keys") or [])
+                        if target_keys & target_keys_of(
+                                p.get("scope") or "", list(row_keys)):
+                            n_pend += 1
+                    if n_target + n_pend >= MAX_TASKS_PER_TARGET:
+                        return (f"[拒绝] 同目标 {'、'.join(sorted(target_keys))} 在队"
+                                f"（open/claimed {n_target} + 待审批 {n_pend}）已达"
+                                f"阈值 {MAX_TASKS_PER_TARGET}——请先审批消化存量")
                 # L1 开窗审批：批准后处理器开窗 + 写入委托 + 带活起跑
                 appr = self.bb.request_approval(
                     self.project_id,

@@ -23,8 +23,13 @@ HTTP 非 200 时第二元为解析后的错误 dict（与非流式 transport 对
 
 # 瞬时故障（网络超时 / 限流 / 网关抖动）自动重试：多会话长跑中一次抖动不该杀死整个编排
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
-MAX_RETRIES = 3
-RETRY_BACKOFF = 3.0
+# 2026-09-28：原 3 次尝试（2 次重试）+ 30/60s backoff 会把坏窗口拖成十几分钟静默——
+# 改为失败只重试 1 次（MAX_RETRIES=总尝试次数），错误快速暴露交人工判断
+MAX_RETRIES = 2
+# 2026-09-28：backoff 3→30——实测 ark 网关对大 max_tokens 请求有分钟级坏窗口（同分钟
+# 小预算请求秒通、大预算挂起，坏窗口可持续 6 分钟+，实测 11:25-11:31 三连超时实例）。
+# 原 3/6s 间隔三次尝试全落同一窗口；30/60s 让第②③次尝试有机会跨入恢复窗口。
+RETRY_BACKOFF = 30.0
 
 
 def _default_transport(timeout: float) -> Transport:
@@ -72,7 +77,12 @@ def _default_stream_transport(timeout: float) -> StreamTransport:
 
 
 class AnthropicCompatProvider:
-    """Anthropic /v1/messages 协议。超时默认 120s（Agent 工具循环单步较重）。"""
+    """Anthropic /v1/messages 协议。超时默认 240s（2026-09-28：120→240——实测正常态
+    tick 18s/慢态可达 ~126s（耗时随 max_tokens 预算线性增长），240s 吸收慢态避免
+    120s 误杀；流式调用为帧间隔超时不受损，UI 测活单独传 30s 不受影响）。
+    2026-09-28 全走流式：只要网关支持（未 _stream_disabled）所有调用都走 SSE——
+    流式为帧间隔超时，长思考（planner/intel 无回调调用实测 6-10 分钟）不再触发
+    非流式「总等待」超时；回调可选，不传只是不上屏。"""
 
     def __init__(
         self,
@@ -80,7 +90,7 @@ class AnthropicCompatProvider:
         api_key: str,
         model: str,
         *,
-        timeout: float = 120.0,
+        timeout: float = 240.0,
         transport: Transport | None = None,
         stream_transport: StreamTransport | None = None,
         api_version: str = "2023-06-01",
@@ -131,9 +141,10 @@ class AnthropicCompatProvider:
     ) -> LLMResponse:
         """on_thinking：SSE thinking_delta 逐帧回调（思考流式上屏，2026-09-19）；
         on_text：SSE text_delta 逐帧回调（回复流式，2026-09-20 对话窗）；
-        should_cancel：逐帧间轮询，命中即掐断连接抛 LLMError——全缺省走原
-        非流式路径。system：str（自动包装单块打 cache_control，M1 默认路径）或
-        块数组（str 元素自动包装不打标 / dict 原样——调用方精细控制断点位置）。"""
+        should_cancel：逐帧间轮询，命中即掐断连接抛 LLMError。回调全缺省也走
+        流式传输（2026-09-28 全走流式：帧间隔超时抗长思考），只是不逐帧上屏。
+        system：str（自动包装单块打 cache_control，M1 默认路径）或块数组
+        （str 元素自动包装不打标 / dict 原样——调用方精细控制断点位置）。"""
         body: dict[str, Any] = {
             "model": self.model,
             "max_tokens": max_tokens,
@@ -149,8 +160,11 @@ class AnthropicCompatProvider:
             # 思考链路（2026-09-19 直播间终端化）：请求侧显式开启，模型吐 thinking block
             # → 落 llm.thinking 事件，前端展开看思考全文。budget 8192 平衡质量与耗时。
             body["thinking"] = {"type": "enabled", "budget_tokens": 8192}
-        use_stream = (on_thinking is not None or on_text is not None) \
-            and not self._stream_disabled
+        # 2026-09-28 全走流式（回调可选）：原「有回调才 stream」让 planner/intel 等
+        # 无回调调用走非流式——服务端思考完才回响应头，240s 是总等待上限，长思考
+        # （实测 6-10 分钟）必超时；重试= 原样重发同一请求注定再超时，纯浪费 5+ 分钟。
+        # SSE 早回头 + 帧间隔超时天然抗长思考，故只要网关支持（未降级）就始终流式。
+        use_stream = not self._stream_disabled
         if use_stream:
             body["stream"] = True
         payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
@@ -214,7 +228,7 @@ class AnthropicCompatProvider:
             except (TimeoutError, ConnectionError) as e:
                 last_err = e
                 if attempt >= MAX_RETRIES:
-                    raise LLMError(f"网络错误（已重试 {MAX_RETRIES} 次）: {e}") from e
+                    raise LLMError(f"网络错误（已重试 {MAX_RETRIES - 1} 次）: {e}") from e
                 time.sleep(RETRY_BACKOFF * attempt)
         raise last_err  # pragma: no cover — 循环内必 return 或 raise
 

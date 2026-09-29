@@ -42,6 +42,20 @@ entries:
     cap: web
     expect: [web/playbooks/oauth-saml-jwt/10-oauth-redirect.md,
              web/playbooks/oauth-saml-jwt/00-index.md]
+  # ---- P0 手法手册回归（2026-09-29）：web/webapp/*/手册.md 中文标题+summary 后
+  #      锁进黄金集——确保「怎么测」手册不被 CTF 题解/泛词挤出 top-4 ----
+  - query: 对站点做越权测试，检查水平越权与垂直越权
+    cap: web
+    expect: [web/webapp/idor/手册.md, web/playbooks/arbitrary-x-authz.md]
+  - query: 登录功能测试认证绕过、密码重置和会话管理
+    cap: web
+    expect: [web/webapp/authbypass/手册.md, web/playbooks/logic-flaws/11-business-logic.md]
+  - query: 测试业务逻辑漏洞，看支付金额能不能篡改、订单跳步
+    cap: web
+    expect: [web/webapp/logic/手册.md, web/playbooks/logic-flaws/11-business-logic.md]
+  - query: SQL 注入测试，先按 SQL 注入手册打一遍
+    cap: web
+    expect: [web/webapp/sqli/手册.md, web/playbooks/sqli.md]
   # ---- binary ----
   - query: 栈溢出 ret2libc 打法，先找 gadget 再写 exp
     cap: binary

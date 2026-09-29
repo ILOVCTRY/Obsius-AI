@@ -30,7 +30,7 @@ export function ceScript({ moduleName, addr, imagebase, bits, name }: CeScriptOp
   const mod = moduleName?.trim() || "<模块文件名.exe>"
 
   const lines: string[] = [
-    `-- cyberstrike-pro 人工动态验证（Cheat Engine Lua）：${label}（${bits} 位）`,
+    `-- obsius 人工动态验证（Cheat Engine Lua）：${label}（${bits} 位）`,
     "-- 用法：CE 附加目标进程后，Memory View → Tools → Lua Engine，粘贴 Execute。",
     "-- 平台只生成脚本文本：不附加进程、不扫描内存，动态分析纪律由人负责。",
     `local MODULE = ${JSON.stringify(mod)}`,

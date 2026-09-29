@@ -285,24 +285,9 @@ def import_assets(bb, project_id: str, rows: list[dict], source: str,
                              "import_batch": batch_id}
 
     def _host_of(row: dict) -> str:
-        h = str(row.get("host") or row.get("domain") or "").strip()
-        # 值里带 scheme（xlsx 列内容是完整 URL 却被映射为 host 列的实战坑）：
-        # 取 hostname，再带端口/路径（如 https://x:8080/）剥尾部——否则会以
-        # 「https://x」形态显式登记成 domain，绕过 detect_type 且与裸域名无法合并。
-        if "://" in h:
-            try:
-                u = urlparse(h)
-            except ValueError:
-                return ""
-            h = u.hostname or ""
-        h = h.rstrip("/")
-        if h and ":" in h:
-            head, _, tail = h.rpartition(":")
-            # 「x.com:8080/」形态：端口随 port 字段走，此处只留主机名；
-            # 尾部带路径（非数字 tail）整段切掉
-            if head and tail.isdigit() and len(tail) <= 5:
-                return head
-        return h
+        # 清洗逻辑抽到模块级 clean_host（FOFA host 展示共用同一规范化），
+        # host 缺失回退 domain——镜像导入登记的实际取值。
+        return clean_host(str(row.get("host") or row.get("domain") or ""))
 
     # 预热 DNS：host 域名 + url 主机部域名
     domains: list[str] = []
@@ -393,6 +378,29 @@ def import_assets(bb, project_id: str, rows: list[dict], source: str,
         return summary
     finally:
         clear_dns_warm()
+
+
+def clean_host(value: str) -> str:
+    """剥 scheme（「://」→ urlparse.hostname）、尾斜杠、数字端口/路径尾。
+
+    FOFA host 展示与导入登记的共用规范化（幂等，干净值原样过）：
+    「https://zczx.zut.edu.cn」「authserver.zut.edu.cn:8080」「x.com/」
+    都归一成裸主机名——端口随 port 字段走，此处只留主机名。
+    """
+    h = str(value or "").strip()
+    if "://" in h:
+        try:
+            u = urlparse(h)
+        except ValueError:
+            return ""
+        h = u.hostname or ""
+    h = h.rstrip("/")
+    if h and ":" in h:
+        head, _, tail = h.rpartition(":")
+        # 「x.com:8080/」形态：尾部带路径（非数字 tail）整段切掉
+        if head and tail.isdigit() and len(tail) <= 5:
+            return head
+    return h
 
 
 def _looks_domain(host: str) -> bool:

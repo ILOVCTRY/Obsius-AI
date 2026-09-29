@@ -136,6 +136,37 @@ def test_allows_devnull_with_glued_separator():
         ['"a;b.txt"']
 
 
+def test_allows_devnull_with_subshell_paren():
+    """`$(curl … 2>/dev/null)` 子壳右括号紧贴重定向目标是 bash 高频惯用法——
+    目标必须在引号外的 `)` 处截断，否则提取出伪路径 /dev/null) 绕过 /dev/null
+    白名单被误判逃逸（2026-09-29 实战 sess-948e9ba771eb：stderr 丢弃三连拒致
+    E2 熔断挂起实锤；模型照回执改对输出文件仍拒，原样重试三振出局）。"""
+    cmd = ("for p in actuator actuator/health; do "
+           "code=$(curl -sS -m 8 -o xj_tmp.txt -w '%{http_code}' "
+           "http://xjapi.zut.edu.cn/$p 2>/dev/null); "
+           "size=$(wc -c < xj_tmp.txt 2>/dev/null); "
+           "echo \"$p $code\"; done; rm -f xj_tmp.txt")
+    assert "/dev/null)" not in pathguard.scan_write_targets(cmd, posix=True)
+    assert pathguard.workspace_escapes(
+        cmd, scratch="/workspace/scratch", workspace="/workspace",
+        posix=True) == []
+    # 裸子壳（无 $）同形态
+    assert pathguard.workspace_escapes(
+        "(curl -sS http://a.b 2>/dev/null) | head -3",
+        scratch="/workspace/scratch", workspace="/workspace",
+        posix=True) == []
+    # 同一逃逸目标多次出现只报一次（回执不重复抖串）
+    assert pathguard.workspace_escapes(
+        "curl -o /tmp/a http://x 2>/dev/null); echo x > /tmp/a 2>/dev/null)",
+        scratch="/workspace/scratch", workspace="/workspace",
+        posix=True) == ["/tmp/a"]
+    # 真逃逸带括号照样拦：截断只会让提取更准（/tmp/x) → /tmp/x），无新旁路
+    assert pathguard.workspace_escapes(
+        "curl -o /tmp/x http://a 2>/dev/null)",
+        scratch="/workspace/scratch", workspace="/workspace",
+        posix=True) == ["/tmp/x"]
+
+
 def test_escapes_posix_wsl():
     esc = pathguard.workspace_escapes(
         "nmap -oG /tmp/scan.gnmap x", scratch="/mnt/e/proj/ws/scratch",

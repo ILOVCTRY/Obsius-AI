@@ -1,17 +1,25 @@
 import type { ProjectMeta } from "./types"
 
 // 工作台 profile 推导（DESIGN.md §4.5.5）：config.workbench.profile 显式覆盖优先；
-// 否则 research 轨 + binary 能力包 ⇒ rev-generic 逆向理解工作台。
+// 否则 research 轨 ⇒ rev-generic 逆向理解工作台。M3 起 capabilities 多选退役
+// （创建恒空），旧「track=research && caps 含 binary」判据已死——M3 后新建的
+// research 项目全会误落渗透模板（2026-09-29 修复）；场景档显式物化的
+// board_view 非 funcs（如 code-audit 档的 findings）→ 交还渗透黑板。
 // 逆向内部子类（病毒分析/破解/外挂/逆向开发）以后只加一份 profile 声明，后端不分叉。
 
 export type WorkbenchProfile = "rev-generic" | string | null
 
 export function deriveWorkbenchProfile(meta: ProjectMeta | null | undefined): WorkbenchProfile {
-  const cfg = meta?.config as { workbench?: { profile?: unknown } } | undefined
+  const cfg = meta?.config as {
+    workbench?: { profile?: unknown }
+    board_view?: { default?: unknown }
+  } | undefined
   const explicit = cfg?.workbench?.profile
   if (typeof explicit === "string" && explicit.trim()) return explicit.trim()
-  if (meta?.track === "research" && (meta.capabilities ?? []).includes("binary")) return "rev-generic"
-  return null
+  if (meta?.track !== "research") return null
+  const bv = cfg?.board_view?.default
+  if (typeof bv === "string" && bv && bv !== "funcs") return null
+  return "rev-generic"
 }
 
 // 地址一律以小写 0x hex 字符串在 UI 内流转（后端契约：JS Number 无法安全表示 64 位地址）

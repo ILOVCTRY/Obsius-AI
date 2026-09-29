@@ -1,0 +1,15 @@
+# CTF 轨阶段剧本（planner-cadence P2，2026-09-28）——文件名 stem=阶段 id。
+# 复核阶段：验证答案正确性，产出 writeup。终点阶段无 gate；next 回指 solve
+# 支持复核不通过回解题修正的回退。
+name: 复核
+goal: 复核答案正确性，产出 writeup
+order: 4
+focus:
+  verify: 3
+gate_types: []
+tasks:
+  - task_type: verify
+    role: _generalist
+    objective: 独立复核解题结论：flag 正确性/验证路径可复现性，复核通过后整理 writeup
+    acceptance: 复核结论落黑板（verified/false-positive），writeup 落产物（含 flag、解法链路、证据）
+next: [solve]

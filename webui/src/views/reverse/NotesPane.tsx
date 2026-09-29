@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react"
 import { Loader2, FileUp } from "lucide-react"
 import { api, pollJob } from "@/lib/api"
-import type { FuncEntry, WritebackItem, WritebackResult } from "@/lib/types"
+import type { FuncEntry, LogicBlockSummary, WritebackItem, WritebackResult } from "@/lib/types"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
@@ -56,6 +56,23 @@ export function NotesPane({ pid, sha, addr, cacheName, kb, onSaved, mcpLive = fa
   const [wbBusy, setWbBusy] = useState(false)
   const [wbMsg, setWbMsg] = useState<string | null>(null)
 
+  // 加入业务块（逆向第四页签）：列表 4s 轮询与 Agent 产出同步
+  const [lbItems, setLbItems] = useState<LogicBlockSummary[]>([])
+  const [lbSel, setLbSel] = useState("")
+  const [lbRole, setLbRole] = useState("")
+  const [lbBusy, setLbBusy] = useState(false)
+  const [lbMsg, setLbMsg] = useState<string | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    const load = () => api.logicBlocks(pid, sha)
+      .then((rs) => { if (alive) setLbItems(rs) })
+      .catch(() => {})
+    load()
+    const t = setInterval(load, 4000)
+    return () => { alive = false; clearInterval(t) }
+  }, [pid, sha])
+
   // 只有切函数才全量重置；同函数的 4s 轮询刷新（kb 引用每轮更新）不得清空
   // 正在编辑的表单、勾选态或写回结果文案。
   const prevAddr = useRef(addr)
@@ -68,6 +85,9 @@ export function NotesPane({ pid, sha, addr, cacheName, kb, onSaved, mcpLive = fa
     setMsg(null)
     setWbMsg(null)
     setWithComment(false)
+    setLbSel("")
+    setLbRole("")
+    setLbMsg(null)
     // 切函数瞬间取最新 kb/cacheName 填表单；同函数刷新有意不重跑
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [addr])
@@ -138,6 +158,31 @@ export function NotesPane({ pid, sha, addr, cacheName, kb, onSaved, mcpLive = fa
 
   const commentReady = !!firstNoteParagraph(kb?.analysis ?? "")
 
+  // 加入业务块：挂接前确保函数已在 func_kb（无行先建，照 save 先例——
+  // 后端挂接校验 (sha, address) 必须已登记，这里顺手补齐入库）
+  const addToBlock = async () => {
+    if (!lbSel) return
+    setLbBusy(true)
+    setLbMsg(null)
+    try {
+      if (!kb) {
+        const finalName = name.trim() || cacheName || `sub_${addr.replace(/^0x/, "")}`
+        await api.createFunc(pid, {
+          binary_sha256: sha, address: addr, name: finalName, analysis: "",
+        })
+      }
+      await api.addLogicBlockFunc(pid, lbSel, { address: addr, role: lbRole })
+      const b = lbItems.find((x) => x.id === lbSel)
+      setLbMsg(`已加入「${b?.name ?? lbSel}」`)
+      setLbRole("")
+      onSaved()
+    } catch (e) {
+      setLbMsg(String(e))
+    } finally {
+      setLbBusy(false)
+    }
+  }
+
   return (
     <div className="space-y-2 p-2">
       <label className="block">
@@ -183,6 +228,38 @@ export function NotesPane({ pid, sha, addr, cacheName, kb, onSaved, mcpLive = fa
           ⬆ 写回 IDA
         </Button>
         {wbMsg && <p className="mt-1 break-all font-mono text-[10px] text-muted-foreground">{wbMsg}</p>}
+      </div>
+
+      {/* 加入业务块（「业务逻辑」页签可见；挂接纪律：仅 func_kb 已登记函数） */}
+      <div className="border-t pt-2">
+        <span className="mb-0.5 block text-[10px] text-muted-foreground">加入业务块</span>
+        {lbItems.length === 0 ? (
+          <p className="text-[10px] leading-relaxed text-muted-foreground">
+            本样本尚无业务块——到「业务逻辑」页签新建，或让 Agent 经 bb_logic_block_create 产出
+          </p>
+        ) : (
+          <div className="space-y-1">
+            <select
+              value={lbSel} onChange={(e) => setLbSel(e.target.value)}
+              className="h-7 w-full rounded border bg-card px-1 text-[11px] outline-none"
+            >
+              <option value="">选择业务块…</option>
+              {lbItems.map((b) => (
+                <option key={b.id} value={b.id}>{b.name}</option>
+              ))}
+            </select>
+            <div className="flex gap-1">
+              <Input value={lbRole} onChange={(e) => setLbRole(e.target.value)}
+                     className="h-7 min-w-0 flex-1 text-[11px]" placeholder="角色注（可空）" />
+              <Button size="sm" variant="outline" className="gap-1 text-[11px]"
+                      onClick={addToBlock} disabled={lbBusy || !lbSel}>
+                {lbBusy && <Loader2 className="size-3 animate-spin" />}
+                加入
+              </Button>
+            </div>
+            {lbMsg && <p className="break-all font-mono text-[10px] text-muted-foreground">{lbMsg}</p>}
+          </div>
+        )}
       </div>
     </div>
   )

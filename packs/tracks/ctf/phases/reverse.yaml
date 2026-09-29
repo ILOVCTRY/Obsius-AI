@@ -1,0 +1,18 @@
+# CTF 轨阶段剧本（planner-cadence P2，2026-09-28）——文件名 stem=阶段 id。
+# 逆向阶段：样本/源码深析，关键函数+解题点定位（func_kb/发现沉淀）。
+name: 逆向
+goal: 样本与源码深析，定位关键函数与解题点
+order: 2
+focus:
+  reverse: 3
+  analyze: 1
+gate:
+  min_verified: 1
+  idle_rounds: 2
+gate_types: [solve]
+tasks:
+  - task_type: reverse
+    role: reverse
+    objective: 对题目二进制/源码做逆向深析：关键函数定位、逻辑还原、漏洞/后门/关键算法定位，沉淀 func_kb 与发现
+    acceptance: 关键函数以 func_kb 登记（name/analysis/risk_tags），解题关键点落发现（intel，带 evidence）
+next: [solve]

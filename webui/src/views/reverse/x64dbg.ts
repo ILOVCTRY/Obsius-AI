@@ -11,7 +11,7 @@ export function x64dbgScript(addr: string, bits: number, name?: string): string 
     : `rax={rax} rcx={rcx} rdx={rdx} r8={r8} r9={r9} rsp={rsp}`
   const label = name ? `${name} @ ${addr}` : addr
   return [
-    `// cyberstrike-pro 人工动态验证：${label}（${bits} 位）`,
+    `// obsius 人工动态验证：${label}（${bits} 位）`,
     `// 粘贴到 x64dbg 脚本窗口执行；命中断点后看日志窗口，随后 File → Export → Log 导出`,
     `bp ${addr}`,
     `SetBreakpointLog ${addr}, "[hit ${label}] ${logArgs}"`,

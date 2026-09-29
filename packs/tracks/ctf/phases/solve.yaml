@@ -1,0 +1,18 @@
+# CTF 轨阶段剧本（planner-cadence P2，2026-09-28）——文件名 stem=阶段 id。
+# 解题阶段：按考点类型派单求解，产出 flag 或验证路径。
+name: 解题
+goal: 按考点类型求解题目，产出 flag 或验证路径
+order: 3
+focus:
+  solve: 3
+  verify: 2
+gate:
+  min_verified: 1
+  idle_rounds: 2
+gate_types: []
+tasks:
+  - task_type: solve
+    role: _generalist
+    objective: 按已锁定考点求解题目：pwn/web/crypto/rev/misc 对应手法推进，产出 flag 或可复现验证路径
+    acceptance: flag 或验证结果落发现（intel，带 evidence 复现步骤），解法结论清晰
+next: [verify]

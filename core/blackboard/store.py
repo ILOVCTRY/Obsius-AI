@@ -844,6 +844,20 @@ class Blackboard:
                 ":requested_by,:created_at)",
                 appr,
             )
+        # 审批请求落事件（2026-09-28 内联审批卡）：此前请求只写表不落事件，直播流里
+        # 「会话在等审批」不可见，决策只能去审批收件箱。作者=requested_by（编排委派
+        # 进编排页签，worker 会话请求进所属会话页签）；摘要=action 去 op 后的紧凑
+        # JSON 截断——卡片副标题一行可读，完整 action 在审批收件箱/事件 JSON 里。
+        op = str(action.get("op") or "unknown")
+        summary = json.dumps(
+            {k: v for k, v in action.items() if k != "op"}, ensure_ascii=False)
+        if len(summary) > 160:
+            summary = summary[:157] + "..."
+        self.append_event(
+            project_id, "approval.requested",
+            {"approval_id": appr["id"], "op": op, "summary": summary,
+             "risk": risk, "requested_by": requested_by},
+            session_id=session_id, author=requested_by)
         return appr
 
     def decide_approval(
@@ -1273,7 +1287,8 @@ class Blackboard:
 
     def set_asset_status(self, asset_id: str, status: str, note: str | None = None,
                          author: str = "system",
-                         expected_revision: int | None = None) -> dict:
+                         expected_revision: int | None = None,
+                         detail: dict | None = None) -> dict:
         """资产扫描/测试状态机（E7，§5.2；2026-09-19 扩六态）：复活 assets.status 死列。
 
         白名单六态 open/visited/scanning/tested_clean/budget_stop/na（借鉴 dsh
@@ -1281,7 +1296,9 @@ class Blackboard:
         **tested_clean/budget_stop/na 必带 note**（服务端强制——测了什么/为什么停/
         为什么不适用，防 AI 虚标干净）；
         同状态重复流转是 no-op（不 bump revision）；每次实际流转落 asset.status_changed
-        审计事件。expected_revision（H2 乐观锁）：非空时与行 revision 比对，不符抛
+        审计事件。detail（2026-09-29 四问答案，Agent 工具层强制）：tested_what/
+         viewpoint/why_no_finding 全文并入事件 payload 供事后对账（note 只截 200）。
+        expected_revision（H2 乐观锁）：非空时与行 revision 比对，不符抛
         ValueError（多窗并发改同一资产防丢失更新——冲突方重新读取后再改）。
         「有发现」不由 AI 标：verified findings 由前端反查显徽章，结论以 findings 为准。
         资产不存在抛 LookupError（→API 404）。
@@ -1315,23 +1332,27 @@ class Blackboard:
                     raise ValueError(
                         "该资产存在子资产：父节点 tested_clean 由子树全部终态自动派生，"
                         "请流转子节点（不适用的面可对子节点标 na）")
-                # tested-clean-intent-backing（2026-09-25）：叶子 clean 须有
-                # closed/dead_end 意图背书（直接命中 / target 子树批次覆盖）——
-                # 死路收尾自带 dead_reason + 证据门禁，防粗略判净
+                # tested-clean-intent-backing（2026-09-25；2026-09-29 逐资产收紧）：
+                # 叶子 clean 须有直接围绕该资产的 closed/dead_end 意图背书——
+                # 祖先链批次覆盖已移除（一条父节点「基线一致」死路意图曾批量
+                # 误标 12 个活站，sess-1d692817a5d0）；死路收尾自带 dead_reason
+                # + 证据门禁，防粗略判净
                 from core.blackboard.intents import dead_end_backing_target
                 if dead_end_backing_target(
                         self.conn, row["project_id"], asset_id) is None:
                     raise ValueError(
-                        "tested_clean 须有死路意图背书：先 declare_intent 声明可证伪假设，"
-                        "close_intent(outcome=dead_end) 带证据收尾后再标；批量面（站群/"
-                        "宿主）可对父节点立一条死路意图覆盖子树")
+                        "tested_clean 须有直接围绕该资产的死路意图背书：对本资产"
+                        " declare_intent 声明可证伪假设，close_intent"
+                        "(outcome=dead_end) 带证据收尾后再标（每资产独立意图，"
+                        "意图越多测得越全面；禁止父节点一条意图批量覆盖子树）")
             self.conn.execute(
                 "UPDATE assets SET status=?, revision=revision+1 WHERE id=?",
                 (status, asset_id))
         self.append_event(
             row["project_id"], "asset.status_changed",
             {"asset_id": asset_id, "old": row["status"], "new": status,
-             "note": (note or "")[:200], "by": author},
+             "note": (note or "")[:200], "by": author,
+             **({"detail": detail} if detail else {})},
             author=author)
         return self.get_asset(asset_id)  # type: ignore[return-value]
 
@@ -1608,7 +1629,75 @@ class Blackboard:
             if dups:
                 out["dedup_warning"] = [{"id": d["id"], "title": d["title"]}
                                         for d in dups]
+        # 阶段四 M2 黑板发布/订阅（2026-09-28）：新 finding 强关联广播——命中在跑
+        # 目标任务的资产值 → 给认领会话发 agent_message(intel) 情报私信（非本人、
+        # 未关闭、任务 open/claimed）。多会话协作核心：A 的发现主动喂给做同目标
+        # 任务的 B，不再等 B 下次认领才看到。cap 目标数防风暴。
+        if not merged:
+            try:
+                self._broadcast_finding_intel(project_id, finding_id, title,
+                                              target_asset_id, author)
+            except Exception:  # noqa: BLE001 —— 广播失败不影响登记主路径
+                log.exception("finding intel 广播失败 finding=%s", finding_id)
         return out
+
+    def _broadcast_finding_intel(
+        self, project_id: str, finding_id: str, title: str,
+        target_asset_id: str | None, by: str,
+    ) -> None:
+        """M2 强关联广播：新 finding 的资产值命中在跑（open/claimed）目标任务
+        objective/scope → 向认领会话发 agent_message(intel)。排除作者本人与
+        closed 会话；每任务目标 cap 5 条，防多会话频繁登记引发广播风暴。
+        仅 Agent 产出的 finding（author=sess- 会话）广播——post_agent_message
+        校验 from_session 必须存在，人工/系统登记无真实来源会话，跳过。
+        纯增强：任何失败静默降级（登记主路径已返回）。"""
+        if not target_asset_id:
+            return
+        if not (isinstance(by, str) and by.startswith("sess-")):
+            return  # 人工/系统登记不广播（无真实 from 会话）
+        try:
+            asset = self.conn.execute(
+                "SELECT value FROM assets WHERE id=? AND project_id=?",
+                (target_asset_id, project_id)).fetchone()
+        except Exception:  # noqa: BLE001
+            asset = None
+        if asset is None or not str(asset["value"] or "").strip():
+            return
+        av = str(asset["value"]).strip().lower()
+        alive = self._alive_sessions(project_id)
+        targets: list[str] = []
+        try:
+            rows = self.conn.execute(
+                "SELECT id, objective, scope, claimed_by FROM tasks"
+                " WHERE project_id=? AND status IN ('open','claimed')",
+                (project_id,)).fetchall()
+        except Exception:  # noqa: BLE001
+            return
+        for r in rows:
+            if len(targets) >= 5:
+                break
+            blob = (str(r["objective"] or "") + " " + str(r["scope"] or "")).lower()
+            if av not in blob:
+                continue
+            sid = r["claimed_by"] if r["status"] == "claimed" else None
+            if not sid:
+                continue
+            if sid == by:
+                continue  # 不给自己广播（登记方自然知道自己产出了什么）
+            if not (isinstance(sid, str) and sid in alive and alive[sid] != "closed"):
+                continue
+            if sid not in targets:
+                targets.append(sid)
+        if not targets:
+            return
+        for sid in targets:
+            try:
+                self.post_agent_message(
+                    project_id, by, sid, "intel",
+                    f"🧠 黑板新发现（同目标）：{title[:80]}（{finding_id}）——"
+                    "你的任务涉及该目标，先读此结论再动手，避免重复验证/重踩。")
+            except Exception:  # noqa: BLE001 —— 单目标失败不影响其余
+                log.exception("intel 广播投递失败 to=%s", sid)
 
     def list_findings(
         self,
@@ -2636,3 +2725,262 @@ class Blackboard:
             author=author,
         )
         return self.get_blueprint(project_id, bp_id)
+
+    # ---------- 业务逻辑块（逆向第四页签：函数协作/业务语义，人机共写） ----------
+
+    @staticmethod
+    def _parse_addr(address: Any) -> int:
+        """地址入参解析：int 或 "0x…" 串（前端以 hex 串为准——JS Number 无法安全
+        表示 64 位地址）。"""
+        if isinstance(address, bool) or address is None:
+            raise ValueError(f"非法函数地址: {address!r}")
+        try:
+            if isinstance(address, int):
+                return int(address)
+            s = str(address).strip()
+            return int(s, 16) if s.lower().startswith("0x") else int(s, 10)
+        except ValueError:
+            raise ValueError(f"非法函数地址: {address!r}") from None
+
+    def _owned_logic_block(self, project_id: str, lb_id: str) -> sqlite3.Row | None:
+        """业务块归属校验：跨项目访问等同不存在。"""
+        return self.conn.execute(
+            "SELECT * FROM logic_blocks WHERE id=? AND project_id=?", (lb_id, project_id)
+        ).fetchone()
+
+    def _logic_block_funcs(self, lb_id: str) -> list[dict]:
+        """挂接函数出口：join func_kb 取当前函数名（可能已被改名），address 出口
+        为 hex 串。"""
+        rows = self.conn.execute(
+            "SELECT lbf.address, lbf.role, lbf.seq, kb.id AS func_id, kb.name AS func_name"
+            " FROM logic_block_funcs lbf"
+            " JOIN logic_blocks lb ON lb.id=lbf.block_id"
+            " LEFT JOIN func_kb kb ON kb.project_id=lb.project_id"
+            "   AND kb.binary_sha256=lb.binary_sha256 AND kb.address=lbf.address"
+            " WHERE lbf.block_id=? ORDER BY lbf.seq, lbf.rowid",
+            (lb_id,),
+        ).fetchall()
+        return [
+            {
+                "address": hex(int(r["address"])),
+                "func_id": r["func_id"] or "",
+                "func_name": r["func_name"] or "",
+                "role": r["role"] or "",
+                "seq": int(r["seq"]),
+            }
+            for r in rows
+        ]
+
+    def create_logic_block(
+        self, project_id: str, name: str, description: str = "",
+        binary_sha256: str = "", seq: int = 0, author: str = "human",
+    ) -> dict:
+        name = str(name).strip()
+        if not name:
+            raise ValueError("业务块 name 不能为空")
+        lb_id = new_id("lb")
+        with self._tx():
+            try:
+                self.conn.execute(
+                    "INSERT INTO logic_blocks(id,project_id,binary_sha256,name,description,"
+                    "seq,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                    (lb_id, project_id, str(binary_sha256), name,
+                     str(description), int(seq), now(), now()),
+                )
+            except sqlite3.IntegrityError as e:
+                raise ValueError(
+                    f"同项目同样本下业务块重名: {name}（换名或复用既有块）") from e
+        self.append_event(
+            project_id, "logic_block.created",
+            {"logic_block_id": lb_id, "name": name, "binary_sha256": binary_sha256},
+            author=author,
+        )
+        d = self.get_logic_block(project_id, lb_id)
+        assert d is not None
+        return d
+
+    def get_logic_block(self, project_id: str, lb_id: str) -> dict | None:
+        row = self._owned_logic_block(project_id, lb_id)
+        if row is None:
+            return None
+        d = _row_to_dict(row) or {}
+        d["funcs"] = self._logic_block_funcs(lb_id)
+        return d
+
+    def list_logic_blocks(
+        self, project_id: str, binary_sha256: str | None = None
+    ) -> list[dict]:
+        """列表按 seq 排（同序按创建先后）；带 func_count 供列表徽标，不嵌 funcs。"""
+        sql = "SELECT * FROM logic_blocks WHERE project_id=?"
+        args: list[Any] = [project_id]
+        if binary_sha256 is not None:
+            sql += " AND binary_sha256=?"
+            args.append(binary_sha256)
+        sql += " ORDER BY seq, created_at"
+        rows = self.conn.execute(sql, args).fetchall()
+        out: list[dict] = []
+        for r in rows:
+            d = _row_to_dict(r) or {}
+            d["func_count"] = self.conn.execute(
+                "SELECT COUNT(*) FROM logic_block_funcs WHERE block_id=?", (r["id"],)
+            ).fetchone()[0]
+            out.append(d)
+        return out
+
+    def update_logic_block(
+        self, project_id: str, lb_id: str, *,
+        name: Any = UNSET, description: Any = UNSET, seq: Any = UNSET,
+        author: str = "human",
+    ) -> dict | None:
+        """分区更新（UNSET 哨兵：未传不覆盖）。"""
+        row = self._owned_logic_block(project_id, lb_id)
+        if row is None:
+            return None
+        sets, args, changed = [], [], {}
+        if name is not UNSET:
+            if not str(name).strip():
+                raise ValueError("业务块 name 不能为空")
+            sets.append("name=?")
+            args.append(str(name).strip())
+            changed["name"] = str(name).strip()
+        if description is not UNSET:
+            sets.append("description=?")
+            args.append(str(description))
+            changed["description"] = True
+        if seq is not UNSET:
+            sets.append("seq=?")
+            args.append(int(seq))
+            changed["seq"] = int(seq)
+        if not sets:
+            return self.get_logic_block(project_id, lb_id)
+        sets.append("updated_at=?")
+        args.append(now())
+        args.append(lb_id)
+        with self._tx():
+            try:
+                self.conn.execute(
+                    f"UPDATE logic_blocks SET {', '.join(sets)} WHERE id=?", args)
+            except sqlite3.IntegrityError as e:
+                raise ValueError(
+                    f"同项目同样本下业务块重名: {changed.get('name')}") from e
+        self.append_event(
+            project_id, "logic_block.updated",
+            {"logic_block_id": lb_id, **changed}, author=author,
+        )
+        return self.get_logic_block(project_id, lb_id)
+
+    def delete_logic_block(
+        self, project_id: str, lb_id: str, author: str = "human"
+    ) -> bool:
+        row = self._owned_logic_block(project_id, lb_id)
+        if row is None:
+            return False
+        with self._tx():
+            # 连接未开 foreign_keys pragma，级联手动做
+            self.conn.execute("DELETE FROM logic_block_funcs WHERE block_id=?", (lb_id,))
+            self.conn.execute("DELETE FROM logic_blocks WHERE id=?", (lb_id,))
+        self.append_event(
+            project_id, "logic_block.deleted",
+            {"logic_block_id": lb_id, "name": row["name"]}, author=author,
+        )
+        return True
+
+    def add_logic_block_func(
+        self, project_id: str, lb_id: str, address: Any, role: str = "",
+        author: str = "human",
+    ) -> dict | None:
+        """挂接函数（块详情选择器 / 分析视图快捷钮双入口共用，Agent 走工具）。
+        地址必须是 func_kb 中本块同样本的已知函数——防幻觉防跨项目（照
+        add_chain_link 纪律）。项目级块（未绑样本）不挂函数。seq 自动追加。"""
+        row = self._owned_logic_block(project_id, lb_id)
+        if row is None:
+            raise LookupError(f"业务块不存在: {lb_id}")
+        if not row["binary_sha256"]:
+            raise ValueError("项目级块（未绑样本）不挂函数——请建样本级业务块")
+        addr = self._parse_addr(address)
+        if self.lookup_func(project_id, row["binary_sha256"], addr) is None:
+            raise ValueError(
+                f"函数 0x{addr:x} 未登记在 func_kb（样本 "
+                f"{str(row['binary_sha256'])[:12]}…）——先在分析视图入库再挂接")
+        link_id = new_id("lbf")
+        with self._tx():
+            m = self.conn.execute(
+                "SELECT COALESCE(MAX(seq),0) AS m FROM logic_block_funcs WHERE block_id=?",
+                (lb_id,),
+            ).fetchone()["m"]
+            try:
+                self.conn.execute(
+                    "INSERT INTO logic_block_funcs(id,block_id,address,role,seq,created_at)"
+                    " VALUES(?,?,?,?,?,?)",
+                    (link_id, lb_id, addr, str(role), int(m) + 1, now()),
+                )
+            except sqlite3.IntegrityError as e:
+                raise ValueError(f"函数 0x{addr:x} 已挂接在本块") from e
+            self.conn.execute(
+                "UPDATE logic_blocks SET updated_at=? WHERE id=?", (now(), lb_id))
+        self.append_event(
+            project_id, "logic_block.func_added",
+            {"logic_block_id": lb_id, "address": hex(addr), "role": str(role)},
+            author=author,
+        )
+        return self.get_logic_block(project_id, lb_id)
+
+    def remove_logic_block_func(
+        self, project_id: str, lb_id: str, address: Any, author: str = "human"
+    ) -> dict | None:
+        """摘除函数；删后剩余挂接按旧序重排 seq 1..n（照 delete_chain_link）。"""
+        row = self._owned_logic_block(project_id, lb_id)
+        if row is None:
+            return None
+        addr = self._parse_addr(address)
+        gone = self.conn.execute(
+            "SELECT id FROM logic_block_funcs WHERE block_id=? AND address=?",
+            (lb_id, addr),
+        ).fetchone()
+        if gone is None:
+            return None
+        with self._tx():
+            self.conn.execute(
+                "DELETE FROM logic_block_funcs WHERE block_id=? AND address=?",
+                (lb_id, addr))
+            remaining = self.conn.execute(
+                "SELECT id FROM logic_block_funcs WHERE block_id=? ORDER BY seq",
+                (lb_id,),
+            ).fetchall()
+            for i, r in enumerate(remaining, start=1):
+                self.conn.execute(
+                    "UPDATE logic_block_funcs SET seq=? WHERE id=?", (i, r["id"]))
+            self.conn.execute(
+                "UPDATE logic_blocks SET updated_at=? WHERE id=?", (now(), lb_id))
+        self.append_event(
+            project_id, "logic_block.func_removed",
+            {"logic_block_id": lb_id, "address": hex(addr)}, author=author,
+        )
+        return self.get_logic_block(project_id, lb_id)
+
+    def update_logic_block_func(
+        self, project_id: str, lb_id: str, address: Any, role: str,
+        author: str = "human",
+    ) -> dict | None:
+        """改角色注（该函数在本块中的职责一句话）。挂接不存在返回 None。"""
+        row = self._owned_logic_block(project_id, lb_id)
+        if row is None:
+            return None
+        addr = self._parse_addr(address)
+        cur = self.conn.execute(
+            "SELECT id FROM logic_block_funcs WHERE block_id=? AND address=?",
+            (lb_id, addr),
+        ).fetchone()
+        if cur is None:
+            return None
+        with self._tx():
+            self.conn.execute(
+                "UPDATE logic_block_funcs SET role=? WHERE id=?", (str(role), cur["id"]))
+            self.conn.execute(
+                "UPDATE logic_blocks SET updated_at=? WHERE id=?", (now(), lb_id))
+        self.append_event(
+            project_id, "logic_block.func_updated",
+            {"logic_block_id": lb_id, "address": hex(addr), "role": str(role)},
+            author=author,
+        )
+        return self.get_logic_block(project_id, lb_id)

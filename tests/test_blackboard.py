@@ -93,7 +93,9 @@ def test_schema_v7_migration(tmp_path):
     try:
         ver = board.conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
-        assert int(ver) == SCHEMA_VERSION == 24
+        assert int(ver) == SCHEMA_VERSION == 27
+        assert {"logic_blocks", "logic_block_funcs"} <= {r[0] for r in board.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}  # v27（业务逻辑块）
         task_cols = {r[1] for r in board.conn.execute("PRAGMA table_info(tasks)")}
         os_cols = {r[1] for r in board.conn.execute(
             "PRAGMA table_info(orchestrator_state)")}
@@ -1148,7 +1150,7 @@ def test_schema_v11_migration_idempotent(tmp_path):
         board = Blackboard(str(db_path))
         ver = board.conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
-        assert int(ver) == SCHEMA_VERSION == 24
+        assert int(ver) == SCHEMA_VERSION == 27
         cols = {r[1] for r in board.conn.execute("PRAGMA table_info(findings)")}
         assert "rating_basis" in cols
         assert "category" in cols  # v12（发现分两类）
@@ -2660,6 +2662,95 @@ def test_blueprint_modules_normalization_on_create(bb, project):
         bb.create_blueprint(pid, "B2", modules=[{"name": "m", "func_addresses": "0x40"}])
     with pytest.raises(ValueError, match="非法状态"):
         bb.create_blueprint(pid, "B3", modules=[{"name": "m", "status": "done"}])
+
+
+# ---------- 业务逻辑块（逆向第四页签：函数协作/业务语义，人机共写） ----------
+
+def test_logic_block_create_get_list_and_duplicate(bb, project):
+    """创建/读取/列表/同项目同样本重名拒收；项目级块与样本级块并存。"""
+    pid = project["id"]
+    lb = bb.create_logic_block(pid, "存档校验", description="校验存档完整性",
+                               binary_sha256="ab" * 32, seq=1)
+    assert lb["binary_sha256"] == "ab" * 32 and lb["funcs"] == []
+    pro = bb.create_logic_block(pid, "总体架构", seq=2)  # 项目级块（无 sha）
+    assert pro["binary_sha256"] == ""
+    rows = bb.list_logic_blocks(pid)
+    assert [r["name"] for r in rows] == ["存档校验", "总体架构"]  # seq 排序
+    assert [r["func_count"] for r in rows] == [0, 0]
+    with pytest.raises(ValueError, match="重名"):
+        bb.create_logic_block(pid, "存档校验", binary_sha256="ab" * 32)
+    # 同名不同样本允许（UNIQUE 三元组）；项目级与样本级同名也允许
+    bb.create_logic_block(pid, "存档校验", binary_sha256="cd" * 32)
+    bb.create_logic_block(pid, "总体架构", binary_sha256="ab" * 32)
+    with pytest.raises(ValueError, match="name"):
+        bb.create_logic_block(pid, "  ")
+    p2 = bb.create_project("另一项目", "research", ["binary"])
+    assert bb.get_logic_block(p2["id"], lb["id"]) is None
+
+
+def test_logic_block_func_attach_and_seq(bb, project):
+    """挂接须 func_kb 已登记（防幻觉/防跨项目）；hex/int 入参、hex 出口；
+    角色注修订；项目级块拒挂；摘后 seq 重排 1..n；删块手动级联。"""
+    pid = project["id"]
+    sha = "ab" * 32
+    bb.upsert_func(pid, sha, 0x401000, "read_save", "读存档头")
+    bb.upsert_func(pid, sha, 0x402000, "check_crc", "CRC 校验")
+    lb = bb.create_logic_block(pid, "存档校验", binary_sha256=sha)
+    lbid = lb["id"]
+    r = bb.add_logic_block_func(pid, lbid, "0x401000", "读入原始存档")
+    assert [f["address"] for f in r["funcs"]] == ["0x401000"]
+    assert r["funcs"][0]["func_name"] == "read_save"
+    assert r["funcs"][0]["role"] == "读入原始存档"
+    bb.add_logic_block_func(pid, lbid, 0x402000)  # int 入参也可
+    with pytest.raises(ValueError, match="已挂接"):
+        bb.add_logic_block_func(pid, lbid, "0x401000")
+    with pytest.raises(ValueError, match="func_kb"):
+        bb.add_logic_block_func(pid, lbid, "0x999999")  # 未登记
+    # 同项目不同样本的函数不可挂（func_kb 键 = (pid, sha, addr)）
+    bb.upsert_func(pid, "cd" * 32, 0x403000, "other_sample_func")
+    with pytest.raises(ValueError, match="func_kb"):
+        bb.add_logic_block_func(pid, lbid, "0x403000")
+    # 项目级块拒挂（无样本锚点）
+    pro = bb.create_logic_block(pid, "总体架构")
+    with pytest.raises(ValueError, match="项目级块"):
+        bb.add_logic_block_func(pid, pro["id"], "0x401000")
+    # 角色注修订；未挂接地址 → None（404 语义）
+    r = bb.update_logic_block_func(pid, lbid, "0x402000", "CRC 校验并重排表")
+    assert next(f for f in r["funcs"] if f["address"] == "0x402000")["role"] \
+        == "CRC 校验并重排表"
+    assert bb.update_logic_block_func(pid, lbid, "0x555555", "x") is None
+    # 摘除中间元素 → seq 重排 1..n
+    r = bb.remove_logic_block_func(pid, lbid, "0x401000")
+    assert [f["seq"] for f in r["funcs"]] == [1]
+    assert bb.remove_logic_block_func(pid, lbid, "0x401000") is None
+    # 删块连挂接一起手动级联（连接未开 foreign_keys）
+    assert bb.delete_logic_block(pid, lbid)
+    assert bb.get_logic_block(pid, lbid) is None
+    assert bb.conn.execute(
+        "SELECT COUNT(*) FROM logic_block_funcs WHERE block_id=?", (lbid,)
+    ).fetchone()[0] == 0
+
+
+def test_logic_block_update_and_events(bb, project):
+    """UNSET 分区更新（name/description/seq）+ 事件痕；改名撞名/空名拒收。"""
+    pid = project["id"]
+    lb = bb.create_logic_block(pid, "金币结算", binary_sha256="ab" * 32,
+                               description="v1")
+    lbid = lb["id"]
+    r = bb.update_logic_block(pid, lbid, description="v2——含掉落加成")
+    assert r["description"] == "v2——含掉落加成" and r["name"] == "金币结算"
+    r = bb.update_logic_block(pid, lbid, name="金币结算（重制）", seq=5)
+    assert r["name"] == "金币结算（重制）" and r["seq"] == 5
+    other = bb.create_logic_block(pid, "掉落结算", binary_sha256="ab" * 32)
+    with pytest.raises(ValueError, match="重名"):
+        bb.update_logic_block(pid, lbid, name="掉落结算")
+    with pytest.raises(ValueError, match="name"):
+        bb.update_logic_block(pid, lbid, name="  ")
+    assert bb.update_logic_block(pid, "lb-nope", description="x") is None
+    assert bb.delete_logic_block(pid, other["id"])
+    kinds = [e["kind"] for e in bb.recent_events(pid)]
+    assert {"logic_block.created", "logic_block.updated", "logic_block.deleted"} \
+        <= set(kinds)
 
 
 # ---------- recent_events kinds 过滤（bb-query-filters M2） ----------

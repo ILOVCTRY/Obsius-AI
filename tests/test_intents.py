@@ -13,7 +13,8 @@ import pytest
 from core.blackboard import Blackboard
 from core.blackboard.intents import (
     INTENT_OUTCOMES, close_intent, dead_end_backing_target, declare_intent,
-    get_intent, list_intents, normalize_refs, reopen_intent,
+    get_intent, list_intents, normalize_refs, normalize_refs_verbose,
+    reopen_intent,
 )
 
 
@@ -150,6 +151,58 @@ def test_basis_refs_must_be_list(ctx):
 
 def test_normalize_refs_empty(ctx):
     assert normalize_refs(ctx["bb"], ctx["pid"], None) == []
+
+
+def test_normalize_refs_stripped_prefix_autocomplete(ctx):
+    """2026-09-30 宽容归一：id 自带 kind 前缀与 kind:<id> 语法结构性碰撞——
+    模型稳定写出剥前缀形态 asset:6971xxx（sess-78df38d1741d 五连拒根因）。
+    补全后同项目真实存在 → 放行并记录修正。"""
+    bb, pid = ctx["bb"], ctx["pid"]
+    full = ctx["host"]
+    short = full.removeprefix("asset-")
+    refs, corr = normalize_refs_verbose(bb, pid, [f"asset:{short}"])
+    assert refs == [f"asset:{full}"]
+    assert corr == [f"asset:{short} → asset:{full}"]
+
+
+def test_normalize_refs_bare_id_and_find_alias(ctx):
+    """裸 id（asset-xxx / find-xxx，无 kind: 前缀）与 find: 别名也收敛。"""
+    bb, pid = ctx["bb"], ctx["pid"]
+    fid = _vuln_finding(bb, pid, ctx["host"])
+    refs, corr = normalize_refs_verbose(
+        bb, pid, [ctx["host"], fid, f"find:{fid.removeprefix('find-')}"])
+    assert refs == [f"asset:{ctx['host']}", f"finding:{fid}"]
+    assert len(corr) == 3
+
+
+def test_normalize_refs_dangling_still_rejected(ctx):
+    """补全后仍不存在 → 照拒（错误文案带完整形态示例）。"""
+    with pytest.raises(ValueError, match="完整 id"):
+        normalize_refs_verbose(ctx["bb"], ctx["pid"], ["asset:deadbeef0000"])
+
+
+def test_declare_ref_corrections_in_return_and_event(ctx):
+    """修正记录透出：返回 dict ref_corrections + intent.declared 事件留痕。"""
+    bb, pid = ctx["bb"], ctx["pid"]
+    short = ctx["host"].removeprefix("asset-")
+    r = declare_intent(bb, pid, "剥前缀引用假设", basis_refs=[f"asset:{short}"])
+    assert r["ref_corrections"] == [f"asset:{short} → asset:{ctx['host']}"]
+    ev = _events(bb, pid, "intent.declared")[-1]
+    assert ev["payload"]["ref_corrections"] == r["ref_corrections"]
+
+
+def test_close_evidence_bare_artifact_autocomplete(ctx):
+    """close_intent 的 evidence_refs 同样走宽容归一（dead_end 收尾）；
+    artifact 的 id 前缀是 art-（与 kind 不同名），artifact:剥前缀 也能补全。"""
+    bb, pid = ctx["bb"], ctx["pid"]
+    iid = declare_intent(bb, pid, "死路假设")["id"]
+    art = bb.add_artifact(pid, "scratch/n.txt", kind="note")
+    short = art.removeprefix("art-")
+    r = close_intent(bb, pid, iid, "dead_end", dead_reason="已排除",
+                     evidence_refs=[f"artifact:{short}", art])
+    assert r["ref_corrections"] == [f"artifact:{short} → artifact:{art}",
+                                    f"{art} → artifact:{art}"]
+    assert r["evidence_refs"] == [f"artifact:{art}"]
 
 
 # ---------- close：入参校验 ----------
@@ -355,12 +408,29 @@ def test_backing_helper_direct_target(ctx):
     assert dead_end_backing_target(bb.conn, pid, ctx["url"]) == ctx["url"]
 
 
-def test_backing_helper_subtree_batch(ctx):
+def test_backing_helper_ancestor_batch_removed(ctx):
+    """2026-09-29 逐资产收紧：祖先链批次背书移除——父节点死路意图不再覆盖子树
+    （曾致 sess-1d692817a5d0 一条「基线一致」意图批量误标 12 个活站）。"""
     bb, pid = ctx["bb"], ctx["pid"]
     _dead_end_on(bb, pid, ctx["host"], "宿主子树无洞")
-    # host 子树内 domain / url 均被批次背书，返回意图 target=host
+    assert dead_end_backing_target(bb.conn, pid, ctx["host"]) == ctx["host"]
+    # 子资产不被父节点意图背书：domain/url 须各自立意
+    assert dead_end_backing_target(bb.conn, pid, ctx["url"]) is None
+    assert dead_end_backing_target(bb.conn, pid, ctx["domain"]) is None
+
+
+def test_backing_helper_basis_refs_direct(ctx):
+    """basis_refs 明确含本资产 id 也算直接背书（意图围绕该资产的另一立意形态）。"""
+    bb, pid = ctx["bb"], ctx["pid"]
+    hid = bb.add_http_history(pid, source="browser", method="GET",
+                              url=f"http://site.com/probe-{ctx['url']}",
+                              status=404, resp_body="")
+    iid = declare_intent(bb, pid, "针对该资产的假设",
+                         target_asset_id=ctx["host"],
+                         basis_refs=[f"asset:{ctx['url']}"])["id"]
+    close_intent(bb, pid, iid, "dead_end", dead_reason="探测均 404，排除",
+                 evidence_refs=[f"http:{hid}"])
     assert dead_end_backing_target(bb.conn, pid, ctx["url"]) == ctx["host"]
-    assert dead_end_backing_target(bb.conn, pid, ctx["domain"]) == ctx["host"]
 
 
 def test_backing_helper_open_or_non_dead_end_not_backing(ctx):
@@ -383,9 +453,9 @@ def test_backing_helper_side_tree_not_backing(ctx):
     other_url = bb.upsert_asset(pid, "url", "http://other.com/",
                                parent_id=other_host)["id"]
     _dead_end_on(bb, pid, other_host, "旁支宿主无洞")
-    # 旁支 host 的死路意图不覆盖本树 url
+    # 旁支 host 的死路意图不覆盖本树 url；旁支子资产也不再被祖先链背书
     assert dead_end_backing_target(bb.conn, pid, ctx["url"]) is None
-    assert dead_end_backing_target(bb.conn, pid, other_url) == other_host
+    assert dead_end_backing_target(bb.conn, pid, other_url) is None
 
 
 def test_set_status_clean_allowed_with_direct_backing(ctx):
@@ -397,11 +467,12 @@ def test_set_status_clean_allowed_with_direct_backing(ctx):
     assert r["status"] == "tested_clean"
 
 
-def test_set_status_clean_allowed_with_subtree_batch(ctx):
+def test_set_status_clean_rejected_with_ancestor_batch_only(ctx):
+    """2026-09-29：仅父节点死路意图（祖先链批次）不再放行子资产 tested_clean。"""
     bb, pid = ctx["bb"], ctx["pid"]
     _dead_end_on(bb, pid, ctx["host"], "宿主批次无洞")
-    r = bb.set_asset_status(ctx["url"], "tested_clean", note="随宿主批次收口")
-    assert r["status"] == "tested_clean"
+    with pytest.raises(ValueError, match="直接围绕该资产"):
+        bb.set_asset_status(ctx["url"], "tested_clean", note="随宿主批次收口")
 
 
 def test_set_status_clean_noop_without_backing_preserves_legacy(ctx):

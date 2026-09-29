@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react"
 import { api } from "@/lib/api"
 import type {
-  FofaConfig, FofaSearchRow, ImportPreview, ImportSummary,
+  FofaConfig, FofaHistoryItem, FofaSearchRow, ImportPreview, ImportSummary,
 } from "@/lib/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -135,7 +135,59 @@ function SearchWorkspace({ pid }: { pid: string }) {
   const [err, setErr] = useState("")
   const [picked, setPicked] = useState<Set<number>>(new Set())
   const [summary, setSummary] = useState<string>("")
+  const [hist, setHist] = useState<FofaHistoryItem[]>([])
+  const [histOpen, setHistOpen] = useState(false)
   const listRef = useRef<HTMLDivElement>(null)
+
+  // 历史即保持（2026-09-28）：查询结果落服务端 <项目>/fofa_history/，面板挂载时
+  // 自动恢复最近一次——切左导航/切页签/刷新浏览器都不丢（组件卸载不再丢结果）。
+  const refreshHist = async () => {
+    try {
+      const r = await api.fofaHistory(pid)
+      setHist(r.items)
+      return r.items
+    } catch {
+      return []
+    }
+  }
+  const restore = async (hid: string) => {
+    setErr("")
+    try {
+      const r = await api.fofaHistoryGet(pid, hid)
+      setQuery(r.query)
+      setSize(r.size)
+      setRows(r.rows)
+      setTotal(r.total)
+      setPicked(new Set())
+      setSummary("")
+      setHistOpen(false)
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    }
+  }
+  useEffect(() => {
+    (async () => {
+      const items = await refreshHist()
+      if (items.length > 0) await restore(items[0].id) // 自动恢复最近一次
+    })()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pid])
+  const delHist = async (hid: string) => {
+    try {
+      await api.fofaHistoryDelete(pid, hid)
+      setHist((h) => h.filter((x) => x.id !== hid))
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    }
+  }
+  const clearHist = async () => {
+    try {
+      await api.fofaHistoryClear(pid)
+      setHist([])
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    }
+  }
 
   const search = async () => {
     if (!query.trim()) return
@@ -147,6 +199,7 @@ function SearchWorkspace({ pid }: { pid: string }) {
       setRows(r.rows)
       setTotal(r.total)
       setPicked(new Set())
+      refreshHist() // 查询成功刷新历史列表（新记录置顶）
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
       setRows(null)
@@ -206,6 +259,51 @@ function SearchWorkspace({ pid }: { pid: string }) {
         <Button size="sm" className="h-7" onClick={search} disabled={busy || !query.trim()}>
           {busy ? "查询中…" : `查询（耗 ${size} 配额）`}
         </Button>
+        {/* 查询历史（历史即保持）：点击条目恢复结果，删除连带服务端结果文件 */}
+        <div className="relative">
+          <Button size="sm" variant="outline" className="h-7"
+                  onClick={() => setHistOpen((o) => !o)}>
+            历史{hist.length > 0 ? `（${hist.length}）` : ""}
+          </Button>
+          {histOpen && (
+            <div className="absolute right-0 top-8 z-20 w-96 rounded-md border bg-background shadow-md">
+              <div className="max-h-80 overflow-auto">
+                {hist.length === 0 && (
+                  <p className="px-3 py-4 text-center text-[11px] text-muted-foreground">
+                    暂无查询历史
+                  </p>
+                )}
+                {hist.map((h) => (
+                  <div key={h.id}
+                       className="group flex items-center gap-2 border-b px-2 py-1.5 text-[11px] last:border-b-0 hover:bg-accent/40">
+                    <button type="button" className="min-w-0 flex-1 text-left"
+                            onClick={() => restore(h.id)}
+                            title={`${h.query} · 命中 ${h.total}`}>
+                      <span className="block truncate font-mono">{h.query}</span>
+                      <span className="text-[10px] text-muted-foreground">
+                        {h.ts.slice(5, 16).replace("T", " ")} · 命中 {h.total} · {h.size} 条
+                      </span>
+                    </button>
+                    <button type="button"
+                            className="shrink-0 rounded px-1 text-muted-foreground opacity-0 hover:text-(--status-error) group-hover:opacity-100"
+                            onClick={() => delHist(h.id)} title="删除该记录（连带查询结果文件）">
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+              {hist.length > 0 && (
+                <div className="border-t px-2 py-1.5">
+                  <button type="button"
+                          className="text-[11px] text-muted-foreground hover:text-(--status-error)"
+                          onClick={clearHist}>
+                    清空全部
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       </div>
       {err && <p className="px-3 py-1 text-[11px] text-(--status-error)">{err}</p>}
       {rows && (
@@ -252,7 +350,7 @@ function SearchWorkspace({ pid }: { pid: string }) {
                       <td className="px-2 py-1 font-mono">{r.ip}</td>
                       <td className="px-2 py-1 font-mono">{r.port}</td>
                       <td className="px-2 py-1 font-mono">
-                        {r.domain || r.host}
+                        {r.host || r.domain}
                         {has && <Badge variant="outline" className="ml-1 text-[9px]">已有</Badge>}
                       </td>
                       <td className="max-w-48 truncate px-2 py-1" title={r.title}>{r.title}</td>

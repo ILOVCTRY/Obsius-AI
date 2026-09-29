@@ -1,0 +1,19 @@
+# CTF 轨阶段剧本（planner-cadence P2，2026-09-28）——文件名 stem=阶段 id。
+# 语义同 pentest 轨：进入阶段时 tasks[] 原样首发（created_by=playbook，按任务
+# 指纹去重，重进不重发；首发任务统一 passive 噪声）；过程派单自由（focus=重心
+# 配比建议）；gate=入场门指标（gate_types 列出被本阶段门拦的任务类型）。
+name: 分诊
+goal: 题目分流与类型归类，锁定考点与研究路线
+order: 1
+focus:
+  triage: 3
+gate:
+  min_assets: 1
+  idle_rounds: 2
+gate_types: [solve]
+tasks:
+  - task_type: triage
+    role: triage
+    objective: 对题目附件/源码/二进制做分诊：格式识别、考点归类（pwn/web/crypto/rev/misc），登记资产并初判解法路线
+    acceptance: 题目资源以 binary/file 资产登记入黑板，考点与路线初判落发现（intel）
+next: [reverse]

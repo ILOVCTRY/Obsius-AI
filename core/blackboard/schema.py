@@ -9,7 +9,7 @@
 
 import sqlite3
 
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 27
 
 # v23→v24（会话中心化 M4，docs/plans/session-centric-orchestration.md，2026-09-25）：
 # **纯语义迁移、零物理改动与数据搬迁**——tasks 表即「委托」；会话窗经
@@ -395,6 +395,71 @@ CREATE TABLE IF NOT EXISTS intents (
 );
 CREATE INDEX IF NOT EXISTS idx_intents_project ON intents(project_id, id);
 CREATE INDEX IF NOT EXISTS idx_intents_open ON intents(project_id, status);
+
+-- v25 智能体工作台对话线程（K9，2026-09-29）：新独立轻量对话运行时的持久化层，
+-- 不进 sessions/tasks 体系。每 agent（主控 chat-orchestrator + 专家池专家）
+-- 独立线程（蛙池式：切 agent=切线程）；主控 call_expert spawn 的子专家线程经
+-- parent_thread_id 留档关联（持久线程留档，摘要+引用回传主控）。
+CREATE TABLE IF NOT EXISTS chat_threads (
+    id               TEXT PRIMARY KEY,
+    project_id       TEXT NOT NULL REFERENCES projects(id),
+    agent_id         TEXT NOT NULL,                 -- 'chat-orchestrator' / 专家池 id
+    title            TEXT NOT NULL DEFAULT '',      -- 首条消息截断自动起题 / 人工改名
+    status           TEXT NOT NULL DEFAULT 'idle',  -- idle / running / error
+    parent_thread_id TEXT REFERENCES chat_threads(id) ON DELETE CASCADE,  -- call_expert spawn 来源（主控线程删则子线程级联删）
+    spawned_task     TEXT NOT NULL DEFAULT '',      -- spawn 时的委派任务简述
+    todo             TEXT NOT NULL DEFAULT '[]',    -- JSON：主控待办 [{id,title,status}]
+    usage            TEXT NOT NULL DEFAULT '',      -- JSON：最近上下文用量 {input,output,steps,cache_read,cache_creation}（v26）
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_chat_threads_agent
+    ON chat_threads(project_id, agent_id, updated_at);
+
+-- v25 对话消息（K9）：API 消息数组按序落库——user / assistant（content=文本段，
+-- tool_calls=JSON [{id,name,args}]）/ tool（content=结果文本，tool_use_id 对应）。
+-- 重放即 LLM messages 数组（assistant 行重建 tool_use 块）；工具结果全文存此，
+-- 事件流只发 delta/终稿供前端流式。
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    thread_id   TEXT NOT NULL REFERENCES chat_threads(id),
+    role        TEXT NOT NULL,               -- user / assistant / tool
+    content     TEXT NOT NULL DEFAULT '',    -- 文本（tool 行=工具结果全文）
+    tool_calls  TEXT NOT NULL DEFAULT '[]',  -- assistant 行 JSON：[{id,name,args}]
+    tool_use_id TEXT NOT NULL DEFAULT '',    -- tool 行：对应的 tool_call id
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_thread ON chat_messages(thread_id, id);
+
+-- v27 业务逻辑块（逆向工作台第四页签，2026-09-29）：分块记载函数协作与业务
+-- 语义——PWN/漏洞利用走攻击链（因果路径），重建走蓝图（R4 管线），业务理解
+-- （函数逻辑/业务逻辑/逆向破解/游戏业务）落这里。人机共写：人工建块挂函数，
+-- Agent 经 bb_logic_block_* 工具产块/挂函数/补描述。函数挂接定位键=
+-- (binary_sha256, address) 同 func_kb；UNIQUE 防重复挂；级联删除在 store 手动做
+-- （连接未开 foreign_keys pragma，不依赖 ON DELETE CASCADE）。
+CREATE TABLE IF NOT EXISTS logic_blocks (
+    id             TEXT PRIMARY KEY,
+    project_id     TEXT NOT NULL REFERENCES projects(id),
+    binary_sha256  TEXT NOT NULL DEFAULT '',   -- 目标样本 sha256（''=项目级块）
+    name           TEXT NOT NULL,
+    description    TEXT NOT NULL DEFAULT '',   -- 业务逻辑描述（markdown：块干什么/函数间协作/业务语义）
+    seq            INTEGER NOT NULL DEFAULT 0, -- 排序
+    created_at     TEXT NOT NULL,
+    updated_at     TEXT NOT NULL,
+    UNIQUE(project_id, binary_sha256, name)
+);
+CREATE INDEX IF NOT EXISTS idx_logic_blocks_project ON logic_blocks(project_id, binary_sha256, seq);
+
+CREATE TABLE IF NOT EXISTS logic_block_funcs (
+    id          TEXT PRIMARY KEY,
+    block_id    TEXT NOT NULL REFERENCES logic_blocks(id),
+    address     INTEGER NOT NULL,            -- 函数地址（func_kb 定位键，sha 继承自块）
+    role        TEXT NOT NULL DEFAULT '',    -- 角色注：该函数在本块中的职责一句话
+    seq         INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL,
+    UNIQUE(block_id, address)
+);
+CREATE INDEX IF NOT EXISTS idx_logic_block_funcs_block ON logic_block_funcs(block_id, seq);
 """
 
 
@@ -421,13 +486,21 @@ def _migrate(conn: sqlite3.Connection) -> None:
     - v19→v20：findings 幂等补 impact/remediation（收录格式三件套的危害描述与
       修复建议，写入放行不进门禁，见文件头版本注释）。
     - v21→v22：intents 由 DDL 的 IF NOT EXISTS 直接建表（无 ALTER，旧库打开即建）。
-    - v22→v23：tasks 幂等补 preferred_runtime（任务默认运行时，见文件头版本注释）。"""
+    - v22→v23：tasks 幂等补 preferred_runtime（任务默认运行时，见文件头版本注释）。
+    - v24→v25：chat_threads/chat_messages 由 DDL 的 IF NOT EXISTS 直接建表
+      （K9 智能体工作台，无 ALTER，旧库打开即建）。
+    - v26→v27：logic_blocks/logic_block_funcs 由 DDL 的 IF NOT EXISTS 直接建表
+      （业务逻辑块，无 ALTER，旧库打开即建）。"""
     cols = {r[1] for r in conn.execute("PRAGMA table_info(projects)")}
     if "track" not in cols:
         conn.execute("ALTER TABLE projects ADD COLUMN track TEXT NOT NULL DEFAULT ''")
     if "capabilities" not in cols:
         conn.execute(
             "ALTER TABLE projects ADD COLUMN capabilities TEXT NOT NULL DEFAULT '[]'")
+    chat_cols = {r[1] for r in conn.execute("PRAGMA table_info(chat_threads)")}
+    if chat_cols and "usage" not in chat_cols:  # v26（K9 /context 与用量圆环）
+        conn.execute(
+            "ALTER TABLE chat_threads ADD COLUMN usage TEXT NOT NULL DEFAULT ''")
     task_cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
     if "context_refs" not in task_cols:
         conn.execute(

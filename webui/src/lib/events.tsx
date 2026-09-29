@@ -148,8 +148,11 @@ export function eventStyle(kind: string, payload?: Record<string, unknown>): Eve
   if (kind === "approval.requested") return { label: "🔔 请求审批", className: "text-(--status-approval)", defaultOpen: true }
   if (kind.startsWith("approval.")) return { label: "🔔 审批决定", className: "text-(--status-approval)", defaultOpen: true }
   if (kind === "orch.proposed") return { label: "💡 编排提案", className: "text-amber-400", defaultOpen: true }
+  // auto-attack（2026-09-28）：研判完成（主渲染走 OrchChatPane 研判卡，本样式供审计兜底）
+  if (kind === "orch.auto_attack.analyzed")
+    return { label: "🚀 自动渗透研判", className: "text-primary", defaultOpen: true }
   // 对话化编排器（M1/M2，§6.4）：对话流主渲染走 OrchChatPane 气泡（本样式供
-  // 「运行记录」/审计平铺兜底）；goal 确认/清空是人类决策留痕
+  // 审计抽屉平铺兜底）；goal 确认/清空是人类决策留痕
   if (kind === "orch.chat") return { label: "💬 编排对话", className: "text-primary", defaultOpen: false }
   if (kind === "goal.confirm") return { label: "🎯 阶段目标确认", className: "text-amber-400", defaultOpen: true }
   if (kind === "goal.clear") return { label: "🎯 阶段目标清空", className: "text-muted-foreground", defaultOpen: false }
@@ -208,6 +211,14 @@ const TOOL_LABELS: Record<string, string> = {
   browser_navigate: "🌐 打开网页", browser_click: "🖱 点击",
   browser_type: "⌨ 输入", browser_screenshot: "📸 截图",
   browser_content: "📄 取页面内容", browser_back: "↩ 后退",
+  // 2026-09-28 补登记（此前未注册的工具降级成裸英文名、参数兜底空白）：
+  read_file: "📄 读文件", search_files: "🔍 文件检索",
+  strings_search: "🔤 字符串检索", func_xrefs: "🔗 交叉引用",
+  skill_open: "📘 打开技能", route_lookup: "🧭 路由查询",
+  declare_intent: "💡 声明意图", close_intent: "🏁 收尾意图",
+  reopen_intent: "↩ 重开意图", task_reconcile: "✓ 任务对账",
+  request_authorization: "🙏 申请授权", request_escalation: "🚨 申请越界",
+  run_cmd: "⌨ 命令",  // 仅计划闸/越界拒绝时落审计（正常执行走 command 配对事件）
 }
 const TOOL_ARG_KEY: Record<string, string> = {
   kb_open: "module", kb_search: "query", browser_navigate: "url",
@@ -248,8 +259,9 @@ const assetLabel = (id: unknown, ctx?: SummaryCtx): string => {
   return ctx?.assetName?.(id) ?? `…${id.slice(-6)}`
 }
 
-// per-tool 语义摘要（A1，live-stream-ux 2026-09-23）：登记高频工具；未登记的
-// 走 TOOL_ARG_KEY 单字段兜底（现状不变）。入参 a=截断后的 args
+// per-tool 语义摘要（A1，live-stream-ux 2026-09-23；2026-09-28 补查询类工具）：
+// 查询类摘要必须带出「查了什么」——检索词/目标值/过滤条件，否则行只剩工具图标无从判断。
+// 入参 a=截断后的 args（_truncate_args 只截长字符串值，结构不变）
 const TOOL_SUMMARIZERS: Record<string, (a: Record<string, unknown>, ctx?: SummaryCtx) => ReactNode> = {
   bb_asset_status: (a, ctx) => {
     const label = assetLabel(a.asset_id, ctx) || String(a.asset_id ?? "")
@@ -258,13 +270,79 @@ const TOOL_SUMMARIZERS: Record<string, (a: Record<string, unknown>, ctx?: Summar
   },
   bb_query: (a, ctx) => {
     const filters: string[] = []
+    // site 查询的「查哪个站」在 asset（值或 id）；events 在 kinds/session_id；
+    // func 在 binary_sha256/address——全部带出，否则「查 site」不知道查的是谁
     const target = assetLabel(a.target_asset_id, ctx)
     if (target) filters.push(`目标 ${target}`)
-    for (const k of ["type", "status", "risk_tag", "what"] as const) {
-      if (typeof a[k] === "string" && a[k]) filters.push(`${k === "what" ? "" : `${k} `}${a[k]}`)
+    const site = typeof a.asset === "string" && a.asset ? a.asset : ""
+    if (site) filters.push(`站点 ${site}`)
+    if (Array.isArray(a.kinds) && a.kinds.length) filters.push(`类型 ${(a.kinds as unknown[]).slice(0, 3).join(",")}`)
+    if (typeof a.session_id === "string" && a.session_id) filters.push(`会话 …${a.session_id.slice(-6)}`)
+    if (typeof a.binary_sha256 === "string" && a.binary_sha256) filters.push(`…${a.binary_sha256.slice(-8)}`)
+    if (a.address !== undefined && a.address !== null) filters.push(`@ ${String(a.address)}`)
+    for (const k of ["type", "status", "risk_tag", "category", "tag", "min_severity"] as const) {
+      if (typeof a[k] === "string" && a[k]) filters.push(`${k} ${a[k]}`)
     }
-    return `查 ${filters.length ? `（${filters.join(" · ")}）` : "（无过滤）"}`
+    return `查 ${String(a.what ?? "?")}${filters.length ? `（${filters.join(" · ")}）` : "（无过滤）"}`
   },
+  search_files: (a) => {
+    const pat = typeof a.pattern === "string" ? clip(a.pattern, LEN_SHORT) : ""
+    const path = typeof a.path === "string" && a.path ? ` @ ${a.path}` : ""
+    return `搜 ${pat ? `“${pat}”` : "（无关键词）"}${path}`
+  },
+  strings_search: (a) => {
+    const pat = typeof a.pattern === "string" ? clip(a.pattern, LEN_SHORT) : ""
+    const bin = typeof a.binary === "string" ? ` @ …${a.binary.split("/").pop()}` : ""
+    return `搜 ${pat ? `“${pat}”` : "全量"}${bin}`
+  },
+  func_xrefs: (a) => {
+    const bin = typeof a.binary === "string" ? `…${a.binary.split("/").pop()}` : ""
+    const who = typeof a.name === "string" && a.name ? a.name
+      : a.address !== undefined && a.address !== null ? `@ ${String(a.address)}` : ""
+    return `${bin}${who ? ` · ${who}` : ""}`
+  },
+  read_file: (a) => {
+    const p = typeof a.path === "string" ? a.path : ""
+    const off = typeof a.offset === "number" && a.offset ? ` (offset ${a.offset})` : ""
+    return `${p}${off}`
+  },
+  skill_open: (a) => String(a.name ?? ""),
+  route_lookup: (a) => {
+    const q = typeof a.query === "string" ? clip(a.query, LEN_SHORT) : ""
+    return q ? `查 “${q}”` : ""
+  },
+  declare_intent: (a) => clip(String(a.statement ?? ""), LEN_LONG),
+  close_intent: (a) => {
+    const id = typeof a.intent_id === "string" ? `…${a.intent_id.slice(-6)}` : ""
+    const outcome = typeof a.outcome === "string" ? a.outcome : ""
+    return `${outcome}${id ? ` · ${id}` : ""}`
+  },
+  reopen_intent: (a) => {
+    const id = typeof a.intent_id === "string" ? `…${a.intent_id.slice(-6)}` : ""
+    const note = typeof a.note === "string" && a.note ? `（${clip(a.note, LEN_SHORT)}）` : ""
+    return `${id}${note}`
+  },
+  task_reconcile: (a) => {
+    const item = typeof a.item_id === "number" ? `#${a.item_id}` : ""
+    const state = typeof a.state === "string" ? a.state : ""
+    const note = typeof a.note === "string" && a.note ? ` ${clip(a.note, LEN_SHORT)}` : ""
+    return `${item}${state ? ` → ${state}` : ""}${note}`
+  },
+  task_plan: (a) => {
+    const n = Array.isArray(a.steps) ? a.steps.length : 0
+    const rev = typeof a.rev_reason === "string" && a.rev_reason ? `（修订：${clip(a.rev_reason, LEN_SHORT)}）` : ""
+    return `${n} 步${rev}`
+  },
+  request_authorization: (a) => {
+    const kind = String(a.kind ?? "")
+    const why = typeof a.reason === "string" && a.reason ? ` ${clip(a.reason, LEN_SHORT)}` : ""
+    return `${kind}${why}`
+  },
+  request_escalation: (a) => {
+    const cmd = typeof a.cmd === "string" ? clip(a.cmd, LEN_SHORT) : ""
+    return cmd
+  },
+  run_cmd: (a) => clip(String(a.cmd ?? ""), LEN_SHORT),  // gated 拒绝审计行
   bb_add_asset: (a) =>
     `${String(a.value ?? "")}（${String(a.type ?? "auto")}）`,
   complete_task: (a) => clip(String(a.result_note ?? ""), LEN_LONG),
@@ -474,8 +552,17 @@ export function eventSummary(payload: Record<string, unknown>,
     const key = TOOL_ARG_KEY[tool] ?? ""
     let detail = typeof a[key] === "string" ? (a[key] as string) : ""
     if (!detail) {
-      const first = Object.values(a).find((v) => typeof v === "string" && v)
-      detail = typeof first === "string" ? first : ""
+      // 三级兜底（2026-09-28 问题1/2）：登记 arg key → 首个字符串值 → k=v 对拼接
+      // （此前只取首字符串，args 首字段非字符串或全嵌套时摘要空白「看不出做了什么」）
+      const pairs = Object.entries(a)
+        .filter(([, v]) => (typeof v === "string" && v) || typeof v === "number")
+        .slice(0, 2)
+        .map(([k, v]) => `${k}=${clip(String(v), 40)}`)
+      if (pairs.length) {
+        detail = pairs.join(" ")
+      } else if (Object.keys(a).length > 0) {
+        detail = JSON.stringify(a)
+      }
     }
     detail = clip(detail, LEN_SHORT)
     if (payload.ok === false) {

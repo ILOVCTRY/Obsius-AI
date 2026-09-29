@@ -108,6 +108,9 @@ def _make_agent_run_done(tmp_path, camp):
     # 发现必挂意图门禁（任务尝试树 v2）：夹具预置一条 open 意图
     from core.blackboard.intents import declare_intent
     declare_intent(bb, project["id"], "对目标执行弱口令尝试", author=agent.session["id"])
+    # 意图先行闸（2026-09-28）：补 command 事件模拟意图后的执行动作
+    bb.append_event(project["id"], "command", {"cmd": "probe"},
+                    session_id=agent.session["id"], author=agent.session["id"])
     agent.run_task("打点", task_id=tid)
     assert tq.get_task(tid)["status"] == "done"
     rows = camp.list_recent()
@@ -213,6 +216,9 @@ def test_campaign_dead_end_fp_only(tmp_path):
         # 判定口径直查：FP-only → campaign 写、不复盘、dead_end
         from core.blackboard.intents import declare_intent
         declare_intent(bb, project["id"], "对注入点进行注入尝试", author=agent.session["id"])
+        # 意图先行闸（2026-09-28）：补 command 事件模拟意图后的执行动作
+        bb.append_event(project["id"], "command", {"cmd": "probe"},
+                        session_id=agent.session["id"], author=agent.session["id"])
         agent.run_task("打点", task_id=tid)
         verdict = agent._sediment_verdict(tid)
         assert verdict["campaign"] and verdict["dead_end"] and not verdict["review"]
@@ -262,6 +268,9 @@ def test_campaign_dead_end_fallback_title(tmp_path):
                              config=AgentConfig(max_steps=10), campaign=camp)
         from core.blackboard.intents import declare_intent
         declare_intent(bb, project["id"], "对注入点进行注入尝试", author=agent.session["id"])
+        # 意图先行闸（2026-09-28）：补 command 事件模拟意图后的执行动作
+        bb.append_event(project["id"], "command", {"cmd": "probe"},
+                        session_id=agent.session["id"], author=agent.session["id"])
         agent.run_task("打点", task_id=tid)
         rows = camp.list_recent()
         assert len(rows) == 1 and rows[0]["tags"] == ["dead_end"]

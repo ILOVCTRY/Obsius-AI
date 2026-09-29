@@ -40,15 +40,14 @@ from core.llm.provider import LLMError
 from core.runtime.gateway import ExecutionGateway
 from core.skills import (
     SkillRegistry,
-    SkillRouter,
     build_rules_preamble,
     load_kb_sources,
     load_task_types,
 )
 from core.skills.judge import judge_finding
-from core.skills.kbindex import kb_module_hints, kb_route_hints
+from core.skills.kbindex import kb_module_hints
 from core.skills.experts import expert_exists, load_expert
-from core.skills.routeindex import read_kb_module, render_route_index_top
+from core.skills.routeindex import read_kb_module
 
 log = logging.getLogger(__name__)
 
@@ -121,7 +120,8 @@ STRICT_PROMPT_TAIL = """
    run_cmd / bb_add_* 等实质动作（服务端有计划闸，未交计划会被回填引导）；情况变化时
    再调 task_plan 修订（保留进度的步带原 id，rev_reason 写原因），每开始/完成一步用
    task_step 置 doing/done——任意时刻至多一个 doing，被阻塞置 blocked 必写原因。
-4. 发现即落 bb_add_finding；无证据 status=unverified。
+4. 发现即落 bb_add_finding（须挂在 open 意图下且意图后有执行动作，见第 10 条）；
+   无证据 status=unverified。
 5. 卡住时如实 fail_task，不要空转。
 6. 经验沉淀只走 propose_pack_edit 提案（绝不直接改技能/知识库）：仅限三种情形——
    文档互相矛盾、文档缺失、某手法已在本任务中验证有效；reason 必须附任务证据
@@ -150,15 +150,21 @@ STRICT_PROMPT_TAIL = """
    （不可信/活体样本；铁律：样本绝不跑 host/wsl）。run_cmd 输出上限
    2000 字符（截断有标注，不要靠语义猜）；读工作区文件用 read_file（带行号、可分段）；
    超大工具结果自动落盘 spill/（回填含定位器，按提示分段取回）。
-10. **意图纪律（渗透链路图，思考→规划→执行→收尾）**：渗透/红队每开一个探测方向，
-    先 declare_intent 把规划落成一句可证伪假设（如「验证 /admin 是否存在未授权
-    访问」，basis_refs 写推导依据），再围绕它执行；http/工具动作按时间归入该意图
-    （执行层是图的展开细节）。**每个意图必须 close_intent 收尾，三选一**：
+10. **意图纪律（渗透链路图，侦察→意图→执行→产出→收尾）**：侦察/测绘（bb_query、
+    指纹、目录发现等只读信息收集）自由先行；**基于侦察结果选定攻击方向后，先
+    declare_intent 把规划落成一句可证伪假设**（如「验证 /admin 是否存在未授权
+    访问」，basis_refs 写侦察依据），再围绕它执行；发现/漏洞是检验的产物——
+    bb_add_finding 前意图声明后必须有真实执行动作（服务端有时间线闸：declare
+    后直接落发现会被拒）。http/工具动作按时间归入该意图（执行层是图的展开细
+    节）。**每个意图必须 close_intent 收尾，三选一**：
     vuln（漏洞，引用已登记的非误报 vuln 发现）/ finding（有效发现，引用非误报
     intel 发现，一意图可挂多条同类发现）/ dead_end（死路：写清死因+至少一条
     http:/event: 证据引用，且零发现）。证据不足就保持 open（宁严勿松）——
     收尾所依据的发现后来被标误报、或有新证据，先 reopen_intent 重开再收。
     不得留下悬挂意图（会话现场会列出未收尾项）。
+    **意图越多测得越全面**：意图粒度=一个具体资产+一个具体攻击面假设，「同模板/
+    基线一致」式推断不能替代独立测试；收尾判据=没有可立的新意图，而非「意图
+    都关了」；拦截页（WAF/WebVPN 488/403）≠源站状态，判死路须注明探测视角。
 """
 
 # G3 结构化摘要压缩（2026-09-19，对齐 Claude Code /compact 与 HackSynth）：
@@ -764,109 +770,50 @@ class AgentSession:
                           task_id: str | None = None,
                           task_type: str | None = None,
                           scope: str | None = None) -> str:
-        """入口技能路由：角色白名单窄化 → 评分最高技能正文 + 知识库源登记。
+        """全量技能描述注入（K8 2026-09-29：废弃 top-1 路由命中，Claude 风格）。
 
-        候选集 = 项目启用能力包技能 ∪ 场景轨技能（§4.5），角色 skills 白名单再窄化。
-        每个任务落一条 skill.routed 审计事件（未命中 name=null，C5 可观测）。
+        角色白名单优先、generalist 全量——每技能注入 name+description 一行
+        （渐进披露层1）；正文仍靠 skill_open 按需打开（层2）。不再注入 kb
+        提示行（📚/🧭/📖 移除，靠模型主动 kb_search/kb_open 检索）。
 
-        2026-09-18 路由增强：
-        - task_type 加分项：认领队列任务时传 task.task_type，frontmatter
-          task_types 命中 +10（router.route）——确定性信号 > 文本巧合。
-        - scope 拼路由 query（G2）：objective 进 system prompt 不变，只有
-          路由匹配串拼 scope（个别 scope 带中文描述时救匹配）。
-        - 未命中不再返回空串：仍注入 kb 源清单 + kb_search 指引（此前 Agent
-          完全不知道 kb 存在，kb 永远不会被打开）。
-        - 两分支都注入「📚 相关知识库模块」提示行（kbindex 中文标题索引，
-          只给路径不注入正文，Agent 自己 kb_open）。
-        E8 会话键快照恢复路径不重路由（回放暂停时点 system，快照自洽）。"""
+        审计：skill.routed 事件改记录本轮注入技能清单（payload injected+count，
+        历史 route_points/kb_hits 数据仍在旧事件里，旁路统计自然降级）。
+        features/file_features 保留签名（调用方透传），路由废弃后不再参与选择。
+        E8 会话键快照恢复路径不重注入（回放暂停时点 system，快照自洽）。"""
         if self.registry is None:
             self.load_skills()
         assert self.registry is not None
         role_skills = self.role.get("skills")
         pack_set = set(self.capabilities) | {self.track}
         route_query = f"{query}\n{scope}".strip() if scope else (query or "")
-        router = SkillRouter(self.registry)
-        hits = router.route(query=route_query, features=features,
-                            file_features=file_features,
-                            role_skills=role_skills, packs=pack_set, top_k=1,
-                            task_type=task_type)
-        # kb 提示行两分支共用（kbindex：中文标题+段落级索引，mtime 快检缓存）
-        try:
-            hint_pairs = kb_module_hints(self.packs_root, self.capabilities,
-                                         route_query)
-        except Exception:  # 索引失败不影响技能路由主链
-            hint_pairs = []
-        hint_block = ""
-        if hint_pairs:
-            lines = []
-            for e, sec in hint_pairs:
-                row = f"- {e.module} —— {e.title}"
-                if e.summary:
-                    row += f"｜{e.summary}"
-                if sec:
-                    row += f"（相关段落：{sec}）"
-                lines.append(row)
-            hint_block = (
-                "\n\n## 📚 相关知识库模块（可能相关；用 kb_open 按路径打开，"
-                "段落命中可直接跳读该节，不相关则忽略）\n" + "\n".join(lines))
-        # 🧭 kb 任务导航（2026-09-19 借鉴 dsh refs/README 路由表）：route.json
-        # 静态路由，确定性键匹配（task_type+query 子串），先于 2-gram hints 注入
-        try:
-            route_hits = kb_route_hints(self.packs_root, self.capabilities,
-                                        task_type, route_query)
-        except Exception:  # 路由失败不影响技能路由主链
-            route_hits = []
-        route_block = ""
-        if route_hits:
-            rrows = []
-            for k, ps, dir_total in route_hits:
-                note = f"（目录共 {dir_total} 篇，更多用 kb_search）" if dir_total else ""
-                rrows.append(f"- 「{k}」→ {', '.join(ps)}{note}")
-            route_block = (
-                "\n\n## 🧭 知识库任务导航（按任务类型静态路由；kb_open 打开下列具体文件）\n"
-                + "\n".join(rrows))
-        # 🧭 测试点路由索引 Top-K 注入（G1 2026-09-19：全表 222 行 → 最相关 3-5 行，
-        # 其余经 route_lookup 工具查询；条目 tags 与角色白名单裁剪口径不变）
-        try:
-            index_block, index_count, index_total, route_points = render_route_index_top(
-                self.packs_root, self.capabilities, role_skills, query=route_query)
-        except Exception:  # 索引失败不影响技能路由主链
-            index_block, index_count, index_total, route_points = "", 0, 0, []
+        # 候选集：角色白名单优先；白名单空（generalist）→ 全部启用技能（能力包∪轨）
+        enabled = [s for s in self.registry.all()
+                   if s.enabled and s.pack in pack_set]
+        if role_skills:
+            enabled = [s for s in enabled if s.name in role_skills]
+        # 全量技能描述块（渐进披露层1：name+description；层2 正文走 skill_open）
+        if enabled:
+            skill_lines = [f"- {s.name}：{s.description or ''}" for s in enabled]
+            skill_block = (
+                "可用技能清单（name+description；动手前用 skill_open(\"<name>\") "
+                "打开全量正文）\n" + "\n".join(skill_lines))
+        else:
+            skill_block = "（当前无可用技能）"
+        # 可用知识库源清单（kb 检索入口：kb_search 全文 / kb_open 按路径打开）
         sources = [{"id": s.id, "domain": s.root.name, "root": str(s.root)}
                    for s in load_kb_sources(self.packs_root, self.capabilities)
                    if s.root.is_dir()]
         source_json = json.dumps(sources, ensure_ascii=False)
-        kb_hits = [e.module for e, _sec in hint_pairs]
-        kb_hits += [p for _k, ps, _d in route_hits for p in ps]
-        if not hits:
-            self.bb.append_event(
-                self.project_id, "skill.routed",
-                {"name": None, "score": 0, "matched": [], "task_id": task_id,
-                 "query": route_query[:200], "task_type": task_type,
-                 "kb_hits": kb_hits, "route_index": index_count,
-                 "route_total": index_total, "route_points": route_points},
-                session_id=self.session["id"], author=self.session["id"])
-            return (
-                "未命中技能指引（按通用方法执行）。需要方法细节时可用 kb_search "
-                "工具按关键词全文检索知识库。\n\n"
-                f"## 可用知识库源（kb_open 用全局 module=<域>/<快照>/<路径> 打开，禁止通读）\n{source_json}"
-                f"{route_block}{hint_block}{index_block}"
-            )
-        top = hits[0]
-        sk = top.skill
+        # 审计：记录本轮注入技能清单（可观测；旁路统计靠旧事件数据自动降级）
         self.bb.append_event(
             self.project_id, "skill.routed",
-            {"name": sk.name, "kind": sk.kind, "pack": sk.pack, "score": top.score,
-             "matched": top.matched, "breakdown": top.breakdown,
-             "task_id": task_id, "query": route_query[:200],
-             "task_type": task_type, "kb_hits": kb_hits,
-             "route_index": index_count, "route_total": index_total,
-             "route_points": route_points},
+            {"name": None, "injected": [s.name for s in enabled],
+             "count": len(enabled), "task_id": task_id,
+             "query": route_query[:200], "task_type": task_type},
             session_id=self.session["id"], author=self.session["id"])
         return (
-            f"{self._skill_digest(sk)}\n\n"
+            f"{skill_block}\n\n"
             f"## 可用知识库源（kb_open 用全局 module=<域>/<快照>/<路径> 打开，禁止通读）\n{source_json}"
-            f"{route_block}{hint_block}{index_block}"
         )
 
     def _skill_digest(self, sk: Any) -> str:
@@ -889,6 +836,283 @@ class AgentSession:
         more = "…（正文截断，用 skill_open(\"%s\") 打开全量）" % sk.name \
             if len(body) > 600 else ""
         return f"当前命中技能: {sk.name}（{sk.description}）\n\n{cut}{more}"
+
+    # ---------- 阶段一：黑板上下文物化（2026-09-28） ----------
+
+    # 物化器注册表（轨道感知分类型物化）：键=内容类型，值为实例方法名。
+    # 新增类型（如蓝图 blueprint 落地后）只加一行注册 + 一个 _mat_* 方法，
+    # 物化入口与注入点零改动。
+    _MATERIALIZERS: dict[str, str] = {
+        "assets": "_mat_assets",       # 渗透/CTF 轨：资产（host/domain/service/url/binary）
+        "findings": "_mat_findings",   # 两轨：渗透=vuln/intel 发现；逆向=intel 功能发现
+        "func_kb": "_mat_func_kb",     # 逆向轨：关键函数 + 功能描述
+        "chains": "_mat_chains",       # 两轨：攻击链/假设
+        "dead_end": "_mat_dead_end",   # 两轨：已排除方向（false-positive 路标）
+        "blueprint": "_mat_blueprint",  # 蓝图轨（R4 表，2026-09-28）：模块级业务功能↔函数锚点
+    }
+
+    # 轨道 → 优先物化类型（其余类型仍按命中注入，只是此表类型排前 + 提高 cap）
+    _TRACK_PREFERRED: dict[str, tuple[str, ...]] = {
+        "research": ("blueprint", "func_kb", "findings", "chains", "dead_end"),
+        "pentest": ("assets", "findings", "chains", "dead_end"),
+        "redteam": ("assets", "findings", "chains", "dead_end"),
+        "ctf": ("assets", "findings", "chains", "dead_end"),
+    }
+
+    def _blackboard_materialize(self, query: str, *, cap_chars: int = 2200) -> str:
+        """黑板上下文物化（阶段一，仅检索式）：任务/对话启动时按 objective 检索
+        黑板强相关内容，分级注入 system——① 一级：verified + confidence≥0.6 +
+        强匹配（标题/值精确子串），注入明细；② 二级：同 host/binary 关联，一行
+        摘要；③ 三级：仅计数提示行（控制 token，Agent 需要时 bb_query 自取）。
+        按轨道差异化分发（research→func_kb 优先，其余→assets/findings 优先）；
+        blueprint 物化器预留（挂起未实施返回空）。任一物化器异常静默降级。
+        返回物化文本块（无命中返回空串）。"""
+        if not query or not query.strip():
+            return ""
+        q = query.strip()
+        try:
+            # 本会话最近一次物化计数（事件流可观测：命中类型/条数）
+            hits: dict[str, int] = {}
+            blocks: list[str] = []
+            order = self._TRACK_PREFERRED.get(self.track, ("assets", "findings", "chains", "dead_end"))
+            for key in order:
+                method = getattr(self, self._MATERIALIZERS[key], None)
+                if method is None:
+                    continue
+                try:
+                    block, n = method(q)
+                except Exception:  # noqa: BLE001 —— 单个物化器失败不影响其他类型
+                    log.exception("黑板物化失败 type=%s", key)
+                    continue
+                if block:
+                    blocks.append(block)
+                    hits[key] = n
+            if not blocks:
+                return ""
+            # 落一条物化审计事件（可观测：命中类型与条数；不落正文防事件膨胀）
+            try:
+                self.bb.append_event(
+                    self.project_id, "bb.materialized",
+                    {"session_id": self.session["id"], "query": q[:150],
+                     "hits": hits, "chars": sum(len(b) for b in blocks)},
+                    session_id=self.session["id"], author=self.session["id"])
+            except Exception:  # noqa: BLE001
+                pass
+            joined = "\n\n".join(blocks)
+            if len(joined) > cap_chars:
+                joined = joined[:cap_chars] + "\n…（黑板物化超长截断，可 bb_query 取详情）"
+            return f"## 🧠 黑板物化（本次相关，动手前先读）\n{joined}"
+        except Exception:  # noqa: BLE001 —— 物化整体失败不影响任务主链
+            log.exception("黑板物化失败（整体）")
+            return ""
+
+    # ---- 各类型物化器：返回 (文本块, 命中条数)；无命中返回 ("", 0) ----
+
+    def _mat_assets(self, q: str) -> tuple[str, int]:
+        """渗透/CTF 轨：资产物化——type/value 子串匹配 + 父子链聚合。
+        一级：强匹配资产明细；二级：同 host 聚合摘要。"""
+        try:
+            assets = self.bb.list_assets(self.project_id)
+        except Exception:  # noqa: BLE001
+            return "", 0
+        if not assets:
+            return "", 0
+        ql = q.lower()
+        by_id = {a["id"]: a for a in assets}
+
+        def host_val(aid: str | None) -> str:
+            a = by_id.get(aid or "")
+            while a:
+                if a["type"] == "host":
+                    return str(a["value"])
+                a = by_id.get(a.get("parent_id") or "")
+            return ""
+
+        strong: list[str] = []
+        by_host: dict[str, list[str]] = {}
+        for a in assets:
+            val = str(a.get("value") or "")
+            if val.lower() and val.lower() in ql:  # 一级：值精确子串命中
+                strong.append(f"- {a['type']}:{val}（{a.get('status') or 'open'}）")
+            elif host_val(a.get("id")):
+                by_host.setdefault(host_val(a.get("id")), []).append(
+                    f"{a['type']}:{val}")
+        lines: list[str] = []
+        for s in strong[:8]:
+            lines.append(s)
+        for hv, vals in list(by_host.items())[:6]:
+            lines.append(f"- 📦 {hv}：{'、'.join(vals[:4])}" +
+                         (f"（+{len(vals) - 4}）" if len(vals) > 4 else ""))
+        if not lines:
+            return "", 0
+        return ("### 资产\n" + "\n".join(lines)), len(strong) + sum(len(v) for v in by_host.values())
+
+    def _mat_findings(self, q: str) -> tuple[str, int]:
+        """发现物化：verified + 标题/危害子串匹配（一级），同 host 聚合（二级）。
+        渗透=vuln/intel；逆向=intel（功能发现）。severity 高优先展示。"""
+        try:
+            findings = self.bb.list_findings(self.project_id, verified_only=True)
+        except Exception:  # noqa: BLE001
+            return "", 0
+        if not findings:
+            return "", 0
+        ql = q.lower()
+        assets = {}
+        try:
+            assets = {a["id"]: a for a in self.bb.list_assets(self.project_id)}
+        except Exception:  # noqa: BLE001
+            pass
+        sev = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+        ranked = sorted(findings, key=lambda f: sev.get(f.get("severity"), 0), reverse=True)
+        strong: list[str] = []
+        by_host: dict[str, list[str]] = {}
+        for f in ranked:
+            title = str(f.get("title") or "")
+            impact = str(f.get("impact") or "")
+            av = (assets.get(f.get("target_asset_id")) or {}).get("value", "")
+            blob = (title + " " + impact).lower()
+            if title.lower() and title.lower() in ql:  # 一级：标题精确子串
+                strong.append(
+                    f"- [{f.get('severity')}] {title}" +
+                    (f" → {impact[:60]}" if impact else ""))
+            elif av and str(av).lower() in ql:
+                by_host.setdefault(str(av), []).append(
+                    f"[{f.get('severity')}]{title[:40]}")
+        lines: list[str] = []
+        for s in strong[:8]:
+            lines.append(s)
+        for av, titles in list(by_host.items())[:6]:
+            lines.append(f"- 📦 {av}：{'、'.join(titles[:4])}" +
+                         (f"（+{len(titles) - 4}）" if len(titles) > 4 else ""))
+        if not lines:
+            return "", 0
+        return ("### 已验证发现\n" + "\n".join(lines)), len(strong) + sum(len(v) for v in by_host.values())
+
+    def _mat_func_kb(self, q: str) -> tuple[str, int]:
+        """逆向轨：关键函数物化——函数名/功能描述子串匹配（一级），按 confidence 排序。"""
+        try:
+            funcs = self.bb.list_funcs(self.project_id)
+        except Exception:  # noqa: BLE001
+            return "", 0
+        if not funcs:
+            return "", 0
+        ql = q.lower()
+        hits: list[dict] = []
+        for f in funcs:
+            name = str(f.get("name") or "")
+            analysis = str(f.get("analysis") or "")
+            if name.lower() and name.lower() in ql:
+                hits.append(f)
+            elif analysis.lower() and any(t in analysis.lower() for t in ql.split() if len(t) >= 3):
+                hits.append(f)
+        hits.sort(key=lambda f: float(f.get("confidence") or 0), reverse=True)
+        if not hits:
+            return "", 0
+        lines = []
+        for f in hits[:10]:
+            name = f.get("name") or ""
+            addr = f.get("address")
+            addr_s = f"@{addr:#x}" if isinstance(addr, int) else ""
+            tags = (f.get("risk_tags") or [])[:3]
+            tag_s = f" 风险:{'、'.join(tags)}" if tags else ""
+            conf = float(f.get("confidence") or 0)
+            conf_s = f" 置信:{conf:.0%}" if conf else ""
+            desc = str(f.get("analysis") or "")[:80]
+            lines.append(f"- {name}{addr_s}{tag_s}{conf_s}" + (f"｜{desc}" if desc else ""))
+        return ("### 关键函数（func_kb）\n" + "\n".join(lines)), len(hits)
+
+    def _mat_chains(self, q: str) -> tuple[str, int]:
+        """攻击链/假设物化：goal/name 子串匹配，未 exploited 的假设优先提示。"""
+        try:
+            chains = self.bb.list_chains(self.project_id)
+        except Exception:  # noqa: BLE001
+            return "", 0
+        if not chains:
+            return "", 0
+        ql = q.lower()
+        lines = []
+        n = 0
+        for c in chains:
+            blob = (str(c.get("name") or "") + " " + str(c.get("goal") or "")).lower()
+            if not blob or ql not in blob:
+                continue
+            status = c.get("status") or "hypothesis"
+            mark = "🔄" if status == "exploited" else "🔬"
+            lines.append(f"- {mark} {c.get('name')}（{status}）｜{str(c.get('goal') or '')[:60]}")
+            n += 1
+            if n >= 6:
+                break
+        if not lines:
+            return "", 0
+        return ("### 攻击链/假设\n" + "\n".join(lines)), n
+
+    def _mat_dead_end(self, q: str) -> tuple[str, int]:
+        """已排除方向物化：false-positive 路标，scope/目标子串匹配。"""
+        try:
+            fps = [f for f in self.bb.list_findings(self.project_id)
+                   if f["status"] == "false-positive"]
+        except Exception:  # noqa: BLE001
+            return "", 0
+        if not fps:
+            return "", 0
+        ql = q.lower()
+        lines = []
+        n = 0
+        for f in fps:
+            title = str(f.get("title") or "")
+            if not title.lower() or title.lower() not in ql:
+                continue
+            lines.append(f"- ⛔ {title[:70]}")
+            n += 1
+            if n >= 5:
+                break
+        if not lines:
+            return "", 0
+        return ("### 已排除方向（勿重走）\n" + "\n".join(lines)), n
+
+    def _mat_blueprint(self, q: str) -> tuple[str, int]:
+        """蓝图物化（R4 blueprints 表，2026-09-28）：模块级业务功能↔函数锚点。
+        按 objective 子串匹配蓝图 name/goal 与模块 desc/spec；research 轨优先。
+        展示：蓝图名（目标+状态）→ 命中模块（desc + func_addresses 锚点数）。
+        无蓝图/无命中返回空。"""
+        try:
+            bps = self.bb.list_blueprints(self.project_id)
+        except Exception:  # noqa: BLE001
+            return "", 0
+        if not bps:
+            return "", 0
+        ql = q.lower()
+        lines: list[str] = []
+        n = 0
+        for bp in bps:
+            name = str(bp.get("name") or "")
+            goal = str(bp.get("goal") or "")
+            status = str(bp.get("status") or "draft")
+            head_hit = (name.lower() and name.lower() in ql) \
+                or (goal.lower() and goal.lower() in ql)
+            mods = bp.get("modules") or []
+            hit_mods: list[str] = []
+            for m in mods:
+                if not isinstance(m, dict):
+                    continue
+                mname = str(m.get("name") or "")
+                mdesc = str(m.get("desc") or "")
+                if (mname.lower() and mname.lower() in ql) \
+                        or (mdesc.lower() and any(
+                            t in mdesc.lower() for t in ql.split() if len(t) >= 3)):
+                    anchors = len(m.get("func_addresses") or [])
+                    hit_mods.append(f"    - {mname}" +
+                                    (f"（{anchors} 函数锚点）" if anchors else ""))
+            if not head_hit and not hit_mods:
+                continue
+            lines.append(f"- 📐 {name}（{status}）" + (f"｜{goal[:50]}" if goal else ""))
+            lines += hit_mods[:4]
+            n += 1
+            if n >= 4:
+                break
+        if not lines:
+            return "", 0
+        return ("### 蓝图（模块级业务功能）\n" + "\n".join(lines)), n
 
     # ---------- C6 漏洞核对 hook（AI 登记漏洞前自我对照红线/评级规则） ----------
 
@@ -968,6 +1192,12 @@ class AgentSession:
             task_type=(task or {}).get("task_type") if task_id else None,
             scope=(task or {}).get("scope") if task_id else None)
         self._last_skill_context = skill_ctx  # v0.71：热换装重建 system 时复用
+        # 阶段一（2026-09-28）：任务认领期黑板物化——检索式注入强相关事实（资产/
+        # 发现/函数/链/死路），objective 为 query；E8 快照恢复不物化（快照自洽）。
+        if not resumed:
+            materialized = self._blackboard_materialize(objective)
+            if materialized:
+                skill_ctx = f"{skill_ctx}\n\n{materialized}".strip()
         system = self.build_system_blocks(objective, skill_ctx)
         # C6：复活时 messages 整体取快照（不与 transcript 拼接，防 tool_use/result
         # 错位）；否则 C10 transcript 接手（末 60 条）。E8 resume 路径不经 run_task，互斥。
@@ -1002,6 +1232,20 @@ class AgentSession:
                         if task_id else None)  # C10：第 N 次尝试接手提示
             if handover:
                 messages.append({"role": "user", "content": handover})
+            if task_id:
+                # 阶段四 M1 跨窗方向指纹（2026-09-28）：本任务历次认领会话的命令
+                # 聚合（精确计数排行 cap 10 + 首词聚类 cap 15，≤20 行）——接手窗
+                # 进场即知已试方向，避免跨窗重踩（stuck-convergence M2 定稿落地）。
+                fp = self._direction_fingerprint(task_id)
+                if fp:
+                    messages.append({"role": "user", "content": fp})
+                # 阶段四 M3 接手黑板视角（2026-09-28）：接手窗无本会话记忆，把黑板
+                # 知识侧（已验证 finding + 已排除死路，跨窗沉淀）作为 user 消息注入
+                # ——与 transcript（对话现场）互补，与阶段一 system 物化（通用检索）
+                # 区分：此处聚焦跨窗已验证结论，接手即知哪些已坐实。
+                bv = self._handover_blackboard_view(task)
+                if bv:
+                    messages.append({"role": "user", "content": bv})
             if old_plan_notice:
                 messages.append({"role": "user", "content": old_plan_notice})
             if dead_end_notice:
@@ -1187,22 +1431,57 @@ class AgentSession:
         note_text = "\n".join(
             str((r.get("payload") or {}).get("text", "")).strip()
             for r in drained if r.get("kind") == "human_note").strip()
+        # 对话即指令（阶段二，2026-09-28）：人类引导首轮意图判定——「任务」语义
+        # 自动升级为绑定本会话的任务（worker 下一轮 take_session_next 自动起跑
+        # run_task），「对话」语义走原对话流程。判定失败回落对话（宁当对话不误派活）。
+        if note_text:
+            intent, objective = self._classify_human_intent(note_text)
+            if intent == "task" and objective:
+                atts = [a for r in drained
+                        for a in ((r.get("payload") or {}).get("attachments") or [])]
+                try:
+                    self.tq.publish(
+                        self.project_id, objective,
+                        task_type="generic", noise_budget="passive",
+                        target_session=self.session["id"],
+                        attachments=atts or None,
+                        created_by="human")
+                    self.bb.append_event(
+                        self.project_id, "agent.intent",
+                        {"session_id": self.session["id"], "intent": "task",
+                         "objective": objective[:300],
+                         "note": note_text[:200]},
+                        session_id=self.session["id"], author=self.session["id"])
+                    return f"已受理为任务，自动起跑（目标：{objective[:80]}）"
+                except Exception as e:  # noqa: BLE001 —— 发布失败不阻断对话
+                    log.warning("对话转任务发布失败，回落对话: %s", e)
+                    parts.append(f"（你这句话按任务处理失败：{e}；可改述后重发）")
         # 历史：会话级 chat 文件（含已完成委托的沉淀问答对）。sanitize_snapshot_tail
         # 截掉末尾悬空 tool_use 半对防 API 拒；损坏/缺失 → 空降级，行为同首轮。
         history = sanitize_snapshot_tail(self._load_session_chat())
         if history:
             chat_mode = ("延续模式：以下是本会话既往对话记录（截尾保留，含此前委托的"
                          "收尾摘要），接着此上下文回应；可继续用工具查黑板/读工作区文件、"
-                         "跑命令核实。有价值的阶段性结论随手 bb_add_finding 登记（带 "
-                         "evidence，relates_to 串起推导链自动上图；没验证过的标 "
-                         "unverified）。干完必须给人类文字结论。回答简洁，直接回应人类。")
+                         "跑命令核实。阶段性结论要落发现时同样走意图纪律：先 "
+                         "declare_intent 声明（侦察结论登记可在 statement 写明依据），"
+                         "做一次核实动作后再 bb_add_finding（带 evidence，relates_to "
+                         "串起推导链自动上图；没验证过的标 unverified）。干完必须给"
+                         "人类文字结论。回答简洁，直接回应人类。")
         else:
             chat_mode = ("与人类直接对话（Claude Code 式工作窗）：回答引导/提问，需要时"
                          "用工具查黑板（资产/发现/事件/知识库）或跑命令核实再作答。"
-                         "有价值的阶段性结论随手 bb_add_finding 登记（带 evidence，"
-                         "relates_to 串起推导链自动上图；没验证过的标 unverified）。"
-                         "干完必须给人类文字结论。回答简洁，直接回应人类。")
+                         "阶段性结论要落发现时同样走意图纪律：先 declare_intent 声明"
+                         "（侦察结论登记可在 statement 写明依据），做一次核实动作后再 "
+                         "bb_add_finding（带 evidence，relates_to 串起推导链自动上图；"
+                         "没验证过的标 unverified）。干完必须给人类文字结论。回答简洁，"
+                         "直接回应人类。")
         system = self.build_system_blocks(chat_mode, self.skill_context_for(note_text))
+        # 阶段一（2026-09-28）：对话轮黑板物化——human_note 为 query 注入强相关
+        # 事实（与任务认领期同管线），让对话/引导也能吃到黑板沉淀。
+        materialized = self._blackboard_materialize(note_text)
+        if materialized:
+            system = [*system,
+                      {"type": "text", "text": materialized}]
         messages: list[dict[str, Any]] = list(history)
         messages.append({"role": "user", "content": "\n".join(parts)})
         final_text: str | None = None
@@ -1255,6 +1534,38 @@ class AgentSession:
             # 中间步不回写（只留问答对）。
             self._append_chat_to_session(parts, final_text)
         return final_text
+
+    def _classify_human_intent(self, note_text: str) -> tuple[str, str]:
+        """对话即指令（阶段二）：判定人类引导是「任务」还是「对话」。
+
+        返回 (intent, objective)：intent ∈ {"task","chat"}；task 时 objective 为
+        提炼后的可执行目标（失败回落原文）。判定模型优先 planner_llm（省主模型
+        token），缺失回落 self.llm；任何异常回落 chat（宁当对话不误派活）。
+        """
+        llm = self.planner_llm or self.llm
+        prompt = (
+            "你是任务意图分类器。判断一条发给 Agent 的人类消息是「任务」还是「对话」。\n"
+            "任务（task）：明确要求执行具体工作（分析/扫描/编写/测试/修改/调查某个目标等），"
+            "有可执行的目标；\n"
+            "对话（chat）：闲聊、提问、澄清、确认、询问状态、给背景、讨论方案、说谢谢/好的等。\n"
+            "只输出一个 JSON 对象，不要任何其他文字：\n"
+            '{"intent": "task"|"chat", "objective": "task 时的一句话可执行目标，chat 时留空"}'
+        )
+        try:
+            resp = llm.chat(
+                [{"role": "user", "content": f"人类消息：\n{note_text[:1500]}"}],
+                system=prompt)
+            self._record_usage(resp, source="planner", llm_obj=llm)
+            m = re.search(r"\{.*\}", resp.text or "", re.DOTALL)
+            data = json.loads(m.group(0)) if m else None
+            intent = str((data or {}).get("intent", "")).strip().lower()
+            if intent == "task":
+                objective = str((data or {}).get("objective", "")).strip()
+                return "task", objective or note_text
+            return "chat", ""
+        except Exception as e:  # noqa: BLE001 —— 判定失败回落对话
+            log.warning("对话意图判定失败，回落对话: %s", e)
+            return "chat", ""
 
     def _load_session_chat(self) -> list[dict[str, Any]]:
         """会话级对话历史（2026-09-20 对话化）：非绑定窗 run_chat 的上下文来源。
@@ -1560,6 +1871,45 @@ class AgentSession:
             lines += render_attempts_lines(attempts)
         return "\n".join(lines) if lines else None
 
+    def _handover_blackboard_view(self, task: dict) -> str:
+        """阶段四 M3 接手黑板视角（2026-09-28）：接手窗无本会话记忆，把黑板知识
+        侧（跨窗已验证 finding + 已排除死路）注入——接手即知哪些结论已坐实、哪些
+        方向勿重走。与阶段一 system 物化（按 objective 通用检索）区分：此处聚焦
+        本任务相关的跨窗已验证沉淀，cap 紧凑防膨胀。无沉淀返回空串。"""
+        q = str((task.get("objective") or "") + " " + str(task.get("scope") or "")).strip()
+        if not q:
+            return ""
+        ql = q.lower()
+        try:
+            findings = self.bb.list_findings(self.project_id)
+            assets = {a["id"]: a for a in self.bb.list_assets(self.project_id)}
+        except Exception:  # noqa: BLE001
+            return ""
+        verified: list[str] = []
+        dead: list[str] = []
+        for f in findings:
+            title = str(f.get("title") or "")
+            av = (assets.get(f.get("target_asset_id")) or {}).get("value", "")
+            blob = (title + " " + av).lower()
+            if not blob or (ql not in blob and av.lower() not in ql):
+                continue
+            if f.get("status") == "false-positive":
+                dead.append(f"⛔ {title[:70]}")
+            elif f.get("status") == "verified":
+                verified.append(
+                    f"- [{f.get('severity')}] {title[:70]}" +
+                    (f"｜{str(f.get('impact') or '')[:50]}" if f.get("impact") else ""))
+        lines: list[str] = []
+        if verified:
+            lines.append("📌 黑板已验证结论（接手可采信，勿重复验证）：")
+            lines += verified[:8]
+        if dead:
+            lines.append("🚫 黑板已排除方向（接手勿重走）：")
+            lines += dead[:5]
+        if not lines:
+            return ""
+        return "\n".join(lines)[:1400]
+
     def _loop(self, system: str, messages: list[dict[str, Any]], objective: str,
               start_step: int = 1) -> str | None:
         """薄包装：在册/注销 `_live_state`（v0.64 暂停请求即时落盘的现场源），
@@ -1601,6 +1951,13 @@ class AgentSession:
         self._plan_gate_count = 0  # 计划闸教练计数随任务复位
         self._stuck_waves = 0  # D1 卡死波次随任务复位
         self._stuck_extensions = 0  # D9 活跃探索延长次数随任务复位
+        # 阶段三规划节拍（2026-09-28）：双源触发状态随任务复位——
+        # _cadence_last_rev=上次 task.plan_revised 事件 id（周期触发去重）；
+        # _cadence_last_hint_step=上次周期提示步（每 K 步最多一次）；
+        # _cadence_hinted_findings=已提示过的新发现 id 集（同一发现只提示一次）。
+        self._cadence_last_rev = 0
+        self._cadence_last_hint_step = 0
+        self._cadence_hinted_findings: set[str] = set()
         # D6 收尾确认轮状态随任务复位（上一任务残留的确认态不得带进新任务）
         self.dispatcher.reset_closing()
         # while 而非 range（E8）：request_steps 在步内增补预算后，循环上界随之
@@ -1619,6 +1976,10 @@ class AgentSession:
                 messages.append({"role": "user", "content":
                     f"⏳ 预算剩余 {remaining} 步，请规划收尾；如确需更多步数，"
                     "调 request_steps 申请增补（一次 +200，剩余 ≤20 步才放行）。"})
+            # 阶段三规划节拍（2026-09-28）：双源机械触发计划修订提示——新发现
+            # 未入计划 / 计划长期未修订。只提示不自动改（计划语义仍由模型决定，
+            # 与计划闸 A2 不冲突）；修订本身走 task_plan（rev_reason 落因）。
+            self._planning_cadence(step, messages)
             if self._stuck(step):
                 if self._stuck_waves >= 2:
                     # D7 硬闸：顾问裁决「继续」后又干满一个观察窗仍无进展——
@@ -1743,6 +2104,97 @@ class AgentSession:
         # 心跳继续，等人类在直播间「继续」（恢复时可附引导语/追加预算）。
         self._budget_pause(system, messages, objective, self.dispatcher.max_steps)
         return None
+
+    # ---------- 阶段三规划节拍（2026-09-28，planner-cadence） ----------
+
+    _CADENCE_K = 8  # 周期校验触发步距：每 K 步且近 K 步未修订过 → 提示一次
+
+    def _planning_cadence(self, step: int, messages: list[dict[str, Any]]) -> None:
+        """双源机械触发计划修订提示（阶段三件 1）：
+
+        源 A 新发现触发：本任务区间新登记 finding 且当前 plan 无任何步 refs 引用
+        （refs 形如 finding:<id>）→ 注入提示（同一 finding 只提示一次）。
+        源 B 周期校验触发：每 K 步且自上次 task.plan_revised 后已推进 ≥K 步 →
+        注入轻量校验提示（提醒模型对照 objective 检查 plan 是否仍有效）。
+
+        只提示不自动改——计划语义仍由模型决定（与计划闸 A2 不冲突）；修订走
+        task_plan（rev_reason 落因，task.plan_revised 事件为去重游标）。
+        任一查询异常静默跳过（规划节拍是增强，不阻断主循环）。"""
+        if not self.dispatcher.current_task_id:
+            return
+        cur = self.dispatcher.current_task_id
+        task = self.tq.get_task(cur) if cur else None
+        if task is None or task["status"] != "claimed":
+            return
+        try:
+            # ---- 源 A：新发现未入计划 ----
+            self._cadence_finding_hint(task, messages)
+            # ---- 源 B：计划长期未修订（周期校验） ----
+            self._cadence_periodic_hint(step, messages)
+        except Exception:  # noqa: BLE001 —— 规划节拍失败不阻断主循环
+            log.exception("规划节拍异常（忽略）")
+
+    def _cadence_finding_hint(self, task: dict,
+                              messages: list[dict[str, Any]]) -> None:
+        """源 A：任务区间新 finding 未入计划 → 提示。refs 引用集=全部计划步 refs。"""
+        from core.blackboard.traces import _session_task_windows
+        task_id = task["id"]
+        wins = [w for w in _session_task_windows(
+                    self.bb.conn, self.project_id, self.session["id"])
+                if w["task_id"] == task_id and w.get("hi")]
+        if not wins:
+            return
+        w = wins[-1]
+        rows = self.bb.conn.execute(
+            "SELECT DISTINCT json_extract(payload,'$.finding_id') AS fid,"
+            " json_extract(payload,'$.title') AS title, id AS ev"
+            " FROM events WHERE project_id=? AND session_id=? AND kind='finding.new'"
+            " AND id>? AND id<=? ORDER BY id",
+            (self.project_id, self.session["id"], w["lo"], w["hi"])).fetchall()
+        if not rows:
+            return
+        # 计划步 refs 引用集（finding:<id>）
+        plan_refs = set()
+        for s in task.get("plan") or []:
+            for ref in (s.get("refs") or []):
+                if isinstance(ref, str) and ref.startswith("finding:"):
+                    plan_refs.add(ref[len("finding:"):])
+        new_hits: list[str] = []
+        for r in rows:
+            fid = r["fid"]
+            if not fid or fid in plan_refs or fid in self._cadence_hinted_findings:
+                continue
+            self._cadence_hinted_findings.add(fid)
+            title = str(r["title"] or fid)[:80]
+            new_hits.append(f"- {title}（{fid}）")
+        if not new_hits:
+            return
+        messages.append({"role": "user", "content":
+            "📋 规划节拍：黑板新登记了本任务相关的发现，当前计划步未引用它们——"
+            "若这些发现改变了打法，请调 task_plan 修订计划（保留进度的步带原 id，"
+            "rev_reason 注明原因）；若不相关可忽略：\n" + "\n".join(new_hits[:5])})
+
+    def _cadence_periodic_hint(self, step: int,
+                               messages: list[dict[str, Any]]) -> None:
+        """源 B：每 K 步且自上次 plan_revised 后推进 ≥K 步 → 轻量校验提示。"""
+        if step - self._cadence_last_hint_step < self._CADENCE_K:
+            return  # 距上次周期提示不足 K 步
+        # 上次 task.plan_revised 事件 id（跨任务统一按 session 查，取全局最大）
+        row = self.bb.conn.execute(
+            "SELECT COALESCE(MAX(id),0) AS maxid FROM events"
+            " WHERE project_id=? AND session_id=? AND kind='task.plan_revised'",
+            (self.project_id, self.session["id"])).fetchone()
+        last_rev = int(row["maxid"] if row else 0)
+        if last_rev > self._cadence_last_rev:
+            # 本任务以来有过修订 → 重置游标与步距，本次不提示
+            self._cadence_last_rev = last_rev
+            self._cadence_last_hint_step = step
+            return
+        self._cadence_last_hint_step = step
+        messages.append({"role": "user", "content":
+            "📋 规划节拍：本任务已推进多步且计划未再修订——请对照目标快速检查："
+            "计划步是否仍与当前进展一致？需修订则调 task_plan（保留进度步带原 id，"
+            "rev_reason 注明原因）；计划仍有效则继续执行（忽略本条）。"})
 
     # ---------- 拒绝分类（2026-09-24，plan-gate-breaker-refine） ----------
 
@@ -2495,6 +2947,65 @@ class AgentSession:
                       key=lambda x: -x[0])[:cap]
         return [{"cmd": c[:200], "times": n} for n, c in rows]
 
+    def _direction_fingerprint(self, task_id: str) -> str:
+        """阶段四 M1 跨窗方向指纹（stuck-convergence M2 定稿落地，2026-09-28）：
+        聚合本任务历次认领会话的命令——精确计数排行（完全相同命令 ×N，cap 10）
+        + 首词聚类（cap 15，去重后计数），全段 ≤20 行。接手窗进场即知已试方向，
+        避免跨窗重踩；无命令/无历史零注入。"""
+        from core.blackboard.traces import _claimed_sessions, _session_task_windows
+        try:
+            sessions = _claimed_sessions(self.bb.conn, self.project_id, task_id)
+            if not sessions:
+                return ""
+            cmds: list[str] = []
+            for sid in sessions:
+                wins = [w for w in _session_task_windows(
+                            self.bb.conn, self.project_id, sid)
+                        if w["task_id"] == task_id]
+                for w in wins:
+                    lo, hi = w["lo"], w.get("hi")
+                    if hi is None:
+                        continue  # 进行中的区间（当前窗）不纳入指纹（只给历史方向）
+                    rows = self.bb.conn.execute(
+                        "SELECT payload FROM events WHERE project_id=? AND session_id=?"
+                        " AND kind='command' AND id>? AND id<=?",
+                        (self.project_id, sid, lo, hi)).fetchall()
+                    for r in rows:
+                        try:
+                            cmd = str((json.loads(r["payload"] or "{}")
+                                       or {}).get("cmd", "")).strip()
+                        except (ValueError, TypeError):
+                            continue
+                        if cmd:
+                            cmds.append(cmd)
+            if not cmds:
+                return ""
+            # 精确计数排行（×≥2，cap 10）
+            counts: dict[str, int] = {}
+            for c in cmds:
+                counts[c] = counts.get(c, 0) + 1
+            exact = sorted(((n, c) for c, n in counts.items() if n >= 2),
+                           key=lambda x: -x[0])[:10]
+            # 首词聚类（cap 15）：去重计数
+            first = {}
+            for c in cmds:
+                head = c.split()[0][:30] if c.split() else c[:30]
+                first[head] = first.get(head, 0) + 1
+            heads = sorted(first.items(), key=lambda x: -x[1])[:15]
+            lines: list[str] = ["🧭 方向指纹——本任务此前已试方向（接手免重踩，勿重复已失败路径）："]
+            if exact:
+                lines.append("重复命令（完全相同的 ×N，多在原地打转）：")
+                for n, c in exact:
+                    lines.append(f"  ×{n} {c[:120]}")
+            if heads:
+                lines.append("已用命令前缀分布（首词聚类，覆盖已试方向）：")
+                for head, n in heads:
+                    lines.append(f"  ×{n} {head}")
+            return "\n".join(lines)[:1600]
+        except Exception:  # noqa: BLE001 —— 指纹失败不影响认领主链
+            log.exception("跨窗方向指纹失败（忽略）")
+            return ""
+
     def _recent_command_summary(self, event_window: int = 50,
                                 cap: int = 5) -> list[str]:
         """D1：最近命令摘要（stuck_escalate 事件给人工快速判断卡在哪）。"""
@@ -2823,12 +3334,13 @@ class AgentSession:
                            *, failure: bool = False) -> None:
         """任务收尾自动复盘（§4 沉淀飞轮；experience-sedimentation M1 条件触发 +
         M2 提纯）：条件见 _sediment_verdict（done+产出=打法沉淀；failed+error=失败
-        避坑教训；aborted/无产出 done 不跑）。planner LLM 复盘 → kb/index/case 提案
-        草稿（origin=agent，人批准后进知识库）。M2 提纯三件：①复盘前 kb 对账
-        （既有相关模块清单注入，已有手册引导 edit 补段不 create 重复新建）；②失败
-        模式 instruction（只提炼方法论教训，环境问题 NONE）；③reason 证据锚点要求
-        （解析后机器校验，缺引用静默跳过）。输出 NONE / 任何失败都静默跳过——绝不
-        影响任务收尾；与 AI 自主提案共用每会话 3 条 pending 上限。"""
+        避坑教训；aborted/无产出 done 不跑）。planner LLM 复盘 → kb/index/case/skill
+        提案草稿（origin=agent，人批准后进知识库/技能）。M2 提纯三件：①复盘前对账
+        （kb 对账注入既有相关模块 + K7 skill 对账注入会话技能清单，已有手册/技能引导
+        edit 补段不 create 重复新建）；②失败模式 instruction（只提炼方法论教训，环境
+        问题 NONE）；③reason 证据锚点要求（解析后机器校验，缺引用静默跳过）。输出
+        NONE / 任何失败都静默跳过——绝不影响任务收尾；与 AI 自主提案共用每会话 3 条
+        pending 上限。"""
         from core.skills import proposals  # 延迟导入避开 tools↔loop 环
         if not self.packs_root:
             return
@@ -2866,6 +3378,24 @@ class AgentSession:
                             "「坑」段，不要 create 重复新建）：\n" + "\n".join(lines))
         except Exception:  # noqa: BLE001
             pass
+        # K7 skill 对账前置：当前会话技能清单注入——LLM 只能对清单内技能提
+        # edit（防猜名/对不存在技能 edit 被后端拒），清单外方向只能提 suggest
+        skill_block = ""
+        try:
+            if self.registry is None:
+                self.load_skills()
+            if self.registry is not None:
+                pack_set = set(self.capabilities) | {self.track}
+                rows = [f"- {s.name}（{s.pack}/{s.kind}）{s.description or ''}"
+                        for s in self.registry.all()
+                        if s.enabled and s.pack in pack_set]
+                if rows:
+                    skill_block = (
+                        "已有技能清单（打法沉淀只走 mode=edit 补段或 mode=suggest "
+                        "提拆分/新方向建议，不要 create；edit 目标必须在此清单内）：\n"
+                        + "\n".join(rows))
+        except Exception:  # noqa: BLE001
+            skill_block = ""
         events = self.bb.recent_events(self.project_id, tail=30)
         digest = json.dumps(
             [{"kind": e["kind"], "payload_head": json.dumps(e["payload"], ensure_ascii=False)[:120]}
@@ -2884,8 +3414,9 @@ class AgentSession:
         instruction = (
             "复盘任务执行过程：是否验证了可复用的有效手法、踩坑或更优路径？\n"
             f"{mode_line}\n"
-            "有则只输出一个提案 JSON（无其他文字），三类去向三选一：\n"
-            '① kb 打法沉淀：{"kind": "kb", "mode": "create" 或 "edit", '
+            "有则只输出一个提案 JSON（无其他文字），四类去向四选一：\n"
+            '① kb 经验沉淀：场景经验/坑/产品指纹/现场笔记 → {"kind": "kb", '
+            '"mode": "create" 或 "edit", '
             '"target": {"kind": "kb", "cap": "能力包", "path": "kb内相对路径.md"}, '
             '"content": "提案文件全文（须有「## 」段落结构，含「已验证路径」或「坑」段）", '
             '"summary": "一句话", "reason": "证据锚点+关键观察"}\n'
@@ -2899,9 +3430,20 @@ class AgentSession:
             ' 或 "create"（payloads/ 下新建弹药文件 .md/.py/.txt/.json）, '
             '"target": {"kind": "case", "cap": "能力包", "path": "测试包内相对路径"}, '
             '"content": "文件全文", "summary": "…", "reason": "…"}\n'
+            '④ skill 打法沉淀：本任务验证了新的通用打法（对一类漏洞通用的做法）'
+            '或对既有技能有方法论修正 → '
+            '{"kind": "skill", "mode": "edit"（既有技能补「已验证路径」「坑」段，'
+            '目标必须在下方技能清单内）或 "suggest"（提出拆分/新打法方向建议，'
+            '产建议文档由人执行）, '
+            '"target": {"kind": "skill", "skill_kind": "capability|track", '
+             '"owner": "包/轨名", "name": "技能名"}, '
+             '"content": "技能正文全文（edit 须含 frontmatter，name 与技能名一致；'
+             'suggest 为建议文档全文，须有「## 」段落结构）", '
+             '"summary": "…", "reason": "证据锚点+关键观察"}\n'
             f"cap 只能取本会话能力包之一（{caps}）；kb 新经验补对应测试包手册的"
             "「已验证路径」「坑」段或写成 payloads/ 弹药；英文快照原文不覆盖不翻译。"
             + (f"\n{kb_block}" if kb_block else "")
+            + (f"\n{skill_block}" if skill_block else "")
             + "\n无则只输出 NONE。")
         try:
             resp = self.planner_llm.chat(
@@ -2922,9 +3464,11 @@ class AgentSession:
         try:
             payload = json.loads(text)
             tgt = payload.get("target") or {}
-            # K4：复盘沉淀允许 kb / index / case 三类去向（index 增补走 edit；其余一律按 kb 处理）
+            # K4/K7：复盘沉淀允许 kb / index / case / skill 四类去向
+            # （index 增补走 edit；skill 仅 edit/suggest 由 create_proposal 再校验；
+            #  其余一律按 kb 处理）
             kind = payload.get("kind") or tgt.get("kind") or "kb"
-            if kind not in {"kb", "index", "case"}:
+            if kind not in {"kb", "index", "case", "skill"}:
                 kind = "kb"
             payload["kind"] = kind
             tgt["kind"] = kind
@@ -2934,9 +3478,9 @@ class AgentSession:
             payload["task"] = task_id
             label = "failed（error）自动复盘沉淀" if failure else "done 自动复盘沉淀"
             payload["evidence"] = f"任务 {task_id}（{label}）"
-            # M2 解析后证据校验：打法沉淀（kb 类）reason 必须引用任务真实产出的
-            # finding id——机器可校验的部分在这里拦，防 LLM 编造/漏引用
-            if kind == "kb" and not failure:
+            # M2 解析后证据校验：打法沉淀（kb/skill 类）reason 必须引用任务真实
+            # 产出的 finding id——机器可校验的部分在这里拦，防 LLM 编造/漏引用
+            if kind in {"kb", "skill"} and not failure:
                 fids = verdict["finding_ids"]
                 if fids and not any(f in (payload.get("reason") or "") for f in fids):
                     log.warning("done 复盘提案缺 finding 证据引用（跳过沉淀）task=%s",

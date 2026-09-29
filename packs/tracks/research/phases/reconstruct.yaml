@@ -1,0 +1,23 @@
+# 逆向分析轨阶段剧本（planner-cadence P2，2026-09-28）——文件名 stem=阶段 id。
+# 重组阶段：按蓝图模块领单重建 + 自测。终点阶段无 gate；next 回指 analyze
+# 支持重组中发现问题回深析补函数的回退。入场门=已确认蓝图（min_verified）。
+name: 重组自测
+goal: 按蓝图模块领单重建，自测 verified 收口
+order: 3
+focus:
+  reconstruct: 3
+  verify: 2
+gate:
+  min_verified: 1
+  idle_rounds: 2
+gate_types: []
+tasks:
+  - task_type: reconstruct
+    role: rebuilder
+    objective: 按蓝图确认的模块划分领单重建：模块代码产出 + 接口对齐 spec，生成代码一律 untrusted 容器执行
+    acceptance: 重建代码落产物，模块接口与蓝图 spec 对齐，关键模块自测 verified
+  - task_type: verify
+    role: code-auditor
+    objective: 对重建产物做独立复核：接口行为对齐蓝图 spec，关键路径回归验证
+    acceptance: 复核结论落黑板（verified/false-positive），spec 偏差以 notes 上报不回改
+next: [analyze]

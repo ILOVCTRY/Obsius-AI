@@ -30,7 +30,7 @@
 - 时间 UTC ISO；ID `<前缀>-<12hex>`。
 - 黑板写操作只走 `Blackboard`/`TaskQueue` 方法；API 层零业务逻辑，只做 HTTP↔core 翻译。
 - 项目绑定 = **场景轨 track（单选）× 专家组队 experts（M2，多选可空）**；能力包隐退为知识组织单位（运行时知识面=caps_effective 推导，专家 yaml `skills` 白名单跨包引用）；无绑定存量项目直通 meta.capabilities 零翻译；旧 domain 读取时经 `LEGACY_DOMAIN_MAP` 映射（pentest→assessment+[web]，ctf→ctf+[binary]，reverse→research+[binary]），新建一律写新值。
-- 逆向工作台（P1/P2）：track=research && caps 含 binary ⇒ profile=rev-generic（前端 `deriveWorkbenchProfile`，config.workbench.profile 可覆盖）；三层数据——headless 缓存 JSON（**v3 契约**：客观全量+strings，可删重导）/ func_kb（只存分析过的函数）/ findings（挂 binary 资产，evidence 带 func_id+address）；headless 是 trusted **解析**工具，平台绝不执行样本。
+- 逆向工作台（P1/P2）：track=research ⇒ profile=rev-generic（前端 `deriveWorkbenchProfile`，config.workbench.profile 可覆盖；**2026-09-29 修**：M3 起 caps 多选退役、创建恒不传 caps，旧「caps 含 binary」判据已死——M3 后新建 research 项目全误落渗透模板；现按 config.board_view.default 非 funcs〔如 code-audit 档 findings〕交还渗透黑板）；三层数据——headless 缓存 JSON（**v3 契约**：客观全量+strings，可删重导）/ func_kb（只存分析过的函数）/ findings（挂 binary 资产，evidence 带 func_id+address）；headless 是 trusted **解析**工具，平台绝不执行样本。
 - Agent 无裸 shell：唯一命令口是经网关的 run_cmd；不可信代码只进 docker/sandbox，WSL 信任级=宿主机。
 - 安全默认宁严勿松：未知样本按恶意处理（L3 + fakenet）；fakenet 尚未实现（显式 NotImplementedError）。
 - 工具异常回填文本不中断循环；LLM 传输层对 429/5xx/超时重试 3 次。

@@ -84,7 +84,7 @@ def _make_server(port: int):
 
 def _run_headless(port: int) -> None:
     app, server = _make_server(port)
-    print(f"cyberstrike-pro core API -> http://127.0.0.1:{port}")
+    print(f"obsius core API -> http://127.0.0.1:{port}")
     print(f"  文档: http://127.0.0.1:{port}/docs")
     if _static_dir_if_built():
         print("  前端: 同源静态托管（webui/dist）—— / 即 WebUI")
@@ -93,7 +93,7 @@ def _run_headless(port: int) -> None:
 
 _PLACEHOLDER_HTML = """<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
-<title>cyberstrike-pro</title>
+<title>Obsius</title>
 <style>
   body{font-family:"Segoe UI","Microsoft YaHei",sans-serif;background:#16181d;
        color:#c9d1d9;display:flex;align-items:center;justify-content:center;
@@ -105,7 +105,7 @@ _PLACEHOLDER_HTML = """<!doctype html>
        padding:1px 6px;font-size:13px;color:#8bd5ca}
   p{margin:8px 0;font-size:14px}
 </style></head><body><div class="card">
-<h1>cyberstrike-pro 桌面窗口</h1>
+<h1>Obsius 桌面窗口</h1>
 <p>后端与前端都没有可加载的地址。请任选其一：</p>
 <p><b>① 静态模式（推荐）</b>：构建前端产物后重启本窗口——<br>
 <code>cd webui &amp;&amp; npm run build</code></p>
@@ -156,7 +156,7 @@ def _warn_dialog(msg: str) -> None:
     print(f"[提示] {msg}")
     try:
         import ctypes
-        ctypes.windll.user32.MessageBoxW(None, msg, "cyberstrike-pro", 0x30)
+        ctypes.windll.user32.MessageBoxW(None, msg, "Obsius", 0x30)
     except Exception:  # noqa: BLE001 —— 弹窗失败不掩盖后续降级
         pass
 
@@ -227,7 +227,7 @@ def _run_window(port: int, explicit_url: str | None, debug: bool) -> int:
             server.should_exit = True
 
     win = webview.create_window(
-        "cyberstrike-pro", url or _PLACEHOLDER_HTML,
+        "Obsius", url or _PLACEHOLDER_HTML,
         width=1480, height=920, min_size=(1100, 700))
     remaining[0] += 1
     win.events.closed += _on_closed
@@ -240,7 +240,7 @@ def _run_window(port: int, explicit_url: str | None, debug: bool) -> int:
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="cyberstrike-pro core API 服务（无窗/桌面窗口壳）")
+    p = argparse.ArgumentParser(description="obsius core API 服务（无窗/桌面窗口壳）")
     p.add_argument("port", nargs="?", type=int, default=8420,
                    help="监听端口（默认 8420）")
     p.add_argument("--window", action="store_true",

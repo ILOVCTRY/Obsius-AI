@@ -605,21 +605,23 @@ def test_agent_propose_skill_create_rejected(tmp_path):
 # ---------------- skill.routed 事件 ----------------
 
 def test_skill_routed_event_hit_and_miss(tmp_path):
+    """K8（2026-09-29）：skill_context_for 不再路由命中——事件改记录注入清单
+    （name 恒 null + injected 列表），正文仍只给描述、靠 skill_open。"""
     _packs, bb, project, _tq, agent = _make_session(tmp_path)
     ctx = agent.skill_context_for("排查 SQL 注入登录绕过", task_id="t-9")
-    assert "web-skill" in ctx
+    assert "web-skill" in ctx  # 全量描述注入含 web-skill
     ev = [e for e in bb.recent_events(project["id"]) if e["kind"] == "skill.routed"]
     assert len(ev) == 1
-    assert ev[0]["payload"]["name"] == "web-skill"
+    assert ev[0]["payload"]["name"] is None
+    assert "web-skill" in ev[0]["payload"]["injected"]
     assert ev[0]["payload"]["task_id"] == "t-9"
-    cats = {b["category"] for b in ev[0]["payload"]["breakdown"]}
-    assert "keywords" in cats
-    # 未命中：name=null
+    assert "breakdown" not in ev[0]["payload"]
+    # 再调用（聊天轮）：同样记录注入清单
     agent.skill_context_for("zzzz qqq unrelated", task_id="t-10")
-    miss = [e for e in bb.recent_events(project["id"])
-            if e["kind"] == "skill.routed" and e["payload"]["name"] is None]
-    assert len(miss) == 1
-    assert len(miss[0]["payload"]["query"]) <= 200
+    ev2 = [e for e in bb.recent_events(project["id"]) if e["kind"] == "skill.routed"]
+    assert len(ev2) == 2
+    assert ev2[-1]["payload"]["task_id"] == "t-10"
+    assert len(ev2[-1]["payload"]["query"]) <= 200
     bb.close()
 
 

@@ -6,12 +6,13 @@ import {
   ArrowLeft,
   Bell,
   Blocks,
+  Bot,
   CheckCircle2,
-  FolderKanban,
+  ChevronLeft,
   Globe2,
-  Inbox,
   LayoutDashboard,
   ListChecks,
+  PanelLeftOpen,
   Radio,
   Settings2,
   ShieldCheck,
@@ -22,6 +23,7 @@ import type { ProjectDetail } from "@/lib/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { LiveRoom } from "@/views/LiveRoom"
+import { AgentWorkbenchView } from "@/views/AgentWorkbenchView"
 import { Blackboard } from "@/views/Blackboard"
 import { ReverseWorkbench } from "@/views/reverse/ReverseWorkbench"
 import { RevCompact } from "@/views/reverse/RevCompact"
@@ -41,8 +43,11 @@ import { bindingBadge } from "@/lib/taxonomy"
 // （左 48–220px、右 288–640px），宽度 localStorage 持久化（ui.nav / ui.live-board）。
 // TRAE 化新壳（shell2）2026-09-26 用户定稿移除：不再维护，代码已删（git 历史可考）；
 // 旧壳为唯一壳。
+// 侧栏收起（2026-09-29）：展开态 hover 分割线浮现「‹」收起；收起后完全隐藏，
+// 左缘悬浮把手唤出；状态 localStorage（ui.nav-collapsed）。收起=条件渲染卸载
+// nav Panel+Separator（同 boardOpen 先例），重挂由 useDefaultLayout 恢复宽度。
 
-type View = "projects" | "intel" | "live" | "board" | "tasks" | "approvals" | "browser" | "settings"
+type View = "projects" | "intel" | "live" | "board" | "tasks" | "agents" | "approvals" | "browser" | "settings"
 
 /** M4c 场景档 board_view 默认视图（config.board_view.default；黑板上自行校验可用 tab 回退） */
 const boardViewOf = (m: ProjectDetail | null): string | undefined => {
@@ -56,9 +61,8 @@ const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
   {
     label: "工作区",
     items: [
-      { key: "projects", label: "项目", icon: FolderKanban, needsProject: false },
-      { key: "intel", label: "情报", icon: Inbox, needsProject: false },
       { key: "live", label: "会话", icon: Radio, needsProject: true },
+      { key: "agents", label: "智能体", icon: Bot, needsProject: true },
       { key: "board", label: "黑板", icon: LayoutDashboard, needsProject: true },
       { key: "tasks", label: "任务", icon: ListChecks, needsProject: true },
     ],
@@ -89,7 +93,7 @@ function NavRail({ active, onSelect, locked, className, expanded = false, pendin
     <nav className={cn("app-nav flex shrink-0 flex-col border-r", expanded ? "items-stretch" : "items-center", className)}>
       <div className={cn("nav-brand", expanded ? "justify-start px-4" : "justify-center")}>
         <div className="brand-mark"><Sparkles size={15} /></div>
-        {expanded && <span>Cyberstrike</span>}
+        {expanded && <span>Obsius</span>}
       </div>
       <div className="nav-scroll">
         {groups.map((group) => (
@@ -120,12 +124,29 @@ function NavRail({ active, onSelect, locked, className, expanded = false, pendin
   )
 }
 
+/** 收起态的左缘唤出把手：常驻窄命中区，悬停浮现青条与展开图标 */
+function NavReveal({ onExpand }: { onExpand: () => void }) {
+  return (
+    <button className="nav-reveal" title="展开侧栏" aria-label="展开侧栏" onClick={onExpand}>
+      <PanelLeftOpen size={14} />
+    </button>
+  )
+}
+
 export default function App() {
   const [pid, setPid] = useState<string | null>(null)
   const [meta, setMeta] = useState<ProjectDetail | null>(null)
   const [view, setView] = useState<View>("projects")
   const [pendingApprovals, setPendingApprovals] = useState(0)
   const [boardOpen, setBoardOpen] = useState(true)
+  // 全局侧栏收起（2026-09-29）：完全隐藏，左缘把手唤出；记忆上次形态
+  const [navCollapsed, setNavCollapsed] = useState(
+    () => window.localStorage.getItem("ui.nav-collapsed") === "1")
+  const toggleNavCollapsed = useCallback(() => {
+    const next = !navCollapsed
+    setNavCollapsed(next)
+    window.localStorage.setItem("ui.nav-collapsed", next ? "1" : "0")
+  }, [navCollapsed])
   // 直播间「复盘沉淀」完成 → 跨视图跳到设置指定 tab；skill.routed 双击 → 带 skill 深链选中
   const [settingsNav, setSettingsNav] = useState<{
     tab: string; n: number; skill?: { source: "cap" | "track"; pack: string; name: string }
@@ -238,11 +259,11 @@ export default function App() {
 
   // F1：三栏宽度持久化（localStorage；仅用户拖拽后的布局保存）
   const navLayout = useDefaultLayout({
-    id: "app-nav", panelIds: ["nav", "main"], storage: window.localStorage,
+    id: "app-nav-v3", panelIds: ["nav", "main"], storage: window.localStorage,
     onlySaveAfterUserInteractions: true,
   })
   const liveBoardLayout = useDefaultLayout({
-    id: "live-board", panelIds: ["live-main", "live-aside"], storage: window.localStorage,
+    id: "live-board-v3", panelIds: ["live-main", "live-aside"], storage: window.localStorage,
     onlySaveAfterUserInteractions: true,
   })
 
@@ -253,7 +274,7 @@ export default function App() {
         <NavRail active={view} onSelect={setView} locked={!pid} className="w-16" />
         <main className="app-content relative min-w-0 flex-1 overflow-auto">
           <div className="context-bar">
-            <div className="context-label"><span className="eyebrow">CYBERSTRIKE / CONTROL CENTER</span><span className="context-title">{view === "intel" ? "情报中心" : view === "settings" ? "设置" : "项目空间"}</span></div>
+            <div className="context-label"><span className="eyebrow">OBSIUS / CONTROL CENTER</span><span className="context-title">{view === "intel" ? "情报中心" : view === "settings" ? "设置" : "项目空间"}</span></div>
             <div className="context-status"><span className="status-dot" />在线</div>
           </div>
           {view === "intel"
@@ -269,7 +290,7 @@ export default function App() {
   return (
     <div className="app-shell flex h-screen flex-col">
       <header className="topbar flex h-16 shrink-0 items-center gap-4 border-b px-5">
-        <div className="mobile-brand"><div className="brand-mark"><Sparkles size={15} /></div><span>Cyberstrike</span></div>
+        <div className="mobile-brand"><div className="brand-mark"><Sparkles size={15} /></div><span>Obsius</span></div>
         <div className="project-context">
           <span className="eyebrow">ACTIVE PROJECT</span>
           <div className="project-title"><span className="project-pulse" /><h1>{meta?.name ?? "加载项目"}</h1><Badge variant="outline" className="project-badge">{meta ? bindingBadge(meta.track, meta.experts) : "…"}</Badge></div>
@@ -281,18 +302,26 @@ export default function App() {
           <span>审批</span>
           {pendingApprovals > 0 && <span className="approval-count">{pendingApprovals}</span>}
         </button>
-        <Button size="sm" variant="ghost" className="back-project" onClick={() => setView("projects")}><ArrowLeft size={15} />项目</Button>
+        <Button size="sm" variant="ghost" className="back-project" onClick={() => setView("projects")}><ArrowLeft size={15} />首页</Button>
       </header>
 
       <div className="flex min-h-0 flex-1">
         <Group orientation="horizontal" className="flex min-h-0 w-full"
                defaultLayout={navLayout.defaultLayout}
                onLayoutChanged={navLayout.onLayoutChanged}>
-          {/* 左：窄导航（F1 可拖拽 48–220px） */}
-          <Panel id="nav" minSize={48} maxSize={220} defaultSize={72}>
-            <NavRail active={view} onSelect={setView} locked={!pid} pendingApprovals={pendingApprovals} expanded className="h-full w-full" />
-          </Panel>
-          <Separator className="w-0.5 shrink-0 bg-transparent transition-colors hover:bg-accent data-[active]:bg-accent" />
+          {/* 左：项目导航（可拖拽 160–280px；悬浮「‹」收起，左缘把手唤出） */}
+          {!navCollapsed && (
+            <>
+              <Panel id="nav" minSize={160} maxSize={280} defaultSize={180}>
+                <NavRail active={view} onSelect={setView} locked={!pid} pendingApprovals={pendingApprovals} expanded className="h-full w-full" />
+              </Panel>
+              <Separator className="nav-sep w-0.5 shrink-0 bg-transparent transition-colors hover:bg-accent data-[active]:bg-accent">
+                <button className="nav-edge-btn" title="收起侧栏" aria-label="收起侧栏" onClick={toggleNavCollapsed}>
+                  <ChevronLeft size={12} />
+                </button>
+              </Separator>
+            </>
+          )}
           {/* 中：主区（直播间在 live 视图与黑板同屏共存） */}
           <Panel id="main">
             <main className={cn("h-full min-w-0", view === "live" ? "flex" : "overflow-auto")}>
@@ -301,7 +330,7 @@ export default function App() {
               <Group orientation="horizontal" className="flex min-h-0 w-full"
                      defaultLayout={liveBoardLayout.defaultLayout}
                      onLayoutChanged={liveBoardLayout.onLayoutChanged}>
-                <Panel id="live-main" minSize={320}>
+                <Panel id="live-main" minSize={500} defaultSize={65}>
                   <div className="h-full min-w-0">
                     <LiveRoom pid={pid} focusSession={sessionNav} />
                   </div>
@@ -309,7 +338,7 @@ export default function App() {
                 {boardOpen && (
                   <>
                     <Separator className="w-0.5 shrink-0 bg-transparent transition-colors hover:bg-accent" />
-                    <Panel id="live-aside" minSize={288} maxSize={640} defaultSize={384}>
+                    <Panel id="live-aside" minSize={320} maxSize={560} defaultSize={35}>
                       <aside className="h-full w-full border-l">
                         {profile === "rev-generic"
                           ? <RevCompact pid={pid} onOpenWorkbench={() => setView("board")} />
@@ -341,6 +370,7 @@ export default function App() {
             </div>
           )}
           {view === "tasks" && <TaskBoard pid={pid} focused={taskNav} />}
+          {view === "agents" && <AgentWorkbenchView pid={pid} meta={meta} />}
           {view === "browser" && (
             // F6 内置浏览器：轨门控（非 pentest/redteam 整页灰显）在视图内部处理；
             // 定高视图（面板组），照 rev 走 h-full + overflow-hidden
@@ -353,6 +383,7 @@ export default function App() {
             </main>
           </Panel>
         </Group>
+        {navCollapsed && <NavReveal onExpand={toggleNavCollapsed} />}
       </div>
     </div>
   )

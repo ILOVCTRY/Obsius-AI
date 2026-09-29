@@ -1,13 +1,15 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import {
   ReactFlow, ReactFlowProvider, Background, BackgroundVariant, MiniMap, Controls,
   useReactFlow, useUpdateNodeInternals, useNodesState, useEdgesState,
+  MarkerType, Handle, Position,
   type Edge, type Node, type NodeChange, type NodeProps, type NodeTypes,
 } from "@xyflow/react"
 import "@xyflow/react/dist/style.css"
 import "./tree.css" // 必须在 xyflow css 之后：深色覆盖（plain CSS 压层叠层）
-import { Crosshair, Maximize2 } from "lucide-react"
+import { Crosshair, Maximize2, X } from "lucide-react"
 import { api } from "@/lib/api"
+import { fmtDateTime } from "@/lib/datetime"
 import type { TaskTree, TaskTreeNode } from "@/lib/types"
 
 // 任务尝试树 v2（task-attempt-tree，2026-09-27 意图驱动改版）：
@@ -53,13 +55,20 @@ const SEV_CLS: Record<string, string> = {
   info: "border-l-zinc-600",
 }
 
+// 边渲染前提（2026-09-28 问题1 复发根因）：xyflow 的 getEdgePosition 用
+// querySelectorAll('.source'/'target') 收集节点 Handle 作为连接锚点，节点没有任何
+// Handle → handleBounds 为 null → 边整体不渲染（AttackPath 每个节点都带 Handle 才正常）。
+// Handle 仅作锚点，视觉透明隐藏；position 左 target/右 source 与左→右流向匹配。
+const HIDE_HANDLE = { opacity: 0, width: 4, height: 4, background: "transparent", border: "none" } as const
+
 function TreeCard({ data }: NodeProps<Node<TreeCardData>>) {
   if (data.variant === "root") {
     return (
       <div style={{ width: ROOT_W, minHeight: ROOT_H }}
-        className="rounded-md border border-(--status-doing) bg-[#161b22] px-3 py-2 shadow-lg">
+        className="cursor-pointer rounded-md border border-(--status-doing) bg-[#161b22] px-3 py-2 shadow-lg">
         <div className="text-[10px] uppercase tracking-wider text-zinc-500">目标</div>
         <div className="mt-1 line-clamp-3 text-[13px] leading-snug text-zinc-100">{data.label}</div>
+        <Handle type="source" position={Position.Right} style={HIDE_HANDLE} />
       </div>
     )
   }
@@ -67,7 +76,7 @@ function TreeCard({ data }: NodeProps<Node<TreeCardData>>) {
     const b = data.badge
     return (
       <div style={{ width: INTENT_W }}
-        className={`rounded-md border bg-[#161b22] px-3 py-2 shadow-md ${
+        className={`cursor-pointer rounded-md border bg-[#161b22] px-3 py-2 shadow-md ${
           data.current
             ? "border-(--status-doing) shadow-[0_0_10px_rgba(34,211,238,0.25)]"
             : "border-[#30363d]"}`}>
@@ -84,23 +93,29 @@ function TreeCard({ data }: NodeProps<Node<TreeCardData>>) {
             {data.sub}
           </div>
         )}
+        <Handle type="target" position={Position.Left} style={HIDE_HANDLE} />
+        <Handle type="source" position={Position.Right} style={HIDE_HANDLE} />
       </div>
     )
   }
   if (data.variant === "finding") {
     return (
       <div style={{ width: FINDING_W }}
-        className={`rounded border border-[#30363d] border-l-2 bg-[#161b22] px-2 py-1.5 shadow-sm ${
+        className={`cursor-pointer rounded border border-[#30363d] border-l-2 bg-[#161b22] px-2 py-1.5 shadow-sm ${
           SEV_CLS[data.sev ?? "info"] ?? SEV_CLS.info}`}>
         <div title={data.label} className="line-clamp-1 text-[11px] leading-snug text-zinc-300">{data.label}</div>
         <div className="mt-0.5 text-[10px] text-zinc-500">{data.sub}</div>
+        <Handle type="target" position={Position.Left} style={HIDE_HANDLE} />
+        <Handle type="source" position={Position.Right} style={HIDE_HANDLE} />
       </div>
     )
   }
   return (
     <div style={{ width: BUCKET_W }}
-      className="rounded border border-dashed border-[#30363d] bg-[#12161c] px-2 py-1.5">
+      className="cursor-pointer rounded border border-dashed border-[#30363d] bg-[#12161c] px-2 py-1.5">
       <div className="text-[11px] text-zinc-500">{data.label}</div>
+      <Handle type="target" position={Position.Left} style={HIDE_HANDLE} />
+      <Handle type="source" position={Position.Right} style={HIDE_HANDLE} />
     </div>
   )
 }
@@ -169,15 +184,90 @@ function buildLayout(tree: TaskTree): Layout {
   return { tree, pos, rootLevel }
 }
 
+// ---------- 详情面板（2026-09-28 问题4：卡片文本截断，点击看全量字段） ----------
+
+function DetailField({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="mb-2.5">
+      <div className="text-[10px] uppercase tracking-wider text-zinc-500">{label}</div>
+      <div className="mt-1 whitespace-pre-wrap break-words text-xs leading-relaxed text-zinc-200">{children}</div>
+    </div>
+  )
+}
+
+function NodeDetail({ selId, node, tree, onClose }: {
+  selId: string
+  node: TaskTreeNode | null
+  tree: TaskTree
+  onClose: () => void
+}) {
+  let title = "详情"
+  let body: ReactNode
+  if (selId === "__root") {
+    title = "目标"
+    body = (
+      <>
+        <DetailField label="目标">{tree.task.objective}</DetailField>
+        <DetailField label="类型 / 状态">{tree.task.task_type} · {tree.task.status}</DetailField>
+        <DetailField label="结果备注">{tree.task.result_note || "—"}</DetailField>
+      </>
+    )
+  } else if (node?.kind === "intent") {
+    title = "意图"
+    body = (
+      <>
+        <DetailField label="假设陈述">{node.statement}</DetailField>
+        <DetailField label="状态">
+          {node.status === "open"
+            ? "● 进行中"
+            : node.outcome_type === "dead_end" ? "✕ 死路"
+            : node.outcome_type === "vuln" ? "✅ 漏洞"
+            : node.outcome_type === "finding" ? "🔵 发现" : "已收尾"}
+        </DetailField>
+        {node.status === "closed" && node.dead_reason && (
+          <DetailField label="死因">{node.dead_reason}</DetailField>
+        )}
+        <DetailField label="创建时间">{fmtDateTime(node.created_at)}</DetailField>
+        {node.closed_at && <DetailField label="收尾时间">{fmtDateTime(node.closed_at)}</DetailField>}
+      </>
+    )
+  } else if (node?.kind === "finding") {
+    title = "发现"
+    body = (
+      <>
+        <DetailField label="标题">{node.title || "—"}</DetailField>
+        {node.vuln_class && <DetailField label="漏洞类型">{node.vuln_class}</DetailField>}
+        <DetailField label="严重级 / 状态">{node.severity} · {node.status}</DetailField>
+        <DetailField label="创建时间">{fmtDateTime(node.created_at)}</DetailField>
+      </>
+    )
+  } else {
+    title = "孤儿发现"
+    body = <DetailField label="说明">{node?.title ?? "—"}</DetailField>
+  }
+  return (
+    <div className="absolute bottom-3 right-3 top-3 z-20 flex w-[min(380px,88%)] flex-col rounded-md border border-[#30363d] bg-[#0d1117]/95 shadow-xl">
+      <div className="flex items-center gap-2 border-b border-[#21262d] px-3 py-2">
+        <span className="text-xs font-medium text-zinc-200">{title}</span>
+        <span className="flex-1" />
+        <button type="button" onClick={onClose} className="text-zinc-500 hover:text-zinc-200">
+          <X size={14} />
+        </button>
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">{body}</div>
+    </div>
+  )
+}
+
 // ---------- 主视图 ----------
 
-function TreeInner({ pid, initialTaskId, wsBump }: {
+function TreeInner({ pid, activeTaskId, wsBump }: {
   pid: string
-  initialTaskId?: string | null
+  activeTaskId?: string | null
   wsBump: number
 }) {
   const [tree, setTree] = useState<TaskTree | null>(null)
-  const [taskId, setTaskId] = useState<string | null>(initialTaskId ?? null)
+  const [taskId, setTaskId] = useState<string | null>(activeTaskId ?? null)
   const [tasks, setTasks] = useState<{ id: string; objective: string; status: string }[]>([])
   const [nodes, setNodes, onNodesChange] = useNodesState<Node<TreeCardData>>([])
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([])
@@ -187,6 +277,13 @@ function TreeInner({ pid, initialTaskId, wsBump }: {
   const measuredRef = useRef<Set<string>>(new Set())
   const fittedRef = useRef(false)
   const lastCurrentRef = useRef<string | null>(null)
+  const treeSigRef = useRef("")
+  const [selId, setSelId] = useState<string | null>(null)
+  // 详情面板选中节点（null + selId!=="__root" 时由 selValid 门禁兜底不渲染）
+  const selNode = useMemo(
+    () => (tree && selId && selId !== "__root" ? tree.nodes.find((n) => n.id === selId) ?? null : null),
+    [tree, selId],
+  )
   const [measuredTick, setMeasuredTick] = useState(0)
   const updateNodeInternals = useUpdateNodeInternals()
 
@@ -207,31 +304,29 @@ function TreeInner({ pid, initialTaskId, wsBump }: {
     }
   }, [pid])
 
-  // 树数据：taskId 变化 / 轮询 / wsBump（300ms 去抖）重拉
+  // 树数据：taskId 变化 / 轮询 / wsBump（300ms 去抖）重拉。
+  // 内容签名短路（2026-09-28 问题3）：轮询命中相同内容则跳过 setTree——否则每 3s 一个新
+  // 引用触发 layout 重算 → nodes 全量重建 + fittedRef 复位 → fitView 把用户缩放复原。
   useEffect(() => {
     if (!taskId) return
     let alive = true
+    const apply = (t: TaskTree) => {
+      if (!alive) return
+      const sig = JSON.stringify([t.task.objective, t.current.intent_id, t.nodes])
+      if (sig === treeSigRef.current) return
+      treeSigRef.current = sig
+      setTree(t)
+      setErr("")
+    }
     const h = setTimeout(async () => {
       try {
-        const t = await api.taskTree(pid, taskId)
-        if (alive) {
-          setTree(t)
-          setErr("")
-        }
+        apply(await api.taskTree(pid, taskId))
       } catch (e) {
         if (alive) setErr(e instanceof Error ? e.message : String(e))
       }
     }, wsBump ? 300 : 0)
     const poll = setInterval(() => {
-      if (!alive) return
-      api.taskTree(pid, taskId)
-        .then((t) => {
-          if (alive) {
-            setTree(t)
-            setErr("")
-          }
-        })
-        .catch(() => { /* 轮询容错 */ })
+      api.taskTree(pid, taskId).then(apply).catch(() => { /* 轮询容错 */ })
     }, 3000)
     return () => {
       alive = false
@@ -240,14 +335,24 @@ function TreeInner({ pid, initialTaskId, wsBump }: {
     }
   }, [pid, taskId, wsBump])
 
-  // 默认任务：initialTaskId 在清单 > 首个 claimed > 第一个
+  // 默认任务：activeTaskId 在清单 > 首个 claimed > 第一个
   useEffect(() => {
     if (taskId || tasks.length === 0) return
-    const pick = (initialTaskId && tasks.find((t) => t.id === initialTaskId)?.id)
+    const pick = (activeTaskId && tasks.find((t) => t.id === activeTaskId)?.id)
       || tasks.find((t) => t.status === "claimed")?.id
       || tasks[0].id
     setTaskId(pick)
-  }, [tasks, taskId, initialTaskId])
+  }, [tasks, taskId, activeTaskId])
+
+  // 会话页签切换跟随（2026-09-28 问题5）：activeTaskId 变化即同步任务选择；
+  // 下拉手动切任务不受影响——只在 prop 值真正变化时才同步
+  const lastPropTaskRef = useRef(activeTaskId ?? null)
+  useEffect(() => {
+    if (!activeTaskId || activeTaskId === lastPropTaskRef.current) return
+    lastPropTaskRef.current = activeTaskId
+    setTaskId(activeTaskId)
+    lastCurrentRef.current = null
+  }, [activeTaskId])
 
   const layout = useMemo(() => (tree ? buildLayout(tree) : null), [tree])
 
@@ -299,26 +404,38 @@ function TreeInner({ pid, initialTaskId, wsBump }: {
       return { id, type: "tree", position: p, draggable: false, data: { variant: "bucket", label: n.title } }
     }
     const ns = [...pos.keys()].map(card)
+    // 边样式（2026-09-28 问题1+2）：暗边提亮一档 + 闭合箭头，方向边可见；
+    // 活跃链（当前意图沿 parent 上溯到根）用青色流动动画，「目标→意图→发现/死路→新意图」
+    // 推理链一眼可辨
+    const chain = new Set<string>(["__root"])
+    const byId = new Map(t.nodes.map((n) => [n.id, n]))
+    let cur = t.current.intent_id
+    while (cur && byId.has(cur)) {
+      chain.add(cur)
+      cur = byId.get(cur)!.parent
+    }
+    const dim = "#57606a"
+    const lit = "#22d3ee"
+    const mkEdge = (source: string, target: string): Edge => {
+      const on = chain.has(source) && chain.has(target)
+      return {
+        id: `e:${source}->${target}`,
+        source,
+        target,
+        type: "smoothstep",
+        animated: on,
+        style: { stroke: on ? lit : dim, strokeWidth: on ? 1.8 : 1.2 },
+        markerEnd: { type: MarkerType.ArrowClosed, width: 15, height: 15, color: on ? lit : dim },
+      }
+    }
     const es: Edge[] = []
     for (const n of t.nodes) {
       const target = n.kind === "finding" && !n.parent ? "_orphan" : n.parent
       if (!target) continue
-      es.push({
-        id: `e:${target}->${n.id}`,
-        source: target,
-        target: n.id,
-        type: "smoothstep",
-        style: { stroke: "#3f4753", width: 1.2 },
-      })
+      es.push(mkEdge(target, n.id))
     }
     for (const r of layout.rootLevel) {
-      es.push({
-        id: `e:__root->${r.id}`,
-        source: "__root",
-        target: r.id,
-        type: "smoothstep",
-        style: { stroke: "#3f4753", width: 1.4 },
-      })
+      es.push(mkEdge("__root", r.id))
     }
     setNodes(ns)
     setEdges(es)
@@ -388,6 +505,8 @@ function TreeInner({ pid, initialTaskId, wsBump }: {
   }, [currentId, layout, rf])
 
   const currentIntent = tree?.nodes.find((n) => n.id === currentId)
+  // 详情面板有效性：切任务后旧选中 id 失效即隐藏（selNode 为 null 且非 root）
+  const selValid = !!selId && (selId === "__root" || !!tree?.nodes.some((n) => n.id === selId))
 
   return (
     <div className="flex h-full flex-col">
@@ -432,7 +551,10 @@ function TreeInner({ pid, initialTaskId, wsBump }: {
           edges={edges}
           onNodesChange={onNodesChangeCb}
           onEdgesChange={onEdgesChange}
+          onNodeClick={(_, n) => setSelId(n.id)}
+          onPaneClick={() => setSelId(null)}
           nodeTypes={NODE_TYPES}
+          nodesConnectable={false}
           onMoveStart={() => setFollow(false)}
           minZoom={0.2}
           maxZoom={1.6}
@@ -442,12 +564,15 @@ function TreeInner({ pid, initialTaskId, wsBump }: {
           <MiniMap pannable zoomable bgColor="#0d1117" maskColor="rgba(13,17,23,0.7)"
             nodeColor="#30363d" />
         </ReactFlow>
+        {tree && selId && selValid && (
+          <NodeDetail selId={selId} node={selNode} tree={tree} onClose={() => setSelId(null)} />
+        )}
       </div>
     </div>
   )
 }
 
-export function TaskTreeView(props: { pid: string; initialTaskId?: string | null; wsBump: number }) {
+export function TaskTreeView(props: { pid: string; activeTaskId?: string | null; wsBump: number }) {
   return (
     <ReactFlowProvider>
       <TreeInner {...props} />

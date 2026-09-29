@@ -60,6 +60,16 @@ _PLAN_PRE_ALLOWED = _PLAN_TOOLS | {
     "browser_navigate", "browser_screenshot", "browser_content",
 }
 
+# 意图流程工具（2026-09-28 意图先行闸）：这些调用不算「意图声明后的执行证据」
+# ——它们是产出/收尾流程自身，事后补票连招（declare_intent→bb_add_finding）恰
+# 由它们构成；门禁语义见 _tool_bb_add_finding。
+_INTENT_FLOW_TOOLS = (
+    "declare_intent", "close_intent", "reopen_intent",
+    "bb_add_finding", "bb_update_finding", "bb_delete_finding",
+    "task_plan", "task_step", "task_reconcile",
+    "complete_task", "fail_task", "finish", "request_steps",
+)
+
 # 运行时等级（DESIGN.md §7）；角色 max_runtime = 允许的最高等级，只可能比网关策略更严
 RUNTIME_RANK = {"host": 0, "wsl": 1, "docker": 2, "sandbox": 3}
 
@@ -201,9 +211,15 @@ AGENT_TOOLS: list[dict[str, Any]] = [
                        "测完且无发现才标 tested_clean；预算/配额用尽被迫停手标 budget_stop、"
                        "确认不适用（如非目标协议/离线主机）标 na——三者一样必须带 note"
                        "（服务端强制），让「哪里没挖完、为什么」可对账。"
-                       "tested_clean 服务端另强制死路意图背书：存在覆盖该资产的"
-                       "closed/dead_end 意图（declare_intent→close_intent 带证据收尾；"
-                       "批量面对父节点立一条意图覆盖子树），无背书直接标会被拒。"
+                       "tested_clean 强制四问+逐资产背书（2026-09-29）：①tested_what"
+                       " 你对该资产自己测了什么（具体动作清单：路径/方法/响应特征）——"
+                       "「与同模板/基线一致」不等于已测试；②viewpoint 探测视角"
+                       "（docker 出口/直连/浏览器），遇 WAF/WebVPN 拦截页（如 488/403）"
+                       "必须说明如何排除是出口假象；③why_no_finding 为何是「无发现」"
+                       "而非「没测到」，还剩什么可立的新意图；④须有直接围绕该资产的"
+                       " closed/dead_end 意图背书（target 或 basis_refs 明确含本资产 id）"
+                       "——每资产独立立意意图，禁止父节点一条意图批量覆盖子树，"
+                       "意图越多测得越全面。四问答案并入审计事件可事后对账。"
                        "测出问题直接 bb_add_finding，不要自报状态。",
         "input_schema": {
             "type": "object",
@@ -215,6 +231,18 @@ AGENT_TOOLS: list[dict[str, Any]] = [
                 "note": {"type": "string",
                          "description": "tested_clean/budget_stop/na 必填："
                                         "测了什么/为什么停/为什么不适用"},
+                "tested_what": {"type": "string",
+                                "description": "tested_clean 必填（四问①）：你对该资产"
+                                               "自己测了什么——具体动作清单（路径/方法/"
+                                               "响应特征），同模板/基线一致不算测试"},
+                "viewpoint": {"type": "string",
+                              "description": "tested_clean 必填（四问②）：探测视角"
+                                             "（docker 出口/直连/浏览器）；遇拦截页"
+                                             "（WAF/WebVPN 488/403）须说明排除出口假象的依据"},
+                "why_no_finding": {"type": "string",
+                                   "description": "tested_clean 必填（四问③）：为何是"
+                                                  "「无发现」而非「没测到」；还剩什么可立的"
+                                                  "新意图（收尾判据=没有可立的新意图）"},
                 "expected_revision": {"type": "integer",
                                       "description": "乐观锁：bb_query 读到的 rev 值。"
                                                      "多窗同时改同一资产时防覆盖，冲突回 [冲突]"},
@@ -588,6 +616,72 @@ AGENT_TOOLS: list[dict[str, Any]] = [
                                "description": "整体替换蓝图正文"},
             },
             "required": ["blueprint_id"],
+        },
+    },
+    {
+        "name": "bb_logic_block_create",
+        "description": "建业务逻辑块（逆向理解笔记，与蓝图/攻击链并列的第三种载体）："
+                       "记录函数协作如何构成业务功能——函数逻辑分析/业务逻辑分析/"
+                       "逆向破解/游戏业务理解的落点（PWN/漏洞利用登记走攻击链，"
+                       "重建管线走蓝图，不要混用）。一个块=一项可讲述的业务功能"
+                       "（如「存档校验」「金币结算」「协议握手」），funcs 挂构成该"
+                       "功能的函数与各自角色注（一句话职责）。address 必须已登记 "
+                       "func_kb（先 decompile/bb_upsert_func 再挂）；"
+                       "同项目同样本下块名重名会拒收。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string",
+                         "description": "业务功能名（如「存档校验」）"},
+                "binary_sha256": {"type": "string",
+                                  "description": "目标样本 sha256（挂函数的前提，必填）"},
+                "description": {"type": "string",
+                                "description": "业务逻辑描述（markdown）：触发时机/输入输出/"
+                                               "状态流转/与其他块的关系"},
+                "funcs": {"type": "array",
+                          "description": "构成该功能的函数（可后续 bb_logic_block_update 增补）",
+                          "items": {"type": "object",
+                                    "properties": {
+                                        "address": {"type": ["integer", "string"],
+                                                    "description": "hex 地址串或 int"},
+                                        "role": {"type": "string",
+                                                 "description": "该函数在本块中的职责一句话"},
+                                    }}},
+            },
+            "required": ["name", "binary_sha256"],
+        },
+    },
+    {
+        "name": "bb_logic_block_update",
+        "description": "更新业务逻辑块（分区增量写）：description 整体替换业务描述；"
+                       "add_funcs 增挂函数；func_roles 修订既有挂接的角色注；"
+                       "remove_addresses 摘除函数。分析深入后回头补描述是预期工作流"
+                       "（先骨架后丰满）。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "block_id": {"type": "string"},
+                "description": {"type": "string",
+                                "description": "整体替换业务描述（markdown）"},
+                "add_funcs": {"type": "array",
+                              "description": "增挂函数",
+                              "items": {"type": "object",
+                                        "properties": {
+                                            "address": {"type": ["integer", "string"]},
+                                            "role": {"type": "string"},
+                                        }}},
+                "func_roles": {"type": "array",
+                               "description": "修订既有挂接的角色注",
+                               "items": {"type": "object",
+                                         "properties": {
+                                             "address": {"type": ["integer", "string"]},
+                                             "role": {"type": "string"},
+                                         }}},
+                "remove_addresses": {"type": "array",
+                                     "description": "摘除函数（hex 地址串）",
+                                     "items": {"type": "string"}},
+            },
+            "required": ["block_id"],
         },
     },
     {
@@ -966,7 +1060,9 @@ AGENT_TOOLS: list[dict[str, Any]] = [
                        "工具动作按时间归入该意图，执行层是图的展开细节）。"
                        "每个意图最终必须 close_intent 收尾为漏洞/发现/死路，不得悬挂。"
                        "basis_refs 写推导依据（从什么资产/发现逻辑推出本假设，"
-                       "形如 finding:<id>/asset:<id>），引用必须已在本项目，悬空即拒。"
+                       "形如 asset:asset-6971f089d5fe / finding:find-c32f449cc7b5"
+                       "——<id> 是完整 id，自带 asset-/find- 前缀），"
+                       "引用必须已在本项目，悬空即拒。"
                        "同陈述的未关闭意图已存在 → 直接返回既有意图（merged=true）。",
         "input_schema": {
             "type": "object",
@@ -977,8 +1073,10 @@ AGENT_TOOLS: list[dict[str, Any]] = [
                                     "description": "意图针对的根目标资产 id（host/domain）"},
                 "basis_refs": {
                     "type": "array",
-                    "description": "推导依据引用：[\"asset:<id>\", \"finding:<id>\", …]——"
-                                   "本意图从哪些已有事实逻辑推出（边=逻辑推导）",
+                    "description": "推导依据引用：[\"asset:asset-6971f089d5fe\", "
+                                   "\"finding:find-c32f449cc7b5\", …]——"
+                                   "本意图从哪些已有事实逻辑推出（边=逻辑推导）；"
+                                   "<id> 是完整 id（自带 kind 前缀）",
                     "items": {"type": "string"},
                 },
             },
@@ -1009,7 +1107,10 @@ AGENT_TOOLS: list[dict[str, Any]] = [
                 "evidence_refs": {
                     "type": "array",
                     "description": "outcome=dead_end 时必填：证据引用"
-                                   "[\"http:<历史id>\", \"event:<事件id>\", \"artifact:<id>\"]",
+                                   "[\"http:1234\", \"event:567\", "
+                                   "\"artifact:art-abc\"]——http/event 为"
+                                   "纯数字历史/事件 id；artifact:<id> 的 <id> "
+                                   "是完整 id（注意 id 前缀是 art-）",
                     "items": {"type": "string"},
                 },
                 "dead_reason": {"type": "string",
@@ -1512,7 +1613,10 @@ class ToolDispatcher:
 
     def _tool_bb_asset_status(self, asset_id: str, status: str,
                               note: str | None = None,
-                              expected_revision: int | None = None) -> str:
+                              expected_revision: int | None = None,
+                              tested_what: str | None = None,
+                              viewpoint: str | None = None,
+                              why_no_finding: str | None = None) -> str:
         a0 = self.bb.get_asset(asset_id)
         if a0 is None or a0.get("project_id") != self.project_id:
             return f"[错误] 资产不存在: {asset_id}"
@@ -1521,10 +1625,33 @@ class ToolDispatcher:
                 int(a0.get("revision") or 1) != int(expected_revision):
             return (f"[冲突] 资产已被他人修改（当前 revision={a0.get('revision')}，"
                     f"请求基于 {expected_revision}）——先 bb_query 现查再重试")
+        # tested_clean 四问门禁（2026-09-29，sess-1d692817a5d0 误判复盘）：答案
+        # 结构化落 detail→asset.status_changed 事件全文可对账；note 截 200 只留
+        # 摘要，四问全文在 detail。
+        detail = None
+        if status == "tested_clean":
+            missing = [k for k, v in (("tested_what", tested_what),
+                                      ("viewpoint", viewpoint),
+                                      ("why_no_finding", why_no_finding))
+                       if not (v and str(v).strip())]
+            if missing:
+                return ("[拒绝] tested_clean 须回答四问（逐资产独立判定，"
+                        "「同模板/基线一致」不等于已测试）：①tested_what 你对该资产"
+                        "自己测了什么（路径/方法/响应特征清单）；②viewpoint 探测视角"
+                        "（docker 出口/直连/浏览器，遇 WAF/WebVPN 拦截页须说明排除"
+                        "依据）；③why_no_finding 为何是「无发现」而非「没测到」、"
+                        "还剩什么可立的新意图；④另有直接围绕本资产的 closed/dead_end"
+                        f" 意图背书（服务端校验）。缺：{','.join(missing)}")
+            detail = {"tested_what": str(tested_what).strip(),
+                      "viewpoint": str(viewpoint).strip(),
+                      "why_no_finding": str(why_no_finding).strip()}
+            if not (note and note.strip()):
+                note = "；".join(f"{k}：{v[:80]}" for k, v in detail.items())
         try:
             a = self.bb.set_asset_status(asset_id, status, note=note,
                                          author=self.author,
-                                         expected_revision=expected_revision)
+                                         expected_revision=expected_revision,
+                                         detail=detail)
         except ValueError as e:
             if "乐观锁冲突" in str(e):
                 return f"[冲突] {e}"
@@ -1546,24 +1673,48 @@ class ToolDispatcher:
         ev = dict(evidence or {})
         if relates_to:
             ev["relates_to"] = relates_to
-        # 发现必挂意图（任务尝试树 v2 门禁，2026-09-27）：发现是意图假设的检验
-        # 产物，不允许游离——Agent（sess-）**在认领任务期间**登记前本会话必须有
-        # open 意图；人类/系统路径不经此工具，不受限。store 层不设闸（测试/人工
-        # PATCH 零感知）。
-        # 2026-09-27 agent-loop 修复：门禁只对任务上下文生效（current_task_id 非
-        # 空）——对话轮/无委托窗没有任务树可挂（树按 task_id 现算），且对话轮无
-        # E2 拒绝熔断/awaiting_human 逃生，硬拦会让对话轮在 24 步里反复被拒白烧
-        # LLM、消息被 drain 后无回复（「石沉大海」）。
-        if self.current_task_id and self.author.startswith("sess-"):
-            has_open = self.bb.conn.execute(
-                "SELECT 1 FROM intents WHERE project_id=? AND status='open'"
-                " AND author=? LIMIT 1", (self.project_id, self.author)).fetchone()
-            if has_open is None:
+        # 发现必挂意图 + 意图先行（2026-09-28 三段式收紧，前身为 2026-09-27 必挂
+        # 意图）：发现是「侦察→declare_intent→执行→产出」链路的检验产物，既不
+        # 允许游离，也不允许「事后补票」——活干完了才 declare 意图紧接着落发现
+        # （实测 sess-b9a539e3ebfe：declare 与 finding 仅隔 12 秒，意图沦为过闸
+        # 仪式而非事前规划）。两道检查对 Agent 会话统一生效（含对话轮——
+        # declare_intent 恒放行不会死锁；人类/系统路径不经此工具，不受限；store
+        # 层不设闸，测试/人工 PATCH 零感知）：
+        # ① 本会话须有 open 意图；
+        # ② 意图声明之后须有执行动作——command 事件（run_cmd，run_cmd 自身不落
+        #    tool.call）或非流程类 tool.call（排除 _INTENT_FLOW_TOOLS）。以
+        #    events.id（自增行序）为时间线基准，不受秒级时间戳同秒歧义影响。
+        if self.author.startswith("sess-"):
+            row = self.bb.conn.execute(
+                "SELECT id FROM intents WHERE project_id=? AND status='open'"
+                " AND author=? ORDER BY created_at LIMIT 1",
+                (self.project_id, self.author)).fetchone()
+            if row is None:
                 self.last_progress_step = self._step
                 return ("[拒绝] 本会话当前没有 open 意图，不允许游离登记发现——"
                         "先 declare_intent(statement=\"对 <对象> 进行 <什么尝试>…\")"
                         " 声明假设，再围绕它执行并登记发现；"
                         "意图最终须 close_intent 收尾（漏洞/发现/死路）")
+            declared_ev = self.bb.conn.execute(
+                "SELECT id FROM events WHERE session_id=? AND kind='intent.declared'"
+                " AND json_extract(payload,'$.intent_id')=? ORDER BY id DESC LIMIT 1",
+                (self.author, row["id"])).fetchone()
+            marks = ",".join("?" * len(_INTENT_FLOW_TOOLS))
+            acted = None
+            if declared_ev is not None:
+                acted = self.bb.conn.execute(
+                    "SELECT 1 FROM events WHERE session_id=? AND id>? AND ("
+                    "kind='command' OR (kind='tool.call' AND"
+                    " json_extract(payload,'$.name') NOT IN (" + marks + ")))"
+                    " LIMIT 1",
+                    (self.author, declared_ev["id"], *_INTENT_FLOW_TOOLS)).fetchone()
+            if acted is None:
+                self.last_progress_step = self._step
+                return ("[拒绝] 意图 " + row["id"] + " 声明后还没有任何执行动作，"
+                        "不能登记发现——先围绕假设干活（run_cmd 验证/http 请求/"
+                        "bb_add_artifact 存证等），有了结果再来 bb_add_finding；"
+                        "发现是检验的产物，不是意图的附赠。若这是侦察阶段的直接"
+                        "观察，请先做一次核实动作（复核请求/查证）再登记。")
         # C6 漏洞核对 hook：AI 登记漏洞前自我对照红线/评级规则——
         # 不合格降级 intel（不进漏洞视图）；核对失败降级跳过（不阻断）。
         gate_note = ""
@@ -1614,11 +1765,16 @@ class ToolDispatcher:
                             target_asset_id=target_asset_id,
                             basis_refs=basis_refs, author=self.author)
         self.last_progress_step = self._step
+        teach = ""
+        if r.get("ref_corrections"):
+            teach = ("；已自动归一引用：" + "；".join(r["ref_corrections"])
+                     + "（<id> 须是完整 id——自带 asset-/find- 前缀，"
+                       "后续请直接写完整形态）")
         if r.get("merged"):
             return (f"[复用] intent={r['id']} status=open"
-                    "（同陈述意图已存在，在它下面继续执行并收尾）")
+                    "（同陈述意图已存在，在它下面继续执行并收尾）" + teach)
         return (f"intent={r['id']} status=open basis_refs={len(r.get('basis_refs') or [])}"
-                "——围绕它执行，最终必须 close_intent 收尾")
+                "——围绕它执行，最终必须 close_intent 收尾" + teach)
 
     def _tool_close_intent(self, intent_id: str, outcome: str,
                            finding_ids: list[str] | None = None,
@@ -1629,7 +1785,12 @@ class ToolDispatcher:
                           dead_reason=dead_reason, author=self.author)
         self.last_progress_step = self._step
         refs = len(r.get("outcome_refs") or [])
-        return f"intent={intent_id} status=closed outcome={outcome} findings={refs}"
+        teach = ""
+        if r.get("ref_corrections"):
+            teach = ("；已自动归一引用：" + "；".join(r["ref_corrections"])
+                     + "（<id> 须是完整 id——后续请直接写完整形态）")
+        return (f"intent={intent_id} status=closed outcome={outcome} "
+                f"findings={refs}" + teach)
 
     def _tool_reopen_intent(self, intent_id: str, note: str = "") -> str:
         r = _reopen_intent(self.bb, self.project_id, intent_id,
@@ -2177,6 +2338,67 @@ class ToolDispatcher:
         self.last_progress_step = self._step
         return f"blueprint={r['id']} updated（modules={len(r['modules'])}）"
 
+    def _tool_bb_logic_block_create(self, name: str, binary_sha256: str,
+                                    description: str = "",
+                                    funcs: list[dict] | None = None) -> str:
+        try:
+            r = self.bb.create_logic_block(
+                self.project_id, name, description=description,
+                binary_sha256=binary_sha256, author=self.author)
+            fails: list[str] = []
+            for f in funcs or []:
+                try:
+                    self.bb.add_logic_block_func(
+                        self.project_id, r["id"], f.get("address", ""),
+                        str(f.get("role", "")), author=self.author)
+                except ValueError as e:  # 未入库/重复挂接：不中断，逐条报告
+                    fails.append(f"{f.get('address')}: {e}")
+        except ValueError as e:
+            return f"[错误] {e}"
+        self.last_progress_step = self._step
+        head = f"logic_block={r['id']} funcs={len(r['funcs'])}"
+        if fails:
+            head += "；部分挂接失败——" + "；".join(fails)
+        return head + "——继续 bb_logic_block_update 补描述/增删挂接，人类在「业务逻辑」页签可见"
+
+    def _tool_bb_logic_block_update(self, block_id: str,
+                                    description: str | None = None,
+                                    add_funcs: list[dict] | None = None,
+                                    func_roles: list[dict] | None = None,
+                                    remove_addresses: list[str] | None = None) -> str:
+        try:
+            r = self.bb.get_logic_block(self.project_id, block_id)
+            if r is None:
+                return f"[错误] 业务块不存在: {block_id}"
+            changed: list[str] = []
+            if description is not None:
+                self.bb.update_logic_block(
+                    self.project_id, block_id, description=description,
+                    author=self.author)
+                changed.append("description")
+            for f in add_funcs or []:
+                try:
+                    self.bb.add_logic_block_func(
+                        self.project_id, block_id, f.get("address", ""),
+                        str(f.get("role", "")), author=self.author)
+                    changed.append(f"+{f.get('address')}")
+                except ValueError as e:
+                    changed.append(f"[拒绝] {f.get('address')}: {e}")
+            for f in func_roles or []:
+                row = self.bb.update_logic_block_func(
+                    self.project_id, block_id, f.get("address", ""),
+                    str(f.get("role", "")), author=self.author)
+                changed.append(f"role@{f.get('address')}" if row is not None
+                               else f"[未挂接] {f.get('address')}")
+            for a in remove_addresses or []:
+                row = self.bb.remove_logic_block_func(
+                    self.project_id, block_id, a, author=self.author)
+                changed.append(f"-{a}" if row is not None else f"[未挂接] {a}")
+        except ValueError as e:
+            return f"[错误] {e}"
+        self.last_progress_step = self._step
+        return f"logic_block={block_id} updated（{'; '.join(changed)}）"
+
     def _finish_or_report_deleted(self, finish, verb: str) -> str:
         """收尾委托；委托已被人类物理删除（§6.4）→ 友好提示，会话照常转向下一委托。"""
         tid = self.current_task_id
@@ -2474,6 +2696,29 @@ class ToolDispatcher:
             "- 无遗漏 → 再次调用 complete_task（一轮零新增即落定 done）。\n"
             f"确认轮最多 {self.closing_max_rounds} 轮；期间任务仍 claimed，事件照常记录。")
 
+    def _milestone_reconcile_hint(self) -> str | None:
+        """阶段三里程碑收口（2026-09-28）：任务完成前检查本任务验收条目是否
+        全部收口——存在 pending 条目则提示先逐条 task_reconcile 交代（复用现有
+        对账机制；不强制，二次申报放行）。返回提示文本或 None 放行。"""
+        if not self.current_task_id:
+            return None
+        try:
+            task = self.tq.get_task(self.current_task_id)
+            entries = ((task or {}).get("context") or {}).get("reconcile") or []
+        except Exception:  # noqa: BLE001
+            return None
+        pending = [e for e in entries if e.get("state") == "pending"]
+        if not pending:
+            return None
+        rows = "\n".join(
+            f"  #{e.get('id')} {e.get('text', '')[:60]}"
+            for e in pending[:8])
+        more = f"\n  （另有 {len(pending) - 8} 条未列）" if len(pending) > 8 else ""
+        return (
+            f"[里程碑收口] 本任务还有 {len(pending)} 条验收条目未逐条交代：\n{rows}{more}\n"
+            "请用 task_reconcile 逐条收口（met=已完成附证据 / failed=已证实无法完成附原因 / "
+            "blocked=受阻附卡点）。全部收口后再 complete_task；确属无法收口的，再次申报放行。")
+
     def _tool_complete_task(self, result_note: str) -> str:
         if not self.current_task_id:
             return "[错误] 当前没有认领的任务"
@@ -2481,6 +2726,12 @@ class ToolDispatcher:
         gate = self._closing_gate(result_note)
         if gate is not None:
             return gate
+        # 阶段三里程碑收口（2026-09-28）：任务完成前检查本任务验收条目是否
+        # 全部收口——未收口则提示先逐条 reconcile（复用现有对账机制，不强制；
+        # 与 D6 收尾确认正交：D6 管产出饱和，此处管验收条目交代）。
+        ms_hint = self._milestone_reconcile_hint()
+        if ms_hint is not None:
+            return ms_hint
         self.reset_closing()
         tid = self.current_task_id
         result = self._finish_or_report_deleted(

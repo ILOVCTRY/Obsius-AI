@@ -45,10 +45,14 @@ export function buildStreamItems(visible: BBEvent[]): StreamItem[] {
   const liveChatTurn = new Map<string, number>() // 回复 stream_id → turn 下标
   const liveThinkTurn = new Map<string, [number, number]>() // 思考 stream_id → [turn 下标, process 下标]
   const openTurn = new Map<string, number>() // 会话 → 未收口 turn 下标
+  // 窗内已出现 message.inbox 的会话（升级回执卡等）：孤儿终稿回复区分「开启语
+  // 被窗口裁剪的断裂轮」与「升级流独立回复」——前者标承接提示，后者不标
+  const seenInbox = new Set<string>()
   const skey = (ev: BBEvent) => typeof ev.session_id === "string" ? ev.session_id : ""
   type Turn = Extract<StreamItem, { type: "turn" }>
   const turnAt = (idx: number) => out[idx] as Turn
   for (const e of visible) {
+    if (e.kind === "message.inbox") seenInbox.add(skey(e))
     if (e.kind === "command") {
       const cid = typeof e.payload.call_id === "string" ? e.payload.call_id : ""
       let loc: [number, number]
@@ -156,7 +160,9 @@ export function buildStreamItems(visible: BBEvent[]): StreamItem[] {
           turnAt(t).reply = e
           openTurn.delete(skey(e))
         } else {
-          out.push({ type: "single", event: e })
+          // 孤儿终稿回复（2026-09-28）：轮开启语（human_note）已随窗口裁剪出窗
+          // → 标记承接（窗内出现过 inbox 卡 = 升级流独立回复，不标）
+          out.push({ type: "single", event: e, cont: !seenInbox.has(skey(e)) })
         }
       } else if (openTurn.has(skey(e))) {
         // 任务轮叙述行（带 step）：轮在场入过程组，否则平铺（任务页签现状不变）

@@ -35,6 +35,35 @@ class ScriptedLLM(AnthropicCompatProvider):
         return {"type": "tool_use", "id": cid, "name": name, "input": args}
 
 
+class StreamScriptLLM(ScriptedLLM):
+    """带 thinking 增量回放的剧本 LLM（编排器思考流式验证）：chat 前把 deltas
+    逐片喂给 on_thinking；剧本项可带 thinking 键（拼 thinking 块进响应）。"""
+
+    def __init__(self, script, deltas):
+        super().__init__(script)
+        self.deltas = list(deltas)
+        self.streamed = False
+
+    def chat(self, messages, *, system=None, tools=None, max_tokens=4096,
+             temperature=None, on_thinking=None, on_text=None, should_cancel=None):
+        self.streamed = on_thinking is not None
+        for d in self.deltas:
+            if on_thinking is not None:
+                on_thinking(d)
+        self.calls.append({"messages": json.loads(json.dumps(messages)), "system": system})
+        item = self.script.pop(0)
+        if "text" in item:
+            content = [{"type": "text", "text": item["text"]}]
+            stop = "end_turn"
+        else:
+            content = list(item["tool_use"])
+            if item.get("thinking"):
+                content = [{"type": "thinking", "thinking": item["thinking"]}] + content
+            stop = "tool_use"
+        return self._parse({"content": content, "stop_reason": stop,
+                            "usage": {"input_tokens": 1, "output_tokens": 1}})
+
+
 @pytest.fixture()
 def env(tmp_path):
     bb = Blackboard(str(tmp_path / "o.db"))
@@ -372,6 +401,94 @@ def test_l1_spawn_gate_precheck_blocks_before_approval(env):
     assert "sessions_cap 已满" in dumped
 
 
+def test_l1_pending_backlog_blocks_new_approval(env):
+    """L1 待审批积压硬闸（2026-09-28）：审批卡批准前不写 tasks 表，编排器每轮
+    看队列空会无限续提——pending 达 max_publish_per_tick 后 delegate 拒绝，
+    不产第 N+1 张卡；跨轮计数（非单轮硬闸）。"""
+    bb, project = env
+
+    def factory(role):
+        raise AssertionError("L1 不得直接开窗")
+
+    cfg = OrchestratorConfig(max_publish_per_tick=2)
+    llm = ScriptedLLM([
+        # 第 1 轮：提 2 张审批卡（达积压上限）
+        {"tool_use": [ScriptedLLM.tool_call("a1", "delegate",
+                                            {"role": "recon", "objective": "任务一"})]},
+        {"tool_use": [ScriptedLLM.tool_call("a2", "delegate",
+                                            {"role": "recon", "objective": "任务二"})]},
+        {"tool_use": [ScriptedLLM.tool_call("a3", "done", {})]},
+        # 第 2 轮：同目标再 delegate → 积压硬闸拒绝（卡数不增）
+        {"tool_use": [ScriptedLLM.tool_call("b1", "delegate",
+                                            {"role": "recon", "objective": "任务一"})]},
+        {"tool_use": [ScriptedLLM.tool_call("b2", "done", {})]},
+    ])
+    orch = make_orch(env, llm, factory=factory, config=cfg,
+                     autonomy_provider=lambda: {"level": "L1"})
+    orch.tick()
+    assert len(_pending_approvals(bb, project["id"])) == 2
+    orch.tick()  # 第 2 轮：同款已在审批 → 复用，不重复提审
+    assert len(_pending_approvals(bb, project["id"])) == 2
+    dumped = json.dumps(llm.calls[-1]["messages"], ensure_ascii=False)
+    assert "审批中" in dumped
+
+
+def test_l1_pending_backlog_hard_gate_across_objectives(env):
+    """L1 积压硬闸（跨目标）：pending 卡数达上限时，**新目标**也被拦（等人类
+    消化），不是只拦同款——防审批队列无限膨胀。"""
+    bb, project = env
+
+    def factory(role):
+        raise AssertionError("L1 不得直接开窗")
+
+    cfg = OrchestratorConfig(max_publish_per_tick=2)
+    # 预置 2 张 pending 审批卡（模拟上轮已提）
+    bb.request_approval(
+        project["id"],
+        {"op": "delegate_window", "role": "recon", "objective": "存量一",
+         "task_type": "generic", "scope": "", "noise_budget": "passive",
+         "conflict_keys": [], "priority": 2, "refs": []},
+        risk="low", requested_by="orchestrator")
+    bb.request_approval(
+        project["id"],
+        {"op": "delegate_window", "role": "recon", "objective": "存量二",
+         "task_type": "generic", "scope": "", "noise_budget": "passive",
+         "conflict_keys": [], "priority": 2, "refs": []},
+        risk="low", requested_by="orchestrator")
+    assert len(_pending_approvals(bb, project["id"])) == 2
+
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("c1", "delegate",
+                                            {"role": "recon", "objective": "新目标"})]},
+        {"tool_use": [ScriptedLLM.tool_call("c2", "done", {})]},
+    ])
+    orch = make_orch(env, llm, factory=factory, config=cfg,
+                     autonomy_provider=lambda: {"level": "L1"})
+    orch.tick()
+    assert len(_pending_approvals(bb, project["id"])) == 2  # 新卡未被提
+    dumped = json.dumps(llm.calls[-1]["messages"], ensure_ascii=False)
+    assert "待人类处理" in dumped
+
+
+def test_l1_stats_injects_pending_delegate(env):
+    """L1 态势可见（2026-09-28）：_stats() 注入 approvals.pending_delegate——
+    LLM 收敛判据能感知「审批排队」，不误判队列空。"""
+    bb, project = env
+    bb.request_approval(
+        project["id"],
+        {"op": "delegate_window", "role": "recon", "objective": "待审批任务",
+         "task_type": "generic", "scope": "", "noise_budget": "passive",
+         "conflict_keys": [], "priority": 2, "refs": []},
+        risk="low", requested_by="orchestrator")
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("d1", "done", {})]},
+    ])
+    orch = make_orch(env, llm, autonomy_provider=lambda: {"level": "L1"})
+    orch.tick()
+    system = llm.calls[0]["system"]
+    assert "pending_delegate" in system and '"pending_delegate": 1' in system
+
+
 def test_l2_spawn_still_opens_directly(env):
     """非 L1（L2/未接线）：delegate 直接开窗（L0 提案语义批 6 才生效）。"""
     bb, project = env
@@ -621,6 +738,27 @@ def test_tick_returns_structured_result(env):
     assert result["digest"] == "本轮：发委托+开窗"
     assert result["proposals"] == []  # 批 6 L0 前恒空
     assert "delegate" in result["summary"] and "write_digest" in result["summary"]
+
+
+# ---------- auto-attack 研判模式（2026-09-28）：只读分析 + analysis 键 ----------
+
+def test_tick_analyze_only_reads_and_reports(env):
+    """研判轮（analyze_only）：写类工具根本不下发（硬约束，调不了而非不许调）；
+    最后一条 assistant 文本捕获为 result.analysis（done 前的完整计划胜出中途草稿）。"""
+    llm = ScriptedLLM([
+        {"text": "草稿：初步研判……"},
+        {"text": "## 态势小结\n已控 1 台。\n## 建议路径\n① 横向移动。"},
+        {"tool_use": [ScriptedLLM.tool_call("d1", "done", {})]},
+    ])
+    orch = make_orch(env, llm, config=OrchestratorConfig(analyze_only=True))
+    names = {t["name"] for t in orch._orch_tools()}
+    assert "delegate" not in names and "cancel_task" not in names
+    assert "requeue_task" not in names and "write_digest" not in names
+    assert "task_detail" in names and "done" in names
+    result = orch.tick()
+    assert result["published"] == [] and result["spawned"] == []
+    assert "建议路径" in result["analysis"] and "① 横向移动" in result["analysis"]
+    assert "草稿" not in result["analysis"]
 
 
 def test_tick_state_persists_across_instances(env):
@@ -1772,3 +1910,62 @@ def test_overview_event_window_excludes_observation_kinds(env):
     assert "llm.usage" not in overview and "llm.thinking.delta" not in overview
     # 游标推进到 tip：下轮不再回放
     assert orch._last_event_id == bb.latest_event_id(pid)
+
+
+def test_orch_thinking_stream_delta_and_final_prune(env):
+    """编排器思考流式（2026-09-28 选项B）：stream_capable llm 的 tick 传
+    on_thinking——增量节流落 llm.thinking.delta（累计全文+seq+stream_id）；
+    带 thinking 终稿落 llm.thinking（带 stream_id）后清剪同流 delta（审计只留
+    终稿一条，worker loop 同型）。"""
+    bb, project = env
+    pid = project["id"]
+    llm = StreamScriptLLM(
+        [{"tool_use": [ScriptedLLM.tool_call("d1", "done", {})],
+          "thinking": "编排终稿思考"}],
+        deltas=["A" * 130, "B" * 5])  # 第二片 <120 且 <1.0s → 节流不发布
+    orch = make_orch(env, llm)
+    orch.tick()
+    evs = bb.recent_events(pid, limit=200)
+    assert llm.streamed is True
+    finals = [e for e in evs if e["kind"] == "llm.thinking"]
+    assert len(finals) == 1
+    fp = finals[0]["payload"]
+    assert "编排终稿思考" in fp["thinking"] and fp["source"] == "tick"
+    assert fp["stream_id"] and finals[0]["author"] == "orchestrator"
+    # 终稿带 stream_id 落库后同流 delta 清剪（审计只留终稿）
+    assert not [e for e in evs if e["kind"] == "llm.thinking.delta"]
+
+
+def test_orch_thinking_stream_delta_payload_shape(env):
+    """delta 载荷形态：{stream_id(12hex), thinking=累计全文, seq 递增}；无
+    thinking 终稿时不清剪（delta 留作过程证据）。"""
+    bb, project = env
+    pid = project["id"]
+    llm = StreamScriptLLM(
+        [{"tool_use": [ScriptedLLM.tool_call("d1", "done", {})]}],
+        deltas=["x" * 130, "y" * 130])  # 两片均越过 120 阈值 → seq 1、2 都发布
+    orch = make_orch(env, llm)
+    orch.tick()
+    deltas = [e for e in bb.recent_events(pid, limit=200)
+              if e["kind"] == "llm.thinking.delta"]
+    assert [d["payload"]["seq"] for d in deltas] == [1, 2]
+    assert deltas[0]["payload"]["thinking"] == "x" * 130
+    assert deltas[1]["payload"]["thinking"] == "x" * 130 + "y" * 130  # 累计全文
+    assert len({d["payload"]["stream_id"] for d in deltas}) == 1
+    assert len(deltas[0]["payload"]["stream_id"]) == 12
+    assert all(d["author"] == "orchestrator" for d in deltas)
+
+
+def test_orch_non_stream_llm_no_thinking_events(env):
+    """非流式 llm（未声明 stream_capable）：不传 on_thinking、全程零思考事件
+    ——编排轮不因 llm 能力差异变形（进度退化为步进式）。"""
+    bb, project = env
+    pid = project["id"]
+    llm = StreamScriptLLM(
+        [{"tool_use": [ScriptedLLM.tool_call("d1", "done", {})]}], deltas=["z" * 200])
+    llm.stream_capable = False
+    orch = make_orch(env, llm)
+    orch.tick()
+    evs = bb.recent_events(pid, limit=200)
+    assert llm.streamed is False
+    assert not [e for e in evs if e["kind"] in ("llm.thinking", "llm.thinking.delta")]

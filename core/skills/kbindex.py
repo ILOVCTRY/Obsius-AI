@@ -127,18 +127,35 @@ def _extract_sections(body: str) -> tuple[str, ...]:
     return tuple(out)
 
 
-def _extract_summary(body: str) -> str:
-    """一行摘要：第一个非空正文行（剥掉 markdown 前缀符号）截断。
+# 摘要候选行里应跳过的「内部纪律/指针」特征（给人类操作者的报告口径、短表
+# 指针、交叉引用——对模型零信息量，还会误导「本篇讲什么」；K7 实测手册类
+# 首行多为「写不写只认 rules/vuln-report-format.md」这类纪律话）
+_DISCIPLINE_MARKS = (
+    "写不写只认", "vuln-report-format", "dig-scope", "短表", "用标题搜",
+    "按标题搜", "别按本文件", "不交报告", "几乎不交", "默认不写", "禁开",
+    "SRC 纪律", "SRC 开场", "SRC 黑盒", "听 `", "见 `", "走 `",
+)
 
-    frontmatter title > H1 之后的第一句话往往就是「本篇讲什么」——
-    中文旅馆（src-strike 知识库）是中文句子，英文快照是英文首行，都可用。
-    """
+
+def _extract_summary(body: str, fm: dict | None = None) -> str:
+    """一行摘要：frontmatter `summary`（人工撰写的「本篇讲什么」）优先，
+    缺省回退正文——首个有信息量的非空行（剥 markdown 前缀；跳过 `>` 引用
+    行与内部纪律/指针行）。
+
+    K7 实测：旧实现抓到「写不写只认 rules/vuln-report-format.md」这类报告
+    纪律行，hints 行对模型零信息量——手册类条目靠 frontmatter summary
+    兜底，正文回退只取真正讲内容的行。"""
+    if fm:
+        for key in ("summary", "description"):
+            v = str(fm.get(key) or "").strip()
+            if v:
+                return v[:_SUMMARY_CHARS]
     for ln in body.splitlines():
         s = ln.strip()
-        if not s or s.startswith("#"):
+        if not s or s.startswith("#") or s.startswith(">"):
             continue
         s = re.sub(r"^[\>\-\*\d\.\[\]\(\)`\|]+", "", s).strip()
-        if len(s) <= 1:
+        if len(s) <= 1 or any(m in s for m in _DISCIPLINE_MARKS):
             continue
         return s[:_SUMMARY_CHARS]
     return ""
@@ -176,7 +193,7 @@ def build_kb_index(packs_root: str | Path,
                 title=title,
                 tokens=f"{title} {stem} {' '.join(sections)}".lower(),
                 mtime=stat.st_mtime,
-                summary=_extract_summary(body),
+                summary=_extract_summary(body, fm),
                 sections=sections,
                 facets=tuple(sorted(parse_facets(text))),
             ))
@@ -221,9 +238,14 @@ def match_kb_index_detailed(index: list[KbEntry], text: str,
         for seg in set(segs):
             if seg not in token_l:
                 continue
-            score += 1.0
+            # ASCII 整词=高特异性技术词（sql/jwt/ssti…），权值 ×2；中文 2-gram
+            # 天然歧义（注入/服务/系统）权值 ×1——抑制「XX 注入测试」类同质
+            # 标题靠泛词平局抢位（K7 实测：SQL 注入查询曾被 crlf/csv 手册
+            # 字母序压过 sqli/手册.md）。
+            w = 2.0 if _ASCII_WORD_RE.match(seg) else 1.0
+            score += w
             if seg in title_l:
-                score += 1.0
+                score += w
             if not section:
                 for h in e.sections:
                     if seg in h.lower():

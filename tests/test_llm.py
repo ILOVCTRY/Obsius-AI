@@ -1,4 +1,6 @@
-"""LLM 层测试：响应解析、错误路径、工具回填、模型路由、密钥解析。全部走 fake transport，不触网。"""
+"""LLM 层测试：响应解析、错误路径、工具回填、模型路由、密钥解析。全部走 fake transport，不触网。
+2026-09-28 全走流式后 chat 一律走 stream_transport：无回调调用用 _fake_stream_transport
+（整份 JSON 行流，命中非 SSE 兜底，解析等价非流式）；transport= 仅降级/哨兵用。"""
 
 import json
 
@@ -26,11 +28,29 @@ def _fake_transport(response=None, status=200, capture=None):
     return transport
 
 
+def _sse_json(resp_dict):
+    """整份响应 dict → 单行行流（命中 _consume_stream 非 SSE 兜底，解析等价 _parse）。"""
+    return iter([json.dumps(resp_dict, ensure_ascii=False)])
+
+
+def _fake_stream_transport(response=None, status=200, capture=None):
+    """流式版 fake transport（2026-09-28 全走流式后 chat 一律走 stream_transport）：
+    200 吐整份 JSON 行流（非 SSE 兜底解析等价非流式）；非 200 吐错误 dict——
+    错误处理分支流式/非流式共享，注入形态与非流式 fake 等价。"""
+    def transport(url, headers, body):
+        if capture is not None:
+            capture.append({"url": url, "headers": headers, "body": json.loads(body)})
+        if status == 200:
+            return 200, _sse_json(response or {})
+        return status, response
+    return transport
+
+
 # ---------- 响应解析 ----------
 
 def test_parse_text_thinking_and_tool_use():
     captured = []
-    transport = _fake_transport(
+    stream_transport = _fake_stream_transport(
         _anthropic_response(
             [
                 {"type": "thinking", "thinking": "先看 NX"},
@@ -42,7 +62,7 @@ def test_parse_text_thinking_and_tool_use():
         ),
         capture=captured,
     )
-    p = AnthropicCompatProvider("https://fake", "key", "m", transport=transport)
+    p = AnthropicCompatProvider("https://fake", "key", "m", stream_transport=stream_transport)
     r = p.chat([{"role": "user", "content": "分析这个 ELF"}],
                system="你是逆向专家",
                tools=[{"name": "run_cmd", "description": "执行", "input_schema": {"type": "object"}}])
@@ -64,20 +84,22 @@ def test_parse_text_thinking_and_tool_use():
 def test_system_blocks_passthrough_and_cache_disabled():
     """M1 prompt caching：块数组透传（dict 原样/str 包装不打标）+ enable_cache=False。"""
     captured = []
-    transport = _fake_transport(_anthropic_response([{"type": "text", "text": "ok"}]),
-                                capture=captured)
+    stream_transport = _fake_stream_transport(
+        _anthropic_response([{"type": "text", "text": "ok"}]), capture=captured)
     blocks = [
         {"type": "text", "text": "稳定块", "cache_control": {"type": "ephemeral"}},
         {"type": "text", "text": "动态块"},
     ]
-    p = AnthropicCompatProvider("https://fake", "k", "m", transport=transport)
+    p = AnthropicCompatProvider("https://fake", "k", "m",
+                                stream_transport=stream_transport)
     p.chat([{"role": "user", "content": "hi"}], system=blocks)
     assert captured[0]["body"]["system"] == blocks
     # 传入列表不被污染（浅拷贝透传）
     assert blocks[0]["cache_control"] == {"type": "ephemeral"}
     # enable_cache=False：str 不打标
     captured.clear()
-    p2 = AnthropicCompatProvider("https://fake", "k", "m", transport=transport,
+    p2 = AnthropicCompatProvider("https://fake", "k", "m",
+                                 stream_transport=stream_transport,
                                  enable_cache=False)
     p2.chat([{"role": "user", "content": "hi"}], system="纯文本")
     assert captured[0]["body"]["system"] == [{"type": "text", "text": "纯文本"}]
@@ -93,9 +115,9 @@ def test_cache_control_degrade_on_400():
         calls.append(req)
         if "cache_control" in json.dumps(req):
             return 400, {"error": {"code": "", "message": "unknown field cache_control"}}
-        return 200, _anthropic_response([{"type": "text", "text": "ok"}])
+        return 200, _sse_json(_anthropic_response([{"type": "text", "text": "ok"}]))
 
-    p = AnthropicCompatProvider("https://fake", "k", "m", transport=flaky)
+    p = AnthropicCompatProvider("https://fake", "k", "m", stream_transport=flaky)
     r = p.chat([{"role": "user", "content": "hi"}], system="稳定前缀")
     assert r.text == "ok"
     assert len(calls) == 2
@@ -107,11 +129,12 @@ def test_cache_control_degrade_on_400():
 
 
 def test_error_raises_llmerror():
-    transport = _fake_transport(
+    stream_transport = _fake_stream_transport(
         {"error": {"code": "InvalidEndpointOrModel.NotFound", "message": "no such model"}},
         status=404,
     )
-    p = AnthropicCompatProvider("https://fake", "key", "m", transport=transport)
+    p = AnthropicCompatProvider("https://fake", "key", "m",
+                                stream_transport=stream_transport)
     with pytest.raises(LLMError, match="404"):
         p.chat([{"role": "user", "content": "hi"}])
 
@@ -119,19 +142,19 @@ def test_error_raises_llmerror():
 def test_retry_on_transient_status_then_success(monkeypatch):
     """429/5xx 瞬时故障自动重试，恢复后成功——一次抖动不该杀死编排。"""
     monkeypatch.setattr("core.llm.anthropic_compat.RETRY_BACKOFF", 0)
-    statuses = iter([500, 429, 200])
+    statuses = iter([500, 200])
     n_calls = {"n": 0}
 
     def transport(url, headers, body):
         n_calls["n"] += 1
         status = next(statuses)
         if status == 200:
-            return 200, _anthropic_response([{"type": "text", "text": "ok"}])
+            return 200, _sse_json(_anthropic_response([{"type": "text", "text": "ok"}]))
         return status, {"error": {"message": "transient"}}
 
-    p = AnthropicCompatProvider("https://fake", "key", "m", transport=transport)
+    p = AnthropicCompatProvider("https://fake", "key", "m", stream_transport=transport)
     r = p.chat([{"role": "user", "content": "hi"}])
-    assert r.text == "ok" and n_calls["n"] == 3
+    assert r.text == "ok" and n_calls["n"] == 2
 
 
 def test_retry_exhausts_then_raises(monkeypatch):
@@ -141,7 +164,7 @@ def test_retry_exhausts_then_raises(monkeypatch):
     def transport(url, headers, body):
         return 503, {"error": {"message": "down"}}
 
-    p = AnthropicCompatProvider("https://fake", "key", "m", transport=transport)
+    p = AnthropicCompatProvider("https://fake", "key", "m", stream_transport=transport)
     with pytest.raises(LLMError, match="503"):
         p.chat([{"role": "user", "content": "hi"}])
 
@@ -152,7 +175,7 @@ def test_thinking_param_injected_when_enabled():
     """enable_thinking=True：请求 body 带 thinking 参数；默认关不注入。"""
     captured = []
     p = AnthropicCompatProvider(
-        "https://fake", "key", "m", transport=_fake_transport(
+        "https://fake", "key", "m", stream_transport=_fake_stream_transport(
             _anthropic_response([{"type": "thinking", "thinking": "推理中"},
                                  {"type": "text", "text": "好"}]), capture=captured),
         enable_thinking=True)
@@ -162,7 +185,7 @@ def test_thinking_param_injected_when_enabled():
 
     captured2 = []
     p2 = AnthropicCompatProvider(
-        "https://fake", "key", "m", transport=_fake_transport(
+        "https://fake", "key", "m", stream_transport=_fake_stream_transport(
             _anthropic_response([{"type": "text", "text": "好"}]), capture=captured2))
     p2.chat([{"role": "user", "content": "hi"}])
     assert "thinking" not in captured2[0]["body"]
@@ -172,8 +195,8 @@ def test_thinking_param_fallback_on_400():
     """模型不认 thinking 参数（400 文案含 thinking）→ 去参重试成功且本实例不再注入。"""
     responses = iter([
         (400, {"error": {"message": "thinking is not supported by this model"}}),
-        (200, _anthropic_response([{"type": "text", "text": "ok"}])),
-        (200, _anthropic_response([{"type": "text", "text": "ok"}])),
+        (200, _sse_json(_anthropic_response([{"type": "text", "text": "ok"}]))),
+        (200, _sse_json(_anthropic_response([{"type": "text", "text": "ok"}]))),
     ])
     calls: list[dict] = []
 
@@ -182,7 +205,7 @@ def test_thinking_param_fallback_on_400():
         return next(responses)
 
     p = AnthropicCompatProvider("https://fake", "key", "m",
-                                transport=transport, enable_thinking=True)
+                                stream_transport=transport, enable_thinking=True)
     r = p.chat([{"role": "user", "content": "hi"}])
     assert r.text == "ok"
     assert "thinking" in calls[0] and "thinking" not in calls[1]
@@ -192,13 +215,14 @@ def test_thinking_param_fallback_on_400():
 
 def test_reasoning_content_fallback():
     """OpenAI 式 reasoning_content 兜底：content 无 thinking block 时接住思考字段。"""
-    transport = _fake_transport({
+    stream_transport = _fake_stream_transport({
         "stop_reason": "end_turn", "model": "fake-model",
         "content": [{"type": "text", "text": "答"}],
         "reasoning_content": "隐藏推理链",
         "usage": {"input_tokens": 1, "output_tokens": 1},
     })
-    p = AnthropicCompatProvider("https://fake", "key", "m", transport=transport)
+    p = AnthropicCompatProvider("https://fake", "key", "m",
+                                stream_transport=stream_transport)
     r = p.chat([{"role": "user", "content": "hi"}])
     assert r.thinking == "隐藏推理链" and r.text == "答"
 
@@ -212,9 +236,9 @@ def test_retry_on_timeout(monkeypatch):
         calls["n"] += 1
         if calls["n"] == 1:
             raise TimeoutError("The read operation timed out")
-        return 200, _anthropic_response([{"type": "text", "text": "recovered"}])
+        return 200, _sse_json(_anthropic_response([{"type": "text", "text": "recovered"}]))
 
-    p = AnthropicCompatProvider("https://fake", "key", "m", transport=transport)
+    p = AnthropicCompatProvider("https://fake", "key", "m", stream_transport=transport)
     assert p.chat([{"role": "user", "content": "hi"}]).text == "recovered"
 
 
@@ -316,7 +340,7 @@ def test_default_max_tokens_raised_to_16384():
     captured = []
     p = AnthropicCompatProvider(
         "https://fake", "key", "m",
-        transport=_fake_transport(
+        stream_transport=_fake_stream_transport(
             _anthropic_response([{"type": "text", "text": "ok"}]), capture=captured))
     p.chat([{"role": "user", "content": "hi"}])
     assert captured[0]["body"]["max_tokens"] == 16384
@@ -386,6 +410,20 @@ def test_stream_disabled_falls_back_to_plain_transport():
     assert r.text == "好"
     assert "stream" not in captured[0]
     assert p._stream_disabled is True
+
+
+def test_all_calls_stream_even_without_callbacks():
+    """2026-09-28 全走流式：无 on_thinking/on_text 回调也走 SSE 传输——planner/
+    intel 等无回调调用不再吃非流式「总等待」超时（长思考 6-10 分钟 > 240s 必炸
+    且重试注定失败），帧间隔超时天然抗长思考。"""
+    captured = []
+    p = AnthropicCompatProvider(
+        "https://fake", "key", "m",
+        stream_transport=_fake_stream_transport(
+            _anthropic_response([{"type": "text", "text": "ok"}]), capture=captured))
+    r = p.chat([{"role": "user", "content": "hi"}])
+    assert r.text == "ok"
+    assert captured[0]["body"]["stream"] is True  # 无回调也发 stream:true
 
 
 # ---------- 模型路由 ----------
@@ -611,8 +649,10 @@ def test_ark_key_resolution_order(tmp_path, monkeypatch):
 
 def test_ark_provider_defaults():
     captured = []
-    transport = _fake_transport(_anthropic_response([{"type": "text", "text": "ok"}]), capture=captured)
-    p = ArkCodingProvider(api_key="ark-x", transport=transport, model="deepseek-v4-flash")
+    stream_transport = _fake_stream_transport(
+        _anthropic_response([{"type": "text", "text": "ok"}]), capture=captured)
+    p = ArkCodingProvider(api_key="ark-x", stream_transport=stream_transport,
+                          model="deepseek-v4-flash")
     p.chat([{"role": "user", "content": "hi"}])
     assert captured[0]["url"].startswith("https://ark.cn-beijing.volces.com/api/coding")
     assert captured[0]["body"]["model"] == "deepseek-v4-flash"

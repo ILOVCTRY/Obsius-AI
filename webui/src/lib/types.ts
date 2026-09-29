@@ -68,6 +68,10 @@ export interface ProjectUsage extends Autonomy {
     cache_read?: number; cache_creation?: number; cache_hit?: number | null }
   tasks: { published: number; budget: number | null; pct: number | null }
   chain?: ChainState
+  /** 会话 UI 风格（trae 视图 2026-09-28）：config.ui_style 透出；缺省 claude */
+  ui_style?: "claude" | "trae"
+  /** 编排 tick 运行中（trae 视图「正在规划下一步」状态行判定源） */
+  orch_running?: boolean
 }
 
 export interface ProjectDetail extends ProjectMeta {
@@ -822,6 +826,35 @@ export interface Blueprint {
   updated_at: string
 }
 
+// ---- 业务逻辑块（逆向第四页签：函数协作/业务语义，人机共写） ----
+
+/** 挂接函数快照：join func_kb 取当前名；func_name 空=函数已不在库（回退显示 hex） */
+export interface LogicBlockFunc {
+  address: string // hex 串
+  func_id: string
+  func_name: string
+  /** 角色注：该函数在本块中的职责一句话 */
+  role: string
+  seq: number
+}
+
+export interface LogicBlock {
+  id: string
+  project_id: string
+  binary_sha256: string
+  name: string
+  /** 业务逻辑描述（markdown） */
+  description: string
+  seq: number
+  created_at: string
+  updated_at: string
+  /** 仅详情端点带；列表行用 func_count */
+  funcs?: LogicBlockFunc[]
+}
+
+/** 列表行：块头 + 挂接数 */
+export type LogicBlockSummary = Omit<LogicBlock, "funcs"> & { func_count: number }
+
 export interface Artifact {
   id: string
   project_id: string
@@ -1485,6 +1518,16 @@ export interface FofaSearchResult {
   size: number
   page: number
   rows: FofaSearchRow[]
+  history_id?: string | null
+}
+
+/** FOFA 查询历史（轻量列表项，不含 rows——点开单条才拉全量恢复） */
+export interface FofaHistoryItem {
+  id: string
+  query: string
+  size: number
+  total: number
+  ts: string
 }
 
 /** 资产导入预览（parse_table + 列映射嗅探建议） */
@@ -1509,4 +1552,77 @@ export interface ImportSummary {
   failed: { index: number; reason: string }[]
   author: string
   skipped_parse?: number
+}
+
+
+// ---------- 智能体工作台（K9，2026-09-29） ----------
+
+export interface ChatAgent {
+  id: string
+  kind: "orchestrator" | "expert"
+  name: string
+  description: string
+}
+
+export interface ChatTodoItem {
+  id: string
+  title: string
+  status: "pending" | "in_progress" | "completed"
+}
+
+export interface ChatUsage {
+  input?: number
+  output?: number
+  steps?: number
+  cache_read?: number
+  cache_creation?: number
+}
+
+export interface ChatThread {
+  id: string
+  project_id: string
+  agent_id: string
+  title: string
+  status: "idle" | "running" | "error"
+  parent_thread_id: string | null
+  spawned_task: string
+  todo: ChatTodoItem[]
+  usage?: ChatUsage | null
+  created_at: string
+  updated_at: string
+}
+
+export interface ChatToolCall {
+  id: string
+  name: string
+  args: Record<string, unknown>
+}
+
+export interface ChatMessage {
+  id: number
+  thread_id: string
+  role: "user" | "assistant" | "tool"
+  content: string
+  tool_calls: ChatToolCall[]
+  tool_use_id: string
+  created_at: string
+}
+
+export interface ChatThreadDetail {
+  thread: ChatThread
+  messages: ChatMessage[]
+}
+
+export interface ChatMcpTool {
+  name: string
+  description: string
+  input_schema: Record<string, unknown>
+}
+
+export interface ChatMcpServer {
+  name: string
+  transport: string
+  domains: string[]
+  online: boolean
+  tools: ChatMcpTool[]
 }

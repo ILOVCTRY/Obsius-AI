@@ -756,6 +756,23 @@ def test_reject_ws_for_deleted_project(client):
     assert getattr(ei.value, "code", None) == 1008
 
 
+def test_ws_tick_heartbeat_frame(client):
+    """空转心跳回归（2026-09-29 消息刷新不及时复盘）：WS 空闲 tick_s 拍后发一条
+    不落库的 ws.tick 帧——前端看门狗据此区分「管道死」（20s 零帧→判死重连）与
+    「健康静默」（长命令执行期 tick 照常到达，不误判）。tick 不进事件流。"""
+    pid = _make_project(client)
+    since = max(e["id"] for e in client.get(f"/api/projects/{pid}/events").json())
+    with client.websocket_connect(
+            f"/api/ws/projects/{pid}?since_id={since}&tick_s=1") as ws:
+        frame = ws.receive_json()
+        assert frame["kind"] == "ws.tick"
+        assert "id" not in frame  # 无事件 id：前端拦在游标赋值之前，不污染游标
+    assert "ts" in frame
+    # 心跳不落库：事件流没有多出任何帧
+    events = client.get(f"/api/projects/{pid}/events").json()
+    assert max(e["id"] for e in events) == since
+
+
 def test_list_roles_endpoint(client):
     """角色清单端点：按项目场景轨扫 tracks/<track>/roles（旧 domain 入参兼容，真实 packs）。"""
     rp = client.post("/api/projects", json={"name": "p", "domain": "pentest"})
@@ -1188,6 +1205,66 @@ def test_sweep_keeps_claimed_tasks_of_snapshot_sessions(client):
     assert rows[sb]["status"] == "idle"
     assert rows[sc]["status"] == "idle"
     assert json.loads(proj2.bb.get_session(sb)["meta"])["resume_snapshot"] is None
+
+
+def test_sweep_pauses_idle_session_with_snapshot(client):
+    """2026-09-28 会话继续钮（清扫归位盲区修复）：idle 会话 + resume_snapshot
+    快照在场 + claimed 任务（快照豁免保留）的组合，清扫后会话一律归位 paused——
+    此前只对 running/blocked 行按快照归位，idle 组合落盲区：前端灰点无「▶继续」、
+    任务 claimed 无续跑钮、跑任务队列又撞 rehydrate 暂停闸空退，现场卡死。"""
+    from core.blackboard import TaskQueue
+
+    rp = client.post("/api/projects", json={"name": "继续钮盲区", "track": "pentest",
+                                            "capabilities": ["web"]})
+    pid = rp.json()["id"]
+    proj = client.app.state.projects[pid]
+    bb = proj.bb
+    tq = TaskQueue(bb)
+    sid = bb.register_session(pid, "外网打点", role="_generalist")["id"]
+    snap_dir = Path(proj.path) / "snapshots"
+    snap_dir.mkdir(parents=True, exist_ok=True)
+    (snap_dir / f"{sid}.json").write_text(
+        json.dumps({"messages": [], "task_id": None, "reason": "pause"}), encoding="utf-8")
+    bb.set_session_meta(sid, {"resume_snapshot": f"{sid}.json"})
+    bb.set_session_status(sid, "idle")  # 模拟重启前已 idle 但留有暂停快照
+    tid = tq.publish(pid, "卡住任务", task_type="generic")
+    tq.claim(tid, sid)  # 清扫按快照豁免保留 claimed
+
+    # 模拟重启：摘内存缓存 → 下一请求触发惰性首开清扫
+    client.app.state.projects.pop(pid)
+    assert client.get(f"/api/projects/{pid}").status_code == 200
+
+    rows = {s["id"]: s for s in client.get(f"/api/projects/{pid}/sessions").json()}
+    assert rows[sid]["status"] == "paused"   # 盲区修复：idle+快照 → 归 paused
+    assert tq.get_task(tid)["status"] == "claimed"  # 快照豁免：claimed 保留可续跑
+
+
+def test_sweep_disarms_all_armed_sessions(client):
+    """2026-09-28 重启即急停：重启清扫把全部 worker_armed 一律解除（含空闲待命
+    窗）——armed 是「常驻自动接活」持久开关，残留会让 kick 链把陈旧 running 会话
+    当待命窗重新拉起（页签青灯常亮 + 后台自动烧 LLM）。恢复=人工「跑任务队列/
+    ▶继续」重新点亮，恢复流程不受影响。"""
+    rp = client.post("/api/projects", json={"name": "重启急停", "track": "pentest",
+                                            "capabilities": ["web"]})
+    pid = rp.json()["id"]
+    bb = client.app.state.projects[pid].bb
+    s_armed_running = bb.register_session(pid, "武装在跑窗", role="_generalist")["id"]
+    s_armed_idle = bb.register_session(pid, "武装待命窗", role="_generalist")["id"]
+    s_plain = bb.register_session(pid, "无武装窗", role="_generalist")["id"]
+    bb.set_session_meta(s_armed_running, {"worker_armed": True})
+    bb.set_session_meta(s_armed_idle, {"worker_armed": True})
+    bb.set_session_status(s_armed_running, "running")  # 模拟强杀残留的陈旧在跑窗
+
+    # 模拟重启：摘内存缓存 → 下一请求触发惰性首开清扫
+    client.app.state.projects.pop(pid)
+    assert client.get(f"/api/projects/{pid}").status_code == 200
+
+    rows = {s["id"]: s for s in client.get(f"/api/projects/{pid}/sessions").json()}
+    assert rows[s_armed_running]["worker_armed"] is False   # 急停：armed 全清
+    assert rows[s_armed_idle]["worker_armed"] is False      # 空闲待命窗同样解除
+    assert rows[s_plain]["worker_armed"] is False
+    assert rows[s_armed_running]["status"] == "idle"        # 无快照 running → idle（纪律③）
+    assert rows[s_armed_idle]["status"] == "idle"           # 空闲窗状态不动
 
 
 def test_shutdown_hook_persists_live_snapshots(client):
@@ -5037,6 +5114,59 @@ def test_fofa_search_smoke_and_existing(client, fofa_cfg, monkeypatch):
     assert r.status_code == 422
 
 
+def test_fofa_host_clean_and_precise_existing(client, fofa_cfg, monkeypatch):
+    """2026-09-29 host 清洗 + 锚点精确化：FOFA host 字段脏形态（https:// 前缀 /
+    :端口 尾）在查询入口统一清洗（响应、落历史同口径）；灰显镜像导入语义——
+    只入过根域不再灰显子域行，子域登记后才灰显；空 host 行回退根域（导入
+    实际登记值就是根域）。"""
+    class _DirtyHostClient(_FakeFofaClient):
+        def search(self, query, size=100, page=1):
+            return {"total": 3, "size": size, "page": page, "rows": [
+                {"ip": "10.0.0.1", "port": "443", "protocol": "tcp",
+                 "host": "https://zczx.zut.edu.cn", "domain": "zut.edu.cn",
+                 "title": "A", "products": []},
+                {"ip": "10.0.0.2", "port": "8080", "protocol": "tcp",
+                 "host": "authserver.zut.edu.cn:8080", "domain": "zut.edu.cn",
+                 "title": "B", "products": []},
+                {"ip": "10.0.0.3", "port": "80", "protocol": "tcp",
+                 "host": "", "domain": "zut.edu.cn", "title": "C", "products": []},
+            ]}
+
+    pid = _make_project(client)
+    client.put("/api/fofa/config", json={"key": "k" * 32})
+    # 复刻实战现场：黑板里只有根域资产（子域从未导入）
+    r = client.post(f"/api/projects/{pid}/assets",
+                    json={"value": "zut.edu.cn", "type": "domain"})
+    assert r.status_code == 201, r.text
+    monkeypatch.setattr("core.api.app.fofa_mod.FofaClient", _DirtyHostClient)
+    r = client.post(f"/api/projects/{pid}/fofa/search",
+                    json={"query": 'domain="zut.edu.cn"', "size": 100})
+    assert r.status_code == 200, r.text
+    rows = r.json()["rows"]
+    # host 清洗：剥 scheme / 端口尾（响应即干净值，前端直接展示）
+    assert rows[0]["host"] == "zczx.zut.edu.cn"
+    assert rows[1]["host"] == "authserver.zut.edu.cn"
+    # 锚点精确化：根域在库 ≠ 子域已导入 → 子域行不灰显；空 host 行回退根域 → 灰显
+    assert rows[0]["existing"]["domain"] is False
+    assert rows[1]["existing"]["domain"] is False
+    assert rows[2]["existing"]["domain"] is True
+    # 落历史的 rows 同口径清洗
+    hid = r.json()["history_id"]
+    proj_dir = Path(client.app.state.projects[pid].path)
+    rec = json.loads(
+        (proj_dir / "fofa_history" / f"{hid}.json").read_text(encoding="utf-8"))
+    assert rec["rows"][0]["host"] == "zczx.zut.edu.cn"
+    # 子域登记后 → 该行灰显，其余子域行仍可勾选
+    r = client.post(f"/api/projects/{pid}/assets",
+                    json={"value": "zczx.zut.edu.cn", "type": "domain"})
+    assert r.status_code == 201, r.text
+    rows = client.post(f"/api/projects/{pid}/fofa/search",
+                       json={"query": 'domain="zut.edu.cn"', "size": 100}
+                       ).json()["rows"]
+    assert rows[0]["existing"]["domain"] is True
+    assert rows[1]["existing"]["domain"] is False
+
+
 def test_fofa_search_quota_429(client, fofa_cfg, monkeypatch):
     """配额耗尽 → 429（熔断语义，绝不能重试）。"""
     class _QuotaClient(_FakeFofaClient):
@@ -5060,6 +5190,92 @@ def test_fofa_test_endpoint(client, fofa_cfg, monkeypatch):
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is True and body["remain"] == 999
+
+
+def test_fofa_history_persist_restore_delete(client, fofa_cfg, monkeypatch):
+    """2026-09-28 历史即保持：查询成功自动落 <项目>/fofa_history/<id>.json（含
+    全量 rows）→ 轻量列表 → 单条恢复（rows 现算 existing 标注，资产导入后灰显
+    新鲜）→ 删除连带结果文件 → 清空删整个目录。"""
+    def _no_dns(*a, **k):
+        raise OSError("dns off (hermetic)")
+    monkeypatch.setattr("socket.getaddrinfo", _no_dns)
+    pid = _make_project(client)
+    client.put("/api/fofa/config", json={"key": "k" * 32})
+    monkeypatch.setattr("core.api.app.fofa_mod.FofaClient", _FakeFofaClient)
+    # 查询成功 → history_id 回传 + 文件落盘
+    r = client.post(f"/api/projects/{pid}/fofa/search",
+                    json={"query": 'domain="x.com"', "size": 100})
+    hid = r.json()["history_id"]
+    assert hid and r.json()["total"] == 2
+    proj_dir = Path(client.app.state.projects[pid].path)
+    hist_file = proj_dir / "fofa_history" / f"{hid}.json"
+    assert hist_file.is_file()
+    # 轻量列表：带 query/size/total/ts，不带 rows
+    r = client.get(f"/api/projects/{pid}/fofa/history")
+    items = r.json()["items"]
+    assert len(items) == 1 and items[0]["id"] == hid
+    assert items[0]["query"] == 'domain="x.com"' and items[0]["total"] == 2
+    assert "rows" not in items[0]
+    # 恢复前先导入一行资产 → 恢复时 existing 现算标注（灰显新鲜）
+    r = client.post(f"/api/projects/{pid}/assets",
+                    json={"value": "aaa.example.com", "type": "domain"})
+    assert r.status_code == 201, r.text
+    r = client.get(f"/api/projects/{pid}/fofa/history/{hid}")
+    assert r.status_code == 200, r.text
+    rec = r.json()
+    assert rec["id"] == hid and len(rec["rows"]) == 2
+    assert rec["rows"][0]["existing"]["domain"] is True  # 恢复时现算：已导入 → 灰显
+    # id 非法 422（正则白名单防路径穿越）；路由层对 .. 归一化出 404 也属安全
+    assert client.get(f"/api/projects/{pid}/fofa/history/xyz").status_code == 422
+    assert client.get(
+        f"/api/projects/{pid}/fofa/history/20990101-000000-000000").status_code == 404
+    # 删除单条 → 文件消失；再删 404 幂等路径返回 deleted
+    assert client.delete(f"/api/projects/{pid}/fofa/history/{hid}").status_code == 200
+    assert not hist_file.exists()
+    # 清空：再查两条 → clear → 目录移除
+    client.post(f"/api/projects/{pid}/fofa/search", json={"query": "b"})
+    client.post(f"/api/projects/{pid}/fofa/search", json={"query": "c"})
+    assert (proj_dir / "fofa_history").is_dir()
+    assert client.delete(f"/api/projects/{pid}/fofa/history").status_code == 200
+    assert not (proj_dir / "fofa_history").exists()
+    assert client.get(f"/api/projects/{pid}/fofa/history").json()["items"] == []
+
+
+def test_fofa_history_fifo_cap(client, fofa_cfg, monkeypatch):
+    """FIFO 上限 50：文件名时间前缀有序，超限淘汰最旧；查询失败（429）不落历史。"""
+    class _CountingClient(_FakeFofaClient):
+        n = 0
+
+        def search(self, query, size=100, page=1):
+            _CountingClient.n += 1
+            return {"total": 1, "size": size, "page": page, "rows": [
+                {"ip": f"10.0.0.{_CountingClient.n}", "port": "80", "protocol": "tcp",
+                 "host": "", "domain": f"d{_CountingClient.n}.x.com", "title": "t",
+                 "products": []},
+            ]}
+
+    pid = _make_project(client)
+    client.put("/api/fofa/config", json={"key": "k" * 32})
+    monkeypatch.setattr("core.api.app.fofa_mod.FofaClient", _CountingClient)
+    proj_dir = Path(client.app.state.projects[pid].path)
+    for i in range(53):
+        r = client.post(f"/api/projects/{pid}/fofa/search", json={"query": f"q{i}"})
+        assert r.status_code == 200, r.text
+    files = sorted((proj_dir / "fofa_history").glob("*.json"))
+    assert len(files) == 50  # FIFO 淘汰 3 条最旧
+    items = client.get(f"/api/projects/{pid}/fofa/history").json()["items"]
+    assert len(items) == 50
+    assert items[0]["query"] == "q52" and items[-1]["query"] == "q3"  # 倒序，最旧 3 条已删
+    # 配额耗尽（429）不落历史
+    class _QuotaClient(_FakeFofaClient):
+        def search(self, query, size=100, page=1):
+            raise fofa.QuotaExhausted("配额没了")
+
+    monkeypatch.setattr("core.api.app.fofa_mod.FofaClient", _QuotaClient)
+    before = len(client.get(f"/api/projects/{pid}/fofa/history").json()["items"])
+    r = client.post(f"/api/projects/{pid}/fofa/search", json={"query": "q"})
+    assert r.status_code == 429
+    assert len(client.get(f"/api/projects/{pid}/fofa/history").json()["items"]) == before
 
 
 def test_asset_import_preview_and_import(client):

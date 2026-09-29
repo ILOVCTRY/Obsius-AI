@@ -12,7 +12,8 @@ import { MarkdownView } from "@/components/settings/MarkdownView"
 
 export type StreamItem =
   | { type: "pair"; command: BBEvent; result?: BBEvent } // result 缺 = 运行中/后端悬空
-  | { type: "single"; event: BBEvent }
+  // cont（2026-09-28）：轮开启语被窗口裁剪出窗的孤儿终稿回复 → 行顶「承接更早」提示
+  | { type: "single"; event: BBEvent; cont?: boolean }
   // 对话轮分组（2026-09-20）：human_note 开轮，过程事件入 process，无 step 的
   // agent.chat 收口 reply；replyStream=流式增量（agent.chat.delta 累计全文，
   // 终稿到达后置空）。仅「全部」筛选下 note/process/reply 齐备时自然生效，
@@ -74,6 +75,37 @@ function Dot({ state }: { state: DotState }) {
   )
 }
 
+// Claude Code 式调用字形（2026-09-28 会话窗三段式改造）：过程行用 ⏺（命令/工具）、
+// ✻（思考）替代圆点——运行中脉冲主色、异常红、正常灰，与 Dot 并存（结论/审计行仍用点）
+function Glyph({ state, char = "⏺" }: { state: DotState; char?: string }) {
+  return (
+    <span
+      className={cn(
+        "shrink-0 select-none text-[10px] leading-[1.45]",
+        state === "running" && "animate-pulse text-primary",
+        state === "ok" && "text-muted-foreground/40",
+        state === "error" && "text-(--status-error)",
+        state === "warn" && "text-(--status-approval)",
+        state === "idle" && "text-muted-foreground/40",
+      )}
+    >
+      {char}
+    </span>
+  )
+}
+
+// heredoc 写入特判（2026-09-28）：`cat > x << 'EOF'` 类命令在渗透流里高频出现且
+// 脚本首行无信息量——折叠行不复述原文，改述「写入 x（heredoc N 行）」（Trae 式
+// 写文件卡在无 diff 场景的替代品）；命令全文与输出仍在展开块里，审计零回退
+function heredocOf(cmd: string): { file: string; lines: number; tag: string } | null {
+  if (!cmd.includes("<<")) return null
+  const m = /(?:cat|tee)\s+(?:-[A-Za-z]+\s+)*>{1,2}\s*([^\s<>'";|&]+)/.exec(cmd)
+  if (!m) return null
+  const tag = /<<\s*-?['"]?([A-Za-z_][A-Za-z0-9_]*)/.exec(cmd)?.[1] ?? "EOF"
+  // 首行「cat > x << EOF」+ 末行「EOF」不计入内容行数
+  return { file: m[1], lines: Math.max(cmd.split("\n").length - 2, 1), tag }
+}
+
 function fmtDuration(s: number): string {
   if (s >= 60) return `${Math.floor(s / 60)}m${Math.round(s % 60)}s`
   return s >= 10 ? `${Math.round(s)}s` : `${Math.round(s * 10) / 10}s`
@@ -105,13 +137,17 @@ function str(v: unknown): string {
   return typeof v === "string" ? v : ""
 }
 
-// ---------- 命令对：● <runtime>  <cmd 首行>，展开 IN/OUT ----------
+// ---------- 命令对：⏺ <RUNTIME> <cmd 首行> + ⎿ 结果摘要行，展开 IN/OUT ----------
+// 2026-09-28 三段式改造：折叠态从单行升级为「⏺ 调用 + ⎿ 首行结果」两行（Claude Code
+// 式）——结果摘要说业务不说 exit 码（有输出取 stdout/stderr 首行，无输出才报 exit N），
+// 耗时右侧小字；展开 IN/OUT 块原样保留（审计零回退）
 
 function CommandPairRow({ command, result, open, onToggle }: {
   command: BBEvent; result?: BBEvent; open: boolean
   onToggle: (primaryId: number, defaultOpen: boolean) => void
 }) {
   const cmd = str(command.payload.cmd)
+  const hd = heredocOf(cmd)
   let state: DotState
   if (result) {
     const ok = result.payload.exit_code === 0 && !result.payload.timed_out
@@ -123,20 +159,46 @@ function CommandPairRow({ command, result, open, onToggle }: {
   }
   const exitOk = result ? result.payload.exit_code === 0 && !result.payload.timed_out : false
   const dur = result?.payload.duration_s
+  const outHead = str(result?.payload.stdout_head)
+  const errHead = str(result?.payload.stderr_head)
+  // ⎿ 摘要口径：失败优先取 stderr 首行（错误对人有用），成功取 stdout 首行，
+  // 双空才退「exit N」；heredoc 写入行摘要由 ⏺ 行承担，⎿ 仍显执行结果
+  const resLine = result
+    ? firstLine(!exitOk && errHead ? errHead : outHead) || `exit ${String(result.payload.exit_code)}`
+    : null
   return (
     <div className="w-full shrink-0 py-0.5">
       <div className="cursor-pointer rounded px-2 py-1 hover:bg-accent/40" title={timeTitle(command.created_at)}
            onClick={() => { if (selectionCollapsed()) onToggle(command.id, false) }}>
         <div className="flex items-baseline gap-2 text-xs">
-          <Dot state={state} />
-          <span className="font-mono text-[11px] text-foreground/80">
+          <Glyph state={state} />
+          <span className="font-mono text-[11px] text-foreground/70">
             {str(command.payload.runtime).toUpperCase() || "CMD"}
           </span>
-          <span className="min-w-0 flex-1 truncate font-mono text-muted-foreground">
-            {firstLine(cmd)}
+          <span className="min-w-0 flex-1 truncate font-mono text-foreground/90">
+            {hd ? `写入 ${hd.file}（heredoc ${hd.lines} 行 · ${hd.tag}）` : firstLine(cmd)}
           </span>
           <TimeTag ts={command.created_at} />
         </div>
+        {result && !open && (
+          <div className="ml-5 mt-0.5 flex items-baseline gap-1.5 text-[11px] leading-relaxed">
+            <span className="shrink-0 select-none text-muted-foreground/40">⎿</span>
+            <span className={cn("min-w-0 flex-1 truncate", exitOk ? "text-muted-foreground/70" : "text-(--status-error)/80")}>
+              {resLine}
+            </span>
+            {typeof dur === "number" && (
+              <span className="shrink-0 font-mono text-[10px] text-muted-foreground/40">{fmtDuration(dur)}</span>
+            )}
+          </div>
+        )}
+        {!result && (
+          <div className="ml-5 mt-0.5 flex items-baseline gap-1.5 text-[11px] leading-relaxed">
+            <span className="shrink-0 select-none text-muted-foreground/40">⎿</span>
+            <span className={state === "running" ? "animate-pulse text-primary/80" : "text-muted-foreground/50"}>
+              {state === "running" ? "运行中…" : "（无结果返回）"}
+            </span>
+          </div>
+        )}
         {open && (
           <div className="ml-5 border-l border-border/60 pl-3">
             <div className="text-[10px] font-mono text-muted-foreground/60">IN</div>
@@ -180,7 +242,7 @@ function CommandPairRow({ command, result, open, onToggle }: {
   )
 }
 
-// ---------- 思考：● 思考 Ns，展开全文（正文非等宽，克制黑客风约定） ----------
+// ---------- 思考：✻ 思考 Ns，展开全文（正文非等宽，克制黑客风约定） ----------
 
 function ThinkingRow({ event, open, onToggle, streaming }: { event: BBEvent; open: boolean; onToggle: (id: number, d: boolean) => void; streaming?: boolean }) {
   const dur = event.payload.duration_s
@@ -193,8 +255,8 @@ function ThinkingRow({ event, open, onToggle, streaming }: { event: BBEvent; ope
         onClick={() => { if (selectionCollapsed()) onToggle(event.id, false) }}
       >
         <div className="flex items-baseline gap-2 text-xs">
-          <Dot state={streaming ? "running" : "idle"} />
-          <span className={streaming ? "min-w-0 flex-1 truncate text-primary italic" : "min-w-0 flex-1 truncate italic text-muted-foreground"}>
+          <Glyph state={streaming ? "running" : "idle"} char="✻" />
+          <span className={streaming ? "min-w-0 flex-1 truncate text-primary italic" : "min-w-0 flex-1 truncate italic text-muted-foreground/70"}>
             {/* streaming 行无 duration（流未结束）；终稿行沿用「无 duration_s 不空心」约定 */}
             {streaming ? "思考中…" : typeof dur === "number" ? `思考 ${fmtDuration(dur)}` : "思考"}
             {(!open && preview) && (
@@ -224,8 +286,12 @@ function AgentChatRow({ event }: { event: BBEvent }) {
       <div className="rounded px-2 py-1" title={timeTitle(event.created_at)}>
         <div className="flex items-start gap-2 text-xs">
           <Dot state="idle" />
-          <div className="min-w-0 flex-1 whitespace-pre-wrap break-words leading-relaxed text-foreground/90">
-            {str(event.payload.text)}
+          {/* 2026-09-28：LLM 产出是 markdown（孤儿回复/任务轮叙述/顾问发言共用本行），
+              此前 whitespace-pre-wrap 直显源码；与 AgentReplyRow 终稿同走 MarkdownView
+              （无 rehype-raw 不渲染 raw HTML，防注入） */}
+          <div className="min-w-0 flex-1">
+            <MarkdownView content={str(event.payload.text)} prefix={`achat-${event.id}`}
+              className="text-sm leading-relaxed text-foreground/90" />
           </div>
           <TimeTag ts={event.created_at} />
           <span className="shrink-0 pt-0.5 font-mono text-[10px] text-muted-foreground/60">{event.author}</span>
@@ -235,18 +301,23 @@ function AgentChatRow({ event }: { event: BBEvent }) {
   )
 }
 
-// ---------- 对话轮（2026-09-20 会话窗对话化，Claude Code 式） ----------
-// 人类气泡（右）→ 「⚙ 过程 · N 步」折叠组（thinking/命令对/tool.call/任务轮叙述，
-// 行内 JSON 展开全保留=审计零回退）→ Agent 回复气泡（左；流式中 pre-wrap+光标，
-// 终稿切 MarkdownView——react-markdown 无 rehype-raw 不渲染 raw HTML，防注入）。
+// ---------- 对话轮（2026-09-28 三段式改造，Claude Code 骨架） ----------
+// ❯ 人类一行（顶部时间分隔线，替代气泡）→ ⏺/⎿ 过程行常显（每行可展开审计明细，
+// 不再整组折叠——过程即内容）→ Agent 正文回复（MarkdownView 平铺，替代气泡；
+// 流式中 pre-wrap+光标，终稿切 MarkdownView——react-markdown 无 rehype-raw 不渲染
+// raw HTML，防注入）。
 
 function HumanNoteRow({ event }: { event: BBEvent }) {
   const text = str(event.payload.text) || str(event.payload.title)
   return (
-    <div className="flex items-center justify-end gap-1.5 pr-1" title={timeTitle(event.created_at)}>
-      <TimeTag ts={event.created_at} />
-      <div className="max-w-[85%] rounded-2xl rounded-br-sm bg-primary/10 px-3 py-1.5 text-sm leading-relaxed text-foreground">
-        <span className="whitespace-pre-wrap break-words">{text}</span>
+    <div className="w-full" title={timeTitle(event.created_at)}>
+      <div className="mb-1 flex items-center gap-2">
+        <span className="h-px flex-1 bg-border/60" />
+        <TimeTag ts={event.created_at} />
+      </div>
+      <div className="px-1 text-sm leading-relaxed">
+        <span className="mr-1.5 select-none font-mono text-primary">❯</span>
+        <span className="whitespace-pre-wrap break-words text-foreground">{text}</span>
       </div>
     </div>
   )
@@ -256,63 +327,83 @@ function AgentReplyRow({ event, streaming }: { event: BBEvent; streaming?: boole
   const text = str(event.payload.text)
   if (streaming) {
     return (
-      <div className="flex justify-start pl-1">
-        <div className="max-w-[92%] rounded-2xl rounded-bl-sm bg-accent/40 px-3 py-1.5 text-sm leading-relaxed text-foreground/90">
-          <span className="whitespace-pre-wrap break-words">{text}</span>
-          <span className="ml-0.5 inline-block h-3.5 w-[2px] animate-pulse bg-primary align-middle" />
-        </div>
+      <div className="px-1 py-0.5 text-sm leading-relaxed text-foreground/90" title={timeTitle(event.created_at)}>
+        <span className="whitespace-pre-wrap break-words">{text}</span>
+        <span className="ml-0.5 inline-block h-3.5 w-[2px] animate-pulse bg-primary align-middle" />
       </div>
     )
   }
   return (
-    <div className="flex items-start justify-start gap-1.5 pl-1" title={timeTitle(event.created_at)}>
-      <div className="max-w-[92%] rounded-2xl rounded-bl-sm bg-accent/40 px-3 py-1.5">
-        {/* 超长回复内部滚动（审计全文仍可展开过程组行看 JSON） */}
-        <MarkdownView content={text} prefix={`chat-${event.id}`}
-          className="max-h-96 overflow-auto text-sm leading-relaxed text-foreground/90" />
-      </div>
-      <TimeTag ts={event.created_at} />
+    <div className="px-1 py-0.5" title={timeTitle(event.created_at)}>
+      {/* 超长回复内部滚动（审计全文仍可展开过程行看 JSON） */}
+      <MarkdownView content={text} prefix={`chat-${event.id}`}
+        className="max-h-96 overflow-auto text-sm leading-relaxed text-foreground/90" />
     </div>
   )
 }
 
-function TurnRow({ item, open, onToggle, roleNames, onRouteJump, assetName }:
+// 轮本体不再有整组折叠（2026-09-28 过程常显），onToggle 仅透传给过程行自管展开态；
+// 注意 open/onToggle 两 prop 保留在 EventRowProps 上（EventRowImpl 统一传参）
+function TurnRow({ item, roleNames, onRouteJump, assetName }:
   EventRowProps & { item: Extract<StreamItem, { type: "turn" }> }) {
   // 过程组内行展开态自管（局部 map，不进 LiveRoom overrides——轮内细节不污染顶层折叠记忆）
   const [innerOpen, setInnerOpen] = useState<Map<number, boolean>>(new Map())
   const innerToggle = (id: number, d: boolean) =>
     setInnerOpen((m) => new Map(m).set(id, !(m.get(id) ?? d)))
-  const hasProcess = item.process.length > 0
   return (
-    <div className="w-full shrink-0 space-y-1 py-1">
+    <div className="w-full shrink-0 space-y-0.5 py-1">
       <HumanNoteRow event={item.note} />
-      {hasProcess && (
-        <div>
-          <button type="button" className="flex w-full items-baseline gap-2 rounded px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent/40"
-            title={timeTitle(item.note.created_at)}
-            onClick={() => { if (selectionCollapsed()) onToggle(item.note.id, false) }}>
-            <Dot state={item.reply ? "ok" : "running"} />
-            <span>{open ? "▾" : "▸"} ⚙ 过程 · {item.process.length} 步</span>
-          </button>
-          {open && (
-            <div className="ml-5 space-y-0.5 border-l border-border/60 pl-3">
-              {item.process.map((p) => {
-                const pe = p.type === "pair" ? p.command
-                  : p.type === "turn" ? p.note : p.event
-                const pk = p.type === "pair" ? "command"
-                  : p.type === "turn" ? "message.inbox" : p.event.kind
-                const st = eventStyle(pk, pe.payload)
-                return <EventRowImpl key={pe.id} item={p}
-                  open={innerOpen.get(pe.id) ?? st.defaultOpen}
-                  onToggle={innerToggle} roleNames={roleNames} onRouteJump={onRouteJump}
-                  assetName={assetName} />
-              })}
-            </div>
-          )}
+      {/* 2026-09-28：过程组取消整组折叠（原「⚙ 过程 N 步」），⏺/⎿ 行常显——
+          折叠态两行/步，与 Claude Code 一致；行内明细仍逐行可展开 */}
+      {item.process.length > 0 && (
+        <div className="space-y-0.5 pl-2">
+          {item.process.map((p) => {
+            const pe = p.type === "pair" ? p.command
+              : p.type === "turn" ? p.note : p.event
+            const pk = p.type === "pair" ? "command"
+              : p.type === "turn" ? "message.inbox" : p.event.kind
+            const st = eventStyle(pk, pe.payload)
+            return <EventRowImpl key={pe.id} item={p}
+              open={innerOpen.get(pe.id) ?? st.defaultOpen}
+              onToggle={innerToggle} roleNames={roleNames} onRouteJump={onRouteJump}
+              assetName={assetName} />
+          })}
         </div>
       )}
       {item.replyStream && <AgentReplyRow event={item.replyStream} streaming />}
       {item.reply && <AgentReplyRow event={item.reply} />}
+    </div>
+  )
+}
+
+// ---------- 审批卡（2026-09-28 内联审批，Codex 式流内决策） ----------
+// approval.requested（store.request_approval 现已落事件）：琥珀卡片 + 摘要 + 行内
+// [批准][拒绝]（按钮由 LiveRoom 经 action 注入，走 api.decideApproval）；决策后的
+// approval.{decision} 事件仍走通用审计行。
+
+function ApprovalCardRow({ event, action }: { event: BBEvent; action?: ReactNode }) {
+  const op = str(event.payload.op) || "unknown"
+  const risk = str(event.payload.risk)
+  const summary = str(event.payload.summary)
+  return (
+    <div className="w-full shrink-0 py-1">
+      <div className="rounded-lg border border-(--status-approval)/40 bg-(--status-approval)/5 px-3 py-2"
+           title={timeTitle(event.created_at)}>
+        <div className="flex items-center gap-2 text-xs">
+          <span className="shrink-0">🔔</span>
+          <span className="shrink-0 font-medium text-foreground/90">审批 · {op}</span>
+          {risk && (
+            <span className="shrink-0 rounded border border-(--status-approval)/40 px-1 font-mono text-[10px] text-(--status-approval)">
+              {risk}
+            </span>
+          )}
+          <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground/70" title={summary}>
+            {summary}
+          </span>
+          {action}
+          <TimeTag ts={event.created_at} />
+        </div>
+      </div>
     </div>
   )
 }
@@ -333,9 +424,20 @@ function EventRowImpl({ item, open, onToggle, roleNames, action, onRouteJump, as
   if (e.kind === "llm.thinking" || e.kind === "llm.thinking.delta") {
     return <ThinkingRow event={e} streaming={e.kind === "llm.thinking.delta"} open={open} onToggle={onToggle} />
   }
-  // Agent 回复走专属 prose 行（正文即行，无标签/摘要复述）；无 text 的异常载荷退回通用 JSON 行
+  // Agent 回复走专属 prose 行（正文即行，无标签/摘要复述）；无 text 的异常载荷退回通用 JSON 行。
+  // cont（2026-09-28）：轮开启语被窗口裁剪出窗时的孤儿终稿回复，行顶提示承接，
+  // 消除「轮内过程事件随窗口滑动在折叠/平铺间翻转、看似消失」的困惑
   if (e.kind === "agent.chat" && typeof e.payload.text === "string") {
-    return <AgentChatRow event={e} />
+    return (
+      <>
+        {item.type === "single" && item.cont && (
+          <div className="shrink-0 pl-1 text-[10px] leading-relaxed text-muted-foreground/60">
+            ⋯ 承接更早的对话轮（开启语已随窗口裁剪，上翻加载完整上下文）
+          </div>
+        )}
+        <AgentChatRow event={e} />
+      </>
+    )
   }
   // 回复流式增量兜底行（2026-09-20 对话化）：正常在对话轮气泡内滚动（装配层），
   // 只有无轮上下文的孤儿 delta（escalation-only 回复等）落到这里
@@ -345,6 +447,10 @@ function EventRowImpl({ item, open, onToggle, roleNames, action, onRouteJump, as
   // 策略顾问发言（2026-09-20）：正文即行——顾问建议同样值得通读，展开 JSON 对人无意义
   if (e.kind === "advisor.intervention" && typeof e.payload.text === "string") {
     return <AgentChatRow event={e} />
+  }
+  // 内联审批卡（2026-09-28）：pending 审批请求渲染为卡片，[批准][拒绝] 经 action 注入
+  if (e.kind === "approval.requested") {
+    return <ApprovalCardRow event={e} action={action} />
   }
 
   const style = eventStyle(e.kind, e.payload)
@@ -393,7 +499,12 @@ function EventRowImpl({ item, open, onToggle, roleNames, action, onRouteJump, as
               </span>
               <span className="text-muted-foreground">{routedTail}</span>
             </span>
-          ) : summary && <span className="min-w-0 flex-1 truncate">{summary}</span>}
+          ) : summary && (
+            <span className="min-w-0 flex-1 truncate"
+                  title={typeof summary === "string" ? summary : undefined}>
+              {summary}
+            </span>
+          )}
           {mapped && (
             <span className="shrink-0 text-[10px] text-(--status-ok)"
                   title={`结论已入黑板链路图 ${mappedId}`}>📌 结论已上图</span>
@@ -426,7 +537,7 @@ function areRowEqual(a: EventRowProps, b: EventRowProps): boolean {
     return a.item.command === b.item.command && a.item.result === b.item.result
   }
   if (a.item.type === "single" && b.item.type === "single") {
-    return a.item.event === b.item.event
+    return a.item.event === b.item.event && a.item.cont === b.item.cont
   }
   if (a.item.type === "turn" && b.item.type === "turn") {
     // process 内对象每次装配重建，引用必变 → 轮有任何更新即重渲（保守正确优先）

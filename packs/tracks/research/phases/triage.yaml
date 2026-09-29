@@ -1,0 +1,20 @@
+# 逆向分析轨阶段剧本（planner-cadence P2，2026-09-28）——文件名 stem=阶段 id。
+# 语义同 pentest 轨：进入阶段时 tasks[] 原样首发（created_by=playbook，按任务
+# 指纹去重，重进不重发；首发任务统一 passive 噪声）；过程派单自由（focus=重心
+# 配比建议）；gate=入场门指标（gate_types 列出被本阶段门拦的任务类型）。
+name: 分诊建档
+goal: 样本归类与功能面初判，锁定分析优先级与研究路线
+order: 1
+focus:
+  triage: 3
+  analyze: 1
+gate:
+  min_assets: 1
+  idle_rounds: 2
+gate_types: [reconstruct]
+tasks:
+  - task_type: triage
+    role: reverse-analyst
+    objective: 对项目样本做分流建档：按格式/架构/混淆特征归类，登记资产并初判功能面，锁定分析优先级
+    acceptance: 样本以 binary 资产登记入黑板，功能面初判与优先级落发现（intel）
+next: [analyze]

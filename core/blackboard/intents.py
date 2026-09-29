@@ -32,6 +32,14 @@ STATEMENT_MAX = 500
 
 # ---------- 引用归一化 + 存在性 ----------
 
+# id 自带 kind 前缀（asset-…/find-…/art-…）；http/event 主键为纯数字。
+# 注意 artifact 的 id 前缀是 art-（kind 与前缀不同名——同类不一致正是模型
+# 引用写错的温床，见 normalize_refs_verbose 宽容归一）
+_ID_PREFIX = {"asset": "asset-", "finding": "find-", "artifact": "art-"}
+# 常见 kind 别名（模型常把 finding 写成 find / artifact 写成 art）
+_KIND_ALIASES = {"find": "finding", "art": "artifact"}
+
+
 def _parse_ref(ref: object) -> tuple[str, str]:
     if not isinstance(ref, str):
         raise ValueError(f"非法引用: {ref!r}（必须是字符串）")
@@ -39,7 +47,8 @@ def _parse_ref(ref: object) -> tuple[str, str]:
     if not m or m.group(1) not in REF_KINDS:
         raise ValueError(
             f"非法引用: {ref}（形如 finding:<id> / asset:<id> / http:<历史id> /"
-            f" event:<事件id> / artifact:<id>）")
+            f" event:<事件id> / artifact:<id>；<id> 是**完整 id**——自带 kind"
+            f" 前缀，如 asset:asset-6971f089d5fe / finding:find-c32f449cc7b5）")
     return m.group(1), m.group(2)
 
 
@@ -61,22 +70,69 @@ def _ref_exists(conn, project_id: str, kind: str, ref: str) -> bool:
     ).fetchone() is not None
 
 
-def normalize_refs(bb, project_id: str, refs) -> list[str]:
-    """引用列表 → 排序保持、去重；逐条做同项目存在性校验，悬空/非法 ValueError。"""
+def normalize_refs_verbose(bb, project_id: str, refs) -> tuple[list[str], list[str]]:
+    """引用列表 → (归一后引用, 修正记录["raw → norm", …])。
+
+    **宽容归一（2026-09-30，sess-78df38d1741d 五连拒复盘）**：id 自带 kind
+    前缀（asset-xxx）与引用语法 kind:<id> 结构性碰撞——模型稳定写出剥前缀
+    形态 asset:6971xxx（正确=asset:asset-6971xxx）或裸 id asset-xxx。收到
+    此类形态按候选补全，**仅当补全后同项目真实存在才放行**并记录修正；
+    悬空/乱写照抛（错误文案带完整形态示例，防静默吞真错误）。"""
     if not refs:
-        return []
+        return [], []
     if not isinstance(refs, (list, tuple)):
         raise ValueError("引用必须是数组 [\"finding:<id>\", …]")
     out: list[str] = []
+    corrections: list[str] = []
     for raw in refs:
-        kind, ref = _parse_ref(raw)
-        if not _ref_exists(bb.conn, project_id, kind, ref):
+        norm = None
+        try:
+            kind, ref = _parse_ref(raw)
+            if _ref_exists(bb.conn, project_id, kind, ref):
+                norm = f"{kind}:{ref}"
+        except ValueError:
+            pass
+        if norm is None:
+            for kind, ref in _ref_candidates(str(raw)):
+                if _ref_exists(bb.conn, project_id, kind, ref):
+                    norm = f"{kind}:{ref}"
+                    corrections.append(f"{raw} → {norm}")
+                    break
+        if norm is None:
+            _parse_ref(raw)  # 形态非法则抛带完整形态示例的原始错误
             raise ValueError(
-                f"引用不存在或不属于本项目: {raw}（先登记/先产生被引用对象，再建立推导）")
-        norm = f"{kind}:{ref}"
+                f"引用不存在或不属于本项目: {raw}（先登记/先产生被引用对象，"
+                f"再建立推导；注意 <id> 须是完整 id——自带 kind 前缀，如"
+                f" asset:asset-6971f089d5fe / finding:find-c32f449cc7b5）")
         if norm not in out:
             out.append(norm)
+    return out, corrections
+
+
+def _ref_candidates(raw: str) -> list[tuple[str, str]]:
+    """宽容归一候选：剥前缀 kind:short / 裸 id / find: 别名 → (kind, 完整id)。"""
+    out: list[tuple[str, str]] = []
+    s = raw.strip()
+    m = re.match(r"^([a-z]+):(\S+)$", s)
+    if m:
+        kind = _KIND_ALIASES.get(m.group(1), m.group(1))
+        ref = m.group(2)
+        if kind in REF_KINDS:
+            out.append((kind, ref))
+            prefix = _ID_PREFIX.get(kind, "")
+            if prefix and not ref.startswith(prefix):
+                out.append((kind, prefix + ref))
+        return out
+    m = re.match(r"^(asset|find|finding|artifact|art)-\S+$", s)
+    if m:
+        kind = _KIND_ALIASES.get(m.group(1), m.group(1))
+        out.append((kind, s))
     return out
+
+
+def normalize_refs(bb, project_id: str, refs) -> list[str]:
+    """兼容包装：只返回归一后引用（语义/修正记录见 normalize_refs_verbose）。"""
+    return normalize_refs_verbose(bb, project_id, refs)[0]
 
 
 def _str_list(values, field: str) -> list[str]:
@@ -115,7 +171,7 @@ def declare_intent(bb, project_id: str, statement: str, *,
         raise ValueError("意图陈述 statement 必填非空（一句可证伪假设）")
     if len(stmt) > STATEMENT_MAX:
         raise ValueError(f"意图陈述过长（上限 {STATEMENT_MAX} 字）——浓缩成一句假设")
-    basis = normalize_refs(bb, project_id, basis_refs)
+    basis, ref_corrections = normalize_refs_verbose(bb, project_id, basis_refs)
     ts = now()
     with bb._tx():
         if target_asset_id:
@@ -134,7 +190,10 @@ def declare_intent(bb, project_id: str, statement: str, *,
         if row:
             out = _row_to_dict(row) or {}
             out["merged"] = True
-            return _hydrate(out)
+            out = _hydrate(out)
+            if ref_corrections:
+                out["ref_corrections"] = ref_corrections
+            return out
         intent_id = new_id("intent")
         bb.conn.execute(
             "INSERT INTO intents(id,project_id,statement,target_asset_id,basis_refs,"
@@ -145,10 +204,15 @@ def declare_intent(bb, project_id: str, statement: str, *,
         )
     bb.append_event(project_id, "intent.declared",
                     {"intent_id": intent_id, "statement": stmt,
-                     "target_asset_id": target_asset_id, "basis_refs": basis},
+                     "target_asset_id": target_asset_id, "basis_refs": basis,
+                     **({"ref_corrections": ref_corrections}
+                        if ref_corrections else {})},
                     session_id=author if author.startswith("sess-") else None,
                     author=author)
-    return get_intent(bb, project_id, intent_id) or {}
+    out = get_intent(bb, project_id, intent_id) or {}
+    if ref_corrections:
+        out["ref_corrections"] = ref_corrections
+    return out
 
 
 # ---------- close ----------
@@ -167,7 +231,8 @@ def close_intent(bb, project_id: str, intent_id: str, outcome: str, *,
         raise ValueError(
             f"非法收尾类型: {outcome}（允许 {INTENT_OUTCOMES}）")
     fids = _str_list(finding_ids, "finding_ids")
-    evidence = normalize_refs(bb, project_id, evidence_refs)
+    evidence, ref_corrections = normalize_refs_verbose(bb, project_id,
+                                                       evidence_refs)
     ts = now()
     with bb._tx():
         row = bb.conn.execute(
@@ -221,10 +286,15 @@ def close_intent(bb, project_id: str, intent_id: str, outcome: str, *,
     bb.append_event(project_id, "intent.closed",
                     {"intent_id": intent_id, "outcome": outcome,
                      "finding_ids": fids,
-                     "dead_reason": (dead_reason or "")[:200]},
+                     "dead_reason": (dead_reason or "")[:200],
+                     **({"ref_corrections": ref_corrections}
+                        if ref_corrections else {})},
                     session_id=author if author.startswith("sess-") else None,
                     author=author)
-    return get_intent(bb, project_id, intent_id) or {}
+    out = get_intent(bb, project_id, intent_id) or {}
+    if ref_corrections:
+        out["ref_corrections"] = ref_corrections
+    return out
 
 
 # ---------- reopen ----------
@@ -274,39 +344,34 @@ def get_intent(bb, project_id: str, intent_id: str) -> dict | None:
 
 
 def dead_end_backing_target(conn, project_id: str, asset_id: str) -> str | None:
-    """tested_clean 背书查询（2026-09-25 门禁）：返回覆盖 asset_id 的
-    closed/dead_end 意图 target_asset_id，无背书 None。
+    """tested_clean 背书查询（2026-09-25 门禁；2026-09-29 逐资产收紧）：返回
+    直接围绕 asset_id 的 closed/dead_end 意图 target_asset_id，无背书 None。
 
-    - 直接背书：意图 target == asset_id；
-    - 批次背书：asset_id 位于意图 target 的资产子树内（沿 parent_id 向上查
-      祖先，服务端校验子树关系）。
+    直接背书（二选一）：
+    - 意图 target_asset_id == asset_id；
+    - 意图 basis_refs 明确含 asset:<asset_id>。
+    **祖先链批次覆盖已移除**（2026-09-29，sess-1d692817a5d0 误判复盘）：
+    一条「同模板基线一致」式父节点死路意图曾批量背书 12 个活站 tested_clean
+    （每域仅 4 个测活请求）——tested_clean 必须逐资产独立立意意图，意图越多
+    测得越全面；父节点终态由子树读时派生（D3），不需要批次背书。
     纯读、**收 conn**——调用方可能已在 ``_tx()`` 内，不能再开 bb 事务。
-    target 为空的意图不参与背书。
     """
+    marker = f"asset:{asset_id}"
     rows = conn.execute(
-        "SELECT target_asset_id FROM intents"
+        "SELECT target_asset_id, basis_refs FROM intents"
         " WHERE project_id=? AND status='closed' AND outcome_type='dead_end'"
-        " AND target_asset_id IS NOT NULL AND target_asset_id!=''",
-        (project_id,),
+        " AND (target_asset_id=? OR basis_refs LIKE ?)",
+        (project_id, asset_id, f'%"{marker}"%'),
     ).fetchall()
-    targets = {r[0] for r in rows}
-    if not targets:
-        return None
-    if asset_id in targets:
-        return asset_id
-    parent_of: dict[str, str] = {}
-    for a in conn.execute(
-        "SELECT id, parent_id FROM assets WHERE project_id=?", (project_id,)
-    ):
-        if a["parent_id"]:
-            parent_of[a["id"]] = a["parent_id"]
-    ancestor = parent_of.get(asset_id)
-    seen: set[str] = set()
-    while ancestor and ancestor not in seen:  # parent 链不成环，seen 兜底
-        if ancestor in targets:
-            return ancestor
-        seen.add(ancestor)
-        ancestor = parent_of.get(ancestor)
+    for r in rows:
+        if r["target_asset_id"] == asset_id:
+            return asset_id
+        try:
+            refs = json.loads(r["basis_refs"] or "[]")
+        except ValueError:
+            continue
+        if marker in refs:
+            return r["target_asset_id"] or asset_id
     return None
 
 

@@ -1,5 +1,5 @@
 [project]
-name = "cyberstrike-pro"
+name = "obsius"
 version = "0.1.0"
 description = "AI 驱动的全能安全平台（渗透/红队/CTF/逆向/Pwn/IoT/AI 安全），原生 Windows 优先"
 readme = "DESIGN.md"

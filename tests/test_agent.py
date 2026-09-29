@@ -106,13 +106,19 @@ def make_agent(env, llm, planner=None, config=None, role="_generalist", artifact
     experts.mkdir(parents=True, exist_ok=True)
     (experts / "_generalist.yaml").write_text(
         'name: _generalist\npersona: "通用测试员。"\n', encoding="utf-8")
-    return AgentSession(project_id=project["id"], bb=bb, gateway=gw, llm=llm,
+    agent = AgentSession(project_id=project["id"], bb=bb, gateway=gw, llm=llm,
                         planner_llm=planner, packs_root=packs, track="pentest",
                         capabilities=list(capabilities),
                         role=role, capability_prompt="## 能力清单\n- Docker: 可用",
                         config=config or AgentConfig(max_steps=10),
                         artifacts_dir=artifacts_dir,
                         enable_sediment=enable_sediment)
+    if planner is None:
+        # 对话即指令（2026-09-28）回归配套：未显式传 planner 时短路对话意图
+        # 分类——分类器回落主 LLM 会多消费一条剧本，旧对话测试整体错位。
+        # 要测分类器/对话转任务：显式传 planner=ScriptedLLM([...])。
+        agent._classify_human_intent = lambda note_text: ("chat", "")
+    return agent
 
 
 def write_role(env, name, body):
@@ -1326,6 +1332,9 @@ def test_add_finding_with_poc_artifact(env):
     agent = make_agent(env, llm)
     declare_intent(bb, project["id"], "对登录框进行 sql 注入尝试",
                    author=agent.session["id"])  # 过 bb_add_finding 必挂意图门禁
+    # 意图先行闸（2026-09-28）：意图声明后须有执行动作——补 command 事件模拟验证
+    bb.append_event(project["id"], "command", {"cmd": "probe"},
+                    session_id=agent.session["id"], author=agent.session["id"])
     agent.run_task("带 POC 引用的发现")
     rows = [f for f in bb.list_findings(project["id"]) if f["vuln_class"] == "sqli"]
     assert len(rows) == 1
@@ -1352,6 +1361,9 @@ def test_add_finding_relates_to_passthrough_and_dangling_reported(env):
     agent = make_agent(env, llm)
     declare_intent(bb, project["id"], "对注入点进行升级利用尝试",
                    author=agent.session["id"])  # 过 bb_add_finding 必挂意图门禁
+    # 意图先行闸（2026-09-28）：补 command 事件模拟意图后的执行动作
+    bb.append_event(project["id"], "command", {"cmd": "probe"},
+                    session_id=agent.session["id"], author=agent.session["id"])
     agent.run_task("强关系登记")
     rows = {f["vuln_class"]: f for f in bb.list_findings(project["id"])}
     assert rows["sqli"]["evidence"]["relates_to"] == [
@@ -2777,16 +2789,22 @@ def test_run_chat_streams_reply_and_prunes_deltas(env):
 
 
 def test_run_chat_registers_finding(env):
-    """对话化（2026-09-20）干活纪律放开：对话轮有价值的阶段性结论可
-    bb_add_finding 入黑板——author=会话 id（P4 图上「对话产出」徽章数据源），
-    无任务上下文不挂任务；prompt 不再含「不登记发现」且明确点名入图纪律。
-    2026-09-27 agent-loop 修复：对话轮（无认领任务）登记发现**不要求先声明
-    意图**——任务尝试树按 task_id 现算，对话发现无处可挂；此前硬拦会让对话
-    轮在 24 步内反复被拒（无 E2 熔断逃生）白烧 LLM、消息被 drain 后无回复。"""
+    """对话轮登记发现同样走意图纪律（2026-09-28 三段式收紧统一生效含对话轮）：
+    declare_intent → 执行动作 → bb_add_finding——发现是检验的产物，不允许
+    游离登记（2026-09-27 的对话轮豁免已被三段式收紧移除，declare_intent 恒
+    放行不会死锁）。author=会话 id（P4 图上「对话产出」徽章数据源），
+    无任务上下文不挂任务。"""
     bb, project, gw, tq, _ = env
     llm = ScriptedLLM([
         {"tool_use": [ScriptedLLM.tool_call(
-            "c1", "bb_add_finding",
+            "c1", "declare_intent",
+            {"statement": "后台存在默认弱口令 admin/admin（人类引导线索，"
+                          "需实测登录验证）"})]},
+        {"tool_use": [ScriptedLLM.tool_call(
+            "c2", "run_cmd", {"cmd": "whoami", "runtime": "host",
+                              "threat_class": "trusted"})]},
+        {"tool_use": [ScriptedLLM.tool_call(
+            "c3", "bb_add_finding",
             {"vuln_class": "weak_password", "title": "后台弱口令 admin/admin",
              "severity": "high", "evidence": {"note": "登录成功且返回管理面板"}})]},
         {"text": "已确认后台存在弱口令并登记 finding。"},
@@ -2822,9 +2840,11 @@ def test_bb_add_finding_task_requires_own_intent(env):
     r = dA.dispatch("bb_add_finding", {"vuln_class": "info-leak", "title": "T",
                                        "severity": "low"})
     assert r.startswith("[拒绝]") and "open 意图" in r
-    # 声明意图后放行
+    # 声明意图后放行（意图先行闸：声明后补 command 事件模拟执行动作）
     r = dA.dispatch("declare_intent", {"statement": "对目标进行备份探测尝试"})
     assert r.startswith("intent=")
+    bb.append_event(project["id"], "command", {"cmd": "probe"},
+                    session_id=sidA, author=sidA)
     r = dA.dispatch("bb_add_finding", {"vuln_class": "info-leak", "title": "T",
                                        "severity": "low"})
     assert r.startswith("finding=")
@@ -2838,8 +2858,35 @@ def test_bb_add_finding_task_requires_own_intent(env):
     dB.dispatch("task_plan", {"steps": [{"id": "p1", "title": "探测", "status": "todo"}]})
     r = dB.dispatch("declare_intent", {"statement": "对目标进行备份探测尝试"})
     assert r.startswith("intent=") and "复用" not in r  # 跨作者不再合并
+    bb.append_event(project["id"], "command", {"cmd": "probe"},
+                    session_id=sidB, author=sidB)
     r = dB.dispatch("bb_add_finding", {"vuln_class": "info-leak", "title": "B",
                                        "severity": "low"})
+    assert r.startswith("finding=")
+
+
+def test_bb_add_finding_intent_requires_execution(env):
+    """2026-09-28 意图先行（三段式收紧）：发现是「侦察→declare→执行→产出」链路
+    的检验产物——① 对话轮（无任务上下文）同样受门禁约束；② declare 后立即落发现
+    （事后补票，实测 sess-b9a539e3ebfe declare→finding 仅隔 12 秒）被拒；③ 意图
+    声明后有实质执行（command 事件）才放行；declare_intent 恒放行不会死锁。"""
+    bb, project, gw, tq, _ = env
+    from core.agent.tools import ToolDispatcher
+    sid = bb.register_session(project["id"], "intent-exec")["id"]
+    d = ToolDispatcher(bb, gateway=gw, tq=tq, project_id=project["id"],
+                       session_id=sid, author=sid)
+    # ① 对话轮（无 current_task_id）无意图 → 拒（统一门禁，不再豁免）
+    r = d.dispatch("bb_add_finding", {"vuln_class": "info-leak", "title": "T"})
+    assert r.startswith("[拒绝]") and "open 意图" in r
+    # ② declare 后立即落发现 = 事后补票 → 拒
+    r = d.dispatch("declare_intent", {"statement": "验证 /admin 是否存在未授权访问"})
+    assert r.startswith("intent=")
+    r = d.dispatch("bb_add_finding", {"vuln_class": "info-leak", "title": "T"})
+    assert r.startswith("[拒绝]") and "执行动作" in r
+    # ③ 意图声明后有实质执行（command 事件，run_cmd 落的审计）→ 放行
+    bb.append_event(project["id"], "command", {"cmd": "curl -s http://x/admin"},
+                    session_id=sid, author=sid)
+    r = d.dispatch("bb_add_finding", {"vuln_class": "info-leak", "title": "T"})
     assert r.startswith("finding=")
 
 
@@ -3226,13 +3273,18 @@ def test_bb_asset_status_tool_and_query_filters(env):
 
     assert d.dispatch("bb_asset_status",
                       {"asset_id": aid, "status": "tested_clean"}).startswith("[拒绝]")
+    # 四问门禁（2026-09-29）：tested_clean 缺任一问 → 拒绝并引导补答
+    r4q = d.dispatch("bb_asset_status",
+                     {"asset_id": aid, "status": "tested_clean",
+                      "tested_what": "测了 4 个入口", "viewpoint": "docker 出口"})
+    assert r4q.startswith("[拒绝]") and "why_no_finding" in r4q
     assert d.dispatch("bb_asset_status",
                       {"asset_id": aid, "status": "hacked"}).startswith("[拒绝]")
     assert d.dispatch("bb_asset_status",
                       {"asset_id": "asset-000000000000", "status": "visited"}).startswith("[错误]")
     for st in ("visited", "scanning"):
         assert d.dispatch("bb_asset_status", {"asset_id": aid, "status": st}).startswith("asset=")
-    # tested_clean 须死路意图背书（2026-09-25 门禁）：先立意图并死路收尾
+    # tested_clean 须死路意图背书（2026-09-25 门禁；2026-09-29 收紧为逐资产）
     from core.blackboard.intents import close_intent, declare_intent
     hid = d.bb.add_http_history(d.project_id, source="browser", method="GET",
                                 url="http://10.2.2.2/probe", status=404,
@@ -3244,13 +3296,19 @@ def test_bb_asset_status_tool_and_query_filters(env):
                  evidence_refs=[f"http:{hid}"])
     assert d.dispatch("bb_asset_status",
                       {"asset_id": aid, "status": "tested_clean",
-                       "note": "手测 4 个入口"}).startswith("asset=")
-    # 无背书的另一资产仍被拒
+                       "note": "手测 4 个入口",
+                       "tested_what": "GET / /login /admin /api 各 1 发，404/200",
+                       "viewpoint": "docker 出口直连，无拦截页",
+                       "why_no_finding": "入口全探、无异常响应；暂无可立新意图"
+                       }).startswith("asset=")
+    # 无背书的另一资产仍被拒（四问齐备但意图不围绕该资产）
     no_backing = d.dispatch("bb_add_asset", {"value": "10.2.2.3"})
     nid = no_backing.split("asset=")[1].split()[0]
     assert d.dispatch("bb_asset_status",
                       {"asset_id": nid, "status": "tested_clean",
-                       "note": "无背书"}).startswith("[拒绝]")
+                       "note": "无背书",
+                       "tested_what": "GET / 200", "viewpoint": "docker 出口",
+                       "why_no_finding": "首页正常"}).startswith("[拒绝]")
     ev = [e for e in d.bb.recent_events(d.project_id)
           if e["kind"] == "asset.status_changed"]
     assert [e["payload"]["new"] for e in ev] == ["visited", "scanning", "tested_clean"]
@@ -3464,24 +3522,26 @@ def _kb_env(tmp_path):
 
 
 def test_skill_miss_injects_kb_sources(env):
-    """路由未命中不再返回空串：注入 kb 源清单 + kb_search 指引（此前 Agent 不知道 kb 存在）。"""
+    """K8（2026-09-29）：废弃 top-1 路由命中——全量注入白名单/启用技能描述 +
+    kb 源清单；skill.routed 事件改记录注入清单（不再有 kb_hits）。"""
     bb, project, gw, tq, tmp_path = env
     _kb_env(tmp_path)
     llm = ScriptedLLM([{"tool_use": [ScriptedLLM.tool_call("t1", "finish",
                                                            {"summary": "完"})]}])
     agent = make_agent(env, llm)
-    agent.run_task("整理资产清单")  # 不含 demo 技能关键词「测试」→ 未命中
+    agent.run_task("整理资产清单")  # generalist：注入全部启用技能描述
     system = llm.calls[0]["system"]
-    assert "未命中技能指引" in system and "kb_search" in system
+    assert "可用技能清单" in system and "- demo：" in system
     assert "可用知识库源" in system and "web-kb" in system
     routed = [e for e in bb.recent_events(project["id"]) if e["kind"] == "skill.routed"]
     assert routed and routed[-1]["payload"]["name"] is None
-    assert routed[-1]["payload"].get("kb_hits") is not None
+    assert "demo" in routed[-1]["payload"]["injected"]
+    assert "kb_hits" not in routed[-1]["payload"]
 
 
 def test_task_type_bonus_and_scope_in_claim_path(env):
-    """认领队列任务：task_type 加分选中 task_types 技能；scope 拼进路由 query；
-    skill.routed 事件带 task_type。"""
+    """认领队列任务：全量描述注入含 exp 技能；route_query 拼 scope；
+    skill.routed 事件带 task_type 与注入清单。"""
     bb, project, gw, tq, tmp_path = env
     exp = tmp_path / "packs" / "capabilities" / "web" / "skills" / "exp"
     exp.mkdir(parents=True)
@@ -3496,29 +3556,28 @@ def test_task_type_bonus_and_scope_in_claim_path(env):
                      target_session=agent.session["id"])
     agent.run_session()
     system = llm.calls[0]["system"]
-    assert "当前命中技能: exp" in system  # task_type +10 翻盘（文本 0 分）
+    assert "- exp：" in system  # 全量描述注入含 exp
     routed = [e for e in bb.recent_events(project["id"]) if e["kind"] == "skill.routed"]
-    assert "target.com" in routed[-1]["payload"]["query"]  # 路由 query 拼 scope
+    assert "target.com" in routed[-1]["payload"]["query"]  # route_query 拼 scope
     assert routed[-1]["payload"]["task_type"] == "exploit"
-    assert f"task_type:exploit" in routed[-1]["payload"]["matched"]
+    assert "exp" in routed[-1]["payload"]["injected"]
 
 
 def test_kb_module_hint_lines(env):
-    """认领/执行时按 objective 中文 2-gram 命中 kb 标题索引 → 📚 提示行。
-    K3：注入一行摘要，但 kb 正文（X9BODY_MARKER 之后的细节）不整体注入。"""
+    """K8（2026-09-29）：不再注入 📚 提示行与 kb_hits——kb 靠模型主动
+    kb_search/kb_open 检索；源清单仍注入。"""
     bb, project, gw, tq, tmp_path = env
     _kb_env(tmp_path)
     llm = ScriptedLLM([{"tool_use": [ScriptedLLM.tool_call("t1", "finish",
                                                            {"summary": "完"})]}])
     agent = make_agent(env, llm)
-    agent.run_task("排查问卷系统越权问题")  # demo 技能关键词「测试」不在 → 未命中分支
+    agent.run_task("排查问卷系统越权问题")
     system = llm.calls[0]["system"]
-    assert "📚 相关知识库模块" in system
-    assert "web/poc/tduck.md" in system and "问卷系统越权合集" in system
-    assert "本篇汇总越权检测的完整路径" in system  # K3 一行摘要进 hints
-    assert "X9BODY_MARKER" not in system  # 只给路径+摘要，不注入 kb 正文
+    assert "📚 相关知识库模块" not in system
+    assert "可用知识库源" in system and "web-kb" in system
     routed = [e for e in bb.recent_events(project["id"]) if e["kind"] == "skill.routed"]
-    assert "web/poc/tduck.md" in routed[-1]["payload"]["kb_hits"]
+    assert "kb_hits" not in routed[-1]["payload"]
+    assert "injected" in routed[-1]["payload"]
 
 
 def test_kb_search_tool(env):
@@ -3583,29 +3642,32 @@ def _write_web_pack(env, index_yaml=_INDEX_YAML):
     return kb
 
 
-def test_skill_context_injects_route_index(env):
-    """认领注入（G1 Top-K）：query 命中条目才注入，未匹配只剩指引行；
-    条目 tags 按角色白名单裁剪。"""
+def test_skill_context_no_route_index_inject(env):
+    """K8（2026-09-29）：不再注入 📖 测试点索引/route_lookup 指引——kb 靠
+    模型主动检索；技能全量描述按角色白名单裁剪（交集空 → 无可用技能）。"""
     _write_web_pack(env)
-    agent = make_agent(env, ScriptedLLM([]))  # _generalist：skills=null 全可见
+    agent = make_agent(env, ScriptedLLM([]))  # _generalist：skills=null 全量
     ctx = agent.skill_context_for("处理文件上传")
-    assert "📖 测试点手册索引" in ctx
-    assert "文件上传测试" in ctx and "web/poc/文件上传.md" in ctx
-    assert "route_lookup" in ctx       # 其余条目经 route_lookup 查询
-    # 未匹配 query → 只剩指引行，不注入全表
-    ctx_none = agent.skill_context_for("随便看看")
-    assert "文件上传测试" not in ctx_none and "route_lookup" in ctx_none
-    # 白名单角色：tags=[demo] 条目仍可见（交集非空）
+    assert "📖 测试点手册索引" not in ctx
+    assert "route_lookup" not in ctx
+    assert "可用知识库源" in ctx
+    assert "- demo：" in ctx  # generalist 注入全部启用技能描述
+    # 白名单角色：只注入白名单内技能
+    skill_dir = env[4] / "packs" / "capabilities" / "web" / "skills" / "up"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: up\ndescription: 上传测试\n---\n步骤。", encoding="utf-8")
     write_role(env, "strike", 'name: 打点\nskills: [demo]\n')
     agent2 = make_agent(env, ScriptedLLM([]), role="strike")
     ctx2 = agent2.skill_context_for("处理文件上传")
-    assert "文件上传测试" in ctx2
-    # 交集为空 → 即使 query 命中也裁掉
+    assert "- demo：" in ctx2
+    assert "- up：" not in ctx2  # 白名单外技能不注入
+    # 白名单交集为空 → 无可用技能
     write_role(env, "recon", 'name: 侦察\nskills: [别的技能]\n')
     agent3 = make_agent(env, ScriptedLLM([]), role="recon")
     ctx3 = agent3.skill_context_for("处理文件上传")
-    assert "- 文件上传测试 → " not in ctx3   # 交集为空 → 路由索引条目裁掉
-    assert "route_lookup" in ctx3
+    assert "（当前无可用技能）" in ctx3
+    assert "可用知识库源" in ctx3
 
 
 def test_route_lookup_and_skill_open_tools(env):
@@ -3628,7 +3690,8 @@ def test_route_lookup_and_skill_open_tools(env):
 
 
 def test_skill_context_digest_not_full_body(env):
-    """G1 渐进披露：命中技能正文不整段进 system——只给目录 + skill_open 指针。"""
+    """K8 渐进披露：全量描述注入只给 name+description 行，技能正文不整段进
+    system——正文靠 skill_open 按需打开。"""
     _write_web_pack(env)
     skill_dir = env[4] / "packs" / "capabilities" / "web" / "skills" / "up"
     skill_dir.mkdir(parents=True, exist_ok=True)
@@ -3638,10 +3701,10 @@ def test_skill_context_digest_not_full_body(env):
         + "正文密度填充。" * 40, encoding="utf-8")
     agent = make_agent(env, ScriptedLLM([]))
     ctx = agent.skill_context_for("上传测试怎么打")
-    assert "当前命中技能: up" in ctx
-    assert "- 步骤" in ctx and "- 坑" in ctx       # 目录注入
-    assert "先黑白名单" not in ctx                  # 正文不整段注入
-    assert 'skill_open("up")' in ctx
+    assert "- up：上传测试" in ctx          # 全量描述注入含 up（name+description）
+    assert "先黑白名单" not in ctx           # 正文不整段注入
+    assert "正文密度填充" not in ctx
+    assert "skill_open" in ctx             # 渐进披露指针
 
 
 def test_kb_recall_for_advisor(env):
@@ -3737,6 +3800,9 @@ def test_sediment_auto_proposal_on_complete(env):
     agent = make_agent(env, llm, planner=planner, enable_sediment=True)
     declare_intent(bb, project["id"], "对订单接口进行越权差分尝试",
                    author=agent.session["id"])  # 过 bb_add_finding 必挂意图门禁
+    # 意图先行闸（2026-09-28）：补 command 事件模拟意图后的执行动作
+    bb.append_event(project["id"], "command", {"cmd": "probe"},
+                    session_id=agent.session["id"], author=agent.session["id"])
     agent.run_task("越权", task_id=task_id)
     pending = proposals.list_proposals(tmp_path / "packs", "pending")
     assert len(pending) == 1 and pending[0]["origin"] == "agent"
@@ -3748,6 +3814,52 @@ def test_sediment_auto_proposal_on_complete(env):
              map(dict, bb.recent_events(project["id"], limit=50))
              if e["kind"] == "proposal.created"]
     assert "kb" in kinds  # 审计事件落了（origin=sediment 在 payload 里）
+
+
+def test_sediment_skill_proposal_on_complete(env):
+    """K7 done 自动提案 → skill 打法沉淀（④ kind=skill）：既有技能补段走 edit，
+    提案 target 落能力包技能，reason 引用真实 finding 证据锚点（与 kb 同口径）。"""
+    from core.skills import proposals
+    _write_web_pack(env)
+    bb, project, gw, tq, tmp_path = env
+    # fixture 补一个 web 能力包技能（sediment 的 skill 对账/存在性校验用）
+    sk_dir = tmp_path / "packs" / "capabilities" / "web" / "skills" / "web-skill"
+    sk_dir.mkdir(parents=True, exist_ok=True)
+    (sk_dir / "SKILL.md").write_text(
+        "---\nname: web-skill\ndescription: Web 注入与认证测试技能\n---\n\n"
+        "# 打法\n现有正文。\n", encoding="utf-8")
+    task_id = tq.publish(project["id"], "越权测试", task_type="exploit", created_by="human")
+    skill_json = json.dumps({
+        "kind": "skill", "mode": "edit",
+        "target": {"kind": "skill", "skill_kind": "capability",
+                   "owner": "web", "name": "web-skill"},
+        "content": "---\nname: web-skill\ndescription: Web 注入与认证测试技能\n---\n\n"
+                   "# 打法\n\n## 已验证路径\n- 换 id 差分请求返回他人数据。\n",
+        "summary": "越权打法补已验证路径", "reason": "任务证据：$FID 换 id 命中"
+    }, ensure_ascii=False)
+    planner = _LazySedimentPlanner(bb, project["id"], skill_json)
+    llm = ScriptedLLM([
+        {"tool_use": [_plan_call(), _verified_finding_call()]},
+        {"tool_use": [ScriptedLLM.tool_call("t1", "complete_task",
+                                            {"result_note": "换 id 差分验证成功"})]},
+        {"tool_use": [ScriptedLLM.tool_call("t1b", "complete_task",
+                                            {"result_note": "换 id 差分验证成功"})]},
+        {"tool_use": [ScriptedLLM.tool_call("t2", "finish", {"summary": "完"})]},
+    ])
+    agent = make_agent(env, llm, planner=planner, enable_sediment=True)
+    declare_intent(bb, project["id"], "对订单接口进行越权差分尝试",
+                   author=agent.session["id"])  # 过 bb_add_finding 必挂意图门禁
+    bb.append_event(project["id"], "command", {"cmd": "probe"},
+                    session_id=agent.session["id"], author=agent.session["id"])
+    agent.run_task("越权", task_id=task_id)
+    pending = proposals.list_proposals(tmp_path / "packs", "pending")
+    assert len(pending) == 1 and pending[0]["target"]["kind"] == "skill"
+    assert pending[0]["target"]["skill_kind"] == "capability"
+    assert pending[0]["target"]["name"] == "web-skill"
+    assert pending[0]["mode"] == "edit"
+    fid = next(f["id"] for f in bb.list_findings(project["id"])
+               if f["status"] == "verified")
+    assert fid in pending[0]["reason"]  # K7 证据锚点：skill 与 kb 同口径
 
 
 def test_sediment_no_output_done_skips_review(env):
@@ -3828,6 +3940,9 @@ def test_sediment_index_proposal_on_complete(env):
     agent = make_agent(env, llm, planner=planner, enable_sediment=True)
     declare_intent(bb, project["id"], "对订单接口进行越权差分尝试",
                    author=agent.session["id"])  # 过 bb_add_finding 必挂意图门禁
+    # 意图先行闸（2026-09-28）：补 command 事件模拟意图后的执行动作
+    bb.append_event(project["id"], "command", {"cmd": "probe"},
+                    session_id=agent.session["id"], author=agent.session["id"])
     agent.run_task("越权", task_id=task_id)
     pending = proposals.list_proposals(tmp_path / "packs", "pending")
     assert len(pending) == 1
@@ -4095,6 +4210,9 @@ def test_add_finding_dedup_warning_text(env):
     d = agent.dispatcher
     declare_intent(bb, project["id"], "对目标资产进行注入参数探测尝试",
                    author=agent.session["id"])  # 过 bb_add_finding 必挂意图门禁
+    # 意图先行闸（2026-09-28）：补 command 事件模拟意图后的执行动作
+    bb.append_event(project["id"], "command", {"cmd": "probe"},
+                    session_id=agent.session["id"], author=agent.session["id"])
     a = bb.upsert_asset(project["id"], "domain", "a.com")["id"]
     d.dispatch("bb_add_finding", {"vuln_class": "sqli", "title": "id 注入",
                                   "severity": "low",

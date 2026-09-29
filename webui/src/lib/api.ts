@@ -4,6 +4,7 @@ import type {
   Blueprint, BlueprintModuleStatus, BlueprintStatus,
   IntruderPayloadSpec, IntruderTemplate,
   CachedFuncRow, CachedFunction, Chain, ChainLink, ChainNodeType, ChainStatus, ChainSummary,
+  LogicBlock, LogicBlockSummary,
   DecideApprovalResult, DoctorReport, DiscoveredModel, Finding, FindingPatchBody, FuncCreateBody, FuncEntry,
   FuncPatchBody, HistoryList, InboxMessage, Job, KbRead, KbRefHit, KbRenameResult,
   KbSearchHit, KbSourceTree,
@@ -18,7 +19,8 @@ import type {
   SkillDetail, SkillVocab, Task, TaskTree, SessionGraph, AttackPath, IntentInfo,
   WritebackItem, XrefData,
   TaskTrace, TraceEffect,
-  FofaConfig, FofaTestResult, FofaSearchResult, ImportPreview, ImportSummary,
+  FofaConfig, FofaTestResult, FofaSearchResult, FofaHistoryItem, ImportPreview, ImportSummary,
+  ChatAgent, ChatThread, ChatThreadDetail, ChatMcpServer,
 } from "./types"
 import type { Taxonomy } from "./taxonomy"
 
@@ -148,11 +150,20 @@ export const api = {
     http<FofaConfig>("/api/fofa/config", { method: "PUT", body: JSON.stringify(body) }),
   // info_my 免费；ok=false 时 error 文案可直接展示
   fofaTest: () => http<FofaTestResult>("/api/fofa/test", { method: "POST" }),
-  // 消耗等量配额：size 由调用方显式选择并提示
+  // 消耗等量配额：size 由调用方显式选择并提示；成功后服务端落查询历史
   fofaSearch: (pid: string, query: string, size: number, page = 1) =>
     http<FofaSearchResult>(`/api/projects/${pid}/fofa/search`, {
       method: "POST", body: JSON.stringify({ query, size, page }),
     }),
+  // 查询历史：列表轻量（不含 rows）；单条全量恢复（rows 现算 existing）；删除=删结果文件
+  fofaHistory: (pid: string) =>
+    http<{ items: FofaHistoryItem[] }>(`/api/projects/${pid}/fofa/history`),
+  fofaHistoryGet: (pid: string, hid: string) =>
+    http<FofaSearchResult & FofaHistoryItem>(`/api/projects/${pid}/fofa/history/${hid}`),
+  fofaHistoryDelete: (pid: string, hid: string) =>
+    http<{ deleted: string }>(`/api/projects/${pid}/fofa/history/${hid}`, { method: "DELETE" }),
+  fofaHistoryClear: (pid: string) =>
+    http<{ cleared: boolean }>(`/api/projects/${pid}/fofa/history`, { method: "DELETE" }),
   assetImportPreview: (pid: string, file: File) => {
     const form = new FormData()
     form.append("file", file)
@@ -284,6 +295,46 @@ export const api = {
     http<Blueprint>(`/api/projects/${pid}/blueprints/${bid}/modules/${encodeURIComponent(moduleName)}`, {
       method: "PATCH", body: JSON.stringify(body),
     }),
+
+  // 业务逻辑块（逆向第四页签：函数协作/业务语义，人机共写）
+  logicBlocks: (pid: string, sha?: string) => {
+    const q = sha ? `?binary_sha256=${encodeURIComponent(sha)}` : ""
+    return http<LogicBlockSummary[]>(`/api/projects/${pid}/logic-blocks${q}`)
+  },
+  logicBlock: (pid: string, lbid: string) =>
+    http<LogicBlock>(`/api/projects/${pid}/logic-blocks/${lbid}`),
+  createLogicBlock: (pid: string, body: {
+    name: string; description?: string; binary_sha256?: string
+  }) =>
+    http<LogicBlock>(`/api/projects/${pid}/logic-blocks`, {
+      method: "POST", body: JSON.stringify(body),
+    }),
+  updateLogicBlock: (pid: string, lbid: string, body: {
+    name?: string; description?: string; seq?: number
+  }) =>
+    http<LogicBlock>(`/api/projects/${pid}/logic-blocks/${lbid}`, {
+      method: "PATCH", body: JSON.stringify(body),
+    }),
+  deleteLogicBlock: (pid: string, lbid: string) =>
+    http<{ deleted: string }>(`/api/projects/${pid}/logic-blocks/${lbid}`, {
+      method: "DELETE",
+    }),
+  addLogicBlockFunc: (pid: string, lbid: string, body: {
+    address: string; role?: string
+  }) =>
+    http<LogicBlock>(`/api/projects/${pid}/logic-blocks/${lbid}/funcs`, {
+      method: "POST", body: JSON.stringify(body),
+    }),
+  updateLogicBlockFunc: (pid: string, lbid: string, address: string, role: string) =>
+    http<LogicBlock>(
+      `/api/projects/${pid}/logic-blocks/${lbid}/funcs?address=${encodeURIComponent(address)}`,
+      { method: "PATCH", body: JSON.stringify({ role }) },
+    ),
+  removeLogicBlockFunc: (pid: string, lbid: string, address: string) =>
+    http<LogicBlock>(
+      `/api/projects/${pid}/logic-blocks/${lbid}/funcs?address=${encodeURIComponent(address)}`,
+      { method: "DELETE" },
+    ),
   artifacts: (pid: string, filter?: { task_id?: string; session_id?: string }) => {
     const q = new URLSearchParams()
     if (filter?.task_id) q.set("task_id", filter.task_id)
@@ -465,10 +516,26 @@ export const api = {
   spawnTaskWindow: (taskId: string) =>
     http<{ session_id: string; created: boolean }>(
       `/api/tasks/${taskId}/spawn-window`, { method: "POST" }),
-  orchTick: (pid: string, opts: { allowed_roles?: string[]; max_sessions?: number } = {}) =>
+  orchTick: (pid: string, opts: { allowed_roles?: string[]; max_sessions?: number;
+    analyze_only?: boolean; budget_ticks?: number } = {}) =>
     http<{ job_id: string }>(`/api/projects/${pid}/orchestrator/tick`, {
       method: "POST", body: JSON.stringify(opts),
     }),
+  // auto-attack（2026-09-28）：人工停止 L2 自动链（停链不降档，在跑任务不受影响）
+  stopAutoAttack: (pid: string) =>
+    http<{ stopped: boolean }>(`/api/projects/${pid}/orchestrator/auto-attack/stop`, {
+      method: "POST",
+    }),
+  // 强制接管（2026-09-28 人工救济）：清 tick 租约，卡死编排轮的补救出口
+  forceAcquireTick: (pid: string) =>
+    http<{ released: boolean }>(`/api/projects/${pid}/orchestrator/tick/force-acquire`, {
+      method: "POST",
+    }),
+  // 任务报告（trae 视图 2026-09-28）：done 任务 → LLM 生成 md 报告落 task.report
+  // 事件（幂等：已有报告返回 existing；生成走后台 job，失败可重试）
+  generateTaskReport: (pid: string, tid: string) =>
+    http<{ job_id?: string; status?: string; existing?: boolean; event_id?: number }>(
+      `/api/projects/${pid}/tasks/${tid}/report`, { method: "POST" }),
   // A5：手动重排 open 任务优先级（任何自主档可用，不受 30s 去抖/预算闸限制）
   replanPriorities: (pid: string) =>
     http<{ job_id: string }>(`/api/projects/${pid}/orchestrator/replan-priorities`, {
@@ -817,6 +884,29 @@ export const api = {
     http<{ stopped: boolean }>(
       `/api/projects/${pid}/browser/intruder/${encodeURIComponent(batchId)}/stop`,
       { method: "POST" }),
+
+  // ---------- 智能体工作台（K9，2026-09-29）：独立轻量对话运行时 ----------
+  chatAgents: (pid: string) =>
+    http<ChatAgent[]>(`/api/chat/agents?pid=${encodeURIComponent(pid)}`),
+  chatThreads: (pid: string, agentId?: string) =>
+    http<ChatThread[]>(
+      `/api/projects/${pid}/chat/threads${agentId ? `?agent_id=${encodeURIComponent(agentId)}` : ""}`),
+  chatThreadCreate: (pid: string, agentId: string, title?: string) =>
+    http<ChatThread>(`/api/projects/${pid}/chat/threads`, {
+      method: "POST", body: JSON.stringify({ agent_id: agentId, title: title ?? null }),
+    }),
+  chatThread: (tid: string, afterId = 0) =>
+    http<ChatThreadDetail>(`/api/chat/threads/${tid}?after_id=${afterId}`),
+  chatThreadDelete: (tid: string) =>
+    http<void>(`/api/chat/threads/${tid}`, { method: "DELETE" }),
+  chatSend: (tid: string, text: string,
+             refs?: { skills: string[]; mcps: string[] } | null) =>
+    http<{ status: string; thread_id: string }>(
+      `/api/chat/threads/${tid}/messages`, { method: "POST", body: JSON.stringify({ text, refs: refs ?? null }) }),
+  chatStop: (tid: string) =>
+    http<void>(`/api/chat/threads/${tid}/stop`, { method: "POST" }),
+  chatMcp: (pid: string) =>
+    http<{ servers: ChatMcpServer[] }>(`/api/chat/mcp?pid=${encodeURIComponent(pid)}`),
 }
 
 // 长耗时 Job 轮询（Agent work / orchestrator tick）

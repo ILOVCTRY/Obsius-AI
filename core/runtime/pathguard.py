@@ -3,6 +3,9 @@
 静态提取命令文本中的**写目标**并判定是否逃逸工作区。设计取舍（2026-09-17 定稿）：
 - 只拦「写」，读不拦（核心诉求=产物归置；读审计另行记录）；
 - 硬拒绝落在网关层（gateway.run → GatewayDenied），Agent 收到指引后可改道重试；
+- 重定向目标在引号外的 shell 分隔符处截断（; | & 2026-09-25 实战 23/43 条
+  误拦实锤；`)` 2026-09-29 补——`$(curl … 2>/dev/null)` 子壳右括号紧贴重定向
+  目标提取出伪路径 /dev/null) 绕过白名单，三连拒致 E2 熔断挂起）；
 - grep 族 `-o*`（only-matching）是输出开关不写文件，按命令词跟踪豁免
   （2026-09-23 误报修复：模式串前导 / 曾被当写目标拒「工作区逃逸」）；
   nmap 风格 -oG/-oN/-oX/-oA 写文件仍拦；
@@ -65,9 +68,13 @@ def _clean(tok: str) -> str:
 
 
 def _trim_shell_separator(target: str) -> str:
-    """重定向目标在**引号外**的首个 shell 分隔符（; | &）处结束。
+    """重定向目标在**引号外**的首个 shell 分隔符（; | & )）处结束。
     2>/dev/null;、>f.txt|wc 这类无空格粘连写法整串是一个 token，不切掉会把
-    /dev/null; 误判逃逸（2026-09-25 实战 23/43 条误拦实锤）。"""
+    /dev/null; 误判逃逸（2026-09-25 实战 23/43 条误拦实锤）；
+    `)` 同理——`$(curl … 2>/dev/null)` 子壳右括号紧贴重定向目标是 bash
+    高频惯用法，不切掉会提取出伪路径 /dev/null) 绕过 /dev/null 白名单
+    （2026-09-29 实战 sess-948e9ba771eb 三连拒致 E2 熔断挂起实锤）。
+    截断只会让提取目标更准（>/tmp/x) → /tmp/x 仍判逃逸），无新旁路。"""
     quote: str | None = None
     for i, ch in enumerate(target):
         if quote:
@@ -75,7 +82,7 @@ def _trim_shell_separator(target: str) -> str:
                 quote = None
         elif ch in "\"'":
             quote = ch
-        elif ch in ";|&":
+        elif ch in ";|&)":
             return target[:i]
     return target
 
@@ -194,6 +201,7 @@ def workspace_escapes(
     - 特殊目标（&1 &2 /dev/null NUL $null）放行。
     """
     escapes: list[str] = []
+    seen: set[str] = set()
     for raw in scan_write_targets(cmd, posix=posix):
         t = _clean(raw)
         if not t or t in ALLOWED_SPECIAL_TARGETS:
@@ -209,6 +217,7 @@ def workspace_escapes(
         # ~ 家目录：一律视为逃逸（工作区外）
         if t.startswith("~"):
             escapes.append(t)
+            seen.add(t)
             continue
         is_abs = False
         if re.match(r"^[A-Za-z]:[\\/]", t):
@@ -218,27 +227,37 @@ def workspace_escapes(
         elif t.startswith("/") and not posix:
             # Windows PowerShell 下 /foo 解析到当前驱动器根 = 工作区外
             escapes.append(t)
+            seen.add(t)
             continue
         if posix and t.startswith("/"):
             is_abs = True
         if is_abs:
+            # 同一目标多次出现只报一次（回执不重复抖串）
+            if t in seen:
+                continue
             if posix:
                 # WSL 侧：workspace 传入 wsl 路径（/mnt/...）
                 if not _inside(t, workspace, posix=True):
                     escapes.append(t)
+                    seen.add(t)
             else:
                 if not _inside(t, workspace, posix=False):
                     escapes.append(t)
+                    seen.add(t)
             continue
         # 相对路径：按 scratch 解析，越出 scratch 即拒
+        if t in seen:
+            continue
         if posix:
             resolved = posixpath.normpath(posixpath.join(scratch, t))
             if not _inside(resolved, scratch, posix=True):
                 escapes.append(t)
+                seen.add(t)
         else:
             resolved = os.path.normcase(os.path.normpath(os.path.join(scratch, t)))
             if not _inside(resolved, scratch, posix=False):
                 escapes.append(t)
+                seen.add(t)
     return escapes
 
 

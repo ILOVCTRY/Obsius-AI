@@ -183,3 +183,20 @@ def release_tick_lease(bb, project_id: str, owner: str) -> bool:
             " updated_at=:now WHERE project_id=:pid",
             {"now": now(), "pid": project_id})
     return True
+
+
+def force_release_tick_lease(bb, project_id: str) -> bool:
+    """强制清租约（2026-09-28 人工救济）：不管 owner 直接清空。仅应在确认当前
+    tick 卡死（心跳已停/时长异常）后使用——旧轮若仍存活，其后续产出照常落事件
+    （任务发布由编排器判重），存在短暂双跑窗口，属接管方案已知代价。"""
+    with bb._tx():
+        cur = bb.conn.execute(
+            "SELECT tick_owner FROM orchestrator_state WHERE project_id=?",
+            (project_id,)).fetchone()
+        if cur is None or not cur["tick_owner"]:
+            return False
+        bb.conn.execute(
+            "UPDATE orchestrator_state SET tick_owner='', tick_lease_until='',"
+            " updated_at=:now WHERE project_id=:pid",
+            {"now": now(), "pid": project_id})
+    return True

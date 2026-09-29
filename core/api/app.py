@@ -41,7 +41,7 @@ from core.browser.replay import Intruder, ReplayClient
 from core.agent import AgentConfig, AgentSession
 from core.agent.loop import clear_task_resume, persisted_snapshot_path, task_resume_path, task_transcript_path
 from core.blackboard import TaskQueue
-from core.blackboard.assets import import_assets, register_asset
+from core.blackboard.assets import _is_ip, clean_host, import_assets, register_asset
 from core.coverage import attach_effective_status
 from core.blackboard.graph import board_graph, session_graph
 from core.blackboard.attackpath import build_attack_path
@@ -416,6 +416,33 @@ class ChainLinkIn(BaseModel):
     edge_note: str = ""
 
 
+class LogicBlockIn(BaseModel):
+    """POST logic-blocks：人工建业务逻辑块（Agent 走 bb_logic_block_* 工具）。"""
+    name: str
+    description: str = ""
+    binary_sha256: str = ""
+    seq: int = 0
+
+
+class LogicBlockPatchIn(BaseModel):
+    """PATCH logic-blocks：人类修订块名/描述/排序（Agent 补描述走工具）。"""
+    name: str | None = None
+    description: str | None = None
+    seq: int | None = None
+
+
+class LogicBlockFuncIn(BaseModel):
+    """POST logic-blocks/{lbid}/funcs：挂接函数。address 吃 int/0x hex/十进制串
+    （前端以 hex 串为准，JS Number 无法安全表示 64 位地址）。"""
+    address: int | str
+    role: str = ""
+
+
+class LogicBlockFuncPatchIn(BaseModel):
+    """PATCH funcs 挂接：改角色注（address 经 query 传）。"""
+    role: str
+
+
 class LinkNoteIn(BaseModel):
     edge_note: str
 
@@ -565,6 +592,16 @@ class McpServerIn(BaseModel):
 
 class McpConfigIn(BaseModel):
     servers: list[McpServerIn]
+
+
+class ChatThreadIn(BaseModel):
+    agent_id: str
+    title: str | None = None
+
+
+class ChatMessageIn(BaseModel):
+    text: str
+    refs: dict[str, list[str]] | None = None  # 人类引用指定 {skills:[], mcps:[]}
 
 
 # ---------------- packs 管理辅助（设置页：角色 / Skill / 红线 / MCP） ----------------
@@ -814,6 +851,9 @@ class TickIn(BaseModel):
     max_sessions: int = 4
     digest_every: int = 3
     max_steps: int = 12
+    # auto-attack 研判轮（2026-09-28）：只分析不派活，产出落 orch.auto_attack.analyzed
+    analyze_only: bool = False
+    budget_ticks: int | None = None  # 研判时人类预选的链轮数预算（回显进 analyzed 事件）
 
 
 class ApprovalDecisionIn(BaseModel):
@@ -936,7 +976,7 @@ def create_app(
     （desktop-app-shell M2，DESIGN §1）：真实文件直出、其余 GET 回 index.html
     （history fallback）；/api、/docs、/openapi.json 不受兜底影响。"""
 
-    app = FastAPI(title="cyberstrike-pro core API", version="0.1")
+    app = FastAPI(title="obsius core API", version="0.1")
 
     def _persist_live_snapshots_on_shutdown() -> list[str]:
         """v0.64 优雅停机钩子：对所有在跑任务且未暂停的会话即时落断点快照
@@ -1069,7 +1109,12 @@ def create_app(
         断点续跑)；② 排水未竟（close_pending）的会话补关窗（关窗请求是人
         下达的，照常执行）；③ 陈旧 running/blocked 会话行按 meta 归位：有落盘
         快照回 paused 可续跑、指针悬空（文件缺）清指针回 idle；paused 是合法
-        持久态不动。"""
+        持久态不动；④ 重启即急停（2026-09-28）：全部 worker_armed 一律解除
+        ——armed 是常驻自动接活的持久开关，不清则 kick 链把陈旧会话当待命窗
+        重新拉起（青灯常亮+后台烧 LLM）；人工「跑任务队列/▶继续」重新点亮；
+        ⑤ 会话继续钮（2026-09-28）：有落盘快照（现场可续）的会话**一律**归位
+        paused（不限 running/blocked）——idle+快照+claimed 组合此前落盲区
+        （灰点无继续钮、任务无续跑钮、跑队列撞暂停闸空退，现场卡死）。"""
         bb = proj.bb
         # v0.64 暂停快照豁免：claimed 任务属于「resume_snapshot 指针 + 快照文件
         # 双双在场」的会话（暂停/预算/停机自动暂停）时不 fail——保留 claimed 等
@@ -1104,16 +1149,30 @@ def create_app(
             meta = json.loads(row["meta"]) if isinstance(row["meta"], str) \
                 else (row["meta"] or {})
             try:
+                # 2026-09-28 重启即急停：worker_armed 是「常驻自动接活」持久开关，
+                # 进程重启后内存 worker 全灭，残留 armed 会让任何 kick 触发点把
+                # 陈旧 running 会话当待命窗重新拉起（页签青灯常亮 + 后台自动烧
+                # LLM）——一律解除武装；恢复=人工「跑任务队列」/「▶继续」（两者
+                # 都会重新点亮 armed，恢复流程不受影响）
+                if meta.get("worker_armed"):
+                    bb.set_session_meta(row["id"], {"worker_armed": False})
                 if meta.get("close_pending"):
                     bb.close_session(row["id"])
+                    continue  # 已关窗，不再归位
+                # 2026-09-28 会话继续钮（清扫归位盲区修复）：有落盘快照（现场可续）
+                # 的会话一律归位 paused——此前只对 running/blocked 行按快照归位，
+                # idle+快照+claimed 任务的组合（重启前已 idle 但留有暂停快照，
+                # fail_interrupted_claims 按快照豁免保留 claimed）落进盲区：会话
+                # 灰点无「▶继续」、任务 claimed 无「⚡续跑」、跑任务队列又撞
+                # rehydrate 暂停闸空退，现场白白卡死。归 paused 后前端自然显示
+                # 「已暂停」+「▶继续」，resume_session 载快照从断点续跑
+                ptr = meta.get("resume_snapshot")
+                if ptr and (snap_dir / str(ptr)).is_file():
+                    bb.set_session_status(row["id"], "paused")
                 elif row.get("status") in {"running", "blocked"}:
-                    ptr = meta.get("resume_snapshot")
-                    if ptr and (snap_dir / str(ptr)).is_file():
-                        bb.set_session_status(row["id"], "paused")
-                    else:
-                        if ptr:  # 指针悬空（文件缺失）→ 清掉再归 idle
-                            bb.set_session_meta(row["id"], {"resume_snapshot": None})
-                        bb.set_session_status(row["id"], "idle")
+                    if ptr:  # 指针悬空（文件缺失）→ 清掉再归 idle
+                        bb.set_session_meta(row["id"], {"resume_snapshot": None})
+                    bb.set_session_status(row["id"], "idle")
             except ValueError:
                 continue  # 并发首开时已被另一路径归位
 
@@ -1649,6 +1708,13 @@ def create_app(
             "auto_ticks_total": int(cst["auto_ticks_total"]),
             "estranged": bool(cst["chain_active"]) and pid not in app.state.active_chains,
         }
+        # 会话 UI 风格（trae 视图 2026-09-28）：config.ui_style 透出给前端切换钮
+        usage["ui_style"] = str((proj.view_meta.get("config") or {}).get("ui_style") or "claude")
+        # 编排 tick 运行中（trae 视图「正在规划下一步」状态行判定源）
+        usage["orch_running"] = any(
+            j["kind"] == "orchestrator-tick" and j["status"] == "running"
+            for j in app.state.jobs.all_jobs()
+            if j.get("meta", {}).get("project_id") == pid)
         return {**_expert_meta_view(proj.view_meta), "task_stats": stats,
                 "findings": len(proj.bb.list_findings(pid)),
                 "assets": len(proj.bb.list_assets(pid)),
@@ -2049,11 +2115,118 @@ def create_app(
         return {"ok": True, "remain": info["remain"], "expire": info["expire"],
                 "base_url": client.base_url}
 
+    # ---------- FOFA 查询历史（2026-09-28：查询结果持久化 + 历史即保持） ----------
+    # 动因：查询结果此前仅存前端组件局部 state，切导航/切页签即丢且后端零持久化。
+    # 现查询成功即落 <项目>/fofa_history/<id>.json（含全量 rows），前端面板挂载时
+    # 自动恢复最近一次——切页/刷新都不丢；历史可单删/清空，删除=删文件（连带物理
+    # 保存）。保存尽力而为（失败不阻断查询返回，配额照扣）。
+
+    _FOFA_HIST_MAX = 50  # FIFO 上限：文件名时间前缀天然有序，超限淘汰最旧
+
+    def _fofa_annotate_rows(proj, raw_rows: list[dict]) -> list[dict]:
+        """existing 三锚点标注（domain/service/host 是否已在黑板）——search 与
+        历史恢复共用：历史里存原始 rows，恢复时现算标注（资产可能已导入，
+        灰显状态要新鲜）。锚点镜像 import_assets 登记语义（2026-09-29 精确化）：
+        按 clean_host(host or domain)（=导入 _host_of 同口径）算实际会被登记的
+        值——是域名就精确查该子域（只入过根域不再灰显子域行），是 IP 归
+        service/host 锚点不查 domain。"""
+        rows = []
+        for row in raw_rows:
+            ip = str(row.get("ip") or "").strip()
+            port = str(row.get("port") or "").strip()
+            host = str(row.get("host") or "").strip()
+            domain = str(row.get("domain") or "").strip()
+            h = clean_host(host or domain)
+            dom = h if h and not _is_ip(h) else ""
+            # service 锚点镜像导入分支：ip:port，缺 ip 用域名 host:port
+            svc = (f"{ip}:{port}" if ip and port
+                   else (f"{h}:{port}" if port and h and not _is_ip(h) else ""))
+            rows.append({**row, "existing": {
+                "domain": bool(dom and proj.bb.find_asset(proj.id, "domain", dom)),
+                "service": bool(svc and proj.bb.find_asset(proj.id, "service", svc)),
+                "host": bool(ip and proj.bb.find_asset(proj.id, "host", ip)),
+            }})
+        return rows
+
+    def _fofa_hist_save(proj, query: str, size: int, total: int,
+                        raw_rows: list[dict]) -> dict | None:
+        """查询成功后落历史（尽力而为，任何异常返回 None 不上抛）。"""
+        try:
+            d = Path(proj.path) / "fofa_history"
+            d.mkdir(parents=True, exist_ok=True)
+            hid = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
+            rec = {"id": hid, "query": query, "size": size, "total": total,
+                   "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                   "rows": raw_rows}
+            (d / f"{hid}.json").write_text(
+                json.dumps(rec, ensure_ascii=False), encoding="utf-8")
+            # FIFO 按 mtime 排序（hid 时间前缀秒级，同秒多条时文件名字典序≠写入序）
+            files = sorted(d.glob("*.json"),
+                           key=lambda f: f.stat().st_mtime)
+            for f in files[:-_FOFA_HIST_MAX]:
+                f.unlink(missing_ok=True)
+            return {k: rec[k] for k in ("id", "query", "size", "total", "ts")}
+        except Exception:
+            log.exception("FOFA 查询历史保存失败（不影响查询返回）")
+            return None
+
+    def _fofa_hist_path(proj, hid: str) -> Path:
+        if not re.fullmatch(r"[0-9]{8}-[0-9]{6}-[0-9a-f]{6}", hid or ""):
+            raise HTTPException(422, "历史 id 非法")
+        return Path(proj.path) / "fofa_history" / f"{hid}.json"
+
+    @app.get("/api/projects/{pid}/fofa/history")
+    def fofa_history_list(pid: str):
+        """轻量列表（不含 rows，按时间倒序）——面板挂载拉取，最近一条用于自动恢复。"""
+        proj = _project(pid)
+        d = Path(proj.path) / "fofa_history"
+        items = []
+        if d.is_dir():
+            # mtime 倒序（最新在前；文件名时间前缀秒级，同秒多条时不可靠）
+            for f in sorted(d.glob("*.json"),
+                            key=lambda f: f.stat().st_mtime, reverse=True):
+                try:
+                    rec = json.loads(f.read_text(encoding="utf-8"))
+                    items.append({k: rec[k] for k in ("id", "query", "size", "total", "ts")})
+                except (OSError, ValueError, KeyError):
+                    continue  # 损坏记录跳过，不阻塞列表
+        return {"items": items}
+
+    @app.get("/api/projects/{pid}/fofa/history/{hid}")
+    def fofa_history_get(pid: str, hid: str):
+        """单条全量（恢复用）：rows 现算 existing 标注。"""
+        proj = _project(pid)
+        f = _fofa_hist_path(proj, hid)
+        if not f.is_file():
+            raise HTTPException(404, "历史记录不存在")
+        try:
+            rec = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            raise HTTPException(500, f"历史记录损坏: {e}") from e
+        return {**rec, "rows": _fofa_annotate_rows(proj, rec.get("rows") or [])}
+
+    @app.delete("/api/projects/{pid}/fofa/history/{hid}")
+    def fofa_history_delete(pid: str, hid: str):
+        """删单条记录（连带查询结果物理文件）。"""
+        proj = _project(pid)
+        f = _fofa_hist_path(proj, hid)
+        if f.is_file():
+            f.unlink(missing_ok=True)
+        return {"deleted": hid}
+
+    @app.delete("/api/projects/{pid}/fofa/history")
+    def fofa_history_clear(pid: str):
+        """清空全部历史（删整个目录）。"""
+        proj = _project(pid)
+        shutil.rmtree(Path(proj.path) / "fofa_history", ignore_errors=True)
+        return {"cleared": True}
+
     @app.post("/api/projects/{pid}/fofa/search")
     def fofa_search(pid: str, body: FofaSearchIn):
         """FOFA 查询（消耗等量配额）：结果逐行标注 existing（domain/service/host
         三锚点是否已在黑板），前端灰显免重复导入。错误分流：配额耗尽 429（必须
-        立即停）、key/base url 配置类 400、其余中转错误 502。"""
+        立即停）、key/base url 配置类 400、其余中转错误 502。成功后落查询历史
+        （历史即保持：切页/刷新由前端从历史自动恢复）。"""
         proj = _project(pid)
         client = fofa_mod.FofaClient.from_config(FOFA_CONFIG_PATH)
         if not client.configured:
@@ -2069,20 +2242,14 @@ def create_app(
             raise HTTPException(400, str(e)) from e
         except fofa_mod.FofaError as e:
             raise HTTPException(502, str(e)) from e
-        rows = []
-        for row in res["rows"]:
-            ip = str(row.get("ip") or "").strip()
-            port = str(row.get("port") or "").strip()
-            host = str(row.get("host") or "").strip()
-            domain = str(row.get("domain") or "").strip()
-            dom = domain or (host if "." in host and ":" not in host else "")
-            rows.append({**row, "existing": {
-                "domain": bool(dom and proj.bb.find_asset(pid, "domain", dom)),
-                "service": bool(ip and port
-                                and proj.bb.find_asset(pid, "service", f"{ip}:{port}")),
-                "host": bool(ip and proj.bb.find_asset(pid, "host", ip)),
-            }})
-        return {**res, "rows": rows}
+        # 查询入口统一清洗 host（clean_host 幂等：剥 scheme/「:端口」尾）——
+        # FOFA 的 host 字段常带「https://x」「x:8080」脏形态，清洗后展示/灰显/
+        # 落历史/导入四处同口径；存量旧历史文件不回写（恢复原样展示，导入链自清洗）
+        clean_rows = [{**r, "host": clean_host(str(r.get("host") or ""))}
+                      for r in res["rows"]]
+        rows = _fofa_annotate_rows(proj, clean_rows)
+        saved = _fofa_hist_save(proj, q, body.size, res["total"], clean_rows)
+        return {**res, "rows": rows, "history_id": (saved or {}).get("id")}
 
     @app.post("/api/projects/{pid}/assets/import/preview")
     def asset_import_preview(pid: str, file: UploadFile = File(...)):
@@ -2677,6 +2844,86 @@ def create_app(
             raise HTTPException(422, str(e)) from e
         if row is None:
             raise HTTPException(404, f"蓝图不存在: {bid}")
+        return row
+
+    # ---------- 业务逻辑块（逆向第四页签：函数协作/业务语义，人机共写） ----------
+
+    @app.get("/api/projects/{pid}/logic-blocks")
+    def list_logic_blocks(pid: str, binary_sha256: str | None = None):
+        return _project(pid).bb.list_logic_blocks(pid, binary_sha256=binary_sha256)
+
+    @app.post("/api/projects/{pid}/logic-blocks", status_code=201)
+    def create_logic_block(pid: str, body: LogicBlockIn):
+        bb = _project(pid).bb
+        try:
+            return bb.create_logic_block(
+                pid, body.name, description=body.description,
+                binary_sha256=body.binary_sha256, seq=body.seq, author="human")
+        except ValueError as e:  # 空名/同项目同样本重名 → 422
+            raise HTTPException(422, str(e)) from e
+
+    @app.get("/api/projects/{pid}/logic-blocks/{lbid}")
+    def get_logic_block(pid: str, lbid: str):
+        row = _project(pid).bb.get_logic_block(pid, lbid)
+        if row is None:
+            raise HTTPException(404, f"业务块不存在: {lbid}")
+        return row
+
+    @app.patch("/api/projects/{pid}/logic-blocks/{lbid}")
+    def patch_logic_block(pid: str, lbid: str, body: LogicBlockPatchIn):
+        try:
+            row = _project(pid).bb.update_logic_block(
+                pid, lbid, author="human", **body.model_dump(exclude_unset=True))
+        except ValueError as e:  # 空名/重名 → 422
+            raise HTTPException(422, str(e)) from e
+        if row is None:
+            raise HTTPException(404, f"业务块不存在: {lbid}")
+        return row
+
+    @app.delete("/api/projects/{pid}/logic-blocks/{lbid}")
+    def delete_logic_block(pid: str, lbid: str):
+        if not _project(pid).bb.delete_logic_block(pid, lbid, author="human"):
+            raise HTTPException(404, f"业务块不存在: {lbid}")
+        return {"deleted": lbid}
+
+    @app.post("/api/projects/{pid}/logic-blocks/{lbid}/funcs", status_code=201)
+    def add_logic_block_func(pid: str, lbid: str, body: LogicBlockFuncIn):
+        bb = _project(pid).bb
+        try:
+            return bb.add_logic_block_func(
+                pid, lbid, body.address, body.role, author="human")
+        except LookupError as e:  # 块不存在/跨项目 → 404
+            raise HTTPException(404, str(e)) from e
+        except ValueError as e:  # 地址非法/未入库/重复挂接/项目级块 → 422
+            raise HTTPException(422, str(e)) from e
+
+    @app.patch("/api/projects/{pid}/logic-blocks/{lbid}/funcs")
+    def patch_logic_block_func(pid: str, lbid: str, body: LogicBlockFuncPatchIn,
+                               address: str = ""):
+        """改挂接函数的角色注。address 走 query（推荐 0x hex 串；query 无 int/str
+        联合语义，统一交给 store 层 _parse_addr 解析）。"""
+        if not address:
+            raise HTTPException(422, "缺 address（0x hex 串）")
+        try:
+            row = _project(pid).bb.update_logic_block_func(
+                pid, lbid, address, body.role, author="human")
+        except ValueError as e:  # 地址非法 → 422
+            raise HTTPException(422, str(e)) from e
+        if row is None:
+            raise HTTPException(404, f"业务块或挂接不存在: {lbid}")
+        return row
+
+    @app.delete("/api/projects/{pid}/logic-blocks/{lbid}/funcs")
+    def delete_logic_block_func(pid: str, lbid: str, address: str = ""):
+        if not address:
+            raise HTTPException(422, "缺 address（0x hex 串）")
+        try:
+            row = _project(pid).bb.remove_logic_block_func(
+                pid, lbid, address, author="human")
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+        if row is None:
+            raise HTTPException(404, f"业务块或挂接不存在: {lbid}")
         return row
 
     @app.get("/api/projects/{pid}/artifacts")
@@ -4964,7 +5211,8 @@ def create_app(
             return {"waited": round(delay, 2)}
         return run
 
-    def _build_orchestrator(pid: str, body: TickIn, owner: str) -> Orchestrator:
+    def _build_orchestrator(pid: str, body: TickIn, owner: str,
+                            analyze_only: bool = False) -> Orchestrator:
         """手动 tick 与自动 tick 共用同一套 Orchestrator 装配（鸭子回调注入）。"""
         proj = _project(pid)
         exec_llm, plan_llm = _llms()
@@ -4979,7 +5227,8 @@ def create_app(
                                 allowed_roles=body.allowed_roles,
                                 max_sessions=body.max_sessions,
                                 digest_every=body.digest_every,
-                                propose_only=(lvl == "L0")),
+                                propose_only=(lvl == "L0"),
+                                analyze_only=analyze_only),
                             packs_root=app.state.packs_root, track=proj.track,
                             campaign=app.state.campaign)
         # 复用进程内已开窗口（跨 tick 保活）
@@ -5528,22 +5777,56 @@ def create_app(
         try:
             orch_state.acquire_tick_lease(proj.bb, pid, owner)
         except orch_state.TickLeaseError as e:
+            # 409 带运行时长（2026-09-28，从最近 tick.started 事件算）：让「慢」
+            # 和「死」可分辨——正常研判/链轮几分钟内完，超 15 分钟基本可判卡死。
+            # 整段异常护栏：观测增强绝不能反过来把 409 炸成 500（教训：list_events
+            # 方法名不存在 → AttributeError → 500，即「链自旋收敛：500」横幅的来源）
+            since = ""
+            try:
+                tip = proj.bb.latest_event_id(pid)
+                for ev in reversed(proj.bb.recent_events(
+                        pid, since_id=max(0, tip - 200), limit=200)):
+                    if ev["kind"] == "orch.tick.started":
+                        try:
+                            mins = int((datetime.now(timezone.utc)
+                                        - datetime.fromisoformat(ev["created_at"]))
+                                       .total_seconds() // 60)
+                            since = f"已运行 {mins} 分钟（启动于 {ev['created_at'][11:16]} UTC）"
+                        except ValueError:
+                            pass
+                        break
+            except Exception:  # noqa: BLE001 —— 推导失败只降级为无时长文案
+                log.exception("409 时长推导失败（不影响 409 本身）")
             raise HTTPException(
-                409, "已有编排 tick 在执行（租约 900s TTL；进程崩溃会自然到期）") from e
+                409, "已有编排 tick 在执行"
+                + (f"（{since}）" if since else "（租约 900s TTL；进程崩溃会自然到期）")
+                + "。编排页签可看进度；确认卡死可在编排页签「⚡ 强制接管」后重启") from e
         try:
             # 503（无 LLM key）等同步失败先释放租约
-            orch = _build_orchestrator(pid, body, owner)
+            orch = _build_orchestrator(pid, body, owner, analyze_only=body.analyze_only)
         except HTTPException:
             orch_state.release_tick_lease(proj.bb, pid, owner)
             raise
         # 编排开始有痕（2026-09-18）：事件流实时可见，配合作战计划面板的运行时长提示
-        proj.bb.append_event(pid, "orch.tick.started", {"reason": "manual"},
-                             author="orchestrator")
+        proj.bb.append_event(
+            pid, "orch.tick.started",
+            {"reason": "analyze" if body.analyze_only else "manual"},
+            author="orchestrator")
 
         def _run_tick() -> dict:
             try:
                 result = orch.tick()
-                _post_tick(pid, result, manual=True)  # 触发点 B：kick + L2 链状态机
+                if body.analyze_only:
+                    # auto-attack 研判轮（2026-09-28）：计划全文落 analyzed 事件
+                    # （流内呈现「分析报告 + 开跑按钮」的载体）。不调 _post_tick——
+                    # 分析不产出任务，不能误启自动链；确认开跑由前端二次触发普通 tick。
+                    proj.bb.append_event(pid, "orch.auto_attack.analyzed", {
+                        "budget_ticks": body.budget_ticks,
+                        "summary": str(result.get("analysis")
+                                       or result.get("summary") or ""),
+                    }, author="orchestrator")
+                else:
+                    _post_tick(pid, result, manual=True)  # 触发点 B：kick + L2 链状态机
                 return result
             except Exception as exc:
                 _emit_llm_error(pid, "orchestrator", exc)
@@ -5557,6 +5840,114 @@ def create_app(
             "orchestrator-tick", _run_tick, meta={"project_id": pid},
             on_done=lambda _j: _maybe_auto_tick(pid, reason="tick-done"))
         return {"job_id": job_id}
+
+    @app.post("/api/projects/{pid}/orchestrator/tick/force-acquire")
+    def orchestrator_tick_force_acquire(pid: str):
+        """强制接管（2026-09-28 人工救济）：无条件清 tick 租约，卡死轮的补救
+        出口——409 长时间不解除（心跳停/时长异常）时，清租约即可重新点火。
+        旧轮若仍存活，其产出照常落事件（任务发布由编排器判重），短暂双跑窗口
+        为已知代价；orch.tick.forced 落事件留痕。"""
+        proj = _project(pid)
+        if not orch_state.force_release_tick_lease(proj.bb, pid):
+            raise HTTPException(409, "当前无 tick 租约可接管")
+        proj.bb.append_event(pid, "orch.tick.forced",
+                             {"by": "human"}, author="orchestrator")
+        return {"released": True}
+
+    @app.post("/api/projects/{pid}/orchestrator/auto-attack/stop")
+    def orchestrator_auto_attack_stop(pid: str):
+        """自动渗透人工停止（auto-attack 2026-09-28）：停 L2 链不降档——与
+        档位变更/暂停同走 _stop_chain（幂等），orch.chain_stopped{reason:human}
+        落事件；在跑 worker 任务不受影响（链只管编排轮的自动续转）。"""
+        _project(pid)
+        if not _stop_chain(pid, "human"):
+            raise HTTPException(409, "自动链当前未在运行")
+        return {"stopped": True}
+
+    @app.post("/api/projects/{pid}/tasks/{tid}/report")
+    def task_report_generate(pid: str, tid: str):
+        """任务报告（trae 视图 2026-09-28）：done 任务 → plan_llm 生成 md 任务状况
+        报告，落 task.report 事件持久化（trae 条目内随时查看；事件幂等查重）。
+        前端在 task.done 后触发；生成走后台 job，失败可重试（job error 可见）。"""
+        proj = _project(pid)
+        t = TaskQueue(proj.bb).get_task(tid)
+        if not t or t.get("project_id") != pid:
+            raise HTTPException(404, f"任务不存在: {tid}")
+        if t["status"] != "done":
+            raise HTTPException(409, f"仅 done 任务生成报告（当前 {t['status']}）")
+        for r in proj.bb.conn.execute(
+                "SELECT id, payload FROM events WHERE project_id=? AND kind='task.report'",
+                (pid,)).fetchall():
+            try:
+                if (json.loads(r["payload"]) or {}).get("task_id") == tid:
+                    return {"existing": True, "event_id": r["id"]}
+            except ValueError:
+                continue
+        sid = str(t.get("target_session") or "")
+        rows = proj.bb.conn.execute(
+            "SELECT kind, payload FROM events WHERE project_id=? AND session_id=?"
+            " AND kind IN ('tool.call','command','finding.new')"
+            " ORDER BY id DESC LIMIT 80", (pid, sid)).fetchall()
+        trace: list[dict] = []
+        for r in reversed(rows):
+            try:
+                trace.append({"kind": r["kind"], **(json.loads(r["payload"]) or {})})
+            except ValueError:
+                continue
+        try:
+            attempts = (json.loads(t.get("context") or "{}") or {}).get("attempts") or []
+        except ValueError:
+            attempts = []
+        _exec_llm, plan_llm = _llms()
+
+        def _gen() -> dict:
+            # job 内复查：并发触发时后到者直接复用先到者的事件（幂等兜底）
+            for r in proj.bb.conn.execute(
+                    "SELECT id, payload FROM events WHERE project_id=? AND kind='task.report'",
+                    (pid,)).fetchall():
+                try:
+                    if (json.loads(r["payload"]) or {}).get("task_id") == tid:
+                        return {"task_id": tid, "deduped": True}
+                except ValueError:
+                    continue
+            material = {
+                "task": {k: t.get(k) for k in ("id", "objective", "scope", "task_type",
+                                               "status", "result_note", "created_at",
+                                               "updated_at")},
+                "attempts": attempts,
+                "recent_actions": trace,
+            }
+            prompt = (
+                "你是渗透测试团队的任务报告员。请根据以下 JSON 任务执行记录，写一份中文"
+                " Markdown 任务状况报告，固定四节：\n"
+                "## 任务概览（目标/范围/类型）\n"
+                "## 执行过程（时间线叙述，引用关键命令/工具及其结果）\n"
+                "## 结果与产出（结论、登记的发现、产物）\n"
+                "## 遗留与建议（未竟事项、下一步建议）\n"
+                "只输出 Markdown 正文，不寒暄、不编造记录里没有的事实。\n"
+                "```json\n" + json.dumps(material, ensure_ascii=False)[:24000] + "\n```")
+            resp = plan_llm.chat(
+                [{"role": "user", "content": prompt}],
+                system="你是渗透测试团队的报告员：输出严谨、克制、只基于给定记录。")
+            record_llm_usage(proj.bb, pid, resp.usage, source="task-report",
+                             session_id=sid or None, model=getattr(plan_llm, "model", ""))
+            blocks = resp.raw.get("content", [])
+            if isinstance(blocks, list):
+                report = "\n".join(
+                    b.get("text", "") for b in blocks
+                    if isinstance(b, dict) and b.get("type") == "text").strip()
+            else:
+                report = str(blocks).strip()
+            if not report:
+                raise RuntimeError("报告生成为空（LLM 无文本输出）")
+            proj.bb.append_event(
+                pid, "task.report",
+                {"task_id": tid, "session_id": sid, "report": report[:16000]},
+                session_id=sid, author="orchestrator")
+            return {"task_id": tid, "chars": len(report)}
+
+        job_id = app.state.jobs.submit("task-report", _gen, meta={"project_id": pid})
+        return {"job_id": job_id, "status": "generating"}
 
     @app.post("/api/projects/{pid}/orchestrator/replan-priorities")
     def orchestrator_replan_priorities(pid: str):
@@ -6750,6 +7141,183 @@ def create_app(
                 encoding="utf-8")
         return {"status": "ok", "count": len(body.servers)}
 
+    # ---- 智能体工作台（K9，2026-09-29）：新独立轻量对话运行时 ----
+    # 与会话窗/任务队列解耦：线程/消息存 chat_threads/chat_messages（core/chat/store.py），
+    # 轮次由 core/chat/runtime.py 的 ChatTurn 跑（主控轻专家重，call_expert spawn
+    # 持久子线程）。流式走 chat.delta/chat.tool/chat.message 事件（现有事件管道）。
+
+    def _chat_agents(pid: str) -> list[dict]:
+        proj = _project(pid)
+        from core.skills.experts import load_expert
+        rows = [{"id": "chat-orchestrator", "kind": "orchestrator"}]
+        for eid in list_experts(app.state.packs_root, proj.track):
+            if eid in {"_generalist", "chat-orchestrator"}:
+                continue
+            rows.append({"id": eid, "kind": "expert"})
+        out = []
+        for r in rows:
+            try:
+                e = load_expert(app.state.packs_root, r["id"], proj.track)
+                out.append({**r, "name": e.get("name", r["id"]),
+                            "description": e.get("description", "")})
+            except FileNotFoundError:
+                continue
+        return out
+
+    def _chat_bridge(proj):
+        bridges = getattr(app.state, "chat_mcp_bridges", None)
+        if bridges is None:
+            bridges = {}
+            app.state.chat_mcp_bridges = bridges
+        bridge = bridges.get(proj.id)
+        if bridge is None:
+            from core.chat.mcp_bridge import MCPBridge
+            domains = sorted({*proj.capabilities, proj.track})
+            bridge = MCPBridge(MCP_CONFIG_PATH, domains=domains)
+            bridges[proj.id] = bridge
+        return bridge
+
+    def _chat_running_set() -> set:
+        running = getattr(app.state, "chat_running", None)
+        if running is None:
+            running = set()
+            app.state.chat_running = running
+        return running
+
+    def _chat_abort_event(tid: str, *, create: bool = False) -> threading.Event | None:
+        """每线程一个中止事件（stop 端点 set / ChatTurn 轮询）。
+        轮次收尾弹出；create=False 且不存在时返回 None（线程没在跑）。"""
+        events = getattr(app.state, "chat_abort_events", None)
+        if events is None:
+            events = {}
+            app.state.chat_abort_events = events
+        if create:
+            ev = events.get(tid)
+            if ev is None:
+                ev = threading.Event()
+                events[tid] = ev
+            return ev
+        return events.get(tid)
+
+    @app.get("/api/chat/agents")
+    def chat_agents(pid: str):
+        return _chat_agents(pid)
+
+    @app.get("/api/chat/mcp")
+    def chat_mcp_status(pid: str):
+        return {"servers": _chat_bridge(_project(pid)).status()}
+
+    @app.get("/api/projects/{pid}/chat/threads")
+    def chat_threads_list(pid: str, agent_id: str | None = None):
+        from core.chat import store as chat_store
+        return chat_store.list_threads(_project(pid).bb, pid, agent_id=agent_id)
+
+    @app.post("/api/projects/{pid}/chat/threads", status_code=201)
+    def chat_thread_create(pid: str, body: ChatThreadIn):
+        from core.chat import store as chat_store
+        agents = {a["id"] for a in _chat_agents(pid)}
+        if body.agent_id not in agents:
+            raise HTTPException(422, f"未知智能体: {body.agent_id}")
+        return chat_store.create_thread(_project(pid).bb, pid, body.agent_id,
+                                        title=body.title or "")
+
+    @app.get("/api/chat/threads/{tid}")
+    def chat_thread_detail(tid: str, after_id: int = 0):
+        from core.chat import store as chat_store
+        thread = chat_store.get_thread(_project(_pid_of_chat(tid)).bb, tid)
+        if thread is None:
+            raise HTTPException(404, f"线程不存在: {tid}")
+        return {"thread": thread,
+                "messages": chat_store.list_messages(
+                    _project(thread["project_id"]).bb, tid, after_id=after_id)}
+
+    @app.delete("/api/chat/threads/{tid}", status_code=204)
+    def chat_thread_delete(tid: str):
+        from core.chat import store as chat_store
+        pid = _pid_of_chat(tid)
+        if tid in _chat_running_set():
+            raise HTTPException(409, "线程正在执行中，无法删除")
+        if not chat_store.delete_thread(_project(pid).bb, tid):
+            raise HTTPException(404, f"线程不存在: {tid}")
+
+    def _pid_of_chat(tid: str) -> str:
+        """线程 id → 项目 id（chat-<hex> 主键全局唯一，按索引表反查）。"""
+        from core.chat import store as chat_store
+        row = store_bb_conn(tid)
+        if row is None:
+            raise HTTPException(404, f"线程不存在: {tid}")
+        return row
+
+    def store_bb_conn(tid: str) -> str | None:
+        # chat_threads 无项目索引缓存时直接扫各打开项目（工作台场景项目数有限）
+        for p in app.state.projects.values():
+            try:
+                row = p.bb.conn.execute(
+                    "SELECT project_id FROM chat_threads WHERE id=?",
+                    (tid,)).fetchone()
+            except Exception:  # noqa: BLE001
+                continue
+            if row is not None:
+                return row["project_id"]
+        return None
+
+    @app.post("/api/chat/threads/{tid}/messages", status_code=202)
+    def chat_send(tid: str, body: ChatMessageIn):
+        """发消息即起跑一轮（后台线程）；流式经 chat.delta/chat.tool/chat.message
+        事件（GET /api/projects/{pid}/events 或项目 WS）。同线程并发发送 409。"""
+        from core.chat import store as chat_store
+        from core.chat.runtime import ChatTurn, ORCHESTRATOR_ID
+        pid = _pid_of_chat(tid)
+        proj = _project(pid)
+        thread = chat_store.get_thread(proj.bb, tid)
+        if thread is None:
+            raise HTTPException(404, f"线程不存在: {tid}")
+        running = _chat_running_set()
+        if tid in running or thread.get("status") == "running":
+            raise HTTPException(409, "上一轮仍在执行中，稍候再发")
+        text = body.text.strip()
+        if not text:
+            raise HTTPException(422, "消息不能为空")
+        exec_llm, _plan = _llms()
+        agents = {a["id"] for a in _chat_agents(pid)}
+        expert_names = sorted(agents) if thread["agent_id"] == ORCHESTRATOR_ID else []
+        running.add(tid)
+        abort_ev = _chat_abort_event(tid, create=True)
+        abort_ev.clear()
+
+        def _run() -> None:
+            try:
+                turn = ChatTurn(
+                    bb=proj.bb, llm=exec_llm, project_id=pid, thread_id=tid,
+                    packs_root=app.state.packs_root, track=proj.track,
+                    capabilities=caps_effective(
+                        app.state.packs_root, proj.track, proj.experts,
+                        fallback=proj.capabilities),
+                    mcp_bridge=_chat_bridge(proj),
+                    expert_names=expert_names,
+                    abort_event=abort_ev)
+                turn.run(text, refs=body.refs)
+            except Exception as e:  # noqa: BLE001 —— 状态已在 ChatTurn.run 归位
+                log.exception("chat 轮后台执行失败 thread=%s", tid)
+            finally:
+                running.discard(tid)
+                events = getattr(app.state, "chat_abort_events", None)
+                if events is not None:
+                    events.pop(tid, None)
+
+        threading.Thread(target=_run, name=f"chat-{tid[-12:]}",
+                         daemon=True).start()
+        return {"status": "running", "thread_id": tid}
+
+    @app.post("/api/chat/threads/{tid}/stop", status_code=204)
+    def chat_stop(tid: str):
+        """中止执行中的轮次：置中止事件 → ChatTurn 在步间/流式帧/工具分发点
+        退出并落「已停止」说明（幂等：线程没在跑则 409）。"""
+        if tid not in _chat_running_set():
+            raise HTTPException(409, "线程未在执行中")
+        ev = _chat_abort_event(tid, create=True)
+        ev.set()
+
     # ---------- 情报面板（E9，全局模块，DESIGN.md §16；与项目黑板无关） ----------
 
     def _intel() -> IntelStore:
@@ -6939,7 +7507,8 @@ def create_app(
     # ---------- WebSocket 事件流 ----------
 
     @app.websocket("/api/ws/projects/{pid}")
-    async def ws_events(ws: WebSocket, pid: str, since_id: int = 0):
+    async def ws_events(ws: WebSocket, pid: str, since_id: int = 0,
+                        tick_s: int = 5):
         await ws.accept()
 
         async def _reject() -> None:
@@ -6956,6 +7525,14 @@ def create_app(
             await _reject()
             return
         cursor = since_id
+        # 应用层心跳（2026-09-29 消息刷新不及时复盘）：WS 名为推送实为 1s 查库，
+        # 空转期零帧——半开连接（服务端→客户端方向静默死）时浏览器收不到 close
+        # 帧、自身不发探测，连接永远 OPEN 但不打货，前端无限期卡住（切页面
+        # 重挂载新建 WS 才恢复）。空闲满 tick_s 拍发一条不落库的 ws.tick 帧：
+        # 前端看门狗据此区分「管道死」（20s 无任何帧→判死重连）与「健康静默」
+        # （长命令执行期 tick 照常到达，不误判）。
+        tick_s = max(1, min(tick_s, 60))
+        idle_loops = 0
         try:
             while True:
                 if pid in app.state.projects_closing:
@@ -6975,10 +7552,17 @@ def create_app(
                         await _reject()
                         return
                     raise
+                if events:
+                    idle_loops = 0
                 for e in events:
                     await ws.send_json(e)
                     cursor = e["id"]
                 if not events:
+                    idle_loops += 1
+                    if idle_loops >= tick_s:
+                        await ws.send_json(
+                            {"kind": "ws.tick", "ts": time.time()})
+                        idle_loops = 0
                     await asyncio.sleep(1.0)
         except WebSocketDisconnect:
             return

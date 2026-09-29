@@ -1,0 +1,24 @@
+# 逆向分析轨阶段剧本（planner-cadence P2，2026-09-28）——文件名 stem=阶段 id。
+# 深析阶段：func_kb 人机共写关键函数+功能描述；产出蓝图（模块划分与接口 spec）
+# 供 reconstruct 按模块领单。入场门=至少 1 资产 + 1 条已验证功能发现。
+name: 深析
+goal: 关键函数定位与功能描述沉淀（func_kb），产出模块级蓝图
+order: 2
+focus:
+  reverse: 3
+  analyze: 2
+  blueprint: 1
+gate:
+  min_verified: 1
+  idle_rounds: 2
+gate_types: [reconstruct]
+tasks:
+  - task_type: reverse
+    role: reverse-analyst
+    objective: 对高优先级样本做函数级深析：关键函数定位、功能描述与风险标注（stack-overflow/no-length-check 等），沉淀 func_kb
+    acceptance: 关键函数以 func_kb 登记（name/analysis/risk_tags/confidence），关键发现落黑板（intel，带 evidence）
+  - task_type: blueprint
+    role: rebuilder
+    objective: 按业务职能划分样本模块，产出模块接口 spec 与依赖关系（蓝图），锚定 func_kb 函数
+    acceptance: 蓝图 draft 产出（模块划分+接口 spec+模块依赖），模块锚点指向已登记 func_kb 条目
+next: [reconstruct]
