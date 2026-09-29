@@ -10,6 +10,8 @@ import {
   CheckCircle2,
   ChevronLeft,
   Globe2,
+  Inbox,
+  FolderKanban,
   LayoutDashboard,
   ListChecks,
   PanelLeftOpen,
@@ -61,6 +63,8 @@ const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
   {
     label: "工作区",
     items: [
+      { key: "projects", label: "项目", icon: FolderKanban, needsProject: false },
+      { key: "intel", label: "情报", icon: Inbox, needsProject: false },
       { key: "live", label: "会话", icon: Radio, needsProject: true },
       { key: "agents", label: "智能体", icon: Bot, needsProject: true },
       { key: "board", label: "黑板", icon: LayoutDashboard, needsProject: true },
@@ -85,8 +89,10 @@ function NavRail({ active, onSelect, locked, className, expanded = false, pendin
   expanded?: boolean
   pendingApprovals?: number
 }) {
+  // 无项目上下文时只展示全局项（needsProject=false：项目/情报/设置），
+  // 不再硬编码 key 白名单——8cb819d 曾因硬编码列表与 NAV_GROUPS 漂移致情报入口消失
   const groups = locked
-    ? [{ label: "", items: NAV_GROUPS.flatMap((group) => group.items).filter((item) => !item.needsProject && ["projects", "intel", "settings"].includes(item.key)) }]
+    ? [{ label: "", items: NAV_GROUPS.flatMap((group) => group.items).filter((item) => !item.needsProject) }]
     : NAV_GROUPS
 
   return (
