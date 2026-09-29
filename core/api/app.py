@@ -1690,6 +1690,14 @@ def create_app(
     @app.get("/api/projects/{pid}")
     def get_project(pid: str):
         proj = _project(pid)
+        # 僵尸 running 清扫（与任务侧 estranged「重启急停」同构）：进程重启后
+        # 执行轮次随旧进程消失，DB status=running 残留会让工作台永久「执行中」
+        # ——新进程 chat_running 为空集，扫到的 running 必是僵尸，归位+落中断
+        # 消息（无僵尸时 no-op，小表查询开销可忽略）
+        from core.chat import store as chat_store
+        recovered = chat_store.recover_running_threads(proj.bb)
+        if recovered:
+            log.info("chat 僵尸线程清扫: %s", recovered)
         tq = TaskQueue(proj.bb)
         tasks = tq.list_tasks(pid)
         stats: dict[str, int] = {}
@@ -7287,6 +7295,7 @@ def create_app(
 
         def _run() -> None:
             try:
+                cfg = proj.bb.get_project(pid)["config"] or {}
                 turn = ChatTurn(
                     bb=proj.bb, llm=exec_llm, project_id=pid, thread_id=tid,
                     packs_root=app.state.packs_root, track=proj.track,
@@ -7295,7 +7304,9 @@ def create_app(
                         fallback=proj.capabilities),
                     mcp_bridge=_chat_bridge(proj),
                     expert_names=expert_names,
-                    abort_event=abort_ev)
+                    abort_event=abort_ev,
+                    owner_tags=proj.bb.owner_tags(pid),
+                    rule_profiles=cfg.get("rule_profiles"))
                 turn.run(text, refs=body.refs)
             except Exception as e:  # noqa: BLE001 —— 状态已在 ChatTurn.run 归位
                 log.exception("chat 轮后台执行失败 thread=%s", tid)

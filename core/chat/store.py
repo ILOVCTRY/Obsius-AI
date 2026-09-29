@@ -113,6 +113,32 @@ def delete_thread(bb, thread_id: str) -> bool:
         return cur.rowcount > 0
 
 
+def recover_running_threads(bb) -> list[str]:
+    """重启后僵尸 running 清扫：执行轮次随旧进程消失（abort_event/执行线程/
+    run_cmd 子进程全灭），DB status=running 残留 → 工作台永久「执行中」（输入
+    框禁用、停止 409）。项目打开时调用（GET /api/projects/{pid}）——新进程
+    chat_running 为空集，扫到的 running 必是僵尸：归位 idle + 落中断 assistant
+    消息（与手动停止同款观感，历史消息保留可续聊）。无僵尸时 no-op 返回空。"""
+    rows = bb.conn.execute(
+        "SELECT id FROM chat_threads WHERE status='running'").fetchall()
+    ids = [r["id"] for r in rows]
+    if not ids:
+        return []
+    ts = now()
+    with bb._tx():
+        for tid in ids:
+            bb.conn.execute(
+                "INSERT INTO chat_messages(thread_id, role, content, tool_calls,"
+                " tool_use_id, created_at) VALUES(?,?,?,?,?,?)",
+                (tid, "assistant",
+                 "（⚠ 进程重启，本轮执行中断；可继续追问或重新发起）",
+                 "[]", "", ts))
+            bb.conn.execute(
+                "UPDATE chat_threads SET status='idle', updated_at=? WHERE id=?",
+                (ts, tid))
+    return ids
+
+
 def _row(r: sqlite3.Row) -> dict[str, Any]:
     out = dict(r)
     out["todo"] = _loads(out.get("todo"), [])

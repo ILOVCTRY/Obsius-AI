@@ -198,6 +198,34 @@ export function Findings({ pid, compact, track, showCanvas }: {
       rank(a.severity) - rank(b.severity) || b.created_at.localeCompare(a.created_at))
   }, [items, assets, statusFilter, assetFilter, isCtf, levelFilter, catView, isSplit])
 
+  // 「项目级」兜底组（2026-09-29 用户定稿）：资产过滤激活时，未挂载具体资产的
+  // 发现（项目级死路记账/重评级等）不再凭空消失——同筛选语义过滤后折叠显示
+  // 在列表末尾。无 target_asset_id = 登记时无对应资产节点可挂（专家登记资产可选）。
+  const projectLevelFindings = useMemo(() => {
+    if (!assetFilter) return []
+    const rank = (s: string) => {
+      const i = (isCtf ? CTF_LEVEL_ORDER : SEVERITY_ORDER).indexOf(s)
+      return i === -1 ? SEVERITY_ORDER.length : i
+    }
+    let list = statusFilter === "unverified"
+      ? items.filter((f) => f.status === "unverified" && !f.target_asset_id)
+      : items.filter((f) => !f.target_asset_id)
+    if (isSplit) list = list.filter((f) => (f.category ?? "vuln") === catView)
+    if (isCtf) {
+      list = levelFilter === "dead"
+        ? list.filter((f) => f.status === "false-positive")
+        : list.filter((f) => f.status !== "false-positive")
+      if (levelFilter === "bg") {
+        list = list.filter((f) => ["low", "medium", "info"].includes(f.severity))
+      } else if (levelFilter && levelFilter !== "dead") {
+        list = list.filter((f) => f.severity === levelFilter)
+      }
+    }
+    return [...list].sort((a, b) =>
+      rank(a.severity) - rank(b.severity) || b.created_at.localeCompare(a.created_at))
+  }, [items, assetFilter, statusFilter, isCtf, levelFilter, catView, isSplit])
+  const [plOpen, setPlOpen] = useState(false)
+
   const add = async () => {
     if (!title.trim()) return
     await api.addFinding(pid, {
@@ -360,46 +388,67 @@ export function Findings({ pid, compact, track, showCanvas }: {
     )
   }
 
+  // 发现行渲染（主列表与「项目级」兜底组共用）
+  const findingRow = (f: (typeof items)[number]) => (
+    <div
+      key={f.id}
+      className="cursor-pointer rounded border p-2 hover:bg-accent/30"
+      onClick={() => setDetail(f)}
+    >
+      <div className="flex items-center gap-2">
+        <span className={cn("text-[10px] font-medium", isCtf ? CTF_LEVEL[f.severity]?.cls : SEVERITY_COLOR[f.severity])}
+              title={f.rating_basis ? `判级依据: ${f.rating_basis}` : undefined}>
+          {isCtf ? (CTF_LEVEL[f.severity]?.label ?? f.severity) : f.severity}
+        </span>
+        <span className="text-sm">{f.title}</span>
+        {isSplit && (
+          <Badge variant="outline"
+                 className={cn("text-[10px]",
+                   (f.category ?? "vuln") === "intel" ? "text-(--status-ok)" : "text-(--status-error)")}>
+            {(f.category ?? "vuln") === "intel" ? "📌 有效发现" : "漏洞"}
+          </Badge>
+        )}
+        {f.status === "verified" && <Badge variant="outline" className="text-[10px]">verified</Badge>}
+        {f.status === "false-positive" && isCtf && (
+          <Badge variant="outline" className="text-[10px] text-muted-foreground">死路</Badge>
+        )}
+        {f.poc_artifact_id && <Badge variant="outline" className="text-[10px]">POC</Badge>}
+        <span className="flex-1" />
+        <span className="font-mono text-[10px] text-muted-foreground">{f.author}</span>
+      </div>
+      <div className="mt-0.5 font-mono text-[10px] text-muted-foreground">
+        {f.vuln_class} · <span title={utcTitle(f.created_at)}>{fmtDateTime(f.created_at)}</span>
+        {assetName(f.target_asset_id) && <> · {assetName(f.target_asset_id)}</>}
+        {(f.rating_basis ?? "").trim() && <> · <span title={`判级依据: ${f.rating_basis}`}>{f.rating_basis.length > 40 ? `${f.rating_basis.slice(0, 40)}…` : f.rating_basis}</span></>}
+      </div>
+    </div>
+  )
+
   return (
     <div className="flex h-full flex-col">
       {filterRow}
       <ScrollArea className="min-h-0 flex-1">
         <div className="space-y-1.5 p-3">
-          {visible.length === 0 && <Empty />}
-          {visible.map((f) => (
-            <div
-              key={f.id}
-              className="cursor-pointer rounded border p-2 hover:bg-accent/30"
-              onClick={() => setDetail(f)}
-            >
-              <div className="flex items-center gap-2">
-                <span className={cn("text-[10px] font-medium", isCtf ? CTF_LEVEL[f.severity]?.cls : SEVERITY_COLOR[f.severity])}
-                      title={f.rating_basis ? `判级依据: ${f.rating_basis}` : undefined}>
-                  {isCtf ? (CTF_LEVEL[f.severity]?.label ?? f.severity) : f.severity}
-                </span>
-                <span className="text-sm">{f.title}</span>
-                {isSplit && (
-                  <Badge variant="outline"
-                         className={cn("text-[10px]",
-                           (f.category ?? "vuln") === "intel" ? "text-(--status-ok)" : "text-(--status-error)")}>
-                    {(f.category ?? "vuln") === "intel" ? "📌 有效发现" : "漏洞"}
-                  </Badge>
-                )}
-                {f.status === "verified" && <Badge variant="outline" className="text-[10px]">verified</Badge>}
-                {f.status === "false-positive" && isCtf && (
-                  <Badge variant="outline" className="text-[10px] text-muted-foreground">死路</Badge>
-                )}
-                {f.poc_artifact_id && <Badge variant="outline" className="text-[10px]">POC</Badge>}
-                <span className="flex-1" />
-                <span className="font-mono text-[10px] text-muted-foreground">{f.author}</span>
-              </div>
-              <div className="mt-0.5 font-mono text-[10px] text-muted-foreground">
-                {f.vuln_class} · <span title={utcTitle(f.created_at)}>{fmtDateTime(f.created_at)}</span>
-                {assetName(f.target_asset_id) && <> · {assetName(f.target_asset_id)}</>}
-                {(f.rating_basis ?? "").trim() && <> · <span title={`判级依据: ${f.rating_basis}`}>{f.rating_basis.length > 40 ? `${f.rating_basis.slice(0, 40)}…` : f.rating_basis}</span></>}
-              </div>
+          {visible.length === 0 && projectLevelFindings.length === 0 && <Empty />}
+          {visible.map(findingRow)}
+          {assetFilter && projectLevelFindings.length > 0 && (
+            <div className="pt-1">
+              <button
+                type="button"
+                className="flex w-full items-center gap-1.5 rounded border border-dashed px-2 py-1 text-[11px] text-muted-foreground hover:bg-accent/30"
+                onClick={() => setPlOpen((o) => !o)}
+                title="登记时未挂载具体资产的发现（项目级结论/死路记账/重评级等）"
+              >
+                <ChevronDown className={cn("size-3 transition-transform", plOpen && "rotate-180")} />
+                项目级（未挂载具体资产）· {projectLevelFindings.length}
+              </button>
+              {plOpen && (
+                <div className="mt-1.5 space-y-1.5">
+                  {projectLevelFindings.map(findingRow)}
+                </div>
+              )}
             </div>
-          ))}
+          )}
         </div>
       </ScrollArea>
       {!compact && (

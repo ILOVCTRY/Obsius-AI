@@ -113,6 +113,33 @@ def test_delete_thread_cascades_descendants(tmp_path):
     assert chat_store.delete_thread(bb, "chat-nope") is False
 
 
+def test_recover_running_threads(tmp_path):
+    """回归（重启僵尸 running）：进程重启后执行轮次随旧进程消失，DB
+    status=running 残留 → 工作台永久「执行中」（输入框禁用、停止 409）。
+    项目打开时 recover_running_threads 归位 idle + 落中断消息（与手动停止
+    同款观感，历史消息保留可续聊）；idle 线程不动；二次调用幂等空表。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    orch = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID, title="主控")
+    sub = chat_store.create_thread(bb, "p1", "recon", title="子",
+                                   parent_thread_id=orch["id"])
+    chat_store.update_thread(bb, orch["id"], status="running")
+    chat_store.update_thread(bb, sub["id"], status="running")
+    chat_store.append_message(bb, orch["id"], "user", "重启前的消息")
+    ok_t = chat_store.create_thread(bb, "p1", "recon", title="完好 idle")
+    recovered = chat_store.recover_running_threads(bb)
+    assert sorted(recovered) == sorted([orch["id"], sub["id"]])
+    for tid in (orch["id"], sub["id"]):
+        assert chat_store.get_thread(bb, tid)["status"] == "idle"
+    assert chat_store.get_thread(bb, ok_t["id"])["status"] == "idle"
+    msgs = chat_store.list_messages(bb, orch["id"])
+    assert len(msgs) == 2 and msgs[-1]["role"] == "assistant"
+    assert "进程重启" in msgs[-1]["content"] and "中断" in msgs[-1]["content"]
+    # 幂等：无僵尸可清返回空表，不再重复落消息
+    assert chat_store.recover_running_threads(bb) == []
+    assert len(chat_store.list_messages(bb, orch["id"])) == 2
+
+
 # ---------- 运行时：主控轮（todo → call_expert → 汇总） ----------
 
 def test_chat_orchestrator_turn_todo_and_call_expert(tmp_path):
@@ -263,6 +290,74 @@ def test_expert_dispatcher_explicit_whitelist(tmp_path):
     d = turn._build_dispatcher()
     # _generalist.yaml tools: null → 同样走全量裁剪语义（显式 null ≈ 未配）
     assert d is not None and "run_cmd" in set(d.allowed_tools)
+
+
+# ---------- 规则链注入（回归） ----------
+
+def test_expert_thread_rule_preamble_injected(tmp_path):
+    """回归（评级规则注入）：对话链 ChatTurn._system_prompt 曾完全不接规则
+    链——主控委派的子专家登记漏洞时判级自由发挥，不引用 rating:<tag> 条款
+    （任务链 loop.py stable_parts[0] 早已注入，两条链不对称）。修复：同构
+    注入 build_rules_preamble（红线+owner 叠加+评级口径）放系统提示最前。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    llm = FakeLLM([_resp(text="发现已按评级口径登记。")])
+    thread = chat_store.create_thread(bb, "p1", "web-solver")
+    turn = ChatTurn(bb=bb, llm=llm, project_id="p1", thread_id=thread["id"],
+                    packs_root="packs", track="pentest", capabilities=["web"],
+                    mcp_bridge=None, expert_names=["web-solver"],
+                    owner_tags=["edusrc"],
+                    rule_profiles={"owners": ["edusrc"],
+                                   "rating": ["edu-rating"]})
+    turn.run("登记 appsettings.json 泄露漏洞")
+    system = llm.calls[0]["system"]
+    # 规则链在最前（角色段之前）
+    assert "场景规则与红线" in system
+    assert system.index("场景规则与红线") < system.index("# 角色")
+    # 评级硬指令 + 生效口径（图二理想态「rating:edu-rating 高危#N …」的来源）
+    assert "评级硬指令" in system and "rating_basis" in system
+    assert "rating:edu-rating" in system
+    # owner 叠加段
+    assert "owner:edusrc" in system
+    # 未配 owner/评级时静默降级：无评级硬指令（track 红线仍注入）
+    llm2 = FakeLLM([_resp(text="ok")])
+    lone = chat_store.create_thread(bb, "p1", "web-solver")
+    turn2 = ChatTurn(bb=bb, llm=llm2, project_id="p1", thread_id=lone["id"],
+                     packs_root="packs", track="pentest", capabilities=["web"],
+                     mcp_bridge=None, expert_names=["web-solver"])
+    turn2.run("x")
+    assert "评级硬指令" not in llm2.calls[0]["system"]
+    assert "场景规则与红线" in llm2.calls[0]["system"]
+
+
+def test_rule_preamble_propagates_to_spawned_expert(tmp_path):
+    """透传链：主控 call_expert spawn 的子线程必须继承 owner_tags/
+    rule_profiles（_tool_call_expert 构造 sub_turn 时透传），否则子专家
+    系统提示缺评级口径——图一 bug 的完整链路。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    llm = FakeLLM([
+        _resp(tool_calls=[_tc("t1", "call_expert",
+                              {"expert": "web-solver",
+                               "task": "对泄露的 appsettings.json 登记漏洞"})]),
+        _resp(text="专家摘要：漏洞已按评级口径登记。"),
+        _resp(text="汇总完成。"),
+    ])
+    thread = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID)
+    turn = ChatTurn(bb=bb, llm=llm, project_id="p1", thread_id=thread["id"],
+                    packs_root="packs", track="pentest", capabilities=["web"],
+                    mcp_bridge=None,
+                    expert_names=["web-solver", ORCHESTRATOR_ID],
+                    owner_tags=["edusrc"],
+                    rule_profiles={"owners": ["edusrc"],
+                                   "rating": ["edu-rating"]})
+    turn.run("登记泄露漏洞")
+    # 主控 system 含规则链
+    assert "评级硬指令" in llm.calls[0]["system"]
+    # 子专家（spawn 线程）system 同样含评级口径与 owner 叠加
+    assert "评级硬指令" in llm.calls[1]["system"]
+    assert "rating:edu-rating" in llm.calls[1]["system"]
+    assert "owner:edusrc" in llm.calls[1]["system"]
 
 
 # ---------- 中止（停止按钮） ----------

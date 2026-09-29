@@ -53,6 +53,23 @@ FOREIGN KEY constraint failed → 曾致删有子线程的线程 500）。
   （scale 缩放 + messages 余数兜底，**四块之和恒等于 input**）。refs 块对应
   「人类本轮指定」注入段（无引用时为 0）。前端浮层画分段彩条+分类清单，
   剩余空间 = 窗口(256K) − input。估算非精确计数：比例可信、绝对值是近似。
+- **规则链注入（2026-09-29，与任务链同构）**：`ChatTurn.__init__` 接收
+  `owner_tags`/`rule_profiles`（app.py 构造点自项目 config 取，与 AgentConfig
+  同款），`_system_prompt` **最前**注入 `build_rules_preamble`（红线+owner
+  叠加+评级硬指令，role=agent_id、role-rules 文件存在时自动叠加）；
+  `_tool_call_expert` spawn 子线程时透传同参。首版对话链完全不接规则链——
+  子专家 bb_add_finding 判级自由发挥不引用 rating:<tag> 条款（任务链
+  loop.py stable_parts[0] 早已注入，两条链不对称）；回归测试
+  test_expert_thread_rule_preamble_injected / test_rule_preamble_propagates_
+  to_spawned_expert。未配 owner/评级时静默降级（track 红线仍注入）。
+- **重启僵尸清扫（2026-09-29）**：进程重启后执行轮次随旧进程消失（abort_event/
+  执行线程/run_cmd 子进程全灭），DB status=running 残留 → 工作台永久「执行中」
+  （输入框禁用、停止 409 死锁）。`store.recover_running_threads(bb)`：扫 running
+  → 归位 idle + 落「⚠ 进程重启，本轮执行中断」assistant 消息（与手动停止同款
+  观感，历史保留可续聊）；单事务手写（_tx 不可嵌套）；无僵尸 no-op 幂等。
+  挂在 `GET /api/projects/{pid}`（进项目页必经，新进程 chat_running 空集 →
+  扫到的 running 必是僵尸；与任务侧 estranged「重启急停」同构）。
+  回归测试 test_recover_running_threads。
 - max_steps：主控 24 / 子专家 32。线程 status：running 起、idle 正常收、
   error 异常收（异常也落一条 chat.message 事件，前端可见）。
 

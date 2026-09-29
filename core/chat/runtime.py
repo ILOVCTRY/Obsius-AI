@@ -35,6 +35,7 @@ from core.chat.mcp_bridge import MCPBridge
 from core.runtime.gateway import ExecutionGateway
 from core.skills.experts import load_expert
 from core.skills.registry import SkillRegistry
+from core.skills.rules import build_rules_preamble
 
 log = logging.getLogger(__name__)
 
@@ -106,7 +107,9 @@ class ChatTurn:
                  capabilities: list[str] | None,
                  mcp_bridge: MCPBridge | None = None,
                  expert_names: list[str] | None = None,
-                 abort_event: threading.Event | None = None):
+                 abort_event: threading.Event | None = None,
+                 owner_tags: list[str] | None = None,
+                 rule_profiles: dict[str, Any] | None = None):
         self.bb = bb
         self.llm = llm
         self.project_id = project_id
@@ -117,6 +120,8 @@ class ChatTurn:
         self.mcp_bridge = mcp_bridge
         self.expert_names = expert_names or []
         self.abort_event = abort_event or threading.Event()
+        self.owner_tags = owner_tags or []
+        self.rule_profiles = rule_profiles
         self.thread = chat_store.get_thread(bb, thread_id) or {}
         self.agent_id = str(self.thread.get("agent_id") or ORCHESTRATOR_ID)
         self.is_orchestrator = self.agent_id == ORCHESTRATOR_ID
@@ -241,7 +246,15 @@ class ChatTurn:
 
     def _system_prompt(self) -> str:
         expert = load_expert(self.packs_root, self.agent_id, self.track)
-        parts = [f"# 角色：{expert.get('name', self.agent_id)}\n{expert.get('persona') or expert.get('description') or ''}"]
+        # 规则链放最前（与任务链 stable_parts[0] 同构）：红线+owner 叠加+评级
+        # 口径——子专家 bb_add_finding 判级引用 rating:<tag> 条款，主控汇总
+        # 判级同样有据；role 传 agent_id，role-rules 文件存在时自动叠加
+        parts = [build_rules_preamble(
+                     self.packs_root, track=self.track,
+                     capabilities=self.capabilities,
+                     owner_tags=self.owner_tags, role=self.agent_id,
+                     rule_profiles=self.rule_profiles),
+                 f"# 角色：{expert.get('name', self.agent_id)}\n{expert.get('persona') or expert.get('description') or ''}"]
         if self.is_orchestrator:
             parts.append(
                 "## 工作方式\n"
@@ -550,7 +563,9 @@ class ChatTurn:
             thread_id=sub["id"], packs_root=self.packs_root,
             track=self.track, capabilities=self.capabilities,
             mcp_bridge=self.mcp_bridge, expert_names=[],
-            abort_event=self.abort_event)  # 停主控连带停执行中的子专家轮
+            abort_event=self.abort_event,  # 停主控连带停执行中的子专家轮
+            owner_tags=self.owner_tags,
+            rule_profiles=self.rule_profiles)
         try:
             summary = sub_turn.run(task)
         except Exception as e:  # noqa: BLE001 —— 专家失败回文本，主控可改派
