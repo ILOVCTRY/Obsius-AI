@@ -61,6 +61,9 @@ async function http<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
   })
   if (!r.ok) return raise(r)
+  // 204 No Content：空 body 无 JSON 可解——曾致删除/停止会话线程
+  // （后端 204 端点）前端报 Unexpected end of JSON input
+  if (r.status === 204) return undefined as T
   return r.json() as Promise<T>
 }
 

@@ -93,9 +93,23 @@ def update_thread(bb, thread_id: str, *, title: str | None = None,
 
 
 def delete_thread(bb, thread_id: str) -> bool:
+    """删除线程（手动递归级联）：先 BFS 收齐全部后代线程（call_expert spawn
+    链可多层），消息全清后再删线程行——chat_messages.thread_id 外键无 CASCADE
+    （schema 未 ALTER），而连接开了 foreign_keys pragma，DB 级联删子线程时会被
+    子消息挡路报 FOREIGN KEY constraint failed（有子线程的线程删除必 500）。"""
     with bb._tx():
-        bb.conn.execute("DELETE FROM chat_messages WHERE thread_id=?", (thread_id,))
-        cur = bb.conn.execute("DELETE FROM chat_threads WHERE id=?", (thread_id,))
+        ids = [thread_id]
+        frontier = [thread_id]
+        while frontier:
+            ph = ",".join("?" * len(frontier))
+            rows = bb.conn.execute(
+                f"SELECT id FROM chat_threads WHERE parent_thread_id IN ({ph})",
+                frontier).fetchall()
+            frontier = [r["id"] for r in rows if r["id"] not in ids]
+            ids.extend(frontier)
+        ph = ",".join("?" * len(ids))
+        bb.conn.execute(f"DELETE FROM chat_messages WHERE thread_id IN ({ph})", ids)
+        cur = bb.conn.execute(f"DELETE FROM chat_threads WHERE id IN ({ph})", ids)
         return cur.rowcount > 0
 
 

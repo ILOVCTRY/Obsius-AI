@@ -87,6 +87,32 @@ def test_chat_store_crud(tmp_path):
     assert chat_store.get_thread(bb, t["id"]) is None
 
 
+def test_delete_thread_cascades_descendants(tmp_path):
+    """回归：删有子线程的父线程曾报 FOREIGN KEY constraint failed → API 500
+    （chat_messages.thread_id 外键无 CASCADE，parent_thread_id 的 DB 级联删
+    子线程行时被子线程消息挡路）。修复：delete_thread 手动 BFS 收齐全部后代，
+    先清消息再删线程行。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    orch = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID, title="父")
+    sub = chat_store.create_thread(bb, "p1", "recon", title="子",
+                                   parent_thread_id=orch["id"])
+    grand = chat_store.create_thread(bb, "p1", "web-solver", title="孙",
+                                     parent_thread_id=sub["id"])
+    chat_store.append_message(bb, orch["id"], "user", "父消息")
+    chat_store.append_message(bb, sub["id"], "user", "子消息")
+    chat_store.append_message(bb, grand["id"], "user", "孙消息")
+    assert chat_store.delete_thread(bb, orch["id"]) is True
+    assert chat_store.list_threads(bb, "p1") == []
+    for tid in (orch["id"], sub["id"], grand["id"]):
+        assert chat_store.list_messages(bb, tid) == []
+    # 无后代的单线程删除照旧；不存在的线程 False
+    lone = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID, title="独")
+    chat_store.append_message(bb, lone["id"], "user", "x")
+    assert chat_store.delete_thread(bb, lone["id"]) is True
+    assert chat_store.delete_thread(bb, "chat-nope") is False
+
+
 # ---------- 运行时：主控轮（todo → call_expert → 汇总） ----------
 
 def test_chat_orchestrator_turn_todo_and_call_expert(tmp_path):
@@ -170,6 +196,47 @@ def test_chat_expert_thread_cannot_call_expert_and_history_replays(tmp_path):
     assert any(b.get("type") == "tool_use" for b in msgs[1]["content"])
     assert msgs[2]["role"] == "user"
     assert any(b.get("type") == "tool_result" for b in msgs[2]["content"])
+
+
+# ---------- 专家工具面装配（回归） ----------
+
+def test_expert_dispatcher_default_full_tools(tmp_path):
+    """回归（8cb819d 首版 bug）：专家 yaml 未配 tools 字段时 expert_tool_names
+    返回 None，契约语义=全量裁剪（与 _tool_specs 一致）；_build_dispatcher 曾把
+    None or [] 当空白名单降级为无工具面——专家线程所有工具报
+    「[错误] 工具 X 不可用：本线程未装配工具面」（recon.yaml 等无 tools 字段
+    的专家全灭）。修复后缺省应装配全量工具（排除 _EXPERT_EXCLUDED 与
+    todo_write/call_expert），显式白名单专家不受影响。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    orch = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID, title="父")
+    sub = chat_store.create_thread(bb, "p1", "recon",
+                                   parent_thread_id=orch["id"], spawned_task="侦察")
+    turn = ChatTurn(bb=bb, llm=FakeLLM([]), project_id="p1", thread_id=sub["id"],
+                    packs_root="packs", track="pentest", capabilities=["web"],
+                    mcp_bridge=None, expert_names=["recon"])
+    d = turn._build_dispatcher()
+    assert d is not None and d.allowed_tools
+    # 实操工具齐备（recon.yaml 没有 tools 字段 → 全量）
+    assert {"run_cmd", "bb_query", "bb_add_finding"} <= set(d.allowed_tools)
+    # 控制原语仍排除（任务队列/计划闸/派单/待办）
+    assert not {"publish_task", "task_plan", "call_expert",
+                "todo_write"} & set(d.allowed_tools)
+
+
+def test_expert_dispatcher_explicit_whitelist(tmp_path):
+    """显式 tools 白名单优先：配了 tools 的专家按白名单装配（不放大）。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    orch = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID, title="父")
+    sub = chat_store.create_thread(bb, "p1", "_generalist",
+                                   parent_thread_id=orch["id"], spawned_task="通才")
+    turn = ChatTurn(bb=bb, llm=FakeLLM([]), project_id="p1", thread_id=sub["id"],
+                    packs_root="packs", track="ctf", capabilities=[],
+                    mcp_bridge=None, expert_names=["_generalist"])
+    d = turn._build_dispatcher()
+    # _generalist.yaml tools: null → 同样走全量裁剪语义（显式 null ≈ 未配）
+    assert d is not None and "run_cmd" in set(d.allowed_tools)
 
 
 # ---------- 中止（停止按钮） ----------

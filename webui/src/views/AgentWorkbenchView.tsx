@@ -330,7 +330,7 @@ export function AgentWorkbenchView({ pid, meta }: { pid: string; meta: ProjectDe
         <div className="wb-thread-list">
           {threads.map((t) => (
             <div key={t.id} className={cn("wb-thread", t.id === tid && "is-active")}
-              onClick={() => selectThread(t.id)}>
+              onClick={() => selectThread(t.id)} title={t.title || "(未命名)"}>
               <span className={cn("wb-dot", t.status === "running" && "is-running",
                 t.status === "error" && "is-error")} />
               <span className="min-w-0 flex-1">

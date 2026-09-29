@@ -12,7 +12,10 @@
 **ON DELETE CASCADE**/spawned_task/todo JSON）+ `chat_messages`（role
 user|assistant|tool / content / tool_calls JSON / tool_use_id）。消息按 API
 数组序落库，**重放即 LLM messages**（assistant 行重建 tool_use 块、tool 行转
-tool_result）。唯一写入口 `store.py`（`bb._tx()`）；线程删除级联清消息+子线程。
+tool_result）。唯一写入口 `store.py`（`bb._tx()`）；线程删除级联清消息+子线程
+（`delete_thread` 手动 BFS 收齐全部后代 → 先清消息再删线程行；chat_messages
+外键无 CASCADE 而 foreign_keys pragma 开启，DB 隐式级联会被子消息挡路报
+FOREIGN KEY constraint failed → 曾致删有子线程的线程 500）。
 
 ## 运行时（runtime.py）
 
@@ -22,6 +25,11 @@ tool_result）。唯一写入口 `store.py`（`bb._tx()`）；线程删除级联
 - **子专家**（agent_id=专家池 id）：AGENT_TOOLS 全量裁剪——排除任务队列/计划/
   意图/收尾/私信/提案/HITL 控制原语（`_EXPERT_EXCLUDED`，防污染任务队列）；
   专家 yaml `tools:` 字段优先；+ mcp__*；无 call_expert（**spawn 深度=1**）。
+  **None 语义统一（2026-09-29 回归修复）**：`expert_tool_names` 返回 None
+  （yaml 未配 tools 字段，recon/web-solver 等全部专家）=「全量裁剪」——
+  `_build_dispatcher` 与 `_tool_specs` 必须同一处理；首版曾把 `None or []`
+  当空白名单降级为无工具面（specs 全量给 LLM、dispatch 层全拒绝，「工具 X
+  不可用：本线程未装配工具面」），回归测试 test_expert_dispatcher_*。
 - `call_expert`：spawn 持久子线程（parent_thread_id 留档）→ 隔离上下文跑完 →
   摘要+线程引用回传主控；不审批、事件流全程可见。
 - `todo_write`：整体覆写 thread.todo（工作记忆外化，前端 TodoCard 渲染）。

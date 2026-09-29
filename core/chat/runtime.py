@@ -112,8 +112,15 @@ class ChatTurn:
             allowed = [t for t in _ORCH_BASE_TOOLS if t != "todo_write"
                        and t != "call_expert"]
         else:
-            allowed = expert_tool_names(self.packs_root, self.agent_id,
-                                        self.track) or []
+            names = expert_tool_names(self.packs_root, self.agent_id,
+                                      self.track)
+            if names is None:
+                # None=未配 tools 字段，契约语义是「全量裁剪」（与 _tool_specs
+                # 同一处理）——8cb819d 首版曾把 None or [] 当空白名单降级为
+                # 无工具面，专家线程所有工具报「不可用：本线程未装配工具面」
+                names = [s["name"] for s in AGENT_TOOLS
+                         if s["name"] not in _EXPERT_EXCLUDED]
+            allowed = names
         allowed = [t for t in allowed if t not in ("todo_write", "call_expert")]
         if not allowed:
             return None

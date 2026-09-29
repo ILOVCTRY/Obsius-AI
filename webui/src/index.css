@@ -274,7 +274,7 @@
 .wb-thread { display: flex; width: 100%; gap: 8px; align-items: center; margin: 2px 0; padding: 7px 9px; border: 1px solid transparent; border-radius: 8px; background: transparent; text-align: left; transition: background .14s, border-color .14s; }
 .wb-thread:hover { background: oklch(0.24 0.018 250 / .55); }
 .wb-thread.is-active { border-color: oklch(0.8 0.13 190 / .24); background: oklch(0.8 0.13 190 / .08); }
-.wb-thread-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--foreground); font-size: 12px; }
+.wb-thread-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--foreground); font-size: 12px; }
 .wb-thread-meta { display: flex; margin-top: 2px; align-items: center; gap: 6px; color: var(--muted-foreground); font-family: var(--font-mono); font-size: 9px; }
 .wb-dot { display: inline-block; width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: var(--status-idle); }
 .wb-dot.is-running { background: var(--status-running); animation: wb-breathe 1.6s ease-in-out infinite; }
