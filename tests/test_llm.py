@@ -3,6 +3,8 @@
 （整份 JSON 行流，命中非 SSE 兜底，解析等价非流式）；transport= 仅降级/哨兵用。"""
 
 import json
+import socket
+import urllib.error
 
 import pytest
 
@@ -204,6 +206,154 @@ def test_retry_exhausts_then_raises(monkeypatch):
         p.chat([{"role": "user", "content": "hi"}])
 
 
+# ---------- 瞬时网络错误（2026-10-01 健壮性） ----------
+# 背景：网关 TCP 重置（Windows WSAECONNRESET 10054）此前被包成 LLMError，
+# 重试循环接不住 → 0 次重试直接判轮次失败。下列测试锁定「连接类故障可重试」。
+
+class _BreakingStream:
+    """迭代时先吐 N 行再抛 ConnectionResetError（模拟流式建连后中途断流）。"""
+
+    def __init__(self, lines, exc_after=0):
+        self._lines = list(lines)
+        self._exc_after = exc_after
+        self._i = 0
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._i >= self._exc_after:
+            raise ConnectionResetError(10054, "远程主机强迫关闭了一个现有的连接。")
+        line = self._lines[self._i]
+        self._i += 1
+        return line
+
+    def close(self):
+        pass
+
+
+def test_default_transport_classifies_connection_reset_as_retryable(monkeypatch):
+    """_default_transport/_default_stream_transport：URLError(ConnectionResetError
+    10054) → 抛 ConnectionError（可重试）；DNS 解析失败仍 LLMError（快速暴露）。"""
+    from core.llm import anthropic_compat as ac
+
+    def _reset(*a, **k):
+        raise urllib.error.URLError(
+            ConnectionResetError(10054, "远程主机强迫关闭了一个现有的连接。"))
+
+    monkeypatch.setattr(ac.urllib.request, "urlopen", _reset)
+    with pytest.raises(ConnectionError):
+        ac._default_transport(5.0)("https://fake/v1/messages", {}, b"{}")
+    with pytest.raises(ConnectionError):
+        ac._default_stream_transport(5.0)("https://fake/v1/messages", {}, b"{}")
+
+    def _dns(*a, **k):
+        raise urllib.error.URLError(socket.gaierror(11001, "getaddrinfo failed"))
+
+    monkeypatch.setattr(ac.urllib.request, "urlopen", _dns)
+    with pytest.raises(ac.LLMError):
+        ac._default_transport(5.0)("https://fake/v1/messages", {}, b"{}")
+
+
+def test_retry_on_connection_reset_then_success(monkeypatch):
+    """连接重置（10054）自动重试，恢复后成功——一次 TCP 重置不该杀死整轮。"""
+    monkeypatch.setattr("core.llm.anthropic_compat.RETRY_BACKOFF", 0)
+    monkeypatch.setattr("core.llm.anthropic_compat.CONN_BACKOFF", (0, 0, 0))
+    n = {"n": 0}
+
+    def transport(url, headers, body):
+        n["n"] += 1
+        if n["n"] == 1:
+            raise ConnectionResetError(10054, "远程主机强迫关闭了一个现有的连接。")
+        return 200, _sse_json(_anthropic_response([{"type": "text", "text": "ok"}]))
+
+    p = AnthropicCompatProvider("https://fake", "key", "m", stream_transport=transport)
+    r = p.chat([{"role": "user", "content": "hi"}])
+    assert r.text == "ok" and n["n"] == 2
+
+
+def test_connection_reset_exhausts_then_raises_network_error(monkeypatch):
+    """连接类独立预算（2026-10-01 事故修复）：CONN_RETRIES=4 → 共 4 次尝试后放弃
+    （此前与 5xx 共用 2 次预算，一次 SSE 长连接重置即判死整轮）。"""
+    monkeypatch.setattr("core.llm.anthropic_compat.RETRY_BACKOFF", 0)
+    monkeypatch.setattr("core.llm.anthropic_compat.CONN_BACKOFF", (0, 0, 0))
+    n = {"n": 0}
+
+    def transport(url, headers, body):
+        n["n"] += 1
+        raise ConnectionResetError(10054, "远程主机强迫关闭了一个现有的连接。")
+
+    p = AnthropicCompatProvider("https://fake", "key", "m", stream_transport=transport)
+    with pytest.raises(LLMError, match="网络错误") as ei:
+        p.chat([{"role": "user", "content": "hi"}])
+    assert n["n"] == 4  # CONN_RETRIES=4：重试 3 次后放弃
+    assert "已重试 3 次" in str(ei.value)
+
+
+def test_retry_budget_per_category(monkeypatch):
+    """按类别预算（2026-10-01）：429/5xx 仍 2 次尝试（保留快速失败基调）；
+    连接类 4 次。"""
+    monkeypatch.setattr("core.llm.anthropic_compat.RETRY_BACKOFF", 0)
+    monkeypatch.setattr("core.llm.anthropic_compat.CONN_BACKOFF", (0, 0, 0))
+    s = {"n": 0}
+
+    def t503(url, headers, body):
+        s["n"] += 1
+        return 503, {"error": {"message": "down"}}
+
+    with pytest.raises(LLMError, match="503"):
+        AnthropicCompatProvider("https://fake", "key", "m",
+                                stream_transport=t503).chat(
+            [{"role": "user", "content": "hi"}])
+    assert s["n"] == 2          # 5xx 维持 2 次
+
+    c = {"n": 0}
+
+    def treset(url, headers, body):
+        c["n"] += 1
+        raise ConnectionResetError(10054, "reset")
+
+    with pytest.raises(LLMError, match="网络错误"):
+        AnthropicCompatProvider("https://fake", "key", "m",
+                                stream_transport=treset).chat(
+            [{"role": "user", "content": "hi"}])
+    assert c["n"] == 4          # 连接类 4 次
+
+
+def test_stream_break_without_delta_is_retried(monkeypatch):
+    """流式建连后中途断开、但尚无任何增量输出 → 安全重试（重发不重复上屏）。"""
+    monkeypatch.setattr("core.llm.anthropic_compat.RETRY_BACKOFF", 0)
+    monkeypatch.setattr("core.llm.anthropic_compat.CONN_BACKOFF", (0, 0, 0))
+    n = {"n": 0}
+
+    def transport(url, headers, body):
+        n["n"] += 1
+        if n["n"] == 1:
+            return 200, _BreakingStream([], exc_after=0)
+        return 200, _sse_json(_anthropic_response([{"type": "text", "text": "ok"}]))
+
+    p = AnthropicCompatProvider("https://fake", "key", "m", stream_transport=transport)
+    r = p.chat([{"role": "user", "content": "hi"}], on_text=lambda _d: None)
+    assert r.text == "ok" and n["n"] == 2
+
+
+def test_stream_break_after_delta_is_not_retried(monkeypatch):
+    """流式中途断开但已吐出增量 → 不重试（避免重复回调 on_text 造成重复上屏）。"""
+    monkeypatch.setattr("core.llm.anthropic_compat.RETRY_BACKOFF", 0)
+    n = {"n": 0}
+    chunk = json.dumps({"type": "content_block_delta", "index": 0,
+                        "delta": {"type": "text_delta", "text": "hi"}})
+
+    def transport(url, headers, body):
+        n["n"] += 1
+        return 200, _BreakingStream([f"data: {chunk}"], exc_after=1)
+
+    p = AnthropicCompatProvider("https://fake", "key", "m", stream_transport=transport)
+    with pytest.raises(LLMError, match="流式传输中断"):
+        p.chat([{"role": "user", "content": "hi"}], on_text=lambda _d: None)
+    assert n["n"] == 1
+
+
 # ---------- 思考开关（2026-09-19 直播间终端化） ----------
 
 def test_thinking_param_injected_when_enabled():
@@ -367,6 +517,37 @@ def test_stream_truncated_tool_args_raises_marked_error():
         p.chat([{"role": "user", "content": "hi"}], on_thinking=lambda _: None)
     assert ei.value.truncated is True
     assert "max_tokens" in str(ei.value)
+
+
+def test_stream_trailing_junk_tool_args_salvaged():
+    """2026-10-01 事故：网关 SSE 尾部多发字符（stop_reason=tool_use 正常收尾却报
+    "Extra data"）——JSON 本体完整，raw_decode 取首值忽略尾部冗余，不再抛错。"""
+    lines = [
+        'data: {"type":"message_start","message":{"usage":{"input_tokens":1}}}',
+        'data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t1","name":"run_cmd"}}',
+        'data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"cmd\\": \\"id\\"}"}}',
+        'data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"}"}}',
+        'data: {"type":"content_block_stop","index":0}',
+        'data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":3}}',
+    ]
+    p = AnthropicCompatProvider("https://fake", "key", "m", stream_transport=_sse_transport(lines))
+    r = p.chat([{"role": "user", "content": "hi"}], on_thinking=lambda _: None)
+    assert r.stop_reason == "tool_use"
+    assert r.tool_calls[0].name == "run_cmd"
+    assert r.tool_calls[0].arguments == {"cmd": "id"}   # 尾部冗余被忽略
+
+
+def test_stream_tool_args_non_dict_trailing_still_truncated():
+    """首值非 dict（工具参数必为对象）时不抢救，仍抛带 truncated 标记的 LLMError。"""
+    lines = [
+        'data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t1","name":"run_cmd"}}',
+        'data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"123x"}}',
+        'data: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}',
+    ]
+    p = AnthropicCompatProvider("https://fake", "key", "m", stream_transport=_sse_transport(lines))
+    with pytest.raises(LLMError) as ei:
+        p.chat([{"role": "user", "content": "hi"}], on_thinking=lambda _: None)
+    assert ei.value.truncated is True
 
 
 def test_default_max_tokens_raised_to_16384():

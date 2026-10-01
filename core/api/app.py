@@ -292,6 +292,11 @@ class AssetPatchIn(BaseModel):
     meta: dict | None = None
 
 
+class EngineIn(BaseModel):
+    """PUT .../binaries/{sha}/engine：样本反编译引擎模式（ida / ghidra）。"""
+    engine: str
+
+
 class FofaConfigIn(BaseModel):
     """PUT /api/fofa/config：key 传空串/缺省 = 不修改（防回显误覆盖）；"""
     base_url: str | None = None
@@ -1332,7 +1337,8 @@ def create_app(
             return {"status": "no-tool", **payload}
         try:
             data, info = svc.export_to_cache(str(_inside(proj, rel_path)),
-                                             progress=progress, stop_event=stop)
+                                             progress=progress, stop_event=stop,
+                                             engine=_binary_engine(proj, sha))
         except Exception as e:  # noqa: BLE001 —— Job 失败也要留黑板痕迹
             bb.append_event(pid, "binary.triage_failed",
                             {"sha": sha, "reason": "export-failed",
@@ -1376,7 +1382,8 @@ def create_app(
             raise HTTPException(409, "该样本正在分诊中")
         # progress 可变 dict 塞进 job meta（引用共享）→ 前端轮询带出；stop Event 经
         # export_cancel[sha] 供取消端点置位（协作式停，保留已导出部分）
-        progress: dict = {"done": 0, "total": 0, "phase": "starting"}
+        progress: dict = {"done": 0, "total": 0, "phase": "starting",
+                          "stoppable": False}
         stop = threading.Event()
         app.state.export_cancel[sha] = stop
         return app.state.jobs.submit(
@@ -1393,6 +1400,24 @@ def create_app(
             and j["meta"].get("project_id") == pid and j["meta"].get("sha") == sha
             for j in app.state.jobs.all_jobs()
         )
+
+    _DELETE_STOP_TIMEOUT = 60.0
+
+    def _binary_jobs_running(pid: str, sha: str) -> bool:
+        """该样本是否仍有在跑的 Job（分诊 triage_sha / 拉取·写回·导入等 sha）。"""
+        return any(
+            j["status"] == "running"
+            and j["meta"].get("project_id") == pid
+            and (j["meta"].get("sha") == sha or j["meta"].get("triage_sha") == sha)
+            for j in app.state.jobs.all_jobs()
+        )
+
+    def _stop_binary_jobs(pid: str, sha: str) -> None:
+        """请求协作式停止该样本的在跑 Job：置 export_cancel（Ghidra 分诊）与
+        pull_cancel（IDA 拉取页间检查）。IDA headless 全量导出不支持中断——只能等。"""
+        for ev in (app.state.export_cancel.get(sha), app.state.pull_cancel.get(sha)):
+            if ev is not None:
+                ev.set()
 
     def _run_binary_writeback(pid: str, sha: str, items: list[dict]) -> dict:
         """func_kb → IDA .i64 写回（零 LLM）。非 ok 状态结构化返回，前端按状态给文案。"""
@@ -1682,6 +1707,58 @@ def create_app(
         if isinstance(row, dict) and isinstance(row.get("address"), int):
             return {**row, "address": hex(row["address"])}
         return row
+
+    def _sample_path(proj: Project, sha: str) -> Path | None:
+        """样本文件绝对路径（资产 meta.path 相对项目根）；缺路径/越界返回 None。"""
+        asset = proj.bb.find_asset(proj.id, "binary", sha)
+        rel = (asset.get("meta") or {}).get("path") if asset else None
+        if not rel:
+            return None
+        try:
+            return _inside(proj, rel)
+        except Exception:  # noqa: BLE001 —— 越界/异常一律当缺失
+            return None
+
+    def _binary_engine(proj: Project, sha: str) -> str:
+        """样本配置的反编译引擎（asset meta.engine，缺省 ida；2026-10-01 双模式）。"""
+        from core.tools.decompiler import normalize_engine
+        asset = proj.bb.find_asset(proj.id, "binary", sha)
+        return normalize_engine((asset.get("meta") or {}).get("engine") if asset else None)
+
+    def _purge_sample_files(proj: Project, sha: str,
+                            blob: Path | None = None) -> list[str]:
+        """物理清理单样本的项目内磁盘产物（2026-10-01 样本删除；best-effort）。
+
+        删：samples/<本体>（blob 由调用方在删资产行前解析传入）；decompiler-cache/
+        {sha}.json + {sha}.details/ + {sha}.annotations.json；decompiler-db/<sha>
+        (.i64/.idb + 锁文件)；.ghidra-tmp/ghidra-<sha>/。**全局 data/decompiler-cache
+        跨项目共享，不动**。单项失败只记日志不抛——DB 行已删，残留文件不应阻断删除
+        语义。返回已删路径清单。
+        """
+        removed: list[str] = []
+
+        def _rm(p: Path) -> None:
+            try:
+                if p.is_dir():
+                    shutil.rmtree(p, ignore_errors=True)
+                elif p.exists():
+                    p.unlink()
+                if not p.exists():
+                    removed.append(str(p))
+            except OSError as e:
+                log.warning("样本清理失败 %s: %s", p, e)
+
+        if blob is not None:
+            _rm(blob)
+        cache_dir = Path(proj.artifacts_dir) / "decompiler-cache"
+        _rm(cache_dir / f"{sha}.json")
+        _rm(cache_dir / f"{sha}.details")
+        _rm(cache_dir / f"{sha}.annotations.json")
+        db_dir = Path(proj.artifacts_dir) / "decompiler-db"
+        for ext in (".i64", ".idb", ".id0", ".id1", ".id2", ".nam", ".til"):
+            _rm(db_dir / f"{sha}{ext}")
+        _rm(Path(proj.artifacts_dir) / ".ghidra-tmp" / f"ghidra-{sha}")
+        return removed
 
     def _require_cache(proj: Project, sha: str) -> dict:
         data = _rev_service(proj).read_cached(sha)
@@ -2780,6 +2857,7 @@ def create_app(
         return {
             "sha": sha,
             "asset_meta": asset.get("meta") or {},
+            "engine": _binary_engine(proj, sha),
             "cached": data is not None,
             "meta": (data or {}).get("meta"),
             "sections": (data or {}).get("sections"),
@@ -2789,6 +2867,12 @@ def create_app(
             "function_count": len((data or {}).get("functions") or []),
             "analyzed_count": len(kb),
             "risk_count": sum(1 for f in kb if f.get("risk_tags")),
+            "findings_count": len(proj.bb.conn.execute(
+                "SELECT 1 FROM findings WHERE target_asset_id=?",
+                (asset["id"],)).fetchall()),
+            "logic_blocks_count": len(proj.bb.conn.execute(
+                "SELECT 1 FROM logic_blocks WHERE project_id=? AND binary_sha256=?",
+                (pid, sha)).fetchall()),
             "db_path": _db_rel(proj, sha),
             "tools": {
                 "ida": {"state": _tool_lamp(proj, "ida-headless", data is not None)},
@@ -2800,6 +2884,61 @@ def create_app(
                 ) else "off")},
             },
         }
+
+    @app.put("/api/projects/{pid}/binaries/{sha}/engine")
+    def set_binary_engine(pid: str, sha: str, body: EngineIn):
+        """设置样本的反编译引擎模式（ida / ghidra，2026-10-01 工作台双模式）。
+
+        存 binary 资产 meta.engine；引擎是「偏好」不是「排他」——所选引擎不可用时
+        后端仍回退另一引擎。「开始分析」按此引擎偏好选路，Ghidra 小样本导出内嵌反汇编。"""
+        from core.tools.decompiler import ENGINES, normalize_engine
+
+        proj = _project(pid)
+        asset = proj.bb.find_asset(pid, "binary", sha)
+        if asset is None:
+            raise HTTPException(404, f"样本资产不存在: {sha}")
+        raw = str(body.engine or "").strip().lower()
+        if raw not in ENGINES:
+            raise HTTPException(422,
+                                f"未知引擎: {body.engine}（可选 {'/'.join(ENGINES)}）")
+        engine = normalize_engine(raw)
+        proj.bb.update_asset_meta(asset["id"], {"engine": engine})
+        proj.bb.append_event(pid, "binary.engine_set",
+                             {"sha": sha, "engine": engine}, author="human")
+        return {"status": "ok", "sha": sha, "engine": engine}
+
+    @app.delete("/api/projects/{pid}/binaries/{sha}")
+    def delete_binary(pid: str, sha: str):
+        """从项目中移除一个样本（2026-10-01 逆向工作台）。
+
+        硬级联：func_kb（该 sha）+ findings（指向该 asset）+ logic_blocks/
+        logic_block_funcs（binary_sha256=sha）+ chain_links（指向被删 func/finding 的边）
+        + 资产行；并物理清理磁盘产物（样本本体 / 缓存 / IDA 库 / Ghidra 工程；
+        全局缓存保留）。落 binary.deleted 审计事件。
+
+        并发安全：若该样本正在分诊/拉取，先置协作停止标志并等待 Job 收尾（上限
+        _DELETE_STOP_TIMEOUT）；超时（IDA headless 不支持协作中断）→ 409。
+        """
+        proj = _project(pid)
+        if proj.bb.find_asset(pid, "binary", sha) is None:
+            raise HTTPException(404, f"样本资产不存在: {sha}")
+        _stop_binary_jobs(proj.id, sha)
+        deadline = time.time() + _DELETE_STOP_TIMEOUT
+        while _binary_jobs_running(proj.id, sha) and time.time() < deadline:
+            time.sleep(0.2)
+        if _binary_jobs_running(proj.id, sha):
+            raise HTTPException(
+                409, "该样本的分诊/拉取仍在进行且无法中断（IDA headless 不支持协作停），"
+                     "请等其完成后再删除")
+        blob = _sample_path(proj, sha)  # 删资产行前解析样本路径（行删后 find_asset 失效）
+        try:
+            counts = proj.bb.delete_binary(pid, sha, author="human")
+        except LookupError as e:
+            raise HTTPException(404, str(e)) from e
+        removed = _purge_sample_files(proj, sha, blob)
+        app.state.export_cancel.pop(sha, None)
+        app.state.pull_cancel.pop(sha, None)
+        return {"deleted": sha, "removed_files": len(removed), **counts}
 
     @app.get("/api/projects/{pid}/binaries/{sha}/functions")
     def cached_functions(pid: str, sha: str):
@@ -2829,37 +2968,47 @@ def create_app(
 
     @app.get("/api/projects/{pid}/binaries/{sha}/functions/{addr}")
     def cached_function(pid: str, sha: str, addr: str):
-        """缓存命中走 v3 缓存；名单有但无伪码（IDA 拉取轻量缓存）→ 按需详情
-        （详情文件命中/自动 analyze_batch 拉取落盘，2026-09-30）；缓存缺席时
-        MCP 在线实时取当前 IDA 库伪码（source=mcp），MCP 也没有才 409。"""
+        """缓存命中走 v3 缓存；按样本引擎取伪码/反汇编（2026-10-01 双模式）：
+
+        - IDA（默认）：缓存有伪码直接用；名单有但无伪码（IDA 拉取轻量缓存）→ 按需
+          详情（MCP analyze_batch 拉取落盘）；缓存缺席且 MCP 在线实时取（source=mcp）
+        - Ghidra：伪码/调用关系取缓存；反汇编取缓存（小样本内嵌）或持久 Ghidra
+          工程按需反汇编（大样本）——走 ensure_func_detail 的 ghidra 分支
+        """
         proj = _project(pid)
         svc = _rev_service(proj)
         want = _parse_hex_addr(addr)
+        engine = _binary_engine(proj, sha)
+        bin_path = _sample_path(proj, sha)
+        bin_arg = str(bin_path) if bin_path else None
         data = svc.read_cached(sha)
         if data is not None:
             for f in data.get("functions", []):
-                if int(f["address"]) == want:
-                    if f.get("pseudocode"):
-                        return {"address": hex(int(f["address"])),
-                                "name": f.get("name"), "size": f.get("size", 0),
-                                "calls": f.get("calls") or [],
-                                "pseudocode": f.get("pseudocode"),
-                                "disasm": None}
-                    # 名单命中但无伪码（IDA 拉取）：按需详情补拉（自动+落盘）
-                    detail = svc.ensure_func_detail(sha, want)
+                if int(f["address"]) != want:
+                    continue
+                # Ghidra 模式（要反汇编）或名单命中但无伪码 → 按需详情补拉（自动+落盘）
+                if engine == "ghidra" or not f.get("pseudocode"):
+                    detail = svc.ensure_func_detail(sha, want, engine=engine,
+                                                    binary=bin_arg)
                     if detail is not None:
                         return _func_detail_view(detail, want)
-                    return {"address": hex(want), "name": f.get("name"),
-                            "size": f.get("size", 0), "calls": f.get("calls") or [],
-                            "pseudocode": None, "disasm": None}
+                return {"address": hex(int(f["address"])),
+                        "name": f.get("name"), "size": f.get("size", 0),
+                        "calls": f.get("calls") or [],
+                        "pseudocode": f.get("pseudocode"),
+                        "disasm": ({"lines": f["disasm_lines"],
+                                    "truncated": bool(f.get("disasm_truncated"))}
+                                   if f.get("disasm_lines") else None)}
             raise HTTPException(404, f"缓存中无此函数: {addr}")
-        detail = svc.ensure_func_detail(sha, want)
+        detail = svc.ensure_func_detail(sha, want, engine=engine, binary=bin_arg)
         if detail is not None:
             return _func_detail_view(detail, want)
-        live = svc.live_decompile(want)
-        if live is not None:
-            return {"address": hex(want), "name": None, "size": 0, "calls": [],
-                    "pseudocode": live["pseudocode"], "disasm": None, "source": "mcp"}
+        if engine == "ida":
+            live = svc.live_decompile(want)
+            if live is not None:
+                return {"address": hex(want), "name": None, "size": 0, "calls": [],
+                        "pseudocode": live["pseudocode"], "disasm": None,
+                        "source": "mcp"}
         raise HTTPException(409, "样本尚未完成 headless 分诊（缓存缺席）；"
                                 "可在 IDA 中 Ctrl-Alt-M 启动 MCP 后实时读取，或先完成分诊")
 
@@ -2870,21 +3019,25 @@ def create_app(
         proj = _project(pid)
         svc = _rev_service(proj)
         want = _parse_hex_addr(addr)
+        engine = _binary_engine(proj, sha)
         data = svc.read_cached(sha)
         target = None
         if data is not None:
             target = next((f for f in data.get("functions", [])
                            if int(f["address"]) == want), None)
-            # headless 全量缓存（函数带 calls 键）→ build_xrefs 权威全局反查
-            if target is not None and "calls" in target:
+            # headless 全量缓存（函数带 calls 键）→ build_xrefs 权威全局反查；
+            # Ghidra 模式一律用缓存（无 MCP 桥，不回实时降级）
+            if target is not None and ("calls" in target or engine == "ghidra"):
                 x = build_xrefs(data, want)
                 if x is None:
                     raise HTTPException(404, f"缓存中无此函数: {addr}")
                 return x
         # IDA 拉取轻量缓存（无 calls）/缓存缺席 → 按需详情（缓存命中→自动拉取落盘）
+        bin_path = _sample_path(proj, sha)
+        bin_arg = str(bin_path) if bin_path else None
         detail = svc.read_func_detail(sha, want)
         if detail is None:
-            detail = svc.ensure_func_detail(sha, want)
+            detail = svc.ensure_func_detail(sha, want, engine=engine, binary=bin_arg)
         if detail is not None:
             return {"address": hex(want), "name": detail.get("name"),
                     "callers": detail.get("callers") or [],
@@ -2896,12 +3049,14 @@ def create_app(
                     "callers": [], "callees": []}
         if data is not None:
             raise HTTPException(404, f"缓存中无此函数: {addr}")
-        # 缓存缺席：MCP 在线走 func_profile 实时降级（xrefs_for 内含选路）
-        x = svc.xrefs_for(sha, want)
-        if x is None:
-            raise HTTPException(409, "样本尚未完成 headless 分诊（缓存缺席）；"
-                                    "可在 IDA 中 Ctrl-Alt-M 启动 MCP 后实时读取，或先完成分诊")
-        return x
+        if engine == "ida":
+            # 缓存缺席：MCP 在线走 func_profile 实时降级（xrefs_for 内含选路）；
+            # Ghidra 模式无 MCP 桥，直接 409 提示先分诊
+            x = svc.xrefs_for(sha, want)
+            if x is not None:
+                return x
+        raise HTTPException(409, "样本尚未完成 headless 分诊（缓存缺席）；"
+                                "可在 IDA 中 Ctrl-Alt-M 启动 MCP 后实时读取，或先完成分诊")
 
     @app.get("/api/projects/{pid}/binaries/{sha}/strings")
     def cached_strings(pid: str, sha: str, q: str = Query(default="", max_length=200)):

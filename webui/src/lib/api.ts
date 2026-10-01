@@ -191,6 +191,15 @@ export const api = {
       `/api/projects/${pid}/binaries/${sha}/triage/cancel`, { method: "POST" }),
   binaryOverview: (pid: string, sha: string) =>
     http<BinaryOverview>(`/api/projects/${pid}/binaries/${sha}/overview`),
+  setBinaryEngine: (pid: string, sha: string, engine: "ida" | "ghidra") =>
+    http<{ status: string; sha: string; engine: string }>(
+      `/api/projects/${pid}/binaries/${sha}/engine`,
+      { method: "PUT", body: JSON.stringify({ engine }) }),
+  // 从项目移除样本（硬级联：func_kb/findings/logic_blocks/链边 + 资产行 + 磁盘产物）
+  deleteSample: (pid: string, sha: string) =>
+    http<{ deleted: string; removed_files: number; funcs: number; findings: number;
+           logic_blocks: number; chain_links: number }>(
+      `/api/projects/${pid}/binaries/${sha}`, { method: "DELETE" }),
   cachedFunctions: (pid: string, sha: string) =>
     http<CachedFuncRow[]>(`/api/projects/${pid}/binaries/${sha}/functions`),
   cachedFunction: (pid: string, sha: string, addr: string) =>

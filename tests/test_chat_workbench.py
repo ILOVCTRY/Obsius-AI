@@ -24,19 +24,22 @@ from core.chat.runtime import (
     _CTX_SUMMARY_TAG,
     _MAX_TOOL_RESULT_CHARS,
     _MODEL_WINDOW_FALLBACK,
+    _classify_error,
     _mask_old_tool_results,
     _msg_text,
     _recent_boundary,
+    _sanitize_history,
 )
-from core.llm.provider import ContextOverflowError, LLMResponse, ToolCall, Usage
+from core.llm.provider import ContextOverflowError, LLMError, LLMResponse, ToolCall, Usage
 
 
 # ---------- 假 LLM ----------
 
 class FakeLLM:
-    """脚本化 LLM：按队列吐响应；记录调用（system/tools 断言用）。"""
+    """脚本化 LLM：按队列吐响应；记录调用（system/tools 断言用）。
+    脚本项为异常实例时直接抛出（测截断整轮重试等异常路径）。"""
 
-    def __init__(self, script: list[LLMResponse]):
+    def __init__(self, script):
         self.script = list(script)
         self.calls: list[dict] = []
         self.lock = threading.Lock()
@@ -46,7 +49,10 @@ class FakeLLM:
             self.calls.append({"messages": [dict(m) for m in messages],
                                "system": kwargs.get("system"),
                                "tools": kwargs.get("tools")})
-            return self.script.pop(0)
+            item = self.script.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        return item
 
 
 def _resp(text="", tool_calls=None) -> LLMResponse:
@@ -241,6 +247,67 @@ def test_chat_system_prompt_includes_binary_skills_for_research(tmp_path):
     system = llm.calls[0]["system"]
     assert "binary-rev" in system and "file-triage" in system
     assert "blueprint-rebuild" in system  # research 轨技能也在（pack 并集）
+
+
+def test_chat_max_steps_budget():
+    """对话轮步数上限：主控/子专家均 200（2026-10-01 由 24/32 提升）。"""
+    from core.chat import runtime
+    assert runtime._ORCH_MAX_STEPS == 200
+    assert runtime._EXPERT_MAX_STEPS == 200
+
+
+def test_chat_last_step_forces_text_final(tmp_path, monkeypatch):
+    """末步强制终稿（2026-10-01）：循环最后一步不传 tools，逼模型输出纯文本终稿，
+    避免「步数耗尽但全程只调工具」→ 落「本轮未产出文本回复」。"""
+    from core.chat import runtime
+    monkeypatch.setattr(runtime, "_EXPERT_MAX_STEPS", 3)
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    llm = FakeLLM([
+        _resp(tool_calls=[_tc("t1", "kb_search", {"q": "x"})]),
+        _resp(tool_calls=[_tc("t2", "kb_search", {"q": "y"})]),
+        _resp(text="收尾总结：完成探测"),
+    ])
+    thread = chat_store.create_thread(bb, "p1", "web-solver")
+    turn = ChatTurn(bb=bb, llm=llm, project_id="p1", thread_id=thread["id"],
+                    packs_root="packs", track="ctf", capabilities=["web"],
+                    mcp_bridge=None, expert_names=None)
+    final = turn.run("探测目标")
+    assert final == "收尾总结：完成探测"
+    assert "本轮未产出文本回复" not in final
+    assert llm.calls[0]["tools"] is not None     # 前步带工具
+    assert llm.calls[-1]["tools"] is None        # 末步不传工具
+    assert chat_store.list_messages(bb, thread["id"])[-1]["content"] == "收尾总结：完成探测"
+
+
+def test_chat_truncated_tool_args_round_retry(tmp_path):
+    """2026-10-01 事故：工具参数流截断（LLMError.truncated）→ chat 轮级整轮重试
+    ≤2 次；重试成功则轮正常收尾（不落错误卡片、线程 status=idle）。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    llm = FakeLLM([
+        LLMError("工具参数流截断（stop_reason=tool_use，已收 2200 字符）: Extra data",
+                 truncated=True),
+        _resp(text="重试成功"),
+    ])
+    thread = chat_store.create_thread(bb, "p1", "web-solver")
+    turn = ChatTurn(bb=bb, llm=llm, project_id="p1", thread_id=thread["id"],
+                    packs_root="packs", track="ctf", capabilities=["web"],
+                    mcp_bridge=None, expert_names=None)
+    final = turn.run("探测目标")
+    assert final == "重试成功"
+    assert len(llm.calls) == 2                       # 首次截断 + 重试一次
+    t = chat_store.get_thread(bb, thread["id"])
+    assert t["status"] == "idle" and not t.get("error")
+
+
+def test_classify_error_stream_category():
+    """2026-10-01：工具参数流截断归类为 stream（网关流异常），不再落 unknown。"""
+    info = _classify_error(LLMError(
+        "工具参数流截断（stop_reason=tool_use，已收 2200 字符）: Extra data",
+        truncated=True))
+    assert info["category"] == "stream"
+    assert "网关流异常" in info["title"]
 
 
 def test_usage_breakdown_calibrated(tmp_path):
@@ -968,3 +1035,148 @@ def test_loop_sends_one_user_message_for_multi_tool_turn(tmp_path):
     assert not any(m["role"] == "user" and isinstance(m.get("content"), list)
                    and any(b.get("type") == "tool_result" for b in m["content"])
                    for m in sent[i + 2:])
+
+
+# ---------- 健壮性（2026-10-01）：错误结构化 + 悬空 tool_calls 修复 ----------
+
+class _BoomLLM:
+    """chat 即抛连接重置（模拟网关 TCP 重置 10054）。"""
+
+    def chat(self, messages, **kwargs):
+        raise ConnectionResetError(10054, "远程主机强迫关闭了一个现有的连接。")
+
+
+class _AbortAfterRespLLM:
+    """返回带 tool_calls 的响应（中止时机由测试自定）。"""
+
+    def __init__(self, resp):
+        self._resp = resp
+
+    def chat(self, messages, **kwargs):
+        return self._resp
+
+
+def _turn(bb, tid, llm, *, track="ctf", caps=("web",), abort_event=None):
+    return ChatTurn(bb=bb, llm=llm, project_id="p1", thread_id=tid,
+                    packs_root="packs", track=track, capabilities=list(caps),
+                    mcp_bridge=None, expert_names=None, abort_event=abort_event)
+
+
+def test_classify_error_categories():
+    """异常 → 结构化错误分类（网络/限流/鉴权/额度/超限/请求非法/未知）。"""
+    assert _classify_error(ConnectionResetError(10054, "x"))["category"] == "network"
+    assert _classify_error(TimeoutError("t"))["category"] == "network"
+    from core.llm.provider import LLMError
+    assert _classify_error(LLMError("HTTP 429 rate limit", status=429))["category"] \
+        == "rate_limit"
+    assert _classify_error(LLMError("HTTP 401 unauthorized", status=401))["category"] \
+        == "auth"
+    assert _classify_error(ContextOverflowError("input length too long", status=400))[
+        "category"] == "context"
+    assert _classify_error(LLMError("HTTP 400 InvalidParameter", status=400))[
+        "category"] == "bad_request"
+    assert _classify_error(ValueError("weird"))["category"] == "unknown"
+    # 每类都带 title / hint / message（前端卡片三要素）
+    info = _classify_error(ConnectionResetError(10054, "reset"))
+    assert info["title"] and info["hint"] and "reset" in info["message"]
+
+
+def test_chat_run_failure_persists_structured_error(tmp_path):
+    """轮次失败：落结构化 error（分类/建议/技术细节）到 chat_threads；新轮清空。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    t = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID)
+    with pytest.raises(ConnectionResetError):
+        _turn(bb, t["id"], _BoomLLM()).run("hi")
+    thread = chat_store.get_thread(bb, t["id"])
+    assert thread["status"] == "error"
+    err = thread["error"]
+    assert err and err["category"] == "network"
+    assert err["title"] and err["hint"] and "10054" in err["message"]
+    # 新轮成功 → status=idle 且 error 清空（None）
+    assert _turn(bb, t["id"], FakeLLM([_resp(text="好的")])).run("再来") == "好的"
+    after = chat_store.get_thread(bb, t["id"])
+    assert after["status"] == "idle" and after["error"] is None
+
+
+def test_chat_abort_mid_tools_keeps_tool_pairing(tmp_path):
+    """中止发生在工具循环中途（工具 1 执行时按停止）：为当前及剩余 tool_calls
+    补落占位结果，历史配对完整（否则悬空 tool_calls → 下轮 400，线程永久损坏）。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    ev = threading.Event()
+    resp = _resp(tool_calls=[_tc("t1", "todo_write", {"items": []}),
+                             _tc("t2", "todo_write", {"items": []})])
+    t = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID)
+    turn = _turn(bb, t["id"], _AbortAfterRespLLM(resp), abort_event=ev)
+    orig = turn._dispatch
+
+    def dispatch(tc):
+        result = orig(tc)
+        ev.set()  # 第一个工具执行完毕 → 模拟人此刻按停止
+        return result
+
+    turn._dispatch = dispatch
+    turn.run("开工")
+    msgs = chat_store.list_messages(bb, t["id"])
+    assert [m["role"] for m in msgs] == ["user", "assistant", "tool", "tool", "assistant"]
+    assert len(msgs[1]["tool_calls"]) == 2
+    assert {m["tool_use_id"] for m in msgs if m["role"] == "tool"} == {"t1", "t2"}
+    assert _pairing_ok(_load_api(bb, t["id"]))  # 每个 tool_use 都有对应 tool_result
+    assert "已按人类要求停止" in msgs[-1]["content"]
+    assert chat_store.get_thread(bb, t["id"])["status"] == "idle"
+
+
+def test_sanitize_history_repairs_dangling_and_orphans():
+    """历史兜底：悬空 tool_use 补占位结果、孤儿 tool_result 丢弃、正常历史零改动。"""
+    normal = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "t1", "name": "x", "input": {}}]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]},
+    ]
+    assert _sanitize_history(normal) == normal  # 幂等
+    dangling = [
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "t9", "name": "x", "input": {}}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "停止"}]},
+    ]
+    fixed = _sanitize_history(dangling)
+    assert fixed[0]["content"][0]["type"] == "tool_use"
+    assert fixed[1]["role"] == "user"
+    assert fixed[1]["content"][0] == {
+        "type": "tool_result", "tool_use_id": "t9",
+        "content": "（该工具调用无结果记录：历史已自动修复）"}
+    assert fixed[2]["content"][0]["text"] == "停止"
+    orphan = [
+        {"role": "user", "content": "hi"},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "ghost", "content": "x"}]},
+    ]
+    assert _sanitize_history(orphan) == [{"role": "user", "content": "hi"}]
+
+
+def _load_api(bb, tid):
+    """经 _load_history 装载（含 _sanitize_history）后的 API 消息数组。"""
+    return _turn(bb, tid, FakeLLM([]))._load_history()
+
+
+def _pairing_ok(messages) -> bool:
+    """校验：每个 assistant tool_use 都有对应 tool_result；无孤儿 tool_result。"""
+    pending: set[str] = set()
+    for m in messages:
+        c = m.get("content")
+        if not isinstance(c, list):
+            continue
+        for b in c:
+            if not isinstance(b, dict):
+                continue
+            if b.get("type") == "tool_use":
+                pending.add(b.get("id"))
+            elif b.get("type") == "tool_result":
+                tid = b.get("tool_use_id")
+                if tid not in pending:
+                    return False
+                pending.discard(tid)
+    return not pending

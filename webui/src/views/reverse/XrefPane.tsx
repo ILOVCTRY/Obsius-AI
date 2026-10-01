@@ -37,7 +37,7 @@ export function XrefPane({
         </p>
       )}
       {xref.source === "cache" && (
-        <p className="px-1 text-[9px] text-muted-foreground" title="按需详情缓存（自动从 IDA MCP 拉取落盘，离线可读）">
+        <p className="px-1 text-[9px] text-muted-foreground" title="按需详情缓存（由样本所选引擎产出，离线可读）">
           已缓存 · {xref.name ?? xref.address}
         </p>
       )}

@@ -65,7 +65,8 @@ def update_thread(bb, thread_id: str, *, title: str | None = None,
                   status: str | None = None,
                   todo: list[dict] | None = None,
                   spawned_task: str | None = None,
-                  usage: dict[str, Any] | None = None) -> dict[str, Any] | None:
+                  usage: dict[str, Any] | None = None,
+                  error: dict[str, Any] | None = None) -> dict[str, Any] | None:
     sets: list[str] = ["updated_at=?"]
     args: list[Any] = [now()]
     if title is not None:
@@ -85,6 +86,10 @@ def update_thread(bb, thread_id: str, *, title: str | None = None,
     if usage is not None:
         sets.append("usage=?")
         args.append(json.dumps(usage, ensure_ascii=False))
+    if error is not None:
+        # '' 表示清空（新轮开始）；dict 表示结构化错误（分类/友好原因/建议/技术细节）
+        sets.append("error=?")
+        args.append(json.dumps(error, ensure_ascii=False) if error else "")
     args.append(thread_id)
     with bb._tx():
         bb.conn.execute(
@@ -147,6 +152,7 @@ def _row(r: sqlite3.Row) -> dict[str, Any]:
     out = dict(r)
     out["todo"] = _loads(out.get("todo"), [])
     out["usage"] = _loads(out.get("usage"), {})
+    out["error"] = _loads(out.get("error"), None)
     return out
 
 

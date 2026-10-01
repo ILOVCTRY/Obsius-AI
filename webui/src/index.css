@@ -306,6 +306,18 @@
 .wb-msg-kind { color: var(--muted-foreground); font-family: var(--font-mono); font-size: 9px; letter-spacing: .06em; }
 .wb-card { padding: 11px 14px; border: 1px solid var(--border); border-radius: 4px 14px 14px 14px; background: oklch(0.185 0.014 250 / .8); font-size: 12.5px; line-height: 1.65; }
 .wb-card.is-stopped { border-color: oklch(0.8 0.14 75 / .3); background: oklch(0.8 0.14 75 / .05); }
+/* 轮次失败错误卡片（2026-10-01）：分类标题 + 建议 + 可折叠技术细节 */
+.wb-error-card { border-color: oklch(0.62 0.2 25 / .4); background: oklch(0.62 0.2 25 / .06); }
+.wb-error-head { display: flex; align-items: center; gap: 7px; margin-bottom: 7px; }
+.wb-error-icon { flex: none; color: oklch(0.74 0.17 25); }
+.wb-error-title { color: oklch(0.86 0.12 25); font-size: 12.5px; font-weight: 600; }
+.wb-error-cat { margin-left: auto; padding: 1px 7px; border: 1px solid oklch(0.62 0.2 25 / .35); border-radius: 999px; color: oklch(0.8 0.12 25); font-family: var(--font-mono); font-size: 9px; letter-spacing: .05em; }
+.wb-error-hint { color: var(--muted-foreground); font-size: 11.5px; line-height: 1.6; }
+.wb-error-toggle { display: inline-flex; align-items: center; gap: 4px; margin-top: 8px; padding: 0; border: 0; background: transparent; color: var(--primary); font-size: 10px; cursor: pointer; }
+.wb-error-toggle:hover { text-decoration: underline; }
+.wb-error-caret { transition: transform .15s ease; }
+.wb-error-caret.is-open { transform: rotate(180deg); }
+.wb-error-detail { margin-top: 7px; max-height: 220px; overflow: auto; padding: 8px 10px; border-radius: 6px; background: oklch(0.16 0.01 250 / .8); color: oklch(0.78 0.05 25); font-family: var(--font-mono); font-size: 10.5px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
 .wb-typing { display: flex; gap: 9px; align-items: center; padding: 10px 14px; border: 1px dashed oklch(0.8 0.13 190 / .3); border-radius: 4px 14px 14px 14px; background: oklch(0.8 0.13 190 / .04); color: var(--muted-foreground); font-size: 12px; }
 .wb-typing-text { overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
 .wb-caret { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--primary); animation: wb-breathe 1.2s ease-in-out infinite; }
@@ -449,6 +461,26 @@
 .wb-splitter { position: relative; width: 5px; flex: 0 0 5px; cursor: col-resize; background: transparent; transition: background .15s; }
 .wb-splitter::before { position: absolute; top: 0; bottom: 0; left: 2px; width: 1px; background: var(--border); content: ""; transition: background .15s, width .15s; }
 .wb-splitter:hover::before, .wb-splitter.is-dragging::before { width: 2px; left: 1.5px; background: oklch(0.8 0.13 190 / .55); }
+
+/* ---- 右栏：漏洞/发现侧边栏（2026-10-01，默认收起） ---- */
+.wb-rail-handle { display: flex; width: 24px; flex: 0 0 24px; flex-direction: column; align-items: center; gap: 8px; padding: 10px 0; border-left: 1px solid var(--border); background: oklch(0.135 0.014 250 / .55); color: var(--muted-foreground); cursor: pointer; transition: background .15s, color .15s; }
+.wb-rail-handle:hover { background: oklch(0.17 0.014 250 / .7); color: var(--foreground); }
+.wb-rail-vtext { writing-mode: vertical-rl; text-orientation: mixed; font-size: 10px; font-weight: 650; letter-spacing: .14em; }
+.wb-rail-dot { width: 6px; height: 6px; border-radius: 9999px; background: var(--status-error); }
+.wb-rail { display: flex; min-height: 0; flex-direction: column; border-left: 1px solid var(--border); background: oklch(0.135 0.014 250 / .55); }
+.wb-rail-head { display: flex; align-items: center; gap: 6px; padding: 9px 10px; border-bottom: 1px solid var(--border); }
+.wb-rail-title { font-size: 11.5px; font-weight: 700; letter-spacing: -.01em; }
+.wb-rail-chain { display: inline-flex; align-items: center; gap: 4px; padding: 3px 7px; border: 1px solid oklch(0.8 0.13 190 / .3); border-radius: 7px; background: oklch(0.8 0.13 190 / .07); color: var(--primary); font-size: 10px; font-weight: 650; transition: border-color .15s, background .15s; }
+.wb-rail-chain:hover { border-color: oklch(0.8 0.13 190 / .5); background: oklch(0.8 0.13 190 / .13); }
+.wb-rail-collapse { display: grid; width: 22px; height: 22px; place-items: center; border: 1px solid var(--border); border-radius: 6px; color: var(--muted-foreground); transition: color .15s, border-color .15s; }
+.wb-rail-collapse:hover { color: var(--foreground); border-color: oklch(0.8 0.13 190 / .4); }
+.wb-rail-filter { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+.wb-rail-chip { padding: 2px 7px; border-radius: 6px; color: var(--muted-foreground); font-size: 10px; transition: background .14s, color .14s; }
+.wb-rail-chip:hover { background: oklch(0.24 0.018 250 / .55); }
+.wb-rail-chip.is-on { background: oklch(0.8 0.13 190 / .12); color: var(--primary); }
+.wb-rail-row { cursor: pointer; padding: 7px 8px; border: 1px solid var(--border); border-radius: 8px; transition: background .14s, border-color .14s; }
+.wb-rail-row:hover { border-color: oklch(0.8 0.13 190 / .3); background: oklch(0.24 0.018 250 / .55); }
+.wb-rail-empty { padding: 14px 12px; color: var(--muted-foreground); font-size: 11px; text-align: center; }
 body.wb-dragging { cursor: col-resize; user-select: none; }
 .wb-tool.is-running .wb-tool-icon { color: var(--primary); }
 .wb-tool-live { flex: 0 0 auto; color: var(--muted-foreground); font-family: var(--font-mono); font-size: 9px; letter-spacing: .04em; }

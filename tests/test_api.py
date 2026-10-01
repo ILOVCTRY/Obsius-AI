@@ -3441,6 +3441,144 @@ def test_rev_triage_cancel_cooperative(client):
                        ).json()["cancelling"] is False
 
 
+def test_rev_binary_engine_set_and_overview(client):
+    """引擎偏好端点（2026-10-01 双模式）：默认 ida；PUT 落库 asset meta.engine +
+    事件 binary.engine_set + overview.engine 回读；未知引擎 422；未知样本 404。"""
+    _install_rev_factory(client, set())
+    pid = client.post("/api/projects", json={
+        "name": "rev-engine", "track": "research", "capabilities": ["binary"]}).json()["id"]
+    up = client.post(f"/api/projects/{pid}/samples",
+                     files={"file": ("crackme.elf", CRACKME.read_bytes(),
+                                     "application/octet-stream")}).json()
+    sha = up["sha"]
+    tr = client.post(f"/api/projects/{pid}/binaries/{sha}/triage")
+    _wait_job(client, tr.json()["job_id"])
+
+    # 默认 ida（asset meta 无 engine）
+    ov = client.get(f"/api/projects/{pid}/binaries/{sha}/overview").json()
+    assert ov["engine"] == "ida"
+    # 缓存标记产出引擎（ida-headless 归一为 ida）
+    assert ov["meta"]["engine"] == "ida"
+
+    # 切到 ghidra
+    r = client.put(f"/api/projects/{pid}/binaries/{sha}/engine", json={"engine": "ghidra"})
+    assert r.status_code == 200 and r.json()["engine"] == "ghidra"
+    asset = next(a for a in client.get(f"/api/projects/{pid}/assets").json()
+                 if a["value"] == sha)
+    assert asset["meta"]["engine"] == "ghidra"
+    assert client.get(f"/api/projects/{pid}/binaries/{sha}/overview").json()["engine"] == "ghidra"
+    kinds = [e["kind"] for e in client.get(f"/api/projects/{pid}/events").json()]
+    assert "binary.engine_set" in kinds
+
+    # 大小写无关归一
+    assert client.put(f"/api/projects/{pid}/binaries/{sha}/engine",
+                      json={"engine": "IDA"}).json()["engine"] == "ida"
+
+    # 未知引擎 422；未知样本 404
+    assert client.put(f"/api/projects/{pid}/binaries/{sha}/engine",
+                      json={"engine": "radare2"}).status_code == 422
+    assert client.put(f"/api/projects/{pid}/binaries/{'f' * 64}/engine",
+                      json={"engine": "ghidra"}).status_code == 404
+
+
+def test_rev_delete_binary_cascades_and_purges(client):
+    """样本删除（2026-10-01）：硬级联删 func_kb/findings/logic_blocks/链边 + 资产行 +
+    磁盘产物（缓存/样本）；事件 binary.deleted；重复删除 404。"""
+    _install_rev_factory(client, set())
+    pid = client.post("/api/projects", json={
+        "name": "rev-del", "track": "research", "capabilities": ["binary"]}).json()["id"]
+    up = client.post(f"/api/projects/{pid}/samples",
+                     files={"file": ("crackme.elf", CRACKME.read_bytes(),
+                                     "application/octet-stream")}).json()
+    sha = up["sha"]
+    tr = client.post(f"/api/projects/{pid}/binaries/{sha}/triage")
+    assert _wait_job(client, tr.json()["job_id"])["status"] == "done"
+    asset = next(a for a in client.get(f"/api/projects/{pid}/assets").json()
+                 if a["value"] == sha)
+    asset_id = asset["id"]
+    # 关联数据：func_kb 行 + finding（指向该 asset）+ 该 sha 的逻辑块 + 链边（func_kb 节点）
+    fid = client.post(f"/api/projects/{pid}/funcs", json={
+        "binary_sha256": sha, "address": "0x401189", "name": "check_flag"}).json()["id"]
+    find = client.post(f"/api/projects/{pid}/findings", json={
+        "title": "硬编码密钥", "target_asset_id": asset_id}).json()
+    lb = client.post(f"/api/projects/{pid}/logic-blocks", json={
+        "name": "校验流程", "binary_sha256": sha}).json()
+    cid = client.post(f"/api/projects/{pid}/chains", json={"name": "链"}).json()["id"]
+    client.post(f"/api/projects/{pid}/chains/{cid}/links",
+                json={"node_type": "func_kb", "node_id": fid})
+    # overview 计数字段（确认框用）
+    ov = client.get(f"/api/projects/{pid}/binaries/{sha}/overview").json()
+    assert ov["analyzed_count"] == 1 and ov["findings_count"] == 1 and ov["logic_blocks_count"] == 1
+
+    proj_obj = client.app.state.projects.get(pid) or client.app.state.store.open_project(pid)
+    cache_file = proj_obj.artifacts_dir / "decompiler-cache" / f"{sha}.json"
+    blob = proj_obj.path / asset["meta"]["path"]
+    assert cache_file.is_file() and blob.is_file()
+
+    r = client.delete(f"/api/projects/{pid}/binaries/{sha}")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["deleted"] == sha and body["funcs"] == 1 and body["findings"] == 1
+    assert body["logic_blocks"] == 1 and body["chain_links"] == 1
+
+    # DB 级联
+    assert client.get(f"/api/projects/{pid}/funcs?binary_sha256={sha}").json() == []
+    assert all(f["id"] != find["id"] for f in client.get(f"/api/projects/{pid}/findings").json())
+    assert client.get(f"/api/projects/{pid}/logic-blocks/{lb['id']}").status_code == 404
+    assert client.get(f"/api/projects/{pid}/binaries/{sha}/overview").status_code == 404
+    assert all(a["value"] != sha for a in client.get(f"/api/projects/{pid}/assets").json()
+               if a["type"] == "binary")
+    assert client.get(f"/api/projects/{pid}/chains/{cid}").json()["links"] == []
+
+    # 磁盘清理
+    assert not cache_file.exists() and not blob.exists()
+    assert not (proj_obj.artifacts_dir / "decompiler-cache" / f"{sha}.details").exists()
+
+    # 审计事件 + 幂等 404
+    assert "binary.deleted" in [e["kind"] for e in client.get(f"/api/projects/{pid}/events").json()]
+    assert client.delete(f"/api/projects/{pid}/binaries/{sha}").status_code == 404
+    assert client.delete(f"/api/projects/{pid}/binaries/{'f' * 64}").status_code == 404
+
+
+def test_rev_delete_binary_auto_stops_running_triage(client):
+    """删除时若有在跑分诊：端点先协作式停止（Ghidra stop 文件）并等 Job 收尾再删，
+    用户无需先手动「停止」。"""
+    from core.tools.decompiler import DecompilerService, GhidraHeadlessBackend
+
+    def ghidra_runner(args):
+        i = args.index("-postScript")
+        out = Path(args[i + 2])
+        stop = Path(args[i + 5]) if len(args) > i + 5 else None
+        out.parent.mkdir(parents=True, exist_ok=True)
+        if stop is not None:  # 阻塞等父进程写停止文件（模拟长跑分诊）
+            deadline = time.time() + 5.0
+            while not stop.is_file() and time.time() < deadline:
+                time.sleep(0.02)
+        data = json.loads(json.dumps(V3))
+        out.write_text(json.dumps(data), encoding="utf-8")
+        return 0, "ok", ""
+
+    def factory(proj):
+        g = GhidraHeadlessBackend(runner=ghidra_runner, available=True,
+                                  tmp_project_dir=proj.artifacts_dir / ".ghidra-tmp")
+        return DecompilerService(cache_dir=proj.artifacts_dir / "decompiler-cache", ghidra=g)
+
+    client.app.state.rev_service_factory = factory
+    pid = client.post("/api/projects", json={
+        "name": "rev-del-stop", "track": "research", "capabilities": ["binary"]}).json()["id"]
+    up = client.post(f"/api/projects/{pid}/samples",
+                     files={"file": ("crackme.elf", CRACKME.read_bytes(),
+                                     "application/octet-stream")}).json()
+    sha = up["sha"]
+    tr = client.post(f"/api/projects/{pid}/binaries/{sha}/triage")
+    assert tr.status_code == 202
+    # 分诊在跑 → 直接删：端点自动置停止标志、等收尾、再删
+    r = client.delete(f"/api/projects/{pid}/binaries/{sha}")
+    assert r.status_code == 200 and r.json()["deleted"] == sha
+    assert _wait_job(client, tr.json()["job_id"])["status"] == "done"
+    assert client.get(f"/api/projects/{pid}/binaries/{sha}/overview").status_code == 404
+
+
 def test_rev_funcs_cross_project_404(client):
     _install_rev_factory(client, set())
     p1 = client.post("/api/projects", json={
@@ -5818,7 +5956,7 @@ def test_asset_import_rejects_bad_source_and_over_limit(client):
     assert r.status_code == 422 and "source" in r.json()["detail"]
     r = client.post(f"/api/projects/{pid}/assets/import",
                     json={"source": "manual",
-                          "rows": [{"ip": f"10.{i}.0.1"} for i in range(5001)]})
+                          "rows": [{"ip": f"10.{i}.0.1"} for i in range(10001)]})
     assert r.status_code == 422 and "上限" in r.json()["detail"]
 
 

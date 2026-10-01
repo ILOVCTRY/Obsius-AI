@@ -136,7 +136,8 @@ def collect_strings():
 
 
 # P2/P3 大样本并行分片 + 协作式停止 + 进度（2026-09-30）：
-# postScript 可选参数位：args[1]=worker 数，args[2]=进度文件，args[3]=停止标志文件。
+# postScript 可选参数位：args[1]=worker 数，args[2]=进度文件，args[3]=停止标志文件，
+# args[4]="1" 时内嵌每函数反汇编（小样本，见下 WANT_DISASM）。
 # 缺参/非法一律回退：WORKERS=1（串行）、无进度/无停止。父进程写 args[3] 即请求协作式
 # 停止——脚本在函数边界检查（非杀进程），停下后仍写出「已完成函数」的 v3 缓存（函数名/
 # 地址全量，伪码只到停点），meta 标 partial/stopped，父进程自然返回。
@@ -152,6 +153,15 @@ if len(args) > 2:
     PROGRESS = args[2]
 if len(args) > 3:
     STOP = args[3]
+# 脚本自驱分析（2026-10-01 工作台可中断）：args[4]="1" 时由本脚本跑完整自动分析
+# （父进程用 analyzeHeadless -noanalysis 导入），配自定义 TaskMonitor 轮询停止文件
+# → 分析阶段即可中断 + 上报进度（phase=analyzing）。
+ANALYZE = len(args) > 4 and str(args[4]) == "1"
+# 反汇编内嵌（2026-10-01 工作台 Ghidra 模式）：args[5]="1" 时随全量导出为每个函数补
+# disasm_lines（单函数上限 DISASM_MAX_LINES，超出置 disasm_truncated）。仅小样本走此
+# 路径（大样本由父进程改为持久工程按需反汇编，避免缓存膨胀）。
+WANT_DISASM = len(args) > 5 and str(args[5]) == "1"
+DISASM_MAX_LINES = 400
 
 STOP_FLAG = [False]
 
@@ -181,6 +191,25 @@ def _write_progress():
         pass
 
 
+def _disasm_lines(f):
+    """指令级反汇编行（`地址  指令`），单函数上限 DISASM_MAX_LINES。返回 (lines, truncated)。"""
+    lines = []
+    truncated = False
+    try:
+        it = prog.getListing().getInstructions(f.getBody(), True)
+        n = 0
+        while it.hasNext():
+            if n >= DISASM_MAX_LINES:
+                truncated = True
+                break
+            ins = it.next()
+            lines.append("%s  %s" % (ins.getAddress().toString(), ins.toString()))
+            n += 1
+    except Exception:
+        pass
+    return lines, truncated
+
+
 def _enrich(f, dec, mon, item):
     # 分片重试（P3）：单函数反编译失败重试一次（瞬时解编译器故障自愈），仍失败则
     # 留 calls=[] 且无伪码，不拖垮整次导出。
@@ -188,6 +217,11 @@ def _enrich(f, dec, mon, item):
         item["calls"] = sorted(set(c.getName() for c in f.getCalledFunctions(mon)))
     except Exception:
         pass
+    if WANT_DISASM:
+        try:
+            item["disasm_lines"], item["disasm_truncated"] = _disasm_lines(f)
+        except Exception:
+            pass
     for _ in range(2):
         try:
             res = dec.decompileFunction(f, 60, mon)
@@ -197,6 +231,72 @@ def _enrich(f, dec, mon, item):
         except Exception:
             pass
 
+
+# ---- 脚本自驱分析（2026-10-01 可中断）：-noanalysis 导入后由本脚本跑分析 ----
+_ANALYSIS_STOPPED = False
+if ANALYZE:
+    from ghidra.app.plugin.core.analysis import AutoAnalysisManager
+    from ghidra.util.task import TaskMonitorAdapter
+
+    class _StopMonitor(TaskMonitorAdapter):
+        """自定义 TaskMonitor：轮询停止文件（分析阶段可中断）+ 节流上报分析进度。"""
+
+        def __init__(self):
+            TaskMonitorAdapter.__init__(self, True)  # cancelEnabled=True
+            self._last = 0.0
+
+        def isCancelled(self):
+            return TaskMonitorAdapter.isCancelled(self) or _stop_requested()
+
+        def cancel(self):
+            TaskMonitorAdapter.cancel(self)
+
+        def _report(self):
+            if not PROGRESS:
+                return
+            import time as _t
+            now = _t.time()
+            if now - self._last < 1.0:
+                return
+            self._last = now
+            try:
+                payload = {"phase": "analyzing",
+                           "done": int(self.getProgress() or 0),
+                           "total": int(self.getMaximum() or 0)}
+                with io.open(PROGRESS, "w", encoding="utf-8") as fh:
+                    fh.write(json.dumps(payload, ensure_ascii=False))
+            except Exception:
+                pass
+
+        def setMessage(self, msg):
+            TaskMonitorAdapter.setMessage(self, msg)
+            self._report()
+
+        def setProgress(self, value):
+            TaskMonitorAdapter.setProgress(self, value)
+            self._report()
+
+        def setMaximum(self, value):
+            TaskMonitorAdapter.setMaximum(self, value)
+            self._report()
+
+    if PROGRESS:
+        try:
+            with io.open(PROGRESS, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps({"phase": "analyzing", "done": 0, "total": 0},
+                                    ensure_ascii=False))
+        except Exception:
+            pass
+    try:
+        _mgr = AutoAnalysisManager.getAnalysisManager(prog)
+        _mgr.startAnalysis(_StopMonitor())
+    except Exception as _e:  # noqa: BLE001 —— 分析启动失败回退（不可中断但至少出结果）
+        print("script-driven analysis failed, fallback analyzeAll: %s" % _e)
+        try:
+            analyzeAll(prog)
+        except Exception as _e2:
+            print("analyzeAll failed: %s" % _e2)
+    _ANALYSIS_STOPPED = _stop_requested()
 
 funcs = list(fm.getFunctions(True))
 # 基础项预填充（P3）：地址/名/大小先全量落好，worker 只补 calls/伪码——协作式停止时
@@ -227,7 +327,9 @@ if PROGRESS:
     _reporter_thread.start()
 
 try:
-    if WORKERS > 1 and len(functions) > 1:
+    if _ANALYSIS_STOPPED:
+        pass  # 分析阶段被停止：仅保留已识别函数清单，不再反编译（partial）
+    elif WORKERS > 1 and len(functions) > 1:
         # Jython 的 threading 映射到 Java 线程；重活在 Java 侧（decompileFunction）
         # 执行时会释放监视器，故并行有效。work 分配用原子游标，避免静态分片的长尾。
         cursor = [0]

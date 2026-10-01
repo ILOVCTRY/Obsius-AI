@@ -8,9 +8,13 @@ import type {
 } from "@/lib/types"
 import { hexAddr } from "@/lib/workbench"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import { cn } from "@/lib/utils"
 import type { ChainNodeType } from "@/lib/types"
-import { SampleBar } from "./SampleBar"
+import { SampleBar, type Engine } from "./SampleBar"
 import { FunctionBrowser } from "./FunctionBrowser"
 import { FunctionDetail } from "./FunctionDetail"
 import { XrefPane } from "./XrefPane"
@@ -34,10 +38,13 @@ const LogicBlocksView = lazy(() =>
 // >20MB headless 全量导出可能很久——上传/开始分析前二次确认，建议走 IDA 拉取
 const SAMPLE_LARGE_BYTES = 20 * 1024 * 1024
 
-function largeSampleConfirm(mb: number): boolean {
+function largeSampleConfirm(mb: number, engine: Engine = "ida"): boolean {
+  const hint = engine === "ghidra"
+    ? "当前为 Ghidra 模式：大样本走 Ghidra 并行分片导出；反汇编改为选中函数时按需生成（不内嵌缓存）。\n"
+    : "更快的路子：在 IDA 里打开样本按 Ctrl-Alt-M 启动 MCP 插件，再用「从 IDA 拉取函数」（秒级拿全量函数清单）。\n"
   return window.confirm(
     `该样本约 ${mb}MB，属于大样本：headless 全量分析（自动分析+全量反编译）可能耗时很久。\n` +
-    "更快的路子：在 IDA 里打开样本按 Ctrl-Alt-M 启动 MCP 插件，再用「从 IDA 拉取函数」（秒级拿全量函数清单）。\n" +
+    hint +
     "仍要继续 headless 分析吗？")
 }
 
@@ -50,6 +57,8 @@ export function ReverseWorkbench({ pid, active = true }: { pid: string; active?:
   const [samples, setSamples] = useState<Asset[]>([])
   const [sha, setSha] = useState<string | null>(null)
   const [overview, setOverview] = useState<BinaryOverview | null>(null)
+  // 反编译引擎模式（2026-10-01）：样本 meta.engine（缺省 ida）
+  const engine: Engine = overview?.engine === "ghidra" ? "ghidra" : "ida"
   const [rows, setRows] = useState<CachedFuncRow[]>([])
   const [funcs, setFuncs] = useState<FuncEntry[]>([])
   const [findings, setFindings] = useState<Finding[]>([])
@@ -63,8 +72,14 @@ export function ReverseWorkbench({ pid, active = true }: { pid: string; active?:
   // IDA 拉取进度（2026-09-30）：job 轮询带出 {pulled,total}；null=没在拉
   const [pullProgress, setPullProgress] = useState<{ pulled: number; total: number | null } | null>(null)
   // headless 导出进度（大样本 P3，2026-09-30）：job 轮询带出 {done,total}；null=没在导出
-  const [triageProgress, setTriageProgress] = useState<{ done: number; total: number } | null>(null)
+  // 2026-10-01 扩：phase（starting/analyzing/decompile/stopped）+ stoppable（仅 Ghidra 可停）
+  const [triageProgress, setTriageProgress] = useState<
+    { phase: string; done: number; total: number; stoppable: boolean } | null>(null)
   const [triageMsg, setTriageMsg] = useState<string | null>(null)
+  // 样本删除确认（2026-10-01）：delTarget 非 null = 确认框打开
+  const [delTarget, setDelTarget] = useState<{ sha: string; name: string; counts: BinaryOverview | null } | null>(null)
+  const [delBusy, setDelBusy] = useState(false)
+  const [delMsg, setDelMsg] = useState<string | null>(null)
 
   // subnav：逆向分析｜攻击链｜蓝图｜业务逻辑（切页不卸载分析状态，同级条件渲染）
   const [mode, setMode] = useState<"rev" | "chains" | "blueprint" | "logic">("rev")
@@ -99,6 +114,35 @@ export function ReverseWorkbench({ pid, active = true }: { pid: string; active?:
     if (!active) return
     refreshSamples()
   }, [tick, refreshSamples, active])
+
+  // 样本删除（2026-10-01）：拉该样本 overview 计数 → 弹确认框 → 确认后 DELETE 级联
+  const handleDeleteSample = useCallback(async (targetSha: string) => {
+    const asset = binaries.find((a) => a.value === targetSha) ?? null
+    const name = (asset?.meta?.filename as string) || `${targetSha.slice(0, 12)}…`
+    const counts = targetSha === sha
+      ? overview
+      : await api.binaryOverview(pid, targetSha).catch(() => null)
+    setDelMsg(null)
+    setDelTarget({ sha: targetSha, name, counts })
+  }, [binaries, sha, overview, pid])
+
+  const confirmDeleteSample = async () => {
+    if (!delTarget || delBusy) return
+    setDelBusy(true)
+    setDelMsg(null)
+    try {
+      await api.deleteSample(pid, delTarget.sha)
+      const wasCurrent = delTarget.sha === sha
+      setDelTarget(null)
+      await refreshSamples()
+      if (wasCurrent) setSha(null)
+      bump()
+    } catch (e) {
+      setDelMsg(String(e))
+    } finally {
+      setDelBusy(false)
+    }
+  }
 
   // 默认选最新样本；当前 sha 消失则回退
   useEffect(() => {
@@ -176,7 +220,7 @@ export function ReverseWorkbench({ pid, active = true }: { pid: string; active?:
       setDetailLoading(false)
     })
     return () => { alive = false }
-  }, [pid, sha, addr, funcReadable, tick, active]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [pid, sha, addr, funcReadable, tick, active, engine]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const currentAsset = binaries.find((a) => a.value === sha) ?? null
   const kbFunc = funcs.find((f) => hexAddr(f.address) === addr) ?? null
@@ -209,13 +253,17 @@ export function ReverseWorkbench({ pid, active = true }: { pid: string; active?:
     if (!sha) return
     const size = overview?.asset_meta?.size
     if (typeof size === "number" && size > SAMPLE_LARGE_BYTES &&
-        !largeSampleConfirm(Math.round(size / 1024 / 1024))) return
-    setTriageProgress({ done: 0, total: 0 })
+        !largeSampleConfirm(Math.round(size / 1024 / 1024), engine)) return
+    setTriageProgress({ phase: "starting", done: 0, total: 0, stoppable: false })
     try {
       const r = await api.retryTriage(pid, sha)
       const job = await awaitJob(r.job_id, (j) => {
-        const p = j.meta?.progress
-        if (p) setTriageProgress({ done: p.done ?? 0, total: p.total ?? 0 })
+        const p = j.meta?.progress as
+          { phase?: string; done?: number; total?: number; stoppable?: boolean } | undefined
+        if (p) setTriageProgress({
+          phase: p.phase ?? "", done: p.done ?? 0, total: p.total ?? 0,
+          stoppable: !!p.stoppable,
+        })
       })
       const res = job?.result as { status?: string; hint?: string } | null
       if (res?.status === "stopped" && res.hint) setTriageMsg(res.hint)
@@ -347,10 +395,18 @@ export function ReverseWorkbench({ pid, active = true }: { pid: string; active?:
     }
   }
 
+  // 反编译引擎模式（2026-10-01）：样本 meta.engine（缺省 ida）；切换落库并刷新 overview
+  const handleSelectEngine = useCallback(async (next: Engine) => {
+    if (!sha || next === engine) return
+    await api.setBinaryEngine(pid, sha, next)
+    await api.binaryOverview(pid, sha).then(setOverview).catch(() => {})
+  }, [pid, sha, engine])
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       <SampleBar
-        samples={binaries} sha={sha} onSelect={setSha} overview={overview}
+        samples={binaries} sha={sha} onSelect={setSha} onDeleteSample={handleDeleteSample} overview={overview}
+        engine={engine} onSelectEngine={handleSelectEngine}
         triaging={triaging} uploading={uploading} busyAi={busyAi}
         onUpload={handleUpload} onRetry={handleRetry} onAiTriage={handleAiTriage}
         onPullNames={handlePullNames}
@@ -414,7 +470,7 @@ export function ReverseWorkbench({ pid, active = true }: { pid: string; active?:
                 kb={kbFunc} bits={overview?.meta?.bits ?? 64} hasDb={!!overview?.db_path}
                 imagebase={overview?.meta?.imagebase ?? null}
                 moduleName={overview?.meta?.filename ?? null}
-                mcpLive={mcpLive} cached={!!overview?.cached}
+                mcpLive={mcpLive} cached={!!overview?.cached} engine={engine}
               />
             ) : (
               <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
@@ -444,13 +500,43 @@ export function ReverseWorkbench({ pid, active = true }: { pid: string; active?:
               <TabsContent value="notes" className="min-h-0 flex-1 overflow-auto">
                 {addr
                   ? <NotesPane pid={pid} sha={sha} addr={addr} cacheName={cacheName}
-                               kb={kbFunc} onSaved={bump} mcpLive={mcpLive} />
+                               kb={kbFunc} onSaved={bump} mcpLive={mcpLive} engine={engine} />
                   : <p className="p-3 text-[11px] text-muted-foreground">先在左侧选中函数</p>}
               </TabsContent>
             </Tabs>
           </div>
         </div>
       )}
+
+      {/* 样本删除确认（列数量 + 不可逆提示；2026-10-01） */}
+      <AlertDialog open={!!delTarget}
+                   onOpenChange={(o) => { if (!o) { setDelTarget(null); setDelMsg(null) } }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>从项目中移除样本？</AlertDialogTitle>
+            <AlertDialogDescription>
+              将永久删除 <span className="font-mono text-foreground">{delTarget?.name}</span> 及其全部关联数据，不可逆：
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <ul className="ml-4 list-disc space-y-0.5 text-[11px] text-muted-foreground">
+            <li>函数条目（func_kb）：{delTarget?.counts?.analyzed_count ?? 0}</li>
+            <li>发现：{delTarget?.counts?.findings_count ?? 0}</li>
+            <li>业务逻辑块：{delTarget?.counts?.logic_blocks_count ?? 0}</li>
+            <li>样本文件与全部缓存（反编译缓存 / IDA 库 / Ghidra 工程）</li>
+          </ul>
+          {delMsg && <p className="text-[11px] text-(--status-error)">{delMsg}</p>}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={delBusy}>取消</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => { e.preventDefault(); void confirmDeleteSample() }}
+              disabled={delBusy}
+              className="bg-(--status-error) text-white hover:bg-(--status-error)/90"
+            >
+              {delBusy ? "删除中…" : "确认删除"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

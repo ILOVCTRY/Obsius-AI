@@ -80,12 +80,17 @@ def test_search_encodes_query_and_normalizes_rows():
 
 
 def test_search_size_and_page_clamp():
-    t = FakeTransport([_search_resp([]), _search_resp([])])
+    t = FakeTransport([_search_resp([]), _search_resp([]), _search_resp([]),
+                       _search_resp([])])
     c = _client(t)
-    c.search("q", size=5000)          # 单次硬上限 1000
-    c.search("q", size=100, page=999)  # 页×条≤1 万 → 页≤100
-    assert t.calls[0]["params"]["size"] == 1000
-    assert t.calls[1]["params"]["page"] == 100
+    c.search("q", size=10000)             # 单次上限 10000（恰好）
+    c.search("q", size=999999)            # 超额 → 夹到 10000
+    c.search("q", size=10000, page=9)     # 页×条≤1 万 → 页夹到 1
+    c.search("q", size=100, page=999)     # 页×条≤1 万 → 页≤100
+    assert t.calls[0]["params"]["size"] == 10000
+    assert t.calls[1]["params"]["size"] == 10000
+    assert t.calls[2]["params"]["page"] == 1
+    assert t.calls[3]["params"]["page"] == 100
 
 
 def test_search_without_key_raises_config_error():

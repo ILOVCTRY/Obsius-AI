@@ -14,7 +14,7 @@ from pathlib import Path
 __all__ = ["COLUMN_KINDS", "MAX_IMPORT_ROWS", "PREVIEW_ROWS", "XlsxUnavailable",
            "parse_table", "sniff_columns", "normalize_rows"]
 
-MAX_IMPORT_ROWS = 5000   # 单批硬上限（防误传超大文件拖垮写路径）
+MAX_IMPORT_ROWS = 10000  # 单批硬上限（防误传超大文件拖垮写路径；2026-10-01 由 5000 提至 10000）
 PREVIEW_ROWS = 50        # 预览行数（方案 4.1）
 
 # 列语义（映射下拉值域）；ignore=该列不导入

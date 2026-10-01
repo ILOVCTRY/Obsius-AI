@@ -24,8 +24,9 @@ DEFAULT_BASE_URL = "https://fofoapi.com"
 FALLBACK_BASE_URL = "http://107.173.248.139:18999"
 # 展示字段白名单（官方兼容；不含 header/banner/cert——那三者 size 上限降到 2000）
 SEARCH_FIELDS = ("ip", "port", "protocol", "host", "domain", "title", "product")
-MAX_SIZE = 1000        # 中转单次硬上限（官方页*条≤1 万；本模块 size=1000 → 页≤10）
-MAX_TOTAL = 10000      # 官方翻页总量上限
+MAX_SIZE = 10000       # 中转单次上限（文档：默认最大输出 10000 条；展示字段白名单不含
+                       # header/banner/cert，故不受其 2000 限制）。总翻页仍受 MAX_TOTAL 约束。
+MAX_TOTAL = 10000      # 官方翻页总量上限（页*条≤1 万）
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "fofa.json"
 
@@ -182,7 +183,7 @@ class FofaClient:
     # ---- 业务接口 ----
 
     def search(self, query: str, size: int = 100, page: int = 1) -> dict:
-        """查询（消耗配额）：qbase64 编码 + size clamp(1..1000) + page clamp
+        """查询（消耗配额）：qbase64 编码 + size clamp(1..MAX_SIZE=10000) + page clamp
         （页×条≤官方 1 万上限）。返回 {total, size, page, rows:[…, products]}，
         行字段按响应回显 fields 序归一化（缺失回退请求序）。"""
         if not self.key:

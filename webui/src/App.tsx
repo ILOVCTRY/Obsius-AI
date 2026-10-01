@@ -227,6 +227,9 @@ export default function App() {
   const [taskNav, setTaskNav] = useState<{ id: string; n: number } | null>(null)
   // v0.71 任务即窗口：任务卡/任务流双击 → 跳会话页并直开专属执行窗页签
   const [sessionNav, setSessionNav] = useState<{ sid: string; n: number } | null>(null)
+  // 智能体工作台右栏「链路视图」→ 跳黑板并直达「发现·链路」子视图（2026-10-01）
+  const [boardNav, setBoardNav] = useState<{ findingsSub: "list" | "canvas"; n: number } | null>(null)
+  useEffect(() => { setBoardNav(null) }, [pid])
 
   useEffect(() => {
     const h = (e: Event) => {
@@ -340,21 +343,41 @@ export default function App() {
   })
 
   // 无项目上下文的视图（项目列表 / 全局情报页 / 设置 §16.4）：左导航 + 主区
+  // 导航与项目页同构（2026-10-01）：展开态同时显示「图标+文字」，可拖宽 160–280px、
+  // 悬浮「‹」收起、左缘把手唤出；宽度/收起态与项目页共用（app-nav-v3 / ui.nav-collapsed）。
   if (!pid || view === "projects" || view === "intel" || view === "settings" && !pid) {
     return (
       <div className="app-shell flex h-screen">
-        <NavRail active={view} onSelect={setView} locked={!pid} className="w-16" />
-        <main className="app-content relative min-w-0 flex-1 overflow-auto">
-          <div className="context-bar">
-            <div className="context-label"><span className="eyebrow">OBSIUS / CONTROL CENTER</span><span className="context-title">{view === "intel" ? "情报中心" : view === "settings" ? "设置" : "项目空间"}</span></div>
-            <div className="context-status"><span className="status-dot" />在线</div>
-          </div>
-          {view === "intel"
-            ? <IntelView />
-            : view === "settings" && !pid
-              ? <SettingsView nav={settingsNav} />
-              : <ProjectsView onOpen={openProject} />}
-        </main>
+        <Group orientation="horizontal" className="flex min-h-0 w-full"
+               defaultLayout={navLayout.defaultLayout}
+               onLayoutChanged={navLayout.onLayoutChanged}>
+          {!navCollapsed && (
+            <>
+              <Panel id="nav" minSize={160} maxSize={280} defaultSize={180}>
+                <NavRail active={view} onSelect={setView} locked={!pid} expanded className="h-full w-full" />
+              </Panel>
+              <Separator className="nav-sep w-0.5 shrink-0 bg-transparent transition-colors hover:bg-accent data-[active]:bg-accent">
+                <button className="nav-edge-btn" title="收起侧栏" aria-label="收起侧栏" onClick={toggleNavCollapsed}>
+                  <ChevronLeft size={12} />
+                </button>
+              </Separator>
+            </>
+          )}
+          <Panel id="main">
+            <main className="app-content relative h-full min-w-0 overflow-auto">
+              <div className="context-bar">
+                <div className="context-label"><span className="eyebrow">OBSIUS / CONTROL CENTER</span><span className="context-title">{view === "intel" ? "情报中心" : view === "settings" ? "设置" : "项目空间"}</span></div>
+                <div className="context-status"><span className="status-dot" />在线</div>
+              </div>
+              {view === "intel"
+                ? <IntelView />
+                : view === "settings" && !pid
+                  ? <SettingsView nav={settingsNav} />
+                  : <ProjectsView onOpen={openProject} />}
+            </main>
+          </Panel>
+        </Group>
+        {navCollapsed && <NavReveal onExpand={toggleNavCollapsed} />}
       </div>
     )
   }
@@ -444,12 +467,16 @@ export default function App() {
                 {profile === "rev-generic"
                   ? <ReverseWorkbench key={pid} pid={pid} active={view === "board"} />
                   : <Blackboard key={pid} pid={pid} track={meta?.track} capabilities={meta?.capabilities}
-                                defaultView={boardViewOf(meta)} />}
+                                defaultView={boardViewOf(meta)}
+                                openFindingsSub={boardNav?.findingsSub}
+                                onFindingsSubConsumed={() => setBoardNav(null)} />}
               </div>
             </ErrorBoundary>
           )}
           {view === "tasks" && <TaskBoard pid={pid} focused={taskNav} />}
-          {view === "agents" && <AgentWorkbenchView pid={pid} meta={meta} />}
+          {view === "agents" && <AgentWorkbenchView pid={pid} meta={meta} onOpenChain={() => {
+            setBoardNav({ findingsSub: "canvas", n: Date.now() }); setView("board")
+          }} />}
           {view === "browser" && (
             // F6 内置浏览器：轨门控（非 pentest/redteam 整页灰显）在视图内部处理；
             // 定高视图（面板组），照 rev 走 h-full + overflow-hidden

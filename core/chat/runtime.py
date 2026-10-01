@@ -33,7 +33,7 @@ from core.agent.tools import AGENT_TOOLS, ToolDispatcher
 from core.blackboard.tasks import TaskQueue
 from core.chat import store as chat_store
 from core.chat.mcp_bridge import MCPBridge
-from core.llm.provider import ContextOverflowError
+from core.llm.provider import ContextOverflowError, LLMError
 from core.runtime.gateway import ExecutionGateway
 from core.skills.experts import load_expert
 from core.skills.registry import SkillRegistry
@@ -56,11 +56,17 @@ _EXPERT_EXCLUDED = {
 _ORCH_BASE_TOOLS = ("todo_write", "call_expert", "skill_open",
                     "kb_search", "kb_open", "bb_query")
 
-_ORCH_MAX_STEPS = 24
-_EXPERT_MAX_STEPS = 32
+# 对话轮步数上限（2026-10-01 由 24/32 提升至 200：修「步数耗尽但全程只调工具
+# → 无终稿 → 落『本轮未产出文本回复』」；配合 _loop 末步强制终稿兜底）
+_ORCH_MAX_STEPS = 200
+_EXPERT_MAX_STEPS = 200
 
 _DELTA_MIN_CHARS = 80
 _DELTA_MIN_INTERVAL = 1.0
+
+# 工具参数流截断的整轮重试上限（2026-10-01 事故修复）：工具参数 JSON 残缺/截断
+# （LLMError.truncated）时，流不可重放 → 轮级重发 ≤2 次（与 agent 循环同口径）。
+_CHAT_TRUNC_RETRIES = 2
 
 # ---------- 上下文治理参数（2026-09-30 压缩上下文方案） ----------
 # 背景：单条工具结果可达数百万字符原样入历史 → 跨轮全量回放 → input 突破
@@ -168,6 +174,123 @@ def _mask_old_tool_results(messages: list[dict[str, Any]],
 
 def _specs_by_names(names: set[str]) -> list[dict[str, Any]]:
     return [s for s in AGENT_TOOLS if s.get("name") in names]
+
+
+# 轮次失败分类（2026-10-01 健壮性）：把异常映射为前端错误卡片可渲染的
+# {category,title,message,hint}。分类为有限枚举，每类给「下一步怎么做」建议。
+# 之前只亮一个「出错」徽标、错误原文不落库不展示，用户无从判断原因。
+_ERROR_CATEGORIES: dict[str, tuple[str, str]] = {
+    "network": (
+        "网络中断",
+        "与模型网关的连接中断、超时或被重置。系统已自动重试仍未成功——"
+        "请稍后重发本条消息；若持续出现，检查网络/代理与网关（base_url）可用性。"),
+    "rate_limit": (
+        "网关限流",
+        "模型网关返回限流（HTTP 429）。稍等片刻后重发即可；频繁触发请降低并发或换供应商。"),
+    "auth": (
+        "鉴权失败",
+        "模型网关拒绝请求（HTTP 401/403）。请在「技能与设置 → 模型供应商」核对该"
+        "供应商的 API Key 与 base_url 是否正确、是否过期。"),
+    "quota": (
+        "额度不足",
+        "模型网关提示额度/余额不足。请充值，或改用其它可用供应商后重发。"),
+    "context": (
+        "上下文超限",
+        "单轮上下文超出模型窗口，自动压缩后仍被网关拒收（400/413）。"
+        "请新开线程，或精简历史消息后重试。"),
+    "bad_request": (
+        "请求被拒",
+        "模型网关判定请求不合法（HTTP 400）。常见于历史消息结构问题"
+        "（如工具调用配对缺失）。系统已尝试修复历史；若仍失败，请新开线程。"),
+    "stream": (
+        "网关流异常",
+        "工具参数流被网关异常中断（SSE 尾部冗余/截断）。系统已自动整轮重试；"
+        "若仍失败，请重发该指令或改述。"),
+    "unknown": (
+        "执行异常",
+        "本轮执行发生未预期异常。技术细节见下方，可据此进一步排查或反馈。"),
+}
+
+
+def _classify_error(e: BaseException) -> dict[str, str]:
+    """异常 → 结构化错误（category/title/message/hint）。message 为原始异常
+    文案（技术细节），title/hint 为面向人类的分类与建议。"""
+    msg = str(e)
+    low = msg.lower()
+    status = getattr(e, "status", 0) or 0
+    if getattr(e, "truncated", False) or "工具参数流截断" in msg:
+        cat = "stream"
+    elif isinstance(e, ContextOverflowError) or (
+            status in (400, 413) and ("too long" in low or "input length" in low
+                                      or "context length" in low
+                                      or "maximum context" in low)):
+        cat = "context"
+    elif isinstance(e, (TimeoutError, ConnectionError)) \
+            or "网络错误" in msg or "流式传输中断" in msg \
+            or "connection reset" in low or "connection aborted" in low \
+            or "remote host" in low:
+        cat = "network"
+    elif status == 429 or "429" in msg or "rate limit" in low or "限流" in msg:
+        cat = "rate_limit"
+    elif status in (401, 403) or "401" in msg or "403" in msg \
+            or "unauthorized" in low or "authentication" in low or "invalid api key" in low:
+        cat = "auth"
+    elif status == 402 or "余额" in msg or "insufficient" in low or "quota" in low:
+        cat = "quota"
+    elif status == 400 or "400" in msg or "invalidparameter" in low:
+        cat = "bad_request"
+    else:
+        cat = "unknown"
+    title, hint = _ERROR_CATEGORIES[cat]
+    return {"category": cat, "title": title, "message": msg[:600], "hint": hint}
+
+
+def _sanitize_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """历史校验兜底（2026-10-01 健壮性）：修复悬空 tool_use / 孤儿 tool_result。
+
+    网关要求「assistant(tool_use) 之后必须紧跟对应的 tool_result」，否则 400
+    （insufficient tool messages following tool_calls）——一旦历史被写坏，该线程
+    后续每轮必失败（永久损坏）。这里在装载后做一次重建：
+      - 每个含 tool_use 的 assistant 消息，其 id 集合都必须有对应的 tool_result；
+        缺失的补一条占位结果；
+      - 不属于任何 tool_use 的孤儿 tool_result 丢弃。
+    正常历史零改动（幂等）。"""
+    out: list[dict[str, Any]] = []
+    i = 0
+    n = len(messages)
+    while i < n:
+        m = messages[i]
+        tool_use_ids = [
+            b.get("id") for b in (m.get("content") or [])
+            if isinstance(b, dict) and b.get("type") == "tool_use"
+        ] if m.get("role") == "assistant" else []
+        if tool_use_ids:
+            out.append(m)
+            results: list[dict[str, Any]] = []
+            if i + 1 < n and messages[i + 1].get("role") == "user" \
+                    and isinstance(messages[i + 1].get("content"), list):
+                for b in messages[i + 1]["content"]:
+                    if isinstance(b, dict) and b.get("type") == "tool_result" \
+                            and b.get("tool_use_id") in tool_use_ids:
+                        results.append(b)
+                i += 1  # 消费原 tool_result 消息（孤儿一并丢弃后重建）
+            have = {b.get("tool_use_id") for b in results}
+            for tid in tool_use_ids:
+                if tid not in have:
+                    results.append({
+                        "type": "tool_result", "tool_use_id": tid,
+                        "content": "（该工具调用无结果记录：历史已自动修复）"})
+            out.append({"role": "user", "content": results})
+            i += 1
+            continue
+        if m.get("role") == "user" and isinstance(m.get("content"), list) \
+                and any(isinstance(b, dict) and b.get("type") == "tool_result"
+                        for b in m["content"]):
+            i += 1  # 孤儿 tool_result 组（前面无匹配 tool_use）→ 丢弃
+            continue
+        out.append(m)
+        i += 1
+    return out
 
 
 def expert_tool_names(packs_root: str | Path, agent_id: str,
@@ -420,7 +543,7 @@ class ChatTurn:
                                 "tool_use_id": r["tool_use_id"],
                                 "content": r["content"] or "(空)"})
         _flush_tools()
-        return messages
+        return _sanitize_history(messages)
 
     # ---------- 上下文治理 ----------
 
@@ -596,11 +719,30 @@ class ChatTurn:
                           "masked": masked, "est": est1, "budget": budget}
 
     def _chat(self, messages: list[dict[str, Any]], system: str | None,
-              tools: list[dict[str, Any]] | None, on_text=None):
+              tools: list[dict[str, Any]] | None, on_text=None, on_retry=None):
         """调 LLM（发送前已压缩）。reactive 兜底（ct-5）：若仍因 input 超限被
         网关 400/413 拒绝（ContextOverflowError），强制压缩一次后重试；再失败
         则抛出交给 run() 落 error。对应 Claude Code 五级级联的最末「reactive
-        compact」——静态预算估算与实际 token 计数总有偏差，需运行时兜底。"""
+        compact」——静态预算估算与实际 token 计数总有偏差，需运行时兜底。
+
+        截断整轮重试（2026-10-01 事故修复）：LLMError.truncated（工具参数流残缺/
+        截断，如网关 SSE 尾部冗余）时整轮重发 ≤_CHAT_TRUNC_RETRIES 次——传输层流
+        不可重放，只能在轮级重试（与 agent 循环同口径）。每次重试前调 on_retry()
+        重置 delta 缓冲，防「半截+新流」拼接上屏。"""
+        for attempt in range(_CHAT_TRUNC_RETRIES + 1):
+            try:
+                return self._chat_once(messages, system, tools, on_text)
+            except LLMError as e:
+                if not getattr(e, "truncated", False) or attempt >= _CHAT_TRUNC_RETRIES:
+                    raise
+                log.warning("chat 工具参数流截断，整轮重试 %d/%d thread=%s: %s",
+                            attempt + 1, _CHAT_TRUNC_RETRIES, self.thread_id, e)
+                if on_retry is not None:
+                    on_retry()
+        raise RuntimeError("unreachable")  # pragma: no cover
+
+    def _chat_once(self, messages: list[dict[str, Any]], system: str | None,
+                   tools: list[dict[str, Any]] | None, on_text=None):
         try:
             return self.llm.chat(messages, system=system, tools=tools,
                                  on_text=on_text, should_cancel=self._aborted)
@@ -621,7 +763,9 @@ class ChatTurn:
         if thread is not None and not thread.get("title"):
             chat_store.update_thread(self.bb, self.thread_id,
                                      title=user_text.strip()[:40])
-        chat_store.update_thread(self.bb, self.thread_id, status="running")
+        # 新轮开始：置 running 并清空上一轮的错误（error={} 为 falsy → 落 ''）
+        chat_store.update_thread(self.bb, self.thread_id, status="running",
+                                 error={})
         # 上下文用量基底（跨轮累计 output/steps；input=最近一步占用）
         self._usage: dict[str, int] = dict(thread.get("usage") or {}) if thread else {}
         self._emit("chat.message", {"role": "user", "text": user_text[:2000],
@@ -630,12 +774,14 @@ class ChatTurn:
             final = self._loop(user_text)
             chat_store.update_thread(self.bb, self.thread_id, status="idle")
             return final
-        except Exception as e:  # noqa: BLE001 —— 失败落线程状态+事件，不静默
+        except Exception as e:  # noqa: BLE001 —— 失败落结构化错误+事件，不静默
             log.exception("chat 轮失败 thread=%s", self.thread_id)
-            chat_store.update_thread(self.bb, self.thread_id, status="error")
-            self._emit("chat.message", {"role": "assistant",
-                                        "text": f"[轮次失败] {e}",
-                                        "message_id": None})
+            info = _classify_error(e)
+            # 结构化错误落库（前端据此渲染错误卡片；之前只亮「出错」徽标、
+            # 错误原文既不落库也不展示，用户无从判断原因）
+            chat_store.update_thread(self.bb, self.thread_id, status="error",
+                                     error=info)
+            self._emit("chat.error", {"thread_id": self.thread_id, **info})
             raise
 
     def _loop(self, user_text: str) -> str:
@@ -677,8 +823,18 @@ class ChatTurn:
                 _pub["at"] = now
                 self._emit("chat.delta", {"text": text, "seq": _pub["seq"]})
 
+            def _reset_delta(_acc=acc, _pub=pub) -> None:
+                """截断整轮重试前：清空累加与节流基准，防「半截+新流」拼接上屏
+                （前端取最后一条 chat.delta 的累计全文，从零重流即整段覆盖）。"""
+                _acc.clear()
+                _pub["chars"] = 0
+
+            # 末步强制终稿（2026-10-01）：最后一步不传工具，逼模型只能输出纯文本
+            # 终稿，避免「步数耗尽但全程只调工具」→ 落「本轮未产出文本回复」。
+            step_tools = None if _step == max_steps - 1 else (tools or None)
             # 发送前两级联动压缩（旧 tool_result 占位化 → 必要时 LLM 摘要）
-            messages, ctx_info = self._prepare_context(messages, system, tools)
+            messages, ctx_info = self._prepare_context(messages, system,
+                                                       step_tools or [])
             if ctx_info.get("compacted"):
                 self._emit("chat.ctx", {"phase": "proactive", **ctx_info})
             # 上下文构成估算（每步重估：messages 随 tool_result 增长）；
@@ -688,7 +844,8 @@ class ChatTurn:
             est_refs = _est_tokens(refs_tail)
             est_tools = _est_tokens(json.dumps(tools, ensure_ascii=False))
             est_msgs = sum(_est_tokens(_msg_text(m)) for m in messages)
-            resp = self._chat(messages, system, tools or None, on_text)
+            resp = self._chat(messages, system, step_tools, on_text,
+                              on_retry=_reset_delta)
             # 上下文用量：input(+cache)=当步窗口占用，output/steps 跨步累计
             u = resp.usage
             input_total = u.input_tokens + u.cache_read_tokens \
@@ -736,10 +893,22 @@ class ChatTurn:
                        "input": tc.arguments} for tc in resp.tool_calls],
                 ]})
                 tool_result_blocks: list[dict[str, Any]] = []
+                aborted = False
                 for tc in resp.tool_calls:
-                    if self._aborted():
-                        final = self._persist_stopped()
-                        break
+                    if aborted or self._aborted():
+                        # 中止：为当前及剩余 tool_calls 补落占位结果，保证
+                        # assistant(tool_calls) 与 tool 消息配对完整（2026-10-01
+                        # 健壮性）。否则首个工具前中止会留下悬空 tool_calls，
+                        # 下一轮回放被网关 400 拒收（insufficient tool messages），
+                        # 线程永久损坏。
+                        aborted = True
+                        result = "[错误] 已停止：工具未执行"
+                        chat_store.append_message(self.bb, self.thread_id, "tool",
+                                                  result, tool_use_id=tc.id)
+                        tool_result_blocks.append({
+                            "type": "tool_result", "tool_use_id": tc.id,
+                            "content": result})
+                        continue
                     t0 = time.perf_counter()
                     self._emit("chat.tool", {
                         "phase": "start", "name": tc.name,
@@ -766,6 +935,10 @@ class ChatTurn:
                 if tool_result_blocks:
                     messages.append({"role": "user",
                                      "content": tool_result_blocks})
+                if aborted:
+                    # 中止说明落库（在补落的 tool 结果之后，保持配对顺序合法）
+                    final = self._persist_stopped()
+                    break
                 if final:
                     break
                 continue

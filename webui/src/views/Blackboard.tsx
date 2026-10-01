@@ -30,8 +30,9 @@ const AttackPathCanvas = lazy(() =>
 // 全景 tab（黑板链路图）2026-09-26 用户要求下线：tab 移除、boardGraph/ 前端删除；
 // 后端 board-graph 只读端点保留。
 // M4c 场景档 board_view：defaultView（config.board_view.default）不在可用集合时回退 findings。
-export function Blackboard({ pid, compact = false, track, capabilities, defaultView }: {
+export function Blackboard({ pid, compact = false, track, capabilities, defaultView, openFindingsSub, onFindingsSubConsumed }: {
   pid: string; compact?: boolean; track?: string; capabilities?: string[]; defaultView?: string
+  openFindingsSub?: "list" | "canvas"; onFindingsSubConsumed?: () => void
 }) {
   const compactPentest = compact && track === "pentest"
   const tabs = [
@@ -54,6 +55,12 @@ export function Blackboard({ pid, compact = false, track, capabilities, defaultV
   useEffect(() => {
     setTab((prev) => (allTabs.includes(prev) ? prev : initial))
   }, [tabsKey]) // eslint-disable-line react-hooks/exhaustive-deps
+  // 外部深链（工作台右栏「链路视图」）：强制切到「发现」tab；子视图由 Findings 消费
+  useEffect(() => {
+    if (!openFindingsSub) return
+    touched.current = true
+    setTab("findings")
+  }, [openFindingsSub])
   return (
     <Tabs value={tab} onValueChange={(v) => { touched.current = true; setTab(v) }} className="flex h-full flex-col gap-0">
       <TabsList className="w-full justify-start rounded-none border-b bg-transparent p-0">
@@ -66,7 +73,8 @@ export function Blackboard({ pid, compact = false, track, capabilities, defaultV
       <TabsContent value="findings" className="min-h-0 flex-1">
         {/* 子视图切换仅渗透/红队轨（R2 拆轨前判断 assessment）且非 compact 侧栏时渲染 */}
         <Findings pid={pid} compact={compact} track={track}
-                  showCanvas={!compact && (track === "pentest" || track === "redteam")} />
+                  showCanvas={!compact && (track === "pentest" || track === "redteam")}
+                  forcedSub={openFindingsSub} onSubConsumed={onFindingsSubConsumed} />
       </TabsContent>
       <TabsContent value="assets" className="min-h-0 flex-1">
         {/* 树视图全轨启用（2026-09-20）：E6 自动挂载全轨生效，ctf 等轨同样有 parent 树；
@@ -105,8 +113,9 @@ function Chip({ active, onClick, children }: { active: boolean; onClick: () => v
 
 // CTF 线索级别词表已提出共享：./blackboard/ctfLevel（列表视图与全景链路图共用）
 
-export function Findings({ pid, compact, track, showCanvas }: {
+export function Findings({ pid, compact, track, showCanvas, forcedSub, onSubConsumed }: {
   pid: string; compact?: boolean; track?: string; showCanvas: boolean
+  forcedSub?: "list" | "canvas"; onSubConsumed?: () => void
 }) {
   const isCtf = track === "ctf"
   const [items, setItems] = useState<Finding[]>([])
@@ -123,7 +132,7 @@ export function Findings({ pid, compact, track, showCanvas }: {
   const [detail, setDetail] = useState<Finding | null>(null)  // 弹窗展示复现步骤/POC
   const [assetOpen, setAssetOpen] = useState(false)   // 资产筛选下拉展开态
   const [assetQuery, setAssetQuery] = useState("")     // 下拉内搜索词
-  const [subView, setSubView] = useState<"list" | "canvas">("list")
+  const [subView, setSubView] = useState<"list" | "canvas">(forcedSub ?? "list")
   const [title, setTitle] = useState("")
   const [vulnClass, setVulnClass] = useState("")
 
@@ -140,6 +149,13 @@ export function Findings({ pid, compact, track, showCanvas }: {
     const t = setInterval(refresh, 4000)
     return () => clearInterval(t)
   }, [refresh])
+
+  // 外部深链消费：非空即切到指定子视图一次（工作台右栏「链路视图」→ canvas）
+  useEffect(() => {
+    if (!forcedSub) return
+    setSubView(forcedSub)
+    onSubConsumed?.()
+  }, [forcedSub, onSubConsumed])
 
   // 资产筛选下拉数据源
   useEffect(() => {

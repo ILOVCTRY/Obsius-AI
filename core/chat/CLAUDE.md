@@ -37,6 +37,11 @@ FOREIGN KEY constraint failed → 曾致删有子线程的线程 500）。
   工具调用落 `chat.tool`（**phase=start/done 两段**（2026-09-29）：dispatch 前
   start、完成后 done 带 ok/duration_s/result_head）；终稿落 `chat.message`；
   spawn 落 `chat.spawn`。**消息全文以 chat_messages 表为准，事件只承担实时可见性**。
+- **截断整轮重试（2026-10-01 事故修复）**：`_chat` 对 `LLMError.truncated`（工具
+  参数流截断/网关 SSE 尾部冗余）整轮重发 ≤2 次（与 agent 同口径——流不可重放，
+  只能轮级重试）；重试前 `_reset_delta` 清空 delta 累加与节流基准，防「半截+新流」
+  拼接上屏（前端取最后一条 chat.delta 的累计全文）。错误卡片新增 `stream`
+  （网关流异常）分类，不再落 `unknown`→「执行异常」。
 - **工具失败约定（2026-09-29）**：`_dispatch` 返回 `(ok, text)`，失败文案统一
   `[错误]` 前缀（agent 工具面兼容 `[工具异常]`/`[参数格式]`）；`ok` 是结构化
   真值进 chat.tool 事件，持久化消息靠 `[错误]` 前缀判定（勿再用 startsWith("[")——
@@ -82,8 +87,10 @@ FOREIGN KEY constraint failed → 曾致删有子线程的线程 500）。
   finish 已被 _EXPERT_EXCLUDED 排除，装了无消费者。回归测试
   test_expert_thread_workspace_tools / test_workspace_params_propagate_to_
   spawned_expert。
-- max_steps：主控 24 / 子专家 32。线程 status：running 起、idle 正常收、
-  error 异常收（异常也落一条 chat.message 事件，前端可见）。
+- max_steps：主控 200 / 子专家 200（2026-10-01 由 24/32 提升）。**末步强制终稿**：
+  循环最后一步不传 tools（`step_tools=None`），逼模型输出纯文本终稿，避免「步数
+  耗尽但全程只调工具」→ 落「本轮未产出文本回复」。线程 status：running 起、
+  idle 正常收、error 异常收（异常也落一条 chat.message 事件，前端可见）。
 
 ## MCP 桥（mcp_bridge.py）
 

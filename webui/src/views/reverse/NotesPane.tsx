@@ -5,6 +5,7 @@ import type { FuncEntry, LogicBlockSummary, WritebackItem, WritebackResult } fro
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
+import type { Engine } from "./SampleBar"
 
 // 右栏 tab：人机共写 func_kb。改名（入 name_history）/ risk_tags 全量替换 / 笔记分段追加。
 // confidence 是 AI 字段，这里不动；缓存中尚无 kb 行时先 POST /funcs 建行再 PATCH。
@@ -19,6 +20,8 @@ interface Props {
   onSaved: () => void
   /** MCP 在线时后端自动选路：实时写 IDA 当前库（无锁、不存盘）；离线走 headless 写 .i64 */
   mcpLive?: boolean
+  /** 反编译引擎模式（2026-10-01）：Ghidra 模式无 IDA 库写回通道，隐藏写回区 */
+  engine?: Engine
 }
 
 /** 取分析笔记首段（跳过 ## 标题行与空行）作为写回 IDA 的函数注释。 */
@@ -46,7 +49,8 @@ function writebackMessage(res: WritebackResult): string {
   }
 }
 
-export function NotesPane({ pid, sha, addr, cacheName, kb, onSaved, mcpLive = false }: Props) {
+export function NotesPane({ pid, sha, addr, cacheName, kb, onSaved, mcpLive = false, engine = "ida" }: Props) {
+  const ghidra = engine === "ghidra"
   const [name, setName] = useState(kb?.name ?? cacheName ?? "")
   const [tags, setTags] = useState((kb?.risk_tags ?? []).join(", "))
   const [note, setNote] = useState("")
@@ -208,27 +212,30 @@ export function NotesPane({ pid, sha, addr, cacheName, kb, onSaved, mcpLive = fa
       </Button>
       {msg && <p className="break-all font-mono text-[10px] text-muted-foreground">{msg}</p>}
 
-      {/* P2：写回 IDA .i64（必须先有 kb 行；注释默认不带，避免覆盖 IDA 里的手工注释） */}
-      <div className="border-t pt-2">
-        <label className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
-          <input type="checkbox" checked={withComment}
-                 disabled={!kb || !commentReady}
-                 onChange={(e) => setWithComment(e.target.checked)} />
-          把分析笔记首段作为函数注释{kb && !commentReady && "（暂无笔记）"}
-        </label>
-        <Button size="sm" variant="outline" className="mt-1 w-full gap-1 text-[11px]"
-                onClick={writeback}
-                disabled={wbBusy || !kb || !name.trim()}
-                title={!kb
-                  ? "先把该函数保存进 func_kb，再写回 IDA"
-                  : mcpLive
-                    ? "实时写入当前 IDA 打开的库（MCP；无 headless 锁问题，存盘由你在 IDA 中完成）"
-                    : "把当前命名/注释写回 IDA 数据库（headless；GUI 开着会被锁挡住）"}>
-          {wbBusy ? <Loader2 className="size-3 animate-spin" /> : <FileUp className="size-3" />}
-          ⬆ 写回 IDA
-        </Button>
-        {wbMsg && <p className="mt-1 break-all font-mono text-[10px] text-muted-foreground">{wbMsg}</p>}
-      </div>
+      {/* P2：写回 IDA .i64（必须先有 kb 行；注释默认不带，避免覆盖 IDA 里的手工注释）
+          Ghidra 模式无 IDA 库写回通道 → 整块隐藏 */}
+      {!ghidra && (
+        <div className="border-t pt-2">
+          <label className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+            <input type="checkbox" checked={withComment}
+                   disabled={!kb || !commentReady}
+                   onChange={(e) => setWithComment(e.target.checked)} />
+            把分析笔记首段作为函数注释{kb && !commentReady && "（暂无笔记）"}
+          </label>
+          <Button size="sm" variant="outline" className="mt-1 w-full gap-1 text-[11px]"
+                  onClick={writeback}
+                  disabled={wbBusy || !kb || !name.trim()}
+                  title={!kb
+                    ? "先把该函数保存进 func_kb，再写回 IDA"
+                    : mcpLive
+                      ? "实时写入当前 IDA 打开的库（MCP；无 headless 锁问题，存盘由你在 IDA 中完成）"
+                      : "把当前命名/注释写回 IDA 数据库（headless；GUI 开着会被锁挡住）"}>
+            {wbBusy ? <Loader2 className="size-3 animate-spin" /> : <FileUp className="size-3" />}
+            ⬆ 写回 IDA
+          </Button>
+          {wbMsg && <p className="mt-1 break-all font-mono text-[10px] text-muted-foreground">{wbMsg}</p>}
+        </div>
+      )}
 
       {/* 加入业务块（「业务逻辑」页签可见；挂接纪律：仅 func_kb 已登记函数） */}
       <div className="border-t pt-2">

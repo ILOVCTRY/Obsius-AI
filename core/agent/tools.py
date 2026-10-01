@@ -88,10 +88,52 @@ _BB_TASK_STATUSES = ("open", "claimed", "done", "failed", "blocked", "cancelled"
 _BB_ASSET_TYPES = ("host", "domain", "service", "url", "binary")
 
 # H1 spill（2026-09-19，借鉴 dsh tool-output-spill）：超限工具结果全量落盘 +
-# 有界预览。豁免两类：run_cmd 已有网关 brief 截断；kb/skill/route 打开类工具
-# 的正文本身就是取用目的（落盘隔一层反而逼模型多绕一步）。
-_SPILL_SKIP = {"run_cmd", "kb_open", "skill_open", "route_lookup"}
-_SPILL_THRESHOLD = 8000  # 字符；生产 60k 摘要线之下，单结果不该占这么多
+# 有界预览。豁免打开类（kb/skill/route）——正文本身即取用目的（落盘隔一层反而
+# 逼模型多绕一步）。run_cmd 不再豁免（2026-10-01）：回执 brief 放大后仍可能逼近
+# 阈值，统一走 spill 兜底更稳。
+_SPILL_SKIP = {"kb_open", "skill_open", "route_lookup"}
+_SPILL_THRESHOLD = 32_000  # 字符（2026-10-01 由 8000 放宽）
+
+# 读路径放开（2026-10-01）：宿主 read_file/search_files 不再限定工作区根——只有
+# **写**（run_cmd 的 pathguard）才拦边界。容器/WSL 会话里模型拿到的是容器根路径
+# （docker 挂 <ws>→/workspace、wsl 挂 /mnt/<盘符>），需映射回宿主真实路径才读得到。
+_DOCKER_WS_MOUNT = "/workspace"          # 与 core.runtime.gateway 同约定
+
+
+def _resolve_read_path(path: str, ws: Path, scratch: Path) -> Path:
+    """读路径解析（2026-10-01 放宽）：
+    ① 容器 `/workspace/…`（docker 挂 <ws>→/workspace）→ 宿主 `ws/…`；
+    ② WSL `/mnt/<盘符>/…` → `<盘符>:\\…`；
+    ③ 其余绝对路径原样；相对路径 → scratch。
+    ①② 命中真实文件即返回，否则回退原样（交给上层出「文件不存在」）。注意：
+    Windows 上 `/workspace/…` 这种「有根无盘符」路径 `is_absolute()` 为 False，
+    故必须先于相对判定处理。"""
+    posix = str(path).replace("\\", "/")
+    if posix == _DOCKER_WS_MOUNT or posix.startswith(_DOCKER_WS_MOUNT + "/"):
+        mapped = ws / posix[len(_DOCKER_WS_MOUNT):].lstrip("/")
+        if mapped.exists():
+            return mapped.resolve()
+    m = re.match(r"^/mnt/([a-zA-Z])(?:/(.*))?$", posix)
+    if m:  # WSL 默认挂载 /mnt/e/... → E:\...
+        drive = m.group(1).upper() + ":\\"
+        mapped = Path(drive + (m.group(2) or "").replace("/", "\\"))
+        if mapped.exists():
+            return mapped.resolve()
+    p = Path(path)
+    if p.is_absolute() or posix.startswith("/"):
+        return p.resolve()
+    return (scratch / p).resolve()
+
+
+def _display_path(p: Path, ws: Path, scratch: Path) -> str:
+    """展示用相对化（scratch 优先、ws 次之、否则原样绝对路径）——读放开后可能
+    在工作区之外，`relative_to` 会 ValueError，故集中兜底。"""
+    for root in (scratch, ws):
+        try:
+            return str(p.relative_to(root.resolve())).replace(os.sep, "/")
+        except ValueError:
+            continue
+    return str(p)
 
 # stuck-convergence D6（2026-09-23）：收尾确认轮上限——防确认本身拖收尾烧 token
 _CLOSING_MAX_ROUNDS = 2
@@ -1441,39 +1483,19 @@ class ToolDispatcher:
             workspace=Path(self.artifacts_dir).parent if self.artifacts_dir else None,
             step=self._step,
         )
-        return r.brief()
+        return r.brief(8000)  # 2026-10-01 由 2000 放宽（回执更完整；超限仍走 spill）
 
     def _tool_read_file(self, path: str, offset: int = 1, limit: int = 100) -> str:
-        """只读工作区文件（2026-09-20）：host 原生 Python open，不经 WSL/PowerShell
+        """只读文件（2026-09-20）：host 原生 Python open，不经 WSL/PowerShell
         ——无命令执行面、无引号转义、无启动开销；pathguard 只拦写不受影响。
-        只许读本项目工作区内（防越权读宿主任意文件）；cat -n 风格带行号；
-        单行 >500 字符切尾标注；offset=-N 读末尾 N 行（tail 语义）。"""
+        读路径放开（2026-10-01）：不再限定工作区根（只有写才拦边界）；容器
+        `/workspace/…` 与 WSL `/mnt/<盘符>/…` 绝对路径自动映射回宿主真实路径。
+        cat -n 风格带行号；单行 >2000 字符切尾标注；offset=-N 读末尾 N 行（tail）。"""
         if not self.artifacts_dir:
             return "[错误] 未装配工作区（artifacts_dir），read_file 不可用"
         ws = Path(self.artifacts_dir).parent
         scratch = ws / "scratch"
-        p = Path(path)
-        if not p.is_absolute():
-            p = scratch / p
-        p = p.resolve()
-        # 允许根 = 本项目工作区 + 启用域 kb 源根（packs/kb/<域>/，只读——
-        # kb_open 回执指示 Read 手册；packs 其余目录仍拒）
-        allowed_roots = [ws.resolve()]
-        if self.packs_root:
-            allowed_roots += [s.root.resolve()
-                              for s in load_kb_sources(self.packs_root,
-                                                       self.capabilities)
-                              if s.root.is_dir()]
-
-        def _within(root: Path) -> bool:
-            try:
-                p.relative_to(root)
-                return True
-            except ValueError:
-                return False
-
-        if not any(_within(r) for r in allowed_roots):
-            return f"[拒绝] 只允许读本项目工作区或知识库内文件（path={path}）"
+        p = _resolve_read_path(path, ws, scratch)
         if not p.is_file():
             return (f"[错误] 文件不存在: {path}（相对 scratch 解析；"
                     "可用 run_cmd ls/dir 查看目录，注意 host 是 PowerShell、wsl 才有 ls）")
@@ -1485,7 +1507,7 @@ class ToolDispatcher:
         total = len(lines)
         # tail 语义：offset=-N 读末尾 N 行
         start = offset if offset > 0 else max(1, total + offset + 1)
-        limit = max(1, min(int(limit), 400))
+        limit = max(1, min(int(limit), 2000))
         if start > total:
             return (f"[错误] offset={offset} 超出文件范围（共 {total} 行）；"
                     "负数 offset 表示读末尾 N 行")
@@ -1493,8 +1515,8 @@ class ToolDispatcher:
         width = len(str(start + len(sel) - 1))
         out = []
         for i, line in enumerate(sel, start=start):
-            if len(line) > 500:
-                line = line[:500] + f"…[行截断：共 {len(line)} 字符]"
+            if len(line) > 2000:
+                line = line[:2000] + f"…[行截断：共 {len(line)} 字符]"
             out.append(f"{str(i).rjust(width)}\t{line}")
         body = "\n".join(out)
         end = start + len(sel) - 1
@@ -1503,16 +1525,9 @@ class ToolDispatcher:
         # D9：成功读取落 file.read 轻事件（只记路径/步号，不存内容）——
         # 卡死预检凭「在读新文件」识别活跃探索；审计事件失败不得影响工具返回
         try:
-            try:
-                shown = p.relative_to(scratch.resolve())
-            except ValueError:
-                try:
-                    shown = p.relative_to(ws.resolve())
-                except ValueError:
-                    shown = p
             self.bb.append_event(
                 self.project_id, "file.read",
-                {"path": str(shown)[:200], "step": self._step},
+                {"path": _display_path(p, ws, scratch)[:200], "step": self._step},
                 session_id=self.session_id, author=self.author)
         except Exception:  # noqa: BLE001
             pass
@@ -1521,31 +1536,29 @@ class ToolDispatcher:
     # 检索时跳过的目录名（命中即剪枝，不跟随——产物/依赖/临时目录，不是侦察对象）
     _SEARCH_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".build-venv",
                          "build", "dist", ".pytest_cache"}
-    # 单文件读取上限：超大文件不做逐行正则（防喂入巨型单行文件造成卡顿）
-    _SEARCH_MAX_FILE = 5 * 1024 * 1024
+    # 单文件读取上限（2026-10-01 由 5MB 放宽）：超大文件不做逐行正则
+    _SEARCH_MAX_FILE = 50 * 1024 * 1024
 
     def _tool_search_files(self, pattern: str, path: str | None = None,
                            regex: bool = True, glob: str | None = None,
                            max_results: int = 100) -> str:
         """工作区内容检索（2026-09-24）：非 shell 的 grep 替代——
-        - 只搜本项目工作区内（resolve 后必须位于 ws 根之下，防越权扫宿主任意文件）；
+        - 读路径放开（2026-10-01）：不再限定工作区根（只有写才拦边界）；容器
+          `/workspace/…` 与 WSL `/mnt/<盘符>/…` 映射回宿主真实路径；path 省略时默认工作区；
         - 纯 Python 逐行匹配（re 正则 / 子串大小写不敏感），无命令执行面；
-        - 跳过二进制类后缀与 VCS/依赖目录，单文件 ≤5MB；
-        - 命中行截 300 字符，最多 300 条；另落 file.search 轻事件（D9 活跃探索识别）。"""
+        - 跳过二进制类后缀与 VCS/依赖目录，单文件 ≤50MB；
+        - 命中行截 1000 字符，最多 1000 条；另落 file.search 轻事件（D9 活跃探索识别）。"""
         if not self.artifacts_dir:
             return "[错误] 未装配工作区（artifacts_dir），search_files 不可用"
         if not isinstance(pattern, str) or not pattern:
             return "[错误] pattern 必须为非空字符串"
         ws = Path(self.artifacts_dir).parent.resolve()
         scratch = (ws / "scratch").resolve()
-        root = Path(path) if path else ws
-        if not root.is_absolute():
-            root = scratch / root
+        root = _resolve_read_path(path, ws, scratch) if path else ws
         try:
             root = root.resolve()
-            root.relative_to(ws)
-        except (ValueError, OSError):
-            return f"[拒绝] 只允许检索本项目工作区内路径（path={path}）"
+        except OSError:
+            return f"[错误] 路径不存在: {path}（相对 scratch 解析）"
         if not root.exists():
             return f"[错误] 路径不存在: {path}（相对 scratch 解析）"
         try:
@@ -1559,7 +1572,7 @@ class ToolDispatcher:
         except re.error as e:
             return f"[错误] 非法正则: {e}"
         try:
-            cap = max(1, min(int(max_results), 300))
+            cap = max(1, min(int(max_results), 1000))
         except (TypeError, ValueError):
             cap = 100
         name_filter: Callable[[str], bool]
@@ -1586,19 +1599,11 @@ class ToolDispatcher:
             if f.stat().st_size > self._SEARCH_MAX_FILE:
                 continue
             scanned += 1
-            shown = f
-            try:
-                shown = f.relative_to(scratch)
-            except ValueError:
-                try:
-                    shown = f.relative_to(ws)
-                except ValueError:
-                    pass
+            shown = _display_path(f, ws, scratch)
             with f.open("r", encoding="utf-8", errors="replace") as fh:
                 for lineno, line in enumerate(fh, start=1):
                     if match(line.rstrip("\n")):
-                        hits.append(f"{str(shown).replace(os.sep, '/')}:{lineno}: "
-                                    f"{line.strip()[:300]}")
+                        hits.append(f"{shown}:{lineno}: {line.strip()[:1000]}")
                         if len(hits) >= cap:
                             truncated = True
                             break
@@ -1608,7 +1613,7 @@ class ToolDispatcher:
             continue
         if not hits:
             return (f"[无命中] pattern={pattern[:100]}（扫描 {scanned} 个文件；"
-                    f"范围 {str(root.relative_to(ws)) if root != ws else '.'}）")
+                    f"范围 {_display_path(root, ws, scratch)}）")
         body = "\n".join(hits)
         if truncated or scanned:
             body += (f"\n…[共 {len(hits)} 条命中，扫描 {scanned} 个文件"

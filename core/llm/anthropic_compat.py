@@ -4,9 +4,11 @@ HTTP 传输层可注入（默认 urllib 标准库实现），单元测试用 fak
 不触网。子类只需固定 base_url / api_key / model（见 ark.py）。
 """
 
+import http.client
 import json
 import logging
 import socket
+import ssl
 import time
 import urllib.request
 from collections.abc import Callable
@@ -40,6 +42,36 @@ MAX_RETRIES = 2
 # 小预算请求秒通、大预算挂起，坏窗口可持续 6 分钟+，实测 11:25-11:31 三连超时实例）。
 # 原 3/6s 间隔三次尝试全落同一窗口；30/60s 让第②③次尝试有机会跨入恢复窗口。
 RETRY_BACKOFF = 30.0
+# 连接类故障（TCP 重置/断连/超时，如 WSAECONNRESET 10054）单独更宽松（2026-10-01
+# 事故修复）：这类多为网关侧瞬时抖动，重试命中率远高于 5xx 坏窗口；此前与 5xx 共用
+# 2 次预算，一次长连接（SSE）重置即判死整轮。
+CONN_RETRIES = 4                      # 连接类总尝试次数（3 次重试）
+CONN_BACKOFF = (5.0, 10.0, 20.0)      # 各次重试前退避（秒）
+
+# 瞬时网络错误判定（2026-10-01 健壮性修复）：网关 TCP 重置（Windows WSAECONNRESET
+# 10054「远程主机强迫关闭了一个现有的连接」）等连接类故障，此前被 _default_transport
+# 包成 LLMError（RuntimeError 子类）→ chat() 的 (TimeoutError, ConnectionError)
+# 重试分支接不住 → 0 次重试直接判「轮次失败」。这里把连接重置/中止/拒绝/断管/超时
+# 统一判为「可重试」，抛 ConnectionError/TimeoutError 让既有 30s×2 重试接手。
+_TRANSIENT_ERRNOS = {
+    10054,  # WSAECONNRESET 远程主机强迫关闭
+    10053,  # WSAECONNABORTED 软件导致连接中止
+    10060,  # WSAETIMEDOUT 连接超时
+    10061,  # WSAECONNREFUSED 连接被拒绝
+    104,    # ECONNRESET
+    103,    # ECONNABORTED
+    110,    # ETIMEDOUT
+    32,     # EPIPE（断管）
+}
+
+
+def _is_transient_network(reason: Any) -> bool:
+    """URLError.reason 是否属「可重试」的瞬时网络故障（连接类/超时/断管）。
+    非瞬时（DNS 解析失败、不支持协议、非法 URL 等）返回 False，仍按 LLMError
+    快速暴露交人工判断。"""
+    if isinstance(reason, (ConnectionError, TimeoutError, BrokenPipeError)):
+        return True
+    return getattr(reason, "errno", None) in _TRANSIENT_ERRNOS
 
 
 def _default_transport(timeout: float) -> Transport:
@@ -59,6 +91,8 @@ def _default_transport(timeout: float) -> Transport:
         except urllib.error.URLError as e:
             if isinstance(e.reason, (socket.timeout, TimeoutError)):
                 raise TimeoutError(str(e.reason)) from e
+            if _is_transient_network(e.reason):
+                raise ConnectionError(f"{e.reason}") from e
             raise LLMError(f"网络错误: {e.reason}") from e
 
     return _transport
@@ -81,6 +115,8 @@ def _default_stream_transport(timeout: float) -> StreamTransport:
         except urllib.error.URLError as e:
             if isinstance(e.reason, (socket.timeout, TimeoutError)):
                 raise TimeoutError(str(e.reason)) from e
+            if _is_transient_network(e.reason):
+                raise ConnectionError(f"{e.reason}") from e
             raise LLMError(f"网络错误: {e.reason}") from e
         return resp.status, resp
     return _transport
@@ -186,8 +222,11 @@ class AnthropicCompatProvider:
             body["stream"] = True
         payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
 
+        max_attempts = MAX_RETRIES + CONN_RETRIES + 4  # 两类预算 + 若干降级重试
         last_err: Exception | None = None
-        for attempt in range(1, MAX_RETRIES + 1):
+        conn_used = 0      # 连接类已用尝试数（含首次）
+        status_used = 0    # 429/5xx 已用尝试数（含首次）
+        for _ in range(max_attempts):
             try:
                 if use_stream:
                     status, data = self._stream_transport(
@@ -241,27 +280,46 @@ class AnthropicCompatProvider:
                             body["system"] = self._system_payload(system)
                             payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
                         continue
-                    if status in RETRYABLE_STATUS and attempt < MAX_RETRIES:
+                    status_used += 1
+                    if status in RETRYABLE_STATUS and status_used < MAX_RETRIES:
                         last_err = LLMError(msg, status=status,
                                             body=json.dumps(data, ensure_ascii=False)[:500])
-                        time.sleep(RETRY_BACKOFF * attempt)
+                        time.sleep(RETRY_BACKOFF * status_used)
                         continue
                     raise LLMError(msg, status=status,
                                    body=json.dumps(data, ensure_ascii=False)[:500])
                 if use_stream:
-                    # 流已开建连成功：中途任何错误不再重试（流不可重放，重试会重复回调
-                    # on_thinking）——网络错误包成 LLMError 直接抛
+                    # 流已开建连成功：中途断开默认不重试（流不可重放，重试会重复回调
+                    # on_thinking/on_text 造成重复上屏）。健壮性修复（2026-10-01）：
+                    # 包一层增量探针——若尚未吐出任何思考/文本增量（用户什么都没看到），
+                    # 则安全重试（杀连接重发原请求）；已吐过增量维持不重试。
+                    seen = {"emitted": False}
+
+                    def _watch(cb):
+                        def _inner(delta):
+                            seen["emitted"] = True
+                            if cb is not None:
+                                cb(delta)
+                        return _inner
+
                     try:
-                        return self._consume_stream(data, on_thinking, should_cancel,
-                                                    on_text)
-                    except (TimeoutError, ConnectionError) as e:
+                        return self._consume_stream(
+                            data, _watch(on_thinking) if on_thinking is not None else None,
+                            should_cancel,
+                            _watch(on_text) if on_text is not None else None)
+                    except (TimeoutError, ConnectionError,
+                            http.client.IncompleteRead, ssl.SSLError) as e:
+                        if not seen["emitted"]:
+                            # 尚无任何增量输出：可重试（重发不产生重复上屏）
+                            raise ConnectionError(f"流式传输中断（无增量，可重试）: {e}") from e
                         raise LLMError(f"流式传输中断: {e}") from e
                 return self._parse(data)
             except (TimeoutError, ConnectionError) as e:
                 last_err = e
-                if attempt >= MAX_RETRIES:
-                    raise LLMError(f"网络错误（已重试 {MAX_RETRIES - 1} 次）: {e}") from e
-                time.sleep(RETRY_BACKOFF * attempt)
+                conn_used += 1
+                if conn_used >= CONN_RETRIES:
+                    raise LLMError(f"网络错误（已重试 {conn_used - 1} 次）: {e}") from e
+                time.sleep(CONN_BACKOFF[min(conn_used - 1, len(CONN_BACKOFF) - 1)])
         raise last_err  # pragma: no cover — 循环内必 return 或 raise
 
     def _consume_stream(
@@ -327,6 +385,22 @@ class AnthropicCompatProvider:
                     try:
                         b["input"] = json.loads(raw)
                     except json.JSONDecodeError as e:
+                        # 尾部冗余容错（2026-10-01）：JSON 本体完整但尾部多发字符
+                        # （网关 SSE 异常：stop_reason=tool_use 正常收尾却报
+                        # "Extra data"）——用 raw_decode 取开头完整的 JSON 值、忽略
+                        # 尾部冗余；仅接受 dict（工具参数必为对象），成功即采用。
+                        salvaged = None
+                        try:
+                            obj, _end = json.JSONDecoder().raw_decode(raw.lstrip())
+                            if isinstance(obj, dict):
+                                salvaged = obj
+                        except json.JSONDecodeError:
+                            salvaged = None
+                        if salvaged is not None:
+                            log.warning("工具参数尾部冗余已忽略（stop_reason=%s，"
+                                        "已收 %d 字符）", stop_reason or "未知", len(raw))
+                            b["input"] = salvaged
+                            continue
                         # 流截断防御（2026-09-20 事故修复）：输出预算耗尽
                         # （stop_reason=max_tokens）或网关优雅断流时工具参数残缺，
                         # 裸 JSONDecodeError 穿到 agent 循环会直接 fail 任务

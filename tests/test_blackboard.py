@@ -93,9 +93,12 @@ def test_schema_v7_migration(tmp_path):
     try:
         ver = board.conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
-        assert int(ver) == SCHEMA_VERSION == 27
+        assert int(ver) == SCHEMA_VERSION == 28
         assert {"logic_blocks", "logic_block_funcs"} <= {r[0] for r in board.conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}  # v27（业务逻辑块）
+        chat_cols = {r[1] for r in board.conn.execute(
+            "PRAGMA table_info(chat_threads)")}
+        assert {"usage", "error"} <= chat_cols  # v26 用量 / v28 轮次失败结构化错误
         task_cols = {r[1] for r in board.conn.execute("PRAGMA table_info(tasks)")}
         os_cols = {r[1] for r in board.conn.execute(
             "PRAGMA table_info(orchestrator_state)")}
@@ -1150,7 +1153,7 @@ def test_schema_v11_migration_idempotent(tmp_path):
         board = Blackboard(str(db_path))
         ver = board.conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
-        assert int(ver) == SCHEMA_VERSION == 27
+        assert int(ver) == SCHEMA_VERSION == 28
         cols = {r[1] for r in board.conn.execute("PRAGMA table_info(findings)")}
         assert "rating_basis" in cols
         assert "category" in cols  # v12（发现分两类）

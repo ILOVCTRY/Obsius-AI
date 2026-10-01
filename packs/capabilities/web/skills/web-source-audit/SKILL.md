@@ -9,7 +9,7 @@ task_types: analyze, verify
 # web-source-audit —— 源码白盒审计入口
 
 > 分层纪律：本技能只做**入口路由 + 纪律**。方法论 = 下面的白盒手册（`kb_open(module=…)`
-> 单篇直开），具体漏洞的 payload 与绕过在 `web/webapp/<类型>/手册.md`。
+> 单篇直开），具体漏洞类型的 payload 与绕过在其专属手册（目录名即类型：idor/sqli/ssrf/…）。
 > **按需 kb_open，禁止通读。**
 >
 > 与黑盒技能的分工：`web-strike-entry` 管**在线探测**（目标只有 URL）；本技能管

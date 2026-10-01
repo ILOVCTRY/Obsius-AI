@@ -3,15 +3,16 @@ import {
   type MouseEvent as ReactMouseEvent,
 } from "react"
 import {
-  Bot, Check, ChevronDown, CircleSlash, Clock3, Cpu, Gauge, Loader2, Plug, Plus,
-  Send, Sparkles, Square, Trash2, Wrench, X, Zap,
+  AlertTriangle, Bot, Check, ChevronDown, CircleSlash, Clock3, Cpu, Gauge, Loader2,
+  Plug, Plus, Send, Sparkles, Square, Trash2, Wrench, X, Zap,
 } from "lucide-react"
 import { api } from "@/lib/api"
 import type {
-  ChatAgent, ChatMcpServer, ChatMessage, ChatThread,
+  ChatAgent, ChatMcpServer, ChatMessage, ChatThread, ChatThreadError,
 } from "@/lib/types"
 import type { ProjectDetail, SkillDef } from "@/lib/types"
 import { MarkdownView } from "@/components/settings/MarkdownView"
+import { FindingsRail } from "@/components/workbench/FindingsRail"
 import { cn } from "@/lib/utils"
 import { useEvents } from "@/lib/useEvents"
 
@@ -46,7 +47,9 @@ const ASIDE_MIN = 180
 const ASIDE_MAX = 420
 const ASIDE_DEFAULT = 236
 
-export function AgentWorkbenchView({ pid, meta }: { pid: string; meta: ProjectDetail | null }) {
+export function AgentWorkbenchView({ pid, meta, onOpenChain }: {
+  pid: string; meta: ProjectDetail | null; onOpenChain?: () => void
+}) {
   const [agents, setAgents] = useState<ChatAgent[]>([])
   const [agentId, setAgentId] = useState<string>(ORCHESTRATOR)
   const [threads, setThreads] = useState<ChatThread[]>([])
@@ -391,7 +394,12 @@ export function AgentWorkbenchView({ pid, meta }: { pid: string; meta: ProjectDe
           </span>
           <span className="wb-header-title">{thread?.title || currentAgent?.name || "智能体工作台"}</span>
           {running && <span className="wb-badge"><span className="wb-dot is-running" />执行中</span>}
-          {thread?.status === "error" && <span className="wb-badge is-error">出错</span>}
+          {thread?.status === "error" && (
+            <span className="wb-badge is-error"
+              title={thread.error ? `${thread.error.title}：${thread.error.hint}` : undefined}>
+              出错
+            </span>
+          )}
           {thread?.parent_thread_id && <span className="wb-badge is-ghost">子专家线程</span>}
         </div>
 
@@ -483,6 +491,14 @@ export function AgentWorkbenchView({ pid, meta }: { pid: string; meta: ProjectDe
                   <div className="wb-msg">
                     <div className="wb-msg-head"><span className="wb-msg-kind">思考中</span></div>
                     <div className="wb-typing"><span className="wb-caret" /></div>
+                  </div>
+                </div>
+              )}
+              {thread?.status === "error" && thread.error && !running && (
+                <div className="wb-row wb-anim">
+                  <span className="wb-avatar is-sm"><CircleSlash size={11} /></span>
+                  <div className="wb-msg">
+                    <ThreadErrorCard error={thread.error} />
                   </div>
                 </div>
               )}
@@ -744,6 +760,9 @@ export function AgentWorkbenchView({ pid, meta }: { pid: string; meta: ProjectDe
           )}
         </div>
       </main>
+
+      {/* 右栏：漏洞/发现（默认收起；2026-10-01） */}
+      <FindingsRail pid={pid} track={meta?.track} onOpenChain={onOpenChain} />
     </div>
   )
 }
@@ -773,6 +792,27 @@ function fmtTime(iso: string): string {
     const d = new Date(iso.endsWith("Z") || iso.includes("T") ? iso : iso.replace(" ", "T") + "Z")
     return d.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })
   } catch { return "" }
+}
+
+// 轮次失败错误卡片（2026-10-01）：分类标题 + 友好原因/建议 + 可折叠技术细节。
+// 后端在 round 失败时落 chat_threads.error（status=error），此处渲染于时间线末尾。
+function ThreadErrorCard({ error }: { error: ChatThreadError }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="wb-card wb-error-card">
+      <div className="wb-error-head">
+        <AlertTriangle size={13} className="wb-error-icon" />
+        <span className="wb-error-title">本轮执行失败 · {error.title}</span>
+        <span className="wb-error-cat">{error.category}</span>
+      </div>
+      <p className="wb-error-hint">{error.hint}</p>
+      <button type="button" className="wb-error-toggle" onClick={() => setOpen((v) => !v)}>
+        <ChevronDown size={11} className={cn("wb-error-caret", open && "is-open")} />
+        {open ? "收起技术细节" : "展开技术细节"}
+      </button>
+      {open && <pre className="wb-error-detail">{error.message}</pre>}
+    </div>
+  )
 }
 
 function Hero({ agentName, isOrch }: { agentName?: string; isOrch: boolean }) {

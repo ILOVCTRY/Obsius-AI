@@ -432,6 +432,8 @@ export interface BinaryMeta {
   partial?: boolean
   total_functions?: number
   next_offset?: number
+  /** 产出该缓存的引擎（ida / ghidra；2026-10-01 双模式一致性对账） */
+  engine?: string
 }
 
 export interface BinarySection {
@@ -448,6 +450,8 @@ export type ToolState = "installed" | "cached" | "off"
 export interface BinaryOverview {
   sha: string
   asset_meta: Record<string, unknown>
+  /** 样本配置的反编译引擎模式（ida / ghidra；2026-10-01 工作台双模式） */
+  engine: string
   cached: boolean
   meta: BinaryMeta | null
   sections: BinarySection[] | { error: string } | null
@@ -455,6 +459,10 @@ export interface BinaryOverview {
   function_count: number
   analyzed_count: number
   risk_count: number
+  /** 指向该样本资产的发现数（删除确认框列数量用；2026-10-01 样本删除） */
+  findings_count: number
+  /** 该样本的业务逻辑块数（删除确认框列数量用） */
+  logic_blocks_count: number
   strings_count: number
   db_path: string | null
   tools: { ida: { state: ToolState }; ghidra: { state: ToolState }; mcp: { state: ToolState } }
@@ -1634,6 +1642,13 @@ export interface ChatUsage {
   }
 }
 
+export interface ChatThreadError {
+  category: string          // network / rate_limit / auth / quota / context / bad_request / unknown
+  title: string             // 分类标题（如「网络中断」）
+  message: string           // 原始异常文案（技术细节）
+  hint: string              // 下一步建议
+}
+
 export interface ChatThread {
   id: string
   project_id: string
@@ -1644,6 +1659,8 @@ export interface ChatThread {
   spawned_task: string
   todo: ChatTodoItem[]
   usage?: ChatUsage | null
+  /** 最近一轮失败的结构化错误（status=error 时存在；新轮开始清空） */
+  error?: ChatThreadError | null
   created_at: string
   updated_at: string
 }

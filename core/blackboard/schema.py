@@ -9,7 +9,11 @@
 
 import sqlite3
 
-SCHEMA_VERSION = 27
+SCHEMA_VERSION = 28
+
+# v27→v28（健壮性：轮次失败结构化错误，2026-10-01）：chat_threads 幂等补 error
+# （JSON：最近一轮失败 {category,message,hint,detail}；''=无错误）。前端据此在
+# 时间线末尾渲染错误卡片，替代原先只亮一个「出错」徽标的粗糙反馈。
 
 # v23→v24（会话中心化 M4，docs/plans/session-centric-orchestration.md，2026-09-25）：
 # **纯语义迁移、零物理改动与数据搬迁**——tasks 表即「委托」；会话窗经
@@ -410,6 +414,7 @@ CREATE TABLE IF NOT EXISTS chat_threads (
     spawned_task     TEXT NOT NULL DEFAULT '',      -- spawn 时的委派任务简述
     todo             TEXT NOT NULL DEFAULT '[]',    -- JSON：主控待办 [{id,title,status}]
     usage            TEXT NOT NULL DEFAULT '',      -- JSON：最近上下文用量 {input,output,steps,cache_read,cache_creation}（v26）
+    error            TEXT NOT NULL DEFAULT '',      -- JSON：最近一轮失败 {category,message,hint,detail}（v28；''=无）
     created_at       TEXT NOT NULL,
     updated_at       TEXT NOT NULL
 );
@@ -490,7 +495,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     - v24→v25：chat_threads/chat_messages 由 DDL 的 IF NOT EXISTS 直接建表
       （K9 智能体工作台，无 ALTER，旧库打开即建）。
     - v26→v27：logic_blocks/logic_block_funcs 由 DDL 的 IF NOT EXISTS 直接建表
-      （业务逻辑块，无 ALTER，旧库打开即建）。"""
+      （业务逻辑块，无 ALTER，旧库打开即建）。
+    - v27→v28：chat_threads 幂等补 error（轮次失败结构化错误，见文件头版本注释）。"""
     cols = {r[1] for r in conn.execute("PRAGMA table_info(projects)")}
     if "track" not in cols:
         conn.execute("ALTER TABLE projects ADD COLUMN track TEXT NOT NULL DEFAULT ''")
@@ -501,6 +507,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if chat_cols and "usage" not in chat_cols:  # v26（K9 /context 与用量圆环）
         conn.execute(
             "ALTER TABLE chat_threads ADD COLUMN usage TEXT NOT NULL DEFAULT ''")
+    if chat_cols and "error" not in chat_cols:  # v28（轮次失败结构化错误）
+        conn.execute(
+            "ALTER TABLE chat_threads ADD COLUMN error TEXT NOT NULL DEFAULT ''")
     task_cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
     if "context_refs" not in task_cols:
         conn.execute(

@@ -9,6 +9,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { x64dbgScript } from "./x64dbg"
 import { ceScript } from "./ce"
 import { AddToChainButton } from "./chains/AddToChainDialog"
+import type { Engine } from "./SampleBar"
 import { fmtDateTime, utcTitle } from "@/lib/datetime"
 
 // 中栏：函数结论（func_kb 人机共写）+ headless 伪码 + 外跳工具（IDA 精确跳址 / 脚本档）。
@@ -40,11 +41,13 @@ interface Props {
   mcpLive?: boolean
   /** headless 全量缓存已就绪（overview.cached） */
   cached?: boolean
+  /** 反编译引擎模式（2026-10-01）：Ghidra 模式无 IDA MCP 通道，提示语随之切换 */
+  engine?: Engine
 }
 
 export function FunctionDetail({
   pid, sha, addr, detail, loading, kb, bits, hasDb, imagebase, moduleName,
-  mcpLive = false, cached = true,
+  mcpLive = false, cached = true, engine = "ida",
 }: Props) {
   const [scriptOpen, setScriptOpen] = useState(false)
   const [idaMsg, setIdaMsg] = useState<string | null>(null)
@@ -55,6 +58,24 @@ export function FunctionDetail({
   const x64 = x64dbgScript(addr, bits, funcName)
   const ce = ceScript({ moduleName: moduleName ?? undefined, addr, imagebase: imagebase ?? undefined,
                          bits, name: funcName })
+  const ghidra = engine === "ghidra"
+  // 空态提示（2026-10-01）：Ghidra 模式无 IDA MCP 通道，措辞随引擎切换
+  const emptyPseudo = detail
+    ? (ghidra ? "该函数无伪码（可在「反汇编」页签查看）" : "该函数无伪码（可在「反汇编」页签或 IDA 中查看）")
+    : ghidra
+      ? "Ghidra 模式：缓存缺席请先「开始分析」；或重选函数触发按需反汇编"
+      : mcpLive
+        ? "MCP 未返回该函数：确认 IDA 当前打开的库包含此地址"
+        : "缓存缺席，请先完成分诊；或在 IDA 中按 Ctrl-Alt-M 启动 MCP 后实时读取"
+  const emptyAsm = detail
+    ? (ghidra
+        ? "该函数无反汇编（Ghidra 小样本在「开始分析」时导出；大样本按需拉取失败——重选函数重试）"
+        : "该函数无反汇编（未自动拉取或拉取失败——确认 IDA MCP 在线后重选函数）")
+    : ghidra
+      ? "Ghidra 模式：缓存缺席请先「开始分析」；或重选函数触发按需反汇编"
+      : mcpLive
+        ? "MCP 未返回该函数：确认 IDA 当前打开的库包含此地址"
+        : "缓存缺席，请先完成分诊；或在 IDA 中按 Ctrl-Alt-M 启动 MCP 后实时读取"
 
   const openIda = async () => {
     setIdaMsg(null)
@@ -77,11 +98,14 @@ export function FunctionDetail({
           {kb?.confidence && <Badge variant="outline" className="text-[10px]">{kb.confidence}</Badge>}
           <span className="flex-1" />
           <CopyBtn text={addr} label="复制地址" />
-          <Button size="sm" variant="outline" className="h-6 gap-1 px-2 text-[10px]"
-                  title={hasDb ? `在 IDA 中打开并跳到 ${addr}` : "尚无 IDA 数据库，先完成 headless 分诊"}
-                  disabled={!hasDb} onClick={openIda}>
-            <ExternalLink className="size-3" />IDA 跳转
-          </Button>
+          {/* IDA 跳转仅 IDA 模式（Ghidra headless 无 GUI 库可跳，按钮隐藏不误导） */}
+          {!ghidra && (
+            <Button size="sm" variant="outline" className="h-6 gap-1 px-2 text-[10px]"
+                    title={hasDb ? `在 IDA 中打开并跳到 ${addr}` : "尚无 IDA 数据库，先完成 headless 分诊"}
+                    disabled={!hasDb} onClick={openIda}>
+              <ExternalLink className="size-3" />IDA 跳转
+            </Button>
+          )}
           <Button size="sm" variant="outline" className="h-6 gap-1 px-2 text-[10px]"
                   title="生成人工动态验证脚本档（x64dbg / Cheat Engine，纯模板不触网）"
                   onClick={() => setScriptOpen(true)}>
@@ -148,13 +172,7 @@ export function FunctionDetail({
                   </p>
                 : detail?.pseudocode
                   ? <pre className="overflow-x-auto rounded bg-muted/40 p-2 font-mono text-[10px] leading-relaxed">{detail.pseudocode}</pre>
-                  : <p className="font-mono text-[10px] text-muted-foreground">
-                      {detail
-                        ? "该函数无伪码（可在「反汇编」页签或 IDA 中查看）"
-                        : mcpLive
-                          ? "MCP 未返回该函数：确认 IDA 当前打开的库包含此地址"
-                          : "缓存缺席，请先完成分诊；或在 IDA 中按 Ctrl-Alt-M 启动 MCP 后实时读取"}
-                    </p>}
+                  : <p className="font-mono text-[10px] text-muted-foreground">{emptyPseudo}</p>}
             </TabsContent>
             <TabsContent value="asm" className="min-h-0">
               {loading
@@ -168,13 +186,7 @@ export function FunctionDetail({
                         </p>
                       )}
                     </>
-                  : <p className="font-mono text-[10px] text-muted-foreground">
-                      {detail
-                        ? "该函数无反汇编（未自动拉取或拉取失败——确认 IDA MCP 在线后重选函数）"
-                        : mcpLive
-                          ? "MCP 未返回该函数：确认 IDA 当前打开的库包含此地址"
-                          : "缓存缺席，请先完成分诊；或在 IDA 中按 Ctrl-Alt-M 启动 MCP 后实时读取"}
-                    </p>}
+                  : <p className="font-mono text-[10px] text-muted-foreground">{emptyAsm}</p>}
             </TabsContent>
           </Tabs>
         </section>

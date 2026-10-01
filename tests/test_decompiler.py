@@ -4,6 +4,7 @@
 Agent 工具面的 func_kb 机制级查重。
 """
 
+import copy
 import json
 import os
 import threading
@@ -1112,9 +1113,122 @@ def test_large_sample_routes_ghidra_first(tmp_path, monkeypatch):
     assert order == ["ghidra"]     # 大样本 Ghidra 优先
 
 
+def test_engine_normalize_and_backend_mapping():
+    """引擎名规整与后端名→引擎映射（2026-10-01 双模式）。"""
+    assert dc.normalize_engine(None) == "ida"
+    assert dc.normalize_engine("") == "ida"
+    assert dc.normalize_engine("IDA") == "ida"
+    assert dc.normalize_engine("ghidra") == "ghidra"
+    assert dc.normalize_engine("Ghidra") == "ghidra"
+    assert dc.normalize_engine("乱写") == "ida"
+    assert dc.engine_of_backend("ida-headless") == "ida"
+    assert dc.engine_of_backend("mcp") == "ida"
+    assert dc.engine_of_backend("ghidra-headless") == "ghidra"
+
+
+def test_engine_preference_reorders_backends(tmp_path, sample):
+    """engine 指定时该引擎后端提到最前（偏好非排他，另一引擎仍兜底）。"""
+    g_runner, _ = fake_ghidra_runner(tmp_path)
+    i_runner, _ = fake_ida_runner()
+    g = GhidraHeadlessBackend(runner=g_runner, available=True,
+                              tmp_project_dir=tmp_path / "gt")
+    ida = IDAHeadlessBackend(idat_cmd="idat", runner=i_runner, available=True,
+                             db_dir=tmp_path / "db")
+    svc = DecompilerService(cache_dir=tmp_path / "cache")
+    svc.backends = [ida, g]
+    assert [b.name for b in svc._ordered_export_backends(str(sample))] \
+        == ["ida-headless", "ghidra-headless"]
+    assert [b.name for b in svc._ordered_export_backends(str(sample), "ghidra")] \
+        == ["ghidra-headless", "ida-headless"]
+    assert [b.name for b in svc._ordered_export_backends(str(sample), "ida")] \
+        == ["ida-headless", "ghidra-headless"]
+
+
+def test_export_marks_engine_in_cache_meta(tmp_path, sample):
+    """全量导出在缓存 meta 写产出引擎（Ghidra 后端产出 → meta.engine=ghidra）。"""
+    runner, _ = fake_ghidra_runner(tmp_path)
+    svc = make_service(tmp_path, sample, runner)
+    data, _info = svc.export_to_cache(str(sample), engine="ghidra")
+    assert data["meta"]["engine"] == "ghidra"
+    # 落盘缓存也带该字段（供 overview 读）
+    assert svc.read_cached(sha256_file(str(sample)))["meta"]["engine"] == "ghidra"
+
+
+def test_ghidra_export_embeds_disasm_for_small_sample(tmp_path, sample):
+    """Ghidra 模式 + 小样本：导出脚本带 args[4]='1'（内嵌反汇编开关）。"""
+    captured: dict = {}
+
+    def run(args):
+        captured["args"] = args
+        out = Path(args[args.index("-postScript") + 2])
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(EXPORT), encoding="utf-8")
+        return 0, "ok", ""
+
+    g = GhidraHeadlessBackend(runner=run, available=True,
+                              tmp_project_dir=tmp_path / "gt")
+    svc = DecompilerService(cache_dir=tmp_path / "cache", ghidra=g)
+    svc.export_to_cache(str(sample), engine="ghidra")
+    args = captured["args"]
+    # 反汇编开关位于 -deleteProject 之前，值为 "1"
+    assert args[args.index("-deleteProject") - 1] == "1"
+    # 非 Ghidra 引擎（ida）时不带该开关
+    captured.clear()
+    svc2 = DecompilerService(cache_dir=tmp_path / "c2", ghidra=GhidraHeadlessBackend(
+        runner=run, available=True, tmp_project_dir=tmp_path / "gt2"))
+    svc2.export_to_cache(str(sample), engine="ida")
+    assert captured["args"][captured["args"].index("-deleteProject") - 1] != "1"
+
+
+def test_ghidra_disasm_on_demand_reuses_persistent_project(tmp_path, sample):
+    """大样本按需反汇编：首次 -import（建持久工程），之后 -process -noanalysis 复用；
+    解析 disasm_funcs.py 的 {hex_addr: [lines]} 输出。"""
+    calls: list = []
+
+    def run(args):
+        calls.append(list(args))
+        out = Path(args[args.index("-postScript") + 2])
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps({"0x1189": ["0x1189  MOV EAX,1", "0x118b  RET"]}),
+                       encoding="utf-8")
+        # 模拟工程落盘（.gpr）→ 下次走 -process
+        proj_dir = Path(args[1])
+        (proj_dir / "csproj.gpr").write_text("x", encoding="utf-8")
+        return 0, "ok", ""
+
+    g = GhidraHeadlessBackend(runner=run, available=True,
+                              tmp_project_dir=tmp_path / "gt")
+    got = g.disasm_on_demand(str(sample), [0x1189], max_lines=400)
+    assert got == {0x1189: ["0x1189  MOV EAX,1", "0x118b  RET"]}
+    assert "-import" in calls[0] and "-process" not in calls[0]
+    # 第二次：既有工程 → -process -noanalysis（免重导入）
+    g.disasm_on_demand(str(sample), [0x1189])
+    assert "-process" in calls[1] and "-noanalysis" in calls[1]
+    assert "-import" not in calls[1]
+
+
+def test_ensure_func_detail_ghidra_uses_cache_and_disasm(tmp_path, sample):
+    """Ghidra 模式按需详情：伪码/调用关系取缓存；反汇编取缓存内嵌或按需生成。"""
+    with_disasm = copy.deepcopy(EXPORT)
+    with_disasm["functions"][0]["disasm_lines"] = ["0x1189  push rbp"]
+    runner = lambda a: (0, "", "")
+    g = GhidraHeadlessBackend(runner=runner, available=True,
+                              tmp_project_dir=tmp_path / "gt")
+    svc = DecompilerService(cache_dir=tmp_path / "cache", ghidra=g)
+    sha = sha256_file(str(sample))
+    svc.cache_dir.mkdir(parents=True, exist_ok=True)
+    svc._write_cache_file(svc._cache_file(sha), with_disasm)
+    detail = svc.ensure_func_detail(sha, 0x1189, engine="ghidra", binary=str(sample))
+    assert detail is not None and detail["engine"] == "ghidra"
+    assert detail["pseudocode"].startswith("int check_flag")
+    assert detail["disasm_lines"] == ["0x1189  push rbp"]
+    assert detail["callers"] == [{"address": "0x1234", "name": "main"}]
+    assert svc._detail_file(sha, 0x1189).is_file()  # 命中伪码/反汇编 → 落盘
+
+
 def test_ghidra_export_passes_workers_when_gt1(tmp_path, sample):
-    """workers>1 时并行度作为 postScript 第二实参（-deleteProject 前）传给脚本；
-    workers=1 不追加（args 形状稳定，兼容既有假 runner 与断言）。"""
+    """postScript 固定 5 位实参 [workers, progress, stop, analyze, want_disasm]；
+    -noanalysis 跳过内置分析（自驱分析开关恒 "1"）。"""
     captured: dict = {}
 
     def run(args):
@@ -1128,13 +1242,37 @@ def test_ghidra_export_passes_workers_when_gt1(tmp_path, sample):
                               tmp_project_dir=tmp_path / "gt")
     g.export(str(sample), tmp_path / "o.json")
     args = captured["args"]
-    assert args[args.index("-deleteProject") - 1] == "4"
+    i = args.index("-postScript")
+    assert args[i + 3] == "4"            # workers
+    assert "-noanalysis" in args          # 自驱分析：跳过内置分析
+    assert args[i + 6] == "1"            # 自驱分析开关
     captured.clear()
     g1 = GhidraHeadlessBackend(runner=run, available=True, workers=1,
                                tmp_project_dir=tmp_path / "gt")
     g1.export(str(sample), tmp_path / "o1.json")
     args1 = captured["args"]
-    assert args1[args1.index("-postScript") + 3] == "-deleteProject"   # 无额外参数
+    i1 = args1.index("-postScript")
+    assert args1[i1 + 3:i1 + 8] == ["1", "", "", "1", ""]  # 无 ctl/无内嵌填空串
+
+
+def test_export_marks_stoppable_by_routed_backend(tmp_path, sample):
+    """progress.stoppable 由实际选路后端决定（Ghidra 可协作停 → True；IDA → False）。"""
+    g_runner, _ = fake_ghidra_runner(tmp_path)
+    i_runner, _ = fake_ida_runner()
+    g = GhidraHeadlessBackend(runner=g_runner, available=True,
+                              tmp_project_dir=tmp_path / "gt")
+    ida = IDAHeadlessBackend(idat_cmd="idat", runner=i_runner, available=True,
+                             db_dir=tmp_path / "db")
+    svc = DecompilerService(cache_dir=tmp_path / "cache")
+    svc.backends = [ida, g]
+    prog: dict = {}
+    svc.export_to_cache(str(sample), progress=prog, engine="ghidra")
+    assert prog.get("stoppable") is True
+    svc2 = DecompilerService(cache_dir=tmp_path / "c2")
+    svc2.backends = [ida, g]
+    prog2: dict = {}
+    svc2.export_to_cache(str(sample), progress=prog2, engine="ida")
+    assert prog2.get("stoppable") is False
 
 
 def test_factory_threads_ghidra_workers(tmp_path, monkeypatch):
@@ -1273,6 +1411,20 @@ def test_ghidra_script_parallel_shard_guards():
     assert "args[1]" in g_src                      # worker 数取 postScript 第二参
     assert "DecompInterface()" in g_src            # 每 worker 各自实例化解编译器
     assert 'io.open(OUT, "w", encoding="utf-8")' in g_src
+
+
+def test_ghidra_script_drives_cancellable_analysis():
+    """静态护栏（2026-10-01 可中断）：脚本内置自驱分析（AutoAnalysisManager +
+    自定义 TaskMonitorAdapter 轮询停止文件）→ 分析阶段可中断 + 报进度；分析阶段
+    停止时跳过反编译（仅函数清单 partial）。"""
+    g_src = (_REPO_ROOT / "tools/decompiler/ghidra/scripts/export_funcs.py").read_text(
+        encoding="utf-8")
+    assert "AutoAnalysisManager" in g_src
+    assert "TaskMonitorAdapter" in g_src
+    assert "args[4]" in g_src                       # 自驱分析开关
+    assert "args[5]" in g_src                       # 反汇编内嵌开关（自 args[4] 后移）
+    assert "_ANALYSIS_STOPPED" in g_src             # 分析阶段停止 → 跳过反编译
+    assert "isCancelled" in g_src and "startAnalysis" in g_src
 
 
 def test_ghidra_script_control_and_partial_guards():

@@ -859,8 +859,9 @@ def test_context_trimming(env):
     cfg = AgentConfig(max_steps=20, context_char_budget=10_000)
     agent = make_agent(env, llm, config=cfg)
     agent.run_task("裁剪测试")
-    # 网关 brief() 已截到 2000 字符/条，总历史远超 10k 预算 → _trim 必然把某次
-    # 调用里的旧结果替换成占位（后续若被 G3 摘要整体替换也属正常压缩路径）
+    # 网关 brief() 已截到 8000 字符/条（2026-10-01 由 2000 放宽），总历史远超
+    # 10k 预算 → _trim 必然把某次调用里的旧结果替换成占位（后续若被 G3 摘要整体
+    # 替换也属正常压缩路径）
     truncated = [c for c in llm.calls
                  if "[已截断]" in json.dumps(c["messages"], ensure_ascii=False)]
     assert truncated
@@ -2405,9 +2406,9 @@ def test_hard_reject_breaker_per_model_step_with_reset(env):
     assert len(br) == 1 and br[-1]["payload"]["streak"] == 3
 
 
-def test_search_files_workspace_only_and_hits(env):
-    """search_files（2026-09-24）：非 shell 工作区内容检索——
-    正则/子串命中、越界路径拒绝、无命中回执；计划前可调（计划闸白名单）。"""
+def test_search_files_hits_and_read_anywhere(env):
+    """search_files（2026-09-24 / 读路径放开 2026-10-01）：正则/子串命中、工作区
+    外路径也可搜（不再拒绝）、无命中回执；计划前可调（计划闸白名单）。"""
     bb, project, gw, tq, tmp_path = env
     agent = make_agent(env, ScriptedLLM([]), artifacts_dir=tmp_path / "artifacts")
     d = agent.dispatcher
@@ -2422,10 +2423,12 @@ def test_search_files_workspace_only_and_hits(env):
     r2 = d.dispatch("search_files",
                      {"pattern": "WX.ZUT", "regex": False, "path": "../spill"})
     assert "dump.txt:2" in r2
-    # 越出工作区 → 拒绝
-    assert d.dispatch("search_files",
-                      {"pattern": "a", "path": "../../../../"}
-                      ).startswith("[拒绝]")
+    # 读路径放开（2026-10-01）：工作区外目录不再拒绝（用显式目录保持扫描有界）
+    out = tmp_path.parent / f"outside-{tmp_path.name}"
+    out.mkdir(exist_ok=True)
+    (out / "o.txt").write_text("outside-hit-xyz", encoding="utf-8")
+    r3 = d.dispatch("search_files", {"pattern": "outside-hit-xyz", "path": str(out)})
+    assert "o.txt" in r3 and not r3.startswith("[拒绝]")
     # 无命中
     assert d.dispatch("search_files",
                       {"pattern": "zzz-no-such-xyz", "path": "../spill"}
@@ -4023,25 +4026,26 @@ def test_sediment_lite_review_long_note_once_per_session(env):
 # ---------- H1：spill 落盘与豁免（借鉴 dsh tool-output-spill-files） ----------
 
 def test_dispatch_spills_oversized_result(env):
-    """超 8000 字符的工具结果：全量落 workspace/spill/，回填预览+定位器。"""
+    """超 spill 阈值（32000，2026-10-01 由 8000 放宽）的工具结果：全量落
+    workspace/spill/，回填预览+定位器。"""
     bb, project, gw, tq, tmp_path = env
     agent = make_agent(env, ScriptedLLM([]), artifacts_dir=tmp_path / "artifacts")
     d = agent.dispatcher
-    d._tool_big = lambda **k: "X" * 20000  # 假工具绕过 run_cmd 的 gateway brief
+    d._tool_big = lambda **k: "X" * 40000  # 假工具绕过 run_cmd 的 gateway brief
     out = d.dispatch("big", {})
     assert "[结果超限已落盘]" in out and "[省略" in out
     assert "完整内容" in out and "../spill/" in out  # scratch 相对路径定位器
     files = list((tmp_path / "spill").glob("*-big-*.txt"))  # E1 uuid 后缀（同秒防互覆）
     assert len(files) == 1
-    assert files[0].read_text(encoding="utf-8") == "X" * 20000  # 落盘是全量
+    assert files[0].read_text(encoding="utf-8") == "X" * 40000  # 落盘是全量
     # tool.call 审计事件照落，result_head 即预览（不吞全量）
     ev = [e for e in bb.recent_events(project["id"]) if e["kind"] == "tool.call"]
     assert ev and ev[-1]["payload"]["name"] == "big"
 
 
 def test_dispatch_spill_skip_kb_open(env):
-    """kb_open 豁免：正文即取用目的，再长也不 spill（run_cmd/kb_open/skill_open/
-    route_lookup 同一豁免清单）。"""
+    """kb_open 豁免：正文即取用目的，再长也不 spill（kb_open/skill_open/
+    route_lookup 同一豁免清单；run_cmd 自 2026-10-01 不再豁免）。"""
     bb, project, gw, tq, tmp_path = env
     agent = make_agent(env, ScriptedLLM([]), artifacts_dir=tmp_path / "artifacts")
     d = agent.dispatcher
@@ -4642,28 +4646,30 @@ def test_read_file_lines_and_windows(env):
 def test_read_file_tail_and_long_line(env):
     d, scratch, _ = _read_dispatcher(env)
     f = scratch / "log.txt"
-    f.write_text("\n".join(f"l{i}" for i in range(1, 31)) + "\n" + "x" * 900,
+    f.write_text("\n".join(f"l{i}" for i in range(1, 31)) + "\n" + "x" * 2500,
                  encoding="utf-8")
     r = d.dispatch("read_file", {"path": "log.txt", "offset": -3})
     assert "31\t" in r and "l29" in r                        # 末尾 N 行（tail 语义）
-    assert "行截断" in r and "共 900 字符" in r               # 超长行切尾标注
+    assert "行截断" in r and "共 2500 字符" in r              # 超长行切尾标注（>2000）
 
 
-def test_read_file_rejects_missing_and_outside(env):
+def test_read_file_missing_and_read_anywhere(env):
+    """read 路径放开（2026-10-01）：工作区外文件也可读（只有写才拦边界）；
+    缺文件 / 越界 offset 仍报错。"""
     d, scratch, artifacts = _read_dispatcher(env)
     r = d.dispatch("read_file", {"path": "nope.txt"})
     assert r.startswith("[错误]") and "不存在" in r
     (scratch.parent.parent / "outside.txt").write_text("secret", encoding="utf-8")
     r = d.dispatch("read_file", {"path": "../../outside.txt"})   # 工作区外
-    assert r.startswith("[拒绝]")
+    assert "secret" in r and not r.startswith("[拒绝]")          # 放开后可读
     (scratch / "tiny.txt").write_text("only\n", encoding="utf-8")
     r = d.dispatch("read_file", {"path": "tiny.txt", "offset": 99})
     assert r.startswith("[错误]") and "共 1 行" in r          # 越界报总行数
 
 
-def test_read_file_kb_root_allowed_but_packs_else_rejected(env):
-    """route-injection-hardening：read_file 放行启用域 kb 源根（kb_open 回执指示
-    Read 手册）；packs 其余目录（experts/）仍拒；工作区文件照旧可读。"""
+def test_read_file_read_anywhere_including_packs(env):
+    """read 路径放开（2026-10-01）：packs 内（kb 各域 / experts）与未启用域 kb 根
+    一律可读——不再有根白名单；工作区相对路径照旧。"""
     bb, project, gw, tq, tmp_path = env
     artifacts = tmp_path / "ws" / "artifacts"
     agent = make_agent(env, ScriptedLLM([]), artifacts_dir=artifacts)
@@ -4672,23 +4678,38 @@ def test_read_file_kb_root_allowed_but_packs_else_rejected(env):
     kb_md = packs / "kb" / "web" / "poc" / "handbook.md"
     kb_md.parent.mkdir(parents=True, exist_ok=True)
     kb_md.write_text("1\t手册正文第一行\n第二行", encoding="utf-8")
-    # kb 根内文件：绝对路径可读
-    r = d.dispatch("read_file", {"path": str(kb_md)})
-    assert "手册正文第一行" in r and not r.startswith("[拒绝]")
-    # packs/experts 仍拒（只放行 kb 源根，不放整个 packs）
-    expert = packs / "experts" / "_generalist.yaml"
-    r = d.dispatch("read_file", {"path": str(expert)})
-    assert r.startswith("[拒绝]")
-    # 未启用域（binary）的 kb 根不放行
+    assert "手册正文第一行" in d.dispatch("read_file", {"path": str(kb_md)})
+    # 未启用域（binary）的 kb 根：放开后同样可读
     bin_md = packs / "kb" / "binary" / "notes.md"
     bin_md.parent.mkdir(parents=True, exist_ok=True)
     bin_md.write_text("binary notes", encoding="utf-8")
-    assert d.dispatch("read_file", {"path": str(bin_md)}).startswith("[拒绝]")
+    assert "binary notes" in d.dispatch("read_file", {"path": str(bin_md)})
+    # packs/experts：不再拒绝（文件存在则可读）
+    expert = packs / "experts" / "_generalist.yaml"
+    expert.parent.mkdir(parents=True, exist_ok=True)
+    expert.write_text("generalist", encoding="utf-8")
+    assert "generalist" in d.dispatch("read_file", {"path": str(expert)})
     # 工作区文件不受影响
     scratch = tmp_path / "ws" / "scratch"
     scratch.mkdir(parents=True, exist_ok=True)
     (scratch / "ws.txt").write_text("workspace file", encoding="utf-8")
     assert "workspace file" in d.dispatch("read_file", {"path": "ws.txt"})
+
+
+def test_read_file_resolves_container_and_wsl_paths(env):
+    """容器/WSL 绝对路径映射（2026-10-01）：docker 会话里模型拿到的是 /workspace/…
+    （挂 <ws>）、wsl 拿到 /mnt/<盘符>/…——都要映射回宿主真实路径才读得到。"""
+    from core.runtime.pathguard import windows_to_wsl_path
+    d, scratch, _ = _read_dispatcher(env)
+    (scratch / "venus").mkdir(parents=True, exist_ok=True)
+    f = scratch / "venus" / "fuzz.out"
+    f.write_text("crash-0x1234", encoding="utf-8")
+    # docker：/workspace/scratch/venus/fuzz.out → <ws>/scratch/venus/fuzz.out
+    r = d.dispatch("read_file", {"path": "/workspace/scratch/venus/fuzz.out"})
+    assert "crash-0x1234" in r and not r.startswith("[拒绝]")
+    # wsl：/mnt/<盘符>/… → <盘符>:\…
+    r2 = d.dispatch("read_file", {"path": windows_to_wsl_path(str(f))})
+    assert "crash-0x1234" in r2 and not r2.startswith("[拒绝]")
 
 
 # ---------- M1 prompt caching：system 拆块（2026-09-23） ----------

@@ -1246,6 +1246,74 @@ class Blackboard:
             author=author)
         return {"id": asset_id, **snapshot}
 
+    def delete_binary(self, project_id: str, sha: str,
+                      author: str = "human") -> dict:
+        """物理删除一个样本（binary 资产）及其全部项目内依赖（2026-10-01 工作台）。
+
+        硬级联（单 _tx 内，顺序即依赖）：chain_links（指向该样本 func_kb / finding
+        的边）→ logic_block_funcs / logic_blocks（binary_sha256=sha）→ findings
+        （target_asset_id=该 asset）→ func_kb（binary_sha256=sha）→ assets 行。
+        资产不存在抛 LookupError（→API 404）；项目级逻辑块（binary_sha256=''）不动。
+        磁盘产物（样本本体/缓存/DB/Ghidra 工程）由 API 层另行清理，不在此处理。
+        落 binary.deleted 审计事件（含计数快照）。
+        """
+        with self._tx():
+            asset = self.conn.execute(
+                "SELECT * FROM assets WHERE project_id=? AND type='binary' AND value=?"
+                " ORDER BY created_at LIMIT 1", (project_id, sha)).fetchone()
+            if asset is None:
+                raise LookupError(f"样本资产不存在: {sha}")
+            asset_id = asset["id"]
+            meta = _loads(asset["meta"], {})
+            func_ids = [r["id"] for r in self.conn.execute(
+                "SELECT id FROM func_kb WHERE project_id=? AND binary_sha256=?",
+                (project_id, sha)).fetchall()]
+            finding_ids = [r["id"] for r in self.conn.execute(
+                "SELECT id FROM findings WHERE target_asset_id=?",
+                (asset_id,)).fetchall()]
+            block_ids = [r["id"] for r in self.conn.execute(
+                "SELECT id FROM logic_blocks WHERE project_id=? AND binary_sha256=?",
+                (project_id, sha)).fetchall()]
+            n_links = 0
+            if func_ids or finding_ids:
+                clauses: list[str] = []
+                params: list[Any] = [project_id]
+                if func_ids:
+                    clauses.append("(node_type='func_kb' AND node_id IN (%s))"
+                                   % ",".join("?" * len(func_ids)))
+                    params.extend(func_ids)
+                if finding_ids:
+                    clauses.append("(node_type='finding' AND node_id IN (%s))"
+                                   % ",".join("?" * len(finding_ids)))
+                    params.extend(finding_ids)
+                n_links = self.conn.execute(
+                    "DELETE FROM chain_links WHERE chain_id IN"
+                    " (SELECT id FROM chains WHERE project_id=?) AND (%s)"
+                    % " OR ".join(clauses), params).rowcount or 0
+            if block_ids:
+                self.conn.execute(
+                    "DELETE FROM logic_block_funcs WHERE block_id IN (%s)"
+                    % ",".join("?" * len(block_ids)), block_ids)
+            self.conn.execute(
+                "DELETE FROM logic_blocks WHERE project_id=? AND binary_sha256=?",
+                (project_id, sha))
+            self.conn.execute(
+                "DELETE FROM findings WHERE target_asset_id=?", (asset_id,))
+            self.conn.execute(
+                "DELETE FROM func_kb WHERE project_id=? AND binary_sha256=?",
+                (project_id, sha))
+            self.conn.execute("DELETE FROM assets WHERE id=?", (asset_id,))
+            snapshot = {
+                "asset_id": asset_id, "sha": sha,
+                "filename": meta.get("filename"),
+                "funcs": len(func_ids), "findings": len(finding_ids),
+                "logic_blocks": len(block_ids), "chain_links": n_links,
+            }
+        self.append_event(
+            project_id, "binary.deleted", {**snapshot, "by": author},
+            author=author)
+        return snapshot
+
     def list_assets(self, project_id: str, type_: str | None = None,
                     status: str | None = None, tag: str | None = None) -> list[dict]:
         """tag 过滤（编排器态势增强）：meta.tags 数组包含该标签的资产（大小写不敏感）。"""

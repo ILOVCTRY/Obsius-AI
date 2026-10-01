@@ -14,7 +14,7 @@ import { cn } from "@/lib/utils"
 // 既有资产灰显） ③ 表格文件导入（xlsx/CSV 列映射 + 预览）。
 // ⚠ 信任边界：FOFA 查询语句与 key 明文流经第三方中转——敏感项目慎用（面板常驻注记）。
 
-const SIZES = [100, 500, 1000]
+const SIZES = [100, 500, 1000, 5000, 10000]
 
 // 列语义（与 core/assetimport.COLUMN_KINDS 对齐；下拉 value 直接作 mapping 项）
 const COLUMN_KINDS = ["ignore", "ip", "port", "host", "url", "title", "products"]
@@ -430,7 +430,7 @@ function ImportWorkspace({ pid }: { pid: string }) {
       <div className="flex flex-wrap items-center gap-2 border-b px-3 py-1.5">
         <input type="file" accept=".csv,.xlsx" className="text-xs"
                onChange={(e) => pick(e.target.files?.[0])} />
-        <span className="text-[10px] text-muted-foreground">xlsx/CSV · ≤5000 行 · 列自动嗅探可手调</span>
+        <span className="text-[10px] text-muted-foreground">xlsx/CSV · ≤10000 行 · 列自动嗅探可手调</span>
         {preview && (
           <Button size="sm" className="ml-auto h-7" onClick={doImport} disabled={busy}>
             {busy ? "导入中…" : `确认导入 ${preview.total_rows} 行`}
