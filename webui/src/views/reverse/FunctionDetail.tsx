@@ -48,6 +48,8 @@ export function FunctionDetail({
 }: Props) {
   const [scriptOpen, setScriptOpen] = useState(false)
   const [idaMsg, setIdaMsg] = useState<string | null>(null)
+  // 伪码 / 反汇编双 tab（2026-09-30：IDA 拉取样本按需详情自动落盘后两样都有）
+  const [codeTab, setCodeTab] = useState("pseudo")
   const displayName = kb?.name || detail?.name || addr
   const funcName = detail?.name ?? kb?.name ?? undefined
   const x64 = x64dbgScript(addr, bits, funcName)
@@ -122,30 +124,59 @@ export function FunctionDetail({
           )}
         </section>
 
-        {/* 伪码（headless 客观缓存；缓存缺席且 MCP 在线时实时取；不进事件流） */}
+        {/* 伪码 / 反汇编（headless 客观缓存；缓存缺席且 MCP 在线时实时取/自动拉取落盘） */}
         <section className="px-3 py-2">
-          <div className="mb-1 flex items-center justify-between">
-            <h3 className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
-              {detail?.source === "mcp" ? "反编译伪码（MCP 实时）" : "反编译伪码（headless 缓存，仅供阅读）"}
-              {detail?.source === "mcp" && (
-                <span className="rounded bg-primary/15 px-1 text-[9px] text-primary" title="经 MCP 从 IDA 当前打开的库实时读取，未落入 headless 缓存">MCP</span>
-              )}
-            </h3>
-            {detail?.pseudocode && <CopyBtn text={detail.pseudocode} label="复制伪码" />}
-          </div>
-          {loading
-            ? <p className="font-mono text-[10px] text-muted-foreground">
-                {mcpLive && !cached ? "正在经 MCP 读取…" : "加载中…"}
-              </p>
-            : detail?.pseudocode
-              ? <pre className="overflow-x-auto rounded bg-muted/40 p-2 font-mono text-[10px] leading-relaxed">{detail.pseudocode}</pre>
-              : <p className="font-mono text-[10px] text-muted-foreground">
-                  {detail
-                    ? "该函数无伪码（可在 IDA 中看反汇编）"
-                    : mcpLive
-                      ? "MCP 未返回该函数：确认 IDA 当前打开的库包含此地址"
-                      : "缓存缺席，请先完成分诊；或在 IDA 中按 Ctrl-Alt-M 启动 MCP 后实时读取"}
-                </p>}
+          <Tabs value={codeTab} onValueChange={setCodeTab} className="flex flex-col gap-0">
+            <TabsList className="w-full justify-start rounded-none border-b bg-transparent p-0">
+              <TabsTrigger value="pseudo" className="rounded-none border-b-2 px-3 py-1 text-[10px]">
+                伪码
+                {detail?.source === "mcp" && (
+                  <span className="ml-1 rounded bg-primary/15 px-1 text-[9px] text-primary" title="经 MCP 实时读取，未落入 headless 缓存">MCP</span>
+                )}
+              </TabsTrigger>
+              <TabsTrigger value="asm" className="rounded-none border-b-2 px-3 py-1 text-[10px]">
+                反汇编{detail?.disasm?.lines?.length ? ` ${detail.disasm.lines.length}` : ""}
+              </TabsTrigger>
+              <span className="flex-1" />
+              {codeTab === "pseudo" && detail?.pseudocode && <CopyBtn text={detail.pseudocode} label="复制伪码" />}
+              {codeTab === "asm" && detail?.disasm && <CopyBtn text={detail.disasm.lines.join("\n")} label="复制反汇编" />}
+            </TabsList>
+            <TabsContent value="pseudo" className="min-h-0">
+              {loading
+                ? <p className="font-mono text-[10px] text-muted-foreground">
+                    {mcpLive && !cached ? "正在经 MCP 读取…" : "加载中…"}
+                  </p>
+                : detail?.pseudocode
+                  ? <pre className="overflow-x-auto rounded bg-muted/40 p-2 font-mono text-[10px] leading-relaxed">{detail.pseudocode}</pre>
+                  : <p className="font-mono text-[10px] text-muted-foreground">
+                      {detail
+                        ? "该函数无伪码（可在「反汇编」页签或 IDA 中查看）"
+                        : mcpLive
+                          ? "MCP 未返回该函数：确认 IDA 当前打开的库包含此地址"
+                          : "缓存缺席，请先完成分诊；或在 IDA 中按 Ctrl-Alt-M 启动 MCP 后实时读取"}
+                    </p>}
+            </TabsContent>
+            <TabsContent value="asm" className="min-h-0">
+              {loading
+                ? <p className="font-mono text-[10px] text-muted-foreground">加载中…</p>
+                : detail?.disasm?.lines?.length
+                  ? <>
+                      <pre className="overflow-x-auto rounded bg-muted/40 p-2 font-mono text-[10px] leading-relaxed">{detail.disasm.lines.join("\n")}</pre>
+                      {detail.disasm.truncated && (
+                        <p className="mt-1 font-mono text-[9px] text-muted-foreground">
+                          反汇编超长已截断（前 {detail.disasm.lines.length} 行）
+                        </p>
+                      )}
+                    </>
+                  : <p className="font-mono text-[10px] text-muted-foreground">
+                      {detail
+                        ? "该函数无反汇编（未自动拉取或拉取失败——确认 IDA MCP 在线后重选函数）"
+                        : mcpLive
+                          ? "MCP 未返回该函数：确认 IDA 当前打开的库包含此地址"
+                          : "缓存缺席，请先完成分诊；或在 IDA 中按 Ctrl-Alt-M 启动 MCP 后实时读取"}
+                    </p>}
+            </TabsContent>
+          </Tabs>
         </section>
       </div>
 

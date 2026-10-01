@@ -5,13 +5,23 @@ HTTP 传输层可注入（默认 urllib 标准库实现），单元测试用 fak
 """
 
 import json
+import logging
 import socket
 import time
 import urllib.request
 from collections.abc import Callable
 from typing import Any
 
-from core.llm.provider import LLMError, LLMResponse, ToolCall, Usage
+from core.llm.provider import (ContextOverflowError, LLMError, LLMResponse,
+                               ToolCall, Usage)
+
+log = logging.getLogger(__name__)
+
+# 输入超限识别（2026-09-30）：网关因 prompt 过长拒收时的错误文案特征词。
+# 命中则抛 ContextOverflowError（不可重试），由调用方强制压缩后兜底重试。
+_OVERFLOW_HINTS = ("input length", "too long", "context length",
+                   "maximum context", "prompt is too long", "exceeds",
+                   "input too large", "request entity too large")
 
 Transport = Callable[[str, dict[str, str], bytes], tuple[int, dict[str, Any]]]
 """transport(url, headers, body_bytes) -> (http_status, parsed_json)"""
@@ -97,6 +107,8 @@ class AnthropicCompatProvider:
         enable_thinking: bool = False,
         enable_cache: bool = True,
         context_tokens: int | None = None,  # 模型最大上下文（providers.json model_context；预算换算用）
+        ctx_soft_budget: int | None = None,  # 有效软上限（providers.json ctx_soft_budget；超此主动压缩）
+        summarizer_model: str | None = None,  # 专用摘要模型（providers.json summarizer_model；缺省用本模型）
     ):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
@@ -109,6 +121,10 @@ class AnthropicCompatProvider:
         # 同一 system 是最大成本项）。缓存 token 仍计数只是更便宜，预算不动。
         self._enable_cache = enable_cache
         self.context_tokens = context_tokens
+        # 上下文治理（2026-09-30 ct-7）：软上限与专用摘要模型由 provider 配置下发，
+        # 供 ChatTurn 压缩上下文时读取；缺省走运行时模块常量/本模型。
+        self.ctx_soft_budget = ctx_soft_budget
+        self.summarizer_model = summarizer_model
         # 模型不支持 thinking 参数时自动降级（HTTP 400 去参重试后置位，本实例不再注入）
         self._thinking_disabled = False
         # 网关拒收 cache_control 标记（400 文案含 cache_control）时置位——本实例
@@ -138,6 +154,7 @@ class AnthropicCompatProvider:
         on_thinking: Callable[[str], None] | None = None,
         on_text: Callable[[str], None] | None = None,
         should_cancel: Callable[[], bool] | None = None,
+        model: str | None = None,  # 单次调用模型覆盖（摘要器专用模型；缺省用实例模型）
     ) -> LLMResponse:
         """on_thinking：SSE thinking_delta 逐帧回调（思考流式上屏，2026-09-19）；
         on_text：SSE text_delta 逐帧回调（回复流式，2026-09-20 对话窗）；
@@ -146,7 +163,7 @@ class AnthropicCompatProvider:
         system：str（自动包装单块打 cache_control，M1 默认路径）或块数组
         （str 元素自动包装不打标 / dict 原样——调用方精细控制断点位置）。"""
         body: dict[str, Any] = {
-            "model": self.model,
+            "model": model or self.model,
             "max_tokens": max_tokens,
             "messages": messages,
         }
@@ -182,12 +199,27 @@ class AnthropicCompatProvider:
                     err = data.get("error", {})
                     msg = (f"LLM 调用失败 HTTP {status}: "
                            f"{err.get('code', '')} {err.get('message', '')[:300]}")
+                    # 输入超限（2026-09-30）：prompt 过长被网关拒收（400/413），
+                    # 原样重试注定再失败 → 抛 ContextOverflowError，调用方强制
+                    # 压缩上下文后兜底重试（reactive 兜底；不再走可重试状态码分支）
+                    if status in (400, 413):
+                        low = (str(err.get("message", "")) + " "
+                               + str(err.get("code", ""))).lower()
+                        if any(h in low for h in _OVERFLOW_HINTS):
+                            raise ContextOverflowError(
+                                msg, status=status,
+                                body=json.dumps(data, ensure_ascii=False)[:500])
                     # 思考参数优雅降级（2026-09-19）：模型/网关不认 thinking 参数（400）时
                     # 去参立即重试一次，并记实例标志后续不再注入——思考行不亮但不炸循环
                     if (status == 400 and self._enable_thinking
                             and not self._thinking_disabled
                             and "thinking" in str(err.get("message", "")).lower()
                             and isinstance(body.get("thinking"), dict)):
+                        # 降级可见化（2026-09-30）：此前静默永久关闭，用户只看到
+                        # 思考链消失无从排查——现在落到日志（终端/日志文件可见）
+                        log.warning("思考链被网关拒收（HTTP 400: %s），本实例降级关闭——"
+                                    "后续请求不再注入 thinking 参数",
+                                    str(err.get("message", ""))[:120])
                         self._thinking_disabled = True
                         body.pop("thinking")
                         payload = json.dumps(body, ensure_ascii=False).encode("utf-8")

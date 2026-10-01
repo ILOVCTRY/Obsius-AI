@@ -19,6 +19,7 @@ runner(args_list) -> (rc, stdout, stderr) 可注入：生产经执行网关（�
 
 import hashlib
 import json
+import os
 import platform
 import re
 import shutil
@@ -33,8 +34,83 @@ from core.runtime.backends import NO_WINDOW_FLAGS
 
 EXPORT_VERSION = 3
 
-# headless 大样本自动分析可能很久（自动分析+全量反编译），网关侧给 15 分钟
-HEADLESS_TIMEOUT = 900
+# headless 大样本自动分析可能很久（自动分析+全量反编译可能数小时）。默认放开到
+# 3 小时；可用 config/decompiler.json 的 headless_timeout（秒）覆盖（0/负值忽略）。
+# 历史上硬编码 900s——大样本必然超时，逼人回 IDA GUI 再 MCP 回拉（P1 治本点）。
+HEADLESS_TIMEOUT = 3 * 3600
+
+# 本机反编译设置覆盖层（gitignore，仿 config/mcp.json）：headless_timeout 等
+DECOMPILER_CONFIG_PATH = Path("config/decompiler.json")
+
+# 大样本阈值（2026-09-29 用户口径 >20MB，与 app.py SAMPLE_LARGE_BYTES 同口径）：
+# ≥阈值走 Ghidra 多进程并行分片主产（P2），普通样本维持 IDA 优先（保 IDA 质量与存量复用）。
+LARGE_SAMPLE_BYTES = 20 * 1024 * 1024
+
+# Ghidra 并行分片 worker 绝对上限（内存保护）：每 worker 一个解编译器进程、吃内存，
+# 无脑按满核起会 OOM/swap。实际取值再夹 [1, GHIDRA_MAX_WORKERS]。
+GHIDRA_MAX_WORKERS = 16
+
+
+def load_decompiler_config() -> dict:
+    """读 config/decompiler.json；缺失/损坏给空配置（调用方回默认值，绝不炸）。"""
+    try:
+        if DECOMPILER_CONFIG_PATH.is_file():
+            data = json.loads(DECOMPILER_CONFIG_PATH.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
+def resolve_headless_timeout() -> float:
+    """headless 命令超时（秒）：config/decompiler.json 的 headless_timeout 覆盖，
+    非法/缺失回 HEADLESS_TIMEOUT 默认（大样本默认数小时，不轻易腰斩分析）。"""
+    raw = load_decompiler_config().get("headless_timeout")
+    try:
+        val = float(raw)
+        if val > 0:
+            return val
+    except (TypeError, ValueError):
+        pass
+    return float(HEADLESS_TIMEOUT)
+
+
+def resolve_large_sample_bytes() -> int:
+    """大样本阈值（字节）：config/decompiler.json 的 large_sample_bytes 覆盖，
+    非法/缺失/≤0 回 LARGE_SAMPLE_BYTES 默认（对齐 app.py 20MB 用户口径）。"""
+    raw = load_decompiler_config().get("large_sample_bytes")
+    try:
+        val = int(raw)
+        if val > 0:
+            return val
+    except (TypeError, ValueError):
+        pass
+    return int(LARGE_SAMPLE_BYTES)
+
+
+def is_large_sample(binary: str | Path) -> bool:
+    """样本是否达大样本阈值（选路用）。不可读（不存在/无权限）视为非大样本，绝不抛。"""
+    try:
+        return Path(binary).stat().st_size >= resolve_large_sample_bytes()
+    except OSError:
+        return False
+
+
+def resolve_ghidra_workers() -> int:
+    """Ghidra 并行分片 worker 数：config/decompiler.json 的 ghidra_workers 覆盖，
+    否则 max(1, CPU-1)；一律夹在 [1, GHIDRA_MAX_WORKERS]（内存保护）。"""
+    raw = load_decompiler_config().get("ghidra_workers")
+    workers = None
+    try:
+        val = int(raw)
+        if val > 0:
+            workers = val
+    except (TypeError, ValueError):
+        pass
+    if workers is None:
+        workers = max(1, (os.cpu_count() or 1) - 1)
+    return max(1, min(workers, GHIDRA_MAX_WORKERS))
+
 
 _DEFAULTS_ROOT = Path(__file__).resolve().parents[2]
 _IDA_SCRIPT = _DEFAULTS_ROOT / "tools" / "decompiler" / "ida" / "scripts" / "export_funcs.py"
@@ -57,6 +133,18 @@ def is_auto_name(name: str | None) -> bool:
     if not name:
         return True
     return any(rx.match(name) for rx in _AUTO_NAME_RULES)
+
+
+def is_partial_export(data: dict | None) -> bool:
+    """导出是否被协作式停止（partial）：meta.partial / 顶层 partial（P3）。
+
+    partial 缓存仅供工作台「已导出部分」展示，绝不当完整缓存复用、绝不发布全局。
+    """
+    if not isinstance(data, dict):
+        return False
+    meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
+    return bool(data.get("partial") or data.get("stopped")
+                or meta.get("partial") or meta.get("stopped"))
 
 DECOMPILE_GUIDANCE = (
     "[反编译器不可用] 检测结果：IDA(idat64) 未安装、Ghidra(analyzeHeadless) 未安装、MCP 离线。"
@@ -143,8 +231,10 @@ def sha256_file(path: str | Path) -> str:
 
 
 def _default_runner(args: list[str]) -> tuple[int, str, str]:
+    # 每次现取：config/decompiler.json 改了超时无需重启（大样本默认数小时）
     try:
-        proc = subprocess.run(args, capture_output=True, text=True, timeout=HEADLESS_TIMEOUT,
+        proc = subprocess.run(args, capture_output=True, text=True,
+                              timeout=resolve_headless_timeout(),
                               encoding="utf-8", errors="replace",
                               creationflags=NO_WINDOW_FLAGS)
         return proc.returncode, proc.stdout or "", proc.stderr or ""
@@ -273,6 +363,7 @@ class MCPBackend:
     T_RENAME = "rename"
     T_SET_COMMENTS = "set_comments"
     T_FUNC_PROFILE = "func_profile"
+    T_ANALYZE_BATCH = "analyze_batch"
     T_ENTITY_QUERY = "entity_query"
     T_HEALTH = "server_health"
     T_IDB_SAVE = "idb_save"
@@ -463,6 +554,48 @@ class MCPBackend:
             "source": "mcp",
         }
 
+    def func_detail(self, addr: int | str) -> dict | None:
+        """analyze_batch 单查询一次拿齐 伪码+反汇编+callers/callees（40万样本按需详情用）。
+
+        只取需要段（关 strings/constants/basic_blocks/proto），单函数体积可控；
+        返回 {address,name,size,pseudocode,disasm_lines,disasm_truncated,callers,callees}
+        （callers/callees 为 {addr,name} 对，与 xref_profile 同构）。工具缺失/失败 None。
+        """
+        payload = self.call_tool(self.T_ANALYZE_BATCH, {"queries": [{
+            "query": self._addr_arg(addr),
+            "include_decompile": True,
+            "include_disasm": True,
+            "max_disasm_insns": DETAIL_DISASM_MAX_LINES,
+            "include_callers": True,
+            "max_callers": DETAIL_MAX_REFS,
+            "include_callees": True,
+            "max_callees": DETAIL_MAX_REFS,
+            "include_strings": False,
+            "include_constants": False,
+            "include_basic_blocks": False,
+            "include_proto": False,
+        }]}, timeout=60.0)
+        if not isinstance(payload, list) or not payload \
+                or not isinstance(payload[0], dict) or payload[0].get("error"):
+            return None
+        row = payload[0]
+        analysis = row.get("analysis") or {}
+        disasm = analysis.get("disasm") or {}
+
+        def _pair(c):
+            return {"address": c.get("addr"), "name": c.get("name")}
+
+        return {
+            "address": row.get("addr") or self._addr_arg(addr),
+            "name": row.get("name"),
+            "size": int(str(analysis.get("size") or "0x0"), 16),
+            "pseudocode": analysis.get("decompile"),
+            "disasm_lines": disasm.get("lines") or [],
+            "disasm_truncated": bool(disasm.get("truncated")),
+            "callers": [_pair(c) for c in (analysis.get("callers") or []) if isinstance(c, dict)],
+            "callees": [_pair(c) for c in (analysis.get("callees") or []) if isinstance(c, dict)],
+        }
+
     def writeback_items(self, items: list[dict]) -> dict | None:
         """实时写当前 IDA GUI 库：rename batch + set_comments（无锁问题）。
 
@@ -514,22 +647,40 @@ class GhidraHeadlessBackend:
     def __init__(self, *, headless_cmd: str = "analyzeHeadless",
                  script_path: str | Path | None = None,
                  tmp_project_dir: str | Path | None = None,
-                 runner=None, available: bool | None = None):
+                 runner=None, available: bool | None = None,
+                 workers: int | None = None):
         self.headless_cmd = shutil.which(headless_cmd) or headless_cmd
         self.script_path = Path(script_path) if script_path else _GHIDRA_SCRIPT
         self.tmp_project_dir = Path(tmp_project_dir or ".ghidra-tmp")
         self.runner = runner or _default_runner
         self._available = available  # 测试注入；None = 实际探测
+        # P2 并行分片：postScript 第二参=worker 数（脚本内按函数表分片反编译）；
+        # 1（默认）走串行老路径，args 形状不变（兼容既有假 runner/断言）
+        try:
+            self.workers = max(1, int(workers)) if workers else 1
+        except (TypeError, ValueError):
+            self.workers = 1
 
     def available(self) -> bool:
         if self._available is not None:
             return self._available
         return shutil.which(self.headless_cmd) is not None or Path(self.headless_cmd).exists()
 
-    def export(self, binary: str, out_json: Path) -> dict:
+    def export(self, binary: str, out_json: Path, *, progress: dict | None = None,
+               stop_event: threading.Event | None = None) -> dict:
         proj_dir = self.tmp_project_dir / f"cs-{uuid.uuid4().hex[:12]}"
         proj_dir.mkdir(parents=True, exist_ok=True)
         proj_name = "csproj"
+        # P3 协作式停止 + 进度：进度文件（脚本写）与停止标志文件（父进程写）落 out_json
+        # 同目录——临时工程跑完即焚，控制文件不能放工程内。
+        progress_path = out_json.with_name(out_json.name + ".progress")
+        stop_path = out_json.with_name(out_json.name + ".stop")
+        want_ctl = progress is not None or stop_event is not None
+        for p in (progress_path, stop_path):
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                pass
         args = [
             self.headless_cmd, str(proj_dir), proj_name,
             "-import", str(binary),
@@ -537,12 +688,68 @@ class GhidraHeadlessBackend:
             "-postScript", self.script_path.name, str(out_json),
             "-deleteProject",
         ]
+        # postScript 位置实参（-deleteProject 前）：worker 数 [, 进度文件, 停止文件]
+        script_args: list[str] = []
+        if want_ctl:
+            script_args = [str(self.workers), str(progress_path), str(stop_path)]
+        elif self.workers > 1:
+            script_args = [str(self.workers)]
+        if script_args:
+            idx = args.index("-deleteProject")
+            args[idx:idx] = script_args
+        monitor_done = threading.Event()
+        monitor: threading.Thread | None = None
+        if want_ctl:
+            def _watch() -> None:
+                # 轮询进度文件更新 job progress（引用共享）；stop_event 置位即写停止文件，
+                # 脚本在函数边界自然停下（不杀进程，保留已导出部分）。
+                while not monitor_done.is_set():
+                    if stop_event is not None and stop_event.is_set():
+                        try:
+                            stop_path.write_text("stop", encoding="utf-8")
+                        except OSError:
+                            pass
+                    if progress is not None and progress_path.is_file():
+                        try:
+                            d = json.loads(progress_path.read_text(encoding="utf-8"))
+                            if isinstance(d, dict):
+                                progress["done"] = int(d.get("done") or 0)
+                                progress["total"] = int(d.get("total") or 0)
+                                progress["phase"] = str(d.get("phase") or "")
+                        except (OSError, ValueError):
+                            pass
+                    monitor_done.wait(1.0)
+            monitor = threading.Thread(target=_watch, daemon=True)
+            monitor.start()
         try:
             rc, out, err = self.runner(args)
             if rc != 0 or not out_json.is_file():
                 raise RuntimeError(f"analyzeHeadless 失败 rc={rc}: {(err or out)[-400:]}")
-            return {"name": self.name, "db_path": None}
+            # 末次进度（监视线程可能未读到最后一帧）
+            if progress is not None and progress_path.is_file():
+                try:
+                    d = json.loads(progress_path.read_text(encoding="utf-8"))
+                    if isinstance(d, dict):
+                        progress["done"] = int(d.get("done") or 0)
+                        progress["total"] = int(d.get("total") or 0)
+                except (OSError, ValueError):
+                    pass
+            stopped = False
+            try:
+                data = json.loads(out_json.read_text(encoding="utf-8"))
+                stopped = is_partial_export(data)
+            except (OSError, ValueError):
+                pass
+            return {"name": self.name, "db_path": None, "stopped": stopped}
         finally:
+            monitor_done.set()
+            if monitor is not None:
+                monitor.join(timeout=3)
+            for p in (progress_path, stop_path):
+                try:
+                    p.unlink(missing_ok=True)
+                except OSError:
+                    pass
             shutil.rmtree(proj_dir, ignore_errors=True)
 
 
@@ -590,11 +797,25 @@ class IDAHeadlessBackend:
                 return p
         return None
 
-    def export(self, binary: str, out_json: Path) -> dict:
+    def export(self, binary: str, out_json: Path, *, progress: dict | None = None,
+               stop_event: threading.Event | None = None) -> dict:
+        # progress/stop_event 为 P3 大样本接口；IDA 路径目前仅在 Ghidra 后端消费
+        # （IDA 大样本已降为精解/写回），此处接受并忽略，保持后端签名一致。
         out_json.parent.mkdir(parents=True, exist_ok=True)
         db_stem = self._db_stem(binary)
         db_stem.parent.mkdir(parents=True, exist_ok=True)
-        # 重新分诊/重导场景：清掉旧库与崩溃残留锁文件，避免 IDA 弹"数据库已存在"
+        # P1 直读存量：库已存在（此前分诊或 GUI 深度分析产出的 .i64/.idb）→ 绝不删库重建，
+        # 直接库内重导（export_db 不带 -o）。IDA 的自动分析成果一次落库、长期复用，
+        # 大样本免去每次重分诊的数小时全量重分析；只有全新样本才从 binary 建库。
+        existing = self._find_db(db_stem)
+        if existing is not None:
+            if self.db_locked(db_stem):
+                raise RuntimeError(
+                    "ida-db-locked: IDA 库正被 GUI 占用，headless 无法重导；"
+                    "请先在 IDA 中关闭该库，或改用 MCP 实时通道")
+            self.export_db(existing, out_json)
+            return {"name": self.name, "db_path": str(existing), "reused": True}
+        # 全新分诊：清掉崩溃残留锁文件，避免 IDA 弹"数据库已存在"
         for ext in (*self.db_exts, ".id0", ".id1", ".id2", ".nam", ".til"):
             db_stem.with_suffix(ext).unlink(missing_ok=True)
         # -o 不带扩展，IDA 按目标位宽产出 .i64/.idb；
@@ -729,6 +950,13 @@ def build_xrefs(data: dict, address: int) -> dict | None:
 
 STRINGS_LIMIT = 5000
 
+# ---- 按需详情缓存（2026-09-30，40万函数样本：调用关系/伪码/反汇编渐进落盘）----
+DETAIL_DISASM_MAX_LINES = 5000       # 单函数反汇编行数上限（MCP disasm 同上限）
+DETAIL_PSEUDO_MAX_CHARS = 512 * 1024  # 单函数伪码上限（字符）
+DETAIL_MAX_REFS = 500                # callers/callees 各自上限（analyze_batch 支持到 5000）
+DETAIL_FILE_MAX_BYTES = 1024 * 1024  # 单详情文件硬上限（超限再砍伪码/反汇编）
+
+
 
 def build_strings(data: dict, q: str | None = None) -> dict:
     """从 v3 缓存构造字符串视图行（地址 hex；refs 附所属函数名）。
@@ -768,12 +996,16 @@ class DecompilerService:
     """Agent 调用面：list_functions / decompile / annotate。选路 + 缓存都在这里。"""
 
     def __init__(self, *, cache_dir: str | Path,
+                 global_cache_dir: str | Path | None = None,
                  mcp_endpoint: str | None = None,
                  mcp_provider: Callable[[str], str | None] | None = None,
                  ghidra: GhidraHeadlessBackend | None = None,
                  ida: IDAHeadlessBackend | None = None):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        # 全局 sha 缓存（跨项目复用）：全量 headless 导出按 sha256 落这里；本地缺缓存时
+        # 从此提升（promote）。落盘只放客观全量导出（不含 MCP 轻量/部分缓存）。
+        self.global_cache_dir = Path(global_cache_dir) if global_cache_dir else None
         self.backends: list = []
         # MCP 懒探活：构造零网络（available() 内 1.5s 超时 + 3s TTL），先入列保证
         # 点查选路优先；脏配置（非 loopback）直接不装。
@@ -809,6 +1041,42 @@ class DecompilerService:
     def _cache_path(self, binary: str) -> Path:
         return self._cache_file(sha256_file(binary))
 
+    def _global_cache_file(self, sha: str) -> Path | None:
+        return (self.global_cache_dir / f"{sha}.json") if self.global_cache_dir else None
+
+    def _promote_from_global(self, sha: str) -> dict | None:
+        """本地缺缓存时从全局 sha 缓存提升：命中即原子拷回本地（跨项目复用，免重跑
+        headless），绝不删全局源；旧契约/损坏由 _load_cache 判废返回 None。"""
+        gf = self._global_cache_file(sha)
+        if gf is None or not gf.is_file():
+            return None
+        data = self._load_cache(gf)
+        if data is None:
+            return None
+        try:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            local = self._cache_file(sha)
+            tmp = local.with_name(f"{local.name}.tmp")
+            tmp.write_bytes(gf.read_bytes())
+            tmp.replace(local)
+        except OSError:
+            return data  # 拷不动也把数据交出去（只读降级，不阻断）
+        return data
+
+    def _publish_global(self, sha: str, data: dict) -> None:
+        """全量 headless 导出落全局 sha 缓存（原子写），供其它项目按同一 sha 复用。
+        仅客观全量导出调用；MCP 轻量/部分缓存绝不入全局（防遮蔽未来全量导出）。"""
+        gf = self._global_cache_file(sha)
+        if gf is None:
+            return
+        try:
+            gf.parent.mkdir(parents=True, exist_ok=True)
+            tmp = gf.with_name(f"{gf.name}.tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(gf)
+        except OSError:
+            pass  # 全局缓存 best-effort：写不成不影响本地导出
+
     @staticmethod
     def _load_cache(cached: Path) -> dict | None:
         """读缓存并校验 export_version；损坏/旧版一律删除，返回 None 触发重导。"""
@@ -826,26 +1094,51 @@ class DecompilerService:
             return None
         return data
 
-    def _export_json(self, binary: str) -> tuple[dict | None, str, dict]:
-        """返回 (导出数据|None, 失败原因链, 导出元信息{name,db_path})。按 sha256 缓存。"""
+    def _export_json(self, binary: str, *, progress: dict | None = None,
+                     stop_event: threading.Event | None = None
+                     ) -> tuple[dict | None, str, dict]:
+        """返回 (导出数据|None, 失败原因链, 导出元信息{name,db_path,stopped})。
+        按 sha256 缓存；被停止的 partial 缓存**不复用**（重跑即补全），且**不发布**全局。"""
         cached = self._cache_path(binary)
         if cached.is_file():
             data = self._load_cache(cached)
-            if data is not None:
+            if data is not None and not is_partial_export(data):
                 return data, "", {}
+        sha = sha256_file(binary)
+        # 本地缺 → 全局 sha 缓存提升（跨项目同一样本免重跑 headless，大样本加速 P1）
+        promoted = self._promote_from_global(sha)
+        if promoted is not None and not is_partial_export(promoted):
+            return promoted, "", {}
         errors = []
-        for backend in self.backends:
+        for backend in self._ordered_export_backends(binary):
             export = getattr(backend, "export", None)
             if export is None:  # MCP 无导出概念，走点查
                 continue
             try:
-                info = export(binary, cached) or {"name": backend.name}
+                info = export(binary, cached, progress=progress,
+                              stop_event=stop_event) or {"name": backend.name}
                 data = json.loads(cached.read_text(encoding="utf-8"))
                 info.setdefault("name", backend.name)
+                # 协作式停止的 partial 只留本地供展示，绝不发布全局（P3 三层数据纪律）
+                if not is_partial_export(data):
+                    self._publish_global(sha, data)  # 全量导出落全局，供它项目复用
                 return data, "", info
             except Exception as e:  # noqa: BLE001
                 errors.append(f"{backend.name}: {e}")
         return None, "; ".join(errors), {}
+
+    def _ordered_export_backends(self, binary: str) -> list:
+        """全量导出候选后端顺序（大样本加速 P2，2026-09-30）：大样本（≥阈值）
+        Ghidra（多进程并行分片主产）优先、其余后端兜底；普通样本维持装配顺序
+        （IDA 优先，保 IDA 质量与 .i64 存量复用）。只含带 export 的后端。"""
+        backends = [b for b in self.backends if getattr(b, "export", None) is not None]
+        if not is_large_sample(binary):
+            return backends
+        ghidra = [b for b in backends if "ghidra" in getattr(b, "name", "")]
+        if not ghidra:
+            return backends
+        others = [b for b in backends if "ghidra" not in getattr(b, "name", "")]
+        return ghidra + others
 
     def _find_func(self, data: dict, address: int | None, name: str | None) -> dict | None:
         for f in data.get("functions", []):
@@ -889,6 +1182,10 @@ class DecompilerService:
         解析结果单槽驻留（mtime 失效）——大样本防崩：每请求 re-parse 几十 MB
         级 JSON 会把 overview 轮询和所有点查拖垮。"""
         cached = self._cache_file(sha)
+        if not cached.is_file():
+            # 本地缺 → 试全局 sha 缓存提升（跨项目复用，免重跑 headless）
+            self._promote_from_global(sha)
+            cached = self._cache_file(sha)
         if not cached.is_file():
             self._parsed_cache.pop(sha, None)
             return None
@@ -937,12 +1234,158 @@ class DecompilerService:
         self._parsed_cache.clear()  # 驻留失效
         return data
 
-    def export_to_cache(self, binary: str) -> tuple[dict, dict]:
-        """确保样本已导出（缺缓存/旧版则跑 headless）；无后端可用抛 RuntimeError。
+    def import_export_json(self, sha: str, src_json: str | Path,
+                           *, publish: bool = True) -> dict:
+        """导入外部 IDA/headless 全量导出 JSON 为本地缓存（免重跑 IDA 也免 MCP 回拉）。
 
-        返回 (v2 数据, 导出元信息 {name: 后端名, db_path: IDA .i64 路径或 None})。
+        只收 export_version >= EXPORT_VERSION 的完整导出；低契约拒绝（让上层重导）。
+        返回 {status: ok, functions, export_version} 或 {status: error, reason}。
         """
-        data, err, info = self._export_json(binary)
+        src = Path(src_json)
+        try:
+            data = json.loads(src.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            return {"status": "error", "reason": f"读取失败: {e}"}
+        if not isinstance(data, dict):
+            return {"status": "error", "reason": "JSON 顶层不是对象"}
+        try:
+            version = int(data.get("export_version", 1))
+        except (TypeError, ValueError):
+            version = 1
+        if version < EXPORT_VERSION:
+            return {"status": "error",
+                    "reason": f"导出契约版本过低（{version} < {EXPORT_VERSION}），请重导"}
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self._cache_file(sha).write_text(json.dumps(data, ensure_ascii=False),
+                                         encoding="utf-8")
+        self._parsed_cache.pop(sha, None)
+        if publish:
+            self._publish_global(sha, data)
+        return {"status": "ok", "functions": len(data.get("functions") or []),
+                "export_version": version}
+
+    def import_ida_db(self, sha: str, src_db: str | Path) -> dict:
+        """纳入外部 IDA 数据库（.i64/.idb）到项目 db_dir 并库内重导为缓存。
+
+        免去「IDA GUI 打开 → Ctrl-Alt-M → MCP 分页回拉」一整轮：把已分析好的库直接
+        拷进项目，headless 库内重导复用库内既有自动分析（而非从样本重建）。
+        返回 {status: ok, functions, db_path} 或结构化 error/locked/no-tool/unsupported。
+        """
+        ida = self._ida()
+        if ida is None:
+            if self.headless_backends():
+                return {"status": "unsupported", "guidance": self.WRITEBACK_GHIDRA_GUIDANCE}
+            return {"status": "no-tool", "guidance": DECOMPILE_GUIDANCE}
+        stem = ida.db_stem_for(sha)
+        if stem is None:
+            return {"status": "no-tool", "reason": "ida-db-dir-unconfigured"}
+        src = Path(src_db)
+        if not src.is_file():
+            return {"status": "error", "reason": f"库文件不存在: {src}"}
+        ext = src.suffix.lower()
+        if ext not in ida.db_exts:
+            return {"status": "error",
+                    "reason": f"不是 IDA 库（需 {'/'.join(ida.db_exts)}）: {src.name}"}
+        dst = stem.with_suffix(ext)
+        if dst.exists() and ida.db_locked(stem):
+            return {"status": "locked"}
+        stem.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if src.resolve() != dst.resolve():
+                shutil.copy2(src, dst)
+        except OSError as e:
+            return {"status": "error", "reason": f"拷贝失败: {e}"}
+        # 清掉另一扩展名的旧库，避免 _find_db 选到过时那份
+        for other in ida.db_exts:
+            cand = stem.with_suffix(other)
+            if cand != dst and cand.exists():
+                cand.unlink(missing_ok=True)
+        cached = self._cache_file(sha)
+        try:
+            ida.export_db(dst, cached)
+        except Exception as e:  # noqa: BLE001 —— 结构化返回，不抛死
+            return {"status": "error", "reason": f"{type(e).__name__}: {e}"[:400]}
+        data = json.loads(cached.read_text(encoding="utf-8"))
+        self._parsed_cache.pop(sha, None)
+        self._publish_global(sha, data)
+        return {"status": "ok", "functions": len(data.get("functions") or []),
+                "db_path": str(dst)}
+
+    # ---------- 按需详情缓存（40万样本：调用关系/伪码/反汇编渐进落盘） ----------
+
+    def _detail_dir(self, sha: str) -> Path:
+        return self.cache_dir / f"{sha}.details"
+
+    def _detail_file(self, sha: str, address: int) -> Path:
+        return self._detail_dir(sha) / f"{hex(address)}.json"
+
+    def read_func_detail(self, sha: str, address: int) -> dict | None:
+        """读单函数详情（每函数一文件，O(1) 不拖累主缓存轮询）；损坏删文件重拉。"""
+        f = self._detail_file(sha, address)
+        if not f.is_file():
+            return None
+        try:
+            return json.loads(f.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            f.unlink(missing_ok=True)
+            return None
+
+    def save_func_detail(self, sha: str, address: int, detail: dict) -> None:
+        """原子写详情文件（tmp+rename）。硬上限兜底：伪码 512K、反汇编 5000 行、
+        单文件 1MB（超限再砍伪码/反汇编），防长函数/异常组合撑爆磁盘与解析。"""
+        out = dict(detail)
+        pc = out.get("pseudocode")
+        if isinstance(pc, str) and len(pc) > DETAIL_PSEUDO_MAX_CHARS:
+            out["pseudocode"] = pc[:DETAIL_PSEUDO_MAX_CHARS]
+            out["pseudocode_truncated"] = True
+        lines = out.get("disasm_lines") or []
+        if len(lines) > DETAIL_DISASM_MAX_LINES:
+            out["disasm_lines"] = lines[:DETAIL_DISASM_MAX_LINES]
+            out["disasm_truncated"] = True
+        body = json.dumps(out, ensure_ascii=False).encode("utf-8", "ignore")
+        if len(body) > DETAIL_FILE_MAX_BYTES:
+            out["disasm_lines"] = (out.get("disasm_lines") or [])[:2000]
+            out["disasm_truncated"] = True
+            if isinstance(out.get("pseudocode"), str) \
+                    and len(out["pseudocode"]) > 256 * 1024:
+                out["pseudocode"] = out["pseudocode"][:256 * 1024]
+                out["pseudocode_truncated"] = True
+            body = json.dumps(out, ensure_ascii=False).encode("utf-8", "ignore")
+        d = self._detail_dir(sha)
+        d.mkdir(parents=True, exist_ok=True)
+        f = self._detail_file(sha, address)
+        tmp = f.with_name(f"{f.name}.tmp")
+        tmp.write_bytes(body)
+        tmp.replace(f)
+
+    def ensure_func_detail(self, sha: str, address: int, binary_name: str = "") -> dict | None:
+        """按需详情主通道：详情文件命中直接返回（source=cache）；未命中且 MCP 在线
+        → analyze_batch 自动拉取 callers/callees/伪码/反汇编并落盘；MCP 离线 → None。"""
+        cached = self.read_func_detail(sha, address)
+        if cached is not None:
+            return cached
+        if self.mcp is None or not self.mcp.available():
+            return None
+        detail = self.mcp.func_detail(address)
+        if detail is None:
+            return None
+        detail["source"] = "cache"
+        detail["pulled_at"] = time.strftime("%Y-%m-%dT%H:%M:%S+00:00",
+                                            time.gmtime())
+        if binary_name:
+            detail["binary"] = binary_name
+        self.save_func_detail(sha, address, detail)
+        return detail
+
+
+    def export_to_cache(self, binary: str, *, progress: dict | None = None,
+                        stop_event: threading.Event | None = None) -> tuple[dict, dict]:
+        """确保样本已导出（缺缓存/旧版/被停止的 partial 则跑 headless）；无后端抛 RuntimeError。
+
+        progress（可变 dict）实时带出分片进度（大样本 P3）；stop_event 置位即协作式
+        停止并把已导出部分落盘。返回 (v3 数据, 导出元信息 {name, db_path, stopped})。
+        """
+        data, err, info = self._export_json(binary, progress=progress, stop_event=stop_event)
         if data is None:
             raise RuntimeError(err or DECOMPILE_GUIDANCE)
         return data, info
@@ -1019,6 +1462,8 @@ class DecompilerService:
         cached = self._cache_file(sha)
         ida.export_db(db, cached)  # 失败抛 RuntimeError → Job error
         data = json.loads(cached.read_text(encoding="utf-8"))
+        self._parsed_cache.pop(sha, None)
+        self._publish_global(sha, data)  # 库内重导同为全量导出，落全局复用
         return {"status": "ok", "data": data}
 
     # ---------- Agent 接口（§9 四接口） ----------
@@ -1086,6 +1531,13 @@ class DecompilerService:
         return self.xrefs(binary, name)
 
     def decompile(self, binary: str, address: int | None = None, name: str | None = None) -> str:
+        sha = sha256_file(binary)
+        want = address
+        if want is None and name is not None:
+            data0, _e, _i = self._export_json(binary)
+            f0 = self._find_func(data0, None, name) if data0 else None
+            if f0 is not None:
+                want = int(f0["address"])
         # 点查候选：样本实例桥（按需拉起）优先，其次固定桥；去重后与原选路一致
         sample = self._sample_mcp(binary)
         backends: list = []
@@ -1113,9 +1565,42 @@ class DecompilerService:
                     return "\n\n".join(parts)
                 f = self._find_func(data, address, name)
                 if f:
-                    return (f"== {f['name']} @ {hex(int(f['address']))} ==\n"
-                            + (f.get("pseudocode") or "（导出无伪码，可看汇编）"))
+                    if f.get("pseudocode"):
+                        return (f"== {f['name']} @ {hex(int(f['address']))} ==\n"
+                                + f["pseudocode"])
+                    # 名单有但无伪码（IDA 拉取轻量缓存）：落到按需详情通道
+                    break
+        # 按需详情兜底（详情缓存命中；或 MCP 在线自动 analyze_batch 拉取落盘）——
+        # IDA 拉取样本的伪码主通道（headless 缓存只有名单）
+        if want is not None:
+            detail = self.ensure_func_detail(sha, want)
+            if detail is not None and detail.get("pseudocode"):
+                return (f"== {detail.get('name') or hex(want)} @ {hex(want)} ==\n"
+                        + detail["pseudocode"])
         return DECOMPILE_GUIDANCE
+
+    def disasm(self, binary: str, address: int | None = None,
+               name: str | None = None) -> str:
+        """Agent 反汇编点查（2026-09-30）：按需详情通道（详情缓存 → MCP analyze_batch
+        自动拉取落盘）。与 decompile 同吃 ensure_func_detail，离线只读已缓存部分。"""
+        sha = sha256_file(binary)
+        want = address
+        if want is None and name is not None:
+            data0, _e, _i = self._export_json(binary)
+            f0 = self._find_func(data0, None, name) if data0 else None
+            if f0 is not None:
+                want = int(f0["address"])
+        if want is None:
+            return "[错误] disasm 需要 name 或 address 至少其一"
+        detail = self.ensure_func_detail(sha, want)
+        if detail is None or not detail.get("disasm_lines"):
+            return "[反编译器不可用] 未获取到反汇编（需 IDA + MCP 在线自动拉取；" \
+                   "离线只能读此前已缓存过的函数）"
+        head = f"== {detail.get('name') or hex(want)} @ {hex(want)} =="
+        body = "\n".join(detail["disasm_lines"])
+        if detail.get("disasm_truncated"):
+            body += "\n…（反汇编超长已截断）"
+        return f"{head}\n{body}"
 
     def annotate(self, binary: str, name: str, comment: str) -> str:
         # Agent 侧只落 sidecar 伴随记录：MCP 实时写/headless apply 的正式通道是
@@ -1158,6 +1643,7 @@ class DecompilerService:
 
 def build_headless_service(cache_dir: str | Path, *, runner,
                            prefer: tuple[str, ...] = ("ida", "ghidra"),
+                           global_cache_dir: str | Path | None = None,
                            ida_db_dir: str | Path | None = None,
                            ghidra_tmp_dir: str | Path | None = None,
                            mcp_endpoint: str | None = None,
@@ -1176,9 +1662,11 @@ def build_headless_service(cache_dir: str | Path, *, runner,
         "ghidra": lambda: GhidraHeadlessBackend(
             headless_cmd=resolve_ghidra_headless() or "analyzeHeadless",
             runner=runner, tmp_project_dir=ghidra_tmp_dir,
-            available=available),
+            available=available, workers=resolve_ghidra_workers()),
     }
-    svc = DecompilerService(cache_dir=cache_dir, mcp_endpoint=mcp_endpoint,
+    svc = DecompilerService(cache_dir=cache_dir,
+                            global_cache_dir=global_cache_dir,
+                            mcp_endpoint=mcp_endpoint,
                             mcp_provider=mcp_provider)
     for key in prefer:
         build = constructors.get(key)

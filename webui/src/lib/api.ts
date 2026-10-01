@@ -185,6 +185,10 @@ export const api = {
   },
   retryTriage: (pid: string, sha: string) =>
     http<{ job_id: string; sha: string }>(`/api/projects/${pid}/binaries/${sha}/triage`, { method: "POST" }),
+  // 停止进行中的 headless 全量导出（大样本 P3，协作式：当前函数反编译完停下并保留已导出部分）
+  cancelTriage: (pid: string, sha: string) =>
+    http<{ cancelling: boolean; hint?: string }>(
+      `/api/projects/${pid}/binaries/${sha}/triage/cancel`, { method: "POST" }),
   binaryOverview: (pid: string, sha: string) =>
     http<BinaryOverview>(`/api/projects/${pid}/binaries/${sha}/overview`),
   cachedFunctions: (pid: string, sha: string) =>

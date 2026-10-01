@@ -113,15 +113,19 @@ def delete_thread(bb, thread_id: str) -> bool:
         return cur.rowcount > 0
 
 
-def recover_running_threads(bb) -> list[str]:
+def recover_running_threads(bb, running: set[str] | None = None) -> list[str]:
     """重启后僵尸 running 清扫：执行轮次随旧进程消失（abort_event/执行线程/
     run_cmd 子进程全灭），DB status=running 残留 → 工作台永久「执行中」（输入
-    框禁用、停止 409）。项目打开时调用（GET /api/projects/{pid}）——新进程
-    chat_running 为空集，扫到的 running 必是僵尸：归位 idle + 落中断 assistant
-    消息（与手动停止同款观感，历史消息保留可续聊）。无僵尸时 no-op 返回空。"""
+    框禁用、停止 409）。只在「本进程首次打开该项目」时调用（_sweep_restarted_
+    project 钩子）——新进程 chat_running 为空集，扫到的 running 必是僵尸：归位
+    idle + 落中断 assistant 消息（与手动停止同款观感，历史消息保留可续聊）。
+    running：本进程仍在执行的 thread_id 集合（app.state.chat_running）——双保险
+    （2026-09-30 误报修复）：清扫前逐线程核对，集合内的活轮跳过不杀，杜绝
+    「执行中刷新页面→GET 项目→活轮被误判僵尸落『进程重启』中断消息」。无僵尸
+    时 no-op 返回空。"""
     rows = bb.conn.execute(
         "SELECT id FROM chat_threads WHERE status='running'").fetchall()
-    ids = [r["id"] for r in rows]
+    ids = [r["id"] for r in rows if not (running and r["id"] in running)]
     if not ids:
         return []
     ts = now()

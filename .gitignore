@@ -6,6 +6,8 @@ config/fofa.json
 config/tools.json
 # 本机环境配置：MCP server 路径每机不同、Claude 工具钩子引用本机绝对路径（2026-09-29 提交治理）
 config/mcp.json
+# 本机反编译覆盖层：headless_timeout（秒）逐机不同（大样本加速 P1，2026-09-30）
+config/decompiler.json
 .claude/
 
 # Python

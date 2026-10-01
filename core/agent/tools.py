@@ -5,6 +5,7 @@ Agent 没有裸 shell：run_cmd 经 gateway；黑板读写走 Blackboard；
 """
 
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -50,6 +51,8 @@ _PLAN_PRE_ALLOWED = _PLAN_TOOLS | {
     "bb_query", "kb_open", "kb_search", "list_symbols", "decompile",
     # strings_search/func_xrefs 只读缓存检索（2026-09-27，侦察先行同 list_symbols）
     "strings_search", "func_xrefs",
+    # disasm 只读反汇编点查（2026-09-30，按需详情通道，同 decompile 侦察先行）
+    "disasm",
     # read_file 只读工作区文件（侦察先行，2026-09-20）
     "read_file",
     # search_files 非 shell 的工作区内容检索（2026-09-24，替代计划前 run_cmd grep）
@@ -395,7 +398,10 @@ AGENT_TOOLS: list[dict[str, Any]] = [
                        "domain 各拉一把、条数多还漏看）。"
                        "findings 尽量带 target_asset_id 精确过滤；events 尽量带 kinds/"
                        "session_id；limit 传小值会截断漏看（漏看了仍要重查，得不偿失）。"
-                       "逆向场景硬规则：反编译任何函数前必须先查 func 防重复劳动。",
+                       "逆向场景硬规则：反编译任何函数前必须先查 func 防重复劳动。"
+                       "**列已上传样本：what=assets type=binary**——返回行的 value 即"
+                       "样本 sha256（func 查询的 binary_sha256 / bb_upsert_func 都用它），"
+                       "meta.filename 是原文件名；不知道 sha 时先列样本，不要猜。",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -743,6 +749,22 @@ AGENT_TOOLS: list[dict[str, Any]] = [
                 "name": {"type": "string", "description": "按符号名查"},
                 "address": {"type": ["integer", "string"],
                             "description": f"按函数入口地址查。{_ADDR_DESC}"},
+            },
+            "required": ["binary"],
+        },
+    },
+    {
+        "name": "disasm",
+        "description": "反汇编单函数（按需自动从 IDA MCP 拉取并落盘缓存，超长截断）。"
+                       "看汇编细节/混淆代码/指令级逻辑时用它；伪码看 decompile。"
+                       "给 name 或 address 其一。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "binary": {"type": "string", "description": "二进制文件路径"},
+                "name": {"type": "string", "description": "按符号名反汇编"},
+                "address": {"type": ["integer", "string"],
+                            "description": f"按函数入口地址反汇编。{_ADDR_DESC}"},
             },
             "required": ["binary"],
         },
@@ -1143,7 +1165,7 @@ TOOL_GROUPS = ["执行", "文件", "黑板", "知识", "浏览器", "协作", "�
 _COLLAB_TOOLS = {"publish_task", "request_authorization", "request_escalation"}
 _KNOWLEDGE_EXTRA = {"kb_open", "kb_search", "skill_open", "route_lookup",
                     "propose_pack_edit", "list_symbols", "decompile",
-                    "strings_search", "func_xrefs"}
+                    "strings_search", "func_xrefs", "disasm"}
 _FILE_TOOLS = {"read_file", "search_files"}
 
 
@@ -1378,6 +1400,18 @@ class ToolDispatcher:
         except GatewayDenied as e:
             # 拒绝不是异常终止：Agent 看到原因后改道（§7 拒绝必须改道）
             return f"[网关拒绝] {e}"
+        except TypeError as e:
+            # 参数幻觉自纠锚点（2026-09-30）：参数名拼错/多传时附上真实参数清单，
+            # 模型下一轮可直接改参重试——裸 TypeError 只会引发连环猜参数
+            # （实测：bb_query 被传 what=files+sha256 连错两处，无清单则空转）。
+            hint = ""
+            if "keyword argument" in str(e) or "positional argument" in str(e):
+                try:
+                    names = list(inspect.signature(handler).parameters)
+                    hint = f"（{name} 的合法参数: {', '.join(names)}）"
+                except (ValueError, TypeError):
+                    pass
+            return f"[工具异常] {type(e).__name__}: {e}{hint}"
         except Exception as e:  # noqa: BLE001 —— 工具失败回填文本，循环不中断
             return f"[工具异常] {type(e).__name__}: {e}"
 
@@ -1912,7 +1946,11 @@ class ToolDispatcher:
                        kinds: list[str] | str | None = None,
                        session_id: str | None = None,
                        asset: str | None = None,
-                       limit: int | None = None) -> str:
+                       limit: int | None = None,
+                       sha256: str | None = None) -> str:
+        # 参数名容错（2026-09-30）：模型高频把 binary_sha256 简写成 sha256——
+        # 别名归一而非裸 TypeError（截图案例：what=files+sha256 连错两处）
+        binary_sha256 = binary_sha256 or sha256
         if address is not None:
             try:
                 address = _coerce_addr(address)
@@ -2076,7 +2114,9 @@ class ToolDispatcher:
                                "func_addresses": m["func_addresses"]}
                               for m in b["modules"]]}
                  for b in rows], ensure_ascii=False)
-        return f"[错误] 未知查询: {what}"
+        return (f"[错误] 未知查询: {what}"
+                f"（允许: findings, assets, events, tasks, func, blueprint, site；"
+                f"列已上传样本用 what=assets type=binary，返回行的 value 即样本 sha256）")
 
     def _tool_kb_open(self, module: str) -> str:
         """打开知识库模块（DESIGN.md §4/§4.5）：kb 全局单根多域解析（expert-pool M0）。
@@ -2971,6 +3011,20 @@ class ToolDispatcher:
             except ValueError as e:
                 return f"[错误] {e}"
         result = self.decompiler.xrefs_for_func(binary, address=address, name=name)
+        if self._decompile_result_ok(result):
+            self.last_progress_step = self._step
+        return result
+
+    def _tool_disasm(self, binary: str, name: str | None = None,
+                     address: int | str | None = None) -> str:
+        if self.decompiler is None:
+            return self._DECOMPILER_UNWIRED
+        if address is not None:
+            try:
+                address = _coerce_addr(address)
+            except ValueError as e:
+                return f"[错误] {e}"
+        result = self.decompiler.disasm(binary, address=address, name=name)
         if self._decompile_result_ok(result):
             self.last_progress_step = self._step
         return result

@@ -329,6 +329,8 @@ export interface LlmProvider {
   enabled: boolean
   /** 每模型最大上下文（token，可选；空=用系统默认预算） */
   model_context?: Record<string, number>
+  /** 思考链开关：true=显式开启；null/缺省=不写该字段，跟随网关缺省（ark 默认开） */
+  thinking?: boolean | null
 }
 
 export interface ModelInfo {
@@ -496,6 +498,8 @@ export interface CachedFunction {
   pseudocode: string | null
   /** 缓存缺席由 MCP 实时取回时为 "mcp"；headless 缓存命中无此字段 */
   source?: string
+  /** 按需详情（IDA 拉取样本自动 analyze_batch 拉取落盘）：反汇编行列表，超长截断 */
+  disasm?: { lines: string[]; truncated?: boolean } | null
 }
 
 export interface XrefRef {
@@ -684,9 +688,18 @@ export interface Job {
   status: "running" | "done" | "error"
   result: unknown
   error: string | null
-  // IDA 拉取进度（2026-09-30）：meta.progress 是后端可变 dict 的引用，
-  // 轮询时每次读到最新值（pulled=已拉函数数，total=null=分母未知）
-  meta?: { progress?: { pulled: number; total: number | null } }
+  // 后端可变 dict 的引用，轮询时每次读到最新值：
+  //  - IDA 拉取：pulled=已拉函数数，total=null=分母未知，rows=本页新增函数行；
+  //  - headless 导出（大样本 P3）：done=已反编译函数数，total=函数总数，phase=阶段。
+  meta?: {
+    progress?: {
+      pulled?: number
+      total?: number | null
+      rows?: CachedFuncRow[]
+      done?: number
+      phase?: string
+    }
+  }
 }
 
 // 编排一轮（orchestrator-tick job）的结构化结果（批 3，DESIGN §6.8/机制 1.9）
@@ -1603,6 +1616,16 @@ export interface ChatUsage {
   steps?: number
   cache_read?: number
   cache_creation?: number
+  ctx_limit?: number
+  ctx_soft?: number
+  compaction?: {
+    compacted: boolean
+    level?: number
+    masked?: number
+    cached?: boolean
+    est?: number
+    budget?: number
+  }
   breakdown?: {
     system: number
     refs: number

@@ -38,6 +38,21 @@ entries:
   - point: Godot 引擎 APK
     match: [godot, gdc, sparsepck, 引擎]
     kb: binary/android/godot.md
+  - point: .NET 逆向与混淆脱壳
+    match: [dotnet, csharp, il, dnspy, dnspyex, de4dot, 混淆脱壳, 托管, clr]
+    kb: binary/dotnet/obfuscators.md
+  - point: 跨版本符号迁移
+    match: [符号迁移, binary diff, bindiff, 无符号, pdb, 版本更新]
+    kb: binary/reverse/sym-diff.md
+  - point: EDR 防御逆向与绕过
+    match: [edr, 钩子, unhook, syscall, etw, amsi, 遥测, 免杀对抗]
+    kb: binary/edr/hook-survey.md
+  - point: Frida 动态 hook（Android）
+    match: [frida, 动态hook, ssl pinning, root检测, 模拟器检测]
+    kb: binary/android/frida-cookbook.md
+  - point: Go 二进制源码恢复
+    match: [goreysym, go 逆向, go二进制, 源码恢复]
+    kb: binary/reverse/cases/go-tls-proxy-source-recovery.md
   - point: RSA 攻击
     match: [rsa, 共模, e与phi, 维纳, coppersmith]
     kb: crypto/crypto/rsa-attacks.md
@@ -342,3 +357,13 @@ entries:
   - point: Serverless
     match: [serverless, 函数计算, lambda, faas]
     kb: cloud/native/serverless/01-function-permission-trigger-abuse.md
+  # ---- 源码白盒审计（AutoCVE 方法论重写，2026-10-01）----
+  - point: 源码白盒审计方法论
+    match: [源码审计, 白盒审计, 代码审计, code audit, source audit, 覆盖率矩阵, 审计方法论]
+    kb: web/webapp/source-audit/手册.md
+  - point: 污点分析与数据流追踪
+    match: [污点分析, 数据流, 污染流, taint, source, sink, 传播链]
+    kb: web/webapp/taint-analysis/手册.md
+  - point: 控制缺失型审计
+    match: [控制缺失, 端点权限矩阵, 认证旁路, 越权一致性, crud, mass assignment, 反向审计]
+    kb: web/webapp/control-gap/手册.md

@@ -21,6 +21,12 @@ from core.skills.roles import _parse_inline_value
 GENERALIST = "_generalist"
 _VARIANT_PREFIX = "variant_"
 
+# 轨默认知识面（2026-09-30）：research 轨 = 旧 reverse 域（前端 research→rev-generic
+# 逆向工作台口径）。项目无专家绑定且无显式 capabilities（M3 起创建恒空）时，caps_effective
+# 按轨默认补全——蛙池AI逆向 等逆向项目的 chat/agent 技能（binary 包逆向技能）与
+# 知识库可见性因此恢复。pentest/ctf 无默认（旧域名=轨名，存量直通语义不变）。
+TRACK_DEFAULT_CAPS: dict[str, list[str]] = {"research": ["binary"]}
+
 
 def _parse_expert(path: Path) -> dict:
     """专家 yaml 极简解析（与 core.skills.roles 同约定）。"""
@@ -127,12 +133,14 @@ def caps_effective(packs_root: str | Path, track: str,
     - 有绑定专家：专家面 = 各绑定专家 skills 并集（含轨变体）∪ 轨技能，取其中
       capability 类技能的所属包集合（轨技能 kind=track 不引包，恒在 {track} 内）；
       任一专家 skills=null = 全量 → 全部能力包目录（all_capability_packs）。
-    - 无绑定专家（存量项目零翻译）：fallback（meta.capabilities）直通。
+    - 无绑定专家（存量项目零翻译）：fallback（meta.capabilities）直通；fallback 为
+      空（M3 起创建恒空）时按 TRACK_DEFAULT_CAPS 轨默认补全（research→binary，
+      2026-09-30 逆向项目口径）。
     找不到的技能名跳过（doctor expert-skill-missing 兜底）。
     """
     bound = [e for e in (experts or []) if str(e).strip()]
     if not bound:
-        return list(fallback or [])
+        return list(fallback or TRACK_DEFAULT_CAPS.get(track, []))
     names = expert_skills(packs_root, track, bound)
     if names is None:  # 绑定含全量专家（skills=null）
         return all_capability_packs(packs_root)

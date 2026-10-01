@@ -176,13 +176,20 @@ export function AgentWorkbenchView({ pid, meta }: { pid: string; meta: ProjectDe
       !messages.some((x) => x.role === "tool" && x.tool_use_id === tc.id))), [messages])
   const running = thread?.status === "running"
 
-  // 上下文用量（K9-C）：input(+cache)=当步窗口占用，分母默认 256K；<70% 青 / 70~90% 琥珀 / >90% 红
+  // 上下文用量（K9-C / ct-8）：分母=后端下发的真实硬窗口（缺省回落 256K）；
+  // 软上限=有效工作窗口（支持 1M≠在 1M 最好），超此会触发压缩，作为警戒线。
   const usage = thread?.usage ?? null
-  const usagePct = Math.min(100, Math.round(((usage?.input ?? 0) / CTX_LIMIT) * 100))
-  const usageLevel = usagePct >= 90 ? "is-high" : usagePct >= 70 ? "is-warn" : "is-ok"
+  const ctxLimit = usage?.ctx_limit ?? CTX_LIMIT
+  const ctxSoft = usage?.ctx_soft ?? ctxLimit
+  const usagePct = Math.min(100, Math.round(((usage?.input ?? 0) / ctxLimit) * 100))
+  const softPct = ctxSoft > 0 ? (usage?.input ?? 0) / ctxSoft : 0
+  // 档位按软上限（警戒线）判定：<70% 青 / 70~90% 琥珀 / >90% 红（接近压缩）
+  const usageLevel = softPct >= 0.9 ? "is-high" : softPct >= 0.7 ? "is-warn" : "is-ok"
+  const softLeftPct = ctxLimit > 0 ? Math.min(100, (ctxSoft / ctxLimit) * 100) : 100
+  const showSoftLine = ctxSoft < ctxLimit
   // 上下文构成（Claude Code /context 式）：后端估算+真值归一的分类 breakdown
   const bk = usage?.breakdown
-  const usageFree = Math.max(0, CTX_LIMIT - (usage?.input ?? 0))
+  const usageFree = Math.max(0, ctxLimit - (usage?.input ?? 0))
   const usageSegs = bk
     ? ([
         { key: "system", label: "系统提示", tokens: bk.system, cls: "seg-sys" },
@@ -558,7 +565,7 @@ export function AgentWorkbenchView({ pid, meta }: { pid: string; meta: ProjectDe
                 <div className="wb-usage-head">
                   <Gauge size={12} className="text-primary" />
                   <b>上下文用量</b>
-                  <span className="wb-thread-meta">{usage ? `分母 ${CTX_LIMIT / 1024}K` : "暂无数据"}</span>
+                  <span className="wb-thread-meta">{usage ? `分母 ${Math.round(ctxLimit / 1024)}K${showSoftLine ? ` · 软上限 ${Math.round(ctxSoft / 1024)}K` : ""}` : "暂无数据"}</span>
                   <button className="wb-usage-close" title="关闭" onClick={() => setUsageOpen(false)}>
                     <X size={12} />
                   </button>
@@ -566,7 +573,7 @@ export function AgentWorkbenchView({ pid, meta }: { pid: string; meta: ProjectDe
                 {usage ? (
                   <>
                     <div className="wb-usage-head-row">
-                      <b className="wb-usage-total">{fmtTokens(usage.input ?? 0)} / {CTX_LIMIT / 1024}K</b>
+                      <b className="wb-usage-total">{fmtTokens(usage.input ?? 0)} / {Math.round(ctxLimit / 1024)}K</b>
                       <span className={cn("wb-usage-pct-big", usageLevel)}>{usagePct}%</span>
                     </div>
                     {bk ? (
@@ -574,17 +581,18 @@ export function AgentWorkbenchView({ pid, meta }: { pid: string; meta: ProjectDe
                         <div className="wb-usage-segs" role="img" aria-label="上下文构成分段条">
                           {usageSegs.map((s) => (
                             <i key={s.key} className={s.cls}
-                              style={{ width: `${(s.tokens / CTX_LIMIT) * 100}%` }}
-                              title={`${s.label} ${fmtTokens(s.tokens)}（${Math.round((s.tokens / CTX_LIMIT) * 100)}%）`} />
+                              style={{ width: `${(s.tokens / ctxLimit) * 100}%` }}
+                              title={`${s.label} ${fmtTokens(s.tokens)}（${Math.round((s.tokens / ctxLimit) * 100)}%）`} />
                           ))}
-                          {usageFree > 0 && <i className="seg-free" style={{ width: `${(usageFree / CTX_LIMIT) * 100}%` }} title={`剩余 ${fmtTokens(usageFree)}`} />}
+                          {usageFree > 0 && <i className="seg-free" style={{ width: `${(usageFree / ctxLimit) * 100}%` }} title={`剩余 ${fmtTokens(usageFree)}`} />}
+                          {showSoftLine && <i className="seg-soft" style={{ left: `${softLeftPct}%` }} title={`软上限警戒线 ${Math.round(ctxSoft / 1024)}K`} />}
                         </div>
                         <div className="wb-usage-legend">
                           {usageSegs.map((s) => (
                             <div className="wb-usage-li" key={s.key}>
                               <i className={cn("wb-usage-dot", s.cls)} />
                               <b className="shrink-0">{s.label}</b>
-                              <span className="wb-usage-num">{fmtTokens(s.tokens)} · {Math.round((s.tokens / CTX_LIMIT) * 100)}%</span>
+                              <span className="wb-usage-num">{fmtTokens(s.tokens)} · {Math.round((s.tokens / ctxLimit) * 100)}%</span>
                             </div>
                           ))}
                           <div className="wb-usage-li">
@@ -592,10 +600,17 @@ export function AgentWorkbenchView({ pid, meta }: { pid: string; meta: ProjectDe
                             <b className="shrink-0">剩余空间</b>
                             <span className="wb-usage-num">{fmtTokens(usageFree)} · {Math.max(0, 100 - usagePct)}%</span>
                           </div>
+                          {showSoftLine && (
+                            <div className="wb-usage-li">
+                              <i className={cn("wb-usage-dot", "seg-soft")} />
+                              <b className="shrink-0">软上限</b>
+                              <span className="wb-usage-num">{Math.round(ctxSoft / 1024)}K 起触发压缩</span>
+                            </div>
+                          )}
                         </div>
                       </>
                     ) : (
-                      <div className="wb-usage-bar"><i className={usageLevel} style={{ width: `${usagePct}%` }} /></div>
+                      <div className="wb-usage-bar"><i className={usageLevel} style={{ width: `${usagePct}%` }} />{showSoftLine && <i className="seg-soft" style={{ left: `${softLeftPct}%` }} />}</div>
                     )}
                     <div className="wb-kv"><b className="shrink-0">输出（累计）</b><span className="wb-usage-num">{fmtTokens(usage.output ?? 0)}</span></div>
                     <div className="wb-kv"><b className="shrink-0">模型步数</b><span className="wb-usage-num">{usage.steps ?? 0}</span></div>

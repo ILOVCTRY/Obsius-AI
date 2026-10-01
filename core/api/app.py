@@ -488,6 +488,19 @@ class WritebackIn(BaseModel):
     items: list[WritebackItemIn] = Field(min_length=1, max_length=500)
 
 
+class ImportExportIn(BaseModel):
+    """POST binaries/{sha}/import-export：纳入外部 headless 全量导出 JSON。
+
+    path 为服务端可读路径（本机文件；大样本 JSON 走路径而非 HTTP 上传体）。
+    """
+    path: str = Field(min_length=1, max_length=4096)
+
+
+class ImportIdaDbIn(BaseModel):
+    """POST binaries/{sha}/import-ida-db：纳入外部 IDA 数据库（.i64/.idb）后库内重导。"""
+    path: str = Field(min_length=1, max_length=4096)
+
+
 class SkillUpdateIn(BaseModel):
     content: str  # SKILL.md 全文（含 frontmatter）
 
@@ -821,6 +834,10 @@ class LlmProviderIn(BaseModel):
     enabled: bool = True
     # 每模型最大上下文（token，可选；非法/未勾选项由 _validate 静默剔除）
     model_context: dict[str, int] = Field(default_factory=dict)
+    # 思考链开关（2026-09-30，设置页勾选框）：None=不写字段（跟随网关缺省——
+    # base_url 含 ark 默认开，其余默认关）；True/False=显式写入 thinking 字段。
+    # 此前该字段被本模型白名单抹掉（设置页保存一次即丢），思考链静默消失
+    thinking: bool | None = None
 
 
 class ProvidersIn(BaseModel):
@@ -1013,6 +1030,10 @@ def create_app(
     from core.blackboard.campaign import CampaignMemory
     app.state.campaign = CampaignMemory(
         Path(workspace_root).parent / "data" / "campaign.db")
+    # 全局反编译缓存（data/decompiler-cache/<sha>.json，仿全局 data/ 先例）：IDA/Ghidra
+    # 一次全量导出按 sha256 落全局，跨项目同一样本免重跑 headless（大样本加速 P1）。
+    app.state.decompiler_cache_dir = \
+        Path(workspace_root).parent / "data" / "decompiler-cache"
     app.state.projects: dict[str, Project] = {}      # pid -> Project（连接复用）
     # 删除中的项目闸门：删除窗口内 _project 拒绝重入（防 pop 缓存后被轮询/open_project
     # 重建 Blackboard 实例重新锁死 db）；WS tick 见到即自行退出。
@@ -1033,6 +1054,9 @@ def create_app(
     # IDA 拉取停止信号（sha -> threading.Event，页间检查点；job 结束残留无害，
     # 下次 submit 覆盖——2026-09-30 断点续拉）
     app.state.pull_cancel: dict[str, threading.Event] = {}
+    # headless 全量导出协作式停止信号（sha -> threading.Event，大样本 P3）：置位即写
+    # 停止标志文件，Ghidra 脚本在函数边界停下并保留已导出部分（不杀进程）。
+    app.state.export_cancel: dict[str, threading.Event] = {}
     # 情报面板（E9，全局模块）：惰性建 IntelStore（首访问情报端点才落 config/intel/）；
     # intel_getter / intel_llm 为测试注入口（None = urllib 真抓 / classifier 路由）
     app.state.intel_dir = str(intel_dir)
@@ -1178,6 +1202,15 @@ def create_app(
                     bb.set_session_status(row["id"], "idle")
             except ValueError:
                 continue  # 并发首开时已被另一路径归位
+        # ⑥ chat 僵尸轮清扫（2026-09-30 误报修复）：原挂在 GET /api/projects/{pid}
+        # 每次调用都执行且不核对 chat_running——执行中刷新页面会把活轮误判僵尸、
+        # 落「⚠ 进程重启，本轮执行中断」误报。挪进本钩子（本进程首次打开该项目
+        # 才执行一次，重启语义正确），并传 _chat_running_set() 双保险：集合内的
+        # 活轮跳过不杀（_chat_running_set 定义在下方，运行时查找无前向问题）
+        from core.chat import store as chat_store
+        recovered = chat_store.recover_running_threads(proj.bb, _chat_running_set())
+        if recovered:
+            log.info("chat 僵尸线程清扫: %s", recovered)
 
     def _tq(pid: str) -> TaskQueue:
         return TaskQueue(_project(pid).bb)
@@ -1197,15 +1230,18 @@ def create_app(
             svc = factory(proj)
         else:
             from core.tools.decompiler import (
-                build_headless_service, gateway_runner, select_mcp_endpoint)
+                build_headless_service, gateway_runner, resolve_headless_timeout,
+                select_mcp_endpoint)
 
             gateway = ExecutionGateway(bb=proj.bb)
             runner = gateway_runner(
                 gateway, project_id=proj.id, session_id="rev-workbench",
-                author="human", timeout=900, workspace=proj.path)
+                author="human", timeout=resolve_headless_timeout(),
+                workspace=proj.path)
             svc = build_headless_service(
                 proj.artifacts_dir / "decompiler-cache",
                 runner=runner,
+                global_cache_dir=app.state.decompiler_cache_dir,
                 ida_db_dir=proj.artifacts_dir / "decompiler-db",
                 ghidra_tmp_dir=proj.artifacts_dir / ".ghidra-tmp",
                 # MCP 实时桥：config/mcp.json 逆向域 http server，无配置默认
@@ -1278,8 +1314,14 @@ def create_app(
             for j in app.state.jobs.all_jobs()
         )
 
-    def _run_binary_triage(pid: str, sha: str, rel_path: str) -> dict:
-        """零 LLM 后台分诊：headless 全量导出→缓存；无工具结构化降级（不报错）。"""
+    def _run_binary_triage(pid: str, sha: str, rel_path: str,
+                           progress: dict | None = None,
+                           stop: threading.Event | None = None) -> dict:
+        """零 LLM 后台分诊：headless 全量导出→缓存；无工具结构化降级（不报错）。
+
+        progress/stop（大样本 P3）：导出带分片进度；stop 置位即协作式停止并保留已导出
+        部分（partial 缓存只展示不发布全局，重跑「开始分析」补全）。
+        """
         from core.tools.decompiler import DECOMPILE_GUIDANCE
 
         proj = _project(pid)
@@ -1289,13 +1331,15 @@ def create_app(
             bb.append_event(pid, "binary.triage_failed", payload, author="human")
             return {"status": "no-tool", **payload}
         try:
-            data, info = svc.export_to_cache(str(_inside(proj, rel_path)))
+            data, info = svc.export_to_cache(str(_inside(proj, rel_path)),
+                                             progress=progress, stop_event=stop)
         except Exception as e:  # noqa: BLE001 —— Job 失败也要留黑板痕迹
             bb.append_event(pid, "binary.triage_failed",
                             {"sha": sha, "reason": "export-failed",
                              "error": f"{type(e).__name__}: {e}"[:400]},
                             author="human")
             raise
+        stopped = bool(info.get("stopped"))
         funcs = data.get("functions") or []
         sections = data.get("sections") if isinstance(data.get("sections"), list) else []
         imports = data.get("imports") if isinstance(data.get("imports"), dict) else {}
@@ -1313,21 +1357,33 @@ def create_app(
                 "import_count": sum(len(v) for v in imports.values()),
                 "db_path": rel_db,
                 "triaged_at": _utc_now(),
+                **({"partial": True} if stopped else {}),
             }})
         bb.append_event(pid, "binary.triaged",
                         {"sha": sha, "backend": info.get("name"),
-                         "function_count": len(funcs), "packer_suspect": packer},
+                         "function_count": len(funcs), "packer_suspect": packer,
+                         **({"stopped": True} if stopped else {})},
                         author="human")
-        return {"status": "ok", "sha": sha, "function_count": len(funcs),
-                "backend": info.get("name")}
+        res = {"status": "stopped" if stopped else "ok", "sha": sha,
+               "function_count": len(funcs), "backend": info.get("name")}
+        if stopped:
+            res["hint"] = (f"已停止：已导出 {len(funcs)} 个函数（部分伪码可能缺失，"
+                           "已保留可见），重新「开始分析」可补全")
+        return res
 
     def _submit_triage(proj: Project, sha: str, rel_path: str) -> str:
         if _triage_running(proj.id, sha):
             raise HTTPException(409, "该样本正在分诊中")
+        # progress 可变 dict 塞进 job meta（引用共享）→ 前端轮询带出；stop Event 经
+        # export_cancel[sha] 供取消端点置位（协作式停，保留已导出部分）
+        progress: dict = {"done": 0, "total": 0, "phase": "starting"}
+        stop = threading.Event()
+        app.state.export_cancel[sha] = stop
         return app.state.jobs.submit(
             "binary-triage",
-            lambda: _run_binary_triage(proj.id, sha, rel_path),
-            meta={"project_id": proj.id, "triage_sha": sha},
+            lambda: _run_binary_triage(proj.id, sha, rel_path, progress, stop),
+            meta={"project_id": proj.id, "triage_sha": sha, "sha": sha,
+                  "progress": progress},
         )
 
     def _rev_job_running(pid: str, sha: str, kind: str) -> bool:
@@ -1436,11 +1492,18 @@ def create_app(
                                     "（插件版本过旧？）"}
                 stopped = True  # 中途翻页失败：保住已拉部分
                 break
+            # 本页新增行（前端轮询增量 append 用，≤PULL_PAGE 不胀 meta；断点续拉
+            # 从 offset 起步，本页行即 offset 之后新拉的，前端按 address 去重兜底）
+            page_rows: list[dict] = []
             for f in rows:
                 try:  # vendor Function 是 hex 字符串；坏行跳过不拖垮整次拉取
-                    functions.append({"address": int(str(f.get("addr")), 16),
-                                      "name": str(f.get("name") or ""),
-                                      "size": int(str(f.get("size") or "0x0"), 16)})
+                    fn = {"address": int(str(f.get("addr")), 16),
+                          "name": str(f.get("name") or ""),
+                          "size": int(str(f.get("size") or "0x0"), 16)}
+                    functions.append(fn)
+                    page_rows.append({"address": hex(fn["address"]),
+                                      "name": fn["name"], "size": fn["size"],
+                                      "has_pseudo": False, "n_calls": 0})
                 except (ValueError, TypeError):
                     continue
             nxt = pages[0].get("next_offset")
@@ -1452,7 +1515,8 @@ def create_app(
                                      partial=not done, total=total,
                                      next_offset=None if done else int(nxt))
             if progress is not None:
-                progress.update(pulled=len(functions), total=total)
+                progress.update(pulled=len(functions), total=total,
+                                rows=page_rows)
             if done:
                 break
             offset = int(nxt)
@@ -1531,6 +1595,70 @@ def create_app(
             meta={"project_id": proj.id, "sha": sha},
         )
 
+    def _run_import_ida_db(pid: str, sha: str, path: str) -> dict:
+        """外部 IDA 库（.i64/.idb）→ 项目 db_dir + 库内重导为缓存（免 MCP 回拉一整轮）。"""
+        proj = _project(pid)
+        bb, svc = proj.bb, _rev_service(proj)
+        res = svc.import_ida_db(sha, path)
+        if res.get("status") == "ok":
+            bb.append_event(pid, "binary.db_imported",
+                            {"sha": sha, "functions": res.get("functions", 0)},
+                            author="human")
+        return res  # locked/no-tool/unsupported/error：结构化返回，不发事件
+
+    def _submit_import_ida_db(proj: Project, sha: str, path: str) -> str:
+        if _rev_job_running(proj.id, sha, "binary-import-ida-db"):
+            raise HTTPException(409, "该样本正在导入 IDA 库中")
+        return app.state.jobs.submit(
+            "binary-import-ida-db",
+            lambda: _run_import_ida_db(proj.id, sha, path),
+            meta={"project_id": proj.id, "sha": sha},
+        )
+
+    def _run_import_export(pid: str, sha: str, path: str) -> dict:
+        """外部 headless 全量导出 JSON → 本地缓存（免重跑 IDA/Ghidra headless）。"""
+        proj = _project(pid)
+        bb, svc = proj.bb, _rev_service(proj)
+        res = svc.import_export_json(sha, path)
+        if res.get("status") == "ok":
+            bb.append_event(pid, "binary.export_imported",
+                            {"sha": sha, "functions": res.get("functions", 0)},
+                            author="human")
+        return res  # 低契约/读取失败：结构化返回，不发事件
+
+    def _submit_import_export(proj: Project, sha: str, path: str) -> str:
+        if _rev_job_running(proj.id, sha, "binary-import-export"):
+            raise HTTPException(409, "该样本正在导入导出 JSON 中")
+        return app.state.jobs.submit(
+            "binary-import-export",
+            lambda: _run_import_export(proj.id, sha, path),
+            meta={"project_id": proj.id, "sha": sha},
+        )
+
+    def _run_reexport_db(pid: str, sha: str) -> dict:
+        """直读项目内既有 IDA 库重导缓存（不删库、不含改名 diff；大样本后台跑）。
+
+        只回计数，绝不把整份全量导出塞进 job 结果（几十 MB 级，会胀 job 存储）。
+        """
+        proj = _project(pid)
+        bb, svc = proj.bb, _rev_service(proj)
+        res = svc.refresh_db_cache(sha)
+        if res.get("status") == "ok":
+            n = len((res.get("data") or {}).get("functions") or [])
+            bb.append_event(pid, "binary.db_reexported",
+                            {"sha": sha, "functions": n}, author="human")
+            return {"status": "ok", "sha": sha, "functions": n}
+        return {k: v for k, v in res.items() if k != "data"}  # locked/no-db/... 去大字段
+
+    def _submit_reexport_db(proj: Project, sha: str) -> str:
+        if _rev_job_running(proj.id, sha, "binary-reexport-db"):
+            raise HTTPException(409, "该样本正在重导缓存中")
+        return app.state.jobs.submit(
+            "binary-reexport-db",
+            lambda: _run_reexport_db(proj.id, sha),
+            meta={"project_id": proj.id, "sha": sha},
+        )
+
     def _db_rel(proj: Project, sha: str) -> str | None:
         """IDA 数据库相对路径（9.x .i64/.idb 按目标位宽，在 decompiler-db/ 下）。"""
         d = Path(proj.artifacts_dir) / "decompiler-db"
@@ -1583,7 +1711,8 @@ def create_app(
         def factory(role: str, session_name: str | None = None,
                     existing_session: dict | None = None,
                     max_steps: int | None = None) -> AgentSession:
-            from core.tools.decompiler import build_headless_service, gateway_runner
+            from core.tools.decompiler import (
+                build_headless_service, gateway_runner, resolve_headless_timeout)
 
             gateway = ExecutionGateway(bb=proj.bb)
             r = load_expert(app.state.packs_root, role, proj.track)
@@ -1622,6 +1751,11 @@ def create_app(
             from core.autonomy import ADVISOR_DEFAULTS
             adv = {**ADVISOR_DEFAULTS, **(cfg.get("advisor") or {})}
             session_plan_llm = plan_llm
+            # 覆写回退可见化（2026-09-30）：坏值静默回退保留（绝不开窗失败），但补落
+            # llm.fallback 事件——此前只有后端 log.warning，用户对「本次实际跑的是别
+            # 的模型」完全无感。会话 id 尚未就绪（AgentSession 还没建），先攒记录，
+            # 建好统一带 session_id 落库。
+            llm_fallbacks: list[dict[str, Any]] = []
             if adv.get("provider") and plan_llm is not None:
                 try:
                     session_plan_llm = app.state.llm_store.build(
@@ -1632,6 +1766,12 @@ def create_app(
                     log.warning(
                         "项目顾问模型覆写构建失败，回退全局 planner: pid=%s %s", pid, e)
                     session_plan_llm = plan_llm
+                    llm_fallbacks.append({
+                        "source": "advisor",
+                        "requested": {"provider": adv.get("provider"),
+                                      "model": adv.get("model")},
+                        "fallback": {"model": getattr(plan_llm, "model", None)},
+                        "reason": str(e)[:300]})
             # 项目 executor 覆写（TRAE 新壳 M3，2026-09-25）：cfg.executor_llm
             # 非空时本项目新开/重附着窗的 executor 按覆写构建，坏值静默回退全局
             # executor（与 advisor 同口径；在跑窗的即时切换走专用 PUT 端点）。
@@ -1646,6 +1786,12 @@ def create_app(
                     log.warning(
                         "项目 executor 覆写构建失败，回退全局 executor: pid=%s %s", pid, e)
                     session_exec_llm = exec_llm
+                    llm_fallbacks.append({
+                        "source": "executor",
+                        "requested": {"provider": str(exec_ov["provider"]).strip(),
+                                      "model": str(exec_ov.get("model") or "") or None},
+                        "fallback": {"model": getattr(exec_llm, "model", None)},
+                        "reason": str(e)[:300]})
             agent = AgentSession(
                 project_id=pid, bb=proj.bb, gateway=gateway,
                 llm=session_exec_llm, planner_llm=session_plan_llm,
@@ -1684,8 +1830,10 @@ def create_app(
                 proj.artifacts_dir / "decompiler-cache",
                 runner=gateway_runner(gateway, project_id=pid,
                                       session_id=agent.session["id"],
-                                      author=agent.session["id"], timeout=900,
+                                      author=agent.session["id"],
+                                      timeout=resolve_headless_timeout(),
                                       workspace=proj.path),
+                global_cache_dir=app.state.decompiler_cache_dir,
                 ida_db_dir=proj.artifacts_dir / "decompiler-db",
                 ghidra_tmp_dir=proj.artifacts_dir / ".ghidra-tmp",
                 mcp_provider=lambda binary: app.state.ida_mcp_manager.ensure(
@@ -1698,6 +1846,15 @@ def create_app(
             if proj.track in ("pentest", "redteam", "ctf"):
                 agent.dispatcher.browser = app.state.browser_pool
             app.state.agents[agent.session["id"]] = agent
+            # 覆写回退可见化：会话 id 就绪，补落 llm.fallback（失败不掩盖开窗）
+            for fb in llm_fallbacks:
+                try:
+                    proj.bb.append_event(
+                        pid, "llm.fallback",
+                        {**fb, "session_id": agent.session["id"]},
+                        session_id=agent.session["id"], author="system")
+                except Exception:  # noqa: BLE001 —— 事件落库失败不掩盖开窗
+                    log.exception("llm.fallback 事件落库失败 pid=%s", pid)
             return agent
 
         return factory
@@ -1842,14 +1999,10 @@ def create_app(
     @app.get("/api/projects/{pid}")
     def get_project(pid: str):
         proj = _project(pid)
-        # 僵尸 running 清扫（与任务侧 estranged「重启急停」同构）：进程重启后
-        # 执行轮次随旧进程消失，DB status=running 残留会让工作台永久「执行中」
-        # ——新进程 chat_running 为空集，扫到的 running 必是僵尸，归位+落中断
-        # 消息（无僵尸时 no-op，小表查询开销可忽略）
-        from core.chat import store as chat_store
-        recovered = chat_store.recover_running_threads(proj.bb)
-        if recovered:
-            log.info("chat 僵尸线程清扫: %s", recovered)
+        # chat 僵尸轮清扫已挪进 _sweep_restarted_project（2026-09-30 误报修复）：
+        # 此前每次 GET 项目都无条件清扫且不核对 chat_running——执行中刷新页面
+        # 会把活轮误判僵尸、落「进程重启」中断消息；现只在本进程首次打开项目
+        # 时执行（重启纪律同钩子），且清扫前逐线程核对 chat_running 双保险。
         tq = TaskQueue(proj.bb)
         tasks = tq.list_tasks(pid)
         stats: dict[str, int] = {}
@@ -2599,6 +2752,21 @@ def create_app(
         _inside(proj, rel)
         return {"job_id": _submit_triage(proj, sha, rel), "sha": sha}
 
+    @app.post("/api/projects/{pid}/binaries/{sha}/triage/cancel")
+    def cancel_triage(pid: str, sha: str):
+        """停止进行中的 headless 全量导出（大样本 P3，协作式）：置位 export_cancel[sha]
+        → 后端写停止标志文件，Ghidra 脚本在函数边界停下并保留已导出部分（partial 缓存
+        立即可见；重新「开始分析」补全）。无在跑导出 / 已置位均幂等。"""
+        proj = _project(pid)
+        if proj.bb.find_asset(pid, "binary", sha) is None:
+            raise HTTPException(404, f"样本资产不存在: {sha}")
+        ev = app.state.export_cancel.get(sha)
+        if ev is None or ev.is_set():
+            return {"cancelling": False, "hint": "没有进行中的导出"}
+        ev.set()
+        return {"cancelling": True,
+                "hint": "已请求停止：将在当前函数反编译完成后停下并保留已导出部分"}
+
     @app.get("/api/projects/{pid}/binaries/{sha}/overview")
     def binary_overview(pid: str, sha: str):
         """样本条首屏：缓存增强段 + 覆盖率 + 工具三态灯。缓存缺席也 200（cached:false）。"""
@@ -2645,10 +2813,25 @@ def create_app(
             for f in data.get("functions", [])
         ]
 
+    def _func_detail_view(detail: dict, want: int) -> dict:
+        """详情缓存/自动拉取 → CachedFunction 视图（disasm 行列表；source=cache）。"""
+        return {
+            "address": detail.get("address") or hex(want),
+            "name": detail.get("name"),
+            "size": detail.get("size", 0),
+            "calls": [],
+            "pseudocode": detail.get("pseudocode"),
+            "disasm": ({"lines": detail.get("disasm_lines") or [],
+                        "truncated": bool(detail.get("disasm_truncated"))}
+                       if detail.get("disasm_lines") else None),
+            "source": detail.get("source") or "cache",
+        }
+
     @app.get("/api/projects/{pid}/binaries/{sha}/functions/{addr}")
     def cached_function(pid: str, sha: str, addr: str):
-        """缓存命中走 v3 缓存；缓存缺席时 MCP 在线则实时取当前 IDA 库伪码（source=mcp），
-        MCP 也没有才 409。"""
+        """缓存命中走 v3 缓存；名单有但无伪码（IDA 拉取轻量缓存）→ 按需详情
+        （详情文件命中/自动 analyze_batch 拉取落盘，2026-09-30）；缓存缺席时
+        MCP 在线实时取当前 IDA 库伪码（source=mcp），MCP 也没有才 409。"""
         proj = _project(pid)
         svc = _rev_service(proj)
         want = _parse_hex_addr(addr)
@@ -2656,14 +2839,27 @@ def create_app(
         if data is not None:
             for f in data.get("functions", []):
                 if int(f["address"]) == want:
-                    return {"address": hex(int(f["address"])), "name": f.get("name"),
+                    if f.get("pseudocode"):
+                        return {"address": hex(int(f["address"])),
+                                "name": f.get("name"), "size": f.get("size", 0),
+                                "calls": f.get("calls") or [],
+                                "pseudocode": f.get("pseudocode"),
+                                "disasm": None}
+                    # 名单命中但无伪码（IDA 拉取）：按需详情补拉（自动+落盘）
+                    detail = svc.ensure_func_detail(sha, want)
+                    if detail is not None:
+                        return _func_detail_view(detail, want)
+                    return {"address": hex(want), "name": f.get("name"),
                             "size": f.get("size", 0), "calls": f.get("calls") or [],
-                            "pseudocode": f.get("pseudocode")}
+                            "pseudocode": None, "disasm": None}
             raise HTTPException(404, f"缓存中无此函数: {addr}")
+        detail = svc.ensure_func_detail(sha, want)
+        if detail is not None:
+            return _func_detail_view(detail, want)
         live = svc.live_decompile(want)
         if live is not None:
             return {"address": hex(want), "name": None, "size": 0, "calls": [],
-                    "pseudocode": live["pseudocode"], "source": "mcp"}
+                    "pseudocode": live["pseudocode"], "disasm": None, "source": "mcp"}
         raise HTTPException(409, "样本尚未完成 headless 分诊（缓存缺席）；"
                                 "可在 IDA 中 Ctrl-Alt-M 启动 MCP 后实时读取，或先完成分诊")
 
@@ -2675,11 +2871,31 @@ def create_app(
         svc = _rev_service(proj)
         want = _parse_hex_addr(addr)
         data = svc.read_cached(sha)
+        target = None
         if data is not None:
-            x = build_xrefs(data, want)
-            if x is None:
-                raise HTTPException(404, f"缓存中无此函数: {addr}")
-            return x
+            target = next((f for f in data.get("functions", [])
+                           if int(f["address"]) == want), None)
+            # headless 全量缓存（函数带 calls 键）→ build_xrefs 权威全局反查
+            if target is not None and "calls" in target:
+                x = build_xrefs(data, want)
+                if x is None:
+                    raise HTTPException(404, f"缓存中无此函数: {addr}")
+                return x
+        # IDA 拉取轻量缓存（无 calls）/缓存缺席 → 按需详情（缓存命中→自动拉取落盘）
+        detail = svc.read_func_detail(sha, want)
+        if detail is None:
+            detail = svc.ensure_func_detail(sha, want)
+        if detail is not None:
+            return {"address": hex(want), "name": detail.get("name"),
+                    "callers": detail.get("callers") or [],
+                    "callees": detail.get("callees") or [],
+                    "source": "cache"}
+        if target is not None:
+            # 名单有但详情拿不到（MCP 离线未缓存）：空调用关系，不回 4xx
+            return {"address": hex(want), "name": target.get("name"),
+                    "callers": [], "callees": []}
+        if data is not None:
+            raise HTTPException(404, f"缓存中无此函数: {addr}")
         # 缓存缺席：MCP 在线走 func_profile 实时降级（xrefs_for 内含选路）
         x = svc.xrefs_for(sha, want)
         if x is None:
@@ -2809,6 +3025,44 @@ def create_app(
         if proj.bb.find_asset(pid, "binary", sha) is None:
             raise HTTPException(404, f"样本资产不存在: {sha}")
         return {"job_id": _submit_push_names_to_ida(proj, sha), "sha": sha}
+
+    @app.post("/api/projects/{pid}/binaries/{sha}/import-ida-db", status_code=202)
+    def import_ida_db(pid: str, sha: str, body: ImportIdaDbIn):
+        """纳入外部已分析好的 IDA 库（.i64/.idb）到项目并库内重导为缓存（Job）。
+
+        免去「GUI 打开 → Ctrl-Alt-M → MCP 分页回拉」一整轮：把现成库拷进项目
+        decompiler-db/，headless 复用库内既有自动分析（不从样本重建，大样本关键）。
+        目标库正被 GUI 占用（锁文件）返回 done{status:"locked"}，绝不强写。
+        """
+        proj = _project(pid)
+        if proj.bb.find_asset(pid, "binary", sha) is None:
+            raise HTTPException(404, f"样本资产不存在: {sha}")
+        if not Path(body.path).is_file():
+            raise HTTPException(422, f"路径不存在或不是文件: {body.path}")
+        return {"job_id": _submit_import_ida_db(proj, sha, body.path), "sha": sha}
+
+    @app.post("/api/projects/{pid}/binaries/{sha}/import-export", status_code=202)
+    def import_export(pid: str, sha: str, body: ImportExportIn):
+        """纳入外部 headless 全量导出 JSON 为本地缓存（Job）：只收 export_version>=3，
+        低契约结构化拒绝（让上层重导）。免重跑 IDA/Ghidra headless。"""
+        proj = _project(pid)
+        if proj.bb.find_asset(pid, "binary", sha) is None:
+            raise HTTPException(404, f"样本资产不存在: {sha}")
+        if not Path(body.path).is_file():
+            raise HTTPException(422, f"路径不存在或不是文件: {body.path}")
+        return {"job_id": _submit_import_export(proj, sha, body.path), "sha": sha}
+
+    @app.post("/api/projects/{pid}/binaries/{sha}/reexport-db", status_code=202)
+    def reexport_db(pid: str, sha: str):
+        """直读项目内既有 IDA 库重导缓存（Job，不含改名 diff；锁库时结构化 locked）。
+
+        与 pull-names 的差别：只重导缓存，不 diff 回拉 func_kb——用于 GUI 深度
+        分析后在后台把库内分析结果同步进缓存（大样本耗时可长，走 Job 不阻塞）。
+        """
+        proj = _project(pid)
+        if proj.bb.find_asset(pid, "binary", sha) is None:
+            raise HTTPException(404, f"样本资产不存在: {sha}")
+        return {"job_id": _submit_reexport_db(proj, sha), "sha": sha}
 
     @app.post("/api/projects/{pid}/funcs", status_code=201)
     def create_func(pid: str, body: FuncCreateIn):
@@ -7363,7 +7617,20 @@ def create_app(
         bridge = bridges.get(proj.id)
         if bridge is None:
             from core.chat.mcp_bridge import MCPBridge
-            domains = sorted({*proj.capabilities, proj.track})
+            from core.skills.experts import caps_effective
+            from core.skills.taxonomy import LEGACY_DOMAIN_MAP
+            # 域推导与 ChatTurn capabilities 同口径（2026-09-30 修复：此前用盘上原始
+            # capabilities——M3 起恒空，且 config 里 ida 等 server 域是旧域 "reverse"，
+            # 交集恒空 → 逆向项目永远加载不了配置的 MCP）。
+            # caps_effective：无专家/无显式能力时按轨默认补（research→binary）。
+            # 旧域反向匹配：research+binary = 旧 reverse 域 → 放行 "reverse" 域 server；
+            # pentest/ctf 旧域名=轨名已在集合内，无需特判。
+            caps = caps_effective(app.state.packs_root, proj.track,
+                                  proj.experts, fallback=proj.capabilities)
+            domains = sorted({*caps, proj.track})
+            for d, (t, cs) in LEGACY_DOMAIN_MAP.items():
+                if t == proj.track and set(cs) <= (set(caps) | {proj.track}):
+                    domains.append(d)
             bridge = MCPBridge(MCP_CONFIG_PATH, domains=domains)
             bridges[proj.id] = bridge
         return bridge
@@ -7482,7 +7749,8 @@ def create_app(
                 # 重装备工厂（与任务链会话工厂同款材料）：decompiler 每线程一
                 # 实例（runner 走自建 gateway 审计、ida_db/ghidra_tmp 落项目
                 # artifacts），browser 按轨注入共享池（轨外 None → no-tool 降级）
-                from core.tools.decompiler import build_headless_service, gateway_runner
+                from core.tools.decompiler import (
+                    build_headless_service, gateway_runner, resolve_headless_timeout)
 
                 def _decompiler_factory(session_id: str, author: str):
                     return build_headless_service(
@@ -7490,8 +7758,10 @@ def create_app(
                         runner=gateway_runner(ExecutionGateway(bb=proj.bb),
                                               project_id=pid,
                                               session_id=session_id,
-                                              author=author, timeout=900,
+                                              author=author,
+                                              timeout=resolve_headless_timeout(),
                                               workspace=proj.path),
+                        global_cache_dir=app.state.decompiler_cache_dir,
                         ida_db_dir=proj.artifacts_dir / "decompiler-db",
                         ghidra_tmp_dir=proj.artifacts_dir / ".ghidra-tmp",
                         mcp_provider=lambda binary: app.state.ida_mcp_manager.ensure(

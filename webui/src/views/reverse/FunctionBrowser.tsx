@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react"
+import { useDeferredValue, useMemo, useRef, useState } from "react"
 import { useVirtualizer } from "@tanstack/react-virtual"
 import type { CachedFuncRow, FuncEntry } from "@/lib/types"
 import { hexAddr, parseAddrInput } from "@/lib/workbench"
@@ -30,6 +30,8 @@ export function FunctionBrowser(
   { pid, sha, rows, funcs, selected, onSelect, imports, cached, stringsCount }: Props,
 ) {
   const [query, setQuery] = useState("")
+  // 5万+ 行全量过滤较重：useDeferredValue 让输入即时响应、过滤延后到空闲渲染
+  const deferredQuery = useDeferredValue(query)
   const kbByAddr = useMemo(() => {
     const m = new Map<string, FuncEntry>()
     for (const f of funcs) m.set(hexAddr(f.address), f)
@@ -37,8 +39,8 @@ export function FunctionBrowser(
   }, [funcs])
 
   const items = useMemo<Item[]>(() => {
-    const q = query.trim().toLowerCase()
-    const addrQ = parseAddrInput(query)
+    const q = deferredQuery.trim().toLowerCase()
+    const addrQ = parseAddrInput(deferredQuery)
     const match = (addr: string, name: string | null) => {
       if (!q) return true
       if (addrQ) return addr === addrQ || addr.startsWith(addrQ)
@@ -67,11 +69,18 @@ export function FunctionBrowser(
       pushRow({ address: addr, name: kb.name, size: 0, has_pseudo: false, n_calls: 0 }, kb, "k")
     }
     const out: Item[] = []
-    if (risk.length) out.push({ kind: "header", key: "h-risk", label: `风险函数 ${risk.length}` }, ...risk)
-    if (analyzed.length) out.push({ kind: "header", key: "h-analyzed", label: `已分析 ${analyzed.length}` }, ...analyzed)
-    if (plain.length) out.push({ kind: "header", key: "h-all", label: `全部 ${plain.length}` }, ...plain)
+    // 分段入列：header + 段内行。5万+ 行时绝不能 `push(header, ...rows)`——
+    // 大数组展开成 .push() 实参会超 V8 实参/栈上限，抛 RangeError 调用栈溢出
+    const pushSection = (label: string, key: string, items: Item[]) => {
+      if (!items.length) return
+      out.push({ kind: "header", key, label })
+      for (const it of items) out.push(it)
+    }
+    pushSection(`风险函数 ${risk.length}`, "h-risk", risk)
+    pushSection(`已分析 ${analyzed.length}`, "h-analyzed", analyzed)
+    pushSection(`全部 ${plain.length}`, "h-all", plain)
     return out
-  }, [rows, kbByAddr, query])
+  }, [rows, kbByAddr, deferredQuery])
 
   const parentRef = useRef<HTMLDivElement>(null)
   const virtualizer = useVirtualizer({

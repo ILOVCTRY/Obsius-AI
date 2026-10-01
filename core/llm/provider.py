@@ -47,6 +47,11 @@ class LLMError(RuntimeError):
         self.truncated = truncated
 
 
+class ContextOverflowError(LLMError):
+    """输入超限（网关因 prompt 过长返回 400/413）——不可通过原样重试解决。
+    调用方据此触发「强制压缩上下文后重试一次」（reactive 兜底）。"""
+
+
 class LLMProvider(Protocol):
     def chat(
         self,

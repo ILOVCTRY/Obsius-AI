@@ -16,6 +16,10 @@ task_types: triage, reverse, verify
 | native so 校验（has_jni） | `android/native-five-lines.md`（JNI 桥 / 常量 / SMC / 验证 / 诱饵） |
 | so 被壳折叠（packed_so） | `android/unpacking.md`（识别四征 + unicorn 脱壳工程） |
 | Godot 引擎 APK（godot_engine） | `android/godot.md`（markers + GDExtension + 加密信封） |
+| 动态 hook（运行时行为/算法观察） | `android/frida-cookbook.md`（加密捕获/网络/存储/脱壳 dump 脚本集） |
+| 反检测对抗（root/SSL/模拟器/反调试） | `android/frida-bypass-kit.md`（四合一绕过框架 + 升级对抗） |
+| native 深度操作 / 框架专项 | `android/android-advanced.md`（IDA JNI 技巧/native hook/加固厂商表/Flutter/RN） |
+| 安全审计视角（产出报告） | `android/apk-security-checklist.md`（MASTG 清单） |
 | 已解题型比对 | `android/cases/`（命中识别特征直接复用 solver 重验证） |
 
 ## 反空转规则（先于一切）

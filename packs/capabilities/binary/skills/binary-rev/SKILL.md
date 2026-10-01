@@ -12,7 +12,14 @@ task_types: reverse, solve, verify
 
 **反编译前必须 `bb_query what=func binary_sha256=<sha>` 查重**；
 每分析完一个函数立即 `bb_upsert_func`（地址 + 语义名 + 算法结论）。
+`<sha>` 来源：`bb_query what=assets type=binary` 的返回行 `value` 字段即样本 sha256
+（或 MCP `survey_binary` 实时取当前 IDA 库）——不知道 sha 先列样本，禁止空串/编造。
 并行会话共享这份知识库——你写下的每个函数都替队友省一次反编译。
+
+**ida-mcp 可用则优先 ida-mcp**：overview `tools.mcp.state == "installed"`（或
+`decompile` 工具直接出结果）时，函数定位/反编译/伪码获取一律先走 ida-mcp
+（`decompile` / `list_funcs`，平台按需自动拉起 IDA）；objdump/capstone 静态路线
+只是 ida-mcp 缺席时的退路，不要在 ida-mcp 可用时绕开它硬啃汇编。
 
 ## 大文件读取纪律（2026-09-20：先定位后阅读，禁止盲猜行号来回补读）
 
@@ -27,12 +34,14 @@ task_types: reverse, solve, verify
    `run_cmd host python split_disasm.py`（脚本用 host python 写，约 10 行：按
    `re.match(r"^[0-9a-f]+ <(.+)>:$", line)` 遇函数头即换文件，shell 转义零烦恼）。
 4. 输出被截断会有显式标注——看到标注立即改用更小窗口/更精确定位，**不要凭语义猜没读到**。
-5. 有 IDA 时优先 `decompile` 工具（伪代码一屏顶百行汇编），平台会按需自动拉起 IDA。
+5. ida-mcp 可用时优先 `decompile` 工具（伪代码一屏顶百行汇编；优先级见硬规则，
+   高于一切静态手段），平台会按需自动拉起 IDA。
 
 ## 流程
 
-1. **定位关键函数**：字符串引用反查（提示语/flag 格式）→ main → 校验逻辑。
-   静态工具优先 host 端脚本（objdump 反汇编 / python capstone 不执行样本）。
+1. **定位关键函数**：ida-mcp 可用则直接 `decompile` / `list_funcs`（见硬规则）；
+   否则字符串引用反查（提示语/flag 格式）→ main → 校验逻辑，静态工具优先 host
+   端脚本（objdump 反汇编 / python capstone 不执行样本）。
 2. **还原算法**：逐块读汇编，提取常量表/变换；结论写 func_kb（如
    `check_flag@0x1189: 输入逐字节 XOR 0x37 后与密文比较`）。
 3. **求解**：还原算法后本地写脚本（host, trusted——这是你自己的代码）算出正确输入。
@@ -44,3 +53,14 @@ task_types: reverse, solve, verify
 
 XOR 常量 / 逐字节加减 / 查表替换 / 简易 TEA·XTEA / 魔改 base64 / 反转+位移。
 遇到多层嵌套先分层落 func_kb，再逐层求解。
+
+## 延伸手册（场景特征 → kb_open）
+
+| 场景/特征 | 手册 |
+|---|---|
+| 旧版有符号、新版无符号（缺 PDB/程序更新） | `binary/reverse/sym-diff.md`（LLM 符号迁移 + 平台 MCP 对接） |
+| ARM64 跳转表平坦化 / 循环 XOR 解密器 / 无 IDA 低依赖路线 | `binary/reverse/cases/arm64-self-extract-source-recovery.md` |
+| Go 二进制源码级恢复 | `binary/reverse/cases/go-tls-proxy-source-recovery.md`（GoReSym 管线） |
+| 平坦化 + DSL VM / 验证码类 | `binary/reverse/cases/dsl-vm-captcha-reverse.md` |
+| Electron/Bytenode 跨层审计 | `binary/reverse/cases/electron-bytenode-update-chain-audit.md` |
+| .NET/C# 托管样本 | 切 dotnet-rev 技能（混淆器/脱壳/IL patch） |

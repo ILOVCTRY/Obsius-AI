@@ -41,8 +41,8 @@ tools/
 ## 关键约定
 
 - 分发策略（toolchain-registry 拍板）：**基础环境开包自带 + 其它工具可下载落位/配置路径纳管**；二进制本体不进 git（runtime/、bin/、venv/ gitignore），桌面打包经 scripts/build_exe.py 随包。
-- 反编译统一走 `core/tools/decompiler.py`：工厂 `build_headless_service(cache_dir, runner=gateway_runner, prefer=("ida","ghidra"), mcp_endpoint=...)` 默认装 MCP 实时桥（端点由 config/mcp.json 选路，缺省 127.0.0.1:13337）；**Agent 会话工厂刻意不传 mcp_endpoint**（无人值守不赌 GUI 当前库）。按 sha256 缓存；**Agent 不直接调 Ghidra/IDA**。
-- 工具命令经执行网关（threat_class=trusted——反编译器只解析不执行样本）；headless 超时 900s（`gateway_runner(author="human", timeout=900)`）。
+- 反编译统一走 `core/tools/decompiler.py`：工厂 `build_headless_service(cache_dir, runner=gateway_runner, prefer=("ida","ghidra"), mcp_endpoint=..., global_cache_dir=...)` 默认装 MCP 实时桥（端点由 config/mcp.json 选路，缺省 127.0.0.1:13337）；**Agent 会话工厂刻意不传 mcp_endpoint**（无人值守不赌 GUI 当前库）。按 sha256 缓存；**Agent 不直接调 Ghidra/IDA**。`global_cache_dir` 指 `data/decompiler-cache`（跨项目同 sha 零重导，大样本 P1，2026-09-30）。**大样本（P2，2026-09-30）**：样本 ≥20MB 时导出选路把 Ghidra 提到最前（多进程并行分片主产，postScript 第二参传 worker 数，脚本内 N 个 worker 各持一个 DecompInterface 并行反编译），普通样本维持 IDA 优先。
+- 工具命令经执行网关（threat_class=trusted——反编译器只解析不执行样本）；headless 超时默认 3h（`HEADLESS_TIMEOUT = 3*3600`，大样本 P1 起，原 900s），可经 gitignore 覆盖层 `config/decompiler.json` 覆盖：`headless_timeout`（秒，`resolve_headless_timeout()`）/ `large_sample_bytes`（大样本阈值，与 app.py 20MB 同口径）/ `ghidra_workers`（Ghidra 并行 worker 数，默认 `max(1,CPU-1)`、夹 ≤16 内存保护）。
 
 ## 坑与注意（Windows 实证）
 

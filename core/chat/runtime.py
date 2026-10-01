@@ -21,6 +21,7 @@ call_expert：spawn 持久子线程（parent_thread_id 留档）→ 隔离上下
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import threading
 import time
@@ -32,6 +33,7 @@ from core.agent.tools import AGENT_TOOLS, ToolDispatcher
 from core.blackboard.tasks import TaskQueue
 from core.chat import store as chat_store
 from core.chat.mcp_bridge import MCPBridge
+from core.llm.provider import ContextOverflowError
 from core.runtime.gateway import ExecutionGateway
 from core.skills.experts import load_expert
 from core.skills.registry import SkillRegistry
@@ -60,7 +62,40 @@ _EXPERT_MAX_STEPS = 32
 _DELTA_MIN_CHARS = 80
 _DELTA_MIN_INTERVAL = 1.0
 
-_TOOL_RESULT_HEAD = 400
+# ---------- 上下文治理参数（2026-09-30 压缩上下文方案） ----------
+# 背景：单条工具结果可达数百万字符原样入历史 → 跨轮全量回放 → input 突破
+# 网关硬上限 → HTTP 400（不可重试、无降级）→ 线程 status=error。治理分三层：
+#   ①单条工具结果截断（入历史前，见 _loop 工具结果追加处）
+#   ②发送前两级联动压缩（一级占位化旧 tool_result → 二级 LLM 摘要）
+#   ③reactive 兜底（捕 ContextOverflowError 强制压缩重试一次）
+# 参数集中在常量块，providers.json 可逐 provider 覆盖（见 ct-7）。
+_MODEL_WINDOW_FALLBACK = 1_048_566   # 硬窗口兜底（providers.json 的 model_window 优先）
+_CTX_SOFT_BUDGET = 512_000           # 有效软上限：支持 1M≠在 1M 最好，超此即压
+_CTX_TRIGGER_RATIO = 0.9             # 触发阈值 = min(该比例×硬窗口, 软上限)
+_MAX_TOOL_RESULT_CHARS = 120_000     # 单条工具结果入历史上限（约 40K token）
+_KEEP_RECENT_STEPS = 12              # 逐字保留的最近步数（其外才允许压缩）
+_TOOL_RESULT_EVENT_HEAD = 400        # 事件流 result_head 预览长度
+
+# 压缩占位/摘要标记（前端与测试可据此识别已压缩内容）
+_CTX_PLACEHOLDER_TAG = "[上下文压缩] "
+_CTX_SUMMARY_TAG = "[历史摘要] "
+_CTX_SUMMARY_MAX_INPUT = 400_000     # 摘要器单次输入上限（超出取首尾、中段省略）
+
+# 二级摘要（LLM）系统提示：逆向领域增强模板（目标/关键地址/结论/假设/产物/待办）
+_CTX_SUMMARY_SYS = (
+    "你是逆向与渗透分析的历史压缩器。把给定对话历史压缩成一段高保真摘要，"
+    "供后续在更小上下文里继续分析。严格要求：\n"
+    "1. 只保留事实与结论，不臆造；无法确定的信息显式标注「未确认」。\n"
+    "2. 按以下结构输出（无内容的项写「无」）：\n"
+    "   - 目标：二进制/服务名、路径、哈希（MD5/SHA1/SHA256）\n"
+    "   - 关键函数/地址/偏移：函数名、地址、RVA/文件偏移、关键字符串\n"
+    "   - 已确认结论：已验证的事实、漏洞/风险点\n"
+    "   - 待验证假设：尚未证实的推测与线索\n"
+    "   - 关键产物：文件路径、脚本、PoC、日志\n"
+    "   - 待办：下一步应做的事项\n"
+    "3. 保留具体数值（地址/偏移/哈希/长度），不要用「某个地址」含糊代替。\n"
+    "4. 中文输出，尽量紧凑，不要复述寒暄与过程性文字。"
+)
 
 
 def _est_tokens(text: str) -> int:
@@ -70,19 +105,65 @@ def _est_tokens(text: str) -> int:
 
 
 def _msg_text(m: dict[str, Any]) -> str:
-    """提取消息可估文本：字符串直取；assistant blocks 取 text+tool_use 入参。"""
+    """提取消息可估文本：字符串直取；assistant blocks 取 text+tool_use 入参；
+    tool_result blocks 取 content（2026-09-30 伪影修复：此前漏计工具结果，
+    est_msgs 被严重低估 → 真值归一 scale 膨胀 → 缺口被成倍记进「工具定义」
+    桶，面板把纯工具 JSON 放大成 271K 的假象）。"""
     c = m.get("content")
     if isinstance(c, str):
         return c
     if isinstance(c, list):
         out: list[str] = []
         for b in c:
-            if isinstance(b, dict):
-                out.append(str(b.get("text") or ""))
-                if b.get("input"):
-                    out.append(json.dumps(b["input"], ensure_ascii=False))
+            if not isinstance(b, dict):
+                continue
+            if b.get("type") == "tool_result":
+                rc = b.get("content")
+                if isinstance(rc, str):
+                    out.append(rc)
+                elif isinstance(rc, list):
+                    out.extend(str(x.get("text") or "") for x in rc
+                               if isinstance(x, dict))
+                continue
+            out.append(str(b.get("text") or ""))
+            if b.get("input"):
+                out.append(json.dumps(b["input"], ensure_ascii=False))
         return "".join(out)
     return ""
+
+
+def _recent_boundary(messages: list[dict[str, Any]],
+                     keep: int = _KEEP_RECENT_STEPS) -> int:
+    """返回「逐字保留区」的起始下标：从末尾往前数第 keep 条 assistant 消息。
+    该下标之前（不含）为可压缩的旧区；找不到足够步数则返回 0（无可压缩）。"""
+    seen = 0
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get("role") == "assistant":
+            seen += 1
+            if seen >= keep:
+                return i
+    return 0
+
+
+def _mask_old_tool_results(messages: list[dict[str, Any]],
+                           boundary: int) -> int:
+    """一级压缩（零 LLM 成本）：把 boundary 之前的旧 tool_result 内容换成
+    占位符（保留 tool_use_id 配对与 assistant 文本/调用记录），返回占位数。
+    幂等：已占位的不再重压。参考 Claude context-editing 的 clear_tool_uses。"""
+    masked = 0
+    for m in messages[:boundary]:
+        c = m.get("content")
+        if not isinstance(c, list):
+            continue
+        for b in c:
+            if not isinstance(b, dict) or b.get("type") != "tool_result":
+                continue
+            rc = b.get("content")
+            if isinstance(rc, str) and not rc.startswith(_CTX_PLACEHOLDER_TAG):
+                b["content"] = (f"{_CTX_PLACEHOLDER_TAG}工具结果原文 {len(rc)} "
+                                f"字符已省略以控制上下文；如需可重新调用该工具）")
+                masked += 1
+    return masked
 
 
 def _specs_by_names(names: set[str]) -> list[dict[str, Any]]:
@@ -311,10 +392,20 @@ class ChatTurn:
     def _load_history(self) -> list[dict[str, Any]]:
         rows = chat_store.list_messages(self.bb, self.thread_id)
         messages: list[dict[str, Any]] = []
+        pending: list[dict[str, Any]] = []
+
+        def _flush_tools() -> None:
+            if pending:
+                messages.append({"role": "user",
+                                 "content": list(pending)})
+                pending.clear()
+
         for r in rows:
             if r["role"] == "user":
+                _flush_tools()
                 messages.append({"role": "user", "content": r["content"]})
             elif r["role"] == "assistant":
+                _flush_tools()
                 blocks: list[dict[str, Any]] = []
                 if r["content"]:
                     blocks.append({"type": "text", "text": r["content"]})
@@ -325,13 +416,201 @@ class ChatTurn:
                 if blocks:
                     messages.append({"role": "assistant", "content": blocks})
             elif r["role"] == "tool":
-                messages.append({
-                    "role": "user",
-                    "content": [{"type": "tool_result",
-                                 "tool_use_id": r["tool_use_id"],
-                                 "content": r["content"] or "(空)"}],
-                })
+                pending.append({"type": "tool_result",
+                                "tool_use_id": r["tool_use_id"],
+                                "content": r["content"] or "(空)"})
+        _flush_tools()
         return messages
+
+    # ---------- 上下文治理 ----------
+
+    def _clip_tool_result(self, text: str, tc) -> tuple[str, str]:
+        """① 单条工具结果截断（2026-09-30）：超过 _MAX_TOOL_RESULT_CHARS 的
+        巨物，完整原文落 artifacts 文件（事件流记路径），入历史的只留前 N 字符
+        + 截断说明。返回 (入历史文本, 完整原文落盘路径或空串)。
+
+        截断必须落在「写 DB」这一步：DB 是下一轮 _load_history 的回放源，若只
+        截断本轮 messages 而 DB 存全量，下轮仍会读回巨物 → input 再爆。"""
+        n = len(text)
+        if n <= _MAX_TOOL_RESULT_CHARS:
+            return text, ""
+        path = ""
+        if self.artifacts_dir is not None:
+            try:
+                d = Path(self.artifacts_dir) / "chat-results"
+                d.mkdir(parents=True, exist_ok=True)
+                fp = d / f"{self.thread_id}-{tc.id}.txt"
+                fp.write_text(text, encoding="utf-8")
+                path = str(fp)
+            except Exception:  # noqa: BLE001 —— 落盘失败不阻断（保截断版）
+                log.exception("chat 工具结果落盘失败 thread=%s", self.thread_id)
+        head = text[:_MAX_TOOL_RESULT_CHARS]
+        tail = (f"\n\n…（结果过长已截断：原文 {n} 字符，本条仅保留前 "
+                f"{_MAX_TOOL_RESULT_CHARS} 字符；完整结果见"
+                f"{path or '事件流'}）")
+        return head + tail, path
+
+    def _ctx_window(self) -> tuple[int, int]:
+        """(硬窗口, 有效软上限)：优先取 provider 配置（model_window/ctx_soft_budget），
+        缺省回落模块常量。前端面板据此定分母与警戒线（ct-8）。"""
+        win = int(getattr(self.llm, "context_tokens", None) or _MODEL_WINDOW_FALLBACK)
+        soft = int(getattr(self.llm, "ctx_soft_budget", None) or _CTX_SOFT_BUDGET)
+        return win, soft
+
+    def _ctx_trigger_tokens(self) -> int:
+        """发送前压缩的触发阈值 = min(比例×硬窗口, 软上限)。硬窗口优先取
+        llm.context_tokens（provider 配置的真实窗口），缺省回落 _MODEL_WINDOW_
+        FALLBACK。软上限保证即使模型支持 1M 也在 512K 前主动压缩。"""
+        win, soft = self._ctx_window()
+        return int(min(_CTX_TRIGGER_RATIO * win, soft))
+
+    def _context_tokens(self, messages: list[dict[str, Any]],
+                        system: str | None,
+                        tools: list[dict[str, Any]]) -> int:
+        return (_est_tokens(system or "")
+                + _est_tokens(json.dumps(tools or [], ensure_ascii=False))
+                + sum(_est_tokens(_msg_text(m)) for m in messages))
+
+    def _ctx_summary_cache_path(self) -> Path | None:
+        if self.artifacts_dir is None:
+            return None
+        return Path(self.artifacts_dir) / "chat-ctx" / f"{self.thread_id}.json"
+
+    def _ctx_cache_get(self, key: str) -> str | None:
+        """摘要缓存（跨轮持久，落 artifacts/chat-ctx/<thread>.json）：以旧区
+        内容哈希为 key，避免每步/每轮重跑昂贵的 LLM 摘要。"""
+        cache = getattr(self, "_ctx_cache", None)
+        if cache is None:
+            cache = {}
+            fp = self._ctx_summary_cache_path()
+            if fp is not None and fp.exists():
+                try:
+                    loaded = json.loads(fp.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict):
+                        cache = loaded
+                except Exception:  # noqa: BLE001 —— 缓存损坏则弃用重算
+                    log.exception("chat 摘要缓存读取失败 thread=%s", self.thread_id)
+            self._ctx_cache = cache
+        return cache.get(key)
+
+    def _ctx_cache_put(self, key: str, summary: str) -> None:
+        self._ctx_cache_get("")  # 确保缓存已加载
+        self._ctx_cache[key] = summary
+        fp = self._ctx_summary_cache_path()
+        if fp is None:
+            return
+        try:
+            fp.parent.mkdir(parents=True, exist_ok=True)
+            fp.write_text(json.dumps(self._ctx_cache, ensure_ascii=False),
+                          encoding="utf-8")
+        except Exception:  # noqa: BLE001 —— 缓存写失败不阻断本轮
+            log.exception("chat 摘要缓存写入失败 thread=%s", self.thread_id)
+
+    def _span_text(self, msgs: list[dict[str, Any]]) -> str:
+        """拼旧区文本并做长度保护（首尾保留、中段省略）。一级压缩会就地改写
+        messages，故二级摘要必须在占位化「之前」对原文快照调用本方法，否则摘要
+        只能看到占位符、丢失真实工具结果细节。"""
+        parts: list[str] = []
+        total = 0
+        for m in msgs:
+            t = _msg_text(m)
+            parts.append(t)
+            total += len(t) + 2
+            if total > _CTX_SUMMARY_MAX_INPUT * 2:
+                break
+        text = "\n\n".join(parts)
+        if len(text) > _CTX_SUMMARY_MAX_INPUT:
+            half = _CTX_SUMMARY_MAX_INPUT // 2
+            text = text[:half] + "\n\n…（中段省略）…\n\n" + text[-half:]
+        return text
+
+    def _summarize_span(self, text: str) -> str:
+        """二级压缩：LLM 把旧区原文压成逆向增强结构化摘要。失败/中止返回空串。"""
+        if self.llm is None or not text:
+            return ""
+        try:
+            kw: dict[str, Any] = {}
+            sm = getattr(self.llm, "summarizer_model", None)
+            if sm:
+                kw["model"] = sm  # 专用摘要模型（providers.json summarizer_model）
+            resp = self.llm.chat(
+                [{"role": "user", "content": text}],
+                system=_CTX_SUMMARY_SYS, should_cancel=self._aborted, **kw)
+        except Exception:  # noqa: BLE001 —— 摘要失败不阻断（交由 reactive 兜底）
+            log.exception("chat 上下文摘要失败 thread=%s", self.thread_id)
+            return ""
+        return (resp.text or "").strip()
+
+    def _prepare_context(self, messages: list[dict[str, Any]],
+                         system: str | None,
+                         tools: list[dict[str, Any]], *,
+                         force: bool = False
+                         ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """发送前两级联动压缩（2026-09-30）。
+
+        一级（零 LLM 成本）：把最近 _KEEP_RECENT_STEPS 步之外的旧 tool_result
+        内容换成占位符（保留 tool_use 记录与 assistant 文本）。
+        二级（LLM 摘要）：若一级后仍超阈值，把旧区整体压成结构化摘要，替换为
+        一条 user 摘要消息；摘要按旧区内容哈希缓存，跨步/跨轮复用。
+
+        force=True：reactive 兜底路径（收到 ContextOverflowError）无视阈值强压。
+        返回 (messages', info)；info 用于事件流/面板展示。"""
+        budget = self._ctx_trigger_tokens()
+        est = self._context_tokens(messages, system, tools)
+        if not force and est <= budget:
+            return messages, {"compacted": False, "level": 0,
+                              "est": est, "budget": budget}
+        keep = _KEEP_RECENT_STEPS
+        boundary = _recent_boundary(messages, keep)
+        if force and boundary == 0 and len(messages) > 1:
+            keep = max(1, _KEEP_RECENT_STEPS // 2)
+            boundary = _recent_boundary(messages, keep)
+        old = messages[:boundary]
+        # 二级摘要必须基于原文：一级占位化会就地改写 messages，故先快照旧区文本
+        old_text = self._span_text(old) if old else ""
+        masked = _mask_old_tool_results(messages, boundary)
+        est1 = self._context_tokens(messages, system, tools)
+        if not force and est1 <= budget:
+            return messages, {"compacted": True, "level": 1, "masked": masked,
+                              "est": est1, "budget": budget}
+        if old_text:
+            key = hashlib.sha1(old_text.encode("utf-8")).hexdigest()
+            summary = self._ctx_cache_get(key)
+            cache_hit = summary is not None
+            if summary is None:
+                summary = self._summarize_span(old_text)
+                if summary:
+                    self._ctx_cache_put(key, summary)
+            if summary:
+                new_msgs = [
+                    {"role": "user",
+                     "content": (f"{_CTX_SUMMARY_TAG}（此前 {len(old)} 条消息"
+                                 f"已压缩为摘要；原始记录见线程历史与事件流）\n{summary}")},
+                    *messages[boundary:],
+                ]
+                est2 = self._context_tokens(new_msgs, system, tools)
+                return new_msgs, {"compacted": True, "level": 2,
+                                  "masked": masked, "cached": cache_hit,
+                                  "est": est2, "budget": budget}
+        return messages, {"compacted": bool(masked), "level": 1 if masked else 0,
+                          "masked": masked, "est": est1, "budget": budget}
+
+    def _chat(self, messages: list[dict[str, Any]], system: str | None,
+              tools: list[dict[str, Any]] | None, on_text=None):
+        """调 LLM（发送前已压缩）。reactive 兜底（ct-5）：若仍因 input 超限被
+        网关 400/413 拒绝（ContextOverflowError），强制压缩一次后重试；再失败
+        则抛出交给 run() 落 error。对应 Claude Code 五级级联的最末「reactive
+        compact」——静态预算估算与实际 token 计数总有偏差，需运行时兜底。"""
+        try:
+            return self.llm.chat(messages, system=system, tools=tools,
+                                 on_text=on_text, should_cancel=self._aborted)
+        except ContextOverflowError:
+            log.warning("chat 输入超限，强制压缩后重试 thread=%s", self.thread_id)
+            compacted, info = self._prepare_context(messages, system,
+                                                    tools or [], force=True)
+            self._emit("chat.ctx", {"phase": "reactive", **info})
+            return self.llm.chat(compacted, system=system, tools=tools,
+                                 on_text=on_text, should_cancel=self._aborted)
 
     # ---------- 主流程 ----------
 
@@ -398,6 +677,10 @@ class ChatTurn:
                 _pub["at"] = now
                 self._emit("chat.delta", {"text": text, "seq": _pub["seq"]})
 
+            # 发送前两级联动压缩（旧 tool_result 占位化 → 必要时 LLM 摘要）
+            messages, ctx_info = self._prepare_context(messages, system, tools)
+            if ctx_info.get("compacted"):
+                self._emit("chat.ctx", {"phase": "proactive", **ctx_info})
             # 上下文构成估算（每步重估：messages 随 tool_result 增长）；
             # 真值归一：块比例来自字符估算，总和强制等于 LLM 报告的窗口占用
             sys_len = len(system) - len(refs_tail)
@@ -405,9 +688,7 @@ class ChatTurn:
             est_refs = _est_tokens(refs_tail)
             est_tools = _est_tokens(json.dumps(tools, ensure_ascii=False))
             est_msgs = sum(_est_tokens(_msg_text(m)) for m in messages)
-            resp = self.llm.chat(messages, system=system, tools=tools or None,
-                                 on_text=on_text,
-                                 should_cancel=self._aborted)
+            resp = self._chat(messages, system, tools or None, on_text)
             # 上下文用量：input(+cache)=当步窗口占用，output/steps 跨步累计
             u = resp.usage
             input_total = u.input_tokens + u.cache_read_tokens \
@@ -417,12 +698,17 @@ class ChatTurn:
             b_system = round(est_system * scale)
             b_refs = round(est_refs * scale)
             b_tools = round(est_tools * scale)
+            win, soft = self._ctx_window()
             self._usage = {
                 "input": input_total,
                 "output": self._usage.get("output", 0) + u.output_tokens,
                 "steps": self._usage.get("steps", 0) + 1,
                 "cache_read": u.cache_read_tokens,
                 "cache_creation": u.cache_creation_tokens,
+                "compaction": ctx_info,
+                # 面板分母（硬窗口）与警戒线（软上限）——后端下发真实值（ct-8）
+                "ctx_limit": win,
+                "ctx_soft": soft,
                 "breakdown": {
                     "system": b_system,
                     "refs": b_refs,
@@ -449,6 +735,7 @@ class ChatTurn:
                     *[{"type": "tool_use", "id": tc.id, "name": tc.name,
                        "input": tc.arguments} for tc in resp.tool_calls],
                 ]})
+                tool_result_blocks: list[dict[str, Any]] = []
                 for tc in resp.tool_calls:
                     if self._aborted():
                         final = self._persist_stopped()
@@ -460,20 +747,25 @@ class ChatTurn:
                             tc.arguments, ensure_ascii=False,
                             separators=(",", ":"))[:300]})
                     ok, result = self._dispatch(tc)
+                    result, artifact_path = self._clip_tool_result(result, tc)
                     chat_store.append_message(
                         self.bb, self.thread_id, "tool", result,
                         tool_use_id=tc.id)
-                    messages.append({"role": "user", "content": [
-                        {"type": "tool_result", "tool_use_id": tc.id,
-                         "content": result}]})
+                    tool_result_blocks.append({
+                        "type": "tool_result", "tool_use_id": tc.id,
+                        "content": result})
                     self._emit("chat.tool", {
                         "phase": "done",
                         "name": tc.name, "args_head": json.dumps(
                             tc.arguments, ensure_ascii=False,
                             separators=(",", ":"))[:300],
-                        "result_head": result[:_TOOL_RESULT_HEAD],
+                        "result_head": result[:_TOOL_RESULT_EVENT_HEAD],
                         "ok": ok,
+                        "artifact_path": artifact_path,
                         "duration_s": round(time.perf_counter() - t0, 2)})
+                if tool_result_blocks:
+                    messages.append({"role": "user",
+                                     "content": tool_result_blocks})
                 if final:
                     break
                 continue

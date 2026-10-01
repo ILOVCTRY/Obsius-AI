@@ -14,6 +14,9 @@
 3. **三层数据不混淆**：全量客观函数在 headless 缓存（只读）；只有被分析过的函数才写
    func_kb（结论、改名、risk_tags），不把符号表灌进 func_kb。
 4. **反编译前先查 func_kb**（按 binary_sha256 + 地址），重复分析是硬违规；分析完立即落库。
+   `<sha>` 的来源：`bb_query what=assets type=binary` 返回行的 `value` 字段就是样本
+   sha256（或 MCP `survey_binary` 实时取当前 IDA 库）；**不知道 sha 先列样本，禁止
+   空串/编造**。
 5. **发现挂样本**：findings 必须挂 binary 资产（target_asset_id），evidence 里带
    func_id/address 精确定位函数；结论分五类：algorithm/protocol/data-structure/mechanism/risk。
 6. 无证据的结论标 unverified；人工确认或动态验证（带调试日志产物）才可标 verified。

@@ -67,11 +67,16 @@ interface Props {
   /** 拉取进度（非 null=拉取中，按钮变「停止」+进度环） */
   pullProgress: { pulled: number; total: number | null } | null
   onStopPull: () => void
+  /** headless 导出进度（非 null=导出中，显示进度环+停止；大样本 P3，协作式停保留部分） */
+  triageProgress: { done: number; total: number } | null
+  onStopTriage: () => void
+  triageMsg: string | null
 }
 
 export function SampleBar({
   samples, sha, onSelect, overview, triaging, uploading, busyAi, onUpload, onRetry, onAiTriage,
   onPullNames, onPullIdaFunctions, onPushNames, pullProgress, onStopPull,
+  triageProgress, onStopTriage, triageMsg,
 }: Props) {
   const [open, setOpen] = useState(false)
   const [pulling, setPulling] = useState(false)
@@ -203,6 +208,20 @@ export function SampleBar({
               disabled={!sha || triaging} title="headless 全量导出（>20MB 大样本会二次确认；也可改走 IDA 拉取）">
         <RefreshCw className={cn("size-3", triaging && "animate-spin")} />{triaging ? "分析中…" : "开始分析"}
       </Button>
+      {triageProgress && triageProgress.total > 0 && (
+        <Button size="sm" variant="outline" className="h-7 gap-1.5 text-[11px]" onClick={onStopTriage}
+                title={`已反编译 ${triageProgress.done}/${triageProgress.total} 个函数，点击停止`
+                  + `（已导出部分保留可见，重新「开始分析」可补全）`}>
+          <PullRing pulled={triageProgress.done} total={triageProgress.total} />
+          {Math.min(100, Math.round((triageProgress.done / triageProgress.total) * 100))}%
+          <span className="text-muted-foreground">停止</span>
+        </Button>
+      )}
+      {triageMsg && (
+        <span className="max-w-80 truncate font-mono text-[10px] text-muted-foreground" title={triageMsg}>
+          {triageMsg}
+        </span>
+      )}
       {pullProgress ? (
         <Button size="sm" variant="outline" className="h-7 gap-1.5 text-[11px]" onClick={onStopPull}
                 title={pullProgress.total

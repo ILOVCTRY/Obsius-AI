@@ -20,10 +20,35 @@
 
 - `IDAHeadlessBackend`：idat -A 跑 `tools/decompiler/ida/scripts/export_funcs.py`（v3 契约），
   库落 `artifacts/decompiler-db/<sha>.i64`；`apply_annotations()` 跑 apply_names.py 写回；
-  `.id0/.id1/.id2/.nam/.til` 锁检测→locked。
+  `.id0/.id1/.id2/.nam/.til` 锁检测→locked。**直读存量（大样本 P1，2026-09-30）**：db 目录已有
+  `.i64/.idb` 则 `export_db` 复用不 `-o` 重建（返 `reused:True`）；锁则 `ida-db-locked` 结构化抛错。
 - `GhidraHeadlessBackend`：analyzeHeadless 兜底，临时工程用完即删；无写回语义。
-- `build_headless_service(cache_dir, runner=gateway_runner, mcp_endpoint=None, available=None)`
-  装配服务；缓存 JSON 按 sha256 存 `artifacts/decompiler-cache/`，`EXPORT_VERSION` 不符读时即删重导。
+- `build_headless_service(cache_dir, runner=gateway_runner, mcp_endpoint=None, available=None,
+  global_cache_dir=None)` 装配服务；缓存 JSON 按 sha256 存 `artifacts/decompiler-cache/`，
+  `EXPORT_VERSION` 不符读时即删重导。
+- **可配超时（大样本 P1，2026-09-30）**：headless 默认 `HEADLESS_TIMEOUT = 3*3600`（原 900s），
+  gitignore 覆盖层 `config/decompiler.json` 的 `headless_timeout`（秒）经 `resolve_headless_timeout()`
+  每次取用（缺省/非法/≤0 回退默认）；`_default_runner` 与 gateway_runner 均走此值。
+- **全局 sha 缓存（大样本 P1，2026-09-30）**：`global_cache_dir` 指 `data/decompiler-cache`，
+  本地缺失 `_promote_from_global` 原子拉回（跨项目同 sha 零重导），全量导出成功 `_publish_global`
+  回写；**只全量入全局，MCP 轻量/部分缓存绝不入**。导入方法 `import_export_json(sha, src_json)`
+  （校验 `export_version>=EXPORT_VERSION`）/ `import_ida_db(sha, src_db)`（复制入库后 `export_db` 重导）。
+- **大样本并行分片（大样本 P2，2026-09-30）**：`GhidraHeadlessBackend(workers=N)`——
+  ① 选路 `_ordered_export_backends`：样本 ≥ `LARGE_SAMPLE_BYTES`（默认 20MB，与 app.py 同口径）
+  时 Ghidra 提到最前（多进程并行主产）、其余兜底；普通样本维持装配顺序（IDA 优先）；
+  ② 并行度经 postScript 第二实参传 `ghidra/scripts/export_funcs.py`，脚本按函数表分片给 N
+  个 worker、每 worker 独占 `DecompInterface`（各自一个解编译器进程），原子游标取活按原序合并；
+  ③ `resolve_ghidra_workers()` 默认 `max(1, CPU-1)`、config `ghidra_workers` 可覆盖、夹
+  `[1, GHIDRA_MAX_WORKERS=16]`（内存保护）；workers=1 回退串行、args 形状不变。
+  配置键（`config/decompiler.json`，均 gitignore）：`headless_timeout` / `large_sample_bytes` / `ghidra_workers`。
+- **长任务 UX（大样本 P3，2026-09-30）**：headless 是单 analyzeHeadless 子进程，父进程只阻塞
+  等待——进度/停止经**控制文件**交换。`GhidraHeadlessBackend.export(binary, out, *, progress=None,
+  stop_event=None)`：传 progress/stop 时把 `[workers, 进度文件, 停止文件]` 作 postScript 位置实参
+  传脚本，并起监视线程轮询进度文件回填 progress（引用共享→job meta）；stop_event 置位写停止文件，
+  脚本**函数边界**协作停下（不杀进程）并写出已完成函数的 v3 缓存，`meta.partial/stopped` 标记。
+  `is_partial_export(data)` 判定 partial：**只展示不发布全局、不被 export_to_cache 复用**（重跑补全）。
+  脚本内单函数反编译失败重试一次（分片重试）。service `_export_json/export_to_cache` 透传
+  progress/stop_event；IDA 后端接受并忽略（大样本走 Ghidra）。
 
 ### 2. MCPBackend（P2 实时桥，只点查不替代缓存）
 

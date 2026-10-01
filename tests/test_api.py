@@ -720,13 +720,16 @@ def test_delete_project_with_open_websocket(client):
     WS 收 1008 关闭。旧实现下 close_all 后 tick 立刻惰性重连锁死 db，rename 必败 422。"""
     import time
     pid = _make_project(client)
+    # 建项即落一条 phase.changed 事件：WS 从「此刻」起听（对齐心跳测试），否则
+    # since_id=0 会先播该事件、receive_json 正常返回，收不到删除时的 1008
+    since = max(e["id"] for e in client.get(f"/api/projects/{pid}/events").json())
     ready = threading.Event()
     closed: dict = {}
 
     def hold_ws():
         try:
             with client.websocket_connect(
-                    f"/api/ws/projects/{pid}?since_id=0") as ws:
+                    f"/api/ws/projects/{pid}?since_id={since}") as ws:
                 ready.set()
                 try:
                     ws.receive_json()  # 无事件：阻塞到服务端关闭
@@ -2477,6 +2480,25 @@ def test_project_executor_llm_override(client):
     assert client.app.state.agents[sid].llm.base_url.endswith("/api/coding")
 
 
+def test_executor_override_fallback_emits_event(client):
+    """项目 executor 覆写指向坏供应商：开窗仍静默回退全局执行器（绝不开窗失败），
+    但补落 llm.fallback 可见化事件（此前只有后端 log，用户无感）。"""
+    pid = client.post("/api/projects", json={
+        "name": "回退可见化", "track": "ctf", "capabilities": ["binary"],
+        "config": {"executor_llm": {"provider": "nope", "model": "ghost"}}}).json()["id"]
+    sid = client.post(f"/api/projects/{pid}/agents",
+                      json={"role": "_generalist"}).json()["id"]
+    ev = [e for e in client.get(f"/api/projects/{pid}/events").json()
+          if e["kind"] == "llm.fallback"]
+    assert len(ev) == 1
+    payload = ev[0]["payload"]
+    assert payload["source"] == "executor"
+    assert payload["requested"] == {"provider": "nope", "model": "ghost"}
+    assert payload["session_id"] == sid
+    assert payload["fallback"]["model"]  # 回退到全局默认执行器（model 非空）
+    assert payload["reason"]
+
+
 # ---------- 资产更新端点（DESIGN.md §5.2：PATCH 补挂/合并 meta） ----------
 
 
@@ -3289,6 +3311,136 @@ def test_rev_writeback_locked_ok_and_pull_names(client):
     assert client.post(f"/api/projects/{pid}/binaries/{'f' * 64}/pull-names").status_code == 404
 
 
+def test_rev_import_and_reexport_db(client, tmp_path):
+    """大样本加速 P1 三端点：导入导出 JSON / 直读既有库重导 / 纳入外部 IDA 库。
+
+    各 Job 成功发对应事件，且 job 结果只回计数（绝不塞整份全量导出）；路径不存在 422。
+    """
+    from core.tools.decompiler import DecompilerService, IDAHeadlessBackend
+
+    def run(args):
+        sarg = next(a for a in args if a.startswith('-S"'))
+        out_p = Path(sarg[3:].rstrip('"').split(" ", 1)[1])
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(json.dumps(V3), encoding="utf-8")
+        return 0, "idat ok", ""
+
+    def factory(proj):
+        ida = IDAHeadlessBackend(idat_cmd="idat", runner=run, available=True,
+                                 db_dir=proj.artifacts_dir / "decompiler-db")
+        return DecompilerService(cache_dir=proj.artifacts_dir / "decompiler-cache",
+                                 ida=ida, global_cache_dir=tmp_path / "global-cache")
+
+    client.app.state.rev_service_factory = factory
+    pid = client.post("/api/projects", json={
+        "name": "大样本", "track": "research", "capabilities": ["binary"]}).json()["id"]
+    up = client.post(f"/api/projects/{pid}/samples",
+                     files={"file": ("crackme.elf", CRACKME.read_bytes())}).json()
+    sha = up["sha"]
+
+    # ① 导入导出 JSON：外部全量导出 → 本地缓存（免重跑 headless）
+    ext_json = tmp_path / "export.json"
+    ext_json.write_text(json.dumps(V3), encoding="utf-8")
+    r = client.post(f"/api/projects/{pid}/binaries/{sha}/import-export",
+                    json={"path": str(ext_json)})
+    assert r.status_code == 202
+    job = _wait_job(client, r.json()["job_id"])
+    assert job["result"]["status"] == "ok" and job["result"]["functions"] == 2
+    assert "binary.export_imported" in [e["kind"] for e in
+                                        client.get(f"/api/projects/{pid}/events").json()]
+    assert client.get(f"/api/projects/{pid}/binaries/{sha}/strings").status_code == 200
+
+    # ② 直读既有库重导：库内重导（无 -o）→ 事件 + 计数（不回大字段）
+    db_dir = client.app.state.projects[pid].artifacts_dir / "decompiler-db"
+    db_dir.mkdir(parents=True, exist_ok=True)
+    (db_dir / f"{sha}.i64").write_bytes(b"IDADB")
+    r = client.post(f"/api/projects/{pid}/binaries/{sha}/reexport-db")
+    job = _wait_job(client, r.json()["job_id"])
+    assert job["result"] == {"status": "ok", "sha": sha, "functions": 2}
+    assert "binary.db_reexported" in [e["kind"] for e in
+                                      client.get(f"/api/projects/{pid}/events").json()]
+
+    # ③ 纳入外部 IDA 库：拷进项目 db_dir + 库内重导 → 事件 + 库被替换
+    ext_db = tmp_path / "incoming" / "x.i64"
+    ext_db.parent.mkdir(parents=True)
+    ext_db.write_bytes(b"EXT")
+    r = client.post(f"/api/projects/{pid}/binaries/{sha}/import-ida-db",
+                    json={"path": str(ext_db)})
+    job = _wait_job(client, r.json()["job_id"])
+    assert job["result"]["status"] == "ok" and job["result"]["functions"] == 2
+    assert (db_dir / f"{sha}.i64").read_bytes() == b"EXT"
+    assert "binary.db_imported" in [e["kind"] for e in
+                                    client.get(f"/api/projects/{pid}/events").json()]
+
+    # ④ 入参护栏：源路径不存在 422；样本不存在 404
+    assert client.post(f"/api/projects/{pid}/binaries/{sha}/import-export",
+                       json={"path": str(tmp_path / "nope.json")}).status_code == 422
+    assert client.post(f"/api/projects/{pid}/binaries/{'f' * 64}/import-ida-db",
+                       json={"path": str(ext_db)}).status_code == 404
+
+
+def test_rev_triage_cancel_cooperative(client):
+    """headless 导出协作式停止（大样本 P3）：triage/cancel 置位 → Job status=stopped、
+    事件 binary.triaged 带 stopped、partial 缓存立即可见（overview cached）；幂等。"""
+    from core.tools.decompiler import DecompilerService, GhidraHeadlessBackend
+
+    def ghidra_ctl_runner(args):
+        i = args.index("-postScript")
+        out = Path(args[i + 2])
+        prog = Path(args[i + 4]) if len(args) > i + 4 else None
+        stop = Path(args[i + 5]) if len(args) > i + 5 else None
+        out.parent.mkdir(parents=True, exist_ok=True)
+        if prog is not None:
+            prog.write_text(json.dumps({"done": 1, "total": 2, "phase": "decompile"}),
+                            encoding="utf-8")
+        stopped = False
+        if stop is not None:
+            deadline = time.time() + 3.0
+            while not stop.is_file() and time.time() < deadline:
+                time.sleep(0.02)
+            stopped = stop.is_file()
+        data = json.loads(json.dumps(V3))
+        if stopped:
+            data["partial"] = True
+            data["meta"]["partial"] = True
+            data["functions"] = [{"address": f["address"], "name": f["name"],
+                                  "size": f["size"], "calls": []}
+                                 for f in V3["functions"]]
+        out.write_text(json.dumps(data), encoding="utf-8")
+        return 0, "ok", ""
+
+    def factory(proj):
+        g = GhidraHeadlessBackend(runner=ghidra_ctl_runner, available=True,
+                                  tmp_project_dir=proj.artifacts_dir / ".ghidra-tmp")
+        return DecompilerService(cache_dir=proj.artifacts_dir / "decompiler-cache", ghidra=g)
+
+    client.app.state.rev_service_factory = factory
+    pid = client.post("/api/projects", json={
+        "name": "rev-cancel", "track": "research", "capabilities": ["binary"]}).json()["id"]
+    up = client.post(f"/api/projects/{pid}/samples",
+                     files={"file": ("crackme.elf", CRACKME.read_bytes(),
+                                     "application/octet-stream")}).json()
+    sha = up["sha"]
+    r = client.post(f"/api/projects/{pid}/binaries/{sha}/triage")
+    assert r.status_code == 202
+    job_id = r.json()["job_id"]
+    # 取消（假 runner 阻塞等停止文件，窗口内必到）
+    c = client.post(f"/api/projects/{pid}/binaries/{sha}/triage/cancel")
+    assert c.status_code == 200 and c.json()["cancelling"] is True
+    job = _wait_job(client, job_id)
+    assert job["status"] == "done"
+    assert job["result"]["status"] == "stopped"
+    # 事件带 stopped；partial 缓存立即可见
+    ev = [e for e in client.get(f"/api/projects/{pid}/events").json()
+          if e["kind"] == "binary.triaged"]
+    assert ev and ev[-1]["payload"].get("stopped") is True
+    ov = client.get(f"/api/projects/{pid}/binaries/{sha}/overview").json()
+    assert ov["cached"] is True
+    # 幂等：无在跑导出时再取消 → cancelling False
+    assert client.post(f"/api/projects/{pid}/binaries/{sha}/triage/cancel"
+                       ).json()["cancelling"] is False
+
+
 def test_rev_funcs_cross_project_404(client):
     _install_rev_factory(client, set())
     p1 = client.post("/api/projects", json={
@@ -3306,19 +3458,22 @@ def test_rev_funcs_cross_project_404(client):
 
 
 class FakeIdaMcp:
-    """假 GUI IDA MCP 桥（不触网）：count_funcs + list_funcs 分页队列 + writeback 抓包。
+    """假 GUI IDA MCP 桥（不触网）：count_funcs + list_funcs 分页队列 + writeback 抓包
+    + analyze_batch/func_detail 按需详情（details={hex地址: analysis 原样}）。
 
     writeback=False 模拟传输级失败（writeback_items 回 None）；
     gate：第一次 call_tool 出页后阻塞（测试窗口内置 stop，模拟中途停止）。
     """
 
-    def __init__(self, pages=None, writeback=True, total=None, gate=None):
+    def __init__(self, pages=None, writeback=True, total=None, gate=None,
+                 details=None):
         self.pages = list(pages or [])
         self.calls: list[tuple[str, dict]] = []
         self.pushed: list[dict] | None = None
         self._writeback_ok = writeback
         self._total = total
         self._gate = gate
+        self._details = dict(details or {})
 
     def available(self) -> bool:
         return True
@@ -3328,12 +3483,53 @@ class FakeIdaMcp:
 
     def call_tool(self, name, args):
         self.calls.append((name, args))
+        if name == "analyze_batch":
+            # vendor analyze_batch 签名：queries 列表 → list[{query,addr,name,analysis,error}]
+            out = []
+            for q in (args or {}).get("queries") or []:
+                key = str(q.get("query", "")).strip()
+                analysis = self._details.get(key)
+                if analysis is None:
+                    out.append({"query": key, "addr": None, "name": None,
+                                "analysis": None,
+                                "error": f"Function query is required: {key}"})
+                    continue
+                out.append({"query": key, "addr": analysis.get("addr"),
+                            "name": analysis.get("name"),
+                            "analysis": analysis, "error": None})
+            return out
         # vendor list_funcs 签名：单 query → list[Page]（每页 {"data", "next_offset"}）
         page = self.pages.pop(0) if self.pages else None
         if page is not None and self._gate is not None:
             gate, self._gate = self._gate, None
             gate.wait(timeout=10)  # 测试窗口：页已出、停止信号尚未置
         return [page] if page is not None else []
+
+    def func_detail(self, addr):
+        """镜像 MCPBackend.func_detail：经 call_tool 记录 + 按 analyze_batch 结构解析。"""
+        key = hex(addr) if isinstance(addr, int) else str(addr)
+        res = self.call_tool("analyze_batch", {"queries": [{"query": key}]})
+        if not isinstance(res, list) or not res or not isinstance(res[0], dict) \
+                or res[0].get("error"):
+            return None
+        analysis = res[0].get("analysis") or {}
+        disasm = analysis.get("disasm") or {}
+
+        def _pair(c):
+            return {"address": c.get("addr"), "name": c.get("name")}
+
+        return {
+            "address": res[0].get("addr") or key,
+            "name": res[0].get("name"),
+            "size": int(str(analysis.get("size") or "0x0"), 16),
+            "pseudocode": analysis.get("decompile"),
+            "disasm_lines": disasm.get("lines") or [],
+            "disasm_truncated": bool(disasm.get("truncated")),
+            "callers": [_pair(c) for c in (analysis.get("callers") or [])
+                        if isinstance(c, dict)],
+            "callees": [_pair(c) for c in (analysis.get("callees") or [])
+                        if isinstance(c, dict)],
+        }
 
     def writeback_items(self, items):
         self.pushed = items
@@ -3394,6 +3590,10 @@ def test_rev_pull_ida_functions_and_push_names(client):
     res = job["result"]
     assert res["status"] == "ok" and res["function_count"] == 3  # 坏行不计
     assert res["total"] == 3 and job["meta"]["progress"]["pulled"] == 3
+    # 增量行：progress.rows 带本页新行（前端拉取中按 address 去重 append，不再全量重拉）
+    prog_rows = job["meta"]["progress"]["rows"]
+    assert [r["address"] for r in prog_rows] == ["0x401234", "0x401300", "0x401500"]
+    assert all(r["has_pseudo"] is False and r["n_calls"] == 0 for r in prog_rows)
     assert res["changed"] == [{"address": "0x401234",
                                "old_name": "main", "new_name": "win_main"}]
     assert mcp.calls and mcp.calls[0][0] == "list_funcs"
@@ -3524,6 +3724,76 @@ def test_rev_pull_ida_resume_stop_and_stale(client):
     assert res["status"] == "ok" and res["total"] is None
     assert job["meta"]["progress"]["total"] is None
 
+
+def test_rev_ida_pull_lazy_detail_endpoints(client):
+    """IDA 拉取轻量缓存 + 按需详情（2026-09-30）：cached_function/cached_xrefs 端点
+    自动 analyze_batch 拉取 callers/callees/伪码/反汇编并落盘（每函数一文件）；
+    二次命中缓存不再调 MCP；MCP 离线且详情缺席时伪码 None、xrefs 空列表（不回 4xx）。"""
+    _install_rev_factory(client, set())
+    pid = client.post("/api/projects", json={
+        "name": "懒拉研究", "track": "research", "capabilities": ["binary"]}).json()["id"]
+    up = client.post(f"/api/projects/{pid}/samples",
+                     files={"file": ("crackme.elf", CRACKME.read_bytes())}).json()
+    sha = up["sha"]
+    svc = client.app.state.rev_services[pid]
+    addr = 0x401234
+    analysis = {
+        "addr": hex(addr), "name": "win_main", "size": "0xc8",
+        "decompile": "int win_main() { return 0; }",
+        "disasm": {"lines": ["push rbp", "mov rbp, rsp", "xor eax, eax"],
+                   "instruction_count": 3, "truncated": False},
+        "callers": [{"addr": "0x401000", "name": "entry"}],
+        "callees": [{"addr": "0x401500", "name": "helper"}],
+    }
+    mcp = FakeIdaMcp(total=3, pages=[{"data": [
+        {"addr": "0x401000", "name": "entry", "size": "0x40"},
+        {"addr": hex(addr), "name": "win_main", "size": "0xc8"},
+        {"addr": "0x401500", "name": "helper", "size": "0x20"},
+    ], "next_offset": None}], details={hex(addr): analysis})
+    svc.mcp = mcp
+    r = client.post(f"/api/projects/{pid}/binaries/{sha}/pull-ida-functions")
+    job = _wait_job(client, r.json()["job_id"])
+    assert job["result"]["status"] == "ok"
+    addr_path = hex(addr).replace("0x", "")
+
+    # ① cached_function：自动拉详情（伪码+反汇编），落盘后二次命中不再调 MCP
+    r = client.get(f"/api/projects/{pid}/binaries/{sha}/functions/{addr_path}")
+    assert r.status_code == 200
+    d = r.json()
+    assert d["pseudocode"] == "int win_main() { return 0; }"
+    assert d["disasm"]["lines"] == ["push rbp", "mov rbp, rsp", "xor eax, eax"]
+    assert d["disasm"]["truncated"] is False
+    n_after_first = len(mcp.calls)
+    assert any(name == "analyze_batch" for name, _ in mcp.calls)
+    assert svc._detail_file(sha, addr).is_file()
+    r2 = client.get(f"/api/projects/{pid}/binaries/{sha}/functions/{addr_path}")
+    assert r2.json()["pseudocode"] == d["pseudocode"]
+    assert len(mcp.calls) == n_after_first  # 详情文件命中，无第二次 analyze_batch
+
+    # ② cached_xrefs：详情缓存的 callers/callees（source=cache）
+    r = client.get(f"/api/projects/{pid}/binaries/{sha}/xrefs/{addr_path}")
+    assert r.status_code == 200
+    x = r.json()
+    assert x["callers"] == [{"address": "0x401000", "name": "entry"}]
+    assert x["callees"] == [{"address": "0x401500", "name": "helper"}]
+    assert x["source"] == "cache"
+
+    # ③ MCP 离线 + 名单有但详情缺席：伪码 None、xrefs 空列表（不回 4xx）
+    svc.mcp = None
+    miss = "401000"  # entry：在名单里，无详情
+    r = client.get(f"/api/projects/{pid}/binaries/{sha}/functions/{miss}")
+    assert r.status_code == 200
+    assert r.json()["pseudocode"] is None and r.json()["disasm"] is None
+    r = client.get(f"/api/projects/{pid}/binaries/{sha}/xrefs/{miss}")
+    assert r.status_code == 200
+    assert r.json()["callers"] == [] and r.json()["callees"] == []
+
+    # ④ 详情文件损坏 → 自动重拉修复（MCP 在线时）
+    svc.mcp = mcp
+    f = svc._detail_file(sha, addr)
+    f.write_text("{broken", encoding="utf-8")
+    r = client.get(f"/api/projects/{pid}/binaries/{sha}/functions/{addr_path}")
+    assert r.status_code == 200 and r.json()["pseudocode"] == analysis["decompile"]
 
 
 def test_concurrent_skill_saves_serialized_under_packs_lock(tmp_path, monkeypatch):

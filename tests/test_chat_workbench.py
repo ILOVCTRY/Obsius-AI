@@ -15,8 +15,20 @@ from core.api.app import create_app
 from core.blackboard.store import Blackboard
 from core.chat import store as chat_store
 from core.chat.mcp_bridge import MCPBridge, _HttpConn
-from core.chat.runtime import ORCHESTRATOR_ID, ChatTurn
-from core.llm.provider import LLMResponse, ToolCall, Usage
+from core.chat.runtime import (
+    ORCHESTRATOR_ID,
+    ChatTurn,
+    _CTX_PLACEHOLDER_TAG,
+    _CTX_SOFT_BUDGET,
+    _CTX_SUMMARY_SYS,
+    _CTX_SUMMARY_TAG,
+    _MAX_TOOL_RESULT_CHARS,
+    _MODEL_WINDOW_FALLBACK,
+    _mask_old_tool_results,
+    _msg_text,
+    _recent_boundary,
+)
+from core.llm.provider import ContextOverflowError, LLMResponse, ToolCall, Usage
 
 
 # ---------- 假 LLM ----------
@@ -138,6 +150,17 @@ def test_recover_running_threads(tmp_path):
     # 幂等：无僵尸可清返回空表，不再重复落消息
     assert chat_store.recover_running_threads(bb) == []
     assert len(chat_store.list_messages(bb, orch["id"])) == 2
+    # 活轮保护（2026-09-30 误报修复）：running 集合内的线程跳过不杀——
+    # 执行中刷新页面（GET 项目）不会再把活轮误判僵尸落「进程重启」中断消息
+    chat_store.update_thread(bb, ok_t["id"], status="running")
+    assert chat_store.recover_running_threads(bb, {ok_t["id"]}) == []
+    assert chat_store.get_thread(bb, ok_t["id"])["status"] == "running"
+    assert chat_store.list_messages(bb, ok_t["id"]) == []
+    # 集合外的僵尸照杀；集合内+外混合时只杀外的
+    chat_store.update_thread(bb, sub["id"], status="running")
+    assert chat_store.recover_running_threads(bb, {ok_t["id"]}) == [sub["id"]]
+    assert chat_store.get_thread(bb, sub["id"])["status"] == "idle"
+    assert chat_store.get_thread(bb, ok_t["id"])["status"] == "running"
 
 
 # ---------- 运行时：主控轮（todo → call_expert → 汇总） ----------
@@ -203,6 +226,23 @@ def test_chat_orchestrator_turn_todo_and_call_expert(tmp_path):
     assert {"chat.message", "chat.tool", "chat.spawn", "chat.todo"} <= kinds
 
 
+def test_chat_system_prompt_includes_binary_skills_for_research(tmp_path):
+    """逆向项目 skill 注入（2026-09-30 修复）：caps_effective 对 research 轨默认补
+    binary → chat system 提示含 binary 包逆向技能（binary-rev/file-triage 等）。
+    此前无专家/无能力的逆向项目 capabilities 为空，只注入 research 轨技能。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    llm = FakeLLM([_resp(text="收到。")])
+    thread = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID)
+    turn = ChatTurn(bb=bb, llm=llm, project_id="p1", thread_id=thread["id"],
+                    packs_root="packs", track="research", capabilities=["binary"],
+                    mcp_bridge=None, expert_names=None)
+    turn.run("分析这个样本")
+    system = llm.calls[0]["system"]
+    assert "binary-rev" in system and "file-triage" in system
+    assert "blueprint-rebuild" in system  # research 轨技能也在（pack 并集）
+
+
 def test_usage_breakdown_calibrated(tmp_path):
     """K10 上下文构成（Claude Code /context 式）：usage.breakdown 四块
     （系统提示/本轮注入/工具定义/会话消息）按字符估算比例、LLM 真值归一，
@@ -227,6 +267,27 @@ def test_usage_breakdown_calibrated(tmp_path):
     assert bk["system"] > 0 and bk["tools"] > 0 and bk["messages"] > 0
     assert bk["refs"] == 0
     assert bk["system"] + bk["refs"] + bk["tools"] + bk["messages"] == usage["input"]
+
+
+def test_msg_text_counts_tool_result_content(tmp_path):
+    """伪影修复回归（2026-09-30）：tool_result 的 content 必须计入可估文本——
+    此前漏计导致 est_msgs 低估、真值归一 scale 膨胀、缺口被成倍记进
+    「工具定义」桶（面板 271K 假象）。content 支持 str 与内容块数组两种形态。"""
+    assert _msg_text({"role": "user", "content": "纯文本"}) == "纯文本"
+    assert _msg_text({"role": "assistant", "content": [
+        {"type": "text", "text": "前缀"},
+        {"type": "tool_use", "id": "t1", "name": "bb_query",
+         "input": {"q": "assets"}},
+    ]}) == "前缀" + json.dumps({"q": "assets"}, ensure_ascii=False)
+    assert _msg_text({"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "t1",
+         "content": "IDA 伪码结果一万字"},
+    ]}) == "IDA 伪码结果一万字"
+    assert _msg_text({"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "t1",
+         "content": [{"type": "text", "text": "块一"},
+                     {"type": "text", "text": "块二"}]},
+    ]}) == "块一块二"
 
 
 def test_chat_expert_thread_cannot_call_expert_and_history_replays(tmp_path):
@@ -486,8 +547,10 @@ def test_chat_stop_endpoint(chat_client, tmp_path):
     class Slow:
         def __init__(self):
             self.aborted_seen = False
+            self.started = threading.Event()
 
         def chat(self, messages, **kwargs):
+            self.started.set()  # 已进入 LLM 调用：消除「步间中止」竞态
             for _ in range(50):
                 if kwargs.get("should_cancel") and kwargs["should_cancel"]():
                     self.aborted_seen = True
@@ -509,12 +572,10 @@ def test_chat_stop_endpoint(chat_client, tmp_path):
                        json={"agent_id": ORCHESTRATOR_ID}).json()["id"]
         assert c2.post(f"/api/chat/threads/{tid2}/messages",
                        json={"text": "慢慢做"}).status_code == 202
-        deadline = time.time() + 5
-        while time.time() < deadline:
-            th = c2.get(f"/api/chat/threads/{tid2}").json()["thread"]
-            if th["status"] == "running":
-                break
-            time.sleep(0.05)
+        # 先确保已进入 LLM 调用再停：否则 stop 可能落在步间（_loop 步首探中止），
+        # 轮次直接 _persist_stopped 而 Slow.chat 从未被调 → aborted_seen 永假（竞态）
+        assert slow.started.wait(5)
+        assert c2.get(f"/api/chat/threads/{tid2}").json()["thread"]["status"] == "running"
         assert c2.post(f"/api/chat/threads/{tid2}/stop").status_code == 204
         deadline = time.time() + 10
         msgs = []
@@ -653,3 +714,257 @@ def test_chat_mcp_endpoint(chat_client, tmp_path, monkeypatch):
     out = chat_client.get(f"/api/chat/mcp?pid={p2}").json()
     assert len(out["servers"]) == 1
     assert out["servers"][0]["name"] == "fofa" and out["servers"][0]["online"] is False
+
+
+def test_chat_mcp_reverse_domain_for_research(chat_client, tmp_path, monkeypatch):
+    """逆向项目（research 轨）加载配置的 reverse 域 MCP server（2026-09-30 修复）。
+
+    此前 _chat_bridge 用盘上原始 capabilities（M3 起创建恒空）→ domains 只有
+    {research}，与 config 里 ida server 的 reverse 域不相交 → 逆向项目永远加载
+    不了配置的 MCP。修复后 caps_effective 按轨默认补 binary + 旧域反向匹配
+    （LEGACY_DOMAIN_MAP: reverse→(research,[binary])）放行 reverse 域。"""
+    import core.api.app as app_mod
+    cfg = tmp_path / "mcp-rev.json"
+    monkeypatch.setattr(app_mod, "MCP_CONFIG_PATH", cfg)
+    cfg.write_text(json.dumps({"servers": [
+        {"name": "ida", "url": "", "transport": "stdio",
+         "command": "no-such-binary-xyz", "args": [], "enabled": True,
+         "domains": ["reverse"]},
+        {"name": "fofa", "url": "", "transport": "stdio",
+         "command": "no-such-binary-xyz", "args": [], "enabled": True,
+         "domains": ["pentest"]}]}, ensure_ascii=False), encoding="utf-8")
+    # 蛙池AI逆向 场景：research 轨、无专家、无显式能力 → 默认 binary → reverse 域放行
+    p1 = chat_client.post("/api/projects", json={
+        "name": "逆向无专家", "track": "research"}).json()["id"]
+    out1 = chat_client.get(f"/api/chat/mcp?pid={p1}").json()
+    assert [s["name"] for s in out1["servers"]] == ["ida"]
+    # 显式声明非 binary 能力（crypto）的 research 项目：不默认放行 reverse
+    p2 = chat_client.post("/api/projects", json={
+        "name": "研究非binary", "track": "research",
+        "capabilities": ["crypto"]}).json()["id"]
+    out2 = chat_client.get(f"/api/chat/mcp?pid={p2}").json()
+    assert [s["name"] for s in out2["servers"]] == []
+    # pentest 项目：fofa(pentest) 加载、ida(reverse) 不加载（行为不变）
+    p3 = chat_client.post("/api/projects", json={
+        "name": "渗透", "track": "pentest", "capabilities": ["web"]}).json()["id"]
+    out3 = chat_client.get(f"/api/chat/mcp?pid={p3}").json()
+    assert [s["name"] for s in out3["servers"]] == ["fofa"]
+
+
+# ---------- 上下文治理（2026-09-30 压缩上下文方案） ----------
+
+def _gov_messages(big: int = 20000) -> list[dict]:
+    """构一段「旧区含单条巨物 tool_result + 12 个 assistant 步」的历史：
+    _recent_boundary(keep=12) 落在下标 1（首个 assistant），故下标 0 的巨物
+    落在可压缩旧区。"""
+    msgs = [{"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "t0", "content": "A" * big}]}]
+    for i in range(12):
+        msgs.append({"role": "assistant", "content": f"a{i}"})
+        msgs.append({"role": "user", "content": f"u{i}"})
+    return msgs
+
+
+def _gov_turn(bb, llm, tmp_path) -> ChatTurn:
+    thread = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID)
+    return ChatTurn(bb=bb, llm=llm, project_id="p1", thread_id=thread["id"],
+                    packs_root="packs", track="ctf", capabilities=["web"],
+                    mcp_bridge=None, expert_names=[ORCHESTRATOR_ID],
+                    artifacts_dir=tmp_path / "artifacts")
+
+
+def _small_budget(llm, window: int = 300, soft: int = 1000) -> None:
+    """把 provider 窗口/软上限调小，使极小历史即可触发压缩（等价 provider
+    配置下发路径），避免构造数百万字符的真巨物。"""
+    llm.context_tokens = window
+    llm.ctx_soft_budget = soft
+
+
+def test_clip_tool_result_truncates_and_spills(tmp_path):
+    """①单条工具结果截断（2026-09-30）：巨物入历史前截到 _MAX_TOOL_RESULT_CHARS
+    + 尾注；完整原文落 artifacts/chat-results/（事件流记路径）；未超限原样返回
+    且不落盘。截断必须落在「写 DB」这一步（DB 是下轮回放源）。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    turn = _gov_turn(bb, FakeLLM([]), tmp_path)
+    # 未超限：原样、无落盘
+    small, p = turn._clip_tool_result("短结果", _tc("t1", "run_cmd", {}))
+    assert small == "短结果" and p == ""
+    # 超限：截断 + 落盘
+    big = "X" * (_MAX_TOOL_RESULT_CHARS + 5000)
+    clipped, path = turn._clip_tool_result(big, _tc("t2", "run_cmd", {}))
+    assert len(clipped) < len(big)
+    assert clipped.startswith("X" * 100)
+    assert "已截断" in clipped and str(len(big)) in clipped
+    assert path and Path(path).is_file()
+    assert Path(path).read_text(encoding="utf-8") == big
+
+
+def test_prepare_context_level1_masks_old_tool_results(tmp_path):
+    """一级压缩（ct-3）：超阈值时只把旧区 tool_result 就地占位化（保留
+    tool_use_id 配对与 assistant 文本），零 LLM 成本；幂等。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    llm = FakeLLM([])
+    _small_budget(llm)
+    turn = _gov_turn(bb, llm, tmp_path)
+    msgs = _gov_messages()
+    assert _recent_boundary(msgs, 12) == 1  # 巨物落在可压缩旧区
+    out, info = turn._prepare_context(msgs, None, [])
+    assert out is msgs
+    assert info["compacted"] is True and info["level"] == 1 and info["masked"] == 1
+    assert msgs[0]["content"][0]["content"].startswith(_CTX_PLACEHOLDER_TAG)
+    assert llm.calls == []  # 一级零 LLM 成本
+    assert _mask_old_tool_results(msgs, 1) == 0  # 幂等：已占位不再重压
+
+
+def test_prepare_context_level2_summary_uses_original_and_caches(tmp_path):
+    """二级 LLM 摘要（ct-4）：force 下旧区压成 _CTX_SUMMARY_TAG 摘要消息替换
+    旧区。关键回归——摘要输入必须是旧区**原文**而非一级占位符（否则丢失逆向
+    细节）；相同旧区第二次命中摘要缓存（cached=True，不再调 LLM）。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    llm = FakeLLM([_resp(text="【摘要】目标 x；地址 0x401000")])
+    _small_budget(llm)
+    turn = _gov_turn(bb, llm, tmp_path)
+    msgs = _gov_messages()
+    out, info = turn._prepare_context(msgs, None, [], force=True)
+    assert info["level"] == 2 and info["cached"] is False and info["masked"] == 1
+    assert out[0]["content"].startswith(_CTX_SUMMARY_TAG)
+    assert "【摘要】" in out[0]["content"]
+    assert len(out) == len(msgs)  # 摘要 1 条替换旧区 1 条
+    # 摘要调用：system=逆向增强模板；输入为原文（20000 个 A），非占位符
+    s = llm.calls[0]
+    assert s["system"] == _CTX_SUMMARY_SYS
+    assert s["messages"][0]["content"] == "A" * 20000
+    assert _CTX_PLACEHOLDER_TAG not in s["messages"][0]["content"]
+    # 摘要缓存命中：相同旧区（新拷贝）不再调 LLM
+    out2, info2 = turn._prepare_context(_gov_messages(), None, [], force=True)
+    assert info2["level"] == 2 and info2["cached"] is True
+    assert len(llm.calls) == 1
+
+
+def test_prepare_context_no_compaction_under_budget(tmp_path):
+    """未超阈值原样返回（不压缩、不占位、不调 LLM）。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    llm = FakeLLM([])
+    turn = _gov_turn(bb, llm, tmp_path)
+    msgs = [{"role": "user", "content": "hi"}]
+    out, info = turn._prepare_context(msgs, None, [])
+    assert out is msgs and info["compacted"] is False and info["level"] == 0
+    assert llm.calls == []
+
+
+def test_chat_reactive_overflow_forces_compaction_and_retries(tmp_path):
+    """reactive 兜底（ct-5）：发送前压缩后仍被网关判输入超限（
+    ContextOverflowError）→ 强制压缩（force）一次后重试，且 emit
+    chat.ctx phase=reactive。对应 Claude Code 五级级联最末 reactive compact。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+
+    class OverflowOnce(FakeLLM):
+        def __init__(self, script):
+            super().__init__(script)
+            self.overflowed = False
+
+        def chat(self, messages, **kwargs):
+            if not self.overflowed:
+                self.overflowed = True
+                with self.lock:
+                    self.calls.append({"messages": [dict(m) for m in messages],
+                                       "system": kwargs.get("system"),
+                                       "tools": kwargs.get("tools")})
+                raise ContextOverflowError("Input length exceeds the maximum")
+            return super().chat(messages, **kwargs)
+
+    llm = OverflowOnce([_resp(text="【摘要】压缩后"), _resp(text="重试成功")])
+    _small_budget(llm)
+    turn = _gov_turn(bb, llm, tmp_path)
+    resp = turn._chat(_gov_messages(), None, None)
+    assert resp.text == "重试成功"
+    assert len(llm.calls) == 3  # ①超限抛 ②摘要 ③重试
+    assert llm.calls[1]["system"] == _CTX_SUMMARY_SYS
+    assert llm.calls[2]["messages"][0]["content"].startswith(_CTX_SUMMARY_TAG)
+    evs = [e for e in bb.recent_events("p1") if e["kind"] == "chat.ctx"]
+    assert any(e["payload"].get("phase") == "reactive" for e in evs)
+
+
+def test_usage_includes_ctx_window(tmp_path):
+    """面板分母/警戒线由后端下发：usage 带 ctx_limit（硬窗口）与 ctx_soft
+    （软上限），缺省走运行时模块常量；并带 compaction 说明（ct-8）。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    llm = FakeLLM([_resp(text="收到。")])
+    thread = chat_store.create_thread(bb, "p1", "recon")
+    turn = ChatTurn(bb=bb, llm=llm, project_id="p1", thread_id=thread["id"],
+                    packs_root="packs", track="ctf", capabilities=["web"],
+                    mcp_bridge=None, expert_names=None)
+    turn.run("你好")
+    usage = chat_store.get_thread(bb, thread["id"])["usage"]
+    assert usage["ctx_limit"] == _MODEL_WINDOW_FALLBACK
+    assert usage["ctx_soft"] == _CTX_SOFT_BUDGET
+    assert usage["compaction"]["compacted"] is False
+
+
+# ---------- 工具结果合并（2026-09-30：Ark 400「没说两句就死」根因回归） ----------
+
+def test_load_history_merges_multiple_tool_results(tmp_path):
+    """回归（Ark 400 根因）：同一轮 assistant 的多个 tool_use，其 tool_result
+    回放时曾各占一条 user 消息 → Ark Anthropic→OpenAI 翻译层报
+    「insufficient tool messages following tool_calls message」直接 400（会话
+    没说几句即死）。修复：_load_history 缓冲连续 tool 行，合并成「一条」user
+    承载多个 tool_result。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    t = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID)
+    chat_store.append_message(bb, t["id"], "user", "开始")
+    chat_store.append_message(bb, t["id"], "assistant", "",
+                              tool_calls=[{"id": "t1", "name": "todo_write", "args": {}},
+                                          {"id": "t2", "name": "todo_write", "args": {}}])
+    chat_store.append_message(bb, t["id"], "tool", "结果1", tool_use_id="t1")
+    chat_store.append_message(bb, t["id"], "tool", "结果2", tool_use_id="t2")
+    chat_store.append_message(bb, t["id"], "assistant", "完成")
+    turn = ChatTurn(bb=bb, llm=FakeLLM([]), project_id="p1", thread_id=t["id"],
+                    packs_root="packs", track="ctf", capabilities=["web"],
+                    mcp_bridge=None, expert_names=None)
+    msgs = turn._load_history()
+    assert [m["role"] for m in msgs] == ["user", "assistant", "user", "assistant"]
+    assert len(msgs[1]["content"]) == 2  # 两个 tool_use
+    # 关键：两条 tool 行合并进「一条」user，内含两个 tool_result（配对齐全）
+    assert len(msgs[2]["content"]) == 2
+    assert [b["tool_use_id"] for b in msgs[2]["content"]] == ["t1", "t2"]
+
+
+def test_loop_sends_one_user_message_for_multi_tool_turn(tmp_path):
+    """回归（Ark 400 根因）：_loop 一度逐条 append(user:tool_result) → 一轮多
+    工具即触发翻译层 400。修复后发送体里 assistant(tool_use×N) 紧跟「恰好一条」
+    user（含 N 个 tool_result），不再拆成 N 条 user。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    llm = FakeLLM([
+        _resp(tool_calls=[_tc("t1", "todo_write",
+                              {"items": [{"title": "a", "status": "pending"}]}),
+                          _tc("t2", "todo_write",
+                              {"items": [{"title": "b", "status": "pending"}]})]),
+        _resp(text="收尾"),
+    ])
+    t = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID)
+    turn = ChatTurn(bb=bb, llm=llm, project_id="p1", thread_id=t["id"],
+                    packs_root="packs", track="ctf", capabilities=["web"],
+                    mcp_bridge=None, expert_names=None)
+    assert turn.run("开工") == "收尾"
+    sent = llm.calls[1]["messages"]  # 第二次调用（工具结果回填后）
+    a_idx = [i for i, m in enumerate(sent) if m["role"] == "assistant"
+             and isinstance(m["content"], list)
+             and any(b.get("type") == "tool_use" for b in m["content"])]
+    assert a_idx, sent
+    i = a_idx[-1]
+    assert len(sent[i]["content"]) == 2  # assistant 发两个 tool_use
+    assert sent[i + 1]["role"] == "user"  # 紧跟一条 user（非多条）
+    trs = [b for b in sent[i + 1]["content"] if b.get("type") == "tool_result"]
+    assert [b["tool_use_id"] for b in trs] == ["t1", "t2"]
+    # 其后不应再有游离的 tool_result user 消息（未被 assistant 消费）
+    assert not any(m["role"] == "user" and isinstance(m.get("content"), list)
+                   and any(b.get("type") == "tool_result" for b in m["content"])
+                   for m in sent[i + 2:])

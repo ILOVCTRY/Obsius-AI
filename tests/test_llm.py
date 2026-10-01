@@ -139,6 +139,41 @@ def test_error_raises_llmerror():
         p.chat([{"role": "user", "content": "hi"}])
 
 
+def test_context_overflow_raises_and_model_override():
+    """输入超限识别（2026-09-30 ct-6）：400/413 文案命中 _OVERFLOW_HINTS → 抛
+    ContextOverflowError（不可重试，调用方据此强制压缩）；非命中 400 → 普通
+    LLMError（不误判为压缩信号）；chat(model=) 覆盖 body.model（摘要器专用模型路径）。"""
+    from core.llm.provider import ContextOverflowError
+
+    calls: list[dict] = []
+
+    def overflow_400(url, headers, body):
+        calls.append(json.loads(body))
+        return 400, {"error": {"message": "Input length exceeds the maximum context length"}}
+
+    p = AnthropicCompatProvider("https://fake", "k", "m", stream_transport=overflow_400)
+    with pytest.raises(ContextOverflowError):
+        p.chat([{"role": "user", "content": "x"}])
+    assert len(calls) == 1  # 超限不可重试：一次即抛
+
+    def plain_400(url, headers, body):
+        return 400, {"error": {"message": "invalid request payload"}}
+
+    p2 = AnthropicCompatProvider("https://fake", "k", "m", stream_transport=plain_400)
+    with pytest.raises(LLMError) as ei:
+        p2.chat([{"role": "user", "content": "x"}])
+    assert not isinstance(ei.value, ContextOverflowError)
+
+    def overflow_413(url, headers, body):
+        calls.append(json.loads(body))
+        return 413, {"error": {"message": "request entity too large"}}
+
+    p3 = AnthropicCompatProvider("https://fake", "k", "m", stream_transport=overflow_413)
+    with pytest.raises(ContextOverflowError):
+        p3.chat([{"role": "user", "content": "x"}], model="cheap-summarizer")
+    assert calls[-1]["model"] == "cheap-summarizer"  # model= 覆盖实例模型
+
+
 def test_retry_on_transient_status_then_success(monkeypatch):
     """429/5xx 瞬时故障自动重试，恢复后成功——一次抖动不该杀死编排。"""
     monkeypatch.setattr("core.llm.anthropic_compat.RETRY_BACKOFF", 0)
@@ -538,6 +573,59 @@ def test_provider_store_model_context(tmp_path, monkeypatch):
     s.save([{"name": "ark-coding", "base_url": "https://x/api", "api_key": "k1",
              "models": ["a"], "enabled": True}])
     assert s.get("ark-coding")["model_context"] == {}
+
+
+def test_provider_store_ctx_governance_fields(tmp_path, monkeypatch):
+    """上下文治理字段（2026-09-30 ct-7）：_validate 显式才落、缺省不写；build 把
+    window/软上限/摘要模型透传到 provider 实例（旧坑：白名单漏登记 → 设置页保存
+    一次即丢，与 thinking 同源）。"""
+    from core.llm.providers import ProviderStore
+    monkeypatch.setenv("ARK_API_KEY", "env-key")
+    s = ProviderStore(tmp_path / "providers.json")
+    s.save([{"name": "ark-coding", "base_url": "https://x/api", "api_key": "k1",
+             "models": ["a"], "enabled": True,
+             "model_window": 1048566, "ctx_soft_budget": 512000,
+             "summarizer_model": "cheap-model"}])
+    p = s.get("ark-coding")
+    assert p["model_window"] == 1048566
+    assert p["ctx_soft_budget"] == 512000
+    assert p["summarizer_model"] == "cheap-model"
+    # 保存 → 读回不丢（masked 出参也透传）
+    assert s.masked()[0]["model_window"] == 1048566
+    inst = s.build("ark-coding", "a")
+    assert inst.context_tokens == 1048566
+    assert inst.ctx_soft_budget == 512000
+    assert inst.summarizer_model == "cheap-model"
+    # 缺省：三者均不落字段，build 实例对应属性为 None（运行时走模块常量兜底）
+    s.save([{"name": "ark-coding", "base_url": "https://x/api", "api_key": "k1",
+             "models": ["a"], "enabled": True}])
+    p2 = s.get("ark-coding")
+    assert "model_window" not in p2 and "ctx_soft_budget" not in p2
+    assert "summarizer_model" not in p2
+    inst2 = s.build("ark-coding", "a")
+    assert inst2.context_tokens is None and inst2.ctx_soft_budget is None
+    assert inst2.summarizer_model is None
+
+
+def test_provider_ctx_window_priority_and_invalid_dropped(tmp_path, monkeypatch):
+    """window 取值优先级（ct-7）：provider 级 model_window 优先于按模型的
+    model_context[model]；非法值（非数/非正/超大/空白）静默剔除。"""
+    from core.llm.providers import ProviderStore
+    monkeypatch.setenv("ARK_API_KEY", "env-key")
+    s = ProviderStore(tmp_path / "providers.json")
+    s.save([{"name": "ark-coding", "base_url": "https://x/api", "api_key": "k1",
+             "models": ["a"], "enabled": True,
+             "model_window": -1, "ctx_soft_budget": "x", "summarizer_model": "   "}])
+    p = s.get("ark-coding")
+    assert "model_window" not in p and "ctx_soft_budget" not in p
+    assert "summarizer_model" not in p
+    s.save([{"name": "ark-coding", "base_url": "https://x/api", "api_key": "k1",
+             "models": ["a"], "enabled": True, "model_context": {"a": 128000}}])
+    assert s.build("ark-coding", "a").context_tokens == 128000
+    s.save([{"name": "ark-coding", "base_url": "https://x/api", "api_key": "k1",
+             "models": ["a"], "enabled": True,
+             "model_window": 1048566, "model_context": {"a": 128000}}])
+    assert s.build("ark-coding", "a").context_tokens == 1048566  # provider 级胜出
 
 
 def test_apply_context_budget(tmp_path):

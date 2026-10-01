@@ -6,6 +6,7 @@ Agent 工具面的 func_kb 机制级查重。
 
 import json
 import os
+import threading
 import time
 
 import pytest
@@ -25,6 +26,7 @@ from core.tools.decompiler import (
     build_xrefs,
     diff_pulled_names,
     is_auto_name,
+    is_partial_export,
     sha256_file,
 )
 
@@ -155,7 +157,8 @@ class FakeMCPTransport:
     """
 
     DEFAULT_TOOLS = ["decompile", "list_funcs", "rename", "set_comments",
-                     "func_profile", "entity_query", "server_health", "idb_save"]
+                     "func_profile", "entity_query", "server_health", "idb_save",
+                     "analyze_batch"]
 
     def __init__(self, routes=None, *, tools=None, session_header=True, session="sess-abc"):
         self.routes = routes or {}
@@ -685,6 +688,99 @@ def test_import_ida_mcp_cache_lightweight(tmp_path):
     assert "partial" not in svc.read_cached("a" * 64)["meta"]
 
 
+def test_func_detail_cache_roundtrip_and_truncation(tmp_path):
+    """按需详情缓存（每函数一文件）：读写回环 + 硬上限截断（伪码 512K/反汇编 5000 行）
+    + 缺失/损坏回 None 并删除坏文件。"""
+    svc = DecompilerService(cache_dir=tmp_path / "cache")
+    sha, addr = "a" * 64, 0x401000
+    detail = {"address": hex(addr), "name": "win_main", "size": 200,
+              "pseudocode": "int x;" * 200000,          # > 512K 字符
+              "disasm_lines": [f"insn {i}" for i in range(6000)],  # > 5000 行
+              "callers": [{"address": "0x400000", "name": "caller"}],
+              "callees": []}
+    svc.save_func_detail(sha, addr, detail)
+    f = svc._detail_file(sha, addr)
+    assert f.is_file()
+    back = svc.read_func_detail(sha, addr)
+    assert back is not None and back["name"] == "win_main"
+    assert len(back["pseudocode"]) <= dc.DETAIL_PSEUDO_MAX_CHARS
+    assert back.get("pseudocode_truncated") is True
+    assert len(back["disasm_lines"]) <= dc.DETAIL_DISASM_MAX_LINES
+    assert back.get("disasm_truncated") is True
+    assert f.stat().st_size <= dc.DETAIL_FILE_MAX_BYTES
+    # 缺失 → None
+    assert svc.read_func_detail(sha, 0x999999) is None
+    # 损坏 → 删除并回 None（下次自动重拉）
+    f.write_text("{broken", encoding="utf-8")
+    assert svc.read_func_detail(sha, addr) is None and not f.exists()
+
+
+def test_mcp_func_detail_parses_analyze_batch(tmp_path):
+    """analyze_batch 单查询 → func_detail 解析：伪码/反汇编行/callers/callees；
+    请求参数关闭非必要段 + 带上限（40万样本按需详情防大响应）。"""
+    def route(args, t):
+        q = args["queries"][0]
+        assert q["include_strings"] is False and q["include_constants"] is False
+        assert q["include_basic_blocks"] is False and q["include_proto"] is False
+        assert q["max_disasm_insns"] == dc.DETAIL_DISASM_MAX_LINES
+        return [{
+            "query": q["query"], "addr": "0x401234", "name": "win_main",
+            "analysis": {
+                "size": "0xc8",
+                "decompile": "int win_main() { return 0; }",
+                "disasm": {"lines": ["push rbp", "ret"], "instruction_count": 2,
+                           "truncated": False},
+                "callers": [{"addr": "0x401000", "name": "entry"}],
+                "callees": [{"addr": "0x401500", "name": "helper"}],
+            },
+            "error": None,
+        }]
+    mcp = MCPBackend(transport=FakeMCPTransport(routes={"analyze_batch": route}))
+    d = mcp.func_detail(0x401234)
+    assert d is not None
+    assert d["pseudocode"] == "int win_main() { return 0; }"
+    assert d["disasm_lines"] == ["push rbp", "ret"] and d["disasm_truncated"] is False
+    assert d["callers"] == [{"address": "0x401000", "name": "entry"}]
+    assert d["callees"] == [{"address": "0x401500", "name": "helper"}]
+    assert d["size"] == 0xC8
+    # 工具缺失（tools/list 无 analyze_batch）→ None（不抛）
+    mcp2 = MCPBackend(transport=FakeMCPTransport(
+        tools=["decompile", "list_funcs"]))
+    assert mcp2.func_detail(0x401234) is None
+
+
+def test_ensure_func_detail_pulls_persists_and_offline(tmp_path, sample):
+    """按需详情主通道：首次 MCP 拉取+落盘；二次命中缓存不再调 MCP；
+    离线未缓存 None；离线已缓存仍可读（渐进累积的离线可用性）。"""
+    def route(args, t):
+        q = args["queries"][0]
+        if q["query"] != "0x401234":
+            return [{"query": q["query"], "addr": None, "name": None,
+                     "analysis": None, "error": "not found"}]
+        return [{"query": q["query"], "addr": "0x401234", "name": "win_main",
+                 "analysis": {"size": "0xc8", "decompile": "code",
+                              "disasm": {"lines": ["nop"], "truncated": False},
+                              "callers": [], "callees": []},
+                 "error": None}]
+    transport = FakeMCPTransport(routes={"analyze_batch": route})
+    svc, mcp = _mcp_service(tmp_path, transport)
+    sha = "a" * 64
+    d1 = svc.ensure_func_detail(sha, 0x401234)
+    assert d1 is not None and d1["pseudocode"] == "code"
+    assert d1["disasm_lines"] == ["nop"]
+    assert svc._detail_file(sha, 0x401234).is_file()
+    n = len(transport.calls)
+    d2 = svc.ensure_func_detail(sha, 0x401234)
+    assert d2 == d1
+    assert len(transport.calls) == n  # 详情文件命中，无第二次 analyze_batch
+    # 未缓存 + MCP 离线 → None
+    mcp._transport = _dead_transport
+    mcp._health = None
+    assert svc.ensure_func_detail(sha, 0x409999) is None
+    # 离线但详情已缓存 → 命中（离线可用）
+    assert svc.ensure_func_detail(sha, 0x401234)["pseudocode"] == "code"
+
+
 def test_list_functions_truncates_large_result(tmp_path, sample):
     """数万函数全量 dump 淹没上下文——>500 行截断并提示用过滤参数（大样本防崩）。"""
     runner, _calls = fake_ghidra_runner(tmp_path)
@@ -761,6 +857,400 @@ def test_is_auto_name():
     assert is_auto_name(None) and is_auto_name("")
 
 
+# ---------- 大样本加速 P1（2026-09-30）：可配超时 / 直读存量 / 全局 sha 缓存 / 导入 ----------
+
+def test_resolve_headless_timeout_config_override(tmp_path, monkeypatch):
+    """headless 超时：默认放开数小时；config/decompiler.json 的 headless_timeout 覆盖，
+    非法/缺失/损坏回默认（大样本不轻易腰斩分析）。"""
+    cfg = tmp_path / "decompiler.json"
+    monkeypatch.setattr(dc, "DECOMPILER_CONFIG_PATH", cfg)
+    assert dc.resolve_headless_timeout() == float(dc.HEADLESS_TIMEOUT)  # 无配置
+    cfg.write_text(json.dumps({"headless_timeout": 7200}), encoding="utf-8")
+    assert dc.resolve_headless_timeout() == 7200.0                      # 覆盖生效
+    cfg.write_text(json.dumps({"headless_timeout": 0}), encoding="utf-8")
+    assert dc.resolve_headless_timeout() == float(dc.HEADLESS_TIMEOUT)  # 0 忽略
+    cfg.write_text(json.dumps({"headless_timeout": "abc"}), encoding="utf-8")
+    assert dc.resolve_headless_timeout() == float(dc.HEADLESS_TIMEOUT)  # 非数忽略
+    cfg.write_text("{broken", encoding="utf-8")
+    assert dc.resolve_headless_timeout() == float(dc.HEADLESS_TIMEOUT)  # 损坏忽略
+
+
+def test_default_runner_passes_configured_timeout(tmp_path, monkeypatch):
+    """_default_runner 每次现取超时（改配置无需重启）：透传到 subprocess.run。"""
+    cfg = tmp_path / "decompiler.json"
+    cfg.write_text(json.dumps({"headless_timeout": 1234}), encoding="utf-8")
+    monkeypatch.setattr(dc, "DECOMPILER_CONFIG_PATH", cfg)
+    captured: dict = {}
+
+    class _P:
+        returncode, stdout, stderr = 0, "o", "e"
+
+    def fake_run(args, **kw):
+        captured["args"] = args
+        captured.update(kw)
+        return _P()
+
+    monkeypatch.setattr(dc.subprocess, "run", fake_run)
+    rc, out, err = dc._default_runner(["idat", "-A"])
+    assert (rc, out, err) == (0, "o", "e")
+    assert captured["timeout"] == 1234.0 and captured["capture_output"] is True
+
+
+def _export_db_runner(write=None, calls=None):
+    """假日 idat：库内重导（无 -o，末位是库）——抠 -S"<script> <out>" 写 canned JSON。"""
+    if write is None:
+        write = EXPORT
+    if calls is None:
+        calls = {"n": 0}
+
+    def run(args):
+        calls["n"] += 1
+        calls["args"] = args
+        sarg = next(a for a in args if a.startswith('-S"'))
+        out_p = Path(sarg[3:].rstrip('"').split(" ", 1)[1])
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(json.dumps(write), encoding="utf-8")
+        return 0, "idat ok", ""
+
+    return run, calls
+
+
+def test_export_reuses_existing_db_without_rebuild(tmp_path, sample):
+    """直读存量：库已存在 → 库内重导（无 -o、不删库）并标记 reused；GUI 占用则拒绝。"""
+    sha = sha256_file(str(sample))
+    db_dir = tmp_path / "db"
+    db_dir.mkdir()
+    (db_dir / f"{sha}.i64").write_bytes(b"IDADB")
+    runner, calls = _export_db_runner()
+    ida = IDAHeadlessBackend(idat_cmd="idat", runner=runner, available=True, db_dir=db_dir)
+    info = ida.export(str(sample), tmp_path / "out.json")
+    assert info["reused"] is True and info["db_path"] == str(db_dir / f"{sha}.i64")
+    assert not any(a.startswith("-o") for a in calls["args"][1:])  # 没有 -o 重建
+    assert calls["args"][-1] == str(db_dir / f"{sha}.i64")
+    assert (db_dir / f"{sha}.i64").read_bytes() == b"IDADB"       # 库原封不动
+    # 库被 GUI 占用（锁文件）→ 绝不重导
+    (db_dir / f"{sha}.id0").write_bytes(b"LOCK")
+    with pytest.raises(RuntimeError, match="ida-db-locked"):
+        ida.export(str(sample), tmp_path / "out2.json")
+
+
+def test_global_cache_publish_and_promote_across_projects(tmp_path, sample):
+    """全量导出落全局 sha 缓存；另一项目本地空时从全局提升（免重跑 headless）。"""
+    sha = sha256_file(str(sample))
+    global_dir = tmp_path / "global"
+    runner_a, calls_a = fake_ida_runner()
+    ida_a = IDAHeadlessBackend(idat_cmd="idat", runner=runner_a, available=True,
+                               db_dir=tmp_path / "dbA")
+    svc_a = DecompilerService(cache_dir=tmp_path / "cacheA", ida=ida_a,
+                              global_cache_dir=global_dir)
+    data_a, _info = svc_a.export_to_cache(str(sample))
+    assert data_a["export_version"] == dc.EXPORT_VERSION and calls_a["n"] == 1
+    assert (global_dir / f"{sha}.json").is_file()                 # 已发布全局
+    # 项目 B：本地缓存空 → read_cached 触发 promote（不跑任何后端）
+    runner_b, calls_b = fake_ida_runner()
+    ida_b = IDAHeadlessBackend(idat_cmd="idat", runner=runner_b, available=True,
+                               db_dir=tmp_path / "dbB")
+    svc_b = DecompilerService(cache_dir=tmp_path / "cacheB", ida=ida_b,
+                              global_cache_dir=global_dir)
+    promoted = svc_b.read_cached(sha)
+    assert promoted is not None and promoted["functions"][0]["name"] == "check_flag"
+    assert calls_b["n"] == 0                                      # 零 headless
+    assert (tmp_path / "cacheB" / f"{sha}.json").is_file()        # 已拷回本地
+    # export_to_cache 亦命中全局（本地已 promote 命中）
+    data_b, _ = svc_b.export_to_cache(str(sample))
+    assert calls_b["n"] == 0 and data_b["export_version"] == dc.EXPORT_VERSION
+    # 未配 global_cache_dir 时 promote/publish 皆为 no-op（不回 None 崩）
+    bare = DecompilerService(cache_dir=tmp_path / "cacheC")
+    assert bare.read_cached(sha) is None and bare.global_cache_dir is None
+
+
+def test_import_export_json_accepts_v3_and_rejects_low(tmp_path):
+    """导入外部全量导出 JSON：>=v3 落盘并发布会全局；低契约/非对象结构化拒绝、不落盘。"""
+    sha = "d" * 64
+    global_dir = tmp_path / "global"
+    svc = DecompilerService(cache_dir=tmp_path / "cache", global_cache_dir=global_dir)
+    src = tmp_path / "export.json"
+    src.write_text(json.dumps(EXPORT), encoding="utf-8")
+    assert svc.import_export_json(sha, src) == {
+        "status": "ok", "functions": 2, "export_version": dc.EXPORT_VERSION}
+    assert svc.read_cached(sha)["functions"][0]["name"] == "check_flag"
+    assert (global_dir / f"{sha}.json").is_file()
+    # 低契约拒绝（不落盘）
+    low = tmp_path / "low.json"
+    low.write_text(json.dumps({"export_version": 2, "functions": []}), encoding="utf-8")
+    res = svc.import_export_json("e" * 64, low)
+    assert res["status"] == "error" and "版本过低" in res["reason"]
+    assert not (tmp_path / "cache" / f"{'e' * 64}.json").exists()
+    # 顶层非对象 / 损坏
+    bad = tmp_path / "bad.json"
+    bad.write_text("[1, 2, 3]", encoding="utf-8")
+    assert svc.import_export_json("f" * 64, bad)["status"] == "error"
+    assert svc.import_export_json("g" * 64, tmp_path / "nope.json")["status"] == "error"
+
+
+def test_import_ida_db_copies_reexports_and_publishes(tmp_path, sample):
+    """纳入外部 IDA 库：拷进项目 db_dir → 库内重导为缓存 → 落全局；免 MCP 回拉一轮。"""
+    sha = sha256_file(str(sample))
+    db_dir = tmp_path / "db"
+    global_dir = tmp_path / "global"
+    ext_db = tmp_path / "incoming" / "sample.i64"
+    ext_db.parent.mkdir(parents=True)
+    ext_db.write_bytes(b"EXT-IDB")
+    runner, calls = _export_db_runner()
+    ida = IDAHeadlessBackend(idat_cmd="idat", runner=runner, available=True, db_dir=db_dir)
+    svc = DecompilerService(cache_dir=tmp_path / "cache", ida=ida,
+                            global_cache_dir=global_dir)
+    res = svc.import_ida_db(sha, ext_db)
+    assert res["status"] == "ok" and res["functions"] == 2
+    assert res["db_path"] == str(db_dir / f"{sha}.i64")
+    assert (db_dir / f"{sha}.i64").read_bytes() == b"EXT-IDB"     # 拷进项目库
+    assert calls["args"][-1] == str(db_dir / f"{sha}.i64")        # 库内重导
+    assert not any(a.startswith("-o") for a in calls["args"][1:])
+    assert svc.read_cached(sha)["functions"][0]["name"] == "check_flag"
+    assert (global_dir / f"{sha}.json").is_file()                 # 已发布全局
+    # 非 IDA 库扩展名 → 结构化错误，不落库
+    bad = tmp_path / "x.bin"
+    bad.write_bytes(b"nope")
+    assert svc.import_ida_db("b" * 64, bad)["status"] == "error"
+    assert not (db_dir / f"{'b' * 64}.i64").exists()
+
+
+def test_import_ida_db_locked_and_no_tool(tmp_path, sample):
+    """目标库正被 GUI 占用 → locked 绝不覆盖；无 IDA 后端 → no-tool/unsupported。"""
+    sha = sha256_file(str(sample))
+    db_dir = tmp_path / "db"
+    db_dir.mkdir()
+    (db_dir / f"{sha}.i64").write_bytes(b"OLD")
+    (db_dir / f"{sha}.id0").write_bytes(b"LOCK")
+    src = tmp_path / "new.i64"
+    src.write_bytes(b"NEW")
+    runner, _calls = _export_db_runner()
+    ida = IDAHeadlessBackend(idat_cmd="idat", runner=runner, available=True, db_dir=db_dir)
+    svc = DecompilerService(cache_dir=tmp_path / "cache", ida=ida)
+    assert svc.import_ida_db(sha, src) == {"status": "locked"}
+    assert (db_dir / f"{sha}.i64").read_bytes() == b"OLD"
+    # 无任何后端
+    bare = DecompilerService(cache_dir=tmp_path / "c2")
+    assert bare.import_ida_db(sha, src)["status"] == "no-tool"
+    # 仅 Ghidra（无持久库语义）
+    g = GhidraHeadlessBackend(runner=lambda a: (0, "", ""), available=True,
+                              tmp_project_dir=tmp_path / "gt")
+    only_g = DecompilerService(cache_dir=tmp_path / "c3", ghidra=g)
+    assert only_g.import_ida_db(sha, src)["status"] == "unsupported"
+
+
+def test_factory_threads_global_cache_dir(tmp_path):
+    """工厂把 global_cache_dir 透传到 DecompilerService（跨项目复用落点）。"""
+    svc = build_headless_service(
+        tmp_path / "c", runner=lambda a: (0, "", ""), available=True,
+        ida_db_dir=tmp_path / "db", ghidra_tmp_dir=tmp_path / "gt",
+        global_cache_dir=tmp_path / "global")
+    assert svc.global_cache_dir == tmp_path / "global"
+
+
+# ---------- 大样本加速 P2（2026-09-30）：Ghidra 多进程并行分片主产 ----------
+
+def test_resolve_ghidra_workers_default_clamp_and_override(tmp_path, monkeypatch):
+    """worker 数：默认 max(1, CPU-1)；config 覆盖；一律夹 [1, GHIDRA_MAX_WORKERS]（内存保护）。"""
+    cfg = tmp_path / "decompiler.json"
+    monkeypatch.setattr(dc, "DECOMPILER_CONFIG_PATH", cfg)
+    monkeypatch.setattr(dc.os, "cpu_count", lambda: 8)
+    assert dc.resolve_ghidra_workers() == 7                        # 默认 CPU-1
+    cfg.write_text(json.dumps({"ghidra_workers": 3}), encoding="utf-8")
+    assert dc.resolve_ghidra_workers() == 3                        # 覆盖生效
+    cfg.write_text(json.dumps({"ghidra_workers": 999}), encoding="utf-8")
+    assert dc.resolve_ghidra_workers() == dc.GHIDRA_MAX_WORKERS    # 夹上限（内存保护）
+    cfg.write_text(json.dumps({"ghidra_workers": 0}), encoding="utf-8")
+    assert dc.resolve_ghidra_workers() == 7                        # ≤0 忽略回默认
+    cfg.write_text("{broken", encoding="utf-8")
+    monkeypatch.setattr(dc.os, "cpu_count", lambda: 1)
+    assert dc.resolve_ghidra_workers() == 1                        # CPU=1 → max(1, 0)
+
+
+def test_resolve_large_sample_bytes_and_is_large_sample(tmp_path, monkeypatch):
+    """大样本阈值可覆盖；is_large_sample 按文件大小判定，缺失文件一律非大样本不抛。"""
+    cfg = tmp_path / "decompiler.json"
+    monkeypatch.setattr(dc, "DECOMPILER_CONFIG_PATH", cfg)
+    assert dc.resolve_large_sample_bytes() == dc.LARGE_SAMPLE_BYTES
+    cfg.write_text(json.dumps({"large_sample_bytes": 100}), encoding="utf-8")
+    assert dc.resolve_large_sample_bytes() == 100
+    small = tmp_path / "s.bin"
+    small.write_bytes(b"x" * 50)
+    big = tmp_path / "b.bin"
+    big.write_bytes(b"x" * 200)
+    assert dc.is_large_sample(str(big)) and not dc.is_large_sample(str(small))
+    assert dc.is_large_sample(str(tmp_path / "missing.bin")) is False
+
+
+def _tagged(inner, tag, order):
+    def run(args):
+        order.append(tag)
+        return inner(args)
+    return run
+
+
+def test_large_sample_routes_ghidra_first(tmp_path, monkeypatch):
+    """大样本（≥阈值）Ghidra 并行主产优先；普通样本维持装配顺序（IDA 优先）。"""
+    order: list = []
+    g_runner, _ = fake_ghidra_runner(tmp_path)
+    i_runner, _ = fake_ida_runner()
+    g = GhidraHeadlessBackend(runner=_tagged(g_runner, "ghidra", order),
+                              available=True, tmp_project_dir=tmp_path / "gt")
+    ida = IDAHeadlessBackend(idat_cmd="idat", runner=_tagged(i_runner, "ida", order),
+                             available=True, db_dir=tmp_path / "db")
+    svc = DecompilerService(cache_dir=tmp_path / "cache")
+    svc.backends = [ida, g]        # 模拟工厂 prefer=("ida","ghidra") 装配顺序
+    small = tmp_path / "small.elf"
+    small.write_bytes(b"MZ" + b"\x00" * 16)
+    svc.export_to_cache(str(small))
+    assert order == ["ida"]        # 普通样本 IDA 优先
+    monkeypatch.setattr(dc, "LARGE_SAMPLE_BYTES", 4)   # 免造 20MB 真文件
+    order.clear()
+    big = tmp_path / "big.elf"
+    big.write_bytes(b"MZ" + b"\x00" * 15 + b"\x01")   # 内容异于 small，避免 sha 缓存互撞
+    svc.export_to_cache(str(big))
+    assert order == ["ghidra"]     # 大样本 Ghidra 优先
+
+
+def test_ghidra_export_passes_workers_when_gt1(tmp_path, sample):
+    """workers>1 时并行度作为 postScript 第二实参（-deleteProject 前）传给脚本；
+    workers=1 不追加（args 形状稳定，兼容既有假 runner 与断言）。"""
+    captured: dict = {}
+
+    def run(args):
+        captured["args"] = args
+        out = Path(args[args.index("-postScript") + 2])
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(EXPORT), encoding="utf-8")
+        return 0, "ok", ""
+
+    g = GhidraHeadlessBackend(runner=run, available=True, workers=4,
+                              tmp_project_dir=tmp_path / "gt")
+    g.export(str(sample), tmp_path / "o.json")
+    args = captured["args"]
+    assert args[args.index("-deleteProject") - 1] == "4"
+    captured.clear()
+    g1 = GhidraHeadlessBackend(runner=run, available=True, workers=1,
+                               tmp_project_dir=tmp_path / "gt")
+    g1.export(str(sample), tmp_path / "o1.json")
+    args1 = captured["args"]
+    assert args1[args1.index("-postScript") + 3] == "-deleteProject"   # 无额外参数
+
+
+def test_factory_threads_ghidra_workers(tmp_path, monkeypatch):
+    """工厂把 resolve_ghidra_workers() 透传给 Ghidra 后端（并行分片落点）。"""
+    monkeypatch.setattr(dc, "resolve_ghidra_workers", lambda: 5)
+    svc = build_headless_service(
+        tmp_path / "c", runner=lambda a: (0, "", ""), prefer=("ghidra",),
+        available=True, ghidra_tmp_dir=tmp_path / "gt")
+    assert svc.headless_backends()[0].workers == 5
+
+
+
+# ---------- 大样本加速 P3（2026-09-30）：协作式停止 + 分片进度 + partial ----------
+
+def _ghidra_ctl_runner(write=None, calls=None, wait_stop=2.0):
+    """假 analyzeHeadless（带控制文件）：写一帧进度；等停止文件最多 wait_stop 秒，
+    出现则产出 partial（仅函数名/地址、无伪码），否则整份 canned v3。"""
+    if write is None:
+        write = EXPORT
+    if calls is None:
+        calls = {"n": 0}
+
+    def run(args):
+        calls["n"] += 1
+        calls["args"] = args
+        i = args.index("-postScript")
+        out = Path(args[i + 2])
+        prog = Path(args[i + 4]) if len(args) > i + 4 else None
+        stop = Path(args[i + 5]) if len(args) > i + 5 else None
+        out.parent.mkdir(parents=True, exist_ok=True)
+        if prog is not None:
+            prog.write_text(json.dumps({"done": 1, "total": 2, "phase": "decompile"}),
+                            encoding="utf-8")
+        stopped = False
+        if stop is not None:
+            deadline = time.time() + wait_stop
+            while not stop.is_file() and time.time() < deadline:
+                time.sleep(0.02)
+            stopped = stop.is_file()
+        data = json.loads(json.dumps(write))
+        if stopped:
+            data["partial"] = True
+            data["stopped"] = True
+            data["meta"]["partial"] = True
+            data["functions"] = [{"address": f["address"], "name": f["name"],
+                                  "size": f["size"], "calls": []}
+                                 for f in data.get("functions", [])]
+        out.write_text(json.dumps(data), encoding="utf-8")
+        return 0, "ok", ""
+
+    return run, calls
+
+
+def test_is_partial_export_detection():
+    assert is_partial_export({"meta": {"partial": True}}) is True
+    assert is_partial_export({"partial": True}) is True
+    assert is_partial_export({"stopped": True}) is True
+    assert is_partial_export({"meta": {"partial": False}}) is False
+    assert is_partial_export(EXPORT) is False
+    assert is_partial_export(None) is False
+
+
+def test_ghidra_export_passes_controls_when_requested(tmp_path, sample):
+    """带 progress/stop_event 时把 worker 数 + 进度文件 + 停止文件作为 postScript
+    位置实参传给脚本；监视线程回填进度；控制文件跑完即清。"""
+    runner, calls = _ghidra_ctl_runner()
+    g = GhidraHeadlessBackend(runner=runner, available=True, workers=3,
+                              tmp_project_dir=tmp_path / "gt")
+    prog: dict = {}
+    info = g.export(str(sample), tmp_path / "o.json", progress=prog)
+    args = calls["args"]
+    i = args.index("-postScript")
+    assert args[i + 3] == "3"                       # workers
+    assert args[i + 4].endswith(".json.progress")   # 进度文件
+    assert args[i + 5].endswith(".json.stop")       # 停止文件
+    assert prog["done"] == 1 and prog["total"] == 2  # 末次进度回填
+    assert info["stopped"] is False
+    assert not Path(args[i + 4]).exists() and not Path(args[i + 5]).exists()  # 已清理
+
+
+def test_cooperative_stop_marks_partial_and_skips_global(tmp_path, sample):
+    """协作式停止：stop_event 已置位 → 脚本产出 partial；partial 不发布全局。"""
+    sha = sha256_file(str(sample))
+    global_dir = tmp_path / "global"
+    runner, _calls = _ghidra_ctl_runner()
+    g = GhidraHeadlessBackend(runner=runner, available=True,
+                              tmp_project_dir=tmp_path / "gt")
+    svc = DecompilerService(cache_dir=tmp_path / "cache", ghidra=g,
+                            global_cache_dir=global_dir)
+    stop = threading.Event()
+    stop.set()
+    data, info = svc.export_to_cache(str(sample), progress={}, stop_event=stop)
+    assert info["stopped"] is True and is_partial_export(data)
+    assert not (global_dir / f"{sha}.json").exists()   # partial 绝不发布全局
+
+
+def test_partial_cache_not_reused_but_visible(tmp_path, sample):
+    """partial 缓存工作台可见（read_cached），但 export_to_cache 不复用（重导补全）。"""
+    sha = sha256_file(str(sample))
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    partial = json.loads(json.dumps(EXPORT))
+    partial["partial"] = True
+    partial["meta"]["partial"] = True
+    partial["functions"] = partial["functions"][:1]
+    (cache / f"{sha}.json").write_text(json.dumps(partial), encoding="utf-8")
+    runner, calls = fake_ghidra_runner(tmp_path)
+    g = GhidraHeadlessBackend(runner=runner, available=True,
+                              tmp_project_dir=tmp_path / "gt")
+    svc = DecompilerService(cache_dir=cache, ghidra=g)
+    assert svc.read_cached(sha) is not None            # partial 仍可见
+    data, _info = svc.export_to_cache(str(sample))
+    assert calls["n"] == 1                             # 不复用 partial → 触发重导
+    assert len(data["functions"]) == 2                 # 补全为完整导出
+
+
 # ---------- IDA/Jython 脚本静态护栏（真机才能跑，防 IDA 版本/编码坑回归） ----------
 
 _REPO_ROOT = Path(dc.__file__).resolve().parents[2]
@@ -773,6 +1263,26 @@ def test_export_scripts_force_utf8_output():
     assert 'open(OUT, "w", encoding="utf-8")' in ida_src
     g_src = (_REPO_ROOT / "tools/decompiler/ghidra/scripts/export_funcs.py").read_text(encoding="utf-8")
     assert 'io.open(OUT, "w", encoding="utf-8")' in g_src
+
+
+def test_ghidra_script_parallel_shard_guards():
+    # P2：脚本按 postScript 第二参（worker 数）并行分片；每 worker 独占 DecompInterface；
+    # 缺参/非法回退串行；UTF-8 输出不回归（真机才能跑，静态护栏防回归）。
+    g_src = (_REPO_ROOT / "tools/decompiler/ghidra/scripts/export_funcs.py").read_text(encoding="utf-8")
+    assert "import threading" in g_src
+    assert "args[1]" in g_src                      # worker 数取 postScript 第二参
+    assert "DecompInterface()" in g_src            # 每 worker 各自实例化解编译器
+    assert 'io.open(OUT, "w", encoding="utf-8")' in g_src
+
+
+def test_ghidra_script_control_and_partial_guards():
+    # P3：协作式停止（停止标志文件 args[3]）+ 进度文件（args[2]）+ 分片重试 + partial 标记。
+    g_src = (_REPO_ROOT / "tools/decompiler/ghidra/scripts/export_funcs.py").read_text(encoding="utf-8")
+    assert "args[2]" in g_src and "args[3]" in g_src
+    assert "_stop_requested" in g_src and "os.path.exists(STOP)" in g_src
+    assert "_write_progress" in g_src
+    assert '"partial"' in g_src                      # meta/顶层 partial 标记
+    assert "range(2)" in g_src                       # 单函数分片重试一次
 
 
 def test_apply_script_uses_ida_name_flags_not_idc():

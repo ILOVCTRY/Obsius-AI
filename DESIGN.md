@@ -387,9 +387,28 @@ registry 校验 fail-fast（kind 白名单/数组字段/平台键 bin，坏条�
 
 统一抽象 core/tools/decompiler.py：IDA headless 优先 → Ghidra analyzeHeadless 兜底（按 sha256 缓存全量导出，export_version=3 契约）+ IDA GUI MCP 实时桥（只连 loopback，13337 人手实例）+ 按需拉起 IdaMcpManager（无窗口 idat、13338+ 空闲端口、锁检测不抢 GUI 库、LRU 回收）；全不可用退纯静态并出 DECOMPILE_GUIDANCE 安装引导。两腿路径解析（2026-09-23 toolchain-registry M1 起）：registry 四来源优先 → 原生兜底（IDA：PATH→`_IDA_INSTALL_GLOBS`；Ghidra：PATH），registry 命中与原生兜底同源并存，双通道冗余无害。
 
+大样本加速 P1（2026-09-30，复用存量 + 缓存 + 可配超时）：
+- **可配超时**：headless 默认 3h（`HEADLESS_TIMEOUT = 3*3600`，原 900s 对大样本不够），可经 gitignore 覆盖层 `config/decompiler.json` 的 `headless_timeout`（秒）覆盖，`resolve_headless_timeout()` 每次取用（缺省/非法/≤0 回退默认），仿 config/mcp.json 模式。
+- **直读存量**：`IDAHeadlessBackend.export` 若项目 db 目录已有 `.i64/.idb`，直接 `export_db` 复用、不再 `-o` 重建（返回 `reused:True`）；db 被 GUI 锁（`.id0/.id1/.id2/.nam/.til`）则结构化抛 `ida-db-locked` 绝不强写。
+- **全局 sha 缓存**：`DecompilerService(global_cache_dir=…)` 指向 `data/decompiler-cache`；本地缓存缺失时 `_promote_from_global` 原子拉回（跨项目同 sha 零重导），全量导出成功后 `_publish_global` 原子回写；**只全量入全局，MCP 轻量/部分缓存绝不入**（守三层数据纪律）。
+- **导入三端点**（复用外部成果，免重跑）：`import-export`（纳入外部 headless 全量 JSON，校验 `export_version>=EXPORT_VERSION`）、`import-ida-db`（纳入外部 `.i64/.idb` 后库内 `export_db` 重导）、`reexport-db`（库内在册 db 重导刷新缓存）。三者皆后台 Job（`binary.db_imported` / `binary.export_imported` / `binary.db_reexported` 事件），大数据不进 Job 结果（reexport 结果剥 `data` 只留 `{status,sha,functions}`）。
+
+大样本加速 P2（2026-09-30，Ghidra 多进程并行分片主产）：
+- **大样本选路**：样本 ≥ 阈值（默认 20MB `LARGE_SAMPLE_BYTES`，与 app.py `SAMPLE_LARGE_BYTES` 同口径）时，`DecompilerService._ordered_export_backends` 把 Ghidra 提到最前（多进程并行主产）、其余后端兜底；普通样本维持装配顺序（IDA 优先，保 IDA 质量与 .i64 存量复用）。选路在导出时按真实文件大小判定，到期不改全局 prefer 默认。
+- **并行分片**：`GhidraHeadlessBackend(workers=N)` 把并行度作为 postScript 第二实参传给 `tools/decompiler/ghidra/scripts/export_funcs.py`；脚本按函数表切分给 N 个 worker，每 worker 独占一个 `DecompInterface`（各自对应一个独立解编译器进程），原子游标取活避静态分片长尾，按原序合并为 v3 契约。缺参/非法一律回退串行（workers=1，新增前 args 形状不变，兼容既有假 runner）。
+- **默认与内存保护**：`resolve_ghidra_workers()` 默认 `max(1, CPU-1)`，config 可覆盖，一律夹 `[1, GHIDRA_MAX_WORKERS=16]`（每 worker 一个解编译器进程吃内存，满核硬起会 OOM/swap，故设绝对上限）。
+
+大样本加速 P3（2026-09-30，长任务 UX：分片进度 + 协作式停止 + 分片重试）：
+- **进度**：headless 是单个 analyzeHeadless 子进程内跑完，父进程只阻塞等待——进度经**控制文件**交换。脚本按 postScript 位置实参收 `args[2]=进度文件`（每 ~1s 由报告线程写 `{done,total,phase}`）与 `args[3]=停止文件`；后端 `export(progress=…)` 起**监视线程**轮询进度文件回填 job meta（引用共享，前端 `GET /api/jobs/{id}` 轮询即见），`done/total` 即已反编译/总函数数。
+- **协作式停止（保留部分）**：`export(stop_event=…)` 置位 → 监视线程写停止文件 → 脚本在**函数边界**检查并停下（不杀进程），仍写出「已完成函数」的 v3 缓存（函数名/地址全量，伪码只到停点），`meta.partial/stopped` 标记。partial 缓存**只展示不发布全局**、且**不被 `export_to_cache` 复用**（重新「开始分析」即补全）。端点 `POST /binaries/{sha}/triage/cancel`（`app.state.export_cancel[sha]` Event；无在跑幂等）。
+- **分片重试**：脚本内单函数反编译失败重试一次（瞬时解编译器故障自愈），仍失败留 `calls=[]` 无伪码，不拖垮整次导出。
+- 前端：样本条「开始分析」旁进度环 + 「停止」按钮（`api.cancelTriage`），停止后 hint 提示部分结果已保留。
+
 ## 双向写回
 
 func_kb→.i64（apply_names 后台 Job，锁检测结构化降级）与 .i64→func_kb（pull-names 库内重导不删库，防 GUI 手改名丢失，diff 后非自动名才入 name_history）。
+
+复用外部成果（大样本 P1）：`import-export` / `import-ida-db` / `reexport-db` 三端点（见 §反编译双通道）承接手工/他机已分析产物直读入库，免再跑一轮 headless。
 
 ## 工具目录 tools/
 

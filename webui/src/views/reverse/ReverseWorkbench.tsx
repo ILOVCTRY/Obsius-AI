@@ -3,7 +3,7 @@ import { Upload, ShieldAlert } from "lucide-react"
 import { api, pollJob } from "@/lib/api"
 import { useEvents } from "@/lib/useEvents"
 import type {
-  Asset, BinaryOverview, CachedFuncRow, CachedFunction, Finding, FuncEntry,
+  Asset, BinaryOverview, CachedFuncRow, CachedFunction, Finding, FuncEntry, Job,
   PullIdaFunctionsResult, PullNamesResult, PushNamesToIdaResult, XrefData,
 } from "@/lib/types"
 import { hexAddr } from "@/lib/workbench"
@@ -41,7 +41,7 @@ function largeSampleConfirm(mb: number): boolean {
     "仍要继续 headless 分析吗？")
 }
 
-export function ReverseWorkbench({ pid }: { pid: string }) {
+export function ReverseWorkbench({ pid, active = true }: { pid: string; active?: boolean }) {
   const { events } = useEvents(pid)
   const [tick, setTick] = useState(0)
   const bump = useCallback(() => setTick((t) => t + 1), [])
@@ -62,6 +62,9 @@ export function ReverseWorkbench({ pid }: { pid: string }) {
   const [busyAi, setBusyAi] = useState(false)
   // IDA 拉取进度（2026-09-30）：job 轮询带出 {pulled,total}；null=没在拉
   const [pullProgress, setPullProgress] = useState<{ pulled: number; total: number | null } | null>(null)
+  // headless 导出进度（大样本 P3，2026-09-30）：job 轮询带出 {done,total}；null=没在导出
+  const [triageProgress, setTriageProgress] = useState<{ done: number; total: number } | null>(null)
+  const [triageMsg, setTriageMsg] = useState<string | null>(null)
 
   // subnav：逆向分析｜攻击链｜蓝图｜业务逻辑（切页不卸载分析状态，同级条件渲染）
   const [mode, setMode] = useState<"rev" | "chains" | "blueprint" | "logic">("rev")
@@ -84,12 +87,18 @@ export function ReverseWorkbench({ pid }: { pid: string }) {
   const binaries = samples.filter((a) => a.type === "binary")
   const refreshSamples = useCallback(
     () => api.assets(pid).then(setSamples).catch(() => {}), [pid])
+  // Keep-alive（2026-09-30）：active=false（黑板被隐藏）时停轮询；切回 active 变
+  // true 本 effect 重跑 → 立即刷一次 + 恢复 4s 间隔。所有轮询 effect 同此模式。
   useEffect(() => {
+    if (!active) return
     refreshSamples()
     const t = setInterval(refreshSamples, 4000)
     return () => clearInterval(t)
-  }, [refreshSamples])
-  useEffect(() => { refreshSamples() }, [tick, refreshSamples])
+  }, [refreshSamples, active])
+  useEffect(() => {
+    if (!active) return
+    refreshSamples()
+  }, [tick, refreshSamples, active])
 
   // 默认选最新样本；当前 sha 消失则回退
   useEffect(() => {
@@ -104,6 +113,7 @@ export function ReverseWorkbench({ pid }: { pid: string }) {
 
   // overview：缓存缺席也 200，照 4s 轮询（分诊完成自动转 cached）
   useEffect(() => {
+    if (!active) return
     if (!sha) return
     let alive = true
     const load = () =>
@@ -111,34 +121,40 @@ export function ReverseWorkbench({ pid }: { pid: string }) {
     load()
     const t = setInterval(load, 4000)
     return () => { alive = false; clearInterval(t) }
-  }, [pid, sha, tick])
+  }, [pid, sha, tick, active])
 
-  // 缓存函数行（cached 前 409 → 留空）
+  // 缓存函数行（cached 前 409 → 留空）。拉取中由 job 增量推送驱动，跳过全量重拉
+  // （5万+ 行每 2s 全量拉+重建曾拖崩渲染）；拉完 setPullProgress(null) 触发本 effect
+  // 重跑一次全量对账（与磁盘 partial 缓存对齐）。
   useEffect(() => {
+    if (!active) return
+    if (pullProgress) return
     if (!sha || !overview?.cached) { setRows([]); return }
     let alive = true
     api.cachedFunctions(pid, sha).then((r) => alive && setRows(r)).catch(() => {})
     return () => { alive = false }
-  }, [pid, sha, overview?.cached, tick])
+  }, [pid, sha, overview?.cached, tick, pullProgress, active])
 
   // func_kb（该样本分析过的函数）
   useEffect(() => {
+    if (!active) return
     if (!sha) return
     let alive = true
     const load = () => api.funcs(pid, sha).then((f) => alive && setFuncs(f)).catch(() => {})
     load()
     const t = setInterval(load, 4000)
     return () => { alive = false; clearInterval(t) }
-  }, [pid, sha, tick])
+  }, [pid, sha, tick, active])
 
   // 发现（项目级，右栏按 binary 资产/func_id/address 客户端过滤）
   useEffect(() => {
+    if (!active) return
     let alive = true
     const load = () => api.findings(pid).then((f) => alive && setFindings(f)).catch(() => {})
     load()
     const t = setInterval(load, 4000)
     return () => { alive = false; clearInterval(t) }
-  }, [pid, tick])
+  }, [pid, tick, active])
 
   // MCP 实时桥：缓存未分诊/被移走时，单函数伪码与 xref 仍可经 IDA 当前库实时取（列表不替代缓存）
   const mcpLive = overview?.tools.mcp.state === "installed"
@@ -146,6 +162,7 @@ export function ReverseWorkbench({ pid }: { pid: string }) {
 
   // 选中函数：伪码 + xref（headless 缓存优先；缺席且 MCP 在线时后端自动实时降级）
   useEffect(() => {
+    if (!active) return
     if (!sha || !addr || !funcReadable) { setDetail(null); setXref(null); return }
     let alive = true
     setDetailLoading(true)
@@ -159,19 +176,19 @@ export function ReverseWorkbench({ pid }: { pid: string }) {
       setDetailLoading(false)
     })
     return () => { alive = false }
-  }, [pid, sha, addr, funcReadable, tick]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [pid, sha, addr, funcReadable, tick, active]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const currentAsset = binaries.find((a) => a.value === sha) ?? null
   const kbFunc = funcs.find((f) => hexAddr(f.address) === addr) ?? null
   const cacheName = rows.find((r) => r.address === addr)?.name ?? null
 
-  const awaitJob = async (jobId: string | null) => {
-    if (!jobId) { bump(); return }
+  const awaitJob = async (jobId: string | null, onProgress?: (j: Job) => void) => {
+    if (!jobId) { bump(); return null }
     setTriaging(true)
-    const job = await pollJob(jobId, () => {}, 1500)
+    const job = await pollJob(jobId, (j) => onProgress?.(j), 1500)
     setTriaging(false)
     bump()
-    if (job.status === "error") setTriaging(false)
+    return job
   }
 
   const handleUpload = async (file: File) => {
@@ -193,8 +210,26 @@ export function ReverseWorkbench({ pid }: { pid: string }) {
     const size = overview?.asset_meta?.size
     if (typeof size === "number" && size > SAMPLE_LARGE_BYTES &&
         !largeSampleConfirm(Math.round(size / 1024 / 1024))) return
-    const r = await api.retryTriage(pid, sha)
-    await awaitJob(r.job_id)
+    setTriageProgress({ done: 0, total: 0 })
+    try {
+      const r = await api.retryTriage(pid, sha)
+      const job = await awaitJob(r.job_id, (j) => {
+        const p = j.meta?.progress
+        if (p) setTriageProgress({ done: p.done ?? 0, total: p.total ?? 0 })
+      })
+      const res = job?.result as { status?: string; hint?: string } | null
+      if (res?.status === "stopped" && res.hint) setTriageMsg(res.hint)
+    } finally {
+      setTriageProgress(null)
+    }
+  }
+
+  // 停止导出（大样本 P3，协作式）：当前函数反编译完停下并保留已导出部分
+  const handleStopTriage = async () => {
+    if (!sha) return
+    try {
+      await api.cancelTriage(pid, sha)
+    } catch { /* 轮询结束分支兜底 */ }
   }
 
   // IDA 手改名 → func_kb：库内重导 diff（自动名 sub_/nullsub/unk_ 不拉）
@@ -232,6 +267,16 @@ export function ReverseWorkbench({ pid }: { pid: string }) {
       const job = await pollJob(r.job_id, (j) => {
         const p = j.meta?.progress
         if (p) setPullProgress({ pulled: p.pulled ?? 0, total: p.total ?? null })
+        // 增量行：job 每页推送新行，按 address 去重 append——拉取中左栏渐进长出，
+        // 不再每 2s 全量重拉整个函数清单（5万+ 行曾拖崩渲染/白屏）
+        const inc = p?.rows
+        if (inc?.length) {
+          setRows((prev) => {
+            const seen = new Set(prev.map((x) => x.address))
+            const fresh = inc.filter((r) => !seen.has(r.address))
+            return fresh.length ? [...prev, ...fresh] : prev
+          })
+        }
       }, 1000)
       bump()
       const res = job.result as PullIdaFunctionsResult | null
@@ -257,12 +302,8 @@ export function ReverseWorkbench({ pid }: { pid: string }) {
     } catch { /* 轮询结束分支兜底 */ }
   }
 
-  // 拉取中每 2s bump：overview/函数行/func_kb 轮询跟着重载 → 左栏列表渐进长出
-  useEffect(() => {
-    if (!pullProgress) return
-    const t = setInterval(bump, 2000)
-    return () => clearInterval(t)
-  }, [!!pullProgress, bump]) // eslint-disable-line react-hooks/exhaustive-deps
+  // 拉取中左栏渐进由 job 增量行驱动（见 handlePullIdaFunctions 的 pollJob 回调），
+  // 不再每 2s bump 触发全量重拉；overview/funcs/findings 各自 4s 轮询保持原节奏。
 
   // 反向：func_kb 有效命名批量写回 GUI IDA 当前库（只改内存，提示用户落盘）
   const handlePushNames = async (): Promise<string> => {
@@ -315,6 +356,7 @@ export function ReverseWorkbench({ pid }: { pid: string }) {
         onPullNames={handlePullNames}
         onPullIdaFunctions={handlePullIdaFunctions} onPushNames={handlePushNames}
         pullProgress={pullProgress} onStopPull={handleStopPull}
+        triageProgress={triageProgress} onStopTriage={handleStopTriage} triageMsg={triageMsg}
       />
       {/* subnav：逆向分析｜攻击链｜蓝图｜业务逻辑（DESIGN §12 / §9 R4） */}
       <div className="flex shrink-0 items-center gap-1 border-b px-2 py-1">

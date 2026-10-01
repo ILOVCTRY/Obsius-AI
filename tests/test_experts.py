@@ -250,6 +250,13 @@ def test_caps_effective_fallback_full_and_union(tmp_path):
     # 存量直通：无绑定 → fallback（meta.capabilities）原样，零翻译
     assert caps_effective(root, "pentest", None, fallback=["web"]) == ["web"]
     assert caps_effective(root, "pentest", [], fallback=None) == []
+    # research 轨默认补 binary（2026-09-30 逆向项目口径）：无专家且 fallback 空时
+    # 按轨默认补全（前端 research→rev-generic 逆向工作台）；显式 fallback 仍直通
+    assert caps_effective(root, "research", None, fallback=None) == ["binary"]
+    assert caps_effective(root, "research", [], fallback=[]) == ["binary"]
+    assert caps_effective(root, "research", None, fallback=["crypto"]) == ["crypto"]
+    # 非 research 轨无默认（pentest 存量直通语义不变）
+    assert caps_effective(root, "ctf", None, fallback=None) == []
     # 全量专家 → capabilities/ 目录全集
     assert caps_effective(root, "pentest", ["_generalist"]) == ["crypto", "web"]
     # 绑定并集：专家技能（capability 类）所属包推导

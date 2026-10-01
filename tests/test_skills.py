@@ -526,20 +526,21 @@ def test_real_research_track_landed():
                      "analyze": "passive", "verify": "passive",
                      "blueprint": "passive", "reconstruct": "passive"}  # R4 新增两类型
     analyst = load_expert("packs", "reverse-analyst", "research")
-    assert analyst["skills"] == ["file-triage", "binary-rev", "android-rev"]  # android-kb-sourcing M1 挂载
+    assert analyst["skills"] == ["file-triage", "binary-rev", "android-rev",
+                                 "binary-diff", "dotnet-rev"]  # android-kb-sourcing M1 + reverse-skill 收编挂载
     assert analyst["task_types"] == ["triage", "reverse", "analyze", "verify"]
     assert analyst["default_noise"] == "passive"
     assert analyst.get("persona")  # 数据纪律 persona 必填护栏
     auditor = load_expert("packs", "code-auditor", "research")  # J 组：代码审计员
     assert auditor["task_types"] == ["analyze", "verify"]
-    assert auditor["skills"] == ["file-triage", "binary-rev"]
+    assert auditor["skills"] == ["file-triage", "binary-rev", "web-source-audit"]
     g = load_expert("packs", "_generalist", "research")
     assert g["skills"] is None
 
     # 白名单技能真实存在（不悬空）
     reg = SkillRegistry("packs")
     reg.load()
-    assert {"file-triage", "binary-rev"} <= {s.name for s in reg.all()}
+    assert {"file-triage", "binary-rev", "web-source-audit"} <= {s.name for s in reg.all()}
 
     # 真实仓库 doctor：research 轨零 error/warning（redlines.md/task_types.yaml 是必要件）
     rep = diagnose(Path("packs"))

@@ -5,6 +5,11 @@ config/providers.json：
         {"name": "ark-coding", "base_url": "...", "api_key": "",
          "models": ["ark-code-latest", ...], "enabled": true}, ...]}
 
+可选字段（2026-09-30 上下文治理 ct-7，均为 provider 级；缺省走运行时模块常量）：
+- "model_window": 1048566      硬窗口（优先于按模型的 "model_context"）
+- "ctx_soft_budget": 512000    有效软上限（支持 1M≠在 1M 最好，超此主动压缩）
+- "summarizer_model": "<model>" 专用摘要模型（缺省用会话模型）
+
 约定：
 - models[] 有序，**第一个 = 该供应商默认模型**；全局默认 = 第一个启用供应商的第一个模型。
 - api_key 留空 → 回退 ARK_API_KEY/.env（resolve_api_key），ark-coding 的标准姿态。
@@ -47,6 +52,10 @@ _SEED = {
             "api_key": "",  # 本机在设置页/配置文件中填入
             "models": ["ark-code-latest", "deepseek-v4-flash", "glm-5-3-flash-260828"],
             "enabled": True,
+            # 上下文治理（可选，2026-09-30 ct-7）：硬窗口/软上限/专用摘要模型；
+            # 省略即用运行时模块常量（1048566 / 512000 / 会话模型）
+            "model_window": 1048566,
+            "ctx_soft_budget": 512000,
         },
     ]
 }
@@ -161,7 +170,7 @@ class ProviderStore:
                     continue
                 if m in models and 0 < n <= 10_000_000:
                     ctx[m] = n
-        return {
+        out = {
             "name": name,
             "base_url": base_url,
             "api_key": str(p.get("api_key", "")),
@@ -169,6 +178,38 @@ class ProviderStore:
             "enabled": bool(p.get("enabled", True)),
             "model_context": ctx,
         }
+        # 思考链开关（2026-09-30）：显式 True/False 才落字段；None/缺失=不写，
+        # 运行时按网关缺省猜（base_url 含 ark 默认开）。此前本函数白名单把
+        # thinking 抹掉——设置页保存一次即丢，思考链静默消失
+        thinking = p.get("thinking")
+        if thinking is not None:
+            out["thinking"] = bool(thinking)
+        # 上下文治理（2026-09-30 ct-7）：同 thinking——显式才落字段，否则设置页
+        # 保存一次即被白名单抹掉（此前 thinking 就是这么静默消失的）。三者均为
+        # 可选，缺省时运行时用模块常量兜底：
+        #   model_window     硬窗口（provider 级，优先于按模型的 model_context）
+        #   ctx_soft_budget  有效软上限（支持 1M≠在 1M 最好，超此主动压缩）
+        #   summarizer_model  专用摘要模型（缺省用会话模型）
+        mw = p.get("model_window")
+        if mw is not None:
+            try:
+                n = int(mw)
+            except (TypeError, ValueError):
+                n = 0
+            if 0 < n <= 10_000_000:
+                out["model_window"] = n
+        sb = p.get("ctx_soft_budget")
+        if sb is not None:
+            try:
+                n = int(sb)
+            except (TypeError, ValueError):
+                n = 0
+            if 0 < n <= 10_000_000:
+                out["ctx_soft_budget"] = n
+        sm = str(p.get("summarizer_model") or "").strip()
+        if sm:
+            out["summarizer_model"] = sm
+        return out
 
     def masked(self) -> list[dict[str, Any]]:
         """API 出参：不回传明文 key。"""
@@ -228,10 +269,15 @@ class ProviderStore:
         thinking = p.get("thinking")
         if thinking is None:
             thinking = "ark" in str(p.get("base_url", "")).lower()
+        # 硬窗口优先取 provider 级 model_window（2026-09-30 ct-7），否则按模型粒度
+        # model_context[model]；两者皆空 → None（运行时回落 _MODEL_WINDOW_FALLBACK）。
+        window = p.get("model_window") or (p.get("model_context") or {}).get(model)
         return AnthropicCompatProvider(
             base_url=p["base_url"], api_key=self.resolve_key(p), model=model,
             enable_thinking=bool(thinking),
-            context_tokens=(p.get("model_context") or {}).get(model))
+            context_tokens=window,
+            ctx_soft_budget=p.get("ctx_soft_budget"),
+            summarizer_model=p.get("summarizer_model"))
 
     # ---------- 发现 / 探活 ----------
 

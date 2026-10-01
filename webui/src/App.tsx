@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react"
+import { Component, useCallback, useEffect, useState, type ErrorInfo, type ReactNode } from "react"
 import { Group, Panel, Separator, useDefaultLayout } from "react-resizable-panels"
 import type { LucideIcon } from "lucide-react"
 import {
@@ -8,6 +8,7 @@ import {
   Blocks,
   Bot,
   CheckCircle2,
+  ChevronDown,
   ChevronLeft,
   Globe2,
   Inbox,
@@ -57,18 +58,16 @@ const boardViewOf = (m: ProjectDetail | null): string | undefined => {
   return typeof v === "string" && v ? v : undefined
 }
 
-type NavItem = { key: View; label: string; icon: LucideIcon; needsProject: boolean }
+type NavItem = { key: View; label: string; icon: LucideIcon; needsProject: boolean; homeOnly?: boolean }
 
-const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
+const NAV_GROUPS: { label: string; items: NavItem[]; collapsible?: boolean }[] = [
   {
     label: "工作区",
     items: [
       { key: "projects", label: "项目", icon: FolderKanban, needsProject: false },
-      { key: "intel", label: "情报", icon: Inbox, needsProject: false },
-      { key: "live", label: "会话", icon: Radio, needsProject: true },
+      { key: "intel", label: "情报", icon: Inbox, needsProject: false, homeOnly: true },
       { key: "agents", label: "智能体", icon: Bot, needsProject: true },
       { key: "board", label: "黑板", icon: LayoutDashboard, needsProject: true },
-      { key: "tasks", label: "任务", icon: ListChecks, needsProject: true },
     ],
   },
   {
@@ -77,6 +76,15 @@ const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
       { key: "browser", label: "浏览器", icon: Globe2, needsProject: true },
       { key: "approvals", label: "审批", icon: ShieldCheck, needsProject: true },
       { key: "settings", label: "技能与设置", icon: Settings2, needsProject: false },
+    ],
+  },
+  // 更多（2026-09-30）：会话/任务降级为二级入口，默认折叠收纳（见 NavRail 折叠逻辑）
+  {
+    label: "更多",
+    collapsible: true,
+    items: [
+      { key: "live", label: "会话", icon: Radio, needsProject: true },
+      { key: "tasks", label: "任务", icon: ListChecks, needsProject: true },
     ],
   },
 ]
@@ -89,11 +97,26 @@ function NavRail({ active, onSelect, locked, className, expanded = false, pendin
   expanded?: boolean
   pendingApprovals?: number
 }) {
-  // 无项目上下文时只展示全局项（needsProject=false：项目/情报/设置），
+  const [moreOpen, setMoreOpen] = useState(
+    () => window.localStorage.getItem("ui.nav-more-open") === "1")
+  useEffect(() => {
+    window.localStorage.setItem("ui.nav-more-open", moreOpen ? "1" : "0")
+  }, [moreOpen])
+
+  // 无项目上下文时只展示全局项（needsProject=false：项目/情报/设置）；
+  // 进入项目后移除 homeOnly 项（情报）——情报是全局模块，只在首页留入口。
   // 不再硬编码 key 白名单——8cb819d 曾因硬编码列表与 NAV_GROUPS 漂移致情报入口消失
   const groups = locked
-    ? [{ label: "", items: NAV_GROUPS.flatMap((group) => group.items).filter((item) => !item.needsProject) }]
-    : NAV_GROUPS
+    ? [{ label: "", collapsible: false, items: NAV_GROUPS.flatMap((group) => group.items).filter((item) => !item.needsProject) }]
+    : NAV_GROUPS.map((group) => ({
+        label: group.label,
+        collapsible: group.collapsible,
+        items: group.items.filter((item) => !item.homeOnly),
+      })).filter((group) => group.items.length > 0)
+
+  // 「更多」折叠（2026-09-30）：会话/任务降级为二级入口，手动状态持久化（ui.nav-more-open）；
+  // 当前视图在其中时强制展开保高亮；窄栏态无标题可点 → 直接展开。
+  const moreActive = active === "live" || active === "tasks"
 
   return (
     <nav className={cn("app-nav flex shrink-0 flex-col border-r", expanded ? "items-stretch" : "items-center", className)}>
@@ -102,28 +125,43 @@ function NavRail({ active, onSelect, locked, className, expanded = false, pendin
         {expanded && <span>Obsius</span>}
       </div>
       <div className="nav-scroll">
-        {groups.map((group) => (
-          <div className="nav-group" key={group.label || "home"}>
-            {expanded && group.label && <span className="nav-group-label">{group.label}</span>}
-            {group.items.map((n) => {
-              const Icon = n.icon
-              const disabled = n.needsProject && locked
-              return (
+        {groups.map((group) => {
+          const collapsible = !!group.collapsible
+          const open = !collapsible || !expanded || moreOpen || moreActive
+          return (
+            <div className="nav-group" key={group.label || "home"}>
+              {expanded && group.label && (collapsible ? (
                 <button
-                  key={n.key}
-                  disabled={disabled}
-                  onClick={() => onSelect(n.key)}
-                  title={expanded ? undefined : n.label}
-                  className={cn("nav-item", expanded ? "justify-start px-3" : "justify-center", active === n.key && "is-active", disabled && "is-locked")}
+                  className="nav-group-toggle"
+                  aria-expanded={open}
+                  onClick={() => setMoreOpen((v) => !v)}
                 >
-                  <Icon size={17} strokeWidth={1.8} />
-                  {expanded && <span>{n.key === "settings" && locked ? "设置" : n.label}</span>}
-                  {n.key === "approvals" && pendingApprovals > 0 && <span className="nav-count">{pendingApprovals}</span>}
+                  <span className="nav-group-label">{group.label}</span>
+                  <ChevronDown size={12} className={cn("nav-group-chevron", open && "is-open")} />
                 </button>
-              )
-            })}
-          </div>
-        ))}
+              ) : (
+                <span className="nav-group-label">{group.label}</span>
+              ))}
+              {open && group.items.map((n) => {
+                const Icon = n.icon
+                const disabled = n.needsProject && locked
+                return (
+                  <button
+                    key={n.key}
+                    disabled={disabled}
+                    onClick={() => onSelect(n.key)}
+                    title={expanded ? undefined : n.label}
+                    className={cn("nav-item", expanded ? "justify-start px-3" : "justify-center", active === n.key && "is-active", disabled && "is-locked")}
+                  >
+                    <Icon size={17} strokeWidth={1.8} />
+                    {expanded && <span>{n.key === "settings" && locked ? "设置" : n.label}</span>}
+                    {n.key === "approvals" && pendingApprovals > 0 && <span className="nav-count">{pendingApprovals}</span>}
+                  </button>
+                )
+              })}
+            </div>
+          )
+        })}
       </div>
       {expanded && <div className="nav-footer"><Activity size={14} /><span>系统在线</span><span className="status-dot" /></div>}
     </nav>
@@ -139,12 +177,40 @@ function NavReveal({ onExpand }: { onExpand: () => void }) {
   )
 }
 
+/** 全局渲染兜底：任一视图渲染异常不再整个页面白屏只剩底色（此前无 ErrorBoundary），
+ * 显示错误信息 + 重试按钮，错误范围限制在主区，导航/顶栏不受影响 */
+class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+  state: { error: Error | null } = { error: null }
+  static getDerivedStateFromError(error: Error) { return { error } }
+  componentDidCatch(error: Error, info: ErrorInfo) { console.error("ErrorBoundary:", error, info) }
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="flex h-full w-full flex-col items-center justify-center gap-3 p-6">
+          <p className="text-sm font-medium text-(--status-error)">界面渲染出错</p>
+          <pre className="max-w-xl whitespace-pre-wrap break-words rounded bg-muted/40 p-3 font-mono text-[10px] text-muted-foreground">
+            {String(this.state.error)}
+          </pre>
+          <Button size="sm" variant="outline" onClick={() => this.setState({ error: null })}>重试</Button>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
+
 export default function App() {
   const [pid, setPid] = useState<string | null>(null)
   const [meta, setMeta] = useState<ProjectDetail | null>(null)
   const [view, setView] = useState<View>("projects")
   const [pendingApprovals, setPendingApprovals] = useState(0)
   const [boardOpen, setBoardOpen] = useState(true)
+  // 黑板 Keep-alive（2026-09-30）：首次点开「黑板」的 pid 才挂载（没点过的项目不
+  // 预加载）；同项目切视图不卸载只隐藏，换项目（pid 变）时因 key={pid} 全新挂载重载
+  const [boardSeenPid, setBoardSeenPid] = useState<string | null>(null)
+  useEffect(() => {
+    if (view === "board" && pid) setBoardSeenPid((prev) => (prev === pid ? prev : pid))
+  }, [view, pid])
   // 全局侧栏收起（2026-09-29）：完全隐藏，左缘把手唤出；记忆上次形态
   const [navCollapsed, setNavCollapsed] = useState(
     () => window.localStorage.getItem("ui.nav-collapsed") === "1")
@@ -331,6 +397,7 @@ export default function App() {
           {/* 中：主区（直播间在 live 视图与黑板同屏共存） */}
           <Panel id="main">
             <main className={cn("h-full min-w-0", view === "live" ? "flex" : "overflow-auto")}>
+            <ErrorBoundary>
           {view === "live" && (
             <>
               <Group orientation="horizontal" className="flex min-h-0 w-full"
@@ -364,16 +431,22 @@ export default function App() {
               </button>
             </>
           )}
-          {view === "board" && (
+          {pid && boardSeenPid === pid && (
+            // 黑板 Keep-alive（2026-09-30）：首次点开才挂载；同项目切视图不卸载只
+            // hidden 隐藏，切回原样恢复（滚动/选中/已拉详情全保留）；换项目因
+            // key={pid} 全新挂载=全量重载。嵌套 ErrorBoundary：隐藏的黑板若崩了
+            // 不影响当前正在看的视图（错误状态随 key={pid} 逐项目重置）。
             // main 是 h-screen flex 行的定高 flex 项：h-full 相对其内容盒可解析，
             // 打通 main→wrapper→黑板的高度链（rev 三栏/评估攻击链画布都需要定高；
             // 列表/资产/函数库内部本就是 ScrollArea flex-1）。
-            <div className={profile === "rev-generic" ? "h-full w-full overflow-hidden" : "h-full w-full"}>
-              {profile === "rev-generic"
-                ? <ReverseWorkbench pid={pid} />
-                : <Blackboard pid={pid} track={meta?.track} capabilities={meta?.capabilities}
-                              defaultView={boardViewOf(meta)} />}
-            </div>
+            <ErrorBoundary key={pid}>
+              <div className={cn(profile === "rev-generic" ? "h-full w-full overflow-hidden" : "h-full w-full", view !== "board" && "hidden")}>
+                {profile === "rev-generic"
+                  ? <ReverseWorkbench key={pid} pid={pid} active={view === "board"} />
+                  : <Blackboard key={pid} pid={pid} track={meta?.track} capabilities={meta?.capabilities}
+                                defaultView={boardViewOf(meta)} />}
+              </div>
+            </ErrorBoundary>
           )}
           {view === "tasks" && <TaskBoard pid={pid} focused={taskNav} />}
           {view === "agents" && <AgentWorkbenchView pid={pid} meta={meta} />}
@@ -386,6 +459,7 @@ export default function App() {
           )}
           {view === "approvals" && <ApprovalsView pid={pid} onGotoTasks={() => setView("tasks")} />}
           {view === "settings" && <SettingsView nav={settingsNav} pid={pid} />}
+            </ErrorBoundary>
             </main>
           </Panel>
         </Group>

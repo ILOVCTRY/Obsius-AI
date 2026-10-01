@@ -36,6 +36,11 @@ export function XrefPane({
           MCP 实时 · {xref.name ?? xref.address}
         </p>
       )}
+      {xref.source === "cache" && (
+        <p className="px-1 text-[9px] text-muted-foreground" title="按需详情缓存（自动从 IDA MCP 拉取落盘，离线可读）">
+          已缓存 · {xref.name ?? xref.address}
+        </p>
+      )}
       <section>
         <h4 className="mb-1 px-1 text-[10px] font-medium text-muted-foreground">被谁调用 · {xref.callers.length}</h4>
         {xref.callers.length === 0

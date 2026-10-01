@@ -1,0 +1,27 @@
+reverse-skill 1.0.1 收编许可登记（2026-09-30）
+来源：开源优秀项目/逆向/reverse-skill-1.0.1（上游 MIT，Copyright (c) 2025 zhaoxuya520）
+范围：packs/kb/binary/{dotnet,edr,reverse,android}/ 下收编改编文档与
+packs/capabilities/binary/skills/{binary-diff,dotnet-rev}、packs/tracks/redteam/skills/edr-hook-rev
+的来源内容；CTF-Sandbox-Orchestrator（GPLv3）本次未收编。
+
+MIT License
+
+Copyright (c) 2025 zhaoxuya520
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

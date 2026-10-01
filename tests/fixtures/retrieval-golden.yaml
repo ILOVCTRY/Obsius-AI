@@ -56,6 +56,16 @@ entries:
   - query: SQL 注入测试，先按 SQL 注入手册打一遍
     cap: web
     expect: [web/webapp/sqli/手册.md, web/playbooks/sqli.md]
+  # ---- 源码白盒审计方法论（AutoCVE 重写落地，2026-10-01）：确保新知识不被挤出 top-4 ----
+  - query: 对目标做源码白盒审计，先过一遍攻击面覆盖率矩阵
+    cap: web
+    expect: [web/webapp/source-audit/手册.md]
+  - query: 污点分析追踪用户输入到危险函数 sink
+    cap: web
+    expect: [web/webapp/taint-analysis/手册.md]
+  - query: 检查接口是不是缺鉴权，端点权限矩阵过一遍
+    cap: web
+    expect: [web/webapp/control-gap/手册.md]
   # ---- binary ----
   - query: 栈溢出 ret2libc 打法，先找 gadget 再写 exp
     cap: binary
