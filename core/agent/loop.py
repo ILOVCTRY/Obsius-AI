@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from core.agent.retention import omitted_note, retain
+from core.agent.session_state import SessionState, state_proxy
 from core.agent.tools import (
     AGENT_TOOLS,
     HARD_REJECT_PREFIXES,
@@ -41,7 +42,6 @@ from core.runtime.gateway import ExecutionGateway
 from core.skills import (
     SkillRegistry,
     build_rules_preamble,
-    load_kb_sources,
     load_task_types,
 )
 from core.skills.judge import judge_finding
@@ -143,9 +143,10 @@ STRICT_PROMPT_TAIL = """
    bb_add_artifact（永久保存+进证据链）；临时中间文件用**相对路径**写当前工作
    目录（服务端已固定到本项目 scratch，可随时清理，系统 TEMP 已重定向到项目内）；
    向工作区外绝对路径写文件会被网关拒绝——不要重试同一写法。
-8. 工具调用策略：无依赖的调用在同一轮**并行发出**（如同时查多个资产、多个 kb 模块）；
-   专用工具优先于 run_cmd 拼命令（查黑板走 bb_query、查知识库走 kb_search/kb_open、
-   查路由索引走 route_lookup）；大段正文按需取用（技能正文 skill_open），不要凭记忆复述文档。
+8. 工具调用策略：无依赖的调用在同一轮**并行发出**（如同时查多个资产或多个函数）；
+   专用工具优先于 run_cmd 拼命令（查黑板走 bb_query，读取当前方法走 skill_open）；
+   Skill 正文和同目录 references/scripts/examples/assets 是本任务的首选方法来源，按需读取，
+   不要凭记忆复述文件。旧 kb_search/kb_open/route_lookup 只用于兼容尚未迁移的历史资料。
 9. 执行环境速查：cwd 已由服务端固定到本项目 scratch（host/wsl/docker 均是，docker
    容器内对应 /workspace/scratch）——命令一律 **用相对路径，禁止手动 cd**（尤其不要拼
    cd /mnt/...）。runtime 语义：docker=Linux 渗透工具箱（bash + nmap/sqlmap/dirsearch/
@@ -512,38 +513,43 @@ class AgentSession:
 
         # 会话控制面（DESIGN.md §3）：API 线程只置 Event，worker 线程在步边界消费
         # （_pause_req/_abort_req 已上移到 dispatcher 构造前——■ 即点即停要传 abort_event）
-        self._resume_state: dict[str, Any] | None = None
+        # session-state 收敛（2026-10-03）：本会话与 dispatcher 的任务/闸门状态统一
+        # 落 SessionState，两处各以 property 代理原属性名（见文件末 _state_proxies）。
+        # dispatcher 构造已在其上方完成，此处注入同一实例（单向共享，无反向依赖）。
+        self.state = SessionState()
+        self.dispatcher._state = self.state
         # 快照 = {system, messages, objective, task_id, next_step}——暂停时保存，恢复续跑
         # v0.64：_loop 在册的当前任务现场（system/messages 引用/objective）——暂停请求
         # 时刻 API 线程据此即时落盘，关后端不再丢「暂停未到步边界」窗口期的现场。
-        self._live_state: dict[str, Any] | None = None
-        # fail 抢救收尾（2026-09-20）：_loop 入口在册的任务现场（objective/messages
-        # 引用），异常穿出后供 _salvage_attempt 提炼部分结论；正常退出即清
-        self._salvage_ctx: dict[str, Any] | None = None
+        # 字段语义与复位归属见 SessionState 各字段注释。
         self.paused = False            # 暂停态（含快照暂停与空闲暂停），恢复/中断后复位
         self._stop_after_task = False  # 硬中断后让 worker 循环退出的一次性闸门
-        # E2 硬拒绝熔断计数：连续含硬拒绝的模型步数（每任务复位，见 _loop_body 开头）
-        self._reject_streak = 0
-        # 计划闸教练计数：含计划闸回执的模型步数（每任务/计划落黑板时复位）
-        self._plan_gate_count = 0
-        # stuck-convergence D1：卡死波次（每任务复位）——第 1 轮召唤顾问，
-        # 第 2 轮不再召唤、升级停轮保护（宁停不烧，见 _stuck_escalate）
-        self._stuck_waves = 0
-        # stuck-convergence D9：活跃探索静默延长次数（每任务复位，上限见常量；
-        # 观察窗到期但命令/读文件在演进 → 延长不叫顾问，见 _active_exploration）
-        self._stuck_extensions = 0
         # 批 5（§6.8）：worker 退出原因信号——True=最后一次 claim 队列为空（可触发
         # L2 续 tick）；暂停/中断退出保持 False。run_next_task 每次认领前置 False。
         self.last_claim_idle = False
         self._heartbeat: _LeaseHeartbeat | None = None  # 当前任务的租约心跳
-        # 撤回传播：已在首条消息告过警的任务（防续跑/重入重复告警）
-        self._stale_alerted: set[str] = set()
         if existing_session is not None:
             # E8：暂停快照已落盘 → 载回 _resume_state 并置回暂停态
             #（服务重启后 resume 仍可从快照+步数断点续跑；无快照行为同旧版）
             self._resume_state = self._load_persisted_snapshot()
             if self._resume_state is not None:
                 self.paused = True
+
+    # ---------- 状态代理（session-state 收敛，2026-10-03） ----------
+    # 原属性名全部保留（读写点与测试断言零改动），存储落共享 SessionState。
+    # 每任务复位见 SessionState.reset_for_task；未列的字段不随任务复位。
+
+    _resume_state = state_proxy("resume_state")
+    _live_state = state_proxy("live_state")
+    _salvage_ctx = state_proxy("salvage_ctx")
+    _reject_streak = state_proxy("reject_streak")
+    _plan_gate_count = state_proxy("plan_gate_count")
+    _stuck_waves = state_proxy("stuck_waves")
+    _stuck_extensions = state_proxy("stuck_extensions")
+    _cadence_last_rev = state_proxy("cadence_last_rev")
+    _cadence_last_hint_step = state_proxy("cadence_last_hint_step")
+    _cadence_hinted_findings = state_proxy("cadence_hinted_findings")
+    _stale_alerted = state_proxy("stale_alerted")
 
     # ---------- 租约心跳（A1：长任务防 30 分钟 TTL 过期被重领双跑） ----------
 
@@ -782,11 +788,11 @@ class AgentSession:
                           task_id: str | None = None,
                           task_type: str | None = None,
                           scope: str | None = None) -> str:
-        """全量技能描述注入（K8 2026-09-29：废弃 top-1 路由命中，Claude 风格）。
+        """注入当前项目可用的自包含 Skill 清单（cc 风格渐进披露）。
 
         角色白名单优先、generalist 全量——每技能注入 name+description 一行
-        （渐进披露层1）；正文仍靠 skill_open 按需打开（层2）。不再注入 kb
-        提示行（📚/🧭/📖 移除，靠模型主动 kb_search/kb_open 检索）。
+        （渐进披露层 1）；完整正文和同目录资源仍靠 skill_open 按需打开（层 2）。
+        全局 packs/kb 不再作为新 Skill 的默认上下文来源。
 
         审计：skill.routed 事件改记录本轮注入技能清单（payload injected+count，
         历史 route_points/kb_hits 数据仍在旧事件里，旁路统计自然降级）。
@@ -803,19 +809,20 @@ class AgentSession:
                    if s.enabled and s.pack in pack_set]
         if role_skills:
             enabled = [s for s in enabled if s.name in role_skills]
-        # 全量技能描述块（渐进披露层1：name+description；层2 正文走 skill_open）
+        # cc 风格渐进披露：每个技能自带完整 SKILL.md，正文和附属资源仍按需
+        # skill_open 读取，避免把所有方法论一次塞进 system。
         if enabled:
-            skill_lines = [f"- {s.name}：{s.description or ''}" for s in enabled]
+            skill_lines = []
+            for s in enabled:
+                marker = "自包含" if s.is_self_contained else "兼容旧技能"
+                resources = len(s.resources)
+                suffix = f"；资源 {resources} 个" if resources else ""
+                skill_lines.append(f"- {s.name}：{s.description or ''}（{marker}{suffix}）")
             skill_block = (
-                "可用技能清单（name+description；动手前用 skill_open(\"<name>\") "
-                "打开全量正文）\n" + "\n".join(skill_lines))
+                "可用技能清单（cc 风格；动手前用 skill_open(name=\"<name>\") "
+                "打开完整 SKILL.md，附属资料用 path 按需读取）\n" + "\n".join(skill_lines))
         else:
             skill_block = "（当前无可用技能）"
-        # 可用知识库源清单（kb 检索入口：kb_search 全文 / kb_open 按路径打开）
-        sources = [{"id": s.id, "domain": s.root.name, "root": str(s.root)}
-                   for s in load_kb_sources(self.packs_root, self.capabilities)
-                   if s.root.is_dir()]
-        source_json = json.dumps(sources, ensure_ascii=False)
         # 审计：记录本轮注入技能清单（可观测；旁路统计靠旧事件数据自动降级）
         self.bb.append_event(
             self.project_id, "skill.routed",
@@ -823,10 +830,7 @@ class AgentSession:
              "count": len(enabled), "task_id": task_id,
              "query": route_query[:200], "task_type": task_type},
             session_id=self.session["id"], author=self.session["id"])
-        return (
-            f"{skill_block}\n\n"
-            f"## 可用知识库源（kb_open 用全局 module=<域>/<快照>/<路径> 打开，禁止通读）\n{source_json}"
-        )
+        return skill_block
 
     def _skill_digest(self, sk: Any) -> str:
         """命中技能的渐进披露摘要（G1）：正文不整段进 system——给目录 + skill_open
@@ -1950,31 +1954,14 @@ class AgentSession:
         本会话内跨任务生效。"""
         max_steps = self.dispatcher.max_steps
         step = start_step
-        # 每任务复位收尾标志（潜伏 bug 修复：finish 后同会话再认领的任务会在
-        # 首步命中 stale finished → 返回旧总结并被 _finalize 误标失败）
-        self.dispatcher.finished = False
-        self.dispatcher.awaiting_human = False
-        self.dispatcher.plan_only_mode = False
-        self.dispatcher.summary = ""
-        self.dispatcher.delegation_just_finished = False  # 委托收尾信号随委托复位
-        self.dispatcher.last_delegation_note = ""
-        self.dispatcher._finish_open_intents_ack = False  # 意图纪律①确认态随任务复位
-        # 意图先行闸（口径 Y，2026-10-01）：每认领一个任务都要「先立意再动手」，
-        # 首次实质动作放行标志随任务复位（chat 链无任务，跨对话轮保持一次性）
-        self.dispatcher._intent_lead_passed = False
-        self._reject_streak = 0  # E2 硬拒绝熔断计数随任务复位
-        self._plan_gate_count = 0  # 计划闸教练计数随任务复位
-        self._stuck_waves = 0  # D1 卡死波次随任务复位
-        self._stuck_extensions = 0  # D9 活跃探索延长次数随任务复位
-        # 阶段三规划节拍（2026-09-28）：双源触发状态随任务复位——
-        # _cadence_last_rev=上次 task.plan_revised 事件 id（周期触发去重）；
-        # _cadence_last_hint_step=上次周期提示步（每 K 步最多一次）；
-        # _cadence_hinted_findings=已提示过的新发现 id 集（同一发现只提示一次）。
-        self._cadence_last_rev = 0
-        self._cadence_last_hint_step = 0
-        self._cadence_hinted_findings: set[str] = set()
-        # D6 收尾确认轮状态随任务复位（上一任务残留的确认态不得带进新任务）
-        self.dispatcher.reset_closing()
+        # 每任务复位（session-state 收敛，2026-10-03）：原先散在这里的十余行逐字段
+        # 赋值 + reset_closing() 收敛为单入口 SessionState.reset_for_task（字段与
+        # 复位值逐字段等价）。覆盖：收尾标志（潜伏 bug 修复：finish 后同会话再认领
+        # 的任务会在首步命中 stale finished → 返回旧总结并被 _finalize 误标失败）、
+        # 意图先行闸放行标志（口径 Y，2026-10-01：每任务都要「先立意再动手」；
+        # chat 链无任务，跨对话轮保持一次性）、E2/D1/D9 计数、阶段三规划节拍状态
+        # （2026-09-28）、D6 收尾确认轮状态（上一任务残留的确认态不得带进新任务）。
+        self.state.reset_for_task()
         # while 而非 range（E8）：request_steps 在步内增补预算后，循环上界随之
         # 前移——耗尽轮当场自救（步号不增）也成立，不会因 range 预计算被截断。
         while step <= max_steps:

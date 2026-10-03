@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from core.agent.retention import omitted_note, retain, spill_text
+from core.agent.session_state import SessionState, state_proxy
 from core.blackboard import Blackboard, ClaimError, TaskQueue
 from core.blackboard.assets import register_asset
 from core.blackboard.attackpath import _intent_in_site, _subtree_ids
@@ -653,7 +654,7 @@ AGENT_TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "kb_open",
-        "description": "打开知识库模块（能力包 kb/ 区，含测试包手册与快照）："
+        "description": "[legacy] 打开尚未迁移的全局知识库模块（packs/kb/ 区，含测试包手册与快照）："
                        "返回文件绝对路径，随后按需 Read。"
                        ".md/.py/.txt/.json 均可打开（弹药脚本只是文本，执行仍须走 run_cmd）。"
                        "路径不存在会返回可用模块清单（照清单改选，禁止猜文件名、"
@@ -671,7 +672,7 @@ AGENT_TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "kb_search",
-        "description": "按关键词全文检索知识库（大小写不敏感子串匹配）："
+        "description": "[legacy] 按关键词全文检索尚未迁移的全局知识库（大小写不敏感子串匹配）："
                        "返回 {path（即 kb_open 的 module 参数）, source, matches, snippet}。"
                        "多关键词空格分隔为 AND 语义（各词都命中的文件才返回），"
                        "零结果自动放宽为 OR（任一词命中）。"
@@ -1197,8 +1198,9 @@ AGENT_TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "route_lookup",
-        "description": "按关键词查询测试点路由索引（认领时只注入最相关条目，其余在这里查）。"
-                       "返回 测试点 → kb 模块路径；命中后用 kb_open 打开手册细读。",
+        "description": "[legacy] 按关键词查询旧测试点路由索引。"
+                       "返回测试点 → packs/kb 模块路径；仅用于兼容未迁移资料，"
+                       "当前 Skill 优先使用 skill_open 打开自身目录。",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -1210,12 +1212,14 @@ AGENT_TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "skill_open",
-        "description": "打开技能的全量正文（认领注入的是技能目录摘要，不整段注入）。"
-                       "name 用当前命中技能名或 route_lookup/设置页看到的技能名。",
+        "description": "打开当前可用技能的 SKILL.md 或同一技能目录内的资源。"
+                       "cc 风格技能把完整方法写在 SKILL.md，references/scripts/examples/assets"
+                       " 中的文件按需读取；省略 path 时返回正文和资源清单。",
         "input_schema": {
             "type": "object",
             "properties": {
                 "name": {"type": "string", "description": "技能名（如 sqli-test）"},
+                "path": {"type": "string", "description": "可选资源路径，如 references/method.md 或 scripts/check.py"},
             },
             "required": ["name"],
         },
@@ -1479,39 +1483,45 @@ class ToolDispatcher:
         # 会话步数预算（E8）：AgentSession 按角色收敛后的 max_steps 注入；request_steps
         # 增补写这里（_loop 的 range 上界同读），0 = 未装配（request_steps 拒收）
         self.max_steps = max_steps
-        self.current_task_id: str | None = None
+        # session-state 收敛（2026-10-03）：任务/闸门状态统一落共享 SessionState
+        #（本类独立使用时自建，AgentSession 构造后以同一实例覆盖）。下方同名
+        # property 代理保证既有读写点与测试断言零改动；字段语义与每任务复位
+        # 归属见 core/agent/session_state.py。此处仅留本类专属的实例字段。
+        self._state = SessionState()
         # v14 认领即换装：当前任务实际执行 persona（None=按会话底色角色）；
         # 换装/恢复由 AgentSession._apply_task_persona/_restore_base_persona 维护
         self.current_persona_role: str | None = None
         self._step = 0
-        self.last_progress_step = 0   # 最近一次实质进展的步号（卡死检测用）
-        self.finished = False
-        self.awaiting_human = False  # C1：fail_task(awaiting_human) 置位，_loop 收尾时落快照+fail
-        # 意图纪律①：finish 首次撞未收尾意图被拦后置 True（二次 finish 才放行）
-        self._finish_open_intents_ack = False
-        self.summary = ""
-        # 会话中心化（2026-09-25）：委托真收尾（complete/fail/删除）置位——_loop
-        # 步边界据此结束本轮（会话不结束），worker while 再入会话轮接窗内下一件；
-        # 收尾申报被 D6 确认闸打回不置位。last_delegation_note=收尾摘要（沉淀进
-        # 会话对话历史，供后续对话轮带上下文）。
-        self.delegation_just_finished = False
-        self.last_delegation_note = ""
-        # 计划闸教练模式（2026-09-24）：同一任务 2 个模型步撞计划闸后置 True——
-        # LLM 工具面收缩到计划/控制原语；仍不写计划 → 下一模型步末 awaiting_human。
-        # 计划落黑板即清；进程重启后为 False（引导从头再来，宁可宽一轮）。
-        self.plan_only_mode = False
-        # 意图先行闸（口径 Y，2026-10-01）：会话首次实质动作放行后置 True，之后
-        # 不再重复查闸（一次性堵「干完活再补票」）；认领新任务时由 loop 复位
-        # （每任务都要「先立意再动手」），进程重启后为 False（宁可宽一轮）。
-        self._intent_lead_passed = False
         # D6 收尾确认（2026-09-23）：complete 申报后先对照产出清单确认无遗漏
         self.dry_tail_steps = max(1, int(stuck_after) - 2)  # 干尾巴阈值=stuck_after-2，与 D1 窗错位
         # D10（2026-09-24）：收尾确认轮上限项目级可配（0=首次申报即放行）
         self.closing_max_rounds = (
             closing_max_rounds if isinstance(closing_max_rounds, int)
             and not isinstance(closing_max_rounds, bool) else _CLOSING_MAX_ROUNDS)
-        self.closing_round = 0          # 0=未在确认；1/2=当前确认轮序号
-        self.closing_last_progress = 0  # 本轮发起时的 last_progress_step（零新增判定基线）
+
+    # ---------- 状态代理（session-state 收敛，2026-10-03） ----------
+    # 原属性名全部保留（读写点与测试断言零改动），存储落共享 SessionState。
+    # current_task_id/last_progress_step：非每任务复位，由收尾/中断路径显式管理。
+    # finished/awaiting_human/summary/delegation_*：会话收尾标志（每任务复位）。
+    # plan_only_mode/_intent_lead_passed：教练与意图先行闸（每任务复位）。
+    # closing_round/closing_last_progress：D6 收尾确认轮状态（每任务复位）。
+
+    @property
+    def state(self) -> SessionState:
+        return self._state
+
+    current_task_id = state_proxy("current_task_id")
+    last_progress_step = state_proxy("last_progress_step")
+    finished = state_proxy("finished")
+    awaiting_human = state_proxy("awaiting_human")
+    _finish_open_intents_ack = state_proxy("finish_open_intents_ack")
+    summary = state_proxy("summary")
+    delegation_just_finished = state_proxy("delegation_just_finished")
+    last_delegation_note = state_proxy("last_delegation_note")
+    plan_only_mode = state_proxy("plan_only_mode")
+    _intent_lead_passed = state_proxy("intent_lead_passed")
+    closing_round = state_proxy("closing_round")
+    closing_last_progress = state_proxy("closing_last_progress")
 
     def set_step(self, n: int) -> None:
         self._step = n
@@ -2608,9 +2618,12 @@ class ToolDispatcher:
         self.last_progress_step = self._step
         return "\n".join(lines)
 
-    def _tool_skill_open(self, name: str) -> str:
-        """打开技能全量正文（G1 渐进披露：认领只注入目录摘要，正文按需取）。
-        只放行当前 pack_set（启用能力包 ∪ 轨）内 enabled 技能；未知名回可用清单防幻觉。"""
+    def _tool_skill_open(self, name: str, path: str | None = None) -> str:
+        """打开自包含技能正文或其同目录资源。
+
+        资源路径严格限制在 cc 约定子目录，不能穿越到其他技能、packs/kb
+        或项目工作区。旧技能仍可读取 SKILL.md，迁移期间不破坏存量任务。
+        """
         if not self.packs_root:
             return "[错误] 本会话未配置 packs_root（skill_open 不可用）"
         if self._skill_registry is None:
@@ -2625,15 +2638,35 @@ class ToolDispatcher:
             return ("[防幻觉] 技能不存在或不可用: " + (name or "")
                     + "\n可用技能: " + ("、".join(names) if names else "（无）"))
         try:
-            body = sk.body()
+            if path:
+                rel = str(path).replace("\\", "/").strip()
+                parts = Path(rel).parts
+                if not rel or rel.startswith("/") or ".." in parts \
+                        or not parts or parts[0] not in {"references", "scripts", "examples", "assets"}:
+                    return "[错误] 技能资源路径非法：只能读取 references/scripts/examples/assets 下的文件"
+                target = (sk.root / Path(rel)).resolve()
+                root = sk.root.resolve()
+                allowed = {p.resolve() for p in sk.resources}
+                if root not in target.parents or target not in allowed:
+                    return f"[错误] 技能资源不存在或不可读: {rel}"
+                body = target.read_text(encoding="utf-8", errors="replace")
+                opened = rel
+            else:
+                body = sk.body()
+                opened = "SKILL.md"
         except OSError as e:
-            return f"[错误] 技能正文读取失败: {e}"
+            return f"[错误] 技能文件读取失败: {e}"
         self.bb.append_event(
             self.project_id, "skill.open",
-            {"name": sk.name, "pack": sk.pack, "chars": len(body)},
+            {"name": sk.name, "pack": sk.pack, "path": opened, "chars": len(body)},
             session_id=self.session_id, author=self.author)
         self.last_progress_step = self._step
-        return (f"技能 {sk.name}（{sk.pack}）全量正文:\n\n{body}")
+        if path:
+            return f"技能 {sk.name}（{sk.pack}）资源 {opened}:\n\n{body}"
+        resources = [p.relative_to(sk.root).as_posix() for p in sk.resources]
+        manifest = "\n".join(f"- {item}" for item in resources) or "（无附属资源）"
+        return (f"技能 {sk.name}（{sk.pack}）SKILL.md:\n\n{body}\n\n"
+                f"同目录可用资源（用 skill_open(path=...) 按需读取）：\n{manifest}")
 
     # 每会话提案上限（DESIGN §4：防凑数/提案洪泛）
     PROPOSE_LIMIT_PER_SESSION = 3
@@ -2992,7 +3025,9 @@ class ToolDispatcher:
     # ---------- D6 收尾收敛确认（stuck-convergence，2026-09-23） ----------
 
     def reset_closing(self) -> None:
-        """收尾确认状态随任务复位（_loop_body 开头调用）。"""
+        """收尾确认状态随任务复位（会话收尾成功路径就地调用）。
+
+        `_loop_body` 开头不再单独调它——`SessionState.reset_for_task` 已含这两项。"""
         self.closing_round = 0
         self.closing_last_progress = 0
 
