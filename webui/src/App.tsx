@@ -12,6 +12,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronLeft,
+  GitBranch,
   Globe2,
   Inbox,
   FolderKanban,
@@ -44,6 +45,7 @@ import { SettingsView } from "@/views/SettingsView"
 import { KnowledgeView } from "@/views/KnowledgeView"
 import { SkillsView } from "@/views/SkillsView"
 import { SampleAnalysisView } from "@/views/SampleAnalysisView"
+import { MultiAgentCoordinationView } from "@/views/MultiAgentCoordinationView"
 import { cn } from "@/lib/utils"
 import { bindingBadge } from "@/lib/taxonomy"
 
@@ -56,7 +58,7 @@ import { bindingBadge } from "@/lib/taxonomy"
 // 左缘悬浮把手唤出；状态 localStorage（ui.nav-collapsed）。收起=条件渲染卸载
 // nav Panel+Separator（同 boardOpen 先例），重挂由 useDefaultLayout 恢复宽度。
 
-type View = "projects" | "intel" | "live" | "board" | "tasks" | "agents" | "approvals" | "browser" | "sample-analysis" | "knowledge" | "skills" | "settings"
+type View = "projects" | "intel" | "live" | "board" | "tasks" | "agents" | "coordination" | "approvals" | "browser" | "sample-analysis" | "knowledge" | "skills" | "settings"
 
 /** M4c 场景档 board_view 默认视图（config.board_view.default；黑板上自行校验可用 tab 回退） */
 const boardViewOf = (m: ProjectDetail | null): string | undefined => {
@@ -73,6 +75,7 @@ const NAV_GROUPS: { label: string; items: NavItem[]; collapsible?: boolean }[] =
       { key: "projects", label: "项目", icon: FolderKanban, needsProject: false },
       { key: "intel", label: "情报", icon: Inbox, needsProject: false, homeOnly: true },
       { key: "agents", label: "智能体", icon: Bot, needsProject: true },
+      { key: "coordination", label: "多智能体协调", icon: GitBranch, needsProject: true },
       { key: "board", label: "黑板", icon: LayoutDashboard, needsProject: true },
     ],
   },
@@ -492,6 +495,7 @@ export default function App() {
           )}
           {view === "tasks" && <TaskBoard pid={pid} focused={taskNav} />}
           {view === "agents" && <AgentWorkbenchView pid={pid} meta={meta} />}
+          {view === "coordination" && <MultiAgentCoordinationView pid={pid} />}
           {view === "browser" && (
             // F6 内置浏览器：轨门控（非 pentest/redteam 整页灰显）在视图内部处理；
             // 定高视图（面板组），照 rev 走 h-full + overflow-hidden

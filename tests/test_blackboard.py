@@ -2,6 +2,7 @@
 
 import sqlite3
 import threading
+import json
 
 import pytest
 
@@ -1451,6 +1452,63 @@ def test_delete_asset_guards(bb, project):
     # 审计事件
     kinds = [e["kind"] for e in bb.recent_events(pid, 0, limit=50)]
     assert "asset.deleted" in kinds
+
+
+def test_merge_assets_moves_refs_children_and_alias(bb, project):
+    """合并资产迁移发现/意图/子节点，并保留源资产别名。"""
+    from core.blackboard.intents import declare_intent
+
+    pid = project["id"]
+    target = bb.upsert_asset(pid, "host", "10.20.0.8")["id"]
+    source = bb.upsert_asset(pid, "domain", "app.example.test")["id"]
+    child = bb.upsert_asset(pid, "url", "https://app.example.test/login",
+                            parent_id=source)["id"]
+    finding = bb.add_finding(pid, "暴露服务", "源资产发现", target_asset_id=source,
+                             dedup_key="source-only")["id"]
+    intent = declare_intent(
+        bb, pid, "验证域名与主机是否同一资产", target_asset_id=source,
+        basis_refs=[f"asset:{source}"], author="human",
+    )["id"]
+
+    result = bb.merge_assets(pid, source, target, author="human", reason="DNS 与扫描结果一致")
+    assert result["findings_moved"] == 1
+    assert result["intents_moved"] == 1
+    assert result["children_moved"] == 1
+    assert bb.get_asset(source) is None
+    assert bb.get_finding(pid, finding)["target_asset_id"] == target
+    assert bb.get_asset(child)["parent_id"] == target
+    merged_target = bb.get_asset(target)
+    assert merged_target["meta"]["aliases"][0]["id"] == source
+    merged_intent = bb.conn.execute(
+        "SELECT target_asset_id, basis_refs FROM intents WHERE id=?", (intent,)
+    ).fetchone()
+    assert merged_intent["target_asset_id"] == target
+    assert json.loads(merged_intent["basis_refs"]) == [f"asset:{target}"]
+    events = [e for e in bb.recent_events(pid, 0, limit=100)
+              if e["kind"] == "asset.merged"]
+    assert events and events[-1]["payload"]["source_asset_id"] == source
+
+
+def test_merge_assets_rejects_collision_binary_and_descendant(bb, project):
+    pid = project["id"]
+    target = bb.upsert_asset(pid, "host", "10.20.0.9")["id"]
+    source = bb.upsert_asset(pid, "domain", "same.example.test")["id"]
+    bb.add_finding(pid, "暴露服务", "目标发现", target_asset_id=target,
+                   dedup_key="same")
+    bb.add_finding(pid, "暴露服务", "源发现", target_asset_id=source,
+                   dedup_key="same")
+    with pytest.raises(ValueError, match="去重键冲突"):
+        bb.merge_assets(pid, source, target)
+    assert bb.get_asset(source) is not None
+
+    binary = bb.upsert_asset(pid, "binary", "b" * 64)["id"]
+    with pytest.raises(ValueError, match="binary"):
+        bb.merge_assets(pid, binary, target)
+
+    parent = bb.upsert_asset(pid, "host", "10.20.0.10")["id"]
+    descendant = bb.upsert_asset(pid, "domain", "child.example.test", parent_id=parent)["id"]
+    with pytest.raises(ValueError, match="后代"):
+        bb.merge_assets(pid, parent, descendant)
 
 def test_board_graph_nodes_and_edges(bb, project):
     from core.blackboard.graph import board_graph

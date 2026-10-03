@@ -72,6 +72,7 @@ _PLAN_PRE_ALLOWED = _PLAN_TOOLS | {
 _INTENT_FLOW_TOOLS = (
     "declare_intent", "close_intent", "reopen_intent", "bb_delete_intent",
     "bb_add_finding", "bb_update_finding", "bb_delete_finding",
+    "bb_delete_asset", "bb_merge_assets",
     "task_plan", "task_step", "task_reconcile",
     "complete_task", "fail_task", "finish", "request_steps",
 )
@@ -335,6 +336,34 @@ AGENT_TOOLS: list[dict[str, Any]] = [
                                              "domain 自动 DNS；显式传可跳过自动逻辑）"},
             },
             "required": ["value"],
+        },
+    },
+    {
+        "name": "bb_delete_asset",
+        "description": "删除黑板中的非 binary 叶子资产。执行前必须用 bb_query what=assets "
+                       "确认 asset_id；有子资产、被发现引用或是 binary 样本时会拒绝。"
+                       "binary 样本请走样本删除流程，发现引用请先修订/删除发现。",
+        "input_schema": {
+            "type": "object",
+            "properties": {"asset_id": {"type": "string", "description": "资产 id"}},
+            "required": ["asset_id"],
+        },
+    },
+    {
+        "name": "bb_merge_assets",
+        "description": "将两个确认为同一实体的非 binary 资产合并。保留 target_asset_id，"
+                       "把 source_asset_id 的发现、意图锚点和子资产迁移到目标，并把源资产"
+                       "保存为目标 meta.aliases 后删除源行。合并不可逆，必须先 bb_query 查清"
+                       "两个资产并在 reason 中写明判断依据；跨项目、树结构不安全、发现去重键"
+                       "冲突或子资产重复时会拒绝。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "source_asset_id": {"type": "string", "description": "被合并并删除的源资产 id"},
+                "target_asset_id": {"type": "string", "description": "保留的目标资产 id"},
+                "reason": {"type": "string", "description": "认定两者为同一资产的证据或理由"},
+            },
+            "required": ["source_asset_id", "target_asset_id", "reason"],
         },
     },
     {
@@ -1114,8 +1143,7 @@ AGENT_TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "browser_navigate",
-        "description": "内置浏览器导航（F6）。目标必须已在项目资产表登记"
-                       "（host/domain/url 任一命中；未登记会被拒绝并提示先 bb_add_asset）。"
+        "description": "内置浏览器导航（F6），允许访问任意目标。"
                        "成功返回最终 url/标题/状态码；页面流量已自动入抓包历史"
                        "（人类可在浏览器页查看/重发）。每个动作落审计。",
         "input_schema": {
@@ -1857,6 +1885,50 @@ class ToolDispatcher:
             reply += ("\n[提示] 命中既有资产（同值或同 IP）：先 bb_query what=assets 查重，"
                       "不要对同一目标重复登记、重复扫描；确需补挂/补 meta 才复报。")
         return reply
+
+    def _tool_bb_delete_asset(self, asset_id: str) -> str:
+        asset = self.bb.get_asset(asset_id)
+        if asset is None or asset.get("project_id") != self.project_id:
+            return f"[错误] 资产不存在: {asset_id}"
+        if asset.get("type") == "binary":
+            return "[拒绝] binary 样本不能用 bb_delete_asset，请使用样本删除流程"
+        try:
+            deleted = self.bb.delete_asset(asset_id, author=self.author)
+        except LookupError as e:
+            return f"[错误] {e}"
+        except ValueError as e:
+            return f"[拒绝] {e}"
+        self.last_progress_step = self._step
+        return (f"asset.deleted={deleted['id']} type={deleted['type']} "
+                f"value={deleted['value']}")
+
+    def _tool_bb_merge_assets(self, source_asset_id: str, target_asset_id: str,
+                              reason: str = "") -> str:
+        if not reason or not reason.strip():
+            return "[拒绝] 合并必须提供 reason，说明认定两个资产为同一实体的证据"
+        source = self.bb.get_asset(source_asset_id)
+        target = self.bb.get_asset(target_asset_id)
+        if source is None or source.get("project_id") != self.project_id:
+            return f"[错误] 源资产不存在: {source_asset_id}"
+        if target is None or target.get("project_id") != self.project_id:
+            return f"[错误] 目标资产不存在: {target_asset_id}"
+        if source.get("type") == "binary" or target.get("type") == "binary":
+            return "[拒绝] binary 样本不能通过 bb_merge_assets 合并，请使用样本生命周期流程"
+        try:
+            merged = self.bb.merge_assets(
+                self.project_id, source_asset_id, target_asset_id,
+                author=self.author, reason=reason,
+            )
+        except LookupError as e:
+            return f"[错误] {e}"
+        except ValueError as e:
+            return f"[拒绝] {e}"
+        self.last_progress_step = self._step
+        return (f"asset.merged source={merged['source_asset_id']} "
+                f"target={merged['target_asset_id']} "
+                f"findings={merged['findings_moved']} intents={merged['intents_moved']} "
+                f"children={merged['children_moved']} alias="
+                f"{merged['source_type']}:{merged['source_value']}")
 
     def _tool_bb_asset_status(self, asset_id: str, status: str,
                               note: str | None = None,
@@ -3358,7 +3430,7 @@ class ToolDispatcher:
             return f"[拒绝] {e}"
         self.last_progress_step = self._step
         return (f"已导航: {r['final_url']} 标题={r.get('title') or '-'} "
-                f"状态={r.get('status')} 目标host={r['target_host']} "
+                f"状态={r.get('status')} 目标host={r.get('target_host') or '-'} "
                 f"耗时={r['duration_ms']}ms\n"
                 "页面流量已入抓包历史（人类可查看/重发）；"
                 "可用 browser_content 提取渲染后文本、browser_screenshot 留证。")

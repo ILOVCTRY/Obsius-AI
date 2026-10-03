@@ -4,7 +4,7 @@
 请求+响应体 → ``route.fulfill(response=resp)`` 原样放行（浏览行为不变）→
 归一化 → ``bb.add_http_history(source="browser")``。
 
-F6-v3 拦截：仅人工隐式会话（human-main）的流量可被挂起裁决——
+F6-v4 拦截：人工和 AI 会话的流量均可被挂起裁决——
 - 请求向：fetch **前** hold（改包走 ``route.fetch(url=/method=/headers=/post_data=)``
   覆写，不走 continue_——保证改后流量照常入 http_history）；
 - 响应向：fetch 后 hold（改包 ``route.fulfill(status=/headers=/body=)``）；
@@ -88,13 +88,9 @@ class CaptureTap:
         request = route.request
         hub = getattr(inst, "_intercept", None)
         sid = self._sid_of(request)
-        # F6-v3：仅人工隐式会话可被拦（AI 会话流量照常记录绝不拦）
-        from core.browser.pool import HUMAN_MAIN_SID
-        is_human = sid == HUMAN_MAIN_SID
-
         # ---- ① 请求向拦截（fetch 前 hold） ----
         req_hold = None
-        if hub is not None and is_human and hub.req_enabled:
+        if hub is not None and hub.req_enabled:
             req_hold = self._register_request_hold(request)
         req_mods = None
         if req_hold is not None:
@@ -123,7 +119,7 @@ class CaptureTap:
 
         # ---- ③ 响应向拦截（fetch 后 hold） ----
         resp_hold = None
-        if hub is not None and is_human and hub.resp_enabled:
+        if hub is not None and hub.resp_enabled:
             resp_hold = await self._register_response_hold(request, resp)
         resp_mods = None
         if resp_hold is not None:

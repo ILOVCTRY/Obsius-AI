@@ -2,7 +2,7 @@ import { useState } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
-import { api, pollJob, ApiError } from "@/lib/api"
+import { api, pollJob } from "@/lib/api"
 import type { HttpHistoryRow, IntruderPayloadSpec } from "@/lib/types"
 
 /** 抓包行 → 完整原始请求报文文本（纯格式化非解析；重发预填用）。
@@ -25,20 +25,16 @@ export function ReplayForm({ pid, initialRaw }: {
   const [result, setResult] = useState<HttpHistoryRow | null>(null)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
-  const [missing, setMissing] = useState<string | null>(null)
 
   const submit = async () => {
-    setBusy(true); setErr(null); setResult(null); setMissing(null)
+    setBusy(true); setErr(null); setResult(null)
     try {
       const { job_id } = await api.browserReplay(pid, { raw })
       const job = await pollJob(job_id, () => {}, 1000)
       if (job.status === "error") setErr(job.error ?? "重发失败")
       else setResult(job.result as HttpHistoryRow)
     } catch (e) {
-      if (e instanceof ApiError && e.status === 422) {
-        const d = e.data as { host?: string; reason?: string }
-        setMissing(d?.host ?? null); setErr(d?.reason ?? String(e))
-      } else setErr(e instanceof Error ? e.message : String(e))
+      setErr(e instanceof Error ? e.message : String(e))
     } finally { setBusy(false) }
   }
 
@@ -54,7 +50,6 @@ export function ReplayForm({ pid, initialRaw }: {
         <Button size="sm" disabled={busy || !raw.trim()} onClick={() => void submit()}>
           {busy ? "发送中…" : "发送"}
         </Button>
-        {missing && <Badge variant="outline" className="font-mono">{missing} 未登记资产</Badge>}
         {err && <span className="text-red-400">{err}</span>}
       </div>
       {result && (
@@ -65,6 +60,8 @@ export function ReplayForm({ pid, initialRaw }: {
             </Badge>
             <span className="font-bold">{result.status ?? "失败"}</span>
             <span className="text-muted-foreground">{result.duration_ms ?? "?"}ms</span>
+            <Button size="sm" variant="outline" className="ml-auto h-6 text-[10px]"
+              onClick={() => void navigator.clipboard.writeText(raw)}>复制为 HTTP POC</Button>
           </div>
           {result.resp_body && (
             <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all">{result.resp_body}</pre>

@@ -2,10 +2,10 @@ import { useCallback, useEffect, useState } from "react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
-import { api, ApiError } from "@/lib/api"
-import type { AssetMissingDetail, InterceptPending, InterceptState } from "@/lib/types"
+import { api } from "@/lib/api"
+import type { InterceptPending, InterceptState } from "@/lib/types"
 
-// F6-v3 拦截面板：仅人工浏览流量可挂起裁决——两个独立开关（请求/响应）
+// 拦截面板：AI 和人类浏览流量均可挂起裁决——两个独立开关（请求/响应）
 // + 挂起包列表 2s 轮询 + 行内弹窗看/改原始报文（解析在后端）。
 // 超时（默认 120s）/关开关/注册满 → 后端自动放行原文，行自然消失。
 export function InterceptPanel({ pid }: { pid: string }) {
@@ -13,7 +13,6 @@ export function InterceptPanel({ pid }: { pid: string }) {
   const [selected, setSelected] = useState<InterceptPending | null>(null)
   const [rawDraft, setRawDraft] = useState("")
   const [err, setErr] = useState<string | null>(null)
-  const [missing, setMissing] = useState<AssetMissingDetail | null>(null)
   const [busy, setBusy] = useState(false)
 
   const refresh = useCallback(() => {
@@ -46,29 +45,14 @@ export function InterceptPanel({ pid }: { pid: string }) {
   }
 
   const decide = async (p: InterceptPending, action: "forward" | "drop", withRaw: boolean) => {
-    setBusy(true); setErr(null); setMissing(null)
+    setBusy(true); setErr(null)
     try {
       await api.browserInterceptDecide(pid, p.hold_id,
         { action, raw: withRaw ? rawDraft : undefined })
       setSelected(null)
       refresh()
-    } catch (e) {
-      if (e instanceof ApiError && e.status === 422) {
-        const d = e.data as AssetMissingDetail
-        if (d?.asset_missing) setMissing(d)
-        else setErr(typeof d === "string" ? d : d?.reason ?? String(e))
-      } else setErr(e instanceof Error ? e.message : String(e))
-    } finally { setBusy(false) }
-  }
-
-  const registerAndRetry = async () => {
-    if (!missing) return
-    try {
-      await api.addAsset(pid, "auto", missing.host)
-      setMissing(null)
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e))
-    }
+    } catch (e) { setErr(e instanceof Error ? e.message : String(e)) }
+    finally { setBusy(false) }
   }
 
   return (
@@ -85,20 +69,13 @@ export function InterceptPanel({ pid }: { pid: string }) {
           {state?.response_enabled ? "● 拦截响应：开" : "○ 拦截响应：关"}
         </Button>
         <span className="ml-auto text-[10px] text-muted-foreground">
-          仅人工浏览流量 · 120s 未裁决自动放行
+          AI 与人类流量 · 120s 未裁决自动放行
         </span>
       </div>
       {err && (
         <div className="flex items-center gap-2 border-b px-2 py-1 text-red-400">
           <span className="flex-1">{err}</span>
           <button className="text-[10px] underline" onClick={() => setErr(null)}>关闭</button>
-        </div>
-      )}
-      {missing && (
-        <div className="flex items-center gap-2 border-b bg-(--status-paused)/10 px-2 py-1">
-          <Badge variant="outline" className="font-mono">{missing.host}</Badge>
-          <span className="flex-1 truncate text-muted-foreground">{missing.reason}</span>
-          <Button size="sm" variant="outline" onClick={() => void registerAndRetry()}>一键登记资产</Button>
         </div>
       )}
       <div className="min-h-0 flex-1 overflow-auto">

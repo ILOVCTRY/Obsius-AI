@@ -7,8 +7,7 @@
   + 线程池 + token-bucket 限速；并发**硬顶** config.intruder_max_concurrency
   （config 可降不可升）；结果逐请求入库 source="intruder"，审计只在批次级。
 
-目标白名单：重发与爆破目标同样硬校验（全量硬校验决策）——主目标（首个请求
-解析出的 host）必须在项目资产表，未命中抛 BrowserError。
+重发与爆破支持任意 URL；HTTP 报文解析与执行沿用现有实现。
 """
 
 from __future__ import annotations
@@ -23,7 +22,6 @@ from concurrent.futures import ThreadPoolExecutor
 import httpx
 
 from core.browser.capture import normalize_body
-from core.browser.policy import check_target
 from core.browser.pool import BrowserError
 
 __all__ = ["ReplayClient", "Intruder"]
@@ -78,14 +76,6 @@ class ReplayClient:
             modified = False
         if not u:
             raise ValueError("缺少重放目标 url（贴原始报文或给 capture_id）")
-        verdict = check_target(self.bb, project_id, u)
-        if not verdict.allowed:
-            self.bb.append_event(
-                project_id, "browser.deny",
-                {"url": u, "host": verdict.host, "origin": "human",
-                 "reason": verdict.reason, "op": "replay"},
-                session_id=session_id, author=author)
-            raise BrowserError(verdict.reason)
         batch_id = f"rp-{uuid.uuid4().hex[:12]}"
         t0 = time.monotonic()
         try:
@@ -194,15 +184,6 @@ class Intruder:
         value_lists = [self.expand_payloads(specs[m]) for m in marks]
         combos = list(itertools.product(*value_lists))[:max_requests]
         total = len(combos)
-
-        verdict = check_target(self.bb, project_id, url)
-        if not verdict.allowed:
-            self.bb.append_event(
-                project_id, "browser.deny",
-                {"url": url, "host": verdict.host, "origin": "human",
-                 "reason": verdict.reason, "op": "intruder"},
-                session_id=session_id, author=author)
-            raise BrowserError(verdict.reason)
 
         self.bb.append_event(
             project_id, "browser.intruder.start",

@@ -45,6 +45,7 @@ from core.agent.loop import clear_task_resume, persisted_snapshot_path, task_res
 from core.blackboard import TaskQueue
 from core.blackboard.assets import _is_ip, clean_host, import_assets, register_asset
 from core.coverage import attach_effective_status
+from core.coordination import CoordinationStore
 from core.blackboard.graph import board_graph, session_graph
 from core.blackboard.attackpath import build_attack_path
 from core.blackboard.intents import list_intents, reopen_intent
@@ -156,6 +157,58 @@ class ConfigPatchIn(BaseModel):
 class ExpertsPatchIn(BaseModel):
     """换将（expert-pool M2）：绑定专家清单整体替换；空清单=解绑存量直通。"""
     experts: list[str] = Field(default_factory=list)
+
+
+class CoordinationPlanIn(BaseModel):
+    name: str
+    objective: str = ""
+
+
+class CoordinationTaskIn(BaseModel):
+    title: str
+    description: str = ""
+    role: str = ""
+    priority: int = 50
+    depends_on: list[str] = Field(default_factory=list)
+
+
+class CoordinationTaskPatchIn(BaseModel):
+    status: str | None = None
+    role: str | None = None
+    evidence: list[dict[str, Any]] | None = None
+
+
+class CoordinationPlanStatusIn(BaseModel):
+    status: str
+
+
+class CoordinationObjectIn(BaseModel):
+    kind: str
+    name: str = ""
+    object_ref: str = ""
+    data: dict[str, Any] = Field(default_factory=dict)
+    source: str = ""
+    confidence: float = 0.5
+    plan_id: str | None = None
+    task_id: str | None = None
+    artifact_refs: list[str] = Field(default_factory=list)
+
+
+class CoordinationConflictIn(BaseModel):
+    left_object_id: str
+    right_object_id: str
+    field: str = ""
+    summary: str
+
+
+class CoordinationConflictPatchIn(BaseModel):
+    status: str
+    resolution: str = ""
+
+
+class CoordinationVerifyIn(BaseModel):
+    task_id: str | None = None
+    plan_id: str | None = None
 
 
 class ExpertSaveIn(BaseModel):
@@ -2502,9 +2555,11 @@ def create_app(
 
     class BrowserNavIn(BaseModel):
         url: str
+        sid: str | None = None
 
     class BrowserActionIn(BaseModel):
         action: Literal["click", "type", "back"]
+        sid: str | None = None
         selector: str | None = None
         text: str | None = None
         x: float | None = None
@@ -2520,6 +2575,10 @@ def create_app(
         concurrency: int = 5
         rate_per_sec: float = 10.0
         max_requests: int | None = None
+
+    class BrowserTakeoverIn(BaseModel):
+        sid: str
+        paused: bool
 
     def _browser_inst(pid: str):
         """浏览器实例（缺 playwright → 503 结构化，不 500）。"""
@@ -2559,6 +2618,16 @@ def create_app(
                 "playwright_installed": browser_available(),
                 "track": proj.track}
 
+    @app.post("/api/projects/{pid}/browser/takeover")
+    def browser_takeover(pid: str, body: BrowserTakeoverIn):
+        """暂停/恢复指定 AI 页面输入，供人类接管标签页。"""
+        _project(pid)
+        inst = _browser_inst(pid)
+        try:
+            return inst.set_input_paused(body.sid, body.paused)
+        except BrowserError as e:
+            raise _browser_http_error(e) from e
+
     @app.get("/api/projects/{pid}/browser/screenshot")
     def browser_screenshot(pid: str):
         inst = _browser_inst(pid)
@@ -2572,19 +2641,11 @@ def create_app(
 
     @app.post("/api/projects/{pid}/browser/navigate")
     def browser_navigate(pid: str, body: BrowserNavIn):
-        """人类导航（隐式会话 human-main；与 AI 同池同白名单；拒绝 422 带 host
-        供前端一键登记资产）。"""
-        from core.browser.policy import check_target
-        proj = _project(pid)
+        """人类导航（隐式会话或指定 sid；允许任意 URL）。"""
+        _project(pid)
         inst = _browser_inst(pid)
-        verdict = check_target(proj.bb, pid, body.url,
-                               domain_scope=app.state.browser_pool.config.domain_scope)
-        if not verdict.allowed:
-            raise HTTPException(422, detail={
-                "reason": verdict.reason, "host": verdict.host,
-                "asset_missing": True})
         try:
-            sid = inst.ensure_human_session()["sid"]
+            sid = body.sid or inst.ensure_human_session()["sid"]
             return inst.navigate(sid, body.url)
         except BrowserError as e:
             raise _browser_http_error(e) from e
@@ -2593,7 +2654,7 @@ def create_app(
     def browser_action(pid: str, body: BrowserActionIn):
         inst = _browser_inst(pid)
         try:
-            sid = inst.ensure_human_session()["sid"]
+            sid = body.sid or inst.ensure_human_session()["sid"]
             return inst.act(sid, body.action, selector=body.selector,
                             text=body.text, x=body.x, y=body.y)
         except BrowserError as e:
@@ -2694,11 +2755,8 @@ def create_app(
 
     @app.post("/api/projects/{pid}/browser/intercept/{hold_id}/decide")
     def browser_intercept_decide(pid: str, hold_id: str, body: InterceptDecideIn):
-        """裁决一个挂起包。顺序：hub 取 hold → raw 解析 → 改后 URL 过
-        check_target → hub.decide（resolve 回 route 协程）。挂起包继续等的
-        失败（解析错/目标未登记）以 422 返回，可修正后重提。"""
+        """裁决一个挂起包。解析成功后直接裁决，允许修改任意目标 URL。"""
         from core.browser.httpmsg import parse_raw_request, parse_raw_response
-        from core.browser.policy import check_target
         inst = _browser_inst(pid)
         hub = inst._intercept
         # 锁内取（不 pop——裁决失败要继续等）；KeyError→404（已裁决/已超时同理）
@@ -2721,16 +2779,6 @@ def create_app(
                             "headers": parsed["headers"], "body": parsed["body"]}
             except ValueError as e:
                 raise HTTPException(422, f"报文解析失败: {e}") from e
-            # 改后 URL 变化 → 过白名单（未登记 422 asset_missing，挂起包继续等）
-            if hold["direction"] == "request" and parsed["url"] != hold["url"]:
-                proj = _project(pid)
-                verdict = check_target(
-                    proj.bb, pid, parsed["url"],
-                    domain_scope=app.state.browser_pool.config.domain_scope)
-                if not verdict.allowed:
-                    raise HTTPException(422, detail={
-                        "reason": verdict.reason, "host": verdict.host,
-                        "asset_missing": True})
         try:
             hub.decide(hold_id, body.action, mods)
         except KeyError as e:
@@ -4833,6 +4881,185 @@ def create_app(
     def get_session_graph(pid: str):
         # 会话中心化 M4：节点=编排器+会话窗；delegate/derive/inbox/dm 边（见 graph.session_graph）
         return session_graph(_project(pid).bb, pid)
+
+    # ---------- 多智能体协调（独立域，不改 chat/agent 工作台） ----------
+    @app.get("/api/projects/{pid}/coordination")
+    def get_coordination(pid: str):
+        return CoordinationStore(_project(pid).bb).overview(pid)
+
+    @app.post("/api/projects/{pid}/coordination/plans", status_code=201)
+    def create_coordination_plan(pid: str, body: CoordinationPlanIn):
+        proj = _project(pid)
+        try:
+            plan = CoordinationStore(proj.bb).create_plan(pid, body.name, body.objective)
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+        proj.bb.append_event(pid, "coordination.plan.created",
+                             {"plan_id": plan["id"], "name": plan["name"]},
+                             author="human")
+        return plan
+
+    @app.post("/api/projects/{pid}/coordination/plans/{plan_id}/tasks", status_code=201)
+    def create_coordination_task(pid: str, plan_id: str, body: CoordinationTaskIn):
+        proj = _project(pid)
+        try:
+            task = CoordinationStore(proj.bb).add_task(
+                pid, plan_id, body.title, body.description, body.role,
+                body.priority, body.depends_on)
+        except LookupError as e:
+            raise HTTPException(404, str(e)) from e
+        except (TypeError, ValueError) as e:
+            raise HTTPException(422, str(e)) from e
+        proj.bb.append_event(pid, "coordination.task.created",
+                             {"plan_id": plan_id, "task_id": task["id"],
+                              "title": task["title"]}, author="human")
+        return task
+
+    @app.patch("/api/projects/{pid}/coordination/plans/{plan_id}")
+    def update_coordination_plan(pid: str, plan_id: str, body: CoordinationPlanStatusIn):
+        proj = _project(pid)
+        try:
+            plan = CoordinationStore(proj.bb).set_plan_status(pid, plan_id, body.status)
+        except LookupError as e:
+            raise HTTPException(404, str(e)) from e
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+        proj.bb.append_event(pid, "coordination.plan.updated",
+                             {"plan_id": plan_id, "status": body.status}, author="human")
+        return plan
+
+    @app.patch("/api/projects/{pid}/coordination/tasks/{task_id}")
+    def update_coordination_task(pid: str, task_id: str, body: CoordinationTaskPatchIn):
+        proj = _project(pid)
+        store = CoordinationStore(proj.bb)
+        try:
+            # 完成任务必须经过验证闭环。先落证据/角色，再验证，支持一次
+            # PATCH 同时提交证据和 completed；验证失败时保留证据供后续补充。
+            if body.status == "completed":
+                if body.role is not None or body.evidence is not None:
+                    store.update_task(pid, task_id, role=body.role,
+                                      evidence=body.evidence)
+                verification = store.verify_task(pid, task_id)
+                if verification["status"] != "passed":
+                    raise HTTPException(
+                        409,
+                        detail={
+                            "message": "任务未通过验证，不能标记为完成",
+                            "verification": verification,
+                        },
+                    )
+                task = store.update_task(pid, task_id, status="completed")
+            else:
+                task = store.update_task(
+                    pid, task_id, status=body.status, role=body.role,
+                    evidence=body.evidence)
+        except LookupError as e:
+            raise HTTPException(404, str(e)) from e
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+        proj.bb.append_event(pid, "coordination.task.updated",
+                             {"task_id": task_id, "status": task["status"]}, author="human")
+        return task
+
+    @app.get("/api/projects/{pid}/coordination/objects")
+    def list_coordination_objects(pid: str, kind: str | None = None):
+        try:
+            return CoordinationStore(_project(pid).bb).list_objects(pid, kind=kind)
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+
+    @app.post("/api/projects/{pid}/coordination/objects", status_code=201)
+    def create_coordination_object(pid: str, body: CoordinationObjectIn):
+        proj = _project(pid)
+        try:
+            obj = CoordinationStore(proj.bb).add_object(
+                pid, kind=body.kind, name=body.name, object_ref=body.object_ref,
+                data=body.data, source=body.source, confidence=body.confidence,
+                plan_id=body.plan_id, task_id=body.task_id,
+                artifact_refs=body.artifact_refs)
+        except LookupError as e:
+            raise HTTPException(404, str(e)) from e
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+        proj.bb.append_event(pid, "coordination.object.created",
+                             {"object_id": obj["id"], "kind": obj["kind"],
+                              "source": obj["source"], "confidence": obj["confidence"]},
+                             author="human")
+        return obj
+
+    @app.get("/api/projects/{pid}/coordination/conflicts")
+    def list_coordination_conflicts(pid: str, status: str | None = None):
+        rows = CoordinationStore(_project(pid).bb).overview(pid)["conflicts"]
+        return [row for row in rows if status is None or row["status"] == status]
+
+    @app.post("/api/projects/{pid}/coordination/conflicts", status_code=201)
+    def create_coordination_conflict(pid: str, body: CoordinationConflictIn):
+        proj = _project(pid)
+        try:
+            conflict = CoordinationStore(proj.bb).add_conflict(
+                pid, left_object_id=body.left_object_id,
+                right_object_id=body.right_object_id, field=body.field,
+                summary=body.summary)
+        except LookupError as e:
+            raise HTTPException(404, str(e)) from e
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+        proj.bb.append_event(pid, "coordination.conflict.created",
+                             {"conflict_id": conflict["id"],
+                              "left_object_id": conflict["left_object_id"],
+                              "right_object_id": conflict["right_object_id"]},
+                             author="human")
+        return conflict
+
+    @app.patch("/api/projects/{pid}/coordination/conflicts/{conflict_id}")
+    def update_coordination_conflict(pid: str, conflict_id: str,
+                                     body: CoordinationConflictPatchIn):
+        proj = _project(pid)
+        try:
+            conflict = CoordinationStore(proj.bb).update_conflict(
+                pid, conflict_id, status=body.status, resolution=body.resolution)
+        except LookupError as e:
+            raise HTTPException(404, str(e)) from e
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+        proj.bb.append_event(pid, "coordination.conflict.updated",
+                             {"conflict_id": conflict_id, "status": conflict["status"]},
+                             author="human")
+        return conflict
+
+    @app.post("/api/projects/{pid}/coordination/verify")
+    def verify_coordination(pid: str, body: CoordinationVerifyIn):
+        if not body.task_id and not body.plan_id:
+            raise HTTPException(422, "task_id 或 plan_id 至少填写一个")
+        proj = _project(pid)
+        store = CoordinationStore(proj.bb)
+        try:
+            result = (store.verify_task(pid, body.task_id)
+                      if body.task_id else store.verify_plan(pid, body.plan_id))
+        except LookupError as e:
+            raise HTTPException(404, str(e)) from e
+        proj.bb.append_event(pid, "coordination.verification.completed",
+                             {"task_id": body.task_id, "plan_id": body.plan_id,
+                              "status": result["status"],
+                              "followup_task_ids": result.get("followup_task_ids", [])},
+                             author="coordination-verifier")
+        return result
+
+    @app.get("/api/projects/{pid}/coordination/verifications/{task_id}")
+    def get_coordination_verification(pid: str, task_id: str):
+        proj = _project(pid)
+        row = proj.bb.conn.execute(
+            "SELECT * FROM coordination_verifications WHERE project_id=? AND task_id=?"
+            " ORDER BY checked_at DESC LIMIT 1", (pid, task_id)).fetchone()
+        if row is None:
+            raise HTTPException(404, "该任务还没有验证记录")
+        data = dict(row)
+        for key in ("issues", "followup_task_ids"):
+            try:
+                data[key] = json.loads(data[key] or "[]")
+            except (TypeError, ValueError):
+                data[key] = []
+        return data
 
     @app.get("/api/projects/{pid}/board-graph")
     def get_board_graph(pid: str):
@@ -9078,9 +9305,8 @@ def create_app(
     # ---- F6-v2 浏览器实时画面流（CDP screencast → WS → 前端回传接管输入） ----
 
     @app.websocket("/api/projects/{pid}/browser/ws")
-    async def ws_browser(ws: WebSocket, pid: str):
-        """F6-v3：人工隐式会话（human-main）实时画面流——前端零会话概念，
-        会话在服务端懒创建。"""
+    async def ws_browser(ws: WebSocket, pid: str, sid: str | None = None):
+        """指定真实浏览器 Page 的画面流；缺省使用人类主页面。"""
         await ws.accept()
 
         async def _close(code: int) -> None:
@@ -9104,8 +9330,12 @@ def create_app(
             return
         inst = app.state.browser_pool.get_instance(pid)
         try:
-            sid = await run_in_threadpool(inst.ensure_human_session)
-            sid = sid["sid"]
+            if not sid:
+                sid = (await run_in_threadpool(inst.ensure_human_session))["sid"]
+            else:
+                exists = await run_in_threadpool(lambda: inst.session_exists(sid))
+                if not exists:
+                    raise BrowserError(f"浏览器会话不存在: {sid}")
         except BrowserError:
             await ws.send_json({"type": "error", "message": "浏览器会话创建失败"})
             await _close(1011)

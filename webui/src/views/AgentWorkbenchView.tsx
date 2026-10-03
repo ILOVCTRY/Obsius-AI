@@ -197,6 +197,24 @@ export function AgentWorkbenchView({ pid, meta }: {
     }
     return null
   }, [events, tid])
+  // 思考内容与回复分开组装：后端发送的是累计全文，因此每个新事件直接覆盖。
+  // 只消费当前用户消息之后的事件，避免上一轮思考在新消息等待时短暂闪现。
+  const liveThinking = useMemo(() => {
+    let text = ""
+    let started = false
+    for (const e of events) {
+      const p = e.payload as { thread_id?: string; role?: string; text?: string; thinking?: string }
+      if (e.kind === "chat.message" && p?.thread_id === tid && p.role === "user") {
+        started = true
+        text = ""
+        continue
+      }
+      if (!started || p?.thread_id !== tid) continue
+      if (e.kind === "chat.thinking.delta" && typeof p.text === "string") text = p.text
+      else if (e.kind === "chat.thinking" && typeof p.thinking === "string") text = p.thinking
+    }
+    return text
+  }, [events, tid])
   // assistant(tool_calls) 已落库但部分调用尚无结果行 → 锚定转圈块（轮询滞后 ≤2s）
   const hasPendingCall = useMemo(() => messages.some((m) =>
     m.role === "assistant" && (m.tool_calls ?? []).some((tc) =>
@@ -497,6 +515,20 @@ export function AgentWorkbenchView({ pid, meta }: {
                   </div>
                 </div>
               )}
+              {(running || !!pendingIn) && liveThinking && (
+                <div className="wb-row wb-anim">
+                  <span className={cn("wb-avatar is-sm", agentId === ORCHESTRATOR && "is-orch")}>
+                    {agentId === ORCHESTRATOR ? <Bot size={11} /> : agentInitial(currentAgent)}
+                  </span>
+                  <div className="wb-msg">
+                    <div className="wb-msg-head"><span className="wb-msg-kind">思考过程</span></div>
+                    <div className="wb-thinking">
+                      <span className="wb-caret" />
+                      <span className="wb-thinking-text">{liveThinking.slice(-3000)}</span>
+                    </div>
+                  </div>
+                </div>
+              )}
               {running && liveToolStart && !hasPendingCall && (
                 <div className="wb-row wb-anim">
                   <span className={cn("wb-avatar is-sm", agentId === ORCHESTRATOR && "is-orch")}>
@@ -508,7 +540,7 @@ export function AgentWorkbenchView({ pid, meta }: {
                   </div>
                 </div>
               )}
-              {(running || !!pendingIn) && !liveDelta && !liveToolStart && !hasPendingCall && (
+              {(running || !!pendingIn) && !liveDelta && !liveThinking && !liveToolStart && !hasPendingCall && (
                 <div className="wb-row wb-anim">
                   <span className={cn("wb-avatar is-sm", agentId === ORCHESTRATOR && "is-orch")}>
                     {agentId === ORCHESTRATOR ? <Bot size={11} /> : agentInitial(currentAgent)}

@@ -82,5 +82,7 @@ schema v30 的 finding 报告字段包括摘要、受影响资产、测试环境
 
 ## 坑
 
+- **资产维护工具（2026-10-03）**：`delete_asset(asset_id)` 只删除非 binary 叶子且拒绝仍被 findings 引用的资产；binary 走 `delete_binary` 样本流程。`merge_assets(project_id, source_asset_id, target_asset_id, reason=)` 在单事务内迁移 findings、intents 的资产锚点和子资产，把源资产快照写入目标 `meta.aliases` 后删除源行并落 `asset.merged`；拒绝 binary、跨项目、目标为源后代、发现去重键冲突和子资产重复，避免证据/样本丢失。
+
 - upsert_asset 去重键含 parent_id；补挂/改 meta 用 find_asset + update_asset_meta/set_asset_parent，勿重复 upsert。
 - tests/test_blackboard.py 含旧 DB 行映射护栏；改 schema 必须升版本 + 幂等迁移。

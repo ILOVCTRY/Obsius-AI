@@ -20,8 +20,10 @@ FOREIGN KEY constraint failed → 曾致删有子线程的线程 500）。
 ## 运行时（runtime.py）
 
 - **主控**（agent_id=chat-orchestrator）：todo_write + call_expert + skill_open/
-  kb_search/kb_open/bb_query + mcp__*；不碰实操（蛙池式主控轻）。专家清单进
-  call_expert 工具描述（`_generalist`/主控自身不进清单）。
+  kb_search/kb_open/bb_query + `bb_delete_asset`/`bb_merge_assets` 受控资产维护 + mcp__*；
+  不直接执行扫描/利用等实操（蛙池式主控轻）。专家清单进
+  call_expert 工具描述（`_generalist`/主控自身不进清单）；相互独立的待办可在同轮
+  生成多个 `call_expert` 并发执行，有依赖的待办仍按顺序委派。
   **技能名≠专家名消歧（2026-10-01 复盘）**：主控 system 同时注入「可用技能清单」
   （`recon-asset-enum` 等）与 call_expert 的「可用专家」（`recon`/`osint`…），
   模型曾把技能名 `recon-asset-enum` 当专家名传入报「未知专家」。三层防护：
@@ -38,7 +40,9 @@ FOREIGN KEY constraint failed → 曾致删有子线程的线程 500）。
   当空白名单降级为无工具面（specs 全量给 LLM、dispatch 层全拒绝，「工具 X
   不可用：本线程未装配工具面」），回归测试 test_expert_dispatcher_*。
 - `call_expert`：spawn 持久子线程（parent_thread_id 留档）→ 隔离上下文跑完 →
-  摘要+线程引用回传主控；不审批、事件流全程可见。
+  摘要+线程引用回传主控；不审批、事件流全程可见。同一轮主控一次生成多个
+  `call_expert` 时并发执行，最多 4 个同时运行，超出的排队；工具结果仍按模型
+  调用顺序写回，保证消息历史可重放。
 - **对话链意图链路（intent-tools-chat，2026-10-01）**：意图三件套 + `bb_delete_intent`
   从 `_EXPERT_EXCLUDED` 移出、开放给对话主控与子专家——此前对话跑完「黑板→发现→
   链路」全空（对话链从未声明意图）；现对话链与任务管线同纪律：① `bb_add_finding`
@@ -48,6 +52,8 @@ FOREIGN KEY constraint failed → 曾致删有子线程的线程 500）。
   漏洞假设，reverse=函数/协议/样本行为等，只提示不硬拦）。
 - `todo_write`：整体覆写 thread.todo（工作记忆外化，前端 TodoCard 渲染）。
 - 流式：llm on_text 攒 delta → 节流（≥80 字符或 1s）落 `chat.delta` 事件；
+  llm on_thinking 同样透传并落 `chat.thinking.delta`，每步完成落
+  `chat.thinking` 终稿，工作台按当前用户消息实时显示思考内容；
   工具调用落 `chat.tool`（**phase=start/done 两段**（2026-09-29）：dispatch 前
   start、完成后 done 带 ok/duration_s/result_head）；终稿落 `chat.message`；
   spawn 落 `chat.spawn`。**消息全文以 chat_messages 表为准，事件只承担实时可见性**。

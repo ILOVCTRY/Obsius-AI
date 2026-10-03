@@ -29,11 +29,11 @@ import json
 import socket
 import threading
 import time
+from urllib.parse import urlsplit
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from core.browser.capture import CaptureTap
-from core.browser.policy import check_target, deny_event
 
 __all__ = [
     "BrowserError", "BrowserConfig", "BrowserPool", "BrowserInstance",
@@ -41,8 +41,7 @@ __all__ = [
     "HUMAN_MAIN_SID",
 ]
 
-# F6-v3 人工隐式会话（保留 sid）：浏览器页去会话化——前端零会话概念，
-# 人工流量统一走这一页；懒创建、不计并发上限、永不自动清除。
+# 人类主页面（保留 sid）：前端与 AI Page 统一用真实 Page 标签显示。
 HUMAN_MAIN_SID = "human-main"
 
 _NO_TOOL_HINT = ('playwright 未安装。请人工执行：pip install -e ".[browser]" '
@@ -50,7 +49,7 @@ _NO_TOOL_HINT = ('playwright 未安装。请人工执行：pip install -e ".[bro
 
 
 class BrowserError(RuntimeError):
-    """浏览器操作失败（白名单拒绝/并发上限/超时/缺依赖）。调用方转文本回填。"""
+    """浏览器操作失败（并发上限/超时/缺依赖）。调用方转文本回填。"""
 
 
 def browser_available() -> bool:
@@ -86,13 +85,13 @@ class BrowserConfig:
     max_sessions_per_project: int = 2     # F6 定稿：项目级并发会话（Page）上限
     body_max_bytes: int = 65536           # 抓包/重放 body 存储上限
     action_timeout_s: float = 20.0
-    domain_scope: str = "subdomain"       # 白名单子域匹配：subdomain / exact
+    domain_scope: str = "subdomain"       # 保留配置兼容；浏览器操作允许任意目标
     intruder_max_concurrency: int = 5     # 爆破并发硬顶（config 可降不可升，replay.py 消费）
     intruder_rate_per_sec: float = 10.0
     intruder_max_requests: int = 1000
     ignore_https_errors: bool = True      # 授权目标默认放行证书错误（过期/自签；
-                                          # 2026-09-24 用户定稿——导航前必经 check_target
-                                          # 白名单，MITM 面只在已登记授权范围）
+                                          # 兼容旧配置；当前浏览器操作允许任意目标
+                                          # 抓包范围配置（当前浏览器 UI 不限制目标）
     screencast_quality: int = 60          # CDP 实时帧 JPEG 质量（F6-v2）
     screencast_max_width: int = 1280      # 实时帧最大宽（超出缩帧）
     screencast_max_height: int = 720
@@ -164,6 +163,8 @@ class BrowserInstance:
         self._pw = None            # playwright 句柄（仅 loop 线程触碰）
         self._ctx = None           # persistent BrowserContext（仅 loop 线程触碰）
         self._pages: dict[str, _PageEntry] = {}
+        self._input_paused: set[str] = set()
+        self._last_action_at: dict[str, float] = {}
         self._casts: dict[str, dict] = {}   # sid → {sinks:set[cb], cdp:CDPSession|None}（sinks 锁外判，cdp 仅 loop 线程）
         self._lock = threading.Lock()
 
@@ -292,6 +293,7 @@ class BrowserInstance:
     def _audit(self, entry: _PageEntry, action: str, **payload) -> None:
         """browser.action 审计（author=owner；agent 动作挂 task_id）。"""
         info = entry.info
+        self._last_action_at[info.sid] = time.time()
         self.bb.append_event(
             self.project_id, "browser.action",
             {"action": action, "origin": self._origin(info.sid),
@@ -304,6 +306,10 @@ class BrowserInstance:
         if entry is None:
             raise BrowserError(f"浏览器会话不存在: {sid}（先 open_session）")
         return entry
+
+    def session_exists(self, sid: str) -> bool:
+        """Return whether a live Page session is registered for this project."""
+        return sid in self._pages
 
     # ---- 会话管理（同步） ----
 
@@ -380,6 +386,8 @@ class BrowserInstance:
         self._intercept.cancel_all(reason="session_closed")  # F6-v3：未裁决包放行
         await self._teardown_screencast(sid)
         entry = self._pages.pop(sid, None)
+        self._input_paused.discard(sid)
+        self._last_action_at.pop(sid, None)
         if entry is not None and entry.page is not None:
             try:
                 await entry.page.close()
@@ -390,7 +398,9 @@ class BrowserInstance:
         info = entry.info
         return {"sid": info.sid, "owner": info.owner, "task_id": info.task_id,
                 "url": entry.url, "title": entry.title,
-                "origin": self._origin(info.sid)}
+                "origin": self._origin(info.sid),
+                "paused": info.sid in self._input_paused,
+                "last_action_at": self._last_action_at.get(info.sid)}
 
     def sessions(self) -> list[dict]:
         return [self._session_dict(e) for e in self._pages.values()]
@@ -401,25 +411,41 @@ class BrowserInstance:
         if entry is not None and entry.info is not None:
             entry.info.task_id = task_id
 
-    # ---- 动作（同步；白名单在导航入口硬校验） ----
+    def set_input_paused(self, sid: str, paused: bool) -> dict:
+        """暂停/恢复指定 AI 页的浏览器输入动作（接管期间由人类控制）。"""
+        self._entry(sid)
+        if sid == HUMAN_MAIN_SID:
+            raise BrowserError("人类主页面无需接管")
+        if paused:
+            self._input_paused.add(sid)
+        else:
+            self._input_paused.discard(sid)
+        self._audit(self._pages[sid], "takeover-start" if paused else "takeover-end",
+                    url=self._pages[sid].url)
+        return self._session_dict(self._pages[sid])
+
+    def _wait_for_input(self, sid: str) -> None:
+        """AI 动作在人工接管期间等待；页面观察和人类输入不受影响。"""
+        deadline = time.monotonic() + self.config.action_timeout_s * 6
+        while sid in self._input_paused:
+            if time.monotonic() >= deadline:
+                raise BrowserError("浏览器页面正在由人类接管，请释放接管后重试")
+            time.sleep(0.1)
+
+    # ---- 动作（同步；浏览器允许访问任意 URL） ----
 
     def navigate(self, sid: str, url: str) -> dict:
-        """导航。目标白名单在此硬校验（宁严勿松）；拒绝落 browser.deny。"""
+        """导航到任意 URL；AI 页面在人工接管期间等待恢复。"""
         entry = self._entry(sid)
-        verdict = check_target(self.bb, self.project_id, url,
-                               domain_scope=self.config.domain_scope)
-        if not verdict.allowed:
-            deny_event(self.bb, self.project_id, url, verdict,
-                       session_id=entry.info.sid, author=entry.info.owner,
-                       origin=self._origin(sid))
-            raise BrowserError(verdict.reason)
+        self._wait_for_input(sid)
         t0 = time.monotonic()
         result = self._submit(self._nav_coro(entry, url))
         duration_ms = int((time.monotonic() - t0) * 1000)
         self._audit(entry, "navigate", url=url,
                     final_url=result["final_url"], status=result["status"],
-                    target_host=verdict.host, duration_ms=duration_ms)
-        return {**result, "target_host": verdict.host, "duration_ms": duration_ms}
+                    duration_ms=duration_ms)
+        parsed = urlsplit(result.get("final_url") or url)
+        return {**result, "target_host": parsed.hostname or "", "duration_ms": duration_ms}
 
     async def _nav_coro(self, entry: _PageEntry, url: str) -> dict:
         ctx = await self._ensure_ctx()
@@ -441,6 +467,7 @@ class BrowserInstance:
     def act(self, sid: str, action: str, **kw) -> dict:
         """非导航动作：click(selector|x,y) / type(selector,text) / back / content。"""
         entry = self._entry(sid)
+        self._wait_for_input(sid)
         t0 = time.monotonic()
         result = self._submit(self._act_coro(entry, action, kw))
         duration_ms = int((time.monotonic() - t0) * 1000)
@@ -599,8 +626,8 @@ class BrowserInstance:
         审计口径：click/dblclick/wheel/key/type 落 browser.action；move/down/up 不审计。
         """
         entry = self._entry(sid)
-        if not sid.startswith("human-"):
-            raise BrowserError("仅人类会话（human-…）可接管输入，AI 会话只读")
+        if not sid.startswith("human-") and sid not in self._input_paused:
+            raise BrowserError("该 AI 页面尚未进入人类接管状态")
         audited = kind in ("click", "dblclick", "wheel", "key", "type")
         audit_kw = {k: (str(v)[:80] if k in ("text", "key") and v else v)
                     for k, v in kw.items()}

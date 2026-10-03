@@ -77,6 +77,12 @@ def _is_transient_network(reason: Any) -> bool:
     """URLError.reason 是否属「可重试」的瞬时网络故障（连接类/超时/断管）。
     非瞬时（DNS 解析失败、不支持协议、非法 URL 等）返回 False，仍按 LLMError
     快速暴露交人工判断。"""
+    # 代理或上游在 TLS 握手/建连阶段提前断开时，urllib 会把
+    # ``ssl.SSLEOFError: UNEXPECTED_EOF_WHILE_READING`` 包在 URLError 里。
+    # 这是连接级瞬时故障，应交给连接重试预算；证书校验等其它 SSLError
+    # 仍保持快速失败，避免掩盖配置错误。
+    if isinstance(reason, ssl.SSLEOFError):
+        return True
     if isinstance(reason, (ConnectionError, TimeoutError, BrokenPipeError)):
         return True
     return getattr(reason, "errno", None) in _TRANSIENT_ERRNOS

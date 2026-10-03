@@ -3481,6 +3481,31 @@ def test_bb_add_asset_unified_entry_and_dedup_hint(env):
     assert r3.startswith("[错误]") and "手选" in r3
 
 
+def test_bb_delete_and_merge_asset_tools(env):
+    """黑板资产删除/合并工具走项目边界并返回迁移回执。"""
+    d = _dispatcher(env, "asset-maintenance")
+    target = d.dispatch("bb_add_asset", {"type": "host", "value": "10.30.0.1"})
+    source = d.dispatch("bb_add_asset", {"type": "domain", "value": "app.internal"})
+    target_id = target.split("asset=")[1].split()[0]
+    source_id = source.split("asset=")[1].split()[0]
+
+    assert d.dispatch("bb_delete_asset", {"asset_id": target_id}).startswith("asset.deleted=")
+    # 源仍可操作；重新登记目标后验证合并回执与别名删除。
+    target = d.dispatch("bb_add_asset", {"type": "host", "value": "10.30.0.1"})
+    target_id = target.split("asset=")[1].split()[0]
+    merged = d.dispatch("bb_merge_assets", {
+        "source_asset_id": source_id,
+        "target_asset_id": target_id,
+        "reason": "同一内部服务的域名与解析主机",
+    })
+    assert merged.startswith("asset.merged ")
+    assert d.bb.get_asset(source_id) is None
+    assert d.bb.get_asset(target_id)["meta"]["aliases"]
+
+    binary_id = d.bb.upsert_asset(d.project_id, "binary", "c" * 64)["id"]
+    assert d.dispatch("bb_delete_asset", {"asset_id": binary_id}).startswith("[拒绝]")
+
+
 def test_bb_add_asset_domain_dns_mount(env, monkeypatch):
     """E6 ③⑤：domain 由平台自动 DNS 解析挂 host（Agent 侧无需显式传 parent_id）。"""
     from core.blackboard import assets as am

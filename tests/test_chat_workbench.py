@@ -55,6 +55,17 @@ class FakeLLM:
         return item
 
 
+class ThinkingLLM:
+    """最小流式替身：验证 ChatTurn 把思考回调传给 provider。"""
+
+    def chat(self, messages, **kwargs):
+        callback = kwargs.get("on_thinking")
+        if callback is not None:
+            callback("先检查输入。")
+            callback("再给出结论。")
+        return _resp(text="完成")
+
+
 def _resp(text="", tool_calls=None) -> LLMResponse:
     return LLMResponse(text=text, tool_calls=tool_calls or [],
                        usage=Usage(input_tokens=1, output_tokens=1))
@@ -169,6 +180,24 @@ def test_recover_running_threads(tmp_path):
     assert chat_store.get_thread(bb, ok_t["id"])["status"] == "running"
 
 
+def test_chat_thinking_stream_events(tmp_path):
+    """工作台 ChatTurn 透传 on_thinking，并发布增量与终稿事件。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    thread = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID)
+    turn = ChatTurn(bb=bb, llm=ThinkingLLM(), project_id="p1",
+                    thread_id=thread["id"], packs_root="packs", track="ctf",
+                    capabilities=["web"], mcp_bridge=None, expert_names=[])
+
+    assert turn.run("分析") == "完成"
+    events = bb.recent_events("p1", limit=100)
+    deltas = [e for e in events if e["kind"] == "chat.thinking.delta"]
+    finals = [e for e in events if e["kind"] == "chat.thinking"]
+    assert deltas and deltas[-1]["payload"]["text"] == "先检查输入。再给出结论。"
+    assert finals and finals[-1]["payload"]["thinking"] == "先检查输入。再给出结论。"
+    assert all(e["payload"]["thread_id"] == thread["id"] for e in deltas + finals)
+
+
 # ---------- 运行时：主控轮（todo → call_expert → 汇总） ----------
 
 def test_chat_orchestrator_turn_todo_and_call_expert(tmp_path):
@@ -213,7 +242,7 @@ def test_chat_orchestrator_turn_todo_and_call_expert(tmp_path):
     orch_call = llm.calls[0]
     names = {s["name"] for s in orch_call["tools"]}
     assert {"todo_write", "call_expert", "skill_open", "kb_search",
-            "kb_open", "bb_query"} <= names
+            "kb_open", "bb_query", "bb_delete_asset", "bb_merge_assets"} <= names
     assert "run_cmd" not in names and "finish" not in names and "publish_task" not in names
     # 主控 system 含 persona；专家清单在 call_expert 工具描述
     # （_generalist/主控自身不进委派清单）
@@ -238,6 +267,41 @@ def test_chat_orchestrator_turn_todo_and_call_expert(tmp_path):
     events = [e for e in bb.recent_events("p1") if e["kind"].startswith("chat.")]
     kinds = {e["kind"] for e in events}
     assert {"chat.message", "chat.tool", "chat.spawn", "chat.todo"} <= kinds
+
+
+def test_chat_orchestrator_parallel_call_expert_dispatch(tmp_path):
+    """同一批 call_expert 必须并行执行，且结果按调用 id 收集。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    thread = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID)
+    turn = ChatTurn(bb=bb, llm=FakeLLM([]), project_id="p1",
+                    thread_id=thread["id"], packs_root="packs", track="ctf",
+                    capabilities=["web"], mcp_bridge=None,
+                    expert_names=["web-solver", "recon"])
+    entered = threading.Barrier(2)
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    def fake_dispatch(tc):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        try:
+            entered.wait(timeout=2)
+            return True, f"done:{tc.id}"
+        finally:
+            with lock:
+                active -= 1
+
+    turn._dispatch = fake_dispatch
+    results = turn._parallel_expert_dispatch([
+        _tc("e1", "call_expert", {"expert": "web-solver", "task": "任务一"}),
+        _tc("e2", "call_expert", {"expert": "recon", "task": "任务二"}),
+    ])
+    assert max_active == 2
+    assert results == {"e1": (True, "done:e1"), "e2": (True, "done:e2")}
 
 
 def test_call_expert_rejects_skill_name_with_enum_and_hint(tmp_path):

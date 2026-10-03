@@ -1550,6 +1550,9 @@ export interface BrowserSessionInfo {
   task_id: string | null
   url: string | null
   title: string | null
+  origin?: "human" | "agent"
+  paused?: boolean
+  last_action_at?: number | null
 }
 
 export interface BrowserState {
@@ -1860,4 +1863,87 @@ export interface ChatMcpServer {
   online: boolean
   tools: ChatMcpTool[]
   session_scoped?: boolean
+}
+
+// ---------- 多智能体协调（独立协调域） ----------
+export type CoordinationPlanStatus = "draft" | "active" | "paused" | "completed"
+export type CoordinationTaskStatus = "pending" | "ready" | "running" | "blocked" | "completed" | "failed"
+
+export interface CoordinationTask {
+  id: string
+  project_id: string
+  plan_id: string
+  title: string
+  description: string
+  role: string
+  status: CoordinationTaskStatus
+  priority: number
+  depends_on: string[]
+  evidence: Record<string, unknown>[]
+  created_at: string
+  updated_at: string
+  verification?: CoordinationVerification | null
+}
+
+export interface CoordinationPlan {
+  id: string
+  project_id: string
+  name: string
+  objective: string
+  status: CoordinationPlanStatus
+  config: Record<string, unknown>
+  created_at: string
+  updated_at: string
+  tasks: CoordinationTask[]
+  task_counts?: Record<string, number>
+}
+
+export interface CoordinationOverview {
+  plans: CoordinationPlan[]
+  active_plan_id: string | null
+  objects: CoordinationObject[]
+  conflicts: CoordinationConflict[]
+  summary: { plans: number; tasks: number; running: number; blocked: number; completed: number; objects: number; conflicts: number }
+}
+
+export type CoordinationObjectKind = "function" | "string" | "xref" | "behavior" | "evidence" | "artifact"
+export interface CoordinationObject {
+  id: string
+  project_id: string
+  plan_id: string | null
+  task_id: string | null
+  kind: CoordinationObjectKind
+  name: string
+  object_ref: string
+  data: Record<string, unknown>
+  source: string
+  confidence: number
+  artifact_refs: { artifact_ref: string; relation: string; created_at: string }[]
+  created_at: string
+  updated_at: string
+}
+export type CoordinationConflictStatus = "open" | "resolved" | "dismissed"
+export interface CoordinationConflict {
+  id: string
+  project_id: string
+  left_object_id: string
+  right_object_id: string
+  field: string
+  summary: string
+  status: CoordinationConflictStatus
+  resolution: string
+  created_at: string
+  updated_at: string
+}
+export type CoordinationVerificationStatus = "passed" | "needs_evidence" | "conflict" | "failed"
+export interface CoordinationVerification {
+  id: string
+  project_id: string
+  plan_id: string
+  task_id: string
+  status: CoordinationVerificationStatus
+  score: number
+  issues: { kind: string; message: string; conflict_id?: string }[]
+  followup_task_ids: string[]
+  checked_at: string
 }

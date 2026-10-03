@@ -16,6 +16,9 @@
 
 ## 约定与坑
 
+- **OpenAI 兼容层 HTTP 520 重试（2026-10-03）**：上游中转/CDN 返回 520 时，`openai_compat.py` 在首次请求失败后最多重试 5 次（总计 6 次尝试），退避为 2/4/8/16/30 秒；每次通过 `on_retry` 落 `chat.retry` 事件，界面显示 `x/5`。鉴权、参数和其它非暂态 HTTP 错误不重试。
+- **TLS EOF 连接重试（2026-10-03）**：`urllib` 包装的 `ssl.SSLEOFError`（尤其 `UNEXPECTED_EOF_WHILE_READING`）判为连接级瞬时故障，交给连接重试预算；其它 SSL 错误仍快速失败。
+
 - 无可用 key 不崩：API Agent/编排端点返回 503；LLM 缺省 = 路由覆写目标或第一个启用供应商的第一个模型。
 - Agent 会话内可经 `POST /agents/{sid}/llm` 运行时动态切换 provider 引用，下一次 chat 生效（落 llm.switched 事件）。
 - 测试可注入 executor_llm/planner_llm 或用 tmp providers_config，避免种子污染真实 config/providers.json；禁止把任何 key 写进技能文件或提交物。

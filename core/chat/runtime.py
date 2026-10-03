@@ -6,16 +6,18 @@
 
 分工（蛙池式主控轻专家重）：
 - 主控线程（agent_id=chat-orchestrator）：todo_write / call_expert /
-  skill_open / kb_search / kb_open / bb_query + mcp__*；不碰实操。
+  skill_open / kb_search / kb_open / bb_query + 受控资产维护工具 + mcp__*；
+  不直接执行扫描、利用等实操。
 - 子专家线程（agent_id=专家池 id）：AGENT_TOOLS 全量裁剪（去掉任务队列/
   计划/意图/收尾控制原语）+ mcp__*；call_expert 不可用（spawn 深度=1）。
 
 call_expert：spawn 持久子线程（parent_thread_id 留档）→ 隔离上下文跑完
 → 摘要+线程引用回传主控（不审批，全程事件流可见）。
 
-流式：llm 流式回调攒 delta → 节流落 chat.delta 事件（前端按 thread_id
-组装）；工具调用落 chat.tool 事件；终稿落 chat.message 事件。消息全文
-以 chat_messages 表为准，事件只承担实时可见性。
+流式：llm 的 text/thinking 回调分别攒 delta → 节流落 chat.delta /
+chat.thinking.delta 事件（前端按 thread_id 组装）；每步思考完成落
+chat.thinking 终稿；工具调用落 chat.tool 事件；回复终稿落 chat.message 事件。
+消息全文以 chat_messages 表为准，事件只承担实时可见性。
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ import logging
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -62,7 +65,8 @@ _EXPERT_EXCLUDED = {
 _INTENT_TOOLS = ("declare_intent", "close_intent", "reopen_intent", "bb_delete_intent")
 
 _ORCH_BASE_TOOLS = ("todo_write", "call_expert", "skill_open",
-                    "kb_search", "kb_open", "bb_query", *_INTENT_TOOLS)
+                    "kb_search", "kb_open", "bb_query",
+                    "bb_delete_asset", "bb_merge_assets", *_INTENT_TOOLS)
 
 # 对话轮步数上限（2026-10-01 由 24/32 提升至 200：修「步数耗尽但全程只调工具
 # → 无终稿 → 落『本轮未产出文本回复』」；配合 _loop 末步强制终稿兜底）
@@ -84,6 +88,10 @@ _CHAT_CONTINUE_MAX = 3
 _TRUNC_STOP_REASONS = ("length", "max_tokens")
 _CONTINUE_NUDGE = ("（上一条回复因输出长度上限被截断）请**接着上一句继续写完**，"
                    "不要重复已写内容，也不要重新开头。")
+
+# 主控一批 tool_calls 中允许同时运行的子专家数。超过上限的调用会在
+# executor 中排队，避免模型一次生成大量 call_expert 时无限创建线程。
+_MAX_PARALLEL_EXPERTS = 4
 
 # ---------- 上下文治理参数（2026-09-30 压缩上下文方案） ----------
 # 背景：单条工具结果可达数百万字符原样入历史 → 跨轮全量回放 → input 突破
@@ -510,7 +518,8 @@ class ChatTurn:
                 "name": "call_expert",
                 "description": "委派专家池专家执行一项任务：spawn 隔离的专家线程"
                                "（持久留档，人类可打开追问），专家跑完返回摘要。"
-                               "一次委派一项；任务描述必须自包含（目标/范围/已知"
+                               "相互独立的任务可在同一轮并发调用；有依赖的任务按顺序委派。"
+                               "任务描述必须自包含（目标/范围/已知"
                                "信息/期望交付物）。你在委派前不直接实操——实操是"
                                "专家的事。（expert 只填下方专家 id，勿填技能名）"
                                + ("\n可用专家：\n" + "\n".join(expert_rows)
@@ -557,10 +566,12 @@ class ChatTurn:
             parts.append(
                 "## 工作方式\n"
                 "1. 接到测试意图 → todo_write 拆待办（每项一条，状态实时更新）；\n"
-                "2. 逐项 call_expert 委派专家执行（一次一项，任务描述自包含）；\n"
+                "2. 将相互独立的待办通过多个 call_expert 同轮并发委派；有前后依赖的待办按顺序委派，任务描述必须自包含；\n"
                 "3. 子专家摘要回来后推进下一项；全部完成后向人类汇总署名输出。\n"
                 "委派前可用 kb_search/kb_open 查知识库确认打法方向、bb_query 了解"
-                "黑板已有资产/发现；不直接执行扫描/利用等实操。")
+                "黑板已有资产/发现；资产清理与合并可直接使用受控的"
+                "bb_delete_asset/bb_merge_assets（必须先查询，合并必须给出 reason）；"
+                "不直接执行扫描/利用等实操。")
         else:
             parts.append(
                 "## 工作方式\n"
@@ -801,8 +812,8 @@ class ChatTurn:
                           "masked": masked, "est": est1, "budget": budget}
 
     def _chat(self, messages: list[dict[str, Any]], system: str | None,
-              tools: list[dict[str, Any]] | None, on_text=None, on_retry=None,
-              on_provider_retry=None):
+              tools: list[dict[str, Any]] | None, on_text=None,
+              on_thinking=None, on_retry=None, on_provider_retry=None):
         """调 LLM（发送前已压缩）。reactive 兜底（ct-5）：若仍因 input 超限被
         网关 400/413 拒绝（ContextOverflowError），强制压缩一次后重试；再失败
         则抛出交给 run() 落 error。对应 Claude Code 五级级联的最末「reactive
@@ -815,7 +826,7 @@ class ChatTurn:
         for attempt in range(_CHAT_TRUNC_RETRIES + 1):
             try:
                 return self._chat_once(messages, system, tools, on_text,
-                                       on_provider_retry)
+                                       on_thinking, on_provider_retry)
             except LLMError as e:
                 if not getattr(e, "truncated", False) or attempt >= _CHAT_TRUNC_RETRIES:
                     raise
@@ -827,12 +838,25 @@ class ChatTurn:
 
     def _chat_once(self, messages: list[dict[str, Any]], system: str | None,
                    tools: list[dict[str, Any]] | None, on_text=None,
-                   on_provider_retry=None):
+                   on_thinking=None, on_provider_retry=None):
         def provider_kwargs() -> dict[str, Any]:
             kwargs: dict[str, Any] = {
                 "system": system, "tools": tools, "on_text": on_text,
                 "should_cancel": self._aborted,
             }
+            # 思考流式是 provider 的可选扩展。对支持 **kwargs 的测试替身和
+            # 新 provider 直接传递；旧的窄签名实现则保持兼容。
+            if on_thinking is not None:
+                try:
+                    params = inspect.signature(self.llm.chat).parameters
+                    supports_thinking = (
+                        "on_thinking" in params
+                        or any(p.kind == inspect.Parameter.VAR_KEYWORD
+                               for p in params.values()))
+                except (TypeError, ValueError):
+                    supports_thinking = False
+                if supports_thinking:
+                    kwargs["on_thinking"] = on_thinking
             # 只有支持该扩展回调的 provider（当前为 OpenAI 兼容层）接收它；
             # 保持测试替身和其他协议 provider 的旧接口兼容。
             if on_provider_retry is not None:
@@ -911,6 +935,9 @@ class ChatTurn:
                 break
             acc: list[str] = []
             pub = {"chars": 0, "seq": 0, "at": 0.0}
+            thinking_acc: list[str] = []
+            thinking_pub = {"chars": 0, "seq": 0, "at": 0.0}
+            thinking_started = time.monotonic()
 
             def on_text(delta: str, _acc=acc, _pub=pub) -> None:
                 _acc.append(delta)
@@ -926,11 +953,34 @@ class ChatTurn:
                 _pub["at"] = now
                 self._emit("chat.delta", {"text": text, "seq": _pub["seq"]})
 
+            def on_thinking(delta: str, _acc=thinking_acc,
+                            _pub=thinking_pub) -> None:
+                """思考增量按累计全文发布，前端可直接覆盖当前内容。"""
+                if not delta:
+                    return
+                _acc.append(delta)
+                thinking = "".join(_acc)
+                now = time.monotonic()
+                grown = len(thinking) - _pub["chars"]
+                if not thinking or (grown < _DELTA_MIN_CHARS
+                                    and (now - _pub["at"] < _DELTA_MIN_INTERVAL
+                                         or grown <= 0)):
+                    return
+                _pub["chars"] = len(thinking)
+                _pub["seq"] += 1
+                _pub["at"] = now
+                self._emit("chat.thinking.delta", {
+                    "text": thinking, "seq": _pub["seq"]})
+
             def _reset_delta(_acc=acc, _pub=pub) -> None:
                 """截断整轮重试前：清空累加与节流基准，防「半截+新流」拼接上屏
                 （前端取最后一条 chat.delta 的累计全文，从零重流即整段覆盖）。"""
                 _acc.clear()
                 _pub["chars"] = 0
+                thinking_acc.clear()
+                thinking_pub["chars"] = 0
+                thinking_pub["seq"] = 0
+                thinking_pub["at"] = 0.0
 
             def _provider_retry(attempt: int, total: int, status: int) -> None:
                 """传输层重试进度：落事件让工作台在等待期间显示具体次数。"""
@@ -955,8 +1005,23 @@ class ChatTurn:
             est_tools = _est_tokens(json.dumps(tools, ensure_ascii=False))
             est_msgs = sum(_est_tokens(_msg_text(m)) for m in messages)
             resp = self._chat(messages, system, step_tools, on_text,
+                              on_thinking=on_thinking,
                               on_retry=_reset_delta,
                               on_provider_retry=_provider_retry)
+            # provider 可能只在响应终稿中返回 thinking（例如非流式替身或网关
+            # 没有发送增量帧）。先补齐最后一小段 delta，再发终稿事件；前端在
+            # 收到终稿前即可看到实时内容，收到终稿后得到完整文本。
+            thinking = "".join(thinking_acc) or (resp.thinking or "")
+            if thinking and len(thinking) > thinking_pub["chars"]:
+                thinking_pub["chars"] = len(thinking)
+                thinking_pub["seq"] += 1
+                self._emit("chat.thinking.delta", {
+                    "text": thinking, "seq": thinking_pub["seq"]})
+            if thinking:
+                self._emit("chat.thinking", {
+                    "thinking": thinking,
+                    "duration_s": round(time.monotonic() - thinking_started, 2),
+                })
             # 上下文用量：input(+cache)=当步窗口占用，output/steps 跨步累计
             u = resp.usage
             input_total = u.input_tokens + u.cache_read_tokens \
@@ -1005,6 +1070,7 @@ class ChatTurn:
                 ]})
                 tool_result_blocks: list[dict[str, Any]] = []
                 aborted = False
+                parallel_results = self._parallel_expert_dispatch(resp.tool_calls)
                 for tc in resp.tool_calls:
                     if aborted or self._aborted():
                         # 中止：为当前及剩余 tool_calls 补落占位结果，保证
@@ -1021,12 +1087,17 @@ class ChatTurn:
                             "content": result})
                         continue
                     t0 = time.perf_counter()
-                    self._emit("chat.tool", {
-                        "phase": "start", "name": tc.name,
-                        "args_head": json.dumps(
-                            tc.arguments, ensure_ascii=False,
-                            separators=(",", ":"))[:300]})
-                    ok, result = self._dispatch(tc)
+                    if tc.id in parallel_results:
+                        # 并发 call_expert 已在 worker 中完成；这里按模型原始
+                        # tool_call 顺序持久化结果，保证下一轮历史稳定可重放。
+                        ok, result = parallel_results[tc.id]
+                    else:
+                        self._emit("chat.tool", {
+                            "phase": "start", "name": tc.name,
+                            "args_head": json.dumps(
+                                tc.arguments, ensure_ascii=False,
+                                separators=(",", ":"))[:300]})
+                        ok, result = self._dispatch(tc)
                     result, artifact_path = self._clip_tool_result(result, tc)
                     chat_store.append_message(
                         self.bb, self.thread_id, "tool", result,
@@ -1034,15 +1105,16 @@ class ChatTurn:
                     tool_result_blocks.append({
                         "type": "tool_result", "tool_use_id": tc.id,
                         "content": result})
-                    self._emit("chat.tool", {
-                        "phase": "done",
-                        "name": tc.name, "args_head": json.dumps(
-                            tc.arguments, ensure_ascii=False,
-                            separators=(",", ":"))[:300],
-                        "result_head": result[:_TOOL_RESULT_EVENT_HEAD],
-                        "ok": ok,
-                        "artifact_path": artifact_path,
-                        "duration_s": round(time.perf_counter() - t0, 2)})
+                    if tc.id not in parallel_results:
+                        self._emit("chat.tool", {
+                            "phase": "done",
+                            "name": tc.name, "args_head": json.dumps(
+                                tc.arguments, ensure_ascii=False,
+                                separators=(",", ":"))[:300],
+                            "result_head": result[:_TOOL_RESULT_EVENT_HEAD],
+                            "ok": ok,
+                            "artifact_path": artifact_path,
+                            "duration_s": round(time.perf_counter() - t0, 2)})
                 if tool_result_blocks:
                     messages.append({"role": "user",
                                      "content": tool_result_blocks})
@@ -1149,6 +1221,51 @@ class ChatTurn:
             except Exception as e:  # noqa: BLE001 —— 工具异常回文本不断轮
                 return False, f"[错误] 工具异常: {e}"
         return False, f"[错误] 工具 {name} 不可用：本线程未装配工具面"
+
+    def _parallel_expert_dispatch(self, tool_calls) -> dict[str, tuple[bool, str]]:
+        """并发执行同一批中的多个 call_expert，返回按 tool_call id 索引的结果。
+
+        只有至少两个子专家调用时才启用；单个调用保留原有路径，其他工具也不
+        参与并行，确保黑板写入工具的调用顺序和既有语义不变。ThreadPoolExecutor
+        的 worker 数有上限，超出的子专家在队列中等待。
+        """
+        experts = [tc for tc in tool_calls if tc.name == "call_expert"]
+        # 混合批次保持原有顺序：例如 call_expert + bb_query 不能让查询
+        # 被隐式延后。模型需要并发时应在同一批只生成独立的 call_expert。
+        if len(experts) < 2 or len(experts) != len(tool_calls):
+            return {}
+        results: dict[str, tuple[bool, str]] = {}
+
+        def run_one(tc):
+            started = time.perf_counter()
+            self._emit("chat.tool", {
+                "phase": "start", "name": tc.name,
+                "args_head": json.dumps(tc.arguments, ensure_ascii=False,
+                                         separators=(",", ":"))[:300],
+                "parallel": True,
+            })
+            try:
+                ok, result = self._dispatch(tc)
+            except Exception as e:  # noqa: BLE001
+                ok, result = False, f"[错误] 工具异常: {e}"
+            self._emit("chat.tool", {
+                "phase": "done", "name": tc.name,
+                "args_head": json.dumps(tc.arguments, ensure_ascii=False,
+                                         separators=(",", ":"))[:300],
+                "result_head": result[:_TOOL_RESULT_EVENT_HEAD], "ok": ok,
+                "parallel": True,
+                "duration_s": round(time.perf_counter() - started, 2),
+            })
+            return tc.id, (ok, result)
+
+        with ThreadPoolExecutor(
+                max_workers=min(_MAX_PARALLEL_EXPERTS, len(experts)),
+                thread_name_prefix="chat-expert") as executor:
+            pending = [executor.submit(run_one, tc) for tc in experts]
+            for future in as_completed(pending):
+                call_id, result = future.result()
+                results[call_id] = result
+        return results
 
     def _dispatch_mcp(self, name: str, args: dict) -> str:
         if self.mcp_bridge is None:

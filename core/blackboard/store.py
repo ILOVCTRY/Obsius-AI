@@ -1298,6 +1298,162 @@ class Blackboard:
             author=author)
         return {"id": asset_id, **snapshot}
 
+    def merge_assets(
+        self,
+        project_id: str,
+        source_asset_id: str,
+        target_asset_id: str,
+        *,
+        author: str = "system",
+        reason: str = "",
+    ) -> dict:
+        """将源资产合并到目标资产，并保留源资产为目标的别名。
+
+        合并是单事务操作：发现、意图锚点和子资产引用都会迁移，源资产随后被删除。
+        binary 必须走 delete_binary 等样本生命周期流程，不能通过通用资产合并破坏分析
+        结果。目标若在源资产子树内也拒绝，避免移动父节点时留下孤儿树。
+        """
+        if source_asset_id == target_asset_id:
+            raise ValueError("源资产和目标资产不能相同")
+        with self._tx():
+            source = self.conn.execute(
+                "SELECT * FROM assets WHERE id=? AND project_id=?",
+                (source_asset_id, project_id)).fetchone()
+            target = self.conn.execute(
+                "SELECT * FROM assets WHERE id=? AND project_id=?",
+                (target_asset_id, project_id)).fetchone()
+            if source is None:
+                raise LookupError(f"源资产不存在或不属于本项目: {source_asset_id}")
+            if target is None:
+                raise LookupError(f"目标资产不存在或不属于本项目: {target_asset_id}")
+            if source["type"] == "binary" or target["type"] == "binary":
+                raise ValueError("binary 样本不能通过通用资产合并，请使用样本生命周期流程")
+
+            # 目标是源的后代时，直接删除源会让目标及其兄弟节点失去稳定的树关系。
+            walker = target["parent_id"]
+            while walker is not None:
+                if walker == source_asset_id:
+                    raise ValueError("目标资产是源资产的后代，不能合并；请保留更高层资产")
+                parent = self.conn.execute(
+                    "SELECT parent_id FROM assets WHERE id=? AND project_id=?",
+                    (walker, project_id)).fetchone()
+                walker = parent["parent_id"] if parent else None
+
+            source_findings = self.conn.execute(
+                "SELECT id, dedup_key FROM findings WHERE project_id=? AND target_asset_id=?",
+                (project_id, source_asset_id)).fetchall()
+            collisions: list[str] = []
+            for finding in source_findings:
+                existing = self.conn.execute(
+                    "SELECT id FROM findings WHERE project_id=? AND target_asset_id=? "
+                    "AND dedup_key=? LIMIT 1",
+                    (project_id, target_asset_id, finding["dedup_key"]),
+                ).fetchone()
+                if existing is not None:
+                    collisions.append(existing["id"])
+            if collisions:
+                raise ValueError(
+                    "合并会造成发现去重键冲突，未执行: " + ", ".join(collisions[:5]))
+
+            children = self.conn.execute(
+                "SELECT id, type, value FROM assets WHERE project_id=? AND parent_id=?",
+                (project_id, source_asset_id)).fetchall()
+            child_conflicts: list[str] = []
+            for child in children:
+                existing = self.conn.execute(
+                    "SELECT id FROM assets WHERE project_id=? AND type=? AND value=? "
+                    "AND parent_id=? AND id!=? LIMIT 1",
+                    (project_id, child["type"], child["value"], target_asset_id,
+                     source_asset_id),
+                ).fetchone()
+                if existing is not None:
+                    child_conflicts.append(existing["id"])
+            if child_conflicts:
+                raise ValueError(
+                    "合并会造成子资产重复，未执行: " + ", ".join(child_conflicts[:5]))
+
+            source_meta = _loads(source["meta"], {})
+            target_meta = _loads(target["meta"], {})
+            aliases = target_meta.get("aliases")
+            if not isinstance(aliases, list):
+                aliases = []
+            aliases.append({
+                "id": source["id"], "type": source["type"], "value": source["value"],
+                "parent_id": source["parent_id"], "status": source["status"],
+                "meta": source_meta,
+            })
+            target_meta["aliases"] = aliases
+
+            if source_findings:
+                self.conn.execute(
+                    "UPDATE findings SET target_asset_id=?, revision=revision+1 "
+                    "WHERE project_id=? AND target_asset_id=?",
+                    (target_asset_id, project_id, source_asset_id),
+                )
+
+            intent_rows = self.conn.execute(
+                "SELECT id, target_asset_id, basis_refs FROM intents WHERE project_id=?",
+                (project_id,),
+            ).fetchall()
+            intents_moved = 0
+            for intent in intent_rows:
+                changed = False
+                new_target = intent["target_asset_id"]
+                if new_target == source_asset_id:
+                    new_target = target_asset_id
+                    changed = True
+                refs = _loads(intent["basis_refs"], [])
+                if not isinstance(refs, list):
+                    refs = []
+                new_refs: list[Any] = []
+                for ref in refs:
+                    replacement = f"asset:{target_asset_id}" \
+                        if ref == f"asset:{source_asset_id}" else ref
+                    if replacement != ref:
+                        changed = True
+                    if replacement not in new_refs:
+                        new_refs.append(replacement)
+                if changed:
+                    self.conn.execute(
+                        "UPDATE intents SET target_asset_id=?, basis_refs=?, "
+                        "revision=revision+1, updated_at=? WHERE id=? AND project_id=?",
+                        (new_target, json.dumps(new_refs, ensure_ascii=False), now(),
+                         intent["id"], project_id),
+                    )
+                    intents_moved += 1
+
+            if children:
+                self.conn.execute(
+                    "UPDATE assets SET parent_id=?, revision=revision+1 "
+                    "WHERE project_id=? AND parent_id=?",
+                    (target_asset_id, project_id, source_asset_id),
+                )
+            self.conn.execute(
+                "UPDATE assets SET meta=?, revision=revision+1 WHERE id=?",
+                (json.dumps(target_meta, ensure_ascii=False), target_asset_id),
+            )
+            self.conn.execute(
+                "DELETE FROM assets WHERE id=? AND project_id=?",
+                (source_asset_id, project_id),
+            )
+
+            result = {
+                "source_asset_id": source_asset_id,
+                "target_asset_id": target_asset_id,
+                "source_type": source["type"],
+                "source_value": source["value"],
+                "findings_moved": len(source_findings),
+                "intents_moved": intents_moved,
+                "children_moved": len(children),
+                "alias": {"type": source["type"], "value": source["value"]},
+            }
+        self.append_event(
+            project_id, "asset.merged",
+            {**result, "reason": (reason or "")[:500], "by": author},
+            author=author,
+        )
+        return result
+
     def delete_binary(self, project_id: str, sha: str,
                       author: str = "human") -> dict:
         """物理删除一个样本（binary 资产）及其全部项目内依赖（2026-10-01 工作台）。

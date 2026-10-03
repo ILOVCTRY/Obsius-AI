@@ -4,6 +4,7 @@
 
 import json
 import socket
+import ssl
 import urllib.error
 
 import pytest
@@ -253,6 +254,21 @@ def test_default_transport_classifies_connection_reset_as_retryable(monkeypatch)
     monkeypatch.setattr(ac.urllib.request, "urlopen", _dns)
     with pytest.raises(ac.LLMError):
         ac._default_transport(5.0)("https://fake/v1/messages", {}, b"{}")
+
+
+def test_default_transport_classifies_ssl_eof_as_retryable(monkeypatch):
+    """代理/上游 TLS 提前 EOF 进入连接重试，而不是直接落网络错误。"""
+    from core.llm import anthropic_compat as ac
+
+    def _ssl_eof(*a, **k):
+        raise urllib.error.URLError(
+            ssl.SSLEOFError("[SSL: UNEXPECTED_EOF_WHILE_READING] EOF"))
+
+    monkeypatch.setattr(ac.urllib.request, "urlopen", _ssl_eof)
+    with pytest.raises(ConnectionError):
+        ac._default_transport(5.0)("https://fake/v1/messages", {}, b"{}")
+    with pytest.raises(ConnectionError):
+        ac._default_stream_transport(5.0)("https://fake/v1/messages", {}, b"{}")
 
 
 def test_provider_proxy_uses_explicit_proxy_and_survives_build(tmp_path, monkeypatch):
@@ -1105,6 +1121,52 @@ def test_openai_524_stops_after_five_total_attempts(monkeypatch):
     with pytest.raises(LLMError, match="HTTP 524"):
         p.chat([{"role": "user", "content": "hi"}])
     assert len(attempts) == 5
+
+
+def test_openai_520_retries_five_times_after_initial_failure(monkeypatch):
+    from core.llm import openai_compat
+
+    attempts = []
+    retries = []
+
+    def transport(url, headers, body):
+        attempts.append(1)
+        return 520, {"error": {"code": 520, "message": "origin error"}}
+
+    monkeypatch.setattr(openai_compat.time, "sleep", lambda _: None)
+    p = openai_compat.OpenAICompatProvider(
+        "https://fake", "key", "m", format="openai-responses",
+        stream_transport=transport)
+    with pytest.raises(LLMError, match="HTTP 520"):
+        p.chat([{"role": "user", "content": "hi"}],
+               on_retry=lambda *args: retries.append(args))
+    assert len(attempts) == 6
+    assert retries == [(1, 5, 520), (2, 5, 520), (3, 5, 520),
+                       (4, 5, 520), (5, 5, 520)]
+
+
+def test_openai_520_retry_recovers(monkeypatch):
+    from core.llm import openai_compat
+
+    attempts = []
+    retries = []
+    response = {"output": [{"type": "message", "content": [
+        {"type": "output_text", "text": "OK"}]}], "status": "completed"}
+
+    def transport(url, headers, body):
+        attempts.append(1)
+        if len(attempts) <= 2:
+            return 520, {"error": {"code": 520, "message": "origin error"}}
+        return 200, iter([json.dumps(response)])
+
+    monkeypatch.setattr(openai_compat.time, "sleep", lambda _: None)
+    p = openai_compat.OpenAICompatProvider(
+        "https://fake", "key", "m", format="openai-responses",
+        stream_transport=transport)
+    assert p.chat([{"role": "user", "content": "hi"}],
+                   on_retry=lambda *args: retries.append(args)).text == "OK"
+    assert len(attempts) == 3
+    assert retries == [(1, 5, 520), (2, 5, 520)]
 
 
 def test_openai_connection_reset_retries_until_success(monkeypatch):

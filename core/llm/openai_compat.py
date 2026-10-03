@@ -10,9 +10,13 @@ from core.llm.provider import LLMResponse, ToolCall, Usage, LLMError
 CHAT_COMPLETIONS = "openai-chat-completions"
 RESPONSES = "openai-responses"
 
-# Cloudflare 524 表示已连上源站，但源站在边缘超时窗口内没有返回结果。
-# 只对这个明确的上游暂态状态重试，最多 5 次总请求，避免把鉴权/参数错误
-# 重复发送；退避时间可由测试覆盖，生产环境按 2/4/8/16 秒递增。
+# Cloudflare 520 表示边缘代理从源站拿到了未知/无效响应；524 表示已连上源站，
+# 但源站在边缘超时窗口内没有返回结果。只对这两个明确的上游暂态状态重试，
+# 避免把鉴权/参数错误重复发送。520 按首次请求失败后重试 5 次处理，
+# 524 保持最多 5 次总请求；退避时间可由测试覆盖。
+OPENAI_520_RETRIES = 5
+OPENAI_520_ATTEMPTS = OPENAI_520_RETRIES + 1
+OPENAI_520_BACKOFF = (2.0, 4.0, 8.0, 16.0, 30.0)
 OPENAI_524_ATTEMPTS = 5
 OPENAI_524_BACKOFF = (2.0, 4.0, 8.0, 16.0)
 OPENAI_CONNECTION_ATTEMPTS = 5
@@ -51,8 +55,9 @@ class OpenAICompatProvider:
         url = f"{self.base_url}/v1/{'chat/completions' if self.format == CHAT_COMPLETIONS else 'responses'}"
 
         def request_with_retries(payload: bytes):
-            """重试上游明确的 524 或瞬时连接断开，其他错误立即返回。"""
-            max_attempts = max(OPENAI_CONNECTION_ATTEMPTS, OPENAI_524_ATTEMPTS)
+            """重试上游明确的 520/524 或瞬时连接断开，其他错误立即返回。"""
+            max_attempts = max(OPENAI_520_ATTEMPTS, OPENAI_CONNECTION_ATTEMPTS,
+                               OPENAI_524_ATTEMPTS)
             for attempt in range(1, max_attempts + 1):
                 try:
                     status, data = self._stream_transport(
@@ -66,6 +71,15 @@ class OpenAICompatProvider:
                                  "connection")
                     time.sleep(OPENAI_CONNECTION_BACKOFF[min(
                         attempt - 1, len(OPENAI_CONNECTION_BACKOFF) - 1)])
+                    continue
+
+                if status == 520:
+                    if attempt >= OPENAI_520_ATTEMPTS:
+                        return status, data
+                    if on_retry is not None:
+                        on_retry(attempt, OPENAI_520_RETRIES, 520)
+                    time.sleep(OPENAI_520_BACKOFF[min(
+                        attempt - 1, len(OPENAI_520_BACKOFF) - 1)])
                     continue
 
                 if status != 524:

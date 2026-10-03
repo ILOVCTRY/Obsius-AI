@@ -1,6 +1,6 @@
 import type {
   Approval, Artifact, ArtifactUploadResponse, Asset, AttachmentInfo, BBEvent, BinaryOverview, BinaryStrings,
-  BrowserState, BrowserStatus, HttpHistoryRow, InterceptState,
+  BrowserState, BrowserStatus, BrowserSessionInfo, HttpHistoryRow, InterceptState,
   Blueprint, BlueprintModuleStatus, BlueprintStatus,
   IntruderPayloadSpec, IntruderTemplate,
   CachedFuncRow, CachedFunction, Chain, ChainLink, ChainNodeType, ChainStatus, ChainSummary,
@@ -21,6 +21,7 @@ import type {
   TaskTrace, TraceEffect,
   FofaConfig, FofaTestResult, FofaSearchResult, FofaHistoryItem, ImportPreview, ImportSummary,
   ChatAgent, ChatThread, ChatThreadDetail, ChatMcpServer,
+  CoordinationOverview, CoordinationPlan, CoordinationTask, CoordinationObject, CoordinationConflict, CoordinationVerification,
   SamplePackage, SampleTargetAnalysis, SampleTargetAnalyzeResponse, SamplePackageUploadSession, SamplePackagePreview,
 } from "./types"
 import type { Taxonomy } from "./taxonomy"
@@ -939,17 +940,21 @@ export const api = {
   browserStatus: () => http<BrowserStatus>("/api/browser/status"),
   browserState: (pid: string) =>
     http<BrowserState>(`/api/projects/${pid}/browser/state`),
-  browserNavigate: (pid: string, url: string) =>
-    http<{ final_url: string; title: string; status: number; target_host: string; duration_ms: number }>(
+  browserNavigate: (pid: string, url: string, sid?: string) =>
+    http<{ final_url: string; title: string; status: number; target_host?: string; duration_ms: number }>(
       `/api/projects/${pid}/browser/navigate`,
-      { method: "POST", body: JSON.stringify({ url }) }),
+      { method: "POST", body: JSON.stringify({ url, sid }) }),
   browserAction: (pid: string, body: {
     action: "click" | "type" | "back"
-    selector?: string; text?: string; x?: number; y?: number
+    selector?: string; text?: string; x?: number; y?: number; sid?: string
   }) =>
     http<{ final_url?: string; title?: string; content?: string; truncated?: boolean }>(
       `/api/projects/${pid}/browser/action`,
       { method: "POST", body: JSON.stringify(body) }),
+  browserTakeover: (pid: string, sid: string, paused: boolean) =>
+    http<BrowserSessionInfo>(`/api/projects/${pid}/browser/takeover`, {
+      method: "POST", body: JSON.stringify({ sid, paused }),
+    }),
   browserScreenshot: (pid: string) =>
     http<{ png: string; ts: number }>(`/api/projects/${pid}/browser/screenshot`),
   browserHistory: (pid: string, opts?: {
@@ -1026,6 +1031,55 @@ export const api = {
     http<void>(`/api/chat/threads/${tid}/stop`, { method: "POST" }),
   chatMcp: (pid: string) =>
     http<{ servers: ChatMcpServer[] }>(`/api/chat/mcp?pid=${encodeURIComponent(pid)}`),
+
+  // ---------- 多智能体协调（独立协调域） ----------
+  coordination: (pid: string) =>
+    http<CoordinationOverview>(`/api/projects/${pid}/coordination`),
+  coordinationPlanCreate: (pid: string, body: { name: string; objective?: string }) =>
+    http<CoordinationPlan>(`/api/projects/${pid}/coordination/plans`, {
+      method: "POST", body: JSON.stringify(body),
+    }),
+  coordinationPlanStatus: (pid: string, planId: string, status: string) =>
+    http<CoordinationPlan>(`/api/projects/${pid}/coordination/plans/${encodeURIComponent(planId)}`, {
+      method: "PATCH", body: JSON.stringify({ status }),
+    }),
+  coordinationTaskCreate: (pid: string, planId: string, body: {
+    title: string; description?: string; role?: string; priority?: number; depends_on?: string[]
+  }) =>
+    http<CoordinationTask>(`/api/projects/${pid}/coordination/plans/${encodeURIComponent(planId)}/tasks`, {
+      method: "POST", body: JSON.stringify(body),
+    }),
+  coordinationTaskUpdate: (pid: string, taskId: string, body: {
+    status?: string; role?: string; evidence?: Record<string, unknown>[]
+  }) =>
+    http<CoordinationTask>(`/api/projects/${pid}/coordination/tasks/${encodeURIComponent(taskId)}`, {
+      method: "PATCH", body: JSON.stringify(body),
+    }),
+  coordinationObjects: (pid: string, kind?: string) =>
+    http<CoordinationObject[]>(`/api/projects/${pid}/coordination/objects${kind ? `?kind=${encodeURIComponent(kind)}` : ""}`),
+  coordinationObjectCreate: (pid: string, body: {
+    kind: string; name?: string; object_ref?: string; data?: Record<string, unknown>
+    source?: string; confidence?: number; plan_id?: string | null; task_id?: string | null
+    artifact_refs?: string[]
+  }) => http<CoordinationObject>(`/api/projects/${pid}/coordination/objects`, {
+    method: "POST", body: JSON.stringify(body),
+  }),
+  coordinationConflicts: (pid: string, status?: string) =>
+    http<CoordinationConflict[]>(`/api/projects/${pid}/coordination/conflicts${status ? `?status=${encodeURIComponent(status)}` : ""}`),
+  coordinationConflictCreate: (pid: string, body: {
+    left_object_id: string; right_object_id: string; field?: string; summary: string
+  }) => http<CoordinationConflict>(`/api/projects/${pid}/coordination/conflicts`, {
+    method: "POST", body: JSON.stringify(body),
+  }),
+  coordinationConflictUpdate: (pid: string, conflictId: string, body: { status: string; resolution?: string }) =>
+    http<CoordinationConflict>(`/api/projects/${pid}/coordination/conflicts/${encodeURIComponent(conflictId)}`, {
+      method: "PATCH", body: JSON.stringify(body),
+    }),
+  coordinationVerify: (pid: string, body: { task_id?: string; plan_id?: string }) =>
+    http<CoordinationVerification | { plan_id: string; status: string; passed: number; total: number; results: CoordinationVerification[] }>(
+      `/api/projects/${pid}/coordination/verify`, { method: "POST", body: JSON.stringify(body) }),
+  coordinationVerification: (pid: string, taskId: string) =>
+    http<CoordinationVerification>(`/api/projects/${pid}/coordination/verifications/${encodeURIComponent(taskId)}`),
 }
 
 // 长耗时 Job 轮询（Agent work / orchestrator tick）
@@ -1048,7 +1102,7 @@ export function wsUrl(pid: string, sinceId: number): string {
 }
 
 // F6-v2 浏览器实时画面流：帧推送（服务端→客户端）+ 接管输入（客户端→服务端）
-export function browserWsUrl(pid: string): string {
+export function browserWsUrl(pid: string, sid?: string): string {
   const proto = location.protocol === "https:" ? "wss" : "ws"
-  return `${proto}://${location.host}/api/projects/${pid}/browser/ws`
+  return `${proto}://${location.host}/api/projects/${pid}/browser/ws${sid ? `?sid=${encodeURIComponent(sid)}` : ""}`
 }
