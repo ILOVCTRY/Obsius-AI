@@ -7,7 +7,7 @@
 | 目录/文件 | 职责 |
 |-----------|------|
 | [`skills/`](skills/CLAUDE.md) | 能力包×场景轨分类学：注册表 / 路由评分 / 规则链 / **专家池（M2 起运行时唯一角色源 + caps_effective/allowed_roles 推导面；M3 专家 CRUD `/api/experts`）** / **场景档 profiles.py（M4a：五件套预设物化即弃）** / task_types 注册表 |
-| [`agent/`](agent/CLAUDE.md) | AgentSession 主循环 + 工具分发 + 角色软边界（tools/max_runtime/default_noise）+ kb_open + 认领后计划闸（A2）+ 子代理分解 publish_task（A5）。**session_state.py（2026-10-03）**：任务/闸门状态单一容器 + `reset_for_task` 单入口复位，两持有者以 property 代理原属性名（只收敛存取，控制流不动） |
+| [`agent/`](agent/CLAUDE.md) | AgentSession 主循环 + 工具分发 + 角色软边界（tools/max_runtime/default_noise）+ kb_open + 认领后计划闸（A2）+ 子代理分解 publish_task（A5）。**session_state.py（2026-10-03）**：任务/闸门状态单一容器 + `reset_for_task` 单入口复位，两持有者以 property 代理原属性名（只收敛存取，控制流不动）。**tool_registry.py（2026-10-03）**：工具唯一真相源——`ToolSpec`(name/description/schema/group/flags/handler) 一处定义，`AGENT_TOOLS`/各闸门白名单常量/`agent_tool_group` 全由 flags 推导（导入名逐字保留，外部零改动），导入期自检 handler 存在 |
 | [`orchestrator/`](orchestrator/CLAUDE.md) | 主代理 tick：监控/派生/开窗/汇总 + 轨注册表拒收 + 饿死告警 + gate 预算闸门 + **replan_priorities 优先级重排（A5）** + state.py（tick 租约/状态持久化/**v21 derive_idle_rounds**）+ **分阶段接线（`_phase_section` 注入 + `_phase_gate_reject` 派单门）** |
 | [`blackboard/`](blackboard/CLAUDE.md) | SQLite 单一写入口 + 任务队列 + 事件总线 + 任务图 graph.py（A3）（schema v11：tasks.plan 计划步、session_inbox/撤回私信、artifacts.meta、findings.rating_basis 判级依据 F11） |
 | [`browser/`](browser/CLAUDE.md) | F6 内置浏览器（渗透/红队轨）：Playwright 托管 Chromium 实例池（每项目常驻，Page=会话）+ 资产白名单 + 抓包（路由拦截入 http_history v15）+ 重发/爆破（人类 UI 专属） |
