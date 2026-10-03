@@ -15,12 +15,13 @@
 | `ark.py` | `ArkCodingProvider`：火山引擎 Ark 接入（**enable_thinking 默认 True**；smoke 实证 ark-code-latest/deepseek-v4-flash 默认即吐 thinking block） |
 | `providers.py` | `ProviderStore`：读写 `config/providers.json`（多供应商，PUT 全量替换语义、空 api_key=沿用原 key、至少一个启用；**顶层 `default_provider` 可选显式指定全局默认供应商**——`save(..., default_provider=)` 须命中启用中的供应商否则 ProviderError、`default()` 优先取它/未设置兜底第一个启用、`default_provider_name()` 供 UI 下拉）；`probe_credentials` 探活（先 /v1/models，404/405 降级最小 chat 调用）；`ProviderError`。**`build()` 思考开关（2026-09-19）**：条目 `"thinking": true/false` 显式控制，缺省=base_url 含 "ark" 默认开、其余默认关；**每模型最大上下文（2026-09-19）**：条目 `"model_context": {"<模型名>": token 数}`（可选，`_validate` 剔除非法/未勾选项），`build()` 带给实例 `context_tokens`，会话层据此换算上下文预算（见 core/agent loop.apply_context_budget；未声明默认 256K） |
 | `routing.py` | `ModelRouter`：planner/executor/classifier 模型路由与覆写；`load_dotenv()` 读 .env |
+| `tokenizer.py` | **token 分层计数（2026-10-03）**：`TokenCounter` 协议 + `get_counter(model)` 三层——OpenAI 系走 **tiktoken 真精确**（`_ENCODING_BY_PREFIX` 前缀表 → o200k/cl100k）、Anthropic/Ark/GLM/DeepSeek 走 `HeuristicCounter`（CJK 1 token/字、ASCII 4 字符/token、其余 2 字符/token + 每消息/每工具固定开销）、两者皆不可用退 `CharCounter`（迁移前字符口径，保证不抛）。**口径**：返回**等价字符数**（token×2），故 `AgentConfig.context_char_budget`/`context_summary_chars` 阈值语义与取值一字未动，升级的只是「这段历史值多少」的算法（此前是 `sum(len(json.dumps(m)))`）。消费点：`core/agent/loop.py::AgentSession._count_tokens`（_trim / _maybe_summarize / llm.compact 事件全走它）。`calibrate(samples)` 供离线核查估算偏差。tiktoken 缺失（`tokens` extra 未装）静默降级估算器。测试 `tests/test_tokenizer.py` |
 
 ## 约定与坑
 
 - **OpenAI 兼容层 HTTP 520 重试（2026-10-03）**：上游中转/CDN 返回 520 时，`openai_compat.py` 在首次请求失败后最多重试 5 次（总计 6 次尝试），退避为 2/4/8/16/30 秒；每次通过 `on_retry` 落 `chat.retry` 事件，界面显示 `x/5`。鉴权、参数和其它非暂态 HTTP 错误不重试。
 - **传输层故障分类移交 SDK（2026-10-03）**：原自研 urllib 层按 errno 白名单（WSAECONNRESET 10054 等）与 `ssl.SSLEOFError` 判定可重试，现已删除——httpx 把连接重置/TLS EOF/超时统一抛 `httpx.TransportError`，SDK 包成 `APIConnectionError/APITimeoutError`，`sdk_engine._as_conn_error` 转回 `ConnectionError/TimeoutError`，**既有 `CONN_RETRIES=4` 预算与退避口径不变**。DNS 解析失败等非瞬时错误仍快速失败（httpx 也归入 `TransportError`，故也走连接重试——与旧行为相比略宽松，可接受）。
-- **依赖（2026-10-03）**：`anthropic>=0.40` / `openai>=1.40` / `httpx>=0.27` 落 `pyproject` **核心依赖**（`core/llm` 导入期即需要，放 extra 会留坏导入路径）；`scripts/build_exe.py` 的 `BUILD_DEPS` 同步（漏了则打包件一导入 `core.llm` 即崩）。
+- **依赖（2026-10-03）**：`anthropic>=0.40` / `openai>=1.40` / `httpx>=0.27` 落 `pyproject` **核心依赖**（`core/llm` 导入期即需要，放 extra 会留坏导入路径）；`scripts/build_exe.py` 的 `BUILD_DEPS` 同步（漏了则打包件一导入 `core.llm` 即崩）。`tiktoken>=0.7` 落**可选 extra `tokens`**（`tokenizer.py` 惰性 import，未装降级估算器，不影响功能）。
 - **测试**：`tests/test_llm.py` 走注入式 fake transport（不触网、不碰 SDK）；`tests/test_llm_sdk.py` 用 `httpx.MockTransport` 换掉底层传输，让 SDK 走完整解析链路，覆盖正常流 / Ark 特化全量保住 / 两种降级 / 鉴权头回归。
 
 - 无可用 key 不崩：API Agent/编排端点返回 503；LLM 缺省 = 路由覆写目标或第一个启用供应商的第一个模型。

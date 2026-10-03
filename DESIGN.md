@@ -51,6 +51,12 @@ Python 3.11+ / FastAPI、React + TypeScript + Vite SPA、SQLite (WAL)（可平�
 
 任务与闸门状态（finished/awaiting_human/plan_only_mode/closing_round/current_task_id/last_progress_step/delegation_* + reject_streak/plan_gate_count/stuck_waves/stuck_extensions/cadence_*/resume_state/live_state/salvage_ctx/stale_alerted）原先散落 `AgentSession` 与 `ToolDispatcher` 两处，复位点分散在 `_loop_body` 开头十余行与 `reset_closing()`——历史上反复踩「上一任务残留字段带进新任务」（stale `finished` 误 fail、`_resume_state` 泄漏被下轮快照消费分支清盘）。收敛为 `core/agent/session_state.py:SessionState` 单一实例 + `reset_for_task()` 单入口复位；两持有者各自以 `property`（`state_proxy(attr)` 工厂）**保留原属性名**代理到共享实例，`AgentSession.__init__` 建实例后注入 `dispatcher._state`。**边界**：只收敛存取，控制流与闸门评估顺序一字未动（隐式时序是最大风险源）；`reset_for_task` 只列原先真被复位的字段，`current_task_id`/`last_progress_step`/`resume_state`/`live_state`/`salvage_ctx`/`stale_alerted` 由各自生命周期路径（收尾/中断/异常）管理。
 
+## token 分层计数（tokenizer，2026-10-03 实施）
+
+上下文预算此前用 `sum(len(json.dumps(m)))`（纯字符数）当近似——中英混写下偏差可达 2-3 倍，同一个 `context_char_budget` 对英文会话偏松（该压不压、真撞供应商上下文墙）、对中文会话偏紧（过早压缩丢细节）。改为 `core/llm/tokenizer.py` 按模型分层：**OpenAI 系**（模型名前缀可映射 encoding）走 **tiktoken 真 BPE 精确**；**Anthropic / Ark / GLM / DeepSeek**（无公开 tokenizer）走 `HeuristicCounter` 加权估算（CJK 1 token/字、ASCII 4 字符/token、其余 2 字符/token，外加每消息/每工具固定开销）；两者皆不可用时退 `CharCounter`（迁移前口径，保证不抛）。消费点是 `AgentSession._count_tokens`（`_trim` / `_maybe_summarize` / `llm.compact` 事件全走它）。
+
+**口径（关键）**：计数器返回**等价字符数**（token×2），不是 token 数——`context_char_budget` / `context_summary_chars` 的语义与取值（默认 120k/60k、`apply_context_budget` 的 `tokens×2` 换算）是既有契约且被 7 处测试钉死，单位改成 token 会连带改掉全部阈值语义。故**阈值一个字未动，升级的只是「这段历史值多少」的算法**。`tiktoken` 落可选 extra `tokens`（惰性 import，未装静默降级估算器）。`calibrate(samples)` 用历史 `usage.input_tokens` 回归核查估算偏差。
+
 ## 卡死升级与收尾收敛（stuck-convergence M1 + D7 + D9，2026-09-24 实施）
 
 **D9 活跃探索静默延长（同日定稿实施）**：观察窗到期且 **waves=0**（顾问未介入）时不立即叫顾问，先零 LLM 成本机械预检 `_active_exploration`：取窗 (lps,step] 内本会话 command/file.read 事件，命中任一信号即**静默延长**（last_progress_step=step、extensions+1、落 `agent.stuck_extend` 事件），不叫顾问、不注入。信号口径保守：①**新文件**——读到本会话此前未读过的路径；②**命令演进**——窗内命令 n≥2、去重 ≥2、最高重复 ≤n/2（半数以上同一条=打转；预检在步开始执行，窗内动作最多 stuck_after−1 个，下限取 2）。延长上限 2 次，用满后走原顾问链；夹一次真黑板进展，extensions 与 waves 一并清零。有界时间线：真打转 12→24→36 步链不变；活跃长任务 12/24 步不打断 → 36 步 suggest → 48 步 verdict → 60 步硬闸（planner ≤2 次、断路器不拆）。配套：command 事件补 step 字段（gateway.run 透传）、read_file 成功落 `file.read` 轻事件（只记路径/步号不存内容）；js-reverse 手册补「长程逆向留痕纪律」（先粗 task_plan、中间脚本即 artifact——artifact 按内容指纹去重自动算进展）。

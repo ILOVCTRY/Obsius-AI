@@ -27,9 +27,11 @@ DIST_APP = ROOT / "dist" / "cyberstrike-pro"
 # add_event_handler（app.py shutdown 钩子所用），>=0.110 语义放行会打出坏包（2026-09-23 实测）
 # anthropic/openai：core/llm 自 2026-10-03 起以官方 SDK 为主引擎（pyproject 核心依赖），
 # 缺失则打包件一导入 core.llm 即崩。httpx 由它们带入，此处仍显式钉住。
+# tiktoken：core/llm/tokenizer.py 的 OpenAI 系精确计数（可选 extra `tokens`），
+# 缺失时静默降级估算器不崩，但打包件应带上以发挥分层计数。
 BUILD_DEPS = [
     "fastapi==0.116.1", "uvicorn==0.35.0", "httpx>=0.27",
-    "anthropic>=0.40", "openai>=1.40",
+    "anthropic>=0.40", "openai>=1.40", "tiktoken>=0.7",
     "python-multipart>=0.0.9", "openpyxl>=3.1",
     "pywebview>=5.0", "pyinstaller>=6.0",
 ]

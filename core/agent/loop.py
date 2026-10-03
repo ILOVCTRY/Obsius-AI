@@ -38,6 +38,7 @@ from core.autonomy import record_llm_usage
 from core.blackboard import Blackboard, TaskQueue
 from core.blackboard.intents import list_intents
 from core.llm.provider import LLMError
+from core.llm.tokenizer import get_counter
 from core.runtime.gateway import ExecutionGateway
 from core.skills import (
     SkillRegistry,
@@ -3509,9 +3510,17 @@ class AgentSession:
         except Exception:  # noqa: BLE001
             log.exception("用量记账失败")
 
+    def _count_tokens(self, messages: list[dict[str, Any]]) -> int:
+        """上下文预算计量（token 分层计数，2026-10-03）：按当前模型选计数器
+        （OpenAI 系 tiktoken 精确 / 其余加权估算 / 不可用退化字符数），返回
+        **等价字符数**——口径见 core/llm/tokenizer.py 模块文档。阈值
+        （context_char_budget / context_summary_chars）语义与取值一字未动，
+        升级的只是「这段历史值多少」的算法。"""
+        return get_counter(getattr(self.llm, "model", None)).count_messages(messages)
+
     def _trim(self, messages: list[dict[str, Any]]) -> None:
         """上下文预算：超限则把旧 tool_result 内容替换为占位（保留结构）。"""
-        total = sum(len(json.dumps(m, ensure_ascii=False)) for m in messages)
+        total = self._count_tokens(messages)
         if total <= self.config.context_char_budget:
             return
         for m in messages[:-8]:  # 保留最近 8 条完整
@@ -3527,7 +3536,7 @@ class AgentSession:
         tool_use/tool_result 配对不拆——切割点回退到非 tool_result 消息）。
         就地生效（messages[:] = …，_live_state/快照引用同一列表不受影响）。
         摘要失败静默返回 False（机械 _trim 仍是硬上限兜底）。"""
-        total = sum(len(json.dumps(m, ensure_ascii=False)) for m in messages)
+        total = self._count_tokens(messages)
         threshold = min(self.config.context_summary_chars,
                         self.config.context_char_budget)
         if total <= threshold or len(messages) <= keep_recent + 2:
@@ -3553,7 +3562,7 @@ class AgentSession:
                         if om:
                             b["content"] = kept + omitted_note(om)
                             pruned += 1
-        total = sum(len(json.dumps(m, ensure_ascii=False)) for m in messages)
+        total = self._count_tokens(messages)
         if total <= threshold:
             self.bb.append_event(
                 self.project_id, "llm.compact",
@@ -3614,7 +3623,7 @@ class AgentSession:
         # 不截就会下一步立即再触发压缩，形成「压一次烧一步 LLM、细节越压越少」的
         # 死循环（实测 5 分钟连压 4 次，chars_after 63k-99k 全部高于 60k 触发线）。
         for cap in (2000, 200):
-            total_after = sum(len(json.dumps(m, ensure_ascii=False)) for m in messages)
+            total_after = self._count_tokens(messages)
             if total_after <= threshold:
                 break
             for m in messages:
@@ -3627,8 +3636,7 @@ class AgentSession:
             self.project_id, "llm.compact",
             {"before_msgs": before_msgs, "after_msgs": len(messages),
              "summarized": len(old), "chars_before": total,
-             "chars_after": sum(len(json.dumps(m, ensure_ascii=False))
-                                for m in messages)},
+             "chars_after": self._count_tokens(messages)},
             session_id=self.session["id"], author=self.session["id"])
         return True
 
