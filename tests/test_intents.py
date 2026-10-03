@@ -405,22 +405,29 @@ def test_backing_helper_direct_target(ctx):
     bb, pid = ctx["bb"], ctx["pid"]
     assert dead_end_backing_target(bb.conn, pid, ctx["url"]) is None
     _dead_end_on(bb, pid, ctx["url"], "url 无洞")
-    assert dead_end_backing_target(bb.conn, pid, ctx["url"]) == ctx["url"]
+    # 叶子 url 的子目标是其直接上层（domain）；背书来源=该子目标
+    assert dead_end_backing_target(bb.conn, pid, ctx["url"]) == ctx["domain"]
 
 
 def test_backing_helper_ancestor_batch_removed(ctx):
-    """2026-09-29 逐资产收紧：祖先链批次背书移除——父节点死路意图不再覆盖子树
-    （曾致 sess-1d692817a5d0 一条「基线一致」意图批量误标 12 个活站）。"""
+    """2026-10-01 口径：背书读链路图（子目标级）——父节点死路意图背书其子树，
+    但**子目标须子树内意图全部收尾**；旁支/更高层不与本子树混淆。
+
+    注：2026-09-29 移除的是「跨分支祖先链批次覆盖」——本用例钉住父意图只覆盖
+    自己子树，不波及无关旁支（旁支仍是另一子目标，须独立立意）。"""
     bb, pid = ctx["bb"], ctx["pid"]
-    _dead_end_on(bb, pid, ctx["host"], "宿主子树无洞")
-    assert dead_end_backing_target(bb.conn, pid, ctx["host"]) == ctx["host"]
-    # 子资产不被父节点意图背书：domain/url 须各自立意
-    assert dead_end_backing_target(bb.conn, pid, ctx["url"]) is None
-    assert dead_end_backing_target(bb.conn, pid, ctx["domain"]) is None
+    # 子目标 = 链顶 host 的直接子资产 domain；对它立意并死路收尾
+    _dead_end_on(bb, pid, ctx["domain"], "域上无洞")
+    # domain 子树（domain+url）内意图全部收尾 → domain 与其后代 url 均可背书
+    assert dead_end_backing_target(bb.conn, pid, ctx["domain"]) == ctx["domain"]
+    assert dead_end_backing_target(bb.conn, pid, ctx["url"]) == ctx["domain"]
+    # 无关旁支（另起链顶）不被本子树背书
+    other = bb.upsert_asset(pid, "host", "10.0.0.9")["id"]
+    assert dead_end_backing_target(bb.conn, pid, other) is None
 
 
 def test_backing_helper_basis_refs_direct(ctx):
-    """basis_refs 明确含本资产 id 也算直接背书（意图围绕该资产的另一立意形态）。"""
+    """basis_refs 含本资产 id 也算资产锚点（意图围绕该资产的另一立意形态）。"""
     bb, pid = ctx["bb"], ctx["pid"]
     hid = bb.add_http_history(pid, source="browser", method="GET",
                               url=f"http://site.com/probe-{ctx['url']}",
@@ -430,18 +437,21 @@ def test_backing_helper_basis_refs_direct(ctx):
                          basis_refs=[f"asset:{ctx['url']}"])["id"]
     close_intent(bb, pid, iid, "dead_end", dead_reason="探测均 404，排除",
                  evidence_refs=[f"http:{hid}"])
-    assert dead_end_backing_target(bb.conn, pid, ctx["url"]) == ctx["host"]
+    # 该意图锚点同时含 host 与 url（span 两个子目标域），无 open → 各子目标均可背书
+    # url 的子目标作用域=domain（链顶 10.0.0.1 的直接子资产）
+    assert dead_end_backing_target(bb.conn, pid, ctx["url"]) == ctx["domain"]
+    assert dead_end_backing_target(bb.conn, pid, ctx["domain"]) == ctx["domain"]
 
 
 def test_backing_helper_open_or_non_dead_end_not_backing(ctx):
     bb, pid = ctx["bb"], ctx["pid"]
-    # open 意图不背书
+    # open 意图不背书（子树内有 open 即无背书）
     declare_intent(bb, pid, "假设", target_asset_id=ctx["url"])
     assert dead_end_backing_target(bb.conn, pid, ctx["url"]) is None
-    # vuln 收尾不背书
+    # vuln 收尾（无 dead_end）不背书
     hid = bb.add_http_history(pid, source="browser", method="GET",
                               url="http://site.com/", status=200, resp_body="")
-    iid = declare_intent(bb, pid, "注入假设", target_asset_id=ctx["host"])["id"]
+    iid = declare_intent(bb, pid, "注入假设", target_asset_id=ctx["url"])["id"]
     fid = _vuln_finding(bb, pid, ctx["url"])
     close_intent(bb, pid, iid, "vuln", finding_ids=[fid])
     assert dead_end_backing_target(bb.conn, pid, ctx["url"]) is None
@@ -452,10 +462,31 @@ def test_backing_helper_side_tree_not_backing(ctx):
     other_host = bb.upsert_asset(pid, "host", "10.0.0.2")["id"]
     other_url = bb.upsert_asset(pid, "url", "http://other.com/",
                                parent_id=other_host)["id"]
-    _dead_end_on(bb, pid, other_host, "旁支宿主无洞")
-    # 旁支 host 的死路意图不覆盖本树 url；旁支子资产也不再被祖先链背书
+    # 对旁支的直接子资产 other_url（即其子目标）立意
+    _dead_end_on(bb, pid, other_url, "旁支 url 无洞")
+    # 旁支的意图不进本树子树，本树 url/domain 无背书
     assert dead_end_backing_target(bb.conn, pid, ctx["url"]) is None
-    assert dead_end_backing_target(bb.conn, pid, other_url) is None
+    # 旁支 host 的意图背书其直接子资产 other_url（子目标级）
+    assert dead_end_backing_target(bb.conn, pid, other_url) == other_url
+
+
+def test_backing_helper_subtree_all_closed_required(ctx):
+    """2026-10-01 新口径：子目标子树内意图须**全部收尾**。
+    子树内残留一条 open 意图 → 该子目标无背书（宁严勿松）。"""
+    bb, pid = ctx["bb"], ctx["pid"]
+    _dead_end_on(bb, pid, ctx["domain"], "域上无洞")   # domain 子树：domain+url
+    # url 归属子目标 domain（链顶的直接子资产），同域内已收尾 → 背书
+    assert dead_end_backing_target(bb.conn, pid, ctx["url"]) == ctx["domain"]
+    assert dead_end_backing_target(bb.conn, pid, ctx["domain"]) == ctx["domain"]
+    # 在 domain 子树下留一条 open 意图 → domain 子树不再干净
+    declare_intent(bb, pid, "新假设", target_asset_id=ctx["url"])
+    assert dead_end_backing_target(bb.conn, pid, ctx["domain"]) is None
+    assert dead_end_backing_target(bb.conn, pid, ctx["url"]) is None
+    # 收尾这条 open（finding 类）后，domain 子树全部收尾且含 dead_end → 恢复背书
+    fid = _intel_finding(bb, pid, ctx["url"])
+    oid = [i["id"] for i in list_intents(bb, pid, status="open")][0]
+    close_intent(bb, pid, oid, "finding", finding_ids=[fid])
+    assert dead_end_backing_target(bb.conn, pid, ctx["domain"]) == ctx["domain"]
 
 
 def test_set_status_clean_allowed_with_direct_backing(ctx):
@@ -467,12 +498,24 @@ def test_set_status_clean_allowed_with_direct_backing(ctx):
     assert r["status"] == "tested_clean"
 
 
-def test_set_status_clean_rejected_with_ancestor_batch_only(ctx):
-    """2026-09-29：仅父节点死路意图（祖先链批次）不再放行子资产 tested_clean。"""
+def test_set_status_clean_subtree_all_closed_and_dead_end(ctx):
+    """2026-10-01：tested_clean 读链路图口径（子目标级）——本资产所属子目标的
+    子树内意图须全部收尾且至少一条 dead_end；旁支意图不影响本子树。"""
     bb, pid = ctx["bb"], ctx["pid"]
-    _dead_end_on(bb, pid, ctx["host"], "宿主批次无洞")
-    with pytest.raises(ValueError, match="直接围绕该资产"):
-        bb.set_asset_status(ctx["url"], "tested_clean", note="随宿主批次收口")
+    # 无任何意图 → 拒
+    with pytest.raises(ValueError, match="死路意图背书"):
+        bb.set_asset_status(ctx["url"], "tested_clean", note="随手标净")
+    # 子目标 domain 的死路意图（url 归 domain 子目标）→ url 可标净
+    _dead_end_on(bb, pid, ctx["domain"], "域上无洞")
+    r = bb.set_asset_status(ctx["url"], "tested_clean", note="随子目标收口")
+    assert r["status"] == "tested_clean"
+    # 子树内再有 open 意图 → 要把该子目标回退并重标就不放行（须全部收尾）。
+    # url 已是 tested_clean（同状态 no-op 先返回），改用一个同子目标的叶子资产验证。
+    leaf2 = bb.upsert_asset(ctx["pid"], "url", "http://site.com/admin",
+                            parent_id=ctx["domain"])["id"]
+    declare_intent(bb, pid, "新假设", target_asset_id=ctx["url"])
+    with pytest.raises(ValueError, match="全部收尾"):
+        bb.set_asset_status(leaf2, "tested_clean", note="子树未收口")
 
 
 def test_set_status_clean_noop_without_backing_preserves_legacy(ctx):

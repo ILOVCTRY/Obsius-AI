@@ -28,3 +28,14 @@
 ## 单发终态纪律（recon 记账场景）
 - 不可达类：单发超时/拒连即终态，不重试；证据=一条 RESULT 行 + UTC 时间戳（`date -u`）。
 - verified 发现：同一请求 3/3 稳定复现（同尺寸/同状态码）才可标 verified；影响面延伸端点另单发，只读优先。
+
+### 坑 5：host·Windows 的 host 运行时是 PowerShell，`&&`/`||` 语法错
+- 现象：宿主 Windows 上 `runtime=host` 走 PowerShell 5.x，命令里带 `&&`/`||` 直接 `InvalidEndOfLine`。
+- 现状（2026-10-01 起）：工具层检测到 `host` + Windows + bash 连接符时，**策略允许即自动改走 wsl（bash -lc）**，回执首行注明 `[已自动改用 wsl]`；策略不允许（受 max_runtime/threat_class 限制）则回落明确报错引导。
+- 纪律：想稳跑 shell 脚本就显式传 `runtime=wsl`；若角色上限不含 wsl，改写 PowerShell 写法（`;` 顺序、`if ($?) {}` 条件）或拆条执行。
+
+### 坑 6：整条命令超时被杀，前面已产出的输出一并丢失
+- 现象：一条命令里挂起请求（DNS/hang 住的 HTTP）拖到整体 timeout，`exit=-1 (超时被杀)`，同圈其他步骤结果全丢。
+- 现状（2026-10-01 起）：超时回执带 `已跑约 Ns` 与 `[超时引导]`，提示拆段、每段传更小 timeout、对单次请求加 `curl -m 10/--max-time 10`。
+- 纪律：把易挂起请求与常规步骤**拆成多条命令**分别跑；每条自带短超时，别让一个 hang 拖死整条。
+

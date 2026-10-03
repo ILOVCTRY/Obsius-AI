@@ -179,7 +179,7 @@ def sandbox_docker_args(net: str) -> list[str]:
     """L3 加固参数（DESIGN.md §7）：无挂载、限额、降权。fakenet 下一里程碑实现。"""
     if net not in {"none", "real"}:
         raise NotImplementedError(f"网络模式 {net} 尚未实现（fakenet=INetSim sidecar，下一里程碑）")
-    docker_net = {"none": "none", "real": "bridge"}[net]  # real=宿主网络栈，须审批
+    docker_net = {"none": "none", "real": "bridge"}[net]  # real=宿主网络栈，可 run_cmd 直接指定
     args = [
         "--rm",                       # 一次性生命周期：跑完即焚
         "--network", docker_net,

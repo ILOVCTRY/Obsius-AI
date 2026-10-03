@@ -59,29 +59,27 @@ def test_gateway_denies_unknown_threat_on_host(bb):
         gw.run("echo hi", runtime="host", threat_class="unknown", project_id=pid)
 
 
-def test_gateway_denies_real_net_without_approval(bb):
+def test_gateway_allows_real_net_without_approval(bb):
+    """net=real 不再人工审批（2026-10-01）：sandbox 直接指定 net=real 即执行，
+    不产生 approval.* 事件；隔离等级/threat_class 约束不变（unknown 仍拒）。"""
     pid = bb.create_project("t3", "reverse")["id"]
-    gw = ExecutionGateway(bb=bb)
-    with pytest.raises(GatewayDenied, match="net=real 须人工审批"):
-        gw.run("wget http://c2.example", runtime="sandbox", threat_class="malware_live",
-               project_id=pid, net="real")
-    # 有已批准的 approval → 放行（后端 fake，不真跑 docker）
+    seen = {}
+
     class FakeSandbox:
         def run_once(self, image, cmd, *, net, sandbox, timeout, abort_event=None):
-            assert net == "real"
+            seen["net"] = net
             return ExecOutcome(exit_code=0, stdout="done")
-    gw2 = ExecutionGateway(bb=bb, backends={"sandbox": FakeSandbox()})
-    approval_id = "appr-1"
-    with bb._tx():
-        bb.conn.execute(
-            "INSERT INTO approvals(id,project_id,session_id,action,risk,status,requested_by,created_at)"
-            " VALUES(?,?,?,?,?,?,?,?)",
-            (approval_id, pid, None, '{"type":"sandbox_net_real"}', "high", "approved", "session-1",
-             "2026-09-12T00:00:00+00:00"),
-        )
-    r = gw2.run("wget http://c2.example", runtime="sandbox", threat_class="malware_live",
-                project_id=pid, net="real", approval_id=approval_id)
-    assert r.ok
+
+    gw = ExecutionGateway(bb=bb, backends={"sandbox": FakeSandbox()})
+    r = gw.run("wget http://c2.example", runtime="sandbox", threat_class="malware_live",
+               project_id=pid, net="real")
+    assert r.ok and seen["net"] == "real"
+    kinds = {e["kind"] for e in bb.recent_events(pid)}
+    assert not any(k.startswith("approval.") for k in kinds)
+    # 隔离等级红线不受影响：unknown（按 malware_live 处理）不允许 host
+    with pytest.raises(GatewayDenied):
+        gw.run("echo hi", runtime="host", threat_class="unknown",
+               project_id=pid, net="real")
 
 
 # ---------- 网关：真实执行（host，无害命令） ----------
@@ -159,6 +157,20 @@ def test_brief_truncation_marker():
     r3 = ExecutionResult(ok=True, exit_code=0, stdout="short", stderr="",
                          runtime="host", duration_s=0.1)
     assert "已截断" not in r3.brief()
+
+
+def test_brief_timeout_guide():
+    """超时引导（2026-10-01）：超时回执带「已跑约 N 秒」+ 分段/小 timeout 引导；
+    非超时回执不带该引导。"""
+    from core.runtime.gateway import ExecutionResult
+    r = ExecutionResult(ok=False, exit_code=-1, stdout="partial", stderr="",
+                        runtime="host", duration_s=12.4, timed_out=True)
+    b = r.brief()
+    assert "超时被杀" in b and "已跑约 12s" in b
+    assert "[超时引导]" in b and "拆成多段" in b and "max-time" in b
+    ok = ExecutionResult(ok=True, exit_code=0, stdout="x", stderr="",
+                         runtime="host", duration_s=0.1)
+    assert "[超时引导]" not in ok.brief()
 
 
 # ---------- docker 后端：参数构造（fake subprocess） ----------
@@ -348,7 +360,8 @@ def test_gateway_would_deny_pure_function(bb):
 
 
 def test_gateway_consumes_approval_once(bb):
-    """H3 一次性审批：net=real 跑完 approval 即 consumed，同 id 二次使用被拒。"""
+    """H3 一次性审批：带 approval_id 的命令跑完即 consumed；net=real 自 2026-10-01
+    起不再依赖审批，但已批准单在升级场景仍一次性消费。"""
     pid = bb.create_project("t-consume", "pentest")["id"]
     approval_id = "appr-once"
 
@@ -364,13 +377,9 @@ def test_gateway_consumes_approval_once(bb):
             (approval_id, pid, None, '{"op":"escalation"}', "high", "approved",
              "sess-x", "2026-09-19T00:00:00+00:00"),
         )
-    r = gw.run("wget http://x.example", runtime="sandbox", threat_class="trusted",
-               project_id=pid, net="real", approval_id=approval_id)
+    r = gw.run("echo hi", runtime="sandbox", threat_class="trusted",
+               project_id=pid, approval_id=approval_id)
     assert r.ok
     row = bb.conn.execute("SELECT status FROM approvals WHERE id=?",
                           (approval_id,)).fetchone()
     assert row["status"] == "consumed"
-    # 同 approval_id 二次使用 → 拒（approved 已不在）
-    with pytest.raises(GatewayDenied, match="须人工审批"):
-        gw.run("wget http://x.example", runtime="sandbox", threat_class="trusted",
-               project_id=pid, net="real", approval_id=approval_id)

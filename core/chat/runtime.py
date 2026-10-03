@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import inspect
 import logging
 import threading
 import time
@@ -43,18 +44,25 @@ log = logging.getLogger(__name__)
 
 ORCHESTRATOR_ID = "chat-orchestrator"
 
-# 子专家不可用的控制原语（任务队列/计划闸/意图纪律/收尾/私信/提案/HITL——
+# 子专家不可用的控制原语（任务队列/计划闸/收尾/私信/提案/HITL——
 # 对话线程没有任务上下文与收件箱，这些工具既无语义也危险：publish/claim
 # 会污染任务队列）
+# 意图三件套（declare/close/reopen_intent）自 2026-10-01 起**开放给对话链**
+# （见 intent-tools-chat）：对话主控/子专家同样要按「声明假设→执行→收尾」走，
+# 否则对话产出的发现不落链路图（用户实测：任务跑完但在「黑板→发现→链路」看不到
+# 任何意图——对话链整条链路从未声明过意图）。
 _EXPERT_EXCLUDED = {
     "task_plan", "task_step", "task_reconcile", "publish_task",
     "complete_task", "fail_task", "finish", "request_steps",
-    "propose_pack_edit", "declare_intent", "close_intent", "reopen_intent",
+    "propose_pack_edit",
     "bb_notify", "request_authorization", "request_escalation",
 }
 
+# 意图三件套（对话链也要，语义=规划产物与收尾纪律，不依赖任务队列）
+_INTENT_TOOLS = ("declare_intent", "close_intent", "reopen_intent", "bb_delete_intent")
+
 _ORCH_BASE_TOOLS = ("todo_write", "call_expert", "skill_open",
-                    "kb_search", "kb_open", "bb_query")
+                    "kb_search", "kb_open", "bb_query", *_INTENT_TOOLS)
 
 # 对话轮步数上限（2026-10-01 由 24/32 提升至 200：修「步数耗尽但全程只调工具
 # → 无终稿 → 落『本轮未产出文本回复』」；配合 _loop 末步强制终稿兜底）
@@ -67,6 +75,15 @@ _DELTA_MIN_INTERVAL = 1.0
 # 工具参数流截断的整轮重试上限（2026-10-01 事故修复）：工具参数 JSON 残缺/截断
 # （LLMError.truncated）时，流不可重放 → 轮级重发 ≤2 次（与 agent 循环同口径）。
 _CHAT_TRUNC_RETRIES = 2
+
+# 纯文本终稿被输出上限截断时的自动续写（2026-10-01，修「话说一半就正常终止」）：
+# 终稿 stop_reason=length/max_tokens → 把半截文本作为 assistant 前缀 + 追一条
+# user「接着说完」继续循环，拼接成完整终稿。上限防死循环；超限接受现有文本并落
+# chat.truncated 事件（前端可提示「输出可能不完整」）。
+_CHAT_CONTINUE_MAX = 3
+_TRUNC_STOP_REASONS = ("length", "max_tokens")
+_CONTINUE_NUDGE = ("（上一条回复因输出长度上限被截断）请**接着上一句继续写完**，"
+                   "不要重复已写内容，也不要重新开头。")
 
 # ---------- 上下文治理参数（2026-09-30 压缩上下文方案） ----------
 # 背景：单条工具结果可达数百万字符原样入历史 → 跨轮全量回放 → input 突破
@@ -212,6 +229,24 @@ _ERROR_CATEGORIES: dict[str, tuple[str, str]] = {
 }
 
 
+def _is_truncated_final(resp) -> bool:
+    """终稿是否被输出上限截断（2026-10-01）。
+
+    主判据：``stop_reason`` 命中 ``length``/``max_tokens``。
+    兜底：网关未报 stop_reason（空串）时，用 output_tokens 是否逼近本步
+    输出上限来判（宁漏勿误——只在明确触顶时才认）。带 tool_calls 的响应不算
+    终稿（走工具路径或工具参数重试），直接 False。
+    """
+    if getattr(resp, "tool_calls", None):
+        return False
+    sr = (getattr(resp, "stop_reason", "") or "").lower()
+    if sr in _TRUNC_STOP_REASONS:
+        return True
+    # 兜底：stop_reason 缺失且无文本（空终稿）时无法判断，不误伤；仅当有文本、
+    # 且调用方计入的 output_tokens 触顶才认——此处只做保守的显式判据。
+    return False
+
+
 def _classify_error(e: BaseException) -> dict[str, str]:
     """异常 → 结构化错误（category/title/message/hint）。message 为原始异常
     文案（技术细节），title/hint 为面向人类的分类与建议。"""
@@ -255,6 +290,25 @@ def _sanitize_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         缺失的补一条占位结果；
       - 不属于任何 tool_use 的孤儿 tool_result 丢弃。
     正常历史零改动（幂等）。"""
+    # 旧版本的 Responses 解析器曾可能把 function_call 落成空 name。
+    # 这种记录即使 tool_result 配对完整，网关转换时仍会因 name="" 返回 400；
+    # 无法从历史可靠推断真实工具名，只能丢弃该调用（其结果随后作为孤儿丢弃）。
+    cleaned: list[dict[str, Any]] = []
+    for m in messages:
+        if m.get("role") != "assistant" or not isinstance(m.get("content"), list):
+            cleaned.append(m)
+            continue
+        blocks = []
+        for b in m["content"]:
+            if not isinstance(b, dict) or b.get("type") != "tool_use":
+                blocks.append(b)
+                continue
+            if str(b.get("id") or "").strip() and str(b.get("name") or "").strip():
+                blocks.append(b)
+        if blocks:
+            cleaned.append({**m, "content": blocks})
+
+    messages = cleaned
     out: list[dict[str, Any]] = []
     i = 0
     n = len(messages)
@@ -342,6 +396,15 @@ class ChatTurn:
 
     # ---------- 装配 ----------
 
+    def _open_intents_of_self(self) -> list[str]:
+        """本线程（author=chat-<threadid>）的 open 意图 id 列表（收尾前拦截用）。"""
+        author = f"chat-{self.thread_id[-12:]}"
+        rows = self.bb.conn.execute(
+            "SELECT id FROM intents WHERE project_id=? AND status='open'"
+            " AND author=? ORDER BY created_at",
+            (self.project_id, author)).fetchall()
+        return [r["id"] for r in rows]
+
     def _build_dispatcher(self) -> ToolDispatcher | None:
         """复用 ToolDispatcher 的黑板/技能/网关工具处理器（run_cmd/http/
         kb/skill/bb_* 全套安全机制免费拿）；allowed_tools 按线程角色收敛。"""
@@ -411,9 +474,7 @@ class ChatTurn:
     def _orch_tool_specs(self) -> list[dict[str, Any]]:
         """主控专属工具规格：todo_write + call_expert（专家清单动态生成）。"""
         expert_rows = []
-        for eid in self.expert_names:
-            if eid in (ORCHESTRATOR_ID, "_generalist"):
-                continue  # 主控自身不委派自己；_generalist 是兜底角色不进清单
+        for eid in self._delegatable_experts():
             try:
                 e = load_expert(self.packs_root, eid, self.track)
             except FileNotFoundError:
@@ -451,13 +512,20 @@ class ChatTurn:
                                "（持久留档，人类可打开追问），专家跑完返回摘要。"
                                "一次委派一项；任务描述必须自包含（目标/范围/已知"
                                "信息/期望交付物）。你在委派前不直接实操——实操是"
-                               "专家的事。" + ("\n可用专家：\n" + "\n".join(expert_rows)
-                                               if expert_rows else ""),
+                               "专家的事。（expert 只填下方专家 id，勿填技能名）"
+                               + ("\n可用专家：\n" + "\n".join(expert_rows)
+                                  if expert_rows else ""),
                 "input_schema": {
                     "type": "object",
                     "properties": {
+                        # enum（2026-10-01）：模型曾把技能名 recon-asset-enum 当专家名
+                        # 传进来（技能清单与专家名录同屏、语义相近）。值域与「可用专家」
+                        # 文本块同源（_delegatable_experts），仅作软约束降错率；
+                        # 硬校验仍在 _tool_call_expert 的成员判定。
                         "expert": {"type": "string",
-                                   "description": "专家 id（见可用专家清单）"},
+                                   "enum": self._delegatable_experts(),
+                                   "description": "专家 id（见可用专家清单，"
+                                                  "不是技能名）"},
                         "task": {"type": "string",
                                  "description": "自包含的任务描述"},
                     },
@@ -465,6 +533,12 @@ class ChatTurn:
                 },
             },
         ]
+
+    def _delegatable_experts(self) -> list[str]:
+        """可委派专家 id（唯一口径）：按轨全池，排除主控自身与兜底角色。
+        工具描述、expert enum、报错文案三处共用，防止口径漂移。"""
+        return [n for n in self.expert_names
+                if n not in (ORCHESTRATOR_ID, "_generalist")]
 
     # ---------- 系统提示 ----------
 
@@ -503,7 +577,11 @@ class ChatTurn:
                 enabled = [s for s in reg.all()
                            if s.enabled and s.pack in pack_set]
                 if enabled:
-                    parts.append("## 可用技能清单（skill_open(\"<name>\") 打开全量正文）\n"
+                    # 消歧（2026-10-01）：技能名与专家名曾同屏混淆（模型把
+                    # recon-asset-enum 当专家名传给 call_expert），标题显式标注边界。
+                    parts.append("## 可用技能清单（skill_open(\"<name>\") 打开全量正文；"
+                                 "下列是【技能名】，不是专家——委派专家请用 call_expert "
+                                 "并填专家 id）\n"
                                  + "\n".join(f"- {s.name}：{s.description or ''}"
                                              for s in enabled))
         except Exception:  # noqa: BLE001 —— 技能清单失败不阻断对话
@@ -533,8 +611,12 @@ class ChatTurn:
                 if r["content"]:
                     blocks.append({"type": "text", "text": r["content"]})
                 for tc in r["tool_calls"]:
-                    blocks.append({"type": "tool_use", "id": tc["id"],
-                                   "name": tc["name"],
+                    name = str(tc.get("name") or "").strip()
+                    call_id = str(tc.get("id") or "").strip()
+                    if not name or not call_id:
+                        continue
+                    blocks.append({"type": "tool_use", "id": call_id,
+                                   "name": name,
                                    "input": tc.get("args") or {}})
                 if blocks:
                     messages.append({"role": "assistant", "content": blocks})
@@ -719,7 +801,8 @@ class ChatTurn:
                           "masked": masked, "est": est1, "budget": budget}
 
     def _chat(self, messages: list[dict[str, Any]], system: str | None,
-              tools: list[dict[str, Any]] | None, on_text=None, on_retry=None):
+              tools: list[dict[str, Any]] | None, on_text=None, on_retry=None,
+              on_provider_retry=None):
         """调 LLM（发送前已压缩）。reactive 兜底（ct-5）：若仍因 input 超限被
         网关 400/413 拒绝（ContextOverflowError），强制压缩一次后重试；再失败
         则抛出交给 run() 落 error。对应 Claude Code 五级级联的最末「reactive
@@ -731,7 +814,8 @@ class ChatTurn:
         重置 delta 缓冲，防「半截+新流」拼接上屏。"""
         for attempt in range(_CHAT_TRUNC_RETRIES + 1):
             try:
-                return self._chat_once(messages, system, tools, on_text)
+                return self._chat_once(messages, system, tools, on_text,
+                                       on_provider_retry)
             except LLMError as e:
                 if not getattr(e, "truncated", False) or attempt >= _CHAT_TRUNC_RETRIES:
                     raise
@@ -742,17 +826,33 @@ class ChatTurn:
         raise RuntimeError("unreachable")  # pragma: no cover
 
     def _chat_once(self, messages: list[dict[str, Any]], system: str | None,
-                   tools: list[dict[str, Any]] | None, on_text=None):
+                   tools: list[dict[str, Any]] | None, on_text=None,
+                   on_provider_retry=None):
+        def provider_kwargs() -> dict[str, Any]:
+            kwargs: dict[str, Any] = {
+                "system": system, "tools": tools, "on_text": on_text,
+                "should_cancel": self._aborted,
+            }
+            # 只有支持该扩展回调的 provider（当前为 OpenAI 兼容层）接收它；
+            # 保持测试替身和其他协议 provider 的旧接口兼容。
+            if on_provider_retry is not None:
+                try:
+                    supports_retry = "on_retry" in inspect.signature(
+                        self.llm.chat).parameters
+                except (TypeError, ValueError):
+                    supports_retry = False
+                if supports_retry:
+                    kwargs["on_retry"] = on_provider_retry
+            return kwargs
+
         try:
-            return self.llm.chat(messages, system=system, tools=tools,
-                                 on_text=on_text, should_cancel=self._aborted)
+            return self.llm.chat(messages, **provider_kwargs())
         except ContextOverflowError:
             log.warning("chat 输入超限，强制压缩后重试 thread=%s", self.thread_id)
             compacted, info = self._prepare_context(messages, system,
                                                     tools or [], force=True)
             self._emit("chat.ctx", {"phase": "reactive", **info})
-            return self.llm.chat(compacted, system=system, tools=tools,
-                                 on_text=on_text, should_cancel=self._aborted)
+            return self.llm.chat(compacted, **provider_kwargs())
 
     # ---------- 主流程 ----------
 
@@ -802,6 +902,9 @@ class ChatTurn:
         tools = self._tool_specs()
         max_steps = _ORCH_MAX_STEPS if self.is_orchestrator else _EXPERT_MAX_STEPS
         final = ""
+        # 截断续写状态（2026-10-01）：continue_n=已续写次数；text_acc=逐段文本拼接
+        continue_n = 0
+        text_acc: list[str] = []
         for _step in range(max_steps):
             if self._aborted():  # 步间中止：不落新 LLM 调用
                 final = self._persist_stopped()
@@ -829,6 +932,13 @@ class ChatTurn:
                 _acc.clear()
                 _pub["chars"] = 0
 
+            def _provider_retry(attempt: int, total: int, status: int) -> None:
+                """传输层重试进度：落事件让工作台在等待期间显示具体次数。"""
+                self._emit("chat.retry", {
+                    "phase": "retry", "attempt": attempt, "total": total,
+                    "status": status,
+                })
+
             # 末步强制终稿（2026-10-01）：最后一步不传工具，逼模型只能输出纯文本
             # 终稿，避免「步数耗尽但全程只调工具」→ 落「本轮未产出文本回复」。
             step_tools = None if _step == max_steps - 1 else (tools or None)
@@ -845,7 +955,8 @@ class ChatTurn:
             est_tools = _est_tokens(json.dumps(tools, ensure_ascii=False))
             est_msgs = sum(_est_tokens(_msg_text(m)) for m in messages)
             resp = self._chat(messages, system, step_tools, on_text,
-                              on_retry=_reset_delta)
+                              on_retry=_reset_delta,
+                              on_provider_retry=_provider_retry)
             # 上下文用量：input(+cache)=当步窗口占用，output/steps 跨步累计
             u = resp.usage
             input_total = u.input_tokens + u.cache_read_tokens \
@@ -942,18 +1053,60 @@ class ChatTurn:
                 if final:
                     break
                 continue
-            # 纯文本回复 = 轮终稿
+            # 纯文本回复 = 轮终稿（**2026-10-01 截断续写**）：若被输出上限截断
+            # （stop_reason=length/max_tokens），不当作终稿收尾——把半截文本作为
+            # assistant 前缀入历史 + 追一条 user 催续，继续循环拼接，避免「话说
+            # 一半就正常终止」。续写次数超上限才接受现有文本并落 chat.truncated。
+            if _is_truncated_final(resp) and text.strip():
+                if continue_n >= _CHAT_CONTINUE_MAX:
+                    self._emit("chat.truncated", {
+                        "phase": "giveup", "continues": continue_n,
+                        "text_head": text[:200]})
+                else:
+                    continue_n += 1
+                    self._emit("chat.truncated", {
+                        "phase": "continue", "continues": continue_n,
+                        "text_head": text[:200]})
+                    row = chat_store.append_message(
+                        self.bb, self.thread_id, "assistant", text)
+                    self._flush_final_delta(text, row["id"])
+                    messages.append({"role": "assistant", "content": text})
+                    messages.append({"role": "user", "content": _CONTINUE_NUDGE})
+                    text_acc.append(text)
+                    continue
+            # 收尾前拦未关意图（2026-10-01 intent-tools-chat）：子专家声明过意图
+            # 就必须收尾，否则链路图永远挂着 open 意图（对话链没有任务管线的
+            # finish 拦截）。仅拦子专家——主控是调度者，其意图由委派流程负责。
+            open_ids = self._open_intents_of_self()
+            if open_ids and not self.is_orchestrator:
+                nudge = ("你还有未收尾的意图：" + ", ".join(open_ids)
+                         + "。链路图要求意图必收尾——先 close_intent"
+                         "（outcome=vuln/finding/dead_end）收尾每条意图，"
+                         "再给最终摘要。若意图不再成立，用 bb_delete_intent 物理删除。")
+                messages.append({"role": "user", "content": nudge})
+                self._emit("chat.intent_guard",
+                           {"phase": "blocked", "open_intents": open_ids})
+                continue
             row = chat_store.append_message(self.bb, self.thread_id,
                                             "assistant", text)
             self._flush_final_delta(text, row["id"])
             self._emit("chat.message", {"role": "assistant",
                                         "text": text[:2000],
                                         "message_id": row["id"]})
-            final = text
+            text_acc.append(text)
+            final = "".join(text_acc)
             break
         if not final:
-            final = "（本轮未产出文本回复，请重试或改述）"
-            chat_store.append_message(self.bb, self.thread_id, "assistant", final)
+            # 步数耗尽但有累积文本（截断续写中途用尽）→ 用累积文本收尾并标记截断
+            if text_acc and any(t.strip() for t in text_acc):
+                final = "".join(text_acc)
+                self._emit("chat.truncated", {
+                    "phase": "giveup", "reason": "steps_exhausted",
+                    "continues": continue_n, "text_head": final[:200]})
+            else:
+                final = "（本轮未产出文本回复，请重试或改述）"
+                chat_store.append_message(self.bb, self.thread_id,
+                                          "assistant", final)
         return final
 
     def _persist_stopped(self) -> str:
@@ -1003,7 +1156,8 @@ class ChatTurn:
         parts = name.split("__", 2)
         if len(parts) != 3:
             return f"[错误] 非法 MCP 工具名: {name}"
-        return self.mcp_bridge.call(parts[1], parts[2], args)
+        return self.mcp_bridge.call(
+            parts[1], parts[2], args, session_id=self.thread_id)
 
     def _tool_todo_write(self, args: dict) -> str:
         items = args.get("items")
@@ -1032,8 +1186,9 @@ class ChatTurn:
         if not self.is_orchestrator:
             return "[错误] call_expert 失败：只有主控能委派（spawn 深度=1）"
         if expert not in self.expert_names or expert == ORCHESTRATOR_ID:
+            available = ", ".join(self._delegatable_experts())
             return (f"[错误] call_expert 失败：未知专家 '{expert}'；"
-                    f"可用：{', '.join(n for n in self.expert_names if n != ORCHESTRATOR_ID)}")
+                    f"可用：{available}（这些是专家 id，不是技能名）")
         if self.llm is None:
             return "[错误] call_expert 失败：LLM 未装配"
         # spawn 持久子线程（留档），隔离上下文跑完 → 摘要回传

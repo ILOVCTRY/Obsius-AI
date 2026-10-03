@@ -6,13 +6,16 @@ import {
   ArrowLeft,
   Bell,
   Blocks,
+  BookOpen,
   Bot,
+  BrainCircuit,
   CheckCircle2,
   ChevronDown,
   ChevronLeft,
   Globe2,
   Inbox,
   FolderKanban,
+  FolderTree,
   LayoutDashboard,
   ListChecks,
   PanelLeftOpen,
@@ -38,6 +41,9 @@ import { TaskBoard } from "@/views/TaskBoard"
 import { BrowserView } from "@/views/browser/BrowserView"
 import { ApprovalsView } from "@/views/ApprovalsView"
 import { SettingsView } from "@/views/SettingsView"
+import { KnowledgeView } from "@/views/KnowledgeView"
+import { SkillsView } from "@/views/SkillsView"
+import { SampleAnalysisView } from "@/views/SampleAnalysisView"
 import { cn } from "@/lib/utils"
 import { bindingBadge } from "@/lib/taxonomy"
 
@@ -50,7 +56,7 @@ import { bindingBadge } from "@/lib/taxonomy"
 // 左缘悬浮把手唤出；状态 localStorage（ui.nav-collapsed）。收起=条件渲染卸载
 // nav Panel+Separator（同 boardOpen 先例），重挂由 useDefaultLayout 恢复宽度。
 
-type View = "projects" | "intel" | "live" | "board" | "tasks" | "agents" | "approvals" | "browser" | "settings"
+type View = "projects" | "intel" | "live" | "board" | "tasks" | "agents" | "approvals" | "browser" | "sample-analysis" | "knowledge" | "skills" | "settings"
 
 /** M4c 场景档 board_view 默认视图（config.board_view.default；黑板上自行校验可用 tab 回退） */
 const boardViewOf = (m: ProjectDetail | null): string | undefined => {
@@ -74,8 +80,11 @@ const NAV_GROUPS: { label: string; items: NavItem[]; collapsible?: boolean }[] =
     label: "工具",
     items: [
       { key: "browser", label: "浏览器", icon: Globe2, needsProject: true },
+      { key: "sample-analysis", label: "样本分析", icon: FolderTree, needsProject: true },
       { key: "approvals", label: "审批", icon: ShieldCheck, needsProject: true },
-      { key: "settings", label: "技能与设置", icon: Settings2, needsProject: false },
+      { key: "knowledge", label: "知识库", icon: BookOpen, needsProject: false },
+      { key: "skills", label: "技能库", icon: BrainCircuit, needsProject: false },
+      { key: "settings", label: "设置", icon: Settings2, needsProject: false },
     ],
   },
   // 更多（2026-09-30）：会话/任务降级为二级入口，默认折叠收纳（见 NavRail 折叠逻辑）
@@ -104,14 +113,15 @@ function NavRail({ active, onSelect, locked, className, expanded = false, pendin
   }, [moreOpen])
 
   // 无项目上下文时只展示全局项（needsProject=false：项目/情报/设置）；
-  // 进入项目后移除 homeOnly 项（情报）——情报是全局模块，只在首页留入口。
-  // 不再硬编码 key 白名单——8cb819d 曾因硬编码列表与 NAV_GROUPS 漂移致情报入口消失
+  // 进入项目后移除项目入口和 homeOnly 项（情报）——项目工作区内不再显示
+  // 「项目」，返回首页清掉 pid 后入口自然恢复。
+  // 其余入口仍从 NAV_GROUPS 动态生成；仅对「项目」做显式生命周期过滤。
   const groups = locked
     ? [{ label: "", collapsible: false, items: NAV_GROUPS.flatMap((group) => group.items).filter((item) => !item.needsProject) }]
     : NAV_GROUPS.map((group) => ({
         label: group.label,
         collapsible: group.collapsible,
-        items: group.items.filter((item) => !item.homeOnly),
+        items: group.items.filter((item) => !item.homeOnly && item.key !== "projects"),
       })).filter((group) => group.items.length > 0)
 
   // 「更多」折叠（2026-09-30）：会话/任务降级为二级入口，手动状态持久化（ui.nav-more-open）；
@@ -227,16 +237,18 @@ export default function App() {
   const [taskNav, setTaskNav] = useState<{ id: string; n: number } | null>(null)
   // v0.71 任务即窗口：任务卡/任务流双击 → 跳会话页并直开专属执行窗页签
   const [sessionNav, setSessionNav] = useState<{ sid: string; n: number } | null>(null)
-  // 智能体工作台右栏「链路视图」→ 跳黑板并直达「发现·链路」子视图（2026-10-01）
-  const [boardNav, setBoardNav] = useState<{ findingsSub: "list" | "canvas"; n: number } | null>(null)
-  useEffect(() => { setBoardNav(null) }, [pid])
-
   useEffect(() => {
     const h = (e: Event) => {
       const d = (e as CustomEvent<{
         tab?: string; skill?: { source: "cap" | "track"; pack: string; name: string }
       }>).detail
-      setView("settings")
+      if (d?.tab === "skills") {
+        setView("skills")
+      } else if (d?.tab === "kb") {
+        setView("knowledge")
+      } else {
+        setView("settings")
+      }
       if (d?.tab || d?.skill) setSettingsNav({ tab: d.tab ?? "skills", n: Date.now(), skill: d.skill })
     }
     window.addEventListener("goto-settings", h)
@@ -276,6 +288,13 @@ export default function App() {
   const openProject = useCallback((id: string) => {
     setPid(id)
     setView("live")
+  }, [])
+
+  const goHome = useCallback(() => {
+    // 首页是无项目上下文的入口；清掉 pid 让项目入口和全局导航恢复。
+    setPid(null)
+    setMeta(null)
+    setView("projects")
   }, [])
 
   useEffect(() => {
@@ -342,7 +361,7 @@ export default function App() {
     onlySaveAfterUserInteractions: true,
   })
 
-  // 无项目上下文的视图（项目列表 / 全局情报页 / 设置 §16.4）：左导航 + 主区
+  // 无项目上下文的视图（项目列表 / 全局情报页 / 知识库 / 技能库 / 设置）：左导航 + 主区
   // 导航与项目页同构（2026-10-01）：展开态同时显示「图标+文字」，可拖宽 160–280px、
   // 悬浮「‹」收起、左缘把手唤出；宽度/收起态与项目页共用（app-nav-v3 / ui.nav-collapsed）。
   if (!pid || view === "projects" || view === "intel" || view === "settings" && !pid) {
@@ -365,12 +384,12 @@ export default function App() {
           )}
           <Panel id="main">
             <main className="app-content relative h-full min-w-0 overflow-auto">
-              <div className="context-bar">
-                <div className="context-label"><span className="eyebrow">OBSIUS / CONTROL CENTER</span><span className="context-title">{view === "intel" ? "情报中心" : view === "settings" ? "设置" : "项目空间"}</span></div>
-                <div className="context-status"><span className="status-dot" />在线</div>
-              </div>
               {view === "intel"
                 ? <IntelView />
+                : view === "knowledge"
+                  ? <KnowledgeView />
+                  : view === "skills"
+                    ? <SkillsView focus={settingsNav?.skill ? { ...settingsNav.skill, n: settingsNav.n } : null} />
                 : view === "settings" && !pid
                   ? <SettingsView nav={settingsNav} />
                   : <ProjectsView onOpen={openProject} />}
@@ -397,7 +416,7 @@ export default function App() {
           <span>审批</span>
           {pendingApprovals > 0 && <span className="approval-count">{pendingApprovals}</span>}
         </button>
-        <Button size="sm" variant="ghost" className="back-project" onClick={() => setView("projects")}><ArrowLeft size={15} />首页</Button>
+        <Button size="sm" variant="ghost" className="back-project" onClick={goHome}><ArrowLeft size={15} />首页</Button>
       </header>
 
       <div className="flex min-h-0 flex-1">
@@ -467,16 +486,12 @@ export default function App() {
                 {profile === "rev-generic"
                   ? <ReverseWorkbench key={pid} pid={pid} active={view === "board"} />
                   : <Blackboard key={pid} pid={pid} track={meta?.track} capabilities={meta?.capabilities}
-                                defaultView={boardViewOf(meta)}
-                                openFindingsSub={boardNav?.findingsSub}
-                                onFindingsSubConsumed={() => setBoardNav(null)} />}
+                                defaultView={boardViewOf(meta)} />}
               </div>
             </ErrorBoundary>
           )}
           {view === "tasks" && <TaskBoard pid={pid} focused={taskNav} />}
-          {view === "agents" && <AgentWorkbenchView pid={pid} meta={meta} onOpenChain={() => {
-            setBoardNav({ findingsSub: "canvas", n: Date.now() }); setView("board")
-          }} />}
+          {view === "agents" && <AgentWorkbenchView pid={pid} meta={meta} />}
           {view === "browser" && (
             // F6 内置浏览器：轨门控（非 pentest/redteam 整页灰显）在视图内部处理；
             // 定高视图（面板组），照 rev 走 h-full + overflow-hidden
@@ -484,7 +499,17 @@ export default function App() {
               <BrowserView pid={pid} track={meta?.track} />
             </div>
           )}
+          {view === "sample-analysis" && (
+            <div className="h-full w-full overflow-hidden">
+              <SampleAnalysisView pid={pid} onOpenBinary={(sha) => {
+                setView("board")
+                window.setTimeout(() => window.dispatchEvent(new CustomEvent("open-binary", { detail: { sha } })), 0)
+              }} />
+            </div>
+          )}
           {view === "approvals" && <ApprovalsView pid={pid} onGotoTasks={() => setView("tasks")} />}
+          {view === "knowledge" && <KnowledgeView pid={pid} />}
+          {view === "skills" && <SkillsView pid={pid} focus={settingsNav?.skill ? { ...settingsNav.skill, n: settingsNav.n } : null} />}
           {view === "settings" && <SettingsView nav={settingsNav} pid={pid} />}
             </ErrorBoundary>
             </main>

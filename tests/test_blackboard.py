@@ -93,7 +93,7 @@ def test_schema_v7_migration(tmp_path):
     try:
         ver = board.conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
-        assert int(ver) == SCHEMA_VERSION == 28
+        assert int(ver) == SCHEMA_VERSION == 30
         assert {"logic_blocks", "logic_block_funcs"} <= {r[0] for r in board.conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}  # v27（业务逻辑块）
         chat_cols = {r[1] for r in board.conn.execute(
@@ -1153,7 +1153,7 @@ def test_schema_v11_migration_idempotent(tmp_path):
         board = Blackboard(str(db_path))
         ver = board.conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
-        assert int(ver) == SCHEMA_VERSION == 28
+        assert int(ver) == SCHEMA_VERSION == 30
         cols = {r[1] for r in board.conn.execute("PRAGMA table_info(findings)")}
         assert "rating_basis" in cols
         assert "category" in cols  # v12（发现分两类）
@@ -1162,6 +1162,43 @@ def test_schema_v11_migration_idempotent(tmp_path):
         assert "intents" in {r[0] for r in board.conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}  # v22
         board.close()
+
+
+def test_v29_anchorless_open_intent_migrated(tmp_path):
+    """v28→v29：存量无锚点且 open 的意图落 intent.anchor_required 审计事件；
+    closed 意图一律不动；迁移幂等（meta 键去重）。"""
+    from core.blackboard.schema import init_schema
+    db = tmp_path / "v29.db"
+    board = Blackboard(str(db))
+    pid = board.create_project("迁移测试", "pentest")["id"]
+    aid = board.upsert_asset(pid, "host", "10.0.0.1")["id"]
+    # 一条无锚点 open（待补）/ 一条有锚点 open（不动）/ 一条无锚点 closed（不动）
+    rows = [
+        ("intent-1", "游离假设", None, "[]", "open"),
+        ("intent-2", "锚定假设", aid, "[]", "open"),
+        ("intent-3", "历史死路", None, "[]", "closed"),
+    ]
+    for iid, stmt, tgt, refs, status in rows:
+        board.conn.execute(
+            "INSERT INTO intents(id,project_id,statement,target_asset_id,"
+            "basis_refs,status,author,created_at,updated_at)"
+            " VALUES(?,?,?,?,?,?, 'tester','2026-01-01','2026-01-01')",
+            (iid, pid, stmt, tgt, refs, status))
+    board.conn.execute("DELETE FROM meta WHERE key='intents_anchor_migration'")
+    board.conn.commit()
+    # 重跑迁移（模拟旧库升级）
+    init_schema(board.conn)
+    evs = [dict(r) for r in board.conn.execute(
+        "SELECT kind, payload FROM events WHERE kind='intent.anchor_required'")]
+    assert len(evs) == 1
+    import json
+    assert json.loads(evs[0]["payload"])["intent_id"] == "intent-1"
+    # 幂等：再跑一遍不新增
+    init_schema(board.conn)
+    n = board.conn.execute(
+        "SELECT COUNT(*) FROM events WHERE kind='intent.anchor_required'").fetchone()[0]
+    assert n == 1
+    board.close()
 
 
 def test_add_finding_severity_whitelist_and_normalize(bb, project):
@@ -2292,6 +2329,45 @@ def test_repro_steps_validation(bb, project):
     r = bb.add_finding(pid, "s2", "t2",
                        evidence={"repro_steps": [{"desc": "x", "type": "http_raw"}]}, **base)
     assert r["id"]
+
+
+def test_gate_errors_carry_copyable_json_examples(bb, project):
+    """门禁报错附可复制示例（2026-10-01）：info 拒收与 verified 缺证据两条报错
+    都带最小可复制 JSON 骨架，Agent 可据此改参重试，不必靠猜结构。"""
+    pid = project["id"]
+    with pytest.raises(ValueError) as ei:
+        bb.add_finding(pid, "info-point", "信息点", severity="info", track="pentest")
+    msg = str(ei.value)
+    assert "可复制示例" in msg and '"category":"vuln"' in msg and "intel" in msg
+    with pytest.raises(ValueError) as ev:
+        bb.add_finding(pid, "sqli", "注入", severity="low", status="verified",
+                       track="pentest")
+    msgv = str(ev.value)
+    assert "可复制最小示例" in msgv and '"status":"verified"' in msgv \
+        and '"repro_steps"' in msgv and '"expected"' in msgv
+
+
+def test_structured_finding_report_contract(bb, project):
+    """新格式正式漏洞要求报告字段齐全，并支持 HTTP/Python 多 POC。"""
+    pid = project["id"]
+    with pytest.raises(ValueError, match="正式漏洞缺少必填项"):
+        bb.add_finding(pid, "SQL 注入", "不完整报告", severity="high",
+                       status="verified", summary="只有摘要")
+    with pytest.raises(ValueError, match="POC 第 1 项 type"):
+        bb.add_finding(pid, "SQL 注入", "非法 POC", severity="high",
+                       pocs=[{"type": "curl", "code": "curl /"}])
+    result = bb.add_finding(
+        pid, "SQL 注入", "接口注入可读取用户数据", severity="high", status="verified",
+        summary="带参数请求可触发 SQL 注入。", affected_assets="https://example.test/api/users",
+        test_environment="Windows 11；Chrome 140；Burp Suite 2026.1；普通测试账号",
+        reproduction_steps="发送带单引号的 id 参数并观察响应。",
+        verification_result="预期：参数被安全处理。实际：返回数据库错误并泄露数据。",
+        risk_assessment="机密性：可读取用户数据；完整性：可修改查询；可用性：可能拖慢数据库。",
+        pocs=[{"type": "http", "code": "GET /api/users?id=1' HTTP/1.1\nHost: example.test"},
+              {"type": "python", "code": "import requests\nrequests.get(url)"}],
+    )
+    row = bb.get_finding(pid, result["id"])
+    assert row["status"] == "verified" and len(row["pocs"]) == 2
 
 
 def test_repro_steps_union_merge_and_impact_remediation(bb, project):

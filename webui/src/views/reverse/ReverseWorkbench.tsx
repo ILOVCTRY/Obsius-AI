@@ -74,7 +74,8 @@ export function ReverseWorkbench({ pid, active = true }: { pid: string; active?:
   // headless 导出进度（大样本 P3，2026-09-30）：job 轮询带出 {done,total}；null=没在导出
   // 2026-10-01 扩：phase（starting/analyzing/decompile/stopped）+ stoppable（仅 Ghidra 可停）
   const [triageProgress, setTriageProgress] = useState<
-    { phase: string; done: number; total: number; stoppable: boolean } | null>(null)
+    { phase: string; done: number; total: number; discovered: number; completed: number; failed: number;
+      stoppable: boolean; etaSeconds: number | null; elapsedSeconds: number; ratePerSecond: number } | null>(null)
   const [triageMsg, setTriageMsg] = useState<string | null>(null)
   // 样本删除确认（2026-10-01）：delTarget 非 null = 确认框打开
   const [delTarget, setDelTarget] = useState<{ sha: string; name: string; counts: BinaryOverview | null } | null>(null)
@@ -85,6 +86,15 @@ export function ReverseWorkbench({ pid, active = true }: { pid: string; active?:
   const [mode, setMode] = useState<"rev" | "chains" | "blueprint" | "logic">("rev")
   const [rightTab, setRightTab] = useState("xref")
   const [focusFinding, setFocusFinding] = useState<string | null>(null)
+
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const sha = (event as CustomEvent<{ sha?: string }>).detail?.sha
+      if (sha) setSha(sha)
+    }
+    window.addEventListener("open-binary", handler)
+    return () => window.removeEventListener("open-binary", handler)
+  }, [])
 
   // 链节点点击 → 切回分析视图定位（artifact 无分析视图落点，忽略）
   const locateFromChain = (nodeType: ChainNodeType, nodeId: string, addr?: string) => {
@@ -163,9 +173,35 @@ export function ReverseWorkbench({ pid, active = true }: { pid: string; active?:
     const load = () =>
       api.binaryOverview(pid, sha).then((o) => alive && setOverview(o)).catch(() => {})
     load()
-    const t = setInterval(load, 4000)
+    const t = setInterval(load, overview?.analysis_job ? 1200 : 4000)
     return () => { alive = false; clearInterval(t) }
-  }, [pid, sha, tick, active])
+  }, [pid, sha, tick, active, overview?.analysis_job?.id])
+
+  // Rehydrate analysis state after refresh/navigation.  The job registry is the
+  // source of truth, so progress remains visible even when the user did not
+  // start the job from this mounted workbench instance.
+  useEffect(() => {
+    const job = overview?.analysis_job
+    if (!job) {
+      setTriaging(false)
+      setTriageProgress(null)
+      return
+    }
+    const p = job.progress || {}
+    setTriaging(true)
+    setTriageProgress({
+      phase: p.phase ?? "starting", done: p.done ?? 0, total: p.total ?? 0,
+      discovered: p.discovered ?? p.total ?? 0, completed: p.completed ?? p.done ?? 0,
+      failed: p.failed ?? 0, stoppable: !!p.stoppable,
+      etaSeconds: typeof p.eta_seconds === "number" ? p.eta_seconds : null,
+      elapsedSeconds: Number(p.elapsed_seconds ?? 0), ratePerSecond: Number(p.rate_per_second ?? 0),
+    })
+  }, [overview?.analysis_job?.id, overview?.analysis_job?.progress?.phase,
+    overview?.analysis_job?.progress?.done, overview?.analysis_job?.progress?.total,
+    overview?.analysis_job?.progress?.discovered, overview?.analysis_job?.progress?.completed,
+    overview?.analysis_job?.progress?.failed, overview?.analysis_job?.progress?.eta_seconds,
+    overview?.analysis_job?.progress?.elapsed_seconds, overview?.analysis_job?.progress?.rate_per_second,
+    overview?.analysis_job?.progress?.stoppable])
 
   // 缓存函数行（cached 前 409 → 留空）。拉取中由 job 增量推送驱动，跳过全量重拉
   // （5万+ 行每 2s 全量拉+重建曾拖崩渲染）；拉完 setPullProgress(null) 触发本 effect
@@ -175,9 +211,12 @@ export function ReverseWorkbench({ pid, active = true }: { pid: string; active?:
     if (pullProgress) return
     if (!sha || !overview?.cached) { setRows([]); return }
     let alive = true
-    api.cachedFunctions(pid, sha).then((r) => alive && setRows(r)).catch(() => {})
-    return () => { alive = false }
-  }, [pid, sha, overview?.cached, tick, pullProgress, active])
+    const load = () => api.cachedFunctions(pid, sha).then((r) => alive && setRows(r)).catch(() => {})
+    load()
+    const live = !!overview?.analysis_job || !!overview?.meta?.partial
+    const timer = live ? window.setInterval(load, 1800) : null
+    return () => { alive = false; if (timer !== null) window.clearInterval(timer) }
+  }, [pid, sha, overview?.cached, overview?.analysis_job?.id, overview?.meta?.partial, tick, pullProgress, active])
 
   // func_kb（该样本分析过的函数）
   useEffect(() => {
@@ -210,17 +249,27 @@ export function ReverseWorkbench({ pid, active = true }: { pid: string; active?:
     if (!sha || !addr || !funcReadable) { setDetail(null); setXref(null); return }
     let alive = true
     setDetailLoading(true)
-    Promise.allSettled([
-      api.cachedFunction(pid, sha, addr),
-      api.binaryXrefs(pid, sha, addr),
-    ]).then(([df, xf]) => {
+    // Xrefs are cache-only and normally return immediately.  Keep them
+    // independent from Ghidra's potentially slow first on-demand disassembly
+    // so the right pane is usable while the assembly request is running.
+    api.binaryXrefs(pid, sha, addr).then((x) => alive && setXref(x)).catch(() => alive && setXref(null))
+    let retryTimer: ReturnType<typeof setTimeout> | null = null
+    const loadDetail = () => api.cachedFunction(pid, sha, addr).then((d) => {
       if (!alive) return
-      setDetail(df.status === "fulfilled" ? df.value : null)
-      setXref(xf.status === "fulfilled" ? xf.value : null)
+      setDetail(d)
+      setDetailLoading(false)
+      // Ghidra large samples enrich assembly asynchronously. Poll only while
+      // that one function is pending, then stop as soon as lines arrive.
+      if (engine === "ghidra" && d.disasm_pending && !d.disasm?.lines?.length)
+        retryTimer = setTimeout(loadDetail, 1500)
+    }).catch(() => {
+      if (!alive) return
+      setDetail(null)
       setDetailLoading(false)
     })
-    return () => { alive = false }
-  }, [pid, sha, addr, funcReadable, tick, active, engine]) // eslint-disable-line react-hooks/exhaustive-deps
+    loadDetail()
+    return () => { alive = false; if (retryTimer) clearTimeout(retryTimer) }
+  }, [pid, sha, addr, funcReadable, active, engine]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const currentAsset = binaries.find((a) => a.value === sha) ?? null
   const kbFunc = funcs.find((f) => hexAddr(f.address) === addr) ?? null
@@ -254,15 +303,21 @@ export function ReverseWorkbench({ pid, active = true }: { pid: string; active?:
     const size = overview?.asset_meta?.size
     if (typeof size === "number" && size > SAMPLE_LARGE_BYTES &&
         !largeSampleConfirm(Math.round(size / 1024 / 1024), engine)) return
-    setTriageProgress({ phase: "starting", done: 0, total: 0, stoppable: false })
+    setTriageProgress({ phase: "starting", done: 0, total: 0, discovered: 0, completed: 0,
+      failed: 0, stoppable: false, etaSeconds: null, elapsedSeconds: 0, ratePerSecond: 0 })
     try {
       const r = await api.retryTriage(pid, sha)
       const job = await awaitJob(r.job_id, (j) => {
         const p = j.meta?.progress as
-          { phase?: string; done?: number; total?: number; stoppable?: boolean } | undefined
+          { phase?: string; done?: number; total?: number; discovered?: number; completed?: number;
+            failed?: number; stoppable?: boolean; eta_seconds?: number | null;
+            elapsed_seconds?: number; rate_per_second?: number } | undefined
         if (p) setTriageProgress({
           phase: p.phase ?? "", done: p.done ?? 0, total: p.total ?? 0,
-          stoppable: !!p.stoppable,
+          discovered: p.discovered ?? p.total ?? 0, completed: p.completed ?? p.done ?? 0,
+          failed: p.failed ?? 0, stoppable: !!p.stoppable,
+          etaSeconds: typeof p.eta_seconds === "number" ? p.eta_seconds : null,
+          elapsedSeconds: Number(p.elapsed_seconds ?? 0), ratePerSecond: Number(p.rate_per_second ?? 0),
         })
       })
       const res = job?.result as { status?: string; hint?: string } | null
@@ -459,6 +514,11 @@ export function ReverseWorkbench({ pid, active = true }: { pid: string; active?:
               rows={rows} funcs={funcs} selected={addr} onSelect={setAddr}
               imports={overview?.imports ?? null} cached={!!overview?.cached}
               stringsCount={overview?.strings_count ?? 0}
+              progress={{
+                discovered: triageProgress?.discovered ?? overview?.analysis_job?.progress?.discovered ?? rows.length,
+                completed: triageProgress?.completed ?? overview?.analysis_job?.progress?.completed ?? rows.filter((row) => row.status === "done").length,
+                failed: triageProgress?.failed ?? overview?.analysis_job?.progress?.failed ?? rows.filter((row) => row.status === "failed").length,
+              }}
             />
           </div>
 

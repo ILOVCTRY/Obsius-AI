@@ -5,7 +5,7 @@
 - pack_rules(capabilities, track)：能力包红线 ∪ 轨红线，构建系统提示时全量注入。
 - owner_rules(track, tags)：按资产 owner 叠加的更严规则（EDUSRC/OSRC/YSRC 模式）。
 - rating_rules(track, tags)：评级与价值口径（rating/<tag>.md，F11 判级依据注入）。
-- resolve_rule_profiles(...)：rule_profiles 三态解析 → (生效 owners, 生效 ratings)。
+- resolve_rule_profiles(...)：rule_profiles 显式解析 → (生效 owners, 生效 ratings)。
 - role_rules(track, role)：角色专属红线（role-rules/<role>.md，仅绑定角色注入）。
 - parse_rule_doc / validate_rule_meta / load_rule_templates：四段一体模板
   （rules-four-section M1：frontmatter 结构化字段 + 正文；M2 接注入与实例层）。
@@ -166,27 +166,26 @@ def resolve_rule_profiles(
     packs_root: str | Path, track: str, owner_tags: list[str],
     rule_profiles: dict | None,
 ) -> tuple[list[str], list[str]]:
-    """rule_profiles 三态解析（F11）→ (生效 owners, 生效 ratings)。
+    """rule_profiles 显式解析（F11；2026-10-01 去三态改纯显式）→
+    (生效 owners, 生效 ratings)。
 
-    - owners：键缺失或 "*" = 自动命中全注入（现行为）；清单 = 自动命中 ∩ 清单（可裁剪）。
-    - rating：键缺失 = 自动（= 自动命中的 owner tags ∩ rating/ 文件存在，向后兼容）；
-      键存在（含空列表）= 显式全集（空=关闭）——可含未自动命中的 tag（提前挂标准）。
+    **勾哪个生效哪个**：owners/rating 都只认显式清单，未配（键缺失/None）= 不注入。
+    不再有「缺省=自动全注入 owner_tags」与「rating 自动跟随 owner 命中」——项目
+    未配置过就不叠加任何 owner/rating 规则（能力包红线/轨红线/角色红线不经此处，
+    仍恒注入）。
+
+    - owners：键存在 = 显式清单 ∩ 文件存在；键缺失/None = 空。
+    - rating：键存在 = 显式清单 ∩ 文件存在；键缺失/None = 空。
     只做文件存在性过滤，不存在的 tag 静默剔除；非法形态已在 projects 层归一化 422。
+    `owner_tags` 保留入参以兼容既有调用签名（显式化后不再参与解析）。
     """
     profiles = rule_profiles or {}
-    auto = [t for t in (owner_tags or [])]
-    owners_cfg = profiles.get("owners", "*")
-    if owners_cfg == "*":
-        eff_owners = [t for t in auto
-                      if (track_dir(packs_root, track) / "rules" / "owners" / f"{t}.md").is_file()]
-    else:
-        eff_owners = [t for t in owners_cfg if t in auto
-                      and (track_dir(packs_root, track) / "rules" / "owners" / f"{t}.md").is_file()]
+    owner_base = track_dir(packs_root, track) / "rules" / "owners"
+    eff_owners = [t for t in (profiles.get("owners") or [])
+                  if (owner_base / f"{t}.md").is_file()]
     rating_base = track_dir(packs_root, track) / "rules" / "rating"
-    if "rating" not in profiles:
-        eff_ratings = [t for t in eff_owners if (rating_base / f"{t}.md").is_file()]
-    else:
-        eff_ratings = [t for t in profiles["rating"] if (rating_base / f"{t}.md").is_file()]
+    eff_ratings = [t for t in (profiles.get("rating") or [])
+                   if (rating_base / f"{t}.md").is_file()]
     return eff_owners, eff_ratings
 
 

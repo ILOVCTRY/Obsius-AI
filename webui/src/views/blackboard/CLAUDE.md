@@ -18,17 +18,23 @@
 
 ## 文件
 
-- `AttackPath.tsx` — **单站攻击链路图 v3（website-attack-path-graph，主脊：目标→
-  意图→收尾）**：默认无 target → `TargetGuide`（host/domain 搜索）；选定后
+- `AttackPath.tsx` — **单站攻击链路图 v3（website-attack-path-graph，主脊：目标 →
+  子目标/意图 → 收尾：漏洞|有效发现|死路 → 意图 → 收尾 → …，可循环延伸）**：
+  默认无 target → `TargetGuide`（host/domain 搜索）；选定后
   `api.attackPath(pid, target)` 4s 轮询。布局常量 `X_STEP=300`/`CARD_W`/`*_H`，
-  列序 target→intent→finding，`nodesDraggable/nodesConnectable=false`。
-  - 主脊节点：`TargetNode`/`IntentNode`（button：待收尾脉冲点、statement、
-    request_count、`OUTCOME_BADGE` 漏洞/有效发现/死路；死路虚线灰卡）/
+  **按依赖层级自动分层**（`layoutGraph`：无前驱非根落 level 1），`nodesDraggable/nodesConnectable=false`。
+  - **子目标节点 `SubtargetNode`（2026-10-01）**：根的直接子资产成节点（孙节点不上图）；
+    带终态徽章 `SUBTARGET_STATUS`（已测清/待测/扫描中…）——`node.settled`（子树意图
+    全部收尾且至少一条 dead_end）为真时显「已测清」；`node.findings` 显示发现数。
+    意图按资产锚点归属到子目标子树，derive 边自子目标起（无归属仍挂根）。
+  - 主脊节点：`TargetNode`/`SubtargetNode`/`IntentNode`（button：待收尾脉冲点、
+    statement、request_count、`OUTCOME_BADGE` 漏洞/有效发现/死路；死路虚线灰卡）/
     `FindingNode`（SEV_COLOR 五档+category）；边 derive/outcome/bypass
     smoothstep 单向（bypass 仅死路隐藏时参与保持连通）。
     **IntentNode/卡片内部用 flex 流式布局（2026-09-26 修文字重叠）**：陈述
     `flex-1 overflow-hidden` 占剩余高度、徽章行常规流——勿改回 absolute
-    底部定位（INTENT_H 内三行陈述会压住徽章/时间戳）；INTENT_H=108。
+    底部定位（正文过长时会压住徽章/时间戳）；当前 INTENT_H=144，正文最多显示五行，
+    超出部分可通过卡片悬停提示查看完整陈述。
   - **执行层展开**：点意图卡 toggles 展开（data.expanded/onToggle）——该意图
     attempts 按 `exec_edges` 时间相邻连成尝试带（连接边 `<intent>-><attempt>:conn`）；
     `AttemptNode` 五档色标（found/hint/blocked/no_reaction/skipped）、路径模板、

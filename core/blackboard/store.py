@@ -32,6 +32,46 @@ FINDING_SEVERITIES = ("info", "low", "medium", "high", "critical")
 # C6 发现分两类：vuln=漏洞（可验证的安全问题）/ intel=有效发现·关键发现（信息点、
 # 防误报提示、合规提示、噪声管理等有价值的非漏洞结论）
 FINDING_CATEGORIES = ("vuln", "intel")
+VULNERABILITY_TYPES = (
+    "未授权访问", "认证绕过", "水平越权", "垂直越权", "SQL 注入", "命令注入",
+    "SSRF", "XSS", "文件读取", "文件上传", "路径穿越", "敏感信息泄露",
+    "弱口令", "配置错误", "CSRF", "业务逻辑", "组件漏洞", "其他",
+)
+
+
+def validate_finding_pocs(pocs: Any) -> list[dict[str, str]]:
+    """POC 只接受可复制的 HTTP 原始报文或 Python 脚本。"""
+    if not isinstance(pocs, list):
+        raise ValueError("pocs 必须是数组，每项为 {type: http|python, code}")
+    out: list[dict[str, str]] = []
+    for i, poc in enumerate(pocs, 1):
+        if not isinstance(poc, dict):
+            raise ValueError(f"POC 第 {i} 项必须是对象")
+        kind, code = poc.get("type"), poc.get("code")
+        if kind not in ("http", "python"):
+            raise ValueError(f"POC 第 {i} 项 type 仅支持 http 或 python")
+        if not isinstance(code, str) or not code.strip():
+            raise ValueError(f"POC 第 {i} 项 code 不能为空")
+        out.append({"type": kind, "code": code.strip()})
+    return out
+
+
+def validate_formal_vuln(*, status: str, category: str, title: str,
+                         vuln_class: str, severity: str, target_asset_id: str | None,
+                         report: dict[str, str], pocs: list[dict[str, str]]) -> None:
+    if status != "verified" or category != "vuln":
+        return
+    required = {
+        "漏洞名称": title, "漏洞等级": severity, "漏洞类型": vuln_class,
+        "受影响资产": target_asset_id or report["affected_assets"],
+        "漏洞摘要": report["summary"], "测试环境": report["test_environment"],
+        "操作步骤": report["reproduction_steps"],
+        "验证结果": report["verification_result"],
+        "风险影响评估": report["risk_assessment"], "POC": pocs,
+    }
+    missing = [label for label, value in required.items() if not value]
+    if missing:
+        raise ValueError("正式漏洞缺少必填项：" + "、".join(missing))
 
 
 def _check_vuln_gates(*, category: str, severity: str, status: str,
@@ -60,7 +100,13 @@ def _check_vuln_gates(*, category: str, severity: str, status: str,
         raise ValueError(
             "收录门禁：渗透/红队轨不再收录 severity=info——有评级条款的按 "
             "low 并补充交互性实证登记，口径外信息（暴露面/合规提示）按 intel "
-            "线索（severity>=low）登记或不登记")
+            "线索（severity>=low）登记或不登记。"
+            "可复制示例（漏洞按 low + 交互实证）："
+            '{"category":"vuln","severity":"low","status":"unverified",'
+            '"title":"…","evidence":{"repro_steps":[{"desc":"发送请求并观察回显",'
+            '"type":"http","code":"GET /x HTTP/1.1\\nHost: target",'
+            '"expected":"响应头回显注入点"}]}}；'
+            "若只是信息性提示（非漏洞）则改 category=intel 且 severity>=low")
     if category != "vuln":
         return
     if status == "verified":
@@ -70,7 +116,13 @@ def _check_vuln_gates(*, category: str, severity: str, status: str,
                 "（evidence.repro_steps：[{desc, type, code, expected}]，至少一步"
                 " code/artifact_id 非空且该步预期结果 expected 非空），或旧结构 "
                 "poc/pocs/poc_artifact_id（legacy）——红线「无证据不下结论」；"
-                "先稳定复现再登记，或先按 unverified/有效发现登记")
+                "先稳定复现再登记，或先按 unverified/有效发现登记。"
+                "可复制最小示例："
+                '{"category":"vuln","severity":"high","status":"verified",'
+                '"title":"…","evidence":{"repro_steps":[{"desc":"重放 PoC 观察回显",'
+                '"type":"cmd","code":"python poc.py --target …",'
+                '"expected":"命令输出 uid=0(root)"}]}}'
+                "（每步 desc 必填，且至少一步同时有 code/artifact_id 与 expected）")
 
 
 # 收录格式（finding-report-format M1，2026-09-22）：evidence.repro_steps 步骤类型
@@ -1400,19 +1452,22 @@ class Blackboard:
                     raise ValueError(
                         "该资产存在子资产：父节点 tested_clean 由子树全部终态自动派生，"
                         "请流转子节点（不适用的面可对子节点标 na）")
-                # tested-clean-intent-backing（2026-09-25；2026-09-29 逐资产收紧）：
-                # 叶子 clean 须有直接围绕该资产的 closed/dead_end 意图背书——
-                # 祖先链批次覆盖已移除（一条父节点「基线一致」死路意图曾批量
-                # 误标 12 个活站，sess-1d692817a5d0）；死路收尾自带 dead_reason
-                # + 证据门禁，防粗略判净
+                # tested-clean-intent-backing（2026-09-25；2026-10-01 改读链路图口径）：
+                # 叶子 clean 须有直接围绕该资产的死路意图背书——祖先链批次覆盖
+                # 已移除（一条父节点「基线一致」死路意图曾批量误标 12 个活站，
+                # sess-1d692817a5d0）；死路收尾自带 dead_reason + 证据门禁，防粗略判净。
+                # 2026-10-01：口径与攻击链路图同源（子目标级）——以本资产为根的
+                # 子树内意图须**全部收尾**且至少一条 dead_end（见 intents.py）。
                 from core.blackboard.intents import dead_end_backing_target
                 if dead_end_backing_target(
                         self.conn, row["project_id"], asset_id) is None:
                     raise ValueError(
-                        "tested_clean 须有直接围绕该资产的死路意图背书：对本资产"
-                        " declare_intent 声明可证伪假设，close_intent"
-                        "(outcome=dead_end) 带证据收尾后再标（每资产独立意图，"
-                        "意图越多测得越全面；禁止父节点一条意图批量覆盖子树）")
+                        "tested_clean 须有死路意图背书（读链路图口径）：以本资产"
+                        "为根的子目标下，意图须**全部收尾**且至少一条 dead_end——"
+                        "对本资产 declare_intent 声明可证伪假设，close_intent"
+                        "(outcome=dead_end) 带证据收尾后再标；如有 open 意图先收尾。"
+                        "（每子目标独立立意，意图越多测得越全面；禁止父节点一条"
+                        "意图批量覆盖子树）")
             self.conn.execute(
                 "UPDATE assets SET status=?, revision=revision+1 WHERE id=?",
                 (status, asset_id))
@@ -1519,6 +1574,13 @@ class Blackboard:
         rating_basis: str = "",
         impact: str = "",
         remediation: str = "",
+        summary: str = "",
+        affected_assets: str = "",
+        test_environment: str = "",
+        reproduction_steps: str = "",
+        verification_result: str = "",
+        risk_assessment: str = "",
+        pocs: list[dict] | None = None,
         category: str | None = None,
         track: str | None = None,
     ) -> dict:
@@ -1549,6 +1611,7 @@ class Blackboard:
             category = "intel" if severity == "info" else "vuln"
         if category not in FINDING_CATEGORIES:
             raise ValueError(f"非法 category: {category}（允许 {FINDING_CATEGORIES}）")
+        clean_pocs = validate_finding_pocs(pocs or [])
         # C6 漏洞门禁（仅渗透/红队轨）：vuln+info 拒、vuln+verified 无复现证据拒（宁严勿松）
         _check_vuln_gates(category=category, severity=severity, status=status,
                           evidence=evidence, poc_artifact_id=poc_artifact_id,
@@ -1604,6 +1667,32 @@ class Blackboard:
                 # impact/remediation（v20 三件套）：旧值非空保留、空缺由新报补入
                 new_impact = row["impact"] or impact
                 new_remediation = row["remediation"] or remediation
+                report = {
+                    "summary": row["summary"] or summary.strip(),
+                    "affected_assets": row["affected_assets"] or affected_assets.strip(),
+                    "test_environment": row["test_environment"] or test_environment.strip(),
+                    "reproduction_steps": row["reproduction_steps"] or reproduction_steps.strip(),
+                    "verification_result": row["verification_result"] or verification_result.strip(),
+                    "risk_assessment": row["risk_assessment"] or risk_assessment.strip(),
+                }
+                old_pocs = _loads(row["pocs"], [])
+                old_pocs = old_pocs if isinstance(old_pocs, list) else []
+                merged_pocs = list(old_pocs)
+                poc_fps = {json.dumps(p, ensure_ascii=False, sort_keys=True) for p in old_pocs}
+                for poc in clean_pocs:
+                    fp = json.dumps(poc, ensure_ascii=False, sort_keys=True)
+                    if fp not in poc_fps:
+                        merged_pocs.append(poc)
+                        poc_fps.add(fp)
+                # Add submissions that include any structured report data are held
+                # to the formal report contract. Legacy verified records can still
+                # receive ordinary edits without retroactive migration.
+                if any(report.values()) or clean_pocs:
+                    validate_formal_vuln(
+                        status=new_status, category=row["category"], title=title or row["title"],
+                        vuln_class=vuln_class or row["vuln_class"], severity=new_severity,
+                        target_asset_id=target_asset_id or row["target_asset_id"],
+                        report=report, pocs=merged_pocs)
                 # A4 变化检测（事务内算标志，事务后投递，多变化聚合一条 finding_update）
                 if len(merged_ev.get("pocs") or []) > old_poc_n or (
                         not row["poc_artifact_id"] and poc_artifact_id):
@@ -1617,27 +1706,50 @@ class Blackboard:
                     merged_verified = True
                 if len(merged_ev.get("relates_to") or []) > old_rel_n:
                     update_changes.append("新增关联发现")
+                if len(merged_pocs) > len(old_pocs):
+                    update_changes.append("新增内嵌 POC")
                 self.conn.execute(
                     "UPDATE findings SET evidence=?, severity=?, rating_basis=?, status=?,"
-                    " poc_artifact_id=?, impact=?, remediation=?,"
+                    " poc_artifact_id=?, impact=?, remediation=?, summary=?, affected_assets=?,"
+                    " test_environment=?, reproduction_steps=?, verification_result=?,"
+                    " risk_assessment=?, pocs=?,"
                     " confidence=MAX(confidence,?), updated_at=?,"
                     " revision=revision+1 WHERE id=?",
                     (json.dumps(merged_ev, ensure_ascii=False), new_severity, new_basis,
-                     new_status, new_poc, new_impact, new_remediation, confidence,
+                     new_status, new_poc, new_impact, new_remediation,
+                     report["summary"], report["affected_assets"], report["test_environment"],
+                     report["reproduction_steps"], report["verification_result"],
+                     report["risk_assessment"], json.dumps(merged_pocs, ensure_ascii=False),
+                     confidence,
                      created, row["id"]),
                 )
                 finding_id, merged = row["id"], True
                 category = row["category"]  # C6：合并保留既有分类（同类发现不因重报换类）
             else:
+                report = {
+                    "summary": summary.strip(),
+                    "affected_assets": affected_assets.strip(),
+                    "test_environment": test_environment.strip(),
+                    "reproduction_steps": reproduction_steps.strip(),
+                    "verification_result": verification_result.strip(),
+                    "risk_assessment": risk_assessment.strip(),
+                }
+                if any(report.values()) or clean_pocs:
+                    validate_formal_vuln(
+                        status=status, category=category, title=title, vuln_class=vuln_class,
+                        severity=severity, target_asset_id=target_asset_id,
+                        report=report, pocs=clean_pocs)
                 finding_id = new_id("find")
                 merged = False
                 if key is None:  # 无去重键：以自身 id 为唯一指纹（列 NOT NULL，且永不合并）
                     key = finding_id
                 self.conn.execute(
                     "INSERT INTO findings(id,project_id,target_asset_id,vuln_class,title,"
-                    "severity,rating_basis,status,category,impact,remediation,evidence,"
+                    "severity,rating_basis,status,category,impact,remediation,summary,"
+                    "affected_assets,test_environment,reproduction_steps,verification_result,"
+                    "risk_assessment,pocs,evidence,"
                     "poc_artifact_id,confidence,dedup_key,author,created_at,updated_at)"
-                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         finding_id,
                         project_id,
@@ -1650,6 +1762,10 @@ class Blackboard:
                         category,
                         impact.strip(),
                         remediation.strip(),
+                        report["summary"], report["affected_assets"],
+                        report["test_environment"], report["reproduction_steps"],
+                        report["verification_result"], report["risk_assessment"],
+                        json.dumps(clean_pocs, ensure_ascii=False),
                         json.dumps(evidence or {}, ensure_ascii=False),
                         poc_artifact_id,
                         confidence,
@@ -1796,6 +1912,7 @@ class Blackboard:
         for r in self.conn.execute(sql, params):
             d = _row_to_dict(r) or {}
             d["evidence"] = _loads(d["evidence"], {})
+            d["pocs"] = _loads(d.get("pocs", "[]"), [])
             out.append(d)
         return out
 
@@ -1808,6 +1925,7 @@ class Blackboard:
         d = _row_to_dict(row)
         if d:
             d["evidence"] = _loads(d.get("evidence", "{}"), {})
+            d["pocs"] = _loads(d.get("pocs", "[]"), [])
         return d
 
     def patch_finding(
@@ -1823,6 +1941,13 @@ class Blackboard:
         rating_basis: str | None = None,
         impact: str | None = None,
         remediation: str | None = None,
+        summary: str | None = None,
+        affected_assets: str | None = None,
+        test_environment: str | None = None,
+        reproduction_steps: str | None = None,
+        verification_result: str | None = None,
+        risk_assessment: str | None = None,
+        pocs: list[dict] | None = None,
         category: str | None = None,
         track: str | None = None,
         author: str = "human",
@@ -1866,6 +1991,7 @@ class Blackboard:
                 len(old_ev.get("relates_to") or []) if isinstance(old_ev, dict) else 0)
             sets: list[str] = []
             params: list[Any] = []
+            clean_pocs = validate_finding_pocs(pocs) if pocs is not None else None
             new_status = row["status"]
             if status is not None:
                 if status not in FINDING_STATUSES:
@@ -1921,6 +2047,29 @@ class Blackboard:
                 sets.append("remediation=?")
                 params.append(str(remediation).strip())
                 changed.append("remediation")
+            report_changes = {
+                "summary": summary,
+                "affected_assets": affected_assets,
+                "test_environment": test_environment,
+                "reproduction_steps": reproduction_steps,
+                "verification_result": verification_result,
+                "risk_assessment": risk_assessment,
+            }
+            report_values: dict[str, str] = {}
+            for col, value in report_changes.items():
+                report_values[col] = str(row[col] or "") if value is None else str(value).strip()
+                if value is not None:
+                    sets.append(f"{col}=?")
+                    params.append(report_values[col])
+                    changed.append(col)
+            stored_pocs = _loads(row["pocs"], [])
+            if not isinstance(stored_pocs, list):
+                stored_pocs = []
+            effective_pocs = stored_pocs if clean_pocs is None else clean_pocs
+            if clean_pocs is not None:
+                sets.append("pocs=?")
+                params.append(json.dumps(clean_pocs, ensure_ascii=False))
+                changed.append("pocs")
             if category is not None:  # C6 分两类：vuln=漏洞 / intel=有效发现·关键发现
                 c = str(category).strip().lower()
                 if c not in FINDING_CATEGORIES:
@@ -1948,7 +2097,7 @@ class Blackboard:
                         "按「有效发现 intel」登记，或补充证据后提升严重度")
                 if status is not None and status == "verified":
                     eff_ev = merged if evidence is not None else old_ev
-                    if not has_repro_evidence(eff_ev, row["poc_artifact_id"]):
+                    if not effective_pocs and not has_repro_evidence(eff_ev, row["poc_artifact_id"]):
                         raise ValueError(
                             "漏洞门禁：verified 漏洞必须带复现证据——按复现步骤登记"
                             "（evidence.repro_steps：[{desc, type, code, expected}]，"
@@ -1956,6 +2105,26 @@ class Blackboard:
                             "或旧结构 poc/pocs/poc_artifact_id（legacy）——红线"
                             "「无证据不下结论」；先稳定复现再登记，"
                             "或先按 unverified/有效发现登记")
+            effective_status = status if status is not None else row["status"]
+            effective_category = category if category is not None else row["category"]
+            effective_severity = severity if severity is not None else row["severity"]
+            effective_title = title if title is not None else row["title"]
+            effective_vuln_class = vuln_class if vuln_class is not None else row["vuln_class"]
+            upgrading_to_verified = status == "verified" and row["status"] != "verified"
+            editing_structured_report = any(
+                value is not None for value in (
+                    summary, affected_assets, test_environment, reproduction_steps,
+                    verification_result, risk_assessment, pocs))
+            # A legacy evidence-only upgrade is still supported. Once the new
+            # report fields or embedded POCs are supplied, the record adopts the
+            # complete structured contract.
+            structured_upgrade = upgrading_to_verified and editing_structured_report
+            if structured_upgrade or (row["status"] == "verified" and editing_structured_report):
+                validate_formal_vuln(
+                    status=effective_status, category=effective_category,
+                    title=effective_title, vuln_class=effective_vuln_class,
+                    severity=effective_severity, target_asset_id=row["target_asset_id"],
+                    report=report_values, pocs=effective_pocs)
             if sets:
                 sets.append("updated_at=?")
                 sets.append("revision=revision+1")

@@ -69,7 +69,9 @@ export function FunctionDetail({
         : "缓存缺席，请先完成分诊；或在 IDA 中按 Ctrl-Alt-M 启动 MCP 后实时读取"
   const emptyAsm = detail
     ? (ghidra
-        ? "该函数无反汇编（Ghidra 小样本在「开始分析」时导出；大样本按需拉取失败——重选函数重试）"
+        ? (detail.disasm_pending
+            ? "Ghidra 正在加载反汇编…"
+            : "该函数无反汇编（Ghidra 小样本在「开始分析」时导出；大样本按需加载失败）")
         : "该函数无反汇编（未自动拉取或拉取失败——确认 IDA MCP 在线后重选函数）")
     : ghidra
       ? "Ghidra 模式：缓存缺席请先「开始分析」；或重选函数触发按需反汇编"

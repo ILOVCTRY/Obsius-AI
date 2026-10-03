@@ -83,7 +83,10 @@ interface Props {
   pullProgress: { pulled: number; total: number | null } | null
   onStopPull: () => void
   /** headless 导出进度（非 null=导出中；含阶段与可停性；2026-10-01 独立进度条） */
-  triageProgress: { phase: string; done: number; total: number; stoppable: boolean } | null
+  triageProgress: {
+    phase: string; done: number; total: number; discovered: number; completed: number; failed: number
+    stoppable: boolean; etaSeconds: number | null; elapsedSeconds: number; ratePerSecond: number
+  } | null
   onStopTriage: () => void
   triageMsg: string | null
 }
@@ -150,6 +153,24 @@ export function SampleBar({
   const coverage = overview && overview.function_count > 0
     ? Math.round((overview.analyzed_count / overview.function_count) * 100)
     : null
+
+  const formatEta = (seconds: number | null | undefined): string => {
+    if (seconds == null || !Number.isFinite(seconds)) return "正在估算"
+    if (seconds < 60) return "即将完成"
+    const minutes = Math.ceil(seconds / 60)
+    if (minutes < 60) return `约 ${minutes} 分钟`
+    const hours = Math.floor(minutes / 60)
+    const rest = minutes % 60
+    return rest ? `约 ${hours} 小时 ${rest} 分钟` : `约 ${hours} 小时`
+  }
+
+  const formatDuration = (seconds: number): string => {
+    if (!Number.isFinite(seconds) || seconds <= 0) return "0 秒"
+    if (seconds < 60) return `${Math.round(seconds)} 秒`
+    const minutes = Math.floor(seconds / 60)
+    const rest = Math.round(seconds % 60)
+    return rest ? `${minutes} 分 ${rest} 秒` : `${minutes} 分钟`
+  }
 
   return (
     <div className="flex shrink-0 flex-wrap items-center gap-2 border-b px-3 py-1.5">
@@ -336,8 +357,19 @@ export function SampleBar({
                   : <span className="block h-full rounded-full bg-primary transition-all"
                           style={{ width: `${pct}%` }} />}
               </span>
-              <span className="font-mono text-[10px] text-muted-foreground">
-                {analyzing ? "分析中…" : `反编译 ${triageProgress.done}/${triageProgress.total}`}
+              <span
+                className="font-mono text-[10px] text-muted-foreground"
+                title={[
+                  `阶段：${analyzing ? "自动分析" : "函数处理"}`,
+                  triageProgress.ratePerSecond > 0 ? `速度：${triageProgress.ratePerSecond.toFixed(1)} 函数/秒` : "速度：正在估算",
+                  `已用时间：${formatDuration(triageProgress.elapsedSeconds)}`,
+                  `预计：${formatEta(triageProgress.etaSeconds)}`,
+                ].join("\n")}
+              >
+                {analyzing
+                  ? `正在分析 · 预计时间计算中${triageProgress.elapsedSeconds > 0
+                    ? ` · 已用 ${formatDuration(triageProgress.elapsedSeconds)}` : ""}`
+                  : `已完成 ${triageProgress.completed}/${triageProgress.discovered} · ${formatEta(triageProgress.etaSeconds)}`}
               </span>
             </span>
             <Button size="sm" variant="outline" className="h-7 gap-1.5 text-[11px]"

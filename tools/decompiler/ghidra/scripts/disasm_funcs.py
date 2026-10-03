@@ -11,6 +11,7 @@
 import io
 import json
 
+args = list(getScriptArgs())
 OUT = args[0]
 ADDRS = args[1] if len(args) > 1 else ""
 try:
@@ -21,6 +22,46 @@ except (TypeError, ValueError):
 prog = currentProgram
 fm = prog.getFunctionManager()
 listing = prog.getListing()
+
+def _instructions(f):
+    for make in (
+        lambda: listing.getInstructions(f.getBody(), True),
+        lambda: listing.getInstructions(f.getBody().getMinAddress(),
+                                        f.getBody().getMaxAddress(), True),
+        lambda: listing.getCodeUnits(f.getBody().getMinAddress(),
+                                     f.getBody().getMaxAddress(), True),
+    ):
+        try:
+            it = make()
+            found = []
+            while it.hasNext():
+                found.append(it.next())
+            if found:
+                return found
+        except Exception:
+            pass
+    try:
+        entry = f.getEntryPoint()
+        cur = listing.getInstructionAt(entry)
+        if cur is None:
+            cur = listing.getInstructionContaining(f.getEntryPoint())
+        if cur is None:
+            space = prog.getAddressFactory().getDefaultAddressSpace()
+            cur = listing.getInstructionAt(space.getAddress(entry.getOffset()))
+        end = f.getBody().getMaxAddress()
+        found = []
+        seen = set()
+        while cur is not None and cur.getAddress().compareTo(end) <= 0:
+            key = str(cur.getAddress())
+            if key in seen:
+                break
+            seen.add(key)
+            found.append(cur)
+            cur = listing.getInstructionAfter(cur)
+        return found
+    except Exception:
+        pass
+    return []
 
 want = set()
 for tok in str(ADDRS).split(","):
@@ -42,12 +83,22 @@ for f in fm.getFunctions(True):
         continue
     lines = []
     try:
-        it = listing.getInstructions(f.getBody(), True)
-        n = 0
-        while it.hasNext() and n < MAX_LINES:
-            ins = it.next()
-            lines.append("%s  %s" % (ins.getAddress().toString(), ins.toString()))
-            n += 1
+        for n, ins in enumerate(_instructions(f)):
+            if n >= MAX_LINES:
+                break
+            try:
+                addr = str(ins.getAddress())
+            except Exception:
+                addr = "?"
+            try:
+                text = str(ins)
+            except Exception:
+                try:
+                    text = "%s %s" % (ins.getMnemonicString(),
+                                       ins.getDefaultOperandRepresentation(0))
+                except Exception:
+                    text = "<instruction>"
+            lines.append("%s  %s" % (addr, text))
     except Exception:
         pass
     result[hex(entry)] = lines

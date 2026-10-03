@@ -121,15 +121,21 @@ chains/chain_links 攻击链（假设→验证→利用）+ board_graph 黑板�
 
 ## 任务尝试树（task-attempt-tree，2026-09-27 实施；同日 v2 意图驱动改版）
 
-单向树**被动派生**（零打扰）：把 agent 针对一个目标的尝试路径画成 `目标 → 意图 → 检验结果` 的实时树——**意图=一句可证伪假设**（如「对 xxx 进行 sql 注入尝试」「对 xxx 函数进行 hook」），检验结果=发现（🔵）或死路（✕），**新发现下再长出新意图**（递归成树）。v1 的「计划步主干+命令/工具动作叶」当日内被用户反馈整体退役（树里不看命令，直播流自会显示）。全部数据读时现算零写入零事件（`core/blackboard/tasktree.py`）。**发现必挂意图门禁**：Agent（sess-）经 bb_add_finding 登记发现前本会话必须有 open 意图，否则拒绝并指路 declare_intent（工具层闸，人类/系统路径不经此工具不受限；declare_intent 在 _PLAN_TOOLS 恒放行保证全轨可先声明）——新数据不允许游离发现，树侧「未挂意图发现」桶仅兜历史数据。**发现归属优先级**：①意图 outcome_refs 显式引用（close_intent 存的 finding ids）→ ②存活窗归属（finding.new 事件时刻 ∈ 意图 [created_at, closed_at]，作者会话一致优先取最新声明）→ ③游离兜底桶。**子意图嵌套**：intent.basis_refs 引用 `finding:<fid>` 且 fid 已在树上 → 子意图挂那条发现节点下（发现同挂多意图=分叉）。任务归属复用 traces 的 R1 会话区间切分，多会话接力按事件 id 全序合并。API：GET /api/projects/{pid}/tree/{task_id}（{task, nodes, current, truncated_findings}；current.intent_id 仅 claimed 态取最新声明的 open 意图——按事件 id 序取，收尾后归位 None）。前端 `webui/src/views/live/TaskTree.tsx`（React.lazy 分包 + tree.css 深色化）：xyflow tidy-tree 深度分列布局（目标根 → 意图卡（进行中脉冲高亮=当前节点、✕死路带死因/✅漏洞/🔵发现徽章）→ 发现卡（severity 五档左边条）→ 子意图…），当前意图自动跟随（拖画布即停、「当前」钮恢复）；3s 轮询 + LiveRoom wsBump 去抖重拉；默认选中激活会话绑定任务、选择器可切全项目任务。**替代并退役任务流**：TaskFlow/TaskNode/TaskFlowEdge/flowModel/flow.css 五件套删除、`graph.task_graph` 函数与 GET /task-graph 端点退役（端点 410 过渡一版）、lib 类型 TaskGraph* → TaskTree*；会话页页签「直播｜任务流」→「直播｜任务树」。
+单向树**被动派生**（零打扰）：把 agent 针对一个目标的尝试路径画成 `目标 → 意图 → 检验结果` 的实时树——**意图=一句可证伪假设**（如「对 xxx 进行 sql 注入尝试」「对 xxx 函数进行 hook」），检验结果=发现（🔵）或死路（✕），**新发现下再长出新意图**（递归成树）。v1 的「计划步主干+命令/工具动作叶」当日内被用户反馈整体退役（树里不看命令，直播流自会显示）。全部数据读时现算零写入零事件（`core/blackboard/tasktree.py`）。**发现必挂意图门禁**：Agent（sess-）经 bb_add_finding 登记发现前本会话必须有 open 意图，否则拒绝并指路 declare_intent（工具层闸，人类/系统路径不经此工具不受限；declare_intent 在 _PLAN_TOOLS 恒放行保证全轨可先声明）——新数据不允许游离发现，树侧「未挂意图发现」桶仅兜历史数据。**发现归属优先级**：①意图 outcome_refs 显式引用（close_intent 存的 finding ids）→ ②存活窗归属（finding.new 事件时刻 ∈ 意图 [created_at, closed_at]，作者会话一致优先取最新声明）→ ③游离兜底桶。**子意图嵌套**：intent.basis_refs 引用 `finding:<fid>` 且 fid 已在树上 → 子意图挂那条发现节点下（发现同挂多意图=分叉）。任务归属复用 traces 的 R1 会话区间切分，多会话接力按事件 id 全序合并。API：GET /api/projects/{pid}/tree/{task_id}（{task, nodes, current, truncated_findings}；current.intent_id 仅 claimed 态取最新声明的 open 意图——按事件 id 序取，收尾后归位 None）。前端 `webui/src/views/live/TaskTree.tsx`（React.lazy 分包 + tree.css 深色化）：xyflow tidy-tree 深度分列布局（目标根 → 意图卡（进行中脉冲高亮=当前节点、✕死路带死因/✅漏洞/🔵发现徽章）→ 发现卡（severity 五档左边条）→ 子意图…），当前意图自动跟随（拖画布即停、「当前」钮恢复）；3s 轮询 + LiveRoom wsBump 去抖重拉；默认选中激活会话绑定任务、选择器可切全项目任务。**替代并退役任务流**：TaskFlow/TaskNode/TaskFlowEdge/flowModel/flow.css 五件套删除、`graph.task_graph` 函数与 GET /task-graph 端点退役（端点 410 过渡一版）、lib 类型 TaskGraph* → TaskTree*；会话页页签「直播｜任务流」→「直播｜任务树」。**边干边写（2026-10-01）**：`category=intel` + `status=unverified` 的 finding 定位为「执行中认知」——围绕假设执行时每确认一条观察（端口/版本/未授权状态/接口行为/凭据线索等）立即落一条，抗中断、抗上下文压缩、跨意图可复用；close_intent 收尾时再升 verified 或随死路一并转 dead_end，不许攒到最后补记（工具描述与系统提示词双向钉死，不改数据结构）。
 
 ## 单站攻击链路图（website-attack-path-graph v3，2026-09-24 实施）
 
 发现页「链路」子视图由旧 findings DAG 画布（FindingsCanvas 两套渲染图退役）替换为**单站攻击链路图 v3**。用户定稿语义：「思考，规划，执行——**意图就是规划产物，每个意图必须收尾：要么发现，要么漏洞，要么死路**」。
 
-**主脊（D8）**：``目标 → 意图（规划产物·可证伪假设）→ 收尾：漏洞 | 有效发现 | 死路``；产出可回流出新意图/新目标。目标=选定的 host/domain 资产根（未选显 TargetGuide 引导，只按 IP/域名搜索）。意图=一句可证伪假设，独立轻表 `intents`（**schema v22**，零 ALTER 建表；不复用 tasks/chains），字段 statement/target_asset_id/basis_refs/status/open|closed/outcome_type/outcome_refs/dead_reason/evidence_refs/revision。
+**主脊（D8）**：``目标 → 子目标/意图 → 收尾：漏洞 | 有效发现 | 死路 → 意图 → 收尾 → …``——是一条**可循环延伸**的链：收尾产出的发现/漏洞又可作新意图的推导依据继续往下长；布局按依赖层级**自动分层**（不固定「意图一列、目标一列」）。产出可回流出新意图/新目标。目标=选定的 host/domain 资产根（未选显 TargetGuide 引导，只按 IP/域名搜索）。意图=一句可证伪假设，独立轻表 `intents`（**schema v22**，零 ALTER 建表；不复用 tasks/chains），字段 statement/target_asset_id/basis_refs/status/open|closed/outcome_type/outcome_refs/dead_reason/evidence_refs/revision。
+
+**子目标节点（2026-10-01）**：根目标的**直接子资产**渲染为 `subtarget` 节点（第二层「子目标」显式化，如根域下的子域/站下的路径端口；孙节点不上图，保持清爽）。意图按资产锚点（target_asset_id ∪ basis_refs 的 `asset:<id>`）**归属到其所在子目标子树**——derive 边自该子目标起；无明确归属的意图仍挂根。子目标节点带**终态徽章**：`settled`=名下意图**全部收尾**且至少一条 dead_end（与 tested_clean 背书同口径）；另有 status/发现数。
 
 **四条硬规则（D10）**：①**意图必收尾**——Agent 五处快照带 open_intents 清单，`finish` 首次有未收尾意图拒绝并列清单（**第二次 finish 允许**，人工兜底），续跑注入收尾提醒；②**收尾必带证据（宁严勿松）**——vuln 收尾引用 finding 必须存在/同项目/非 FP/**category=vuln**，finding 收尾要求 category=intel；FP 发现拒收并指引走 dead_end；死路必须带非空 dead_reason（什么证据排除假设）+ ≥1 条 http/event/artifact 证据引用；证据不足保持 open；③**边仍是逻辑推导**——derive（target/finding → intent，basis_refs 是数据源，无主依据由 target 起边）、outcome（intent → finding）；服务端 Kahn 断言主脊无环（端点缺失同样 AssertionError）；时间先后只影响布局；④**死路是意图关闭态**——持久在意图上，default_hidden 默认隐藏，服务端预复合 bypass 穿通边（入边×出边，已有直连不重复造）；新证据/被引发现标 FP → reopen，**只重开自身不级联下游**，reopen 清收尾字段但保留 evidence_refs；AI 可自收尾，人类侧栏可驳回/重开。
+
+**意图先行闸（口径 Y，2026-10-01）**：意图是「主脊/规划产物」，task_plan 管任务粗粒度、intent 管假设细粒度，两层互补。**会话第一次实质动作前必须有 open 意图**——认领任务时=先 task_plan（粗）+ 对每条假设 declare_intent（细）；不认领任务的直通会话同样先立意再动手。落在 dispatcher 层（`_dispatch_once`，sess-/chat- 会话、A2 计划闸之后）：本会话无 open 意图且动作不在只读放行面 `_INTENT_PRE_ALLOWED` 时回 `[拒绝] 意图先行闸：…先 declare_intent(statement=…)`。放行面=全部只读侦察（bb_query/kb_open/kb_search/route_lookup/list_symbols/decompile/disasm/read_file/search_files/browser_* 等）+ 控制原语 + 协调原语（`publish_task`/`bb_notify`/`bb_add_asset`——防多代理死锁与「请人批准」类提案 `request_*`/`propose_pack_edit` 被误拦）。标志 `_intent_lead_passed` 随任务起点复位（`_loop_body`），**每个任务都要「先立意再动手」**；拒绝路径复用 `[拒绝]` 前缀（连续 3 个模型步硬拒 → E2 熔断挂人）。与 bb_add_finding 既有意图闸分工：本闸管「第一次实质动作」，后者管「登记发现时本会话须有 open 意图且意图声明之后须有执行动作」。
+
+**意图必有资产锚点（2026-10-01）**：`declare_intent` **工具层硬门禁（仅 Agent）**——必须有资产锚点：`target_asset_id` 非空，或 `basis_refs` 至少一条 `asset:<id>`；否则拒绝（游离意图落不到链路图子目标下、其 dead_end 收尾也无法给任何资产背书 tested_clean）。人类/系统路径豁免（门禁落在工具层，与 bb_add_finding 意图闸同策略）。存量兼容：**只把无锚点且仍 open 的意图落 `intent.anchor_required` 审计事件**（schema v29 迁移，幂等），closed 历史一律不动。
 
 **执行层（读时归属，不改造写入链）**：http_history 按 M1 归一为测试点尝试组——method+路径模板（数字→{id}/UUID→{uuid}/≥8hex→{hash}）+ query 键排序去重、同点 30min 窗折叠、五档 found/hint/blocked/no_reaction/skipped、跨任务跨会话不切割。attempt.intent_id 查询时按意图存活窗 `[created_at, closed_at]`（open 尾端 +∞）归属；重叠窗归**最新声明**意图；无时间的 curl 缺口合成节点（request_count=0）按收尾发现反查 owner。执行层时间序相邻边单独出 `exec_edges`（同意图桶，含无主桶），前端点意图卡才展开为尝试条。站点边界=目标全后代子树；意图入图=target_asset_id 在子树或 basis_refs 命中子树。
 
@@ -153,9 +159,17 @@ events 表全量审计 + EventBus 同步落库、尽力广播；前端按游标�
 
 **根状态读时派生（effective_status，core/coverage.py `effective_status_map`）**：有子资产节点的 tested_clean 不由 AI/人工显式设置——叶子 effective=显式状态（basis=explicit）；父节点 effective 由全部子节点终态读时派生：孩子全 settled → tested_clean/basis=derived，任一非终态 → open（宁严；na/dead_end/finding 挂链同为收口味）；**新增子资产立即破除 derived clean**，无需事件联动；has_findings 沿子树向上传播。写入门：有子资产节点显式写 tested_clean 一律 ValueError（na 不挡——人工裁定）。前端黑板资产筛选器**只列 host/domain（IP/域名）按值搜索**（2026-09-24 用户定稿，推翻同日早先「四类放开」口径——过滤只按 IP 和域名），选中后沿子树展开过滤，url/service 叶子 finding 不漏。存量处理：`scripts/rebuild_asset_trees.py`——DoH（默认 223.5.5.5，避开 Clash fake-ip 198.18/15 与系统代理）重解析挂树，CDN 根行无操作、有子根行 tested_clean→reset-open；默认 dry-run，`--apply` 落库，全经 Blackboard 方法。
 
-## tested_clean 意图死路背书（tested-clean-intent-backing，2026-09-25 实施）
+## tested_clean 意图死路背书（tested-clean-intent-backing，2026-09-25 实施；2026-10-01 改读链路图口径）
 
-**「这个资产没洞」是被证据证伪的假设，不是访问观感。** 触发：中原工学院项目两个会话把 109 个叶子以「80/443 各 1 GET 见登录页」「同模板 200 随批次收口」粗略标 clean，盘上零意图零证据。写入门禁：叶子资产标 tested_clean（在「note 非空」「无子节点」两检查之后）服务端强制存在同项目 `status=closed AND outcome_type=dead_end` 且覆盖该资产的意图——**直接背书**：意图 target_asset_id == 资产；**批次背书**：资产位于意图 target 的资产子树内（沿 parent_id 祖先链校验，站群/宿主一条死路意图覆盖子树，不要求一 vhost 一意图）。死路收尾在 close_intent 已强制 dead_reason 非空 + ≥1 真实证据引用（http/event/artifact），证据语义由意图层继承不重复造。无背书 → ValueError 指引「先 declare_intent 声明可证伪假设，close_intent(dead_end) 带证据收尾后再标；批量面对父节点立一条意图覆盖子树」（工具层 `[拒绝]`、API 422）。查询助手 `intents.dead_end_backing_target(conn, pid, aid)` 纯读收 conn（store 已在事务内）。na（人工裁定）/budget_stop（被迫停手）口径不动；父节点 tested_clean 读时派生不动；同状态 no-op 在背书检查之前返回=存量行兼容。存量处理：`scripts/reset_cursory_clean.py`——按会话（默认上述两会话）回退当前仍为 tested_clean 的资产至收口事件 old 值（open/visited），默认 dry-run，`--apply` 落库（已执行：109 个全部回退，其余会话的 136 个未授权不动）。
+**「这个资产没洞」是被证据证伪的假设，不是访问观感。** 触发：中原工学院项目两个会话把 109 个叶子以「80/443 各 1 GET 见登录页」「同模板 200 随批次收口」粗略标 clean，盘上零意图零证据。写入门禁：叶子资产标 tested_clean（在「note 非空」「无子节点」两检查之后）服务端强制有死路意图背书。
+
+**2026-10-01 口径（与攻击链路图同源，子目标级）**：`intents.dead_end_backing_target(conn, pid, aid, root_id=None)` 先把 aid 归到它所属的**子目标**（自根向下、离根最近的那层祖先；root 缺省取资产链顶），再判定该子目标子树是否满足「**名下意图全部收尾**（无 open）**且至少一条 dead_end**」，返回该子目标 id（背书来源）/ None。要点：①**子目标级**——根的直接子资产是子目标；对叶子标净实为校验其所属子目标的整棵子树，父/子树共识可背书后代；②**全部收尾**——子树内残留任一条 open 意图即无背书（宁严勿松）；③**逐子目标、不跨旁支**——无关旁支不互相背书（保留 2026-09-29「同模板一致」批量误判修复精神；当时移除的是跨分支祖先链批次覆盖）。
+
+死路收尾在 close_intent 已强制 dead_reason 非空 + ≥1 真实证据引用（http/event/artifact），证据语义由意图层继承不重复造。无背书 → ValueError 指引「先 declare_intent 声明可证伪假设，close_intent(dead_end) 带证据收尾后再标；如有 open 意图先收尾」（工具层 `[拒绝]`、API 422）。na（人工裁定）/budget_stop（被迫停手）口径不动；父节点 tested_clean 读时派生不动；同状态 no-op 在背书检查之前返回=存量行兼容。存量处理：`scripts/reset_cursory_clean.py`——按会话（默认上述两会话）回退当前仍为 tested_clean 的资产至收口事件 old 值（open/visited），默认 dry-run，`--apply` 落库（已执行：109 个全部回退，其余会话的 136 个未授权不动）。
+
+## 意图资产锚点（intent-asset-anchor，2026-10-01 实施）
+
+`declare_intent` **必须有资产锚点**（`target_asset_id` 或 `basis_refs` 含 `asset:<id>`），否则**工具层拒绝**（仅 Agent；人类/系统豁免）——游离意图落不到链路图子目标下、其 dead_end 收尾也无法背书 tested_clean。schema v29 迁移把存量**无锚点且 open** 的意图落 `intent.anchor_required` 审计事件（closed 不动，meta 键幂等）。
 
 ## 指定资产删除（2026-09-25 补 UI 入口）
 
@@ -254,7 +268,7 @@ L0 提案模式（propose_only）/ L1 建窗待命 + 执行审批单（批准=�
 
 ## 隔离模型
 
-L0 host < L1 wsl < L2 docker < L3 sandbox（--rm 一次性 / 断网 / 512m / cap-drop ALL 加固容器）；trusted 全等级、untrusted 仅容器、unknown 按 malware_live 最严处理。三条硬规则写死代码：WSL 信任级=宿主机、未知按活体恶意样本、net=real 永不默认。
+L0 host < L1 wsl < L2 docker < L3 sandbox（--rm 一次性 / 断网 / 512m / cap-drop ALL 加固容器）；trusted 全等级、untrusted 仅容器、unknown 按 malware_live 最严处理。三条硬规则写死代码：WSL 信任级=宿主机、未知按活体恶意样本、net=real 不默认（2026-10-01 起可直接经 run_cmd 指定，不再人工审批）。
 
 ## 渗透命令容器化（pentest-tools-container-m0 M1，2026-09-23 定稿并实施）
 
@@ -266,7 +280,7 @@ F6 内置浏览器持久化上下文（`core/browser/pool.py` launch_persistent_
 
 ## 网关流水线
 
-`run(cmd, runtime)` 九步序：would_deny 干跑（与真实执行同口径，杜绝两处校验漂移）→ net=real 审批校验 → 工作区隔离改造（cwd/TEMP 重定向；docker 卷挂载）→ 限速检查 → 执行前审计事件 → 按后端执行 → 结果审计 → 审批一次性消费（封死长期通行证）→ 拒绝统一协议（GatewayDenied 回填改道不炸循环）。
+`run(cmd, runtime)` 九步序：would_deny 干跑（与真实执行同口径，杜绝两处校验漂移）→ 网络模式缺省（net=real 自 2026-10-01 起不再人工审批，由调用方直接指定）→ 工作区隔离改造（cwd/TEMP 重定向；docker 卷挂载）→ 限速检查 → 执行前审计事件 → 按后端执行 → 结果审计 → 审批一次性消费（仍服务越界 runtime 等场景）→ 拒绝统一协议（GatewayDenied 回填改道不炸循环）。
 
 ## 静态护栏双子星
 
@@ -278,7 +292,7 @@ host（PowerShell/bash）/ WSL（env 不透传；**`--exec` argv 直通**——�
 
 ## 双层权限模型
 
-角色 max_runtime 软上限（只可能比网关更严）+ 网关 threat_class 硬校验；request_escalation 升级=单次授权（net=real 与超角色上限两类，红线不受理）。人类命令同层经网关，审计流无旁路。
+角色 max_runtime 软上限（只可能比网关更严）+ 网关 threat_class 硬校验；request_escalation 升级=单次授权（仅超角色 max_runtime 一类，红线不受理；net=real 自 2026-10-01 起免审批可直接 run_cmd）。人类命令同层经网关，审计流无旁路。
 
 ## 审计与体验
 
@@ -316,7 +330,7 @@ SKILL.md 薄路由入口 → kb/route.json 任务导航表（**M0 留域内** `p
 
 ## 角色与规则链
 
-角色（M2 起实现为专家，见下节）字段全是软边界（skills/task_types 为 null=不过滤），缺专家静默回退 _generalist，expert_exists 防拼错放行；规则链 redlines（硬红线）/ owners（授权边界，按资产 owner tag）/ rating（判级口径）/ role-rules（按专家 id 匹配）分层注入，resolve_rule_profiles 三态解析。
+角色（M2 起实现为专家，见下节）字段全是软边界（skills/task_types 为 null=不过滤），缺专家静默回退 _generalist，expert_exists 防拼错放行；规则链 redlines（硬红线）/ owners（授权边界，按资产 owner tag）/ rating（判级口径）/ role-rules（按专家 id 匹配）分层注入，resolve_rule_profiles 纯显式解析（2026-10-01 去三态：勾哪个生效哪个，未配=不注入）。
 
 ## 项目规则四段一体（rules-four-section M1，2026-09-23 定稿并实施）
 
@@ -496,6 +510,16 @@ x64dbg 下断 / Cheat Engine Lua 纯前端模板（零插件不触网），日�
 ## 三层数据纪律
 
 客观全量层（headless 导出缓存）/ 主观分析层 / 产物分离；样本 untrusted；headless 解析经网关审计定性 trusted（只解析不执行样本）。
+
+## 分析包基础层（2026-10）
+
+分析包代表一个应用、游戏或解包环境，分析目标代表包内可分析文件。第一阶段已落地：
+
+- `core/sample_packages.py` 负责单文件、目录文件、ZIP/7z/TAR 的安全导入；拒绝路径穿越、符号链接和特殊条目，并限制单文件、总展开大小、文件数和目录深度。
+- 展开目录生成规范化 manifest hash；相同目录内容复用全局内容树，项目只保存包版本元数据；原始上传物按 SHA256 保留。重复导入记录保存在该包的 `imports.jsonl`。
+- 自动识别 PE/ELF/Mach-O/DEX/APK/AAB、游戏资源、压缩包和文本候选；同包 PE/ELF/Mach-O 通过导入名建立基础依赖边。候选目标选择与旧 `binary` 资产分开，后续接入静态分析器。
+- `ANALYZER_REGISTRY` 将目标格式映射到可扩展插件 ID；`GET/POST .../targets/{target_id}` 提供目标详情和异步静态分析。PE/ELF/Mach-O 复用现有 IDA/Ghidra headless 导出；APK/AAB 导入时保留包级摘要，展开后对 Manifest、DEX 做只读解析，`lib/<abi>/*.so` 进入 ELF 分析；不安装、不启动 Android 应用。
+- API：`/api/projects/{pid}/sample-packages` 支持单文件/压缩包和重复 `files` 目录导入；`.../uploads` 提供分片续传；`.../targets` 保存目标选择和分析报告。旧 `/samples` 与 `/binaries/{sha}` 保持兼容。
 
 ## 蓝图数据底座
 

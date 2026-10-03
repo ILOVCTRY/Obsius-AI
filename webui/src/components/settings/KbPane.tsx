@@ -22,7 +22,7 @@ function RefBadge({ refs }: { refs: KbRefHit[] }) {
 }
 
 export function KbPane({ cap, path, reloadKey, onDirtyChange, onSaved,
-                         onRename, onDelete, onContent, onOpenKb }: {
+                         onRename, onDelete, onContent, onOpenKb, onMissing, initialMode }: {
   cap: string
   path: string
   reloadKey: number
@@ -33,11 +33,15 @@ export function KbPane({ cap, path, reloadKey, onDirtyChange, onSaved,
   onContent?: (content: string) => void
   /** 预览内 .md 相对链接跳转：打开目标 kb 文件（SettingsView 传 pickKb） */
   onOpenKb?: (path: string) => void
+  /** 当前能力包中找不到文档时，由工作台刷新列表并清空选中项。 */
+  onMissing?: () => void
+  /** 普通打开默认预览；新建文档可指定为编辑。 */
+  initialMode?: "edit" | "preview"
 }) {
   const [doc, setDoc] = useState<KbRead | null>(null)
   const [content, setContent] = useState("")
   const [dirty, setDirty] = useState(false)
-  const [mode, setMode] = useState<"edit" | "preview">("edit")
+  const [mode, setMode] = useState<"edit" | "preview">(initialMode ?? "preview")
   const [saved, setSaved] = useState(false)
   const [loadErr, setLoadErr] = useState<string | null>(null)
   const [saveErr, setSaveErr] = useState<string | null>(null)
@@ -53,9 +57,13 @@ export function KbPane({ cap, path, reloadKey, onDirtyChange, onSaved,
       setLoadErr(null)
     }).catch((e) => {
       setDoc(null)
+      if (e instanceof ApiError && e.status === 404) {
+        onMissing?.()
+        return
+      }
       setLoadErr(String(e))
     })
-  }, [cap, path, onDirtyChange, onContent])
+  }, [cap, path, onDirtyChange, onContent, onMissing])
 
   useEffect(reload, [reload, reloadKey])
 

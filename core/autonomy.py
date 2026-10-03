@@ -104,11 +104,14 @@ def autonomy_of(config: dict | None, *, track: str | None = "ctf") -> dict:
 
 
 def normalize_rule_profiles(raw: Any) -> dict:
-    """F11 rule_profiles 归一化：合法形态 {"owners": "*" | [tag…], "rating": [tag…]}。
+    """F11 rule_profiles 归一化（2026-10-01 去三态改纯显式）：
+    合法形态 {"owners": [tag…], "rating": [tag…]}——勾哪个生效哪个。
 
-    None / {} → {}（调用方剥键恢复缺省态）；owners 仅 "*" 或字符串列表
-    （"all" 等其他字符串非法）；rating 仅字符串列表（空列表=关闭，合法）；
-    tag strip 非空、去重保序；未知键剥除；非法抛 ValueError（API 层转 422）。"""
+    None / {} → {}（调用方剥键=不注入）；owners/rating 均只收字符串列表
+    （空列表=不注入，合法）；tag strip 非空、去重保序；未知键剥除；
+    非法抛 ValueError（API 层转 422）。旧的 owners="*"（自动全注入）已退役——
+    存量盘上若残留 "*" 视作非法（显式化后无自动态）。
+    """
     if raw is None:
         return {}
     if not isinstance(raw, dict):
@@ -125,12 +128,9 @@ def normalize_rule_profiles(raw: Any) -> dict:
     out: dict = {}
     if "owners" in raw:
         v = raw["owners"]
-        if v == "*":
-            out["owners"] = "*"
-        elif isinstance(v, list) and all(isinstance(x, str) for x in v):
-            out["owners"] = _tags(v)
-        else:
-            raise ValueError('rule_profiles.owners 仅支持 "*" 或字符串列表')
+        if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+            raise ValueError("rule_profiles.owners 必须是字符串列表（勾哪个生效哪个）")
+        out["owners"] = _tags(v)
     if "rating" in raw:
         v = raw["rating"]
         if not isinstance(v, list) or not all(isinstance(x, str) for x in v):

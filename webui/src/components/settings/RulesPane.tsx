@@ -287,31 +287,46 @@ export function RulesPane({ track, cap, focus, pid }: {
 
 // ---------- F11 生效档案勾选区（项目级 rule_profiles，经 PATCH /config 双写） ----------
 
-// owners 缺省=全部自动命中(*)，清单=自动命中∩清单；rating 缺省=自动（按 owner 命中），
-// 自定义=显式全集（可提前挂未自动命中的 tag），全不勾=关闭。恢复缺省保存传 null 剥键。
+// 纯显式（2026-10-01 去三态）：owners/rating 都是「勾哪个生效哪个」，不再有
+// 自动命中/自动全注入——未勾选=不注入。保存空数组=显式不注入；全空则剥键。
 function RuleProfilesEditor({ pid, ownerTags, ratingTags }: {
   pid: string; ownerTags: string[]; ratingTags: string[] }) {
   const [profiles, setProfiles] = useState<RuleProfiles>({})
   const [dirty, setDirty] = useState(false)
   const [saved, setSaved] = useState(false)
 
-  useEffect(() => {
+  const load = () => {
     api.getProject(pid).then((p) => {
-      setProfiles(((p.config?.rule_profiles ?? {}) as RuleProfiles)); setDirty(false)
+      const rp = ((p.config?.rule_profiles ?? {}) as RuleProfiles)
+      setProfiles({ owners: rp.owners ?? [], rating: rp.rating ?? [] })
+      setDirty(false)
     }).catch(() => {})
-  }, [pid])
+  }
 
-  const ownersAll = profiles.owners === undefined || profiles.owners === "*"
-  const ratingAuto = profiles.rating === undefined
+  useEffect(load, [pid])
+
+  const toggle = (key: "owners" | "rating", tag: string) => {
+    setProfiles((p) => {
+      const cur = (p[key] as string[] | undefined) ?? []
+      return { ...p, [key]: cur.includes(tag) ? cur.filter((x) => x !== tag) : [...cur, tag] }
+    })
+    setDirty(true)
+  }
+
+  const has = (key: "owners" | "rating", tag: string) =>
+    ((profiles[key] as string[] | undefined) ?? []).includes(tag)
 
   const save = async () => {
+    // 只存本轨清单内的勾选（切轨后不在新轨清单的残留 tag 不写入——防错位）；
+    // 两个都空 → 剥键（等价不注入，盘上保持干净）
     const out: RuleProfiles = {}
-    if (profiles.owners !== undefined && profiles.owners !== "*") out.owners = profiles.owners
-    if (profiles.rating !== undefined) out.rating = profiles.rating
+    const ownersKept = (profiles.owners ?? []).filter((t) => ownerTags.includes(t))
+    const ratingKept = (profiles.rating ?? []).filter((t) => ratingTags.includes(t))
+    if (ownersKept.length) out.owners = ownersKept
+    if (ratingKept.length) out.rating = ratingKept
     await api.patchProjectConfig(pid, { rule_profiles: Object.keys(out).length ? out : null })
-    setSaved(true); setTimeout(() => setSaved(false), 1500); setDirty(false)
-    api.getProject(pid).then((p) =>
-      setProfiles(((p.config?.rule_profiles ?? {}) as RuleProfiles))).catch(() => {})
+    setSaved(true); setTimeout(() => setSaved(false), 1500)
+    load()
   }
 
   const Check = ({ on, label, onClick }: { on: boolean; label: string; onClick: () => void }) => (
@@ -329,52 +344,31 @@ function RuleProfilesEditor({ pid, ownerTags, ratingTags }: {
         <Button size="sm" variant="outline" className="h-6 px-2 text-[10px]" onClick={save} disabled={!dirty}>保存</Button>
       </p>
       <div>
-        <Check on={ownersAll} label="owners：全部自动命中（*）"
-               onClick={() => {
-                 setProfiles((p) => ({ ...p, owners: ownersAll ? [] : "*" })); setDirty(true)
-               }} />
-        {!ownersAll && (
-          <div className="ml-4 flex flex-wrap gap-x-2">
-            {ownerTags.length === 0 && <span className="text-[10px] text-muted-foreground">本轨暂无 owners 规则</span>}
+        <p className="text-[10px] text-muted-foreground">平台规则（owners）</p>
+        {ownerTags.length === 0 ? (
+          <span className="ml-1 text-[10px] text-muted-foreground">本轨暂无 owners 规则</span>
+        ) : (
+          <div className="ml-1 flex flex-wrap gap-x-2">
             {ownerTags.map((t) => (
-              <Check key={t} on={(profiles.owners as string[] ?? []).includes(t)} label={t}
-                     onClick={() => {
-                       setProfiles((p) => {
-                         const cur = p.owners === "*" ? ownerTags : (p.owners ?? [])
-                         return { ...p, owners: cur.includes(t) ? cur.filter((x) => x !== t) : [...cur, t] }
-                       }); setDirty(true)
-                     }} />
+              <Check key={t} on={has("owners", t)} label={t} onClick={() => toggle("owners", t)} />
             ))}
           </div>
         )}
       </div>
       <div>
-        <Check on={!ratingAuto} label="rating：自定义（不勾=自动按 owner 命中）"
-               onClick={() => {
-                 setProfiles((p) => {
-                   const next = { ...p }
-                   if (ratingAuto) next.rating = []  // 切自定义从关闭起步，逐 tag 勾选
-                   else delete next.rating
-                   return next
-                 }); setDirty(true)
-               }} />
-        {!ratingAuto && (
-          <div className="ml-4 flex flex-wrap gap-x-2">
-            {ratingTags.length === 0 && <span className="text-[10px] text-muted-foreground">本轨暂无评级规则</span>}
+        <p className="text-[10px] text-muted-foreground">评级与价值口径（rating）</p>
+        {ratingTags.length === 0 ? (
+          <span className="ml-1 text-[10px] text-muted-foreground">本轨暂无评级规则</span>
+        ) : (
+          <div className="ml-1 flex flex-wrap gap-x-2">
             {ratingTags.map((t) => (
-              <Check key={t} on={(profiles.rating ?? []).includes(t)} label={t}
-                     onClick={() => {
-                       setProfiles((p) => {
-                         const cur = p.rating ?? []
-                         return { ...p, rating: cur.includes(t) ? cur.filter((x) => x !== t) : [...cur, t] }
-                       }); setDirty(true)
-                     }} />
+              <Check key={t} on={has("rating", t)} label={t} onClick={() => toggle("rating", t)} />
             ))}
           </div>
         )}
       </div>
       <p className="text-[10px] leading-relaxed text-muted-foreground">
-        缺省=owners 自动全注入 + rating 按 owner 命中；保存后下次开窗生效。
+        勾哪个生效哪个；不勾=不注入。未配置的项目默认不叠加 owners/rating（能力包红线/轨红线仍恒注入）。保存后下次开窗生效。
       </p>
     </div>
   )

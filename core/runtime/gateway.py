@@ -66,7 +66,7 @@ class ExecutionResult:
         if self.interrupted:
             s += " (被人手中断)"
         elif self.timed_out:
-            s += " (超时被杀)"
+            s += f" (超时被杀，已跑约 {self.duration_s:.0f}s)"
         if out:
             if len(self.stdout) > limit:
                 out += f"\n…[stdout 已截断：{limit}/{len(self.stdout)} 字符，请缩小窗口分段读]"
@@ -75,6 +75,14 @@ class ExecutionResult:
             if len(self.stderr) > limit:
                 err += f"\n…[stderr 已截断：{limit}/{len(self.stderr)} 字符，请缩小窗口分段读]"
             s += f"\n[stderr]\n{err}"
+        if self.timed_out:
+            # 超时引导（2026-10-01）：整条命令被杀会丢掉全部输出，拆段是唯一可靠解。
+            # 网关按整条命令超时，长驻请求（如目标 hang 住）会连带拖死同圈其他步骤。
+            s += ("\n[超时引导] 本条命令超时被杀，输出可能不完整。建议："
+                  "① 拆成多段分别跑，每段传更小的 timeout（如 15~30s）；"
+                  "② 避免把抓取头/路径遍历变体等易挂起请求与常规步骤放在同一条命令；"
+                  "③ 对每次请求单独加短超时（curl -m 10 / --max-time 10），"
+                  "别让被测端 hang 死整条命令。")
         return s
 
 
@@ -145,20 +153,17 @@ class ExecutionGateway:
             return denied
 
         # ①②③'③'' 策略校验统一走 would_deny（H3：干跑判定与真实执行单一出处，
-        # 防两处口径漂移；net=real 审批校验在下方单独做——它依赖 approval_id）
+        # 防两处口径漂移）
         deny = self.would_deny(cmd, runtime, threat_class=threat_class,
                                net=net, workspace=workspace)
         if deny:
             raise _audit_deny(deny)
 
-        # ③ 网络模式校验：real 需已批准的 approval
+        # ③ 网络模式缺省（2026-10-01 起 net=real 不再人工审批）：sandbox 默认 none，
+        #    其余 runtime 默认 bridge；net=real 由调用方（run_cmd）直接指定并放行，
+        #    隔离等级/threat_class/网络模式合法性校验仍由 would_deny 承担。
         if net is None:
             net = DEFAULT_NET_MODE if runtime == "sandbox" else "bridge"
-        if net == "real":
-            if not (approval_id and self._approval_approved(approval_id)):
-                raise _audit_deny(
-                    f"net=real 须人工审批：approval_id={approval_id} 缺失或未批准"
-                )
 
         # ③' 工作区隔离（§7 2026-09-17）：host/wsl/docker 有文件系统边界问题；
         #     docker 容器化 M0（2026-09-23）挂 workspace 卷并对齐 scratch 相对路径习惯
@@ -241,7 +246,8 @@ class ExecutionGateway:
             )
         # H3 一次性审批（借鉴 dsh approval allowed-once）：approval 只批准「一次
         # 执行」——本次命令真跑完后立即标记 consumed，同 approval_id 二次使用会被
-        # _approval_approved 拒绝（net=real 长期通行证在此封死）。失败不影响执行结果。
+        # _approval_approved 拒绝。2026-10-01 起 net=real 不再走审批，这里只服务
+        # 其余仍需审批的动作类型。失败不影响执行结果。
         if approval_id:
             self._consume_approval(approval_id)
         return result
@@ -256,8 +262,8 @@ class ExecutionGateway:
 
         H3（2026-09-19）：deny-driven 升级的前置判定 + run() 内部复用——策略
         口径单一出处。覆盖 ①runtime 合法 ②隔离等级 ③非法网络模式 ③'工作区逃逸
-        ③''限速纪律；**不含** net=real 审批校验（依赖 approval_id，由 run() 自查）
-        与后端可用性（执行期才知道）。
+        ③''限速纪律；**不含**后端可用性（执行期才知道）。net=real 自 2026-10-01
+        起不再人工审批（由调用方直接指定），网络模式只做合法性校验。
         """
         if runtime not in RUNTIME_LEVELS:
             return f"未知 runtime: {runtime}"

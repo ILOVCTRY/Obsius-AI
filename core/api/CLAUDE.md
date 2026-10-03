@@ -2,12 +2,22 @@
 
 > core API：HTTP + WebSocket 把黑板/任务/会话/编排暴露给 WebUI 与 CLI（DESIGN.md：所有写经 core API 单一入口的 HTTP 化）。**全项目唯一 import fastapi 的地方**，核心引擎保持零依赖。
 
+漏洞 findings 的 POST/PATCH 透传结构化报告字段与多 POC；POC 是 HTTP 原始报文或 Python 脚本，不使用附件字段。完整性校验由黑板存储层执行，旧 evidence 结构继续兼容。
+
 ## 文件
 
 - `app.py` — `create_app(workspace_root, packs_root, tools_root, *, executor_llm=None, planner_llm=None, providers_config=config/providers.json, static_dir=None)`。`app.state.llm_store` = `ProviderStore`（多供应商，§8）；**`app.state.campaign` = `CampaignMemory(workspace_root 同级 data/campaign.db)`（2026-09-19 战役记忆全局库，§16.5——workspace-hygiene D1 2026-09-23 从 workspaces/ 根归位 data/，构造内含老位置惰性迁移；注入 AgentSession 工厂与编排器，Agent 完成任务沉淀打法、编排 tick 召回注入）**；LLM 缺省 = 路由覆写目标或全局默认（第一个启用供应商的第一个模型）；测试可注入 executor_llm 或用 tmp providers_config 避免种子污染真实文件。无可用 key → Agent/编排端点 **503**（不崩）。
 - `JobRegistry` — 长耗时动作（跑 Agent / orchestrator tick/auto-tick/auto-wait/**replan/replan-wait**）后台线程执行，`POST` 立即返回 job_id，`GET /api/jobs/{id}` 轮询；`submit(..., on_done=)` 在状态翻 done/error 后回调（异常只 log），是 L2 链防搁浅的关键（worker/tick 收尾期的竞态由它兜底）。**`_worker_loop.run()` 对 `agent.run_next_task()` 有 try/except 兜底**（2026-09-17：异常只 log+break——任务级收尾由 AgentSession._fail_task_on_error 负责，见 core/agent/CLAUDE.md；此前异常静默杀死 worker 线程，任务悬 claimed+孤儿心跳续租，看板永久「执行中」）。**会话轮（会话中心化，2026-09-25；DESIGN §四）**：worker loop 每轮调 `agent.run_session()`——有委托干活（`take_session_next` 读时取窗内队首，串行接件）、无委托 `run_chat()` 回应收件箱、都没有 None 空退窗回待命；委托做完 while 重入自动接窗内下一件；不再读 meta.bound_task_id（v24 退役）。异常 try/except 只 log+break，委托级收尾由 AgentSession._fail_task_on_error 负责。
 
 ## 端点速查（前缀 /api）
+
+### 分析包基础层（2026-10）
+
+- `POST /projects/{pid}/sample-packages`：单文件/ZIP/7z/TAR 或重复 `files` 部件导入目录，统一执行路径穿越、特殊条目和资源配额校验，返回包版本、候选目标和依赖边。
+- `POST/GET/PUT /projects/{pid}/sample-packages/uploads...`：可恢复分片上传会话；完成后进入同一导入流程。
+- `GET /projects/{pid}/sample-packages[/{package_id}]`：列出或读取包版本；`POST .../versions/{version_id}/targets` 保存目标选择。
+- `GET/POST .../versions/{version_id}/targets/{target_id}`：读取目标与插件列表；`POST .../analyze` 复用现有 IDA/Ghidra headless 服务异步生成目标报告。PE/ELF/Mach-O 当前可正式分析；APK/AAB 的 Manifest、DEX 和包摘要执行只读解析，其他格式先返回 `analyzer-unavailable`，不会伪造成功结果。
+- 旧 `/projects/{pid}/samples` 与 `/binaries/{sha}` 保持兼容，第一轮不自动创建 IDA/Ghidra 工程。
 
 | 方法 | 路径 | 说明 |
 |------|------|------|

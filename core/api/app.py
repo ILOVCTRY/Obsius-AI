@@ -14,6 +14,7 @@ import difflib
 import hashlib
 import json
 import logging
+import mimetypes
 import os
 import re
 import shutil
@@ -26,8 +27,9 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal
+from urllib.parse import quote
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.websockets import WebSocketState
 from fastapi.concurrency import run_in_threadpool
@@ -69,6 +71,7 @@ from core.orchestrator import judgments
 from core.projects import Project, ProjectStore
 from core.runtime import ExecutionGateway, HostDetector
 from core.runtime.policy import RUNTIME_LEVELS
+from core.sample_packages import SamplePackageError, SamplePackageStore
 from core.skills import proposals as proposals_mod
 from core.skills import refs as refs_mod
 from core.skills import writing
@@ -272,6 +275,13 @@ class FindingIn(BaseModel):
     rating_basis: str = ""  # F11 判级依据（注入评级口径时必填）
     impact: str = ""  # 收录格式三件套·危害描述（v20，不进门禁）
     remediation: str = ""  # 收录格式三件套·修复建议（v20，不进门禁）
+    summary: str = ""
+    affected_assets: str = ""
+    test_environment: str = ""
+    reproduction_steps: str = ""
+    verification_result: str = ""
+    risk_assessment: str = ""
+    pocs: list[dict] = Field(default_factory=list)
     status: str = "unverified"
     category: Literal["vuln", "intel"] | None = None  # C6 分两类；缺省按 vuln_class/severity 自动判
     evidence: dict = Field(default_factory=dict)
@@ -295,6 +305,26 @@ class AssetPatchIn(BaseModel):
 class EngineIn(BaseModel):
     """PUT .../binaries/{sha}/engine：样本反编译引擎模式（ida / ghidra）。"""
     engine: str
+
+
+class SampleTargetSelectIn(BaseModel):
+    target_ids: list[str] = Field(default_factory=list, max_length=10000)
+
+
+class SampleTargetAnalyzeIn(BaseModel):
+    engine: str = "ida"
+
+
+class SamplePackageMoveIn(BaseModel):
+    path: str = Field(min_length=1, max_length=4096)
+    target_path: str = Field(default="", max_length=4096)
+
+
+class SampleUploadCreateIn(BaseModel):
+    filename: str = Field(min_length=1, max_length=4096)
+    total_size: int = Field(gt=0)
+    total_chunks: int = Field(gt=0, le=1_000_000)
+    source_type: str = "auto"
 
 
 class FofaConfigIn(BaseModel):
@@ -363,6 +393,13 @@ class FindingPatchIn(BaseModel):
     rating_basis: str | None = None  # F11：None=不动，空串=清空
     impact: str | None = None  # 收录格式三件套·危害描述：None=不动，空串=清空
     remediation: str | None = None  # 收录格式三件套·修复建议：None=不动，空串=清空
+    summary: str | None = None
+    affected_assets: str | None = None
+    test_environment: str | None = None
+    reproduction_steps: str | None = None
+    verification_result: str | None = None
+    risk_assessment: str | None = None
+    pocs: list[dict] | None = None
 
 
 class ChainIn(BaseModel):
@@ -556,6 +593,21 @@ class KbRenameIn(BaseModel):
     new_path: str
 
 
+class KbEvolutionIn(BaseModel):
+    """从知识库资料异步生成派生层草稿；只读素材，不直接写入知识库。"""
+    sources: list[str] = Field(default_factory=list, min_length=1, max_length=6)
+    target_kind: Literal["case", "pattern", "playbook"] | None = None
+    language: str = "zh"
+
+    @field_validator("sources")
+    @classmethod
+    def _sources_valid(cls, value: list[str]) -> list[str]:
+        clean = [str(item).strip().replace("\\", "/") for item in value if str(item).strip()]
+        if not clean or len(clean) > 6 or len(set(clean)) != len(clean):
+            raise ValueError("sources 必须是 1-6 个不重复路径")
+        return clean
+
+
 # ---- 统一提案（C4） ----
 
 class ProposalIn(BaseModel):
@@ -571,6 +623,7 @@ class ProposalIn(BaseModel):
     session: str | None = None
     task: str | None = None
     evidence: str = ""
+    source_refs: list[dict[str, str]] = Field(default_factory=list, max_length=20)
 
     @field_validator("origin")
     @classmethod
@@ -834,6 +887,7 @@ class AgentIn(BaseModel):
 class LlmProviderIn(BaseModel):
     name: str
     base_url: str
+    format: str = "openai-chat-completions"
     api_key: str = ""        # 读出脱敏；保存空串=保持原 key
     models: list[str] = Field(default_factory=list)
     enabled: bool = True
@@ -843,6 +897,7 @@ class LlmProviderIn(BaseModel):
     # base_url 含 ark 默认开，其余默认关）；True/False=显式写入 thinking 字段。
     # 此前该字段被本模型白名单抹掉（设置页保存一次即丢），思考链静默消失
     thinking: bool | None = None
+    proxy: str | None = None  # 供应商专属 HTTP/HTTPS 代理；缺省沿用系统代理环境
 
 
 class ProvidersIn(BaseModel):
@@ -854,13 +909,17 @@ class DiscoverIn(BaseModel):
     name: str | None = None       # 已保存供应商
     base_url: str | None = None   # 未保存的新供应商：直接用地址+key 发现
     api_key: str | None = None
+    format: str = "openai-chat-completions"
+    proxy: str | None = None
 
 
 class TestModelIn(BaseModel):
     name: str | None = None       # 已保存供应商：用其 base_url/key（api_key 字段可覆盖）
     base_url: str | None = None   # 未保存的新供应商：直接给地址+key 测
     api_key: str | None = None
+    format: str = "openai-chat-completions"
     model: str
+    proxy: str | None = None
 
 
 class SwitchLlmIn(BaseModel):
@@ -1028,6 +1087,7 @@ def create_app(
 
     store = ProjectStore(workspace_root)
     app.state.store = store
+    app.state.sample_packages = SamplePackageStore(workspace_root)
     # ⑥ 战役记忆全局库（data/campaign.db，workspace-hygiene D1 归位全局运行时数据；
     # 仿 intel 全局 DB 先例）。落 workspace_root 同级 data/（workspaces/ 契约只收项目），
     # 构造内含老位置 workspaces/campaign.db 惰性迁移；测试传 tmp workspace_root 时库
@@ -1062,6 +1122,9 @@ def create_app(
     # headless 全量导出协作式停止信号（sha -> threading.Event，大样本 P3）：置位即写
     # 停止标志文件，Ghidra 脚本在函数边界停下并保留已导出部分（不杀进程）。
     app.state.export_cancel: dict[str, threading.Event] = {}
+    # 样本分析任务的协作式停止信号，按 package/version/target 隔离。
+    # 删除分析包时先置位，再等待 worker 自然退出。
+    app.state.sample_cancel: dict[str, threading.Event] = {}
     # 情报面板（E9，全局模块）：惰性建 IntelStore（首访问情报端点才落 config/intel/）；
     # intel_getter / intel_llm 为测试注入口（None = urllib 真抓 / classifier 路由）
     app.state.intel_dir = str(intel_dir)
@@ -1224,7 +1287,7 @@ def create_app(
         """研究工作台的 headless 反编译服务（项目级复用）。
 
         项目独立目录：缓存在 artifacts/decompiler-cache，IDA 库在 artifacts/decompiler-db，
-        Ghidra 临时工程在 artifacts/.ghidra-tmp（均不进 samples/ 的 untrusted 只读语义）。
+        Ghidra 临时工程在 artifacts/ghidra-tmp（均不进 samples/ 的 untrusted 只读语义）。
         headless 是可信解析（只解析不执行样本），走 host + 网关审计，超时 900s。
         """
         cached_svc = app.state.rev_services.get(proj.id)
@@ -1248,7 +1311,8 @@ def create_app(
                 runner=runner,
                 global_cache_dir=app.state.decompiler_cache_dir,
                 ida_db_dir=proj.artifacts_dir / "decompiler-db",
-                ghidra_tmp_dir=proj.artifacts_dir / ".ghidra-tmp",
+                ghidra_tmp_dir=proj.artifacts_dir / "ghidra-tmp",
+                resident_ghidra_worker=True,
                 # MCP 实时桥：config/mcp.json 逆向域 http server，无配置默认
                 # http://127.0.0.1:13337/mcp 懒探活（Ctrl-Alt-M 起插件即亮灯）
                 mcp_endpoint=select_mcp_endpoint(_load_mcp_config()),
@@ -1693,6 +1757,252 @@ def create_app(
                 return str(p.relative_to(proj.path)).replace("\\", "/")
         return None
 
+    def _package_store() -> SamplePackageStore:
+        return app.state.sample_packages
+
+    def _package_target_job_running(pid: str, package_id: str,
+                                    version_id: str, target_id: str) -> bool:
+        return any(
+            job.get("status") == "running"
+            and job.get("kind") == "sample-target-analysis"
+            and job.get("meta", {}).get("project_id") == pid
+            and job.get("meta", {}).get("package_id") == package_id
+            and job.get("meta", {}).get("version_id") == version_id
+            and job.get("meta", {}).get("target_id") == target_id
+            for job in app.state.jobs.all_jobs()
+        )
+
+    def _sample_job_key(package_id: str, version_id: str, target_id: str) -> str:
+        return f"{package_id}/{version_id}/{target_id}"
+
+    def _sample_package_jobs_running(pid: str, package_id: str) -> bool:
+        return any(
+            job.get("status") == "running"
+            and job.get("kind") == "sample-target-analysis"
+            and job.get("meta", {}).get("project_id") == pid
+            and job.get("meta", {}).get("package_id") == package_id
+            for job in app.state.jobs.all_jobs()
+        )
+
+    def _stop_sample_package_jobs(pid: str, package_id: str) -> None:
+        """Request cooperative cancellation for every target analysis in a package."""
+        for job in app.state.jobs.all_jobs():
+            meta = job.get("meta", {})
+            if (job.get("status") == "running"
+                    and job.get("kind") == "sample-target-analysis"
+                    and meta.get("project_id") == pid
+                    and meta.get("package_id") == package_id):
+                key = str(meta.get("sample_cancel_key") or "")
+                event = app.state.sample_cancel.get(key)
+                if event is not None:
+                    event.set()
+
+    def _ensure_package_binary_asset(proj: Project, package: dict[str, Any],
+                                     target: dict[str, Any], binary_path: Path,
+                                     sha: str, size: int) -> dict[str, Any]:
+        """Expose a package PE/ELF/Mach-O target through the legacy binary workbench.
+
+        The immutable package tree lives outside the project, while the existing
+        reverse-workbench contract resolves binary assets through ``meta.path``
+        under the project root.  Materialize one content-addressed copy and keep
+        the package coordinates in metadata so both workflows share the same
+        cache and asset identity.
+        """
+        existing = proj.bb.find_asset(proj.id, "binary", sha)
+        if existing is not None:
+            proj.bb.update_asset_meta(existing["id"], {
+                "package_id": package.get("package_id"),
+                "version_id": package.get("version_id"),
+                "target_id": target.get("target_id"),
+                "source": "sample-package",
+            })
+            return proj.bb.find_asset(proj.id, "binary", sha) or existing
+
+        samples_dir = _inside(proj, "samples")
+        samples_dir.mkdir(parents=True, exist_ok=True)
+        suffix = Path(str(target.get("path") or "")).suffix.lower()[:16]
+        final = samples_dir / f"{sha}{suffix}"
+        if not final.exists():
+            temp = samples_dir / f".{sha}.{uuid.uuid4().hex}.tmp"
+            shutil.copyfile(binary_path, temp)
+            try:
+                os.replace(temp, final)
+            except FileExistsError:
+                temp.unlink(missing_ok=True)
+        rel = str(final.relative_to(proj.path)).replace("\\", "/")
+        meta = {
+            "filename": Path(str(target.get("path") or "sample.bin")).name,
+            "size": size,
+            "path": rel,
+            "uploaded_at": _utc_now(),
+            "source": "sample-package",
+            "package_id": package.get("package_id"),
+            "version_id": package.get("version_id"),
+            "target_id": target.get("target_id"),
+        }
+        result = proj.bb.upsert_asset(proj.id, "binary", sha, meta=meta, author="human")
+        return proj.bb.find_asset(proj.id, "binary", sha) or {"id": result["id"], **meta}
+
+    def _run_sample_target_analysis(pid: str, package_id: str, version_id: str,
+                                    target_id: str, engine: str,
+                                    progress: dict[str, Any],
+                                    stop: threading.Event | None = None) -> dict[str, Any]:
+        """Run one registered static analyzer and persist only its report."""
+        from core.sample_packages import (
+            analyze_registered_target,
+            sha256_file as package_sha256_file,
+        )
+
+        proj = _project(pid)
+        package_store: SamplePackageStore = _package_store()
+        package, target, binary_path = package_store.resolve_target(
+            proj.path, package_id, version_id, target_id)
+        if stop is not None and stop.is_set():
+            raise RuntimeError("样本分析已取消")
+        actual_sha, actual_size = package_sha256_file(binary_path)
+        if actual_sha != target.get("sha256") or actual_size != int(target.get("size") or -1):
+            raise RuntimeError("分析包内容已变化，拒绝分析")
+        analyzers = list(target.get("analyzers") or [])
+        report: dict[str, Any] = {
+            "package_id": package_id,
+            "version_id": version_id,
+            "target_id": target_id,
+            "path": target.get("path"),
+            "sha256": actual_sha,
+            "format": target.get("format"),
+            "platform": target.get("platform"),
+            "analyzers": analyzers,
+            "status": "recognized",
+            "started_at": _utc_now(),
+        }
+        if "binary-static" in analyzers and str(target.get("format") or "") in {"pe", "elf", "mach-o"}:
+            asset = _ensure_package_binary_asset(
+                proj, package, target, binary_path, actual_sha, actual_size)
+            report["binary_sha256"] = actual_sha
+            report["binary_asset_id"] = asset.get("id")
+        progress["phase"] = "recognized"
+        plugin_report = analyze_registered_target(binary_path, target)
+        if stop is not None and stop.is_set():
+            raise RuntimeError("样本分析已取消")
+        if plugin_report is not None:
+            report.update({
+                "status": "ok",
+                "completed_at": _utc_now(),
+                **plugin_report,
+            })
+            package_store.write_target_analysis(
+                proj.path, package_id, version_id, target_id, report)
+            proj.bb.append_event(pid, "sample.target.analyzed", {
+                "package_id": package_id, "version_id": version_id,
+                "target_id": target_id, "status": report["status"],
+                "analyzer": plugin_report.get("analyzer"),
+            }, author="human")
+            progress["phase"] = "done"
+            return report
+        if "binary-static" not in analyzers:
+            report.update({
+                "status": "analyzer-unavailable",
+                "message": "目标已识别，但对应静态分析器尚未接入",
+                "completed_at": _utc_now(),
+            })
+            package_store.write_target_analysis(
+                proj.path, package_id, version_id, target_id, report)
+            proj.bb.append_event(pid, "sample.target.analyzed", {
+                "package_id": package_id, "version_id": version_id,
+                "target_id": target_id, "status": report["status"],
+            }, author="human")
+            return report
+        svc = _rev_service(proj)
+        if not svc.headless_backends():
+            report.update({
+                "status": "no-tool",
+                "message": "IDA/Ghidra headless 不可用",
+                "completed_at": _utc_now(),
+            })
+            package_store.write_target_analysis(
+                proj.path, package_id, version_id, target_id, report)
+            proj.bb.append_event(pid, "sample.target.analysis_failed", {
+                "package_id": package_id, "version_id": version_id,
+                "target_id": target_id, "reason": "no-tool",
+            }, author="human")
+            return report
+        progress["phase"] = "headless"
+        try:
+            data, info = svc.export_to_cache(
+                str(binary_path), engine=engine, progress=progress, stop_event=stop)
+        except TypeError as exc:
+            # Keep injected/third-party decompiler adapters that predate the
+            # cooperative control parameters usable.  Real services expose
+            # both keywords; only signature mismatches take this fallback.
+            if "unexpected keyword argument" not in str(exc):
+                raise
+            data, info = svc.export_to_cache(str(binary_path), engine=engine)
+        if stop is not None and stop.is_set():
+            raise RuntimeError("样本分析已取消")
+        sections = data.get("sections") if isinstance(data.get("sections"), list) else []
+        imports = data.get("imports") if isinstance(data.get("imports"), dict) else {}
+        funcs = data.get("functions") if isinstance(data.get("functions"), list) else []
+        report.update({
+            "status": "ok",
+            "backend": info.get("name"),
+            "engine": engine,
+            "function_count": len(funcs),
+            "section_count": len(sections),
+            "import_modules": len(imports),
+            "import_count": sum(len(v) for v in imports.values()),
+            "cache_sha256": actual_sha,
+            "db_path": info.get("db_path"),
+            "completed_at": _utc_now(),
+        })
+        package_store.write_target_analysis(
+            proj.path, package_id, version_id, target_id, report)
+        proj.bb.append_event(pid, "sample.target.analyzed", {
+            "package_id": package_id, "version_id": version_id,
+            "target_id": target_id, "status": report["status"],
+            "function_count": report.get("function_count", 0),
+            "backend": report.get("backend"),
+        }, author="human")
+        progress["phase"] = "done"
+        return report
+
+    def _write_upload_temp(upload: UploadFile, max_bytes: int) -> Path:
+        """Stream an untrusted upload to a temporary file without buffering it."""
+        handle = tempfile.NamedTemporaryFile(prefix="sample-upload-", suffix=".part", delete=False)
+        path = Path(handle.name)
+        size = 0
+        try:
+            while True:
+                chunk = upload.file.read(1 << 20)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > max_bytes:
+                    raise HTTPException(413, f"上传文件超过 {max_bytes // (1024 * 1024)}MB 上限")
+                handle.write(chunk)
+            if size == 0:
+                raise HTTPException(422, "空文件")
+            handle.close()
+            return path
+        except Exception:
+            handle.close()
+            path.unlink(missing_ok=True)
+            raise
+
+    def _sample_upload_dir(proj: Project, upload_id: str) -> Path:
+        if not re.fullmatch(r"[0-9a-f]{24}", upload_id):
+            raise HTTPException(422, "非法上传会话 ID")
+        return _inside(proj, "sample_uploads", upload_id)
+
+    def _sample_upload_meta(proj: Project, upload_id: str) -> tuple[Path, dict]:
+        root = _sample_upload_dir(proj, upload_id)
+        path = root / "metadata.json"
+        if not path.is_file():
+            raise HTTPException(404, "上传会话不存在")
+        try:
+            return root, json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise HTTPException(409, "上传会话元数据损坏") from exc
+
     def _parse_hex_addr(addr: str) -> int:
         try:
             return int(addr, 16)
@@ -1731,11 +2041,17 @@ def create_app(
 
         删：samples/<本体>（blob 由调用方在删资产行前解析传入）；decompiler-cache/
         {sha}.json + {sha}.details/ + {sha}.annotations.json；decompiler-db/<sha>
-        (.i64/.idb + 锁文件)；.ghidra-tmp/ghidra-<sha>/。**全局 data/decompiler-cache
+        (.i64/.idb + 锁文件)；ghidra-tmp/ghidra-<sha>/。**全局 data/decompiler-cache
         跨项目共享，不动**。单项失败只记日志不抛——DB 行已删，残留文件不应阻断删除
         语义。返回已删路径清单。
         """
         removed: list[str] = []
+        service = app.state.rev_services.get(proj.id)
+        if service is not None:
+            try:
+                service.close()
+            except Exception:
+                log.exception("关闭反编译 Worker 失败 project=%s", proj.id)
 
         def _rm(p: Path) -> None:
             try:
@@ -1753,11 +2069,13 @@ def create_app(
         cache_dir = Path(proj.artifacts_dir) / "decompiler-cache"
         _rm(cache_dir / f"{sha}.json")
         _rm(cache_dir / f"{sha}.details")
+        _rm(cache_dir / f"{sha}.disasm")
+        _rm(cache_dir / f"{sha}.analysis.db")
         _rm(cache_dir / f"{sha}.annotations.json")
         db_dir = Path(proj.artifacts_dir) / "decompiler-db"
         for ext in (".i64", ".idb", ".id0", ".id1", ".id2", ".nam", ".til"):
             _rm(db_dir / f"{sha}{ext}")
-        _rm(Path(proj.artifacts_dir) / ".ghidra-tmp" / f"ghidra-{sha}")
+        _rm(Path(proj.artifacts_dir) / "ghidra-tmp" / f"ghidra-{sha}")
         return removed
 
     def _require_cache(proj: Project, sha: str) -> dict:
@@ -1912,7 +2230,7 @@ def create_app(
                                       workspace=proj.path),
                 global_cache_dir=app.state.decompiler_cache_dir,
                 ida_db_dir=proj.artifacts_dir / "decompiler-db",
-                ghidra_tmp_dir=proj.artifacts_dir / ".ghidra-tmp",
+                ghidra_tmp_dir=proj.artifacts_dir / "ghidra-tmp",
                 mcp_provider=lambda binary: app.state.ida_mcp_manager.ensure(
                     pid, binary,
                     db_dir=proj.artifacts_dir / "decompiler-db"),
@@ -2445,6 +2763,11 @@ def create_app(
                 severity=body.severity, status=body.status, evidence=body.evidence,
                 dedup_key=body.dedup_key, author="human", rating_basis=body.rating_basis,
                 impact=body.impact, remediation=body.remediation,
+                summary=body.summary, affected_assets=body.affected_assets,
+                test_environment=body.test_environment,
+                reproduction_steps=body.reproduction_steps,
+                verification_result=body.verification_result,
+                risk_assessment=body.risk_assessment, pocs=body.pocs,
                 category=body.category, track=proj.track)
         except ValueError as e:  # relates_to 悬空/跨项目等（E0）
             raise HTTPException(422, str(e)) from e
@@ -2782,6 +3105,396 @@ def create_app(
 
     # ---------- 逆向工作台（样本 / headless 缓存 / 人机共写） ----------
 
+    @app.post("/api/projects/{pid}/sample-packages/uploads", status_code=201)
+    def create_sample_upload(pid: str, body: SampleUploadCreateIn):
+        proj = _project(pid)
+        package_store: SamplePackageStore = _package_store()
+        if body.source_type not in {"auto", "file", "zip", "7z", "tar"}:
+            raise HTTPException(422, "source_type 仅支持 auto/file/zip/7z/tar")
+        if body.total_size > package_store.limits.max_source_bytes:
+            raise HTTPException(413, "原始上传物超过大小上限")
+        upload_id = uuid.uuid4().hex[:24]
+        root = _inside(proj, "sample_uploads", upload_id)
+        (root / "chunks").mkdir(parents=True, exist_ok=False)
+        metadata = {
+            "upload_id": upload_id,
+            "filename": body.filename,
+            "source_type": body.source_type,
+            "total_size": body.total_size,
+            "total_chunks": body.total_chunks,
+            "received_chunks": [],
+            "status": "uploading",
+            "created_at": _utc_now(),
+        }
+        (root / "metadata.json").write_text(
+            json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {k: metadata[k] for k in ("upload_id", "filename", "total_size", "total_chunks", "status")}
+
+    @app.get("/api/projects/{pid}/sample-packages/uploads/{upload_id}")
+    def sample_upload_status(pid: str, upload_id: str):
+        proj = _project(pid)
+        root, metadata = _sample_upload_meta(proj, upload_id)
+        chunks = root / "chunks"
+        received = sorted(int(p.stem) for p in chunks.glob("*.part") if p.stem.isdigit())
+        metadata["received_chunks"] = received
+        metadata["received_size"] = sum(p.stat().st_size for p in chunks.glob("*.part"))
+        return metadata
+
+    @app.put("/api/projects/{pid}/sample-packages/uploads/{upload_id}/chunks/{chunk_index}")
+    async def upload_sample_chunk(pid: str, upload_id: str, chunk_index: int, request: Request):
+        proj = _project(pid)
+        root, metadata = _sample_upload_meta(proj, upload_id)
+        if metadata.get("status") != "uploading":
+            raise HTTPException(409, "上传会话已结束")
+        total_chunks = int(metadata["total_chunks"])
+        if chunk_index < 0 or chunk_index >= total_chunks:
+            raise HTTPException(422, "分片序号越界")
+        chunk = await request.body()
+        # A bounded chunk prevents a client from bypassing the source quota in
+        # memory before the assembled file is checked.
+        if len(chunk) > 16 * 1024 * 1024:
+            raise HTTPException(413, "单个分片不能超过 16MB")
+        path = root / "chunks" / f"{chunk_index}.part"
+        if path.exists():
+            if path.read_bytes() != chunk:
+                raise HTTPException(409, "同一分片已存在且内容不同")
+        else:
+            temp = path.with_suffix(".tmp")
+            temp.write_bytes(chunk)
+            os.replace(temp, path)
+        return {"upload_id": upload_id, "chunk_index": chunk_index,
+                "size": len(chunk), "status": "received"}
+
+    @app.post("/api/projects/{pid}/sample-packages/uploads/{upload_id}/complete", status_code=202)
+    def complete_sample_upload(pid: str, upload_id: str):
+        proj = _project(pid)
+        root, metadata = _sample_upload_meta(proj, upload_id)
+        if metadata.get("status") == "complete":
+            return metadata.get("result") or metadata
+        if metadata.get("status") != "uploading":
+            raise HTTPException(409, "上传会话不可完成")
+        chunks_dir = root / "chunks"
+        expected = list(range(int(metadata["total_chunks"])))
+        actual = sorted(int(p.stem) for p in chunks_dir.glob("*.part") if p.stem.isdigit())
+        if actual != expected:
+            missing = sorted(set(expected) - set(actual))
+            raise HTTPException(409, f"仍缺少分片: {missing[:20]}")
+        assembled = root / "assembled.part"
+        total = 0
+        with assembled.open("wb") as out:
+            for index in expected:
+                part = chunks_dir / f"{index}.part"
+                data = part.read_bytes()
+                total += len(data)
+                if total > int(metadata["total_size"]):
+                    raise HTTPException(422, "分片总大小超过声明值")
+                out.write(data)
+        if total != int(metadata["total_size"]):
+            raise HTTPException(422, "分片总大小与声明值不一致")
+        try:
+            result = _package_store().import_source(
+                proj.path, assembled, filename=str(metadata["filename"]),
+                source_type=str(metadata.get("source_type") or "auto"))
+        except SamplePackageError as exc:
+            metadata["status"] = "failed"
+            metadata["error"] = str(exc)
+            (root / "metadata.json").write_text(
+                json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+            raise HTTPException(422, str(exc)) from exc
+        metadata["status"] = "complete"
+        metadata["completed_at"] = _utc_now()
+        metadata["result"] = {"package_id": result["package_id"], "version_id": result["version_id"],
+                               "manifest_sha256": result["manifest_sha256"],
+                               "file_count": result["file_count"], "targets": result["targets"],
+                               "dependencies": result["dependencies"]}
+        (root / "metadata.json").write_text(
+            json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+        shutil.rmtree(chunks_dir, ignore_errors=True)
+        return metadata["result"]
+
+    @app.post("/api/projects/{pid}/sample-packages", status_code=202)
+    def import_sample_package(
+        pid: str,
+        file: UploadFile | None = File(default=None),
+        files: list[UploadFile] | None = File(default=None),
+        relative_paths: list[str] | None = Form(default=None),
+    ):
+        """Import a single file/archive or a browser-selected directory.
+
+        Directory uploads use repeated ``files`` parts.  The browser supplied
+        filename is treated as an untrusted relative path and never as a host
+        filesystem path.
+        """
+        proj = _project(pid)
+        package_store: SamplePackageStore = _package_store()
+        uploads = list(files or [])
+        if file is not None:
+            if uploads:
+                raise HTTPException(422, "file 与 files 只能二选一")
+            temp = _write_upload_temp(file, package_store.limits.max_source_bytes)
+            try:
+                try:
+                    result = package_store.import_source(
+                        proj.path, temp, filename=file.filename or "sample.bin")
+                except SamplePackageError as exc:
+                    raise HTTPException(422, str(exc)) from exc
+            finally:
+                temp.unlink(missing_ok=True)
+        elif uploads:
+            temp_files: list[tuple[str, Path]] = []
+            try:
+                names = relative_paths or []
+                for index, upload in enumerate(uploads):
+                    temp = _write_upload_temp(upload, package_store.limits.max_file_bytes)
+                    name = names[index] if index < len(names) and names[index] else (upload.filename or "sample.bin")
+                    temp_files.append((name, temp))
+                try:
+                    result = package_store.import_folder_files(
+                        proj.path, temp_files, origin={"file_count": len(temp_files)})
+                except SamplePackageError as exc:
+                    raise HTTPException(422, str(exc)) from exc
+            finally:
+                for _, temp in temp_files:
+                    temp.unlink(missing_ok=True)
+        else:
+            raise HTTPException(422, "请上传 file 或 files")
+        return {
+            "package_id": result["package_id"],
+            "version_id": result["version_id"],
+            "manifest_sha256": result["manifest_sha256"],
+            "raw_sha256": (result.get("origin") or {}).get("raw_sha256"),
+            "source_analysis": result.get("source_analysis"),
+            "file_count": result["file_count"],
+            "total_bytes": result["total_bytes"],
+            "targets": result["targets"],
+            "dependencies": result["dependencies"],
+        }
+
+    @app.get("/api/projects/{pid}/sample-packages")
+    def list_sample_packages(pid: str):
+        proj = _project(pid)
+        return _package_store().list_packages(proj.path)
+
+    @app.get("/api/projects/{pid}/sample-packages/current")
+    def current_sample_package(pid: str):
+        proj = _project(pid)
+        row = _package_store().current_package(proj.path)
+        if row is None:
+            raise HTTPException(404, "分析包不存在")
+        pointer = _package_store()._read_current(proj.path) or {}
+        return {**row, "undo_available": bool((pointer.get("undo") or {}).get("version_id"))}
+
+    @app.get("/api/projects/{pid}/sample-packages/preview")
+    def preview_sample_package_entry(pid: str, path: str = Query(..., min_length=1),
+                                     max_bytes: int = Query(256 * 1024, ge=4096, le=2 * 1024 * 1024)):
+        proj = _project(pid)
+        try:
+            result = _package_store().preview_entry(proj.path, path, max_bytes=max_bytes)
+        except SamplePackageError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        result["content_url"] = f"/api/projects/{pid}/sample-packages/content?path={quote(path, safe='')}"
+        return result
+
+    @app.get("/api/projects/{pid}/sample-packages/content")
+    def sample_package_content(pid: str, path: str = Query(..., min_length=1)):
+        proj = _project(pid)
+        try:
+            _, entry, resolved = _package_store().resolve_entry_path(proj.path, path)
+        except SamplePackageError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        media_type = mimetypes.guess_type(str(entry.get("path") or path))[0] or "application/octet-stream"
+        return FileResponse(resolved, media_type=media_type,
+                            headers={"Cache-Control": "no-store"})
+
+    @app.delete("/api/projects/{pid}/sample-packages")
+    def delete_sample_package(pid: str):
+        """Delete the sole project package after cooperative analysis cancellation."""
+        proj = _project(pid)
+        package_store = _package_store()
+        package = package_store.current_package(proj.path)
+        if package is None:
+            raise HTTPException(404, "分析包不存在")
+        package_id = str(package.get("package_id") or "")
+        metadata_root = Path(proj.path) / "sample_packages"
+        package_ids = {package_id}
+        package_ids.update(path.name for path in metadata_root.glob("pkg-*") if path.is_dir())
+
+        # The package reports are the source of binary asset references.  Read
+        # them before removing package metadata so cleanup remains complete.
+        binary_shas: set[str] = set()
+        for current_package_id in package_ids:
+            package_root = metadata_root / current_package_id
+            for report_path in package_root.glob("versions/*/targets/*.json"):
+                try:
+                    report = json.loads(report_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                sha = report.get("binary_sha256")
+                if isinstance(sha, str) and re.fullmatch(r"[0-9a-fA-F]{64}", sha):
+                    binary_shas.add(sha.lower())
+        for asset in proj.bb.list_assets(pid, "binary"):
+            meta = asset.get("meta") or {}
+            if str(meta.get("package_id") or "") in package_ids:
+                value = str(asset.get("value") or "")
+                if re.fullmatch(r"[0-9a-fA-F]{64}", value):
+                    binary_shas.add(value.lower())
+
+        for current_package_id in package_ids:
+            _stop_sample_package_jobs(pid, current_package_id)
+        deadline = time.time() + _DELETE_STOP_TIMEOUT
+        while any(_sample_package_jobs_running(pid, current_package_id)
+                  for current_package_id in package_ids) and time.time() < deadline:
+            time.sleep(0.2)
+        if any(_sample_package_jobs_running(pid, current_package_id)
+               for current_package_id in package_ids):
+            raise HTTPException(409, "分析包仍有任务运行，已请求取消，请稍后重试")
+
+        removed_assets = 0
+        removed_files = 0
+        for sha in binary_shas:
+            blob = _sample_path(proj, sha)
+            try:
+                proj.bb.delete_binary(pid, sha, author="human")
+            except LookupError:
+                continue
+            removed_files += len(_purge_sample_files(proj, sha, blob))
+            removed_assets += 1
+        try:
+            for current_package_id in package_ids:
+                package_store.delete_package(proj.path, current_package_id)
+        except SamplePackageError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        for key in list(app.state.sample_cancel):
+            if any(key.startswith(current_package_id + "/") for current_package_id in package_ids):
+                app.state.sample_cancel.pop(key, None)
+        return {"deleted": package_id, "removed_packages": len(package_ids),
+                "removed_assets": removed_assets, "removed_files": removed_files}
+
+    @app.post("/api/projects/{pid}/sample-packages/files", status_code=202)
+    def append_sample_package_files(pid: str, files: list[UploadFile] = File(...),
+                                    relative_paths: list[str] | None = Form(default=None)):
+        proj = _project(pid)
+        store = _package_store()
+        temp_files: list[tuple[str, Path]] = []
+        try:
+            names = relative_paths or []
+            for index, upload in enumerate(files):
+                temp = _write_upload_temp(upload, store.limits.max_file_bytes)
+                name = names[index] if index < len(names) and names[index] else (upload.filename or "sample.bin")
+                temp_files.append((name, temp))
+            try:
+                result = store.append_files(proj.path, temp_files)
+            except SamplePackageError as exc:
+                raise HTTPException(422, str(exc)) from exc
+        finally:
+            for _, temp in temp_files:
+                temp.unlink(missing_ok=True)
+        return result
+
+    @app.post("/api/projects/{pid}/sample-packages/move", status_code=202)
+    def move_sample_package_entry(pid: str, body: SamplePackageMoveIn):
+        proj = _project(pid)
+        try:
+            return _package_store().move_entry(proj.path, body.path, body.target_path)
+        except SamplePackageError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.delete("/api/projects/{pid}/sample-packages/entries", status_code=202)
+    def delete_sample_package_entry(pid: str, path: str = Query(..., min_length=1)):
+        proj = _project(pid)
+        try:
+            return _package_store().delete_entry(proj.path, path)
+        except SamplePackageError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/projects/{pid}/sample-packages/undo", status_code=200)
+    def undo_sample_package(pid: str):
+        proj = _project(pid)
+        try:
+            return _package_store().undo_last(proj.path)
+        except SamplePackageError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.get("/api/projects/{pid}/sample-packages/{package_id}")
+    def get_sample_package(pid: str, package_id: str, version_id: str | None = Query(default=None)):
+        proj = _project(pid)
+        row = _package_store().get_package(proj.path, package_id, version_id)
+        if row is None:
+            raise HTTPException(404, "分析包版本不存在")
+        return row
+
+    @app.post("/api/projects/{pid}/sample-packages/{package_id}/versions/{version_id}/targets")
+    def select_sample_targets(pid: str, package_id: str, version_id: str,
+                              body: SampleTargetSelectIn):
+        proj = _project(pid)
+        try:
+            return _package_store().select_targets(
+                proj.path, package_id, version_id, body.target_ids)
+        except SamplePackageError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/api/projects/{pid}/sample-packages/{package_id}/versions/{version_id}/targets/{target_id}")
+    def get_sample_target(pid: str, package_id: str, version_id: str, target_id: str):
+        proj = _project(pid)
+        try:
+            package, target, path = _package_store().resolve_target(
+                proj.path, package_id, version_id, target_id)
+        except SamplePackageError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        report = _package_store().read_target_analysis(
+            proj.path, package_id, version_id, target_id)
+        return {"package_id": package["package_id"], "version_id": package["version_id"],
+                "target": target, "analysis": report,
+                "file_exists": path.is_file()}
+
+    @app.post("/api/projects/{pid}/sample-packages/{package_id}/versions/{version_id}/targets/{target_id}/analyze", status_code=202)
+    def analyze_sample_target(pid: str, package_id: str, version_id: str,
+                              target_id: str,
+                              body: SampleTargetAnalyzeIn = SampleTargetAnalyzeIn()):
+        proj = _project(pid)
+        try:
+            package, target, binary_path = _package_store().resolve_target(
+                proj.path, package_id, version_id, target_id)
+        except SamplePackageError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        from core.tools.decompiler import ENGINES, normalize_engine
+        engine = normalize_engine(body.engine)
+        if str(body.engine or "").strip().lower() not in ENGINES:
+            raise HTTPException(422, f"未知引擎: {body.engine}（可选 {'/'.join(ENGINES)}）")
+        if _package_target_job_running(pid, package_id, version_id, target_id):
+            raise HTTPException(409, "该分析目标正在分析中")
+        existing = _package_store().read_target_analysis(
+            proj.path, package_id, version_id, target_id)
+        if existing and existing.get("status") == "ok" and existing.get("engine") == engine:
+            # Reports created before the package-to-binary bridge may predate
+            # the asset mapping. Repair it lazily when the cached target opens.
+            if ("binary-static" in (target.get("analyzers") or [])
+                    and existing.get("sha256")
+                    and str(target.get("format") or "") in {"pe", "elf", "mach-o"}):
+                _ensure_package_binary_asset(
+                    proj, package, target, binary_path,
+                    str(existing["sha256"]), int(target.get("size") or binary_path.stat().st_size))
+            return {"job_id": None, "cached": True, "report": existing}
+        progress: dict[str, Any] = {"phase": "queued"}
+        cancel_key = _sample_job_key(package_id, version_id, target_id)
+        stop = threading.Event()
+        app.state.sample_cancel[cancel_key] = stop
+
+        def _cleanup_sample_cancel(_job: dict) -> None:
+            if app.state.sample_cancel.get(cancel_key) is stop:
+                app.state.sample_cancel.pop(cancel_key, None)
+
+        job_id = app.state.jobs.submit(
+            "sample-target-analysis",
+            lambda: _run_sample_target_analysis(
+                pid, package_id, version_id, target_id, engine, progress, stop),
+            meta={"project_id": pid, "package_id": package_id,
+                  "version_id": version_id, "target_id": target_id,
+                  "progress": progress, "sample_cancel_key": cancel_key},
+            on_done=_cleanup_sample_cancel,
+        )
+        return {"job_id": job_id, "cached": False, "target_id": target_id}
+
     @app.post("/api/projects/{pid}/samples", status_code=202)
     def upload_sample(pid: str, file: UploadFile = File(...)):
         """样本上传（multipart，≤256MB，流式 sha）→ binary 资产登记。
@@ -2854,11 +3567,20 @@ def create_app(
         svc = _rev_service(proj)
         data = svc.read_cached(sha)
         kb = proj.bb.list_funcs(pid, sha)
+        analysis_job = next((job for job in app.state.jobs.all_jobs()
+                             if job.get("status") == "running"
+                             and job.get("kind") == "binary-triage"
+                             and job.get("meta", {}).get("project_id") == pid
+                             and (job.get("meta", {}).get("sha") == sha
+                                  or job.get("meta", {}).get("triage_sha") == sha)), None)
         return {
             "sha": sha,
             "asset_meta": asset.get("meta") or {},
             "engine": _binary_engine(proj, sha),
             "cached": data is not None,
+            "analysis_job": ({"id": analysis_job.get("id"), "status": "running",
+                              "progress": analysis_job.get("meta", {}).get("progress") or {}}
+                             if analysis_job else None),
             "meta": (data or {}).get("meta"),
             "sections": (data or {}).get("sections"),
             "imports": (data or {}).get("imports"),
@@ -2944,11 +3666,25 @@ def create_app(
     def cached_functions(pid: str, sha: str):
         """精简函数行（不带伪码）；地址一律 hex 字符串（JS Number 精度）。"""
         proj = _project(pid)
+        svc = _rev_service(proj)
+        bin_path = _sample_path(proj, sha)
+        projected = svc.cached_function_rows(sha, str(bin_path) if bin_path else None)
+        if projected is not None:
+            return [
+                {"address": hex(int(f["address"])), "name": f.get("name"),
+                 "size": f.get("size", 0), "has_pseudo": bool(f.get("has_pseudo")),
+                 "n_calls": f.get("n_calls", 0),
+                 "status": str(f.get("status") or ("done" if f.get("has_pseudo") else "pending")),
+                 "error": f.get("error")}
+                for f in projected
+            ]
         data = _require_cache(proj, sha)
         return [
             {"address": hex(int(f["address"])), "name": f.get("name"),
              "size": f.get("size", 0), "has_pseudo": bool(f.get("pseudocode")),
-             "n_calls": len(f.get("calls") or [])}
+             "n_calls": len(f.get("calls") or []),
+             "status": (str(f.get("status") or ("done" if f.get("pseudocode") else "pending"))),
+             "error": f.get("error")}
             for f in data.get("functions", [])
         ]
 
@@ -2958,11 +3694,14 @@ def create_app(
             "address": detail.get("address") or hex(want),
             "name": detail.get("name"),
             "size": detail.get("size", 0),
-            "calls": [],
+            "calls": detail.get("calls") or [c.get("name") for c in (detail.get("callees") or []) if c.get("name")],
             "pseudocode": detail.get("pseudocode"),
+            "status": detail.get("status"),
+            "error": detail.get("error"),
             "disasm": ({"lines": detail.get("disasm_lines") or [],
                         "truncated": bool(detail.get("disasm_truncated"))}
                        if detail.get("disasm_lines") else None),
+            "disasm_pending": bool(detail.get("disasm_pending")),
             "source": detail.get("source") or "cache",
         }
 
@@ -2986,7 +3725,8 @@ def create_app(
             for f in data.get("functions", []):
                 if int(f["address"]) != want:
                     continue
-                # Ghidra 模式（要反汇编）或名单命中但无伪码 → 按需详情补拉（自动+落盘）
+                # Ghidra mode always queries the native project first. This
+                # avoids stale JSON/SQLite details masking real Listing data.
                 if engine == "ghidra" or not f.get("pseudocode"):
                     detail = svc.ensure_func_detail(sha, want, engine=engine,
                                                     binary=bin_arg)
@@ -3020,6 +3760,14 @@ def create_app(
         svc = _rev_service(proj)
         want = _parse_hex_addr(addr)
         engine = _binary_engine(proj, sha)
+        bin_path = _sample_path(proj, sha)
+        bin_arg = str(bin_path) if bin_path else None
+        projected_xref = svc.cached_xrefs(sha, want, bin_arg)
+        if projected_xref is not None:
+            return projected_xref
+        projected_rows = svc.cached_function_rows(sha, bin_arg)
+        if projected_rows is not None:
+            raise HTTPException(404, f"缓存中无此函数: {addr}")
         data = svc.read_cached(sha)
         target = None
         if data is not None:
@@ -3773,8 +4521,10 @@ def create_app(
         bb: Blackboard, pid: str, action: dict, approval_id: str,
     ) -> dict:
         """H3 批准 request_escalation 后当场执行一次（deny-driven 一次性升级）：
-        gateway.run 直跑（net=real 走 approval 校验，跑完即 consumed，同单不可复用），
-        结果经收件箱 escalation_result 回流请求会话——下个步边界/空闲对话轮注入。
+        gateway.run 直跑（跑完即 consumed，同单不可复用），结果经收件箱
+        escalation_result 回流请求会话——下个步边界/空闲对话轮注入。
+        2026-10-01 起 net=real 不再走审批（直接 run_cmd），本处理器只服务
+        「runtime 超角色 max_runtime」类升级。
         与 spawn_session 同纪律：op 白名单字典分派；执行失败落 approval.exec_failed
         不回滚批准。escalation op 的唯一生产方是 Agent 的 request_escalation 工具
         （人类 API 也可建，op 字段照填），编排器不生产。"""
@@ -4925,7 +5675,7 @@ def create_app(
             "threat_matrix": threat_matrix,
             "net_modes": {"modes": ["none", "fakenet", "real"],
                           "default": policy.DEFAULT_NET_MODE,
-                          "note": "real 永不默认，须人工审批；fakenet 为后续里程碑"},
+                          "note": "real 不默认、可直接经 run_cmd 指定（2026-10-01 起不再人工审批）；fakenet 为后续里程碑"},
             "pathguard_rules": pathguard_rules,
             "rate_rules": [
                 {"tool": tool, "requirement": r["requirement"],
@@ -5016,7 +5766,8 @@ def create_app(
             if body.name:
                 return llm_store.discover(body.name)
             if body.base_url and body.api_key:
-                return llm_store.discover_credentials(body.base_url, body.api_key)
+                return llm_store.discover_credentials(body.base_url, body.api_key,
+                                                       format=body.format, proxy=body.proxy)
             raise ProviderError("须提供已保存供应商 name，或 base_url+api_key")
         except ProviderError as e:
             raise HTTPException(422, str(e))
@@ -5036,7 +5787,12 @@ def create_app(
                 if not body.base_url or not body.api_key:
                     return {"ok": False, "error": "未保存供应商须填 base_url 与 api_key"}
                 base_url, api_key = body.base_url, body.api_key
-            probe_credentials(base_url, api_key, body.model)
+            if body.name:
+                format = p.get("format", "openai-chat-completions")
+            else:
+                format = body.format
+            proxy = p.get("proxy") if body.name else body.proxy
+            probe_credentials(base_url, api_key, body.model, format=format, proxy=proxy)
         except ProviderError as e:
             return {"ok": False, "error": str(e)}
         except Exception as e:  # noqa: BLE001
@@ -7495,6 +8251,108 @@ def create_app(
         return {"path": target.module, "count": len(hits),
                 "refs": [h.to_dict() for h in hits]}
 
+    def _kb_evolution_files(cap: str) -> dict[str, dict]:
+        rows: dict[str, dict] = {}
+        for source in writing.list_kb(app.state.packs_root, cap):
+            for item in source["files"]:
+                rel = str(item["path"]).replace("\\", "/")
+                low = rel.lower()
+                kind = next((x[:-1] for x in ("playbooks", "patterns", "cases")
+                             if low.startswith(x + "/")), "ref")
+                rows[rel] = {"cap": cap, "path": rel, "source": source["id"],
+                             "title": item.get("title") or Path(rel).stem,
+                             "kind": kind, "layer": {"ref": 1, "case": 2,
+                                                       "pattern": 3, "playbook": 4}[kind]}
+        return rows
+
+    @app.get("/api/capabilities/{cap}/kb/evolution/recommend")
+    def kb_evolution_recommend(cap: str, path: str = Query(...),
+                               limit: int = Query(5, ge=1, le=20)):
+        rows = _kb_evolution_files(cap)
+        path = path.replace("\\", "/")
+        current = rows.get(path)
+        if current is None:
+            raise HTTPException(404, f"kb 文件不存在: {path}")
+        target = _kb_error_map(writing.resolve_kb, app.state.packs_root, cap, path)
+        text = target.path.read_text(encoding="utf-8", errors="replace")
+        words = re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}|[\u4e00-\u9fff]{2,}", text[:12000])
+        needles: list[str] = []
+        seen: set[str] = set()
+        for word in words:
+            key = word.lower()
+            if key not in seen:
+                seen.add(key); needles.append(word)
+            if len(needles) >= 8:
+                break
+        scores: dict[str, int] = {}
+        for needle in needles:
+            try:
+                hits = writing.search_kb(app.state.packs_root, cap, needle, min(limit * 3, 60))
+            except writing.KbError:
+                hits = []
+            for hit in hits:
+                rel = str(hit.get("path") or "").replace("\\", "/")
+                if rel and rel != path and rel in rows:
+                    scores[rel] = scores.get(rel, 0) + int(hit.get("matches") or 1)
+        result = []
+        for rel, score in sorted(scores.items(), key=lambda pair: (-pair[1], pair[0]))[:limit]:
+            item = dict(rows[rel]); item["reason"] = f"与当前文档共享 {score} 个主题命中"; result.append(item)
+        return {"cap": cap, "current": current, "results": result}
+
+    @app.post("/api/capabilities/{cap}/kb/evolution")
+    def kb_evolution(cap: str, body: KbEvolutionIn):
+        rows = _kb_evolution_files(cap)
+        clean = [p.replace("\\", "/") for p in body.sources]
+        missing = [p for p in clean if p not in rows]
+        if missing:
+            raise HTTPException(404, f"知识库资料不存在: {', '.join(missing[:3])}")
+        _exec, plan_llm = _llms()
+        if plan_llm is None:
+            raise HTTPException(503, "planner LLM 未配置，知识演化不可用")
+
+        def _run() -> dict:
+            materials = []
+            for rel in clean:
+                target = writing.resolve_kb(app.state.packs_root, cap, rel)
+                materials.append({"path": rel, "title": rows[rel].get("title"),
+                                  "kind": rows[rel].get("kind"),
+                                  "content": target.path.read_text(encoding="utf-8", errors="replace")[:40000]})
+            templates = {
+                "case": "背景、目标、环境、关键步骤、结果、失败与修正、可复用要点",
+                "pattern": "问题信号、原理、适用条件、实施步骤、验证方法、边界与风险",
+                "playbook": "适用场景、核心原理、标准流程、决策分支、检查清单、常见误区",
+            }
+            system = ("你是安全知识库演化编辑。只基于资料生成中文 Markdown 草稿，保留代码、命令、路径和专有名词原文，禁止虚构。"
+                      "只输出 JSON：{\"kind\":\"case|pattern|playbook\",\"title\":\"...\",\"path\":\"...\",\"summary\":\"...\",\"content\":\"...\"}。"
+                      f"目标类型={body.target_kind or 'auto'}；模板={templates.get(body.target_kind or 'pattern', '先判断类型再使用对应模板')}。")
+            response = plan_llm.chat([{"role": "user", "content": json.dumps({"cap": cap, "materials": materials}, ensure_ascii=False)}], system=system)
+            raw = (response.text or "").strip()
+            if raw.startswith("```"):
+                raw = re.sub(r"^```[a-zA-Z]*\n?", "", raw).strip(); raw = re.sub(r"\n?```$", "", raw).strip()
+            match = re.search(r"\{.*\}", raw, re.S)
+            try:
+                draft = json.loads(match.group(0) if match else raw)
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise ValueError(f"planner 输出不是合法 JSON: {exc}") from exc
+            kind = draft.get("kind") if draft.get("kind") in {"case", "pattern", "playbook"} else (body.target_kind or "pattern")
+            title = str(draft.get("title") or f"由 {len(clean)} 篇资料提炼的{kind}").strip()[:160]
+            slug = re.sub(r"[^\w\-\u4e00-\u9fff]+", "-", title).strip("-") or "evolution-draft"
+            base = {"case": "cases", "pattern": "patterns", "playbook": "playbooks"}[kind]
+            rel = str(draft.get("path") or f"{base}/{slug}.md").replace("\\", "/")
+            if not rel.lower().startswith(base + "/") or not rel.lower().endswith(".md"):
+                rel = f"{base}/{slug}.md"
+            original = rel; n = 2
+            while rel in rows or writing.resolve_kb(app.state.packs_root, cap, rel).path.exists():
+                rel = f"{base}/{slug}-{n}.md"; n += 1
+            return {"kind": kind, "title": title, "path": rel,
+                    "content": str(draft.get("content") or "").strip(),
+                    "summary": str(draft.get("summary") or title).strip()[:300],
+                    "sources": [{"cap": cap, "path": p, "title": rows[p].get("title")} for p in clean],
+                    "path_adjusted": rel != original,
+                    "notice": "目标路径已自动调整以避免同名文件" if rel != original else None}
+
+        return {"job_id": app.state.jobs.submit("kb-evolution", _run, meta={"cap": cap, "sources": clean})}
+
     # ---- 统一变更提案（C4：skill edit / kb 四模式，只落 pending，人类审批） ----
 
     def _proposal_event_payload(p: dict, **extra) -> dict:
@@ -7786,7 +8644,14 @@ def create_app(
             for d, (t, cs) in LEGACY_DOMAIN_MAP.items():
                 if t == proj.track and set(cs) <= (set(caps) | {proj.track}):
                     domains.append(d)
-            bridge = MCPBridge(MCP_CONFIG_PATH, domains=domains)
+            bridge = MCPBridge(
+                MCP_CONFIG_PATH,
+                domains=domains,
+                project_id=proj.id,
+                browser_pool=(app.state.browser_pool
+                              if proj.track in ("pentest", "redteam", "ctf")
+                              else None),
+            )
             bridges[proj.id] = bridge
         return bridge
 
@@ -7918,7 +8783,7 @@ def create_app(
                                               workspace=proj.path),
                         global_cache_dir=app.state.decompiler_cache_dir,
                         ida_db_dir=proj.artifacts_dir / "decompiler-db",
-                        ghidra_tmp_dir=proj.artifacts_dir / ".ghidra-tmp",
+                        ghidra_tmp_dir=proj.artifacts_dir / "ghidra-tmp",
                         mcp_provider=lambda binary: app.state.ida_mcp_manager.ensure(
                             pid, binary,
                             db_dir=proj.artifacts_dir / "decompiler-db"))

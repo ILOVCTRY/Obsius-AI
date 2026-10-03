@@ -135,27 +135,42 @@ class _StdioConn:
     MCP stdio 传输 = 每行一条 JSON-RPC 消息。stderr 单独排干（很多 server
     往 stderr 打日志，不排干会堵管道）。请求按 id 关联 Future；通知不等待。"""
 
-    def __init__(self, command: str, args: list[str]):
+    def __init__(self, command: str, args: list[str],
+                 env_extra: dict[str, str] | None = None,
+                 cwd: str | Path | None = None):
         self._cmd = [command, *args]
+        self._env_extra = dict(env_extra or {})
+        self._cwd = str(cwd) if cwd else None
         self._proc: subprocess.Popen | None = None
         self._lock = threading.Lock()
         self._pending: dict[int, dict[str, Any]] = {}  # id -> {"event","resp"}
         self._next_id = 0
+        self._ready = False   # MCP 握手是否已完成（进程重启后复位）
 
     def _ensure(self) -> bool:
         if self._proc is not None and self._proc.poll() is None:
             return True
+        self._ready = False   # 新进程：握手需重做
         try:
+            env = None
+            if self._env_extra:
+                import os
+                env = {**os.environ, **self._env_extra}
             self._proc = subprocess.Popen(
                 self._cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, text=True, encoding="utf-8",
-                errors="replace", creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                errors="replace", env=env, cwd=self._cwd,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         except OSError:
             self._proc = None
             return False
         threading.Thread(target=self._pump_stdout, daemon=True).start()
         threading.Thread(target=self._drain_stderr, daemon=True).start()
         return True
+
+    def is_alive(self) -> bool:
+        """连接是否可用：未起过（懒启动，待用）或进程运行中 → True；已退出 → False。"""
+        return self._proc is None or self._proc.poll() is None
 
     def _pump_stdout(self) -> None:
         proc = self._proc
@@ -183,22 +198,66 @@ class _StdioConn:
         for _line in proc.stderr:
             pass  # 排干防阻塞
 
+    def _write_raw(self, body: dict) -> bool:
+        try:
+            assert self._proc is not None and self._proc.stdin is not None
+            self._proc.stdin.write(json.dumps(body) + "\n")
+            self._proc.stdin.flush()
+            return True
+        except (OSError, AssertionError):
+            return False
+
+    def _ensure_ready(self) -> bool:
+        """确保进程已拉起并完成 MCP 握手（initialize → initialized）。
+
+        2026-10-01：此前缺握手，@playwright/mcp 的 tools/call 会被拒（tools/list
+        却可能成功），表现为「server 离线或协议错误」。每次进程重启后重做一次。"""
+        if not self._ensure():
+            return False
+        if self._ready:
+            return True
+        with self._lock:
+            if self._ready:
+                return True
+            if self._proc is None or self._proc.poll() is not None:
+                return False
+            self._next_id += 1
+            mid = self._next_id
+            waiter: dict[str, Any] = {"event": threading.Event(), "resp": None}
+            self._pending[mid] = waiter
+            if not self._write_raw({
+                    "jsonrpc": "2.0", "method": "initialize", "id": mid,
+                    "params": {"protocolVersion": MCP_PROTOCOL_VERSION,
+                               "capabilities": {},
+                               "clientInfo": {"name": "cyberstrike-pro-chat",
+                                              "version": "0.1"}}}):
+                self._pending.pop(mid, None)
+                return False
+        if not waiter["event"].wait(_PROBE_TIMEOUT):
+            self._pending.pop(mid, None)
+            return False
+        msg = waiter.get("resp")
+        if not isinstance(msg, dict) or msg.get("error") is not None:
+            return False
+        if not self._write_raw({"jsonrpc": "2.0",
+                                "method": "notifications/initialized",
+                                "params": {}}):
+            return False
+        self._ready = True
+        return True
+
     def _rpc(self, method: str, params: dict | None = None,
              timeout: float | None = None):
+        if not self._ensure_ready():
+            return None
         with self._lock:
-            if not self._ensure():
-                return None
             self._next_id += 1
             mid = self._next_id
             waiter: dict[str, Any] = {"event": threading.Event(), "resp": None}
             self._pending[mid] = waiter
             body = {"jsonrpc": "2.0", "method": method,
                     "params": params or {}, "id": mid}
-            try:
-                assert self._proc is not None and self._proc.stdin is not None
-                self._proc.stdin.write(json.dumps(body) + "\n")
-                self._proc.stdin.flush()
-            except (OSError, AssertionError):
+            if not self._write_raw(body):
                 self._pending.pop(mid, None)
                 return None
         if not waiter["event"].wait(timeout or _CALL_TIMEOUT):
@@ -215,15 +274,19 @@ class MCPServerRuntime:
 
     HTTP_TRANSPORTS = ("streamable-http", "http", "http-stream")
 
-    def __init__(self, name: str, cfg: dict):
+    def __init__(self, name: str, cfg: dict,
+                 env_extra: dict[str, str] | None = None,
+                 cwd: str | Path | None = None):
         self.name = name
         self.transport = str(cfg.get("transport") or "stdio")
         self.domains = cfg.get("domains") or []
+        cwd = cwd or cfg.get("_cwd")
         if self.transport in self.HTTP_TRANSPORTS:
             self._conn: Any = _HttpConn(str(cfg.get("url") or ""))
         else:
             self._conn = _StdioConn(
-                str(cfg.get("command") or ""), list(cfg.get("args") or []))
+                str(cfg.get("command") or ""), list(cfg.get("args") or []),
+                env_extra=env_extra, cwd=cwd)
         self._tools: list[dict] | None = None
         self._tools_at = 0.0
         self._lock = threading.Lock()
@@ -260,15 +323,41 @@ class MCPServerRuntime:
             return f"[错误] MCP 工具报错: {text[:2000] or '未知错误'}"
         return text or "(空结果)"
 
+    def is_alive(self) -> bool:
+        """底层连接是否还活着（进程运行中 / HTTP 恒真）。"""
+        checker = getattr(self._conn, "is_alive", None)
+        return bool(checker()) if callable(checker) else True
+
 
 class MCPBridge:
-    """全部已启用 server 的桥：按项目域过滤，聚合工具清单与调用。"""
+    """全部已启用 server 的桥：按项目域过滤，聚合工具清单与调用。
 
-    def __init__(self, config_path: str | Path, domains: list[str] | None = None):
+    **会话隔离（2026-10-01）**：名字在 ``SESSION_SCOPED_SERVERS`` 里的 stdio server
+    （目前 = playwright）按 ``(server, session_id)`` **各起一个独立子进程**，用环境
+    变量 ``PW_SESSION_ID`` 把会话标识传给启动器 —— 启动器据此派生独立 Chrome
+    profile / CDP 端口，避免多个会话抢同一个持久化 profile（"Browser is already
+    in use"）。同会话内多轮复用同一进程（登录态跨轮保留）。其余 server 仍按项目共享。
+    ``MAX_BROWSER_SESSIONS`` 限制并发浏览器会话数，超限时回结构化错误引导。
+    """
+
+    # 需要按会话隔离的 stdio server 名（浏览器类，进程/资源重）
+    SESSION_SCOPED_SERVERS = {"playwright"}
+    # 并发浏览器会话上限（超出时调用回错误引导，避免机器被 Chrome 打爆）
+    MAX_BROWSER_SESSIONS = 4
+    # 传给会话级 server 进程的环境变量名
+    SESSION_ENV_KEY = "PW_SESSION_ID"
+
+    def __init__(self, config_path: str | Path, domains: list[str] | None = None,
+                 *, project_id: str | None = None, browser_pool=None):
         self.config_path = Path(config_path)
+        self._cwd = self.config_path.resolve().parent.parent
         self._domains = {d for d in (domains or []) if d}
+        self.project_id = project_id
+        self.browser_pool = browser_pool
         self._servers: dict[str, MCPServerRuntime] = {}
         self._loaded_at = 0.0
+        # (server, session_id) -> 会话级 runtime
+        self._session_servers: dict[tuple[str, str], MCPServerRuntime] = {}
         self._lock = threading.Lock()
 
     def _load_servers(self) -> dict[str, MCPServerRuntime]:
@@ -289,17 +378,68 @@ class MCPBridge:
                 domains = {d for d in (entry.get("domains") or []) if d}
                 if self._domains and domains and not (domains & self._domains):
                     continue
+                if name in self.SESSION_SCOPED_SERVERS:
+                    # 会话级 server：此处只登记"该 server 启用"，runtime 延迟到
+                    # 按会话首次调用时再建（那时才知道 session_id）。
+                    servers[name] = _LazySessionServer(name, entry, cwd=self._cwd)
+                    continue
                 try:
-                    servers[name] = MCPServerRuntime(name, entry)
+                    runtime_cfg = {**entry, "_cwd": str(self._cwd)}
+                    servers[name] = MCPServerRuntime(name, runtime_cfg)
                 except (ValueError, OSError):
                     continue  # 非法端点等：跳过该 server
             self._servers = servers
             self._loaded_at = time.monotonic()
             return servers
 
+    def _server_for_session(self, name: str, entry: dict,
+                            session_id: str) -> MCPServerRuntime:
+        """取（或建）会话级 server runtime；超并发上限时回错误。"""
+        key = (name, session_id)
+        with self._lock:
+            srv = self._session_servers.get(key)
+            if srv is not None:
+                if srv.is_alive():
+                    return srv
+                # 进程已退出（空闲回收 / 崩溃）→ 丢弃重认领配额
+                self._session_servers.pop(key, None)
+            # 回收其它已死会话，释放并发配额
+            dead = [k for k, v in self._session_servers.items() if not v.is_alive()]
+            for k in dead:
+                self._session_servers.pop(k, None)
+            if len(self._session_servers) >= self.MAX_BROWSER_SESSIONS:
+                raise _TooManyBrowserSessions(
+                    f"并发浏览器会话已达上限 {self.MAX_BROWSER_SESSIONS}"
+                    f"（当前会话 {session_id[:12]} 无法再开浏览器）")
+            env = {self.SESSION_ENV_KEY: session_id}
+            if self.project_id:
+                env["PW_PROJECT_ID"] = self.project_id
+            if name == "playwright" and self.browser_pool is not None and self.project_id:
+                try:
+                    env["PW_BROWSER_CDP_ENDPOINT"] = self.browser_pool.prepare_embedded(
+                        self.project_id)
+                except Exception as exc:  # noqa: BLE001
+                    raise OSError(f"项目内置浏览器启动失败: {exc}") from exc
+            runtime_cfg = {**entry, "_cwd": str(self._cwd)}
+            srv = MCPServerRuntime(name, runtime_cfg, env_extra=env)
+            self._session_servers[key] = srv
+            return srv
+
     def status(self) -> list[dict]:
         out = []
         for name, srv in self._load_servers().items():
+            if isinstance(srv, _LazySessionServer):
+                # 会话级 server 的探针只设置 PW_NO_CHROME，不启动真实浏览器；
+                # 仍需拉取工具清单，否则前端只能显示“工具发现失败或为空”。
+                try:
+                    tools = srv.list_tools()
+                except Exception:  # noqa: BLE001
+                    tools = []
+                out.append({"name": name, "transport": "stdio",
+                            "domains": sorted(srv.domains),
+                            "online": bool(tools), "tools": tools,
+                            "session_scoped": True})
+                continue
             try:
                 tools = srv.list_tools()
             except Exception:  # noqa: BLE001
@@ -312,7 +452,12 @@ class MCPBridge:
         return out
 
     def tool_specs(self) -> list[dict]:
-        """LLM 工具面：mcp__<server>__<tool> 规格列表（OpenAPI function 形状）。"""
+        """LLM 工具面：mcp__<server>__<tool> 规格列表（OpenAPI function 形状）。
+
+        会话级 server 在装配工具面时（尚无 session_id 上下文）用其**模板配置**静态
+        列出工具：直接读该 server 的工具清单开销大且需起进程，故会话级 server 的工具
+        以「按需透传」方式提供 —— 这里仍尝试用其共享模板列举一次，失败则跳过。
+        """
         specs = []
         for name, srv in self._load_servers().items():
             try:
@@ -325,18 +470,89 @@ class MCPBridge:
                     "description": (
                         f"MCP[{name}] {t['description']}".strip()
                         or f"MCP server {name} 的工具 {t['name']}"),
-                    "input_schema": {
-                        "type": "object",
-                        "properties": (t.get("input_schema") or {}).get("properties") or {},
-                    },
+                    # 保留 required/items/enum 等完整 JSON Schema；只透传 properties
+                    # 会让模型遗漏必填参数，也会破坏 MCP 工具的数组与枚举输入。
+                    "input_schema": t.get("input_schema") or {
+                        "type": "object", "properties": {}},
                 })
         return specs
 
-    def call(self, server: str, tool: str, args: dict) -> str:
-        srv = self._load_servers().get(server)
+    def _entry_for(self, server: str) -> dict | None:
+        """读回该 server 的原始配置条目（会话级 server 建进程时用）。"""
+        try:
+            cfg = json.loads(self.config_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        for entry in cfg.get("servers") or []:
+            if isinstance(entry, dict) and str(entry.get("name") or "") == server:
+                return entry
+        return None
+
+    def call(self, server: str, tool: str, args: dict,
+             session_id: str | None = None) -> str:
+        servers = self._load_servers()
+        srv = servers.get(server)
         if srv is None:
             return f"[错误] MCP 调用失败：server '{server}' 未启用或域名不匹配"
+        if isinstance(srv, _LazySessionServer):
+            sid = (session_id or "").strip()
+            if not sid:
+                # 无会话上下文：退回模板进程（单实例），仍可工作但无隔离
+                sid = "__default__"
+            entry = self._entry_for(server) or {"name": server,
+                                                "transport": "stdio",
+                                                "command": srv.command,
+                                                "args": srv.args}
+            try:
+                rt = self._server_for_session(server, entry, sid)
+            except _TooManyBrowserSessions as e:
+                return (f"[错误] {e}。请等某个会话的浏览器空闲回收"
+                        f"（默认 1 小时无活动自动关闭），或减少并发会话数后重试。")
+            except (ValueError, OSError) as e:
+                return f"[错误] MCP 调用失败：无法启动 {server} 会话进程: {e}"
+        else:
+            rt = srv
         try:
-            return srv.call(tool, args)
+            return rt.call(tool, args)
         except Exception as e:  # noqa: BLE001 —— 工具崩溃回文本，不断轮
             return f"[错误] MCP 调用异常: {e}"
+
+
+class _TooManyBrowserSessions(RuntimeError):
+    """并发浏览器会话数超限（MCPBridge.MAX_BROWSER_SESSIONS）。"""
+
+
+class _LazySessionServer:
+    """会话级 server 的占位：登记启用状态 + 静态配置，不建进程。
+
+    ``list_tools`` 用一份**临时**共享 runtime 探一次工具面（供 LLM 工具面装配），
+    真正 ``call`` 时再按 session_id 建独立进程。探针 runtime 失败即回空清单。
+    """
+
+    def __init__(self, name: str, entry: dict,
+                 *, cwd: str | Path | None = None):
+        self.name = name
+        self.transport = str(entry.get("transport") or "stdio")
+        self.domains = entry.get("domains") or []
+        self.command = str(entry.get("command") or "")
+        self.args = list(entry.get("args") or [])
+        self.cwd = str(cwd) if cwd else None
+        self._probe: MCPServerRuntime | None = None
+        self._probe_lock = threading.Lock()
+
+    def list_tools(self, *, refresh: bool = False) -> list[dict]:
+        with self._probe_lock:
+            if self._probe is None:
+                try:
+                    # PW_NO_CHROME：探针进程只列工具清单，不起浏览器
+                    self._probe = MCPServerRuntime(
+                        self.name, {"transport": self.transport,
+                                    "command": self.command, "args": self.args,
+                                    "_cwd": self.cwd},
+                        env_extra={"PW_NO_CHROME": "1"})
+                except (ValueError, OSError):
+                    return []
+            try:
+                return self._probe.list_tools(refresh=refresh)
+            except Exception:  # noqa: BLE001
+                return []

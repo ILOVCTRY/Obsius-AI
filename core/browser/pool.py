@@ -23,8 +23,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import concurrent.futures
+import hashlib
 import importlib.util
 import json
+import socket
 import threading
 import time
 from dataclasses import dataclass, field
@@ -143,12 +145,15 @@ class BrowserInstance:
     """
 
     def __init__(self, project_id: str, profile_dir: Path, downloads_dir: Path,
-                 bb, config: BrowserConfig):
+                 bb, config: BrowserConfig, cdp_port: int | None = None):
         self.project_id = project_id
         self.profile_dir = profile_dir
         self.downloads_dir = downloads_dir
         self.bb = bb
         self.config = config
+        # MCP Playwright 通过该 loopback CDP 端点接入同一项目浏览器，避免
+        # MCP 自己再拉起一个看不见的 Chrome。
+        self.cdp_port = cdp_port
         self._capture = None       # CaptureTap（批 F6-2 注入，见 capture.py）
         from core.browser.intercept import InterceptHub
         self._intercept = InterceptHub(self, timeout_s=config.intercept_timeout_s)
@@ -243,11 +248,14 @@ class BrowserInstance:
         try:
             self._pw = await async_playwright().start()
             self.profile_dir.mkdir(parents=True, exist_ok=True)
+            launch_args = ([f"--remote-debugging-port={self.cdp_port}"]
+                           if self.cdp_port else [])
             self._ctx = await self._pw.chromium.launch_persistent_context(
                 str(self.profile_dir),
                 headless=self.config.headless,
                 viewport={"width": self.config.viewport_width,
                           "height": self.config.viewport_height},
+                args=launch_args,
                 accept_downloads=True,
                 ignore_https_errors=self.config.ignore_https_errors,
             )
@@ -658,7 +666,27 @@ class BrowserPool:
         self._bb_getter = bb_getter          # pid -> Blackboard（app 层注入）
         self.config = config or BrowserConfig.from_file(config_path)
         self._instances: dict[str, BrowserInstance] = {}
+        self._cdp_ports: dict[str, int] = {}
         self._lock = threading.Lock()
+
+    def _cdp_port_for(self, project_id: str) -> int:
+        """为项目挑一个稳定且当前空闲的 loopback CDP 端口。"""
+        existing = self._cdp_ports.get(project_id)
+        if existing:
+            return existing
+        seed = int(hashlib.sha1(project_id.encode("utf-8")).hexdigest()[:8], 16)
+        start = 16000 + seed % 1800
+        for offset in range(200):
+            port = start + offset
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    sock.bind(("127.0.0.1", port))
+                self._cdp_ports[project_id] = port
+                return port
+            except OSError:
+                continue
+        raise BrowserError("项目浏览器无法分配 MCP CDP 端口")
 
     def get_instance(self, project_id: str) -> BrowserInstance:
         with self._lock:
@@ -671,11 +699,20 @@ class BrowserPool:
                     downloads_dir=base / "artifacts" / "browser-downloads",
                     bb=self._bb_getter(project_id),
                     config=self.config,
+                    cdp_port=self._cdp_port_for(project_id),
                 )
                 # 抓包拦截（F6 批 2）：context 建立后由 _ensure_ctx 自动 attach
                 inst._capture = CaptureTap(inst)
                 self._instances[project_id] = inst
             return inst
+
+    def prepare_embedded(self, project_id: str) -> str:
+        """启动项目浏览器并返回 MCP 可复用的 loopback CDP 地址。"""
+        inst = self.get_instance(project_id)
+        inst.ensure_human_session()
+        if not inst.cdp_port:
+            raise BrowserError("项目浏览器未暴露 MCP CDP 端点")
+        return f"http://127.0.0.1:{inst.cdp_port}"
 
     def close_project(self, project_id: str) -> None:
         """焚毁实例（删项目前必调——profile 目录被 chromium 占用会锁死删除）。"""
@@ -686,6 +723,7 @@ class BrowserPool:
                 inst.stop()
             except Exception:  # noqa: BLE001 —— 停机降级：实例残留随进程退出
                 pass
+            self._cdp_ports.pop(project_id, None)
 
     def close_all(self) -> None:
         with self._lock:

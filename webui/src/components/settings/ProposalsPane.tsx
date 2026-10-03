@@ -19,7 +19,7 @@ const STATUS_LABEL: Record<ProposalStatus, string> = {
 
 export function targetLabel(p: Proposal): string {
   const t = p.target
-  if (t.kind === "kb") {
+  if (t.kind === "kb" || t.kind === "case" || t.kind === "pattern" || t.kind === "playbook") {
     const base = `${t.cap}/${t.path}`
     return p.mode === "rename" ? `${base} → ${t.cap}/${t.new_path}` : base
   }

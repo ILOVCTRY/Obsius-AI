@@ -7,7 +7,7 @@ import { cn } from "@/lib/utils"
 
 // MCP 配置层（原 SettingsView 内部组件，webui-trae-shell M4 抽出为独立件）：
 // 设置页「MCP」tab 与新壳工具姿态「插件·MCP」共用。
-// 记录端点与启动方式（stdio=命令+参数，http=URL）；Agent 运行时工具桥为后续批次。
+// 记录端点与启动方式（stdio=命令+参数，http=URL）；Agent 运行时会动态发现工具。
 
 const selectCls = "rounded border bg-background px-1.5 py-0.5 text-xs [color-scheme:dark] [&>option]:bg-popover [&>option]:text-popover-foreground"
 
@@ -78,8 +78,8 @@ export function McpPane() {
               onClick={() => setServers((ss) => [...ss, { name: "", url: "", transport: "stdio", enabled: true, domains: [], command: "", args: [] }])}>
         + 添加 server
       </Button>
-      <p className="rounded border border-amber-400/30 bg-amber-400/10 p-2 text-[10px] text-amber-300">
-        MCP 配置层（stdio 填命令+参数，http 填 URL）：记录端点与启动方式。Agent 运行时工具桥（把 MCP 工具注入会话工具集）是后续批次——现在改配置不会改变 Agent 可用工具。
+      <p className="rounded border border-cyan-400/20 bg-cyan-400/10 p-2 text-[10px] text-cyan-200">
+        MCP 配置层（stdio 填命令+参数，http 填 URL）。保存后新会话会重新发现工具；Playwright 会复用当前项目的内置浏览器和登录态。
       </p>
     </div>
   )

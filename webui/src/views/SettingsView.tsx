@@ -26,7 +26,6 @@ import {
 } from "@/components/settings/CreateDialogs"
 import { SkillEditor, SKILL_MD_PREFIX, type SkillEditorHandle } from "@/components/settings/SkillEditor"
 import { KbView, type KbFocus } from "@/components/settings/KbView"
-import { RouteTester } from "@/components/settings/RouteTester"
 import { MarkdownOutline } from "@/components/settings/MarkdownOutline"
 import { ProposalsPane } from "@/components/settings/ProposalsPane"
 import { IntelSourcePane } from "@/components/settings/IntelSourcePane"
@@ -36,7 +35,7 @@ import { McpPane } from "@/components/McpPane"
 import { parseSkill } from "@/lib/skillfm"
 import { cn } from "@/lib/utils"
 import {
-  BookOpen, Bot, BrainCircuit, Cable, ChevronRight, CircleGauge,
+  Bot, Cable, ChevronRight, CircleGauge,
   Gauge, GitPullRequest, Network, Radio, Search, Settings2, ShieldCheck,
   Sparkles, Wrench,
 } from "lucide-react"
@@ -171,7 +170,7 @@ export function SettingsView({ nav, pid }: {
   }
 
   const navGroups: { label: string; items: [string, string, typeof Bot][] }[] = [
-    { label: "智能系统", items: [["experts", "专家池", Bot], ["skills", "技能库", BrainCircuit], ["kb", "知识库", BookOpen], ["matrix", "能力矩阵", CircleGauge], ["advisor", "策略顾问", Sparkles]] },
+    { label: "智能系统", items: [["experts", "专家池", Bot], ["matrix", "能力矩阵", CircleGauge], ["advisor", "策略顾问", Sparkles]] },
     { label: "安全控制", items: [["rules", "安全红线", ShieldCheck], ["gateway", "访问网关", Network], ["tools", "执行工具", Wrench]] },
     { label: "基础设施", items: [["llm", "模型供应商", Gauge], ["mcp", "MCP 连接", Cable], ["intel", "情报来源", Radio]] },
     { label: "工作流", items: [["proposals", "变更提案", GitPullRequest]] },
@@ -188,7 +187,7 @@ export function SettingsView({ nav, pid }: {
         <div className="settings-brand"><div className="settings-brand-mark"><Settings2 size={15} /></div><div><strong>控制中心</strong><span>OBSIUS / SETTINGS</span></div></div>
         <div className="settings-context"><span className="eyebrow">当前上下文</span><div className="settings-context-row"><span className="settings-live-dot" /> <span>{trackLabel(track)}</span><span className="settings-slash">/</span><span>{capLabel(cap)}</span></div></div>
         <div className="settings-nav">
-          {navGroups.map((group) => <div className="settings-nav-group" key={group.label}><span className="settings-nav-label">{group.label}</span>{group.items.map(([key, label, Icon]) => <button key={key} className={cn("settings-nav-item", tab === key && "is-active")} onClick={() => setTab(key)}><Icon size={14} /><span>{label}</span>{key === "proposals" && pendingN > 0 && <b>{pendingN}</b>}<ChevronRight size={13} className="settings-nav-arrow" /></button>)}</div>)}
+          {navGroups.map((group) => <div className="settings-nav-group" key={group.label}><span className="settings-nav-label">{group.label}</span>{group.items.map(([key, label, Icon]) => <button key={key} aria-label={label} className={cn("settings-nav-item", tab === key && "is-active")} onClick={() => setTab(key)}><Icon size={14} /><span>{label}</span>{key === "proposals" && pendingN > 0 && <b>{pendingN}</b>}<ChevronRight size={13} className="settings-nav-arrow" /></button>)}</div>)}
         </div>
         <div className="settings-sidebar-footer"><span className="settings-live-dot" />配置服务正常<span className="settings-version">v0.8</span></div>
       </aside>
@@ -199,7 +198,7 @@ export function SettingsView({ nav, pid }: {
         <Tabs value={tab} onValueChange={setTab} className="settings-content min-h-0 flex-1 flex-col gap-0">
           <TabsList className="hidden"><TabsTrigger value={tab}>{activeLabel}</TabsTrigger></TabsList>
           <TabsContent value="experts" className="min-h-0 flex-1"><ExpertsPane tax={tax} focus={expertFocus} /></TabsContent>
-          <TabsContent value="skills" className="min-h-0 flex-1"><SkillsPane tax={tax} track={track} cap={cap} focus={skillFocus} /></TabsContent>
+          <TabsContent value="skills" className="min-h-0 flex-1"><SkillsPane track={track} cap={cap} focus={skillFocus} /></TabsContent>
           <TabsContent value="kb" className="min-h-0 flex-1"><KbView cap={cap} focus={kbFocus} /></TabsContent>
           <TabsContent value="matrix" className="min-h-0 flex-1"><MatrixPane tax={tax} track={track} onFocusSkill={(source, pack, name) => { if (source === "track") setTrack(pack); else setCap(pack); setTab("skills"); setSkillFocus({ source, pack, name, n: Date.now() }) }} /></TabsContent>
           <TabsContent value="rules" className="min-h-0 flex-1"><RulesPane track={track} cap={cap} focus={ruleFocus} pid={pid} /></TabsContent>
@@ -447,12 +446,8 @@ const HANDLE_CLS = "z-10 bg-border transition-colors hover:bg-primary/60 data-[s
 function HHandle() {
   return <Separator className={cn("h-full w-px shrink-0", HANDLE_CLS)} />
 }
-function VHandle() {
-  return <Separator className={cn("h-px w-full shrink-0", HANDLE_CLS)} />
-}
-
-function SkillsPane({ tax, track, cap, focus }: {
-  tax: Taxonomy | null; track: string; cap: string; focus: SkillFocus | null
+export function SkillsPane({ track, cap, focus }: {
+  track: string; cap: string; focus: SkillFocus | null
 }) {
   const [source, setSource] = useState<SkillSource>("cap")
   const packName = source === "cap" ? cap : track
@@ -484,7 +479,7 @@ function SkillsPane({ tax, track, cap, focus }: {
     listApi(packName).then((ss) => {
       if (!alive) return
       setSkills(ss)
-      setSelected((cur) => cur && ss.some((s) => s.name === cur) ? cur : (ss[0]?.name ?? null))
+      setSelected((cur) => cur && ss.some((s) => s.name === cur) ? cur : null)
     }).catch(() => { if (alive) setSkills([]) })
     return () => { alive = false }
   }, [listApi, packName])
@@ -494,15 +489,15 @@ function SkillsPane({ tax, track, cap, focus }: {
   // doctor/矩阵/直播间深链跳转：切到指定来源并选中技能
   // （守卫按 focus.source 对应的包比较——packName 依赖本 pane 的 source state，
   //   轨技能深链时 source 仍是 "cap"，用 packName 会永远不命中）
-  // viaFocus：深链选中的技能以预览模式打开（F12 配套）；手动点选/保存后回编辑默认
-  const [viaFocus, setViaFocus] = useState(false)
+  // 技能打开默认预览；新建技能使用编辑模式，保存/启用刷新保留当前模式
+  const [openMode, setOpenMode] = useState<"edit" | "preview">("preview")
   useEffect(() => {
     if (!focus) return
     const focusPack = focus.source === "cap" ? cap : track
     if (focus.pack === focusPack) {
       setSource(focus.source)
       setSelected(focus.name)
-      setViaFocus(true)
+      setOpenMode("preview")
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focus?.n])
@@ -516,6 +511,8 @@ function SkillsPane({ tax, track, cap, focus }: {
     if (s === source) return
     if (dirty && !window.confirm("技能有未保存修改，放弃并切换？")) return
     setSource(s)
+    setSelected(null)
+    setOpenMode("preview")
   }
 
   const save = async () => {
@@ -526,7 +523,6 @@ function SkillsPane({ tax, track, cap, focus }: {
       setSaved(true)
       setTimeout(() => setSaved(false), 1500)
       packsChanged()
-      setViaFocus(false) // 保存后重载 detail 会触发编辑器重置，回到编辑模式
       reload()
       detailApi(packName, selected).then(setDetail).catch(() => {})
     } catch (e) {
@@ -598,7 +594,7 @@ function SkillsPane({ tax, track, cap, focus }: {
                        selected !== s.name && !s.enabled && "opacity-50")}>
                   <button
                     className="min-w-0 flex-1 truncate rounded px-2 py-1.5 text-left font-mono hover:bg-accent/40"
-                    onClick={() => { setSelected(s.name); setViaFocus(false) }}>
+                    onClick={() => { setSelected(s.name); setOpenMode("preview") }}>
                     {s.name}
                   </button>
                   <button className="px-1.5 text-[10px] text-(--status-error) opacity-0 transition-opacity group-hover:opacity-100"
@@ -645,7 +641,7 @@ function SkillsPane({ tax, track, cap, focus }: {
               </p>
               <SkillEditor key={detail.name} ref={editorRef} detail={detail} vocab={vocab}
                            onDirtyChange={setDirty}
-                           startMode={viaFocus ? "preview" : "edit"} resetKey={focus?.n} />
+                           startMode={openMode} resetKey={focus?.n} />
               <DangerNote>表单保存时合并回写 frontmatter（name 锁定与目录一致，改名请新建+删除）；正文是 Agent 入口纪律，写坏会导致路由失效。</DangerNote>
             </div>
           ) : (
@@ -654,28 +650,20 @@ function SkillsPane({ tax, track, cap, focus }: {
         </Panel>
         <HHandle />
 
-        {/* 右栏：路由试算 + md 大纲（默认 300px） */}
+        {/* 右栏：正文大纲（默认 300px） */}
         <Panel defaultSize={300} minSize="17%">
-          <Group orientation="vertical">
-            <Panel defaultSize="58%" minSize="20%" className="min-h-0 overflow-y-auto">
-              <RouteTester tax={tax} track={track} />
-            </Panel>
-            <VHandle />
-            <Panel defaultSize="42%" minSize="12%">
-              <div className="flex h-full min-h-0 flex-col">
-                <p className="shrink-0 border-b px-2 py-1 text-[10px] font-semibold text-muted-foreground">
-                  正文大纲（h1–h3，点击滚动）
-                </p>
-                <MarkdownOutline markdown={outlineMd} prefix={outlinePrefix} />
-              </div>
-            </Panel>
-          </Group>
+          <div className="flex h-full min-h-0 flex-col">
+            <p className="shrink-0 border-b px-2 py-1 text-[10px] font-semibold text-muted-foreground">
+              正文大纲（h1–h3，点击滚动）
+            </p>
+            <MarkdownOutline markdown={outlineMd} prefix={outlinePrefix} />
+          </div>
         </Panel>
       </Group>
 
       <SkillCreateDialog open={createOpen} onOpenChange={setCreateOpen}
                         source={source} packName={packName}
-                        onCreated={(name) => { setSelected(name); reload() }} />
+                        onCreated={(name) => { setSelected(name); setOpenMode("edit"); reload() }} />
       <AlertDialog open={confirmDel !== null} onOpenChange={(v) => !v && setConfirmDel(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -771,7 +759,7 @@ function LlmPane() {
     setBusyIdx(i)
     setError(null)
     try {
-      const r = await api.discoverLlm(creds(providers[i]))
+      const r = await api.discoverLlm({ ...creds(providers[i]), format: providers[i].format, proxy: providers[i].proxy ?? null })
       const ids = r.models.map((m) => m.id)
       const checked = ids.filter((id) => providers[i].models.includes(id))
       setDisc((d) => ({ ...d, [i]: {
@@ -794,7 +782,7 @@ function LlmPane() {
   const testModel = async (i: number, model: string) => {
     const key = `${i}/${model}`
     setTestRes((t) => ({ ...t, [key]: "…" }))
-    const r = await api.testLlmModel({ ...creds(providers[i]), model })
+    const r = await api.testLlmModel({ ...creds(providers[i]), format: providers[i].format, model, proxy: providers[i].proxy ?? null })
     setTestRes((t) => ({ ...t, [key]: r.ok ? "✓ 可用" : `✗ ${r.error ?? "不可用"}` }))
   }
 
@@ -817,10 +805,10 @@ function LlmPane() {
       <ScrollArea className="llm-scroll"><div className="llm-provider-list">
         {providers.map((p, i) => <div key={i} className={cn("llm-provider-card", !p.enabled && "is-disabled", p.name === defaultProvider && "is-default")}>
           <div className="llm-provider-header"><div className="llm-order"><button onClick={() => move(i, -1)} aria-label="上移">↑</button><button onClick={() => move(i, 1)} aria-label="下移">↓</button></div><div className="llm-provider-title"><Input value={p.name} onChange={(e) => patch(i, { name: e.target.value })} placeholder="供应商名" /><div><span>{p.models.length} 个模型</span><span className={p.enabled ? "llm-status is-on" : "llm-status"}>{p.enabled ? "已启用" : "已停用"}</span></div></div><label className="llm-switch"><input type="checkbox" checked={p.enabled} onChange={(e) => patch(i, { enabled: e.target.checked })} /><span /></label><button className="llm-delete" onClick={() => setProviders((ps) => ps.filter((_, j) => j !== i))}>删除</button></div>
-          <div className="llm-section"><div className="llm-section-title"><span>连接配置</span><small>兼容 OpenAI / Anthropic API</small></div><div className="llm-fields"><label><span>API 地址</span><Input value={p.base_url} onChange={(e) => patch(i, { base_url: e.target.value })} className="font-mono" placeholder="https://…/api/v1" /></label><label><span>API 密钥</span><Input type="password" value={p.api_key ?? ""} onChange={(e) => patch(i, { api_key: e.target.value })} className="font-mono" placeholder={p.has_key ? "已配置 · 留空表示保持不变" : "输入 API 密钥"} /></label><label className="llm-thinking" title="勾选=请求开启思考链（网关不支持时自动降级关闭，日志有记录）；不勾=跟随网关缺省（ark 网关默认开，其余默认关）"><input type="checkbox" checked={p.thinking === true} onChange={(e) => patch(i, { thinking: e.target.checked || null })} /><span>思考链</span></label></div></div>
+           <div className="llm-section"><div className="llm-section-title"><span>连接配置</span><small>地址填写 API 根地址，系统自动追加协议端点</small></div><div className="llm-fields"><label><span>兼容格式</span><select value={p.format} onChange={(e) => patch(i, { format: e.target.value as LlmProvider["format"] })}><option value="openai-chat-completions">OpenAI Chat Completions</option><option value="openai-responses">OpenAI Responses API</option><option value="anthropic-messages">Anthropic Messages</option></select></label><label><span>API 地址</span><Input value={p.base_url} onChange={(e) => patch(i, { base_url: e.target.value })} className="font-mono" placeholder="https://api.example.com" /></label><label><span>API 密钥</span><Input type="password" value={p.api_key ?? ""} onChange={(e) => patch(i, { api_key: e.target.value })} className="font-mono" placeholder={p.has_key ? "已配置 · 留空表示保持不变" : "输入 API 密钥"} /></label><label><span>供应商代理</span><Input value={p.proxy ?? ""} onChange={(e) => patch(i, { proxy: e.target.value || null })} className="font-mono" placeholder="留空跟随系统代理，例如 http://127.0.0.1:7890" /></label><label className="llm-thinking" title="勾选=按兼容格式发送 reasoning/thinking（不支持时自动降级）；不勾=普通请求"><input type="checkbox" checked={p.thinking === true} onChange={(e) => patch(i, { thinking: e.target.checked || null })} /><span>思考链</span></label></div></div>
           <div className="llm-section"><div className="llm-section-title"><span>模型清单</span><small>第一个模型作为供应商默认</small><div className="llm-model-actions"><Button size="sm" variant="outline" onClick={() => addModel(i)}>添加模型</Button><Button size="sm" variant="outline" disabled={busyIdx === i || !p.base_url} onClick={() => discover(i)}>{busyIdx === i ? "获取中…" : "发现模型"}</Button></div></div><div className="llm-model-list">{p.models.map((m, mi) => <div className={cn("llm-model-row", mi === 0 && "is-primary")} key={m}><div className="llm-model-main"><span className="llm-model-dot" /><span className="font-mono">{m}</span>{mi === 0 && <Badge>默认模型</Badge>}</div><label className="llm-context"><span>上下文</span><Input type="number" min={0.1} step={1} placeholder="默认" value={p.model_context?.[m] ? String(p.model_context[m] / 1000) : ""} onChange={(e) => { const raw = e.target.value; const ctx = { ...(p.model_context ?? {}) }; if (raw === "") delete ctx[m]; else ctx[m] = Math.round(Number(raw) * 1000); patch(i, { model_context: ctx }) }} /><em>K</em></label><span className={cn("llm-test-state", testRes[`${i}/${m}`]?.startsWith("✓") && "is-ok", testRes[`${i}/${m}`]?.startsWith("✗") && "is-fail")}>{testRes[`${i}/${m}`] ?? "未测试"}</span><Button size="sm" variant="ghost" onClick={() => testModel(i, m)}>测试</Button><div className="llm-row-arrows"><button onClick={() => moveModel(i, mi, -1)}>↑</button><button onClick={() => moveModel(i, mi, 1)}>↓</button><button className="is-danger" onClick={() => patch(i, { models: p.models.filter((x) => x !== m) })}>×</button></div></div>)}</div><div className="llm-add-model"><Input value={newModel[i] ?? ""} onChange={(e) => setNewModel((n) => ({ ...n, [i]: e.target.value }))} onKeyDown={(e) => e.key === "Enter" && addModel(i)} placeholder="输入模型 ID，例如 gpt-4o-mini" /><Button size="sm" onClick={() => addModel(i)}>添加</Button></div>{disc[i] && <div className="llm-discovery"><div className="llm-discovery-title"><span>模型发现</span><small>{disc[i].ids.length} 个候选模型</small></div>{disc[i].msg && <p>{disc[i].msg}</p>}<div className="llm-discovery-list">{disc[i].ids.map((id) => <label key={id}><input type="checkbox" checked={disc[i].checked.includes(id)} onChange={(e) => setDisc((d) => { const cur = d[i]; const checked = e.target.checked ? [...cur.checked, id] : cur.checked.filter((x) => x !== id); return { ...d, [i]: { ...cur, checked } } })} />{id}</label>)}</div><div><Button size="sm" onClick={() => applyDisc(i)}>应用已选模型</Button><Button size="sm" variant="ghost" onClick={() => { const { [i]: _drop, ...rest } = disc; setDisc(rest) }}>取消</Button></div></div>}</div>
         </div>)}
-        <Button size="sm" variant="outline" className="llm-add-provider" onClick={() => setProviders((ps) => [...ps, { name: "", base_url: "", api_key: "", models: [], enabled: true }])}>+ 添加供应商</Button>
+        <Button size="sm" variant="outline" className="llm-add-provider" onClick={() => setProviders((ps) => [...ps, { name: "", base_url: "", format: "openai-chat-completions", api_key: "", models: [], enabled: true }])}>+ 添加供应商</Button>
       </div></ScrollArea>
       <button className="llm-help-toggle" onClick={() => setHelpOpen((open) => !open)}>配置说明 {helpOpen ? "⌃" : "⌄"}</button>{helpOpen && <div className="llm-help"><p>第一个启用供应商的第一个模型会作为自动默认模型。</p><p>API 密钥只显示配置状态，不会回显真实值。</p><p>上下文 K 用于控制会话历史预算和摘要压缩阈值，留空使用默认值。</p></div>}
     </div>

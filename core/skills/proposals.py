@@ -31,6 +31,7 @@ from core.skills.registry import SkillRegistry, parse_frontmatter
 # index 仅 edit（M0 全局单表 packs/kb/route_index.yaml 恒存在，K4 的 create 退役；
 # 条目 kb 路径须带本域前缀，apply 时按域归并写回，删除仍归人类）
 KB_MODES = {"edit", "create", "rename", "delete"}
+DERIVED_KINDS = {"case", "pattern", "playbook"}
 SKILL_MODES = {"edit", "suggest"}
 INDEX_MODES = {"edit"}
 # K6（2026-09-20 外部对标升级项 A，RapidPen 成功案例复用）：成功链沉淀——
@@ -117,8 +118,8 @@ def _validate_common(p: dict) -> None:
     _require(isinstance(p.get("reason"), str) and p["reason"].strip(),
              "reason 必填且不能为空（为什么改/凭什么）")
     _require(len(p["summary"]) <= 300, "summary 限 300 字")
-    _require(t.get("kind") in {"kb", "skill", "index", "case"},
-             "target.kind 仅 kb|skill|index|case")
+    _require(t.get("kind") in {"kb", "skill", "index"} | DERIVED_KINDS,
+             "target.kind 仅 kb|skill|index|case|pattern|playbook")
     _require(p["mode"] in (KB_MODES | SKILL_MODES | INDEX_MODES | CASE_MODES),
              f"非法 mode: {p['mode']}")
     if p.get("origin", "agent") not in ORIGINS:
@@ -133,11 +134,10 @@ def _validate_target(packs_root: Path, p: dict, *, applying: bool) -> None:
     kind, mode = t["kind"], p["mode"]
     content = p.get("content")
 
-    if kind in {"kb", "case"}:
-        if kind == "case":
-            _require(mode in CASE_MODES,
-                     "case 提案仅 edit（成功案例.md 补段）/create（payloads/ 补弹药），"
-                     "rename/delete 归人类")
+    if kind in {"kb"} | DERIVED_KINDS:
+        if kind in DERIVED_KINDS:
+            _require(mode in {"edit", "create"},
+                     f"{kind} 提案仅允许 edit/create")
         cap = t.get("cap")
         path = t.get("path")
         _require(cap and path, f"{kind} 提案必须给 target.cap 与 target.path")
@@ -240,6 +240,13 @@ def create_proposal(packs_root: str | Path, proposal: dict,
         "summary": (proposal.get("summary") or "").strip(),
         "reason": (proposal.get("reason") or "").strip(),
         "evidence": (proposal.get("evidence") or "").strip()[:2000],
+        "source_refs": [
+            {"cap": str(ref.get("cap") or ""),
+             "path": str(ref.get("path") or ""),
+             **({"title": str(ref["title"])} if ref.get("title") else {})}
+            for ref in (proposal.get("source_refs") or [])
+            if isinstance(ref, dict) and ref.get("cap") and ref.get("path")
+        ][:20],
         "revisions": [],
         "created_at": _now(),
         "decided_at": None,
@@ -267,7 +274,7 @@ def _index_path(packs_root: Path, cap: str) -> Path:
 def _current_text(packs_root: Path, p: dict) -> str | None:
     t = p["target"]
     try:
-        if t["kind"] in {"kb", "case"}:
+        if t["kind"] in {"kb"} | DERIVED_KINDS:
             target = writing.resolve_kb(packs_root, t["cap"], t["path"])
             return target.path.read_text(encoding="utf-8") if target.path.is_file() else None
         if t["kind"] == "index":
@@ -296,7 +303,7 @@ def live_diff(packs_root: str | Path, p: dict) -> dict:
     t = p["target"]
     mode = p["mode"]
     current = _current_text(packs_root, p)
-    label = (f"{t.get('cap') + '/' if t['kind'] in {'kb', 'index', 'case'} else ''}"
+    label = (f"{t.get('cap') + '/' if t['kind'] in {'kb', 'index', 'case', 'pattern', 'playbook'} else ''}"
              f"{t.get('path') or t.get('name') or 'route_index.yaml'}")
     if mode == "create":
         old_name, new_name = "(不存在)", label
@@ -314,7 +321,7 @@ def live_diff(packs_root: str | Path, p: dict) -> dict:
     diff = "\n".join(difflib.unified_diff(
         old_lines, new_lines, fromfile=old_name, tofile=new_name, lineterm=""))
     refs = None
-    if t["kind"] in {"kb", "case"} and mode in {"rename", "delete"}:
+    if t["kind"] in {"kb"} | DERIVED_KINDS and mode in {"rename", "delete"}:
         from core.skills import refs
         refs = [h.to_dict() for h in refs.find_module_refs(packs_root, t["path"])]
     return {"exists_now": current is not None or (
@@ -360,7 +367,7 @@ def apply_proposal(packs_root: str | Path, pid: str, decided_by: str) -> dict:
     t = p["target"]
     result: dict = {}
     with writing.pack_write_lock():
-        if t["kind"] in {"kb", "case"}:  # case（K6）校验/应用与 kb 同源，模式仅 edit/create
+        if t["kind"] in {"kb"} | DERIVED_KINDS:
             cap, module, mode = t["cap"], t["path"], p["mode"]
             if mode == "edit":
                 result = writing.write_kb_file(

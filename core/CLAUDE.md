@@ -27,6 +27,8 @@
 
 ## 全局约定
 
+- `sample_packages.py`：分析包基础层。负责单文件/目录文件/ZIP/7z/TAR 的安全导入，内容清单哈希、全局树去重、原始上传物保留、候选目标识别和同包二进制依赖边；`ANALYZER_REGISTRY` 为格式到插件 ID 的注册表。Android 目标提供 APK/AAB 包摘要、Manifest XML/AXML 字符串清单和 DEX 头部计数；目标元数据和静态分析报告保存于 `sample_packages/`，不替换旧 `binary` 资产接口。
+
 - 时间 UTC ISO；ID `<前缀>-<12hex>`。
 - 黑板写操作只走 `Blackboard`/`TaskQueue` 方法；API 层零业务逻辑，只做 HTTP↔core 翻译。
 - 项目绑定 = **场景轨 track（单选）× 专家组队 experts（M2，多选可空）**；能力包隐退为知识组织单位（运行时知识面=caps_effective 推导，专家 yaml `skills` 白名单跨包引用）；无绑定存量项目直通 meta.capabilities 零翻译；旧 domain 读取时经 `LEGACY_DOMAIN_MAP` 映射（pentest→assessment+[web]，ctf→ctf+[binary]，reverse→research+[binary]），新建一律写新值。

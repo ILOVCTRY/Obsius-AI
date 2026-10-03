@@ -18,6 +18,7 @@ runner(args_list) -> (rc, stdout, stderr) 可注入：生产经执行网关（�
 """
 
 import hashlib
+from contextlib import contextmanager
 import json
 import logging
 import os
@@ -25,6 +26,8 @@ import platform
 import re
 import shutil
 import subprocess
+import sqlite3
+import sys
 import threading
 import time
 import uuid
@@ -52,6 +55,134 @@ LARGE_SAMPLE_BYTES = 20 * 1024 * 1024
 # Ghidra 并行分片 worker 绝对上限（内存保护）：每 worker 一个解编译器进程、吃内存，
 # 无脑按满核起会 OOM/swap。实际取值再夹 [1, GHIDRA_MAX_WORKERS]。
 GHIDRA_MAX_WORKERS = 16
+
+
+class AnalysisStore:
+    """SQLite projection of one sample's immutable headless analysis."""
+
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._init()
+
+    def _connect(self):
+        con = sqlite3.connect(str(self.path), timeout=30.0)
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA synchronous=NORMAL")
+        return con
+
+    @contextmanager
+    def _session(self):
+        con = self._connect()
+        try:
+            yield con
+            con.commit()
+        finally:
+            con.close()
+
+    def _init(self):
+        with self._session() as con:
+            con.executescript("""
+            CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS functions (
+              address INTEGER PRIMARY KEY, name TEXT, size INTEGER NOT NULL DEFAULT 0,
+              pseudocode TEXT, status TEXT, error TEXT
+            );
+            CREATE TABLE IF NOT EXISTS instructions (
+              function_address INTEGER NOT NULL, line_no INTEGER NOT NULL, text TEXT NOT NULL,
+              PRIMARY KEY(function_address, line_no)
+            );
+            CREATE TABLE IF NOT EXISTS xrefs (
+              function_address INTEGER NOT NULL, direction TEXT NOT NULL,
+              ref_address INTEGER, ref_name TEXT, PRIMARY KEY(function_address, direction, ref_address, ref_name)
+            );
+            CREATE TABLE IF NOT EXISTS strings (
+              address INTEGER PRIMARY KEY, text TEXT NOT NULL, length INTEGER NOT NULL DEFAULT 0,
+              type TEXT, refs_json TEXT NOT NULL DEFAULT '[]'
+            );
+            CREATE INDEX IF NOT EXISTS idx_instr_func ON instructions(function_address, line_no);
+            CREATE INDEX IF NOT EXISTS idx_xref_func ON xrefs(function_address, direction);
+            """)
+
+    def replace_export(self, data: dict, disasm_dir: Path | None = None) -> None:
+        funcs = data.get("functions") or []
+        with self._session() as con:
+            con.execute("DELETE FROM functions")
+            con.execute("DELETE FROM instructions")
+            con.execute("DELETE FROM xrefs")
+            con.execute("DELETE FROM strings")
+            con.execute("DELETE FROM meta")
+            meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
+            meta = {**meta, "export_version": data.get("export_version", EXPORT_VERSION),
+                    "binary": data.get("binary", "")}
+            con.executemany("INSERT INTO meta(key,value) VALUES(?,?)",
+                            [(str(k), json.dumps(v, ensure_ascii=False)) for k, v in meta.items()])
+            for f in funcs:
+                try: addr = int(f.get("address"))
+                except (TypeError, ValueError): continue
+                con.execute("INSERT OR REPLACE INTO functions(address,name,size,pseudocode,status,error) VALUES(?,?,?,?,?,?)",
+                            (addr, f.get("name"), int(f.get("size") or 0), f.get("pseudocode"),
+                             f.get("status"), f.get("error")))
+                lines = f.get("disasm_lines") or []
+                if not lines and disasm_dir is not None:
+                    side = disasm_dir / f"{hex(addr)}.json"
+                    try:
+                        raw = json.loads(side.read_text(encoding="utf-8"))
+                        lines = raw.get("lines") or []
+                    except (OSError, ValueError):
+                        lines = []
+                con.executemany("INSERT INTO instructions(function_address,line_no,text) VALUES(?,?,?)",
+                                [(addr, i, str(line)) for i, line in enumerate(lines)])
+                for callee in f.get("calls") or []:
+                    con.execute("INSERT OR IGNORE INTO xrefs(function_address,direction,ref_address,ref_name) VALUES(?,?,?,?)",
+                                (addr, "callee", None, str(callee)))
+            for item in data.get("strings") or []:
+                if not isinstance(item, dict):
+                    continue
+                try: saddr = int(item.get("address"))
+                except (TypeError, ValueError): continue
+                con.execute("INSERT OR REPLACE INTO strings(address,text,length,type,refs_json) VALUES(?,?,?,?,?)",
+                            (saddr, str(item.get("string") or ""), int(item.get("length") or 0),
+                             item.get("type"), json.dumps(item.get("refs") or [], ensure_ascii=False)))
+            con.commit()
+
+    def function(self, address: int) -> dict | None:
+        with self._session() as con:
+            row = con.execute("SELECT address,name,size,pseudocode,status,error FROM functions WHERE address=?", (int(address),)).fetchone()
+            if row is None: return None
+            lines = [r[0] for r in con.execute("SELECT text FROM instructions WHERE function_address=? ORDER BY line_no", (int(address),))]
+            return {"address": row[0], "name": row[1], "size": row[2], "pseudocode": row[3],
+                    "status": row[4], "error": row[5], "disasm_lines": lines,
+                    "disasm_truncated": False}
+
+    def has_functions(self) -> bool:
+        with self._session() as con:
+            return con.execute("SELECT 1 FROM functions LIMIT 1").fetchone() is not None
+
+    def rows(self) -> list[dict]:
+        with self._session() as con:
+            return [{"address": r[0], "name": r[1], "size": r[2],
+                     "has_pseudo": bool(r[3]), "status": r[4], "error": r[5],
+                     "n_calls": con.execute(
+                         "SELECT COUNT(*) FROM xrefs WHERE function_address=? AND direction='callee'",
+                         (r[0],)).fetchone()[0]}
+                    for r in con.execute("SELECT address,name,size,pseudocode,status,error FROM functions ORDER BY address")]
+
+    def xrefs(self, address: int) -> dict | None:
+        with self._session() as con:
+            row = con.execute("SELECT name FROM functions WHERE address=?", (int(address),)).fetchone()
+            if row is None:
+                return None
+            name = row[0]
+            callees = [{"address": (hex(int(r[1])) if r[1] is not None else None), "name": r[0]} for r in con.execute(
+                "SELECT x.ref_name,f.address FROM xrefs x LEFT JOIN functions f ON f.name=x.ref_name "
+                "WHERE x.function_address=? AND x.direction='callee' ORDER BY x.ref_name",
+                (int(address),))]
+            callers = [{"address": hex(r[0]), "name": r[1]} for r in con.execute(
+                "SELECT f.address,f.name FROM functions f JOIN xrefs x ON x.function_address=f.address "
+                "WHERE x.direction='callee' AND x.ref_name=? ORDER BY f.address", (name,))]
+            return {"address": hex(int(address)), "name": name,
+                    "callers": callers, "callees": callees}
 
 
 def load_decompiler_config() -> dict:
@@ -274,9 +405,20 @@ def gateway_runner(gateway, *, project_id: str, session_id: str, author: str,
     （对 .bat 同样有效，Ghidra 的 analyzeHeadless 正是批处理）。
     注意：--% 后路径里的 % 会被 cmd 风格展开，项目/样本路径按约定不含 %。
     """
+    def _ps_literal(value: str) -> str:
+        """Quote one argv item for PowerShell without using ``--%``.
+
+        ``--%`` is a PowerShell parser escape, not an argument quoting mode.
+        Passing it after a ``.bat`` path makes the batch wrapper receive the
+        token and can leave Ghidra stuck before Java starts.  Calling the batch
+        file through ``&`` with single-quoted literals preserves every path and
+        lets cmd.exe receive the original argument vector.
+        """
+        return "'" + str(value).replace("'", "''") + "'"
+
     def run(args: list[str]) -> tuple[int, str, str]:
         if platform.system() == "Windows" and len(args) > 1:
-            cmd = f"{args[0]} --% {' '.join(args[1:])}"
+            cmd = "& " + " ".join(_ps_literal(arg) for arg in args)
         else:
             cmd = " ".join(args)
         kwargs = {"timeout": timeout} if timeout else {}
@@ -667,11 +809,35 @@ class GhidraHeadlessBackend:
                  script_path: str | Path | None = None,
                  tmp_project_dir: str | Path | None = None,
                  runner=None, available: bool | None = None,
-                 workers: int | None = None):
+                 workers: int | None = None,
+                 resident_worker: bool = False,
+                 preserve_project: bool = False):
         self.headless_cmd = shutil.which(headless_cmd) or headless_cmd
+        # Ghidra 12 removed Jython script execution.  When PyGhidra is
+        # installed, launch AnalyzeHeadless through its CPython bridge so the
+        # existing Python exporter can run.  Keep the plain batch fallback for
+        # older Ghidra installations and test doubles.
+        self._launch_prefix: list[str] = [self.headless_cmd]
+        if (platform.system() == "Windows"
+                and str(self.headless_cmd).lower().endswith(".bat")):
+            try:
+                import importlib.util
+                if importlib.util.find_spec("pyghidra") is not None:
+                    install_dir = str(Path(self.headless_cmd).resolve().parent.parent)
+                    self._launch_prefix = [sys.executable, "-m", "pyghidra.ghidra_launch",
+                                           "--install-dir", install_dir,
+                                           "ghidra.app.util.headless.AnalyzeHeadless"]
+            except (ImportError, OSError, ValueError):
+                pass
         self.script_path = Path(script_path) if script_path else _GHIDRA_SCRIPT
-        self.tmp_project_dir = Path(tmp_project_dir or ".ghidra-tmp")
+        # Ghidra 12 rejects local project paths containing a component that
+        # starts with '.', so keep the default directory name portable.
+        self.tmp_project_dir = Path(tmp_project_dir or "ghidra-tmp")
         self.runner = runner or _default_runner
+        self.resident_worker = bool(resident_worker)
+        # Keep the native Ghidra project as the durable analysis artifact.
+        # Legacy/test callers can still request the old disposable behavior.
+        self.preserve_project = bool(preserve_project)
         self._available = available  # 测试注入；None = 实际探测
         # P2 并行分片：postScript 第二参=worker 数（脚本内按函数表分片反编译）；
         # 1（默认）走串行老路径，args 形状不变（兼容既有假 runner/断言）
@@ -679,57 +845,229 @@ class GhidraHeadlessBackend:
             self.workers = max(1, int(workers)) if workers else 1
         except (TypeError, ValueError):
             self.workers = 1
+        # A browser selection can issue duplicate detail requests while the
+        # first Ghidra import is still running.  Serialise project creation and
+        # reuse so concurrent calls cannot remove or lock the same project.
+        self._disasm_lock = threading.Lock()
+        self._worker_proc = None
+        self._worker_lock = threading.Lock()
+        self._worker_project: Path | None = None
+        self._worker_last_used = 0.0
+        self._worker_idle_seconds = 600.0
+        threading.Thread(target=self._worker_reaper, name="ghidra-worker-reaper",
+                         daemon=True).start()
+
+    def _worker_reaper(self) -> None:
+        while True:
+            time.sleep(30.0)
+            with self._worker_lock:
+                proc = self._worker_proc
+                if proc is not None and self._worker_last_used \
+                        and time.monotonic() - self._worker_last_used > self._worker_idle_seconds:
+                    try:
+                        proc.kill()
+                    except OSError:
+                        pass
+                    self._worker_proc = None
+                    self._worker_project = None
+
+    def close(self) -> None:
+        with self._worker_lock:
+            if self._worker_proc is not None:
+                try:
+                    if self._worker_proc.stdin:
+                        self._worker_proc.stdin.write(json.dumps({"op": "stop"}) + "\n")
+                        self._worker_proc.stdin.flush()
+                    self._worker_proc.terminate()
+                except OSError:
+                    pass
+                self._worker_proc = None
+                self._worker_project = None
+
+    def _resident_disasm(self, binary: str, project_dir: Path,
+                         addresses: list[int], max_lines: int) -> dict[int, list[str]] | None:
+        """Use one resident PyGhidra process for repeated cache misses.
+
+        This is intentionally best effort. The persistent sidecar/SQLite path
+        remains authoritative; a worker crash is recovered by the old headless
+        request path.
+        """
+        if not self.resident_worker or not project_dir.is_dir():
+            return None
+        with self._worker_lock:
+            try:
+                if self._worker_proc is None or self._worker_proc.poll() is not None \
+                        or self._worker_project != project_dir:
+                    if self._worker_proc is not None:
+                        self._worker_proc.kill()
+                    install_dir = str(Path(self.headless_cmd).resolve().parent.parent)
+                    worker = self.script_path.parent.parent / "ghidra_worker.py"
+                    cmd = [sys.executable, str(worker), "--install-dir", install_dir,
+                           "--project-dir", str(project_dir), "--project-name", "csproj",
+                           "--program-name", Path(binary).name]
+                    self._worker_proc = subprocess.Popen(
+                        cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL, text=True, encoding="utf-8",
+                        bufsize=1, creationflags=NO_WINDOW_FLAGS)
+                    self._worker_project = project_dir
+                req = {"op": "disasm", "addresses": [hex(int(a)) for a in addresses],
+                       "max_lines": int(max_lines)}
+                assert self._worker_proc.stdin is not None and self._worker_proc.stdout is not None
+                self._worker_proc.stdin.write(json.dumps(req) + "\n")
+                self._worker_proc.stdin.flush()
+                raw = self._worker_proc.stdout.readline()
+                if not raw:
+                    return None
+                reply = json.loads(raw)
+                if not reply.get("ok"):
+                    return None
+                self._worker_last_used = time.monotonic()
+                return {int(k, 16): [str(x) for x in v]
+                        for k, v in (reply.get("result") or {}).items()}
+            except (OSError, ValueError, AssertionError, TypeError):
+                if self._worker_proc is not None:
+                    try: self._worker_proc.kill()
+                    except OSError: pass
+                self._worker_proc = None
+                self._worker_project = None
+                return None
+
+    def _resident_query(self, binary: str, project_dir: Path, op: str,
+                        addresses: list[int] | None = None) -> object | None:
+        """Query the native Ghidra project through the resident PyGhidra worker."""
+        if not self.resident_worker or not project_dir.is_dir():
+            return None
+        with self._worker_lock:
+            try:
+                if self._worker_proc is None or self._worker_proc.poll() is not None \
+                        or self._worker_project != project_dir:
+                    if self._worker_proc is not None:
+                        self._worker_proc.kill()
+                    install_dir = str(Path(self.headless_cmd).resolve().parent.parent)
+                    worker = self.script_path.parent.parent / "ghidra_worker.py"
+                    cmd = [sys.executable, str(worker), "--install-dir", install_dir,
+                           "--project-dir", str(project_dir), "--project-name", "csproj",
+                           "--program-name", Path(binary).name]
+                    self._worker_proc = subprocess.Popen(
+                        cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL, text=True, encoding="utf-8",
+                        bufsize=1, creationflags=NO_WINDOW_FLAGS)
+                    self._worker_project = project_dir
+                req = {"op": op, "addresses": [hex(int(a)) for a in (addresses or [])]}
+                assert self._worker_proc.stdin is not None and self._worker_proc.stdout is not None
+                self._worker_proc.stdin.write(json.dumps(req) + "\n")
+                self._worker_proc.stdin.flush()
+                raw = self._worker_proc.stdout.readline()
+                if not raw:
+                    return None
+                reply = json.loads(raw)
+                if not reply.get("ok"):
+                    return None
+                self._worker_last_used = time.monotonic()
+                return reply.get("result")
+            except (OSError, ValueError, AssertionError, TypeError):
+                if self._worker_proc is not None:
+                    try: self._worker_proc.kill()
+                    except OSError: pass
+                self._worker_proc = None
+                self._worker_project = None
+                return None
 
     def available(self) -> bool:
         if self._available is not None:
             return self._available
-        return shutil.which(self.headless_cmd) is not None or Path(self.headless_cmd).exists()
+        return bool(self._launch_prefix) and (
+            shutil.which(self._launch_prefix[0]) is not None
+            or Path(self._launch_prefix[0]).exists())
 
     def export(self, binary: str, out_json: Path, *, progress: dict | None = None,
                stop_event: threading.Event | None = None,
-               want_disasm: bool = False) -> dict:
-        proj_dir = self.tmp_project_dir / f"cs-{uuid.uuid4().hex[:12]}"
+               want_disasm: bool = False,
+               disasm_sidecar: bool = False,
+               retry_addresses: list[int] | None = None) -> dict:
+        if self.preserve_project:
+            proj_dir = self._persist_project_dir(binary)
+            ready_marker = proj_dir / ".analysis-ready"
+            first_import = True
+            if ready_marker.is_file():
+                try:
+                    marker = json.loads(ready_marker.read_text(encoding="utf-8"))
+                    first_import = marker.get("format_version") != 2
+                except (OSError, ValueError):
+                    first_import = True
+            if first_import:
+                shutil.rmtree(proj_dir, ignore_errors=True)
+                proj_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            proj_dir = self.tmp_project_dir / f"cs-{uuid.uuid4().hex[:12]}"
+            first_import = True
         proj_dir.mkdir(parents=True, exist_ok=True)
         proj_name = "csproj"
         # P3 协作式停止 + 进度：进度文件（脚本写）与停止标志文件（父进程写）落 out_json
         # 同目录——临时工程跑完即焚，控制文件不能放工程内。
         progress_path = out_json.with_name(out_json.name + ".progress")
         stop_path = out_json.with_name(out_json.name + ".stop")
+        live_path = out_json.with_name(out_json.name + ".live")
         want_ctl = progress is not None or stop_event is not None
-        for p in (progress_path, stop_path):
+        for p in (progress_path, stop_path, live_path):
             try:
                 p.unlink(missing_ok=True)
             except OSError:
                 pass
         args = [
-            self.headless_cmd, str(proj_dir), proj_name,
-            "-import", str(binary),
-            # 2026-10-01 工作台可中断：-noanalysis 跳过内置分析，改由 postScript 内
-            # AutoAnalysisManager + 自定义 TaskMonitor 驱动 → 分析阶段可中断 + 报进度。
-            "-noanalysis",
+            *self._launch_prefix, str(proj_dir), proj_name,
+            ("-import" if first_import else "-process"),
+            str(binary) if first_import else Path(binary).name,
             "-scriptPath", str(self.script_path.parent),
             "-postScript", self.script_path.name, str(out_json),
-            "-deleteProject",
         ]
+        if not self.preserve_project:
+            # Disposable legacy exports keep the cooperative scripted analysis
+            # path. Durable native projects use Ghidra's standard Auto Analysis
+            # before the exporter, so Listing/References are fully populated.
+            args.insert(args.index("-scriptPath"), "-noanalysis")
+        if first_import:
+            # Import needs the sample path; process mode opens the existing
+            # native project and must not receive a second import argument.
+            args = [x for x in args if x != ""]
+        args.append("-deleteProject") if not self.preserve_project else None
         # postScript 位置实参（-deleteProject 前，固定 5 位保证形状稳定）：
-        # [worker 数, 进度文件, 停止文件, 自驱分析(1), 反汇编内嵌(1)]。无控制/无内嵌时
+        # [worker 数, 进度文件, 停止文件, 自驱分析(1), 反汇编模式(1/2)]。无控制/无内嵌时
         # 对应位填空串；分析开关恒 "1"——-noanalysis 后必须由脚本补跑分析。
         script_args = [
-            str(self.workers),
+            str(1 if disasm_sidecar else self.workers),
             str(progress_path) if want_ctl else "",
             str(stop_path) if want_ctl else "",
             "1",
-            "1" if want_disasm else "",
+            "2" if disasm_sidecar else ("1" if want_disasm else ""),
         ]
-        idx = args.index("-deleteProject")
-        args[idx:idx] = script_args
+        if retry_addresses:
+            script_args.append(",".join(hex(int(a)) for a in retry_addresses))
+        if "-deleteProject" in args:
+            idx = args.index("-deleteProject")
+            args[idx:idx] = script_args
+        else:
+            args.extend(script_args)
+        if disasm_sidecar and not retry_addresses:
+            shutil.rmtree(out_json.with_suffix(".disasm"), ignore_errors=True)
         monitor_done = threading.Event()
         monitor: threading.Thread | None = None
         if want_ctl:
             def _watch() -> None:
                 # 轮询进度文件更新 job progress（引用共享）；stop_event 置位即写停止文件，
                 # 脚本在函数边界自然停下（不杀进程，保留已导出部分）。
+                samples: list[tuple[float, str, int, int]] = []
+                last_phase = ""
+                displayed_eta: int | None = None
+                started_at = time.time()
+                if progress is not None:
+                    progress.update(started_at=started_at, eta_seconds=None,
+                                    rate_per_second=0.0, elapsed_seconds=0.0,
+                                    completed=0, discovered=0, failed=0,
+                                    phase="starting")
                 while not monitor_done.is_set():
+                    if progress is not None:
+                        progress["elapsed_seconds"] = round(time.time() - started_at, 1)
                     if stop_event is not None and stop_event.is_set():
                         try:
                             stop_path.write_text("stop", encoding="utf-8")
@@ -742,6 +1080,44 @@ class GhidraHeadlessBackend:
                                 progress["done"] = int(d.get("done") or 0)
                                 progress["total"] = int(d.get("total") or 0)
                                 progress["phase"] = str(d.get("phase") or "")
+                                progress["completed"] = int(d.get("completed") or progress["done"])
+                                progress["discovered"] = int(d.get("discovered") or progress["total"])
+                                progress["failed"] = int(d.get("failed") or 0)
+                                now = time.time()
+                                phase = progress["phase"]
+                                if phase != last_phase:
+                                    samples.clear()
+                                    last_phase = phase
+                                    displayed_eta = None
+                                samples.append((now, phase, progress["done"], progress["total"]))
+                                samples[:] = [item for item in samples if now - item[0] <= 20.0]
+                                progress["elapsed_seconds"] = round(now - started_at, 1)
+                                if len(samples) >= 2:
+                                    first = samples[0]
+                                    elapsed = now - first[0]
+                                    delta = progress["done"] - first[2]
+                                    rate = delta / elapsed if elapsed > 0 and delta > 0 else 0.0
+                                    progress["rate_per_second"] = round(rate, 3)
+                                    if rate > 0 and progress["total"] > progress["done"]:
+                                        candidate = int(round((progress["total"] - progress["done"]) / rate))
+                                        if (displayed_eta is None or candidate < 1
+                                                or abs(candidate - displayed_eta) / max(displayed_eta, 1) >= 0.10):
+                                            displayed_eta = candidate
+                                        progress["eta_seconds"] = displayed_eta
+                                    else:
+                                        displayed_eta = None
+                                        progress["eta_seconds"] = None
+                        except (OSError, ValueError):
+                            pass
+                    # Promote the script's atomic live snapshot to the normal
+                    # cache so readers can list functions before headless ends.
+                    if live_path.is_file():
+                        try:
+                            live_data = json.loads(live_path.read_text(encoding="utf-8"))
+                            if isinstance(live_data, dict) and isinstance(live_data.get("functions"), list):
+                                tmp_live = out_json.with_name(out_json.name + ".partial.tmp")
+                                tmp_live.write_text(json.dumps(live_data, ensure_ascii=False), encoding="utf-8")
+                                tmp_live.replace(out_json)
                         except (OSError, ValueError):
                             pass
                     monitor_done.wait(1.0)
@@ -766,17 +1142,35 @@ class GhidraHeadlessBackend:
                 stopped = is_partial_export(data)
             except (OSError, ValueError):
                 pass
-            return {"name": self.name, "db_path": None, "stopped": stopped}
+            if disasm_sidecar and not stopped:
+                try:
+                    out_json.with_suffix(".disasm").joinpath(".complete").write_text(
+                        json.dumps({"functions": len(data.get("functions") or [])}),
+                        encoding="utf-8")
+                except OSError:
+                    pass
+            if self.preserve_project and not stopped:
+                try:
+                    (proj_dir / ".analysis-ready").write_text(
+                        json.dumps({"format_version": 2,
+                                    "sha256": sha256_file(binary),
+                                    "program": Path(binary).name}, ensure_ascii=False),
+                        encoding="utf-8")
+                except OSError:
+                    pass
+            return {"name": self.name, "db_path": str(proj_dir),
+                    "project_dir": str(proj_dir), "stopped": stopped}
         finally:
             monitor_done.set()
             if monitor is not None:
                 monitor.join(timeout=3)
-            for p in (progress_path, stop_path):
+            for p in (progress_path, stop_path, live_path):
                 try:
                     p.unlink(missing_ok=True)
                 except OSError:
                     pass
-            shutil.rmtree(proj_dir, ignore_errors=True)
+            if not self.preserve_project:
+                shutil.rmtree(proj_dir, ignore_errors=True)
 
     # ---- 按需反汇编（2026-10-01 工作台 Ghidra 模式，大样本路径） ----
 
@@ -787,6 +1181,39 @@ class GhidraHeadlessBackend:
 
     def disasm_on_demand(self, binary: str, addresses: list[int],
                          *, max_lines: int = 400) -> dict[int, list[str]]:
+        with self._disasm_lock:
+            return self._disasm_on_demand_locked(binary, addresses,
+                                                 max_lines=max_lines)
+
+    def native_functions(self, binary: str) -> list[dict] | None:
+        project = self._persist_project_dir(binary)
+        if not (project / ".analysis-ready").is_file():
+            return None
+        result = self._resident_query(binary, project, "functions")
+        return result if isinstance(result, list) else None
+
+    def native_detail(self, binary: str, address: int) -> dict | None:
+        project = self._persist_project_dir(binary)
+        if not (project / ".analysis-ready").is_file():
+            return None
+        result = self._resident_query(binary, project, "detail", [address])
+        if not isinstance(result, dict):
+            return None
+        row = result.get(hex(int(address)))
+        return row if isinstance(row, dict) else None
+
+    def native_profile(self, binary: str, address: int) -> dict | None:
+        project = self._persist_project_dir(binary)
+        if not (project / ".analysis-ready").is_file():
+            return None
+        result = self._resident_query(binary, project, "profile", [address])
+        if not isinstance(result, dict):
+            return None
+        row = result.get(hex(int(address)))
+        return row if isinstance(row, dict) else None
+
+    def _disasm_on_demand_locked(self, binary: str, addresses: list[int],
+                                 *, max_lines: int = 400) -> dict[int, list[str]]:
         """指定函数地址的按需反汇编（大样本 Ghidra 模式）：
 
         首次：analyzeHeadless -import + 自动分析（工程落盘，不 -deleteProject）；
@@ -797,6 +1224,15 @@ class GhidraHeadlessBackend:
         if not addrs:
             return {}
         proj_dir = self._persist_project_dir(binary)
+        ready_marker = proj_dir / ".disasm-ready"
+        # A previous full export uses ``-deleteProject`` and can leave an empty
+        # ``csproj.gpr`` behind.  Treat only our successful marker as reusable;
+        # failed/partial projects are removed before retrying the import.
+        if not ready_marker.is_file():
+            try:
+                shutil.rmtree(proj_dir, ignore_errors=True)
+            except OSError:
+                pass
         proj_dir.mkdir(parents=True, exist_ok=True)
         proj_name = "csproj"
         out_json = proj_dir / "disasm-out.json"
@@ -804,10 +1240,13 @@ class GhidraHeadlessBackend:
             out_json.unlink(missing_ok=True)
         except OSError:
             pass
+        resident = self._resident_disasm(binary, proj_dir, addrs, max_lines)
+        if resident is not None and all(a in resident for a in addrs):
+            return resident
         script = self.script_path.parent / "disasm_funcs.py"
         addr_arg = ",".join(hex(a) for a in addrs)
-        first = not any(proj_dir.glob(f"{proj_name}.gpr"))
-        args = [self.headless_cmd, str(proj_dir), proj_name]
+        first = not ready_marker.is_file()
+        args = [*self._launch_prefix, str(proj_dir), proj_name]
         if first:
             args += ["-import", str(binary)]
         else:
@@ -817,6 +1256,16 @@ class GhidraHeadlessBackend:
                  str(int(max_lines))]
         rc, out, err = self.runner(args)
         if rc != 0 or not out_json.is_file():
+            # A stale marker can point at an empty project left by a previous
+            # failed import.  Rebuild it once instead of retrying -process
+            # forever on every browser selection.
+            if not first:
+                try:
+                    shutil.rmtree(proj_dir, ignore_errors=True)
+                except OSError:
+                    pass
+                return self._disasm_on_demand_locked(binary, addresses,
+                                                     max_lines=max_lines)
             raise RuntimeError(f"Ghidra 按需反汇编失败 rc={rc}: {(err or out)[-400:]}")
         try:
             raw = json.loads(out_json.read_text(encoding="utf-8"))
@@ -828,6 +1277,21 @@ class GhidraHeadlessBackend:
                 out_map[int(str(k), 16)] = [str(x) for x in (v or [])]
             except (TypeError, ValueError):
                 continue
+        if not all(int(a) in out_map for a in addrs):
+            if not first:
+                try:
+                    shutil.rmtree(proj_dir, ignore_errors=True)
+                except OSError:
+                    pass
+                return self._disasm_on_demand_locked(binary, addresses,
+                                                     max_lines=max_lines)
+            raise RuntimeError("Ghidra 按需反汇编未找到目标函数")
+        # Do not mark the project reusable until the requested script produced
+        # a valid JSON response.  A later request can then safely use -process.
+        try:
+            ready_marker.write_text("ready\n", encoding="utf-8")
+        except OSError:
+            pass
         return out_map
 
 
@@ -1083,6 +1547,7 @@ class DecompilerService:
                  ida: IDAHeadlessBackend | None = None):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self._analysis_stores: dict[str, AnalysisStore] = {}
         # 全局 sha 缓存（跨项目复用）：全量 headless 导出按 sha256 落这里；本地缺缓存时
         # 从此提升（promote）。落盘只放客观全量导出（不含 MCP 轻量/部分缓存）。
         self.global_cache_dir = Path(global_cache_dir) if global_cache_dir else None
@@ -1104,6 +1569,11 @@ class DecompilerService:
         # 缓存解析结果单槽驻留：大缓存 JSON 的 re-parse 是 overview 4s 轮询 +
         # 函数/xref/字符串点查的公共热点（1G 级样本防崩，mtime 失效）
         self._parsed_cache: dict[str, tuple[float, dict]] = {}
+        # Large Ghidra samples are expensive to open (JVM + project load).
+        # Keep that work off the HTTP request path and deduplicate selections
+        # of the same function while the first request is still running.
+        self._disasm_jobs: set[tuple[str, int]] = set()
+        self._disasm_jobs_lock = threading.Lock()
         for backend in (ghidra, ida):
             if backend is None:
                 continue
@@ -1124,6 +1594,85 @@ class DecompilerService:
     def _global_cache_file(self, sha: str) -> Path | None:
         return (self.global_cache_dir / f"{sha}.json") if self.global_cache_dir else None
 
+    def _disasm_dir(self, sha: str) -> Path:
+        return self.cache_dir / f"{sha}.disasm"
+
+    def _analysis_store(self, sha: str) -> AnalysisStore:
+        store = self._analysis_stores.get(sha)
+        if store is None:
+            store = AnalysisStore(self.cache_dir / f"{sha}.analysis.db")
+            self._analysis_stores[sha] = store
+        return store
+
+    def _sync_analysis_store(self, sha: str, data: dict) -> None:
+        try:
+            self._analysis_store(sha).replace_export(data, self._disasm_dir(sha))
+        except (OSError, sqlite3.Error) as exc:
+            log.warning("analysis sqlite projection failed sha=%s: %s", sha, exc)
+
+    def _global_disasm_dir(self, sha: str) -> Path | None:
+        return (self.global_cache_dir / f"{sha}.disasm") if self.global_cache_dir else None
+
+    def _global_analysis_db(self, sha: str) -> Path | None:
+        return (self.global_cache_dir / f"{sha}.analysis.db") if self.global_cache_dir else None
+
+    def _disasm_complete(self, sha: str, expected: int) -> bool:
+        root = self._disasm_dir(sha)
+        marker = root / ".complete"
+        if not marker.is_file() or expected <= 0:
+            return False
+        try:
+            raw = marker.read_text(encoding="utf-8").strip()
+            declared = int(raw) if raw.isdigit() else int(json.loads(raw).get("functions", 0))
+            files = list(root.glob("0x*.json"))
+            if declared < expected or len(files) < expected:
+                return False
+            # Empty sidecars are the signature of the old parallel Listing
+            # race. Require nearly all functions to contain instructions.
+            nonempty = 0
+            for side in files:
+                try:
+                    raw_side = json.loads(side.read_text(encoding="utf-8"))
+                    if raw_side.get("lines"):
+                        nonempty += 1
+                except (OSError, ValueError, AttributeError):
+                    pass
+            return nonempty >= max(1, int(expected * 0.90))
+        except (OSError, ValueError, TypeError, AttributeError):
+            return False
+
+    @staticmethod
+    def _ghidra_export_suspect(data: dict) -> bool:
+        """Reject Ghidra exports where function bodies or call graph vanished."""
+        funcs = [f for f in (data.get("functions") or []) if isinstance(f, dict)]
+        if len(funcs) < 100:
+            return False
+        sizes = []
+        has_calls = False
+        for f in funcs:
+            try:
+                sizes.append(int(f.get("size") or 0))
+            except (TypeError, ValueError):
+                pass
+            has_calls = has_calls or bool(f.get("calls"))
+        # Real functions in a nontrivial binary cannot all have a one-byte body.
+        # The old PyGhidra bridge produced exactly that signature alongside a
+        # single-byte disassembly line for every function.
+        one_byte = sum(1 for size in sizes if size <= 1)
+        return (len(sizes) >= 100 and one_byte >= int(len(sizes) * 0.90)
+                and not has_calls)
+
+    def _promote_disasm_from_global(self, sha: str) -> None:
+        src = self._global_disasm_dir(sha)
+        if src is None or not src.is_dir():
+            return
+        dst = self._disasm_dir(sha)
+        try:
+            if not dst.exists():
+                shutil.copytree(src, dst)
+        except OSError:
+            pass
+
     def _promote_from_global(self, sha: str) -> dict | None:
         """本地缺缓存时从全局 sha 缓存提升：命中即原子拷回本地（跨项目复用，免重跑
         headless），绝不删全局源；旧契约/损坏由 _load_cache 判废返回 None。"""
@@ -1141,6 +1690,13 @@ class DecompilerService:
             tmp.replace(local)
         except OSError:
             return data  # 拷不动也把数据交出去（只读降级，不阻断）
+        self._promote_disasm_from_global(sha)
+        gdb = self._global_analysis_db(sha)
+        if gdb is not None and gdb.is_file():
+            try:
+                shutil.copy2(gdb, self.cache_dir / gdb.name)
+            except OSError:
+                pass
         return data
 
     def _write_cache_file(self, path: Path, data: dict) -> None:
@@ -1162,6 +1718,15 @@ class DecompilerService:
             tmp = gf.with_name(f"{gf.name}.tmp")
             tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
             tmp.replace(gf)
+            src = self._disasm_dir(sha)
+            gd = self._global_disasm_dir(sha)
+            if src.is_dir() and gd is not None:
+                shutil.rmtree(gd, ignore_errors=True)
+                shutil.copytree(src, gd)
+            db = self.cache_dir / f"{sha}.analysis.db"
+            gdb = self._global_analysis_db(sha)
+            if db.is_file() and gdb is not None:
+                shutil.copy2(db, gdb)
         except OSError:
             pass  # 全局缓存 best-effort：写不成不影响本地导出
 
@@ -1180,6 +1745,13 @@ class DecompilerService:
         if version < EXPORT_VERSION:
             cached.unlink(missing_ok=True)
             return None
+        # Ghidra 12 used to write a successful-looking cache with a failed
+        # strings section when DefinedDataIterator.definedStrings() vanished.
+        # Invalidate only that narrow shape so ordinary v3/IDA caches remain
+        # reusable and external v3 imports keep their contract.
+        if isinstance(data.get("strings"), dict) and data["strings"].get("error"):
+            cached.unlink(missing_ok=True)
+            return None
         return data
 
     def _export_json(self, binary: str, *, progress: dict | None = None,
@@ -1192,19 +1764,59 @@ class DecompilerService:
         被停止的 partial 缓存**不复用**（重跑即补全），且**不发布**全局。
         engine 指定时按引擎偏好选路（见 _ordered_export_backends）。"""
         cached = self._cache_path(binary)
+        sha = sha256_file(binary)
+        retry_addresses: list[int] = []
         if cached.is_file():
             data = self._load_cache(cached)
             if data is not None and not is_partial_export(data):
-                return data, "", {}
-        sha = sha256_file(binary)
+                retry_addresses = [int(f.get("address")) for f in data.get("functions", [])
+                                   if isinstance(f, dict) and f.get("status") == "failed"]
+                large_ghidra_cache_missing_asm = (
+                    normalize_engine(engine) == "ghidra"
+                    and is_large_sample(binary)
+                    and not self._disasm_complete(sha, len(data.get("functions") or [])))
+                missing_xrefs = (normalize_engine(engine) == "ghidra"
+                                 and len(data.get("functions") or []) > 100
+                                 and not any(f.get("calls") for f in data.get("functions") or []))
+                suspect_ghidra = (normalize_engine(engine) == "ghidra"
+                                  and self._ghidra_export_suspect(data))
+                large_ghidra_cache_missing_asm = (large_ghidra_cache_missing_asm
+                                                   or missing_xrefs or suspect_ghidra)
+                if large_ghidra_cache_missing_asm:
+                    # A partial sidecar set cannot be repaired by retrying only
+                    # failed pseudo-code rows; regenerate the complete Ghidra export.
+                    retry_addresses = []
+                if not retry_addresses and not large_ghidra_cache_missing_asm:
+                    if not (self.cache_dir / f"{sha}.analysis.db").is_file():
+                        self._sync_analysis_store(sha, data)
+                    return data, "", {}
         # 本地缺 → 全局 sha 缓存提升（跨项目同一样本免重跑 headless，大样本加速 P1）
         promoted = self._promote_from_global(sha)
         if promoted is not None and not is_partial_export(promoted):
-            return promoted, "", {}
-        # 小样本 + 所选引擎=Ghidra → 导出内嵌反汇编；大样本走持久工程按需
-        # （GhidraHeadlessBackend.disasm_on_demand），避免缓存膨胀
-        want_disasm = (normalize_engine(engine) == "ghidra"
-                       and not is_large_sample(binary))
+            retry_addresses = [int(f.get("address")) for f in promoted.get("functions", [])
+                               if isinstance(f, dict) and f.get("status") == "failed"]
+            promoted_missing_asm = (
+                normalize_engine(engine) == "ghidra"
+                and is_large_sample(binary)
+                and not self._disasm_complete(sha, len(promoted.get("functions") or [])))
+            promoted_missing_asm = promoted_missing_asm or (
+                normalize_engine(engine) == "ghidra"
+                and len(promoted.get("functions") or []) > 100
+                and not any(f.get("calls") for f in promoted.get("functions") or []))
+            promoted_missing_asm = promoted_missing_asm or (
+                normalize_engine(engine) == "ghidra"
+                and self._ghidra_export_suspect(promoted))
+            if promoted_missing_asm:
+                retry_addresses = []
+            if not retry_addresses and not promoted_missing_asm:
+                if not (self.cache_dir / f"{sha}.analysis.db").is_file():
+                    self._sync_analysis_store(sha, promoted)
+                return promoted, "", {}
+            data = promoted
+        # Ghidra 一次分析即导出反汇编：小样本内嵌，大样本写每函数 sidecar，
+        # 查看阶段直接读缓存，不再为每次点击启动 JVM。
+        want_disasm = normalize_engine(engine) == "ghidra"
+        disasm_sidecar = want_disasm and is_large_sample(binary)
         errors = []
         for backend in self._ordered_export_backends(binary, engine):
             export = getattr(backend, "export", None)
@@ -1213,10 +1825,28 @@ class DecompilerService:
             if progress is not None:  # 前端「停止」可用性：仅 Ghidra 支持协作中断
                 progress["stoppable"] = "ghidra" in getattr(backend, "name", "")
             try:
-                info = export(binary, cached, progress=progress,
-                              stop_event=stop_event,
-                              want_disasm=want_disasm) or {"name": backend.name}
-                data = json.loads(cached.read_text(encoding="utf-8"))
+                retry = retry_addresses if "ghidra" in getattr(backend, "name", "") else None
+                export_kwargs = {"progress": progress, "stop_event": stop_event,
+                                 "want_disasm": want_disasm}
+                if "ghidra" in getattr(backend, "name", ""):
+                    export_kwargs["disasm_sidecar"] = disasm_sidecar
+                if retry:
+                    export_kwargs["retry_addresses"] = retry
+                info = export(binary, cached, **export_kwargs) or {"name": backend.name}
+                exported = json.loads(cached.read_text(encoding="utf-8"))
+                if retry and data is not None and isinstance(exported.get("functions"), list):
+                    by_addr = {int(f.get("address")): f for f in data.get("functions", [])
+                               if isinstance(f, dict) and f.get("address") is not None}
+                    for row in exported["functions"]:
+                        if isinstance(row, dict) and row.get("address") is not None:
+                            by_addr[int(row["address"])] = row
+                    exported["functions"] = list(by_addr.values())
+                    exported["total_functions"] = len(exported["functions"])
+                    if isinstance(exported.get("meta"), dict) and isinstance(data.get("meta"), dict):
+                        exported["meta"] = {**data["meta"], **exported["meta"],
+                                            "total_functions": len(exported["functions"])}
+                    cached.write_text(json.dumps(exported, ensure_ascii=False), encoding="utf-8")
+                data = exported
                 info.setdefault("name", backend.name)
                 # 标记产出引擎（模式/缓存一致性对账用）：写回缓存 + 随全局发布
                 try:
@@ -1228,6 +1858,7 @@ class DecompilerService:
                     pass
                 # 协作式停止的 partial 只留本地供展示，绝不发布全局（P3 三层数据纪律）
                 if not is_partial_export(data):
+                    self._sync_analysis_store(sha, data)
                     self._publish_global(sha, data)  # 全量导出落全局，供它项目复用
                 return data, "", info
             except Exception as e:  # noqa: BLE001
@@ -1318,6 +1949,50 @@ class DecompilerService:
         self._parsed_cache.clear()  # 只驻留最近一个样本（工作台单样本活跃）
         self._parsed_cache[sha] = (mtime, data)
         return data
+
+    def cached_function_rows(self, sha: str, binary: str | None = None) -> list[dict] | None:
+        if binary:
+            ghidra = self._ghidra_backend()
+            if ghidra is not None:
+                native = ghidra.native_functions(binary)
+                if native is not None:
+                    return [{"address": int(str(f["address"]), 16),
+                             "name": f.get("name"), "size": f.get("size", 0),
+                             "has_pseudo": bool(f.get("has_pseudo", True)),
+                             "n_calls": int(f.get("n_calls") or 0),
+                             "status": str(f.get("status") or "done")} for f in native]
+        try:
+            db = self.cache_dir / f"{sha}.analysis.db"
+            if not db.is_file():
+                return None
+            store = self._analysis_store(sha)
+            if store.has_functions():
+                return store.rows()
+        except sqlite3.Error:
+            pass
+        return None
+
+    def cached_xrefs(self, sha: str, address: int, binary: str | None = None) -> dict | None:
+        if binary:
+            ghidra = self._ghidra_backend()
+            if ghidra is not None:
+                native = ghidra.native_profile(binary, address)
+                if native is not None:
+                    return {"address": native.get("address", hex(address)),
+                            "name": native.get("name"),
+                            "callers": native.get("callers") or [],
+                            "callees": native.get("callees") or [],
+                            "source": "ghidra"}
+        try:
+            db = self.cache_dir / f"{sha}.analysis.db"
+            if not db.is_file():
+                return None
+            result = self._analysis_store(sha).xrefs(address)
+            if result is not None:
+                return result
+        except sqlite3.Error:
+            pass
+        return None
 
     def import_ida_mcp_cache(self, sha: str, functions: list[dict],
                              binary_name: str = "", *, partial: bool = False,
@@ -1448,6 +2123,20 @@ class DecompilerService:
             f.unlink(missing_ok=True)
             return None
 
+    def read_disasm_sidecar(self, sha: str, address: int) -> tuple[list[str], bool] | None:
+        """Read Ghidra's per-function assembly export without starting Ghidra."""
+        f = self._disasm_dir(sha) / f"{hex(int(address))}.json"
+        if not f.is_file():
+            return None
+        try:
+            raw = json.loads(f.read_text(encoding="utf-8"))
+            lines = raw.get("lines") if isinstance(raw, dict) else raw
+            if not isinstance(lines, list):
+                return None
+            return [str(x) for x in lines], bool(raw.get("truncated")) if isinstance(raw, dict) else False
+        except (ValueError, OSError):
+            return None
+
     def save_func_detail(self, sha: str, address: int, detail: dict) -> None:
         """原子写详情文件（tmp+rename）。硬上限兜底：伪码 512K、反汇编 5000 行、
         单文件 1MB（超限再砍伪码/反汇编），防长函数/异常组合撑爆磁盘与解析。"""
@@ -1480,8 +2169,38 @@ class DecompilerService:
         return next((b for b in self.backends
                      if isinstance(b, GhidraHeadlessBackend)), None)
 
+    def _schedule_ghidra_disasm(self, sha: str, address: int, binary: str) -> None:
+        key = (sha, int(address))
+        with self._disasm_jobs_lock:
+            if key in self._disasm_jobs:
+                return
+            self._disasm_jobs.add(key)
+
+        def run() -> None:
+            try:
+                g = self._ghidra_backend()
+                if g is None:
+                    return
+                got = g.disasm_on_demand(binary, [address],
+                                         max_lines=DETAIL_DISASM_MAX_LINES)
+                lines = got.get(int(address)) or []
+                if not lines:
+                    return
+                current = self.read_func_detail(sha, address) or {}
+                current["disasm_lines"] = lines
+                current["disasm_truncated"] = len(lines) >= DETAIL_DISASM_MAX_LINES
+                current["source"] = "cache"
+                self.save_func_detail(sha, address, current)
+            except Exception:  # noqa: BLE001 - background enrichment is best effort
+                log.exception("Ghidra 后台反汇编失败 sha=%s addr=%s", sha, hex(address))
+            finally:
+                with self._disasm_jobs_lock:
+                    self._disasm_jobs.discard(key)
+
+        threading.Thread(target=run, name="ghidra-disasm", daemon=True).start()
+
     def _ghidra_detail(self, sha: str, address: int, binary: str | None,
-                       binary_name: str = "") -> tuple[dict | None, bool]:
+                       binary_name: str = "", *, background: bool = False) -> tuple[dict | None, bool]:
         """Ghidra 模式按需详情：伪码/调用关系取自 headless 缓存；反汇编取自缓存
         （小样本导出内嵌 disasm_lines）或持久 Ghidra 工程按需反汇编（大样本）。
 
@@ -1490,26 +2209,52 @@ class DecompilerService:
         if data is None:
             return None, False
         target = self._find_func(data, address, None)
+        # SQLite is the first read path once a complete projection exists.
+        # JSON remains the recovery source for old projects and partial exports.
+        try:
+            projected = self._analysis_store(sha).function(address)
+        except sqlite3.Error:
+            projected = None
+        if projected is not None and (projected.get("pseudocode") or projected.get("disasm_lines")):
+            target = {**(target or {}), **projected}
         if target is None:
             return None, False
-        x = build_xrefs(data, address) or {}
+        try:
+            x = self._analysis_store(sha).xrefs(address) or build_xrefs(data, address) or {}
+        except sqlite3.Error:
+            x = build_xrefs(data, address) or {}
         lines = list(target.get("disasm_lines") or [])
         truncated = bool(target.get("disasm_truncated"))
         if not lines:
+            sidecar = self.read_disasm_sidecar(sha, address)
+            if sidecar is not None:
+                lines, truncated = sidecar
+        pending = False
+        # A failed decompilation is terminal for this export. Do not label it
+        # as an assembly job that is still loading; the UI needs to distinguish
+        # retryable background disassembly from a real Ghidra decompiler error.
+        failed = str(target.get("status") or "").lower() == "failed"
+        if not lines and not failed:
             g = self._ghidra_backend()
             if g is not None and binary:
-                try:
-                    got = g.disasm_on_demand(binary, [address],
-                                             max_lines=DETAIL_DISASM_MAX_LINES)
-                    lines = got.get(int(address)) or []
-                except Exception:  # noqa: BLE001 —— 反汇编失败降级为无反汇编
-                    log.exception("Ghidra 按需反汇编失败 sha=%s addr=%s",
-                                  sha, hex(address))
+                if background:
+                    self._schedule_ghidra_disasm(sha, address, binary)
+                    pending = True
+                else:
+                    try:
+                        got = g.disasm_on_demand(binary, [address],
+                                                 max_lines=DETAIL_DISASM_MAX_LINES)
+                        lines = got.get(int(address)) or []
+                    except Exception:  # noqa: BLE001 —— 反汇编失败降级为无反汇编
+                        log.exception("Ghidra 按需反汇编失败 sha=%s addr=%s",
+                                      sha, hex(address))
         detail = {
             "address": hex(int(target.get("address", address))),
             "name": target.get("name"),
             "size": int(target.get("size") or 0),
             "pseudocode": target.get("pseudocode"),
+            "status": target.get("status"),
+            "error": target.get("error"),
             "disasm_lines": lines,
             "disasm_truncated": truncated,
             "callers": x.get("callers") or [],
@@ -1517,6 +2262,8 @@ class DecompilerService:
             "source": "cache",
             "engine": "ghidra",
         }
+        if pending and not failed:
+            detail["disasm_pending"] = True
         if binary_name:
             detail["binary"] = binary_name
         return detail, bool(lines) or bool(target.get("pseudocode"))
@@ -1530,12 +2277,84 @@ class DecompilerService:
         - Ghidra：伪码/调用关系取自 headless 缓存，反汇编取缓存（小样本内嵌）或
           持久 Ghidra 工程按需反汇编（大样本）；都没有 → None
         """
+        # Native Ghidra project is authoritative. Query it before legacy
+        # detail/SQLite caches so stale one-line exports cannot mask the real
+        # Listing and ReferenceManager data.
+        if normalize_engine(engine) == "ghidra" and binary:
+            ghidra = self._ghidra_backend()
+            if ghidra is not None:
+                native = ghidra.native_detail(binary, address)
+                if native is not None:
+                    detail = {"address": native.get("address", hex(address)),
+                              "name": native.get("name"),
+                              "size": native.get("size") or 0,
+                              "pseudocode": native.get("pseudocode"),
+                              "disasm_lines": native.get("disasm_lines") or [],
+                              "disasm_truncated": False,
+                              "callers": native.get("callers") or [],
+                              "callees": native.get("callees") or [],
+                              "calls": [x.get("name") for x in (native.get("callees") or [])],
+                              "source": "ghidra", "engine": "ghidra"}
+                    if binary_name:
+                        detail["binary"] = binary_name
+                    return detail
         cached = self.read_func_detail(sha, address)
         if cached is not None:
+            # Ghidra details may have been cached before on-demand assembly was
+            # available.  Keep the pseudo code, but fill the missing assembly
+            # instead of returning the stale partial detail forever.
+            if (normalize_engine(engine) == "ghidra"
+                    and not cached.get("disasm_lines") and binary):
+                detail, persist = self._ghidra_detail(sha, address, binary, binary_name,
+                                                      background=True)
+                if detail is not None and (detail.get("disasm_lines")
+                                           or detail.get("disasm_pending")):
+                    if persist and detail.get("disasm_lines"):
+                        self.save_func_detail(sha, address, detail)
+                    return detail
             return cached
+        # SQLite projection remains usable when the legacy JSON cache is
+        # missing or one optional section is corrupt.
+        try:
+            projected = self._analysis_store(sha).function(address)
+        except sqlite3.Error:
+            projected = None
+        if projected is not None and (projected.get("pseudocode") or projected.get("disasm_lines")):
+            x = self.cached_xrefs(sha, address) or {}
+            detail = {
+                "address": hex(int(projected.get("address") or address)),
+                "name": projected.get("name"), "size": projected.get("size") or 0,
+                "pseudocode": projected.get("pseudocode"),
+                "disasm_lines": projected.get("disasm_lines") or [],
+                "disasm_truncated": bool(projected.get("disasm_truncated")),
+                "callers": x.get("callers") or [], "callees": x.get("callees") or [],
+                "calls": [c.get("name") for c in (x.get("callees") or []) if c.get("name")],
+                "source": "sqlite", "engine": normalize_engine(engine),
+            }
+            if binary_name:
+                detail["binary"] = binary_name
+            return detail
+        if normalize_engine(engine) == "ghidra" and binary:
+            ghidra = self._ghidra_backend()
+            if ghidra is not None:
+                native = ghidra.native_detail(binary, address)
+                if native is not None:
+                    detail = {"address": native.get("address", hex(address)),
+                              "name": native.get("name"),
+                              "size": 0,
+                              "pseudocode": native.get("pseudocode"),
+                              "disasm_lines": native.get("disasm_lines") or [],
+                              "callers": native.get("callers") or [],
+                              "callees": native.get("callees") or [],
+                              "calls": [x.get("name") for x in (native.get("callees") or [])],
+                              "source": "ghidra"}
+                    if binary_name:
+                        detail["binary"] = binary_name
+                    return detail
         persist = True
         if normalize_engine(engine) == "ghidra":
-            detail, persist = self._ghidra_detail(sha, address, binary, binary_name)
+            detail, persist = self._ghidra_detail(sha, address, binary, binary_name,
+                                                  background=True)
             if detail is None:
                 return None
         else:
@@ -1549,7 +2368,10 @@ class DecompilerService:
                 detail["binary"] = binary_name
         detail["pulled_at"] = time.strftime("%Y-%m-%dT%H:%M:%S+00:00",
                                             time.gmtime())
-        if persist:
+        # Do not persist a pending marker: a failed background job must not
+        # become a permanent "pending" cache entry. The next selection can
+        # retry after the deduplication slot is released.
+        if persist and not detail.get("disasm_pending"):
             self.save_func_detail(sha, address, detail)
         return detail
 
@@ -1825,6 +2647,7 @@ def build_headless_service(cache_dir: str | Path, *, runner,
                            global_cache_dir: str | Path | None = None,
                            ida_db_dir: str | Path | None = None,
                            ghidra_tmp_dir: str | Path | None = None,
+                           resident_ghidra_worker: bool = False,
                            mcp_endpoint: str | None = None,
                            mcp_provider: Callable[[str], str | None] | None = None,
                            available: bool | None = None) -> DecompilerService:
@@ -1841,7 +2664,8 @@ def build_headless_service(cache_dir: str | Path, *, runner,
         "ghidra": lambda: GhidraHeadlessBackend(
             headless_cmd=resolve_ghidra_headless() or "analyzeHeadless",
             runner=runner, tmp_project_dir=ghidra_tmp_dir,
-            available=available, workers=resolve_ghidra_workers()),
+            available=available, workers=resolve_ghidra_workers(),
+            resident_worker=resident_ghidra_worker, preserve_project=True),
     }
     svc = DecompilerService(cache_dir=cache_dir,
                             global_cache_dir=global_cache_dir,

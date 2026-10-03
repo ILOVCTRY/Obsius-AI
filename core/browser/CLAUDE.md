@@ -18,6 +18,8 @@
   （API 层懒创建唯一入口）、`BrowserInstance`（每项目一个常驻，Page=会话，并发上限 2
   **只数 AI 页**；`__init__` 注入 `self._intercept=InterceptHub(...)`，会话关/实例停
   `cancel_all` 放行未裁决包）、`BrowserPool`、`browser_available()`/`chromium_available()`。
+  Playwright MCP 通过 `prepare_embedded(pid)` 获取项目实例的 loopback CDP 地址；
+  该地址只用于本机 MCP 附接同一个持久 context，禁止额外启动项目外 Chrome。
 - `httpmsg.py` **原始报文解析/渲染纯函数层**（零依赖，重放与拦截共用）：
   `parse_raw_request(text, base_url=)`（相对路径拼绝对/裸 authority 换 netloc；坏行
   ValueError→422）、`parse_raw_response`、`render_raw_request/render_raw_response`

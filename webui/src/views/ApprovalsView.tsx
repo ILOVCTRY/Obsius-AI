@@ -202,11 +202,6 @@ export function ApprovalsView({ pid, onGotoTasks }: { pid: string; onGotoTasks?:
                 <div className="mt-2 space-y-2">
                   <p className="text-sm font-medium">
                     🛫 一次性越界执行申请
-                    {esc.kind === "net_real" && (
-                      <Badge variant="outline" className="ml-2 font-mono text-[10px] text-(--status-error)">
-                        net=real 真实网络
-                      </Badge>
-                    )}
                     {esc.kind === "role_runtime" && (
                       <Badge variant="outline" className="ml-2 font-mono text-[10px] text-(--status-approval)">
                         超角色 runtime 上限

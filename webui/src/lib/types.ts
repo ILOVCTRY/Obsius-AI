@@ -219,19 +219,22 @@ export interface AttackAttempt {
   }
 }
 
-export type AttackNodeType = "target" | "intent" | "finding"
+export type AttackNodeType = "target" | "subtarget" | "intent" | "finding"
 export type AttackEdgeKind = "outcome" | "derive" | "bypass" | "exec"
 export type IntentOutcome = "" | "vuln" | "finding" | "dead_end"
 
 export interface AttackNode {
   id: string
   type: AttackNodeType
-  // target
+  // target / subtarget
   label?: string; asset_type?: string
+  settled?: boolean                       // subtarget：子树意图全部收尾且至少一条 dead_end
+  findings?: number                        // subtarget：子树非误报发现数
   // intent
   statement?: string
-  // 意图 open/closed；finding 节点同字段复用 finding 状态（unverified/verified/false-positive）
+  // 意图 open/closed；子目标复用资产状态；finding 节点复用 finding 状态
   status?: "open" | "closed" | "unverified" | "verified" | "false-positive"
+    | "visited" | "scanning" | "tested_clean" | "budget_stop" | "na"
   outcome?: IntentOutcome
   finding_ids?: string[]
   dead_reason?: string
@@ -256,6 +259,7 @@ export interface AttackPath {
   attempts: AttackAttempt[]
   exec_edges: AttackEdge[]
   counts: {
+    subtargets?: number   // 根的直接子资产数（2026-10-01 子目标层）
     intents: number; open: number; closed: number; dead_end: number
     findings: number; total_requests: number
   }
@@ -320,9 +324,12 @@ export interface TraceEffect {
   trace_chains: number; validated_chains: number; combos: TraceEffectCombo[]
 }
 
+export type LlmProviderFormat = "openai-chat-completions" | "openai-responses" | "anthropic-messages"
+
 export interface LlmProvider {
   name: string
   base_url: string
+  format: LlmProviderFormat
   api_key?: string          // 仅写入；读出脱敏（只有 has_key）
   has_key?: boolean
   models: string[]
@@ -331,6 +338,8 @@ export interface LlmProvider {
   model_context?: Record<string, number>
   /** 思考链开关：true=显式开启；null/缺省=不写该字段，跟随网关缺省（ark 默认开） */
   thinking?: boolean | null
+  /** 供应商专属 HTTP/HTTPS 代理；留空沿用系统代理环境 */
+  proxy?: string | null
 }
 
 export interface ModelInfo {
@@ -375,6 +384,13 @@ export interface Finding {
   impact: string
   /** 收录格式三件套·修复建议（schema v20），空=待补充 */
   remediation: string
+  summary: string
+  affected_assets: string
+  test_environment: string
+  reproduction_steps: string
+  verification_result: string
+  risk_assessment: string
+  pocs: FindingPoc[]
   status: string
   /** C6 分两类：vuln=漏洞 / intel=有效发现·关键发现（缺省迁移行=vuln） */
   category: FindingCategory
@@ -395,6 +411,104 @@ export interface Asset {
   meta: Record<string, unknown>
   author: string
   created_at: string
+}
+
+export interface FindingPoc {
+  type: "http" | "python"
+  code: string
+}
+
+export const VULNERABILITY_TYPES = [
+  "未授权访问", "认证绕过", "水平越权", "垂直越权", "SQL 注入", "命令注入",
+  "SSRF", "XSS", "文件读取", "文件上传", "路径穿越", "敏感信息泄露",
+  "弱口令", "配置错误", "CSRF", "业务逻辑", "组件漏洞", "其他",
+] as const
+
+// 分析包（目录/压缩包/APK/AAB 的统一只读样本容器）
+export interface SamplePackageTarget {
+  target_id: string
+  path: string
+  format: string
+  size: number
+  sha256?: string
+  candidate?: boolean
+  analyzers: string[]
+}
+
+export interface SamplePackageEntry {
+  path: string
+  format: string
+  platform?: string
+  size: number
+  sha256?: string
+  candidate: boolean
+}
+
+export interface SamplePackageDependency {
+  from: string
+  to: string
+  kind: string
+}
+
+export interface SamplePackage {
+  package_id: string
+  version_id: string
+  manifest_sha256: string
+  created_at: string
+  file_count: number
+  total_bytes: number
+  origin?: { source_type?: string; filename?: string; file_count?: number; raw_sha256?: string }
+  raw_sha256?: string | null
+  targets: SamplePackageTarget[]
+  entries?: SamplePackageEntry[]
+  dependencies: SamplePackageDependency[]
+  source_analysis?: Record<string, unknown> | null
+  import_count?: number
+  tree_ref?: string
+}
+
+export interface SampleTargetAnalysis {
+  package_id: string
+  version_id: string
+  target: SamplePackageTarget
+  analysis: Record<string, unknown> | null
+  file_exists: boolean
+  binary_sha256?: string
+  binary_asset_id?: string
+}
+
+export interface SampleTargetAnalyzeResponse {
+  job_id: string | null
+  cached?: boolean
+  target_id?: string
+  report?: Record<string, unknown>
+  binary_sha256?: string
+  binary_asset_id?: string
+}
+
+export interface SamplePackageUploadSession {
+  upload_id: string
+  filename: string
+  total_size: number
+  total_chunks: number
+  received_chunks?: number[]
+  status: "uploading" | "complete" | "failed"
+}
+
+export interface SamplePackagePreview {
+  path: string
+  format: string
+  size: number
+  sha256?: string
+  kind: "text" | "image" | "structure" | "binary"
+  truncated: boolean
+  preview_bytes: number
+  content_url?: string | null
+  media_type?: string
+  text?: string
+  hex_rows: { offset: number; hex: string; ascii: string }[]
+  archive?: Record<string, unknown>
+  dex?: Record<string, unknown>
 }
 
 export interface FuncNameHistory {
@@ -453,6 +567,14 @@ export interface BinaryOverview {
   /** 样本配置的反编译引擎模式（ida / ghidra；2026-10-01 工作台双模式） */
   engine: string
   cached: boolean
+  analysis_job?: {
+    id: string
+    status: "running"
+    progress?: {
+      phase?: string; done?: number; total?: number; discovered?: number; completed?: number; failed?: number
+      stoppable?: boolean; eta_seconds?: number | null; elapsed_seconds?: number; rate_per_second?: number
+    }
+  } | null
   meta: BinaryMeta | null
   sections: BinarySection[] | { error: string } | null
   imports: Record<string, string[]> | null
@@ -496,6 +618,8 @@ export interface CachedFuncRow {
   size: number
   has_pseudo: boolean
   n_calls: number
+  status?: "pending" | "done" | "failed"
+  error?: string
 }
 
 export interface CachedFunction {
@@ -508,6 +632,7 @@ export interface CachedFunction {
   source?: string
   /** 按需详情（IDA 拉取样本自动 analyze_batch 拉取落盘）：反汇编行列表，超长截断 */
   disasm?: { lines: string[]; truncated?: boolean } | null
+  disasm_pending?: boolean
 }
 
 export interface XrefRef {
@@ -567,10 +692,19 @@ export interface FindingPatchBody {
   title?: string
   severity?: string
   vuln_class?: string
+  impact?: string
+  remediation?: string
   /** F11 判级依据：None=不动，空串=清空 */
   rating_basis?: string
   /** C6 分两类：vuln=漏洞 / intel=有效发现·关键发现 */
   category?: FindingCategory
+  summary?: string
+  affected_assets?: string
+  test_environment?: string
+  reproduction_steps?: string
+  verification_result?: string
+  risk_assessment?: string
+  pocs?: FindingPoc[]
 }
 
 export interface JudgmentTemplates {
@@ -1098,6 +1232,10 @@ export interface KbSearchHit {
   source: string
   matches: number
   snippet: string
+  title?: string
+  kind?: "playbook" | "pattern" | "case" | "ref" | string
+  layer?: number
+  is_attachment?: boolean
 }
 
 export interface KbRefHit {
@@ -1140,7 +1278,7 @@ export type SkillVocab = Record<
 
 // ---------- 统一变更提案（C4） ----------
 
-export type ProposalKind = "kb" | "skill"
+export type ProposalKind = "kb" | "skill" | "case" | "pattern" | "playbook"
 export type ProposalMode = "edit" | "create" | "rename" | "delete"
 export type ProposalStatus = "pending" | "approved" | "rejected"
 export type ProposalOrigin = "agent" | "review" | "human"
@@ -1182,6 +1320,7 @@ export interface Proposal {
   summary: string
   reason: string
   evidence: string
+  source_refs?: { cap: string; path: string; title?: string }[]
   revisions: ProposalRevision[]
   created_at: string
   decided_at: string | null
@@ -1189,6 +1328,27 @@ export interface Proposal {
   decision_note: string | null
   /** 仅详情端点带（对照磁盘实时算） */
   live?: ProposalLive
+}
+
+export interface KbEvolutionSource {
+  path: string
+  source: string
+  title?: string
+  kind?: string
+  layer?: number
+  snippet?: string
+  reason?: string
+}
+
+export interface KbEvolutionDraft {
+  kind: "case" | "pattern" | "playbook"
+  title: string
+  path: string
+  content: string
+  summary: string
+  sources: { cap: string; path: string; title?: string }[]
+  path_adjusted?: boolean
+  notice?: string
 }
 
 export interface ReviewProposalsResult {
@@ -1229,9 +1389,10 @@ export interface OwnerRule {
 export type RatingRule = OwnerRule
 
 /** F11 rule_profiles 项目级生效档案（config.rule_profiles）：
- * owners 缺省 "*"=自动命中全注入；rating 键缺失=自动（按 owner 命中），[] =关闭 */
+ * 纯显式（2026-10-01 去三态）：owners/rating 都只收字符串清单，勾哪个生效哪个，
+ * 未配/空=不注入；旧 owners="*"（自动全注入）已退役。 */
 export interface RuleProfiles {
-  owners?: "*" | string[]
+  owners?: string[]
   rating?: string[]
 }
 
@@ -1698,4 +1859,5 @@ export interface ChatMcpServer {
   domains: string[]
   online: boolean
   tools: ChatMcpTool[]
+  session_scoped?: boolean
 }

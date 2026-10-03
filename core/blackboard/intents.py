@@ -1,4 +1,4 @@
-"""意图写入口（渗透链路图 v3，website-attack-path-graph，2026-09-24）。
+﻿"""意图写入口（渗透链路图 v3，website-attack-path-graph，2026-09-24）。
 
 意图 = 思考/规划阶段的产物（一句可证伪假设）。纪律：
 
@@ -23,6 +23,14 @@ from core.blackboard.store import _loads, _row_to_dict, new_id, now
 
 INTENT_STATUSES = ("open", "closed")
 INTENT_OUTCOMES = ("vuln", "finding", "dead_end")
+
+
+def _event_session_id(author: str) -> str | None:
+    """意图事件挂 session_id 的口径（2026-10-01 intent-tools-chat）：任务链
+    author=sess-*、对话链 author=chat-*，两者都要挂——bb_add_finding 的「意图
+    声明后有执行动作」门禁按 session_id 查 intent.declared 事件，chat 侧此前
+    写 None 会导致门禁查不到声明、误判「无执行动作」而永久拒绝登记发现。"""
+    return author if author.startswith(("sess-", "chat-")) else None
 
 # 引用 kind 白名单（basis_refs / evidence_refs）
 REF_KINDS = ("asset", "finding", "artifact", "http", "event")
@@ -207,7 +215,7 @@ def declare_intent(bb, project_id: str, statement: str, *,
                      "target_asset_id": target_asset_id, "basis_refs": basis,
                      **({"ref_corrections": ref_corrections}
                         if ref_corrections else {})},
-                    session_id=author if author.startswith("sess-") else None,
+                    session_id=_event_session_id(author),
                     author=author)
     out = get_intent(bb, project_id, intent_id) or {}
     if ref_corrections:
@@ -289,7 +297,7 @@ def close_intent(bb, project_id: str, intent_id: str, outcome: str, *,
                      "dead_reason": (dead_reason or "")[:200],
                      **({"ref_corrections": ref_corrections}
                         if ref_corrections else {})},
-                    session_id=author if author.startswith("sess-") else None,
+                    session_id=_event_session_id(author),
                     author=author)
     out = get_intent(bb, project_id, intent_id) or {}
     if ref_corrections:
@@ -320,9 +328,62 @@ def reopen_intent(bb, project_id: str, intent_id: str, *,
         )
     bb.append_event(project_id, "intent.reopened",
                     {"intent_id": intent_id, "note": note[:200]},
-                    session_id=author if author.startswith("sess-") else None,
+                    session_id=_event_session_id(author),
                     author=author)
     return get_intent(bb, project_id, intent_id) or {}
+
+
+# ---------- delete ----------
+
+def delete_intent(bb, project_id: str, intent_id: str, *,
+                  author: str = "system", reason: str = "") -> dict:
+    """物理删除意图（2026-10-01 intent-tools-chat）：误声明/目标取消时硬删该行。
+
+    **带保护**（宁严勿松）：
+    - 已收尾（status=closed）→ 拒删（收尾是链路图事实，须先 reopen 再删）；
+    - 被别的意图当 basis_refs 引用 → 拒删（会断推导链）；
+    - 已作为某 finding 的挂载意图（bb_add_finding 记录了 intent 关联）——实测
+      发现本身不强制存 intent_id 列，故以 intent.declared→后续 finding 的
+      事件关联/作者未硬绑；此处只拦「有 finding 归入本意图」的显式情形：
+      intents 表若有 finding 引用（outcome_refs）也已由 closed 态覆盖。
+    事件 intent.deleted（留痕：谁删了什么）。
+    """
+    with bb._tx():
+        row = bb.conn.execute(
+            "SELECT * FROM intents WHERE id=? AND project_id=?",
+            (intent_id, project_id),
+        ).fetchone()
+        if row is None:
+            raise LookupError(f"意图不存在: {intent_id}")
+        if row["status"] == "closed":
+            raise ValueError(
+                f"意图已收尾（{intent_id}），不能直接删除——收尾结论是链路图事实；"
+                "如确要废弃请先 reopen_intent 重开，再评估删除")
+        # 被其他意图引用为推导依据 → 拒删（防断链）
+        rows = bb.conn.execute(
+            "SELECT id, basis_refs FROM intents WHERE project_id=? AND id!=?",
+            (project_id, intent_id),
+        ).fetchall()
+        for r in rows:
+            try:
+                refs = json.loads(r["basis_refs"] or "[]")
+            except ValueError:
+                refs = []
+            if any(isinstance(x, str) and x == f"intent:{intent_id}" for x in refs):
+                raise ValueError(
+                    f"意图 {intent_id} 被 {r['id']} 当作推导依据引用，不能删除——"
+                    "先处理引用它的意图")
+        statement = row["statement"]
+        bb.conn.execute(
+            "DELETE FROM intents WHERE id=? AND project_id=?",
+            (intent_id, project_id),
+        )
+    bb.append_event(project_id, "intent.deleted",
+                    {"intent_id": intent_id, "statement": statement[:200],
+                     "reason": (reason or "")[:200]},
+                    session_id=_event_session_id(author),
+                    author=author)
+    return {"id": intent_id, "deleted": True, "statement": statement}
 
 
 # ---------- read ----------
@@ -343,36 +404,112 @@ def get_intent(bb, project_id: str, intent_id: str) -> dict | None:
     return _hydrate(d) if d else None
 
 
-def dead_end_backing_target(conn, project_id: str, asset_id: str) -> str | None:
-    """tested_clean 背书查询（2026-09-25 门禁；2026-09-29 逐资产收紧）：返回
-    直接围绕 asset_id 的 closed/dead_end 意图 target_asset_id，无背书 None。
+def _subtree_asset_ids(conn, project_id: str, root_id: str) -> set:
+    """root_id 及其全部后代资产 id（沿 parent_id 展开）。纯读、收 conn。"""
+    rows = conn.execute(
+        "SELECT id, parent_id FROM assets WHERE project_id=?",
+        (project_id,),
+    ).fetchall()
+    subtree = {root_id}
+    changed = True
+    while changed:
+        changed = False
+        for r in rows:
+            if r["parent_id"] in subtree and r["id"] not in subtree:
+                subtree.add(r["id"])
+                changed = True
+    return subtree
 
-    直接背书（二选一）：
-    - 意图 target_asset_id == asset_id；
-    - 意图 basis_refs 明确含 asset:<asset_id>。
-    **祖先链批次覆盖已移除**（2026-09-29，sess-1d692817a5d0 误判复盘）：
-    一条「同模板基线一致」式父节点死路意图曾批量背书 12 个活站 tested_clean
-    （每域仅 4 个测活请求）——tested_clean 必须逐资产独立立意意图，意图越多
-    测得越全面；父节点终态由子树读时派生（D3），不需要批次背书。
+
+def _intent_anchors(intent_row) -> set:
+    """意图的资产锚点集合：target_asset_id ∪ basis_refs 中的 asset:<id>。"""
+    out: set = set()
+    tid = intent_row["target_asset_id"]
+    if tid:
+        out.add(tid)
+    try:
+        refs = json.loads(intent_row["basis_refs"] or "[]")
+    except ValueError:
+        refs = []
+    for ref in refs:
+        if isinstance(ref, str) and ref.startswith("asset:"):
+            out.add(ref.split(":", 1)[1])
+    return out
+
+
+def dead_end_backing_target(conn, project_id: str, asset_id: str,
+                            root_id: str | None = None) -> str | None:
+    """tested_clean 背书查询（2026-09-25 门禁；2026-10-01 改读链路图口径）。
+
+    口径与攻击链路图同源，**子目标级**：先把 asset_id 归到它所属的「子目标」
+    （自根向下、离根最近的那层祖先；`root_id` 给定时用该根，缺省用资产的链顶），
+    再判定该子目标的子树是否「**意图全部收尾**（无 open）且至少一条 dead_end」。
+    满足则返回该子目标 id（即背书来源）；否则 None。
+
+    - **子目标级**：根的直接子资产是子目标；对叶子（如 url）标净，实际校验的是
+      它所属子目标的整棵子树——父/子树共识可背书后代，但不跨到无关旁支
+      （保留 2026-09-29「同模板一致」批量误判的修复精神）；
+    - **全部收尾**：子树内只要还有 open 意图即无背书（宁严勿松）；
+    - 无 root_id 时用该资产的祖先链顶（无 parent 的顶层资产）作为根。
     纯读、**收 conn**——调用方可能已在 ``_tx()`` 内，不能再开 bb 事务。
     """
-    marker = f"asset:{asset_id}"
+    subtarget_scope = _subtarget_scope(conn, project_id, asset_id, root_id)
+    if subtarget_scope is None:
+        return None
+    scope_set = subtarget_scope[1]
     rows = conn.execute(
-        "SELECT target_asset_id, basis_refs FROM intents"
-        " WHERE project_id=? AND status='closed' AND outcome_type='dead_end'"
-        " AND (target_asset_id=? OR basis_refs LIKE ?)",
-        (project_id, asset_id, f'%"{marker}"%'),
+        "SELECT target_asset_id, basis_refs, status, outcome_type FROM intents"
+        " WHERE project_id=?",
+        (project_id,),
     ).fetchall()
-    for r in rows:
-        if r["target_asset_id"] == asset_id:
-            return asset_id
-        try:
-            refs = json.loads(r["basis_refs"] or "[]")
-        except ValueError:
-            continue
-        if marker in refs:
-            return r["target_asset_id"] or asset_id
-    return None
+    in_scope = [r for r in rows if _intent_anchors(r) & scope_set]
+    if not in_scope:
+        return None
+    if any(r["status"] == "open" for r in in_scope):
+        return None
+    has_dead_end = any(
+        r["status"] == "closed" and r["outcome_type"] == "dead_end"
+        for r in in_scope)
+    return subtarget_scope[0] if has_dead_end else None
+
+
+def _subtarget_scope(conn, project_id: str, asset_id: str,
+                     root_id: str | None) -> tuple[str, set] | None:
+    """把 asset_id 归到「子目标」作用域，返回 (子目标 id, 其子树集合)。
+
+    子目标 = 根的直接子资产（2026-10-01 链路图口径）。归法：
+    - asset_id 本身就是根的直接子资产 → 它自己；
+    - 否则沿 parent_id 上溯到根的最近一层后代；
+    - asset_id 就是根（root 自身无子目标）→ 以 root 为作用域（等价整站，
+      仅当调用方对着根资产标净时发生；父节点 clean 本就走读时派生，少用）。
+    资产不存在 → None。
+    """
+    rows = conn.execute(
+        "SELECT id, parent_id FROM assets WHERE project_id=?", (project_id,)
+    ).fetchall()
+    parent_of = {r["id"]: r["parent_id"] for r in rows}
+    if asset_id not in parent_of:
+        return None
+    # 找链顶（无 parent 或 parent 不存在的祖先）
+    root = root_id
+    if not root:
+        cur = asset_id
+        while parent_of.get(cur):
+            cur = parent_of[cur]
+        root = cur
+    if asset_id == root:
+        return (root, _subtree_asset_ids(conn, project_id, root))
+    # 上溯到 root 的直接子资产
+    chain = []
+    cur = asset_id
+    while cur and cur != root:
+        chain.append(cur)
+        cur = parent_of.get(cur)
+    if cur != root or not chain:
+        # asset_id 不在 root 子树内 → 退回以自身为根的作用域
+        return (asset_id, _subtree_asset_ids(conn, project_id, asset_id))
+    subtarget = chain[-1]  # 离 root 最近的那一层
+    return (subtarget, _subtree_asset_ids(conn, project_id, subtarget))
 
 
 def list_intents(bb, project_id: str, *, status: str | None = None) -> list[dict]:

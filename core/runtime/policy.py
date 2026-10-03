@@ -43,6 +43,7 @@ def allowed_runtimes(threat_class: str) -> set[str]:
     }
 
 
-# L3 沙箱网络模式（§7）：real 永不默认，需人工审批
+# L3 沙箱网络模式（§7）：real 不默认、也不再人工审批（2026-10-01 起），
+# 可经 run_cmd 直接指定；隔离等级/threat_class 约束不变。
 NET_MODES = {"none", "fakenet", "real"}
 DEFAULT_NET_MODE = "none"  # MVP 先实现 none；fakenet(INetSim sidecar) 为下一里程碑

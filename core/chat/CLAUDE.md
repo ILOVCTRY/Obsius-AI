@@ -22,6 +22,13 @@ FOREIGN KEY constraint failed → 曾致删有子线程的线程 500）。
 - **主控**（agent_id=chat-orchestrator）：todo_write + call_expert + skill_open/
   kb_search/kb_open/bb_query + mcp__*；不碰实操（蛙池式主控轻）。专家清单进
   call_expert 工具描述（`_generalist`/主控自身不进清单）。
+  **技能名≠专家名消歧（2026-10-01 复盘）**：主控 system 同时注入「可用技能清单」
+  （`recon-asset-enum` 等）与 call_expert 的「可用专家」（`recon`/`osint`…），
+  模型曾把技能名 `recon-asset-enum` 当专家名传入报「未知专家」。三层防护：
+  ① `expert` schema 加 `enum`（值域=可委派专家，见 `_delegatable_experts`）——
+  软约束降错率；② 技能清单标题显式标注「下列是【技能名】，不是专家」；
+  ③ 未知专家报错文案同口径（`_delegatable_experts`，不含 `_generalist`）+
+  「这些是专家 id，不是技能名」。硬校验仍是 `_tool_call_expert` 成员判定。
 - **子专家**（agent_id=专家池 id）：AGENT_TOOLS 全量裁剪——排除任务队列/计划/
   意图/收尾/私信/提案/HITL 控制原语（`_EXPERT_EXCLUDED`，防污染任务队列）；
   专家 yaml `tools:` 字段优先；+ mcp__*；无 call_expert（**spawn 深度=1**）。
@@ -32,6 +39,13 @@ FOREIGN KEY constraint failed → 曾致删有子线程的线程 500）。
   不可用：本线程未装配工具面」），回归测试 test_expert_dispatcher_*。
 - `call_expert`：spawn 持久子线程（parent_thread_id 留档）→ 隔离上下文跑完 →
   摘要+线程引用回传主控；不审批、事件流全程可见。
+- **对话链意图链路（intent-tools-chat，2026-10-01）**：意图三件套 + `bb_delete_intent`
+  从 `_EXPERT_EXCLUDED` 移出、开放给对话主控与子专家——此前对话跑完「黑板→发现→
+  链路」全空（对话链从未声明意图）；现对话链与任务管线同纪律：① `bb_add_finding`
+  的意图先行门禁 author 判定扩到 `chat-*`（无 open 意图/声明后无执行动作均 `[拒绝]`）；
+  ② 子专家交摘要前若本线程有 open 意图 → 拦截并要求先 `close_intent`（主控豁免，
+  它是调度者）；③ `declare_intent` 回执按轨附 `[意图口径]` 提示（pentest=攻击面/
+  漏洞假设，reverse=函数/协议/样本行为等，只提示不硬拦）。
 - `todo_write`：整体覆写 thread.todo（工作记忆外化，前端 TodoCard 渲染）。
 - 流式：llm on_text 攒 delta → 节流（≥80 字符或 1s）落 `chat.delta` 事件；
   工具调用落 `chat.tool`（**phase=start/done 两段**（2026-09-29）：dispatch 前
@@ -91,6 +105,16 @@ FOREIGN KEY constraint failed → 曾致删有子线程的线程 500）。
   循环最后一步不传 tools（`step_tools=None`），逼模型输出纯文本终稿，避免「步数
   耗尽但全程只调工具」→ 落「本轮未产出文本回复」。线程 status：running 起、
   idle 正常收、error 异常收（异常也落一条 chat.message 事件，前端可见）。
+- **纯文本终稿截断自动续写（2026-10-01，修「话说一半就正常终止」）**：`_loop`
+  拿到响应后，若为纯文本终稿且 `_is_truncated_final(resp)`（`stop_reason ∈
+  {length, max_tokens}`）**不当作终稿收尾**——把半截文本作为 assistant 前缀
+  落库并入历史 + 追一条 user 催续（`_CONTINUE_NUDGE`，**只入内存 messages，
+  不落库**，避免污染人类对话），继续循环拼接成完整终稿（`text_acc` 逐段拼接）。
+  续写上限 `_CHAT_CONTINUE_MAX=3`，超限接受现有文本并落 `chat.truncated`
+  （phase=giveup）；步数耗尽但有累积文本时也按其收尾并落 giveup
+  （reason=steps_exhausted）。带 tool_calls 的响应不算终稿截断（走工具路径 /
+  工具参数整轮重试）。**只治纯文本终稿截断**；工具参数截断仍走 `_chat` 的整轮
+  重试。
 
 ## MCP 桥（mcp_bridge.py）
 
@@ -100,6 +124,32 @@ initialize→Mcp-Session-Id→initialized→tools/list/call，**只允许 loopba
 协议时序同 decompiler.MCPBackend）+ stdio（子进程行分隔 JSON-RPC，后台读线程
 收响应、stderr 排干、崩溃重拉一次）。工具名 `mcp__<server>__<tool>`；tools/list
 结果 300s TTL 缓存；单 server 离线不阻断（状态点 `online=tools 非空`）。
+
+**会话级 server 隔离（2026-10-01）**：`SESSION_SCOPED_SERVERS={"playwright"}` 的
+stdio server **按 `(server, session_id)` 各起一个独立子进程**，用环境变量
+`PW_SESSION_ID` 把会话标识传给启动器；启动器据此派生独立 Chrome profile / CDP
+端口，修「多个会话抢同一持久化 profile → Browser is already in use」。同会话内多轮
+复用同一进程（登录态跨轮保留），异会话互不干扰。`ChatTurn._dispatch_mcp` 传
+`session_id=self.thread_id`。`MAX_BROWSER_SESSIONS=4` 限制并发会话数，超限回结构化
+错误引导（提示等空闲回收或减并发）；已死会话（空闲回收/退出）的配额会被自动回收。
+装配工具面时用 `PW_NO_CHROME=1` 探针进程（只 `tools/list`，不起真实浏览器）；
+`status()` 对会话级 server 标 `session_scoped=true`，也通过该探针返回工具清单。
+启动器空闲 1h（`PW_IDLE_MS` 可覆盖）无活动页 → 关自管 Chrome + 删 profile + 释放锁。
+
+**项目内嵌（2026-10-03）**：Playwright 实际调用按项目注入
+`PW_BROWSER_CDP_ENDPOINT`，先启动 `BrowserPool` 的项目持久浏览器，再让 MCP
+通过 loopback CDP 接入同一 context/profile；因此 MCP 与内置浏览器共享登录态、页面
+和抓包链路，不再另起外部 Chrome。stdio server 统一以仓库根目录为 cwd，配置中的
+相对命令路径不依赖服务启动目录。
+
+**stdio 握手（2026-10-01）**：`_StdioConn._rpc` 现在先做 MCP 握手
+（`initialize` → `notifications/initialized`）再发业务请求，且每次进程重启后重做
+（`_ready` 标志）。此前缺握手，`@playwright/mcp` 的 `tools/call` 会被拒（`tools/list`
+却可能成功），表现为「server 离线或协议错误」。启动器侧：`--user-data-dir` 必须排在
+`--remote-debugging-port` 前（否则有常规 Chrome 时调试端口不监听）；端口选取跳过
+Windows TCP 排除段（`netsh interface ipv4 show excludedportrange protocol=tcp`，
+Hyper-V/WinNAT 保留段，本机为 8421~9880）；默认基址 9244 → **14000**（9244 恰在
+保留段内）；Chrome 绑不上调试端口时换端口重试而非降级到自托管浏览器（降级会丢会话隔离）。
 
 ## API（app.py「智能体工作台」节）
 

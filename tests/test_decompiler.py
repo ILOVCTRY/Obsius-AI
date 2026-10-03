@@ -1437,6 +1437,13 @@ def test_ghidra_script_control_and_partial_guards():
     assert "range(2)" in g_src                       # 单函数分片重试一次
 
 
+def test_ghidra_string_export_supports_listing_iterator():
+    g_src = (_REPO_ROOT / "tools/decompiler/ghidra/scripts/export_funcs.py").read_text(
+        encoding="utf-8")
+    assert "getDefinedData(True)" in g_src
+    assert "DefinedDataIterator.definedStrings(prog)" in g_src
+
+
 def test_apply_script_uses_ida_name_flags_not_idc():
     # IDA 9.3：idc.SN_FORCE 已迁到 ida_name（idc 上取它 AttributeError，idat rc=1 且 stderr 空）
     src = (_REPO_ROOT / "tools/decompiler/ida/scripts/apply_names.py").read_text(encoding="utf-8")

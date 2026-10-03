@@ -14,6 +14,7 @@ import type { ProjectDetail, SkillDef } from "@/lib/types"
 import { MarkdownView } from "@/components/settings/MarkdownView"
 import { FindingsRail } from "@/components/workbench/FindingsRail"
 import { cn } from "@/lib/utils"
+import { paneMaxWidth } from "@/lib/paneWidth"
 import { useEvents } from "@/lib/useEvents"
 
 // 智能体工作台（K9，2026-09-29）：对话式挖洞入口（蛙池式）。
@@ -44,11 +45,13 @@ const SLASH_COMMANDS = [
 ]
 
 const ASIDE_MIN = 180
-const ASIDE_MAX = 420
 const ASIDE_DEFAULT = 236
+// 左栏最大宽动态取「容器 − 主区保底 − 右栏占位」（见 lib/paneWidth）
+const ASIDE_RESERVE = [".wb-rail, .wb-rail-handle"]
+const ASIDE_RESERVE_EXTRA = 16
 
-export function AgentWorkbenchView({ pid, meta, onOpenChain }: {
-  pid: string; meta: ProjectDetail | null; onOpenChain?: () => void
+export function AgentWorkbenchView({ pid, meta }: {
+  pid: string; meta: ProjectDetail | null
 }) {
   const [agents, setAgents] = useState<ChatAgent[]>([])
   const [agentId, setAgentId] = useState<string>(ORCHESTRATOR)
@@ -70,6 +73,11 @@ export function AgentWorkbenchView({ pid, meta, onOpenChain }: {
   const [asideWidth, setAsideWidth] = useState(ASIDE_DEFAULT)
   const [dragging, setDragging] = useState(false)
   const dragOrigin = useRef<{ x: number; w: number } | null>(null)
+  const splitterRef = useRef<HTMLDivElement>(null)
+
+  // 左栏可拖到的最大宽（动态：容器 − 主区保底 − 右栏占位）
+  const maxAside = useCallback(
+    () => paneMaxWidth(splitterRef.current, ASIDE_RESERVE, ASIDE_RESERVE_EXTRA), [])
   const scrollRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const { events } = useEvents(pid)
@@ -86,7 +94,7 @@ export function AgentWorkbenchView({ pid, meta, onOpenChain }: {
     if (!dragging) return
     const move = (e: MouseEvent) => {
       const o = dragOrigin.current
-      if (o) setAsideWidth(Math.min(ASIDE_MAX, Math.max(ASIDE_MIN, o.w + (e.clientX - o.x))))
+      if (o) setAsideWidth(Math.max(ASIDE_MIN, Math.min(maxAside(), o.w + (e.clientX - o.x))))
     }
     const up = () => setDragging(false)
     document.addEventListener("mousemove", move)
@@ -98,7 +106,7 @@ export function AgentWorkbenchView({ pid, meta, onOpenChain }: {
       document.body.classList.remove("wb-dragging")
       dragOrigin.current = null
     }
-  }, [dragging])
+  }, [dragging, maxAside])
 
   // ---- 加载 ----
   useEffect(() => {
@@ -173,6 +181,22 @@ export function AgentWorkbenchView({ pid, meta, onOpenChain }: {
   }, [events, tid])
   const liveToolStart = liveTool?.phase === "start" ? liveTool : null
   const liveToolDone = liveTool?.phase === "done" ? liveTool : null
+  // 传输层 524 重试进度：provider 通过 chat.retry 事件实时上报，避免长时间
+  // 只显示「思考中」让人误以为请求已经卡死。
+  const liveRetry = useMemo(() => {
+    for (let i = events.length - 1; i >= 0; i--) {
+      const e = events[i]
+      if (e.kind === "chat.retry") {
+        const p = e.payload as { thread_id?: string; attempt?: number; total?: number; status?: number }
+        if (p?.thread_id === tid) return p
+      }
+      if (e.kind === "chat.message") {
+        const p = e.payload as { thread_id?: string; role?: string }
+        if (p?.thread_id === tid && p.role === "user") break
+      }
+    }
+    return null
+  }, [events, tid])
   // assistant(tool_calls) 已落库但部分调用尚无结果行 → 锚定转圈块（轮询滞后 ≤2s）
   const hasPendingCall = useMemo(() => messages.some((m) =>
     m.role === "assistant" && (m.tool_calls ?? []).some((tc) =>
@@ -374,6 +398,7 @@ export function AgentWorkbenchView({ pid, meta, onOpenChain }: {
         </div>
       </aside>
       <div
+        ref={splitterRef}
         className={cn("wb-splitter", dragging && "is-dragging")}
         role="separator"
         aria-orientation="vertical"
@@ -382,7 +407,7 @@ export function AgentWorkbenchView({ pid, meta, onOpenChain }: {
         onMouseDown={onSplitterDown}
         onKeyDown={(e) => {
           if (e.key === "ArrowLeft") setAsideWidth((w) => Math.max(ASIDE_MIN, w - 16))
-          if (e.key === "ArrowRight") setAsideWidth((w) => Math.min(ASIDE_MAX, w + 16))
+          if (e.key === "ArrowRight") setAsideWidth((w) => Math.min(maxAside(), w + 16))
         }}
       />
 
@@ -489,7 +514,11 @@ export function AgentWorkbenchView({ pid, meta, onOpenChain }: {
                     {agentId === ORCHESTRATOR ? <Bot size={11} /> : agentInitial(currentAgent)}
                   </span>
                   <div className="wb-msg">
-                    <div className="wb-msg-head"><span className="wb-msg-kind">思考中</span></div>
+                    <div className="wb-msg-head"><span className="wb-msg-kind">
+                      {liveRetry
+                        ? `正在第 ${liveRetry.attempt ?? "?"}/${liveRetry.total ?? "?"} 次重试`
+                        : "思考中"}
+                    </span></div>
                     <div className="wb-typing"><span className="wb-caret" /></div>
                   </div>
                 </div>
@@ -745,10 +774,13 @@ export function AgentWorkbenchView({ pid, meta, onOpenChain }: {
                           {s.name}
                           <span className={cn("wb-dot", s.online && "is-running")} />
                           <span className="wb-thread-meta">{s.transport} · {s.domains.join("/")}</span>
+                          {s.session_scoped && <span className="wb-thread-meta">项目内嵌</span>}
                           <Plus size={11} className="wb-kv-add" />
                         </div>
                         <div className="wb-panel-line mt-0.5 pl-5">
-                          {s.tools.length ? s.tools.map((t) => t.name).join("、") : "（工具发现失败或为空）"}
+                          {s.tools.length
+                            ? `已发现 ${s.tools.length} 个工具：${s.tools.map((t) => t.name).join("、")}`
+                            : "（工具发现失败或为空，请检查 MCP 进程）"}
                         </div>
                       </button>
                     ))}
@@ -761,8 +793,8 @@ export function AgentWorkbenchView({ pid, meta, onOpenChain }: {
         </div>
       </main>
 
-      {/* 右栏：漏洞/发现（默认收起；2026-10-01） */}
-      <FindingsRail pid={pid} track={meta?.track} onOpenChain={onOpenChain} />
+      {/* 右栏：漏洞/发现（默认收起；2026-10-01）——链路视图内联于此 */}
+      <FindingsRail pid={pid} track={meta?.track} />
     </div>
   )
 }

@@ -28,8 +28,10 @@ def env(tmp_path, monkeypatch):
 def _disp(env, **kw):
     bb, project, gw, tq, _ = env
     sid = "sess-" + "b" * 12
-    return ToolDispatcher(bb, gateway=gw, tq=tq, project_id=project["id"],
-                          session_id=sid, author=sid, **kw)
+    d = ToolDispatcher(bb, gateway=gw, tq=tq, project_id=project["id"],
+                       session_id=sid, author=sid, **kw)
+    d._intent_lead_passed = True  # 本组用例主题=浏览器工具面，跳过意图先行闸
+    return d
 
 
 # ---------- schema 与计划闸 ----------

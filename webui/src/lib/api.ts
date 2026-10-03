@@ -7,7 +7,7 @@ import type {
   LogicBlock, LogicBlockSummary,
   DecideApprovalResult, DoctorReport, DiscoveredModel, Finding, FindingPatchBody, FuncCreateBody, FuncEntry,
   FuncPatchBody, HistoryList, InboxMessage, Job, KbRead, KbRefHit, KbRenameResult,
-  KbSearchHit, KbSourceTree,
+  KbSearchHit, KbSourceTree, KbEvolutionDraft, KbEvolutionSource,
   KbWriteResult, LlmProvider, McpServer, ModelInfo, ExecutorLlmView,
   IntelArticle, IntelBrief, IntelBriefMeta,
   IntelFeed, IntelOverview, IntelProfile, IntelVaultConfig, IntelVaultInfo, VaultNode,
@@ -21,6 +21,7 @@ import type {
   TaskTrace, TraceEffect,
   FofaConfig, FofaTestResult, FofaSearchResult, FofaHistoryItem, ImportPreview, ImportSummary,
   ChatAgent, ChatThread, ChatThreadDetail, ChatMcpServer,
+  SamplePackage, SampleTargetAnalysis, SampleTargetAnalyzeResponse, SamplePackageUploadSession, SamplePackagePreview,
 } from "./types"
 import type { Taxonomy } from "./taxonomy"
 
@@ -183,6 +184,88 @@ export const api = {
     form.append("file", file)
     return httpUpload<SampleUploadResponse>(`/api/projects/${pid}/samples`, form)
   },
+  // 分析包：单文件、压缩包或浏览器目录上传；目录路径通过 relative_paths 保留
+  samplePackages: (pid: string) =>
+    http<SamplePackage[]>(`/api/projects/${pid}/sample-packages`),
+  currentSamplePackage: (pid: string) =>
+    http<SamplePackage & { undo_available?: boolean }>(`/api/projects/${pid}/sample-packages/current`),
+  deleteSamplePackage: (pid: string) =>
+    http<{ deleted: string; removed_assets: number; removed_files: number }>(
+      `/api/projects/${pid}/sample-packages`, { method: "DELETE" }),
+  samplePackagePreview: (pid: string, path: string) =>
+    http<SamplePackagePreview>(`/api/projects/${pid}/sample-packages/preview?path=${encodeURIComponent(path)}`),
+  samplePackageContentUrl: (pid: string, path: string) =>
+    `/api/projects/${pid}/sample-packages/content?path=${encodeURIComponent(path)}`,
+  samplePackage: (pid: string, packageId: string, versionId?: string) =>
+    http<SamplePackage>(`/api/projects/${pid}/sample-packages/${packageId}${versionId ? `?version_id=${encodeURIComponent(versionId)}` : ""}`),
+  uploadSamplePackage: (pid: string, file: File) => {
+    const form = new FormData()
+    form.append("file", file)
+    return httpUpload<SamplePackage>(`/api/projects/${pid}/sample-packages`, form)
+  },
+  uploadSamplePackageFiles: (pid: string, files: File[]) => {
+    const form = new FormData()
+    for (const file of files) {
+      form.append("files", file, file.name)
+      form.append("relative_paths", (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name)
+    }
+    return httpUpload<SamplePackage>(`/api/projects/${pid}/sample-packages`, form)
+  },
+  appendSamplePackageFiles: (pid: string, files: File[]) => {
+    const form = new FormData()
+    for (const file of files) {
+      form.append("files", file, file.name)
+      form.append("relative_paths", (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name)
+    }
+    return httpUpload<SamplePackage>(`/api/projects/${pid}/sample-packages/files`, form)
+  },
+  moveSamplePackageEntry: (pid: string, path: string, targetPath: string) =>
+    http<SamplePackage>(`/api/projects/${pid}/sample-packages/move`, {
+      method: "POST", body: JSON.stringify({ path, target_path: targetPath }),
+    }),
+  deleteSamplePackageEntry: (pid: string, path: string) =>
+    http<SamplePackage>(`/api/projects/${pid}/sample-packages/entries?path=${encodeURIComponent(path)}`, { method: "DELETE" }),
+  undoSamplePackage: (pid: string) =>
+    http<SamplePackage>(`/api/projects/${pid}/sample-packages/undo`, { method: "POST" }),
+  uploadSamplePackageResumable: async (pid: string, file: File,
+                                       onProgress?: (done: number, total: number) => void) => {
+    const chunkSize = 8 * 1024 * 1024
+    const totalChunks = Math.ceil(file.size / chunkSize)
+    const session = await http<SamplePackageUploadSession>(
+      `/api/projects/${pid}/sample-packages/uploads`, {
+        method: "POST",
+        body: JSON.stringify({ filename: file.name, total_size: file.size,
+          total_chunks: totalChunks, source_type: "auto" }),
+      })
+    const status = await http<SamplePackageUploadSession>(
+      `/api/projects/${pid}/sample-packages/uploads/${session.upload_id}`)
+    const received = new Set(status.received_chunks ?? [])
+    for (let index = 0; index < totalChunks; index += 1) {
+      if (!received.has(index)) {
+        const start = index * chunkSize
+        const response = await fetch(
+          `/api/projects/${pid}/sample-packages/uploads/${session.upload_id}/chunks/${index}`,
+          { method: "PUT", headers: { "Content-Type": "application/octet-stream" },
+            body: file.slice(start, Math.min(file.size, start + chunkSize)) })
+        if (!response.ok) return raise(response)
+      }
+      onProgress?.(index + 1, totalChunks)
+    }
+    return http<SamplePackage>(
+      `/api/projects/${pid}/sample-packages/uploads/${session.upload_id}/complete`,
+      { method: "POST" })
+  },
+  selectSampleTargets: (pid: string, packageId: string, versionId: string, targetIds: string[]) =>
+    http<{ package_id: string; version_id: string; target_ids: string[] }>(
+      `/api/projects/${pid}/sample-packages/${packageId}/versions/${versionId}/targets`,
+      { method: "POST", body: JSON.stringify({ target_ids: targetIds }) }),
+  sampleTarget: (pid: string, packageId: string, versionId: string, targetId: string) =>
+    http<SampleTargetAnalysis>(
+      `/api/projects/${pid}/sample-packages/${packageId}/versions/${versionId}/targets/${targetId}`),
+  analyzeSampleTarget: (pid: string, packageId: string, versionId: string, targetId: string, engine = "ida") =>
+    http<SampleTargetAnalyzeResponse>(
+      `/api/projects/${pid}/sample-packages/${packageId}/versions/${versionId}/targets/${targetId}/analyze`,
+      { method: "POST", body: JSON.stringify({ engine }) }),
   retryTriage: (pid: string, sha: string) =>
     http<{ job_id: string; sha: string }>(`/api/projects/${pid}/binaries/${sha}/triage`, { method: "POST" }),
   // 停止进行中的 headless 全量导出（大样本 P3，协作式：当前函数反编译完停下并保留已导出部分）
@@ -716,12 +799,20 @@ export const api = {
   kbRefs: (cap: string, path: string) =>
     http<{ path: string; count: number; refs: KbRefHit[] }>(
       `/api/capabilities/${cap}/kb/refs?path=${encodeURIComponent(path)}`),
+  kbEvolutionRecommend: (cap: string, path: string, limit = 5) =>
+    http<{ cap: string; current: KbEvolutionSource | null; results: KbEvolutionSource[] }>(
+      `/api/capabilities/${cap}/kb/evolution/recommend?path=${encodeURIComponent(path)}&limit=${limit}`),
+  kbEvolution: (cap: string, sources: string[], targetKind?: KbEvolutionDraft["kind"] | null) =>
+    http<{ job_id: string }>(`/api/capabilities/${cap}/kb/evolution`, {
+      method: "POST", body: JSON.stringify({ sources, target_kind: targetKind ?? null, language: "zh" }),
+    }),
 
   // 统一变更提案（C4）
   createProposal: (body: {
     target: Proposal["target"]; mode: Proposal["mode"]; content?: string | null
     summary: string; reason: string; origin?: ProposalOrigin
     project?: string | null; session?: string | null; task?: string | null; evidence?: string
+    source_refs?: { cap: string; path: string; title?: string }[]
   }) =>
     http<Proposal>("/api/proposals", { method: "POST", body: JSON.stringify(body) }),
   proposals: (status?: "pending" | "approved" | "rejected") =>
@@ -780,10 +871,10 @@ export const api = {
         method: "PUT", body: JSON.stringify(
           defaultProvider !== undefined ? { providers, default_provider: defaultProvider } : { providers }),
       }),
-  discoverLlm: (body: { name?: string; base_url?: string; api_key?: string }) =>
+  discoverLlm: (body: { name?: string; base_url?: string; api_key?: string; format?: LlmProvider["format"]; proxy?: string | null }) =>
     http<{ listed: boolean; models: DiscoveredModel[]; probed?: string[] }>(
       "/api/llm/discover", { method: "POST", body: JSON.stringify(body) }),
-  testLlmModel: (body: { name?: string; base_url?: string; api_key?: string; model: string }) =>
+  testLlmModel: (body: { name?: string; base_url?: string; api_key?: string; format?: LlmProvider["format"]; model: string; proxy?: string | null }) =>
     http<{ ok: boolean; error?: string }>("/api/llm/test-model", {
       method: "POST", body: JSON.stringify(body),
     }),

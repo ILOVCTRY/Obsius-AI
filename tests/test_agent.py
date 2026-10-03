@@ -121,6 +121,26 @@ def make_agent(env, llm, planner=None, config=None, role="_generalist", artifact
     return agent
 
 
+def pass_intent_lead(*dispatchers) -> None:
+    """意图先行闸测试旁路（口径 Y，2026-10-01）：把「会话首次实质动作已放行」标志
+    钉死为 True，并包一层 dispatch——loop 每任务起点会复位该标志（每任务都要「先
+    立意再动手」），故每次派发前重设，保证本用例聚焦其自身主题（网关/卡死/产物/
+    运行时/上下文…）而不被意图纪律挡回。闸本身的行为由 test_intent_lead_gate_*
+    专测覆盖（含无意图被拒/只读不受阻/协调原语放行/declare 后放行）。"""
+    for d in dispatchers:
+        d._intent_lead_passed = True
+        if getattr(d, "_intent_lead_bypass_wrapped", False):
+            continue
+        original = d.dispatch
+
+        def _dispatch(name, args, _original=original, _d=d):
+            _d._intent_lead_passed = True
+            return _original(name, args)
+
+        d.dispatch = _dispatch
+        d._intent_lead_bypass_wrapped = True
+
+
 def write_role(env, name, body):
     """测试夹具里写一个专家 yaml（expert-pool M2：运行时角色源=experts/）。"""
     _, _, _, _, tmp_path = env
@@ -182,6 +202,7 @@ def test_gateway_deny_feeds_back_not_crashes(env):
         {"tool_use": [ScriptedLLM.tool_call("t3", "finish", {"summary": "改道成功"})]},
     ])
     agent = make_agent(env, llm)
+    pass_intent_lead(agent.dispatcher)  # 本测主题=网关拒绝改道，跳过意图先行闸
     summary = agent.run_task("分析样本")
     assert summary == "改道成功"
     # 拒绝落了 audit.deny；拒绝文本确实回给了 LLM
@@ -349,6 +370,7 @@ def test_d9_command_evolution_extends_without_advisor(env):
     llm = ScriptedLLM(script)
     agent = make_agent(env, llm, planner=planner,
                        config=AgentConfig(max_steps=10, stuck_after=3))
+    pass_intent_lead(agent.dispatcher)  # 本测主题=卡死检测，跳过意图先行闸
     assert agent.run_task("逆向中") == "长任务完成"
     assert len(planner.calls) == 0
     extends = [e for e in bb.recent_events(project["id"])
@@ -426,6 +448,7 @@ def test_d9_extension_cap_then_advisor_chain(env):
     llm = ScriptedLLM(script)
     agent = make_agent(env, llm, planner=planner,
                        config=AgentConfig(max_steps=12, stuck_after=3))
+    pass_intent_lead(agent.dispatcher)  # 本测主题=活跃探索延长，跳过意图先行闸
     agent.run_task("长程逆向")
     extends = [e for e in bb.recent_events(project["id"])
                if e["kind"] == "agent.stuck_extend"]
@@ -467,6 +490,7 @@ def test_d7_escalate_event_carries_command_stats(env):
     agent = make_agent(env, llm, planner=planner,
                        config=AgentConfig(max_steps=12, stuck_after=3),
                        artifacts_dir=tmp_path / "artifacts")
+    pass_intent_lead(agent.dispatcher)  # 本测主题=顾问裁决统计，跳过意图先行闸
     agent.run_task("命令重复", task_id=tid)
     # 裁决 prompt：含上次建议原文 + 建议后实际执行的命令
     verdict_seen = json.dumps(planner.calls[1]["messages"], ensure_ascii=False)
@@ -784,6 +808,7 @@ def test_d10_stuck_max_extensions_one_then_advisor(env):
     agent = make_agent(env, llm, planner=planner,
                        config=AgentConfig(max_steps=10, stuck_after=3,
                                           stuck_max_extensions=1))
+    pass_intent_lead(agent.dispatcher)  # 本测主题=延长上限，跳过意图先行闸
     agent.run_task("长任务")
     extends = [e for e in bb.recent_events(project["id"])
                if e["kind"] == "agent.stuck_extend"]
@@ -858,6 +883,7 @@ def test_context_trimming(env):
     ] + [{"tool_use": [ScriptedLLM.tool_call("tz", "finish", {"summary": "ok"})]}])
     cfg = AgentConfig(max_steps=20, context_char_budget=10_000)
     agent = make_agent(env, llm, config=cfg)
+    pass_intent_lead(agent.dispatcher)  # 本测主题=上下文裁剪，跳过意图先行闸
     agent.run_task("裁剪测试")
     # 网关 brief() 已截到 8000 字符/条（2026-10-01 由 2000 放宽），总历史远超
     # 10k 预算 → _trim 必然把某次调用里的旧结果替换成占位（后续若被 G3 摘要整体
@@ -893,6 +919,7 @@ def test_context_summarization(env):
     cfg = AgentConfig(max_steps=20, context_summary_chars=1_500,
                       context_char_budget=1_000_000)  # 机械 _trim 不触发
     agent = make_agent(env, llm, config=cfg)
+    pass_intent_lead(agent.dispatcher)  # 本测主题=摘要压缩，跳过意图先行闸
     agent.run_task("摘要压缩测试")
     # 4 次任务 chat + 1 次摘要 chat + 1 次 finish chat
     assert len(llm.calls) == 6
@@ -1283,6 +1310,7 @@ def test_add_artifact_writes_file_and_sha256(env):
         {"tool_use": [ScriptedLLM.tool_call("t2", "finish", {"summary": "完"})]},
     ])
     agent = make_agent(env, llm, artifacts_dir=artifacts_dir)
+    pass_intent_lead(agent.dispatcher)  # 本测主题=产物落盘，跳过意图先行闸
     agent.run_task("落 POC 产物")
 
     path = artifacts_dir / "poc" / "poc_sqli.py"
@@ -1447,6 +1475,7 @@ def test_add_artifact_poc_python_only(env):
         {"tool_use": [ScriptedLLM.tool_call("t3", "finish", {"summary": "完"})]},
     ])
     agent = make_agent(env, llm, artifacts_dir=artifacts_dir)
+    pass_intent_lead(agent.dispatcher)  # 本测主题=POC 语言纪律，跳过意图先行闸
     agent.run_task("POC 语言纪律")
     rows = bb.conn.execute(
         "SELECT path FROM artifacts WHERE project_id=?", (project["id"],)).fetchall()
@@ -1548,6 +1577,7 @@ def test_role_max_runtime_blocks_level(env):
         {"tool_use": [ScriptedLLM.tool_call("t3", "finish", {"summary": "降级成功"})]},
     ])
     agent = make_agent(env, llm, role="hostonly")
+    pass_intent_lead(agent.dispatcher)  # 本测主题=运行时越界，跳过意图先行闸
     assert agent.run_task("运行时越界") == "降级成功"
     msgs = json.dumps(llm.calls[1]["messages"], ensure_ascii=False)
     assert "[越界拒绝]" in msgs and "max_runtime=host" in msgs
@@ -1580,6 +1610,7 @@ def test_preferred_runtime_fills_omitted_runtime(env):
     disp = ToolDispatcher(bb, gateway=gw, tq=tq, project_id=project["id"],
                           session_id=sid, author=sid)
     disp.current_task_id = tid
+    pass_intent_lead(disp)  # 本测主题=runtime 回填，跳过意图先行闸
     out = disp.dispatch("run_cmd", {"cmd": "echo RT_MARKER",
                                     "threat_class": "trusted"})
     assert "RT_MARKER" in out and "[错误]" not in out
@@ -1615,6 +1646,7 @@ def test_preferred_runtime_notice_and_e2e(env):
                                             {"summary": "默认执行成功"})]},
     ])
     agent = make_agent(env, llm)
+    pass_intent_lead(agent.dispatcher)  # 本测主题=默认运行时端到端，跳过意图先行闸
     assert agent.run_task("默认运行时任务", task_id=tid) == "默认执行成功"
     first_msgs = json.dumps(llm.calls[0]["messages"], ensure_ascii=False)
     assert "默认执行运行时=sandbox" in first_msgs
@@ -1927,6 +1959,7 @@ def _plan_dispatcher(env, session_name="planner", **kw):
     tid = tq.publish(project["id"], "有计划的活", task_type="generic")
     tq.claim(tid, sid)
     d.current_task_id = tid
+    pass_intent_lead(d)  # 本组用例主题=计划闸，跳过意图先行闸
     return d, tid
 
 
@@ -1941,6 +1974,7 @@ def test_raw_arguments_wrapper_unwrapped(env):
     sid = "sess-" + "r" * 12
     d = ToolDispatcher(bb, gateway=gw, tq=tq, project_id=project["id"],
                        session_id=sid, author=sid)
+    pass_intent_lead(d)  # 本测主题=raw_arguments 垫片，跳过意图先行闸
     inner = {"type": "domain", "value": "wrap.com"}
     # dict 形包裹：解包后正常执行
     r = d.dispatch("bb_add_asset", {"raw_arguments": dict(inner)})
@@ -2460,6 +2494,52 @@ def test_run_cmd_plan_gate_rejection_audited_and_skill_open_preallowed(env):
     assert not rs.startswith("[计划闸]") and "按步骤执行" in rs
 
 
+def test_run_cmd_bash_connector_degrade_to_wsl(env, monkeypatch):
+    """bash 连接符兼容（2026-10-01）：host·Windows 遇 &&/|| 且策略允许 wsl 时，
+    自动改走 wsl（bash -lc）并在回执注明；纯单条命令不触发。"""
+    bb, project, gw, tq, _ = env
+    agent = make_agent(env, ScriptedLLM([]))
+    d = agent.dispatcher
+    pass_intent_lead(d)  # 本测主题=连接符降级，跳过意图先行闸
+    d.current_task_id = tq.publish(project["id"], "连接符降级", task_type="generic")
+    tq.claim(d.current_task_id, agent.session["id"])
+    d.dispatch("task_plan", {"steps": [{"title": "跑命令验证降级"}]})
+    import core.agent.tools as tools_mod
+    monkeypatch.setattr(tools_mod, "_host_is_windows", lambda: True)
+    seen = {}
+
+    def fake_run(cmd, runtime, **kw):
+        seen["runtime"] = runtime
+        from core.runtime.gateway import ExecutionResult
+        return ExecutionResult(ok=True, exit_code=0, stdout="ok", stderr="",
+                               runtime=runtime, duration_s=0.1)
+
+    monkeypatch.setattr(gw, "run", fake_run)
+    r = d.dispatch("run_cmd", {"cmd": "cd /tmp && ls", "runtime": "host",
+                               "threat_class": "trusted"})
+    assert seen["runtime"] == "wsl" and "[已自动改用 wsl]" in r
+    # 无连接符：仍按 host 执行，不加注记
+    d.dispatch("run_cmd", {"cmd": "id", "runtime": "host", "threat_class": "trusted"})
+    assert seen["runtime"] == "host"
+
+
+def test_run_cmd_bash_connector_policy_denied_falls_back(env, monkeypatch):
+    """策略不允许 wsl 时（threat_class=untrusted 只放 docker/sandbox），
+    host+Windows 遇 && 不降级——回落明确报错引导，不越权。"""
+    bb, project, gw, tq, _ = env
+    agent = make_agent(env, ScriptedLLM([]))
+    d = agent.dispatcher
+    pass_intent_lead(d)  # 本测主题=连接符拒绝，跳过意图先行闸
+    d.current_task_id = tq.publish(project["id"], "连接符拒绝", task_type="generic")
+    tq.claim(d.current_task_id, agent.session["id"])
+    d.dispatch("task_plan", {"steps": [{"title": "跑命令验证拒绝"}]})
+    import core.agent.tools as tools_mod
+    monkeypatch.setattr(tools_mod, "_host_is_windows", lambda: True)
+    r = d.dispatch("run_cmd", {"cmd": "cd /tmp && ls", "runtime": "host",
+                               "threat_class": "untrusted"})
+    assert r.startswith("[错误]") and "PowerShell" in r and "wsl" in r
+
+
 def test_bb_query_findings_filters_passthrough(env):
     """bb-query-filters M1：findings 的 min_severity/verified_only/category
     透传底层 store（能力早已实现、工具层没接出）。"""
@@ -2566,7 +2646,7 @@ def test_bb_query_tasks_assets_filters_and_closed_set_errors(env):
         "bb_query", {"what": "tasks", "status": "open"}))] == [t1]
     # assets tag（大小写不敏感）
     got = rows(d.dispatch("bb_query", {"what": "assets", "tag": "靶标"}))
-    assert [a["value"] for a in got] == ["10.0.0.1"]
+    assert [a["value"] for a in got["assets"]] == ["10.0.0.1"]
     # 闭集非法值
     assert d.dispatch("bb_query",
                       {"what": "findings", "min_severity": "urgent"}).startswith("[错误]")
@@ -2578,7 +2658,57 @@ def test_bb_query_tasks_assets_filters_and_closed_set_errors(env):
                       {"what": "assets", "type": "printer"}).startswith("[错误]")
     # 非法值不产生误报：open 任务仍在、资产仍全量
     assert len(rows(d.dispatch("bb_query", {"what": "tasks"}))) == 2
-    assert len(rows(d.dispatch("bb_query", {"what": "assets"}))) == 2
+    assert len(rows(d.dispatch("bb_query", {"what": "assets"}))["assets"]) == 2
+
+
+def test_bb_query_assets_asset_filter_and_slim_meta(env):
+    """2026-10-01：what=assets 支持 asset 子树过滤（修「按域名查拿到全量」）、
+    meta 默认精简（verbose=true 才全量）、未传 limit 默认 200 防瀑。"""
+    from core.blackboard.assets import register_asset
+    bb, project, gw, tq, _ = env
+    agent = make_agent(env, ScriptedLLM([]))
+    d = agent.dispatcher
+    pid = project["id"]
+    host = register_asset(bb, pid, "10.0.0.1", "host", quiet=True)["id"]
+    dom = register_asset(bb, pid, "site.com", "domain",
+                         meta={"title": "示例站", "source": "fofa",
+                               "products": [f"p{i}" for i in range(20)]},
+                         quiet=True)["id"]
+    register_asset(bb, pid, "http://site.com/a", "url", quiet=True)
+    register_asset(bb, pid, "10.0.0.9", "host", quiet=True)  # 旁支
+    r = lambda s: json.loads(s)
+    # asset 过滤：只回该域子树（domain + url），不含旁支 host
+    q = r(d.dispatch("bb_query", {"what": "assets", "asset": "site.com"}))
+    vals = {a["value"] for a in q["assets"]}
+    assert vals == {"site.com", "http://site.com/a"}
+    assert q["counts"]["total"] == 2 and q["counts"]["returned"] == 2
+    # meta 精简：products 截到 8 项；verbose=true 给全 20 项
+    domrow = next(a for a in q["assets"] if a["id"] == dom)
+    assert len(domrow["meta"]["products"]) == 8
+    qv = r(d.dispatch("bb_query", {"what": "assets", "asset": dom, "verbose": True}))
+    assert len(next(a for a in qv["assets"] if a["id"] == dom)["meta"]["products"]) == 20
+    # 找不到资产 → [错误] 引导，不静默返回全量
+    assert d.dispatch("bb_query",
+                      {"what": "assets", "asset": "nope.com"}).startswith("[错误]")
+    # 无过滤时返回全项目计数（>= 上述 4 个显式登记；url 自动挂载可能补节点）
+    qall = r(d.dispatch("bb_query", {"what": "assets"}))
+    assert qall["counts"]["total"] >= 4
+    assert qall["counts"]["total"] > q["counts"]["total"]  # 全量 > 子树
+
+
+def test_bb_query_assets_default_limit(env):
+    """未传 limit 时 assets 默认截断到 _BB_ASSETS_DEFAULT_LIMIT，防大体积落盘。"""
+    from core.blackboard.assets import register_asset
+    from core.agent.tools import _BB_ASSETS_DEFAULT_LIMIT
+    bb, project, gw, tq, _ = env
+    agent = make_agent(env, ScriptedLLM([]))
+    d = agent.dispatcher
+    pid = project["id"]
+    for i in range(_BB_ASSETS_DEFAULT_LIMIT + 20):
+        register_asset(bb, pid, f"10.1.{i // 256}.{i % 256}", "host", quiet=True)
+    q = json.loads(d.dispatch("bb_query", {"what": "assets"}))
+    assert q["counts"]["total"] == _BB_ASSETS_DEFAULT_LIMIT + 20
+    assert q["counts"]["returned"] == _BB_ASSETS_DEFAULT_LIMIT
 
 
 def test_bb_query_events_kinds_and_limit(env):
@@ -2666,6 +2796,7 @@ def test_run_chat_replies_without_task(env):
         {"text": "你好，我是通用测试员。"},
     ])
     agent = make_agent(env, llm)
+    pass_intent_lead(agent.dispatcher)  # 本测主题=对话轮，跳过意图先行闸
     sid = agent.session["id"]
     bb.post_human_note(project["id"], sid, "介绍下自己")
     reply = agent.run_chat()
@@ -2798,11 +2929,13 @@ def test_run_chat_registers_finding(env):
     放行不会死锁）。author=会话 id（P4 图上「对话产出」徽章数据源），
     无任务上下文不挂任务。"""
     bb, project, gw, tq, _ = env
+    aid = bb.upsert_asset(project["id"], "host", "admin.example.com")["id"]
     llm = ScriptedLLM([
         {"tool_use": [ScriptedLLM.tool_call(
             "c1", "declare_intent",
             {"statement": "后台存在默认弱口令 admin/admin（人类引导线索，"
-                          "需实测登录验证）"})]},
+                          "需实测登录验证）",
+             "target_asset_id": aid})]},
         {"tool_use": [ScriptedLLM.tool_call(
             "c2", "run_cmd", {"cmd": "whoami", "runtime": "host",
                               "threat_class": "trusted"})]},
@@ -2837,6 +2970,7 @@ def test_bb_add_finding_task_requires_own_intent(env):
                         session_id=sidA, author=sidA)
     tid = tq.publish(project["id"], "带意图纪律的任务", task_type="generic")
     tq.claim(tid, sidA)
+    aid = bb.upsert_asset(project["id"], "host", "10.0.0.7")["id"]
     dA.current_task_id = tid
     dA.dispatch("task_plan", {"steps": [{"id": "p1", "title": "探测", "status": "todo"}]})  # 先过 A2 计划闸
     # 无本会话 open 意图 → 拒绝
@@ -2844,7 +2978,8 @@ def test_bb_add_finding_task_requires_own_intent(env):
                                        "severity": "low"})
     assert r.startswith("[拒绝]") and "open 意图" in r
     # 声明意图后放行（意图先行闸：声明后补 command 事件模拟执行动作）
-    r = dA.dispatch("declare_intent", {"statement": "对目标进行备份探测尝试"})
+    r = dA.dispatch("declare_intent", {"statement": "对目标进行备份探测尝试",
+                                       "target_asset_id": aid})
     assert r.startswith("intent=")
     bb.append_event(project["id"], "command", {"cmd": "probe"},
                     session_id=sidA, author=sidA)
@@ -2859,7 +2994,8 @@ def test_bb_add_finding_task_requires_own_intent(env):
     tq.claim(tidB, sidB)
     dB.current_task_id = tidB
     dB.dispatch("task_plan", {"steps": [{"id": "p1", "title": "探测", "status": "todo"}]})
-    r = dB.dispatch("declare_intent", {"statement": "对目标进行备份探测尝试"})
+    r = dB.dispatch("declare_intent", {"statement": "对目标进行备份探测尝试",
+                                       "target_asset_id": aid})
     assert r.startswith("intent=") and "复用" not in r  # 跨作者不再合并
     bb.append_event(project["id"], "command", {"cmd": "probe"},
                     session_id=sidB, author=sidB)
@@ -2878,11 +3014,13 @@ def test_bb_add_finding_intent_requires_execution(env):
     sid = bb.register_session(project["id"], "intent-exec")["id"]
     d = ToolDispatcher(bb, gateway=gw, tq=tq, project_id=project["id"],
                        session_id=sid, author=sid)
+    aid = bb.upsert_asset(project["id"], "url", "http://x/admin")["id"]
     # ① 对话轮（无 current_task_id）无意图 → 拒（统一门禁，不再豁免）
     r = d.dispatch("bb_add_finding", {"vuln_class": "info-leak", "title": "T"})
     assert r.startswith("[拒绝]") and "open 意图" in r
     # ② declare 后立即落发现 = 事后补票 → 拒
-    r = d.dispatch("declare_intent", {"statement": "验证 /admin 是否存在未授权访问"})
+    r = d.dispatch("declare_intent", {"statement": "验证 /admin 是否存在未授权访问",
+                                      "target_asset_id": aid})
     assert r.startswith("intent=")
     r = d.dispatch("bb_add_finding", {"vuln_class": "info-leak", "title": "T"})
     assert r.startswith("[拒绝]") and "执行动作" in r
@@ -2891,6 +3029,95 @@ def test_bb_add_finding_intent_requires_execution(env):
                     session_id=sid, author=sid)
     r = d.dispatch("bb_add_finding", {"vuln_class": "info-leak", "title": "T"})
     assert r.startswith("finding=")
+
+
+def test_declare_intent_requires_asset_anchor(env):
+    """2026-10-01：declare_intent 硬门禁——必须有资产锚点（target_asset_id 或
+    basis_refs 含 asset:<id>），否则游离意图落不到链路图子目标下、无法背书
+    tested_clean，直接拒绝。"""
+    bb, project, gw, tq, _ = env
+    from core.agent.tools import ToolDispatcher
+    sid = bb.register_session(project["id"], "intent-anchor")["id"]
+    d = ToolDispatcher(bb, gateway=gw, tq=tq, project_id=project["id"],
+                       session_id=sid, author=sid)
+    aid = bb.upsert_asset(project["id"], "host", "10.0.0.5")["id"]
+    # 无锚点 → 拒
+    r = d.dispatch("declare_intent", {"statement": "对目标进行探测"})
+    assert r.startswith("[拒绝]") and "资产锚点" in r
+    # target_asset_id 锚点 → 放行
+    r = d.dispatch("declare_intent", {"statement": "假设一", "target_asset_id": aid})
+    assert r.startswith("intent=")
+    # 仅 basis_refs 的 asset: 锚点 → 放行
+    r = d.dispatch("declare_intent", {"statement": "假设二",
+                                      "basis_refs": [f"asset:{aid}"]})
+    assert r.startswith("intent=")
+    # 只有 finding: 依据但无 asset: 锚点 → 仍拒（finding 不是资产锚点）
+    r = d.dispatch("declare_intent", {"statement": "假设三",
+                                      "basis_refs": ["finding:find-xxx"]})
+    assert r.startswith("[拒绝]") and "资产锚点" in r
+
+
+def test_intent_lead_gate_blocks_then_releases(env):
+    """意图先行闸（口径 Y，2026-10-01）：会话第一次实质动作前必须有 open 意图——
+    无意图时 run_cmd 被 [拒绝] 拦下并指路 declare_intent；只读侦察不受阻；
+    declare_intent 之后实质动作放行。"""
+    bb, project, gw, tq, _ = env
+    from core.agent.tools import ToolDispatcher
+    sid = bb.register_session(project["id"], "lead-gate")["id"]
+    d = ToolDispatcher(bb, gateway=gw, tq=tq, project_id=project["id"],
+                       session_id=sid, author=sid)
+    aid = bb.upsert_asset(project["id"], "host", "10.0.0.11")["id"]
+    # ① 无 open 意图 → 实质动作被拦，且指路 declare_intent
+    r = d.dispatch("run_cmd", {"cmd": "whoami", "runtime": "host",
+                               "threat_class": "trusted"})
+    assert r.startswith("[拒绝]") and "意图先行闸" in r and "declare_intent" in r
+    assert not [e for e in bb.recent_events(project["id"]) if e["kind"] == "command"]
+    # ② 只读侦察不受本闸限制（不落 [拒绝]）
+    assert "意图先行闸" not in d.dispatch("bb_query", {"what": "tasks"})
+    assert "意图先行闸" not in d.dispatch("list_symbols", {"binary": "x.exe"})
+    # ③ 先立意（资产锚点）→ 实质动作放行
+    r = d.dispatch("declare_intent", {"statement": "对 10.0.0.11 进行探测",
+                                      "target_asset_id": aid})
+    assert r.startswith("intent=")
+    r = d.dispatch("run_cmd", {"cmd": "whoami", "runtime": "host",
+                               "threat_class": "trusted"})
+    assert "意图先行闸" not in r
+    assert "command" in [e["kind"] for e in bb.recent_events(project["id"])]
+
+
+def test_intent_lead_gate_allows_coordination_and_asset(env):
+    """放行面：多代理协调（publish_task/bb_notify）、授权申请、资产登记
+    （declare_intent 锚点前置）不经本闸——否则编排/立意两处都会死锁。"""
+    bb, project, gw, tq, _ = env
+    from core.agent.tools import ToolDispatcher
+    sid = bb.register_session(project["id"], "lead-allow")["id"]
+    d = ToolDispatcher(bb, gateway=gw, tq=tq, project_id=project["id"],
+                       session_id=sid, author=sid)
+    assert "意图先行闸" not in d.dispatch("bb_add_asset", {"value": "10.0.0.12"})
+    r = d.dispatch("publish_task", {"objective": "子任务：测 /api"})
+    assert "意图先行闸" not in r
+    assert "意图先行闸" not in d.dispatch(
+        "bb_notify", {"text": "集合", "kind": "note"})
+
+
+def test_intent_lead_gate_resets_per_task(env):
+    """每认领一个任务都要「先立意再动手」：任务起点复位首次放行标志
+    （_loop_body 每任务复位）——即便上一任务已放行，新任务首发的实质动作
+    仍被意图先行闸拦下。"""
+    bb, project, gw, tq, _ = env
+    llm = ScriptedLLM([
+        {"tool_use": [ScriptedLLM.tool_call("c1", "run_cmd",
+                                            {"cmd": "whoami", "runtime": "host",
+                                             "threat_class": "trusted"})]},
+        {"tool_use": [ScriptedLLM.tool_call("c2", "finish", {"summary": "收工"})]},
+    ])
+    agent = make_agent(env, llm)
+    agent.dispatcher._intent_lead_passed = True  # 模拟上一任务已放行
+    agent._loop_body("系统", [{"role": "user", "content": "任务"}], "任务")
+    # 新任务首发的实质动作被拦：没落 command 事件，且喂回模型的是闸文案
+    assert not [e for e in bb.recent_events(project["id"]) if e["kind"] == "command"]
+    assert any("意图先行闸" in json.dumps(c["messages"], ensure_ascii=False)
+               for c in llm.calls)
 
 
 def test_finish_gate_scoped_to_own_intents(env):
@@ -3271,6 +3498,7 @@ def test_bb_asset_status_tool_and_query_filters(env):
     """E7：bb_asset_status 流转（tested_clean 必带 note）；bb_query assets
     增 status/type 过滤并返回 status。"""
     d = _dispatcher(env, "status")
+    pass_intent_lead(d)  # 本测主题=资产状态流转，跳过意图先行闸
     r = d.dispatch("bb_add_asset", {"value": "10.2.2.2"})
     aid = r.split("asset=")[1].split()[0]
 
@@ -3317,9 +3545,10 @@ def test_bb_asset_status_tool_and_query_filters(env):
     assert [e["payload"]["new"] for e in ev] == ["visited", "scanning", "tested_clean"]
 
     q = json.loads(d.dispatch("bb_query", {"what": "assets", "status": "tested_clean"}))
-    assert [a["id"] for a in q] == [aid] and q[0]["status"] == "tested_clean"
+    assert [a["id"] for a in q["assets"]] == [aid]
+    assert q["assets"][0]["status"] == "tested_clean"
     q2 = json.loads(d.dispatch("bb_query", {"what": "assets", "type": "host", "status": "open"}))
-    assert all(a["type"] == "host" and a["status"] == "open" for a in q2)
+    assert all(a["type"] == "host" and a["status"] == "open" for a in q2["assets"])
 
 
 def test_awaiting_human_pauses_with_snapshot_then_reusable(env):
@@ -4031,6 +4260,7 @@ def test_dispatch_spills_oversized_result(env):
     bb, project, gw, tq, tmp_path = env
     agent = make_agent(env, ScriptedLLM([]), artifacts_dir=tmp_path / "artifacts")
     d = agent.dispatcher
+    pass_intent_lead(d)  # 本测主题=超限落盘，跳过意图先行闸
     d._tool_big = lambda **k: "X" * 40000  # 假工具绕过 run_cmd 的 gateway brief
     out = d.dispatch("big", {})
     assert "[结果超限已落盘]" in out and "[省略" in out
@@ -4117,20 +4347,16 @@ def test_request_escalation_rejections(env):
     assert bb.conn.execute("SELECT COUNT(*) c FROM approvals").fetchone()["c"] == 0
 
 
-def test_request_escalation_net_real_creates_approval(env):
-    """net=real：提交 high 风险审批单（kind=net_real），命令只等批准不执行。"""
+def test_request_escalation_net_real_no_longer_needs_approval(env):
+    """net=real 自 2026-10-01 起免审批：request_escalation 不再受理，引导直接用
+    run_cmd(net="real")，且不产生任何审批单。"""
     bb, project, gw, tq, _ = env
     agent = make_agent(env, ScriptedLLM([]))
     out = agent.dispatcher.dispatch("request_escalation", {
         "cmd": "wget http://10.0.0.5/x", "runtime": "host", "net": "real",
         "reason": "需要真实出网验证 SSRF"})
-    assert out.startswith("[已提交审批]")
-    row = bb.conn.execute("SELECT * FROM approvals").fetchone()
-    assert row is not None and row["status"] == "pending"
-    assert row["risk"] == "high" and row["session_id"] == agent.session["id"]
-    action = json.loads(row["action"])
-    assert action["op"] == "escalation" and action["kind"] == "net_real"
-    assert action["net"] == "real" and "SSRF" in action["reason"]
+    assert out.startswith("[无需审批]") and "run_cmd" in out
+    assert bb.conn.execute("SELECT COUNT(*) c FROM approvals").fetchone()["c"] == 0
 
 
 def test_request_escalation_role_runtime(env):
@@ -4248,7 +4474,7 @@ def test_authorization_and_rejection_notices_reach_chat(env):
     agent2 = make_agent(env, llm2)
     sid2 = agent2.session["id"]
     bb.inbox_post(project["id"], sid2, "approval_rejected", "appr-2",
-                  {"op": "escalation", "kind": "net_real"})
+                  {"op": "escalation", "kind": "role_runtime"})
     bb.inbox_post(project["id"], sid2, "approval_rejected", "appr-3",
                   {"op": "authorization", "kind": "rating_override"})
     out2 = agent2.run_chat()
@@ -4565,6 +4791,7 @@ def test_blueprint_tools_create_update_and_status_guard(env):
     bb, project, gw, tq, _ = env
     agent = make_agent(env, ScriptedLLM([]))
     d = agent.dispatcher
+    pass_intent_lead(d)  # 本测主题=蓝图工具，跳过意图先行闸
     out = d.dispatch("bb_blueprint_create", {
         "name": "聊天客户端", "goal": "重建客户端",
         "binary_sha256": "abc123",

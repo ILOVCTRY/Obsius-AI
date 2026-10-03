@@ -245,7 +245,7 @@ def test_hook_gateway_denied_fail_closed(bb, pid):
     tq, sess, tid = _claimed_task(bb, pid, [
         {"text": "越网验证", "verify": {"strategy": "oracle", "cmd": "curl evil"}}])
     fake = FakeGateway(lambda cmd: (_ for _ in ()).throw(
-        GatewayDenied("net=real 须人工审批", runtime="host")))
+        GatewayDenied("策略拒绝：验证命令被网关拦下", runtime="host")))
     with pytest.raises(ValueError, match="独立验证"):
         run_reconcile_verifications(tq, tid, sess, gateway=fake)
     ent = tq.get_task(tid)["context"]["reconcile"][0]

@@ -220,16 +220,53 @@ def test_chat_orchestrator_turn_todo_and_call_expert(tmp_path):
     assert "问答蛙式调度者" in orch_call["system"]
     ce = next(s for s in orch_call["tools"] if s["name"] == "call_expert")
     assert "web-solver" in ce["description"] and "_generalist" not in ce["description"]
+    # expert 字段带 enum（2026-10-01）：值域=可委派专家（排除主控/兜底），
+    # 防模型把技能名当专家名传（recon-asset-enum 误用复盘）
+    assert ce["input_schema"]["properties"]["expert"]["enum"] == ["web-solver"]
     # 子专家工具面：全量裁剪（无任务队列/收尾原语），且无 call_expert（spawn 深度=1）
     sub_call = llm.calls[2]
     sub_names = {s["name"] for s in sub_call["tools"]}
     assert "run_cmd" in sub_names and "bb_add_finding" in sub_names
     assert "call_expert" not in sub_names and "todo_write" not in sub_names
-    assert "complete_task" not in sub_names and "declare_intent" not in sub_names
+    assert "complete_task" not in sub_names  # 任务队列原语仍排除
+    # 意图三件套开放给对话子专家（2026-10-01 intent-tools-chat）：链路图不再空
+    assert {"declare_intent", "close_intent", "reopen_intent",
+            "bb_delete_intent"} <= sub_names
+    # 主控也拿到意图工具（目标级意图声明 + 汇总收尾）
+    assert {"declare_intent", "close_intent"} <= names
     # 事件流：chat.message / chat.tool / chat.spawn / chat.todo 可见
     events = [e for e in bb.recent_events("p1") if e["kind"].startswith("chat.")]
     kinds = {e["kind"] for e in events}
     assert {"chat.message", "chat.tool", "chat.spawn", "chat.todo"} <= kinds
+
+
+def test_call_expert_rejects_skill_name_with_enum_and_hint(tmp_path):
+    """技能名当专家名（2026-10-01 复盘）：主控 ctx 同时含技能清单与专家名录，
+    模型曾把 recon-asset-enum（技能）当专家传给 call_expert。三层防护断言：
+    ① expert enum 只含专家 id；② 技能清单标题显式标注「技能名，不是专家」；
+    ③ 未知专家报错与 enum 同口径（不含 _generalist）且提示「不是技能名」。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    llm = FakeLLM([_resp(text="收到。")])
+    thread = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID)
+    turn = ChatTurn(bb=bb, llm=llm, project_id="p1", thread_id=thread["id"],
+                    packs_root="packs", track="pentest", capabilities=["web"],
+                    mcp_bridge=None,
+                    expert_names=["recon", "osint", "_generalist", ORCHESTRATOR_ID])
+    turn.run("先做被动侦察复核")
+    call = llm.calls[0]
+    ce = next(s for s in call["tools"] if s["name"] == "call_expert")
+    enum = ce["input_schema"]["properties"]["expert"]["enum"]
+    assert enum == ["recon", "osint"] and "_generalist" not in enum
+    assert "recon-asset-enum" not in enum
+    # 技能清单在 system 里，且标题明确划界（防同屏误认）
+    assert "recon-asset-enum" in call["system"]
+    assert "不是专家" in call["system"]
+    # 报错回退：技能名 → 未知专家，可用清单与 enum 同口径、不含 _generalist
+    msg = turn._tool_call_expert({"expert": "recon-asset-enum", "task": "x"})
+    assert "未知专家 'recon-asset-enum'" in msg
+    assert "recon" in msg and "osint" in msg and "_generalist" not in msg
+    assert "不是技能名" in msg
 
 
 def test_chat_system_prompt_includes_binary_skills_for_research(tmp_path):
@@ -308,6 +345,90 @@ def test_classify_error_stream_category():
         truncated=True))
     assert info["category"] == "stream"
     assert "网关流异常" in info["title"]
+
+
+# ---------- 纯文本终稿截断自动续写（2026-10-01） ----------
+
+def _trunc_turn(bb, llm, *, agent_id="web-solver"):
+    thread = chat_store.create_thread(bb, "p1", agent_id)
+    return ChatTurn(bb=bb, llm=llm, project_id="p1", thread_id=thread["id"],
+                    packs_root="packs", track="ctf", capabilities=["web"],
+                    mcp_bridge=None, expert_names=None), thread
+
+
+def test_chat_continuation_on_truncated_final(tmp_path):
+    """终稿 stop_reason=length → 不当作终稿收尾：把半截文本作为 assistant 前缀 +
+    追 user 催续，继续循环拼接为完整终稿（修「话说一半就正常终止」）。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    tail = LLMResponse(text="并已确认 /admin 未授权访问。", usage=Usage(1, 1),
+                       stop_reason="end_turn")
+    head = LLMResponse(text="正在分析目标：已完成资产测绘，",
+                       usage=Usage(1, 1), stop_reason="length")
+    llm = FakeLLM([head, tail])
+    turn, thread = _trunc_turn(bb, llm)
+    final = turn.run("分析目标")
+    assert final == "正在分析目标：已完成资产测绘，并已确认 /admin 未授权访问。"
+    assert len(llm.calls) == 2
+    # 第二次调用：历史里应有 assistant 半截 + user 催续
+    msgs = llm.calls[1]["messages"]
+    assert any(m.get("role") == "assistant" and "已完成资产测绘" in _msg_text(m)
+               for m in msgs)
+    assert any(m.get("role") == "user" and "接着上一句" in _msg_text(m)
+               for m in msgs)
+    # 事件：先 continue 后正常收尾（无 giveup）
+    kinds = [e["kind"] for e in bb.recent_events("p1")]
+    assert "chat.truncated" in kinds
+    cont = [e for e in bb.recent_events("p1") if e["kind"] == "chat.truncated"]
+    assert cont[0]["payload"]["phase"] == "continue"
+    # 线程正常收尾
+    t = chat_store.get_thread(bb, thread["id"])
+    assert t["status"] == "idle" and not t.get("error")
+
+
+def test_chat_continuation_gives_up_after_max(tmp_path, monkeypatch):
+    """连续截断超过 _CHAT_CONTINUE_MAX → 接受现有文本收尾并落 chat.truncated
+    giveup 事件（不报错、不置 error）。"""
+    from core.chat import runtime
+    monkeypatch.setattr(runtime, "_CHAT_CONTINUE_MAX", 2)
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    llm = FakeLLM([
+        LLMResponse(text="片段一 ", usage=Usage(1, 1), stop_reason="length"),
+        LLMResponse(text="片段二 ", usage=Usage(1, 1), stop_reason="max_tokens"),
+        LLMResponse(text="片段三", usage=Usage(1, 1), stop_reason="length"),
+    ])
+    turn, thread = _trunc_turn(bb, llm)
+    final = turn.run("长任务")
+    # 2 次续写 + 收口（第三次响应即达上限，接受其文本）
+    assert "片段一" in final and "片段三" in final
+    evs = [e for e in bb.recent_events("p1") if e["kind"] == "chat.truncated"]
+    assert any(e["payload"]["phase"] == "giveup" for e in evs)
+    t = chat_store.get_thread(bb, thread["id"])
+    assert t["status"] == "idle" and not t.get("error")
+
+
+def test_chat_no_continuation_on_normal_final(tmp_path):
+    """正常终稿（stop_reason=end_turn / 空）不触发续写，单次调用即收尾。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    llm = FakeLLM([_resp(text="正常完成")])
+    turn, thread = _trunc_turn(bb, llm)
+    final = turn.run("普通问题")
+    assert final == "正常完成"
+    assert len(llm.calls) == 1
+    assert not [e for e in bb.recent_events("p1") if e["kind"] == "chat.truncated"]
+
+
+def test_is_truncated_final_helper():
+    from core.chat.runtime import _is_truncated_final
+    assert _is_truncated_final(LLMResponse(text="x", stop_reason="length"))
+    assert _is_truncated_final(LLMResponse(text="x", stop_reason="max_tokens"))
+    assert not _is_truncated_final(LLMResponse(text="x", stop_reason="end_turn"))
+    assert not _is_truncated_final(LLMResponse(text="x", stop_reason=""))
+    # 带 tool_calls 的响应当工具路径处理，不算终稿截断
+    assert not _is_truncated_final(LLMResponse(
+        text="x", stop_reason="length", tool_calls=[_tc("t", "bb_query", {})]))
 
 
 def test_usage_breakdown_calibrated(tmp_path):
@@ -707,6 +828,102 @@ def test_mcp_bridge_http_tools_and_call(mcp_config, monkeypatch):
     assert status["online"] and status["tools"][0]["name"] == "decompile"
 
 
+# ---------- MCP 会话隔离 + 并发上限（2026-10-01） ----------
+
+@pytest.fixture()
+def pw_config(tmp_path):
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(json.dumps({"servers": [
+        {"name": "playwright", "url": "", "transport": "stdio",
+         "command": "no-such-bin-pw", "args": [], "enabled": True,
+         "domains": ["pentest"]},
+    ]}, ensure_ascii=False), encoding="utf-8")
+    return cfg
+
+
+def _capture_session_runtimes(bridge, monkeypatch):
+    """拦截会话级 runtime 构造，记录每个 (session -> env) 而不真起进程。"""
+    made = {}
+
+    class FakeRuntime:
+        def __init__(self, name, cfg, env_extra=None):
+            self.name = name
+            self.transport = "stdio"
+            self.domains = cfg.get("domains") or []
+            self.env = dict(env_extra or {})
+            made[self.env.get("PW_SESSION_ID")] = self
+
+        def list_tools(self, *, refresh=False):
+            return [{"name": "browser_navigate", "description": "导航",
+                     "input_schema": {"type": "object", "properties": {"url": {}}}}]
+
+        def call(self, tool, args):
+            return f"ok:{tool}:{self.env.get('PW_SESSION_ID')}"
+
+        def is_alive(self):
+            return True
+
+    monkeypatch.setattr("core.chat.mcp_bridge.MCPServerRuntime", FakeRuntime)
+    return made
+
+
+def test_mcp_session_scoped_server_gets_session_env(pw_config, monkeypatch):
+    """会话级 server：PW_SESSION_ID 按调用方 session 注入，同会话复用、异会话隔离。"""
+    made = _capture_session_runtimes(None, monkeypatch)
+    bridge = MCPBridge(pw_config, domains=["pentest"])
+    a1 = bridge.call("playwright", "browser_navigate", {}, session_id="thread-A")
+    a2 = bridge.call("playwright", "browser_navigate", {}, session_id="thread-A")
+    b1 = bridge.call("playwright", "browser_navigate", {}, session_id="thread-B")
+    assert "thread-A" in a1 and "thread-A" in a2 and "thread-B" in b1
+    assert set(made) == {"thread-A", "thread-B"}      # 同会话只建一个
+    assert len(bridge._session_servers) == 2
+
+
+def test_mcp_session_scoped_concurrency_limit(pw_config, monkeypatch):
+    """并发浏览器会话超上限 → 结构化错误引导，不再新建进程。"""
+    _capture_session_runtimes(None, monkeypatch)
+    monkeypatch.setattr(MCPBridge, "MAX_BROWSER_SESSIONS", 2)
+    bridge = MCPBridge(pw_config, domains=["pentest"])
+    assert "thread-1" in bridge.call("playwright", "browser_navigate", {},
+                                     session_id="thread-1")
+    assert "thread-2" in bridge.call("playwright", "browser_navigate", {},
+                                     session_id="thread-2")
+    out = bridge.call("playwright", "browser_navigate", {}, session_id="thread-3")
+    assert out.startswith("[错误]") and "上限" in out and "空闲回收" in out
+    assert len(bridge._session_servers) == 2
+
+
+def test_mcp_session_scoped_reaps_dead_sessions(pw_config, monkeypatch):
+    """已死会话占用的配额会被回收，允许新会话顶替（空闲回收后不永久卡限）。"""
+    made = _capture_session_runtimes(None, monkeypatch)
+    monkeypatch.setattr(MCPBridge, "MAX_BROWSER_SESSIONS", 1)
+    bridge = MCPBridge(pw_config, domains=["pentest"])
+    assert "thread-1" in bridge.call("playwright", "browser_navigate", {},
+                                     session_id="thread-1")
+    made["thread-1"].is_alive = lambda: False     # 模拟空闲回收/进程退出
+    out = bridge.call("playwright", "browser_navigate", {}, session_id="thread-2")
+    assert "thread-2" in out
+    assert set(bridge._session_servers) == {("playwright", "thread-2")}
+
+
+def test_mcp_status_marks_session_scoped_server(pw_config):
+    """无法探针时仍标记会话级 server，且不报告为在线。"""
+    bridge = MCPBridge(pw_config, domains=["pentest"])
+    st = bridge.status()[0]
+    assert st["name"] == "playwright" and st["session_scoped"] is True
+    assert st["online"] is False
+
+
+def test_mcp_status_discovers_session_scoped_tools(pw_config, monkeypatch):
+    """状态探针不启动真实浏览器，但应返回会话级 server 的工具清单。"""
+    _capture_session_runtimes(None, monkeypatch)
+    bridge = MCPBridge(pw_config, domains=["pentest"])
+    st = bridge.status()[0]
+    assert st["session_scoped"] is True
+    assert st["online"] is True
+    assert st["tools"][0]["name"] == "browser_navigate"
+
+
 # ---------- API ----------
 
 @pytest.fixture()
@@ -1037,6 +1254,129 @@ def test_loop_sends_one_user_message_for_multi_tool_turn(tmp_path):
                    for m in sent[i + 2:])
 
 
+# ---------- 对话链意图链路（intent-tools-chat，2026-10-01） ----------
+
+def _mk_asset(bb, pid, value):
+    from core.blackboard.assets import register_asset
+    return register_asset(bb, pid, value, "domain", quiet=True)["id"]
+
+
+def test_chat_expert_intent_first_gate(tmp_path):
+    """对话子专家（author=chat-*）也受意图先行门禁：无 open 意图登记发现 → [拒绝]；
+    declare_intent（挂资产锚点）后再登记 → 放行。修复「对话跑完链路图空」。"""
+    from core.agent.tools import ToolDispatcher
+    from core.blackboard import TaskQueue
+    from core.runtime.gateway import ExecutionGateway
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    aid = _mk_asset(bb, "p1", "target.example.com")
+    d = ToolDispatcher(bb, ExecutionGateway(bb=bb), TaskQueue(bb),
+                       project_id="p1", session_id="chat-abcdef123456",
+                       author="chat-abcdef123456", track="pentest")
+    # 无意图 → 拒
+    out = d.dispatch("bb_add_finding", {"vuln_class": "recon-x", "title": "暴露",
+                                        "severity": "low", "category": "intel"})
+    assert out.startswith("[拒绝]") and "declare_intent" in out
+    # 声明（带资产锚点）→ 需先有一次执行动作再登记发现（第二道闸）
+    di = d.dispatch("declare_intent", {"statement": "验证目标是否存在未授权入口",
+                                       "target_asset_id": aid})
+    assert di.startswith("intent=") and "[意图口径]" in di
+    d.dispatch("run_cmd", {"cmd": "echo probe", "runtime": "host",
+                           "threat_class": "trusted"})
+    out2 = d.dispatch("bb_add_finding", {"vuln_class": "recon-x", "title": "暴露",
+                                         "severity": "low", "category": "intel",
+                                         "target_asset_id": aid})
+    assert not out2.startswith("[拒绝]"), out2
+    # 意图落库（链路图有数据可画）
+    rows = bb.conn.execute("SELECT statement, target_asset_id FROM intents"
+                           " WHERE project_id='p1'").fetchall()
+    assert len(rows) == 1 and rows[0]["target_asset_id"] == aid
+
+
+def test_chat_expert_must_close_intent_before_summary(tmp_path):
+    """子专家声明意图后直接交摘要 → 被拦（回执提示先 close_intent），
+    补收尾后下一条文本才被当终稿放行。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    thread = chat_store.create_thread(bb, "p1", "web-solver")
+    aid = _mk_asset(bb, "p1", "t.example.com")
+    author = f"chat-{thread['id'][-12:]}"
+    from core.blackboard.intents import declare_intent
+    it = declare_intent(bb, "p1", "验证入口可达性", target_asset_id=aid,
+                        author=author)
+    # dead_end 收尾需 evidence_refs → 先造一条 http 历史
+    hid = bb.add_http_history("p1", source="replay", method="GET",
+                              url="http://t.example.com/", status=404)
+    llm = FakeLLM([
+        _resp(text="我打算先说结论"),                       # 1：被拦（有 open 意图）
+        _resp(tool_calls=[_tc("c1", "close_intent",
+                              {"intent_id": it["id"], "outcome": "dead_end",
+                               "dead_reason": "入口不可达",
+                               "evidence_refs": [f"http:{hid}"]})]),
+        _resp(text="结论：入口不可达（已收尾）"),            # 3：放行
+    ])
+    turn = ChatTurn(bb=bb, llm=llm, project_id="p1", thread_id=thread["id"],
+                    packs_root="packs", track="pentest", capabilities=["web"],
+                    mcp_bridge=None, expert_names=None)
+    final = turn.run("做被动侦察")
+    # 第一次纯文本被拦 → 第二轮消息里应出现收尾提醒
+    blob = json.dumps(llm.calls[1]["messages"], ensure_ascii=False, default=str)
+    assert "未收尾的意图" in blob and "close_intent" in blob
+    # 收尾后放行终稿
+    assert final == "结论：入口不可达（已收尾）"
+    row = bb.conn.execute("SELECT status FROM intents WHERE id=?",
+                          (it["id"],)).fetchone()
+    assert row["status"] == "closed"
+
+
+def test_chat_orchestrator_not_blocked_by_open_intent(tmp_path):
+    """主控是调度者：即便有 open 意图也不拦其汇总文本（拦截只针对子专家）。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    thread = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID)
+    author = f"chat-{thread['id'][-12:]}"
+    aid = _mk_asset(bb, "p1", "o.example.com")
+    from core.blackboard.intents import declare_intent
+    declare_intent(bb, "p1", "目标级假设", target_asset_id=aid, author=author)
+    llm = FakeLLM([_resp(text="汇总：任务完成")])
+    turn = ChatTurn(bb=bb, llm=llm, project_id="p1", thread_id=thread["id"],
+                    packs_root="packs", track="pentest", capabilities=["web"],
+                    mcp_bridge=None, expert_names=["recon"])
+    assert turn.run("汇总") == "汇总：任务完成"
+
+
+def test_bb_delete_intent_guard_and_delete(tmp_path):
+    """bb_delete_intent：open 意图可物理删（落 intent.deleted）；已收尾拒删。"""
+    from core.agent.tools import ToolDispatcher
+    from core.blackboard import TaskQueue
+    from core.runtime.gateway import ExecutionGateway
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    aid = _mk_asset(bb, "p1", "d.example.com")
+    d = ToolDispatcher(bb, ExecutionGateway(bb=bb), TaskQueue(bb),
+                       project_id="p1", session_id="sess-xyz", author="sess-xyz",
+                       track="pentest")
+    di = d.dispatch("declare_intent", {"statement": "误声明意图",
+                                       "target_asset_id": aid})
+    iid = di.split("intent=", 1)[1].split(" ", 1)[0]
+    out = d.dispatch("bb_delete_intent", {"intent_id": iid, "reason": "误声明"})
+    assert "已物理删除" in out
+    assert bb.conn.execute("SELECT COUNT(*) c FROM intents").fetchone()["c"] == 0
+    assert any(e["kind"] == "intent.deleted"
+               for e in bb.recent_events("p1"))
+    # 已收尾拒删：新建一条并收尾
+    di2 = d.dispatch("declare_intent", {"statement": "会收尾的意图",
+                                        "target_asset_id": aid})
+    iid2 = di2.split("intent=", 1)[1].split(" ", 1)[0]
+    # 造证据（http 历史）用于 dead_end 收尾
+    hid = bb.add_http_history("p1", source="replay", method="GET",
+                              url="http://d.example.com/", status=404)
+    d.dispatch("close_intent", {"intent_id": iid2, "outcome": "dead_end",
+                                "dead_reason": "不可达", "evidence_refs": [f"http:{hid}"]})
+    out2 = d.dispatch("bb_delete_intent", {"intent_id": iid2})
+    assert out2.startswith("[拒绝]") and "已收尾" in out2
+
+
 # ---------- 健壮性（2026-10-01）：错误结构化 + 悬空 tool_calls 修复 ----------
 
 class _BoomLLM:
@@ -1155,6 +1495,26 @@ def test_sanitize_history_repairs_dangling_and_orphans():
             {"type": "tool_result", "tool_use_id": "ghost", "content": "x"}]},
     ]
     assert _sanitize_history(orphan) == [{"role": "user", "content": "hi"}]
+
+
+def test_sanitize_history_drops_empty_tool_names():
+    """旧 Responses 解析残留的空工具名不能再发给网关。"""
+    history = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "bad", "name": "", "input": {}},
+            {"type": "text", "text": "继续处理"},
+        ]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "bad", "content": "旧结果"},
+        ]},
+    ]
+    assert _sanitize_history(history) == [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": [
+            {"type": "text", "text": "继续处理"},
+        ]},
+    ]
 
 
 def _load_api(bb, tid):

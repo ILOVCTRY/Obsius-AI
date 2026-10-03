@@ -24,10 +24,15 @@ interface Props {
   imports: Record<string, string[]> | null
   cached: boolean
   stringsCount: number
+  progress?: {
+    discovered: number
+    completed: number
+    failed: number
+  }
 }
 
 export function FunctionBrowser(
-  { pid, sha, rows, funcs, selected, onSelect, imports, cached, stringsCount }: Props,
+  { pid, sha, rows, funcs, selected, onSelect, imports, cached, stringsCount, progress }: Props,
 ) {
   const [query, setQuery] = useState("")
   // 5万+ 行全量过滤较重：useDeferredValue 让输入即时响应、过滤延后到空闲渲染
@@ -101,7 +106,9 @@ export function FunctionBrowser(
         />
       </div>
       <TabsList className="w-full justify-start rounded-none border-b bg-transparent p-0">
-        <TabsTrigger value="funcs" className="rounded-none border-b-2 px-3 py-1 text-[11px]">函数 {rows.length}</TabsTrigger>
+        <TabsTrigger value="funcs" className="rounded-none border-b-2 px-3 py-1 text-[11px]">
+          函数 {progress ? `${progress.completed}/${progress.discovered}` : rows.length}
+        </TabsTrigger>
         <TabsTrigger value="strings" className="rounded-none border-b-2 px-3 py-1 text-[11px]">
           字符串{stringsCount ? ` ${stringsCount}` : ""}
         </TabsTrigger>
@@ -149,7 +156,15 @@ export function FunctionBrowser(
                     </span>
                   )}
                   {it.kb && <span className="shrink-0 text-[10px] text-primary" title="已入 func_kb">✓</span>}
-                  {!it.row.has_pseudo && <span className="shrink-0 text-[9px] text-muted-foreground" title="无伪码">asm</span>}
+                  {it.row.status === "pending" && (
+                    <span className="shrink-0 text-[9px] text-(--status-approval)" title="伪代码分析中">分析中</span>
+                  )}
+                  {it.row.status === "failed" && (
+                    <span className="shrink-0 text-[9px] text-(--status-error)" title={it.row.error || "伪代码生成失败"}>失败</span>
+                  )}
+                  {it.row.status !== "pending" && it.row.status !== "failed" && !it.row.has_pseudo && (
+                    <span className="shrink-0 text-[9px] text-muted-foreground" title="无伪码">asm</span>
+                  )}
                   <span className="shrink-0 font-mono text-[9px] text-muted-foreground">{it.row.address}</span>
                 </button>
               )

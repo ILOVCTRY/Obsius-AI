@@ -30,9 +30,8 @@ const AttackPathCanvas = lazy(() =>
 // 全景 tab（黑板链路图）2026-09-26 用户要求下线：tab 移除、boardGraph/ 前端删除；
 // 后端 board-graph 只读端点保留。
 // M4c 场景档 board_view：defaultView（config.board_view.default）不在可用集合时回退 findings。
-export function Blackboard({ pid, compact = false, track, capabilities, defaultView, openFindingsSub, onFindingsSubConsumed }: {
+export function Blackboard({ pid, compact = false, track, capabilities, defaultView }: {
   pid: string; compact?: boolean; track?: string; capabilities?: string[]; defaultView?: string
-  openFindingsSub?: "list" | "canvas"; onFindingsSubConsumed?: () => void
 }) {
   const compactPentest = compact && track === "pentest"
   const tabs = [
@@ -55,12 +54,6 @@ export function Blackboard({ pid, compact = false, track, capabilities, defaultV
   useEffect(() => {
     setTab((prev) => (allTabs.includes(prev) ? prev : initial))
   }, [tabsKey]) // eslint-disable-line react-hooks/exhaustive-deps
-  // 外部深链（工作台右栏「链路视图」）：强制切到「发现」tab；子视图由 Findings 消费
-  useEffect(() => {
-    if (!openFindingsSub) return
-    touched.current = true
-    setTab("findings")
-  }, [openFindingsSub])
   return (
     <Tabs value={tab} onValueChange={(v) => { touched.current = true; setTab(v) }} className="flex h-full flex-col gap-0">
       <TabsList className="w-full justify-start rounded-none border-b bg-transparent p-0">
@@ -73,8 +66,7 @@ export function Blackboard({ pid, compact = false, track, capabilities, defaultV
       <TabsContent value="findings" className="min-h-0 flex-1">
         {/* 子视图切换仅渗透/红队轨（R2 拆轨前判断 assessment）且非 compact 侧栏时渲染 */}
         <Findings pid={pid} compact={compact} track={track}
-                  showCanvas={!compact && (track === "pentest" || track === "redteam")}
-                  forcedSub={openFindingsSub} onSubConsumed={onFindingsSubConsumed} />
+                  showCanvas={!compact && (track === "pentest" || track === "redteam")} />
       </TabsContent>
       <TabsContent value="assets" className="min-h-0 flex-1">
         {/* 树视图全轨启用（2026-09-20）：E6 自动挂载全轨生效，ctf 等轨同样有 parent 树；
@@ -113,9 +105,8 @@ function Chip({ active, onClick, children }: { active: boolean; onClick: () => v
 
 // CTF 线索级别词表已提出共享：./blackboard/ctfLevel（列表视图与全景链路图共用）
 
-export function Findings({ pid, compact, track, showCanvas, forcedSub, onSubConsumed }: {
+export function Findings({ pid, track, showCanvas }: {
   pid: string; compact?: boolean; track?: string; showCanvas: boolean
-  forcedSub?: "list" | "canvas"; onSubConsumed?: () => void
 }) {
   const isCtf = track === "ctf"
   const [items, setItems] = useState<Finding[]>([])
@@ -126,15 +117,11 @@ export function Findings({ pid, compact, track, showCanvas, forcedSub, onSubCons
   // C6 分两类硬切换（仅渗透/红队轨）：vuln=漏洞 / intel=有效发现·关键发现，互不混显
   const isSplit = track === "pentest" || track === "redteam"
   const [catView, setCatView] = useState<FindingCategory>("vuln")
-  // 手动添加的严重度（漏洞视图不含 info——门禁①）
-  const [addSev, setAddSev] = useState("low")
   const [levelFilter, setLevelFilter] = useState("")   // C2：ctf 线索级别筛选（""=全部未折叠）
   const [detail, setDetail] = useState<Finding | null>(null)  // 弹窗展示复现步骤/POC
   const [assetOpen, setAssetOpen] = useState(false)   // 资产筛选下拉展开态
   const [assetQuery, setAssetQuery] = useState("")     // 下拉内搜索词
-  const [subView, setSubView] = useState<"list" | "canvas">(forcedSub ?? "list")
-  const [title, setTitle] = useState("")
-  const [vulnClass, setVulnClass] = useState("")
+  const [subView, setSubView] = useState<"list" | "canvas">("list")
 
   // 筛选全局生效；数据恒为当前项目（API 按 pid 查，无跨项目混杂）。
   // 资产维度客户端过滤（下拉只列 host/domain，选中时展开后代 service/url 一并匹配
@@ -149,13 +136,6 @@ export function Findings({ pid, compact, track, showCanvas, forcedSub, onSubCons
     const t = setInterval(refresh, 4000)
     return () => clearInterval(t)
   }, [refresh])
-
-  // 外部深链消费：非空即切到指定子视图一次（工作台右栏「链路视图」→ canvas）
-  useEffect(() => {
-    if (!forcedSub) return
-    setSubView(forcedSub)
-    onSubConsumed?.()
-  }, [forcedSub, onSubConsumed])
 
   // 资产筛选下拉数据源
   useEffect(() => {
@@ -241,16 +221,6 @@ export function Findings({ pid, compact, track, showCanvas, forcedSub, onSubCons
       rank(a.severity) - rank(b.severity) || b.created_at.localeCompare(a.created_at))
   }, [items, assetFilter, statusFilter, isCtf, levelFilter, catView, isSplit])
   const [plOpen, setPlOpen] = useState(false)
-
-  const add = async () => {
-    if (!title.trim()) return
-    await api.addFinding(pid, {
-      vuln_class: vulnClass || "clue", title: title.trim(), status: "unverified",
-      category: isSplit ? catView : undefined, severity: addSev,
-    })
-    setTitle("")
-    refresh()
-  }
 
   // IP/严重度/状态筛选行（列表与链路共用）
   const filterRow = (
@@ -467,22 +437,6 @@ export function Findings({ pid, compact, track, showCanvas, forcedSub, onSubCons
           )}
         </div>
       </ScrollArea>
-      {!compact && (
-        <div className="flex gap-2 border-t p-2">
-          <select className="h-8 w-20 shrink-0 rounded-md border bg-background px-2 text-xs"
-                  value={addSev} onChange={(e) => setAddSev(e.target.value)}
-                  title="严重度">
-            {(isSplit
-              ? ["low", "medium", "high", "critical"] // 渗透/红队轨 info 停收（2026-09-18，全类别）
-              : ["info", "low", "medium", "high", "critical"]
-            ).map((s) => <option key={s} value={s}>{s}</option>)}
-          </select>
-          <Input className="min-w-0 flex-1" value={vulnClass} onChange={(e) => setVulnClass(e.target.value)} placeholder="类别（如 暴露面/远程管理服务、信息点）" />
-          <Input className="min-w-0 flex-1" value={title} onChange={(e) => setTitle(e.target.value)}
-                 placeholder="手动添加发现（human 共写，§6.5）" onKeyDown={(e) => e.key === "Enter" && add()} />
-          <Button size="sm" onClick={add} disabled={!title.trim()}>添加</Button>
-        </div>
-      )}
       {/* 点击卡片 → 弹窗展示复现步骤 + POC（一键复制） */}
       {detail && (
         <FindingDetailDialog

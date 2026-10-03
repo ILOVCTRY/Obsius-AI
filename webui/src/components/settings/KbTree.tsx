@@ -2,6 +2,10 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import { api } from "@/lib/api"
 import type { KbSearchHit, KbSourceTree } from "@/lib/types"
 import { cn } from "@/lib/utils"
+import {
+  ChevronDown, ChevronRight, Compass, FileCode2, FileText, Folder,
+  Pencil, Search, SlidersHorizontal, Trash2, X,
+} from "lucide-react"
 
 // 知识库折叠树：源 → 多级目录（中文目录名允许）→ 文件（K5 白名单 .md/.py/.txt/.json）。
 // 文件行显 kbindex 同口径标题（frontmatter title > # H1 > stem，F15），悬停 title 出路径；
@@ -17,6 +21,14 @@ interface TreeNode {
   files: TreeNodeFile[]
 }
 interface TreeNodeFile { name: string; path: string; size: number; title: string }
+
+function fileLayer(path: string): { label: string; className: string } {
+  const parts = path.toLowerCase().split("/")
+  if (parts.includes("playbooks")) return { label: "方法论", className: "text-primary" }
+  if (parts.includes("patterns")) return { label: "模式", className: "text-violet-300" }
+  if (parts.includes("cases")) return { label: "案例", className: "text-amber-300" }
+  return { label: "资料", className: "text-muted-foreground" }
+}
 
 // 自然排序：数字段按数值比较（`-2` 紧跟主体、`11-` 排 `2-` 后），
 // 过渡期残存编号文件不再按字典序乱序
@@ -71,13 +83,14 @@ function DirNode({ node, depth, q, selected, onSelect, onRename, onDelete, colla
     <div>
       {node.name && (
         <button
-          className="flex w-full items-center gap-0.5 truncate rounded py-0.5 pr-1 text-left text-[11px] text-muted-foreground hover:bg-accent/40"
+          className="kb-dir-row flex w-full items-center gap-1 truncate rounded py-1 pr-1 text-left text-[11px] text-muted-foreground hover:bg-accent/40"
           style={{ paddingLeft: depth * 10 + 2 }}
           onClick={() => toggle(node.path)}
           title={node.path}
         >
-          <span className="w-3 shrink-0 text-[9px]">{isOpen ? "▾" : "▸"}</span>
-          <span className="truncate">📁 {node.name}</span>
+          {isOpen ? <ChevronDown size={12} className="shrink-0" /> : <ChevronRight size={12} className="shrink-0" />}
+          <Folder size={13} className="shrink-0 text-amber-300/80" />
+          <span className="truncate">{node.name}</span>
         </button>
       )}
       {isOpen && (
@@ -89,19 +102,20 @@ function DirNode({ node, depth, q, selected, onSelect, onRename, onDelete, colla
           ))}
           {files.map((f) => (
             <div key={f.path}
-                 className={cn("group flex items-center rounded text-[11px]",
-                   selected === f.path && "bg-primary/10 text-primary")}>
+                 className={cn("kb-file-row group flex items-center rounded text-[11px]",
+                   selected === f.path && "is-selected bg-primary/10 text-primary")}>
               <button
-                className="min-w-0 flex-1 truncate py-0.5 pr-1 text-left hover:bg-accent/40"
+                className="min-w-0 flex-1 truncate py-1 pr-1 text-left hover:bg-accent/40"
                 style={{ paddingLeft: (depth + 1) * 10 + 2 }}
                 onClick={() => onSelect(f.path)}
                 title={`${f.path}（${f.size}B）`}>
-                📄 {f.title || f.name}
+                <span className="mr-1 inline-flex align-middle text-muted-foreground"><FileText size={12} /></span>{f.title || f.name}
               </button>
-              <button className="shrink-0 px-1 text-[10px] text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:text-primary"
-                      title="改名（全仓引用联动替换）" onClick={() => onRename(f.path)}>✎</button>
-              <button className="shrink-0 px-1 text-[10px] text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:text-(--status-error)"
-                      title="删除（进 kb-trash，可恢复）" onClick={() => onDelete(f.path)}>✕</button>
+              <span className={cn("kb-layer-mark hidden shrink-0 text-[8px] font-medium sm:inline", fileLayer(f.path).className)}>{fileLayer(f.path).label}</span>
+              <button className="kb-file-action shrink-0 rounded p-1 text-muted-foreground hover:text-primary"
+                      aria-label={`改名 ${f.title || f.name}`} title="改名（全仓引用联动替换）" onClick={() => onRename(f.path)}><Pencil size={11} /></button>
+              <button className="kb-file-action shrink-0 rounded p-1 text-muted-foreground hover:text-(--status-error)"
+                      aria-label={`删除 ${f.title || f.name}`} title="删除（进 kb-trash，可恢复）" onClick={() => onDelete(f.path)}><Trash2 size={11} /></button>
             </div>
           ))}
         </div>
@@ -128,6 +142,7 @@ export function KbTree({ cap, sources, selected, onSelect, onRename, onDelete }:
   const [hits, setHits] = useState<KbSearchHit[]>([])
   const [routes, setRoutes] = useState<[string, string[]][]>([])
   const [routesOpen, setRoutesOpen] = useState(false)
+  const [searchFocused, setSearchFocused] = useState(false)
   const seqRef = useRef(0)
   const trees = useMemo(
     () => sources.map((s) => ({ src: s, tree: buildTree(s.files) })), [sources])
@@ -168,22 +183,36 @@ export function KbTree({ cap, sources, selected, onSelect, onRename, onDelete }:
   }, [cap])
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <input
-        value={q}
-        onChange={(e) => setQ(e.target.value.toLowerCase())}
-        placeholder={`过滤/正文搜索 ${total} 篇…`}
-        className="mx-1 mb-1 h-6 shrink-0 rounded border bg-background px-1.5 text-[11px] outline-none focus:border-primary/50"
-      />
+    <div className="kb-tree flex min-h-0 flex-1 flex-col">
+      <div className="kb-tree-toolbar">
+        <div className={cn("kb-tree-search", searchFocused && "is-focused")}>
+          <Search size={13} />
+          <input
+            value={q}
+            onFocus={() => setSearchFocused(true)}
+            onBlur={() => setSearchFocused(false)}
+            onChange={(e) => setQ(e.target.value.toLowerCase())}
+            onKeyDown={(e) => e.key === "Escape" && setQ("")}
+            placeholder={`搜索 ${total} 份资料…`}
+            aria-label="搜索知识库文件"
+          />
+          {q && <button className="kb-tree-clear" title="清空搜索" aria-label="清空搜索" onClick={() => setQ("")}><X size={12} /></button>}
+        </div>
+        <button className="kb-tree-tool" title="搜索同时匹配正文和路径" aria-label="搜索说明"><SlidersHorizontal size={13} /></button>
+      </div>
+      <div className="kb-tree-summary">
+        <span><Compass size={11} />知识导航</span>
+        <span className="font-mono">{q ? `${hits.length} 命中` : `${total} 文件`}</span>
+      </div>
       {hits.length > 0 && (
         <div className="mb-1 max-h-40 shrink-0 overflow-y-auto rounded border bg-card/60 px-1 py-0.5">
-          <p className="px-1 py-0.5 text-[10px] text-muted-foreground">正文命中 {hits.length} 篇</p>
+            <p className="px-1 py-1 text-[10px] font-medium text-muted-foreground">正文命中 {hits.length} 篇</p>
           {hits.map((h) => (
             <button key={`${h.source}/${h.path}`}
                     className="block w-full truncate rounded px-1 py-0.5 text-left text-[11px] hover:bg-accent/40"
                     title={`${h.path}（命中 ${h.matches} 次）\n${h.snippet}`}
                     onClick={() => onSelect(h.path)}>
-              <span className="text-primary">📄 {h.path}</span>
+              <span className="inline-flex items-center gap-1 text-primary"><FileCode2 size={11} />{h.title || h.path}</span>
               <span className="ml-1 text-[10px] text-muted-foreground">×{h.matches} · {h.snippet}</span>
             </button>
           ))}

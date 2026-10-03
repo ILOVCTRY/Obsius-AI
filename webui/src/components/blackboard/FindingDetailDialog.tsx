@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react"
 import { api } from "@/lib/api"
-import type { Finding } from "@/lib/types"
+import { VULNERABILITY_TYPES, type Finding, type FindingPoc as FindingPocModel } from "@/lib/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog"
@@ -10,6 +10,7 @@ import {
 } from "@/components/ui/alert-dialog"
 import { cn } from "@/lib/utils"
 import { fmtDateTime, utcTitle } from "@/lib/datetime"
+import { ChevronDown, ChevronUp, Copy, Plus, Trash2 } from "lucide-react"
 
 // 发现详情弹窗（发现列表/黑板画布/攻击链画布三调用点共用）：收录格式三件套
 // （危害描述/复现步骤/修复建议，v20）+ 复现文稿一键复制；F10 人工修订：编辑态
@@ -35,27 +36,35 @@ const SEVERITIES: { value: string; label: string }[] = [
 // evidence.poc(s) 约定（DESIGN.md §5.2）：稳定复现的证据结构；
 // 同一发现可有**多条 POC**（不同触发路径/报文位置），pocs 数组逐条独立；
 // 旧数据单条 evidence.poc 与 findings.poc_artifact_id 保留兼容（视为主 POC）。
-export interface FindingPoc {
-  name?: string // POC 名称（如 "GET 探测" / "POST 利用"）
-  type?: string // http_raw | python | steps
-  http_raw?: string // HTTP 报文原文（可复现的最小报文，稳定触发时入黑板）
-  artifact_id?: string // 不稳定时引 artifacts 里的 Python POC
-  target?: string
-  stability?: string // 如 "3/3"（连续 3 次全部触发）
+export type FindingPoc = FindingPocModel
+interface LegacyFindingPoc {
+  name?: string; type?: string; http_raw?: string; artifact_id?: string
+  target?: string; stability?: string; steps?: unknown
 }
 
-export function pocsOf(f: Finding): FindingPoc[] {
+export function pocsOf(f: Finding): (FindingPoc | LegacyFindingPoc)[] {
+  if (Array.isArray(f.pocs) && f.pocs.length) return f.pocs
   const ev = f.evidence as { poc?: unknown; pocs?: unknown } | undefined
-  const list: FindingPoc[] = []
+  const list: LegacyFindingPoc[] = []
   if (Array.isArray(ev?.pocs)) {
     for (const p of ev.pocs) {
-      if (p && typeof p === "object") list.push(p as FindingPoc)
+      if (p && typeof p === "object") list.push(p as LegacyFindingPoc)
     }
   }
   if (!list.length && ev?.poc && typeof ev.poc === "object") {
-    list.push(ev.poc as FindingPoc)
+    list.push(ev.poc as LegacyFindingPoc)
   }
   return list
+}
+
+function editablePocsOf(f: Finding): FindingPocModel[] {
+  return pocsOf(f).flatMap((p) => {
+    const code = "code" in p && typeof p.code === "string" ? p.code
+      : "http_raw" in p && typeof p.http_raw === "string" ? p.http_raw : ""
+    if (!code.trim()) return []
+    const type = p.type === "python" ? "python" : "http"
+    return [{ type, code }]
+  })
 }
 
 /** 收录格式三件套·复现步骤（v20）：结构化步骤，verified 门禁认可的证据形态 */
@@ -76,17 +85,18 @@ const FENCE: Record<string, string> = { http: "http", python: "python", cmd: "ba
 function legacyPocSteps(f: Finding): ReproStep[] {
   const steps: ReproStep[] = []
   for (const p of pocsOf(f)) {
-    if (p.http_raw || p.artifact_id) {
+    const legacyPoc = p as LegacyFindingPoc
+    if (legacyPoc.http_raw || legacyPoc.artifact_id) {
       steps.push({
-        desc: p.name ?? "复现步骤",
-        type: p.type === "http_raw" ? "http" : p.type,
-        code: p.http_raw,
-        artifact_id: p.artifact_id,
-        stability: p.stability,
-        target: p.target,
+        desc: legacyPoc.name ?? "复现步骤",
+        type: legacyPoc.type === "http_raw" ? "http" : legacyPoc.type,
+        code: legacyPoc.http_raw,
+        artifact_id: legacyPoc.artifact_id,
+        stability: legacyPoc.stability,
+        target: legacyPoc.target,
       })
     }
-    const legacy = (p as { steps?: unknown }).steps
+    const legacy = legacyPoc.steps
     if (Array.isArray(legacy)) {
       for (const s of legacy) steps.push({ desc: String(s) })
     }
@@ -229,8 +239,11 @@ export function FindingDetailDialog({ pid, finding, assetLabel, track, onClose, 
   // F10：row 本地快照（初始=prop，保存成功用 PATCH 响应覆盖）——解耦 4s 轮询且头部即时回显
   const [row, setRow] = useState<Finding>(finding)
   const [editing, setEditing] = useState(false)
-  const [form, setForm] = useState({ title: "", severity: "", vuln_class: "", rating_basis: "",
-                                     impact: "", remediation: "", category: "vuln" })
+  const [form, setForm] = useState({ title: "", severity: "", status: "unverified", vuln_class: "", rating_basis: "",
+                                     impact: "", remediation: "", category: "vuln",
+                                     summary: "", affected_assets: "", test_environment: "",
+                                     reproduction_steps: "", verification_result: "",
+                                     risk_assessment: "", pocs: [] as FindingPocModel[] })
   const [saving, setSaving] = useState(false)
   const [editErr, setEditErr] = useState<string | null>(null)
   const [delOpen, setDelOpen] = useState(false)
@@ -243,9 +256,16 @@ export function FindingDetailDialog({ pid, finding, assetLabel, track, onClose, 
     .filter(([k]) => k !== "poc" && k !== "pocs" && k !== "repro_steps")
 
   const startEdit = () => {
-    setForm({ title: row.title, severity: row.severity, vuln_class: row.vuln_class ?? "",
+    setForm({ title: row.title, severity: row.severity, status: row.status,
+              vuln_class: row.vuln_class ?? "",
               rating_basis: row.rating_basis ?? "", impact: row.impact ?? "",
-              remediation: row.remediation ?? "", category: row.category ?? "vuln" })
+              remediation: row.remediation ?? "", category: row.category ?? "vuln",
+              summary: row.summary ?? "", affected_assets: row.affected_assets ?? "",
+              test_environment: row.test_environment ?? "",
+              reproduction_steps: row.reproduction_steps ?? "",
+              verification_result: row.verification_result ?? "",
+              risk_assessment: row.risk_assessment ?? "",
+              pocs: editablePocsOf(row) })
     setEditErr(null)
     setEditing(true)
   }
@@ -254,6 +274,7 @@ export function FindingDetailDialog({ pid, finding, assetLabel, track, onClose, 
     const changes: Record<string, unknown> = {}
     if (form.title !== row.title) changes.title = form.title
     if (form.severity !== row.severity) changes.severity = form.severity
+    if (form.status !== row.status) changes.status = form.status
     if (form.vuln_class !== (row.vuln_class ?? "")) changes.vuln_class = form.vuln_class
     // F11 判级依据：空串=清空（basis 必须证成当前 severity）
     if (form.rating_basis !== (row.rating_basis ?? "")) changes.rating_basis = form.rating_basis
@@ -262,6 +283,18 @@ export function FindingDetailDialog({ pid, finding, assetLabel, track, onClose, 
     if (form.remediation !== (row.remediation ?? "")) changes.remediation = form.remediation
     // C6 分两类：vuln=漏洞 / intel=有效发现·关键发现
     if (form.category !== (row.category ?? "vuln")) changes.category = form.category
+    for (const key of ["summary", "affected_assets", "test_environment",
+      "reproduction_steps", "verification_result", "risk_assessment"] as const) {
+      if (form[key] !== ((row[key] as string | undefined) ?? "")) changes[key] = form[key]
+    }
+    if (JSON.stringify(form.pocs) !== JSON.stringify(row.pocs ?? [])) changes.pocs = form.pocs
+    if (form.status === "verified" && row.status !== "verified") {
+      for (const key of ["summary", "affected_assets", "test_environment",
+        "reproduction_steps", "verification_result", "risk_assessment"] as const) {
+        changes[key] = form[key]
+      }
+      changes.pocs = form.pocs
+    }
     if (!Object.keys(changes).length) {
       setEditing(false)
       return
@@ -363,8 +396,9 @@ export function FindingDetailDialog({ pid, finding, assetLabel, track, onClose, 
         {editing && (
           <div className="space-y-2 rounded border p-2">
             <div>
-              <label className="mb-0.5 block text-[10px] text-muted-foreground">标题</label>
+              <label className="mb-0.5 block text-[10px] text-muted-foreground">漏洞名称</label>
               <input className="h-8 w-full rounded-md border bg-background px-2 text-xs"
+                     placeholder="漏洞类型 + 受影响资产 + 风险能力"
                      value={form.title}
                      onChange={(e) => setForm((f) => ({ ...f, title: e.target.value }))} />
             </div>
@@ -385,13 +419,31 @@ export function FindingDetailDialog({ pid, finding, assetLabel, track, onClose, 
                 </select>
               </div>
               <div className="flex-1">
-                <label className="mb-0.5 block text-[10px] text-muted-foreground">
-                  类别（可空；CTF 轨填线索类别）
-                </label>
-                <input className="h-8 w-full rounded-md border bg-background px-2 text-xs"
-                       value={form.vuln_class}
-                       onChange={(e) => setForm((f) => ({ ...f, vuln_class: e.target.value }))} />
+                <label className="mb-0.5 block text-[10px] text-muted-foreground">漏洞类型</label>
+                <select className={cn(selectCls, "w-full")} value={form.vuln_class}
+                        onChange={(e) => setForm((f) => ({ ...f, vuln_class: e.target.value }))}>
+                  {form.vuln_class && !(VULNERABILITY_TYPES as readonly string[]).includes(form.vuln_class)
+                    && <option value={form.vuln_class}>{form.vuln_class}（存量类型）</option>}
+                  {VULNERABILITY_TYPES.map((v) => <option key={v} value={v}>{v}</option>)}
+                </select>
               </div>
+            </div>
+            <div>
+              <label className="mb-0.5 block text-[10px] text-muted-foreground">状态</label>
+              <select className={cn(selectCls, "w-full")} value={form.status}
+                      onChange={(e) => setForm((f) => ({ ...f, status: e.target.value }))}>
+                <option value="unverified">草稿 / 待验证</option>
+                <option value="verified">正式漏洞</option>
+                <option value="false-positive">误报</option>
+              </select>
+            </div>
+            <div>
+              <label className="mb-0.5 block text-[10px] text-muted-foreground">记录分类</label>
+              <select className={cn(selectCls, "w-full")} value={form.category}
+                      onChange={(e) => setForm((f) => ({ ...f, category: e.target.value }))}>
+                <option value="vuln">漏洞</option>
+                <option value="intel">有效发现 / 情报</option>
+              </select>
             </div>
             <div>
               <label className="mb-0.5 block text-[10px] text-muted-foreground">
@@ -402,29 +454,85 @@ export function FindingDetailDialog({ pid, finding, assetLabel, track, onClose, 
                      onChange={(e) => setForm((f) => ({ ...f, rating_basis: e.target.value }))} />
             </div>
             <div>
-              <label className="mb-0.5 block text-[10px] text-muted-foreground">
-                危害描述（可空，空串=清空；报告三件套之一）
-              </label>
+              <label className="mb-0.5 block text-[10px] text-muted-foreground">漏洞摘要</label>
               <textarea className="min-h-16 w-full rounded-md border bg-background px-2 py-1.5 text-xs"
-                        value={form.impact}
-                        onChange={(e) => setForm((f) => ({ ...f, impact: e.target.value }))} />
+                        value={form.summary}
+                        onChange={(e) => setForm((f) => ({ ...f, summary: e.target.value }))} />
             </div>
             <div>
-              <label className="mb-0.5 block text-[10px] text-muted-foreground">
-                修复建议（可空，空串=清空；报告三件套之一）
-              </label>
+              <label className="mb-0.5 block text-[10px] text-muted-foreground">受影响资产说明</label>
+              <textarea className="min-h-16 w-full rounded-md border bg-background px-2 py-1.5 text-xs"
+                        value={form.affected_assets}
+                        onChange={(e) => setForm((f) => ({ ...f, affected_assets: e.target.value }))} />
+            </div>
+            {([
+              ["test_environment", "测试环境"],
+              ["reproduction_steps", "操作步骤"],
+              ["verification_result", "验证结果（预期结果与实际结果）"],
+              ["risk_assessment", "风险影响评估"],
+            ] as const).map(([key, label]) => (
+              <div key={key}>
+                <label className="mb-0.5 block text-[10px] text-muted-foreground">{label}</label>
+                <textarea className="min-h-16 w-full rounded-md border bg-background px-2 py-1.5 text-xs"
+                          value={form[key]}
+                          onChange={(e) => setForm((f) => ({ ...f, [key]: e.target.value }))} />
+              </div>
+            ))}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="text-[10px] text-muted-foreground">POC（HTTP 原始报文 / Python）</label>
+                <Button size="sm" variant="outline" className="h-7 gap-1 px-2 text-[10px]"
+                        onClick={() => setForm((f) => ({ ...f, pocs: [...f.pocs, { type: "http", code: "" }] }))}>
+                  <Plus className="size-3" /> 添加 POC
+                </Button>
+              </div>
+              {form.pocs.map((poc, index) => (
+                <div key={index} className="space-y-1 rounded border p-2">
+                  <div className="flex items-center gap-1">
+                    <select aria-label={`POC ${index + 1} 类型`} className={selectCls} value={poc.type}
+                            onChange={(e) => setForm((f) => ({
+                              ...f, pocs: f.pocs.map((p, i) => i === index
+                                ? { ...p, type: e.target.value as FindingPocModel["type"] } : p),
+                            }))}>
+                      <option value="http">HTTP</option><option value="python">Python</option>
+                    </select>
+                    <Button size="icon" variant="ghost" className="size-7" title="上移" aria-label="上移 POC"
+                            disabled={index === 0}
+                            onClick={() => setForm((f) => {
+                              const next = [...f.pocs]; [next[index - 1], next[index]] = [next[index], next[index - 1]]
+                              return { ...f, pocs: next }
+                            })}><ChevronUp className="size-3.5" /></Button>
+                    <Button size="icon" variant="ghost" className="size-7" title="下移" aria-label="下移 POC"
+                            disabled={index === form.pocs.length - 1}
+                            onClick={() => setForm((f) => {
+                              const next = [...f.pocs]; [next[index + 1], next[index]] = [next[index], next[index + 1]]
+                              return { ...f, pocs: next }
+                            })}><ChevronDown className="size-3.5" /></Button>
+                    <Button size="icon" variant="ghost" className="size-7 text-(--status-error)" title="删除" aria-label="删除 POC"
+                            onClick={() => setForm((f) => ({ ...f, pocs: f.pocs.filter((_, i) => i !== index) }))}>
+                      <Trash2 className="size-3.5" />
+                    </Button>
+                  </div>
+                  <textarea className="min-h-28 w-full rounded-md border bg-background px-2 py-1.5 font-mono text-[11px]"
+                            placeholder={poc.type === "http" ? "POST /api/... HTTP/1.1\nHost: example.com" : "import requests\n..."}
+                            value={poc.code}
+                            onChange={(e) => setForm((f) => ({
+                              ...f, pocs: f.pocs.map((p, i) => i === index ? { ...p, code: e.target.value } : p),
+                            }))} />
+                </div>
+              ))}
+            </div>
+            <div>
+              <label className="mb-0.5 block text-[10px] text-muted-foreground">修复建议（选填）</label>
               <textarea className="min-h-16 w-full rounded-md border bg-background px-2 py-1.5 text-xs"
                         value={form.remediation}
                         onChange={(e) => setForm((f) => ({ ...f, remediation: e.target.value }))} />
             </div>
             <div>
-              <label className="mb-0.5 block text-[10px] text-muted-foreground">分类</label>
-              <select className={cn(selectCls, "w-full")}
-                      value={form.category}
-                      onChange={(e) => setForm((f) => ({ ...f, category: e.target.value }))}>
-                <option value="vuln">漏洞（可验证的安全问题）</option>
-                <option value="intel">有效发现 / 关键发现（信息点/提示/合规等非漏洞结论）</option>
-              </select>
+              <label className="mb-0.5 block text-[10px] text-muted-foreground">危害描述（兼容旧字段）</label>
+              <textarea className="min-h-16 w-full rounded-md border bg-background px-2 py-1.5 text-xs"
+                        value={form.impact}
+                        onChange={(e) => setForm((f) => ({ ...f, impact: e.target.value }))} />
             </div>
             {editErr && <p className="text-[10px] text-(--status-error)">{editErr}</p>}
             <div className="flex items-center gap-2">
@@ -435,66 +543,73 @@ export function FindingDetailDialog({ pid, finding, assetLabel, track, onClose, 
                       onClick={() => { setEditing(false); setEditErr(null) }}>
                 取消
               </Button>
-              <span className="text-[10px] text-muted-foreground">只提交变化字段；状态切换请走误报/验证通道</span>
+              <span className="text-[10px] text-muted-foreground">正式漏洞须补齐必填报告字段和至少一个 POC</span>
             </div>
           </div>
         )}
 
         <div className="-mx-1 min-h-0 flex-1 space-y-3 overflow-y-auto px-1">
-          {/* 危害描述（收录格式三件套①） */}
           <section>
-            <h4 className="mb-1 text-[11px] font-medium text-foreground">危害描述</h4>
-            {(row.impact ?? "").trim() ? (
-              <p className="whitespace-pre-wrap text-xs text-foreground">{row.impact}</p>
-            ) : (
-              <p className="text-xs text-muted-foreground">（待补充）</p>
-            )}
+            <h4 className="mb-1 text-[11px] font-medium text-foreground">漏洞摘要</h4>
+            <p className="whitespace-pre-wrap text-xs text-foreground">{row.summary || "（待补充）"}</p>
           </section>
-
-          {/* 复现步骤（收录格式三件套②）：统一步骤视图 + 文稿一键复制 */}
+          <section>
+            <h4 className="mb-1 text-[11px] font-medium text-foreground">受影响资产</h4>
+            <p className="whitespace-pre-wrap text-xs text-foreground">
+              {row.affected_assets || assetLabel || "（待补充）"}
+            </p>
+          </section>
           <section>
             <div className="mb-1 flex items-center justify-between">
-              <h4 className="text-[11px] font-medium text-foreground">
-                复现步骤{steps.length > 0 &&
-                  <span className="ml-1 text-[10px] text-muted-foreground">· {steps.length} 步</span>}
-              </h4>
+              <h4 className="text-[11px] font-medium text-foreground">复现手册</h4>
               <CopyButton text={fullText} label="复制复现文稿" />
             </div>
+            <div className="space-y-2 text-xs">
+              <div><span className="font-medium">测试环境</span>
+                <p className="whitespace-pre-wrap text-muted-foreground">{row.test_environment || "（待补充）"}</p></div>
+              <div><span className="font-medium">操作步骤</span>
+                <p className="whitespace-pre-wrap text-muted-foreground">{row.reproduction_steps || "（待补充）"}</p></div>
+              <div><span className="font-medium">验证结果</span>
+                <p className="whitespace-pre-wrap text-muted-foreground">{row.verification_result || "（待补充）"}</p></div>
+            </div>
             {steps.length > 0 && (
-              <ol className="space-y-2">
-                {steps.map((s, i) => (
-                  <StepRow key={i} pid={pid} step={s} n={i + 1} scripts={scripts} />
-                ))}
+              <ol className="mt-2 space-y-2">
+                {steps.map((s, i) => <StepRow key={i} pid={pid} step={s} n={i + 1} scripts={scripts} />)}
               </ol>
             )}
-            {steps.length === 0 && legacyRef && (
-              // 旧数据：只有产物引用（findings.poc_artifact_id / evidence 裸路径）
-              <ScriptBlock ref_={legacyRef} scripts={scripts} />
-            )}
-            {steps.length === 0 && !legacyRef && (entries.length > 0 ? (
-              <div className="space-y-1.5">
-                {/* 旧数据无结构化步骤：evidence 各条目按「字段名 + 内容 + 单独复制」呈现 */}
-                {entries.map(([k, v]) => {
-                  const text = typeof v === "string" ? v : JSON.stringify(v, null, 2)
-                  return (
-                    <div key={k} className="rounded border p-2">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="font-mono text-[10px] text-muted-foreground">{k}</span>
-                        <CopyButton text={text} />
-                      </div>
-                      <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap font-mono text-[10px] text-foreground">
-                        {text}
-                      </pre>
-                    </div>
-                  )
-                })}
-              </div>
-            ) : (
-              <p className="text-xs text-muted-foreground">（无复现步骤记录）</p>
-            ))}
+            {steps.length === 0 && legacyRef && <ScriptBlock ref_={legacyRef} scripts={scripts} />}
           </section>
 
-          {/* 修复建议（收录格式三件套③） */}
+          {/* 结构化 POC 优先；老记录继续展示旧证据步骤 */}
+          <section>
+            <h4 className="mb-1 text-[11px] font-medium text-foreground">POC</h4>
+            {pocsOf(row).some((p) => "code" in p && typeof p.code === "string" && p.code.trim()) ? (
+              <div className="space-y-2">
+                {pocsOf(row).map((p, index) => {
+                  const code = "code" in p && typeof p.code === "string" ? p.code : ""
+                  if (!code.trim()) return null
+                  const type = p.type === "python" ? "Python" : "HTTP"
+                  return <div key={index} className="overflow-hidden rounded border">
+                    <div className="flex items-center justify-between border-b px-2 py-1 text-[10px] text-muted-foreground">
+                      <span>{type} · POC {index + 1}</span>
+                      <Button size="sm" variant="ghost" className="h-6 gap-1 px-1.5 text-[10px]"
+                              onClick={() => void navigator.clipboard.writeText(code)}>
+                        <Copy className="size-3" />复制
+                      </Button>
+                    </div>
+                    <pre className="max-h-56 overflow-auto whitespace-pre-wrap p-2 font-mono text-[10px]">{code}</pre>
+                  </div>
+                })}
+              </div>
+            ) : <p className="text-xs text-muted-foreground">（无内嵌 POC）</p>}
+          </section>
+
+          <section>
+            <h4 className="mb-1 text-[11px] font-medium text-foreground">风险影响评估</h4>
+            <p className="whitespace-pre-wrap text-xs text-foreground">{row.risk_assessment || "（待补充）"}</p>
+          </section>
+
+          {/* 修复建议 */}
           <section>
             <h4 className="mb-1 text-[11px] font-medium text-foreground">修复建议</h4>
             {(row.remediation ?? "").trim() ? (
@@ -503,6 +618,23 @@ export function FindingDetailDialog({ pid, finding, assetLabel, track, onClose, 
               <p className="text-xs text-muted-foreground">（待补充）</p>
             )}
           </section>
+          {entries.length > 0 && (
+            <details className="rounded border px-2 py-1.5">
+              <summary className="cursor-pointer text-[10px] text-muted-foreground">原始证据</summary>
+              <div className="mt-2 space-y-1.5">
+                {entries.map(([k, v]) => {
+                  const text = typeof v === "string" ? v : JSON.stringify(v, null, 2)
+                  return <div key={k} className="rounded border p-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-mono text-[10px] text-muted-foreground">{k}</span>
+                      <CopyButton text={text} />
+                    </div>
+                    <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap font-mono text-[10px]">{text}</pre>
+                  </div>
+                })}
+              </div>
+            </details>
+          )}
         </div>
 
         {/* F10 删除确认（失败保持打开） */}

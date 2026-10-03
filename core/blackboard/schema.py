@@ -9,7 +9,17 @@
 
 import sqlite3
 
-SCHEMA_VERSION = 28
+SCHEMA_VERSION = 30
+
+# v29→v30（结构化漏洞报告）：findings 新增报告正文与内嵌 POC 字段；历史行
+# 保持默认空值，由前端兼容展示旧 evidence，不做自动猜测迁移。
+
+# v28→v29（意图必须有资产锚点 + 子目标链路图，2026-10-01）：
+# 存量**无锚点且仍 open** 的意图标记为「需补锚点」——批次留档（不回退 closed
+# 历史：closed 意图与既有 tested_clean 背书保持不动）。declare_intent 工具层已
+# 硬门禁（须 target_asset_id 或 basis_refs 含 asset:<id>）；本迁移把历史遗漏的
+# open 游离意图落一个 audit 事件，便于人工/Agent 按新口径重新立意。
+# 无 ALTER（纯数据事件，幂等靠 meta 键 intents_anchor_migration 去重）。
 
 # v27→v28（健壮性：轮次失败结构化错误，2026-10-01）：chat_threads 幂等补 error
 # （JSON：最近一轮失败 {category,message,hint,detail}；''=无错误）。前端据此在
@@ -166,6 +176,13 @@ CREATE TABLE IF NOT EXISTS findings (
     category        TEXT NOT NULL DEFAULT 'vuln',  -- C6 分两类：vuln=漏洞 / intel=有效发现·关键发现
     impact          TEXT NOT NULL DEFAULT '',  -- v20 危害描述：影响事实（拿到什么/影响面，报告三件套）
     remediation     TEXT NOT NULL DEFAULT '',  -- v20 修复建议：可落地（报告三件套）
+    summary         TEXT NOT NULL DEFAULT '',  -- 漏洞摘要
+    affected_assets TEXT NOT NULL DEFAULT '',  -- URL/API、版本、业务模块补充说明
+    test_environment TEXT NOT NULL DEFAULT '', -- 测试环境
+    reproduction_steps TEXT NOT NULL DEFAULT '', -- 人工可执行的复现步骤
+    verification_result TEXT NOT NULL DEFAULT '', -- 预期与实际验证结果
+    risk_assessment TEXT NOT NULL DEFAULT '', -- CIA 风险影响评估
+    pocs            TEXT NOT NULL DEFAULT '[]', -- 内嵌 POC：[{type:http|python,code}]
     evidence        TEXT NOT NULL DEFAULT '{}',  -- JSON：引用 event、请求响应、截图、repro_steps 复现步骤
     poc_artifact_id TEXT REFERENCES artifacts(id),
     confidence      REAL NOT NULL DEFAULT 0.5,
@@ -496,7 +513,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
       （K9 智能体工作台，无 ALTER，旧库打开即建）。
     - v26→v27：logic_blocks/logic_block_funcs 由 DDL 的 IF NOT EXISTS 直接建表
       （业务逻辑块，无 ALTER，旧库打开即建）。
-    - v27→v28：chat_threads 幂等补 error（轮次失败结构化错误，见文件头版本注释）。"""
+    - v27→v28：chat_threads 幂等补 error（轮次失败结构化错误，见文件头版本注释）。
+    - v28→v29：无锚点且 open 的存量意图落 intent.anchor_required 审计事件
+      （closed 不动；幂等靠 meta 键去重，见文件头版本注释）。"""
     cols = {r[1] for r in conn.execute("PRAGMA table_info(projects)")}
     if "track" not in cols:
         conn.execute("ALTER TABLE projects ADD COLUMN track TEXT NOT NULL DEFAULT ''")
@@ -554,6 +573,18 @@ def _migrate(conn: sqlite3.Connection) -> None:
         if fin_cols and col not in fin_cols:
             conn.execute(
                 f"ALTER TABLE findings ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+    report_columns = {
+        "summary": "TEXT NOT NULL DEFAULT ''",
+        "affected_assets": "TEXT NOT NULL DEFAULT ''",
+        "test_environment": "TEXT NOT NULL DEFAULT ''",
+        "reproduction_steps": "TEXT NOT NULL DEFAULT ''",
+        "verification_result": "TEXT NOT NULL DEFAULT ''",
+        "risk_assessment": "TEXT NOT NULL DEFAULT ''",
+        "pocs": "TEXT NOT NULL DEFAULT '[]'",
+    }
+    for col, declaration in report_columns.items():
+        if fin_cols and col not in fin_cols:
+            conn.execute(f"ALTER TABLE findings ADD COLUMN {col} {declaration}")
     for tbl in ("assets", "findings"):  # v16（H2 乐观锁 revision 列）
         cols = {r[1] for r in conn.execute(f"PRAGMA table_info({tbl})")}
         if cols and "revision" not in cols:
@@ -587,6 +618,55 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "ALTER TABLE orchestrator_state ADD COLUMN"
                 " derive_idle_rounds INTEGER NOT NULL DEFAULT 0")
+    _migrate_intent_anchors(conn)
+
+
+def _migrate_intent_anchors(conn: sqlite3.Connection) -> None:
+    """v28→v29：存量无锚点且 open 的意图落 intent.anchor_required 审计事件。
+
+    意图必须有资产锚点（2026-10-01 新规）——否则落不到链路图子目标下，其
+    dead_end 收尾也无法为资产背书 tested_clean。只标注**仍 open** 的游离意图
+    （closed 历史一律不动：保住已上链路图与既有 tested_clean 背书）。幂等：
+    meta.intents_anchor_migration 置位后不再重复扫描；但新库/无 intents 表时跳过。
+    """
+    tables = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='intents'")}
+    if not tables:
+        return
+    done = conn.execute(
+        "SELECT value FROM meta WHERE key='intents_anchor_migration'").fetchone()
+    if done is not None:
+        return
+    rows = conn.execute(
+        "SELECT id, project_id, target_asset_id, basis_refs FROM intents"
+        " WHERE status='open'").fetchall()
+    import json as _json
+    from datetime import datetime, timezone
+    ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    for r in rows:
+        has_anchor = bool(r[2] and str(r[2]).strip())
+        if not has_anchor:
+            try:
+                refs = _json.loads(r[3] or "[]")
+            except ValueError:
+                refs = []
+            has_anchor = any(isinstance(x, str) and x.startswith("asset:")
+                             for x in refs)
+        if has_anchor:
+            continue
+        conn.execute(
+            "INSERT INTO events(project_id, session_id, kind, payload, author,"
+            " created_at) VALUES(?,?,?,?,?,?)",
+            (r[1], None, "intent.anchor_required",
+             _json.dumps({"intent_id": r[0],
+                          "reason": "存量 open 意图无资产锚点——请补 "
+                                    "target_asset_id 或 basis_refs 的 "
+                                    "asset:<id> 后重新立意收尾"},
+                         ensure_ascii=False),
+             "system-migration", ts))
+    conn.execute(
+        "INSERT INTO meta(key, value) VALUES('intents_anchor_migration', ?)"
+        " ON CONFLICT(key) DO UPDATE SET value=excluded.value", (ts,))
 
 
 def init_schema(conn: sqlite3.Connection) -> None:

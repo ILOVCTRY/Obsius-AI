@@ -858,6 +858,7 @@ def test_dispatcher_func_kb_upsert_and_query(tmp_path):
                         project_id=project["id"], session_id="sess-1", author="sess-1")
     d2 = ToolDispatcher(bb, gateway=None, tq=TaskQueue(bb),
                         project_id=project["id"], session_id="sess-2", author="sess-2")
+    d1._intent_lead_passed = d2._intent_lead_passed = True  # 本测主题=func kb 读写，跳过意图先行闸
     r1 = d1.dispatch("bb_upsert_func",
                      {"binary_sha256": sha, "address": 0x1189, "name": "sub_1189",
                       "analysis": "长度校验 21"})

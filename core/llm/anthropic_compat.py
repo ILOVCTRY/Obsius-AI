@@ -19,6 +19,14 @@ from core.llm.provider import (ContextOverflowError, LLMError, LLMResponse,
 
 log = logging.getLogger(__name__)
 
+# Some OpenAI-compatible gateways reject Python's default
+# ``Python-urllib/...`` signature at the edge (Cloudflare error 1010).
+CLIENT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
+
 # 输入超限识别（2026-09-30）：网关因 prompt 过长拒收时的错误文案特征词。
 # 命中则抛 ContextOverflowError（不可重试），由调用方强制压缩后兜底重试。
 _OVERFLOW_HINTS = ("input length", "too long", "context length",
@@ -74,13 +82,22 @@ def _is_transient_network(reason: Any) -> bool:
     return getattr(reason, "errno", None) in _TRANSIENT_ERRNOS
 
 
-def _default_transport(timeout: float) -> Transport:
+def _urlopen(req: urllib.request.Request, timeout: float, proxy: str | None = None):
+    """Open an LLM request through a provider-specific proxy when configured."""
+    if proxy:
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+        return opener.open(req, timeout=timeout)
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
+def _default_transport(timeout: float, proxy: str | None = None) -> Transport:
     def _transport(url: str, headers: dict[str, str], body: bytes) -> tuple[int, dict[str, Any]]:
         req = urllib.request.Request(url, data=body, method="POST")
-        for k, v in headers.items():
+        for k, v in {"User-Agent": CLIENT_USER_AGENT, **headers}.items():
             req.add_header(k, v)
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with _urlopen(req, timeout, proxy) as resp:
                 return resp.status, json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             raw = e.read().decode("utf-8", errors="replace")
@@ -98,14 +115,14 @@ def _default_transport(timeout: float) -> Transport:
     return _transport
 
 
-def _default_stream_transport(timeout: float) -> StreamTransport:
+def _default_stream_transport(timeout: float, proxy: str | None = None) -> StreamTransport:
     """SSE 流式默认实现：urlopen 后不整读，交给调用方逐行迭代（思考增量边到边回调）。"""
     def _transport(url: str, headers: dict[str, str], body: bytes) -> tuple[int, Any]:
         req = urllib.request.Request(url, data=body, method="POST")
-        for k, v in headers.items():
+        for k, v in {"User-Agent": CLIENT_USER_AGENT, **headers}.items():
             req.add_header(k, v)
         try:
-            resp = urllib.request.urlopen(req, timeout=timeout)
+            resp = _urlopen(req, timeout, proxy)
         except urllib.error.HTTPError as e:
             raw = e.read().decode("utf-8", errors="replace")
             try:
@@ -123,9 +140,8 @@ def _default_stream_transport(timeout: float) -> StreamTransport:
 
 
 class AnthropicCompatProvider:
-    """Anthropic /v1/messages 协议。超时默认 240s（2026-09-28：120→240——实测正常态
-    tick 18s/慢态可达 ~126s（耗时随 max_tokens 预算线性增长），240s 吸收慢态避免
-    120s 误杀；流式调用为帧间隔超时不受损，UI 测活单独传 30s 不受影响）。
+    """Anthropic /v1/messages 协议。超时默认 600s（10 分钟），用于吸收长思考和
+    大上下文请求的慢响应；流式调用为帧间隔超时不受损，UI 测活单独传 30s 不受影响。
     2026-09-28 全走流式：只要网关支持（未 _stream_disabled）所有调用都走 SSE——
     流式为帧间隔超时，长思考（planner/intel 无回调调用实测 6-10 分钟）不再触发
     非流式「总等待」超时；回调可选，不传只是不上屏。"""
@@ -136,7 +152,7 @@ class AnthropicCompatProvider:
         api_key: str,
         model: str,
         *,
-        timeout: float = 240.0,
+        timeout: float = 600.0,
         transport: Transport | None = None,
         stream_transport: StreamTransport | None = None,
         api_version: str = "2023-06-01",
@@ -145,12 +161,15 @@ class AnthropicCompatProvider:
         context_tokens: int | None = None,  # 模型最大上下文（providers.json model_context；预算换算用）
         ctx_soft_budget: int | None = None,  # 有效软上限（providers.json ctx_soft_budget；超此主动压缩）
         summarizer_model: str | None = None,  # 专用摘要模型（providers.json summarizer_model；缺省用本模型）
+        use_x_api_key: bool = True,
+        proxy: str | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
         self.timeout = timeout
         self.api_version = api_version
+        self._use_x_api_key = use_x_api_key
         self._enable_thinking = enable_thinking
         # prompt caching（2026-09-23 retrieval-upgrade M1）：system 块打
         # cache_control ephemeral 断点，稳定前缀跨步命中缓存（Agent 每步重发
@@ -161,13 +180,14 @@ class AnthropicCompatProvider:
         # 供 ChatTurn 压缩上下文时读取；缺省走运行时模块常量/本模型。
         self.ctx_soft_budget = ctx_soft_budget
         self.summarizer_model = summarizer_model
+        self.proxy = proxy or None
         # 模型不支持 thinking 参数时自动降级（HTTP 400 去参重试后置位，本实例不再注入）
         self._thinking_disabled = False
         # 网关拒收 cache_control 标记（400 文案含 cache_control）时置位——本实例
         # system 不再打标（镜像 thinking/stream 降级先例）
         self._cache_disabled = False
-        self._transport = transport or _default_transport(timeout)
-        self._stream_transport = stream_transport or _default_stream_transport(timeout)
+        self._transport = transport or _default_transport(timeout, self.proxy)
+        self._stream_transport = stream_transport or _default_stream_transport(timeout, self.proxy)
         # 网关不认 stream 参数（400 文案含 stream）时置位，本实例回退非流式
         self._stream_disabled = False
 
@@ -214,7 +234,7 @@ class AnthropicCompatProvider:
             # → 落 llm.thinking 事件，前端展开看思考全文。budget 8192 平衡质量与耗时。
             body["thinking"] = {"type": "enabled", "budget_tokens": 8192}
         # 2026-09-28 全走流式（回调可选）：原「有回调才 stream」让 planner/intel 等
-        # 无回调调用走非流式——服务端思考完才回响应头，240s 是总等待上限，长思考
+        # 无回调调用走非流式——服务端思考完才回响应头，600s 是总等待上限，长思考
         # （实测 6-10 分钟）必超时；重试= 原样重发同一请求注定再超时，纯浪费 5+ 分钟。
         # SSE 早回头 + 帧间隔超时天然抗长思考，故只要网关支持（未降级）就始终流式。
         use_stream = not self._stream_disabled
@@ -445,11 +465,15 @@ class AnthropicCompatProvider:
         return blocks
 
     def _headers(self) -> dict[str, str]:
-        return {
+        headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}",
             "anthropic-version": self.api_version,
         }
+        if self._use_x_api_key:
+            headers["x-api-key"] = self.api_key
+        else:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
 
     def _parse(self, data: dict[str, Any]) -> LLMResponse:
         resp = LLMResponse(

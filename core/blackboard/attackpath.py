@@ -3,18 +3,23 @@
 纯函数查询层（仿 core/coverage.py，不 import 编排器）：从 intents + http_history
 + assets + findings 构建「思考→规划→执行→收尾」的逻辑推导图。
 
-主脊：``目标 → 意图（规划产物·可证伪假设）→ 收尾：漏洞 | 发现 | 死路``。
+主脊：``目标 → 子目标/意图 → 收尾（漏洞 | 发现 | 死路）→ 意图 → 收尾 → …``
+——是一条可循环延伸的链：收尾产出的发现/漏洞可再作新意图的派生依据（derive）
+继续往下长。布局按依赖层级自动分层（不固定"意图一列、目标一列"）。
 
 节点（nodes）：
 - **target**：选定根目标资产（host/domain，单根）；
+- **subtarget**（2026-10-01）：根的直接子资产（子域/路径/端口……）——第二层
+  「子目标」显式化；带终态徽章（settled=子树意图全部收尾且至少一条 dead_end）；
+  意图按资产锚点归属到其所在子目标子树；
 - **intent**：intents 行——open/closed；closed vuln/finding 挂收尾发现，
   closed dead_end 是意图的关闭态（默认隐藏 + bypass 穿通边）；
 - **finding**：子树内非误报发现——漏洞（category=vuln）/有效发现（intel）。
 
 边（edges，kind）：
 - **outcome**：intent → finding（执行产出了什么）；
-- **derive**：target/finding/intent → intent（后者必须由前者逻辑推出；
-  basis_refs 是边数据源，无主的早期发现/依据由 target 起边）；
+- **derive**：target/subtarget/finding/intent → intent（后者必须由前者逻辑推出；
+  basis_refs 是边数据源；归属子目标的意图由该子目标起边，否则由 target 起边）；
 - **bypass**：死路默认隐藏时，其前驱直连后继（穿通被剪掉的枝）；
 - **exec**：执行层 attempt 相邻边（展开意图时才看的时间序细节）。
 
@@ -191,11 +196,43 @@ def build_attack_path(bb, project_id: str, target_root_id: str, *,
 
     _attribute_attempts(attempts, site_intents, finding_owner)
 
+    # ---- 子目标节点（2026-10-01）：根的直接子资产 ----
+    # 第二层「子目标」显式化——根的直接下级资产（子域/路径/端口等）各自成节点，
+    # 意图按资产锚点归属到其所在子目标子树；形成 根 → 子目标/意图 → 收尾 → 意图 → …
+    # 子目标自带终态徽章（子树意图全部收尾且至少一条 dead_end → 已测清）。
+    direct_children = [a for a in assets if a.get("parent_id") == target_root_id]
+    subtarget_ids = {a["id"] for a in direct_children}
+    # 每个子目标的子树（含自身），用于意图归属
+    subtarget_subtree: dict[str, set] = {
+        a["id"]: _subtree_ids(assets, a["id"]) for a in direct_children}
+    # 意图 → 子目标（首个命中其子树的子目标；未命中=挂根）
+    intent_subtarget: dict[str, str | None] = {}
+    for it in site_intents:
+        anchors = _anchors_of(it)
+        owner = None
+        for sid in subtarget_ids:
+            if anchors & subtarget_subtree[sid]:
+                owner = sid
+                break
+        intent_subtarget[it["id"]] = owner
+
     # ---- 逻辑节点 ----
     nodes: list[dict] = [{
         "id": target["id"], "type": "target",
         "label": target.get("value", ""), "asset_type": target.get("type"),
     }]
+    for a in direct_children:
+        anchored = [it for it in site_intents if intent_subtarget.get(it["id"]) == a["id"]]
+        nodes.append({
+            "id": a["id"], "type": "subtarget",
+            "label": a.get("value", ""), "asset_type": a.get("type"),
+            "status": a.get("status", "open"),
+            "settled": _subtarget_settled(anchored),
+            "findings": sum(
+                1 for f in site_findings_all
+                if f.get("target_asset_id") in subtarget_subtree[a["id"]]
+                and f.get("status") != "false-positive"),
+        })
     # 子树非误报发现全部上图（含无主的早期发现）
     graph_findings = [f for f in site_findings_all
                       if f.get("status") != "false-positive"]
@@ -238,10 +275,12 @@ def build_attack_path(bb, project_id: str, target_root_id: str, *,
         else:
             add_edge(target["id"], f["id"], "derive")
 
-    # derive：每个意图的推导前驱
+    # derive：每个意图的推导前驱。有子目标归属 → 从子目标节点起边；
+    # 无 basis 前驱时落点：归属子目标则挂该子目标，否则挂根。
     for it in site_intents:
+        fallback = intent_subtarget.get(it["id"]) or target["id"]
         pres = _intent_predecessors(
-            it, target["id"], finding_owner, evidence_owner,
+            it, fallback, finding_owner, evidence_owner,
             intent_by_id, finding_ids, subtree)
         for p in pres:
             add_edge(p, it["id"], "derive")
@@ -277,6 +316,7 @@ def build_attack_path(bb, project_id: str, target_root_id: str, *,
         "attempts": attempts,
         "exec_edges": exec_edges,
         "counts": {
+            "subtargets": len(direct_children),
             "intents": len(site_intents),
             "open": sum(1 for it in site_intents if it.get("status") == "open"),
             "closed": len(closed),
@@ -471,6 +511,32 @@ def _intent_in_site(intent: dict, subtree: set) -> bool:
         if kind in ("asset", "finding") and rid in subtree:
             return True
     return False
+
+
+def _anchors_of(intent: dict) -> set:
+    """意图的资产锚点集合：target_asset_id ∪ basis_refs 的 asset:<id>
+    （与 intents._intent_anchors 同口径，用于子目标归属）。"""
+    out: set = set()
+    tgt = intent.get("target_asset_id")
+    if tgt:
+        out.add(tgt)
+    for ref in intent.get("basis_refs") or []:
+        kind, _, rid = _split_ref(ref)
+        if kind == "asset" and rid:
+            out.add(rid)
+    return out
+
+
+def _subtarget_settled(anchored_intents: list[dict]) -> bool:
+    """子目标是否已收口：其名下意图**全部收尾**且至少一条 dead_end
+    （与 store/intents 的 tested_clean 背书同口径；无意图=未收口）。"""
+    if not anchored_intents:
+        return False
+    if any(it.get("status") == "open" for it in anchored_intents):
+        return False
+    return any(it.get("status") == "closed"
+               and it.get("outcome_type") == "dead_end"
+               for it in anchored_intents)
 
 
 def _split_ref(ref: str) -> tuple[str, str, str]:

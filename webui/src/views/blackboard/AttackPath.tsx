@@ -23,7 +23,10 @@ const X_STEP = 300
 const CARD_W = 248
 const Y_GAP = 20
 const TARGET_H = 60
-const INTENT_H = 108 // 2026-09-26 100→108：流式布局下三行陈述+徽章行不再挤压重叠
+const SUBTARGET_H = 64
+// 意图卡正文通常是可证伪假设，中文/域名混排时三行会过早截断；
+// 预留五行正文空间，同时把底部状态和时间行固定留在卡片内。
+const INTENT_H = 144
 const FINDING_H = 72
 
 // 执行层
@@ -54,6 +57,16 @@ const OUTCOME_BADGE: Record<string, { color: string; label: string }> = {
   dead_end: { color: "#8b949e", label: "死路" },
 }
 
+// 子目标资产状态徽章（2026-10-01）：settled=子树意图全部收尾且至少一条 dead_end
+const SUBTARGET_STATUS: Record<string, { color: string; label: string }> = {
+  tested_clean: { color: "#3fb950", label: "已测清" },
+  na: { color: "#8b949e", label: "不适用" },
+  budget_stop: { color: "#d29922", label: "预算停手" },
+  scanning: { color: "#58a6ff", label: "扫描中" },
+  visited: { color: "#58a6ff", label: "已访问" },
+  open: { color: "#8b949e", label: "待测" },
+}
+
 // ---------- 主脊节点 ----------
 
 function TargetNode({ data }: { data: Record<string, unknown> }) {
@@ -72,6 +85,40 @@ function TargetNode({ data }: { data: Record<string, unknown> }) {
       </div>
       <p className="mt-1 truncate font-mono text-[12px]">{n.label}</p>
       <Handle type="source" position={Position.Right} style={{ background: "#58a6ff" }} />
+    </div>
+  )
+}
+
+function SubtargetNode({ data }: { data: Record<string, unknown> }) {
+  const n = data.node as AttackNode
+  const settled = Boolean(n.settled)
+  const st = SUBTARGET_STATUS[n.status || "open"] || SUBTARGET_STATUS.open
+  return (
+    <div
+      className="rounded-md border bg-[#101722] px-3 py-2"
+      style={{
+        width: CARD_W, height: SUBTARGET_H,
+        borderColor: settled ? "#3fb95066" : "#30363d",
+      }}
+    >
+      <div className="flex items-center gap-1.5">
+        <span className="text-[10px] font-medium text-[#8b949e]">子目标</span>
+        <span className="ml-auto rounded border border-[#30363d] px-1 font-mono text-[10px] text-muted-foreground">
+          {n.asset_type}
+        </span>
+      </div>
+      <p className="mt-1 truncate font-mono text-[12px]">{n.label}</p>
+      <div className="mt-0.5 flex items-center gap-1.5">
+        <span className="rounded px-1 text-[10px]"
+              style={{ background: `${st.color}22`, color: st.color }}>
+          {settled ? "已测清" : st.label}
+        </span>
+        {!!n.findings && (
+          <span className="text-[10px] text-muted-foreground">{n.findings} 发现</span>
+        )}
+      </div>
+      <Handle type="target" position={Position.Left} style={{ background: "#6e7681" }} />
+      <Handle type="source" position={Position.Right} style={{ background: "#6e7681" }} />
     </div>
   )
 }
@@ -105,8 +152,13 @@ function IntentNode({ data }: { data: Record<string, unknown> }) {
           {n.request_count ? `${n.request_count} 请求 · ` : ""}{expanded ? "收起 ▾" : "执行 ▸"}
         </span>
       </div>
-      {/* 流式布局（2026-09-26 修文字重叠）：陈述占剩余高度，徽章行常规流不再 absolute 压字 */}
-      <p className="mt-1.5 min-h-0 flex-1 overflow-hidden text-[11.5px] leading-snug [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:3]">{n.statement}</p>
+      {/* 流式布局：陈述占剩余高度，徽章行常规流不再 absolute 压字 */}
+      <p
+        className="mt-1.5 min-h-0 flex-1 overflow-hidden break-words text-[11.5px] leading-snug [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:5]"
+        title={n.statement}
+      >
+        {n.statement}
+      </p>
       <div className="flex items-center gap-1 pt-0.5">
         {badge
           ? <span className="rounded px-1 text-[10px]"
@@ -132,6 +184,8 @@ function FindingNode({ data }: { data: Record<string, unknown> }) {
   const onSelect = data.onSelect as (n: AttackNode) => void
   const sev = SEV_COLOR[n.severity || "info"]
   const isVuln = n.category === "vuln"
+  // 分组色标（2026-10-01）：左侧色条 = 归属的父意图色，同列按父意图分组一眼对应
+  const groupColor = data.groupColor as string | undefined
   return (
     <button
       type="button"
@@ -140,6 +194,8 @@ function FindingNode({ data }: { data: Record<string, unknown> }) {
       style={{
         width: CARD_W, height: FINDING_H,
         borderColor: selected ? sev : "#30363d",
+        borderLeftColor: groupColor ?? (selected ? sev : "#30363d"),
+        borderLeftWidth: groupColor ? 3 : 1,
         boxShadow: selected ? `0 0 0 1px ${sev}` : undefined,
       }}
     >
@@ -202,7 +258,8 @@ function AttemptNode({ data }: { data: Record<string, unknown> }) {
 }
 
 const nodeTypes = {
-  target: TargetNode, intent: IntentNode, finding: FindingNode, attempt: AttemptNode,
+  target: TargetNode, subtarget: SubtargetNode,
+  intent: IntentNode, finding: FindingNode, attempt: AttemptNode,
 }
 
 // ---------- 目标选择引导 ----------
@@ -220,7 +277,7 @@ function TargetGuide({ assets, onPick }: {
   }, [assets, q])
   return (
     <div className="flex h-full items-center justify-center p-6">
-      <div className="w-96 rounded-lg border border-[#30363d] bg-[#161b22] p-4">
+      <div className="w-full max-w-96 rounded-lg border border-[#30363d] bg-[#161b22] p-4">
         <p className="text-sm font-medium">选择要查看攻击链路的目标</p>
         <p className="mt-0.5 text-[11px] text-muted-foreground">
           主脊：目标 → 意图（规划）→ 收尾（漏洞/发现/死路）；跨任务、跨会话合并。
@@ -478,27 +535,116 @@ function layoutGraph(
   }
   visible.forEach((n) => calc(n.id, new Set()))
 
-  // 列内堆叠（保持 nodes 原始序：target → intents → findings）
-  const rfNodes: Node[] = []
-  const cols = new Map<number, AttackNode[]>()
-  for (const n of visible) {
-    const l = level[n.id]
-    if (!cols.has(l)) cols.set(l, [])
-    cols.get(l)!.push(n)
+  // 列内布局（2026-10-01 渲染 fix）：自底向上居中（借鉴 TaskTree 的 tidy——
+  // 父节点 y 取其子节点 y 范围的中点），替代旧「瀑布顶对齐」；x 仍按 level 分列。
+  // 同列 findings 按父意图分组：DFS 让同一父的子块连续、组间加空（GROUP_GAP），
+  // findings 以父意图色标（groupColor）标注归属，一眼对上。
+  const nodeById = new Map<string, AttackNode>(visible.map((n) => [n.id, n]))
+  const heightOf = (n: AttackNode): number =>
+    n.type === "target" ? TARGET_H
+      : n.type === "subtarget" ? SUBTARGET_H
+      : n.type === "intent" ? INTENT_H : FINDING_H
+
+  // 逻辑子节点表（含 bypass：死路隐藏时穿通，保持子树连续）
+  const children = new Map<string, string[]>()
+  visIds.forEach((id) => children.set(id, []))
+  for (const e of data.edges) {
+    if (e.kind === "exec") continue
+    if (!visIds.has(e.source) || !visIds.has(e.target)) continue
+    const arr = children.get(e.source)!
+    if (!arr.includes(e.target)) arr.push(e.target)
   }
-  let maxBottom = 0
-  for (const l of [...cols.keys()].sort((a, b) => a - b)) {
-    let y = 40
-    for (const n of cols.get(l)!) {
-      const h = n.type === "target" ? TARGET_H
-        : n.type === "intent" ? INTENT_H : FINDING_H
-      rfNodes.push({
-        id: n.id, type: n.type, position: { x: l * X_STEP + 20, y },
-        data: { node: n }, draggable: false,
-      })
-      y += h + Y_GAP
+
+  // finding → 归属意图（outcome 边源）：用于分组色标
+  const findingOwner = new Map<string, string>()
+  for (const e of data.edges) {
+    if (e.kind === "outcome" && visIds.has(e.target)) findingOwner.set(e.target, e.source)
+  }
+
+  // DFS 建树：同父的子块连续（同意图 findings 成组）；每个节点只挂一次
+  // （DAG 共享节点取首次到访的父，避免重复落位破坏列内不重叠）
+  const treeKids = new Map<string, string[]>()
+  visIds.forEach((id) => treeKids.set(id, []))
+  const order: string[] = []
+  const seen = new Set<string>()
+  const visit = (id: string, parent: string | null) => {
+    if (seen.has(id)) return
+    seen.add(id)
+    order.push(id)
+    if (parent) treeKids.get(parent)!.push(id)
+    for (const c of children.get(id) ?? []) visit(c, id)
+  }
+  visit(data.target.id, null)
+  for (const n of visible) visit(n.id, null)
+
+  // 子树高：容器子块（意图/子目标）之间加组间距，findings 组间留空
+  const GROUP_GAP = 24
+  const gapBetween = (prev: string, next: string): number => {
+    const container = (t?: string) => t === "intent" || t === "subtarget"
+    return container(nodeById.get(prev)?.type) && container(nodeById.get(next)?.type)
+      ? Y_GAP + GROUP_GAP : Y_GAP
+  }
+  const subH = new Map<string, number>()
+  const subtreeH = (id: string): number => {
+    const cached = subH.get(id)
+    if (cached != null) return cached
+    const kids = treeKids.get(id) ?? []
+    let h = heightOf(nodeById.get(id)!)
+    if (kids.length) {
+      let kh = 0
+      kids.forEach((k, i) => { kh += subtreeH(k) + (i ? gapBetween(kids[i - 1], k) : 0) })
+      h = Math.max(h, kh)
     }
-    maxBottom = Math.max(maxBottom, y)
+    subH.set(id, h)
+    return h
+  }
+
+  // 自底向上落位：父节点以其子块 y 范围中点为 y（垂直居中于子节点）
+  const yOf = new Map<string, number>()
+  const place = (id: string, yTop: number) => {
+    const n = nodeById.get(id)!
+    const kids = treeKids.get(id) ?? []
+    let y = yTop
+    kids.forEach((k, i) => {
+      if (i) y += gapBetween(kids[i - 1], k)
+      place(k, y)
+      y += subtreeH(k)
+    })
+    yOf.set(id, kids.length ? (yTop + y) / 2 - heightOf(n) / 2 : yTop)
+  }
+  const hasParent = new Set<string>()
+  for (const kids of treeKids.values()) kids.forEach((k) => hasParent.add(k))
+  const roots = [data.target.id,
+                 ...order.filter((id) => id !== data.target.id && !hasParent.has(id))]
+  let rootCursor = 40
+  for (const r of roots) {
+    place(r, rootCursor)
+    rootCursor += subtreeH(r) + Y_GAP
+  }
+  const minY = Math.min(...order.map((id) => yOf.get(id) ?? 40))
+  const shift = minY < 20 ? 20 - minY : 0
+
+  // 分组色标：同一父意图的 findings 同色
+  const palette = ["#58a6ff", "#3fb950", "#d29922", "#bc8cff",
+                   "#39c5cf", "#f0883e", "#ff7b72", "#6e7681"]
+  const hueOf = (id: string) => {
+    let h = 0
+    for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0
+    return palette[h % palette.length]
+  }
+
+  const rfNodes: Node[] = []
+  let maxBottom = 0
+  for (const id of order) {
+    const n = nodeById.get(id)!
+    const y = (yOf.get(id) ?? 40) + shift
+    const owner = findingOwner.get(id)
+    rfNodes.push({
+      id, type: n.type, position: { x: level[id] * X_STEP + 20, y },
+      data: { node: n, groupColor: owner ? hueOf(owner) : undefined },
+      draggable: false,
+    })
+    maxBottom = Math.max(maxBottom, y + heightOf(n))
   }
 
   // 执行层：展开意图的尝试条 + 无主尝试条
@@ -544,10 +690,13 @@ function layoutGraph(
 
 // ---------- 主画布 ----------
 
-function Canvas({ pid, assets, initialTarget }: {
+function Canvas({ pid, assets, initialTarget, onTargetChange }: {
   pid: string; assets: Asset[]; initialTarget?: string
+  onTargetChange?: (t: string) => void
 }) {
   const [target, setTarget] = useState(initialTarget ?? "")
+  // 目标变更出口（供右栏内联用法记忆「上次选择」；黑板全屏用法不传=保持原行为）
+  const applyTarget = (t: string) => { setTarget(t); onTargetChange?.(t) }
   // 列表过滤态贯通（父级资产过滤选中后切链路直接带上）
   useEffect(() => {
     if (initialTarget) setTarget(initialTarget)
@@ -661,7 +810,7 @@ function Canvas({ pid, assets, initialTarget }: {
     if (!assets.length) {
       return <p className="p-6 text-center text-xs text-muted-foreground">资产加载中…</p>
     }
-    return <TargetGuide assets={assets} onPick={setTarget} />
+    return <TargetGuide assets={assets} onPick={applyTarget} />
   }
 
   const empty = data != null
@@ -674,7 +823,7 @@ function Canvas({ pid, assets, initialTarget }: {
         <button
           type="button"
           className="rounded border border-[#30363d] px-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground"
-          onClick={() => { setTarget(""); setSelAttempt(null); setSelNode(null) }}
+          onClick={() => { applyTarget(""); setSelAttempt(null); setSelNode(null) }}
           title="重新选择目标"
         >
           换目标
@@ -684,6 +833,7 @@ function Canvas({ pid, assets, initialTarget }: {
         </span>
         {data && (
           <span className="shrink-0 text-[10px] text-muted-foreground">
+            {data.counts.subtargets ? `子目标 ${data.counts.subtargets} · ` : ""}
             意图 {data.counts.intents}（待收尾 {data.counts.open}）· 发现 {data.counts.findings} ·
             {" "}{data.counts.total_requests} 请求
           </span>
@@ -750,7 +900,7 @@ function Canvas({ pid, assets, initialTarget }: {
 }
 
 export function AttackPath(props: {
-  pid: string; assets: Asset[]; target?: string
+  pid: string; assets: Asset[]; target?: string; onTargetChange?: (t: string) => void
 }) {
   return (
     <ReactFlowProvider>

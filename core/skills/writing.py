@@ -34,12 +34,16 @@ KB_MAX_BYTES = 1 << 20
 # 全量索引（hints）；.py/.txt/.json 弹药只进 kb_search 全文与 kb_open 可读，
 # 不进 hints（防脚本名噪声进提示行）。kb 内脚本只是文本，无执行面——
 # 执行仍只经 run() 网关 + 沙箱（红线不变）。
-KB_FILE_SUFFIXES = {".md", ".py", ".txt", ".json"}
+# Text resources participate in search; binary attachments remain addressable
+# resources and are listed with metadata but are never decoded as prose.
+KB_TEXT_SUFFIXES = {".md", ".py", ".txt", ".json", ".js", ".yml", ".yaml", ".dic", ".enc", ".dat"}
+KB_ATTACHMENT_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+KB_FILE_SUFFIXES = KB_TEXT_SUFFIXES | KB_ATTACHMENT_SUFFIXES
 # kb 根下平台自维护文件（非知识内容，树/搜索里不出现）
 _KB_NON_CONTENT_FILES = {"route.json"}
-# Windows 非法文件名字符（/ 是分隔符不算）；其余中文/字母数字/-_.() 空格允许
+# Windows 非法文件名字符（/ 是分隔符不算）。知识库来源文件名可能包含 Unicode
+# 标点（例如 en dash ``–``），因此不能用过窄的 ASCII 文件名白名单限制既有资料。
 _KB_FORBIDDEN_CHARS = set('<>:"|?*\x00')
-_KB_NAME_RE = re.compile(r"^[\w][\w .()-]{0,127}$")
 _UTC_TS_FMT = "%Y%m%dT%H%M%SZ"
 
 
@@ -137,8 +141,13 @@ def _validate_rel(rel_path: str) -> Path:
         if not seg or seg in {".", ""} or any(c in seg for c in _KB_FORBIDDEN_CHARS):
             raise KbError(f"非法路径段: {seg!r}")
     if p.suffix.lower() not in KB_FILE_SUFFIXES:
-        raise KbError("知识库只接受 .md/.py/.txt/.json 文件")
-    if not _KB_NAME_RE.fullmatch(p.stem):
+        raise KbError("知识库只接受文本资源或常见附件文件")
+    name = p.stem
+    # 允许 Unicode 字母、数字和标点，但拒绝 Windows 控制字符/保留字符，
+    # 以及 Windows 不接受的尾随空格或句点。路径段已先做分隔符归一化。
+    if (not name or len(name) > 128 or name in {".", ".."}
+            or any(ord(c) < 32 or c in _KB_FORBIDDEN_CHARS for c in name)
+            or name[-1] in {" ", "."}):
         raise KbError(f"文件名不合法: {p.name!r}")
     return p
 
@@ -304,6 +313,21 @@ def search_kb(packs_root: str | Path, cap: str, q: str, limit: int = 50,
     （正交于目录单轴的跨轴检索，Anthropic-Cybersecurity-Skills 模式）。
     每命中文件回 {path, source, matches, snippet}；按命中次数降序、同分按路径，
     cap limit。空 q 返回空列表（交由调用方决定是否提示）。"""
+    # Real packs use the incremental FTS5 index.  Small fixture trees and
+    # explicitly missing index directories retain the deterministic legacy
+    # scanner, which keeps this API useful during tests and recovery.
+    try:
+        from core.skills.kbsearch import KbSearchIndex
+        if Path(packs_root).resolve().name == "packs":
+            rows = KbSearchIndex(packs_root).search(
+                q, capabilities=[cap], limit=limit, tag=tag)
+            # An empty FTS result must fall through to the legacy scanner:
+            # fixtures and CJK/OR queries can be valid even when FTS tokenization
+            # produces no row.
+            if rows:
+                return rows
+    except Exception:  # index is an optimization; never block KB access
+        pass
     needles = [t for t in (q or "").strip().lower().split() if t]
     if not needles:
         return []
@@ -315,6 +339,13 @@ def search_kb(packs_root: str | Path, cap: str, q: str, limit: int = 50,
         root = Path(packs_root)
         out = [r for r in out if t in _facets_of(root, cap, r["path"])]
     out.sort(key=lambda r: (-r["matches"], r["path"]))
+    for row in out:
+        rel = row.get("path", "")
+        row["kind"] = next((x[:-1] for x in ("playbooks", "patterns", "cases", "refs")
+                             if rel.startswith(x + "/")), "reference")
+        row["layer"] = {"playbook": 4, "pattern": 3, "case": 2,
+                         "ref": 1, "reference": 1}.get(row["kind"], 1)
+    out.sort(key=lambda r: (-r.get("layer", 1), -r["matches"], r["path"]))
     return out[:max(1, limit)]
 
 

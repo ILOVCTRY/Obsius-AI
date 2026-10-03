@@ -2009,45 +2009,55 @@ def test_browser_pool_injection_by_track(tmp_path):
             assert (agent.dispatcher.browser is not None) is expect, track
 
 
-def test_l2_net_real_without_approval_denied(tmp_path):
-    """批 5 红线（plan 跨批纪律）：L2 全自动不放松安全层——worker 跑 net=real
-    且无已批准审批时，网关必须拒绝并落 audit.deny，命令不执行，任务正常收尾。"""
+def test_l2_net_real_runs_without_approval(tmp_path):
+    """net=real 不再人工审批（2026-10-01）：L2 全自动下 worker 跑 net=real 由网关
+    直接放行（不再落 audit.deny），任务正常收尾。隔离等级红线不受影响。"""
     from test_orchestrator import ScriptedLLM as S
     executor = [
         # A2：认领后先写计划，实质工具才过计划闸
         {"tool_use": [S.tool_call("p1", "task_plan",
-                                  {"steps": [{"title": "尝试取外网文件（预期被红线拒绝）"}]})]},
+                                  {"steps": [{"title": "取外网文件（net=real 已免审批）"}]})]},
         {"tool_use": [S.tool_call("r1", "run_cmd",
-                                  {"cmd": "curl http://10.0.0.1/x", "runtime": "host",
+                                  {"cmd": "echo NETREAL_OK", "runtime": "host",
                                    "threat_class": "trusted", "net": "real"})]},
-        {"tool_use": [S.tool_call("c1", "complete_task", {"result_note": "被网关拒绝，改道"})]},
-        {"tool_use": [S.tool_call("c1b", "complete_task", {"result_note": "被网关拒绝，改道"})]},
-        {"tool_use": [S.tool_call("f1", "finish", {"summary": "改道完成"})]},
+        {"tool_use": [S.tool_call("c1", "complete_task", {"result_note": "完成"})]},
+        {"tool_use": [S.tool_call("c1b", "complete_task", {"result_note": "完成"})]},
+        {"tool_use": [S.tool_call("f1", "finish", {"summary": "完成"})]},
+        # 意图先行闸：预置 open 意图会先被收尾闸拦一次（意图纪律①），补一次 finish
+        {"tool_use": [S.tool_call("f1b", "finish", {"summary": "完成"})]},
     ]
     # A5：触发点 D 会在 L2 下跑一轮去抖重排（消费 planner 一条 set_priorities）
     planner = [{"tool_use": [S.tool_call("rp1", "set_priorities",
                                          {"updates": []})]}]
     app = _chain_app(tmp_path, planner, executor)
     with TestClient(app) as c:
-        pid = _l2_project(c, "L2红线")
-        # 会话中心化：先开窗（未武装），再把委托指派给它 → human-delegate 起跑
+        pid = _l2_project(c, "L2-netreal")
         sp = c.post(f"/api/projects/{pid}/agents", json={"role": "_generalist"})
         sid = sp.json()["id"]
+        # 意图先行闸（口径 Y）：会话需有 open 意图才允许首次实质动作——预置一条
+        # 本会话已立意的假设（真实链路里 agent 会先 declare_intent 再执行）
+        from core.blackboard.intents import declare_intent
+        _bb = c.app.state.projects[pid].bb
+        _aid = _bb.upsert_asset(pid, "host", "198.51.100.7")["id"]
+        declare_intent(_bb, pid, "验证取外网文件路径可行",
+                       target_asset_id=_aid, author=sid)
         r = c.post(f"/api/projects/{pid}/tasks",
                    json={"objective": "取个外网文件", "task_type": "generic",
                          "target_session": sid})
         assert r.json()["kicked"] == [] and r.json()["session_id"] == sid
-        # 轮询任务终态（不用 _wait_no_running：replan-wait 30s 节流 job 与断言无关）
         for _ in range(300):
             tasks = c.get(f"/api/projects/{pid}/tasks").json()
             if tasks[0]["status"] == "done":
                 break
             time.sleep(0.02)
-        denies = [e for e in c.app.state.projects[pid].bb.recent_events(pid)
-                  if e["kind"] == "audit.deny"]
-        assert len(denies) == 1 and "net=real" in denies[0]["payload"]["reason"]
+        events = c.app.state.projects[pid].bb.recent_events(pid)
+        # net=real 不再被审批门拦下：没有 net=real 相关的 audit.deny
+        denies = [e for e in events
+                  if e["kind"] == "audit.deny" and "net=real" in e["payload"]["reason"]]
+        assert denies == []
+        cmds = [e for e in events if e["kind"] == "command"]
+        assert cmds and cmds[-1]["payload"].get("net") == "real"
         task = c.get(f"/api/projects/{pid}/tasks").json()[0]
-        # 任务由自己的专属执行窗完成（v0.72 一窗一任务）
         assert task["status"] == "done" and task["claimed_by"] == task["target_session"]
 
 
@@ -4838,10 +4848,10 @@ def test_decide_escalation_executes_once_and_inboxes(client):
     pid = _make_project(client, track="pentest")
     proj = client.app.state.projects[pid]
     appr = proj.bb.request_approval(
-        pid, {"op": "escalation", "kind": "net_real",
+        pid, {"op": "escalation", "kind": "role_runtime",
               "cmd": "Write-Output escalation-ok", "runtime": "host",
               "threat_class": "trusted", "net": "bridge", "reason": "API 层测试"},
-        risk="high", requested_by="sess-test", session_id="sess-test")
+        risk="medium", requested_by="sess-test", session_id="sess-test")
     r = client.post(f"/api/approvals/{appr['id']}/decide",
                     json={"decision": "approved"})
     assert r.status_code == 200
@@ -4922,9 +4932,9 @@ def test_decide_rejected_inboxes_approval_rejected(client):
     pid = _make_project(client, track="pentest")
     proj = client.app.state.projects[pid]
     appr1 = proj.bb.request_approval(
-        pid, {"op": "escalation", "kind": "net_real", "cmd": "wget http://x",
+        pid, {"op": "escalation", "kind": "role_runtime", "cmd": "wget http://x",
               "runtime": "host", "reason": "x", "session_id": "sess-r1"},
-        risk="high", requested_by="sess-r1", session_id="sess-r1")
+        risk="medium", requested_by="sess-r1", session_id="sess-r1")
     appr2 = proj.bb.request_approval(
         pid, {"op": "authorization", "kind": "impact_escalate",
               "scope_request": "证明到接管会话", "justification": "y",

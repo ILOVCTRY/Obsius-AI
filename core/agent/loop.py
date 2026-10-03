@@ -120,8 +120,13 @@ STRICT_PROMPT_TAIL = """
    run_cmd / bb_add_* 等实质动作（服务端有计划闸，未交计划会被回填引导）；情况变化时
    再调 task_plan 修订（保留进度的步带原 id，rev_reason 写原因），每开始/完成一步用
    task_step 置 doing/done——任意时刻至多一个 doing，被阻塞置 blocked 必写原因。
+   **实质动作还必须先有 open 意图**（服务端有意图先行闸，见第 10 条）：认领后=先
+   task_plan 粗规划 → 再 declare_intent 把第一步方向落成假设 → 然后才 run_cmd。
 4. 发现即落 bb_add_finding（须挂在 open 意图下且意图后有执行动作，见第 10 条）；
-   无证据 status=unverified。
+   无证据 status=unverified。**边干边写**：执行中每确认一条认知（端口/版本/未授权
+   状态/接口行为/凭据线索等观察）立即以 category=intel + status=unverified 落一条
+   发现——抗中断、抗上下文压缩、跨意图可复用；close_intent 收尾时再把它升 verified
+   或随死路一并了结，不要攒到最后一次性补记。
 5. 卡住时如实 fail_task，不要空转。
 6. 经验沉淀只走 propose_pack_edit 提案（绝不直接改技能/知识库）：仅限三种情形——
    文档互相矛盾、文档缺失、某手法已在本任务中验证有效；reason 必须附任务证据
@@ -150,21 +155,28 @@ STRICT_PROMPT_TAIL = """
    （不可信/活体样本；铁律：样本绝不跑 host/wsl）。run_cmd 输出上限
    2000 字符（截断有标注，不要靠语义猜）；读工作区文件用 read_file（带行号、可分段）；
    超大工具结果自动落盘 spill/（回填含定位器，按提示分段取回）。
-10. **意图纪律（渗透链路图，侦察→意图→执行→产出→收尾）**：侦察/测绘（bb_query、
-    指纹、目录发现等只读信息收集）自由先行；**基于侦察结果选定攻击方向后，先
-    declare_intent 把规划落成一句可证伪假设**（如「验证 /admin 是否存在未授权
-    访问」，basis_refs 写侦察依据），再围绕它执行；发现/漏洞是检验的产物——
-    bb_add_finding 前意图声明后必须有真实执行动作（服务端有时间线闸：declare
-    后直接落发现会被拒）。http/工具动作按时间归入该意图（执行层是图的展开细
-    节）。**每个意图必须 close_intent 收尾，三选一**：
-    vuln（漏洞，引用已登记的非误报 vuln 发现）/ finding（有效发现，引用非误报
-    intel 发现，一意图可挂多条同类发现）/ dead_end（死路：写清死因+至少一条
-    http:/event: 证据引用，且零发现）。证据不足就保持 open（宁严勿松）——
-    收尾所依据的发现后来被标误报、或有新证据，先 reopen_intent 重开再收。
-    不得留下悬挂意图（会话现场会列出未收尾项）。
-    **意图越多测得越全面**：意图粒度=一个具体资产+一个具体攻击面假设，「同模板/
-    基线一致」式推断不能替代独立测试；收尾判据=没有可立的新意图，而非「意图
-    都关了」；拦截页（WAF/WebVPN 488/403）≠源站状态，判死路须注明探测视角。
+10. **意图纪律（渗透链路图：目标 → 子目标/意图 → 收尾 → 意图 → 收尾 → …）**：
+    侦察/测绘（bb_query、kb_search、list_symbols/decompile、read_file/search_files、
+    browser_navigate 等**只读**信息收集）自由先行；**会话第一次实质动作（run_cmd、
+    浏览器点击/输入、写黑板产物等）前必须先 declare_intent**，把方向落成一句
+    可证伪假设（服务端有意图先行闸：无 open 意图时实质动作直接拒），再围绕它执行。
+    **意图必须绑资产锚点**（服务端硬门禁）：填 target_asset_id，或在 basis_refs
+    里至少给一条 asset:<资产id>——游离意图落不到链路图子目标下，其收尾也无法
+    为资产背书 tested_clean，会被直接拒绝。http/工具动作按时间归入该意图（执行层
+    是图的展开细节）；发现/漏洞是检验的产物——bb_add_finding 前意图声明后必须有
+    真实执行动作（服务端有时间线闸：declare 后直接落发现会被拒）。
+    **每个意图必须 close_intent 收尾，三选一**：vuln（漏洞，引用已登记的非误报
+    vuln 发现）/ finding（有效发现，引用非误报 intel 发现，一意图可挂多条同类）/
+    dead_end（死路：写清死因+至少一条 http:/event: 证据引用，且零发现）。证据不足
+    就保持 open（宁严勿松）——收尾所依据的发现后来被标误报、或有新证据，先
+    reopen_intent 重开再收。不得留下悬挂意图（会话现场会列出未收尾项）。
+    **逐资产独立立意（绑定 tested_clean）**：意图粒度=一个具体资产+一个具体攻击面
+    假设；一个子目标要判净，须它名下意图**全部收尾**且至少一条 dead_end——「同模板/
+    基线一致」式推断不能替代独立测试；收尾判据=没有可立的新意图，而非「意图都关了」；
+    拦截页（WAF/WebVPN 488/403）≠源站状态，判死路须注明探测视角。
+    **发现可再生长意图**：收尾产出的发现/漏洞本身也是推导依据——基于某个发现
+    可以再 declare_intent（basis_refs 引用 finding:<id>）继续深挖，链路据此
+    循环延伸，不要停在第一个发现上。
 """
 
 # G3 结构化摘要压缩（2026-09-19，对齐 Claude Code /compact 与 HackSynth）：
@@ -1947,6 +1959,9 @@ class AgentSession:
         self.dispatcher.delegation_just_finished = False  # 委托收尾信号随委托复位
         self.dispatcher.last_delegation_note = ""
         self.dispatcher._finish_open_intents_ack = False  # 意图纪律①确认态随任务复位
+        # 意图先行闸（口径 Y，2026-10-01）：每认领一个任务都要「先立意再动手」，
+        # 首次实质动作放行标志随任务复位（chat 链无任务，跨对话轮保持一次性）
+        self.dispatcher._intent_lead_passed = False
         self._reject_streak = 0  # E2 硬拒绝熔断计数随任务复位
         self._plan_gate_count = 0  # 计划闸教练计数随任务复位
         self._stuck_waves = 0  # D1 卡死波次随任务复位

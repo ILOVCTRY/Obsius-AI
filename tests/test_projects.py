@@ -241,19 +241,21 @@ def test_update_project_track(store):
 
 
 def test_normalize_rule_profiles_matrix():
-    """F11 rule_profiles 归一化矩阵：合法三态 / 非法 / 未知键剥除 / None→{}。"""
+    """F11 rule_profiles 归一化矩阵（2026-10-01 纯显式）：仅收字符串清单 /
+    非法（含旧 "*"）/ 未知键剥除 / None→{}。"""
     from core.autonomy import normalize_rule_profiles
 
     assert normalize_rule_profiles(None) == {}
     assert normalize_rule_profiles({}) == {}
-    assert normalize_rule_profiles({"owners": "*"}) == {"owners": "*"}
     assert normalize_rule_profiles({"rating": []}) == {"rating": []}
     assert normalize_rule_profiles({"owners": ["b", "a", "b", " "]}) == {"owners": ["b", "a"]}
-    assert normalize_rule_profiles({"owners": "*", "rating": ["x"]}) == {
-        "owners": "*", "rating": ["x"]}
+    assert normalize_rule_profiles({"owners": ["a"], "rating": ["x"]}) == {
+        "owners": ["a"], "rating": ["x"]}
     # 未知键剥除
-    assert normalize_rule_profiles({"owners": "*", "junk": 1}) == {"owners": "*"}
-    # 非法形态
+    assert normalize_rule_profiles({"owners": ["a"], "junk": 1}) == {"owners": ["a"]}
+    # 非法形态（含已退役的 owners="*" 自动全注入）
+    with pytest.raises(ValueError):
+        normalize_rule_profiles({"owners": "*"})
     with pytest.raises(ValueError):
         normalize_rule_profiles({"owners": "all"})
     with pytest.raises(ValueError):
@@ -270,18 +272,20 @@ def test_update_config_rule_profiles(store):
     """rule_profiles PATCH：非法 422（ValueError）；合法双写一致；null 清键恢复缺省态。"""
     proj = store.create_project("rp", "pentest", capabilities=["web"])
     pid = proj.id
-    # 合法：写入并双写
-    store.update_config(pid, {"rule_profiles": {"owners": "*", "rating": ["edu-rating"]}})
+    # 合法：写入并双写（纯显式清单）
+    store.update_config(pid, {"rule_profiles": {"owners": ["edusrc"], "rating": ["edu-rating"]}})
     meta = json.loads((proj.path / "project.json").read_text(encoding="utf-8"))
-    assert meta["config"]["rule_profiles"] == {"owners": "*", "rating": ["edu-rating"]}
+    assert meta["config"]["rule_profiles"] == {"owners": ["edusrc"], "rating": ["edu-rating"]}
     assert proj.bb.get_project(pid)["config"]["rule_profiles"] == {
-        "owners": "*", "rating": ["edu-rating"]}
+        "owners": ["edusrc"], "rating": ["edu-rating"]}
     # 归一化写入（去重保序）
     store.update_config(pid, {"rule_profiles": {"rating": ["b", "a", "b"]}})
     assert proj.bb.get_project(pid)["config"]["rule_profiles"] == {"rating": ["b", "a"]}
-    # 非法 → ValueError（API 层转 422）
+    # 非法 → ValueError（API 层转 422）；旧 owners="*" 已退役同判非法
     with pytest.raises(ValueError):
         store.update_config(pid, {"rule_profiles": {"owners": "all"}})
+    with pytest.raises(ValueError):
+        store.update_config(pid, {"rule_profiles": {"owners": "*"}})
     # 空对象 / null → 剥键恢复缺省态
     store.update_config(pid, {"rule_profiles": {}})
     meta = json.loads((proj.path / "project.json").read_text(encoding="utf-8"))

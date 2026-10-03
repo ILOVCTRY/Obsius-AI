@@ -77,7 +77,7 @@ def test_parse_text_thinking_and_tool_use():
     # 请求侧检查：system / tools / 协议头（M1 prompt caching：str 自动包装单块打标）
     req = captured[0]
     assert req["url"].endswith("/v1/messages")
-    assert req["headers"]["Authorization"] == "Bearer key"
+    assert req["headers"]["x-api-key"] == "key"
     assert req["body"]["system"] == [
         {"type": "text", "text": "你是逆向专家", "cache_control": {"type": "ephemeral"}}]
     assert req["body"]["tools"][0]["name"] == "run_cmd"
@@ -253,6 +253,54 @@ def test_default_transport_classifies_connection_reset_as_retryable(monkeypatch)
     monkeypatch.setattr(ac.urllib.request, "urlopen", _dns)
     with pytest.raises(ac.LLMError):
         ac._default_transport(5.0)("https://fake/v1/messages", {}, b"{}")
+
+
+def test_provider_proxy_uses_explicit_proxy_and_survives_build(tmp_path, monkeypatch):
+    """供应商专属代理进入普通传输层，ProviderStore.build 也保留该配置。"""
+    from core.llm import anthropic_compat as ac
+    from core.llm.providers import ProviderStore
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self):
+            return b'{"ok": true}'
+
+    calls = {}
+
+    class Opener:
+        def open(self, req, timeout):
+            calls["url"] = req.full_url
+            calls["timeout"] = timeout
+            return Response()
+
+    def build_opener(handler):
+        calls["proxies"] = handler.proxies
+        return Opener()
+
+    monkeypatch.setattr(ac.urllib.request, "build_opener", build_opener)
+    status, data = ac._default_transport(7.0, "http://127.0.0.1:7890")(
+        "https://llm.example/v1/messages", {}, b"{}")
+    assert status == 200 and data == {"ok": True}
+    assert calls["proxies"]["http"] == "http://127.0.0.1:7890"
+    assert calls["url"] == "https://llm.example/v1/messages"
+
+    store = ProviderStore(tmp_path / "providers.json")
+    store.save([{"name": "custom", "base_url": "https://llm.example", "api_key": "k",
+                 "models": ["m"], "enabled": True,
+                 "proxy": "http://127.0.0.1:7890"}])
+    assert store.get("custom")["proxy"] == "http://127.0.0.1:7890"
+    assert store.build("custom").proxy == "http://127.0.0.1:7890"
+    with pytest.raises(ValueError, match=r"proxy 须为 http\(s\) 地址"):
+        store.save([{"name": "bad-proxy", "base_url": "https://llm.example",
+                     "api_key": "k", "models": ["m"], "enabled": True,
+                     "proxy": "socks5://127.0.0.1:1080"}])
 
 
 def test_retry_on_connection_reset_then_success(monkeypatch):
@@ -630,7 +678,7 @@ def test_stream_disabled_falls_back_to_plain_transport():
 
 def test_all_calls_stream_even_without_callbacks():
     """2026-09-28 全走流式：无 on_thinking/on_text 回调也走 SSE 传输——planner/
-    intel 等无回调调用不再吃非流式「总等待」超时（长思考 6-10 分钟 > 240s 必炸
+    intel 等无回调调用不再吃非流式「总等待」超时（长思考 6-10 分钟 > 600s 才超时
     且重试注定失败），帧间隔超时天然抗长思考。"""
     captured = []
     p = AnthropicCompatProvider(
@@ -925,3 +973,212 @@ def test_ark_provider_defaults():
     p.chat([{"role": "user", "content": "hi"}])
     assert captured[0]["url"].startswith("https://ark.cn-beijing.volces.com/api/coding")
     assert captured[0]["body"]["model"] == "deepseek-v4-flash"
+
+
+def test_openai_chat_completions_protocol():
+    from core.llm.openai_compat import OpenAICompatProvider
+    captured = []
+    response = {"choices": [{"message": {"content": "ok", "tool_calls": [{
+        "id": "call-1", "function": {"name": "run_cmd", "arguments": '{"cmd":"id"}'}}]},
+        "finish_reason": "tool_calls"}], "usage": {"prompt_tokens": 3, "completion_tokens": 2}}
+    p = OpenAICompatProvider("https://fake", "key", "m", stream_transport=_fake_stream_transport(response, capture=captured))
+    result = p.chat([{"role": "user", "content": "hi"}], system="sys", tools=[{"name": "run_cmd", "input_schema": {"type": "object"}}])
+    req = captured[0]
+    assert req["url"] == "https://fake/v1/chat/completions"
+    assert req["headers"]["Authorization"] == "Bearer key"
+    assert req["body"]["messages"][0] == {"role": "system", "content": "sys"}
+    assert req["body"]["tools"][0]["type"] == "function"
+    assert result.tool_calls[0].arguments["cmd"] == "id"
+
+
+def test_openai_responses_protocol_and_tool_result():
+    from core.llm.openai_compat import OpenAICompatProvider
+    captured = []
+    response = {"output": [{"type": "message", "content": [{"type": "output_text", "text": "ok"}]},
+                             {"type": "function_call", "call_id": "call-1", "name": "run_cmd", "arguments": '{"cmd":"id"}'}],
+                "status": "completed"}
+    p = OpenAICompatProvider("https://fake", "key", "m", format="openai-responses",
+                             stream_transport=_fake_stream_transport(response, capture=captured))
+    result = p.chat([{"role": "user", "content": "hi"}])
+    assert captured[0]["url"] == "https://fake/v1/responses"
+    assert result.text == "ok" and result.tool_calls[0].name == "run_cmd"
+    msg = p.tool_result_message(result.tool_calls[0], "uid=0")
+    assert msg["content"][0]["tool_use_id"] == "call-1"
+
+
+def test_openai_responses_sse_ignores_event_metadata():
+    """Responses SSE emits event metadata lines before each JSON data frame."""
+    events = [
+        "event: response.created",
+        'data: {"type":"response.created"}',
+        "event: response.output_text.delta",
+        'data: {"type":"response.output_text.delta","delta":"OK"}',
+        "event: response.completed",
+        'data: {"type":"response.completed","response":{"status":"completed"}}',
+        "data: [DONE]",
+    ]
+
+    def stream_transport(url, headers, body):
+        return 200, iter(events)
+
+    from core.llm.openai_compat import OpenAICompatProvider
+    p = OpenAICompatProvider("https://fake", "key", "m",
+                             format="openai-responses",
+                             stream_transport=stream_transport)
+    assert p.chat([{"role": "user", "content": "hi"}]).text == "OK"
+
+
+def test_openai_responses_sse_recovers_tool_name_from_done_events():
+    """兼容中转站：added 只有 id，工具 name/arguments 延迟到 done/completed。"""
+    events = [
+        'data: {"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_1"}}',
+        'data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\\"cmd\\":\\"id\\"}"}',
+        'data: {"type":"response.output_item.done","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"run_cmd","arguments":"{\\"cmd\\":\\"id\\"}"}}',
+        'data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"function_call","id":"fc_1","call_id":"call_1","name":"run_cmd","arguments":"{\\"cmd\\":\\"id\\"}"}]}}',
+        "data: [DONE]",
+    ]
+
+    from core.llm.openai_compat import OpenAICompatProvider
+    p = OpenAICompatProvider("https://fake", "key", "m",
+                             format="openai-responses",
+                             stream_transport=lambda *args: (200, iter(events)))
+    result = p.chat([{"role": "user", "content": "hi"}])
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].id == "call_1"
+    assert result.tool_calls[0].name == "run_cmd"
+    assert result.tool_calls[0].arguments == {"cmd": "id"}
+
+
+def test_openai_responses_sse_rejects_tool_call_without_name():
+    events = [
+        'data: {"type":"response.output_item.added","item":{"type":"function_call","id":"fc_missing","call_id":"call_missing"}}',
+        'data: {"type":"response.function_call_arguments.delta","item_id":"fc_missing","delta":"{}"}',
+        'data: {"type":"response.completed","response":{"status":"completed"}}',
+        "data: [DONE]",
+    ]
+
+    from core.llm.openai_compat import OpenAICompatProvider
+    p = OpenAICompatProvider("https://fake", "key", "m",
+                             format="openai-responses",
+                             stream_transport=lambda *args: (200, iter(events)))
+    with pytest.raises(LLMError, match="缺少工具名.*call_missing"):
+        p.chat([{"role": "user", "content": "hi"}])
+
+
+def test_openai_524_retries_until_success(monkeypatch):
+    from core.llm import openai_compat
+
+    attempts = []
+    retries = []
+    response = {"output": [{"type": "message", "content": [
+        {"type": "output_text", "text": "OK"}]}], "status": "completed"}
+
+    def transport(url, headers, body):
+        attempts.append(1)
+        if len(attempts) < 3:
+            return 524, {"error": {"message": "origin timeout"}}
+        return 200, iter([json.dumps(response)])
+
+    monkeypatch.setattr(openai_compat.time, "sleep", lambda _: None)
+    p = openai_compat.OpenAICompatProvider(
+        "https://fake", "key", "m", format="openai-responses",
+        stream_transport=transport)
+    assert p.chat([{"role": "user", "content": "hi"}],
+                   on_retry=lambda *args: retries.append(args)).text == "OK"
+    assert len(attempts) == 3
+    assert retries == [(1, 5, 524), (2, 5, 524)]
+
+
+def test_openai_524_stops_after_five_total_attempts(monkeypatch):
+    from core.llm import openai_compat
+
+    attempts = []
+
+    def transport(url, headers, body):
+        attempts.append(1)
+        return 524, {"error": {"message": "origin timeout"}}
+
+    monkeypatch.setattr(openai_compat.time, "sleep", lambda _: None)
+    p = openai_compat.OpenAICompatProvider(
+        "https://fake", "key", "m", format="openai-responses",
+        stream_transport=transport)
+    with pytest.raises(LLMError, match="HTTP 524"):
+        p.chat([{"role": "user", "content": "hi"}])
+    assert len(attempts) == 5
+
+
+def test_openai_connection_reset_retries_until_success(monkeypatch):
+    from core.llm import openai_compat
+
+    monkeypatch.setattr(openai_compat.time, "sleep", lambda _: None)
+    attempts, retries = [], []
+    response = {"choices": [{"message": {"content": "OK"},
+                              "finish_reason": "stop"}]}
+
+    def transport(url, headers, body):
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise ConnectionResetError(10054, "远程主机强迫关闭了一个现有的连接。")
+        return 200, iter([json.dumps(response)])
+
+    p = openai_compat.OpenAICompatProvider(
+        "https://fake", "key", "m", stream_transport=transport,
+        format="openai-chat-completions")
+    assert p.chat([{"role": "user", "content": "hi"}],
+                   on_retry=lambda *args: retries.append(args)).text == "OK"
+    assert len(attempts) == 3
+    assert retries == [(1, 5, "connection"), (2, 5, "connection")]
+
+
+def test_openai_connection_reset_stops_after_five_total_attempts(monkeypatch):
+    from core.llm import openai_compat
+
+    monkeypatch.setattr(openai_compat.time, "sleep", lambda _: None)
+    attempts = []
+
+    def transport(url, headers, body):
+        attempts.append(1)
+        raise ConnectionResetError(10054, "远程主机强迫关闭了一个现有的连接。")
+
+    p = openai_compat.OpenAICompatProvider(
+        "https://fake", "key", "m", stream_transport=transport)
+    with pytest.raises(LLMError, match="网络连接失败.*已重试 4 次"):
+        p.chat([{"role": "user", "content": "hi"}])
+    assert len(attempts) == 5
+
+
+def test_openai_stream_read_timeout_retries_until_success(monkeypatch):
+    """响应头已收到后，SSE 读取阶段的 read timeout 也必须有限重试。"""
+    from core.llm import openai_compat
+
+    monkeypatch.setattr(openai_compat.time, "sleep", lambda _: None)
+    attempts, retries = [], []
+    response = {"choices": [{"message": {"content": "OK"},
+                              "finish_reason": "stop"}]}
+
+    def stream_transport(url, headers, body):
+        attempts.append(1)
+        if len(attempts) == 1:
+            def broken_stream():
+                raise TimeoutError("The read operation timed out")
+                yield  # pragma: no cover
+            return 200, broken_stream()
+        return 200, iter([json.dumps(response)])
+
+    p = openai_compat.OpenAICompatProvider(
+        "https://fake", "key", "m", stream_transport=stream_transport)
+    assert p.chat([{"role": "user", "content": "hi"}],
+                   on_retry=lambda *args: retries.append(args)).text == "OK"
+    assert len(attempts) == 2
+    assert retries == [(1, 5, "stream")]
+
+
+def test_anthropic_messages_uses_x_api_key():
+    captured = []
+    p = AnthropicCompatProvider("https://fake", "key", "m",
+                                stream_transport=_fake_stream_transport(
+                                    _anthropic_response([{"type": "text", "text": "ok"}]), capture=captured))
+    p.chat([{"role": "user", "content": "hi"}])
+    assert captured[0]["url"].endswith("/v1/messages")
+    assert captured[0]["headers"]["x-api-key"] == "key"
+    assert "Authorization" not in captured[0]["headers"]

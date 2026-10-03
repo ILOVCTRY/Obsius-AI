@@ -9,6 +9,7 @@ config/providers.json：
 - "model_window": 1048566      硬窗口（优先于按模型的 "model_context"）
 - "ctx_soft_budget": 512000    有效软上限（支持 1M≠在 1M 最好，超此主动压缩）
 - "summarizer_model": "<model>" 专用摘要模型（缺省用会话模型）
+- "proxy": "http://127.0.0.1:7890" 可选供应商专属 HTTP/HTTPS 代理；缺省沿用系统代理环境
 
 约定：
 - models[] 有序，**第一个 = 该供应商默认模型**；全局默认 = 第一个启用供应商的第一个模型。
@@ -23,9 +24,15 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
-from core.llm.anthropic_compat import AnthropicCompatProvider
+from core.llm.anthropic_compat import AnthropicCompatProvider, CLIENT_USER_AGENT
+from core.llm.openai_compat import CHAT_COMPLETIONS, RESPONSES, OpenAICompatProvider
 from core.llm.ark import resolve_api_key
+
+ANTHROPIC_MESSAGES = "anthropic-messages"
+DEFAULT_FORMAT = CHAT_COMPLETIONS
+SUPPORTED_FORMATS = {DEFAULT_FORMAT, RESPONSES, ANTHROPIC_MESSAGES}
 
 CONFIG_PATH = "config/providers.json"
 NAME_RE = re.compile(r"^[\w][\w.-]{0,63}$")
@@ -70,13 +77,20 @@ class ProviderError(ValueError):
 HttpGetter = Callable[[str, dict[str, str], float], tuple[int, dict[str, Any] | None]]
 
 
-def _http_get(url: str, headers: dict[str, str], timeout: float = 20.0
+def _http_get(url: str, headers: dict[str, str], timeout: float = 20.0,
+              proxy: str | None = None
               ) -> tuple[int, dict[str, Any] | None]:
     req = urllib.request.Request(url, method="GET")
-    for k, v in headers.items():
+    for k, v in {"User-Agent": CLIENT_USER_AGENT, "Accept": "application/json", **headers}.items():
         req.add_header(k, v)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        if proxy:
+            opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+            response = opener.open(req, timeout=timeout)
+        else:
+            response = urllib.request.urlopen(req, timeout=timeout)
+        with response as resp:
             return resp.status, json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         raw = e.read().decode("utf-8", errors="replace")
@@ -157,6 +171,9 @@ class ProviderStore:
         models = [str(m).strip() for m in p.get("models", []) if str(m).strip()]
         if not models:
             raise ProviderError(f"{name}: 至少勾选/填写一个模型")
+        protocol = str(p.get("format") or DEFAULT_FORMAT).strip()
+        if protocol not in SUPPORTED_FORMATS:
+            raise ProviderError(f"{name}: 不支持的兼容格式: {protocol}")
         # 每模型最大上下文（token，可选）：models 保持纯字符串列表不破坏兼容；
         # 非法项（非正数/超大/未勾选的模型）静默剔除，宁少勿滥
         raw_ctx = p.get("model_context") or {}
@@ -174,6 +191,7 @@ class ProviderStore:
             "name": name,
             "base_url": base_url,
             "api_key": str(p.get("api_key", "")),
+            "format": protocol,
             "models": models,
             "enabled": bool(p.get("enabled", True)),
             "model_context": ctx,
@@ -209,6 +227,13 @@ class ProviderStore:
         sm = str(p.get("summarizer_model") or "").strip()
         if sm:
             out["summarizer_model"] = sm
+        proxy = str(p.get("proxy") or "").strip()
+        if proxy:
+            parsed_proxy = urlsplit(proxy)
+            if (parsed_proxy.scheme not in {"http", "https"}
+                    or not parsed_proxy.hostname):
+                raise ProviderError(f"{name}: proxy 须为 http(s) 地址")
+            out["proxy"] = proxy.rstrip("/")
         return out
 
     def masked(self) -> list[dict[str, Any]]:
@@ -216,6 +241,7 @@ class ProviderStore:
         out = []
         for p in self.load():
             q = {k: v for k, v in p.items() if k != "api_key"}
+            q["format"] = p.get("format", DEFAULT_FORMAT)
             q["has_key"] = bool(p.get("api_key"))
             out.append(q)
         return out
@@ -256,9 +282,8 @@ class ProviderStore:
             raise ProviderError(
                 f"供应商 {p['name']} 未配置 api_key，且环境/.env 也无 ARK_API_KEY") from e
 
-    def build(self, name: str | None = None, model: str | None = None
-              ) -> AnthropicCompatProvider:
-        """构造 provider 实例。name=None → 全局默认供应商；model=None → 其默认模型。"""
+    def build(self, name: str | None = None, model: str | None = None):
+        """构造与供应商兼容格式匹配的 provider 实例。"""
         p = self.default() if name is None else self.get(name)
         if not p.get("enabled", True):
             raise ProviderError(f"供应商 {p['name']} 已停用")
@@ -272,12 +297,16 @@ class ProviderStore:
         # 硬窗口优先取 provider 级 model_window（2026-09-30 ct-7），否则按模型粒度
         # model_context[model]；两者皆空 → None（运行时回落 _MODEL_WINDOW_FALLBACK）。
         window = p.get("model_window") or (p.get("model_context") or {}).get(model)
-        return AnthropicCompatProvider(
-            base_url=p["base_url"], api_key=self.resolve_key(p), model=model,
-            enable_thinking=bool(thinking),
-            context_tokens=window,
-            ctx_soft_budget=p.get("ctx_soft_budget"),
-            summarizer_model=p.get("summarizer_model"))
+        kwargs = {
+            "base_url": p["base_url"], "api_key": self.resolve_key(p), "model": model,
+            "enable_thinking": bool(thinking), "context_tokens": window,
+            "ctx_soft_budget": p.get("ctx_soft_budget"),
+            "summarizer_model": p.get("summarizer_model"),
+            "proxy": p.get("proxy"),
+        }
+        if p.get("format", DEFAULT_FORMAT) == ANTHROPIC_MESSAGES:
+            return AnthropicCompatProvider(**kwargs)
+        return OpenAICompatProvider(format=p.get("format", DEFAULT_FORMAT), **kwargs)
 
     # ---------- 发现 / 探活 ----------
 
@@ -288,11 +317,14 @@ class ProviderStore:
         p = self.get(name)
         probe = prober or (lambda model: self.probe(name, model))
         return self.discover_credentials(
-            p["base_url"], self.resolve_key(p), saved_models=p.get("models", []),
-            http_get=http_get, prober=probe)
+            p["base_url"], self.resolve_key(p), format=p.get("format", DEFAULT_FORMAT),
+            saved_models=p.get("models", []), http_get=http_get, prober=probe,
+            proxy=p.get("proxy"))
 
     def discover_credentials(self, base_url: str, api_key: str, *,
+                             format: str = DEFAULT_FORMAT,
                              saved_models: list[str] | None = None,
+                             proxy: str | None = None,
                              http_get: HttpGetter | None = None,
                              prober: Callable[[str], bool] | None = None
                              ) -> dict[str, Any]:
@@ -302,11 +334,14 @@ class ProviderStore:
         2) 404/不支持（ark-plan 实测）→ 候选清单 + 已保存模型逐个最小调用探活。
         返回 {listed: bool, models: [{id, status?}], probed: [...可用...]}。
         """
-        getter = http_get or _http_get
-        status, data = getter(
-            f"{base_url.rstrip('/')}/v1/models",
-            {"Authorization": f"Bearer {api_key}", "anthropic-version": "2023-06-01"},
-        )
+        headers = {"Authorization": f"Bearer {api_key}"}
+        if format == ANTHROPIC_MESSAGES:
+            headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01"}
+        if http_get is None:
+            status, data = _http_get(f"{base_url.rstrip('/')}/v1/models", headers,
+                                     proxy=proxy)
+        else:
+            status, data = http_get(f"{base_url.rstrip('/')}/v1/models", headers)
         if status == 200 and isinstance(data, dict) and isinstance(data.get("data"), list):
             models = []
             for m in data["data"]:
@@ -319,7 +354,8 @@ class ProviderStore:
             raise ProviderError(
                 f"模型列表接口返回 HTTP {status}: {(data or {}).get('error', '') if data else ''}")
         # 降级：候选探活
-        probe = prober or (lambda model: _probe_safe(base_url, api_key, model))
+        probe = prober or (lambda model: _probe_safe(base_url, api_key, model, format,
+                                                      proxy=proxy))
         candidates: list[str] = []
         for m in FALLBACK_CANDIDATES + (saved_models or []):
             if m not in candidates:
@@ -328,24 +364,32 @@ class ProviderStore:
         return {"listed": False, "models": [{"id": m} for m in ok], "probed": ok}
 
     def probe(self, name: str, model: str) -> bool:
-        """单模型最小调用探活（/v1/messages，max_tokens=8）。"""
         p = self.get(name)
-        probe_credentials(p["base_url"], self.resolve_key(p), model)
+        probe_credentials(p["base_url"], self.resolve_key(p), model,
+                          format=p.get("format", DEFAULT_FORMAT), proxy=p.get("proxy"))
         return True
 
 
-def probe_credentials(base_url: str, api_key: str, model: str) -> None:
+def probe_credentials(base_url: str, api_key: str, model: str, *, format: str = DEFAULT_FORMAT,
+                      proxy: str | None = None) -> None:
     """手填测活：任意 base_url/key/model 组合，不通抛 ProviderError/LLMError。"""
-    provider = AnthropicCompatProvider(
-        base_url=base_url.rstrip("/"), api_key=api_key, model=model, timeout=30.0)
+    if format == ANTHROPIC_MESSAGES:
+        provider = AnthropicCompatProvider(
+            base_url=base_url.rstrip("/"), api_key=api_key, model=model, timeout=30.0,
+            proxy=proxy)
+    else:
+        provider = OpenAICompatProvider(
+            base_url=base_url.rstrip("/"), api_key=api_key, model=model,
+            format=format, timeout=30.0, proxy=proxy)
     provider.chat(
         [{"role": "user", "content": "reply exactly: OK"}], max_tokens=8)
 
 
-def _probe_safe(base_url: str, api_key: str, model: str) -> bool:
+def _probe_safe(base_url: str, api_key: str, model: str, format: str = DEFAULT_FORMAT,
+                *, proxy: str | None = None) -> bool:
     """候选探活用：不通返回 False，不抛异常（一次坏候选不影响整体发现）。"""
     try:
-        probe_credentials(base_url, api_key, model)
+        probe_credentials(base_url, api_key, model, format=format, proxy=proxy)
         return True
     except Exception:  # noqa: BLE001
         return False

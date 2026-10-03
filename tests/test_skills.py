@@ -184,7 +184,8 @@ def test_rules_chain_owner_and_role_rules(packs):
     assert role_rules(packs, "pentest", "nobody") is None
     preamble = build_rules_preamble(
         packs, track="pentest", capabilities=["web"],
-        owner_tags=["edusrc"], role="recon")
+        owner_tags=["edusrc"], role="recon",
+        rule_profiles={"owners": ["edusrc"]})
     assert "Web 能力红线" in preamble
     assert "禁止真资损" in preamble
     assert "不取他人 PII" in preamble and "owner 叠加" in preamble
@@ -192,47 +193,53 @@ def test_rules_chain_owner_and_role_rules(packs):
 
 
 def test_rating_rules_and_rule_profiles(packs):
-    """F11 评级与价值口径：rating 注入四态 + 段序 + 硬指令 + 不存在 tag 静默剔除。"""
+    """F11 评级与价值口径（2026-10-01 去三态改纯显式）：勾哪个生效哪个，
+    未配=不注入；不存在 tag 静默剔除；段序 + 硬指令随 rating 显式出现。"""
     tr = packs / "tracks" / "pentest" / "rules"
     (tr / "rating").mkdir()
     (tr / "rating" / "edusrc.md").write_text("教育判级：高危=交互实证后系统权限", encoding="utf-8")
     (tr / "rating" / "edu-rating.md").write_text("教育评级：任意文件覆盖写=中危核", encoding="utf-8")
     assert rating_rules(packs, "pentest", ["edusrc"])[0][0] == "rating:edusrc"
 
-    # 缺省 profiles：owners 自动全注入；rating 自动 = owner 命中 ∩ rating 文件存在
+    # 未配置（None）= 都不注入：owner_tags 不再自动命中
     eo, er = resolve_rule_profiles(packs, "pentest", ["edusrc"], None)
-    assert eo == ["edusrc"] and er == ["edusrc"]
+    assert eo == [] and er == []
     pre = build_rules_preamble(packs, track="pentest", owner_tags=["edusrc"])
-    assert "rule:rating:edusrc" in pre
-    assert pre.count("评级硬指令") == 1  # 硬指令恰一次
-    assert "rule:rating:edu-rating" not in pre  # 未自动命中的 tag 不注入
+    assert "rule:owner:edusrc" not in pre
+    assert "rule:rating:" not in pre and "评级硬指令" not in pre
 
-    # 显式 rating 全集：可提前挂未自动命中的 tag
+    # 显式 owners：勾哪个生效哪个（不依赖 owner_tags 自动命中）
+    eo, er = resolve_rule_profiles(packs, "pentest", ["edusrc"],
+                                   {"owners": ["edusrc"], "rating": ["edusrc"]})
+    assert eo == ["edusrc"] and er == ["edusrc"]
+    pre = build_rules_preamble(packs, track="pentest", owner_tags=["edusrc"],
+                               rule_profiles={"owners": ["edusrc"], "rating": ["edusrc"]})
+    assert "rule:owner:edusrc" in pre and "rule:rating:edusrc" in pre
+    assert pre.count("评级硬指令") == 1
+
+    # 显式 rating 可挂任意本轨存在的 tag（含未自动命中的）
     eo, er = resolve_rule_profiles(packs, "pentest", ["edusrc"], {"rating": ["edu-rating"]})
     assert er == ["edu-rating"]
     pre = build_rules_preamble(packs, track="pentest", owner_tags=["edusrc"],
                                rule_profiles={"rating": ["edu-rating"]})
-    assert "rule:rating:edu-rating" in pre
+    assert "rule:rating:edu-rating" in pre and "rule:owner:edusrc" not in pre
 
-    # rating=[] 关闭；owners 不受影响
-    pre = build_rules_preamble(packs, track="pentest", owner_tags=["edusrc"],
-                               rule_profiles={"rating": []})
-    assert "rule:rating:" not in pre and "rule:owner:edusrc" in pre
-
-    # owners 清单裁剪：自动命中 ∩ 空清单 = 全不注入（rating 自动跟随为空）
-    eo, er = resolve_rule_profiles(packs, "pentest", ["edusrc"], {"owners": []})
+    # 空列表 = 不注入（与未配同义）
+    eo, er = resolve_rule_profiles(packs, "pentest", ["edusrc"], {"owners": [], "rating": []})
     assert eo == [] and er == []
     pre = build_rules_preamble(packs, track="pentest", owner_tags=["edusrc"],
-                               rule_profiles={"owners": []})
+                               rule_profiles={"owners": [], "rating": []})
     assert "rule:owner:edusrc" not in pre and "rule:rating:" not in pre
 
     # 不存在的 tag 静默剔除
-    eo, er = resolve_rule_profiles(packs, "pentest", ["edusrc", "不存在"], {"rating": ["不存在"]})
+    eo, er = resolve_rule_profiles(packs, "pentest", ["edusrc"],
+                                   {"owners": ["edusrc", "不存在"], "rating": ["不存在"]})
     assert eo == ["edusrc"] and er == []
 
-    # 段序：owner 段 < rating 段 < role 段
+    # 段序：owner 段 < rating 段 < role 段（显式配置下）
     pre = build_rules_preamble(packs, track="pentest", capabilities=["web"],
-                               owner_tags=["edusrc"], role="recon")
+                               owner_tags=["edusrc"], role="recon",
+                               rule_profiles={"owners": ["edusrc"], "rating": ["edusrc"]})
     assert -1 < pre.find("rule:owner:edusrc") \
         < pre.find("rule:rating:edusrc") < pre.find("rule:role:recon")
     assert "评级硬指令" in pre

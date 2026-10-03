@@ -284,7 +284,7 @@ def test_intent_request_count_aggregated(tree):
 
 
 def test_derive_edge_from_basis_finding(tree):
-    """意图 basis_refs=finding：finding 无收尾主 → target 作前驱（无主发现边不进图）。"""
+    """意图 basis_refs=finding：finding 无收尾主 → 意图归属子目标/根作前驱。"""
     findings = [{"id": "f1", "title": "框架版本", "severity": "medium",
                  "status": "verified", "category": "intel",
                  "target_asset_id": "h1"}]
@@ -292,14 +292,57 @@ def test_derive_edge_from_basis_finding(tree):
                  basis=["finding:f1"])
     out = _build(tree, [], findings=findings, intents=[it])
     pairs = _edge_pairs(out, "derive")
-    # f1 无主：target→f1；i1 依据 f1 但无主 → target→i1
-    assert ("h1", "f1") in pairs and ("h1", "i1") in pairs
+    # f1 无主：target→f1；i1 锚定 d1（子目标）→ d1 起边
+    assert ("h1", "f1") in pairs and ("d1", "i1") in pairs
+
+
+# ---------- v3.1：子目标节点（2026-10-01） ----------
+
+def test_subtarget_nodes_from_direct_children(tree):
+    """根的直接子资产渲染为 subtarget 节点；孙节点不上图。"""
+    out = _build(tree, [], intents=[])
+    types = {n["id"]: n["type"] for n in out["nodes"]}
+    assert types.get("h1") == "target"
+    assert types.get("d1") == "subtarget"      # h1 的直接子
+    assert "u1" not in types                    # 孙节点（d1 的子）不上子目标层
+    assert out["counts"]["subtargets"] == 1
+
+
+def test_subtarget_settled_badge(tree):
+    """子目标 settled：名下意图全部收尾且至少一条 dead_end。"""
+    d = _intent("d", "无洞", created=_ts(0), closed=_ts(10),
+                status="closed", outcome="dead_end", evidence=["http:1"])
+    open_it = _intent("o", "待验证", created=_ts(11))
+    out = _build(tree, [_row(1, "http://site.com/x", created=_ts(5))],
+                 intents=[d])
+    st = next(n for n in out["nodes"] if n["id"] == "d1")
+    assert st["settled"] is True
+    # 加一条 open 意图 → 不再 settled
+    out2 = _build(tree, [_row(1, "http://site.com/x", created=_ts(5))],
+                  intents=[d, open_it])
+    st2 = next(n for n in out2["nodes"] if n["id"] == "d1")
+    assert st2["settled"] is False
+
+
+def test_intent_anchored_to_its_subtarget(tree):
+    """意图按资产锚点归属到所在子目标子树：target=d1 → d1 起 derive 边。"""
+    it = _intent("i1", "假设", created=_ts(1), target="d1")
+    out = _build(tree, [], intents=[it])
+    assert ("d1", "i1") in _edge_pairs(out, "derive")
+    assert ("h1", "i1") not in _edge_pairs(out, "derive")
+
+
+def test_intent_without_anchor_falls_back_to_root(tree):
+    """无锚点/锚点在根 → 挂根（历史数据兼容）。"""
+    it = _intent("i1", "假设", created=_ts(1), target="h1")
+    out = _build(tree, [], intents=[it])
+    assert ("h1", "i1") in _edge_pairs(out, "derive")
 
 
 # ---------- v3：死路默认隐藏 + bypass ----------
 
 def test_dead_end_hidden_and_bypass(tree):
-    # d：死路（target→d derive）；s：依据 d 的证据（d→s derive）→ bypass h1→s
+    # d：死路（子目标 d1→d derive）；s：依据 d 的证据（d→s derive）→ bypass d1→s
     d = _intent("d", "走备份文件找入口", created=_ts(0), closed=_ts(10),
                 status="closed", outcome="dead_end",
                 evidence=["http:1"])
@@ -310,10 +353,10 @@ def test_dead_end_hidden_and_bypass(tree):
                  intents=[d, s])
     dnode = next(n for n in out["nodes"] if n["id"] == "d")
     assert dnode["default_hidden"] is True
-    assert _edge_pairs(out, "bypass") == [("h1", "s")]
+    assert _edge_pairs(out, "bypass") == [("d1", "s")]
     assert out["counts"]["dead_end"] == 1
     # 隐藏是渲染侧口径：节点与 derive 边仍在（显示开关由前端控制）
-    assert ("h1", "d") in _edge_pairs(out, "derive")
+    assert ("d1", "d") in _edge_pairs(out, "derive")
     assert ("d", "s") in _edge_pairs(out, "derive")
 
 
@@ -325,9 +368,9 @@ def test_bypass_not_duplicate_direct_edge(tree):
     out = _build(tree,
                  [_row(1, "http://site.com/x", created=_ts(5))],
                  intents=[d, s])
-    # s 的前驱既有 d（http 证据主）又有 target（asset d1）→ h1→s 直连已存在
+    # s 的前驱既有 d（http 证据主）又有子目标 d1（asset 锚点）→ d1→s 直连已存在
     pairs = _edge_pairs(out, "derive")
-    assert ("h1", "s") in pairs
+    assert ("d1", "s") in pairs
     assert _edge_pairs(out, "bypass") == []
 
 
@@ -369,6 +412,7 @@ def test_counts(tree):
     rows = [_row(1, "http://site.com/", created=_ts(2))]
     out = _build(tree, rows, findings=findings, intents=intents)
     assert out["counts"] == {
+        "subtargets": 1,
         "intents": 2, "open": 1, "closed": 1, "dead_end": 0,
         "findings": 2, "total_requests": 1}
 
