@@ -1,8 +1,8 @@
-# cyberstrike-pro（Obsius-AI）
+# Obsius-AI
 
-`cyberstrike-pro` 是一个 AI 驱动的安全研究工作台，面向 CTF、渗透测试、红队行动、逆向分析、Pwn、IoT/车联网研究和恶意样本分析。项目以 Windows 为主要运行环境，按任务需要使用 Docker 或 WSL2 执行隔离工作。
+`Obsius-AI` 是一个 AI 驱动的安全研究工作台，面向 CTF、渗透测试、红队行动、逆向分析、Pwn、IoT/车联网研究和恶意样本分析。项目以 Windows 为主要运行环境，按任务需要使用 Docker 或 WSL2 执行隔离工作。
 
-项目仍在持续迭代中。README 介绍当前已经落地的能力、启动方式和开发约定；功能设计的详细说明以 [`DESIGN.md`](DESIGN.md) 为准。
+项目仍在持续迭代中。README 介绍当前已经落地的能力、启动方式和开发约定；功能设计的详细说明以 `DESIGN.md` 为准。
 
 ## 核心能力
 
@@ -39,14 +39,14 @@
 
 ### 技术栈
 
-| 层 | 技术 |
-| --- | --- |
-| 后端 | Python 3.11+、FastAPI、Uvicorn |
-| 前端 | React、TypeScript、Vite、Tailwind CSS |
-| 存储 | SQLite WAL，经 Core API 统一写入 |
-| 浏览器 | Playwright 托管 Chromium（可选） |
-| 运行时 | Windows 优先，按能力降级到 Docker/WSL2 |
-| 测试 | pytest |
+|层 |技术 |
+|---|---|
+|后端 |Python 3.11+、FastAPI、Uvicorn |
+|前端 |React、TypeScript、Vite、Tailwind CSS |
+|存储 |SQLite WAL，经 Core API 统一写入 |
+|浏览器 |Playwright 托管 Chromium（可选） |
+|运行时 |Windows 优先，按能力降级到 Docker/WSL2 |
+|测试 |pytest |
 
 ## 快速开始
 
@@ -62,7 +62,7 @@
 
 在项目根目录执行：
 
-```powershell
+```ps1
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
@@ -71,7 +71,7 @@ python -m pip install -e ".[api]"
 
 按需安装可选能力：
 
-```powershell
+```ps1
 python -m pip install -e ".[browser]"  # 浏览器与抓包能力
 python -m pip install -e ".[window]"    # pywebview 桌面窗口
 python -m playwright install chromium   # 安装托管浏览器
@@ -79,20 +79,20 @@ python -m playwright install chromium   # 安装托管浏览器
 
 ### 安装前端
 
-```powershell
+```ps1
 cd webui
 npm install
 ```
 
 开发时启动 Vite：
 
-```powershell
+```ps1
 npm run dev
 ```
 
 构建生产静态文件：
 
-```powershell
+```ps1
 npm run build
 ```
 
@@ -100,7 +100,7 @@ npm run build
 
 ### 启动平台
 
-最简单的方式是双击项目根目录的 [`启动平台.bat`](启动平台.bat)：
+最简单的方式是双击项目根目录的 `启动平台.bat`：
 
 - 后端监听 `http://127.0.0.1:8420`。
 - 如果存在 `webui/dist/index.html`，使用后端同源静态模式。
@@ -109,17 +109,17 @@ npm run build
 
 也可以直接启动后端：
 
-```powershell
+```ps1
 python scripts/serve.py
 ```
 
 桌面窗口模式：
 
-```powershell
+```ps1
 python scripts/serve.py --window
 ```
 
-或双击 [`启动平台（窗口）.bat`](启动平台（窗口）.bat)。窗口模式会优先加载静态前端，其次探测 Vite；关闭最后一个 owner 窗口时会优雅停止服务并保存任务现场。停止平台请使用 [`停止平台.bat`](停止平台.bat)，它会先请求后端保存现场，再在超时后结束进程。
+或双击 `启动平台（窗口）.bat`。窗口模式会优先加载静态前端，其次探测 Vite；关闭最后一个 owner 窗口时会优雅停止服务并保存任务现场。停止平台请使用 `停止平台.bat`，它会先请求后端保存现场，再在超时后结束进程。
 
 ## 日常使用流程
 
@@ -144,15 +144,15 @@ python scripts/serve.py --window
 - 字符串、逻辑块和逆向蓝图
 - 分析进度、预计时间和实时新增函数
 
-当前逆向分析可能需要较长时间，具体取决于样本规模、分析器和本机资源。未知或可疑样本应在隔离运行时中动态分析；宿主机、WSL 和 Docker 的信任级别与限制见 [`DESIGN.md`](DESIGN.md) 的执行网关章节。
+当前逆向分析可能需要较长时间，具体取决于样本规模、分析器和本机资源。未知或可疑样本应在隔离运行时中动态分析；宿主机、WSL 和 Docker 的信任级别与限制见 `DESIGN.md` 的执行网关章节。
 
 ## 浏览器与 MCP
 
-浏览器相关能力通过后端浏览器池管理上下文，前端通过项目 API 与其通信。常用入口包括浏览器、抓包、拦截、重放和 Playwright MCP。MCP 配置位于 [`.mcp.json`](.mcp.json)；项目内嵌浏览器优先用于当前项目，避免不同会话之间混用页面状态。
+浏览器相关能力通过后端浏览器池管理上下文，前端通过项目 API 与其通信。常用入口包括浏览器、抓包、拦截、重放和 Playwright MCP。MCP 配置位于 `.mcp.json`；项目内嵌浏览器优先用于当前项目，避免不同会话之间混用页面状态。
 
 浏览器能力需要安装可选依赖：
 
-```powershell
+```ps1
 python -m pip install -e ".[browser]"
 python -m playwright install chromium
 ```
@@ -179,13 +179,13 @@ python -m playwright install chromium
 
 后端测试：
 
-```powershell
+```ps1
 python -m pytest
 ```
 
 前端检查与构建：
 
-```powershell
+```ps1
 cd webui
 npm run lint
 npm run build
@@ -210,9 +210,9 @@ tests/       自动化测试
 
 ## 文档地图
 
-- [`DESIGN.md`](DESIGN.md)：当前已实施功能的详细设计和系统约束。
-- [`CLAUDE.md`](CLAUDE.md)：项目级开发约束和目录文档规则。
-- [`docs/plans/`](docs/plans/)：尚未实施或正在规划中的方案。
+- `DESIGN.md`：当前已实施功能的详细设计和系统约束。
+- `CLAUDE.md`：项目级开发约束和目录文档规则。
+- `docs/plans/`：尚未实施或正在规划中的方案。
 - 各目录下的 `CLAUDE.md`：对应模块的入口、约定和常见陷阱。
 
 ## 已知限制
@@ -223,4 +223,4 @@ tests/       自动化测试
 
 ## 许可证
 
-项目许可证见 [`LICENSE`](LICENSE)。项目中引用的第三方代码和素材遵循其原始许可证。
+项目许可证见 `LICENSE`。项目中引用的第三方代码和素材遵循其原始许可证。
