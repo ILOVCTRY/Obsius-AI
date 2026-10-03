@@ -4,8 +4,10 @@ import ssl
 import time
 from typing import Any
 
-from core.llm.anthropic_compat import StreamTransport, Transport, _default_stream_transport, _default_transport
+from core.llm import parsing
+from core.llm.anthropic_compat import StreamTransport, Transport
 from core.llm.provider import LLMResponse, ToolCall, Usage, LLMError
+from core.llm.sdk_engine import RawFallback, build_openai_transports
 
 CHAT_COMPLETIONS = "openai-chat-completions"
 RESPONSES = "openai-responses"
@@ -44,8 +46,22 @@ class OpenAICompatProvider:
         self.ctx_soft_budget = ctx_soft_budget
         self.summarizer_model = summarizer_model
         self.proxy = proxy or None
-        self._transport = transport or _default_transport(timeout, self.proxy)
-        self._stream_transport = stream_transport or _default_stream_transport(timeout, self.proxy)
+        # 2026-10-03 SDK 迁移：默认传输层换成官方 openai SDK（sdk_engine 把 SDK 的
+        # 流式事件还原成 SSE 行，_consume_stream 零改动）。注入的 transport/
+        # stream_transport 优先且按需构建 SDK（两侧都注入则完全不碰 SDK）。
+        self._transport = transport
+        self._stream_transport = stream_transport
+
+    def _sdk_transports(self) -> tuple[Transport, StreamTransport]:
+        """按需构建 SDK 传输层（只在真正调用时建，且构建一次即缓存）。"""
+        if self._transport is None or self._stream_transport is None:
+            sdk_t, sdk_st = build_openai_transports(
+                self.base_url, self.api_key, self.timeout, self.proxy)
+            if self._transport is None:
+                self._transport = sdk_t
+            if self._stream_transport is None:
+                self._stream_transport = sdk_st
+        return self._transport, self._stream_transport
 
     def chat(self, messages: list[dict[str, Any]], *, system: str | list[dict[str, Any] | str] | None = None,
              tools: list[dict[str, Any]] | None = None, max_tokens: int = 16384,
@@ -53,6 +69,7 @@ class OpenAICompatProvider:
              should_cancel=None, model: str | None = None, on_retry=None) -> LLMResponse:
         body = self._body(messages, system, tools, max_tokens, temperature, model or self.model)
         url = f"{self.base_url}/v1/{'chat/completions' if self.format == CHAT_COMPLETIONS else 'responses'}"
+        _, stream_transport = self._sdk_transports()  # OpenAI 路径恒走流式
 
         def request_with_retries(payload: bytes):
             """重试上游明确的 520/524 或瞬时连接断开，其他错误立即返回。"""
@@ -60,7 +77,7 @@ class OpenAICompatProvider:
                                OPENAI_524_ATTEMPTS)
             for attempt in range(1, max_attempts + 1):
                 try:
-                    status, data = self._stream_transport(
+                    status, data = stream_transport(
                         url, self._headers(), payload)
                 except (TimeoutError, ConnectionError) as exc:
                     if attempt >= OPENAI_CONNECTION_ATTEMPTS:
@@ -124,12 +141,25 @@ class OpenAICompatProvider:
                 return _wrapped
 
             try:
-                return self._consume_stream(
-                    data,
-                    _watch(on_thinking),
-                    _watch(on_text),
-                    should_cancel,
-                )
+                try:
+                    return self._consume_stream(
+                        data,
+                        _watch(on_thinking),
+                        _watch(on_text),
+                        should_cancel,
+                    )
+                except RawFallback as fb:
+                    # SDK 事件解析失败 / 零事件（网关 SSE 缺 event: 行、忽略
+                    # stream:true 回整份 JSON）→ 用 tee 录制的原始字节重走自研
+                    # 逐行 SSE 解析（含非 SSE 兜底）。已吐过增量则不能重放。
+                    if emitted["value"]:
+                        raise LLMError("SDK 事件解析失败且已有增量输出，无法重放") from fb
+                    return self._consume_stream(
+                        iter(fb.lines),
+                        _watch(on_thinking),
+                        _watch(on_text),
+                        should_cancel,
+                    )
             except (TimeoutError, ConnectionError,
                     http.client.IncompleteRead, ssl.SSLError) as exc:
                 close = getattr(data, "close", None)
@@ -337,34 +367,8 @@ class OpenAICompatProvider:
         return result
 
     def _parse(self, data):
-        if self.format == RESPONSES:
-            text = "".join(x.get("text", "") for x in data.get("output", []) if x.get("type") == "message" for x in x.get("content", []) if x.get("type") == "output_text")
-            result = LLMResponse(text=text, raw=data, stop_reason=data.get("status", ""))
-            for item in data.get("output", []):
-                if item.get("type") == "function_call":
-                    name = item.get("name", "")
-                    if not name:
-                        raise LLMError(
-                            "Responses function_call 缺少工具名 "
-                            f"(call_id={item.get('call_id', item.get('id', 'unknown'))})")
-                    result.tool_calls.append(ToolCall(item.get("call_id", item.get("id", "")), name, json.loads(item.get("arguments", "{}"))))
-            return result
-        choices = data.get("choices", [])
-        msg = choices[0].get("message", {}) if choices else {}
-        result = LLMResponse(text=msg.get("content", "") or "", thinking=msg.get("reasoning_content", "") or "", raw=data,
-                             stop_reason=(choices[0].get("finish_reason", "") if choices else ""),
-                             usage=Usage(input_tokens=data.get("usage", {}).get("prompt_tokens", 0), output_tokens=data.get("usage", {}).get("completion_tokens", 0)))
-        for tc in msg.get("tool_calls", []):
-            f = tc.get("function", {})
-            call_id = str(tc.get("id") or "").strip()
-            name = str(f.get("name") or "").strip()
-            if not call_id or not name:
-                raise LLMError(
-                    "Chat Completions tool_call 缺少工具名或调用 ID "
-                    f"(call_id={call_id or 'unknown'})")
-            result.tool_calls.append(ToolCall(
-                call_id, name, json.loads(f.get("arguments", "{}"))))
-        return result
+        """委托 core.llm.parsing（SDK 引擎与 compat 层共用同一解析口径）。"""
+        return parsing.parse_openai_response(data, format=self.format)
 
     def tool_result_message(self, tool_call: ToolCall, content: str, is_error: bool = False):
         return {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_call.id, "content": content, **({"is_error": True} if is_error else {})}]}

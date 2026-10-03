@@ -3,9 +3,6 @@
 （整份 JSON 行流，命中非 SSE 兜底，解析等价非流式）；transport= 仅降级/哨兵用。"""
 
 import json
-import socket
-import ssl
-import urllib.error
 
 import pytest
 
@@ -233,79 +230,9 @@ class _BreakingStream:
         pass
 
 
-def test_default_transport_classifies_connection_reset_as_retryable(monkeypatch):
-    """_default_transport/_default_stream_transport：URLError(ConnectionResetError
-    10054) → 抛 ConnectionError（可重试）；DNS 解析失败仍 LLMError（快速暴露）。"""
-    from core.llm import anthropic_compat as ac
-
-    def _reset(*a, **k):
-        raise urllib.error.URLError(
-            ConnectionResetError(10054, "远程主机强迫关闭了一个现有的连接。"))
-
-    monkeypatch.setattr(ac.urllib.request, "urlopen", _reset)
-    with pytest.raises(ConnectionError):
-        ac._default_transport(5.0)("https://fake/v1/messages", {}, b"{}")
-    with pytest.raises(ConnectionError):
-        ac._default_stream_transport(5.0)("https://fake/v1/messages", {}, b"{}")
-
-    def _dns(*a, **k):
-        raise urllib.error.URLError(socket.gaierror(11001, "getaddrinfo failed"))
-
-    monkeypatch.setattr(ac.urllib.request, "urlopen", _dns)
-    with pytest.raises(ac.LLMError):
-        ac._default_transport(5.0)("https://fake/v1/messages", {}, b"{}")
-
-
-def test_default_transport_classifies_ssl_eof_as_retryable(monkeypatch):
-    """代理/上游 TLS 提前 EOF 进入连接重试，而不是直接落网络错误。"""
-    from core.llm import anthropic_compat as ac
-
-    def _ssl_eof(*a, **k):
-        raise urllib.error.URLError(
-            ssl.SSLEOFError("[SSL: UNEXPECTED_EOF_WHILE_READING] EOF"))
-
-    monkeypatch.setattr(ac.urllib.request, "urlopen", _ssl_eof)
-    with pytest.raises(ConnectionError):
-        ac._default_transport(5.0)("https://fake/v1/messages", {}, b"{}")
-    with pytest.raises(ConnectionError):
-        ac._default_stream_transport(5.0)("https://fake/v1/messages", {}, b"{}")
-
-
-def test_provider_proxy_uses_explicit_proxy_and_survives_build(tmp_path, monkeypatch):
-    """供应商专属代理进入普通传输层，ProviderStore.build 也保留该配置。"""
-    from core.llm import anthropic_compat as ac
+def test_provider_proxy_survives_build(tmp_path):
+    """供应商专属代理随 ProviderStore.build 传到实例（传输层实现在 test_llm_sdk）。"""
     from core.llm.providers import ProviderStore
-
-    class Response:
-        status = 200
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_):
-            return False
-
-        def read(self):
-            return b'{"ok": true}'
-
-    calls = {}
-
-    class Opener:
-        def open(self, req, timeout):
-            calls["url"] = req.full_url
-            calls["timeout"] = timeout
-            return Response()
-
-    def build_opener(handler):
-        calls["proxies"] = handler.proxies
-        return Opener()
-
-    monkeypatch.setattr(ac.urllib.request, "build_opener", build_opener)
-    status, data = ac._default_transport(7.0, "http://127.0.0.1:7890")(
-        "https://llm.example/v1/messages", {}, b"{}")
-    assert status == 200 and data == {"ok": True}
-    assert calls["proxies"]["http"] == "http://127.0.0.1:7890"
-    assert calls["url"] == "https://llm.example/v1/messages"
 
     store = ProviderStore(tmp_path / "providers.json")
     store.save([{"name": "custom", "base_url": "https://llm.example", "api_key": "k",

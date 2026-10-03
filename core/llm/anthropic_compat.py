@@ -1,21 +1,21 @@
 """Anthropic Messages 协议 Provider 基类。
 
-HTTP 传输层可注入（默认 urllib 标准库实现），单元测试用 fake transport，
-不触网。子类只需固定 base_url / api_key / model（见 ark.py）。
+HTTP 传输层默认由官方 anthropic SDK 提供（`core/llm/sdk_engine`：SDK 负责连接/
+代理/UA/HTTP 状态分类/超时/SSE 解析，httpx 垫片旁路录制原始字节），也可注入
+fake transport（单元测试不触网）。子类只需固定 base_url / api_key / model（见 ark.py）。
 """
 
 import http.client
 import json
 import logging
-import socket
 import ssl
 import time
-import urllib.request
 from collections.abc import Callable
 from typing import Any
 
-from core.llm.provider import (ContextOverflowError, LLMError, LLMResponse,
-                               ToolCall, Usage)
+from core.llm import parsing
+from core.llm.provider import ContextOverflowError, LLMError, LLMResponse, ToolCall
+from core.llm.sdk_engine import RawFallback, build_anthropic_transports
 
 log = logging.getLogger(__name__)
 
@@ -50,100 +50,15 @@ MAX_RETRIES = 2
 # 小预算请求秒通、大预算挂起，坏窗口可持续 6 分钟+，实测 11:25-11:31 三连超时实例）。
 # 原 3/6s 间隔三次尝试全落同一窗口；30/60s 让第②③次尝试有机会跨入恢复窗口。
 RETRY_BACKOFF = 30.0
-# 连接类故障（TCP 重置/断连/超时，如 WSAECONNRESET 10054）单独更宽松（2026-10-01
-# 事故修复）：这类多为网关侧瞬时抖动，重试命中率远高于 5xx 坏窗口；此前与 5xx 共用
-# 2 次预算，一次长连接（SSE）重置即判死整轮。
+# 连接类故障（TCP 重置/断连/超时，如 WSAECONNRESET 10054 / TLS SSLEOFError）单独
+# 更宽松（2026-10-01 事故修复）：这类多为网关侧瞬时抖动，重试命中率远高于 5xx 坏
+# 窗口；此前与 5xx 共用 2 次预算，一次长连接（SSE）重置即判死整轮。
+# 2026-10-03 SDK 迁移：原先由自研 urllib 层按 errno 白名单分类，现由 httpx 把
+# 连接重置/SSL EOF/超时统一抛成 httpx.TransportError，SDK 再包成 APIConnectionError
+# /APITimeoutError，sdk_engine._as_conn_error 转回 ConnectionError/TimeoutError
+# ——本预算分支口径不变。
 CONN_RETRIES = 4                      # 连接类总尝试次数（3 次重试）
 CONN_BACKOFF = (5.0, 10.0, 20.0)      # 各次重试前退避（秒）
-
-# 瞬时网络错误判定（2026-10-01 健壮性修复）：网关 TCP 重置（Windows WSAECONNRESET
-# 10054「远程主机强迫关闭了一个现有的连接」）等连接类故障，此前被 _default_transport
-# 包成 LLMError（RuntimeError 子类）→ chat() 的 (TimeoutError, ConnectionError)
-# 重试分支接不住 → 0 次重试直接判「轮次失败」。这里把连接重置/中止/拒绝/断管/超时
-# 统一判为「可重试」，抛 ConnectionError/TimeoutError 让既有 30s×2 重试接手。
-_TRANSIENT_ERRNOS = {
-    10054,  # WSAECONNRESET 远程主机强迫关闭
-    10053,  # WSAECONNABORTED 软件导致连接中止
-    10060,  # WSAETIMEDOUT 连接超时
-    10061,  # WSAECONNREFUSED 连接被拒绝
-    104,    # ECONNRESET
-    103,    # ECONNABORTED
-    110,    # ETIMEDOUT
-    32,     # EPIPE（断管）
-}
-
-
-def _is_transient_network(reason: Any) -> bool:
-    """URLError.reason 是否属「可重试」的瞬时网络故障（连接类/超时/断管）。
-    非瞬时（DNS 解析失败、不支持协议、非法 URL 等）返回 False，仍按 LLMError
-    快速暴露交人工判断。"""
-    # 代理或上游在 TLS 握手/建连阶段提前断开时，urllib 会把
-    # ``ssl.SSLEOFError: UNEXPECTED_EOF_WHILE_READING`` 包在 URLError 里。
-    # 这是连接级瞬时故障，应交给连接重试预算；证书校验等其它 SSLError
-    # 仍保持快速失败，避免掩盖配置错误。
-    if isinstance(reason, ssl.SSLEOFError):
-        return True
-    if isinstance(reason, (ConnectionError, TimeoutError, BrokenPipeError)):
-        return True
-    return getattr(reason, "errno", None) in _TRANSIENT_ERRNOS
-
-
-def _urlopen(req: urllib.request.Request, timeout: float, proxy: str | None = None):
-    """Open an LLM request through a provider-specific proxy when configured."""
-    if proxy:
-        opener = urllib.request.build_opener(
-            urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
-        return opener.open(req, timeout=timeout)
-    return urllib.request.urlopen(req, timeout=timeout)
-
-
-def _default_transport(timeout: float, proxy: str | None = None) -> Transport:
-    def _transport(url: str, headers: dict[str, str], body: bytes) -> tuple[int, dict[str, Any]]:
-        req = urllib.request.Request(url, data=body, method="POST")
-        for k, v in {"User-Agent": CLIENT_USER_AGENT, **headers}.items():
-            req.add_header(k, v)
-        try:
-            with _urlopen(req, timeout, proxy) as resp:
-                return resp.status, json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            raw = e.read().decode("utf-8", errors="replace")
-            try:
-                return e.code, json.loads(raw)
-            except ValueError:
-                return e.code, {"error": {"message": raw[:500]}}
-        except urllib.error.URLError as e:
-            if isinstance(e.reason, (socket.timeout, TimeoutError)):
-                raise TimeoutError(str(e.reason)) from e
-            if _is_transient_network(e.reason):
-                raise ConnectionError(f"{e.reason}") from e
-            raise LLMError(f"网络错误: {e.reason}") from e
-
-    return _transport
-
-
-def _default_stream_transport(timeout: float, proxy: str | None = None) -> StreamTransport:
-    """SSE 流式默认实现：urlopen 后不整读，交给调用方逐行迭代（思考增量边到边回调）。"""
-    def _transport(url: str, headers: dict[str, str], body: bytes) -> tuple[int, Any]:
-        req = urllib.request.Request(url, data=body, method="POST")
-        for k, v in {"User-Agent": CLIENT_USER_AGENT, **headers}.items():
-            req.add_header(k, v)
-        try:
-            resp = _urlopen(req, timeout, proxy)
-        except urllib.error.HTTPError as e:
-            raw = e.read().decode("utf-8", errors="replace")
-            try:
-                return e.code, json.loads(raw)
-            except ValueError:
-                return e.code, {"error": {"message": raw[:500]}}
-        except urllib.error.URLError as e:
-            if isinstance(e.reason, (socket.timeout, TimeoutError)):
-                raise TimeoutError(str(e.reason)) from e
-            if _is_transient_network(e.reason):
-                raise ConnectionError(f"{e.reason}") from e
-            raise LLMError(f"网络错误: {e.reason}") from e
-        return resp.status, resp
-    return _transport
-
 
 class AnthropicCompatProvider:
     """Anthropic /v1/messages 协议。超时默认 600s（10 分钟），用于吸收长思考和
@@ -192,13 +107,31 @@ class AnthropicCompatProvider:
         # 网关拒收 cache_control 标记（400 文案含 cache_control）时置位——本实例
         # system 不再打标（镜像 thinking/stream 降级先例）
         self._cache_disabled = False
-        self._transport = transport or _default_transport(timeout, self.proxy)
-        self._stream_transport = stream_transport or _default_stream_transport(timeout, self.proxy)
+        # 2026-10-03 SDK 迁移：默认传输层换成官方 anthropic SDK（连接池/代理/UA/
+        # 超时/HTTP 状态分类/SSE 解析全交 SDK），sdk_engine 把 SDK 事件还原成 SSE
+        # 行供 _consume_stream 复用。注入的 transport/stream_transport 优先且
+        # 按需构建 SDK（两侧都注入则完全不碰 SDK）——测试与 ScriptedLLM 走注入路径。
+        self._transport = transport
+        self._stream_transport = stream_transport
         # 网关不认 stream 参数（400 文案含 stream）时置位，本实例回退非流式
         self._stream_disabled = False
 
     stream_capable = True
     """Agent 层据此决定是否传 on_thinking/should_cancel（duck-type 能力探测）。"""
+
+    # ---------- 内部 ----------
+
+    def _sdk_transports(self) -> tuple[Transport, StreamTransport]:
+        """按需构建 SDK 传输层（只在真正调用时建，且构建一次即缓存）。"""
+        if self._transport is None or self._stream_transport is None:
+            sdk_t, sdk_st = build_anthropic_transports(
+                self.base_url, self.api_key, self.api_version, self._use_x_api_key,
+                self.timeout, self.proxy)
+            if self._transport is None:
+                self._transport = sdk_t
+            if self._stream_transport is None:
+                self._stream_transport = sdk_st
+        return self._transport, self._stream_transport
 
     # ---------- 公共接口 ----------
 
@@ -252,13 +185,14 @@ class AnthropicCompatProvider:
         last_err: Exception | None = None
         conn_used = 0      # 连接类已用尝试数（含首次）
         status_used = 0    # 429/5xx 已用尝试数（含首次）
+        transport, stream_transport = self._sdk_transports()
         for _ in range(max_attempts):
             try:
                 if use_stream:
-                    status, data = self._stream_transport(
+                    status, data = stream_transport(
                         f"{self.base_url}/v1/messages", self._headers(), payload)
                 else:
-                    status, data = self._transport(
+                    status, data = transport(
                         f"{self.base_url}/v1/messages", self._headers(), payload)
                 if status != 200:
                     err = data.get("error", {})
@@ -329,10 +263,23 @@ class AnthropicCompatProvider:
                         return _inner
 
                     try:
-                        return self._consume_stream(
-                            data, _watch(on_thinking) if on_thinking is not None else None,
-                            should_cancel,
-                            _watch(on_text) if on_text is not None else None)
+                        try:
+                            return self._consume_stream(
+                                data, _watch(on_thinking) if on_thinking is not None else None,
+                                should_cancel,
+                                _watch(on_text) if on_text is not None else None)
+                        except RawFallback as fb:
+                            # SDK 事件解析失败（Ark SSE 尾部冗余）→ 用 tee 录制的
+                            # 原始字节重走自研 SSE 解析（raw_decode 容错），保住
+                            # 2026-10-01 的尾部冗余抢救能力。已吐过增量则不能重放
+                            # （会重复上屏），按流中断语义如实上报。
+                            if seen["emitted"]:
+                                raise LLMError("SDK 事件解析失败且已有增量输出，无法重放") from fb
+                            return self._consume_stream(
+                                iter(fb.lines),
+                                _watch(on_thinking) if on_thinking is not None else None,
+                                should_cancel,
+                                _watch(on_text) if on_text is not None else None)
                     except (TimeoutError, ConnectionError,
                             http.client.IncompleteRead, ssl.SSLError) as e:
                         if not seen["emitted"]:
@@ -482,42 +429,8 @@ class AnthropicCompatProvider:
         return headers
 
     def _parse(self, data: dict[str, Any]) -> LLMResponse:
-        resp = LLMResponse(
-            stop_reason=data.get("stop_reason", ""),
-            raw=data,
-            usage=Usage(
-                input_tokens=data.get("usage", {}).get("input_tokens", 0),
-                output_tokens=data.get("usage", {}).get("output_tokens", 0),
-                cache_read_tokens=data.get("usage", {}).get("cache_read_input_tokens", 0),
-                cache_creation_tokens=data.get("usage", {}).get("cache_creation_input_tokens", 0),
-            ),
-        )
-        texts: list[str] = []
-        thinkings: list[str] = []
-        for block in data.get("content", []):
-            btype = block.get("type")
-            if btype == "text":
-                texts.append(block.get("text", ""))
-            elif btype == "thinking":
-                thinkings.append(block.get("thinking", ""))
-            elif btype == "tool_use":
-                resp.tool_calls.append(
-                    ToolCall(
-                        id=block.get("id", ""),
-                        name=block.get("name", ""),
-                        arguments=block.get("input", {}) or {},
-                    )
-                )
-            # redacted_thinking 等未知块：留在 raw，不参与拼接
-        resp.text = "".join(texts)
-        resp.thinking = "\n".join(thinkings)
-        if not resp.thinking:
-            # OpenAI 式 reasoning_content 兜底（2026-09-19）：部分网关按 OpenAI 风格
-            # 泄漏思考字段，Anthropic content 里没有 thinking block 时接住它
-            rc = data.get("reasoning_content")
-            if isinstance(rc, str) and rc.strip():
-                resp.thinking = rc
-        return resp
+        """委托 core.llm.parsing（SDK 引擎与 compat 层共用同一解析口径）。"""
+        return parsing.parse_anthropic_response(data)
 
     def tool_result_message(self, tool_call: ToolCall, content: str, is_error: bool = False) -> dict:
         """构造工具结果消息（Agent 循环回填用）。"""

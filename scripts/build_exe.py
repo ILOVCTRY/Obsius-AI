@@ -25,8 +25,11 @@ DIST_APP = ROOT / "dist" / "cyberstrike-pro"
 # 与 pyproject.toml [project.optional-dependencies] 对齐（api + window）+ 打包器。
 # fastapi/uvicorn 钉到与开发环境一致的版本：fastapi 0.12x 移除 Starlette
 # add_event_handler（app.py shutdown 钩子所用），>=0.110 语义放行会打出坏包（2026-09-23 实测）
+# anthropic/openai：core/llm 自 2026-10-03 起以官方 SDK 为主引擎（pyproject 核心依赖），
+# 缺失则打包件一导入 core.llm 即崩。httpx 由它们带入，此处仍显式钉住。
 BUILD_DEPS = [
     "fastapi==0.116.1", "uvicorn==0.35.0", "httpx>=0.27",
+    "anthropic>=0.40", "openai>=1.40",
     "python-multipart>=0.0.9", "openpyxl>=3.1",
     "pywebview>=5.0", "pyinstaller>=6.0",
 ]

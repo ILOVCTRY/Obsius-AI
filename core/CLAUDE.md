@@ -14,7 +14,7 @@
 | [`intel/`](intel/CLAUDE.md) | 情报面板（E9，§16）：全局 config/intel/ 存储 + 触发式抓取（NVD/KEV/GHSA/RSS，getter 可注入不经网关）+ classifier 打分/简报（LLM 缺席降级规则，不 503） |
 | [`api/`](api/CLAUDE.md) | FastAPI 唯一 HTTP 入口（全项目唯一 import fastapi 处）+ WS + Job |
 | `runtime/` | Level L0-L3 / policy / gateway / backends / detector；unknown 按 malware_live，默认 net=none |
-| `llm/` | Anthropic /v1/messages 内部标准；Ark 接入 + 多供应商（config/providers.json）+ ModelRouter |
+| `llm/` | Anthropic /v1/messages 内部标准；Ark 接入 + 多供应商（config/providers.json）+ ModelRouter。**传输层 = 官方 anthropic/openai SDK（2026-10-03）**：`sdk_engine.py` 把 SDK 流式事件还原成 SSE 行复用既有 `_consume_stream`（Ark 特化零重写），httpx 垫片旁路录制原始字节作降级重解析；`parsing.py` 抽出双协议响应解析纯函数 |
 | `tools/` | 组合服务（decompiler：headless v3 全量导出含 strings，IDA→Ghidra 选路；P2 IDA 双向写回 writeback/refresh_db_cache/diff_pulled_names；`MCPBackend` 实时桥=streamable-http 懒握手/3s TTL 探活，只做写回直写+缓存缺席单函数 decompile+xref 降级，绝不替代全量缓存，断了静默降级）+ detector；`data/fpdb/fpdb_seed.json`=本地指纹包首批（2026-09-22 dsh 收编，规则制；registry data 类声明随 toolchain-registry M1） |
 | `projects.py` | ProjectStore：`create_project(name, track="ctf", capabilities=None, config=None, experts=None)`（注入 autonomy 默认档归一化；**M2：experts 非空才写 meta 键=存量直通语义**）；`update_config` 双写 project.json+黑板行；**`update_experts` 换将（M2：重写 meta.experts，空清单剥键恢复直通态；黑板行无此列，单一真相源 project.json）**；**`update_phase_goal` / `update_orchestrator_persona`（对话化编排器 M2/M3，2026-09-21）：meta.phase_goal（None=剥键清空）与 meta.orchestrator_persona（None=恢复缺省）整键写，事件留痕（goal.confirm/goal.clear）由 API 层落**；**`inherit_knowledge(pid, src)`（M4b 知识继承，2026-09-21）：三段复制只增不覆盖——binary 资产（find_asset 同 sha 判重，样本文件 copy2 到目标 samples/、meta.path 更新+`inherited_from` 标记、author 沿源）/ func_kb（(project,sha,address) 判重）/ 蓝图（(project,sha,name) 判重，非 draft 状态尽力保留）；源项目只读不动，失败不阻建项**；旧 domain 透明映射；回收站式删除（删前 close_all 双层关闭闸门 + rename 0.05–0.2s 退避重试）；`Project.close()` 后 `proj.bb` 抛 BlackboardClosedError 不重建 |
 | `autonomy.py` | 自主档 L0/L1/L2（§6.8）+ **auto_derive mission 自动派生开关（C2 §6.9）**：默认档按轨、normalize/autonomy_of、sessions_cap 计数、`record_llm_usage`（记账+llm.usage+80% 软警）、`hard_block_reason`/`human_warning` 闸门（每次实时重读，不缓存）、usage_view（批 5 起被 api L2 链状态机消费，本文件无链逻辑；**出口带 `derive:{last_at,last_result}`——mission 自动派生上次判定，v13 orchestrator_state 新列，前端状态灯消费**）、**`normalize_rule_profiles`（F11：rule_profiles 三态归一化，projects.update_config 与 API 层共用）**、**`normalize_advisor` + ADVISOR_DEFAULTS/RANGES（D10，2026-09-24：config.advisor 段归一化，非法值 ValueError→422）** |
@@ -35,7 +35,7 @@
 - 逆向工作台（P1/P2）：track=research ⇒ profile=rev-generic（前端 `deriveWorkbenchProfile`，config.workbench.profile 可覆盖；**2026-09-29 修**：M3 起 caps 多选退役、创建恒不传 caps，旧「caps 含 binary」判据已死——M3 后新建 research 项目全误落渗透模板；现按 config.board_view.default 非 funcs〔如 code-audit 档 findings〕交还渗透黑板）；三层数据——headless 缓存 JSON（**v3 契约**：客观全量+strings，可删重导）/ func_kb（只存分析过的函数）/ findings（挂 binary 资产，evidence 带 func_id+address）；headless 是 trusted **解析**工具，平台绝不执行样本。
 - Agent 无裸 shell：唯一命令口是经网关的 run_cmd；不可信代码只进 docker/sandbox，WSL 信任级=宿主机。
 - 安全默认宁严勿松：未知样本按恶意处理（L3 + fakenet）；fakenet 尚未实现（显式 NotImplementedError）。
-- 工具异常回填文本不中断循环；LLM 传输层对 429/5xx/超时重试 3 次。
+- 工具异常回填文本不中断循环；LLM 传输层按类别重试（429/5xx 共 2 次尝试 + 30s 退避；连接类共 4 次 + 5/10/20s 退避；OpenAI 520 首次失败后 5 次重试），连接/TLS/超时分类由 SDK 承担（见 `core/llm/CLAUDE.md`）。
 
 ## 测试
 

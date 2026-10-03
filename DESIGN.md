@@ -365,11 +365,13 @@ refs.py kb 改名全库引用扫描+重写；doctor 体检（error：悬空引�
 
 ## 协议统一
 
-内部传输协议统一 Anthropic /v1/messages，标准库 urllib 零 SDK；三个网络注入面（Transport/StreamTransport/HttpGetter）使整个 core/llm 测试零触网。
+内部传输协议统一 Anthropic /v1/messages；三个网络注入面（Transport/StreamTransport/HttpGetter）使整个 core/llm 测试零触网。
+
+**传输引擎（LLM SDK 迁移，2026-10-03 实施）**：官方 `anthropic` / `openai` SDK 作主引擎，接管连接 / 代理 / UA / HTTP 状态分类 / 超时 / SSE 事件解析；`sdk_engine.py` 用自定义 `httpx` transport（`TeeTransport`）旁路录制原始字节，并把 SDK 的流式事件**还原成 SSE 行**喂给既有 `_consume_stream`——Ark 特化（截断容错、增量探针、逐帧回调、文案嗅探）零重写，60+ 处注入式测试零改动。`RawFallback` 是双向兜底：SDK 抛 `JSONDecodeError`（Ark SSE 尾部冗余）或**一个事件都没产出**（网关 SSE 缺 `event:` 行 / 无视 `stream:true` 回整份 JSON）时，改用原始字节走自研行式解析（含 `raw_decode` 抢救与非 SSE 兜底）。鉴权头必须由 SDK 自持凭据产生（`Omit` 关掉另一通道 + 阻断 `ANTHROPIC_*` 环境变量回退），否则 SDK 会把凭据与自定义头拼接成 `x-api-key: a, b`。响应解析抽为 `parsing.py` 纯函数供 compat 与 SDK 引擎共用。
 
 ## anthropic_compat
 
-协议转换核心：重试矩阵（{429,5xx} 最多 3 次线性退避）、thinking/stream 400 实例级降级（去参重发）、SSE 状态机（工具参数 JSON 分片拼装）、首帧后不重试（SSE 不可重放）、truncated 截断防御（区分「说完」与「流断」）。
+协议转换核心：按类别重试矩阵（{429,5xx} 共 2 次尝试 + 30s 退避；连接类共 4 次 + 5/10/20s 退避）、thinking/stream/cache_control 400 实例级降级（去参重发）、SSE 状态机（工具参数 JSON 分片拼装）、首帧后不重试（SSE 不可重放）、truncated 截断防御（区分「说完」与「流断」）。
 
 **Prompt caching（retrieval-upgrade M1，2026-09-23 实施）**：请求侧 system 改块数组——`build_system_parts` 拆 stable（规则链+角色+能力清单，会话内字节稳定）/ dynamic（技能指引+任务目标+纪律尾）两块，stable 块末尾打 `cache_control: {"type":"ephemeral"}` 断点；Ark Anthropic 兼容层实测直接接受（同前缀第二跑 cache_read>0 前缀缓存生效），400 文案含 cache_control 时实例级降级剥标重发作保险（`_cache_disabled` 置位后不再打标）。观测面：usage_view 补 cache_read/creation 与命中率 `cr/(in+cr+cc)`（LiveRoom 预算弹窗展示）；预算逻辑不动（缓存 token 仍计数，只是便宜）。消息历史增量断点后置观察。
 
