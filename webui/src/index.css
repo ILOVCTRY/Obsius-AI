@@ -1236,9 +1236,11 @@
 .wb-drawer-trigger:hover .wb-drawer-trigger-arrow, .wb-drawer-trigger:focus-visible .wb-drawer-trigger-arrow { opacity: 1; transform: translateX(0); }
 .wb-drawer { display: flex; height: 100%; min-height: 0; flex: 0 0 auto; }
 .wb-drawer-panel { display: flex; width: 420px; height: 100%; min-width: 0; min-height: 0; flex: 0 0 420px; flex-direction: column; overflow: hidden; border-left: 1px solid var(--border); background: var(--theme-raw-8b524e3722); }
-.wb-drawer-head { display: flex; align-items: center; gap: 7px; min-height: 47px; padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 12px; }
-.wb-drawer-head button { margin-left: auto; color: var(--muted-foreground); font-size: 17px; }
+.wb-drawer-head { display: none; }
 .wb-drawer-tabs { display: flex; align-items: center; gap: 5px; padding: 8px; border-bottom: 1px solid var(--border); }
+.wb-drawer-collapse { display: grid; width: 34px; height: 32px; place-items: center; margin-left: auto; border: 1px solid transparent; border-radius: 6px; color: var(--muted-foreground); }
+.wb-drawer-collapse svg { width: 19px; height: 19px; stroke-width: 2.25; }
+.wb-drawer-collapse:hover { border-color: var(--border); background: var(--theme-raw-a4dcc6a258); color: var(--primary); }
 .wb-drawer-tabs button { display: inline-flex; align-items: center; gap: 5px; padding: 6px 9px; border: 1px solid transparent; border-radius: 6px; color: var(--muted-foreground); font-size: 11px; }
 .wb-drawer-tabs button:hover, .wb-drawer-tabs button.is-on { border-color: var(--theme-raw-69747d9905); background: var(--theme-raw-a4dcc6a258); color: var(--primary); }
 .wb-drawer-splitter { position: relative; width: 10px; flex: 0 0 10px; cursor: col-resize; background: transparent; }

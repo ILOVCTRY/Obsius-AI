@@ -3,7 +3,7 @@ import {
   useCallback, useEffect, useMemo, useRef, useState,
   type MouseEvent as ReactMouseEvent,
 } from "react"
-import { ChevronLeft, ChevronRight, GitBranch, ShieldAlert } from "lucide-react"
+import { ChevronLeft, GitBranch, ShieldAlert } from "lucide-react"
 import { api } from "@/lib/api"
 import type { Asset, Finding } from "@/lib/types"
 import { Badge } from "@/components/ui/badge"
@@ -219,9 +219,6 @@ export const FindingsRail = memo(function FindingsRail({ pid, track, embedded = 
               </button>
             )
           )}
-          <button type="button" className="wb-rail-collapse" onClick={toggle} title="收起">
-            <ChevronRight size={13} />
-          </button>
         </div>
 
         {!chain && (

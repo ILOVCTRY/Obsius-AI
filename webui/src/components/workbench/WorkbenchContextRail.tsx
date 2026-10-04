@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Terminal } from "@xterm/xterm"
 import { FitAddon } from "@xterm/addon-fit"
 import "@xterm/xterm/css/xterm.css"
-import { FolderTree, Globe2, RefreshCw, ShieldAlert, TerminalSquare } from "lucide-react"
+import { ChevronRight, FolderTree, Globe2, RefreshCw, ShieldAlert, TerminalSquare } from "lucide-react"
 import { api } from "@/lib/api"
 import type { BrowserSessionInfo, BrowserState, WorkspaceTreeResponse } from "@/lib/types"
 import { WorkspaceTree } from "./WorkspaceTree"
@@ -152,13 +152,13 @@ export function WorkbenchContextRail({ pid, tid, workDir, track }: {
       {open && <div className="wb-drawer">
         <div className="wb-drawer-splitter" onMouseDown={onDragStart} role="separator" aria-label="拖动调整抽屉宽度" />
         <div className="wb-drawer-panel" style={{ width: railWidth, flexBasis: railWidth }}>
-          <div className="wb-drawer-head"><b>{labels[selected]}</b><button onClick={() => setOpen(false)} title="关闭">×</button></div>
           <div className="wb-drawer-tabs">
             {(["browser", "terminal", "files", "findings"] as const).map((kind) => {
               if (kind === "terminal" && !desktop) return null
               const Icon = icons[kind]
               return <button key={kind} className={cn(selected === kind && "is-on")} onClick={() => selectPane(kind)}><Icon size={14} />{labels[kind]}</button>
             })}
+            <button type="button" className="wb-drawer-collapse" onClick={() => setOpen(false)} title="收起工具抽屉" aria-label="收起工具抽屉"><ChevronRight size={19} /></button>
           </div>
           {selected === "findings" && <FindingsRail pid={pid} track={track} embedded visible widthOverride={railWidth} />}
           {selected !== "findings" && (
