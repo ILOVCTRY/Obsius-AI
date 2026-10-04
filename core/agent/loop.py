@@ -37,7 +37,7 @@ from core.agent.tools import (
 from core.autonomy import record_llm_usage
 from core.blackboard import Blackboard, TaskQueue
 from core.blackboard.intents import list_intents
-from core.llm.provider import LLMError
+from core.llm.provider import LLMError, assistant_message, tool_results_message
 from core.llm.tokenizer import get_counter
 from core.runtime.gateway import ExecutionGateway
 from core.skills import (
@@ -100,7 +100,6 @@ _SEDIMENT_LITE_CAP = 1
 _INBOX_SUBSCRIPTIONS: dict[str, tuple[str, ...]] = {
     "basis_stale": ("claim", "resume", "step"),
     "finding_update": ("claim", "resume", "step"),
-    "escalation_result": ("claim", "resume", "step", "chat"),
     "authorization_result": ("claim", "resume", "step", "chat"),
     "approval_rejected": ("claim", "resume", "step", "chat"),
     "human_note": ("claim", "resume", "chat"),
@@ -221,10 +220,7 @@ class AgentConfig:
     owner_tags: list[str] = field(default_factory=list)
     rule_profiles: dict | None = None     # F11：评级/owner 生效档案三态（None=缺省自动）
     # 角色增强（§6.6，由 yaml 注入；None = 不限制）
-    max_noise: str | None = None          # 角色 default_noise：噪声预算上限（提示自陈，
-                                          # 不再过滤认领——窗口无 role 限制，2026-09-18）
     allowed_tools: list[str] | None = None
-    max_runtime: str | None = None        # host/wsl/docker/sandbox 最高等级
     lease_minutes: int = 30               # 认领/续租的租约 TTL
     lease_renew_seconds: int = 600        # 租约心跳间隔（TTL 的 1/3，留两次余量）
 
@@ -327,26 +323,26 @@ def _tool_result_ids(m: dict) -> list[str]:
 
 
 def sanitize_snapshot_tail(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """v0.64 暂停请求即时落盘的尾部 sanitize：请求时刻 worker 可能停在半步
-    （assistant(tool_use) 后 tool_result 只 append 了一部分），悬空 tool_use 会
-    让续跑后的 LLM 调用被 API 拒。按 tool_use/tool_result 配对计数：尾部结果
-    少于配对数（或 assistant 还没落任何 result）→ 截到最后一个完整边界；
-    完整对原样保留。只读入参（调用方先浅拷贝），不修改 worker 现场。"""
+    """清理任务现场尾部的半步、重复或错配工具消息。"""
     msgs = list(messages)
-    i = len(msgs)
-    while i > 0 and _is_tool_result(msgs[i - 1]):
-        i -= 1                      # 尾部连续纯 tool_result 消息段的起点
-    if i == len(msgs):
-        # 尾部无 result：assistant(tool_use) 尚未落任何结果 → 悬空，截掉
-        if msgs and _tool_use_blocks(msgs[-1]):
-            msgs.pop()
+    # 从末尾寻找最近一个 assistant tool_use；现场通常只在最后一轮不完整，
+    # 发现严格不配对就丢掉该轮及其结果，保留此前安全边界。
+    for idx in range(len(msgs) - 1, -1, -1):
+        uses = _tool_use_blocks(msgs[idx])
+        if not uses:
+            continue
+        ids = [str(b.get("id") or "").strip() for b in uses]
+        if any(not x for x in ids) or len(ids) != len(set(ids)):
+            return msgs[:idx]
+        result_msgs = []
+        j = idx + 1
+        while j < len(msgs) and _is_tool_result(msgs[j]):
+            result_msgs.append(msgs[j]); j += 1
+        result_ids = [tid for m in result_msgs for tid in _tool_result_ids(m)]
+        if len(result_ids) != len(ids) or set(result_ids) != set(ids) \
+                or len(result_ids) != len(set(result_ids)):
+            return msgs[:idx]
         return msgs
-    if i == 0 or not _tool_use_blocks(msgs[i - 1]):
-        return msgs                 # result 段前无 assistant(tool_use)，结构原样保留
-    use_ids = [b.get("id") for b in _tool_use_blocks(msgs[i - 1])]
-    result_ids = [tid for m in msgs[i:] for tid in _tool_result_ids(m)]
-    if len(result_ids) < len(use_ids):
-        return msgs[:i - 1]         # 半步：丢弃悬空 assistant + 已落的部分 result
     return msgs
 
 
@@ -487,7 +483,7 @@ class AgentSession:
             project_id=project_id, session_id=self.session["id"], author=self.session["id"],
             decompiler=decompiler, artifacts_dir=artifacts_dir,
             packs_root=packs_root, track=track, capabilities=self.capabilities,
-            allowed_tools=self.config.allowed_tools, max_runtime=self.config.max_runtime,
+            allowed_tools=self.config.allowed_tools,
             allowed_task_types=load_task_types(self.packs_root, track).keys(),
             max_steps=self.config.max_steps,
             stuck_after=self.config.stuck_after,
@@ -569,19 +565,14 @@ class AgentSession:
     def _apply_role_limits(self, role_data: dict) -> None:
         """角色 yaml 增强字段 → AgentConfig（§6.6）。
 
-        角色限制只可能比全局/工厂配置更严：max_steps 取 min；tools/max_runtime/
-        default_noise 以角色值为准（null/缺省 = 不加该层过滤）。"""
+        角色限制只可能比全局/工厂配置更严：max_steps 取 min；tools 以角色值为准
+        （null/缺省 = 不加该层过滤）。"""
         max_steps = role_data.get("max_steps")
         if isinstance(max_steps, int) and max_steps > 0:
             self.config.max_steps = min(self.config.max_steps, max_steps)
         tools = role_data.get("tools")
         if tools:  # 非空列表才限制（null/[] = 不限制）
             self.config.allowed_tools = list(tools)
-        max_runtime = role_data.get("max_runtime")
-        if max_runtime in {"host", "wsl", "docker", "sandbox"}:
-            self.config.max_runtime = max_runtime
-        if role_data.get("default_noise") in {"passive", "low", "medium", "high"}:
-            self.config.max_noise = role_data["default_noise"]
 
     # ---------- 认领即换装（v14 任务绑定角色，DESIGN §6.4 定稿块） ----------
 
@@ -590,8 +581,8 @@ class AgentSession:
         """认领带 role 的任务时按任务角色换装（动态 persona）。
 
         换装四面：角色 prompt 段/技能路由白名单（self.role/self.role_name，build_system_prompt
-        按调用时点取值）+ config.{max_noise, allowed_tools, max_runtime}（经 _apply_role_limits
-        收敛）+ dispatcher 对应边界。**不动 max_steps**（会话级资源，E8）。窗口不设
+        按调用时点取值）+ config.allowed_tools（经 _apply_role_limits 收敛）+
+        dispatcher 对应边界。**不动 max_steps**（会话级资源，E8）。窗口不设
         role 限制（2026-09-18）：认领无角色过滤，本方法即任务 role 的唯一生效点。
         幂等：无 role / 与当前执行角色一致 → no-op；
         角色文件缺失（发布后被删）→ 防御性按当前角色跑。"""
@@ -602,20 +593,14 @@ class AgentSession:
             return
         saved = {
             "role_name": self.role_name, "role": self.role,
-            "max_noise": self.config.max_noise,
             "allowed_tools": self.config.allowed_tools,
-            "max_runtime": self.config.max_runtime,
             "dispatcher_allowed_tools": self.dispatcher.allowed_tools,
-            "dispatcher_max_runtime": self.dispatcher.max_runtime,
         }
         rd = load_expert(self.packs_root, want, self.track)
         self.role_name, self.role = want, rd
-        self.config.max_noise = None
         self.config.allowed_tools = None
-        self.config.max_runtime = None
         self._apply_role_limits(rd)
         self.dispatcher.allowed_tools = self.config.allowed_tools
-        self.dispatcher.max_runtime = self.config.max_runtime
         self.dispatcher.current_persona_role = want
         self._persona_saved = saved
         self.bb.append_event(
@@ -633,12 +618,9 @@ class AgentSession:
         self._persona_saved = None
         self.role_name = s["role_name"]
         self.role = s["role"]
-        self.config.max_noise = s["max_noise"]
         self.config.allowed_tools = list(s["allowed_tools"]) if s["allowed_tools"] else None
-        self.config.max_runtime = s["max_runtime"]
         self.dispatcher.allowed_tools = (
             list(s["dispatcher_allowed_tools"]) if s["dispatcher_allowed_tools"] else None)
-        self.dispatcher.max_runtime = s["dispatcher_max_runtime"]
         self.dispatcher.current_persona_role = None
 
     def apply_role_change(self, task: dict) -> None:
@@ -662,12 +644,9 @@ class AgentSession:
         else:
             rd = load_expert(self.packs_root, want, self.track)
             self.role_name, self.role = want, rd
-            self.config.max_noise = None
             self.config.allowed_tools = None
-            self.config.max_runtime = None
             self._apply_role_limits(rd)
             self.dispatcher.allowed_tools = self.config.allowed_tools
-            self.dispatcher.max_runtime = self.config.max_runtime
             self.dispatcher.current_persona_role = want
         self._persona_dirty = True
         self.bb.append_event(
@@ -700,22 +679,16 @@ class AgentSession:
             s["role"] = rd
         # 当前身份重装配（底色或换装层同一套四面）
         self.role_name, self.role = want, rd
-        self.config.max_noise = None
         self.config.allowed_tools = None
-        self.config.max_runtime = None
         self._apply_role_limits(rd)
         self.dispatcher.allowed_tools = self.config.allowed_tools
-        self.dispatcher.max_runtime = self.config.max_runtime
         self.dispatcher.current_persona_role = want
         if self._persona_saved is not None:
             # 存具体边界（restore 不重跑 _apply_role_limits）
             s = self._persona_saved
-            s["max_noise"] = self.config.max_noise
             s["allowed_tools"] = (
                 list(self.config.allowed_tools) if self.config.allowed_tools else None)
-            s["max_runtime"] = self.config.max_runtime
             s["dispatcher_allowed_tools"] = self.dispatcher.allowed_tools
-            s["dispatcher_max_runtime"] = self.dispatcher.max_runtime
         self._persona_dirty = True
         self.bb.append_event(
             self.project_id, "session.persona_switched",
@@ -770,10 +743,6 @@ class AgentSession:
         if self.role.get("persona"):
             lines.append(str(self.role["persona"]))
         bounds = []
-        if self.config.max_noise:
-            bounds.append(f"噪声预算上限 {self.config.max_noise}")
-        if self.config.max_runtime:
-            bounds.append(f"运行时上限 {self.config.max_runtime}")
         if self.config.allowed_tools is not None:
             bounds.append(f"工具白名单 {', '.join(self.config.allowed_tools)}")
         if bounds:
@@ -1277,11 +1246,11 @@ class AgentSession:
             pref_runtime = str(task.get("preferred_runtime") or "") if task_id else ""
             if pref_runtime:
                 # v23（TRAE 新壳 M3）：任务默认运行时——run_cmd 省略 runtime 即按此
-                # 执行；单条命令显式传 runtime 仍可临时覆盖（max_runtime 软上限照常）
+                # 执行；单条命令显式传 runtime 仍可临时覆盖
                 messages.append({"role": "user", "content":
                     f"🎛️ 本任务默认执行运行时={pref_runtime}：run_cmd 可省略 runtime"
                     f"（按 {pref_runtime} 执行）；单条命令确需其他运行时时显式传 "
-                    "runtime 即临时覆盖（仍受角色 max_runtime 约束）。"})
+                    "runtime 即临时覆盖。"})
             messages.append({"role": "user", "content": objective})
         if task_id:
             self._checkpoint_task_transcript(messages, objective)  # 认领即有现场
@@ -1357,8 +1326,7 @@ class AgentSession:
                     self._start_heartbeat(st["task_id"])
                 # E8：暂停期积压的私信（含 human_note 人类引导 / agent_message 私信 /
                 # task_receipt 回执，2026-09-20 对话化）随快照恢复一并注入；口径统一
-                # 走订阅声明表（2026-09-21）——escalation_result 原漏渲染（全量
-                # drain 吞掉不显示），本起补齐。
+                # 走订阅声明表（2026-09-21）——原全量 drain 会吞掉不显示，本起补齐。
                 notices, _dr = self._drain_inbox("resume")
                 for _kind, notice in notices:
                     st["messages"].append({"role": "user", "content": notice})
@@ -1523,11 +1491,9 @@ class AgentSession:
                 return None
             self._record_usage(resp, source="agent", llm_obj=self.llm)
             self._emit_final_thinking(resp, step, None)
-            messages.append({"role": "assistant", "content": resp.raw.get("content", [])})
+            messages.append(assistant_message(resp))
             if not resp.tool_calls:
-                text = "".join(
-                    b.get("text", "") for b in resp.raw.get("content", [])
-                    if isinstance(b, dict) and b.get("type") == "text").strip()
+                text = resp.text.strip()
                 if text:  # 回复落事件流（💬 Agent 回复），空文本防死循环直接退
                     sid = resp.raw.get("_stream_id") if isinstance(resp.raw, dict) else None
                     self.bb.append_event(
@@ -1542,9 +1508,11 @@ class AgentSession:
                             log.exception("agent.chat.delta 清剪失败 stream_id=%s", sid)
                 final_text = text or None
                 break
+            tool_results = []
             for tc in resp.tool_calls:
                 result_text = self.dispatcher.dispatch(tc.name, tc.arguments)
-                messages.append(self.llm.tool_result_message(tc, result_text))
+                tool_results.append(self.llm.tool_result_message(tc, result_text)["content"][0])
+            messages.append(tool_results_message(tool_results))
             self._trim(messages)
         if final_text:
             # 问答对回写会话历史（下轮对话/重启后仍带全上下文）；本轮带工具的
@@ -2024,13 +1992,12 @@ class AgentSession:
             # duration_s = 整次 chat 墙钟（含网络+生成），前端显示「思考 Ns」；
             # 流式增量行（llm.thinking.delta）由 _emit_final_thinking 一并清剪
             self._emit_final_thinking(resp, step, chat_s)
-            messages.append({"role": "assistant", "content": resp.raw.get("content", [])})
+            messages.append(assistant_message(resp))
             # 任务叙述落事件流（2026-09-19 直播间终端化，与 run_chat 的 agent.chat 对称）：
             # assistant 在工具调用之间说的话=「做了什么/进度」叙述行；有 tool_calls 的步也落
             # （叙述常出现在调用前）。截 2000 字符防事件表膨胀；键用 step 不用 step_id
             # （避免撞 A2 计划事件的前端摘要分支）。
-            _narr = "".join(b.get("text", "") for b in resp.raw.get("content", [])
-                            if isinstance(b, dict) and b.get("type") == "text")
+            _narr = resp.text
             if _narr.strip():
                 self.bb.append_event(
                     self.project_id, "agent.chat",
@@ -2047,10 +2014,12 @@ class AgentSession:
             else:
                 _progress_before = self.dispatcher.last_progress_step
                 step_results: list[str] = []
+                tool_results = []
                 for tc in resp.tool_calls:
                     result_text = self.dispatcher.dispatch(tc.name, tc.arguments)
                     step_results.append(result_text)
-                    messages.append(self.llm.tool_result_message(tc, result_text))
+                    tool_results.append(self.llm.tool_result_message(tc, result_text)["content"][0])
+                messages.append(tool_results_message(tool_results))
                 # 拒绝按「模型步」分类处理（2026-09-24 口径重构，
                 # plan-gate-breaker-refine；原逻辑在工具内联处按回执张数计，
                 # 并行批可当场熔断，模型拿不到改道机会）
@@ -2371,21 +2340,6 @@ class AgentSession:
             lines.append(head)
         return "\n".join(lines)
 
-    def _escalation_result_notice(self, inbox_rows: list[dict[str, Any]]) -> str | None:
-        """拼「升级命令回执」消息（H3，kind='escalation_result'）：request_escalation
-        经人类批准执行后，结果经收件箱回流——信息式注入，Agent 拿到回执继续原路线。"""
-        lines: list[str] = []
-        for r in inbox_rows:
-            if r.get("kind") != "escalation_result":
-                continue
-            p = r.get("payload") or {}
-            cmd = str(p.get("cmd", ""))[:200]
-            out = str(p.get("text", ""))[:2500]
-            lines.append(f"🛫 升级命令已执行（人类批准，一次性）：{cmd}\n{out}")
-        if not lines:
-            return None
-        return "\n---\n".join(lines)
-
     def _authorization_result_notice(self, inbox_rows: list[dict[str, Any]]) -> str | None:
         """拼「授权申请已批准」消息（M5 D2，kind='authorization_result'）：
         request_authorization 经人类批准后回流——信息式注入，Agent 按批准内容
@@ -2405,15 +2359,15 @@ class AgentSession:
 
     def _approval_rejected_notice(self, inbox_rows: list[dict[str, Any]]) -> str | None:
         """拼「申请被拒绝」消息（M5 D2 搭车，kind='approval_rejected'）：
-        escalation/authorization 被人类拒绝后回流（此前 rejected 无回流=Agent
-        空等）——信息式注入，Agent 换路不要再等。"""
+        authorization 被人类拒绝后回流（此前 rejected 无回流=Agent 空等）
+        ——信息式注入，Agent 换路不要再等。"""
         lines: list[str] = []
         for r in inbox_rows:
             if r.get("kind") != "approval_rejected":
                 continue
             p = r.get("payload") or {}
             op = str(p.get("op", ""))
-            head = {"authorization": "授权申请", "escalation": "升级命令申请"}.get(op, op)
+            head = {"authorization": "授权申请"}.get(op, op)
             note = str(p.get("note", "")).strip()
             tail = f"：{note[:300]}" if note else "（未附理由）"
             lines.append(f"❌ {head}被人类拒绝{tail}——不要继续等待，按当前边界换路。")

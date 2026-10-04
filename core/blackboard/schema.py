@@ -9,7 +9,12 @@
 
 import sqlite3
 
-SCHEMA_VERSION = 30
+SCHEMA_VERSION = 31
+
+# v30→v31（会话流 cc-haha 对齐，2026-10-04）：chat_messages 幂等补 thinking
+# （assistant 行=该步推理正文，''=无）。此前思考只经 chat.thinking 事件实时
+# 上屏、轮结束即消失；落库后前端可持久渲染「已思考 <预览>」折叠行，展开看全文。
+# 不参与 LLM 重放（_load_history 只读 role/content/tool_calls），纯展示列。
 
 # v29→v30（结构化漏洞报告）：findings 新增报告正文与内嵌 POC 字段；历史行
 # 保持默认空值，由前端兼容展示旧 evidence，不做自动猜测迁移。
@@ -33,7 +38,7 @@ SCHEMA_VERSION = 30
 # v22→v23（TRAE 新壳 M3 chip 全通，docs/plans/webui-trae-shell.md，2026-09-25）：
 # tasks 幂等补 preferred_runtime（''=未设；host/wsl/docker/sandbox）——runtime chip
 # 写入的任务级默认运行时：run_cmd 省略 runtime 时由工具调度层按此回填，单条命令
-# 显式传 runtime 仍可临时覆盖（角色 max_runtime 软上限照常生效）。
+# 显式传 runtime 仍可临时覆盖。
 
 # v21→v22（渗透链路图 v3，docs/plans/website-attack-path-graph.md，2026-09-24）：
 # 新表 intents 由 DDL 的 IF NOT EXISTS 直接建表（无 ALTER，幂等）——意图（规划
@@ -447,6 +452,7 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     thread_id   TEXT NOT NULL REFERENCES chat_threads(id),
     role        TEXT NOT NULL,               -- user / assistant / tool
     content     TEXT NOT NULL DEFAULT '',    -- 文本（tool 行=工具结果全文）
+    thinking    TEXT NOT NULL DEFAULT '',    -- assistant 行：该步推理正文（v31；''=无）
     tool_calls  TEXT NOT NULL DEFAULT '[]',  -- assistant 行 JSON：[{id,name,args}]
     tool_use_id TEXT NOT NULL DEFAULT '',    -- tool 行：对应的 tool_call id
     created_at  TEXT NOT NULL
@@ -515,7 +521,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
       （业务逻辑块，无 ALTER，旧库打开即建）。
     - v27→v28：chat_threads 幂等补 error（轮次失败结构化错误，见文件头版本注释）。
     - v28→v29：无锚点且 open 的存量意图落 intent.anchor_required 审计事件
-      （closed 不动；幂等靠 meta 键去重，见文件头版本注释）。"""
+      （closed 不动；幂等靠 meta 键去重，见文件头版本注释）。
+    - v30→v31：chat_messages 幂等补 thinking（assistant 行推理正文，见文件头
+      版本注释）。"""
     cols = {r[1] for r in conn.execute("PRAGMA table_info(projects)")}
     if "track" not in cols:
         conn.execute("ALTER TABLE projects ADD COLUMN track TEXT NOT NULL DEFAULT ''")
@@ -529,6 +537,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if chat_cols and "error" not in chat_cols:  # v28（轮次失败结构化错误）
         conn.execute(
             "ALTER TABLE chat_threads ADD COLUMN error TEXT NOT NULL DEFAULT ''")
+    msg_cols = {r[1] for r in conn.execute("PRAGMA table_info(chat_messages)")}
+    if msg_cols and "thinking" not in msg_cols:  # v31（思考正文持久化）
+        conn.execute(
+            "ALTER TABLE chat_messages ADD COLUMN thinking TEXT NOT NULL DEFAULT ''")
     task_cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
     if "context_refs" not in task_cols:
         conn.execute(

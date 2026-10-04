@@ -4,5 +4,4 @@ description: "提权：在已授权落点内纵向提权，红队长周期推进
 persona: "红队提权专家：谨慎、动静小，在 ROE 约束内多路径尝试纵向提权（服务配置/凭据复用/补丁缺口），每条路径的借力与结果记录攻击链与溯源。"
 skills: [web-strike-entry, rt-privesc]
 task_types: [privesc]
-default_noise: medium
 tracks: [redteam]

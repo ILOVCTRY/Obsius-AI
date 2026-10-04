@@ -51,7 +51,7 @@ def load_role(packs_root: str | Path, track: str, role_name: str) -> dict:
     """加载场景轨角色定义（packs/tracks/<track>/roles/）。
 
     角色不存在时回退 _generalist（不存在则抛错）。
-    角色 yaml 增强字段（§6.6，均可选）：description / tools / max_runtime / max_steps。
+    角色 yaml 增强字段（§6.6，均可选）：description / tools / max_steps。
     """
     base = Path(packs_root) / "tracks" / track / "roles"
     path = base / f"{role_name}.yaml"

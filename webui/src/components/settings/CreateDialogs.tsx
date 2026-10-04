@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 
-// 新建专家（expert-pool M3）与新建技能（薄路由向导）对话框。专家 slug 只允许小写
+// 新建专家（expert-pool M3）与新建自包含技能对话框。专家 slug 只允许小写
 // 字母数字与 -（ASCII 文件名/命令引用面），服务端同口径 422 + 重名 409，错误直接展示 detail。
 
 const SLUG_HINT = "英文 slug：字母/数字/_-/.，1-64 字符（如 web-recon）"
@@ -119,20 +119,20 @@ export function SkillCreateDialog({ open, onOpenChange, source, packName, onCrea
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
-        <DialogTitle>新建中文薄路由技能</DialogTitle>
+        <DialogTitle>新建自包含技能</DialogTitle>
         <DialogDescription>
           {source === "cap" ? `capabilities/${packName}/skills/` : `tracks/${packName}/skills/`}
-          下生成 SKILL.md 模板（特征→kb_open 对照表骨架）。
+          下生成 cc 风格 SKILL.md 模板；详细资料可放入同目录 references/、scripts/、examples/ 或 assets/。
         </DialogDescription>
         <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="技能 slug，如 web-strike-entry"
                className="font-mono text-xs" autoFocus />
         <p className="-mt-1 text-[10px] text-muted-foreground">{SLUG_HINT}</p>
         <Input value={description} onChange={(e) => setDescription(e.target.value)}
-               placeholder="一句话描述（路由 description×1 加权）" className="text-xs" />
+               placeholder="一句话描述（用于技能清单）" className="text-xs" />
         <Input value={keywords} onChange={(e) => setKeywords(e.target.value)}
-               placeholder="关键词 keywords，逗号/空格分隔（×2 加权）" className="font-mono text-xs" />
+               placeholder="关键词 keywords，逗号/空格分隔" className="font-mono text-xs" />
         <Input value={fileFeatures} onChange={(e) => setFileFeatures(e.target.value)}
-               placeholder="文件特征 file_features，如 NX, Canary, PIE（×3 加权）"
+               placeholder="文件特征 file_features，如 NX, Canary, PIE"
                className="font-mono text-xs"
                onKeyDown={(e) => e.key === "Enter" && name.trim() && submit()} />
         <ErrorLine err={err} />

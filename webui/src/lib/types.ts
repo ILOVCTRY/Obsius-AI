@@ -407,7 +407,12 @@ export interface Asset {
   type: string
   value: string
   parent_id: string | null
-  status: string   // E7：open / visited / scanning / tested_clean
+  status: string   // E7：持久化显式状态
+  /** E7：资产树读时派生状态；父节点所有子节点收敛后可为 tested_clean */
+  effective_status?: string
+  status_basis?: "explicit" | "derived"
+  settled?: boolean
+  has_findings?: boolean
   meta: Record<string, unknown>
   author: string
   created_at: string
@@ -754,9 +759,7 @@ export interface RoleInfo {
   description?: string | null
   persona?: string | null
   task_types: string[] | null
-  default_noise?: string | null
   tools?: string[] | null
-  max_runtime?: string | null
   max_steps?: number | null
 }
 
@@ -768,7 +771,6 @@ export interface Approval {
   risk: string
   /** M5 D2：行动边界全文（server 拼好，与编排器 _mission_section 同源），审批卡对照显示 */
   boundary?: string
-  /** H3：escalation 执行完置 consumed（一次性消费，语义上属已批准分支） */
   status: "pending" | "approved" | "rejected" | "consumed"
   requested_by: string
   decided_by?: string | null
@@ -809,7 +811,6 @@ export interface SpawnSessionAction {
 }
 
 // decide 响应：命中 op 处理器才带 executed；失败不回滚批准（executed:false + error）
-// H3：escalation 执行完 approval 置 consumed（一次性消费），响应多 exit_code
 export interface DecideApprovalResult {
   approval_id: string
   status: "approved" | "rejected"
@@ -1058,9 +1059,7 @@ export interface PackRole {
   persona?: string | null
   skills: string[] | null
   task_types: string[] | null
-  default_noise?: string | null
   tools?: string[] | null
-  max_runtime?: string | null
   max_steps?: number | null
   file: string // yaml 文件名（去 .yaml 后即角色 id，sessions.role/URL/日志标识）
 }
@@ -1074,9 +1073,7 @@ export interface Expert {
   tracks?: string[] | null // null/缺省 = 服务全部轨
   skills?: string[] | null // null = 全量专家（不限定）
   task_types?: string[] | null
-  default_noise?: string | null
   tools?: string[] | null
-  max_runtime?: string | null
   max_steps?: number | null
   protected?: boolean // _generalist 兜底专家，拒删
   variants?: Record<string, Record<string, unknown>> // {track: {field: value}} 轨变体
@@ -1145,9 +1142,7 @@ export interface ExpertBody {
   tracks?: string[] | null
   skills?: string[] | null
   task_types?: string[] | null
-  default_noise?: string | null
   tools?: string[] | null
-  max_runtime?: string | null
   max_steps?: number | null
   variants?: Record<string, Record<string, unknown>> | null
 }
@@ -1180,6 +1175,12 @@ export interface SkillDef {
   task_types: string[]
   required_tools: string[]
   enabled: boolean
+  /** cc 风格技能：正文自包含，辅助资料位于技能目录资源子目录。 */
+  mode?: "self-contained" | "legacy" | "thin-route" | string
+  self_contained?: boolean
+  resources?: string[]
+  expert_refs?: string[]
+  estimated_tokens?: number
 }
 
 export interface SkillDetail {
@@ -1187,6 +1188,38 @@ export interface SkillDetail {
   meta: Record<string, unknown>
   skill: SkillDef | null
   raw: string // SKILL.md 全文（含 frontmatter，可编辑）
+  resources?: string[]
+}
+
+export interface SkillResource {
+  path: string
+  content: string
+}
+
+export interface SkillCatalogPackage {
+  name: string
+  label: string
+  skills: SkillDef[]
+  skill_count: number
+  estimated_tokens: number
+}
+
+export interface SkillCatalog {
+  capabilities: SkillCatalogPackage[]
+  skill_count: number
+  capability_count: number
+  estimated_tokens: number
+}
+
+export interface SkillFileEntry {
+  path: string
+  name: string
+  is_dir: boolean
+  size: number
+  modified: number
+  kind: "text" | "image" | "binary"
+  content?: string
+  preview?: string
 }
 
 /** 路由评分分类明细（breakdown，C5） */
@@ -1555,6 +1588,23 @@ export interface BrowserSessionInfo {
   last_action_at?: number | null
 }
 
+export type WorkspaceTreeKind = "file" | "dir"
+
+export interface WorkspaceTreeNode {
+  name: string
+  path: string
+  kind: WorkspaceTreeKind
+  size?: number
+  children?: WorkspaceTreeNode[]
+}
+
+export interface WorkspaceTreeResponse {
+  root: string
+  nodes: WorkspaceTreeNode[]
+  truncated: boolean
+  limits: { max_depth: number; max_nodes: number; max_children: number }
+}
+
 export interface BrowserState {
   sessions: BrowserSessionInfo[]
   profile_dir: string
@@ -1840,6 +1890,8 @@ export interface ChatMessage {
   thread_id: string
   role: "user" | "assistant" | "tool"
   content: string
+  /** assistant 行：该步推理正文（schema v31 持久化；''=无）。仅展示，不参与 LLM 重放。 */
+  thinking?: string
   tool_calls: ChatToolCall[]
   tool_use_id: string
   created_at: string
@@ -1848,6 +1900,8 @@ export interface ChatMessage {
 export interface ChatThreadDetail {
   thread: ChatThread
   messages: ChatMessage[]
+  /** 项目工作区绝对路径（会话流文件卡把工具参数里的绝对路径落回相对路径用） */
+  work_dir?: string
 }
 
 export interface ChatMcpTool {
@@ -1880,6 +1934,8 @@ export interface CoordinationTask {
   priority: number
   depends_on: string[]
   evidence: Record<string, unknown>[]
+  /** M3：计划节点绑定的真实 tasks.id；空=尚未派单 */
+  task_id: string
   created_at: string
   updated_at: string
   verification?: CoordinationVerification | null
@@ -1904,6 +1960,26 @@ export interface CoordinationOverview {
   objects: CoordinationObject[]
   conflicts: CoordinationConflict[]
   summary: { plans: number; tasks: number; running: number; blocked: number; completed: number; objects: number; conflicts: number }
+}
+export interface CoordinationPreflight {
+  plan_id: string
+  status: CoordinationPlanStatus
+  revision: string
+  plan: CoordinationPlan
+  dependencies: { task_count: number; root_count: number; ready_count: number; blocked_count: number; cycle: boolean; unresolved: { task_id: string; dependency: string }[] }
+  safety: { track: string; mission: Record<string, unknown>; roe: Record<string, unknown>; autonomy: Record<string, unknown> }
+  blockers: { code: string; severity: "error" | "warning"; message: string }[]
+}
+export interface CoordinationCommunication {
+  id: string
+  project_id: string
+  to_session: string
+  kind: string
+  ref_id: string
+  payload: Record<string, unknown>
+  created_at: string
+  read_at?: string | null
+  unread?: boolean
 }
 
 export type CoordinationObjectKind = "function" | "string" | "xref" | "behavior" | "evidence" | "artifact"

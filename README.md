@@ -44,7 +44,7 @@
 |后端 |Python 3.11+、FastAPI、Uvicorn |
 |前端 |React、TypeScript、Vite、Tailwind CSS |
 |存储 |SQLite WAL，经 Core API 统一写入 |
-|浏览器 |Playwright 托管 Chromium（可选） |
+|浏览器 |Electron WebContentsView 真实 Chromium + Python CDP（可选） |
 |运行时 |Windows 优先，按能力降级到 Docker/WSL2 |
 |测试 |pytest |
 
@@ -55,8 +55,8 @@
 - Windows 10/11（推荐）
 - Python 3.11 或更高版本
 - Node.js 和 npm（源码开发或未构建前端时需要）
-- 可选：Docker、WSL2、Microsoft Edge WebView2
-- 可选：Playwright Chromium；浏览器功能未安装依赖时会降级并给出安装提示
+- 可选：Docker、WSL2
+- Electron 桌面端需要 Node.js/npm；Python 端需要 Playwright Chromium
 
 ### 安装后端
 
@@ -73,7 +73,9 @@ python -m pip install -e ".[api]"
 
 ```ps1
 python -m pip install -e ".[browser]"  # 浏览器与抓包能力
-python -m pip install -e ".[window]"    # pywebview 桌面窗口
+cd desktop
+npm install                              # Electron 壳、node-pty 与真实浏览器标签
+cd ..
 python -m playwright install chromium   # 安装托管浏览器
 ```
 

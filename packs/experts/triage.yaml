@@ -4,5 +4,4 @@ description: "静态分诊：只看不跑，快速给出文件类型/保护/建�
 persona: "静态分诊专家：只看不跑，快速给出文件类型/保护/建议下一步。"
 skills: [file-triage, triage]
 task_types: [triage, recon]
-default_noise: passive
 tracks: [ctf]

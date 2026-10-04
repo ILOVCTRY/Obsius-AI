@@ -4,5 +4,4 @@ description: "CTF pwn 解题：checksec 起手按保护组合路由 pwn 手册�
 persona: "CTF pwn 解题手：checksec 起手，按保护组合（NX/PIE/canary/RELRO）路由 pwn/ kb 模块选利用路径（ret2libc/格式化字符串/堆利用/SROP…）；反编译前先查 func_kb，exp 脚本与偏移落黑板；exp 只准 docker/sandbox 容器执行，不虚报可用性——本地打通才算数。"
 skills: [file-triage, binary-rev, binary-pwn]
 task_types: [solve, reverse, verify]
-default_noise: passive
 tracks: [ctf]

@@ -26,6 +26,7 @@ import json
 import hashlib
 import inspect
 import logging
+import sqlite3
 import threading
 import time
 import uuid
@@ -34,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from core.agent.tools import AGENT_TOOLS, ToolDispatcher
+from core.blackboard.store import BlackboardClosedError
 from core.blackboard.tasks import TaskQueue
 from core.chat import store as chat_store
 from core.chat.mcp_bridge import MCPBridge
@@ -58,7 +60,7 @@ _EXPERT_EXCLUDED = {
     "task_plan", "task_step", "task_reconcile", "publish_task",
     "complete_task", "fail_task", "finish", "request_steps",
     "propose_pack_edit",
-    "bb_notify", "request_authorization", "request_escalation",
+    "bb_notify", "request_authorization",
 }
 
 # 意图三件套（对话链也要，语义=规划产物与收尾纪律，不依赖任务队列）
@@ -73,8 +75,13 @@ _ORCH_BASE_TOOLS = ("todo_write", "call_expert", "skill_open",
 _ORCH_MAX_STEPS = 200
 _EXPERT_MAX_STEPS = 200
 
-_DELTA_MIN_CHARS = 80
-_DELTA_MIN_INTERVAL = 1.0
+# 流式节流（2026-10-04 顺滑化）：由 80 字符/1s 一路压到 6 字符/0.05s（约 20Hz）——
+# 文本按大块跳变是「一顿顿的」的直接来源。**真正的瓶颈不只在节流**：WS 投递节奏
+# （app.py `ws_events` 轮询间隔）与前端 flush 窗口都要同步压密，只降节流=白降。
+# 写入开销实测 2.7ms/次（synchronous=FULL），20Hz ≈ 5% 线程占用，可接受；每条携带
+# 累计全文，故 run() 正常收尾后调 prune_chat_thread_deltas 清剪。
+_DELTA_MIN_CHARS = 6
+_DELTA_MIN_INTERVAL = 0.05
 
 # 工具参数流截断的整轮重试上限（2026-10-01 事故修复）：工具参数 JSON 残缺/截断
 # （LLMError.truncated）时，流不可重放 → 轮级重发 ≤2 次（与 agent 循环同口径）。
@@ -231,6 +238,15 @@ _ERROR_CATEGORIES: dict[str, tuple[str, str]] = {
         "网关流异常",
         "工具参数流被网关异常中断（SSE 尾部冗余/截断）。系统已自动整轮重试；"
         "若仍失败，请重发该指令或改述。"),
+    "filesystem": (
+        "文件访问失败",
+        "读取本地文件/目录时失败（文件被移动或删除、被安全软件/索引服务瞬时占用）。"
+        "系统已自动重试仍未成功——请确认相关文件仍在原位后重发；"
+        "若文件已被删除，新开线程可绕开残留引用。"),
+    "db": (
+        "数据存储异常",
+        "读写项目数据库失败（项目可能正在删除/重建，或进程刚重启）。"
+        "请稍后重试；若持续出现，检查该项目是否已被删除。"),
     "unknown": (
         "执行异常",
         "本轮执行发生未预期异常。技术细节见下方，可据此进一步排查或反馈。"),
@@ -282,73 +298,96 @@ def _classify_error(e: BaseException) -> dict[str, str]:
         cat = "quota"
     elif status == 400 or "400" in msg or "invalidparameter" in low:
         cat = "bad_request"
+    elif isinstance(e, sqlite3.Error) or isinstance(e, BlackboardClosedError):
+        cat = "db"
+    # 文件系统类放最后：TimeoutError/ConnectionError 是 OSError 子类，已在上面
+    # 的 network 分支拦下，不会误落此处。
+    elif isinstance(e, OSError):
+        cat = "filesystem"
     else:
         cat = "unknown"
     title, hint = _ERROR_CATEGORIES[cat]
     return {"category": cat, "title": title, "message": msg[:600], "hint": hint}
 
 
-def _sanitize_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """历史校验兜底（2026-10-01 健壮性）：修复悬空 tool_use / 孤儿 tool_result。
+def _retry_transient(fn, *, attempts: int = 2, delay: float = 0.25):
+    """瞬时 IO/DB 错误重试（2026-10-03 健壮性）：Windows 安全软件/索引服务会
+    短暂锁文件（FileNotFoundError/PermissionError），项目库偶发 locked——退避
+    重试 1 次往往即过。**只重试 OSError/sqlite3.Error**；BlackboardClosedError
+    等语义性错误（项目正在删除）立即上抛，不浪费重试。"""
+    for i in range(attempts):
+        try:
+            return fn()
+        except (OSError, sqlite3.Error) as e:
+            if i >= attempts - 1:
+                raise
+            log.warning("瞬时 IO/DB 错误，%.2fs 后重试（%d/%d）：%s",
+                        delay, i + 1, attempts - 1, e)
+            time.sleep(delay)
 
-    网关要求「assistant(tool_use) 之后必须紧跟对应的 tool_result」，否则 400
-    （insufficient tool messages following tool_calls）——一旦历史被写坏，该线程
-    后续每轮必失败（永久损坏）。这里在装载后做一次重建：
-      - 每个含 tool_use 的 assistant 消息，其 id 集合都必须有对应的 tool_result；
-        缺失的补一条占位结果；
-      - 不属于任何 tool_use 的孤儿 tool_result 丢弃。
-    正常历史零改动（幂等）。"""
-    # 旧版本的 Responses 解析器曾可能把 function_call 落成空 name。
-    # 这种记录即使 tool_result 配对完整，网关转换时仍会因 name="" 返回 400；
-    # 无法从历史可靠推断真实工具名，只能丢弃该调用（其结果随后作为孤儿丢弃）。
+
+def _sanitize_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """重建严格配对的 tool-use/tool-result 历史，兼容旧版本坏记录。
+
+    网关要求每个 assistant tool-use id 唯一，且紧随一个同 id 的 tool result；
+    旧工作台线程可能已经持久化重复/错配调用，这里只修复内存回放，不改原始审计。
+    """
     cleaned: list[dict[str, Any]] = []
     for m in messages:
         if m.get("role") != "assistant" or not isinstance(m.get("content"), list):
             cleaned.append(m)
             continue
-        blocks = []
+        blocks: list[dict[str, Any]] = []
+        seen: set[str] = set()
         for b in m["content"]:
             if not isinstance(b, dict) or b.get("type") != "tool_use":
                 blocks.append(b)
                 continue
-            if str(b.get("id") or "").strip() and str(b.get("name") or "").strip():
+            tid = str(b.get("id") or "").strip()
+            name = str(b.get("name") or "").strip()
+            if tid and name and tid not in seen:
+                seen.add(tid)
                 blocks.append(b)
         if blocks:
             cleaned.append({**m, "content": blocks})
 
-    messages = cleaned
     out: list[dict[str, Any]] = []
     i = 0
-    n = len(messages)
-    while i < n:
-        m = messages[i]
-        tool_use_ids = [
-            b.get("id") for b in (m.get("content") or [])
-            if isinstance(b, dict) and b.get("type") == "tool_use"
-        ] if m.get("role") == "assistant" else []
-        if tool_use_ids:
+    while i < len(cleaned):
+        m = cleaned[i]
+        use_ids = [str(b.get("id")) for b in (m.get("content") or [])
+                   if isinstance(b, dict) and b.get("type") == "tool_use"] \
+            if m.get("role") == "assistant" else []
+        if use_ids:
             out.append(m)
-            results: list[dict[str, Any]] = []
-            if i + 1 < n and messages[i + 1].get("role") == "user" \
-                    and isinstance(messages[i + 1].get("content"), list):
-                for b in messages[i + 1]["content"]:
-                    if isinstance(b, dict) and b.get("type") == "tool_result" \
-                            and b.get("tool_use_id") in tool_use_ids:
-                        results.append(b)
-                i += 1  # 消费原 tool_result 消息（孤儿一并丢弃后重建）
-            have = {b.get("tool_use_id") for b in results}
-            for tid in tool_use_ids:
-                if tid not in have:
-                    results.append({
-                        "type": "tool_result", "tool_use_id": tid,
-                        "content": "（该工具调用无结果记录：历史已自动修复）"})
+            candidates: list[dict[str, Any]] = []
+            j = i + 1
+            while j < len(cleaned):
+                nxt = cleaned[j]
+                if nxt.get("role") != "user" or not isinstance(nxt.get("content"), list):
+                    break
+                tool_blocks = [b for b in nxt["content"]
+                               if isinstance(b, dict) and b.get("type") == "tool_result"]
+                if not tool_blocks:
+                    break
+                candidates.extend(tool_blocks)
+                j += 1
+            by_id: dict[str, dict[str, Any]] = {}
+            for b in candidates:
+                tid = str(b.get("tool_use_id") or "").strip()
+                if tid in use_ids and tid not in by_id:
+                    by_id[tid] = b
+            results = [by_id[tid] for tid in use_ids if tid in by_id]
+            results.extend({"type": "tool_result", "tool_use_id": tid,
+                            "content": "（该工具调用无结果记录：历史已自动修复）"}
+                           for tid in use_ids if tid not in by_id)
             out.append({"role": "user", "content": results})
-            i += 1
+            i = j if j > i + 1 else i + 1
             continue
         if m.get("role") == "user" and isinstance(m.get("content"), list) \
                 and any(isinstance(b, dict) and b.get("type") == "tool_result"
                         for b in m["content"]):
-            i += 1  # 孤儿 tool_result 组（前面无匹配 tool_use）→ 丢弃
+            i += 1
             continue
         out.append(m)
         i += 1
@@ -416,24 +455,29 @@ class ChatTurn:
     def _build_dispatcher(self) -> ToolDispatcher | None:
         """复用 ToolDispatcher 的黑板/技能/网关工具处理器（run_cmd/http/
         kb/skill/bb_* 全套安全机制免费拿）；allowed_tools 按线程角色收敛。"""
-        if self.is_orchestrator:
-            allowed = [t for t in _ORCH_BASE_TOOLS if t != "todo_write"
-                       and t != "call_expert"]
-        else:
-            names = expert_tool_names(self.packs_root, self.agent_id,
-                                      self.track)
-            if names is None:
-                # None=未配 tools 字段，契约语义是「全量裁剪」（与 _tool_specs
-                # 同一处理）——8cb819d 首版曾把 None or [] 当空白名单降级为
-                # 无工具面，专家线程所有工具报「不可用：本线程未装配工具面」
-                names = [s["name"] for s in AGENT_TOOLS
-                         if s["name"] not in _EXPERT_EXCLUDED]
-            allowed = names
-        allowed = [t for t in allowed if t not in ("todo_write", "call_expert")]
-        if not allowed:
+        try:
+            if self.is_orchestrator:
+                allowed = [t for t in _ORCH_BASE_TOOLS if t != "todo_write"
+                           and t != "call_expert"]
+            else:
+                names = expert_tool_names(self.packs_root, self.agent_id,
+                                          self.track)
+                if names is None:
+                    # None=未配 tools 字段，契约语义是「全量裁剪」（与 _tool_specs
+                    # 同一处理）——8cb819d 首版曾把 None or [] 当空白名单降级为
+                    # 无工具面，专家线程所有工具报「不可用：本线程未装配工具面」
+                    names = [s["name"] for s in AGENT_TOOLS
+                             if s["name"] not in _EXPERT_EXCLUDED]
+                allowed = names
+            allowed = [t for t in allowed
+                       if t not in ("todo_write", "call_expert")]
+            if not allowed:
+                return None
+            expert = load_expert(self.packs_root, self.agent_id, self.track) \
+                if not self.is_orchestrator else {}
+        except Exception:  # noqa: BLE001 —— 白名单/专家 yaml 读取失败降级无工具面
+            log.exception("chat 工具面白名单装配失败 thread=%s", self.thread_id)
             return None
-        expert = load_expert(self.packs_root, self.agent_id, self.track) \
-            if not self.is_orchestrator else {}
         try:
             dispatcher = ToolDispatcher(
                 self.bb, ExecutionGateway(bb=self.bb), TaskQueue(self.bb),
@@ -443,7 +487,6 @@ class ChatTurn:
                 packs_root=self.packs_root, track=self.track,
                 capabilities=self.capabilities,
                 allowed_tools=allowed,
-                max_runtime=expert.get("max_runtime"),
                 abort_event=self.abort_event,
                 artifacts_dir=self.artifacts_dir,
                 role_skills=expert.get("skills"))
@@ -552,15 +595,28 @@ class ChatTurn:
     # ---------- 系统提示 ----------
 
     def _system_prompt(self) -> str:
-        expert = load_expert(self.packs_root, self.agent_id, self.track)
+        # 降级不中断（2026-10-03）：系统提示是「增强注入」，专家 yaml / 规则链
+        # 任一读取失败（文件被删、Windows AV/索引瞬时锁、packs 目录缺失）都不该
+        # 让整轮对话炸成「执行异常 unknown」——回退空人设 / 空规则串继续跑。
+        try:
+            expert = load_expert(self.packs_root, self.agent_id, self.track)
+        except Exception:  # noqa: BLE001 —— 专家与兜底 yaml 双缺才抛，降级空人设
+            log.exception("chat 专家加载失败，回退空人设 thread=%s agent=%s",
+                          self.thread_id, self.agent_id)
+            expert = {}
+        try:
+            rules_preamble = build_rules_preamble(
+                self.packs_root, track=self.track,
+                capabilities=self.capabilities,
+                owner_tags=self.owner_tags, role=self.agent_id,
+                rule_profiles=self.rule_profiles)
+        except Exception:  # noqa: BLE001 —— 规则链读取失败降级为空串
+            log.exception("chat 规则链构建失败，降级为空 thread=%s", self.thread_id)
+            rules_preamble = ""
         # 规则链放最前（与任务链 stable_parts[0] 同构）：红线+owner 叠加+评级
         # 口径——子专家 bb_add_finding 判级引用 rating:<tag> 条款，主控汇总
         # 判级同样有据；role 传 agent_id，role-rules 文件存在时自动叠加
-        parts = [build_rules_preamble(
-                     self.packs_root, track=self.track,
-                     capabilities=self.capabilities,
-                     owner_tags=self.owner_tags, role=self.agent_id,
-                     rule_profiles=self.rule_profiles),
+        parts = [rules_preamble,
                  f"# 角色：{expert.get('name', self.agent_id)}\n{expert.get('persona') or expert.get('description') or ''}"]
         if self.is_orchestrator:
             parts.append(
@@ -897,6 +953,13 @@ class ChatTurn:
         try:
             final = self._loop(user_text)
             chat_store.update_thread(self.bb, self.thread_id, status="idle")
+            # 正常收尾：清剪本轮流式 delta（终稿全文已在 chat_messages，事件只承担
+            # 实时可见）——不删则每条携带累计全文的 delta 行持续膨胀事件表。异常/
+            # 中断路径不调用（残留 delta = 被中断思考的现场审计）。
+            try:
+                self.bb.prune_chat_thread_deltas(self.project_id, self.thread_id)
+            except Exception:  # noqa: BLE001 —— 清剪失败不影响收尾
+                log.exception("chat delta 清剪失败 thread=%s", self.thread_id)
             return final
         except Exception as e:  # noqa: BLE001 —— 失败落结构化错误+事件，不静默
             log.exception("chat 轮失败 thread=%s", self.thread_id)
@@ -922,8 +985,10 @@ class ChatTurn:
                              + "、".join(self._refs["mcps"]) + " 的工具完成相关任务")
             refs_tail = "\n".join(parts)
             system += refs_tail
-        messages = self._load_history()
-        tools = self._tool_specs()
+        # 装载期瞬时 IO/DB 错误退避重试 1 次（2026-10-03）：历史读库与工具规格
+        # 都会读盘（专家 yaml / 技能注册表），Windows 下偶发文件锁不该炸整轮。
+        messages = _retry_transient(self._load_history)
+        tools = _retry_transient(self._tool_specs)
         max_steps = _ORCH_MAX_STEPS if self.is_orchestrator else _EXPERT_MAX_STEPS
         final = ""
         # 截断续写状态（2026-10-01）：continue_n=已续写次数；text_acc=逐段文本拼接
@@ -1058,8 +1123,16 @@ class ChatTurn:
                 break
             text = resp.text or ""
             if resp.tool_calls:
+                call_ids = [str(tc.id or "").strip() for tc in resp.tool_calls]
+                if (any(not cid for cid in call_ids)
+                        or len(call_ids) != len(set(call_ids))
+                        or any(not str(tc.name or "").strip()
+                               or not isinstance(tc.arguments, dict)
+                               for tc in resp.tool_calls)):
+                    raise LLMError("工作台工具调用 ID/名称/参数不满足序列协议")
                 row = chat_store.append_message(
                     self.bb, self.thread_id, "assistant", text,
+                    thinking=thinking,
                     tool_calls=[{"id": tc.id, "name": tc.name,
                                  "args": tc.arguments} for tc in resp.tool_calls])
                 self._flush_final_delta(text, row["id"])
@@ -1070,6 +1143,19 @@ class ChatTurn:
                 ]})
                 tool_result_blocks: list[dict[str, Any]] = []
                 aborted = False
+                serial_results: dict[str, tuple[bool, str, float]] = {}
+                # 先执行混合批次中的普通工具；只有它们完成后才启动专家线程，
+                # 避免 todo_write/bb_query 与专家并发写共享状态。
+                for tc in resp.tool_calls:
+                    if tc.name == "call_expert" or self._aborted():
+                        continue
+                    started = time.perf_counter()
+                    self._emit("chat.tool", {
+                        "phase": "start", "name": tc.name,
+                        "args_head": json.dumps(tc.arguments, ensure_ascii=False,
+                                                 separators=(",", ":"))[:300]})
+                    ok, result = self._dispatch(tc)
+                    serial_results[tc.id] = (ok, result, started)
                 parallel_results = self._parallel_expert_dispatch(resp.tool_calls)
                 for tc in resp.tool_calls:
                     if aborted or self._aborted():
@@ -1091,7 +1177,12 @@ class ChatTurn:
                         # 并发 call_expert 已在 worker 中完成；这里按模型原始
                         # tool_call 顺序持久化结果，保证下一轮历史稳定可重放。
                         ok, result = parallel_results[tc.id]
+                        started = time.perf_counter()
+                    elif tc.id in serial_results:
+                        ok, result, started = serial_results[tc.id]
                     else:
+                        # 单个 call_expert 保留原有串行路径；普通工具已在前置阶段执行。
+                        started = time.perf_counter()
                         self._emit("chat.tool", {
                             "phase": "start", "name": tc.name,
                             "args_head": json.dumps(
@@ -1105,7 +1196,7 @@ class ChatTurn:
                     tool_result_blocks.append({
                         "type": "tool_result", "tool_use_id": tc.id,
                         "content": result})
-                    if tc.id not in parallel_results:
+                    if tc.id not in parallel_results and tc.id in serial_results:
                         self._emit("chat.tool", {
                             "phase": "done",
                             "name": tc.name, "args_head": json.dumps(
@@ -1140,7 +1231,8 @@ class ChatTurn:
                         "phase": "continue", "continues": continue_n,
                         "text_head": text[:200]})
                     row = chat_store.append_message(
-                        self.bb, self.thread_id, "assistant", text)
+                        self.bb, self.thread_id, "assistant", text,
+                        thinking=thinking)
                     self._flush_final_delta(text, row["id"])
                     messages.append({"role": "assistant", "content": text})
                     messages.append({"role": "user", "content": _CONTINUE_NUDGE})
@@ -1160,7 +1252,8 @@ class ChatTurn:
                            {"phase": "blocked", "open_intents": open_ids})
                 continue
             row = chat_store.append_message(self.bb, self.thread_id,
-                                            "assistant", text)
+                                            "assistant", text,
+                                            thinking=thinking)
             self._flush_final_delta(text, row["id"])
             self._emit("chat.message", {"role": "assistant",
                                         "text": text[:2000],
@@ -1200,27 +1293,37 @@ class ChatTurn:
 
     def _dispatch(self, tc) -> tuple[bool, str]:
         """工具分发：返回 (ok, 结果文本)。失败文案统一以「[错误]」前缀，
-        是持久化消息与前端渲染共用的单点失败判定约定。"""
+        是持久化消息与前端渲染共用的单点失败判定约定。
+
+        **兜底红线（2026-10-03）**：整个分发体包一层 try——工具是 LLM 驱动的
+        循环，任何工具侧异常（含 `call_expert` 的 ChatTurn 构造读专家 yaml 失败
+        这类「非 _dispatcher 分支」）都必须**转成 tool_result 文本回给 LLM**，
+        让它自行改道/重试；此前只有 `_dispatcher.dispatch` 分支有 try，其余分支
+        （mcp__ / todo_write / call_expert）抛出的异常会直接穿出 `_loop` 把整轮
+        炸成「执行异常 unknown」——工具失败不该是轮失败。"""
         if self._aborted():
             return False, "[错误] 已停止：工具未执行"
-        name, args = tc.name, tc.arguments or {}
-        if name.startswith("mcp__"):
-            r = self._dispatch_mcp(name, args)
-            return not r.startswith("[错误"), r
-        if name == "todo_write":
-            r = self._tool_todo_write(args)
-            return not r.startswith("[错误"), r
-        if name == "call_expert":
-            r = self._tool_call_expert(args)
-            return not r.startswith("[错误"), r
-        if self._dispatcher is not None:
-            try:
+        name = getattr(tc, "name", "") or ""
+        try:
+            args = tc.arguments or {}
+            if name.startswith("mcp__"):
+                r = self._dispatch_mcp(name, args)
+                return not r.startswith("[错误"), r
+            if name == "todo_write":
+                r = self._tool_todo_write(args)
+                return not r.startswith("[错误"), r
+            if name == "call_expert":
+                r = self._tool_call_expert(args)
+                return not r.startswith("[错误"), r
+            if self._dispatcher is not None:
                 r = self._dispatcher.dispatch(name, args)
                 # agent 工具面失败文本约定（[错误] 为主，兼容 [工具异常]/[参数格式]）
                 return not r.startswith(("[错误", "[工具异常", "[参数格式")), r
-            except Exception as e:  # noqa: BLE001 —— 工具异常回文本不断轮
-                return False, f"[错误] 工具异常: {e}"
-        return False, f"[错误] 工具 {name} 不可用：本线程未装配工具面"
+            return False, f"[错误] 工具 {name} 不可用：本线程未装配工具面"
+        except Exception as e:  # noqa: BLE001 —— 工具异常回文本，绝不炸整轮
+            log.exception("chat 工具分发异常 name=%s thread=%s",
+                          name, self.thread_id)
+            return False, f"[错误] 工具 {name} 执行异常: {e}"
 
     def _parallel_expert_dispatch(self, tool_calls) -> dict[str, tuple[bool, str]]:
         """并发执行同一批中的多个 call_expert，返回按 tool_call id 索引的结果。
@@ -1230,9 +1333,9 @@ class ChatTurn:
         的 worker 数有上限，超出的子专家在队列中等待。
         """
         experts = [tc for tc in tool_calls if tc.name == "call_expert"]
-        # 混合批次保持原有顺序：例如 call_expert + bb_query 不能让查询
-        # 被隐式延后。模型需要并发时应在同一批只生成独立的 call_expert。
-        if len(experts) < 2 or len(experts) != len(tool_calls):
+        # 混合批次中，非 call_expert 工具仍由主线程按原序执行；所有专家调用
+        # 默认视为相互独立并发。结果稍后按原始 tool_call 顺序落库，保证重放稳定。
+        if len(experts) < 2:
             return {}
         results: dict[str, tuple[bool, str]] = {}
 
@@ -1308,29 +1411,37 @@ class ChatTurn:
                     f"可用：{available}（这些是专家 id，不是技能名）")
         if self.llm is None:
             return "[错误] call_expert 失败：LLM 未装配"
-        # spawn 持久子线程（留档），隔离上下文跑完 → 摘要回传
-        sub = chat_store.create_thread(
-            self.bb, self.project_id, expert,
-            title=task[:40], parent_thread_id=self.thread_id,
-            spawned_task=task[:500])
-        self._emit("chat.spawn", {"thread_id": sub["id"], "expert": expert,
-                                  "task_head": task[:200]})
-        sub_turn = ChatTurn(
-            bb=self.bb, llm=self.llm, project_id=self.project_id,
-            thread_id=sub["id"], packs_root=self.packs_root,
-            track=self.track, capabilities=self.capabilities,
-            mcp_bridge=self.mcp_bridge, expert_names=[],
-            abort_event=self.abort_event,  # 停主控连带停执行中的子专家轮
-            owner_tags=self.owner_tags,
-            rule_profiles=self.rule_profiles,
-            artifacts_dir=self.artifacts_dir,
-            browser_pool=self.browser_pool,
-            decompiler_factory=self.decompiler_factory)
+        # spawn 持久子线程（留档），隔离上下文跑完 → 摘要回传。
+        # **构造也必须包在 try 内**（2026-10-03）：子 ChatTurn 构造会读专家 yaml /
+        # 装工具面，构造抛错（如 packs 缺文件）此前直接穿出把主控整轮炸掉；现
+        # 回文本，主控可改派或向人类说明。
+        sub_id = ""
         try:
+            sub = chat_store.create_thread(
+                self.bb, self.project_id, expert,
+                title=task[:40], parent_thread_id=self.thread_id,
+                spawned_task=task[:500])
+            sub_id = sub["id"]
+            self._emit("chat.spawn", {"thread_id": sub_id, "expert": expert,
+                                      "task_head": task[:200]})
+            sub_turn = ChatTurn(
+                bb=self.bb, llm=self.llm, project_id=self.project_id,
+                thread_id=sub_id, packs_root=self.packs_root,
+                track=self.track, capabilities=self.capabilities,
+                mcp_bridge=self.mcp_bridge, expert_names=[],
+                abort_event=self.abort_event,  # 停主控连带停执行中的子专家轮
+                owner_tags=self.owner_tags,
+                rule_profiles=self.rule_profiles,
+                artifacts_dir=self.artifacts_dir,
+                browser_pool=self.browser_pool,
+                decompiler_factory=self.decompiler_factory)
             summary = sub_turn.run(task)
         except Exception as e:  # noqa: BLE001 —— 专家失败回文本，主控可改派
-            summary = f"[专家线程执行失败：{e}]"
-        return (f"专家线程 {sub['id']}（{expert}）已完成。\n"
+            log.exception("chat 子专家线程失败 expert=%s thread=%s",
+                          expert, self.thread_id)
+            return (f"[错误] call_expert 专家线程 {expert} 执行失败：{e}"
+                    + (f"（线程 {sub_id} 已留档）" if sub_id else ""))
+        return (f"专家线程 {sub_id}（{expert}）已完成。\n"
                 f"收尾摘要：\n{summary[:4000]}\n"
                 f"（人类可在工作台打开该线程查看全过程与追问）")
 

@@ -18,6 +18,7 @@ from core.chat.mcp_bridge import MCPBridge, _HttpConn
 from core.chat.runtime import (
     ORCHESTRATOR_ID,
     ChatTurn,
+    ChatTurn,
     _CTX_PLACEHOLDER_TAG,
     _CTX_SOFT_BUDGET,
     _CTX_SUMMARY_SYS,
@@ -181,21 +182,35 @@ def test_recover_running_threads(tmp_path):
 
 
 def test_chat_thinking_stream_events(tmp_path):
-    """工作台 ChatTurn 透传 on_thinking，并发布增量与终稿事件。"""
+    """工作台 ChatTurn 透传 on_thinking，并发布增量与终稿事件。
+
+    2026-10-04：流式增量行（chat.thinking.delta / chat.delta）在轮正常收尾后被
+    `prune_chat_thread_deltas` 清剪（终稿全文在 chat_messages，事件只承担实时
+    可见）——故增量经**事件总线订阅**捕获实时发布，不读落库残留。"""
     bb = Blackboard(str(tmp_path / "bb.db"))
     _mk_project(bb, "p1")
     thread = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID)
+    published: list[dict] = []
+    bb.bus.subscribe(published.append)
     turn = ChatTurn(bb=bb, llm=ThinkingLLM(), project_id="p1",
                     thread_id=thread["id"], packs_root="packs", track="ctf",
                     capabilities=["web"], mcp_bridge=None, expert_names=[])
 
     assert turn.run("分析") == "完成"
-    events = bb.recent_events("p1", limit=100)
-    deltas = [e for e in events if e["kind"] == "chat.thinking.delta"]
-    finals = [e for e in events if e["kind"] == "chat.thinking"]
+    deltas = [e for e in published if e["kind"] == "chat.thinking.delta"]
     assert deltas and deltas[-1]["payload"]["text"] == "先检查输入。再给出结论。"
+    assert all(e["payload"]["thread_id"] == thread["id"] for e in deltas)
+    # 终稿思考落库保留（审计），流式增量行已清剪（事件表不膨胀）
+    events = bb.recent_events("p1", limit=200)
+    finals = [e for e in events if e["kind"] == "chat.thinking"]
     assert finals and finals[-1]["payload"]["thinking"] == "先检查输入。再给出结论。"
-    assert all(e["payload"]["thread_id"] == thread["id"] for e in deltas + finals)
+    assert not [e for e in events if e["kind"] in
+                ("chat.thinking.delta", "chat.delta")]
+    # v31：思考正文随 assistant 消息落库（前端轮结束后持久渲染「已思考」折叠行）
+    assistants = [m for m in chat_store.list_messages(bb, thread["id"])
+                  if m["role"] == "assistant"]
+    assert assistants and assistants[-1]["thinking"] == "先检查输入。再给出结论。"
+    bb.close()
 
 
 # ---------- 运行时：主控轮（todo → call_expert → 汇总） ----------
@@ -300,6 +315,39 @@ def test_chat_orchestrator_parallel_call_expert_dispatch(tmp_path):
         _tc("e1", "call_expert", {"expert": "web-solver", "task": "任务一"}),
         _tc("e2", "call_expert", {"expert": "recon", "task": "任务二"}),
     ])
+    assert max_active == 2
+    assert results == {"e1": (True, "done:e1"), "e2": (True, "done:e2")}
+
+
+def test_mixed_tool_batch_runs_experts_concurrently_after_serial_tool(tmp_path):
+    """混合批次：普通工具先执行，多个 call_expert 再并发；结果顺序仍按原批次。"""
+    bb = Blackboard(str(tmp_path / "bb.db")); _mk_project(bb, "p1")
+    thread = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID)
+    turn = ChatTurn(bb=bb, llm=FakeLLM([]), project_id="p1", thread_id=thread["id"],
+                    packs_root="packs", track="ctf", capabilities=["web"],
+                    mcp_bridge=None, expert_names=["web-solver", "recon"])
+    entered = threading.Barrier(2); active = 0; max_active = 0; calls: list[str] = []
+    lock = threading.Lock()
+    def fake_dispatch(tc):
+        nonlocal active, max_active
+        calls.append(tc.name)
+        if tc.name == "call_expert":
+            with lock:
+                active += 1; max_active = max(max_active, active)
+            try:
+                entered.wait(timeout=2); return True, f"done:{tc.id}"
+            finally:
+                with lock: active -= 1
+        return True, "todo done"
+    turn._dispatch = fake_dispatch
+    batch = [_tc("todo", "todo_write", {"items": []}),
+             _tc("e1", "call_expert", {"expert": "web-solver", "task": "一"}),
+             _tc("e2", "call_expert", {"expert": "recon", "task": "二"})]
+    serial = []
+    for tc in batch:
+        if tc.name != "call_expert": serial.append((tc.id, turn._dispatch(tc)))
+    results = turn._parallel_expert_dispatch(batch)
+    assert calls[:1] == ["todo_write"]
     assert max_active == 2
     assert results == {"e1": (True, "done:e1"), "e2": (True, "done:e2")}
 
@@ -1559,6 +1607,25 @@ def test_sanitize_history_repairs_dangling_and_orphans():
             {"type": "tool_result", "tool_use_id": "ghost", "content": "x"}]},
     ]
     assert _sanitize_history(orphan) == [{"role": "user", "content": "hi"}]
+
+
+def test_sanitize_history_deduplicates_and_reorders_tool_results():
+    history = [
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "a", "name": "one", "input": {}},
+            {"type": "tool_use", "id": "a", "name": "duplicate", "input": {}},
+            {"type": "tool_use", "id": "b", "name": "two", "input": {}},
+        ]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "b", "content": "B"},
+            {"type": "tool_result", "tool_use_id": "b", "content": "B-dup"},
+            {"type": "tool_result", "tool_use_id": "ghost", "content": "bad"},
+            {"type": "tool_result", "tool_use_id": "a", "content": "A"},
+        ]},
+    ]
+    fixed = _sanitize_history(history)
+    assert [b["id"] for b in fixed[0]["content"]] == ["a", "b"]
+    assert [(b["tool_use_id"], b["content"]) for b in fixed[1]["content"]] == [("a", "A"), ("b", "B")]
 
 
 def test_sanitize_history_drops_empty_tool_names():

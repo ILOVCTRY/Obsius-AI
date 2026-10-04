@@ -1,21 +1,22 @@
-/* 评估画布深色化（DESIGN §12 克制黑客风）：
+/* 评估画布控件样式（DESIGN §12 克制黑客风）：
    xyflow 自带样式表是未分层 plain CSS，层叠优先级高于 Tailwind v4 的 utilities layer，
    组件内任意选择器压不住；故在 @xyflow/react/dist/style.css 之后引入本文件，
-   用 .fc-dark 提高特异性覆盖其白底控件。改这里后无需重启 Vite。 */
+   用 .fc-dark 提高特异性覆盖其白底控件。改这里后无需重启 Vite。
+   颜色一律走主题 token（--viz-*），随 data-theme 切换。 */
 
 .fc-dark .react-flow__controls {
   border-radius: 6px;
   overflow: hidden;
   box-shadow: none;
-  border: 1px solid #21262d;
+  border: 1px solid var(--viz-outline);
 }
 
 .fc-dark .react-flow__controls-button {
   width: 24px;
   height: 24px;
-  background: #161b22;
-  border-bottom: 1px solid #21262d;
-  fill: #8b949e;
+  background: var(--viz-card);
+  border-bottom: 1px solid var(--viz-outline);
+  fill: var(--viz-text-muted);
 }
 
 .fc-dark .react-flow__controls-button:last-child {
@@ -23,8 +24,8 @@
 }
 
 .fc-dark .react-flow__controls-button:hover {
-  background: #21262d;
-  fill: #e6edf3;
+  background: var(--viz-outline);
+  fill: var(--viz-text);
 }
 
 .fc-dark .react-flow__controls button svg {
@@ -33,12 +34,12 @@
 
 .fc-dark .react-flow__minimap {
   border-radius: 6px;
-  border: 1px solid #21262d;
-  background: #0d1117;
+  border: 1px solid var(--viz-outline);
+  background: var(--viz-canvas);
 }
 
 .fc-dark .react-flow__minimap-mask {
-  fill: rgba(13, 17, 23, 0.7);
+  fill: var(--viz-canvas-mask);
 }
 
 /* 边可点选（交互带 interactionWidth=14 由 xyflow 内部渲染，cursor 这里给） */

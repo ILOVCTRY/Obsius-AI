@@ -34,7 +34,7 @@ export function layout(links: ChainLink[], onRemove: (l: ChainLink) => void) {
       source: links[i - 1].id,
       target: links[i].id,
       label: links[i].edge_note || " ",
-      style: { stroke: "#39424e", strokeWidth: 1.5 },
+      style: { stroke: "var(--viz-edge)", strokeWidth: 1.5 },
     })
   }
   return { nodes, edges }

@@ -55,8 +55,7 @@ def test_role_crud_retired_410(client):
 def _expert_payload(**over):
     body = {"name": "测试专家", "description": "M3 CRUD 测试", "persona": "测试 persona",
             "tracks": ["ctf"], "skills": ["demo-skill"], "task_types": ["generic"],
-            "default_noise": "passive", "tools": ["run_cmd"], "max_runtime": "long",
-            "max_steps": 120,
+            "tools": ["run_cmd"], "max_steps": 120,
             "variants": {"ctf": {"persona": "ctf 专属 persona"}}}
     body.update(over)
     return body
@@ -140,7 +139,17 @@ def test_skill_create_toggle_and_delete(client):
     assert listed["new-skill"]["keywords"] == ["sqli", "注入"]
     raw = client.get("/api/capabilities/web/skills/new-skill").json()["raw"]
     assert "name: new-skill" in raw and "file_features: elf" in raw
-    assert "kb_open" in raw  # 薄路由模板
+    assert "mode: self-contained" in raw
+    assert "skill_open" in raw
+
+    # cc 风格附属资源只从技能自身目录读取，不能穿越到 packs/kb。
+    resource = client.packs / "capabilities/web/skills/new-skill/references/method.md"
+    _write(resource, "自包含参考资料")
+    r = client.get("/api/capabilities/web/skills/new-skill/resources/references/method.md")
+    assert r.status_code == 200 and r.json()["content"] == "自包含参考资料"
+    assert client.get(
+        "/api/capabilities/web/skills/new-skill/resources/../SKILL.md"
+    ).status_code in {404, 422}
 
     assert client.post("/api/capabilities/web/skills",
                        json={"name": "new-skill"}).status_code == 409

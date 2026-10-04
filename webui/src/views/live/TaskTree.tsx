@@ -41,18 +41,18 @@ type TreeCardData = {
 
 function outcomeBadge(n: Extract<TaskTreeNode, { kind: "intent" }>): { text: string; cls: string } {
   if (n.status === "open") return { text: "进行中", cls: "border-(--status-doing) text-(--status-doing)" }
-  if (n.outcome_type === "dead_end") return { text: "✕ 死路", cls: "border-zinc-600 text-zinc-400" }
-  if (n.outcome_type === "vuln") return { text: "✅ 漏洞", cls: "border-(--status-ok) text-(--status-ok)" }
-  if (n.outcome_type === "finding") return { text: "🔵 发现", cls: "border-sky-600 text-sky-400" }
-  return { text: "已收尾", cls: "border-zinc-600 text-zinc-400" }
+  if (n.outcome_type === "dead_end") return { text: "✕ 死路", cls: "border-(--viz-node-deadend) text-(--viz-node-deadend)" }
+  if (n.outcome_type === "vuln") return { text: "✅ 漏洞", cls: "border-(--viz-sev-critical) text-(--viz-sev-critical)" }
+  if (n.outcome_type === "finding") return { text: "🔵 发现", cls: "border-(--viz-node-finding) text-(--viz-node-finding)" }
+  return { text: "已收尾", cls: "border-(--viz-node-deadend) text-(--viz-node-deadend)" }
 }
 
 const SEV_CLS: Record<string, string> = {
-  critical: "border-l-red-500",
-  high: "border-l-orange-500",
-  medium: "border-l-amber-500",
-  low: "border-l-yellow-600",
-  info: "border-l-zinc-600",
+  critical: "border-l-(--viz-sev-critical)",
+  high: "border-l-(--viz-sev-high)",
+  medium: "border-l-(--viz-sev-medium)",
+  low: "border-l-(--viz-sev-low)",
+  info: "border-l-(--viz-sev-info)",
 }
 
 // 边渲染前提（2026-09-28 问题1 复发根因）：xyflow 的 getEdgePosition 用
@@ -65,9 +65,9 @@ function TreeCard({ data }: NodeProps<Node<TreeCardData>>) {
   if (data.variant === "root") {
     return (
       <div style={{ width: ROOT_W, minHeight: ROOT_H }}
-        className="cursor-pointer rounded-md border border-(--status-doing) bg-[#161b22] px-3 py-2 shadow-lg">
-        <div className="text-[10px] uppercase tracking-wider text-zinc-500">目标</div>
-        <div className="mt-1 line-clamp-3 text-[13px] leading-snug text-zinc-100">{data.label}</div>
+        className="cursor-pointer rounded-md border border-(--status-doing) bg-(--viz-card) px-3 py-2 shadow-lg">
+        <div className="text-[10px] uppercase tracking-wider text-(--viz-text-muted)">目标</div>
+        <div className="mt-1 line-clamp-3 text-[13px] leading-snug text-(--viz-text)">{data.label}</div>
         <Handle type="source" position={Position.Right} style={HIDE_HANDLE} />
       </div>
     )
@@ -76,20 +76,20 @@ function TreeCard({ data }: NodeProps<Node<TreeCardData>>) {
     const b = data.badge
     return (
       <div style={{ width: INTENT_W }}
-        className={`cursor-pointer rounded-md border bg-[#161b22] px-3 py-2 shadow-md ${
+        className={`cursor-pointer rounded-md border bg-(--viz-card) px-3 py-2 shadow-md ${
           data.current
-            ? "border-(--status-doing) shadow-[0_0_10px_rgba(34,211,238,0.25)]"
-            : "border-[#30363d]"}`}>
+            ? "border-(--status-doing) shadow-[0_0_10px_var(--viz-chain-glow)]"
+            : "border-(--viz-edge)"}`}>
         <div className="flex items-start gap-2">
           <div title={data.label}
-            className={`min-w-0 flex-1 line-clamp-2 text-[12px] leading-snug text-zinc-200 ${
+            className={`min-w-0 flex-1 line-clamp-2 text-[12px] leading-snug text-(--viz-text) ${
               data.current ? "animate-pulse" : ""}`}>
             {data.label}
           </div>
           {b && <span className={`shrink-0 rounded border px-1 py-px text-[10px] ${b.cls}`}>{b.text}</span>}
         </div>
         {data.sub && (
-          <div title={data.sub} className="mt-1 line-clamp-1 text-[10px] leading-snug text-zinc-500">
+          <div title={data.sub} className="mt-1 line-clamp-1 text-[10px] leading-snug text-(--viz-text-muted)">
             {data.sub}
           </div>
         )}
@@ -101,10 +101,10 @@ function TreeCard({ data }: NodeProps<Node<TreeCardData>>) {
   if (data.variant === "finding") {
     return (
       <div style={{ width: FINDING_W }}
-        className={`cursor-pointer rounded border border-[#30363d] border-l-2 bg-[#161b22] px-2 py-1.5 shadow-sm ${
+        className={`cursor-pointer rounded border border-(--viz-edge) border-l-2 bg-(--viz-card) px-2 py-1.5 shadow-sm ${
           SEV_CLS[data.sev ?? "info"] ?? SEV_CLS.info}`}>
-        <div title={data.label} className="line-clamp-1 text-[11px] leading-snug text-zinc-300">{data.label}</div>
-        <div className="mt-0.5 text-[10px] text-zinc-500">{data.sub}</div>
+        <div title={data.label} className="line-clamp-1 text-[11px] leading-snug text-(--viz-text-soft)">{data.label}</div>
+        <div className="mt-0.5 text-[10px] text-(--viz-text-muted)">{data.sub}</div>
         <Handle type="target" position={Position.Left} style={HIDE_HANDLE} />
         <Handle type="source" position={Position.Right} style={HIDE_HANDLE} />
       </div>
@@ -112,8 +112,8 @@ function TreeCard({ data }: NodeProps<Node<TreeCardData>>) {
   }
   return (
     <div style={{ width: BUCKET_W }}
-      className="cursor-pointer rounded border border-dashed border-[#30363d] bg-[#12161c] px-2 py-1.5">
-      <div className="text-[11px] text-zinc-500">{data.label}</div>
+      className="cursor-pointer rounded border border-dashed border-(--viz-edge) bg-(--viz-canvas) px-2 py-1.5">
+      <div className="text-[11px] text-(--viz-text-muted)">{data.label}</div>
       <Handle type="target" position={Position.Left} style={HIDE_HANDLE} />
       <Handle type="source" position={Position.Right} style={HIDE_HANDLE} />
     </div>
@@ -189,8 +189,8 @@ function buildLayout(tree: TaskTree): Layout {
 function DetailField({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="mb-2.5">
-      <div className="text-[10px] uppercase tracking-wider text-zinc-500">{label}</div>
-      <div className="mt-1 whitespace-pre-wrap break-words text-xs leading-relaxed text-zinc-200">{children}</div>
+      <div className="text-[10px] uppercase tracking-wider text-(--viz-text-muted)">{label}</div>
+      <div className="mt-1 whitespace-pre-wrap break-words text-xs leading-relaxed text-(--viz-text)">{children}</div>
     </div>
   )
 }
@@ -246,11 +246,11 @@ function NodeDetail({ selId, node, tree, onClose }: {
     body = <DetailField label="说明">{node?.title ?? "—"}</DetailField>
   }
   return (
-    <div className="absolute bottom-3 right-3 top-3 z-20 flex w-[min(380px,88%)] flex-col rounded-md border border-[#30363d] bg-[#0d1117]/95 shadow-xl">
-      <div className="flex items-center gap-2 border-b border-[#21262d] px-3 py-2">
-        <span className="text-xs font-medium text-zinc-200">{title}</span>
+    <div className="absolute bottom-3 right-3 top-3 z-20 flex w-[min(380px,88%)] flex-col rounded-md border border-(--viz-edge) bg-(--viz-canvas)/95 shadow-xl">
+      <div className="flex items-center gap-2 border-b border-(--viz-outline) px-3 py-2">
+        <span className="text-xs font-medium text-(--viz-text)">{title}</span>
         <span className="flex-1" />
-        <button type="button" onClick={onClose} className="text-zinc-500 hover:text-zinc-200">
+        <button type="button" onClick={onClose} className="text-(--viz-text-muted) hover:text-(--viz-text)">
           <X size={14} />
         </button>
       </div>
@@ -414,8 +414,8 @@ function TreeInner({ pid, activeTaskId, wsBump }: {
       chain.add(cur)
       cur = byId.get(cur)!.parent
     }
-    const dim = "#57606a"
-    const lit = "#22d3ee"
+    const dim = "var(--viz-edge-muted)"
+    const lit = "var(--viz-chain-active)"
     const mkEdge = (source: string, target: string): Edge => {
       const on = chain.has(source) && chain.has(target)
       return {
@@ -510,10 +510,10 @@ function TreeInner({ pid, activeTaskId, wsBump }: {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex items-center gap-2 border-b border-[#21262d] px-3 py-1.5">
-        <span className="shrink-0 text-xs text-zinc-500">任务树</span>
+      <div className="flex items-center gap-2 border-b border-(--viz-outline) px-3 py-1.5">
+        <span className="shrink-0 text-xs text-(--viz-text-muted)">任务树</span>
         <select
-          className="max-w-72 min-w-0 truncate rounded border border-[#30363d] bg-[#161b22] px-2 py-1 text-xs text-zinc-300"
+          className="max-w-72 min-w-0 truncate rounded border border-(--viz-edge) bg-(--viz-card) px-2 py-1 text-xs text-(--viz-text-soft)"
           value={taskId ?? ""}
           onChange={(e) => {
             setTaskId(e.target.value)
@@ -532,7 +532,7 @@ function TreeInner({ pid, activeTaskId, wsBump }: {
               ● {currentIntent.statement.slice(0, 24)}…
             </span>
             <button type="button" onClick={panToCurrent} title="回到当前意图节点"
-              className="flex shrink-0 items-center gap-1 rounded border border-[#30363d] px-2 py-1 text-xs text-zinc-300 hover:bg-[#21262d]">
+              className="flex shrink-0 items-center gap-1 rounded border border-(--viz-edge) px-2 py-1 text-xs text-(--viz-text-soft) hover:bg-(--viz-outline)">
               <Crosshair size={13} /> 当前
             </button>
           </>
@@ -540,11 +540,11 @@ function TreeInner({ pid, activeTaskId, wsBump }: {
         <span className="flex-1" />
         <button type="button" title="适应视图"
           onClick={() => void rf.fitView({ padding: 0.12, maxZoom: 1, duration: 300 })}
-          className="flex shrink-0 items-center gap-1 rounded border border-[#30363d] px-2 py-1 text-xs text-zinc-300 hover:bg-[#21262d]">
+          className="flex shrink-0 items-center gap-1 rounded border border-(--viz-edge) px-2 py-1 text-xs text-(--viz-text-soft) hover:bg-(--viz-outline)">
           <Maximize2 size={13} />
         </button>
       </div>
-      {err && <div className="px-3 py-1 text-xs text-red-400">{err}</div>}
+      {err && <div className="px-3 py-1 text-xs text-(--viz-sev-critical)">{err}</div>}
       <div className="min-h-0 flex-1">
         <ReactFlow<Node<TreeCardData>>
           nodes={nodes}
@@ -559,10 +559,10 @@ function TreeInner({ pid, activeTaskId, wsBump }: {
           minZoom={0.2}
           maxZoom={1.6}
           proOptions={{ hideAttribution: true }}>
-          <Background variant={BackgroundVariant.Dots} gap={22} size={1.4} color="#1c2128" />
+          <Background variant={BackgroundVariant.Dots} gap={22} size={1.4} color="var(--viz-card-hover)" />
           <Controls showInteractive={false} position="bottom-left" />
-          <MiniMap pannable zoomable bgColor="#0d1117" maskColor="rgba(13,17,23,0.7)"
-            nodeColor="#30363d" />
+          <MiniMap pannable zoomable bgColor="var(--viz-canvas)" maskColor="var(--viz-canvas-mask)"
+            nodeColor="var(--viz-edge)" />
         </ReactFlow>
         {tree && selId && selValid && (
           <NodeDetail selId={selId} node={selNode} tree={tree} onClose={() => setSelId(null)} />

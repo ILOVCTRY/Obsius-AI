@@ -94,12 +94,15 @@ def test_schema_v7_migration(tmp_path):
     try:
         ver = board.conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
-        assert int(ver) == SCHEMA_VERSION == 30
+        assert int(ver) == SCHEMA_VERSION == 31
         assert {"logic_blocks", "logic_block_funcs"} <= {r[0] for r in board.conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}  # v27（业务逻辑块）
         chat_cols = {r[1] for r in board.conn.execute(
             "PRAGMA table_info(chat_threads)")}
         assert {"usage", "error"} <= chat_cols  # v26 用量 / v28 轮次失败结构化错误
+        msg_cols = {r[1] for r in board.conn.execute(
+            "PRAGMA table_info(chat_messages)")}
+        assert "thinking" in msg_cols  # v31 思考正文持久化
         task_cols = {r[1] for r in board.conn.execute("PRAGMA table_info(tasks)")}
         os_cols = {r[1] for r in board.conn.execute(
             "PRAGMA table_info(orchestrator_state)")}
@@ -1154,7 +1157,7 @@ def test_schema_v11_migration_idempotent(tmp_path):
         board = Blackboard(str(db_path))
         ver = board.conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
-        assert int(ver) == SCHEMA_VERSION == 30
+        assert int(ver) == SCHEMA_VERSION == 31
         cols = {r[1] for r in board.conn.execute("PRAGMA table_info(findings)")}
         assert "rating_basis" in cols
         assert "category" in cols  # v12（发现分两类）
@@ -2287,6 +2290,35 @@ def test_lifecycle_events_carry_created_by(bb, project):
     tq.reopen(t2)
     ev = [e for e in bb.recent_events(pid) if e["kind"] == "task.reopened"][-1]
     assert ev["payload"]["created_by"] == "human"
+
+
+def test_delegation_receipt_on_terminal(bb, project):
+    """M2（orchestrator-coordination-fusion）：绑窗委托终态时 task.done/failed payload
+    追加结构化 receipt（角色/产出/依据/尝试次数）；未绑窗任务不带。"""
+    pid = project["id"]
+    tq = TaskQueue(bb)
+    s1 = _session(bb, project)
+    bound = tq.publish(pid, "绑窗委托", created_by="orchestrator",
+                       target_session=s1["id"])
+    free = tq.publish(pid, "无窗任务", created_by="human")
+    tq.claim(bound, s1["id"])
+    tq.claim(free, s1["id"])
+    tq.complete(bound, s1["id"], "收工")
+    tq.complete(free, s1["id"], "也收工")
+    done = {e["payload"]["task_id"]: e["payload"]
+            for e in bb.recent_events(pid) if e["kind"] == "task.done"}
+    assert "receipt" in done[bound] and "receipt" not in done[free]
+    r = done[bound]["receipt"]
+    assert r["status"] == "done" and r["attempts"] == 1
+    assert set(r) >= {"role", "status", "findings", "artifacts", "refs", "attempts"}
+    # 失败路径同样带 receipt（唤醒简报据此补产出计数）
+    failed = tq.publish(pid, "绑窗失败", created_by="orchestrator",
+                        target_session=s1["id"])
+    tq.claim(failed, s1["id"])
+    tq.fail(failed, s1["id"], "炸了")
+    fev = [e for e in bb.recent_events(pid) if e["kind"] == "task.failed"][-1]
+    assert fev["payload"]["task_id"] == failed
+    assert fev["payload"]["receipt"]["status"] == "failed"
 
 
 # ---------- 收录门禁：pentest/redteam 轨 info 停收（2026-09-18，全类别） ----------

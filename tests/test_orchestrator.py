@@ -85,6 +85,42 @@ def make_orch(env, llm, factory=None, config=None, track=None, packs_root="packs
                         meta_loader=meta_loader)
 
 
+def test_plan_work_rejects_cycle(env):
+    orch = make_orch(env, ScriptedLLM([]), track=None)
+    result = orch._tool_plan_work(
+        "循环计划", [{"title": "一", "depends_on": [1]}, {"title": "二", "depends_on": [0]}])
+    assert result.startswith("[拒绝] plan_work") and "循环" in result
+
+
+def test_plan_work_creates_dag_and_delegate_binds_node(env):
+    """M3：plan_work 登记依赖 DAG；delegate 绑定 ready 节点并拒绝未满足节点。"""
+    bb, project = env
+    llm = ScriptedLLM([])
+    orch = make_orch(env, llm, track=None)
+    result = json.loads(orch._tool_plan_work(
+        "攻击链计划",
+        [{"title": "入口侦察", "priority": 1},
+         {"title": "验证入口", "role": "", "depends_on": [0]}],
+        "找到可复现入口"))
+    assert result["status"] == "active"
+    plan = orch._coord().plan_view(project["id"])
+    assert plan and len(plan["tasks"]) == 2
+    first, second = plan["tasks"]
+    assert first["status"] == "ready" and second["status"] == "blocked"
+    blocked = orch._tool_delegate("验证入口", plan_node_id=second["id"])
+    assert blocked.startswith("[拒绝] 计划节点")
+
+
+def test_stats_injects_active_plan_summary(env):
+    """M3：编排器态势只注入 active 计划节点摘要，不载 objects/conflicts。"""
+    orch = make_orch(env, ScriptedLLM([]), track=None)
+    orch._tool_plan_work("简报计划", [{"title": "查资产"}], "覆盖入口")
+    stats = orch._stats()
+    assert stats["plan"]["name"] == "简报计划"
+    assert stats["plan"]["nodes"][0]["status"] == "ready"
+    assert "objects" not in stats["plan"]
+
+
 def test_stats_injection_hvt_surface_recent_tasks_and_digest(env):
     """态势增强：HVT（meta.tags 高价值）段/攻击面进度（HVT 优先排序+in_progress）
     /recent_closed（result_note）+ digest 常驻注入。"""
@@ -356,8 +392,8 @@ def test_l1_spawn_creates_approval_not_session(env):
     assert rows[0]["risk"] == "low" and rows[0]["requested_by"] == "orchestrator"
     kinds = [e["kind"] for e in bb.recent_events(project["id"])]
     assert "session.spawned" not in kinds
-    # L1 系统提示告知开窗语义
-    assert "审批收件箱" in llm.calls[0]["system"]
+    # L1 系统提示告知开窗语义（M1 改版：spawn_session 工具已退役，L1 段改述 delegate 待命窗+执行审批）
+    assert "执行审批" in llm.calls[0]["system"]
     # 审批单号回填给了 LLM
     assert rows[0]["id"] in json.dumps(llm.calls[-1]["messages"], ensure_ascii=False)
 
@@ -1583,6 +1619,24 @@ def test_chat_history_roles_and_lead_orch_skip(env):
     msgs = llm.calls[0]["messages"]
     assert [(m["role"], m["content"]) for m in msgs] == [
         ("user", "第一问"), ("assistant", "第一答"), ("user", "第二问")]
+
+
+def test_delegation_discipline_injected_both_prompts(env):
+    """M1（orchestrator-coordination-fusion）：委托纪律段注入 tick 与对话轮系统提示；
+    且提示词不再出现已退役的工具名 publish_task/spawn_session。"""
+    bb, project = env
+    llm = ScriptedLLM([{"text": "好"}])
+    orch = make_orch(env, llm)
+    orch.chat_turn("在吗")
+    chat_sys = llm.calls[0]["system"]
+    assert "委托纪律" in chat_sys and "综合是你的活" in chat_sys
+    orch.llm = ScriptedLLM([{"tool_use": [ScriptedLLM.tool_call("d1", "done", {})]}])
+    orch.tick()
+    tick_sys = orch.llm.calls[0]["system"]
+    assert "委托纪律" in tick_sys and "委托单必须自包含" in tick_sys
+    for sys in (chat_sys, tick_sys):
+        assert "publish_task" not in sys and "spawn_session" not in sys
+        assert "delegate" in sys  # 真实工具名在工具段可见
 
 
 def test_goal_and_persona_injection_chat_and_tick(env):

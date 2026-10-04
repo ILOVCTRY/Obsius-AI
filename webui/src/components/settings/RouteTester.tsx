@@ -55,7 +55,7 @@ export function RouteTester({ tax, track }: { tax: Taxonomy | null; track: strin
         <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="任务描述 / 关键词…"
                className="h-7 flex-1 text-xs" onKeyDown={(e) => e.key === "Enter" && preview()} />
         <select value={role} onChange={(e) => setRole(e.target.value)} title="按角色白名单窄化（可选）"
-                className={cn("h-7 rounded border bg-background px-1 text-[11px] [color-scheme:dark]")}>
+                className={cn("h-7 rounded border bg-background px-1 text-[11px]")}>
           <option value="">不限角色</option>
           {roles.map((r) => <option key={r.file} value={r.file}>{roleLabel(r)}</option>)}
         </select>

@@ -10,20 +10,33 @@ import { api } from "@/lib/api"
 import type {
   ChatAgent, ChatMcpServer, ChatMessage, ChatThread, ChatThreadError,
 } from "@/lib/types"
-import type { ProjectDetail, SkillDef } from "@/lib/types"
+import type { Approval, DecideApprovalResult, ProjectDetail, SkillDef } from "@/lib/types"
 import { MarkdownView } from "@/components/settings/MarkdownView"
-import { FindingsRail } from "@/components/workbench/FindingsRail"
+import { WorkbenchContextRail } from "@/components/workbench/WorkbenchContextRail"
+import { ActivityGroup } from "@/components/chat/ActivityGroup"
+import { ApprovalCard } from "@/components/chat/ApprovalCard"
+import { FileCardList } from "@/components/chat/FileCard"
+import { ChatStats } from "@/components/chat/ChatStats"
+import { ThinkingBlock } from "@/components/chat/ThinkingBlock"
+import { usePendingApprovals } from "@/lib/usePendingApprovals"
+import { mergeTargets, relToWorkdir, targetsFromProse, targetsFromTool, type FileTarget } from "@/lib/fileTargets"
+import type { ActivityStep } from "@/lib/activity"
+import { parseTs } from "@/lib/datetime"
 import { cn } from "@/lib/utils"
 import { paneMaxWidth } from "@/lib/paneWidth"
 import { useEvents } from "@/lib/useEvents"
 
 // 智能体工作台（K9，2026-09-29）：对话式挖洞入口（蛙池式）。
 // K9-UI（2026-09-29）：蛙池式结构语言 × 深色黑客风精修——左栏 agent 切换 +
-// 线程列表、中栏结构化时间线（头像/作者行/工具折叠块/进度待办卡/空态 hero）、
-// 底部输入大卡片（agent pill + 胶囊能力钮 + 渐变发送/停止）。样式集中在
-// index.css `.wb-*` 段；动效尊重 prefers-reduced-motion。左栏分割线可拖宽
-// （180–420px，键盘 ←/→ 微调）。数据链路不变：REST 2s 轮询为主，
-// chat.delta 事件做实时输入行增强。
+// 线程列表、中栏时间线、底部输入大卡片（agent pill + 胶囊能力钮 + 渐变发送/停止）。
+// **会话流改造（2026-10-03，cc-haha 风格）**：中栏时间线由「气泡 + 卡片 + 逐个工具块」
+// 改为**无气泡 prose + 折叠活动摘要 + 文件卡**——用户消息一行 `❯`、agent 叙述平铺
+// markdown、一轮内连续工具调用折成一行灰色摘要（`components/chat/ActivityGroup`）、
+// 叙述提到的文件渲染为卡片（`components/chat/FileCard`）、顶部统计行
+// （`components/chat/ChatStats`）。左栏/底部 dock/右栏不动。样式集中在
+// index.css `.wb-*` 段（会话流部分已迁至 Tailwind 工具类，见 components/chat/CLAUDE.md）；
+// 动效尊重 prefers-reduced-motion。左栏分割线可拖宽（180–420px，键盘 ←/→ 微调）。
+// 数据链路不变：REST 2s 轮询为主，chat.delta 事件做实时输入行增强。
 
 const ORCHESTRATOR = "chat-orchestrator"
 const CHIPS = [
@@ -59,6 +72,8 @@ export function AgentWorkbenchView({ pid, meta }: {
   const [tid, setTid] = useState<string | null>(null)
   const [thread, setThread] = useState<ChatThread | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [loaded, setLoaded] = useState(false)
+  const [workDir, setWorkDir] = useState<string | null>(null)
   const [input, setInput] = useState("")
   const [sending, setSending] = useState(false)
   const [pendingIn, setPendingIn] = useState<string | null>(null)
@@ -80,7 +95,24 @@ export function AgentWorkbenchView({ pid, meta }: {
     () => paneMaxWidth(splitterRef.current, ASIDE_RESERVE, ASIDE_RESERVE_EXTRA), [])
   const scrollRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
-  const { events } = useEvents(pid)
+  // flushMs=50（≈20Hz）：工作台流式期要跟得上后端 ~20Hz 的 delta 投递，否则前端
+  // 100ms 批合并会把输出压成「一顿顿的」（2026-10-04 顺滑化）。
+  const { events } = useEvents(pid, null, { flushMs: 50 })
+
+  // 待审批（2026-10-04）：工作台时间线是 ChatMessage[]，审批事件不在其中 → 用「贴 composer
+  // 的悬浮卡」呈现项目待审批单；新 approval.requested 到达即唤醒重拉。
+  const aprWake = useMemo(() => {
+    for (let i = events.length - 1; i >= 0; i--) if (events[i].kind === "approval.requested") return events[i].id
+    return 0
+  }, [events])
+  const { items: pendingApprovals } = usePendingApprovals(pid, aprWake)
+  const decideApproval = useCallback(async (approval: Approval, decision: "approved" | "rejected", note: string): Promise<DecideApprovalResult> => {
+    const text = note.trim()
+    if (text && approval.session_id) {
+      try { await api.sessionNote(approval.session_id, text) } catch { /* 引导失败不阻断决策 */ }
+    }
+    return api.decideApproval(approval.id, decision)
+  }, [])
 
   const currentAgent = agents.find((a) => a.id === agentId)
 
@@ -122,20 +154,29 @@ export function AgentWorkbenchView({ pid, meta }: {
   useEffect(() => { reloadThreads(agentId); setTid(null); setThread(null); setMessages([]) },
     [agentId, reloadThreads])
 
+  // 轮询拉线程详情（2s）。load 存进 ref，供「用户消息事件到达」时即时补拉。
+  // **2026-10-04 修「发送后空白」**：乐观行 pendingIn 只在「持久化的 user 消息
+  // 真的进了 messages」时清除——此前 WS 的 chat.message(user) 事件一到就清，
+  // 而 messages 只靠 2s 轮询刷新，事件先于轮询到达时时间线会空一段。
+  const reloadRef = useRef<(() => void) | null>(null)
   useEffect(() => {
-    if (!tid) { setThread(null); setMessages([]); return }
+    if (!tid) { setThread(null); setMessages([]); setLoaded(false); reloadRef.current = null; return }
     let alive = true
+    setLoaded(false)
     const load = () => api.chatThread(tid).then((d) => {
       if (!alive) return
       setThread(d.thread)
       setMessages(d.messages)
-      // 对账乐观气泡：持久化的 user 消息出现后移除本地占位
+      setWorkDir(d.work_dir ?? null)
+      setLoaded(true)
+      // 对账乐观行：持久化的 user 消息出现后才移除本地占位
       setPendingIn((cur) => cur && d.messages.some(
         (m) => m.role === "user" && m.content === cur) ? null : cur)
     }).catch(() => {})
+    reloadRef.current = load
     load()
     const timer = setInterval(load, 2000)
-    return () => { alive = false; clearInterval(timer) }
+    return () => { alive = false; clearInterval(timer); reloadRef.current = null }
   }, [tid])
 
   useEffect(() => { reloadThreads(agentId) }, [thread?.status, agentId, reloadThreads])
@@ -247,16 +288,15 @@ export function AgentWorkbenchView({ pid, meta }: {
   // 切线程时收起斜杠面板与用量浮层
   useEffect(() => { setUsageOpen(false); setSlash(null) }, [tid])
 
-  // chat.message(user) 事件对账乐观气泡（比轮询更快）
+  // chat.message(user) 事件到达 → 立即补拉一次线程详情（比 2s 轮询快）。
+  // **不在这里清 pendingIn**——清除只发生在 load() 确认该消息已进 messages 之后，
+  // 否则事件先到、轮询未到时会闪空白（2026-10-04 修）。
   useEffect(() => {
-    if (!pendingIn) return
+    if (!pendingIn || !tid) return
     for (const e of events) {
       if (e.kind !== "chat.message") continue
-      const p = e.payload as { thread_id?: string; role?: string; text?: string }
-      if (p?.thread_id !== tid || p.role !== "user" || typeof p.text !== "string") continue
-      if (p.text === pendingIn || (p.text.length >= 2000 && pendingIn.startsWith(p.text))) {
-        setPendingIn(null); return
-      }
+      const p = e.payload as { thread_id?: string; role?: string }
+      if (p?.thread_id === tid && p.role === "user") { reloadRef.current?.(); return }
     }
   }, [events, tid, pendingIn])
 
@@ -310,11 +350,11 @@ export function AgentWorkbenchView({ pid, meta }: {
     try { await api.chatStop(tid) } catch (e) { setErr(e instanceof Error ? e.message : String(e)) }
   }, [tid])
 
-  // 自动滚底
+  // 自动滚底（含思考增量——此前漏 liveThinking，思考增长时不跟滚，观感「卡住」）
   useEffect(() => {
     const el = scrollRef.current
     if (el) el.scrollTop = el.scrollHeight
-  }, [messages.length, liveDelta, running])
+  }, [messages.length, liveDelta, liveThinking, running])
 
   const agentInitial = (a: ChatAgent | undefined) =>
     (a?.name ?? "?").slice(0, 1)
@@ -347,6 +387,15 @@ export function AgentWorkbenchView({ pid, meta }: {
   const slashMcps = mcpServers.filter((s) => `${s.name} ${s.domains.join("/")}`.toLowerCase().includes(slashQuery))
 
   // ---- 渲染 ----
+  // 会话流渲染项（cc-haha 风格）：连续工具调用折成一行活动摘要。**memo 化**——
+  // messages 只在轮询（2s）时换新数组，避免每个事件帧都重算整条时间线（卡顿源之一）。
+  const items = useMemo(() => buildWbItems(messages), [messages])
+  // 空态判定（2026-10-04）：无线程且无乐观行、或线程已加载但确实为空 → 回退 Hero，
+  // 不再留一片空白（此前选中空线程 / 发送后竞态窗口会全空）。
+  const showHero = !tid
+    ? !pendingIn
+    : loaded && messages.length === 0 && !pendingIn && !running
+      && !(thread?.todo?.length) && !thread?.error
   return (
     <div className="wb-shell">
       {/* 左栏：agent 切换器 + 线程列表 */}
@@ -429,138 +478,102 @@ export function AgentWorkbenchView({ pid, meta }: {
         }}
       />
 
-      {/* 中栏：头 + 时间线 + 输入大卡片 */}
+      {/* 中栏：时间线 + 输入大卡片；标题栏信息并入统计行 */}
       <main className="wb-main">
-        <div className="wb-header">
-          <span className={cn("wb-avatar", agentId === ORCHESTRATOR && "is-orch")}>
-            {agentId === ORCHESTRATOR ? <Bot size={14} /> : agentInitial(currentAgent)}
-          </span>
-          <span className="wb-header-title">{thread?.title || currentAgent?.name || "智能体工作台"}</span>
-          {running && <span className="wb-badge"><span className="wb-dot is-running" />执行中</span>}
-          {thread?.status === "error" && (
-            <span className="wb-badge is-error"
-              title={thread.error ? `${thread.error.title}：${thread.error.hint}` : undefined}>
-              出错
-            </span>
-          )}
-          {thread?.parent_thread_id && <span className="wb-badge is-ghost">子专家线程</span>}
-        </div>
+        {/* 统计行（会话流改造 2026-10-03）：token/最后更新/条数——工作台侧取精确值 */}
+        {tid && (
+          <ChatStats
+            tokens={(usage?.input ?? 0) + (usage?.output ?? 0)
+              + (usage?.cache_read ?? 0) + (usage?.cache_creation ?? 0)}
+            cachedTokens={(usage?.cache_read ?? 0) + (usage?.cache_creation ?? 0)}
+            updatedAt={thread?.updated_at}
+            count={messages.length}
+            endAdornment={
+              <>
+                {running && <span className="wb-badge"><span className="wb-dot is-running" />执行中</span>}
+                {thread?.status === "error" && (
+                  <span className="wb-badge is-error"
+                    title={thread.error ? `${thread.error.title}：${thread.error.hint}` : undefined}>出错</span>
+                )}
+                {thread?.parent_thread_id && <span className="wb-badge is-ghost">子专家线程</span>}
+              </>
+            }
+          />
+        )}
 
         <div ref={scrollRef} className="wb-stream">
-          {(!tid && !pendingIn) ? (
+          {showHero ? (
             <Hero agentName={currentAgent?.name} isOrch={agentId === ORCHESTRATOR} />
           ) : (
             <div className="wb-timeline">
               {thread && thread.todo.length > 0 && <TodoCard todo={thread.todo} />}
-              {messages.map((m) => {
-                if (m.role === "tool") return null
-                if (m.role === "user") {
+              {items.map((it) => {
+                if (it.kind === "user") {
+                  return <HumanNote key={it.m.id} m={it.m} />
+                }
+                if (it.kind === "thinking") {
+                  return <ThinkingBlock key={it.id} content={it.content} className="wb-anim" />
+                }
+                if (it.kind === "prose") {
+                  const stopped = it.m.content.includes("已按人类要求停止")
                   return (
-                    <div key={m.id} className="wb-row is-user wb-anim">
-                      <div className="wb-bubble-user">{m.content}</div>
+                    <div key={it.m.id} className="wb-anim py-0.5">
+                      <div className="flex items-baseline gap-2">
+                        <MarkdownView content={it.m.content} prefix={`chat-${it.m.id}`}
+                          className="min-w-0 flex-1 text-[12.5px] leading-relaxed text-foreground/90" />
+                        {stopped && <span className="wb-badge is-ghost shrink-0">已停止</span>}
+                      </div>
+                      <FileCardList targets={relTargets(mergeTargets(it.targets, it.known), workDir)}
+                        pid={pid} />
                     </div>
                   )
                 }
-                const stopped = m.content.includes("已按人类要求停止")
-                const calls = m.tool_calls ?? []
+                // activity：一轮内连续工具调用折成一行摘要，展开看逐条明细
                 return (
-                  <div key={m.id} className="wb-row wb-anim">
-                    <span className={cn("wb-avatar", "is-sm", agentId === ORCHESTRATOR && "is-orch")}>
-                      {agentId === ORCHESTRATOR ? <Bot size={11} /> : agentInitial(currentAgent)}
-                    </span>
-                    <div className="wb-msg">
-                      <div className="wb-msg-head">
-                        <span className="wb-msg-author">{currentAgent?.name ?? agentId}</span>
-                        {stopped && <span className="wb-badge is-ghost">已停止</span>}
-                      </div>
-                      {(m.content || !calls.length) && (
-                        <div className={cn("wb-card", stopped && "is-stopped")}>
-                          {m.content
-                            ? <MarkdownView content={m.content} prefix={`chat-${m.id}`} className="text-[12px]" />
-                            : <span className="text-muted-foreground">（调用工具中…）</span>}
-                        </div>
-                      )}
-                      {calls.map((tc) => {
-                        const tr = messages.find(
-                          (x) => x.role === "tool" && x.tool_use_id === tc.id)
-                        const live = !tr && liveToolDone
-                          && liveToolDone.name === tc.name
-                          && liveToolDone.args_head === JSON.stringify(tc.args).slice(0, 300)
-                          ? liveToolDone : null
-                        return (
-                          <ToolBlock key={tc.id} name={tc.name} args={tc.args}
-                            result={tr?.content} done={!!tr} live={live} />
-                        )
-                      })}
-                    </div>
-                  </div>
+                  <ActivityGroup key={it.id} steps={it.steps} live={running}
+                    failedCount={it.steps.filter((s) => s.failed).length}
+                    className="wb-anim">
+                    {it.rows.map((r) => r.kind === "thinking"
+                      ? <ThinkingBlock key={r.id} content={r.content} />
+                      : <ToolBlock key={r.id} name={r.name} args={r.args}
+                          result={r.result} done={r.done}
+                          live={!r.done && liveToolDone
+                            && liveToolDone.name === r.name
+                            && liveToolDone.args_head === JSON.stringify(r.args ?? {}).slice(0, 300)
+                            ? liveToolDone : null} />)}
+                  </ActivityGroup>
                 )
               })}
-              {pendingIn && (
-                <div className="wb-row is-user wb-anim">
-                  <div className="wb-bubble-user">{pendingIn}</div>
-                </div>
-              )}
+              {pendingIn && <HumanNote m={null} text={pendingIn} />}
+              {/* 实时叠加层（会话流改造后统一为平铺 prose + 光标，无气泡无卡片） */}
               {(running || !!pendingIn) && liveDelta && liveDelta !== lastAssistantText(messages) && (
-                <div className="wb-row wb-anim">
-                  <span className={cn("wb-avatar is-sm", agentId === ORCHESTRATOR && "is-orch")}>
-                    {agentId === ORCHESTRATOR ? <Bot size={11} /> : agentInitial(currentAgent)}
-                  </span>
-                  <div className="wb-msg">
-                    <div className="wb-msg-head"><span className="wb-msg-kind">正在输入</span></div>
-                    <div className="wb-typing">
-                      <span className="wb-caret" />
-                      <span className="wb-typing-text">{liveDelta.slice(-600)}</span>
-                    </div>
-                  </div>
+                <div className="wb-anim py-0.5 text-[12.5px] leading-relaxed text-foreground/90">
+                  <span className="whitespace-pre-wrap break-words">{liveDelta.slice(-600)}</span>
+                  <span className="ml-0.5 inline-block h-3.5 w-[2px] animate-pulse bg-primary align-middle" />
                 </div>
               )}
-              {(running || !!pendingIn) && liveThinking && (
-                <div className="wb-row wb-anim">
-                  <span className={cn("wb-avatar is-sm", agentId === ORCHESTRATOR && "is-orch")}>
-                    {agentId === ORCHESTRATOR ? <Bot size={11} /> : agentInitial(currentAgent)}
-                  </span>
-                  <div className="wb-msg">
-                    <div className="wb-msg-head"><span className="wb-msg-kind">思考过程</span></div>
-                    <div className="wb-thinking">
-                      <span className="wb-caret" />
-                      <span className="wb-thinking-text">{liveThinking.slice(-3000)}</span>
-                    </div>
-                  </div>
-                </div>
+              {(running || !!pendingIn) && liveThinking
+                && liveThinking !== lastPersistedThinking(messages) && (
+                <ThinkingBlock content={liveThinking} active={running && !liveDelta}
+                  className="wb-anim" />
               )}
               {running && liveToolStart && !hasPendingCall && (
-                <div className="wb-row wb-anim">
-                  <span className={cn("wb-avatar is-sm", agentId === ORCHESTRATOR && "is-orch")}>
-                    {agentId === ORCHESTRATOR ? <Bot size={11} /> : agentInitial(currentAgent)}
-                  </span>
-                  <div className="wb-msg">
-                    <ToolBlock name={liveToolStart.name ?? "?"}
-                      argsHead={liveToolStart.args_head} done={false} />
-                  </div>
+                <div className="wb-anim">
+                  <ToolBlock name={liveToolStart.name ?? "?"}
+                    argsHead={liveToolStart.args_head} done={false} />
                 </div>
               )}
               {(running || !!pendingIn) && !liveDelta && !liveThinking && !liveToolStart && !hasPendingCall && (
-                <div className="wb-row wb-anim">
-                  <span className={cn("wb-avatar is-sm", agentId === ORCHESTRATOR && "is-orch")}>
-                    {agentId === ORCHESTRATOR ? <Bot size={11} /> : agentInitial(currentAgent)}
-                  </span>
-                  <div className="wb-msg">
-                    <div className="wb-msg-head"><span className="wb-msg-kind">
-                      {liveRetry
-                        ? `正在第 ${liveRetry.attempt ?? "?"}/${liveRetry.total ?? "?"} 次重试`
-                        : "思考中"}
-                    </span></div>
-                    <div className="wb-typing"><span className="wb-caret" /></div>
-                  </div>
+                <div className="wb-anim py-0.5 text-[12px] text-muted-foreground">
+                  {liveRetry
+                    ? `正在第 ${liveRetry.attempt ?? "?"}/${liveRetry.total ?? "?"} 次重试`
+                    : "思考中"}
+                  <span className="ml-0.5 inline-block h-3.5 w-[2px] animate-pulse bg-primary align-middle" />
                 </div>
               )}
               {thread?.status === "error" && thread.error && !running && (
-                <div className="wb-row wb-anim">
-                  <span className="wb-avatar is-sm"><CircleSlash size={11} /></span>
-                  <div className="wb-msg">
-                    <ThreadErrorCard error={thread.error} />
-                  </div>
+                <div className="wb-anim">
+                  <ThreadErrorCard error={thread.error} />
                 </div>
               )}
             </div>
@@ -702,6 +715,18 @@ export function AgentWorkbenchView({ pid, meta }: {
             </div>
           )}
 
+          {/* 待审批问答卡（贴 composer；本页即对话页 → 隐藏「和 Agent 聊聊」） */}
+          {pendingApprovals.length > 0 && (
+            <div className="mb-2">
+              <ApprovalCard approval={pendingApprovals[0]} onDecide={decideApproval} showChat={false} />
+              {pendingApprovals.length > 1 && (
+                <p className="mt-1 text-center text-[10px] text-muted-foreground">
+                  还有 {pendingApprovals.length - 1} 条待确认
+                </p>
+              )}
+            </div>
+          )}
+
           <div className="wb-composer">
             <div className="wb-composer-head">
               <button className="wb-composer-agent" onClick={() => setAgentMenuOpen(true)}>
@@ -825,8 +850,8 @@ export function AgentWorkbenchView({ pid, meta }: {
         </div>
       </main>
 
-      {/* 右栏：漏洞/发现（默认收起；2026-10-01）——链路视图内联于此 */}
-      <FindingsRail pid={pid} track={meta?.track} />
+      {/* 右栏：会话上下文 + 漏洞/发现（默认收起） */}
+      <WorkbenchContextRail pid={pid} tid={tid} workDir={workDir} track={meta?.track} />
     </div>
   )
 }
@@ -863,18 +888,25 @@ function fmtTime(iso: string): string {
 function ThreadErrorCard({ error }: { error: ChatThreadError }) {
   const [open, setOpen] = useState(false)
   return (
-    <div className="wb-card wb-error-card">
-      <div className="wb-error-head">
-        <AlertTriangle size={13} className="wb-error-icon" />
-        <span className="wb-error-title">本轮执行失败 · {error.title}</span>
-        <span className="wb-error-cat">{error.category}</span>
+    <div className="rounded-xl border border-(--status-error)/40 bg-(--status-error)/5 px-3.5 py-2.5 text-[12.5px]">
+      <div className="mb-1.5 flex items-center gap-2">
+        <AlertTriangle size={13} className="shrink-0 text-(--status-error)" />
+        <span className="text-[12.5px] font-semibold text-(--status-error)">本轮执行失败 · {error.title}</span>
+        <span className="ml-auto shrink-0 rounded-full border border-(--status-error)/35 px-2 py-0.5 font-mono text-[9px] tracking-wide text-(--status-error)/90">
+          {error.category}
+        </span>
       </div>
-      <p className="wb-error-hint">{error.hint}</p>
-      <button type="button" className="wb-error-toggle" onClick={() => setOpen((v) => !v)}>
-        <ChevronDown size={11} className={cn("wb-error-caret", open && "is-open")} />
+      <p className="text-[11.5px] leading-relaxed text-muted-foreground">{error.hint}</p>
+      <button type="button" onClick={() => setOpen((v) => !v)}
+        className="mt-2 inline-flex items-center gap-1 text-[10px] text-primary hover:underline">
+        <ChevronDown size={11} className={cn("transition-transform", open && "rotate-180")} />
         {open ? "收起技术细节" : "展开技术细节"}
       </button>
-      {open && <pre className="wb-error-detail">{error.message}</pre>}
+      {open && (
+        <pre className="mt-2 max-h-56 overflow-auto rounded-md bg-background/70 p-2.5 font-mono text-[10.5px] leading-relaxed whitespace-pre-wrap break-words text-(--status-error)/80">
+          {error.message}
+        </pre>
+      )}
     </div>
   )
 }
@@ -890,6 +922,124 @@ function Hero({ agentName, isOrch }: { agentName?: string; isOrch: boolean }) {
           : "直接下达该专家负责范围内的测试任务；过程与结论都会落档。"}
       </p>
       <div className="wb-hero-hint"><Wrench size={10} /> AGENTS · SKILLS · MCP · 输入 / 唤出命令</div>
+    </div>
+  )
+}
+
+// ---------- 会话流装配（2026-10-03 cc-haha 风格） ----------
+// ChatMessage[] → 渲染项：连续 assistant(tool_calls) + tool(result) 归入同一
+// activity 组（折成一行摘要）；有正文的 assistant 走 prose 行 + 文件卡。
+// 纯函数，不碰 React——与直播间 lib/turnStream.ts 的 buildStreamItems 同思路，
+// 但消息模型不同（ChatMessage[] vs BBEvent[]）故各自实现。
+
+// 活动组内一行：工具调用 或 该步的思考（思考折进行内，摘要也能带上「思考」计数）
+type GroupRow =
+  | { kind: "tool"; id: string; name: string; args?: Record<string, unknown>
+      result?: string; done: boolean }
+  | { kind: "thinking"; id: string; content: string }
+
+type WbItem =
+  | { kind: "user"; m: ChatMessage }
+  | { kind: "thinking"; id: string; content: string }
+  | { kind: "activity"; id: string; steps: ActivityStep[]; rows: GroupRow[] }
+
+/** 时间戳解析：与 lib/datetime.ts parseTs 同口径（含 packs 紧凑形态） */
+function tsOf(iso: string): number {
+  const t = parseTs(iso).getTime()
+  return Number.isFinite(t) ? t : 0
+}
+
+// 叙述段（prose）——含所属轮的工具目标（文件卡对账用，渲染时才合并，保持纯函数）
+type WbProse = { kind: "prose"; m: ChatMessage; targets: FileTarget[]; known: FileTarget[] }
+
+/** ChatMessage[] → 渲染项。连续 assistant(tool_calls)+tool(result) 归入同一 activity 组。 */
+function buildWbItems(messages: ChatMessage[]): (WbItem | WbProse)[] {
+  const out: (WbItem | WbProse)[] = []
+  let pending: { steps: ActivityStep[]; rows: GroupRow[]; known: FileTarget[] } | null = null
+  const flush = () => {
+    if (!pending) return
+    out.push({ kind: "activity", id: `act-${pending.rows[0]?.id ?? out.length}`,
+               steps: pending.steps, rows: pending.rows })
+    pending = null
+  }
+  for (const m of messages) {
+    if (m.role === "user") { flush(); out.push({ kind: "user", m }); continue }
+    if (m.role === "tool") continue  // 结果挂在对应 tool_call 上，不单独出行
+    const calls = m.tool_calls ?? []
+    const thinking = (m.thinking ?? "").trim() ? (m.thinking as string) : ""
+    if (!calls.length) {
+      flush()
+      // 思考先于正文成行（cc-haha 风格：单行折叠，展开看全文）
+      if (thinking) out.push({ kind: "thinking", id: `th-${m.id}`, content: thinking })
+      out.push({ kind: "prose", m, targets: targetsFromProse(m.content, []), known: [] })
+      continue
+    }
+    // 有工具调用的 assistant：正文（若有）先出 prose，工具并进当前 activity 组
+    if (m.content) {
+      flush()
+      // 有正文时思考单独成行（先于正文）——否则并进后面的活动组会落到正文下方
+      if (thinking) out.push({ kind: "thinking", id: `th-${m.id}`, content: thinking })
+      out.push({ kind: "prose", m: { ...m, tool_calls: [] },
+                 targets: targetsFromProse(m.content, []), known: [] })
+    }
+    if (!pending) pending = { steps: [], rows: [], known: [] }
+    // 无正文时思考并进活动组：摘要能带上「思考」计数（对齐 cc-haha）
+    if (thinking && !m.content) {
+      pending.rows.push({ kind: "thinking", id: `th-${m.id}`, content: thinking })
+      pending.steps.push({ kind: "thinking", name: "thinking", ts: tsOf(m.created_at) })
+    }
+    for (const tc of calls) {
+      const tr = messages.find((x) => x.role === "tool" && x.tool_use_id === tc.id)
+      pending.rows.push({ kind: "tool", id: tc.id, name: tc.name, args: tc.args,
+                          result: tr?.content, done: !!tr })
+      pending.steps.push({
+        kind: tc.name === "run_cmd" ? "command" : "tool",
+        name: tc.name,
+        ts: tsOf(m.created_at),
+        dedupKey: tc.name === "read_file" ? String(tc.args?.path ?? "") : undefined,
+        failed: !!tr && (tr.content ?? "").startsWith("[错误"),
+      })
+      pending.known.push(...targetsFromTool(tc.name, tc.args, tr?.content))
+    }
+    // 该轮的工具目标回填给「轮内叙述」——同 basename 时叙述文件卡指向真实路径
+    if (pending.known.length) {
+      for (let i = out.length - 1; i >= 0; i--) {
+        const it = out[i]
+        if (it.kind === "activity" || it.kind === "user") break
+        if (it.kind === "prose") { it.known = pending.known; break }
+      }
+    }
+  }
+  flush()
+  return out
+}
+
+/** 最后一条已持久化的思考正文——实时思考尾块据此去重（持久化后不再重复显示）。 */
+function lastPersistedThinking(messages: ChatMessage[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]
+    if (m.role === "assistant" && m.thinking) return m.thinking
+  }
+  return ""
+}
+
+/** 文件卡目标归一：工具参数里的工作区绝对路径 → 相对路径（后端 /files/open 口径） */
+function relTargets(targets: FileTarget[], workDir: string | null): FileTarget[] {
+  return targets.map((t) => {
+    const rel = relToWorkdir(t.relPath, workDir)
+    return rel === t.relPath ? t
+      : { ...t, relPath: rel, name: rel.split("/").pop() ?? rel }
+  })
+}
+
+// 人类消息行（会话流改造 2026-10-03）：单行 `❯ <text>`——去气泡，对齐 cc-haha。
+// m=null 时用 text（乐观上屏的 pendingIn 占位）。
+function HumanNote({ m, text }: { m: ChatMessage | null; text?: string }) {
+  const body = text ?? m?.content ?? ""
+  return (
+    <div className="wb-anim py-1 text-[13px] leading-relaxed">
+      <span className="mr-1.5 select-none font-mono text-primary">❯</span>
+      <span className="whitespace-pre-wrap break-words text-foreground">{body}</span>
     </div>
   )
 }
@@ -924,6 +1074,8 @@ function TodoCard({ todo }: { todo: { id: string; title: string; status: string 
   )
 }
 
+// 工具明细行（会话流改造 2026-10-03）：折在 ActivityGroup 展开态里的一行，
+// 点开看参数/结果原文（Tailwind 工具类，不再用 .wb-tool 卡片样式）。
 function ToolBlock({ name, args, argsHead, result, done, live }: {
   name: string; args?: Record<string, unknown>; argsHead?: string
   result?: string; done: boolean
@@ -934,36 +1086,41 @@ function ToolBlock({ name, args, argsHead, result, done, live }: {
   const ok = done ? !(result ?? "").startsWith("[错误")
     : live ? live.ok !== false : true
   return (
-    <div className={cn("wb-tool", open && "is-open", !done && "is-running", !ok && "is-error")}>
-      <button className="wb-tool-head" onClick={() => setOpen((v) => !v)}>
-        <span className="wb-tool-icon">
+    <div className="rounded-md border border-border/50 bg-card/40">
+      <button type="button" onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-2 px-2 py-1 text-left">
+        <span className={cn("shrink-0", !done ? "text-primary" : ok ? "text-muted-foreground" : "text-(--status-error)")}>
           {!done ? <Loader2 size={10} className="animate-spin" />
             : ok ? <Wrench size={10} /> : <CircleSlash size={10} />}
         </span>
-        <span className="wb-tool-name">{name}</span>
-        <span className="wb-tool-args">
+        <span className="shrink-0 font-mono text-[11px] font-semibold text-foreground/85">{name}</span>
+        <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-muted-foreground/70">
           {args ? JSON.stringify(args).slice(0, 140) : argsHead ?? ""}
         </span>
-        {!done && <span className="wb-tool-live">运行中</span>}
-        {done && live && <span className="wb-tool-live">{live.duration_s ?? "?"}s</span>}
-        {done && <ChevronDown size={12} className="wb-tool-chev" />}
+        {!done && <span className="shrink-0 font-mono text-[9px] text-primary">运行中</span>}
+        {done && live && <span className="shrink-0 font-mono text-[9px] text-muted-foreground/60">{live.duration_s ?? "?"}s</span>}
+        {done && <ChevronDown size={12} className={cn("shrink-0 text-muted-foreground transition-transform", open && "rotate-180")} />}
       </button>
       {open && (
-        <div className="wb-tool-body">
+        <div className="border-t border-border/50">
           {args != null && (
             <>
-              <div className="wb-tool-kicker">参数</div>
-              <pre className="wb-tool-pre">{JSON.stringify(args, null, 2).slice(0, 2000)}</pre>
+              <div className="px-3 pt-1.5 font-mono text-[8px] uppercase tracking-widest text-muted-foreground/70">参数</div>
+              <pre className="max-h-56 overflow-auto px-3 pb-2.5 font-mono text-[10px] leading-relaxed whitespace-pre-wrap break-words text-foreground/80">
+                {JSON.stringify(args, null, 2).slice(0, 2000)}
+              </pre>
             </>
           )}
           {args == null && argsHead != null && (
             <>
-              <div className="wb-tool-kicker">参数</div>
-              <pre className="wb-tool-pre">{argsHead}</pre>
+              <div className="px-3 pt-1.5 font-mono text-[8px] uppercase tracking-widest text-muted-foreground/70">参数</div>
+              <pre className="max-h-56 overflow-auto px-3 pb-2.5 font-mono text-[10px] leading-relaxed whitespace-pre-wrap break-words text-foreground/80">
+                {argsHead}
+              </pre>
             </>
           )}
-          <div className="wb-tool-kicker">结果</div>
-          <pre className="wb-tool-pre">
+          <div className="px-3 pt-1.5 font-mono text-[8px] uppercase tracking-widest text-muted-foreground/70">结果</div>
+          <pre className="max-h-56 overflow-auto px-3 pb-2.5 font-mono text-[10px] leading-relaxed whitespace-pre-wrap break-words text-foreground/80">
             {done ? (result ?? "").slice(0, 6000)
               : live?.result_head ? live.result_head.slice(0, 600) : "执行中…"}
           </pre>

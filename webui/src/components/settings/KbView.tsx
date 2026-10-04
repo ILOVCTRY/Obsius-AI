@@ -355,7 +355,7 @@ export function KbView({ cap, capabilities, onCapChange, focus }: {
           <div className="flex items-center gap-1.5">
             {capabilities && capabilities.length > 0 && <label className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
               能力包
-              <select className="rounded border bg-background px-2 py-1 text-xs [color-scheme:dark]" value={cap} onChange={(e) => onCapChange?.(e.target.value)}>
+              <select className="rounded border bg-background px-2 py-1 text-xs" value={cap} onChange={(e) => onCapChange?.(e.target.value)}>
                 {capabilities.map((item) => <option key={item.name} value={item.name}>{item.label || item.name}</option>)}
               </select>
             </label>}

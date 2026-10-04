@@ -1,0 +1,17 @@
+{
+  "name": "cyberstrike-pro-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Electron shell for the CyberStrike real Chromium workspace",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron ."
+  },
+  "dependencies": {
+    "node-pty": "^1.1.0"
+  },
+  "devDependencies": {
+    "electron": "^38.1.0"
+  }
+}

@@ -1,6 +1,6 @@
 import type {
   Approval, Artifact, ArtifactUploadResponse, Asset, AttachmentInfo, BBEvent, BinaryOverview, BinaryStrings,
-  BrowserState, BrowserStatus, BrowserSessionInfo, HttpHistoryRow, InterceptState,
+  BrowserState, BrowserStatus, BrowserSessionInfo, WorkspaceTreeResponse, HttpHistoryRow, InterceptState,
   Blueprint, BlueprintModuleStatus, BlueprintStatus,
   IntruderPayloadSpec, IntruderTemplate,
   CachedFuncRow, CachedFunction, Chain, ChainLink, ChainNodeType, ChainStatus, ChainSummary,
@@ -16,12 +16,13 @@ import type {
   AgentToolsResponse,
   Proposal, ProposalOrigin, RoleInfo, RouteHit,
   RoutePreviewBody, SampleUploadResponse, Session, SkillCreateBody, SkillDef, TrackProfile,
-  SkillDetail, SkillVocab, Task, TaskTree, SessionGraph, AttackPath, IntentInfo,
+  SkillDetail, SkillVocab, SkillCatalog, SkillFileEntry, Task, TaskTree, SessionGraph, AttackPath, IntentInfo,
   WritebackItem, XrefData,
   TaskTrace, TraceEffect,
   FofaConfig, FofaTestResult, FofaSearchResult, FofaHistoryItem, ImportPreview, ImportSummary,
   ChatAgent, ChatThread, ChatThreadDetail, ChatMcpServer,
-  CoordinationOverview, CoordinationPlan, CoordinationTask, CoordinationObject, CoordinationConflict, CoordinationVerification,
+  CoordinationOverview, CoordinationPreflight, CoordinationCommunication, CoordinationPlan, CoordinationTask, CoordinationObject, CoordinationConflict, CoordinationVerification,
+  SkillResource,
   SamplePackage, SampleTargetAnalysis, SampleTargetAnalyzeResponse, SamplePackageUploadSession, SamplePackagePreview,
 } from "./types"
 import type { Taxonomy } from "./taxonomy"
@@ -457,6 +458,14 @@ export const api = {
   // 工作区隔离（W3）：清空 scratch + .tmp（正式产物 artifacts/ 不动）
   clearScratch: (pid: string) =>
     http<{ removed: number; failed: string[] }>(`/api/projects/${pid}/scratch/clear`, { method: "POST" }),
+  workspaceTree: (pid: string) =>
+    http<WorkspaceTreeResponse>(`/api/projects/${pid}/workspace/tree`),
+  // 本地文件动作（会话流文件卡，2026-10-03）：resolve/open/reveal/content 四动作，
+  // 后端 scope 白名单=项目工作区 ∪ packs ∪ tools（越界 422）
+  openProjectFile: (pid: string, path: string, action: "resolve" | "open" | "reveal" | "content") =>
+    http<{ status: string; action: string; abs_path: string; content?: string; truncated?: boolean }>(
+      `/api/projects/${pid}/files/open`,
+      { method: "POST", body: JSON.stringify({ path, action }) }),
 
   // 任务
   tasks: (pid: string) => http<Task[]>(`/api/projects/${pid}/tasks`),
@@ -691,6 +700,8 @@ export const api = {
     }),
   trackSkillDetail: (track: string, name: string) =>
     http<SkillDetail>(`/api/tracks/${track}/skills/${name}`),
+  trackSkillResource: (track: string, name: string, resource: string) =>
+    http<SkillResource>(`/api/tracks/${track}/skills/${name}/resources/${resource.split("/").map(encodeURIComponent).join("/")}`),
   updateTrackSkill: (track: string, name: string, content: string) =>
     http<{ status: string }>(`/api/tracks/${track}/skills/${name}`, {
       method: "PUT", body: JSON.stringify({ content }),
@@ -735,6 +746,8 @@ export const api = {
     }),
   capSkillDetail: (cap: string, name: string) =>
     http<SkillDetail>(`/api/capabilities/${cap}/skills/${name}`),
+  capSkillResource: (cap: string, name: string, resource: string) =>
+    http<SkillResource>(`/api/capabilities/${cap}/skills/${name}/resources/${resource.split("/").map(encodeURIComponent).join("/")}`),
   updateCapSkill: (cap: string, name: string, content: string) =>
     http<{ status: string }>(`/api/capabilities/${cap}/skills/${name}`, {
       method: "PUT", body: JSON.stringify({ content }),
@@ -757,6 +770,19 @@ export const api = {
       method: "POST", body: JSON.stringify(body),
     }),
   skillsVocab: () => http<SkillVocab>("/api/skills/vocab"),
+  skillCatalog: (pid?: string | null) => http<SkillCatalog>(`/api/skills/catalog${pid ? `?pid=${encodeURIComponent(pid)}` : ""}`),
+  capSkillFiles: (cap: string, name: string) =>
+    http<{ root: string; files: SkillFileEntry[] }>(`/api/capabilities/${cap}/skills/${name}/files`),
+  capSkillFile: (cap: string, name: string, path: string) =>
+    http<SkillFileEntry>(`/api/capabilities/${cap}/skills/${name}/files/content?path=${encodeURIComponent(path)}`),
+  createCapSkillFile: (cap: string, name: string, body: { path: string; content?: string; is_dir?: boolean }) =>
+    http<{ status: string; path: string }>(`/api/capabilities/${cap}/skills/${name}/files`, { method: "POST", body: JSON.stringify(body) }),
+  updateCapSkillFile: (cap: string, name: string, body: { path: string; content: string }) =>
+    http<{ status: string; path: string }>(`/api/capabilities/${cap}/skills/${name}/files`, { method: "PUT", body: JSON.stringify(body) }),
+  renameCapSkillFile: (cap: string, name: string, path: string, newPath: string) =>
+    http<{ status: string; path: string }>(`/api/capabilities/${cap}/skills/${name}/files/rename`, { method: "POST", body: JSON.stringify({ path, new_path: newPath }) }),
+  deleteCapSkillFile: (cap: string, name: string, path: string) =>
+    http<{ status: string; path: string }>(`/api/capabilities/${cap}/skills/${name}/files?path=${encodeURIComponent(path)}`, { method: "DELETE" }),
 
   // kb 本地基线（C2/C3：源树/读写/改名联动/版本/引用）
   kbList: (cap: string) =>
@@ -940,6 +966,14 @@ export const api = {
   browserStatus: () => http<BrowserStatus>("/api/browser/status"),
   browserState: (pid: string) =>
     http<BrowserState>(`/api/projects/${pid}/browser/state`),
+  browserDesktopAttach: (pid: string, body: { cdp_url: string; sid: string; owner?: string }) =>
+    http<BrowserSessionInfo>(`/api/projects/${pid}/browser/desktop/attach`, {
+      method: "POST", body: JSON.stringify(body),
+    }),
+  browserDesktopDetach: (pid: string, sid: string) =>
+    http<{ detached: boolean; sid: string }>(`/api/projects/${pid}/browser/desktop/detach`, {
+      method: "POST", body: JSON.stringify({ sid, paused: false }),
+    }),
   browserNavigate: (pid: string, url: string, sid?: string) =>
     http<{ final_url: string; title: string; status: number; target_host?: string; duration_ms: number }>(
       `/api/projects/${pid}/browser/navigate`,
@@ -1043,6 +1077,29 @@ export const api = {
     http<CoordinationPlan>(`/api/projects/${pid}/coordination/plans/${encodeURIComponent(planId)}`, {
       method: "PATCH", body: JSON.stringify({ status }),
     }),
+  coordinationPreflight: (pid: string, planId: string) =>
+    http<CoordinationPreflight>(`/api/projects/${pid}/coordination/plans/${encodeURIComponent(planId)}/preflight`),
+  coordinationPlanStart: (pid: string, planId: string, body: { preflight_revision?: string; confirmations?: Record<string, boolean> }) =>
+    http<{ plan: CoordinationPlan; status: string; job_id?: string | null }>(`/api/projects/${pid}/coordination/plans/${encodeURIComponent(planId)}/start`, {
+      method: "POST", body: JSON.stringify(body),
+    }),
+  coordinationPlanControl: (pid: string, planId: string, action: "pause" | "resume" | "interrupt" | "retry") =>
+    http<Record<string, unknown>>(`/api/projects/${pid}/coordination/plans/${encodeURIComponent(planId)}/control`, {
+      method: "POST", body: JSON.stringify({ action }),
+    }),
+  coordinationCommunications: (pid: string, params?: { session_id?: string; unread?: boolean; limit?: number }) => {
+    const q = new URLSearchParams()
+    if (params?.session_id) q.set("session_id", params.session_id)
+    if (params?.unread) q.set("unread", "true")
+    if (params?.limit) q.set("limit", String(params.limit))
+    return http<CoordinationCommunication[]>(`/api/projects/${pid}/coordination/communications${q.size ? `?${q}` : ""}`)
+  },
+  coordinationCommunicationsRead: (pid: string, body: { ids?: string[]; session_ids?: string[] }) =>
+    http<{ marked: number }>(`/api/projects/${pid}/coordination/communications/read`, {
+      method: "POST", body: JSON.stringify(body),
+    }),
+  coordinationTimeline: (pid: string, planId: string, limit = 200) =>
+    http<Record<string, unknown>[]>(`/api/projects/${pid}/coordination/plans/${encodeURIComponent(planId)}/timeline?limit=${limit}`),
   coordinationTaskCreate: (pid: string, planId: string, body: {
     title: string; description?: string; role?: string; priority?: number; depends_on?: string[]
   }) =>

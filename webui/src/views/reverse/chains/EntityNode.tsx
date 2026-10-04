@@ -7,11 +7,11 @@ import { FINDING_CATEGORY_LABEL } from "@/lib/workbench"
 // 实体已删=孤儿节点，灰显 [已删除] 但保留在链上（数据不级联删除，DESIGN §5.2）。
 
 const SEV: Record<string, string> = {
-  critical: "#f85149",
-  high: "#ff7b72",
-  medium: "#d29922",
-  low: "#58a6ff",
-  info: "#8b949e",
+  critical: "var(--viz-sev-critical)",
+  high: "var(--viz-sev-high)",
+  medium: "var(--viz-sev-medium)",
+  low: "var(--viz-sev-low)",
+  info: "var(--viz-sev-info)",
 }
 
 export function EntityNode({ data }: NodeProps<EntityFlowNode>) {
@@ -20,12 +20,12 @@ export function EntityNode({ data }: NodeProps<EntityFlowNode>) {
 
   return (
     <div
-      className={`group relative w-[200px] rounded-md border bg-popover px-2.5 py-2 shadow-sm ${
+      className={`group relative w-[200px] rounded-md border bg-(--viz-card) px-2.5 py-2 shadow-sm ${
         link.deleted ? "border-dashed border-muted-foreground/40 opacity-60"
-        : link.node_type === "func_kb" ? "border-primary/50" : "border-[#39424e]"
+        : link.node_type === "func_kb" ? "border-primary/50" : "border-(--viz-edge)"
       }`}
     >
-      <Handle type="target" position={Position.Left} className="!h-2 !w-2 !border-0 !bg-muted-foreground" />
+      <Handle type="target" position={Position.Left} className="!h-2 !w-2 !border-0 !bg-(--viz-handle)" />
       {link.node_type === "finding" && !link.deleted && (
         <span
           className="absolute inset-y-0 left-0 w-0.5 rounded-l-md"
@@ -63,7 +63,7 @@ export function EntityNode({ data }: NodeProps<EntityFlowNode>) {
           <p className="line-clamp-2 text-[11px] leading-tight">{e?.title}</p>
           <div className="mt-1 flex items-center gap-1">
             {e?.category && (
-              <span className="rounded bg-muted px-1 text-[9px] text-muted-foreground">
+              <span className="rounded bg-(--viz-outline) px-1 text-[9px] text-muted-foreground">
                 {FINDING_CATEGORY_LABEL[e.category] ?? e.category}
               </span>
             )}
@@ -79,11 +79,11 @@ export function EntityNode({ data }: NodeProps<EntityFlowNode>) {
       ) : (
         <div className="pr-4">
           <p className="text-[9px] text-muted-foreground">📎 产物</p>
-          <span className="rounded bg-muted px-1 text-[9px] text-muted-foreground">{e?.kind}</span>
+          <span className="rounded bg-(--viz-outline) px-1 text-[9px] text-muted-foreground">{e?.kind}</span>
           <p className="mt-0.5 truncate text-[10px]" title={e?.path}>{e?.description || e?.path}</p>
         </div>
       )}
-      <Handle type="source" position={Position.Right} className="!h-2 !w-2 !border-0 !bg-muted-foreground" />
+      <Handle type="source" position={Position.Right} className="!h-2 !w-2 !border-0 !bg-(--viz-handle)" />
     </div>
   )
 }

@@ -5,28 +5,29 @@ keywords: 登录, 认证, 鉴权, jwt, oauth, saml, session, 会话, cookie, tok
 features: has_user_system, has_oauth, returns_401
 vuln_classes: auth-bypass, jwt, oauth, saml, session, weak-credential
 task_types: exploit, recon
+mode: self-contained
 ---
 
 # web-authn-session —— 认证与会话攻击路由
 
 > 分层纪律：本技能只做**认证面特征 → 手册对照**。方法论在 src-strike 快照
-> （`playbooks/知识库/`），弹药在 `playbooks/`。按需 `kb_open(module=…)` 单篇，
+> （`playbooks/参考资料/`），弹药在 `playbooks/`。按需 `skill_open(path=…)` 单篇，
 > 禁止通读。红线提醒：弱口令默认 ≤10 候选慢速单发（领域红线 5）；
 > 禁止登出/注销用户提供的登录态（领域红线 2）。
 
 ## 特征 → 手册对照表（module 路径）
 
-| 特征 | 方法论（`playbooks/知识库/` 下） | 打法/弹药（`playbooks/` 下） |
+| 特征 | 方法论（`playbooks/参考资料/` 下） | 打法/弹药（`playbooks/` 下） |
 |---|---|---|
-| 登录页/鉴权逻辑整体 | `web/webapp/authbypass/手册.md` | `arbitrary-x-authz.md` |
-| 401/403 接口 | `web/webapp/401-403-bypass/手册.md`（path/METHOD/头现场改） | — |
-| JWT（none/弱密钥/混淆） | `web/webapp/jwt/手册.md` | `oauth-saml-jwt/12-jwt.md`、`api-rest/12-jwt-api.md` |
-| OAuth 授权码/redirect | `web/webapp/jwt/手册.md` | `oauth-saml-jwt/10-oauth-redirect.md` |
-| SAML / SSO | `web/webapp/jwt/手册.md` | `oauth-saml-jwt/11-saml.md` |
-| 认证杂项（session/cookie/记住我） | `web/webapp/jwt/手册.md` | `oauth-saml-jwt/13-auth-misc.md` |
-| 验证码（图形/滑块/短信） | `web/webapp/captcha-ocr/手册.md` | — |
-| 类型戏法/松散比较绕过 | `web/webapp/type-juggling/手册.md` | — |
-| 短信/邮件轰炸类 | `web/webapp/logic/手册.md` | — |
+| 登录页/鉴权逻辑整体 | `references/web/webapp/authbypass/手册.md` | `arbitrary-x-authz.md` |
+| 401/403 接口 | `references/web/webapp/401-403-bypass/手册.md`（path/METHOD/头现场改） | — |
+| JWT（none/弱密钥/混淆） | `references/web/webapp/jwt/手册.md` | `oauth-saml-jwt/12-jwt.md`、`api-rest/12-jwt-api.md` |
+| OAuth 授权码/redirect | `references/web/webapp/jwt/手册.md` | `oauth-saml-jwt/10-oauth-redirect.md` |
+| SAML / SSO | `references/web/webapp/jwt/手册.md` | `oauth-saml-jwt/11-saml.md` |
+| 认证杂项（session/cookie/记住我） | `references/web/webapp/jwt/手册.md` | `oauth-saml-jwt/13-auth-misc.md` |
+| 验证码（图形/滑块/短信） | `references/web/webapp/captcha-ocr/手册.md` | — |
+| 类型戏法/松散比较绕过 | `references/web/webapp/type-juggling/手册.md` | — |
+| 短信/邮件轰炸类 | `references/web/webapp/logic/手册.md` | — |
 
 ## 纪律
 

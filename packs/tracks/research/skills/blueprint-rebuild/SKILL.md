@@ -4,6 +4,7 @@ description: R4 逆向开发管线：模块划分、蓝图写回、重建实现�
 keywords: 蓝图, blueprint, 重建, reconstruct, 开发, 模块划分, 自测
 features: is_elf, is_pe, packed_binary
 task_types: blueprint, reconstruct, analyze, verify
+mode: self-contained
 ---
 
 # blueprint-rebuild —— 蓝图驱动的逆向重建（R4）

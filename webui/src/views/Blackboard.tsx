@@ -270,7 +270,7 @@ export function Findings({ pid, track, showCanvas }: {
                       assetFilter === a.id && "bg-primary/10 text-primary")}
                     onClick={() => { setAssetFilter(a.id); setAssetOpen(false) }}
                   >
-                    <span className="mr-1 rounded border border-[#30363d] px-0.5 text-[9px] text-muted-foreground">
+                    <span className="mr-1 rounded border border-(--viz-edge) px-0.5 text-[9px] text-muted-foreground">
                       {a.type}
                     </span>
                     {a.value}
@@ -459,11 +459,11 @@ export function Findings({ pid, track, showCanvas }: {
 function AssetBadges({ a, hasFinding }: { a: Asset; hasFinding?: boolean }) {
   if (hasFinding)
     return <Badge variant="outline" className="text-[10px] text-(--status-error)">有发现</Badge>
-  const s = a.status === "open" && a.meta?.scanned ? "visited" : a.status
+  const s = a.effective_status ?? (a.status === "open" && a.meta?.scanned ? "visited" : a.status)
   if (s === "visited")
     return <Badge variant="outline" className="text-[10px] text-muted-foreground">已访问</Badge>
   if (s === "scanning")
-    return <Badge variant="outline" className="text-[10px] text-amber-400">扫描中</Badge>
+    return <Badge variant="outline" className="text-[10px] text-(--viz-sev-medium)">扫描中</Badge>
   if (s === "tested_clean")
     return <Badge variant="outline" className="text-[10px] text-primary">已测试·干净</Badge>
   if (s === "budget_stop")
@@ -491,7 +491,7 @@ function AssetTags({ tags }: { tags: string[] }) {
       {tags.map((t) => (
         <Badge key={t} variant="outline"
                className={cn("text-[10px]",
-                 t === "高价值" ? "border-amber-400/60 text-amber-400" : "text-muted-foreground")}>
+                 t === "高价值" ? "border-(--viz-sev-medium)/60 text-(--viz-sev-medium)" : "text-muted-foreground")}>
           {t === "高价值" ? "⭐高价值" : `#${t}`}
         </Badge>
       ))}
@@ -525,7 +525,7 @@ function AssetRow({ a, indent = false, hasFinding, onToggleHvt, onDelete }:
           <button
             title={tags.includes("高价值") ? "取消高价值标记" : "标记为高价值（⭐ 进编排器每轮态势注入）"}
             className={cn("shrink-0 rounded px-1 text-[10px] hover:bg-accent",
-              tags.includes("高价值") ? "text-amber-400" : "text-muted-foreground/50")}
+              tags.includes("高价值") ? "text-(--viz-sev-medium)" : "text-muted-foreground/50")}
             onClick={(e) => { e.stopPropagation(); onToggleHvt(a) }}
           >
             ⭐
@@ -701,7 +701,7 @@ export function Assets({ pid, compact, tree = false }: { pid: string; compact?: 
                   ? "取消高价值标记" : "标记为高价值（⭐ 进编排器每轮态势注入）"}
                 className={cn("shrink-0 rounded px-1 text-[10px] hover:bg-accent",
                   (meta.tags as string[] | undefined)?.includes("高价值")
-                    ? "text-amber-400" : "text-muted-foreground/50")}
+                    ? "text-(--viz-sev-medium)" : "text-muted-foreground/50")}
                 onClick={(e) => { e.stopPropagation(); toggleHvt(a) }}
               >
                 ⭐
@@ -752,7 +752,7 @@ export function Assets({ pid, compact, tree = false }: { pid: string; compact?: 
             <button key={t}
               className={cn("rounded px-2 py-0.5 text-[10px]",
                 tagFilter === t ? "bg-primary/15 text-primary" : "text-muted-foreground hover:bg-accent",
-                t === "高价值" && "text-amber-400")}
+                t === "高价值" && "text-(--viz-sev-medium)")}
               onClick={() => setTagFilter(tagFilter === t ? "" : t)}>
               {t === "高价值" ? `⭐${t}` : `#${t}`}
             </button>

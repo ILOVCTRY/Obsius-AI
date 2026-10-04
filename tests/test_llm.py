@@ -7,6 +7,7 @@ import json
 import pytest
 
 from core.llm import AnthropicCompatProvider, ArkCodingProvider, LLMError, ModelRouter
+from core.llm.provider import LLMResponse, ToolCall, assistant_message
 from core.llm.routing import load_dotenv
 
 
@@ -26,6 +27,17 @@ def _fake_transport(response=None, status=200, capture=None):
             capture.append({"url": url, "headers": headers, "body": json.loads(body)})
         return status, response if status == 200 else response
     return transport
+
+
+def test_assistant_message_uses_typed_response_not_raw():
+    response = LLMResponse(text="前言", thinking="思考", raw={})
+    response.tool_calls.append(ToolCall("call-1", "plan_work", {"nodes": []}))
+    message = assistant_message(response)
+    assert message == {"role": "assistant", "content": [
+        {"type": "thinking", "thinking": "思考"},
+        {"type": "text", "text": "前言"},
+        {"type": "tool_use", "id": "call-1", "name": "plan_work", "input": {"nodes": []}},
+    ]}
 
 
 def _sse_json(resp_dict):
@@ -969,6 +981,52 @@ def test_openai_responses_sse_ignores_event_metadata():
                              format="openai-responses",
                              stream_transport=stream_transport)
     assert p.chat([{"role": "user", "content": "hi"}]).text == "OK"
+
+
+def test_openai_chat_sse_aggregates_arguments_by_index():
+    events = [
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"run_cmd","arguments":"{\\"cmd\\":"}}]}}]}',
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"id\\"}"}}]}}]}',
+        "data: [DONE]",
+    ]
+    from core.llm.openai_compat import OpenAICompatProvider
+    p = OpenAICompatProvider("https://fake", "key", "m",
+                             stream_transport=lambda *args: (200, iter(events)))
+    result = p.chat([{"role": "user", "content": "hi"}])
+    assert [(c.id, c.name, c.arguments) for c in result.tool_calls] == [("call_1", "run_cmd", {"cmd": "id"})]
+
+
+def test_openai_chat_sse_keeps_interleaved_tool_calls_separate():
+    events = [
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"a","function":{"name":"one","arguments":"{}"}},{"index":1,"id":"b","function":{"name":"two","arguments":"{}"}}]}}]}',
+        "data: [DONE]",
+    ]
+    from core.llm.openai_compat import OpenAICompatProvider
+    p = OpenAICompatProvider("https://fake", "key", "m", stream_transport=lambda *args: (200, iter(events)))
+    assert [c.id for c in p.chat([{"role": "user", "content": "hi"}]).tool_calls] == ["a", "b"]
+
+
+def test_openai_chat_sse_rejects_missing_tool_id():
+    events = [
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"run_cmd","arguments":"{}"}}]}}]}',
+        "data: [DONE]",
+    ]
+    from core.llm.openai_compat import OpenAICompatProvider
+    p = OpenAICompatProvider("https://fake", "key", "m", stream_transport=lambda *args: (200, iter(events)))
+    with pytest.raises(LLMError, match="缺少 call id"):
+        p.chat([{"role": "user", "content": "hi"}])
+
+
+def test_openai_chat_sse_uses_declared_choice_index_when_order_changes():
+    events = [
+        'data: {"choices":[{"index":1,"delta":{"tool_calls":[{"index":0,"id":"b","function":{"name":"two","arguments":"{\\"b\\":"}}]}},{"index":0,"delta":{"tool_calls":[{"index":0,"id":"a","function":{"name":"one","arguments":"{\\"a\\":"}}]}}]}',
+        'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1}"}}]}},{"index":1,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"2}"}}]}}]}',
+        "data: [DONE]",
+    ]
+    from core.llm.openai_compat import OpenAICompatProvider
+    p = OpenAICompatProvider("https://fake", "key", "m", stream_transport=lambda *args: (200, iter(events)))
+    result = p.chat([{"role": "user", "content": "hi"}])
+    assert [(c.id, c.arguments) for c in result.tool_calls] == [("b", {"b": 2}), ("a", {"a": 1})]
 
 
 def test_openai_responses_sse_recovers_tool_name_from_done_events():

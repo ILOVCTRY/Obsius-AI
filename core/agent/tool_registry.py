@@ -1913,62 +1913,6 @@ tool(
 )
 
 tool(
-    'request_escalation',
-    group='协作',
-    flags=("intent_pre", "collab"),
-    description=(
-        '申请一次性越界执行（deny-driven：仅当命令超出角色 max_runtime 软上限时才受理）。人类批准后该命令**只执行一次**，结果投递回你'
-        '的收件箱（下个步边界/空闲对话轮可见）。工作区隔离、隔离等级（threat_class↔runtime）与限速纪律是红线或自助项，不受理；**net=r'
-        'eal 自 2026-10-01 起无需审批**，直接 run_cmd(net="real") 即可。等待期间可继续其他无依赖工作。'
-    ),
-    input_schema={
-        'type': 'object',
-        'properties': {
-            'cmd': {
-                'type': 'string',
-                'description': '要执行的一条命令（原样执行）',
-            },
-            'runtime': {
-                'type': 'string',
-                'enum': [
-                    'host',
-                    'wsl',
-                    'docker',
-                    'sandbox',
-                ],
-            },
-            'reason': {
-                'type': 'string',
-                'description': '为什么必须越界、不改道（审批人只看得到这个）',
-            },
-            'threat_class': {
-                'type': 'string',
-                'enum': [
-                    'trusted',
-                    'untrusted',
-                ],
-            },
-            'net': {
-                'type': 'string',
-                'enum': [
-                    'bridge',
-                    'real',
-                ],
-                'description': '可选；net=real 已可直接用 run_cmd，无需走本工具',
-            },
-            'timeout': {
-                'type': 'number',
-            },
-        },
-        'required': [
-            'cmd',
-            'runtime',
-            'reason',
-        ],
-    },
-)
-
-tool(
     'declare_intent',
     group='计划',
     flags=("plan", "intent_flow"),

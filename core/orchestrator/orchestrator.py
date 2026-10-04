@@ -2,7 +2,7 @@
 
 职责四件套：
 - 监控：每 tick 回收过期 lease（防会话挂死占坑），把队列空转/低产出摆到 LLM 面前
-- 派生：新发现 → 新任务（LLM 决策，publish_task 落地）
+- 派生：新发现 → 新任务（LLM 决策，delegate 落地）
 - 开窗：唯一有权启动新 AI 会话的角色（角色白名单 + 会话数上限约束）
 - 汇总：把项目态势写成简报，落 project.digest 事件（人类了解全局的入口）
 
@@ -24,6 +24,8 @@ from core import phases
 from core.coverage import coverage_report, effective_status_map
 from core.autonomy import record_llm_usage
 from core.blackboard import Blackboard, TaskQueue
+from core.llm.provider import assistant_message, tool_results_message
+from core.coordination import CoordinationStore  # M3：计划 DAG 层（编排器消费协调域）
 from core.blackboard.tasks import _check_task_type, dedup_fp, target_keys_of, MAX_TASKS_PER_TARGET
 from core.skills.experts import expert_exists, list_experts, load_expert
 from core.skills.taxonomy import GENERIC_TASK_TYPE, load_task_types
@@ -39,8 +41,8 @@ ORCH_SYSTEM_PROMPT = """你是项目主代理（Orchestrator），职责是监�
 {role_catalog}
 {autonomy_notice}{goal_section}{phase_section}{mission_section}{campaign_section}
 ## 可用工具
-- publish_task：发布任务。task_type 必须是场景轨 task_types.yaml 已注册类型（未注册会被拒收——拼错的类型会让任务饿死），决定哪些角色能认领（先看角色目录与已有会话）；noise_budget 缺省取该类型注册表默认值；会产生噪声的动作（主动探测/执行样本）必须给 conflict_keys；任务若以某发现为依据（如「验证 find-x」），把该发现 id 填 refs——该发现事后被推翻时，执行者会立刻收到强制自评通知。**任务即窗口（v0.71）**：发布成功后系统自动为该任务建立专属执行窗（按建议角色装配），无需也不应再为执行窗调 spawn_session。
-- spawn_session：开一个新 AI 会话（受角色白名单 {allowed_roles} 与上限 {max_sessions} 个约束）；**仅用于纯侦查/纯对话辅助窗**（不挂任务，如常驻态势问答、交叉质询）；任务的执行窗由 publish_task 自动建立，不要用本工具代替。
+- delegate：发布委托（像人类给 AI 发消息让他干活）。task_type 必须是场景轨 task_types.yaml 已注册类型（未注册会被拒收——拼错的类型会让任务饿死），决定哪些角色能认领（先看角色目录与已有会话）；noise_budget 缺省取该类型注册表默认值；会产生噪声的动作（主动探测/执行样本）必须给 conflict_keys；委托若以某发现为依据（如「验证 find-x」），把该发现 id 填 refs——该发现事后被推翻时，执行者会立刻收到强制自评通知。默认由系统选窗：优先复用空闲同角色窗，无合适窗则开新窗；force_new_window=true 强制新窗、target_session 指定窗；受角色白名单 {allowed_roles} 与活跃窗上限 {max_sessions} 约束。长探测/扫描类 objective 写明建议超时（run_cmd 默认 120s，C3）。
+- cancel_task / requeue_task：生命周期收编（见纪律 9）。
 - write_digest：写项目简报（给人类看的全局摘要：进展/发现/风险/下一步）。
 - done：结束本轮协调。
 - 只读查询四工具（task_detail / bb_overview / budget_status / session_list）：
@@ -51,7 +53,7 @@ ORCH_SYSTEM_PROMPT = """你是项目主代理（Orchestrator），职责是监�
 ## 主代理纪律（硬规则）
 1. 不执行命令、不写分析结论——一切经任务派发。
 2. 遵循「分析-分解-分派」：复杂目标先在心里拆成自足的小任务，再按角色目录对号分派；
-   publish_task 用 **role 参数**结构化指定建议认领角色（本轨已注册角色 id；留空=不限，
+   delegate 用 **role 参数**结构化指定建议认领角色（本轨已注册角色 id；留空=不限，
    任务即窗口机制下，带角色的任务建专属执行窗时按该角色装配，一窗一任务），并给初始
    priority（0-9，整数；小者优先：被依赖的前置/为他人解阻塞的任务给 0-2，常规任务 3-5，
    可延后的 6-9）。
@@ -72,24 +74,26 @@ ORCH_SYSTEM_PROMPT = """你是项目主代理（Orchestrator），职责是监�
 9. 生命周期收编（M4）：方向变更/目标已达成/前提失效 → cancel_task（reason 写清；
    在跑窗自动打断）；预算恢复/前提补齐/人类已解决挂起 → requeue_task 放回原任务
    （履历保留）——**不要取消后重发同款任务**（丢执行履历且污染发布去重）。
-"""
+10. 计划执行（M3）：态势含 active 计划（plan 段）时，先派 status=ready 的节点
+   （delegate 带 plan_node_id 绑定，role 用节点上的建议角色）；只派 ready，勿碰
+   running/completed/failed。节点任务完成会自动唤醒你续派其依赖节点——收到
+   「计划节点就绪」唤醒后照 plan 段逐节点派即可。
+{delegation_discipline}"""
 
 
-# L1（任务自动·执行审批，v0.72）系统提示追加段：任务窗发布即建（待命），执行等人类批准
+# L1（任务自动·执行审批，v0.72）系统提示追加段：委派发布即建（待命），执行等人类批准
 L1_AUTONOMY_NOTICE = """## 自主档位 L1（任务自动·执行审批）
-publish_task 发布即自动建专属待命窗（待命不耗 LLM），并自动提「执行审批」（action 带 task_id）：
-人类批准后系统启动该窗执行任务；批准前任务已入队、只是待命等待。
-spawn_session（纯侦查/对话辅助窗，不挂任务）不会立刻开窗：请求进入人类审批收件箱，
-人类批准后系统自动建窗并开跑。
-- spawn_session 的 reason 必须写清（为什么开这个角色、要它做什么），审批人只看得到 role+reason；
-- 等待审批期间可继续 publish passive 任务，或 done 结束本轮；批准/拒绝结果下轮 tick 经事件可见。
+delegate 发布即自动建专属待命窗（待命不耗 LLM），并自动提「执行审批」（action 带 task_id）：
+人类批准后系统启动该窗执行委托；批准前任务已入队、只是待命等待。
+- 委托的 objective 必须自包含（执行者看不到你的态势与对话），写清目标/依据/完成定义；
+- 等待审批期间可继续发 passive 委托，或 done 结束本轮；批准/拒绝结果下轮 tick 经事件可见。
 - 委派审批积压达 max_publish_per_tick 时会停发新委派（先让人类消化，下轮恢复）——
   态势里见 pending_delegate 计数即「有审批卡排队」，别再提同款/同目标。"""
 
 
 # L0（全手动）系统提示追加段（批 6）：publish/spawn 只产提案，不写实体
 L0_AUTONOMY_NOTICE = """## 自主档位 L0（全手动·提案模式）
-你不能直接派任务或开窗：publish_task / spawn_session / cancel_task / requeue_task
+你不能直接派任务或开窗：delegate / cancel_task / requeue_task
 只生成人类提案（orch.proposed 事件），
 人类在事件流逐条「采纳」后才真正落地（任务以人类名义入队、窗由人类开）。
 - 提案不消耗任何预算、不占会话上限，但参数校验照跑：task_type 必须是本轨注册类型、
@@ -109,6 +113,26 @@ ANALYZE_ONLY_NOTICE = """## 本轮：自动渗透启动前态势研判（只读�
 3. 首轮动作建议：开跑后第一轮应该派什么任务、为什么。
 计划写完整、写具体——人类将根据这份计划决定是否启动自动渗透。
 计划正文直接作为回复输出，然后 done 结束（done 不需要带任何参数）。"""
+
+
+# 委托纪律（M1，orchestrator-coordination-fusion，2026-10-04）：借鉴 cc-haha 协调者
+# 模式（coordinatorMode.ts）的四条纪律，tick 与对话轮共用同槽 {delegation_discipline}。
+# 纯提示词注入（无控制流）——「综合不可下放 / 委托单自包含 / 续用 vs 新开 / 并行 fan-out」
+# 是编排器写高质量委托单的软约束；硬约束（去重/闸门/上限）仍在服务端。
+DELEGATION_DISCIPLINE = """
+## 委托纪律（协调者协议）
+- **综合是你的活，不可下放**：收到执行者回执后，先自己读懂（存疑就 task_detail 拉全文），
+  落到具体资产/发现/文件，再写下一张委托单。**禁止**「基于你的发现继续…」「按你的判断
+  修复…」这类把理解下放给执行者的委托——理解永远由你完成。
+- **委托单必须自包含**：执行者是独立会话窗，**看不到本轮态势与你的对话**。每张委托单写清
+  目标、依据（refs 填资产/发现 id）、完成定义与边界，否则执行者只能猜。
+- **续用窗还是新开窗**（默认系统复用空闲同角色窗）：按上下文重叠度判断——研究恰好覆盖待改
+  目标→续用；研究宽泛而实现聚焦→新开；修正/延伸刚做完的工作→续用；验证他人刚写的产出→
+  新开（避免实现假设污染）；方向整体错误→新开（别把错误路径带进重试）。需要时用
+  force_new_window=true 强制新开。
+- **并行 fan-out**：只读研究类委托可一轮并行多发；写入类按目标/资产分区串行（同目标在队
+  达上限会被拒收）。
+"""
 
 
 def mission_boundary_lines(track: str | None, config: dict | None) -> list[str]:
@@ -171,8 +195,43 @@ ORCH_TOOLS: list[dict[str, Any]] = [
                          "description": "本委托依据的既有发现 id（find- 前缀）；依据"
                                         "被推翻时执行者会收到强制自评通知。正文里直接"
                                         "写 find-id 也会被服务端自动抽取，显式填写更准"},
+                "plan_node_id": {"type": "string",
+                                 "description": "可选：绑定到某计划节点（plan_work 返回的 "
+                                                "node_id）。派单前校验该节点依赖已完成；成功后"
+                                                "节点置执行中、随任务终态自动同步"},
             },
             "required": ["objective"],
+        },
+    },
+    {
+        "name": "plan_work",
+        "description": "登记一张多任务计划（跨任务依赖 DAG）。用 nodes 一次给出全部节点，"
+                       "depends_on 填「前置节点的下标（从 0 起）或标题」——系统拓扑排序后建图。"
+                       "计划只是「打算怎么做」的登记（不派单、不开窗、零执行）；真正执行再用 "
+                       "delegate 逐节点派单（delegate 传 plan_node_id 绑定）。同一项目建议只维护"
+                       "一张 active 计划；全部节点完成后计划自动置 completed。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "plan_name": {"type": "string", "description": "计划名称"},
+                "objective": {"type": "string", "description": "计划目标（可写阶段目标摘要）"},
+                "nodes": {"type": "array", "description": "计划节点（按依赖拓扑排序后建图）",
+                          "items": {
+                              "type": "object",
+                              "properties": {
+                                  "title": {"type": "string", "description": "节点标题"},
+                                  "role": {"type": "string",
+                                           "description": "建议执行专家（可选）"},
+                                  "depends_on": {"type": "array",
+                                                 "items": {"type": ["integer", "string"]},
+                                                 "description": "前置节点下标或标题"},
+                                  "priority": {"type": "integer",
+                                               "description": "0-100，小者优先（缺省 50）"},
+                              },
+                              "required": ["title"],
+                          }},
+            },
+            "required": ["plan_name", "nodes"],
         },
     },
     {
@@ -335,12 +394,12 @@ CHAT_SYSTEM_PROMPT = """你是项目主代理（Orchestrator），现在处于**
 {autonomy_notice}{goal_section}{phase_section}{mission_section}{campaign_section}{persona_section}
 ## 对话纪律
 1. 用人类的语言简洁作答，结论先行；问下一步计划时用上方态势作答（门没过就说还差什么）。
-2. 执行者看不到对话上下文：publish_task 的 objective 必须自包含；任务即窗口机制
-   会自动建专属执行窗，不要为执行窗调 spawn_session。
+2. 执行者看不到对话上下文：delegate 的 objective 必须自包含；系统会自动选窗
+   （优先复用空闲同角色窗）或开新窗。
 3. 阶段目标（goal）的变更须由人类确认：你可以在对话里给出结构化草案
    （text/criteria/phase），由人类在编排页签 goal 条确认落盘；未确认前不要当作已生效。
 4. 回答完毕调用 done 结束本轮；纯问答（无需动手）直接 done。
-"""
+{delegation_discipline}"""
 
 # 对话轮 LLM 步上限（插队轮不跑长决策链；发布分批语义不适用——人类在场可连续对话）
 CHAT_MAX_STEPS = 8
@@ -359,7 +418,7 @@ class OrchestratorConfig:
     digest_every: int = 3   # 每 N 轮至少一份简报
     # C1 编排拆解：单轮发布硬闸（拆解/分批 3-5/轮；worker 空退事件驱动续批）
     max_publish_per_tick: int = 5
-    # 批 6（§6.8）：L0 提案模式——publish_task/spawn_session 只发 orch.proposed
+    # 批 6（§6.8）：L0 提案模式——delegate/cancel_task/requeue_task 只发 orch.proposed
     # 事件、不写实体（校验照跑）；API 按实时档位 level=="L0" 注入。
     propose_only: bool = False
     # 自动渗透研判模式（auto-attack 2026-09-28）：工具面只留只读查询+done，
@@ -392,6 +451,7 @@ class Orchestrator:
         self.project_id = project_id
         self.bb = bb
         self.tq = TaskQueue(bb)
+        self._coord_store: CoordinationStore | None = None  # M3 计划 DAG 层（惰性）
         self.llm = llm
         self.session_factory = session_factory
         self.config = config or OrchestratorConfig()
@@ -407,7 +467,7 @@ class Orchestrator:
         self.state_saver = state_saver
         self.heartbeat = heartbeat
         # 批 4（§6.8）：autonomy_provider 实时返回归一化 autonomy dict；
-        # level=="L1" 时 spawn_session 转人工审批而非直接开窗。None=脚本/旧测试
+        # level=="L1" 时 delegate 转人工审批而非直接开窗。None=脚本/旧测试
         # 不接线（直接开窗），本模块不 import core.autonomy。
         self.autonomy_provider = autonomy_provider
         self.campaign = campaign  # ⑥ 战役记忆（tick 态势召回；None=关闭）
@@ -504,7 +564,7 @@ class Orchestrator:
         """阶段工作流注入（pentest-phased-workflow M1，§4.1 重心配额）：当前阶段
         + goal + focus 配比建议 + 出口门进度——tick 与对话轮同槽（{phase_section}）。
         重心配比是软引导（任何阶段可发任何类型）；门未过时 gate_types 内类型由
-        _tool_publish_task 硬拒（此处只预告）。轨无阶段剧本/meta 未接线=空段。"""
+        _tool_delegate 硬拒（此处只预告）。轨无阶段剧本/meta 未接线=空段。"""
         if self.meta_loader is None or not self.track:
             return ""
         try:
@@ -518,7 +578,7 @@ class Orchestrator:
             lines = [f"## 阶段工作流：当前处于「{spec['name']}」（{pid}）",
                      f"- 阶段目标：{spec['goal'] or '（未声明）'}"]
             if spec["focus"]:
-                lines.append("- 重心配额建议（软引导，publish_task 类型配比向此倾斜）："
+                lines.append("- 重心配额建议（软引导，delegate 类型配比向此倾斜）："
                              + "、".join(f"{k}×{v}" for k, v in spec["focus"].items()))
             fwd = phases.forward_targets(book, spec)
             gate = spec.get("gate") or {}
@@ -762,6 +822,26 @@ class Orchestrator:
                                  for f in rel],
                 })
         recent_tasks = self._recent_tasks_view(tasks)
+        # M3：计划 DAG 只注入当前 active 计划的摘要；objects/conflicts/verifications
+        # 仍由各自域维护，不混入编排器态势。刷新是单向 tasks→节点。
+        plan_view = None
+        try:
+            active_plan = self._coord().plan_view(self.project_id)
+            if active_plan:
+                plan_view = {
+                    "id": active_plan["id"],
+                    "name": active_plan["name"],
+                    "objective": active_plan["objective"][:300],
+                    "status": active_plan["status"],
+                    "nodes": [{
+                        "id": node["id"], "title": node["title"][:100],
+                        "status": node["status"], "role": node.get("role") or "",
+                        "task_id": node.get("task_id") or "",
+                        "depends_on": node.get("depends_on") or [],
+                    } for node in active_plan["tasks"]],
+                }
+        except Exception:  # noqa: BLE001 —— 计划域观测不阻断主编排
+            log.exception("协调计划态势注入失败")
         # 上下文预算（orch-context-budget，2026-09-27）：findings/sessions 全量段
         # 随项目线性膨胀失控——findings 只进 top 20（verified/exploited 优先 →
         # severity 降序），closed 会话出清；计数行给参照，细节走 bb_overview 按需拉。
@@ -798,6 +878,7 @@ class Orchestrator:
             # L1 待审批委派（2026-09-28）：批准前不进 tasks 表，若不摆进态势，
             # 编排器把「审批排队」误判为「队列空」无限续派——计数 + 摘要注入
             "approvals": self._approvals_view(),
+            "plan": plan_view,
             **assets_view,
         }
 
@@ -1050,6 +1131,7 @@ class Orchestrator:
             phase_section=self._phase_section(),
             mission_section=self._mission_section(),
             campaign_section=self._campaign_section(),
+            delegation_discipline=DELEGATION_DISCIPLINE,
         )
         messages: list[dict[str, Any]] = [{
             "role": "user",
@@ -1078,24 +1160,17 @@ class Orchestrator:
             self._emit_thinking(resp, _step,
                                 "analyze" if self.config.analyze_only else "tick",
                                 stream_id=stream_id)
-            messages.append({"role": "assistant", "content": resp.raw.get("content", [])})
-            if self.config.analyze_only:
-                # 研判轮：捕获最后一条 assistant 文本（content 可能是 blocks 或纯串）
-                raw = resp.raw.get("content", [])
-                if isinstance(raw, str):
-                    self._analysis_text = raw
-                elif isinstance(raw, list):
-                    buf = " ".join(
-                        b.get("text", "") for b in raw
-                        if isinstance(b, dict) and b.get("type") == "text")
-                    if buf.strip():
-                        self._analysis_text = buf.strip()
+            messages.append(assistant_message(resp))
+            if self.config.analyze_only and resp.text.strip():
+                self._analysis_text = resp.text.strip()
             if not resp.tool_calls:
                 messages.append({"role": "user", "content": "（请调用工具执行动作，或 done 结束本轮）"})
                 continue
+            tool_results = []
             for tc in resp.tool_calls:
                 result = self._dispatch(tc.name, tc.arguments)
-                messages.append(self.llm.tool_result_message(tc, result))
+                tool_results.append(self.llm.tool_result_message(tc, result)["content"][0])
+            messages.append(tool_results_message(tool_results))
             if self._finished:
                 return self._finish_tick()
         return self._finish_tick(exhausted=True)
@@ -1109,6 +1184,8 @@ class Orchestrator:
         "task.starvation": 600.0,      # 新饿死告警（含绑窗关闭待重绑）
         "budget.soft_warning": 3600.0,  # 预算 80% 软警（低频，1h 冷却）
         "phase.gate_open": 600.0,      # 阶段出口门满足（五触发之一：goal 阶段门）
+        # M3（2026-10-04）：计划节点新就绪 → 唤醒编排器派依赖节点（短冷却，续派快）
+        "plan.node_ready": 120.0,
     }
     WAKE_LOOKBACK = 1800.0   # 首启回看窗：无历史唤醒锚点时只看最近 30 分钟事件
     WAKE_MAX_EVENTS = 300    # 扫描上限：锚点之后最多回看多少条事件
@@ -1184,9 +1261,18 @@ class Orchestrator:
                         if line.strip("（） ") and line not in parts:
                             parts.append(line)
                 summary = "；".join(parts)
+            elif kind == "plan.node_ready":  # payload={plan_id,node_ids}
+                n = len(p.get("node_ids") or [])
+                summary = f"{n} 个计划节点就绪，可派依赖节点"
             else:  # task.failed/budget.soft_warning=note、phase.gate_open=summary
                 summary = str(p.get("note") or p.get("summary")
                               or p.get("reason") or "")
+                # M2：委派回执富化——失败任务带 receipt 时补产出计数，唤醒简报更全
+                rcpt = p.get("receipt")
+                if kind == "task.failed" and isinstance(rcpt, dict):
+                    nf, na = len(rcpt.get("findings") or []), len(rcpt.get("artifacts") or [])
+                    if nf or na:
+                        summary += f"（产出 {nf} 发现/{na} 产物）"
             out.append({"kind": kind, "event_id": r["id"],
                         "summary": summary[:160], "ts": r["created_at"]})
         return out
@@ -1206,6 +1292,9 @@ class Orchestrator:
                 lines.append("- 预算软警：LLM 用量已达 80%，请评估消耗与剩余任务量")
             elif kind == "phase.gate_open":
                 lines.append("- 阶段出口门满足：当前阶段门指标达标，可考虑流转下一阶段")
+            elif kind == "plan.node_ready":
+                lines.append(f"- 计划节点就绪：{t['summary']}——按态势里的 plan 段"
+                             "逐节点 delegate（带 plan_node_id 绑定）")
             else:
                 lines.append(f"- {kind}：{t['summary']}")
         return "\n".join(lines)
@@ -1338,6 +1427,7 @@ class Orchestrator:
             mission_section=self._mission_section(),
             campaign_section=self._campaign_section(),
             persona_section=self._persona_section(),
+            delegation_discipline=DELEGATION_DISCIPLINE,
         )
         messages = self._chat_history()
         messages.append({"role": "user", "content": text})
@@ -1355,12 +1445,13 @@ class Orchestrator:
                 self.bb, self.project_id, resp.usage, source="orchestrator-chat",
                 session_id=None, model=getattr(self.llm, "model", ""))
             self._emit_thinking(resp, _step, "chat", stream_id=stream_id)
-            messages.append({"role": "assistant", "content": resp.raw.get("content", [])})
-            step_text = self._assistant_text(resp.raw)
+            messages.append(assistant_message(resp))
+            step_text = resp.text.strip()
             if step_text:
                 reply = step_text
             if not resp.tool_calls:
                 break  # 纯文本回复 = 回答完毕（对话轮与 tick 不同：文本即答案）
+            tool_results = []
             for tc in resp.tool_calls:
                 result = self._dispatch(tc.name, tc.arguments)
                 tool_trace.append({
@@ -1368,7 +1459,8 @@ class Orchestrator:
                     "args": json.dumps(tc.arguments, ensure_ascii=False)[:200],
                     "result": str(result)[:200],
                 })
-                messages.append(self.llm.tool_result_message(tc, result))
+                tool_results.append(self.llm.tool_result_message(tc, result)["content"][0])
+            messages.append(tool_results_message(tool_results))
             if self._finished:
                 break
         if reply:
@@ -1713,17 +1805,104 @@ class Orchestrator:
             } for p in pending[:10]],
         }
 
+    def _coord(self) -> CoordinationStore:
+        """惰性取得计划 DAG 存储；编排器测试可继续使用未接线的内存黑板。"""
+        if self._coord_store is None:
+            self._coord_store = CoordinationStore(self.bb)
+        return self._coord_store
+
+    def _tool_plan_work(self, plan_name: str, nodes: list[dict[str, Any]],
+                        objective: str = "") -> str:
+        """创建/激活一张计划 DAG；只登记计划，不开窗、不派真实任务。"""
+        if not isinstance(nodes, list) or not nodes:
+            return "[拒绝] plan_work 至少需要一个节点"
+        if len(nodes) > 20:
+            return "[拒绝] plan_work 单计划最多 20 个节点"
+        coord = self._coord()
+        try:
+            plan = coord.create_plan(self.project_id, plan_name, objective)
+            created: list[dict[str, Any]] = []
+            by_index: dict[int, str] = {}
+            by_title: dict[str, str] = {}
+            # 先建无依赖节点，保证所有合法引用都能解析。
+            for idx, raw in enumerate(nodes):
+                if not isinstance(raw, dict):
+                    return f"[拒绝] 节点 {idx} 必须是对象"
+                title = str(raw.get("title") or "").strip()
+                if not title:
+                    return f"[拒绝] 节点 {idx} 缺少 title"
+                if title in by_title:
+                    return f"[拒绝] 节点标题重复: {title}"
+                node = coord.add_task(
+                    self.project_id, plan["id"], title,
+                    role=str(raw.get("role") or ""),
+                    priority=int(raw.get("priority", 50)), depends_on=[])
+                created.append(node); by_index[idx] = node["id"]; by_title[title] = node["id"]
+            # 再补依赖；依赖只允许本计划节点，拒绝自环。
+            for idx, raw in enumerate(nodes):
+                refs = raw.get("depends_on") or []
+                if not isinstance(refs, list):
+                    return f"[拒绝] 节点 {idx} depends_on 必须是数组"
+                dep_ids: list[str] = []
+                for ref in refs:
+                    key = by_index.get(ref) if isinstance(ref, int) else by_title.get(str(ref))
+                    if key is None:
+                        return f"[拒绝] 节点 {idx} 依赖不存在: {ref}"
+                    if key == by_index[idx]:
+                        return f"[拒绝] 节点 {idx} 不能依赖自身"
+                    dep_ids.append(key)
+                if dep_ids:
+                    coord.set_dependencies(self.project_id, by_index[idx], dep_ids)
+            coord.set_plan_status(self.project_id, plan["id"], "active")
+            view = coord.plan_view(self.project_id) or coord.get_plan(self.project_id, plan["id"])
+            # 检测环：若所有节点都 blocked 且没有可就绪根，明确拒绝并清理本次草稿。
+            if not any(t["status"] == "ready" for t in view["tasks"]):
+                return "[拒绝] plan_work 依赖图无可执行根节点（可能存在循环依赖）"
+            return json.dumps({"plan_id": plan["id"], "status": view["status"],
+                               "nodes": [{"node_id": t["id"], "title": t["title"],
+                                          "status": t["status"], "role": t["role"]}
+                                         for t in view["tasks"]]}, ensure_ascii=False)
+        except (LookupError, TypeError, ValueError) as e:
+            return f"[拒绝] plan_work: {e}"
+
+    def _prepare_plan_node(self, plan_node_id: str | None, role: str) -> tuple[str, str]:
+        """校验计划节点可派单并补齐角色；返回 (node_id, role)。"""
+        if not plan_node_id:
+            return "", role
+        coord = self._coord()
+        node = coord.get_task(self.project_id, plan_node_id)
+        plan = coord.get_plan(self.project_id, node["plan_id"])
+        if plan["status"] != "active":
+            raise ValueError(f"计划 {node['plan_id']} 当前不是 active")
+        coord.refresh_readiness(self.project_id)
+        node = coord.get_task(self.project_id, plan_node_id)
+        if node.get("task_id"):
+            raise ValueError(f"计划节点已绑定真实任务 {node['task_id']}")
+        if node["status"] != "ready":
+            unmet = coord.unmet_dependencies(self.project_id, plan_node_id)
+            suffix = f"；未满足依赖: {','.join(unmet)}" if unmet else ""
+            raise ValueError(f"计划节点当前不可派单（status={node['status']}）{suffix}")
+        node_role = str(node.get("role") or "").strip()
+        if role and node_role and role != node_role:
+            raise ValueError(f"委托 role={role} 与计划节点 role={node_role} 不一致")
+        return plan_node_id, role or node_role
+
     def _tool_delegate(
         self, objective: str, task_type: str = "generic", role: str = "",
         target_session: str = "", force_new_window: bool = False,
         scope: str = "", noise_budget: str | None = None,
         conflict_keys: list[str] | None = None, priority: int = 2,
         refs: list[str] | None = None, parent_id: str | None = None,
+        plan_node_id: str | None = None,
     ) -> str:
         """向会话窗委派委托（docs/plans/session-centric-orchestration.md §4.3）。
         选窗：target_session 指定 > 复用同类 idle 武装窗 > 开新窗；L1 开窗走
         审批（批准=开窗+写入委托+带活起跑），L2 直接开窗；窗忙且被指定 →
         委托进窗内队列。"""
+        try:
+            plan_node_id, role = self._prepare_plan_node(plan_node_id, role)
+        except (LookupError, ValueError) as e:
+            return f"[拒绝] 计划节点: {e}"
         # C1 单轮委派硬闸：分批 3-5/轮，防一轮刷爆（与提案同闸）
         if self._publish_count >= self.config.max_publish_per_tick:
             return (f"[拒绝] 本轮委派已达上限 max_publish_per_tick="
@@ -1784,7 +1963,8 @@ class Orchestrator:
                 "conflict_keys": conflict_keys or [], "refs": refs or [],
                 "target_session": target_session,
                 "force_new_window": force_new_window,
-                "parent_id": parent_id})
+                "parent_id": parent_id,
+                **({"plan_node_id": plan_node_id} if plan_node_id else {})})
         # 自主预算硬闸（回调实时重读项目配置）
         if self.gate is not None:
             reason = self.gate("delegate")
@@ -1869,7 +2049,7 @@ class Orchestrator:
                      "objective": objective, "task_type": task_type,
                      "scope": scope, "noise_budget": noise_budget,
                      "conflict_keys": conflict_keys or [], "priority": priority,
-                     "refs": refs or []},
+                     "refs": refs or [], "plan_node_id": plan_node_id or ""},
                     risk="low" if noise_budget == "passive" else "medium",
                     requested_by="orchestrator")
                 self._publish_count += 1
@@ -1906,7 +2086,9 @@ class Orchestrator:
                 allowed_types=(self.task_types.keys() if self.track else None),
                 refs=refs, role=role, target_session=sid, parent_id=parent_id,
                 parent_depth_limit=1)
-        except ValueError as e:
+            if plan_node_id:
+                self._coord().bind_task(self.project_id, plan_node_id, task_id)
+        except (ValueError, LookupError) as e:
             return f"[拒绝] {e}"
         self._publish_count += 1
         self._published.append(task_id)
@@ -1914,7 +2096,8 @@ class Orchestrator:
         self.bb.append_event(
             self.project_id, "delegation.posted",
             {"task_id": task_id, "objective": objective, "task_type": task_type,
-             "created_by": "orchestrator", "role": role, "new_window": created},
+             "created_by": "orchestrator", "role": role, "new_window": created,
+             **({"plan_node_id": plan_node_id} if plan_node_id else {})},
             session_id=sid, author="orchestrator")
         # 回调（API 侧）：usage 计数 + idle 窗起跑 / 忙窗排队
         if self.on_task_published is not None:

@@ -1,6 +1,8 @@
-"""Skill 注册表与解析（DESIGN.md §4、§4.5）。
+"""Skill 注册表与解析（cc 风格技能目录）。
 
-Skill = 目录约定（SKILL.md frontmatter + 可选 helpers/examples）。
+Skill = 自包含目录（SKILL.md + 可选 references/scripts/examples/assets）。
+旧版只含路由正文的技能仍可被扫描，便于渐进迁移；新技能不再依赖
+packs/kb 才能工作。
 SKILL.md frontmatter 解析用极简 YAML（名字/关键词/特征平铺结构够用；
 引入 PyYAML 后可换）。
 
@@ -22,6 +24,7 @@ vuln_classes: stack, heap
 task_types: exploit                        # 可认领的任务类型（角色过滤联动）
 required_tools: sqlmap
 enabled: true                              # false = 不参与路由（设置页可启停）
+mode: self-contained                       # self-contained（默认）| legacy
 ---
 """
 
@@ -48,6 +51,36 @@ class SkillMeta:
     task_types: list[str] = field(default_factory=list)
     required_tools: list[str] = field(default_factory=list)
     enabled: bool = True
+    mode: str = "self-contained"
+
+    @property
+    def root(self) -> Path:
+        """技能目录根；附属资源只能从这里解析。"""
+        return self.path.parent
+
+    @property
+    def resources(self) -> list[Path]:
+        """cc 约定资源清单，跳过隐藏目录和未知文件。"""
+        allowed = {"references", "scripts", "examples", "assets"}
+        out: list[Path] = []
+        for dirname in allowed:
+            base = self.root / dirname
+            if not base.is_dir():
+                continue
+            root = self.root.resolve()
+            out.extend(
+                p for p in base.rglob("*")
+                if p.is_file()
+                and not p.is_symlink()
+                and root in p.resolve().parents
+                and not any(part.startswith(".")
+                            for part in p.relative_to(self.root).parts)
+            )
+        return sorted(out, key=lambda p: p.relative_to(self.root).as_posix())
+
+    @property
+    def is_self_contained(self) -> bool:
+        return self.mode not in {"legacy", "thin-route"}
 
     @property
     def labels(self) -> list[str]:
@@ -127,7 +160,8 @@ class SkillRegistry:
         ]
         for group, kind in patterns:
             for skill_md in sorted(root.glob(f"{group}/*/skills/*/SKILL.md")):
-                meta = parse_frontmatter(skill_md.read_text(encoding="utf-8"))
+                raw = skill_md.read_text(encoding="utf-8")
+                meta = parse_frontmatter(raw)
                 name = meta.get("name", skill_md.parent.name)
                 rel = skill_md.relative_to(root).parts
                 self._skills[name] = SkillMeta(
@@ -145,6 +179,9 @@ class SkillRegistry:
                     task_types=_split(meta.get("task_types")),
                     required_tools=_split(meta.get("required_tools")),
                     enabled=_is_enabled(meta.get("enabled")),
+                    mode=(meta.get("mode") or meta.get("format") or
+                          ("legacy" if ("kb_open" in raw or "知识库" in raw)
+                           else "self-contained")).strip().lower(),
                 )
         return len(self._skills)
 

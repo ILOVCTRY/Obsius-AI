@@ -82,6 +82,23 @@ def test_collect_lookback_window_no_anchor(env):
     assert trig[0]["kind"] == "task.failed"
 
 
+def test_collect_failed_receipt_appends_output_counts(env):
+    """M2（orchestrator-coordination-fusion）：task.failed 带 receipt 时，唤醒简报
+    摘要补「产出 N 发现/M 产物」，编排器一眼看清失败前的产出。"""
+    bb, project = env
+    pid = project["id"]
+    bb.append_event(pid, "task.failed",
+                    {"task_id": "t1", "note": "exploit 崩了",
+                     "receipt": {"status": "failed",
+                                 "findings": [{"id": "find-1", "title": "x",
+                                               "severity": "high"}],
+                                 "artifacts": ["poc.py", "out.txt"]}},
+                    author="sess-a")
+    trig = Orchestrator.collect_wake_triggers(bb, pid)
+    assert trig[0]["kind"] == "task.failed"
+    assert trig[0]["summary"] == "exploit 崩了（产出 1 发现/2 产物）"
+
+
 def test_collect_anchor_id_and_cooldown(env):
     """有锚点：锚点前事件按 id 跳过；锚点后新事件在冷却窗内静默，过后可再报。"""
     bb, project = env

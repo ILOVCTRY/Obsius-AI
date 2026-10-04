@@ -12,7 +12,9 @@
 - id 由本模块统一生成，blackboard projects 行同 id。
 """
 
+import fnmatch
 import json
+import os
 import re
 import shutil
 import time
@@ -28,6 +30,72 @@ PROJECT_FILE = "project.json"
 DB_FILE = "blackboard.db"
 SUBDIRS = ("samples", "artifacts", "logs")
 TRASH_DIR = ".trash"
+WORKSPACE_TREE_MAX_DEPTH = 4
+WORKSPACE_TREE_MAX_NODES = 1000
+WORKSPACE_TREE_MAX_CHILDREN = 200
+_WORKSPACE_HIDDEN_DIRS = {".git", ".hg", ".svn", ".venv", "venv", "node_modules",
+                          "__pycache__", ".history", ".trash", ".tmp"}
+_WORKSPACE_HIDDEN_NAMES = {"blackboard.db", "blackboard.db-wal", "blackboard.db-shm",
+                           "project.json"}
+_WORKSPACE_HIDDEN_PATTERNS = (".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx",
+                              "id_rsa*", "credentials*", "secrets*")
+
+
+def _workspace_hidden(name: str, is_dir: bool) -> bool:
+    if is_dir and name in _WORKSPACE_HIDDEN_DIRS:
+        return True
+    if name in _WORKSPACE_HIDDEN_NAMES:
+        return True
+    return any(fnmatch.fnmatch(name, pattern) for pattern in _WORKSPACE_HIDDEN_PATTERNS)
+
+
+def list_workspace_tree(root: str | Path, *, max_depth: int = WORKSPACE_TREE_MAX_DEPTH,
+                        max_nodes: int = WORKSPACE_TREE_MAX_NODES,
+                        max_children: int = WORKSPACE_TREE_MAX_CHILDREN) -> dict:
+    """返回受限项目工作区文件树；只返回相对路径和元数据，不跟随符号链接。"""
+    base = Path(root).resolve()
+    nodes_seen = 0
+    truncated = False
+
+    def walk(directory: Path, rel_prefix: str, depth: int) -> list[dict]:
+        nonlocal nodes_seen, truncated
+        if depth > max_depth or nodes_seen >= max_nodes:
+            truncated = True
+            return []
+        try:
+            entries = sorted(os.scandir(directory), key=lambda e: (not e.is_dir(follow_symlinks=False), e.name.lower()))
+        except OSError:
+            return []
+        out: list[dict] = []
+        for entry in entries:
+            if len(out) >= max_children or nodes_seen >= max_nodes:
+                truncated = True
+                break
+            try:
+                is_dir = entry.is_dir(follow_symlinks=False)
+                if _workspace_hidden(entry.name, is_dir) or entry.is_symlink():
+                    continue
+                rel = f"{rel_prefix}/{entry.name}" if rel_prefix else entry.name
+                nodes_seen += 1
+                node: dict = {"name": entry.name, "path": rel, "kind": "dir" if is_dir else "file"}
+                if is_dir:
+                    if depth < max_depth:
+                        node["children"] = walk(Path(entry.path), rel, depth + 1)
+                    else:
+                        truncated = True
+                else:
+                    try:
+                        node["size"] = entry.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        node["size"] = 0
+                out.append(node)
+            except OSError:
+                continue
+        return out
+
+    return {"root": "workspace", "nodes": walk(base, "", 0), "truncated": truncated,
+            "limits": {"max_depth": max_depth, "max_nodes": max_nodes,
+                       "max_children": max_children}}
 
 
 def _now() -> str:

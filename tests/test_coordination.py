@@ -29,6 +29,59 @@ def test_coordination_plan_task_dag(tmp_path):
     assert overview["plans"][0]["tasks"][0]["evidence"][0]["ref"] == "overview.json"
 
 
+def test_coordination_preflight_and_ready_event(tmp_path):
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _project(bb)
+    store = CoordinationStore(bb)
+    plan = store.create_plan("p1", "预检计划")
+    first = store.add_task("p1", plan["id"], "根任务")
+    store.set_plan_status("p1", plan["id"], "active")
+    pf = store.preflight("p1", plan["id"])
+    assert pf["dependencies"]["ready_count"] == 1
+    assert not pf["blockers"]
+    ready = [e for e in bb.recent_events("p1") if e["kind"] == "plan.node_ready"]
+    assert ready and ready[-1]["payload"]["node_ids"] == [first["id"]]
+    store.refresh_readiness("p1")
+    assert len([e for e in bb.recent_events("p1") if e["kind"] == "plan.node_ready"]) == len(ready)
+
+
+def test_coordination_bound_task_sync_and_auto_complete(tmp_path):
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _project(bb)
+    store = CoordinationStore(bb)
+    plan = store.create_plan("p1", "绑定计划")
+    first = store.add_task("p1", plan["id"], "执行入口")
+    second = store.add_task("p1", plan["id"], "复核入口", depends_on=[first["id"]])
+    store.set_plan_status("p1", plan["id"], "active")
+    with bb._tx():
+        bb.conn.execute("INSERT INTO tasks(id,project_id,objective,status,created_at,updated_at) VALUES(?,?,?,?,datetime('now'),datetime('now'))",
+                        ("task-real", "p1", "执行入口", "open"))
+    store.bind_task("p1", first["id"], "task-real")
+    assert store.get_task("p1", first["id"])["task_id"] == "task-real"
+    store.refresh_readiness("p1")
+    assert store.get_task("p1", first["id"])["status"] == "running"
+    with bb._tx():
+        bb.conn.execute("UPDATE tasks SET status='done' WHERE id='task-real'")
+    store.refresh_readiness("p1")
+    assert store.get_task("p1", first["id"])["status"] == "completed"
+    assert store.get_task("p1", second["id"])["status"] == "ready"
+
+
+def test_coordination_set_dependencies_rejects_cycle(tmp_path):
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _project(bb)
+    store = CoordinationStore(bb)
+    plan = store.create_plan("p1", "循环检查")
+    first = store.add_task("p1", plan["id"], "一")
+    second = store.add_task("p1", plan["id"], "二", depends_on=[first["id"]])
+    try:
+        store.set_dependencies("p1", first["id"], [second["id"]])
+    except ValueError as exc:
+        assert "循环" in str(exc)
+    else:
+        raise AssertionError("cycle should be rejected")
+
+
 def test_coordination_rejects_unknown_dependency(tmp_path):
     bb = Blackboard(str(tmp_path / "bb.db"))
     _project(bb)

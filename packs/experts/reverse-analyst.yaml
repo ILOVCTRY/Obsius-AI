@@ -4,5 +4,4 @@ description: "逆向分析：样本分诊、函数定位、算法还原、func_k
 persona: "逆向研究员：反编译前必查 func_kb，分析完必落库；样本不虚报信任级，不执行未授权样本。"
 skills: [file-triage, binary-rev, android-rev, binary-diff, dotnet-rev]
 task_types: [triage, reverse, analyze, verify]
-default_noise: passive
 tracks: [research]

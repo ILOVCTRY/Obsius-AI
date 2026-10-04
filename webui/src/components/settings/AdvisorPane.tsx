@@ -19,7 +19,7 @@ const RANGES: { key: keyof typeof DEFAULTS; label: string; lo: number; hi: numbe
 ]
 
 const selectCls =
-  "rounded border bg-background px-1.5 py-1 text-xs [color-scheme:dark] [&>option]:bg-popover [&>option]:text-popover-foreground"
+  "rounded border bg-background px-1.5 py-1 text-xs [&>option]:bg-popover [&>option]:text-popover-foreground"
 
 export function AdvisorPane({ pid }: { pid?: string | null }) {
   const [values, setValues] = useState(DEFAULTS)

@@ -1055,6 +1055,20 @@ class Blackboard:
                 (project_id, stream_id))
             return cur.rowcount
 
+    def prune_chat_thread_deltas(self, project_id: str, thread_id: str) -> int:
+        """智能体工作台流式增量清剪（2026-10-04）：一轮正常收尾后删该线程的
+        chat.delta / chat.thinking.delta 过渡行——终稿全文在 chat_messages，事件
+        只承担实时可见；不删则每条携带累计全文的 delta 行会持续膨胀事件表。
+        异常/中断路径不调用（残留 delta = 被中断思考的现场审计，同
+        prune_thinking_deltas 纪律）。"""
+        with self._tx():
+            cur = self.conn.execute(
+                "DELETE FROM events WHERE project_id=? AND kind IN"
+                " ('chat.delta','chat.thinking.delta')"
+                " AND json_extract(payload,'$.thread_id')=?",
+                (project_id, thread_id))
+            return cur.rowcount
+
     # ---------- HTTP 历史（v15，F6：浏览器抓包/重发/爆破统一入库） ----------
 
     def add_http_history(

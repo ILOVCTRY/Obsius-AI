@@ -4,7 +4,7 @@
 
 ## 组件树
 
-- `BrowserView.tsx` 入口：标签栏显示人类主页面和 AI Page，状态每 2 秒刷新；未手动选定标签时跟随最近动作的 AI Page。右侧抓包工具默认收起。
+- `BrowserView.tsx` 入口：标签栏显示人类主页面和 AI Page，状态每 2 秒刷新；未手动选定标签时跟随最近动作的 AI Page。右侧抓包工具默认收起。**默认只开一个标签**：挂载时等全局标签表加载完，仅当全局无 `human-main` 才新建一次（`human-main` 是全应用单例，切回模块组件重挂、`tabs` 初值空，不能凭本项目 `tabs.length` 判定否则会重复新建）。**原生视图可见性契约**：真实 Chromium 页是 Electron 覆盖在窗口上的 `WebContentsView`，不由 React 树渲染——本组件挂载时 `desktop.setBrowserVisible(true)`、卸载（切到其它模块）时 `false`，否则切走原生视图会留在原位浮在新视图上（`main.js` 的 `setBrowserViewsVisible`）。
 - `ActionTimeline.tsx` browser.* 事件 3s 增量（api.events since_id 游标，
   isBrowserEvent 过滤；v3 自 SessionBar.tsx 迁出，**SessionBar 已删**）。
 - `NavShotPane.tsx` URL 栏 + 实时画面：

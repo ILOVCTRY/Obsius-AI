@@ -12,21 +12,23 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronLeft,
-  GitBranch,
   Globe2,
   Inbox,
   FolderKanban,
   FolderTree,
   LayoutDashboard,
   ListChecks,
+  Maximize2,
+  Minus,
   PanelLeftOpen,
   Radio,
   Settings2,
-  ShieldCheck,
   Sparkles,
+  Square,
+  X,
 } from "lucide-react"
 import { api, ApiError } from "@/lib/api"
-import type { ProjectDetail } from "@/lib/types"
+import type { Approval, ProjectDetail } from "@/lib/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { LiveRoom } from "@/views/LiveRoom"
@@ -40,12 +42,10 @@ import { ProjectsView } from "@/views/ProjectsView"
 import { IntelView } from "@/views/IntelView"
 import { TaskBoard } from "@/views/TaskBoard"
 import { BrowserView } from "@/views/browser/BrowserView"
-import { ApprovalsView } from "@/views/ApprovalsView"
 import { SettingsView } from "@/views/SettingsView"
 import { KnowledgeView } from "@/views/KnowledgeView"
 import { SkillsView } from "@/views/SkillsView"
 import { SampleAnalysisView } from "@/views/SampleAnalysisView"
-import { MultiAgentCoordinationView } from "@/views/MultiAgentCoordinationView"
 import { cn } from "@/lib/utils"
 import { bindingBadge } from "@/lib/taxonomy"
 
@@ -58,7 +58,7 @@ import { bindingBadge } from "@/lib/taxonomy"
 // 左缘悬浮把手唤出；状态 localStorage（ui.nav-collapsed）。收起=条件渲染卸载
 // nav Panel+Separator（同 boardOpen 先例），重挂由 useDefaultLayout 恢复宽度。
 
-type View = "projects" | "intel" | "live" | "board" | "tasks" | "agents" | "coordination" | "approvals" | "browser" | "sample-analysis" | "knowledge" | "skills" | "settings"
+type View = "projects" | "intel" | "live" | "board" | "tasks" | "agents" | "browser" | "sample-analysis" | "knowledge" | "skills" | "settings"
 
 /** M4c 场景档 board_view 默认视图（config.board_view.default；黑板上自行校验可用 tab 回退） */
 const boardViewOf = (m: ProjectDetail | null): string | undefined => {
@@ -75,7 +75,6 @@ const NAV_GROUPS: { label: string; items: NavItem[]; collapsible?: boolean }[] =
       { key: "projects", label: "项目", icon: FolderKanban, needsProject: false },
       { key: "intel", label: "情报", icon: Inbox, needsProject: false, homeOnly: true },
       { key: "agents", label: "智能体", icon: Bot, needsProject: true },
-      { key: "coordination", label: "多智能体协调", icon: GitBranch, needsProject: true },
       { key: "board", label: "黑板", icon: LayoutDashboard, needsProject: true },
     ],
   },
@@ -84,7 +83,6 @@ const NAV_GROUPS: { label: string; items: NavItem[]; collapsible?: boolean }[] =
     items: [
       { key: "browser", label: "浏览器", icon: Globe2, needsProject: true },
       { key: "sample-analysis", label: "样本分析", icon: FolderTree, needsProject: true },
-      { key: "approvals", label: "审批", icon: ShieldCheck, needsProject: true },
       { key: "knowledge", label: "知识库", icon: BookOpen, needsProject: false },
       { key: "skills", label: "技能库", icon: BrainCircuit, needsProject: false },
       { key: "settings", label: "设置", icon: Settings2, needsProject: false },
@@ -101,13 +99,12 @@ const NAV_GROUPS: { label: string; items: NavItem[]; collapsible?: boolean }[] =
   },
 ]
 
-function NavRail({ active, onSelect, locked, className, expanded = false, pendingApprovals = 0 }: {
+function NavRail({ active, onSelect, locked, className, expanded = false }: {
   active: View
   onSelect: (key: View) => void
   locked: boolean
   className?: string
   expanded?: boolean
-  pendingApprovals?: number
 }) {
   const [moreOpen, setMoreOpen] = useState(
     () => window.localStorage.getItem("ui.nav-more-open") === "1")
@@ -133,10 +130,7 @@ function NavRail({ active, onSelect, locked, className, expanded = false, pendin
 
   return (
     <nav className={cn("app-nav flex shrink-0 flex-col border-r", expanded ? "items-stretch" : "items-center", className)}>
-      <div className={cn("nav-brand", expanded ? "justify-start px-4" : "justify-center")}>
-        <div className="brand-mark"><Sparkles size={15} /></div>
-        {expanded && <span>Obsius</span>}
-      </div>
+      <NavBrand expanded={expanded} />
       <div className="nav-scroll">
         {groups.map((group) => {
           const collapsible = !!group.collapsible
@@ -168,7 +162,6 @@ function NavRail({ active, onSelect, locked, className, expanded = false, pendin
                   >
                     <Icon size={17} strokeWidth={1.8} />
                     {expanded && <span>{n.key === "settings" && locked ? "设置" : n.label}</span>}
-                    {n.key === "approvals" && pendingApprovals > 0 && <span className="nav-count">{pendingApprovals}</span>}
                   </button>
                 )
               })}
@@ -187,6 +180,43 @@ function NavReveal({ onExpand }: { onExpand: () => void }) {
     <button className="nav-reveal" title="展开侧栏" aria-label="展开侧栏" onClick={onExpand}>
       <PanelLeftOpen size={14} />
     </button>
+  )
+}
+
+/** 桌面窗口状态（最大化标志 + 控制 API）；浏览器环境返回空。
+ *  标题栏已拆件：品牌进左导航顶部（NavBrand），窗口按钮悬浮在内容区右上角（WindowControls）。 */
+function useDesktopWindow() {
+  const desktopWindow = typeof window !== "undefined" ? window.desktopWindow : undefined
+  const [maximized, setMaximized] = useState(false)
+  useEffect(() => {
+    if (!desktopWindow) return
+    void desktopWindow.isMaximized().then(setMaximized).catch(() => {})
+    return desktopWindow.onMaximizedChanged(setMaximized)
+  }, [desktopWindow])
+  return { desktopWindow, maximized }
+}
+
+/** 左导航顶部的品牌行：兼作窗口拖动区（双击最大化）。 */
+function NavBrand({ expanded }: { expanded: boolean }) {
+  const { desktopWindow } = useDesktopWindow()
+  return (
+    <div className="nav-brand" onDoubleClick={() => void desktopWindow?.toggleMaximize()}>
+      <span className="brand-mark"><Sparkles size={13} /></span>
+      {expanded && <span>Obsius</span>}
+    </div>
+  )
+}
+
+/** 窗口控制按钮（最小化/最大化/关闭）；项目页并入顶栏、其余页面悬浮在内容右上角。 */
+function WindowControls({ className }: { className?: string }) {
+  const { desktopWindow, maximized } = useDesktopWindow()
+  if (!desktopWindow) return null
+  return (
+    <div className={cn("window-controls", className)}>
+      <button type="button" aria-label="最小化" title="最小化" onClick={() => void desktopWindow.minimize()}><Minus size={15} /></button>
+      <button type="button" aria-label={maximized ? "还原" : "最大化"} title={maximized ? "还原" : "最大化"} onClick={() => void desktopWindow.toggleMaximize()}>{maximized ? <Square size={12} /> : <Maximize2 size={13} />}</button>
+      <button type="button" className="window-close" aria-label="关闭" title="关闭" onClick={() => void desktopWindow.close()}><X size={15} /></button>
+    </div>
   )
 }
 
@@ -212,11 +242,31 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
   }
 }
 
+// 事件订阅隔离壳（2026-10-04）：只订阅、去抖、回调，**渲染 null**——把「事件驱动的
+// 状态更新」关在一个小组件里，父组件（App 根）不再随事件重渲。工作台/直播间同理
+// 可按需复用（它们自身需要事件驱动渲染，故不适用）。
+function EventsDebouncedRefresh({ pid, onBump }: {
+  pid: string | null; onBump: () => void
+}) {
+  const { events } = useEvents(pid)
+  const n = events.length
+  useEffect(() => {
+    if (!pid || n === 0) return
+    const t = setTimeout(onBump, 400)
+    return () => clearTimeout(t)
+  }, [n, pid, onBump])
+  return null
+}
+
 export default function App() {
   const [pid, setPid] = useState<string | null>(null)
   const [meta, setMeta] = useState<ProjectDetail | null>(null)
   const [view, setView] = useState<View>("projects")
-  const [pendingApprovals, setPendingApprovals] = useState(0)
+  // 审批铃铛（2026-10-04 审批模块下线后保留）：待审批列表（点击跳有审批的会话）+ awaiting_human 任务数
+  const [pendingApprovals, setPendingApprovals] = useState<Approval[]>([])
+  const [awaitingHuman, setAwaitingHuman] = useState(0)
+  const pendingCount = pendingApprovals.length + awaitingHuman
+  void pendingCount
   const [boardOpen, setBoardOpen] = useState(true)
   // 黑板 Keep-alive（2026-09-30）：首次点开「黑板」的 pid 才挂载（没点过的项目不
   // 预加载）；同项目切视图不卸载只隐藏，换项目（pid 变）时因 key={pid} 全新挂载重载
@@ -293,6 +343,7 @@ export default function App() {
     setView("live")
   }, [])
 
+  // 项目页返回入口由悬浮控件承载；保留回调供跨视图调用。
   const goHome = useCallback(() => {
     // 首页是无项目上下文的入口；清掉 pid 让项目入口和全局导航恢复。
     setPid(null)
@@ -322,20 +373,20 @@ export default function App() {
     }
   }, [pid])
 
-  // 事件到达即去抖重拉项目元数据（顶栏任务/发现/资产统计；5s 轮询兜底，不另加轮询）
-  const { events } = useEvents(pid)
-  useEffect(() => {
-    if (!pid || events.length === 0) return
-    const t = setTimeout(() => {
-      api.getProject(pid).then(setMeta).catch(() => {})
-    }, 400)
-    return () => clearTimeout(t)
-  }, [events.length, pid])
-
+  // 事件到达即去抖重拉项目元数据（顶栏任务/发现/资产统计；5s 轮询兜底）。
+  // **订阅隔离**（2026-10-04）：事件订阅移到返回 null 的 EventsDebouncedRefresh
+  // 子组件——此前 useEvents 直接挂在 App 根上，流式期每条事件（~6-8Hz）都重渲
+  // 整棵应用树（工作台/发现栏/直播间全跟着重渲），是「输出过程卡卡的」主因之一。
+  const bumpMeta = useCallback(() => {
+    if (!pid) return
+    api.getProject(pid).then(setMeta).catch(() => {})
+  }, [pid])
+  const eventsWatcher = <EventsDebouncedRefresh pid={pid} onBump={bumpMeta} />
   // 全局审批铃铛轮询（C1：awaiting_human 任务计入红点，只计数不混 approval 表）
   useEffect(() => {
     if (!pid) {
-      setPendingApprovals(0)
+      setPendingApprovals([])
+      setAwaitingHuman(0)
       return
     }
     const load = () =>
@@ -343,13 +394,30 @@ export default function App() {
         api.approvals(pid, "pending"),
         api.getProject(pid),
       ])
-        .then(([a, detail]) =>
-          setPendingApprovals(a.length + (detail.task_stats.awaiting_human ?? 0)))
+        .then(([a, detail]) => {
+          setPendingApprovals(a)
+          setAwaitingHuman(detail.task_stats.awaiting_human ?? 0)
+        })
         .catch(() => {})
     load()
     const t = setInterval(load, 5000)
     return () => clearInterval(t)
   }, [pid])
+
+  // 铃铛点击（2026-10-04）：跳「有审批的会话」（审批模块已下线，决策在对话内联卡完成）；
+  // 无会话归属的审批/仅待人工任务 → 退任务看板；都没有 → 直播间。
+  const openApprovals = useCallback(() => {
+    const target = pendingApprovals.find((a) => a.session_id)
+    if (target?.session_id) {
+      window.dispatchEvent(new CustomEvent("goto-session", { detail: { sessionId: target.session_id } }))
+    } else if (awaitingHuman > 0) {
+      setView("tasks")
+    } else {
+      setView("live")
+    }
+  }, [pendingApprovals, awaitingHuman])
+  void goHome
+  void openApprovals
 
   // 工作台 profile：research+binary ⇒ rev-generic 逆向工作台（其他轨保持渗透模板）
   const profile = deriveWorkbenchProfile(meta)
@@ -369,8 +437,9 @@ export default function App() {
   // 悬浮「‹」收起、左缘把手唤出；宽度/收起态与项目页共用（app-nav-v3 / ui.nav-collapsed）。
   if (!pid || view === "projects" || view === "intel" || view === "settings" && !pid) {
     return (
-      <div className="app-shell flex h-screen">
-        <Group orientation="horizontal" className="flex min-h-0 w-full"
+      <div className="app-shell flex h-screen flex-col">
+        {eventsWatcher}
+        <Group orientation="horizontal" className="flex min-h-0 w-full flex-1"
                defaultLayout={navLayout.defaultLayout}
                onLayoutChanged={navLayout.onLayoutChanged}>
           {!navCollapsed && (
@@ -386,17 +455,23 @@ export default function App() {
             </>
           )}
           <Panel id="main">
-            <main className="app-content relative h-full min-w-0 overflow-auto">
-              {view === "intel"
-                ? <IntelView />
-                : view === "knowledge"
-                  ? <KnowledgeView />
-                  : view === "skills"
-                    ? <SkillsView focus={settingsNav?.skill ? { ...settingsNav.skill, n: settingsNav.n } : null} />
-                : view === "settings" && !pid
-                  ? <SettingsView nav={settingsNav} />
-                  : <ProjectsView onOpen={openProject} />}
-            </main>
+            <div className="relative h-full min-h-0">
+              {/* 无独立标题栏：顶部 36px 为拖动区，窗口按钮悬浮右上角；
+                  让位由各视图自身根节点的 pt-9 承担（视图背景因此一直铺到最顶，避免接缝） */}
+              <div className="window-drag-strip" />
+              <WindowControls className="window-controls-float" />
+              <main className="app-content h-full min-h-0 min-w-0 overflow-hidden">
+                {view === "intel"
+                  ? <IntelView />
+                  : view === "knowledge"
+                    ? <KnowledgeView />
+                    : view === "skills"
+                      ? <SkillsView focus={settingsNav?.skill ? { ...settingsNav.skill, n: settingsNav.n } : null} />
+                  : view === "settings" && !pid
+                    ? <SettingsView nav={settingsNav} />
+                    : <ProjectsView onOpen={openProject} />}
+              </main>
+            </div>
           </Panel>
         </Group>
         {navCollapsed && <NavReveal onExpand={toggleNavCollapsed} />}
@@ -406,22 +481,7 @@ export default function App() {
 
   return (
     <div className="app-shell flex h-screen flex-col">
-      <header className="topbar flex h-16 shrink-0 items-center gap-4 border-b px-5">
-        <div className="mobile-brand"><div className="brand-mark"><Sparkles size={15} /></div><span>Obsius</span></div>
-        <div className="project-context">
-          <span className="eyebrow">ACTIVE PROJECT</span>
-          <div className="project-title"><span className="project-pulse" /><h1>{meta?.name ?? "加载项目"}</h1><Badge variant="outline" className="project-badge">{meta ? bindingBadge(meta.track, meta.experts) : "…"}</Badge></div>
-        </div>
-        {meta && <div className="project-stats"><span><CheckCircle2 size={13} />{meta.task_stats.done ?? 0}/{Object.values(meta.task_stats).reduce((a, b) => a + b, 0)} 任务</span><span><Blocks size={13} />{meta.findings} 发现</span><span><Globe2 size={13} />{meta.assets} 资产</span></div>}
-        <span className="flex-1" />
-        <button onClick={() => setView("approvals")} className={cn("approval-action", view === "approvals" && "is-active")}>
-          <Bell size={16} />
-          <span>审批</span>
-          {pendingApprovals > 0 && <span className="approval-count">{pendingApprovals}</span>}
-        </button>
-        <Button size="sm" variant="ghost" className="back-project" onClick={goHome}><ArrowLeft size={15} />首页</Button>
-      </header>
-
+      {eventsWatcher}
       <div className="flex min-h-0 flex-1">
         <Group orientation="horizontal" className="flex min-h-0 w-full"
                defaultLayout={navLayout.defaultLayout}
@@ -430,7 +490,7 @@ export default function App() {
           {!navCollapsed && (
             <>
               <Panel id="nav" minSize={160} maxSize={280} defaultSize={180}>
-                <NavRail active={view} onSelect={setView} locked={!pid} pendingApprovals={pendingApprovals} expanded className="h-full w-full" />
+                <NavRail active={view} onSelect={setView} locked={!pid} expanded className="h-full w-full" />
               </Panel>
               <Separator className="nav-sep w-0.5 shrink-0 bg-transparent transition-colors hover:bg-accent data-[active]:bg-accent">
                 <button className="nav-edge-btn" title="收起侧栏" aria-label="收起侧栏" onClick={toggleNavCollapsed}>
@@ -441,6 +501,15 @@ export default function App() {
           )}
           {/* 中：主区（直播间在 live 视图与黑板同屏共存） */}
           <Panel id="main">
+            <div className="topbar flex h-16 shrink-0 items-center gap-4 border-b px-5">
+              <div className="mobile-brand"><div className="brand-mark"><Sparkles size={15} /></div><span>Obsius</span></div>
+              <div className="project-context"><span className="eyebrow">ACTIVE PROJECT</span><div className="project-title"><span className="project-pulse" /><h1>{meta?.name ?? "加载项目"}</h1><Badge variant="outline" className="project-badge">{meta ? bindingBadge(meta.track, meta.experts) : "…"}</Badge></div></div>
+              {meta && <div className="project-stats"><span><CheckCircle2 size={13} />{meta.task_stats.done ?? 0}/{Object.values(meta.task_stats).reduce((a, b) => a + b, 0)} 任务</span><span><Blocks size={13} />{meta.findings} 发现</span><span><Globe2 size={13} />{meta.assets} 资产</span></div>}
+              <span className="flex-1" />
+              <button onClick={openApprovals} className="approval-action" title="待审批动作"><Bell size={16} /><span>审批</span>{pendingCount > 0 && <span className="approval-count">{pendingCount}</span>}</button>
+              <Button size="sm" variant="ghost" className="back-project" onClick={goHome}><ArrowLeft size={15} />首页</Button>
+              <WindowControls className="-mr-5" />
+            </div>
             <main className={cn("h-full min-w-0", view === "live" ? "flex" : "overflow-auto")}>
             <ErrorBoundary>
           {view === "live" && (
@@ -495,7 +564,6 @@ export default function App() {
           )}
           {view === "tasks" && <TaskBoard pid={pid} focused={taskNav} />}
           {view === "agents" && <AgentWorkbenchView pid={pid} meta={meta} />}
-          {view === "coordination" && <MultiAgentCoordinationView pid={pid} />}
           {view === "browser" && (
             // F6 内置浏览器：轨门控（非 pentest/redteam 整页灰显）在视图内部处理；
             // 定高视图（面板组），照 rev 走 h-full + overflow-hidden
@@ -511,7 +579,6 @@ export default function App() {
               }} />
             </div>
           )}
-          {view === "approvals" && <ApprovalsView pid={pid} onGotoTasks={() => setView("tasks")} />}
           {view === "knowledge" && <KnowledgeView pid={pid} />}
           {view === "skills" && <SkillsView pid={pid} focus={settingsNav?.skill ? { ...settingsNav.skill, n: settingsNav.n } : null} />}
           {view === "settings" && <SettingsView nav={settingsNav} pid={pid} />}

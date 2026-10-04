@@ -7,9 +7,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 
 PLAN_STATUSES = ("draft", "active", "paused", "completed")
@@ -65,6 +68,7 @@ class CoordinationStore:
                     priority INTEGER NOT NULL DEFAULT 50,
                     depends_on TEXT NOT NULL DEFAULT '[]',
                     evidence TEXT NOT NULL DEFAULT '[]',
+                    task_id TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -121,6 +125,15 @@ class CoordinationStore:
                 CREATE INDEX IF NOT EXISTS idx_coord_verifications_task
                     ON coordination_verifications(project_id, task_id, checked_at DESC);
                 """)
+            # M3（orchestrator-coordination-fusion，2026-10-04）：计划节点绑定真实
+            # tasks.id（编排器派单后回填）。存量库 CREATE IF NOT EXISTS 不会补列 →
+            # 幂等 ALTER（PRAGMA 守卫）。
+            cols = {r[1] for r in self.bb.conn.execute(
+                "PRAGMA table_info(coordination_tasks)").fetchall()}
+            if "task_id" not in cols:
+                self.bb.conn.execute(
+                    "ALTER TABLE coordination_tasks"
+                    " ADD COLUMN task_id TEXT NOT NULL DEFAULT ''")
 
     @staticmethod
     def _decode(row: Any) -> dict[str, Any]:
@@ -169,6 +182,126 @@ class CoordinationStore:
                 item[key] = []
         return item
 
+    def preflight(self, project_id: str, plan_id: str) -> dict[str, Any]:
+        """生成启动前服务端快照；只读，不改变计划状态。"""
+        plan = self.get_plan(project_id, plan_id)
+        self.refresh_readiness(project_id)
+        plan = self.get_plan(project_id, plan_id)
+        tasks = plan["tasks"]
+        statuses = {t["id"]: t["status"] for t in tasks}
+        roots = [t for t in tasks if not t.get("depends_on")]
+        unresolved = []
+        for task in tasks:
+            for dep in task.get("depends_on") or []:
+                if dep not in statuses:
+                    unresolved.append({"task_id": task["id"], "dependency": dep})
+        cycle = False
+        visiting: set[str] = set(); visited: set[str] = set()
+        graph = {t["id"]: set(t.get("depends_on") or []) for t in tasks}
+        def walk(node: str) -> None:
+            nonlocal cycle
+            if node in visiting:
+                cycle = True; return
+            if node in visited:
+                return
+            visiting.add(node)
+            for dep in graph.get(node, set()):
+                if dep in graph:
+                    walk(dep)
+            visiting.remove(node); visited.add(node)
+        for node in graph:
+            walk(node)
+        project = self.bb.get_project(project_id) or {}
+        config = project.get("config") or {}
+        mission = config.get("mission") if isinstance(config.get("mission"), dict) else {}
+        roe = config.get("redteam_roe") if isinstance(config.get("redteam_roe"), dict) else {}
+        blockers: list[dict[str, Any]] = []
+        if plan["status"] == "completed":
+            blockers.append({"code": "completed", "severity": "error", "message": "计划已经完成"})
+        if not tasks:
+            blockers.append({"code": "empty_plan", "severity": "error", "message": "计划没有节点"})
+        if cycle or unresolved:
+            blockers.append({"code": "invalid_dag", "severity": "error", "message": "计划依赖图存在循环或未解析依赖"})
+        return {
+            "plan_id": plan_id, "status": plan["status"],
+            "revision": plan["updated_at"], "plan": plan,
+            "dependencies": {"task_count": len(tasks), "root_count": len(roots),
+                             "ready_count": sum(t["status"] == "ready" for t in tasks),
+                             "blocked_count": sum(t["status"] == "blocked" for t in tasks),
+                             "cycle": cycle, "unresolved": unresolved},
+            "safety": {"track": project.get("track") or "pentest", "mission": mission,
+                       "roe": {"targets": roe.get("targets", ""), "window": roe.get("window", ""),
+                               "exclusions": roe.get("exclusions", ""), "approver": roe.get("approver", ""),
+                               "complete": all(roe.get(k) for k in ("targets", "window", "exclusions", "approver")) if roe else None},
+                       "autonomy": config.get("autonomy") or {}},
+            "blockers": blockers,
+        }
+
+    def communications(self, project_id: str, *, session_id: str | None = None,
+                       unread_only: bool = False, limit: int = 100) -> list[dict[str, Any]]:
+        """项目级通信聚合，直接查 session_inbox，避免前端 N+1。"""
+        sql = "SELECT * FROM session_inbox WHERE project_id=?"
+        args: list[Any] = [project_id]
+        if session_id:
+            sql += " AND to_session=?"; args.append(session_id)
+        if unread_only:
+            sql += " AND read_at IS NULL"
+        sql += " ORDER BY created_at DESC LIMIT ?"; args.append(max(1, min(500, int(limit))))
+        rows = []
+        for r in self.bb.conn.execute(sql, args).fetchall():
+            item = dict(r)
+            item["payload"] = json.loads(item.get("payload") or "{}")
+            item["unread"] = item.get("read_at") is None
+            rows.append(item)
+        return rows
+
+    def mark_communications_read(self, project_id: str, ids: list[str] | None = None,
+                                 session_ids: list[str] | None = None) -> int:
+        """批量标记项目通信已读，范围始终限制在 project_id。"""
+        with self.bb._tx():
+            where = "project_id=? AND read_at IS NULL"; args: list[Any] = [project_id]
+            if ids:
+                where += " AND id IN (" + ",".join("?" * len(ids)) + ")"; args.extend(ids)
+            if session_ids:
+                where += " AND to_session IN (" + ",".join("?" * len(session_ids)) + ")"; args.extend(session_ids)
+            cur = self.bb.conn.execute(f"UPDATE session_inbox SET read_at=? WHERE {where}", [now(), *args])
+            return cur.rowcount
+
+    def reset_failed_nodes(self, project_id: str, plan_id: str) -> list[str]:
+        """将失败节点重置为 ready（仅无未完成依赖者），保留真实 task/证据履历。"""
+        plan = self.get_plan(project_id, plan_id)
+        states = {t["id"]: t["status"] for t in plan["tasks"]}
+        ids: list[str] = []
+        with self.bb._tx():
+            for task in plan["tasks"]:
+                if task["status"] != "failed":
+                    continue
+                deps = task.get("depends_on") or []
+                if all(states.get(dep) == "completed" for dep in deps):
+                    self.bb.conn.execute(
+                        "UPDATE coordination_tasks SET status='ready',task_id='',updated_at=?"
+                        " WHERE id=? AND project_id=?", (_now(), task["id"], project_id))
+                    ids.append(task["id"])
+        return ids
+
+    def timeline(self, project_id: str, plan_id: str, limit: int = 200) -> list[dict[str, Any]]:
+        """聚合计划节点相关事件，供 LiveRoom 回看，不受最近事件窗口限制。"""
+        self.get_plan(project_id, plan_id)
+        rows = self.bb.conn.execute(
+            "SELECT id,kind,payload,session_id,author,created_at FROM events"
+            " WHERE project_id=? AND (kind LIKE 'coordination.%' OR kind IN"
+            " ('delegation.posted','task.done','task.failed','plan.node_ready'))"
+            " ORDER BY id DESC LIMIT ?", (project_id, max(1, min(500, int(limit)))))
+        out = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"] or "{}")
+            except (TypeError, ValueError):
+                payload = {}
+            if payload.get("plan_id") == plan_id or payload.get("coord_task_id"):
+                out.append({**dict(row), "payload": payload})
+        return out
+
     def overview(self, project_id: str) -> dict[str, Any]:
         self.refresh_readiness(project_id)
         plans = self.bb.conn.execute(
@@ -214,15 +347,42 @@ class CoordinationStore:
         }
 
     def refresh_readiness(self, project_id: str) -> None:
-        """根据依赖刷新待执行状态，供协调页和未来调度器共用。"""
+        """刷新计划节点状态，供协调页与编排器共用。
+
+        M3（orchestrator-coordination-fusion，2026-10-04）扩展：
+        ① **tasks → coordination 单向同步**——节点绑定 `task_id` 后按真实任务状态
+           映射（done→completed / failed→failed / claimed·open→running）；
+        ② 依赖派生 ready/blocked（原逻辑，仅对未派单/未终态行）；
+        ③ active 计划全部节点 completed → 计划自动置 completed。
+        严格单向：coordination 永不反向改 tasks。
+        """
         rows = self.bb.conn.execute(
-            "SELECT id,status,depends_on FROM coordination_tasks WHERE project_id=?",
-            (project_id,)).fetchall()
-        states = {row["id"]: row["status"] for row in rows}
+            "SELECT id,plan_id,status,depends_on,task_id FROM coordination_tasks"
+            " WHERE project_id=?", (project_id,)).fetchall()
         now = _now()
+        states = {row["id"]: row["status"] for row in rows}
         changes: list[tuple[str, str]] = []
+        # ① 绑定任务单向同步（tasks → 节点）
+        bound = {row["id"]: row["task_id"] for row in rows if row["task_id"]}
+        task_status: dict[str, str] = {}
+        if bound:
+            ids = list(dict.fromkeys(bound.values()))
+            marks = ",".join("?" * len(ids))
+            for tr in self.bb.conn.execute(
+                    f"SELECT id,status FROM tasks WHERE id IN ({marks})",
+                    ids).fetchall():
+                task_status[tr["id"]] = tr["status"]
+        sync_map = {"done": "completed", "failed": "failed",
+                    "claimed": "running", "open": "running"}
+        for node_id, real_tid in bound.items():
+            mapped = sync_map.get(task_status.get(real_tid, ""))
+            if mapped and mapped != states[node_id]:
+                states[node_id] = mapped
+                changes.append((mapped, node_id))
+        # ② 依赖派生（未派单/未终态行）
         for row in rows:
-            if row["status"] in ("running", "completed", "failed"):
+            cur = states[row["id"]]
+            if cur in ("running", "completed", "failed"):
                 continue
             try:
                 deps = json.loads(row["depends_on"] or "[]")
@@ -235,13 +395,99 @@ class CoordinationStore:
                 target = "ready"
             else:
                 target = "blocked" if deps else "ready"
-            if target != row["status"]:
+            if target != cur:
+                states[row["id"]] = target
                 changes.append((target, row["id"]))
         if changes:
             with self.bb._tx():
                 self.bb.conn.executemany(
                     "UPDATE coordination_tasks SET status=?,updated_at=? WHERE id=?",
-                    [(status, now, task_id) for status, task_id in changes])
+                    [(status, now, node_id) for status, node_id in changes])
+        # ②-b M3（2026-10-04）：新就绪节点 → 发 plan.node_ready（编排器唤醒白名单
+        # 消费，驱动「节点完成→自动派依赖节点」）。幂等——refresh 本身幂等，仅在
+        # 状态**跃迁到 ready** 时发一次，重复调用不再触发。
+        ready_ids = {node_id for status, node_id in changes if status == "ready"}
+        if ready_ids:
+            ready_by_plan: dict[str, list[str]] = {}
+            for row in rows:
+                if row["id"] in ready_ids:
+                    ready_by_plan.setdefault(row["plan_id"], []).append(row["id"])
+            for plan_id, node_ids in ready_by_plan.items():
+                try:
+                    self.bb.append_event(
+                        project_id, "plan.node_ready",
+                        {"plan_id": plan_id, "node_ids": node_ids},
+                        author="coordination")
+                except Exception:  # noqa: BLE001 —— 观测事件失败不影响状态刷新
+                    log.exception("plan.node_ready 事件落库失败 plan=%s", plan_id)
+        # ③ active 计划全部节点 completed → 自动完成（确定性，零 LLM）
+        plan_status = {r["id"]: r["status"] for r in self.bb.conn.execute(
+            "SELECT id,status FROM coordination_plans WHERE project_id=?",
+            (project_id,)).fetchall()}
+        by_plan: dict[str, list[str]] = {}
+        for row in rows:
+            by_plan.setdefault(row["plan_id"], []).append(states[row["id"]])
+        done_plans = [pid for pid, sts in by_plan.items()
+                      if plan_status.get(pid) == "active" and sts
+                      and all(s == "completed" for s in sts)]
+        if done_plans:
+            with self.bb._tx():
+                self.bb.conn.executemany(
+                    "UPDATE coordination_plans SET status='completed',updated_at=?"
+                    " WHERE id=?", [(now, pid) for pid in done_plans])
+
+    def bind_task(self, project_id: str, task_id: str, real_task_id: str) -> dict[str, Any]:
+        """把计划节点绑定到真实任务并置 running（编排器派单后回填，M3）。
+        只写协调域，不改 tasks。节点不存在抛 LookupError。"""
+        row = self.bb.conn.execute(
+            "SELECT id FROM coordination_tasks WHERE id=? AND project_id=?",
+            (task_id, project_id)).fetchone()
+        if row is None:
+            raise LookupError("协调任务不存在")
+        now = _now()
+        with self.bb._tx():
+            self.bb.conn.execute(
+                "UPDATE coordination_tasks SET task_id=?,status='running',updated_at=?"
+                " WHERE id=? AND project_id=?",
+                (real_task_id, now, task_id, project_id))
+        return self._decode(self.bb.conn.execute(
+            "SELECT * FROM coordination_tasks WHERE id=?", (task_id,)).fetchone())
+
+    def unmet_dependencies(self, project_id: str, task_id: str) -> list[str]:
+        """返回未满足（状态非 completed）的依赖节点 id 清单；空=就绪。
+        节点不存在抛 LookupError。调用方应先用 refresh_readiness 刷新状态。"""
+        row = self.bb.conn.execute(
+            "SELECT depends_on FROM coordination_tasks WHERE id=? AND project_id=?",
+            (task_id, project_id)).fetchone()
+        if row is None:
+            raise LookupError("协调任务不存在")
+        try:
+            deps = json.loads(row["depends_on"] or "[]")
+        except (TypeError, ValueError):
+            deps = []
+        if not deps:
+            return []
+        marks = ",".join("?" * len(deps))
+        rows = self.bb.conn.execute(
+            f"SELECT id,status FROM coordination_tasks WHERE id IN ({marks})",
+            deps).fetchall()
+        done = {r["id"] for r in rows if r["status"] == "completed"}
+        return [d for d in deps if d not in done]
+
+    def plan_view(self, project_id: str) -> dict[str, Any] | None:
+        """轻量：当前 active 计划 + 节点清单（供编排器态势注入，不载 objects/conflicts）。
+        先 refresh_readiness 保证状态新鲜；无 active 计划返 None。"""
+        self.refresh_readiness(project_id)
+        row = self.bb.conn.execute(
+            "SELECT * FROM coordination_plans WHERE project_id=? AND status='active'"
+            " ORDER BY updated_at DESC LIMIT 1", (project_id,)).fetchone()
+        if row is None:
+            return None
+        plan = self._decode(row)
+        plan["tasks"] = [self._decode(r) for r in self.bb.conn.execute(
+            "SELECT * FROM coordination_tasks WHERE plan_id=?"
+            " ORDER BY priority,created_at", (plan["id"],)).fetchall()]
+        return plan
 
     def create_plan(self, project_id: str, name: str, objective: str = "") -> dict[str, Any]:
         name = name.strip()
@@ -271,6 +517,17 @@ class CoordinationStore:
         for task in plan["tasks"]:
             task["verification"] = self._latest_verification(project_id, task["id"])
         return plan
+
+    def get_task(self, project_id: str, task_id: str) -> dict[str, Any]:
+        """按节点 id 读取计划任务（编排器绑定真实 tasks 前置校验）。"""
+        row = self.bb.conn.execute(
+            "SELECT * FROM coordination_tasks WHERE id=? AND project_id=?",
+            (task_id, project_id)).fetchone()
+        if row is None:
+            raise LookupError("协调任务不存在")
+        item = self._decode(row)
+        item["verification"] = self._latest_verification(project_id, task_id)
+        return item
 
     def add_object(self, project_id: str, *, kind: str, name: str = "",
                    object_ref: str = "", data: dict[str, Any] | None = None,
@@ -387,6 +644,45 @@ class CoordinationStore:
                 "UPDATE coordination_plans SET updated_at=? WHERE id=?", (now, plan_id))
         return self._decode(self.bb.conn.execute(
             "SELECT * FROM coordination_tasks WHERE id=?", (task_id,)).fetchone())
+
+    def set_dependencies(self, project_id: str, task_id: str,
+                         depends_on: list[str]) -> dict[str, Any]:
+        """设置计划节点依赖；仅允许同计划节点且拒绝环，供 plan_work 使用。"""
+        row = self.bb.conn.execute(
+            "SELECT plan_id FROM coordination_tasks WHERE id=? AND project_id=?",
+            (task_id, project_id)).fetchone()
+        if row is None:
+            raise LookupError("协调任务不存在")
+        deps = list(dict.fromkeys(str(x) for x in depends_on if str(x).strip()))
+        if task_id in deps:
+            raise ValueError("计划节点不能依赖自身")
+        known_rows = self.bb.conn.execute(
+            "SELECT id,depends_on FROM coordination_tasks WHERE project_id=? AND plan_id=?",
+            (project_id, row["plan_id"])).fetchall()
+        known = {r["id"] for r in known_rows}
+        if any(dep not in known for dep in deps):
+            raise ValueError("依赖任务不存在")
+        graph = {r["id"]: set(json.loads(r["depends_on"] or "[]"))
+                 for r in known_rows}
+        graph[task_id] = set(deps)
+        def visit(node: str, stack: set[str], seen: set[str]) -> None:
+            if node in stack:
+                raise ValueError("计划依赖图存在循环")
+            if node in seen:
+                return
+            stack.add(node)
+            for dep in graph.get(node, set()):
+                visit(dep, stack, seen)
+            stack.remove(node); seen.add(node)
+        seen: set[str] = set()
+        for node in graph:
+            visit(node, set(), seen)
+        now = _now()
+        with self.bb._tx():
+            self.bb.conn.execute(
+                "UPDATE coordination_tasks SET depends_on=?,updated_at=? WHERE id=? AND project_id=?",
+                (json.dumps(deps, ensure_ascii=False), now, task_id, project_id))
+        return self.get_task(project_id, task_id)
 
     def update_task(self, project_id: str, task_id: str,
                     *, status: str | None = None, role: str | None = None,

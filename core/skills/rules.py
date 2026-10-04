@@ -30,6 +30,16 @@ class KbSource:
     recursive: bool = True
 
 
+def _read_text_safe(path: Path) -> str | None:
+    """规则文件读取容错（2026-10-03）：glob 命中后文件被删/被占用（Windows
+    AV/索引锁）时返回 None 跳过该文件，绝不把 OSError 抛给系统提示构建——
+    规则链是增强注入，缺一条不应中断整轮对话。"""
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
 def pack_rules(packs_root: str | Path, capabilities: list[str] | None = None,
                track: str | None = None) -> list[tuple[str, str]]:
     """返回 [(规则名, 正文)]：启用能力包 rules/*.md ∪ 场景轨 rules/*.md。"""
@@ -50,7 +60,9 @@ def owner_rules(packs_root: str | Path, track: str, owner_tags: list[str]) -> li
     for tag in owner_tags:
         f = base / f"{tag}.md"
         if f.is_file():
-            out.append((f"owner:{tag}", f.read_text(encoding="utf-8")))
+            text = _read_text_safe(f)
+            if text is not None:
+                out.append((f"owner:{tag}", text))
     return out
 
 
@@ -58,7 +70,9 @@ def role_rules(packs_root: str | Path, track: str, role: str) -> tuple[str, str]
     """角色专属红线：tracks/<track>/rules/role-rules/<role>.md。不存在返回 None。"""
     f = track_dir(packs_root, track) / "rules" / "role-rules" / f"{role}.md"
     if f.is_file():
-        return f"role:{role}", f.read_text(encoding="utf-8")
+        text = _read_text_safe(f)
+        if text is not None:
+            return f"role:{role}", text
     return None
 
 
@@ -158,7 +172,9 @@ def rating_rules(packs_root: str | Path, track: str, tags: list[str]) -> list[tu
     for tag in tags:
         f = base / f"{tag}.md"
         if f.is_file():
-            out.append((f"rating:{tag}", f.read_text(encoding="utf-8")))
+            text = _read_text_safe(f)
+            if text is not None:
+                out.append((f"rating:{tag}", text))
     return out
 
 
@@ -237,5 +253,7 @@ def _read_md_dir(d: Path, prefix: str = "") -> list[tuple[str, str]]:
     if not d.is_dir():
         return out
     for f in sorted(d.glob("*.md")):  # 非递归：owners/role-rules 不注入
-        out.append((f"{prefix}{f.stem}", f.read_text(encoding="utf-8")))
+        text = _read_text_safe(f)
+        if text is not None:
+            out.append((f"{prefix}{f.stem}", text))
     return out

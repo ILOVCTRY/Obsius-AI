@@ -113,6 +113,22 @@ def test_registry_scan_and_parse(packs):
     assert reg.get("disabled-skill").enabled is False
 
 
+def test_cc_skill_resources_are_scoped_to_skill_directory(packs):
+    skill_dir = packs / "capabilities" / "web" / "skills" / "file-upload-test"
+    (skill_dir / "references").mkdir()
+    (skill_dir / "references" / "method.md").write_text("完整方法", encoding="utf-8")
+    (skill_dir / "scripts").mkdir()
+    (skill_dir / "scripts" / "check.py").write_text("print('ok')", encoding="utf-8")
+    (skill_dir / ".history").mkdir()
+    (skill_dir / ".history" / "old.md").write_text("不要暴露", encoding="utf-8")
+    reg = SkillRegistry(packs)
+    reg.load()
+    skill = reg.get("file-upload-test")
+    assert skill.is_self_contained is True
+    assert [p.relative_to(skill.root).as_posix() for p in skill.resources] == [
+        "references/method.md", "scripts/check.py"]
+
+
 def test_router_labels_and_pack_filter(packs):
     reg = SkillRegistry(packs)
     reg.load()
@@ -442,7 +458,9 @@ def test_real_k1_thin_entry_skills():
     # 对照表覆盖度抽检：每个新技能正文都有 kb_open 对照表
     for n in ("web-injection", "web-post-exp", "misc-triage"):
         body = by_name[n].path.read_text(encoding="utf-8")
-        assert "kb_open" in body and "|---" in body
+        assert "mode: self-contained" in body
+        if by_name[n].resources:
+            assert "skill_open" in body and "references/" in body
 
 
 def test_real_pentest_experts_yaml():
@@ -452,7 +470,7 @@ def test_real_pentest_experts_yaml():
     recon = load_expert("packs", "recon", "pentest")
     assert recon["skills"] == ["recon-asset-enum"]  # recon 已与打点技能分离
     assert recon["task_types"] == ["recon", "asset-enum"]
-    assert recon["default_noise"] == "passive"
+    assert "default_noise" not in recon
     assert recon.get("description")  # v0.2：职责描述必填护栏
     for role_name, expected_types, expected_skills in [
         ("external-entry", ["exploit", "recon"],
@@ -484,7 +502,7 @@ def test_real_ctf_experts_yaml():
 
     assert load_task_types("packs", "ctf")["solve"] == "passive"
     g = load_expert("packs", "_generalist", "ctf")
-    assert g.get("default_noise") == "passive"  # variant_ctf_default_noise 覆写
+    assert "default_noise" not in g
     for name in ("triage", "reverse"):
         load_expert("packs", name, "ctf")  # 存在且可解析
     # J 组（2026-09-20 开源对标扩充）：四个分类解题手（对标 CAI/EnIGMA 按类分工）
@@ -499,7 +517,7 @@ def test_real_ctf_experts_yaml():
         r = load_expert("packs", name, "ctf")
         assert r["task_types"] == types, name
         assert r["skills"] == skills, name
-        assert r["default_noise"] == "passive", name
+        assert "default_noise" not in r, name
         assert r.get("persona"), name
 
 
@@ -512,7 +530,7 @@ def test_real_redteam_experts_j_batch():
     osint = load_expert("packs", "osint", "redteam")
     assert osint["task_types"] == ["recon", "asset-enum"]
     assert osint["skills"] == ["recon-asset-enum"]
-    assert osint["default_noise"] == "passive"
+    assert "default_noise" not in osint
     rw = load_expert("packs", "report-writer", "redteam")
     assert rw["task_types"] == ["report"] and rw["skills"] is None
     # 新角色全落位后 doctor 零 error（skills/task_types 引用不悬空）
@@ -536,7 +554,7 @@ def test_real_research_track_landed():
     assert analyst["skills"] == ["file-triage", "binary-rev", "android-rev",
                                  "binary-diff", "dotnet-rev"]  # android-kb-sourcing M1 + reverse-skill 收编挂载
     assert analyst["task_types"] == ["triage", "reverse", "analyze", "verify"]
-    assert analyst["default_noise"] == "passive"
+    assert "default_noise" not in analyst
     assert analyst.get("persona")  # 数据纪律 persona 必填护栏
     auditor = load_expert("packs", "code-auditor", "research")  # J 组：代码审计员
     assert auditor["task_types"] == ["analyze", "verify"]

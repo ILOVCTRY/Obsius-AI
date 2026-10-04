@@ -24,7 +24,7 @@ export function ChainEdge({
           <span
             title={text}
             className="nodrag nopan pointer-events-none absolute line-clamp-2 max-w-[150px]
-                       rounded border border-[#39424e]/60 bg-[#1c2128]/95 px-1.5 py-0.5
+                       rounded border border-(--viz-edge)/60 bg-(--viz-card)/95 px-1.5 py-0.5
                        text-center text-[10px] leading-tight text-muted-foreground shadow-sm"
             style={{ transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)` }}
           >

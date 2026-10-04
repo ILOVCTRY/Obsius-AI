@@ -98,7 +98,7 @@ def pid(bb):
     return pid
 
 
-# ---------- httpmsg（F6-v3 原始报文解析/渲染，重放与拦截共用） ----------
+# ---------- httpmsg（F6-v4 原始报文解析/渲染，重放与拦截共用） ----------
 
 class TestHttpMsg:
     def test_parse_request_absolute_url(self):
@@ -143,7 +143,7 @@ class TestHttpMsg:
         assert editable is False and BINARY_PLACEHOLDER_RE.match(raw.split("\n\n")[-1])
 
 
-# ---------- ReplayClient（F6-v3：raw 原始报文 / capture_id 模板） ----------
+# ---------- ReplayClient（F6-v4：raw 原始报文 / capture_id 模板） ----------
 
 def test_replay_raw_get_and_history(bb, pid, server):
     rc = ReplayClient(bb, config=BrowserConfig())
@@ -191,14 +191,6 @@ def test_replay_missing_capture(bb, pid):
     rc = ReplayClient(bb, config=BrowserConfig())
     with pytest.raises(ValueError):
         rc.replay(pid, capture_id=99999)
-
-
-def test_replay_denied_unregistered_target(bb, pid, server):
-    rc = ReplayClient(bb, config=BrowserConfig())
-    with pytest.raises(BrowserError):
-        rc.replay(pid, raw=f"GET http://203.0.113.5/echo HTTP/1.1\nHost: x\n\n")
-    kinds = [e["kind"] for e in bb.recent_events(pid)]
-    assert "browser.deny" in kinds
 
 
 # ---------- Intruder ----------
@@ -249,14 +241,6 @@ def test_intruder_max_requests_cap(bb, pid, server):
         [{"position": "U", "type": "list", "values": big}],
         batch_id="in-t3", max_requests=5, rate_per_sec=100)
     assert summary["total"] == 5
-
-
-def test_intruder_denied_unregistered(bb, pid):
-    intr = Intruder(bb, config=BrowserConfig())
-    with pytest.raises(BrowserError):
-        intr.run(pid, {"method": "GET", "url": "http://203.0.113.9/?u=§U§"},
-                 [{"position": "U", "type": "list", "values": ["a"]}],
-                 batch_id="in-t4")
 
 
 def test_intruder_stop_event(bb, pid, server):

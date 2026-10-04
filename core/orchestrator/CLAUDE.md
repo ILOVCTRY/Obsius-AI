@@ -11,6 +11,18 @@
 - **饿死检测** `_starvation_warnings`：open 任务类型①未注册（`未在 <track> 轨 ...`）或②已注册但无专才角色（`_generalist` 的 task_types=null 不计覆盖，reason=`无专才角色`）→ 落 `task.starvation` 事件；`(task_id, reason)` 去重，多轮 tick 不重复报。**v0.71（2026-09-20）role 维度修订**：删「无底色匹配会话在岗」分支（任务即窗口模型下每任务必有专属窗，该告警已无意义）；新增「open+target_session 指向 closed 会话 → 待调度器重绑」告警（绑窗在窗关闭瞬间会失败，重绑由调度器 60s sweep 兜底）。
 - 无 track 时退化为仅 generic、不做饿死判断（旧调用兼容）。
 
+## 计划 DAG（M3，orchestrator-coordination-fusion，2026-10-04）
+
+- `plan_work` 只登记 `core/coordination` 的 active 计划与 `depends_on` DAG，不直接执行；`delegate(plan_node_id=...)` 才把 ready 节点绑定真实 `tasks.id`，依赖未完成、节点已绑定或计划非 active 均拒绝。
+- 协调域是计划层单向投影：真实 tasks 状态 `open/claimed→running`、`done→completed`、`failed→failed`；全节点完成自动完成计划；协调域不反写 tasks。态势 `_stats.plan` 只注入 active 计划摘要，objects/conflicts/verifications 不混入编排器。
+- L1 `delegate_window` 审批批准处理器同样校验并绑定 `plan_node_id`，防审批等待期绕过依赖门。
+- **依赖驱动续派（M3，liveroom-collaboration-fusion，2026-10-04）**：协调节点跃迁到 ready 时发 `plan.node_ready`；该事件进入 `WAKE_TRIGGERS`（冷却 120s），唤醒轮将就绪计划摘要注入并要求只对 ready 节点调用 `delegate(plan_node_id=...)`。这是编排器唤醒提示，不是服务端自动派单，所有角色/预算/去重/自主档闸门仍照常生效。
+
+## 委托纪律（M1，orchestrator-coordination-fusion，2026-10-04）
+
+- `DELEGATION_DISCIPLINE` 模块常量，经 `{delegation_discipline}` 槽注入 **tick（ORCH_SYSTEM_PROMPT）与对话轮（CHAT_SYSTEM_PROMPT）** 两处系统提示（纯提示词，控制流不动）。四条（借鉴 cc-haha `coordinatorMode.ts`）：①**综合不可下放**（收到回执先自己读懂，禁止「基于你的发现…」式委托）②**委托单自包含**（执行者是独立会话窗，看不到态势与对话）③**续用窗 vs 新开窗**（按上下文重叠度判断；`force_new_window` 强制新开）④**并行 fan-out**（只读并行/写入串行）。硬约束仍在服务端（去重/闸门/上限）。
+- **工具名修正（同日）**：提示词原写 `publish_task`/`spawn_session`——**两个工具都已不存在**（会话中心化后真实工具是 `delegate`，`spawn_session` 已退役）。已全量改 `publish_task`→`delegate`、删 `spawn_session` 段，L0/L1 notice 同步改。**改 prompt 勿回退**。
+
 ## 文件
 
 - `state.py`（批 3，§6.8/机制 1.9）— tick 租约 + 编排状态：`load_or_create`（无行返零值默认不落盘）/`save_fields`（白名单：event_cursor/cycles/last_digest_cycle/chain_*/last_replan_at(A5)/**last_derive_at·last_derive_result（v13，2026-09-18 mission 派生结果，API 层 _mission_on_done 写）**，非法字段 KeyError）/`increment_counters`（chain_ticks/auto_ticks_total，批 5 先备）/`acquire_tick_lease`（单 `bb._tx()`：建行→读租约→他人未过期抛 `TickLeaseError`→否则抢占，TTL 默认 900s）/`renew_tick_lease`（持有者心跳，易主抛错）/`release_tick_lease`（仅 owner 自清）。租约时间 UTC ISO 比较，崩溃靠 TTL 自然到期。

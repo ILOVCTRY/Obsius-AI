@@ -65,16 +65,25 @@ def parse_openai_response(data: dict[str, Any], *, format: str) -> LLMResponse:
             for x in x.get("content", []) if x.get("type") == "output_text"
         )
         result = LLMResponse(text=text, raw=data, stop_reason=data.get("status", ""))
+        seen_ids: set[str] = set()
         for item in data.get("output", []):
             if item.get("type") == "function_call":
-                name = item.get("name", "")
-                if not name:
+                call_id = str(item.get("call_id") or item.get("id") or "").strip()
+                name = str(item.get("name") or "").strip()
+                if not call_id or not name:
                     raise LLMError(
-                        "Responses function_call 缺少工具名 "
-                        f"(call_id={item.get('call_id', item.get('id', 'unknown'))})")
-                result.tool_calls.append(ToolCall(
-                    item.get("call_id", item.get("id", "")), name,
-                    json.loads(item.get("arguments", "{}"))))
+                        "Responses function_call 缺少工具名或调用 ID "
+                        f"(call_id={call_id or 'unknown'})")
+                if call_id in seen_ids:
+                    raise LLMError(f"工具调用 id 重复: {call_id}")
+                try:
+                    arguments = json.loads(item.get("arguments", "{}"))
+                except json.JSONDecodeError as exc:
+                    raise LLMError(f"工具调用参数 JSON 无效 (call_id={call_id})", truncated=True) from exc
+                if not isinstance(arguments, dict):
+                    raise LLMError(f"工具调用参数必须是对象 (call_id={call_id})")
+                seen_ids.add(call_id)
+                result.tool_calls.append(ToolCall(call_id, name, arguments))
         return result
     choices = data.get("choices", [])
     msg = choices[0].get("message", {}) if choices else {}
@@ -87,6 +96,7 @@ def parse_openai_response(data: dict[str, Any], *, format: str) -> LLMResponse:
             input_tokens=data.get("usage", {}).get("prompt_tokens", 0),
             output_tokens=data.get("usage", {}).get("completion_tokens", 0)),
     )
+    seen_ids: set[str] = set()
     for tc in msg.get("tool_calls", []):
         f = tc.get("function", {})
         call_id = str(tc.get("id") or "").strip()
@@ -95,6 +105,14 @@ def parse_openai_response(data: dict[str, Any], *, format: str) -> LLMResponse:
             raise LLMError(
                 "Chat Completions tool_call 缺少工具名或调用 ID "
                 f"(call_id={call_id or 'unknown'})")
-        result.tool_calls.append(ToolCall(
-            call_id, name, json.loads(f.get("arguments", "{}"))))
+        if call_id in seen_ids:
+            raise LLMError(f"工具调用 id 重复: {call_id}")
+        try:
+            arguments = json.loads(f.get("arguments", "{}"))
+        except json.JSONDecodeError as exc:
+            raise LLMError(f"工具调用参数 JSON 无效 (call_id={call_id})", truncated=True) from exc
+        if not isinstance(arguments, dict):
+            raise LLMError(f"工具调用参数必须是对象 (call_id={call_id})")
+        seen_ids.add(call_id)
+        result.tool_calls.append(ToolCall(call_id, name, arguments))
     return result

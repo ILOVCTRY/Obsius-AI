@@ -43,11 +43,11 @@ _SNAPSHOT = {
         "close_intent", "reopen_intent",
         "bb_delete_intent", "bb_add_finding", "bb_update_finding",
         "bb_delete_finding", "bb_delete_asset", "bb_merge_assets",
-        "publish_task", "bb_notify", "request_escalation",
+        "publish_task", "bb_notify",
         "request_authorization", "propose_pack_edit", "bb_add_asset",
     },
     "_SPILL_SKIP": {"kb_open", "skill_open", "route_lookup"},
-    "_COLLAB_TOOLS": {"publish_task", "request_authorization", "request_escalation"},
+    "_COLLAB_TOOLS": {"publish_task", "request_authorization"},
     "_KNOWLEDGE_EXTRA": {
         "kb_open", "kb_search", "skill_open", "route_lookup",
         "propose_pack_edit", "list_symbols", "decompile",
@@ -71,7 +71,7 @@ _SNAPSHOT_ORDER = [
     "browser_navigate", "browser_click", "browser_type", "browser_screenshot",
     "browser_content", "browser_back",
     "route_lookup", "skill_open",
-    "request_authorization", "request_escalation",
+    "request_authorization",
     "declare_intent", "close_intent", "reopen_intent", "bb_delete_intent",
 ]
 
@@ -141,7 +141,7 @@ def test_group_mapping_matches_legacy_prefix_rules():
     expected = {
         "complete_task": "控制", "request_steps": "控制",
         "task_plan": "计划", "task_reconcile": "计划",
-        "publish_task": "协作", "request_escalation": "协作",
+        "publish_task": "协作",
         "run_cmd": "执行",
         "read_file": "文件", "search_files": "文件",
         "bb_query": "黑板", "bb_delete_intent": "黑板",

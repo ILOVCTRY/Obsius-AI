@@ -167,7 +167,7 @@ events 表全量审计 + EventBus 同步落库、尽力广播；前端按游标�
 
 **树形态**：host(IP) 为根 → domain 子节点 → url/service 再挂。register_asset 为唯一登记入口：domain 自动 DNS 解析挂 host，url/service 的 IP 主机部挂 host，域名主机部只精确挂既有 domain（不猜 DNS、不造行）；同 IP 首域名记 `host.meta.primary_domain`、其余 `meta.alias`。**CDN 判定**（core/blackboard/cdn.py）：共享 CDN IP 上的域名彼此无关——解析命中 CDN 的 domain **保持根行、不建 host、不挂树**；优先级 `meta.cdn` 人工覆盖（True/False）> CNAME 后缀 > IP CIDR；清单= `packs/data/cdn_ranges.json` 随包基线 + `config/cdn.json` 同结构增补，坏文件 ValueError fail-fast；**拿不准默认非 CDN**（不并只是保守，误并才会错绑结论）。DNS 漂移（重报解析到新 IP/CDN）经 `set_asset_parent` 改挂/摘挂并发 `asset.reparent` 事件。
 
-**根状态读时派生（effective_status，core/coverage.py `effective_status_map`）**：有子资产节点的 tested_clean 不由 AI/人工显式设置——叶子 effective=显式状态（basis=explicit）；父节点 effective 由全部子节点终态读时派生：孩子全 settled → tested_clean/basis=derived，任一非终态 → open（宁严；na/dead_end/finding 挂链同为收口味）；**新增子资产立即破除 derived clean**，无需事件联动；has_findings 沿子树向上传播。写入门：有子资产节点显式写 tested_clean 一律 ValueError（na 不挡——人工裁定）。前端黑板资产筛选器**只列 host/domain（IP/域名）按值搜索**（2026-09-24 用户定稿，推翻同日早先「四类放开」口径——过滤只按 IP 和域名），选中后沿子树展开过滤，url/service 叶子 finding 不漏。存量处理：`scripts/rebuild_asset_trees.py`——DoH（默认 223.5.5.5，避开 Clash fake-ip 198.18/15 与系统代理）重解析挂树，CDN 根行无操作、有子根行 tested_clean→reset-open；默认 dry-run，`--apply` 落库，全经 Blackboard 方法。
+**根状态读时派生（effective_status，core/coverage.py `effective_status_map`）**：有子资产节点的 tested_clean 不由 AI/人工显式设置——叶子 effective=显式状态（basis=explicit）；父节点 effective 由全部子节点终态读时派生：孩子全 settled → tested_clean/basis=derived，任一非终态 → open（宁严；na/dead_end/finding 挂链同为收口味）；**新增子资产立即破除 derived clean**，无需事件联动；has_findings 沿子树向上传播。写入门：有子资产节点显式写 tested_clean 一律 ValueError（na 不挡——人工裁定）。黑板前端徽章优先消费 API 的 `effective_status`，`status` 仅代表持久化显式状态，前端不自行推导也不回写根节点。前端黑板资产筛选器**只列 host/domain（IP/域名）按值搜索**（2026-09-24 用户定稿，推翻同日早先「四类放开」口径——过滤只按 IP 和域名），选中后沿子树展开过滤，url/service 叶子 finding 不漏。存量处理：`scripts/rebuild_asset_trees.py`——DoH（默认 223.5.5.5，避开 Clash fake-ip 198.18/15 与系统代理）重解析挂树，CDN 根行无操作、有子根行 tested_clean→reset-open；默认 dry-run，`--apply` 落库，全经 Blackboard 方法。
 
 ## tested_clean 意图死路背书（tested-clean-intent-backing，2026-09-25 实施；2026-10-01 改读链路图口径）
 
@@ -260,7 +260,7 @@ L0 提案模式（propose_only）/ L1 建窗待命 + 执行审批单（批准=�
 - **剧本首发**：显式流转进入阶段时 tasks[] 原样发布（`created_by=playbook`、acceptance→判据、**noise=passive**——阶段引导 objective 级不占 active 互斥键、priority=1）；`playbook_fired` 按（阶段，指纹）去重——回退重进不重发，同款已在队（find_dedup_target）=吸收指纹。**建项只登记初始阶段不直发**（`publish=False`；mission/目标商议前不发静态任务），首发随显式流转触发；读侧 current_spec 回落首阶段，门拦截与重心注入不依赖登记。
 - **前端呈现（M4）**：项目顶栏阶段条 `webui/src/views/live/PhaseBar.tsx`——三阶段序 chips（当前高亮/到访过亮字/未到灰）+ 当前阶段门进度（达标绿「已达标」/未达标琥珀显 unmet 明细）+ 前向流转按钮（人工流转不强制门，422 原因行内显；到访过的阶段回退重进、剧本已发任务不重发），GET /phase 5s 轮询、轨无剧本（enabled=false）渲染 null；挂直播间页签行下，直播/任务流两视图共用。任务卡「📋 剧本」徽章（created_by=playbook）。事件样式：`phase.changed`「🔄 阶段流转」/ `phase.gate_open`「🚪 渗透门开启」（摘要=summary）默认展开，进「决策」筛选组。
 - **报告链（finding-report-format M3，随本批落地）**：report 阶段剧本 acceptance = 出报告前逐条盘点 verified 发现收录三件套（impact 非空 / evidence.repro_steps 每步 desc+code+expected 齐备 / remediation 非空），缺项落事件流回补清单且报告附录列「待回补」项——不现编、不卡黑板写入；report-writer 专家 persona 按三节模板取字段渲染（危害描述取 impact、复现步骤按 repro_steps 逐步、修复建议取 remediation；pentest 主 persona 与 redteam 变体同步）。
-- **M3 专家与内容（2026-09-22，内容专题见 dsh-kb-sourcing 方案）**：三剧本 tasks[] 充实——recon 三条（被动测绘 / 资产重要性评级 / 云面盘点〔role=cloud-security〕：对象存储·云控制台·云 API 暴露与前端 AKIA/ASIA/LTAI/AKID 凭证泄露面，凭据明文不落黑板）、pentest 两条（外部入口漏洞验证 / 云面凭证与配置缺陷验证〔role=cloud-security〕：只读 API 优先、变更性动作先过审批、verified 附四要素闭环可到达性证明）、report 一条（三件套盘点）；云安全专家 `packs/experts/cloud-security.yaml`（skills:[cloud-entry]，task_types:[recon,asset-enum,exploit]，default_noise:passive，tracks:[pentest]）落池。miniapp 面按 D5 后置（种子已入 web 包 kb，角色等内容攒够再挂）。
+- **M3 专家与内容（2026-09-22，内容专题见 dsh-kb-sourcing 方案）**：三剧本 tasks[] 充实——recon 三条（被动测绘 / 资产重要性评级 / 云面盘点〔role=cloud-security〕：对象存储·云控制台·云 API 暴露与前端 AKIA/ASIA/LTAI/AKID 凭证泄露面，凭据明文不落黑板）、pentest 两条（外部入口漏洞验证 / 云面凭证与配置缺陷验证〔role=cloud-security〕：只读 API 优先、变更性动作先过审批、verified 附四要素闭环可到达性证明）、report 一条（三件套盘点）；云安全专家 `packs/experts/cloud-security.yaml`（skills:[cloud-entry]，task_types:[recon,asset-enum,exploit]，tracks:[pentest]）落池。miniapp 面按 D5 后置（种子已入 web 包 kb，角色等内容攒够再挂）。
 
 ## 战役记忆召回
 
@@ -302,7 +302,7 @@ host（PowerShell/bash）/ WSL（env 不透传；**`--exec` argv 直通**——�
 
 ## 双层权限模型
 
-角色 max_runtime 软上限（只可能比网关更严）+ 网关 threat_class 硬校验；request_escalation 升级=单次授权（仅超角色 max_runtime 一类，红线不受理；net=real 自 2026-10-01 起免审批可直接 run_cmd）。人类命令同层经网关，审计流无旁路。
+角色仅通过工具白名单约束可调用面；网关 threat_class/runtime 负责执行环境硬校验。人类命令同层经网关，审计流无旁路。
 
 ## 审计与体验
 

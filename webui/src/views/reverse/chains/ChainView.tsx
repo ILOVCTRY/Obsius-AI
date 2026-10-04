@@ -20,9 +20,9 @@ import { AddNodeDialog } from "./AddNodeDialog"
 // 本期只做人工建链；节点点击回跳分析视图定位（回调由 ReverseWorkbench 提供）。
 
 const STATUS_DOT: Record<ChainStatus, string> = {
-  hypothesis: "#d29922",
-  validated: "#3fb950",
-  exploited: "#bc8cff",
+  hypothesis: "var(--viz-sev-medium)",
+  validated: "var(--viz-success)",
+  exploited: "var(--viz-chain)",
 }
 const STATUSES: ChainStatus[] = ["hypothesis", "validated", "exploited"]
 const STATUS_LABEL: Record<ChainStatus, string> = {
@@ -213,7 +213,7 @@ export function ChainView({ pid, tick, onLocate }: Props) {
                 if (target) openNote(target)
               }}
             >
-              <Background color="#30363d" gap={20} size={1} />
+              <Background color="var(--viz-edge)" gap={20} size={1} />
             </ReactFlow>
             <button
               type="button" onClick={() => setAddOpen(true)}

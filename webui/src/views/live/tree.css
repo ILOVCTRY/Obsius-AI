@@ -1,21 +1,22 @@
-/* 任务树画布深色化（task-attempt-tree，2026-09-27）：
+/* 任务树画布控件样式（task-attempt-tree，2026-09-27）：
    xyflow 自带样式表是未分层 plain CSS，层叠优先级高于 Tailwind v4 utilities layer；
    必须在 @xyflow/react/dist/style.css 之后引入本文件，用 .tf-dark 提高特异性
-   覆盖其白底控件（与原任务流 flow.css 同手法，TaskFlow 退役后由本文件承接）。 */
+   覆盖其白底控件（与原任务流 flow.css 同手法，TaskFlow 退役后由本文件承接）。
+   颜色一律走主题 token（--viz-*），随 data-theme 切换。 */
 
 .tf-dark .react-flow__controls {
   border-radius: 6px;
   overflow: hidden;
   box-shadow: none;
-  border: 1px solid #21262d;
+  border: 1px solid var(--viz-outline);
 }
 
 .tf-dark .react-flow__controls-button {
   width: 24px;
   height: 24px;
-  background: #161b22;
-  border-bottom: 1px solid #21262d;
-  fill: #8b949e;
+  background: var(--viz-card);
+  border-bottom: 1px solid var(--viz-outline);
+  fill: var(--viz-text-muted);
 }
 
 .tf-dark .react-flow__controls-button:last-child {
@@ -23,8 +24,8 @@
 }
 
 .tf-dark .react-flow__controls-button:hover {
-  background: #21262d;
-  fill: #e6edf3;
+  background: var(--viz-outline);
+  fill: var(--viz-text);
 }
 
 .tf-dark .react-flow__controls button svg {
@@ -33,10 +34,10 @@
 
 .tf-dark .react-flow__minimap {
   border-radius: 6px;
-  border: 1px solid #21262d;
-  background: #0d1117;
+  border: 1px solid var(--viz-outline);
+  background: var(--viz-canvas);
 }
 
 .tf-dark .react-flow__minimap-mask {
-  fill: rgba(13, 17, 23, 0.7);
+  fill: var(--viz-canvas-mask);
 }

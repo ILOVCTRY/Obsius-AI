@@ -104,19 +104,17 @@ def pool(tmp_path, monkeypatch):
     bb.close()
 
 
-def test_navigate_capture_screenshot_whitelist(pool, server):
+def test_navigate_capture_screenshot_unregistered_localhost_allowed(pool, server):
+    from core.browser.pool import BrowserError
     bpool, bb, pid = pool
     inst = bpool.get_instance(pid)
-    # ① 未登记目标拒绝 + browser.deny 审计（独立会话，owner=human）
-    from core.browser.pool import BrowserError
-    deny_sid = "sess-" + "d" * 12
-    inst.open_session(deny_sid, "human")
-    with pytest.raises(BrowserError):
-        inst.navigate(deny_sid, "http://203.0.113.7/")
-    kinds = [e["kind"] for e in bb.recent_events(pid)]
-    assert "browser.deny" in kinds
-    inst.close_session(deny_sid)
-    # ② 回环已登记：导航成功 + browser.action 审计
+    # 当前产品允许任意目标导航；localhost 未登记也应访问 fixture 本地服务。
+    unregistered_sid = "sess-" + "d" * 12
+    inst.open_session(unregistered_sid, unregistered_sid)
+    r = inst.navigate(unregistered_sid, f"http://localhost:{server.rsplit(':', 1)[1]}/")
+    assert r["status"] == 200 and r["target_host"] == "localhost"
+    inst.close_session(unregistered_sid)
+    # 回环已登记：导航成功 + browser.action 审计
     sid = "sess-" + "e" * 12
     info = inst.open_session(sid, sid)
     assert info["sid"] == sid
@@ -136,7 +134,7 @@ def test_navigate_capture_screenshot_whitelist(pool, server):
     # ⑤ content
     c = inst.act(sid, "content")
     assert "IT WORKS" in c["content"]
-    # ⑥ 会话上限 2 只数 AI 页（F6-v3：human-main 豁免不计）
+    # ⑥ 会话上限 2 只数 AI 页（F6-v4：human-main 豁免不计）
     inst.ensure_human_session()
     inst.open_session("sess-" + "f" * 12, "human")  # 第 2 个 AI 页（sid 是第 1 个）
     with pytest.raises(BrowserError):
@@ -145,7 +143,7 @@ def test_navigate_capture_screenshot_whitelist(pool, server):
     events = [e for e in bb.recent_events(pid) if e["kind"] == "browser.action"]
     actions = {e["payload"]["action"] for e in events}
     assert {"navigate", "screenshot", "content"} <= actions
-    assert all(e["author"] == sid for e in events)
+    assert {e["author"] for e in events} <= {sid, unregistered_sid}
 
 
 def test_navigate_self_signed_https_ignored(pool, https_server, tmp_path):
@@ -235,7 +233,7 @@ def test_human_input_takeover(pool, server):
     assert any(e["author"] == "human" and e["session_id"] == human_sid for e in evs)
 
 
-# ---------- F6-v3 拦截 / 去会话化 ----------
+# ---------- F6-v4 拦截 / 去会话化 ----------
 
 def _wait_pending(hub, n=1, timeout=10.0):
     deadline = time.time() + timeout
@@ -351,7 +349,7 @@ def test_intercept_e2e(pool, server):
 
 
 def test_ai_session_auto_close(pool, server):
-    """F6-v3：AI 会话可开可关；human-main 豁免不计上限、不受 AI 关闭影响。"""
+    """F6-v4：AI 会话可开可关；human-main 豁免不计上限、不受 AI 关闭影响。"""
     bpool, bb, pid = pool
     inst = bpool.get_instance(pid)
     ai_sid = "sess-" + "a" * 12

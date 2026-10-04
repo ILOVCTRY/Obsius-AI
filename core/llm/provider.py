@@ -35,6 +35,26 @@ class LLMResponse:
     raw: dict[str, Any] = field(default_factory=dict)  # 原始响应，审计用
 
 
+def assistant_message(response: LLMResponse) -> dict[str, Any]:
+    """把 provider 无关的 typed 响应重建为内部 assistant 消息。
+
+    ``LLMResponse.raw`` 保持供应商原始协议，调用方不得从 raw 猜 content。
+    """
+    blocks: list[dict[str, Any]] = []
+    if response.thinking:
+        blocks.append({"type": "thinking", "thinking": response.thinking})
+    if response.text:
+        blocks.append({"type": "text", "text": response.text})
+    blocks.extend({"type": "tool_use", "id": call.id, "name": call.name,
+                   "input": call.arguments} for call in response.tool_calls)
+    return {"role": "assistant", "content": blocks}
+
+
+def tool_results_message(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """把同一 assistant 回合的多个工具结果聚合为一个 user 消息。"""
+    return {"role": "user", "content": results}
+
+
 class LLMError(RuntimeError):
     """调用失败（HTTP 非 2xx / 响应不可解析）。携带 status 与响应片段。
     truncated=True 表示流式响应中途截断（工具参数 JSON 残缺等）——可整轮重试。"""

@@ -1,197 +1,169 @@
 import { useEffect, useRef, useState } from "react"
-import { Group, Panel, Separator } from "react-resizable-panels"
+import { ArrowLeft, ArrowRight, ChevronDown, ExternalLink, Plus, RefreshCw, TerminalSquare, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { api } from "@/lib/api"
-import type { BBEvent, BrowserSessionInfo } from "@/lib/types"
+import type { BBEvent, HttpHistoryRow } from "@/lib/types"
 import { ActionTimeline } from "./ActionTimeline"
-import { NavShotPane } from "./NavShotPane"
-import { CaptureHistory } from "./CaptureHistory"
-import { InterceptPanel } from "./InterceptPanel"
-import { IntruderForm, ReplayForm } from "./ReplayForm"
+import { ReplayForm, toRawRequest } from "./ReplayForm"
 import { cn } from "@/lib/utils"
 
-// F6 内置浏览器：项目内真实 Chromium Page 多标签，包含人类主页面和 AI 页面。
+type TimelineItem = { id: number; kind: string; author: string; summary: string; created_at: string }
+
 export function BrowserView({ pid, track }: { pid: string; track?: string }) {
-  // v0.70：CTF 轨启用（Web 题需真实浏览器渲染 reCAPTCHA/JS 挑战）；逆向分析/恶意样本轨仍灰显
-  const trackOk = track === "pentest" || track === "redteam" || track === "ctf"
-  const [status, setStatus] = useState<{ playwright_installed: boolean; install_cmd: string } | null>(null)
-  const evCursor = useRef(0)
-  const [timeline, setTimeline] = useState<
-    { id: number; kind: string; author: string; summary: string; created_at: string }[]>([])
-  const [sessions, setSessions] = useState<BrowserSessionInfo[]>([])
-  const [selectedSid, setSelectedSid] = useState<string>(() => {
-    try { return localStorage.getItem(`browser.active-sid:${pid}`) ?? "human-main" } catch { return "human-main" }
-  })
-  const [toolsOpen, setToolsOpen] = useState(false)
-  const userSelected = useRef(false)
+  const trackOk = !track || track === "pentest" || track === "redteam" || track === "ctf"
+  const desktop = typeof window !== "undefined" ? window.desktopBrowser : undefined
+  const [tabs, setTabs] = useState<DesktopTab[]>([])
+  const [activeId, setActiveId] = useState<string | null>(null)
+  const [loaded, setLoaded] = useState(false)
+  const [hasHumanTab, setHasHumanTab] = useState(false)
+  const [showNewMenu, setShowNewMenu] = useState(false)
+  const [panelOpen, setPanelOpen] = useState(true)
+  const [timeline, setTimeline] = useState<TimelineItem[]>([])
+  const [history, setHistory] = useState<HttpHistoryRow[]>([])
+  const [selectedHistory, setSelectedHistory] = useState<HttpHistoryRow | null>(null)
+  const [eventCursor, setEventCursor] = useState(0)
+  const surfaceRef = useRef<HTMLDivElement | null>(null)
+  const createdRef = useRef(false)
+  const requestedSessions = useRef(new Set<string>())
 
   useEffect(() => {
-    userSelected.current = false
-    try {
-      const saved = localStorage.getItem(`browser.active-sid:${pid}`)
-      userSelected.current = !!saved
-      setSelectedSid(saved ?? "human-main")
-    } catch { setSelectedSid("human-main") }
-  }, [pid])
+    if (!desktop) return
+    let alive = true
+    // 用「全局标签表」判定人类主页面是否已存在：human-main 是全应用单例，只看
+    // 本项目过滤后的 tabs 会在切回模块（组件重挂、tabs 初值空）时误判为「没有」而重复新建。
+    const apply = (all: DesktopTab[]) => {
+      if (!alive) return
+      const projectTabs = all.filter((tab) => !tab.pid || tab.pid === pid)
+      setTabs(projectTabs)
+      setActiveId((id) => id && projectTabs.some((tab) => tab.id === id) ? id : projectTabs[0]?.id ?? null)
+      setHasHumanTab(all.some((tab) => tab.type === "browser" && tab.sid === "human-main"))
+      setLoaded(true)
+    }
+    void desktop.listTabs().catch(() => []).then(apply)
+    const off = desktop.onTabUpdated(apply)
+    return () => { alive = false; off() }
+  }, [desktop, pid])
 
-  // Keep the real Page list fresh. AI sessions are selected by their latest action
-  // until the operator explicitly chooses a tab.
+  // 默认只开一个标签：等全局标签表加载完，仅当全局还没有 human-main 时新建，且每次挂载最多一次
+  // （手动关掉最后一个标签后不再自动重建，与旧行为一致）。
+  useEffect(() => {
+    if (!desktop || !loaded || createdRef.current) return
+    createdRef.current = true
+    if (!hasHumanTab) void desktop.createBrowserTab(pid, "human-main")
+  }, [desktop, loaded, hasHumanTab, pid])
+
   useEffect(() => {
     let alive = true
-    const load = async () => {
+    const sync = async () => {
       try {
         const state = await api.browserState(pid)
         if (!alive) return
-        const next = state.sessions ?? []
-        setSessions(next)
-        const ai = next.filter((s) => s.origin === "agent")
-          .sort((a, b) => (b.last_action_at ?? 0) - (a.last_action_at ?? 0))[0]
-        setSelectedSid((current) => {
-          if (!userSelected.current && ai) return ai.sid
-          return next.some((s) => s.sid === current) || current === "human-main" ? current : "human-main"
-        })
-      } catch { /* browser may be unavailable while starting */ }
+        if (!desktop) return
+        const known = new Set((await desktop.listTabs()).map((tab) => tab.sid))
+        for (const session of state.sessions ?? []) {
+          if (session.origin !== "agent" || known.has(session.sid) || requestedSessions.current.has(session.sid)) continue
+          requestedSessions.current.add(session.sid)
+          const created = await desktop.createBrowserTab(pid, session.sid)
+          if ("error" in created) requestedSessions.current.delete(session.sid)
+        }
+      } catch { /* browser service may still be starting */ }
     }
-    void load()
-    const t = setInterval(load, 2000)
-    return () => { alive = false; clearInterval(t) }
-  }, [pid])
+    void sync()
+    const timer = setInterval(sync, 2500)
+    return () => { alive = false; clearInterval(timer) }
+  }, [desktop, pid])
+
+  const activeTab = tabs.find((tab) => tab.id === activeId) ?? null
+  useEffect(() => { if (desktop && activeId) void desktop.activateTab(activeId) }, [desktop, activeId])
+
+  // 原生浏览器页是覆盖在窗口上的 WebContentsView，不由 React 树渲染——本组件卸载
+  // （切到其它模块）时必须显式隐藏，否则原生视图会留在原位浮在新视图之上（切走不消失）。
+  // 重新挂载时再显示并复用同一 activeId 页；显示由下方 activateTab 效应完成。
+  useEffect(() => {
+    if (!desktop) return
+    desktop.setBrowserVisible(true)
+    return () => desktop.setBrowserVisible(false)
+  }, [desktop])
 
   useEffect(() => {
-    try { localStorage.setItem(`browser.active-sid:${pid}`, selectedSid) } catch { /* storage disabled */ }
-  }, [pid, selectedSid])
+    if (!desktop || !activeTab || activeTab.type !== "browser" || !surfaceRef.current) return
+    const update = () => { const rect = surfaceRef.current?.getBoundingClientRect(); if (rect) desktop.setBounds(activeTab.id, { x: rect.left, y: rect.top, width: rect.width, height: rect.height }) }
+    update()
+    const observer = new ResizeObserver(update)
+    observer.observe(surfaceRef.current)
+    window.addEventListener("resize", update)
+    return () => { observer.disconnect(); window.removeEventListener("resize", update) }
+  }, [desktop, activeTab?.id, panelOpen])
 
-  // 依赖探测（5s；未装 playwright 时后端接口 503 结构化不 500）
-  useEffect(() => {
-    let alive = true
-    const load = () => api.browserStatus().then((s) => alive && setStatus(s)).catch(() => {})
-    void load()
-    const t = setInterval(load, 5000)
-    return () => { alive = false; clearInterval(t) }
-  }, [])
-
-  // browser.* 事件 3s 增量（动作时间线）
   useEffect(() => {
     let alive = true
     const load = async () => {
       try {
-        const next = await api.events(pid, evCursor.current)
+        const next = await api.events(pid, eventCursor)
         if (!alive || next.length === 0) return
-        evCursor.current = next[next.length - 1].id
-        setTimeline((prev) => [...prev, ...next.filter(isBrowserEvent).map(mapEvent)].slice(-200))
-      } catch { /* 静默 */ }
+        setEventCursor(next[next.length - 1].id)
+        setTimeline((prev) => [...prev, ...next.filter((event) => event.kind.startsWith("browser.")).map(mapEvent)].slice(-200))
+      } catch { /* API may be starting */ }
     }
     void load()
-    const t = setInterval(load, 3000)
-    return () => { alive = false; clearInterval(t) }
+    const timer = setInterval(load, 2500)
+    return () => { alive = false; clearInterval(timer) }
+  }, [pid, eventCursor])
+
+  useEffect(() => {
+    let alive = true
+    const load = async () => { try { const rows = await api.browserHistory(pid, { limit: 100 }); if (alive) setHistory(rows) } catch { /* no history yet */ } }
+    void load()
+    const timer = setInterval(load, 3000)
+    return () => { alive = false; clearInterval(timer) }
   }, [pid])
 
-  if (!trackOk) {
-    return (
-      <div className="flex h-full items-center justify-center">
-        <div className="text-center text-sm text-muted-foreground">
-          <div className="mb-2 text-3xl opacity-40">🌐</div>
-          内置浏览器仅 pentest / redteam / ctf 轨可用
-          <div className="mt-1 text-xs">（当前轨：{track ?? "未知"}）</div>
-        </div>
-      </div>
-    )
-  }
+  const createBrowser = async () => { setShowNewMenu(false); if (!desktop) return; const created = await desktop.createBrowserTab(pid); if (!("error" in created)) setActiveId(created.id) }
+  const createTerminal = async () => { setShowNewMenu(false); if (!desktop) return; const created = await desktop.createTerminalTab(); if (!("error" in created)) setActiveId(created.id) }
+  const closeActive = async () => { if (desktop && activeId) await desktop.closeTab(activeId) }
 
-  const noPlaywright = status && !status.playwright_installed
+  if (!trackOk) return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">内置浏览器当前轨道不可用</div>
 
-  return (
-    <div className="flex h-full min-w-0 flex-col">
-      {noPlaywright && (
-        <div className="flex items-center gap-2 border-b bg-(--status-paused)/10 px-3 py-1.5 text-xs">
-          <span>⚠ playwright 未安装——浏览器功能降级（AI 工具同样 no-tool）。</span>
-          <code className="rounded bg-accent px-1 py-0.5 font-mono text-[10px]">{status!.install_cmd}</code>
-          <Button size="sm" variant="ghost" className="h-5 text-[10px]"
-                  onClick={() => { void navigator.clipboard.writeText(status!.install_cmd) }}>
-            复制
-          </Button>
-        </div>
-      )}
-      <div className="flex items-center gap-2 border-b px-2 py-1">
-        <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
-          <BrowserTab sid="human-main" label="人类主页面" active={selectedSid === "human-main"}
-            info={sessions.find((s) => s.sid === "human-main")}
-            onClick={() => { userSelected.current = true; setSelectedSid("human-main") }} />
-          {sessions.filter((s) => s.sid !== "human-main").map((s) => (
-            <BrowserTab key={s.sid} sid={s.sid} label={s.title || s.task_id || s.sid.slice(0, 12)}
-              active={selectedSid === s.sid} info={s}
-              onClick={() => { userSelected.current = true; setSelectedSid(s.sid) }} />
-          ))}
-        </div>
-        <Button size="sm" variant={toolsOpen ? "default" : "outline"} className="h-7 shrink-0 text-xs"
-          onClick={() => setToolsOpen((open) => !open)}>
-          {toolsOpen ? "收起工具" : "抓包工具"}
-        </Button>
+  return <div className="flex h-full min-w-0 flex-col overflow-hidden">
+    <div className="flex min-h-10 items-center gap-1 border-b bg-background/90 px-2">
+      <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">{tabs.map((tab) => <DesktopTabButton key={tab.id} tab={tab} active={tab.id === activeId} onClick={() => setActiveId(tab.id)} onClose={() => void desktop?.closeTab(tab.id)} />)}</div>
+      <div className="relative shrink-0"><Button size="sm" variant="outline" className="h-7 gap-1 px-2 text-xs" onClick={() => setShowNewMenu((open) => !open)} title="新建标签"><Plus size={14} /> 新建</Button>
+        {showNewMenu && <div className="absolute right-0 top-8 z-30 w-36 overflow-hidden rounded-md border bg-popover p-1 shadow-lg"><button className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent" onClick={() => void createBrowser()}><ExternalLink size={13} /> 浏览器</button><button className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent" onClick={() => void createTerminal()}><TerminalSquare size={13} /> 终端</button></div>}
       </div>
-      <Group orientation="horizontal" className="flex min-h-0 w-full flex-1">
-        {/* 左：动作时间线 */}
-        <Panel id="br-left" minSize={180} defaultSize={220} maxSize={320}>
-          <div className={cn("flex h-full flex-col", noPlaywright && "pointer-events-none opacity-40")}>
-            <ActionTimeline events={timeline} />
-          </div>
-        </Panel>
-        <Separator className="w-0.5 bg-transparent transition-colors hover:bg-accent" />
-        {/* 中：导航 + 实时画面 */}
-        <Panel id="br-center" minSize={320}>
-          <NavShotPane pid={pid} sid={selectedSid}
-            initialPaused={sessions.find((s) => s.sid === selectedSid)?.paused}
-            onTakeover={(paused) => setSessions((all) => all.map((s) => s.sid === selectedSid ? { ...s, paused } : s))} />
-        </Panel>
-        {toolsOpen && <Separator className="w-0.5 bg-transparent transition-colors hover:bg-accent" />}
-        {toolsOpen && <Panel id="br-right" minSize={300} defaultSize={380} maxSize={560}>
-          <Tabs defaultValue="capture" className="flex h-full flex-col">
-            <TabsList className="shrink-0">
-              <TabsTrigger value="capture">抓包</TabsTrigger>
-              <TabsTrigger value="intercept">拦截</TabsTrigger>
-              <TabsTrigger value="replay">重发</TabsTrigger>
-              <TabsTrigger value="intruder">爆破</TabsTrigger>
-            </TabsList>
-            <TabsContent value="capture" className="min-h-0 flex-1">
-              <CaptureHistory pid={pid} />
-            </TabsContent>
-            <TabsContent value="intercept" className="min-h-0 flex-1">
-              <InterceptPanel pid={pid} />
-            </TabsContent>
-            <TabsContent value="replay" className="min-h-0 flex-1 overflow-auto p-2">
-              <p className="mb-2 text-xs text-muted-foreground">
-                贴完整 HTTP 请求报文（请求行 + 头 + 空行 + 体）发送；从「抓包」点「重发」可预填。支持任意目标。
-              </p>
-              <ReplayForm pid={pid} />
-            </TabsContent>
-            <TabsContent value="intruder" className="min-h-0 flex-1 overflow-auto p-2">
-              <IntruderForm pid={pid} />
-            </TabsContent>
-          </Tabs>
-        </Panel>}
-      </Group>
     </div>
-  )
+    {activeTab?.type === "browser" && <BrowserToolbar tab={activeTab} desktop={desktop} onClose={() => void closeActive()} />}
+    <div className="flex min-h-0 flex-1"><div className="relative flex min-w-0 flex-1 flex-col bg-(--viz-terminal-input)/20">{activeTab?.type === "terminal" ? <TerminalPane tab={activeTab} desktop={desktop} /> : <div ref={surfaceRef} className="min-h-0 flex-1" />}{!desktop && <div className="absolute inset-0 flex items-center justify-center bg-background text-center text-xs text-muted-foreground"><div><div className="mb-2 text-2xl">▣</div>请使用 Electron 桌面端打开真实 Chromium 浏览器</div></div>}</div>
+      {panelOpen && <aside className="flex w-80 shrink-0 flex-col border-l bg-background/95"><Tabs defaultValue="timeline" className="flex h-full flex-col"><TabsList className="m-2 shrink-0"><TabsTrigger value="timeline">AI 时间线</TabsTrigger><TabsTrigger value="replay">HTTP 重放</TabsTrigger></TabsList><TabsContent value="timeline" className="min-h-0 flex-1"><ActionTimeline events={timeline} /></TabsContent><TabsContent value="replay" className="min-h-0 flex-1 overflow-auto p-2"><ReplayPanel rows={history} selected={selectedHistory} onSelect={setSelectedHistory} pid={pid} /></TabsContent></Tabs></aside>}
+      <button className="flex w-5 shrink-0 items-center justify-center border-l text-muted-foreground hover:bg-accent" onClick={() => setPanelOpen((open) => !open)} title={panelOpen ? "收起侧栏" : "展开侧栏"}><ChevronDown size={14} className={panelOpen ? "-rotate-90" : "rotate-90"} /></button>
+    </div>
+  </div>
 }
 
-function BrowserTab({ sid, label, active, info, onClick }: {
-  sid: string; label: string; active: boolean; info?: BrowserSessionInfo; onClick: () => void
-}) {
-  return <button type="button" onClick={onClick}
-    className={cn("max-w-52 shrink-0 rounded-md border px-2 py-1 text-left text-[11px] transition-colors",
-      active ? "border-primary bg-accent text-foreground" : "border-transparent text-muted-foreground hover:bg-accent/60")}
-    title={info?.url ?? sid}>
-    <span className="block truncate">{info?.paused ? "⏸ " : ""}{label}</span>
-    <span className="block truncate font-mono text-[9px] text-muted-foreground">{info?.url ?? "未连接"}</span>
-  </button>
+function BrowserToolbar({ tab, desktop, onClose }: { tab: DesktopTab; desktop?: DesktopBrowserApi; onClose: () => void }) {
+  const [url, setUrl] = useState(tab.url === "about:blank" ? "" : tab.url)
+  useEffect(() => setUrl(tab.url === "about:blank" ? "" : tab.url), [tab.url])
+  const go = () => { if (desktop && url.trim()) void desktop.navigate(tab.id, url.trim().match(/^https?:\/\//) ? url.trim() : `https://${url.trim()}`) }
+  return <div className="flex items-center gap-1 border-b px-2 py-1"><Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={() => void desktop?.goBack(tab.id)} title="后退"><ArrowLeft size={14} /></Button><Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={() => void desktop?.goForward(tab.id)} title="前进"><ArrowRight size={14} /></Button><Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={() => void desktop?.reload(tab.id)} title="刷新"><RefreshCw size={14} /></Button><Input className="h-7 min-w-0 flex-1 font-mono text-xs" value={url} onChange={(event) => setUrl(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") go() }} placeholder="输入 URL" /><Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={() => void desktop?.openDevTools(tab.id)} title="开发者工具"><ExternalLink size={14} /></Button><Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={onClose} title="关闭标签"><X size={14} /></Button></div>
 }
 
-function isBrowserEvent(e: BBEvent): boolean {
-  return e.kind.startsWith("browser.")
+function DesktopTabButton({ tab, active, onClick, onClose }: { tab: DesktopTab; active: boolean; onClick: () => void; onClose: () => void }) {
+  return <div className={cn("flex min-w-28 max-w-52 items-center gap-1 rounded-t border px-2 py-1", active ? "border-primary bg-accent" : "border-transparent text-muted-foreground hover:bg-accent/60")}><button className="min-w-0 flex-1 text-left text-[11px]" onClick={onClick}><span className="block truncate">{tab.type === "terminal" ? "终端" : tab.title || "浏览器"}</span><span className="block truncate font-mono text-[9px] text-muted-foreground">{tab.type === "browser" ? tab.url : "PowerShell"}</span></button><button className="text-muted-foreground hover:text-foreground" onClick={onClose} title="关闭"><X size={12} /></button></div>
 }
 
-function mapEvent(e: BBEvent) {
-  const p = e.payload as Record<string, unknown>
-  const text = String(p.action ? `${p.action} ${p.url ?? ""}` : (p.reason ?? e.kind))
-  return { id: e.id, kind: e.kind, author: e.author, summary: text.slice(0, 80), created_at: e.created_at }
+function TerminalPane({ tab, desktop }: { tab: DesktopTab; desktop?: DesktopBrowserApi }) {
+  const [output, setOutput] = useState("")
+  const [input, setInput] = useState("")
+  const preRef = useRef<HTMLPreElement | null>(null)
+  useEffect(() => { if (!desktop) return; const off = desktop.onTerminalData((event) => { if (event.id === tab.id) setOutput((current) => (current + event.data).slice(-120000)) }); return off }, [desktop, tab.id])
+  useEffect(() => { preRef.current?.scrollTo(0, preRef.current.scrollHeight) }, [output])
+  const send = () => { if (!desktop || !input) return; desktop.terminalWrite(tab.id, input + "\r"); setInput("") }
+  return <div className="flex min-h-0 flex-1 flex-col bg-(--viz-terminal) p-2"><pre ref={preRef} className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap font-mono text-xs text-(--viz-terminal-text)">{output || "PowerShell · 项目根目录\n"}</pre><div className="mt-2 flex gap-1"><Input className="h-7 flex-1 border-(--viz-terminal-border)/10 bg-(--viz-terminal-input)/20 font-mono text-xs" value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") send() }} placeholder="输入命令" /><Button size="sm" className="h-7" onClick={send}>执行</Button></div></div>
 }
+
+function ReplayPanel({ rows, selected, onSelect, pid }: { rows: HttpHistoryRow[]; selected: HttpHistoryRow | null; onSelect: (row: HttpHistoryRow) => void; pid: string }) {
+  return <div className="space-y-2"><div className="space-y-1">{rows.filter((row) => row.source !== "intruder").slice(0, 30).map((row) => <button key={row.id} className={cn("block w-full rounded border p-1.5 text-left text-[10px] hover:bg-accent", selected?.id === row.id && "border-primary bg-accent")} onClick={() => onSelect(row)}><span className="font-mono font-bold">{row.method} {row.status ?? "-"}</span><span className="ml-1 block truncate text-muted-foreground">{row.url}</span></button>)}</div>{selected ? <ReplayForm key={selected.id} pid={pid} initialRaw={toRawRequest(selected)} /> : <div className="rounded border border-dashed p-3 text-center text-[10px] text-muted-foreground">选择一条 HTTP 请求开始重放</div>}</div>
+}
+
+function mapEvent(event: BBEvent): TimelineItem { const payload = event.payload as Record<string, unknown>; const summary = String(payload.action ? `${payload.action} ${payload.url ?? ""}` : (payload.reason ?? event.kind)); return { id: event.id, kind: event.kind, author: event.author, summary: summary.slice(0, 100), created_at: event.created_at } }

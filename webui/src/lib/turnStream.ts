@@ -125,7 +125,7 @@ export function buildStreamItems(visible: BBEvent[]): StreamItem[] {
       }
     } else if (e.kind === "agent.chat.delta") {
       // 回复流式增量（2026-09-20）：轮内 replyStream 原位替换（累计全文自愈）；
-      // 无轮上下文的孤儿 delta 单行流式渲染（escalation-only 回复等）
+      // 无轮上下文的孤儿 delta 单行流式渲染
       const sid = typeof e.payload.stream_id === "string" ? e.payload.stream_id : ""
       if (!sid || finalChats.has(sid)) continue
       const ti = liveChatTurn.get(sid)

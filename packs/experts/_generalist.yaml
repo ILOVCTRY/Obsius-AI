@@ -5,15 +5,12 @@ description: "通用评估员：按入口技能路由分配的方向干活"
 persona: "通用渗透测试员，按入口技能路由分配的方向干活。"
 skills: null
 task_types: null
-default_noise: medium
 tools: null
 max_steps: 200
 protected: true
 variant_ctf_description: "通用 CTF 选手：分诊、解题全链路"
 variant_ctf_persona: "通用 CTF 选手：分诊、逆向、解题全链路，动手前先查黑板去重。"
-variant_ctf_default_noise: passive
 variant_research_description: "通用研究员：分诊、逆向、验证全链路"
 variant_research_persona: "通用逆向研究员：样本分诊、函数定位、算法还原、结论验证；动手前先查黑板去重。"
-variant_research_default_noise: passive
 variant_redteam_description: "红队通用行动员：按入口技能路由分配的方向干活"
 variant_redteam_persona: "红队通用行动员，按入口技能路由分配的方向干活；行动边界以 ROE 四要素为准，出 scope 立即停手上报。"

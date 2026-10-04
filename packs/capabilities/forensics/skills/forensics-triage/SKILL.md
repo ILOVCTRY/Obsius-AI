@@ -7,12 +7,13 @@ file_features: pcap_magic, disk_image_magic, memory_dump_magic, image_dimensions
 formats: pcap, pcapng, evtx, raw, dd, e01, vmem, dmp, png, jpg, gif, wav, mp3, mkv, pdf
 platforms: linux, windows
 task_types: solve, triage
+mode: self-contained
 ---
 
 # forensics-triage —— 取证与 OSINT 分诊路由
 
 > 分层纪律：本技能只做**介质判定 → 开专题**。操作细节在 forensics /
-> osint 英文知识库，用 `kb_open(module=…)` 按表开单篇，禁止通读。
+> osint 英文参考资料，用 `skill_open(path=…)` 按表开单篇，禁止通读。
 > 附件先过 file-triage（magic/strings），介质明确后回本技能选模块。
 
 ## 0. 先看附件是什么
@@ -23,7 +24,7 @@ task_types: solve, triage
 
 ## 1. 介质 → 专题对照表
 
-**forensics（kb_open module 前缀 `forensics/`）**
+**forensics（skill_open module 前缀 `forensics/`）**
 
 | 附件形态/题目关键词 | 模块 |
 |---|---|

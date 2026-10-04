@@ -4,22 +4,23 @@ description: Android/移动端逆向：APK 分层分诊、JNI/native 五线、�
 keywords: android, apk, 安卓, jni, ndk, dex, smali, 加固, 脱壳, godot, crackme, frida, so
 file_features: is_apk, has_native_lib, has_jni, godot_engine, packed_so
 task_types: triage, reverse, verify
+mode: self-contained
 ---
 
 # android-rev —— Android 逆向：分诊 → 五线 → 脱壳 → 验证
 
-## 手册对照表（特征 → 打开哪篇，用 kb_open）
+## 手册对照表（特征 → 打开哪篇，用 skill_open）
 
 | 场景/特征 | 手册 |
 |---|---|
-| 拿到 APK 不知道往哪层打 | `android/triage-and-layering.md`（四分判据 + 分诊命令 + 特征词声明） |
-| native so 校验（has_jni） | `android/native-five-lines.md`（JNI 桥 / 常量 / SMC / 验证 / 诱饵） |
-| so 被壳折叠（packed_so） | `android/unpacking.md`（识别四征 + unicorn 脱壳工程） |
-| Godot 引擎 APK（godot_engine） | `android/godot.md`（markers + GDExtension + 加密信封） |
-| 动态 hook（运行时行为/算法观察） | `android/frida-cookbook.md`（加密捕获/网络/存储/脱壳 dump 脚本集） |
-| 反检测对抗（root/SSL/模拟器/反调试） | `android/frida-bypass-kit.md`（四合一绕过框架 + 升级对抗） |
-| native 深度操作 / 框架专项 | `android/android-advanced.md`（IDA JNI 技巧/native hook/加固厂商表/Flutter/RN） |
-| 安全审计视角（产出报告） | `android/apk-security-checklist.md`（MASTG 清单） |
+| 拿到 APK 不知道往哪层打 | `references/binary/android/triage-and-layering.md`（四分判据 + 分诊命令 + 特征词声明） |
+| native so 校验（has_jni） | `references/binary/android/native-five-lines.md`（JNI 桥 / 常量 / SMC / 验证 / 诱饵） |
+| so 被壳折叠（packed_so） | `references/binary/android/unpacking.md`（识别四征 + unicorn 脱壳工程） |
+| Godot 引擎 APK（godot_engine） | `references/binary/android/godot.md`（markers + GDExtension + 加密信封） |
+| 动态 hook（运行时行为/算法观察） | `references/binary/android/frida-cookbook.md`（加密捕获/网络/存储/脱壳 dump 脚本集） |
+| 反检测对抗（root/SSL/模拟器/反调试） | `references/binary/android/frida-bypass-kit.md`（四合一绕过框架 + 升级对抗） |
+| native 深度操作 / 框架专项 | `references/binary/android/android-advanced.md`（IDA JNI 技巧/native hook/加固厂商表/Flutter/RN） |
+| 安全审计视角（产出报告） | `references/binary/android/apk-security-checklist.md`（MASTG 清单） |
 | 已解题型比对 | `android/cases/`（命中识别特征直接复用 solver 重验证） |
 
 ## 反空转规则（先于一切）

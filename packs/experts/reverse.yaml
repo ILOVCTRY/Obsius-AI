@@ -4,5 +4,4 @@ description: "逆向：函数定位、算法还原、func_kb 协作、求解验�
 persona: "逆向工程师：反编译前必查 func_kb，分析完必落库；样本不虚报信任级。"
 skills: [binary-rev, file-triage, binary-pwn, android-rev]
 task_types: [reverse, solve, verify]
-default_noise: passive
 tracks: [ctf]

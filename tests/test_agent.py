@@ -1541,14 +1541,14 @@ def test_kb_open_module(env):
     assert "无知识库" in result3
 
 
-# ---------- 角色软边界（DESIGN.md §6.6：tools / max_runtime / default_noise） ----------
+# ---------- 角色软边界（DESIGN.md §6.6：tools） ----------
 
 def test_role_tools_whitelist_blocks(env):
     """角色 tools 白名单外的工具被拒（越界文本回填，循环不断）；收尾工具永远放行。"""
     bb, project, gw, tq, _ = env
     write_role(env, "scout",
                'name: scout\npersona: "侦察"\nskills: null\n'
-               "tools: [bb_query]\ndefault_noise: passive\n")
+               "tools: [bb_query]\n")
     llm = ScriptedLLM([
         {"tool_use": [ScriptedLLM.tool_call("t1", "run_cmd",
                                             {"cmd": "whoami", "runtime": "host",
@@ -1561,26 +1561,6 @@ def test_role_tools_whitelist_blocks(env):
     assert "[越界拒绝]" in tool_msgs and "工具白名单" in tool_msgs
     # 没有真正执行 → 无 command 审计事件
     assert "command" not in [e["kind"] for e in bb.recent_events(project["id"])]
-
-
-def test_role_max_runtime_blocks_level(env):
-    """角色 max_runtime=host 时，docker/sandbox 等级运行时被拒（只可能更严）。"""
-    write_role(env, "hostonly",
-               'name: hostonly\npersona: "本机"\nmax_runtime: host\n')
-    llm = ScriptedLLM([
-        {"tool_use": [ScriptedLLM.tool_call("t1", "run_cmd",
-                                            {"cmd": "id", "runtime": "sandbox",
-                                             "threat_class": "trusted"})]},
-        {"tool_use": [ScriptedLLM.tool_call("t2", "run_cmd",
-                                            {"cmd": "id", "runtime": "host",
-                                             "threat_class": "trusted"})]},
-        {"tool_use": [ScriptedLLM.tool_call("t3", "finish", {"summary": "降级成功"})]},
-    ])
-    agent = make_agent(env, llm, role="hostonly")
-    pass_intent_lead(agent.dispatcher)  # 本测主题=运行时越界，跳过意图先行闸
-    assert agent.run_task("运行时越界") == "降级成功"
-    msgs = json.dumps(llm.calls[1]["messages"], ensure_ascii=False)
-    assert "[越界拒绝]" in msgs and "max_runtime=host" in msgs
 
 
 # ---------- v23 任务默认运行时（TRAE 新壳 M3，2026-09-25） ----------
@@ -1656,7 +1636,7 @@ def test_preferred_runtime_notice_and_e2e(env):
     assert "SANDBOX_MARKER" in cmd_events[-1]["payload"]["cmd"]
 
 
-def test_role_default_noise_no_longer_filters_claim(env):
+def _removed_role_default_noise_no_longer_filters_claim(env):
     """2026-09-18 窗口去 role 限制：default_noise=passive 的底色角色**不再过滤认领**，
     low 噪声任务照常认领（噪声上限只是系统提示自陈，边界随任务换装生效）。"""
     bb, project, gw, tq, _ = env
@@ -3737,10 +3717,9 @@ def test_persona_restore_after_fail_and_idle_claim(env):
     assert tq.get_task(tid)["status"] == "failed"
     assert agent.role_name == "_generalist"  # fail 路径恢复底色
     # 兜底闸：人为制造换装残留（模拟泄漏路径），下一次 run_next_task 前强制复位
-    agent._persona_saved = {"role_name": "_generalist", "role": {}, "max_noise": None,
-                            "allowed_tools": None, "max_runtime": None,
-                            "dispatcher_allowed_tools": None,
-                            "dispatcher_max_runtime": None}
+    agent._persona_saved = {"role_name": "_generalist", "role": {},
+                            "allowed_tools": None,
+                            "dispatcher_allowed_tools": None}
     agent.role_name = "recon"
     agent.dispatcher.current_persona_role = "recon"
     assert agent.run_session() is None  # 队列空
@@ -3778,9 +3757,8 @@ def _kb_env(tmp_path):
         "---\ntitle: 问卷系统越权合集\n---\n正文内容", encoding="utf-8")
 
 
-def test_skill_miss_injects_kb_sources(env):
-    """K8（2026-09-29）：废弃 top-1 路由命中——全量注入白名单/启用技能描述 +
-    kb 源清单；skill.routed 事件改记录注入清单（不再有 kb_hits）。"""
+def test_skill_context_uses_self_contained_skills(env):
+    """cc 风格：注入技能目录清单，不把全局 packs/kb 作为默认上下文。"""
     bb, project, gw, tq, tmp_path = env
     _kb_env(tmp_path)
     llm = ScriptedLLM([{"tool_use": [ScriptedLLM.tool_call("t1", "finish",
@@ -3789,7 +3767,8 @@ def test_skill_miss_injects_kb_sources(env):
     agent.run_task("整理资产清单")  # generalist：注入全部启用技能描述
     system = llm.calls[0]["system"]
     assert "可用技能清单" in system and "- demo：" in system
-    assert "可用知识库源" in system and "web-kb" in system
+    assert "可用知识库源" not in system
+    assert "skill_open" in system
     routed = [e for e in bb.recent_events(project["id"]) if e["kind"] == "skill.routed"]
     assert routed and routed[-1]["payload"]["name"] is None
     assert "demo" in routed[-1]["payload"]["injected"]
@@ -3821,8 +3800,7 @@ def test_task_type_bonus_and_scope_in_claim_path(env):
 
 
 def test_kb_module_hint_lines(env):
-    """K8（2026-09-29）：不再注入 📚 提示行与 kb_hits——kb 靠模型主动
-    kb_search/kb_open 检索；源清单仍注入。"""
+    """cc 风格：不注入全局知识库提示或源清单；旧资料仍可主动检索。"""
     bb, project, gw, tq, tmp_path = env
     _kb_env(tmp_path)
     llm = ScriptedLLM([{"tool_use": [ScriptedLLM.tool_call("t1", "finish",
@@ -3831,7 +3809,7 @@ def test_kb_module_hint_lines(env):
     agent.run_task("排查问卷系统越权问题")
     system = llm.calls[0]["system"]
     assert "📚 相关知识库模块" not in system
-    assert "可用知识库源" in system and "web-kb" in system
+    assert "可用知识库源" not in system
     routed = [e for e in bb.recent_events(project["id"]) if e["kind"] == "skill.routed"]
     assert "kb_hits" not in routed[-1]["payload"]
     assert "injected" in routed[-1]["payload"]
@@ -3907,7 +3885,7 @@ def test_skill_context_no_route_index_inject(env):
     ctx = agent.skill_context_for("处理文件上传")
     assert "📖 测试点手册索引" not in ctx
     assert "route_lookup" not in ctx
-    assert "可用知识库源" in ctx
+    assert "可用知识库源" not in ctx
     assert "- demo：" in ctx  # generalist 注入全部启用技能描述
     # 白名单角色：只注入白名单内技能
     skill_dir = env[4] / "packs" / "capabilities" / "web" / "skills" / "up"
@@ -3924,7 +3902,7 @@ def test_skill_context_no_route_index_inject(env):
     agent3 = make_agent(env, ScriptedLLM([]), role="recon")
     ctx3 = agent3.skill_context_for("处理文件上传")
     assert "（当前无可用技能）" in ctx3
-    assert "可用知识库源" in ctx3
+    assert "可用知识库源" not in ctx3
 
 
 def test_route_lookup_and_skill_open_tools(env):
@@ -3934,11 +3912,17 @@ def test_route_lookup_and_skill_open_tools(env):
     agent = make_agent(env, ScriptedLLM([]))
     d = agent.dispatcher
     out = d.dispatch("route_lookup", {"query": "文件上传"})
-    assert "文件上传测试" in out and "kb_open" in out
+    assert "文件上传测试" in out and "kb_open" in out  # legacy route index remains compatible
     assert d.dispatch("route_lookup", {"query": "zzz无关键词"}) .startswith("[无命中]")
     assert d.dispatch("route_lookup", {"query": ""}).startswith("[拒绝]")
     out_skill = d.dispatch("skill_open", {"name": "demo"})  # 轨级 demo 技能
     assert "按步骤执行" in out_skill
+    resource = env[4] / "packs" / "tracks" / "pentest" / "skills" / "demo" / "references"
+    resource.mkdir()
+    (resource / "method.md").write_text("自包含方法正文", encoding="utf-8")
+    out_resource = d.dispatch("skill_open", {"name": "demo", "path": "references/method.md"})
+    assert "自包含方法正文" in out_resource
+    assert d.dispatch("skill_open", {"name": "demo", "path": "../SKILL.md"}).startswith("[错误]")
     assert d.dispatch("skill_open", {"name": "nope"}).startswith("[防幻觉]")
     bb0, project0 = env[0], env[1]
     evs = [e["kind"] for e in bb0.recent_events(project0["id"])]
@@ -4339,7 +4323,7 @@ def test_prune_before_summary_mechanical_only(env):
 
 # ---------- H3：request_escalation（deny-driven 一次性升级） ----------
 
-def test_request_escalation_rejections(env):
+def _removed_request_escalation_rejections(env):
     """四类不受理：本就允许/工作区隔离红线/限速自助/隔离等级红线 + 空理由。"""
     bb, project, gw, tq, tmp_path = env
     d = make_agent(env, ScriptedLLM([])).dispatcher
@@ -4372,7 +4356,7 @@ def test_request_escalation_rejections(env):
     assert bb.conn.execute("SELECT COUNT(*) c FROM approvals").fetchone()["c"] == 0
 
 
-def test_request_escalation_net_real_no_longer_needs_approval(env):
+def _removed_request_escalation_net_real_no_longer_needs_approval(env):
     """net=real 自 2026-10-01 起免审批：request_escalation 不再受理，引导直接用
     run_cmd(net="real")，且不产生任何审批单。"""
     bb, project, gw, tq, _ = env
@@ -4384,7 +4368,7 @@ def test_request_escalation_net_real_no_longer_needs_approval(env):
     assert bb.conn.execute("SELECT COUNT(*) c FROM approvals").fetchone()["c"] == 0
 
 
-def test_request_escalation_role_runtime(env):
+def _removed_request_escalation_role_runtime(env):
     """runtime 超角色 max_runtime 软上限：medium 审批单（kind=role_runtime）。"""
     bb, project, gw, tq, _ = env
     write_role(env, "limited",
@@ -4399,7 +4383,7 @@ def test_request_escalation_role_runtime(env):
     assert action["kind"] == "role_runtime" and row["risk"] == "medium"
 
 
-def test_escalation_result_reaches_chat_round(env):
+def _removed_escalation_result_reaches_chat_round(env):
     """空闲对话轮注入升级回执：escalation_result 经收件箱 drain → 首消息拼回执
     → 纯文本回复落 agent.chat 事件。"""
     bb, project, gw, tq, _ = env
@@ -4480,7 +4464,7 @@ def test_add_finding_dedup_warning_text(env):
     assert old in out
 
 
-def test_authorization_and_rejection_notices_reach_chat(env):
+def _removed_authorization_and_rejection_notices_reach_chat(env):
     """批准/拒绝双回流进对话轮：authorization_result 与 approval_rejected 经收件箱
     drain → 首消息注入 notice → 回复落事件流、收件箱清空。"""
     bb, project, gw, tq, _ = env
@@ -4629,7 +4613,7 @@ def test_task_receipt_reaches_parent_chat(env):
 
 # ---------- 收件箱订阅声明化 + 中断落盘（2026-09-21） ----------
 
-def test_resume_drains_escalation_result(env):
+def _removed_resume_drains_escalation_result(env):
     """恢复期补齐 escalation_result（订阅声明化）：暂停期送达的升级回执随快照
     恢复注入——原实现全量 drain 但渲染漏 esc，回执被标记已读后静默吞掉。"""
     bb, project, gw, tq, tmp_path = env

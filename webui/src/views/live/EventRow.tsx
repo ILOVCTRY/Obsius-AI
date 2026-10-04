@@ -1,14 +1,25 @@
-import { memo, useState, type ReactNode } from "react"
+import { memo, useMemo, useState, type ReactNode } from "react"
 import { eventStyle, eventSummary } from "@/lib/events"
 import { fmtDateTime, fmtTime, fmtUtcDateTime, parseTs } from "@/lib/datetime"
-import type { BBEvent } from "@/lib/types"
+import type { Approval, BBEvent, DecideApprovalResult } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import { MarkdownView } from "@/components/settings/MarkdownView"
+import { ActivityGroup } from "@/components/chat/ActivityGroup"
+import { FileCardList } from "@/components/chat/FileCard"
+import { ApprovalCard, asSpawnAction } from "@/components/chat/ApprovalCard"
+import { mergeTargets, targetsFromProse, targetsFromTool, type FileTarget } from "@/lib/fileTargets"
+import type { ActivityStep } from "@/lib/activity"
+
+const NOOP_DECIDE = async (): Promise<void> => { /* 无决策注入时占位（引用稳定，勿改） */ }
 
 // 直播流渲染层（Claude Code 终端风格，DESIGN.md §12）：状态点 + 折叠行。
 // lib/events.tsx 的 eventStyle/eventSummary 只管筛选/标签/摘要，本文件管布局：
 // 命令对 → IN/OUT 块；思考 → 耗时行展开全文；错误/审批 → 醒目行；其余 → 简洁单行；
-// 对话轮（2026-09-20 会话窗对话化）→ 人类气泡 + 过程折叠组 + Agent 回复气泡。
+// 对话轮（2026-09-20 会话窗对话化）→ 人类一行 + 过程折叠摘要组 + Agent 回复 prose。
+// **会话流改造（2026-10-03，cc-haha 风格）**：轮的 process 组由平铺行改为
+// ActivityGroup 折叠摘要（一行灰色摘要 + 耗时，展开仍是原来的逐条 EventRow——
+// **审计零回退**）；Agent 回复下挂文件卡（叙述提到的文件）。命令对/思考/通用单行
+// 本身不变（它们既是展开态明细，也是「未成组单条」的呈现）。
 
 export type StreamItem =
   | { type: "pair"; command: BBEvent; result?: BBEvent } // result 缺 = 运行中/后端悬空
@@ -27,10 +38,64 @@ export interface EventRowProps {
   roleNames: Record<string, string>
   /** orch.proposed 的行内「采纳」按钮等，由 LiveRoom 注入 */
   action?: ReactNode
+  /** 待审批完整行（usePendingApprovals 按 approval_id 反查；命中则渲染审批问答卡） */
+  approval?: Approval
+  /** 审批卡提交回调（LiveRoom/工作台注入：sessionNote + decideApproval） */
+  onDecideApproval?: (approval: Approval, decision: "approved" | "rejected", note: string) => Promise<DecideApprovalResult | void>
   /** skill.routed 命中技能：单击路由名跳设置页（deep link 由 LiveRoom dispatch，F12） */
   onRouteJump?: (e: BBEvent, name: string) => void
   /** 摘要资产反查（live-stream-ux A3）：LiveRoom 自建 assets 映射传入 */
   assetName?: (id: string) => string | undefined
+  /** 文件卡动作的落点项目（会话流改造 2026-10-03）；缺省=文件卡只读展示 */
+  pid?: string
+}
+
+// ---------- 活动摘要映射（会话流改造 2026-10-03） ----------
+// StreamItem（轮的 process 组）→ ActivityStep[]：tool.call 取 name/duration_s/ok，
+// 命令对取 cmd/duration_s，llm.thinking 计「思考」。turnStream.ts 契约零改动。
+
+function toActivitySteps(process: StreamItem[]): ActivityStep[] {
+  const steps: ActivityStep[] = []
+  for (const p of process) {
+    if (p.type === "pair") {
+      const cmd = str(p.command.payload.cmd)
+      steps.push({ kind: "command", name: "command", ts: parseTs(p.command.created_at).getTime(),
+                   durationS: typeof p.result?.payload.duration_s === "number"
+                     ? p.result.payload.duration_s : undefined,
+                   dedupKey: firstLine(cmd).slice(0, 120),
+                   failed: p.result ? p.result.payload.exit_code !== 0 || p.result.payload.timed_out === true
+                     : false })
+      continue
+    }
+    const e = p.type === "turn" ? p.note : p.event
+    if (e.kind === "llm.thinking" || e.kind === "llm.thinking.delta") {
+      steps.push({ kind: "thinking", name: "thinking", ts: parseTs(e.created_at).getTime(),
+                   durationS: typeof e.payload.duration_s === "number" ? e.payload.duration_s : undefined })
+    } else if (e.kind === "tool.call") {
+      const name = str(e.payload.name) || "tool"
+      steps.push({ kind: "tool", name, ts: parseTs(e.created_at).getTime(),
+                   durationS: typeof e.payload.duration_s === "number" ? e.payload.duration_s : undefined,
+                   dedupKey: name === "read_file" ? str((e.payload.args as Record<string, unknown>)?.path) : undefined,
+                   failed: e.payload.ok === false })
+    } else {
+      steps.push({ kind: "tool", name: e.kind, ts: parseTs(e.created_at).getTime() })
+    }
+  }
+  return steps
+}
+
+/** 轮内所有 tool.call / 命令对产出的文件目标（供叙述文件卡对账） */
+function turnFileTargets(process: StreamItem[]): FileTarget[] {
+  const out: FileTarget[] = []
+  for (const p of process) {
+    if (p.type === "pair") { out.push(...targetsFromTool("run_cmd", { cmd: p.command.payload.cmd })); continue }
+    const e = p.type === "turn" ? p.note : p.event
+    if (e.kind !== "tool.call") continue
+    out.push(...targetsFromTool(str(e.payload.name),
+      (e.payload.args ?? {}) as Record<string, unknown>,
+      str(e.payload.result_head) || str(e.payload.result)))
+  }
+  return out
 }
 
 // ---------- live-stream-ux D1/E1（2026-09-23）共用小件 ----------
@@ -344,44 +409,56 @@ function AgentReplyRow({ event, streaming }: { event: BBEvent; streaming?: boole
 
 // 轮本体不再有整组折叠（2026-09-28 过程常显），onToggle 仅透传给过程行自管展开态；
 // 注意 open/onToggle 两 prop 保留在 EventRowProps 上（EventRowImpl 统一传参）
-function TurnRow({ item, roleNames, onRouteJump, assetName }:
+function TurnRow({ item, roleNames, onRouteJump, assetName, pid, approval, onDecideApproval }:
   EventRowProps & { item: Extract<StreamItem, { type: "turn" }> }) {
   // 过程组内行展开态自管（局部 map，不进 LiveRoom overrides——轮内细节不污染顶层折叠记忆）
   const [innerOpen, setInnerOpen] = useState<Map<number, boolean>>(new Map())
   const innerToggle = (id: number, d: boolean) =>
     setInnerOpen((m) => new Map(m).set(id, !(m.get(id) ?? d)))
+  // 轮的「运行中」判据：replyStream 在场而终稿 reply 未到（turnStream 收口时清 replyStream）
+  const live = !!item.replyStream && !item.reply
+  const steps = useMemo(() => toActivitySteps(item.process), [item.process])
+  const known = useMemo(() => turnFileTargets(item.process), [item.process])
+  const replyText = str(item.reply?.payload.text) || str(item.replyStream?.payload.text)
+  const targets = useMemo(
+    () => mergeTargets(targetsFromProse(replyText, known), known), [replyText, known])
   return (
     <div className="w-full shrink-0 space-y-0.5 py-1">
       <HumanNoteRow event={item.note} />
-      {/* 2026-09-28：过程组取消整组折叠（原「⚙ 过程 N 步」），⏺/⎿ 行常显——
-          折叠态两行/步，与 Claude Code 一致；行内明细仍逐行可展开 */}
+      {/* 会话流改造（2026-10-03，cc-haha 风格）：过程组由平铺行改折叠摘要行——
+          一行灰色摘要 + 耗时，点开仍是原来的逐条 EventRow（**审计零回退**）；
+          运行中的轮恒展开（live）。单步不成组由 ActivityGroup 内部短路。 */}
       {item.process.length > 0 && (
-        <div className="space-y-0.5 pl-2">
-          {item.process.map((p) => {
-            const pe = p.type === "pair" ? p.command
-              : p.type === "turn" ? p.note : p.event
-            const pk = p.type === "pair" ? "command"
-              : p.type === "turn" ? "message.inbox" : p.event.kind
-            const st = eventStyle(pk, pe.payload)
-            return <EventRowImpl key={pe.id} item={p}
-              open={innerOpen.get(pe.id) ?? st.defaultOpen}
-              onToggle={innerToggle} roleNames={roleNames} onRouteJump={onRouteJump}
-              assetName={assetName} />
-          })}
+        <div className="pl-2">
+          <ActivityGroup steps={steps} live={live}
+            failedCount={steps.filter((s) => s.failed).length}>
+            {item.process.map((p) => {
+              const pe = p.type === "pair" ? p.command
+                : p.type === "turn" ? p.note : p.event
+              const pk = p.type === "pair" ? "command"
+                : p.type === "turn" ? "message.inbox" : p.event.kind
+              const st = eventStyle(pk, pe.payload)
+              return <EventRowImpl key={pe.id} item={p}
+                open={innerOpen.get(pe.id) ?? st.defaultOpen}
+                onToggle={innerToggle} roleNames={roleNames} onRouteJump={onRouteJump}
+                assetName={assetName} pid={pid} approval={approval} onDecideApproval={onDecideApproval} />
+            })}
+          </ActivityGroup>
         </div>
       )}
       {item.replyStream && <AgentReplyRow event={item.replyStream} streaming />}
       {item.reply && <AgentReplyRow event={item.reply} />}
+      <FileCardList targets={targets} pid={pid} />
     </div>
   )
 }
 
-// ---------- 审批卡（2026-09-28 内联审批，Codex 式流内决策） ----------
-// approval.requested（store.request_approval 现已落事件）：琥珀卡片 + 摘要 + 行内
-// [批准][拒绝]（按钮由 LiveRoom 经 action 注入，走 api.decideApproval）；决策后的
-// approval.{decision} 事件仍走通用审计行。
+// ---------- 审批（2026-10-04 改版：问答卡 + 紧凑审计行） ----------
+// 审批模块已下线：待审批（usePendingApprovals 命中）渲染整块「审批问答卡」
+// （选项单选 + 附加说明 + 提交，见 components/chat/ApprovalCard）；已决策或数据未到
+// 退回紧凑琥珀行（无按钮）。决策后的 approval.{decision} 事件仍走通用审计行。
 
-function ApprovalCardRow({ event, action }: { event: BBEvent; action?: ReactNode }) {
+function ApprovalCardRow({ event }: { event: BBEvent }) {
   const op = str(event.payload.op) || "unknown"
   const risk = str(event.payload.risk)
   const summary = str(event.payload.summary)
@@ -400,7 +477,6 @@ function ApprovalCardRow({ event, action }: { event: BBEvent; action?: ReactNode
           <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground/70" title={summary}>
             {summary}
           </span>
-          {action}
           <TimeTag ts={event.created_at} />
         </div>
       </div>
@@ -410,9 +486,10 @@ function ApprovalCardRow({ event, action }: { event: BBEvent; action?: ReactNode
 
 // ---------- 其余：简洁单行 / 错误审批醒目行（展开 JSON 详情） ----------
 
-function EventRowImpl({ item, open, onToggle, roleNames, action, onRouteJump, assetName }: EventRowProps) {
+function EventRowImpl({ item, open, onToggle, roleNames, action, onRouteJump, assetName, pid, approval, onDecideApproval }: EventRowProps) {
   if (item.type === "turn") {
-    return <TurnRow item={item} open={open} onToggle={onToggle} roleNames={roleNames} onRouteJump={onRouteJump} />
+    return <TurnRow item={item} open={open} onToggle={onToggle} roleNames={roleNames}
+      onRouteJump={onRouteJump} assetName={assetName} pid={pid} approval={approval} onDecideApproval={onDecideApproval} />
   }
   if (item.type === "pair") {
     // pair 折叠主键 = command.id（IN/OUT 一个开关整体折叠，LiveRoom overrides 统一存）
@@ -448,9 +525,19 @@ function EventRowImpl({ item, open, onToggle, roleNames, action, onRouteJump, as
   if (e.kind === "advisor.intervention" && typeof e.payload.text === "string") {
     return <AgentChatRow event={e} />
   }
-  // 内联审批卡（2026-09-28）：pending 审批请求渲染为卡片，[批准][拒绝] 经 action 注入
+  // 内联审批（2026-10-04）：待审批命中 → 问答卡；否则紧凑审计行
   if (e.kind === "approval.requested") {
-    return <ApprovalCardRow event={e} action={action} />
+    const aid = str(e.payload.approval_id)
+    if (approval && aid && approval.id === aid) {
+      return (
+        <div className="w-full shrink-0 py-1">
+          <ApprovalCard approval={approval}
+                        roleName={roleNames[asSpawnAction(approval)?.role ?? ""]}
+                        onDecide={onDecideApproval ?? NOOP_DECIDE} />
+        </div>
+      )
+    }
+    return <ApprovalCardRow event={e} />
   }
 
   const style = eventStyle(e.kind, e.payload)
@@ -530,8 +617,9 @@ function EventRowImpl({ item, open, onToggle, roleNames, action, onRouteJump, as
 // （LiveRoom 侧已收口），action JSX 仅 orch.proposed 行传入（量少，放行重渲无妨）。
 function areRowEqual(a: EventRowProps, b: EventRowProps): boolean {
   if (a.open !== b.open || a.roleNames !== b.roleNames || a.action !== b.action
+      || a.approval !== b.approval || a.onDecideApproval !== b.onDecideApproval
       || a.onToggle !== b.onToggle || a.onRouteJump !== b.onRouteJump
-      || a.assetName !== b.assetName) return false
+      || a.assetName !== b.assetName || a.pid !== b.pid) return false
   if (a.item.type !== b.item.type) return false
   if (a.item.type === "pair" && b.item.type === "pair") {
     return a.item.command === b.item.command && a.item.result === b.item.result

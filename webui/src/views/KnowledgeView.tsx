@@ -36,6 +36,6 @@ export function KnowledgeView({ pid }: { pid?: string | null }) {
   }, [pid, tax])
 
   return (
-    <div className="h-full min-h-0"><KbView cap={cap} capabilities={capabilities} onCapChange={setCap} /></div>
+    <div className="h-full min-h-0 pt-9"><KbView cap={cap} capabilities={capabilities} onCapChange={setCap} /></div>
   )
 }

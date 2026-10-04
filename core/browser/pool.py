@@ -153,6 +153,10 @@ class BrowserInstance:
         # MCP Playwright 通过该 loopback CDP 端点接入同一项目浏览器，避免
         # MCP 自己再拉起一个看不见的 Chrome。
         self.cdp_port = cdp_port
+        # Electron mode attaches to an already running Chromium instance.  The
+        # legacy cdp_port launch path remains available for headless/CLI use.
+        self.external_cdp_url: str | None = None
+        self._external_browser = None
         self._capture = None       # CaptureTap（批 F6-2 注入，见 capture.py）
         from core.browser.intercept import InterceptHub
         self._intercept = InterceptHub(self, timeout_s=config.intercept_timeout_s)
@@ -214,14 +218,17 @@ class BrowserInstance:
             except Exception:  # noqa: BLE001
                 pass
         self._casts.clear()
-        for entry in list(self._pages.values()):
-            try:
-                await entry.page.close()
-            except Exception:  # noqa: BLE001
-                pass
+        # A CDP-attached context is owned by Electron.  Closing pages here
+        # would close the user's visible tabs when the API shuts down.
+        if self.external_cdp_url is None:
+            for entry in list(self._pages.values()):
+                try:
+                    await entry.page.close()
+                except Exception:  # noqa: BLE001
+                    pass
         self._pages.clear()
         ctx, self._ctx = self._ctx, None
-        if ctx is not None:
+        if ctx is not None and self.external_cdp_url is None:
             try:
                 await ctx.close()
             except Exception:  # noqa: BLE001
@@ -232,6 +239,7 @@ class BrowserInstance:
                 await pw.stop()
             except Exception:  # noqa: BLE001
                 pass
+        self._external_browser = None
 
     async def _ensure_ctx(self):
         """懒启动 Chromium（持久 profile）；context 被外部关闭时自动重建。"""
@@ -248,18 +256,26 @@ class BrowserInstance:
             raise BrowserError(_NO_TOOL_HINT) from None
         try:
             self._pw = await async_playwright().start()
-            self.profile_dir.mkdir(parents=True, exist_ok=True)
-            launch_args = ([f"--remote-debugging-port={self.cdp_port}"]
-                           if self.cdp_port else [])
-            self._ctx = await self._pw.chromium.launch_persistent_context(
-                str(self.profile_dir),
-                headless=self.config.headless,
-                viewport={"width": self.config.viewport_width,
-                          "height": self.config.viewport_height},
-                args=launch_args,
-                accept_downloads=True,
-                ignore_https_errors=self.config.ignore_https_errors,
-            )
+            if self.external_cdp_url:
+                self._external_browser = await self._pw.chromium.connect_over_cdp(
+                    self.external_cdp_url)
+                contexts = self._external_browser.contexts
+                if not contexts:
+                    raise BrowserError("Electron Chromium 尚未创建 browser context")
+                self._ctx = contexts[0]
+            else:
+                self.profile_dir.mkdir(parents=True, exist_ok=True)
+                launch_args = ([f"--remote-debugging-port={self.cdp_port}"]
+                               if self.cdp_port else [])
+                self._ctx = await self._pw.chromium.launch_persistent_context(
+                    str(self.profile_dir),
+                    headless=self.config.headless,
+                    viewport={"width": self.config.viewport_width,
+                              "height": self.config.viewport_height},
+                    args=launch_args,
+                    accept_downloads=True,
+                    ignore_https_errors=self.config.ignore_https_errors,
+                )
         except BrowserError:
             raise
         except Exception as e:  # noqa: BLE001 —— 启动失败转 BrowserError（不杀 loop）
@@ -271,6 +287,78 @@ class BrowserInstance:
             except Exception:  # noqa: BLE001 —— 抓包接入失败不阻断浏览
                 pass
         return self._ctx
+
+    def attach_external(self, cdp_url: str, sid: str, owner: str = "human") -> dict:
+        """Register a visible Electron WebContentsView as a browser session.
+
+        Electron sets ``window.name`` to the stable sid before calling this
+        endpoint.  Matching by that marker avoids ambiguous URL based lookup
+        when several tabs show the same site.
+        """
+        if not cdp_url.strip():
+            raise BrowserError("缺少 Electron CDP 地址")
+        # A running headless compatibility instance may already exist when the
+        # user opens Electron after starting the API separately. Replace that
+        # hidden Chromium owner before attaching, otherwise the first attach
+        # would silently keep using the invisible browser.
+        if self.external_cdp_url is None and self._thread is not None:
+            self.stop()
+            self._pages.clear()
+        with self._lock:
+            existing = self._pages.get(sid)
+            if existing is not None and self.external_cdp_url is None:
+                return self._session_dict(self._pages[sid])
+            if existing is None and sid != HUMAN_MAIN_SID:
+                ai_pages = len([s for s in self._pages if s != HUMAN_MAIN_SID])
+                if ai_pages >= self.config.max_sessions_per_project:
+                    raise BrowserError(
+                        f"项目并发浏览器会话已达上限 {self.config.max_sessions_per_project}"
+                        "（先关闭空闲会话）")
+            self.external_cdp_url = cdp_url.strip().rstrip("/")
+            if existing is None:
+                self._pages[sid] = _PageEntry(info=BrowserSession(sid=sid, owner=owner))
+        self.start()
+        self._submit(self._attach_external_coro(sid), timeout=30)
+        return self._session_dict(self._pages[sid])
+
+    async def _attach_external_coro(self, sid: str) -> None:
+        ctx = await self._ensure_ctx()
+        entry = self._pages.get(sid)
+        if entry is None:
+            return
+        marker = None
+        page = None
+        # The desktop view is created after a Playwright-only page in the AI
+        # case; prefer the newest matching target so the visible page wins.
+        for page in reversed(list(ctx.pages)):
+            try:
+                marker = await page.evaluate("window.name")
+            except Exception:  # noqa: BLE001
+                marker = None
+            if marker == sid:
+                break
+        else:
+            raise BrowserError(f"Electron 页面尚未就绪: {sid}")
+        if entry.page is page:
+            return
+        # An agent may have opened a Playwright page before the desktop tab was
+        # rendered. Rebind the session to the visible Electron page and close
+        # the invisible placeholder to keep one Page per session.
+        old_page = entry.page
+        entry.page = page
+        if old_page is not None and self.external_cdp_url is not None:
+            try:
+                await old_page.close()
+            except Exception:  # noqa: BLE001
+                pass
+        self.downloads_dir.mkdir(parents=True, exist_ok=True)
+        page.on("download", self._on_download)
+        page.on("close", lambda _p: self._remove_page_if_current(sid, page))
+        entry.url = page.url
+        try:
+            entry.title = await page.title()
+        except Exception:  # noqa: BLE001
+            entry.title = ""
 
     def _submit(self, coro, timeout: float | None = None):
         """桥到 loop 线程执行；超时/失败一律转 BrowserError（loop 线程不死于调用方）。"""
@@ -343,15 +431,26 @@ class BrowserInstance:
         if entry is None or entry.page is not None:
             return
         page = await ctx.new_page()
+        if self.external_cdp_url:
+            try:
+                await page.evaluate("sid => { window.name = sid; return true; }", sid)
+            except Exception:  # noqa: BLE001
+                pass
         entry.page = page
         self.downloads_dir.mkdir(parents=True, exist_ok=True)
         page.on("download", self._on_download)
-        page.on("close", lambda _p: self._pages.pop(sid, None))
+        page.on("close", lambda _p: self._remove_page_if_current(sid, page))
         try:
             entry.url = page.url
             entry.title = await page.title()
         except Exception:  # noqa: BLE001
             pass
+
+    def _remove_page_if_current(self, sid: str, page: object) -> None:
+        """Do not remove a session when an old CDP page is being replaced."""
+        entry = self._pages.get(sid)
+        if entry is not None and entry.page is page:
+            self._pages.pop(sid, None)
 
     def _on_download(self, download) -> None:
         """下载文件落 artifacts/browser-downloads/ + 审计事件（loop 线程回调；
@@ -737,9 +836,22 @@ class BrowserPool:
         """启动项目浏览器并返回 MCP 可复用的 loopback CDP 地址。"""
         inst = self.get_instance(project_id)
         inst.ensure_human_session()
+        if inst.external_cdp_url:
+            return inst.external_cdp_url
         if not inst.cdp_port:
             raise BrowserError("项目浏览器未暴露 MCP CDP 端点")
         return f"http://127.0.0.1:{inst.cdp_port}"
+
+    def attach_external(self, project_id: str, cdp_url: str, sid: str,
+                        owner: str = "human") -> dict:
+        """Attach a page owned by the Electron desktop shell."""
+        inst = self.get_instance(project_id)
+        return inst.attach_external(cdp_url, sid, owner)
+
+    def detach_external(self, project_id: str, sid: str) -> None:
+        inst = self._instances.get(project_id)
+        if inst is not None:
+            inst.close_session(sid)
 
     def close_project(self, project_id: str) -> None:
         """焚毁实例（删项目前必调——profile 目录被 chromium 占用会锁死删除）。"""

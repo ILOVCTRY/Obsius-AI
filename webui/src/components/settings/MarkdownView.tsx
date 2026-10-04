@@ -34,7 +34,7 @@ const CLS = {
   ol: "my-1 list-decimal pl-5 leading-relaxed",
   li: "my-0.5",
   a: "text-primary underline decoration-dotted underline-offset-2",
-  code: "rounded bg-card/60 px-1 py-0.5 font-mono text-[11px] text-[#9fe6c8]",
+  code: "rounded bg-card/60 px-1 py-0.5 font-mono text-[11px] text-(--viz-code)",
   pre: "my-1.5 overflow-x-auto rounded border bg-card/60 p-2 font-mono text-[11px] leading-relaxed",
   blockquote: "my-1.5 border-l-2 border-primary/50 pl-2 text-muted-foreground",
   table: "my-1.5 border-collapse text-[12px]",

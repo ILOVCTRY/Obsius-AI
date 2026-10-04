@@ -1,7 +1,8 @@
 import { useMemo, useState } from "react"
 import { MarkdownView } from "@/components/settings/MarkdownView"
+import { ApprovalCard } from "@/components/chat/ApprovalCard"
 import { fmtDateTimeMin, utcTitle } from "@/lib/datetime"
-import type { BBEvent, Task } from "@/lib/types"
+import type { Approval, BBEvent, DecideApprovalResult, Task } from "@/lib/types"
 
 // Trae 风格会话视图 v2（2026-09-28，对齐 TraeWork 真实截图）：任务即计划条目的
 // 执行视图。真实形态四要素——①条目行式无边框（✅完成/☁进行中(蓝脉冲)/✳待执行/
@@ -169,63 +170,17 @@ function NoteBubble({ event }: { event: BBEvent }) {
   )
 }
 
-function ApprovalCard({ event, decided, busy, onDecide }: {
-  event: BBEvent
-  decided: Set<string>
-  busy: boolean
-  onDecide: (aid: string, decision: "approved" | "rejected") => void
-}) {
-  const aid = String(event.payload.approval_id ?? "")
-  const op = String(event.payload.op ?? "")
-  const risk = typeof event.payload.risk === "string" ? event.payload.risk : ""
-  const summary = String(event.payload.summary ?? "")
-  const done = decided.has(aid)
-  return (
-    <div className="rounded-lg border border-(--status-approval)/50 bg-(--status-approval)/10 px-2.5 py-2"
-      title={utcTitle(event.created_at)}>
-      <div className="flex items-center gap-2">
-        <span className="text-sm text-(--status-approval)">🔔</span>
-        <span className="text-sm font-medium text-(--status-approval)">{op}</span>
-        {risk && (
-          <span className="shrink-0 rounded border border-(--status-approval)/40 px-1 font-mono text-[10px] text-(--status-approval)">
-            {risk}
-          </span>
-        )}
-        <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground/80" title={summary}>
-          {summary}
-        </span>
-        {done ? (
-          <span className="shrink-0 text-[11px] text-muted-foreground">✓ 已决策</span>
-        ) : (
-          <span className="flex shrink-0 items-center gap-1">
-            <button type="button" disabled={busy}
-              onClick={() => onDecide(aid, "approved")}
-              className="rounded border border-emerald-400/60 px-1.5 py-px text-[11px] text-emerald-300 hover:bg-emerald-400/10 disabled:opacity-50">
-              批准
-            </button>
-            <button type="button" disabled={busy}
-              onClick={() => onDecide(aid, "rejected")}
-              className="rounded border border-rose-400/60 px-1.5 py-px text-[11px] text-rose-300 hover:bg-rose-400/10 disabled:opacity-50">
-              拒绝
-            </button>
-          </span>
-        )}
-      </div>
-    </div>
-  )
-}
-
 export function TraeView({ pid, tasks, events, orchRunning, reportBusy,
-  onGenerateReport, decidedApr, aprBusy, onDecideApproval }: {
+  onGenerateReport, approvalById, onDecideApproval }: {
   pid: string
   tasks: Task[]
   events: BBEvent[]
   orchRunning: boolean
   reportBusy: boolean
   onGenerateReport: (tid: string) => void
-  decidedApr: Set<string>
-  aprBusy: boolean
-  onDecideApproval: (aid: string, decision: "approved" | "rejected") => void
+  /** 待审批完整行（usePendingApprovals 的 byId；未命中=已决策 → 出流） */
+  approvalById: Map<string, Approval>
+  onDecideApproval: (approval: Approval, decision: "approved" | "rejected", note: string) => Promise<DecideApprovalResult | void>
 }) {
   const reports = useMemo(() => {
     const m = new Map<string, BBEvent>()
@@ -297,10 +252,9 @@ export function TraeView({ pid, tasks, events, orchRunning, reportBusy,
         if (it.kind === "note" && it.note) return <NoteBubble key={`n${it.note.id}`} event={it.note} />
         if (it.kind === "approval" && it.apr) {
           const aid = String(it.apr.payload.approval_id ?? "")
-          return decidedApr.has(aid) ? null : (   // 已决策（审计有回执）即出流，保持清单干净
-            <ApprovalCard key={`a${it.apr.id}`} event={it.apr} decided={decidedApr}
-              busy={aprBusy} onDecide={onDecideApproval} />
-          )
+          const apr = approvalById.get(aid)
+          // 已决策（不在待审批列表）即出流，保持清单干净
+          return apr ? <ApprovalCard key={`a${it.apr.id}`} approval={apr} onDecide={onDecideApproval} /> : null
         }
         if (it.kind === "task" && it.task) {
           return (

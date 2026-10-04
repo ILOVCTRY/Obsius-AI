@@ -1,8 +1,9 @@
-"""F6-v3 拦截单测（core/browser/intercept.py + capture.py 的 hold/裁决流程）。
+"""F6-v4 拦截单测（core/browser/intercept.py + capture.py 的 hold/裁决流程）。
 
 零 playwright：FakeRoute/FakeRequest 复刻 route.fetch/fulfill/abort/continue_。
-线程模型与真机一致——route 协程跑在独立 asyncio loop 线程（FakeInstance._loop），
-裁决（toggle/decide）从测试主线程（≈API 线程）经 call_soon_threadsafe 回环。
+人工与 AI 页面均可挂起裁决；测试覆盖跨线程 hold→裁决→放行。线程模型与真机一致——
+route 协程跑在独立 asyncio loop 线程（FakeInstance._loop），裁决（toggle/decide）
+从测试主线程（≈API 线程）经 call_soon_threadsafe 回环。
 """
 
 from __future__ import annotations
@@ -245,13 +246,24 @@ def test_response_hold_forward_modified_body(inst, runner):
 
 # ---------- 范围与上限 ----------
 
-def test_ai_session_never_held(inst, runner):
+def test_ai_session_hold_and_forward(inst, runner):
+    """F6-v4：AI 页面同样进入拦截队列，逐个裁决后正常放行并入库。"""
     inst._intercept.toggle("request", True)
     inst._intercept.toggle("response", True)
     route = _route(inst, sid="agent-1")
-    runner.run(CaptureTap(inst)._on_route(route))
+    t = threading.Thread(target=runner.run,
+                         args=(CaptureTap(inst)._on_route(route),))
+    t.start()
+    req = _wait_pending(inst._intercept)
+    assert req[0]["direction"] == "request"
+    inst._intercept.decide(req[0]["hold_id"], "forward")
+    resp = _wait_pending(inst._intercept)
+    assert resp[0]["direction"] == "response"
+    inst._intercept.decide(resp[0]["hold_id"], "forward")
+    t.join(_TIMEOUT)
+    assert not t.is_alive()
+    assert route.fetch_calls == [{}] and route.fulfill_calls
     assert inst._intercept.snapshot()["pending"] == []
-    assert route.fetch_calls == [{}] and route.fulfill_calls  # 照常记录放行
     assert len(inst.bb.list_http_history(inst.project_id)) == 1
 
 

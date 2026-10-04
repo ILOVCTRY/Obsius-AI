@@ -1,0 +1,27 @@
+{
+  "providers": [
+    {
+      "name": "ark-coding",
+      "base_url": "https://ark.cn-beijing.volces.com/api/coding",
+      "api_key": "",
+      "models": [
+        "ark-code-latest",
+        "deepseek-v4-flash"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "ark-plan",
+      "base_url": "https://ark.cn-beijing.volces.com/api/plan",
+      "api_key": "",
+      "models": [
+        "ark-code-latest",
+        "deepseek-v4-flash",
+        "glm-5-3-flash-260828"
+      ],
+      "enabled": true,
+      "model_window": 1048566,
+      "ctx_soft_budget": 512000
+    }
+  ]
+}

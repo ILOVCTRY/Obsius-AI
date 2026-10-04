@@ -202,7 +202,10 @@ class KbSearchIndex:
             # fall back to LIKE so Chinese filenames and prose retain old behavior.
             has_cjk = any("\u4e00" <= c <= "\u9fff" for c in query)
             if not has_cjk:
-                match = " AND ".join('"' + t.replace('"', '""') + '"' for t in terms)
+                # 只在 content 列匹配；title/summary/relpath 是展示元数据，不能
+                # 改变正文搜索结果（否则 README.md 这类文件名会制造假命中）。
+                match = " AND ".join(
+                    'content : "' + t.replace('"', '""') + '"' for t in terms)
                 sql = """SELECT d.*, bm25(kb_documents_fts, 1.0, 2.0, 1.5, 1.0, 1.0) rank
                          FROM kb_documents_fts f JOIN kb_documents d ON d.path=f.path
                          WHERE kb_documents_fts MATCH ?"""
@@ -220,7 +223,9 @@ class KbSearchIndex:
                 clauses = []
                 params = []
                 for term in terms:
-                    clauses.append("lower(d.content || ' ' || d.title || ' ' || d.relpath) LIKE ?")
+                    # 与 writing.search_kb 的正文 substring 契约保持一致：标题/路径
+                    # 仅作展示，不应因为文件名命中而返回结果。
+                    clauses.append("lower(d.content) LIKE ?")
                     params.append("%" + term + "%")
                 sql = "SELECT d.*, 0.0 rank FROM kb_documents d WHERE " + " AND ".join(clauses)
                 if caps:

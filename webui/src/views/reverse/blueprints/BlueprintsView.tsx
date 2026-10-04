@@ -38,7 +38,7 @@ const MODULE_STATUS_CLS: Record<string, string> = {
   pending: "text-muted-foreground",
   analyzed: "text-primary",
   specd: "text-primary",
-  tested: "text-[#4ade80]",
+  tested: "text-(--viz-success)",
 }
 
 function ModuleCard({ m, onLocate, bpSha }: {

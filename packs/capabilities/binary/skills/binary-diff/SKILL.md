@@ -4,6 +4,7 @@ description: 跨版本符号迁移：旧版有符号+新版无符号（内核缺
 keywords: binary diff, 符号迁移, bindiff, pdb, 符号, 版本更新, 内核, ntoskrnl, llm, 比对, 无符号
 file_features: dotnet, no_pdb
 task_types: reverse, analyze, verify
+mode: self-contained
 ---
 
 # binary-diff —— 跨版本符号迁移（LLM 辅助比对）
@@ -16,15 +17,15 @@ task_types: reverse, analyze, verify
 
 不适用：从零逆向（用 binary-rev）；两个完全不同二进制的整体对比（用 BinDiff 工具）。
 
-## 手册对照表（特征 → 打开哪篇，用 kb_open）
+## 手册对照表（特征 → 打开哪篇，用 skill_open）
 
 | 场景/特征 | 手册 |
 |---|---|
-| 想知道怎么比、prompt 模板、五步工作流 | `binary/reverse/sym-diff.md`（原理+模板+平台 MCP 工具对接+锚点策略） |
-| 要选 LLM / 估算成本 / 大函数处理 | `binary/reverse/sym-diff.md`（批量建议与 LLM 选型段） |
-| 迁移结果怎么落地 | `binary/reverse/sym-diff.md`（Step 4：先 bb_upsert_func 落 func_kb，再 rename batch / set_comments 写回 IDA） |
-| 典型案例（ntoskrnl 缺 PDB / 应用更新迁移） | `binary/reverse/sym-diff.md`（场景段） |
-| Go 程序源码级恢复（非符号迁移） | `binary/reverse/cases/go-tls-proxy-source-recovery.md`（GoReSym 管线） |
+| 想知道怎么比、prompt 模板、五步工作流 | `references/binary/reverse/sym-diff.md`（原理+模板+平台 MCP 工具对接+锚点策略） |
+| 要选 LLM / 估算成本 / 大函数处理 | `references/binary/reverse/sym-diff.md`（批量建议与 LLM 选型段） |
+| 迁移结果怎么落地 | `references/binary/reverse/sym-diff.md`（Step 4：先 bb_upsert_func 落 func_kb，再 rename batch / set_comments 写回 IDA） |
+| 典型案例（ntoskrnl 缺 PDB / 应用更新迁移） | `references/binary/reverse/sym-diff.md`（场景段） |
+| Go 程序源码级恢复（非符号迁移） | `references/binary/reverse/cases/go-tls-proxy-source-recovery.md`（GoReSym 管线） |
 
 ## 红线与收尾
 

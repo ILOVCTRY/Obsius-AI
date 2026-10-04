@@ -32,7 +32,6 @@ def _build_packs(root: Path) -> Path:
         'persona: "pentest 侦察 persona"\n'
         "skills: [recon-asset-enum]\n"
         "task_types: [recon, asset-enum]\n"
-        "default_noise: passive\n"
         "tracks: [pentest, redteam]\n"
         'variant_redteam_description: "redteam 侦察"\n'
         'variant_redteam_persona: "redteam 侦察 persona"\n'
@@ -41,10 +40,8 @@ def _build_packs(root: Path) -> Path:
         "name: 通用\n"
         "skills: null\n"
         "task_types: null\n"
-        "default_noise: medium\n"
         "max_steps: 200\n"
         "protected: true\n"
-        "variant_ctf_default_noise: passive\n"
     ))
     _write(root / "experts/ctf-only.yaml", (
         "name: 仅 CTF\n"
@@ -104,10 +101,10 @@ def test_apply_variant_strips_other_track_keys():
 def test_load_expert_falls_back_to_generalist_with_variant(tmp_path):
     root = _build_packs(tmp_path / "packs")
     ctf = load_expert(root, "ghost-expert", "ctf")
-    assert ctf["default_noise"] == "passive"   # ctf 变体覆写
+    assert "default_noise" not in ctf
     assert ctf["max_steps"] == 200             # 基线字段保留
     pentest = load_expert(root, "ghost-expert", "pentest")
-    assert pentest["default_noise"] == "medium"  # 无变体=基线
+    assert "default_noise" not in pentest
 
 
 def test_load_expert_raises_without_generalist(tmp_path):

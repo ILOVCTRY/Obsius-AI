@@ -4,6 +4,7 @@ description: CTF 附件静态分诊：文件类型识别、字符串提取、保
 keywords: 附件, 识别, file, strings, 静态, 分诊, triage
 features: has_binary, has_pcap, has_archive, unknown_file_type
 task_types: triage, recon
+mode: self-contained
 ---
 
 # file-triage —— 附件静态分诊

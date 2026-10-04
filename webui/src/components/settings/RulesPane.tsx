@@ -5,6 +5,8 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
+import { ScrollArea } from "@/components/ui/scroll-area"
+import { MarkdownView } from "./MarkdownView"
 import { cn } from "@/lib/utils"
 
 // 红线设置页（E1 重构，DESIGN.md §12 设置页）：左文件列表 + 右单文件编辑器。
@@ -69,6 +71,8 @@ export function RulesPane({ track, cap, focus, pid }: {
   const [exists, setExists] = useState<{ track: boolean; cap: boolean }>({ track: true, cap: true })
   const [newTag, setNewTag] = useState("")
   const [newRatingTag, setNewRatingTag] = useState("")
+  // 红线/规则文件都是 .md：默认预览渲染，可切编辑（对齐 SkillWorkspace/KbPane）
+  const [mode, setMode] = useState<"preview" | "edit">("preview")
 
   const reloadOwners = useCallback(() =>
     api.trackOwners(track).then(setOwners).catch(() => {}), [track])
@@ -194,6 +198,9 @@ export function RulesPane({ track, cap, focus, pid }: {
     reloadRatings()
   }
 
+  // 切文件 default 回预览（编辑态仅在本次会话内显式选择）
+  useEffect(() => { setMode("preview") }, [sel])
+
   const badge = sel ? SCOPE[sel.kind] : ""
 
   return (
@@ -257,14 +264,28 @@ export function RulesPane({ track, cap, focus, pid }: {
               <span className="truncate font-mono text-sm" title={sel.path}>{sel.path}</span>
               <Badge variant="outline" className="shrink-0 text-[10px]">{badge}</Badge>
               <span className="flex-1" />
+              <div className="flex shrink-0 rounded border text-[10px]">
+                <button className={cn("px-2 py-0.5", mode === "preview" ? "bg-primary/10 text-primary" : "text-muted-foreground")}
+                        onClick={() => setMode("preview")}>预览</button>
+                <button className={cn("px-2 py-0.5", mode === "edit" ? "bg-primary/10 text-primary" : "text-muted-foreground")}
+                        onClick={() => setMode("edit")}>编辑</button>
+              </div>
               <span className={cn("text-[10px] transition-opacity", saved ? "text-primary opacity-100" : "opacity-0")}>已保存 ✓</span>
               <Button size="sm" onClick={save} disabled={!dirty && !missing}>
                 {missing ? "新建并保存" : "保存"}
               </Button>
             </div>
-            <Textarea value={content} onChange={(e) => { setContent(e.target.value); setDirty(true) }}
-                      className="mt-2 min-h-0 flex-1 font-mono text-[11px] leading-relaxed" spellCheck={false}
-                      placeholder={missing ? "（文件不存在，输入内容后点「新建并保存」）" : undefined} />
+            {mode === "preview" ? (
+              <ScrollArea className="mt-2 min-h-0 flex-1 rounded border bg-background/40 p-4">
+                {content.trim()
+                  ? <MarkdownView content={content} prefix={`rule-${sel.path.replace(/[^\w.-]+/g, "-")}`} />
+                  : <p className="text-xs text-muted-foreground">{missing ? "（文件不存在，切「编辑」输入内容后保存即可创建）" : "（空文件）"}</p>}
+              </ScrollArea>
+            ) : (
+              <Textarea value={content} onChange={(e) => { setContent(e.target.value); setDirty(true) }}
+                        className="mt-2 min-h-0 flex-1 font-mono text-[11px] leading-relaxed" spellCheck={false}
+                        placeholder={missing ? "（文件不存在，输入内容后点「新建并保存」）" : undefined} />
+            )}
             <div className="flex shrink-0 items-center gap-2 border-t pt-1 text-[10px] text-muted-foreground">
               <span>{content.length} 字</span>
               <span className={dirty ? "text-(--status-approval)" : ""}>{dirty ? "● 未保存" : "已同步"}</span>

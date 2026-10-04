@@ -1,5 +1,5 @@
 import {
-  lazy, Suspense,
+  lazy, memo, Suspense,
   useCallback, useEffect, useMemo, useRef, useState,
   type MouseEvent as ReactMouseEvent,
 } from "react"
@@ -27,7 +27,7 @@ const AttackPathLazy = lazy(() =>
 
 const SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"]
 const RAIL_MIN = 280
-const RAIL_DEFAULT = 320
+const RAIL_DEFAULT = 360
 const CHAIN_W = 720                       // 内联链路切图时的舒适宽度
 const RAIL_RESERVE = [".wb-aside", ".wb-splitter"]  // 右栏最大宽需扣掉左栏 + 左分割线
 const RAIL_RESERVE_EXTRA = 16             // 右分割线 + 边框余量
@@ -35,12 +35,29 @@ const RAIL_RESERVE_EXTRA = 16             // 右分割线 + 边框余量
 type CatView = "vuln" | "intel"
 type StatusView = "all" | "unverified" | "verified"
 
-export function FindingsRail({ pid, track }: {
+// finding.* 事件即时刷新（比 4s 轮询更早反映新增/编辑/删除）。**订阅隔离**（2026-10-04）：
+// 订阅挪进这个返回 null 的小组件——否则本栏随工作台流式期的高频事件整栏重渲。
+function FindingsWatcher({ pid, onFinding }: { pid: string; onFinding: () => void }) {
+  const { events } = useEvents(pid)
+  const lastId = useMemo(() => {
+    for (let i = events.length - 1; i >= 0; i--)
+      if (events[i].kind.startsWith("finding.")) return events[i].id
+    return 0
+  }, [events])
+  useEffect(() => { if (lastId) onFinding() }, [lastId, onFinding])
+  return null
+}
+
+export const FindingsRail = memo(function FindingsRail({ pid, track, embedded = false, visible = false, widthOverride }: {
   pid: string
   track?: string
+  embedded?: boolean
+  visible?: boolean
+  widthOverride?: number
 }) {
   const [open, setOpen] = useState(
     () => window.localStorage.getItem("ui.wb-findings-open") === "1")
+  const isOpen = embedded ? visible : open
   const [width, setWidth] = useState(() => {
     const w = Number(window.localStorage.getItem("ui.wb-findings-w"))
     return Number.isFinite(w) && w >= RAIL_MIN ? w : RAIL_DEFAULT
@@ -57,7 +74,6 @@ export function FindingsRail({ pid, track }: {
   const [cat, setCat] = useState<CatView>("vuln")
   const [status, setStatus] = useState<StatusView>("all")
   const [detail, setDetail] = useState<Finding | null>(null)
-  const { events } = useEvents(pid)
 
   const isSplit = track === "pentest" || track === "redteam"
   const canChain = isSplit   // 链路画布仅渗透/红队轨（与黑板 showCanvas 判据一致）
@@ -74,14 +90,6 @@ export function FindingsRail({ pid, track }: {
     const t = setInterval(refresh, 4000)
     return () => clearInterval(t)
   }, [refresh])
-
-  // finding.* 事件即时刷新（比 4s 轮询更早反映新增/编辑/删除）
-  const lastFindingEv = useMemo(() => {
-    for (let i = events.length - 1; i >= 0; i--)
-      if (events[i].kind.startsWith("finding.")) return events[i]
-    return null
-  }, [events])
-  useEffect(() => { if (lastFindingEv) refresh() }, [lastFindingEv, refresh])
 
   const filtered = useMemo(() => {
     let list = items
@@ -169,11 +177,13 @@ export function FindingsRail({ pid, track }: {
     else window.localStorage.removeItem(key)
   }, [pid])
 
+  if (embedded && !isOpen) return null
+
   // ---- 收起态：右缘竖排把手 ----
-  if (!open) {
+  if (!isOpen) {
     return (
       <button type="button" className="wb-rail-handle" onClick={toggle}
-              title="展开：漏洞 / 发现">
+              title="展开：漏洞 / 发现" aria-label={`发现 ${unverified.length}`}>
         <ChevronLeft size={13} />
         <span className="wb-rail-vtext">发现 {unverified.length}</span>
         {hasHighUnverified && <span className="wb-rail-dot" title="存在高危未验证发现" />}
@@ -184,10 +194,11 @@ export function FindingsRail({ pid, track }: {
   // ---- 展开态 ----
   return (
     <>
-      <div ref={splitterRef} className={cn("wb-splitter", dragging && "is-dragging")} role="separator"
+      <FindingsWatcher pid={pid} onFinding={refresh} />
+      {!embedded && <div ref={splitterRef} className={cn("wb-splitter", dragging && "is-dragging")} role="separator"
            aria-orientation="vertical" aria-label="拖动调整发现栏宽度"
-           onMouseDown={onSplitterDown} />
-      <aside className="wb-rail" style={{ width, flexBasis: width }}>
+           onMouseDown={onSplitterDown} />}
+      <aside className={cn("wb-rail", embedded && "wb-rail-embedded")} style={embedded ? { width: widthOverride ?? width, flexBasis: widthOverride ?? width } : { width, flexBasis: width }}>
         <div className="wb-rail-head">
           <ShieldAlert size={13} className="text-primary" />
           <span className="wb-rail-title">{chain ? "链路视图" : "漏洞 / 发现"}</span>
@@ -274,4 +285,4 @@ export function FindingsRail({ pid, track }: {
       )}
     </>
   )
-}
+})

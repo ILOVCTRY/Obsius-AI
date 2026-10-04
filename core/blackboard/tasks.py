@@ -698,6 +698,33 @@ class TaskQueue:
             payload["blocked_reason"] = blocked_reason or "error"
         if extra:
             payload.update(extra)
+        # M2 结构化委托回执（orchestrator-coordination-fusion，2026-10-04）：委派
+        # （target_session 非空）终态时在 task.done/failed payload 追加 receipt——
+        # 执行角色/产出发现/产物/依据引用/尝试次数，供编排器唤醒轮与前端一眼看清
+        # 「谁完成了什么」。刻意不加新事件 kind（避免双份维护与事件表膨胀）；失败
+        # 只 log 不影响收尾主路径。
+        bound_window = row["target_session"] if "target_session" in row.keys() else ""
+        if bound_window:
+            try:
+                receipt_finds = [
+                    {"id": r["id"], "title": r["title"], "severity": r["severity"]}
+                    for r in self.bb.conn.execute(
+                        "SELECT id,title,severity FROM findings"
+                        " WHERE project_id=? AND author=?"
+                        " ORDER BY created_at DESC LIMIT 5",
+                        (row["project_id"], session_id)).fetchall()]
+                arts = self.bb.list_artifacts(row["project_id"], task_id=task_id)
+                payload["receipt"] = {
+                    "role": (row["role"] if "role" in row.keys() else "") or "",
+                    "status": status,
+                    "findings": receipt_finds,
+                    "artifacts": [str(a.get("path") or "").replace("\\", "/").split("/")[-1]
+                                  for a in arts[:5]],
+                    "refs": _loads(row["context_refs"], [])[:5],
+                    "attempts": len(ctx.get("attempts") or []),
+                }
+            except Exception:  # noqa: BLE001 —— 回执富化失败不影响收尾主路径
+                log.exception("委派回执富化失败 task=%s", task_id)
         self.bb.append_event(
             row["project_id"],
             f"task.{status}",

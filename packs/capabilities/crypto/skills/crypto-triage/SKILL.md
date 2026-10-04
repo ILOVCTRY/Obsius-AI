@@ -7,13 +7,14 @@ file_features: big_numbers, public_key_file, encrypted_blob
 formats: py, sage, txt, pem, pub
 vuln_classes: rsa, ecc, block-cipher, stream-cipher, prng, classic-cipher, lattice, hash
 task_types: solve, triage
+mode: self-contained
 ---
 
 # crypto-triage —— 密码题分诊与攻击路由
 
 > 分层纪律：本技能只做**题型判定 → 开专题**。攻击细节与可运行代码在 crypto
-> 英文知识库（每篇一个技术族），用 `kb_open(module=…)` 按表开单篇，禁止通读。
-> 拿不准题型先翻 `crypto/crypto/index.md` 的总索引。
+> 英文参考资料（每篇一个技术族），用 `skill_open(path=…)` 按表开单篇，禁止通读。
+> 拿不准题型先翻 `references/crypto/crypto/index.md` 的总索引。
 
 ## 0. 先看题面给了什么
 
@@ -27,7 +28,7 @@ task_types: solve, triage
 
 ## 1. 特征 → 专题对照表（module 路径）
 
-| 题面特征 | kb_open 模块（crypto/） |
+| 题面特征 | skill_open 模块（crypto/） |
 |---|---|
 | RSA：小 e 开方、共模、Wiener、Pollard p-1、Håstad 广播、Franklin-Reiter、Fermat | `rsa-attacks.md` 前半 |
 | RSA：dp/dq 部分泄露、多素数、批 GCD、CRT 故障注入、低指数签名伪造、Manger | `rsa-attacks.md` Part 2 |

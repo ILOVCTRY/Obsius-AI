@@ -9,7 +9,7 @@ import { cn } from "@/lib/utils"
 // 设置页「MCP」tab 与新壳工具姿态「插件·MCP」共用。
 // 记录端点与启动方式（stdio=命令+参数，http=URL）；Agent 运行时会动态发现工具。
 
-const selectCls = "rounded border bg-background px-1.5 py-0.5 text-xs [color-scheme:dark] [&>option]:bg-popover [&>option]:text-popover-foreground"
+const selectCls = "rounded border bg-background px-1.5 py-0.5 text-xs [&>option]:bg-popover [&>option]:text-popover-foreground"
 
 export function McpPane() {
   const [servers, setServers] = useState<McpServer[]>([])

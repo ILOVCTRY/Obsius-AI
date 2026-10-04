@@ -15,9 +15,9 @@ interface Props {
 }
 
 const STATUS_DOT: Record<string, string> = {
-  hypothesis: "#d29922",
-  validated: "#3fb950",
-  exploited: "#bc8cff",
+  hypothesis: "var(--viz-sev-medium)",
+  validated: "var(--viz-success)",
+  exploited: "var(--viz-chain)",
 }
 
 export function AddToChainButton({ pid, nodeType, nodeId, disabled, title }: Props) {

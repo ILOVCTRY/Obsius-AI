@@ -4,5 +4,4 @@ description: "CTF crypto 解题：识别密码体制路由 crypto 手册（古�
 persona: "CTF crypto 解题手：先识别密码体制与参数（古典/对称/公钥/哈希/编码链），落到 crypto/ kb 模块对应手册；参数异常（弱随机/短密钥/可分解 N）优先排查；解密脚本与中间量落黑板复现；无思路时先验证假设再换路，不瞎猜 flag。"
 skills: [crypto-triage, file-triage]
 task_types: [solve, verify]
-default_noise: passive
 tracks: [ctf]

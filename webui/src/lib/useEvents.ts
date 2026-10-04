@@ -59,8 +59,15 @@ function writeCache(key: string, incoming: BBEvent[], loadedAll?: boolean): BBEv
   return events
 }
 
-export function useEvents(pid: string | null, sessionId?: string | null) {
+export function useEvents(
+  pid: string | null, sessionId?: string | null,
+  opts?: { flushMs?: number },
+) {
   const cacheKey = sessionId ? `${pid}:${sessionId}` : `${pid ?? ""}`
+  // WS 增量批量 flush 窗口：默认 100ms（≈10Hz，直播间/审计够用）；**工作台流式期
+  // 传更小值**（2026-10-04 顺滑化：50ms≈20Hz）——否则前端 10Hz 封顶会把后端 20Hz
+  // 的投递合并成「一顿顿的」。只取原始值进依赖，调用方传的字面量对象不会触发重跑。
+  const flushMs = opts?.flushMs ?? 100
   const [events, setEvents] = useState<BBEvent[]>([])
   const [connected, setConnected] = useState(false)
   // 更早历史是否已取尽（取尽后上翻不再请求）；loadingEarlier=翻页请求在途
@@ -157,7 +164,7 @@ export function useEvents(pid: string | null, sessionId?: string | null) {
         // 断线重连回放不重复；切回全局源时这些事件经缓存/翻页自然可见）
         if (sessionId && e.session_id !== sessionId) return
         buf.push(e)
-        if (flushTimer == null) flushTimer = setTimeout(flush, 100)
+        if (flushTimer == null) flushTimer = setTimeout(flush, flushMs)
       }
       ws.onclose = (ev) => {
         if (connectTimer) clearTimeout(connectTimer)
@@ -234,7 +241,7 @@ export function useEvents(pid: string | null, sessionId?: string | null) {
       buf = []
       ws?.close()
     }
-  }, [pid, sessionId, cacheKey])
+  }, [pid, sessionId, cacheKey, flushMs])
 
   // 上翻加载更早一页：返回是否有更多（滚动触发与「加载更早」按钮共用）。
   // 先吃缓存（水合截断留在 cache 里的更早事件，零网络），缓存不够再打 before_id 翻页。

@@ -4,12 +4,13 @@ description: 杂项/AI 题分诊入口：pyjail/bashjail/编码链/游戏 VM/LLM
 keywords: misc, 杂项, pyjail, 沙箱, 逃逸, bashjail, 编码, base64, 解码, 游戏, vm, wasm, llm, prompt, 提示注入, 越狱, 对抗样本, ai, 机器学习, dns, sdr, 无线, latin, 隐写杂项
 formats: py, txt, wav, iq
 task_types: solve, triage, reverse
+mode: self-contained
 ---
 
 # misc-triage —— 杂项/AI 题分诊与路由
 
-> 分层纪律：本技能只做**题型判定 → 开专题**。资料在 misc 能力包英文知识库，
-> 用 `kb_open(module=…)` 按表开单篇，禁止通读。拿不准先翻各目录 `index.md`。
+> 分层纪律：本技能只做**题型判定 → 开专题**。资料在 misc 能力包英文参考资料，
+> 用 `skill_open(path=…)` 按表开单篇，禁止通读。拿不准先翻各目录 `index.md`。
 
 ## 0. 先看题面给了什么
 
@@ -24,21 +25,21 @@ task_types: solve, triage, reverse
 
 ## 1. 特征 → 专题对照表（module 路径）
 
-| 特征 | kb_open 模块 |
+| 特征 | skill_open 模块 |
 |---|---|
-| pyjail（过滤/沙箱/逃逸） | `misc/misc/pyjails.md` |
-| bashjail / 受限 shell | `misc/misc/bashjails.md` |
-| 编码识别与多层解码 | `misc/misc/encodings.md`、进阶 `misc/misc/encodings-advanced.md` |
-| 游戏 / VM / wasm | `misc/misc/games-and-vms.md` |
-| LLM 提示注入/越狱 | `misc/ai-ml/llm-attacks.md` |
-| 模型攻击（成员推理/抽取） | `misc/ai-ml/model-attacks.md` |
-| 对抗样本 | `misc/ai-ml/adversarial-ml.md` |
-| AI 题总索引 | `misc/ai-ml/index.md` |
-| DNS 隐道/协议 | `misc/misc/dns.md` |
-| 无线 / SDR | `misc/misc/rf-sdr.md` |
-| Linux 提权杂项（CTF 向） | `misc/misc/linux-privesc.md` |
-| CTFd 平台导航 | `misc/misc/ctfd-navigation.md` |
-| writeup 写法（收尾） | `misc/writeup/index.md` |
+| pyjail（过滤/沙箱/逃逸） | `references/misc/misc/pyjails.md` |
+| bashjail / 受限 shell | `references/misc/misc/bashjails.md` |
+| 编码识别与多层解码 | `references/misc/misc/encodings.md`、进阶 `references/misc/misc/encodings-advanced.md` |
+| 游戏 / VM / wasm | `references/misc/misc/games-and-vms.md` |
+| LLM 提示注入/越狱 | `references/misc/ai-ml/llm-attacks.md` |
+| 模型攻击（成员推理/抽取） | `references/misc/ai-ml/model-attacks.md` |
+| 对抗样本 | `references/misc/ai-ml/adversarial-ml.md` |
+| AI 题总索引 | `references/misc/ai-ml/index.md` |
+| DNS 隐道/协议 | `references/misc/misc/dns.md` |
+| 无线 / SDR | `references/misc/misc/rf-sdr.md` |
+| Linux 提权杂项（CTF 向） | `references/misc/misc/linux-privesc.md` |
+| CTFd 平台导航 | `references/misc/misc/ctfd-navigation.md` |
+| writeup 写法（收尾） | `references/misc/writeup/index.md` |
 
 ## 2. 纪律
 

@@ -10,6 +10,7 @@
 """
 
 import asyncio
+import base64
 import difflib
 import hashlib
 import json
@@ -69,7 +70,7 @@ from core.llm.routing import AVAILABLE_MODELS, KNOWN_ROLES
 from core.orchestrator import Orchestrator, OrchestratorConfig
 from core.orchestrator import state as orch_state
 from core.orchestrator import judgments
-from core.projects import Project, ProjectStore
+from core.projects import Project, ProjectStore, list_workspace_tree
 from core.runtime import ExecutionGateway, HostDetector
 from core.runtime.policy import RUNTIME_LEVELS
 from core.sample_packages import SamplePackageError, SamplePackageStore
@@ -182,6 +183,20 @@ class CoordinationPlanStatusIn(BaseModel):
     status: str
 
 
+class CoordinationPlanStartIn(BaseModel):
+    preflight_revision: str = ""
+    confirmations: dict[str, bool] = Field(default_factory=dict)
+
+
+class CoordinationPlanControlIn(BaseModel):
+    action: str
+
+
+class CoordinationCommunicationReadIn(BaseModel):
+    ids: list[str] = Field(default_factory=list)
+    session_ids: list[str] = Field(default_factory=list)
+
+
 class CoordinationObjectIn(BaseModel):
     kind: str
     name: str = ""
@@ -222,9 +237,7 @@ class ExpertSaveIn(BaseModel):
     tracks: list[str] | None = None
     skills: list[str] | None = None
     task_types: list[str] | None = None
-    default_noise: str | None = None
     tools: list[str] | None = None
-    max_runtime: str | None = None
     max_steps: int | None = None
     variants: dict[str, dict[str, Any]] | None = None
 
@@ -601,7 +614,7 @@ class SkillUpdateIn(BaseModel):
 
 
 class SkillCreateIn(BaseModel):
-    """新建技能向导：name + frontmatter 常用字段，正文给中文薄路由模板。"""
+    """新建 cc 风格自包含技能：正文是完整执行手册，资源放在技能目录内。"""
     name: str
     description: str = ""
     keywords: list[str] = Field(default_factory=list)
@@ -619,6 +632,24 @@ class SkillEnabledIn(BaseModel):
 
 class FileContentIn(BaseModel):
     content: str  # 红线等单文件全文
+
+
+class SkillFileWriteIn(BaseModel):
+    path: str = Field(min_length=1, max_length=1024)
+    content: str = ""
+    is_dir: bool = False
+
+
+class SkillFileRenameIn(BaseModel):
+    path: str = Field(min_length=1, max_length=1024)
+    new_path: str = Field(min_length=1, max_length=1024)
+
+
+class FileOpenIn(BaseModel):
+    """本地文件动作（会话流文件卡的「打开方式」）：resolve=只解析绝对路径 /
+    open=系统默认程序打开 / reveal=文件管理器定位 / content=读文本。"""
+    path: str = Field(min_length=1, max_length=4096)
+    action: Literal["resolve", "open", "reveal", "content"]
 
 
 class RoutePreviewIn(BaseModel):
@@ -838,7 +869,11 @@ _SKILL_FRONTMATTER_LIST_KEYS = (
 
 
 def _dump_new_skill(name: str, body: "SkillCreateIn") -> str:
-    """新建技能的中文薄路由模板：frontmatter 带向导字段，正文给「观察→kb_open」骨架。"""
+    """新建 cc 风格自包含技能模板。
+
+    SKILL.md 负责完整工作流；references/scripts/examples/assets 是可选的
+    同目录资源，Agent 通过 skill_open(name, path=...) 按需读取。
+    """
     lines = ["---", f"name: {name}"]
     if body.description:
         lines.append(f"description: {body.description}")
@@ -846,19 +881,23 @@ def _dump_new_skill(name: str, body: "SkillCreateIn") -> str:
         vals = [v.strip() for v in getattr(body, key) if v.strip()]
         if vals:
             lines.append(f"{key}: " + ", ".join(vals))
+    lines.append("mode: self-contained")
     lines += [
         "---", "",
         f"# {name}", "",
-        "> 中文薄路由技能：正文只写「观察到什么特征 → kb_open 打开哪个快照模块」的对照与",
-        "> 最短纪律；方法论细节留在 kb/ 英文快照（不进 registry、不通读、不就地修改）。",
+        "> 这是一个自包含技能：把可复用的详细方法、判断标准和收尾要求写在本目录。",
+        "> 大型资料放入 `references/`，可执行辅助程序放入 `scripts/`，示例放入 `examples/`。",
         "", "## 适用场景", "",
-        "- （什么任务/什么特征下应被路由到本技能）", "",
-        "## 观察 → 开模块", "",
-        "| 观察到的特征 | kb_open 模块 |",
-        "|---|---|",
-        "| （例：保护组合 NX+Canary+PIE） | `kb_open(module=\"<快照名>/<模块>.md\")` |",
-        "", "## 红线与收尾", "",
-        "- 只读参考快照；POC/产物一律落黑板 artifact，不写回技能与 kb/。",
+        "- （明确本技能何时使用、输入是什么、范围是什么）", "",
+        "## 执行流程", "",
+        "1. （先写准备和前置条件）",
+        "2. （写可验证的执行步骤、分支和停止条件）",
+        "3. （写证据、产物和验收标准）", "",
+        "## 资源", "",
+        "- 需要细节时，用 `skill_open(name=\"" + name + "\", path=\"references/<文件>\")` 读取本技能目录内的资料。",
+        "- 脚本只作为辅助，运行前检查参数、范围和输出位置。", "",
+        "## 红线与收尾", "",
+        "- 只在授权范围内行动；证据和产物落项目黑板，不写入技能目录。",
         "",
     ]
     return "\n".join(lines)
@@ -2257,8 +2296,8 @@ def create_app(
                     app.state.packs_root, proj.track, proj.experts),
                 session_name=session_name or r.get("name") or role,
                 capability_prompt=(inventory.to_prompt() + "\n" + mode_prompt).strip(),
-                # 角色 yaml 的 default_noise/tools/max_runtime/max_steps 在
-                # AgentSession 内消费（只可能更严）；这里只给全局/动态部分
+                # 角色 yaml 的 tools/max_steps 在 AgentSession 内消费
+                # （只可能更严）；这里只给全局/动态部分
                 # （窗口不设 role 限制：角色 task_types 不再注入，认领无过滤）
                 config=AgentConfig(max_steps=max_steps or 200,
                                    owner_tags=proj.bb.owner_tags(pid),
@@ -2580,6 +2619,11 @@ def create_app(
         sid: str
         paused: bool
 
+    class BrowserExternalAttachIn(BaseModel):
+        cdp_url: str
+        sid: str
+        owner: str = "human"
+
     def _browser_inst(pid: str):
         """浏览器实例（缺 playwright → 503 结构化，不 500）。"""
         if not browser_available():
@@ -2618,6 +2662,30 @@ def create_app(
                 "playwright_installed": browser_available(),
                 "track": proj.track}
 
+    @app.post("/api/projects/{pid}/browser/desktop/attach")
+    def browser_desktop_attach(pid: str, body: BrowserExternalAttachIn):
+        """Bind an Electron WebContentsView to the project's Playwright page.
+
+        The desktop shell owns Chromium; the API only attaches over CDP and
+        therefore never creates a second visible browser for this session.
+        """
+        _project(pid)
+        inst = _browser_inst(pid)
+        try:
+            return app.state.browser_pool.attach_external(
+                pid, body.cdp_url, body.sid, body.owner)
+        except BrowserError as e:
+            raise _browser_http_error(e) from e
+
+    @app.post("/api/projects/{pid}/browser/desktop/detach")
+    def browser_desktop_detach(pid: str, body: BrowserTakeoverIn):
+        _project(pid)
+        try:
+            app.state.browser_pool.detach_external(pid, body.sid)
+        except BrowserError as e:
+            raise _browser_http_error(e) from e
+        return {"detached": True, "sid": body.sid}
+
     @app.post("/api/projects/{pid}/browser/takeover")
     def browser_takeover(pid: str, body: BrowserTakeoverIn):
         """暂停/恢复指定 AI 页面输入，供人类接管标签页。"""
@@ -2645,7 +2713,9 @@ def create_app(
         _project(pid)
         inst = _browser_inst(pid)
         try:
-            sid = body.sid or inst.ensure_human_session()["sid"]
+            sid = body.sid
+            if not sid or sid == "human-main":
+                sid = inst.ensure_human_session()["sid"]
             return inst.navigate(sid, body.url)
         except BrowserError as e:
             raise _browser_http_error(e) from e
@@ -2654,7 +2724,9 @@ def create_app(
     def browser_action(pid: str, body: BrowserActionIn):
         inst = _browser_inst(pid)
         try:
-            sid = body.sid or inst.ensure_human_session()["sid"]
+            sid = body.sid
+            if not sid or sid == "human-main":
+                sid = inst.ensure_human_session()["sid"]
             return inst.act(sid, body.action, selector=body.selector,
                             text=body.text, x=body.x, y=body.y)
         except BrowserError as e:
@@ -3919,6 +3991,74 @@ def create_app(
                              close_fds=True, cwd=cwd)
         return {"opening": rel_db, "jumping": jumping}
 
+    # 本地文件动作（会话流文件卡，2026-10-03）：把工作台/直播间叙述里出现的
+    # 文件交给系统打开。**scope 白名单**=项目工作区 ∪ packs ∪ tools——三处之外
+    # 一律 422，杜绝任意路径被当作句柄交给系统程序。
+    # 安全取舍（有意为之，勿当 bug）：本端点无鉴权（全项目 localhost 信任模型，
+    # 无 CORS/无 token），且**不按扩展名/目录设限**——samples/ 内的不可信样本也
+    # 能一键交给系统默认程序。与既有 /binaries/{sha}/open（detached 拉起 IDA GUI）
+    # 同一风险等级；要收紧只改下面的 _open_scope_roots 与动作分支。
+    _OPEN_CONTENT_MAX = 200_000
+
+    def _open_scope_roots(proj: Project) -> list[Path]:
+        roots = [Path(proj.path)]
+        for extra in (app.state.packs_root, app.state.tools_root):
+            if extra:  # tools_root 可为 None（测试机不做工具探测）
+                roots.append(Path(extra))
+        return [r.resolve() for r in roots]
+
+    def _open_scope_path(proj: Project, raw: str) -> Path:
+        """scope 内相对/绝对路径 → resolve；越出全部 scope 根 422（防穿越）。"""
+        rel = str(raw or "").replace("\\", "/").strip()
+        if not rel or "\x00" in rel:
+            raise HTTPException(422, "文件路径非法")
+        p = Path(rel)
+        target = p.resolve() if p.is_absolute() else (Path(proj.path).resolve() / p).resolve()
+        if not any(target.is_relative_to(root) for root in _open_scope_roots(proj)):
+            raise HTTPException(422, f"路径越界（仅限项目工作区/packs/tools）: {raw}")
+        return target
+
+    def _spawn_detached(args: list[str]) -> None:
+        flags = 0
+        if os.name == "nt":
+            flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(
+                subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            subprocess.Popen(args, creationflags=flags, close_fds=True)
+        else:
+            subprocess.Popen(args, start_new_session=True, close_fds=True)
+
+    @app.get("/api/projects/{pid}/workspace/tree")
+    def workspace_tree(pid: str):
+        proj = _project(pid)
+        return list_workspace_tree(proj.path)
+
+    @app.post("/api/projects/{pid}/files/open")
+    def open_local_file(pid: str, body: FileOpenIn):
+        proj = _project(pid)
+        target = _open_scope_path(proj, body.path)
+        if body.action == "resolve":
+            return {"status": "ok", "action": "resolve", "abs_path": str(target)}
+        if not target.exists():
+            raise HTTPException(404, f"文件不存在: {body.path}")
+        if body.action == "open":
+            if os.name == "nt":
+                os.startfile(str(target))  # noqa: S606 —— Windows 专用，交由文件关联
+            else:
+                _spawn_detached(["xdg-open", str(target)])
+        elif body.action == "reveal":
+            if os.name == "nt":
+                _spawn_detached(["explorer", f"/select,{target}"])
+            else:
+                _spawn_detached(["xdg-open", str(target.parent)])
+        else:  # content
+            if target.is_dir():
+                raise HTTPException(422, "目录不能读取内容")
+            text = target.read_text(encoding="utf-8", errors="replace")
+            return {"status": "ok", "action": "content", "abs_path": str(target),
+                    "content": text[:_OPEN_CONTENT_MAX],
+                    "truncated": len(text) > _OPEN_CONTENT_MAX}
+        return {"status": "ok", "action": body.action, "abs_path": str(target)}
+
     @app.post("/api/projects/{pid}/binaries/{sha}/writeback", status_code=202)
     def binary_writeback(pid: str, sha: str, body: WritebackIn):
         """func_kb 命名/注释 headless 写回 .i64（Job，900s）。
@@ -4565,57 +4705,6 @@ def create_app(
         job_id = _submit_worker(pid, agent, auto=True, origin="approval-spawn")
         return {"session_id": sid, "job_id": job_id}
 
-    def _exec_approved_escalation(
-        bb: Blackboard, pid: str, action: dict, approval_id: str,
-    ) -> dict:
-        """H3 批准 request_escalation 后当场执行一次（deny-driven 一次性升级）：
-        gateway.run 直跑（跑完即 consumed，同单不可复用），结果经收件箱
-        escalation_result 回流请求会话——下个步边界/空闲对话轮注入。
-        2026-10-01 起 net=real 不再走审批（直接 run_cmd），本处理器只服务
-        「runtime 超角色 max_runtime」类升级。
-        与 spawn_session 同纪律：op 白名单字典分派；执行失败落 approval.exec_failed
-        不回滚批准。escalation op 的唯一生产方是 Agent 的 request_escalation 工具
-        （人类 API 也可建，op 字段照填），编排器不生产。"""
-        cmd = str(action.get("cmd") or "").strip()
-        runtime = str(action.get("runtime") or "")
-        if not cmd or runtime not in RUNTIME_LEVELS:
-            raise RuntimeError(f"escalation action 不合法：cmd/runtime 缺失或非法（{action}）")
-        proj = _project(pid)
-        sid = bb.conn.execute(
-            "SELECT session_id FROM approvals WHERE id=?", (approval_id,)).fetchone()
-        sid = sid["session_id"] if sid else None
-        gateway = ExecutionGateway(bb=bb)
-        r = gateway.run(
-            cmd, runtime,
-            threat_class=str(action.get("threat_class") or "trusted"),
-            project_id=pid, session_id=sid, author=f"approval:{approval_id}",
-            net=action.get("net"),
-            timeout=float(action["timeout"]) if action.get("timeout") else None,
-            approval_id=approval_id,
-            workspace=proj.path,
-        )
-        brief = r.brief(limit=4000)
-        if sid:
-            ok = bb.inbox_post(pid, sid, "escalation_result", approval_id,
-                               {"text": brief, "cmd": cmd, "runtime": runtime,
-                                "exit_code": r.exit_code})
-            if ok:  # 事件流同步可见（message.inbox 通用卡，title=命令头）
-                bb.append_event(
-                    pid, "message.inbox",
-                    {"to_session": sid, "kind": "escalation_result",
-                     "ref_id": approval_id, "title": f"🛫 升级命令已执行：{cmd[:60]}",
-                     "by": "system"},
-                    session_id=sid, author="system")
-            # 回执踢醒：armed 且空闲 → 立即跑对话轮消费回执（同 note 端点语义）
-            try:
-                meta_raw = (bb.get_session(sid) or {}).get("meta")
-                meta = json.loads(meta_raw) if isinstance(meta_raw, str) else (meta_raw or {})
-                if meta.get("worker_armed") and not _session_job_running(sid):
-                    _submit_worker(pid, _ensure_agent(pid, sid), origin="escalation-result")
-            except Exception:  # noqa: BLE001 —— kick 失败不影响回执投递
-                log.exception("escalation 回执 kick 失败 approval=%s", approval_id)
-        return {"exit_code": r.exit_code, "session_id": sid}
-
     def _exec_approved_phase_transition(
             bb: Blackboard, pid: str, action: dict, approval_id: str) -> dict:
         """批准阶段流转审批单（分阶段工作流 M2）：批准即流转。生产方唯一=API 层
@@ -4730,6 +4819,18 @@ def create_app(
         task_type = str(action.get("task_type") or "generic")
         scope = str(action.get("scope") or "")
         role = str(action.get("role") or "").strip()
+        plan_node_id = str(action.get("plan_node_id") or "").strip()
+        if plan_node_id:
+            coord = CoordinationStore(bb)
+            coord.refresh_readiness(pid)
+            node = coord.get_task(pid, plan_node_id)
+            if node.get("task_id") or node.get("status") != "ready":
+                raise RuntimeError(
+                    f"计划节点 {plan_node_id} 当前不可派单（status={node.get('status')}）")
+            node_role = str(node.get("role") or "").strip()
+            if role and node_role and role != node_role:
+                raise RuntimeError(f"审批角色 {role} 与计划节点角色 {node_role} 不一致")
+            role = role or node_role
         if tq.find_dedup_target(pid, dedup_fp(task_type, scope, objective)) is not None:
             return {"skipped": "审批等待期已存在同指纹委托，未重复开窗"}
         try:
@@ -4758,26 +4859,27 @@ def create_app(
                 allowed_types=_task_type_table(pid).keys(),
                 refs=action.get("refs") or None,
                 role=role, target_session=sid)
-        except ValueError as e:
+            if plan_node_id:
+                CoordinationStore(bb).bind_task(pid, plan_node_id, task_id)
+        except (ValueError, LookupError) as e:
             raise RuntimeError(str(e)) from e
         bb.append_event(
             pid, "delegation.posted",
             {"task_id": task_id, "objective": objective, "task_type": task_type,
              "created_by": "orchestrator",
-             "role": role, "new_window": True, "approval_id": approval_id},
+             "role": role, "new_window": True, "approval_id": approval_id,
+             **({"plan_node_id": plan_node_id} if plan_node_id else {})},
             session_id=sid, author="orchestrator")
         job_id = _submit_worker(pid, agent, auto=True, origin="approval-delegate")
         return {"session_id": sid, "task_id": task_id, "job_id": job_id}
 
     # 审批 op 处理器白名单（批 4，红线）：批准后动作只准字典分派，绝不 eval。
     # delegate_window 的唯一生产方=Orchestrator 的 L1 委派分流；spawn_session
-    # 为旧版待决单兼容保留；escalation（H3）唯一生产方=Agent 的
-    # request_escalation 工具；phase_transition 唯一生产方=API 层
+    # 为旧版待决单兼容保留；phase_transition 唯一生产方=API 层
     # _phase_gate_check 的 L1 分流——各 op 生产方不混用。
     _APPROVAL_OP_HANDLERS = {
         "delegate_window": _exec_approved_delegate_window,
         "spawn_session": _exec_approved_spawn_session,
-        "escalation": _exec_approved_escalation,
         "phase_transition": _exec_approved_phase_transition,
         "cancel_task": _exec_approved_cancel_task,
         "requeue_task": _exec_approved_requeue_task,
@@ -4795,7 +4897,7 @@ def create_app(
         # 批 4：approved 且 action.op 命中白名单才执行处理器；
         # rejected / 无 op / 未知 op 维持旧语义——只翻状态（rejected 由 orch 下轮经事件改道）
         if body.decision == "rejected":
-            # M5 D2 搭车（§0-10）：escalation/authorization 被拒后回流提交会话
+            # M5 D2 搭车（§0-10）：authorization 被拒后回流提交会话
             # （此前 rejected 无回流=Agent 空等）；回流失败不影响拒绝
             action = row.get("action")
             if isinstance(action, str):
@@ -4805,7 +4907,7 @@ def create_app(
                     action = None
             op = action.get("op") if isinstance(action, dict) else None
             sid = str((action or {}).get("session_id") or "") if isinstance(action, dict) else ""
-            if op in ("escalation", "authorization") and sid:
+            if op == "authorization" and sid:
                 try:
                     proj_bb.inbox_post(
                         row["project_id"], sid, "approval_rejected", approval_id,
@@ -4914,6 +5016,92 @@ def create_app(
                              {"plan_id": plan_id, "task_id": task["id"],
                               "title": task["title"]}, author="human")
         return task
+
+    @app.get("/api/projects/{pid}/coordination/plans/{plan_id}/preflight")
+    def coordination_plan_preflight(pid: str, plan_id: str):
+        try:
+            return CoordinationStore(_project(pid).bb).preflight(pid, plan_id)
+        except LookupError as e:
+            raise HTTPException(404, str(e)) from e
+
+    @app.post("/api/projects/{pid}/coordination/plans/{plan_id}/start")
+    def start_coordination_plan(pid: str, plan_id: str, body: CoordinationPlanStartIn):
+        proj = _project(pid); cs = CoordinationStore(proj.bb)
+        try:
+            pf = cs.preflight(pid, plan_id)
+        except LookupError as e:
+            raise HTTPException(404, str(e)) from e
+        if body.preflight_revision and body.preflight_revision != pf["revision"]:
+            raise HTTPException(409, {"message": "计划在确认后已变化，请重新预检", "preflight": pf})
+        if pf["blockers"]:
+            raise HTTPException(422, {"message": "计划未通过执行前检查", "blockers": pf["blockers"]})
+        plan = cs.set_plan_status(pid, plan_id, "active")
+        proj.bb.append_event(pid, "coordination.plan.started",
+                             {"plan_id": plan_id, "confirmations": body.confirmations}, author="human")
+        owner = f"coord-plan-{uuid.uuid4().hex}"
+        try:
+            orch_state.acquire_tick_lease(proj.bb, pid, owner)
+        except orch_state.TickLeaseError:
+            return {"plan": plan, "status": "active", "job_id": None, "note": "已有编排轮执行中"}
+        try:
+            orch = _build_orchestrator(pid, TickIn(), owner)
+            proj.bb.append_event(pid, "orch.tick.started", {"reason": "coordination-plan"}, author="orchestrator")
+            def run_plan_tick():
+                try:
+                    result = orch.tick(); _post_tick(pid, result, manual=True); return result
+                finally:
+                    orch_state.release_tick_lease(proj.bb, pid, owner)
+            job_id = app.state.jobs.submit("orchestrator-tick", run_plan_tick, meta={"project_id": pid})
+        except HTTPException:
+            orch_state.release_tick_lease(proj.bb, pid, owner); raise
+        return {"plan": plan, "status": "started", "job_id": job_id}
+
+    @app.post("/api/projects/{pid}/coordination/plans/{plan_id}/control")
+    def control_coordination_plan(pid: str, plan_id: str, body: CoordinationPlanControlIn):
+        proj = _project(pid); cs = CoordinationStore(proj.bb)
+        if body.action not in {"pause", "resume", "interrupt", "retry"}:
+            raise HTTPException(422, "非法计划控制动作")
+        try:
+            plan = cs.get_plan(pid, plan_id)
+        except LookupError as e:
+            raise HTTPException(404, str(e)) from e
+        if body.action == "pause":
+            result = cs.set_plan_status(pid, plan_id, "paused")
+        elif body.action == "resume":
+            pf = cs.preflight(pid, plan_id)
+            if pf["blockers"]:
+                raise HTTPException(422, {"message": "计划未通过执行前检查", "blockers": pf["blockers"]})
+            result = cs.set_plan_status(pid, plan_id, "active")
+        elif body.action == "retry":
+            ids = cs.reset_failed_nodes(pid, plan_id)
+            result = cs.get_plan(pid, plan_id) | {"reset_node_ids": ids}
+        else:
+            result = cs.set_plan_status(pid, plan_id, "paused") | {"execution_state": "interrupted"}
+            for task in plan["tasks"]:
+                if task.get("task_id"):
+                    row = proj.bb.conn.execute("SELECT target_session,status FROM tasks WHERE id=?", (task["task_id"],)).fetchone()
+                    if row and row["status"] == "claimed" and row["target_session"]:
+                        try:
+                            _ensure_agent(pid, row["target_session"]).request_abort()
+                        except Exception:
+                            log.exception("计划中断会话失败 sid=%s", row["target_session"])
+        proj.bb.append_event(pid, "coordination.plan.controlled", {"plan_id": plan_id, "action": body.action}, author="human")
+        return result
+
+    @app.get("/api/projects/{pid}/coordination/communications")
+    def coordination_communications(pid: str, session_id: str | None = None, unread: bool = False, limit: int = 100):
+        return CoordinationStore(_project(pid).bb).communications(pid, session_id=session_id, unread_only=unread, limit=limit)
+
+    @app.post("/api/projects/{pid}/coordination/communications/read")
+    def mark_coordination_communications(pid: str, body: CoordinationCommunicationReadIn):
+        return {"marked": CoordinationStore(_project(pid).bb).mark_communications_read(pid, body.ids, body.session_ids)}
+
+    @app.get("/api/projects/{pid}/coordination/plans/{plan_id}/timeline")
+    def coordination_plan_timeline(pid: str, plan_id: str, limit: int = 200):
+        try:
+            return CoordinationStore(_project(pid).bb).timeline(pid, plan_id, limit)
+        except LookupError as e:
+            raise HTTPException(404, str(e)) from e
 
     @app.patch("/api/projects/{pid}/coordination/plans/{plan_id}")
     def update_coordination_plan(pid: str, plan_id: str, body: CoordinationPlanStatusIn):
@@ -5849,9 +6037,7 @@ def create_app(
                         "description": e.get("description"),
                         "persona": e.get("persona"),
                         "task_types": e.get("task_types"),
-                        "default_noise": e.get("default_noise"),
                         "tools": e.get("tools"),
-                        "max_runtime": e.get("max_runtime"),
                         "max_steps": e.get("max_steps")})
         return out
 
@@ -7596,6 +7782,8 @@ def create_app(
             "platforms": sk.platforms, "formats": sk.formats,
             "vuln_classes": sk.vuln_classes, "task_types": sk.task_types,
             "required_tools": sk.required_tools, "enabled": sk.enabled,
+            "mode": sk.mode, "self_contained": sk.is_self_contained,
+            "resources": [p.relative_to(sk.root).as_posix() for p in sk.resources],
         }
 
     def _loaded_registry() -> SkillRegistry:
@@ -7615,6 +7803,167 @@ def create_app(
                    if s.kind == kind and s.pack == owner and s.name == skill_name), None)
         return path, sk
 
+    def _skill_resource(sk, resource: str) -> Path:
+        """Resolve a cc skill resource without allowing traversal or SKILL.md escape."""
+        rel = str(resource or "").replace("\\", "/").strip()
+        if not rel or rel.startswith("/") or ".." in Path(rel).parts:
+            raise HTTPException(422, "技能资源路径非法")
+        if Path(rel).parts[0] not in {"references", "scripts", "examples", "assets"}:
+            raise HTTPException(422, "技能资源必须位于 references/scripts/examples/assets")
+        target = (sk.root / Path(rel)).resolve()
+        root = sk.root.resolve()
+        if root not in target.parents or not target.is_file():
+            raise HTTPException(404, f"技能资源不存在: {rel}")
+        if target not in {p.resolve() for p in sk.resources}:
+            raise HTTPException(404, f"技能资源不存在: {rel}")
+        return target
+
+    def _cap_skill_dir(cap: str, skill_name: str) -> Path:
+        """Resolve a capability skill directory for the file workspace."""
+        _check_name(cap, "能力包")
+        _check_name(skill_name, "技能名")
+        root = _cap_path(app, cap, "skills", skill_name).resolve()
+        pack_root = Path(app.state.packs_root).resolve()
+        if pack_root not in root.parents or not root.is_dir():
+            raise HTTPException(404, f"技能不存在: 能力包 {cap}/{skill_name}")
+        return root
+
+    def _skill_file_path(root: Path, rel: str, *, must_exist: bool = True) -> Path:
+        rel = str(rel or "").replace("\\", "/").strip().strip("/")
+        if not rel or "\x00" in rel or rel.startswith("/") or ".." in Path(rel).parts:
+            raise HTTPException(422, "技能文件路径非法")
+        if ".history" in Path(rel).parts:
+            raise HTTPException(422, "历史备份目录不能通过技能工作区访问")
+        target = (root / Path(rel)).resolve()
+        if target != root and root not in target.parents:
+            raise HTTPException(422, "技能文件必须位于当前技能目录")
+        if must_exist and not target.exists():
+            raise HTTPException(404, f"技能文件不存在: {rel}")
+        return target
+
+    def _skill_file_entry(root: Path, path: Path) -> dict:
+        rel = path.relative_to(root).as_posix()
+        st = path.stat()
+        is_text = path.suffix.lower() in {".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".py", ".js", ".ts", ".tsx", ".css", ".html", ".xml", ".csv", ".ini", ".cfg", ".sh", ".bat", ".java", ".c", ".cpp", ".h", ".hpp", ".rs", ".go"}
+        return {"path": rel, "name": path.name, "is_dir": path.is_dir(),
+                "size": 0 if path.is_dir() else st.st_size,
+                "modified": st.st_mtime, "kind": "text" if is_text else ("image" if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"} else "binary")}
+
+    def _skill_catalog(pid: str | None = None) -> dict:
+        reg = _loaded_registry()
+        caps = list_packs(app.state.packs_root, "capability")
+        experts = []
+        if pid:
+            try:
+                experts = list(_project(pid).experts or [])
+            except HTTPException:
+                pass
+        rows = []
+        for cap in caps:
+            name = cap["name"]
+            skills = [_skill_json(s) for s in reg.all() if s.kind == "capability" and s.pack == name]
+            for skill in skills:
+                refs = []
+                base = Path(app.state.packs_root) / "experts"
+                if base.is_dir():
+                    for f in sorted(base.glob("*.yaml")):
+                        eid = f.stem
+                        if pid and eid not in experts:
+                            continue
+                        try:
+                            raw = _parse_expert_yaml(f)
+                            allowed = raw.get("skills")
+                            if allowed is not None and skill["name"] in (allowed or []):
+                                refs.append(eid)
+                        except Exception:
+                            continue
+                skill["expert_refs"] = refs
+                skill["estimated_tokens"] = max(1, len((_cap_skill_dir(name, skill["name"]) / "SKILL.md").read_text(encoding="utf-8", errors="replace")) // 4)
+            rows.append({"name": name, "label": cap.get("label") or name, "skills": skills,
+                         "skill_count": len(skills), "estimated_tokens": sum(s["estimated_tokens"] for s in skills)})
+        return {"capabilities": rows, "skill_count": sum(r["skill_count"] for r in rows),
+                "capability_count": len(rows), "estimated_tokens": sum(r["estimated_tokens"] for r in rows)}
+
+    @app.get("/api/skills/catalog")
+    def get_skill_catalog(pid: str | None = None):
+        return _skill_catalog(pid)
+
+    @app.get("/api/capabilities/{cap}/skills/{skill_name}/files")
+    def list_cap_skill_files(cap: str, skill_name: str):
+        root = _cap_skill_dir(cap, skill_name)
+        entries = []
+        for path in sorted(root.rglob("*"), key=lambda p: (not p.is_dir(), p.relative_to(root).as_posix().lower())):
+            if ".history" in path.relative_to(root).parts:
+                continue
+            entries.append(_skill_file_entry(root, path))
+        return {"root": f"capabilities/{cap}/skills/{skill_name}", "files": entries}
+
+    @app.get("/api/capabilities/{cap}/skills/{skill_name}/files/content")
+    def read_cap_skill_file(cap: str, skill_name: str, path: str):
+        root = _cap_skill_dir(cap, skill_name)
+        target = _skill_file_path(root, path)
+        if target.is_dir():
+            raise HTTPException(422, "目录不能读取内容")
+        entry = _skill_file_entry(root, target)
+        if entry["kind"] == "text":
+            return {**entry, "content": target.read_text(encoding="utf-8", errors="replace")}
+        if entry["kind"] == "image" and target.stat().st_size <= 5 * 1024 * 1024:
+            mime = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp", ".svg": "image/svg+xml"}.get(target.suffix.lower(), "application/octet-stream")
+            return {**entry, "preview": f"data:{mime};base64,{base64.b64encode(target.read_bytes()).decode()}"}
+        return entry
+
+    @app.post("/api/capabilities/{cap}/skills/{skill_name}/files")
+    def create_cap_skill_file(cap: str, skill_name: str, body: SkillFileWriteIn):
+        root = _cap_skill_dir(cap, skill_name)
+        target = _skill_file_path(root, body.path, must_exist=False)
+        if target.exists():
+            raise HTTPException(409, "技能文件已存在")
+        with pack_write_lock():
+            if body.is_dir:
+                target.mkdir(parents=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(body.content, encoding="utf-8")
+        return {"status": "ok", "path": body.path}
+
+    @app.put("/api/capabilities/{cap}/skills/{skill_name}/files")
+    def update_cap_skill_file(cap: str, skill_name: str, body: SkillFileWriteIn):
+        root = _cap_skill_dir(cap, skill_name)
+        target = _skill_file_path(root, body.path)
+        if target.is_dir():
+            raise HTTPException(422, "目录不能写入内容")
+        with pack_write_lock():
+            _pack_history_backup(target)
+            target.write_text(body.content, encoding="utf-8")
+        return {"status": "ok", "path": body.path}
+
+    @app.post("/api/capabilities/{cap}/skills/{skill_name}/files/rename")
+    def rename_cap_skill_file(cap: str, skill_name: str, body: SkillFileRenameIn):
+        root = _cap_skill_dir(cap, skill_name)
+        src = _skill_file_path(root, body.path)
+        dest = _skill_file_path(root, body.new_path, must_exist=False)
+        if dest.exists():
+            raise HTTPException(409, "目标路径已存在")
+        with pack_write_lock():
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), str(dest))
+        return {"status": "ok", "path": body.new_path}
+
+    @app.delete("/api/capabilities/{cap}/skills/{skill_name}/files")
+    def delete_cap_skill_file(cap: str, skill_name: str, path: str):
+        root = _cap_skill_dir(cap, skill_name)
+        target = _skill_file_path(root, path)
+        if target == root or target.name == "SKILL.md":
+            raise HTTPException(422, "不能删除技能根目录或 SKILL.md")
+        if target.is_dir() and any(target.iterdir()):
+            raise HTTPException(409, "只能删除空目录")
+        with pack_write_lock():
+            if target.is_dir(): target.rmdir()
+            else:
+                _pack_history_backup(target)
+                target.unlink()
+        return {"status": "ok", "path": path}
+
     # ---- 能力包：Skill 列表/读写 + 红线 ----
 
     @app.get("/api/capabilities/{cap}/skills")
@@ -7629,7 +7978,18 @@ def create_app(
         path, sk = _get_skill("capability", cap, skill_name)
         return {"name": skill_name, "meta": parse_frontmatter(path.read_text(encoding="utf-8")),
                 "skill": _skill_json(sk) if sk else None,
-                "raw": path.read_text(encoding="utf-8")}
+                "raw": path.read_text(encoding="utf-8"),
+                "resources": ([p.relative_to(path.parent).as_posix() for p in sk.resources]
+                              if sk else [])}
+
+    @app.get("/api/capabilities/{cap}/skills/{skill_name}/resources/{resource:path}")
+    def get_cap_skill_resource(cap: str, skill_name: str, resource: str):
+        _path, sk = _get_skill("capability", cap, skill_name)
+        if sk is None:
+            raise HTTPException(404, "技能未注册")
+        target = _skill_resource(sk, resource)
+        return {"path": resource.replace("\\", "/"),
+                "content": target.read_text(encoding="utf-8", errors="replace")}
 
     @app.put("/api/capabilities/{cap}/skills/{skill_name}")
     def update_cap_skill(cap: str, skill_name: str, body: SkillUpdateIn):
@@ -7644,7 +8004,7 @@ def create_app(
 
     @app.post("/api/capabilities/{cap}/skills", status_code=201)
     def create_cap_skill(cap: str, body: SkillCreateIn):
-        """向导新建能力包技能（薄路由模板）。重名 409、非法名 422、能力包不存在 404。"""
+        """向导新建能力包自包含技能。重名 409、非法名 422、能力包不存在 404。"""
         _check_name(cap, "能力包")
         _check_name(body.name, "技能名")
         cdir = capability_dir(app.state.packs_root, cap)
@@ -7707,7 +8067,18 @@ def create_app(
         path, sk = _get_skill("track", track, skill_name)
         return {"name": skill_name, "meta": parse_frontmatter(path.read_text(encoding="utf-8")),
                 "skill": _skill_json(sk) if sk else None,
-                "raw": path.read_text(encoding="utf-8")}
+                "raw": path.read_text(encoding="utf-8"),
+                "resources": ([p.relative_to(path.parent).as_posix() for p in sk.resources]
+                              if sk else [])}
+
+    @app.get("/api/tracks/{track}/skills/{skill_name}/resources/{resource:path}")
+    def get_track_skill_resource(track: str, skill_name: str, resource: str):
+        _path, sk = _get_skill("track", track, skill_name)
+        if sk is None:
+            raise HTTPException(404, "技能未注册")
+        target = _skill_resource(sk, resource)
+        return {"path": resource.replace("\\", "/"),
+                "content": target.read_text(encoding="utf-8", errors="replace")}
 
     @app.put("/api/tracks/{track}/skills/{skill_name}")
     def update_track_skill(track: str, skill_name: str, body: SkillUpdateIn):
@@ -7722,7 +8093,7 @@ def create_app(
 
     @app.post("/api/tracks/{track}/skills", status_code=201)
     def create_track_skill(track: str, body: SkillCreateIn):
-        """向导新建轨级技能（薄路由模板）。重名 409、非法名 422、场景轨不存在 404。"""
+        """向导新建轨级自包含技能。重名 409、非法名 422、场景轨不存在 404。"""
         _check_name(track, "场景轨")
         _check_name(body.name, "技能名")
         tdir = track_dir(app.state.packs_root, track)
@@ -7787,9 +8158,7 @@ def create_app(
                         "persona": e.get("persona"),
                         "skills": e.get("skills"),
                         "task_types": e.get("task_types"),
-                        "default_noise": e.get("default_noise"),
                         "tools": e.get("tools"),
-                        "max_runtime": e.get("max_runtime"),
                         "max_steps": e.get("max_steps"),
                         "file": name})
         return out
@@ -7834,9 +8203,7 @@ def create_app(
                 "tracks": raw.get("tracks"),
                 "skills": raw.get("skills"),
                 "task_types": raw.get("task_types"),
-                "default_noise": raw.get("default_noise"),
                 "tools": raw.get("tools"),
-                "max_runtime": raw.get("max_runtime"),
                 "max_steps": raw.get("max_steps"),
                 "protected": bool(raw.get("protected")),
                 "variants": variants,
@@ -7888,7 +8255,7 @@ def create_app(
             lines.append(f"{key}: {s}")
         lines: list[str] = []
         for key in ("name", "description", "tracks", "persona", "skills",
-                    "task_types", "default_noise", "tools", "max_runtime", "max_steps"):
+                    "task_types", "tools", "max_steps"):
             _emit(key, getattr(body, key), lines)
         for vt in sorted(body.variants or {}):
             for field in sorted(body.variants[vt] or {}):
@@ -8932,9 +9299,12 @@ def create_app(
         thread = chat_store.get_thread(_project(_pid_of_chat(tid)).bb, tid)
         if thread is None:
             raise HTTPException(404, f"线程不存在: {tid}")
+        proj = _project(thread["project_id"])
         return {"thread": thread,
-                "messages": chat_store.list_messages(
-                    _project(thread["project_id"]).bb, tid, after_id=after_id)}
+                # work_dir：会话流文件卡把工具参数里的绝对路径落回工作区相对路径
+                # （后端 /files/open 收相对 scope 根的路径，2026-10-03）
+                "work_dir": str(Path(proj.path).resolve()),
+                "messages": chat_store.list_messages(proj.bb, tid, after_id=after_id)}
 
     @app.delete("/api/chat/threads/{tid}", status_code=204)
     def chat_thread_delete(tid: str):
@@ -9034,6 +9404,18 @@ def create_app(
                 turn.run(text, refs=body.refs)
             except Exception as e:  # noqa: BLE001 —— 状态已在 ChatTurn.run 归位
                 log.exception("chat 轮后台执行失败 thread=%s", tid)
+                # 构造期异常（ChatTurn(...) 抛错，run() 未进入）不会归位状态——
+                # 线程会永久卡在 running，前端显示「执行中」且无错误卡片。
+                # 这里兜底：仅当状态仍为 running 时归位为 error（run() 内部已置
+                # error 的情形不覆盖其更精确的分类）。
+                try:
+                    from core.chat.runtime import _classify_error
+                    th = chat_store.get_thread(proj.bb, tid)
+                    if th and th.get("status") == "running":
+                        chat_store.update_thread(proj.bb, tid, status="error",
+                                                 error=_classify_error(e))
+                except Exception:  # noqa: BLE001 —— 兜底失败不掩盖原始异常
+                    log.exception("chat 失败状态归位失败 thread=%s", tid)
             finally:
                 running.discard(tid)
                 events = getattr(app.state, "chat_abort_events", None)
@@ -9267,6 +9649,14 @@ def create_app(
         # 前端看门狗据此区分「管道死」（20s 无任何帧→判死重连）与「健康静默」
         # （长命令执行期 tick 照常到达，不误判）。
         tick_s = max(1, min(tick_s, 60))
+        # 轮询间隔（2026-10-04 流式顺滑化）：此前无事件时固定 sleep(1.0)——delta 每
+        # ~0.25s 落一条，查库命中后立即再查必空 → 睡满 1s，前端于是**每秒才收到一批**
+        # delta，文本 1Hz 跳变（观感「一顿顿的」；后端再降 delta 节流阈值也治不了，
+        # 瓶颈在这个投递节奏）。改为 50ms 短轮询：有事件即时连查（延迟≈0），无事件
+        # 最多 50ms 后再查，流式投递延迟 ≤~50ms。空闲心跳按时间折算（≈tick_s 秒），
+        # 语义不变（前端看门狗只看「20s 零帧」）。
+        poll_s = 0.05
+        tick_loops = max(1, round(tick_s / poll_s))
         idle_loops = 0
         try:
             while True:
@@ -9294,11 +9684,11 @@ def create_app(
                     cursor = e["id"]
                 if not events:
                     idle_loops += 1
-                    if idle_loops >= tick_s:
+                    if idle_loops >= tick_loops:
                         await ws.send_json(
                             {"kind": "ws.tick", "ts": time.time()})
                         idle_loops = 0
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(poll_s)
         except WebSocketDisconnect:
             return
 

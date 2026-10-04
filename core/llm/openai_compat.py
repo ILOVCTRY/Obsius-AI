@@ -260,16 +260,28 @@ class OpenAICompatProvider:
     def _consume_stream(self, stream, on_thinking, on_text, should_cancel):
         text = ""
         thinking = ""
-        calls: dict[str, dict[str, Any]] = {}
+        calls: dict[Any, dict[str, Any]] = {}
+        call_aliases: dict[str, Any] = {}
         # Responses 网关的 SSE 实现并不总是把 function_call 的完整元数据
         # 放在 output_item.added：部分中转站只在 output_item.done 或
         # response.completed.response.output 中补齐 name/arguments。保留
         # item_id -> 内部调用记录的映射，后续事件到达时合并到同一条调用。
         def merge_call(item: dict[str, Any], *, item_id: str = "") -> dict[str, Any]:
-            key = str(item.get("id") or item.get("call_id") or item_id or "")
-            call_id = str(item.get("call_id") or item.get("id") or key)
-            c = calls.setdefault(key, {"id": call_id, "name": "", "arguments": ""})
-            c["id"] = call_id or c.get("id", "")
+            item_key = str(item.get("id") or item_id or "")
+            call_id = str(item.get("call_id") or "")
+            key = call_aliases.get(item_key) if item_key else None
+            if key is None and call_id:
+                key = call_aliases.get(call_id)
+            if key is None:
+                key = call_id or item_key
+            if not key:
+                raise LLMError("Responses function_call 缺少 id")
+            c = calls.setdefault(key, {"id": call_id or item_key, "name": "", "arguments": ""})
+            if call_id:
+                c["id"] = call_id
+                call_aliases[call_id] = key
+            if item_key:
+                call_aliases[item_key] = key
             if item.get("name"):
                 c["name"] = str(item["name"])
             if item.get("arguments") is not None:
@@ -301,7 +313,8 @@ class OpenAICompatProvider:
             if should_cancel and should_cancel():
                 raise LLMError("已中断")
             if self.format == CHAT_COMPLETIONS:
-                for choice in evt.get("choices", []):
+                for choice_position, choice in enumerate(evt.get("choices", [])):
+                    choice_index = choice.get("index", choice_position)
                     d = choice.get("delta", {})
                     chunk = d.get("content") or ""
                     text += chunk
@@ -311,9 +324,16 @@ class OpenAICompatProvider:
                     thinking += rc
                     if rc and on_thinking:
                         on_thinking(rc)
-                    for tc in d.get("tool_calls", []):
+                    for fallback_index, tc in enumerate(d.get("tool_calls", [])):
                         f = tc.get("function", {})
-                        c = calls.setdefault(tc.get("id", ""), {"id": tc.get("id", ""), "name": f.get("name", ""), "arguments": ""})
+                        tc_index = tc.get("index", fallback_index)
+                        key = ("chat", choice_index, tc_index)
+                        call_id = str(tc.get("id") or "")
+                        if call_id and key in calls and calls[key].get("id") not in ("", call_id):
+                            raise LLMError("Chat Completions tool call id changed within index")
+                        c = calls.setdefault(key, {"id": call_id, "name": f.get("name", ""), "arguments": ""})
+                        if call_id:
+                            c["id"] = call_id
                         c["name"] = c["name"] or f.get("name", "")
                         c["arguments"] += f.get("arguments", "")
             else:
@@ -331,16 +351,17 @@ class OpenAICompatProvider:
                 elif typ == "response.output_item.added":
                     item = evt.get("item") or {}
                     if item.get("type") == "function_call":
+                        call_id = str(item.get("call_id") or "")
+                        if call_id and call_id in call_aliases:
+                            raise LLMError(f"工具调用 id 重复: {call_id}")
                         merge_call(item)
                 elif typ == "response.function_call_arguments.delta":
                     item_id = str(evt.get("item_id") or evt.get("call_id") or "")
-                    c = calls.setdefault(item_id, {"id": item_id, "name": "", "arguments": ""})
+                    c = merge_call({"call_id": evt.get("call_id"), "arguments": ""}, item_id=item_id)
                     c["arguments"] += evt.get("delta", "")
                 elif typ == "response.function_call_arguments.done":
                     item_id = str(evt.get("item_id") or evt.get("call_id") or "")
-                    c = calls.setdefault(item_id, {"id": item_id, "name": "", "arguments": ""})
-                    if evt.get("arguments") is not None:
-                        c["arguments"] = str(evt.get("arguments") or c["arguments"])
+                    c = merge_call({"call_id": evt.get("call_id"), "arguments": evt.get("arguments")}, item_id=item_id)
                     if evt.get("name"):
                         c["name"] = str(evt["name"])
                 elif typ == "response.output_item.done":
@@ -358,12 +379,24 @@ class OpenAICompatProvider:
                         if item.get("type") == "function_call":
                             merge_call(item)
         result = LLMResponse(text=text, thinking=thinking, usage=usage)
+        seen_ids: set[str] = set()
         for c in calls.values():
+            if not c["id"]:
+                raise LLMError("工具调用缺少 call id")
+            if c["id"] in seen_ids:
+                raise LLMError(f"工具调用 id 重复: {c['id']}")
             if not c["name"]:
                 raise LLMError(
-                    "Responses function_call 缺少工具名 "
-                    f"(call_id={c['id'] or 'unknown'})")
-            result.tool_calls.append(ToolCall(c["id"], c["name"], json.loads(c["arguments"] or "{}")))
+                    "工具调用缺少工具名 "
+                    f"(call_id={c['id']})")
+            seen_ids.add(c["id"])
+            try:
+                arguments = json.loads(c["arguments"] or "{}")
+            except json.JSONDecodeError as exc:
+                raise LLMError(f"工具调用参数 JSON 无效 (call_id={c['id']})", truncated=True) from exc
+            if not isinstance(arguments, dict):
+                raise LLMError(f"工具调用参数必须是对象 (call_id={c['id']})")
+            result.tool_calls.append(ToolCall(c["id"], c["name"], arguments))
         return result
 
     def _parse(self, data):

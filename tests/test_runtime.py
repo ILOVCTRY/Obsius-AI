@@ -374,7 +374,7 @@ def test_gateway_consumes_approval_once(bb):
         bb.conn.execute(
             "INSERT INTO approvals(id,project_id,session_id,action,risk,status,requested_by,created_at)"
             " VALUES(?,?,?,?,?,?,?,?)",
-            (approval_id, pid, None, '{"op":"escalation"}', "high", "approved",
+            (approval_id, pid, None, '{"op":"authorization"}', "high", "approved",
              "sess-x", "2026-09-19T00:00:00+00:00"),
         )
     r = gw.run("echo hi", runtime="sandbox", threat_class="trusted",

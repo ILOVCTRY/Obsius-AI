@@ -63,9 +63,6 @@ def _intent_scope_hint(track: str | None) -> str:
     return ("\n[意图口径] " + hint) if hint else ""
 
 
-# 运行时等级（DESIGN.md §7）；角色 max_runtime = 允许的最高等级，只可能比网关策略更严
-RUNTIME_RANK = {"host": 0, "wsl": 1, "docker": 2, "sandbox": 3}
-
 # host·Windows 的 bash 风格连接符（2026-10-01）：PowerShell 5.x 不支持 `&&`/`||`
 # （报 InvalidEndOfLine），但命令里带它们极其常见。检测到且策略允许 wsl 时，
 # 自动把 runtime=host 改走 wsl（bash -lc），语义最准；不允许则回落明确报错。
@@ -210,7 +207,6 @@ class ToolDispatcher:
                  track: str | None = None,
                  capabilities: list[str] | None = None,
                  allowed_tools: list[str] | None = None,
-                 max_runtime: str | None = None,
                  allowed_task_types: Iterable[str] | None = None,
                  max_steps: int = 0,
                  stuck_after: int = 12,
@@ -243,8 +239,6 @@ class ToolDispatcher:
         self._skill_registry = None
         # 角色 tools 白名单（§6.6 软边界）：None/空=不限；收尾协议工具永远放行
         self.allowed_tools = allowed_tools or None
-        # 角色 max_runtime 运行时等级软上限（host/wsl/docker/sandbox，§6.6）：None=不限
-        self.max_runtime = max_runtime if max_runtime in RUNTIME_RANK else None
         # 轨 task_types.yaml 注册表（A5 子代理发任务的类型护栏）：None=未接线不校验
         self.allowed_task_types = allowed_task_types
         # 会话步数预算（E8）：AgentSession 按角色收敛后的 max_steps 注入；request_steps
@@ -360,7 +354,7 @@ class ToolDispatcher:
         if handler is None:
             return f"[错误] 未知工具: {name}"
         # v23（TRAE 新壳 M3）：run_cmd 省略 runtime → 按任务默认运行时回填；
-        # 任务未设默认 → 要求显式传参（回填值照样过下方 max_runtime 软上限闸）。
+        # 任务未设默认 → 要求显式传参（回填值照样过网关 threat_class 校验）。
         if name == "run_cmd" and args.get("runtime") is None:
             pref = ""
             if self.current_task_id:
@@ -374,8 +368,7 @@ class ToolDispatcher:
                         "请显式传 runtime（host/wsl/docker/sandbox，按目标与能力清单选择）")
         if self.allowed_tools is not None and name not in self.allowed_tools \
                 and name not in _CONTROL_TOOLS and name not in _PLAN_TOOLS:
-            # 角色软边界（§6.6）：白名单外工具不执行；阶段 4 起可走 request_escalation
-            # 申请一次性授权，当前由人类调整角色配置。
+            # 角色软边界（§6.6）：白名单外工具不执行，由人类调整角色配置放开。
             return (f"[越界拒绝] 工具 {name} 不在本角色工具白名单内"
                     f"（允许: {', '.join(self.allowed_tools)}）。停止该方向或请人类调整角色配置。")
         if self.current_task_id and name not in _PLAN_PRE_ALLOWED \
@@ -462,17 +455,10 @@ class ToolDispatcher:
         if runtime is None:
             return ("[错误] run_cmd 缺少 runtime：请显式指定 host/wsl/docker/sandbox"
                     "（任务默认运行时未设置）")
-        # 角色 max_runtime 运行时等级软上限（§6.6）：只可能比网关 threat_class
-        # 允许集更严，不可放松；阶段 4 起可 request_escalation(kind=runtime) 一次性授权
-        if self.max_runtime is not None and runtime in RUNTIME_RANK \
-                and RUNTIME_RANK[runtime] > RUNTIME_RANK[self.max_runtime]:
-            return (f"[越界拒绝] runtime={runtime} 超过角色 max_runtime="
-                    f"{self.max_runtime}（运行时软上限不可自行放松；"
-                    "如确有必要请人类调整角色配置）")
         # bash 风格连接符兼容（2026-10-01）：宿主机 Windows 上 host 走 PowerShell
         # 5.x，`&&`/`||` 直接语法错（InvalidEndOfLine）。命令里带它们极常见，
         # 且 host→wsl 属同级（WSL 信任级=宿主机），故在策略允许时自动改走 wsl。
-        # 策略不允许（max_runtime 或 threat_class 挡下）则回落明确报错，不越权。
+        # 策略不允许（threat_class 挡下）则回落明确报错，不越权。
         wsl_note = ""
         if runtime == "host" and _host_is_windows() and _BASH_CONNECTOR_RE.search(cmd):
             if self._wsl_allowed(threat_class):
@@ -482,7 +468,7 @@ class ToolDispatcher:
             else:
                 return ("[错误] 命令含 bash 连接符（&&/||），但宿主机 Windows 的 "
                         "host 运行时是 PowerShell，不支持该语法；当前策略又不允许 "
-                        "wsl（受 max_runtime/threat_class 限制）。请改用 PowerShell "
+                        "wsl（受 threat_class 限制）。请改用 PowerShell "
                         "写法（`;` 顺序执行、`if ($?) {}` 条件）或拆成多条命令，"
                         "或请人类放宽运行时上限。")
         r = self.gateway.run(
@@ -496,10 +482,7 @@ class ToolDispatcher:
         return wsl_note + r.brief(8000)  # 2026-10-01 由 2000 放宽（回执更完整；超限仍走 spill）
 
     def _wsl_allowed(self, threat_class: str) -> bool:
-        """wsl 是否同时被角色上限与网关威胁策略允许（自动降级前置条件）。"""
-        if self.max_runtime is not None and RUNTIME_RANK.get(_WSL_RUNTIME, 99) \
-                > RUNTIME_RANK.get(self.max_runtime, -1):
-            return False
+        """wsl 是否被网关威胁策略允许（自动降级前置条件）。"""
         return _WSL_RUNTIME in allowed_runtimes(threat_class)
 
     def _tool_read_file(self, path: str, offset: int = 1, limit: int = 100) -> str:
@@ -2050,48 +2033,6 @@ class ToolDispatcher:
             session_id=self.session_id, author=self.author)
         return (f"步数预算已增补：{old} → {self.max_steps}。请继续规划收尾，"
                 "优先完成当前任务再考虑新动作。")
-
-    def _tool_request_escalation(self, cmd: str, runtime: str, reason: str,
-                                 threat_class: str = "trusted",
-                                 net: str | None = None,
-                                 timeout: float | None = None) -> str:
-        """H3 deny-driven 一次性升级（借鉴 dsh escalation）：仅受理一类——
-        runtime 超角色 max_runtime 软上限（§6.6 越界走审批）。工作区隔离/隔离等级/
-        限速是红线或自助项不受理；**net=real 自 2026-10-01 起不再需要审批**，直接
-        run_cmd(net="real") 即可，无需走本工具。审批批准后由 API 层执行一次
-        （gateway 消费 approval → consumed），结果经收件箱 escalation_result 回流。"""
-        if not reason.strip():
-            return "[拒绝] 必须说明升级理由（reason）——审批人只看得到它"
-        if threat_class not in ("trusted", "untrusted"):
-            return "[拒绝] threat_class 只收 trusted/untrusted（malware_live 不开放升级）"
-        deny = self.gateway.would_deny(cmd, runtime, threat_class=threat_class,
-                                       net=net,
-                                       workspace=(Path(self.artifacts_dir).parent
-                                                  if self.artifacts_dir else None))
-        if deny:
-            if deny.startswith("工作区隔离"):
-                return (f"[拒绝] 工作区隔离是红线不可升级：{deny}")
-            if deny.startswith("限速纪律"):
-                return (f"[拒绝] 限速拒绝可自助解决（拒因自带放行参数），不允许升级：{deny}")
-            return (f"[拒绝] 隔离等级策略是红线（宁严勿松），不可升级：{deny}")
-        if net == "real":
-            return ("[无需审批] net=real 自 2026-10-01 起可直接执行——"
-                    "改用 run_cmd(cmd=…, runtime=…, threat_class=…, net=\"real\")。")
-        role_escalation = (self.max_runtime is not None and runtime in RUNTIME_RANK
-                           and RUNTIME_RANK[runtime] > RUNTIME_RANK[self.max_runtime])
-        if not role_escalation:
-            return "[拒绝] 该命令当前策略允许且未超角色上限——直接 run_cmd 即可，无需升级。"
-        kind = "role_runtime"
-        appr = self.bb.request_approval(
-            self.project_id,
-            {"op": "escalation", "kind": kind, "cmd": cmd, "runtime": runtime,
-             "threat_class": threat_class, "net": net or "",
-             "reason": reason.strip()[:500], "task_id": self.current_task_id},
-            risk="medium",
-            requested_by=self.author, session_id=self.session_id)
-        return (f"[已提交审批] approval_id={appr['id']}（{kind}，risk={appr['risk']}）："
-                f"{cmd}\n人类批准后命令只执行一次，结果将投递回你的收件箱"
-                "（🛫 升级命令已执行）；等待期间可继续其他无依赖工作。")
 
     _AUTH_KINDS = ("scope_expand", "impact_escalate", "rating_override")
 

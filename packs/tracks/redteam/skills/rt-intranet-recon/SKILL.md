@@ -3,17 +3,18 @@ name: rt-intranet-recon
 description: 内网侦察入口：拿到落点后的网段测绘、存活探测、服务枚举、域信息收集的打法路由（redteam 轨）
 keywords: 内网侦察, 网段, 存活, 端口扫描, smb, netbios, ldap, 域, ad, 内网资产, fscan, arp, 路由, 可达面, 落点
 task_types: recon, lateral-movement
+mode: self-contained
 ---
 
 # intranet-recon —— 内网侦察路由（redteam 轨）
 
 > 分层纪律：本技能只做**内网侦察阶段 → 手册对照**。打法在 web 能力包
-> `playbooks/intranet-postexp/`。按需 `kb_open(module=…)` 单篇，禁止通读。
+> `playbooks/intranet-postexp/`。按需 `skill_open(path=…)` 单篇，禁止通读。
 > 侦察流量走正常扫描预算，先查黑板资产表去重再扫。
 
 ## 阶段 → 手册对照表（web 包 `playbooks/intranet-postexp/` 下）
 
-| 阶段 | kb_open 模块 |
+| 阶段 | skill_open 模块 |
 |---|---|
 | 内网侦察总纲（起手必做） | `16-recon.md` |
 | 域内信息收集 | `14-domain.md` |

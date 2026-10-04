@@ -21,11 +21,11 @@ export function eventStyle(kind: string, payload?: Record<string, unknown>): Eve
       "task.deleted": { label: "🗑 删除任务", className: "text-muted-foreground", defaultOpen: true },
       "task.lease_expired": { label: "⏰ 租约过期", className: "text-(--status-approval)", defaultOpen: true },
       // A2 先规划后动手
-      "task.plan_set": { label: "📐 制定计划", className: "text-sky-400", defaultOpen: true },
-      "task.plan_revised": { label: "📐 修订计划", className: "text-sky-400", defaultOpen: true },
+      "task.plan_set": { label: "📐 制定计划", className: "text-(--viz-sev-low)", defaultOpen: true },
+      "task.plan_revised": { label: "📐 修订计划", className: "text-(--viz-sev-low)", defaultOpen: true },
       "task.step": { label: "▦ 计划步进", className: "text-muted-foreground", defaultOpen: false },
       // ⑤ 完成对账硬拦：complete 被拒，列出未收口条目
-      "task.reconcile_blocked": { label: "☑ 完成对账未收口", className: "text-amber-400", defaultOpen: true },
+      "task.reconcile_blocked": { label: "☑ 完成对账未收口", className: "text-(--viz-sev-medium)", defaultOpen: true },
     }
     return map[kind] ?? { label: `task`, className: "text-muted-foreground", defaultOpen: false }
   }
@@ -34,7 +34,7 @@ export function eventStyle(kind: string, payload?: Record<string, unknown>): Eve
   // 独立验证 M1：验证器对 verify 验收条目的判定回执（未过默认展开，脱敏摘要）
   if (kind === "verify.result")
     return payload?.passed
-      ? { label: "🔬 独立验证通过", className: "text-emerald-400", defaultOpen: false }
+      ? { label: "🔬 独立验证通过", className: "text-(--viz-success)", defaultOpen: false }
       : { label: "🔬 独立验证未过", className: "text-(--status-error)", defaultOpen: true }
   if (kind === "tool.call") return { label: "🛠 工具调用", className: "text-muted-foreground", defaultOpen: false }
   if (kind === "audit.deny") return { label: "🛡 网关拒绝", className: "text-(--status-approval)", defaultOpen: true }
@@ -49,13 +49,11 @@ export function eventStyle(kind: string, payload?: Record<string, unknown>): Eve
     if (payload?.kind === "human_note")
       return { label: "💬 人类引导", className: "text-primary", defaultOpen: true }
     if (payload?.kind === "finding_update")
-      return { label: "🔵 发现增补", className: "text-sky-400", defaultOpen: true }
+      return { label: "🔵 发现增补", className: "text-(--viz-sev-low)", defaultOpen: true }
     if (payload?.kind === "basis_stale")
-      return { label: "⚠ 依据撤回", className: "text-amber-400", defaultOpen: true }
-    if (payload?.kind === "escalation_result")
-      return { label: "🛫 升级命令已执行", className: "text-sky-400", defaultOpen: true }
+      return { label: "⚠ 依据撤回", className: "text-(--viz-sev-medium)", defaultOpen: true }
     if (payload?.kind === "authorization_result")
-      return { label: "✅ 授权申请已批准", className: "text-emerald-400", defaultOpen: true }
+      return { label: "✅ 授权申请已批准", className: "text-(--viz-success)", defaultOpen: true }
     if (payload?.kind === "approval_rejected")
       return { label: "❌ 申请被拒绝", className: "text-(--status-error)", defaultOpen: true }
     return { label: "🔔 会话私信", className: "text-(--status-approval)", defaultOpen: true }
@@ -71,24 +69,24 @@ export function eventStyle(kind: string, payload?: Record<string, unknown>): Eve
   if (kind === "advisor.intervention")
     // 策略顾问发言（2026-09-20）：卡壳干预的正文落事件流，人工可判断顾问说了什么、
     // 建议是否合理；渲染同样走 prose 行（正文即行），同居「决策」tab
-    return { label: "🧭 策略顾问", className: "text-amber-400", defaultOpen: true }
+    return { label: "🧭 策略顾问", className: "text-(--viz-sev-medium)", defaultOpen: true }
   // D9 活跃探索静默延长（2026-09-24）：未叫顾问、仅重置观察窗——默认展开让人工
   // 看得见为什么没打断；file.read 是其取材源，默认折叠
   if (kind === "agent.stuck_extend")
-    return { label: "⏱ 活跃探索，观察窗延长", className: "text-emerald-400", defaultOpen: true }
+    return { label: "⏱ 活跃探索，观察窗延长", className: "text-(--viz-success)", defaultOpen: true }
   if (kind === "file.read")
     return { label: "📄 读取文件", className: "text-muted-foreground", defaultOpen: false }
   if (kind === "file.search")
     return { label: "🔎 内容检索", className: "text-muted-foreground", defaultOpen: false }
   // 计划闸教练链（2026-09-24）：强提示默认展开、挂起/熔断红色默认展开
   if (kind === "agent.plan_nudge")
-    return { label: "📋 请先写计划", className: "text-amber-400", defaultOpen: true }
+    return { label: "📋 请先写计划", className: "text-(--viz-sev-medium)", defaultOpen: true }
   if (kind === "agent.plan_gate_block")
     return { label: "🚫 拒写计划，挂起", className: "text-(--status-error)", defaultOpen: true }
   if (kind === "agent.reject_breaker")
     return { label: "🚫 拒绝熔断挂起", className: "text-(--status-error)", defaultOpen: true }
   if (kind === "task.basis_stale_done")
-    return { label: "⚠ 推翻依据下完成", className: "text-amber-400", defaultOpen: true }
+    return { label: "⚠ 推翻依据下完成", className: "text-(--viz-sev-medium)", defaultOpen: true }
   if (kind === "binary.triaged")
     return { label: "🧊 样本分诊完成", className: "text-primary", defaultOpen: true }
   if (kind === "binary.triage_failed")
@@ -113,12 +111,12 @@ export function eventStyle(kind: string, payload?: Record<string, unknown>): Eve
   if (kind === "llm.error")
     return { label: "🚨 LLM 调用失败", className: "text-(--status-error)", defaultOpen: true }
   if (kind === "budget.soft_warning")
-    return { label: "🟡 预算预警", className: "text-amber-400", defaultOpen: true }
+    return { label: "🟡 预算预警", className: "text-(--viz-sev-medium)", defaultOpen: true }
   // E8 步数预算：自助/人工增补与耗尽自动暂停
   if (kind === "step.budget_extended")
-    return { label: "⏳ 步数增补", className: "text-amber-400", defaultOpen: true }
+    return { label: "⏳ 步数增补", className: "text-(--viz-sev-medium)", defaultOpen: true }
   if (kind === "session.budget_paused")
-    return { label: "⏸ 步数预算用尽", className: "text-amber-400", defaultOpen: true }
+    return { label: "⏸ 步数预算用尽", className: "text-(--viz-sev-medium)", defaultOpen: true }
   if (kind === "kb.open") return { label: "📖 打开知识库", className: "text-muted-foreground", defaultOpen: false }
   if (kind === "kb.search") return { label: "🔍 搜索知识库", className: "text-muted-foreground", defaultOpen: false }
   if (kind === "skill.open") return { label: "📖 打开技能正文", className: "text-muted-foreground", defaultOpen: false }
@@ -147,18 +145,18 @@ export function eventStyle(kind: string, payload?: Record<string, unknown>): Eve
   if (kind === "session.finished") return { label: "⚪ 会话收尾", className: "text-muted-foreground", defaultOpen: true }
   if (kind === "approval.requested") return { label: "🔔 请求审批", className: "text-(--status-approval)", defaultOpen: true }
   if (kind.startsWith("approval.")) return { label: "🔔 审批决定", className: "text-(--status-approval)", defaultOpen: true }
-  if (kind === "orch.proposed") return { label: "💡 编排提案", className: "text-amber-400", defaultOpen: true }
+  if (kind === "orch.proposed") return { label: "💡 编排提案", className: "text-(--viz-sev-medium)", defaultOpen: true }
   // auto-attack（2026-09-28）：研判完成（主渲染走 OrchChatPane 研判卡，本样式供审计兜底）
   if (kind === "orch.auto_attack.analyzed")
     return { label: "🚀 自动渗透研判", className: "text-primary", defaultOpen: true }
   // 对话化编排器（M1/M2，§6.4）：对话流主渲染走 OrchChatPane 气泡（本样式供
   // 审计抽屉平铺兜底）；goal 确认/清空是人类决策留痕
   if (kind === "orch.chat") return { label: "💬 编排对话", className: "text-primary", defaultOpen: false }
-  if (kind === "goal.confirm") return { label: "🎯 阶段目标确认", className: "text-amber-400", defaultOpen: true }
+  if (kind === "goal.confirm") return { label: "🎯 阶段目标确认", className: "text-(--viz-sev-medium)", defaultOpen: true }
   if (kind === "goal.clear") return { label: "🎯 阶段目标清空", className: "text-muted-foreground", defaultOpen: false }
   // 分阶段工作流（pentest M4）：阶段流转留痕与过门开门事件（门开启摘要走 payload.summary 通用分支）
   if (kind === "phase.changed") return { label: "🔄 阶段流转", className: "text-primary", defaultOpen: true }
-  if (kind === "phase.gate_open") return { label: "🚪 渗透门开启", className: "text-amber-400", defaultOpen: true }
+  if (kind === "phase.gate_open") return { label: "🚪 渗透门开启", className: "text-(--viz-sev-medium)", defaultOpen: true }
   if (kind === "orch.tick.started")
     return { label: "⚙ 编排启动", className: "text-primary", defaultOpen: false }
   if (kind === "mission.derive")
@@ -167,13 +165,13 @@ export function eventStyle(kind: string, payload?: Record<string, unknown>): Eve
     return { label: "🎯 派生结果", className: "text-primary", defaultOpen: true }
   if (kind === "orch.chain_started") return { label: "⛓🤖 L2 自动链启动", className: "text-primary", defaultOpen: true }
   // 停止原因（含急停/预算/异常）由 eventSummary 中文行呈现
-  if (kind === "orch.chain_stopped") return { label: "⛓⏹ L2 自动链停止", className: "text-amber-400", defaultOpen: true }
+  if (kind === "orch.chain_stopped") return { label: "⛓⏹ L2 自动链停止", className: "text-(--viz-sev-medium)", defaultOpen: true }
   if (kind === "orch.replan_priorities") return { label: "🔀 优先级重排", className: "text-primary", defaultOpen: false }
   if (kind === "project.digest") return { label: "📌 编排简报", className: "text-primary", defaultOpen: true }
-  if (kind === "chain.created") return { label: "🔗 新建攻击链", className: "text-[#bc8cff]", defaultOpen: true }
-  if (kind === "chain.updated") return { label: "🔗 攻击链更新", className: "text-[#bc8cff]", defaultOpen: false }
+  if (kind === "chain.created") return { label: "🔗 新建攻击链", className: "text-(--viz-chain)", defaultOpen: true }
+  if (kind === "chain.updated") return { label: "🔗 攻击链更新", className: "text-(--viz-chain)", defaultOpen: false }
   if (kind === "chain.deleted") return { label: "🔗 删除攻击链", className: "text-muted-foreground", defaultOpen: true }
-  if (kind === "chain.link_added") return { label: "🔗 链上挂节点", className: "text-[#bc8cff]", defaultOpen: true }
+  if (kind === "chain.link_added") return { label: "🔗 链上挂节点", className: "text-(--viz-chain)", defaultOpen: true }
   if (kind === "chain.link_removed") return { label: "🔗 链上移节点", className: "text-muted-foreground", defaultOpen: false }
   // 蓝图（R4 逆向开发管线）
   if (kind === "blueprint.created") return { label: "📐 新建蓝图", className: "text-primary", defaultOpen: true }
@@ -217,7 +215,7 @@ const TOOL_LABELS: Record<string, string> = {
   skill_open: "📘 打开技能", route_lookup: "🧭 路由查询",
   declare_intent: "💡 声明意图", close_intent: "🏁 收尾意图",
   reopen_intent: "↩ 重开意图", task_reconcile: "✓ 任务对账",
-  request_authorization: "🙏 申请授权", request_escalation: "🚨 申请越界",
+  request_authorization: "🙏 申请授权",
   run_cmd: "⌨ 命令",  // 仅计划闸/越界拒绝时落审计（正常执行走 command 配对事件）
 }
 const TOOL_ARG_KEY: Record<string, string> = {
@@ -233,11 +231,11 @@ const TOOL_ARG_KEY: Record<string, string> = {
 // severity 徽章共用（live-stream-ux C2，2026-09-23）：色值从 Blackboard.tsx 提升，
 // 发现页签与事件流同源；中文标签事件流专用
 export const SEVERITY_COLOR: Record<string, string> = {
-  critical: "text-(--status-error)",
-  high: "text-(--status-error)",
-  medium: "text-(--status-approval)",
-  low: "text-muted-foreground",
-  info: "text-muted-foreground",
+  critical: "text-(--viz-sev-critical)",
+  high: "text-(--viz-sev-high)",
+  medium: "text-(--viz-sev-medium)",
+  low: "text-(--viz-sev-low)",
+  info: "text-(--viz-sev-info)",
 }
 const SEVERITY_LABEL: Record<string, string> = {
   critical: "严重", high: "高危", medium: "中危", low: "低危", info: "信息",
@@ -338,10 +336,6 @@ const TOOL_SUMMARIZERS: Record<string, (a: Record<string, unknown>, ctx?: Summar
     const why = typeof a.reason === "string" && a.reason ? ` ${clip(a.reason, LEN_SHORT)}` : ""
     return `${kind}${why}`
   },
-  request_escalation: (a) => {
-    const cmd = typeof a.cmd === "string" ? clip(a.cmd, LEN_SHORT) : ""
-    return cmd
-  },
   run_cmd: (a) => clip(String(a.cmd ?? ""), LEN_SHORT),  // gated 拒绝审计行
   bb_add_asset: (a) =>
     `${String(a.value ?? "")}（${String(a.type ?? "auto")}）`,
@@ -367,15 +361,30 @@ const TOOL_SUMMARIZERS: Record<string, (a: Record<string, unknown>, ctx?: Summar
 }
 
 // B3（live-stream-ux）：task.done/task.failed 事件行专属摘要——「动作」与「结果」
-// 分行一眼可辨；blocked_reason=awaiting_human 标注「待人类处理」
+// 分行一眼可辨；blocked_reason=awaiting_human 标注「待人类处理」。
+// M2（orchestrator-coordination-fusion）：委派回执富化——payload.receipt 存在时
+// 追加产出计数（🏷N发现 · 🔧N产物），人类在事件流一眼看清委托成果。
+function receiptSuffix(payload: Record<string, unknown>): string {
+  const r = payload.receipt
+  if (!r || typeof r !== "object") return ""
+  const rec = r as Record<string, unknown>
+  const nf = Array.isArray(rec.findings) ? rec.findings.length : 0
+  const na = Array.isArray(rec.artifacts) ? rec.artifacts.length : 0
+  const parts: string[] = []
+  if (nf) parts.push(`🏷${nf}发现`)
+  if (na) parts.push(`🔧${na}产物`)
+  return parts.length ? ` · ${parts.join(" · ")}` : ""
+}
 function taskDoneSummary(payload: Record<string, unknown>): ReactNode {
   const note = typeof payload.note === "string" ? payload.note : ""
-  return clip(note, LEN_LONG) || undefined
+  const s = `${clip(note, LEN_LONG)}${receiptSuffix(payload)}`
+  return s || undefined
 }
 function taskFailedSummary(payload: Record<string, unknown>): ReactNode {
   const note = typeof payload.note === "string" ? clip(payload.note, LEN_LONG) : ""
   const why = payload.blocked_reason === "awaiting_human" ? "（待人类处理）" : ""
-  return (note || why) ? `${note}${why}` : undefined
+  const s = `${note}${why}${receiptSuffix(payload)}`
+  return s || undefined
 }
 
 export function eventSummary(payload: Record<string, unknown>,

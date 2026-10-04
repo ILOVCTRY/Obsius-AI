@@ -4,6 +4,7 @@ description: 二进制逆向核心技能：函数定位、算法还原、func_kb
 keywords: 逆向, reverse, 反汇编, 反编译, crackme, 算法, 校验
 features: is_elf, is_pe, has_check_logic, packed_binary
 task_types: reverse, solve, verify
+mode: self-contained
 ---
 
 # binary-rev —— 二进制逆向：定位 → 还原 → 落库 → 求解
@@ -14,7 +15,7 @@ task_types: reverse, solve, verify
 每分析完一个函数立即 `bb_upsert_func`（地址 + 语义名 + 算法结论）。
 `<sha>` 来源：`bb_query what=assets type=binary` 的返回行 `value` 字段即样本 sha256
 （或 MCP `survey_binary` 实时取当前 IDA 库）——不知道 sha 先列样本，禁止空串/编造。
-并行会话共享这份知识库——你写下的每个函数都替队友省一次反编译。
+并行会话共享这份参考资料——你写下的每个函数都替队友省一次反编译。
 
 **ida-mcp 可用则优先 ida-mcp**：overview `tools.mcp.state == "installed"`（或
 `decompile` 工具直接出结果）时，函数定位/反编译/伪码获取一律先走 ida-mcp
@@ -54,13 +55,13 @@ task_types: reverse, solve, verify
 XOR 常量 / 逐字节加减 / 查表替换 / 简易 TEA·XTEA / 魔改 base64 / 反转+位移。
 遇到多层嵌套先分层落 func_kb，再逐层求解。
 
-## 延伸手册（场景特征 → kb_open）
+## 延伸手册（场景特征 → skill_open）
 
 | 场景/特征 | 手册 |
 |---|---|
-| 旧版有符号、新版无符号（缺 PDB/程序更新） | `binary/reverse/sym-diff.md`（LLM 符号迁移 + 平台 MCP 对接） |
-| ARM64 跳转表平坦化 / 循环 XOR 解密器 / 无 IDA 低依赖路线 | `binary/reverse/cases/arm64-self-extract-source-recovery.md` |
-| Go 二进制源码级恢复 | `binary/reverse/cases/go-tls-proxy-source-recovery.md`（GoReSym 管线） |
-| 平坦化 + DSL VM / 验证码类 | `binary/reverse/cases/dsl-vm-captcha-reverse.md` |
-| Electron/Bytenode 跨层审计 | `binary/reverse/cases/electron-bytenode-update-chain-audit.md` |
+| 旧版有符号、新版无符号（缺 PDB/程序更新） | `references/binary/reverse/sym-diff.md`（LLM 符号迁移 + 平台 MCP 对接） |
+| ARM64 跳转表平坦化 / 循环 XOR 解密器 / 无 IDA 低依赖路线 | `references/binary/reverse/cases/arm64-self-extract-source-recovery.md` |
+| Go 二进制源码级恢复 | `references/binary/reverse/cases/go-tls-proxy-source-recovery.md`（GoReSym 管线） |
+| 平坦化 + DSL VM / 验证码类 | `references/binary/reverse/cases/dsl-vm-captcha-reverse.md` |
+| Electron/Bytenode 跨层审计 | `references/binary/reverse/cases/electron-bytenode-update-chain-audit.md` |
 | .NET/C# 托管样本 | 切 dotnet-rev 技能（混淆器/脱壳/IL patch） |

@@ -160,21 +160,23 @@ def _row(r: sqlite3.Row) -> dict[str, Any]:
 
 def append_message(bb, thread_id: str, role: str, content: str, *,
                    tool_calls: list[dict] | None = None,
-                   tool_use_id: str = "") -> dict[str, Any]:
+                   tool_use_id: str = "",
+                   thinking: str = "") -> dict[str, Any]:
     if role not in ("user", "assistant", "tool"):
         raise ValueError(f"非法消息角色: {role}")
     ts = now()
     with bb._tx():
         cur = bb.conn.execute(
-            "INSERT INTO chat_messages(thread_id, role, content, tool_calls,"
-            " tool_use_id, created_at) VALUES(?,?,?,?,?,?)",
-            (thread_id, role, content,
+            "INSERT INTO chat_messages(thread_id, role, content, thinking,"
+            " tool_calls, tool_use_id, created_at) VALUES(?,?,?,?,?,?,?)",
+            (thread_id, role, content, thinking,
              json.dumps(tool_calls or [], ensure_ascii=False),
              tool_use_id, ts))
         bb.conn.execute(
             "UPDATE chat_threads SET updated_at=? WHERE id=?", (ts, thread_id))
         mid = cur.lastrowid
     return {"id": mid, "thread_id": thread_id, "role": role, "content": content,
+            "thinking": thinking,
             "tool_calls": tool_calls or [], "tool_use_id": tool_use_id,
             "created_at": ts}
 

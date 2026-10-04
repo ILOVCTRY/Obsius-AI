@@ -36,35 +36,35 @@ const ATTEMPT_H = 96
 
 // 五档执行结果：色 / 中文标
 const RESULT_STYLE: Record<string, { color: string; label: string }> = {
-  found: { color: "#f85149", label: "出洞" },
-  hint: { color: "#d29922", label: "有反应" },
-  blocked: { color: "#8b949e", label: "被拦" },
-  no_reaction: { color: "#484f58", label: "无反应" },
-  skipped: { color: "#58a6ff", label: "跳过" },
+  found: { color: "var(--viz-sev-critical)", label: "出洞" },
+  hint: { color: "var(--viz-sev-medium)", label: "有反应" },
+  blocked: { color: "var(--viz-sev-info)", label: "被拦" },
+  no_reaction: { color: "var(--viz-edge-muted)", label: "无反应" },
+  skipped: { color: "var(--viz-sev-low)", label: "跳过" },
 }
 
 const SEV_COLOR: Record<string, string> = {
-  critical: "#f85149", high: "#ff7b72", medium: "#d29922",
-  low: "#58a6ff", info: "#8b949e",
+  critical: "var(--viz-sev-critical)", high: "var(--viz-sev-high)", medium: "var(--viz-sev-medium)",
+  low: "var(--viz-sev-low)", info: "var(--viz-sev-info)",
 }
 const SEV_LABEL: Record<string, string> = {
   critical: "严重", high: "高危", medium: "中危", low: "低危", info: "提示",
 }
 
-const OUTCOME_BADGE: Record<string, { color: string; label: string }> = {
-  vuln: { color: "#f85149", label: "漏洞" },
-  finding: { color: "#3fb950", label: "有效发现" },
-  dead_end: { color: "#8b949e", label: "死路" },
+const OUTCOME_BADGE: Record<string, { color: string; background: string; label: string }> = {
+  vuln: { color: "var(--viz-sev-critical)", background: "var(--viz-sev-critical-bg)", label: "漏洞" },
+  finding: { color: "var(--viz-node-finding)", background: "var(--viz-node-finding-bg)", label: "有效发现" },
+  dead_end: { color: "var(--viz-node-deadend)", background: "var(--viz-node-deadend-bg)", label: "死路" },
 }
 
 // 子目标资产状态徽章（2026-10-01）：settled=子树意图全部收尾且至少一条 dead_end
-const SUBTARGET_STATUS: Record<string, { color: string; label: string }> = {
-  tested_clean: { color: "#3fb950", label: "已测清" },
-  na: { color: "#8b949e", label: "不适用" },
-  budget_stop: { color: "#d29922", label: "预算停手" },
-  scanning: { color: "#58a6ff", label: "扫描中" },
-  visited: { color: "#58a6ff", label: "已访问" },
-  open: { color: "#8b949e", label: "待测" },
+const SUBTARGET_STATUS: Record<string, { color: string; background: string; label: string }> = {
+  tested_clean: { color: "var(--viz-success)", background: "var(--viz-success-bg)", label: "已测清" },
+  na: { color: "var(--viz-sev-info)", background: "var(--viz-sev-info-bg)", label: "不适用" },
+  budget_stop: { color: "var(--viz-sev-medium)", background: "var(--viz-sev-medium-bg)", label: "预算停手" },
+  scanning: { color: "var(--viz-sev-low)", background: "var(--viz-sev-low-bg)", label: "扫描中" },
+  visited: { color: "var(--viz-sev-low)", background: "var(--viz-sev-low-bg)", label: "已访问" },
+  open: { color: "var(--viz-sev-info)", background: "var(--viz-sev-info-bg)", label: "待测" },
 }
 
 // ---------- 主脊节点 ----------
@@ -73,18 +73,18 @@ function TargetNode({ data }: { data: Record<string, unknown> }) {
   const n = data.node as AttackNode
   return (
     <div
-      className="rounded-md border border-[#1f6feb]/60 bg-[#0f1c30] px-3 py-2"
+      className="rounded-md border border-(--viz-target)/60 bg-(--viz-target-bg) px-3 py-2"
       style={{ width: CARD_W, height: TARGET_H }}
     >
       <div className="flex items-center gap-1.5">
         <span className="text-xs">🎯</span>
-        <span className="text-[10px] font-medium text-[#58a6ff]">目标</span>
-        <span className="ml-auto rounded border border-[#30363d] px-1 font-mono text-[10px] text-muted-foreground">
+        <span className="text-[10px] font-medium text-(--viz-node-target)">目标</span>
+        <span className="ml-auto rounded border border-(--viz-edge) px-1 font-mono text-[10px] text-muted-foreground">
           {n.asset_type}
         </span>
       </div>
       <p className="mt-1 truncate font-mono text-[12px]">{n.label}</p>
-      <Handle type="source" position={Position.Right} style={{ background: "#58a6ff" }} />
+      <Handle type="source" position={Position.Right} style={{ background: "var(--viz-node-target)" }} />
     </div>
   )
 }
@@ -95,30 +95,30 @@ function SubtargetNode({ data }: { data: Record<string, unknown> }) {
   const st = SUBTARGET_STATUS[n.status || "open"] || SUBTARGET_STATUS.open
   return (
     <div
-      className="rounded-md border bg-[#101722] px-3 py-2"
+      className="rounded-md border bg-(--viz-node-bg) px-3 py-2"
       style={{
         width: CARD_W, height: SUBTARGET_H,
-        borderColor: settled ? "#3fb95066" : "#30363d",
+        borderColor: settled ? "var(--viz-success-border)" : "var(--viz-edge)",
       }}
     >
       <div className="flex items-center gap-1.5">
-        <span className="text-[10px] font-medium text-[#8b949e]">子目标</span>
-        <span className="ml-auto rounded border border-[#30363d] px-1 font-mono text-[10px] text-muted-foreground">
+        <span className="text-[10px] font-medium text-(--viz-sev-info)">子目标</span>
+        <span className="ml-auto rounded border border-(--viz-edge) px-1 font-mono text-[10px] text-muted-foreground">
           {n.asset_type}
         </span>
       </div>
       <p className="mt-1 truncate font-mono text-[12px]">{n.label}</p>
       <div className="mt-0.5 flex items-center gap-1.5">
         <span className="rounded px-1 text-[10px]"
-              style={{ background: `${st.color}22`, color: st.color }}>
+              style={{ background: st.background, color: st.color }}>
           {settled ? "已测清" : st.label}
         </span>
         {!!n.findings && (
           <span className="text-[10px] text-muted-foreground">{n.findings} 发现</span>
         )}
       </div>
-      <Handle type="target" position={Position.Left} style={{ background: "#6e7681" }} />
-      <Handle type="source" position={Position.Right} style={{ background: "#6e7681" }} />
+      <Handle type="target" position={Position.Left} style={{ background: "var(--viz-handle)" }} />
+      <Handle type="source" position={Position.Right} style={{ background: "var(--viz-handle)" }} />
     </div>
   )
 }
@@ -133,17 +133,17 @@ function IntentNode({ data }: { data: Record<string, unknown> }) {
     <button
       type="button"
       onClick={() => onToggle(n.id)}
-      className="flex flex-col rounded-md border bg-[#161b22] px-3 py-2 text-left transition-colors hover:bg-[#1c2128]"
+      className="flex flex-col rounded-md border bg-(--viz-card) px-3 py-2 text-left transition-colors hover:bg-(--viz-card-hover)"
       style={{
         width: CARD_W, height: INTENT_H,
-        borderColor: isDeadEnd ? "#6e7681" : n.status === "open" ? "#1f6feb55" : "#30363d",
+        borderColor: isDeadEnd ? "var(--viz-handle)" : n.status === "open" ? "var(--viz-target-border)" : "var(--viz-edge)",
         borderStyle: isDeadEnd ? "dashed" : "solid",
       }}
     >
       <div className="flex items-center gap-1.5">
         <span
           className={`size-1.5 rounded-full ${n.status === "open" ? "animate-pulse" : ""}`}
-          style={{ background: n.status === "open" ? "#58a6ff" : "#8b949e" }}
+          style={{ background: n.status === "open" ? "var(--viz-sev-low)" : "var(--viz-sev-info)" }}
         />
         <span className="text-[10px] text-muted-foreground">
           {n.status === "open" ? "待收尾" : "已收尾"}
@@ -162,7 +162,7 @@ function IntentNode({ data }: { data: Record<string, unknown> }) {
       <div className="flex items-center gap-1 pt-0.5">
         {badge
           ? <span className="rounded px-1 text-[10px]"
-                   style={{ background: `${badge.color}22`, color: badge.color }}>
+                   style={{ background: badge.background, color: badge.color }}>
               {badge.label}×{n.finding_ids?.length || 0}
             </span>
           : <span className="text-[10px] text-muted-foreground">假设待验证</span>}
@@ -172,8 +172,8 @@ function IntentNode({ data }: { data: Record<string, unknown> }) {
           </span>
         )}
       </div>
-      <Handle type="target" position={Position.Left} style={{ background: "#6e7681" }} />
-      <Handle type="source" position={Position.Right} style={{ background: "#6e7681" }} />
+      <Handle type="target" position={Position.Left} style={{ background: "var(--viz-handle)" }} />
+      <Handle type="source" position={Position.Right} style={{ background: "var(--viz-handle)" }} />
     </button>
   )
 }
@@ -190,11 +190,11 @@ function FindingNode({ data }: { data: Record<string, unknown> }) {
     <button
       type="button"
       onClick={() => onSelect(n)}
-      className="rounded-md border bg-[#161b22] px-3 py-2 text-left transition-colors hover:bg-[#1c2128]"
+      className="rounded-md border bg-(--viz-card) px-3 py-2 text-left transition-colors hover:bg-(--viz-card-hover)"
       style={{
         width: CARD_W, height: FINDING_H,
-        borderColor: selected ? sev : "#30363d",
-        borderLeftColor: groupColor ?? (selected ? sev : "#30363d"),
+        borderColor: selected ? sev : "var(--viz-edge)",
+        borderLeftColor: groupColor ?? (selected ? sev : "var(--viz-edge)"),
         borderLeftWidth: groupColor ? 3 : 1,
         boxShadow: selected ? `0 0 0 1px ${sev}` : undefined,
       }}
@@ -202,20 +202,20 @@ function FindingNode({ data }: { data: Record<string, unknown> }) {
       <div className="flex items-center gap-1">
         <span className="rounded px-1 text-[10px]"
               style={{
-                background: isVuln ? "#f8514922" : "#3fb95022",
-                color: isVuln ? "#f85149" : "#3fb950",
+                background: isVuln ? "var(--viz-sev-critical-bg)" : "var(--viz-success-bg)",
+                color: isVuln ? "var(--viz-sev-critical)" : "var(--viz-success)",
               }}>
           {isVuln ? "漏洞" : "有效发现"}
         </span>
         {n.status === "verified" && (
-          <span className="rounded bg-[#21262d] px-1 text-[10px] text-emerald-400">已验证</span>
+          <span className="rounded bg-(--viz-outline) px-1 text-[10px] text-(--viz-success)">已验证</span>
         )}
         <span className="ml-auto text-[10px]" style={{ color: sev }}>
           {SEV_LABEL[n.severity || "info"]}
         </span>
       </div>
       <p className="mt-1.5 line-clamp-2 text-[11.5px] leading-snug">{n.title}</p>
-      <Handle type="target" position={Position.Left} style={{ background: "#6e7681" }} />
+      <Handle type="target" position={Position.Left} style={{ background: "var(--viz-handle)" }} />
     </button>
   )
 }
@@ -231,10 +231,10 @@ function AttemptNode({ data }: { data: Record<string, unknown> }) {
     <button
       type="button"
       onClick={() => onOpen(a)}
-      className="rounded border bg-[#161b22] px-2 py-1.5 text-left transition-colors hover:bg-[#1c2128]"
+      className="rounded border bg-(--viz-card) px-2 py-1.5 text-left transition-colors hover:bg-(--viz-card-hover)"
       style={{
         width: ATTEMPT_W, height: ATTEMPT_H,
-        borderColor: selected ? st.color : "#30363d",
+        borderColor: selected ? st.color : "var(--viz-edge)",
       }}
     >
       <div className="flex items-center gap-1">
@@ -250,7 +250,7 @@ function AttemptNode({ data }: { data: Record<string, unknown> }) {
       </p>
       <div className="absolute inset-x-1.5 bottom-1 flex flex-wrap gap-0.5">
         {a.status_codes.slice(0, 3).map((s) => (
-          <span key={s} className="rounded bg-[#21262d] px-0.5 font-mono text-[9px] text-muted-foreground">{s}</span>
+          <span key={s} className="rounded bg-(--viz-outline) px-0.5 font-mono text-[9px] text-muted-foreground">{s}</span>
         ))}
       </div>
     </button>
@@ -277,7 +277,7 @@ function TargetGuide({ assets, onPick }: {
   }, [assets, q])
   return (
     <div className="flex h-full items-center justify-center p-6">
-      <div className="w-full max-w-96 rounded-lg border border-[#30363d] bg-[#161b22] p-4">
+      <div className="w-full max-w-96 rounded-lg border border-(--viz-edge) bg-(--viz-card) p-4">
         <p className="text-sm font-medium">选择要查看攻击链路的目标</p>
         <p className="mt-0.5 text-[11px] text-muted-foreground">
           主脊：目标 → 意图（规划）→ 收尾（漏洞/发现/死路）；跨任务、跨会话合并。
@@ -287,7 +287,7 @@ function TargetGuide({ assets, onPick }: {
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder="搜索 IP/域名…"
-          className="mt-3 h-7 w-full rounded border border-[#30363d] bg-[#0d1117] px-2 text-[11px] outline-none focus:border-primary/50"
+          className="mt-3 h-7 w-full rounded border border-(--viz-edge) bg-(--viz-canvas) px-2 text-[11px] outline-none focus:border-primary/50"
         />
         <div className="mt-2 max-h-72 space-y-0.5 overflow-auto">
           {roots.map((a) => (
@@ -297,7 +297,7 @@ function TargetGuide({ assets, onPick }: {
               onClick={() => onPick(a.id)}
               className="flex w-full items-center gap-2 rounded px-2 py-1 text-left hover:bg-accent/40"
             >
-              <span className="rounded border border-[#30363d] px-1 font-mono text-[10px] text-muted-foreground">
+              <span className="rounded border border-(--viz-edge) px-1 font-mono text-[10px] text-muted-foreground">
                 {a.type}
               </span>
               <span className="truncate font-mono text-xs">{a.value}</span>
@@ -350,12 +350,12 @@ function DetailPane({ pid, attempt, node, onClose, onReopen }: {
   }
 
   return (
-    <div className="absolute inset-y-0 right-0 z-20 w-80 overflow-auto border-l border-[#30363d] bg-[#161b22]">
-      <div className="sticky top-0 flex items-center gap-2 border-b border-[#21262d] bg-[#161b22] px-3 py-2">
+    <div className="absolute inset-y-0 right-0 z-20 w-80 overflow-auto border-l border-(--viz-edge) bg-(--viz-card)">
+      <div className="sticky top-0 flex items-center gap-2 border-b border-(--viz-outline) bg-(--viz-card) px-3 py-2">
         <span className="size-2 rounded-full" style={{
           background: attempt
             ? RESULT_STYLE[attempt.result].color
-            : node?.type === "target" ? "#58a6ff" : SEV_COLOR[node?.severity || "info"],
+            : node?.type === "target" ? "var(--viz-node-target)" : SEV_COLOR[node?.severity || "info"],
         }} />
         <span className="min-w-0 flex-1 truncate text-xs font-medium">{title}</span>
         <button type="button" className="text-[11px] text-muted-foreground hover:text-foreground"
@@ -368,7 +368,7 @@ function DetailPane({ pid, attempt, node, onClose, onReopen }: {
             <Section title="意图陈述"><p>{node.statement}</p></Section>
             <Section title="收尾状态">
               {node.status === "open"
-                ? <p className="text-[#58a6ff]">待收尾（漏洞 / 有效发现 / 死路 三选一）</p>
+                ? <p className="text-(--viz-node-target)">待收尾（漏洞 / 有效发现 / 死路 三选一）</p>
                 : <p>
                     <span style={{ color: OUTCOME_BADGE[node.outcome || ""]?.color }}>
                       {OUTCOME_BADGE[node.outcome || ""]?.label || "—"}
@@ -391,7 +391,7 @@ function DetailPane({ pid, attempt, node, onClose, onReopen }: {
                 type="button"
                 disabled={busy}
                 onClick={reopen}
-                className="w-full rounded border border-[#30363d] px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground disabled:opacity-50"
+                className="w-full rounded border border-(--viz-edge) px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground disabled:opacity-50"
               >
                 🔓 重开意图（新证据/收尾被否决）
               </button>
@@ -402,7 +402,7 @@ function DetailPane({ pid, attempt, node, onClose, onReopen }: {
         {node?.type === "finding" && (
           <>
             <Section title="类别">
-              <p style={{ color: node.category === "vuln" ? "#f85149" : "#3fb950" }}>
+              <p style={{ color: node.category === "vuln" ? "var(--viz-sev-critical)" : "var(--viz-success)" }}>
                 {node.category === "vuln" ? "漏洞" : "有效发现（intel）"}
               </p>
             </Section>
@@ -430,7 +430,7 @@ function DetailPane({ pid, attempt, node, onClose, onReopen }: {
                 <Field k="类型" v={attempt.representative.resp_mime || ""} />
                 <p className="break-all font-mono">{attempt.representative.url}</p>
                 {attempt.representative.snippet && (
-                  <pre className="mt-1 max-h-32 overflow-auto rounded bg-[#0d1117] p-1.5 font-mono text-[10px]">{attempt.representative.snippet}</pre>
+                  <pre className="mt-1 max-h-32 overflow-auto rounded bg-(--viz-canvas) p-1.5 font-mono text-[10px]">{attempt.representative.snippet}</pre>
                 )}
               </Section>
             )}
@@ -460,11 +460,11 @@ function RawSections({ row }: { row: HttpHistoryRow }) {
     <>
       <Section title="请求头">
         <Headers m={row.req_headers} />
-        {row.req_body && <pre className="mt-1 max-h-32 overflow-auto rounded bg-[#0d1117] p-1.5 font-mono text-[10px]">{row.req_body}</pre>}
+        {row.req_body && <pre className="mt-1 max-h-32 overflow-auto rounded bg-(--viz-canvas) p-1.5 font-mono text-[10px]">{row.req_body}</pre>}
       </Section>
       <Section title="响应头">
         <Headers m={row.resp_headers} />
-        {row.resp_body && <pre className="mt-1 max-h-40 overflow-auto rounded bg-[#0d1117] p-1.5 font-mono text-[10px]">{row.resp_body}</pre>}
+        {row.resp_body && <pre className="mt-1 max-h-40 overflow-auto rounded bg-(--viz-canvas) p-1.5 font-mono text-[10px]">{row.resp_body}</pre>}
       </Section>
     </>
   )
@@ -625,8 +625,8 @@ function layoutGraph(
   const shift = minY < 20 ? 20 - minY : 0
 
   // 分组色标：同一父意图的 findings 同色
-  const palette = ["#58a6ff", "#3fb950", "#d29922", "#bc8cff",
-                   "#39c5cf", "#f0883e", "#ff7b72", "#6e7681"]
+  const palette = ["var(--viz-sev-low)", "var(--viz-success)", "var(--viz-sev-medium)", "var(--viz-chain)",
+                   "var(--viz-accent-cyan)", "var(--viz-accent-orange)", "var(--viz-sev-high)", "var(--viz-handle)"]
   const hueOf = (id: string) => {
     let h = 0
     for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0
@@ -771,7 +771,7 @@ function Canvas({ pid, assets, initialTarget, onTargetChange }: {
       style,
       markerEnd: {
         type: MarkerType.ArrowClosed,
-        color: (style.stroke as string) || "#6e7681", width: 14, height: 14,
+        color: (style.stroke as string) || "var(--viz-handle)", width: 14, height: 14,
       },
     })
     // 主脊边
@@ -780,27 +780,27 @@ function Canvas({ pid, assets, initialTarget, onTargetChange }: {
       const tgtNode = nodeById.get(e.target)
       if (e.kind === "derive") {
         out.push(mk(`${e.source}->${e.target}:${e.kind}`, e.source, e.target,
-          { stroke: "#58a6ff", strokeWidth: 1.3, opacity: 0.7 }))
+          { stroke: "var(--viz-sev-low)", strokeWidth: 1.3, opacity: 0.7 }))
       } else if (e.kind === "outcome") {
-        const color = tgtNode?.category === "vuln" ? "#f85149" : "#3fb950"
+        const color = tgtNode?.category === "vuln" ? "var(--viz-sev-critical)" : "var(--viz-success)"
         out.push(mk(`${e.source}->${e.target}:${e.kind}`, e.source, e.target,
           { stroke: color, strokeWidth: 1.6, opacity: 0.85 }))
       } else if (e.kind === "bypass") {
         out.push(mk(`${e.source}->${e.target}:${e.kind}`, e.source, e.target,
-          { stroke: "#8b949e", strokeWidth: 1.1, opacity: 0.5, strokeDasharray: "5 4" }))
+          { stroke: "var(--viz-sev-info)", strokeWidth: 1.1, opacity: 0.5, strokeDasharray: "5 4" }))
       }
     }
     // 执行层边
     for (const e of data.exec_edges) {
       if (renderedAttempts.has(e.source) && renderedAttempts.has(e.target)) {
         out.push(mk(`${e.source}->${e.target}:exec`, e.source, e.target,
-          { stroke: "#484f58", strokeWidth: 1, opacity: 0.8 }))
+          { stroke: "var(--viz-edge-muted)", strokeWidth: 1, opacity: 0.8 }))
       }
     }
     for (const c of clusters) {
       if (c.intentId && c.attempts[0]) {
         out.push(mk(`${c.intentId}->${c.attempts[0].id}:conn`, c.intentId, c.attempts[0].id,
-          { stroke: "#484f58", strokeWidth: 1, opacity: 0.55, strokeDasharray: "3 3" }))
+          { stroke: "var(--viz-edge-muted)", strokeWidth: 1, opacity: 0.55, strokeDasharray: "3 3" }))
       }
     }
     return out
@@ -817,12 +817,12 @@ function Canvas({ pid, assets, initialTarget, onTargetChange }: {
     && data.counts.intents === 0 && data.attempts.length === 0
 
   return (
-    <div className="fc-dark absolute inset-0 bg-[#0d1117]">
+    <div className="fc-dark absolute inset-0 bg-(--viz-canvas)">
       {/* 目标条 */}
-      <div className="absolute inset-x-0 top-0 z-20 flex items-center gap-2 border-b border-[#21262d] bg-[#0d1117]/90 px-3 py-1.5">
+      <div className="absolute inset-x-0 top-0 z-20 flex items-center gap-2 border-b border-(--viz-outline) bg-(--viz-canvas)/90 px-3 py-1.5">
         <button
           type="button"
-          className="rounded border border-[#30363d] px-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground"
+          className="rounded border border-(--viz-edge) px-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground"
           onClick={() => { applyTarget(""); setSelAttempt(null); setSelNode(null) }}
           title="重新选择目标"
         >
@@ -867,13 +867,13 @@ function Canvas({ pid, assets, initialTarget, onTargetChange }: {
         minZoom={0.2}
         proOptions={{ hideAttribution: true }}
       >
-        <Background color="#30363d" gap={20} size={1} />
+        <Background color="var(--viz-edge)" gap={20} size={1} />
         <Controls showInteractive={false} position="bottom-left" />
       </ReactFlow>
 
       {empty && (
         <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
-          <p className="rounded border border-dashed border-[#30363d] px-4 py-2 text-center text-xs text-muted-foreground">
+          <p className="rounded border border-dashed border-(--viz-edge) px-4 py-2 text-center text-xs text-muted-foreground">
             该站暂无意图与执行记录<br />
             <span className="text-[10px]">Agent 声明意图（declare_intent）并探测后自动出现</span>
           </p>
