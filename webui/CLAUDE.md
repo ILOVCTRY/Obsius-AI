@@ -10,7 +10,7 @@
 
 - 开发 `npm run dev`（5173；`/api` 与 WS 代理到 127.0.0.1:8420）；Vite 只绑 IPv6，浏览器用 `http://localhost:5173`。
 - 构建 `npm run build`（tsc -b + vite build，**必须零 TS 错误**）；产物 `dist/` 由后端**同源静态托管**（desktop-app-shell M2，`create_app(static_dir=)` SPA fallback——前端本就走相对路径 `/api/*` + `location.host` 拼 WS，**同源零改动**；src/ 勿写死端口）。改 core 需重启后端，前端 HMR 仅 dev 模式。
-- 桌面窗口模式（M1）：`serve.py --window` 或双击「启动平台（窗口）.bat」。**窗口标题栏已拆件**（无独立条）：品牌 `NavBrand` 在左导航顶部（兼作拖动区，双击最大化），窗口按钮 `WindowControls` 项目页并入 `.topbar` 右侧、其余页绝对定位到内容区右上角（`.window-controls-float`）；无标题栏页用 `.window-drag-strip` 作拖动区，顶部 36px 由各视图根节点 `pt-9` 承担，且首页 `ProjectsView` 自身是唯一纵向滚动容器，避免外层与页面叠加双滚动条。拖动靠 `-webkit-app-region`，交互元素须 `no-drag`（`.topbar button` 等已在 index.css 声明）。
+- 桌面窗口模式（M1）：`serve.py --window` 或双击「启动平台（窗口）.bat」。**窗口标题栏已拆件**（无独立条）：品牌 `NavBrand` 在左导航顶部（兼作拖动区，双击最大化），窗口按钮 `WindowControls` 项目页并入 `.topbar` 右侧、其余页绝对定位到内容区右上角（`.window-controls-float`）；无标题栏页用 `.window-drag-strip` 作拖动区，顶部 36px 由各视图根节点 `pt-9` 承担，首页 `ProjectsView` 自身是唯一纵向滚动容器；项目页外壳和主区使用 `min-h-0/overflow-hidden`，滚动只由具体视图内部承担，避免右侧出现外层滚动条。拖动靠 `-webkit-app-region`，交互元素须 `no-drag`（`.topbar button` 等已在 index.css 声明）。
 
 ## 页面（src/views/）
 

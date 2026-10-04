@@ -480,7 +480,7 @@ export default function App() {
   }
 
   return (
-    <div className="app-shell flex h-screen flex-col">
+    <div className="app-shell flex h-screen flex-col overflow-hidden">
       {eventsWatcher}
       <div className="flex min-h-0 flex-1">
         <Group orientation="horizontal" className="flex min-h-0 w-full"
@@ -501,6 +501,7 @@ export default function App() {
           )}
           {/* 中：主区（直播间在 live 视图与黑板同屏共存） */}
           <Panel id="main">
+            <div className="flex h-full min-h-0 flex-col overflow-hidden">
             <div className="topbar flex h-16 shrink-0 items-center gap-4 border-b px-5">
               <div className="mobile-brand"><div className="brand-mark"><Sparkles size={15} /></div><span>Obsius</span></div>
               <div className="project-context"><span className="eyebrow">ACTIVE PROJECT</span><div className="project-title"><span className="project-pulse" /><h1>{meta?.name ?? "加载项目"}</h1><Badge variant="outline" className="project-badge">{meta ? bindingBadge(meta.track, meta.experts) : "…"}</Badge></div></div>
@@ -510,7 +511,7 @@ export default function App() {
               <Button size="sm" variant="ghost" className="back-project" onClick={goHome}><ArrowLeft size={15} />首页</Button>
               <WindowControls className="-mr-5" />
             </div>
-            <main className={cn("h-full min-w-0", view === "live" ? "flex" : "overflow-auto")}>
+            <main className={cn("min-h-0 min-w-0 flex-1", view === "live" ? "flex" : "overflow-hidden")}>
             <ErrorBoundary>
           {view === "live" && (
             <>
@@ -584,6 +585,7 @@ export default function App() {
           {view === "settings" && <SettingsView nav={settingsNav} pid={pid} />}
             </ErrorBoundary>
             </main>
+            </div>
           </Panel>
         </Group>
         {navCollapsed && <NavReveal onExpand={toggleNavCollapsed} />}
