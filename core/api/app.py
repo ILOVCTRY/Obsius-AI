@@ -6509,25 +6509,45 @@ def create_app(
             log.exception("C4 L2 自动续跑失败 pid=%s", pid)
 
     def _submit_worker(pid: str, agent: AgentSession, **extra_meta) -> str:
-        """agent-work job 的唯一提交口（批 5）：run() 末尾的 A 触发可能因自身 job 仍
-        running 被软去重跳过，这里统一挂 on_done 在状态翻 done 后再评估一次续链，
-        兜住「worker 在 tick 收尾期间秒退」的搁浅竞态。meta.auto=True 为自动消费
-        （受 paused 约束）；人显式跑队列/恢复（无 auto）不受 paused 认领约束。"""
+        """agent-work job 的唯一提交口（批 5）。
+
+        开窗只创建 idle 会话；真正提交 worker 时才切换为 running，worker
+        完成且没有 successor worker 时再归回 idle。armed 只是自动接活开关，
+        不参与 active_sessions 计数。"""
         sid = agent.session["id"]
         manual = not bool(extra_meta.get("auto"))
         tail = {"replan_busy": False}  # 重排尾部触发是否被在跑编排动作挤掉
+        bb = _project(pid).bb
+        row = bb.get_session(sid)
+        if row is not None and row.get("status") not in {"closed", "paused"}:
+            try:
+                bb.set_session_status(sid, "running")
+            except ValueError:
+                pass
+
+        def on_done(_job: dict | None) -> None:
+            # 先执行续跑/自动链回调：这些回调可能立即提交 successor worker，
+            # 因此必须在回调之后判断，不能把新 worker 的 running 状态覆盖成 idle。
+            _maybe_auto_resume(pid, agent)  # C4：L2 下 budget_paused 自动续跑
+            _maybe_mission_auto_tick(pid, reason=f"worker-done:{sid}")  # C2 L1 自动派生
+            _maybe_auto_tick(pid, reason=f"worker-done:{sid}")
+            _schedule(pid, reason=f"worker-done:{sid}")  # v0.71 调度器
+            # 重排只补「尾部被挤掉」的那一次；已提交/已起 wait 的不重复触发
+            if tail["replan_busy"]:
+                _maybe_replan(pid, reason=f"worker-done:{sid}")
+            if _session_job_running(sid):
+                return
+            current = bb.get_session(sid)
+            if current and current.get("status") not in {"closed", "paused"}:
+                try:
+                    bb.set_session_status(sid, "idle")
+                except ValueError:
+                    pass
+
         return app.state.jobs.submit(
             "agent-work", _worker_loop(agent, manual=manual, tail=tail),
             meta={"project_id": pid, "session_id": sid, **extra_meta},
-            on_done=lambda _j: (
-                _maybe_auto_resume(pid, agent),  # C4：L2 下 budget_paused 自动续跑
-                _maybe_mission_auto_tick(pid, reason=f"worker-done:{sid}"),  # C2 L1 自动派生
-                _maybe_auto_tick(pid, reason=f"worker-done:{sid}"),
-                _schedule(pid, reason=f"worker-done:{sid}"),  # v0.71 调度器：终态释放名额起跑队头
-                # 重排只补「尾部被挤掉」的那一次；已提交/已起 wait 的不重复触发
-                _maybe_replan(pid, reason=f"worker-done:{sid}")
-                if tail["replan_busy"] else None,
-            ))
+            on_done=on_done)
 
     # ---------- L2 全自动链（批 5，DESIGN §6.8：事件驱动，无调度器/无轮询） ----------
 

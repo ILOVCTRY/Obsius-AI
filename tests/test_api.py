@@ -265,8 +265,11 @@ def test_spawn_session_cap_returns_409(client):
     r = client.patch(f"/api/projects/{pid}/config",
                      json={"config": {"autonomy": {"level": "L1", "sessions_cap": 1}}})
     assert r.status_code == 200
-    # 直接在黑板登记一个非 closed 会话（无 key 环境开不了真窗）
-    client.app.state.projects[pid].bb.register_session(pid, "占位会话", role="_generalist")
+    # 仅开窗不会占用 cap；只有运行中的会话才计入。
+    sid = client.app.state.projects[pid].bb.register_session(pid, "占位会话", role="_generalist")["id"]
+    resp = client.post(f"/api/projects/{pid}/agents", json={"role": "_generalist"})
+    assert resp.status_code == 201
+    client.app.state.projects[pid].bb.set_session_status(sid, "running")
     resp = client.post(f"/api/projects/{pid}/agents", json={"role": "_generalist"})
     assert resp.status_code == 409 and "sessions_cap=1" in resp.json()["detail"]
 
@@ -1560,7 +1563,8 @@ def test_l1_delegate_approved_but_cap_full_exec_failed(tmp_path):
         pr = c.patch(f"/api/projects/{pid}/config",
                      json={"config": {"autonomy": {"level": "L1", "sessions_cap": 1}}})
         assert pr.status_code == 200
-        c.app.state.projects[pid].bb.register_session(pid, "占位会话", role="_generalist")
+        sid = c.app.state.projects[pid].bb.register_session(pid, "占位会话", role="_generalist")["id"]
+        c.app.state.projects[pid].bb.set_session_status(sid, "running")
 
         r = c.post(f"/api/approvals/{item['id']}/decide", json={"decision": "approved"})
         assert r.status_code == 200
@@ -4353,7 +4357,7 @@ def test_human_delegate_l2_window_runs_delegation(tmp_path):
         assert spawns[0]["role"] == "recon"
         assert spawns[0].get("origin") == "human"  # 人开的窗，无 task-window 自动补
         from core.autonomy import count_active_sessions
-        assert count_active_sessions(bb, pid) == 1  # 委托收尾不退窗
+        assert count_active_sessions(bb, pid) == 0  # 委托收尾后会话 idle，不占活跃名额
         rows = {s["id"]: s for s in c.get(f"/api/projects/{pid}/sessions").json()}
         assert rows[sid]["worker_armed"] is True and rows[sid]["status"] == "idle"
 
@@ -4390,7 +4394,7 @@ def test_l1_untargeted_human_tasks_need_explicit_delegation(tmp_path):
         assert len(done) == 1 and done[0]["claimed_by"] == sid
         # 编排器未参与：仍无审批单；另两件未指派委托依旧 open
         assert c.get(f"/api/projects/{pid}/approvals").json() == []
-        assert count_active_sessions(c.app.state.projects[pid].bb, pid) == 1
+        assert count_active_sessions(c.app.state.projects[pid].bb, pid) == 0
 
 
 def test_legacy_auto_spawn_key_ignored(tmp_path):
@@ -4413,7 +4417,7 @@ def test_legacy_auto_spawn_key_ignored(tmp_path):
         assert r.status_code == 201 and r.json()["session_id"] == sid
         _wait_no_running(c, pid)
         from core.autonomy import count_active_sessions
-        assert count_active_sessions(c.app.state.projects[pid].bb, pid) == 1
+        assert count_active_sessions(c.app.state.projects[pid].bb, pid) == 0
         rows = {t["objective"]: t for t in c.get(f"/api/projects/{pid}/tasks").json()}
         assert rows["显式委托"]["status"] == "done"
         assert rows["未指派委托"]["status"] == "open"
@@ -5227,7 +5231,7 @@ def test_task_target_session_arms_idle_window(tmp_path):
         assert meta.get("worker_armed") is True and "bound_task_id" not in meta
         assert sess["status"] == "idle"  # 委托收尾不退窗
         from core.autonomy import count_active_sessions
-        assert count_active_sessions(c.app.state.projects[pid].bb, pid) == 1
+        assert count_active_sessions(c.app.state.projects[pid].bb, pid) == 0
 
 
 def test_close_session_unassigns_without_rebind(client):

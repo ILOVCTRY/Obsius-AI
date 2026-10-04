@@ -572,7 +572,6 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
   const auditShown = useMemo(() => [...auditItems].reverse(), [auditItems])
 
   const listRef = useRef<HTMLDivElement>(null)
-  const streamContentRef = useRef<HTMLDivElement>(null)
   const [streamShort, setStreamShort] = useState(false)
   // 命令对配对（Claude Code 式渲染，DESIGN.md §12）：command/command.result 就地合并为
   // 一条折叠行。新数据按 payload.call_id 配对；存量旧事件无 call_id，降级为「同会话最近
@@ -603,13 +602,11 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
   const shown = useMemo(() => [...leanItems].reverse(), [leanItems])
   useEffect(() => {
     const el = listRef.current
-    const content = streamContentRef.current
     if (!el) return
     const update = () => setStreamShort(el.scrollHeight <= el.clientHeight + 2)
     update()
     const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(update) : null
     observer?.observe(el)
-    if (content) observer?.observe(content)
     return () => observer?.disconnect()
   }, [shown.length, activeTab, filter, viewMode])
   // 统计行（会话流改造 2026-10-03，cc-haha 风格）：token/最后更新/条数。
@@ -1594,14 +1591,12 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
       <div
         ref={listRef}
         onScroll={onListScroll}
-        className={cn("min-h-0 flex-1 overflow-auto px-3", streamShort ? "flex" : "flex flex-col-reverse")}
+        className={cn(
+          "min-h-0 flex-1 overflow-auto px-3",
+          streamShort ? "flex flex-col" : "flex flex-col-reverse",
+        )}
       >
-        <div
-          ref={streamContentRef}
-          className={cn("w-full", streamShort ? "flex flex-col" : "shrink-0")}
-        >
-          {renderStream(streamShort ? leanItems : shown, true)}
-        </div>
+        {renderStream(streamShort ? leanItems : shown, true)}
       </div>
       )}
 

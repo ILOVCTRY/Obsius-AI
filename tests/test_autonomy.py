@@ -163,15 +163,21 @@ def test_soft_warning_fires_once_then_resets_when_budget_raised(tmp_path):
 def test_hard_block_session_cap(bb):
     b, pid = bb
     s1 = b.register_session(pid, "w1")
-    b.register_session(pid, "w2")
-    # 默认 cap=4：2 个会话不拦
+    s2 = b.register_session(pid, "w2")
+    # 开窗只是 idle，不占活跃名额；默认 cap=4 可继续开窗
     assert autonomy.hard_block_reason(b, pid, "spawn_session") is None
     b.update_project_config(pid, {"autonomy": normalize_autonomy(
         {"level": "L2", "sessions_cap": 2})})
+    assert autonomy.hard_block_reason(b, pid, "spawn_session") is None
+    assert autonomy.count_active_sessions(b, pid) == 0
+    b.set_session_status(s1["id"], "running")
+    b.set_session_status(s2["id"], "running")
     reason = autonomy.hard_block_reason(b, pid, "spawn_session")
     assert reason and "sessions_cap=2" in reason
-    # closed 会话不计入
-    b.close_session(s1["id"])
+    # 停止一个运行会话后释放名额；closed 会话同样不计入
+    b.set_session_status(s1["id"], "idle")
+    assert autonomy.hard_block_reason(b, pid, "spawn_session") is None
+    b.close_session(s2["id"])
     assert autonomy.hard_block_reason(b, pid, "spawn_session") is None
 
 

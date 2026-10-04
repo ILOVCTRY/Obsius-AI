@@ -201,9 +201,13 @@ def _cache_hit(row: dict) -> float | None:
 
 
 def count_active_sessions(bb, project_id: str) -> int:
-    """计数口径 = 黑板 sessions 行非 closed（计划批 2 明文；不关内存态的事）。"""
+    """计数口径 = 黑板中真正运行的会话（status=running）。
+
+    仅开窗、idle、armed 待命和 paused 会话都不占用活跃会话名额；会话
+    worker 启动时由 API 统一入口切换为 running，空退或收尾后归回 idle。
+    """
     return bb.conn.execute(
-        "SELECT COUNT(*) AS n FROM sessions WHERE project_id=? AND status!='closed'",
+        "SELECT COUNT(*) AS n FROM sessions WHERE project_id=? AND status='running'",
         (project_id,)).fetchone()["n"]
 
 
@@ -255,7 +259,7 @@ def hard_block_reason(bb, project_id: str, action: str) -> str | None:
     auto = autonomy_of(proj["config"], track=proj.get("track"))
     if action == "spawn_session" and count_active_sessions(bb, project_id) >= auto["sessions_cap"]:
         return (f"活跃会话已达项目上限 sessions_cap={auto['sessions_cap']}"
-                "（计数=非 closed 会话；关窗后可再开）")
+                "（计数=正在运行的会话；任务结束或停止后释放）")
     st = bb.usage_state_get(project_id)
     tb = auto["token_budget"]
     if tb and total_tokens(st) >= tb:

@@ -157,9 +157,9 @@ export function CoordinationPane({ pid, onOpenSession }: {
               <div className="coord-detail-head">
                 <div><div className="coord-eyebrow">ACTIVE PLAN</div><h2>{selected.name}</h2><p>{selected.objective || "尚未填写计划目标"}</p></div>
                 <div className="coord-actions">
-                  {selected.status === "active" && <button className="coord-secondary" onClick={() => void setPlanStatus("paused")}><Pause size={13} />暂停计划</button>}
-                  {selected.status !== "active" && selected.status !== "completed" && <button className="coord-primary" onClick={() => void setPlanStatus("active")}><Play size={13} />启动计划</button>}
-                  {selected.status === "paused" && <button className="coord-secondary" onClick={() => void setPlanStatus("draft")}><RefreshCw size={13} />回到草稿</button>}
+                  {selected.status === "active" && <button className="coord-secondary" onClick={() => void controlPlan("pause")}><Pause size={13} />暂停计划</button>}
+                  {selected.status !== "active" && selected.status !== "completed" && <button className="coord-primary" onClick={() => setConfirmOpen(true)}><Play size={13} />启动计划</button>}
+                  {selected.status === "paused" && <button className="coord-secondary" onClick={() => setPlanStatus("draft")}><RefreshCw size={13} />回到草稿</button>}
                 </div>
               </div>
               <div className="coord-task-board">

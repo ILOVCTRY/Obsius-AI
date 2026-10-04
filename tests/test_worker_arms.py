@@ -227,14 +227,14 @@ def test_spawn_task_window_open_rebind(client):
     sid = r2b.json()["session_id"]
     assert tq.get_task(tid)["target_session"] == sid
 
-    # cap 压满（活跃窗 sid 占 1）→ 新任务无绑，补绑 409
+    # idle 待命窗不占 active_sessions；只有运行中的会话才占 cap。
     client.patch(f"/api/projects/{pid}/config",
                  json={"config": {"autonomy": {"level": "L0", "paused": True,
                                                "sessions_cap": 1}}})
     tid3 = tq.publish(pid, "超额目标", task_type="generic",
                       noise_budget="passive", created_by="human")
     assert tq.get_task(tid3)["target_session"] == ""
-    assert client.post(f"/api/tasks/{tid3}/spawn-window").status_code == 409
+    assert client.post(f"/api/tasks/{tid3}/spawn-window").status_code == 200
 
 
 class _GatedScriptedLLM(ScriptedLLM):

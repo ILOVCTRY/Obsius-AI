@@ -376,10 +376,6 @@ function HumanNoteRow({ event }: { event: BBEvent }) {
   const text = str(event.payload.text) || str(event.payload.title)
   return (
     <div className="w-full" title={timeTitle(event.created_at)}>
-      <div className="mb-1 flex items-center gap-2">
-        <span className="h-px flex-1 bg-border/60" />
-        <TimeTag ts={event.created_at} />
-      </div>
       <div className="px-1 text-sm leading-relaxed">
         <span className="mr-1.5 select-none font-mono text-primary">❯</span>
         <span className="whitespace-pre-wrap break-words text-foreground">{text}</span>
