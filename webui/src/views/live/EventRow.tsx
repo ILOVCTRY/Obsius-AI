@@ -400,9 +400,9 @@ function AgentReplyRow({ event, streaming }: { event: BBEvent; streaming?: boole
   }
   return (
     <div className="px-1 py-0.5" title={timeTitle(event.created_at)}>
-      {/* 超长回复内部滚动（审计全文仍可展开过程行看 JSON） */}
+      {/* 回复正文交给外层消息流滚动，避免嵌套滚动容器造成下方空白和内容截断。 */}
       <MarkdownView content={text} prefix={`chat-${event.id}`}
-        className="max-h-96 overflow-auto text-sm leading-relaxed text-foreground/90" />
+        className="text-sm leading-relaxed text-foreground/90" />
     </div>
   )
 }
