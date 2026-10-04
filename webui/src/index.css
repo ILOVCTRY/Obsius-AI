@@ -1281,6 +1281,8 @@
 .wb-context-terminal .xterm-viewport { background: var(--viz-terminal) !important; scrollbar-color: var(--muted-foreground) transparent; scrollbar-width: thin; }
 .wb-context-terminal .xterm-screen { padding: 0 2px; }
 .wb-rail { display: flex; width: 100%; min-width: 0; min-height: 0; flex: 1 1 auto; flex-direction: column; overflow: hidden; border-left: 1px solid var(--border); background: var(--theme-raw-8b524e3722); }
+.wb-rail [data-slot="scroll-area-viewport"] { min-width: 0; overflow-x: hidden; }
+.wb-rail [data-slot="scroll-area-scrollbar"] { z-index: 1; }
 .wb-rail-head { display: flex; align-items: center; gap: 6px; padding: 9px 10px; border-bottom: 1px solid var(--border); }
 .wb-rail-title { font-size: 11.5px; font-weight: 700; letter-spacing: -.01em; }
 .wb-rail-chain { display: inline-flex; align-items: center; gap: 4px; padding: 3px 7px; border: 1px solid var(--theme-raw-69747d9905); border-radius: 7px; background: var(--theme-raw-a4dcc6a258); color: var(--primary); font-size: 10px; font-weight: 650; transition: border-color .15s, background .15s; }
@@ -1294,7 +1296,7 @@
 .wb-rail-chip { padding: 2px 7px; border-radius: 6px; color: var(--muted-foreground); font-size: 10px; transition: background .14s, color .14s; }
 .wb-rail-chip:hover { background: var(--theme-raw-9de7753430); }
 .wb-rail-chip.is-on { background: var(--theme-raw-a73eb30acf); color: var(--primary); }
-.wb-rail-row { min-width: 0; cursor: pointer; padding: 7px 8px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; transition: background .14s, border-color .14s; }
+.wb-rail-row { display: block; width: 100%; min-width: 0; box-sizing: border-box; cursor: pointer; padding: 7px 8px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; transition: background .14s, border-color .14s; }
 .wb-rail-row:hover { border-color: var(--theme-raw-69747d9905); background: var(--theme-raw-9de7753430); }
 .wb-rail-empty { padding: 14px 12px; color: var(--muted-foreground); font-size: 11px; text-align: center; }
 body.wb-dragging { cursor: col-resize; user-select: none; }

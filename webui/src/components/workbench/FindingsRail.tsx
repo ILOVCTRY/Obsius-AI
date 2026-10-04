@@ -257,17 +257,17 @@ export const FindingsRail = memo(function FindingsRail({ pid, track, embedded = 
               {filtered.length === 0 && <div className="wb-rail-empty">暂无发现</div>}
               {filtered.map((f) => (
                 <div key={f.id} className="wb-rail-row" onClick={() => setDetail(f)}>
-                  <div className="flex items-center gap-2">
-                    <span className={cn("text-[10px] font-medium", SEVERITY_COLOR[f.severity])}
+                  <div className="flex min-w-0 items-start gap-2">
+                    <span className={cn("shrink-0 text-[10px] font-medium", SEVERITY_COLOR[f.severity])}
                           title={f.rating_basis ? `判级依据: ${f.rating_basis}` : undefined}>
                       {f.severity}
                     </span>
-                    <span className="min-w-0 flex-1 truncate text-[12px]">{f.title}</span>
+                    <span className="min-w-0 flex-1 break-words text-[12px] leading-5">{f.title}</span>
                     {f.status === "verified" && (
-                      <Badge variant="outline" className="text-[9px]">verified</Badge>
+                      <Badge variant="outline" className="shrink-0 text-[9px]">verified</Badge>
                     )}
                   </div>
-                  <div className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground">
+                  <div className="mt-0.5 min-w-0 break-words font-mono text-[10px] leading-4 text-muted-foreground">
                     {f.vuln_class}
                     {f.poc_artifact_id && <> · POC</>}
                   </div>
