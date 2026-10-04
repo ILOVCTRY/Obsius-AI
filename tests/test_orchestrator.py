@@ -102,19 +102,23 @@ def test_plan_work_creates_dag_and_delegate_binds_node(env):
         [{"title": "入口侦察", "priority": 1},
          {"title": "验证入口", "role": "", "depends_on": [0]}],
         "找到可复现入口"))
-    assert result["status"] == "active"
-    plan = orch._coord().plan_view(project["id"])
-    assert plan and len(plan["tasks"]) == 2
+    assert result["status"] == "draft"
+    plan = orch._coord().get_plan(project["id"], result["plan_id"])
+    assert plan and plan["status"] == "draft" and len(plan["tasks"]) == 2
     first, second = plan["tasks"]
     assert first["status"] == "ready" and second["status"] == "blocked"
     blocked = orch._tool_delegate("验证入口", plan_node_id=second["id"])
     assert blocked.startswith("[拒绝] 计划节点")
 
 
-def test_stats_injects_active_plan_summary(env):
-    """M3：编排器态势只注入 active 计划节点摘要，不载 objects/conflicts。"""
+def test_stats_ignores_draft_plan_until_confirmed(env):
+    """draft 团队提案在确认前不进入 active 计划态势。"""
+    _bb, project = env
     orch = make_orch(env, ScriptedLLM([]), track=None)
-    orch._tool_plan_work("简报计划", [{"title": "查资产"}], "覆盖入口")
+    result = json.loads(orch._tool_plan_work("简报计划", [{"title": "查资产"}], "覆盖入口"))
+    assert result["status"] == "draft"
+    assert orch._stats().get("plan") is None
+    orch._coord().set_plan_status(project["id"], result["plan_id"], "active")
     stats = orch._stats()
     assert stats["plan"]["name"] == "简报计划"
     assert stats["plan"]["nodes"][0]["status"] == "ready"

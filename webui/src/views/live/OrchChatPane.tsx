@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef } from "react"
 import { MarkdownView } from "@/components/settings/MarkdownView"
 import { fmtDateTimeMin, utcTitle } from "@/lib/datetime"
-import type { BBEvent, OrchPersona, PhaseGoal } from "@/lib/types"
+import type { BBEvent, CoordinationPlanProposal, OrchPersona, PhaseGoal } from "@/lib/types"
 
 // 停链 reason 中文（orch.chain_stopped.payload.reason，与后端 _stop_chain 调用点对齐）
 const CHAIN_STOP_ZH: Record<string, string> = {
@@ -67,8 +67,51 @@ const WAKE_LABELS: Record<string, string> = {
   "phase.gate_open": "阶段出口门满足",
 }
 
-function OrchBubble({ ev, name }: { ev: BBEvent; name: string }) {
+function coordinationPlansOf(ev: BBEvent): CoordinationPlanProposal[] {
+  const raw = (ev.payload as { coordination_plans?: unknown } | null)?.coordination_plans
+  if (!Array.isArray(raw)) return []
+  return raw.filter((x): x is CoordinationPlanProposal => {
+    if (!x || typeof x !== "object") return false
+    const p = x as CoordinationPlanProposal
+    return typeof p.plan_id === "string" && typeof p.name === "string" && Array.isArray(p.nodes)
+  })
+}
+
+function CoordinationProposalCard({ plan, onConfirm, onOpen }: {
+  plan: CoordinationPlanProposal
+  onConfirm?: (plan: CoordinationPlanProposal) => void
+  onOpen?: (plan: CoordinationPlanProposal) => void
+}) {
+  const draft = plan.status === "draft"
+  return <div className="mt-2 rounded-lg border border-primary/30 bg-background/40 p-2.5 text-xs">
+    <div className="flex items-start gap-2">
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <b>{plan.name}</b>
+          <span className="rounded bg-primary/15 px-1.5 py-px text-[10px] text-primary">{draft ? "等待确认" : plan.status}</span>
+        </div>
+        {plan.objective && <p className="mt-1 text-muted-foreground">{plan.objective}</p>}
+      </div>
+      <span className="shrink-0 text-muted-foreground">{plan.nodes.length} 个成员任务</span>
+    </div>
+    <div className="mt-2 space-y-1 border-t border-white/10 pt-2">
+      {plan.nodes.map((node, i) => <div key={node.id} className="flex gap-2">
+        <span className="w-5 shrink-0 text-muted-foreground">{String(i + 1).padStart(2, "0")}</span>
+        <div className="min-w-0 flex-1"><b>{node.title}</b><span className="ml-2 text-muted-foreground">{node.role || "待分配"}</span>
+          {node.depends_on.length > 0 && <small className="ml-2 text-muted-foreground">依赖 {node.depends_on.length} 项</small>}
+        </div>
+      </div>)}
+    </div>
+    <div className="mt-2 flex items-center gap-2 border-t border-white/10 pt-2">
+      {draft ? <button type="button" onClick={() => onConfirm?.(plan)} className="rounded border border-primary/60 bg-primary/10 px-2 py-1 text-[11px] text-primary hover:bg-primary/20">确认执行前检查</button> : <span className="text-(--status-ok)">✓ 已进入协调流程</span>}
+      <button type="button" onClick={() => onOpen?.(plan)} className="rounded border px-2 py-1 text-[11px] text-muted-foreground hover:bg-accent">打开协调</button>
+    </div>
+  </div>
+}
+
+function OrchBubble({ ev, name, onConfirmPlan, onOpenPlan }: { ev: BBEvent; name: string; onConfirmPlan?: (plan: CoordinationPlanProposal) => void; onOpenPlan?: (plan: CoordinationPlanProposal) => void }) {
   const trace = traceOf(ev)
+  const plans = coordinationPlansOf(ev)
   const p = ev.payload as { proactive?: unknown; triggers?: unknown } | null
   const triggers = Array.isArray(p?.triggers)
     ? p!.triggers.filter((x): x is string => typeof x === "string") : []
@@ -86,6 +129,7 @@ function OrchBubble({ ev, name }: { ev: BBEvent; name: string }) {
         </p>
         <MarkdownView content={textOf(ev)} prefix={`orch-chat-${ev.id}`}
           className="max-h-96 overflow-auto text-sm leading-relaxed text-foreground/90" />
+        {plans.map((plan) => <CoordinationProposalCard key={plan.plan_id} plan={plan} onConfirm={onConfirmPlan} onOpen={onOpenPlan} />)}
         {trace.length > 0 && (
           <details className="mt-1 border-t border-white/10 pt-1 text-[11px] text-muted-foreground">
             <summary className="cursor-pointer select-none hover:text-foreground">
@@ -150,7 +194,7 @@ function OrchAnalysisCard({ ev, name, chainActive, startBusy, onStartRun }: {
 }
 
 export function OrchChatPane({ events, busy, persona, goal, onEditGoal, onEditPersona,
-  level, chainActive, autoBusy, onStartAuto, onStopAuto, onStartRun, orchRunning,
+  onConfirmPlan, onOpenPlan, level, chainActive, autoBusy, onStartAuto, onStopAuto, onStartRun, orchRunning,
   chainTicks, chainEstranged, onForceAcquire, uiStyle = "claude" }: {
   events: BBEvent[]
   busy: boolean
@@ -158,6 +202,8 @@ export function OrchChatPane({ events, busy, persona, goal, onEditGoal, onEditPe
   goal: PhaseGoal | null
   onEditGoal: () => void
   onEditPersona: () => void
+  onConfirmPlan?: (plan: CoordinationPlanProposal) => void
+  onOpenPlan?: (plan: CoordinationPlanProposal) => void
   // 自动渗透（auto-attack 2026-09-28）：仅 L2 档显示——链未活=「启动」（弹层选
   // 轮数档→研判→流内确认开跑），链活=「停止」（停链不降档）。非 L2 不渲染。
   level?: string
@@ -339,7 +385,7 @@ export function OrchChatPane({ events, busy, persona, goal, onEditGoal, onEditPe
               <OrchAnalysisCard key={o.id} ev={o} name={orchName}
                 chainActive={chainActive} startBusy={autoBusy} onStartRun={onStartRun} />
             ) : (
-              <OrchBubble key={o.id} ev={o} name={orchName} />
+              <OrchBubble key={o.id} ev={o} name={orchName} onConfirmPlan={onConfirmPlan} onOpenPlan={onOpenPlan} />
             ))}
           </div>
         ))}

@@ -396,9 +396,13 @@ CHAT_SYSTEM_PROMPT = """你是项目主代理（Orchestrator），现在处于**
 1. 用人类的语言简洁作答，结论先行；问下一步计划时用上方态势作答（门没过就说还差什么）。
 2. 执行者看不到对话上下文：delegate 的 objective 必须自包含；系统会自动选窗
    （优先复用空闲同角色窗）或开新窗。
-3. 阶段目标（goal）的变更须由人类确认：你可以在对话里给出结构化草案
+3. 当人类要求组建 Agent 团队、合理分工或按计划协作时，先用 plan_work 登记完整
+   的团队计划。plan_work 只生成等待确认的 draft 提案：你必须在回复中说明成员角色、
+   任务依赖和安全边界，**不得**直接 delegate 这些计划节点。只有人类在 LiveRoom
+   的团队确认卡或「协调」页签确认后，系统才会把计划置 active 并开始派发。
+4. 阶段目标（goal）的变更须由人类确认：你可以在对话里给出结构化草案
    （text/criteria/phase），由人类在编排页签 goal 条确认落盘；未确认前不要当作已生效。
-4. 回答完毕调用 done 结束本轮；纯问答（无需动手）直接 done。
+5. 回答完毕调用 done 结束本轮；纯问答（无需动手）直接 done。
 {delegation_discipline}"""
 
 # 对话轮 LLM 步上限（插队轮不跑长决策链；发布分批语义不适用——人类在场可连续对话）
@@ -493,6 +497,7 @@ class Orchestrator:
         self._spawned: list[dict[str, str]] = []
         self._publish_count = 0  # C1：单轮发布计数（tick 每轮重置）
         self._proposals: list[dict[str, Any]] = []  # 批 6：L0 提案 {op,args,event_id}
+        self._coordination_plans: list[dict[str, Any]] = []  # LiveRoom 聊天中的团队提案
         self._digest: str | None = None
         self._warned_starvation: dict[tuple[str, str], dict] = {}
         self._last_stats_starvation: list[dict] = []
@@ -1408,6 +1413,7 @@ class Orchestrator:
         self._published: list[str] = []
         self._spawned: list[dict[str, str]] = []
         self._proposals = []
+        self._coordination_plans = []
         self._digest: str | None = None
         self._publish_count = 0
         tool_trace: list[dict[str, str]] = []
@@ -1465,7 +1471,9 @@ class Orchestrator:
                 break
         if reply:
             payload: dict[str, Any] = {
-                "role": "orch", "text": reply[:2000], "tool_trace": tool_trace}
+                "role": "orch", "text": reply[:2000], "tool_trace": tool_trace,
+                "coordination_plans": list(self._coordination_plans),
+            }
             if wake:
                 payload["proactive"] = True
                 payload["triggers"] = [t["kind"] for t in wake]
@@ -1813,7 +1821,7 @@ class Orchestrator:
 
     def _tool_plan_work(self, plan_name: str, nodes: list[dict[str, Any]],
                         objective: str = "") -> str:
-        """创建/激活一张计划 DAG；只登记计划，不开窗、不派真实任务。"""
+        """创建一张等待确认的 draft 计划 DAG；不激活、不派单、不启动会话。"""
         if not isinstance(nodes, list) or not nodes:
             return "[拒绝] plan_work 至少需要一个节点"
         if len(nodes) > 20:
@@ -1853,15 +1861,22 @@ class Orchestrator:
                     dep_ids.append(key)
                 if dep_ids:
                     coord.set_dependencies(self.project_id, by_index[idx], dep_ids)
-            coord.set_plan_status(self.project_id, plan["id"], "active")
-            view = coord.plan_view(self.project_id) or coord.get_plan(self.project_id, plan["id"])
-            # 检测环：若所有节点都 blocked 且没有可就绪根，明确拒绝并清理本次草稿。
+            coord.refresh_readiness(self.project_id)
+            view = coord.get_plan(self.project_id, plan["id"])
+            # 检测环：若所有节点都 blocked 且没有可就绪根，明确拒绝。
             if not any(t["status"] == "ready" for t in view["tasks"]):
                 return "[拒绝] plan_work 依赖图无可执行根节点（可能存在循环依赖）"
-            return json.dumps({"plan_id": plan["id"], "status": view["status"],
-                               "nodes": [{"node_id": t["id"], "title": t["title"],
-                                          "status": t["status"], "role": t["role"]}
-                                         for t in view["tasks"]]}, ensure_ascii=False)
+            proposal = {
+                "plan_id": plan["id"], "status": "draft",
+                "name": view["name"], "objective": view["objective"],
+                "nodes": [{"id": t["id"], "title": t["title"],
+                           "description": t["description"], "status": t["status"],
+                           "role": t["role"], "priority": t["priority"],
+                           "depends_on": t["depends_on"]}
+                          for t in view["tasks"]],
+            }
+            self._coordination_plans.append(proposal)
+            return json.dumps(proposal, ensure_ascii=False)
         except (LookupError, TypeError, ValueError) as e:
             return f"[拒绝] plan_work: {e}"
 

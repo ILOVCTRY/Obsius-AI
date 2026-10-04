@@ -1954,6 +1954,24 @@ export interface CoordinationPlan {
   task_counts?: Record<string, number>
 }
 
+export interface CoordinationPlanProposalNode {
+  id: string
+  title: string
+  description?: string
+  role: string
+  priority: number
+  status: CoordinationTaskStatus
+  depends_on: string[]
+}
+
+export interface CoordinationPlanProposal {
+  plan_id: string
+  status: CoordinationPlanStatus
+  name: string
+  objective: string
+  nodes: CoordinationPlanProposalNode[]
+}
+
 export interface CoordinationOverview {
   plans: CoordinationPlan[]
   active_plan_id: string | null

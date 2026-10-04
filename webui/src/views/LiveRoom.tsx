@@ -9,6 +9,7 @@ import { PlanPanel } from "./live/PlanPanel"
 import { OrchChatPane } from "./live/OrchChatPane"
 import { TraeView } from "./live/TraeView"
 import { GoalEditor, PersonaEditor } from "./live/editors"
+import { PlanConfirmDialog } from "./live/coordination/PlanConfirmDialog"
 import { PhaseBar } from "./live/PhaseBar"
 import { EventRow, type StreamItem } from "./live/EventRow"
 import { ApiError, api, pollJob } from "@/lib/api"
@@ -18,7 +19,7 @@ import { useEvents } from "@/lib/useEvents"
 import { usePendingApprovals } from "@/lib/usePendingApprovals"
 import { buildStreamItems } from "@/lib/turnStream"
 import { fmtDateTimeMin } from "@/lib/datetime"
-import type { Approval, AttachmentInfo, Asset, Autonomy, BBEvent, DecideApprovalResult, ModelInfo, OrchPersona, OrchProposal, OrchTickResult, PhaseGoal, ProjectUsage, ReplanResult, RoleInfo, Session, Task } from "@/lib/types"
+import type { Approval, AttachmentInfo, Asset, Autonomy, BBEvent, CoordinationPlan, CoordinationPlanProposal, DecideApprovalResult, ModelInfo, OrchPersona, OrchProposal, OrchTickResult, PhaseGoal, ProjectUsage, ReplanResult, RoleInfo, Session, Task } from "@/lib/types"
 import { StatusDot, type SessionStatus } from "@/components/StatusDot"
 import { Button } from "@/components/ui/button"
 import { ChatStats } from "@/components/chat/ChatStats"
@@ -393,6 +394,17 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
   // + goal/persona 元数据 + 编辑弹层开关
   const [orchBusy, setOrchBusy] = useState(false)
   const [orchMeta, setOrchMeta] = useState<{ phase_goal: PhaseGoal | null; persona: OrchPersona | null } | null>(null)
+  const [pendingCoordinationPlan, setPendingCoordinationPlan] = useState<CoordinationPlan | null>(null)
+  const [coordinationConfirmOpen, setCoordinationConfirmOpen] = useState(false)
+  const refreshCoordination = useCallback(() => api.coordination(pid).catch(() => null), [pid])
+  const openCoordinationPlan = useCallback(async (proposal: CoordinationPlanProposal, confirm = false) => {
+    const next = await refreshCoordination()
+    const plan = next?.plans.find((p) => p.id === proposal.plan_id)
+    if (plan) {
+      setPendingCoordinationPlan(plan)
+      if (confirm) setCoordinationConfirmOpen(true)
+    }
+  }, [refreshCoordination])
   const [goalOpen, setGoalOpen] = useState(false)
   const [personaOpen, setPersonaOpen] = useState(false)
   const refreshOrchMeta = () =>
@@ -1544,6 +1556,8 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
         goal={orchMeta?.phase_goal ?? null}
         onEditGoal={() => setGoalOpen(true)}
         onEditPersona={() => setPersonaOpen(true)}
+        onConfirmPlan={(plan) => void openCoordinationPlan(plan, true)}
+        onOpenPlan={(plan) => { void openCoordinationPlan(plan); setViewMode("coord") }}
         level={usage?.level}
         chainActive={!!usage?.chain?.active}
         autoBusy={autoBusy}
@@ -2069,6 +2083,13 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
       )}
 
       {/* E12 中断确认弹窗已退役（2026-09-19）：中断并入输入行 ■ 钮，单击直接中断（快照保留可续跑） */}
+      <PlanConfirmDialog
+        pid={pid}
+        plan={pendingCoordinationPlan}
+        open={coordinationConfirmOpen}
+        onOpenChange={setCoordinationConfirmOpen}
+        onStarted={() => { setJobInfo("团队计划已确认，协调轮已提交"); void refreshCoordination(); refreshSessions() }}
+      />
 
       {/* 阶段目标 / 拟人身份编辑弹层（M2/M3，入口在编排页签 goal 条） */}
       {goalOpen && (
