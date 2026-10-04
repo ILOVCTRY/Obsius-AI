@@ -25,11 +25,11 @@ const nodeTypes: NodeTypes = { planTask: PlanTaskNode }
 
 export function PlanDag({ tasks, sessions, onOpenSession, onOpenTask }: Props) {
   const { nodes, edges, cycle } = buildPlanFlow(tasks, sessions, { onOpenSession, onOpenTask })
-  return <div className="relative h-[min(62vh,680px)] min-h-[420px] overflow-hidden rounded border bg-background/40">
+  return <div className="plan-dag-canvas relative h-[min(62vh,680px)] min-h-[420px] overflow-hidden rounded border bg-background/40">
     {cycle && <div className="absolute left-2 top-2 z-10 rounded border border-(--status-error) bg-background px-2 py-1 text-[10px] text-(--status-error)">依赖图存在循环，请检查计划</div>}
-    <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} nodesDraggable={false} nodesConnectable={false} fitView fitViewOptions={{ padding: 0.2 }}>
+    <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} nodesDraggable={false} nodesConnectable={false} fitView fitViewOptions={{ padding: 0.2 }} proOptions={{ hideAttribution: true }}>
       <Background gap={24} size={1} />
-      <Controls />
+      <Controls showInteractive={false} position="bottom-left" />
     </ReactFlow>
   </div>
 }

@@ -38,7 +38,7 @@ export function buildPlanFlow(tasks: CoordinationTask[], sessions: Session[], ha
       const session = task.task_id ? sessions.find((item) => item.bound_task_id === task.task_id) : undefined
       nodes.push({ id: `task:${task.id}`, type: "planTask", position: { x: col * (nodeW + colGap), y: row * (nodeH + rowGap) }, data: {
         task, session, unmet: task.depends_on.filter((dep) => byId.get(dep)?.status !== "completed"), ...handlers,
-      }, draggable: false })
+      }, draggable: false, style: { width: nodeW, height: nodeH } })
     })
   }
   const edges: Edge[] = []
