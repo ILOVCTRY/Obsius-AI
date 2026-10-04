@@ -502,7 +502,7 @@ export default function App() {
           {/* 中：主区（直播间在 live 视图与黑板同屏共存） */}
           <Panel id="main">
             <div className="flex h-full min-h-0 flex-col overflow-hidden">
-            <div className="topbar flex h-16 shrink-0 items-center gap-4 border-b px-5">
+            <div className="topbar flex h-16 shrink-0 items-center gap-4 px-5">
               <div className="mobile-brand"><div className="brand-mark"><Sparkles size={15} /></div><span>Obsius</span></div>
               <div className="project-context"><span className="eyebrow">ACTIVE PROJECT</span><div className="project-title"><span className="project-pulse" /><h1>{meta?.name ?? "加载项目"}</h1><Badge variant="outline" className="project-badge">{meta ? bindingBadge(meta.track, meta.experts) : "…"}</Badge></div></div>
               {meta && <div className="project-stats"><span><CheckCircle2 size={13} />{meta.task_stats.done ?? 0}/{Object.values(meta.task_stats).reduce((a, b) => a + b, 0)} 任务</span><span><Blocks size={13} />{meta.findings} 发现</span><span><Globe2 size={13} />{meta.assets} 资产</span></div>}
@@ -511,7 +511,7 @@ export default function App() {
               <Button size="sm" variant="ghost" className="back-project" onClick={goHome}><ArrowLeft size={15} />首页</Button>
               <WindowControls className="-mr-5" />
             </div>
-            <main className={cn("min-h-0 min-w-0 flex-1", view === "live" ? "flex" : "overflow-hidden")}>
+            <main className={cn("min-h-0 min-w-0 flex-1 bg-(--surface-0)", view === "live" ? "flex" : "overflow-hidden")}>
             <ErrorBoundary>
           {view === "live" && (
             <>

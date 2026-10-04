@@ -252,8 +252,8 @@ export const FindingsRail = memo(function FindingsRail({ pid, track, embedded = 
             </Suspense>
           </div>
         ) : (
-          <ScrollArea className="min-h-0 flex-1">
-            <div className="space-y-1.5 p-2">
+          <ScrollArea className="min-h-0 min-w-0 flex-1">
+            <div className="min-w-0 space-y-1.5 p-2">
               {filtered.length === 0 && <div className="wb-rail-empty">暂无发现</div>}
               {filtered.map((f) => (
                 <div key={f.id} className="wb-rail-row" onClick={() => setDetail(f)}>

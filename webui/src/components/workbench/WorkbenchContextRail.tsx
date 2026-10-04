@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Terminal } from "@xterm/xterm"
 import { FitAddon } from "@xterm/addon-fit"
 import "@xterm/xterm/css/xterm.css"
-import { FolderTree, Globe2, PanelRight, RefreshCw, ShieldAlert, TerminalSquare } from "lucide-react"
+import { FolderTree, Globe2, RefreshCw, ShieldAlert, TerminalSquare } from "lucide-react"
 import { api } from "@/lib/api"
 import type { BrowserSessionInfo, BrowserState, WorkspaceTreeResponse } from "@/lib/types"
 import { WorkspaceTree } from "./WorkspaceTree"
@@ -20,7 +20,7 @@ export function WorkbenchContextRail({ pid, tid, workDir, track }: {
   const [open, setOpen] = useState(false)
   const [railWidth, setRailWidth] = useState(360)
   const [dragging, setDragging] = useState(false)
-  const dragX = useRef<number | null>(null)
+  const dragOrigin = useRef<{ x: number; width: number } | null>(null)
   const [browser, setBrowser] = useState<BrowserState | null>(null)
   const [tree, setTree] = useState<WorkspaceTreeResponse | null>(null)
   const tab = selected === "findings" ? "browser" : selected
@@ -63,16 +63,28 @@ export function WorkbenchContextRail({ pid, tid, workDir, track }: {
 
   const desktop = typeof window !== "undefined" ? window.desktopBrowser : undefined
   const onDragStart = (e: React.MouseEvent<HTMLDivElement>) => {
-    e.preventDefault(); dragX.current = e.clientX; setDragging(true)
+    e.preventDefault()
+    dragOrigin.current = { x: e.clientX, width: railWidth }
+    setDragging(true)
   }
   useEffect(() => {
     if (!dragging) return
     const move = (e: MouseEvent) => {
-      if (dragX.current !== null) setRailWidth((w) => Math.max(280, Math.min(620, w + dragX.current! - e.clientX)))
+      const origin = dragOrigin.current
+      if (origin) {
+        const delta = origin.x - e.clientX
+        const stepped = Math.round(delta / 4) * 4
+        setRailWidth(Math.max(320, Math.min(620, origin.width + stepped)))
+      }
     }
     const up = () => setDragging(false)
     document.addEventListener("mousemove", move); document.addEventListener("mouseup", up)
-    return () => { document.removeEventListener("mousemove", move); document.removeEventListener("mouseup", up); dragX.current = null }
+    document.body.classList.add("wb-dragging")
+    return () => {
+      document.removeEventListener("mousemove", move); document.removeEventListener("mouseup", up)
+      document.body.classList.remove("wb-dragging")
+      dragOrigin.current = null
+    }
   }, [dragging])
   const activateBrowser = async (sid: string) => {
     if (!desktop) return
@@ -136,7 +148,7 @@ export function WorkbenchContextRail({ pid, tid, workDir, track }: {
   const icons = { browser: Globe2, terminal: TerminalSquare, files: FolderTree, findings: ShieldAlert } as const
   return (
     <>
-      {!open && <button type="button" className="wb-drawer-trigger" onClick={() => setOpen(true)} title="打开工具抽屉" aria-label="打开工具抽屉"><PanelRight size={19} /></button>}
+      {!open && <button type="button" className="wb-drawer-trigger" onClick={() => setOpen(true)} title="打开工具抽屉" aria-label="打开工具抽屉"><span className="wb-drawer-trigger-arrow" aria-hidden>‹</span></button>}
       {open && <div className="wb-drawer">
         <div className="wb-drawer-splitter" onMouseDown={onDragStart} role="separator" aria-label="拖动调整抽屉宽度" />
         <div className="wb-drawer-panel" style={{ width: railWidth, flexBasis: railWidth }}>
