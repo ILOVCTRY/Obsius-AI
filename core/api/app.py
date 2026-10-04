@@ -3213,8 +3213,14 @@ def create_app(
             meta = row.get("meta")
             meta = json.loads(meta) if isinstance(meta, str) else (meta or {})
             row["worker_armed"] = bool(meta.get("worker_armed"))
-            # v0.71 任务即窗口：绑定任务 id（前端延续模式徽章/页签上下文用）
-            row["bound_task_id"] = meta.get("bound_task_id") or ""
+            # v24 任务绑定以 tasks.target_session 为准；复盘窗通过 spawn_task_id 关联。
+            bound = _project(pid).bb.conn.execute(
+                "SELECT id FROM tasks WHERE project_id=? AND target_session=? "
+                "AND status IN ('open','claimed') ORDER BY updated_at DESC LIMIT 1",
+                (pid, row["id"])).fetchone()
+            row["bound_task_id"] = bound["id"] if bound else ""
+            row["context_task_id"] = meta.get("context_task_id") or meta.get("spawn_task_id") or ""
+            row["context_mode"] = meta.get("context_mode") or ("review" if row["context_task_id"] else "")
             row["worker_running"] = _session_job_running(row["id"])
         return rows
 
@@ -5724,9 +5730,14 @@ def create_app(
                 409, f"活跃会话已达项目上限 sessions_cap={auto['sessions_cap']}"
                      f"（当前 {active} 个非 closed 会话）；请先关窗或在直播间调高上限")
         exec_llm, plan_llm = _llms()
-        # 角色沿用原认领者（读不到/会话已关 → 通用角色）
+        # 角色沿用最后一次执行履历，找不到再回退原认领者/通用角色。
         role = "_generalist"
-        if task.get("claimed_by"):
+        attempts = (task.get("context") or {}).get("attempts", [])
+        if isinstance(attempts, list) and attempts:
+            last_role = attempts[-1].get("role") if isinstance(attempts[-1], dict) else ""
+            if last_role:
+                role = str(last_role)
+        if role == "_generalist" and task.get("claimed_by"):
             origin_sess = bb.get_session(task["claimed_by"])
             if origin_sess and origin_sess.get("role"):
                 role = origin_sess["role"]
@@ -5736,7 +5747,8 @@ def create_app(
         except FileNotFoundError as e:
             raise HTTPException(422, str(e))
         sid = agent.session["id"]
-        bb.set_session_meta(sid, {"spawn_task_id": task_id, "worker_armed": False})
+        bb.set_session_meta(sid, {"spawn_task_id": task_id, "context_task_id": task_id,
+                                  "context_mode": "review", "worker_armed": False})
         # 上下文注入：E8 human_note 通道，worker 起跑后首个控制点 drain
         text = _task_context_digest(bb, pid, task)
         try:

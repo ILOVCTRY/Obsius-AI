@@ -373,7 +373,7 @@ function TaskCard({ pid, task, roles, roleNames, onChanged, onDelete, onResolve,
   const [roleEditing, setRoleEditing] = useState(false)
   const [newRole, setNewRole] = useState(task.role ?? "")
   const [roleErr, setRoleErr] = useState<string | null>(null)
-  // 双击直开会话（v0.71 任务即窗口，四态通用）：有专属窗挂回；open 无绑 →
+  // 双击直开会话（v0.71 任务即窗口，四态通用）：有专属窗挂回；终态旧窗关闭时创建复盘窗；open 无绑 →
   // 手动补绑待命窗（2026-09-23）成功即挂回，失败提示留卡上；其余回看板定位。
   // 待执行（open）任务挂回后**立刻起跑**（2026-09-24）：人工双击=显式启动，
   // 等同会话内「跑任务队列」；其余态只跳转。
@@ -384,10 +384,22 @@ function TaskCard({ pid, task, roles, roleNames, onChanged, onDelete, onResolve,
   }
   const openSession = async () => {
     let sid = task.target_session || task.claimed_by
-    if (sid) {
+    const sessionAlive = sid ? await api.sessions(pid).then((rows) => rows.some((row) => row.id === sid && row.status !== "closed")).catch(() => false) : false
+    if (sid && (sessionAlive || task.status === "open")) {
       window.dispatchEvent(new CustomEvent("goto-session", { detail: { sessionId: sid } }))
       if (task.status === "open") startWork(sid)
       return
+    }
+    if (task.status === "done" || task.status === "failed") {
+      try {
+        setSpawnErr(null)
+        const r = await api.spawnWindow(task.id)
+        sid = r.session_id
+        window.dispatchEvent(new CustomEvent("goto-session", { detail: { sessionId: sid } }))
+        return
+      } catch (e) {
+        setSpawnErr(e instanceof Error ? e.message : String(e))
+      }
     }
     if (task.status === "open") {
       try {

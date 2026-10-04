@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Activity, ChevronRight, CircleAlert, Clock3, FileKey2, GitBranch, MessageCircle, Pause, Play, Radio, RefreshCw, Users, Mail } from "lucide-react"
 import { api } from "@/lib/api"
 import type { BBEvent, CoordinationOverview, CoordinationTask, CoordinationTaskStatus, Session, SessionGraph } from "@/lib/types"
@@ -29,6 +29,7 @@ export function CoordinationPane({ pid, onOpenSession }: {
   const [sessions, setSessions] = useState<Session[]>([])
   const [sessionGraph, setSessionGraph] = useState<SessionGraph | null>(null)
   const [events, setEvents] = useState<BBEvent[]>([])
+  const loadSeq = useRef(0)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -40,6 +41,7 @@ export function CoordinationPane({ pid, onOpenSession }: {
   const [controlBusy, setControlBusy] = useState(false)
 
   const load = useCallback(() => {
+    const seq = ++loadSeq.current
     setLoading(true)
     return Promise.allSettled([
       api.coordination(pid),
@@ -47,6 +49,7 @@ export function CoordinationPane({ pid, onOpenSession }: {
       api.sessionGraph(pid),
       api.eventsTail(pid, 80),
     ]).then(([coordination, sessionRows, graph, activity]) => {
+      if (seq !== loadSeq.current) return
       if (coordination.status === "fulfilled") {
         const next = coordination.value
         setData(next)
@@ -163,6 +166,7 @@ export function CoordinationPane({ pid, onOpenSession }: {
                 <div className="coord-section-head"><span>编排计划依赖图</span><span className="coord-hint">节点绑定真实任务后自动同步；点击节点打开会话</span></div>
                 {!selected.tasks.length ? <div className="coord-empty">等待编排器生成计划</div> : <PlanDag tasks={selected.tasks} sessions={sessions} onOpenSession={onOpenSession} onOpenTask={openBoundTask} />}
               </div>
+              <TeamRoster plan={selected} sessions={sessions} onOpenSession={onOpenSession} />
               <section className="coord-knowledge coord-legacy-knowledge">
                 <div className="coord-section-head"><span><FileKey2 size={13} /> 结构化对象与冲突</span><span className="coord-hint">只读兼容面；产出由 Agent 黑板 / findings / func_kb 写入</span></div>
                 {(data?.objects ?? []).slice(0, 12).map((obj) => <div className="coord-object" key={obj.id}><span className="coord-object-kind">{OBJECT_LABEL[obj.kind] ?? obj.kind}</span><div><b>{obj.name || obj.object_ref}</b><small>{obj.object_ref && obj.name ? obj.object_ref : ""} · 来源 {obj.source || "未指定"} · 置信度 {Math.round(obj.confidence * 100)}%</small></div></div>)}
@@ -181,6 +185,42 @@ export function CoordinationPane({ pid, onOpenSession }: {
 
 function Metric({ label, value, accent }: { label: string; value: number; accent?: string }) {
   return <div className="coord-metric"><span>{label}</span><b className={accent ? `is-${accent}` : undefined}>{value}</b></div>
+}
+
+function TeamRoster({ plan, sessions, onOpenSession }: {
+  plan: CoordinationOverview["plans"][number]
+  sessions: Session[]
+  onOpenSession?: (sid: string) => void
+}) {
+  const rows = plan.tasks.map((task) => ({
+    task,
+    session: task.task_id ? sessions.find((item) => item.bound_task_id === task.task_id) : undefined,
+  }))
+  const bound = rows.filter((row) => row.session)
+  const running = bound.filter((row) => row.session?.worker_running).length
+  return <section className="coord-team-roster">
+    <div className="coord-section-head">
+      <span><Users size={13} /> 当前计划团队编制</span>
+      <span className="coord-hint">按计划节点展示，不合并同角色任务</span>
+    </div>
+    <div className="coord-roster-summary">
+      <Metric label="成员任务" value={rows.length} />
+      <Metric label="已绑定会话" value={bound.length} accent="active" />
+      <Metric label="运行中" value={running} accent="active" />
+      <Metric label="待派发" value={rows.length - bound.length} accent="warn" />
+    </div>
+    {!rows.length ? <div className="coord-empty">当前计划还没有团队任务</div> : <div className="coord-roster-list">{rows.map(({ task, session }) => (
+      <div className="coord-roster-row" key={task.id}>
+        <span className={cn("coord-live-dot", session?.worker_running ? "is-running" : session?.worker_armed ? "is-armed" : "is-idle")} />
+        <div className="coord-roster-main">
+          <b title={task.title}>{task.title}</b>
+          <small>{task.role || "待分配角色"} · {STATUS_LABEL[task.status]} · {session ? (session.name || session.id) : "尚未绑定会话"}</small>
+        </div>
+        <span className={cn("coord-roster-state", session ? "is-bound" : "is-pending")}>{session ? (session.worker_running ? "运行中" : session.worker_armed ? "待命" : "空闲") : "待派发"}</span>
+        {session && <button type="button" className="coord-roster-open" onClick={() => onOpenSession?.(session.id)}>打开</button>}
+      </div>
+    ))}</div>}
+  </section>
 }
 
 function CoordinationCockpit({

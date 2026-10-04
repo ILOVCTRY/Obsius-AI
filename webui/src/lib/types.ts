@@ -732,6 +732,8 @@ export interface Session {
   worker_running?: boolean
   /** v0.71 任务即窗口：绑定的任务 id（''=无绑定手动窗） */
   bound_task_id?: string
+  context_task_id?: string
+  context_mode?: "review" | string
 }
 
 /** 会话收件箱私信（DESIGN §6.7 的 1.5/1.6；本切片只有系统投递的 basis_stale） */

@@ -572,6 +572,7 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
   const auditShown = useMemo(() => [...auditItems].reverse(), [auditItems])
 
   const listRef = useRef<HTMLDivElement>(null)
+  const [streamShort, setStreamShort] = useState(false)
   // 命令对配对（Claude Code 式渲染，DESIGN.md §12）：command/command.result 就地合并为
   // 一条折叠行。新数据按 payload.call_id 配对；存量旧事件无 call_id，降级为「同会话最近
   // 未闭合 command」游标配对（run_cmd 串行执行，会话内相邻性成立），session_id 不符宁走
@@ -599,6 +600,15 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
       || (it.type === "single" && STREAMLINE_KINDS.has(it.event.kind))),
     [items])
   const shown = useMemo(() => [...leanItems].reverse(), [leanItems])
+  useEffect(() => {
+    const el = listRef.current
+    if (!el) return
+    const update = () => setStreamShort(el.scrollHeight <= el.clientHeight + 2)
+    update()
+    const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(update) : null
+    observer?.observe(el)
+    return () => observer?.disconnect()
+  }, [shown.length, activeTab, filter])
   // 统计行（会话流改造 2026-10-03，cc-haha 风格）：token/最后更新/条数。
   // token 取当前窗口内 llm.usage 事件求和——**窗口内近似**（已上翻的分页不在内），
   // 故文案标注「窗口内」；精确值在工作台侧（thread.usage）。
@@ -1587,7 +1597,7 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
       <div
         ref={listRef}
         onScroll={onListScroll}
-        className="flex min-h-0 flex-1 flex-col-reverse overflow-auto px-3"
+        className={cn("flex min-h-0 flex-1 flex-col-reverse overflow-auto px-3", streamShort && "justify-end")}
       >
         {renderStream(shown, true)}
       </div>

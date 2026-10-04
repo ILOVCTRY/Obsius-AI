@@ -1441,11 +1441,21 @@ class AgentSession:
                 except Exception as e:  # noqa: BLE001 —— 发布失败不阻断对话
                     log.warning("对话转任务发布失败，回落对话: %s", e)
                     parts.append(f"（你这句话按任务处理失败：{e}；可改述后重发）")
-        # 历史：会话级 chat 文件（含已完成委托的沉淀问答对）。sanitize_snapshot_tail
-        # 截掉末尾悬空 tool_use 半对防 API 拒；损坏/缺失 → 空降级，行为同首轮。
-        history = sanitize_snapshot_tail(self._load_session_chat())
+        # 历史：复盘窗口优先读取任务现场，普通窗口读取会话级 chat 文件。
+        # 两者都经 sanitize_snapshot_tail 清理悬空 tool-use 半对，避免把历史污染带回上游。
+        meta = self.session.get("meta")
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except ValueError:
+                meta = {}
+        context_task_id = meta.get("context_task_id") if isinstance(meta, dict) else None
+        history_source = self._load_task_transcript(str(context_task_id)) if context_task_id else self._load_session_chat()
+        history = sanitize_snapshot_tail(history_source)
         if history:
-            chat_mode = ("延续模式：以下是本会话既往对话记录（截尾保留，含此前委托的"
+            chat_mode = (("任务复盘模式：以下是该任务执行现场的历史消息（仅作事实参考，"
+                          "不要自动重放历史工具/命令）；" if context_task_id else "") +
+                         "延续模式：以下是本会话既往对话记录（截尾保留，含此前委托的"
                          "收尾摘要），接着此上下文回应；可继续用工具查黑板/读工作区文件、"
                          "跑命令核实。阶段性结论要落发现时同样走意图纪律：先 "
                          "declare_intent 声明（侦察结论登记可在 statement 写明依据），"
