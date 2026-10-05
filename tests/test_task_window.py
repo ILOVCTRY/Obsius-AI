@@ -1,9 +1,7 @@
-"""会话中心化（2026-09-25）：委托定窗 / 窗内队列 / 串行承接 / 关窗退回 / 并发上限。
+"""会话与任务直派：定窗、同窗互斥、关窗接手，以及停用的自动调度。
 
-黑板层用例直接打 TaskQueue（target_session 定窗 / session_queue /
-take_session_next / unassign_session）；调度层用例经 app.state.schedule_sweep
-直调（触发点与 publish 路径已由 test_api.py 覆盖，这里验证并发上限语义）。
-bind_session 为未指派 open 行的遗留定窗口，用例保留。
+存量 bind_session / take_session_next 接口仍有独立兼容测试；新执行入口
+start_direct 不从队列自动认领，同一会话一次只能执行一项任务。
 """
 
 import time
@@ -35,6 +33,20 @@ def _win(bb, project, name):
 
 
 # ---------- bind_session ----------
+
+def test_start_direct_blocks_second_task_in_same_session(bb, project):
+    tq = _tq(bb)
+    sid = _win(bb, project, "直派窗口")
+    first = tq.publish(project["id"], "第一件", target_session=sid)
+    second = tq.publish(project["id"], "第二件", target_session=sid)
+    tq.start_direct(first, sid)
+    with pytest.raises(ClaimError, match="正在执行任务"):
+        tq.start_direct(second, sid)
+    assert tq.get_task(second)["status"] == "open"
+    assert tq.get_task(first)["status"] == "claimed"
+    assert [e["payload"]["task_id"] for e in bb.recent_events(project["id"])
+            if e["kind"] == "task.claimed"] == [first]
+
 
 def test_bind_session_binds_open_unbound_task(bb, project):
     """open 且未绑定的任务可绑定；落 task.window_bound 事件。"""
@@ -170,18 +182,37 @@ def _wait_terminal(c, pid, task_ids, tries=600):
     raise AssertionError(f"任务未到终态: {rows}")
 
 
-def test_scheduler_respects_max_concurrent_tasks(tmp_path):
-    """自动挡同时执行委托数 ≤ max_concurrent_tasks：sweep 只武装+起跑上限内的窗，
-    跑动过程中同时 running 的 agent-work job 数不超过上限；窗内委托随收尾释放
-    名额补起（最终全部到终态，不因上限饿死）。"""
+def test_closed_origin_reopen_can_spawn_new_window(tmp_path):
+    from fastapi.testclient import TestClient
+    from test_api import _chain_app, _l2_project
+
+    app = _chain_app(tmp_path, [])
+    with TestClient(app) as c:
+        pid = _l2_project(c, "关闭原窗后放回", paused=True)
+        sid = c.post(f"/api/projects/{pid}/agents", json={"role": "_generalist"}).json()["id"]
+        tq = TaskQueue(c.app.state.projects[pid].bb)
+        tid = tq.publish(pid, "待接手任务", target_session=sid)
+        tq.start_direct(tid, sid)
+        tq.fail(tid, sid, "需补充信息")
+        assert c.post(f"/api/sessions/{sid}/close").status_code == 200
+        reopened = c.post(f"/api/tasks/{tid}/reopen")
+        assert reopened.status_code == 200 and reopened.json()["kicked"] == []
+        opened = c.post(f"/api/tasks/{tid}/spawn-window")
+        assert opened.status_code == 200 and opened.json()["created"] is True
+        new_sid = opened.json()["session_id"]
+        assert new_sid != sid and tq.get_task(tid)["target_session"] == new_sid
+        assert tq.get_task(tid)["status"] == "open"
+
+
+def test_scheduler_does_not_claim_unassigned_tasks(tmp_path):
+    """停用公共池调度后，sweep 不应把已有 open 任务自动认领或启动。"""
     from fastapi.testclient import TestClient
 
-    from test_api import _chain_app, _l2_project, _exec_delegation_script
+    from test_api import _chain_app, _l2_project
 
-    app = _chain_app(tmp_path, [], _exec_delegation_script(3))
+    app = _chain_app(tmp_path, [])
     with TestClient(app) as c:
-        # 显式上限 2（全局缺省 3，假设上限 2 必须自设，防再次漂移）
-        pid = _l2_project(c, "L2并发上限", max_concurrent_tasks=2)
+        pid = _l2_project(c, "L2直派", max_concurrent_tasks=2)
         bb = c.app.state.projects[pid].bb
         tq = TaskQueue(bb)
         tids = []
@@ -191,26 +222,11 @@ def test_scheduler_respects_max_concurrent_tasks(tmp_path):
             sid = sp.json()["id"]
             tids.append(tq.publish(pid, f"并发任务{i}", task_type="recon",
                                    target_session=sid))
-        # 直调调度器：未武装 L2 窗当场武装起跑，只起 cap=2 个
         c.app.state.schedule_sweep(pid, "poll-sweep")
-        # 采样同时 running 的 agent-work job 峰值（预算放宽：全量回归负载下
-        # 600 次偶发超时误报「未到终态」，与超卖断言无关）
-        peak = 0
-        rows = None
-        for _ in range(2000):
-            running = [j for j in c.app.state.jobs.all_jobs()
-                       if j["meta"].get("project_id") == pid
-                       and j["kind"] == "agent-work" and j["status"] == "running"]
-            peak = max(peak, len(running))
-            statuses = {t["id"]: t["status"]
-                        for t in c.get(f"/api/projects/{pid}/tasks").json()}
-            if all(statuses.get(t) in {"done", "failed"} for t in tids):
-                rows = statuses
-                break
-            time.sleep(0.01)
-        assert rows is not None, "任务未全部到终态"
-        # 上限 2：峰值不得超卖（调度器逐个重算的合同）
-        assert peak <= 2
+        assert all(tq.get_task(tid)["status"] == "open" for tid in tids)
+        assert not [j for j in c.app.state.jobs.all_jobs()
+                    if j["meta"].get("project_id") == pid
+                    and j["kind"] == "agent-work" and j["status"] == "running"]
 
 
 # ---------- v0.72 全局一窗一任务：审批=执行 / kick 收窄 ----------
@@ -249,9 +265,8 @@ def test_delegate_window_approval_creates_window_and_runs(tmp_path):
         assert rows[0]["target_session"] == sid and rows[0]["claimed_by"] == sid
 
 
-def test_reopen_kicks_all_armed_windows(tmp_path):
-    """会话中心化 _kick_workers：reopen（触发点 D）踢全部 armed 且无 job 的会话——
-    原执行窗起跑；别的 armed 窗无委托无消息则零成本空退（不消费 LLM）。"""
+def test_reopen_kicks_only_bound_window(tmp_path):
+    """放回只起跑原任务归属窗，不唤醒无关的 armed 空闲会话。"""
     from fastapi.testclient import TestClient
 
     from test_api import _chain_app, _l2_project, _wait_no_running
@@ -300,11 +315,11 @@ def test_reopen_kicks_all_armed_windows(tmp_path):
             if not running:
                 break
             time.sleep(0.02)
-        # 放回：原执行窗必在 kicked；manual armed 窗也被踢（空退）
+        # 放回只直派原任务归属窗；无关的 armed 空窗不被唤醒。
         rr = c.post(f"/api/tasks/{tid}/reopen", json={"note": "凭证已补"})
         kicked = rr.json()["kicked"]
-        assert rr.status_code == 200 and bound_sid in kicked
-        assert manual_sid in kicked
+        assert rr.status_code == 200 and kicked == [bound_sid]
+        assert manual_sid not in kicked
         # 轮询终态（L2 下 replan-wait 30s 节流 job 与断言无关）
         for _ in range(300):
             if TaskQueue(bb).get_task(tid)["status"] == "done":

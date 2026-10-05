@@ -1348,8 +1348,15 @@ body.wb-dragging { cursor: col-resize; user-select: none; }
 .coord-roster-summary { display: grid; grid-template-columns: repeat(4, minmax(90px, 1fr)); gap: 7px; margin-top: 10px; }
 .coord-roster-summary .coord-metric { padding: 8px 10px; background: var(--theme-raw-2b1386a692); }
 .coord-roster-summary .coord-metric b { margin-top: 4px; font-size: 16px; }
-.coord-roster-list { display: grid; gap: 5px; margin-top: 10px; }
-.coord-roster-row { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 8px 9px; border: 1px solid var(--border); border-radius: 5px; background: var(--theme-raw-2b1386a692); }
+.coord-roster-groups { display: grid; gap: 9px; margin-top: 10px; }
+.coord-roster-group { padding: 9px; border: 1px solid var(--border); border-radius: 5px; background: var(--theme-raw-2b1386a692); }
+.coord-roster-group.is-ungrouped { border-style: dashed; }
+.coord-roster-group-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.coord-roster-group-head > div { min-width: 0; }
+.coord-roster-group-head b, .coord-roster-group-head span, .coord-roster-group-head small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.coord-roster-group-head b { font-size: 11px; }.coord-roster-group-head span { margin-top: 2px; color: var(--primary); font: 9px var(--font-mono); }.coord-roster-group-head small { margin-top: 3px; color: var(--muted-foreground); font-size: 9px; }.coord-roster-group-head em { flex: 0 0 auto; color: var(--muted-foreground); font: 9px var(--font-mono); font-style: normal; }
+.coord-roster-list { display: grid; gap: 5px; margin-top: 7px; }
+.coord-roster-row { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 8px 9px; border: 1px solid var(--border); border-radius: 5px; background: var(--theme-raw-01bfc46347); }
 .coord-roster-main { min-width: 0; flex: 1; }
 .coord-roster-main b, .coord-roster-main small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .coord-roster-main b { font-size: 11px; }

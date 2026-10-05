@@ -630,9 +630,9 @@ export const api = {
     http<{ status: string; provider: string; model: string }>(`/api/agents/${sid}/llm`, {
       method: "POST", body: JSON.stringify({ provider, model: model || undefined }),
     }),
-  agentWork: (sid: string) =>
+  agentWork: (sid: string, taskId?: string) =>
     http<{ job_id?: string; session_id: string; already_running?: boolean }>(
-      `/api/agents/${sid}/work`, { method: "POST" }),
+      `/api/agents/${sid}/work${taskId ? `?task_id=${encodeURIComponent(taskId)}` : ""}`, { method: "POST" }),
   // F9 任务窗：双击已收尾任务卡开带上下文的新窗（幂等，已有窗直接返回）
   spawnTaskWindow: (taskId: string) =>
     http<{ session_id: string; created: boolean }>(
@@ -1107,7 +1107,7 @@ export const api = {
       method: "POST", body: JSON.stringify(body),
     }),
   coordinationTaskUpdate: (pid: string, taskId: string, body: {
-    status?: string; role?: string; evidence?: Record<string, unknown>[]
+    status?: string; title?: string; description?: string; role?: string; member_id?: string; evidence?: Record<string, unknown>[]
   }) =>
     http<CoordinationTask>(`/api/projects/${pid}/coordination/tasks/${encodeURIComponent(taskId)}`, {
       method: "PATCH", body: JSON.stringify(body),

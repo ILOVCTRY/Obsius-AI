@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import uuid
@@ -23,7 +24,7 @@ VERIFICATION_STATUSES = ("passed", "needs_evidence", "conflict", "failed")
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def _id(prefix: str) -> str:
@@ -64,6 +65,7 @@ class CoordinationStore:
                     title TEXT NOT NULL,
                     description TEXT NOT NULL DEFAULT '',
                     role TEXT NOT NULL DEFAULT '',
+                    member_id TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL DEFAULT 'pending',
                     priority INTEGER NOT NULL DEFAULT 50,
                     depends_on TEXT NOT NULL DEFAULT '[]',
@@ -134,6 +136,10 @@ class CoordinationStore:
                 self.bb.conn.execute(
                     "ALTER TABLE coordination_tasks"
                     " ADD COLUMN task_id TEXT NOT NULL DEFAULT ''")
+            if "member_id" not in cols:
+                self.bb.conn.execute(
+                    "ALTER TABLE coordination_tasks"
+                    " ADD COLUMN member_id TEXT NOT NULL DEFAULT ''")
 
     @staticmethod
     def _decode(row: Any) -> dict[str, Any]:
@@ -162,6 +168,68 @@ class CoordinationStore:
             "SELECT artifact_ref,relation,created_at FROM coordination_object_artifacts"
             " WHERE object_id=? ORDER BY created_at", (object_id,)).fetchall()
         return [dict(row) for row in rows]
+
+    @staticmethod
+    def _normalize_team(team: Any) -> list[dict[str, Any]]:
+        """兼容 id/member_id、label/name/title、responsibility/description。"""
+        members = team.get("members", []) if isinstance(team, dict) else team
+        if not isinstance(members, list):
+            raise ValueError("team.members 必须是数组")
+        roster: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for index, member in enumerate(members):
+            if isinstance(member, str):
+                member = {"id": member, "label": member}
+            if not isinstance(member, dict):
+                raise ValueError(f"团队成员 {index} 必须是对象")
+            item = dict(member)
+            member_id = str(item.get("member_id") or item.get("id") or "").strip()[:120]
+            if not member_id:
+                raise ValueError(f"团队成员 {index} 缺少 id/member_id")
+            if member_id in seen:
+                raise ValueError(f"团队成员标识重复: {member_id}")
+            seen.add(member_id)
+            label = str(item.get("label") or item.get("name") or item.get("title") or member_id).strip()[:160]
+            responsibility = str(item.get("responsibility") or item.get("description") or "").strip()[:4000]
+            item.update(id=member_id, member_id=member_id, label=label,
+                        name=label, title=label, responsibility=responsibility,
+                        description=responsibility, role=str(item.get("role") or "").strip()[:80])
+            roster.append(item)
+        return roster
+
+    def _team_for_plan(self, plan: dict[str, Any]) -> dict[str, Any]:
+        raw_team = plan.get("config", {}).get("team") if isinstance(plan.get("config"), dict) else None
+        config_team = raw_team if isinstance(raw_team, dict) else {}
+        roster = self._normalize_team(raw_team if raw_team is not None else [])
+        source = str(config_team.get("source") or (
+            "explicit" if raw_team is not None else "legacy_derived"))
+        if not roster and raw_team is None:
+            # 存量计划没有 team：由节点 role 生成兼容 roster。
+            seen: set[str] = set()
+            for task in plan.get("tasks", []):
+                role = str(task.get("member_id") or task.get("role") or "").strip()
+                if role and role not in seen:
+                    seen.add(role)
+                    roster.append({"id": role, "member_id": role, "label": role,
+                                   "name": role, "title": role, "responsibility": "",
+                                   "description": "", "role": role})
+            source = "legacy_derived"
+        return {
+            "id": str(config_team.get("id") or f"team:{plan.get('id', '')}"),
+            "name": str(config_team.get("name") or plan.get("name") or "Agent 团队"),
+            "source": source,
+            "members": roster,
+            "execution": config_team.get("execution") or {
+                "mode": "plan_dag", "dispatch": "orchestrator_delegate",
+            },
+        }
+
+    def _attach_team(self, plan: dict[str, Any]) -> dict[str, Any]:
+        plan["team"] = self._team_for_plan(plan)
+        for task in plan.get("tasks", []):
+            task["member_id"] = str(task.get("member_id") or (
+                task.get("role") if plan.get("config", {}).get("team") is None else "") or "")
+        return plan
 
     def _with_object_artifacts(self, row: Any) -> dict[str, Any]:
         item = self._decode(row)
@@ -222,9 +290,20 @@ class CoordinationStore:
             blockers.append({"code": "empty_plan", "severity": "error", "message": "计划没有节点"})
         if cycle or unresolved:
             blockers.append({"code": "invalid_dag", "severity": "error", "message": "计划依赖图存在循环或未解析依赖"})
+        if plan["status"] in ("draft", "paused") and any(t["status"] == "failed" for t in tasks):
+            blockers.append({"code": "failed_nodes", "severity": "error", "message": "计划存在失败节点，请先重试或调整"})
+        revision = hashlib.sha256(json.dumps({
+            "plan": {key: plan[key] for key in ("name", "objective", "status", "config")},
+            "tasks": [{key: task[key] for key in (
+                "id", "title", "description", "role", "member_id", "status",
+                "priority", "depends_on", "task_id")}
+                      for task in tasks],
+            "safety": {"track": project.get("track"), "mission": mission,
+                       "roe": roe, "autonomy": config.get("autonomy")},
+        }, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
         return {
             "plan_id": plan_id, "status": plan["status"],
-            "revision": plan["updated_at"], "plan": plan,
+            "revision": revision, "plan": plan,
             "dependencies": {"task_count": len(tasks), "root_count": len(roots),
                              "ready_count": sum(t["status"] == "ready" for t in tasks),
                              "blocked_count": sum(t["status"] == "blocked" for t in tasks),
@@ -325,6 +404,7 @@ class CoordinationStore:
             by_plan.setdefault(task["plan_id"], []).append(task)
         for plan in plan_rows:
             plan["tasks"] = by_plan.get(plan["id"], [])
+            self._attach_team(plan)
             counts: dict[str, int] = {}
             for task in plan["tasks"]:
                 counts[task["status"]] = counts.get(task["status"], 0) + 1
@@ -487,12 +567,25 @@ class CoordinationStore:
         plan["tasks"] = [self._decode(r) for r in self.bb.conn.execute(
             "SELECT * FROM coordination_tasks WHERE plan_id=?"
             " ORDER BY priority,created_at", (plan["id"],)).fetchall()]
-        return plan
+        return self._attach_team(plan)
 
-    def create_plan(self, project_id: str, name: str, objective: str = "") -> dict[str, Any]:
+    def create_plan(self, project_id: str, name: str, objective: str = "",
+                    config: dict[str, Any] | None = None,
+                    team: dict[str, Any] | list[dict[str, Any]] | None = None) -> dict[str, Any]:
         name = name.strip()
         if not name:
             raise ValueError("计划名称不能为空")
+        if config is not None and not isinstance(config, dict):
+            raise ValueError("计划 config 必须是对象")
+        if team is not None and not isinstance(team, (dict, list)):
+            raise ValueError("team 必须是对象或成员列表")
+        plan_config = dict(config or {})
+        if team is not None:
+            plan_config["team"] = team
+        if plan_config.get("team") is not None:
+            if not isinstance(plan_config["team"], (dict, list)):
+                raise ValueError("team 必须是对象或成员列表")
+            self._normalize_team(plan_config["team"])
         now = _now()
         plan_id = _id("coord")
         with self.bb._tx():
@@ -501,7 +594,7 @@ class CoordinationStore:
                 " (id,project_id,name,objective,status,config,created_at,updated_at)"
                 " VALUES(?,?,?,?,?,?,?,?)",
                 (plan_id, project_id, name[:120], objective.strip()[:2000],
-                 "draft", "{}", now, now))
+                 "draft", json.dumps(plan_config, ensure_ascii=False), now, now))
         return self.get_plan(project_id, plan_id)
 
     def get_plan(self, project_id: str, plan_id: str) -> dict[str, Any]:
@@ -516,7 +609,7 @@ class CoordinationStore:
             " ORDER BY priority, created_at", (plan_id,)).fetchall()]
         for task in plan["tasks"]:
             task["verification"] = self._latest_verification(project_id, task["id"])
-        return plan
+        return self._attach_team(plan)
 
     def get_task(self, project_id: str, task_id: str) -> dict[str, Any]:
         """按节点 id 读取计划任务（编排器绑定真实 tasks 前置校验）。"""
@@ -527,6 +620,12 @@ class CoordinationStore:
             raise LookupError("协调任务不存在")
         item = self._decode(row)
         item["verification"] = self._latest_verification(project_id, task_id)
+        if not item.get("member_id"):
+            plan_row = self.bb.conn.execute(
+                "SELECT config FROM coordination_plans WHERE id=? AND project_id=?",
+                (item["plan_id"], project_id)).fetchone()
+            config = self._decode(plan_row).get("config", {}) if plan_row else {}
+            item["member_id"] = (item.get("role") or "") if config.get("team") is None else ""
         return item
 
     def add_object(self, project_id: str, *, kind: str, name: str = "",
@@ -618,9 +717,52 @@ class CoordinationStore:
                 (status, resolution.strip()[:2000], now, conflict_id, project_id))
         return self.get_conflict(project_id, conflict_id)
 
+    @staticmethod
+    def _check_member(plan: dict[str, Any], member_id: str, role: str) -> None:
+        """显式团队的成员绑定必须存在且与执行 role 相符；存量计划保持 role 兼容。"""
+        if (plan.get("config") or {}).get("team") is None:
+            return
+        if not member_id:
+            return  # 允许未编组节点；role 仍是原有的执行角色。
+        member = next((m for m in plan["team"]["members"]
+                       if m["member_id"] == member_id), None)
+        if member is None:
+            raise ValueError(f"member_id 不属于计划团队: {member_id}")
+        if member.get("role") and role != member["role"]:
+            raise ValueError(f"role 与团队成员 {member_id} 的 role 不一致")
+
+    def update_plan_metadata(self, project_id: str, plan_id: str, *,
+                             team: dict[str, Any] | list[dict[str, Any]] | None = None,
+                             config: dict[str, Any] | None = None) -> dict[str, Any]:
+        """仅 draft/paused 可改团队；已绑定执行任务的节点不得被重编组。"""
+        plan = self.get_plan(project_id, plan_id)
+        if plan["status"] not in ("draft", "paused"):
+            raise ValueError("仅 draft/paused 计划允许修改团队元数据")
+        if config is not None and not isinstance(config, dict):
+            raise ValueError("计划 config 必须是对象")
+        new_config = {**plan["config"], **(config or {})}
+        if team is not None:
+            new_config["team"] = team
+        if new_config.get("team") is not None:
+            if not isinstance(new_config["team"], (dict, list)):
+                raise ValueError("team 必须是对象或成员列表")
+            self._normalize_team(new_config["team"])
+        proposed = {**plan, "config": new_config}
+        proposed["team"] = self._team_for_plan(proposed)
+        for task in plan["tasks"]:
+            if task.get("task_id") and (proposed["team"]["members"] != plan["team"]["members"]):
+                raise ValueError("已绑定真实任务的计划不能重编组")
+            self._check_member(proposed, task["member_id"], task["role"])
+        with self.bb._tx():
+            self.bb.conn.execute(
+                "UPDATE coordination_plans SET config=?,updated_at=? WHERE id=? AND project_id=?",
+                (json.dumps(new_config, ensure_ascii=False), _now(), plan_id, project_id))
+        return self.get_plan(project_id, plan_id)
+
     def add_task(self, project_id: str, plan_id: str, title: str,
                  description: str = "", role: str = "", priority: int = 50,
-                 depends_on: list[str] | None = None) -> dict[str, Any]:
+                 depends_on: list[str] | None = None,
+                 member_id: str | None = None) -> dict[str, Any]:
         title = title.strip()
         if not title:
             raise ValueError("任务标题不能为空")
@@ -630,20 +772,22 @@ class CoordinationStore:
         unknown = [x for x in deps if x not in known]
         if unknown:
             raise ValueError("依赖任务不存在: " + ", ".join(unknown))
+        assigned_member = str(member_id if member_id is not None else (
+            role if plan["config"].get("team") is None else "")).strip()
+        self._check_member(plan, assigned_member, role.strip())
         now = _now()
         task_id = _id("ctask")
         with self.bb._tx():
             self.bb.conn.execute(
                 "INSERT INTO coordination_tasks"
-                " (id,project_id,plan_id,title,description,role,status,priority,depends_on,evidence,created_at,updated_at)"
-                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                " (id,project_id,plan_id,title,description,role,member_id,status,priority,depends_on,evidence,created_at,updated_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (task_id, project_id, plan_id, title[:160], description.strip()[:4000],
-                 role.strip()[:80], "pending", max(0, min(100, int(priority))),
+                 role.strip()[:80], assigned_member[:120], "pending", max(0, min(100, int(priority))),
                  json.dumps(deps, ensure_ascii=False), "[]", now, now))
             self.bb.conn.execute(
                 "UPDATE coordination_plans SET updated_at=? WHERE id=?", (now, plan_id))
-        return self._decode(self.bb.conn.execute(
-            "SELECT * FROM coordination_tasks WHERE id=?", (task_id,)).fetchone())
+        return self.get_task(project_id, task_id)
 
     def set_dependencies(self, project_id: str, task_id: str,
                          depends_on: list[str]) -> dict[str, Any]:
@@ -686,6 +830,8 @@ class CoordinationStore:
 
     def update_task(self, project_id: str, task_id: str,
                     *, status: str | None = None, role: str | None = None,
+                    member_id: str | None = None,
+                    title: str | None = None, description: str | None = None,
                     evidence: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         row = self.bb.conn.execute(
             "SELECT * FROM coordination_tasks WHERE id=? AND project_id=?",
@@ -694,6 +840,16 @@ class CoordinationStore:
             raise LookupError("协调任务不存在")
         if status is not None and status not in TASK_STATUSES:
             raise ValueError("非法任务状态")
+        if any(value is not None for value in (title, description, member_id, role)):
+            plan = self.get_plan(project_id, row["plan_id"])
+            if plan["status"] not in ("draft", "paused"):
+                raise ValueError("仅 draft/paused 计划允许修改任务元数据")
+            if row["task_id"]:
+                raise ValueError("已绑定真实任务的节点不能重编组")
+            effective_member = str(member_id if member_id is not None else row["member_id"] or (
+                row["role"] if plan["config"].get("team") is None else "")).strip()
+            effective_role = str(role if role is not None else row["role"]).strip()
+            self._check_member(plan, effective_member, effective_role)
         now = _now()
         sets: list[str] = ["updated_at=?"]
         args: list[Any] = [now]
@@ -701,13 +857,24 @@ class CoordinationStore:
             sets.append("status=?"); args.append(status)
         if role is not None:
             sets.append("role=?"); args.append(role.strip()[:80])
+        if member_id is not None:
+            sets.append("member_id=?"); args.append(member_id.strip()[:120])
+        if title is not None:
+            if not title.strip():
+                raise ValueError("任务标题不能为空")
+            sets.append("title=?"); args.append(title.strip()[:160])
+        if description is not None:
+            sets.append("description=?"); args.append(description.strip()[:4000])
         if evidence is not None:
             sets.append("evidence=?"); args.append(json.dumps(evidence[:50], ensure_ascii=False))
         args.append(task_id)
         with self.bb._tx():
             self.bb.conn.execute(f"UPDATE coordination_tasks SET {', '.join(sets)} WHERE id=?", args)
-        return self._decode(self.bb.conn.execute(
-            "SELECT * FROM coordination_tasks WHERE id=?", (task_id,)).fetchone())
+            if any(value is not None for value in (title, description, member_id, role)):
+                self.bb.conn.execute(
+                    "UPDATE coordination_plans SET updated_at=? WHERE id=? AND project_id=?",
+                    (now, row["plan_id"], project_id))
+        return self.get_task(project_id, task_id)
 
     def _create_followup_task(self, project_id: str, plan_id: str, title: str,
                               description: str) -> str:

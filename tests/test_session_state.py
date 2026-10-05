@@ -115,9 +115,13 @@ def test_second_task_does_not_inherit_first_task_state(env):
     sid = agent.session["id"]
     t1 = tq.publish(project["id"], "任务一", task_type="generic", target_session=sid)
     t2 = tq.publish(project["id"], "任务二", task_type="generic", target_session=sid)
+    tq.start_direct(t1, sid)
+    agent.dispatcher.current_task_id = t1
     assert agent.run_session() == "任务一完成"
     assert tq.get_task(t1)["status"] == "done"
-    # 任务二必须真跑（走完 task_plan 两个剧本项），不能被 stale finished 提前结束
+    # 第二件也须显式直派，不能被上一件的 finished 状态提前结束。
+    tq.start_direct(t2, sid)
+    agent.dispatcher.current_task_id = t2
     assert agent.run_session() == "任务二完成"
     assert tq.get_task(t2)["status"] == "done"
     assert len(llm.calls) == 6
@@ -144,10 +148,14 @@ def test_resume_state_cleared_between_tasks(env):
     sid = agent.session["id"]
     t1 = tq.publish(project["id"], "任务一", task_type="generic", target_session=sid)
     t2 = tq.publish(project["id"], "任务二", task_type="generic", target_session=sid)
+    tq.start_direct(t1, sid)
+    agent.dispatcher.current_task_id = t1
     agent.run_session()
     assert agent._resume_state is None       # 正常收尾不留内存断点
     agent._resume_state = {"task_id": t1, "reason": "stale"}  # 模拟泄漏
     agent.state.reset_for_task()             # 新任务入口复位
     assert agent._resume_state == {"task_id": t1, "reason": "stale"}  # 复位不动它
-    agent.run_session()                      # 认领任务二：快照消费分支按需清
+    tq.start_direct(t2, sid)
+    agent.dispatcher.current_task_id = t2
+    agent.run_session()                      # 直派任务二：过期快照按需清
     assert tq.get_task(t2)["status"] == "done"

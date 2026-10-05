@@ -30,6 +30,85 @@ def _make_project(client, track: str = "ctf") -> str:
     return r.json()["id"]
 
 
+def test_coordination_team_api_round_trip(client):
+    pid = _make_project(client)
+    root = f"/api/projects/{pid}/coordination"
+    plan_response = client.post(f"{root}/plans", json={
+        "name": "协作分析组", "objective": "共同定位并验证关键行为",
+        "team": {"name": "样本团队", "members": [
+            {"member_id": "a", "title": "分析员", "role": "_generalist", "description": "静态分析"},
+            {"member_id": "b", "title": "验证员", "role": "_generalist", "description": "交叉验证"},
+        ]},
+    })
+    assert plan_response.status_code == 201
+    plan = plan_response.json()
+    assert plan["team"]["name"] == "样本团队"
+    assert [member["member_id"] for member in plan["team"]["members"]] == ["a", "b"]
+    task_response = client.post(f"{root}/plans/{plan['id']}/tasks", json={
+        "title": "读取样本", "role": "_generalist", "member_id": "a",
+    })
+    assert task_response.status_code == 201
+    task = task_response.json()
+    assert task["member_id"] == "a"
+    assert client.get(root).json()["plans"][0]["team"]["members"][1]["member_id"] == "b"
+    pf = client.get(f"{root}/plans/{plan['id']}/preflight").json()
+    assert pf["plan"]["tasks"][0]["member_id"] == "a"
+    assert "team" not in task and "team" not in pf["plan"]["tasks"][0]
+    updated = client.patch(f"{root}/tasks/{task['id']}", json={"title": "检查样本", "description": "记录特征"})
+    assert updated.status_code == 200 and updated.json()["title"] == "检查样本"
+    assert client.patch(f"{root}/plans/{plan['id']}", json={"team": {"members": [
+        {"id": "other", "label": "旁观员", "role": "_generalist"}
+    ]}}).status_code == 422  # 不允许删除已有节点绑定的成员
+    patched = client.patch(f"{root}/plans/{plan['id']}", json={"config": {"note": "已复核"}})
+    assert patched.status_code == 200 and patched.json()["config"]["note"] == "已复核"
+    assert patched.json()["team"]["members"][0]["member_id"] == "a"
+    assert client.patch(f"{root}/tasks/{task['id']}", json={"member_id": "nope"}).status_code == 422
+    assert client.patch(f"{root}/plans/{plan['id']}", json={"status": "active"}).status_code == 200
+    assert client.patch(f"{root}/tasks/{task['id']}", json={"description": "执行中不可改"}).status_code == 422
+    assert client.patch(f"{root}/plans/{plan['id']}", json={"team": {"members": []}}).status_code == 422
+
+
+def test_coordination_team_list_and_confirmation_boundary(client):
+    pid = _make_project(client)
+    root = f"/api/projects/{pid}/coordination"
+    created = client.post(f"{root}/plans", json={
+        "name": "编组", "team": [{"id": "analyst", "label": "分析员", "role": "_generalist"}],
+    })
+    assert created.status_code == 201
+    plan = created.json()
+    assert plan["team"]["members"][0]["member_id"] == "analyst"
+    node = client.post(f"{root}/plans/{plan['id']}/tasks", json={
+        "title": "分工", "role": "_generalist", "member_id": "analyst",
+    })
+    assert node.status_code == 201
+    endpoint = f"{root}/plans/{plan['id']}"
+    before = client.get(f"{endpoint}/preflight").json()
+    invalid = client.patch(endpoint, json={
+        "config": {"should_not_persist": True}, "status": "invalid",
+    })
+    assert invalid.status_code == 422
+    assert "should_not_persist" not in client.get(root).json()["plans"][0]["config"]
+    assert client.post(f"{endpoint}/start", json={
+        "preflight_revision": before["revision"], "confirmations": {},
+    }).status_code == 422
+    assert client.post(f"{endpoint}/start", json={
+        "preflight_revision": "", "confirmations": {
+            "dependencies": True, "safety": True, "execution": True,
+        },
+    }).status_code == 409
+    assert client.patch(f"{root}/tasks/{node.json()['id']}", json={"status": "failed"}).status_code == 200
+    now = client.get(f"{endpoint}/preflight").json()
+    assert now["revision"] != before["revision"]
+    assert any(item["code"] == "failed_nodes" for item in now["blockers"])
+    rejected = client.post(f"{endpoint}/start", json={
+        "preflight_revision": before["revision"], "confirmations": {
+            "dependencies": True, "safety": True, "execution": True,
+        },
+    })
+    assert rejected.status_code == 409
+    assert client.get(root).json()["plans"][0]["status"] == "draft"
+
+
 def test_project_lifecycle(client):
     pid = _make_project(client)
     listed = client.get("/api/projects").json()

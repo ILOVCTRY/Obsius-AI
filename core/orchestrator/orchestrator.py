@@ -209,12 +209,29 @@ ORCH_TOOLS: list[dict[str, Any]] = [
                        "depends_on 填「前置节点的下标（从 0 起）或标题」——系统拓扑排序后建图。"
                        "计划只是「打算怎么做」的登记（不派单、不开窗、零执行）；真正执行再用 "
                        "delegate 逐节点派单（delegate 传 plan_node_id 绑定）。同一项目建议只维护"
-                       "一张 active 计划；全部节点完成后计划自动置 completed。",
+                       "一张 active 计划；team.members 明确团队成员，节点 member_id 指定成员；"
+                       "全部节点完成后计划自动置 completed。",
         "input_schema": {
             "type": "object",
             "properties": {
                 "plan_name": {"type": "string", "description": "计划名称"},
                 "objective": {"type": "string", "description": "计划目标（可写阶段目标摘要）"},
+                "team": {"type": "object", "description": "团队成员名册；旧调用可省略，按节点 role 生成", "properties": {
+                    "id": {"type": "string", "description": "团队标识（可选）"},
+                    "name": {"type": "string", "description": "团队名称（可选）"},
+                    "source": {"type": "string", "description": "团队来源（可选）"},
+                    "execution": {"type": "object", "description": "执行元数据（不改变派单语义）"},
+                    "members": {"type": "array", "items": {"type": "object", "properties": {
+                        "id": {"type": "string", "description": "成员标识，等价于 member_id"},
+                        "member_id": {"type": "string", "description": "成员标识，等价于 id"},
+                        "label": {"type": "string", "description": "成员显示名称；兼容 name/title"},
+                        "name": {"type": "string", "description": "成员显示名称；兼容 label/title"},
+                        "title": {"type": "string", "description": "成员显示名称；兼容 label/name"},
+                        "responsibility": {"type": "string", "description": "职责说明；兼容 description"},
+                        "description": {"type": "string", "description": "职责说明；兼容 responsibility"},
+                        "role": {"type": "string", "description": "执行专家角色（可选）"},
+                    }}},
+                }},
                 "nodes": {"type": "array", "description": "计划节点（按依赖拓扑排序后建图）",
                           "items": {
                               "type": "object",
@@ -222,6 +239,8 @@ ORCH_TOOLS: list[dict[str, Any]] = [
                                   "title": {"type": "string", "description": "节点标题"},
                                   "role": {"type": "string",
                                            "description": "建议执行专家（可选）"},
+                                  "member_id": {"type": "string", "description": "团队成员标识（可选）"},
+                                  "description": {"type": "string", "description": "节点任务说明（可选）"},
                                   "depends_on": {"type": "array",
                                                  "items": {"type": ["integer", "string"]},
                                                  "description": "前置节点下标或标题"},
@@ -397,8 +416,9 @@ CHAT_SYSTEM_PROMPT = """你是项目主代理（Orchestrator），现在处于**
 2. 执行者看不到对话上下文：delegate 的 objective 必须自包含；系统会自动选窗
    （优先复用空闲同角色窗）或开新窗。
 3. 当人类要求组建 Agent 团队、合理分工或按计划协作时，先用 plan_work 登记完整
-   的团队计划。plan_work 只生成等待确认的 draft 提案：你必须在回复中说明成员角色、
-   任务依赖和安全边界，**不得**直接 delegate 这些计划节点。只有人类在 LiveRoom
+   的团队计划。team.members 须明确成员 id/身份/职责，节点 member_id 指向团队成员；
+   plan_work 只生成等待确认的 draft 提案：回复中说明分工、任务依赖和安全边界，
+   **不得**直接 delegate 这些计划节点。只有人类在 LiveRoom
    的团队确认卡或「协调」页签确认后，系统才会把计划置 active 并开始派发。
 4. 阶段目标（goal）的变更须由人类确认：你可以在对话里给出结构化草案
    （text/criteria/phase），由人类在编排页签 goal 条确认落盘；未确认前不要当作已生效。
@@ -838,9 +858,11 @@ class Orchestrator:
                     "name": active_plan["name"],
                     "objective": active_plan["objective"][:300],
                     "status": active_plan["status"],
+                    "team": active_plan["team"],
                     "nodes": [{
                         "id": node["id"], "title": node["title"][:100],
                         "status": node["status"], "role": node.get("role") or "",
+                        "member_id": node.get("member_id") or "",
                         "task_id": node.get("task_id") or "",
                         "depends_on": node.get("depends_on") or [],
                     } for node in active_plan["tasks"]],
@@ -1820,15 +1842,80 @@ class Orchestrator:
         return self._coord_store
 
     def _tool_plan_work(self, plan_name: str, nodes: list[dict[str, Any]],
-                        objective: str = "") -> str:
-        """创建一张等待确认的 draft 计划 DAG；不激活、不派单、不启动会话。"""
+                        objective: str = "", team: dict[str, Any] | None = None) -> str:
+        """创建一张等待确认的 draft 团队计划；不激活、不派单、不启动会话。"""
         if not isinstance(nodes, list) or not nodes:
             return "[拒绝] plan_work 至少需要一个节点"
         if len(nodes) > 20:
             return "[拒绝] plan_work 单计划最多 20 个节点"
+        if team is not None and (not isinstance(team, dict) or not isinstance(team.get("members"), list)):
+            return "[拒绝] team.members 必须是数组"
+        members = team.get("members", []) if team is not None else []
+        if any(not isinstance(m, dict) or not str(m.get("member_id") or m.get("id") or "").strip() for m in members):
+            return "[拒绝] team.members 每位成员须有 id 或 member_id"
+        ids = [str(m.get("member_id") or m.get("id")).strip() for m in members]
+        if len(ids) != len(set(ids)):
+            return "[拒绝] team.members 成员标识重复"
+        if team is None:
+            # 旧版只提供节点 role 时仍能看见团队 roster；绝不更改 role 的执行含义。
+            roles = dict.fromkeys(str(n.get("role") or "").strip() for n in nodes if isinstance(n, dict))
+            members = [{"member_id": role, "title": role, "role": role, "description": ""}
+                       for role in roles if role]
+        ids = [str(m.get("member_id") or m.get("id")).strip() for m in members]
+        titles: set[str] = set()
+        for idx, raw in enumerate(nodes):
+            if not isinstance(raw, dict) or not str(raw.get("title") or "").strip():
+                return f"[拒绝] 节点 {idx} 缺少 title"
+            title = str(raw["title"]).strip()
+            if title in titles:
+                return f"[拒绝] 节点标题重复: {title}"
+            titles.add(title)
+            member_id = str(raw.get("member_id") or (raw.get("role") if team is None else "") or "").strip()
+            if member_id and member_id not in ids:
+                return f"[拒绝] 节点 {idx} 的 member_id 不在团队名册"
+            if member_id:
+                member = members[ids.index(member_id)]
+                if raw.get("role") and member.get("role") and raw["role"] != member["role"]:
+                    return f"[拒绝] 节点 {idx} 的 role 与团队成员不一致"
+            try:
+                int(raw.get("priority", 50))
+            except (TypeError, ValueError):
+                return f"[拒绝] 节点 {idx} priority 必须是整数"
+        graph: dict[int, set[int]] = {}
+        title_indexes = {str(n["title"]).strip(): i for i, n in enumerate(nodes)}
+        for idx, raw in enumerate(nodes):
+            refs = raw.get("depends_on") or []
+            if not isinstance(refs, list):
+                return f"[拒绝] 节点 {idx} depends_on 必须是数组"
+            deps: set[int] = set()
+            for ref in refs:
+                target = ref if isinstance(ref, int) and not isinstance(ref, bool) else title_indexes.get(str(ref))
+                if target is None or target not in range(len(nodes)):
+                    return f"[拒绝] 节点 {idx} 依赖不存在: {ref}"
+                if target == idx:
+                    return f"[拒绝] 节点 {idx} 不能依赖自身"
+                deps.add(target)
+            graph[idx] = deps
+        visiting: set[int] = set()
+        visited: set[int] = set()
+        def check_cycle(node: int) -> bool:
+            if node in visiting:
+                return True
+            if node in visited:
+                return False
+            visiting.add(node)
+            for dep in graph[node]:
+                if check_cycle(dep):
+                    return True
+            visiting.remove(node)
+            visited.add(node)
+            return False
+        if any(check_cycle(idx) for idx in graph):
+            return "[拒绝] plan_work 依赖图存在循环"
         coord = self._coord()
         try:
-            plan = coord.create_plan(self.project_id, plan_name, objective)
+            plan = coord.create_plan(self.project_id, plan_name, objective,
+                                     team={**(team or {}), "members": members})
             created: list[dict[str, Any]] = []
             by_index: dict[int, str] = {}
             by_title: dict[str, str] = {}
@@ -1843,7 +1930,9 @@ class Orchestrator:
                     return f"[拒绝] 节点标题重复: {title}"
                 node = coord.add_task(
                     self.project_id, plan["id"], title,
+                    description=str(raw.get("description") or ""),
                     role=str(raw.get("role") or ""),
+                    member_id=str(raw.get("member_id") or (raw.get("role") if team is None else "") or ""),
                     priority=int(raw.get("priority", 50)), depends_on=[])
                 created.append(node); by_index[idx] = node["id"]; by_title[title] = node["id"]
             # 再补依赖；依赖只允许本计划节点，拒绝自环。
@@ -1869,9 +1958,10 @@ class Orchestrator:
             proposal = {
                 "plan_id": plan["id"], "status": "draft",
                 "name": view["name"], "objective": view["objective"],
+                "team": view["team"],
                 "nodes": [{"id": t["id"], "title": t["title"],
                            "description": t["description"], "status": t["status"],
-                           "role": t["role"], "priority": t["priority"],
+                           "role": t["role"], "member_id": t["member_id"], "priority": t["priority"],
                            "depends_on": t["depends_on"]}
                           for t in view["tasks"]],
             }

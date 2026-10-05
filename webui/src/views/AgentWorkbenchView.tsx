@@ -6,7 +6,7 @@ import {
   AlertTriangle, Bot, Check, ChevronDown, CircleSlash, Clock3, Cpu, Gauge, Loader2,
   Plug, Plus, Send, Sparkles, Square, Trash2, Wrench, X, Zap,
 } from "lucide-react"
-import { api } from "@/lib/api"
+import { api, ApiError } from "@/lib/api"
 import type {
   ChatAgent, ChatMcpServer, ChatMessage, ChatThread, ChatThreadError,
 } from "@/lib/types"
@@ -296,7 +296,7 @@ export function AgentWorkbenchView({ pid, meta }: {
     for (const e of events) {
       if (e.kind !== "chat.message") continue
       const p = e.payload as { thread_id?: string; role?: string }
-      if (p?.thread_id === tid && p.role === "user") { reloadRef.current?.(); return }
+      if (p?.thread_id === tid && (p.role === "user" || p.role === "assistant")) { reloadRef.current?.(); return }
     }
   }, [events, tid, pendingIn])
 
@@ -318,6 +318,7 @@ export function AgentWorkbenchView({ pid, meta }: {
   const send = useCallback(async (text?: string) => {
     const body = (text ?? input).trim()
     if (!body || sending) return
+    setSending(true)
     setInput(""); setErr(null); setPendingIn(body)
     draftsRef.current.set(tid ?? "__new", "")
     const refs = refsDraft.skills.length || refsDraft.mcps.length ? refsDraft : null
@@ -346,9 +347,18 @@ export function AgentWorkbenchView({ pid, meta }: {
   }, [tid, agentId, reloadThreads, selectThread])
 
   const stop = useCallback(async () => {
-    if (!tid) return
-    try { await api.chatStop(tid) } catch (e) { setErr(e instanceof Error ? e.message : String(e)) }
-  }, [tid])
+    if (!tid || !running) return
+    try {
+      await api.chatStop(tid)
+      reloadRef.current?.()
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        reloadRef.current?.()
+        return
+      }
+      setErr(e instanceof Error ? e.message : String(e))
+    }
+  }, [tid, running])
 
   // 自动滚底（含思考增量——此前漏 liveThinking，思考增长时不跟滚，观感「卡住」）
   useEffect(() => {
@@ -778,7 +788,7 @@ export function AgentWorkbenchView({ pid, meta }: {
                 )
               })}
               <span className="wb-spacer" />
-              {(running || !!pendingIn || sending) ? (
+              {running ? (
                 <button className="wb-send is-stop" onClick={() => void stop()}>
                   <Square size={11} /> 停止
                 </button>

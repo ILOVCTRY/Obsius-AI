@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Activity, ChevronRight, CircleAlert, Clock3, FileKey2, GitBranch, MessageCircle, Pause, Play, Radio, RefreshCw, Users, Mail } from "lucide-react"
 import { api } from "@/lib/api"
-import type { BBEvent, CoordinationOverview, CoordinationTask, CoordinationTaskStatus, Session, SessionGraph } from "@/lib/types"
+import type { BBEvent, CoordinationOverview, CoordinationTask, CoordinationTaskStatus, CoordinationTeamMember, Session, SessionGraph } from "@/lib/types"
 import { PlanDag } from "./coordination/PlanDag"
 import { PlanConfirmDialog } from "./coordination/PlanConfirmDialog"
 import { PlanControlBar } from "./coordination/PlanControlBar"
@@ -64,6 +64,7 @@ export function CoordinationPane({ pid, onOpenSession }: {
   useEffect(() => { void load(); const t = window.setInterval(() => void load(), 3000); return () => window.clearInterval(t) }, [load])
 
   const selected = useMemo(() => data?.plans.find((p) => p.id === selectedId) ?? null, [data, selectedId])
+  const memberLabels = useMemo(() => Object.fromEntries((selected?.team?.members ?? []).map((member) => [member.member_id, member.label || member.title || member.member_id])), [selected])
   const selectedTask = useMemo(() => selected?.tasks.find((task) => task.id === selectedTaskId) ?? null, [selected, selectedTaskId])
   useEffect(() => {
     if (!selected) { setSelectedTaskId(null); return }
@@ -164,7 +165,7 @@ export function CoordinationPane({ pid, onOpenSession }: {
               </div>
               <div className="coord-task-board">
                 <div className="coord-section-head"><span>编排计划依赖图</span><span className="coord-hint">节点绑定真实任务后自动同步；点击节点打开会话</span></div>
-                {!selected.tasks.length ? <div className="coord-empty">等待编排器生成计划</div> : <PlanDag tasks={selected.tasks} sessions={sessions} onOpenSession={onOpenSession} onOpenTask={openBoundTask} />}
+                {!selected.tasks.length ? <div className="coord-empty">等待编排器生成计划</div> : <PlanDag tasks={selected.tasks} sessions={sessions} memberLabels={memberLabels} onOpenSession={onOpenSession} onOpenTask={openBoundTask} />}
               </div>
               <TeamRoster plan={selected} sessions={sessions} onOpenSession={onOpenSession} />
               <section className="coord-knowledge coord-legacy-knowledge">
@@ -197,29 +198,29 @@ function TeamRoster({ plan, sessions, onOpenSession }: {
     session: task.task_id ? sessions.find((item) => item.bound_task_id === task.task_id) : undefined,
   }))
   const bound = rows.filter((row) => row.session)
-  const running = bound.filter((row) => row.session?.worker_running).length
+  const running = new Set(bound.filter((row) => row.session?.worker_running).map((row) => row.session?.id)).size
+  const members = plan.team?.members ?? []
+  const groups = members.map((member) => ({ member, rows: rows.filter(({ task }) => task.member_id === member.member_id) }))
+  const fallbackGroups = members.length === 0
+    ? [...new Set(rows.map(({ task }) => task.role || "待分配"))].map((role) => ({ member: { member_id: role, title: role, role } satisfies CoordinationTeamMember, rows: rows.filter(({ task }) => (task.role || "待分配") === role) }))
+    : []
+  const groupedIds = new Set([...groups, ...fallbackGroups].flatMap(({ rows: groupedRows }) => groupedRows.map(({ task }) => task.id)))
+  const ungrouped = rows.filter(({ task }) => !groupedIds.has(task.id))
+  const renderRow = ({ task, session }: { task: CoordinationTask; session?: Session }) => <div className="coord-roster-row" key={task.id}>
+    <span className={cn("coord-live-dot", session?.worker_running ? "is-running" : session?.worker_armed ? "is-armed" : "is-idle")} />
+    <div className="coord-roster-main"><b title={task.title}>{task.title}</b><small>{STATUS_LABEL[task.status]} · {session ? (session.name || session.id) : "尚未绑定会话"}{task.depends_on.length ? ` · 依赖 ${task.depends_on.length}` : ""}</small></div>
+    <span className={cn("coord-roster-state", session ? "is-bound" : "is-pending")}>{session ? (session.worker_running ? "运行中" : session.worker_armed ? "待命" : "空闲") : "待派发"}</span>
+    {session && <button type="button" className="coord-roster-open" onClick={() => onOpenSession?.(session.id)}>打开</button>}
+  </div>
+  const renderGroup = ({ member, rows: memberRows }: typeof groups[number]) => <div className="coord-roster-group" key={member.member_id}>
+    <div className="coord-roster-group-head"><div><b>{member.label || member.title || member.member_id}</b><span>{member.role || "未指定角色"}</span><small>{member.description || "未填写责任说明"}</small></div><em>{memberRows.filter(({ task }) => task.status === "completed").length}/{memberRows.length} 已完成</em></div>
+    <div className="coord-roster-list">{memberRows.length ? memberRows.map(renderRow) : <div className="coord-empty">暂无分配节点</div>}</div>
+  </div>
   return <section className="coord-team-roster">
-    <div className="coord-section-head">
-      <span><Users size={13} /> 当前计划团队编制</span>
-      <span className="coord-hint">按计划节点展示，不合并同角色任务</span>
-    </div>
-    <div className="coord-roster-summary">
-      <Metric label="成员任务" value={rows.length} />
-      <Metric label="已绑定会话" value={bound.length} accent="active" />
-      <Metric label="运行中" value={running} accent="active" />
-      <Metric label="待派发" value={rows.length - bound.length} accent="warn" />
-    </div>
-    {!rows.length ? <div className="coord-empty">当前计划还没有团队任务</div> : <div className="coord-roster-list">{rows.map(({ task, session }) => (
-      <div className="coord-roster-row" key={task.id}>
-        <span className={cn("coord-live-dot", session?.worker_running ? "is-running" : session?.worker_armed ? "is-armed" : "is-idle")} />
-        <div className="coord-roster-main">
-          <b title={task.title}>{task.title}</b>
-          <small>{task.role || "待分配角色"} · {STATUS_LABEL[task.status]} · {session ? (session.name || session.id) : "尚未绑定会话"}</small>
-        </div>
-        <span className={cn("coord-roster-state", session ? "is-bound" : "is-pending")}>{session ? (session.worker_running ? "运行中" : session.worker_armed ? "待命" : "空闲") : "待派发"}</span>
-        {session && <button type="button" className="coord-roster-open" onClick={() => onOpenSession?.(session.id)}>打开</button>}
-      </div>
-    ))}</div>}
+    <div className="coord-section-head"><span><Users size={13} /> Agent 团队编制 · {plan.team?.name || plan.name}</span><span className="coord-hint">DAG 编排 · Orchestrator delegate 执行</span></div>
+    <p className="mt-1 text-xs text-muted-foreground">共享目标：{plan.objective || "未填写"}{plan.team?.source === "legacy_derived" && " · 存量计划按角色推导成员"}</p>
+    <div className="coord-roster-summary"><Metric label="成员" value={members.length || fallbackGroups.length} /><Metric label="工作节点" value={rows.length} /><Metric label="已绑定会话" value={new Set(bound.map(({ session }) => session?.id)).size} accent="active" /><Metric label="运行中" value={running} accent="active" /><Metric label="待派发" value={rows.length - bound.length} accent="warn" /></div>
+    {!rows.length && !members.length ? <div className="coord-empty">当前计划还没有团队成员或任务</div> : <div className="coord-roster-groups">{[...groups, ...fallbackGroups].map(renderGroup)}{ungrouped.length > 0 && <div className="coord-roster-group is-ungrouped"><div className="coord-roster-group-head"><div><b>未编组节点</b><small>未匹配团队成员名册</small></div><em>{ungrouped.length} 节点</em></div><div className="coord-roster-list">{ungrouped.map(renderRow)}</div></div>}</div>}
   </section>
 }
 
@@ -239,7 +240,11 @@ function CoordinationCockpit({
     .filter((event) => String(event.payload.kind ?? "").includes("message") || event.payload.kind === "human_note")
     .slice(-8).reverse()
   const activity = events.filter((event) => event.kind !== "message.inbox").slice(-8).reverse()
-  const activeSessions = sessions.filter((session) => session.status !== "closed")
+  const activeSessions = sessions.filter((session) => session.worker_running === true)
+  const runningTaskIds = new Set(
+    tasks.map((task) => task.task_id).filter((taskId): taskId is string => !!taskId)
+      .filter((taskId) => sessions.some((session) => session.bound_task_id === taskId && session.worker_running === true)),
+  )
   const edgeCount = sessionGraph?.edges.length ?? 0
   return <section className="coord-cockpit">
     <div className="coord-cockpit-head">
@@ -260,7 +265,7 @@ function CoordinationCockpit({
       <div className="coord-panel coord-lane-panel">
         <div className="coord-panel-title"><span><GitBranch size={13} /> 任务进度泳道</span><small>{tasks.length} 个任务</small></div>
         {!tasks.length ? <div className="coord-panel-empty">选择计划后显示任务</div> : <div className="coord-lanes">{(["pending", "ready", "running", "blocked", "failed", "completed"] as CoordinationTaskStatus[]).map((status) => <div className="coord-lane" key={status}>
-          <div className="coord-lane-label"><span className={`is-${status}`} />{STATUS_LABEL[status]}<b>{tasks.filter((task) => task.status === status).length}</b></div>
+          <div className="coord-lane-label"><span className={`is-${status}`} />{STATUS_LABEL[status]}<b>{status === "running" ? runningTaskIds.size : tasks.filter((task) => task.status === status).length}</b></div>
           <div className="coord-lane-items">{tasks.filter((task) => task.status === status).map((task) => <button key={task.id} className={cn("coord-lane-task", selectedTask?.id === task.id && "is-selected")} onClick={() => onSelectTask(task.id)}><b>{task.title}</b><small>{task.role || "待分配"}{task.depends_on.length ? ` · 依赖 ${task.depends_on.length}` : ""}</small></button>)}</div>
         </div>)}</div>}
       </div>

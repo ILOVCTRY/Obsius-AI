@@ -52,7 +52,7 @@ from core.blackboard.attackpath import build_attack_path
 from core.blackboard.intents import list_intents, reopen_intent
 from core.blackboard import traces, tasktree
 from core.blackboard.store import Blackboard, BlackboardClosedError
-from core.blackboard.tasks import dedup_fp, render_attempts_lines
+from core.blackboard.tasks import ClaimError, dedup_fp, render_attempts_lines
 from core import assetimport
 from core import fofa as fofa_mod
 from core.intel import config as intel_config
@@ -163,12 +163,15 @@ class ExpertsPatchIn(BaseModel):
 class CoordinationPlanIn(BaseModel):
     name: str
     objective: str = ""
+    team: dict[str, Any] | list[dict[str, Any]] | None = None
+    config: dict[str, Any] = Field(default_factory=dict)
 
 
 class CoordinationTaskIn(BaseModel):
     title: str
     description: str = ""
     role: str = ""
+    member_id: str | None = None
     priority: int = 50
     depends_on: list[str] = Field(default_factory=list)
 
@@ -176,11 +179,16 @@ class CoordinationTaskIn(BaseModel):
 class CoordinationTaskPatchIn(BaseModel):
     status: str | None = None
     role: str | None = None
+    member_id: str | None = None
+    title: str | None = None
+    description: str | None = None
     evidence: list[dict[str, Any]] | None = None
 
 
 class CoordinationPlanStatusIn(BaseModel):
-    status: str
+    status: str | None = None
+    team: dict[str, Any] | list[dict[str, Any]] | None = None
+    config: dict[str, Any] | None = None
 
 
 class CoordinationPlanStartIn(BaseModel):
@@ -4650,7 +4658,8 @@ def create_app(
                     return {"session_id": sid, "job_id": None,
                             "skipped": "窗口处于暂停态，未自动起跑（恢复后点「跑」）"}
                 bb.set_session_meta(sid, {"worker_armed": True, "close_pending": None})
-                job_id = _submit_worker(pid, agent, auto=True, origin="approval-spawn")
+                tq.start_direct(bind_to, sid, lease_minutes=agent.config.lease_minutes)
+                job_id = _submit_worker(pid, agent, auto=True, origin="approval-spawn", task_id=bind_to)
                 bb.append_event(
                     pid, "session.spawned",
                     {"role": row.get("role") or "", "session_id": sid,
@@ -4671,7 +4680,8 @@ def create_app(
             except HTTPException as e:
                 raise RuntimeError(e.detail) from e
             bb.set_session_meta(new_sid, {"worker_armed": True, "close_pending": None})
-            job_id = _submit_worker(pid, agent, auto=True, origin="approval-spawn")
+            tq.start_direct(bind_to, new_sid, lease_minutes=agent.config.lease_minutes)
+            job_id = _submit_worker(pid, agent, auto=True, origin="approval-spawn", task_id=bind_to)
             bb.append_event(
                 pid, "session.spawned",
                 {"role": action.get("role") or "", "session_id": new_sid,
@@ -4876,7 +4886,11 @@ def create_app(
              "role": role, "new_window": True, "approval_id": approval_id,
              **({"plan_node_id": plan_node_id} if plan_node_id else {})},
             session_id=sid, author="orchestrator")
-        job_id = _submit_worker(pid, agent, auto=True, origin="approval-delegate")
+        try:
+            tq.start_direct(task_id, sid, lease_minutes=agent.config.lease_minutes)
+        except (ValueError, ClaimError) as e:
+            raise RuntimeError(str(e)) from e
+        job_id = _submit_worker(pid, agent, auto=True, origin="approval-delegate", task_id=task_id)
         return {"session_id": sid, "task_id": task_id, "job_id": job_id}
 
     # 审批 op 处理器白名单（批 4，红线）：批准后动作只准字典分派，绝不 eval。
@@ -4999,7 +5013,8 @@ def create_app(
     def create_coordination_plan(pid: str, body: CoordinationPlanIn):
         proj = _project(pid)
         try:
-            plan = CoordinationStore(proj.bb).create_plan(pid, body.name, body.objective)
+            plan = CoordinationStore(proj.bb).create_plan(
+                pid, body.name, body.objective, config=body.config, team=body.team)
         except ValueError as e:
             raise HTTPException(422, str(e)) from e
         proj.bb.append_event(pid, "coordination.plan.created",
@@ -5013,7 +5028,7 @@ def create_app(
         try:
             task = CoordinationStore(proj.bb).add_task(
                 pid, plan_id, body.title, body.description, body.role,
-                body.priority, body.depends_on)
+                body.priority, body.depends_on, body.member_id)
         except LookupError as e:
             raise HTTPException(404, str(e)) from e
         except (TypeError, ValueError) as e:
@@ -5037,8 +5052,10 @@ def create_app(
             pf = cs.preflight(pid, plan_id)
         except LookupError as e:
             raise HTTPException(404, str(e)) from e
-        if body.preflight_revision and body.preflight_revision != pf["revision"]:
+        if not body.preflight_revision or body.preflight_revision != pf["revision"]:
             raise HTTPException(409, {"message": "计划在确认后已变化，请重新预检", "preflight": pf})
+        if not all(body.confirmations.get(key) is True for key in ("dependencies", "safety", "execution")):
+            raise HTTPException(422, "请确认任务依赖、安全边界及执行")
         if pf["blockers"]:
             raise HTTPException(422, {"message": "计划未通过执行前检查", "blockers": pf["blockers"]})
         plan = cs.set_plan_status(pid, plan_id, "active")
@@ -5113,13 +5130,21 @@ def create_app(
     def update_coordination_plan(pid: str, plan_id: str, body: CoordinationPlanStatusIn):
         proj = _project(pid)
         try:
-            plan = CoordinationStore(proj.bb).set_plan_status(pid, plan_id, body.status)
+            store = CoordinationStore(proj.bb)
+            if body.status is None and body.team is None and body.config is None:
+                raise ValueError("请提供 status、team 或 config")
+            if body.status is not None and body.status not in ("draft", "active", "paused", "completed"):
+                raise ValueError("非法计划状态")
+            if body.team is not None or body.config is not None:
+                store.update_plan_metadata(pid, plan_id, team=body.team, config=body.config)
+            plan = (store.set_plan_status(pid, plan_id, body.status)
+                    if body.status is not None else store.get_plan(pid, plan_id))
         except LookupError as e:
             raise HTTPException(404, str(e)) from e
         except ValueError as e:
             raise HTTPException(422, str(e)) from e
         proj.bb.append_event(pid, "coordination.plan.updated",
-                             {"plan_id": plan_id, "status": body.status}, author="human")
+                             {"plan_id": plan_id, "status": plan["status"]}, author="human")
         return plan
 
     @app.patch("/api/projects/{pid}/coordination/tasks/{task_id}")
@@ -5130,8 +5155,12 @@ def create_app(
             # 完成任务必须经过验证闭环。先落证据/角色，再验证，支持一次
             # PATCH 同时提交证据和 completed；验证失败时保留证据供后续补充。
             if body.status == "completed":
-                if body.role is not None or body.evidence is not None:
+                if any(value is not None for value in (
+                    body.role, body.member_id, body.title, body.description, body.evidence
+                )):
                     store.update_task(pid, task_id, role=body.role,
+                                      member_id=body.member_id, title=body.title,
+                                      description=body.description,
                                       evidence=body.evidence)
                 verification = store.verify_task(pid, task_id)
                 if verification["status"] != "passed":
@@ -5146,7 +5175,8 @@ def create_app(
             else:
                 task = store.update_task(
                     pid, task_id, status=body.status, role=body.role,
-                    evidence=body.evidence)
+                    member_id=body.member_id, title=body.title,
+                    description=body.description, evidence=body.evidence)
         except LookupError as e:
             raise HTTPException(404, str(e)) from e
         except ValueError as e:
@@ -5438,15 +5468,24 @@ def create_app(
                     transcript.unlink()
                 except OSError:
                     log.warning("丢弃现场：transcript 清理失败（任务 %s）", task_id)
-        # 触发点 D（C1 放回，与 publish 同口径）：L1/L2 未暂停时唤醒空闲 armed
-        # worker 认领放回的任务——worker 在队列空时已退出（空队列零成本退），
-        # 不 kick 则放回的任务永久悬 open 无人认领。paused/L0 时排队等恢复
-        # （响应带 kicked 供前端提示）。
+        # 放回仅恢复为待执行；在自动档未暂停且原绑定会话仍存活时，
+        # 明确将这条任务直派到原会话。不开公共任务池扫描，也不唤醒无关窗口。
         kicked: list[str] = []
         cfg = _auto_cfg(pid)
         if cfg["level"] in {"L1", "L2"} and not cfg["paused"]:
-            kicked = _kick_workers(pid)
-            _schedule(pid, reason="task-reopen")  # v0.71 调度器：原窗保留绑定，closed 才重绑
+            proj = _project(pid)
+            task = tq.get_task(task_id)
+            sid = (task or {}).get("target_session") or ""
+            row = proj.bb.get_session(sid) if sid else None
+            if row and row.get("status") not in {"closed", "paused"} and not _session_job_running(sid):
+                agent = _ensure_agent(pid, sid)
+                if not agent.paused:
+                    try:
+                        tq.start_direct(task_id, sid, lease_minutes=agent.config.lease_minutes)
+                    except (ValueError, ClaimError) as e:
+                        raise HTTPException(409, str(e)) from e
+                    _submit_worker(pid, agent, auto=True, origin="task-reopen", task_id=task_id)
+                    kicked.append(sid)
         return {"task_id": task_id, "status": "open", "kicked": kicked}
 
     def _session_meta(bb, sid: str) -> dict:
@@ -5578,18 +5617,19 @@ def create_app(
                          "old_max": old, "new_max": old + 200, "by": "human"},
                         session_id=sid, author="human")
             else:
-                # ↩ 接手现场续跑：现场就在本窗（C10 任务现场文件归任务所有，
-                # 零搬运）；认领由 worker 首轮 run_next_task 执行（与跨会话
-                # 新窗分支同时点，run_task 接手路径重建末 60 条上下文）
+                # ↩ 接手现场续跑：现场就在本窗（C10 任务现场归任务所有，
+                # 零搬运）。重开后直接绑定当前窗口并把 task_id 传入 worker，
+                # 不再等待已退役的窗口队列认领。
                 try:
                     tq.reopen(task_id, by="human", scene="kept")
-                except ValueError as e:
-                    raise HTTPException(409, str(e))
+                    tq.start_direct(task_id, sid, lease_minutes=agent.config.lease_minutes)
+                except (ValueError, ClaimError) as e:
+                    raise HTTPException(409, str(e)) from e
             agent._stop_after_task = False  # 清中断一次性闸门，否则 worker 领任务前即退出
             agent._pause_req.clear()
             agent._abort_req.clear()
             proj.bb.set_session_status(sid, "running")
-            _submit_worker(pid, agent, origin="human-resume")
+            _submit_worker(pid, agent, origin="human-resume", task_id=task_id)
             return {"task_id": task_id, "session_id": sid,
                     "status": "resumed", "resume_mode": mode}
 
@@ -5604,9 +5644,10 @@ def create_app(
             if old_target and old_target != new_sid:
                 tq.unassign_session(old_target)
             tq.bind_session(task_id, new_sid, by="resume-spawn")
-        except ValueError as e:
+            tq.start_direct(task_id, new_sid, lease_minutes=agent.config.lease_minutes)
+        except (ValueError, ClaimError) as e:
             raise HTTPException(409, str(e))
-        _submit_worker(pid, agent, origin="task-resume")
+        _submit_worker(pid, agent, origin="task-resume", task_id=task_id)
         return {"task_id": task_id, "session_id": new_sid,
                 "status": "resumed", "resume_mode": mode}
 
@@ -5701,7 +5742,10 @@ def create_app(
             if active >= auto["sessions_cap"]:
                 raise HTTPException(
                     409, f"活跃会话已达项目上限 sessions_cap={auto['sessions_cap']}"
-                         f"（当前 {active} 个非 closed 会话）；请先关窗或调高上限后重试")
+                         f"（当前 {active} 个正在运行的会话）；请等待任务结束或调高上限后重试")
+            # 失效归属仅对 open 行解绑；任务现场与审计保留，随后显式绑定新窗。
+            if sid and (row is None or row.get("status") == "closed"):
+                tq.unassign_session(sid)
             new_sid = _bind_task_window(pid, task, reason="human:spawn-window")
             if not new_sid:
                 # 竞态兜底：预检与绑窗之间调度器 sweep 抢先绑上 → 挂回即可
@@ -6393,17 +6437,43 @@ def create_app(
         return [a.session for a in app.state.agents.values()]
 
     @app.post("/api/agents/{sid}/work")
-    def run_agent_work(sid: str):
+    def run_agent_work(sid: str, task_id: str | None = None):
         # F9 启动口：显式点亮武装（清排水标记）+ 起一个 worker；已在跑则去重不重复起
         pid = _pid_of_session(sid)
         bb = _project(pid).bb
-        bb.set_session_meta(sid, {"worker_armed": True, "close_pending": None})
         if _session_job_running(sid):
+            if task_id:
+                existing = TaskQueue(bb).get_task(task_id)
+                if not existing or existing["project_id"] != pid or existing["target_session"] != sid:
+                    raise HTTPException(409, "任务不属于该会话")
+                if existing["status"] != "claimed" or existing["claimed_by"] != sid:
+                    raise HTTPException(409, "会话已有任务在跑，请等待完成后再启动此任务")
             return {"session_id": sid, "already_running": True}
-        # 重启后/历史孤儿窗：内存未命中时按黑板 sessions 行 rehydrate 再开跑
+        # 重启后/历史孤儿窗：内存未命中时按黑板 sessions 行 rehydrate 再开跑。
+        # 新直派语义下，显式「工作」必须先把该窗的一条 open 委托登记为当前任务；
+        # 不再依赖 worker 进入后扫描公共任务池。
         agent = _ensure_agent(pid, sid)
-        job_id = _submit_worker(pid, agent, origin="human-work")
-        return {"job_id": job_id, "session_id": sid}
+        tq = TaskQueue(bb)
+        if task_id:
+            task = tq.get_task(task_id)
+            if not task or task["project_id"] != pid or task["target_session"] != sid or task["status"] != "open":
+                raise HTTPException(409, "任务不属于该会话或当前不可启动")
+        # 兼容显式点「工作」的旧调用：只接该会话唯一待执行任务，
+        # 多任务时要求提供 task_id，避免误执行另一份任务。
+        if not task_id:
+            queued = tq.session_queue(pid, sid)
+            if len(queued) > 1:
+                raise HTTPException(409, "该会话有多个待执行任务，请指定 task_id")
+            task_id = queued[0]["id"] if queued else None
+        if task_id:
+            try:
+                tq.start_direct(task_id, sid,
+                                lease_minutes=agent.config.lease_minutes)
+            except (ValueError, ClaimError) as e:
+                raise HTTPException(409, str(e)) from e
+        bb.set_session_meta(sid, {"worker_armed": True, "close_pending": None})
+        job_id = _submit_worker(pid, agent, origin="human-work", **({"task_id": task_id} if task_id else {}))
+        return {"job_id": job_id, "session_id": sid, **({"task_id": task_id} if task_id else {})}
 
     def _worker_loop(agent: AgentSession, *, manual: bool = False,
                      tail: dict | None = None) -> Callable[[], int]:
@@ -9464,9 +9534,14 @@ def create_app(
     @app.post("/api/chat/threads/{tid}/stop", status_code=204)
     def chat_stop(tid: str):
         """中止执行中的轮次：置中止事件 → ChatTurn 在步间/流式帧/工具分发点
-        退出并落「已停止」说明（幂等：线程没在跑则 409）。"""
+        退出并落「已停止」说明。轮次刚结束时按幂等成功处理，避免前端状态刷新竞态。"""
         if tid not in _chat_running_set():
-            raise HTTPException(409, "线程未在执行中")
+            thread = chat_store.get_thread(_project(_pid_of_chat(tid)).bb, tid)
+            if thread is None:
+                raise HTTPException(404, f"线程不存在: {tid}")
+            if thread.get("status") != "running":
+                return
+            return
         ev = _chat_abort_event(tid, create=True)
         ev.set()
 

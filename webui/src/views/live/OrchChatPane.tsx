@@ -1,18 +1,7 @@
 import { useEffect, useMemo, useRef } from "react"
 import { MarkdownView } from "@/components/settings/MarkdownView"
 import { fmtDateTimeMin, utcTitle } from "@/lib/datetime"
-import type { BBEvent, CoordinationPlanProposal, OrchPersona, PhaseGoal } from "@/lib/types"
-
-// 停链 reason 中文（orch.chain_stopped.payload.reason，与后端 _stop_chain 调用点对齐）
-const CHAIN_STOP_ZH: Record<string, string> = {
-  converged: "收敛停止（编排器无新产出）",
-  no_sessions: "停止（无可用会话窗）",
-  level_changed: "停止（档位已变更）",
-  paused: "停止（自动档已暂停）",
-  restart: "停止（服务重启急停）",
-  error: "停止（执行异常）",
-  human: "手动停止",
-}
+import type { BBEvent, CoordinationPlanProposal, CoordinationTeamMember, OrchPersona } from "@/lib/types"
 
 // 对话化编排器 M1/M2/M3（2026-09-21，DESIGN §6.4）：编排页签前两段——
 // 顶部阶段目标条（M2 goal 闭环，编辑/清空经回调交父级弹层）+ 中部对话流（M1，
@@ -83,24 +72,57 @@ function CoordinationProposalCard({ plan, onConfirm, onOpen }: {
   onOpen?: (plan: CoordinationPlanProposal) => void
 }) {
   const draft = plan.status === "draft"
+  const members = plan.team?.members ?? []
+  const grouped = members.map((member) => ({
+    member,
+    nodes: plan.nodes.filter((node) => node.member_id === member.member_id),
+  }))
+  const ungrouped = members.length
+    ? plan.nodes.filter((node) => !node.member_id || !members.some((member) => member.member_id === node.member_id))
+    : []
+  // 旧提案没有团队名册时，按 role 保留可读的团队视图。
+  const fallback = members.length === 0
+    ? [...new Set(plan.nodes.map((node) => node.role || "待分配"))].map((role) => ({
+      member: { member_id: role, title: role, role } satisfies CoordinationTeamMember,
+      nodes: plan.nodes.filter((node) => (node.role || "待分配") === role),
+    }))
+    : []
+  const sections = [...grouped, ...fallback]
   return <div className="mt-2 rounded-lg border border-primary/30 bg-background/40 p-2.5 text-xs">
     <div className="flex items-start gap-2">
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
-          <b>{plan.name}</b>
+          <b>{plan.team?.name || plan.name}</b>
           <span className="rounded bg-primary/15 px-1.5 py-px text-[10px] text-primary">{draft ? "等待确认" : plan.status}</span>
         </div>
-        {plan.objective && <p className="mt-1 text-muted-foreground">{plan.objective}</p>}
+        <p className="mt-1 text-[10px] font-medium text-primary">Agent 团队 · 共享目标</p>
+        <p className="mt-0.5 text-muted-foreground">{plan.objective || "尚未填写团队共享目标"}{plan.team?.source === "legacy_derived" && " · 成员按角色兼容推导"}</p>
       </div>
-      <span className="shrink-0 text-muted-foreground">{plan.nodes.length} 个成员任务</span>
+      <span className="shrink-0 text-muted-foreground">{plan.nodes.length} 个工作节点</span>
     </div>
-    <div className="mt-2 space-y-1 border-t border-white/10 pt-2">
-      {plan.nodes.map((node, i) => <div key={node.id} className="flex gap-2">
-        <span className="w-5 shrink-0 text-muted-foreground">{String(i + 1).padStart(2, "0")}</span>
-        <div className="min-w-0 flex-1"><b>{node.title}</b><span className="ml-2 text-muted-foreground">{node.role || "待分配"}</span>
-          {node.depends_on.length > 0 && <small className="ml-2 text-muted-foreground">依赖 {node.depends_on.length} 项</small>}
+    <div className="mt-2 space-y-2 border-t border-white/10 pt-2">
+      {sections.map(({ member, nodes }) => { const memberInfo = member as CoordinationTeamMember; return <div key={memberInfo.member_id} className="rounded border border-white/10 bg-background/30 p-2">
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0"><b>{memberInfo.label || memberInfo.title || memberInfo.member_id}</b>
+            <span className="ml-2 text-muted-foreground">{memberInfo.role || "未指定角色"}</span>
+            {memberInfo.description && <p className="mt-0.5 text-muted-foreground">{memberInfo.description}</p>}
+          </div>
+          <span className="shrink-0 text-muted-foreground">{nodes.length} 节点</span>
         </div>
-      </div>)}
+        <div className="mt-1.5 space-y-1">
+          {nodes.map((node) => <div key={node.id} className="flex gap-2">
+            <span className="w-5 shrink-0 text-muted-foreground">{String(plan.nodes.indexOf(node) + 1).padStart(2, "0")}</span>
+            <div className="min-w-0 flex-1"><b>{node.title}</b>
+              {node.depends_on.length > 0 && <small className="ml-2 text-muted-foreground">依赖 {node.depends_on.length} 项：{node.depends_on.join("、")}</small>}
+            </div>
+          </div>)}
+          {!nodes.length && <span className="text-muted-foreground">暂无分配节点</span>}
+        </div>
+      </div> })}
+      {ungrouped.length > 0 && <div className="rounded border border-dashed border-white/20 p-2">
+        <b className="text-muted-foreground">未编组节点</b>
+        {ungrouped.map((node) => <div key={node.id} className="mt-1 flex gap-2"><span className="w-5 text-muted-foreground">{String(plan.nodes.indexOf(node) + 1).padStart(2, "0")}</span><div><b>{node.title}</b><span className="ml-2 text-muted-foreground">{node.role || "待分配"}</span>{node.depends_on.length > 0 && <small className="ml-2 text-muted-foreground">依赖 {node.depends_on.length} 项：{node.depends_on.join("、")}</small>}</div></div>)}
+      </div>}
     </div>
     <div className="mt-2 flex items-center gap-2 border-t border-white/10 pt-2">
       {draft ? <button type="button" onClick={() => onConfirm?.(plan)} className="rounded border border-primary/60 bg-primary/10 px-2 py-1 text-[11px] text-primary hover:bg-primary/20">确认执行前检查</button> : <span className="text-(--status-ok)">✓ 已进入协调流程</span>}
@@ -153,78 +175,17 @@ function OrchBubble({ ev, name, onConfirmPlan, onOpenPlan }: { ev: BBEvent; name
 
 /** 研判卡（auto-attack 2026-09-28）：orch.auto_attack.analyzed 事件的流内呈现——
  * 渗透计划全文（markdown）+ 内联「开跑」确认。链已活=按钮转「运行中」态（幂等防重）。 */
-function OrchAnalysisCard({ ev, name, chainActive, startBusy, onStartRun }: {
-  ev: BBEvent
-  name: string
-  chainActive?: boolean
-  startBusy?: boolean
-  onStartRun?: (ev: BBEvent) => void
-}) {
-  const p = ev.payload as { budget_ticks?: unknown; summary?: unknown } | null
-  const summary = typeof p?.summary === "string" ? p.summary : ""
-  const budget = typeof p?.budget_ticks === "number" ? p.budget_ticks : null
-  return (
-    <div className="flex justify-start pl-1" title={utcTitle(ev.created_at)}>
-      <div className="max-w-[92%] rounded-2xl rounded-bl-sm border border-primary/30 bg-accent/40 px-3 py-1.5">
-        <p className="mb-1 flex flex-wrap items-center gap-2 text-[10px] text-muted-foreground">
-          <span className="rounded bg-primary/20 px-1 py-px text-primary">🚀 自动渗透研判</span>
-          {budget != null && (
-            <span className="rounded bg-amber-500/20 px-1 py-px text-amber-400">预算 {budget} 轮</span>
-          )}
-          <span>{name} · {fmtDateTimeMin(ev.created_at)}</span>
-        </p>
-        <MarkdownView content={summary} prefix={`atk-${ev.id}`}
-          className="max-h-96 overflow-auto text-sm leading-relaxed text-foreground/90" />
-        <div className="mt-1.5 border-t border-white/10 pt-1.5">
-          {chainActive ? (
-            <span className="text-[11px] text-(--status-ok)" title="自动链已按计划运行（停止走 goal 条右侧按钮）">
-              ✓ 自动链运行中
-            </span>
-          ) : (
-            <button type="button" onClick={() => onStartRun?.(ev)} disabled={startBusy}
-              title="按此计划开跑：写入链预算并触发首轮编排（有产出即自动续链）"
-              className="rounded border border-primary/60 bg-primary/10 px-2 py-0.5 text-[11px] text-primary hover:bg-primary/20 disabled:opacity-50">
-              ▶ 开跑{budget != null ? ` · ${budget} 轮` : ""}
-            </button>
-          )}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-export function OrchChatPane({ events, busy, persona, goal, onEditGoal, onEditPersona,
-  onConfirmPlan, onOpenPlan, level, chainActive, autoBusy, onStartAuto, onStopAuto, onStartRun, orchRunning,
-  chainTicks, chainEstranged, onForceAcquire, uiStyle = "claude" }: {
+export function OrchChatPane({ events, busy, persona, onEditPersona, orchRunning,
+  onConfirmPlan, onOpenPlan, uiStyle = "claude" }: {
   events: BBEvent[]
   busy: boolean
   persona: OrchPersona | null
-  goal: PhaseGoal | null
-  onEditGoal: () => void
   onEditPersona: () => void
   onConfirmPlan?: (plan: CoordinationPlanProposal) => void
   onOpenPlan?: (plan: CoordinationPlanProposal) => void
-  // 自动渗透（auto-attack 2026-09-28）：仅 L2 档显示——链未活=「启动」（弹层选
-  // 轮数档→研判→流内确认开跑），链活=「停止」（停链不降档）。非 L2 不渲染。
-  level?: string
-  chainActive?: boolean
-  autoBusy?: boolean
-  onStartAuto?: () => void
-  onStopAuto?: () => void
-  // 研判卡内联「开跑」（写链预算 + 触发首轮编排）
-  onStartRun?: (ev: BBEvent) => void
-  // 编排 tick 运行中（研判/开跑后首/链轮）：对话流内极简进度行 + 编排器思考展开
+  // 编排 tick 运行中和强制接管（保留通用编排故障救济）
   orchRunning?: boolean
-  // 链状态行（2026-09-28 继承修复）：ticks=已跑轮数；estranged=后端重启急停（DB 活
-  // 但进程 runner 丢）——链状态本就持久化（DB chain_active + chain_started/stopped
-  // 事件），此前 goal 条只有二态按钮，重启/停链后「跑过什么、为何停」无任何痕迹
-  chainTicks?: number
-  chainEstranged?: boolean
-  // 强制接管（2026-09-28 人工救济）：编排轮卡死（已运行超 15 分钟）时显示的
-  // 「⚡ 强制接管」按钮回调——清租约后可重新点火
   onForceAcquire?: () => void
-  // 思考进度行双形态（2026-09-28）：claude=✻ 暗淡行直显最新思考尾部（不点开，
-  // 点开看全量）；trae=灰色极简行折叠（现状）。数据源 config.ui_style（LiveRoom）
   uiStyle?: "claude" | "trae"
 }) {
   const orchName = persona?.display_name || "编排器"
@@ -239,32 +200,8 @@ export function OrchChatPane({ events, busy, persona, goal, onEditGoal, onEditPe
     }
     return null
   }, [events])
-  // 自动渗透入口（仅 L2）：链活→停止；链未活→启动（弹层选档→研判→流内确认）
-  const autoBtn = level === "L2" && (chainActive ? (
-    <button type="button" onClick={onStopAuto} disabled={autoBusy}
-      title="停止自动链（不降档；在跑任务不受影响）"
-      className="shrink-0 rounded border border-(--status-error)/50 px-2 py-0.5 text-[11px] text-(--status-error) hover:bg-(--status-error)/10 disabled:opacity-50">
-      ⏹ 停止自动链
-    </button>
-  ) : (
-    <button type="button" onClick={onStartAuto} disabled={autoBusy}
-      title="启动自动渗透：先研判态势出计划，你确认后再开跑"
-      className="shrink-0 rounded border border-primary/50 px-2 py-0.5 text-[11px] text-primary hover:bg-primary/10 disabled:opacity-50">
-      🚀 启动自动渗透
-    </button>
-  ))
-  // 强制接管（救济）：编排轮已跑超 15 分钟（明显异常于正常几分钟的研判/链轮）
-  // 才显示——正常慢轮不误导；点击走确认弹层（双跑风险由人拍板）
-  const forceBtn = orchRunning && (tickStartedMin ?? 0) >= 15 && onForceAcquire && (
-    <button type="button" onClick={onForceAcquire} disabled={autoBusy}
-      title={`编排轮已运行 ${tickStartedMin} 分钟，疑似卡死——强制接管将清除其执行租约，之后可重新「启动」`}
-      className="shrink-0 rounded border border-(--status-approval)/50 px-2 py-0.5 text-[11px] text-(--status-approval) hover:bg-(--status-approval)/10 disabled:opacity-50">
-      ⚡ 强制接管
-    </button>
-  )
   const turns = useMemo(
-    () => turnsOf(events.filter((e) =>
-      e.kind === "orch.chat" || e.kind === "orch.auto_attack.analyzed")),
+    () => turnsOf(events.filter((e) => e.kind === "orch.chat")),
     [events])
   const scroller = useRef<HTMLDivElement>(null)
   const pinned = useRef(true)
@@ -283,15 +220,6 @@ export function OrchChatPane({ events, busy, persona, goal, onEditGoal, onEditPe
     : latestThinking
   // 链状态行数据源：最近一条链生命周期事件（started/stopped 均持久化，重启/刷新
   // 后从此恢复「上次链」显示——修复「重启窗口后启动自动渗透状态归零」）
-  const chainEv = useMemo(() => {
-    let last: BBEvent | null = null
-    for (const e of events) {
-      if (e.kind === "orch.chain_started" || e.kind === "orch.chain_stopped") {
-        if (!last || e.id > last.id) last = e
-      }
-    }
-    return last
-  }, [events])
   // 自动滚底：仅在用户已接近底部时跟随（上翻历史时不抢滚动条）
   useEffect(() => {
     const el = scroller.current
@@ -304,67 +232,10 @@ export function OrchChatPane({ events, busy, persona, goal, onEditGoal, onEditPe
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {/* 顶部阶段目标条（M2 goal 闭环）：注入 tick + 对话轮系统提示的人类验收口径 */}
       <div className="shrink-0 border-b px-3 py-2 text-xs">
-        {goal ? (
-          <div className="flex items-start gap-2">
-            <div className="min-w-0 flex-1">
-              <p className="text-foreground">
-                🎯 <span className="font-medium">{goal.text}</span>
-                {goal.phase && <span className="ml-2 text-[10px] text-muted-foreground">阶段：{goal.phase}</span>}
-              </p>
-              {!!goal.criteria?.length && (
-                <ul className="mt-0.5 list-disc pl-5 leading-relaxed text-muted-foreground">
-                  {goal.criteria.map((c, i) => <li key={i}>{c}</li>)}
-                </ul>
-              )}
-              <p className="mt-0.5 text-[10px] text-muted-foreground">
-                {fmtDateTimeMin(goal.created_at)} 由 {goal.confirmed_by} 确认 · 已注入编排 tick 与对话轮
-              </p>
-            </div>
-            {forceBtn}{autoBtn}
-            <button type="button" onClick={onEditGoal}
-              title="修改或清空阶段目标（goal.confirm/goal.clear 事件留痕）"
-              className="shrink-0 rounded border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground">
-              编辑
-            </button>
-          </div>
-        ) : (
-          <div className="flex items-center gap-2 text-muted-foreground">
-            <span className="min-w-0 flex-1">
-              尚未设定阶段目标——与{orchName}聊出方向后，把验收口径固化下来（注入每轮编排与对话）
-            </span>
-            {forceBtn}{autoBtn}
-            <button type="button" onClick={onEditGoal}
-              className="shrink-0 rounded border border-primary/50 px-2 py-0.5 text-[11px] text-primary hover:bg-primary/10">
-              🎯 设定阶段目标
-            </button>
-          </div>
-        )}
-        {/* 链状态行（持久继承，2026-09-28）：数据源全持久化——usage.chain(DB chain_active)
-            + chain_started/stopped 事件，重启/刷新后自动还原显示，不再「归零感」。
-            三态：运行中（绿）/ 待恢复（琥珀，服务重启过 runner 失联）/ 上次停止（灰） */}
-        {level === "L2" && (chainActive ? (
-          chainEstranged ? (
-            <p className="mt-1 text-[10px] text-(--status-approval)"
-              title="后端服务重启过：链开关仍在但自动执行器已失联——点「停止自动链」清理后可重新启动">
-              ● 自动链待恢复 · 已跑 {chainTicks ?? 0} 轮（服务重启过）
-            </p>
-          ) : (
-            <p className="mt-1 text-[10px] text-(--status-ok)">
-              ● 自动链运行中 · 已跑 {chainTicks ?? 0} 轮
-            </p>
-          )
-        ) : chainEv?.kind === "orch.chain_stopped" ? (
-          <p className="mt-1 text-[10px] text-muted-foreground"
-            title={`停于 ${fmtDateTimeMin(chainEv.created_at)}`}>
-            ○ 上次自动链：{CHAIN_STOP_ZH[String(chainEv.payload.reason)] ?? String(chainEv.payload.reason ?? "未知")}
-            （跑了 {String(chainEv.payload.chain_ticks ?? "0")} 轮）· {fmtDateTimeMin(chainEv.created_at)}
-          </p>
-        ) : null)}
         <button type="button" onClick={onEditPersona}
-          title={persona?.persona || "给编排器起名、立人设（只注入对话轮，tick 不受影响）"}
-          className="mt-1 text-[10px] text-muted-foreground hover:text-foreground hover:underline">
+          title={persona?.persona || "给编排器起名、立人设"}
+          className="text-[10px] text-muted-foreground hover:text-foreground hover:underline">
           🎭 {orchName} · 身份设定
         </button>
       </div>
@@ -381,10 +252,7 @@ export function OrchChatPane({ events, busy, persona, goal, onEditGoal, onEditPe
         {turns.map((t) => (
           <div key={t.key} className="flex flex-col gap-1.5">
             {t.human && <HumanBubble ev={t.human} />}
-            {t.orch.map((o) => o.kind === "orch.auto_attack.analyzed" ? (
-              <OrchAnalysisCard key={o.id} ev={o} name={orchName}
-                chainActive={chainActive} startBusy={autoBusy} onStartRun={onStartRun} />
-            ) : (
+            {t.orch.map((o) => (
               <OrchBubble key={o.id} ev={o} name={orchName} onConfirmPlan={onConfirmPlan} onOpenPlan={onOpenPlan} />
             ))}
           </div>

@@ -1,3 +1,5 @@
+import pytest
+
 from core.blackboard.store import Blackboard
 from core.coordination import CoordinationStore
 
@@ -27,6 +29,93 @@ def test_coordination_plan_task_dag(tmp_path):
     assert overview["plans"][0]["tasks"][1]["depends_on"] == [first["id"]]
     assert overview["plans"][0]["tasks"][1]["status"] == "ready"
     assert overview["plans"][0]["tasks"][0]["evidence"][0]["ref"] == "overview.json"
+
+
+def test_list_team_round_trip_and_preflight_revision(tmp_path):
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _project(bb)
+    store = CoordinationStore(bb)
+    plan = store.create_plan("p1", "列表名册", team=[{"id": "a", "label": "分析员", "role": "static"}])
+    assert plan["team"]["members"][0]["member_id"] == "a"
+    task = store.add_task("p1", plan["id"], "检查样本", role="static", member_id="a")
+    first = store.preflight("p1", plan["id"])["revision"]
+    store.set_dependencies("p1", task["id"], [])
+    store.update_task("p1", task["id"], status="failed")
+    current = store.preflight("p1", plan["id"])
+    assert current["revision"] != first
+    assert any(blocker["code"] == "failed_nodes" for blocker in current["blockers"])
+    bb.close()
+
+
+def test_team_normalization_and_member_binding(tmp_path):
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _project(bb)
+    store = CoordinationStore(bb)
+    team = {"id": "crew-1", "name": "研究组", "source": "human",
+            "execution": {"mode": "plan_dag"}, "members": [
+                {"id": "analyst", "label": "分析员", "role": "static",
+                 "responsibility": "静态检查"},
+                {"member_id": "reviewer", "title": "复核员", "role": "review",
+                 "description": "交叉验证"}]}
+    plan = store.create_plan("p1", "样本研究", team=team)
+    first = store.add_task("p1", plan["id"], "静态检查", member_id="analyst", role="static")
+    assert plan["team"]["id"] == "crew-1" and plan["team"]["source"] == "human"
+    assert plan["team"]["execution"] == {"mode": "plan_dag"}
+    assert plan["team"]["members"][0]["description"] == "静态检查"
+    assert plan["team"]["members"][0]["title"] == "分析员"
+    assert plan["team"]["members"][1]["label"] == "复核员"
+    assert "team" not in first and "team" not in store.get_task("p1", first["id"])
+    assert "team" not in store.get_plan("p1", plan["id"])["tasks"][0]
+    assert "team" not in store.overview("p1")["plans"][0]["tasks"][0]
+    for kwargs in ({"member_id": "missing"}, {"member_id": "reviewer", "role": "static"}):
+        with pytest.raises(ValueError, match="member_id|role"):
+            store.add_task("p1", plan["id"], "错误绑定", **kwargs)
+    bb.close()
+
+
+def test_metadata_edit_restricted_by_plan_state_and_member(tmp_path):
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _project(bb)
+    store = CoordinationStore(bb)
+    plan = store.create_plan("p1", "编辑计划", team={"members": [
+        {"id": "m1", "label": "一", "role": "static"},
+        {"id": "m2", "label": "二", "role": "review"}]})
+    task = store.add_task("p1", plan["id"], "草稿任务", role="static", member_id="m1")
+    for patch in ({"member_id": "nope"}, {"role": "review"}):
+        with pytest.raises(ValueError, match="member_id|role"):
+            store.update_task("p1", task["id"], **patch)
+    before = store.preflight("p1", plan["id"])["revision"]
+    changed = store.update_task("p1", task["id"], member_id="m2", role="review",
+                                title="复核任务", description="复核说明")
+    assert (changed["member_id"], changed["role"], changed["title"]) == ("m2", "review", "复核任务")
+    assert before != store.preflight("p1", plan["id"])["revision"]
+    store.set_plan_status("p1", plan["id"], "active")
+    with pytest.raises(ValueError, match="draft/paused"):
+        store.update_task("p1", task["id"], title="越权改标题")
+    assert store.update_task("p1", task["id"], evidence=[{"ref": "x"}])["evidence"] == [{"ref": "x"}]
+    store.set_plan_status("p1", plan["id"], "paused")
+    assert store.update_task("p1", task["id"], description="暂停后允许")["description"] == "暂停后允许"
+    store.set_plan_status("p1", plan["id"], "active")
+    with pytest.raises(ValueError, match="draft/paused"):
+        store.update_plan_metadata("p1", plan["id"], team={"members": []})
+    bb.close()
+
+
+def test_plan_team_patch_validates_existing_assignments(tmp_path):
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _project(bb)
+    store = CoordinationStore(bb)
+    plan = store.create_plan("p1", "补充团队", config={"note": "保留"})
+    task = store.add_task("p1", plan["id"], "侦察", role="recon")
+    with pytest.raises(ValueError, match="member_id"):
+        store.update_plan_metadata("p1", plan["id"], team={"members": [
+            {"id": "other", "role": "recon"}]})
+    patched = store.update_plan_metadata("p1", plan["id"], team={"members": [
+        {"id": "recon", "label": "侦察员", "role": "recon"}]}, config={"note2": 1})
+    assert patched["config"]["note"] == "保留" and patched["config"]["note2"] == 1
+    assert patched["team"]["members"][0]["label"] == "侦察员"
+    assert store.get_task("p1", task["id"])["member_id"] == "recon"
+    bb.close()
 
 
 def test_coordination_preflight_and_ready_event(tmp_path):

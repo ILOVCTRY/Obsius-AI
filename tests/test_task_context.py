@@ -159,6 +159,8 @@ def test_handover_to_new_session(env):
     tq.reopen(tid)  # 人工「放回继续」
     llm_b = ScriptedLLM([_DONE, _DONE2, _FINISH])
     agent_b = make_agent(env, llm_b, artifacts_dir=art)
+    tq.unassign_session(agent_a.session["id"])
+    tq.bind_session(tid, agent_b.session["id"], by="human-handover")
     agent_b.run_task("侦查内网", task_id=tid)
 
     msgs = llm_b.calls[0]["messages"]

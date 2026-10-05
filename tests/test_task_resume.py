@@ -113,6 +113,8 @@ def test_claim_revives_across_sessions(failed_with_task_key):
     llm2 = ScriptedLLM([_DONE, _DONE2, _FINISH])
     agent2 = make_agent((bb, project, gw, tq, tmp_path), llm2,
                         artifacts_dir=art, max_steps=3)  # 预算更低
+    tq.unassign_session(agent.session["id"])
+    tq.bind_session(tid, agent2.session["id"], by="human-resume")
     agent2.run_task("渗透侦查任务", task_id=tid)
     # 复活：max_steps 被快照还原为 10（不是新会话的 3）
     assert agent2.dispatcher.max_steps == 10
@@ -134,6 +136,8 @@ def test_objective_changed_degrades_to_transcript(failed_with_task_key):
     llm2 = ScriptedLLM([_DONE, _DONE2, _FINISH])
     agent2 = make_agent((bb, project, gw, tq, tmp_path), llm2,
                         artifacts_dir=art, max_steps=10)
+    tq.unassign_session(agent.session["id"])
+    tq.bind_session(tid, agent2.session["id"], by="human-resume")
     agent2.run_task("改成完全不同的目标", task_id=tid)
     assert not task_resume_path(art, tid).exists()  # 降级时删除
     # 降级走 C10 transcript 接手：末 60 条现场仍注入（消息里带旧现场）
@@ -148,6 +152,8 @@ def test_done_consumes_task_key_snapshot(failed_with_task_key):
     llm2 = ScriptedLLM([_DONE, _DONE2, _FINISH])
     agent2 = make_agent((bb, project, gw, tq, tmp_path), llm2,
                         artifacts_dir=art, max_steps=10)
+    tq.unassign_session(agent.session["id"])
+    tq.bind_session(tid, agent2.session["id"], by="human-resume")
     agent2.run_task("渗透侦查任务", task_id=tid)
     assert tq.get_task(tid)["status"] == "done"
     assert not task_resume_path(art, tid).exists()  # done 清理

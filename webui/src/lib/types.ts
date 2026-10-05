@@ -1925,6 +1925,23 @@ export interface ChatMcpServer {
 export type CoordinationPlanStatus = "draft" | "active" | "paused" | "completed"
 export type CoordinationTaskStatus = "pending" | "ready" | "running" | "blocked" | "completed" | "failed"
 
+export interface CoordinationTeamMember {
+  member_id: string
+  /** 成员展示名；后端兼容 title，前端优先显示 label */
+  title: string
+  label?: string
+  description?: string
+  role?: string
+}
+
+export interface CoordinationTeam {
+  id?: string
+  name?: string
+  source?: "explicit" | "legacy_derived" | string
+  members: CoordinationTeamMember[]
+  execution?: { mode: string; dispatch?: string }
+}
+
 export interface CoordinationTask {
   id: string
   project_id: string
@@ -1932,6 +1949,7 @@ export interface CoordinationTask {
   title: string
   description: string
   role: string
+  member_id: string
   status: CoordinationTaskStatus
   priority: number
   depends_on: string[]
@@ -1952,6 +1970,7 @@ export interface CoordinationPlan {
   config: Record<string, unknown>
   created_at: string
   updated_at: string
+  team: CoordinationTeam
   tasks: CoordinationTask[]
   task_counts?: Record<string, number>
 }
@@ -1961,6 +1980,7 @@ export interface CoordinationPlanProposalNode {
   title: string
   description?: string
   role: string
+  member_id?: string
   priority: number
   status: CoordinationTaskStatus
   depends_on: string[]
@@ -1971,6 +1991,7 @@ export interface CoordinationPlanProposal {
   status: CoordinationPlanStatus
   name: string
   objective: string
+  team?: CoordinationTeam
   nodes: CoordinationPlanProposalNode[]
 }
 

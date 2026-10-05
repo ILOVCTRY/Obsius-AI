@@ -1,16 +1,13 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
-import { ArrowUp, GitBranch, ListTree, Paperclip, Plus, Square, X } from "lucide-react"
+import { ArrowUp, GitBranch, Paperclip, Plus, Square, X } from "lucide-react"
 
-// 任务尝试树视图（task-attempt-tree，2026-09-27 替代 A3 任务流）：懒加载，@xyflow/react 不进直播间主包
-const TaskTreeView = lazy(() => import("./live/TaskTree").then((m) => ({ default: m.TaskTreeView })))
 // 多智能体协调（2026-10-04 并入直播间）：原独立顶级页迁为第三段视图
 const CoordinationPane = lazy(() => import("./live/CoordinationPane").then((m) => ({ default: m.CoordinationPane })))
 import { PlanPanel } from "./live/PlanPanel"
 import { OrchChatPane } from "./live/OrchChatPane"
 import { TraeView } from "./live/TraeView"
-import { GoalEditor, PersonaEditor } from "./live/editors"
+import { PersonaEditor } from "./live/editors"
 import { PlanConfirmDialog } from "./live/coordination/PlanConfirmDialog"
-import { PhaseBar } from "./live/PhaseBar"
 import { EventRow, type StreamItem } from "./live/EventRow"
 import { ApiError, api, pollJob } from "@/lib/api"
 import { eventStyle } from "@/lib/events"
@@ -323,12 +320,23 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
   // 长跑项目 orch.chat 轮几乎必然落窗外——编排页签打开时单独拉全，与直播流按 id 归并
   // （新增 orch.chat 经 WS/轮询进 events，归并去重不重复渲染）
   const [orchHistory, setOrchHistory] = useState<BBEvent[]>([])
+  const orchHistorySeq = useRef(0)
+  const refreshOrchHistory = useCallback(() => {
+    if (activeTab !== "__orch") return
+    const seq = ++orchHistorySeq.current
+    api.eventsByKind(pid, "orch.chat").then((es) => {
+      if (seq === orchHistorySeq.current) setOrchHistory(es)
+    }).catch(() => {})
+  }, [pid, activeTab])
+  useEffect(() => {
+    refreshOrchHistory()
+  }, [refreshOrchHistory])
   useEffect(() => {
     if (activeTab !== "__orch") return
-    let alive = true
-    api.eventsByKind(pid, "orch.chat").then((es) => { if (alive) setOrchHistory(es) }).catch(() => {})
-    return () => { alive = false }
-  }, [pid, activeTab])
+    const wakeKinds = new Set(["coordination.plan.started", "coordination.plan.updated", "plan.node_ready", "task.started", "task.done", "task.failed", "session.spawned"])
+    if (!events.some((event) => wakeKinds.has(event.kind))) return
+    refreshOrchHistory()
+  }, [events, activeTab, refreshOrchHistory])
   const orchEvents = useMemo(() => {
     if (orchHistory.length === 0) return events
     const seen = new Set(orchHistory.map((e) => e.id))
@@ -348,8 +356,6 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
   }, [events])
   const { byId: approvalById } = usePendingApprovals(pid, aprWake)
   // auto-attack（2026-09-28）：L2 自动渗透——三档弹层开关 + 研判/开跑/停止进行中
-  const [autoAtkOpen, setAutoAtkOpen] = useState(false)
-  const [autoBusy, setAutoBusy] = useState(false)
   const [overrides, setOverrides] = useState<Map<number, boolean>>(new Map())
   const [remark, setRemark] = useState("")
   const [jobInfo, setJobInfo] = useState<string | null>(null)
@@ -373,8 +379,8 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
   // 排队引导条（2026-09-19 轮末语义）：note 发送后 human_note 留收件箱等下一轮
   // 认领期注入，此处仅组件内存的可见排队态；task.claimed 事件到达即清（已注入）
   const [queuedNotes, setQueuedNotes] = useState<{ key: string; sid: string; text: string; attCount: number }[]>([])
-  // 直播｜任务树 顶栏切换（任务流已由任务树退役替代，2026-09-27）
-  const [viewMode, setViewMode] = useState<"live" | "tree" | "coord">("live")
+  // 直播｜协调 顶栏切换
+  const [viewMode, setViewMode] = useState<"live" | "coord">("live")
   // 批 6 L0 提案采纳态只存内存（刷新后可再次采纳，不做服务端去重）
   const [adopted, setAdopted] = useState<Set<number>>(new Set())
   const [adoptingId, setAdoptingId] = useState<number | null>(null)
@@ -405,7 +411,6 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
       if (confirm) setCoordinationConfirmOpen(true)
     }
   }, [refreshCoordination])
-  const [goalOpen, setGoalOpen] = useState(false)
   const [personaOpen, setPersonaOpen] = useState(false)
   const refreshOrchMeta = () =>
     api.projectGoal(pid).then(setOrchMeta).catch(() => {})
@@ -892,11 +897,6 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
     if (s?.worker_armed && (st === "idle" || st === "finished")) return "armed"
     return st
   }, [eventsBySid, sessionsById])
-  // 任务树 WS bump：只数树关心的事件（3s 轮询兜底，组件内去抖重拉）
-  const flowBump = useMemo(
-    () => events.filter((e) =>
-      e.kind.startsWith("task.") || e.kind === "message.inbox" || e.kind.startsWith("session.")).length,
-    [events])
 
   // 终止入口（2026-09-19 起：页签 ×=结束会话，会话控制组已删；另一处是任务看板删除 claimed 任务）。
   // armed/running/paused 先 confirm——关窗语义已改硬中断，执行中任务会 fail（快照保留可续跑）
@@ -1047,60 +1047,6 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
     }
   }
 
-  // auto-attack（2026-09-28）：研判→流内确认开跑→停止，三步全走既有编排管线，
-  // 无新状态机。研判=analyze_only tick（工具面只读，产出落 orch.auto_attack.analyzed）；
-  // 开跑=写链预算（patchProjectConfig）+ 普通 tick（有产出 _post_tick 自动成链）；
-  // 停止=stopAutoAttack（停链不降档）。autoBusy 仅禁入口防重复点火（409 租约兜底）。
-  const analyzeAuto = async (budget: number) => {
-    setAutoAtkOpen(false)
-    setAutoBusy(true)
-    try {
-      await api.orchTick(pid, { analyze_only: true, budget_ticks: budget })
-      setJobInfo(`研判中：编排器正在分析态势并生成渗透计划（预算档 ${budget} 轮）…计划出来后在本对话流确认「开跑」`)
-    } catch (e) {
-      setJobInfo(`研判启动失败：${e instanceof Error ? e.message : String(e)}`)
-    } finally {
-      setAutoBusy(false)
-    }
-  }
-  const startAutoRun = async (ev: BBEvent) => {
-    const n = typeof ev.payload.budget_ticks === "number" ? ev.payload.budget_ticks : 0
-    if (!n || autoBusy) return
-    setAutoBusy(true)
-    try {
-      await api.patchProjectConfig(pid, { autonomy: { max_chain_ticks: n } })
-      await api.orchTick(pid)
-      setJobInfo(`自动渗透已开跑：链预算 ${n} 轮（首轮编排进行中，有产出即自动续链；随时可 ⏹ 停止）`)
-      void refreshUsage()
-    } catch (e) {
-      setJobInfo(`开跑失败：${e instanceof Error ? e.message : String(e)}`)
-    } finally {
-      setAutoBusy(false)
-    }
-  }
-  const stopAuto = async () => {
-    setAutoBusy(true)
-    try {
-      await api.stopAutoAttack(pid)
-      setJobInfo("自动链已停止（档位不变，在跑任务不受影响）")
-      void refreshUsage()
-    } catch (e) {
-      setJobInfo(`停止失败：${e instanceof Error ? e.message : String(e)}`)
-    } finally {
-      setAutoBusy(false)
-    }
-  }
-  // 强制接管（2026-09-28 人工救济）：编排轮卡死（409 长期不解除）时清租约。
-  // 双跑窗口为已知代价——确认弹层把风险讲清，由人拍板。
-  const forceAcquire = async () => {
-    if (!window.confirm("强制接管将清除当前编排轮的执行租约（用于轮次卡死时）。若旧轮仍在运行，可能出现短暂重复产出。确认接管？")) return
-    try {
-      await api.forceAcquireTick(pid)
-      setJobInfo("已强制接管：编排轮租约已清除，现在可重新点「启动自动渗透」")
-    } catch (e) {
-      setJobInfo(`强制接管失败：${e instanceof Error ? e.message : String(e)}`)
-    }
-  }
   // 任务报告（trae 视图 2026-09-28）：点击生成→后台 LLM 撰写（幂等端点）→报告
   // 事件落库后自动出现在条目里；pending 只管按钮态，生成不阻塞页面
   const [reportPending, setReportPending] = useState<Set<string>>(new Set())
@@ -1407,7 +1353,7 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
             </Button>
           </div>
         )}
-        {/* 直播｜任务树｜协调 分段切换（原生 button，避开 radix Tabs mousedown 激活坑） */}
+        {/* 直播｜协调分段切换 */}
         <div className="mr-1 ml-1 flex shrink-0 items-center rounded-md border p-0.5 text-[11px]">
           <button
             type="button"
@@ -1418,17 +1364,6 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
             )}
           >
             直播
-          </button>
-          <button
-            type="button"
-            title="任务树：目标 → 意图 → 检验结果，新发现下长新意图（当前意图实时高亮）"
-            onClick={() => setViewMode("tree")}
-            className={cn(
-              "flex items-center gap-1 rounded px-2 py-0.5 whitespace-nowrap",
-              viewMode === "tree" ? "bg-secondary font-medium text-foreground" : "text-muted-foreground hover:bg-accent",
-            )}
-          >
-            <ListTree className="size-3" />任务树
           </button>
           <button
             type="button"
@@ -1487,8 +1422,7 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
           </>
         )}
       </div>
-      {/* 分阶段工作流阶段条（pentest M4）：轨无剧本自渲染 null，直播/任务树两视图共用 */}
-      <PhaseBar pid={pid} />
+      {/* 分阶段工作流阶段条（pentest M4）：轨无剧本自渲染 null，直播视图共用 */}
       {/* 统计行（会话流改造 2026-10-03）：仅直播视图 + 非计划面板时显示 */}
       {viewMode === "live" && filter !== "plan" && (
         <ChatStats tokens={stats.tokens} cachedTokens={stats.cached}
@@ -1533,21 +1467,10 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
         events={orchEvents}
         busy={orchBusy}
         persona={orchMeta?.persona ?? null}
-        goal={orchMeta?.phase_goal ?? null}
-        onEditGoal={() => setGoalOpen(true)}
         onEditPersona={() => setPersonaOpen(true)}
         onConfirmPlan={(plan) => void openCoordinationPlan(plan, true)}
         onOpenPlan={(plan) => { void openCoordinationPlan(plan); setViewMode("coord") }}
-        level={usage?.level}
-        chainActive={!!usage?.chain?.active}
-        autoBusy={autoBusy}
-        onStartAuto={() => setAutoAtkOpen(true)}
-        onStopAuto={() => void stopAuto()}
-        onStartRun={(ev) => void startAutoRun(ev)}
         orchRunning={!!usage?.orch_running}
-        onForceAcquire={() => void forceAcquire()}
-        chainTicks={usage?.chain?.ticks}
-        chainEstranged={!!usage?.chain?.estranged}
         uiStyle={usage?.ui_style}
       />
       ) : usage?.ui_style === "trae" ? (
@@ -2021,24 +1944,6 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
       </>
       )}
 
-      {/* 任务树视图（task-attempt-tree；懒加载分包，页签行常驻） */}
-      {viewMode === "tree" && (
-        <div className="min-h-0 flex-1 border-t">
-          <Suspense fallback={
-            <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
-              任务树加载中…
-            </div>
-          }>
-            <TaskTreeView
-              key={pid}
-              pid={pid}
-              activeTaskId={activeTask?.id ?? null}
-              wsBump={flowBump}
-            />
-          </Suspense>
-        </div>
-      )}
-
       {/* 多智能体协调视图（2026-10-04 并入直播间）：计划依赖图 + 协调驾驶舱；
           点会话/绑定节点 → 切回直播视图并选中该会话 */}
       {viewMode === "coord" && (
@@ -2066,20 +1971,6 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
         onStarted={() => { setJobInfo("团队计划已确认，协调轮已提交"); void refreshCoordination(); refreshSessions() }}
       />
 
-      {/* 阶段目标 / 拟人身份编辑弹层（M2/M3，入口在编排页签 goal 条） */}
-      {goalOpen && (
-        <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/50 p-4"
-             onClick={() => setGoalOpen(false)}>
-          <div onClick={(e) => e.stopPropagation()}>
-            <GoalEditor
-              initial={orchMeta?.phase_goal ?? null}
-              onClose={() => setGoalOpen(false)}
-              onSave={async (body) => { await api.setGoal(pid, body); await refreshOrchMeta() }}
-              onClear={async () => { await api.setGoal(pid, { text: "" }); await refreshOrchMeta() }}
-            />
-          </div>
-        </div>
-      )}
       {personaOpen && (
         <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/50 p-4"
              onClick={() => setPersonaOpen(false)}>
@@ -2089,31 +1980,6 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
               onClose={() => setPersonaOpen(false)}
               onSave={async (body) => { await api.setOrchPersona(pid, body); await refreshOrchMeta() }}
             />
-          </div>
-        </div>
-      )}
-      {/* auto-attack 三档弹层（2026-09-28）：点档即研判——按用户口径按钮式一键直达，
-          无二次确认（研判本身不派任务，开跑还有流内确认兜底） */}
-      {autoAtkOpen && (
-        <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/50 p-4"
-             onClick={() => { if (!autoBusy) setAutoAtkOpen(false) }}>
-          <div className="w-80 rounded-lg border bg-card p-3 shadow-xl"
-               onClick={(e) => e.stopPropagation()}>
-            <p className="mb-1 text-xs font-medium text-foreground">🚀 启动自动渗透 · 选链轮数预算</p>
-            <p className="mb-2.5 text-[11px] leading-relaxed text-muted-foreground">
-              先研判态势出渗透计划（只读，不派任务）——计划出来后你在对话流确认「开跑」。
-            </p>
-            <div className="grid grid-cols-3 gap-1.5">
-              {([[3, "快速"], [8, "标准"], [20, "深入"]] as const).map(([n, label]) => (
-                <button key={n} type="button" disabled={autoBusy}
-                  onClick={() => void analyzeAuto(n)}
-                  title={`链预算 ${n} 轮：研判 → 确认 → 开跑`}
-                  className="rounded border border-primary/40 px-2 py-2 text-center hover:bg-primary/10 disabled:opacity-50">
-                  <span className="block text-sm text-primary">{label}</span>
-                  <span className="block text-[10px] text-muted-foreground">{n} 轮</span>
-                </button>
-              ))}
-            </div>
           </div>
         </div>
       )}

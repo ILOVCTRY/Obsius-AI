@@ -1767,8 +1767,10 @@ def test_llm_exception_fails_task_and_stops_heartbeat(env):
     tid = tq.publish(project["id"], "将被 LLM 异常打断的任务",
                      target_session=agent.session["id"])
 
+    tq.start_direct(tid, agent.session["id"])
+    agent.dispatcher.current_task_id = tid
     with pytest.raises(RuntimeError):
-        agent.run_session()  # 认领该任务后首步即炸
+        agent.run_session()  # 直派任务首步即炸
     row = tq.get_task(tid)
     assert row["status"] == "failed"
     assert "RuntimeError" in (row["result_note"] or "")
@@ -1800,6 +1802,8 @@ def test_salvage_on_error_saves_partial_conclusions(env):
 
     tid = tq.publish(project["id"], "异常中断但有结论的任务",
                      target_session=agent.session["id"])
+    tq.start_direct(tid, agent.session["id"])
+    agent.dispatcher.current_task_id = tid
     with pytest.raises(RuntimeError):
         agent.run_session()
     row = tq.get_task(tid)
@@ -1835,6 +1839,8 @@ def test_salvage_llm_failure_does_not_break_fail(env):
 
     tid = tq.publish(project["id"], "抢救也救不了的任务",
                      target_session=agent.session["id"])
+    tq.start_direct(tid, agent.session["id"])
+    agent.dispatcher.current_task_id = tid
     with pytest.raises(RuntimeError):
         agent.run_session()
     row = tq.get_task(tid)
@@ -1921,7 +1927,9 @@ def test_snapshot_resume_after_task_deleted_claims_new(env):
     agent._pause_req.clear()
     agent._abort_req.clear()
     agent.paused = False
-    assert agent.run_session() == "收工"  # 快照失效 → 认领新任务并跑完
+    tq.start_direct(other, agent.session["id"])
+    agent.dispatcher.current_task_id = other
+    assert agent.run_session() == "收工"  # 快照失效后显式直派新任务
     assert tq.get_task(tid) is None
     assert tq.get_task(other)["status"] == "done"
     assert not [e for e in bb.recent_events(project["id"])
@@ -2845,6 +2853,8 @@ def test_run_chat_task_continuation_with_context(env):
     tid = tq.publish(project["id"], "找 flag", task_type="generic",
                      target_session=sid)
     # 委托跑完：complete 即收尾，「委托目标+收尾摘要」沉淀进会话 chat 文件
+    tq.start_direct(tid, sid)
+    agent.dispatcher.current_task_id = tid
     assert agent.run_session() == "已在 p1 确认 strings 输出"
     cpath = artifacts.parent / "snapshots" / f"chat-{sid}.json"
     seed = json.dumps(json.loads(cpath.read_text(encoding="utf-8")),
@@ -3584,7 +3594,9 @@ def test_awaiting_human_pauses_with_snapshot_then_reusable(env):
                     target_session=agent.session["id"])
     t2 = tq.publish(project["id"], "不需要等待的任务", task_type="generic",
                     target_session=agent.session["id"])
-    assert agent.run_session() == ""              # t1 挂起 → 空串，worker 继续认领
+    tq.start_direct(t1, agent.session["id"])
+    agent.dispatcher.current_task_id = t1
+    assert agent.run_session() == ""              # t1 挂起 → 空串
     assert agent.paused is False                     # 不进 paused（区别于 budget 暂停）
     row1 = tq.get_task(t1)
     assert row1["status"] == "failed" and row1["blocked_reason"] == "awaiting_human"
@@ -3593,7 +3605,9 @@ def test_awaiting_human_pauses_with_snapshot_then_reusable(env):
     assert snap.is_file()                            # 现场保留（awaiting 快照）
     failed = [e for e in bb.recent_events(project["id"]) if e["kind"] == "task.failed"][-1]
     assert failed["payload"]["resumable"] is True
-    # worker 继续认领 t2（同一 job 内）；complete 即收尾，返回 t2 收尾注记
+    # 下一份工作显式直派；complete 后返回任务收尾注记。
+    tq.start_direct(t2, sid)
+    agent.dispatcher.current_task_id = t2
     assert agent.run_session() == "t2 完成"
     assert tq.get_task(t2)["status"] == "done"
 
@@ -3602,7 +3616,8 @@ def test_awaiting_human_pauses_with_snapshot_then_reusable(env):
     assert st is not None and st["reason"] == "awaiting"
     tq.reopen(t1, by="human", note="ROE 已核验")
     assert "人类补充（human）: ROE 已核验" in tq.get_task(t1)["result_note"]  # complete 覆盖前可见
-    tq.claim(t1, sid, lease_minutes=agent.config.lease_minutes)
+    tq.start_direct(t1, sid, lease_minutes=agent.config.lease_minutes)
+    agent.dispatcher.current_task_id = t1
     agent._stop_after_task = False
     assert agent.run_session() == "t1 续跑成功"
     assert tq.get_task(t1)["status"] == "done"
@@ -3640,8 +3655,10 @@ def test_dead_end_notice_injected_on_claim(env):
         {"tool_use": [ScriptedLLM.tool_call("t1", "finish", {"summary": "知道了"})]},
     ])
     agent = make_agent(env, llm)
-    tq.publish(project["id"], "打 10.0.0.8 的 443", task_type="recon",
-               target_session=agent.session["id"])
+    tid = tq.publish(project["id"], "打 10.0.0.8 的 443", task_type="recon",
+                     target_session=agent.session["id"])
+    tq.start_direct(tid, agent.session["id"])
+    agent.dispatcher.current_task_id = tid
     agent.run_session()
     injected = json.dumps(llm.calls[0]["messages"], ensure_ascii=False)
     assert "路标" in injected and "勿重走" in injected
@@ -3667,6 +3684,8 @@ def test_persona_switch_on_claim_and_restore(env):
     assert agent.base_role_name == "_generalist"
     tid = tq.publish(project["id"], "侦察任务", role="recon",
                      target_session=agent.session["id"])
+    tq.start_direct(tid, agent.session["id"])
+    agent.dispatcher.current_task_id = tid
     agent.run_session()  # 窗口无 role 限制：底色窗直接认领 role 任务
     assert tq.get_task(tid)["status"] == "done"
     # 换装生效：system prompt 含任务角色 persona；工具白名单段切到角色集
@@ -3695,6 +3714,8 @@ def test_no_role_task_runs_in_base_persona(env):
     agent = make_agent(env, llm)
     tid = tq.publish(project["id"], "普通任务",
                      target_session=agent.session["id"])
+    tq.start_direct(tid, agent.session["id"])
+    agent.dispatcher.current_task_id = tid
     agent.run_session()
     assert tq.get_task(tid)["status"] == "done"
     assert agent.role_name == "_generalist"
@@ -3713,6 +3734,8 @@ def test_persona_restore_after_fail_and_idle_claim(env):
     agent = make_agent(env, llm)
     tid = tq.publish(project["id"], "会炸的任务", role="recon",
                      target_session=agent.session["id"])
+    tq.start_direct(tid, agent.session["id"])
+    agent.dispatcher.current_task_id = tid
     agent.run_session()
     assert tq.get_task(tid)["status"] == "failed"
     assert agent.role_name == "_generalist"  # fail 路径恢复底色
@@ -3737,6 +3760,8 @@ def test_persona_missing_role_file_runs_defensively(env):
     agent = make_agent(env, llm)
     tid = tq.publish(project["id"], "幽灵角色任务", role="ghost-role",
                      target_session=agent.session["id"])
+    tq.start_direct(tid, agent.session["id"])
+    agent.dispatcher.current_task_id = tid
     agent.run_session()
     assert tq.get_task(tid)["status"] == "done"
     assert agent.role_name == "_generalist"
@@ -3790,6 +3815,8 @@ def test_task_type_bonus_and_scope_in_claim_path(env):
     tid = tq.publish(project["id"], "处理工单", scope="target.com",
                      task_type="exploit", created_by="human",
                      target_session=agent.session["id"])
+    tq.start_direct(tid, agent.session["id"])
+    agent.dispatcher.current_task_id = tid
     agent.run_session()
     system = llm.calls[0]["system"]
     assert "- exp：" in system  # 全量描述注入含 exp

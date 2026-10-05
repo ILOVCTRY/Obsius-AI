@@ -371,6 +371,13 @@ class TaskQueue:
                 raise ValueError(f"任务 {task_id} 状态为 {row['status']}，不可直接启动")
             if row["target_session"] and row["target_session"] != session_id:
                 raise ValueError(f"任务 {task_id} 已绑定其他执行会话")
+            running = self.bb.conn.execute(
+                "SELECT id FROM tasks WHERE project_id=? AND claimed_by=?"
+                " AND status='claimed' AND id!=? LIMIT 1",
+                (row["project_id"], session_id, task_id),
+            ).fetchone()
+            if running:
+                raise ClaimError(f"会话 {session_id} 正在执行任务 {running['id']}，不可同时启动 {task_id}")
             keys = leases.normalize_keys(_loads(row["conflict_keys"], []))
             mode = leases.mode_for(row["noise_budget"])
             if keys:
@@ -386,9 +393,18 @@ class TaskQueue:
                 "UPDATE tasks SET status='claimed', claimed_by=?, target_session=?, lease_until=?, wait_for='[]', updated_at=? WHERE id=? AND status IN ('open','pending')",
                 (session_id, session_id, lease_until, now(), task_id))
             updated = self.bb.conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+        self.bb.append_event(
+            row["project_id"], "task.claimed",
+            {"task_id": task_id, "session_id": session_id, "lease_until": lease_until,
+             "created_by": row["created_by"], "role": row["role"], "direct": True},
+            session_id=session_id, author=session_id)
         self.bb.append_event(row["project_id"], "task.started",
                              {"task_id": task_id, "session_id": session_id, "lease_until": lease_until, "direct": True},
                              session_id=session_id, author=session_id)
+        try:
+            self._flush_pending_receipts(row["project_id"], task_id, session_id)
+        except Exception:  # noqa: BLE001 —— 回执补投失败不影响起跑
+            log.exception("补投 pending_receipts 失败 task=%s", task_id)
         return self.get_task(task_id) or {}
 
     # ---------- 认领（存量兼容） ----------

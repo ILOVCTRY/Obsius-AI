@@ -111,6 +111,60 @@ def test_plan_work_creates_dag_and_delegate_binds_node(env):
     assert blocked.startswith("[拒绝] 计划节点")
 
 
+def test_plan_work_team_aliases_and_active_summary(env):
+    from core.orchestrator.orchestrator import ORCH_TOOLS
+
+    _bb, project = env
+    orch = make_orch(env, ScriptedLLM([]), track=None)
+    schema = next(t for t in ORCH_TOOLS if t["name"] == "plan_work")["input_schema"]
+    props = schema["properties"]["team"]["properties"]["members"]["items"]["properties"]
+    assert {"id", "member_id", "label", "name", "title", "responsibility", "description"} <= props.keys()
+    team = {"id": "crew-1", "name": "研究组", "source": "planner",
+            "members": [{"id": "alpha", "label": "分析员", "role": "static",
+                         "responsibility": "拆解样本"},
+                        {"member_id": "beta", "name": "复核员", "role": "review",
+                         "description": "交叉验证"}]}
+    proposal = json.loads(orch._tool_plan_work(
+        "研究计划", [{"title": "拆解", "role": "static", "member_id": "alpha"},
+                  {"title": "复核", "role": "review", "member_id": "beta", "depends_on": [0]}],
+        team=team))
+    assert proposal["status"] == "draft"
+    assert proposal["team"]["id"] == "crew-1"
+    assert proposal["team"]["members"][0]["title"] == "分析员"
+    assert proposal["team"]["members"][1]["label"] == "复核员"
+    assert [node["member_id"] for node in proposal["nodes"]] == ["alpha", "beta"]
+    plan = orch._coord().get_plan(project["id"], proposal["plan_id"])
+    assert all("team" not in node for node in plan["tasks"])
+    orch._coord().set_plan_status(project["id"], proposal["plan_id"], "active")
+    stats = orch._stats()["plan"]
+    assert stats["team"]["members"][0]["member_id"] == "alpha"
+    assert stats["nodes"][0]["member_id"] == "alpha"
+    assert all("team" not in node for node in stats["nodes"])
+    assert orch._tool_plan_work("无效计划", [{"title": "越权", "member_id": "missing"}], team=team).startswith("[拒绝]")
+    assert orch._tool_plan_work("无效角色", [{"title": "越权", "role": "review", "member_id": "alpha"}], team=team).startswith("[拒绝]")
+
+
+def test_plan_work_rejects_invalid_dag_without_draft_residue(env):
+    _bb, project = env
+    orch = make_orch(env, ScriptedLLM([]), track=None)
+    for nodes in (
+        [{"title": "重复"}, {"title": "重复"}],
+        [{"title": "引用", "depends_on": ["不存在"]}],
+        [{"title": "根"}, {"title": "依赖", "depends_on": [True]}],
+        [{"title": "非法优先级", "priority": "bad"}],
+        [{"title": "一", "depends_on": [1]}, {"title": "二", "depends_on": [0]}],
+    ):
+        assert orch._tool_plan_work("无效计划", nodes).startswith("[拒绝]")
+    assert orch._coord().overview(project["id"])["plans"] == []
+
+
+def test_plan_work_legacy_role_roster(env):
+    orch = make_orch(env, ScriptedLLM([]), track=None)
+    proposal = json.loads(orch._tool_plan_work("旧计划", [{"title": "拆解", "role": "static"}]))
+    assert proposal["team"]["members"][0]["member_id"] == "static"
+    assert proposal["nodes"][0]["member_id"] == "static"
+
+
 def test_stats_ignores_draft_plan_until_confirmed(env):
     """draft 团队提案在确认前不进入 active 计划态势。"""
     _bb, project = env

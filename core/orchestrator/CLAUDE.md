@@ -13,7 +13,7 @@
 
 ## 计划 DAG（M3，orchestrator-coordination-fusion，2026-10-04）
 
-- `plan_work` 在 LiveRoom 对话中只登记 `core/coordination` 的 draft 计划与 `depends_on` DAG，并通过 `orch.chat.payload.coordination_plans` 返回结构化团队提案；不直接执行、不派单。用户经 LiveRoom 团队确认卡或「协调」页签 preflight/start 后才置 active；`delegate(plan_node_id=...)` 才把 ready 节点绑定真实 `tasks.id`，依赖未完成、节点已绑定或计划非 active 均拒绝。
+- `plan_work` 在 LiveRoom 对话中只登记 `core/coordination` 的 draft 计划与 `depends_on` DAG，并通过 `orch.chat.payload.coordination_plans` 返回结构化团队提案；`team.members` 保存 roster，节点 `member_id` 绑定成员；旧调用按 role 兼容生成 roster。不直接执行、不派单。用户经 LiveRoom 团队确认卡或「协调」页签 preflight/start 后才置 active；`delegate(plan_node_id=...)` 才把 ready 节点绑定真实 `tasks.id`，依赖未完成、节点已绑定或计划非 active 均拒绝。
 - 协调域是计划层单向投影：真实 tasks 状态 `open/claimed→running`、`done→completed`、`failed→failed`；全节点完成自动完成计划；协调域不反写 tasks。态势 `_stats.plan` 只注入 active 计划摘要，objects/conflicts/verifications 不混入编排器。
 - L1 `delegate_window` 审批批准处理器同样校验并绑定 `plan_node_id`，防审批等待期绕过依赖门。
 - **依赖驱动续派（M3，liveroom-collaboration-fusion，2026-10-04）**：协调节点跃迁到 ready 时发 `plan.node_ready`；该事件进入 `WAKE_TRIGGERS`（冷却 120s），唤醒轮将就绪计划摘要注入并要求只对 ready 节点调用 `delegate(plan_node_id=...)`。这是编排器唤醒提示，不是服务端自动派单，所有角色/预算/去重/自主档闸门仍照常生效。

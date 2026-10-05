@@ -375,17 +375,16 @@ function TaskCard({ pid, task, roles, roleNames, onChanged, onDelete, onResolve,
   const [roleErr, setRoleErr] = useState<string | null>(null)
   // 双击直开会话（v0.71 任务即窗口，四态通用）：有专属窗挂回；终态旧窗关闭时创建复盘窗；open 无绑 →
   // 手动补绑待命窗（2026-09-23）成功即挂回，失败提示留卡上；其余回看板定位。
-  // 待执行（open）任务挂回后**立刻起跑**（2026-09-24）：人工双击=显式启动，
-  // 等同会话内「跑任务队列」；其余态只跳转。
+  // 待执行（open）任务挂回后显式按任务 ID 直派，避免会话中其他待执行任务被误启动。
   const [spawnErr, setSpawnErr] = useState<string | null>(null)
   const startWork = (sid: string) => {
-    api.agentWork(sid).catch((e) =>
+    api.agentWork(sid, task.id).catch((e) =>
       setSpawnErr(`自动启动失败：${e instanceof Error ? e.message : String(e)}`))
   }
   const openSession = async () => {
     let sid = task.target_session || task.claimed_by
     const sessionAlive = sid ? await api.sessions(pid).then((rows) => rows.some((row) => row.id === sid && row.status !== "closed")).catch(() => false) : false
-    if (sid && (sessionAlive || task.status === "open")) {
+    if (sid && sessionAlive) {
       window.dispatchEvent(new CustomEvent("goto-session", { detail: { sessionId: sid } }))
       if (task.status === "open") startWork(sid)
       return

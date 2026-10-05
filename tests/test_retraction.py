@@ -217,8 +217,10 @@ def test_agent_claim_injects_stale_notice(tmp_path):
                                             {"result_note": "改道成功"})]},
     ])
     agent = make_agent((bb, project, gw, tq, tmp_path), llm)
-    # 会话中心化：未指派委托定窗给本会话后 run_session 起跑
+    # 显式绑定、直启并指定当前任务后才进入会话执行轮。
     tq.bind_session(tid, agent.session["id"])
+    tq.start_direct(tid, agent.session["id"])
+    agent.dispatcher.current_task_id = tid
     assert agent.run_session() == "改道成功"
 
     first = json.dumps(llm.calls[0]["messages"], ensure_ascii=False)
