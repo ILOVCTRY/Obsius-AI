@@ -372,18 +372,6 @@ function AgentChatRow({ event }: { event: BBEvent }) {
 // 流式中 pre-wrap+光标，终稿切 MarkdownView——react-markdown 无 rehype-raw 不渲染
 // raw HTML，防注入）。
 
-function HumanNoteRow({ event }: { event: BBEvent }) {
-  const text = str(event.payload.text) || str(event.payload.title)
-  return (
-    <div className="w-full" title={timeTitle(event.created_at)}>
-      <div className="px-1 text-sm leading-relaxed">
-        <span className="mr-1.5 select-none font-mono text-primary">❯</span>
-        <span className="whitespace-pre-wrap break-words text-foreground">{text}</span>
-      </div>
-    </div>
-  )
-}
-
 function AgentReplyRow({ event, streaming }: { event: BBEvent; streaming?: boolean }) {
   const text = str(event.payload.text)
   if (streaming) {
@@ -420,7 +408,6 @@ function TurnRow({ item, roleNames, onRouteJump, assetName, pid, approval, onDec
     () => mergeTargets(targetsFromProse(replyText, known), known), [replyText, known])
   return (
     <div className="w-full shrink-0 space-y-0.5 py-1">
-      <HumanNoteRow event={item.note} />
       {/* 会话流改造（2026-10-03，cc-haha 风格）：过程组由平铺行改折叠摘要行——
           一行灰色摘要 + 耗时，点开仍是原来的逐条 EventRow（**审计零回退**）；
           运行中的轮恒展开（live）。单步不成组由 ActivityGroup 内部短路。 */}

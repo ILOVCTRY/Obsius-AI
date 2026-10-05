@@ -355,7 +355,43 @@ class TaskQueue:
         ).fetchone()
         return self.get_task(row["id"]) if row else None
 
-    # ---------- 认领 ----------
+    # ---------- 直接执行（新会话中心化语义） ----------
+
+    def start_direct(self, task_id: str, session_id: str, *, lease_minutes: int = 30) -> dict:
+        """将任务直接绑定给执行会话并启动，不经过公共任务池认领。"""
+        from datetime import datetime, timedelta, timezone
+        lease_until = (datetime.now(timezone.utc) + timedelta(minutes=lease_minutes)).isoformat(timespec="seconds")
+        with self.bb._tx():
+            row = self.bb.conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if row is None:
+                raise ValueError(f"任务不存在: {task_id}")
+            if row["status"] not in {"open", "pending"}:
+                if row["claimed_by"] == session_id and row["status"] == "claimed":
+                    return self.get_task(task_id) or {}
+                raise ValueError(f"任务 {task_id} 状态为 {row['status']}，不可直接启动")
+            if row["target_session"] and row["target_session"] != session_id:
+                raise ValueError(f"任务 {task_id} 已绑定其他执行会话")
+            keys = leases.normalize_keys(_loads(row["conflict_keys"], []))
+            mode = leases.mode_for(row["noise_budget"])
+            if keys:
+                held = [h for h in leases.active_leases_for_keys(self.bb, row["project_id"], keys, exclude_task_id=task_id) if leases.keys_conflict(mode, h["mode"])]
+                if held:
+                    raise ClaimError(f"任务 {task_id} 资源冲突：{held[0]['task_id']}")
+                for key in keys:
+                    self.bb.conn.execute(
+                        "INSERT INTO resource_leases(project_id,resource_key,mode,task_id,session_id,granted_at) VALUES(?,?,?,?,?,?) "
+                        "ON CONFLICT(project_id,resource_key,task_id) DO UPDATE SET mode=excluded.mode,session_id=excluded.session_id,granted_at=excluded.granted_at",
+                        (row["project_id"], key, mode, task_id, session_id, now()))
+            self.bb.conn.execute(
+                "UPDATE tasks SET status='claimed', claimed_by=?, target_session=?, lease_until=?, wait_for='[]', updated_at=? WHERE id=? AND status IN ('open','pending')",
+                (session_id, session_id, lease_until, now(), task_id))
+            updated = self.bb.conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+        self.bb.append_event(row["project_id"], "task.started",
+                             {"task_id": task_id, "session_id": session_id, "lease_until": lease_until, "direct": True},
+                             session_id=session_id, author=session_id)
+        return self.get_task(task_id) or {}
+
+    # ---------- 认领（存量兼容） ----------
 
     def _defer_receipt(self, parent_id: str, rcpt: dict) -> None:
         """E4-①（orchestrator-efficiency，2026-09-22）：父任务未被认领/父窗已关闭

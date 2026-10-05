@@ -5360,9 +5360,10 @@ def create_app(
                     proj.bb.set_session_meta(
                         session_id, {"worker_armed": True, "close_pending": None})
                     if not _session_job_running(session_id):
+                        TaskQueue(proj.bb).start_direct(task_id, session_id)
                         _submit_worker(
                             pid, _ensure_agent(pid, session_id),
-                            origin="human-delegate")
+                            origin="human-delegate", task_id=task_id)
                 except Exception:  # noqa: BLE001 —— 起跑失败不拖垮发布
                     log.exception("委托起跑失败 pid=%s task=%s", pid, task_id)
         return {"task_id": task_id, "kicked": [], "deduplicated": False,
@@ -6515,6 +6516,8 @@ def create_app(
         完成且没有 successor worker 时再归回 idle。armed 只是自动接活开关，
         不参与 active_sessions 计数。"""
         sid = agent.session["id"]
+        if extra_meta.get("task_id"):
+            agent.dispatcher.current_task_id = str(extra_meta["task_id"])
         manual = not bool(extra_meta.get("auto"))
         tail = {"replan_busy": False}  # 重排尾部触发是否被在跑编排动作挤掉
         bb = _project(pid).bb
@@ -6906,6 +6909,8 @@ def create_app(
             cfg = autonomy.autonomy_of(bb.get_project(pid)["config"], track=proj.track)
             if cfg["level"] not in {"L1", "L2"} or cfg["paused"]:
                 return
+            # 新任务直派语义：不再从 open 任务池补窗/认领，保留函数仅兼容旧调度触发。
+            return
             tq = TaskQueue(bb)
             tasks = tq.list_tasks(pid)
             limit = int(cfg["max_concurrent_tasks"])
@@ -7058,13 +7063,11 @@ def create_app(
                 if srow is None or srow.get("status") in {"closed", "paused"} \
                         or _session_job_running(sid):
                     return
-                meta_raw = srow.get("meta")
-                meta = json.loads(meta_raw) if isinstance(meta_raw, str) else (meta_raw or {})
-                if meta.get("worker_armed"):
-                    _submit_worker(pid, _ensure_agent(pid, sid),
-                                   auto=True, origin="orch-delegate")
-                else:
-                    _schedule(pid, reason="orch-delegate")
+                # 任务已由编排器绑定新窗；先直接登记执行会话，再启动 worker，
+                # 不依赖 armed/调度器认领。
+                TaskQueue(bb).start_direct(task_id, sid)
+                _submit_worker(pid, _ensure_agent(pid, sid),
+                               auto=True, origin="orch-delegate", task_id=task_id)
             except Exception:  # noqa: BLE001
                 log.exception("编排委派起跑失败 task=%s", task_id)
 

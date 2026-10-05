@@ -1149,9 +1149,9 @@ class AgentSession:
             if task is None:
                 raise ValueError(f"任务不存在: {task_id}")
             if task["claimed_by"] != self.session["id"]:
-                if task["status"] == "open":
-                    self.tq.claim(task_id, self.session["id"],
-                                  lease_minutes=self.config.lease_minutes)
+                if task["status"] in {"open", "pending"}:
+                    self.tq.start_direct(task_id, self.session["id"],
+                                         lease_minutes=self.config.lease_minutes)
                     task = self.tq.get_task(task_id)
                 else:
                     raise ValueError(
@@ -1357,19 +1357,17 @@ class AgentSession:
                 return summary
             # 快照失效（租约被回收/他人持有）：丢弃快照，落到正常取队列
         self.last_claim_idle = False  # 进入会话轮：暂停/中断早退路径不得残留旧 True
-        task_id = self.tq.take_session_next(
-            self.project_id, self.session["id"],
-            lease_minutes=self.config.lease_minutes)
-        if task_id is not None:
+        # 新任务直派语义：worker 只执行提交时绑定的唯一任务，不再扫描任务池认领。
+        task_id = self.dispatcher.current_task_id
+        if task_id:
             task = self.tq.get_task(task_id)
-            try:
-                return self.run_task(task["objective"], task_id=task_id)
-            except Exception as e:
-                # 覆盖 run_task 内起跑后、_loop 前的异常窗口（_fail_task_on_error 幂等，
-                # _loop 内已兜过则此处只重复停心跳）
-                self._fail_task_on_error(e)
-                raise
-        # 无委托：对话回应——无消息可回应 → run_chat None → 真空闲空退
+            if task and task.get("claimed_by") == self.session["id"] and task.get("status") == "claimed":
+                try:
+                    return self.run_task(task["objective"], task_id=task_id)
+                except Exception as e:
+                    self._fail_task_on_error(e)
+                    raise
+        # 无直派任务：对话回应——无消息可回应 → run_chat None → 真空闲空退
         reply = self.run_chat()
         if reply is not None:
             return reply

@@ -2022,7 +2022,8 @@ class Orchestrator:
             if srow.get("status") == "paused":
                 return f"[拒绝] 会话窗 {sid} 处于暂停态，暂不接委托"
         elif not force_new_window:
-            sid = self._pick_reusable_window(role, task_type)
+            # 新会话语义：指挥派发默认每个任务新开 Agent 会话，不复用待命窗。
+            sid = ""
         created = False
         if not sid:
             auto = self.autonomy_provider() if self.autonomy_provider is not None else None

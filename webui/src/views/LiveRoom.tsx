@@ -864,27 +864,6 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
     }
   }
 
-  // F9：跑任务队列=启动 worker（armed=true，之后自动接单；⏸暂停即停）
-  const runWork = async (sid: string) => {
-    setJobInfo("Worker 执行中…")
-    try {
-      const r = await api.agentWork(sid)
-      if (r.already_running) {
-        setJobInfo("Worker 已在跑（会话已启动）")
-        refreshSessions()
-        return
-      }
-      const job = await pollJob(r.job_id!, () => {})
-      const n = Number(job.result ?? 0)
-      setJobInfo(job.status === "done"
-        ? (n > 0 ? `Worker 完成（${n} 个任务）` : "Worker 完成：队列无可认领任务（已被认领或队列已空）")
-        : `Worker 出错：${job.error}`)
-      refreshSessions()
-    } catch (e) {
-      setJobInfo(`Worker 出错：${e}`)
-    }
-  }
-
   // F9 状态灯：事件流派生叠加 armed——armed 且事件流判空闲 → 绿点「已启动待命」；
   // 未 armed 空闲保持灰点（未启动）。armed 数据来自 sessions 轮询（GET sessions 增强）。
   const sessionsById = useMemo(() => new Map(sessions.map((s) => [s.id, s])), [sessions])
@@ -1231,16 +1210,13 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [events])
 
-  // 排队条「立即发送」：中断当前轮（abort 硬中断）+ armed 窗自动跑下一轮——认领期
-  // drain 即把排队引导注入；队列已空时 runWork 空退，引导等下次「跑任务队列」注入
+  // 排队引导条仅保留当前轮中断入口；任务不再通过会话队列认领。
   const sendQueuedNow = async (key: string) => {
     const q = queuedNotes.find((x) => x.key === key)
     if (!q) return
-    const armed = sessionsById.get(q.sid)?.worker_armed
     setQueuedNotes((qs) => qs.filter((x) => x.key !== key))
     await controlSession("abort", q.sid)
-    if (armed) void runWork(q.sid)
-    setJobInfo("已中断本轮：引导将在下一轮认领时注入（队列已空则等下次「跑任务队列」）")
+    setJobInfo("已中断当前轮，引导将在会话恢复后处理")
   }
 
   // 事件流渲染体（2026-09-21 抽出复用）：会话页签主区与审计抽屉（2026-09-28）共用
@@ -1970,14 +1946,6 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
               onClick={() => void controlSession("resume", activeSession.id)}
               className="rounded-full border px-2.5 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
               ▶ 继续
-            </button>
-          )}
-          {activeSession && (activeStatus === "armed" || activeStatus === "idle" || activeStatus === "finished") && (
-            <button type="button"
-              title="F9 启动 worker：自动接任务队列（未启动的窗不自动接单，armed 后待命自动接单）"
-              onClick={() => void runWork(activeSession.id)}
-              className="rounded-full border px-2.5 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
-              ▶ 跑任务队列
             </button>
           )}
           {activeSession && (
