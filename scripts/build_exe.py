@@ -1,11 +1,14 @@
-"""桌面打包一键脚本（desktop-app-shell M3）：干净 venv 固化 + PyInstaller onedir + 资源随包。
+"""桌面打包一键脚本（desktop-app-shell M3）：干净 venv 固化 + PyInstaller onefile 单 exe + 资源旁挂。
 
-产物 dist/cyberstrike-pro/：
-  cyberstrike-pro.exe（windowed，双击弹窗）+ _internal/（Python 运行时与依赖）
-  packs/  webui/dist/  tools/（资源随包——serve.py frozen 分支 _ROOT=exe 目录，
-  cwd 相对路径惯例直接命中）
+产物 dist/cyberstrike-pro/（**onefile 单 exe，2026-10-05 改**）：
+  cyberstrike-pro.exe（windowed，双击弹窗；Python 运行时与依赖全部内嵌，运行时自解压到 %TEMP%）
+  packs/  webui/dist/  tools/（资源仍**外置**在 exe 旁——serve.py frozen 分支 _ROOT=exe 目录，
+  cwd 相对路径惯例直接命中，语义与 onedir 时一致）
   config/、workspaces/ 不随包：首启自建（ProviderStore 写种子 providers.json /
   ProjectStore mkdir）——敏感凭据（providers key / fofa.json）绝不进包。
+
+注：onefile 每次启动要把内嵌运行时解压到 %TEMP%\\_MEIxxxxx，比 onedir 首次启动略慢；
+资源不进 exe（55MB packs 进包会显著拖慢每次启动，且 packs 运行时会被写），故旁挂。
 
 用法（项目根）：
   E:\\Miniconda3\\python.exe scripts\\build_exe.py             # 全流程（.build-venv 缺失自动建）
@@ -70,19 +73,21 @@ def ensure_venv(base_python: str) -> str:
 
 
 def build_exe(python: str) -> None:
-    # 注：--specpath 不允许与 .spec 文件同用（makespec 专属选项）；spec 就在 cwd
+    # 注：--specpath 不允许与 .spec 文件同用（makespec 专属选项）；spec 就在 cwd。
+    # onefile：--distpath 指到 dist/cyberstrike-pro（目录），exe 落在该目录内
+    # （dist/cyberstrike-pro/cyberstrike-pro.exe），资源再由 copy_resources 复制到其旁。
     run([python, "-m", "PyInstaller", "cyberstrike-pro.spec", "--noconfirm",
-         "--distpath", "dist", "--workpath", "build"], cwd=ROOT)
+         "--distpath", "dist/cyberstrike-pro", "--workpath", "build"], cwd=ROOT)
 
 
 def copy_resources() -> None:
     if not (DIST_APP / "cyberstrike-pro.exe").is_file():
         sys.exit("[build] PyInstaller 未产出 dist/cyberstrike-pro/cyberstrike-pro.exe")
     for name in ("packs", "tools"):
-        print(f"[build] 资源随包：{name}/")
+        print(f"[build] 资源旁挂：{name}/")
         shutil.copytree(ROOT / name, DIST_APP / name,
                         dirs_exist_ok=True, ignore=COPY_IGNORE)
-    print("[build] 资源随包：webui/dist/")
+    print("[build] 资源旁挂：webui/dist/")
     shutil.copytree(ROOT / "webui" / "dist", DIST_APP / "webui" / "dist",
                     dirs_exist_ok=True, ignore=COPY_IGNORE)
 

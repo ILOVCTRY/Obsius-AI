@@ -1,11 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
 """cyberstrike-pro 桌面打包 spec（desktop-app-shell M3，DESIGN.md §一「部署形态」）。
 
+**onefile 单 exe（2026-10-05 改）**：Python 运行时与全部依赖内嵌进单个 exe，
+运行时由 PyInstaller bootloader 解压到 %TEMP%\\_MEIxxxxx；exe 本身不含 packs/、
+tools/、webui/dist（体积与启动考虑），这些资源仍由 build_exe.py 复制到 exe 旁目录，
+serve.py frozen 分支 _ROOT=exe 目录 → cwd 相对路径直接命中，_ROOT 语义不变。
+config/、workspaces/ 不随包：首启自建（ProviderStore 种子 / ProjectStore mkdir）。
+
 由 scripts/build_exe.py 在 .build-venv 内驱动：
     .build-venv\\Scripts\\python.exe -m PyInstaller cyberstrike-pro.spec --noconfirm
-产物 dist/cyberstrike-pro/（exe + _internal/）；packs/、webui/dist/、tools/ 资源由
-build_exe.py 复制到 exe 旁（serve.py frozen 分支 _ROOT=exe 目录，cwd 相对路径直接命中）。
-config/、workspaces/ 不随包：首启自建（ProviderStore 种子 / ProjectStore mkdir）。
+        --distpath dist/cyberstrike-pro --workpath build
+产物 dist/cyberstrike-pro/cyberstrike-pro.exe（单文件）+ 同级资源目录。
 """
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules
@@ -42,10 +47,12 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
+    a.binaries,
+    a.datas,
     [],
-    exclude_binaries=True,
     name="cyberstrike-pro",
     console=False,  # windowed：双击无黑窗；stdout 落 logs/serve-window.log（serve.py 处理）
     disable_windowed_traceback=False,
+    upx=False,
+    runtime_tmpdir=None,  # 默认解压到 %TEMP%\_MEIxxxxx，退出清理
 )
-coll = COLLECT(exe, a.binaries, a.datas, name="cyberstrike-pro")
