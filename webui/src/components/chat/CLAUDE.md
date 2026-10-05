@@ -28,6 +28,11 @@
 - `ChatStats.tsx` — **统计行**：`{tokens} tokens（含缓存） · 最后更新 {相对时间} · {N} 条消息`。
   导出 `fmtTokenCount`（847/1.2k/1.2m）与 `fmtRelative`（刚刚/N 分钟前…）。工作台传精确
   值（`thread.usage`），直播间传窗口内近似（`llm.usage` 事件求和 + `visible.length`）。
+- `TeamCard.tsx`（**2026-10-06**）— **会话内团队卡**：直播间「指挥」对话流里呈现 Team
+  （`core/team` 域）。两形态对齐 cc-haha Agent Teams 参考图——待确认态（`draft`/`ready`）：
+  `等待人工确认 · 尚未启动成员 · N 位成员` + 团队名 + 「查看并配置」；已建/运行态：图标 +
+  团队名（等宽）+「组建团队」徽章 + `Agent 团队 · N 名成员` + 「打开运行报告 ›」。
+  纯展示件，数据由 `OrchChatPane` 从 `team.*` 事件 + 实时 `Team` 反查给出（回调交父级）。
 
 ## 约定与坑
 

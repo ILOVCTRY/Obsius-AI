@@ -42,11 +42,13 @@ from core.browser import BrowserConfig, BrowserPool, BrowserError
 from core.browser.pool import browser_available, chromium_available
 from core.browser.replay import Intruder, ReplayClient
 from core.agent import AgentConfig, AgentSession
+from core.agent.execution import ExecutionContext
 from core.agent.loop import clear_task_resume, persisted_snapshot_path, task_resume_path, task_transcript_path
 from core.blackboard import TaskQueue
 from core.blackboard.assets import _is_ip, clean_host, import_assets, register_asset
 from core.coverage import attach_effective_status
 from core.coordination import CoordinationStore
+from core.team import TeamStore
 from core.blackboard.graph import board_graph, session_graph
 from core.blackboard.attackpath import build_attack_path
 from core.blackboard.intents import list_intents, reopen_intent
@@ -165,6 +167,42 @@ class CoordinationPlanIn(BaseModel):
     objective: str = ""
     team: dict[str, Any] | list[dict[str, Any]] | None = None
     config: dict[str, Any] = Field(default_factory=dict)
+
+
+class TeamMemberIn(BaseModel):
+    member_key: str
+    label: str = ""
+    responsibility: str = ""
+    role: str = ""
+    provider: str = ""
+    model: str = ""
+    runtime: str = ""
+    threat_class: str = "trusted"
+    max_steps: int | None = None
+
+
+class TeamCreateIn(BaseModel):
+    name: str
+    goal_text: str = ""
+    members: list[TeamMemberIn] = Field(default_factory=list)
+    config: dict[str, Any] = Field(default_factory=dict)
+
+
+class TeamPatchIn(BaseModel):
+    name: str | None = None
+    goal_text: str | None = None
+    members: list[TeamMemberIn] | None = None
+    config: dict[str, Any] | None = None
+
+
+class TeamStartIn(BaseModel):
+    preflight_revision: str
+    confirmations: dict[str, bool] = Field(default_factory=dict)
+
+
+class TeamCancelIn(BaseModel):
+    run_id: str
+    reason: str = ""
 
 
 class CoordinationTaskIn(BaseModel):
@@ -2205,7 +2243,9 @@ def create_app(
 
         def factory(role: str, session_name: str | None = None,
                     existing_session: dict | None = None,
-                    max_steps: int | None = None) -> AgentSession:
+                    max_steps: int | None = None,
+                    provider: str | None = None,
+                    model: str | None = None) -> AgentSession:
             from core.tools.decompiler import (
                 build_headless_service, gateway_runner, resolve_headless_timeout)
 
@@ -2246,6 +2286,12 @@ def create_app(
             from core.autonomy import ADVISOR_DEFAULTS
             adv = {**ADVISOR_DEFAULTS, **(cfg.get("advisor") or {})}
             session_plan_llm = plan_llm
+            session_exec_llm = exec_llm
+            if provider or model:
+                try:
+                    session_exec_llm = app.state.llm_store.build(provider or "", model or None)
+                except Exception as e:
+                    raise ValueError(f"供应商/模型不可用: {e}") from e
             # 覆写回退可见化（2026-09-30）：坏值静默回退保留（绝不开窗失败），但补落
             # llm.fallback 事件——此前只有后端 log.warning，用户对「本次实际跑的是别
             # 的模型」完全无感。会话 id 尚未就绪（AgentSession 还没建），先攒记录，
@@ -2377,6 +2423,54 @@ def create_app(
             proj.bb.set_session_status(
                 sid, "paused" if agent._resume_state is not None else "idle")
         return agent
+
+    def _fanout_team(pid: str, team_id: str, run_id: str) -> dict[str, Any]:
+        """事务创建 Run 后逐成员创建专属会话并提交 Team worker。"""
+        proj = _project(pid)
+        ts = TeamStore(proj.bb, packs_root=app.state.packs_root)
+        run = ts.get_run(pid, team_id, run_id)
+        exec_llm, plan_llm = _llms()
+        factory = _registered_session_factory(pid, exec_llm, plan_llm)
+        submitted: list[dict[str, str]] = []
+        for row in run["members"]:
+            claimed = ts.claim_member(row["id"])
+            if claimed is None:
+                continue
+            try:
+                agent = factory(
+                    claimed["role"] or "_generalist",
+                    session_name=f"team/{team_id}/{claimed['member_key']}",
+                    max_steps=claimed["max_steps"],
+                    provider=claimed["provider"] or None,
+                    model=claimed["model"] or None,
+                )
+                sid = agent.session["id"]
+                context = ExecutionContext(
+                    execution_id=claimed["execution_id"], team_id=team_id,
+                    run_id=run_id, member_id=claimed["member_id"],
+                    session_id=sid, objective=claimed["objective"],
+                    role=claimed["role"], runtime=claimed["runtime"],
+                    threat_class=claimed["threat_class"],
+                )
+                proj.bb.set_session_meta(sid, {
+                    "team_id": team_id, "run_id": run_id,
+                    "team_member_id": claimed["member_id"],
+                    "run_member_id": claimed["id"],
+                    "execution_id": claimed["execution_id"],
+                    "team_direct": True, "worker_armed": False,
+                })
+                ts.attach_session(claimed["id"], sid)
+                job_id = _submit_worker(
+                    pid, agent, team_context=context, team_id=team_id,
+                    run_id=run_id, run_member_id=claimed["id"],
+                    execution_id=claimed["execution_id"], origin="team-direct",
+                )
+                submitted.append({"member_id": claimed["member_id"], "session_id": sid, "job_id": job_id})
+            except Exception as exc:  # noqa: BLE001
+                log.exception("Team 成员 fan-out 失败 team=%s member=%s", team_id, row["id"])
+                ts.mark_member(row["id"], "failed", error=str(exc), outcome="session/job 创建失败")
+        ts.reconcile_run(pid, team_id, run_id)
+        return {"run_id": run_id, "submitted": submitted}
 
     # ---------- 项目 ----------
 
@@ -5004,6 +5098,97 @@ def create_app(
         # 会话中心化 M4：节点=编排器+会话窗；delegate/derive/inbox/dm 边（见 graph.session_graph）
         return session_graph(_project(pid).bb, pid)
 
+    # ---------- Team direct execution（独立于旧任务/DAG） ----------
+    @app.post("/api/projects/{pid}/teams", status_code=201)
+    def create_team(pid: str, body: TeamCreateIn):
+        proj = _project(pid)
+        try:
+            return TeamStore(proj.bb, packs_root=app.state.packs_root).create_team(
+                pid, name=body.name, goal_text=body.goal_text,
+                members=[member.model_dump() for member in body.members],
+                config=body.config)
+        except LookupError as e:
+            raise HTTPException(404, str(e)) from e
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+
+    @app.get("/api/projects/{pid}/teams")
+    def list_teams(pid: str):
+        proj = _project(pid)
+        return TeamStore(proj.bb, packs_root=app.state.packs_root).list_teams(pid)
+
+    @app.get("/api/projects/{pid}/teams/{team_id}")
+    def get_team(pid: str, team_id: str):
+        try:
+            return TeamStore(_project(pid).bb, packs_root=app.state.packs_root).get_team(pid, team_id)
+        except LookupError as e:
+            raise HTTPException(404, str(e)) from e
+
+    @app.patch("/api/projects/{pid}/teams/{team_id}")
+    def patch_team(pid: str, team_id: str, body: TeamPatchIn):
+        proj = _project(pid)
+        try:
+            return TeamStore(proj.bb, packs_root=app.state.packs_root).update_team(
+                pid, team_id, name=body.name, goal_text=body.goal_text,
+                members=None if body.members is None else [member.model_dump() for member in body.members],
+                config=body.config)
+        except LookupError as e:
+            raise HTTPException(404, str(e)) from e
+        except ValueError as e:
+            raise HTTPException(409, str(e)) from e
+
+    @app.get("/api/projects/{pid}/teams/{team_id}/preflight")
+    def team_preflight(pid: str, team_id: str):
+        try:
+            return TeamStore(_project(pid).bb, packs_root=app.state.packs_root).preflight(pid, team_id)
+        except LookupError as e:
+            raise HTTPException(404, str(e)) from e
+
+    @app.post("/api/projects/{pid}/teams/{team_id}/start")
+    def start_team(pid: str, team_id: str, body: TeamStartIn):
+        proj = _project(pid)
+        ts = TeamStore(proj.bb, packs_root=app.state.packs_root)
+        try:
+            run = ts.create_run_and_members(pid, team_id, revision=body.preflight_revision, confirmations=body.confirmations)
+        except LookupError as e:
+            raise HTTPException(404, str(e)) from e
+        except RuntimeError as e:
+            raise HTTPException(409, str(e)) from e
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+        job_id = app.state.jobs.submit("team-fanout", lambda: _fanout_team(pid, team_id, run["id"]), meta={"project_id": pid, "team_id": team_id, "run_id": run["id"]})
+        return {"run": run, "job_id": job_id, "status": "starting"}
+
+    @app.post("/api/projects/{pid}/teams/{team_id}/cancel")
+    def cancel_team(pid: str, team_id: str, body: TeamCancelIn):
+        proj = _project(pid)
+        ts = TeamStore(proj.bb, packs_root=app.state.packs_root)
+        try:
+            run = ts.cancel_run(pid, team_id, body.run_id, body.reason)
+        except LookupError as e:
+            raise HTTPException(404, str(e)) from e
+        for member in run["members"]:
+            sid = member.get("session_id")
+            if sid and member.get("status") == "running":
+                agent = app.state.agents.get(sid)
+                if agent is not None:
+                    agent.request_abort()
+        return run
+
+    @app.get("/api/projects/{pid}/teams/{team_id}/runs")
+    def list_team_runs(pid: str, team_id: str):
+        try:
+            return TeamStore(_project(pid).bb, packs_root=app.state.packs_root).list_runs(pid, team_id)
+        except LookupError as e:
+            raise HTTPException(404, str(e)) from e
+
+    @app.get("/api/projects/{pid}/teams/{team_id}/runs/{run_id}")
+    def get_team_run(pid: str, team_id: str, run_id: str):
+        try:
+            return TeamStore(_project(pid).bb, packs_root=app.state.packs_root).get_run(pid, team_id, run_id)
+        except LookupError as e:
+            raise HTTPException(404, str(e)) from e
+
     # ---------- 多智能体协调（独立域，不改 chat/agent 工作台） ----------
     @app.get("/api/projects/{pid}/coordination")
     def get_coordination(pid: str):
@@ -6579,6 +6764,21 @@ def create_app(
         except Exception:  # noqa: BLE001 —— 自动续跑失败保持暂停，等人工
             log.exception("C4 L2 自动续跑失败 pid=%s", pid)
 
+    def _team_worker_loop(pid: str, agent: AgentSession, context: ExecutionContext,
+                           run_member_id: str, team_id: str, run_id: str) -> Callable[[], Any]:
+        def run() -> Any:
+            ts = TeamStore(agent.bb, packs_root=app.state.packs_root)
+            try:
+                result = agent.run_team_execution(context)
+                ts.mark_member(run_member_id, "completed", outcome=str(result or "完成"))
+                return result
+            except Exception as exc:  # noqa: BLE001
+                ts.mark_member(run_member_id, "failed", error=str(exc), outcome="Team execution 异常")
+                raise
+            finally:
+                ts.reconcile_run(pid, team_id, run_id)
+        return run
+
     def _submit_worker(pid: str, agent: AgentSession, **extra_meta) -> str:
         """agent-work job 的唯一提交口（批 5）。
 
@@ -6617,6 +6817,14 @@ def create_app(
                 except ValueError:
                     pass
 
+        team_context = extra_meta.get("team_context")
+        if team_context is not None:
+            run_member_id = str(extra_meta["run_member_id"])
+            team_id = str(extra_meta["team_id"])
+            run_id = str(extra_meta["run_id"])
+            return app.state.jobs.submit(
+                "agent-work", _team_worker_loop(pid, agent, team_context, run_member_id, team_id, run_id),
+                meta={"project_id": pid, "session_id": sid, **extra_meta})
         return app.state.jobs.submit(
             "agent-work", _worker_loop(agent, manual=manual, tail=tail),
             meta={"project_id": pid, "session_id": sid, **extra_meta},
@@ -9535,6 +9743,7 @@ def create_app(
     def chat_stop(tid: str):
         """中止执行中的轮次：置中止事件 → ChatTurn 在步间/流式帧/工具分发点
         退出并落「已停止」说明。轮次刚结束时按幂等成功处理，避免前端状态刷新竞态。"""
+        from core.chat import store as chat_store
         if tid not in _chat_running_set():
             thread = chat_store.get_thread(_project(_pid_of_chat(tid)).bb, tid)
             if thread is None:

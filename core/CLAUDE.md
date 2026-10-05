@@ -1,6 +1,7 @@
 # core/
 
-> 领域无关核心引擎：黑板 / 任务协调 / Agent / 执行网关 / LLM。设计唯一真相源是 DESIGN.md（§3-§9）。
+> 领域无关核心引擎：黑板 / 任务协调 / Agent / 执行网关 / LLM。设计唯一真相源是 DESIGN.md（§3-§9）。Team/Member/Run direct execution 独立于旧任务 DAG，start 经 preflight/人工确认后 fan-out 专属 Agent session。
+
 
 ## 目录索引（各目录 CLAUDE.md 是接手入口）
 

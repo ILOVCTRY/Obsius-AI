@@ -463,6 +463,7 @@ class AgentSession:
         # 与最近一次 system 的 skill_context 快照（重建时复用，避免重跑路由）
         self._persona_dirty = False
         self._last_skill_context = ""
+        self._team_execution = False
 
         if existing_session is not None:
             # rehydrate（服务重启/孤儿窗）：附着既有 sessions 行，不新建、不重置状态。
@@ -1275,6 +1276,26 @@ class AgentSession:
             summary or self.dispatcher.last_delegation_note or "委托已收尾")
         return summary
 
+    def run_team_execution(self, context) -> str | None:
+        """执行一个独立 Team 成员目标，不创建或认领旧任务。"""
+        if not context.objective.strip():
+            raise ValueError("Team 成员 objective 不能为空")
+        old_task = self.dispatcher.current_task_id
+        self.dispatcher.current_task_id = None
+        original_schemas = self._task_tool_schemas
+        blocked = {"task_plan", "task_step", "task_reconcile", "publish_task", "complete_task", "fail_task", "finish"}
+        self._team_execution = True
+        try:
+            self._task_tool_schemas = lambda: [tool for tool in AGENT_TOOLS if tool.get("name") not in blocked]
+            skill_ctx = self.skill_context_for(context.objective)
+            system = self.build_system_blocks(context.objective, skill_ctx)
+            messages = [{"role": "user", "content": context.objective}]
+            return self._loop(system, messages, context.objective)
+        finally:
+            self._team_execution = False
+            self._task_tool_schemas = original_schemas
+            self.dispatcher.current_task_id = old_task
+
     def run_session(self) -> str | None:
         """会话轮（会话中心化编排，docs/plans/session-centric-orchestration.md §4.2）：
         ① 窗内有 open 委托 → 取队首起跑执行（完整工具面）；
@@ -2015,6 +2036,9 @@ class AgentSession:
                 # 纯文本步也过拒绝分类：硬拒绝计数清零；plan-only 模式下纯文本
                 # 而计划仍空 → 挂人（2026-09-24）
                 self._classify_step_rejections([], messages)
+                if self._team_execution and not self.dispatcher.awaiting_human:
+                    # Team direct execution 没有旧 task 的 finish 工具；纯文本即成员结论。
+                    return resp.text or self.dispatcher.summary or "Team 成员执行完成"
                 if not self.dispatcher.awaiting_human:
                     # 纯文本回复：视为停等，提示其用 finish 或继续干活
                     messages.append({"role": "user",

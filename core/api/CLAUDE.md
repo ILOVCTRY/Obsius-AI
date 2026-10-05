@@ -7,6 +7,10 @@
 - `app.py` — `create_app(workspace_root, packs_root, tools_root, *, executor_llm=None, planner_llm=None, providers_config=config/providers.json, static_dir=None)`。`app.state.llm_store`=ProviderStore（多供应商）；`app.state.campaign`=CampaignMemory（全局库 `data/campaign.db`，构造内含老位置惰性迁移）。LLM 缺省=路由覆写目标或全局默认；测试可注入 executor_llm 或 tmp providers_config 避免种子污染。无可用 key → Agent/编排端点 **503**（不崩）。
 - `JobRegistry` — 长耗时动作（跑 Agent / orchestrator tick/auto-tick/auto-wait/replan）后台线程执行，`POST` 返 job_id，`GET /api/jobs/{id}` 轮询；`submit(..., on_done=)` 状态翻 done/error 后回调。任务执行入口先 `TaskQueue.start_direct(task_id,sid)`，再 `_submit_worker(task_id=...)` 指定当前任务；`agent.run_session()` 只执行已绑定的当前任务，无任务时处理收件箱后空退，**不扫描公共任务池**。L1 批准、显式 `/agents/{sid}/work?task_id=`、失败任务 resume/reopen 同样走直派；`/work` 不给 id 仅兼容该会话唯一 open 任务，多个时 409；`start_direct` 事务内拒绝同窗第二个 claimed 任务，避免并发请求双跑。已关闭原窗的 open 任务经人工 `spawn-window` 会先解绑再绑定新窗。worker 异常由 `AgentSession._fail_task_on_error` 收口。
 
+## Team direct API
+
+`/projects/{pid}/teams` 是独立于旧 coordination DAG 的 Team/Member/Run API。创建只登记 roster；preflight 生成 revision；start 事务创建 Run 快照后由后台 fan-out 创建专属 session，并通过 `_submit_worker` 的 Team 分支执行。新路径不调用 TaskQueue claim/take_session_next/start_direct；cancel 只 request_abort Team session，不调用旧 cancel_task。**`GET .../teams/{id}/runs`（2026-10-06）** 列团队历史 Run（新→旧，前端运行报告取最新）；团队生命周期事件（`team.created/updated/run.started/member.updated/run.finished`）由 `core/team/store.py` 在事务外发出（前端「指挥」页签团队卡消费）。
+
 ## 协调团队 API
 
 - `/projects/{pid}/coordination` 返回计划、工作节点及计划级 `team` 视图；计划 `config.team` 是成员名册的持久来源，节点 `member_id` 是归属，旧计划按 role 读时推导。`POST .../plans` 可带 `team`，`PATCH .../plans/{id}` 在 draft/paused 更新 team/config；已绑定执行任务或 active 计划不得重编组。

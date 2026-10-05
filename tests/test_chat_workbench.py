@@ -311,12 +311,24 @@ def test_chat_orchestrator_parallel_call_expert_dispatch(tmp_path):
                 active -= 1
 
     turn._dispatch = fake_dispatch
+    published: list[dict] = []
+    bb.bus.subscribe(published.append)
     results = turn._parallel_expert_dispatch([
         _tc("e1", "call_expert", {"expert": "web-solver", "task": "任务一"}),
         _tc("e2", "call_expert", {"expert": "recon", "task": "任务二"}),
     ])
     assert max_active == 2
     assert results == {"e1": (True, "done:e1"), "e2": (True, "done:e2")}
+    tool_events = [e for e in published if e["kind"] == "chat.tool"]
+    assert len(tool_events) == 4
+    by_call: dict[str, list[dict]] = {}
+    for event in tool_events:
+        payload = event["payload"]
+        by_call.setdefault(payload["tool_call_id"], []).append(payload)
+    assert set(by_call) == {"e1", "e2"}
+    assert all({p["phase"] for p in payloads} == {"start", "done"}
+               for payloads in by_call.values())
+    assert all(p["parallel"] is True for p in (e["payload"] for e in tool_events))
 
 
 def test_mixed_tool_batch_runs_experts_concurrently_after_serial_tool(tmp_path):

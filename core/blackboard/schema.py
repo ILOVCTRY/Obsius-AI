@@ -9,7 +9,10 @@
 
 import sqlite3
 
-SCHEMA_VERSION = 31
+SCHEMA_VERSION = 32
+
+# v31→v32（Team direct execution）：Team/Member/Run 与旧 tasks/coordination DAG
+# 完全分离。新 Team 只写以下独立表；旧项目数据不迁移、不回填。
 
 # v30→v31（会话流 cc-haha 对齐，2026-10-04）：chat_messages 幂等补 thinking
 # （assistant 行=该步推理正文，''=无）。此前思考只经 chat.thinking 事件实时
@@ -488,6 +491,103 @@ CREATE TABLE IF NOT EXISTS logic_block_funcs (
     UNIQUE(block_id, address)
 );
 CREATE INDEX IF NOT EXISTS idx_logic_block_funcs_block ON logic_block_funcs(block_id, seq);
+
+-- Team direct execution（v32）：与旧 tasks/coordination DAG 完全独立。
+CREATE TABLE IF NOT EXISTS teams (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL REFERENCES projects(id),
+    name        TEXT NOT NULL,
+    goal_text   TEXT NOT NULL DEFAULT '',
+    status      TEXT NOT NULL DEFAULT 'draft',
+    created_by  TEXT NOT NULL DEFAULT 'human',
+    revision    INTEGER NOT NULL DEFAULT 1,
+    config      TEXT NOT NULL DEFAULT '{}',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_teams_project ON teams(project_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS team_members (
+    id              TEXT PRIMARY KEY,
+    team_id         TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    member_key      TEXT NOT NULL,
+    label           TEXT NOT NULL DEFAULT '',
+    responsibility  TEXT NOT NULL DEFAULT '',
+    role            TEXT NOT NULL DEFAULT '',
+    provider        TEXT NOT NULL DEFAULT '',
+    model           TEXT NOT NULL DEFAULT '',
+    runtime         TEXT NOT NULL DEFAULT '',
+    threat_class    TEXT NOT NULL DEFAULT '',
+    max_steps      INTEGER,
+    status          TEXT NOT NULL DEFAULT 'active',
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    UNIQUE(team_id, member_key)
+);
+CREATE INDEX IF NOT EXISTS idx_team_members_team ON team_members(team_id, updated_at);
+
+CREATE TABLE IF NOT EXISTS team_runs (
+    id                      TEXT PRIMARY KEY,
+    project_id              TEXT NOT NULL REFERENCES projects(id),
+    team_id                 TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    status                  TEXT NOT NULL DEFAULT 'starting',
+    confirmation_revision   TEXT NOT NULL,
+    cancel_reason           TEXT NOT NULL DEFAULT '',
+    created_at              TEXT NOT NULL,
+    updated_at              TEXT NOT NULL,
+    started_at              TEXT,
+    finished_at             TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_team_runs_team ON team_runs(team_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_team_runs_project ON team_runs(project_id, status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS team_run_members (
+    id              TEXT PRIMARY KEY,
+    run_id          TEXT NOT NULL REFERENCES team_runs(id) ON DELETE CASCADE,
+    member_id       TEXT NOT NULL REFERENCES team_members(id),
+    member_key      TEXT NOT NULL,
+    objective       TEXT NOT NULL DEFAULT '',
+    role            TEXT NOT NULL DEFAULT '',
+    provider        TEXT NOT NULL DEFAULT '',
+    model           TEXT NOT NULL DEFAULT '',
+    runtime         TEXT NOT NULL DEFAULT '',
+    threat_class    TEXT NOT NULL DEFAULT '',
+    max_steps      INTEGER,
+    session_id      TEXT,
+    execution_id    TEXT,
+    status          TEXT NOT NULL DEFAULT 'pending',
+    error           TEXT NOT NULL DEFAULT '',
+    started_at      TEXT,
+    finished_at     TEXT,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    UNIQUE(run_id, member_id),
+    UNIQUE(run_id, member_key)
+);
+CREATE INDEX IF NOT EXISTS idx_team_run_members_run ON team_run_members(run_id, status);
+CREATE INDEX IF NOT EXISTS idx_team_run_members_session ON team_run_members(session_id);
+
+CREATE TABLE IF NOT EXISTS execution_audits (
+    execution_id    TEXT PRIMARY KEY,
+    project_id      TEXT NOT NULL REFERENCES projects(id),
+    source          TEXT NOT NULL,
+    team_id         TEXT NOT NULL REFERENCES teams(id),
+    run_id          TEXT NOT NULL REFERENCES team_runs(id),
+    member_id       TEXT NOT NULL REFERENCES team_members(id),
+    session_id      TEXT,
+    objective       TEXT NOT NULL DEFAULT '',
+    role            TEXT NOT NULL DEFAULT '',
+    runtime         TEXT NOT NULL DEFAULT '',
+    threat_class    TEXT NOT NULL DEFAULT '',
+    roe_snapshot    TEXT NOT NULL DEFAULT '{}',
+    status          TEXT NOT NULL DEFAULT 'pending',
+    outcome         TEXT NOT NULL DEFAULT '',
+    transcript_ref  TEXT NOT NULL DEFAULT '',
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_execution_audits_project ON execution_audits(project_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_execution_audits_run ON execution_audits(run_id, status);
 """
 
 
@@ -523,7 +623,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     - v28→v29：无锚点且 open 的存量意图落 intent.anchor_required 审计事件
       （closed 不动；幂等靠 meta 键去重，见文件头版本注释）。
     - v30→v31：chat_messages 幂等补 thinking（assistant 行推理正文，见文件头
-      版本注释）。"""
+      版本注释）。
+    - v31→v32：teams/team_members/team_runs/team_run_members/execution_audits
+      由 DDL 的 IF NOT EXISTS 直接建表；新 Team 直执行不转换旧任务。"""
     cols = {r[1] for r in conn.execute("PRAGMA table_info(projects)")}
     if "track" not in cols:
         conn.execute("ALTER TABLE projects ADD COLUMN track TEXT NOT NULL DEFAULT ''")

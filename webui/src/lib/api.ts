@@ -22,6 +22,7 @@ import type {
   FofaConfig, FofaTestResult, FofaSearchResult, FofaHistoryItem, ImportPreview, ImportSummary,
   ChatAgent, ChatThread, ChatThreadDetail, ChatMcpServer,
   CoordinationOverview, CoordinationPreflight, CoordinationCommunication, CoordinationPlan, CoordinationTask, CoordinationObject, CoordinationConflict, CoordinationVerification,
+  Team, TeamMemberInput, TeamPreflight, TeamRun,
   SkillResource,
   SamplePackage, SampleTargetAnalysis, SampleTargetAnalyzeResponse, SamplePackageUploadSession, SamplePackagePreview,
 } from "./types"
@@ -672,6 +673,25 @@ export const api = {
     http<DecideApprovalResult>(`/api/approvals/${aid}/decide`, {
       method: "POST", body: JSON.stringify({ decision }),
     }),
+
+  // Team direct execution（core/team；2026-10-06）：团队卡 / 查看并配置 / 运行报告
+  teams: (pid: string) => http<Team[]>(`/api/projects/${pid}/teams`),
+  team: (pid: string, teamId: string) => http<Team>(`/api/projects/${pid}/teams/${teamId}`),
+  createTeam: (pid: string, body: { name: string; goal_text?: string; members?: TeamMemberInput[]; config?: Record<string, unknown> }) =>
+    http<Team>(`/api/projects/${pid}/teams`, { method: "POST", body: JSON.stringify(body) }),
+  patchTeam: (pid: string, teamId: string, body: { name?: string; goal_text?: string; members?: TeamMemberInput[]; config?: Record<string, unknown> }) =>
+    http<Team>(`/api/projects/${pid}/teams/${teamId}`, { method: "PATCH", body: JSON.stringify(body) }),
+  teamPreflight: (pid: string, teamId: string) =>
+    http<TeamPreflight>(`/api/projects/${pid}/teams/${teamId}/preflight`),
+  startTeam: (pid: string, teamId: string, body: { preflight_revision: string; confirmations: Record<string, boolean> }) =>
+    http<{ run: TeamRun; job_id: string; status: string }>(
+      `/api/projects/${pid}/teams/${teamId}/start`, { method: "POST", body: JSON.stringify(body) }),
+  cancelTeam: (pid: string, teamId: string, body: { run_id: string; reason?: string }) =>
+    http<TeamRun>(`/api/projects/${pid}/teams/${teamId}/cancel`, { method: "POST", body: JSON.stringify(body) }),
+  teamRuns: (pid: string, teamId: string) =>
+    http<TeamRun[]>(`/api/projects/${pid}/teams/${teamId}/runs`),
+  teamRun: (pid: string, teamId: string, runId: string) =>
+    http<TeamRun>(`/api/projects/${pid}/teams/${teamId}/runs/${runId}`),
 
   // packs 管理（正交分类学 §4.5：owners/任务类型属轨，Skill/红线轨与包各有一份）
   // 场景轨

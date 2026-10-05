@@ -4,7 +4,9 @@ import { ArrowUp, GitBranch, Paperclip, Plus, Square, X } from "lucide-react"
 // 多智能体协调（2026-10-04 并入直播间）：原独立顶级页迁为第三段视图
 const CoordinationPane = lazy(() => import("./live/CoordinationPane").then((m) => ({ default: m.CoordinationPane })))
 import { PlanPanel } from "./live/PlanPanel"
-import { OrchChatPane } from "./live/OrchChatPane"
+import { OrchChatPane, TEAM_EVENT_KINDS } from "./live/OrchChatPane"
+import { TeamRunReport } from "./live/TeamRunReport"
+import { TeamConfigDialog } from "@/components/team/TeamConfigDialog"
 import { TraeView } from "./live/TraeView"
 import { PersonaEditor } from "./live/editors"
 import { PlanConfirmDialog } from "./live/coordination/PlanConfirmDialog"
@@ -16,7 +18,7 @@ import { useEvents } from "@/lib/useEvents"
 import { usePendingApprovals } from "@/lib/usePendingApprovals"
 import { buildStreamItems } from "@/lib/turnStream"
 import { fmtDateTimeMin } from "@/lib/datetime"
-import type { Approval, AttachmentInfo, Asset, Autonomy, BBEvent, CoordinationPlan, CoordinationPlanProposal, DecideApprovalResult, ModelInfo, OrchPersona, OrchProposal, OrchTickResult, PhaseGoal, ProjectUsage, ReplanResult, RoleInfo, Session, Task } from "@/lib/types"
+import type { Approval, AttachmentInfo, Asset, Autonomy, BBEvent, CoordinationPlan, CoordinationPlanProposal, DecideApprovalResult, ModelInfo, OrchPersona, OrchProposal, OrchTickResult, PhaseGoal, ProjectUsage, ReplanResult, RoleInfo, Session, Task, Team } from "@/lib/types"
 import { StatusDot, type SessionStatus } from "@/components/StatusDot"
 import { Button } from "@/components/ui/button"
 import { ChatStats } from "@/components/chat/ChatStats"
@@ -343,6 +345,19 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
     return [...orchHistory, ...events.filter((e) => !seen.has(e.id))]
       .sort((a, b) => a.id - b.id)
   }, [orchHistory, events])
+  // 团队实时态（2026-10-06）：指挥页签团队卡的数据源（卡优先取实时态，缺省回落事件快照）。
+  // 仅指挥页签激活时轮询，避免其它页签空跑。
+  const [teams, setTeams] = useState<Team[]>([])
+  const [teamConfigId, setTeamConfigId] = useState<string | null>(null)
+  const [teamReportId, setTeamReportId] = useState<string | null>(null)
+  useEffect(() => {
+    if (!pid || activeTab !== "__orch") return
+    let alive = true
+    const load = () => api.teams(pid).then((ts) => { if (alive) setTeams(ts) }).catch(() => {})
+    load()
+    const t = setInterval(load, 3000)
+    return () => { alive = false; clearInterval(t) }
+  }, [pid, activeTab])
   const [filter, setFilter] = useState<string>("all")
   // 审计抽屉（2026-09-28 会话窗三段式改造）：主区常显对话轮形态，类型筛选迁入右侧
   // 抽屉——抽屉复用同一 events 窗口（inTabScope 圈定）+ 本地筛选态平铺渲染
@@ -554,6 +569,8 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
       // session_id，按 payload.created_by 关联进编排页签（须在 session_id
       // 剔除之前判）；旧事件无 created_by → 不显示（退回现状，不回填）。
       if (ORCH_TASK_EVENTS.has(e.kind)) return e.payload.created_by === "orchestrator"
+      // 团队生命周期事件（2026-10-06）：无 session_id，指挥页签对话流渲染团队卡
+      if (TEAM_EVENT_KINDS.has(e.kind)) return true
       if (e.session_id) return false
       if (e.author === "orchestrator") return true
       // 编排器/顾问源 LLM 失败也属编排视角（worker 源不进，看会话页签/全部）
@@ -1467,11 +1484,14 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
         events={orchEvents}
         busy={orchBusy}
         persona={orchMeta?.persona ?? null}
+        pid={pid}
+        teams={teams}
         onEditPersona={() => setPersonaOpen(true)}
         onConfirmPlan={(plan) => void openCoordinationPlan(plan, true)}
         onOpenPlan={(plan) => { void openCoordinationPlan(plan); setViewMode("coord") }}
+        onOpenTeamReport={(tid) => setTeamReportId(tid)}
+        onConfigureTeam={(tid) => setTeamConfigId(tid)}
         orchRunning={!!usage?.orch_running}
-        uiStyle={usage?.ui_style}
       />
       ) : usage?.ui_style === "trae" ? (
       // trae 风格执行视图（2026-09-28）：任务即计划条目（清单+展开统计+LLM 报告），
@@ -1982,6 +2002,18 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
             />
           </div>
         </div>
+      )}
+
+      {/* 团队（2026-10-06）：查看并配置弹窗 + 运行报告全屏视图 */}
+      {teamConfigId && (
+        <TeamConfigDialog pid={pid} teamId={teamConfigId}
+          onClose={() => setTeamConfigId(null)}
+          onStarted={() => { const tid = teamConfigId; setTeamConfigId(null); setTeamReportId(tid) }} />
+      )}
+      {teamReportId && (
+        <TeamRunReport pid={pid} teamId={teamReportId}
+          onClose={() => setTeamReportId(null)}
+          onOpenSession={(sid) => { setTeamReportId(null); setActiveTab(sid); setViewMode("live") }} />
       )}
     </div>
   )

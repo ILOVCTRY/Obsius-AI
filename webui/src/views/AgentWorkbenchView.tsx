@@ -205,23 +205,33 @@ export function AgentWorkbenchView({ pid, meta }: {
     }
     return text
   }, [events, tid])
-  // chat.tool 本线程最新事件：phase=start → 实时「执行中」块（先于轮询）；
-  // phase=done → 立即标完成态（ok/耗时），轮询结果行到达后接管
-  const liveTool = useMemo(() => {
-    for (let i = events.length - 1; i >= 0; i--) {
-      const e = events[i]
-      if (e.kind !== "chat.tool") continue
-      const p = e.payload as {
-        thread_id?: string; phase?: string; name?: string; args_head?: string
-        ok?: boolean; duration_s?: number; result_head?: string
-      }
-      if (p?.thread_id !== tid) continue
-      return p
+  // chat.tool 按 tool_call_id 累积：同一批并行专家共享主控 thread_id，不能只取
+  // 最新一条事件，否则后一个 start 会覆盖先完成的 done。旧事件没有 id 时保留
+  // name + args_head 回退匹配，兼容历史事件缓存。
+  const liveTools = useMemo(() => {
+    type LiveTool = {
+      tool_call_id?: string; phase?: string; name?: string; args_head?: string
+      ok?: boolean; duration_s?: number; result_head?: string
     }
-    return null
+    const byId = new Map<string, LiveTool>()
+    const legacy: LiveTool[] = []
+    for (const e of events) {
+      if (e.kind !== "chat.tool") continue
+      const p = e.payload as LiveTool & { thread_id?: string }
+      if (p?.thread_id !== tid) continue
+      if (p.tool_call_id) byId.set(p.tool_call_id, p)
+      else legacy.push(p)
+    }
+    return { byId, legacy }
   }, [events, tid])
-  const liveToolStart = liveTool?.phase === "start" ? liveTool : null
-  const liveToolDone = liveTool?.phase === "done" ? liveTool : null
+  const liveToolStart = useMemo(() => {
+    let latest: { name?: string; args_head?: string } | null = null
+    for (const p of liveTools.byId.values()) {
+      if (p.phase === "start") latest = p
+    }
+    const legacyStart = [...liveTools.legacy].reverse().find((p) => p.phase === "start")
+    return legacyStart ?? latest
+  }, [liveTools])
   // 传输层 524 重试进度：provider 通过 chat.retry 事件实时上报，避免长时间
   // 只显示「思考中」让人误以为请求已经卡死。
   const liveRetry = useMemo(() => {
@@ -546,11 +556,12 @@ export function AgentWorkbenchView({ pid, meta }: {
                     {it.rows.map((r) => r.kind === "thinking"
                       ? <ThinkingBlock key={r.id} content={r.content} />
                       : <ToolBlock key={r.id} name={r.name} args={r.args}
-                          result={r.result} done={r.done}
-                          live={!r.done && liveToolDone
-                            && liveToolDone.name === r.name
-                            && liveToolDone.args_head === JSON.stringify(r.args ?? {}).slice(0, 300)
-                            ? liveToolDone : null} />)}
+                          result={r.result}
+                          done={r.done || liveTools.byId.get(r.id)?.phase === "done"}
+                          live={liveTools.byId.get(r.id)
+                            ?? liveTools.legacy.find((p) => p.name === r.name
+                              && p.args_head === JSON.stringify(r.args ?? {}).slice(0, 300))
+                            ?? null} />)}
                   </ActivityGroup>
                 )
               })}
@@ -1093,7 +1104,8 @@ function ToolBlock({ name, args, argsHead, result, done, live }: {
 }) {
   const [open, setOpen] = useState(false)
   // ok 三态来源：持久化结果行 → 「[错误]」前缀约定；事件实时态 → 后端结构化 ok
-  const ok = done ? !(result ?? "").startsWith("[错误")
+  const ok = done
+    ? live ? live.ok !== false : !(result ?? "").startsWith("[错误")
     : live ? live.ok !== false : true
   return (
     <div className="rounded-md border border-border/50 bg-card/40">
@@ -1131,7 +1143,7 @@ function ToolBlock({ name, args, argsHead, result, done, live }: {
           )}
           <div className="px-3 pt-1.5 font-mono text-[8px] uppercase tracking-widest text-muted-foreground/70">结果</div>
           <pre className="max-h-56 overflow-auto px-3 pb-2.5 font-mono text-[10px] leading-relaxed whitespace-pre-wrap break-words text-foreground/80">
-            {done ? (result ?? "").slice(0, 6000)
+            {done ? (result ?? live?.result_head ?? "").slice(0, 6000)
               : live?.result_head ? live.result_head.slice(0, 600) : "执行中…"}
           </pre>
         </div>

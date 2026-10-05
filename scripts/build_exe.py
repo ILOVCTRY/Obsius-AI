@@ -83,6 +83,11 @@ def build_exe(python: str) -> None:
 def copy_resources() -> None:
     if not (DIST_APP / "cyberstrike-pro.exe").is_file():
         sys.exit("[build] PyInstaller 未产出 dist/cyberstrike-pro/cyberstrike-pro.exe")
+    # onefile 不再产出 _internal/：清掉旧 onedir 残留，避免分发里混入废弃运行时目录
+    stale_internal = DIST_APP / "_internal"
+    if stale_internal.is_dir():
+        print("[build] 清理 onedir 残留：_internal/")
+        shutil.rmtree(stale_internal, ignore_errors=True)
     for name in ("packs", "tools"):
         print(f"[build] 资源旁挂：{name}/")
         shutil.copytree(ROOT / name, DIST_APP / name,

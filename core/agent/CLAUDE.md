@@ -4,6 +4,10 @@
 
 Agent 创建或补充 finding 时可填摘要、受影响资产、测试环境、操作步骤、验证结果、风险评估及多条 `pocs`（HTTP/Python）；正式漏洞报告须满足存储层报告门禁，历史 evidence POC 保持兼容。
 
+## Team direct execution
+
+`execution.py` 的 `ExecutionContext` 与 `AgentSession.run_team_execution()` 服务新 Team 成员；该入口不设置旧 `current_task_id`，不调用 TaskQueue 认领或完成工具。Team 成员工具面禁用旧任务生命周期工具，但资产、发现、产物、命令仍走原黑板单一写入口、gateway、runtime、ROE 与 approval。旧 `run_session()` 及任务恢复路径保持原语义。
+
 ## 文件
 
 - `session_state.py` — **会话状态单一容器**：`SessionState` dataclass + `reset_for_task()` 单入口复位 + `state_proxy(attr)` 工厂。状态原先散在 `AgentSession`/`ToolDispatcher` 两处、复位点分散，历史多次踩「上一任务残留字段带进新任务」stale bug。两处各以 `xxx = state_proxy("xxx")` 保留**原属性名**（property 双向代理到共享实例），既有读写点与测试断言零改动，**控制流与闸门评估顺序一字未动**。`reset_for_task` 只列原先真被复位的字段；`current_task_id`/`last_progress_step`/`resume_state`/`live_state`/`salvage_ctx`/`stale_alerted` 由各自生命周期路径管理，**不得顺手加进去**。

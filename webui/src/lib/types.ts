@@ -1921,6 +1921,104 @@ export interface ChatMcpServer {
   session_scoped?: boolean
 }
 
+// ---------- Team direct execution（core/team，schema v32；2026-10-06） ----------
+// 独立于旧 tasks 与 coordination DAG 的团队域：Team（roster）→ Run（执行快照）→ 成员会话。
+// 后端行结构直出（team_runs/team_run_members 等），前端只做展示与轻编辑。
+export type TeamStatus =
+  | "draft" | "ready" | "starting" | "running" | "partial_failed"
+  | "cancelling" | "completed" | "cancelled" | "failed"
+export type TeamMemberStatus =
+  | "active" | "pending" | "creating" | "running" | "completed" | "failed" | "cancelled"
+
+export interface TeamMember {
+  id: string
+  team_id: string
+  member_key: string
+  label: string
+  responsibility: string
+  role: string
+  provider: string
+  model: string
+  runtime: string
+  threat_class: string
+  max_steps: number | null
+  status: TeamMemberStatus
+  created_at: string
+  updated_at: string
+}
+
+export interface Team {
+  id: string
+  project_id: string
+  name: string
+  goal_text: string
+  status: TeamStatus
+  created_by: string
+  revision: number
+  config: Record<string, unknown>
+  created_at: string
+  updated_at: string
+  members: TeamMember[]
+}
+
+export interface TeamRunMember {
+  id: string
+  run_id: string
+  member_id: string
+  member_key: string
+  objective: string
+  role: string
+  provider: string
+  model: string
+  runtime: string
+  threat_class: string
+  max_steps: number | null
+  session_id: string | null
+  execution_id: string
+  status: TeamMemberStatus
+  error: string
+  started_at: string | null
+  finished_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface TeamRun {
+  id: string
+  project_id: string
+  team_id: string
+  status: TeamStatus
+  confirmation_revision: string
+  cancel_reason: string
+  created_at: string
+  updated_at: string
+  started_at: string | null
+  finished_at: string | null
+  members: TeamRunMember[]
+}
+
+export interface TeamPreflight {
+  team: Team
+  members: TeamMember[]
+  revision: string
+  safety: { track: string; roe: Record<string, unknown>; autonomy: Record<string, unknown> }
+  capacity: { running: number; requested: number; cap: number }
+  blockers: { code: string; message: string }[]
+}
+
+/** 成员编辑入参（PATCH 整体替换 roster 时逐条提交） */
+export interface TeamMemberInput {
+  member_key: string
+  label?: string
+  responsibility?: string
+  role?: string
+  provider?: string
+  model?: string
+  runtime?: string
+  threat_class?: string
+  max_steps?: number | null
+}
+
 // ---------- 多智能体协调（独立协调域） ----------
 export type CoordinationPlanStatus = "draft" | "active" | "paused" | "completed"
 export type CoordinationTaskStatus = "pending" | "ready" | "running" | "blocked" | "completed" | "failed"

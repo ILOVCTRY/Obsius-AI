@@ -1152,6 +1152,7 @@ class ChatTurn:
                     started = time.perf_counter()
                     self._emit("chat.tool", {
                         "phase": "start", "name": tc.name,
+                        "tool_call_id": tc.id,
                         "args_head": json.dumps(tc.arguments, ensure_ascii=False,
                                                  separators=(",", ":"))[:300]})
                     ok, result = self._dispatch(tc)
@@ -1185,6 +1186,7 @@ class ChatTurn:
                         started = time.perf_counter()
                         self._emit("chat.tool", {
                             "phase": "start", "name": tc.name,
+                            "tool_call_id": tc.id,
                             "args_head": json.dumps(
                                 tc.arguments, ensure_ascii=False,
                                 separators=(",", ":"))[:300]})
@@ -1199,7 +1201,8 @@ class ChatTurn:
                     if tc.id not in parallel_results and tc.id in serial_results:
                         self._emit("chat.tool", {
                             "phase": "done",
-                            "name": tc.name, "args_head": json.dumps(
+                            "name": tc.name, "tool_call_id": tc.id,
+                            "args_head": json.dumps(
                                 tc.arguments, ensure_ascii=False,
                                 separators=(",", ":"))[:300],
                             "result_head": result[:_TOOL_RESULT_EVENT_HEAD],
@@ -1343,6 +1346,7 @@ class ChatTurn:
             started = time.perf_counter()
             self._emit("chat.tool", {
                 "phase": "start", "name": tc.name,
+                "tool_call_id": tc.id,
                 "args_head": json.dumps(tc.arguments, ensure_ascii=False,
                                          separators=(",", ":"))[:300],
                 "parallel": True,
@@ -1353,6 +1357,7 @@ class ChatTurn:
                 ok, result = False, f"[错误] 工具异常: {e}"
             self._emit("chat.tool", {
                 "phase": "done", "name": tc.name,
+                "tool_call_id": tc.id,
                 "args_head": json.dumps(tc.arguments, ensure_ascii=False,
                                          separators=(",", ":"))[:300],
                 "result_head": result[:_TOOL_RESULT_EVENT_HEAD], "ok": ok,
