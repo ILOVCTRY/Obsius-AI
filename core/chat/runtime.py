@@ -97,7 +97,9 @@ _CONTINUE_NUDGE = ("（上一条回复因输出长度上限被截断）请**接�
 
 # 主控一批 tool_calls 中允许同时运行的子专家数。超过上限的调用会在
 # executor 中排队，避免模型一次生成大量 call_expert 时无限创建线程。
-_MAX_PARALLEL_EXPERTS = 4
+# 2026-10-06 由 4 提到 8：主控常一次并发 5+ 个 call_expert，4 会让多出的排队
+# 串行（实测「先跑 4 个再跑第 5 个」）；8 给常见批量留出余量，仍防无限建线程。
+_MAX_PARALLEL_EXPERTS = 8
 
 # ---------- 上下文治理参数（2026-09-30 压缩上下文方案） ----------
 # 背景：单条工具结果可达数百万字符原样入历史 → 跨轮全量回放 → input 突破
@@ -284,9 +286,10 @@ def _classify_error(e: BaseException) -> dict[str, str]:
                                       or "maximum context" in low)):
         cat = "context"
     elif isinstance(e, (TimeoutError, ConnectionError)) \
-            or "网络错误" in msg or "流式传输中断" in msg \
+            or "网络错误" in msg or "网络连接失败" in msg or "流式传输中断" in msg \
             or "connection reset" in low or "connection aborted" in low \
-            or "remote host" in low:
+            or "remote host" in low or "incomplete chunked read" in low \
+            or "peer closed connection" in low:
         cat = "network"
     elif status == 429 or "429" in msg or "rate limit" in low or "限流" in msg:
         cat = "rate_limit"
@@ -1158,6 +1161,15 @@ class ChatTurn:
                     serial_results[tc.id] = (ok, result, started)
                 parallel_results = self._parallel_expert_dispatch(resp.tool_calls)
                 for tc in resp.tool_calls:
+                    # 并行专家：worker 内已完成并**落库**（见 _parallel_expert_dispatch），
+                    # 这里只按原始 tool_call 顺序补 history block——前端靠 2s 轮询
+                    # messages 就能逐个看到完成，不必依赖会滚出窗口的实时事件。
+                    if tc.id in parallel_results:
+                        ok, result = parallel_results[tc.id]
+                        tool_result_blocks.append({
+                            "type": "tool_result", "tool_use_id": tc.id,
+                            "content": result})
+                        continue
                     if aborted or self._aborted():
                         # 中止：为当前及剩余 tool_calls 补落占位结果，保证
                         # assistant(tool_calls) 与 tool 消息配对完整（2026-10-01
@@ -1173,12 +1185,7 @@ class ChatTurn:
                             "content": result})
                         continue
                     t0 = time.perf_counter()
-                    if tc.id in parallel_results:
-                        # 并发 call_expert 已在 worker 中完成；这里按模型原始
-                        # tool_call 顺序持久化结果，保证下一轮历史稳定可重放。
-                        ok, result = parallel_results[tc.id]
-                        started = time.perf_counter()
-                    elif tc.id in serial_results:
+                    if tc.id in serial_results:
                         ok, result, started = serial_results[tc.id]
                     else:
                         # 单个 call_expert 保留原有串行路径；普通工具已在前置阶段执行。
@@ -1197,17 +1204,18 @@ class ChatTurn:
                     tool_result_blocks.append({
                         "type": "tool_result", "tool_use_id": tc.id,
                         "content": result})
-                    if tc.id not in parallel_results and tc.id in serial_results:
-                        self._emit("chat.tool", {
-                            "phase": "done",
-                            "name": tc.name, "tool_call_id": tc.id,
-                            "args_head": json.dumps(
-                                tc.arguments, ensure_ascii=False,
-                                separators=(",", ":"))[:300],
-                            "result_head": result[:_TOOL_RESULT_EVENT_HEAD],
-                            "ok": ok,
-                            "artifact_path": artifact_path,
-                            "duration_s": round(time.perf_counter() - t0, 2)})
+                    # 串行/单专家路径补 done 事件（单专家此前漏发，行会一直「运行中」
+                    # 直到轮末落库；现与并行路径一致，实时即可收尾）。
+                    self._emit("chat.tool", {
+                        "phase": "done",
+                        "name": tc.name, "tool_call_id": tc.id,
+                        "args_head": json.dumps(
+                            tc.arguments, ensure_ascii=False,
+                            separators=(",", ":"))[:300],
+                        "result_head": result[:_TOOL_RESULT_EVENT_HEAD],
+                        "ok": ok,
+                        "artifact_path": artifact_path,
+                        "duration_s": round(time.perf_counter() - t0, 2)})
                 if tool_result_blocks:
                     messages.append({"role": "user",
                                      "content": tool_result_blocks})
@@ -1333,10 +1341,17 @@ class ChatTurn:
         只有至少两个子专家调用时才启用；单个调用保留原有路径，其他工具也不
         参与并行，确保黑板写入工具的调用顺序和既有语义不变。ThreadPoolExecutor
         的 worker 数有上限，超出的子专家在队列中等待。
+
+        **每个专家一完成即持久化工具结果**（不等整批）：前端 2s 轮询 messages
+        即可逐个反映完成态，不再依赖会滚动出窗的 chat.tool 实时事件——5 专家轮
+        里子线程刷屏数万条事件，早期 done 事件会被前端水合窗口（HYDRATE_LIMIT）
+        挤掉，只显部分「执行完成」（2026-10-06 实测）。乱序落库安全：
+        `_load_history` 装载时按 tool_use 顺序重排（`_sanitize_history`）。
         """
         experts = [tc for tc in tool_calls if tc.name == "call_expert"]
         # 混合批次中，非 call_expert 工具仍由主线程按原序执行；所有专家调用
-        # 默认视为相互独立并发。结果稍后按原始 tool_call 顺序落库，保证重放稳定。
+        # 默认视为相互独立并发。结果稍后按原始 tool_call 顺序拼 history block，
+        # 保证重放稳定。
         if len(experts) < 2:
             return {}
         results: dict[str, tuple[bool, str]] = {}
@@ -1354,6 +1369,14 @@ class ChatTurn:
                 ok, result = self._dispatch(tc)
             except Exception as e:  # noqa: BLE001
                 ok, result = False, f"[错误] 工具异常: {e}"
+            # 完成即落库（乱序安全，见方法 docstring）。落库失败不阻断其余专家。
+            result, artifact_path = self._clip_tool_result(result, tc)
+            try:
+                chat_store.append_message(self.bb, self.thread_id, "tool",
+                                          result, tool_use_id=tc.id)
+            except Exception:  # noqa: BLE001
+                log.exception("chat 并行专家结果落库失败 thread=%s id=%s",
+                              self.thread_id, tc.id)
             self._emit("chat.tool", {
                 "phase": "done", "name": tc.name,
                 "tool_call_id": tc.id,
@@ -1361,6 +1384,7 @@ class ChatTurn:
                                          separators=(",", ":"))[:300],
                 "result_head": result[:_TOOL_RESULT_EVENT_HEAD], "ok": ok,
                 "parallel": True,
+                "artifact_path": artifact_path,
                 "duration_s": round(time.perf_counter() - started, 2),
             })
             return tc.id, (ok, result)

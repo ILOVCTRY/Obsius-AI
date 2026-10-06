@@ -37,6 +37,22 @@ def test_classify_network_not_shadowed_by_filesystem():
     assert _classify_error(ConnectionError("reset"))["category"] == "network"
 
 
+def test_classify_network_covers_stream_body_drop():
+    """流式 body 半途断开的两副面孔都须归 network（2026-10-06 事故回归）：
+    ① 裸 httpx.RemoteProtocolError（SDK 迭代不包装 body 异常）；
+    ② OpenAI 路径最终抛的 LLMError「网络连接失败（已重试 N 次）」文案。
+    此前两者都落 unknown「执行异常」。"""
+    import httpx
+
+    from core.llm.provider import LLMError
+
+    assert _classify_error(httpx.RemoteProtocolError(
+        "peer closed connection without sending complete message body "
+        "(incomplete chunked read)"))["category"] == "network"
+    assert _classify_error(LLMError(
+        "网络连接失败（已重试 4 次）: peer closed connection"))["category"] == "network"
+
+
 def test_classify_known_categories_unchanged():
     from core.llm.provider import ContextOverflowError
     assert _classify_error(ContextOverflowError("too long"))["category"] == "context"

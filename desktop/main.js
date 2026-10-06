@@ -1,4 +1,4 @@
-const { app, BrowserWindow, WebContentsView, ipcMain, Menu, session } = require("electron")
+const { app, BrowserWindow, WebContentsView, ipcMain, Menu, session, shell } = require("electron")
 const { spawn } = require("child_process")
 const path = require("path")
 const fs = require("fs")
@@ -7,6 +7,7 @@ const ROOT = path.resolve(__dirname, "..")
 const API_PORT = Number(process.env.CS_API_PORT || 8420)
 const CDP_PORT = Number(process.env.CS_ELECTRON_CDP_PORT || 9222)
 const API_BASE = `http://127.0.0.1:${API_PORT}`
+const UI_URL = process.env.CS_UI_URL || `${API_BASE}/`
 const tabs = new Map()
 let mainWindow = null
 let pythonProcess = null
@@ -15,6 +16,36 @@ let activeId = null
 
 app.commandLine.appendSwitch("remote-debugging-port", String(CDP_PORT))
 app.commandLine.appendSwitch("remote-allow-origins", "*")
+
+// 应用壳只允许停在 UI 自身源。此前无守卫：任何顶层导航（误点外链、拖放、重定向、
+// 页面里第三方库发起的导航）都会把无边框窗口带走——没有地址栏/后退键，用户被永久
+// 卡在空白页，整窗只剩 BrowserWindow 的 backgroundColor（2026-10-06 实测：主窗停在
+// https://adc.zzuli.edu.cn/ 的 39 字节空文档）。外链一律交系统浏览器。
+function uiOrigin() {
+  try { return new URL(UI_URL).origin } catch { return API_BASE }
+}
+
+function guardTopLevelNavigation(webContents) {
+  const allow = uiOrigin()
+  const block = (event, url) => {
+    if (url === "about:blank") return
+    let target
+    try { target = new URL(url) } catch { event.preventDefault(); return }
+    if (target.origin === allow) return
+    event.preventDefault()
+    if (target.protocol === "http:" || target.protocol === "https:") {
+      void shell.openExternal(url)
+    }
+  }
+  webContents.on("will-navigate", block)
+  webContents.on("will-redirect", block)
+  // target="_blank" / window.open：不要在壳里再开一个裸窗（无 preload、无窗控），
+  // 交系统浏览器打开。
+  webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:/i.test(url)) void shell.openExternal(url)
+    return { action: "deny" }
+  })
+}
 
 function sendTabs() {
   if (!mainWindow || mainWindow.isDestroyed()) return
@@ -171,7 +202,8 @@ async function createWindow() {
     autoHideMenuBar: true,
     webPreferences: { preload: path.join(__dirname, "preload.js"), contextIsolation: true, sandbox: false },
   })
-  const url = process.env.CS_UI_URL || `${API_BASE}/`
+  const url = UI_URL
+  guardTopLevelNavigation(mainWindow.webContents)
   await mainWindow.loadURL(url)
   session.defaultSession.on("will-download", (_event, item) => {
     item.setSaveDialogOptions({ defaultPath: path.join(ROOT, "workspaces", "downloads", item.getFilename()) })
@@ -185,7 +217,27 @@ async function createWindow() {
   mainWindow.on("closed", () => { mainWindow = null })
 }
 
+// 单实例锁：两个实例共用同一 Chromium user-data-dir（CDP 端口 / 缓存 / 存储互相踩，
+// 后启动的那个连 remote-debugging-port 都绑不上），且用户看到空白窗时再双击启动只会
+// 再叠一个窗，无从判断该关哪个。第二次启动改为聚焦已有窗口；若它已被导航离开 UI
+// （旧版本无守卫时可能发生），顺手载回 UI 自愈。
+if (!app.requestSingleInstanceLock()) {
+  app.quit()
+} else {
+  app.on("second-instance", () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.focus()
+    try {
+      if (new URL(mainWindow.webContents.getURL()).origin !== uiOrigin()) {
+        void mainWindow.loadURL(UI_URL)
+      }
+    } catch (_) { /* 取 URL 失败不阻断聚焦 */ }
+  })
+}
+
 app.whenReady().then(async () => {
+  if (!app.hasSingleInstanceLock()) return  // 第二实例：已 quit，不再建窗
   // The renderer owns the title bar in the frameless window. Keep the native
   // application menu out of the content area on every desktop platform.
   Menu.setApplicationMenu(null)

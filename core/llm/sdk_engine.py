@@ -148,12 +148,23 @@ class _SdkStream:
 
 
 def _as_conn_error(e: Exception) -> Exception:
-    """SDK 连接/超时异常 → 现有 chat() 重试分支认得的 ConnectionError/TimeoutError。"""
+    """SDK / httpx 连接类异常 → 现有 chat() 重试分支认得的 ConnectionError/TimeoutError。
+
+    除 SDK 包装的 APIConnectionError/APITimeoutError，还须兜住**裸 httpx 传输异常**：
+    流式响应体的读取发生在 SDK 的 `Stream` 迭代内（httpx 的 `send(stream=True)`
+    只读响应头，body 延迟到 `iter_bytes`），SDK 的 `Stream.__stream__` 只 `finally`
+    关流、**不包异常**——对端半途关连接会直接抛
+    `httpx.RemoteProtocolError("peer closed connection without sending complete
+    message body (incomplete chunked read)")`。不在此归类则它裸穿到上层：既绕开
+    连接重试预算，又被错误分类器判成 unknown「执行异常」（2026-10-06 事故）。
+    `httpx.TimeoutException` 是 `httpx.TransportError` 子类，故先判超时。"""
     import anthropic
     import openai
-    if isinstance(e, (anthropic.APITimeoutError, openai.APITimeoutError)):
+    if isinstance(e, (anthropic.APITimeoutError, openai.APITimeoutError,
+                      httpx.TimeoutException)):
         return TimeoutError(str(e))
-    if isinstance(e, (anthropic.APIConnectionError, openai.APIConnectionError)):
+    if isinstance(e, (anthropic.APIConnectionError, openai.APIConnectionError,
+                      httpx.TransportError)):
         return ConnectionError(str(e))
     return e
 

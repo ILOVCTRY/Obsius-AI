@@ -4,6 +4,8 @@
 
 项目仍在持续迭代中。README 介绍当前已经落地的能力、启动方式和开发约定；功能设计的详细说明以 `DESIGN.md` 为准。
 
+![](https://raw.githubusercontent.com/ILOVCTRY/note-gen-image-sync/main/blog-img/2026-10-06/image_1791291566_19a.png)
+
 ## 核心能力
 
 - **项目与工作区**：每个项目拥有独立配置、资产、任务、样本分析包和运行现场。

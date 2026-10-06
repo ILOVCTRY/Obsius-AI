@@ -238,6 +238,36 @@ def test_anthropic_sdk_connection_and_timeout_use_conn_budget(monkeypatch):
         assert calls["n"] == 4
 
 
+def test_anthropic_sdk_stream_body_drop_retries_then_succeeds(monkeypatch):
+    """响应头已到、body 迭代中被对端半途关连接（裸 httpx.RemoteProtocolError
+    "incomplete chunked read"）→ 归类 ConnectionError → 既有连接重试预算生效。
+
+    回归（2026-10-06 事故）：SDK 的 `Stream.__stream__` 只 `finally` 关流、不包装
+    body 读取异常，裸 httpx 异常此前绕过重试，且被错误分类器判成 unknown。"""
+    monkeypatch.setattr("core.llm.anthropic_compat.CONN_BACKOFF", (0, 0, 0))
+    calls = {"n": 0}
+
+    class _Drop(httpx.SyncByteStream):
+        def __iter__(self):
+            raise httpx.RemoteProtocolError(
+                "peer closed connection without sending complete message body "
+                "(incomplete chunked read)")
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                                  stream=_Drop())
+        return _sse(_msg_start(), _block_start(0, {"type": "text", "text": ""}),
+                    _delta(0, {"type": "text_delta", "text": "OK"}),
+                    _msg_delta("end_turn"))
+
+    _wire(monkeypatch, handler)
+    resp = AnthropicCompatProvider("https://fake", "k", "m").chat(
+        [{"role": "user", "content": "hi"}])
+    assert resp.text == "OK" and calls["n"] == 2
+
+
 def test_anthropic_sdk_tool_arg_trailing_junk_salvaged(monkeypatch):
     """工具参数尾部冗余（stop_reason=tool_use 却多发字符）→ raw_decode 抢救。"""
     _wire(monkeypatch, lambda r: _sse(
@@ -450,7 +480,47 @@ def test_openai_sdk_connection_reset_retries(monkeypatch):
     assert calls["n"] == 3
 
 
+def test_openai_sdk_stream_body_drop_retries_then_succeeds(monkeypatch):
+    """同上（OpenAI 兼容路径）：body 迭代中断 → 既有连接重试预算生效。"""
+    from core.llm import openai_compat
+
+    monkeypatch.setattr(openai_compat.time, "sleep", lambda _: None)
+    calls = {"n": 0}
+
+    class _Drop(httpx.SyncByteStream):
+        def __iter__(self):
+            raise httpx.RemoteProtocolError(
+                "peer closed connection without sending complete message body "
+                "(incomplete chunked read)")
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                                  stream=_Drop())
+        return _sse(_openai_chunk({"content": "OK"}, finish="stop"))
+
+    _wire(monkeypatch, handler)
+    assert OpenAICompatProvider("https://fake", "k", "m").chat(
+        [{"role": "user", "content": "hi"}]).text == "OK"
+    assert calls["n"] == 2
+
+
 # ---------- sdk_engine 单元 ----------
+
+def test_sdk_engine_maps_bare_httpx_errors_to_conn_class():
+    """裸 httpx 传输异常也必须归类为连接级——否则绕过 chat() 重试预算，
+    并被 `_classify_error` 判成 unknown。"""
+    assert isinstance(sdk_engine._as_conn_error(
+        httpx.RemoteProtocolError(
+            "peer closed connection without sending complete message body "
+            "(incomplete chunked read)")), ConnectionError)
+    assert isinstance(sdk_engine._as_conn_error(httpx.ConnectError("reset")),
+                      ConnectionError)
+    assert isinstance(sdk_engine._as_conn_error(httpx.ReadTimeout("slow")),
+                      TimeoutError)
+    other = ValueError("无关异常")
+    assert sdk_engine._as_conn_error(other) is other
 
 def test_sdk_engine_error_dict_prefers_json_error_body():
     """APIStatusError → 既有分支消费的 {"error": {...}} 形态。"""

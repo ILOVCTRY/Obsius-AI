@@ -364,6 +364,96 @@ def test_mixed_tool_batch_runs_experts_concurrently_after_serial_tool(tmp_path):
     assert results == {"e1": (True, "done:e1"), "e2": (True, "done:e2")}
 
 
+def test_parallel_experts_above_old_cap_run_concurrently(tmp_path):
+    """回归（2026-10-06）：并发上限由 4 提到 8——主控一次并发 5 个 call_expert
+    不再让第 5 个排队串行（此前「先跑 4 个再跑第 5 个」）。"""
+    bb = Blackboard(str(tmp_path / "bb.db")); _mk_project(bb, "p1")
+    thread = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID)
+    turn = ChatTurn(bb=bb, llm=FakeLLM([]), project_id="p1", thread_id=thread["id"],
+                    packs_root="packs", track="ctf", capabilities=["web"],
+                    mcp_bridge=None, expert_names=["web-solver", "recon"])
+    n = 5
+    barrier = threading.Barrier(n)
+    active = 0; max_active = 0; lock = threading.Lock()
+
+    def fake_dispatch(tc):
+        nonlocal active, max_active
+        with lock:
+            active += 1; max_active = max(max_active, active)
+        try:
+            barrier.wait(timeout=3)   # 5 个必须同时在跑才放行
+            return True, f"done:{tc.id}"
+        finally:
+            with lock: active -= 1
+
+    turn._dispatch = fake_dispatch
+    results = turn._parallel_expert_dispatch([
+        _tc(f"e{i}", "call_expert", {"expert": "recon", "task": f"任务{i}"})
+        for i in range(n)])
+    assert max_active == n
+    assert len(results) == n
+
+
+def test_parallel_expert_results_persisted_on_completion(tmp_path):
+    """回归（2026-10-06）：每个专家一完成即落库工具结果——前端靠 2s 轮询
+    messages 逐个反映完成态，不再依赖会滚出窗口的 chat.tool 实时事件。"""
+    bb = Blackboard(str(tmp_path / "bb.db")); _mk_project(bb, "p1")
+    thread = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID)
+    turn = ChatTurn(bb=bb, llm=FakeLLM([]), project_id="p1", thread_id=thread["id"],
+                    packs_root="packs", track="ctf", capabilities=["web"],
+                    mcp_bridge=None, expert_names=["web-solver", "recon"])
+    turn._dispatch = lambda tc: (True, f"done:{tc.id}")
+    turn._parallel_expert_dispatch([
+        _tc("e1", "call_expert", {"expert": "web-solver", "task": "一"}),
+        _tc("e2", "call_expert", {"expert": "recon", "task": "二"}),
+    ])
+    tool_rows = [m for m in chat_store.list_messages(bb, thread["id"])
+                 if m["role"] == "tool"]
+    assert {m["tool_use_id"]: m["content"] for m in tool_rows} == \
+        {"e1": "done:e1", "e2": "done:e2"}
+
+
+def test_load_history_reorders_out_of_order_tool_results(tmp_path):
+    """乱序落库安全（并行专家完成顺序不定）：`_load_history` 装载时按 tool_use
+    顺序重排，重放不受落库顺序影响。"""
+    bb = Blackboard(str(tmp_path / "bb.db")); _mk_project(bb, "p1")
+    tid = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID)["id"]
+    chat_store.append_message(bb, tid, "assistant", "", tool_calls=[
+        {"id": "a", "name": "call_expert", "args": {}},
+        {"id": "b", "name": "call_expert", "args": {}}])
+    chat_store.append_message(bb, tid, "tool", "res-b", tool_use_id="b")  # b 先完成
+    chat_store.append_message(bb, tid, "tool", "res-a", tool_use_id="a")  # a 后完成
+    turn = ChatTurn(bb=bb, llm=FakeLLM([]), project_id="p1", thread_id=tid,
+                    packs_root="packs", track="ctf", capabilities=["web"],
+                    mcp_bridge=None, expert_names=["recon"])
+    hist = turn._load_history()
+    blocks = [b for m in hist if m["role"] == "user"
+              for b in m["content"] if isinstance(b, dict)
+              and b.get("type") == "tool_result"]
+    assert [b["tool_use_id"] for b in blocks] == ["a", "b"]
+
+
+def test_single_call_expert_emits_done_event(tmp_path):
+    """单专家路径此前漏发 chat.tool done 事件——工具行会一直显示「运行中」直到
+    轮末落库。现与并行路径一致，实时即收尾。"""
+    bb = Blackboard(str(tmp_path / "bb.db")); _mk_project(bb, "p1")
+    llm = FakeLLM([
+        _resp(tool_calls=[_tc("e1", "call_expert", {"expert": "recon", "task": "侦察"})]),
+        _resp(text="完成"),
+    ])
+    thread = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID)
+    turn = ChatTurn(bb=bb, llm=llm, project_id="p1", thread_id=thread["id"],
+                    packs_root="packs", track="pentest", capabilities=["web"],
+                    mcp_bridge=None, expert_names=["recon"])
+    turn._dispatch = lambda tc: (True, "子专家完成摘要")
+    published: list[dict] = []
+    bb.bus.subscribe(published.append)
+    turn.run("委派侦察")
+    phases = [(e["payload"].get("tool_call_id"), e["payload"].get("phase"))
+              for e in published if e["kind"] == "chat.tool"]
+    assert ("e1", "start") in phases and ("e1", "done") in phases
+
+
 def test_call_expert_rejects_skill_name_with_enum_and_hint(tmp_path):
     """技能名当专家名（2026-10-01 复盘）：主控 ctx 同时含技能清单与专家名录，
     模型曾把 recon-asset-enum（技能）当专家传给 call_expert。三层防护断言：
