@@ -806,6 +806,85 @@ def test_chat_history_roles_and_lead_orch_skip(env):
         ("user", "第一问"), ("assistant", "第一答"), ("user", "第二问")]
 
 
+def test_orch_compact_persists_summary_and_trims_history(env):
+    """手动持久压缩（/compact，2026-10-06）：旧 orch.chat 压成摘要落 orch.compact，
+    后续 _chat_history 从「摘要 + 截止之后的近期消息」起跑；历史过短 noop 不烧 LLM。"""
+    bb, project = env
+    pid = project["id"]
+    ids: list[int] = []
+    for i in range(6):  # 6 轮 = 12 条
+        ids.append(bb.append_event(pid, "orch.chat", {"role": "human", "text": f"问{i}"},
+                                   author="human"))
+        ids.append(bb.append_event(pid, "orch.chat", {"role": "orch", "text": f"答{i}"},
+                                   author="orchestrator"))
+    llm = ScriptedLLM([{"text": "## 摘要\n人类要测 X。"}])
+    orch = make_orch(env, llm)
+    res = orch.compact_chat(keep_recent=8)
+    assert res["status"] == "compacted"
+    assert res["before_msgs"] == 12 and res["summarized"] == 4
+    evs = [e for e in bb.recent_events(pid) if e["kind"] == "orch.compact"]
+    assert len(evs) == 1
+    assert evs[0]["payload"]["cutoff_id"] == ids[3]
+
+    # 后续对话轮：摘要前置 + 截止之后的消息（问2…答5）+ 本次提问
+    llm2 = ScriptedLLM([{"text": "新答"}])
+    orch.llm = llm2
+    orch.chat_turn("新问")
+    msgs = llm2.calls[0]["messages"]
+    assert msgs[0]["role"] == "user" and "历史摘要" in msgs[0]["content"]
+    assert msgs[1] == {"role": "assistant", "content": "已读摘要，继续。"}
+    assert msgs[2] == {"role": "user", "content": "问2"}
+    assert msgs[-1] == {"role": "user", "content": "新问"}
+
+    # 过短 noop（新项目，零历史）不烧 LLM
+    pid2 = bb.create_project("空项目", "ctf")["id"]
+    llm3 = ScriptedLLM([])
+    orch2 = Orchestrator(project_id=pid2, bb=bb, llm=llm3,
+                         config=OrchestratorConfig(), packs_root="packs")
+    assert orch2.compact_chat()["status"] == "noop"
+    assert len(llm3.script) == 0
+
+
+def test_orch_context_usage_and_autocompact(env):
+    """指挥上下文用量（/context，2026-10-06）：窗口=供应商 model_context（缺省 256K）；
+    占用取最近编排 llm.usage 的 input（无则估算）；达 85% → 持久压缩落 orch.compact。"""
+    from core.autonomy import record_llm_usage
+    from core.llm.provider import Usage
+    bb, project = env
+    pid = project["id"]
+    llm = ScriptedLLM([{"text": "摘要"}])
+    orch = make_orch(env, llm)
+
+    u = orch.context_usage()
+    assert u["window"] == 256_000 and u["source"] == "estimated"
+    b = u["breakdown"]
+    assert b["system"] + b["tools"] + b["messages"] == u["used"]
+
+    llm.context_tokens = 1000
+    record_llm_usage(bb, pid, Usage(input_tokens=900, output_tokens=3),
+                     source="orchestrator-chat", session_id=None, model="m")
+    u2 = orch.context_usage()
+    assert u2["window"] == 1000 and u2["used"] == 900 and u2["threshold"] == 850
+
+    # 阈值未到 → 不压缩
+    record_llm_usage(bb, pid, Usage(input_tokens=100, output_tokens=1),
+                     source="orchestrator-chat", session_id=None, model="m")
+    orch._maybe_autocompact()
+    assert not [e for e in bb.recent_events(pid) if e["kind"] == "orch.compact"]
+
+    # 达阈值 + 有历史 → 自动压缩
+    for i in range(6):
+        bb.append_event(pid, "orch.chat", {"role": "human", "text": f"问{i}"},
+                        author="human")
+        bb.append_event(pid, "orch.chat", {"role": "orch", "text": f"答{i}"},
+                        author="orchestrator")
+    record_llm_usage(bb, pid, Usage(input_tokens=900, output_tokens=3),
+                     source="orchestrator-chat", session_id=None, model="m")
+    orch._maybe_autocompact()
+    evs = [e for e in bb.recent_events(pid) if e["kind"] == "orch.compact"]
+    assert len(evs) == 1
+
+
 def test_delegation_discipline_injected_both_prompts(env):
     """委托纪律段注入 tick 与对话轮系统提示；提示词不再出现已退役工具名
     publish_task/spawn_session，真实工具名 build_team/execute 在工具段可见。"""

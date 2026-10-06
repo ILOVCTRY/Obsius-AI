@@ -27,6 +27,7 @@ from core.autonomy import record_llm_usage
 from core.blackboard import Blackboard
 from core.blackboard.store import new_id
 from core.llm.provider import assistant_message, tool_results_message
+from core.llm.tokenizer import CHARS_PER_TOKEN, context_window_tokens, get_counter
 from core.runtime.policy import RUNTIME_LEVELS, VALID_THREAT_CLASSES
 from core.skills.experts import expert_exists, list_experts, load_expert
 from core.skills.taxonomy import GENERIC_TASK_TYPE, load_task_types
@@ -281,6 +282,20 @@ CHAT_SYSTEM_PROMPT = """你是项目主代理（指挥），现在处于**对话
 
 # 对话轮 LLM 步上限（插队轮不跑长决策链；发布分批语义不适用——人类在场可连续对话）
 CHAT_MAX_STEPS = 8
+
+# 对话历史手动压缩（/compact，2026-10-06）：与 Agent 侧同精神——旧 orch.chat 消息经
+# LLM 压成一段摘要，后续对话轮从「摘要 + 近期消息」起跑（对话历史原本固定取最近 40
+# 条，长对话下早期关键决策会被挤出窗口；摘要把它们沉淀下来）。
+ORCH_COMPACT_SYSTEM = (
+    "你是项目主代理对话历史压缩器：把指挥与人类的既往对话压缩成一段摘要，供后续"
+    "对话续接。只保留事实与决策：人类原话中的目标/约束**逐字保留**、已确认的方案与"
+    "行动边界、已组建的团队/已下达的执行、待办与未决问题。黑板对象一律引用 id"
+    "（如 find-xxxx、as-xxxx、team-xxxx），不要内联全文。中文输出，Markdown，不要客套。"
+)
+
+# 轮末自动压缩阈值（/context，2026-10-06）：指挥上下文占用达窗口 85% 即在对话轮
+# 结束后持久压缩（与手动 /compact 同语义）。窗口分母 = 供应商 model_context（缺省 256K）。
+ORCH_AUTOCOMPACT_RATIO = 0.85
 
 # 编排器事件窗剔除的纯观测 kind（orch-context-budget，2026-09-27）：
 # llm.usage=流量计费行、llm.thinking.delta=思考流式碎片——对派单决策零信息量，
@@ -1012,11 +1027,30 @@ class Orchestrator:
     def _chat_history(self) -> list[dict[str, Any]]:
         """对话上下文 = events 表 orch.chat 最近 40 条按序组装（单一来源，零新表
         零文件）。human→user / orch→assistant；开头连续的 orch 消息跳过（保证
-        messages 首条是 user）。"""
+        messages 首条是 user）。
+
+        手动压缩（/compact，2026-10-06）：最近一条 orch.compact 事件给出摘要 +
+        截止 event id——只回放 id 之后的消息，摘要作为首条 user 消息前置。"""
+        cutoff, summary = 0, ""
+        row = self.bb.conn.execute(
+            "SELECT payload FROM events WHERE project_id=? AND kind='orch.compact'"
+            " ORDER BY id DESC LIMIT 1", (self.project_id,)).fetchone()
+        if row is not None:
+            try:
+                p = json.loads(row["payload"])
+                cutoff = int(p.get("cutoff_id") or 0)
+                summary = str(p.get("summary") or "").strip()
+            except (ValueError, TypeError):
+                cutoff, summary = 0, ""
         rows = self.bb.conn.execute(
             "SELECT payload FROM events WHERE project_id=? AND kind='orch.chat'"
-            " ORDER BY id DESC LIMIT 40", (self.project_id,)).fetchall()
+            " AND id>? ORDER BY id DESC LIMIT 40",
+            (self.project_id, cutoff)).fetchall()
         out: list[dict[str, Any]] = []
+        if summary:
+            out.append({"role": "user",
+                        "content": f"[历史摘要]（此前对话已压缩；原始记录见事件流）\n{summary}"})
+            out.append({"role": "assistant", "content": "已读摘要，继续。"})
         for r in reversed(rows):
             try:
                 payload = json.loads(r["payload"])
@@ -1030,6 +1064,148 @@ class Orchestrator:
         while out and out[0]["role"] != "user":
             out.pop(0)
         return out
+
+    def _summarize_chat(self, lines: list[str]) -> str:
+        """把「指挥 ↔ 人类」既往对话文本行交 LLM 压成摘要；失败/空返回空串。"""
+        if not lines or self.llm is None:
+            return ""
+        prompt = ("请把以下「指挥 ↔ 人类」的既往对话压缩成摘要（Markdown，中文）：\n"
+                  "1. 人类提出的目标与约束（原话逐字保留）\n"
+                  "2. 已确认的方案与行动边界\n"
+                  "3. 已组建的团队 / 已下达的执行（引用 id）\n"
+                  "4. 待办与未决问题\n\n待压缩对话：\n" + "\n".join(lines))
+        try:
+            resp = self.llm.chat([{"role": "user", "content": prompt}],
+                                 system=ORCH_COMPACT_SYSTEM)
+        except Exception:  # noqa: BLE001 —— 压缩失败不阻断（宁可不压）
+            log.exception("指挥对话历史压缩失败")
+            return ""
+        try:
+            # source 独立（orchestrator-compact）：/context 取"最近占用"时排除摘要调用
+            record_llm_usage(self.bb, self.project_id, resp.usage,
+                             source="orchestrator-compact", session_id=None,
+                             model=getattr(self.llm, "model", ""))
+        except Exception:  # noqa: BLE001
+            log.exception("指挥对话压缩用量记账失败")
+        return "".join(b.get("text", "") for b in (resp.raw or {}).get("content", [])
+                       if isinstance(b, dict) and b.get("type") == "text").strip()
+
+    def compact_chat(self, *, keep_recent: int = 8) -> dict[str, Any]:
+        """手动持久压缩对话历史（/compact，2026-10-06）：把较早的 orch.chat 消息经
+        LLM 压成一段摘要，落 orch.compact 事件（摘要 + 截止 event id）；后续
+        `_chat_history` 从「摘要 + 截止之后的近期消息」起跑。历史过短 noop 不烧
+        LLM；摘要失败/空不落事件（宁可不压不破坏现场）。返回 {status, ...}。"""
+        rows = self.bb.conn.execute(
+            "SELECT id, payload FROM events WHERE project_id=? AND kind='orch.chat'"
+            " ORDER BY id DESC LIMIT 60", (self.project_id,)).fetchall()
+        msgs: list[tuple[int, str, str]] = []
+        for r in reversed(rows):
+            try:
+                payload = json.loads(r["payload"])
+            except ValueError:
+                continue
+            text = str(payload.get("text") or "").strip()
+            if not text:
+                continue
+            role = "user" if payload.get("role") == "human" else "assistant"
+            msgs.append((int(r["id"]), role, text))
+        before = len(msgs)
+        if before <= keep_recent + 2:
+            return {"status": "noop", "reason": "too_short", "before_msgs": before}
+        cut = before - keep_recent
+        old = msgs[:cut]
+        if len(old) < 4:
+            return {"status": "noop", "reason": "too_short", "before_msgs": before}
+        lines = [f"[{'人类' if role == 'user' else '指挥'}] {text}"
+                 for _id, role, text in old]
+        summary = self._summarize_chat(lines)
+        if not summary:
+            return {"status": "error", "reason": "summarize_failed",
+                    "before_msgs": before}
+        cutoff_id = old[-1][0]
+        after = len(msgs) - cut + 2  # 摘要头 2 条 + 近期消息
+        self.bb.append_event(
+            self.project_id, "orch.compact",
+            {"summary": summary, "cutoff_id": cutoff_id, "before_msgs": before,
+             "after_msgs": after, "summarized": len(old)},
+            session_id=None, author="orchestrator")
+        return {"status": "compacted", "before_msgs": before, "after_msgs": after,
+                "summarized": len(old), "summary": summary[:200]}
+
+    # ---------- 上下文用量（/context，2026-10-06） ----------
+
+    def _latest_ctx_input_tokens(self) -> int | None:
+        """最近一次编排 LLM 调用（巡检 tick / 对话轮）的输入占用（token）=
+        input + cache_read + cache_creation。无记录返回 None。"""
+        rows = self.bb.conn.execute(
+            "SELECT payload FROM events WHERE project_id=? AND kind='llm.usage'"
+            " AND author='orchestrator' ORDER BY id DESC LIMIT 20",
+            (self.project_id,)).fetchall()
+        for r in rows:
+            try:
+                p = json.loads(r["payload"])
+            except ValueError:
+                continue
+            if str(p.get("source") or "") not in ("orchestrator", "orchestrator-chat"):
+                continue  # 排除摘要压缩调用（orchestrator-compact）
+            return (int(p.get("input_tokens") or 0)
+                    + int(p.get("cache_read_tokens") or 0)
+                    + int(p.get("cache_creation_tokens") or 0))
+        return None
+
+    def _ctx_breakdown_chars(self) -> tuple[int, int, int]:
+        """(system, tools, messages) 的等价字符数估算（供指挥 /context 分段）。"""
+        sys_chars = 0
+        try:
+            sys_chars = (len(CHAT_SYSTEM_PROMPT) + len(self._overview_for_chat())
+                         + len(self._role_catalog_prompt()) + len(self._goal_section())
+                         + len(self._phase_section()) + len(self._mission_section())
+                         + len(self._persona_section()))
+        except Exception:  # noqa: BLE001 —— 估算失败退 0，不影响主流程
+            log.exception("指挥上下文用量：系统提示估算失败")
+        tools_chars = len(json.dumps(self._orch_tools(), ensure_ascii=False))
+        msgs_chars = get_counter(getattr(self.llm, "model", None)).count_messages(
+            self._chat_history())
+        return sys_chars, tools_chars, msgs_chars
+
+    def context_usage(self) -> dict[str, Any]:
+        """指挥上下文用量快照（/context，2026-10-06）：窗口 = 供应商 model_context
+        （缺省 256K）；占用取最近一次编排 LLM 调用的真实 input（无则估算）。
+        消费方：直播间指挥页签 /context 浮层 + 对话轮末 85% 自动压缩。"""
+        window = context_window_tokens(self.llm)
+        threshold = int(window * ORCH_AUTOCOMPACT_RATIO)
+        sys_chars, tools_chars, msgs_chars = self._ctx_breakdown_chars()
+        est_chars = max(1, sys_chars + tools_chars + msgs_chars)
+        measured = self._latest_ctx_input_tokens()
+        if measured is not None and measured > 0:
+            used, source = measured, "measured"
+        else:
+            used, source = max(1, est_chars // CHARS_PER_TOKEN), "estimated"
+        scale = used / est_chars
+        b_sys = round(sys_chars * scale)
+        b_tools = round(tools_chars * scale)
+        return {
+            "window": window,
+            "used": used,
+            "pct": round(used / window, 4) if window else 0.0,
+            "threshold": threshold,
+            "source": source,
+            "breakdown": {"system": b_sys, "tools": b_tools,
+                          "messages": max(0, used - b_sys - b_tools)},
+        }
+
+    def _maybe_autocompact(self) -> None:
+        """对话轮末自动压缩（/context 阈值，2026-10-06）：一轮结束后若指挥上下文
+        占用 ≥85% 窗口 → 持久压缩（与手动 /compact 同语义）。整段吞异常，不阻断对话。"""
+        try:
+            usage = self.context_usage()
+            if usage["used"] < usage["threshold"]:
+                return
+            res = self.compact_chat()
+            if res.get("status") == "compacted":
+                log.info("指挥轮末自动压缩 used=%s/%s", usage["used"], usage["window"])
+        except Exception:  # noqa: BLE001
+            log.exception("指挥轮末自动压缩失败（忽略）")
 
     @staticmethod
     def _assistant_text(raw: dict) -> str:
@@ -1180,6 +1356,8 @@ class Orchestrator:
                 payload["triggers"] = [t["kind"] for t in wake]
             self.bb.append_event(
                 self.project_id, "orch.chat", payload, author="orchestrator")
+        # 轮末自动压缩（/context 阈值）：上下文占用 ≥85% 窗口 → 持久压缩
+        self._maybe_autocompact()
         return {
             "reply": reply,
             "published": list(self._published),

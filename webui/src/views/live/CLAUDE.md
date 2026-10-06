@@ -23,7 +23,8 @@
   orch 追加，**孤儿 orch 自成一轮不丢**）；**`TEAM_EVENT_KINDS` 集合导出**（`team.created/
   updated/run.started/member.updated/run.finished`），`timelineOf` 把 `orch.chat` 轮与 `team.*`
   团队卡合成时间线（每队一张卡，锚在首次出现处；团队卡优先取实时 `Team`，缺省回落事件快照，
-  流末补列未锚定的队保「打开运行报告」可达）。**2026-10-06 渲染向开窗事件流看齐**（去气泡）：
+  流末补列未锚定的队保「打开运行报告」可达）；`orch.compact`（指挥 `/compact` 手动压缩）
+  落一行 `notice` 分隔提示「🧹 上下文已压缩」。**2026-10-06 渲染向开窗事件流看齐**（去气泡）：
   人类消息平铺 `❯` 一行、编排回复平铺 prose（`MarkdownView` 无 raw HTML）+ 作者·时间靠右小字、
   `tool_trace` 复用 `components/chat/ActivityGroup`（折叠摘要行，展开逐条轨迹）、思考复用
   `ThinkingBlock`、回复挂 `FileCardList`。🔔 主动唤醒徽章（`payload.proactive`，`WAKE_LABELS`

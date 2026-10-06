@@ -20,7 +20,7 @@ import type {
   WritebackItem, XrefData,
   TraceEffect,
   FofaConfig, FofaTestResult, FofaSearchResult, FofaHistoryItem, ImportPreview, ImportSummary,
-  ChatAgent, ChatThread, ChatThreadDetail, ChatMcpServer,
+  ChatAgent, ChatThread, ChatThreadDetail, ChatMcpServer, ContextUsage,
   Team, TeamMemberInput, TeamPreflight, TeamRun,
   SkillResource,
   SamplePackage, SampleTargetAnalysis, SampleTargetAnalyzeResponse, SamplePackageUploadSession, SamplePackagePreview,
@@ -513,6 +513,14 @@ export const api = {
     http<{ job_id: string }>(`/api/projects/${pid}/orchestrator/chat`, {
       method: "POST", body: JSON.stringify({ text }),
     }),
+  // 指挥对话手动压缩（直播间「指挥」页签 /compact，2026-10-06）：旧 orch.chat 压成
+  // 摘要落 orch.compact，后续对话从摘要续起。巡检/对话在跑 → 409。
+  compactOrchChat: (pid: string) =>
+    http<{ status: string; before_msgs?: number; after_msgs?: number; summarized?: number; reason?: string }>(
+      `/api/projects/${pid}/orchestrator/compact`, { method: "POST" }),
+  // 指挥上下文用量快照（指挥页签 /context，2026-10-06）
+  orchContext: (pid: string) =>
+    http<ContextUsage>(`/api/projects/${pid}/orchestrator/context`),
   // M2 goal 闭环：阶段目标确认/清空（GET/PUT /goal）+ M3 拟人身份（PUT persona）
   projectGoal: (pid: string) =>
     http<{ phase_goal: PhaseGoal | null; persona: OrchPersona | null }>(
@@ -555,6 +563,9 @@ export const api = {
   compactSession: (sid: string) =>
     http<{ status: string; before_msgs?: number; after_msgs?: number; summarized?: number; reason?: string }>(
       `/api/sessions/${sid}/compact`, { method: "POST" }),
+  // 上下文用量快照（/context，2026-10-06）：窗口分母=供应商 model_context（缺省 256K）
+  sessionContext: (sid: string) =>
+    http<ContextUsage>(`/api/sessions/${sid}/context`),
   sessionInbox: (sid: string, unread = false) =>
     http<InboxMessage[]>(`/api/sessions/${sid}/inbox${unread ? "?unread=true" : ""}`),
   readSessionInbox: (sid: string, ids?: string[]) =>

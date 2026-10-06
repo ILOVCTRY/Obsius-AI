@@ -32,6 +32,17 @@ from typing import Any, Protocol
 # token → 等价字符数的换算系数（与 apply_context_budget 的 tokens×2 同基准）
 CHARS_PER_TOKEN = 2
 
+# 模型上下文窗口兜底（token）：providers.json `model_context` 未声明时用此值。
+# 与 core/agent 的上下文预算默认同源（apply_context_budget 亦按 256K 推导）。
+DEFAULT_CONTEXT_TOKENS = 256_000
+
+
+def context_window_tokens(llm: Any) -> int:
+    """模型上下文窗口（token，分母）：providers.json `model_context`（实例
+    `context_tokens`）优先，未声明默认 `DEFAULT_CONTEXT_TOKENS`（256K）。
+    消费方：直播间 `/context` 展示与 85% 轮末自动压缩（会话/指挥同源）。"""
+    return int(getattr(llm, "context_tokens", None) or DEFAULT_CONTEXT_TOKENS)
+
 # 每条消息 / 每个工具的固定开销（token）：role 标记、分隔符、协议样板。
 # 取 Anthropic Messages 协议量级；数量级正确即可（相对正文占比很小）。
 _PER_MESSAGE_TOKENS = 4

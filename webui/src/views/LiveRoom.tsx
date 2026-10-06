@@ -13,7 +13,7 @@ import { useEvents } from "@/lib/useEvents"
 import { usePendingApprovals } from "@/lib/usePendingApprovals"
 import { buildStreamItems } from "@/lib/turnStream"
 import { fmtDateTimeMin } from "@/lib/datetime"
-import type { Approval, AttachmentInfo, Asset, Autonomy, BBEvent, DecideApprovalResult, ModelInfo, OrchPersona, OrchProposal, OrchTickResult, PhaseGoal, ProjectUsage, RoleInfo, Session, Team, TeamMemberInput } from "@/lib/types"
+import type { Approval, AttachmentInfo, Asset, Autonomy, BBEvent, ContextUsage, DecideApprovalResult, ModelInfo, OrchPersona, OrchProposal, OrchTickResult, PhaseGoal, ProjectUsage, RoleInfo, Session, Team, TeamMemberInput } from "@/lib/types"
 import { StatusDot, type SessionStatus } from "@/components/StatusDot"
 import { Button } from "@/components/ui/button"
 import { ChatStats } from "@/components/chat/ChatStats"
@@ -44,10 +44,15 @@ type PendingFile = {
 // 单模式——去模式徽章循环，「发任务/指派」语义由 Agent 在对话中自判（run_chat 意图判定升级任务）。
 type InputMode = "note" | "orch"
 
-// 会话态斜杠命令（2026-10-06）：目前仅 /compact——把会话持久对话历史（chat-<sid>.json）
-// 的旧问答对压成摘要重写，后续对话从「摘要 + 最近若干条」续起。选中会话页签时可用。
+// 斜杠命令（2026-10-06）：目前仅 /compact，两态各压各自的持久上下文。
+// 会话态 → 会话持久对话历史（chat-<sid>.json）；编排器态 → 指挥对话历史（orch.chat）。
 const SESSION_SLASH_COMMANDS = [
+  { cmd: "/context", desc: "查看本会话上下文用量（占用 / 窗口）" },
   { cmd: "/compact", desc: "压缩本会话上下文：旧历史压成摘要，后续对话从摘要续起" },
+]
+const ORCH_SLASH_COMMANDS = [
+  { cmd: "/context", desc: "查看指挥上下文用量（占用 / 窗口）" },
+  { cmd: "/compact", desc: "压缩指挥对话上下文：旧历史压成摘要，后续对话从摘要续起" },
 ]
 
 function fmtBytes(n: number): string {
@@ -364,6 +369,8 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
   const [overrides, setOverrides] = useState<Map<number, boolean>>(new Map())
   const [remark, setRemark] = useState("")
   const [jobInfo, setJobInfo] = useState<string | null>(null)
+  // 上下文用量浮层（/context，2026-10-06）：取一次快照，不轮询
+  const [ctxUsage, setCtxUsage] = useState<ContextUsage | null>(null)
   const [spawning, setSpawning] = useState(false)
   const [roles, setRoles] = useState<RoleInfo[]>([])
   const [role, setRole] = useState("_generalist")
@@ -869,13 +876,14 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
   // 摘要重写，后续对话从压缩后历史续起。不走 human_note、不发对话轮。
   const runCompact = async (sid: string) => {
     setRemark("")
+    setJobInfo("正在压缩本会话上下文…")
     try {
       const r = await api.compactSession(sid)
       if (r.status === "compacted") {
         const kept = Math.max(0, (r.after_msgs ?? 0) - 2) // 减摘要头两条
         setJobInfo(`已压缩上下文：${r.before_msgs ?? "?"} 条 → 摘要 + 最近 ${kept} 条（见事件流「🧹 上下文压缩」）`)
       } else if (r.status === "noop") {
-        setJobInfo("当前对话历史较短，无需压缩")
+        setJobInfo("当前对话历史较短，无需压缩（会话持久对话历史仅数条）")
       } else {
         setJobInfo(`上下文压缩失败：${r.reason ?? r.status}`)
       }
@@ -884,6 +892,51 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
         ? "会话正在执行中，稍候再压缩"
         : `上下文压缩失败：${e}`)
     }
+  }
+
+  // 指挥对话历史压缩（编排器态 /compact）：走 orch.compact，巡检/对话在跑 409。
+  const runCompactOrch = async () => {
+    setRemark("")
+    setJobInfo("正在压缩指挥对话上下文…")
+    try {
+      const r = await api.compactOrchChat(pid)
+      if (r.status === "compacted") {
+        const kept = Math.max(0, (r.after_msgs ?? 0) - 2)
+        setJobInfo(`已压缩指挥对话：${r.before_msgs ?? "?"} 条 → 摘要 + 最近 ${kept} 条（见事件流「🧹 上下文压缩」）`)
+      } else if (r.status === "noop") {
+        setJobInfo("指挥对话历史较短，无需压缩")
+      } else {
+        setJobInfo(`指挥对话压缩失败：${r.reason ?? r.status}`)
+      }
+    } catch (e) {
+      setJobInfo(e instanceof ApiError && e.status === 409
+        ? "编排器正在思考（巡检/对话在跑），稍后再压缩"
+        : `指挥对话压缩失败：${e}`)
+    }
+  }
+
+  // 上下文用量快照（/context，2026-10-06）：取一次、不轮询。
+  const runContext = async () => {
+    setRemark("")
+    setJobInfo("正在读取上下文用量…")
+    try {
+      const u = inputMode === "orch"
+        ? await api.orchContext(pid)
+        : (activeSession ? await api.sessionContext(activeSession.id) : null)
+      if (!u) { setJobInfo("请先选中一个会话页签"); return }
+      setCtxUsage(u)
+      setJobInfo(null)
+    } catch (e) {
+      setJobInfo(`读取上下文用量失败：${e}`)
+    }
+  }
+
+  // 斜杠命令分派（两态共用）：/context 看用量、/compact 压各自上下文。
+  const runSlash = (cmd: string) => {
+    if (cmd === "/context") { void runContext(); return }
+    if (cmd !== "/compact") return
+    if (inputMode === "orch") { void runCompactOrch(); return }
+    if (activeSession) void runCompact(activeSession.id)
   }
 
   // 输入框（E8，2026-09-19 附件随发；2026-09-20 对话化改双模式；2026-09-21
@@ -898,8 +951,8 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
     if (uploadingAtt) return
     if (inputMode === "note") {
       if (!activeSession) return
-      // 斜杠命令 /compact：压缩本会话上下文，不发引导（2026-10-06）
-      if (text === "/compact") { void runCompact(activeSession.id); return }
+      // 斜杠命令 /compact、/context：不走引导、不发对话轮（2026-10-06）
+      if (text === "/compact" || text === "/context") { runSlash(text); return }
       if (!text && readyIds.length === 0) return
       const sid = activeSession.id
       setRemark("")
@@ -934,6 +987,7 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
       // 「一次性目标+自动 tick」退役（orchDirective API 留 deprecated），目标
       // 固化走 M2 goal 闭环（对话流顶部「设定阶段目标」）。busy 409 不排队
       //（定稿 #6）：只提示，不禁用输入。
+      if (text === "/compact" || text === "/context") { runSlash(text); return }
       if (!text || orchBusy) return
       setRemark("")
       setOrchBusy(true)
@@ -1001,12 +1055,22 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
 
   const activeSession = sessions.find((s) => s.id === activeTab)
   const activeStatus = activeSession ? tabStatus(activeSession.id) : null
-  // 会话态斜杠命令提示（2026-10-06）：选中会话且输入以 / 开头（无空格）时浮出候选。
-  const slashQuery = inputMode === "note" && activeSession
+  // 斜杠命令提示（2026-10-06）：会话态与编排器态均支持 /compact（各压各自上下文）。
+  const slashQuery = ((inputMode === "note" && !!activeSession) || inputMode === "orch")
     && remark.startsWith("/") && !remark.includes(" ")
     ? remark.slice(1).toLowerCase() : null
-  const sessionSlashCmds = slashQuery === null
-    ? [] : SESSION_SLASH_COMMANDS.filter((c) => c.cmd.slice(1).includes(slashQuery))
+  const slashCmds = slashQuery === null
+    ? [] : (inputMode === "orch" ? ORCH_SLASH_COMMANDS : SESSION_SLASH_COMMANDS)
+      .filter((c) => c.cmd.slice(1).includes(slashQuery))
+  // /context 浮层（复用工作台 .wb-usage-* 视觉）：分段/百分比/阈值线
+  const ctxSegs = ctxUsage ? ([
+    { key: "system", label: "系统提示", tokens: ctxUsage.breakdown.system, cls: "seg-sys" },
+    { key: "tools", label: "工具定义", tokens: ctxUsage.breakdown.tools, cls: "seg-tools" },
+    { key: "messages", label: "会话消息", tokens: ctxUsage.breakdown.messages, cls: "seg-msgs" },
+  ] as const).filter((s) => s.tokens > 0) : []
+  const ctxPct = ctxUsage ? Math.round(ctxUsage.pct * 100) : 0
+  const ctxLevel = ctxUsage ? (ctxUsage.pct >= 0.85 ? "is-high" : ctxUsage.pct >= 0.7 ? "is-warn" : "is-ok") : "is-ok"
+  const ctxFree = ctxUsage ? Math.max(0, ctxUsage.window - ctxUsage.used) : 0
   // 输入行模型徽章（2026-09-19）：当前会话记忆中的模型（无值=后端默认）与发送可用性
   const sessionModelOf = activeSession ? sessionModel[activeSession.id] : undefined
   const uploadingAtt = pendingFiles.some((f) => f.status === "uploading")
@@ -1033,6 +1097,8 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
   useEffect(() => {
     setInputMode(hasSessionCtx ? "note" : "orch")
   }, [hasSessionCtx])
+  // 切页签收起上下文用量浮层（快照随会话/指挥切换失效）
+  useEffect(() => { setCtxUsage(null) }, [activeTab])
 
   // 排队引导条清理（2026-10-06 任务退役后）：会话不再 running = 本轮结束，
   // 收件箱引导随下一轮对话注入，排队提示随之清除。
@@ -1388,6 +1454,51 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
           （+ 附件 / 模式徽章循环 / 模型徽章浮层 / 会话 chips（跑队列·继续·复盘）/ 圆形 ↑ 或 ■ 中断钮）。
           发任务=human 名义 passive 任务；E8 引导会话=human_note 直达选中会话（轮末注入）；指挥编排不支持附件 */}
       <div className="relative p-3">
+        {/* 上下文用量浮层（/context，2026-10-06）：分母=供应商 model_context（缺省 256K），
+            85% 阈值线=轮末自动压缩触发点；复用工作台 .wb-panel/.wb-usage-* 视觉 */}
+        {ctxUsage && (
+          <div className="wb-panel wb-anim mb-2">
+            <div className="wb-panel-inner">
+              <div className="wb-usage-head">
+                <b>上下文用量</b>
+                <span className="wb-thread-meta">
+                  分母 {Math.round(ctxUsage.window / 1024)}K · 85% 自动压缩 {Math.round(ctxUsage.threshold / 1024)}K
+                  {ctxUsage.source === "estimated" ? " · 估算" : ""}
+                </span>
+                <button className="wb-usage-close" title="关闭" onClick={() => setCtxUsage(null)}>
+                  <X size={12} />
+                </button>
+              </div>
+              <div className="wb-usage-head-row">
+                <b className="wb-usage-total">{fmtTokens(ctxUsage.used)} / {Math.round(ctxUsage.window / 1024)}K</b>
+                <span className={cn("wb-usage-pct-big", ctxLevel)}>{ctxPct}%</span>
+              </div>
+              <div className="wb-usage-segs" role="img" aria-label="上下文构成分段条">
+                {ctxSegs.map((s) => (
+                  <i key={s.key} className={s.cls}
+                    style={{ width: `${(s.tokens / ctxUsage.window) * 100}%` }}
+                    title={`${s.label} ${fmtTokens(s.tokens)}（${Math.round((s.tokens / ctxUsage.window) * 100)}%）`} />
+                ))}
+                {ctxFree > 0 && <i className="seg-free" style={{ width: `${(ctxFree / ctxUsage.window) * 100}%` }} title={`剩余 ${fmtTokens(ctxFree)}`} />}
+                <i className="seg-soft" style={{ left: "85%" }} title="85% 自动压缩阈值" />
+              </div>
+              <div className="wb-usage-legend">
+                {ctxSegs.map((s) => (
+                  <div className="wb-usage-li" key={s.key}>
+                    <i className={cn("wb-usage-dot", s.cls)} />
+                    <b className="shrink-0">{s.label}</b>
+                    <span className="wb-usage-num">{fmtTokens(s.tokens)} · {Math.round((s.tokens / ctxUsage.window) * 100)}%</span>
+                  </div>
+                ))}
+                <div className="wb-usage-li">
+                  <i className={cn("wb-usage-dot", "seg-free")} />
+                  <b className="shrink-0">剩余空间</b>
+                  <span className="wb-usage-num">{fmtTokens(ctxFree)} · {Math.max(0, 100 - ctxPct)}%</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
         {/* 输入卡片（2026-09-19 定稿，Claude Code 形态）：圆角白描边、光标进入聚焦发光，
             输入区与底部功能栏之间有细分隔线；外层不再整宽 border-t（卡片自身即边界） */}
         <div className={cn(
@@ -1445,12 +1556,12 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
         )}
         {/* 会话态斜杠命令提示（2026-10-06）：输入以 / 开头时浮出候选（目前仅 /compact），
             点击即执行；Esc 关闭（清空输入）。 */}
-        {sessionSlashCmds.length > 0 && (
+        {slashCmds.length > 0 && (
           <div className="mb-2 rounded-md border border-white/15 bg-card/95 p-1 shadow-lg">
-            {sessionSlashCmds.map((c) => (
+            {slashCmds.map((c) => (
               <button key={c.cmd} type="button"
                       className="flex w-full items-baseline gap-2 rounded px-2 py-1 text-left text-xs hover:bg-accent"
-                      onClick={() => { if (activeSession) void runCompact(activeSession.id) }}>
+                      onClick={() => runSlash(c.cmd)}>
                 <span className="font-mono text-foreground">{c.cmd}</span>
                 <span className="text-muted-foreground">{c.desc}</span>
               </button>
@@ -1471,12 +1582,15 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
                 : "对话：先选中一个会话页签…")}
           onChange={(e) => { setRemark(e.target.value); autoResize() }}
           onKeyDown={(e) => {
-            if (e.key === "Escape" && sessionSlashCmds.length > 0) {
+            if (e.key === "Escape" && slashCmds.length > 0) {
               e.preventDefault(); setRemark(""); return
             }
             if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault()
-              sendRemark()
+              // 斜杠候选开着时回车=执行首个命令（"/com" 也能触发 /compact），
+              // 否则按普通消息发送。
+              if (slashCmds.length > 0) runSlash(slashCmds[0].cmd)
+              else sendRemark()
             }
           }}
           className="max-h-36 min-h-6 w-full resize-none bg-transparent text-sm leading-6 outline-none placeholder:text-muted-foreground"

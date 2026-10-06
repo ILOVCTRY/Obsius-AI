@@ -37,6 +37,8 @@ state_loader 装载持久游标/轮数 → 态势收集（`_stats` + 增量事�
 - 入口 `chat_turn(text)`（API `POST /orchestrator/chat`）：人类消息落 `orch.chat{role:"human", text}`，回复落 `{role:"orch", text, tool_trace}`——对话历史=events 表 orch.chat 单一来源（`_chat_history()` 取最近 40 条）。
 - **循环语义与 tick 不同**：每步 heartbeat 续租 → `llm.chat(tools=ORCH_TOOLS 全闸门同源)` → **无 tool_calls 即 break（纯文本=回答完毕）**，勿回退成 tick 的「催促调工具 continue」（会空转烧轮）；步数上限 `CHAT_MAX_STEPS=8`。
 - **系统提示** `CHAT_SYSTEM_PROMPT`（与 tick 分立）注入 `_goal_section()`（M2 goal，tick 与对话轮同槽）与 `_persona_section()`（M3，**仅对话轮**，persona[:600]）。**插队轮只读边界**：不推进 event_cursor、不计 cycles、不动 last_digest_cycle、不消费 C2 指令、不写 state_saver。
+- **手动持久压缩 `compact_chat()`（/compact，2026-10-06）**：直播间「指挥」页签输入 `/compact`（`POST /orchestrator/compact`，同 tick 租约 busy 409）——较早 orch.chat 消息经 LLM（`ORCH_COMPACT_SYSTEM`）压成摘要落 `orch.compact{summary,cutoff_id,...}` 事件；`_chat_history()` 读最近一条 orch.compact，只回放 `id>cutoff_id` 的消息并前置摘要（原本固定取最近 40 条，长对话下早期决策会被挤出窗口）。历史过短 noop 不烧 LLM；摘要失败/空不落事件。
+- **上下文用量与自动压缩（`/context`，2026-10-06）**：`context_usage()` 返回 `{window,used,pct,threshold,source,breakdown}`——窗口 = `core.llm.tokenizer.context_window_tokens(self.llm)`（`model_context` 优先，缺省 256K）；占用取最近一条**编排** `llm.usage`（source ∈ orchestrator/orchestrator-chat，排除摘要调用 `orchestrator-compact`）的 input；breakdown = system(估算)/tools/messages 归一。`chat_turn` 收尾调 `_maybe_autocompact()`：≥`window×0.85` → `compact_chat()`（吞异常不阻断）。API：`GET /api/projects/{pid}/orchestrator/context`（只读不抢租约）。
 
 ## 分阶段工作流接线（pentest M1+M2）
 

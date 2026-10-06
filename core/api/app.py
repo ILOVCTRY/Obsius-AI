@@ -5112,6 +5112,13 @@ def create_app(
         agent = _ensure_agent(pid, sid)  # 404：不存在/已关窗
         return agent.compact_session_chat()
 
+    @app.get("/api/sessions/{sid}/context")
+    def session_context(sid: str):
+        """会话上下文用量快照（直播间 `/context`，2026-10-06）：窗口分母 = 供应商
+        model_context（缺省 256K），占用 = 最近一次 LLM 调用的真实 input（无则估算）。"""
+        pid = _pid_of_session(sid)
+        return _ensure_agent(pid, sid).context_usage()
+
     @app.post("/api/sessions/{sid}/role")
     def switch_session_role(sid: str, body: SessionRoleIn):
         """会话级换智能体（会话中心化 §4.4，2026-09-25）：会话行身份更新 +
@@ -6286,6 +6293,35 @@ def create_app(
         job_id = app.state.jobs.submit(
             "orchestrator-chat", _run_chat, meta={"project_id": pid})
         return {"job_id": job_id}
+
+    @app.post("/api/projects/{pid}/orchestrator/compact")
+    def orchestrator_compact(pid: str):
+        """手动持久压缩指挥对话历史（直播间「指挥」页签 `/compact`，2026-10-06）：
+        较早 orch.chat 消息经 LLM 压成摘要落 orch.compact 事件，后续对话轮从
+        「摘要 + 近期消息」起跑。与对话轮同租约（巡检/对话在跑 → 409）。"""
+        proj = _project(pid)
+        owner = f"compact-{uuid.uuid4().hex}"
+        try:
+            orch_state.acquire_tick_lease(proj.bb, pid, owner)
+        except orch_state.TickLeaseError as e:
+            raise HTTPException(409, "编排器正在思考（巡检/对话在跑），稍后再压缩") from e
+        try:
+            orch = _build_orchestrator(pid, TickIn(), owner)
+        except HTTPException:
+            orch_state.release_tick_lease(proj.bb, pid, owner)
+            raise
+        try:
+            return orch.compact_chat()
+        finally:
+            orch_state.release_tick_lease(proj.bb, pid, owner)
+
+    @app.get("/api/projects/{pid}/orchestrator/context")
+    def orchestrator_context(pid: str):
+        """指挥上下文用量快照（直播间指挥页签 `/context`，2026-10-06）：只读，
+        不抢租约；窗口 = 供应商 model_context（缺省 256K）。"""
+        _project(pid)
+        orch = _build_orchestrator(pid, TickIn(), f"ctx-{uuid.uuid4().hex}")
+        return orch.context_usage()
 
     @app.get("/api/projects/{pid}/goal")
     def get_project_goal(pid: str):

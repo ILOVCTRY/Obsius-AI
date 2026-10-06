@@ -1602,6 +1602,65 @@ def test_d10_advisor_override_does_not_reach_orchestrator(tmp_path, monkeypatch)
         assert planner.calls and marker.used is False
 
 
+def test_orchestrator_compact_endpoint(tmp_path):
+    """POST /orchestrator/compact（指挥页签 /compact）：历史过短 noop；有历史则旧
+    orch.chat 压成摘要落 orch.compact 事件。"""
+    from test_orchestrator import ScriptedLLM
+    planner = ScriptedLLM([{"text": "## 摘要\n人类要测 X。"}])
+    app = create_app(workspace_root=str(tmp_path / "workspaces"), tools_root=None,
+                     executor_llm=ScriptedLLM([]), planner_llm=planner,
+                     providers_config=str(tmp_path / "providers.json"))
+    with TestClient(app) as c:
+        pid = c.post("/api/projects", json={"name": "指挥压缩", "track": "pentest",
+                                            "capabilities": ["web"]}).json()["id"]
+        # 无对话历史 → noop（同时把项目缓存进 app.state.projects）
+        r = c.post(f"/api/projects/{pid}/orchestrator/compact")
+        assert r.status_code == 200 and r.json()["status"] == "noop"
+        bb = app.state.projects[pid].bb
+        for i in range(6):  # 6 轮 = 12 条
+            bb.append_event(pid, "orch.chat", {"role": "human", "text": f"问{i}"},
+                            author="human")
+            bb.append_event(pid, "orch.chat", {"role": "orch", "text": f"答{i}"},
+                            author="orchestrator")
+        r = c.post(f"/api/projects/{pid}/orchestrator/compact")
+        assert r.status_code == 200 and r.json()["status"] == "compacted"
+        evs = [e for e in bb.recent_events(pid) if e["kind"] == "orch.compact"]
+        assert len(evs) == 1 and evs[0]["payload"]["summarized"] == 4
+
+
+def test_session_context_endpoint(client):
+    """GET /sessions/{sid}/context（/context，2026-10-06）：窗口/占用/阈值/breakdown；
+    未知会话 404。"""
+    pid = _make_project(client)
+    agent = _spawn_test_agent(client, pid)
+    sid = agent.session["id"]
+    r = client.get(f"/api/sessions/{sid}/context")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["window"] == 256_000
+    assert body["threshold"] == int(256_000 * 0.85)
+    assert set(body["breakdown"]) == {"system", "tools", "messages"}
+    assert body["used"] >= 1 and body["source"] in ("measured", "estimated")
+    assert client.get("/api/sessions/sess-nope/context").status_code == 404
+
+
+def test_orchestrator_context_endpoint(tmp_path):
+    """GET /orchestrator/context（指挥页签 /context，2026-10-06）：200 + 结构。"""
+    from test_orchestrator import ScriptedLLM
+    app = create_app(workspace_root=str(tmp_path / "workspaces"), tools_root=None,
+                     executor_llm=ScriptedLLM([]), planner_llm=ScriptedLLM([]),
+                     providers_config=str(tmp_path / "providers.json"))
+    with TestClient(app) as c:
+        pid = c.post("/api/projects", json={"name": "指挥用量", "track": "pentest",
+                                            "capabilities": ["web"]}).json()["id"]
+        r = c.get(f"/api/projects/{pid}/orchestrator/context")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["window"] == 256_000
+        assert set(body["breakdown"]) == {"system", "tools", "messages"}
+        assert body["used"] >= 1
+
+
 def test_llm_providers_crud_and_switch(client):
     """供应商管理 API：脱敏/整表保存/校验；在跑会话动态切换落 llm.switched。"""
     # 初始种子 + 默认 + 脱敏

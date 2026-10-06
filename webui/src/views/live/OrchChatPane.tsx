@@ -44,6 +44,7 @@ export const TEAM_EVENT_KINDS = new Set([
 type TimelineItem =
   | { kind: "turn"; key: number; human: BBEvent | null; orch: BBEvent[] }
   | { kind: "team"; key: string; teamId: string; name: string; status: TeamStatus; memberCount: number }
+  | { kind: "notice"; key: number; label: string }
 
 /** 事件序列 → 时间线：orch.chat 组装成轮（human 开新轮），team.* 落团队卡（每队一张，
  *  锚在首次出现处）。团队卡优先取实时 Team（`teamById`），缺省回落事件载荷快照。 */
@@ -64,6 +65,15 @@ function timelineOf(events: BBEvent[], teamById: Map<string, Team>): TimelineIte
         status: live?.status ?? (typeof p.status === "string" ? p.status as TeamStatus : "draft"),
         memberCount: live ? live.members.length : (typeof p.member_count === "number" ? p.member_count : 0),
       })
+      cur = null
+      continue
+    }
+    if (e.kind === "orch.compact") {
+      // 指挥对话历史手动压缩（/compact，2026-10-06）：流内落一行分隔提示
+      const p = e.payload as { summarized?: unknown } | null
+      const n = typeof p?.summarized === "number" ? p.summarized : null
+      out.push({ kind: "notice", key: e.id,
+                 label: n != null ? `🧹 上下文已压缩（${n} 条旧对话压成摘要）` : "🧹 上下文已压缩" })
       cur = null
       continue
     }
@@ -262,6 +272,10 @@ export function OrchChatPane({ events, busy, persona, pid, teams = [], onEditPer
           <TeamCard key={it.key} name={it.name} status={it.status} memberCount={it.memberCount}
             onOpenReport={() => onOpenTeamReport?.(it.teamId)}
             onConfigure={() => onConfigureTeam?.(it.teamId)} />
+        ) : it.kind === "notice" ? (
+          <div key={it.key} className="py-0.5 text-center font-mono text-[11px] text-muted-foreground/70">
+            {it.label}
+          </div>
         ) : (
           <div key={it.key} className="flex flex-col gap-1.5">
             {it.human && <HumanRow ev={it.human} />}

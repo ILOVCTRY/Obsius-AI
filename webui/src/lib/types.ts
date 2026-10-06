@@ -1714,6 +1714,19 @@ export interface ChatUsage {
   }
 }
 
+/** 上下文用量快照（直播间 /context，2026-10-06；会话与指挥同结构） */
+export interface ContextUsage {
+  /** 窗口分母（token）：供应商 model_context，缺省 256K */
+  window: number
+  /** 当前占用（token）：最近一次 LLM 调用的 input，无则估算 */
+  used: number
+  pct: number
+  /** 85% 自动压缩阈值（token） */
+  threshold: number
+  source: "measured" | "estimated"
+  breakdown: { system: number; tools: number; messages: number }
+}
+
 export interface ChatThreadError {
   category: string          // network / rate_limit / auth / quota / context / bad_request / unknown
   title: string             // 分类标题（如「网络中断」）

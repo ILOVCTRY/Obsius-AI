@@ -38,7 +38,8 @@ from core.autonomy import record_llm_usage
 from core.blackboard import Blackboard
 from core.blackboard.intents import list_intents
 from core.llm.provider import LLMError, assistant_message, tool_results_message
-from core.llm.tokenizer import get_counter
+from core.llm.tokenizer import (CHARS_PER_TOKEN, DEFAULT_CONTEXT_TOKENS,
+                                context_window_tokens, get_counter)
 from core.runtime.gateway import ExecutionGateway
 from core.skills import (
     SkillRegistry,
@@ -111,6 +112,11 @@ _INBOX_SUBSCRIPTIONS: dict[str, tuple[str, ...]] = {
 class _StepInterrupted(Exception):
     """■ 即点即停（2026-09-19）：LLM 调用等待中被人手中断——等待方即刻收到，
     不等响应返回。旁路线程随 HTTP 超时自行结束，结果丢弃。"""
+
+
+# 轮末自动压缩阈值（/context，2026-10-06）：上下文占用达窗口 85% 即在一轮结束后
+# 持久压缩（与手动 /compact 同语义）。窗口分母 = 供应商 model_context（缺省 256K）。
+_CTX_AUTOCOMPACT_RATIO = 0.85
 
 STRICT_PROMPT_TAIL = """
 ## 工具纪律（硬规则）
@@ -228,7 +234,8 @@ class AgentConfig:
 # 未声明 model_context 的模型假定上下文（token）。当前主力模型（GLM-5.3-Flash /
 # deepseek-v4-flash / ark-code-latest）窗口 ≥256k；配小了会频繁触发摘要压缩
 # （每次烧一步 LLM 调用还丢细节），宁可宽——真超窗由供应商报错兜底。
-DEFAULT_MODEL_CONTEXT_TOKENS = 256_000
+# 单一来源：与 core/llm/tokenizer.DEFAULT_CONTEXT_TOKENS 同值（`/context` 分母同源）。
+DEFAULT_MODEL_CONTEXT_TOKENS = DEFAULT_CONTEXT_TOKENS
 
 
 def apply_context_budget(config: AgentConfig, llm) -> None:
@@ -1239,6 +1246,8 @@ class AgentSession:
             # 问答对回写会话历史（下轮对话/重启后仍带全上下文）；本轮带工具的
             # 中间步不回写（只留问答对）。
             self._append_chat_to_session(parts, final_text)
+        # 轮末自动压缩（/context 阈值，2026-10-06）：上下文占用 ≥85% 窗口 → 持久压缩
+        self._maybe_autocompact()
         return final_text
 
     def _load_session_chat(self) -> list[dict[str, Any]]:
@@ -1285,7 +1294,8 @@ class AgentSession:
         except Exception:  # noqa: BLE001
             log.exception("会话对话历史回写失败（会话 %s）", self.session["id"])
 
-    def compact_session_chat(self, *, keep_recent: int = 8) -> dict[str, Any]:
+    def compact_session_chat(self, *, keep_recent: int = 8,
+                             manual: bool = True) -> dict[str, Any]:
         """手动持久压缩会话对话历史（直播间 `/compact`，2026-10-06）：把
         `chat-<sid>.json` 的旧问答对经 LLM 按九要素压成摘要，文件重写为
         「摘要头 + 最近 keep_recent 条」，后续对话轮从压缩后的历史起跑。
@@ -1345,11 +1355,87 @@ class AgentSession:
             self.project_id, "llm.compact",
             {"before_msgs": before, "after_msgs": len(new_messages),
              "summarized": len(old), "chars_before": chars_before,
-             "chars_after": self._count_tokens(new_messages), "manual": True},
+             "chars_after": self._count_tokens(new_messages), "manual": manual},
             session_id=self.session["id"], author=self.session["id"])
         return {"status": "compacted", "before_msgs": before,
                 "after_msgs": len(new_messages), "summarized": len(old),
                 "summary": summary[:200]}
+
+    # ---------- 上下文用量（/context，2026-10-06） ----------
+
+    def _latest_ctx_input_tokens(self) -> int | None:
+        """本会话最近一次「对话/执行」LLM 调用的输入占用（token）= input + cache_read
+        + cache_creation。排除摘要压缩调用（source=agent-compact，其 input 是旧历史
+        文本、不代表当前上下文占用）。无记录返回 None。"""
+        rows = self.bb.conn.execute(
+            "SELECT payload FROM events WHERE project_id=? AND kind='llm.usage'"
+            " AND session_id=? ORDER BY id DESC LIMIT 20",
+            (self.project_id, self.session["id"])).fetchall()
+        for r in rows:
+            try:
+                p = json.loads(r["payload"])
+            except ValueError:
+                continue
+            if str(p.get("source") or "") == "agent-compact":
+                continue
+            return (int(p.get("input_tokens") or 0)
+                    + int(p.get("cache_read_tokens") or 0)
+                    + int(p.get("cache_creation_tokens") or 0))
+        return None
+
+    def _ctx_breakdown_chars(self) -> tuple[int, int, int]:
+        """(system, tools, messages) 三块的**等价字符数**估算（供 /context 分段）。"""
+        sys_chars = 0
+        try:
+            blocks = self.build_system_blocks("", "")
+            sys_chars = sum(len(str(b.get("text") or "")) for b in blocks
+                            if isinstance(b, dict))
+        except Exception:  # noqa: BLE001 —— 估算失败退 0，不影响主流程
+            log.exception("上下文用量：系统提示估算失败")
+        tools_chars = len(json.dumps(CHAT_TOOLS, ensure_ascii=False))
+        msgs_chars = self._count_tokens(self._load_session_chat())
+        return sys_chars, tools_chars, msgs_chars
+
+    def context_usage(self) -> dict[str, Any]:
+        """上下文用量快照（/context，2026-10-06）：窗口分母 = 供应商 model_context
+        （缺省 256K）；占用优先取最近一次 LLM 调用的真实 input（无则按持久历史 +
+        系统 + 工具估算）。三块 breakdown 按真值归一（同 core/chat/runtime.py 口径）。
+        消费方：直播间 /context 浮层 + 轮末 85% 自动压缩判据。"""
+        window = context_window_tokens(self.llm)
+        threshold = int(window * _CTX_AUTOCOMPACT_RATIO)
+        sys_chars, tools_chars, msgs_chars = self._ctx_breakdown_chars()
+        est_chars = max(1, sys_chars + tools_chars + msgs_chars)
+        measured = self._latest_ctx_input_tokens()
+        if measured is not None and measured > 0:
+            used, source = measured, "measured"
+        else:
+            used, source = max(1, est_chars // CHARS_PER_TOKEN), "estimated"
+        scale = used / est_chars
+        b_sys = round(sys_chars * scale)
+        b_tools = round(tools_chars * scale)
+        return {
+            "window": window,
+            "used": used,
+            "pct": round(used / window, 4) if window else 0.0,
+            "threshold": threshold,
+            "source": source,
+            "breakdown": {"system": b_sys, "tools": b_tools,
+                          "messages": max(0, used - b_sys - b_tools)},
+        }
+
+    def _maybe_autocompact(self) -> None:
+        """轮末自动压缩（/context 阈值，2026-10-06）：一轮正常结束后若上下文占用
+        ≥85% 窗口 → 持久压缩（与手动 /compact 同语义）。整段吞异常，绝不阻断对话轮。"""
+        try:
+            usage = self.context_usage()
+            if usage["used"] < usage["threshold"]:
+                return
+            res = self.compact_session_chat(manual=False)
+            if res.get("status") == "compacted":
+                log.info("轮末自动压缩 thread=%s used=%s/%s", self.session["id"],
+                         usage["used"], usage["window"])
+        except Exception:  # noqa: BLE001
+            log.exception("轮末自动压缩失败（忽略）")
 
     def _chat_interruptible(self, messages: list[dict[str, Any]],
                             *, system: str | list[dict[str, Any]],
@@ -2499,7 +2585,9 @@ class AgentSession:
         except Exception:  # noqa: BLE001 —— 压缩失败不影响主循环
             log.exception("上下文摘要压缩失败（跳过本次）")
             return ""
-        self._record_usage(resp, source="agent", llm_obj=self.llm)
+        # source 独立（agent-compact）：/context 取"最近上下文占用"时排除摘要调用的
+        # input（那是旧历史文本，不代表当前窗口占用）
+        self._record_usage(resp, source="agent-compact", llm_obj=self.llm)
         return "".join(b.get("text", "") for b in resp.raw.get("content", [])
                        if isinstance(b, dict) and b.get("type") == "text").strip()
 

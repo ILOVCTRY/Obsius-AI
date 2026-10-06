@@ -107,6 +107,9 @@ export function eventStyle(kind: string, payload?: Record<string, unknown>): Eve
   if (kind === "llm.compact")
     // G3 上下文摘要压缩（2026-09-19）：N 条旧历史压成摘要；展开看前后规模
     return { label: "🧹 上下文压缩", className: "text-muted-foreground", defaultOpen: false }
+  if (kind === "orch.compact")
+    // 指挥对话历史手动压缩（/compact，2026-10-06）：旧 orch.chat 压成摘要落事件
+    return { label: "🧹 上下文压缩", className: "text-muted-foreground", defaultOpen: false }
   if (kind === "proposal.created") return { label: "📝 变更提案", className: "text-(--status-approval)", defaultOpen: true }
   if (kind === "proposal.applied") return { label: "✅ 提案应用", className: "text-primary", defaultOpen: true }
   if (kind === "proposal.rejected") return { label: "⊘ 提案拒绝", className: "text-muted-foreground", defaultOpen: false }

@@ -792,6 +792,69 @@ def test_compact_session_chat_rewrites_persistent_history(env):
         "status": "noop", "reason": "empty", "before_msgs": 0}
 
 
+def test_context_usage_and_autocompact(env):
+    """上下文用量（/context，2026-10-06）：窗口分母=供应商 model_context（缺省 256K）；
+    占用优先取最近 llm.usage 的真实 input（无则估算）；达 85% 阈值 → 持久自动压缩。"""
+    from core.autonomy import record_llm_usage
+    from core.llm.provider import Usage
+    bb, project, gw, tmp_path = env
+    artifacts = tmp_path / "artifacts"
+    llm = ScriptedLLM([{"text": "摘要正文"}])
+    agent = make_agent(env, llm, artifacts_dir=artifacts)
+    sid = agent.session["id"]
+
+    # 无 llm.usage → estimated；窗口默认 256K；breakdown 三块之和 == used
+    u = agent.context_usage()
+    assert u["window"] == 256_000 and u["source"] == "estimated"
+    assert u["threshold"] == int(256_000 * 0.85)
+    b = u["breakdown"]
+    assert b["system"] + b["tools"] + b["messages"] == u["used"]
+
+    # 供应商覆写窗口
+    llm.context_tokens = 1000
+    assert agent.context_usage()["window"] == 1000
+    assert agent.context_usage()["threshold"] == 850
+
+    # 落一条真实 input → measured
+    record_llm_usage(bb, project["id"], Usage(input_tokens=900, output_tokens=5),
+                     source="agent", session_id=sid, model="m")
+    u2 = agent.context_usage()
+    assert u2["source"] == "measured" and u2["used"] == 900
+
+    # 阈值未到 → 不压缩
+    record_llm_usage(bb, project["id"], Usage(input_tokens=100, output_tokens=1),
+                     source="agent", session_id=sid, model="m")
+    agent._maybe_autocompact()
+    assert not [e for e in bb.recent_events(project["id"]) if e["kind"] == "llm.compact"]
+
+    # 达阈值 + 有历史 → 自动压缩（manual=False）
+    path = session_chat_path(artifacts, sid)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    msgs: list[dict] = []
+    for i in range(10):
+        msgs.append({"role": "user", "content": f"q{i}"})
+        msgs.append({"role": "assistant", "content": f"a{i}"})
+    path.write_text(json.dumps({"session_id": sid, "messages": msgs},
+                               ensure_ascii=False), encoding="utf-8")
+    record_llm_usage(bb, project["id"], Usage(input_tokens=900, output_tokens=5),
+                     source="agent", session_id=sid, model="m")
+    agent._maybe_autocompact()
+    evs = [e for e in bb.recent_events(project["id"]) if e["kind"] == "llm.compact"]
+    assert len(evs) == 1 and evs[0]["payload"]["manual"] is False
+
+
+def test_run_chat_invokes_autocompact(env, monkeypatch):
+    """对话轮正常收尾调用轮末自动压缩钩子（/context 阈值，2026-10-06）。"""
+    bb, project, gw, _ = env
+    llm = ScriptedLLM([{"text": "回复"}])
+    agent = make_agent(env, llm)
+    called: list[int] = []
+    monkeypatch.setattr(agent, "_maybe_autocompact", lambda: called.append(1))
+    bb.post_human_note(project["id"], agent.session["id"], "在吗")
+    assert agent.run_chat() == "回复"
+    assert called == [1]
+
+
 # ---------- 思考事件（DESIGN.md §12：llm.thinking 折叠摘要 + 展开全文） ----------
 
 def test_thinking_lands_in_event_stream(env):
