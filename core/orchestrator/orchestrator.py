@@ -21,63 +21,52 @@ from pathlib import Path
 from typing import Any, Callable
 
 from core import phases
+from core.agent.execution import ExecutionContext
 from core.coverage import coverage_report, effective_status_map
 from core.autonomy import record_llm_usage
-from core.blackboard import Blackboard, TaskQueue
+from core.blackboard import Blackboard
+from core.blackboard.store import new_id
 from core.llm.provider import assistant_message, tool_results_message
-from core.coordination import CoordinationStore  # M3：计划 DAG 层（编排器消费协调域）
-from core.blackboard.tasks import _check_task_type, dedup_fp, target_keys_of, MAX_TASKS_PER_TARGET
+from core.runtime.policy import RUNTIME_LEVELS, VALID_THREAT_CLASSES
 from core.skills.experts import expert_exists, list_experts, load_expert
 from core.skills.taxonomy import GENERIC_TASK_TYPE, load_task_types
+from core.team.store import TeamStore  # 指挥组建队伍（Team/Member/Run direct execution）
 
 log = logging.getLogger(__name__)
 
 
-ORCH_SYSTEM_PROMPT = """你是项目主代理（Orchestrator），职责是监控、派生、开窗、汇总。
-你不亲自执行任何命令或分析——脏活全部发布成任务，由 Agent 会话认领执行。
+ORCH_SYSTEM_PROMPT = """你是项目主代理（指挥）：**组建队伍**（build_team）与统筹全局是你的核心
+职责，也可**亲自执行**（execute）小范围验证/补刀；大块并行工作交给团队子代理或委派会话执行。
 
 ## 本轮态势
 {overview}
 {role_catalog}
 {autonomy_notice}{goal_section}{phase_section}{mission_section}{campaign_section}
 ## 可用工具
+- build_team：**组建 Agent 团队（你的核心职责）**——给团队名/共享目标/成员名册（成员 role 从本轨专家池选，留空=按职责现场定义的动态成员）。创建后是 draft，需人类在「指挥」页查看并配置（preflight + 四项确认）后才启动；本工具只登记 roster，不启动、不派单。
+- execute：**指挥亲自执行**一件工作（自己下场，完整 Agent 工具面：命令/文件/黑板/知识库/浏览器…），产出落黑板。适合小范围验证/补刀/需要你自己判断的活；大块并行工作请 build_team 组队。受活跃窗上限约束。
 - delegate：发布委托（像人类给 AI 发消息让他干活）。task_type 必须是场景轨 task_types.yaml 已注册类型（未注册会被拒收——拼错的类型会让任务饿死），决定哪些角色能认领（先看角色目录与已有会话）；noise_budget 缺省取该类型注册表默认值；会产生噪声的动作（主动探测/执行样本）必须给 conflict_keys；委托若以某发现为依据（如「验证 find-x」），把该发现 id 填 refs——该发现事后被推翻时，执行者会立刻收到强制自评通知。默认由系统选窗：优先复用空闲同角色窗，无合适窗则开新窗；force_new_window=true 强制新窗、target_session 指定窗；受角色白名单 {allowed_roles} 与活跃窗上限 {max_sessions} 约束。长探测/扫描类 objective 写明建议超时（run_cmd 默认 120s，C3）。
 - cancel_task / requeue_task：生命周期收编（见纪律 9）。
 - write_digest：写项目简报（给人类看的全局摘要：进展/发现/风险/下一步）。
 - done：结束本轮协调。
 - 只读查询四工具（task_detail / bb_overview / budget_status / session_list）：
   用于核对与决策——对执行者结论存疑时先 task_detail 拉全文再判断，不要只凭
-  态势摘要下结论；**它们不用于替代派单执行**（你仍不亲自干活，查询是为了
-  派得更准、验收得更实）。
+  态势摘要下结论；查询是为了派得更准、验收得更实。
 
 ## 主代理纪律（硬规则）
-1. 不执行命令、不写分析结论——一切经任务派发。
-2. 遵循「分析-分解-分派」：复杂目标先在心里拆成自足的小任务，再按角色目录对号分派；
-   delegate 用 **role 参数**结构化指定建议认领角色（本轨已注册角色 id；留空=不限，
-   任务即窗口机制下，带角色的任务建专属执行窗时按该角色装配，一窗一任务），并给初始
-   priority（0-9，整数；小者优先：被依赖的前置/为他人解阻塞的任务给 0-2，常规任务 3-5，
-   可延后的 6-9）。
-   注意同目标防碎闸：同一目标（IP/域名等）在队（open+claimed）任务达 {max_tasks_per_target} 个
-   会被拒收，发新任务前先看态势里的 targets 分布、消化存量。
-3. 新发现 severity>=medium 且 unverified 的，应派生验证任务，别让它烂在黑板里
-   （category=intel 的有效发现/提示类除外——它们不是漏洞，无需验证复现）。
-4. 开窗被拒（白名单/上限）即改道：复用现有会话或调整任务。
+1. 优先组建队伍（build_team）把大块/多角色工作分派出去；小范围验证/补刀/需要你亲自判断时 execute。团队子代理是独立会话，看不到你的态势与对话——成员的 responsibility 必须自包含。
+2. 遵循「分析-分解-分派」：复杂目标先拆成自足的小任务，再按角色目录对号编入团队；
+   每位成员写清目标/依据/完成定义与建议 runtime；组队受角色白名单 {allowed_roles} 与
+   会话上限 {max_sessions} 约束。
+3. 新发现 severity>=medium 且 unverified 的，应编入验证团队或亲自 execute 验证，别让它
+   烂在黑板里（category=intel 的有效发现/提示类除外——它们不是漏洞，无需验证复现）。
+4. 组队/执行被拒（白名单/上限）即改道：缩编、换角色或先收尾。
 5. 距上次简报 >= {digest_every} 轮时，本轮必须 write_digest。
 6. 决策完毕调用 done。
-7. 任务拆解与分批（C1）：大目标（如全资产侦察）拆解为自足子任务——先发布父任务拿到
-   task_id，再发布子任务并把 parent_id 指向它（**深度 1 层**：子任务不可再拆）；每轮
-   发布 ≤{max_publish_per_tick} 个（分批 3-5 个/轮，按建议角色与优先级）；队列空退后
-   下一轮 tick 续批（态势里有 uncovered 资产清单可对照发批）。长探测/扫描类 objective
-   写明建议超时秒数（run_cmd 默认 120s，不提醒会被截杀，C3）。
+7. 团队创建后是 draft：人类在「指挥」页查看并配置、确认后才启动——你只负责组建与统筹，
+   不要假设它已在跑；长探测/扫描类责任写明建议超时（run_cmd 默认 120s，不提醒会被截杀）。
 8. 收敛判据（轨级行为语义）：mission 判据全部达成、或资产穷尽（uncovered=0 且无可推进
    发现）才 done——不要因为单轮零产出就提前收摊；对照上方行动边界段的判据清单逐条评估。
-9. 生命周期收编（M4）：方向变更/目标已达成/前提失效 → cancel_task（reason 写清；
-   在跑窗自动打断）；预算恢复/前提补齐/人类已解决挂起 → requeue_task 放回原任务
-   （履历保留）——**不要取消后重发同款任务**（丢执行履历且污染发布去重）。
-10. 计划执行（M3）：态势含 active 计划（plan 段）时，先派 status=ready 的节点
-   （delegate 带 plan_node_id 绑定，role 用节点上的建议角色）；只派 ready，勿碰
-   running/completed/failed。节点任务完成会自动唤醒你续派其依赖节点——收到
-   「计划节点就绪」唤醒后照 plan 段逐节点派即可。
 {delegation_discipline}"""
 
 
@@ -93,7 +82,7 @@ delegate 发布即自动建专属待命窗（待命不耗 LLM），并自动提�
 
 # L0（全手动）系统提示追加段（批 6）：publish/spawn 只产提案，不写实体
 L0_AUTONOMY_NOTICE = """## 自主档位 L0（全手动·提案模式）
-你不能直接派任务或开窗：delegate / cancel_task / requeue_task
+你不能直接建队、执行或派任务：build_team / execute / delegate / cancel_task / requeue_task
 只生成人类提案（orch.proposed 事件），
 人类在事件流逐条「采纳」后才真正落地（任务以人类名义入队、窗由人类开）。
 - 提案不消耗任何预算、不占会话上限，但参数校验照跑：task_type 必须是本轨注册类型、
@@ -157,129 +146,48 @@ def mission_boundary_lines(track: str | None, config: dict | None) -> list[str]:
 
 ORCH_TOOLS: list[dict[str, Any]] = [
     {
-        "name": "delegate",
-        "description": "向某个会话窗委派一件委托（像人类给 AI 发一条消息让他干活）。"
-                       "默认由系统选窗：优先复用「空闲且干过同类委托/与目标有关联"
-                       "上下文」的窗，无合适窗则开新窗；也可用 target_session 指定"
-                       "窗、force_new_window=true 强制开窗。窗空闲 → 委托进窗后起跑；"
-                       "窗忙 → 进该窗队列，当前活干完自动接下一件。长探测/扫描/"
-                       "口令喷洒类 objective 请写明建议超时（如「nmap 全端口建议 "
-                       "run_cmd timeout 传 600」）——run_cmd 默认 120s，长命令不提醒"
-                       "会被截杀（C3）。",
+        "name": "build_team",
+        "description": "组建一支 Agent 团队（Team）——指挥的核心职责。给出团队名、共享目标与"
+                       "成员名册：成员的 role 从本轨专家池选（留空=按职责现场定义的动态成员）。"
+                       "创建后团队处于 draft（未启动、未派单），需人类在「指挥」页查看并配置"
+                       "（preflight + 四项确认）后才启动执行。适合需要多角色协作/并行的大块目标。",
         "input_schema": {
             "type": "object",
             "properties": {
-                "objective": {"type": "string", "description": "委托内容（自包含）"},
-                "task_type": {"type": "string",
-                              "description": "委托类型，必须是场景轨 task_types.yaml "
-                                             "注册表内的合法类型",
-                              "default": "generic"},
-                "role": {"type": "string",
-                         "description": "建议执行专家（可选）：本轨 experts/ 池内专家 "
-                                        "id；选窗时优先匹配该专家的窗，开窗时按它装配；"
-                                        "留空=不限。执行者中途可被人类换人接手"},
-                "target_session": {"type": "string",
-                                   "description": "指定委派给已有会话窗（窗 id）；不传="
-                                                  "系统按复用规则选窗/开窗"},
-                "force_new_window": {"type": "boolean",
-                                     "description": "true=不复用窗、强制开新窗",
-                                     "default": False},
-                "scope": {"type": "string", "description": "限定范围（如目标资产）"},
-                "noise_budget": {"type": "string", "enum": ["passive", "low", "medium", "high"],
-                                 "description": "缺省取 task_types.yaml 中该类型的默认噪声预算"},
-                "conflict_keys": {"type": "array", "items": {"type": "string"},
-                                  "description": "非 passive 必填，如 [\"ip:1.2.3.4\"]；"
-                                                 "跨窗 active 委托键交集自动排队等待"},
-                "priority": {"type": "integer", "description": "0 最高，2 默认"},
-                "refs": {"type": "array", "items": {"type": "string"},
-                         "description": "本委托依据的既有发现 id（find- 前缀）；依据"
-                                        "被推翻时执行者会收到强制自评通知。正文里直接"
-                                        "写 find-id 也会被服务端自动抽取，显式填写更准"},
-                "plan_node_id": {"type": "string",
-                                 "description": "可选：绑定到某计划节点（plan_work 返回的 "
-                                                "node_id）。派单前校验该节点依赖已完成；成功后"
-                                                "节点置执行中、随任务终态自动同步"},
+                "name": {"type": "string", "description": "团队名称（如「外网打点小队」）"},
+                "goal_text": {"type": "string", "description": "团队共享目标（自包含，写清要达成什么）"},
+                "members": {
+                    "type": "array", "minItems": 1,
+                    "description": "成员名册（至少一位）",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "member_key": {"type": "string", "description": "成员标识（团队内唯一，如 recon/exploit）"},
+                            "label": {"type": "string", "description": "成员显示名（如「侦察手」）"},
+                            "responsibility": {"type": "string", "description": "该成员职责/执行目标（自包含，执行者看不到团队对话）"},
+                            "role": {"type": "string", "description": "执行专家 id（本轨 experts/ 池内）；留空=按 responsibility 现场定义的动态成员"},
+                            "runtime": {"type": "string", "enum": ["", "host", "wsl", "docker", "sandbox"], "description": "运行环境（缺省 host）"},
+                            "threat_class": {"type": "string", "enum": ["trusted", "untrusted", "malware_live", "unknown"], "description": "威胁等级（缺省 trusted）"},
+                            "max_steps": {"type": "integer", "description": "该成员步数预算（可选）"},
+                        },
+                        "required": ["member_key", "responsibility"],
+                    },
+                },
+            },
+            "required": ["name", "members"],
+        },
+    },
+    {
+        "name": "execute",
+        "description": "指挥亲自执行一件工作（自己下场）：以完整 Agent 工具面（命令/文件/黑板/"
+                       "知识库/浏览器…）按 objective 执行，产出落黑板。适合小范围验证、补刀、"
+                       "需要指挥自己判断的活；大块并行工作请用 build_team 组队。受活跃窗上限约束。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "objective": {"type": "string", "description": "执行目标（自包含，写清要做什么、产出什么）"},
             },
             "required": ["objective"],
-        },
-    },
-    {
-        "name": "plan_work",
-        "description": "登记一张多任务计划（跨任务依赖 DAG）。用 nodes 一次给出全部节点，"
-                       "depends_on 填「前置节点的下标（从 0 起）或标题」——系统拓扑排序后建图。"
-                       "计划只是「打算怎么做」的登记（不派单、不开窗、零执行）；真正执行再用 "
-                       "delegate 逐节点派单（delegate 传 plan_node_id 绑定）。同一项目建议只维护"
-                       "一张 active 计划；team.members 明确团队成员，节点 member_id 指定成员；"
-                       "全部节点完成后计划自动置 completed。",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "plan_name": {"type": "string", "description": "计划名称"},
-                "objective": {"type": "string", "description": "计划目标（可写阶段目标摘要）"},
-                "team": {"type": "object", "description": "团队成员名册；旧调用可省略，按节点 role 生成", "properties": {
-                    "id": {"type": "string", "description": "团队标识（可选）"},
-                    "name": {"type": "string", "description": "团队名称（可选）"},
-                    "source": {"type": "string", "description": "团队来源（可选）"},
-                    "execution": {"type": "object", "description": "执行元数据（不改变派单语义）"},
-                    "members": {"type": "array", "items": {"type": "object", "properties": {
-                        "id": {"type": "string", "description": "成员标识，等价于 member_id"},
-                        "member_id": {"type": "string", "description": "成员标识，等价于 id"},
-                        "label": {"type": "string", "description": "成员显示名称；兼容 name/title"},
-                        "name": {"type": "string", "description": "成员显示名称；兼容 label/title"},
-                        "title": {"type": "string", "description": "成员显示名称；兼容 label/name"},
-                        "responsibility": {"type": "string", "description": "职责说明；兼容 description"},
-                        "description": {"type": "string", "description": "职责说明；兼容 responsibility"},
-                        "role": {"type": "string", "description": "执行专家角色（可选）"},
-                    }}},
-                }},
-                "nodes": {"type": "array", "description": "计划节点（按依赖拓扑排序后建图）",
-                          "items": {
-                              "type": "object",
-                              "properties": {
-                                  "title": {"type": "string", "description": "节点标题"},
-                                  "role": {"type": "string",
-                                           "description": "建议执行专家（可选）"},
-                                  "member_id": {"type": "string", "description": "团队成员标识（可选）"},
-                                  "description": {"type": "string", "description": "节点任务说明（可选）"},
-                                  "depends_on": {"type": "array",
-                                                 "items": {"type": ["integer", "string"]},
-                                                 "description": "前置节点下标或标题"},
-                                  "priority": {"type": "integer",
-                                               "description": "0-100，小者优先（缺省 50）"},
-                              },
-                              "required": ["title"],
-                          }},
-            },
-            "required": ["plan_name", "nodes"],
-        },
-    },
-    {
-        "name": "cancel_task",
-        "description": "取消任务（open/claimed → failed）：被更高优先级方向取代、"
-                       "目标已达成、前提失效时用——方向性收编，不占执行窗。claimed "
-                       "任务的在跑窗会被打断（现场快照保留可续跑）。reason 必填"
-                       "（审计与父子任务回执依据）。预算被泡掉的任务请用 requeue_task "
-                       "而不是取消后再重发（避免丢履历）。",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string"},
-                "reason": {"type": "string",
-                           "description": "取消原因（写清为什么，人类在事件流审计）"},
-            },
-            "required": ["task_id", "reason"],
-        },
-    },
-    {
-        "name": "requeue_task",
-        "description": "把 failed/awaiting_human 任务放回待认领（清认领持有，"
-                       "attempts 履历保留，原绑定窗优先续跑）——预算恢复、前提补齐、"
-                       "人类解决挂起原因后重试用；不要取消后重发同款任务（丢履历且"
-                       "污染 dedup）。",
-        "input_schema": {
-            "type": "object",
-            "properties": {"task_id": {"type": "string"}},
-            "required": ["task_id"],
         },
     },
     {
@@ -304,17 +212,6 @@ ORCH_TOOLS: list[dict[str, Any]] = [
 # 补齐「编排器验证不了执行者结论」缺口：态势注入是聚合+截断的被动只读，
 # 本工具面给按 id 拉详情的主动通道（渐进披露：态势看摘要，存疑拉全文）。
 ORCH_QUERY_TOOLS: list[dict[str, Any]] = [
-    {
-        "name": "task_detail",
-        "description": "按 id 拉取单个任务的全量详情：objective/scope 全文、执行现场"
-                       " context（计划、完成对账、历次尝试 attempts）、result_note 全文"
-                       "（态势里只有 300 字截断）。用于核对执行者结论——不要凭态势摘要下判断。",
-        "input_schema": {
-            "type": "object",
-            "properties": {"task_id": {"type": "string"}},
-            "required": ["task_id"],
-        },
-    },
     {
         "name": "bb_overview",
         "description": "黑板分区总览（只读）：assets=资产终态覆盖分布；findings=分级统计"
@@ -351,61 +248,18 @@ ORCH_QUERY_TOOLS: list[dict[str, Any]] = [
 ]
 
 
-# A5：优先级重排专用一轮（手动按钮 / L2 自动去抖共用）。
-# 只给一个工具、只改 open 行；逐行落 task.updated 审计，非法条目服务端跳过。
-REPLAN_TOOLS: list[dict[str, Any]] = [
-    {
-        "name": "set_priorities",
-        "description": "批量重排待认领任务的优先级。只允许针对清单里 status=open 的任务；"
-                       "未列出的任务保持原值。priority 为 0-9 的整数，小者优先。",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "updates": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "task_id": {"type": "string"},
-                            "priority": {"type": "integer",
-                                         "description": "0-9 整数；0 最优先，2 常规默认"},
-                        },
-                        "required": ["task_id", "priority"],
-                    },
-                },
-            },
-            "required": ["updates"],
-        },
-    },
-]
-
-
-REPLAN_SYSTEM_PROMPT = """你是项目主代理（Orchestrator）的优先级重排器，本轮只做一件事：
-依据当前态势重排 **待认领（open）** 任务的优先级，然后调用一次 set_priorities。
-
-## 排序原则（0-9，小者优先）
-- 0-2：他人任务的前置/能为 blocked 任务解阻塞/高危时效窗口（如目标即将下线）。
-- 3-5：常规推进（默认 2-3；新验证发现按严重度收紧）。
-- 6-9：可延后的清理、广度收集、nice-to-have。
-- 已经 claimed/done/failed 的任务、清单外的 id 一律不要出现在 updates 里
-  （服务端也会忽略，乱填只浪费配额）。
-- 值与现值相同的任务不必提交；没有任何调整就调 set_priorities(updates=[])。
-- 只调一次工具；不要发布任务、不要开窗、不要写简报。
-
-## 待认领任务（仅这些可改）
-{open_tasks}
-{blocked}
-{role_catalog}
-"""
+# A5 优先级重排已随任务机制退役（2026-10-06）：REPLAN_TOOLS / REPLAN_SYSTEM_PROMPT /
+# replan_priorities 一并删除。
 
 
 # 对话化编排器（M1，§4.2）：对话插队轮系统提示——复用 tick 态势组装槽 +
 # goal_section + persona_section，纪律段换成对话口径（可对话/可发布/走闸门/
 # goal 变更须人类确认）。发布走与 tick 完全相同的工具闸门（dedup/gate/L0 提案/
 # L1 审批），对话只是起草方式变了。
-CHAT_SYSTEM_PROMPT = """你是项目主代理（Orchestrator），现在处于**对话轮**：人类正在与你直接交流。
-你可以回答问题、商议目标、给出计划；需要动手时用工具——发布任务与开窗走全部闸门
-（预算硬闸/去重/L0 提案/L1 审批，与巡检 tick 同源），被拒就向人类转述原因。
+CHAT_SYSTEM_PROMPT = """你是项目主代理（指挥），现在处于**对话轮**：人类正在与你直接交流。
+你可以回答问题、商议目标、给出计划；需要动手时用工具——组建队伍（build_team）、亲自执行
+（execute）、发布委托与开窗走全部闸门（预算硬闸/去重/L0 提案/L1 审批，与巡检 tick 同源），
+被拒就向人类转述原因。
 
 ## 当前态势
 {overview}
@@ -415,11 +269,11 @@ CHAT_SYSTEM_PROMPT = """你是项目主代理（Orchestrator），现在处于**
 1. 用人类的语言简洁作答，结论先行；问下一步计划时用上方态势作答（门没过就说还差什么）。
 2. 执行者看不到对话上下文：delegate 的 objective 必须自包含；系统会自动选窗
    （优先复用空闲同角色窗）或开新窗。
-3. 当人类要求组建 Agent 团队、合理分工或按计划协作时，先用 plan_work 登记完整
-   的团队计划。team.members 须明确成员 id/身份/职责，节点 member_id 指向团队成员；
-   plan_work 只生成等待确认的 draft 提案：回复中说明分工、任务依赖和安全边界，
-   **不得**直接 delegate 这些计划节点。只有人类在 LiveRoom
-   的团队确认卡或「协调」页签确认后，系统才会把计划置 active 并开始派发。
+3. 当人类要求组建 Agent 团队、合理分工或按计划协作时，用 **build_team** 组建团队：
+   给团队名、共享目标与成员名册（成员 role 从本轨专家池选，留空=按职责现场定义的
+   动态成员），成员的 responsibility 写清各自执行目标。build_team 只登记 draft 团队，
+   **不启动、不派单**——回复中说明分工与安全边界，人类在「指挥」页确认（preflight +
+   四项确认）后才会启动执行。
 4. 阶段目标（goal）的变更须由人类确认：你可以在对话里给出结构化草案
    （text/criteria/phase），由人类在编排页签 goal 条确认落盘；未确认前不要当作已生效。
 5. 回答完毕调用 done 结束本轮；纯问答（无需动手）直接 done。
@@ -448,6 +302,9 @@ class OrchestratorConfig:
     # 自动渗透研判模式（auto-attack 2026-09-28）：工具面只留只读查询+done，
     # 产出为渗透计划文本（result.analysis）——启动前「先分析后确认」的后半段。
     analyze_only: bool = False
+    # 指挥亲自执行（2026-10-06）：execute 工具单次执行的步数上限——tick 内同步
+    # 执行，防一次跑满默认预算把编排轮拖死。
+    execute_max_steps: int = 40
 
 
 class Orchestrator:
@@ -474,8 +331,6 @@ class Orchestrator:
     ):
         self.project_id = project_id
         self.bb = bb
-        self.tq = TaskQueue(bb)
-        self._coord_store: CoordinationStore | None = None  # M3 计划 DAG 层（惰性）
         self.llm = llm
         self.session_factory = session_factory
         self.config = config or OrchestratorConfig()
@@ -515,12 +370,10 @@ class Orchestrator:
         # 批 3：每 tick 的结构化动作收集（tick 开头重置；构造器预置以便单测直调工具）
         self._published: list[str] = []
         self._spawned: list[dict[str, str]] = []
+        self._teams: list[dict[str, Any]] = []  # 指挥组建的队伍（本轮）
         self._publish_count = 0  # C1：单轮发布计数（tick 每轮重置）
         self._proposals: list[dict[str, Any]] = []  # 批 6：L0 提案 {op,args,event_id}
-        self._coordination_plans: list[dict[str, Any]] = []  # LiveRoom 聊天中的团队提案
         self._digest: str | None = None
-        self._warned_starvation: dict[tuple[str, str], dict] = {}
-        self._last_stats_starvation: list[dict] = []
 
     def _orch_tools(self) -> list[dict[str, Any]]:
         """工具表副本：把本轨合法 task_type 作为 enum 下发（让 LLM 一次填对，
@@ -664,10 +517,8 @@ class Orchestrator:
             goal_text = str(((meta or {}).get("phase_goal") or {}).get("text") or "")
             mission = str(((proj["config"] or {}).get("mission") or {}).get("text") or "")
             caps = proj.get("capabilities") or []
-            targets = self._target_load(self.tq.list_tasks(self.project_id))
             hv = " ".join(a["value"] for a in self._stats().get("high_value", []))
-            query = (goal_text or mission) + " " + hv + " " + " ".join(
-                t["target"] for t in targets[:5])
+            query = (goal_text or mission) + " " + hv
             hits = self.campaign.recall(
                 query, track=self.track or "", capability=caps[0] if caps else "",
                 limit=5)
@@ -703,9 +554,8 @@ class Orchestrator:
             log.exception("战役记忆召回失败（跳过）")
             return ""
 
-    def _overview(self, expired_leases: list[str]) -> str:
+    def _overview(self) -> str:
         stats = self._stats()
-        self._last_stats_starvation = stats["tasks"]["starvation"]
         # 游标追赶：未消费 backlog 超过窗口（100）时只喂最新 100 条，但游标一次跳到
         # 当前末端——旧 backlog 永不逐轮回放（走查发现：从 0 起每轮 +100 的爬行 bug）。
         tip = self.bb.latest_event_id(self.project_id)
@@ -725,9 +575,7 @@ class Orchestrator:
             for e in new_events[-40:]
         ]
         out = json.dumps(stats, ensure_ascii=False, indent=1) + (
-            "\n\n## 本轮过期租约（已回收为 open）\n- " + "\n- ".join(expired_leases)
-            if expired_leases else ""
-        ) + "\n\n## 自上轮以来的新事件\n" + ("\n".join(event_lines) or "  （无）")
+            "\n\n## 自上轮以来的新事件\n" + ("\n".join(event_lines) or "  （无）"))
         directives = self._pending_directives()
         if directives:
             out += "\n\n## ⚠ 人类指令（最高优先，本轮优先落实）"
@@ -744,8 +592,7 @@ class Orchestrator:
     def _overview_for_chat(self) -> str:
         """对话轮只读态势（对话化 M1，§4.2）：stats 全量 + 固定最近 100 条事件窗
         （**不推进 event_cursor**）+ 最新简报常驻。与 tick 的 _overview 差异：
-        不注入过期租约（对话轮不做回收动作）、不注入也不消费 C2 指令（存量指令
-        仍由 tick 消费）、不写 _last_stats_starvation（不触发饿死告警事件）。"""
+        不注入也不消费 C2 指令（存量指令仍由 tick 消费）。"""
         stats = self._stats()
         tip = self.bb.latest_event_id(self.project_id)
         new_events = self.bb.recent_events(
@@ -785,33 +632,15 @@ class Orchestrator:
         return out
 
     def _stats(self) -> dict:
-        tasks = self.tq.list_tasks(self.project_id)
-        by_status: dict[str, int] = {}
-        for t in tasks:
-            by_status[t["status"]] = by_status.get(t["status"], 0) + 1
         findings = self.bb.list_findings(self.project_id)
         sessions = self.bb.list_sessions(self.project_id)
-        open_tasks = [t for t in tasks if t["status"] == "open"]
-        starvation = self._starvation_warnings(open_tasks, sessions)
-        # A5：claimed 任务的 blocked 计划步——编排器据此派生解阻塞任务/重排优先级
-        blocked_plan: list[dict] = []
-        for t in tasks:
-            if t["status"] != "claimed":
-                continue
-            blocked_steps = [s for s in (t.get("plan") or []) if s.get("status") == "blocked"]
-            if blocked_steps:
-                blocked_plan.append({
-                    "task_id": t["id"], "type": t["task_type"],
-                    "blocked": len(blocked_steps),
-                    "note": (blocked_steps[0].get("note") or "")[:120],
-                })
         cfg = self.bb.get_project(self.project_id)["config"] or {}
         mission_view: dict[str, Any] = {"track": self.track or "pentest"}
         if isinstance(cfg.get("mission"), dict):
             mission_view["mission"] = cfg["mission"]
         if isinstance(cfg.get("redteam_roe"), dict):
             mission_view["roe"] = cfg["redteam_roe"]
-        assets_view = self._assets_view(tasks)
+        assets_view = self._assets_view()
         hvt_ids: set = assets_view.pop("_hvt_ids")
         covered_ids: set = assets_view.pop("_covered_ids")
         # 高价值目标段（态势增强）：两类来源并集——
@@ -846,29 +675,7 @@ class Orchestrator:
                                   "severity": f["severity"], "status": f["status"]}
                                  for f in rel],
                 })
-        recent_tasks = self._recent_tasks_view(tasks)
-        # M3：计划 DAG 只注入当前 active 计划的摘要；objects/conflicts/verifications
-        # 仍由各自域维护，不混入编排器态势。刷新是单向 tasks→节点。
-        plan_view = None
-        try:
-            active_plan = self._coord().plan_view(self.project_id)
-            if active_plan:
-                plan_view = {
-                    "id": active_plan["id"],
-                    "name": active_plan["name"],
-                    "objective": active_plan["objective"][:300],
-                    "status": active_plan["status"],
-                    "team": active_plan["team"],
-                    "nodes": [{
-                        "id": node["id"], "title": node["title"][:100],
-                        "status": node["status"], "role": node.get("role") or "",
-                        "member_id": node.get("member_id") or "",
-                        "task_id": node.get("task_id") or "",
-                        "depends_on": node.get("depends_on") or [],
-                    } for node in active_plan["tasks"]],
-                }
-        except Exception:  # noqa: BLE001 —— 计划域观测不阻断主编排
-            log.exception("协调计划态势注入失败")
+        recent_runs = self._recent_runs_view()
         # 上下文预算（orch-context-budget，2026-09-27）：findings/sessions 全量段
         # 随项目线性膨胀失控——findings 只进 top 20（verified/exploited 优先 →
         # severity 降序），closed 会话出清；计数行给参照，细节走 bb_overview 按需拉。
@@ -880,19 +687,7 @@ class Orchestrator:
         return {
             "mission": mission_view,
             "high_value": high_value,
-            "tasks": {
-                "by_status": by_status,
-                "open": [{"id": t["id"], "type": t["task_type"], "priority": t["priority"],
-                          "noise_budget": t["noise_budget"], "created_at": t["created_at"],
-                          "role": t.get("role") or "",
-                          "objective": t["objective"][:80]}
-                         for t in open_tasks],
-                # v14 同目标负载分布（top5）：发布前对照，防把一个目标碎成过多任务
-                "targets": self._target_load(tasks),
-                "blocked_plan": blocked_plan,
-                "starvation": starvation,
-                **recent_tasks,
-            },
+            "teams": self._teams_view(),
             "findings": [{"id": f["id"], "vuln_class": f["vuln_class"], "title": f["title"][:60],
                           "severity": f["severity"], "status": f["status"],
                           "category": f.get("category") or "vuln"} for f in findings_top],
@@ -902,22 +697,47 @@ class Orchestrator:
                          for s in sessions_live],
             "sessions_closed": len(sessions) - len(sessions_live),
             "live_windows": len(self.live_sessions),
-            # L1 待审批委派（2026-09-28）：批准前不进 tasks 表，若不摆进态势，
-            # 编排器把「审批排队」误判为「队列空」无限续派——计数 + 摘要注入
             "approvals": self._approvals_view(),
-            "plan": plan_view,
+            **recent_runs,
             **assets_view,
         }
 
-    def _assets_view(self, tasks: list[dict]) -> dict:
+    def _teams_view(self) -> dict:
+        """指挥态势的团队视图（2026-10-06 任务退役后）：Team 名册 + 最近 Run 状态。
+        替代旧 tasks 段——编排器据此判断「有没有在跑的队伍 / 上一轮跑成什么样」。"""
+        rows = self.bb.conn.execute(
+            "SELECT id,name,status,goal_text FROM teams WHERE project_id=?"
+            " ORDER BY updated_at DESC,id", (self.project_id,)).fetchall()
+        items = [{"id": r["id"], "name": r["name"], "status": r["status"],
+                  "goal": (r["goal_text"] or "")[:120]} for r in rows[:20]]
+        return {"total": len(rows), "items": items}
+
+    def _recent_runs_view(self) -> dict:
+        """最近 Team Run（新→旧 cap 20）与运行中成员——「做得怎么样」的 Team 口径。"""
+        rows = self.bb.conn.execute(
+            "SELECT r.id,r.team_id,r.status,r.created_at,r.updated_at,"
+            " (SELECT COUNT(*) FROM team_run_members m WHERE m.run_id=r.id) AS members"
+            " FROM team_runs r WHERE r.project_id=?"
+            " ORDER BY r.created_at DESC, r.id DESC LIMIT 20", (self.project_id,)).fetchall()
+        recent_runs = [{"id": r["id"], "team_id": r["team_id"], "status": r["status"],
+                        "members": r["members"],
+                        "ended_at": r["updated_at"] or r["created_at"]} for r in rows]
+        running = self.bb.conn.execute(
+            "SELECT rm.id,rm.member_key,rm.status,rm.objective,rm.run_id"
+            " FROM team_run_members rm JOIN team_runs r ON r.id=rm.run_id"
+            " WHERE r.project_id=? AND rm.status IN ('creating','running')"
+            " ORDER BY rm.created_at DESC LIMIT 20", (self.project_id,)).fetchall()
+        running_now = [{"id": r["id"], "member_key": r["member_key"], "status": r["status"],
+                        "objective": (r["objective"] or "")[:80], "run_id": r["run_id"]}
+                       for r in running]
+        return {"recent_runs": recent_runs, "running_members": running_now}
+
+    def _assets_view(self) -> dict:
         """C1 资产视图 + 态势增强（HVT 标签/攻击面进度）：by_type/by_status 计数 +
-        未覆盖清单（cap 30 带 id，HVT 优先排序）+ 半程资产（visited/scanning cap 20）——
-        供编排器分批发批对照；判定为提示层，真护栏 = conflict_keys 互斥。
-        未覆盖 = host/domain/url/service 资产**既未被任何 open/claimed 任务的
-        conflict_keys/scope/objective 文本提及、状态也还是 open**——
-        visited/scanning（半程）/tested_clean（"挖完"口径，访问≠测试）都算已覆盖
-        （2026-09-18 对齐判据文案「含 visited/scanning 状态排除」；旧口径只看任务
-        文本，任务 done 后资产回流 uncovered 导致判据永不收敛）。"""
+        未覆盖清单（cap 30 带 id，HVT 优先排序）+ 半程资产（visited/scanning cap 20）。
+        未覆盖 = host/domain/url/service 资产**状态还是 open**——visited/scanning
+        （半程）/tested_clean（"挖完"口径）都算已覆盖。2026-10-06 任务退役后去掉
+        「任务文本命中」覆盖口径，covered 只看资产状态（读时派生）。"""
         assets = self.bb.list_assets(self.project_id)
         # asset-tree-derived-clean M2：状态以读时派生为准（父节点显式 status 被子树覆盖）
         eff_map = effective_status_map(assets, self.bb.list_findings(self.project_id))
@@ -935,22 +755,8 @@ class Orchestrator:
             tags = [str(t).strip().lower() for t in (a.get("meta") or {}).get("tags") or []]
             if "高价值" in tags:
                 hvt_ids.add(a["id"])
-        covered_text = ""
-        for t in tasks:
-            if t["status"] not in ("open", "claimed"):
-                continue
-            covered_text += " ".join([
-                *(t.get("conflict_keys") or []), t.get("scope") or "",
-                t.get("objective") or ""]).lower() + "\n"
-        def _asset_keys(a: dict) -> list[str]:
-            v = a["value"].lower()
-            if a["type"] == "url":
-                v = v.split("://", 1)[-1].rstrip("/")
-            return [v]
-
-        # covered（M2 新口径）：effective settled（全终态/挂 finding 收口）或
-        # 半程（visited/scanning）或任务文本命中。零子根行的显式 tested_clean
-        # 照常算 covered（D5，AI 管理语义不变）。
+        # covered（M2 口径）：effective settled（全终态/挂 finding 收口）或半程
+        # （visited/scanning）。零子根行的显式 tested_clean 照常算 covered（D5）。
         def _status_covered(a: dict) -> bool:
             eff = eff_map.get(a["id"])
             if eff is None:
@@ -958,10 +764,7 @@ class Orchestrator:
                     "visited", "scanning", "tested_clean", "na")
             return eff["settled"] or eff["status"] in ("visited", "scanning")
 
-        covered_ids = {
-            a["id"] for a in targetable
-            if _status_covered(a) or any(k in covered_text for k in _asset_keys(a))
-        }
+        covered_ids = {a["id"] for a in targetable if _status_covered(a)}
         uncovered = [a for a in targetable if a["id"] not in covered_ids]
         # 排序：HVT 优先 → 未访问（open，此时 uncovered 里只剩 open 态）
         uncovered.sort(key=lambda a: (a["id"] not in hvt_ids, 0))
@@ -1008,104 +811,6 @@ class Orchestrator:
             "_covered_ids": covered_ids,
         }
 
-    def _target_load(self, tasks: list[dict]) -> list[dict]:
-        """v14 同目标负载分布：open+claimed 任务按 target_keys_of 归一化目标键聚合
-        （ip:/host:/domain:，url 派生 host 键，passive 无 conflict_keys 时 scope 切段识别），
-        top5 注入态势。发布前对照——同目标在队达 MAX_TASKS_PER_TARGET（4）个会被拒收。"""
-        load: dict[str, int] = {}
-        for t in tasks:
-            if t["status"] not in ("open", "claimed"):
-                continue
-            for k in target_keys_of(t.get("scope") or "", t.get("conflict_keys") or []):
-                load[k] = load.get(k, 0) + 1
-        ranked = sorted(load.items(), key=lambda kv: -kv[1])[:5]
-        return [{"target": k, "in_queue": n, "at_limit": n >= MAX_TASKS_PER_TARGET}
-                for k, n in ranked]
-
-    def _recent_tasks_view(self, tasks: list[dict]) -> dict:
-        """态势增强（记忆缺口补强）：最近收尾（done/failed，含 result_note 收尾摘要）
-        与执行中（claimed，计划进度）任务——上轮/近几轮"做得怎么样"不再只靠事件窗口碎片。"""
-        closed = [t for t in tasks if t["status"] in ("done", "failed")]
-        closed.sort(key=lambda t: t.get("updated_at") or t.get("created_at") or "",
-                    reverse=True)
-        recent_closed = [
-            {"id": t["id"], "type": t["task_type"], "status": t["status"],
-             # A2 截断放宽（orchestrator-efficiency，2026-09-22）：[:100]→[:300]；
-             # 全文兜底走 task_detail
-             "result_note": (t.get("result_note") or "")[:300],
-             "ended_at": t.get("updated_at") or t.get("created_at") or ""}
-            for t in closed[:30]
-        ]
-        claimed_now = [
-            {"id": t["id"], "type": t["task_type"],
-             "claimed_by": t.get("claimed_by") or "",
-             "objective": (t.get("objective") or "")[:60],
-             "plan_done": sum(1 for s in (t.get("plan") or [])
-                              if s.get("status") == "done"),
-             "plan_total": len(t.get("plan") or [])}
-            for t in tasks if t["status"] == "claimed"
-        ]
-        return {"recent_closed": recent_closed, "claimed_now": claimed_now}
-
-    def _starvation_warnings(self, open_tasks: list[dict],
-                             sessions: list[dict] | None = None) -> list[dict]:
-        """饿死检测（§6.6）：open 任务 ①task_type 未在轨注册表（拼错/漏配）
-        ②注册表有但无专才角色声明可认领（只有 _generalist 兜底）。
-        _generalist 的 task_types=null（不过滤）不计入专才覆盖。
-        v14 role 维度：带 role 的 open 任务 ③role 未注册。
-        v0.71 任务即窗口修订：④「无底色匹配会话在岗」分支退役——每个任务发布
-        即有专属执行窗（绑定模型）；新增 ⑤open 任务绑定指向 closed 会话（绑窗
-        被人工关掉）——提醒等待调度器重绑新窗。"""
-        if not self.track:
-            return []
-        covered: dict[str, list[str]] = {}
-        for r in self.role_catalog:
-            if r["name"] == "_generalist":
-                continue
-            data = load_expert(self.packs_root, r["name"], self.track)
-            for tt in data.get("task_types") or []:
-                covered.setdefault(tt, []).append(r["name"])
-        warnings: list[dict] = []
-        for t in open_tasks:
-            tt = t["task_type"]
-            if tt != GENERIC_TASK_TYPE and tt not in self.task_types:
-                reason = f"task_type {tt!r} 未在 {self.track} 轨 task_types.yaml 注册"
-            elif tt != GENERIC_TASK_TYPE and not covered.get(tt):
-                reason = f"task_type {tt!r} 无专才角色可认领（仅 _generalist 兜底）"
-            else:
-                continue
-            warnings.append({"task_id": t["id"], "task_type": tt,
-                             "objective": t["objective"][:80], "reason": reason})
-        if sessions is not None:
-            names = {c["name"] for c in self.role_catalog}
-            closed_sids = {s["id"] for s in sessions
-                           if (s.get("status") or "") == "closed"}
-            for t in open_tasks:
-                r = (t.get("role") or "").strip()
-                if r and r not in names:
-                    reason = f"role {r!r} 不在 experts/ 池（认领后无法换装）"
-                elif t.get("target_session") and t["target_session"] in closed_sids:
-                    # v0.71 任务即窗口：绑定窗被人工关闭，任务悬 open 等 scheduler 重绑
-                    reason = ("任务绑定的执行窗已关闭，等待调度器重绑新窗"
-                              "（或人工在看板放回/重新发布）")
-                else:
-                    continue
-                warnings.append({"task_id": t["id"], "task_type": t["task_type"],
-                                 "objective": t["objective"][:80], "reason": reason})
-        return warnings
-
-    def _emit_starvation_events(self, warnings: list[dict]) -> None:
-        """饿死告警落事件流；同任务同原因只报一次（任务消失后解除，复发可再报）。"""
-        current = {(w["task_id"], w["reason"]): w for w in warnings}
-        self._warned_starvation = {
-            k: v for k, v in self._warned_starvation.items() if k in current}
-        fresh = [current[k] for k in current.keys() - self._warned_starvation.keys()]
-        self._warned_starvation.update(current)
-        if fresh:
-            self.bb.append_event(
-                self.project_id, "task.starvation", {"warnings": fresh},
-                author="orchestrator")
-
     # ---------- tick ----------
 
     def tick(self) -> dict[str, Any]:
@@ -1118,22 +823,19 @@ class Orchestrator:
             self.cycles = int(state.get("cycles", 0))
             self.last_digest_cycle = int(state.get("last_digest_cycle", -999))
         self.cycles += 1
-        expired = self.tq.expire_leases()
-        if expired:
-            log.info("回收过期租约: %s", expired)
         self._finished = False
         self._summary = ""
         self._analysis_text = ""  # auto-attack 研判模式：最后一条 assistant 文本=渗透计划
         self._actions = []
         self._published: list[str] = []
         self._spawned: list[dict[str, str]] = []
+        self._teams = []
         self._proposals = []
         self._digest: str | None = None
         self._publish_count = 0  # C1：单轮发布硬闸计数（直接发布与 L0 提案同闸）
-        overview = self._overview(expired)
+        overview = self._overview()
         pending_directives = self._pending_directives()  # C2：人类指令随 tick 消费后标 done
         self._consumed_directives = list(pending_directives)
-        self._emit_starvation_events(self._last_stats_starvation)
         auto = self.autonomy_provider() if self.autonomy_provider is not None else None
         # 批 6：config.propose_only（API 按 L0 注入）优先；无 provider 的单测也可直配
         # auto-attack：研判模式优先级最高（只读分析，覆盖一切档位提示）
@@ -1153,7 +855,6 @@ class Orchestrator:
             max_sessions=self.config.max_sessions,
             digest_every=self.config.digest_every,
             max_publish_per_tick=self.config.max_publish_per_tick,
-            max_tasks_per_target=MAX_TASKS_PER_TARGET,
             goal_section=self._goal_section(),
             phase_section=self._phase_section(),
             mission_section=self._mission_section(),
@@ -1204,15 +905,13 @@ class Orchestrator:
 
     # ---------- 异常订阅唤醒（对话化编排器 M4，§4.6） ----------
 
-    # 白名单 kind → 冷却窗秒数。只有这里列出的事件才可能唤醒编排器；
-    # 绑窗关闭复用 task.starvation（调度器重绑分支），不单独设 kind。
+    # 白名单 kind → 冷却窗秒数。只有这里列出的事件才可能唤醒编排器。
+    # 2026-10-06 任务退役：task.failed / task.starvation 触发器移除；团队执行失败由
+    # team.run.finished（终态）唤醒编排器复盘。
     WAKE_TRIGGERS: dict[str, float] = {
-        "task.failed": 600.0,          # 任务失败聚合（一次唤醒合并锚点后全部失败）
-        "task.starvation": 600.0,      # 新饿死告警（含绑窗关闭待重绑）
+        "team.run.finished": 600.0,    # 团队 Run 收尾（完成/失败/取消）→ 唤醒复盘
         "budget.soft_warning": 3600.0,  # 预算 80% 软警（低频，1h 冷却）
         "phase.gate_open": 600.0,      # 阶段出口门满足（五触发之一：goal 阶段门）
-        # M3（2026-10-04）：计划节点新就绪 → 唤醒编排器派依赖节点（短冷却，续派快）
-        "plan.node_ready": 120.0,
     }
     WAKE_LOOKBACK = 1800.0   # 首启回看窗：无历史唤醒锚点时只看最近 30 分钟事件
     WAKE_MAX_EVENTS = 300    # 扫描上限：锚点之后最多回看多少条事件
@@ -1280,26 +979,12 @@ class Orchestrator:
                 p = json.loads(r["payload"])
             except ValueError:
                 p = {}
-            if kind == "task.starvation":  # payload={warnings:[{task_id,objective,reason}]}
-                parts: list[str] = []
-                for w in (p.get("warnings") or [])[:5]:
-                    if isinstance(w, dict):
-                        line = f"{w.get('reason') or ''}（{w.get('objective') or ''}）"
-                        if line.strip("（） ") and line not in parts:
-                            parts.append(line)
-                summary = "；".join(parts)
-            elif kind == "plan.node_ready":  # payload={plan_id,node_ids}
-                n = len(p.get("node_ids") or [])
-                summary = f"{n} 个计划节点就绪，可派依赖节点"
-            else:  # task.failed/budget.soft_warning=note、phase.gate_open=summary
+            if kind == "team.run.finished":  # payload={team_id,team_name,run_id,status}
+                summary = (f"团队「{p.get('team_name') or p.get('team_id') or ''}」"
+                           f"执行收尾：{p.get('status') or ''}")
+            else:  # budget.soft_warning=note、phase.gate_open=summary
                 summary = str(p.get("note") or p.get("summary")
                               or p.get("reason") or "")
-                # M2：委派回执富化——失败任务带 receipt 时补产出计数，唤醒简报更全
-                rcpt = p.get("receipt")
-                if kind == "task.failed" and isinstance(rcpt, dict):
-                    nf, na = len(rcpt.get("findings") or []), len(rcpt.get("artifacts") or [])
-                    if nf or na:
-                        summary += f"（产出 {nf} 发现/{na} 产物）"
             out.append({"kind": kind, "event_id": r["id"],
                         "summary": summary[:160], "ts": r["created_at"]})
         return out
@@ -1311,17 +996,13 @@ class Orchestrator:
                  "处理建议；若无需处理请明确说明。"]
         for t in triggers:
             kind = t["kind"]
-            if kind == "task.failed":
-                lines.append(f"- 任务失败：{t['summary']}")
-            elif kind == "task.starvation":
-                lines.append(f"- 饿死/重绑告警：{t['summary']}")
+            if kind == "team.run.finished":
+                lines.append(f"- 团队执行收尾：{t['summary']}——请复盘产出、"
+                             "决定是否新建团队或亲自 execute 补刀")
             elif kind == "budget.soft_warning":
-                lines.append("- 预算软警：LLM 用量已达 80%，请评估消耗与剩余任务量")
+                lines.append("- 预算软警：LLM 用量已达 80%，请评估消耗与剩余工作量")
             elif kind == "phase.gate_open":
                 lines.append("- 阶段出口门满足：当前阶段门指标达标，可考虑流转下一阶段")
-            elif kind == "plan.node_ready":
-                lines.append(f"- 计划节点就绪：{t['summary']}——按态势里的 plan 段"
-                             "逐节点 delegate（带 plan_node_id 绑定）")
             else:
                 lines.append(f"- {kind}：{t['summary']}")
         return "\n".join(lines)
@@ -1435,7 +1116,6 @@ class Orchestrator:
         self._published: list[str] = []
         self._spawned: list[dict[str, str]] = []
         self._proposals = []
-        self._coordination_plans = []
         self._digest: str | None = None
         self._publish_count = 0
         tool_trace: list[dict[str, str]] = []
@@ -1494,7 +1174,6 @@ class Orchestrator:
         if reply:
             payload: dict[str, Any] = {
                 "role": "orch", "text": reply[:2000], "tool_trace": tool_trace,
-                "coordination_plans": list(self._coordination_plans),
             }
             if wake:
                 payload["proactive"] = True
@@ -1532,6 +1211,7 @@ class Orchestrator:
             "summary": self._summary or "；".join(self._actions) or fallback,
             "published": list(self._published),
             "spawned": list(self._spawned),
+            "teams": list(self._teams),
             "digest": self._digest,
             "proposals": list(self._proposals),  # 批 6：仅 L0 propose_only 非空
         }
@@ -1540,97 +1220,6 @@ class Orchestrator:
             # （tick 结果键集合是既有契约，严格断言不收多余键）
             out["analysis"] = getattr(self, "_analysis_text", "")
         return out
-
-    # ---------- A5：优先级重排（手动 / L2 自动去抖共用） ----------
-
-    def replan_priorities(self) -> dict[str, Any]:
-        """一次性 planner 轮重排 open 任务优先级。
-
-        - 只认 set_priorities 工具调用；无 open 任务直接返回，不调 LLM。
-        - 严格校验：task_id 必须存在且仍 open、priority 必须 0-9 的非布尔整数；
-          非法/重复/未变条目跳过且不中断；逐行 tq.update_task（每行落 task.updated 审计）。
-        - 返回 {updated:[{task_id,old,new}], skipped:[{task_id,reason}]}。
-        """
-        if self.heartbeat is not None:
-            try:
-                self.heartbeat()
-            except Exception:  # noqa: BLE001 —— 续租失败不阻断重排
-                log.exception("replan 租约心跳失败")
-        tasks = self.tq.list_tasks(self.project_id)
-        open_tasks = [t for t in tasks if t["status"] == "open"]
-        if not open_tasks:
-            return {"updated": [], "skipped": [], "note": "无 open 任务，跳过重排"}
-
-        blocked_lines = [
-            f"  - {b['task_id']}（{b['type']}）有 {b['blocked']} 个阻塞步：{b['note']}"
-            for b in self._stats()["tasks"]["blocked_plan"]
-        ]
-        open_lines = [
-            f"  - {t['id']} [{t['task_type']}/{t['noise_budget']}] P{t['priority']} "
-            f"created={t['created_at']}：{t['objective'][:100]}"
-            for t in open_tasks
-        ]
-        system = REPLAN_SYSTEM_PROMPT.format(
-            open_tasks="\n".join(open_lines),
-            blocked=("\n## 执行中任务的阻塞步（优先解阻塞）\n" + "\n".join(blocked_lines))
-                    if blocked_lines else "",
-            role_catalog=self._role_catalog_prompt(),
-        )
-        skwargs, stream_id = self._stream_kwargs()
-        resp = self.llm.chat(
-            [{"role": "user", "content": "请按排序原则重排待认领任务优先级，调用一次 set_priorities。"}],
-            system=system, tools=REPLAN_TOOLS, **skwargs)
-        record_llm_usage(
-            self.bb, self.project_id, resp.usage, source="orchestrator",
-            session_id=None, model=getattr(self.llm, "model", ""))
-        self._emit_thinking(resp, 1, "replan", stream_id=stream_id)
-
-        raw_updates: list[dict[str, Any]] = []
-        for tc in getattr(resp, "tool_calls", None) or []:
-            if tc.name != "set_priorities":
-                continue
-            raw_updates.extend((tc.arguments or {}).get("updates") or [])
-
-        open_map = {t["id"]: t for t in open_tasks}
-        updated: list[dict[str, Any]] = []
-        skipped: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for u in raw_updates:
-            tid = u.get("task_id") if isinstance(u, dict) else None
-            pr = u.get("priority") if isinstance(u, dict) else None
-            if not isinstance(tid, str):
-                skipped.append({"task_id": str(tid)[:40], "reason": "bad-task_id"})
-                continue
-            if tid in seen:
-                skipped.append({"task_id": tid, "reason": "duplicate"})
-                continue
-            seen.add(tid)
-            task = open_map.get(tid)
-            if task is None:
-                # 不存在 / claimed / done / failed：一律忽略（LLM 快照可能过期）
-                skipped.append({"task_id": tid, "reason": "not-open-or-unknown"})
-                continue
-            # bool 是 int 子类，显式拦住（True/False 不是合法优先级）
-            if isinstance(pr, bool) or not isinstance(pr, int) or not 0 <= pr <= 9:
-                skipped.append({"task_id": tid, "reason": f"bad-priority:{pr!r}"})
-                continue
-            if pr == task["priority"]:
-                skipped.append({"task_id": tid, "reason": "unchanged"})
-                continue
-            try:
-                row = self.tq.update_task(
-                    tid, by="orchestrator-replan",
-                    allowed_types=(self.task_types.keys() if self.track else None),
-                    priority=pr)
-            except ValueError as e:  # 并发被改状态等：跳过不中断
-                skipped.append({"task_id": tid, "reason": f"update-rejected:{e}"[:120]})
-                continue
-            updated.append({"task_id": tid, "old": task["priority"], "new": row["priority"]})
-        if updated:
-            self.bb.append_event(
-                self.project_id, "orch.replan_priorities",
-                {"updated": updated, "skipped_n": len(skipped)}, author="orchestrator")
-        return {"updated": updated, "skipped": skipped}
 
     # ---------- 工具分发 ----------
 
@@ -1654,19 +1243,111 @@ class Orchestrator:
         return (f"已提案 #{event_id}（{op}）：不写实体，等待人类在事件流「采纳」；"
                 "本轮可继续提案或 done。")
 
-    # ---------- 只读查询四工具（M2 orchestrator-efficiency A1，2026-09-22） ----------
+    # ---------- 指挥组建队伍 / 亲自执行（2026-10-06 任务机制退役后） ----------
 
-    def _tool_task_detail(self, task_id: str) -> str:
-        """按 id 拉任务全量：get_task 出口已解析 context（plan/reconcile/attempts），
-        result_note 全文不截断——核对执行者结论的唯一可信通道。"""
-        task = self.tq.get_task(task_id)
-        if task is None or task.get("project_id") != self.project_id:
-            return f"[错误] 任务不存在或不在本项目: {task_id}"
-        out = {k: task.get(k) for k in (
-            "id", "status", "task_type", "role", "objective", "scope",
-            "claimed_by", "blocked_reason", "result_note", "created_at",
-            "updated_at", "plan", "context")}
-        return json.dumps(out, ensure_ascii=False, indent=1)
+    def _tool_build_team(self, name: str, members: list[dict[str, Any]],
+                         goal_text: str = "") -> str:
+        """组建 Team（draft，不启动）：成员 role 从本轨专家池选（留空=动态成员）。
+        人类在「指挥」页 preflight + 四项确认后才启动——本工具只登记 roster。"""
+        name = str(name or "").strip()
+        if not name:
+            return "[拒绝] 团队名称不能为空"
+        if not isinstance(members, list) or not members:
+            return "[拒绝] 团队至少需要一名成员"
+        roster: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for index, raw in enumerate(members):
+            if not isinstance(raw, dict):
+                return f"[拒绝] 成员 {index + 1} 必须是对象"
+            key = str(raw.get("member_key") or raw.get("id") or "").strip()
+            if not key:
+                return f"[拒绝] 成员 {index + 1} 缺少 member_key"
+            if key in seen:
+                return f"[拒绝] 成员 key 重复: {key}"
+            seen.add(key)
+            role = str(raw.get("role") or "").strip()
+            if role and self.track and not expert_exists(self.packs_root, role, self.track):
+                return (f"[拒绝] 成员 {key} 的角色不在本轨专家池: {role!r}；"
+                        "留空 role 可创建按职责定义的动态成员")
+            if role and self.config.allowed_roles is not None \
+                    and role not in self.config.allowed_roles:
+                return f"[拒绝] 角色 {role!r} 不在白名单 {self.config.allowed_roles}"
+            runtime = str(raw.get("runtime") or "").strip().lower()
+            if runtime and runtime not in RUNTIME_LEVELS:
+                return f"[拒绝] 成员 {key} 非法 runtime: {runtime}"
+            threat = str(raw.get("threat_class") or "trusted").strip() or "trusted"
+            if threat not in VALID_THREAT_CLASSES:
+                return f"[拒绝] 成员 {key} 非法 threat_class: {threat}"
+            roster.append({
+                "member_key": key,
+                "label": str(raw.get("label") or raw.get("name") or key).strip(),
+                "responsibility": str(raw.get("responsibility") or raw.get("description") or "").strip(),
+                "role": role,
+                "runtime": runtime,
+                "threat_class": threat,
+                "max_steps": raw.get("max_steps"),
+            })
+        if self.config.propose_only:
+            return self._propose("build_team", {
+                "name": name, "goal_text": str(goal_text or "").strip(), "members": roster})
+        try:
+            team = TeamStore(self.bb, packs_root=str(self.packs_root)).create_team(
+                self.project_id, name=name, goal_text=str(goal_text or "").strip(),
+                members=roster, created_by="orchestrator")
+        except (ValueError, LookupError) as e:
+            return f"[拒绝] {e}"
+        self._teams.append({"team_id": team["id"], "name": team["name"],
+                            "member_count": len(roster)})
+        return (f"team={team['id']} 已组建（{len(roster)} 名成员，draft 未启动）："
+                "请在「指挥」页查看并配置，人类确认（preflight + 四项确认）后才会启动执行")
+
+    def _tool_execute(self, objective: str) -> str:
+        """指挥亲自执行：建会话 → run_team_execution（无 task，完整 Agent 工具面）。
+        tick 内同步执行，步数上限 config.execute_max_steps（防一次跑满拖死编排轮）。"""
+        objective = str(objective or "").strip()
+        if not objective:
+            return "[拒绝] objective 不能为空"
+        if self.config.propose_only:
+            return self._propose("execute", {"objective": objective})
+        if self.session_factory is None:
+            return "[错误] 未配置 session_factory，无法亲自执行"
+        if self.gate is not None:
+            reason = self.gate("execute")
+            if reason:
+                return f"[拒绝] {reason}"
+        if len(self.live_sessions) >= self.config.max_sessions:
+            return (f"[拒绝] 活跃会话已达上限 {self.config.max_sessions}，请先收尾再亲自执行")
+        try:
+            sess = self.session_factory("_generalist")
+        except FileNotFoundError as e:
+            return f"[拒绝] {e}"
+        except Exception as e:  # noqa: BLE001
+            return f"[错误] 建会话失败: {type(e).__name__}: {e}"
+        sid = sess.session["id"]
+        self.live_sessions[sid] = sess
+        self._spawned.append({"session_id": sid, "role": "_generalist"})
+        self.bb.append_event(
+            self.project_id, "session.spawned",
+            {"role": "_generalist", "session_id": sid, "origin": "orchestrator-execute"},
+            session_id=sid, author="orchestrator")
+        dispatcher = getattr(sess, "dispatcher", None)
+        if dispatcher is not None and hasattr(dispatcher, "max_steps"):
+            try:
+                dispatcher.max_steps = min(int(dispatcher.max_steps), self.config.execute_max_steps)
+            except (TypeError, ValueError):
+                pass
+        context = ExecutionContext(
+            execution_id=new_id("exec"), session_id=sid, objective=objective,
+            role="_generalist")
+        try:
+            result = sess.run_team_execution(context)
+        except Exception as e:  # noqa: BLE001
+            return f"[错误] 执行异常: {type(e).__name__}: {e}"
+        text = str(result or "").strip()
+        return (f"已亲自执行（session={sid}）：{text[:600]}" if text
+                else f"已亲自执行（session={sid}）：本轮未产出结论")
+
+    # ---------- 只读查询四工具（M2 orchestrator-efficiency A1，2026-09-22） ----------
 
     def _tool_bb_overview(self, section: str = "all", *,
                           asset_type: str = "", asset_status: str = "",
@@ -1699,8 +1380,7 @@ class Orchestrator:
                      "matched_total": len(rows), "shown": len(shown), "items": shown},
                     ensure_ascii=False, indent=1))
             else:
-                tasks = self.tq.list_tasks(self.project_id)
-                av = self._assets_view(tasks)
+                av = self._assets_view()
                 av.pop("_hvt_ids", None)
                 av.pop("_covered_ids", None)
                 parts.append("## 资产覆盖\n" + json.dumps(av, ensure_ascii=False, indent=1))
@@ -1801,539 +1481,22 @@ class Orchestrator:
             })
         return json.dumps({"sessions": out}, ensure_ascii=False, indent=1)
 
-    def _pending_delegate_approvals(self) -> list[dict]:
-        """L1 待审批委派卡（2026-09-28）：approvals 表 status='pending' 且
-        op='delegate_window'。L1 委派批准前任务不写 tasks 表、不落事件，编排器
-        _stats/去重/防碎全看不见——这里把「在途审批」捞出来补闸（积压上限、
-        同指纹去重、同目标防碎）。返回 action 已解析的卡列表。"""
+    def _approvals_view(self) -> dict:
+        """态势审批段：待审批卡计数 + 摘要（cap 10）——LLM 收敛判据把「审批排队」
+        当作在途工作（授权/阶段流转等人类决策尚未落定）。"""
         rows = self.bb.conn.execute(
-            "SELECT id, action FROM approvals"
-            " WHERE project_id=? AND status='pending'",
-            (self.project_id,)).fetchall()
+            "SELECT id, action, risk FROM approvals WHERE project_id=? AND status='pending'"
+            " ORDER BY created_at DESC LIMIT 10", (self.project_id,)).fetchall()
         out = []
         for r in rows:
             try:
                 action = json.loads(r["action"] or "{}")
             except (TypeError, ValueError):
-                continue
-            if action.get("op") == "delegate_window":
-                out.append({"id": r["id"], **action})
-        return out
-
-    def _approvals_view(self) -> dict:
-        """态势审批段：待审批委派卡计数 + 摘要（cap 10）——LLM 收敛判据
-        把「审批排队」当作在途工作（L1 下任务批准前不进 tasks 表）。"""
-        pending = self._pending_delegate_approvals()
-        return {
-            "pending_delegate": len(pending),
-            "pending": [{
-                "id": p["id"],
-                "objective": str(p.get("objective") or "")[:80],
-                "role": p.get("role") or "",
-                "task_type": p.get("task_type") or "generic",
-                "risk": p.get("risk") or "medium",
-            } for p in pending[:10]],
-        }
-
-    def _coord(self) -> CoordinationStore:
-        """惰性取得计划 DAG 存储；编排器测试可继续使用未接线的内存黑板。"""
-        if self._coord_store is None:
-            self._coord_store = CoordinationStore(self.bb)
-        return self._coord_store
-
-    def _tool_plan_work(self, plan_name: str, nodes: list[dict[str, Any]],
-                        objective: str = "", team: dict[str, Any] | None = None) -> str:
-        """创建一张等待确认的 draft 团队计划；不激活、不派单、不启动会话。"""
-        if not isinstance(nodes, list) or not nodes:
-            return "[拒绝] plan_work 至少需要一个节点"
-        if len(nodes) > 20:
-            return "[拒绝] plan_work 单计划最多 20 个节点"
-        if team is not None and (not isinstance(team, dict) or not isinstance(team.get("members"), list)):
-            return "[拒绝] team.members 必须是数组"
-        members = team.get("members", []) if team is not None else []
-        if any(not isinstance(m, dict) or not str(m.get("member_id") or m.get("id") or "").strip() for m in members):
-            return "[拒绝] team.members 每位成员须有 id 或 member_id"
-        ids = [str(m.get("member_id") or m.get("id")).strip() for m in members]
-        if len(ids) != len(set(ids)):
-            return "[拒绝] team.members 成员标识重复"
-        if team is None:
-            # 旧版只提供节点 role 时仍能看见团队 roster；绝不更改 role 的执行含义。
-            roles = dict.fromkeys(str(n.get("role") or "").strip() for n in nodes if isinstance(n, dict))
-            members = [{"member_id": role, "title": role, "role": role, "description": ""}
-                       for role in roles if role]
-        ids = [str(m.get("member_id") or m.get("id")).strip() for m in members]
-        titles: set[str] = set()
-        for idx, raw in enumerate(nodes):
-            if not isinstance(raw, dict) or not str(raw.get("title") or "").strip():
-                return f"[拒绝] 节点 {idx} 缺少 title"
-            title = str(raw["title"]).strip()
-            if title in titles:
-                return f"[拒绝] 节点标题重复: {title}"
-            titles.add(title)
-            member_id = str(raw.get("member_id") or (raw.get("role") if team is None else "") or "").strip()
-            if member_id and member_id not in ids:
-                return f"[拒绝] 节点 {idx} 的 member_id 不在团队名册"
-            if member_id:
-                member = members[ids.index(member_id)]
-                if raw.get("role") and member.get("role") and raw["role"] != member["role"]:
-                    return f"[拒绝] 节点 {idx} 的 role 与团队成员不一致"
-            try:
-                int(raw.get("priority", 50))
-            except (TypeError, ValueError):
-                return f"[拒绝] 节点 {idx} priority 必须是整数"
-        graph: dict[int, set[int]] = {}
-        title_indexes = {str(n["title"]).strip(): i for i, n in enumerate(nodes)}
-        for idx, raw in enumerate(nodes):
-            refs = raw.get("depends_on") or []
-            if not isinstance(refs, list):
-                return f"[拒绝] 节点 {idx} depends_on 必须是数组"
-            deps: set[int] = set()
-            for ref in refs:
-                target = ref if isinstance(ref, int) and not isinstance(ref, bool) else title_indexes.get(str(ref))
-                if target is None or target not in range(len(nodes)):
-                    return f"[拒绝] 节点 {idx} 依赖不存在: {ref}"
-                if target == idx:
-                    return f"[拒绝] 节点 {idx} 不能依赖自身"
-                deps.add(target)
-            graph[idx] = deps
-        visiting: set[int] = set()
-        visited: set[int] = set()
-        def check_cycle(node: int) -> bool:
-            if node in visiting:
-                return True
-            if node in visited:
-                return False
-            visiting.add(node)
-            for dep in graph[node]:
-                if check_cycle(dep):
-                    return True
-            visiting.remove(node)
-            visited.add(node)
-            return False
-        if any(check_cycle(idx) for idx in graph):
-            return "[拒绝] plan_work 依赖图存在循环"
-        coord = self._coord()
-        try:
-            plan = coord.create_plan(self.project_id, plan_name, objective,
-                                     team={**(team or {}), "members": members})
-            created: list[dict[str, Any]] = []
-            by_index: dict[int, str] = {}
-            by_title: dict[str, str] = {}
-            # 先建无依赖节点，保证所有合法引用都能解析。
-            for idx, raw in enumerate(nodes):
-                if not isinstance(raw, dict):
-                    return f"[拒绝] 节点 {idx} 必须是对象"
-                title = str(raw.get("title") or "").strip()
-                if not title:
-                    return f"[拒绝] 节点 {idx} 缺少 title"
-                if title in by_title:
-                    return f"[拒绝] 节点标题重复: {title}"
-                node = coord.add_task(
-                    self.project_id, plan["id"], title,
-                    description=str(raw.get("description") or ""),
-                    role=str(raw.get("role") or ""),
-                    member_id=str(raw.get("member_id") or (raw.get("role") if team is None else "") or ""),
-                    priority=int(raw.get("priority", 50)), depends_on=[])
-                created.append(node); by_index[idx] = node["id"]; by_title[title] = node["id"]
-            # 再补依赖；依赖只允许本计划节点，拒绝自环。
-            for idx, raw in enumerate(nodes):
-                refs = raw.get("depends_on") or []
-                if not isinstance(refs, list):
-                    return f"[拒绝] 节点 {idx} depends_on 必须是数组"
-                dep_ids: list[str] = []
-                for ref in refs:
-                    key = by_index.get(ref) if isinstance(ref, int) else by_title.get(str(ref))
-                    if key is None:
-                        return f"[拒绝] 节点 {idx} 依赖不存在: {ref}"
-                    if key == by_index[idx]:
-                        return f"[拒绝] 节点 {idx} 不能依赖自身"
-                    dep_ids.append(key)
-                if dep_ids:
-                    coord.set_dependencies(self.project_id, by_index[idx], dep_ids)
-            coord.refresh_readiness(self.project_id)
-            view = coord.get_plan(self.project_id, plan["id"])
-            # 检测环：若所有节点都 blocked 且没有可就绪根，明确拒绝。
-            if not any(t["status"] == "ready" for t in view["tasks"]):
-                return "[拒绝] plan_work 依赖图无可执行根节点（可能存在循环依赖）"
-            proposal = {
-                "plan_id": plan["id"], "status": "draft",
-                "name": view["name"], "objective": view["objective"],
-                "team": view["team"],
-                "nodes": [{"id": t["id"], "title": t["title"],
-                           "description": t["description"], "status": t["status"],
-                           "role": t["role"], "member_id": t["member_id"], "priority": t["priority"],
-                           "depends_on": t["depends_on"]}
-                          for t in view["tasks"]],
-            }
-            self._coordination_plans.append(proposal)
-            return json.dumps(proposal, ensure_ascii=False)
-        except (LookupError, TypeError, ValueError) as e:
-            return f"[拒绝] plan_work: {e}"
-
-    def _prepare_plan_node(self, plan_node_id: str | None, role: str) -> tuple[str, str]:
-        """校验计划节点可派单并补齐角色；返回 (node_id, role)。"""
-        if not plan_node_id:
-            return "", role
-        coord = self._coord()
-        node = coord.get_task(self.project_id, plan_node_id)
-        plan = coord.get_plan(self.project_id, node["plan_id"])
-        if plan["status"] != "active":
-            raise ValueError(f"计划 {node['plan_id']} 当前不是 active")
-        coord.refresh_readiness(self.project_id)
-        node = coord.get_task(self.project_id, plan_node_id)
-        if node.get("task_id"):
-            raise ValueError(f"计划节点已绑定真实任务 {node['task_id']}")
-        if node["status"] != "ready":
-            unmet = coord.unmet_dependencies(self.project_id, plan_node_id)
-            suffix = f"；未满足依赖: {','.join(unmet)}" if unmet else ""
-            raise ValueError(f"计划节点当前不可派单（status={node['status']}）{suffix}")
-        node_role = str(node.get("role") or "").strip()
-        if role and node_role and role != node_role:
-            raise ValueError(f"委托 role={role} 与计划节点 role={node_role} 不一致")
-        return plan_node_id, role or node_role
-
-    def _tool_delegate(
-        self, objective: str, task_type: str = "generic", role: str = "",
-        target_session: str = "", force_new_window: bool = False,
-        scope: str = "", noise_budget: str | None = None,
-        conflict_keys: list[str] | None = None, priority: int = 2,
-        refs: list[str] | None = None, parent_id: str | None = None,
-        plan_node_id: str | None = None,
-    ) -> str:
-        """向会话窗委派委托（docs/plans/session-centric-orchestration.md §4.3）。
-        选窗：target_session 指定 > 复用同类 idle 武装窗 > 开新窗；L1 开窗走
-        审批（批准=开窗+写入委托+带活起跑），L2 直接开窗；窗忙且被指定 →
-        委托进窗内队列。"""
-        try:
-            plan_node_id, role = self._prepare_plan_node(plan_node_id, role)
-        except (LookupError, ValueError) as e:
-            return f"[拒绝] 计划节点: {e}"
-        # C1 单轮委派硬闸：分批 3-5/轮，防一轮刷爆（与提案同闸）
-        if self._publish_count >= self.config.max_publish_per_tick:
-            return (f"[拒绝] 本轮委派已达上限 max_publish_per_tick="
-                    f"{self.config.max_publish_per_tick}；分批委派——本轮先 done，"
-                    "窗空退后下一轮 tick 续批（态势含 uncovered 资产清单）")
-        # role 前置校验（拼错专家不静默回退）；无 track 不校验
-        role = (role or "").strip()
-        if role and self.track and not expert_exists(self.packs_root, role, self.track):
-            return (f"[拒绝] 专家不在池内或不可服务本轨: {role!r}；"
-                    f"请使用 experts/ 池内专家 id（或留空不限）")
-        # 角色白名单（config.allowed_roles 配置时生效，None=不限）：开窗前拦，
-        # 不提审批、不建窗（track 过滤已由 expert_exists 把关）
-        if role and self.config.allowed_roles is not None \
-                and role not in self.config.allowed_roles:
-            return (f"[拒绝] 角色 {role!r} 不在白名单 {self.config.allowed_roles}；"
-                    "请改用白名单内专家或先调整配置")
-        # 去重：命中同指纹 open/claimed 委托 → 复用不新建
-        fp = dedup_fp(task_type, scope, objective)
-        dup = self.tq.find_dedup_target(self.project_id, fp)
-        if dup is not None:
-            return (f"[复用] 已存在同目标委托 {dup['id']}（status={dup['status']}），"
-                    f"本轮不重复委派；避让请参考其 conflict_keys")
-        # 分阶段入场门（直接委派与提案同闸；发布 API 422 是第二层）
-        gate_msg = self._phase_gate_reject(task_type)
-        if gate_msg:
-            return gate_msg
-        # task_type 注册校验前置（与 L0 提案同护栏）：未注册直接拒绝，不开窗、
-        # 不提审批、不发提案（否则会留下「窗建了、委托写不进」的孤儿窗）
-        if self.track:
-            try:
-                _check_task_type(task_type, self.task_types.keys())
-            except ValueError as e:
-                return f"[拒绝] {e}"
-        # 父子关系 + 编排拆解深度 1 层前置（与 tq.publish 同护栏）：开窗前拦
-        if parent_id:
-            try:
-                self.tq.check_parent(self.project_id, parent_id, enforce_depth=True)
-            except ValueError as e:
-                return f"[拒绝] {e}"
-        # L0 提案模式：校验照跑、不写实体，只发 orch.proposed
-        if self.config.propose_only:
-            if noise_budget is None:
-                noise_budget = self.task_types.get(task_type, "passive")
-            if noise_budget not in {"passive", "low", "medium", "high"}:
-                return f"[拒绝] 非法 noise_budget: {noise_budget}"
-            if noise_budget != "passive" and not conflict_keys:
-                return "[拒绝] 非 passive 委托必须提供 conflict_keys（active 互斥的依据）"
-            try:
-                _check_task_type(task_type,
-                                 self.task_types.keys() if self.track else None)
-            except ValueError as e:
-                return f"[拒绝] {e}"
-            self._publish_count += 1
-            return self._propose("delegate", {
-                "objective": objective, "role": role, "scope": scope,
-                "task_type": task_type,
-                "noise_budget": noise_budget, "priority": priority,
-                "conflict_keys": conflict_keys or [], "refs": refs or [],
-                "target_session": target_session,
-                "force_new_window": force_new_window,
-                "parent_id": parent_id,
-                **({"plan_node_id": plan_node_id} if plan_node_id else {})})
-        # 自主预算硬闸（回调实时重读项目配置）
-        if self.gate is not None:
-            reason = self.gate("delegate")
-            if reason:
-                return f"[拒绝] {reason}"
-        # 噪声缺省 = 注册表该类型默认值；轨未接线回退 passive
-        if noise_budget is None:
-            noise_budget = self.task_types.get(task_type, "passive")
-        if noise_budget not in {"passive", "low", "medium", "high"}:
-            return f"[拒绝] 非法 noise_budget: {noise_budget}"
-        # active 委托冲突键前置校验（与 tq.publish / L0 提案同护栏）：开窗前拦，
-        # 不留「窗开了、委托写不进」的孤儿窗
-        if noise_budget != "passive" and not conflict_keys:
-            return "[拒绝] 非 passive 委托必须提供 conflict_keys（active 互斥的依据）"
-        # 同目标防碎闸前置（镜像 tasks.py 事务内计数）：达阈值不开窗、不提审批
-        target_keys = target_keys_of(scope, conflict_keys)
-        if target_keys:
-            n_target = 0
-            for r in self.bb.conn.execute(
-                "SELECT scope, conflict_keys FROM tasks"
-                " WHERE project_id=? AND status IN ('open','claimed')",
-                (self.project_id,),
-            ).fetchall():
-                try:
-                    row_keys = json.loads(r["conflict_keys"] or "[]")
-                except ValueError:
-                    row_keys = []
-                if target_keys & target_keys_of(r["scope"], row_keys):
-                    n_target += 1
-            if n_target >= MAX_TASKS_PER_TARGET:
-                return (f"[拒绝] 同目标 {'、'.join(sorted(target_keys))} 在队"
-                        f"（open+claimed）任务已达 {n_target} 个（阈值 "
-                        f"{MAX_TASKS_PER_TARGET}）——请先消化存量或合并范围")
-        # ---- 选窗 ----
-        sid = (target_session or "").strip()
-        if sid:
-            srow = self.bb.get_session(sid)
-            if srow is None or srow.get("status") == "closed":
-                return f"[拒绝] 指定会话窗不存在或已关闭: {sid}"
-            if srow.get("status") == "paused":
-                return f"[拒绝] 会话窗 {sid} 处于暂停态，暂不接委托"
-        elif not force_new_window:
-            # 新会话语义：指挥派发默认每个任务新开 Agent 会话，不复用待命窗。
-            sid = ""
-        created = False
-        if not sid:
-            auto = self.autonomy_provider() if self.autonomy_provider is not None else None
-            if auto is not None and auto.get("level") == "L1":
-                # L1 待审批（2026-09-28）：审批卡批准前不写 tasks 表、不落事件，
-                # 编排器每轮看队列空会无限续提。闸序：先同指纹去重（同款给「复用」
-                # 具体理由），再积压上限（pending 达单轮上限停发，等人类消化）
-                pending = self._pending_delegate_approvals()
-                # 同指纹去重（待审批在途）：同款已提审批 → 复用不重复提审
-                fp = dedup_fp(task_type, scope, objective)
-                for p in pending:
-                    if dedup_fp(p.get("task_type") or "generic",
-                                p.get("scope") or "",
-                                p.get("objective") or "") == fp:
-                        return (f"[复用] 同款委派已在审批中 {p['id']}，"
-                                "本轮不重复提审（审批结果下轮 tick 可见）")
-                # 待审批积压硬闸：pending 达单轮上限即停发
-                if len(pending) >= self.config.max_publish_per_tick:
-                    return (f"[拒绝] 已有 {len(pending)} 张委派审批待人类处理"
-                            f"（≥max_publish_per_tick={self.config.max_publish_per_tick}）；"
-                            "请先审批消化，下轮再续派")
-                # 同目标防碎（待审批在途并入）：pending 卡 scope/conflict_keys
-                # 也算在队，防对同一目标无限提审批卡
-                if target_keys:
-                    n_pend = 0
-                    for p in pending:
-                        row_keys = set(p.get("conflict_keys") or [])
-                        if target_keys & target_keys_of(
-                                p.get("scope") or "", list(row_keys)):
-                            n_pend += 1
-                    if n_target + n_pend >= MAX_TASKS_PER_TARGET:
-                        return (f"[拒绝] 同目标 {'、'.join(sorted(target_keys))} 在队"
-                                f"（open/claimed {n_target} + 待审批 {n_pend}）已达"
-                                f"阈值 {MAX_TASKS_PER_TARGET}——请先审批消化存量")
-                # L1 开窗审批：批准后处理器开窗 + 写入委托 + 带活起跑
-                appr = self.bb.request_approval(
-                    self.project_id,
-                    {"op": "delegate_window", "role": role or "_generalist",
-                     "objective": objective, "task_type": task_type,
-                     "scope": scope, "noise_budget": noise_budget,
-                     "conflict_keys": conflict_keys or [], "priority": priority,
-                     "refs": refs or [], "plan_node_id": plan_node_id or ""},
-                    risk="low" if noise_budget == "passive" else "medium",
-                    requested_by="orchestrator")
-                self._publish_count += 1
-                return (f"已提交委派审批 {appr['id']}（开 {role or '通用'} 窗执行）："
-                        "人类批准后系统自动开窗、写入委托并带活起跑；本轮可继续其他"
-                        "决策或 done，审批结果下轮 tick 经事件可见")
-            if self.session_factory is None:
-                return "[错误] 未配置 session_factory，无法开窗"
-            if len(self.live_sessions) >= self.config.max_sessions:
-                return (f"[拒绝] 活跃会话已达上限 {self.config.max_sessions}，"
-                        "请复用现有会话")
-            try:
-                sess = self.session_factory(role or "_generalist")
-            except FileNotFoundError as e:
-                return f"[拒绝] {e}"
-            except Exception as e:  # noqa: BLE001
-                return f"[错误] 开窗失败: {type(e).__name__}: {e}"
-            sid = sess.session["id"]
-            self.live_sessions[sid] = sess
-            created = True
-            self._spawned.append({"session_id": sid, "role": role or "_generalist"})
-            # 开窗即事件（与 API 侧 _bind_task_window 同口径）：审计/新壳会话流据此呈现
-            self.bb.append_event(
-                self.project_id, "session.spawned",
-                {"role": role or "_generalist", "session_id": sid,
-                 "origin": "orchestrator-delegate"},
-                session_id=sid, author="orchestrator")
-        # ---- 写委托（归属窗已定） ----
-        try:
-            task_id = self.tq.publish(
-                self.project_id, objective, scope=scope, task_type=task_type,
-                noise_budget=noise_budget, priority=priority,
-                conflict_keys=conflict_keys, created_by="orchestrator",
-                allowed_types=(self.task_types.keys() if self.track else None),
-                refs=refs, role=role, target_session=sid, parent_id=parent_id,
-                parent_depth_limit=1)
-            if plan_node_id:
-                self._coord().bind_task(self.project_id, plan_node_id, task_id)
-        except (ValueError, LookupError) as e:
-            return f"[拒绝] {e}"
-        self._publish_count += 1
-        self._published.append(task_id)
-        # 委托事件：会话流呈现「🧭 编排器委派」
-        self.bb.append_event(
-            self.project_id, "delegation.posted",
-            {"task_id": task_id, "objective": objective, "task_type": task_type,
-             "created_by": "orchestrator", "role": role, "new_window": created,
-             **({"plan_node_id": plan_node_id} if plan_node_id else {})},
-            session_id=sid, author="orchestrator")
-        # 回调（API 侧）：usage 计数 + idle 窗起跑 / 忙窗排队
-        if self.on_task_published is not None:
-            try:
-                self.on_task_published(task_id)
-            except Exception:  # noqa: BLE001
-                log.exception("tasks_published 回调失败")
-        return (f"task={task_id} 已委派给会话 {sid}（{task_type}/{noise_budget}"
-                + (f"/role={role}" if role else "")
-                + ("，新窗" if created else "，复用窗")
-                + "）：窗空闲已起跑 / 窗忙已排队")
-
-    def _pick_reusable_window(self, role: str, task_type: str) -> str:
-        """选复用窗（保守规则）：armed + idle、role 给定时窗角色匹配、且干过同
-        task_type 终态委托；多个按最近终态时间取新。无 → ''（交调用方开窗）。"""
-        sessions = {s["id"]: s for s in self.bb.list_sessions(self.project_id)}
-        last_done: dict[str, str] = {}
-        for t in self.tq.list_tasks(self.project_id):
-            if t.get("target_session") and t["status"] in {"done", "failed"} \
-                    and t.get("task_type") == task_type:
-                wsid = t["target_session"]
-                ts = t.get("updated_at") or t.get("created_at") or ""
-                if wsid not in last_done or ts > last_done[wsid]:
-                    last_done[wsid] = ts
-        candidates: list[tuple[str, str]] = []
-        for wsid, row in sessions.items():
-            if row.get("status") != "idle" or wsid not in last_done:
-                continue
-            if role and row.get("role") != role:
-                continue
-            meta = row.get("meta")
-            meta = json.loads(meta) if isinstance(meta, str) else (meta or {})
-            if not meta.get("worker_armed"):
-                continue
-            candidates.append((last_done[wsid], wsid))
-        return sorted(candidates)[-1][1] if candidates else ""
-
-    def _phase_gate_reject(self, task_type: str) -> str:
-        """入场门校验（M2）：被拦返回 [拒绝] 原因串，放行返回空串。
-        meta/state 未接线（脚本/旧测试）一律放行；校验自身异常也放行
-        （门是工作流护栏非安全边界，发布 API 侧还有第二层拦截兜底）。"""
-        if self.meta_loader is None or not self.track:
-            return ""
-        try:
-            meta = self.meta_loader() or {}
-            idle = 0
-            if self.state_loader is not None:
-                try:
-                    idle = int(self.state_loader().get("derive_idle_rounds", 0))
-                except Exception:  # noqa: BLE001
-                    idle = 0
-            reason = phases.gate_block_reason(
-                self.bb, self.project_id, meta, self.track, self.packs_root,
-                task_type=task_type, idle_rounds=idle)
-            return f"[拒绝] {reason}" if reason else ""
-        except Exception:  # noqa: BLE001
-            log.exception("阶段入场门校验失败（放行）")
-            return ""
-
-    def _tool_cancel_task(self, task_id: str, reason: str = "") -> str:
-        """取消委托（M4 C1，orchestrator-efficiency）：open/claimed → failed
-        （blocked_reason=cancelled）。自主档三分流：L0 提案 / L1 审批卡 /
-        L2 直接执行 + 打断在跑窗。打断复用人工中断原语 request_abort（当前步
-        做完收口，现场快照保留）——窗保持待命可复用，cancel ≠ 关窗。"""
-        task = self.tq.get_task(task_id)
-        if task is None or task["project_id"] != self.project_id:
-            return f"[错误] 任务不存在: {task_id}"
-        reason = (reason or "").strip()
-        if not reason:
-            return "[拒绝] 取消必须填 reason（写清为什么，人类在事件流审计）"
-        if task["status"] not in ("open", "claimed"):
-            return (f"[拒绝] 任务 {task_id} 状态为 {task['status']}"
-                    f"（{task.get('blocked_reason') or 'error'}），仅 open/claimed 可取消；"
-                    "failed/awaiting_human 请用 requeue_task 放回")
-        if self.config.propose_only:
-            return self._propose("cancel_task", {"task_id": task_id, "reason": reason})
-        auto = self.autonomy_provider() if self.autonomy_provider is not None else None
-        if auto is not None and auto.get("level") == "L1":
-            appr = self.bb.request_approval(
-                self.project_id,
-                {"op": "cancel_task", "task_id": task_id,
-                 "objective": (task["objective"] or "")[:120], "reason": reason},
-                risk="low", requested_by="orchestrator")
-            return (f"已提交取消审批 {appr['id']}：人类批准后任务转 failed（cancelled）"
-                    "并打断在跑窗；本轮可继续其他决策或 done")
-        res = self.tq.cancel_task(task_id, by="orchestrator", reason=reason)
-        self._interrupt_window(res.get("claimed_by"))
-        tail = "；在跑窗已打断（快照保留可续跑）" if res.get("claimed_by") else ""
-        return f"task={task_id} 已取消（cancelled）{tail}"
-
-    def _tool_requeue_task(self, task_id: str) -> str:
-        """放回待认领（M4 C1）：failed/awaiting_human → open（reopen 原语——
-        awaiting_human 本就是 failed+blocked_reason 档；attempts 履历保留，
-        target_session 保留=原绑定窗优先续跑）。自主档三分流同 cancel_task。"""
-        task = self.tq.get_task(task_id)
-        if task is None or task["project_id"] != self.project_id:
-            return f"[错误] 任务不存在: {task_id}"
-        if task["status"] != "failed":
-            return (f"[拒绝] 任务 {task_id} 状态为 {task['status']}，"
-                    "仅 failed/awaiting_human 可放回")
-        if self.config.propose_only:
-            return self._propose("requeue_task", {"task_id": task_id})
-        auto = self.autonomy_provider() if self.autonomy_provider is not None else None
-        if auto is not None and auto.get("level") == "L1":
-            appr = self.bb.request_approval(
-                self.project_id,
-                {"op": "requeue_task", "task_id": task_id,
-                 "objective": (task["objective"] or "")[:120],
-                 "blocked_reason": task.get("blocked_reason") or "error"},
-                risk="low", requested_by="orchestrator")
-            return (f"已提交放回审批 {appr['id']}：人类批准后任务回到待认领"
-                    "（原绑定窗优先续跑）；本轮可继续其他决策或 done")
-        self.tq.reopen(task_id, by="orchestrator")
-        return "task={} 已放回待认领（原绑定窗优先续跑，调度器自动重开窗）".format(task_id)
-
-    def _interrupt_window(self, sid: str | None) -> None:
-        """打断在跑窗（M4 cancel 链路）：request_abort 让当前步尽快收口——
-        在跑窗走 _abort_current_task（fail 撞 ClaimError 被吞、会话空闲），
-        空闲窗标志在下次检查点自清（loop.py 无任务只清标志先例）。
-        只打断不关窗：窗保持待命可接新任务。失败只 log——任务行已取消，
-        主语义已达成，打断失败不回滚。"""
-        if not sid:
-            return
-        sess = self.live_sessions.get(sid)
-        if sess is None:
-            return
-        try:
-            sess.request_abort()
-        except Exception:  # noqa: BLE001
-            log.exception("打断在跑窗失败 sid=%s", sid)
+                action = {}
+            out.append({"id": r["id"], "op": action.get("op") or "",
+                        "objective": str(action.get("objective") or "")[:80],
+                        "risk": r["risk"] or "medium"})
+        return {"pending_total": len(out), "pending": out}
 
     def _tool_write_digest(self, summary: str) -> str:
         self.bb.append_event(

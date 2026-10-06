@@ -1,15 +1,10 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
-import { ArrowUp, GitBranch, Paperclip, Plus, Square, X } from "lucide-react"
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
+import { ArrowUp, Paperclip, Plus, Square, X } from "lucide-react"
 
-// 多智能体协调（2026-10-04 并入直播间）：原独立顶级页迁为第三段视图
-const CoordinationPane = lazy(() => import("./live/CoordinationPane").then((m) => ({ default: m.CoordinationPane })))
-import { PlanPanel } from "./live/PlanPanel"
 import { OrchChatPane, TEAM_EVENT_KINDS } from "./live/OrchChatPane"
 import { TeamRunReport } from "./live/TeamRunReport"
 import { TeamConfigDialog } from "@/components/team/TeamConfigDialog"
-import { TraeView } from "./live/TraeView"
 import { PersonaEditor } from "./live/editors"
-import { PlanConfirmDialog } from "./live/coordination/PlanConfirmDialog"
 import { EventRow, type StreamItem } from "./live/EventRow"
 import { ApiError, api, pollJob } from "@/lib/api"
 import { eventStyle } from "@/lib/events"
@@ -18,7 +13,7 @@ import { useEvents } from "@/lib/useEvents"
 import { usePendingApprovals } from "@/lib/usePendingApprovals"
 import { buildStreamItems } from "@/lib/turnStream"
 import { fmtDateTimeMin } from "@/lib/datetime"
-import type { Approval, AttachmentInfo, Asset, Autonomy, BBEvent, CoordinationPlan, CoordinationPlanProposal, DecideApprovalResult, ModelInfo, OrchPersona, OrchProposal, OrchTickResult, PhaseGoal, ProjectUsage, ReplanResult, RoleInfo, Session, Task, Team } from "@/lib/types"
+import type { Approval, AttachmentInfo, Asset, Autonomy, BBEvent, DecideApprovalResult, ModelInfo, OrchPersona, OrchProposal, OrchTickResult, PhaseGoal, ProjectUsage, RoleInfo, Session, Team, TeamMemberInput } from "@/lib/types"
 import { StatusDot, type SessionStatus } from "@/components/StatusDot"
 import { Button } from "@/components/ui/button"
 import { ChatStats } from "@/components/chat/ChatStats"
@@ -48,6 +43,12 @@ type PendingFile = {
 // 输入模式收敛（阶段二，2026-09-28）：会话态=「对话/引导」单模式、编排器态=「与编排对话」
 // 单模式——去模式徽章循环，「发任务/指派」语义由 Agent 在对话中自判（run_chat 意图判定升级任务）。
 type InputMode = "note" | "orch"
+
+// 会话态斜杠命令（2026-10-06）：目前仅 /compact——把会话持久对话历史（chat-<sid>.json）
+// 的旧问答对压成摘要重写，后续对话从「摘要 + 最近若干条」续起。选中会话页签时可用。
+const SESSION_SLASH_COMMANDS = [
+  { cmd: "/compact", desc: "压缩本会话上下文：旧历史压成摘要，后续对话从摘要续起" },
+]
 
 function fmtBytes(n: number): string {
   if (n >= 1_048_576) return `${(n / 1_048_576).toFixed(1)}MB`
@@ -273,9 +274,6 @@ const FILTERS = [
   { key: "tools", label: "工具", match: (k: string) => k === "tool.call" },
   { key: "finding", label: "发现", match: (k: string) =>
       k.startsWith("finding.") || k === "func.upsert" || k === "asset.new" },
-  // 「计划」是特殊标签：选中时主区渲染 PlanPanel（结构化任务计划/进度）而非事件流，match 仅供类型完整
-  { key: "plan", label: "计划", match: (k: string) =>
-      k === "task.plan_set" || k === "task.plan_revised" || k === "task.step" },
 ] as const
 
 // 稀疏组保底（2026-09-28）：思考/命令/工具高频刷屏会在几分钟内把低频关键事件
@@ -286,13 +284,6 @@ const KEEP_SPARSE = 30
 const SPARSE_FLOORS: { match: (kind: string) => boolean; keep: number }[] = FILTERS
   .filter((f) => f.key === "decision" || f.key === "route" || f.key === "finding")
   .map((f) => ({ match: f.match, keep: KEEP_SPARSE }))
-
-// 编排页签收录的任务状态变迁事件（编排发布任务的，按 payload.created_by=orchestrator
-// 关联；计划步进属会话内部执行细节，留会话页签——2026-09-18 定稿）
-const ORCH_TASK_EVENTS = new Set([
-  "task.claimed", "task.done", "task.failed", "task.reopened", "task.lease_expired",
-  "task.cancelled",  // M4 C1：取消（编排器/审批/人工，payload.by 区分）
-])
 
 function sessionStatus(mine: BBEvent[]): SessionStatus {
   if (mine.some((e) => e.kind === "session.finished")) return "finished"
@@ -306,7 +297,7 @@ function sessionStatus(mine: BBEvent[]): SessionStatus {
   // 等生命周期事件误判成执行态——新开窗假执行中 2 分钟。执行态唯一权威=
   // worker_running（服务端 Job 在跑，tabStatus 恒优先），此处只留终态推导。
   const last = mine[mine.length - 1]
-  if (last?.kind === "task.failed" || last?.kind === "task.lease_expired") return "error"
+  void last
   return "idle"
 }
 
@@ -335,7 +326,7 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
   }, [refreshOrchHistory])
   useEffect(() => {
     if (activeTab !== "__orch") return
-    const wakeKinds = new Set(["coordination.plan.started", "coordination.plan.updated", "plan.node_ready", "task.started", "task.done", "task.failed", "session.spawned"])
+    const wakeKinds = new Set(["team.created", "team.run.started", "team.run.finished", "session.spawned"])
     if (!events.some((event) => wakeKinds.has(event.kind))) return
     refreshOrchHistory()
   }, [events, activeTab, refreshOrchHistory])
@@ -358,7 +349,6 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
     const t = setInterval(load, 3000)
     return () => { alive = false; clearInterval(t) }
   }, [pid, activeTab])
-  const [filter, setFilter] = useState<string>("all")
   // 审计抽屉（2026-09-28 会话窗三段式改造）：主区常显对话轮形态，类型筛选迁入右侧
   // 抽屉——抽屉复用同一 events 窗口（inTabScope 圈定）+ 本地筛选态平铺渲染
   const [auditOpen, setAuditOpen] = useState(false)
@@ -394,8 +384,6 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
   // 排队引导条（2026-09-19 轮末语义）：note 发送后 human_note 留收件箱等下一轮
   // 认领期注入，此处仅组件内存的可见排队态；task.claimed 事件到达即清（已注入）
   const [queuedNotes, setQueuedNotes] = useState<{ key: string; sid: string; text: string; attCount: number }[]>([])
-  // 直播｜协调 顶栏切换
-  const [viewMode, setViewMode] = useState<"live" | "coord">("live")
   // 批 6 L0 提案采纳态只存内存（刷新后可再次采纳，不做服务端去重）
   const [adopted, setAdopted] = useState<Set<number>>(new Set())
   const [adoptingId, setAdoptingId] = useState<number | null>(null)
@@ -415,17 +403,6 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
   // + goal/persona 元数据 + 编辑弹层开关
   const [orchBusy, setOrchBusy] = useState(false)
   const [orchMeta, setOrchMeta] = useState<{ phase_goal: PhaseGoal | null; persona: OrchPersona | null } | null>(null)
-  const [pendingCoordinationPlan, setPendingCoordinationPlan] = useState<CoordinationPlan | null>(null)
-  const [coordinationConfirmOpen, setCoordinationConfirmOpen] = useState(false)
-  const refreshCoordination = useCallback(() => api.coordination(pid).catch(() => null), [pid])
-  const openCoordinationPlan = useCallback(async (proposal: CoordinationPlanProposal, confirm = false) => {
-    const next = await refreshCoordination()
-    const plan = next?.plans.find((p) => p.id === proposal.plan_id)
-    if (plan) {
-      setPendingCoordinationPlan(plan)
-      if (confirm) setCoordinationConfirmOpen(true)
-    }
-  }, [refreshCoordination])
   const [personaOpen, setPersonaOpen] = useState(false)
   const refreshOrchMeta = () =>
     api.projectGoal(pid).then(setOrchMeta).catch(() => {})
@@ -489,20 +466,11 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
     setSessions((ss) => ss.map((s) => (s.id === sid && s.unread ? { ...s, unread: 0 } : s)))
     api.readSessionInbox(sid).catch(() => {})
   }, [activeTab])
-  // v0.71 任务即窗口：双击任务卡/任务流节点跳来——直开该任务专属窗页签并回直播模式
+  // 双击任务卡/任务流节点跳来——直开该会话页签
   useEffect(() => {
     if (!focusSession?.sid) return
     setActiveTab(focusSession.sid)
-    setViewMode("live")
   }, [focusSession?.n, focusSession?.sid])  // eslint-disable-line react-hooks/exhaustive-deps
-  // v0.71 任务即窗口：任务清单轮询（延续模式判定=绑定任务终态）
-  const [tasks, setTasks] = useState<Task[]>([])
-  useEffect(() => {
-    api.tasks(pid).then(setTasks).catch(() => {})
-    const t = setInterval(() => api.tasks(pid).then(setTasks).catch(() => {}), 5000)
-    return () => clearInterval(t)
-  }, [pid])
-
   // 角色中文名映射（事件流「提议开窗」摘要 / 会话页签显中文）
   const roleNames = useMemo(
     () => Object.fromEntries(roles.map((r) => [r.role, r.name || r.role])),
@@ -565,10 +533,6 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
   // 圈定口径，只差类型筛选层
   const inTabScope = useCallback((e: BBEvent) => {
     if (activeTab === "__orch") {
-      // 编排发布任务的全生命周期（2026-09-18）：五类状态变迁带认领会话的
-      // session_id，按 payload.created_by 关联进编排页签（须在 session_id
-      // 剔除之前判）；旧事件无 created_by → 不显示（退回现状，不回填）。
-      if (ORCH_TASK_EVENTS.has(e.kind)) return e.payload.created_by === "orchestrator"
       // 团队生命周期事件（2026-10-06）：无 session_id，指挥页签对话流渲染团队卡
       if (TEAM_EVENT_KINDS.has(e.kind)) return true
       if (e.session_id) return false
@@ -580,10 +544,9 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
     return e.session_id === activeTab
   }, [activeTab])
 
-  const visible = useMemo(() => {
-    const f = FILTERS.find((x) => x.key === filter)!
-    return events.filter((e) => inTabScope(e) && f.match(e.kind))
-  }, [events, inTabScope, filter])
+  const visible = useMemo(
+    () => events.filter((e) => inTabScope(e)),
+    [events, inTabScope])
   // 审计抽屉数据（2026-09-28）：同一 events 窗口按抽屉筛选态平铺；「全部」下经
   // buildStreamItems 仍成轮（与主区一致），其余筛选 note 被滤掉自然退化为平铺审计行
   const auditVisible = useMemo(() => {
@@ -615,7 +578,7 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
     "agent.chat", "agent.chat.delta",
     "advisor.intervention", "approval.requested",
     "finding.new", "message.inbox",
-    "session.aborted", "task.failed",
+    "session.aborted",
   ])
   const leanItems = useMemo<StreamItem[]>(
     () => items.filter((it) => it.type === "turn" || it.type === "pair"
@@ -630,7 +593,7 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
     const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(update) : null
     observer?.observe(el)
     return () => observer?.disconnect()
-  }, [shown.length, activeTab, filter, viewMode])
+  }, [shown.length, activeTab])
   // 统计行（会话流改造 2026-10-03，cc-haha 风格）：token/最后更新/条数。
   // token 取当前窗口内 llm.usage 事件求和——**窗口内近似**（已上翻的分页不在内），
   // 故文案标注「窗口内」；精确值在工作台侧（thread.usage）。
@@ -649,7 +612,7 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
   useEffect(() => {
     const el = listRef.current
     if (el) el.scrollTop = 0
-  }, [activeTab, filter])
+  }, [activeTab])
   // 上翻到视觉顶部附近自动加载更早一页。column-reverse 的滚动原点在最底（最新），
   // Chrome 走负值域（scrollTop=0 贴底，视觉顶部=-max）；取 |scrollTop| 兼容正负两套实现，
   // 距顶 = 可滚动总距离 - 已上翻距离。
@@ -684,24 +647,6 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
     if (el && el.scrollHeight <= el.clientHeight + 40) return // 未铺满：让位补批
     trimDom(MAX_DOM, PAGE, SPARSE_FLOORS)
   }, [events, trimDom])
-
-  // 筛选空窗自动回填（2026-09-28）：类型筛选选中后窗口内零命中且历史未取尽
-  // → 自动补一批更早——低频事件被刷屏挤出窗口后筛选视图不再「空窗像失灵」；
-  // 单页签+筛选组合最多自动补 1 批（50 条）：低频筛选（路由/发现等）在窗口内
-  // 零命中时再补批大概率仍空，连发多批只会在拉取瞬间造成列表重建闪动/「加载
-  // 更早」按钮跳动——1 批仍空即静默，余下交「↑ 加载更早」手动。
-  // 「计划」标签渲染 PlanPanel 非事件流、「全部」由铺满补批负责，均不参与。
-  const backfillRef = useRef<{ key: string; tries: number }>({ key: "", tries: 0 })
-  useEffect(() => {
-    const key = `${activeTab}:${filter}`
-    if (backfillRef.current.key !== key) backfillRef.current = { key, tries: 0 }
-    if (filter === "plan" || filter === "all") return
-    if (loadedAll || loadingEarlier) return
-    if (visible.length > 0) return
-    if (backfillRef.current.tries >= 1) return
-    backfillRef.current.tries++
-    void loadEarlier()
-  }, [filter, activeTab, visible.length, loadedAll, loadingEarlier, loadEarlier])
 
   const toggleRow = useCallback((id: number, defaultValue: boolean) =>
     setOverrides((prev) => new Map(prev).set(id, !(prev.get(id) ?? defaultValue))), [])
@@ -811,7 +756,7 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
       }
       const r = job.result as OrchTickResult
       // 统计位在前（截断后首屏可见的是数字而非 raw_arguments JSON；summary 尾随，悬停 title 见全文）
-      const bits = [`📤 ${r.published.length} 任务`, `🪟 ${r.spawned.length} 窗`]
+      const bits = [`🪟 ${r.spawned.length} 窗`, `🏗 ${r.teams.length} 队`]
       if (r.proposals.length) bits.push(`💡 ${r.proposals.length} 提案待采纳`)
       if (r.digest) bits.push("📝 已写简报")
       setJobInfo(`编排完成：${bits.join(" · ")}${r.summary ? ` · ${r.summary}` : ""}`)
@@ -820,41 +765,7 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
     }
   }
 
-  // A5 手动重排：planner 一轮只调 set_priorities，只改 open 行；
-  // 人类动作不受自主档/30s 去抖/预算限制，tick/重排租约占用时服务端 409。
-  const [replanning, setReplanning] = useState(false)
-  const replanPriorities = async () => {
-    setReplanning(true)
-    setJobInfo("重排优先级中…")
-    try {
-      const { job_id } = await api.replanPriorities(pid)
-      const job = await pollJob(job_id, () => {})
-      if (job.status !== "done") {
-        setJobInfo(`重排失败：${job.error}`)
-        return
-      }
-      const r = job.result as ReplanResult
-      if (r.error) {
-        setJobInfo(`重排失败：${r.error}`)
-        return
-      }
-      if (r.note) {
-        setJobInfo(`重排跳过：${r.note}`)
-        return
-      }
-      if (r.updated.length) {
-        const detail = r.updated
-          .map((u) => `${u.task_id.slice(-6)}:P${u.old}→P${u.new}`).join("，")
-        setJobInfo(`重排完成：${r.updated.length} 条改级（${detail}），跳过 ${r.skipped.length} 条`)
-      } else {
-        setJobInfo(`重排完成：无调整${r.skipped.length ? `（跳过 ${r.skipped.length} 条）` : ""}`)
-      }
-    } catch (e) {
-      setJobInfo(`重排不可用：${String(e)}`)  // 含 409：tick/重排租约占用
-    } finally {
-      setReplanning(false)
-    }
-  }
+  // A5 手动重排已随任务机制退役（2026-10-06）：函数与入口一并删除。
 
   // F8 会话级复盘：planner LLM 复盘本会话跑过的任务 → 变更提案进设置「提案」tab 等人审（无 key 503）
   const [reviewing, setReviewing] = useState(false)
@@ -954,6 +865,27 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
     }
   }
 
+  // 会话手动压缩上下文（/compact，2026-10-06）：调后端把 chat-<sid>.json 旧历史压成
+  // 摘要重写，后续对话从压缩后历史续起。不走 human_note、不发对话轮。
+  const runCompact = async (sid: string) => {
+    setRemark("")
+    try {
+      const r = await api.compactSession(sid)
+      if (r.status === "compacted") {
+        const kept = Math.max(0, (r.after_msgs ?? 0) - 2) // 减摘要头两条
+        setJobInfo(`已压缩上下文：${r.before_msgs ?? "?"} 条 → 摘要 + 最近 ${kept} 条（见事件流「🧹 上下文压缩」）`)
+      } else if (r.status === "noop") {
+        setJobInfo("当前对话历史较短，无需压缩")
+      } else {
+        setJobInfo(`上下文压缩失败：${r.reason ?? r.status}`)
+      }
+    } catch (e) {
+      setJobInfo(e instanceof ApiError && e.status === 409
+        ? "会话正在执行中，稍候再压缩"
+        : `上下文压缩失败：${e}`)
+    }
+  }
+
   // 输入框（E8，2026-09-19 附件随发；2026-09-20 对话化改双模式；2026-09-21
   // 对话化编排器 M1 编排器态改「与编排对话」；2026-09-28 阶段二去模式徽章）：
   // 会话态=「对话/引导」（human_note 直达当前选中会话，空闲=后端踢对话轮流式
@@ -965,7 +897,10 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
     const readyIds = pendingFiles.filter((f) => f.status === "ready" && f.att).map((f) => f.att!.id)
     if (uploadingAtt) return
     if (inputMode === "note") {
-      if (!activeSession || (!text && readyIds.length === 0)) return
+      if (!activeSession) return
+      // 斜杠命令 /compact：压缩本会话上下文，不发引导（2026-10-06）
+      if (text === "/compact") { void runCompact(activeSession.id); return }
+      if (!text && readyIds.length === 0) return
       const sid = activeSession.id
       setRemark("")
       try {
@@ -1019,42 +954,42 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
     }
   }
 
-  // 批 6 L0：采纳编排提案——走人类既有写口（POST /tasks、POST /agents），
+  // 批 6 L0：采纳编排提案——走人类既有写口（POST /teams、POST /agents），
   // 实体 created_by=human，责任不挂编排；成功后按钮仅在本页内存态置灰。
+  // 任务机制退役（2026-10-06）后 op 仅剩 build_team / execute。
   const adoptProposal = async (ev: BBEvent) => {
     const p = ev.payload as unknown as OrchProposal
     if (!p || typeof p !== "object" || adopted.has(ev.id) || adoptingId !== null) return
     setAdoptingId(ev.id)
     try {
-      if (p.op === "publish_task") {
+      if (p.op === "build_team") {
+        // 采纳=以人类名义建队（draft，不启动）；启动仍需团队卡 preflight + 四项确认
         const a = p.args
-        const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined)
-        const strs = (v: unknown): string[] | undefined =>
-          Array.isArray(v) && v.every((x) => typeof x === "string") ? (v as string[]) : undefined
-        await api.publishTask(pid, {
-          objective: String(a.objective ?? ""),
-          scope: str(a.scope),
-          task_type: str(a.task_type),
-          noise_budget: str(a.noise_budget),
-          priority: typeof a.priority === "number" ? a.priority : undefined,
-          conflict_keys: strs(a.conflict_keys),
-          refs: strs(a.refs),
-          parent_id: str(a.parent_id),  // C1 编排拆解：透传父子关系（任务流实线/撤回子树依赖）
+        const rawMembers = Array.isArray(a.members) ? (a.members as Record<string, unknown>[]) : []
+        const members: TeamMemberInput[] = rawMembers.map((m, i) => ({
+          member_key: String(m.member_key ?? m.id ?? `member-${i + 1}`),
+          label: typeof m.label === "string" ? m.label : undefined,
+          responsibility: typeof m.responsibility === "string" ? m.responsibility : undefined,
+          role: typeof m.role === "string" ? m.role : undefined,
+          runtime: typeof m.runtime === "string" ? m.runtime : undefined,
+          threat_class: typeof m.threat_class === "string" ? m.threat_class : undefined,
+          max_steps: typeof m.max_steps === "number" ? m.max_steps : undefined,
+        }))
+        await api.createTeam(pid, {
+          name: String(a.name ?? ""),
+          goal_text: typeof a.goal_text === "string" ? a.goal_text : undefined,
+          members,
         })
-        setJobInfo("已采纳任务提案：以人类名义入队（L0 不自动跑队列，需要时点「跑队列」）")
-      } else if (p.op === "spawn_session") {
-        const r = await api.spawnAgent(pid, String(p.args.role ?? ""))
+        setJobInfo("已采纳建队提案：请在团队卡「查看并配置」确认启动")
+      } else if (p.op === "execute") {
+        // 采纳=亲自执行：以人类名义开通用窗并引导（新模型下人工开窗引导=纯对话）
+        const r = await api.spawnAgent(pid, "_generalist")
+        await api.sessionNote(r.id, String(p.args.objective ?? ""))
         await refreshSessions()
         void refreshUsage()
-        setJobInfo(r.warning ? `已采纳开窗提案（⚠ ${r.warning}）` : "已采纳开窗提案：以人类名义开了窗（L0 不自动跑队列）")
-      } else if (p.op === "cancel_task") {
-        // M4 C1：取消提案采纳——走人工取消端点（同源写口，打断在跑窗不关窗）
-        await api.cancelTask(String(p.args.task_id ?? ""), String(p.args.reason ?? ""))
-        setJobInfo("已采纳取消提案：任务转 failed（cancelled），在跑窗已打断")
-      } else if (p.op === "requeue_task") {
-        // M4 C1：放回提案采纳——走人工 reopen 端点（履历保留，原绑定窗优先续跑）
-        await api.reopenTask(String(p.args.task_id ?? ""))
-        setJobInfo("已采纳放回提案：任务回到待认领（原绑定窗优先续跑）")
+        setJobInfo(r.warning
+          ? `已开窗引导执行（⚠ ${r.warning}）`
+          : "已采纳执行提案：已开窗并引导 Agent 执行该目标")
       }
       setAdopted((prev) => new Set(prev).add(ev.id))
     } catch (e) {
@@ -1064,51 +999,14 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
     }
   }
 
-  // 任务报告（trae 视图 2026-09-28）：点击生成→后台 LLM 撰写（幂等端点）→报告
-  // 事件落库后自动出现在条目里；pending 只管按钮态，生成不阻塞页面
-  const [reportPending, setReportPending] = useState<Set<string>>(new Set())
-  const generateReport = async (tid: string) => {
-    if (reportPending.has(tid)) return
-    setReportPending((prev) => new Set(prev).add(tid))
-    try {
-      await api.generateTaskReport(pid, tid)
-      setJobInfo("任务报告生成中（后台 LLM 撰写，完成后自动出现在条目里）")
-    } catch (e) {
-      setJobInfo(`报告生成失败：${e instanceof Error ? e.message : String(e)}`)
-    } finally {
-      setReportPending((prev) => {
-        const n = new Set(prev)
-        n.delete(tid)
-        return n
-      })
-    }
-  }
-
   const activeSession = sessions.find((s) => s.id === activeTab)
   const activeStatus = activeSession ? tabStatus(activeSession.id) : null
-  // v0.71：当前会话绑定的任务（bound_task_id 优先；延续模式=任务已终态，续聊不接新任务）
-  const activeTask = activeSession
-    ? (tasks.find((t) => t.id === activeSession.bound_task_id)
-       ?? tasks.find((t) => t.target_session === activeSession.id))
-    : null
-  const continuing = !!activeTask && (activeTask.status === "done" || activeTask.status === "failed")
-  // 延续徽章「续跑」按钮（2026-09-22）：failed 任务经 C6 resume 端点复活——原窗可复用即原窗续跑，
-  // 否则后端新建 armed 任务窗（响应 session_id 区分提示）；成功即主动刷任务行（5s 轮询兜底）
-  const [resumingTask, setResumingTask] = useState(false)
-  async function resumeBoundTask(taskId: string) {
-    setResumingTask(true)
-    try {
-      const r = await api.resumeTask(taskId)
-      api.tasks(pid).then(setTasks).catch(() => {})
-      setJobInfo(r.session_id && r.session_id !== activeSession?.id
-        ? `任务已续跑（快照缺失，已在新任务窗 ${r.session_id.slice(0, 16)} 接手现场）`
-        : "任务已续跑，本窗恢复执行")
-    } catch (e) {
-      setJobInfo(`续跑失败：${e instanceof Error ? e.message : String(e)}`)
-    } finally {
-      setResumingTask(false)
-    }
-  }
+  // 会话态斜杠命令提示（2026-10-06）：选中会话且输入以 / 开头（无空格）时浮出候选。
+  const slashQuery = inputMode === "note" && activeSession
+    && remark.startsWith("/") && !remark.includes(" ")
+    ? remark.slice(1).toLowerCase() : null
+  const sessionSlashCmds = slashQuery === null
+    ? [] : SESSION_SLASH_COMMANDS.filter((c) => c.cmd.slice(1).includes(slashQuery))
   // 输入行模型徽章（2026-09-19）：当前会话记忆中的模型（无值=后端默认）与发送可用性
   const sessionModelOf = activeSession ? sessionModel[activeSession.id] : undefined
   const uploadingAtt = pendingFiles.some((f) => f.status === "uploading")
@@ -1136,28 +1034,17 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
     setInputMode(hasSessionCtx ? "note" : "orch")
   }, [hasSessionCtx])
 
-  // 排队引导条自动清理：会话下一轮 task.claimed 到达 = 认领期 drain 已把引导注入
-  // 排队条清理：只看新到达的 task.claimed——用游标记上次扫到的事件 id，
-  // 避免历史事件（加载更早/重连重放）每次 events 变化都误清排队条
-  const claimCursor = useRef(0)
+  // 排队引导条清理（2026-10-06 任务退役后）：会话不再 running = 本轮结束，
+  // 收件箱引导随下一轮对话注入，排队提示随之清除。
   useEffect(() => {
-    let maxId = claimCursor.current
-    const claimed = new Set<string>()
-    for (const e of events) {
-      if (e.id <= claimCursor.current) continue
-      maxId = Math.max(maxId, e.id)
-      if (e.kind !== "task.claimed") continue
-      const sid = e.session_id ?? String((e.payload as { claimed_by?: string } | null)?.claimed_by ?? "")
-      if (sid) claimed.add(sid)
-    }
-    claimCursor.current = maxId
-    if (claimed.size === 0) return
-    setQueuedNotes((qs) => qs.filter((q) => !claimed.has(q.sid)))
+    if (queuedNotes.length === 0) return
+    setQueuedNotes((qs) => qs.filter((q) => tabStatus(q.sid) === "running"))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [events])
 
-  // 事件驱动即时刷 sessions（2026-09-29 余晖退役配套）：task.claimed/done/failed
-  // 到达即刷，执行灯（worker_running 权威信号）开始/结束亚秒亮灭，不吃 5s
-  // 轮询延迟；游标去重防历史回放/重连风暴（同 claimCursor 模式）
+  // 事件驱动即时刷 sessions（2026-09-29 余晖退役配套）：会话生命周期事件到达即刷，
+  // 执行灯（worker_running 权威信号）开始/结束亚秒亮灭，不吃 5s 轮询延迟；
+  // 游标去重防历史回放/重连风暴。
   const lifeCursor = useRef(0)
   useEffect(() => {
     let maxId = lifeCursor.current
@@ -1165,8 +1052,9 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
     for (const e of events) {
       if (e.id <= lifeCursor.current) continue
       maxId = Math.max(maxId, e.id)
-      if (e.kind === "task.claimed" || e.kind === "task.done"
-          || e.kind === "task.failed") touched = true
+      if (e.kind === "session.spawned" || e.kind === "session.finished"
+          || e.kind === "session.paused" || e.kind === "session.resumed"
+          || e.kind === "session.aborted") touched = true
     }
     lifeCursor.current = maxId
     if (touched) void refreshSessions()
@@ -1211,7 +1099,7 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
           action = (
             <button
               type="button"
-              title="以人类名义采纳：走与手动发任务/开窗相同的写口（created_by=human）"
+              title="以人类名义采纳：走与手动建队/开窗相同的写口（created_by=human）"
               onClick={(click) => { click.stopPropagation(); void adoptProposal(item.event) }}
               disabled={adopted.has(item.event.id) || adoptingId !== null}
               className={cn(
@@ -1370,83 +1258,30 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
             </Button>
           </div>
         )}
-        {/* 直播｜协调分段切换 */}
-        <div className="mr-1 ml-1 flex shrink-0 items-center rounded-md border p-0.5 text-[11px]">
-          <button
-            type="button"
-            onClick={() => setViewMode("live")}
-            className={cn(
-              "rounded px-2 py-0.5 whitespace-nowrap",
-              viewMode === "live" ? "bg-secondary font-medium text-foreground" : "text-muted-foreground hover:bg-accent",
-            )}
-          >
-            直播
-          </button>
-          <button
-            type="button"
-            title="多智能体协调：计划依赖图 + 协调驾驶舱（会话状态/任务泳道/协作消息）"
-            onClick={() => setViewMode("coord")}
-            className={cn(
-              "flex items-center gap-1 rounded px-2 py-0.5 whitespace-nowrap",
-              viewMode === "coord" ? "bg-secondary font-medium text-foreground" : "text-muted-foreground hover:bg-accent",
-            )}
-          >
-            <GitBranch className="size-3" />协调
-          </button>
-        </div>
         <span className={cn("ml-1 shrink-0 font-mono text-[10px]", connected ? "text-primary" : "text-(--status-error)")}>
           {connected ? "● live" : "○ 重连中"}
         </span>
-        {/* 计划/审计入口（2026-09-28 三段式改造）：类型筛选 chips 从主区撤除迁入审计
-            抽屉；「计划」切换 PlanPanel 结构化视图（原 FILTERS 的 plan 特殊标签） */}
-        {viewMode === "live" && (
-          <>
-            <button
-              type="button"
-              title="结构化任务计划/进度面板（GET /tasks 轮询，目标 → 任务 → 步骤）"
-              onClick={() => setFilter((f) => (f === "plan" ? "all" : "plan"))}
-              className={cn(
-                "shrink-0 rounded px-2 py-1 text-[11px] whitespace-nowrap",
-                filter === "plan" ? "bg-secondary font-medium text-foreground" : "text-muted-foreground hover:bg-accent",
-              )}
-            >
-              ▦ 计划
-            </button>
-            <button
-              type="button"
-              title="审计流：按类型平铺过滤当前页签事件（思考/命令/工具/发现…）"
-              onClick={() => setAuditOpen((v) => !v)}
-              className={cn(
-                "shrink-0 rounded px-2 py-1 text-[11px] whitespace-nowrap",
-                auditOpen ? "bg-secondary font-medium text-foreground" : "text-muted-foreground hover:bg-accent",
-              )}
-            >
-              ❋ 审计
-            </button>
-            <button
-              type="button"
-              title="切换会话 UI 风格：claude=终端行式对话流 / trae=计划清单执行视图（项目级记忆）"
-              onClick={() => {
-                const next = usage?.ui_style === "trae" ? "claude" : "trae"
-                api.patchProjectConfig(pid, { ui_style: next })
-                  .then(() => refreshUsage())
-                  .catch((e) => setJobInfo(`风格切换失败：${e instanceof Error ? e.message : String(e)}`))
-              }}
-              className="shrink-0 rounded px-2 py-1 text-[11px] whitespace-nowrap text-muted-foreground hover:bg-accent"
-            >
-              ◫ {usage?.ui_style === "trae" ? "trae" : "claude"}
-            </button>
-          </>
+        {/* 审计入口（2026-09-28 三段式改造）：类型筛选 chips 从主区撤除迁入审计抽屉 */}
+        {true && (
+          <button
+            type="button"
+            title="审计流：按类型平铺过滤当前页签事件（思考/命令/工具/发现…）"
+            onClick={() => setAuditOpen((v) => !v)}
+            className={cn(
+              "shrink-0 rounded px-2 py-1 text-[11px] whitespace-nowrap",
+              auditOpen ? "bg-secondary font-medium text-foreground" : "text-muted-foreground hover:bg-accent",
+            )}
+          >
+            ❋ 审计
+          </button>
         )}
       </div>
       {/* 分阶段工作流阶段条（pentest M4）：轨无剧本自渲染 null，直播视图共用 */}
-      {/* 统计行（会话流改造 2026-10-03）：仅直播视图 + 非计划面板时显示 */}
-      {viewMode === "live" && filter !== "plan" && (
-        <ChatStats tokens={stats.tokens} cachedTokens={stats.cached}
-          updatedAt={stats.updatedAt} count={visible.length} countLabel="条事件"
-          className="shrink-0 border-b px-3 py-1 text-[11px] text-muted-foreground/70" />
-      )}
-      {viewMode === "live" && (
+      {/* 统计行（会话流改造 2026-10-03） */}
+      <ChatStats tokens={stats.tokens} cachedTokens={stats.cached}
+        updatedAt={stats.updatedAt} count={visible.length} countLabel="条事件"
+        className="shrink-0 border-b px-3 py-1 text-[11px] text-muted-foreground/70" />
+      {true && (
       <>
 
       {/* 批 5 §6.8：重启=急停。DB 链活但本进程无标记 → 提示人工恢复 */}
@@ -1472,10 +1307,7 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
         </div>
       )}
 
-      {/* 「计划」标签：结构化计划/进度面板替代事件流（GET /tasks，3s 轮询仅在本标签激活时跑） */}
-      {filter === "plan" ? (
-        <PlanPanel pid={pid} activeTab={activeTab} sessions={sessions} />
-      ) : activeTab === "__orch" ? (
+      {activeTab === "__orch" ? (
       // 对话化编排器（M1/M2/M3，2026-09-21）：编排页签两段式——顶部 goal 条 + 对话流
       // （OrchChatPane）。编排动作事件（任务派发/orch.*/goal.*/llm.error…）由「❋ 审计」
       // 抽屉承载——2026-09-28 删除运行记录折叠区：与审计抽屉数据源/渲染体完全相同，
@@ -1487,24 +1319,9 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
         pid={pid}
         teams={teams}
         onEditPersona={() => setPersonaOpen(true)}
-        onConfirmPlan={(plan) => void openCoordinationPlan(plan, true)}
-        onOpenPlan={(plan) => { void openCoordinationPlan(plan); setViewMode("coord") }}
         onOpenTeamReport={(tid) => setTeamReportId(tid)}
         onConfigureTeam={(tid) => setTeamConfigId(tid)}
         orchRunning={!!usage?.orch_running}
-      />
-      ) : usage?.ui_style === "trae" ? (
-      // trae 风格执行视图（2026-09-28）：任务即计划条目（清单+展开统计+LLM 报告），
-      // 引导右气泡+审批卡保留；仅显示绑定当前窗的任务（页签=单会话视角）
-      <TraeView
-        pid={pid}
-        tasks={tasks.filter((t) => t.target_session === activeTab)}
-        events={visible}
-        orchRunning={!!usage?.orch_running}
-        reportBusy={reportPending.size > 0}
-        onGenerateReport={(tid) => void generateReport(tid)}
-        approvalById={approvalById}
-        onDecideApproval={decideApr}
       />
       ) : (
       <div
@@ -1522,7 +1339,7 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
       {/* 审计抽屉（2026-09-28 三段式改造）：右侧滑出覆盖流区（页签行保留可切页签），
           类型筛选 chips 迁此；复用同一 events 窗口 + renderStream（busy 行不传），
           加载更早/行展开/审批按钮与主区共享状态 */}
-      {auditOpen && viewMode === "live" && (
+      {auditOpen && (
         <div className="absolute bottom-0 right-0 top-9 z-30 flex w-[min(720px,92%)] flex-col border-l bg-background shadow-2xl">
           <div className="flex h-9 shrink-0 items-center gap-2 border-b px-3">
             <span className="shrink-0 text-xs font-medium">❋ 审计流</span>
@@ -1542,7 +1359,7 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
             </button>
           </div>
           <div className="flex shrink-0 flex-wrap gap-1 border-b px-3 py-1.5">
-            {FILTERS.filter((f) => f.key !== "plan").map((f) => (
+            {FILTERS.map((f) => (
               <button
                 key={f.key}
                 onClick={() => setAuditFilter(f.key)}
@@ -1577,36 +1394,6 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
           "rounded-xl border border-white/25 bg-background/30 px-3 py-2",
           "transition-[border-color,box-shadow] duration-200",
           "focus-within:border-white/60 focus-within:shadow-[0_0_18px_rgba(255,255,255,0.15)]")}>
-        {/* v0.71 延续模式徽章：绑定任务已终态，窗保留可续聊（不接新任务，页签 × 才真关）。
-            failed 分色红 + 带「续跑」入口（C6 resume 端点原窗复活）——此前窗内无任何续跑入口，
-            LLM 429 等传输层失败后任务只能去看板找按钮，发「继续」只触发延续聊天（2026-09-22） */}
-        {continuing && activeTask && (
-          <div className={cn(
-            "mb-2 flex items-center gap-2 rounded-md border px-2 py-1 text-[11px]",
-            activeTask.status === "failed"
-              ? "border-red-400/40 bg-red-400/5 text-red-300"
-              : "border-emerald-400/40 bg-emerald-400/5 text-emerald-300")}>
-            {activeTask.status === "failed" ? "❌ 任务失败 · 延续模式" : "✅ 任务已结束 · 延续模式"}
-            <span className={cn("min-w-0 flex-1 truncate", activeTask.status === "failed" ? "text-red-300/70" : "text-emerald-300/70")}
-                  title={activeTask.objective}>
-              {activeTask.objective}
-            </span>
-            {activeTask.status === "failed" && (
-              <button type="button" disabled={resumingTask}
-                      className="shrink-0 rounded border border-red-400/60 px-1.5 py-px text-[11px] hover:bg-red-400/10 disabled:opacity-50"
-                      title={activeTask.resume_mode === "snapshot"
-                        ? "⚡ 带现场续跑（C6）：从任务键断点快照恢复对话与步数预算（原窗存活即本窗复活）"
-                        : "↩ 接手现场续跑（C6）：恢复最近对话现场与尝试履历重新认领（原窗存活即本窗接手，仅原窗已关时才在新任务窗执行）"}
-                      onClick={() => void resumeBoundTask(activeTask.id)}>
-                {resumingTask ? "续跑中…"
-                  : activeTask.resume_mode === "snapshot" ? "⚡ 带现场续跑" : "↩ 接手现场续跑"}
-              </button>
-            )}
-            <span className={cn("shrink-0", activeTask.status === "failed" ? "text-red-300/60" : "text-emerald-300/60")}>
-              继续聊属于该任务的延续，不会接新任务
-            </span>
-          </div>
-        )}
         {/* 排队引导条（2026-09-19 轮末语义）：note 发送后等本轮结束注入，可「立即发送」中断当前轮提前注入 */}
         {activeSession && queuedNotes.filter((q) => q.sid === activeSession.id).map((q) => (
           <div key={q.key}
@@ -1656,6 +1443,20 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
             )}
           </div>
         )}
+        {/* 会话态斜杠命令提示（2026-10-06）：输入以 / 开头时浮出候选（目前仅 /compact），
+            点击即执行；Esc 关闭（清空输入）。 */}
+        {sessionSlashCmds.length > 0 && (
+          <div className="mb-2 rounded-md border border-white/15 bg-card/95 p-1 shadow-lg">
+            {sessionSlashCmds.map((c) => (
+              <button key={c.cmd} type="button"
+                      className="flex w-full items-baseline gap-2 rounded px-2 py-1 text-left text-xs hover:bg-accent"
+                      onClick={() => { if (activeSession) void runCompact(activeSession.id) }}>
+                <span className="font-mono text-foreground">{c.cmd}</span>
+                <span className="text-muted-foreground">{c.desc}</span>
+              </button>
+            ))}
+          </div>
+        )}
         {/* 输入区：无边框透明多行，Enter 发送 / Shift+Enter 换行，自适应 1-6 行 */}
         <textarea
           ref={taRef}
@@ -1664,14 +1465,15 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
           placeholder={inputMode === "orch"
             ? "与编排器对话：问态势/问下一步/纠正方向——插队轮即时回复，可让它发任务、开窗（同闸门）…"
             : (activeSession
-                ? (continuing
-                    ? `续聊此任务「${activeTask?.objective.slice(0, 24)}…」：作为该任务的延续对话（不接新任务）…`
-                    : canAbort
+                ? (canAbort
                     ? `引导「${sessionLabel(activeSession, roleNames)}」：一句话指示，本轮结束后注入（可在上方排队条点「立即发送」中断当前轮）…`
-                    : `与「${sessionLabel(activeSession, roleNames)}」对话：下达任务或提问，Agent 空闲时自动判断并回复/执行…`)
+                    : `与「${sessionLabel(activeSession, roleNames)}」对话：提问或下达指示，Agent 空闲时自动回复…`)
                 : "对话：先选中一个会话页签…")}
           onChange={(e) => { setRemark(e.target.value); autoResize() }}
           onKeyDown={(e) => {
+            if (e.key === "Escape" && sessionSlashCmds.length > 0) {
+              e.preventDefault(); setRemark(""); return
+            }
             if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault()
               sendRemark()
@@ -1799,14 +1601,6 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
                         ? `/${fmtTokens(usage.tokens.budget)} ${Math.round((usage.tokens.pct ?? 0) * 100)}%`
                         : ""}
                     </span>
-                    <span className={usage.tasks.budget
-                      ? (usage.tasks.pct ?? 0) >= 1
-                        ? "text-(--status-error)"
-                        : (usage.tasks.pct ?? 0) >= 0.8 ? "text-amber-400" : "text-muted-foreground"
-                      : "text-muted-foreground"}>
-                      📋 {usage.tasks.published}
-                      {usage.tasks.budget ? `/${usage.tasks.budget}` : ""}
-                    </span>
                     <span className="text-muted-foreground">
                       🪟 {usage.active_sessions}/{usage.sessions_cap}
                     </span>
@@ -1839,16 +1633,12 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
               {/* ⋯ 更多：低频动作收弹层 */}
               <div className="relative">
                 <button type="button" onClick={() => setMoreOpen((v) => !v)}
-                  title="重排优先级 / 清理工作区"
+                  title="清理工作区"
                   className={ORCH_CHIP_CLS}>
                   ⋯
                 </button>
                 {moreOpen && (
                   <div className="absolute bottom-9 left-0 z-10 w-44 rounded-lg border bg-popover p-2 shadow-md">
-                    <Button size="sm" variant="outline" className="mb-1.5 w-full" disabled={replanning} onClick={replanPriorities}
-                            title="让 planner 重排待认领任务优先级（0-9，小者优先，只改 open）。手动随时可跑，不受自主档/30s 去抖/预算限制；tick 或重排在跑时返回 409">
-                      {replanning ? "重排中…" : "重排优先级"}
-                    </Button>
                     {/* 工作区隔离（W3）：清空 scratch + .tmp（临时工作区），正式产物 artifacts/ 不动 */}
                     <Button size="sm" variant="outline" className="w-full"
                             title="清空项目自由工作区（scratch 临时文件与 .tmp 系统临时重定向区）；正式产物 artifacts/ 不受影响"
@@ -1964,33 +1754,6 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
       </>
       )}
 
-      {/* 多智能体协调视图（2026-10-04 并入直播间）：计划依赖图 + 协调驾驶舱；
-          点会话/绑定节点 → 切回直播视图并选中该会话 */}
-      {viewMode === "coord" && (
-        <div className="min-h-0 flex-1 border-t">
-          <Suspense fallback={
-            <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
-              协调视图加载中…
-            </div>
-          }>
-            <CoordinationPane
-              key={pid}
-              pid={pid}
-              onOpenSession={(sid) => { setActiveTab(sid); setViewMode("live") }}
-            />
-          </Suspense>
-        </div>
-      )}
-
-      {/* E12 中断确认弹窗已退役（2026-09-19）：中断并入输入行 ■ 钮，单击直接中断（快照保留可续跑） */}
-      <PlanConfirmDialog
-        pid={pid}
-        plan={pendingCoordinationPlan}
-        open={coordinationConfirmOpen}
-        onOpenChange={setCoordinationConfirmOpen}
-        onStarted={() => { setJobInfo("团队计划已确认，协调轮已提交"); void refreshCoordination(); refreshSessions() }}
-      />
-
       {personaOpen && (
         <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/50 p-4"
              onClick={() => setPersonaOpen(false)}>
@@ -2013,7 +1776,7 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
       {teamReportId && (
         <TeamRunReport pid={pid} teamId={teamReportId}
           onClose={() => setTeamReportId(null)}
-          onOpenSession={(sid) => { setTeamReportId(null); setActiveTab(sid); setViewMode("live") }} />
+          onOpenSession={(sid) => { setTeamReportId(null); setActiveTab(sid) }} />
       )}
     </div>
   )

@@ -1,19 +1,10 @@
 """执行轨迹链路（docs/plans/execution-trace-chain.md，2026-09-22 实施 M1+M2+M3）。
 
-双轨制（方案 D3 定稿）：
-- **轨 A 轨迹视图**：`build_task_trace` 查询时现算（零写入）——events 按会话任务
-  区间切分（R1）+ 过程聚合（R2），API `GET /api/projects/{pid}/trace/{task_id}` 直出。
-- **轨 B 持久链**：`materialize_task_trace` 把聚合结果物化进 chains/chain_links
-  （origin='trace' 自动链，node_type 扩 task/step，trace_ref 幂等键），触发点 =
-  任务收尾 done（tasks._finish）与 finding verified（store 两条升级路径），
-  try/except 旁路不挡主流程（R3）。
+任务机制退役（2026-10-06）：原轨 A 轨迹视图（`build_task_trace`）与轨 B 持久链
+（`materialize_task_trace`）随任务一并退役——任务区间切分与任务链物化不再存在。
+本模块保留的只读统计口径：
 - **效果榜（M3/R4）**：`effect_stats` 基于物化侧统计 (skill × kb) × verified finding。
-
-任务归属口径（R1）：一个会话同时只持一个任务（AgentSession.current_task_id 单值），
-会话事件流按 `task.claimed → task.done/task.failed` 区间良构切分；区间内
-command/tool.call/kb.open/skill.routed/finding.new 归属该任务；区间外 = 会话游离段
-（idle，chat 轮命令等），只进轨迹视图、不进任务链。纯 claimed_by 列不可靠
-（reopen 重跑可换会话），事件切分是唯一可靠口径。
+- `kb_module_feedback` / `retrieval_stats`：检索质量四象限只读对账。
 """
 
 import json
@@ -82,24 +73,6 @@ def _session_task_windows(conn, pid: str, session_id: str) -> list[dict]:
     if cur is not None:
         windows.append({**cur, "hi": None, "open": True})
     return windows
-
-
-def _claimed_sessions(conn, pid: str, task_id: str) -> list[str]:
-    """认领过本任务的会话（事件回放；claimed_by 列被 reopen 重跑覆盖不可靠）。"""
-    rows = conn.execute(
-        "SELECT DISTINCT session_id FROM events"
-        " WHERE project_id=? AND kind='task.claimed'"
-        " AND json_extract(payload,'$.task_id')=? AND session_id IS NOT NULL",
-        (pid, task_id)).fetchall()
-    return [r["session_id"] for r in rows]
-
-
-def _task_at(conn, pid: str, session_id: str, event_id: int) -> str | None:
-    """事件 id 落在该会话哪个任务区间（verified 触发时按 finding.new 反查归属）。"""
-    for w in _session_task_windows(conn, pid, session_id):
-        if event_id > w["lo"] and (w["hi"] is None or event_id <= w["hi"]):
-            return w["task_id"]
-    return None
 
 
 def _session_events(conn, pid: str, session_id: str) -> list[dict]:
@@ -230,200 +203,6 @@ def _results_by_call(bb: Blackboard, pid: str, session_id: str) -> dict[str, int
 
 # ---------------- 轨 A：轨迹视图（现算） ----------------
 
-def build_task_trace(bb: Blackboard, pid: str, task_id: str) -> dict | None:
-    """R1+R2 现算任务轨迹（零写入）。任务不存在返 None；从未被认领返空 windows。
-
-    返回 {task, windows, steps, idle, truncated}——steps 跨会话/跨 attempt 按时间序
-    合并（reopen 重跑的多段区间天然串成一条）；idle=各认领会话的游离段聚合。"""
-    task = bb.conn.execute(
-        "SELECT * FROM tasks WHERE id=? AND project_id=?", (task_id, pid)).fetchone()
-    if task is None:
-        return None
-    windows: list[dict] = []
-    steps: list[dict] = []
-    idle: list[dict] = []
-    truncated = False
-    for sid in _claimed_sessions(bb.conn, pid, task_id):
-        wins = _session_task_windows(bb.conn, pid, sid)
-        mine_idx = {i for i, w in enumerate(wins) if w["task_id"] == task_id}
-        windows.extend({**wins[i], "session_id": sid} for i in sorted(mine_idx))
-        events = _session_events(bb.conn, pid, sid)
-        results = _results_by_call(bb, pid, sid)
-
-        def label_of(e: dict) -> int:
-            """事件所属窗口下标（本任务的窗口）；游离段/他人任务段 = -1。"""
-            for i, w in enumerate(wins):
-                if i not in mine_idx:
-                    continue
-                if e["id"] > w["lo"] and (w["hi"] is None or e["id"] <= w["hi"]):
-                    return i
-            return -1
-
-        # 按连续段聚合（label 相同才算相邻）：工具组不跨窗口边界（R2「组不跨任务」
-        # 的窗口侧保证——任务前后的游离命令不会隔着整个任务被并成一组）
-        runs: list[tuple[int, list[dict]]] = []
-        for e in events:
-            lb = label_of(e)
-            if runs and runs[-1][0] == lb:
-                runs[-1][1].append(e)
-            else:
-                runs.append((lb, [e]))
-        for lb, run in runs:
-            aggregated = _aggregate(run, results)
-            if lb == -1:
-                if len(idle) < TRACE_MAX_IDLE:
-                    idle.extend(aggregated)
-            else:
-                steps.extend(aggregated)
-    steps.sort(key=lambda s: s["ts"])
-    _enrich_findings(bb, pid, steps)
-    if len(steps) > TRACE_MAX_STEPS:
-        steps = steps[:TRACE_MAX_STEPS]
-        truncated = True
-    idle.sort(key=lambda s: s["ts"])
-    return {
-        "task": {"id": task["id"], "objective": task["objective"],
-                 "task_type": task["task_type"], "status": task["status"],
-                 "priority": task["priority"], "claimed_by": task["claimed_by"],
-                 "result_note": _short(task["result_note"], 300)},
-        "windows": windows, "steps": steps,
-        "idle": idle[:TRACE_MAX_IDLE], "truncated": truncated,
-    }
-
-
-# ---------------- 轨 B：持久链物化（R3） ----------------
-
-def materialize_task_trace(bb: Blackboard, pid: str, task_id: str,
-                           author: str = "system") -> str | None:
-    """R3：把任务轨迹物化进 origin='trace' 自动链（幂等）。
-
-    - 幂等键 chain_links.trace_ref='task-<task_id>'：单事务 DELETE+重插，重跑安全；
-      人工补挂的链边（trace_ref=''）零感知保留。
-    - 链 status 只升不降：区间内存在 verified finding → validated；已是 validated
-      不因后续重物化降级（exploited 仅人工语义，自动链不判）。
-    - 从未被认领的任务无区间 → 返回 None 不建链。
-    触发点：tasks._finish done 分支 / store 两条 verified 升级路径，均 try/except 旁路。
-    """
-    trace = build_task_trace(bb, pid, task_id)
-    if trace is None or not trace["windows"]:
-        return None
-    task = trace["task"]
-    trace_ref = f"task-{task_id}"
-    # --- 组装节点（D2 聚合级：同 (kind,value) 合并；结构化计数，末尾统一拼 note） ---
-    merged: dict[str, dict] = {}
-    finding_ids: list[str] = []
-    has_verified = False
-    for s in trace["steps"]:
-        if s["kind"] == "skill":
-            key = "skill:" + (s.get("name") or "none")
-            if key not in merged:  # skill 每任务一条（重复 routed 不重复记）
-                merged[key] = {"kind": "skill", "label": _short(s.get("name"), 60),
-                               "score": s.get("score"), "hit": s.get("hit")}
-        elif s["kind"] == "kb":
-            key = f"kb:{s.get('module')}"
-            m = merged.setdefault(key, {"kind": "kb",
-                                        "label": _short(s.get("module"), 80), "count": 0})
-            m["count"] += int(s.get("count") or 1)
-        elif s["kind"] == "tools":
-            key = f"tools:{s.get('name')}"
-            m = merged.setdefault(key, {"kind": "tools",
-                                        "label": _short(s.get("name"), 40),
-                                        "count": 0, "ok": 0, "fail": 0})
-            m["count"] += int(s.get("count") or 1)
-            m["ok"] += int(s.get("ok") or 0)
-            m["fail"] += int(s.get("fail") or 0)
-        elif s["kind"] == "finding":
-            fid = s.get("finding_id")
-            if fid and fid not in finding_ids:
-                finding_ids.append(fid)
-                if s.get("status") == "verified":
-                    has_verified = True
-    links: list[tuple[str, str, str]] = [
-        ("task", task_id, f"意图：{_short(task['objective'], 120)}")]
-    for key, m in merged.items():
-        if m["kind"] == "skill":
-            note = (f"技能命中 {m['label']}（score {m['score']}）" if m["hit"]
-                    else "未命中技能（反例节点）")
-        elif m["kind"] == "kb":
-            note = f"知识库模块 {m['label']} ×{m['count']}"
-        else:
-            stat = f"（ok {m['ok']}/fail {m['fail']}）" if (m["ok"] or m["fail"]) else ""
-            note = f"工具组 {m['label']} ×{m['count']}{stat}"
-        links.append(("step", f"{task_id}#{key}", note))
-    for s in trace["steps"]:
-        if s.get("kind") == "finding" and s.get("finding_id") in finding_ids:
-            fid = s["finding_id"]
-            note = (f"任务区间内产出：{_short(s.get('title') or s.get('vuln_class'), 80)}"
-                    f"（{s.get('severity')}{'，✓ verified' if s.get('status') == 'verified' else ''}）")
-            links.append(("finding", fid, note))
-            finding_ids.remove(fid)
-    links = links[:TRACE_MAX_LINKS]
-
-    created = False
-    with bb._tx():
-        row = bb.conn.execute(
-            "SELECT l.chain_id FROM chain_links l JOIN chains c ON c.id=l.chain_id"
-            " WHERE l.trace_ref=? AND c.project_id=? LIMIT 1", (trace_ref, pid)).fetchone()
-        chain_id = row["chain_id"] if row else None
-        old_status = "hypothesis"
-        if chain_id is None:
-            chain_id = new_id("chain")
-            bb.conn.execute(
-                "INSERT INTO chains(id,project_id,name,goal,status,origin,created_at,updated_at)"
-                " VALUES(?,?,?,?,?,?,?,?)",
-                (chain_id, pid, _short(task["objective"], 60) or task["task_type"],
-                 "", "hypothesis", "trace", now(), now()))
-            created = True
-        else:
-            old = bb.conn.execute(
-                "SELECT status FROM chains WHERE id=?", (chain_id,)).fetchone()
-            old_status = old["status"] if old else "hypothesis"
-        bb.conn.execute(
-            "DELETE FROM chain_links WHERE chain_id=? AND trace_ref=?", (chain_id, trace_ref))
-        for i, (ntype, nid, note) in enumerate(links, 1):
-            bb.conn.execute(
-                "INSERT INTO chain_links(id,chain_id,seq,node_type,node_id,edge_note,trace_ref,created_at)"
-                " VALUES(?,?,?,?,?,?,?,?)",
-                (new_id("clink"), chain_id, i, ntype, nid, note, trace_ref, now()))
-        # status 只升不降（R3）：validated 保级、exploited 不降（exploited 仅人工语义）
-        rank = {"hypothesis": 0, "validated": 1, "exploited": 2}
-        target = "validated" if has_verified else "hypothesis"
-        status = (target if rank.get(target, 0) > rank.get(old_status, 0) else old_status)
-        bb.conn.execute(
-            "UPDATE chains SET status=?, updated_at=? WHERE id=?", (status, now(), chain_id))
-    bb.append_event(
-        pid, "chain.created" if created else "chain.updated",
-        {"chain_id": chain_id, "name": _short(task["objective"], 60),
-         "origin": "trace", "trace_ref": trace_ref, "links": len(links),
-         "status": status}, author=author)
-    return chain_id
-
-
-def materialize_for_finding(bb: Blackboard, pid: str, finding_id: str,
-                            author: str = "system") -> str | None:
-    """verified 升级触发（R3）：优先重物化已包含该发现的轨迹链；链上没有则按
-    finding.new 事件反查归属任务。都找不到（对话轮产出/人工创建/无任务区间）
-    返回 None——不强行入链。"""
-    row = bb.conn.execute(
-        "SELECT l.trace_ref FROM chain_links l JOIN chains c ON c.id=l.chain_id"
-        " WHERE c.project_id=? AND c.origin='trace' AND l.node_type='finding'"
-        " AND l.node_id=? LIMIT 1", (pid, finding_id)).fetchone()
-    if row and str(row["trace_ref"] or "").startswith("task-"):
-        return materialize_task_trace(bb, pid, row["trace_ref"][5:], author=author)
-    ev = bb.conn.execute(
-        "SELECT id, session_id FROM events WHERE project_id=? AND kind='finding.new'"
-        " AND json_extract(payload,'$.finding_id')=? AND session_id IS NOT NULL"
-        " ORDER BY id DESC LIMIT 1", (pid, finding_id)).fetchone()
-    if ev is None:
-        return None
-    tid = _task_at(bb.conn, pid, ev["session_id"], ev["id"])
-    if tid:
-        return materialize_task_trace(bb, pid, tid, author=author)
-    return None
-
-
-# ---------------- M3/R4：打法效果榜（物化侧） ----------------
-
 def effect_stats(bb: Blackboard, pid: str, top: int = 20) -> dict:
     """R4 正向效果榜：轨迹链（origin='trace'）内 (skill × kb) 组合 × verified finding。
 
@@ -488,9 +267,8 @@ def kb_module_feedback(conn, pid: str) -> dict[str, dict]:
     - negative：真失败任务（failed + blocked_reason='error'）任务窗内的 kb.open
       次数——「打开且失败」≠「手册误导」（试错正常），只作弱信号供人工复核。
     返回 {module: {opened, positive, negative}}。"""
-    failed_ids = {r["id"] for r in conn.execute(
-        "SELECT id FROM tasks WHERE project_id=? AND status='failed'"
-        " AND blocked_reason='error'", (pid,)).fetchall()}
+    # 任务机制退役（2026-10-06）：无「真失败任务」口径，negative 恒 0。
+    failed_ids: set[str] = set()
     pos: dict[str, int] = {}
     for c in conn.execute(
             "SELECT id FROM chains WHERE project_id=? AND origin='trace'",
@@ -623,8 +401,10 @@ def retrieval_stats(bb: Blackboard, pid: str,
     opens_all: dict[str, int] = {}
     quad = {"hinted_opened": 0, "hinted_not_opened": 0, "opened_no_output": 0,
             "missed": 0}
-    task_rows = {r["id"]: r["objective"] for r in conn.execute(
-        "SELECT id, objective FROM tasks WHERE project_id=?", (pid,)).fetchall()}
+    # 任务机制退役（2026-10-06）：tasks 表已删，objective 无从取；任务区间事件
+    # （task.claimed/done/failed）亦不再产出，故本统计的四象限恒空，仅 top_modules
+    # 仍按 kb_open 事件可用。
+    task_rows: dict[str, str] = {}
     for rec in tasks.values():
         hits, opened = rec["kb_hits"], rec["opened"]
         for m in opened:

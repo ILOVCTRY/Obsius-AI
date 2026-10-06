@@ -9,7 +9,11 @@
 
 import sqlite3
 
-SCHEMA_VERSION = 32
+SCHEMA_VERSION = 33
+
+# v32→v33（任务机制退役，2026-10-06）：DROP TABLE tasks / resource_leases。
+# 执行单元由 Team direct execution 承接（teams/team_members/team_runs/
+# team_run_members/execution_audits 独立表）。历史任务数据一并删除。
 
 # v31→v32（Team direct execution）：Team/Member/Run 与旧 tasks/coordination DAG
 # 完全分离。新 Team 只写以下独立表；旧项目数据不迁移、不回填。
@@ -239,51 +243,6 @@ CREATE TABLE IF NOT EXISTS chain_links (
     trace_ref  TEXT NOT NULL DEFAULT '', -- v19：物化幂等键（='task-<task_id>'；人工链空串——重物化按它整删重插）
     created_at TEXT NOT NULL
 );
-
-CREATE TABLE IF NOT EXISTS tasks (
-    id            TEXT PRIMARY KEY,
-    project_id    TEXT NOT NULL REFERENCES projects(id),
-    scope         TEXT NOT NULL DEFAULT '',          -- 如 ip:1.2.3.4 / domain:x.com / binary:sha
-    task_type     TEXT NOT NULL DEFAULT 'generic',   -- recon / exploit / analyze / privesc ...
-    objective     TEXT NOT NULL,
-    status        TEXT NOT NULL DEFAULT 'open',      -- open / claimed / done / failed（不要的任务物理删除，见 tasks.py delete；历史库可能残留 cancelled 行）
-    priority      INTEGER NOT NULL DEFAULT 2,        -- 0(P0) 最高
-    noise_budget  TEXT NOT NULL DEFAULT 'passive',   -- passive / low / medium / high
-    conflict_keys TEXT NOT NULL DEFAULT '[]',        -- JSON：active 任务的互斥键（如 ip 值）
-    claimed_by    TEXT REFERENCES sessions(id),
-    lease_until   TEXT,
-    parent_id     TEXT REFERENCES tasks(id),
-    created_by    TEXT NOT NULL DEFAULT 'human',     -- human / orchestrator / session-x
-    role          TEXT NOT NULL DEFAULT '',          -- v14：建议认领角色 id（''=不限；认领即换装）
-    target_session TEXT NOT NULL DEFAULT '',         -- v18：指派会话（''=公共池；非空=仅该窗可认领）
-    preferred_runtime TEXT NOT NULL DEFAULT '',     -- v23：任务默认运行时（''=未设；host/wsl/docker/sandbox）
-    result_note   TEXT NOT NULL DEFAULT '',
-    context_refs  TEXT NOT NULL DEFAULT '[]',  -- v3 JSON：任务依据的 finding id（显式 refs ∪ 正文自动抽取）
-    stale_refs    TEXT NOT NULL DEFAULT '[]',  -- v3 JSON：已被推翻待自评的依据（撤回传播挂标，收尾后留审计）
-    plan          TEXT NOT NULL DEFAULT '[]',  -- v6 JSON：认领者计划步 [{id,title,status,note,ts}]（A2 先规划后动手）
-    workset       TEXT NOT NULL DEFAULT '[]',  -- v7 JSON：正在分析的目标集（advisory 软声明，不阻塞任何人，机制 1.1）
-    dedup_fp      TEXT NOT NULL DEFAULT '',    -- v7：发布去重指纹（project+type+归一化 scope+objective 哈希，机制 1.1）
-    wait_for      TEXT NOT NULL DEFAULT '[]',  -- v7 JSON：被占资源键（open 行门控标记，claim_next 排除，机制 1.4）
-    lease_cooldown_until TEXT,                 -- v7：死锁牺牲者冷却（到期前 claim_next 跳过，机制 1.4）
-    blocked_reason TEXT NOT NULL DEFAULT 'error',  -- v8：fail 通道结构化原因 error|awaiting_human（C1）
-    context       TEXT NOT NULL DEFAULT '{}',      -- v9 JSON：任务执行履历 {transcript, attempts[]}（C10 跨会话接手，唯一写点 _finish）
-    created_at    TEXT NOT NULL,
-    updated_at    TEXT NOT NULL
-);
-
--- v7 资源租约（机制 1.4，DESIGN §6.7.1）：认领任务时由 conflict_keys 转写授予；
--- 键方案白名单归一化在 leases.py；有效性 = JOIN tasks（claimed 且租约未过期）判定，
--- 免心跳双写；任务收尾/删除/租约过期时释放行并重校验 wait_for 等待者。
-CREATE TABLE IF NOT EXISTS resource_leases (
-    project_id   TEXT NOT NULL REFERENCES projects(id),
-    resource_key TEXT NOT NULL,             -- 归一化键：ip:/host:/domain:/url:/binary:/func:/tool:/user:
-    mode         TEXT NOT NULL,             -- X 独占 / S 共享（passive→S、active→X）
-    task_id      TEXT NOT NULL,
-    session_id   TEXT,
-    granted_at   TEXT NOT NULL,
-    PRIMARY KEY (project_id, resource_key, task_id)
-);
-CREATE INDEX IF NOT EXISTS idx_resource_leases_key ON resource_leases(project_id, resource_key);
 
 -- v3 会话收件箱（DESIGN.md §6.7 的 1.5/1.6）：知会类私信，与审批收件箱严格分设。
 -- 只有系统写，没有 Agent 自由消息工具；kind：basis_stale（撤回强制自评）/
@@ -625,7 +584,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     - v30→v31：chat_messages 幂等补 thinking（assistant 行推理正文，见文件头
       版本注释）。
     - v31→v32：teams/team_members/team_runs/team_run_members/execution_audits
-      由 DDL 的 IF NOT EXISTS 直接建表；新 Team 直执行不转换旧任务。"""
+      由 DDL 的 IF NOT EXISTS 直接建表；新 Team 直执行不转换旧任务。
+    - v32→v33：任务机制退役——DROP TABLE tasks / resource_leases（幂等
+      IF EXISTS），历史任务数据一并删除。"""
     cols = {r[1] for r in conn.execute("PRAGMA table_info(projects)")}
     if "track" not in cols:
         conn.execute("ALTER TABLE projects ADD COLUMN track TEXT NOT NULL DEFAULT ''")
@@ -643,36 +604,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if msg_cols and "thinking" not in msg_cols:  # v31（思考正文持久化）
         conn.execute(
             "ALTER TABLE chat_messages ADD COLUMN thinking TEXT NOT NULL DEFAULT ''")
-    task_cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
-    if "context_refs" not in task_cols:
-        conn.execute(
-            "ALTER TABLE tasks ADD COLUMN context_refs TEXT NOT NULL DEFAULT '[]'")
-    if "stale_refs" not in task_cols:
-        conn.execute(
-            "ALTER TABLE tasks ADD COLUMN stale_refs TEXT NOT NULL DEFAULT '[]'")
-    if "plan" not in task_cols:  # v6（A2 先规划后动手）
-        conn.execute(
-            "ALTER TABLE tasks ADD COLUMN plan TEXT NOT NULL DEFAULT '[]'")
-    for col in ("workset", "dedup_fp", "wait_for"):  # v7（机制 1.1/1.4 协调底座）
-        if col not in task_cols:
-            conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} TEXT NOT NULL DEFAULT '[]'")
-    if "lease_cooldown_until" not in task_cols:
-        conn.execute("ALTER TABLE tasks ADD COLUMN lease_cooldown_until TEXT")
-    if "blocked_reason" not in task_cols:  # v8（C1 暂停语义统一）
-        conn.execute(
-            "ALTER TABLE tasks ADD COLUMN blocked_reason TEXT NOT NULL DEFAULT 'error'")
-    if "context" not in task_cols:  # v9（C10 任务执行履历：{transcript, attempts[]}）
-        conn.execute(
-            "ALTER TABLE tasks ADD COLUMN context TEXT NOT NULL DEFAULT '{}'")
-    if "role" not in task_cols:  # v14（任务绑定角色：认领即换装）
-        conn.execute(
-            "ALTER TABLE tasks ADD COLUMN role TEXT NOT NULL DEFAULT ''")
-    if "target_session" not in task_cols:  # v18（指派任务：认领门控）
-        conn.execute(
-            "ALTER TABLE tasks ADD COLUMN target_session TEXT NOT NULL DEFAULT ''")
-    if "preferred_runtime" not in task_cols:  # v23（TRAE 新壳 M3：任务默认运行时）
-        conn.execute(
-            "ALTER TABLE tasks ADD COLUMN preferred_runtime TEXT NOT NULL DEFAULT ''")
+    # v32→v33（任务机制退役，2026-10-06）：DROP TABLE tasks / resource_leases。
+    # 幂等（IF EXISTS）；旧库残留任务数据一并删除。
+    conn.execute("DROP TABLE IF EXISTS resource_leases")
+    conn.execute("DROP TABLE IF EXISTS tasks")
     art_cols = {r[1] for r in conn.execute("PRAGMA table_info(artifacts)")}
     if art_cols and "meta" not in art_cols:  # v10（W3 产物归属元数据）
         conn.execute("ALTER TABLE artifacts ADD COLUMN meta TEXT NOT NULL DEFAULT '{}'")

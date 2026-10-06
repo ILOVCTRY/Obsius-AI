@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 
 import core.projects
-from core.blackboard import TaskQueue
 from core.projects import ProjectStore, slugify
 
 
@@ -137,10 +136,10 @@ def test_explicit_binding_overrides_legacy(store):
 
 def test_open_survives_reopen_and_data_persists(store):
     p1 = store.create_project("persist", "ctf")
-    TaskQueue(p1.bb).publish(p1.id, "队列里的任务", created_by="human")
+    p1.bb.add_finding(p1.id, "sqli", "持久化发现", severity="high", author="human")
     p1.close()
     p2 = store.open_project("persist")
-    assert len(TaskQueue(p2.bb).list_tasks(p2.id)) == 1  # 数据随项目目录持久化
+    assert len(p2.bb.list_findings(p2.id)) == 1  # 数据随项目目录持久化
     p2.close()
 
 

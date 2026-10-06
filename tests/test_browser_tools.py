@@ -6,7 +6,7 @@ import socket
 import pytest
 
 from core.agent.tools import AGENT_TOOLS, ToolDispatcher, _PLAN_PRE_ALLOWED
-from core.blackboard import Blackboard, TaskQueue
+from core.blackboard import Blackboard
 from core.runtime.gateway import ExecutionGateway
 
 from test_agent import FakeDockerBackend, NativeBackend
@@ -20,15 +20,14 @@ def env(tmp_path, monkeypatch):
     project = bb.create_project("浏览器测试", "pentest", ["web"])
     gw = ExecutionGateway(bb=bb, backends={"host": NativeBackend(),
                                            "sandbox": FakeDockerBackend()})
-    tq = TaskQueue(bb)
-    yield bb, project, gw, tq, tmp_path
+    yield bb, project, gw, tmp_path
     bb.close()
 
 
 def _disp(env, **kw):
-    bb, project, gw, tq, _ = env
+    bb, project, gw, _ = env
     sid = "sess-" + "b" * 12
-    d = ToolDispatcher(bb, gateway=gw, tq=tq, project_id=project["id"],
+    d = ToolDispatcher(bb, gateway=gw, project_id=project["id"],
                        session_id=sid, author=sid, **kw)
     d._intent_lead_passed = True  # 本组用例主题=浏览器工具面，跳过意图先行闸
     return d
@@ -117,7 +116,7 @@ class _FakeInstance:
 
 
 def _fake(env):
-    bb, project, gw, tq, _ = env
+    bb, project, gw, _ = env
 
     class _Pool:
         def __init__(self):
@@ -150,7 +149,7 @@ def test_navigate_denied_maps_to_ju_jue(env):
 
 def test_screenshot_writes_artifact(env):
     pool = _fake(env)
-    bb, project, gw, tq, tmp_path = env
+    bb, project, gw, tmp_path = env
     art = tmp_path / "artifacts"
     art.mkdir()
     d = _disp(env, browser=pool, artifacts_dir=str(art))
@@ -163,22 +162,9 @@ def test_screenshot_writes_artifact(env):
 
 
 def test_close_browser_session_lifecycle(env):
-    """F6-v3：任务收尾自动清除本会话浏览器 Page——complete/fail(error)/finish
-    清、awaiting_human 不清（断点续跑保页面现场）。"""
+    """F6-v3：会话收尾自动清除本会话浏览器 Page——任务机制退役后仅 finish
+    收尾触发（_tool_finish 调 _close_browser_session）。"""
     pool = _fake(env)
     d = _disp(env, browser=pool, artifacts_dir=None)
-    d.current_task_id = "t-1"  # 不存在于队列 → 收尾回执走任务消失分支，不影响断言
-    d.dispatch("fail_task", {"result_note": "等人工",
-                             "blocked_reason": "awaiting_human"})
-    assert not any(c[0] == "close" for c in pool.inst.calls)
-    pool.inst.calls.clear()
-    d.dispatch("complete_task", {"result_note": "done"})  # D6：首次被收尾确认拦截
-    d.dispatch("complete_task", {"result_note": "done"})  # 零新增放行真收尾
-    assert ("close", d.session_id) in pool.inst.calls
-    pool.inst.calls.clear()
-    d.current_task_id = "t-1"  # complete 已消费认领，重设再测 error 分支
-    d.dispatch("fail_task", {"result_note": "坏了", "blocked_reason": "error"})
-    assert ("close", d.session_id) in pool.inst.calls
-    pool.inst.calls.clear()
     d.dispatch("finish", {"summary": "s"})
     assert ("close", d.session_id) in pool.inst.calls

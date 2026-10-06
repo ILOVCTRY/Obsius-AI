@@ -92,107 +92,6 @@ export interface BBEvent {
   created_at: string
 }
 
-export type TaskPlanStatus = "todo" | "doing" | "done" | "blocked"
-
-export interface TaskPlanStep {
-  id: string
-  title: string
-  status: TaskPlanStatus
-  note?: string
-  ts: string
-}
-
-export interface Task {
-  id: string
-  project_id: string
-  scope: string
-  task_type: string
-  role?: string   // v14：建议认领角色（''/缺省=不限；认领即换装）
-  target_session?: string   // v18：指派会话 → v0.71 起恒为专属执行窗（''/缺省=未绑窗）
-  preferred_runtime?: string  // v23：任务默认运行时（''/缺省=未设；host/wsl/docker/sandbox）
-  objective: string
-  status: "open" | "claimed" | "done" | "failed"
-  priority: number
-  noise_budget: string
-  conflict_keys: string[]
-  parent_id: string | null
-  created_by: string
-  claimed_by: string | null
-  result_note: string | null
-  context_refs?: string[]
-  stale_refs?: string[]
-  plan: TaskPlanStep[]
-  created_at: string
-  updated_at: string
-  resumable?: boolean  // C6：failed 恒 true（任何失败卡都可续跑）
-  resume_mode?: "snapshot" | "transcript"  // C6：snapshot=⚡带现场续跑 / transcript=↩接手现场续跑
-  workset?: string[]   // B1 工作集软声明（advisory，供避让不阻塞）
-  wait_for?: string[]  // B2 被占资源键（open 行门控标记，claim_next 排除）
-  blocked_reason?: "error" | "awaiting_human" | "aborted" | "cancelled"  // C1：fail 通道结构化原因（v8；aborted=人工中断 E12，cancelled=编排器/人类取消 M4）
-  context?: TaskContext | null                  // C10 任务执行履历（v9，唯一写点 _finish）
-}
-
-// C10：任务执行履历——完整对话现场在 workspace 文件（task-<tid>.json），此处只存履历
-export interface TaskAttempt {
-  session_id: string
-  session_name: string | null
-  role: string | null
-  outcome: "done" | "failed"
-  result_note: string
-  blocked_reason: "error" | "awaiting_human" | "aborted" | "cancelled" | null
-  ended_at: string
-}
-
-export interface TaskContext {
-  transcript: string | null
-  attempts: TaskAttempt[]
-  reconcile?: { id: number; text: string; state: "pending" | "met" | "failed" | "blocked"; note: string; verify?: Record<string, unknown>; by?: string }[]
-  attachments?: AttachmentInfo[]  // 附件随发（2026-09-19）：publish 落库的附件清单（认领首条消息渲染 📎）
-}
-
-// 任务尝试树 v2（task-attempt-tree，2026-09-27 意图驱动改版）：
-// 根=任务 → 意图（一句可证伪假设）→ 检验结果（发现/死路）→ 新发现下再长新意图。
-// 后端现算零写入 GET /tree/{task_id}；nodes 平铺带 parent（""=挂根），前端组树。
-// v1 的计划步主干+命令/工具动作叶已整体退役（用户拍板：树里不看命令）。
-export type TaskTreeNode =
-  | {
-      kind: "intent"
-      id: string
-      parent: string
-      statement: string
-      status: "open" | "closed"
-      outcome_type: string   // vuln / finding / dead_end（closed 时非空）
-      dead_reason: string
-      created_at: string
-      closed_at: string | null
-    }
-  | {
-      kind: "finding"
-      id: string
-      parent: string         // 挂的意图 id；""=游离（进兜底桶，仅历史数据）
-      title: string
-      severity: string
-      status: string
-      vuln_class: string
-      created_at: string
-    }
-  | { kind: "bucket"; id: string; parent: string; title: string }  // "_orphan" 游离发现兜底桶
-
-export interface TaskTree {
-  task: {
-    id: string
-    objective: string
-    task_type: string
-    status: Task["status"]
-    priority: number
-    claimed_by: string | null
-    result_note: string
-  }
-  nodes: TaskTreeNode[]
-  current: { intent_id: string | null; last_activity_ts: string | null }
-  truncated_findings: boolean
-}
-
 // 单站攻击链路图 v3（website-attack-path-graph，2026-09-24）：
 // 目标 → 意图（规划产物）→ 执行（展开层）→ 收尾：漏洞 | 发现 | 死路
 export type AttackResult = "blocked" | "no_reaction" | "hint" | "found" | "skipped"
@@ -279,40 +178,6 @@ export interface IntentInfo {
   author: string
   created_at: string; closed_at: string | null; updated_at: string
   revision: number
-}
-
-// 执行轨迹（execution-trace-chain M1，2026-09-22）：任务详情内嵌时间链（R1+R2 现算）
-export type TraceStepKind = "skill" | "kb" | "tools" | "finding"
-
-export interface TraceStep {
-  kind: TraceStepKind
-  ts: string
-  ts_end?: string                          // tools 组专属
-  // skill
-  name?: string | null; hit?: boolean; score?: number | null; matched?: string[]
-  // kb
-  module?: string; source?: string | null; count?: number
-  // tools 组
-  ok?: number; fail?: number; cmds?: string[]
-  // finding（服务端已富化）
-  finding_id?: string; title?: string; severity?: string; status?: string
-  vuln_class?: string; category?: string
-}
-
-export interface TaskTraceWindow {
-  task_id: string; session_id: string
-  lo: number; hi: number | null; open: boolean
-}
-
-export interface TaskTrace {
-  task: {
-    id: string; objective: string; task_type: string; status: string
-    priority: number; claimed_by: string | null; result_note: string
-  }
-  windows: TaskTraceWindow[]
-  steps: TraceStep[]
-  idle: TraceStep[]                        // 游离段（未挂任务活动）
-  truncated: boolean
 }
 
 // 打法效果榜（M3/R4，基于物化侧轨迹链）
@@ -848,30 +713,21 @@ export interface Job {
 }
 
 // 编排一轮（orchestrator-tick job）的结构化结果（批 3，DESIGN §6.8/机制 1.9）
-/** L0 提案（批 6）：校验过的动作不写实体，等人在事件流行内采纳 */
+/** L0 提案（批 6）：校验过的动作不写实体，等人在事件流行内采纳。
+ *  任务机制退役（2026-10-06）后 op 仅剩「组建队伍 / 亲自执行」两类。 */
 export interface OrchProposal {
-  op: 'publish_task' | 'spawn_session'
+  op: 'build_team' | 'execute'
   args: Record<string, unknown>
   event_id?: number
 }
 
 export interface OrchTickResult {
   summary: string                 // 本轮动作摘要
-  published: string[]             // 自主发布的任务 id
+  published: string[]             // 自主发布的任务 id（任务机制退役后恒空，键保留以对齐后端）
   spawned: { session_id: string; role: string }[]
+  teams: { team_id: string; name: string; member_count: number }[]  // 本轮组建的 Team
   digest: string | null           // 本轮是否写了项目简报
   proposals: OrchProposal[]       // 批 6：仅 L0 提案模式非空
-}
-
-// A5 重排优先级（orchestrator-replan job）的结构化结果
-export interface ReplanUpdate { task_id: string; old: number; new: number }
-export interface ReplanSkip { task_id: string; reason: string }
-export interface ReplanResult {
-  updated: ReplanUpdate[]         // 实际改了优先级的 open 任务（逐行审计）
-  skipped: ReplanSkip[]           // claimed/done/乱 id/非法值/未变，逐条跳过
-  note?: string                   // 无 open 任务空转时的说明（零 LLM）
-  reason?: string                 // 触发原因（manual/human-publish/worker-*/...）
-  error?: string                  // LLM/传输失败时的结构化错误
 }
 
 // ---------- IDA 双向写回（P2） ----------
@@ -2019,146 +1875,4 @@ export interface TeamMemberInput {
   max_steps?: number | null
 }
 
-// ---------- 多智能体协调（独立协调域） ----------
-export type CoordinationPlanStatus = "draft" | "active" | "paused" | "completed"
-export type CoordinationTaskStatus = "pending" | "ready" | "running" | "blocked" | "completed" | "failed"
 
-export interface CoordinationTeamMember {
-  member_id: string
-  /** 成员展示名；后端兼容 title，前端优先显示 label */
-  title: string
-  label?: string
-  description?: string
-  role?: string
-}
-
-export interface CoordinationTeam {
-  id?: string
-  name?: string
-  source?: "explicit" | "legacy_derived" | string
-  members: CoordinationTeamMember[]
-  execution?: { mode: string; dispatch?: string }
-}
-
-export interface CoordinationTask {
-  id: string
-  project_id: string
-  plan_id: string
-  title: string
-  description: string
-  role: string
-  member_id: string
-  status: CoordinationTaskStatus
-  priority: number
-  depends_on: string[]
-  evidence: Record<string, unknown>[]
-  /** M3：计划节点绑定的真实 tasks.id；空=尚未派单 */
-  task_id: string
-  created_at: string
-  updated_at: string
-  verification?: CoordinationVerification | null
-}
-
-export interface CoordinationPlan {
-  id: string
-  project_id: string
-  name: string
-  objective: string
-  status: CoordinationPlanStatus
-  config: Record<string, unknown>
-  created_at: string
-  updated_at: string
-  team: CoordinationTeam
-  tasks: CoordinationTask[]
-  task_counts?: Record<string, number>
-}
-
-export interface CoordinationPlanProposalNode {
-  id: string
-  title: string
-  description?: string
-  role: string
-  member_id?: string
-  priority: number
-  status: CoordinationTaskStatus
-  depends_on: string[]
-}
-
-export interface CoordinationPlanProposal {
-  plan_id: string
-  status: CoordinationPlanStatus
-  name: string
-  objective: string
-  team?: CoordinationTeam
-  nodes: CoordinationPlanProposalNode[]
-}
-
-export interface CoordinationOverview {
-  plans: CoordinationPlan[]
-  active_plan_id: string | null
-  objects: CoordinationObject[]
-  conflicts: CoordinationConflict[]
-  summary: { plans: number; tasks: number; running: number; blocked: number; completed: number; objects: number; conflicts: number }
-}
-export interface CoordinationPreflight {
-  plan_id: string
-  status: CoordinationPlanStatus
-  revision: string
-  plan: CoordinationPlan
-  dependencies: { task_count: number; root_count: number; ready_count: number; blocked_count: number; cycle: boolean; unresolved: { task_id: string; dependency: string }[] }
-  safety: { track: string; mission: Record<string, unknown>; roe: Record<string, unknown>; autonomy: Record<string, unknown> }
-  blockers: { code: string; severity: "error" | "warning"; message: string }[]
-}
-export interface CoordinationCommunication {
-  id: string
-  project_id: string
-  to_session: string
-  kind: string
-  ref_id: string
-  payload: Record<string, unknown>
-  created_at: string
-  read_at?: string | null
-  unread?: boolean
-}
-
-export type CoordinationObjectKind = "function" | "string" | "xref" | "behavior" | "evidence" | "artifact"
-export interface CoordinationObject {
-  id: string
-  project_id: string
-  plan_id: string | null
-  task_id: string | null
-  kind: CoordinationObjectKind
-  name: string
-  object_ref: string
-  data: Record<string, unknown>
-  source: string
-  confidence: number
-  artifact_refs: { artifact_ref: string; relation: string; created_at: string }[]
-  created_at: string
-  updated_at: string
-}
-export type CoordinationConflictStatus = "open" | "resolved" | "dismissed"
-export interface CoordinationConflict {
-  id: string
-  project_id: string
-  left_object_id: string
-  right_object_id: string
-  field: string
-  summary: string
-  status: CoordinationConflictStatus
-  resolution: string
-  created_at: string
-  updated_at: string
-}
-export type CoordinationVerificationStatus = "passed" | "needs_evidence" | "conflict" | "failed"
-export interface CoordinationVerification {
-  id: string
-  project_id: string
-  plan_id: string
-  task_id: string
-  status: CoordinationVerificationStatus
-  score: number
-  issues: { kind: string; message: string; conflict_id?: string }[]
-  followup_task_ids: string[]
-  checked_at: string
-}

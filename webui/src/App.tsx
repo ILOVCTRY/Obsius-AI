@@ -9,7 +9,6 @@ import {
   BookOpen,
   Bot,
   BrainCircuit,
-  CheckCircle2,
   ChevronDown,
   ChevronLeft,
   Globe2,
@@ -17,7 +16,6 @@ import {
   FolderKanban,
   FolderTree,
   LayoutDashboard,
-  ListChecks,
   Maximize2,
   Minus,
   PanelLeftOpen,
@@ -40,7 +38,6 @@ import { deriveWorkbenchProfile } from "@/lib/workbench"
 import { useEvents } from "@/lib/useEvents"
 import { ProjectsView } from "@/views/ProjectsView"
 import { IntelView } from "@/views/IntelView"
-import { TaskBoard } from "@/views/TaskBoard"
 import { BrowserView } from "@/views/browser/BrowserView"
 import { SettingsView } from "@/views/SettingsView"
 import { KnowledgeView } from "@/views/KnowledgeView"
@@ -58,7 +55,7 @@ import { bindingBadge } from "@/lib/taxonomy"
 // 左缘悬浮把手唤出；状态 localStorage（ui.nav-collapsed）。收起=条件渲染卸载
 // nav Panel+Separator（同 boardOpen 先例），重挂由 useDefaultLayout 恢复宽度。
 
-type View = "projects" | "intel" | "live" | "board" | "tasks" | "agents" | "browser" | "sample-analysis" | "knowledge" | "skills" | "settings"
+type View = "projects" | "intel" | "live" | "board" | "agents" | "browser" | "sample-analysis" | "knowledge" | "skills" | "settings"
 
 /** M4c 场景档 board_view 默认视图（config.board_view.default；黑板上自行校验可用 tab 回退） */
 const boardViewOf = (m: ProjectDetail | null): string | undefined => {
@@ -88,13 +85,13 @@ const NAV_GROUPS: { label: string; items: NavItem[]; collapsible?: boolean }[] =
       { key: "settings", label: "设置", icon: Settings2, needsProject: false },
     ],
   },
-  // 更多（2026-09-30）：会话/任务降级为二级入口，默认折叠收纳（见 NavRail 折叠逻辑）
+  // 更多（2026-09-30）：会话降级为二级入口，默认折叠收纳（见 NavRail 折叠逻辑）；
+  // 任务机制退役（2026-10-06）后该组仅剩「会话」。
   {
     label: "更多",
     collapsible: true,
     items: [
       { key: "live", label: "会话", icon: Radio, needsProject: true },
-      { key: "tasks", label: "任务", icon: ListChecks, needsProject: true },
     ],
   },
 ]
@@ -124,9 +121,9 @@ function NavRail({ active, onSelect, locked, className, expanded = false }: {
         items: group.items.filter((item) => !item.homeOnly && item.key !== "projects"),
       })).filter((group) => group.items.length > 0)
 
-  // 「更多」折叠（2026-09-30）：会话/任务降级为二级入口，手动状态持久化（ui.nav-more-open）；
+  // 「更多」折叠（2026-09-30）：会话降级为二级入口，手动状态持久化（ui.nav-more-open）；
   // 当前视图在其中时强制展开保高亮；窄栏态无标题可点 → 直接展开。
-  const moreActive = active === "live" || active === "tasks"
+  const moreActive = active === "live"
 
   return (
     <nav className={cn("app-nav flex shrink-0 flex-col border-r", expanded ? "items-stretch" : "items-center", className)}>
@@ -262,10 +259,9 @@ export default function App() {
   const [pid, setPid] = useState<string | null>(null)
   const [meta, setMeta] = useState<ProjectDetail | null>(null)
   const [view, setView] = useState<View>("projects")
-  // 审批铃铛（2026-10-04 审批模块下线后保留）：待审批列表（点击跳有审批的会话）+ awaiting_human 任务数
+  // 审批铃铛（2026-10-04 审批模块下线后保留）：待审批列表（点击跳有审批的会话）
   const [pendingApprovals, setPendingApprovals] = useState<Approval[]>([])
-  const [awaitingHuman, setAwaitingHuman] = useState(0)
-  const pendingCount = pendingApprovals.length + awaitingHuman
+  const pendingCount = pendingApprovals.length
   void pendingCount
   const [boardOpen, setBoardOpen] = useState(true)
   // 黑板 Keep-alive（2026-09-30）：首次点开「黑板」的 pid 才挂载（没点过的项目不
@@ -286,8 +282,6 @@ export default function App() {
   const [settingsNav, setSettingsNav] = useState<{
     tab: string; n: number; skill?: { source: "cap" | "track"; pack: string; name: string }
   } | null>(null)
-  // A3 任务流双击无会话节点 → 跳任务看板并高亮定位卡片（focus nonce 触发滚动）
-  const [taskNav, setTaskNav] = useState<{ id: string; n: number } | null>(null)
   // v0.71 任务即窗口：任务卡/任务流双击 → 跳会话页并直开专属执行窗页签
   const [sessionNav, setSessionNav] = useState<{ sid: string; n: number } | null>(null)
   useEffect(() => {
@@ -306,17 +300,6 @@ export default function App() {
     }
     window.addEventListener("goto-settings", h)
     return () => window.removeEventListener("goto-settings", h)
-  }, [])
-
-  useEffect(() => {
-    const h = (e: Event) => {
-      const id = (e as CustomEvent<{ taskId?: string }>).detail?.taskId
-      if (!id) return
-      setView("tasks")
-      setTaskNav({ id, n: Date.now() })
-    }
-    window.addEventListener("goto-tasks", h)
-    return () => window.removeEventListener("goto-tasks", h)
   }, [])
 
   // v0.71 任务即窗口：双击任务卡/任务流节点直开会话页签（detail.sessionId 必带）
@@ -382,40 +365,29 @@ export default function App() {
     api.getProject(pid).then(setMeta).catch(() => {})
   }, [pid])
   const eventsWatcher = <EventsDebouncedRefresh pid={pid} onBump={bumpMeta} />
-  // 全局审批铃铛轮询（C1：awaiting_human 任务计入红点，只计数不混 approval 表）
+  // 全局审批铃铛轮询（只计数 approval 表）
   useEffect(() => {
     if (!pid) {
       setPendingApprovals([])
-      setAwaitingHuman(0)
       return
     }
     const load = () =>
-      Promise.all([
-        api.approvals(pid, "pending"),
-        api.getProject(pid),
-      ])
-        .then(([a, detail]) => {
-          setPendingApprovals(a)
-          setAwaitingHuman(detail.task_stats.awaiting_human ?? 0)
-        })
-        .catch(() => {})
+      api.approvals(pid, "pending").then(setPendingApprovals).catch(() => {})
     load()
     const t = setInterval(load, 5000)
     return () => clearInterval(t)
   }, [pid])
 
   // 铃铛点击（2026-10-04）：跳「有审批的会话」（审批模块已下线，决策在对话内联卡完成）；
-  // 无会话归属的审批/仅待人工任务 → 退任务看板；都没有 → 直播间。
+  // 无会话归属的审批 → 直播间。
   const openApprovals = useCallback(() => {
     const target = pendingApprovals.find((a) => a.session_id)
     if (target?.session_id) {
       window.dispatchEvent(new CustomEvent("goto-session", { detail: { sessionId: target.session_id } }))
-    } else if (awaitingHuman > 0) {
-      setView("tasks")
     } else {
       setView("live")
     }
-  }, [pendingApprovals, awaitingHuman])
+  }, [pendingApprovals])
   void goHome
   void openApprovals
 
@@ -505,7 +477,7 @@ export default function App() {
             <div className="topbar flex h-16 shrink-0 items-center gap-4 px-5">
               <div className="mobile-brand"><div className="brand-mark"><Sparkles size={15} /></div><span>Obsius</span></div>
               <div className="project-context"><span className="eyebrow">ACTIVE PROJECT</span><div className="project-title"><span className="project-pulse" /><h1>{meta?.name ?? "加载项目"}</h1><Badge variant="outline" className="project-badge">{meta ? bindingBadge(meta.track, meta.experts) : "…"}</Badge></div></div>
-              {meta && <div className="project-stats"><span><CheckCircle2 size={13} />{meta.task_stats.done ?? 0}/{Object.values(meta.task_stats).reduce((a, b) => a + b, 0)} 任务</span><span><Blocks size={13} />{meta.findings} 发现</span><span><Globe2 size={13} />{meta.assets} 资产</span></div>}
+              {meta && <div className="project-stats"><span><Blocks size={13} />{meta.findings} 发现</span><span><Globe2 size={13} />{meta.assets} 资产</span></div>}
               <span className="flex-1" />
               <button onClick={openApprovals} className="approval-action" title="待审批动作"><Bell size={16} /><span>审批</span>{pendingCount > 0 && <span className="approval-count">{pendingCount}</span>}</button>
               <Button size="sm" variant="ghost" className="back-project" onClick={goHome}><ArrowLeft size={15} />首页</Button>
@@ -563,7 +535,6 @@ export default function App() {
               </div>
             </ErrorBoundary>
           )}
-          {view === "tasks" && <TaskBoard pid={pid} focused={taskNav} />}
           {view === "agents" && <AgentWorkbenchView pid={pid} meta={meta} />}
           {view === "browser" && (
             // F6 内置浏览器：轨门控（非 pentest/redteam 整页灰显）在视图内部处理；

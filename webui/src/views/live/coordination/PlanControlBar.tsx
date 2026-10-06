@@ -1,7 +1,0 @@
-import { Pause, Play, RefreshCw, Square } from "lucide-react"
-import type { CoordinationPlan } from "@/lib/types"
-
-export function PlanControlBar({ plan, busy, onStart, onControl, onTimeline }: { plan: CoordinationPlan | null; busy?: boolean; onStart: () => void; onControl: (action: "pause" | "resume" | "interrupt" | "retry") => void; onTimeline: () => void }) {
-  if (!plan) return null
-  return <div className="flex flex-wrap items-center gap-2 border-b px-3 py-2 text-xs"><span className="font-medium">计划控制</span><span className="rounded border px-2 py-0.5 text-[10px]">{plan.status}</span><span className="flex-1" />{plan.status === "draft" && <button className="coord-primary" disabled={busy} onClick={onStart}><Play size={13} />执行前确认</button>}{plan.status === "active" && <><button className="coord-secondary" disabled={busy} onClick={() => onControl("pause")}><Pause size={13} />暂停派发</button><button className="coord-secondary text-(--status-error)" disabled={busy} onClick={() => onControl("interrupt")}><Square size={12} />中断本计划</button></>}{plan.status === "paused" && <><button className="coord-primary" disabled={busy} onClick={() => onControl("resume")}><Play size={13} />恢复派发</button><button className="coord-secondary" disabled={busy} onClick={() => onControl("retry")}><RefreshCw size={13} />重试失败节点</button></>}<button className="coord-secondary" onClick={onTimeline}>回看</button></div>
-}

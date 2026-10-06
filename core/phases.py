@@ -34,11 +34,9 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
-from core.blackboard import TaskQueue
-from core.blackboard.tasks import dedup_fp
 from core.projects import PROJECT_FILE
 from core.skills.roles import _parse_inline_value
-from core.skills.taxonomy import load_task_types, track_dir
+from core.skills.taxonomy import track_dir
 
 log = logging.getLogger(__name__)
 
@@ -313,12 +311,10 @@ def enter_phase(proj, to: str, *, by: str, packs_root: str | Path,
     只走前向过门、审批批准即流转）。
 
     职责：①meta 写 current_phase/phase_history/playbook_fired（playbook_fired
-    按（阶段，指纹）去重——重进不重发）②publish=True 时剧本 tasks[] 原样首发
-    （created_by=playbook、acceptance→判据、noise=passive——阶段引导 objective
-    级不占 active 互斥键、优先级 1；同款任务已在队（find_dedup_target）也跳过；
-    项目创建登记初始阶段传 publish=False——mission 商议前不发静态任务，首发随
-    显式流转触发）③抵达校准 gate_open_notified（新阶段门已过则标记，防 L2
-    秒弹回）④phase.changed 事件留痕。返回 {"from", "to", "published", "spec"}。"""
+    按（阶段，指纹）去重——重进不重发）②publish 参数保留兼容，但任务机制退役
+    （2026-10-06）后不再首发剧本任务（published 恒空）③抵达校准 gate_open_notified
+    （新阶段门已过则标记，防 L2 秒弹回）④phase.changed 事件留痕。
+    返回 {"from", "to", "published", "spec"}。"""
     meta = _load_meta(proj)
     book = load_track_phases(packs_root, proj.track, meta.get("config"))
     if to not in book:
@@ -326,29 +322,9 @@ def enter_phase(proj, to: str, *, by: str, packs_root: str | Path,
     st = read_state(meta)
     prev = st["current"] or default_phase_id(book)
     now_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    tq = TaskQueue(proj.bb)
-    table = load_task_types(packs_root, proj.track)
+    # 任务机制退役（2026-10-06）：剧本 tasks[] 不再首发（原 tq.publish 路径删除）。
     fired: list[str] = list(st["fired"].get(to) or [])
     published: list[str] = []
-    for t in (book[to]["tasks"] if publish else []):
-        fp = dedup_fp(t["task_type"], "", t["objective"])
-        if fp in fired:
-            continue
-        if tq.find_dedup_target(proj.id, fp) is not None:
-            fired.append(fp)  # 同款已在队/在跑：吸收首发（指纹计入，重进不重发）
-            continue
-        try:
-            tid = tq.publish(
-                proj.id, t["objective"], task_type=t["task_type"],
-                noise_budget="passive",
-                priority=1, role=t["role"],
-                acceptance=([t["acceptance"]] if t["acceptance"] else None),
-                created_by="playbook", allowed_types=table.keys())
-        except ValueError as e:
-            log.warning("剧本首发任务被拒 phase=%s type=%s: %s", to, t["task_type"], e)
-            continue
-        fired.append(fp)
-        published.append(tid)
     meta["current_phase"] = to
     history = [*st["history"], {"phase": to, "entered_at": now_ts, "by": by,
                                 "auto": auto,

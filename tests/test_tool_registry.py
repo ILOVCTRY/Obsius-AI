@@ -12,15 +12,14 @@ import pytest
 from core.agent import tool_registry as R
 from core.agent.tools import ToolDispatcher
 
-# ---- 迁移前快照（逐字抄自 2026-10-03 重构前的 core/agent/tools.py） ----
+# ---- 基线快照（2026-10-06 任务机制退役后的工具面；六个任务工具已删） ----
 _SNAPSHOT = {
     "_CONTROL_TOOLS": {
-        "complete_task", "fail_task", "finish", "request_steps",
-        "close_intent", "reopen_intent",
+        "finish", "request_steps", "close_intent", "reopen_intent",
     },
-    "_PLAN_TOOLS": {"task_plan", "task_step", "task_reconcile", "declare_intent"},
+    "_PLAN_TOOLS": {"declare_intent"},
     "_PLAN_PRE_ALLOWED": {
-        "task_plan", "task_step", "task_reconcile", "declare_intent",
+        "declare_intent",
         "bb_query", "kb_open", "kb_search", "route_lookup", "list_symbols",
         "decompile", "strings_search", "func_xrefs", "disasm", "read_file",
         "search_files", "skill_open", "browser_navigate", "browser_screenshot",
@@ -30,24 +29,23 @@ _SNAPSHOT = {
         "declare_intent", "close_intent", "reopen_intent", "bb_delete_intent",
         "bb_add_finding", "bb_update_finding", "bb_delete_finding",
         "bb_delete_asset", "bb_merge_assets",
-        "task_plan", "task_step", "task_reconcile",
-        "complete_task", "fail_task", "finish", "request_steps",
+        "finish", "request_steps",
     },
     "_INTENT_PRE_ALLOWED": {
-        "task_plan", "task_step", "task_reconcile", "declare_intent",
+        "declare_intent",
         "bb_query", "kb_open", "kb_search", "route_lookup", "list_symbols",
         "decompile", "strings_search", "func_xrefs", "disasm", "read_file",
         "search_files", "skill_open", "browser_navigate", "browser_screenshot",
         "browser_content",
-        "complete_task", "fail_task", "finish", "request_steps",
+        "finish", "request_steps",
         "close_intent", "reopen_intent",
         "bb_delete_intent", "bb_add_finding", "bb_update_finding",
         "bb_delete_finding", "bb_delete_asset", "bb_merge_assets",
-        "publish_task", "bb_notify",
+        "bb_notify",
         "request_authorization", "propose_pack_edit", "bb_add_asset",
     },
     "_SPILL_SKIP": {"kb_open", "skill_open", "route_lookup"},
-    "_COLLAB_TOOLS": {"publish_task", "request_authorization"},
+    "_COLLAB_TOOLS": {"request_authorization"},
     "_KNOWLEDGE_EXTRA": {
         "kb_open", "kb_search", "skill_open", "route_lookup",
         "propose_pack_edit", "list_symbols", "decompile",
@@ -56,7 +54,7 @@ _SNAPSHOT = {
     "_FILE_TOOLS": {"read_file", "search_files"},
 }
 
-# 迁移前 AGENT_TOOLS 的 48 个工具名（顺序即文件顺序，Agent schema 顺序对外可见）
+# 退役后 AGENT_TOOLS 的 41 个工具名（顺序即文件顺序，Agent schema 顺序对外可见）
 _SNAPSHOT_ORDER = [
     "run_cmd", "read_file", "search_files",
     "bb_add_asset", "bb_delete_asset", "bb_merge_assets", "bb_asset_status",
@@ -65,9 +63,8 @@ _SNAPSHOT_ORDER = [
     "bb_upsert_func", "bb_blueprint_create", "bb_blueprint_update",
     "bb_logic_block_create", "bb_logic_block_update",
     "decompile", "list_symbols", "strings_search", "func_xrefs", "disasm",
-    "task_plan", "task_step", "task_reconcile",
-    "publish_task", "bb_notify",
-    "complete_task", "fail_task", "finish", "request_steps",
+    "bb_notify",
+    "finish", "request_steps",
     "browser_navigate", "browser_click", "browser_type", "browser_screenshot",
     "browser_content", "browser_back",
     "route_lookup", "skill_open",
@@ -139,12 +136,12 @@ def test_intent_gate_is_derived_not_hardcoded():
 def test_group_mapping_matches_legacy_prefix_rules():
     """迁移前 agent_tool_group 是前缀+集合规则；迁移后落组结果须逐条一致。"""
     expected = {
-        "complete_task": "控制", "request_steps": "控制",
-        "task_plan": "计划", "task_reconcile": "计划",
-        "publish_task": "协作",
+        "request_steps": "控制",
+        "declare_intent": "计划",
+        "request_authorization": "协作",
         "run_cmd": "执行",
         "read_file": "文件", "search_files": "文件",
-        "bb_query": "黑板", "bb_delete_intent": "黑板",
+        "bb_query": "黑板", "bb_delete_intent": "黑板", "bb_notify": "黑板",
         "browser_navigate": "浏览器", "browser_back": "浏览器",
         "kb_open": "知识", "decompile": "知识", "disasm": "知识",
     }

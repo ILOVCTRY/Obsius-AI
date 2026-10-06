@@ -58,7 +58,7 @@ def _age_events(bb, pid, kind, seconds):
 
 def _wake_once(env, triggers):
     """跑一次唤醒轮（产生 proactive 锚点），返回编排器与简报文本。"""
-    llm = ScriptedLLM([{"text": "已收到异常简报：任务失败，建议复查凭据有效性。"}])
+    llm = ScriptedLLM([{"text": "已收到异常简报：团队执行收尾，建议复盘产出。"}])
     bb, project = env
     orch = Orchestrator(project_id=project["id"], bb=bb, llm=llm,
                         session_factory=None, config=OrchestratorConfig())
@@ -71,99 +71,102 @@ def test_collect_lookback_window_no_anchor(env):
     """无锚点（首启）：只报 WAKE_LOOKBACK 窗内的白名单事件，不翻旧账。"""
     bb, project = env
     pid = project["id"]
-    bb.append_event(pid, "task.failed", {"task_id": "t-old", "note": "三天前的失败"},
-                    author="sess-a")
-    _age_events(bb, pid, "task.failed", seconds=3600)  # 超出 1800s 回看窗
+    bb.append_event(pid, "team.run.finished",
+                    {"team_id": "team-old", "team_name": "旧队", "run_id": "r-old",
+                     "status": "failed"}, author="sess-a")
+    _age_events(bb, pid, "team.run.finished", seconds=3600)  # 超出 1800s 回看窗
     assert Orchestrator.collect_wake_triggers(bb, pid) == []
-    bb.append_event(pid, "task.failed", {"task_id": "t-new", "note": "刚才的失败"},
-                    author="sess-a")
+    bb.append_event(pid, "team.run.finished",
+                    {"team_id": "team-new", "team_name": "新队", "run_id": "r-new",
+                     "status": "completed"}, author="sess-a")
     trig = Orchestrator.collect_wake_triggers(bb, pid)
-    assert [t["summary"] for t in trig] == ["刚才的失败"]
-    assert trig[0]["kind"] == "task.failed"
+    assert [t["summary"] for t in trig] == ["团队「新队」执行收尾：completed"]
+    assert trig[0]["kind"] == "team.run.finished"
 
 
-def test_collect_failed_receipt_appends_output_counts(env):
-    """M2（orchestrator-coordination-fusion）：task.failed 带 receipt 时，唤醒简报
-    摘要补「产出 N 发现/M 产物」，编排器一眼看清失败前的产出。"""
+def test_collect_team_run_finished_summary(env):
+    """team.run.finished 摘要按 payload 契约合成：团队名（缺则回落 team_id）
+    + 终态；编排器一眼看清是哪个团队、以何状态收尾。"""
     bb, project = env
     pid = project["id"]
-    bb.append_event(pid, "task.failed",
-                    {"task_id": "t1", "note": "exploit 崩了",
-                     "receipt": {"status": "failed",
-                                 "findings": [{"id": "find-1", "title": "x",
-                                               "severity": "high"}],
-                                 "artifacts": ["poc.py", "out.txt"]}},
-                    author="sess-a")
+    bb.append_event(pid, "team.run.finished",
+                    {"team_id": "team-abc", "team_name": "exploit 队",
+                     "run_id": "r1", "status": "failed"}, author="sess-a")
     trig = Orchestrator.collect_wake_triggers(bb, pid)
-    assert trig[0]["kind"] == "task.failed"
-    assert trig[0]["summary"] == "exploit 崩了（产出 1 发现/2 产物）"
+    assert trig[0]["kind"] == "team.run.finished"
+    assert trig[0]["summary"] == "团队「exploit 队」执行收尾：failed"
+    # team_name 缺失 → 回落 team_id
+    bb.append_event(pid, "team.run.finished",
+                    {"team_id": "team-xyz", "run_id": "r2", "status": "completed"},
+                    author="sess-a")
+    trig2 = Orchestrator.collect_wake_triggers(bb, pid)
+    assert [t["summary"] for t in trig2] == [
+        "团队「exploit 队」执行收尾：failed",
+        "团队「team-xyz」执行收尾：completed"]
 
 
 def test_collect_anchor_id_and_cooldown(env):
     """有锚点：锚点前事件按 id 跳过；锚点后新事件在冷却窗内静默，过后可再报。"""
     bb, project = env
     pid = project["id"]
-    bb.append_event(pid, "task.failed", {"task_id": "t1", "note": "第一次失败"},
-                    author="sess-a")
+    bb.append_event(pid, "team.run.finished",
+                    {"team_id": "t1", "team_name": "一队", "run_id": "r1",
+                     "status": "failed"}, author="sess-a")
     first = Orchestrator.collect_wake_triggers(bb, pid)
     assert len(first) == 1
-    _wake_once(env, first)  # 产生 proactive 锚点（triggers=["task.failed"]）
+    _wake_once(env, first)  # 产生 proactive 锚点（triggers=["team.run.finished"]）
     # 锚点前的旧事件：id <= anchor → 已被上次唤醒覆盖
     assert Orchestrator.collect_wake_triggers(bb, pid) == []
-    # 锚点后新失败：冷却窗（600s）内静默
-    bb.append_event(pid, "task.failed", {"task_id": "t2", "note": "第二次失败"},
-                    author="sess-a")
+    # 锚点后新收尾：冷却窗（600s）内静默
+    bb.append_event(pid, "team.run.finished",
+                    {"team_id": "t2", "team_name": "二队", "run_id": "r2",
+                     "status": "failed"}, author="sess-a")
     now = time.time() + 300
     assert Orchestrator.collect_wake_triggers(bb, pid, now=now) == []
     # 冷却窗过后：新事件可再触发
     now = time.time() + 700
     trig = Orchestrator.collect_wake_triggers(bb, pid, now=now)
-    assert [t["summary"] for t in trig] == ["第二次失败"]
+    assert [t["summary"] for t in trig] == ["团队「二队」执行收尾：failed"]
 
 
 def test_collect_multi_kind_and_nonwhitelist(env):
-    """多类触发同批聚合；白名单外事件（task.done 等）永不唤醒；
-    starvation 摘 warnings.reason+objective，budget 摘 note。"""
+    """多类触发同批聚合；白名单外事件（team.created 等）永不唤醒；
+    team.run.finished 摘团队名+终态，budget 摘 note，gate 摘 summary。"""
     bb, project = env
     pid = project["id"]
-    bb.append_event(pid, "task.failed", {"task_id": "t1", "note": "exploit 崩溃"},
-                    author="sess-a")
-    bb.append_event(pid, "task.starvation",
-                    {"warnings": [{"task_id": "t2", "task_type": "exploit",
-                                   "objective": "拿下后台", "reason": "无专才角色"}]},
-                    author="orchestrator")
+    bb.append_event(pid, "team.run.finished",
+                    {"team_id": "t1", "team_name": "exploit 队", "run_id": "r1",
+                     "status": "failed"}, author="sess-a")
     bb.append_event(pid, "budget.soft_warning",
                     {"scope": "tokens", "used": 80, "budget": 100, "pct": 0.8,
                      "note": "Token 用量已达预算 80%"}, author="system")
     bb.append_event(pid, "phase.gate_open",
                     {"from": "recon", "to": "pentest", "summary": "门指标达成"},
                     author="orchestrator")
-    bb.append_event(pid, "task.done", {"task_id": "t3", "note": "顺利完成"},
-                    author="sess-a")  # 白名单外
+    bb.append_event(pid, "team.created", {"team_id": "t9", "name": "新队"},
+                    author="human")  # 白名单外
     bb.append_event(pid, "llm.usage", {"total_tokens": 1}, author="system")  # 白名单外
     trig = Orchestrator.collect_wake_triggers(bb, pid)
     kinds = {t["kind"] for t in trig}
-    assert kinds == {"task.failed", "task.starvation", "budget.soft_warning",
-                     "phase.gate_open"}
+    assert kinds == {"team.run.finished", "budget.soft_warning", "phase.gate_open"}
     by_kind = {t["kind"]: t for t in trig}
-    assert "无专才角色（拿下后台）" in by_kind["task.starvation"]["summary"]
+    assert by_kind["team.run.finished"]["summary"] == "团队「exploit 队」执行收尾：failed"
     assert "80%" in by_kind["budget.soft_warning"]["summary"]
     assert "门指标达成" in by_kind["phase.gate_open"]["summary"]
 
 
 def test_wake_brief_text_composition():
-    """合成消息：固定引导语 + 按类分行，failed/starvation 带摘要。"""
+    """合成消息：固定引导语 + 按类分行，team.run.finished 带摘要。"""
     triggers = [
-        {"kind": "task.failed", "event_id": 1, "summary": "exploit 崩溃", "ts": "x"},
-        {"kind": "task.starvation", "event_id": 2, "summary": "无专才角色（x）", "ts": "x"},
+        {"kind": "team.run.finished", "event_id": 1,
+         "summary": "团队「exploit 队」执行收尾：failed", "ts": "x"},
         {"kind": "budget.soft_warning", "event_id": 3, "summary": "", "ts": "x"},
         {"kind": "phase.gate_open", "event_id": 4, "summary": "", "ts": "x"},
     ]
     text = Orchestrator.wake_brief_text(triggers)
     assert text.startswith("〔主动唤醒〕")
     assert "向人类简报现状" in text
-    assert "任务失败：exploit 崩溃" in text
-    assert "饿死/重绑告警：无专才角色（x）" in text
+    assert "团队执行收尾：团队「exploit 队」执行收尾：failed" in text
     assert "预算软警" in text and "80%" in text
     assert "阶段出口门满足" in text
 
@@ -175,14 +178,14 @@ def test_chat_turn_wake_payload_and_history(env):
     （唤醒轮=自包含简报，简报语境随轮消散，属定稿口径）。"""
     bb, project = env
     pid = project["id"]
-    triggers = [{"kind": "task.failed", "event_id": 1, "summary": "exploit 崩溃",
-                 "ts": "x"}]
+    triggers = [{"kind": "team.run.finished", "event_id": 1,
+                 "summary": "团队「exploit 队」执行收尾：failed", "ts": "x"}]
     orch, brief = _wake_once(env, triggers)
     chats = [e for e in bb.recent_events(pid) if e["kind"] == "orch.chat"]
     assert len(chats) == 1  # 唤醒简报（user）不落 orch.chat，只有 orch 回复
     payload = chats[0]["payload"]
     assert payload["role"] == "orch" and payload["proactive"] is True
-    assert payload["triggers"] == ["task.failed"]
+    assert payload["triggers"] == ["team.run.finished"]
     # 简报确实进了本轮 LLM messages（唤醒轮自身语境完整）
     assert orch.llm.calls[0]["messages"][-1] == {"role": "user", "content": brief}
     # 下轮普通对话：简报不在历史，首条=新 user 消息
@@ -197,13 +200,13 @@ def test_chat_turn_wake_payload_and_history(env):
 
 
 def test_api_orch_wake_smoke(tmp_path):
-    """API 冒烟：orch_wake_check 直调口——落 task.failed 事件后提交唤醒 Job，
+    """API 冒烟：orch_wake_check 直调口——落 team.run.finished 事件后提交唤醒 Job，
     完成后事件流有 proactive orch.chat；再次直调因锚点覆盖返 empty。"""
     from fastapi.testclient import TestClient
 
     from core.api.app import create_app
-    planner = ScriptedLLM([{"text": "简报：检测到一次任务失败（exploit 崩溃），"
-                                    "建议检查目标环境后重试。"}])
+    planner = ScriptedLLM([{"text": "简报：检测到一次团队执行收尾（exploit 队 failed），"
+                                    "建议复盘产出后决定是否新建团队。"}])
     app = create_app(workspace_root=str(tmp_path / "workspaces"),
                      tools_root=None, executor_llm=ScriptedLLM([]),
                      planner_llm=planner,
@@ -213,9 +216,9 @@ def test_api_orch_wake_smoke(tmp_path):
                                             "capabilities": ["web"]}).json()["id"]
         bb = c.app.state.projects[pid].bb
         assert c.app.state.orch_wake_check(pid) == "empty"  # 无白名单事件
-        bb.append_event(pid, "task.failed",
-                        {"task_id": "t-x", "note": "exploit 崩溃",
-                         "blocked_reason": "error"}, author="sess-a")
+        bb.append_event(pid, "team.run.finished",
+                        {"team_id": "team-x", "team_name": "exploit 队",
+                         "run_id": "run-x", "status": "failed"}, author="sess-a")
         assert c.app.state.orch_wake_check(pid) == "submitted"
         # 等 runner 完成（pending 摘除发生在 finally，晚于 chat_turn 落盘）
         for _ in range(200):
@@ -226,7 +229,7 @@ def test_api_orch_wake_smoke(tmp_path):
         chats = [e for e in bb.recent_events(pid) if e["kind"] == "orch.chat"]
         assert len(chats) == 1
         assert chats[0]["payload"]["proactive"] is True
-        assert chats[0]["payload"]["triggers"] == ["task.failed"]
-        assert "任务失败" in chats[0]["payload"]["text"]
-        # 锚点已覆盖该失败事件：不重复唤醒
+        assert chats[0]["payload"]["triggers"] == ["team.run.finished"]
+        assert "团队执行收尾" in chats[0]["payload"]["text"]
+        # 锚点已覆盖该收尾事件：不重复唤醒
         assert c.app.state.orch_wake_check(pid) == "empty"

@@ -36,7 +36,6 @@ from typing import Any
 
 from core.agent.tools import AGENT_TOOLS, ToolDispatcher
 from core.blackboard.store import BlackboardClosedError
-from core.blackboard.tasks import TaskQueue
 from core.chat import store as chat_store
 from core.chat.mcp_bridge import MCPBridge
 from core.llm.provider import ContextOverflowError, LLMError
@@ -480,7 +479,7 @@ class ChatTurn:
             return None
         try:
             dispatcher = ToolDispatcher(
-                self.bb, ExecutionGateway(bb=self.bb), TaskQueue(self.bb),
+                self.bb, ExecutionGateway(bb=self.bb),
                 project_id=self.project_id,
                 session_id=f"chat-{self.thread_id[-12:]}",
                 author=f"chat-{self.thread_id[-12:]}",

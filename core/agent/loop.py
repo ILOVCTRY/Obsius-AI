@@ -35,7 +35,7 @@ from core.agent.tools import (
     _PLAN_TOOLS,
 )
 from core.autonomy import record_llm_usage
-from core.blackboard import Blackboard, TaskQueue
+from core.blackboard import Blackboard
 from core.blackboard.intents import list_intents
 from core.llm.provider import LLMError, assistant_message, tool_results_message
 from core.llm.tokenizer import get_counter
@@ -254,16 +254,6 @@ def persisted_snapshot_path(artifacts_dir, sid: str) -> "Path | None":
     return Path(artifacts_dir).parent / "snapshots" / f"{sid}.json"
 
 
-def task_transcript_path(artifacts_dir, task_id: str) -> "Path | None":
-    """C10 任务现场文件路径（模块级形态，API 层删任务清理用）：
-    <workspace>/<pid>/snapshots/task-<tid>.json——与 E8 会话快照同目录。
-    文件名由 task_id 确定性推导，agent 层读写无需查 DB 指针；
-    artifacts_dir 为 None 返回 None。"""
-    if artifacts_dir is None:
-        return None
-    return Path(artifacts_dir).parent / "snapshots" / f"task-{task_id}.json"
-
-
 def session_chat_path(artifacts_dir, sid: str) -> "Path | None":
     """会话级对话历史文件路径（2026-09-20 会话窗对话化）：
     <workspace>/<pid>/snapshots/chat-<sid>.json——与 task-<tid>.json 同目录
@@ -272,31 +262,6 @@ def session_chat_path(artifacts_dir, sid: str) -> "Path | None":
     if artifacts_dir is None:
         return None
     return Path(artifacts_dir).parent / "snapshots" / f"chat-{sid}.json"
-
-
-def task_resume_path(artifacts_dir, task_id: str) -> "Path | None":
-    """C6 任务键断点快照路径（模块级形态，API 层判 resume_mode/清理用）：
-    <workspace>/<pid>/snapshots/task-<tid>.resume.json——**跨会话/跨角色复活凭证**。
-    与 C10 task-<tid>.json（transcript 接手素材）同目录不同文件；
-    不存 system（跨角色安全，system 由认领会话按角色重建）；
-    artifacts_dir 为 None 返回 None。"""
-    if artifacts_dir is None:
-        return None
-    return Path(artifacts_dir).parent / "snapshots" / f"task-{task_id}.resume.json"
-
-
-def clear_task_resume(artifacts_dir, task_id: str) -> None:
-    """C6 任务键快照清理（模块级，API 层复用）：done 消费/objective 不匹配降级/
-    任务删除/reopen(drop_scene)/重启孤儿对账时调用；缺失静默、OSError 只 log。"""
-    path = task_resume_path(artifacts_dir, task_id)
-    if path is None:
-        return
-    try:
-        path.unlink()
-    except FileNotFoundError:
-        pass
-    except OSError:
-        log.warning("任务键快照清理失败（任务 %s）", task_id)
 
 
 def _is_tool_result(m: dict) -> bool:
@@ -346,6 +311,29 @@ def sanitize_snapshot_tail(messages: list[dict[str, Any]]) -> list[dict[str, Any
     return msgs
 
 
+def _render_history_lines(msgs: list[dict[str, Any]]) -> list[str]:
+    """把消息列表渲染成摘要器可读文本行（G3 自动压缩与手动 `/compact` 共用）：
+    `[role] 文本` / `[工具结果] …` / `[调用工具] name(args)`。"""
+    lines: list[str] = []
+    for m in msgs:
+        role = m.get("role")
+        content = m.get("content")
+        if isinstance(content, list):
+            for b in content:
+                if not isinstance(b, dict):
+                    continue
+                if b.get("type") == "text":
+                    lines.append(f"[{role}] {b.get('text', '')}")
+                elif b.get("type") == "tool_result":
+                    lines.append(f"[工具结果] {str(b.get('content', ''))[:300]}")
+                elif b.get("type") == "tool_use":
+                    args = json.dumps(b.get("input", {}), ensure_ascii=False)[:200]
+                    lines.append(f"[调用工具] {b.get('name')}({args})")
+        else:
+            lines.append(f"[{role}] {content}")
+    return lines
+
+
 def _fmt_size(n: Any) -> str:
     """附件大小人读格式（_attachment_lines 用）。"""
     if not isinstance(n, int) or n < 0:
@@ -372,43 +360,6 @@ def _attachment_lines(attachments: Any) -> list[str]:
         size_s = _fmt_size(a.get("size"))
         lines.append(f"- 📎 {path}（{name}{('，' + size_s) if size_s else ''}）")
     return lines
-
-
-class _LeaseHeartbeat(threading.Thread):
-    """任务租约守护心跳（§6.4）：认领后周期 renew_lease，防长任务超过 TTL 被回收双跑。
-
-    - pause 期间继续续租（任务仍被会话占有，快照恢复后接着跑）；
-    - 任务 complete/fail/abort/被人类删除时由会话 stop()；
-    - 续租抛 ClaimError（任务已不属于本会话）→ 自行退出；其他异常记下日志下一周期再试，
-      绝不抛进主线程。
-    """
-
-    def __init__(self, tq: TaskQueue, session_id: str, task_id: str, interval_seconds: int):
-        super().__init__(daemon=True, name=f"lease-hb-{session_id[:12]}-{task_id[:12]}")
-        self.tq = tq
-        self.session_id = session_id
-        self.task_id = task_id
-        self.interval = max(0.05, float(interval_seconds))
-        self._stop_evt = threading.Event()
-
-    def run(self) -> None:
-        from core.blackboard.tasks import ClaimError
-
-        while not self._stop_evt.wait(self.interval):
-            try:
-                self.tq.renew_lease(self.task_id, self.session_id)
-            except ClaimError:
-                log.info("租约心跳退出：任务 %s 已不由会话 %s 持有",
-                         self.task_id, self.session_id)
-                return
-            except Exception:  # noqa: BLE001 —— 心跳是安全网，瞬时失败下一周期补偿
-                log.warning("租约续租失败（任务 %s），下一周期重试", self.task_id, exc_info=True)
-
-    def stop(self) -> None:
-        self._stop_evt.set()
-        # 有界等线程退出：Event.wait 命中置位即返，正常毫秒级收摊；负载下若不 join，
-        # 观测方（测试/收尾断言）在 is_alive() 上会滞后一拍误判未停
-        self.join(timeout=2.0)
 
 
 class AgentSession:
@@ -473,14 +424,13 @@ class AgentSession:
         else:
             self.session = bb.register_session(
                 project_id, session_name or f"{track}/{self.role_name}", role=self.role_name)
-        self.tq = TaskQueue(bb)
         # 会话控制面（DESIGN.md §3）：API 线程只置 Event，worker 线程消费——
         # 事件对象须先于 dispatcher 创建（■ 即点即停 2026-09-19：abort_event
         # 传给 dispatcher，run_cmd 执行中置位即杀进程树）
         self._pause_req = threading.Event()
         self._abort_req = threading.Event()
         self.dispatcher = ToolDispatcher(
-            bb, gateway, self.tq,
+            bb, gateway,
             project_id=project_id, session_id=self.session["id"], author=self.session["id"],
             decompiler=decompiler, artifacts_dir=artifacts_dir,
             packs_root=packs_root, track=track, capabilities=self.capabilities,
@@ -499,15 +449,9 @@ class AgentSession:
         # 用本会话 LLM 对照红线/评级规则自我核对——不合格降级有效发现，不进漏洞视图。
         if track in ("pentest", "redteam") and gate_llm is not None:
             self.dispatcher.vuln_gate = self._build_vuln_gate(gate_llm)
-        # v0.65 done 自动提案：任务完成时复盘验证过的有效手法 → 自动产提案草稿
-        # （planner_llm 缺席或 enable_sediment=False 不接线；人类审批后进 kb 并更新索引）
-        if planner_llm is not None and enable_sediment:
-            self.dispatcher.sediment_hook = self._sediment_proposal
-        # ⑥ 战役记忆（简版）：任务 done 后沉淀打法进全局库（跨项目召回；
-        # 纯确定性拼接不需要 LLM，campaign 注入即接线）
+        # 任务机制退役（2026-10-06）：done 自动提案（sediment_hook）与战役记忆
+        # 沉淀（campaign_hook）原挂在 complete_task 钩子——任务工具已删，两钩子不再接线。
         self.campaign = campaign
-        if campaign is not None:
-            self.dispatcher.campaign_hook = self._campaign_memory
 
         # 会话控制面（DESIGN.md §3）：API 线程只置 Event，worker 线程在步边界消费
         # （_pause_req/_abort_req 已上移到 dispatcher 构造前——■ 即点即停要传 abort_event）
@@ -525,7 +469,6 @@ class AgentSession:
         # 批 5（§6.8）：worker 退出原因信号——True=最后一次 claim 队列为空（可触发
         # L2 续 tick）；暂停/中断退出保持 False。run_next_task 每次认领前置 False。
         self.last_claim_idle = False
-        self._heartbeat: _LeaseHeartbeat | None = None  # 当前任务的租约心跳
         if existing_session is not None:
             # E8：暂停快照已落盘 → 载回 _resume_state 并置回暂停态
             #（服务重启后 resume 仍可从快照+步数断点续跑；无快照行为同旧版）
@@ -544,24 +487,7 @@ class AgentSession:
     _plan_gate_count = state_proxy("plan_gate_count")
     _stuck_waves = state_proxy("stuck_waves")
     _stuck_extensions = state_proxy("stuck_extensions")
-    _cadence_last_rev = state_proxy("cadence_last_rev")
-    _cadence_last_hint_step = state_proxy("cadence_last_hint_step")
-    _cadence_hinted_findings = state_proxy("cadence_hinted_findings")
     _stale_alerted = state_proxy("stale_alerted")
-
-    # ---------- 租约心跳（A1：长任务防 30 分钟 TTL 过期被重领双跑） ----------
-
-    def _start_heartbeat(self, task_id: str) -> None:
-        self._stop_heartbeat()
-        hb = _LeaseHeartbeat(
-            self.tq, self.session["id"], task_id, self.config.lease_renew_seconds)
-        self._heartbeat = hb
-        hb.start()
-
-    def _stop_heartbeat(self) -> None:
-        hb, self._heartbeat = self._heartbeat, None
-        if hb is not None:
-            hb.stop()
 
     def _apply_role_limits(self, role_data: dict) -> None:
         """角色 yaml 增强字段 → AgentConfig（§6.6）。
@@ -1136,146 +1062,6 @@ class AgentSession:
         self._abort_req.set()
         self._pause_req.clear()  # 中断优先，避免同一检查点被当成暂停
 
-    def run_task(self, objective: str, features: list[str] | None = None,
-                 file_features: list[str] | None = None,
-                 task_id: str | None = None) -> str:
-        """执行一个目标（任务）。task_id 给定时：open 则自动认领，已被他人持有则拒绝。
-        返回空串 = 暂停/中断退出（任务收尾已由检查点处理，不得再走 _finalize）。"""
-        stale_refs: list[str] = []
-        old_plan_notice: str | None = None  # C1：重认领旧任务的计划/发现注入
-        dead_end_notice: str | None = None  # C3：跨轨路标三级注入
-        resumed: dict[str, Any] | None = None  # C6：任务键断点快照（认领即复活）
-        if task_id:
-            task = self.tq.get_task(task_id)
-            if task is None:
-                raise ValueError(f"任务不存在: {task_id}")
-            if task["claimed_by"] != self.session["id"]:
-                if task["status"] in {"open", "pending"}:
-                    self.tq.start_direct(task_id, self.session["id"],
-                                         lease_minutes=self.config.lease_minutes)
-                    task = self.tq.get_task(task_id)
-                else:
-                    raise ValueError(
-                        f"任务 {task_id} 由 {task['claimed_by']} 持有（{task['status']}），"
-                        f"本会话不可执行")
-            # 撤回传播（§6.7 的 1.6）：认领/接手时若依据已被推翻，首条消息必带
-            # 强制自警告警（open 任务只挂标无私信，这里按 stale_refs 现场补水）。
-            # 同会话同任务只告一次，暂停快照续跑不重复（快照里已有告警）。
-            stale_refs = list(task.get("stale_refs") or [])
-            self.dispatcher.current_task_id = task_id
-            self._start_heartbeat(task_id)
-            # C6 认领即复活：任务键断点快照命中（objective 未被改）→ 跳过
-            # handover/old_plan/dead_end/objective 注入链（快照历史里已有）。
-            resumed = self._load_task_resume(task_id, task)
-            if resumed is None:  # 无快照/快照被清（objective 被改降级）→ 常规注入链
-                old_plan_notice = self._old_plan_notice(task)
-                dead_end_notice = self._dead_end_notice(task)
-            # v14 认领即换装：任务带 role 且 ≠ 当前执行角色 → 先换装再建 system prompt
-            #（build_system_prompt/_role_block/skill_context_for 按调用时点取值，全链生效）
-            self._apply_task_persona(task, task_id)
-        skill_ctx = self.skill_context_for(
-            objective, features, file_features, task_id=task_id,
-            # 认领路径增强：task_type 加分 + scope 拼路由 query（task 行已取过）
-            task_type=(task or {}).get("task_type") if task_id else None,
-            scope=(task or {}).get("scope") if task_id else None)
-        self._last_skill_context = skill_ctx  # v0.71：热换装重建 system 时复用
-        # 阶段一（2026-09-28）：任务认领期黑板物化——检索式注入强相关事实（资产/
-        # 发现/函数/链/死路），objective 为 query；E8 快照恢复不物化（快照自洽）。
-        if not resumed:
-            materialized = self._blackboard_materialize(objective)
-            if materialized:
-                skill_ctx = f"{skill_ctx}\n\n{materialized}".strip()
-        system = self.build_system_blocks(objective, skill_ctx)
-        # C6：复活时 messages 整体取快照（不与 transcript 拼接，防 tool_use/result
-        # 错位）；否则 C10 transcript 接手（末 60 条）。E8 resume 路径不经 run_task，互斥。
-        transcript_msgs: list[dict[str, Any]] = []
-        if task_id and resumed is None:
-            transcript_msgs = self._load_task_transcript(task_id)
-        messages: list[dict[str, Any]] = list(resumed["messages"]) if resumed \
-            else list(transcript_msgs)
-        start_step = int(resumed["next_step"]) if resumed else 1
-        if resumed is not None:
-            self.dispatcher.max_steps = int(resumed["max_steps"])  # 预算断点还原
-            clear_task_resume(self.artifacts_dir, task_id or "")  # 消费即删
-        # 认领期消费收件箱（2026-09-19 轮末语义：human_note 不再于步边界中途
-        # 注入，延迟到此处/恢复期——认领即拿到上一轮期间投递的人类引导）。
-        # 口径统一走订阅声明表 _INBOX_SUBSCRIPTIONS（2026-09-21）。basis_stale
-        # （强制三选一）合并任务挂标（open 任务只挂标无私信，按 stale_refs 现场
-        # 补水）与收件箱私信两条来源；_stale_alerted 去重只对任务挂标部分生效
-        # ——纯私信形态（任务行 stale_refs 已清）不再被 stale_refs 门控吞掉。
-        if task_id:
-            notices, _drained = self._drain_inbox("claim", stale_refs=stale_refs)
-            for _kind, notice in notices:
-                messages.append({"role": "user", "content": notice})
-            if stale_refs and any(k == "basis_stale" for k, _ in notices):
-                self._stale_alerted.add(task_id)
-        if resumed is not None:
-            # ⚡ 续跑标记：历史工具结果属旧现场不可重放，需重新取证
-            messages.append({"role": "user", "content":
-                f"⚡ 已从中断现场续跑（第 {resumed['next_step']} 步起；"
-                "历史工具结果属旧现场不可重放，需重新取证）。"})
-        else:
-            handover = (self._handover_notice(task, bool(transcript_msgs))
-                        if task_id else None)  # C10：第 N 次尝试接手提示
-            if handover:
-                messages.append({"role": "user", "content": handover})
-            if task_id:
-                # 阶段四 M1 跨窗方向指纹（2026-09-28）：本任务历次认领会话的命令
-                # 聚合（精确计数排行 cap 10 + 首词聚类 cap 15，≤20 行）——接手窗
-                # 进场即知已试方向，避免跨窗重踩（stuck-convergence M2 定稿落地）。
-                fp = self._direction_fingerprint(task_id)
-                if fp:
-                    messages.append({"role": "user", "content": fp})
-                # 阶段四 M3 接手黑板视角（2026-09-28）：接手窗无本会话记忆，把黑板
-                # 知识侧（已验证 finding + 已排除死路，跨窗沉淀）作为 user 消息注入
-                # ——与 transcript（对话现场）互补，与阶段一 system 物化（通用检索）
-                # 区分：此处聚焦跨窗已验证结论，接手即知哪些已坐实。
-                bv = self._handover_blackboard_view(task)
-                if bv:
-                    messages.append({"role": "user", "content": bv})
-            if old_plan_notice:
-                messages.append({"role": "user", "content": old_plan_notice})
-            if dead_end_notice:
-                messages.append({"role": "user", "content": dead_end_notice})
-            att_lines = _attachment_lines(
-                ((task or {}).get("context") or {}).get("attachments")) \
-                if task_id else []
-            if att_lines:  # 附件随发（2026-09-19）：发布时经 API 层校验的 artifact 引用
-                messages.append({"role": "user", "content":
-                    "📎 任务附件（可用 run_cmd 读取，只读勿改写，工作区相对路径）：\n"
-                    + "\n".join(att_lines)})
-            pref_runtime = str(task.get("preferred_runtime") or "") if task_id else ""
-            if pref_runtime:
-                # v23（TRAE 新壳 M3）：任务默认运行时——run_cmd 省略 runtime 即按此
-                # 执行；单条命令显式传 runtime 仍可临时覆盖
-                messages.append({"role": "user", "content":
-                    f"🎛️ 本任务默认执行运行时={pref_runtime}：run_cmd 可省略 runtime"
-                    f"（按 {pref_runtime} 执行）；单条命令确需其他运行时时显式传 "
-                    "runtime 即临时覆盖。"})
-            messages.append({"role": "user", "content": objective})
-        if task_id:
-            self._checkpoint_task_transcript(messages, objective)  # 认领即有现场
-        try:
-            summary = self._loop(system, messages, objective, start_step=start_step)
-        except Exception as e:
-            # 兜底：异常穿出主循环（典型=LLM 传输层重试耗尽）必须收尾任务并停心跳，
-            # 否则任务悬在 claimed + 孤儿心跳续租占坑（本进程内永久「执行中」）。
-            self._fail_task_on_error(e)
-            raise
-        if summary is None:  # 暂停（心跳保留，继续占任务）/中断（_abort_current_task 已停心跳）
-            return ""
-        if self.dispatcher.finished:
-            self._finalize()
-            return summary
-        # 委托收尾、会话存活：先恢复底色 persona（防带任务角色待命），再把
-        # 「委托目标 + 收尾摘要」沉淀进会话对话历史——后续对话轮即带本件上下文
-        # （格式与 run_chat 问答对一致）。
-        self._restore_base_persona()
-        self._append_chat_to_session(
-            [f"🧭 委托：{objective}"],
-            summary or self.dispatcher.last_delegation_note or "委托已收尾")
-        return summary
-
     def run_team_execution(self, context) -> str | None:
         """执行一个独立 Team 成员目标，不创建或认领旧任务。"""
         if not context.objective.strip():
@@ -1297,29 +1083,25 @@ class AgentSession:
             self.dispatcher.current_task_id = old_task
 
     def run_session(self) -> str | None:
-        """会话轮（会话中心化编排，docs/plans/session-centric-orchestration.md §4.2）：
-        ① 窗内有 open 委托 → 取队首起跑执行（完整工具面）；
-        ② 无委托但收件箱有可回应消息 → 对话回应（工具面一致）；
-        ③ 都没有 → None 空退（窗回待命，事件驱动，非常驻进程）。
-        委托做完由 worker while 再入本方法，自动接窗内队列下一件。
+        """会话轮（任务机制退役后，2026-10-06）：会话不再认领任务——只有
+        收件箱有可回应消息 → 对话回应（run_chat）；无消息 → None 空退
+        （窗回待命，事件驱动，非常驻进程）。
 
-        暂停/中断请求 → 不领新任务并落状态；有快照 → 优先续跑被暂停的任务。
-        快照续跑（E8）不经 run_task，与任务现场（transcript）接手路径天然互斥。"""
-        self._restore_base_persona()  # v14 兜底闸：任何遗漏恢复路径不得带 persona 接新委托
+        暂停/中断请求 → 不处理并落状态（本会话无任务现场可续）。"""
+        self._restore_base_persona()
         if self._abort_req.is_set():
             self._abort_current_task()   # 空闲路径：无任务则只清标志 + 落审计
             return None
         if self._pause_req.is_set():
             self._pause_req.clear()
-            self._enter_paused()         # 任务间暂停：无快照，恢复后正常取队列
+            self._enter_paused()         # 空闲暂停：无快照
             return None
         if self._stop_after_task or self.paused:
             self._stop_after_task = False
             if self.paused:
                 # 暂停闸空退留审计（2026-09-27 修「引导石沉大海」排查难）：
                 # 此前静默 return，出问题只能靠快照 mtime 反推；正常流不该
-                # 踢到暂停会话（note 端点已改走恢复语义、调度器跳过 paused
-                # 行），触发即说明上游有闸漏，事件流必须可见。
+                # 踢到暂停会话（note 端点已改走恢复语义），触发即说明上游有闸漏。
                 try:
                     self.bb.append_event(
                         self.project_id, "session.work_state",
@@ -1328,72 +1110,13 @@ class AgentSession:
                         session_id=self.session["id"], author=self.session["id"])
                 except Exception:  # noqa: BLE001 —— 审计失败不影响空退路径
                     log.exception("暂停闸审计事件落盘失败 sid=%s", self.session["id"])
-            return None                  # 中断收尾闸门 / 暂停态不领新任务
-        if self._resume_state is not None:
-            st, self._resume_state = self._resume_state, None
-            self._clear_snapshot()  # 快照已消费（文件+指针清理；失败留垃圾不影响主流程）
-            # C6 生命周期：E8 会话键恢复消费时同步删任务键快照（防「恢复后又 fail」
-            # 时 rewind 到旧暂停点——现场以最新一次暂停为准）
-            clear_task_resume(self.artifacts_dir, st.get("task_id") or "")
-            task = self.tq.get_task(st["task_id"])
-            if (task and task["claimed_by"] == self.session["id"]
-                    and task["status"] == "claimed"):
-                self.dispatcher.current_task_id = st["task_id"]
-                # v14：重启/恢复后先按任务行重换装（快照 system 生成于暂停时点、
-                # 已含任务角色 prompt 段；此处补齐 config/dispatcher 执行边界一致）。
-                # 同进程暂停恢复时 persona 未摘 → 幂等 no-op。
-                self._apply_task_persona(task, st["task_id"])
-                if self._heartbeat is None:  # 兜底：暂停期心跳本应保留，缺失则补起
-                    self._start_heartbeat(st["task_id"])
-                # E8：暂停期积压的私信（含 human_note 人类引导 / agent_message 私信 /
-                # task_receipt 回执，2026-09-20 对话化）随快照恢复一并注入；口径统一
-                # 走订阅声明表（2026-09-21）——原全量 drain 会吞掉不显示，本起补齐。
-                notices, _dr = self._drain_inbox("resume")
-                for _kind, notice in notices:
-                    st["messages"].append({"role": "user", "content": notice})
-                pending_intents = st.get("open_intents") or []
-                if pending_intents:  # 意图纪律①：续跑即提醒照单收尾
-                    lines = "\n".join(
-                        f"- {it.get('statement', '')}（{it.get('id', '')}）"
-                        for it in pending_intents[:10]
-                        if isinstance(it, dict))
-                    st["messages"].append({"role": "user", "content":
-                        f"🧾 收尾提醒：本项目有 {len(pending_intents)} 个意图未收尾，"
-                        f"续跑中必须逐个 close_intent：\n{lines}"})
-                try:
-                    summary = self._loop(st["system"], st["messages"], st["objective"],
-                                         start_step=st["next_step"])
-                except Exception as e:
-                    self._fail_task_on_error(e)
-                    raise
-                if summary is None:
-                    return None          # 恢复后立刻又被暂停/中断
-                if self.dispatcher.finished:
-                    self._finalize()
-                else:  # 委托收尾、会话存活：恢复底色 + 沉淀进会话对话历史
-                    self._restore_base_persona()
-                    self._append_chat_to_session(
-                        [f"🧭 委托：{st['objective']}"],
-                        summary or self.dispatcher.last_delegation_note or "委托已收尾")
-                return summary
-            # 快照失效（租约被回收/他人持有）：丢弃快照，落到正常取队列
+            return None                  # 中断收尾闸门 / 暂停态不处理
         self.last_claim_idle = False  # 进入会话轮：暂停/中断早退路径不得残留旧 True
-        # 新任务直派语义：worker 只执行提交时绑定的唯一任务，不再扫描任务池认领。
-        task_id = self.dispatcher.current_task_id
-        if task_id:
-            task = self.tq.get_task(task_id)
-            if task and task.get("claimed_by") == self.session["id"] and task.get("status") == "claimed":
-                try:
-                    return self.run_task(task["objective"], task_id=task_id)
-                except Exception as e:
-                    self._fail_task_on_error(e)
-                    raise
-        # 无直派任务：对话回应——无消息可回应 → run_chat None → 真空闲空退
+        # 对话回应——无消息可回应 → run_chat None → 真空闲空退
         reply = self.run_chat()
         if reply is not None:
             return reply
-        # 真空闲：DB 状态回 idle（旧流路由 _finalize 落，现委托收尾不结束会话，
-        # 在此统一落）。closed/paused 不覆盖。
+        # 真空闲：DB 状态回 idle。closed/paused 不覆盖。
         cur = self.bb.get_session(self.session["id"])
         if (cur or {}).get("status") not in ("closed", "paused"):
             try:
@@ -1435,47 +1158,16 @@ class AgentSession:
         note_text = "\n".join(
             str((r.get("payload") or {}).get("text", "")).strip()
             for r in drained if r.get("kind") == "human_note").strip()
-        # 对话即指令（阶段二，2026-09-28）：人类引导首轮意图判定——「任务」语义
-        # 自动升级为绑定本会话的任务（worker 下一轮 take_session_next 自动起跑
-        # run_task），「对话」语义走原对话流程。判定失败回落对话（宁当对话不误派活）。
-        if note_text:
-            intent, objective = self._classify_human_intent(note_text)
-            if intent == "task" and objective:
-                atts = [a for r in drained
-                        for a in ((r.get("payload") or {}).get("attachments") or [])]
-                try:
-                    self.tq.publish(
-                        self.project_id, objective,
-                        task_type="generic", noise_budget="passive",
-                        target_session=self.session["id"],
-                        attachments=atts or None,
-                        created_by="human")
-                    self.bb.append_event(
-                        self.project_id, "agent.intent",
-                        {"session_id": self.session["id"], "intent": "task",
-                         "objective": objective[:300],
-                         "note": note_text[:200]},
-                        session_id=self.session["id"], author=self.session["id"])
-                    return f"已受理为任务，自动起跑（目标：{objective[:80]}）"
-                except Exception as e:  # noqa: BLE001 —— 发布失败不阻断对话
-                    log.warning("对话转任务发布失败，回落对话: %s", e)
-                    parts.append(f"（你这句话按任务处理失败：{e}；可改述后重发）")
-        # 历史：复盘窗口优先读取任务现场，普通窗口读取会话级 chat 文件。
-        # 两者都经 sanitize_snapshot_tail 清理悬空 tool-use 半对，避免把历史污染带回上游。
-        meta = self.session.get("meta")
-        if isinstance(meta, str):
-            try:
-                meta = json.loads(meta)
-            except ValueError:
-                meta = {}
-        context_task_id = meta.get("context_task_id") if isinstance(meta, dict) else None
-        history_source = self._load_task_transcript(str(context_task_id)) if context_task_id else self._load_session_chat()
+        # 2026-10-06 任务机制退役：人类引导一律走对话——不再判定「任务」意图自动
+        # 升级为绑定任务（原 agent.intent 路径已删）。开窗引导即纯对话；需要受管
+        # 执行请由指挥组建团队（build_team）。
+        # 历史：任务机制退役后恒读会话级 chat 文件（原「任务复盘模式」读任务现场已废）。
+        # 经 sanitize_snapshot_tail 清理悬空 tool-use 半对，避免把历史污染带回上游。
+        history_source = self._load_session_chat()
         history = sanitize_snapshot_tail(history_source)
         if history:
-            chat_mode = (("任务复盘模式：以下是该任务执行现场的历史消息（仅作事实参考，"
-                          "不要自动重放历史工具/命令）；" if context_task_id else "") +
-                         "延续模式：以下是本会话既往对话记录（截尾保留，含此前委托的"
-                         "收尾摘要），接着此上下文回应；可继续用工具查黑板/读工作区文件、"
+            chat_mode = ("延续模式：以下是本会话既往对话记录（截尾保留），接着此上下文"
+                         "回应；可继续用工具查黑板/读工作区文件、"
                          "跑命令核实。阶段性结论要落发现时同样走意图纪律：先 "
                          "declare_intent 声明（侦察结论登记可在 statement 写明依据），"
                          "做一次核实动作后再 bb_add_finding（带 evidence，relates_to "
@@ -1549,38 +1241,6 @@ class AgentSession:
             self._append_chat_to_session(parts, final_text)
         return final_text
 
-    def _classify_human_intent(self, note_text: str) -> tuple[str, str]:
-        """对话即指令（阶段二）：判定人类引导是「任务」还是「对话」。
-
-        返回 (intent, objective)：intent ∈ {"task","chat"}；task 时 objective 为
-        提炼后的可执行目标（失败回落原文）。判定模型优先 planner_llm（省主模型
-        token），缺失回落 self.llm；任何异常回落 chat（宁当对话不误派活）。
-        """
-        llm = self.planner_llm or self.llm
-        prompt = (
-            "你是任务意图分类器。判断一条发给 Agent 的人类消息是「任务」还是「对话」。\n"
-            "任务（task）：明确要求执行具体工作（分析/扫描/编写/测试/修改/调查某个目标等），"
-            "有可执行的目标；\n"
-            "对话（chat）：闲聊、提问、澄清、确认、询问状态、给背景、讨论方案、说谢谢/好的等。\n"
-            "只输出一个 JSON 对象，不要任何其他文字：\n"
-            '{"intent": "task"|"chat", "objective": "task 时的一句话可执行目标，chat 时留空"}'
-        )
-        try:
-            resp = llm.chat(
-                [{"role": "user", "content": f"人类消息：\n{note_text[:1500]}"}],
-                system=prompt)
-            self._record_usage(resp, source="planner", llm_obj=llm)
-            m = re.search(r"\{.*\}", resp.text or "", re.DOTALL)
-            data = json.loads(m.group(0)) if m else None
-            intent = str((data or {}).get("intent", "")).strip().lower()
-            if intent == "task":
-                objective = str((data or {}).get("objective", "")).strip()
-                return "task", objective or note_text
-            return "chat", ""
-        except Exception as e:  # noqa: BLE001 —— 判定失败回落对话
-            log.warning("对话意图判定失败，回落对话: %s", e)
-            return "chat", ""
-
     def _load_session_chat(self) -> list[dict[str, Any]]:
         """会话级对话历史（2026-09-20 对话化）：非绑定窗 run_chat 的上下文来源。
         防御同 _load_task_transcript：JSON 损坏/结构异常 → 空列表降级；只取末
@@ -1624,6 +1284,72 @@ class AgentSession:
             os.replace(tmp, path)
         except Exception:  # noqa: BLE001
             log.exception("会话对话历史回写失败（会话 %s）", self.session["id"])
+
+    def compact_session_chat(self, *, keep_recent: int = 8) -> dict[str, Any]:
+        """手动持久压缩会话对话历史（直播间 `/compact`，2026-10-06）：把
+        `chat-<sid>.json` 的旧问答对经 LLM 按九要素压成摘要，文件重写为
+        「摘要头 + 最近 keep_recent 条」，后续对话轮从压缩后的历史起跑。
+
+        与 `_maybe_summarize` 的差别：作用于**磁盘持久历史**而非本轮内存 messages
+        ——后者轮末即丢，文件永远全量，长会话每轮都从全量重放。此处切割点只需
+        避开 tool_result 边界（chat 文件只存问答对，天然无工具块）。
+        历史过短/为空 noop 不烧 LLM；摘要失败/写回失败不改文件（宁可不压不破坏
+        现场）。返回 {status, reason?, before_msgs, after_msgs?, summarized?, summary?}。"""
+        path = session_chat_path(self.artifacts_dir, self.session["id"])
+        if path is None or not path.exists():
+            return {"status": "noop", "reason": "empty", "before_msgs": 0}
+        try:
+            st = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {"status": "noop", "reason": "empty", "before_msgs": 0}
+        msgs = st.get("messages") if isinstance(st, dict) else None
+        if not isinstance(msgs, list):
+            return {"status": "noop", "reason": "empty", "before_msgs": 0}
+        messages = [m for m in msgs if isinstance(m, dict)]
+        before = len(messages)
+        if before <= keep_recent + 2:
+            return {"status": "noop", "reason": "too_short", "before_msgs": before}
+        cut = before - keep_recent
+        while cut > 0 and _is_tool_result(messages[cut]):
+            cut -= 1  # 边界不落在 tool_result 上（与 _maybe_summarize 同口径）
+        old = messages[:cut]
+        if len(old) < 4:
+            return {"status": "noop", "reason": "too_short", "before_msgs": before}
+        chars_before = self._count_tokens(messages)
+        summary = self._summarize_history_text(_render_history_lines(old))
+        if not summary:
+            return {"status": "error", "reason": "summarize_failed",
+                    "before_msgs": before}
+        head = (f"[历史摘要（原 {len(old)} 条消息由系统压缩；黑板对象只存 id，"
+                f"细节用 bb_query/kb_open 现查）]\n")
+        new_messages = [
+            {"role": "user", "content": head + summary},
+            {"role": "assistant", "content": "已读摘要，从上一步继续。"},
+            *messages[cut:],
+        ]
+        if len(new_messages) > 120:
+            new_messages = new_messages[-120:]
+        out = st if isinstance(st, dict) else {}
+        out["session_id"] = self.session["id"]
+        out["messages"] = new_messages
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, path)
+        except Exception:  # noqa: BLE001
+            log.exception("会话对话历史压缩写回失败（会话 %s）", self.session["id"])
+            return {"status": "error", "reason": "write_failed",
+                    "before_msgs": before}
+        self.bb.append_event(
+            self.project_id, "llm.compact",
+            {"before_msgs": before, "after_msgs": len(new_messages),
+             "summarized": len(old), "chars_before": chars_before,
+             "chars_after": self._count_tokens(new_messages), "manual": True},
+            session_id=self.session["id"], author=self.session["id"])
+        return {"status": "compacted", "before_msgs": before,
+                "after_msgs": len(new_messages), "summarized": len(old),
+                "summary": summary[:200]}
 
     def _chat_interruptible(self, messages: list[dict[str, Any]],
                             *, system: str | list[dict[str, Any]],
@@ -1792,138 +1518,6 @@ class AgentSession:
             except Exception:  # noqa: BLE001 —— 清剪失败只多留过渡行，不影响主流程
                 log.exception("llm.thinking.delta 清剪失败 stream_id=%s", sid)
 
-    def _dead_end_notice(self, task: dict) -> str | None:
-        """C3 跨轨路标三级注入（§5.2 定稿）：已排除方向/死路（status=false-positive
-        findings）注入认领会话——① scope/资产精确匹配全文（cap 5）② 同 host 聚合
-        一行动态摘要（跨端口可见、未覆盖目标显形）③ 项目级计数 + 查询纪律。
-        渗透=已排除攻击路径、CTF=死路线索、逆向=已排除假设。"""
-        fps = [f for f in self.bb.list_findings(self.project_id)
-               if f["status"] == "false-positive"]
-        if not fps:
-            return None
-        assets = {a["id"]: a for a in self.bb.list_assets(self.project_id)}
-
-        def host_val(aid: str | None) -> str:
-            a = assets.get(aid)
-            while a:
-                if a["type"] == "host":
-                    return a["value"]
-                a = assets.get(a.get("parent_id") or "")
-            return ""
-
-        scope_text = ((task.get("scope") or "") + " " +
-                      (task.get("objective") or "")).lower()
-        exact: list[str] = []
-        by_host: dict[str, list[str]] = {}
-        for f in fps:
-            av = (assets.get(f.get("target_asset_id")) or {}).get("value", "").lower()
-            hv = host_val(f.get("target_asset_id"))
-            blob = (f["title"] + " " + json.dumps(f.get("evidence", {}),
-                                                  ensure_ascii=False)[:200]).lower()
-            line = f"⛔ {f['title']}"
-            if av and (av in scope_text or (hv and hv in scope_text)):
-                exact.append(line)
-            elif hv:
-                by_host.setdefault(hv, []).append(f["title"][:40])
-            else:
-                by_host.setdefault("(其他)", []).append(f["title"][:40])
-        lines: list[str] = ["🚫 路标——以下方向已被排除（勿重走，动手前先 bb_query 查死路）："]
-        for f in exact[:5]:
-            lines.append(f"  {f}")
-        for hv, titles in list(by_host.items())[:10]:
-            lines.append(f"  ⛔ {hv}：已排除 {len(titles)} 条（{'、'.join(titles[:2])}…）"
-                         if len(titles) > 2 else
-                         f"  ⛔ {hv}：已排除 {len(titles)} 条（{'、'.join(titles)}）")
-        if len(exact) > 5:
-            lines.append(f"  （另有 {len(exact) - 5} 条精确匹配路标未展开）")
-        return "\n".join(lines)
-
-    def _old_plan_notice(self, task: dict) -> str | None:
-        """C1：重新认领曾执行过的任务时，注入旧计划与依据发现摘要——
-        done 步骤带真实性注记（未经本会话验证，不视为已验证），防新会话误读。"""
-        old_plan = task.get("plan") or []
-        if not old_plan:
-            return None
-        lines = ["♻ 该任务曾被执行过并中途停止（现重新认领）。以下旧计划仅供参考——"
-                 "done 步骤未经你验证，重做前先核实，不要盲目沿用："]
-        for s in old_plan:
-            line = f"- {s.get('id')} [{s.get('status')}] {s.get('title')}"
-            if s.get("note"):
-                line += f"（{s['note']}）"
-            lines.append(line)
-        fsums: list[str] = []
-        for fid in (task.get("context_refs") or [])[:5]:
-            try:
-                f = self.bb.get_finding(self.project_id, fid)
-            except Exception:  # noqa: BLE001
-                f = None
-            if f:
-                fsums.append(f"- {fid} [{f['status']}/{f['severity']}] {f['title']}")
-        if fsums:
-            lines.append("该任务依据的发现摘要：")
-            lines += fsums
-        return "\n".join(lines)
-
-    def _handover_notice(self, task: dict, has_transcript: bool) -> str | None:
-        """C10 跨会话接手提示：有现场或履历才注入。对上面的对话现场做元说明
-        （可续做、已有结论不必重查；历史工具结果属于当时现场不可重放），
-        并注入历次尝试履历（outcome/result_note/blocked_reason，黑板侧落库）。"""
-        ctx = task.get("context") or {}
-        attempts = ctx.get("attempts") or []
-        if not has_transcript and not attempts:
-            return None
-        n = len(attempts) + 1
-        lines: list[str] = []
-        if has_transcript:
-            lines.append(
-                f"🔁 第 {n} 次尝试接手：以上对话现场来自此前执行（可直接续做，"
-                "已有结论不必重查）；注意历史里的工具结果属于当时现场，"
-                "不可重放，需要时重新取证。")
-        if attempts:
-            lines.append(f"本任务共 {n - 1} 次历史尝试：")
-            from core.blackboard.tasks import render_attempts_lines
-            lines += render_attempts_lines(attempts)
-        return "\n".join(lines) if lines else None
-
-    def _handover_blackboard_view(self, task: dict) -> str:
-        """阶段四 M3 接手黑板视角（2026-09-28）：接手窗无本会话记忆，把黑板知识
-        侧（跨窗已验证 finding + 已排除死路）注入——接手即知哪些结论已坐实、哪些
-        方向勿重走。与阶段一 system 物化（按 objective 通用检索）区分：此处聚焦
-        本任务相关的跨窗已验证沉淀，cap 紧凑防膨胀。无沉淀返回空串。"""
-        q = str((task.get("objective") or "") + " " + str(task.get("scope") or "")).strip()
-        if not q:
-            return ""
-        ql = q.lower()
-        try:
-            findings = self.bb.list_findings(self.project_id)
-            assets = {a["id"]: a for a in self.bb.list_assets(self.project_id)}
-        except Exception:  # noqa: BLE001
-            return ""
-        verified: list[str] = []
-        dead: list[str] = []
-        for f in findings:
-            title = str(f.get("title") or "")
-            av = (assets.get(f.get("target_asset_id")) or {}).get("value", "")
-            blob = (title + " " + av).lower()
-            if not blob or (ql not in blob and av.lower() not in ql):
-                continue
-            if f.get("status") == "false-positive":
-                dead.append(f"⛔ {title[:70]}")
-            elif f.get("status") == "verified":
-                verified.append(
-                    f"- [{f.get('severity')}] {title[:70]}" +
-                    (f"｜{str(f.get('impact') or '')[:50]}" if f.get("impact") else ""))
-        lines: list[str] = []
-        if verified:
-            lines.append("📌 黑板已验证结论（接手可采信，勿重复验证）：")
-            lines += verified[:8]
-        if dead:
-            lines.append("🚫 黑板已排除方向（接手勿重走）：")
-            lines += dead[:5]
-        if not lines:
-            return ""
-        return "\n".join(lines)[:1400]
-
     def _loop(self, system: str, messages: list[dict[str, Any]], objective: str,
               start_step: int = 1) -> str | None:
         """薄包装：在册/注销 `_live_state`（v0.64 暂停请求即时落盘的现场源），
@@ -1976,10 +1570,6 @@ class AgentSession:
                 messages.append({"role": "user", "content":
                     f"⏳ 预算剩余 {remaining} 步，请规划收尾；如确需更多步数，"
                     "调 request_steps 申请增补（一次 +200，剩余 ≤20 步才放行）。"})
-            # 阶段三规划节拍（2026-09-28）：双源机械触发计划修订提示——新发现
-            # 未入计划 / 计划长期未修订。只提示不自动改（计划语义仍由模型决定，
-            # 与计划闸 A2 不冲突）；修订本身走 task_plan（rev_reason 落因）。
-            self._planning_cadence(step, messages)
             if self._stuck(step):
                 if self._stuck_waves >= 2:
                     # D7 硬闸：顾问裁决「继续」后又干满一个观察窗仍无进展——
@@ -2064,12 +1654,9 @@ class AgentSession:
                 # G3：过阈值先 LLM 摘要压缩，_trim 硬上限兜底；任务已收尾不再压缩
                 if not self.dispatcher.finished:
                     self._maybe_summarize(messages)
-            self._checkpoint_task_transcript(messages, objective)  # C10 每步落盘任务现场
             if getattr(self.dispatcher, "awaiting_human", False):
-                # C1：Agent 自主挂起（awaiting_human）——快照落盘 + 任务 fail
-                # （blocked_reason=awaiting_human，resumable=True），现场保留，
-                # 人类可经看板「▶ 续跑」（E12 revive）或「✅ 已解决，放回继续」承接。
-                # 会话不结束（不走 finished/_finalize），worker 继续认领下一个任务。
+                # C1：Agent 自主挂起（awaiting_human）——落断点快照，现场保留。
+                # 任务机制退役后无任务可 fail；会话不结束（不走 finished/_finalize）。
                 self.dispatcher.awaiting_human = False
                 self._resume_state = {
                     "system": system, "messages": messages, "objective": objective,
@@ -2079,23 +1666,12 @@ class AgentSession:
                     "open_intents": self._open_intent_snapshot(),
                 }
                 self._persist_snapshot()
-                try:
-                    self.tq.fail(
-                        self.dispatcher.current_task_id, self.session["id"],
-                        self.dispatcher.summary or "等待人工输入",
-                        resumable=True, blocked_reason="awaiting_human",
-                        persona_role=self.dispatcher.current_persona_role)
-                except Exception:  # noqa: BLE001
-                    log.exception("awaiting_human fail 失败")
                 self.dispatcher.current_task_id = None
-                self._resume_state = None  # 快照只留在磁盘（内存态泄漏会被下轮 run_next_task 误消费清盘）
-                self._stop_heartbeat()
-                return None  # 任务收尾已处理（同暂停/中断语义，不走 _finalize）
+                self._resume_state = None  # 快照只留在磁盘
+                return None
             if self.dispatcher.delegation_just_finished:
-                # 委托真收尾（done/failed/删除）：本轮结束、会话保留待命——run_task
-                # 不走 _finalize；worker while 再入会话轮接窗内队列下一件。
+                # 委托真收尾（done/failed/删除）：本轮结束、会话保留待命。
                 self.dispatcher.delegation_just_finished = False
-                self._stop_heartbeat()
                 return self.dispatcher.last_delegation_note or "委托已收尾"
             if self.dispatcher.finished:
                 return self.dispatcher.summary
@@ -2112,95 +1688,6 @@ class AgentSession:
     # ---------- 阶段三规划节拍（2026-09-28，planner-cadence） ----------
 
     _CADENCE_K = 8  # 周期校验触发步距：每 K 步且近 K 步未修订过 → 提示一次
-
-    def _planning_cadence(self, step: int, messages: list[dict[str, Any]]) -> None:
-        """双源机械触发计划修订提示（阶段三件 1）：
-
-        源 A 新发现触发：本任务区间新登记 finding 且当前 plan 无任何步 refs 引用
-        （refs 形如 finding:<id>）→ 注入提示（同一 finding 只提示一次）。
-        源 B 周期校验触发：每 K 步且自上次 task.plan_revised 后已推进 ≥K 步 →
-        注入轻量校验提示（提醒模型对照 objective 检查 plan 是否仍有效）。
-
-        只提示不自动改——计划语义仍由模型决定（与计划闸 A2 不冲突）；修订走
-        task_plan（rev_reason 落因，task.plan_revised 事件为去重游标）。
-        任一查询异常静默跳过（规划节拍是增强，不阻断主循环）。"""
-        if not self.dispatcher.current_task_id:
-            return
-        cur = self.dispatcher.current_task_id
-        task = self.tq.get_task(cur) if cur else None
-        if task is None or task["status"] != "claimed":
-            return
-        try:
-            # ---- 源 A：新发现未入计划 ----
-            self._cadence_finding_hint(task, messages)
-            # ---- 源 B：计划长期未修订（周期校验） ----
-            self._cadence_periodic_hint(step, messages)
-        except Exception:  # noqa: BLE001 —— 规划节拍失败不阻断主循环
-            log.exception("规划节拍异常（忽略）")
-
-    def _cadence_finding_hint(self, task: dict,
-                              messages: list[dict[str, Any]]) -> None:
-        """源 A：任务区间新 finding 未入计划 → 提示。refs 引用集=全部计划步 refs。"""
-        from core.blackboard.traces import _session_task_windows
-        task_id = task["id"]
-        wins = [w for w in _session_task_windows(
-                    self.bb.conn, self.project_id, self.session["id"])
-                if w["task_id"] == task_id and w.get("hi")]
-        if not wins:
-            return
-        w = wins[-1]
-        rows = self.bb.conn.execute(
-            "SELECT DISTINCT json_extract(payload,'$.finding_id') AS fid,"
-            " json_extract(payload,'$.title') AS title, id AS ev"
-            " FROM events WHERE project_id=? AND session_id=? AND kind='finding.new'"
-            " AND id>? AND id<=? ORDER BY id",
-            (self.project_id, self.session["id"], w["lo"], w["hi"])).fetchall()
-        if not rows:
-            return
-        # 计划步 refs 引用集（finding:<id>）
-        plan_refs = set()
-        for s in task.get("plan") or []:
-            for ref in (s.get("refs") or []):
-                if isinstance(ref, str) and ref.startswith("finding:"):
-                    plan_refs.add(ref[len("finding:"):])
-        new_hits: list[str] = []
-        for r in rows:
-            fid = r["fid"]
-            if not fid or fid in plan_refs or fid in self._cadence_hinted_findings:
-                continue
-            self._cadence_hinted_findings.add(fid)
-            title = str(r["title"] or fid)[:80]
-            new_hits.append(f"- {title}（{fid}）")
-        if not new_hits:
-            return
-        messages.append({"role": "user", "content":
-            "📋 规划节拍：黑板新登记了本任务相关的发现，当前计划步未引用它们——"
-            "若这些发现改变了打法，请调 task_plan 修订计划（保留进度的步带原 id，"
-            "rev_reason 注明原因）；若不相关可忽略：\n" + "\n".join(new_hits[:5])})
-
-    def _cadence_periodic_hint(self, step: int,
-                               messages: list[dict[str, Any]]) -> None:
-        """源 B：每 K 步且自上次 plan_revised 后推进 ≥K 步 → 轻量校验提示。"""
-        if step - self._cadence_last_hint_step < self._CADENCE_K:
-            return  # 距上次周期提示不足 K 步
-        # 上次 task.plan_revised 事件 id（跨任务统一按 session 查，取全局最大）
-        row = self.bb.conn.execute(
-            "SELECT COALESCE(MAX(id),0) AS maxid FROM events"
-            " WHERE project_id=? AND session_id=? AND kind='task.plan_revised'",
-            (self.project_id, self.session["id"])).fetchone()
-        last_rev = int(row["maxid"] if row else 0)
-        if last_rev > self._cadence_last_rev:
-            # 本任务以来有过修订 → 重置游标与步距，本次不提示
-            self._cadence_last_rev = last_rev
-            self._cadence_last_hint_step = step
-            return
-        self._cadence_last_hint_step = step
-        messages.append({"role": "user", "content":
-            "📋 规划节拍：本任务已推进多步且计划未再修订——请对照目标快速检查："
-            "计划步是否仍与当前进展一致？需修订则调 task_plan（保留进度步带原 id，"
-            "rev_reason 注明原因）；计划仍有效则继续执行（忽略本条）。"})
-
-    # ---------- 拒绝分类（2026-09-24，plan-gate-breaker-refine） ----------
 
     def _task_tool_schemas(self) -> list[dict[str, Any]]:
         """plan-only 教练模式：发给 LLM 的工具面收缩到计划/控制原语；其余全量。"""
@@ -2219,11 +1706,9 @@ class AgentSession:
           plan-only 之后下一模型步末计划仍空 → awaiting_human（进入模式的当步不挂）。
         """
         cur = self.dispatcher.current_task_id
-        task = self.tq.get_task(cur) if cur else None
-        plan_written = task is not None and bool(task.get("plan"))
-        if plan_written:
-            self._plan_gate_count = 0
-            self.dispatcher.plan_only_mode = False
+        # 任务机制退役（2026-10-06）：无任务即无计划闸/计划态，plan-only 恒关。
+        self._plan_gate_count = 0
+        self.dispatcher.plan_only_mode = False
 
         hard_hit = any(r.startswith(HARD_REJECT_PREFIXES) for r in results)
         gate_hit = any(r.startswith(PLAN_GATE_PREFIX) for r in results)
@@ -2291,11 +1776,6 @@ class AgentSession:
             }
             self._enter_paused()
             return "paused"
-        if self._task_gone():
-            # A1：任务在看板被删除（claimed 步边界取消）——当前步已做完，按中断收尾，
-            # 不再调 fail（行已不存在，task.deleted 即审计）。
-            self._abort_current_task()
-            return "aborted"
         # 系统私信（不打断当前工具调用；drain 已原子标记已读）：下一个步边界注入。
         # 口径统一走订阅声明表 _INBOX_SUBSCRIPTIONS（2026-09-21）：human_note 轮末
         # 语义（不在任务中途打断思路，留收件箱等认领期/恢复期注入）由订阅表表达；
@@ -2303,7 +1783,6 @@ class AgentSession:
         notices, _dr = self._drain_inbox("step")
         for _kind, notice in notices:
             messages.append({"role": "user", "content": notice})
-        self._checkpoint_task_transcript(messages, objective)  # C10：注入的私信/引导也进现场
         return None
 
     def _drain_inbox(self, scenario: str, *, stale_refs: list[str] | None = None
@@ -2579,20 +2058,6 @@ class AgentSession:
                                      {"resume_snapshot": path.name})
         except Exception:  # noqa: BLE001
             log.exception("暂停快照落盘失败（会话 %s）", self.session["id"])
-        # C6 任务键双写（覆盖前移断点）：快照不含 system——认领会话按角色重建
-        task_id = st.get("task_id")
-        if not task_id:
-            return  # 纯 objective 直跑无任务，不落任务键
-        task_path = task_resume_path(self.artifacts_dir, task_id)
-        if task_path is None:
-            return
-        try:
-            task_path.write_text(
-                json.dumps({k: v for k, v in st.items() if k != "system"},
-                           ensure_ascii=False),
-                encoding="utf-8")
-        except Exception:  # noqa: BLE001
-            log.exception("任务键快照双写失败（任务 %s）", task_id)
 
     def _open_intent_snapshot(self) -> list[dict[str, str]]:
         """意图纪律①：快照带未收尾意图清单（停机/关窗后照单收尾，不留悬挂）。
@@ -2630,87 +2095,6 @@ class AgentSession:
         return True
 
     # ---------- 任务现场落盘（C10：上下文归任务所有，跨会话接手） ----------
-
-    def _checkpoint_task_transcript(self, messages: list[dict[str, Any]],
-                                    objective: str) -> None:
-        """C10 每步任务现场落盘：写 <snapshots>/task-<tid>.json（temp+replace
-        原子替换，防崩溃撕裂/并发读者读到半截）。只认 current_task_id——无任务
-        （纯 objective 直跑）不落盘；失败降级不影响主循环。"""
-        task_id = self.dispatcher.current_task_id
-        path = task_transcript_path(self.artifacts_dir, task_id or "") if task_id else None
-        if path is None:
-            return  # 无任务（纯 objective 直跑）不落盘；防 task-.json 空名残file（走查发现）
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(
-                {"task_id": task_id, "objective": objective,
-                 "session_id": self.session["id"], "messages": messages,
-                 "updated_at": datetime.now(timezone.utc).isoformat()},
-                ensure_ascii=False), encoding="utf-8")
-            os.replace(tmp, path)
-        except Exception:  # noqa: BLE001
-            log.exception("任务现场落盘失败（任务 %s）", task_id)
-
-    def _load_task_resume(self, task_id: str, task: dict) -> dict | None:
-        """C6 认领即复活：读任务键断点快照（task-<tid>.resume.json）。
-        objective 匹配 → 返回快照（messages 整体/next_step/max_steps 还原，
-        由调用方消费即删）；objective 被改/损坏/任务不符 → 删快照、返回 None
-        （降级 C10 transcript 接手）。"""
-        path = task_resume_path(self.artifacts_dir, task_id)
-        if path is None or not path.exists():
-            return None
-        try:
-            st = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            st = None
-        if (not isinstance(st, dict) or st.get("task_id") != task_id
-                or not isinstance(st.get("messages"), list)):
-            clear_task_resume(self.artifacts_dir, task_id)  # 损坏/不符 → 清理降级
-            return None
-        if str(st.get("objective") or "").strip() != \
-                str(task.get("objective") or "").strip():
-            clear_task_resume(self.artifacts_dir, task_id)  # objective 被改 → 降级接手
-            return None
-        if not isinstance(st.get("max_steps"), int) or st["max_steps"] <= 0:
-            clear_task_resume(self.artifacts_dir, task_id)
-            return None
-        return st
-
-    def _load_task_transcript(self, task_id: str) -> list[dict[str, Any]]:
-        """C10 跨会话接手：读任务现场文件为初始对话历史。防御点：JSON 损坏/
-        task_id 不符/messages 结构异常 → 空列表降级（履历仍经接手提示注入）；
-        只取末尾 60 条（≈30 步完整对话，更早内容以黑板 finding/事件为准）。"""
-        path = task_transcript_path(self.artifacts_dir, task_id)
-        if path is None:
-            return []
-        try:
-            st = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return []
-        if not isinstance(st, dict) or st.get("task_id") != task_id:
-            return []
-        msgs = st.get("messages")
-        if not isinstance(msgs, list):
-            return []
-        msgs = [m for m in msgs
-                if isinstance(m, dict) and m.get("role") in {"user", "assistant"}
-                and m.get("content") is not None]
-        if not msgs:
-            return []
-
-        omitted = len(msgs) - 60
-        if omitted > 0:
-            msgs = msgs[-60:]
-            # 截断边界不得拆开 tool_use/tool_result 对（首条若是 tool_result，
-            # 其配对的 tool_use 已在被省略段里，API 会拒）——继续丢弃到非 result 为止
-            while msgs and _is_tool_result(msgs[0]):
-                msgs.pop(0)
-                omitted += 1
-            msgs = [{"role": "user",
-                     "content": f"（此前 {omitted} 条对话历史已省略，"
-                                "完整结论以黑板 finding/事件为准）"}] + msgs
-        return msgs
 
     def _load_persisted_snapshot(self) -> dict | None:
         """rehydrate：按 sessions.meta 指针读回暂停快照；命中即置回暂停态。
@@ -2754,76 +2138,22 @@ class AgentSession:
         except Exception:  # noqa: BLE001
             log.exception("暂停快照指针清理失败（会话 %s）", self.session["id"])
 
-    def revive_snapshot(self, task_id: str) -> dict | None:
-        """E12：人工中断后从落盘快照复活（限原会话）——刷新会话行取最新快照
-        指针，载回 _resume_state 并校验任务匹配；不匹配/无快照返回 None。
-        任务的 reopen/claim 与 worker 提交由 API 层编排（POST /tasks/{tid}/resume）。"""
-        try:
-            row = self.bb.get_session(self.session["id"])
-        except Exception:  # noqa: BLE001
-            row = None
-        if row is not None:
-            self.session = dict(row)  # 中断可能发生在本进程外：meta 指针要现读
-        st = self._load_persisted_snapshot()
-        if st is None or st.get("task_id") != task_id:
-            return None
-        self._resume_state = st
-        self.paused = False
-        return st
-
-    def _task_gone(self) -> bool:
-        """A1：当前任务行是否已从看板删除（claimed 任务可被人工取消，步边界感知）。"""
-        task_id = self.dispatcher.current_task_id
-        return bool(task_id) and self.tq.get_task(task_id) is None
-
     def _abort_current_task(self) -> None:
-        """硬中断收尾：任务 fail（人工中断，不回队列）→ 会话空闲 + 审计。
-        任务行已被删除（看板取消）时跳过 fail——task.deleted 事件即审计。
-        E12：人工中断**保留落盘快照**（任务续跑凭证，看板 failed 卡可「▶ 续跑」
-        原会话复活）；仅任务已删除/无快照时清理，防孤儿文件。
-        C6：resumable 修复——原会话键快照**或**任务键断点快照任一存在即可续跑
-        （旧实现只看会话键，暂停后中断的孤儿场景会误判不可续跑）。"""
-        task_id = self.dispatcher.current_task_id
-        if task_id is None and self._resume_state:
-            task_id = self._resume_state.get("task_id")  # 空闲暂停态被中断：快照任务也要收尾
+        """硬中断收尾：会话空闲 + 审计（任务机制退役后无任务可 fail）。"""
         self._resume_state = None
-        task_alive = bool(task_id) and self.tq.get_task(task_id) is not None
-        resumable = False
-        if task_alive:
-            path = self._snapshot_path()
-            resumable = ((path is not None and path.exists())  # E8 会话键快照
-                         or task_resume_path(self.artifacts_dir,
-                                             task_id) is not None)  # C6 任务键快照
-        if not resumable:
-            self._clear_snapshot()  # 无任务/任务已删/无落盘快照：清理防孤儿
-            clear_task_resume(self.artifacts_dir, task_id or "")
         self.paused = False
         self._pause_req.clear()
         self._abort_req.clear()
-        self._stop_after_task = True  # 让 worker 循环退出，不再领新任务
-        self._stop_heartbeat()
-        note = "人工中断"
-        if task_id:
-            if not task_alive:
-                note = "任务已被删除"
-            else:
-                try:
-                    self.tq.fail(task_id, self.session["id"], "人工中断",
-                                 resumable=resumable,
-                                 blocked_reason="aborted",
-                                 persona_role=self.dispatcher.current_persona_role)
-                except Exception:  # noqa: BLE001
-                    log.exception("中断 fail 任务失败")
-            self.dispatcher.current_task_id = None
-        self._restore_base_persona()  # v14：硬中断恢复底色（下一单按新任务重新换装）
-        self.dispatcher._close_browser_session()  # F6-v3：任务结束清浏览器 Page
+        self._stop_after_task = True  # 让 worker 循环退出
+        self._restore_base_persona()
+        self.dispatcher._close_browser_session()  # F6-v3：清浏览器 Page
         try:
             self.bb.set_session_status(self.session["id"], "idle")
         except Exception:  # noqa: BLE001
             log.exception("set_session_status(idle) 失败")
         self.bb.append_event(
             self.project_id, "session.aborted",
-            {"session_id": self.session["id"], "task_id": task_id, "note": note},
+            {"session_id": self.session["id"], "note": "人工中断"},
             session_id=self.session["id"], author=self.session["id"])
 
     def _stuck(self, step: int) -> bool:
@@ -2935,65 +2265,6 @@ class AgentSession:
         rows = sorted(((n, c) for c, n in counts.items() if n >= 2),
                       key=lambda x: -x[0])[:cap]
         return [{"cmd": c[:200], "times": n} for n, c in rows]
-
-    def _direction_fingerprint(self, task_id: str) -> str:
-        """阶段四 M1 跨窗方向指纹（stuck-convergence M2 定稿落地，2026-09-28）：
-        聚合本任务历次认领会话的命令——精确计数排行（完全相同命令 ×N，cap 10）
-        + 首词聚类（cap 15，去重后计数），全段 ≤20 行。接手窗进场即知已试方向，
-        避免跨窗重踩；无命令/无历史零注入。"""
-        from core.blackboard.traces import _claimed_sessions, _session_task_windows
-        try:
-            sessions = _claimed_sessions(self.bb.conn, self.project_id, task_id)
-            if not sessions:
-                return ""
-            cmds: list[str] = []
-            for sid in sessions:
-                wins = [w for w in _session_task_windows(
-                            self.bb.conn, self.project_id, sid)
-                        if w["task_id"] == task_id]
-                for w in wins:
-                    lo, hi = w["lo"], w.get("hi")
-                    if hi is None:
-                        continue  # 进行中的区间（当前窗）不纳入指纹（只给历史方向）
-                    rows = self.bb.conn.execute(
-                        "SELECT payload FROM events WHERE project_id=? AND session_id=?"
-                        " AND kind='command' AND id>? AND id<=?",
-                        (self.project_id, sid, lo, hi)).fetchall()
-                    for r in rows:
-                        try:
-                            cmd = str((json.loads(r["payload"] or "{}")
-                                       or {}).get("cmd", "")).strip()
-                        except (ValueError, TypeError):
-                            continue
-                        if cmd:
-                            cmds.append(cmd)
-            if not cmds:
-                return ""
-            # 精确计数排行（×≥2，cap 10）
-            counts: dict[str, int] = {}
-            for c in cmds:
-                counts[c] = counts.get(c, 0) + 1
-            exact = sorted(((n, c) for c, n in counts.items() if n >= 2),
-                           key=lambda x: -x[0])[:10]
-            # 首词聚类（cap 15）：去重计数
-            first = {}
-            for c in cmds:
-                head = c.split()[0][:30] if c.split() else c[:30]
-                first[head] = first.get(head, 0) + 1
-            heads = sorted(first.items(), key=lambda x: -x[1])[:15]
-            lines: list[str] = ["🧭 方向指纹——本任务此前已试方向（接手免重踩，勿重复已失败路径）："]
-            if exact:
-                lines.append("重复命令（完全相同的 ×N，多在原地打转）：")
-                for n, c in exact:
-                    lines.append(f"  ×{n} {c[:120]}")
-            if heads:
-                lines.append("已用命令前缀分布（首词聚类，覆盖已试方向）：")
-                for head, n in heads:
-                    lines.append(f"  ×{n} {head}")
-            return "\n".join(lines)[:1600]
-        except Exception:  # noqa: BLE001 —— 指纹失败不影响认领主链
-            log.exception("跨窗方向指纹失败（忽略）")
-            return ""
 
     def _recent_command_summary(self, event_window: int = 50,
                                 cap: int = 5) -> list[str]:
@@ -3176,316 +2447,6 @@ class AgentSession:
 
     # ---------- v0.65 done 自动提案（T4 沉淀飞轮；experience-sedimentation 提纯） ----------
 
-    def _task_finding_ids(self, task_id: str) -> list[str]:
-        """本任务区间（最近一次认领→收尾）内本会话产出的 finding id（事件反查）。
-        用 _session_task_windows 的 (lo,hi] 区间 + session_id=author 双约束精确到
-        本任务——多任务会话的历史 verified 不误伤后续常规任务。判定失败按无产出
-        处理（宁少勿滥）。"""
-        from core.blackboard.traces import _session_task_windows
-        try:
-            wins = [w for w in _session_task_windows(
-                        self.bb.conn, self.project_id, self.session["id"])
-                    if w["task_id"] == task_id and w.get("hi")]
-            if not wins:
-                return []
-            w = wins[-1]
-            rows = self.bb.conn.execute(
-                "SELECT DISTINCT json_extract(payload,'$.finding_id') AS fid FROM events"
-                " WHERE project_id=? AND session_id=? AND kind IN"
-                " ('finding.new','finding.merged') AND id>? AND id<=?",
-                (self.project_id, self.session["id"], w["lo"], w["hi"])).fetchall()
-            return [r["fid"] for r in rows if r["fid"]]
-        except Exception:  # noqa: BLE001
-            return []
-
-    def _sediment_verdict(self, task_id: str, result_note: str = "") -> dict:
-        """沉淀条件判定（experience-sedimentation §4.1 口径表，单一实现——campaign
-        条件写入与复盘条件触发共用，勿在别处再写第二份口径）：
-        - done + 本任务产出 verified finding（或含本任务节点的 exploited 链）→
-          campaign 写入 + 复盘（打法沉淀）；
-        - done + 本任务产出 FP finding 且无 verified/exploited 链 → campaign 写入
-          死路条目（tags=["dead_end"]）、不复盘（M6 F1：负知识跨项目复用——
-          死路的结构化口径就是 status='false-positive'，orchestrator-efficiency §0-11）；
-        - done 无产出但 result_note ≥500 字 → 只复盘（高质量收尾，每会话上限
-          _SEDIMENT_LITE_CAP 条防刷量）；
-        - failed + error（真失败，Agent 自填归因）→ 只复盘（失败模式，提炼避坑教训）；
-        - failed + aborted/awaiting_human、done 其余零产出 → 都不（非方法论性失败
-          与常规收尾不值得沉淀）。
-        返回 {campaign, review, finding_ids, dead_end}。"""
-        task = self.tq.get_task(task_id) or {}
-        status = task.get("status")
-        if status == "failed":
-            real = (task.get("blocked_reason") or "error") == "error"
-            return {"campaign": False, "review": real, "finding_ids": [],
-                    "dead_end": False}
-        if status != "done":
-            return {"campaign": False, "review": False, "finding_ids": [],
-                    "dead_end": False}
-        finding_ids = self._task_finding_ids(task_id)
-        if finding_ids:
-            marks = ",".join("?" for _ in finding_ids)
-            row = self.bb.conn.execute(
-                f"SELECT 1 FROM findings WHERE project_id=? AND status='verified'"
-                f" AND id IN ({marks}) LIMIT 1",
-                (self.project_id, *finding_ids)).fetchone()
-            if row is not None:
-                return {"campaign": True, "review": True, "finding_ids": finding_ids,
-                        "dead_end": False}
-        # exploited 链兜底：任务无 verified finding 但轨迹链打穿（链节点 id =
-        # `{task_id}#{kind}:{value}`，origin='trace' 为任务轨迹自动链）
-        try:
-            row = self.bb.conn.execute(
-                "SELECT 1 FROM chains c JOIN chain_links l ON l.chain_id=c.id"
-                " WHERE c.project_id=? AND c.origin='trace' AND c.status='exploited'"
-                " AND l.node_id LIKE ? LIMIT 1",
-                (self.project_id, f"{task_id}#%")).fetchone()
-        except Exception:  # noqa: BLE001
-            row = None
-        verified = row is not None
-        if verified:
-            return {"campaign": True, "review": True, "finding_ids": finding_ids,
-                    "dead_end": False}
-        # M6 F1 死路记账档：本任务 FP-only → 负知识入 campaign（content 取死路
-        # 原因），不产 kb 复盘提案（避坑方法论可走下方高质量复盘档）
-        if finding_ids:
-            marks = ",".join("?" for _ in finding_ids)
-            fp = self.bb.conn.execute(
-                f"SELECT 1 FROM findings WHERE project_id=? AND status='false-positive'"
-                f" AND id IN ({marks}) LIMIT 1",
-                (self.project_id, *finding_ids)).fetchone()
-            if fp is not None:
-                return {"campaign": True, "review": False,
-                        "finding_ids": finding_ids, "dead_end": True}
-        # M6 F1 高质量复盘档：零产出但收尾总结够长 → 只复盘（每会话上限防刷量；
-        # 额度在 _sediment_proposal 实际产提案时消耗，这里只读）
-        note = (result_note or "").strip()
-        if len(note) >= _SEDIMENT_LITE_MIN_NOTE:
-            used = getattr(self, "_sediment_lite_used", 0)
-            if used < _SEDIMENT_LITE_CAP:
-                return {"campaign": False, "review": True, "finding_ids": [],
-                        "dead_end": False}
-        return {"campaign": False, "review": False, "finding_ids": [],
-                "dead_end": False}
-
-    def _campaign_memory(self, task_id: str, result_note: str) -> None:
-        """⑥ 战役记忆写入（complete_task 并联 hook；experience-sedimentation M1
-        条件收窄）：campaign 只存「成功打法索引层」——产出过 verified 发现或
-        exploited 链的任务才写；无产出任务/常规操作全量退役（失败教训走 kb 复盘）。
-        M6 F1 扩死路记账档（tags=["dead_end"]，§0-11）：FP-only 任务负知识入全局库，
-        content 优先 result_note、空则 fallback FP finding title。
-        content=result_note 纯净收尾（M1 瘦身：发现明细本就在黑板，砍「最近 5 条」
-        拼接——那是检索语境噪声）。写全局库（跨项目召回）+ 项目事件流
-        campaign.memory（双写不保强一致）。"""
-        verdict = self._sediment_verdict(task_id, result_note)
-        if not verdict["campaign"]:
-            return
-        content = (result_note or "").strip()
-        if not content and verdict.get("dead_end"):
-            # 死路条目无收尾总结 → 取 FP finding title 兜底（负知识必须有内容可召回）
-            fid = verdict["finding_ids"]
-            if fid:
-                marks = ",".join("?" for _ in fid)
-                try:
-                    row = self.bb.conn.execute(
-                        f"SELECT title FROM findings WHERE project_id=? AND"
-                        f" status='false-positive' AND id IN ({marks})"
-                        f" ORDER BY created_at DESC LIMIT 1",
-                        (self.project_id, *fid)).fetchone()
-                    content = f"〔死路〕{row['title']}" if row else ""
-                except Exception:  # noqa: BLE001
-                    content = ""
-        if not content:
-            return  # 无收尾总结=无可复用打法
-        task = self.tq.get_task(task_id) or {}
-        try:
-            row = self.campaign.add(
-                project_id=self.project_id, track=self.track,
-                capability="/".join(self.capabilities),
-                task_type=task.get("task_type", ""),
-                title=task.get("objective", "")[:200] or task_id,
-                content=content,
-                target_key=(task.get("scope") or "")[:200],
-                tags=["dead_end"] if verdict.get("dead_end") else None)
-        except Exception as e:  # noqa: BLE001
-            log.warning("战役记忆写入失败（跳过）: %s", e)
-            return
-        try:
-            self.bb.append_event(
-                self.project_id, "campaign.memory",
-                {"id": row["id"], "title": row["title"],
-                 "content_head": row["content"][:120],
-                 "dead_end": bool(verdict.get("dead_end"))},
-                session_id=self.session["id"], author=self.session["id"])
-        except Exception:  # noqa: BLE001 —— 事件失败不回滚全局库
-            log.warning("campaign.memory 事件落库失败（全局库已写入）")
-
-    def _sediment_proposal(self, task_id: str, result_note: str,
-                           *, failure: bool = False) -> None:
-        """任务收尾自动复盘（§4 沉淀飞轮；experience-sedimentation M1 条件触发 +
-        M2 提纯）：条件见 _sediment_verdict（done+产出=打法沉淀；failed+error=失败
-        避坑教训；aborted/无产出 done 不跑）。planner LLM 复盘 → kb/index/case/skill
-        提案草稿（origin=agent，人批准后进知识库/技能）。M2 提纯三件：①复盘前对账
-        （kb 对账注入既有相关模块 + K7 skill 对账注入会话技能清单，已有手册/技能引导
-        edit 补段不 create 重复新建）；②失败模式 instruction（只提炼方法论教训，环境
-        问题 NONE）；③reason 证据锚点要求（解析后机器校验，缺引用静默跳过）。输出
-        NONE / 任何失败都静默跳过——绝不影响任务收尾；与 AI 自主提案共用每会话 3 条
-        pending 上限。"""
-        from core.skills import proposals  # 延迟导入避开 tools↔loop 环
-        if not self.packs_root:
-            return
-        verdict = self._sediment_verdict(task_id, result_note)
-        if not verdict["review"]:
-            return
-        # M6 高质量复盘档额度：零产出长收尾的复盘实际要跑 LLM，产提案前占用额度
-        # （verified/failed 档不占——它们不是防刷量对象）
-        lite = (not verdict["finding_ids"] and not failure)
-        if lite:
-            if getattr(self, "_sediment_lite_used", 0) >= _SEDIMENT_LITE_CAP:
-                return
-            self._sediment_lite_used = getattr(self, "_sediment_lite_used", 0) + 1
-        try:
-            pending = [p for p in proposals.list_proposals(self.packs_root, "pending")
-                       if p.get("session") == self.session["id"]]
-            if len(pending) >= ToolDispatcher.PROPOSE_LIMIT_PER_SESSION:
-                return
-        except Exception:  # noqa: BLE001
-            return
-        task = self.tq.get_task(task_id) or {}
-        # M2 kb 对账前置：既有相关模块清单（K3 同款口径），已有手册 → edit 补段
-        kb_block = ""
-        try:
-            pairs = kb_module_hints(self.packs_root, self.capabilities,
-                                    task.get("objective") or result_note, cap=3)
-            lines = []
-            for entry, _sec in pairs:
-                row = f"- {entry.module} —— {entry.title}"
-                if entry.summary:
-                    row += f"｜{entry.summary}"
-                lines.append(row)
-            if lines:
-                kb_block = ("已有相关知识库模块（相关经验请走 mode=edit 补「已验证路径」"
-                            "「坑」段，不要 create 重复新建）：\n" + "\n".join(lines))
-        except Exception:  # noqa: BLE001
-            pass
-        # K7 skill 对账前置：当前会话技能清单注入——LLM 只能对清单内技能提
-        # edit（防猜名/对不存在技能 edit 被后端拒），清单外方向只能提 suggest
-        skill_block = ""
-        try:
-            if self.registry is None:
-                self.load_skills()
-            if self.registry is not None:
-                pack_set = set(self.capabilities) | {self.track}
-                rows = [f"- {s.name}（{s.pack}/{s.kind}）{s.description or ''}"
-                        for s in self.registry.all()
-                        if s.enabled and s.pack in pack_set]
-                if rows:
-                    skill_block = (
-                        "已有技能清单（打法沉淀只走 mode=edit 补段或 mode=suggest "
-                        "提拆分/新方向建议，不要 create；edit 目标必须在此清单内）：\n"
-                        + "\n".join(rows))
-        except Exception:  # noqa: BLE001
-            skill_block = ""
-        events = self.bb.recent_events(self.project_id, tail=30)
-        digest = json.dumps(
-            [{"kind": e["kind"], "payload_head": json.dumps(e["payload"], ensure_ascii=False)[:120]}
-             for e in events], ensure_ascii=False)
-        caps = "、".join(self.capabilities) or "(无)"
-        if failure:
-            mode_line = (
-                "本任务以真失败告终（blocked_reason=error）：只提炼可复用的避坑教训"
-                "（错误假设/被证伪的手法/更优路径）；环境或临时性问题（网络超时、配额"
-                "限流、平台异常等非方法论因素）一律输出 NONE。"
-                "reason 必须引用本任务 id（task-xxxxxxxxxxxx）作为证据锚点。")
-        else:
-            mode_line = (
-                "reason 必须引用本任务产出的 finding id（形如 find-xxxxxxxxxxxx）"
-                "作为证据锚点；无产出证据引用的提案不合法。")
-        instruction = (
-            "复盘任务执行过程：是否验证了可复用的有效手法、踩坑或更优路径？\n"
-            f"{mode_line}\n"
-            "有则只输出一个提案 JSON（无其他文字），四类去向四选一：\n"
-            '① kb 经验沉淀：场景经验/坑/产品指纹/现场笔记 → {"kind": "kb", '
-            '"mode": "create" 或 "edit", '
-            '"target": {"kind": "kb", "cap": "能力包", "path": "kb内相对路径.md"}, '
-            '"content": "提案文件全文（须有「## 」段落结构，含「已验证路径」或「坑」段）", '
-            '"summary": "一句话", "reason": "证据锚点+关键观察"}\n'
-            '② index 增补：本任务验证的测试点在 kb 中有对应手册、且全局 route_index.yaml '
-            '缺本域这条目 → {"kind": "index", "mode": "edit", '
-            '"target": {"kind": "index", "cap": "能力包"}, '
-            '"content": "本域条目全文（kb 路径带域前缀，如 web/webapp/…/手册.md）", "summary": "…", '
-            '"reason": "…"}\n'
-            '③ case 成功链沉淀（K6）：本任务整条 verified 攻击链/跑通 payload 值得复用 →'
-            ' {"kind": "case", "mode": "edit"（对应测试包 成功案例.md 补「已验证路径」段）'
-            ' 或 "create"（payloads/ 下新建弹药文件 .md/.py/.txt/.json）, '
-            '"target": {"kind": "case", "cap": "能力包", "path": "测试包内相对路径"}, '
-            '"content": "文件全文", "summary": "…", "reason": "…"}\n'
-            '④ skill 打法沉淀：本任务验证了新的通用打法（对一类漏洞通用的做法）'
-            '或对既有技能有方法论修正 → '
-            '{"kind": "skill", "mode": "edit"（既有技能补「已验证路径」「坑」段，'
-            '目标必须在下方技能清单内）或 "suggest"（提出拆分/新打法方向建议，'
-            '产建议文档由人执行）, '
-            '"target": {"kind": "skill", "skill_kind": "capability|track", '
-             '"owner": "包/轨名", "name": "技能名"}, '
-             '"content": "技能正文全文（edit 须含 frontmatter，name 与技能名一致；'
-             'suggest 为建议文档全文，须有「## 」段落结构）", '
-             '"summary": "…", "reason": "证据锚点+关键观察"}\n'
-            f"cap 只能取本会话能力包之一（{caps}）；kb 新经验补对应测试包手册的"
-            "「已验证路径」「坑」段或写成 payloads/ 弹药；英文快照原文不覆盖不翻译。"
-            + (f"\n{kb_block}" if kb_block else "")
-            + (f"\n{skill_block}" if skill_block else "")
-            + "\n无则只输出 NONE。")
-        try:
-            resp = self.planner_llm.chat(
-                [{"role": "user", "content":
-                  f"任务: {task_id}\n结果: {result_note[:500]}\n"
-                  f"最近事件摘要: {digest}\n\n{instruction}"}],
-                system="你是经验沉淀复盘员：只提炼本任务中验证过的事实，"
-                       "不臆测、不复述常识。")
-            self._record_usage(resp, source="planner", llm_obj=self.planner_llm)
-            text = (resp.text or "").strip()
-        except Exception as e:  # noqa: BLE001
-            log.warning("收尾复盘调用失败（跳过沉淀）: %s", e)
-            return
-        if not text or text.upper().startswith("NONE"):
-            return
-        text = re.sub(r"^```(?:json)?\s*|\s*```\s*$", "", text,
-                      flags=re.MULTILINE).strip()
-        try:
-            payload = json.loads(text)
-            tgt = payload.get("target") or {}
-            # K4/K7：复盘沉淀允许 kb / index / case / skill 四类去向
-            # （index 增补走 edit；skill 仅 edit/suggest 由 create_proposal 再校验；
-            #  其余一律按 kb 处理）
-            kind = payload.get("kind") or tgt.get("kind") or "kb"
-            if kind not in {"kb", "index", "case", "skill"}:
-                kind = "kb"
-            payload["kind"] = kind
-            tgt["kind"] = kind
-            payload["target"] = tgt
-            payload["project"] = self.project_id
-            payload["session"] = self.session["id"]
-            payload["task"] = task_id
-            label = "failed（error）自动复盘沉淀" if failure else "done 自动复盘沉淀"
-            payload["evidence"] = f"任务 {task_id}（{label}）"
-            # M2 解析后证据校验：打法沉淀（kb/skill 类）reason 必须引用任务真实
-            # 产出的 finding id——机器可校验的部分在这里拦，防 LLM 编造/漏引用
-            if kind in {"kb", "skill"} and not failure:
-                fids = verdict["finding_ids"]
-                if fids and not any(f in (payload.get("reason") or "") for f in fids):
-                    log.warning("done 复盘提案缺 finding 证据引用（跳过沉淀）task=%s",
-                                task_id)
-                    return
-            p = proposals.create_proposal(self.packs_root, payload, origin="agent")
-        except Exception as e:  # noqa: BLE001  # JSONDecodeError/ProposalError 均静默
-            log.warning("收尾自动提案未落地（跳过）: %s", e)
-            return
-        self.bb.append_event(
-            self.project_id, "proposal.created",
-            {"id": p["id"], "kind": p["target"].get("kind"),
-             "mode": p["mode"], "target": p["target"], "summary": p["summary"],
-             "origin": "sediment"},
-            session_id=self.session["id"], author=self.session["id"])
-
     def _record_usage(self, resp: Any, *, source: str, llm_obj: Any) -> None:
         """每次 chat 后用量记账（§6.8）：累加 orchestrator_state + llm.usage 事件；
         全 0 用量（ScriptedLLM/厂商未回）在底层跳过。记账失败不阻断主循环。"""
@@ -3514,6 +2475,33 @@ class AgentSession:
                 for block in m["content"]:
                     if block.get("type") == "tool_result" and len(block.get("content", "")) > 200:
                         block["content"] = block["content"][:200] + "…[已截断]"
+
+    def _summarize_history_text(self, lines: list[str]) -> str:
+        """把渲染好的历史文本行交 LLM 按九要素骨架压成一段摘要（G3 自动压缩与
+        手动 `/compact` 共用）。失败/空返回空串（静默，调用方各自降级）。"""
+        if not lines:
+            return ""
+        prompt = (
+            "请把以下 Agent 执行历史压缩成摘要，九个要素各一小节（无内容的省略）：\n"
+            "1. 任务目标与用户意图（用户引导/人类原话**逐字保留**）\n"
+            "2. 关键技术概念与目标信息\n"
+            "3. 涉及的黑板对象（资产/发现/任务 id 列表，只引用 id）\n"
+            "4. 已尝试的步骤与结果（含失败/死路方向——防重走）\n"
+            "5. 遇到的错误与修复\n"
+            "6. 问题解决过程要点\n"
+            "7. 待办与未完成方向\n"
+            "8. 当前进行到哪一步\n"
+            "9. 建议的下一步\n\n"
+            "待压缩历史：\n" + "\n".join(lines))
+        try:
+            resp = self.llm.chat([{"role": "user", "content": prompt}],
+                                 system=SUMMARY_SYSTEM)
+        except Exception:  # noqa: BLE001 —— 压缩失败不影响主循环
+            log.exception("上下文摘要压缩失败（跳过本次）")
+            return ""
+        self._record_usage(resp, source="agent", llm_obj=self.llm)
+        return "".join(b.get("text", "") for b in resp.raw.get("content", [])
+                       if isinstance(b, dict) and b.get("type") == "text").strip()
 
     def _maybe_summarize(self, messages: list[dict[str, Any]], *,
                          keep_recent: int = 8) -> bool:
@@ -3557,44 +2545,7 @@ class AgentSession:
                  "chars_after": total},
                 session_id=self.session["id"], author=self.session["id"])
             return True
-        lines: list[str] = []
-        for m in old:
-            role = m.get("role")
-            content = m.get("content")
-            if isinstance(content, list):
-                for b in content:
-                    if not isinstance(b, dict):
-                        continue
-                    if b.get("type") == "text":
-                        lines.append(f"[{role}] {b.get('text', '')}")
-                    elif b.get("type") == "tool_result":
-                        lines.append(f"[工具结果] {str(b.get('content', ''))[:300]}")
-                    elif b.get("type") == "tool_use":
-                        args = json.dumps(b.get("input", {}), ensure_ascii=False)[:200]
-                        lines.append(f"[调用工具] {b.get('name')}({args})")
-            else:
-                lines.append(f"[{role}] {content}")
-        prompt = (
-            "请把以下 Agent 执行历史压缩成摘要，九个要素各一小节（无内容的省略）：\n"
-            "1. 任务目标与用户意图（用户引导/人类原话**逐字保留**）\n"
-            "2. 关键技术概念与目标信息\n"
-            "3. 涉及的黑板对象（资产/发现/任务 id 列表，只引用 id）\n"
-            "4. 已尝试的步骤与结果（含失败/死路方向——防重走）\n"
-            "5. 遇到的错误与修复\n"
-            "6. 问题解决过程要点\n"
-            "7. 待办与未完成方向\n"
-            "8. 当前进行到哪一步\n"
-            "9. 建议的下一步\n\n"
-            "待压缩历史：\n" + "\n".join(lines))
-        try:
-            resp = self.llm.chat([{"role": "user", "content": prompt}],
-                                 system=SUMMARY_SYSTEM)
-        except Exception:  # noqa: BLE001 —— 压缩失败不影响主循环
-            log.exception("上下文摘要压缩失败（跳过本次）")
-            return False
-        self._record_usage(resp, source="agent", llm_obj=self.llm)
-        text = "".join(b.get("text", "") for b in resp.raw.get("content", [])
-                       if isinstance(b, dict) and b.get("type") == "text").strip()
+        text = self._summarize_history_text(_render_history_lines(old))
         if not text:
             return False
         head = (f"[历史摘要（原 {len(old)} 条消息由系统压缩；黑板对象只存 id，"
@@ -3705,75 +2656,33 @@ class AgentSession:
             log.exception("salvage 抢救落盘失败（不影响 fail）task=%s", task_id)
 
     def _fail_task_on_error(self, exc: BaseException) -> None:
-        """Worker 异常兜底：llm.chat 传输层重试耗尽 / 未预期异常穿出 _loop 时，
-        任务绝不能悬在 claimed——① 停心跳（否则孤儿心跳线程继续每 10 分钟续租，
-        租约永不过期、expire_leases 不回收，任务在本进程内永久卡「执行中」）；
-        ② 传输类异常（LLMError，429/5xx/超时重试耗尽）转 **awaiting_human 挂起**
-        （orchestrator-efficiency，2026-09-22）：外部条件失败不是打法失败——现场
-        快照双写落盘（任务键+会话键，C6 resume 可「⚡ 带现场续跑」），恢复靠人工
-        （换模型/等配额），替代原 fail(aborted) 直接终态化（曾致任务只能去
-        看板人工兜底）；挂起链路自身失败再退回 aborted 终态兜底。
-        ③ 非传输类异常：salvage 抢救收尾（2026-09-20）把现场部分结论落盘为产物
-        再 fail(aborted) 落审计——非方法论性失败（experience-sedimentation M1：
-        不进失败复盘）。④ 清 current_task_id。
-        幂等：current_task_id 已清时只停心跳。"""
-        self._stop_heartbeat()
-        task_id = self.dispatcher.current_task_id
-        if task_id:
-            note = f"worker 异常退出（{type(exc).__name__}: {exc}）"[:400]
-            if isinstance(exc, LLMError):
-                # 不 salvage：提炼也要调 LLM 必炸；快照本身已是完整现场
-                hung = False
-                try:
-                    live = self._salvage_ctx or {}
-                    self._persist_snapshot({
-                        "system": live.get("system", ""),
-                        "messages": sanitize_snapshot_tail(live.get("messages") or []),
-                        "objective": live.get("objective", ""),
-                        "task_id": task_id,
-                        "next_step": self.dispatcher.step + 1,
-                        "max_steps": self.dispatcher.max_steps,
-                        "reason": "awaiting",
-                        "open_intents": self._open_intent_snapshot(),
-                    })
-                    self.tq.fail(task_id, self.session["id"], note, resumable=True,
-                                 blocked_reason="awaiting_human",
-                                 persona_role=self.dispatcher.current_persona_role)
-                    hung = True
-                except Exception:  # noqa: BLE001
-                    log.exception("传输异常 awaiting_human 挂起失败，退回 aborted task=%s",
-                                  task_id)
-                if not hung:
-                    try:
-                        self.tq.fail(task_id, self.session["id"], note,
-                                     blocked_reason="aborted",
-                                     persona_role=self.dispatcher.current_persona_role)
-                    except Exception:  # noqa: BLE001
-                        log.exception("异常兜底 fail 任务失败 task=%s", task_id)
-            else:
-                self._salvage_attempt(note)
-                try:
-                    self.tq.fail(task_id, self.session["id"], note,
-                                 blocked_reason="aborted",
-                                 persona_role=self.dispatcher.current_persona_role)
-                except Exception:  # noqa: BLE001
-                    log.exception("异常兜底 fail 任务失败 task=%s", task_id)
-            self.dispatcher.current_task_id = None
-        self._restore_base_persona()  # v14：异常兜底恢复底色（幂等）
-        self.dispatcher._close_browser_session()  # F6-v3：任务结束清浏览器 Page
+        """Worker 异常兜底（任务机制退役后，2026-10-06）：无任务可 fail——
+        ① 落断点快照（传输类异常与 LLMError 同款，现场保留可恢复）；
+        ② 非传输类异常：salvage 抢救收尾把现场部分结论落盘为产物；
+        ③ 恢复底色 + 清浏览器 Page。"""
+        note = f"worker 异常退出（{type(exc).__name__}: {exc}）"[:400]
+        try:
+            live = self._salvage_ctx or {}
+            self._persist_snapshot({
+                "system": live.get("system", ""),
+                "messages": sanitize_snapshot_tail(live.get("messages") or []),
+                "objective": live.get("objective", ""),
+                "task_id": None,
+                "next_step": self.dispatcher.step + 1,
+                "max_steps": self.dispatcher.max_steps,
+                "reason": "awaiting",
+                "open_intents": self._open_intent_snapshot(),
+            })
+        except Exception:  # noqa: BLE001
+            log.exception("异常兜底快照落盘失败")
+        if not isinstance(exc, LLMError):
+            self._salvage_attempt(note)
+        self._restore_base_persona()
+        self.dispatcher._close_browser_session()
 
     def _finalize(self) -> None:
-        """会话收尾：任务未收尾 → fail（防 lease 占坑）；落 session.finished 事件。"""
-        self._salvage_ctx = None  # 会话收尾不做抢救（_fail_task_on_error 专属）
-        self._stop_heartbeat()
-        if self.dispatcher.current_task_id:
-            try:
-                self.tq.fail(self.dispatcher.current_task_id, self.session["id"],
-                             "会话结束但任务未收尾，自动标记失败",
-                             blocked_reason="aborted",
-                             persona_role=self.dispatcher.current_persona_role)
-            except Exception:  # noqa: BLE001
-                log.exception("自动 fail 任务失败")
+        """会话收尾：落 session.finished 事件（任务机制退役后无任务可 fail）。"""
+        self._salvage_ctx = None
         self._restore_base_persona()  # v14：会话结束恢复底色（防状态残留）
         self.dispatcher._close_browser_session()  # F6-v3：会话结束清浏览器 Page
         self.bb.append_event(

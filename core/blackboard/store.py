@@ -693,10 +693,9 @@ class Blackboard:
 
     def delete_session(self, session_id: str, author: str = "human") -> dict:
         """物理删除会话窗（2026-09-26 侧栏悬停删除）：仅 closed 可删——活窗必须
-        先走 API 层正规关窗（排水 worker + 摘 app.state.agents + open 任务退回
-        公共池都发生在关窗路径上）。行级清除 sessions + 收件箱私信；
-        tasks.claimed_by 外键引用清空（done/failed 的历史归属随事件快照留痕，
-        session.deleted 事件即审计）。不可逆。"""
+        先走 API 层正规关窗。行级清除 sessions + 收件箱私信。
+        任务机制退役（2026-10-06）后无 tasks 引用需清。session.deleted 事件即审计。
+        不可逆。"""
         row = self.conn.execute(
             "SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
         if row is None:
@@ -705,29 +704,12 @@ class Blackboard:
             raise ValueError(f"会话未关闭（{row['status']}），先关窗再删除")
         project_id = row["project_id"]
         with self._tx():
-            # FK 引用清空：仍在认领（关窗路径异常残留）→ 释放回 open；
-            # 已收尾任务只清归属指针（任务行与履历保留）
-            claimed = [r["id"] for r in self.conn.execute(
-                "SELECT id FROM tasks WHERE claimed_by=?", (session_id,)).fetchall()]
-            if claimed:
-                ph = ",".join("?" * len(claimed))
-                self.conn.execute(
-                    f"UPDATE tasks SET status='open', claimed_by=NULL,"
-                    f" lease_until=NULL, updated_at=? WHERE id IN ({ph})",
-                    (now(), *claimed))
-                self.conn.execute(
-                    f"DELETE FROM resource_leases WHERE task_id IN ({ph})",
-                    claimed)
-            self.conn.execute(
-                "UPDATE tasks SET claimed_by=NULL WHERE claimed_by=?",
-                (session_id,))
             self.conn.execute(
                 "DELETE FROM session_inbox WHERE to_session=?", (session_id,))
             self.conn.execute("DELETE FROM sessions WHERE id=?", (session_id,))
         self.append_event(
             project_id, "session.deleted",
             {"session_id": session_id, "name": row["name"], "role": row["role"],
-             "claimed_task_ids": claimed,
              "summary": f"人类删除会话窗「{row['name']}」"},
             session_id=session_id, author=author)
         return {"id": session_id, "deleted": True}
@@ -1960,14 +1942,7 @@ class Blackboard:
         )
         if merged and update_changes:  # 首次创建不通知；纯重复上报无变化不通知
             self._notify_finding_updates(project_id, finding_id, update_changes, author)
-        if merged_verified:
-            # 执行轨迹重物化（R3，同 patch_finding 钩子）：重报升级 verified →
-            # 重物化所属任务轨迹链并升链状态；失败只 log 不挡登记主路径。
-            try:
-                from core.blackboard import traces
-                traces.materialize_for_finding(self, project_id, finding_id, author=author)
-            except Exception:  # noqa: BLE001
-                log.exception("verified 触发轨迹重物化失败 finding=%s", finding_id)
+        # 任务机制退役（2026-10-06）：执行轨迹链重物化（R3）随任务机制一并退役。
         out = {"id": finding_id, "merged": merged, "severity": new_severity,
                "rating_basis": new_basis, "category": category}
         # M5 D1 疑似重复警告（orchestrator-efficiency §0-9）：同目标+同类
@@ -2020,22 +1995,24 @@ class Blackboard:
         av = str(asset["value"]).strip().lower()
         alive = self._alive_sessions(project_id)
         targets: list[str] = []
+        # 任务机制退役（2026-10-06）：工作单元改由 Team 成员承接，广播目标改按
+        # team_run_members 的 objective 命中同目标资产的在跑会话。
         try:
             rows = self.conn.execute(
-                "SELECT id, objective, scope, claimed_by FROM tasks"
-                " WHERE project_id=? AND status IN ('open','claimed')",
+                "SELECT rm.session_id, rm.objective FROM team_run_members rm"
+                " JOIN team_runs r ON r.id=rm.run_id"
+                " WHERE r.project_id=? AND rm.status IN ('running','creating')"
+                " AND rm.session_id IS NOT NULL",
                 (project_id,)).fetchall()
         except Exception:  # noqa: BLE001
             return
         for r in rows:
             if len(targets) >= 5:
                 break
-            blob = (str(r["objective"] or "") + " " + str(r["scope"] or "")).lower()
+            blob = str(r["objective"] or "").lower()
             if av not in blob:
                 continue
-            sid = r["claimed_by"] if r["status"] == "claimed" else None
-            if not sid:
-                continue
+            sid = r["session_id"]
             if sid == by:
                 continue  # 不给自己广播（登记方自然知道自己产出了什么）
             if not (isinstance(sid, str) and sid in alive and alive[sid] != "closed"):
@@ -2322,14 +2299,8 @@ class Blackboard:
         elif do_update and update_changes:
             self._notify_finding_updates(project_id, finding_id, update_changes, author)
         if do_update and old_status != "verified" and new_status == "verified":
-            # 执行轨迹重物化（execution-trace-chain R3，2026-09-22）：finding 升
-            # verified → 重物化所属任务轨迹链并升链状态（trace_ref 幂等）。惰性
-            # import 防循环依赖；失败只 log 不挡 PATCH 主路径（同 _finish 先例）。
-            try:
-                from core.blackboard import traces
-                traces.materialize_for_finding(self, project_id, finding_id, author=author)
-            except Exception:  # noqa: BLE001
-                log.exception("verified 触发轨迹重物化失败 finding=%s", finding_id)
+            # 执行轨迹重物化（R3）：任务机制退役（2026-10-06）后任务轨迹链一并退役。
+            pass
         return updated
 
     def delete_finding(
@@ -2339,14 +2310,12 @@ class Blackboard:
         ——那会触发撤回传播；删除不触发。同事务级联：
 
         - 其他 findings.evidence.relates_to 中指向它的边逐条摘除（含历史悬空引用）；
-        - tasks.context_refs/stale_refs 中摘除该 id（只摘引用，**不删任务**）；
         - chain_links 不级联：链详情既有「孤儿实体 deleted:true 占位」语义；
         - session_inbox 私信保留（payload 标题快照自包含，同「关窗私信留审计」）；
         - poc_artifact 不删（产物可能复用）。
 
-        落 finding.deleted 审计事件（快照 + 摘边数 + 受影响任务）。不存在返 None。
+        落 finding.deleted 审计事件（快照 + 摘边数）。不存在返 None。
         """
-        affected_tasks: list[str] = []
         trimmed_rels = 0
         with self._tx():
             row = self.conn.execute(
@@ -2370,20 +2339,6 @@ class Blackboard:
                     self.conn.execute(
                         "UPDATE findings SET evidence=?, updated_at=? WHERE id=?",
                         (json.dumps(ev, ensure_ascii=False), ts, f["id"]))
-            # 任务依据/挂标数组摘引用（任务本身的去留是独立决定，不由删 finding 代办）
-            for t in self.conn.execute(
-                    "SELECT id,context_refs,stale_refs FROM tasks WHERE project_id=?",
-                    (project_id,)):
-                ctx = _loads(t["context_refs"], [])
-                stale = _loads(t["stale_refs"], [])
-                nctx = [x for x in ctx if x != finding_id]
-                nstale = [x for x in stale if x != finding_id]
-                if nctx != ctx or nstale != stale:
-                    self.conn.execute(
-                        "UPDATE tasks SET context_refs=?, stale_refs=?, updated_at=? WHERE id=?",
-                        (json.dumps(nctx, ensure_ascii=False),
-                         json.dumps(nstale, ensure_ascii=False), ts, t["id"]))
-                    affected_tasks.append(t["id"])
             self.conn.execute("DELETE FROM findings WHERE id=?", (finding_id,))
             snapshot = {"title": row["title"], "vuln_class": row["vuln_class"],
                         "severity": row["severity"], "status": row["status"],
@@ -2391,10 +2346,9 @@ class Blackboard:
         self.append_event(
             project_id, "finding.deleted",
             {"finding_id": finding_id, "by": author, **snapshot,
-             "trimmed_relates_to": trimmed_rels, "affected_tasks": affected_tasks},
+             "trimmed_relates_to": trimmed_rels},
             author=author)
-        return {"id": finding_id, **snapshot,
-                "trimmed_relates_to": trimmed_rels, "affected_tasks": affected_tasks}
+        return {"id": finding_id, **snapshot, "trimmed_relates_to": trimmed_rels}
 
     def _propagate_retraction(
         self, project_id: str, finding_id: str, by: str, finding: dict | None = None,
@@ -2403,14 +2357,10 @@ class Blackboard:
 
         1. 项目级广播 finding.retracted（事件流/WS 全员可见，主代理下轮 tick 可见）；
         2. 私聊（session_inbox + message.inbox，按 (to_session,ref,kind) 未读去重）：
-           a) 被推翻 finding 的作者会话；b) relates_to 反向边下游 finding 的作者；
-           c) context_refs 命中任务及其子树：claimed→认领者私信+stale_refs 挂标，
-              open→只挂标（认领开场白必见），done/failed→作者私信不改行；
-           d) 命中任务向上一级：父任务 claimed 时抄送父认领者（不挂标）。
+           a) 被推翻 finding 的作者会话；b) relates_to 反向边下游 finding 的作者。
         human/system 作者不私聊。closed 会话不投递（行留库，UI 不再显示）。
+        任务机制退役（2026-10-06）后不再按任务 context_refs/parent 传播。
         """
-        from core.blackboard.tasks import TaskQueue
-
         finding = finding or self.get_finding(project_id, finding_id)
         if finding is None:
             return
@@ -2448,22 +2398,7 @@ class Blackboard:
             if any(isinstance(x, dict) and x.get("finding_id") == finding_id for x in rels):
                 add_target(f.get("author"))
 
-        # c) context_refs 命中任务 + parent_id 子树
-        tq = TaskQueue(self)
-        by_id, hits, subtree = self._finding_task_graph(tq, project_id, finding_id)
-        for tid in subtree:
-            t = by_id[tid]
-            if t["status"] in ("open", "claimed"):
-                tq.add_stale_ref(tid, finding_id)
-            if t["status"] == "claimed":
-                add_target(t.get("claimed_by"))
-            elif t["status"] in ("done", "failed"):
-                add_target(t.get("created_by"))
-        # d) 命中任务向上一级：父任务在跑则抄送协调者（不挂 stale_refs）
-        for tid in hits:
-            parent = by_id.get(by_id[tid].get("parent_id") or "")
-            if parent and parent["status"] == "claimed":
-                add_target(parent.get("claimed_by"))
+        # c/d) 任务机制退役：不再按任务 context_refs/parent 子树传播。
 
         for sid in sorted(targets):
             if self.inbox_post(project_id, sid, "basis_stale", finding_id, payload):
@@ -2481,75 +2416,14 @@ class Blackboard:
                 "SELECT id,status FROM sessions WHERE project_id=?", (project_id,))
         }
 
-    def _finding_task_graph(
-        self, tq: Any, project_id: str, finding_id: str,
-    ) -> tuple[dict[str, dict], set[str], set[str]]:
-        """context_refs 命中任务集合 + 沿 parent_id 向下展开子树（撤回/更新传播共用）。
-
-        返回 (by_id, hits, subtree)：hits=直接引用 finding 的任务，
-        subtree=hits 及其全部后代任务。"""
-        tasks = tq.list_tasks(project_id)
-        by_id = {t["id"]: t for t in tasks}
-        children: dict[str | None, list[dict]] = {}
-        for t in tasks:
-            children.setdefault(t.get("parent_id"), []).append(t)
-        hits = {t["id"] for t in tasks if finding_id in (t.get("context_refs") or [])}
-        subtree, stack = set(hits), list(hits)
-        while stack:
-            cur = stack.pop()
-            for ch in children.get(cur, []):
-                if ch["id"] not in subtree:
-                    subtree.add(ch["id"])
-                    stack.append(ch["id"])
-        return by_id, hits, subtree
-
     def _notify_finding_updates(
         self, project_id: str, finding_id: str, changes: list[str], by: str,
     ) -> None:
         """发现实质增补/升级的信息式私信（A4，kind='finding_update'）。
 
-        与撤回（basis_stale，强制三选一+stale_refs 挂标）严格分语义：本通知
-        - 只给引用方**在跑任务**（含子树）的认领者，及命中任务上一级父认领者；
-        - 不给 open/done/failed 任务、不给造成本次更新的作者本人、不给 closed 会话；
-        - 不挂 stale_refs、不强制任何动作。
-        多次增补在未读期间只此一条（(to_session,ref_id,kind) 未读唯一索引去重）。
-        """
-        if not changes:
-            return
-        from core.blackboard.tasks import TaskQueue
-
-        finding = self.get_finding(project_id, finding_id)
-        if finding is None:
-            return
-        tq = TaskQueue(self)
-        by_id, hits, subtree = self._finding_task_graph(tq, project_id, finding_id)
-        alive = self._alive_sessions(project_id)
-        targets: set[str] = set()
-
-        def add_target(sid: Any) -> None:
-            if (isinstance(sid, str) and sid.startswith("sess-")
-                    and sid in alive and alive[sid] != "closed"):
-                targets.add(sid)
-
-        for tid in subtree:
-            if by_id[tid]["status"] == "claimed":
-                add_target(by_id[tid].get("claimed_by"))
-        for tid in hits:  # d) 命中任务向上一级：父任务在跑则抄送协调者
-            parent = by_id.get(by_id[tid].get("parent_id") or "")
-            if parent and parent["status"] == "claimed":
-                add_target(parent.get("claimed_by"))
-        targets.discard(by)  # 不给造成更新的本人投递（自报 POC 不需通知自己）
-
-        title = finding.get("title", "")
-        payload = {"finding_id": finding_id, "title": title, "changes": changes, "by": by}
-        for sid in sorted(targets):
-            if self.inbox_post(project_id, sid, "finding_update", finding_id, payload):
-                self.append_event(
-                    project_id, "message.inbox",
-                    {"to_session": sid, "kind": "finding_update",
-                     "ref_id": finding_id, "title": f"发现增补：{title}",
-                     "changes": changes, "by": by},
-                    session_id=sid, author="system")
+        任务机制退役（2026-10-06）后无任务引用方追踪——本通知恒无目标，保留
+        方法签名供 add_finding/patch_finding 调用（不投递）。"""
+        return
 
     # ---------- 函数知识库（func_kb，逆向防重复劳动主力，§5.4） ----------
 

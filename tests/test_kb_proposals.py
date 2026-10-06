@@ -16,10 +16,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core.api.app import create_app  # noqa: E402
 from core.agent.loop import AgentConfig, AgentSession  # noqa: E402
 from core.agent.tools import ToolDispatcher  # noqa: E402
-from core.blackboard import Blackboard, TaskQueue  # noqa: E402
+from core.blackboard import Blackboard  # noqa: E402
 from core.runtime.backends import NativeBackend  # noqa: E402
 from core.runtime.gateway import ExecutionGateway  # noqa: E402
 from core.skills import proposals as pm  # noqa: E402
+from core.team import TeamStore  # noqa: E402
 from core.skills import writing  # noqa: E402
 from core.skills.doctor import diagnose  # noqa: E402
 
@@ -511,17 +512,16 @@ def _make_session(tmp_path: Path):
     bb = Blackboard(str(db))
     project = bb.create_project("提案项目", "pentest", ["web"])
     gw = ExecutionGateway(bb=bb, backends={"host": NativeBackend()})
-    tq = TaskQueue(bb)
     agent = AgentSession(
         project_id=project["id"], bb=bb, gateway=gw, llm=_FakeLLM(),
         packs_root=packs, track="pentest", capabilities=["web"],
         capability_prompt="## 能力清单\n- host: 可用",
         config=AgentConfig(max_steps=5))
-    return packs, bb, project, tq, agent
+    return packs, bb, project, agent
 
 
 def test_agent_propose_tool_only_pending_and_cap(tmp_path):
-    packs, bb, project, _tq, agent = _make_session(tmp_path)
+    packs, bb, project, agent = _make_session(tmp_path)
     d: ToolDispatcher = agent.dispatcher
     d.current_task_id = "t-100"
     ids = []
@@ -562,7 +562,7 @@ def test_agent_kb_proposal_structure_lint(tmp_path):
     """M2/M3 机械质检（agent kb create 限定，experience-sedimentation）：
     reason 缺 find-/task- 证据锚点、content 无「## 」段落结构 → 拒绝不落地；
     origin=human 不受限（复核放宽，human 改后采纳不被拦）。"""
-    packs, bb, project, _tq, agent = _make_session(tmp_path)
+    packs, bb, project, agent = _make_session(tmp_path)
     d: ToolDispatcher = agent.dispatcher
     base = {"kind": "kb", "mode": "create",
             "target": {"cap": "web", "path": "ctf-web/lint.md"},
@@ -593,7 +593,7 @@ def test_agent_kb_proposal_structure_lint(tmp_path):
 
 
 def test_agent_propose_skill_create_rejected(tmp_path):
-    _packs, _bb, _p, _tq, agent = _make_session(tmp_path)
+    _packs, _bb, _p, agent = _make_session(tmp_path)
     out = agent.dispatcher.dispatch("propose_pack_edit", {
         "kind": "skill", "mode": "create",
         "target": {"skill_kind": "capability", "owner": "web", "name": "new-skill"},
@@ -607,7 +607,7 @@ def test_agent_propose_skill_create_rejected(tmp_path):
 def test_skill_routed_event_hit_and_miss(tmp_path):
     """K8（2026-09-29）：skill_context_for 不再路由命中——事件改记录注入清单
     （name 恒 null + injected 列表），正文仍只给描述、靠 skill_open。"""
-    _packs, bb, project, _tq, agent = _make_session(tmp_path)
+    _packs, bb, project, agent = _make_session(tmp_path)
     ctx = agent.skill_context_for("排查 SQL 注入登录绕过", task_id="t-9")
     assert "web-skill" in ctx  # 全量描述注入含 web-skill
     ev = [e for e in bb.recent_events(project["id"]) if e["kind"] == "skill.routed"]
@@ -662,6 +662,24 @@ def test_doctor_near_duplicate_info(tmp_path):
 
 # ---------------- F8 会话级复盘 Job（planner_llm） ----------------
 
+def _attach_run(bb, pid: str, session_id: str, objective: str) -> dict:
+    """造一个绑定到指定会话的 Team 成员执行（复盘工作单元，替代旧任务）。"""
+    store = TeamStore(bb)
+    team = store.create_team(
+        pid, name="复盘组", goal_text="复盘",
+        members=[{"member_key": "recon", "responsibility": objective,
+                  "runtime": "host"}])
+    pf = store.preflight(pid, team["id"])
+    run = store.create_run_and_members(
+        pid, team["id"], revision=pf["revision"],
+        confirmations={"members": True, "goal": True,
+                       "safety": True, "execution": True})
+    member = run["members"][0]
+    store.claim_member(member["id"])
+    store.attach_session(member["id"], session_id)
+    return member
+
+
 def test_session_review_job_fake_planner(tmp_path):
     proposal_json = json.dumps({"proposals": [
         # 合法：create 新经验 md
@@ -682,17 +700,12 @@ def test_session_review_job_fake_planner(tmp_path):
                         executor_llm=_FakeLLM(), planner_llm=_FakeLLM(proposal_json))
     pid = _project(c)
     proj = c.app.state.projects[pid]
-    # 造会话 + 它认领过的任务（done 保留 claimed_by）+ 带会话归属的事件/发现
+    # 造会话 + 它承接过的 Team 成员执行（任务机制退役后复盘工作单元=team run）
+    # + 带会话归属的事件/发现
     sess = proj.bb.register_session(pid, "复盘窗", role="_generalist")
     other = proj.bb.register_session(pid, "别家窗", role="_generalist")
-    tq = TaskQueue(proj.bb)
-    tid = tq.publish(pid, "测试 SQL 注入", task_type="recon",
-                     noise_budget="passive", created_by="human")
-    tq.claim(tid, sess["id"])
-    tq.complete(tid, sess["id"], result_note="SQLi 已验证")
-    tid_other = tq.publish(pid, "别家任务", task_type="recon",
-                           noise_budget="passive", created_by="human")
-    tq.claim(tid_other, other["id"])
+    _attach_run(proj.bb, pid, sess["id"], "测试 SQL 注入")
+    _attach_run(proj.bb, pid, other["id"], "别家任务")
     proj.bb.add_finding(pid, vuln_class="sqli", title="本会话发现",
                         author=sess["id"])
     proj.bb.add_finding(pid, vuln_class="xss", title="别家发现",

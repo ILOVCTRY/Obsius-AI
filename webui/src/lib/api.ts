@@ -16,12 +16,11 @@ import type {
   AgentToolsResponse,
   Proposal, ProposalOrigin, RoleInfo, RouteHit,
   RoutePreviewBody, SampleUploadResponse, Session, SkillCreateBody, SkillDef, TrackProfile,
-  SkillDetail, SkillVocab, SkillCatalog, SkillFileEntry, Task, TaskTree, SessionGraph, AttackPath, IntentInfo,
+  SkillDetail, SkillVocab, SkillCatalog, SkillFileEntry, SessionGraph, AttackPath, IntentInfo,
   WritebackItem, XrefData,
-  TaskTrace, TraceEffect,
+  TraceEffect,
   FofaConfig, FofaTestResult, FofaSearchResult, FofaHistoryItem, ImportPreview, ImportSummary,
   ChatAgent, ChatThread, ChatThreadDetail, ChatMcpServer,
-  CoordinationOverview, CoordinationPreflight, CoordinationCommunication, CoordinationPlan, CoordinationTask, CoordinationObject, CoordinationConflict, CoordinationVerification,
   Team, TeamMemberInput, TeamPreflight, TeamRun,
   SkillResource,
   SamplePackage, SampleTargetAnalysis, SampleTargetAnalyzeResponse, SamplePackageUploadSession, SamplePackagePreview,
@@ -468,12 +467,6 @@ export const api = {
       `/api/projects/${pid}/files/open`,
       { method: "POST", body: JSON.stringify({ path, action }) }),
 
-  // 任务
-  tasks: (pid: string) => http<Task[]>(`/api/projects/${pid}/tasks`),
-  // 任务尝试树 v2（task-attempt-tree，2026-09-27，替代 task-graph/TaskFlow）：
-  // 目标 → 意图 → 检验结果，新发现下长新意图，后端现算零写入
-  taskTree: (pid: string, taskId: string) =>
-    http<TaskTree>(`/api/projects/${pid}/tree/${taskId}`),
   // 单站攻击链路图 v3（website-attack-path-graph，2026-09-24）：
   // 目标 → 意图 → 收尾（漏洞/发现/死路），执行层展开
   attackPath: (pid: string, target: string) =>
@@ -486,49 +479,9 @@ export const api = {
     http<IntentInfo>(`/api/projects/${pid}/intents/${encodeURIComponent(intentId)}/reopen`, {
       method: "POST", body: JSON.stringify({ note }),
     }),
-  // 执行轨迹（execution-trace-chain M1，2026-09-22）：任务区间切分+过程聚合现算
-  taskTrace: (pid: string, taskId: string) =>
-    http<TaskTrace>(`/api/projects/${pid}/trace/${taskId}`),
   // 打法效果榜（M3/R4，物化侧统计）
   traceEffect: (pid: string, top = 20) =>
     http<TraceEffect>(`/api/projects/${pid}/trace-effect?top=${top}`),
-  publishTask: (pid: string, body: {
-    objective: string; scope?: string; task_type?: string; role?: string; noise_budget?: string;
-    priority?: number; conflict_keys?: string[]; refs?: string[];
-    workset?: string[]; force?: boolean; parent_id?: string; attachment_ids?: string[];
-    acceptance?: string[]; target_session?: string   // v18：指派会话（''/缺省=公共池）
-  }) =>
-    http<{ task_id: string; kicked: string[]; deduplicated?: boolean; existed_status?: string; already_running?: boolean; session_id?: string | null }>(
-      `/api/projects/${pid}/tasks`, { method: "POST", body: JSON.stringify(body) }),
-  updateTask: (taskId: string, body: {
-    objective?: string; task_type?: string; noise_budget?: string;
-    priority?: number; conflict_keys?: string[]
-    role?: string  // v0.71：执行中任务仅可改角色（热换装，下个步进生效）
-    preferred_runtime?: string  // v23：任务默认运行时（''=重置；open/failed 可改）
-  }) =>
-    http<Task>(`/api/tasks/${taskId}`, {
-      method: "PATCH", body: JSON.stringify(body),
-    }),
-  reopenTask: (taskId: string, note?: string, drop_scene = false) =>
-    http<{ status: string; kicked?: string[] }>(`/api/tasks/${taskId}/reopen`, {
-      method: "POST", body: JSON.stringify({ note: note ?? "", drop_scene }),
-    }),
-  // M4 C1：人工取消任务（open/claimed → failed cancelled，打断在跑窗不关窗）
-  cancelTask: (taskId: string, reason = "") =>
-    http<{ task_id: string; status: string; interrupted: boolean }>(
-      `/api/tasks/${taskId}/cancel`, {
-        method: "POST", body: JSON.stringify({ reason }),
-      }),
-  // C6 失败任务跨会话完整续跑：snapshot=⚡带现场复活 / transcript=↩接手现场续跑
-  resumeTask: (taskId: string) =>
-    http<{ task_id: string; session_id: string; status: string; resume_mode: "snapshot" | "transcript" }>(
-      `/api/tasks/${taskId}/resume`, { method: "POST" }),
-  // F9 任务窗：双击任务卡直开窗（open 无绑=补绑待命窗 / 已绑=幂等挂回 / 终态=复盘窗）
-  spawnWindow: (taskId: string) =>
-    http<{ session_id: string; created: boolean }>(
-      `/api/tasks/${taskId}/spawn-window`, { method: "POST" }),
-  deleteTask: (taskId: string) =>
-    http<{ deleted: string }>(`/api/tasks/${taskId}`, { method: "DELETE" }),
   closeSession: (sid: string) =>
     http<{ status: string }>(`/api/sessions/${sid}/close`, { method: "POST" }),
   // 物理删除会话窗：仅 closed 可删（活窗先 close），黑板行级清除，events 留审计
@@ -597,6 +550,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ text, attachment_ids: attachmentIds.length ? attachmentIds : undefined }),
     }),
+  // 会话手动压缩上下文（/compact，2026-10-06）：把 chat-<sid>.json 旧历史经
+  // LLM 压成摘要后重写，后续对话轮从压缩后历史起跑。执行中 409。
+  compactSession: (sid: string) =>
+    http<{ status: string; before_msgs?: number; after_msgs?: number; summarized?: number; reason?: string }>(
+      `/api/sessions/${sid}/compact`, { method: "POST" }),
   sessionInbox: (sid: string, unread = false) =>
     http<InboxMessage[]>(`/api/sessions/${sid}/inbox${unread ? "?unread=true" : ""}`),
   readSessionInbox: (sid: string, ids?: string[]) =>
@@ -634,10 +592,6 @@ export const api = {
   agentWork: (sid: string, taskId?: string) =>
     http<{ job_id?: string; session_id: string; already_running?: boolean }>(
       `/api/agents/${sid}/work${taskId ? `?task_id=${encodeURIComponent(taskId)}` : ""}`, { method: "POST" }),
-  // F9 任务窗：双击已收尾任务卡开带上下文的新窗（幂等，已有窗直接返回）
-  spawnTaskWindow: (taskId: string) =>
-    http<{ session_id: string; created: boolean }>(
-      `/api/tasks/${taskId}/spawn-window`, { method: "POST" }),
   orchTick: (pid: string, opts: { allowed_roles?: string[]; max_sessions?: number;
     analyze_only?: boolean; budget_ticks?: number } = {}) =>
     http<{ job_id: string }>(`/api/projects/${pid}/orchestrator/tick`, {
@@ -653,16 +607,7 @@ export const api = {
     http<{ released: boolean }>(`/api/projects/${pid}/orchestrator/tick/force-acquire`, {
       method: "POST",
     }),
-  // 任务报告（trae 视图 2026-09-28）：done 任务 → LLM 生成 md 报告落 task.report
-  // 事件（幂等：已有报告返回 existing；生成走后台 job，失败可重试）
-  generateTaskReport: (pid: string, tid: string) =>
-    http<{ job_id?: string; status?: string; existing?: boolean; event_id?: number }>(
-      `/api/projects/${pid}/tasks/${tid}/report`, { method: "POST" }),
-  // A5：手动重排 open 任务优先级（任何自主档可用，不受 30s 去抖/预算闸限制）
-  replanPriorities: (pid: string) =>
-    http<{ job_id: string }>(`/api/projects/${pid}/orchestrator/replan-priorities`, {
-      method: "POST",
-    }),
+  // A5 手动重排已随任务机制退役（2026-10-06）：端点/方法一并删除。
   job: (jobId: string) => http<Job>(`/api/jobs/${jobId}`),
 
   // 审批
@@ -1086,77 +1031,6 @@ export const api = {
   chatMcp: (pid: string) =>
     http<{ servers: ChatMcpServer[] }>(`/api/chat/mcp?pid=${encodeURIComponent(pid)}`),
 
-  // ---------- 多智能体协调（独立协调域） ----------
-  coordination: (pid: string) =>
-    http<CoordinationOverview>(`/api/projects/${pid}/coordination`),
-  coordinationPlanCreate: (pid: string, body: { name: string; objective?: string }) =>
-    http<CoordinationPlan>(`/api/projects/${pid}/coordination/plans`, {
-      method: "POST", body: JSON.stringify(body),
-    }),
-  coordinationPlanStatus: (pid: string, planId: string, status: string) =>
-    http<CoordinationPlan>(`/api/projects/${pid}/coordination/plans/${encodeURIComponent(planId)}`, {
-      method: "PATCH", body: JSON.stringify({ status }),
-    }),
-  coordinationPreflight: (pid: string, planId: string) =>
-    http<CoordinationPreflight>(`/api/projects/${pid}/coordination/plans/${encodeURIComponent(planId)}/preflight`),
-  coordinationPlanStart: (pid: string, planId: string, body: { preflight_revision?: string; confirmations?: Record<string, boolean> }) =>
-    http<{ plan: CoordinationPlan; status: string; job_id?: string | null }>(`/api/projects/${pid}/coordination/plans/${encodeURIComponent(planId)}/start`, {
-      method: "POST", body: JSON.stringify(body),
-    }),
-  coordinationPlanControl: (pid: string, planId: string, action: "pause" | "resume" | "interrupt" | "retry") =>
-    http<Record<string, unknown>>(`/api/projects/${pid}/coordination/plans/${encodeURIComponent(planId)}/control`, {
-      method: "POST", body: JSON.stringify({ action }),
-    }),
-  coordinationCommunications: (pid: string, params?: { session_id?: string; unread?: boolean; limit?: number }) => {
-    const q = new URLSearchParams()
-    if (params?.session_id) q.set("session_id", params.session_id)
-    if (params?.unread) q.set("unread", "true")
-    if (params?.limit) q.set("limit", String(params.limit))
-    return http<CoordinationCommunication[]>(`/api/projects/${pid}/coordination/communications${q.size ? `?${q}` : ""}`)
-  },
-  coordinationCommunicationsRead: (pid: string, body: { ids?: string[]; session_ids?: string[] }) =>
-    http<{ marked: number }>(`/api/projects/${pid}/coordination/communications/read`, {
-      method: "POST", body: JSON.stringify(body),
-    }),
-  coordinationTimeline: (pid: string, planId: string, limit = 200) =>
-    http<Record<string, unknown>[]>(`/api/projects/${pid}/coordination/plans/${encodeURIComponent(planId)}/timeline?limit=${limit}`),
-  coordinationTaskCreate: (pid: string, planId: string, body: {
-    title: string; description?: string; role?: string; priority?: number; depends_on?: string[]
-  }) =>
-    http<CoordinationTask>(`/api/projects/${pid}/coordination/plans/${encodeURIComponent(planId)}/tasks`, {
-      method: "POST", body: JSON.stringify(body),
-    }),
-  coordinationTaskUpdate: (pid: string, taskId: string, body: {
-    status?: string; title?: string; description?: string; role?: string; member_id?: string; evidence?: Record<string, unknown>[]
-  }) =>
-    http<CoordinationTask>(`/api/projects/${pid}/coordination/tasks/${encodeURIComponent(taskId)}`, {
-      method: "PATCH", body: JSON.stringify(body),
-    }),
-  coordinationObjects: (pid: string, kind?: string) =>
-    http<CoordinationObject[]>(`/api/projects/${pid}/coordination/objects${kind ? `?kind=${encodeURIComponent(kind)}` : ""}`),
-  coordinationObjectCreate: (pid: string, body: {
-    kind: string; name?: string; object_ref?: string; data?: Record<string, unknown>
-    source?: string; confidence?: number; plan_id?: string | null; task_id?: string | null
-    artifact_refs?: string[]
-  }) => http<CoordinationObject>(`/api/projects/${pid}/coordination/objects`, {
-    method: "POST", body: JSON.stringify(body),
-  }),
-  coordinationConflicts: (pid: string, status?: string) =>
-    http<CoordinationConflict[]>(`/api/projects/${pid}/coordination/conflicts${status ? `?status=${encodeURIComponent(status)}` : ""}`),
-  coordinationConflictCreate: (pid: string, body: {
-    left_object_id: string; right_object_id: string; field?: string; summary: string
-  }) => http<CoordinationConflict>(`/api/projects/${pid}/coordination/conflicts`, {
-    method: "POST", body: JSON.stringify(body),
-  }),
-  coordinationConflictUpdate: (pid: string, conflictId: string, body: { status: string; resolution?: string }) =>
-    http<CoordinationConflict>(`/api/projects/${pid}/coordination/conflicts/${encodeURIComponent(conflictId)}`, {
-      method: "PATCH", body: JSON.stringify(body),
-    }),
-  coordinationVerify: (pid: string, body: { task_id?: string; plan_id?: string }) =>
-    http<CoordinationVerification | { plan_id: string; status: string; passed: number; total: number; results: CoordinationVerification[] }>(
-      `/api/projects/${pid}/coordination/verify`, { method: "POST", body: JSON.stringify(body) }),
-  coordinationVerification: (pid: string, taskId: string) =>
-    http<CoordinationVerification>(`/api/projects/${pid}/coordination/verifications/${encodeURIComponent(taskId)}`),
 }
 
 // 长耗时 Job 轮询（Agent work / orchestrator tick）

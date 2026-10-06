@@ -9,26 +9,6 @@ export interface EventStyle {
 }
 
 export function eventStyle(kind: string, payload?: Record<string, unknown>): EventStyle {
-  if (kind.startsWith("task.")) {
-    const map: Record<string, EventStyle> = {
-      "task.published": { label: "📋 发布任务", className: "text-primary", defaultOpen: true },
-      "task.claimed": { label: "🔧 认领任务", className: "text-muted-foreground", defaultOpen: false },
-      "task.done": { label: "✅ 任务完成", className: "text-primary", defaultOpen: true },
-      "task.failed": { label: "❌ 任务失败", className: "text-(--status-error)", defaultOpen: false },
-      "task.updated": { label: "✏️ 编辑任务", className: "text-muted-foreground", defaultOpen: true },
-      "task.reopened": { label: "♻️ 放回待认领", className: "text-primary", defaultOpen: true },
-      "task.cancelled": { label: "🚫 任务已取消", className: "text-muted-foreground", defaultOpen: true },
-      "task.deleted": { label: "🗑 删除任务", className: "text-muted-foreground", defaultOpen: true },
-      "task.lease_expired": { label: "⏰ 租约过期", className: "text-(--status-approval)", defaultOpen: true },
-      // A2 先规划后动手
-      "task.plan_set": { label: "📐 制定计划", className: "text-(--viz-sev-low)", defaultOpen: true },
-      "task.plan_revised": { label: "📐 修订计划", className: "text-(--viz-sev-low)", defaultOpen: true },
-      "task.step": { label: "▦ 计划步进", className: "text-muted-foreground", defaultOpen: false },
-      // ⑤ 完成对账硬拦：complete 被拒，列出未收口条目
-      "task.reconcile_blocked": { label: "☑ 完成对账未收口", className: "text-(--viz-sev-medium)", defaultOpen: true },
-    }
-    return map[kind] ?? { label: `task`, className: "text-muted-foreground", defaultOpen: false }
-  }
   if (kind === "command") return { label: "⚡ 执行命令", className: "text-foreground/80", defaultOpen: false }
   if (kind === "command.result") return { label: "↳ 命令输出", className: "text-muted-foreground", defaultOpen: false }
   // 独立验证 M1：验证器对 verify 验收条目的判定回执（未过默认展开，脱敏摘要）
@@ -85,8 +65,6 @@ export function eventStyle(kind: string, payload?: Record<string, unknown>): Eve
     return { label: "🚫 拒写计划，挂起", className: "text-(--status-error)", defaultOpen: true }
   if (kind === "agent.reject_breaker")
     return { label: "🚫 拒绝熔断挂起", className: "text-(--status-error)", defaultOpen: true }
-  if (kind === "task.basis_stale_done")
-    return { label: "⚠ 推翻依据下完成", className: "text-(--viz-sev-medium)", defaultOpen: true }
   if (kind === "binary.triaged")
     return { label: "🧊 样本分诊完成", className: "text-primary", defaultOpen: true }
   if (kind === "binary.triage_failed")
@@ -166,7 +144,6 @@ export function eventStyle(kind: string, payload?: Record<string, unknown>): Eve
   if (kind === "orch.chain_started") return { label: "⛓🤖 L2 自动链启动", className: "text-primary", defaultOpen: true }
   // 停止原因（含急停/预算/异常）由 eventSummary 中文行呈现
   if (kind === "orch.chain_stopped") return { label: "⛓⏹ L2 自动链停止", className: "text-(--viz-sev-medium)", defaultOpen: true }
-  if (kind === "orch.replan_priorities") return { label: "🔀 优先级重排", className: "text-primary", defaultOpen: false }
   if (kind === "project.digest") return { label: "📌 编排简报", className: "text-primary", defaultOpen: true }
   if (kind === "chain.created") return { label: "🔗 新建攻击链", className: "text-(--viz-chain)", defaultOpen: true }
   if (kind === "chain.updated") return { label: "🔗 攻击链更新", className: "text-(--viz-chain)", defaultOpen: false }
@@ -202,9 +179,7 @@ const TOOL_LABELS: Record<string, string> = {
   bb_delete_finding: "📋 删除发现", bb_add_artifact: "📦 落产物",
   bb_query: "🔎 查黑板", bb_upsert_func: "⚙ 函数知识",
   propose_pack_edit: "📝 变更提案", decompile: "⚙ 反编译",
-  list_symbols: "⚙ 符号表", task_plan: "📐 写计划",
-  task_step: "▦ 计划步进", publish_task: "📨 派发任务",
-  complete_task: "✅ 完成任务", fail_task: "✗ 任务失败",
+  list_symbols: "⚙ 符号表",
   finish: "🏁 收尾会话", request_steps: "⏳ 申请增补步数",
   browser_navigate: "🌐 打开网页", browser_click: "🖱 点击",
   browser_type: "⌨ 输入", browser_screenshot: "📸 截图",
@@ -214,7 +189,7 @@ const TOOL_LABELS: Record<string, string> = {
   strings_search: "🔤 字符串检索", func_xrefs: "🔗 交叉引用",
   skill_open: "📘 打开技能", route_lookup: "🧭 路由查询",
   declare_intent: "💡 声明意图", close_intent: "🏁 收尾意图",
-  reopen_intent: "↩ 重开意图", task_reconcile: "✓ 任务对账",
+  reopen_intent: "↩ 重开意图",
   request_authorization: "🙏 申请授权",
   run_cmd: "⌨ 命令",  // 仅计划闸/越界拒绝时落审计（正常执行走 command 配对事件）
 }
@@ -222,10 +197,10 @@ const TOOL_ARG_KEY: Record<string, string> = {
   kb_open: "module", kb_search: "query", browser_navigate: "url",
   bb_add_finding: "title", bb_update_finding: "finding_id",
   bb_delete_finding: "finding_id", bb_asset_status: "asset_id",
-  bb_add_artifact: "filename", publish_task: "objective",
+  bb_add_artifact: "filename",
   decompile: "binary", list_symbols: "binary", browser_click: "selector",
   browser_type: "selector", bb_upsert_func: "func_id",
-  propose_pack_edit: "target", task_step: "step_id",
+  propose_pack_edit: "target",
 }
 
 // severity 徽章共用（live-stream-ux C2，2026-09-23）：色值从 Blackboard.tsx 提升，
@@ -320,17 +295,6 @@ const TOOL_SUMMARIZERS: Record<string, (a: Record<string, unknown>, ctx?: Summar
     const note = typeof a.note === "string" && a.note ? `（${clip(a.note, LEN_SHORT)}）` : ""
     return `${id}${note}`
   },
-  task_reconcile: (a) => {
-    const item = typeof a.item_id === "number" ? `#${a.item_id}` : ""
-    const state = typeof a.state === "string" ? a.state : ""
-    const note = typeof a.note === "string" && a.note ? ` ${clip(a.note, LEN_SHORT)}` : ""
-    return `${item}${state ? ` → ${state}` : ""}${note}`
-  },
-  task_plan: (a) => {
-    const n = Array.isArray(a.steps) ? a.steps.length : 0
-    const rev = typeof a.rev_reason === "string" && a.rev_reason ? `（修订：${clip(a.rev_reason, LEN_SHORT)}）` : ""
-    return `${n} 步${rev}`
-  },
   request_authorization: (a) => {
     const kind = String(a.kind ?? "")
     const why = typeof a.reason === "string" && a.reason ? ` ${clip(a.reason, LEN_SHORT)}` : ""
@@ -339,11 +303,6 @@ const TOOL_SUMMARIZERS: Record<string, (a: Record<string, unknown>, ctx?: Summar
   run_cmd: (a) => clip(String(a.cmd ?? ""), LEN_SHORT),  // gated 拒绝审计行
   bb_add_asset: (a) =>
     `${String(a.value ?? "")}（${String(a.type ?? "auto")}）`,
-  complete_task: (a) => clip(String(a.result_note ?? ""), LEN_LONG),
-  fail_task: (a) => {
-    const why = a.blocked_reason === "awaiting_human" ? "（待人类处理）" : ""
-    return `${clip(String(a.result_note ?? ""), LEN_LONG)}${why}`
-  },
   finish: (a) => clip(String(a.summary ?? ""), LEN_LONG),
   bb_add_finding: (a) => {
     const sev = String(a.severity ?? "")
@@ -360,47 +319,10 @@ const TOOL_SUMMARIZERS: Record<string, (a: Record<string, unknown>, ctx?: Summar
   },
 }
 
-// B3（live-stream-ux）：task.done/task.failed 事件行专属摘要——「动作」与「结果」
-// 分行一眼可辨；blocked_reason=awaiting_human 标注「待人类处理」。
-// M2（orchestrator-coordination-fusion）：委派回执富化——payload.receipt 存在时
-// 追加产出计数（🏷N发现 · 🔧N产物），人类在事件流一眼看清委托成果。
-function receiptSuffix(payload: Record<string, unknown>): string {
-  const r = payload.receipt
-  if (!r || typeof r !== "object") return ""
-  const rec = r as Record<string, unknown>
-  const nf = Array.isArray(rec.findings) ? rec.findings.length : 0
-  const na = Array.isArray(rec.artifacts) ? rec.artifacts.length : 0
-  const parts: string[] = []
-  if (nf) parts.push(`🏷${nf}发现`)
-  if (na) parts.push(`🔧${na}产物`)
-  return parts.length ? ` · ${parts.join(" · ")}` : ""
-}
-function taskDoneSummary(payload: Record<string, unknown>): ReactNode {
-  const note = typeof payload.note === "string" ? payload.note : ""
-  const s = `${clip(note, LEN_LONG)}${receiptSuffix(payload)}`
-  return s || undefined
-}
-function taskFailedSummary(payload: Record<string, unknown>): ReactNode {
-  const note = typeof payload.note === "string" ? clip(payload.note, LEN_LONG) : ""
-  const why = payload.blocked_reason === "awaiting_human" ? "（待人类处理）" : ""
-  const s = `${note}${why}${receiptSuffix(payload)}`
-  return s || undefined
-}
-
 export function eventSummary(payload: Record<string, unknown>,
-                              roleNames?: Record<string, string>,
+                              _roleNames?: Record<string, string>,
                               ctx?: SummaryCtx,
                               kind?: string): ReactNode {
-  // B3（live-stream-ux）：task.done/task.failed 专属摘要——与收尾 tool.call 行
-  // 图标呼应，一眼分清「动作」与「结果」；note 空（纯 awaiting_human）也有标注
-  if (kind === "task.done") {
-    const s = taskDoneSummary(payload)
-    if (s !== undefined) return s
-  }
-  if (kind === "task.failed") {
-    const s = taskFailedSummary(payload)
-    if (s !== undefined) return s
-  }
   // 资产批量导入（cyberspace-mapping M1）：N 行 → 新建/合并/跳过/失败 单行摘要
   if (kind === "asset.imported") {
     const skipped = typeof payload.skipped === "number" && payload.skipped > 0
@@ -458,28 +380,25 @@ export function eventSummary(payload: Record<string, unknown>,
   }
   if (kind === "file.read")
     return <span className="font-mono text-xs">{String(payload.path ?? "")}</span>
-  // roleNames：role id → 中文显示名映射（LiveRoom 由 GET /api/projects/{pid}/roles 建）；
-  // 缺省兜底显 role id。
-  // 批 6 L0 提案：{op, args}，按动作给一行人话摘要（行内「采纳」按钮在 LiveRoom 挂）
-  if (payload.op === "publish_task" && payload.args && typeof payload.args === "object") {
+  // 批 6 L0 提案：{op, args}，按动作给一行人话摘要（行内「采纳」按钮在 LiveRoom 挂）；
+  // 任务机制退役后 op 仅剩 build_team / execute 两类。
+  if (payload.op === "build_team" && payload.args && typeof payload.args === "object") {
     const a = payload.args as Record<string, unknown>
-    if (typeof a.objective === "string") {
+    const members = Array.isArray(a.members) ? a.members.length : 0
+    if (typeof a.name === "string") {
       return (
         <span className="font-mono text-xs">
-          提议发任务 · {a.objective}
-          {typeof a.task_type === "string" ? `（${a.task_type}/${String(a.noise_budget ?? "")}）` : ""}
+          提议组建团队 · {a.name}（{members} 名成员）
+          {typeof a.goal_text === "string" && a.goal_text ? `（${clip(a.goal_text, LEN_SHORT)}）` : ""}
         </span>
       )
     }
   }
-  if (payload.op === "spawn_session" && payload.args && typeof payload.args === "object") {
+  if (payload.op === "execute" && payload.args && typeof payload.args === "object") {
     const a = payload.args as Record<string, unknown>
-    if (typeof a.role === "string") {
+    if (typeof a.objective === "string") {
       return (
-        <span className="font-mono text-xs">
-          提议开窗 · {roleNames?.[a.role] ?? a.role}
-          {typeof a.reason === "string" && a.reason ? `（${a.reason}）` : ""}
-        </span>
+        <span className="font-mono text-xs">提议亲自执行 · {clip(a.objective, LEN_SHORT)}</span>
       )
     }
   }
@@ -495,17 +414,6 @@ export function eventSummary(payload: Record<string, unknown>,
   // orch.chain_started
   if (payload.reason === "manual_tick") return "人手编排一轮，自动链启动"
   if (payload.reason === "manual_recovery") return "急停后手动恢复，链预算清零重算"
-  // orch.replan_priorities：updated=[{task_id,old,new}] + skipped_n
-  if (Array.isArray(payload.updated) && typeof payload.skipped_n === "number") {
-    const updated = payload.updated as { task_id: string; old: number; new: number }[]
-    const detail = updated
-      .map((u) => `${u.task_id.slice(-6)} P${u.old}→P${u.new}`).join("，")
-    return (
-      <span className="font-mono text-xs">
-        {updated.length} 条改级{detail ? ` · ${detail}` : ""} · 跳过 {payload.skipped_n}
-      </span>
-    )
-  }
   if (typeof payload.thinking === "string") {
     // 思考行：折叠时显示首行摘要（Claude Code 式），展开看全文
     const line = (payload.thinking.split("\n").find((l) => l.trim()) ?? "").trim()

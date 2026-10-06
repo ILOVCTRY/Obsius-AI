@@ -137,13 +137,13 @@ def test_calibrate_returns_ratio():
 
 @pytest.fixture()
 def env(tmp_path):
-    from core.blackboard import Blackboard, TaskQueue
+    from core.blackboard import Blackboard
     from core.runtime import ExecutionGateway, NativeBackend
 
     bb = Blackboard(str(tmp_path / "a.db"))
     project = bb.create_project("计数测试", "pentest", ["web"])
     gw = ExecutionGateway(bb=bb, backends={"host": NativeBackend()})
-    yield bb, project, gw, TaskQueue(bb), tmp_path
+    yield bb, project, gw, tmp_path
     bb.close()
 
 

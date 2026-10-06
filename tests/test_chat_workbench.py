@@ -845,13 +845,14 @@ def test_chat_turn_abort_between_steps(tmp_path):
 
 
 def test_chat_stop_endpoint(chat_client, tmp_path):
-    """stop 端点：未在跑 409；执行中 204 且轮次以「已停止」收尾、状态归位。"""
+    """stop 端点：未在跑按幂等成功 204（前端状态刷新竞态）；执行中 204 且轮次以
+    「已停止」收尾、状态归位。"""
     r = chat_client.post("/api/projects", json={
         "name": "停止测试", "track": "ctf", "capabilities": ["web"]})
     pid = r.json()["id"]
     tid = chat_client.post(f"/api/projects/{pid}/chat/threads",
                            json={"agent_id": ORCHESTRATOR_ID}).json()["id"]
-    assert chat_client.post(f"/api/chat/threads/{tid}/stop").status_code == 409
+    assert chat_client.post(f"/api/chat/threads/{tid}/stop").status_code == 204
     # 慢 LLM：让执行窗口足够长，命中运行中的 stop
     import core.api.app as app_mod
     from core.llm.provider import LLMResponse as _R
@@ -1389,12 +1390,11 @@ def test_chat_expert_intent_first_gate(tmp_path):
     """对话子专家（author=chat-*）也受意图先行门禁：无 open 意图登记发现 → [拒绝]；
     declare_intent（挂资产锚点）后再登记 → 放行。修复「对话跑完链路图空」。"""
     from core.agent.tools import ToolDispatcher
-    from core.blackboard import TaskQueue
     from core.runtime.gateway import ExecutionGateway
     bb = Blackboard(str(tmp_path / "bb.db"))
     _mk_project(bb, "p1")
     aid = _mk_asset(bb, "p1", "target.example.com")
-    d = ToolDispatcher(bb, ExecutionGateway(bb=bb), TaskQueue(bb),
+    d = ToolDispatcher(bb, gateway=ExecutionGateway(bb=bb),
                        project_id="p1", session_id="chat-abcdef123456",
                        author="chat-abcdef123456", track="pentest")
     # 无意图 → 拒
@@ -1472,12 +1472,11 @@ def test_chat_orchestrator_not_blocked_by_open_intent(tmp_path):
 def test_bb_delete_intent_guard_and_delete(tmp_path):
     """bb_delete_intent：open 意图可物理删（落 intent.deleted）；已收尾拒删。"""
     from core.agent.tools import ToolDispatcher
-    from core.blackboard import TaskQueue
     from core.runtime.gateway import ExecutionGateway
     bb = Blackboard(str(tmp_path / "bb.db"))
     _mk_project(bb, "p1")
     aid = _mk_asset(bb, "p1", "d.example.com")
-    d = ToolDispatcher(bb, ExecutionGateway(bb=bb), TaskQueue(bb),
+    d = ToolDispatcher(bb, gateway=ExecutionGateway(bb=bb),
                        project_id="p1", session_id="sess-xyz", author="sess-xyz",
                        track="pentest")
     di = d.dispatch("declare_intent", {"statement": "误声明意图",

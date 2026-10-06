@@ -1,12 +1,14 @@
 """独立验证器（independent-verification-audit M1，2026-09-23，DESIGN §六）。
 
 核心命题：题目做对了没有，不是 Agent 自己说了算的。验收条目带 verify 规格
-（acceptance 从纯字符串升级为 ``str | {text, verify}``）时，met/failed 由服务端
-验证器判定——Agent 对 verify 条目自报 met/failed 被 store 拒绝（tasks.py
-``set_reconcile_state`` 红线），只能置 blocked（附不适用理由）。判定执行经执行
+（``str | {text, verify}``）时，met/failed 由服务端验证器判定。判定执行经执行
 网关（平台身份 trusted + host + 工作区隔离，宁严勿松），回执脱敏红线（照抄
 VulnHouse VE）：只含 passed + 结构化摘要（长度/哈希前缀），flag/token 原文不回显
 ——防 Agent 经验证接口反套答案。
+
+2026-10-06 任务机制退役：原 ``run_reconcile_verifications`` 收尾钩子（由
+TaskQueue._finish 调用）随任务一并移除；本模块保留纯判定引擎
+（validate_verify_spec / evaluate / Verdict）。
 
 四策略（规格受约束 schema，未知键拒绝，仿 phases.yaml 精神）：
 - flag_capture  读文件（``src: "file:<工作区相对路径>"``）或执行命令取输出，
@@ -278,66 +280,7 @@ def _extract_json(text: str) -> Any:
     return None
 
 
-# ---------- 收尾验证钩子（tasks.py complete 前调用） ----------
-
-def run_reconcile_verifications(tq: Any, task_id: str, session_id: str, *,
-                                gateway: Any = None) -> list[dict]:
-    """任务收尾钩子：跑 reconcile 中带 verify 规格且 state ∈ {pending, failed} 的
-    条目（failed 也重跑 = 「修正后重新 complete」重验语义；blocked 视为不适用跳过）。
-    通过 → met、未过 → failed（note=脱敏摘要），逐条落 verify.result 事件
-    （author=verifier）。存在未过条目 → ValueError 拦下本次 complete（与
-    reconcile_blocked 同口径）。无 verify 条目零成本直返。
-
-    gateway 参数供测试注入 fake；生产路径惰性构造 ExecutionGateway（平台身份
-    trusted + host + 工作区隔离，命令与拒绝都落 command/command.result 审计）。"""
-    bb = tq.bb
-    row = bb.conn.execute(
-        "SELECT project_id, status, claimed_by, context FROM tasks WHERE id=?",
-        (task_id,)).fetchone()
-    if row is None or row["claimed_by"] != session_id or row["status"] != "claimed":
-        return []  # 权限/存在性由 _finish 统一报错，钩子只管自己的活
-    try:
-        ctx = json.loads(row["context"] or "{}")
-    except json.JSONDecodeError:
-        ctx = {}
-    entries = [e for e in (ctx.get("reconcile") or [])
-               if e.get("verify") and e.get("state") in ("pending", "failed")]
-    if not entries:
-        return []
-
-    from core.runtime.gateway import ExecutionGateway  # 惰性：防与 blackboard 成环
-
-    workspace = Path(bb.db_path).parent
-    if gateway is None:
-        gateway = ExecutionGateway(bb=bb)
-
-    def executor(cmd: str) -> Any:
-        return gateway.run(cmd, "host", threat_class="trusted",
-                           project_id=row["project_id"], session_id=session_id,
-                           author="verifier", workspace=workspace)
-
-    results: list[dict] = []
-    for e in entries:
-        verdict = evaluate(e["verify"], executor=executor, workspace=workspace)
-        passed = bool(verdict["passed"])
-        tq.set_reconcile_state(task_id, session_id, e["id"],
-                               "met" if passed else "failed",
-                               note=verdict["evidence_head"][:300], as_verifier=True)
-        bb.append_event(row["project_id"], "verify.result",
-                        {"task_id": task_id, "item_id": e["id"],
-                         "strategy": verdict.get("strategy"), "passed": passed,
-                         "evidence_head": verdict["evidence_head"],
-                         "duration_s": verdict["duration_s"]},
-                        session_id=session_id, author="verifier")
-        results.append({"item_id": e["id"], **verdict})
-
-    failed = [r for r in results if not r["passed"]]
-    if failed:
-        items = "\n".join(f"  #{r['item_id']} [{r.get('strategy')}] {r['evidence_head']}"
-                          for r in failed)
-        raise ValueError(
-            "[独立验证] 以下验收条目由验证器判定未过（met 不由 Agent 自报）：\n"
-            f"{items}\n"
-            "修正后重新 complete（验证器会重跑未过条目）；确不适用可 task_reconcile "
-            "置 blocked（note 附原因，人类可审计）。")
-    return results
+# ---------- 收尾验证钩子（2026-10-06 任务机制退役后移除） ----------
+# 原 run_reconcile_verifications 由 TaskQueue._finish 在 complete 前调用，随任务
+# 机制一并退役（reconcile 条目与 tasks 表均已不存在）。本模块保留纯判定引擎
+# （validate_verify_spec / evaluate / Verdict），供未来受管执行的独立验证复用。

@@ -26,7 +26,7 @@ from core.agent.tool_registry import (AGENT_TOOLS, TOOL_GROUPS, _ADDR_DESC,
                                       _KNOWLEDGE_EXTRA, _PLAN_PRE_ALLOWED,
                                       _PLAN_TOOLS, _SPILL_SKIP, REGISTRY,
                                       agent_tool_group)
-from core.blackboard import Blackboard, ClaimError, TaskQueue
+from core.blackboard import Blackboard
 from core.blackboard.assets import register_asset
 from core.blackboard.attackpath import _intent_in_site, _subtree_ids
 from core.blackboard.intents import (declare_intent as _declare_intent,
@@ -35,7 +35,6 @@ from core.blackboard.intents import (declare_intent as _declare_intent,
                                      list_intents as _list_intents,
                                      reopen_intent as _reopen_intent)
 from core.blackboard.store import UNSET, has_repro_evidence
-from core.blackboard.tasks import dedup_fp
 from core.runtime.gateway import ExecutionGateway, GatewayDenied
 from core.runtime.policy import allowed_runtimes
 from core.skills import proposals
@@ -200,7 +199,7 @@ class ToolDispatcher:
     #: complete_task 成功后调用 hook(task_id, result_note) 沉淀打法（跨项目召回）。
     campaign_hook: Callable[[str, str], None] | None = None
 
-    def __init__(self, bb: Blackboard, gateway: ExecutionGateway, tq: TaskQueue,
+    def __init__(self, bb: Blackboard, gateway: ExecutionGateway,
                  *, project_id: str, session_id: str, author: str,
                  decompiler=None, artifacts_dir=None, browser=None,
                  packs_root: str | Path | None = None,
@@ -216,7 +215,6 @@ class ToolDispatcher:
                  allowed_roles: list[str] | None = None):
         self.bb = bb
         self.gateway = gateway
-        self.tq = tq
         self.project_id = project_id
         self.session_id = session_id
         self.author = author
@@ -353,33 +351,16 @@ class ToolDispatcher:
         handler = getattr(self, spec.handler if spec is not None else f"_tool_{name}", None)
         if handler is None:
             return f"[错误] 未知工具: {name}"
-        # v23（TRAE 新壳 M3）：run_cmd 省略 runtime → 按任务默认运行时回填；
-        # 任务未设默认 → 要求显式传参（回填值照样过网关 threat_class 校验）。
+        # v23（TRAE 新壳 M3）：run_cmd 必须显式传 runtime；任务机制退役（2026-10-06）
+        # 后不再有「任务默认运行时」回填。
         if name == "run_cmd" and args.get("runtime") is None:
-            pref = ""
-            if self.current_task_id:
-                cur_task = self.tq.get_task(self.current_task_id)
-                if cur_task is not None:
-                    pref = str(cur_task.get("preferred_runtime") or "")
-            if pref:
-                args["runtime"] = pref
-            else:
-                return ("[错误] run_cmd 省略了 runtime，但本任务未设置默认运行时："
-                        "请显式传 runtime（host/wsl/docker/sandbox，按目标与能力清单选择）")
+            return ("[错误] run_cmd 省略了 runtime：请显式传 runtime"
+                    "（host/wsl/docker/sandbox，按目标与能力清单选择）")
         if self.allowed_tools is not None and name not in self.allowed_tools \
                 and name not in _CONTROL_TOOLS and name not in _PLAN_TOOLS:
             # 角色软边界（§6.6）：白名单外工具不执行，由人类调整角色配置放开。
             return (f"[越界拒绝] 工具 {name} 不在本角色工具白名单内"
                     f"（允许: {', '.join(self.allowed_tools)}）。停止该方向或请人类调整角色配置。")
-        if self.current_task_id and name not in _PLAN_PRE_ALLOWED \
-                and name not in _CONTROL_TOOLS:
-            # A2 先规划后动手：认领后计划为空时，实质工具一律引导先 task_plan。
-            # 每次调度现查（修订/暂停恢复后状态以黑板为准），开销可忽略。
-            task = self.tq.get_task(self.current_task_id)
-            if task is not None and task.get("status") == "claimed" and not task.get("plan"):
-                return ("[计划闸] 请先调 task_plan 写下本任务的解决计划（3-8 个可验证小步），"
-                        "再开始实质动作。只读侦察（bb_query/kb_open/kb_search/"
-                        "list_symbols/decompile）允许先行，但 run_cmd、写黑板等须在计划之后。")
         # 意图先行闸（口径 Y，2026-10-01）：会话第一次实质执行动作前必须有 open
         # 意图——先 declare_intent 把方向落成一句可证伪假设，再 run_cmd/写黑板。
         # 只生效到本会话首次实质动作放行（_intent_lead_passed，认领新任务时复位），
@@ -1198,13 +1179,6 @@ class ToolDispatcher:
                   "session_id": e.get("session_id"), "created_at": e["created_at"],
                   "payload": e["payload"]}
                  for e in rows], ensure_ascii=False)
-        if what == "tasks":
-            rows = self.tq.list_tasks(self.project_id, status=status)
-            if limit is not None:
-                rows = rows[:limit]
-            return json.dumps(
-                [{"id": t["id"], "objective": t["objective"], "status": t["status"],
-                  "priority": t["priority"]} for t in rows], ensure_ascii=False)
         if what == "func":
             if not binary_sha256:
                 return "[错误] func 查询必须提供 binary_sha256"
@@ -1596,140 +1570,6 @@ class ToolDispatcher:
         self.last_progress_step = self._step
         return f"logic_block={block_id} updated（{'; '.join(changed)}）"
 
-    def _finish_or_report_deleted(self, finish, verb: str) -> str:
-        """收尾委托；委托已被人类物理删除（§6.4）→ 友好提示，会话照常转向下一委托。"""
-        tid = self.current_task_id
-        try:
-            finish(tid, self.session_id, persona_role=self.current_persona_role)
-        except ValueError:
-            if self.tq.get_task(tid) is not None:
-                raise
-            self.current_task_id = None
-            self.last_progress_step = self._step
-            self.delegation_just_finished = True
-            return f"task={tid} 已被人类删除，无需收尾，继续认领下一个委托"
-        self.current_task_id = None
-        self.last_progress_step = self._step
-        self.delegation_just_finished = True
-        return f"task={tid} {verb}"
-
-    # ---------- 计划（A2 先规划后动手） ----------
-
-    @staticmethod
-    def _render_plan(plan: list[dict[str, Any]]) -> str:
-        icon = {"todo": "○", "doing": "▶", "done": "●", "blocked": "■"}
-        return "\n".join(
-            f"  {icon.get(s.get('status'), '?')} {s['id']} {s['title']}"
-            + (f"⇐ {','.join(s['refs'])}" if s.get("refs") else "")
-            + (f"（阻塞：{s['note']}）" if s.get("status") == "blocked" and s.get("note") else "")
-            for s in plan
-        )
-
-    def _tool_task_plan(self, steps: list[dict[str, Any]],
-                        rev_reason: str = "") -> str:
-        if not self.current_task_id:
-            return "[错误] 当前没有认领的任务，计划必须挂在认领任务上"
-        try:
-            plan = self.tq.set_plan(
-                self.current_task_id, self.session_id, steps, rev_reason=rev_reason)
-        except ClaimError as e:
-            return f"[拒绝] {e}"
-        except ValueError as e:
-            # 意图接地：refs 悬空/格式坏（服务端机制级校验，2026-09-20）
-            return f"[拒绝] 计划步接地校验未通过：{e}"
-        done_n = sum(1 for s in plan if s.get("status") == "done")
-        self.last_progress_step = self._step
-        return (f"计划已{'修订' if rev_reason or any(s.get('status') != 'todo' for s in plan) else '记录'}，"
-                f"共 {len(plan)} 步（已完成 {done_n}）。用 task_step 把开始的步置 doing、做完置 done：\n"
-                + self._render_plan(plan))
-
-    def _tool_task_step(self, step_id: str, status: str, note: str = "") -> str:
-        if not self.current_task_id:
-            return "[错误] 当前没有认领的任务"
-        try:
-            task = self.tq.step_plan(
-                self.current_task_id, self.session_id, step_id, status, note)
-        except ClaimError as e:
-            return f"[拒绝] {e}"
-        plan = task["plan"]
-        if status in ("doing", "done"):
-            self.last_progress_step = self._step
-        return f"计划步 {step_id} → {status}。当前计划：\n" + self._render_plan(plan)
-
-    def _tool_task_reconcile(self, item_id: int, state: str, note: str = "") -> str:
-        """⑤ 任务完成对账：逐条置验收条目状态（met/failed/blocked）。
-        全部收口前 complete_task 被硬拦（tasks.py _check_reconcile）。"""
-        if not self.current_task_id:
-            return "[错误] 当前没有认领的任务"
-        try:
-            entries = self.tq.set_reconcile_state(
-                self.current_task_id, self.session_id, int(item_id), state, note)
-        except ClaimError as e:
-            return f"[拒绝] {e}"
-        except ValueError as e:
-            return f"[拒绝] {e}"
-        self.last_progress_step = self._step
-        label = {"met": "✅ 已达成", "failed": "❌ 未达成", "blocked": "⛔ 受阻"}
-        done = sum(1 for e in entries if e["state"] != "pending")
-        rows = "\n".join(
-            f"  {label.get(e['state'], e['state'])} #{e['id']} {e['text']}"
-            + (f"（{e['note']}）" if e["note"] else "")
-            for e in entries)
-        return f"验收条目 #{item_id} → {label.get(state, state)}。已收口 {done}/{len(entries)}：\n{rows}"
-
-    # ---------- 分解派活（A5：子代理发布子任务） ----------
-
-    def _tool_publish_task(self, objective: str, task_type: str = "generic",
-                           role: str = "",
-                           scope: str = "", refs: list[str] | None = None,
-                           noise_budget: str = "passive", priority: int = 2,
-                           conflict_keys: list[str] | None = None,
-                           workset: list[str] | None = None) -> str:
-        """子代理分解子任务（A5）：parent 强制当前任务、created_by 强制本会话。
-
-        入参里不接受 parent_id/created_by——分解关系由服务端按会话状态钉死，
-        与撤回传播的 is_session 识别一致（created_by=sess-…）。
-        机制 1.1：发布前按指纹查重，命中 open/claimed 同目标任务 → 复用不新建（防重复派活）。
-        v14 双闸：分解深度 1 层（对称编排器）+ 每父任务子任务 ≤3（超限回填拒绝，
-        防模型偷懒层层下包）；同 target 防碎闸内核同样生效（ValueError 统一回填）。
-        role（v14）：建议认领角色，认领会话按该角色换装执行。
-        """
-        objective = (objective or "").strip()
-        if not objective:
-            return "[错误] objective 不能为空"
-        # 机制 1.1 发布去重：命中同指纹 open/claimed 任务 → 静默复用（编排/Agent 不重复派活）
-        fp = dedup_fp(task_type, scope, objective)
-        dup = self.tq.find_dedup_target(self.project_id, fp)
-        if dup is not None:
-            self.last_progress_step = self._step
-            return (f"[复用] 已存在同目标任务 {dup['id']}（status={dup['status']}），"
-                    f"本轮不重复发布；认领/避让请参考其 workset 与 conflict_keys")
-        try:
-            task_id = self.tq.publish(
-                self.project_id, objective, scope=scope, task_type=task_type,
-                noise_budget=noise_budget, priority=priority,
-                conflict_keys=conflict_keys,
-                parent_id=self.current_task_id,   # 无认领任务 → 顶层任务（parent 为空）
-                created_by=self.session_id,
-                allowed_types=self.allowed_task_types, refs=refs, workset=workset,
-                role=role,
-                # expert-pool M2（§4.6）：绑定专家清单优先（工厂注入）；
-                # 未注入=按轨过滤的池内专家（等价退役前 list_roles 行为）
-                allowed_roles=(self.allowed_roles
-                               or (list_experts(self.packs_root, self.track)
-                                   if self.packs_root and self.track else None)),
-                parent_depth_limit=1,             # v14：分解深度 1 层（子任务不可再拆）
-                max_children_per_parent=3,        # v14：每父任务子任务上限（防偷懒下包）
-            )
-        except ValueError as e:  # TaskTypeError / 超限 / 噪声冲突键 / 非法 role / 键归一化失败等
-            return f"[拒绝] {e}"
-        self.last_progress_step = self._step
-        parent = self.current_task_id or "(无)"
-        return (f"子任务已发布: {task_id}（parent={parent}，type={task_type}，"
-                f"P{priority}，{noise_budget}）。系统将自动为该任务建立专属执行窗"
-                "（调度器按建议角色装配并按并发上限起跑）；"
-                "你继续推进当前任务，不要自己抢领（当前任务收尾后若仍 open 才可认领）。")
-
     def _tool_bb_notify(self, text: str, to_session: str = "", to_role: str = "",
                         kind: str = "intel", refs: list[str] | None = None) -> str:
         """bb_notify（2026-09-20 会话窗对话化，§17 B1 挂账落地）：Agent 私信其他窗。
@@ -1777,216 +1617,6 @@ class ToolDispatcher:
             pass
 
     # ---------- D6 收尾收敛确认（stuck-convergence，2026-09-23） ----------
-
-    def reset_closing(self) -> None:
-        """收尾确认状态随任务复位（会话收尾成功路径就地调用）。
-
-        `_loop_body` 开头不再单独调它——`SessionState.reset_for_task` 已含这两项。"""
-        self.closing_round = 0
-        self.closing_last_progress = 0
-
-    def _closing_event(self, round_no: int, result_note: str,
-                       pathway: str = "") -> None:
-        """确认轮留痕（任务仍 claimed、事件照常落库，可观测）。"""
-        try:
-            self.bb.append_event(
-                self.project_id, "agent.closing_confirm",
-                {"session_id": self.session_id, "task_id": self.current_task_id,
-                 "round": round_no, "step": self._step,
-                 "pathway": pathway, "result_note_head": (result_note or "")[:200]},
-                session_id=self.session_id, author=self.author)
-        except Exception:  # noqa: BLE001 —— 留痕失败不影响确认流程
-            pass
-
-    def _closing_gate(self, result_note: str) -> str | None:
-        """complete 闸：返回非空=本次申报被拦截（文本回填模型）；None=放行真收尾。
-
-        - 首次申报（round=0）：最近 ``dry_tail_steps`` 步零新增（干尾巴）→ 直接
-          放行（常态任务零额外成本）；否则进入确认轮 1，注入产出清单。
-        - 确认轮内再申报：该轮零新增黑板写入（以 last_progress_step 未推进为
-          等价机械信号，非模型自报）→ 饱和放行；有新增且未到 2 轮上限 → 再确认
-          一轮；已到上限 → 强制放行（封顶 2 轮，宁结束不烧）。"""
-        if self.closing_round == 0:
-            # D10 cap=0（2026-09-24）：必须在干尾巴判定之前——否则 cap=0 不产生
-            # 真"零确认"语义（首次申报仍可能被拦进确认轮）
-            if self.closing_max_rounds <= 0:
-                self._closing_event(0, result_note, pathway="cap_zero")
-                return None
-            if self._step - self.last_progress_step >= self.dry_tail_steps:
-                self._closing_event(0, result_note, pathway="dry_tail")
-                return None
-            self.closing_round = 1
-            self.closing_last_progress = self.last_progress_step
-            self._closing_event(1, result_note)
-            return self._closing_prompt()
-        if self.last_progress_step <= self.closing_last_progress:
-            self._closing_event(self.closing_round, result_note,
-                                pathway="zero_new")
-            return None
-        if self.closing_round >= self.closing_max_rounds:
-            self._closing_event(self.closing_round, result_note,
-                                pathway="round_cap")
-            return None
-        self.closing_round += 1
-        self.closing_last_progress = self.last_progress_step
-        self._closing_event(self.closing_round, result_note, pathway="new_output")
-        return self._closing_prompt()
-
-    def _closing_prompt(self) -> str:
-        """收尾确认清单：findings/assets/artifacts + plan 完成度（全黑板现成数据）。"""
-        pid = self.project_id
-        tid = self.current_task_id
-        sections: list[str] = []
-        try:
-            findings = self.bb.list_findings(pid)[:15]
-            if findings:
-                rows = "\n".join(
-                    f"  - [{f.get('status', '?')}/{f.get('severity', '?')}] "
-                    f"{f.get('title', '')[:80]}（{f.get('id')}）"
-                    for f in findings)
-                sections.append(f"已登记发现（{len(findings)}，最新在前）：\n{rows}")
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            assets = self.bb.list_assets(pid)[:15]
-            if assets:
-                rows = "\n".join(
-                    f"  - {a.get('type', '?')} {a.get('value', '')[:80]}"
-                    f"（{a.get('id')}）"
-                    for a in assets)
-                sections.append(f"已登记资产（{len(assets)}）：\n{rows}")
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            artifacts = self.bb.list_artifacts(pid, task_id=tid)[:10]
-            if artifacts:
-                rows = "\n".join(
-                    f"  - {a.get('kind', '?')} "
-                    f"{(a.get('description') or os.path.basename(a.get('path', '')))[:80]}"
-                    f"（{a.get('id')}）"
-                    for a in artifacts)
-                sections.append(f"本任务产物（{len(artifacts)}）：\n{rows}")
-        except Exception:  # noqa: BLE001
-            pass
-        plan_line = "计划完成度：本任务未登记计划"
-        try:
-            task = self.tq.get_task(tid) if tid else None
-            plan = (task or {}).get("plan") or []
-            if plan:
-                done = sum(1 for s in plan if s.get("status") == "done")
-                blocked = sum(1 for s in plan if s.get("status") == "blocked")
-                icon = {"todo": "○", "doing": "▶", "done": "●", "blocked": "■"}
-                rows = "\n".join(
-                    f"  {icon.get(s.get('status'), '?')} {s.get('id')} "
-                    f"{s.get('title', '')[:60]}" for s in plan)
-                plan_line = (f"计划完成度：{done}/{len(plan)} done"
-                             + (f"，{blocked} blocked" if blocked else "")
-                             + f"\n{rows}")
-        except Exception:  # noqa: BLE001
-            pass
-        inventory = "\n\n".join(sections) if sections else "（当前黑板无已登记产出）"
-        return (
-            f"[收尾确认 · 第 {self.closing_round}/{self.closing_max_rounds} 轮]\n"
-            "对照任务目标，以下是已登记的全部产出：\n"
-            f"{inventory}\n\n{plan_line}\n\n"
-            "请自查：对照目标还有遗漏的攻击面、证据或验收项吗？\n"
-            "- 有遗漏 → 直接继续调用工具补齐（确认轮内有新黑板写入即视为续干，"
-            "完成后重新申报，进入下一轮确认）。\n"
-            "- 无遗漏 → 再次调用 complete_task（一轮零新增即落定 done）。\n"
-            f"确认轮最多 {self.closing_max_rounds} 轮；期间任务仍 claimed，事件照常记录。")
-
-    def _milestone_reconcile_hint(self) -> str | None:
-        """阶段三里程碑收口（2026-09-28）：任务完成前检查本任务验收条目是否
-        全部收口——存在 pending 条目则提示先逐条 task_reconcile 交代（复用现有
-        对账机制；不强制，二次申报放行）。返回提示文本或 None 放行。"""
-        if not self.current_task_id:
-            return None
-        try:
-            task = self.tq.get_task(self.current_task_id)
-            entries = ((task or {}).get("context") or {}).get("reconcile") or []
-        except Exception:  # noqa: BLE001
-            return None
-        pending = [e for e in entries if e.get("state") == "pending"]
-        if not pending:
-            return None
-        rows = "\n".join(
-            f"  #{e.get('id')} {e.get('text', '')[:60]}"
-            for e in pending[:8])
-        more = f"\n  （另有 {len(pending) - 8} 条未列）" if len(pending) > 8 else ""
-        return (
-            f"[里程碑收口] 本任务还有 {len(pending)} 条验收条目未逐条交代：\n{rows}{more}\n"
-            "请用 task_reconcile 逐条收口（met=已完成附证据 / failed=已证实无法完成附原因 / "
-            "blocked=受阻附卡点）。全部收口后再 complete_task；确属无法收口的，再次申报放行。")
-
-    def _tool_complete_task(self, result_note: str) -> str:
-        if not self.current_task_id:
-            return "[错误] 当前没有认领的任务"
-        # D6：未饱和先对照清单确认，干尾巴/零新增/封顶才放行真收尾
-        gate = self._closing_gate(result_note)
-        if gate is not None:
-            return gate
-        # 阶段三里程碑收口（2026-09-28）：任务完成前检查本任务验收条目是否
-        # 全部收口——未收口则提示先逐条 reconcile（复用现有对账机制，不强制；
-        # 与 D6 收尾确认正交：D6 管产出饱和，此处管验收条目交代）。
-        ms_hint = self._milestone_reconcile_hint()
-        if ms_hint is not None:
-            return ms_hint
-        self.reset_closing()
-        tid = self.current_task_id
-        result = self._finish_or_report_deleted(
-            lambda t, sid, **kw: self.tq.complete(t, sid, result_note, **kw), "已完成")
-        if result.startswith("task="):
-            self.last_delegation_note = result_note[:2000]
-        self._close_browser_session()
-        # v0.65 沉淀飞轮：任务 done → 复盘验证过的有效手法，自动产提案草稿
-        # （hook 内部全静默，任何失败不影响收尾回执）
-        if result.startswith("task=") and self.sediment_hook is not None:
-            try:
-                self.sediment_hook(tid, result_note)
-            except Exception:  # noqa: BLE001
-                pass
-        # ⑥ 战役记忆：done 并联沉淀打法进全局库（跨项目召回）；失败绝不影响收尾
-        if result.startswith("task=") and self.campaign_hook is not None:
-            try:
-                self.campaign_hook(tid, result_note)
-            except Exception:  # noqa: BLE001
-                pass
-        # C6 生命周期：任务 done → 任务键断点快照消费完毕，清理防孤儿
-        try:
-            from core.agent.loop import clear_task_resume  # 延迟导入避开 tools↔loop 环
-            clear_task_resume(self.artifacts_dir, tid)
-        except Exception:  # noqa: BLE001 —— 清理失败只留垃圾文件
-            pass
-        return result
-
-    def _tool_fail_task(self, result_note: str = "",
-                        blocked_reason: str = "error") -> str:
-        if not self.current_task_id:
-            return "[错误] 当前没有认领的任务"
-        if blocked_reason not in ("error", "awaiting_human"):
-            return f"[拒绝] 非法 blocked_reason: {blocked_reason}"
-        if blocked_reason == "awaiting_human":
-            # C1：不在此处 fail——_loop 步边界检测 awaiting_human 后先落快照再
-            # fail(blocked_reason=awaiting_human, resumable=True)，现场保留供
-            # 「▶ 续跑」/「放回继续」；会话不结束，worker 继续认领下一个任务
-            self.awaiting_human = True
-            self.last_progress_step = self._step
-            return ("任务已挂起等待人工输入（现场快照保留，人类处理后可从断点续跑）。"
-                    "挂起在本步收尾生效；之后可继续认领其他任务。")
-        tid = self.current_task_id  # 先取（finish 内部清 current_task_id）
-        result = self._finish_or_report_deleted(
-            lambda t, sid, **kw: self.tq.fail(t, sid, result_note, **kw), "已标记失败")
-        if result.startswith("task="):
-            self.last_delegation_note = result_note[:2000]
-        self._close_browser_session()  # awaiting_human 不清（断点续跑保页面现场）
-        # experience-sedimentation M1：真失败（error）→ 失败模式复盘（只提炼避坑
-        # 教训）；aborted/awaiting_human 分支在上方即返回，天然不进复盘。
-        if result.startswith("task=") and self.sediment_hook is not None:
-            try:
-                self.sediment_hook(tid, result_note, failure=True)
-            except Exception:  # noqa: BLE001
-                pass
-        return result
 
     def _tool_finish(self, summary: str) -> str:
         # 意图纪律①（宁严勿松）：有未收尾意图首次 finish 拦截，列清单要求收尾；

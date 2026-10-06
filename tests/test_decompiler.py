@@ -15,7 +15,7 @@ import pytest
 from pathlib import Path
 
 from core.agent.tools import ToolDispatcher
-from core.blackboard import Blackboard, TaskQueue
+from core.blackboard import Blackboard
 import core.tools.decompiler as dc
 from core.tools.decompiler import (
     DecompilerService,
@@ -1470,14 +1470,14 @@ def test_dispatcher_decompile_func_kb_enforcement(tmp_path):
             self.calls += 1
             return "== f @ 0x1 ==\npseudocode"
 
-    d = ToolDispatcher(bb, gateway=None, tq=TaskQueue(bb),
+    d = ToolDispatcher(bb, gateway=None,
                        project_id=project["id"], session_id="s1", author="s1",
                        decompiler=None)
     # 未装配 → 明确提示，不崩
     assert d.dispatch("decompile", {"binary": str(sample), "address": 1}).startswith("[未装配]")
 
     stub = StubSvc()
-    d2 = ToolDispatcher(bb, gateway=None, tq=TaskQueue(bb),
+    d2 = ToolDispatcher(bb, gateway=None,
                         project_id=project["id"], session_id="s1", author="s1",
                         decompiler=stub)
     # func_kb 无记录 → 调服务；真文件 sha 写入 func_kb（用真实 hash 保证命中路径一致）

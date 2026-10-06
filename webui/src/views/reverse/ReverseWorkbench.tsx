@@ -428,7 +428,7 @@ export function ReverseWorkbench({ pid, active = true }: { pid: string; active?:
     }
   }
 
-  // AI triage：只发被动任务（不投 Job 不开 Agent）；objective 自包含
+  // AI triage（任务机制退役后）：开通用窗 + 引导，objective 自包含（人工开窗引导=纯对话）
   const handleAiTriage = async () => {
     if (!sha || !overview) return
     const path = typeof overview.asset_meta?.path === "string" ? overview.asset_meta.path : "?"
@@ -443,7 +443,8 @@ export function ReverseWorkbench({ pid, active = true }: { pid: string; active?:
     ].join("\n")
     setBusyAi(true)
     try {
-      await api.publishTask(pid, { task_type: "triage", noise_budget: "passive", objective })
+      const r = await api.spawnAgent(pid, "_generalist")
+      await api.sessionNote(r.id, objective)
       setTimeout(() => setBusyAi(false), 2500)
     } catch {
       setBusyAi(false)

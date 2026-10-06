@@ -7,7 +7,7 @@ import { FileCardList } from "@/components/chat/FileCard"
 import { TeamCard } from "@/components/chat/TeamCard"
 import { mergeTargets, targetsFromProse, targetsFromTool, type FileTarget } from "@/lib/fileTargets"
 import type { ActivityStep } from "@/lib/activity"
-import type { BBEvent, CoordinationPlanProposal, CoordinationTeamMember, OrchPersona, Team, TeamStatus } from "@/lib/types"
+import type { BBEvent, OrchPersona, Team, TeamStatus } from "@/lib/types"
 
 // 对话化编排器 M1/M2/M3（2026-09-21，DESIGN §6.4）：编排页签前两段——
 // 顶部阶段目标条（M2 goal 闭环，编辑/清空经回调交父级弹层）+ 中部对话流（M1，
@@ -116,85 +116,9 @@ function HumanRow({ ev }: { ev: BBEvent }) {
 }
 
 const WAKE_LABELS: Record<string, string> = {
-  "task.failed": "任务失败",
-  "task.starvation": "饿死/重绑告警",
+  "team.run.finished": "团队运行结束",
   "budget.soft_warning": "预算软警",
   "phase.gate_open": "阶段出口门满足",
-}
-
-function coordinationPlansOf(ev: BBEvent): CoordinationPlanProposal[] {
-  const raw = (ev.payload as { coordination_plans?: unknown } | null)?.coordination_plans
-  if (!Array.isArray(raw)) return []
-  return raw.filter((x): x is CoordinationPlanProposal => {
-    if (!x || typeof x !== "object") return false
-    const p = x as CoordinationPlanProposal
-    return typeof p.plan_id === "string" && typeof p.name === "string" && Array.isArray(p.nodes)
-  })
-}
-
-function CoordinationProposalCard({ plan, onConfirm, onOpen }: {
-  plan: CoordinationPlanProposal
-  onConfirm?: (plan: CoordinationPlanProposal) => void
-  onOpen?: (plan: CoordinationPlanProposal) => void
-}) {
-  const draft = plan.status === "draft"
-  const members = plan.team?.members ?? []
-  const grouped = members.map((member) => ({
-    member,
-    nodes: plan.nodes.filter((node) => node.member_id === member.member_id),
-  }))
-  const ungrouped = members.length
-    ? plan.nodes.filter((node) => !node.member_id || !members.some((member) => member.member_id === node.member_id))
-    : []
-  // 旧提案没有团队名册时，按 role 保留可读的团队视图。
-  const fallback = members.length === 0
-    ? [...new Set(plan.nodes.map((node) => node.role || "待分配"))].map((role) => ({
-      member: { member_id: role, title: role, role } satisfies CoordinationTeamMember,
-      nodes: plan.nodes.filter((node) => (node.role || "待分配") === role),
-    }))
-    : []
-  const sections = [...grouped, ...fallback]
-  return <div className="mt-2 rounded-lg border border-primary/30 bg-background/40 p-2.5 text-xs">
-    <div className="flex items-start gap-2">
-      <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-center gap-2">
-          <b>{plan.team?.name || plan.name}</b>
-          <span className="rounded bg-primary/15 px-1.5 py-px text-[10px] text-primary">{draft ? "等待确认" : plan.status}</span>
-        </div>
-        <p className="mt-1 text-[10px] font-medium text-primary">Agent 团队 · 共享目标</p>
-        <p className="mt-0.5 text-muted-foreground">{plan.objective || "尚未填写团队共享目标"}{plan.team?.source === "legacy_derived" && " · 成员按角色兼容推导"}</p>
-      </div>
-      <span className="shrink-0 text-muted-foreground">{plan.nodes.length} 个工作节点</span>
-    </div>
-    <div className="mt-2 space-y-2 border-t border-white/10 pt-2">
-      {sections.map(({ member, nodes }) => { const memberInfo = member as CoordinationTeamMember; return <div key={memberInfo.member_id} className="rounded border border-white/10 bg-background/30 p-2">
-        <div className="flex items-start justify-between gap-2">
-          <div className="min-w-0"><b>{memberInfo.label || memberInfo.title || memberInfo.member_id}</b>
-            <span className="ml-2 text-muted-foreground">{memberInfo.role || "未指定角色"}</span>
-            {memberInfo.description && <p className="mt-0.5 text-muted-foreground">{memberInfo.description}</p>}
-          </div>
-          <span className="shrink-0 text-muted-foreground">{nodes.length} 节点</span>
-        </div>
-        <div className="mt-1.5 space-y-1">
-          {nodes.map((node) => <div key={node.id} className="flex gap-2">
-            <span className="w-5 shrink-0 text-muted-foreground">{String(plan.nodes.indexOf(node) + 1).padStart(2, "0")}</span>
-            <div className="min-w-0 flex-1"><b>{node.title}</b>
-              {node.depends_on.length > 0 && <small className="ml-2 text-muted-foreground">依赖 {node.depends_on.length} 项：{node.depends_on.join("、")}</small>}
-            </div>
-          </div>)}
-          {!nodes.length && <span className="text-muted-foreground">暂无分配节点</span>}
-        </div>
-      </div> })}
-      {ungrouped.length > 0 && <div className="rounded border border-dashed border-white/20 p-2">
-        <b className="text-muted-foreground">未编组节点</b>
-        {ungrouped.map((node) => <div key={node.id} className="mt-1 flex gap-2"><span className="w-5 text-muted-foreground">{String(plan.nodes.indexOf(node) + 1).padStart(2, "0")}</span><div><b>{node.title}</b><span className="ml-2 text-muted-foreground">{node.role || "待分配"}</span>{node.depends_on.length > 0 && <small className="ml-2 text-muted-foreground">依赖 {node.depends_on.length} 项：{node.depends_on.join("、")}</small>}</div></div>)}
-      </div>}
-    </div>
-    <div className="mt-2 flex items-center gap-2 border-t border-white/10 pt-2">
-      {draft ? <button type="button" onClick={() => onConfirm?.(plan)} className="rounded border border-primary/60 bg-primary/10 px-2 py-1 text-[11px] text-primary hover:bg-primary/20">确认执行前检查</button> : <span className="text-(--status-ok)">✓ 已进入协调流程</span>}
-      <button type="button" onClick={() => onOpen?.(plan)} className="rounded border px-2 py-1 text-[11px] text-muted-foreground hover:bg-accent">打开协调</button>
-    </div>
-  </div>
 }
 
 // 工具轨迹明细行（ActivityGroup 展开态）：⏺ 名称 + 参数 + ⎿ 结果，等宽克制风。
@@ -210,13 +134,10 @@ function TraceRow({ t }: { t: ChatTrace }) {
 
 // 编排回复行（2026-10-06 去气泡）：正文平铺 prose（MarkdownView），作者·时间靠右小字，
 // 对齐开窗窗口 EventRow.AgentChatRow；工具轨迹折成 ActivityGroup 摘要行；回复挂文件卡。
-function OrchRow({ ev, name, pid, onConfirmPlan, onOpenPlan }: {
+function OrchRow({ ev, name, pid }: {
   ev: BBEvent; name: string; pid?: string
-  onConfirmPlan?: (plan: CoordinationPlanProposal) => void
-  onOpenPlan?: (plan: CoordinationPlanProposal) => void
 }) {
   const trace = traceOf(ev)
-  const plans = coordinationPlansOf(ev)
   const text = textOf(ev)
   const p = ev.payload as { proactive?: unknown; triggers?: unknown } | null
   const triggers = Array.isArray(p?.triggers)
@@ -245,9 +166,6 @@ function OrchRow({ ev, name, pid, onConfirmPlan, onOpenPlan }: {
           {name} · {fmtDateTimeMin(ev.created_at)}
         </span>
       </div>
-      {plans.map((plan) => (
-        <CoordinationProposalCard key={plan.plan_id} plan={plan} onConfirm={onConfirmPlan} onOpen={onOpenPlan} />
-      ))}
       {trace.length > 0 && (
         <ActivityGroup steps={steps}>
           {trace.map((t, i) => <TraceRow key={i} t={t} />)}
@@ -259,7 +177,7 @@ function OrchRow({ ev, name, pid, onConfirmPlan, onOpenPlan }: {
 }
 
 export function OrchChatPane({ events, busy, persona, pid, teams = [], onEditPersona, orchRunning,
-  onConfirmPlan, onOpenPlan, onOpenTeamReport, onConfigureTeam }: {
+  onOpenTeamReport, onConfigureTeam }: {
   events: BBEvent[]
   busy: boolean
   persona: OrchPersona | null
@@ -268,8 +186,6 @@ export function OrchChatPane({ events, busy, persona, pid, teams = [], onEditPer
   /** 项目团队实时态（LiveRoom 轮询 /teams 传入）；团队卡优先取它，缺省回落事件载荷快照 */
   teams?: Team[]
   onEditPersona: () => void
-  onConfirmPlan?: (plan: CoordinationPlanProposal) => void
-  onOpenPlan?: (plan: CoordinationPlanProposal) => void
   /** 团队卡「打开运行报告」（Phase E：Run 成员执行明细） */
   onOpenTeamReport?: (teamId: string) => void
   /** 团队卡「查看并配置」（Phase D：团队配置弹窗） */
@@ -350,8 +266,7 @@ export function OrchChatPane({ events, busy, persona, pid, teams = [], onEditPer
           <div key={it.key} className="flex flex-col gap-1.5">
             {it.human && <HumanRow ev={it.human} />}
             {it.orch.map((o) => (
-              <OrchRow key={o.id} ev={o} name={orchName} pid={pid}
-                onConfirmPlan={onConfirmPlan} onOpenPlan={onOpenPlan} />
+              <OrchRow key={o.id} ev={o} name={orchName} pid={pid} />
             ))}
           </div>
         ))}

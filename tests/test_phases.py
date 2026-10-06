@@ -1,8 +1,11 @@
 """分阶段工作流测试（pentest-phased-workflow M1+M2）。
 
-覆盖：剧本解析/加载与项目覆写、门判定（含空闲逃生）、enter_phase 幂等去重与
-抵达校准、gate_block_reason 各态、doctor phase-* 码、API 双层拦截与三档过门分流。
-编排器侧（门拒收 / phase_section 注入）在 tests/test_orchestrator.py。
+覆盖：剧本解析/加载与项目覆写、门判定（含空闲逃生）、enter_phase 状态落 meta
+与抵达校准、gate_block_reason 各态、doctor phase-* 码、API 双层校验与三档过门分流。
+编排器侧（phase_section 注入）在 tests/test_orchestrator.py。
+
+任务机制退役（2026-10-06）后 enter_phase 不再首发剧本任务（published 恒为空），
+相关「流转产生任务」的用例已删除或改为断言阶段状态落 meta。
 """
 
 import json
@@ -11,7 +14,6 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from core.blackboard import TaskQueue
 from core.blackboard.assets import register_asset
 from core.blackboard.store import Blackboard
 from core import phases
@@ -211,38 +213,34 @@ def test_gate_metrics_and_block_reason(proj, packs):
                              task_type="exploit") is None
 
 
-# ---------- enter_phase：首发 / 去重 / 抵达校准 ----------
+# ---------- enter_phase：状态落 meta / 无首发 / 抵达校准 ----------
 
-def test_enter_phase_publishes_playbook_once(proj, packs):
+def test_enter_phase_records_state_without_publish(proj, packs):
+    """任务机制退役后：流转只落 meta 状态 + 事件留痕，published 恒为空。"""
     bb, pid = proj.bb, proj.id
     r = enter_phase(proj, "recon", by="system", packs_root=packs, reason="建项")
-    assert r["from"] == "recon" and len(r["published"]) == 1  # 首进=默认阶段，首发 1 条
-    rows = TaskQueue(bb).list_tasks(pid)
-    assert len(rows) == 1 and rows[0]["created_by"] == "playbook"
-    assert rows[0]["noise_budget"] == "passive" and rows[0]["role"] == "recon"
-    assert read_state(proj.meta)["fired"]["recon"]  # 指纹已记
+    assert r["from"] == "recon" and r["published"] == []
+    assert read_state(proj.meta)["current"] == "recon"
     evs = [dict(e) for e in bb.conn.execute(
         "SELECT kind, payload FROM events WHERE project_id=? AND kind='phase.changed'",
         (pid,)).fetchall()]
     assert evs and json.loads(evs[0]["payload"])["to"] == "recon"
+    assert json.loads(evs[0]["payload"])["published"] == []
 
-    # 回退重进不重发：recon → pentest → recon → pentest
+    # 回退重进不产生任务：recon → pentest → recon → pentest
     r2 = enter_phase(proj, "pentest", by="human", packs_root=packs)
-    assert len(r2["published"]) == 1 and r2["spec"]["name"] == "渗透测试"
+    assert r2["published"] == [] and r2["spec"]["name"] == "渗透测试"
     assert enter_phase(proj, "recon", by="human", packs_root=packs)["published"] == []
     assert enter_phase(proj, "pentest", by="human", packs_root=packs)["published"] == []
-    assert len(TaskQueue(bb).list_tasks(pid)) == 2
+    history = read_state(proj.meta)["history"]
+    assert [h["phase"] for h in history] == ["recon", "pentest", "recon", "pentest"]
 
 
-def test_enter_phase_dedup_target_and_calibration(proj, packs):
+def test_enter_phase_calibration(proj, packs):
+    """抵达校准：新阶段门已过则标记 gate_open_notified；未过则剥键。"""
     bb, pid = proj.bb, proj.id
-    # 同款任务已在队：首发跳过（指纹仍计入 fired）
-    TaskQueue(bb).publish(pid, "被动测绘产出资产清单", task_type="recon",
-                          noise_budget="passive")
-    r = enter_phase(proj, "recon", by="system", packs_root=packs)
-    assert r["published"] == []
-    assert len(read_state(proj.meta)["fired"]["recon"]) == 1
-    # 抵达校准：recon 门已过（11 资产含 1 高价值）→ 抵达即标记已分流
+    enter_phase(proj, "recon", by="system", packs_root=packs)
+    # recon 门已过（10 资产含 1 高价值）→ 抵达即标记已分流
     _seed_assets(bb, pid, n=10, hv=1)
     enter_phase(proj, "recon", by="system", packs_root=packs)
     assert read_state(proj.meta)["notified"] == "pentest"
@@ -323,7 +321,7 @@ def test_doctor_phase_codes(tmp_path):
     assert ("phase-gatetype-unregistered", "warning") in codes
 
 
-# ---------- API：双层拦截 / 流转端点 / 三档过门分流 ----------
+# ---------- API：阶段状态 / 流转端点 / 三档过门分流 ----------
 
 @pytest.fixture()
 def client(tmp_path, packs):
@@ -350,19 +348,18 @@ def _events(client, pid: str, kind: str) -> list[dict]:
 
 
 def test_create_enters_initial_phase_without_publish(client):
-    """建项只登记初始阶段（current_phase + history + 事件），不发剧本任务——
-    mission/目标商议前不发静态任务，首发随显式流转触发。"""
+    """建项只登记初始阶段（current_phase + history + 事件），不产生任何任务——
+    任务机制退役后流转也不首发剧本任务（published 恒空）。"""
     pid = _mk(client)
     r = client.get(f"/api/projects/{pid}/phase").json()
     assert r["enabled"] is True and r["current"] == "recon"
     assert r["spec"]["name"] == "信息收集" and r["gate"]["forward"] == ["pentest"]
     assert r["gate"]["metrics"]["assets"] == 0 and not r["gate"]["met"]
-    assert client.get(f"/api/projects/{pid}/tasks").json() == []
     evs = _events(client, pid, "phase.changed")
     assert len(evs) == 1 and json.loads(evs[0]["payload"])["published"] == []
-    # 显式流转时剧本首发照常（recon→pentest 首发 exploit 任务）
+    # 显式流转：仍不产生任务
     r = client.post(f"/api/projects/{pid}/phase", json={"to": "pentest"})
-    assert r.status_code == 200 and len(r.json()["published"]) == 1
+    assert r.status_code == 200 and r.json()["published"] == []
 
 
 def test_phase_disabled_track(client):
@@ -374,26 +371,19 @@ def test_phase_disabled_track(client):
     assert r.status_code == 422 and "无阶段剧本" in r.json()["detail"]
 
 
-def test_publish_gate_422_then_transition_allows(client):
+def test_phase_transition_validation(client):
+    """流转端点：方向/目标校验 422；合法流转落 current + phase.changed by=human。"""
     pid = _mk(client)
-    r = client.post(f"/api/projects/{pid}/tasks",
-                    json={"objective": "尝试利用", "task_type": "exploit"})
-    assert r.status_code == 422 and "入场门" in r.json()["detail"]
-    # 流转方向/目标校验
     r = client.post(f"/api/projects/{pid}/phase", json={"to": "report"})
     assert r.status_code == 422 and "不允许的流转" in r.json()["detail"]
     r = client.post(f"/api/projects/{pid}/phase", json={"to": "ghost"})
     assert r.status_code == 422 and "目标阶段不存在" in r.json()["detail"]
-    # 人工流转到 pentest：剧本首发 exploit 任务 + 发布 API 放行
+    # 人工流转到 pentest（人工最终——不走门）
     r = client.post(f"/api/projects/{pid}/phase", json={"to": "pentest",
                                                         "reason": "资产够了"})
     assert r.status_code == 200 and r.json()["from"] == "recon"
-    assert len(r.json()["published"]) == 1
+    assert r.json()["published"] == []
     assert client.get(f"/api/projects/{pid}/phase").json()["current"] == "pentest"
-    r = client.post(f"/api/projects/{pid}/tasks",
-                    json={"objective": "尝试利用", "task_type": "exploit",
-                          "conflict_keys": ["host:10.0.0.5"]})
-    assert r.status_code == 201, r.text
     # phase.changed 留痕 by=human
     evs = _events(client, pid, "phase.changed")
     assert any(json.loads(e["payload"])["by"] == "human" for e in evs)
@@ -425,7 +415,7 @@ def test_l1_approval_flow_with_dedup(client):
     # 同目标审批在途：不重复提单
     client.app.state.phase_gate_check(pid)
     assert len(client.get(f"/api/projects/{pid}/approvals?status=pending").json()) == 1
-    # 批准即流转（enter_phase by=approval + 剧本首发）
+    # 批准即流转（enter_phase by=approval）
     r = client.post(f"/api/approvals/{appr[0]['id']}/decide",
                     json={"decision": "approved"})
     assert r.status_code == 200 and r.json()["executed"] is True
@@ -461,7 +451,7 @@ def test_idle_rounds_counting_and_escape(client):
     tick(pid, {"published": []})  # idle=2 且指标未达 → 逃生过门（L0 → 事件提示）
     assert client.get(f"/api/projects/{pid}/phase").json()["gate"]["metrics"]["idle_rounds"] == 2
     assert len(_events(client, pid, "phase.gate_open")) == 1
-    tick(pid, {"published": ["task-x"]})  # 有发布 → 计数复位
+    tick(pid, {"teams": [{"team_id": "team-x"}]})  # 有产出（建队/执行）→ 计数复位
     assert client.get(f"/api/projects/{pid}/phase").json()["gate"]["metrics"]["idle_rounds"] == 0
     # 逃生审批面（L1 默认档）：资产达标但高价值缺，idle 满 2 轮 → 审批单
     pid2 = _mk(client)
