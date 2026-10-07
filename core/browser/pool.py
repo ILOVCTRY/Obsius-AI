@@ -6,7 +6,7 @@ JobRegistry daemon / Agent worker），playwright sync API 对象绑定创建线
 线程**，公开 API 全部同步包装（``run_coroutine_threadsafe(...).result(timeout)``）。
 
 实例模型红线：Chromium user_data_dir 是进程级排他锁 →「每项目持久 profile」
-收敛为每项目 1 个常驻实例（launch_persistent_context）；F6 的项目并发上限 2
+收敛为每项目 1 个常驻实例（launch_persistent_context）；项目并发上限 10
 落在**同时活跃 Page（会话）数**上。登录态随项目存活；会话（Page）关闭即焚毁，
 profile 不焚毁。
 
@@ -82,7 +82,7 @@ class BrowserConfig:
     headless: bool = True                 # False=本机弹窗（headed）
     viewport_width: int = 1280
     viewport_height: int = 720
-    max_sessions_per_project: int = 2     # F6 定稿：项目级并发会话（Page）上限
+    max_sessions_per_project: int = 10    # 项目级并发会话（Page）上限，避免浏览器工作台过早拒绝并发
     body_max_bytes: int = 65536           # 抓包/重放 body 存储上限
     action_timeout_s: float = 20.0
     domain_scope: str = "subdomain"       # 保留配置兼容；浏览器操作允许任意目标
@@ -115,7 +115,7 @@ class BrowserConfig:
         for k, v in data.items():
             if k in allowed and not k.startswith("_"):
                 setattr(cfg, k, v)
-        cfg.max_sessions_per_project = max(1, int(cfg.max_sessions_per_project))
+        cfg.max_sessions_per_project = min(10, max(1, int(cfg.max_sessions_per_project)))
         cfg.intruder_max_concurrency = max(1, int(cfg.intruder_max_concurrency))
         return cfg
 

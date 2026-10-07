@@ -72,6 +72,15 @@ class ContextOverflowError(LLMError):
     调用方据此触发「强制压缩上下文后重试一次」（reactive 兜底）。"""
 
 
+class TransientStreamError(ConnectionError):
+    """流内瞬时错误（HTTP 200 已建连，SSE 里发 {"error": ...} 且属瞬时类）。
+
+    继承 `ConnectionError` 是为了让既有「流已建连、未吐增量则安全重试」的连接
+    重试分支原样接住它（compat 层零改动）；错误分类器据类型/文案归「上游服务
+    不可用」而非「网络中断」。仅瞬时类（upstream / service unavailable /
+    overloaded / 5xx 网关文案）才转成本类型，内容策略等硬错误仍原样上抛。"""
+
+
 class LLMProvider(Protocol):
     def chat(
         self,

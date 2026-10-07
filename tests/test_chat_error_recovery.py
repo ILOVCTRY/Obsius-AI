@@ -53,6 +53,37 @@ def test_classify_network_covers_stream_body_drop():
         "网络连接失败（已重试 4 次）: peer closed connection"))["category"] == "network"
 
 
+def test_classify_upstream_5xx_not_unknown():
+    """上游 5xx 须归 upstream，不再落 unknown「执行异常」（2026-10-07 事故回归）：
+    ① 带 status 的 LLMError（Anthropic/OpenAI 两条路径耗尽重试后都这样抛）；
+    ② 无 status、正文就是网关原始 JSON 的形态。"""
+    from core.llm.provider import LLMError
+
+    assert _classify_error(LLMError(
+        "LLM 调用失败 HTTP 503: Upstream service temporarily unavailable",
+        status=503))["category"] == "upstream"
+    assert _classify_error(LLMError(
+        '{"error":{"message":"Upstream service temporarily unavailable",'
+        '"type":"upstream_error"}}'))["category"] == "upstream"
+    assert _classify_error(LLMError("HTTP 502 Bad Gateway", status=502))[
+        "category"] == "upstream"
+    assert _classify_error(LLMError("HTTP 504 Gateway Timeout", status=504))[
+        "category"] == "upstream"
+
+
+def test_classify_transient_stream_error_not_network():
+    """`TransientStreamError`（流内瞬时错误帧，ConnectionError 子类）须归 upstream——
+    upstream 分支必须排在 network 之前，否则被 isinstance 抢走判成「网络中断」。"""
+    from core.llm.provider import LLMError, TransientStreamError
+
+    e = TransientStreamError("Upstream service temporarily unavailable")
+    assert _classify_error(e)["category"] == "upstream"
+    # 重试耗尽后 compat 层包成「网络错误/网络连接失败」的形态同样归 upstream
+    assert _classify_error(LLMError(
+        "网络连接失败（已重试 4 次）: Upstream service temporarily unavailable")
+    )["category"] == "upstream"
+
+
 def test_classify_known_categories_unchanged():
     from core.llm.provider import ContextOverflowError
     assert _classify_error(ContextOverflowError("too long"))["category"] == "context"

@@ -268,6 +268,79 @@ def test_anthropic_sdk_stream_body_drop_retries_then_succeeds(monkeypatch):
     assert resp.text == "OK" and calls["n"] == 2
 
 
+def test_anthropic_sdk_in_stream_error_frame_retries(monkeypatch):
+    """流内错误帧（HTTP 200 已建连、SSE 发 `event: error` + upstream_error 体）→
+    归类 TransientStreamError → 既有「未吐增量则安全重试」分支接住重试。
+
+    回归（2026-10-07）：此前 SDK 抛的 APIStatusError 裸穿 → 不重试、整轮炸成
+    「执行异常 unknown」（用户实测 {"error":{"message":"Upstream service
+    temporarily unavailable","type":"upstream_error"}}）。"""
+    monkeypatch.setattr("core.llm.anthropic_compat.CONN_BACKOFF", (0, 0, 0))
+    calls = {"n": 0}
+    err_frame = ('event: error\ndata: ' + json.dumps({"error": {
+        "message": "Upstream service temporarily unavailable",
+        "type": "upstream_error"}}) + "\n\n").encode()
+
+    class _ErrStream(httpx.SyncByteStream):
+        def __iter__(self):
+            yield err_frame
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                                  stream=_ErrStream())
+        return _sse(_msg_start(), _block_start(0, {"type": "text", "text": ""}),
+                    _delta(0, {"type": "text_delta", "text": "OK"}),
+                    _msg_delta("end_turn"))
+
+    _wire(monkeypatch, handler)
+    resp = AnthropicCompatProvider("https://fake", "k", "m").chat(
+        [{"role": "user", "content": "hi"}])
+    assert resp.text == "OK" and calls["n"] == 2
+
+
+def test_openai_sdk_in_stream_error_frame_retries(monkeypatch):
+    """同上（OpenAI 兼容路径）：流内 upstream_error 帧 → 重试自愈。"""
+    from core.llm import openai_compat
+
+    monkeypatch.setattr(openai_compat.time, "sleep", lambda _: None)
+    calls = {"n": 0}
+    err_frame = ("data: " + json.dumps({"error": {
+        "message": "Upstream service temporarily unavailable",
+        "type": "upstream_error"}}) + "\n\n").encode()
+
+    class _ErrStream(httpx.SyncByteStream):
+        def __iter__(self):
+            yield err_frame
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                                  stream=_ErrStream())
+        return _sse(_openai_chunk({"content": "OK"}, finish="stop"))
+
+    _wire(monkeypatch, handler)
+    assert OpenAICompatProvider("https://fake", "k", "m").chat(
+        [{"role": "user", "content": "hi"}]).text == "OK"
+    assert calls["n"] == 2
+
+
+def test_sdk_engine_only_transient_stream_errors_become_retryable():
+    """流内错误只转瞬时类：内容策略等硬错误原样上抛（不白试）。"""
+    import anthropic
+
+    request = httpx.Request("POST", "https://fake/v1/messages")
+    transient = anthropic.APIError(
+        "Upstream service temporarily unavailable", request=request,
+        body={"type": "upstream_error"})
+    hard = anthropic.APIError("content policy violation", request=request,
+                              body={"type": "invalid_request_error"})
+    assert isinstance(sdk_engine._as_conn_error(transient), ConnectionError)
+    assert sdk_engine._as_conn_error(hard) is hard
+
+
 def test_anthropic_sdk_tool_arg_trailing_junk_salvaged(monkeypatch):
     """工具参数尾部冗余（stop_reason=tool_use 却多发字符）→ raw_decode 抢救。"""
     _wire(monkeypatch, lambda r: _sse(
@@ -458,6 +531,58 @@ def test_openai_sdk_520_retries_then_succeeds(monkeypatch):
         on_retry=lambda *a: retries.append(a))
     assert resp.text == "OK" and calls["n"] == 3
     assert retries == [(1, 5, 520), (2, 5, 520)]
+
+
+def test_openai_sdk_5xx_retries_then_succeeds(monkeypatch):
+    """上游 5xx（503「Upstream service temporarily unavailable」）原样重试自愈。
+
+    回归（2026-10-07）：此前 OpenAI 路径只重试 520/524，503/502/504 直接返回 →
+    整轮炸成「执行异常 unknown」。"""
+    from core.llm import openai_compat
+
+    monkeypatch.setattr(openai_compat.time, "sleep", lambda _: None)
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            return httpx.Response(503, json={"error": {
+                "message": "Upstream service temporarily unavailable",
+                "type": "upstream_error"}})
+        return httpx.Response(200, json={"choices": [
+            {"message": {"content": "OK"}, "finish_reason": "stop"}]})
+
+    _wire(monkeypatch, handler)
+    retries = []
+    resp = OpenAICompatProvider("https://fake", "k", "m").chat(
+        [{"role": "user", "content": "hi"}],
+        on_retry=lambda *a: retries.append(a))
+    assert resp.text == "OK" and calls["n"] == 3
+    assert [r[2] for r in retries] == [503, 503]
+    assert [r[0] for r in retries] == [1, 2]
+    assert all(r[1] == 10 for r in retries)
+
+
+def test_openai_sdk_5xx_exhausted_reports_status(monkeypatch):
+    """5xx 重试耗尽 → LLMError 带 status=503（供错误分类器归「上游服务不可用」）。"""
+    from core.llm import openai_compat
+
+    monkeypatch.setattr(openai_compat.time, "sleep", lambda _: None)
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(503, json={"error": {
+            "message": "Upstream service temporarily unavailable",
+            "type": "upstream_error"}})
+
+    _wire(monkeypatch, handler)
+    with pytest.raises(LLMError) as ei:
+        OpenAICompatProvider("https://fake", "k", "m").chat(
+            [{"role": "user", "content": "hi"}])
+    assert ei.value.status == 503
+    assert "Upstream service temporarily unavailable" in str(ei.value)
+    assert calls["n"] == 11
 
 
 def test_openai_sdk_connection_reset_retries(monkeypatch):

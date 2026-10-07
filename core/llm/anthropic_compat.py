@@ -15,6 +15,7 @@ from typing import Any
 
 from core.llm import parsing
 from core.llm.provider import ContextOverflowError, LLMError, LLMResponse, ToolCall
+from core.llm.retry import HTTP_5XX_ATTEMPTS, HTTP_5XX_RETRIES, HTTP_5XX_STATUS
 from core.llm.sdk_engine import RawFallback, build_anthropic_transports
 
 log = logging.getLogger(__name__)
@@ -41,11 +42,10 @@ StreamTransport = Callable[[str, dict[str, str], bytes], tuple[int, Any]]
 响应流 = SSE 逐行可迭代（字节行或 str 行均可，带 close 则用毕关闭）；
 HTTP 非 200 时第二元为解析后的错误 dict（与非流式 transport 对齐）。"""
 
-# 瞬时故障（网络超时 / 限流 / 网关抖动）自动重试：多会话长跑中一次抖动不该杀死整个编排
-RETRYABLE_STATUS = {429, 500, 502, 503, 504}
-# 2026-09-28：原 3 次尝试（2 次重试）+ 30/60s backoff 会把坏窗口拖成十几分钟静默——
-# 改为失败只重试 1 次（MAX_RETRIES=总尝试次数），错误快速暴露交人工判断
-MAX_RETRIES = 2
+# 429 保持原有快速失败预算；标准上游 5xx 使用共享的 10 次重试预算。
+RETRYABLE_STATUS = {429, *HTTP_5XX_STATUS}
+RATE_LIMIT_ATTEMPTS = 2
+MAX_RETRIES = RATE_LIMIT_ATTEMPTS  # 兼容旧测试/调用方：429 总尝试次数
 # 2026-09-28：backoff 3→30——实测 ark 网关对大 max_tokens 请求有分钟级坏窗口（同分钟
 # 小预算请求秒通、大预算挂起，坏窗口可持续 6 分钟+，实测 11:25-11:31 三连超时实例）。
 # 原 3/6s 间隔三次尝试全落同一窗口；30/60s 让第②③次尝试有机会跨入恢复窗口。
@@ -150,6 +150,7 @@ class AnthropicCompatProvider:
         on_text: Callable[[str], None] | None = None,
         should_cancel: Callable[[], bool] | None = None,
         model: str | None = None,  # 单次调用模型覆盖（摘要器专用模型；缺省用实例模型）
+        on_retry: Callable[[int, int, int | str], None] | None = None,
     ) -> LLMResponse:
         """on_thinking：SSE thinking_delta 逐帧回调（思考流式上屏，2026-09-19）；
         on_text：SSE text_delta 逐帧回调（回复流式，2026-09-20 对话窗）；
@@ -181,10 +182,12 @@ class AnthropicCompatProvider:
             body["stream"] = True
         payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
 
-        max_attempts = MAX_RETRIES + CONN_RETRIES + 4  # 两类预算 + 若干降级重试
+        max_attempts = (RATE_LIMIT_ATTEMPTS + HTTP_5XX_ATTEMPTS
+                        + CONN_RETRIES + 4)  # 各类预算 + 若干降级重试
         last_err: Exception | None = None
         conn_used = 0      # 连接类已用尝试数（含首次）
-        status_used = 0    # 429/5xx 已用尝试数（含首次）
+        rate_limit_used = 0  # 429 已用尝试数（含首次）
+        status_5xx_used = 0  # 标准 5xx 已用尝试数（含首次）
         transport, stream_transport = self._sdk_transports()
         for _ in range(max_attempts):
             try:
@@ -240,11 +243,29 @@ class AnthropicCompatProvider:
                             body["system"] = self._system_payload(system)
                             payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
                         continue
-                    status_used += 1
-                    if status in RETRYABLE_STATUS and status_used < MAX_RETRIES:
+                    if status == 429:
+                        rate_limit_used += 1
+                        can_retry = rate_limit_used < RATE_LIMIT_ATTEMPTS
+                        retry_attempt = rate_limit_used
+                        retry_total = RATE_LIMIT_ATTEMPTS - 1
+                    elif status in HTTP_5XX_STATUS:
+                        status_5xx_used += 1
+                        can_retry = status_5xx_used < HTTP_5XX_ATTEMPTS
+                        retry_attempt = status_5xx_used
+                        retry_total = HTTP_5XX_RETRIES
+                    else:
+                        can_retry = False
+                        retry_attempt = 0
+                        retry_total = 0
+                    if can_retry:
                         last_err = LLMError(msg, status=status,
                                             body=json.dumps(data, ensure_ascii=False)[:500])
-                        time.sleep(RETRY_BACKOFF * status_used)
+                        if on_retry is not None:
+                            on_retry(retry_attempt, retry_total, status)
+                        if status == 429:
+                            time.sleep(RETRY_BACKOFF * rate_limit_used)
+                        else:
+                            time.sleep(RETRY_BACKOFF * status_5xx_used)
                         continue
                     raise LLMError(msg, status=status,
                                    body=json.dumps(data, ensure_ascii=False)[:500])

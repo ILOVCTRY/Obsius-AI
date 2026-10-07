@@ -38,7 +38,7 @@ from core.agent.tools import AGENT_TOOLS, ToolDispatcher
 from core.blackboard.store import BlackboardClosedError
 from core.chat import store as chat_store
 from core.chat.mcp_bridge import MCPBridge
-from core.llm.provider import ContextOverflowError, LLMError
+from core.llm.provider import ContextOverflowError, LLMError, TransientStreamError
 from core.runtime.gateway import ExecutionGateway
 from core.skills.experts import load_expert
 from core.skills.registry import SkillRegistry
@@ -220,6 +220,11 @@ _ERROR_CATEGORIES: dict[str, tuple[str, str]] = {
     "rate_limit": (
         "网关限流",
         "模型网关返回限流（HTTP 429）。稍等片刻后重发即可；频繁触发请降低并发或换供应商。"),
+    "upstream": (
+        "上游服务不可用",
+        "模型网关/中转站瞬时故障（HTTP 5xx，如「Upstream service temporarily "
+        "unavailable」）。系统已自动重试若干次仍未成功——通常是上游抖动，"
+        "稍后重发即可；若持续出现，请检查供应商状态或改用其它供应商。"),
     "auth": (
         "鉴权失败",
         "模型网关拒绝请求（HTTP 401/403）。请在「技能与设置 → 模型供应商」核对该"
@@ -280,6 +285,13 @@ def _classify_error(e: BaseException) -> dict[str, str]:
     status = getattr(e, "status", 0) or 0
     if getattr(e, "truncated", False) or "工具参数流截断" in msg:
         cat = "stream"
+    # 上游 5xx / 流内瞬时错误帧（TransientStreamError 是 ConnectionError 子类，
+    # 必须排在 network 之前，否则会被 isinstance 抢走判成「网络中断」）。
+    elif isinstance(e, TransientStreamError) or status in (500, 502, 503, 504) \
+            or "upstream" in low or "temporarily unavailable" in low \
+            or "service unavailable" in low or "bad gateway" in low \
+            or "gateway timeout" in low or "overloaded" in low:
+        cat = "upstream"
     elif isinstance(e, ContextOverflowError) or (
             status in (400, 413) and ("too long" in low or "input length" in low
                                       or "context length" in low

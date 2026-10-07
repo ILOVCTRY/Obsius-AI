@@ -381,7 +381,7 @@ refs.py kb 改名全库引用扫描+重写；doctor 体检（error：悬空引�
 
 ## anthropic_compat
 
-协议转换核心：按类别重试矩阵（{429,5xx} 共 2 次尝试 + 30s 退避；连接类共 4 次 + 5/10/20s 退避）、thinking/stream/cache_control 400 实例级降级（去参重发）、SSE 状态机（工具参数 JSON 分片拼装）、首帧后不重试（SSE 不可重放）、truncated 截断防御（区分「说完」与「流断」）。
+协议转换核心：按类别重试矩阵（标准 5xx〔500/502/503/504〕失败后重试 10 次、共 11 次尝试；429 共 2 次尝试；连接类共 4 次 + 5/10/20s 退避；OpenAI 520/524 保留专用预算）、thinking/stream/cache_control 400 实例级降级（去参重发）、SSE 状态机（工具参数 JSON 分片拼装）、首帧后不重试（SSE 不可重放）、truncated 截断防御（区分「说完」与「流断」）。
 
 **Prompt caching（retrieval-upgrade M1，2026-09-23 实施）**：请求侧 system 改块数组——`build_system_parts` 拆 stable（规则链+角色+能力清单，会话内字节稳定）/ dynamic（技能指引+任务目标+纪律尾）两块，stable 块末尾打 `cache_control: {"type":"ephemeral"}` 断点；Ark Anthropic 兼容层实测直接接受（同前缀第二跑 cache_read>0 前缀缓存生效），400 文案含 cache_control 时实例级降级剥标重发作保险（`_cache_disabled` 置位后不再打标）。观测面：usage_view 补 cache_read/creation 与命中率 `cr/(in+cr+cc)`（LiveRoom 预算弹窗展示）；预算逻辑不动（缓存 token 仍计数，只是便宜）。消息历史增量断点后置观察。
 

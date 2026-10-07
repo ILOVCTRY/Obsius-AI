@@ -47,6 +47,77 @@ function guardTopLevelNavigation(webContents) {
   })
 }
 
+// ---- 壳级日志（logs/desktop.log）----
+// 此前壳没有任何日志落盘：主窗渲染进程静默死亡时（render-process-gone 未挂主窗、
+// Windows 事件日志也无记录）事后完全无法定位，用户只能看到一片空白。壳级异常与
+// 自愈动作一律落此文件。
+const LOG_PATH = path.join(ROOT, "logs", "desktop.log")
+
+function logLine(message) {
+  try {
+    fs.mkdirSync(path.dirname(LOG_PATH), { recursive: true })
+    fs.appendFileSync(LOG_PATH, `[${new Date().toISOString()}] ${message}\n`)
+  } catch (_) { /* 日志写失败绝不阻断主流程 */ }
+  console.log("[desktop]", message)
+}
+
+// ---- 主窗渲染进程死亡自愈（2026-10-07 白屏事故）----
+// 主窗渲染进程一旦退出，窗口就只剩 BrowserWindow.backgroundColor（无边框、无地址栏、
+// 无菜单），用户看到的正是「白屏」且无从自救；而重启应用也救不回来（见下 second-instance）。
+// 挂 render-process-gone 做退避重载，任何死因都能自愈；连续崩溃设上限防重载风暴——
+// 只有加载成功后稳定 60s 才清零计数。
+let mainCrashed = false
+let reloadAttempts = 0
+let reloadResetTimer = null
+
+function noteMainLoaded() {
+  mainCrashed = false
+  clearTimeout(reloadResetTimer)
+  reloadResetTimer = setTimeout(() => { reloadAttempts = 0 }, 60000)
+}
+
+function recoverMainWindow(reason) {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (reloadAttempts >= 5) {
+    logLine(`主窗自动重载已达上限(5)，停止恢复，请手动重启应用。last=${reason}`)
+    return
+  }
+  const delay = Math.min(1000 * 2 ** reloadAttempts, 15000)
+  reloadAttempts += 1
+  logLine(`主窗将于 ${delay}ms 后重载（第 ${reloadAttempts} 次）reason=${reason}`)
+  setTimeout(() => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      try { mainWindow.webContents.reload() } catch (error) { logLine(`主窗重载失败: ${error}`) }
+    }
+  }, delay)
+}
+
+function attachMainWindowRecovery(win) {
+  const wc = win.webContents
+  wc.on("render-process-gone", (_event, details) => {
+    mainCrashed = true
+    logLine(`主窗渲染进程退出 reason=${details && details.reason} exitCode=${details && details.exitCode}`)
+    recoverMainWindow((details && details.reason) || "unknown")
+  })
+  wc.on("unresponsive", () => logLine("主窗无响应（unresponsive）"))
+  wc.on("responsive", () => logLine("主窗恢复响应（responsive）"))
+  wc.on("did-finish-load", () => noteMainLoaded())
+  // 无边框窗口 Menu 置空后，Electron 默认的 Ctrl+R / F5 重载加速键随菜单一起消失，
+  // 窗口里没有任何刷新入口——手工补回，兼作渲染进程卡死时的人工逃生口。
+  wc.on("before-input-event", (event, input) => {
+    if (input.type !== "keyDown") return
+    const key = String(input.key || "").toLowerCase()
+    if ((input.control && !input.shift && key === "r") || key === "f5") {
+      event.preventDefault()
+      logLine("人工触发重载（Ctrl+R / F5）")
+      wc.reload()
+    } else if (input.control && input.shift && key === "i") {
+      event.preventDefault()
+      wc.openDevTools({ mode: "detach" })
+    }
+  })
+}
+
 function sendTabs() {
   if (!mainWindow || mainWindow.isDestroyed()) return
   mainWindow.webContents.send("tabs:updated", Array.from(tabs.values()).map((tab) => ({
@@ -204,6 +275,7 @@ async function createWindow() {
   })
   const url = UI_URL
   guardTopLevelNavigation(mainWindow.webContents)
+  attachMainWindowRecovery(mainWindow)
   await mainWindow.loadURL(url)
   session.defaultSession.on("will-download", (_event, item) => {
     item.setSaveDialogOptions({ defaultPath: path.join(ROOT, "workspaces", "downloads", item.getFilename()) })
@@ -220,7 +292,10 @@ async function createWindow() {
 // 单实例锁：两个实例共用同一 Chromium user-data-dir（CDP 端口 / 缓存 / 存储互相踩，
 // 后启动的那个连 remote-debugging-port 都绑不上），且用户看到空白窗时再双击启动只会
 // 再叠一个窗，无从判断该关哪个。第二次启动改为聚焦已有窗口；若它已被导航离开 UI
-// （旧版本无守卫时可能发生），顺手载回 UI 自愈。
+// （旧版本无守卫时可能发生）**或渲染进程已死**（窗口只剩背景色 = 白屏），一律重载自愈。
+// —— 2026-10-07：自愈条件原先只比对 URL origin，而渲染进程死亡后 getURL() 仍报 UI
+// 源，同源判断直接漏掉白屏；于是「重启后端 / 再双击启动器」全成了空操作，用户被永久
+// 卡在空白窗（新实例拿到不到锁就 app.quit，实测 exit=0 立即退出）。
 if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
@@ -228,16 +303,21 @@ if (!app.requestSingleInstanceLock()) {
     if (!mainWindow || mainWindow.isDestroyed()) return
     if (mainWindow.isMinimized()) mainWindow.restore()
     mainWindow.focus()
+    let away = false
     try {
-      if (new URL(mainWindow.webContents.getURL()).origin !== uiOrigin()) {
-        void mainWindow.loadURL(UI_URL)
-      }
-    } catch (_) { /* 取 URL 失败不阻断聚焦 */ }
+      away = new URL(mainWindow.webContents.getURL()).origin !== uiOrigin()
+    } catch (_) { away = true }  // 取 URL 失败按「已离开 UI」处理
+    if (mainCrashed || away) {
+      logLine(`二次启动自愈：重载主窗（crashed=${mainCrashed} away=${away}）`)
+      reloadAttempts = 0
+      void mainWindow.webContents.reload()
+    }
   })
 }
 
 app.whenReady().then(async () => {
   if (!app.hasSingleInstanceLock()) return  // 第二实例：已 quit，不再建窗
+  logLine(`壳启动 v${app.getVersion()} UI=${UI_URL} cdp=${CDP_PORT} api=${API_BASE}`)
   // The renderer owns the title bar in the frameless window. Keep the native
   // application menu out of the content area on every desktop platform.
   Menu.setApplicationMenu(null)
@@ -265,7 +345,7 @@ app.whenReady().then(async () => {
   ipcMain.on("terminal:write", (_event, { id, data }) => getTab(id)?.pty?.write(data))
   ipcMain.on("terminal:resize", (_event, { id, cols, rows }) => { try { getTab(id)?.pty?.resize(cols, rows) } catch (_) {} })
   ipcMain.handle("terminal:kill", (_event, id) => closeTab(id))
-  try { await createWindow() } catch (error) { console.error(error); app.quit() }
+  try { await createWindow() } catch (error) { logLine(`主窗创建失败: ${error}`); app.quit() }
 })
 
 app.on("window-all-closed", async () => {

@@ -22,7 +22,17 @@ from typing import Any, Callable
 
 import httpx
 
+from core.llm.provider import TransientStreamError
+
 log = logging.getLogger(__name__)
+
+# 流内错误帧里判定「瞬时、值得重试」的文案特征（大小写不敏感）。中转站/网关的
+# 瞬时故障文案（upstream_error / service unavailable / overloaded / 5xx 网关）——
+# 内容策略、参数非法等硬错误不在列，原样上抛快速失败。
+TRANSIENT_STREAM_HINTS = (
+    "upstream", "temporarily unavailable", "service unavailable",
+    "bad gateway", "gateway timeout", "overloaded",
+)
 
 Transport = Callable[[str, dict[str, str], bytes], tuple[int, dict[str, Any]]]
 StreamTransport = Callable[[str, dict[str, str], bytes], tuple[int, Any]]
@@ -157,7 +167,13 @@ def _as_conn_error(e: Exception) -> Exception:
     `httpx.RemoteProtocolError("peer closed connection without sending complete
     message body (incomplete chunked read)")`。不在此归类则它裸穿到上层：既绕开
     连接重试预算，又被错误分类器判成 unknown「执行异常」（2026-10-06 事故）。
-    `httpx.TimeoutException` 是 `httpx.TransportError` 子类，故先判超时。"""
+    `httpx.TimeoutException` 是 `httpx.TransportError` 子类，故先判超时。
+
+    **流内错误帧**（HTTP 200 已建连、SSE 里发 `{"error": {...}}`）：SDK 在迭代中抛
+    `APIError`/`APIStatusError`（`{"error":{"type":"upstream_error"}}` 这类中转站
+    瞬时故障），既不是传输异常也带不上 status，此前裸穿 → 不重试 + unknown
+    （2026-10-07 事故）。仅**瞬时类文案**转 `TransientStreamError`（ConnectionError
+    子类，被既有「未吐增量则安全重试」分支接住）；内容策略等硬错误原样上抛。"""
     import anthropic
     import openai
     if isinstance(e, (anthropic.APITimeoutError, openai.APITimeoutError,
@@ -166,6 +182,10 @@ def _as_conn_error(e: Exception) -> Exception:
     if isinstance(e, (anthropic.APIConnectionError, openai.APIConnectionError,
                       httpx.TransportError)):
         return ConnectionError(str(e))
+    if isinstance(e, (anthropic.APIError, openai.APIError)):
+        low = str(e).lower()
+        if any(h in low for h in TRANSIENT_STREAM_HINTS):
+            return TransientStreamError(str(e))
     return e
 
 

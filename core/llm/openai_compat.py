@@ -7,6 +7,7 @@ from typing import Any
 from core.llm import parsing
 from core.llm.anthropic_compat import StreamTransport, Transport
 from core.llm.provider import LLMResponse, ToolCall, Usage, LLMError
+from core.llm.retry import HTTP_5XX_ATTEMPTS, HTTP_5XX_RETRIES, HTTP_5XX_STATUS
 from core.llm.sdk_engine import RawFallback, build_openai_transports
 
 CHAT_COMPLETIONS = "openai-chat-completions"
@@ -23,6 +24,12 @@ OPENAI_524_ATTEMPTS = 5
 OPENAI_524_BACKOFF = (2.0, 4.0, 8.0, 16.0)
 OPENAI_CONNECTION_ATTEMPTS = 5
 OPENAI_CONNECTION_BACKOFF = (2.0, 4.0, 8.0, 16.0)
+# 上游标准 5xx（500/502/503/504）：失败后重试 10 次，共 11 次尝试。
+# 429 刻意不重试；520/524 继续使用各自的专用预算。
+OPENAI_5XX_RETRYABLE = tuple(sorted(HTTP_5XX_STATUS))
+OPENAI_5XX_ATTEMPTS = HTTP_5XX_ATTEMPTS
+OPENAI_5XX_RETRIES = HTTP_5XX_RETRIES
+OPENAI_5XX_BACKOFF = (2.0, 4.0, 8.0, 16.0, 30.0)
 
 
 class OpenAICompatProvider:
@@ -72,9 +79,10 @@ class OpenAICompatProvider:
         _, stream_transport = self._sdk_transports()  # OpenAI 路径恒走流式
 
         def request_with_retries(payload: bytes):
-            """重试上游明确的 520/524 或瞬时连接断开，其他错误立即返回。"""
-            max_attempts = max(OPENAI_520_ATTEMPTS, OPENAI_CONNECTION_ATTEMPTS,
-                               OPENAI_524_ATTEMPTS)
+            """重试上游明确的 520/524/5xx 或瞬时连接断开，其他错误立即返回。"""
+            max_attempts = (OPENAI_520_ATTEMPTS + OPENAI_5XX_ATTEMPTS
+                            + OPENAI_524_ATTEMPTS + OPENAI_CONNECTION_ATTEMPTS)
+            status_5xx_used = 0
             for attempt in range(1, max_attempts + 1):
                 try:
                     status, data = stream_transport(
@@ -97,6 +105,16 @@ class OpenAICompatProvider:
                         on_retry(attempt, OPENAI_520_RETRIES, 520)
                     time.sleep(OPENAI_520_BACKOFF[min(
                         attempt - 1, len(OPENAI_520_BACKOFF) - 1)])
+                    continue
+
+                if status in OPENAI_5XX_RETRYABLE:
+                    status_5xx_used += 1
+                    if status_5xx_used >= OPENAI_5XX_ATTEMPTS:
+                        return status, data
+                    if on_retry is not None:
+                        on_retry(status_5xx_used, OPENAI_5XX_RETRIES, status)
+                    time.sleep(OPENAI_5XX_BACKOFF[min(
+                        status_5xx_used - 1, len(OPENAI_5XX_BACKOFF) - 1)])
                     continue
 
                 if status != 524:

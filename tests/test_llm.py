@@ -206,14 +206,16 @@ def test_retry_on_transient_status_then_success(monkeypatch):
 
 def test_retry_exhausts_then_raises(monkeypatch):
     monkeypatch.setattr("core.llm.anthropic_compat.RETRY_BACKOFF", 0)
-    monkeypatch.setattr("core.llm.anthropic_compat.MAX_RETRIES", 2)
+    calls = {"n": 0}
 
     def transport(url, headers, body):
+        calls["n"] += 1
         return 503, {"error": {"message": "down"}}
 
     p = AnthropicCompatProvider("https://fake", "key", "m", stream_transport=transport)
     with pytest.raises(LLMError, match="503"):
         p.chat([{"role": "user", "content": "hi"}])
+    assert calls["n"] == 11
 
 
 # ---------- 瞬时网络错误（2026-10-01 健壮性） ----------
@@ -294,8 +296,7 @@ def test_connection_reset_exhausts_then_raises_network_error(monkeypatch):
 
 
 def test_retry_budget_per_category(monkeypatch):
-    """按类别预算（2026-10-01）：429/5xx 仍 2 次尝试（保留快速失败基调）；
-    连接类 4 次。"""
+    """按类别预算：标准 5xx 共 11 次尝试，429 共 2 次，连接类 4 次。"""
     monkeypatch.setattr("core.llm.anthropic_compat.RETRY_BACKOFF", 0)
     monkeypatch.setattr("core.llm.anthropic_compat.CONN_BACKOFF", (0, 0, 0))
     s = {"n": 0}
@@ -308,7 +309,19 @@ def test_retry_budget_per_category(monkeypatch):
         AnthropicCompatProvider("https://fake", "key", "m",
                                 stream_transport=t503).chat(
             [{"role": "user", "content": "hi"}])
-    assert s["n"] == 2          # 5xx 维持 2 次
+    assert s["n"] == 11         # 5xx：首次 + 10 次重试
+
+    r = {"n": 0}
+
+    def t429(url, headers, body):
+        r["n"] += 1
+        return 429, {"error": {"message": "slow down"}}
+
+    with pytest.raises(LLMError, match="429"):
+        AnthropicCompatProvider("https://fake", "key", "m",
+                                stream_transport=t429).chat(
+            [{"role": "user", "content": "hi"}])
+    assert r["n"] == 2          # 429 保持快速失败预算
 
     c = {"n": 0}
 
@@ -321,6 +334,24 @@ def test_retry_budget_per_category(monkeypatch):
                                 stream_transport=treset).chat(
             [{"role": "user", "content": "hi"}])
     assert c["n"] == 4          # 连接类 4 次
+
+
+def test_anthropic_5xx_retry_callback(monkeypatch):
+    monkeypatch.setattr("core.llm.anthropic_compat.RETRY_BACKOFF", 0)
+    calls = {"n": 0}
+    retries = []
+
+    def transport(url, headers, body):
+        calls["n"] += 1
+        if calls["n"] <= 10:
+            return 503, {"error": {"message": "temporarily unavailable"}}
+        return 200, _sse_json(_anthropic_response([{"type": "text", "text": "ok"}]))
+
+    p = AnthropicCompatProvider("https://fake", "key", "m", stream_transport=transport)
+    assert p.chat([{"role": "user", "content": "hi"}],
+                  on_retry=lambda *args: retries.append(args)).text == "ok"
+    assert calls["n"] == 11
+    assert retries == [(i, 10, 503) for i in range(1, 11)]
 
 
 def test_stream_break_without_delta_is_retried(monkeypatch):

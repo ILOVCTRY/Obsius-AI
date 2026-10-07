@@ -342,8 +342,8 @@ class MCPBridge:
 
     # 需要按会话隔离的 stdio server 名（浏览器类，进程/资源重）
     SESSION_SCOPED_SERVERS = {"playwright"}
-    # 并发浏览器会话上限（超出时调用回错误引导，避免机器被 Chrome 打爆）
-    MAX_BROWSER_SESSIONS = 4
+    # 并发浏览器会话上限（超出时调用回错误引导）；最多允许 10 个会话
+    MAX_BROWSER_SESSIONS = 10
     # 传给会话级 server 进程的环境变量名
     SESSION_ENV_KEY = "PW_SESSION_ID"
 
