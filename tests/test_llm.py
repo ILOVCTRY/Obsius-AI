@@ -189,6 +189,7 @@ def test_context_overflow_raises_and_model_override():
 def test_retry_on_transient_status_then_success(monkeypatch):
     """429/5xx 瞬时故障自动重试，恢复后成功——一次抖动不该杀死编排。"""
     monkeypatch.setattr("core.llm.anthropic_compat.RETRY_BACKOFF", 0)
+    monkeypatch.setattr("core.llm.anthropic_compat.HTTP_5XX_BACKOFF", (0,))
     statuses = iter([500, 200])
     n_calls = {"n": 0}
 
@@ -206,6 +207,7 @@ def test_retry_on_transient_status_then_success(monkeypatch):
 
 def test_retry_exhausts_then_raises(monkeypatch):
     monkeypatch.setattr("core.llm.anthropic_compat.RETRY_BACKOFF", 0)
+    monkeypatch.setattr("core.llm.anthropic_compat.HTTP_5XX_BACKOFF", (0,))
     calls = {"n": 0}
 
     def transport(url, headers, body):
@@ -215,7 +217,7 @@ def test_retry_exhausts_then_raises(monkeypatch):
     p = AnthropicCompatProvider("https://fake", "key", "m", stream_transport=transport)
     with pytest.raises(LLMError, match="503"):
         p.chat([{"role": "user", "content": "hi"}])
-    assert calls["n"] == 11
+    assert calls["n"] == 10     # 5xx：首次 + 9 次重试
 
 
 # ---------- 瞬时网络错误（2026-10-01 健壮性） ----------
@@ -296,8 +298,9 @@ def test_connection_reset_exhausts_then_raises_network_error(monkeypatch):
 
 
 def test_retry_budget_per_category(monkeypatch):
-    """按类别预算：标准 5xx 共 11 次尝试，429 共 2 次，连接类 4 次。"""
+    """按类别预算：标准 5xx 共 10 次尝试，429 共 2 次，连接类 4 次。"""
     monkeypatch.setattr("core.llm.anthropic_compat.RETRY_BACKOFF", 0)
+    monkeypatch.setattr("core.llm.anthropic_compat.HTTP_5XX_BACKOFF", (0,))
     monkeypatch.setattr("core.llm.anthropic_compat.CONN_BACKOFF", (0, 0, 0))
     s = {"n": 0}
 
@@ -309,7 +312,7 @@ def test_retry_budget_per_category(monkeypatch):
         AnthropicCompatProvider("https://fake", "key", "m",
                                 stream_transport=t503).chat(
             [{"role": "user", "content": "hi"}])
-    assert s["n"] == 11         # 5xx：首次 + 10 次重试
+    assert s["n"] == 10         # 5xx：首次 + 9 次重试
 
     r = {"n": 0}
 
@@ -338,20 +341,21 @@ def test_retry_budget_per_category(monkeypatch):
 
 def test_anthropic_5xx_retry_callback(monkeypatch):
     monkeypatch.setattr("core.llm.anthropic_compat.RETRY_BACKOFF", 0)
+    monkeypatch.setattr("core.llm.anthropic_compat.HTTP_5XX_BACKOFF", (0,))
     calls = {"n": 0}
     retries = []
 
     def transport(url, headers, body):
         calls["n"] += 1
-        if calls["n"] <= 10:
+        if calls["n"] <= 9:
             return 503, {"error": {"message": "temporarily unavailable"}}
         return 200, _sse_json(_anthropic_response([{"type": "text", "text": "ok"}]))
 
     p = AnthropicCompatProvider("https://fake", "key", "m", stream_transport=transport)
     assert p.chat([{"role": "user", "content": "hi"}],
                   on_retry=lambda *args: retries.append(args)).text == "ok"
-    assert calls["n"] == 11
-    assert retries == [(i, 10, 503) for i in range(1, 11)]
+    assert calls["n"] == 10
+    assert retries == [(i, 9, 503) for i in range(1, 10)]
 
 
 def test_stream_break_without_delta_is_retried(monkeypatch):

@@ -298,6 +298,17 @@ pathguard 写逃逸静态判定（只拦写不拦读；**命令词跟踪：管�
 
 host（PowerShell/bash）/ WSL（env 不透传；**`--exec` argv 直通**——包装层剥引号吞 `$var`/awk `$1`，2026-09-23）/ Docker（run_once 挂载+cwd + exec_in pwn 交互）；协作取消三入口收 abort_event，0.2s 轮询杀进程树，宁误杀勿悬挂；**管道排水**（stdout=PIPE 时 daemon 线程持续消费，防 64KB 管道缓冲写阻塞死锁，2026-09-23）；**NO_WINDOW_FLAGS** 全创建点隐藏窗口（pythonw 桌面模式弹 PowerShell 窗根治，2026-09-23）。
 
+## 会话级常驻容器与容器回收（2026-10-07 实施）
+
+**背景（根因）**：`DockerBackend.run_once` 的 `--rm` 只在 L3 sandbox 分支加了，**L2 `docker` 分支漏传**——而渗透命令走的正是 L2（带 `-v` 挂载那条路），于是每次 `run_cmd(runtime="docker")` 都留一个 exited 容器、只增不减，累积上千个后 Docker Desktop 仪表盘（Electron）枚举全量容器 + 逐容器轮询 stats，UI 线程被拖死（用户报「仪表盘卡」的直接原因）。项目文档 `docs/plans/container-execution-architecture.md` §2 早在 2026-09-23 就记录过此坑。
+
+**修复三层**：
+1. **止血**——L2 分支补 `--rm`，与 sandbox 语义对齐（一次性容器跑完即焚）。
+2. **可识别 + 自愈**——常驻容器用确定性名 `csp_<pid>_<sid>` + labels `csp.managed/csp.project/csp.session/csp.runtime`；`SessionContainerManager`（`core/runtime/sessioncontainers.py`，照 `ida_mcp_manager` 同构：懒 reaper + `shutdown_all` 兜关）启动对账清遗留、周期 TTL 回收（`config/containers.json` 覆盖，`session_scoped:false` = 一键全局回落）。
+3. **消除 per-call 开销**——**会话级常驻容器**：会话首次执行 docker 命令时 `docker run -d … sleep infinity` 起一个容器，后续命令走 `docker exec`，把 create/destroy 从「每工具调用一次」降到「每会话一次」。作用域锚点 = **会话**（`sess-<12hex>`）——原「一任务一容器」设计的任务锚点随任务机制退役（schema v33，2026-10-06），改由会话承接；workspace 仍是项目根卷挂载（同项目多会话各持一容器，共享挂载）。
+
+**边界铁律**：只作用 **L2 docker**；**L3 sandbox 恒 per-execution**（零挂载/断网/`--rm` 不变），网关 `_dispatch` 里 sandbox 分支前置判定、永不经管理器。网关 `ExecutionGateway(containers=...)` 默认 None（关闭）；仅 `sess-*` 会话走 exec，其余（`chat-*`/`rev-workbench`/无会话）与建容器失败一律回落 `run_once`——**绝不因新机制让命令执行失败**。会话关闭删容器、项目删除前按 label 停删（释放 Windows 卷挂载句柄，否则 rename 必 422）、shutdown 钩子兜关清空。workspace 是宿主卷 → 容器 rootfs 即弃，故进程重启直接对账清空、下次按需重建（~0.5s），不做跨进程续用。
+
 ## 双层权限模型
 
 角色仅通过工具白名单约束可调用面；网关 threat_class/runtime 负责执行环境硬校验。人类命令同层经网关，审计流无旁路。
@@ -381,7 +392,7 @@ refs.py kb 改名全库引用扫描+重写；doctor 体检（error：悬空引�
 
 ## anthropic_compat
 
-协议转换核心：按类别重试矩阵（标准 5xx〔500/502/503/504〕失败后重试 10 次、共 11 次尝试；429 共 2 次尝试；连接类共 4 次 + 5/10/20s 退避；OpenAI 520/524 保留专用预算）、thinking/stream/cache_control 400 实例级降级（去参重发）、SSE 状态机（工具参数 JSON 分片拼装）、首帧后不重试（SSE 不可重放）、truncated 截断防御（区分「说完」与「流断」）。
+协议转换核心：按类别重试矩阵（标准 5xx〔500/502/503/504〕共 10 次尝试、首次 + 9 次重试、退避封顶 30s；429 共 2 次尝试；连接类共 4 次 + 5/10/20s 退避；OpenAI 520/524 保留专用预算）、thinking/stream/cache_control 400 实例级降级（去参重发）、SSE 状态机（工具参数 JSON 分片拼装）、首帧后不重试（SSE 不可重放）、truncated 截断防御（区分「说完」与「流断」）。
 
 **Prompt caching（retrieval-upgrade M1，2026-09-23 实施）**：请求侧 system 改块数组——`build_system_parts` 拆 stable（规则链+角色+能力清单，会话内字节稳定）/ dynamic（技能指引+任务目标+纪律尾）两块，stable 块末尾打 `cache_control: {"type":"ephemeral"}` 断点；Ark Anthropic 兼容层实测直接接受（同前缀第二跑 cache_read>0 前缀缓存生效），400 文案含 cache_control 时实例级降级剥标重发作保险（`_cache_disabled` 置位后不再打标）。观测面：usage_view 补 cache_read/creation 与命中率 `cr/(in+cr+cc)`（LiveRoom 预算弹窗展示）；预算逻辑不动（缓存 token 仍计数，只是便宜）。消息历史增量断点后置观察。
 

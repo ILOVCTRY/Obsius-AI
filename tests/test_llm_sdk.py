@@ -560,7 +560,7 @@ def test_openai_sdk_5xx_retries_then_succeeds(monkeypatch):
     assert resp.text == "OK" and calls["n"] == 3
     assert [r[2] for r in retries] == [503, 503]
     assert [r[0] for r in retries] == [1, 2]
-    assert all(r[1] == 10 for r in retries)
+    assert all(r[1] == 9 for r in retries)
 
 
 def test_openai_sdk_5xx_exhausted_reports_status(monkeypatch):
@@ -582,7 +582,7 @@ def test_openai_sdk_5xx_exhausted_reports_status(monkeypatch):
             [{"role": "user", "content": "hi"}])
     assert ei.value.status == 503
     assert "Upstream service temporarily unavailable" in str(ei.value)
-    assert calls["n"] == 11
+    assert calls["n"] == 10     # 5xx：首次 + 9 次重试
 
 
 def test_openai_sdk_connection_reset_retries(monkeypatch):

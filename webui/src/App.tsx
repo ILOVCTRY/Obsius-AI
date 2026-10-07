@@ -24,6 +24,7 @@ import {
   Sparkles,
   Square,
   X,
+  Zap,
 } from "lucide-react"
 import { api, ApiError } from "@/lib/api"
 import type { Approval, ProjectDetail } from "@/lib/types"
@@ -39,6 +40,7 @@ import { useEvents } from "@/lib/useEvents"
 import { ProjectsView } from "@/views/ProjectsView"
 import { IntelView } from "@/views/IntelView"
 import { BrowserView } from "@/views/browser/BrowserView"
+import { FuzzerView } from "@/views/fuzzer/FuzzerView"
 import { SettingsView } from "@/views/SettingsView"
 import { KnowledgeView } from "@/views/KnowledgeView"
 import { SkillsView } from "@/views/SkillsView"
@@ -55,7 +57,7 @@ import { bindingBadge } from "@/lib/taxonomy"
 // 左缘悬浮把手唤出；状态 localStorage（ui.nav-collapsed）。收起=条件渲染卸载
 // nav Panel+Separator（同 boardOpen 先例），重挂由 useDefaultLayout 恢复宽度。
 
-type View = "projects" | "intel" | "live" | "board" | "agents" | "browser" | "sample-analysis" | "knowledge" | "skills" | "settings"
+type View = "projects" | "intel" | "live" | "board" | "agents" | "browser" | "fuzzer" | "sample-analysis" | "knowledge" | "skills" | "settings"
 
 /** M4c 场景档 board_view 默认视图（config.board_view.default；黑板上自行校验可用 tab 回退） */
 const boardViewOf = (m: ProjectDetail | null): string | undefined => {
@@ -79,6 +81,7 @@ const NAV_GROUPS: { label: string; items: NavItem[]; collapsible?: boolean }[] =
     label: "工具",
     items: [
       { key: "browser", label: "浏览器", icon: Globe2, needsProject: true },
+      { key: "fuzzer", label: "重放", icon: Zap, needsProject: true },
       { key: "sample-analysis", label: "样本分析", icon: FolderTree, needsProject: true },
       { key: "knowledge", label: "知识库", icon: BookOpen, needsProject: false },
       { key: "skills", label: "技能库", icon: BrainCircuit, needsProject: false },
@@ -284,6 +287,8 @@ export default function App() {
   } | null>(null)
   // v0.71 任务即窗口：任务卡/任务流双击 → 跳会话页并直开专属执行窗页签
   const [sessionNav, setSessionNav] = useState<{ sid: string; n: number } | null>(null)
+  // 重放工作台深链：抓包行「重发」/ 直播间入口 → 跳重放视图并预填报文（2026-10-07）
+  const [fuzzerNav, setFuzzerNav] = useState<{ raw?: string; n: number } | null>(null)
   useEffect(() => {
     const h = (e: Event) => {
       const d = (e as CustomEvent<{
@@ -312,6 +317,17 @@ export default function App() {
     }
     window.addEventListener("goto-session", h)
     return () => window.removeEventListener("goto-session", h)
+  }, [])
+
+  // 重放工作台入口（goto-fuzzer 自定义事件模式；detail.raw 预填报文）
+  useEffect(() => {
+    const h = (e: Event) => {
+      const d = (e as CustomEvent<{ raw?: string }>).detail
+      setView("fuzzer")
+      setFuzzerNav({ raw: d?.raw, n: Date.now() })
+    }
+    window.addEventListener("goto-fuzzer", h)
+    return () => window.removeEventListener("goto-fuzzer", h)
   }, [])
 
   // 情报页「查看全部」等跨视图跳转（goto-* 自定义事件模式）
@@ -541,6 +557,14 @@ export default function App() {
             // 定高视图（面板组），照 rev 走 h-full + overflow-hidden
             <div className="h-full w-full overflow-hidden">
               <BrowserView pid={pid} track={meta?.track} />
+            </div>
+          )}
+          {view === "fuzzer" && (
+            // Web Fuzzer 重放工作台（2026-10-07）：轨门控在视图内部处理；
+            // 定高双栏（react-resizable-panels），照 rev/browser 走 h-full + overflow-hidden
+            <div className="h-full w-full overflow-hidden">
+              <FuzzerView key={fuzzerNav?.n} pid={pid} track={meta?.track}
+                          initialRaw={fuzzerNav?.raw} />
             </div>
           )}
           {view === "sample-analysis" && (

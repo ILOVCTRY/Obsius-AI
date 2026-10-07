@@ -7,6 +7,7 @@ register_asset 登记回环 IP。
 import json
 import socket
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -14,8 +15,9 @@ import pytest
 
 from core.blackboard import Blackboard
 from core.blackboard.assets import register_asset
+from core.browser.gmhttp import gm_available
 from core.browser.pool import BrowserConfig, BrowserError
-from core.browser.replay import Intruder, ReplayClient
+from core.browser.replay import Intruder, ReplayClient, ReplayOptions
 
 
 def test_browser_config_ignore_https_default_and_override(tmp_path):
@@ -46,6 +48,16 @@ def server():
             if u.path == "/echo":
                 self._reply(200, {"method": "GET", "path": u.path,
                                   "query": {k: v for k, v in parse_qs(u.query).items()}})
+            elif u.path == "/redirect":
+                self.send_response(302)
+                self.send_header("Location", "/echo")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            elif u.path == "/slow":
+                time.sleep(1.2)
+                self._reply(200, {"slow": True})
+            elif u.path == "/big":
+                self._reply(200, {"pad": "x" * 400})
             else:
                 self._reply(404, {"error": "not found"})
 
@@ -191,6 +203,114 @@ def test_replay_missing_capture(bb, pid):
     rc = ReplayClient(bb, config=BrowserConfig())
     with pytest.raises(ValueError):
         rc.replay(pid, capture_id=99999)
+
+
+# ---------- 重发传输选项（2026-10-07 重放工作台，全量对齐 Yakit 式 Repeater 控件） ----------
+
+def test_replay_options_defaults_match_legacy_behavior():
+    """默认值必须等价于 2026-10-07 之前的硬编码行为（跟随重定向 / 无代理 / httpx）。"""
+    o = ReplayOptions()
+    assert o.force_https is False
+    assert o.follow_redirects is True
+    assert o.proxy is None and o.body_max_bytes is None
+    assert o.insecure is False and o.gm_tls is False
+    assert o.timeout_s == 15.0
+
+
+def test_force_https_rewrites_only_plain_http():
+    from core.browser.replay import _apply_force_https
+    assert _apply_force_https("http://a/b") == "https://a/b"
+    assert _apply_force_https("https://a/b") == "https://a/b"   # 已 https 不动
+    assert _apply_force_https("ftp://a/b") == "ftp://a/b"       # 其它 scheme 不动
+
+
+def test_replay_force_https_upgrades_request_line(bb, pid, server):
+    """强制HTTPS：请求行 http:// 升级为 https://（打回环明文服务必失败，但入库 url 已是 https）。"""
+    rc = ReplayClient(bb, config=BrowserConfig())
+    with pytest.raises(BrowserError):
+        rc.replay(pid, raw=f"GET {server}/echo HTTP/1.1\nHost: x\n\n",
+                  opts=ReplayOptions(force_https=True, timeout_s=3))
+    rows = bb.list_http_history(pid, source="replay")
+    assert rows and rows[0]["url"].startswith("https://")
+
+
+def test_replay_follow_redirects_toggle(bb, pid, server):
+    rc = ReplayClient(bb, config=BrowserConfig())
+    raw = f"GET {server}/redirect HTTP/1.1\nHost: 127.0.0.1\n\n"
+    followed = rc.replay(pid, raw=raw, opts=ReplayOptions(follow_redirects=True))
+    assert followed["status"] == 200
+    not_followed = rc.replay(pid, raw=raw, opts=ReplayOptions(follow_redirects=False))
+    assert not_followed["status"] == 302
+
+
+def test_replay_body_max_override(bb, pid, server):
+    rc = ReplayClient(bb, config=BrowserConfig())
+    row = rc.replay(pid, raw=f"GET {server}/big HTTP/1.1\nHost: 127.0.0.1\n\n",
+                    opts=ReplayOptions(body_max_bytes=16))
+    assert row["body_truncated"] is True
+    assert len(row["resp_body"]) <= 16
+
+
+def test_replay_explicit_proxy_is_used(bb, pid, server):
+    """显式代理（非系统代理）：指向死端口应失败——证明 proxy 参数确实生效。"""
+    rc = ReplayClient(bb, config=BrowserConfig())
+    with pytest.raises(BrowserError):
+        rc.replay(pid, raw=f"GET {server}/echo HTTP/1.1\nHost: 127.0.0.1\n\n",
+                  opts=ReplayOptions(proxy="http://127.0.0.1:1", timeout_s=3))
+    rows = bb.list_http_history(pid, source="replay")
+    assert rows and rows[0]["meta"].get("proxy") == "http://127.0.0.1:1"
+
+
+def test_replay_stop_event_interrupts_and_records(bb, pid, server):
+    """停止：慢响应期间置 stop_event → 中断并落失败行（status=None）。"""
+    rc = ReplayClient(bb, config=BrowserConfig())
+    stop = threading.Event()
+    timer = threading.Timer(0.4, stop.set)
+    timer.start()
+    t0 = time.monotonic()
+    try:
+        with pytest.raises(BrowserError, match="中断"):
+            rc.replay(pid, raw=f"GET {server}/slow HTTP/1.1\nHost: 127.0.0.1\n\n",
+                      opts=ReplayOptions(timeout_s=10), stop_event=stop)
+    finally:
+        timer.cancel()
+    assert time.monotonic() - t0 < 5      # 未被慢响应拖满
+    rows = bb.list_http_history(pid, source="replay")
+    assert rows and rows[0]["status"] is None
+
+
+# ---------- 国密 sidecar（gmhttp） ----------
+
+def test_gmhttp_unavailable_without_binary(tmp_path):
+    from core.browser import gmhttp
+    assert gmhttp.resolve_gmhttp(tmp_path) is None
+    assert gmhttp.gm_available(tmp_path) is False
+    with pytest.raises(gmhttp.GmHttpError, match="不可用"):
+        gmhttp.gm_request({"method": "GET", "url": "https://x"}, tools_root=tmp_path)
+
+
+def test_replay_gm_without_sidecar_stores_failure(bb, pid, tmp_path):
+    """国密不可用 → 明确报错 + 落失败行，**绝不静默降级成普通 TLS**。"""
+    rc = ReplayClient(bb, config=BrowserConfig(), tools_root=str(tmp_path))
+    with pytest.raises(BrowserError, match="重放请求失败"):
+        rc.replay(pid, raw="GET https://127.0.0.1:9/ HTTP/1.1\nHost: x\n\n",
+                  opts=ReplayOptions(gm_tls=True, timeout_s=3))
+    rows = bb.list_http_history(pid, source="replay")
+    assert rows and rows[0]["status"] is None
+    assert rows[0]["meta"]["gm_tls"] is True
+
+
+@pytest.mark.skipif(not gm_available(), reason="gmhttp sidecar 未构建（跑 scripts/build_gmhttp.py）")
+def test_gm_sidecar_end_to_end_plain_http(bb, pid, server):
+    """真 sidecar 端到端跑通进程协议（stdin JSON → stdout JSON）。
+    打回环明文 http 不触发 GM 握手（DialTLSContext 只用于 https），故必成功——
+    本用例验的是「协议/进程链路可用」，非 GM 握手本身（无国密服务端可测）。"""
+    rc = ReplayClient(bb, config=BrowserConfig())
+    row = rc.replay(pid, raw=f"GET {server}/echo?gm=1 HTTP/1.1\nHost: 127.0.0.1\n\n",
+                    opts=ReplayOptions(gm_tls=True, timeout_s=10))
+    assert row["status"] == 200
+    assert json.loads(row["resp_body"])["query"] == {"gm": ["1"]}
+    assert row["meta"]["gm_tls"] is True
 
 
 # ---------- Intruder ----------

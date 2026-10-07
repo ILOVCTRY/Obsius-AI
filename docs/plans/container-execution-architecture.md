@@ -25,7 +25,7 @@ toolchain-registry M4（容器侧）细化中暴露的执行架构四问（快�
 | # | 决策点 | 结论 |
 |---|--------|------|
 | 1 | LLM/Agent 位置 | **宿主（确认现状）**，容器只有手——自研 Agent 无需进容器（r0re 塞容器是因调度第三方 CLI）；LLM key 不出宿主 + L3 断网自洽；模型路由/限速/审计/黑板单入口控制面单一 |
-| 2 | L2 现场载体 | **workspace 卷挂载（样本 ro + scratch rw）**；~~生命周期保持 per-command~~ **2026-09-24 拍板翻转为一任务一容器**（detached 长驻 + docker exec，失败即冻结留 24h，细节见 [task-scoped-container.md](task-scoped-container.md)） |
+| 2 | L2 现场载体 | **workspace 卷挂载（样本 ro + scratch rw）**；~~生命周期保持 per-command~~ **2026-09-24 拍板翻转为长驻 + docker exec**；**2026-10-07 已实施为「会话级常驻容器」**（原「一任务一容器」锚点随任务机制退役，改由会话承接；见 `core/runtime/sessioncontainers.py` 与 DESIGN.md §7） |
 | 3 | L3 生命周期与取证 | **per-execution 一次性不变**；取证=终态关键目录 cp-out 进 `sandbox-scene/`（与沙箱行为报告 artifact 合流）；docker commit 只做可选兜底档不默认；CRIU 排除（Docker Desktop Windows 不支持） |
 | 4 | 通信通道 | **exec/cp/卷三件套走 daemon named pipe，零网络面**；服务型工具例外=专用内部 docker 网络+端口仅绑 127.0.0.1；黑板写永在宿主、凭据不进容器 |
 | 5 | x64dbg 与人工调试 | **Agent 自动动态分析=frida 不用 x64dbg**（GUI-first 不适合 Agent）；x64dbg 短期放**宿主 + 人工调试豁免审计事件**；中期迁 **Windows VM 插槽**（快照回滚） |
@@ -67,14 +67,14 @@ toolchain-registry M4（容器侧）细化中暴露的执行架构四问（快�
 
 - L2 开卷挂载后「写脚本→跑脚本」跨命令成立；「容器内装依赖」需求随工具进镜像基本消失（剩余场景=临时 pip 装，可后续观察再议 per-session 工作台）；
 - 停机场景：abort+杀进程树已有；现场在卷 → 容器停毁现场不丢——卷方案的附带好处；
-- 已停容器残留堆积改由任务容器管理器的 TTL/reap/启动对账关闭（见 task-scoped-container.md §4）。
+- 已停容器残留堆积：**L2 补 `--rm`（2026-10-07 已修根因）** + 会话容器管理器的 TTL/reap/启动对账兜底（见 `core/runtime/sessioncontainers.py`）。
 
 ### 4.4 生命周期矩阵
 
 | runtime | 生命周期 | 挂载 | 网络 | 备注 |
 |---|---|---|---|---|
 | L0 host / L1 wsl | 现状不变 | pathguard 写边界（现状） | 宿主栈 | 不在本方案范围 |
-| L2 docker | **per-task（2026-09-24 翻转，见 task-scoped-container.md）** | workspace 卷（整卷，将来收窄子目录） | none；net=real 任务级窗口 | pathguard 容器侧改告警制；终态收证后销毁 |
+| L2 docker | **per-session 常驻（2026-10-07 已实施；原 per-task 锚点随任务机制退役改会话承接）** | workspace 卷（整卷，将来收窄子目录） | none；net=real 任务级窗口 | pathguard 容器侧改告警制；会话关闭/项目删除时销毁 |
 | L3 sandbox-min | per-execution + `--rm` | 零挂载（取证走 cp-out） | none → fakenet（S2） | 加固参数现状保留 |
 | L3 wine-sandbox | per-execution + `--rm` | 行为目录 rw（behavior-run wrapper 约定，见沙箱行为报告 §5 #1） | none → fakenet | `--cap-add SYS_PTRACE` 例外显性化 |
 | 服务容器（fakenet 等） | 项目会话期常驻 | — | 内部 docker 网络 | 会话终态清理；端口仅 127.0.0.1 或不映射 |
@@ -127,7 +127,7 @@ Windows 侧
 3. Windows VM 插槽选型：VirtualBox vs VMware Workstation（Home 可用性、VBoxManage 快照 API、VM 内 Agent 通信通道：共享文件夹/网络/控制 API）。
 4. 人工调试豁免事件 schema 与入口形态（终端命令触发？面板按钮？）。
 5. fakenet sidecar 网络拓扑细节（INetSim 容器 + 业务容器 docker network + DNS 劫持指向）。
-6. ~~`exec_in` 长驻容器生命周期统一~~ **由 task-scoped-container.md 承接（2026-09-24）**：exec 目标即 T-container，终态归任务终态路径清理；pwn 交互天然成立。
+6. ~~`exec_in` 长驻容器生命周期统一~~ **2026-10-07 已实施**：exec 目标即会话常驻容器（`csp_<pid>_<sid>`），生命周期归 `SessionContainerManager`（会话关闭删、项目删除先停、启动对账清残留）；pwn 交互天然成立。
 7. 服务型工具内部 docker 网络的命名与复用策略（per-project? per-session?）。
 8. Windows 容器远期条件（Pro/Server 或 CI 环境出现时重启评估，headless 脚本类样本场景）。
 

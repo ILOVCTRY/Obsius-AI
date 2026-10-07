@@ -92,6 +92,14 @@ _CHAT_TRUNC_RETRIES = 2
 # chat.truncated 事件（前端可提示「输出可能不完整」）。
 _CHAT_CONTINUE_MAX = 3
 _TRUNC_STOP_REASONS = ("length", "max_tokens")
+
+# 上游偶发返回空响应（无文本、无工具调用）时只在内存中续问，避免瞬时空流
+# 直接结束会话；达到上限后沿用现有 fallback 文案。
+_EMPTY_RESPONSE_RETRIES = 3
+_EMPTY_RESPONSE_NUDGE = (
+    "上一条响应没有产生文本或工具调用。请继续处理当前请求，必须返回可见文本回复，"
+    "或返回需要执行的工具调用；不要返回空响应。"
+)
 _CONTINUE_NUDGE = ("（上一条回复因输出长度上限被截断）请**接着上一句继续写完**，"
                    "不要重复已写内容，也不要重新开头。")
 
@@ -1007,6 +1015,7 @@ class ChatTurn:
         final = ""
         # 截断续写状态（2026-10-01）：continue_n=已续写次数；text_acc=逐段文本拼接
         continue_n = 0
+        empty_response_n = 0
         text_acc: list[str] = []
         for _step in range(max_steps):
             if self._aborted():  # 步间中止：不落新 LLM 调用
@@ -1136,6 +1145,23 @@ class ChatTurn:
                 final = self._persist_stopped()
                 break
             text = resp.text or ""
+            if not text.strip() and not resp.tool_calls:
+                if empty_response_n < _EMPTY_RESPONSE_RETRIES:
+                    empty_response_n += 1
+                    self._emit("chat.retry", {
+                        "phase": "empty_response",
+                        "attempt": empty_response_n,
+                        "total": _EMPTY_RESPONSE_RETRIES,
+                        "reason": "empty_response",
+                    })
+                    messages.append({"role": "user", "content": _EMPTY_RESPONSE_NUDGE})
+                    continue
+                final = "（本轮未产出文本回复，请重试或改述）"
+                chat_store.append_message(self.bb, self.thread_id,
+                                          "assistant", final)
+                break
+            else:
+                empty_response_n = 0
             if resp.tool_calls:
                 call_ids = [str(tc.id or "").strip() for tc in resp.tool_calls]
                 if (any(not cid for cid in call_ids)

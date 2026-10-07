@@ -8,6 +8,8 @@ config/tools.json
 config/mcp.json
 # 本机反编译覆盖层：headless_timeout（秒）逐机不同（大样本加速 P1，2026-09-30）
 config/decompiler.json
+# 会话级常驻容器覆盖层：session_scoped/idle_timeout/reaper_interval 逐机不同（2026-10-07）
+config/containers.json
 .claude/
 
 # Python
@@ -41,6 +43,11 @@ packs/**/.history/
 
 # 工具按需安装目录（DESIGN.md §7 tools/installed/）
 tools/installed/
+# 工具二进制/运行时规范位（toolchain-registry：本体不进 git，桌面打包经 build_exe.py 随包旁挂）
+# tools/bin/gmhttp.exe 由 scripts/build_gmhttp.py 构建（2026-10-07 国密 sidecar）
+tools/bin/
+tools/runtime/
+tools/venv/
 
 # 临时产物
 *.tmp

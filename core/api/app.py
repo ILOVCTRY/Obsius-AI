@@ -40,7 +40,7 @@ from core import autonomy
 from core import phases as phases_mod
 from core.browser import BrowserConfig, BrowserPool, BrowserError
 from core.browser.pool import browser_available, chromium_available
-from core.browser.replay import Intruder, ReplayClient
+from core.browser.replay import Intruder, ReplayClient, ReplayOptions
 from core.agent import AgentConfig, AgentSession
 from core.agent.execution import ExecutionContext
 from core.blackboard.assets import _is_ip, clean_host, import_assets, register_asset
@@ -70,7 +70,9 @@ from core.orchestrator import state as orch_state
 from core.orchestrator import judgments
 from core.projects import Project, ProjectStore, list_workspace_tree
 from core.runtime import ExecutionGateway, HostDetector
+from core.runtime.backends import DockerBackend
 from core.runtime.policy import RUNTIME_LEVELS
+from core.runtime.sessioncontainers import SessionContainerManager
 from core.sample_packages import SamplePackageError, SamplePackageStore
 from core.skills import proposals as proposals_mod
 from core.skills import refs as refs_mod
@@ -1102,6 +1104,7 @@ def create_app(
     mission_poll_interval: float = 60.0,
     sediment_proposals: bool = True,
     static_dir: str | Path | None = None,
+    session_containers: bool = True,
 ) -> FastAPI:
     """executor_llm / planner_llm 缺省时按供应商配置（config/providers.json）+
     llm.json 文件级覆写构建 provider；测试可注入假 provider。
@@ -1198,6 +1201,8 @@ def create_app(
         workspace_root, bb_getter=lambda p: _project(p).bb,
         config=BrowserConfig.from_file("config/browser.json"))
     app.state.intruder_runs: dict[str, threading.Event] = {}
+    # 重发运行表（run_id → stop Event）：单条重发的中断信号（2026-10-07，仿 intruder_runs）
+    app.state.replay_runs: dict[str, threading.Event] = {}
 
     def _browser_shutdown() -> None:
         app.state.browser_pool.close_all()
@@ -1215,6 +1220,20 @@ def create_app(
         app.state.ida_mcp_manager.shutdown_all()
 
     app.add_event_handler("shutdown", _ida_mcp_shutdown)
+
+    # 会话级常驻容器管理器（P2/P3，2026-10-07）：L2 docker runtime 复用容器 + 孤儿回收。
+    # 根因修复配套——L2 曾漏 --rm 致每次 run_cmd 留 exited 容器，累积上千拖垮 Docker
+    # Desktop 仪表盘。懒 reaper 首轮做启动对账；shutdown 兜关清空；config/containers.json
+    # 的 session_scoped=false 可一键关闭（全局回落 per-call）。session_containers=False
+    # 供测试禁用（同 mission_poll_interval 惯例：不起 reaper 线程、不触 docker）。
+    app.state.session_containers = SessionContainerManager(
+        DockerBackend(), enabled=session_containers)
+    app.state.session_containers.start()
+
+    def _session_containers_shutdown() -> None:
+        app.state.session_containers.shutdown_all()
+
+    app.add_event_handler("shutdown", _session_containers_shutdown)
 
     def _llms():
         exec_llm = executor_llm
@@ -2152,7 +2171,8 @@ def create_app(
             from core.tools.decompiler import (
                 build_headless_service, gateway_runner, resolve_headless_timeout)
 
-            gateway = ExecutionGateway(bb=proj.bb)
+            gateway = ExecutionGateway(
+                bb=proj.bb, containers=app.state.session_containers)
             r = load_expert(app.state.packs_root, role, proj.track)
             # 轨级行为语义（R2，§6.9 mode 退役）：redteam 轨注入红队语义 + ROE 摘要
             # （ROE 未核验齐全=按 pentest 上限兜底+提示补全）；其余轨注入影响证明级上限。
@@ -2569,6 +2589,11 @@ def create_app(
             app.state.projects.pop(pid, None)
             # F6：先焚毁浏览器实例（chromium 占用 profile 目录会锁死 Windows 删除）
             app.state.browser_pool.close_project(pid)
+            # 会话级常驻容器先停删（释放卷挂载句柄，否则 Windows rename 必 422；P3，2026-10-07）
+            try:
+                app.state.session_containers.remove_project(pid)
+            except Exception:  # noqa: BLE001
+                pass
             try:
                 trash_path = store.delete_project(pid, project=proj)
             except FileNotFoundError:
@@ -2600,6 +2625,18 @@ def create_app(
     class ReplayIn(BaseModel):
         capture_id: int | None = None
         raw: str | None = None             # 原始请求报文（F6-v3：与 capture_id 二选一）
+        # 传输选项（2026-10-07 重放工作台，全量对齐 Yakit 式 Repeater 控件）
+        force_https: bool = False
+        follow_redirects: bool = True
+        proxy: str | None = None           # 显式代理；None=直连（绝不读系统代理）
+        body_max_bytes: int | None = None  # 响应体截断上限（前端「响应体长度限制」）
+        insecure: bool = False             # 跳过证书校验
+        gm_tls: bool = False               # 国密 TLS（GM/T 0024）→ gmhttp sidecar
+        timeout_s: float = 15.0
+        server_name: str | None = None     # SNI 覆写
+        client_cert_pem: str | None = None  # 国密双证书：两块 CERTIFICATE 拼接
+        client_key_pem: str | None = None
+        ca_cert_pem: str | None = None
 
     class IntruderIn(BaseModel):
         template: dict                    # {method,url,headers,body}，含 §POS§ 标记
@@ -2745,20 +2782,63 @@ def create_app(
         n = _project(pid).bb.clear_http_history(pid, batch_id=batch_id)
         return {"removed": n}
 
+    @app.get("/api/projects/{pid}/browser/gm-status")
+    def browser_gm_status(pid: str):
+        """国密 TLS 通道能力探测（重放工作台据此置灰「国密TLS」开关）。
+
+        红线：**不可用时不静默降级成普通 TLS**——前端必须显式置灰并给出安装指引，
+        否则会制造「以为走了国密、实际没走」的安全假象。"""
+        from core.browser.gmhttp import gm_available, resolve_gmhttp
+        path = resolve_gmhttp(app.state.tools_root or "tools")
+        return {"available": gm_available(app.state.tools_root or "tools"),
+                "path": path,
+                "guide": ("国密 sidecar 缺失：tools/bin/gmhttp.exe 未构建。"
+                          "跑 scripts/build_gmhttp.py（需 Go 1.21+）生成。") if not path else ""}
+
     @app.post("/api/projects/{pid}/browser/replay", status_code=202)
     def browser_replay(pid: str, body: ReplayIn):
         """重发（人类 UI；AI 无发起入口）。原始报文 raw 或 capture_id 模板。
-        Job 化返回 job_id 轮询。"""
+        Job 化返回 job_id 轮询；run_id 供「停止」端点中断（2026-10-07 重放工作台）。"""
         proj = _project(pid)
-        client = ReplayClient(proj.bb, config=app.state.browser_pool.config)
+        client = ReplayClient(proj.bb, config=app.state.browser_pool.config,
+                              tools_root=app.state.tools_root or "tools")
+        opts = ReplayOptions(
+            force_https=body.force_https,
+            follow_redirects=body.follow_redirects,
+            proxy=body.proxy or None,
+            body_max_bytes=body.body_max_bytes,
+            insecure=body.insecure,
+            gm_tls=body.gm_tls,
+            timeout_s=body.timeout_s,
+            server_name=body.server_name or None,
+            client_cert_pem=body.client_cert_pem,
+            client_key_pem=body.client_key_pem,
+            ca_cert_pem=body.ca_cert_pem,
+        )
+        run_id = f"rp-{uuid.uuid4().hex[:12]}"
+        stop = threading.Event()
+        app.state.replay_runs[run_id] = stop
 
         def _run():
-            return client.replay(pid, capture_id=body.capture_id,
-                                 raw=body.raw, author="human")
+            try:
+                return client.replay(pid, capture_id=body.capture_id,
+                                     raw=body.raw, author="human",
+                                     opts=opts, stop_event=stop)
+            finally:
+                app.state.replay_runs.pop(run_id, None)
 
         job_id = app.state.jobs.submit("browser-replay", _run,
-                                       meta={"project_id": pid})
-        return {"job_id": job_id}
+                                       meta={"project_id": pid, "run_id": run_id})
+        return {"job_id": job_id, "run_id": run_id}
+
+    @app.post("/api/projects/{pid}/browser/replay/{run_id}/stop")
+    def browser_replay_stop(pid: str, run_id: str):
+        """中断在跑的单条重发（httpx=放弃等待，国密 sidecar=kill 子进程）。"""
+        stop = app.state.replay_runs.get(run_id)
+        if stop is None:
+            raise HTTPException(404, f"重发不在运行中: {run_id}")
+        stop.set()
+        return {"stopped": True}
 
     @app.post("/api/projects/{pid}/browser/intruder", status_code=202)
     def browser_intruder(pid: str, body: IntruderIn):
@@ -4903,6 +4983,11 @@ def create_app(
         except ValueError as e:
             raise HTTPException(422, str(e))
         app.state.agents.pop(sid, None)
+        # 会话级常驻容器随会话终结销毁（P3，2026-10-07）；尽力而为，不阻断关窗
+        try:
+            app.state.session_containers.remove(pid, sid)
+        except Exception:  # noqa: BLE001
+            pass
         return {"session_id": sid, "status": "closed"}
 
     @app.post("/api/sessions/{sid}/close")

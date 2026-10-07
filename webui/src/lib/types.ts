@@ -1519,6 +1519,26 @@ export interface IntruderTemplate {
   body?: string | null
 }
 
+/** 重发传输选项（2026-10-07 重放工作台，全量对齐 Yakit 式 Repeater 控件）。
+ *  默认值即「与既有行为一致」：跟随重定向、无代理、httpx、证书校验开。 */
+export interface ReplayOptions {
+  force_https?: boolean
+  follow_redirects?: boolean
+  proxy?: string | null
+  body_max_bytes?: number | null
+  insecure?: boolean
+  gm_tls?: boolean
+  timeout_s?: number
+  server_name?: string | null
+}
+
+/** 国密 TLS 通道能力探测（重放工作台据此置灰开关；available=false 时绝不静默降级成普通 TLS） */
+export interface GmStatus {
+  available: boolean
+  path: string | null
+  guide: string
+}
+
 /** F6-v3 拦截挂起包（仅人工浏览流量；快照形态，raw 为后端渲染的完整报文） */
 export interface InterceptPending {
   hold_id: string

@@ -149,5 +149,12 @@
     "kind": "data",
     "bin": {"windows": "data/fpdb", "linux": "data/fpdb"},
     "note": "本地指纹包首批（dsh 收编 2026-09-22，registry data 类首批成员）"
+  },
+  "gmhttp": {
+    "kind": "binary",
+    "acquire": "bundled",
+    "domains": ["pentest"],
+    "bin": {"windows": "bin/gmhttp.exe", "linux": "bin/gmhttp"},
+    "note": "国密 TLS / 标准 TLS 单次 HTTP 请求 sidecar（重放国密通道，2026-10-07）：Python 生态无带 SM 密码套件的 TLS 栈（ssl 是 OpenSSL 薄绑定且未编 SM 套件、gmssl/gmalg/pygmssl 只有密码学原语），故国密走本 Go 二进制（tjfoc/gmsm gmtls）。源码 tools/gmhttp/，构建 scripts/build_gmhttp.py"
   }
 }

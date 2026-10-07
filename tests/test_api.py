@@ -4556,3 +4556,48 @@ def test_workspace_hygiene_bloat_error_level(client, tmp_path, monkeypatch):
     proj = next(p for p in body["projects"] if p["slug"] == slug)
     assert proj["bloat"][0]["level"] == "error"
     assert body["summary"]["errors"] == 1
+
+
+# ---------- 重放工作台 API（2026-10-07）：gm-status / replay run_id + stop ----------
+
+def test_browser_gm_status_shape(client):
+    """国密能力探测端点：恒 200，形状 {available, path, guide}（供前端置灰开关）。"""
+    pid = _make_project(client, track="pentest")
+    r = client.get(f"/api/projects/{pid}/browser/gm-status")
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body) == {"available", "path", "guide"}
+    assert isinstance(body["available"], bool)
+    assert isinstance(body["guide"], str)
+
+
+def test_browser_replay_returns_run_id_and_stop_404_when_idle(client):
+    """重发返回 {job_id, run_id}；未知 run_id 恒 404；job 收尾后 run 表已清理（再 stop 404）。"""
+    pid = _make_project(client, track="pentest")
+    r = client.post(f"/api/projects/{pid}/browser/replay",
+                    json={"raw": "GET http://127.0.0.1:9/ HTTP/1.1\nHost: x\n\n",
+                          "timeout_s": 2})
+    assert r.status_code == 202
+    body = r.json()
+    assert body["job_id"] and body["run_id"].startswith("rp-")
+    assert client.post(
+        f"/api/projects/{pid}/browser/replay/rp-nope/stop").status_code == 404
+    # 等 job 收尾（连接被拒很快；finally 会把 run_id 从 replay_runs 摘除）
+    for _ in range(100):
+        if client.get(f"/api/jobs/{body['job_id']}").json()["status"] != "running":
+            break
+        time.sleep(0.05)
+    assert client.post(
+        f"/api/projects/{pid}/browser/replay/{body['run_id']}/stop").status_code == 404
+
+
+def test_browser_replay_accepts_transport_options(client):
+    """传输选项透传（强制HTTPS/重定向/体长/跳过校验/代理/国密）——202 即受理。"""
+    pid = _make_project(client, track="pentest")
+    r = client.post(f"/api/projects/{pid}/browser/replay", json={
+        "raw": "GET http://127.0.0.1:9/ HTTP/1.1\nHost: x\n\n",
+        "force_https": True, "follow_redirects": False,
+        "proxy": "http://127.0.0.1:1", "body_max_bytes": 4096,
+        "insecure": True, "gm_tls": True, "timeout_s": 2,
+    })
+    assert r.status_code == 202

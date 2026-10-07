@@ -1327,6 +1327,15 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
         <span className={cn("ml-1 shrink-0 font-mono text-[10px]", connected ? "text-primary" : "text-(--status-error)")}>
           {connected ? "● live" : "○ 重连中"}
         </span>
+        {/* 重放工作台入口（2026-10-07）：渗透/红队现场随时开重放台手工验 POC（轨门控在视图内） */}
+        <button
+          type="button"
+          title="打开重放工作台（Web Fuzzer）"
+          onClick={() => window.dispatchEvent(new CustomEvent("goto-fuzzer"))}
+          className="ml-1 shrink-0 rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+        >
+          🧪
+        </button>
         {/* 审计入口（2026-09-28 三段式改造）：类型筛选 chips 从主区撤除迁入审计抽屉 */}
         {true && (
           <button

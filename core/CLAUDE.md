@@ -36,7 +36,7 @@
 - 逆向工作台（P1/P2）：track=research ⇒ profile=rev-generic（前端 `deriveWorkbenchProfile`，config.workbench.profile 可覆盖；**2026-09-29 修**：M3 起 caps 多选退役、创建恒不传 caps，旧「caps 含 binary」判据已死——M3 后新建 research 项目全误落渗透模板；现按 config.board_view.default 非 funcs〔如 code-audit 档 findings〕交还渗透黑板）；三层数据——headless 缓存 JSON（**v3 契约**：客观全量+strings，可删重导）/ func_kb（只存分析过的函数）/ findings（挂 binary 资产，evidence 带 func_id+address）；headless 是 trusted **解析**工具，平台绝不执行样本。
 - Agent 无裸 shell：唯一命令口是经网关的 run_cmd；不可信代码只进 docker/sandbox，WSL 信任级=宿主机。
 - 安全默认宁严勿松：未知样本按恶意处理（L3 + fakenet）；fakenet 尚未实现（显式 NotImplementedError）。
-- 工具异常回填文本不中断循环；LLM 传输层按类别重试（标准 5xx 失败后重试 10 次、共 11 次尝试；429 共 2 次尝试；连接类共 4 次 + 5/10/20s 退避；OpenAI 520/524 保持各自专用预算），连接/TLS/超时分类由 SDK 承担，**含流式 body 半途断开的裸 httpx 异常与 SSE 流内 `{"error":...}` 帧（`_as_conn_error` 兜底映射/转 `TransientStreamError`，见 `core/llm/CLAUDE.md`）**。
+- 工具异常回填文本不中断循环；LLM 传输层按类别重试（标准 5xx 共 10 次尝试、退避封顶 30s；429 共 2 次尝试；连接类共 4 次 + 5/10/20s 退避；OpenAI 520/524 保持各自专用预算），连接/TLS/超时分类由 SDK 承担，**含流式 body 半途断开的裸 httpx 异常与 SSE 流内 `{"error":...}` 帧（`_as_conn_error` 兜底映射/转 `TransientStreamError`，见 `core/llm/CLAUDE.md`）**。
 
 ## 测试
 

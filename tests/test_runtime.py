@@ -230,6 +230,7 @@ def test_docker_run_once_mounts_and_cwd(monkeypatch):
     d.run_once("img", "id", net="bridge", mounts=[(r"E:\proj\ws", "/workspace")],
                cwd="/workspace/scratch")
     argv = calls[0]
+    assert "--rm" in argv                        # P0：L2 一次性生命周期（曾漏致残留堆积）
     assert argv[argv.index("-v") + 1] == "E:/proj/ws:/workspace"
     assert argv[argv.index("-w") + 1] == "/workspace/scratch"
     d.run_once("img", "id", net="none", sandbox=True,
@@ -273,6 +274,100 @@ def test_gateway_docker_workspace_mount_and_deny(bb, tmp_path):
     with pytest.raises(GatewayDenied, match="工作区隔离"):
         gw.run("curl -o /etc/evil x", runtime="docker", threat_class="trusted",
                project_id=pid, workspace=ws)
+
+
+# ---------- 网关：会话级常驻容器路由（P3，2026-10-07） ----------
+
+_UNSET = object()
+
+
+class _FakeManager:
+    """假 SessionContainerManager：记录 exec 调用，供路由断言。"""
+
+    def __init__(self, enabled=True, result=_UNSET):
+        self.enabled = enabled
+        self.execs = []
+        self._result = (ExecOutcome(exit_code=0, stdout="via-exec")
+                        if result is _UNSET else result)
+
+    def exec(self, pid, sid, cmd, *, timeout, abort_event, image, net, mounts, cwd):
+        self.execs.append({"pid": pid, "sid": sid, "cmd": cmd, "net": net,
+                           "mounts": mounts, "cwd": cwd})
+        return self._result
+
+
+class _RecDocker:
+    def __init__(self):
+        self.calls = []
+
+    def run_once(self, image, cmd, *, net, sandbox, timeout,
+                 abort_event=None, mounts=None, cwd=None):
+        self.calls.append({"image": image, "cmd": cmd, "net": net,
+                           "sandbox": sandbox, "mounts": mounts, "cwd": cwd})
+        return ExecOutcome(exit_code=0, stdout="via-runonce")
+
+
+def test_gateway_docker_sess_routes_to_manager(bb, tmp_path):
+    """sess-* 会话 + 管理器可用 → 走 exec 复用，不回落 run_once。"""
+    pid = bb.create_project("t-sc", "pentest")["id"]
+    fd, fm = _RecDocker(), _FakeManager()
+    gw = ExecutionGateway(bb=bb, backends={"docker": fd}, containers=fm)
+    ws = tmp_path / "ws"
+    r = gw.run("id", runtime="docker", threat_class="trusted", project_id=pid,
+               session_id="sess-001122334455", workspace=ws)
+    assert r.stdout == "via-exec"
+    assert fd.calls == []                              # 未回落 per-call
+    assert fm.execs[0]["mounts"] == [(str(ws), "/workspace")]
+    assert fm.execs[0]["cwd"] == "/workspace/scratch"
+    assert fm.execs[0]["net"] == "bridge"
+
+
+def test_gateway_docker_falls_back_without_session(bb, tmp_path):
+    """无会话 / 非 sess- 前缀 / 管理器禁用 → 一律回落 run_once（绝不失败）。"""
+    pid = bb.create_project("t-fb", "pentest")["id"]
+    fd, fm = _RecDocker(), _FakeManager()
+    gw = ExecutionGateway(bb=bb, backends={"docker": fd}, containers=fm)
+    ws = tmp_path / "ws"
+    for sid in (None, "chat-abc123", "rev-workbench"):
+        gw.run("id", runtime="docker", threat_class="trusted", project_id=pid,
+               session_id=sid, workspace=ws)
+    assert len(fd.calls) == 3 and fm.execs == []
+
+    fm.enabled = False                                  # kill switch
+    gw.run("id", runtime="docker", threat_class="trusted", project_id=pid,
+           session_id="sess-001122334455", workspace=ws)
+    assert len(fd.calls) == 4 and fm.execs == []
+
+
+def test_gateway_docker_falls_back_when_manager_returns_none(bb, tmp_path):
+    """管理器建容器失败（exec 返回 None）→ 回落 run_once，命令仍执行。"""
+    pid = bb.create_project("t-none", "pentest")["id"]
+    fd, fm = _RecDocker(), _FakeManager(result=None)
+    gw = ExecutionGateway(bb=bb, backends={"docker": fd}, containers=fm)
+    r = gw.run("id", runtime="docker", threat_class="trusted", project_id=pid,
+               session_id="sess-001122334455", workspace=tmp_path / "ws")
+    assert r.stdout == "via-runonce" and len(fd.calls) == 1
+
+
+def test_gateway_sandbox_never_uses_manager(bb):
+    """L3 铁律：sandbox 恒走 per-execution run_once，即使有 sess- 会话也不经管理器。"""
+    pid = bb.create_project("t-sb", "pentest")["id"]
+
+    class _SandboxDocker:
+        def __init__(self):
+            self.calls = 0
+
+        def run_once(self, image, cmd, *, net, sandbox, timeout,
+                     abort_event=None, mounts=None, cwd=None):
+            self.calls += 1
+            assert sandbox is True
+            return ExecOutcome(exit_code=0, stdout="sandbox")
+
+    fd, fm = _SandboxDocker(), _FakeManager()
+    gw = ExecutionGateway(bb=bb, backends={"sandbox": fd}, containers=fm)
+    r = gw.run("id", runtime="sandbox", threat_class="untrusted", project_id=pid,
+               session_id="sess-001122334455")
+    assert r.stdout == "sandbox" and fd.calls == 1 and fm.execs == []
 
 
 # ---------- detector ----------

@@ -15,7 +15,7 @@ from typing import Any
 
 from core.llm import parsing
 from core.llm.provider import ContextOverflowError, LLMError, LLMResponse, ToolCall
-from core.llm.retry import HTTP_5XX_ATTEMPTS, HTTP_5XX_RETRIES, HTTP_5XX_STATUS
+from core.llm.retry import HTTP_5XX_ATTEMPTS, HTTP_5XX_BACKOFF, HTTP_5XX_RETRIES, HTTP_5XX_STATUS
 from core.llm.sdk_engine import RawFallback, build_anthropic_transports
 
 log = logging.getLogger(__name__)
@@ -42,13 +42,14 @@ StreamTransport = Callable[[str, dict[str, str], bytes], tuple[int, Any]]
 响应流 = SSE 逐行可迭代（字节行或 str 行均可，带 close 则用毕关闭）；
 HTTP 非 200 时第二元为解析后的错误 dict（与非流式 transport 对齐）。"""
 
-# 429 保持原有快速失败预算；标准上游 5xx 使用共享的 10 次重试预算。
+# 429 保持原有快速失败预算；标准上游 5xx 使用共享的 10 次尝试预算 + 封顶 30s 退避。
 RETRYABLE_STATUS = {429, *HTTP_5XX_STATUS}
 RATE_LIMIT_ATTEMPTS = 2
 MAX_RETRIES = RATE_LIMIT_ATTEMPTS  # 兼容旧测试/调用方：429 总尝试次数
 # 2026-09-28：backoff 3→30——实测 ark 网关对大 max_tokens 请求有分钟级坏窗口（同分钟
 # 小预算请求秒通、大预算挂起，坏窗口可持续 6 分钟+，实测 11:25-11:31 三连超时实例）。
 # 原 3/6s 间隔三次尝试全落同一窗口；30/60s 让第②③次尝试有机会跨入恢复窗口。
+# 2026-10-07：本常量现仅用于 429 退避；标准 5xx 改用共享 HTTP_5XX_BACKOFF（封顶 30s）。
 RETRY_BACKOFF = 30.0
 # 连接类故障（TCP 重置/断连/超时，如 WSAECONNRESET 10054 / TLS SSLEOFError）单独
 # 更宽松（2026-10-01 事故修复）：这类多为网关侧瞬时抖动，重试命中率远高于 5xx 坏
@@ -265,7 +266,8 @@ class AnthropicCompatProvider:
                         if status == 429:
                             time.sleep(RETRY_BACKOFF * rate_limit_used)
                         else:
-                            time.sleep(RETRY_BACKOFF * status_5xx_used)
+                            time.sleep(HTTP_5XX_BACKOFF[min(
+                                status_5xx_used - 1, len(HTTP_5XX_BACKOFF) - 1)])
                         continue
                     raise LLMError(msg, status=status,
                                    body=json.dumps(data, ensure_ascii=False)[:500])

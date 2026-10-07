@@ -27,6 +27,7 @@ from core.runtime.backends import (
 )
 from core.runtime.pathguard import windows_to_wsl_path
 from core.runtime.policy import DEFAULT_NET_MODE, NET_MODES, RUNTIME_LEVELS, Level, allowed_levels
+from core.runtime.sessioncontainers import SessionContainerManager
 
 #: docker runtime 的 workspace 挂载约定（pentest-tools-container-m0）：
 #: 宿主 <workspace> 挂容器 /workspace 读写，cwd 固定 /workspace/scratch
@@ -97,10 +98,14 @@ class ExecutionGateway:
         *,
         default_timeout: float = 120.0,
         sandbox_image: str = DEFAULT_SANDBOX_IMAGE,
+        containers: SessionContainerManager | None = None,
     ):
         self.bb = bb
         self.default_timeout = default_timeout
         self.sandbox_image = sandbox_image
+        # 会话级常驻容器管理器（P3，2026-10-07）：None=关闭（默认），恒走 per-call run_once。
+        # 仅 sess-* 会话的 docker runtime 会经它复用容器；sandbox/其它 runtime 不受影响。
+        self.containers = containers
         self.backends: dict[str, Any] = backends or {
             "host": NativeBackend(),
             "wsl": WSLBackend(),
@@ -215,7 +220,8 @@ class ExecutionGateway:
             # 立即返回 interrupted，不等命令自然结束；结果 ok=False 进 command.result
             outcome = self._dispatch(exec_cmd, runtime, timeout, net, image,
                                      cwd=cwd, env=env, abort_event=abort_event,
-                                     mounts=mounts)
+                                     mounts=mounts, project_id=project_id,
+                                     session_id=session_id)
         except BackendError as e:
             raise _audit_deny(f"后端不可用: {e}") from e
         except NotImplementedError as e:
@@ -299,16 +305,29 @@ class ExecutionGateway:
                   image: str | None, cwd: str | None = None,
                   env: dict[str, str] | None = None,
                   abort_event: threading.Event | None = None,
-                  mounts: list[tuple[str, str]] | None = None) -> ExecOutcome:
+                  mounts: list[tuple[str, str]] | None = None,
+                  project_id: str | None = None,
+                  session_id: str | None = None) -> ExecOutcome:
         backend = self.backends.get(runtime)
         if backend is None:
             raise BackendError(f"runtime {runtime} 无对应后端")
         if runtime == "sandbox":
+            # L3 铁律（per-execution 一次性 + 零挂载 + 断网）：**永不**经常驻容器管理器
             return backend.run_once(
                 image or self.sandbox_image, cmd, net=net, sandbox=True, timeout=timeout,
                 abort_event=abort_event
             )
         if runtime == "docker":
+            # 会话级常驻容器（P3，2026-10-07）：仅 sess-* 会话走 exec 复用；无会话上下文
+            # （chat-/rev-workbench）或建容器失败 → 回落 per-call run_once（绝不失败）
+            mgr = self.containers
+            if (mgr is not None and mgr.enabled
+                    and session_id and session_id.startswith("sess-")):
+                out = mgr.exec(project_id or "", session_id, cmd, timeout=timeout,
+                               abort_event=abort_event, image=image, net=net,
+                               mounts=mounts, cwd=cwd)
+                if out is not None:
+                    return out
             return backend.run_once(image or DEFAULT_PENTEST_IMAGE, cmd, net=net,
                                     sandbox=False, timeout=timeout,
                                     abort_event=abort_event,

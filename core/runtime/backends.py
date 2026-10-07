@@ -210,25 +210,95 @@ class DockerBackend:
     def run_once(self, image: str, cmd: str, *, net: str = "none", sandbox: bool = False,
                  timeout: float = 300.0, abort_event: threading.Event | None = None,
                  mounts: list[tuple[str, str]] | None = None,
-                 cwd: str | None = None) -> ExecOutcome:
+                 cwd: str | None = None,
+                 name: str | None = None,
+                 labels: dict[str, str] | None = None) -> ExecOutcome:
         """一次性容器执行。sandbox=True 时强制 L3 加固参数（忽略 mounts——L3 零挂载）。
         mounts=[(宿主路径, 容器路径), ...]（L2 workspace 卷挂载，pentest-tools-container-m0）；
         cwd=容器内工作目录（网关固定 /workspace/scratch，对齐 host/wsl 相对路径习惯）。
-        中断杀 docker CLI 客户端；--rm 容器侧残留由容器生命周期兜底（已知局限）。"""
+        name/labels（P1，2026-10-07）：固定容器名 + 标签使残留可识别可回收（默认 None=现状）。
+        **两条路径均带 --rm 一次性生命周期**——L2 曾漏 --rm 致「已停容器残留堆积」
+        （container-execution-architecture §2 已知小坑），每次 docker run 留一个 exited
+        容器，累积上千拖垮 Docker Desktop 仪表盘。中断杀 docker CLI 客户端属已知局限，
+        由 SessionContainerManager 的对账/reaper 兜底。"""
         argv = ["run"]
         if sandbox:
             argv += sandbox_docker_args(net)
         else:
-            argv += ["--network", net if net in {"none", "bridge"} else "none"]
+            argv += ["--rm", "--network", net if net in {"none", "bridge"} else "none"]
             for host_path, cpath in (mounts or []):
                 # 宿主路径转正斜杠：docker -v 在 Windows 上两种斜杠都收，正斜杠免转义
                 argv += ["-v", f"{str(host_path).replace(chr(92), '/')}:{cpath}"]
             if cwd:
                 argv += ["-w", cwd]
+        if name:
+            argv += ["--name", name]
+        for k, v in (labels or {}).items():
+            argv += ["--label", f"{k}={v}"]
         argv += [image, "sh", "-c", cmd]
         return self._docker(argv, timeout, abort_event)
 
+    def run_detached(self, image: str, cmd: str, *, name: str,
+                     labels: dict[str, str], net: str = "none",
+                     timeout: float = 60.0,
+                     mounts: list[tuple[str, str]] | None = None,
+                     cwd: str | None = None) -> ExecOutcome:
+        """常驻容器（会话级 P3，2026-10-07）：`docker run -d` 起长驻容器，后续命令走
+        exec_in。与 run_once 的区别：detached（-d）、固定 name、必带 labels、
+        **绝不带 --rm**（常驻容器自毁会毁掉复用语义）。生命周期由
+        SessionContainerManager 管理（冻结/删除/对账/reap）。"""
+        argv = ["run", "-d", "--name", name,
+                "--network", net if net in {"none", "bridge"} else "none"]
+        for k, v in labels.items():
+            argv += ["--label", f"{k}={v}"]
+        for host_path, cpath in (mounts or []):
+            argv += ["-v", f"{str(host_path).replace(chr(92), '/')}:{cpath}"]
+        if cwd:
+            argv += ["-w", cwd]
+        argv += [image, "sh", "-c", cmd]
+        return self._docker(argv, timeout)
+
     def exec_in(self, container: str, cmd: str, timeout: float = 120.0,
-                abort_event: threading.Event | None = None) -> ExecOutcome:
-        """在已运行容器内执行（pwn 题目交互等场景）。"""
-        return self._docker(["exec", container, "sh", "-c", cmd], timeout, abort_event)
+                abort_event: threading.Event | None = None,
+                cwd: str | None = None) -> ExecOutcome:
+        """在已运行容器内执行（会话级常驻容器 / pwn 题目交互等场景）。
+        cwd=容器内工作目录（会话级路径固定 /workspace/scratch，对齐 L2 习惯）。"""
+        argv = ["exec"]
+        if cwd:
+            argv += ["-w", cwd]
+        argv += [container, "sh", "-c", cmd]
+        return self._docker(argv, timeout, abort_event)
+
+    # ---------- 容器生命周期原语（会话级常驻容器 P3） ----------
+
+    def stop(self, container: str, timeout: float = 30.0) -> ExecOutcome:
+        """停止容器（保留 FS，可 start 恢复）。冻结语义，非销毁。"""
+        return self._docker(["stop", "-t", "2", container], timeout)
+
+    def start(self, container: str, timeout: float = 30.0) -> ExecOutcome:
+        return self._docker(["start", container], timeout)
+
+    def restart(self, container: str, timeout: float = 30.0) -> ExecOutcome:
+        """重启容器——清空容器内残留进程（exec 被 abort 后子进程可能挂住）。"""
+        return self._docker(["restart", "-t", "2", container], timeout)
+
+    def rm(self, container: str, timeout: float = 30.0) -> ExecOutcome:
+        """强制删除容器（-f 兼容运行中，一并释放卷挂载句柄——Windows 删目录前必做）。"""
+        return self._docker(["rm", "-f", container], timeout)
+
+    def inspect_running(self, container: str, timeout: float = 15.0) -> bool:
+        """容器是否存在且处于运行中。inspect 对不存在的容器非零退出 → False。"""
+        o = self._docker(["inspect", "-f", "{{.State.Running}}", container], timeout)
+        return o.exit_code == 0 and o.stdout.strip() == "true"
+
+    def ps_by_label(self, selector: str, timeout: float = 15.0) -> list[str]:
+        """按 label 选择器列出容器名（含已停止）。selector 形如 "csp.managed=1"。
+
+        只用 {{.Names}} 做 format——`.Label "k"` 需在 argv 内嵌引号，Windows 下
+        CreateProcess 引号转义易被 docker CLI 曲解；会话/项目归属改由容器名
+        `csp_<pid>_<sid>` 编码（管理器解析），label 仅作 --filter 选择器。"""
+        o = self._docker(["ps", "-a", "--filter", f"label={selector}",
+                          "--format", "{{.Names}}"], timeout)
+        if o.exit_code != 0:
+            return []
+        return [ln.strip() for ln in o.stdout.splitlines() if ln.strip()]

@@ -7,7 +7,7 @@ from typing import Any
 from core.llm import parsing
 from core.llm.anthropic_compat import StreamTransport, Transport
 from core.llm.provider import LLMResponse, ToolCall, Usage, LLMError
-from core.llm.retry import HTTP_5XX_ATTEMPTS, HTTP_5XX_RETRIES, HTTP_5XX_STATUS
+from core.llm.retry import HTTP_5XX_ATTEMPTS, HTTP_5XX_BACKOFF, HTTP_5XX_RETRIES, HTTP_5XX_STATUS
 from core.llm.sdk_engine import RawFallback, build_openai_transports
 
 CHAT_COMPLETIONS = "openai-chat-completions"
@@ -24,12 +24,13 @@ OPENAI_524_ATTEMPTS = 5
 OPENAI_524_BACKOFF = (2.0, 4.0, 8.0, 16.0)
 OPENAI_CONNECTION_ATTEMPTS = 5
 OPENAI_CONNECTION_BACKOFF = (2.0, 4.0, 8.0, 16.0)
-# 上游标准 5xx（500/502/503/504）：失败后重试 10 次，共 11 次尝试。
+# 上游标准 5xx（500/502/503/504）：共 10 次尝试（首次 + 9 次重试），退避封顶 30s
+# ——与 Anthropic 路径统一口径（共享 HTTP_5XX_BACKOFF）。
 # 429 刻意不重试；520/524 继续使用各自的专用预算。
 OPENAI_5XX_RETRYABLE = tuple(sorted(HTTP_5XX_STATUS))
 OPENAI_5XX_ATTEMPTS = HTTP_5XX_ATTEMPTS
 OPENAI_5XX_RETRIES = HTTP_5XX_RETRIES
-OPENAI_5XX_BACKOFF = (2.0, 4.0, 8.0, 16.0, 30.0)
+OPENAI_5XX_BACKOFF = HTTP_5XX_BACKOFF
 
 
 class OpenAICompatProvider:

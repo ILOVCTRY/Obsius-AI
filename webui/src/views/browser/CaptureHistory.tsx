@@ -5,13 +5,13 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
 import { api } from "@/lib/api"
 import type { HttpHistoryRow } from "@/lib/types"
-import { ReplayForm, toRawRequest } from "./ReplayForm"
+import { toRawRequest } from "./ReplayForm"
 
 // 抓包历史（http_history 3s 增量游标）+ 单条详情弹窗（全量 body + 重发预填）
+// 2026-10-07：重发不再弹小 Dialog，改为跳「重放」工作台并预填报文（goto-fuzzer）。
 export function CaptureHistory({ pid }: { pid: string }) {
   const [rows, setRows] = useState<HttpHistoryRow[]>([])
   const [detail, setDetail] = useState<HttpHistoryRow | null>(null)
-  const [replayRow, setReplayRow] = useState<HttpHistoryRow | null>(null)
   const cursor = useRef(0)
 
   useEffect(() => {
@@ -71,13 +71,10 @@ export function CaptureHistory({ pid }: { pid: string }) {
           <DialogTitle className="font-mono text-xs">
             {detail?.method} {detail?.url} → {detail?.status ?? "—"}
           </DialogTitle>
-          {detail && <HistoryDetail row={detail} onReplay={() => { setReplayRow(detail); setDetail(null) }} />}
-        </DialogContent>
-      </Dialog>
-      <Dialog open={!!replayRow} onOpenChange={(o) => !o && setReplayRow(null)}>
-        <DialogContent className="max-w-2xl">
-          <DialogTitle className="text-xs">重发（贴原始报文可改包）</DialogTitle>
-          {replayRow && <ReplayForm pid={pid} initialRaw={toRawRequest(replayRow)} />}
+          {detail && <HistoryDetail row={detail} onReplay={() => {
+            window.dispatchEvent(new CustomEvent("goto-fuzzer", { detail: { raw: toRawRequest(detail) } }))
+            setDetail(null)
+          }} />}
         </DialogContent>
       </Dialog>
     </div>
@@ -108,7 +105,7 @@ function HistoryDetail({ row, onReplay }: { row: HttpHistoryRow; onReplay: () =>
         </Section>
       )}
       <div className="flex justify-end">
-        <Button size="sm" variant="outline" onClick={onReplay}>✉ 重发…</Button>
+        <Button size="sm" variant="outline" onClick={onReplay}>✉ 去重放台…</Button>
       </div>
     </div>
   )

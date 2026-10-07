@@ -2,7 +2,7 @@ import type {
   Approval, Artifact, ArtifactUploadResponse, Asset, AttachmentInfo, BBEvent, BinaryOverview, BinaryStrings,
   BrowserState, BrowserStatus, BrowserSessionInfo, WorkspaceTreeResponse, HttpHistoryRow, InterceptState,
   Blueprint, BlueprintModuleStatus, BlueprintStatus,
-  IntruderPayloadSpec, IntruderTemplate,
+  IntruderPayloadSpec, IntruderTemplate, ReplayOptions, GmStatus,
   CachedFuncRow, CachedFunction, Chain, ChainLink, ChainNodeType, ChainStatus, ChainSummary,
   LogicBlock, LogicBlockSummary,
   DecideApprovalResult, DoctorReport, DiscoveredModel, Finding, FindingPatchBody, FuncCreateBody, FuncEntry,
@@ -985,14 +985,23 @@ export const api = {
     http<{ removed: number }>(
       `/api/projects/${pid}/browser/history${batchId ? `?batch_id=${encodeURIComponent(batchId)}` : ""}`,
       { method: "DELETE" }),
-  /** 202 返回 job_id，pollJob 轮询；job.result = 重发结果 HttpHistoryRow。
-   *  F6-v3：原始报文 raw（解析在后端）或 capture_id 模板。 */
+  /** 202 返回 {job_id, run_id}，pollJob 轮询；job.result = 重发结果 HttpHistoryRow。
+   *  F6-v3：原始报文 raw（解析在后端）或 capture_id 模板。
+   *  2026-10-07：新增传输选项（强制HTTPS/重定向/代理/体长/跳过校验/国密TLS）。 */
   browserReplay: (pid: string, body: {
     capture_id?: number; raw?: string
-  }) =>
-    http<{ job_id: string }>(`/api/projects/${pid}/browser/replay`, {
+  } & ReplayOptions) =>
+    http<{ job_id: string; run_id: string }>(`/api/projects/${pid}/browser/replay`, {
       method: "POST", body: JSON.stringify(body),
     }),
+  /** 中断在跑的单条重发（httpx=放弃等待，国密 sidecar=kill 子进程）；不在运行 404 */
+  replayStop: (pid: string, runId: string) =>
+    http<{ stopped: boolean }>(
+      `/api/projects/${pid}/browser/replay/${encodeURIComponent(runId)}/stop`,
+      { method: "POST" }),
+  /** 国密 TLS 通道能力探测（工作台据此置灰开关；available=false 绝不静默降级） */
+  gmStatus: (pid: string) =>
+    http<GmStatus>(`/api/projects/${pid}/browser/gm-status`),
   /** F6-v3 拦截（仅人工浏览流量可挂起）：快照 / 开关 / 裁决 */
   browserIntercept: (pid: string) =>
     http<InterceptState>(`/api/projects/${pid}/browser/intercept`),

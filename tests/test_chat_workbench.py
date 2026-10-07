@@ -561,6 +561,41 @@ def test_classify_error_stream_category():
     assert "网关流异常" in info["title"]
 
 
+# ---------- 空响应自动重试 ----------
+
+def test_chat_empty_response_retries_in_memory(tmp_path):
+    """瞬时空响应只追加内存 nudge，下一次有文本即正常收尾。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    llm = FakeLLM([_resp(), _resp(text="恢复成功")])
+    turn, thread = _trunc_turn(bb, llm)
+    assert turn.run("继续分析") == "恢复成功"
+    assert len(llm.calls) == 2
+    assert any("必须返回可见文本回复" in _msg_text(m)
+               for m in llm.calls[1]["messages"])
+    messages = chat_store.list_messages(bb, thread["id"])
+    assert not any(m["role"] == "assistant" and not m["content"] for m in messages)
+    retries = [e for e in bb.recent_events("p1") if e["kind"] == "chat.retry"]
+    assert len(retries) == 1
+    assert {k: retries[0]["payload"][k] for k in
+            ("phase", "attempt", "total", "reason")} == {
+        "phase": "empty_response", "attempt": 1, "total": 3,
+        "reason": "empty_response"}
+
+
+def test_chat_empty_response_retries_exhausted(tmp_path):
+    """连续空响应最多重试 3 次，耗尽后保留现有 fallback 并正常收尾。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    llm = FakeLLM([_resp(), _resp(), _resp(), _resp()])
+    turn, thread = _trunc_turn(bb, llm)
+    assert "本轮未产出文本回复" in turn.run("继续分析")
+    assert len(llm.calls) == 4
+    retries = [e for e in bb.recent_events("p1") if e["kind"] == "chat.retry"]
+    assert [e["payload"]["attempt"] for e in retries] == [1, 2, 3]
+    assert chat_store.get_thread(bb, thread["id"])["status"] == "idle"
+
+
 # ---------- 纯文本终稿截断自动续写（2026-10-01） ----------
 
 def _trunc_turn(bb, llm, *, agent_id="web-solver"):
