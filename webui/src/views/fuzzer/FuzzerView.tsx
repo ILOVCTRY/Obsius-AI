@@ -128,7 +128,7 @@ export function FuzzerView({ pid, track, initialRaw }: {
 
   const requestPane = (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 items-center gap-1 border-b px-2 py-1 text-[11px] text-muted-foreground">
+      <div className="flex shrink-0 items-center gap-1 border-b px-2 py-1.5 text-[11px] text-muted-foreground">
         <span className="font-medium text-foreground">Request</span>
         <span className="flex-1" />
         <Button size="sm" variant="ghost" className="h-6 w-6 p-0" title="复制报文"
@@ -216,9 +216,9 @@ export function FuzzerView({ pid, track, initialRaw }: {
           <div className="min-w-0 flex-1">{requestPane}</div>
         ) : (
           <Group orientation="horizontal" className="h-full min-w-0 flex-1">
-            <Panel defaultSize={50} minSize="20%">{requestPane}</Panel>
+            <Panel defaultSize="50%" minSize="20%" className="min-h-0">{requestPane}</Panel>
             <Separator className="z-10 h-full w-px shrink-0 bg-border transition-colors hover:bg-primary/60 data-[separator-active]:bg-primary" />
-            <Panel minSize="20%" className="min-h-0">
+            <Panel defaultSize="50%" minSize="20%" className="min-h-0">
               <ResponsePane row={result} err={err} busy={busy} />
             </Panel>
           </Group>

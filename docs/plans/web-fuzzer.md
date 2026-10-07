@@ -4,8 +4,27 @@
 > 「改一行报文 → 发送 → 看完整响应 → 再改」的秒级迭代。把现有藏在浏览器右栏的
 > 单 textarea 重发，升级为独立双栏重放工作台。多请求爆破仍归 Intruder，本方案只做**单请求迭代**。
 
-- **状态**：讨论收敛（2026-09-24，含完整设计；待用户过目后排期实施）
+- **状态**：**M1 已实施（2026-10-07，见文内 §0 实施记录）；M2/M3 待排期**
 - **拍板记录**：见 §2 决策表（D1-D5；均为工程常规决策——后端零新端点、沿用既有白名单与人类专属红线）
+
+## 0 实施记录（2026-10-07）
+
+**已落地**：独立顶级「重放」视图（`webui/src/views/fuzzer/`，NavRail 第 9 项，轨门控 pentest/redteam/ctf）+ 双栏工作台（react-resizable-panels 默认 50/50）+ 响应区（状态行/响应头·体 tab/JSON 美化/字符集重解/定位）+ 历史抽屉（source=replay，打开才拉）+ 抓包行「去重放台」与直播间顶栏 🧪 两处入口（`goto-fuzzer` CustomEvent 带 raw 预填）。
+
+**补修（2026-10-07）**：
+- `httpmsg.parse_raw_request` 增 `Host` 头兜底——贴标准 origin-form 报文（相对路径请求行 + `Host` 头，DevTools/Burp/Yakit 复制出来的即此形态）此前因无 `base_url` 直接 422「相对路径 URL 需要 base_url 兜底」；现 `base_url` 为空时用报文自身 `Host` 拼 `http://<host>`（报文不带 scheme 故默认 http，https 由「强制HTTPS」重写）。绝对 URL 与抓包预填链路不受影响；错误文案改为面向用户。
+- `replay.ReplayClient.replay` 剥 `Content-Length`/`Transfer-Encoding`——改包后 body 长度常变，由客户端按实际 body 重算 framing（同 Burp/Yakit 自动重算，与 capture 拦截路径同口径），否则 httpx 报「Too little data for declared Content-Length」请求发不出去。
+- 前端响应区改**完整原始报文单栏**（去「响应体/响应头」tab）；双栏 `defaultSize` 修 `"50%"` 字符串（v4 里 number=px，曾塌成 20%）。
+
+**与本文设计的偏离（实施时用户拍板，以此为准）**：
+1. **D5「后端零新端点」不再成立**——用户要求「全量对齐截图」，控件超出本方案 D2/D3 与 §5「明确不做」的范围：新增 强制HTTPS / 国密TLS / 跟随重定向开关 / 设置代理（显式）/ 响应体长度限制 / 停止 / 构造请求。后端 `ReplayClient.replay` 扩 `ReplayOptions` + `stop_event`，`POST /browser/replay` 扩参并返回 `run_id`，新增 `POST /browser/replay/{run_id}/stop` 与 `GET /browser/gm-status`。
+2. **§5「明确不做」的 TLS/设置代理/响应体长度限制三项本期做了**；代理语义定为**显式代理**（绝不跟随系统代理，`trust_env=False` 红线不破）。
+3. **国密TLS 走 Go sidecar**（本方案未涉及）：Python 生态无带 SM 密码套件的 TLS 栈，故新增 `tools/gmhttp/`（Go + tjfoc/gmsm gmtls）+ `scripts/build_gmhttp.py`；二进制缺失=国密不可用、开关置灰，**绝不静默降级**。
+4. **BrowserView 右栏「重发」tab 未退役**（本方案 D1/§2.2 曾计划收口）——本次只做「新增工作台」，不删既有 UI；是否收口待后续拍板。
+5. **422 一键登记资产（D3）未做**——用户拍板「保持任意目标」，不设门禁。
+6. 编码工具钮（§3 M3）未做。
+
+**剩余**：M2（FindingDetailDialog 预填 / 历史两条 Diff / curl 导入 / HTML 预览 / CodeMirror）与 M3（编码工具钮 / 一键挂 finding 证据）待排期。
 - **关联代码**：
   - `core/browser/replay.py`（`ReplayClient.replay`：raw 原始报文解析/白名单/入 http_history source="replay"，已完备）、`core/browser/httpmsg.py`（parse/render 报文纯函数）、`core/browser/policy.py`（check_target）
   - `core/api/app.py`（`POST /browser/replay` 202 Job、history GET/单行 GET 已全）

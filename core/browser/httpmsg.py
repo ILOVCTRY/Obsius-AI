@@ -35,7 +35,8 @@ def _join_url(url: str, base_url: str) -> str:
     if "://" in url:
         return url
     if not base_url:
-        raise ValueError(f"相对路径 URL 需要 base_url 兜底: {url}")
+        raise ValueError(
+            f"相对路径请求行缺少目标主机（补 Host 头或写成绝对 URL）: {url}")
     b = urlsplit(base_url)
     if url.startswith("/"):
         return urlunsplit((b.scheme, b.netloc, url, "", ""))
@@ -67,10 +68,24 @@ def _parse_headers(lines: list[str]) -> dict:
     return headers
 
 
+def _header_get(headers: dict, name: str) -> str:
+    """大小写不敏感取单头值（``_parse_headers`` 保留原键名）。"""
+    lower = name.lower()
+    for k, v in headers.items():
+        if k.lower() == lower:
+            return v
+    return ""
+
+
 def parse_raw_request(text: str, *, base_url: str = "") -> dict:
     """原始请求报文 → {method, url(绝对), headers, body, is_binary}。
 
     坏请求行/非法头 ValueError → API 层 422。
+
+    ``base_url`` 为空且请求行为相对路径时，回退用**报文自身的 ``Host`` 头**拼
+    ``http://<host>``——标准 HTTP origin-form 报文（DevTools/Burp/Yakit/mitmproxy
+    复制出来的原始报文）请求行恒为相对路径、主机在 ``Host`` 头，此前无模板兜底即 422。
+    报文不带 scheme，故默认 http；需 https 由上层「强制HTTPS」选项重写。
     """
     lines, body = _parse_head_and_body(text)
     if not lines:
@@ -78,8 +93,13 @@ def parse_raw_request(text: str, *, base_url: str = "") -> dict:
     parts = lines[0].split()
     if len(parts) < 2:
         raise ValueError(f"非法请求行: {lines[0][:60]}")
-    method, url = parts[0].upper(), _join_url(parts[1], base_url)
+    method = parts[0].upper()
     headers = _parse_headers(lines[1:])
+    if not base_url:
+        host = _header_get(headers, "host")
+        if host:
+            base_url = f"http://{host}"
+    url = _join_url(parts[1], base_url)
     return {"method": method, "url": url, "headers": headers,
             "body": body, "is_binary": False}
 

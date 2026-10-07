@@ -286,6 +286,16 @@ L0 host < L1 wsl < L2 docker < L3 sandbox（--rm 一次性 / 断网 / 512m / cap
 
 F6 内置浏览器持久化上下文（`core/browser/pool.py` launch_persistent_context）**默认 `ignore_https_errors=True`**——证书过期/自签/CN 不符一律放行加载（用户定稿）。风险边界可控：导航前必经 `check_target` 资产白名单硬校验，MITM 面只可能发生在已登记授权目标，且浏览器流量全程经 route 抓落入 http_history 可审计；`config/browser.json` 可设 `ignore_https_errors:false` 关回严格口径（`BrowserConfig` 白名单字段）。背景事故：目标 booklocation.zut.edu.cn 证书 2026-05-06 过期，Chromium `ERR_CERT_DATE_INVALID` 致 Agent 三次合理换路重试被错计为「拒绝熔断」挂起任务；与 curl `-k` 侦察口径对齐。
 
+## Web Fuzzer 重放工作台与国密 TLS sidecar（2026-10-07 实施）
+
+**背景**：单条重发原先是 F6 浏览器右栏（300–560px）里的一个原始报文 textarea，改包→发送→看响应的秒级 POC 迭代被空间局促与无历史拖累。升格为**顶级「重放」视图**（前端 `webui/src/views/fuzzer/`，轨门控 pentest/redteam/ctf）：左 raw 报文编辑器 / 右完整响应（react-resizable-panels 默认 50/50），工具条 = 发送（Alt/Ctrl+Enter）/ 停止 / 构造请求（表单建包）/ 历史抽屉 / 强制HTTPS / 国密TLS / 跟随重定向 / 跳过证书校验 / 设置代理 / 响应体长度限制；响应区含状态行（状态码·耗时·字节数）+ 响应头/体 tab + JSON 美化 + 字符集重解 + 定位。入口走 `goto-fuzzer` CustomEvent（抓包行「去重放台」、直播间顶栏 🧪）。
+
+**传输双路**（`core/browser/replay.py::ReplayClient`）：默认 httpx（`ReplayOptions` 全量对齐控件：`force_https`/`follow_redirects`/`proxy`/`body_max_bytes`/`insecure`/`timeout_s`/`server_name`/客户端证书与 CA；恒 `trust_env=False`，**显式 `proxy` 是用户主动指定**，与「不打系统代理」红线不冲突）；勾「国密TLS」切 `gmhttp` sidecar。失败/中断也入库（status=None + meta.error），meta 记 `gm_tls`/`proxy`。**中断语义**：httpx = 放弃等待（sync 不可真中止），国密 sidecar = kill 子进程（真停止）。API：`POST /browser/replay` 返回 `{job_id, run_id}`，`POST /browser/replay/{run_id}/stop` 中断，`GET /browser/gm-status` 能力探测。
+
+**国密 TLS 为什么外挂 Go**：Python 的 `ssl` 是 OpenSSL 薄绑定——本机 OpenSSL 未编入 SM 密码套件（`get_ciphers()` 仅 3 个标准 TLS1.3 套件、任何 SM 名报 `No cipher can be selected`），Python 又未暴露 `set_ciphersuites`；PyPI 的 gmssl/gmalg/pygmssl/gmssl-python 只有 SM2/SM3/SM4 **密码学原语**（`gmssl-python` 文档明写「只能覆盖除 SSL/TLS/TLCP 之外的功能算法」），`tlslite-ng` 纯 Python TLS 亦无 SM4/SM2。各生态通行解法是自带 SM 套件的 TLS 栈（Go `tjfoc/gmsm/gmtls` / Java BouncyCastle / C 侧 Tongsuo·GmSSL），**Python 无对应物**；用原语手写 TLCP 属研究级安全关键工程，不该由 UI 开关承载。故引入 `tools/gmhttp/`（Go + gmtls，纯 Go 零 cgo，一次性进程 stdin JSON → stdout JSON、body base64），构建 `scripts/build_gmhttp.py` → `tools/bin/gmhttp.exe`（registry `acquire=bundled`，桌面打包随包旁挂）。
+
+**红线**：**二进制缺失 = 国密不可用**（`gm_available()` 探测 → 前端开关置灰 + 安装指引），**绝不静默降级成普通 TLS**——否则会制造「以为走了国密、实际没走」的安全假象。重发/爆破/拦截裁决仍是**人类 UI 专属**（Agent 无任何发起入口，只能只读 `http_history`）；目标不设门禁（授权边界由使用者负责，与 F6 浏览器同口径）。
+
 ## 网关流水线
 
 `run(cmd, runtime)` 九步序：would_deny 干跑（与真实执行同口径，杜绝两处校验漂移）→ 网络模式缺省（net=real 自 2026-10-01 起不再人工审批，由调用方直接指定）→ 工作区隔离改造（cwd/TEMP 重定向；docker 卷挂载）→ 限速检查 → 执行前审计事件 → 按后端执行 → 结果审计 → 审批一次性消费（仍服务越界 runtime 等场景）→ 拒绝统一协议（GatewayDenied 回填改道不炸循环）。

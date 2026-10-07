@@ -214,6 +214,21 @@ function createBrowserTab(pid, requestedSid) {
   view.webContents.on("did-navigate", (_event, url) => { tab.url = url; sendTabs() })
   view.webContents.on("did-navigate-in-page", (_event, url) => { tab.url = url; sendTabs() })
   view.webContents.on("page-title-updated", (_event, title) => { tab.title = title || tab.url; sendTabs() })
+  // 协议守卫（2026-10-07）：网页里的自定义深链（如抖音的 bytedance://）此前无拦截，
+  // Chromium 把它当外部协议交给 OS → Windows 弹「获取打开此'bytedance'链接的应用」系统窗。
+  // 标签只浏览 web：非 http(s)/about 一律不动作；_blank/window.open 的 http(s) 改在
+  // 当前标签打开（避免冒出裸 BrowserWindow），其余 deny。
+  const blockProto = (event, url) => {
+    if (url === "about:blank") return
+    if (/^https?:/i.test(url)) return
+    event.preventDefault()
+  }
+  view.webContents.on("will-navigate", blockProto)
+  view.webContents.on("will-redirect", blockProto)
+  view.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:/i.test(url)) void view.webContents.loadURL(url)
+    return { action: "deny" }
+  })
   view.webContents.on("dom-ready", async () => {
     try { await view.webContents.executeJavaScript(`window.name = ${JSON.stringify(sid)}`) } catch (_) {}
     await postAttach(tab)

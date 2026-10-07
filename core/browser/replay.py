@@ -133,6 +133,12 @@ class ReplayClient:
             hs = dict(row.get("req_headers") or {})
             b = row.get("req_body")
             modified = False
+        # 改包重发语义：报文里的 Content-Length 常与改后 body 不符（改一行就错位），
+        # 剥掉 framing 头由客户端按实际 body 重算——同 Burp/Yakit 自动重算，与 capture
+        # 拦截路径（剥 content-length/host）同口径。否则 httpx 直接报「Too little data
+        # for declared Content-Length」请求发不出去。
+        hs = {k: v for k, v in hs.items()
+              if k.lower() not in ("content-length", "transfer-encoding")}
         if not u:
             raise ValueError("缺少重放目标 url（贴原始报文或给 capture_id）")
         if opts.force_https:

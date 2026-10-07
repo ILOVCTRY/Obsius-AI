@@ -6,7 +6,9 @@
 ## 组件树
 
 - `FuzzerView.tsx` 入口：顶部工具条 + 左 raw 编辑器 + 右响应（react-resizable-panels
-  v4 `Group/Panel/Separator`，默认 50/50、各最小 20%）。
+  v4 `Group/Panel/Separator`，默认 50/50、各最小 20%）。**`defaultSize` 必须写带 `%` 的字符串**
+  —— v4 里 number 是**像素**，写 `defaultSize={50}` 会被 `minSize="20%"` clamp 成 20%（左侧塌窄）。
+  两侧 header 统一 `px-2 py-1.5 text-[11px]`、编辑区统一 `min-h-0 flex-1 border-0 p-2` 铺满，保证上下对齐。
   - **工具条**：发送请求（Alt+Enter / Ctrl+Enter）/ 停止 / 构造请求（表单式建包弹层）/
     历史（左抽屉）/ 强制HTTPS / 国密TLS / 跟随重定向 / 跳过证书校验 / 设置代理（+ 地址输入）/
     响应体长度限制（KB）。工具条控件用本地 `Toggle` 小组件（自绘开关）。
@@ -16,7 +18,8 @@
   - **全屏**：请求编辑器可全屏（隐藏响应区与抽屉）。
   - 轨门控：`!track || track ∈ {pentest, redteam, ctf}`，否则整页提示不可用。
 - `ResponsePane.tsx` 响应区：状态行（`状态码 · 耗时ms · 字节数` + 国密/代理/已截断/二进制徽章）
-  + 子 tab「响应体 / 响应头」；**美化**（JSON parse+2 空格缩进，失败置灰）；
+  + **完整原始响应报文单栏**（`HTTP/1.1 <status>` + 响应头 + 空行 + 响应体，对齐 Burp/Yakit
+  原始报文形态；**不再拆「响应体 / 响应头」tab**）；**美化**（JSON parse+2 空格缩进，**仅作用体段**，失败置灰）；
   **字符集**下拉（UTF-8/GBK/GB18030/Big5/Shift_JIS/ISO-8859-1）——后端以 utf-8 解码入库，
   故 `TextEncoder` 可无损还原字节再按所选字符集 `TextDecoder` 重解（乱码救场）；
   **定位**输入框（大小写不敏感，命中即 `setSelectionRange` 滚动到首处）。失败行红条显

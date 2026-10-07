@@ -13,6 +13,8 @@ tools/
 │                         # 构建 python scripts/build_pentest_box.py；网关 docker runtime 默认镜像
 ├─ runtime/               # 基础环境「开包自带」规范位（M2 落位 jre-temurin-17 / python-3.13；gitignore）
 ├─ bin/                   # 可下载/手动落位的便携工具规范位（M2 起；gitignore）
+│                         # gmhttp.exe = 国密 TLS sidecar 构建产物（scripts/build_gmhttp.py，2026-10-07）
+├─ gmhttp/                # 国密 TLS sidecar 源码（Go + tjfoc/gmsm gmtls，2026-10-07；入库）
 ├─ py/android/            # 随仓自带 python 分析脚本（r0re 收编 5 件：分诊 runner / godot runner / 脱壳三件套）
 ├─ venv/                  # python 工具环境（建于自带 python，M2；gitignore）
 ├─ data/                  # 随包数据规范位（kind=data，见 data/CLAUDE.md）：fpdb/fpdb_seed.json
@@ -27,7 +29,8 @@ tools/
 - **registry.json 条目字段**：`kind`（binary/runtime/python-tool/data 白名单）/ `bin`（平台键 windows/linux/\*，相对 tools/ 规范位）/ `search`（PATH 探测文件名清单）/ `fallback`（常见安装目录 glob，`?:/` 前缀=盘符通配 C-H）/ `download`（官方下载页）/ `verify`（深检命令，M3 面板用）/ `pip`（python-tool 的 venv 包）/ `domains`（能力域）/ `guide`（缺失指引文案）/ `acquire: "bundled"`（开包自带）/ `runtime`（依赖的运行时，如 ghidra→jre）/ `note`。
 - **四来源顺序**（core/toolchain.py `resolve_tool`，命中即止）：`config/tools.json` paths 指认 → tools/ bin 规范位（acquire=bundled 则 source=bundled，否则 downloaded）→ fallback glob → PATH。**探测只查文件存在性零副作用**（verify 试跑留 M3 面板）。
 - **覆盖层 `config/tools.json`**（gitignore）：`{"jadx": {"paths": ["D:/.../jadx.cmd"]}}`——本机既有安装纳管；坏文件 `{}` 宁容错。registry 坏条目反而 fail-fast（ValueError，入库声明出错不静默吞）。
-- **消费方**：detector（能力清单→Agent 系统提示）、doctor（tool-missing info / tool-registry-invalid error）、decompiler（ida/ghidra 解析前置 registry）。新增工具先查 registry 再加探测逻辑；**改 schema 须同步 core/toolchain.py 校验与 tests/test_toolchain.py**。
+- **消费方**：detector（能力清单→Agent 系统提示）、doctor（tool-missing info / tool-registry-invalid error）、decompiler（ida/ghidra 解析前置 registry）、**browser/gmhttp（国密 sidecar 探测，2026-10-07）**。新增工具先查 registry 再加探测逻辑；**改 schema 须同步 core/toolchain.py 校验与 tests/test_toolchain.py**。
+- **gmhttp（国密 TLS sidecar，2026-10-07）**：`kind=binary` + `acquire=bundled` + `bin={windows: bin/gmhttp.exe, linux: bin/gmhttp}`。**为什么外挂**：Python 的 `ssl` 是 OpenSSL 薄绑定，本机 OpenSSL 未编 SM 密码套件、Python 未暴露 `set_ciphersuites`，PyPI 的 gmssl/gmalg/pygmssl 只有 SM2/SM3/SM4 原语无 TLS 栈；Go 的 `tjfoc/gmsm/gmtls`（fork 自 crypto/tls 补 GM/T 0024 套件）是现成解。源码 `tools/gmhttp/`（纯 Go 零 cgo，一次性进程：stdin JSON 规格 → stdout JSON 结果，body base64），构建 `scripts/build_gmhttp.py`（需 Go 1.21+，默认 `GOPROXY=goproxy.cn`）。消费方 `core/browser/gmhttp.py`；**二进制缺失=国密不可用，绝不静默降级成普通 TLS**。
 
 ## 反编译脚本区
 

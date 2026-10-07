@@ -133,6 +133,37 @@ class TestHttpMsg:
                               base_url="http://127.0.0.1:9/root")
         assert p["url"] == "http://127.0.0.1:9/echo?a=1"
 
+    def test_parse_request_relative_host_fallback(self):
+        """origin-form 报文（相对路径 + Host 头）无 base_url 时用 Host 兜底。"""
+        from core.browser.httpmsg import parse_raw_request
+        p = parse_raw_request(
+            "POST /gemini/x.do HTTP/1.1\n"
+            "Host: i.zut.edu.cn\n"
+            "Content-Type: application/x-www-form-urlencoded\n"
+            "\n"
+            "ACCOUNTID=admin")
+        assert p["url"] == "http://i.zut.edu.cn/gemini/x.do"
+        assert p["method"] == "POST"
+        assert p["body"] == "ACCOUNTID=admin"
+
+    def test_parse_request_host_fallback_case_insensitive(self):
+        from core.browser.httpmsg import parse_raw_request
+        p = parse_raw_request("GET /a HTTP/1.1\nhost: 127.0.0.1:9\n\n")
+        assert p["url"] == "http://127.0.0.1:9/a"
+
+    def test_parse_request_base_url_wins_over_host(self):
+        """有模板 base_url 时以模板为准（Host 头不参与，保持既有改包语义）。"""
+        from core.browser.httpmsg import parse_raw_request
+        p = parse_raw_request("GET /echo HTTP/1.1\nHost: other:1\n\n",
+                              base_url="http://127.0.0.1:9/root")
+        assert p["url"] == "http://127.0.0.1:9/echo"
+
+    def test_parse_request_relative_no_host_no_base(self):
+        """相对路径既无 Host 头也无 base_url → 仍报错（不猜目标）。"""
+        from core.browser.httpmsg import parse_raw_request
+        with pytest.raises(ValueError):
+            parse_raw_request("GET /a HTTP/1.1\nAccept: */*\n\n")
+
     def test_parse_request_bad_lines(self):
         from core.browser.httpmsg import parse_raw_request
         with pytest.raises(ValueError):
@@ -185,6 +216,25 @@ def test_replay_raw_bad_message(bb, pid):
     rc = ReplayClient(bb, config=BrowserConfig())
     with pytest.raises(BrowserError, match="原始报文解析失败"):
         rc.replay(pid, raw="GETonly\n\n")
+
+
+def test_replay_recomputes_content_length(bb, pid, server):
+    """报文 Content-Length 与实际 body 不符（改包常态）→ 剥 framing 头由客户端重算，
+    不再报「Too little data for declared Content-Length」（2026-10-07）。"""
+    rc = ReplayClient(bb, config=BrowserConfig())
+    raw = (f"POST {server}/login HTTP/1.1\r\n"
+           "Host: 127.0.0.1\r\n"
+           "Content-Type: application/x-www-form-urlencoded\r\n"
+           "Content-Length: 999\r\n"        # 故意大于实际 body（22 字节）
+           "\r\n"
+           "user=admin&pass=123456")
+    row = rc.replay(pid, raw=raw, author="human")
+    assert row["status"] == 200
+    assert json.loads(row["resp_body"])["ok"] is True
+    # 入库 headers 剥掉 framing 头（记录实际发出的请求，与 capture._store 同口径）
+    keys = {k.lower() for k in (row.get("req_headers") or {})}
+    assert "content-length" not in keys
+    assert "transfer-encoding" not in keys
 
 
 def test_replay_ignores_system_proxy(bb, pid, server, monkeypatch):

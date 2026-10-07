@@ -27,7 +27,8 @@
   - 超时 120s / 关开关 / 满 50 由后端自动放行原文——前端不处理，只展示倒计时。
 - `CaptureHistory.tsx` http_history 3s 增量游标（上限 500 行）；行点击开详情
   Dialog（browserHistoryRow 单条全量；**本项目 dialog.tsx 无 DialogHeader**，
-  DialogTitle 直放 DialogContent 内）；「✉ 重发」弹窗预填 `toRawRequest(row)`。
+  DialogTitle 直放 DialogContent 内）；「✉ 去重放台…」**跳重放工作台预填**
+  `toRawRequest(row)`（2026-10-07：不再弹小 Dialog，改 dispatch `goto-fuzzer`）。
 - `ReplayForm.tsx`：`toRawRequest(row)` 纯格式化（请求行+头+空行+体，供预填）；
   `ReplayForm` **单一原始报文 textarea**（v3 删 method/url/headers 控件与
   parseHeaders/fmtHeaders——解析全在后端）→ `{raw}` 202 + pollJob 1s；422 显

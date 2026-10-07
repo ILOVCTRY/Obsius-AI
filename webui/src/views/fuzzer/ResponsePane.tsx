@@ -3,7 +3,6 @@ import { Search } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import type { HttpHistoryRow } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
@@ -37,25 +36,20 @@ function byteLen(text: string): number {
   try { return new TextEncoder().encode(text).length } catch { return text.length }
 }
 
-/** 响应区：状态行 + 「响应头 / 响应体」子 tab + JSON 美化 + 字符集 + 定位。 */
+/** 响应区：**完整原始响应报文**单栏呈现（状态行 + 响应头 + 空行 + 响应体，对齐 Burp/Yakit），
+ *  不再用「响应头 / 响应体」tab 拆分；保留 JSON 美化（仅作用体段）+ 字符集重解 + 定位。 */
 export function ResponsePane({ row, err, busy }: {
   row: HttpHistoryRow | null
   err: string | null
   busy: boolean
 }) {
-  const [tab, setTab] = useState("body")
   const [pretty, setPretty] = useState(false)
   const [charset, setCharset] = useState("UTF-8")
   const [find, setFind] = useState("")
-  const bodyRef = useRef<HTMLTextAreaElement | null>(null)
+  const ref = useRef<HTMLTextAreaElement | null>(null)
 
-  // 每次新响应回到「响应体 · 原文」，避免上一条的美化/字符集选择造成误读
-  useEffect(() => { setTab("body"); setPretty(false); setFind("") }, [row?.id])
-
-  const headersText = useMemo(() => {
-    if (!row) return ""
-    return Object.entries(row.resp_headers ?? {}).map(([k, v]) => `${k}: ${v}`).join("\n")
-  }, [row])
+  // 每次新响应回到「原文 · UTF-8」，避免上一条的美化/字符集选择造成误读
+  useEffect(() => { setPretty(false); setFind("") }, [row?.id])
 
   const decoded = useMemo(() => decodeWith(row?.resp_body ?? "", charset), [row?.resp_body, charset])
   const prettyResult = useMemo(() => tryPretty(decoded), [decoded])
@@ -63,12 +57,24 @@ export function ResponsePane({ row, err, busy }: {
 
   const isJson = prettyResult.ok
   const failed = row != null && row.status == null
-  const placeholder = row?.is_binary ? decoded : null
+
+  // 完整报文：状态行 + 头 + 空行 + 体（体段受美化/字符集影响，头段恒原样）
+  const raw = useMemo(() => {
+    if (!row) return ""
+    const statusLine = row.status != null ? `HTTP/1.1 ${row.status}` : "HTTP/1.1 (无响应)"
+    const hs = Object.entries(row.resp_headers ?? {}).map(([k, v]) => `${k}: ${v}`).join("\n")
+    const body = row.is_binary
+      ? `${decoded}（二进制响应，不渲染正文）`
+      : bodyText
+    let out = statusLine + (hs ? "\n" + hs : "")
+    if (body) out += "\n\n" + body
+    return out
+  }, [row, decoded, bodyText])
 
   const locate = () => {
-    const el = bodyRef.current
+    const el = ref.current
     if (!el || !find) return
-    const idx = bodyText.toLowerCase().indexOf(find.toLowerCase())
+    const idx = raw.toLowerCase().indexOf(find.toLowerCase())
     if (idx < 0) return
     el.focus()
     el.setSelectionRange(idx, idx + find.length)
@@ -84,7 +90,7 @@ export function ResponsePane({ row, err, busy }: {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b px-2 py-1.5 text-xs">
+      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b px-2 py-1.5 text-[11px]">
         {busy && <span className="text-muted-foreground">请求中…</span>}
         {row && (
           <>
@@ -101,7 +107,7 @@ export function ResponsePane({ row, err, busy }: {
         )}
         <span className="flex-1" />
         <Button size="sm" variant={pretty ? "default" : "outline"} className="h-6 text-[10px]"
-                disabled={!isJson} title={isJson ? "JSON 美化" : "非 JSON，不可美化"}
+                disabled={!isJson} title={isJson ? "JSON 美化（仅体段）" : "非 JSON，不可美化"}
                 onClick={() => setPretty((v) => !v)}>美化</Button>
         <select className="h-6 rounded-md border bg-background px-1 font-mono text-[10px]"
                 value={charset} onChange={(e) => setCharset(e.target.value)}>
@@ -125,28 +131,9 @@ export function ResponsePane({ row, err, busy }: {
         </div>
       )}
 
-      <Tabs value={tab} onValueChange={setTab} className="flex min-h-0 flex-1 flex-col">
-        <TabsList className="m-2 shrink-0 self-start">
-          <TabsTrigger value="body">响应体</TabsTrigger>
-          <TabsTrigger value="headers">响应头</TabsTrigger>
-        </TabsList>
-        <TabsContent value="body" className="min-h-0 flex-1 px-2 pb-2">
-          {placeholder ? (
-            <div className="flex h-full items-center justify-center rounded border border-dashed text-[11px] text-muted-foreground">
-              {placeholder}（二进制响应，不渲染正文）
-            </div>
-          ) : (
-            <textarea ref={bodyRef} readOnly spellCheck={false}
-                      className="h-full w-full resize-none rounded-md border bg-background p-2 font-mono text-[11px] leading-relaxed outline-none"
-                      value={bodyText} />
-          )}
-        </TabsContent>
-        <TabsContent value="headers" className="min-h-0 flex-1 px-2 pb-2">
-          <textarea readOnly spellCheck={false}
-                    className="h-full w-full resize-none rounded-md border bg-background p-2 font-mono text-[11px] leading-relaxed outline-none"
-                    value={headersText} />
-        </TabsContent>
-      </Tabs>
+      <textarea ref={ref} readOnly spellCheck={false}
+                className="min-h-0 flex-1 resize-none border-0 bg-background p-2 font-mono text-[11px] leading-relaxed outline-none"
+                value={raw} />
     </div>
   )
 }
