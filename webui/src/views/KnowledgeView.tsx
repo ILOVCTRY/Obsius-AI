@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react"
 import { api } from "@/lib/api"
 import { capLabel, type PackInfo, type Taxonomy } from "@/lib/taxonomy"
+import { cn } from "@/lib/utils"
 import { KbView } from "@/components/settings/KbView"
 
 /** 一级知识库工作台；设置页只保留配置相关内容。 */
@@ -36,6 +37,9 @@ export function KnowledgeView({ pid }: { pid?: string | null }) {
   }, [pid, tax])
 
   return (
-    <div className="h-full min-h-0 pt-9"><KbView cap={cap} capabilities={capabilities} onCapChange={setCap} /></div>
+    // pt-9=首页无顶栏分支的 36px 拖动区让位；项目内有 .topbar(h-16)，再加就是重复死区
+    <div className={cn("h-full min-h-0", !pid && "pt-9")}>
+      <KbView cap={cap} capabilities={capabilities} onCapChange={setCap} />
+    </div>
   )
 }

@@ -32,7 +32,7 @@
 
 **表头已移除（2026-10-04）**：原「OBSIUS / CONTROL CENTER」表头 + 同步提示 + 场景/能力包 选择器**项目内外都不再渲染**（相关 CSS `.settings-header/-select/-search/-notice/-icon-button` 已删）；只保留 `DoctorBar`（健康度，全局信息）且**仅首页**（`pid` 为空）显示。`main.settings-main` 恒补 12px 顶距（原 `.is-bare` 条件已并入）。**已知副作用（用户确认接受）**：首页 skills/矩阵/安全红线 等 tab 的 track/cap 入口仅剩矩阵点选与深链，无独立选择器。
 **侧栏精简（2026-10-04）**：「控制中心」品牌块（`.settings-brand*`）删除（左侧主导航已有「设置」入口），改为单行 `.settings-context`（live dot + 轨/包；**无底边线**——那条线只在侧栏宽度内、到右栏就断，反而生硬；左内边距 21px 与导航项对齐），窄栏（≤760px）隐藏。
-**`pt-9` 按分支条件加（2026-10-04）**：`settings-shell` 的 36px 顶距是给**首页无顶栏**分支（`App.tsx` 的 `window-drag-strip` 让位）用的；项目内那条分支**已有 `.topbar`(h-16)**，再无脑加 `pt-9` 就是顶栏下多出一截死区。故 `className={cn("settings-shell", !pid && "pt-9")}`——`SettingsView` 是唯一被两个分支复用的视图，其余 `pt-9` 视图（KnowledgeView/IntelView/ProjectsView/SkillsView）都只在首页分支出现，不受影响。
+**`pt-9` 按分支条件加（2026-10-04，2026-10-07 补）**：36px 顶距是给**首页无顶栏**分支（`App.tsx` 的 `window-drag-strip` 让位）用的；项目内那条分支**已有 `.topbar`(h-16)**，再无脑加 `pt-9` 就是顶栏下多出一截死区。凡**两个分支都渲染**的视图一律 `cn(..., !pid && "pt-9")`——`SettingsView`、`KnowledgeView`、`SkillsView`（后两者 2026-10-07 修：此前误判「只在首页分支」，实际项目内 `App.tsx` 也渲染 → 顶栏下多 36px 死区）；`IntelView`(`homeOnly`)/`ProjectsView` 确只在首页分支，无需条件化。
 
 1 **专家** ExpertsPane（替换 RolesPane，轨角色写端点已退役 410）：左列表右表单，保存=全字段覆写，variants 只读，protected 拒删；`ExpertCreateDialog` 新建（slug 409/422 直显）。
 2 **Skill** SkillsPane：**react-resizable-panels 三栏**（列表/文档/试算+大纲），只管理 `packs/*/skills/`，与知识库彻底分离（K7）；一级导航「技能库」= `SkillWorkspace`（概览/文件两态，**概览底部正文与文件态 .md 均 Markdown 渲染**——概览剥 frontmatter 只渲染正文，文件态默认预览、可切编辑，对齐 `KbPane`）。

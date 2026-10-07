@@ -1,3 +1,4 @@
+import { cn } from "@/lib/utils"
 import { SkillWorkspace } from "@/components/settings/SkillWorkspace"
 
 /** 一级技能工作台；编辑器逻辑与设置页兼容入口共享。
@@ -7,7 +8,7 @@ export function SkillsView({ pid, focus }: {
   focus?: { source: "cap" | "track"; pack: string; name: string; n: number } | null
 }) {
   return (
-    <div className="flex h-full min-h-0 flex-col pt-9">
+    <div className={cn("flex h-full min-h-0 flex-col", !pid && "pt-9")}>
       <div className="min-h-0 flex-1"><SkillWorkspace pid={pid} focus={focus ?? null} /></div>
     </div>
   )
