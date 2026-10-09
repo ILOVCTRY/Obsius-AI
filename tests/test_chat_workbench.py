@@ -4,6 +4,7 @@
 """
 
 import json
+import sys
 import threading
 import time
 from pathlib import Path
@@ -12,12 +13,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from core.api.app import create_app
+from core.blackboard.intents import close_intent, declare_intent
 from core.blackboard.store import Blackboard
 from core.chat import store as chat_store
-from core.chat.mcp_bridge import MCPBridge, _HttpConn
+from core.chat.mcp_bridge import MCPBridge, _HttpConn, _StdioConn, _resolve_command
 from core.chat.runtime import (
     ORCHESTRATOR_ID,
-    ChatTurn,
     ChatTurn,
     _CTX_PLACEHOLDER_TAG,
     _CTX_SOFT_BUDGET,
@@ -181,6 +182,64 @@ def test_recover_running_threads(tmp_path):
     assert chat_store.get_thread(bb, ok_t["id"])["status"] == "running"
 
 
+def test_recover_repairs_dangling_tool_calls(tmp_path):
+    """回归（2026-10-09）：重启打断执行中的轮次 → assistant 已落 tool_calls 但
+    结果行没落（并行专家 worker 在子线程，进程一死全灭）→ 前端 done=!!tr 恒
+    false，工具行永久「运行中」。recover 须为每个悬空 tool_use_id 补一条 [错误]
+    占位结果（与中止路径同口径）；旧代码只归位 status、不补结果，用户实测主控
+    两个 call_expert 卡「运行中」。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    orch = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID, title="主控")
+    chat_store.update_thread(bb, orch["id"], status="running")
+    chat_store.append_message(bb, orch["id"], "user", "开始")
+    chat_store.append_message(bb, orch["id"], "assistant", "",
+                              tool_calls=[
+                                  {"id": "c1", "name": "todo_write", "args": {}},
+                                  {"id": "c2", "name": "call_expert", "args": {}},
+                                  {"id": "c3", "name": "call_expert", "args": {}}])
+    # todo_write 完成（c1 有结果），两个 call_expert 被打断（c2/c3 悬空）
+    chat_store.append_message(bb, orch["id"], "tool", "待办已更新", tool_use_id="c1")
+    chat_store.recover_running_threads(bb)
+    msgs = chat_store.list_messages(bb, orch["id"])
+    answered = {m["tool_use_id"] for m in msgs if m["role"] == "tool"}
+    assert {"c1", "c2", "c3"} <= answered           # 全部配对了结果
+    for tid in ("c2", "c3"):
+        row = next(m for m in msgs
+                   if m["role"] == "tool" and m["tool_use_id"] == tid)
+        assert row["content"].startswith("[错误]")
+    # c1 的真实结果不被覆盖
+    c1 = next(m for m in msgs if m["role"] == "tool" and m["tool_use_id"] == "c1")
+    assert c1["content"] == "待办已更新"
+    assert chat_store.get_thread(bb, orch["id"])["status"] == "idle"
+    # 幂等：再跑不重复补
+    n = len(chat_store.list_messages(bb, orch["id"]))
+    chat_store.recover_running_threads(bb)
+    assert len(chat_store.list_messages(bb, orch["id"])) == n
+
+
+def test_repair_dangling_covers_stale_idle_and_skips_live(tmp_path):
+    """陈旧遗留：线程已 idle（旧代码扫过但没补结果）仍有悬空 tool_calls，
+    recover 也须补；本进程活轮（running 集合内）的悬空是执行中间态，不补。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    stale = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID, title="陈旧")
+    chat_store.append_message(bb, stale["id"], "assistant", "",
+                              tool_calls=[{"id": "s1", "name": "call_expert", "args": {}}])
+    live = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID, title="活轮")
+    chat_store.update_thread(bb, live["id"], status="running")
+    chat_store.append_message(bb, live["id"], "assistant", "",
+                              tool_calls=[{"id": "l1", "name": "call_expert", "args": {}}])
+    chat_store.recover_running_threads(bb, {live["id"]})
+    # 陈旧 idle 线程被补齐
+    sm = chat_store.list_messages(bb, stale["id"])
+    assert [m["role"] for m in sm] == ["assistant", "tool"]
+    assert sm[-1]["tool_use_id"] == "s1" and sm[-1]["content"].startswith("[错误]")
+    # 活轮不动（不补结果、不落中断消息、状态保持 running）
+    assert [m["role"] for m in chat_store.list_messages(bb, live["id"])] == ["assistant"]
+    assert chat_store.get_thread(bb, live["id"])["status"] == "running"
+
+
 def test_chat_thinking_stream_events(tmp_path):
     """工作台 ChatTurn 透传 on_thinking，并发布增量与终稿事件。
 
@@ -276,12 +335,93 @@ def test_chat_orchestrator_turn_todo_and_call_expert(tmp_path):
     # 意图三件套开放给对话子专家（2026-10-01 intent-tools-chat）：链路图不再空
     assert {"declare_intent", "close_intent", "reopen_intent",
             "bb_delete_intent"} <= sub_names
+    # 子专家 system 注入工作台委派上下文（2026-10-09）：资产台账 + 维度清单 +
+    # plan→execute→plan 纪律，主控 task 原文仍保持自包含。
+    assert "工作台委派上下文" in sub_call["system"]
+    assert "当前项目测试资产台账" in sub_call["system"]
+    assert "plan→execute→plan 纪律" in sub_call["system"]
     # 主控也拿到意图工具（目标级意图声明 + 汇总收尾）
     assert {"declare_intent", "close_intent"} <= names
     # 事件流：chat.message / chat.tool / chat.spawn / chat.todo 可见
     events = [e for e in bb.recent_events("p1") if e["kind"].startswith("chat.")]
     kinds = {e["kind"] for e in events}
     assert {"chat.message", "chat.tool", "chat.spawn", "chat.todo"} <= kinds
+
+
+def _mk_spawned_expert(bb, agent="web-solver"):
+    orch = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID)
+    return chat_store.create_thread(bb, "p1", agent,
+                                    parent_thread_id=orch["id"],
+                                    spawned_task="测试委派任务")
+
+
+def test_expert_dimension_gate_nudges_to_plan_and_gives_up(tmp_path):
+    """主控分配了资产的 pentest 子专家：未 plan（无锚定资产意图）时纯文本收尾
+    被推回 declare_intent；连续不给 plan 达上限后放行，避免空转整轮。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    asset = bb.upsert_asset("p1", "host", "10.0.0.1")
+    sub = _mk_spawned_expert(bb)
+    texts = ["直接给摘要", "还是直接给摘要", "继续不给 plan",
+             "继续不 plan", "继续", "最终放行"]
+    llm = FakeLLM([_resp(text=t) for t in texts])
+    turn = ChatTurn(bb=bb, llm=llm, project_id="p1", thread_id=sub["id"],
+                    packs_root="packs", track="pentest", capabilities=["web"],
+                    mcp_bridge=None, expert_names=[],
+                    assigned_asset_ids=[asset["id"]])
+    final = turn.run("对 10.0.0.1 做弱口令测试")
+    assert final == "最终放行"
+    # 第 2~5 词 LLM 调用结束处都被追了 plan nudge（最后一次为 giveup 放行）
+    nudges = [c["messages"][-1]["content"] for c in llm.calls[1:-1]]
+    assert nudges and all("declare_intent" in u for u in nudges)
+    gate = [e for e in bb.recent_events("p1")
+            if e["kind"] == "chat.dimension_gate"]
+    assert gate and gate[-1]["payload"]["phase"] == "giveup"
+    assert gate[-1]["payload"]["empty"] is True
+
+
+def test_expert_dimension_gate_allows_when_covered(tmp_path):
+    """spawn 委派的 pentest 子专家：目标资产适用维度有 closed 意图且无 open，
+    纯文本可以直接收尾，不再推回 plan。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    asset = bb.upsert_asset("p1", "host", "10.0.0.1")
+    sub = _mk_spawned_expert(bb)
+    author = f"chat-{sub['id'][-12:]}"
+    ev = bb.append_event("p1", "test.synthetic", {"ok": True})
+    it = declare_intent(bb, "p1", "验证 10.0.0.1 是否存在弱口令",
+                        target_asset_id=asset["id"], dimension="weakpass",
+                        author=author)
+    close_intent(bb, "p1", it["id"], "dead_end",
+                 dead_reason="已尝试默认/常见弱口令，均失败",
+                 evidence_refs=[f"event:{ev}"], author=author)
+    llm = FakeLLM([_resp(text="弱口令面已覆盖，收尾")])
+    turn = ChatTurn(bb=bb, llm=llm, project_id="p1", thread_id=sub["id"],
+                    packs_root="packs", track="pentest", capabilities=["web"],
+                    mcp_bridge=None, expert_names=[],
+                    assigned_asset_ids=[asset["id"]])
+    final = turn.run("对 10.0.0.1 做弱口令测试")
+    assert "弱口令面已覆盖" in final
+    assert len(llm.calls) == 1
+    assert not [e for e in bb.recent_events("p1")
+                if e["kind"] == "chat.dimension_gate"]
+
+
+def test_expert_dimension_gate_skipped_for_lone_expert_thread(tmp_path):
+    """人类直接打开专家线程（非 spawn）不应被维度收敛闸逼着 plan。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    bb.upsert_asset("p1", "host", "10.0.0.1")
+    sub = chat_store.create_thread(bb, "p1", "web-solver")
+    llm = FakeLLM([_resp(text="直接答复")])
+    turn = ChatTurn(bb=bb, llm=llm, project_id="p1", thread_id=sub["id"],
+                    packs_root="packs", track="pentest", capabilities=["web"],
+                    mcp_bridge=None, expert_names=[])
+    final = turn.run("请直接回答")
+    assert final == "直接答复"
+    assert len(llm.calls) == 1
+    assert not [e for e in bb.recent_events("p1")
+                if e["kind"] == "chat.dimension_gate"]
 
 
 def test_chat_orchestrator_parallel_call_expert_dispatch(tmp_path):
@@ -500,6 +640,52 @@ def test_chat_system_prompt_includes_binary_skills_for_research(tmp_path):
     assert "blueprint-rebuild" in system  # research 轨技能也在（pack 并集）
 
 
+def test_chat_orchestrator_injects_tri_state_situation(tmp_path):
+    """主控态势注入（asset-tri-state D8，2026-10-09）：chat-orchestrator 的
+    system 含三态态势段（未测试/已访问/已测干净 + 派发纪律），使主控不必靠
+    bb_query 手动搜资产拼现状；子专家不含（它拿 _mission_context 分配资产段）。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    bb.upsert_asset("p1", "host", "10.0.0.9")            # 未测试
+    bb.upsert_asset("p1", "url", "http://10.0.0.9/a")    # 未测试
+    llm = FakeLLM([_resp(text="收到。")])
+    thread = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID)
+    turn = ChatTurn(bb=bb, llm=llm, project_id="p1", thread_id=thread["id"],
+                    packs_root="packs", track="pentest", capabilities=["web"],
+                    mcp_bridge=None, expert_names=None)
+    turn.run("看看当前态势")
+    system = llm.calls[0]["system"]
+    assert "## 项目资产态势" in system
+    assert "未测试 open" in system and "10.0.0.9" in system
+    assert "已访问 visited" in system and "已测试干净" in system
+    assert "call_expert(asset_ids=...)" in system        # 派发纪律
+    # 子专家（spawn）不含态势段
+    sub = chat_store.create_thread(bb, "p1", "web-solver",
+                                   parent_thread_id=thread["id"],
+                                   spawned_task="测 10.0.0.9")
+    turn2 = ChatTurn(bb=bb, llm=FakeLLM([]), project_id="p1",
+                     thread_id=sub["id"], packs_root="packs", track="pentest",
+                     capabilities=["web"], mcp_bridge=None, expert_names=None)
+    assert "## 项目资产态势" not in turn2._system_prompt()
+
+
+def test_chat_orchestrator_situation_degrades_on_bb_error(tmp_path, monkeypatch):
+    """态势读取失败降级占位，不阻断对话（D8 健壮性）。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    thread = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID)
+    turn = ChatTurn(bb=bb, llm=FakeLLM([]), project_id="p1",
+                    thread_id=thread["id"], packs_root="packs", track="pentest",
+                    capabilities=["web"], mcp_bridge=None, expert_names=None)
+
+    def _boom(*a, **k):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(bb, "list_assets", _boom)
+    ctx = turn._situation_context()
+    assert "## 项目资产态势" in ctx and "读取失败" in ctx
+
+
 def test_chat_max_steps_budget():
     """对话轮步数上限：主控/子专家均 200（2026-10-01 由 24/32 提升）。"""
     from core.chat import runtime
@@ -667,6 +853,209 @@ def test_chat_no_continuation_on_normal_final(tmp_path):
     assert final == "正常完成"
     assert len(llm.calls) == 1
     assert not [e for e in bb.recent_events("p1") if e["kind"] == "chat.truncated"]
+
+
+# ---------- 流中断续跑（2026-10-08） ----------
+
+class _DropLLM:
+    """第 1 次调用：先吐一段增量再抛 LLMError(partial=True)（模拟「已吐增量后
+    连接中断」，如 peer closed connection / incomplete chunked read）；之后正常返回。"""
+
+    def __init__(self, first_delta: str, tail: str):
+        self.first_delta = first_delta
+        self.tail = tail
+        self.n = 0
+        self.calls: list[dict] = []
+
+    def chat(self, messages, **kwargs):
+        self.n += 1
+        self.calls.append({"messages": [dict(m) for m in messages]})
+        if self.n == 1:
+            cb = kwargs.get("on_text")
+            if cb is not None:
+                cb(self.first_delta)
+            raise LLMError("流式传输中断: peer closed connection "
+                           "(incomplete chunked read)", partial=True)
+        return _resp(text=self.tail)
+
+
+class _AlwaysDropLLM:
+    """每次调用都先吐增量再抛 partial 中断（测续跑上限 giveup）。"""
+
+    def __init__(self, delta: str = "片段 "):
+        self.delta = delta
+        self.n = 0
+
+    def chat(self, messages, **kwargs):
+        self.n += 1
+        cb = kwargs.get("on_text")
+        if cb is not None:
+            cb(self.delta)
+        raise LLMError("流式传输中断: drop", partial=True)
+
+
+def test_chat_continuation_on_stream_interrupt(tmp_path):
+    """已吐增量后流中断（LLMError.partial）→ 半截文本作 assistant 前缀落库 + 追
+    续写指令继续，拼接为完整终稿；不落 error（2026-10-08，修「网络中断」错误卡）。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    llm = _DropLLM("正在分析目标：", "已完成资产测绘。")
+    turn, thread = _trunc_turn(bb, llm)
+    final = turn.run("分析目标")
+    assert final == "正在分析目标：已完成资产测绘。"
+    assert llm.n == 2
+    # 第二次调用：历史里应有 assistant 半截 + user 续写指令
+    msgs = llm.calls[1]["messages"]
+    assert any(m.get("role") == "assistant" and "正在分析目标" in _msg_text(m)
+               for m in msgs)
+    assert any(m.get("role") == "user" and "接着上一句" in _msg_text(m)
+               for m in msgs)
+    evs = [e for e in bb.recent_events("p1") if e["kind"] == "chat.interrupted"]
+    assert evs and evs[0]["payload"]["phase"] == "continue"
+    t = chat_store.get_thread(bb, thread["id"])
+    assert t["status"] == "idle" and not t.get("error")
+    # 半截文本作为独立 assistant 消息落库（与终稿分段一致）
+    rows = chat_store.list_messages(bb, thread["id"])
+    assert any(m["role"] == "assistant" and "正在分析目标" in (m.get("content") or "")
+               for m in rows)
+
+
+def test_chat_stream_interrupt_gives_up_after_max(tmp_path, monkeypatch):
+    """连续流中断超过 _CHAT_INTERRUPT_MAX → 如实失败（交 run() 落错误卡）。"""
+    from core.chat import runtime
+    monkeypatch.setattr(runtime, "_CHAT_INTERRUPT_MAX", 2)
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    llm = _AlwaysDropLLM("片段 ")
+    turn, thread = _trunc_turn(bb, llm)
+    with pytest.raises(LLMError):
+        turn.run("长任务")
+    assert llm.n == 3   # 2 次续跑 + 第 3 次仍断 → 抛
+    evs = [e for e in bb.recent_events("p1") if e["kind"] == "chat.interrupted"]
+    assert any(e["payload"]["phase"] == "giveup" for e in evs)
+    t = chat_store.get_thread(bb, thread["id"])
+    assert t["status"] == "error"
+
+
+# ---------- 无文本增量流中断的重发（2026-10-09） ----------
+
+class _ThinkingOnlyDropLLM:
+    """第 1 次调用：只吐 thinking 增量（on_text 从未触发）再抛 LLMError(partial=True)
+    ——模拟「只有思考、文本还没开始」时连接中断（用户实测：此前直接落网络卡）；
+    之后正常返回。"""
+
+    def __init__(self, think: str, tail: str):
+        self.think = think
+        self.tail = tail
+        self.n = 0
+        self.calls: list[dict] = []
+
+    def chat(self, messages, **kwargs):
+        self.n += 1
+        self.calls.append({"messages": [dict(m) for m in messages]})
+        if self.n == 1:
+            cb = kwargs.get("on_thinking")
+            if cb is not None:
+                cb(self.think)
+            raise LLMError("流式传输中断: peer closed connection "
+                           "(incomplete chunked read)", partial=True)
+        return _resp(text=self.tail)
+
+
+class _AlwaysThinkingDropLLM:
+    """每次调用都只吐 thinking 再抛 partial（测重发上限 giveup）。"""
+
+    def __init__(self, think: str = "思考中…"):
+        self.think = think
+        self.n = 0
+
+    def chat(self, messages, **kwargs):
+        self.n += 1
+        cb = kwargs.get("on_thinking")
+        if cb is not None:
+            cb(self.think)
+        raise LLMError("流式传输中断: drop", partial=True)
+
+
+def test_chat_resend_on_thinking_only_interrupt(tmp_path):
+    """只有 thinking 增量、文本未开始的流中断（partial 但文本为空）→ 不再直接落
+    「网络中断」错误卡，而是原样重发本 step 直至成功（2026-10-09 事故修复）。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    llm = _ThinkingOnlyDropLLM("正在推理目标…", "已完成资产测绘。")
+    turn, thread = _trunc_turn(bb, llm)
+    final = turn.run("分析目标")
+    assert final == "已完成资产测绘。"
+    assert llm.n == 2
+    # 重发走同一步、原样消息：第二次调用历史里不应出现 assistant 半截或续写指令
+    msgs = llm.calls[1]["messages"]
+    assert not any(m.get("role") == "assistant" for m in msgs)
+    assert not any("接着上一句" in _msg_text(m) for m in msgs)
+    evs = [e for e in bb.recent_events("p1") if e["kind"] == "chat.interrupted"]
+    assert any(e["payload"]["phase"] == "resend" for e in evs)
+    t = chat_store.get_thread(bb, thread["id"])
+    assert t["status"] == "idle" and not t.get("error")
+
+
+def test_chat_resend_gives_up_after_max(tmp_path, monkeypatch):
+    """只有 thinking 的连续流中断超过 _CHAT_RESEND_MAX → 如实失败（落错误卡），
+    不无限空转。"""
+    from core.chat import runtime
+    monkeypatch.setattr(runtime, "_CHAT_RESEND_MAX", 2)
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    llm = _AlwaysThinkingDropLLM("思考…")
+    turn, thread = _trunc_turn(bb, llm)
+    with pytest.raises(LLMError):
+        turn.run("长任务")
+    assert llm.n == 3   # 2 次重发 + 第 3 次仍断 → 抛
+    evs = [e for e in bb.recent_events("p1") if e["kind"] == "chat.interrupted"]
+    assert len([e for e in evs if e["payload"]["phase"] == "resend"]) == 2
+    t = chat_store.get_thread(bb, thread["id"])
+    assert t["status"] == "error"
+
+
+class _ResendThenPartialTextLLM:
+    """第 1 次：只有 thinking 就断（触发重发）；第 2 次：吐半截文本后断（触发续写）；
+    第 3 次：正常返回。验证「重发环」与「续写」两机制可组合过渡。"""
+
+    def __init__(self, think: str, head: str, tail: str):
+        self.think = think
+        self.head = head
+        self.tail = tail
+        self.n = 0
+
+    def chat(self, messages, **kwargs):
+        self.n += 1
+        if self.n == 1:
+            cb = kwargs.get("on_thinking")
+            if cb is not None:
+                cb(self.think)
+            raise LLMError("流式传输中断: drop", partial=True)
+        if self.n == 2:
+            cb = kwargs.get("on_text")
+            if cb is not None:
+                cb(self.head)
+            raise LLMError("流式传输中断: drop", partial=True)
+        return _resp(text=self.tail)
+
+
+def test_chat_resend_then_continuation(tmp_path):
+    """先无文本重发（无 thinking/文本提交）→ 再有半截文本续写：两条路径交接，
+    终稿拼接完整。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    llm = _ResendThenPartialTextLLM("推理…", "正在分析目标：", "已完成资产测绘。")
+    turn, thread = _trunc_turn(bb, llm)
+    final = turn.run("分析目标")
+    assert final == "正在分析目标：已完成资产测绘。"
+    assert llm.n == 3
+    phases = [e["payload"]["phase"] for e in bb.recent_events("p1")
+              if e["kind"] == "chat.interrupted"]
+    assert phases.count("resend") == 1
+    assert phases.count("continue") == 1
+    t = chat_store.get_thread(bb, thread["id"])
+    assert t["status"] == "idle" and not t.get("error")
 
 
 def test_is_truncated_final_helper():
@@ -1053,6 +1442,19 @@ def test_mcp_bridge_domains_and_stdio_offline(mcp_config):
     assert "未启用" in bridge.call("ida", "any", {})
 
 
+def test_mcp_stdio_python_command_resolves_to_platform_interpreter():
+    """`python`/`python3` 占位 → 平台自身解释器（其环境已带 mcp/httpx）；其它原样。
+
+    2026-10-08：fir-proxy 条目由 `uv run --active`（依赖 VIRTUAL_ENV，平台自 .bat
+    直起时为空 → 落到无 mcp 的 uv 解释器）改为 `python`，据此解析。
+    """
+    assert _resolve_command("python") == sys.executable
+    assert _resolve_command("python3") == sys.executable
+    assert _resolve_command("node") == "node"
+    assert _resolve_command("E:/x/python.exe") == "E:/x/python.exe"
+    assert _StdioConn("python", ["s.py"])._cmd == [sys.executable, "s.py"]
+
+
 def test_mcp_bridge_http_tools_and_call(mcp_config, monkeypatch):
     def fake_post(self, method, params, *, notification, timeout):
         if method == "initialize":
@@ -1076,6 +1478,43 @@ def test_mcp_bridge_http_tools_and_call(mcp_config, monkeypatch):
     assert "push rbp" in out
     status = bridge.status()[0]
     assert status["online"] and status["tools"][0]["name"] == "decompile"
+
+
+def test_mcp_bridge_sessionless_server_single_handshake(tmp_path, monkeypatch):
+    """无 Mcp-Session-Id 头的 server（x64dbg 形态）：reverse 域出工具，且握手只做一次。
+
+    此前 _rpc 判据是 `_session_id is None`——无 session 头的 server 每次调用都白握手
+    一遍（initialize+initialized）。本用例锁住 `_ready` 修复。"""
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(json.dumps({"servers": [
+        {"name": "x64dbg", "url": "http://127.0.0.1:3000/mcp",
+         "transport": "streamable-http", "enabled": True, "domains": ["reverse"]},
+    ]}, ensure_ascii=False), encoding="utf-8")
+    calls = {"initialize": 0}
+
+    def fake_post(self, method, params, *, notification, timeout):
+        if method == "initialize":
+            calls["initialize"] += 1
+            # 真机 x64dbg 不回 Mcp-Session-Id 头
+            return 200, {"result": {"serverInfo": {"name": "x64dbg"}}}, {}
+        if method == "tools/list":
+            return 200, {"result": {"tools": [
+                {"name": "debug_get_state", "description": "取调试状态",
+                 "inputSchema": {"type": "object", "properties": {}}}]}}, {}
+        if method == "tools/call":
+            return 200, {"result": {"content": [
+                {"type": "text", "text": '{"state": "stopped"}'}]}}, {}
+        return 200, {"result": {}}, {}
+
+    monkeypatch.setattr(_HttpConn, "_post", fake_post)
+    bridge = MCPBridge(cfg, domains=["reverse"])
+    specs = bridge.tool_specs()
+    assert [s["name"] for s in specs] == ["mcp__x64dbg__debug_get_state"]
+    assert "stopped" in bridge.call("x64dbg", "debug_get_state", {})
+    status = bridge.status()[0]
+    assert status["online"] and status["tools"][0]["name"] == "debug_get_state"
+    # 无 session 头 → 握手仅一次（_ready 生效），不随每次调用重来
+    assert calls["initialize"] == 1
 
 
 # ---------- MCP 会话隔离 + 并发上限（2026-10-01） ----------
@@ -1807,3 +2246,79 @@ def _pairing_ok(messages) -> bool:
                     return False
                 pending.discard(tid)
     return not pending
+
+
+def test_mcp_plain_stdio_server_gets_project_env(tmp_path, monkeypatch):
+    """非会话级 stdio server 也注入 PW_PROJECT_ID + mcp.json 的 `env` 字段
+    （fir-proxy 控制面薄客户端靠它反查平台 API，2026-10-07）。"""
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(json.dumps({"servers": [
+        {"name": "fir-proxy", "url": "", "transport": "stdio",
+         "command": "no-such-bin", "args": [], "enabled": True,
+         "domains": ["pentest"],
+         "env": {"CYBERSTRIKE_API": "http://127.0.0.1:9999"}},
+    ]}, ensure_ascii=False), encoding="utf-8")
+    made: dict = {}
+
+    class FakeRuntime:
+        def __init__(self, name, cfg, env_extra=None):
+            self.name = name
+            self.transport = "stdio"
+            self.domains = cfg.get("domains") or []
+            self.env = dict(env_extra or {})
+            made[name] = self
+
+        def list_tools(self, *, refresh=False):
+            return [{"name": "proxy_status", "description": "x",
+                     "input_schema": {"type": "object", "properties": {}}}]
+
+        def call(self, tool, args):
+            return "ok"
+
+        def is_alive(self):
+            return True
+
+    monkeypatch.setattr("core.chat.mcp_bridge.MCPServerRuntime", FakeRuntime)
+    bridge = MCPBridge(cfg, domains=["pentest"], project_id="proj-xyz")
+    assert bridge.tool_specs()                       # 触发 _load_servers
+    assert made["fir-proxy"].env["PW_PROJECT_ID"] == "proj-xyz"
+    assert made["fir-proxy"].env["CYBERSTRIKE_API"] == "http://127.0.0.1:9999"
+
+
+def test_chat_message_with_attachment(chat_client):
+    """附件随发（2026-10-08，工作台 composer 粘贴/拖拽）：附件只给路径，Agent 收到 📎 行。"""
+    pid = chat_client.post("/api/projects", json={
+        "name": "工作台附件", "track": "pentest", "capabilities": ["web"]}).json()["id"]
+    tid = chat_client.post(f"/api/projects/{pid}/chat/threads",
+                           json={"agent_id": ORCHESTRATOR_ID}).json()["id"]
+    up = chat_client.post(f"/api/projects/{pid}/attachments",
+                          files={"file": ("note.txt", b"hello attachment", "text/plain")})
+    assert up.status_code == 201
+    aid = up.json()["id"]
+
+    # 非法附件 id → 422（线程空闲态，先于 409 校验）
+    bad = chat_client.post(f"/api/chat/threads/{tid}/messages",
+                           json={"text": "x", "attachment_ids": ["art-nope"]})
+    assert bad.status_code == 422
+
+    # 正文 + 附件随发 → 202 → 落库 user 消息含 📎 路径（只给路径口径）
+    r = chat_client.post(f"/api/chat/threads/{tid}/messages",
+                         json={"text": "看下这个文件", "attachment_ids": [aid]})
+    assert r.status_code == 202
+    deadline = time.time() + 10
+    msgs: list[dict] = []
+    while time.time() < deadline:
+        d = chat_client.get(f"/api/chat/threads/{tid}").json()
+        msgs = d["messages"]
+        if len(msgs) >= 2 and d["thread"]["status"] == "idle":
+            break
+        time.sleep(0.2)
+    user = next(m for m in msgs if m["role"] == "user")
+    assert "看下这个文件" in user["content"]
+    assert "📎" in user["content"] and "note.txt" in user["content"]
+
+    # 只有附件、无正文 → 202（空值校验放宽为「text 或附件至少一项」）
+    r2 = chat_client.post(f"/api/chat/threads/{tid}/messages",
+                          json={"text": "", "attachment_ids": [aid]})
+    assert r2.status_code == 202
+

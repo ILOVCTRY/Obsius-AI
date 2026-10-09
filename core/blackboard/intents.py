@@ -162,6 +162,7 @@ def _str_list(values, field: str) -> list[str]:
 
 def declare_intent(bb, project_id: str, statement: str, *,
                    target_asset_id: str | None = None,
+                   dimension: str = "",
                    basis_refs=None, author: str = "system") -> dict:
     """声明意图（规划产物）。同作者存在 status=open 的同陈述意图 → 返回既有行
     （merged=True，不重复登记、不发事件）。target_asset_id 与 basis_refs 都做
@@ -179,6 +180,9 @@ def declare_intent(bb, project_id: str, statement: str, *,
         raise ValueError("意图陈述 statement 必填非空（一句可证伪假设）")
     if len(stmt) > STATEMENT_MAX:
         raise ValueError(f"意图陈述过长（上限 {STATEMENT_MAX} 字）——浓缩成一句假设")
+    # v34 测试面归属：''=未标面（不校验 id 合法性——面清单由轨/项目决定，
+    # 存储层无 packs 访问；合法性在工具层对照 core.dimensions 校验）。
+    dim = dimension.strip() if isinstance(dimension, str) else ""
     basis, ref_corrections = normalize_refs_verbose(bb, project_id, basis_refs)
     ts = now()
     with bb._tx():
@@ -204,15 +208,16 @@ def declare_intent(bb, project_id: str, statement: str, *,
             return out
         intent_id = new_id("intent")
         bb.conn.execute(
-            "INSERT INTO intents(id,project_id,statement,target_asset_id,basis_refs,"
-            "status,author,created_at,updated_at)"
-            " VALUES(?,?,?,?,?, 'open', ?,?,?)",
-            (intent_id, project_id, stmt, target_asset_id,
+            "INSERT INTO intents(id,project_id,statement,target_asset_id,dimension,"
+            "basis_refs,status,author,created_at,updated_at)"
+            " VALUES(?,?,?,?,?,?, 'open', ?,?,?)",
+            (intent_id, project_id, stmt, target_asset_id, dim,
              json.dumps(basis, ensure_ascii=False), author, ts, ts),
         )
     bb.append_event(project_id, "intent.declared",
                     {"intent_id": intent_id, "statement": stmt,
-                     "target_asset_id": target_asset_id, "basis_refs": basis,
+                     "target_asset_id": target_asset_id, "dimension": dim,
+                     "basis_refs": basis,
                      **({"ref_corrections": ref_corrections}
                         if ref_corrections else {})},
                     session_id=_event_session_id(author),

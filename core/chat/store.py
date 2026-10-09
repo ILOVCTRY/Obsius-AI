@@ -127,10 +127,17 @@ def recover_running_threads(bb, running: set[str] | None = None) -> list[str]:
     running：本进程仍在执行的 thread_id 集合（app.state.chat_running）——双保险
     （2026-09-30 误报修复）：清扫前逐线程核对，集合内的活轮跳过不杀，杜绝
     「执行中刷新页面→GET 项目→活轮被误判僵尸落『进程重启』中断消息」。无僵尸
-    时 no-op 返回空。"""
+    时 no-op 返回空。
+
+    2026-10-09：归位前先补悬空 tool_calls 的占位结果（`_repair_dangling_tool_calls`）
+    ——光把 status 归 idle 不够，被打断的轮次里 assistant 已落 tool_calls 但结果行
+    没落，前端 `done=!!tr` 便永久显示「运行中」。先补结果再落中断消息，回放序干净
+    （tool_use → tool_result → 中断 assistant）。"""
     rows = bb.conn.execute(
         "SELECT id FROM chat_threads WHERE status='running'").fetchall()
     ids = [r["id"] for r in rows if not (running and r["id"] in running)]
+    # 先补结果行：覆盖陈旧（已 idle 但悬空）与本次僵尸两类线程，幂等
+    _repair_dangling_tool_calls(bb, running)
     if not ids:
         return []
     ts = now()
@@ -146,6 +153,54 @@ def recover_running_threads(bb, running: set[str] | None = None) -> list[str]:
                 "UPDATE chat_threads SET status='idle', updated_at=? WHERE id=?",
                 (ts, tid))
     return ids
+
+
+def _repair_dangling_tool_calls(bb, running: set[str] | None = None) -> int:
+    """补齐悬空 tool_calls 的占位结果（重启中断遗留，2026-10-09）。
+
+    进程重启会打断执行中的轮次：assistant 行已落 tool_calls，对应的 tool 结果行
+    却没来得及落库（工具结果全文写 chat_messages 是最后一步，尤其并行专家 worker
+    在子线程里跑，进程一死全灭）。此前只有本模块的僵尸清扫把 status 归位 idle，
+    **没补结果行**——前端 `buildWbItems` 判定 `done = !!tr`（存在同 id 的 tool 结果
+    行才算完成），悬空调用便永久显示「运行中」，即便线程早已 idle（用户实测：主控
+    并发两个 call_expert 卡「运行中」）。`runtime._sanitize_history` 的回放兜底只修
+    内存不改审计表，故必须在落库层补齐。
+
+    与中止路径（runtime `_loop`）同口径：未执行的 tool_call 补 `[错误] …` 占位结果，
+    否则下轮回放会出现 tool_use 无配对 result。
+
+    跳过 `running`（本进程仍在执行的活轮）——悬空是「正在执行」的中间态，不是僵尸。
+    单事务、幂等（已有同 id 结果的不动）。返回补齐条数。"""
+    rows = bb.conn.execute(
+        "SELECT DISTINCT thread_id FROM chat_messages WHERE role='assistant'"
+        " AND tool_calls NOT IN ('', '[]')").fetchall()
+    ts = now()
+    fixed = 0
+    with bb._tx():
+        for r in rows:
+            tid = r["thread_id"]
+            if running and tid in running:
+                continue
+            msgs = bb.conn.execute(
+                "SELECT role, tool_calls, tool_use_id FROM chat_messages"
+                " WHERE thread_id=? ORDER BY id", (tid,)).fetchall()
+            answered = {m["tool_use_id"] for m in msgs if m["role"] == "tool"}
+            for m in msgs:
+                if m["role"] != "assistant":
+                    continue
+                for tc in (_loads(m["tool_calls"], []) or []):
+                    tcid = str((tc or {}).get("id") or "").strip()
+                    if tcid and tcid not in answered:
+                        bb.conn.execute(
+                            "INSERT INTO chat_messages(thread_id, role, content,"
+                            " tool_calls, tool_use_id, created_at)"
+                            " VALUES(?,?,?,?,?,?)",
+                            (tid, "tool",
+                             "[错误] 进程重启，本轮工具执行中断（未完成）",
+                             "[]", tcid, ts))
+                        answered.add(tcid)
+                        fixed += 1
+    return fixed
 
 
 def _row(r: sqlite3.Row) -> dict[str, Any]:

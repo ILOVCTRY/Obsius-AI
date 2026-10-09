@@ -20,7 +20,7 @@
 
 ### 2. MCPBackend（实时桥，只点查不替代缓存）
 
-- streamable-http 客户端，端点 loopback 校验（只许 127.0.0.1/localhost/::1，构造零网络）。
+- streamable-http 客户端，端点 loopback 校验（只许 127.0.0.1/localhost/::1，构造零网络）。端点由 `select_mcp_endpoint(config/mcp.json)` 选：**精确名 `ida` 的条目优先**（2026-10-08），无则回退首个逆向域命中——本桥工具名是 IDA 专属（decompile/list_funcs/rename…），池里另挂 x64dbg 等同域 server 时不能因排序抢占。
 - 会话：initialize → 缓存响应头 `Mcp-Session-Id`（真机回 200 JSON，兼容 SSE 体）→ notifications/initialized（202）；4xx 清 session 重握一次（`_rpc` 两轮 for 循环，**禁止持锁递归**，threading.Lock 不可重入）。
 - 懒探活：`available()` 握手 1.5s 超时，结果 3s TTL 正负缓存，overview 4s 轮询不拖慢。
 - 真机 tools/call 双重 JSON（zeromcp json.dumps 进 content[0].text）→ `_payload` 二次解码。

@@ -9,7 +9,7 @@ from core.agent.tools import AGENT_TOOLS, ToolDispatcher, _PLAN_PRE_ALLOWED
 from core.blackboard import Blackboard
 from core.runtime.gateway import ExecutionGateway
 
-from test_agent import FakeDockerBackend, NativeBackend
+from test_agent import FakeDockerBackend, NativeBackend, open_dispatch_intent
 
 
 @pytest.fixture()
@@ -29,7 +29,7 @@ def _disp(env, **kw):
     sid = "sess-" + "b" * 12
     d = ToolDispatcher(bb, gateway=gw, project_id=project["id"],
                        session_id=sid, author=sid, **kw)
-    d._intent_lead_passed = True  # 本组用例主题=浏览器工具面，跳过意图先行闸
+    open_dispatch_intent(d)  # 本组用例主题=浏览器工具面，跳过意图先行闸
     return d
 
 
@@ -38,26 +38,47 @@ def _disp(env, **kw):
 def test_browser_tools_in_schema():
     names = {t["name"] for t in AGENT_TOOLS}
     assert {"browser_navigate", "browser_click", "browser_type",
-            "browser_screenshot", "browser_content", "browser_back"} <= names
+            "browser_screenshot", "browser_content", "browser_back",
+            "browser_replay", "browser_intruder"} <= names
     # 只读侦察先行；click/type/back 受计划闸
     assert "browser_navigate" in _PLAN_PRE_ALLOWED
     assert "browser_screenshot" in _PLAN_PRE_ALLOWED
     assert "browser_content" in _PLAN_PRE_ALLOWED
     assert "browser_click" not in _PLAN_PRE_ALLOWED
     assert "browser_type" not in _PLAN_PRE_ALLOWED
+    # 重发/爆破 2026-10-07 放开红线：Agent 可发起（走意图先行闸，非计划闸）
+    assert "browser_replay" not in _PLAN_PRE_ALLOWED
+    assert "browser_intruder" not in _PLAN_PRE_ALLOWED
 
 
 def test_no_tool_fallback_when_not_injected(env):
-    """未接入 BrowserPool（轨外/测试）：六工具统一 no-tool 回填，不 500。"""
+    """未接入 BrowserPool（轨外/测试）：八工具统一 no-tool 回填，不 500。"""
     d = _disp(env)
     for name, args in [("browser_navigate", {"url": "http://1.2.3.4"}),
                        ("browser_click", {"selector": "#x"}),
                        ("browser_type", {"selector": "#u", "text": "a"}),
                        ("browser_screenshot", {}),
                        ("browser_content", {}),
-                       ("browser_back", {})]:
+                       ("browser_back", {}),
+                       ("browser_replay", {"raw": "GET / HTTP/1.1\nHost: x\n\n"}),
+                       ("browser_intruder", {"template": {"url": "http://x/§P§"},
+                                             "payloads": [{"position": "P", "type": "list",
+                                                           "values": ["a"]}]})]:
         r = d.dispatch(name, args)
         assert r.startswith("[no-tool]"), (name, r)
+
+
+def test_replay_requires_raw_or_capture(env):
+    """接入了池：raw 与 capture_id 都缺 → 明确拒绝（不静默）。"""
+    d = _disp(env, browser=object())
+    import core.browser.pool as pool_mod
+    orig = pool_mod.browser_available
+    pool_mod.browser_available = lambda: True
+    try:
+        r = d.dispatch("browser_replay", {})
+    finally:
+        pool_mod.browser_available = orig
+    assert r.startswith("[拒绝]") and "capture_id" in r
 
 
 def test_no_tool_fallback_when_dependency_missing(env, monkeypatch):

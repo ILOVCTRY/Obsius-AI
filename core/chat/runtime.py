@@ -38,6 +38,12 @@ from core.agent.tools import AGENT_TOOLS, ToolDispatcher
 from core.blackboard.store import BlackboardClosedError
 from core.chat import store as chat_store
 from core.chat.mcp_bridge import MCPBridge
+from core.coverage import situation_snapshot
+from core.dimensions import (
+    dimension_coverage,
+    dimensions_for_type,
+    load_track_dimensions,
+)
 from core.llm.provider import ContextOverflowError, LLMError, TransientStreamError
 from core.runtime.gateway import ExecutionGateway
 from core.skills.experts import load_expert
@@ -103,11 +109,37 @@ _EMPTY_RESPONSE_NUDGE = (
 _CONTINUE_NUDGE = ("（上一条回复因输出长度上限被截断）请**接着上一句继续写完**，"
                    "不要重复已写内容，也不要重新开头。")
 
+# 流式 body 中断续跑（2026-10-08 事故修复）：已吐增量后连接中断（LLMError.partial
+# ——「peer closed connection ... incomplete chunked read」这类）时，半截文本已
+# 上屏、流不可重放。此前直接整轮失败（用户看到「网络中断」错误卡）；现把半截文本
+# 作为 assistant 前缀落库 + 追一条续写指令继续循环拼接，上限 _CHAT_INTERRUPT_MAX
+# 防死循环，超限才如实失败（交 run() 落错误卡）。
+_CHAT_INTERRUPT_MAX = 10
+_INTERRUPT_NUDGE = ("（上一条回复因网络中断被截断）请**接着上一句继续写完**，"
+                    "不要重复已写内容，也不要重新开头。")
+
+# 无文本增量的流中断「原样重发」（2026-10-09 事故修复）：模型只吐了 thinking
+# （或工具参数）就断流时，`partial=True` 但文本累加为空——工作台续写需要半截
+# 文本，此处无可续，此前直接抛错落「网络中断」卡，且一次都没重试（用户实测
+# 症状）。修正：无内容提交 → 清 delta 后原样重发本 step（与 agent 循环 partial
+# 整轮重发同口径）。重发要重做整轮 LLM（长思考可达数分钟），故与续写上限分开、
+# 取小值——no 无限空转。
+_CHAT_RESEND_MAX = 3
+
 # 主控一批 tool_calls 中允许同时运行的子专家数。超过上限的调用会在
 # executor 中排队，避免模型一次生成大量 call_expert 时无限创建线程。
 # 2026-10-06 由 4 提到 8：主控常一次并发 5+ 个 call_expert，4 会让多出的排队
 # 串行（实测「先跑 4 个再跑第 5 个」）；8 给常见批量留出余量，仍防无限建线程。
 _MAX_PARALLEL_EXPERTS = 8
+
+# 子专家维度收敛闸（agent-path-intent-loop M2，2026-10-09）：纯文本收尾前，
+# spawn 委派的子专家若轨有维度清单，检查已锚定资产的适用面覆盖；未覆盖推回
+# plan（declare_intent → execute → close_intent）而不是允许提前收尾。连续 nudge
+# 上限防模型始终不给 plan 时空转整轮；超限接受现有文本并落 giveup 事件。
+_DIMENSION_GATE_MAX = 5
+
+# 子专家启动注入的资产台账条数上限（防 system 膨胀；超出截断并提示）。
+_ASSET_LEDGER_CAP = 200
 
 # ---------- 上下文治理参数（2026-09-30 压缩上下文方案） ----------
 # 背景：单条工具结果可达数百万字符原样入历史 → 跨轮全量回放 → input 突破
@@ -439,7 +471,8 @@ class ChatTurn:
                  rule_profiles: dict[str, Any] | None = None,
                  artifacts_dir: str | Path | None = None,
                  browser_pool=None,
-                 decompiler_factory=None):
+                 decompiler_factory=None,
+                 assigned_asset_ids: list[str] | None = None):
         self.bb = bb
         self.llm = llm
         self.project_id = project_id
@@ -455,6 +488,9 @@ class ChatTurn:
         self.artifacts_dir = artifacts_dir
         self.browser_pool = browser_pool
         self.decompiler_factory = decompiler_factory
+        self.assigned_asset_ids = [str(x).strip()
+                                   for x in (assigned_asset_ids or [])
+                                   if str(x).strip()]
         self.thread = chat_store.get_thread(bb, thread_id) or {}
         self.agent_id = str(self.thread.get("agent_id") or ORCHESTRATOR_ID)
         self.is_orchestrator = self.agent_id == ORCHESTRATOR_ID
@@ -473,6 +509,197 @@ class ChatTurn:
             " AND author=? ORDER BY created_at",
             (self.project_id, author)).fetchall()
         return [r["id"] for r in rows]
+
+    def _mission_context(self) -> str:
+        """子专家工作台上下文：分配资产台账 + 测试维度清单 + plan→execute→plan 纪律。
+
+        注入 system（不污染消息历史），使子专家知道主控划定的测试范围、每个测试
+        面的 dimension 取值与收尾纪律。**分配资产（assigned_asset_ids）非空时**
+        只列这些资产并要求逐面覆盖；未分配（查询/登记类委派）则列出项目台账供上下
+        文，不做收敛强制。读取失败降级为占位文本，不阻断。"""
+        try:
+            all_assets = self.bb.list_assets(self.project_id)
+        except Exception:  # noqa: BLE001 —— 注入失败不阻断委派
+            log.exception("chat 子专家资产台账读取失败 thread=%s", self.thread_id)
+            all_assets = []
+        by_id = {str(a.get("id")): a for a in all_assets}
+        lines = ["## 工作台委派上下文"]
+        if self.assigned_asset_ids:
+            lines.append("### 本线程分配资产（只测这些，越界须先上报主控）")
+            missing = [i for i in self.assigned_asset_ids if i not in by_id]
+            for aid in self.assigned_asset_ids:
+                a = by_id.get(aid)
+                if a is None:
+                    continue
+                value = str(a.get("value") or "").strip().replace("\n", " ")[:200]
+                lines.append(
+                    f"- id={aid} type={a.get('type')} "
+                    f"status={a.get('status')} value={value or '<空>'}")
+            if missing:
+                lines.append(f"- （以下分配 id 在黑板上不存在，须向主控确认：{missing}）")
+            others = len(all_assets) - len(self.assigned_asset_ids)
+            if others > 0:
+                lines.append(
+                    f"- 项目另有 {others} 条未分配资产：仅可用 bb_add_asset 上报，"
+                    "不要直接测试——由主控另行派发。")
+        else:
+            lines.append("### 当前项目测试资产台账（供上下文，测试须先确认主控已分配）")
+            shown = all_assets[:_ASSET_LEDGER_CAP]
+            if not shown:
+                lines.append("- （黑板当前无资产行；如需测试目标，先确认主控是否已落资产）")
+            for a in shown:
+                value = str(a.get("value") or "").strip().replace("\n", " ")[:200]
+                lines.append(
+                    f"- id={a.get('id')} type={a.get('type')} "
+                    f"status={a.get('status')} value={value or '<空>'}")
+            if len(all_assets) > _ASSET_LEDGER_CAP:
+                lines.append(
+                    f"- …（共 {len(all_assets)} 条，仅注入前 {_ASSET_LEDGER_CAP} 条）")
+        try:
+            dims = load_track_dimensions(self.packs_root, self.track)
+        except Exception:  # noqa: BLE001 —— 维度清单失败视同无面可查
+            log.exception("chat 子专家维度清单加载失败 thread=%s", self.thread_id)
+            dims = []
+        lines.append("### 测试维度面清单（declare_intent 的 dimension 取值）")
+        if dims:
+            for d in dims:
+                intent = (d.get("intent") or "").replace("\n", " ").strip()[:200]
+                hint = (d.get("evidence_hint") or "").replace("\n", " ").strip()[:200]
+                lines.append(
+                    f"- id={d['id']} name={d.get('name')} "
+                    f"applies_to={','.join(d.get('applies_to') or [])}")
+                if intent:
+                    lines.append(f"  intent={intent}")
+                if hint:
+                    lines.append(f"  evidence_hint={hint}")
+        else:
+            lines.append("- （本轨无维度清单，不强制面收敛）")
+        lines.append(
+            "### plan→execute→plan 纪律\n"
+            "先 plan：对目标资产用 declare_intent(target_asset_id=..., dimension=..., "
+            "statement=...) 逐面声明测试假设；再 execute；每条意图用 close_intent "
+            "收尾。收尾摘要前自检：已声明资产还有适用维度未覆盖时，先补 plan 再执行，"
+            "不要提前给最终摘要。")
+        return "\n".join(lines)
+
+    def _situation_context(self) -> str:
+        """主控态势注入（asset-tri-state D8，2026-10-09）：三态分桶让主控看得见
+        「哪些没测、哪些测了没测尽、哪些测干净」，据此规划委派；否则主控只能靠
+        bb_query 手动搜资产拼现状。
+
+        与 `_mission_context`（子专家）对称：注入 system 不污染消息历史，**每轮
+        重投影**（态势随黑板演进）。数据源=`core.coverage.situation_snapshot`
+        （读时派生三态，纯函数）。读取失败降级占位，不阻断对话。"""
+        try:
+            assets = self.bb.list_assets(self.project_id)
+            findings = self.bb.list_findings(self.project_id)
+            snap = situation_snapshot(assets, findings)
+        except Exception:  # noqa: BLE001 —— 注入失败不阻断委派
+            log.exception("chat 主控态势读取失败 thread=%s", self.thread_id)
+            return ("## 项目资产态势\n"
+                    "- （态势读取失败，请用 bb_query 自查当前资产与发现）")
+        counts = snap["counts"]
+        untested, visited = snap["untested"], snap["visited"]
+        lines = ["## 项目资产态势（三态，据此规划委派）"]
+        if not (untested or visited or snap["clean_ids"]):
+            lines.append("- （黑板当前无测试资产：先 bb_query 确认，必要时委派侦察登记）")
+            return "\n".join(lines)
+
+        def _row(it: dict) -> str:
+            val = str(it.get("value") or "<空>").replace("\n", " ")[:60]
+            mark = " ⚠有洞" if it.get("has_findings") else ""
+            return f"  - id={it['id']} type={it.get('type')} value={val}{mark}"
+
+        lines.append(f"- **未测试 open：{len(untested)} 条**（优先派发）")
+        lines.extend(_row(it) for it in untested)
+        if snap["untested_truncated"]:
+            lines.append("  - …（仅列前 30 条，用 bb_query 看全量）")
+        lines.append(f"- **已访问 visited：{len(visited)} 条**"
+                     "（碰过、未测尽——续派按未覆盖测试面继续深挖，不得重复已覆盖面）")
+        lines.extend(_row(it) for it in visited)
+        if snap["visited_truncated"]:
+            lines.append("  - …（仅列前 20 条，用 bb_query 看全量）")
+        lines.append(f"- **已测试干净 tested_clean：{counts.get('tested_clean', 0)} 条**"
+                     "（勿重复派发；新增子资产会自动使其掉出 clean，重新纳入）")
+        lines.append(
+            "纪律：优先委派**未测试**资产；**已访问**资产续派时按未覆盖的测试面深挖；"
+            "**已测干净**资产不再派发。委派时用 call_expert(asset_ids=...) 显式划定"
+            "该子专家的资产范围，避免多个子专家重复测试同一资产。")
+        return "\n".join(lines)
+
+    def _dimension_gate_status(self) -> dict | None:
+        """子专家维度收敛态；None=不启用（主控/非 spawn/无目标资产/无面可查）。
+
+        收敛目标 = 主控**显式分配的资产**（assigned_asset_ids）∪ 本线程意图锚定
+        的资产（intents.target_asset_id）。两者都空 → 不启用（查询/登记类委派不
+        受强制）。分配了资产但无任何意图 → empty=True（没 plan），推回声明；否则
+        逐资产按类型匹配适用维度做 dimension_coverage，ok=所有适用面都覆盖。"""
+        if self.is_orchestrator:
+            return None
+        if not (self.thread.get("parent_thread_id")
+                and self.thread.get("spawned_task")):
+            return None
+        try:
+            dims = load_track_dimensions(self.packs_root, self.track)
+        except Exception:  # noqa: BLE001 —— 读取失败视同无面可查，不误拦
+            log.exception("chat 维度收敛读取失败 thread=%s", self.thread_id)
+            dims = []
+        if not dims:
+            return None
+        author = f"chat-{self.thread_id[-12:]}"
+        try:
+            rows = self.bb.conn.execute(
+                "SELECT id, target_asset_id, dimension, status FROM intents"
+                " WHERE project_id=? AND author=? AND target_asset_id IS NOT NULL"
+                " ORDER BY created_at",
+                (self.project_id, author)).fetchall()
+        except Exception:  # noqa: BLE001 —— 查询失败不阻断对话
+            log.exception("chat 维度意图查询失败 thread=%s", self.thread_id)
+            return None
+        intents = [dict(r) for r in rows]
+        plain_ids = {str(r.get("target_asset_id") or "").strip() for r in intents}
+        target_ids = sorted({i for i in self.assigned_asset_ids if i} | plain_ids)
+        if not target_ids:
+            return None
+        covered: list[str] = []
+        uncovered: list[str] = []
+        for aid in target_ids:
+            asset = self.bb.get_asset(aid)
+            if asset is None:
+                continue
+            asset_intents = [r for r in intents
+                             if str(r.get("target_asset_id") or "").strip() == aid]
+            dims_for = dimensions_for_type(dims, str(asset.get("type") or ""))
+            if not dims_for:
+                continue
+            cov = dimension_coverage(asset_intents, dims_for)
+            covered.extend(cov["covered"])
+            uncovered.extend(cov["uncovered"])
+        return {"ok": not uncovered, "empty": not plain_ids,
+                "covered": sorted(set(covered)),
+                "uncovered": sorted(set(uncovered))}
+
+    def _dimension_gate_nudge(self, status: dict) -> str:
+        """维度收敛闸的推回文案：明确未覆盖维度，要求先声明意图再执行。"""
+        if status.get("empty"):
+            return ("你正准备收尾，但本线程还没有任何已锚定资产的测试意图。"
+                    "请先 plan：用 declare_intent(target_asset_id=..., dimension=..., "
+                    "statement=...) 逐面声明测试假设，再执行并用 close_intent 收尾；"
+                    "不要提前给最终摘要。")
+        names: dict[str, str] = {}
+        try:
+            names = {d["id"]: d.get("name") or d["id"]
+                     for d in load_track_dimensions(self.packs_root, self.track)}
+        except Exception:  # noqa: BLE001 —— 名称缺失用 id 兜底
+            pass
+        ids = status.get("uncovered") or []
+        detail = "\n".join(f"- {i}（{names.get(i, i)}）" for i in ids)
+        return ("你准备收尾，但以下测试面还没有覆盖（未覆盖 = 该面无 closed 意图，"
+                "或还有 open 意图未收尾）：\n"
+                + detail
+                + "\n请先 plan：用 declare_intent(dimension=<面id>, target_asset_id="
+                  "<资产id>, statement=...) 声明未覆盖面，执行后 close_intent 收尾；"
+                  "全部适用面覆盖后再给最终摘要。")
 
     def _build_dispatcher(self) -> ToolDispatcher | None:
         """复用 ToolDispatcher 的黑板/技能/网关工具处理器（run_cmd/http/
@@ -511,7 +738,8 @@ class ChatTurn:
                 allowed_tools=allowed,
                 abort_event=self.abort_event,
                 artifacts_dir=self.artifacts_dir,
-                role_skills=expert.get("skills"))
+                role_skills=expert.get("skills"),
+                assigned_asset_ids=self.assigned_asset_ids)
         except Exception:  # noqa: BLE001 —— 装配失败降级为无黑板工具
             log.exception("chat ToolDispatcher 装配失败 thread=%s", self.thread_id)
             return None
@@ -586,7 +814,8 @@ class ChatTurn:
                                "相互独立的任务可在同一轮并发调用；有依赖的任务按顺序委派。"
                                "任务描述必须自包含（目标/范围/已知"
                                "信息/期望交付物）。你在委派前不直接实操——实操是"
-                               "专家的事。（expert 只填下方专家 id，勿填技能名）"
+                               "专家的事。（expert 只填下方专家 id，勿填技能名；"
+                               "测试类任务用 asset_ids 把该专家负责的资产 id 明确划给它）"
                                + ("\n可用专家：\n" + "\n".join(expert_rows)
                                   if expert_rows else ""),
                 "input_schema": {
@@ -602,6 +831,14 @@ class ChatTurn:
                                                   "不是技能名）"},
                         "task": {"type": "string",
                                  "description": "自包含的任务描述"},
+                        "asset_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "分配给该子专家测试的资产 id 列表"
+                                           "（严格单一派发：不同子专家分不同资产，"
+                                           "避免重复测试。测试类任务必填；纯查询/登记"
+                                           "类任务可省略）",
+                        },
                     },
                     "required": ["expert", "task"],
                 },
@@ -650,6 +887,7 @@ class ChatTurn:
                 "黑板已有资产/发现；资产清理与合并可直接使用受控的"
                 "bb_delete_asset/bb_merge_assets（必须先查询，合并必须给出 reason）；"
                 "不直接执行扫描/利用等实操。")
+            parts.append(self._situation_context())
         else:
             parts.append(
                 "## 工作方式\n"
@@ -657,6 +895,7 @@ class ChatTurn:
                 "kb_search/kb_open 查知识库、skill_open 打开技能手册；过程结论落"
                 "黑板（bb_add_asset/bb_add_finding）；干完给一段**自包含的收尾"
                 "摘要**（做了什么/关键证据/结论），主控会原样转述给人类。")
+            parts.append(self._mission_context())
         # 技能全量描述（K8 同款渐进披露层1：name+description，正文 skill_open）
         try:
             if SkillRegistry is not None:
@@ -958,22 +1197,34 @@ class ChatTurn:
 
     # ---------- 主流程 ----------
 
-    def run(self, user_text: str, refs: dict[str, list[str]] | None = None) -> str:
+    def run(self, user_text: str, refs: dict[str, list[str]] | None = None,
+            attachments: list[dict] | None = None) -> str:
         self._refs = refs or {}
-        chat_store.append_message(self.bb, self.thread_id, "user", user_text)
+        # 附件随发（2026-10-08，工作台 composer）：与直播间同口径——只把附件渲染成
+        # 📎 路径行拼进用户消息（Agent 自行 run_cmd/read_file 读取），不做多模态。
+        # 复用 core.agent.loop 的渲染器，防文案漂移（loop.py 不 import core.chat，无环）。
+        text = user_text
+        if attachments:
+            from core.agent.loop import _attachment_lines
+            lines = _attachment_lines(attachments)
+            if lines:
+                text = f"{user_text}\n\n附件：\n" + "\n".join(lines)
+        chat_store.append_message(self.bb, self.thread_id, "user", text)
         thread = chat_store.get_thread(self.bb, self.thread_id)
         if thread is not None and not thread.get("title"):
-            chat_store.update_thread(self.bb, self.thread_id,
-                                     title=user_text.strip()[:40])
+            title = user_text.strip()[:40] or next(
+                (str(a.get("name") or "") for a in (attachments or []) if a.get("name")), "")
+            if title:
+                chat_store.update_thread(self.bb, self.thread_id, title=title[:40])
         # 新轮开始：置 running 并清空上一轮的错误（error={} 为 falsy → 落 ''）
         chat_store.update_thread(self.bb, self.thread_id, status="running",
                                  error={})
         # 上下文用量基底（跨轮累计 output/steps；input=最近一步占用）
         self._usage: dict[str, int] = dict(thread.get("usage") or {}) if thread else {}
-        self._emit("chat.message", {"role": "user", "text": user_text[:2000],
+        self._emit("chat.message", {"role": "user", "text": text[:2000],
                                     "message_id": None})
         try:
-            final = self._loop(user_text)
+            final = self._loop(text)
             chat_store.update_thread(self.bb, self.thread_id, status="idle")
             # 正常收尾：清剪本轮流式 delta（终稿全文已在 chat_messages，事件只承担
             # 实时可见）——不删则每条携带累计全文的 delta 行持续膨胀事件表。异常/
@@ -1015,7 +1266,9 @@ class ChatTurn:
         final = ""
         # 截断续写状态（2026-10-01）：continue_n=已续写次数；text_acc=逐段文本拼接
         continue_n = 0
+        interrupt_n = 0   # 流中断续跑次数（2026-10-08）
         empty_response_n = 0
+        dimension_nudges = 0  # 子专家维度收敛闸连续推回数（2026-10-09）
         text_acc: list[str] = []
         for _step in range(max_steps):
             if self._aborted():  # 步间中止：不落新 LLM 调用
@@ -1092,10 +1345,55 @@ class ChatTurn:
             est_refs = _est_tokens(refs_tail)
             est_tools = _est_tokens(json.dumps(tools, ensure_ascii=False))
             est_msgs = sum(_est_tokens(_msg_text(m)) for m in messages)
-            resp = self._chat(messages, system, step_tools, on_text,
-                              on_thinking=on_thinking,
-                              on_retry=_reset_delta,
-                              on_provider_retry=_provider_retry)
+            # 本 step 的 LLM 调用 + 无文本增量流中断的「原样重发」环（2026-10-09）。
+            # 只吐了 thinking/工具参数就断流时（partial 但文本为空），无可续写的
+            # 半截文本，但也没有内容提交——清 delta 后原样重发本 step 安全（前端按
+            # 最新累计全文覆盖显示）。有半截文本的 partial 不走此环，交给下方续写。
+            resp = None
+            pending_err: LLMError | None = None
+            for _resend in range(_CHAT_RESEND_MAX + 1):
+                try:
+                    resp = self._chat(messages, system, step_tools, on_text,
+                                      on_thinking=on_thinking,
+                                      on_retry=_reset_delta,
+                                      on_provider_retry=_provider_retry)
+                    break
+                except LLMError as e:
+                    if (getattr(e, "partial", False) and not "".join(acc).strip()
+                            and _resend < _CHAT_RESEND_MAX):
+                        self._emit("chat.interrupted", {
+                            "phase": "resend", "continues": _resend + 1,
+                            "text_head": ""})
+                        _reset_delta()
+                        thinking_started = time.monotonic()
+                        continue
+                    pending_err = e
+                    break
+            if resp is None:
+                e = pending_err
+                # 流中断续跑（2026-10-08）：已吐增量后连接中断——半截文本已上屏、
+                # 流不可重放。把它作为 assistant 前缀落库 + 追续写指令继续拼接
+                # （与终稿截断续写同构）；无半截文本或超上限才如实失败。
+                partial_text = "".join(acc)
+                if not getattr(e, "partial", False) or not partial_text.strip():
+                    raise e
+                if interrupt_n >= _CHAT_INTERRUPT_MAX:
+                    self._emit("chat.interrupted", {
+                        "phase": "giveup", "continues": interrupt_n,
+                        "text_head": partial_text[:200]})
+                    raise e
+                interrupt_n += 1
+                self._emit("chat.interrupted", {
+                    "phase": "continue", "continues": interrupt_n,
+                    "text_head": partial_text[:200]})
+                row = chat_store.append_message(
+                    self.bb, self.thread_id, "assistant", partial_text,
+                    thinking="".join(thinking_acc))
+                self._flush_final_delta(partial_text, row["id"])
+                messages.append({"role": "assistant", "content": partial_text})
+                messages.append({"role": "user", "content": _INTERRUPT_NUDGE})
+                text_acc.append(partial_text)
+                continue
             # provider 可能只在响应终稿中返回 thinking（例如非流式替身或网关
             # 没有发送增量帧）。先补齐最后一小段 delta，再发终稿事件；前端在
             # 收到终稿前即可看到实时内容，收到终稿后得到完整文本。
@@ -1299,6 +1597,20 @@ class ChatTurn:
                 self._emit("chat.intent_guard",
                            {"phase": "blocked", "open_intents": open_ids})
                 continue
+            # 维度收敛闸（2026-10-09 agent-path-intent-loop M2）：spawn 委派的
+            # 子专家收尾前，检查已锚定资产的测试维度覆盖；有未覆盖面（或根本没
+            # plan）推回 plan，而不是允许提前给最终摘要。
+            dim_status = self._dimension_gate_status()
+            if dim_status is not None and not dim_status.get("ok"):
+                if dimension_nudges < _DIMENSION_GATE_MAX:
+                    dimension_nudges += 1
+                    messages.append({"role": "user",
+                                     "content": self._dimension_gate_nudge(dim_status)})
+                    self._emit("chat.dimension_gate", {
+                        "phase": "nudge", "nudges": dimension_nudges, **dim_status})
+                    continue
+                self._emit("chat.dimension_gate", {
+                    "phase": "giveup", "nudges": dimension_nudges, **dim_status})
             row = chat_store.append_message(self.bb, self.thread_id,
                                             "assistant", text,
                                             thinking=thinking)
@@ -1477,6 +1789,26 @@ class ChatTurn:
                     f"可用：{available}（这些是专家 id，不是技能名）")
         if self.llm is None:
             return "[错误] call_expert 失败：LLM 未装配"
+        # 分配资产（asset_ids，2026-10-09 严格单一派发）：主控把该子专家负责的
+        # 资产显式划给它——子专家只测这些资产、按测试维度收敛；未分配（查询/登记
+        # 类任务）不强制面收敛。id 必须存在且属于本项目（宁严勿松）。
+        raw_assets = args.get("asset_ids")
+        if raw_assets in (None, "", []):
+            assigned: list[str] = []
+        elif isinstance(raw_assets, list):
+            assigned = []
+            for a in raw_assets:
+                aid = str(a or "").strip()
+                if not aid:
+                    continue
+                if aid not in assigned:
+                    assigned.append(aid)
+        else:
+            return "[错误] call_expert 失败：asset_ids 必须是资产 id 数组"
+        for aid in assigned:
+            if self.bb.get_asset(aid) is None:
+                return (f"[错误] call_expert 失败：分配资产不存在或不属于本项目 "
+                        f"{aid}（先 bb_add_asset 落资产，再按 id 分配）")
         # spawn 持久子线程（留档），隔离上下文跑完 → 摘要回传。
         # **构造也必须包在 try 内**（2026-10-03）：子 ChatTurn 构造会读专家 yaml /
         # 装工具面，构造抛错（如 packs 缺文件）此前直接穿出把主控整轮炸掉；现
@@ -1489,7 +1821,8 @@ class ChatTurn:
                 spawned_task=task[:500])
             sub_id = sub["id"]
             self._emit("chat.spawn", {"thread_id": sub_id, "expert": expert,
-                                      "task_head": task[:200]})
+                                      "task_head": task[:200],
+                                      "asset_ids": assigned})
             sub_turn = ChatTurn(
                 bb=self.bb, llm=self.llm, project_id=self.project_id,
                 thread_id=sub_id, packs_root=self.packs_root,
@@ -1500,7 +1833,8 @@ class ChatTurn:
                 rule_profiles=self.rule_profiles,
                 artifacts_dir=self.artifacts_dir,
                 browser_pool=self.browser_pool,
-                decompiler_factory=self.decompiler_factory)
+                decompiler_factory=self.decompiler_factory,
+                assigned_asset_ids=assigned)
             summary = sub_turn.run(task)
         except Exception as e:  # noqa: BLE001 —— 专家失败回文本，主控可改派
             log.exception("chat 子专家线程失败 expert=%s thread=%s",

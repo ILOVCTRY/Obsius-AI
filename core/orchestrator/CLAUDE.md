@@ -21,7 +21,7 @@
 
 state_loader 装载持久游标/轮数 → 态势收集（`_stats` + 增量事件 + 人类指令 + 团队视图）→ LLM 工具循环（ORCH_TOOLS；每步 chat 前 heartbeat 续租）。digest_every 到期强制 write_digest。两条出口都走 `_finish_tick`：state_saver 落盘 event_cursor/cycles/last_digest_cycle（失败只 log），返回**结构化 dict** `{summary, published, spawned, teams, digest, proposals}`（proposals 仅 L0 非空）。游标在态势收集时推进（上一轮自身事件下轮仍可见，属既定口径）；backlog 超窗（>100）只喂最新 100 条，游标**一次跳到 tick 开始时末端 id**（勿逐轮回放）。
 
-- **态势 `_stats`**：mission 视图（track/mission/roe）+ high_value（HVT ∪ verified 高危资产自动推导，`derived=true`）+ **`_teams_view`（Team 名册 cap 20）+ `_recent_runs_view`（最近 Team Run cap 20 + running_members）** + findings（top 20，verified/exploited 优先）+ 活跃会话（closed 出清）+ approvals + `_assets_view`（HVT/uncovered/coverage）。**任务退役后无 tasks 段**；`_overview` 无参（尾部注入最新 project.digest 全文 cap 2000）。内部键 `_hvt_ids/_covered_ids` 在 `_stats` pop 后再返回（勿漏）。
+- **态势 `_stats`**：mission 视图（track/mission/roe）+ high_value（HVT ∪ verified 高危资产自动推导，`derived=true`）+ **`_teams_view`（Team 名册 cap 20）+ `_recent_runs_view`（最近 Team Run cap 20 + running_members）** + findings（top 20，verified/exploited 优先）+ 活跃会话（closed 出清）+ approvals + `_assets_view`（**三态桶 `untested`/`in_progress`/`clean_count`——asset-tri-state 2026-10-09，按 `effective_status` 分桶，兼容键 `done_count`=clean_count/`uncovered`=untested 保留；有洞资产落 in_progress 带 `has_findings`** + coverage）。**任务退役后无 tasks 段**；`_overview` 无参（尾部注入最新 project.digest 全文 cap 2000）。内部键 `_hvt_ids/_covered_ids` 在 `_stats` pop 后再返回（勿漏）。
 - **上下文预算**：全量段压常数级——findings 只进 top 20、closed 会话出清、事件窗剔除纯观测 kind `llm.usage`/`llm.thinking.delta`（`_ORCH_EVENT_EXCLUDE`，游标照推不重放）。被裁细节走 bb_overview 按需拉，**勿回退成全量**。
 - **行动边界**：`mission_boundary_lines(track, config)` 是边界文案**唯一出处**（redteam ROE 四要素 / 其余轨影响证明级上限），`_mission_section` 与 API approvals 出口同源调用，勿复制第二份。
 - **战役记忆召回**：`_campaign_section()` 按 goal 文本 + high_value 目标做 query，`CampaignMemory.recall` 取 top-5 注入；死路条目（tags 含 dead_end）单列「⚠ 既往死路」组。零命中/异常=空段，**召回失败绝不阻断编排**。
@@ -29,7 +29,7 @@ state_loader 装载持久游标/轮数 → 态势收集（`_stats` + 增量事�
 
 ## 异常订阅唤醒（M4，§4.6）
 
-- 类常量 `WAKE_TRIGGERS`（白名单 kind→冷却秒）= `{team.run.finished:600, budget.soft_warning:3600, phase.gate_open:600}`；`WAKE_LOOKBACK=1800s`（无锚点首启回看窗）+ `WAKE_MAX_EVENTS`/`WAKE_CHAT_WINDOW`。
+- 类常量 `WAKE_TRIGGERS`（白名单 kind→冷却秒）= `{team.run.finished:600, budget.soft_warning:3600, phase.gate_open:600, finding.new:300}`；`WAKE_LOOKBACK=1800s`（无锚点首启回看窗）+ `WAKE_MAX_EVENTS`/`WAKE_CHAT_WINDOW`。**`finding.new` 带严重度闸门**（`WAKE_FINDING_SEVERITIES=("high","critical")`，payload 按 severity 过滤/摘要合成）——发现回喂（M4，2026-10-09）：高危产出即时唤醒复判是否派生意图/加派子专家，低档发现静默（被动注入见 `_stats` findings 段，勿重复触发）。`finding.merged` 不在白名单（合并入既有发现不唤醒）。
 - `collect_wake_triggers(bb, pid, *, now=None)` 纯函数——锚点=最近 proactive `orch.chat` 事件（triggers 字段 kind 级 id 防重 + created_at 冷却双维度）；`wake_brief_text(triggers)` 合成「〔主动唤醒〕…」user 消息（只进 LLM messages **不落 orch.chat 历史**）；`chat_turn(text, *, wake=None)` 唯一差异=回复 payload 加 `proactive:true, triggers:[kind]`（前端 🔔 徽章 + 下次锚点双用途）。触发接线在 API 层 `_post_tick`，本模块零新表零调度。
 
 ## 对话插队轮 chat_turn（对话化编排器 M1-M3）

@@ -9,7 +9,12 @@
 
 import sqlite3
 
-SCHEMA_VERSION = 33
+SCHEMA_VERSION = 34
+
+# v33→v34（测试维度面，agent-path-intent-loop M1，2026-10-09）：intents 幂等补
+# dimension（所属测试面 id，见 core/dimensions.py；''=未标面）。面覆盖判定的
+# 数据源——"该资产测完了吗"由「适用面是否都有收尾意图」回答，替代只看覆盖度。
+# 历史行保持默认空值（不猜测回填：面归属是声明时的语义，事后推断会误判）。
 
 # v32→v33（任务机制退役，2026-10-06）：DROP TABLE tasks / resource_leases。
 # 执行单元由 Team direct execution 承接（teams/team_members/team_runs/
@@ -369,6 +374,7 @@ CREATE TABLE IF NOT EXISTS intents (
     project_id      TEXT NOT NULL REFERENCES projects(id),
     statement       TEXT NOT NULL,            -- 假设一句话（可证伪）
     target_asset_id TEXT REFERENCES assets(id),  -- 意图针对的根目标（host/domain，可空）
+    dimension       TEXT NOT NULL DEFAULT '',  -- v34：所属测试面 id（core/dimensions.py 口径，可空）
     basis_refs      TEXT NOT NULL DEFAULT '[]',  -- JSON：推导依据 ["finding:<id>",...]
     status          TEXT NOT NULL DEFAULT 'open',  -- open / closed
     outcome_type    TEXT NOT NULL DEFAULT '',  -- vuln / finding / dead_end（closed 时非空）
@@ -586,7 +592,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     - v31→v32：teams/team_members/team_runs/team_run_members/execution_audits
       由 DDL 的 IF NOT EXISTS 直接建表；新 Team 直执行不转换旧任务。
     - v32→v33：任务机制退役——DROP TABLE tasks / resource_leases（幂等
-      IF EXISTS），历史任务数据一并删除。"""
+      IF EXISTS），历史任务数据一并删除。
+    - v33→v34：intents 幂等补 dimension（所属测试面 id，''=未标面，见
+      core/dimensions.py）。历史行保持默认空值不回填。"""
     cols = {r[1] for r in conn.execute("PRAGMA table_info(projects)")}
     if "track" not in cols:
         conn.execute("ALTER TABLE projects ADD COLUMN track TEXT NOT NULL DEFAULT ''")
@@ -608,6 +616,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # 幂等（IF EXISTS）；旧库残留任务数据一并删除。
     conn.execute("DROP TABLE IF EXISTS resource_leases")
     conn.execute("DROP TABLE IF EXISTS tasks")
+    int_cols = {r[1] for r in conn.execute("PRAGMA table_info(intents)")}
+    if int_cols and "dimension" not in int_cols:  # v34（测试维度面）
+        conn.execute(
+            "ALTER TABLE intents ADD COLUMN dimension TEXT NOT NULL DEFAULT ''")
     art_cols = {r[1] for r in conn.execute("PRAGMA table_info(artifacts)")}
     if art_cols and "meta" not in art_cols:  # v10（W3 产物归属元数据）
         conn.execute("ALTER TABLE artifacts ADD COLUMN meta TEXT NOT NULL DEFAULT '{}'")

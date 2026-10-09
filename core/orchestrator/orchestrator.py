@@ -748,13 +748,17 @@ class Orchestrator:
         return {"recent_runs": recent_runs, "running_members": running_now}
 
     def _assets_view(self) -> dict:
-        """C1 资产视图 + 态势增强（HVT 标签/攻击面进度）：by_type/by_status 计数 +
-        未覆盖清单（cap 30 带 id，HVT 优先排序）+ 半程资产（visited/scanning cap 20）。
-        未覆盖 = host/domain/url/service 资产**状态还是 open**——visited/scanning
-        （半程）/tested_clean（"挖完"口径）都算已覆盖。2026-10-06 任务退役后去掉
-        「任务文本命中」覆盖口径，covered 只看资产状态（读时派生）。"""
+        """C1 资产视图 + 态势增强（HVT 标签/攻击面进度）：**三态**（asset-tri-state，
+        2026-10-09）——未测试(`open`) / 已访问(`visited`) / 已测试干净(`tested_clean`)。
+
+        出口两桶（主控派发判据）+ 一计数：
+        - `untested`   未测试清单（open，cap 30 带 id，HVT 优先排序）——从没碰过；
+        - `in_progress` 已访问清单（visited，cap 20）——碰过、未测尽（**含带洞资产**，
+          「有发现 ≠ 测干净」）；
+        - `clean_count` 已测试干净计数——只给数不给清单（防重复派）。
+        covered = 已测试干净；`high_value.covered` 语义随三态收紧。状态一律读时派生
+        （父节点显式 status 被子树覆盖，加子自动破 clean）。"""
         assets = self.bb.list_assets(self.project_id)
-        # asset-tree-derived-clean M2：状态以读时派生为准（父节点显式 status 被子树覆盖）
         eff_map = effective_status_map(assets, self.bb.list_findings(self.project_id))
         by_type: dict[str, int] = {}
         by_status: dict[str, int] = {}
@@ -770,25 +774,24 @@ class Orchestrator:
             tags = [str(t).strip().lower() for t in (a.get("meta") or {}).get("tags") or []]
             if "高价值" in tags:
                 hvt_ids.add(a["id"])
-        # covered（M2 口径）：effective settled（全终态/挂 finding 收口）或半程
-        # （visited/scanning）。零子根行的显式 tested_clean 照常算 covered（D5）。
-        def _status_covered(a: dict) -> bool:
-            eff = eff_map.get(a["id"])
-            if eff is None:
-                return (a.get("status") or "open") in (
-                    "visited", "scanning", "tested_clean", "na")
-            return eff["settled"] or eff["status"] in ("visited", "scanning")
 
-        covered_ids = {a["id"] for a in targetable if _status_covered(a)}
-        uncovered = [a for a in targetable if a["id"] not in covered_ids]
-        # 排序：HVT 优先 → 未访问（open，此时 uncovered 里只剩 open 态）
-        uncovered.sort(key=lambda a: (a["id"] not in hvt_ids, 0))
+        def _state_of(a: dict) -> str:
+            eff = eff_map.get(a["id"])
+            return eff["status"] if eff else (a.get("status") or "open")
+
+        # 三态分桶（对账面资产）：未测试 open / 已访问 visited / 已测干净 tested_clean
+        untested = [a for a in targetable if _state_of(a) == "open"]
+        visited = [a for a in targetable if _state_of(a) == "visited"]
+        clean_ids = {a["id"] for a in targetable if _state_of(a) == "tested_clean"}
+        untested.sort(key=lambda a: (a["id"] not in hvt_ids, 0))  # HVT 优先
+        visited.sort(key=lambda a: (a["id"] not in hvt_ids, 0))
+        covered_ids = clean_ids
         in_progress = [
             {"id": a["id"], "type": a["type"], "value": a["value"][:60],
-             "status": eff_map[a["id"]]["status"]}
-            for a in targetable
-            if a["id"] in eff_map and eff_map[a["id"]]["status"] in ("visited", "scanning")
-        ][:20]
+             "status": "visited",
+             "has_findings": bool(eff_map.get(a["id"], {}).get("has_findings"))}
+            for a in visited[:20]
+        ]
         # B2 覆盖度对账（M3）：分组收敛摘要——终态含 finding 挂链/dead_end/na，
         # 组内子资产传播收敛，uncovered open 优先。「全景对账」类数数任务归零；
         # 对账失败不阻断态势注入。
@@ -815,11 +818,18 @@ class Orchestrator:
         return {
             "assets": {
                 "total": len(assets), "by_type": by_type, "by_status": by_status,
-                "done_count": by_status.get("tested_clean", 0),  # "挖完"口径 = tested_clean
-                "uncovered_total": len(uncovered),
+                # 三态（2026-10-09）：未测试 / 已访问 / 已测试干净
+                "untested_total": len(untested),
+                "untested": [{"id": a["id"], "type": a["type"], "value": a["value"][:60]}
+                             for a in untested[:30]],
+                "in_progress_total": len(visited),
+                "in_progress": in_progress,               # 已访问（未测尽，含带洞）
+                "clean_count": by_status.get("tested_clean", 0),   # 已测干净（只给数）
+                # 兼容键：covered = 已测试干净（旧 uncovered ↔ 新 untested，旧 done_count ↔ 新 clean_count）
+                "done_count": by_status.get("tested_clean", 0),
+                "uncovered_total": len(untested),
                 "uncovered": [{"id": a["id"], "type": a["type"], "value": a["value"][:60]}
-                              for a in uncovered[:30]],
-                "in_progress": in_progress,
+                              for a in untested[:30]],
                 "coverage": coverage_view,
             },
             "_hvt_ids": hvt_ids,        # 内部复用（_stats 组装 high_value 段），出口前剔除
@@ -923,11 +933,18 @@ class Orchestrator:
     # 白名单 kind → 冷却窗秒数。只有这里列出的事件才可能唤醒编排器。
     # 2026-10-06 任务退役：task.failed / task.starvation 触发器移除；团队执行失败由
     # team.run.finished（终态）唤醒编排器复盘。
+    # 2026-10-09 发现回喂（agent-path-intent-loop M4）：finding.new 进白名单——
+    # 高危产出即时唤醒，编排器不必等到下轮 tick 才看到（被动注入见 _stats）。
+    # **仅 serious 档触发**（见 WAKE_FINDING_SEVERITIES）：一个项目可产几十条
+    # info/low 记录，全量触发会把唤醒轮烧成噪声；「改变打法」的是 high/critical。
     WAKE_TRIGGERS: dict[str, float] = {
         "team.run.finished": 600.0,    # 团队 Run 收尾（完成/失败/取消）→ 唤醒复盘
         "budget.soft_warning": 3600.0,  # 预算 80% 软警（低频，1h 冷却）
         "phase.gate_open": 600.0,      # 阶段出口门满足（五触发之一：goal 阶段门）
+        "finding.new": 300.0,          # 高危发现落库 → 唤醒复判是否派生/加派（5min 冷却）
     }
+    # finding.new 的严重度闸门：只有这些档位才唤醒（payload.severity）。
+    WAKE_FINDING_SEVERITIES = ("high", "critical")
     WAKE_LOOKBACK = 1800.0   # 首启回看窗：无历史唤醒锚点时只看最近 30 分钟事件
     WAKE_MAX_EVENTS = 300    # 扫描上限：锚点之后最多回看多少条事件
     WAKE_CHAT_WINDOW = 200   # 在 orch.chat 里找 proactive 锚点的回看条数
@@ -994,7 +1011,16 @@ class Orchestrator:
                 p = json.loads(r["payload"])
             except ValueError:
                 p = {}
-            if kind == "team.run.finished":  # payload={team_id,team_name,run_id,status}
+            if kind == "finding.new":  # payload 见 store.add_finding 事件契约
+                # 严重度闸门：只有 serious 档唤醒（低档发现不改变打法，只堆噪声）。
+                sev = str(p.get("severity") or "").strip().lower()
+                if sev not in cls.WAKE_FINDING_SEVERITIES:
+                    continue
+                title = str(p.get("title") or p.get("vuln_class") or "未命名发现")
+                aid = str(p.get("target_asset_id") or "").strip()
+                summary = (f"[{sev.upper()}] {title}"
+                           + (f"（资产 {aid}）" if aid else ""))
+            elif kind == "team.run.finished":  # payload={team_id,team_name,run_id,status}
                 summary = (f"团队「{p.get('team_name') or p.get('team_id') or ''}」"
                            f"执行收尾：{p.get('status') or ''}")
             else:  # budget.soft_warning=note、phase.gate_open=summary
@@ -1009,8 +1035,11 @@ class Orchestrator:
         """把触发清单合成一条 user 消息（只进 LLM messages，不落 orch.chat 历史）。"""
         lines = ["〔主动唤醒〕以下异常事件达到白名单触发条件，请向人类简报现状并给出"
                  "处理建议；若无需处理请明确说明。"]
+        found = [t for t in triggers if t["kind"] == "finding.new"]
         for t in triggers:
             kind = t["kind"]
+            if kind == "finding.new":
+                continue  # 成组渲染（见下），避免逐条刷屏
             if kind == "team.run.finished":
                 lines.append(f"- 团队执行收尾：{t['summary']}——请复盘产出、"
                              "决定是否新建团队或亲自 execute 补刀")
@@ -1020,6 +1049,11 @@ class Orchestrator:
                 lines.append("- 阶段出口门满足：当前阶段门指标达标，可考虑流转下一阶段")
             else:
                 lines.append(f"- {kind}：{t['summary']}")
+        if found:
+            lines.append(f"- 高危发现落库（{len(found)} 条）：请复判打法——"
+                         "是否据此派生新意图/加派子专家深挖、或修正 HVT 与收敛判据。")
+            for t in found:
+                lines.append(f"  · {t['summary']}")
         return "\n".join(lines)
 
     # ---------- 对话插队轮（对话化编排器 M1，§4.2） ----------

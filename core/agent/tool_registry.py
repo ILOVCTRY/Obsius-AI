@@ -702,7 +702,7 @@ tool(
     group='黑板',
     flags=("plan_pre",),
     description=(
-        '查黑板：findings / assets / events / tasks / func（函数知识库）/blueprint（开发蓝图）/ site（单'
+        '查黑板：findings / assets / events / func（函数知识库）/blueprint（开发蓝图）/ site（单'
         '站全貌）。**按域名/站点查现状（资产+发现+意图）一律用 what=site 并传 asset**（一次返回根子树全貌）——**不要**用 what='
         'assets 当站点查询：assets 是资产清单面（列清单/按 type/status/tag 筛），其 asset 参数只做子树过滤、不带 find'
         'ings/intents。不要按 type 分片拉全量再本地过滤（host/url/domain 各拉一把、条数多还漏看）。findings 尽量带 t'
@@ -723,7 +723,6 @@ tool(
                     'findings',
                     'assets',
                     'events',
-                    'tasks',
                     'func',
                     'blueprint',
                     'site',
@@ -771,7 +770,7 @@ tool(
                 'type': 'string',
                 'description': (
                     '按状态过滤（语义随 what）：assets=open/visited/scanning/tested_clean/budget_stop/na（并发会'
-                    '话可借此感知哪些目标正被扫）；tasks=open/claimed/done/failed/blocked/cancelled'
+                    '话可借此感知哪些目标正被扫）'
                 ),
             },
             'min_severity': {
@@ -810,7 +809,7 @@ tool(
             },
             'limit': {
                 'type': 'integer',
-                'description': '返回条数上限，1-200（events 默认 50；findings/assets/tasks/func/blueprint 默认全量）',
+                'description': '返回条数上限，1-200（events 默认 50；findings/assets/func/blueprint 默认全量）',
             },
         },
         'required': [
@@ -1471,6 +1470,50 @@ tool(
 )
 
 tool(
+    'browser_replay',
+    group='浏览器',
+    flags=(),
+    description=('重放一条 HTTP 请求（F6 重放）：给原始报文 raw（Burp/DevTools/Yakit 复制的'
+                 '请求行+头+体）或抓包记录 capture_id，二选一。结果入抓包历史（人类可在重放台查看）。'
+                 '可经 proxy 走代理池做 IP 轮换（先起代理池服务，用其 http 入口）。'),
+    input_schema={
+        'type': 'object',
+        'properties': {
+            'raw': {'type': 'string', 'description': '原始请求报文；与 capture_id 二选一'},
+            'capture_id': {'type': 'integer', 'description': '抓包历史行 id（模板）；与 raw 二选一'},
+            'proxy': {'type': 'string', 'description': '显式代理（如 127.0.0.1:1801 代理池入口）；缺省直连'},
+            'force_https': {'type': 'boolean', 'description': '请求行 http→https'},
+            'follow_redirects': {'type': 'boolean', 'description': '跟随重定向（默认 true）'},
+            'insecure': {'type': 'boolean', 'description': '跳过证书校验'},
+            'gm_tls': {'type': 'boolean', 'description': '国密 TLS（走 gmhttp sidecar，需二进制就位）'},
+            'timeout_s': {'type': 'number', 'description': '超时秒数（默认 15）'},
+        },
+    },
+)
+
+tool(
+    'browser_intruder',
+    group='浏览器',
+    flags=(),
+    description=('HTTP 爆破（F6 Intruder）：template 用 §名字§ 标出替换位（url/body），'
+                 'payloads 给每个标记的取值集。结果逐请求入抓包历史（按 batch_id 拉取）。'
+                 '并发/速率/总请求数服务端硬顶；可经 proxy 走代理池做 IP 轮换。'),
+    input_schema={
+        'type': 'object',
+        'properties': {
+            'template': {'type': 'object', 'description': '{method,url,headers,body}，含 §POS§ 标记'},
+            'payloads': {'type': 'array', 'description': '每个标记一项：{position,type:"list",values:[...]} 或 {position,type:"range",start,stop,step}',
+                         'items': {'type': 'object'}},
+            'concurrency': {'type': 'integer', 'description': '并发（服务端硬顶 5）'},
+            'rate_per_sec': {'type': 'number', 'description': '每秒请求上限'},
+            'max_requests': {'type': 'integer', 'description': '总请求上限（服务端硬顶）'},
+            'proxy': {'type': 'string', 'description': '显式代理（如 127.0.0.1:1801 代理池入口）；缺省直连'},
+        },
+        'required': ['template', 'payloads'],
+    },
+)
+
+tool(
     'browser_navigate',
     group='浏览器',
     flags=("plan_pre",),
@@ -1691,6 +1734,14 @@ tool(
             'target_asset_id': {
                 'type': 'string',
                 'description': '意图针对的资产 id（host/domain/子目标）。与 basis_refs 的 asset: 锚点二者至少其一',
+            },
+            'dimension': {
+                'type': 'string',
+                'description': (
+                    '本意图所属的【测试面】id（本轨面清单见系统提示/维度清单，'
+                    '如 unauth/sqli/upload）——用于判定"该资产各面是否都测过"；'
+                    '填了必须是对本轨合法的面 id，否则拒绝。'
+                ),
             },
             'basis_refs': {
                 'type': 'array',

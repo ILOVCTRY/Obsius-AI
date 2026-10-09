@@ -75,6 +75,7 @@
 - 黄金镜像增项：x64dbg（x32/x64）+ Node 20+ + x64dbg-mcp（streamable-http、自启）。
 - NAT 端口转发：`127.0.0.1:3000 → VM:3000`（hypervisor 接口 natpf 落库配置）。
 - `config/mcp.json` 加 x64dbg 条目（复用 loopback 校验）；MCPBackend 探活/会话管理零新增。
+  - **宿主直连形态已落地（2026-10-08，先于 VM）**：x64dbg 装宿主时插件自启 `http://127.0.0.1:3000/mcp`（streamable-http，80 工具，**无 `Mcp-Session-Id` 响应头**），`config/mcp.json` 条目 `domains:["reverse"]` → 逆向（research 轨）项目的**智能体工作台**经 `core/chat/mcp_bridge.py` 自动获得 `mcp__x64dbg__*` 工具。VM 形态只是把 `127.0.0.1:3000` 换成 NAT 转发，配置条目同构。**IDA 专用 `MCPBackend` 不接 x64dbg**（工具名不兼容）——`select_mcp_endpoint` 已加精确名 `ida` 优先，防其抢占实时桥。
 - Agent 工具暴露：调试工具随 MCP 工具清单下发；run_cmd 描述补「样本投递后用 MCP 加载调试」路径。
 - 人工监督下跑通全链：**投递样本 → MCP 加载 → 下断 → 单步 → 读寄存器/内存 → 产物回收**。
 - 前置评估闸门：ouonet/x64dbg-mcp 若实测不稳（GUI 会话、x64bridge 兼容），启用 C# 插件备选再定。

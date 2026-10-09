@@ -454,21 +454,37 @@ def _is_loopback_url(url: str) -> bool:
     return p.scheme in ("http", "https") and (p.hostname or "").lower() in _MCP_LOOPBACK_HOSTS
 
 
+def _mcp_reverse_url(entry) -> str | None:
+    """单条 server 能否作逆向域 http 端点：能则回其 url，否则 None。"""
+    if not isinstance(entry, dict) or not entry.get("enabled", True):
+        return None
+    if entry.get("transport", "streamable-http") not in _MCP_HTTP_TRANSPORTS:
+        return None
+    domains = entry.get("domains") or []
+    if "reverse" not in domains and "binary" not in domains:
+        return None
+    url = (entry.get("url") or "").strip()
+    return url if url and _is_loopback_url(url) else None
+
+
 def select_mcp_endpoint(config: dict | None) -> str:
     """config/mcp.json 选逆向域（domains 含 reverse，兼容旧标 binary）的 http server；
-    无配置/无合适条目/条目非 loopback 时回默认本机端点（零配置：装插件 Ctrl-Alt-M 即用）。"""
+    无配置/无合适条目/条目非 loopback 时回默认本机端点（零配置：装插件 Ctrl-Alt-M 即用）。
+
+    **IDA 优先（2026-10-08）**：本端点只喂 IDA 专用实时桥（MCPBackend 的工具名
+    decompile/list_funcs/rename… 只对 IDA 有意义），故名字精确为 "ida" 的条目无论
+    排在何处都优先；池里另挂 x64dbg 等同域 server 时不会因排序抢占（否则缓存缺席的
+    实时取伪码/xref 会打向调试器而全失效）。无 ida 条目时回退原「首个命中」语义。"""
+    fallback: str | None = None
     for s in (config or {}).get("servers") or []:
-        if not isinstance(s, dict) or not s.get("enabled", True):
+        url = _mcp_reverse_url(s)
+        if not url:
             continue
-        if s.get("transport", "streamable-http") not in _MCP_HTTP_TRANSPORTS:
-            continue
-        domains = s.get("domains") or []
-        if "reverse" not in domains and "binary" not in domains:
-            continue
-        url = (s.get("url") or "").strip()
-        if url and _is_loopback_url(url):
+        if str(s.get("name") or "") == "ida":
             return url
-    return MCP_DEFAULT_ENDPOINT
+        if fallback is None:
+            fallback = url
+    return fallback or MCP_DEFAULT_ENDPOINT
 
 
 def _parse_mcp_body(raw: str):

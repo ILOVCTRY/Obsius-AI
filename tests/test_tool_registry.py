@@ -65,6 +65,7 @@ _SNAPSHOT_ORDER = [
     "decompile", "list_symbols", "strings_search", "func_xrefs", "disasm",
     "bb_notify",
     "finish", "request_steps",
+    "browser_replay", "browser_intruder",
     "browser_navigate", "browser_click", "browser_type", "browser_screenshot",
     "browser_content", "browser_back",
     "route_lookup", "skill_open",

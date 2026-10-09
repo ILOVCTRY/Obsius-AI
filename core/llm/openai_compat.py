@@ -7,27 +7,24 @@ from typing import Any
 from core.llm import parsing
 from core.llm.anthropic_compat import StreamTransport, Transport
 from core.llm.provider import LLMResponse, ToolCall, Usage, LLMError
-from core.llm.retry import HTTP_5XX_ATTEMPTS, HTTP_5XX_BACKOFF, HTTP_5XX_RETRIES, HTTP_5XX_STATUS
+from core.llm.retry import (HTTP_5XX_ATTEMPTS, HTTP_5XX_BACKOFF, HTTP_5XX_RETRIES,
+                            HTTP_5XX_STATUS, retry_note)
 from core.llm.sdk_engine import RawFallback, build_openai_transports
 
 CHAT_COMPLETIONS = "openai-chat-completions"
 RESPONSES = "openai-responses"
 
-# Cloudflare 520 表示边缘代理从源站拿到了未知/无效响应；524 表示已连上源站，
-# 但源站在边缘超时窗口内没有返回结果。只对这两个明确的上游暂态状态重试，
-# 避免把鉴权/参数错误重复发送。520 按首次请求失败后重试 5 次处理，
-# 524 保持最多 5 次总请求；退避时间可由测试覆盖。
-OPENAI_520_RETRIES = 5
-OPENAI_520_ATTEMPTS = OPENAI_520_RETRIES + 1
-OPENAI_520_BACKOFF = (2.0, 4.0, 8.0, 16.0, 30.0)
-OPENAI_524_ATTEMPTS = 5
-OPENAI_524_BACKOFF = (2.0, 4.0, 8.0, 16.0)
-OPENAI_CONNECTION_ATTEMPTS = 5
-OPENAI_CONNECTION_BACKOFF = (2.0, 4.0, 8.0, 16.0)
-# 上游标准 5xx（500/502/503/504）：共 10 次尝试（首次 + 9 次重试），退避封顶 30s
-# ——与 Anthropic 路径统一口径（共享 HTTP_5XX_BACKOFF）。
-# 429 刻意不重试；520/524 继续使用各自的专用预算。
-OPENAI_5XX_RETRYABLE = tuple(sorted(HTTP_5XX_STATUS))
+# Cloudflare 专有暂态状态：520=边缘代理从源站拿到未知/无效响应，524=已连上源站
+# 但源站在边缘超时窗口内没返回。与标准 5xx 一并纳入统一重试预算（2026-10-07
+# 拉齐：原 520/524 各自 5 次专用预算，现并入标准口径，见下方 OPENAI_5XX_RETRYABLE）。
+# 2026-10-08 与 Anthropic 路径拉齐：连接类共 11 次尝试（首次 + 10 次重试），
+# 退避 2/4/8/16/30s 封顶（原 5 次尝试）。
+OPENAI_CONNECTION_ATTEMPTS = 11
+OPENAI_CONNECTION_BACKOFF = (2.0, 4.0, 8.0, 16.0, 30.0)
+# 上游暂态状态（标准 5xx 500/502/503/504 + Cloudflare 520/524）：共 11 次尝试
+# （首次 + 10 次重试），退避封顶 30s——与 Anthropic 路径共享 HTTP_5XX_* 口径。
+# 429 刻意不重试。
+OPENAI_5XX_RETRYABLE = tuple(sorted(HTTP_5XX_STATUS | {520, 524}))
 OPENAI_5XX_ATTEMPTS = HTTP_5XX_ATTEMPTS
 OPENAI_5XX_RETRIES = HTTP_5XX_RETRIES
 OPENAI_5XX_BACKOFF = HTTP_5XX_BACKOFF
@@ -79,10 +76,16 @@ class OpenAICompatProvider:
         url = f"{self.base_url}/v1/{'chat/completions' if self.format == CHAT_COMPLETIONS else 'responses'}"
         _, stream_transport = self._sdk_transports()  # OpenAI 路径恒走流式
 
-        def request_with_retries(payload: bytes):
-            """重试上游明确的 520/524/5xx 或瞬时连接断开，其他错误立即返回。"""
-            max_attempts = (OPENAI_520_ATTEMPTS + OPENAI_5XX_ATTEMPTS
-                            + OPENAI_524_ATTEMPTS + OPENAI_CONNECTION_ATTEMPTS)
+        def request_with_retries(payload: bytes) -> tuple[int, Any, str]:
+            """重试上游暂态状态（500/502/503/504/520/524）或瞬时连接断开，
+            其他错误立即返回。
+
+            三类暂态状态统一 10 次重试预算（2026-10-07 拉齐：520/524 原为 5 次
+            专用预算，现并入标准 5xx 口径）。返回 ``(status, data, note)``——
+            ``note`` 是重试耗尽后的计数后缀（``retry_note``），非重试类错误为
+            空串，供错误文案显式带出「试了几次」。
+            """
+            max_attempts = OPENAI_5XX_ATTEMPTS + OPENAI_CONNECTION_ATTEMPTS
             status_5xx_used = 0
             for attempt in range(1, max_attempts + 1):
                 try:
@@ -99,39 +102,24 @@ class OpenAICompatProvider:
                         attempt - 1, len(OPENAI_CONNECTION_BACKOFF) - 1)])
                     continue
 
-                if status == 520:
-                    if attempt >= OPENAI_520_ATTEMPTS:
-                        return status, data
-                    if on_retry is not None:
-                        on_retry(attempt, OPENAI_520_RETRIES, 520)
-                    time.sleep(OPENAI_520_BACKOFF[min(
-                        attempt - 1, len(OPENAI_520_BACKOFF) - 1)])
-                    continue
-
                 if status in OPENAI_5XX_RETRYABLE:
                     status_5xx_used += 1
                     if status_5xx_used >= OPENAI_5XX_ATTEMPTS:
-                        return status, data
+                        return status, data, retry_note(status_5xx_used - 1,
+                                                        OPENAI_5XX_RETRIES)
                     if on_retry is not None:
                         on_retry(status_5xx_used, OPENAI_5XX_RETRIES, status)
                     time.sleep(OPENAI_5XX_BACKOFF[min(
                         status_5xx_used - 1, len(OPENAI_5XX_BACKOFF) - 1)])
                     continue
 
-                if status != 524:
-                    return status, data
-                if attempt >= OPENAI_524_ATTEMPTS:
-                    return status, data
-                if on_retry is not None:
-                    on_retry(attempt, OPENAI_524_ATTEMPTS, 524)
-                time.sleep(OPENAI_524_BACKOFF[min(
-                    attempt - 1, len(OPENAI_524_BACKOFF) - 1)])
+                return status, data, ""
             raise RuntimeError("unreachable")  # pragma: no cover
 
         payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
         stream_attempt = 0
         while True:
-            status, data = request_with_retries(payload)
+            status, data, note = request_with_retries(payload)
             if status != 200:
                 message = str((data or {}).get("error", {}).get("message", "请求失败"))
                 if (self._enable_thinking and not self._thinking_disabled
@@ -141,7 +129,8 @@ class OpenAICompatProvider:
                     body.pop("reasoning", None)
                     payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
                     continue
-                raise LLMError(f"LLM 调用失败 HTTP {status}: {message}", status=status,
+                raise LLMError(f"LLM 调用失败 HTTP {status}{note}: {message}",
+                               status=status,
                                body=json.dumps(data or {}, ensure_ascii=False)[:500])
             if isinstance(data, dict):
                 return self._parse(data)
@@ -189,7 +178,9 @@ class OpenAICompatProvider:
                         pass
                 if emitted["value"] or stream_attempt + 1 >= OPENAI_CONNECTION_ATTEMPTS:
                     if emitted["value"]:
-                        raise LLMError(f"流式传输中断: {exc}") from exc
+                        # 已吐增量后中断：半截内容已上屏，流不可重放。打 partial 标记
+                        # 交上层走「接着续写」（2026-10-08）。
+                        raise LLMError(f"流式传输中断: {exc}", partial=True) from exc
                     raise LLMError(
                         f"网络连接失败（已重试 {stream_attempt} 次）: {exc}") from exc
                 stream_attempt += 1

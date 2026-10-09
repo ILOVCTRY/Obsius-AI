@@ -217,7 +217,7 @@ def test_retry_exhausts_then_raises(monkeypatch):
     p = AnthropicCompatProvider("https://fake", "key", "m", stream_transport=transport)
     with pytest.raises(LLMError, match="503"):
         p.chat([{"role": "user", "content": "hi"}])
-    assert calls["n"] == 10     # 5xx：首次 + 9 次重试
+    assert calls["n"] == 11     # 5xx：首次 + 10 次重试
 
 
 # ---------- 瞬时网络错误（2026-10-01 健壮性） ----------
@@ -280,8 +280,8 @@ def test_retry_on_connection_reset_then_success(monkeypatch):
 
 
 def test_connection_reset_exhausts_then_raises_network_error(monkeypatch):
-    """连接类独立预算（2026-10-01 事故修复）：CONN_RETRIES=4 → 共 4 次尝试后放弃
-    （此前与 5xx 共用 2 次预算，一次 SSE 长连接重置即判死整轮）。"""
+    """连接类独立预算（2026-10-08 用户定稿）：CONN_RETRIES=11 → 共 11 次尝试后放弃
+    （原 4 次；实测网关抖动/长连接重置在 4 次内未恢复即判死整轮）。"""
     monkeypatch.setattr("core.llm.anthropic_compat.RETRY_BACKOFF", 0)
     monkeypatch.setattr("core.llm.anthropic_compat.CONN_BACKOFF", (0, 0, 0))
     n = {"n": 0}
@@ -293,12 +293,12 @@ def test_connection_reset_exhausts_then_raises_network_error(monkeypatch):
     p = AnthropicCompatProvider("https://fake", "key", "m", stream_transport=transport)
     with pytest.raises(LLMError, match="网络错误") as ei:
         p.chat([{"role": "user", "content": "hi"}])
-    assert n["n"] == 4  # CONN_RETRIES=4：重试 3 次后放弃
-    assert "已重试 3 次" in str(ei.value)
+    assert n["n"] == 11  # CONN_RETRIES=11：重试 10 次后放弃
+    assert "已重试 10 次" in str(ei.value)
 
 
 def test_retry_budget_per_category(monkeypatch):
-    """按类别预算：标准 5xx 共 10 次尝试，429 共 2 次，连接类 4 次。"""
+    """按类别预算：标准 5xx 共 11 次尝试，429 共 2 次，连接类 11 次。"""
     monkeypatch.setattr("core.llm.anthropic_compat.RETRY_BACKOFF", 0)
     monkeypatch.setattr("core.llm.anthropic_compat.HTTP_5XX_BACKOFF", (0,))
     monkeypatch.setattr("core.llm.anthropic_compat.CONN_BACKOFF", (0, 0, 0))
@@ -308,11 +308,12 @@ def test_retry_budget_per_category(monkeypatch):
         s["n"] += 1
         return 503, {"error": {"message": "down"}}
 
-    with pytest.raises(LLMError, match="503"):
+    with pytest.raises(LLMError, match="503") as e503:
         AnthropicCompatProvider("https://fake", "key", "m",
                                 stream_transport=t503).chat(
             [{"role": "user", "content": "hi"}])
-    assert s["n"] == 10         # 5xx：首次 + 9 次重试
+    assert s["n"] == 11         # 5xx：首次 + 10 次重试
+    assert "已重试 10/10 次" in str(e503.value)   # 重试次数显式入文案（2026-10-07）
 
     r = {"n": 0}
 
@@ -320,11 +321,12 @@ def test_retry_budget_per_category(monkeypatch):
         r["n"] += 1
         return 429, {"error": {"message": "slow down"}}
 
-    with pytest.raises(LLMError, match="429"):
+    with pytest.raises(LLMError, match="429") as e429:
         AnthropicCompatProvider("https://fake", "key", "m",
                                 stream_transport=t429).chat(
             [{"role": "user", "content": "hi"}])
     assert r["n"] == 2          # 429 保持快速失败预算
+    assert "已重试 1/1 次" in str(e429.value)
 
     c = {"n": 0}
 
@@ -336,7 +338,7 @@ def test_retry_budget_per_category(monkeypatch):
         AnthropicCompatProvider("https://fake", "key", "m",
                                 stream_transport=treset).chat(
             [{"role": "user", "content": "hi"}])
-    assert c["n"] == 4          # 连接类 4 次
+    assert c["n"] == 11         # 连接类 11 次（与 5xx 口径拉齐）
 
 
 def test_anthropic_5xx_retry_callback(monkeypatch):
@@ -347,15 +349,15 @@ def test_anthropic_5xx_retry_callback(monkeypatch):
 
     def transport(url, headers, body):
         calls["n"] += 1
-        if calls["n"] <= 9:
+        if calls["n"] <= 10:
             return 503, {"error": {"message": "temporarily unavailable"}}
         return 200, _sse_json(_anthropic_response([{"type": "text", "text": "ok"}]))
 
     p = AnthropicCompatProvider("https://fake", "key", "m", stream_transport=transport)
     assert p.chat([{"role": "user", "content": "hi"}],
                   on_retry=lambda *args: retries.append(args)).text == "ok"
-    assert calls["n"] == 10
-    assert retries == [(i, 9, 503) for i in range(1, 10)]
+    assert calls["n"] == 11
+    assert retries == [(i, 10, 503) for i in range(1, 11)]
 
 
 def test_stream_break_without_delta_is_retried(monkeypatch):
@@ -376,7 +378,8 @@ def test_stream_break_without_delta_is_retried(monkeypatch):
 
 
 def test_stream_break_after_delta_is_not_retried(monkeypatch):
-    """流式中途断开但已吐出增量 → 不重试（避免重复回调 on_text 造成重复上屏）。"""
+    """流式中途断开但已吐出增量 → 不重试（避免重复回调 on_text 造成重复上屏）；
+    打 partial 标记（2026-10-08）供上层走「接着续写」。"""
     monkeypatch.setattr("core.llm.anthropic_compat.RETRY_BACKOFF", 0)
     n = {"n": 0}
     chunk = json.dumps({"type": "content_block_delta", "index": 0,
@@ -387,9 +390,10 @@ def test_stream_break_after_delta_is_not_retried(monkeypatch):
         return 200, _BreakingStream([f"data: {chunk}"], exc_after=1)
 
     p = AnthropicCompatProvider("https://fake", "key", "m", stream_transport=transport)
-    with pytest.raises(LLMError, match="流式传输中断"):
+    with pytest.raises(LLMError, match="流式传输中断") as ei:
         p.chat([{"role": "user", "content": "hi"}], on_text=lambda _d: None)
     assert n["n"] == 1
+    assert ei.value.partial is True
 
 
 # ---------- 思考开关（2026-09-19 直播间终端化） ----------
@@ -1122,10 +1126,10 @@ def test_openai_524_retries_until_success(monkeypatch):
     assert p.chat([{"role": "user", "content": "hi"}],
                    on_retry=lambda *args: retries.append(args)).text == "OK"
     assert len(attempts) == 3
-    assert retries == [(1, 5, 524), (2, 5, 524)]
+    assert retries == [(1, 10, 524), (2, 10, 524)]
 
 
-def test_openai_524_stops_after_five_total_attempts(monkeypatch):
+def test_openai_524_stops_after_ten_retries(monkeypatch):
     from core.llm import openai_compat
 
     attempts = []
@@ -1140,10 +1144,10 @@ def test_openai_524_stops_after_five_total_attempts(monkeypatch):
         stream_transport=transport)
     with pytest.raises(LLMError, match="HTTP 524"):
         p.chat([{"role": "user", "content": "hi"}])
-    assert len(attempts) == 5
+    assert len(attempts) == 11      # 与标准 5xx 拉齐：首次 + 10 次重试
 
 
-def test_openai_520_retries_five_times_after_initial_failure(monkeypatch):
+def test_openai_520_retries_ten_times_after_initial_failure(monkeypatch):
     from core.llm import openai_compat
 
     attempts = []
@@ -1160,9 +1164,8 @@ def test_openai_520_retries_five_times_after_initial_failure(monkeypatch):
     with pytest.raises(LLMError, match="HTTP 520"):
         p.chat([{"role": "user", "content": "hi"}],
                on_retry=lambda *args: retries.append(args))
-    assert len(attempts) == 6
-    assert retries == [(1, 5, 520), (2, 5, 520), (3, 5, 520),
-                       (4, 5, 520), (5, 5, 520)]
+    assert len(attempts) == 11      # 与标准 5xx 拉齐：首次 + 10 次重试
+    assert retries == [(i, 10, 520) for i in range(1, 11)]
 
 
 def test_openai_520_retry_recovers(monkeypatch):
@@ -1186,7 +1189,7 @@ def test_openai_520_retry_recovers(monkeypatch):
     assert p.chat([{"role": "user", "content": "hi"}],
                    on_retry=lambda *args: retries.append(args)).text == "OK"
     assert len(attempts) == 3
-    assert retries == [(1, 5, 520), (2, 5, 520)]
+    assert retries == [(1, 10, 520), (2, 10, 520)]
 
 
 def test_openai_connection_reset_retries_until_success(monkeypatch):
@@ -1209,10 +1212,10 @@ def test_openai_connection_reset_retries_until_success(monkeypatch):
     assert p.chat([{"role": "user", "content": "hi"}],
                    on_retry=lambda *args: retries.append(args)).text == "OK"
     assert len(attempts) == 3
-    assert retries == [(1, 5, "connection"), (2, 5, "connection")]
+    assert retries == [(1, 11, "connection"), (2, 11, "connection")]
 
 
-def test_openai_connection_reset_stops_after_five_total_attempts(monkeypatch):
+def test_openai_connection_reset_stops_after_eleven_total_attempts(monkeypatch):
     from core.llm import openai_compat
 
     monkeypatch.setattr(openai_compat.time, "sleep", lambda _: None)
@@ -1224,9 +1227,9 @@ def test_openai_connection_reset_stops_after_five_total_attempts(monkeypatch):
 
     p = openai_compat.OpenAICompatProvider(
         "https://fake", "key", "m", stream_transport=transport)
-    with pytest.raises(LLMError, match="网络连接失败.*已重试 4 次"):
+    with pytest.raises(LLMError, match="网络连接失败.*已重试 10 次"):
         p.chat([{"role": "user", "content": "hi"}])
-    assert len(attempts) == 5
+    assert len(attempts) == 11
 
 
 def test_openai_stream_read_timeout_retries_until_success(monkeypatch):
@@ -1252,7 +1255,7 @@ def test_openai_stream_read_timeout_retries_until_success(monkeypatch):
     assert p.chat([{"role": "user", "content": "hi"}],
                    on_retry=lambda *args: retries.append(args)).text == "OK"
     assert len(attempts) == 2
-    assert retries == [(1, 5, "stream")]
+    assert retries == [(1, 11, "stream")]
 
 
 def test_anthropic_messages_uses_x_api_key():

@@ -4,11 +4,11 @@ import {
 } from "react"
 import {
   AlertTriangle, Bot, Check, ChevronDown, CircleSlash, Clock3, Cpu, Gauge, Loader2,
-  Plug, Plus, Send, Sparkles, Square, Trash2, Wrench, X, Zap,
+  Paperclip, Plug, Plus, Send, Sparkles, Square, Trash2, Wrench, X, Zap,
 } from "lucide-react"
 import { api, ApiError } from "@/lib/api"
 import type {
-  ChatAgent, ChatMcpServer, ChatMessage, ChatThread, ChatThreadError,
+  AttachmentInfo, ChatAgent, ChatMcpServer, ChatMessage, ChatThread, ChatThreadError,
 } from "@/lib/types"
 import type { Approval, DecideApprovalResult, ProjectDetail, SkillDef } from "@/lib/types"
 import { MarkdownView } from "@/components/settings/MarkdownView"
@@ -48,6 +48,15 @@ const CHIPS = [
 
 type PanelTab = "agents" | "skills" | "mcp" | null
 type SlashState = { mode: "menu" | "skills" | "mcp" }
+/** 待发附件（粘贴/拖拽即上传；chip 三态） */
+type PendingFile = {
+  key: string
+  status: "uploading" | "ready" | "error"
+  name: string
+  size: number
+  file: File
+  att?: AttachmentInfo
+}
 
 // 斜杠命令（K9-C）；CTX_LIMIT：上下文窗口分母，默认按 256K 计
 const CTX_LIMIT = 256 * 1024
@@ -80,6 +89,7 @@ export function AgentWorkbenchView({ pid, meta }: {
   const [err, setErr] = useState<string | null>(null)
   const [panel, setPanel] = useState<PanelTab>(null)
   const [refsDraft, setRefsDraft] = useState<{ skills: string[]; mcps: string[] }>({ skills: [], mcps: [] })
+  const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([])
   const [slash, setSlash] = useState<SlashState | null>(null)
   const [usageOpen, setUsageOpen] = useState(false)
   const [skills, setSkills] = useState<{ name: string; description: string }[]>([])
@@ -323,11 +333,33 @@ export function AgentWorkbenchView({ pid, meta }: {
     setRefsDraft({ skills: [], mcps: [] })
   }, [tid, input])
 
+  // 附件随发（2026-10-08）：粘贴/拖拽即上传为 artifact（服务端同 sha 去重），chip 三态。
+  const uploadOne = (key: string, file: File) => {
+    api.uploadAttachment(pid, file)
+      .then((att) => setPendingFiles((fs) => fs.map((x) => x.key === key ? { ...x, status: "ready", att } : x)))
+      .catch(() => setPendingFiles((fs) => fs.map((x) => x.key === key ? { ...x, status: "error" } : x)))
+  }
+  const pickFiles = (files: FileList | null) => {
+    for (const f of Array.from(files ?? [])) {
+      const key = `${Date.now()}-${Math.random().toString(36).slice(2)}`
+      setPendingFiles((fs) => [...fs, { key, status: "uploading", name: f.name, size: f.size, file: f }])
+      uploadOne(key, f)
+    }
+  }
+  const retryFile = (key: string) => {
+    const f = pendingFiles.find((x) => x.key === key)
+    if (!f?.file) return
+    setPendingFiles((fs) => fs.map((x) => x.key === key ? { ...x, status: "uploading" } : x))
+    uploadOne(key, f.file)
+  }
+  const removeFile = (key: string) => setPendingFiles((fs) => fs.filter((x) => x.key !== key))
+
   // 发送 = 乐观上屏（用户气泡 + 思考占位先行）；POST 为 202 异步起线程，
   // 上屏由事件/轮询对账驱动，不再阻塞等全量 GET（修「发送后卡一下」）
   const send = useCallback(async (text?: string) => {
     const body = (text ?? input).trim()
-    if (!body || sending) return
+    const readyIds = pendingFiles.filter((f) => f.status === "ready" && f.att).map((f) => f.att!.id)
+    if ((!body && !readyIds.length) || sending) return
     setSending(true)
     setInput(""); setErr(null); setPendingIn(body)
     draftsRef.current.set(tid ?? "__new", "")
@@ -338,14 +370,16 @@ export function AgentWorkbenchView({ pid, meta }: {
         const t = await api.chatThreadCreate(pid, agentId)
         id = t.id; setTid(id)
       }
-      await api.chatSend(id, body, refs)
+      await api.chatSend(id, body, refs, readyIds)
       setRefsDraft({ skills: [], mcps: [] })
+      const sent = new Set(pendingFiles.filter((f) => f.status === "ready").map((f) => f.key))
+      setPendingFiles((fs) => fs.filter((f) => !sent.has(f.key)))
     } catch (e) {
       setPendingIn(null)
       setErr(e instanceof Error ? e.message : String(e))
     }
     finally { setSending(false); inputRef.current?.focus() }
-  }, [input, sending, tid, pid, agentId, refsDraft])
+  }, [input, sending, tid, pid, agentId, refsDraft, pendingFiles])
 
   const removeThread = useCallback(async (id: string) => {
     try {
@@ -748,7 +782,9 @@ export function AgentWorkbenchView({ pid, meta }: {
             </div>
           )}
 
-          <div className="wb-composer">
+          <div className="wb-composer"
+               onDragOver={(e) => { e.preventDefault() }}
+               onDrop={(e) => { e.preventDefault(); pickFiles(e.dataTransfer?.files ?? null) }}>
             <div className="wb-composer-head">
               <button className="wb-composer-agent" onClick={() => setAgentMenuOpen(true)}>
                 <span className={cn("wb-avatar is-sm", agentId === ORCHESTRATOR && "is-orch")}>
@@ -768,12 +804,39 @@ export function AgentWorkbenchView({ pid, meta }: {
                   : <><span className="wb-dot" />待命</>}
               </span>
             </div>
+            {pendingFiles.length > 0 && (
+              <div className="mb-1.5 flex flex-wrap items-center gap-1.5">
+                {pendingFiles.map((f) => (
+                  <span key={f.key}
+                    className={cn("inline-flex max-w-64 items-center gap-1 rounded-md border px-2 py-1 text-xs",
+                      f.status === "error" && "border-destructive/50 text-destructive",
+                      f.status === "uploading" && "opacity-60")}
+                    title={f.status === "error" ? "上传失败，点「重试」再传" : `${f.name}（${fmtBytes(f.size)}）`}>
+                    <Paperclip className="size-3 shrink-0" />
+                    <span className="min-w-0 truncate">{f.name}</span>
+                    <span className="shrink-0 text-[10px] text-muted-foreground">{fmtBytes(f.size)}</span>
+                    {f.status === "uploading" && <span className="shrink-0 text-[10px]">上传中…</span>}
+                    {f.status === "error" && (
+                      <button type="button" className="shrink-0 underline" onClick={() => retryFile(f.key)}>重试</button>
+                    )}
+                    <button type="button" className="shrink-0 text-muted-foreground hover:text-foreground"
+                            onClick={() => removeFile(f.key)} title="移除附件">
+                      <X className="size-3" />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
             <textarea
               ref={inputRef}
               rows={2}
               value={input}
-              placeholder={running ? "当前线程执行中，可点「停止」中止本轮…" : "描述测试意图，回车发送（Shift+回车 换行，/ 唤出命令）"}
+              placeholder={running ? "当前线程执行中，可点「停止」中止本轮…" : "描述测试意图，回车发送（Shift+回车 换行，/ 唤出命令，可粘贴或拖入附件）"}
               onChange={(e) => onInputChange(e.target.value)}
+              onPaste={(e) => {
+                const files = e.clipboardData?.files
+                if (files && files.length) { e.preventDefault(); pickFiles(files) }
+              }}
               onKeyDown={(e) => {
                 if (e.key === "Escape" && slash) { setSlash(null); e.preventDefault(); return }
                 if (e.key !== "Enter" || e.shiftKey) return
@@ -895,6 +958,13 @@ function UsageRing({ pct }: { pct: number }) {
 
 function fmtTokens(n: number): string {
   return n >= 1024 ? `${(n / 1024).toFixed(1)}K` : String(n)
+}
+
+/** 字节 → 人类可读（附件 chip 用；与 LiveRoom 同款）。 */
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  return `${(n / 1024 / 1024).toFixed(1)} MB`
 }
 
 function fmtTime(iso: string): string {

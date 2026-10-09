@@ -28,6 +28,10 @@ packs/
    ├─ phases/<phase>.yaml # 阶段剧本（当前仅 pentest 轨三阶段）：stem=阶段 id、name 中文显示；
    │                     #   goal/order/focus/gate 门指标/gate_types/tasks 剧本首发清单/next；
    │                     #   项目 config.phases 同名条目整体覆写；引擎 core/phases.py
+   ├─ dimensions.yaml    # 测试维度清单（test-dimensions M1，当前仅 pentest 轨）：每个维度 =
+   │                     #   id/name/applies_to（适用资产类型）/intent 意图模板/evidence_hint；
+   │                     #   面覆盖 ⟺ 该面有 ≥1 条收尾意图且无 open 意图；项目 config.dimensions
+   │                     #   同名 id 整体覆写；加载与判定 core/dimensions.py。后续演进取 skill.covers
    ├─ rules/{redlines.md, owners/<tag>.md, rating/<tag>.md, role-rules/<role>.md, templates/<tag>.md}
    │                     # F11：rating/ = 评级与价值口径（文件即规则，注入时带头注评级硬指令）；
    │                     #   owners/ 只留授权边界与操作红线；role-rules/<专家id>.md 按绑定专家匹配；

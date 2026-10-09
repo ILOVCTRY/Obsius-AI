@@ -47,6 +47,59 @@ function guardTopLevelNavigation(webContents) {
   })
 }
 
+/** URL 是否属于 UI 自身源（主窗唯一允许停留的地方）。 */
+function isUiUrl(url) {
+  if (!url || url === "about:blank") return true
+  try {
+    const target = new URL(url)
+    // ws/wss 与 http/https 视为同源——前端事件流走 ws://<ui-host>/ws/...，
+    // 不折算会把主窗自己的 WebSocket 也一起拦掉。
+    if (target.protocol === "ws:") target.protocol = "http:"
+    else if (target.protocol === "wss:") target.protocol = "https:"
+    return target.origin === uiOrigin()
+  } catch { return false }
+}
+
+// ---- 主窗内容守卫（2026-10-08 事故）----
+// 事故：壳把自己注册成项目浏览器（/browser/desktop/attach，cdp_url=壳的 9222），平台
+// 浏览器池 connect_over_cdp 后取 contexts[0]——主窗与各 WebContentsView 同在该默认
+// context 内，且主窗页排在最前（应用启动最早创建）。Playwright MCP（非 isolated）的
+// _currentTab 因此落在主窗上，一次 browser_navigate 就把平台 UI 导航成了目标站（实测
+// 主窗停在 m.ys7.com 萤石商城，用户看到「前端变成浏览器」）。
+// guardTopLevelNavigation 拦不住：CDP Page.navigate / loadURL 属浏览器侧发起，不触发
+// will-navigate。故在此做两道兜底——
+//   ① 网络层：按 webContentsId 只放行主窗的 UI 源请求，目标页**永不加载**（preload 的
+//      IPC 面也就不会暴露给外部站点：desktopBrowser 能 createTerminalTab 起 PowerShell）。
+//   ② 导航看门狗：did-start-navigation / did-navigate 发现主文档离开 UI 源立即回跳。
+function guardMainWindowContent(win) {
+  const wc = win.webContents
+  const wcId = wc.id
+  let restoreUntil = 0
+  const restore = (reason, url) => {
+    if (Date.now() < restoreUntil) return  // 一次导航会连发多个事件，防回跳风暴
+    restoreUntil = Date.now() + 2000
+    logLine(`主窗被导航离开 UI（${reason}）: ${url} → 回跳 ${UI_URL}`)
+    try { wc.stop() } catch (_) { /* 已停止 */ }
+    void wc.loadURL(UI_URL).catch(() => { /* UI 不可达时不循环重试 */ })
+  }
+  try {
+    wc.session.webRequest.onBeforeRequest((details, callback) => {
+      if (details.webContentsId !== wcId) return callback({})  // 同一 session 还有浏览器标签页
+      if (isUiUrl(details.url)) return callback({})
+      logLine(`主窗拦截外部请求: ${details.url}`)
+      callback({ cancel: true })
+    })
+  } catch (error) { logLine(`主窗请求过滤挂载失败: ${error}`) }
+  wc.on("did-start-navigation", (details, url, _isInPlace, isMainFrame) => {
+    const target = (details && details.url) || url
+    const main = details && typeof details.isMainFrame === "boolean" ? details.isMainFrame : isMainFrame
+    if (main && !isUiUrl(target)) restore("did-start-navigation", target)
+  })
+  wc.on("did-navigate", (_event, url) => {
+    if (!isUiUrl(url)) restore("did-navigate", url)
+  })
+}
+
 // ---- 壳级日志（logs/desktop.log）----
 // 此前壳没有任何日志落盘：主窗渲染进程静默死亡时（render-process-gone 未挂主窗、
 // Windows 事件日志也无记录）事后完全无法定位，用户只能看到一片空白。壳级异常与
@@ -286,15 +339,30 @@ async function createWindow() {
     backgroundColor: "#111419",
     frame: false,
     autoHideMenuBar: true,
-    webPreferences: { preload: path.join(__dirname, "preload.js"), contextIsolation: true, sandbox: false },
+    // partition（2026-10-08）：主窗独占一个 StoragePartition，即在 CDP 里独占一个
+    // browser context——否则平台浏览器池 connect_over_cdp 后的 contexts[0]（Electron
+    // 默认 context）里既有各浏览器标签页、也有平台 UI 主窗，Playwright MCP 的
+    // _currentTab 会挑中主窗并把前端导航走。代价：UI 的 localStorage 随 partition
+    // 走，换 partition 后外观/导航折叠等前端偏好会重置一次。
+    webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
+      contextIsolation: true,
+      sandbox: false,
+      partition: "persist:cyberstrike-ui",
+    },
   })
   const url = UI_URL
   guardTopLevelNavigation(mainWindow.webContents)
   attachMainWindowRecovery(mainWindow)
+  guardMainWindowContent(mainWindow)
   await mainWindow.loadURL(url)
-  session.defaultSession.on("will-download", (_event, item) => {
+  // 下载默认落到项目 workspaces/downloads。主窗换 partition 后与浏览器标签页不再共用
+  // session，故两处都要挂（标签页的下载在 default session）。
+  const setDownloadPath = (_event, item) => {
     item.setSaveDialogOptions({ defaultPath: path.join(ROOT, "workspaces", "downloads", item.getFilename()) })
-  })
+  }
+  session.defaultSession.on("will-download", setDownloadPath)
+  mainWindow.webContents.session.on("will-download", setDownloadPath)
   mainWindow.on("resize", () => {
     mainWindow.webContents.send("desktop:resize")
     mainWindow.webContents.send("window:maximized", mainWindow.isMaximized())

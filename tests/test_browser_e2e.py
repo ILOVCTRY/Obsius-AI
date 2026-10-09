@@ -365,3 +365,38 @@ def test_ai_session_auto_close(pool, server):
     rows = [r for r in bb.list_http_history(pid, source="browser")
             if r["session_id"] == "human-main"]
     assert rows
+
+
+def test_idle_reaper_closes_ai_session_keeps_human(pool, server):
+    """空闲回收（2026-10-07）：AI 会话超 session_idle_timeout_s 无操作 → 关其 Page；
+    人工 human-main 永不回收。计时口径 = _last_action_at（每次动作刷新）。"""
+    bpool, bb, pid = pool
+    bpool.config.session_idle_timeout_s = 0     # 先禁用，避免浏览器启动耗时被判空闲
+    inst = bpool.get_instance(pid)
+    ai_sid = "sess-" + "f" * 12
+    inst.open_session(ai_sid, ai_sid)
+    inst.ensure_human_session()
+    inst.navigate(ai_sid, f"{server}/")          # 一次动作 → 刷新计时
+    bpool.config.session_idle_timeout_s = 1.0    # 热改生效（reaper 每轮重读）
+    assert inst.session_exists(ai_sid) and inst.session_exists("human-main")
+    deadline = time.time() + 10
+    while time.time() < deadline and inst.session_exists(ai_sid):
+        time.sleep(0.3)
+    assert not inst.session_exists(ai_sid)        # 空闲 AI 页被回收
+    assert inst.session_exists("human-main")      # 人工页保留
+    # 回收留审计（工作台浏览器时间线可见）
+    acts = [e for e in bb.recent_events(pid, tail=50, kinds=["browser.action"])
+            if (e.get("payload") or {}).get("action") == "idle-close"]
+    assert acts and acts[-1]["session_id"] == ai_sid
+
+
+def test_idle_reaper_disabled_when_zero(pool, server):
+    """session_idle_timeout_s=0 禁用回收：AI 页保持存活。"""
+    bpool, bb, pid = pool
+    bpool.config.session_idle_timeout_s = 0
+    inst = bpool.get_instance(pid)
+    ai_sid = "sess-" + "e" * 12
+    inst.open_session(ai_sid, ai_sid)
+    inst.navigate(ai_sid, f"{server}/")
+    time.sleep(2.5)
+    assert inst.session_exists(ai_sid)

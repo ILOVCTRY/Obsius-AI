@@ -11,6 +11,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+import httpx
 import pytest
 
 from core.blackboard import Blackboard
@@ -390,6 +391,22 @@ def test_intruder_runs_and_groups_by_batch(bb, pid, server):
     assert "browser.intruder.start" in kinds and "browser.intruder.done" in kinds
 
 
+def test_intruder_proxy_recorded_in_meta_and_event(bb, pid, server):
+    """爆破显式代理（2026-10-07 放开红线）：proxy 进 start 事件与每行 meta.proxy。
+    指向死端口 → 连接失败，正好证明 proxy 参数确实生效。"""
+    intr = Intruder(bb, config=BrowserConfig())
+    summary = intr.run(
+        pid, {"method": "GET", "url": f"{server}/echo?u=§U§"},
+        [{"position": "U", "type": "list", "values": ["a"]}],
+        batch_id="in-px", concurrency=1, rate_per_sec=50,
+        proxy="http://127.0.0.1:1")
+    assert summary["total"] == 1 and summary["failed"] == 1  # 死代理 → 失败
+    rows = bb.list_http_history(pid, batch_id="in-px")
+    assert rows and rows[0]["meta"].get("proxy") == "http://127.0.0.1:1"
+    starts = [e for e in bb.recent_events(pid, kinds=["browser.intruder.start"])]
+    assert starts and starts[-1]["payload"].get("proxy") == "http://127.0.0.1:1"
+
+
 def test_intruder_range_and_two_markers(bb, pid, server):
     intr = Intruder(bb, config=BrowserConfig())
     summary = intr.run(
@@ -441,3 +458,37 @@ def test_intruder_consecutive_failures_stop(bb, pid, server):
         [{"position": "U", "type": "list", "values": [str(i) for i in range(30)]}],
         batch_id="in-t6", concurrency=1, rate_per_sec=100)
     assert summary["stopped"] is True and summary["failed"] >= 10
+
+
+# ---------- DNS 解析失败识别（2026-10-08） ----------
+
+def test_dns_failure_detection():
+    """_dns_failure：socket.gaierror / 异常链 / 已知文案三路都识别；_host_of 取主机。"""
+    from core.browser.replay import _dns_failure, _host_of
+
+    assert _dns_failure(socket.gaierror(11002, "getaddrinfo failed"))
+    assert _dns_failure(RuntimeError("[Errno 11002] getaddrinfo failed"))  # 文案兜底
+    try:
+        try:
+            raise socket.gaierror(11002, "getaddrinfo failed")
+        except socket.gaierror as inner:
+            raise RuntimeError("connect failed") from inner
+    except RuntimeError as exc:
+        assert _dns_failure(exc)                                  # 异常链
+    assert not _dns_failure(RuntimeError("connection refused"))
+    assert _host_of("http://a.b:8080/x") == "a.b"
+
+
+def test_replay_dns_failure_clear_message(bb, pid, monkeypatch):
+    """DNS 解析失败 → BrowserError 文案点明「域名解析失败」，失败行仍入库。"""
+    rc = ReplayClient(bb)
+
+    def boom(*_a, **_k):
+        raise httpx.ConnectError("[Errno 11002] getaddrinfo failed")
+
+    monkeypatch.setattr(rc, "_execute", boom)
+    with pytest.raises(BrowserError, match="域名解析失败"):
+        rc.replay(pid, raw="GET /x HTTP/1.1\nHost: opsg-gateway-in.oppo.com\n\n")
+    rows = bb.list_http_history(pid, source="replay")
+    assert rows and rows[0]["status"] is None
+

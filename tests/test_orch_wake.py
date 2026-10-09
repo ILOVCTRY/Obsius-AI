@@ -155,6 +155,50 @@ def test_collect_multi_kind_and_nonwhitelist(env):
     assert "门指标达成" in by_kind["phase.gate_open"]["summary"]
 
 
+def test_collect_finding_new_severity_gate(env):
+    """发现回喂（M4）：finding.new 仅 high/critical 唤醒；info/low/medium 静默
+    （低档发现不改变打法，只堆唤醒噪声）。摘要带级别+标题+资产。"""
+    bb, project = env
+    pid = project["id"]
+    bb.append_event(pid, "finding.new",
+                    {"finding_id": "f1", "title": "SQLi 登录口", "severity": "critical",
+                     "vuln_class": "sqli", "target_asset_id": "asset-1"}, author="sess-a")
+    bb.append_event(pid, "finding.new",
+                    {"finding_id": "f2", "title": "版本泄露", "severity": "info",
+                     "vuln_class": "infoleak", "target_asset_id": "asset-1"}, author="sess-a")
+    bb.append_event(pid, "finding.new",
+                    {"finding_id": "f3", "title": "中危", "severity": "medium",
+                     "vuln_class": "xss"}, author="sess-a")
+    trig = Orchestrator.collect_wake_triggers(bb, pid)
+    assert [t["kind"] for t in trig] == ["finding.new"]
+    assert trig[0]["summary"] == "[CRITICAL] SQLi 登录口（资产 asset-1）"
+
+
+def test_collect_finding_new_high_and_severity_forms(env):
+    """high 档同样唤醒；severity 大小写/空格容错；缺 title 回落 vuln_class；
+    payload 缺 severity 一律不唤醒（宁少勿扰）。"""
+    bb, project = env
+    pid = project["id"]
+    bb.append_event(pid, "finding.new",
+                    {"finding_id": "f1", "severity": " High ", "vuln_class": "rce"},
+                    author="sess-a")
+    bb.append_event(pid, "finding.new",
+                    {"finding_id": "f2", "title": "无级别发现"}, author="sess-a")
+    trig = Orchestrator.collect_wake_triggers(bb, pid)
+    assert len(trig) == 1
+    assert trig[0]["summary"] == "[HIGH] rce"
+
+
+def test_collect_finding_merged_not_waking(env):
+    """finding.merged（合并入既有发现）不在白名单——只有全新落库的发现唤醒。"""
+    bb, project = env
+    pid = project["id"]
+    bb.append_event(pid, "finding.merged",
+                    {"finding_id": "f1", "title": "重复上报", "severity": "critical"},
+                    author="sess-a")
+    assert Orchestrator.collect_wake_triggers(bb, pid) == []
+
+
 def test_wake_brief_text_composition():
     """合成消息：固定引导语 + 按类分行，team.run.finished 带摘要。"""
     triggers = [
@@ -169,6 +213,23 @@ def test_wake_brief_text_composition():
     assert "团队执行收尾：团队「exploit 队」执行收尾：failed" in text
     assert "预算软警" in text and "80%" in text
     assert "阶段出口门满足" in text
+
+
+def test_wake_brief_text_finding_group():
+    """finding.new 成组渲染：一条引导行（条数+复判打法指引）+ 逐条 · 摘要，
+    不与逐行 kind 行混杂。"""
+    triggers = [
+        {"kind": "finding.new", "event_id": 7,
+         "summary": "[CRITICAL] SQLi 登录口（资产 asset-1）", "ts": "x"},
+        {"kind": "finding.new", "event_id": 8,
+         "summary": "[HIGH] RCE 上传点", "ts": "x"},
+    ]
+    text = Orchestrator.wake_brief_text(triggers)
+    assert text.startswith("〔主动唤醒〕")
+    assert "高危发现落库（2 条）" in text and "派生新意图" in text
+    assert "  · [CRITICAL] SQLi 登录口（资产 asset-1）" in text
+    assert "  · [HIGH] RCE 上传点" in text
+    assert "finding.new：" not in text  # 不落逐行兜底格式
 
 
 def test_chat_turn_wake_payload_and_history(env):

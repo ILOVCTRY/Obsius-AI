@@ -18,11 +18,13 @@ from __future__ import annotations
 import base64
 import itertools
 import re
+import socket
 import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -83,6 +85,38 @@ _CONSECUTIVE_FAIL_LIMIT = 10
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+# DNS 解析失败文案（跨平台；httpx 会把底层 socket.gaierror 包成 ConnectError，
+# 异常链或消息里二者其一即可判定）
+_DNS_FAIL_HINTS = (
+    "getaddrinfo failed",            # Windows WSAHOST_NOT_FOUND（Errno 11002）
+    "name or service not known",     # Linux
+    "nodename nor servname provided",  # macOS
+    "no address associated with hostname",
+    "temporary failure in name resolution",
+)
+
+
+def _dns_failure(exc: BaseException) -> bool:
+    """判定异常（含 ``__cause__``/``__context__`` 链）是否 DNS 解析失败。"""
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, socket.gaierror):
+            return True
+        cur = cur.__cause__ or cur.__context__
+    text = str(exc).lower()
+    return any(hint in text for hint in _DNS_FAIL_HINTS)
+
+
+def _host_of(url: str) -> str:
+    """URL → 主机名（解析不出时回退原串，供错误文案展示）。"""
+    try:
+        return urlsplit(url).hostname or url
+    except ValueError:
+        return url
 
 
 class ReplayClient:
@@ -154,6 +188,10 @@ class ReplayClient:
                                 batch_id, m, u, hs, b, t0, str(e), opts)
             if isinstance(e, ReplayStopped):
                 raise BrowserError(str(e)) from e
+            if _dns_failure(e):
+                raise BrowserError(
+                    f"域名解析失败：{_host_of(u)} 在本机 DNS 解析不出来"
+                    f"（内网域名，或需经代理访问）；原始错误: {e}") from e
             raise BrowserError(f"重放请求失败: {e}") from e
         except Exception as e:  # noqa: BLE001 —— 国密 sidecar 不可用等：失败也入库
             self._store_failure(project_id, capture_id, modified, session_id, task_id,
@@ -300,7 +338,7 @@ class Intruder:
             *, batch_id: str, concurrency: int = 5, rate_per_sec: float = 10.0,
             max_requests: int | None = None, stop_event: threading.Event | None = None,
             progress_cb=None, session_id: str | None = None,
-            author: str = "human") -> dict:
+            author: str = "human", proxy: str | None = None) -> dict:
         """阻塞执行爆破。返回 {total, done, failed, batch_id, stopped}。"""
         cfg = self.config
         max_conc = cfg.intruder_max_concurrency if cfg else 5
@@ -334,7 +372,7 @@ class Intruder:
             project_id, "browser.intruder.start",
             {"batch_id": batch_id, "method": method, "url": url,
              "markers": marks, "total": total, "concurrency": concurrency,
-             "rate_per_sec": rate},
+             "rate_per_sec": rate, **({"proxy": proxy} if proxy else {})},
             session_id=session_id, author=author)
 
         # token-bucket 限速（全局共享，线程安全）
@@ -372,9 +410,10 @@ class Intruder:
             t0 = time.monotonic()
             ok = False
             try:
-                # trust_env=False 同重放（见上）：爆破流量不交系统代理
+                # trust_env=False 同重放（见上）：爆破流量不交系统代理；
+                # 显式 proxy 是使用者/Agent 主动指定（如代理池本地入口做 IP 轮换）
                 resp = httpx.Client(timeout=15.0, follow_redirects=True,
-                                    trust_env=False).request(
+                                    trust_env=False, proxy=proxy or None).request(
                     method, req_url, headers=headers,
                     content=req_body if req_body else None)
                 status = resp.status_code
@@ -387,7 +426,8 @@ class Intruder:
                 status = None
                 resp_headers, mime, resp_text = {}, "", None
                 resp_trunc = resp_bin = False
-                err = str(e)[:200]
+                err = (f"域名解析失败：{_host_of(req_url)} 在本机 DNS 解析不出来"
+                       if _dns_failure(e) else str(e))[:200]
             finally:
                 duration_ms = int((time.monotonic() - t0) * 1000)
             try:
@@ -395,6 +435,7 @@ class Intruder:
                     project_id, source="intruder", session_id=session_id,
                     batch_id=batch_id,
                     meta={"payload": payload_map, "index": idx,
+                          **({"proxy": proxy} if proxy else {}),
                           **({} if ok else {"error": err})},
                     method=method, url=req_url, status=status,
                     req_headers=headers, req_body=req_body,

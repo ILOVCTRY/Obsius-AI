@@ -215,7 +215,8 @@ def test_stats_injection_hvt_surface_and_digest(env):
     orch = make_orch(env, llm, track="pentest")
     stats = orch._stats()
     assert stats["assets"]["uncovered"][0]["value"] == "10.205.9.9"  # HVT 优先排序
-    assert stats["assets"]["done_count"] == 0  # 无 tested_clean（covered 走 na 终态）
+    # 三态：na 归已测试干净（收口），故 done_count=1（旧口径只数显式 tested_clean=0）
+    assert stats["assets"]["done_count"] == 1 and stats["assets"]["clean_count"] == 1
     assert [i["value"] for i in stats["assets"]["in_progress"]] == \
         ["https://a.t.com/admin"]
     hv = {h["value"]: h for h in stats["high_value"]}
@@ -678,7 +679,8 @@ def test_dispatcher_func_kb_upsert_and_query(tmp_path):
                         project_id=project["id"], session_id="sess-1", author="sess-1")
     d2 = ToolDispatcher(bb, gateway=None,
                         project_id=project["id"], session_id="sess-2", author="sess-2")
-    d1._intent_lead_passed = d2._intent_lead_passed = True  # 本测主题=func kb 读写，跳过意图先行闸
+    from test_agent import open_dispatch_intent
+    open_dispatch_intent(d1, d2)  # 本测主题=func kb 读写，跳过意图先行闸
     r1 = d1.dispatch("bb_upsert_func",
                      {"binary_sha256": sha, "address": 0x1189, "name": "sub_1189",
                       "analysis": "长度校验 21"})

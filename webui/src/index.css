@@ -841,7 +841,7 @@
 .nav-item.is-active { color: var(--primary); background: var(--theme-raw-e636578dde); border-color: var(--theme-raw-939d500bbc); }
 .nav-item.is-active::before { position: absolute; left: -11px; width: 2px; height: 18px; border-radius: 2px; background: var(--primary); content: ""; }
 .nav-item.is-locked { opacity: .3; cursor: not-allowed; }
-.nav-count, .approval-count { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; background: var(--status-approval); color: var(--background); font-size: 10px; font-weight: 750; }
+.nav-count { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; background: var(--status-approval); color: var(--background); font-size: 10px; font-weight: 750; }
 .nav-count { margin-left: auto; }
 .nav-footer { display: flex; align-items: center; gap: 8px; padding: 15px 16px; border-top: 1px solid var(--border); color: var(--muted-foreground); font-size: 11px; }
 .status-dot, .project-pulse { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--status-running); box-shadow: 0 0 0 3px var(--theme-raw-a73eb30acf); }
@@ -857,8 +857,6 @@
 .project-stats { display: flex; gap: 16px; padding-left: 20px; border-left: 1px solid var(--border); color: var(--muted-foreground); font-family: var(--font-mono); font-size: 10px; }
 .project-stats span { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
 .project-stats svg { color: var(--primary); }
-.approval-action { display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 10px; border: 1px solid transparent; border-radius: 6px; color: var(--muted-foreground); font-size: 12px; transition: .16s; }
-.approval-action:hover, .approval-action.is-active { border-color: var(--border); background: var(--secondary); color: var(--foreground); }
 .back-project { gap: 6px; color: var(--muted-foreground); }
 
 .settings-shell { display: flex; min-height: 0; height: 100%; overflow: hidden; background: linear-gradient(135deg, var(--theme-raw-8fcfcc3618), var(--theme-raw-95d080f0ad)); }
@@ -1009,7 +1007,6 @@
   .project-context { min-width: 0; }
   .project-context .eyebrow, .project-stats, .back-project span { display: none; }
   .project-title h1 { max-width: 150px; }
-  .approval-action span:not(.approval-count) { display: none; }
 }
 
 /* ---------- 智能体工作台（K9-UI，2026-09-29）：蛙池式结构语言 × 深色黑客风精修 ---------- */

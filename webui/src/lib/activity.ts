@@ -114,6 +114,11 @@ export function formatDuration(ms: number): string {
   return `${Math.floor(mins / 60)}h${mins % 60}m`
 }
 
+/** 空闲时长（浏览器卡片「多久未操作」）：一律秒（如 3s / 180s / 3725s）。 */
+export function formatIdle(ms: number): string {
+  return `${Math.max(0, Math.floor(ms / 1000))}s`
+}
+
 // ---------- 思考预览（对齐 cc-haha ThinkingBlock.thinkingPreview） ----------
 // 折叠行只显一行：剥掉 markdown 噪声（#/-/>/序号），流式中跟随尾部（此刻在
 // 想什么最有用），稳定后回到首行——除非首行是「XXX：」这种空标题，就显其下正文。

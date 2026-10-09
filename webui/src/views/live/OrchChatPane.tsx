@@ -129,6 +129,7 @@ const WAKE_LABELS: Record<string, string> = {
   "team.run.finished": "团队运行结束",
   "budget.soft_warning": "预算软警",
   "phase.gate_open": "阶段出口门满足",
+  "finding.new": "高危发现落库",
 }
 
 // 工具轨迹明细行（ActivityGroup 展开态）：⏺ 名称 + 参数 + ⎿ 结果，等宽克制风。

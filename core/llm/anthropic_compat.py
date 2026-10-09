@@ -15,7 +15,8 @@ from typing import Any
 
 from core.llm import parsing
 from core.llm.provider import ContextOverflowError, LLMError, LLMResponse, ToolCall
-from core.llm.retry import HTTP_5XX_ATTEMPTS, HTTP_5XX_BACKOFF, HTTP_5XX_RETRIES, HTTP_5XX_STATUS
+from core.llm.retry import (HTTP_5XX_ATTEMPTS, HTTP_5XX_BACKOFF, HTTP_5XX_RETRIES,
+                            HTTP_5XX_STATUS, retry_note)
 from core.llm.sdk_engine import RawFallback, build_anthropic_transports
 
 log = logging.getLogger(__name__)
@@ -42,7 +43,7 @@ StreamTransport = Callable[[str, dict[str, str], bytes], tuple[int, Any]]
 响应流 = SSE 逐行可迭代（字节行或 str 行均可，带 close 则用毕关闭）；
 HTTP 非 200 时第二元为解析后的错误 dict（与非流式 transport 对齐）。"""
 
-# 429 保持原有快速失败预算；标准上游 5xx 使用共享的 10 次尝试预算 + 封顶 30s 退避。
+# 429 保持原有快速失败预算；标准上游 5xx 使用共享的 11 次尝试预算 + 封顶 30s 退避。
 RETRYABLE_STATUS = {429, *HTTP_5XX_STATUS}
 RATE_LIMIT_ATTEMPTS = 2
 MAX_RETRIES = RATE_LIMIT_ATTEMPTS  # 兼容旧测试/调用方：429 总尝试次数
@@ -58,8 +59,11 @@ RETRY_BACKOFF = 30.0
 # 连接重置/SSL EOF/超时统一抛成 httpx.TransportError，SDK 再包成 APIConnectionError
 # /APITimeoutError，sdk_engine._as_conn_error 转回 ConnectionError/TimeoutError
 # ——本预算分支口径不变。
-CONN_RETRIES = 4                      # 连接类总尝试次数（3 次重试）
-CONN_BACKOFF = (5.0, 10.0, 20.0)      # 各次重试前退避（秒）
+# 2026-10-08 用户定稿：连接类预算与 HTTP 5xx 拉齐——共 11 次尝试（首次 + 10 次重试），
+# 退避 5/10/20/30s 封顶。原为 4 次尝试（3 次重试），实测网关抖动/长连接重置在 4 次内
+# 未恢复即判死整轮，用户要求提到 10 次重试。
+CONN_RETRIES = 11                     # 连接类总尝试次数（10 次重试）
+CONN_BACKOFF = (5.0, 10.0, 20.0, 30.0)  # 各次重试前退避（秒），超出长度按末值封顶
 
 class AnthropicCompatProvider:
     """Anthropic /v1/messages 协议。超时默认 600s（10 分钟），用于吸收长思考和
@@ -249,15 +253,19 @@ class AnthropicCompatProvider:
                         can_retry = rate_limit_used < RATE_LIMIT_ATTEMPTS
                         retry_attempt = rate_limit_used
                         retry_total = RATE_LIMIT_ATTEMPTS - 1
+                        note = retry_note(rate_limit_used - 1,
+                                          RATE_LIMIT_ATTEMPTS - 1)
                     elif status in HTTP_5XX_STATUS:
                         status_5xx_used += 1
                         can_retry = status_5xx_used < HTTP_5XX_ATTEMPTS
                         retry_attempt = status_5xx_used
                         retry_total = HTTP_5XX_RETRIES
+                        note = retry_note(status_5xx_used - 1, HTTP_5XX_RETRIES)
                     else:
                         can_retry = False
                         retry_attempt = 0
                         retry_total = 0
+                        note = ""
                     if can_retry:
                         last_err = LLMError(msg, status=status,
                                             body=json.dumps(data, ensure_ascii=False)[:500])
@@ -269,7 +277,12 @@ class AnthropicCompatProvider:
                             time.sleep(HTTP_5XX_BACKOFF[min(
                                 status_5xx_used - 1, len(HTTP_5XX_BACKOFF) - 1)])
                         continue
-                    raise LLMError(msg, status=status,
+                    # 重试耗尽（或本就不可重试）：把已重试次数带进文案
+                    # （2026-10-07），排查时不必再翻 chat.retry 事件数次数。
+                    raise LLMError(f"LLM 调用失败 HTTP {status}{note}: "
+                                   f"{err.get('code', '')} "
+                                   f"{err.get('message', '')[:300]}",
+                                   status=status,
                                    body=json.dumps(data, ensure_ascii=False)[:500])
                 if use_stream:
                     # 流已开建连成功：中途断开默认不重试（流不可重放，重试会重复回调
@@ -308,7 +321,9 @@ class AnthropicCompatProvider:
                         if not seen["emitted"]:
                             # 尚无任何增量输出：可重试（重发不产生重复上屏）
                             raise ConnectionError(f"流式传输中断（无增量，可重试）: {e}") from e
-                        raise LLMError(f"流式传输中断: {e}") from e
+                        # 已吐增量后中断：半截内容已上屏，流不可重放。打 partial 标记
+                        # 交上层走「接着续写」（chat 工作台）而非整轮失败（2026-10-08）。
+                        raise LLMError(f"流式传输中断: {e}", partial=True) from e
                 return self._parse(data)
             except (TimeoutError, ConnectionError) as e:
                 last_err = e

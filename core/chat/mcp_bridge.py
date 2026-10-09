@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -63,6 +64,7 @@ class _HttpConn:
             raise ValueError(f"MCP 只允许连本机 loopback 端点: {endpoint}")
         self.endpoint = endpoint
         self._session_id: str | None = None
+        self._ready = False   # 握手是否已完成（无 session 头的 server 也据此免重复握手）
         self._next_id = 0
         self._lock = threading.Lock()
 
@@ -93,6 +95,7 @@ class _HttpConn:
 
     def _handshake(self) -> bool:
         self._session_id = None
+        self._ready = False
         status, data, headers = self._post("initialize", {
             "protocolVersion": MCP_PROTOCOL_VERSION,
             "capabilities": {},
@@ -106,27 +109,47 @@ class _HttpConn:
         self._session_id = sid or None
         self._post("notifications/initialized", {},
                    notification=True, timeout=_PROBE_TIMEOUT)
+        # 无 session 头的 server（如 x64dbg）也置就绪：否则每次调用都白握手一遍
+        self._ready = True
         return True
 
     def _rpc(self, method: str, params: dict | None = None,
              timeout: float | None = None):
         for attempt in (1, 2):
             with self._lock:
-                if self._session_id is None and not self._handshake():
+                if not self._ready and not self._handshake():
                     return None
                 status, data, _h = self._post(
                     method, params, notification=False,
                     timeout=timeout or _CALL_TIMEOUT)
                 if status == 0:
                     self._session_id = None
+                    self._ready = False   # 掉线/进程重启：下次调用重握
                     return None
                 if status in (400, 404, 405, 409, 410) and attempt == 1:
                     self._session_id = None  # 旧 session 失效：重握一轮
+                    self._ready = False
                     continue
                 break
         if not isinstance(data, dict) or data.get("error") is not None:
             return None
         return data.get("result")
+
+
+def _resolve_command(command: str) -> str:
+    """``python``/``python3`` 占位 → 平台自身解释器（与本进程同一环境，依赖已在位）。
+
+    2026-10-08：fir-proxy 条目原为 ``uv run --active <script>``，而 ``--active``
+    依赖环境变量 ``VIRTUAL_ENV``——平台自 ``.bat`` 直起时该变量为空，uv 落到自管的
+    无 ``mcp`` 解释器，``tools/list`` 失败、面板显「工具发现失败或为空」。改用平台
+    解释器零依赖、秒起（uv 临时环境 ``--with mcp`` 实测 ~7s，逼近 8s 探活超时）。
+    打包形态（``sys.executable`` 非 python）或其它命令名一律原样返回。
+    """
+    if command in ("python", "python3"):
+        exe = sys.executable or ""
+        if Path(exe).name.lower().startswith("python"):
+            return exe
+    return command
 
 
 class _StdioConn:
@@ -138,7 +161,7 @@ class _StdioConn:
     def __init__(self, command: str, args: list[str],
                  env_extra: dict[str, str] | None = None,
                  cwd: str | Path | None = None):
-        self._cmd = [command, *args]
+        self._cmd = [_resolve_command(command), *args]
         self._env_extra = dict(env_extra or {})
         self._cwd = str(cwd) if cwd else None
         self._proc: subprocess.Popen | None = None
@@ -385,7 +408,14 @@ class MCPBridge:
                     continue
                 try:
                     runtime_cfg = {**entry, "_cwd": str(self._cwd)}
-                    servers[name] = MCPServerRuntime(name, runtime_cfg)
+                    # 非会话级 stdio server 也注入 PW_PROJECT_ID + mcp.json 的 `env`
+                    # 字段：薄客户端型 MCP（如 fir-proxy 控制面）靠它反查平台 API。
+                    env_extra = dict(entry.get("env") or {}) \
+                        if isinstance(entry.get("env"), dict) else {}
+                    if self.project_id:
+                        env_extra["PW_PROJECT_ID"] = self.project_id
+                    servers[name] = MCPServerRuntime(name, runtime_cfg,
+                                                     env_extra=env_extra or None)
                 except (ValueError, OSError):
                     continue  # 非法端点等：跳过该 server
             self._servers = servers
@@ -411,7 +441,9 @@ class MCPBridge:
                 raise _TooManyBrowserSessions(
                     f"并发浏览器会话已达上限 {self.MAX_BROWSER_SESSIONS}"
                     f"（当前会话 {session_id[:12]} 无法再开浏览器）")
-            env = {self.SESSION_ENV_KEY: session_id}
+            env = dict(entry.get("env") or {}) \
+                if isinstance(entry.get("env"), dict) else {}
+            env[self.SESSION_ENV_KEY] = session_id
             if self.project_id:
                 env["PW_PROJECT_ID"] = self.project_id
             if name == "playwright" and self.browser_pool is not None and self.project_id:
@@ -507,7 +539,7 @@ class MCPBridge:
                 rt = self._server_for_session(server, entry, sid)
             except _TooManyBrowserSessions as e:
                 return (f"[错误] {e}。请等某个会话的浏览器空闲回收"
-                        f"（默认 1 小时无活动自动关闭），或减少并发会话数后重试。")
+                        f"（默认 30 分钟无操作自动关闭），或减少并发会话数后重试。")
             except (ValueError, OSError) as e:
                 return f"[错误] MCP 调用失败：无法启动 {server} 会话进程: {e}"
         else:

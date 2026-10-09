@@ -35,6 +35,7 @@ from core.blackboard.intents import (declare_intent as _declare_intent,
                                      list_intents as _list_intents,
                                      reopen_intent as _reopen_intent)
 from core.blackboard.store import UNSET, has_repro_evidence
+from core.dimensions import load_track_dimensions
 from core.runtime.gateway import ExecutionGateway, GatewayDenied
 from core.runtime.policy import allowed_runtimes
 from core.skills import proposals
@@ -62,6 +63,44 @@ def _intent_scope_hint(track: str | None) -> str:
     return ("\n[意图口径] " + hint) if hint else ""
 
 
+# 资产越界闸（agent-path-intent-loop M3，2026-10-09）：被主控分配资产的子代理
+# （ToolDispatcher.assigned_asset_ids 非空）只能在分配集内工作——**新资产仅通过
+# bb_add_asset 上报，等主控派发后才能测**。本表列「引用具体资产 id 的工具 → 承载
+# id 的参数名」；命中且引用了范围外 id → `[越界拒绝]`（与角色白名单同前缀，进
+# _TOOL_FAIL_PREFIXES/HARD_REJECT_PREFIXES，连续硬拒走 E2 熔断）。
+# bb_add_asset 不入表——它是唯一的「上报新资产」通道，恒放行；bb_query 也不入表
+# （只读侦察不受限，正是子代理看全局黑板的手段，且其 target_asset_id 只是过滤条件）。
+_ASSET_REF_TOOLS: dict[str, tuple[str, ...]] = {
+    "bb_delete_asset": ("asset_id",),
+    "bb_asset_status": ("asset_id",),
+    "bb_merge_assets": ("source_asset_id", "target_asset_id"),
+    "bb_add_finding": ("target_asset_id",),
+    "declare_intent": ("target_asset_id",),
+}
+
+
+def _asset_scope_violations(name: str, args: dict,
+                            scope: list[str]) -> list[str]:
+    """返回 `name` 的参数里引用了分配集外资产 id 的列表（空=不越界）。
+
+    只认 `_ASSET_REF_TOOLS` 登记的参数名；宽容：缺参/非字符串/空串跳过（交给各
+    handler 自身的参数校验，本闸只做边界，不重复做参数合法性）。"""
+    params = _ASSET_REF_TOOLS.get(name)
+    if not params:
+        return []
+    allowed = set(scope)
+    out: list[str] = []
+    for p in params:
+        raw = args.get(p)
+        vals = [raw] if isinstance(raw, str) else (
+            raw if isinstance(raw, (list, tuple)) else [])
+        for v in vals:
+            aid = str(v or "").strip()
+            if aid and aid not in allowed and aid not in out:
+                out.append(aid)
+    return out
+
+
 # host·Windows 的 bash 风格连接符（2026-10-01）：PowerShell 5.x 不支持 `&&`/`||`
 # （报 InvalidEndOfLine），但命令里带它们极其常见。检测到且策略允许 wsl 时，
 # 自动把 runtime=host 改走 wsl（bash -lc），语义最准；不允许则回落明确报错。
@@ -73,14 +112,12 @@ def _host_is_windows() -> bool:
     return os.name == "nt" or platform.system() == "Windows"
 
 # bb_query 闭集值域（bb-query-filters M1）：非法值显式 [错误]，不静默返回空。
-# ⚠ 第二处值域声明，改 store 状态机/任务状态时必须同步：
+# ⚠ 第二处值域声明，改 store 状态机时必须同步：
 #   findings severity → store.list_findings severity_rank；
-#   assets status/type → store.set_asset_status 白名单 / register_asset 类型；
-#   tasks status → tasks.py 状态写入点（open/claimed/done/failed/blocked/cancelled）。
+#   assets status/type → store.set_asset_status 白名单 / register_asset 类型。
 _BB_SEVERITIES = ("info", "low", "medium", "high", "critical")
 _BB_ASSET_STATUSES = ("open", "visited", "scanning", "tested_clean",
                       "budget_stop", "na")
-_BB_TASK_STATUSES = ("open", "claimed", "done", "failed", "blocked", "cancelled")
 _BB_ASSET_TYPES = ("host", "domain", "service", "url", "binary")
 # what=assets 未显式传 limit 时的返回上限（2026-10-01 防瀑）：FOFA 大批导入后
 # 全项目资产可达数千，meta 全文数 MB——默认截断，要全量显式传大 limit。
@@ -91,7 +128,6 @@ _BB_ASSET_META_KEYS = ("title", "fingerprint", "products", "owner", "source",
                        "filename", "cdn")
 _BB_ASSET_META_STR_MAX = 160
 _BB_ASSET_META_LIST_MAX = 8
-
 
 def _asset_row(a: dict, *, verbose: bool = False) -> dict:
     """资产行序列化（2026-10-01）：meta 默认精简（防大体积），verbose=true 给全文。"""
@@ -212,7 +248,8 @@ class ToolDispatcher:
                  closing_max_rounds: int = _CLOSING_MAX_ROUNDS,
                  abort_event: threading.Event | None = None,
                  role_skills: list[str] | None = None,
-                 allowed_roles: list[str] | None = None):
+                 allowed_roles: list[str] | None = None,
+                 assigned_asset_ids: list[str] | None = None):
         self.bb = bb
         self.gateway = gateway
         self.project_id = project_id
@@ -237,6 +274,12 @@ class ToolDispatcher:
         self._skill_registry = None
         # 角色 tools 白名单（§6.6 软边界）：None/空=不限；收尾协议工具永远放行
         self.allowed_tools = allowed_tools or None
+        # 资产越界约束（agent-path-intent-loop M2，2026-10-09）：主控 call_expert
+        # 划给本子专家的资产 id 范围；None/空=不启用（任务链/主控/未分配委派不受限）。
+        # 非空时，_ASSET_REF_TOOLS 命中的工具若引用范围外资产 → [越界拒绝]。
+        self.assigned_asset_ids = [str(x).strip()
+                                   for x in (assigned_asset_ids or [])
+                                   if str(x).strip()] or None
         # 轨 task_types.yaml 注册表（A5 子代理发任务的类型护栏）：None=未接线不校验
         self.allowed_task_types = allowed_task_types
         # 会话步数预算（E8）：AgentSession 按角色收敛后的 max_steps 注入；request_steps
@@ -262,7 +305,7 @@ class ToolDispatcher:
     # 原属性名全部保留（读写点与测试断言零改动），存储落共享 SessionState。
     # current_task_id/last_progress_step：非每任务复位，由收尾/中断路径显式管理。
     # finished/awaiting_human/summary/delegation_*：会话收尾标志（每任务复位）。
-    # plan_only_mode/_intent_lead_passed：教练与意图先行闸（每任务复位）。
+    # plan_only_mode：教练（每任务复位）。
     # closing_round/closing_last_progress：D6 收尾确认轮状态（每任务复位）。
 
     @property
@@ -278,7 +321,6 @@ class ToolDispatcher:
     delegation_just_finished = state_proxy("delegation_just_finished")
     last_delegation_note = state_proxy("last_delegation_note")
     plan_only_mode = state_proxy("plan_only_mode")
-    _intent_lead_passed = state_proxy("intent_lead_passed")
     closing_round = state_proxy("closing_round")
     closing_last_progress = state_proxy("closing_last_progress")
 
@@ -361,31 +403,44 @@ class ToolDispatcher:
             # 角色软边界（§6.6）：白名单外工具不执行，由人类调整角色配置放开。
             return (f"[越界拒绝] 工具 {name} 不在本角色工具白名单内"
                     f"（允许: {', '.join(self.allowed_tools)}）。停止该方向或请人类调整角色配置。")
-        # 意图先行闸（口径 Y，2026-10-01）：会话第一次实质执行动作前必须有 open
-        # 意图——先 declare_intent 把方向落成一句可证伪假设，再 run_cmd/写黑板。
-        # 只生效到本会话首次实质动作放行（_intent_lead_passed，认领新任务时复位），
-        # 一次性堵「干完活再补票」（实测 sess-b9a539e3ebfe：declare 与 finding
-        # 仅隔 12 秒）。与 A2 计划闸叠加：认领后先 task_plan 粗规划，再 declare_intent
-        # 细立意。人类/系统路径（author 非 sess-/chat-）不经 ToolDispatcher，不受限；
-        # declare_intent 在 _INTENT_PRE_ALLOWED 内恒放行，全轨可先声明不会死锁。
+        # 资产越界闸（agent-path-intent-loop M3，2026-10-09）：主控分配的资产范围内
+        # 才能操作。命中 `_ASSET_REF_TOOLS` 且引用了分配集外的资产 id → 拒绝并指路
+        # 「bb_add_asset 上报等派发」。宽容：参数缺失/非字符串/空串一律放行，交给
+        # 各 handler 自身的参数校验（本闸只做边界，不重复做参数合法性）。
+        if self.assigned_asset_ids:
+            out_of_scope = _asset_scope_violations(
+                name, args, self.assigned_asset_ids)
+            if out_of_scope:
+                return ("[越界拒绝] 资产越界：本会话只被分配了 "
+                        + ", ".join(self.assigned_asset_ids)
+                        + f"，但你引用了范围外的资产 {', '.join(out_of_scope)}。"
+                        "新发现的资产先用 bb_add_asset 上报，等主控派发后再测；"
+                        "直接测试/登记范围外资产会与其它子代理重复。")
+        # 意图先行闸（口径 Y，2026-10-01；2026-10-09 升级为**每意图级**）：
+        # **任何**实质执行动作前都必须有 open 意图——先 declare_intent 把方向落成
+        # 一句可证伪假设，再 run_cmd/写黑板。逐动作都查（不再是一次性放行标志）：
+        # plan→execute→plan 自循环里，每条意图收尾后再执行必须先声明下一条，
+        # 事后声明（先干活再补票，实测 sess-b9a539e3ebfe declare 与 finding 仅隔
+        # 12 秒）在结构上不可能。人类/系统路径（author 非 sess-/chat-）不经
+        # ToolDispatcher，不受限；declare_intent 在 _INTENT_PRE_ALLOWED 内恒放行，
+        # 全轨可先声明不会死锁。
         # 拒绝用 [拒绝] 前缀（前缀纪律：进 _TOOL_FAIL_PREFIXES/HARD_REJECT_PREFIXES，
         # 连续 3 步硬拒走 E2 熔断挂人——照搬口径即无需新增前缀分类）。
-        if not self._intent_lead_passed \
-                and self.author.startswith(("sess-", "chat-")) \
+        if self.author.startswith(("sess-", "chat-")) \
                 and name not in _INTENT_PRE_ALLOWED:
             has_open = self.bb.conn.execute(
                 "SELECT 1 FROM intents WHERE project_id=? AND status='open'"
                 " AND author=? LIMIT 1",
                 (self.project_id, self.author)).fetchone() is not None
             if not has_open:
-                return ("[拒绝] 意图先行闸：本会话还没有 open 意图，第一次实质动作"
-                        "被拦下——先 declare_intent(statement=\"对 <资产> 进行 "
-                        "<什么尝试>\", target_asset_id=<资产id>) 把方向落成一句"
-                        "可证伪假设，再围绕它执行；只读侦察（bb_query/kb_open/"
-                        "kb_search/list_symbols/decompile/disasm/read_file/"
-                        "search_files/browser_navigate 等）不受本闸限制。"
+                return ("[拒绝] 意图先行闸：本会话当前没有 open 意图，实质动作被拦下"
+                        "——先 declare_intent(statement=\"对 <资产> 进行 <什么尝试>\""
+                        ", target_asset_id=<资产id>) 把方向落成一句可证伪假设，再围绕"
+                        "它执行；上一条意图已收尾时同样要先声明下一条，再动手。只读"
+                        "侦察（bb_query/kb_open/kb_search/list_symbols/decompile/"
+                        "disasm/read_file/search_files/browser_navigate 等）不受本闸"
+                        "限制。"
                         + _intent_scope_hint(self.track))
-            self._intent_lead_passed = True
         # raw_arguments 解包垫片（2026-09-26）：部分模型在长文本参数上会把全部参数
         # 包成 {"raw_arguments": "<JSON 字符串>"}（实测 ark-code-latest 调
         # bb_upsert_func 连发 6 次全中），平铺解包的裸 TypeError 只会让模型空转重试。
@@ -835,6 +890,7 @@ class ToolDispatcher:
 
     def _tool_declare_intent(self, statement: str,
                               target_asset_id: str | None = None,
+                              dimension: str | None = None,
                               basis_refs: list[str] | None = None) -> str:
         # 资产锚点门禁（2026-10-01，仅 Agent 会话）：意图必须有资产锚点
         # （target_asset_id 或 basis_refs 含 asset:<id>），否则成"游离意图"——
@@ -849,8 +905,18 @@ class ToolDispatcher:
                     "其 dead_end 收尾也无法为资产背书 tested_clean——"
                     "先 bb_query/bb_asset 确认你要测的资产 id，再声明意图。"
                     + _intent_scope_hint(self.track))
+        # 测试面归属（v34）：填了必须对本轨合法；本轨无面清单时一律拒（防拼错
+        # 静默丢面归属）。未填放行（可选，向后兼容）。
+        dim = dimension.strip() if isinstance(dimension, str) else ""
+        if dim:
+            dims = load_track_dimensions(self.packs_root, self.track)
+            valid = {d["id"] for d in dims}
+            if dim not in valid:
+                return (f"[拒绝] declare_intent 的 dimension={dim!r} 不是本轨合法"
+                        f"测试面；可用：{sorted(valid) or '（本轨无面清单，勿填）'}")
         r = _declare_intent(self.bb, self.project_id, statement,
                             target_asset_id=target_asset_id,
+                            dimension=dim,
                             basis_refs=basis_refs, author=self.author)
         self.last_progress_step = self._step
         teach = ""
@@ -978,8 +1044,7 @@ class ToolDispatcher:
             return f"[错误] 发现不存在: {finding_id}"
         self.last_progress_step = self._step
         return (f"deleted={finding_id} reason={reason.strip()[:100]} "
-                f"trimmed_relates_to={r.get('trimmed_relates_to', 0)} "
-                f"affected_tasks={r.get('affected_tasks', 0)}")
+                f"trimmed_relates_to={r.get('trimmed_relates_to', 0)}")
 
     def _tool_bb_add_artifact(self, filename: str, content: str,
                               kind: str = "file", description: str = "") -> str:
@@ -1051,9 +1116,6 @@ class ToolDispatcher:
             if status is not None and status not in _BB_ASSET_STATUSES:
                 return (f"[错误] 非法 assets status: {status}"
                         f"（允许: {', '.join(_BB_ASSET_STATUSES)}）")
-        if what == "tasks" and status is not None and status not in _BB_TASK_STATUSES:
-            return (f"[错误] 非法 tasks status: {status}"
-                    f"（允许: {', '.join(_BB_TASK_STATUSES)}）")
         # limit 钳 1-200（与 kb_search 同口径：非法值钳制不报错）
         if limit is not None:
             try:
@@ -1217,7 +1279,7 @@ class ToolDispatcher:
                               for m in b["modules"]]}
                  for b in rows], ensure_ascii=False)
         return (f"[错误] 未知查询: {what}"
-                f"（允许: findings, assets, events, tasks, func, blueprint, site；"
+                f"（允许: findings, assets, events, func, blueprint, site；"
                 f"列已上传样本用 what=assets type=binary，返回行的 value 即样本 sha256）")
 
     def _tool_kb_open(self, module: str) -> str:
@@ -1795,6 +1857,70 @@ class ToolDispatcher:
         inst.open_session(self.session_id, self.session_id)
         inst.set_task_id(self.session_id, self.current_task_id)
         return inst, self.session_id
+
+    def _tool_browser_replay(self, raw: str | None = None, capture_id: int | None = None,
+                             proxy: str | None = None, force_https: bool = False,
+                             follow_redirects: bool = True, insecure: bool = False,
+                             gm_tls: bool = False, timeout_s: float = 15.0) -> str:
+        """重放一条请求（F6 重放；Agent 侧入口，2026-10-07 放开红线）。
+
+        与人类重放台共用 `ReplayClient`；结果入 http_history（source=replay）。
+        """
+        if self.browser is None:
+            return self._NO_BROWSER_TOOL
+        if not raw and capture_id is None:
+            return "[拒绝] 需给 raw（原始报文）或 capture_id（抓包记录）之一"
+        from core.browser.pool import browser_available
+        if not browser_available():
+            return self._NO_BROWSER_TOOL
+        from core.browser.replay import ReplayClient, ReplayOptions
+        # tools_root 仅国密 sidecar 解析用（缺二进制=国密不可用，绝不降级）
+        client = ReplayClient(self.bb, config=self.browser.config,
+                              tools_root="tools")
+        opts = ReplayOptions(force_https=force_https, follow_redirects=follow_redirects,
+                             proxy=proxy or None, insecure=insecure, gm_tls=gm_tls,
+                             timeout_s=timeout_s)
+        try:
+            row = client.replay(self.project_id, capture_id=capture_id, raw=raw,
+                                session_id=self.session_id, author=self.session_id,
+                                opts=opts, stop_event=self.abort_event)
+        except Exception as e:  # noqa: BLE001 —— 失败也入库，转文本不炸循环
+            return f"[错误] 重放失败: {e}"
+        self.last_progress_step = self._step
+        body = (row.get("resp_body") or "")
+        head = body[:1500] + ("\n…[截断]" if len(body) > 1500 else "")
+        return (f"重放完成: {row.get('method')} {row.get('url')} → "
+                f"状态={row.get('status')} 耗时={row.get('duration_ms')}ms "
+                f"mime={row.get('resp_mime') or '-'} 行id={row.get('id')}"
+                f"{' [经代理 ' + proxy + ']' if proxy else ''}\n响应体:\n{head}")
+
+    def _tool_browser_intruder(self, template: dict, payloads: list,
+                               concurrency: int = 5, rate_per_sec: float = 10.0,
+                               max_requests: int | None = None,
+                               proxy: str | None = None) -> str:
+        """HTTP 爆破（F6 Intruder；Agent 侧入口，2026-10-07 放开红线）。"""
+        if self.browser is None:
+            return self._NO_BROWSER_TOOL
+        from core.browser.pool import browser_available
+        if not browser_available():
+            return self._NO_BROWSER_TOOL
+        from core.browser.replay import Intruder
+        import uuid
+        batch_id = f"in-{uuid.uuid4().hex[:12]}"
+        intruder = Intruder(self.bb, config=self.browser.config)
+        try:
+            r = intruder.run(self.project_id, template, payloads,
+                             batch_id=batch_id, concurrency=concurrency,
+                             rate_per_sec=rate_per_sec, max_requests=max_requests,
+                             proxy=proxy or None, stop_event=self.abort_event,
+                             session_id=self.session_id, author=self.session_id)
+        except Exception as e:  # noqa: BLE001
+            return f"[错误] 爆破失败: {e}"
+        self.last_progress_step = self._step
+        return (f"爆破完成: 批次={r['batch_id']} 总={r['total']} 完成={r['done']} "
+                f"失败={r['failed']} 中断={r['stopped']}"
+                f"{' [经代理 ' + proxy + ']' if proxy else ''}\n"
+                f"结果已入抓包历史（按 batch_id={r['batch_id']} 拉取）。")
 
     def _tool_browser_navigate(self, url: str) -> str:
         inst, sid = self._browser_pair()

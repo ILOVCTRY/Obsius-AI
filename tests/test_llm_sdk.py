@@ -222,7 +222,7 @@ def test_anthropic_sdk_context_overflow_hint_raises(monkeypatch):
 
 
 def test_anthropic_sdk_connection_and_timeout_use_conn_budget(monkeypatch):
-    """SDK 连接/超时异常 → 既有 CONN_RETRIES 连接预算（4 次尝试后如实上报）。"""
+    """SDK 连接/超时异常 → 既有 CONN_RETRIES 连接预算（11 次尝试后如实上报）。"""
     monkeypatch.setattr("core.llm.anthropic_compat.CONN_BACKOFF", (0, 0, 0))
     for exc in (httpx.ConnectError("[WinError 10054] reset"), httpx.ReadTimeout("slow")):
         calls = {"n": 0}
@@ -232,10 +232,10 @@ def test_anthropic_sdk_connection_and_timeout_use_conn_budget(monkeypatch):
             raise _exc
 
         _wire(monkeypatch, handler)
-        with pytest.raises(LLMError, match="网络错误（已重试 3 次）"):
+        with pytest.raises(LLMError, match="网络错误（已重试 10 次）"):
             AnthropicCompatProvider("https://fake", "k", "m").chat(
                 [{"role": "user", "content": "hi"}])
-        assert calls["n"] == 4
+        assert calls["n"] == 11
 
 
 def test_anthropic_sdk_stream_body_drop_retries_then_succeeds(monkeypatch):
@@ -266,6 +266,68 @@ def test_anthropic_sdk_stream_body_drop_retries_then_succeeds(monkeypatch):
     resp = AnthropicCompatProvider("https://fake", "k", "m").chat(
         [{"role": "user", "content": "hi"}])
     assert resp.text == "OK" and calls["n"] == 2
+
+
+def test_anthropic_sdk_stream_body_drop_after_increment_is_partial(monkeypatch):
+    """已吐增量后 body 中断 → 不再重试，而是 LLMError(partial=True)。
+
+    半截内容已上屏、流不可重放，故不静默重发（会重复上屏）；打 partial 标记交
+    上层「接着续写」（2026-10-08 用户定稿）。"""
+    monkeypatch.setattr("core.llm.anthropic_compat.CONN_BACKOFF", (0, 0, 0))
+    calls = {"n": 0}
+
+    class _DropMid(httpx.SyncByteStream):
+        def __iter__(self):
+            yield _msg_start().encode()
+            yield _block_start(0, {"type": "text", "text": ""}).encode()
+            yield _delta(0, {"type": "text_delta", "text": "半截"}).encode()
+            raise httpx.RemoteProtocolError(
+                "peer closed connection without sending complete message body "
+                "(incomplete chunked read)")
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                              stream=_DropMid())
+
+    _wire(monkeypatch, handler)
+    text: list[str] = []
+    with pytest.raises(LLMError) as ei:
+        AnthropicCompatProvider("https://fake", "k", "m").chat(
+            [{"role": "user", "content": "hi"}], on_text=text.append)
+    assert ei.value.partial is True
+    assert "流式传输中断" in str(ei.value)
+    assert "半截" in "".join(text)   # 增量确已上屏
+    assert calls["n"] == 1           # 已吐增量 → 不重试
+
+
+def test_openai_sdk_stream_body_drop_after_increment_is_partial(monkeypatch):
+    """同上（OpenAI 兼容路径）：已吐增量后中断 → LLMError(partial=True)。"""
+    from core.llm import openai_compat
+
+    monkeypatch.setattr(openai_compat.time, "sleep", lambda _: None)
+    calls = {"n": 0}
+
+    class _DropMid(httpx.SyncByteStream):
+        def __iter__(self):
+            yield _openai_chunk({"content": "半截"}).encode()
+            raise httpx.RemoteProtocolError(
+                "peer closed connection without sending complete message body "
+                "(incomplete chunked read)")
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                              stream=_DropMid())
+
+    _wire(monkeypatch, handler)
+    text: list[str] = []
+    with pytest.raises(LLMError) as ei:
+        OpenAICompatProvider("https://fake", "k", "m").chat(
+            [{"role": "user", "content": "hi"}], on_text=text.append)
+    assert ei.value.partial is True
+    assert "半截" in "".join(text)
+    assert calls["n"] == 1
 
 
 def test_anthropic_sdk_in_stream_error_frame_retries(monkeypatch):
@@ -530,7 +592,7 @@ def test_openai_sdk_520_retries_then_succeeds(monkeypatch):
         [{"role": "user", "content": "hi"}],
         on_retry=lambda *a: retries.append(a))
     assert resp.text == "OK" and calls["n"] == 3
-    assert retries == [(1, 5, 520), (2, 5, 520)]
+    assert retries == [(1, 10, 520), (2, 10, 520)]
 
 
 def test_openai_sdk_5xx_retries_then_succeeds(monkeypatch):
@@ -560,7 +622,7 @@ def test_openai_sdk_5xx_retries_then_succeeds(monkeypatch):
     assert resp.text == "OK" and calls["n"] == 3
     assert [r[2] for r in retries] == [503, 503]
     assert [r[0] for r in retries] == [1, 2]
-    assert all(r[1] == 9 for r in retries)
+    assert all(r[1] == 10 for r in retries)
 
 
 def test_openai_sdk_5xx_exhausted_reports_status(monkeypatch):
@@ -582,7 +644,8 @@ def test_openai_sdk_5xx_exhausted_reports_status(monkeypatch):
             [{"role": "user", "content": "hi"}])
     assert ei.value.status == 503
     assert "Upstream service temporarily unavailable" in str(ei.value)
-    assert calls["n"] == 10     # 5xx：首次 + 9 次重试
+    assert "已重试 10/10 次" in str(ei.value)   # 重试次数显式入文案（2026-10-07）
+    assert calls["n"] == 11     # 5xx：首次 + 10 次重试
 
 
 def test_openai_sdk_connection_reset_retries(monkeypatch):

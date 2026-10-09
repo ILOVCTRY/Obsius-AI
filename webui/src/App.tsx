@@ -4,7 +4,6 @@ import type { LucideIcon } from "lucide-react"
 import {
   Activity,
   ArrowLeft,
-  Bell,
   Blocks,
   BookOpen,
   Bot,
@@ -18,6 +17,7 @@ import {
   LayoutDashboard,
   Maximize2,
   Minus,
+  Network,
   PanelLeftOpen,
   Radio,
   Settings2,
@@ -27,7 +27,7 @@ import {
   Zap,
 } from "lucide-react"
 import { api, ApiError } from "@/lib/api"
-import type { Approval, ProjectDetail } from "@/lib/types"
+import type { ProjectDetail } from "@/lib/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { LiveRoom } from "@/views/LiveRoom"
@@ -41,6 +41,7 @@ import { ProjectsView } from "@/views/ProjectsView"
 import { IntelView } from "@/views/IntelView"
 import { BrowserView } from "@/views/browser/BrowserView"
 import { FuzzerView } from "@/views/fuzzer/FuzzerView"
+import { ProxyPoolView } from "@/views/proxy/ProxyPoolView"
 import { SettingsView } from "@/views/SettingsView"
 import { KnowledgeView } from "@/views/KnowledgeView"
 import { SkillsView } from "@/views/SkillsView"
@@ -57,7 +58,7 @@ import { bindingBadge } from "@/lib/taxonomy"
 // 左缘悬浮把手唤出；状态 localStorage（ui.nav-collapsed）。收起=条件渲染卸载
 // nav Panel+Separator（同 boardOpen 先例），重挂由 useDefaultLayout 恢复宽度。
 
-type View = "projects" | "intel" | "live" | "board" | "agents" | "browser" | "fuzzer" | "sample-analysis" | "knowledge" | "skills" | "settings"
+type View = "projects" | "intel" | "live" | "board" | "agents" | "browser" | "fuzzer" | "proxy" | "sample-analysis" | "knowledge" | "skills" | "settings"
 
 /** M4c 场景档 board_view 默认视图（config.board_view.default；黑板上自行校验可用 tab 回退） */
 const boardViewOf = (m: ProjectDetail | null): string | undefined => {
@@ -82,6 +83,7 @@ const NAV_GROUPS: { label: string; items: NavItem[]; collapsible?: boolean }[] =
     items: [
       { key: "browser", label: "浏览器", icon: Globe2, needsProject: true },
       { key: "fuzzer", label: "重放", icon: Zap, needsProject: true },
+      { key: "proxy", label: "代理池", icon: Network, needsProject: true },
       { key: "sample-analysis", label: "样本分析", icon: FolderTree, needsProject: true },
       { key: "knowledge", label: "知识库", icon: BookOpen, needsProject: false },
       { key: "skills", label: "技能库", icon: BrainCircuit, needsProject: false },
@@ -262,10 +264,6 @@ export default function App() {
   const [pid, setPid] = useState<string | null>(null)
   const [meta, setMeta] = useState<ProjectDetail | null>(null)
   const [view, setView] = useState<View>("projects")
-  // 审批铃铛（2026-10-04 审批模块下线后保留）：待审批列表（点击跳有审批的会话）
-  const [pendingApprovals, setPendingApprovals] = useState<Approval[]>([])
-  const pendingCount = pendingApprovals.length
-  void pendingCount
   const [boardOpen, setBoardOpen] = useState(true)
   // 黑板 Keep-alive（2026-09-30）：首次点开「黑板」的 pid 才挂载（没点过的项目不
   // 预加载）；同项目切视图不卸载只隐藏，换项目（pid 变）时因 key={pid} 全新挂载重载
@@ -381,31 +379,6 @@ export default function App() {
     api.getProject(pid).then(setMeta).catch(() => {})
   }, [pid])
   const eventsWatcher = <EventsDebouncedRefresh pid={pid} onBump={bumpMeta} />
-  // 全局审批铃铛轮询（只计数 approval 表）
-  useEffect(() => {
-    if (!pid) {
-      setPendingApprovals([])
-      return
-    }
-    const load = () =>
-      api.approvals(pid, "pending").then(setPendingApprovals).catch(() => {})
-    load()
-    const t = setInterval(load, 5000)
-    return () => clearInterval(t)
-  }, [pid])
-
-  // 铃铛点击（2026-10-04）：跳「有审批的会话」（审批模块已下线，决策在对话内联卡完成）；
-  // 无会话归属的审批 → 直播间。
-  const openApprovals = useCallback(() => {
-    const target = pendingApprovals.find((a) => a.session_id)
-    if (target?.session_id) {
-      window.dispatchEvent(new CustomEvent("goto-session", { detail: { sessionId: target.session_id } }))
-    } else {
-      setView("live")
-    }
-  }, [pendingApprovals])
-  void goHome
-  void openApprovals
 
   // 工作台 profile：research+binary ⇒ rev-generic 逆向工作台（其他轨保持渗透模板）
   const profile = deriveWorkbenchProfile(meta)
@@ -495,7 +468,6 @@ export default function App() {
               <div className="project-context"><span className="eyebrow">ACTIVE PROJECT</span><div className="project-title"><span className="project-pulse" /><h1>{meta?.name ?? "加载项目"}</h1><Badge variant="outline" className="project-badge">{meta ? bindingBadge(meta.track, meta.experts) : "…"}</Badge></div></div>
               {meta && <div className="project-stats"><span><Blocks size={13} />{meta.findings} 发现</span><span><Globe2 size={13} />{meta.assets} 资产</span></div>}
               <span className="flex-1" />
-              <button onClick={openApprovals} className="approval-action" title="待审批动作"><Bell size={16} /><span>审批</span>{pendingCount > 0 && <span className="approval-count">{pendingCount}</span>}</button>
               <Button size="sm" variant="ghost" className="back-project" onClick={goHome}><ArrowLeft size={15} />首页</Button>
               <WindowControls className="-mr-5" />
             </div>
@@ -567,6 +539,7 @@ export default function App() {
                           initialRaw={fuzzerNav?.raw} />
             </div>
           )}
+          {view === "proxy" && <ProxyPoolView pid={pid} />}
           {view === "sample-analysis" && (
             <div className="h-full w-full overflow-hidden">
               <SampleAnalysisView pid={pid} onOpenBinary={(sha) => {

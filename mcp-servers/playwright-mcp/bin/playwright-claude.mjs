@@ -22,9 +22,11 @@
  *     BASE_DIR 下分隔 profile-<session>/锁 claude-<session>，起始端口也按会话哈希错开，
  *     彻底绕开 @playwright/mcp 默认的 workspace-hash 持久化 profile（同 workspace
  *     只能被一个实例持有 → 第二会话报 "already in use"）。
- *  4. **空闲自动关闭（默认 1 小时）**：看门狗轮询该 Chrome 的 CDP /json/list 活动，
- *     超时无活动 → 关闭 Chrome + 释放锁 + 删除该会话 profile（PW_IDLE_MS 可覆盖；
- *     在跑 MCP 时按会话锁目录防并发）。
+ *  4. **空闲自动关闭（2026-10-07 改「无操作」口径，默认 30 分钟）**：代理 MCP stdio
+ *     给每次 tools/call 打点，连续 IDLE_MS 无操作 → 关闭 Chrome + 释放锁 + 删除该会话
+ *     profile（PW_IDLE_MS 可覆盖）。**判据是「有没有操作」而非「有没有活动页」**——旧
+ *     口径只要挂着一个非 about:blank 页面就永不回收。仅自管/复用 Chrome 路径启用；
+ *     内嵌项目浏览器（PW_BROWSER_CDP_ENDPOINT）不起 Chrome，不走此看门狗。
  */
 
 import { execSync, spawn } from "node:child_process";
@@ -274,38 +276,28 @@ async function ensureChrome(port) {
   return { mode: "self-managed", pid: null };
 }
 
-// ---------- 空闲自动关闭（2026-10-01） ----------
+// ---------- 空闲自动关闭（2026-10-01；2026-10-07 改「无操作」口径） ----------
 
-const IDLE_MS = Number(process.env.PW_IDLE_MS || 60 * 60 * 1000); // 默认 1 小时
-const IDLE_POLL_MS = 60 * 1000; // 每分钟探一次
+// 判据 = 距最后一次 MCP tools/call 的时长（由 runMcp 的 stdio 代理打点）。
+const IDLE_MS = Number(process.env.PW_IDLE_MS || 30 * 60 * 1000); // 默认 30 分钟
+const IDLE_POLL_MS = 60 * 1000; // 每分钟核一次
 
-// 该 CDP 端口上有多少活动页（about:blank 不算活动）。返回 -1 = 端口已不可达。
-function cdpPageCount(port) {
-  return new Promise((resolve) => {
-    const req = http.get(
-      { host: "127.0.0.1", port, path: "/json/list", timeout: 1500 },
-      (res) => {
-        let body = "";
-        res.on("data", (c) => (body += c));
-        res.on("end", () => {
-          try {
-            const list = JSON.parse(body);
-            if (!Array.isArray(list)) return resolve(-1);
-            const active = list.filter(
-              (t) => t && typeof t.url === "string" && t.url && t.url !== "about:blank"
-            );
-            resolve(active.length);
-          } catch {
-            resolve(-1);
-          }
-        });
-      }
-    );
-    req.on("error", () => resolve(-1));
-    req.on("timeout", () => {
-      req.destroy();
-      resolve(-1);
-    });
+// MCP stdio 是行分隔 JSON-RPC；命中 tools/call 即视为一次「操作」。
+const TOOLS_CALL_RE = /"method"\s*:\s*"tools\/call"/;
+
+// 代理 MCP 的两个 stdio 方向（原样透传），顺带在 tools/call 上打点活动时间。
+function proxyStdio(child, onActivity) {
+  process.stdin.pipe(child.stdin);
+  let buf = "";
+  child.stdout.on("data", (chunk) => {
+    process.stdout.write(chunk);
+    buf += chunk.toString("utf8");
+    let idx;
+    while ((idx = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, idx);
+      buf = buf.slice(idx + 1);
+      if (TOOLS_CALL_RE.test(line)) onActivity();
+    }
   });
 }
 
@@ -325,20 +317,13 @@ function killChrome(pid) {
   }
 }
 
-// 看门狗：轮询 CDP /json/list；连续 IDLE_MS 无活动页 → 关 Chrome + 删 profile + 释放锁。
-// 判定：有任意非 about:blank 的 tab 即视为「有活动」（刷新 lastActive）；只有浏览器在、
-// 且长期停在空白页才回收——保守（人挂着页面就不会误关）。
-function startIdleWatch(port, chromePid) {
+// 看门狗：连续 IDLE_MS 无 MCP 操作 → 关 Chrome + 删 profile + 释放锁 + 退出。
+// 返回 { touch } 供 stdio 代理在每次 tools/call 时刷新活动时间。
+function startIdleWatch(chromePid) {
   let lastActive = Date.now();
-  const timer = setInterval(async () => {
-    const n = await cdpPageCount(port);
-    if (n > 0) {
-      lastActive = Date.now();
-      return;
-    }
-    if (n < 0) return;   // 端口不可达：浏览器已退出，交给子进程 exit 处理
+  const timer = setInterval(() => {
     if (Date.now() - lastActive < IDLE_MS) return;
-    log(`空闲 ${Math.round(IDLE_MS / 60000)} 分钟无活动页 → 关闭浏览器并清理 profile`);
+    log(`空闲 ${Math.round(IDLE_MS / 60000)} 分钟无 MCP 操作 → 关闭浏览器并清理 profile`);
     clearInterval(timer);
     killChrome(chromePid);
     try {
@@ -351,10 +336,10 @@ function startIdleWatch(port, chromePid) {
     process.exit(0);
   }, IDLE_POLL_MS);
   timer.unref?.();
-  return timer;
+  return { touch: () => { lastActive = Date.now(); } };
 }
 
-function runMcp(cdpEndpoint) {
+function runMcp(cdpEndpoint, onActivity) {
   const endpointArgs = cdpEndpoint ? [`--cdp-endpoint=${cdpEndpoint}`] : [];
   const args = [...endpointArgs, ...EXTRA_MCP_ARGS];
   log(`Launching Playwright MCP → ${cdpEndpoint || "(self-managed browser)"}`);
@@ -365,16 +350,19 @@ function runMcp(cdpEndpoint) {
   );
   log(`Dedicated port: ${activePort}`);
 
+  // 需要打点时空闲看门狗要求代理 stdio（改成管道自己转发）；否则原样 inherit 透传。
+  const stdio = onActivity ? ["pipe", "pipe", "inherit"] : "inherit";
   const child = LOCAL_MCP_CLI
     ? // 本地固定版本：node cli.js …，无网络依赖
-      spawn(process.execPath, [LOCAL_MCP_CLI, ...args], { stdio: "inherit", env: process.env })
+      spawn(process.execPath, [LOCAL_MCP_CLI, ...args], { stdio, env: process.env })
     : process.platform === "win32"
       ? spawn("cmd.exe", ["/d", "/s", "/c", "npx", "-y", "@playwright/mcp@latest", ...args], {
-          stdio: "inherit",
+          stdio,
           windowsHide: Boolean(cdpEndpoint),
           env: process.env,
         })
-      : spawn("npx", ["-y", "@playwright/mcp@latest", ...args], { stdio: "inherit", env: process.env });
+      : spawn("npx", ["-y", "@playwright/mcp@latest", ...args], { stdio, env: process.env });
+  if (onActivity) proxyStdio(child, onActivity);
 
   const cleanup = () => releaseLock();
   process.on("exit", cleanup);
@@ -469,11 +457,14 @@ async function main() {
   try {
     const { mode, pid, port: boundPort } = started;
     const usePort = boundPort || port;
-    // 空闲看门狗（2026-10-01）：仅在确起了 CDP Chrome 时启用（有 pid 可回收）
+    // 空闲看门狗（2026-10-01；2026-10-07 改「无操作」口径）：仅在确起了 CDP Chrome
+    // 时启用（有 pid 可回收）；自托管浏览器无 pid，不起看门狗。
     if (mode !== "self-managed") {
-      startIdleWatch(usePort, pid);
+      const watch = startIdleWatch(pid);
+      runMcp(`http://127.0.0.1:${usePort}`, watch.touch);
+    } else {
+      runMcp(null);
     }
-    runMcp(mode === "self-managed" ? null : `http://127.0.0.1:${usePort}`);
   } catch (err) {
     releaseLock();
     log(err?.message || err);

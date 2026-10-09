@@ -82,6 +82,7 @@ export function IntruderForm({ pid }: { pid: string }) {
   const [newVals, setNewVals] = useState("")
   const [concurrency, setConcurrency] = useState(5)
   const [rate, setRate] = useState(10)
+  const [proxy, setProxy] = useState("")
   const [batchId, setBatchId] = useState<string | null>(null)
   const [running, setRunning] = useState(false)
   const [done, setDone] = useState<{ total: number; failed: number; stopped: boolean } | null>(null)
@@ -93,6 +94,7 @@ export function IntruderForm({ pid }: { pid: string }) {
       const r = await api.browserIntruder(pid, {
         template: { method, url, body: body || undefined },
         payloads, concurrency, rate_per_sec: rate,
+        proxy: proxy.trim() || undefined,
       })
       setBatchId(r.batch_id)
       const job = await pollJob(r.job_id, () => {}, 1500)
@@ -164,6 +166,12 @@ export function IntruderForm({ pid }: { pid: string }) {
         速率/秒
         <Input type="number" min={1} className="h-6 w-16" value={rate}
                onChange={(e) => setRate(Math.max(1, +e.target.value || 1))} />
+      </div>
+      <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
+        代理
+        <Input className="h-6 flex-1 font-mono text-[10px]" value={proxy}
+               onChange={(e) => setProxy(e.target.value)}
+               placeholder="显式代理，如 127.0.0.1:1801（代理池入口，做 IP 轮换）；留空直连" />
       </div>
       <div className="flex items-center gap-2">
         <Button size="sm" disabled={running || !hasMarker || !url.trim() || payloads.length === 0}

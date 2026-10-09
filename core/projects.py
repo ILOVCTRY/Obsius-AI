@@ -260,9 +260,11 @@ class ProjectStore:
     # ---------- 查询 / 打开 ----------
 
     def list_projects(self) -> list[dict]:
-        """扫描 project.json（忽略 .trash）。损坏/缺文件的目录跳过（不抛错，列表页要稳）。"""
+        """扫描 project.json（忽略 .trash）。损坏/缺文件的目录跳过（不抛错，列表页要稳）。
+        排序按 created_at 倒序（新的在前）；meta 缺 created_at 的存量项目垫底，
+        同值时间戳按目录名兜底（保证稳定序）。"""
         out = []
-        for d in sorted(self.root.iterdir()):
+        for d in self.root.iterdir():
             if not d.is_dir() or d.name == TRASH_DIR:
                 continue
             f = d / PROJECT_FILE
@@ -272,6 +274,8 @@ class ProjectStore:
                 out.append(view_meta(json.loads(f.read_text(encoding="utf-8"))))
             except (ValueError, OSError):
                 continue
+        out.sort(key=lambda m: (str(m.get("created_at") or ""), str(m.get("slug") or "")),
+                 reverse=True)
         return out
 
     def open_project(self, key: str) -> Project:

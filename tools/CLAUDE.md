@@ -15,6 +15,9 @@ tools/
 ├─ bin/                   # 可下载/手动落位的便携工具规范位（M2 起；gitignore）
 │                         # gmhttp.exe = 国密 TLS sidecar 构建产物（scripts/build_gmhttp.py，2026-10-07）
 ├─ gmhttp/                # 国密 TLS sidecar 源码（Go + tjfoc/gmsm gmtls，2026-10-07；入库）
+├─ fir-proxy/             # 代理池（vendor 1.2，2026-10-07；入库）：上游 CLI+modules +
+│                         # 平台薄 runner cyberstrike_serve.py（loopback 控制通道）；
+│                         # 平台侧托管 core/proxy/pool.py，见其 CLAUDE.md
 ├─ py/android/            # 随仓自带 python 分析脚本（r0re 收编 5 件：分诊 runner / godot runner / 脱壳三件套）
 ├─ venv/                  # python 工具环境（建于自带 python，M2；gitignore）
 ├─ data/                  # 随包数据规范位（kind=data，见 data/CLAUDE.md）：fpdb/fpdb_seed.json

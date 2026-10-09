@@ -117,7 +117,7 @@ WAL + 线程局部连接 + `_tx()`（进程内写锁 + BEGIN IMMEDIATE）串行�
 
 ## 黑板查询过滤（bb-query-filters，2026-09-24 实施；site 单站全貌 2026-09-26 增补）
 
-**取数从「全量拉回本地找」改为「按条件精确取」**：`bb_query` 接出底层早已实现、工具层没暴露的过滤——findings：`min_severity`（info/low/medium/high/critical，语义=不低于该级）、`verified_only`、`category`；tasks：`status`（open/claimed/done/failed/blocked/cancelled）；assets：`tag`（meta.tags 大小写不敏感）。events：`kinds`（多值 IN 过滤，store `recent_events` 新入参，与 session_id/tail/before_id 三分支正交）、`session_id`；输出增量带出 id/session_id/created_at（查事件即可知归属，不必反查落盘）。六面统一 `limit`（1-200；events 走 tail 默认 50、其余应用层裁剪默认全量——**默认行为全部不动**）。闭集入参（severity/两 status/type）非法值显式返 `[错误] 非法 X（允许: …）`，修掉「拼错参数静默返回 [] 被误判为没有」；limit 非法钳 1-200 不报错。M3 关键词 `q=`（LIKE/FTS5）后置观察：看实战是否仍频繁全量查询再立项。
+**取数从「全量拉回本地找」改为「按条件精确取」**：`bb_query` 接出底层早已实现、工具层没暴露的过滤——findings：`min_severity`（info/low/medium/high/critical，语义=不低于该级）、`verified_only`、`category`；assets：`tag`（meta.tags 大小写不敏感）。events：`kinds`（多值 IN 过滤，store `recent_events` 新入参，与 session_id/tail/before_id 三分支正交）、`session_id`；输出增量带出 id/session_id/created_at（查事件即可知归属，不必反查落盘）。六面统一 `limit`（1-200；events 走 tail 默认 50、其余应用层裁剪默认全量——**默认行为全部不动**）。闭集入参（severity/status/type）非法值显式返 `[错误] 非法 X（允许: …）`，修掉「拼错参数静默返回 [] 被误判为没有」；limit 非法钳 1-200 不报错。M3 关键词 `q=`（LIKE/FTS5）后置观察：看实战是否仍频繁全量查询再立项。
 
 **`what=site` 单站全貌（2026-09-26 增补）**：`asset` 入参（根资产 id 或精确 value，host/domain 优先消歧）一次返回 `{root, counts, assets（子树全部）, findings（挂在子树上）, intents（target/basis 命中子树）, hint}`——子树与意图归属复用 attackpath 的 `_subtree_ids`/`_intent_in_site`（单一口径）。动机：实战（vpn.zut.edu.cn 核实，2026-09-26）agent 按 type 分片全量拉（host/service/url/domain 各一把、条数多还漏看）再本地过滤，两分钟烧近 20 次查询；小 limit 试探漏看后重查、spill 解析踩坑再重查进一步放大。配套把「查站点一律用 site、findings 带 target_asset_id、events 带 kinds、limit 勿小值试探」写进工具 description 显眼处（不加 result 侧提示——回执尾部拼文本会毒化模型对 spill 文件的 json.load）。
 
@@ -147,7 +147,7 @@ chains/chain_links 攻击链（假设→验证→利用）+ board_graph 黑板�
 
 **四条硬规则（D10）**：①**意图必收尾**——Agent 五处快照带 open_intents 清单，`finish` 首次有未收尾意图拒绝并列清单（**第二次 finish 允许**，人工兜底），续跑注入收尾提醒；②**收尾必带证据（宁严勿松）**——vuln 收尾引用 finding 必须存在/同项目/非 FP/**category=vuln**，finding 收尾要求 category=intel；FP 发现拒收并指引走 dead_end；死路必须带非空 dead_reason（什么证据排除假设）+ ≥1 条 http/event/artifact 证据引用；证据不足保持 open；③**边仍是逻辑推导**——derive（target/finding → intent，basis_refs 是数据源，无主依据由 target 起边）、outcome（intent → finding）；服务端 Kahn 断言主脊无环（端点缺失同样 AssertionError）；时间先后只影响布局；④**死路是意图关闭态**——持久在意图上，default_hidden 默认隐藏，服务端预复合 bypass 穿通边（入边×出边，已有直连不重复造）；新证据/被引发现标 FP → reopen，**只重开自身不级联下游**，reopen 清收尾字段但保留 evidence_refs；AI 可自收尾，人类侧栏可驳回/重开。
 
-**意图先行闸（口径 Y，2026-10-01）**：意图是「主脊/规划产物」，intent 管假设细粒度（旧 `task_plan` 粗粒度层随任务机制退役，2026-10-06）。**会话第一次实质动作前必须有 open 意图**——对每条假设先 declare_intent（细）再动手。落在 dispatcher 层（`_dispatch_once`，sess-/chat- 会话、A2 计划闸之后）：本会话无 open 意图且动作不在只读放行面 `_INTENT_PRE_ALLOWED` 时回 `[拒绝] 意图先行闸：…先 declare_intent(statement=…)`。放行面=全部只读侦察（bb_query/kb_open/kb_search/route_lookup/list_symbols/decompile/disasm/read_file/search_files/browser_* 等）+ 控制原语 + 协调原语（`build_team`/`bb_notify`/`bb_add_asset`——防多代理死锁与「请人批准」类提案 `request_*`/`propose_pack_edit` 被误拦）。标志 `_intent_lead_passed` 随执行起点复位（`_loop_body`），**每次执行都要「先立意再动手」**；拒绝路径复用 `[拒绝]` 前缀（连续 3 个模型步硬拒 → E2 熔断挂人）。与 bb_add_finding 既有意图闸分工：本闸管「第一次实质动作」，后者管「登记发现时本会话须有 open 意图且意图声明之后须有执行动作」。
+**意图先行闸（口径 Y，2026-10-01；2026-10-09 升为「每意图级」）**：意图是「主脊/规划产物」，intent 管假设细粒度（旧 `task_plan` 粗粒度层随任务机制退役，2026-10-06）。**每一个实质动作前都必须有 open 意图**——对每条假设先 declare_intent（细）再动手。落在 dispatcher 层（`_dispatch_once`，sess-/chat- 会话、A2 计划闸之后）：本会话无 open 意图且动作不在只读放行面 `_INTENT_PRE_ALLOWED` 时回 `[拒绝] 意图先行闸：…先 declare_intent(statement=…)`。放行面=全部只读侦察（bb_query/kb_open/kb_search/route_lookup/list_symbols/decompile/disasm/read_file/search_files/browser_* 等）+ 控制原语 + 协调原语（`build_team`/`bb_notify`/`bb_add_asset`——防多代理死锁与「请人批准」类提案 `request_*`/`propose_pack_edit` 被误拦）。**逐动作现查**（**一次性放行标志 `_intent_lead_passed` 已删**，2026-10-09）——plan→execute→plan 自循环里一条意图收尾后再动手必须先声明下一条，事后声明（干完活再补票，实测 `sess-b9a539e3ebfe` declare 与 finding 仅隔 12 秒）在结构上不可能；拒绝路径复用 `[拒绝]` 前缀（连续 3 个模型步硬拒 → E2 熔断挂人）。与 bb_add_finding 既有意图闸分工：本闸管「实质动作前须有 open 意图」，后者管「登记发现时本会话须有 open 意图且意图声明之后须有执行动作」。
 
 **意图必有资产锚点（2026-10-01）**：`declare_intent` **工具层硬门禁（仅 Agent）**——必须有资产锚点：`target_asset_id` 非空，或 `basis_refs` 至少一条 `asset:<id>`；否则拒绝（游离意图落不到链路图子目标下、其 dead_end 收尾也无法给任何资产背书 tested_clean）。人类/系统路径豁免（门禁落在工具层，与 bb_add_finding 意图闸同策略）。存量兼容：**只把无锚点且仍 open 的意图落 `intent.anchor_required` 审计事件**（schema v29 迁移，幂等），closed 历史一律不动。
 
@@ -171,7 +171,23 @@ events 表全量审计 + EventBus 同步落库、尽力广播；前端按游标�
 
 **树形态**：host(IP) 为根 → domain 子节点 → url/service 再挂。register_asset 为唯一登记入口：domain 自动 DNS 解析挂 host，url/service 的 IP 主机部挂 host，域名主机部只精确挂既有 domain（不猜 DNS、不造行）；同 IP 首域名记 `host.meta.primary_domain`、其余 `meta.alias`。**CDN 判定**（core/blackboard/cdn.py）：共享 CDN IP 上的域名彼此无关——解析命中 CDN 的 domain **保持根行、不建 host、不挂树**；优先级 `meta.cdn` 人工覆盖（True/False）> CNAME 后缀 > IP CIDR；清单= `packs/data/cdn_ranges.json` 随包基线 + `config/cdn.json` 同结构增补，坏文件 ValueError fail-fast；**拿不准默认非 CDN**（不并只是保守，误并才会错绑结论）。DNS 漂移（重报解析到新 IP/CDN）经 `set_asset_parent` 改挂/摘挂并发 `asset.reparent` 事件。
 
-**根状态读时派生（effective_status，core/coverage.py `effective_status_map`）**：有子资产节点的 tested_clean 不由 AI/人工显式设置——叶子 effective=显式状态（basis=explicit）；父节点 effective 由全部子节点终态读时派生：孩子全 settled → tested_clean/basis=derived，任一非终态 → open（宁严；na/dead_end/finding 挂链同为收口味）；**新增子资产立即破除 derived clean**，无需事件联动；has_findings 沿子树向上传播。写入门：有子资产节点显式写 tested_clean 一律 ValueError（na 不挡——人工裁定）。黑板前端徽章优先消费 API 的 `effective_status`，`status` 仅代表持久化显式状态，前端不自行推导也不回写根节点。前端黑板资产筛选器**只列 host/domain（IP/域名）按值搜索**（2026-09-24 用户定稿，推翻同日早先「四类放开」口径——过滤只按 IP 和域名），选中后沿子树展开过滤，url/service 叶子 finding 不漏。存量处理：`scripts/rebuild_asset_trees.py`——DoH（默认 223.5.5.5，避开 Clash fake-ip 198.18/15 与系统代理）重解析挂树，CDN 根行无操作、有子根行 tested_clean→reset-open；默认 dry-run，`--apply` 落库，全经 Blackboard 方法。
+**根状态读时派生（effective_status，core/coverage.py `effective_status_map`）**：有子资产节点的 tested_clean 不由 AI/人工显式设置——叶子 effective=显式状态经 `tri_state_of` 归一（basis=explicit）；父节点 effective 由全部子节点读时派生（basis=derived）：**有洞 → visited**（不派生 clean）、全子 `tested_clean` → `tested_clean`、全子 `open` → `open`、混合 → `visited`；**新增子资产立即破除 derived clean**（加未测子 → 父掉出 clean），无需事件联动；has_findings 沿子树向上传播。写入门：有子资产节点显式写 tested_clean 一律 ValueError（na 不挡——人工裁定）。黑板前端徽章优先消费 API 的 `effective_status`，`status` 仅代表持久化显式状态，前端不自行推导也不回写根节点。前端黑板资产筛选器**只列 host/domain（IP/域名）按值搜索**（2026-09-24 用户定稿，推翻同日早先「四类放开」口径——过滤只按 IP 和域名），选中后沿子树展开过滤，url/service 叶子 finding 不漏。存量处理：`scripts/rebuild_asset_trees.py`——DoH（默认 223.5.5.5，避开 Clash fake-ip 198.18/15 与系统代理）重解析挂树，CDN 根行无操作、有子根行 tested_clean→reset-open；默认 dry-run，`--apply` 落库，全经 Blackboard 方法。
+
+## 资产三态（asset-tri-state，2026-10-09 定稿并实施）
+
+**要解决的问题**：旧口径把**有 finding 挂链**也算「收口」（`terminal-finding` ∈ settled）——方向性错误而非精度问题：①带洞资产（11 个适用面只测 1 个就出高危）被标「已测尽」、从 uncovered 消失，恰恰最该继续深挖；②父节点因**子节点出洞**被派生 `tested_clean`，同时 `has_findings=True`（自相矛盾的行）；③叶子显式 `tested_clean` 后补挂洞，走 explicit 分支永远显示 clean。
+
+**定稿三态**（`core/coverage.py`，词表与 DB status 同名，前端/API 零新枚举）：
+
+| 状态 | 落库值 | 判据 |
+|---|---|---|
+| **未测试** | 不设（`open`） | 从没碰过 |
+| **已访问** | `visited` | 碰过 **∧**（有未覆盖适用面 **∨** 有洞） |
+| **已测试干净** | `tested_clean` | 碰过 **∧** 适用面全覆盖 **∧** 无洞 |
+
+要点：**有发现 ≠ 已测试干净**（`is_settled` 收口味 = `tested_clean`/`na`/`dead_end`，**不含 finding**；`na` 归 clean——测过了结论是「没什么可测」，`dead_end` 归 clean——此路不通）；**`scanning` 并入 `visited`**（派发是一批一批派、非任务认领，无孤儿半程；写入门仍接受 scanning/存量行，读时归一到 visited，零迁移）；**发现压过显式 clean（读时降级）**——叶子显式 `tested_clean` 但挂非 FP 发现 → 读时降级 `visited`、`settled=False`，历史行不动。`coverage_report.is_converged` 同口径（`is_settled` 替 `startswith("terminal")`）：带洞资产不收敛、留 uncovered，组内 `terminal` 计 = 已测干净数。
+
+**消费方**：`orchestrator._assets_view` 出口按三态重排——`untested`（未测试清单）/`in_progress`（已访问，未测尽，**含带洞资产**）/`clean_count`（已测干净，只给计数防重复派）；`_covered_ids` = 已测干净（`high_value.covered` 语义随之收紧）；兼容键 `uncovered`↔`untested`、`done_count`/`clean_count` 同值。**主控（workbench chat-orchestrator）态势注入（D8，2026-10-09 已落地）**：`coverage.situation_snapshot` 三态分桶快照（untested/visited 清单 cap + clean_ids + counts）+ `core/chat/runtime.py::_situation_context()` 注入主控 system——主控不必再靠 bb_query 手动搜资产拼现状，每轮重投影、读取失败降级占位；与子专家 `_mission_context`（分配资产台账+维度面）对称。实施记录见 `docs/plans/归档-已完成/asset-tri-state.md`。
 
 ## tested_clean 意图死路背书（tested-clean-intent-backing，2026-09-25 实施；2026-10-01 改读链路图口径）
 
@@ -184,6 +200,26 @@ events 表全量审计 + EventBus 同步落库、尽力广播；前端按游标�
 ## 意图资产锚点（intent-asset-anchor，2026-10-01 实施）
 
 `declare_intent` **必须有资产锚点**（`target_asset_id` 或 `basis_refs` 含 `asset:<id>`），否则**工具层拒绝**（仅 Agent；人类/系统豁免）——游离意图落不到链路图子目标下、其 dead_end 收尾也无法背书 tested_clean。schema v29 迁移把存量**无锚点且 open** 的意图落 `intent.anchor_required` 审计事件（closed 不动，meta 键幂等）。
+
+## 测试维度面（test-dimensions，agent-path-intent-loop M1，2026-10-09 实施）
+
+**要解决的问题**：覆盖度（`coverage.py`）只回答「这个资产摸过没有」，回答不了「测的面够不够」——一个资产可 coverage=100% 却只测了可达性就被标 `tested_clean`。本功能把「该测哪些面」显式成一张**可判定的维度清单**，让收敛判据从「覆盖度」变成「面是否都有结论」。
+
+**维度清单**：`packs/tracks/<track>/dimensions.yaml`——轨级静态表（仿 `phases/*.yaml`，受约束 yaml 极简解析，零 PyYAML），项目可经 `config.dimensions` 同名 id 整体覆写。每个维度：`id`（稳定标识，意图按此归属）/`name`/`applies_to`（适用资产类型 domain/host/service/url/binary）/`intent`（意图模板，`{asset}` 由调用方替换）/`evidence_hint`（收尾为 dead_end 时什么样的证据才算「确实排除了」）。pentest 轨首版 11 个面：unauth/authz/weakpass/sqli/upload/rce/traversal/ssrf/xss/infoleak/deserial。
+
+**面覆盖判定**（`core/dimensions.py::dimension_coverage`，纯函数）：**面覆盖 ⟺ 该面有 ≥1 条收尾意图（`status=closed`）且无 open 意图**。返回 `{covered, uncovered, open}`；`is_converged(intents, dims)` = 所有适用面全覆盖（dims 空则不拦）。面是**下限不是上限**——一个面可派多条意图往深挖，不漏面即可。
+
+**面归属落库**：`intents.dimension` 列（**schema v34**，幂等 ALTER，历史行不回填）。`declare_intent` 工具层校验归属面 id 对本轨合法（填了不合法则拒；不填放行，向后兼容）；存储层不校验（无 packs 访问）。
+
+**演进（接 skill）**：后续把维度条目迁进各 skill 的 `covers` 字段，由「专家 skill 白名单 → 维度清单」推导取代本静态表；在此之前本表是唯一真相源。
+
+**消费方（分阶段落地）**：M1 已落「表 + 加载器 + 面覆盖判定」；M2 起由子代理 plan→execute→plan 自循环消费（领资产 → 按资产 type 取维度子集 → 逐面声明意图并收尾 → 全封面才许收尾），与「主代理单一派发」配套。
+
+**M2（2026-10-09）已落对话链**：主控 `call_expert` 新增 `asset_ids`（服务端逐个校验同项目存在）——**单一派发**下不同子专家分不同资产；`ChatTurn` 接 `assigned_asset_ids` 并透传子线程，`_mission_context()` 把「分配资产（含『未分配资产仅可 bb_add_asset 上报』）+ 维度面清单 + plan→execute→plan 纪律」注入子专家 system（不进消息历史）。**维度收敛闸** `_dimension_gate_status()`：仅 spawn 子专家且（分配资产 ∪ 本线程意图锚定资产）非空时启用，逐资产做 `dimension_coverage`，未覆盖/未声明意图 → 纯文本收尾前推回 plan（`_DIMENSION_GATE_MAX=5` 次后放行并落 `chat.dimension_gate`）。收敛判据是「意图面是否都有结论」，非覆盖率。
+
+**M3（2026-10-09）资产越界闸**：`ToolDispatcher.assigned_asset_ids` 非空时，命中 `_ASSET_REF_TOOLS`（bb_asset_status/bb_add_finding/declare_intent/bb_delete_asset/bb_merge_assets）且引用集外资产 id → `[越界拒绝]`（与角色白名单同前缀，进 E2 熔断）；**bb_add_asset 恒放行**（唯一上报通道，新资产仍须等主控派发）、**bb_query 不拦**（只读侦察）。未分配资产的会话/任务链/主控零影响。
+
+**M4（2026-10-09）发现回喂**：`finding.new` 进编排器异常订阅白名单（`Orchestrator.WAKE_TRIGGERS`，冷却 300s）——子专家挖到高危产出即时唤醒主控复判（是否派生意图/加派子专家/修正 HVT），不必等下轮 tick 的被动注入（`_stats` findings 段仍在，二者互补）。**严重度闸门 `WAKE_FINDING_SEVERITIES=("high","critical")`**：低档发现静默（避免唤醒轮被 info/low 噪声烧穿）；`finding.merged` 不唤醒（合并入既有发现不改变打法）。`wake_brief_text` 把多条发现成组渲染（一条复判指引 + 逐条 · 摘要）。
 
 ## 指定资产删除（2026-09-25 补 UI 入口）
 
@@ -208,8 +244,8 @@ events 表全量审计 + EventBus 同步落库、尽力广播；前端按游标�
 
 `core/coverage.py` 纯函数查询层（地位仿 phases.py，不 import core.orchestrator），**对账面 = host/domain/url/service 四类资产**（与 _assets_view targetable 同口径，binary 不入组）。口径（宁严勿松）：
 
-- **终态四味**：`status ∈ {tested_clean, na}` ∪ `meta.dead_end` ∪ 有 finding 挂链——**FP-only 发现=死路味**（这条路被否了）；`visited/scanning` 算半程；**budget_stop 算 open**（预算停 ≠ 测完）。判定顺序：状态机终态 > 死路标记 > 发现挂链。
-- **收敛传播**：叶子 converged=自身 terminal；父节点 converged=自身 terminal OR（自身至少 visited AND 全部子 converged）——**借子收敛必须有自身 visited 佐证**（host 还有 IP 直连面/服务面未摸；domain 同规则不豁免，DNS 面测完应标 tested_clean）。
+- **对账态（2026-10-09 改三态，见 §三「资产三态」）**：`status ∈ {tested_clean, na}` ∪ `meta.dead_end` 为**收口味**（可计入已测试干净）；**有 finding 挂链不收敛**（有洞 ≠ 测干净，FP-only=死路味例外）；`visited/scanning` 算已访问；**budget_stop 算 visited**（预算停 ≠ 测完，宁严勿松）。判定顺序：状态机终态 > 死路标记 > 发现挂链 > 半程 > open。
+- **收敛传播**：叶子 converged=自身收口；父节点 converged=有子 AND 全部子 converged——**父收敛只看子树，不要求自身 visited 佐证**（D3，2026-09-24 修订；host 的 IP 直连/服务面经子节点记账）。
 - **归组 group_key**：沿 parent_id 链走到根——根 domain → `domain:<value>`、根 host → `host:<value>`、孤儿自成组 `<type>:<value>`（与 target_keys_of 归一化键口径对齐）。
 - **输出**：`coverage_report(bb, pid)` → `{overall:{groups,groups_done,assets,converged}, by_group:[{group,total,terminal,converged,done,uncovered[]}]}（uncovered open 态优先排序）`。agent 侧 dead_end 标记路径随 M5/M6 的 F1 死路记账口径一起收口。
 - 同文件另有 `effective_status_map` / `attach_effective_status`：资产树节点的根状态读时派生（口径见 §三「资产树归并」定稿块），与分组收敛对账是两个消费面，勿混用。
@@ -243,7 +279,7 @@ L0 提案模式（propose_only）/ L1 建窗待命 + 执行审批单 / L2 自动
 - **M2 goal 闭环**：`meta.phase_goal={text, criteria[]（验收判据；goal 统一后为判据四层之首，自动派生朝它推进）, phase?, source:"chat", created_at, confirmed_by}`；`GET/PUT /goal`（text 空=剥键=清空重议）；`goal.confirm`/`goal.clear` 事件留痕（payload 全文快照，变更历史可回放）；goal 段「当前阶段目标（人类确认）」注入 tick 与对话轮系统提示；meta_loader 实时读 project.json meta（确认即生效，无需重启）。**goal 统一（2026-09-22）**：goal 升格唯一目标判据层（见「任务派生与判据」），判据来源经 resolve_criteria 四层解析供 L1 判跳闸与提示共用。
 - **M3 虚拟单例专家**：`GET /api/experts` 恒追加 `{id:"orchestrator", kind:"virtual", protected:true}`（不入 experts/\*.yaml 文件池、不认领任务不执行命令、删不掉；带 pid 时 name 读 meta）；`PUT /orchestrator/persona` 写 `meta.orchestrator_persona`（display_name 贯穿页签/气泡，不注入提示；persona 只注入对话轮系统提示「## 你的身份」段，tick 决策语气不受影响）；专家池消费点（组队/管理面板/建项多选）按 kind=virtual 过滤。
 - **前端编排页签三段式**：顶部 goal 条（引导设定 / 展示 text+criteria+phase，编辑/清空弹层）→ 中部对话流（OrchChatPane：human 右气泡 / orch 左气泡 MarkdownView + tool_trace 折叠，busy 显思考行，接近底部才自动跟随）→ 「运行记录」折叠区（原事件流剔除 orch.chat，防对话重复渲染）。composer 编排器态改双态「与编排对话（orch，缺省）/发任务」，**C2 指令态退役**；「决策」筛选含 goal.confirm/goal.clear。
-- **M4 异常订阅唤醒（2026-09-22 实施）**：黑板异常时编排器主动开口向人类简报——**触发白名单 3 kind**（`team.run.finished` 团队 Run 收尾〔完成/失败/取消〕→ 唤醒复盘 / `budget.soft_warning` 预算 80% 软警 / `phase.gate_open` 阶段出口门满足），kind 独立冷却窗（600s / 3600s）防轰炸；**零新表**——上次唤醒锚点 = proactive `orch.chat` 事件（`triggers` 字段 kind 级 id 防重 + created_at 冷却双维度），无锚点只看 `WAKE_LOOKBACK=1800s` 回看窗；`Orchestrator.collect_wake_triggers`（模块级纯函数）+ `wake_brief_text`（合成「〔主动唤醒〕…请向人类简报现状」user 消息，**只进 LLM messages 不落历史**——简报语境随轮消散属定稿口径）+ `chat_turn(wake=)`（唯一差异 = 回复 payload 加 `proactive:true, triggers:[kind]`）；API 层 `_maybe_orch_wake`：`_post_tick` 挡位闸前插入（**paused 不打扰，L0/L1/L2 全唤醒**），`app.state.orch_wake_pending` 防同项目重复提交，Job `orchestrator-wake` 内抢 tick 租约（占用静默放弃=宁少勿扰）+ 构造失败放弃 + LLM 异常 `_emit_llm_error`；前端 orch 气泡 🔔 主动唤醒徽章（amber，triggers 中文映射）。测试直调口 `app.state.orch_wake_check`。
+- **M4 异常订阅唤醒（2026-09-22 实施；2026-10-09 增补 finding.new）**：黑板异常时编排器主动开口向人类简报——**触发白名单 4 kind**（`team.run.finished` 团队 Run 收尾〔完成/失败/取消〕→ 唤醒复盘 / `budget.soft_warning` 预算 80% 软警 / `phase.gate_open` 阶段出口门满足 / **`finding.new` 高危发现落库**〔严重度闸门 `WAKE_FINDING_SEVERITIES=("high","critical")`，低档静默；`finding.merged` 不唤醒〕→ 唤醒复判是否派生意图/加派子专家），kind 独立冷却窗（600s / 3600s / 300s）防轰炸；**零新表**——上次唤醒锚点 = proactive `orch.chat` 事件（`triggers` 字段 kind 级 id 防重 + created_at 冷却双维度），无锚点只看 `WAKE_LOOKBACK=1800s` 回看窗；`Orchestrator.collect_wake_triggers`（模块级纯函数，finding.new 摘要带级别+标题+资产）+ `wake_brief_text`（合成「〔主动唤醒〕…请向人类简报现状」user 消息，**只进 LLM messages 不落历史**——简报语境随轮消散属定稿口径；多条发现成组渲染）+ `chat_turn(wake=)`（唯一差异 = 回复 payload 加 `proactive:true, triggers:[kind]`）；API 层 `_maybe_orch_wake`：`_post_tick` 挡位闸前插入（**paused 不打扰，L0/L1/L2 全唤醒**），`app.state.orch_wake_pending` 防同项目重复提交，Job `orchestrator-wake` 内抢 tick 租约（占用静默放弃=宁少勿扰）+ 构造失败放弃 + LLM 异常 `_emit_llm_error`；前端 orch 气泡 🔔 主动唤醒徽章（amber，triggers 中文映射）。测试直调口 `app.state.orch_wake_check`。
 
 ## 分阶段工作流（pentest-phased-workflow M1-M4 全量，2026-09-22）
 
@@ -286,6 +322,24 @@ L0 host < L1 wsl < L2 docker < L3 sandbox（--rm 一次性 / 断网 / 512m / cap
 
 F6 内置浏览器持久化上下文（`core/browser/pool.py` launch_persistent_context）**默认 `ignore_https_errors=True`**——证书过期/自签/CN 不符一律放行加载（用户定稿）。风险边界可控：导航前必经 `check_target` 资产白名单硬校验，MITM 面只可能发生在已登记授权目标，且浏览器流量全程经 route 抓落入 http_history 可审计；`config/browser.json` 可设 `ignore_https_errors:false` 关回严格口径（`BrowserConfig` 白名单字段）。背景事故：目标 booklocation.zut.edu.cn 证书 2026-05-06 过期，Chromium `ERR_CERT_DATE_INVALID` 致 Agent 三次合理换路重试被错计为「拒绝熔断」挂起任务；与 curl `-k` 侦察口径对齐。
 
+## 代理池（fir-proxy 托管，2026-10-07 M1 实施）
+
+**形态**：vendor 外部 fir-proxy（代理池工具）进 `tools/fir-proxy/`，平台侧 `core/proxy/pool.py` **项目级托管**其 serve 子进程（仿 `BrowserPool`：`app.state.proxy_pool` 装配 + shutdown 兜关 + `delete_project` 前置链停服），池记录落 `<项目>/proxy/pool.json`。**人类 UI 与 AI 共享同一池**。
+
+**为什么托管而非塞进 MCP 子进程**：本项目 MCP server 是平台按项目托管的**外部子进程**（`app.state.chat_mcp_bridges` 按 `proj.id` 缓存），随会话/轮次起停、崩溃重拉；serve 与池若住进去会随 MCP 生死、多项目各起一个、UI 还得反向依赖 MCP 在线。
+
+**不动上游**：上游 `cli.py serve` 是**一次性、文件驱动**的长驻进程，**无运行中控制口**（查不到实时当前代理、无法手动轮换）。故本仓新增薄 runner `tools/fir-proxy/cyberstrike_serve.py` 包上游 `ProxyRotator`/`ProxyServer`，补 **loopback 控制通道**（`/status` `/proxies` `/rotate` `/reload` `/stop`，只绑 127.0.0.1）；stdout 走 JSONL（`started`/`stopped`/`error`）供平台解析，日志走 stderr，启动强制 UTF-8。**不改 fir-proxy 自身文件**（便于上游同步）。
+
+**端口与依赖**：三端口（http/socks5/control）按项目**动态取空闲口**，多项目不冲突；解释器自动解析（`tools/venv` → `sys.executable` → PATH），缺 `requests[socks]`/`bs4`/`lxml` 时 `proxy_available()` False → 端点 **503 结构化**，**不静默降级**。
+
+**AI 用法（甲）**：MCP 控制面给 http/socks5 端点 + 可用 IP 列表，**AI 自行 `curl -x`**；平台**不**注入 browser/run_cmd 的代理（用户定稿）。
+
+**API**：`/api/projects/{pid}/proxy/{status,start,stop,proxies,rotate,add,remove,select,fetch,validate}`（后两者 202 Job）；UI 顶级「代理池」视图（`webui/src/views/proxy/`）。
+
+**抓取/验证口径（2026-10-08）**：抓取走平台薄 runner `tools/fir-proxy/cyberstrike_fetch.py`（**内置精选源清单 + `--sources` 可覆盖，不改上游**；**单次限量 `fetch_limit`〔默认 2000，按协议轮转取〕**）——免费源普遍 90%+ 死代理，换源收益有限，真正提升靠验证闭环。**抓取/验证 Job 汇报 `meta.progress`**（可变 dict 引用，相位 fetch→check→prune + `done/total` + `eta_seconds`/`elapsed_seconds`）→ 前端代理池状态栏显进度条与「预计剩余」。**验证走平台薄 runner `tools/fir-proxy/cyberstrike_check.py`**（复用上游 `check_proxy_url`，不改上游）：经代理 GET 一个**可配置目标**（`validate_target`，默认 `http://www.baidu.com`，走 80 口、不强制 CONNECT），拿到响应即 `Working` 并记延迟——**不用**上游 `cli.py validate`（其判据要求 HTTPS-CONNECT + httpbin + 测速**全过**，实测同批 120 只过 9 → 池被清空；宽松单目标同批过 52）。**抓取后自动验证、验证即清理**：`status≠Working` 或延迟 > `prune_latency_ms`（默认 5s）的代理从池中**物理删除**；验证经 `_apply_validation` 按地址 merge 回池 + 单次 `/reload` remove，不再整体覆盖池文件。前端「在线抓取」「验证全部」复用共享 `pollJob` 并回执清理计数。
+
+**待续**：M2 MCP 控制面（`mcp-servers/fir-proxy-mcp/`，`config/mcp.json` enabled 开关）与 M3「放开红线让 Agent 发起重放/爆破」见 `docs/plans/proxy-pool-integration.md`。
+
 ## Web Fuzzer 重放工作台与国密 TLS sidecar（2026-10-07 实施）
 
 **背景**：单条重发原先是 F6 浏览器右栏（300–560px）里的一个原始报文 textarea，改包→发送→看响应的秒级 POC 迭代被空间局促与无历史拖累。升格为**顶级「重放」视图**（前端 `webui/src/views/fuzzer/`，轨门控 pentest/redteam/ctf）：左 raw 报文编辑器 / 右完整响应（react-resizable-panels 默认 50/50），工具条 = 发送（Alt/Ctrl+Enter）/ 停止 / 构造请求（表单建包）/ 历史抽屉 / 强制HTTPS / 国密TLS / 跟随重定向 / 跳过证书校验 / 设置代理 / 响应体长度限制；响应区含状态行（状态码·耗时·字节数）+ 响应头/体 tab + JSON 美化 + 字符集重解 + 定位。入口走 `goto-fuzzer` CustomEvent（抓包行「去重放台」、直播间顶栏 🧪）。
@@ -294,7 +348,7 @@ F6 内置浏览器持久化上下文（`core/browser/pool.py` launch_persistent_
 
 **国密 TLS 为什么外挂 Go**：Python 的 `ssl` 是 OpenSSL 薄绑定——本机 OpenSSL 未编入 SM 密码套件（`get_ciphers()` 仅 3 个标准 TLS1.3 套件、任何 SM 名报 `No cipher can be selected`），Python 又未暴露 `set_ciphersuites`；PyPI 的 gmssl/gmalg/pygmssl/gmssl-python 只有 SM2/SM3/SM4 **密码学原语**（`gmssl-python` 文档明写「只能覆盖除 SSL/TLS/TLCP 之外的功能算法」），`tlslite-ng` 纯 Python TLS 亦无 SM4/SM2。各生态通行解法是自带 SM 套件的 TLS 栈（Go `tjfoc/gmsm/gmtls` / Java BouncyCastle / C 侧 Tongsuo·GmSSL），**Python 无对应物**；用原语手写 TLCP 属研究级安全关键工程，不该由 UI 开关承载。故引入 `tools/gmhttp/`（Go + gmtls，纯 Go 零 cgo，一次性进程 stdin JSON → stdout JSON、body base64），构建 `scripts/build_gmhttp.py` → `tools/bin/gmhttp.exe`（registry `acquire=bundled`，桌面打包随包旁挂）。
 
-**红线**：**二进制缺失 = 国密不可用**（`gm_available()` 探测 → 前端开关置灰 + 安装指引），**绝不静默降级成普通 TLS**——否则会制造「以为走了国密、实际没走」的安全假象。重发/爆破/拦截裁决仍是**人类 UI 专属**（Agent 无任何发起入口，只能只读 `http_history`）；目标不设门禁（授权边界由使用者负责，与 F6 浏览器同口径）。
+**红线**：**二进制缺失 = 国密不可用**（`gm_available()` 探测 → 前端开关置灰 + 安装指引），**绝不静默降级成普通 TLS**——否则会制造「以为走了国密、实际没走」的安全假象。**重发/爆破 2026-10-07 放开红线**（`proxy-pool-integration` M3）：Agent 工具面新增 `browser_replay` / `browser_intruder`，与人类 UI 共用 `ReplayClient`/`Intruder`，两者均可传 `proxy` 走代理池做 IP 轮换；**拦截裁决仍人类 UI 专属**。目标不设门禁（授权边界由使用者负责，与 F6 浏览器同口径）。
 
 ## 网关流水线
 
@@ -402,7 +456,7 @@ refs.py kb 改名全库引用扫描+重写；doctor 体检（error：悬空引�
 
 ## anthropic_compat
 
-协议转换核心：按类别重试矩阵（标准 5xx〔500/502/503/504〕共 10 次尝试、首次 + 9 次重试、退避封顶 30s；429 共 2 次尝试；连接类共 4 次 + 5/10/20s 退避；OpenAI 520/524 保留专用预算）、thinking/stream/cache_control 400 实例级降级（去参重发）、SSE 状态机（工具参数 JSON 分片拼装）、首帧后不重试（SSE 不可重放）、truncated 截断防御（区分「说完」与「流断」）。
+协议转换核心：按类别重试矩阵（标准 5xx〔500/502/503/504，OpenAI 侧含 Cloudflare 520/524〕共 11 次尝试、首次 + 10 次重试、退避封顶 30s；429 共 2 次尝试；连接类共 4 次 + 5/10/20s 退避）、重试次数入错误文案（`retry_note`）、thinking/stream/cache_control 400 实例级降级（去参重发）、SSE 状态机（工具参数 JSON 分片拼装）、首帧后不重试（SSE 不可重放）、truncated 截断防御（区分「说完」与「流断」）。
 
 **Prompt caching（retrieval-upgrade M1，2026-09-23 实施）**：请求侧 system 改块数组——`build_system_parts` 拆 stable（规则链+角色+能力清单，会话内字节稳定）/ dynamic（技能指引+任务目标+纪律尾）两块，stable 块末尾打 `cache_control: {"type":"ephemeral"}` 断点；Ark Anthropic 兼容层实测直接接受（同前缀第二跑 cache_read>0 前缀缓存生效），400 文案含 cache_control 时实例级降级剥标重发作保险（`_cache_disabled` 置位后不再打标）。观测面：usage_view 补 cache_read/creation 与命中率 `cr/(in+cr+cc)`（LiveRoom 预算弹窗展示）；预算逻辑不动（缓存 token 仍计数，只是便宜）。消息历史增量断点后置观察。
 

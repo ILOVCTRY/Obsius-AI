@@ -363,6 +363,28 @@ def test_mcp_loopback_guard_and_endpoint_select():
                                 "domains": ["reverse"]}]}) == dc.MCP_DEFAULT_ENDPOINT
 
 
+def test_mcp_select_prefers_ida_over_other_reverse_servers():
+    """池里另挂同域（reverse）的调试器 server 时，IDA 实时桥仍选 ida 条目（排序无关）。"""
+    select = dc.select_mcp_endpoint
+    x64dbg = {"name": "x64dbg", "transport": "streamable-http",
+              "url": "http://127.0.0.1:3000/mcp", "enabled": True,
+              "domains": ["reverse"]}
+    ida = {"name": "ida", "transport": "streamable-http",
+           "url": "http://127.0.0.1:13337/mcp", "enabled": True,
+           "domains": ["reverse"]}
+    # x64dbg 排在 ida 之前也不抢占（否则缓存缺席实时取伪码/xref 会打向调试器）
+    assert select({"servers": [x64dbg, ida]}) == "http://127.0.0.1:13337/mcp"
+    assert select({"servers": [ida, x64dbg]}) == "http://127.0.0.1:13337/mcp"
+    # 名字须精确 "ida"："vidar" 不误命中 → 回退首个命中（x64dbg 在前）
+    vidar = {**ida, "name": "vidar"}
+    assert select({"servers": [x64dbg, vidar]}) == "http://127.0.0.1:3000/mcp"
+    # 无 ida 条目 → 回退首个命中（既有语义）
+    assert select({"servers": [x64dbg]}) == "http://127.0.0.1:3000/mcp"
+    # ida 条目非法（非 loopback）→ 跳过，回退 x64dbg
+    bad_ida = {**ida, "url": "http://10.1.2.3:13337/mcp"}
+    assert select({"servers": [bad_ida, x64dbg]}) == "http://127.0.0.1:3000/mcp"
+
+
 def test_mcp_parse_body_json_sse_plain():
     parse = dc._parse_mcp_body
     assert parse('{"jsonrpc":"2.0","result":{}}') == {"jsonrpc": "2.0", "result": {}}

@@ -34,7 +34,7 @@
   Python 生态无带 SM 密码套件的 TLS 栈，故国密必须外挂（详见 `tools/CLAUDE.md`）。
 - **停止**：`api.replayStop(pid, runId)` → 后端置 stop Event。httpx=放弃等待（sync 不可真中止），
   国密 sidecar=kill 子进程（真停止）。`runId` 由 `browserReplay` 返回。
-- **红线**：重发人类 UI 专属——Agent 无任何发起入口，只能只读 `http_history`。
+- **重发 2026-10-07 放开红线**：人类 UI 与 Agent 工具 `browser_replay` 共用后端（`proxy-pool-integration` M3）；**拦截裁决仍人类 UI 专属**。
   目标不设门禁（授权边界由使用者负责，与 F6 浏览器同口径）。
 - **入口**：`goto-fuzzer` CustomEvent（`detail.raw` 预填报文）。抓包行「✉ 去重放台…」与
   LiveRoom 顶栏 🧪 均走此事件；App.tsx 用 `key={fuzzerNav?.n}` 重挂以套用新预填。

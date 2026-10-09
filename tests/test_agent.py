@@ -132,24 +132,63 @@ def make_agent(env, llm, planner=None, config=None, role="_generalist", artifact
     return agent
 
 
-def pass_intent_lead(*dispatchers) -> None:
-    """意图先行闸测试旁路（口径 Y，2026-10-01）：把「会话首次实质动作已放行」标志
-    钉死为 True，并包一层 dispatch——loop 每任务起点会复位该标志（每任务都要「先
-    立意再动手」），故每次派发前重设，保证本用例聚焦其自身主题（网关/卡死/产物/
-    运行时/上下文…）而不被意图纪律挡回。闸本身的行为由 test_intent_lead_gate_*
-    专测覆盖（含无意图被拒/只读不受阻/协调原语放行/declare 后放行）。"""
+_INTENT_BYPASS_STMT = "测试旁路意图：本用例主题非意图纪律"
+
+
+def _ensure_open_intent(d) -> None:
+    """给 dispatcher 的会话作者确保一条 open 意图。意图先行闸自 2026-10-09 起
+    **逐动作**现查「本会话是否有 open 意图」，故只要用例期间始终有一条 open 意图
+    在场即可放行；declare_intent 按「作者+陈述」去重，重复调用是幂等复用。
+    非 sess-/chat- 作者（人类/系统路径）不适用本闸，直接跳过，不落多余事件。
+
+    同时预置 finish 收尾拦截的 ack：旁路意图恒为 open（本用例不关心意图收尾），
+    不预置的话首轮 finish 会被「还有意图未收尾」多拦一次、多烧一轮 LLM 脚本。
+    必须**逐 dispatch** 设置——`reset_for_task()`（_loop_body 入口）会把 ack 清回
+    False，一次性预置会被它抹掉。"""
+    author = getattr(d, "author", "") or ""
+    if not author.startswith(("sess-", "chat-")):
+        return
+    try:
+        d._finish_open_intents_ack = True
+    except Exception:  # noqa: BLE001
+        pass
+    bb = getattr(d, "bb", None)
+    pid = getattr(d, "project_id", None)
+    if bb is None or not pid:
+        return
+    try:
+        declare_intent(bb, pid, _INTENT_BYPASS_STMT, author=author)
+    except Exception:  # noqa: BLE001 —— 旁路失败不阻断用例（闸行为另有专测）
+        pass
+
+
+def open_dispatch_intent(*dispatchers) -> None:
+    """意图先行闸测试旁路（不含 dispatch 包装）：给每个 dispatcher 的会话作者
+    声明一条 open 意图，并预置 finish 收尾 ack。供**直接调 dispatch**、不关心
+    意图纪律的用例使用（走完整 `_loop` 的用例请用 `pass_intent_lead`，它会逐
+    dispatch 重设——`reset_for_task()` 会清掉一次性设置）。"""
     for d in dispatchers:
-        d._intent_lead_passed = True
-        if getattr(d, "_intent_lead_bypass_wrapped", False):
+        _ensure_open_intent(d)
+
+
+def pass_intent_lead(*dispatchers) -> None:
+    """意图先行闸测试旁路（口径 Y；2026-10-09 随闸门升为「每意图级」改造）：
+    为每个 dispatcher 的会话作者声明一条 open 意图，并包一层 dispatch 兜底——
+    保证本次用例聚焦其自身主题（网关/卡死/产物/运行时/上下文…）而不被意图纪律
+    挡回。闸本身的行为由 test_intent_lead_gate_* 专测覆盖（含无意图被拒/只读
+    不受阻/协调原语放行/declare 后放行）。"""
+    for d in dispatchers:
+        _ensure_open_intent(d)
+        if getattr(d, "_intent_gate_bypass_wrapped", False):
             continue
         original = d.dispatch
 
         def _dispatch(name, args, _original=original, _d=d):
-            _d._intent_lead_passed = True
+            _ensure_open_intent(_d)
             return _original(name, args)
 
         d.dispatch = _dispatch
-        d._intent_lead_bypass_wrapped = True
+        d._intent_gate_bypass_wrapped = True
 
 
 def write_role(env, name, body):
@@ -2169,6 +2208,89 @@ def test_bb_delete_and_merge_asset_tools(env):
 
     binary_id = d.bb.upsert_asset(d.project_id, "binary", "c" * 64)["id"]
     assert d.dispatch("bb_delete_asset", {"asset_id": binary_id}).startswith("[拒绝]")
+
+
+def _scoped_dispatcher(env, assigned, name="scoped"):
+    """子代理越界约束（agent-path-intent-loop M3）用例的装配：chat- 作者 +
+    显式分配资产集，触发 `_ASSET_REF_TOOLS` 越界闸。"""
+    from core.agent.tools import ToolDispatcher
+    bb, project, gw, _ = env
+    sid = f"chat-{name}"
+    bb.register_session(project["id"], sid)
+    return ToolDispatcher(bb, gateway=gw, project_id=project["id"],
+                          session_id=sid, author=sid,
+                          assigned_asset_ids=assigned)
+
+
+def test_asset_scope_gate_blocks_out_of_scope_refs(env):
+    """分配资产的子代理引用范围外资产 → [越界拒绝] 并指路 bb_add_asset 上报。"""
+    bb, project, gw, _ = env
+    mine = bb.upsert_asset(project["id"], "host", "10.40.0.1")["id"]
+    other = bb.upsert_asset(project["id"], "host", "10.40.0.2")["id"]
+    d = _scoped_dispatcher(env, [mine])
+
+    for tool, args in (
+        ("declare_intent", {"target_asset_id": other, "statement": "测隔壁主机",
+                            "dimension": "weakpass"}),
+        ("bb_add_finding", {"target_asset_id": other, "title": "越界漏洞",
+                            "severity": "high"}),
+        ("bb_asset_status", {"asset_id": other, "status": "tested_clean"}),
+        ("bb_delete_asset", {"asset_id": other}),
+    ):
+        r = d.dispatch(tool, args)
+        assert r.startswith("[越界拒绝]"), (tool, r)
+        assert "资产越界" in r and other in r and mine in r
+        assert "bb_add_asset" in r
+
+    # 范围外资产未被改动；也不因越界尝试生成 finding/intent
+    assert bb.get_asset(other)["status"] == "open"
+    rows = bb.conn.execute(
+        "SELECT 1 FROM intents WHERE project_id=? AND target_asset_id=?",
+        (project["id"], other)).fetchone()
+    assert rows is None
+
+
+def test_asset_scope_gate_allows_in_scope_and_merge_both_ends(env):
+    """范围内资产照常放行；merge 两端任一出界整单拒绝（半并会撕裂资产树）。"""
+    bb, project, gw, _ = env
+    a1 = bb.upsert_asset(project["id"], "host", "10.41.0.1")["id"]
+    a2 = bb.upsert_asset(project["id"], "host", "10.41.0.2")["id"]
+    outside = bb.upsert_asset(project["id"], "host", "10.41.0.3")["id"]
+    d = _scoped_dispatcher(env, [a1, a2], name="scoped-merge")
+
+    assert not d.dispatch("declare_intent", {
+        "target_asset_id": a1, "statement": "验证 ssh 弱口令",
+        "dimension": "weakpass"}).startswith("[越界拒绝]")
+    assert not d.dispatch("bb_asset_status", {
+        "asset_id": a2, "status": "visited"}).startswith("[越界拒绝]")
+    # 双端均在范围内 → 放行
+    assert d.dispatch("bb_merge_assets", {
+        "source_asset_id": a1, "target_asset_id": a2,
+        "reason": "同一主机两个记录"}).startswith("asset.merged")
+    # 任一端出界 → 整单拒绝（source 在界内也拦）
+    r = d.dispatch("bb_merge_assets", {
+        "source_asset_id": a1, "target_asset_id": outside,
+        "reason": "跨范围合并"})
+    assert r.startswith("[越界拒绝]") and outside in r
+
+
+def test_asset_scope_gate_off_without_assignment(env):
+    """未分配资产的会话不受越界闸约束（任务链/主控/查询类委派零影响），
+    bb_add_asset 恒放行（上报通道）。"""
+    d = _dispatcher(env, "unscoped")
+    a1 = d.dispatch("bb_add_asset", {"type": "host", "value": "10.42.0.1"})
+    aid = a1.split("asset=")[1].split()[0]
+    assert not d.dispatch("bb_asset_status", {
+        "asset_id": aid, "status": "visited"}).startswith("[越界拒绝]")
+
+    mine = d.bb.upsert_asset(d.project_id, "host", "10.42.0.9")["id"]
+    scoped = _scoped_dispatcher(env, [mine], name="scoped-report")
+    new = scoped.dispatch("bb_add_asset", {"type": "host", "value": "10.42.0.10"})
+    assert "asset=" in new and not new.startswith("[越界拒绝]")
+    # 上报的新资产仍不在范围内，等主控派发
+    new_id = new.split("asset=")[1].split()[0]
+    r = scoped.dispatch("bb_asset_status", {"asset_id": new_id, "status": "visited"})
+    assert r.startswith("[越界拒绝]")
 
 
 def test_bb_add_asset_domain_dns_mount(env, monkeypatch):

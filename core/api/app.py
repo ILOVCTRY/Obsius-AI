@@ -39,6 +39,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from core import autonomy
 from core import phases as phases_mod
 from core.browser import BrowserConfig, BrowserPool, BrowserError
+from core.proxy import ProxyConfig, ProxyPool, ProxyError
 from core.browser.pool import browser_available, chromium_available
 from core.browser.replay import Intruder, ReplayClient, ReplayOptions
 from core.agent import AgentConfig, AgentSession
@@ -723,6 +724,7 @@ class ChatThreadIn(BaseModel):
 class ChatMessageIn(BaseModel):
     text: str
     refs: dict[str, list[str]] | None = None  # 人类引用指定 {skills:[], mcps:[]}
+    attachment_ids: list[str] = Field(default_factory=list)  # 附件随发（kind=attachment）
 
 
 # ---------------- packs 管理辅助（设置页：角色 / Skill / 红线 / MCP） ----------------
@@ -1208,6 +1210,18 @@ def create_app(
         app.state.browser_pool.close_all()
 
     app.add_event_handler("shutdown", _browser_shutdown)
+
+    # 代理池（fir-proxy 托管，2026-10-07，docs/plans/proxy-pool-integration.md）：项目级
+    # 常驻 serve 子进程 + 池记录落 <项目>/proxy/pool.json；config/proxy.json 缺失=全默认；
+    # 缺 fir-proxy/依赖时端点返明确错误不 500（proxy_available 能力探测）。
+    app.state.proxy_pool = ProxyPool(
+        workspace_root, tools_root or "tools",
+        config=ProxyConfig.from_file("config/proxy.json"))
+
+    def _proxy_shutdown() -> None:
+        app.state.proxy_pool.close_all()
+
+    app.add_event_handler("shutdown", _proxy_shutdown)
 
     # IDA-MCP 实例管理器（2026-09-20 按需拉起+空闲关，DESIGN.md §7）：Agent 点查
     # decompile/xrefs 时按 (项目, 样本) 拉起无窗口 idat 并连其 MCP 端点，空闲
@@ -2589,6 +2603,11 @@ def create_app(
             app.state.projects.pop(pid, None)
             # F6：先焚毁浏览器实例（chromium 占用 profile 目录会锁死 Windows 删除）
             app.state.browser_pool.close_project(pid)
+            # 代理池：先停 serve 子进程（释放池文件/日志句柄，2026-10-07）
+            try:
+                app.state.proxy_pool.close_project(pid)
+            except Exception:  # noqa: BLE001
+                pass
             # 会话级常驻容器先停删（释放卷挂载句柄，否则 Windows rename 必 422；P3，2026-10-07）
             try:
                 app.state.session_containers.remove_project(pid)
@@ -2644,6 +2663,28 @@ def create_app(
         concurrency: int = 5
         rate_per_sec: float = 10.0
         max_requests: int | None = None
+        proxy: str | None = None          # 显式代理；None=直连（绝不读系统代理）
+
+    class ProxyAddIn(BaseModel):
+        records: list[dict] = Field(default_factory=list)  # 代理记录（proxy/protocol/...）
+
+    class ProxyRemoveIn(BaseModel):
+        addresses: list[str] = Field(default_factory=list)
+
+    class ProxyFetchIn(BaseModel):
+        protocols: list[str] = Field(default_factory=list)  # http/socks4/socks5；空=全部
+        auto_validate: bool = True                           # 抓取后自动验证并清理失效
+
+    class ProxyValidateIn(BaseModel):
+        workers: int = 50
+        timeout_s: float = 600.0
+        prune: bool = True                                   # 验证后剔除失效代理
+
+    class ProxySelectIn(BaseModel):
+        limit: int = 1
+        region: str | None = None
+        max_latency_ms: float | None = None
+        include_failed: bool = False
 
     class BrowserTakeoverIn(BaseModel):
         sid: str
@@ -2797,8 +2838,8 @@ def create_app(
 
     @app.post("/api/projects/{pid}/browser/replay", status_code=202)
     def browser_replay(pid: str, body: ReplayIn):
-        """重发（人类 UI；AI 无发起入口）。原始报文 raw 或 capture_id 模板。
-        Job 化返回 job_id 轮询；run_id 供「停止」端点中断（2026-10-07 重放工作台）。"""
+        """重发（人类 UI + Agent 工具 `browser_replay`，2026-10-07 放开红线）。
+        原始报文 raw 或 capture_id 模板。Job 化返回 job_id 轮询；run_id 供「停止」端点中断。"""
         proj = _project(pid)
         client = ReplayClient(proj.bb, config=app.state.browser_pool.config,
                               tools_root=app.state.tools_root or "tools")
@@ -2842,7 +2883,7 @@ def create_app(
 
     @app.post("/api/projects/{pid}/browser/intruder", status_code=202)
     def browser_intruder(pid: str, body: IntruderIn):
-        """爆破（**人类 UI 专属**——Agent 无任何发起入口，红线见 DESIGN §7）。
+        """爆破（人类 UI + Agent 工具 `browser_intruder`，2026-10-07 放开红线）。
         服务端生成 batch_id + stop 事件；结果逐请求入 http_history 按 batch 拉取。"""
         proj = _project(pid)
         batch_id = f"in-{uuid.uuid4().hex[:12]}"
@@ -2858,6 +2899,7 @@ def create_app(
                                     concurrency=body.concurrency,
                                     rate_per_sec=body.rate_per_sec,
                                     max_requests=body.max_requests,
+                                    proxy=body.proxy or None,
                                     stop_event=stop, author="human")
             finally:
                 app.state.intruder_runs.pop(batch_id, None)
@@ -2875,6 +2917,109 @@ def create_app(
             raise HTTPException(404, f"爆破批次不在运行中: {batch_id}")
         stop.set()
         return {"stopped": True}
+
+    # ---------- 代理池（fir-proxy 托管，2026-10-07） ----------
+    # 项目级 serve 生命周期 + 池记录；人类 UI 与 AI（经 MCP 控制面）共享同一池。
+    # 缺 fir-proxy/依赖 → ProxyError → 503 结构化（不 500）。
+
+    def _proxy_pool():
+        return app.state.proxy_pool
+
+    def _proxy_call(fn, *args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except ProxyError as exc:
+            raise HTTPException(503, str(exc)) from exc
+
+    def _proxy_running_job(pid: str) -> dict | None:
+        """本项目运行中的代理 Job（fetch/validate），无则 None。
+
+        前端切页回来据此重挂 `pollJob`（进度 dict 是 meta 内的**引用**，读到即最新）。
+        """
+        for j in app.state.jobs.all_jobs():
+            if (j.get("status") == "running"
+                    and j.get("kind") in ("proxy-fetch", "proxy-validate")
+                    and (j.get("meta") or {}).get("project_id") == pid):
+                meta = j.get("meta") or {}
+                return {"id": j["id"], "kind": j["kind"],
+                        "progress": meta.get("progress")}
+        return None
+
+    @app.get("/api/projects/{pid}/proxy/status")
+    def proxy_status(pid: str):
+        _project(pid)
+        out = _proxy_pool().status(pid)
+        out["job"] = _proxy_running_job(pid)
+        return out
+
+    @app.post("/api/projects/{pid}/proxy/start")
+    def proxy_start(pid: str):
+        _project(pid)
+        return _proxy_call(_proxy_pool().start, pid)
+
+    @app.post("/api/projects/{pid}/proxy/stop")
+    def proxy_stop(pid: str):
+        _project(pid)
+        return _proxy_pool().stop(pid)
+
+    @app.get("/api/projects/{pid}/proxy/proxies")
+    def proxy_list(pid: str):
+        _project(pid)
+        return _proxy_pool().list_proxies(pid)
+
+    @app.post("/api/projects/{pid}/proxy/rotate")
+    def proxy_rotate(pid: str):
+        _project(pid)
+        return _proxy_call(_proxy_pool().rotate, pid)
+
+    @app.post("/api/projects/{pid}/proxy/add")
+    def proxy_add(pid: str, body: ProxyAddIn):
+        _project(pid)
+        return _proxy_pool().add_records(pid, body.records)
+
+    @app.post("/api/projects/{pid}/proxy/remove")
+    def proxy_remove(pid: str, body: ProxyRemoveIn):
+        _project(pid)
+        return _proxy_pool().remove_records(pid, body.addresses)
+
+    @app.post("/api/projects/{pid}/proxy/select")
+    def proxy_select(pid: str, body: ProxySelectIn):
+        _project(pid)
+        return {"proxies": _proxy_pool().select(
+            pid, limit=body.limit, region=body.region,
+            max_latency_ms=body.max_latency_ms,
+            include_failed=body.include_failed)}
+
+    @app.post("/api/projects/{pid}/proxy/fetch", status_code=202)
+    def proxy_fetch(pid: str, body: ProxyFetchIn):
+        """从在线源抓取代理入池（默认抓取后自动验证并清理失效；Job：联网慢，返 job_id 轮询）。
+
+        ``meta.progress`` 为可变 dict（引用共享）：前端轮询读到实时相位/进度/ETA。
+        """
+        _project(pid)
+        pool = _proxy_pool()
+        progress: dict = {"phase": "queued", "done": 0, "total": 0,
+                          "eta_seconds": None, "message": "排队中…"}
+        job_id = app.state.jobs.submit(
+            "proxy-fetch",
+            lambda: pool.fetch(pid, body.protocols, auto_validate=body.auto_validate,
+                               on_progress=progress.update),
+            meta={"project_id": pid, "progress": progress})
+        return {"job_id": job_id}
+
+    @app.post("/api/projects/{pid}/proxy/validate", status_code=202)
+    def proxy_validate(pid: str, body: ProxyValidateIn):
+        """批量验证池内代理并清理失效（Job：慢；``meta.progress`` 同 fetch）。"""
+        _project(pid)
+        pool = _proxy_pool()
+        progress: dict = {"phase": "queued", "done": 0, "total": 0,
+                          "eta_seconds": None, "message": "排队中…"}
+        job_id = app.state.jobs.submit(
+            "proxy-validate",
+            lambda: pool.validate(pid, timeout=body.timeout_s, workers=body.workers,
+                                  prune=body.prune, on_progress=progress.update),
+            meta={"project_id": pid, "progress": progress})
+        return {"job_id": job_id}
 
     # ---------- F6-v3 拦截（仅人工隐式会话 human-main 流量可挂起裁决） ----------
 
@@ -8253,7 +8398,9 @@ def create_app(
         if tid in running or thread.get("status") == "running":
             raise HTTPException(409, "上一轮仍在执行中，稍候再发")
         text = body.text.strip()
-        if not text:
+        # 附件随发（2026-10-08）：text 与附件至少一项；附件 id 严格校验（422 不静默丢）。
+        att_refs = _attachment_refs(pid, body.attachment_ids)
+        if not text and not att_refs:
             raise HTTPException(422, "消息不能为空")
         exec_llm, _plan = _llms()
         agents = {a["id"] for a in _chat_agents(pid)}
@@ -8303,7 +8450,7 @@ def create_app(
                                   if proj.track in ("pentest", "redteam", "ctf")
                                   else None),
                     decompiler_factory=_decompiler_factory)
-                turn.run(text, refs=body.refs)
+                turn.run(text, refs=body.refs, attachments=att_refs)
             except Exception as e:  # noqa: BLE001 —— 状态已在 ChatTurn.run 归位
                 log.exception("chat 轮后台执行失败 thread=%s", tid)
                 # 构造期异常（ChatTurn(...) 抛错，run() 未进入）不会归位状态——

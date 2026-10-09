@@ -156,5 +156,13 @@
     "domains": ["pentest"],
     "bin": {"windows": "bin/gmhttp.exe", "linux": "bin/gmhttp"},
     "note": "国密 TLS / 标准 TLS 单次 HTTP 请求 sidecar（重放国密通道，2026-10-07）：Python 生态无带 SM 密码套件的 TLS 栈（ssl 是 OpenSSL 薄绑定且未编 SM 套件、gmssl/gmalg/pygmssl 只有密码学原语），故国密走本 Go 二进制（tjfoc/gmsm gmtls）。源码 tools/gmhttp/，构建 scripts/build_gmhttp.py"
+  },
+  "fir-proxy": {
+    "kind": "python-tool",
+    "acquire": "bundled",
+    "domains": ["pentest", "redteam"],
+    "bin": {"*": "fir-proxy/cli.py"},
+    "pip": ["requests[socks]", "beautifulsoup4", "lxml"],
+    "note": "代理池（vendor 2026-10-07）：抓取/验证/筛选/轮换本地 HTTP+SOCKS5 服务。平台侧 core/proxy/pool.py 托管 serve 子进程（薄 runner fir-proxy/cyberstrike_serve.py，含 loopback 控制通道 /status /rotate /reload），CLI 路径依赖 requests[socks]/bs4/lxml（GUI 需 ttkbootstrap，平台不用）"
   }
 }

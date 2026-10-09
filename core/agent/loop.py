@@ -1541,10 +1541,14 @@ class AgentSession:
                 # 流被 should_cancel 掐断（LLMError「已中断」等）：先捞半截回复再抛
                 self._flush_interrupted_reply(stream_id, text_acc, step)
                 raise err
-            if (not (isinstance(err, LLMError) and getattr(err, "truncated", False))
-                    or attempt >= _CHAT_TRUNC_RETRIES):
+            # truncated=工具参数流截断；partial=已吐增量后连接中断（2026-10-08，
+            # 「peer closed connection ... incomplete chunked read」）。两者流均不可
+            # 重放，只能在轮级整轮重发（重发前清缓冲，前端按 stream_id 覆盖显示）。
+            retryable = isinstance(err, LLMError) and (
+                getattr(err, "truncated", False) or getattr(err, "partial", False))
+            if not retryable or attempt >= _CHAT_TRUNC_RETRIES:
                 raise err
-            log.warning("LLM 工具参数流截断，整轮重试 %d/%d（stream_id=%s）: %s",
+            log.warning("LLM 流中断/工具参数流截断，整轮重试 %d/%d（stream_id=%s）: %s",
                         attempt + 1, _CHAT_TRUNC_RETRIES, stream_id, err)
             acc.clear()  # 重试轮思考重新累计（前端按最新 seq 的累计全文覆盖显示）
             pub["chars"] = 0

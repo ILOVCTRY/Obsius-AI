@@ -8,6 +8,13 @@ import type { BrowserSessionInfo, BrowserState, WorkspaceTreeResponse } from "@/
 import { WorkspaceTree } from "./WorkspaceTree"
 import { FindingsRail } from "./FindingsRail"
 import { cn } from "@/lib/utils"
+import { formatIdle } from "@/lib/activity"
+
+/** 卡片「多久未操作」文案：last_action_at 是后端 epoch 秒；无记录返回 null。 */
+function idleLabel(at: number | null | undefined, nowMs: number): string | null {
+  if (typeof at !== "number" || !at) return null
+  return `未操作 ${formatIdle(nowMs - at * 1000)}`
+}
 
 export function WorkbenchContextRail({ pid, tid, workDir, track }: {
   pid: string
@@ -22,6 +29,13 @@ export function WorkbenchContextRail({ pid, tid, workDir, track }: {
   const [dragging, setDragging] = useState(false)
   const dragOrigin = useRef<{ x: number; width: number } | null>(null)
   const [browser, setBrowser] = useState<BrowserState | null>(null)
+  // 空闲时长按秒计，3s 轮询刷新会跳着走——1s 心跳只在浏览器页签展开时跑。
+  const [nowMs, setNowMs] = useState(() => Date.now())
+  useEffect(() => {
+    if (!open || selected !== "browser") return
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [open, selected])
   const [tree, setTree] = useState<WorkspaceTreeResponse | null>(null)
   const tab = selected === "findings" ? "browser" : selected
   useEffect(() => { window.localStorage.setItem("ui.wb-side-pane", selected) }, [selected])
@@ -165,11 +179,14 @@ export function WorkbenchContextRail({ pid, tid, workDir, track }: {
           <div className="wb-context-body">
             {selected === "browser" && <>
               {!agentSessions.length && <p className="wb-context-muted">当前会话尚未使用浏览器</p>}
-              {agentSessions.map((s: BrowserSessionInfo) => <button className="wb-context-card wb-context-card-button" key={s.sid} onClick={() => void activateBrowser(s.sid)} title="在 Electron 中激活此浏览器">
-                <div className="wb-context-card-title"><Globe2 size={13} /><b>{s.title || "AI 浏览器"}</b></div>
-                <div className="wb-context-card-url">{s.url || "尚未打开页面"}</div>
-                <small>{s.paused ? "已暂停" : "活动中"} · {s.sid}</small>
-              </button>)}
+              {agentSessions.map((s: BrowserSessionInfo) => {
+                const idle = idleLabel(s.last_action_at, nowMs)
+                return <button className="wb-context-card wb-context-card-button" key={s.sid} onClick={() => void activateBrowser(s.sid)} title="在 Electron 中激活此浏览器">
+                  <div className="wb-context-card-title"><Globe2 size={13} /><b>{s.title || "AI 浏览器"}</b></div>
+                  <div className="wb-context-card-url">{s.url || "尚未打开页面"}</div>
+                  <small>{s.paused ? "已暂停" : "活动中"}{idle ? ` · ${idle}` : ""} · {s.sid}</small>
+                </button>
+              })}
             </>}
             {selected === "terminal" && <div className="wb-context-terminal-wrap">
               {terminalId ? <div ref={terminalRef} className="wb-context-terminal" /> : <p className="wb-context-muted">当前项目尚未打开 PowerShell 终端</p>}

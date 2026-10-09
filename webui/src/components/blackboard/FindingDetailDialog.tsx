@@ -394,7 +394,7 @@ export function FindingDetailDialog({ pid, finding, assetLabel, track, onClose, 
         )}
 
         {editing && (
-          <div className="space-y-2 rounded border p-2">
+          <div className="min-h-0 flex-1 space-y-2 overflow-y-auto rounded border p-2">
             <div>
               <label className="mb-0.5 block text-[10px] text-muted-foreground">漏洞名称</label>
               <input className="h-8 w-full rounded-md border bg-background px-2 text-xs"
@@ -548,6 +548,8 @@ export function FindingDetailDialog({ pid, finding, assetLabel, track, onClose, 
           </div>
         )}
 
+        {/* 编辑态只渲染表单（自身即滚动容器，保存按钮可达）；非编辑态渲染只读详情 */}
+        {!editing && (
         <div className="-mx-1 min-h-0 flex-1 space-y-3 overflow-y-auto px-1">
           <section>
             <h4 className="mb-1 text-[11px] font-medium text-foreground">漏洞摘要</h4>
@@ -636,6 +638,7 @@ export function FindingDetailDialog({ pid, finding, assetLabel, track, onClose, 
             </details>
           )}
         </div>
+        )}
 
         {/* F10 删除确认（失败保持打开） */}
         <AlertDialog open={delOpen} onOpenChange={(o) => !o && setDelOpen(false)}>

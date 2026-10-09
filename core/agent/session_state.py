@@ -54,7 +54,6 @@ class SessionState:
     delegation_just_finished: bool = False  # 会话中心化：委托真收尾置位
     last_delegation_note: str = ""
     plan_only_mode: bool = False          # 计划闸教练模式：工具面收缩到计划/控制
-    intent_lead_passed: bool = False      # 意图先行闸：首次实质动作已放行
     closing_round: int = 0                # D6：0=未在确认；1/2=当前确认轮序号
     closing_last_progress: int = 0        # D6：本轮发起时的 last_progress_step
 
@@ -72,7 +71,6 @@ class SessionState:
         self.delegation_just_finished = False
         self.last_delegation_note = ""
         self.finish_open_intents_ack = False
-        self.intent_lead_passed = False
         self.reject_streak = 0
         self.plan_gate_count = 0
         self.stuck_waves = 0

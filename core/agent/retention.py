@@ -42,7 +42,7 @@ def spill_text(text: str, name: str, spill_dir: Path) -> Path | None:
     文件名 ``<本地时间>-<name>-<uuid6>.txt``；name 先做文件名安全化（非
     ``[A-Za-z0-9_-]`` 折线，防工具名带怪字符）。uuid 后缀（orchestrator-efficiency
     E1，2026-09-22）：原名仅（秒级时间戳+工具名）两维，同工具同秒两次超限
-    （如同一轮先查 findings 再查 tasks，同为 bb_query）必互相覆盖丢数据。
+    （如同一轮先查 findings 再查 assets，同为 bb_query）必互相覆盖丢数据。
     """
     safe = "".join(c if c.isalnum() or c in "-_" else "-" for c in name) or "tool"
     stamp = time.strftime("%Y%m%d-%H%M%S")

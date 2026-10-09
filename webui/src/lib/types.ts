@@ -700,7 +700,9 @@ export interface Job {
   error: string | null
   // 后端可变 dict 的引用，轮询时每次读到最新值：
   //  - IDA 拉取：pulled=已拉函数数，total=null=分母未知，rows=本页新增函数行；
-  //  - headless 导出（大样本 P3）：done=已反编译函数数，total=函数总数，phase=阶段。
+  //  - headless 导出（大样本 P3）：done=已反编译函数数，total=函数总数，phase=阶段；
+  //  - 代理池抓取/验证（2026-10-08）：phase=fetch/check/prune，done/total，
+  //    eta_seconds=预计剩余秒（null=未知），elapsed_seconds/rate_per_second/message。
   meta?: {
     progress?: {
       pulled?: number
@@ -708,6 +710,10 @@ export interface Job {
       rows?: CachedFuncRow[]
       done?: number
       phase?: string
+      eta_seconds?: number | null
+      elapsed_seconds?: number
+      rate_per_second?: number
+      message?: string
     }
   }
 }
@@ -1537,6 +1543,47 @@ export interface GmStatus {
   available: boolean
   path: string | null
   guide: string
+}
+
+/** 代理池（fir-proxy 托管，2026-10-07） */
+export interface ProxyRecord {
+  proxy: string
+  protocol?: string | null
+  location?: string | null
+  latency?: number | null
+  speed?: number | null
+  anonymity?: string | null
+  score?: number | null
+  status?: string | null
+}
+
+/** 抓取/验证 Job 的进度快照（后端 `job.meta.progress` 可变 dict，轮询即最新）。 */
+export interface ProxyJobProgress {
+  phase?: string
+  done?: number
+  total?: number
+  eta_seconds?: number | null
+  elapsed_seconds?: number
+  rate_per_second?: number
+  message?: string
+}
+
+export interface ProxyStatus {
+  running: boolean
+  endpoint: { http: string; socks5: string; control: string } | null
+  current: ProxyRecord | null
+  count: number
+  working: number
+  regions: Record<string, number>
+  uptime_s?: number
+  pool_size: number
+  /** 运行中的抓取/验证 Job（切页回来重挂轮询用；无则 null）。 */
+  job?: { id: string; kind: string; progress?: ProxyJobProgress } | null
+}
+
+export interface ProxyListResponse {
+  source: "serve" | "file"
+  proxies: ProxyRecord[]
 }
 
 /** F6-v3 拦截挂起包（仅人工浏览流量；快照形态，raw 为后端渲染的完整报文） */

@@ -28,7 +28,7 @@
   人类消息平铺 `❯` 一行、编排回复平铺 prose（`MarkdownView` 无 raw HTML）+ 作者·时间靠右小字、
   `tool_trace` 复用 `components/chat/ActivityGroup`（折叠摘要行，展开逐条轨迹）、思考复用
   `ThinkingBlock`、回复挂 `FileCardList`。🔔 主动唤醒徽章（`payload.proactive`，`WAKE_LABELS`
-  中文映射 `team.run.finished`/`budget.soft_warning`/`phase.gate_open`）。props `{events,busy,
+  中文映射 `team.run.finished`/`budget.soft_warning`/`phase.gate_open`/`finding.new`）。props `{events,busy,
   persona,pid,teams,onEditPersona,orchRunning,onOpenTeamReport,onConfigureTeam}`；`pid` 供文件卡
   动作；busy 显思考行；**接近底部（<60px）才自动滚跟**。goal 条/身份设定经回调交父级弹层。
 - `TeamRunReport.tsx`（**2026-10-06**）— **团队运行报告**（参考 cc-haha `AgentTeamsWorkbench`

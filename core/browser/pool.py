@@ -26,6 +26,7 @@ import concurrent.futures
 import hashlib
 import importlib.util
 import json
+import logging
 import socket
 import threading
 import time
@@ -34,6 +35,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from core.browser.capture import CaptureTap
+
+log = logging.getLogger(__name__)
 
 __all__ = [
     "BrowserError", "BrowserConfig", "BrowserPool", "BrowserInstance",
@@ -96,6 +99,9 @@ class BrowserConfig:
     screencast_max_width: int = 1280      # 实时帧最大宽（超出缩帧）
     screencast_max_height: int = 720
     intercept_timeout_s: float = 120.0    # F6-v3 拦截挂起超时自动放行原文
+    session_idle_timeout_s: float = 1800.0  # AI 会话空闲回收（2026-10-07）：连续无操作
+                                            # 超过该秒数关其 Page；0=禁用。人工 human-main
+                                            # 永不回收。计时口径 = _last_action_at
 
     @classmethod
     def from_file(cls, path: str | Path) -> "BrowserConfig":
@@ -111,7 +117,7 @@ class BrowserConfig:
                    "intruder_max_requests", "ignore_https_errors",
                    "screencast_quality",
                    "screencast_max_width", "screencast_max_height",
-                   "intercept_timeout_s"}
+                   "intercept_timeout_s", "session_idle_timeout_s"}
         for k, v in data.items():
             if k in allowed and not k.startswith("_"):
                 setattr(cfg, k, v)
@@ -171,6 +177,7 @@ class BrowserInstance:
         self._last_action_at: dict[str, float] = {}
         self._casts: dict[str, dict] = {}   # sid → {sinks:set[cb], cdp:CDPSession|None}（sinks 锁外判，cdp 仅 loop 线程）
         self._lock = threading.Lock()
+        self._reaper_task: asyncio.Task | None = None   # 空闲回收协程（仅 loop 线程）
 
     # ---- 生命周期（同步，任意线程） ----
 
@@ -201,6 +208,9 @@ class BrowserInstance:
         self._loop = loop
         asyncio.set_event_loop(loop)
         self._started.set()
+        # 空闲回收看门狗（2026-10-07）：与实例同生命周期，跑在本 loop 线程内，
+        # 故对 _pages/_last_action_at 的访问天然串行（无需跨线程锁）。
+        self._reaper_task = loop.create_task(self._idle_reaper())
         try:
             loop.run_forever()
         finally:
@@ -211,6 +221,9 @@ class BrowserInstance:
 
     async def _aclose(self) -> None:
         """loop 停止后清理 context 与 playwright（异常全吞：停机不打断退出）。"""
+        if self._reaper_task is not None:
+            self._reaper_task.cancel()
+            self._reaper_task = None
         self._intercept.cancel_all(reason="instance_closed")  # F6-v3
         for sid in list(self._casts):
             try:
@@ -240,6 +253,42 @@ class BrowserInstance:
             except Exception:  # noqa: BLE001
                 pass
         self._external_browser = None
+
+    async def _idle_reaper(self) -> None:
+        """空闲回收看门狗（2026-10-07）：AI 会话（Page）连续 ``session_idle_timeout_s``
+        无操作 → 关该 Page（人工 ``human-main`` 永不回收）。
+
+        计时口径 = ``_last_action_at``（每次 ``_audit`` 刷新，与工作台卡片「未操作 Ns」
+        同源）；只在实例 loop 线程内跑，故对 ``_pages``/``_last_action_at`` 的访问天然
+        串行。超时判定远大于任何单次动作超时（20s/60s），不会误关在跑的动作。
+        """
+        while not self._stopped.is_set():
+            timeout = float(self.config.session_idle_timeout_s)  # 每轮重读（可热改）
+            await asyncio.sleep(max(1.0, min(60.0, timeout / 10)))
+            if timeout <= 0:   # 禁用（0=不回收）
+                continue
+            now = time.time()
+            for sid in list(self._pages.keys()):
+                if sid.startswith("human-"):
+                    continue
+                last = self._last_action_at.get(sid)
+                if last is None or now - last <= timeout:
+                    continue
+                entry = self._pages.get(sid)
+                if entry is None:
+                    continue
+                idle_s = now - last
+                try:  # 留审计（工作台浏览器时间线可见「空闲回收」）
+                    self._audit(entry, "idle-close", idle_s=round(idle_s, 1))
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    await self._close_session_coro(sid)
+                    log.info("浏览器空闲回收 sid=%s 空闲=%.0fs 项目=%s",
+                             sid, idle_s, self.project_id)
+                except Exception:  # noqa: BLE001
+                    log.exception("浏览器空闲回收失败 sid=%s 项目=%s",
+                                  sid, self.project_id)
 
     async def _ensure_ctx(self):
         """懒启动 Chromium（持久 profile）；context 被外部关闭时自动重建。"""
@@ -317,6 +366,7 @@ class BrowserInstance:
             self.external_cdp_url = cdp_url.strip().rstrip("/")
             if existing is None:
                 self._pages[sid] = _PageEntry(info=BrowserSession(sid=sid, owner=owner))
+                self._last_action_at[sid] = time.time()  # 起空闲计时
         self.start()
         self._submit(self._attach_external_coro(sid), timeout=30)
         return self._session_dict(self._pages[sid])
@@ -417,6 +467,7 @@ class BrowserInstance:
                         f"项目并发浏览器会话已达上限 {self.config.max_sessions_per_project}"
                         "（先关闭空闲会话）")
             self._pages[sid] = _PageEntry(info=BrowserSession(sid=sid, owner=owner))
+            self._last_action_at[sid] = time.time()  # 起空闲计时（未动作也计时）
         self.start()
         self._submit(self._open_session_coro(sid), timeout=30)
         return self._session_dict(self._pages[sid])

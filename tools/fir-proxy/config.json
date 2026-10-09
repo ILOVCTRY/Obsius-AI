@@ -1,0 +1,29 @@
+{
+    "general": {
+        "validation_threads": 100,
+        "failure_threshold": 3,
+        "auto_retest_enabled": false,
+        "auto_retest_interval": 5,
+        "url_health_enabled": false,
+        "url_health_interval_seconds": 60,
+        "url_health_urls": "https://www.baidu.com",
+        "request_rotation_enabled": false,
+        "request_rotation_count": 10,
+        "target_failover_enabled": true,
+        "target_failover_threshold": 3
+    },
+    "auto_fetch": {
+        "fofa": {
+            "enabled": false,
+            "key": "",
+            "query": "protocol==\"socks5\" && country==\"CN\" && banner=\"Method:No\"",
+            "size": 500
+        },
+        "hunter": {
+            "enabled": false,
+            "key": "",
+            "query": "protocol==\"socks5\"&&protocol.banner=\"No authentication\"&&ip.country=\"CN\"",
+            "size": 50
+        }
+    }
+}

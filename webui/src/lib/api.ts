@@ -3,6 +3,7 @@ import type {
   BrowserState, BrowserStatus, BrowserSessionInfo, WorkspaceTreeResponse, HttpHistoryRow, InterceptState,
   Blueprint, BlueprintModuleStatus, BlueprintStatus,
   IntruderPayloadSpec, IntruderTemplate, ReplayOptions, GmStatus,
+  ProxyRecord, ProxyStatus, ProxyListResponse,
   CachedFuncRow, CachedFunction, Chain, ChainLink, ChainNodeType, ChainStatus, ChainSummary,
   LogicBlock, LogicBlockSummary,
   DecideApprovalResult, DoctorReport, DiscoveredModel, Finding, FindingPatchBody, FuncCreateBody, FuncEntry,
@@ -1019,6 +1020,7 @@ export const api = {
   browserIntruder: (pid: string, body: {
     template: IntruderTemplate; payloads: IntruderPayloadSpec[]
     concurrency?: number; rate_per_sec?: number; max_requests?: number
+    proxy?: string
   }) =>
     http<{ job_id: string; batch_id: string; max_concurrency: number }>(
       `/api/projects/${pid}/browser/intruder`,
@@ -1027,6 +1029,38 @@ export const api = {
     http<{ stopped: boolean }>(
       `/api/projects/${pid}/browser/intruder/${encodeURIComponent(batchId)}/stop`,
       { method: "POST" }),
+
+  // ---------- 代理池（fir-proxy 托管，2026-10-07）：项目级 serve + 池记录 ----------
+  proxyStatus: (pid: string) =>
+    http<ProxyStatus>(`/api/projects/${pid}/proxy/status`),
+  proxyStart: (pid: string) =>
+    http<ProxyStatus>(`/api/projects/${pid}/proxy/start`, { method: "POST" }),
+  proxyStop: (pid: string) =>
+    http<{ running: boolean }>(`/api/projects/${pid}/proxy/stop`, { method: "POST" }),
+  proxyList: (pid: string) =>
+    http<ProxyListResponse>(`/api/projects/${pid}/proxy/proxies`),
+  proxyRotate: (pid: string) =>
+    http<{ ok: boolean; current: ProxyRecord | null }>(
+      `/api/projects/${pid}/proxy/rotate`, { method: "POST" }),
+  proxyAdd: (pid: string, records: ProxyRecord[]) =>
+    http<{ added: number; pool_size: number }>(`/api/projects/${pid}/proxy/add`,
+      { method: "POST", body: JSON.stringify({ records }) }),
+  proxyRemove: (pid: string, addresses: string[]) =>
+    http<{ removed: number; pool_size: number }>(`/api/projects/${pid}/proxy/remove`,
+      { method: "POST", body: JSON.stringify({ addresses }) }),
+  proxySelect: (pid: string, body: {
+    limit?: number; region?: string | null; max_latency_ms?: number | null; include_failed?: boolean
+  }) =>
+    http<{ proxies: ProxyRecord[] }>(`/api/projects/${pid}/proxy/select`,
+      { method: "POST", body: JSON.stringify(body) }),
+  /** 从在线源抓取入池（202：Job 轮询） */
+  proxyFetch: (pid: string, protocols: string[] = []) =>
+    http<{ job_id: string }>(`/api/projects/${pid}/proxy/fetch`,
+      { method: "POST", body: JSON.stringify({ protocols }) }),
+  /** 批量验证池内代理（202：Job 轮询） */
+  proxyValidate: (pid: string, workers = 50) =>
+    http<{ job_id: string }>(`/api/projects/${pid}/proxy/validate`,
+      { method: "POST", body: JSON.stringify({ workers }) }),
 
   // ---------- 智能体工作台（K9，2026-09-29）：独立轻量对话运行时 ----------
   chatAgents: (pid: string) =>
@@ -1043,9 +1077,10 @@ export const api = {
   chatThreadDelete: (tid: string) =>
     http<void>(`/api/chat/threads/${tid}`, { method: "DELETE" }),
   chatSend: (tid: string, text: string,
-             refs?: { skills: string[]; mcps: string[] } | null) =>
+             refs?: { skills: string[]; mcps: string[] } | null,
+             attachmentIds: string[] = []) =>
     http<{ status: string; thread_id: string }>(
-      `/api/chat/threads/${tid}/messages`, { method: "POST", body: JSON.stringify({ text, refs: refs ?? null }) }),
+      `/api/chat/threads/${tid}/messages`, { method: "POST", body: JSON.stringify({ text, refs: refs ?? null, attachment_ids: attachmentIds.length ? attachmentIds : undefined }) }),
   chatStop: (tid: string) =>
     http<void>(`/api/chat/threads/${tid}/stop`, { method: "POST" }),
   chatMcp: (pid: string) =>

@@ -10,6 +10,10 @@ config/mcp.json
 config/decompiler.json
 # 会话级常驻容器覆盖层：session_scoped/idle_timeout/reaper_interval 逐机不同（2026-10-07）
 config/containers.json
+# 代理池覆盖层：端口基址/地区/延迟阈值逐机不同（2026-10-07）
+config/proxy.json
+# 代理池抓取源清单覆盖层（逐机不同；默认走 runner 内置精选）（2026-10-08）
+config/proxy_sources.json
 .claude/
 
 # Python

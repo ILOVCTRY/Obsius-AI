@@ -3281,7 +3281,8 @@ def test_assets_api_exposes_derived_parent_clean_status(client):
     bb.upsert_asset(pid, "url", "http://10.55.0.1/new", parent_id=root)
     rows = client.get(f"/api/projects/{pid}/assets").json()
     parent = next(a for a in rows if a["id"] == root)
-    assert parent["effective_status"] == "open"
+    # 三态：加未测子 → 父掉出 clean（混合子态 → 已访问 visited，非 open）
+    assert parent["effective_status"] == "visited"
     assert parent["settled"] is False
 
 
@@ -4155,10 +4156,11 @@ def test_agent_tools_catalog(client):
     assert data["groups"] == ["执行", "文件", "黑板", "知识", "浏览器", "协作", "计划", "控制"]
     # 无工具落「其他」（防新工具漏配分组规则）
     assert all(t["group"] != "其他" for t in tools)
-    # bb_query：what 参数 enum 含七查询面（site=单站全貌，2026-09-26）
+    # bb_query：what 参数 enum 含六查询面（site=单站全貌 2026-09-26；
+    # tasks 面 2026-10-06 随任务机制退役移除）
     bbq = next(t for t in tools if t["name"] == "bb_query")
     assert bbq["input_schema"]["properties"]["what"]["enum"] == [
-        "findings", "assets", "events", "tasks", "func", "blueprint", "site"]
+        "findings", "assets", "events", "func", "blueprint", "site"]
 
 
 def test_agent_tool_group_rules():

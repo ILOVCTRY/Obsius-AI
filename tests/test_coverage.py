@@ -10,7 +10,8 @@ import pytest
 
 from core.blackboard import Blackboard
 from core.coverage import (asset_terminal_state, attach_effective_status,
-                           coverage_report, effective_status_map)
+                           coverage_report, effective_status_map,
+                           situation_snapshot)
 
 
 @pytest.fixture()
@@ -36,13 +37,15 @@ def _mark_clean(bb, pid, aid, note="测完"):
 
 
 def test_terminal_state_flavors():
-    """终态四味与半程/open 判定，判定顺序：状态机终态 > 死路 > 发现挂链。"""
+    """对账态判定，判定顺序：状态机终态 > 死路 > 发现挂链 > 半程 > open。
+    scanning 并入 visited（三态归并，2026-10-09）。"""
     assert asset_terminal_state({"status": "tested_clean"}) == "terminal-tested_clean"
     assert asset_terminal_state({"status": "na"}) == "terminal-na"
     # budget_stop 算 open（预算停 ≠ 测完，宁严勿松）
     assert asset_terminal_state({"status": "budget_stop"}) == "open"
     assert asset_terminal_state({"status": "visited"}) == "visited"
-    assert asset_terminal_state({"status": "scanning"}) == "scanning"
+    # scanning 并入 visited（无任务认领，无孤儿半程，读时不区分在跑/半程）
+    assert asset_terminal_state({"status": "scanning"}) == "visited"
     assert asset_terminal_state({}) == "open"
     # meta.dead_end 标记
     assert asset_terminal_state({"status": "visited", "meta": {"dead_end": True}}) \
@@ -121,8 +124,9 @@ def rep_overall_done(rep: dict) -> bool:
     return rep["overall"]["groups_done"] == rep["overall"]["groups"]
 
 
-def test_finding_attachment_and_fp_only(env):
-    """发现挂链反查收口 + FP-only 死路味（经 coverage_report 集成路径）。"""
+def test_finding_attachment_not_settled_and_fp_only(env):
+    """**有发现 ≠ 测干净**（2026-10-09 三态）：非 FP 发现挂链 → 不收敛、留 uncovered；
+    FP-only = 死路味，仍算收口（这条路被否了）。"""
     bb, proj = env
     pid = proj["id"]
     h1 = bb.upsert_asset(pid, "host", "10.1.1.1")["id"]
@@ -134,10 +138,13 @@ def test_finding_attachment_and_fp_only(env):
 
     rep = coverage_report(bb, pid)
     keys = {g["group"]: g for g in rep["by_group"]}
-    assert keys["host:10.1.1.1"]["terminal"] == 1
-    assert keys["host:10.1.1.1"]["done"] is True  # finding 挂链=终态
-    assert keys["host:10.1.1.2"]["terminal"] == 1  # FP-only=死路味，同样终态
-    assert rep["overall"]["converged"] == rep["overall"]["assets"] == 2
+    # 出洞资产不算已测干净 → 留 uncovered（state=visited），未收敛
+    g1 = keys["host:10.1.1.1"]
+    assert g1["terminal"] == 0 and g1["done"] is False
+    assert [u["state"] for u in g1["uncovered"]] == ["visited"]
+    # FP-only = 死路味 = 收口
+    assert keys["host:10.1.1.2"]["terminal"] == 1 and keys["host:10.1.1.2"]["done"] is True
+    assert rep["overall"]["converged"] == 1 and rep["overall"]["assets"] == 2
 
 
 # ---------- effective_status 读时派生（asset-tree-derived-clean M2，⑥-⑪） ----------
@@ -177,13 +184,22 @@ def test_effective_derived_clean_when_all_terminal(env):
     assert m[u1]["basis"] == "explicit"  # 叶子仍是显式口径
 
 
-def test_effective_any_child_open_is_open(env):
-    """⑦ 任一子节点非终态 → 父 open（宁严，混合不显示 visited）。"""
+def test_effective_any_child_unsettled_is_visited(env):
+    """⑦ 子节点有收口也有未收口（混合）→ 父 visited（已访问未测尽，三态）。"""
     bb, proj = env
     pid = proj["id"]
     host, u1, u2 = _tree(bb, pid)
     _mark_clean(bb, pid, u1)
     bb.set_asset_status(u2, "visited", note="摸过半程")
+    m = effective_status_map(bb.list_assets(pid))
+    assert m[host]["status"] == "visited" and m[host]["settled"] is False
+
+
+def test_effective_all_children_untested_is_open(env):
+    """⑦b 全子未测 → 父 open（未测试，从没碰过）。"""
+    bb, proj = env
+    pid = proj["id"]
+    host, u1, u2 = _tree(bb, pid)
     m = effective_status_map(bb.list_assets(pid))
     assert m[host]["status"] == "open" and m[host]["settled"] is False
 
@@ -196,10 +212,10 @@ def test_effective_new_child_breaks_clean(env):
     _mark_clean(bb, pid, u1)
     _mark_clean(bb, pid, u2)
     assert effective_status_map(bb.list_assets(pid))[host]["status"] == "tested_clean"
-    # 新登记一个 open url 子节点 → 根立刻回 open
+    # 新登记一个 open url 子节点 → 根立刻掉出 clean（已访问）
     u3 = bb.upsert_asset(pid, "url", "http://10.0.0.1/c", parent_id=host)["id"]
     m = effective_status_map(bb.list_assets(pid))
-    assert m[host]["status"] == "open" and m[u3]["settled"] is False
+    assert m[host]["status"] == "visited" and m[u3]["settled"] is False
 
 
 def test_effective_na_dead_end_children_settle(env):
@@ -217,7 +233,8 @@ def test_effective_na_dead_end_children_settle(env):
 
 
 def test_effective_service_port_face_and_findings(env):
-    """⑪ 端口面：service 子节点未收口时 host 不得 clean；findings 沿树向上传播。"""
+    """⑪ 端口面：service 子节点未收口时 host 不得 clean；findings 沿树向上传播。
+    **有 finding 的子树不派生 clean**（有洞 ≠ 测干净，2026-10-09）。"""
     bb, proj = env
     pid = proj["id"]
     host = bb.upsert_asset(pid, "host", "10.5.5.5")["id"]
@@ -226,14 +243,32 @@ def test_effective_service_port_face_and_findings(env):
     assert m[host]["status"] == "open"
     bb.set_asset_status(svc, "na", note="端口关闭")
     assert effective_status_map(bb.list_assets(pid))[host]["status"] == "tested_clean"
-    # finding 挂叶子 → has_findings 向父传播
+    # finding 挂叶子 → has_findings 向父传播；叶子降级 visited、父不派生 clean
     url = bb.upsert_asset(pid, "url", "http://10.5.5.5/x", parent_id=host)["id"]
     bb.add_finding(pid, vuln_class="sqli", title="注入", target_asset_id=url,
                    severity="high", status="verified")
     m = effective_status_map(bb.list_assets(pid), bb.list_findings(pid))
     assert m[url]["has_findings"] and m[host]["has_findings"]
-    # finding 挂链=叶子收口 → 父随子树派生 clean，同时 has_findings 带上
-    assert m[url]["settled"] and m[host]["status"] == "tested_clean"
+    assert m[url]["status"] == "visited" and m[url]["settled"] is False
+    assert m[host]["status"] == "visited" and m[host]["settled"] is False
+
+
+def test_effective_finding_overrides_explicit_clean(env):
+    """**发现压过显式 clean（读时降级）**：叶子显式 tested_clean 后补挂发现 →
+    effective 降级 visited、settled=False——历史行不动，读时兜（asset-tri-state）。"""
+    bb, proj = env
+    pid = proj["id"]
+    leaf = bb.upsert_asset(pid, "host", "10.8.8.8")["id"]
+    _mark_clean(bb, pid, leaf, "单点全测")
+    assert effective_status_map(bb.list_assets(pid))[leaf]["status"] == "tested_clean"
+    # 落库显式 tested_clean 不动，后补一个非 FP 发现
+    bb.add_finding(pid, vuln_class="rce", title="后补洞", target_asset_id=leaf,
+                   severity="high", status="verified")
+    m = effective_status_map(bb.list_assets(pid), bb.list_findings(pid))
+    assert m[leaf]["status"] == "visited" and m[leaf]["settled"] is False
+    assert m[leaf]["has_findings"] is True
+    # 库里的显式 status 仍是 tested_clean（读时降级，零迁移）
+    assert bb.get_asset(leaf)["status"] == "tested_clean"
 
 
 def test_attach_effective_status_fields(env):
@@ -243,7 +278,7 @@ def test_attach_effective_status_fields(env):
     host, u1, u2 = _tree(bb, pid)
     _mark_clean(bb, pid, u1)
     out = {a["id"]: a for a in attach_effective_status(bb.list_assets(pid))}
-    assert out[host]["effective_status"] == "open"
+    assert out[host]["effective_status"] == "visited"   # 混合子态 → 已访问（未测尽）
     assert out[host]["status_basis"] == "derived" and out[host]["settled"] is False
     assert out[u1]["effective_status"] == "tested_clean"
     # 原对象未被修改
@@ -270,3 +305,36 @@ def test_uncovered_open_first_ordering_and_cap(env):
     # open（含 budget_stop）在前，visited 垫后
     assert g["uncovered"][0]["state"] == "open"
     assert all(u["state"] == "open" for u in g["uncovered"])
+
+
+def test_situation_snapshot_buckets_caps_and_binary_excluded(env):
+    """态势快照（asset-tri-state D8）：三态分桶 + 带洞标 has_findings +
+    clean 只给 id + cap 截断 + binary 等非对账面不入。"""
+    bb, proj = env
+    pid = proj["id"]
+    h_open = bb.upsert_asset(pid, "host", "10.1.0.1")["id"]           # 未测试
+    h_vuln = bb.upsert_asset(pid, "host", "10.1.0.2")["id"]           # 有洞→visited
+    u = bb.upsert_asset(pid, "url", "http://10.1.0.2/a",
+                        parent_id=h_vuln)["id"]
+    bb.add_finding(pid, vuln_class="rce", title="RCE", target_asset_id=u,
+                   severity="high", status="verified")
+    h_clean = bb.upsert_asset(pid, "host", "10.1.0.3")["id"]
+    _mark_clean(bb, pid, h_clean, "全测无洞")
+    bb.upsert_asset(pid, "binary", "a" * 64)                          # 不入组
+
+    snap = situation_snapshot(bb.list_assets(pid), bb.list_findings(pid))
+    assert snap["counts"] == {"open": 1, "visited": 2, "tested_clean": 1}
+    assert [x["id"] for x in snap["untested"]] == [h_open]
+    assert {x["id"] for x in snap["visited"]} == {h_vuln, u}
+    assert all(x["has_findings"] for x in snap["visited"])   # 带洞标
+    assert snap["clean_ids"] == [h_clean]                    # clean 只给 id
+    assert snap["untested_truncated"] is False
+    assert snap["visited_truncated"] is False
+
+    # cap 截断：再加 5 个未测试 host
+    for i in range(5):
+        bb.upsert_asset(pid, "host", f"10.2.0.{i}")
+    snap2 = situation_snapshot(bb.list_assets(pid), bb.list_findings(pid),
+                               untested_cap=3)
+    assert len(snap2["untested"]) == 3 and snap2["untested_truncated"] is True
+    assert snap2["counts"]["open"] == 6                      # 计数不受 cap 影响

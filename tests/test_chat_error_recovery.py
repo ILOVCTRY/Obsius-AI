@@ -154,6 +154,8 @@ def _bare_turn(**over) -> ChatTurn:
     t.thread_id = "chat-test"
     t.thread = {}
     t.bb = None
+    t.project_id = "proj-test"
+    t.assigned_asset_ids = None
     t.artifacts_dir = None
     t.browser_pool = None
     t.decompiler_factory = None

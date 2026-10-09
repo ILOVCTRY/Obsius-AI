@@ -57,14 +57,17 @@ def tool_results_message(results: list[dict[str, Any]]) -> dict[str, Any]:
 
 class LLMError(RuntimeError):
     """调用失败（HTTP 非 2xx / 响应不可解析）。携带 status 与响应片段。
-    truncated=True 表示流式响应中途截断（工具参数 JSON 残缺等）——可整轮重试。"""
+    truncated=True 表示流式响应中途截断（工具参数 JSON 残缺等）——可整轮重试。
+    partial=True 表示流式响应**已吐出增量后**连接中断（半截内容已上屏，流不可
+    重放）——调用方据此走「接着续写」而非整轮失败（2026-10-08）。"""
 
     def __init__(self, message: str, status: int = 0, body: str = "",
-                 truncated: bool = False):
+                 truncated: bool = False, partial: bool = False):
         super().__init__(message)
         self.status = status
         self.body = body
         self.truncated = truncated
+        self.partial = partial
 
 
 class ContextOverflowError(LLMError):
