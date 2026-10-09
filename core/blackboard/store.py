@@ -81,34 +81,33 @@ def _check_vuln_gates(*, category: str, severity: str, status: str,
     违例 raise ValueError（Agent 回填条款引用改道；人工路径同样拦截）。
     仅渗透/红队轨生效（track 参数；CTF/研究轨黑板不拦）。
 
-    ① severity=info 全类别拒收（2026-09-18 起，不止 vuln）——渗透/红队轨不再
-       收录 info 级内容（漏洞只收 low..critical，信息提示归 intel 线索且须
-       >=low）；检查在 category 早退之前，拦截 add_finding 的 info→intel 兜底；
-    ② category=vuln 且 severity=info（被①覆盖，防御性保留语义）；
-    ③ status=verified → 必须带复现证据——收录格式新口径（finding-report-format
+    ① 漏洞类（category=vuln）severity=info 拒收（2026-09-18 起）——漏洞只收
+       low..critical；**finding-severity-calibration（2026-10-09）收窄**：intel
+       类 info 放行——「够不上 low 的观察」有低档去处，边界/疑似项不必往
+       low/vuln 挤（防往上挤加压，矫正夸大）；
+    ② status=verified → 必须带复现证据——收录格式新口径（finding-report-format
        2026-09-22）：evidence.repro_steps 至少一步 code（或 artifact_id）非空且
        该步 expected 非空；或旧结构（evidence.poc/pocs 或 poc_artifact_id，兼容
        存量直通）——红线「无证据不下结论」硬化为门禁；unverified 不拦（待验证
        是合法初态）。"""
     if track not in ("pentest", "redteam"):
         return
+    if category != "vuln":
+        return
     if severity == "info":
-        # 2026-09-18 起 info 全类别拒收（不止 vuln）：渗透/红队轨不再收录
-        # info 级内容，有漏洞条款的按 low+补证据登记，口径外信息按 intel
-        # 线索登记或不登记（须显式传 severity>=low）。放在 category 早退前，
-        # 才能拦住 add_finding 的 info→intel 兜底路径。
+        # 2026-09-18 起漏洞类（category=vuln）不收 info；finding-severity-
+        # calibration（2026-10-09）收窄为只拒 vuln 类——intel 类 info 放行，
+        # 「够不上 low 的观察」有低档去处，边界/疑似项不必往 low/vuln 挤。
         raise ValueError(
-            "收录门禁：渗透/红队轨不再收录 severity=info——有评级条款的按 "
-            "low 并补充交互性实证登记，口径外信息（暴露面/合规提示）按 intel "
-            "线索（severity>=low）登记或不登记。"
+            "收录门禁：渗透/红队轨漏洞类（category=vuln）不再收录 severity=info"
+            "——有评级条款的按 low 并补充交互性实证登记，口径外信息（暴露面/"
+            "合规提示）按 intel 线索登记（severity 可到 info）。"
             "可复制示例（漏洞按 low + 交互实证）："
             '{"category":"vuln","severity":"low","status":"unverified",'
             '"title":"…","evidence":{"repro_steps":[{"desc":"发送请求并观察回显",'
             '"type":"http","code":"GET /x HTTP/1.1\\nHost: target",'
             '"expected":"响应头回显注入点"}]}}；'
-            "若只是信息性提示（非漏洞）则改 category=intel 且 severity>=low")
-    if category != "vuln":
-        return
+            "若只是信息性提示（非漏洞）则改 category=intel")
     if status == "verified":
         if not has_repro_evidence(evidence, poc_artifact_id):
             raise ValueError(
@@ -196,6 +195,19 @@ CHAIN_STATUSES = ("hypothesis", "validated", "exploited")
 
 # 严重度排序（severity 就高不就低）
 SEVERITY_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+
+
+def downgrade_severity(severity: str) -> str | None:
+    """降一档（finding-severity-calibration P0 定级校准用，全项目唯一定义处）：
+    critical→high→medium→low。low 已到地板（渗透/红队轨 info 拒收，low 是最低收录档）
+    → 返 None，由调用方按「连最低档都撑不起」处理（转 intel）。未知值返 None。"""
+    rank = SEVERITY_RANK.get(str(severity).strip().lower())
+    if rank is None or rank <= SEVERITY_RANK["low"]:
+        return None
+    for name, r in SEVERITY_RANK.items():
+        if r == rank - 1:
+            return name
+    return None
 
 # 重复发现合并时做"按内容去重追加"的 evidence 列表键（§5.3 证据并集）；
 # repro_steps（收录格式复现步骤）同列——多来源步骤并存、按内容指纹去重，
@@ -1308,6 +1320,13 @@ class Blackboard:
         合并是单事务操作：发现、意图锚点和子资产引用都会迁移，源资产随后被删除。
         binary 必须走 delete_binary 等样本生命周期流程，不能通过通用资产合并破坏分析
         结果。目标若在源资产子树内也拒绝，避免移动父节点时留下孤儿树。
+
+        **同键发现折并**（merge-assets-finding-union，2026-10-09）：源资产上的发现
+        若与目标资产上某条发现同 `dedup_key`（撞 UNIQUE(project_id,target_asset_id,
+        dedup_key)），不再整单拒绝，而是按 add_finding 的 §5.3 并集语义把源发现
+        **折并**进目标发现（保留目标行 id），并迁移全项目对源行的引用后删除源行；
+        其余源发现照常重挂。折并逐条落 `finding.merged` 事件，`asset.merged` 记
+        `findings_merged` 计数。子资产重复、binary、后代目标仍拒绝。
         """
         if source_asset_id == target_asset_id:
             raise ValueError("源资产和目标资产不能相同")
@@ -1336,20 +1355,25 @@ class Blackboard:
                 walker = parent["parent_id"] if parent else None
 
             source_findings = self.conn.execute(
-                "SELECT id, dedup_key FROM findings WHERE project_id=? AND target_asset_id=?",
+                "SELECT * FROM findings WHERE project_id=? AND target_asset_id=?",
                 (project_id, source_asset_id)).fetchall()
-            collisions: list[str] = []
-            for finding in source_findings:
+            # 折并计划（merge-assets-finding-union，2026-10-09）：源发现若与目标资产
+            # 上某条发现同 dedup_key → 折并（§5.3 并集语义并入该行、删源行）；其余
+            # 迁移（重挂 target_asset_id）。源侧 dedup_key 自身唯一、目标侧同键唯一
+            # ⇒ 1:1 折并，绝无一对多。此前遇同键即整单拒绝（设计自锁），与
+            # add_finding「同键即同一发现、自动并集」语义不一致，现抹平。
+            folds: list[tuple[sqlite3.Row, sqlite3.Row]] = []
+            moves: list[str] = []
+            for sf in source_findings:
                 existing = self.conn.execute(
-                    "SELECT id FROM findings WHERE project_id=? AND target_asset_id=? "
+                    "SELECT * FROM findings WHERE project_id=? AND target_asset_id=? "
                     "AND dedup_key=? LIMIT 1",
-                    (project_id, target_asset_id, finding["dedup_key"]),
+                    (project_id, target_asset_id, sf["dedup_key"]),
                 ).fetchone()
                 if existing is not None:
-                    collisions.append(existing["id"])
-            if collisions:
-                raise ValueError(
-                    "合并会造成发现去重键冲突，未执行: " + ", ".join(collisions[:5]))
+                    folds.append((sf, existing))
+                else:
+                    moves.append(sf["id"])
 
             children = self.conn.execute(
                 "SELECT id, type, value FROM assets WHERE project_id=? AND parent_id=?",
@@ -1380,7 +1404,25 @@ class Blackboard:
             })
             target_meta["aliases"] = aliases
 
-            if source_findings:
+            ts = now()
+            # 折并执行顺序：并入目标行 → 迁移全项目对源行的引用 → 删源行 → 重挂余下
+            fold_map: dict[str, str] = {}
+            fold_events: list[dict] = []
+            for sf, tf in folds:
+                self._fold_finding_into_target(tf, sf)
+                fold_map[sf["id"]] = tf["id"]
+                fold_events.append({
+                    "finding_id": tf["id"], "merged_from": sf["id"],
+                    "title": sf["title"], "vuln_class": sf["vuln_class"],
+                    "severity": sf["severity"], "status": sf["status"],
+                })
+            if folds:
+                self._migrate_finding_refs(project_id, fold_map, ts)
+                self.conn.execute(
+                    "DELETE FROM findings WHERE project_id=? AND id IN (%s)"
+                    % ",".join("?" * len(fold_map)),
+                    (project_id, *fold_map.keys()))
+            if moves:
                 self.conn.execute(
                     "UPDATE findings SET target_asset_id=?, revision=revision+1 "
                     "WHERE project_id=? AND target_asset_id=?",
@@ -1388,7 +1430,8 @@ class Blackboard:
                 )
 
             intent_rows = self.conn.execute(
-                "SELECT id, target_asset_id, basis_refs FROM intents WHERE project_id=?",
+                "SELECT id, target_asset_id, basis_refs, outcome_refs"
+                " FROM intents WHERE project_id=?",
                 (project_id,),
             ).fetchall()
             intents_moved = 0
@@ -1403,17 +1446,34 @@ class Blackboard:
                     refs = []
                 new_refs: list[Any] = []
                 for ref in refs:
-                    replacement = f"asset:{target_asset_id}" \
-                        if ref == f"asset:{source_asset_id}" else ref
+                    replacement = ref
+                    if ref == f"asset:{source_asset_id}":
+                        replacement = f"asset:{target_asset_id}"
+                    elif isinstance(ref, str) and ref.startswith("finding:") \
+                            and ref[8:] in fold_map:
+                        replacement = "finding:" + fold_map[ref[8:]]
                     if replacement != ref:
                         changed = True
                     if replacement not in new_refs:
                         new_refs.append(replacement)
+                outcome = _loads(intent["outcome_refs"], [])
+                if not isinstance(outcome, list):
+                    outcome = []
+                new_outcome: list[Any] = []
+                for ref in outcome:
+                    replacement = (
+                        fold_map.get(ref, ref) if isinstance(ref, str) else ref)
+                    if replacement != ref:
+                        changed = True
+                    if replacement not in new_outcome:
+                        new_outcome.append(replacement)
                 if changed:
                     self.conn.execute(
-                        "UPDATE intents SET target_asset_id=?, basis_refs=?, "
-                        "revision=revision+1, updated_at=? WHERE id=? AND project_id=?",
-                        (new_target, json.dumps(new_refs, ensure_ascii=False), now(),
+                        "UPDATE intents SET target_asset_id=?, basis_refs=?,"
+                        " outcome_refs=?, revision=revision+1, updated_at=?"
+                        " WHERE id=? AND project_id=?",
+                        (new_target, json.dumps(new_refs, ensure_ascii=False),
+                         json.dumps(new_outcome, ensure_ascii=False), now(),
                          intent["id"], project_id),
                     )
                     intents_moved += 1
@@ -1438,7 +1498,8 @@ class Blackboard:
                 "target_asset_id": target_asset_id,
                 "source_type": source["type"],
                 "source_value": source["value"],
-                "findings_moved": len(source_findings),
+                "findings_moved": len(moves),
+                "findings_merged": len(folds),
                 "intents_moved": intents_moved,
                 "children_moved": len(children),
                 "alias": {"type": source["type"], "value": source["value"]},
@@ -1448,7 +1509,112 @@ class Blackboard:
             {**result, "reason": (reason or "")[:500], "by": author},
             author=author,
         )
+        # 折并逐条留痕（发现级审计：哪条并进了哪条），与原资产合并事件分离
+        for fe in fold_events:
+            self.append_event(
+                project_id, "finding.merged",
+                {**fe, "source_asset_id": source_asset_id,
+                 "target_asset_id": target_asset_id, "reason": "asset.merged"},
+                author=author,
+            )
         return result
+
+    def _fold_finding_into_target(self, target_row: sqlite3.Row,
+                                  source_row: sqlite3.Row) -> None:
+        """把 source 发现按 §5.3 并集语义折并进 target 发现（保留 target 行 id，
+        就地更新、revision+1）。语义对齐 add_finding 合并分支：证据并集（自环边
+        清理）、severity 就高（rating_basis 随就高）、status 只升、confidence 取
+        MAX、报告三件套/正文旧非空保留补空、pocs 按内容指纹去重并集。两条既有行
+        各自过门禁入库，折并不复校（避免历史 verified 行被溯及拒绝）。"""
+        merged_ev = merge_finding_evidence(
+            _loads(target_row["evidence"], {}), _loads(source_row["evidence"], {}))
+        tid = target_row["id"]
+        rels = merged_ev.get("relates_to")
+        if isinstance(rels, list):  # 并集后不得引用目标行自身（自环）
+            merged_ev["relates_to"] = [
+                r for r in rels
+                if not (isinstance(r, dict) and r.get("finding_id") == tid)]
+        new_severity = target_row["severity"]
+        new_basis = target_row["rating_basis"]
+        if SEVERITY_RANK.get(source_row["severity"], 0) > \
+                SEVERITY_RANK.get(new_severity, 0):
+            new_severity = source_row["severity"]
+            new_basis = source_row["rating_basis"]
+        new_status = target_row["status"]
+        if target_row["status"] == "verified" or source_row["status"] == "verified":
+            new_status = "verified"
+        new_poc = target_row["poc_artifact_id"] or source_row["poc_artifact_id"]
+        old_pocs = _loads(target_row["pocs"], [])
+        old_pocs = old_pocs if isinstance(old_pocs, list) else []
+        src_pocs = _loads(source_row["pocs"], [])
+        src_pocs = src_pocs if isinstance(src_pocs, list) else []
+        merged_pocs = list(old_pocs)
+        fps = {json.dumps(p, ensure_ascii=False, sort_keys=True) for p in old_pocs}
+        for p in src_pocs:
+            fp = json.dumps(p, ensure_ascii=False, sort_keys=True)
+            if fp not in fps:
+                fps.add(fp)
+                merged_pocs.append(p)
+        self.conn.execute(
+            "UPDATE findings SET evidence=?, severity=?, rating_basis=?, status=?,"
+            " poc_artifact_id=?, impact=?, remediation=?, summary=?, affected_assets=?,"
+            " test_environment=?, reproduction_steps=?, verification_result=?,"
+            " risk_assessment=?, pocs=?, confidence=MAX(confidence,?), updated_at=?,"
+            " revision=revision+1 WHERE id=? AND project_id=?",
+            (json.dumps(merged_ev, ensure_ascii=False), new_severity, new_basis,
+             new_status, new_poc,
+             target_row["impact"] or source_row["impact"],
+             target_row["remediation"] or source_row["remediation"],
+             target_row["summary"] or source_row["summary"],
+             target_row["affected_assets"] or source_row["affected_assets"],
+             target_row["test_environment"] or source_row["test_environment"],
+             target_row["reproduction_steps"] or source_row["reproduction_steps"],
+             target_row["verification_result"] or source_row["verification_result"],
+             target_row["risk_assessment"] or source_row["risk_assessment"],
+             json.dumps(merged_pocs, ensure_ascii=False),
+             source_row["confidence"], now(), tid, target_row["project_id"]),
+        )
+
+    def _migrate_finding_refs(self, project_id: str, fold_map: dict[str, str],
+                              ts: str) -> None:
+        """折并删源发现行前，把全项目对它的引用改指目标发现行：chain_links 的
+        finding 节点（node_id）+ 各 findings.evidence.relates_to 的 finding_id。
+        改写后按内容指纹去重、丢弃改动后指向自身的自环边。intents 的
+        basis_refs（finding:）/outcome_refs 引用在 merge_assets 意图循环内随资产
+        引用一并迁移，此处不重复。"""
+        for src_id, tgt_id in fold_map.items():
+            self.conn.execute(
+                "UPDATE chain_links SET node_id=?"
+                " WHERE node_type='finding' AND node_id=?",
+                (tgt_id, src_id))
+            for f in self.conn.execute(
+                    "SELECT id,evidence FROM findings WHERE project_id=?",
+                    (project_id,)):
+                ev = _loads(f["evidence"], {})
+                rels = ev.get("relates_to")
+                if not isinstance(rels, list):
+                    continue
+                new_rels: list[Any] = []
+                seen: set[str] = set()
+                changed = False
+                for r in rels:
+                    if isinstance(r, dict) and r.get("finding_id") == src_id:
+                        r = {**r, "finding_id": tgt_id}
+                        changed = True
+                    if isinstance(r, dict) and r.get("finding_id") == f["id"]:
+                        changed = True  # 自环丢弃
+                        continue
+                    fp = _evidence_item_fp(r)
+                    if fp in seen:
+                        changed = True  # 重复边去重
+                        continue
+                    seen.add(fp)
+                    new_rels.append(r)
+                if changed:
+                    ev["relates_to"] = new_rels
+                    self.conn.execute(
+                        "UPDATE findings SET evidence=?, updated_at=? WHERE id=?",
+                        (json.dumps(ev, ensure_ascii=False), ts, f["id"]))
 
     def delete_binary(self, project_id: str, sha: str,
                       author: str = "human") -> dict:
@@ -1781,6 +1947,7 @@ class Blackboard:
             # 合并分支里并集只追加本批新边，校验传入部分即可
             validate_relates_to(self.conn, project_id, evidence)
             row = None
+            severity_raise_blocked = False  # 就高被拒标志（P2，仅合并分支可能置真）
             if key is not None:
                 row = self.conn.execute(
                     "SELECT * FROM findings"
@@ -1810,8 +1977,15 @@ class Blackboard:
                 # F11：basis 随 severity 就高覆盖（新报更高=取新报含空清空；否则保留旧值）
                 new_basis = row["rating_basis"]
                 if SEVERITY_RANK.get(severity, 0) > SEVERITY_RANK.get(new_severity, 0):
-                    new_severity = severity
-                    new_basis = rating_basis
+                    # finding-severity-calibration P2（2026-10-09）：渗透/红队轨就高
+                    # 须带新判级依据（rating_basis 非空）或新复现证据，否则保留旧级
+                    # ——防「反复重报、空口垫高」。CTF/研究轨合并语义不变。
+                    if track not in ("pentest", "redteam") or rating_basis.strip() \
+                            or has_repro_evidence(evidence, poc_artifact_id):
+                        new_severity = severity
+                        new_basis = rating_basis
+                    else:
+                        severity_raise_blocked = True
                 new_status = row["status"]
                 if status == "verified":
                     new_status = "verified"
@@ -1944,7 +2118,8 @@ class Blackboard:
             self._notify_finding_updates(project_id, finding_id, update_changes, author)
         # 任务机制退役（2026-10-06）：执行轨迹链重物化（R3）随任务机制一并退役。
         out = {"id": finding_id, "merged": merged, "severity": new_severity,
-               "rating_basis": new_basis, "category": category}
+               "rating_basis": new_basis, "category": category,
+               "severity_raise_blocked": severity_raise_blocked}
         # M5 D1 疑似重复警告（orchestrator-efficiency §0-9）：同目标+同类
         # （vuln_class）但 dedup_key 不同 = 可能被不同指纹分裂的重复——只提示不阻塞
         # （Agent 可坚持新增）；合并分支（同 key 已自动并集）不算；无 target 或

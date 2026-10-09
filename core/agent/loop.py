@@ -37,6 +37,7 @@ from core.agent.tools import (
 from core.autonomy import record_llm_usage
 from core.blackboard import Blackboard
 from core.blackboard.intents import list_intents
+from core.blackboard.store import downgrade_severity
 from core.llm.provider import LLMError, assistant_message, tool_results_message
 from core.llm.tokenizer import (CHARS_PER_TOKEN, DEFAULT_CONTEXT_TOKENS,
                                 context_window_tokens, get_counter)
@@ -1038,24 +1039,42 @@ class AgentSession:
 
     def _build_vuln_gate(self, gate_llm: Any):
         """漏洞核对 hook 工厂：Agent 触发 category=vuln 登记时，先让 LLM 对照
-        红线/评级规则自我核对——不合格降级 intel（不进漏洞视图）。
+        红线/评级规则做**双判**——既判「够不够格算漏洞」（不合规 → 降级 intel），
+        也判「所报 severity 是否被证据支撑」（finding-severity-calibration P0：
+        severity_ok=false → 降一档，下限 low，治夸大）。
         LLM 失败/不可用 → 降级跳过（照常登记、回执标注），与 F11 降级哲学一致。
         LLM 调用面复用 core.skills.judge.judge_finding（与存量清洗脚本同口径）。"""
-        def gate(draft: dict) -> tuple[bool, str]:
+        def gate(draft: dict) -> tuple[bool, str | None, str]:
             sys_p = (
                 "你是漏洞合规审核员。候选发现要登记为「漏洞」，请对照以下红线与"
-                "评级规则核对其是否够格：有可验证的安全问题、方向未被禁止、"
-                "证据链成立。证据不足/方向被禁/属于信息提示或合规提示而非漏洞 → "
-                "compliant=false。只输出 JSON："
-                '{"compliant": true|false, "reason": "一句话依据"}')
+                "评级规则做两件核对：\n"
+                "① 合规：是否有可验证的安全问题、方向未被禁止、证据链是否成立；"
+                "证据不足/方向被禁/属于信息提示或合规提示而非漏洞 → compliant=false。\n"
+                "② 定级校准（反向复验，宁低勿高）：用证据倒推——PoC/repro_steps "
+                "实际证实的危害只够低档就按低档；所报 severity 高于证据能支撑的档位"
+                " → severity_ok=false，并给出证据能支撑的 suggested_severity。\n"
+                "只输出 JSON："
+                '{"compliant": true|false, "severity_ok": true|false, '
+                '"suggested_severity": "low|medium|high|critical", "reason": "一句话依据"}')
             v = judge_finding(gate_llm, rules_text=build_rules_preamble(
                 self.packs_root, track=self.track, capabilities=self.capabilities,
                 owner_tags=self.config.owner_tags,
                 rule_profiles=self.config.rule_profiles),
                 draft=draft, sys_prompt=sys_p)
             if v is None:
-                return True, "核对跳过：审核响应无 JSON"
-            return bool(v.get("compliant")), str(v.get("reason") or "未通过漏洞标准核对")
+                return True, None, "核对跳过：审核响应无 JSON"
+            reason = str(v.get("reason") or "")
+            if not bool(v.get("compliant")):
+                return False, None, reason or "未通过漏洞标准核对"
+            # 合规但定级虚高 → 降一档（下限 low；low 都撑不起 → 转 intel，见 tools 侧）
+            if v.get("severity_ok") is False:
+                cur = str(draft.get("severity") or "").strip().lower()
+                lower = downgrade_severity(cur)
+                if lower is None:
+                    return False, None, reason or f"证据不足以支撑最低档（{cur}）"
+                note = f"定级校准 {cur}→{lower}" + (f"（{reason}）" if reason else "")
+                return True, lower, note
+            return True, None, reason or "severity 与证据相符"
         return gate
 
     # ---------- 运行 ----------

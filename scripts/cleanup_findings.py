@@ -80,8 +80,8 @@ def build_plan(proj, llm) -> list[dict]:
                  ("title", "severity", "category", "status", "vuln_class",
                   "rating_basis", "evidence")}, "action": "keep",
                  "severity": None, "basis": None, "reason": "", "flag": ""}
-        if sev == "info":  # 硬规则先行：info 停收，直接删（不耗 LLM）
-            entry.update(action="delete", reason="硬规则：pentest/redteam 轨 info 停收")
+        if sev == "info" and cat == "vuln":  # 硬规则先行：漏洞类 info 停收，直接删（不耗 LLM）
+            entry.update(action="delete", reason="硬规则：pentest/redteam 轨漏洞类 info 停收")
         else:
             v = judge_finding(llm, rules_text=rules, draft={
                 "title": f["title"], "vuln_class": f["vuln_class"],

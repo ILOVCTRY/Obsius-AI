@@ -113,7 +113,7 @@ WAL + 线程局部连接 + `_tx()`（进程内写锁 + BEGIN IMMEDIATE）串行�
 
 ## 业务语义层
 
-发现门禁（info 全类别拒收、verified 无复现证据拒〔repro_steps 新口径或旧 POC legacy 直通，has_repro_evidence add/patch 共用〕、rating_basis 随 severity 就高覆盖——「无证据不下结论」写进存储层）；合并=证据并集；撤回传播（四类目标+私信）；TOCTOU 防护（读-合并-写整体单事务 + 乐观锁 CAS）；资产状态回流（tested_clean 才算挖完）、high_value 标记。**疑似重复警告（orchestrator-efficiency M5 D1，2026-09-23）**：add_finding 返回值附 `dedup_warning`（cap 3 最新优先）——同 target_asset_id + 同 vuln_class（非空）但 dedup_key 不同的行=可能被指纹分裂的重复，只提示不阻塞（Agent 可坚持新增）；合并分支被并入的本体行不算、同目标无键行（dedup_key=自身 id）参与；无 target 或 vuln_class 空（逆向常态）不查；警告只进工具返回值（单次按需），不落事件无频控。
+发现门禁（info 全类别拒收、verified 无复现证据拒〔repro_steps 新口径或旧 POC legacy 直通，has_repro_evidence add/patch 共用〕、rating_basis 随 severity 就高覆盖——「无证据不下结论」写进存储层）；合并=证据并集；**资产合并同键发现折并（merge-assets-finding-union，2026-10-09）**：`merge_assets` 遇源/目标各一条同 `dedup_key` 的发现（撞 `UNIQUE(project_id,target_asset_id,dedup_key)`）不再整单拒绝，按上口径折并进目标行（证据并集、severity 就高、status 只升、保留目标 id），迁移全项目对源行的引用（`chain_links`/`evidence.relates_to`/意图 `basis_refs(finding:)`/`outcome_refs`）后删源行；binary/子资产重复/后代目标仍拒；撤回传播（四类目标+私信）；TOCTOU 防护（读-合并-写整体单事务 + 乐观锁 CAS）；资产状态回流（tested_clean 才算挖完）、high_value 标记。**疑似重复警告（orchestrator-efficiency M5 D1，2026-09-23）**：add_finding 返回值附 `dedup_warning`（cap 3 最新优先）——同 target_asset_id + 同 vuln_class（非空）但 dedup_key 不同的行=可能被指纹分裂的重复，只提示不阻塞（Agent 可坚持新增）；合并分支被并入的本体行不算、同目标无键行（dedup_key=自身 id）参与；无 target 或 vuln_class 空（逆向常态）不查；警告只进工具返回值（单次按需），不落事件无频控。
 
 ## 黑板查询过滤（bb-query-filters，2026-09-24 实施；site 单站全貌 2026-09-26 增补）
 

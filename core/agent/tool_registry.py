@@ -268,7 +268,8 @@ tool(
     description=(
         '将两个确认为同一实体的非 binary 资产合并。保留 target_asset_id，把 source_asset_id 的发现、意图锚点和子资产迁移'
         '到目标，并把源资产保存为目标 meta.aliases 后删除源行。合并不可逆，必须先 bb_query 查清两个资产并在 reason 中写明判断依据'
-        '；跨项目、树结构不安全、发现去重键冲突或子资产重复时会拒绝。'
+        '；若源/目标各有一条同 dedup_key 的发现，按 add_finding 并集语义自动折并（证据并集、等级就高）而非拒绝；'
+        '跨项目、树结构不安全或子资产重复时会拒绝。'
     ),
     input_schema={
         'type': 'object',
@@ -442,7 +443,7 @@ tool(
             },
             'impact': {
                 'type': 'string',
-                'description': '危害描述（报告三件套）：影响事实——实际拿到什么数据/权限、影响面多大',
+                'description': '危害描述（报告三件套）：影响事实——**以已实证的为准**，实际拿到什么数据/权限、影响面多大；未实证的影响标注推测或留空，不得当既成事实',
             },
             'remediation': {
                 'type': 'string',
@@ -470,7 +471,7 @@ tool(
             },
             'risk_assessment': {
                 'type': 'string',
-                'description': '攻击行为、影响范围及机密性/完整性/可用性后果',
+                'description': '攻击行为、影响范围及机密性/完整性/可用性后果——只写已证实路径上的后果，未实证的链条不得当既成事实',
             },
             'pocs': {
                 'type': 'array',
@@ -521,8 +522,8 @@ tool(
         '修订已有发现（只传要改的字段）。① 降级时 rating_basis 必须同给「规则名+条款+一句话依据」，否则宁可不改；② 口径外内容（纯暴露面/过期'
         '组件等）→ category=intel + severity=low 转有效线索，不要删除；③ 误报/死路 → status=false-positi'
         've（触发撤回传播通知引用方）；④ evidence 浅层合并（键级覆盖，列表键整键替换——补复现步骤请整组传 repro_steps 全量）。rati'
-        'ng_basis/impact/remediation 不传=不动，传空串=清空。渗透/红队轨不收 severity=info（服务端拒收，CTF 轨可'
-        '用）。'
+        'ng_basis/impact/remediation 不传=不动，传空串=清空。渗透/红队轨不收漏洞类（category=vuln）severity=info'
+        '（服务端拒收；intel 类可到 info；CTF 轨 info 语义不变）。'
     ),
     input_schema={
         'type': 'object',
@@ -1670,8 +1671,9 @@ tool(
         '申请行为边界授权（M5 D2，orchestrator-efficiency）：发现受当前授权边界限制打不下去时，向人类显式申请——不默默死路记账了事。'
         '三类：scope_expand=扩大授权目标（新目标打之前先申请；批准后自行 bb_add_asset 登记）；impact_escalate=影响证明'
         '升级（如从探测升级到拿权限证明）；rating_override=突破收录口径（发现真实影响但按评级规则到不了 vuln/high，申请按更高口径登记）'
-        '。**恒人类决策**（L2 也不自动批），结果投递回你的收件箱（authorization_result/approval_rejected）。等待期间'
-        '可继续其他无依赖工作。'
+        '。**恒人类决策**（L2 也不自动批），结果投递回你的收件箱（authorization_result/approval_rejected）。'
+        'rating_override 是口径受限时的**显式**出口，**不得作为常规抬级手段**（定级仍以实证危害为准，'
+        '证据不足宁低勿高——finding-severity-calibration）。等待期间可继续其他无依赖工作。'
     ),
     input_schema={
         'type': 'object',

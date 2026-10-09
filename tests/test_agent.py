@@ -1191,11 +1191,15 @@ def test_add_finding_relates_to_passthrough_and_dangling_reported(env):
 
 
 def test_update_finding_tool_downgrade_and_gates(env):
-    """bb_update_finding：降级+rating_basis 落库；显式改 info 被门禁拒绝回填；
+    """bb_update_finding：降级+rating_basis 落库；漏洞类显式改 info 被门禁拒绝回填；
     不存在的发现回填错误。"""
     bb, project, gw, _ = env
     fid = bb.add_finding(project["id"], "exposure", "WinRM 公网暴露",
                          severity="high", track="pentest")["id"]
+    # 另建一条漏洞类（category=vuln）发现：intel 类 info 现已放行
+    # （finding-severity-calibration P2），改 info 拒收只对 vuln 类生效
+    fid_vuln = bb.add_finding(project["id"], "sqli", "注入", severity="low",
+                              track="pentest")["id"]
     llm = ScriptedLLM([
         {"tool_use": [ScriptedLLM.tool_call(
             "t1", "bb_update_finding",
@@ -1203,7 +1207,7 @@ def test_update_finding_tool_downgrade_and_gates(env):
              "rating_basis": "rating:edu-rating 低危#1 非核心数据"})]},
         {"tool_use": [ScriptedLLM.tool_call(
             "t2", "bb_update_finding",
-            {"finding_id": fid, "severity": "info"})]},
+            {"finding_id": fid_vuln, "severity": "info"})]},
         {"tool_use": [ScriptedLLM.tool_call(
             "t3", "bb_update_finding",
             {"finding_id": "find-deadbeef", "severity": "low"})]},

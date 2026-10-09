@@ -30,7 +30,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any
 
@@ -79,6 +79,18 @@ _ORCH_BASE_TOOLS = ("todo_write", "call_expert", "skill_open",
 # → 无终稿 → 落『本轮未产出文本回复』」；配合 _loop 末步强制终稿兜底）
 _ORCH_MAX_STEPS = 200
 _EXPERT_MAX_STEPS = 200
+
+
+class ChatStopped(Exception):
+    """人类中止本轮的专用信号（2026-10-09）。
+
+    此前中止靠 `LLMError("已中断")` 穿出，被 `_loop` 的 `except LLMError`
+    当成可重试的流中断——只吐 thinking 时原样重发 ≤`_CHAT_RESEND_MAX` 次、
+    有半截文本时续写 ≤`_CHAT_INTERRUPT_MAX` 次，耗尽才抛；抛到 `run()` 又被
+    `_classify_error` 判成 `unknown` → 「执行异常」错误卡（用户实测截图）。
+    中止是**人为意图**而非故障：用独立异常直达 `run()` 归位 idle，不进任何
+    重试逻辑、不落错误卡。"""
+
 
 # 流式节流（2026-10-04 顺滑化）：由 80 字符/1s 一路压到 6 字符/0.05s（约 20Hz）——
 # 文本按大块跳变是「一顿顿的」的直接来源。**真正的瓶颈不只在节流**：WS 投递节奏
@@ -1234,6 +1246,18 @@ class ChatTurn:
             except Exception:  # noqa: BLE001 —— 清剪失败不影响收尾
                 log.exception("chat delta 清剪失败 thread=%s", self.thread_id)
             return final
+        except ChatStopped:
+            # 人类中止（2026-10-09）：不是故障，归位 idle 且不落错误卡。中止说明
+            # 在此落库（步间/工具后的中止点走 `_loop` 内的 `_persist_stopped`
+            # 正常返回，只有 LLM 调用中途被掐断才经本分支穿出）。delta 清剪与
+            # 正常收尾同口径：本轮已产出的终稿全文都在 chat_messages。
+            final = self._persist_stopped()
+            chat_store.update_thread(self.bb, self.thread_id, status="idle")
+            try:
+                self.bb.prune_chat_thread_deltas(self.project_id, self.thread_id)
+            except Exception:  # noqa: BLE001 —— 清剪失败不影响收尾
+                log.exception("chat delta 清剪失败 thread=%s", self.thread_id)
+            return final
         except Exception as e:  # noqa: BLE001 —— 失败落结构化错误+事件，不静默
             log.exception("chat 轮失败 thread=%s", self.thread_id)
             info = _classify_error(e)
@@ -1359,6 +1383,11 @@ class ChatTurn:
                                       on_provider_retry=_provider_retry)
                     break
                 except LLMError as e:
+                    # 人类中止优先于一切重试（2026-10-09）：流被 should_cancel
+                    # 掐断时抛的也是 LLMError("已中断")，若不先判中止就会被当成
+                    # 流中断反复重发/续写，停止迟迟不生效。
+                    if self._aborted():
+                        raise ChatStopped() from None
                     if (getattr(e, "partial", False) and not "".join(acc).strip()
                             and _resend < _CHAT_RESEND_MAX):
                         self._emit("chat.interrupted", {
@@ -1370,6 +1399,9 @@ class ChatTurn:
                     pending_err = e
                     break
             if resp is None:
+                if self._aborted():
+                    # 中止落到本分支（重发环耗尽/非 partial 错误）时同样直接收尾
+                    raise ChatStopped()
                 e = pending_err
                 # 流中断续跑（2026-10-08）：已吐增量后连接中断——半截文本已上屏、
                 # 流不可重放。把它作为 assistant 前缀落库 + 追续写指令继续拼接
@@ -1377,6 +1409,8 @@ class ChatTurn:
                 partial_text = "".join(acc)
                 if not getattr(e, "partial", False) or not partial_text.strip():
                     raise e
+                if self._aborted():  # 续写前再判（partial 半截文本分支）
+                    raise ChatStopped()
                 if interrupt_n >= _CHAT_INTERRUPT_MAX:
                     self._emit("chat.interrupted", {
                         "phase": "giveup", "continues": interrupt_n,
@@ -1743,9 +1777,19 @@ class ChatTurn:
                 max_workers=min(_MAX_PARALLEL_EXPERTS, len(experts)),
                 thread_name_prefix="chat-expert") as executor:
             pending = [executor.submit(run_one, tc) for tc in experts]
-            for future in as_completed(pending):
-                call_id, result = future.result()
-                results[call_id] = result
+            # 中止门（2026-10-09）：裸 as_completed 会一直等到所有专家子轮自然
+            # 收尾——长工具（浏览器/MCP/大扫描）能拖几分钟，主控线程卡在这里
+            # 无法回到步边界判中止，点停止迟迟不生效。改为限时等待 + 轮询中止：
+            # 一旦置位立刻跳出，未完成的 future 留在 executor（退出 with 时
+            # shutdown(wait=True) 仍会等它们收尾，但主线程已不再阻塞于此处）。
+            pending_set = set(pending)
+            while pending_set:
+                if self._aborted():
+                    break
+                done, pending_set = wait(pending_set, timeout=0.3)
+                for future in done:
+                    call_id, result = future.result()
+                    results[call_id] = result
         return results
 
     def _dispatch_mcp(self, name: str, args: dict) -> str:

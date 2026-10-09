@@ -1098,17 +1098,10 @@ def test_merge_assets_moves_refs_children_and_alias(bb, project):
     assert events and events[-1]["payload"]["source_asset_id"] == source
 
 
-def test_merge_assets_rejects_collision_binary_and_descendant(bb, project):
+def test_merge_assets_rejects_binary_and_descendant(bb, project):
     pid = project["id"]
     target = bb.upsert_asset(pid, "host", "10.20.0.9")["id"]
     source = bb.upsert_asset(pid, "domain", "same.example.test")["id"]
-    bb.add_finding(pid, "暴露服务", "目标发现", target_asset_id=target,
-                   dedup_key="same")
-    bb.add_finding(pid, "暴露服务", "源发现", target_asset_id=source,
-                   dedup_key="same")
-    with pytest.raises(ValueError, match="去重键冲突"):
-        bb.merge_assets(pid, source, target)
-    assert bb.get_asset(source) is not None
 
     binary = bb.upsert_asset(pid, "binary", "b" * 64)["id"]
     with pytest.raises(ValueError, match="binary"):
@@ -1118,6 +1111,100 @@ def test_merge_assets_rejects_collision_binary_and_descendant(bb, project):
     descendant = bb.upsert_asset(pid, "domain", "child.example.test", parent_id=parent)["id"]
     with pytest.raises(ValueError, match="后代"):
         bb.merge_assets(pid, parent, descendant)
+
+
+def test_merge_assets_folds_colliding_findings(bb, project):
+    """同 dedup_key 发现不再拒绝合并，按 §5.3 并集语义折并（保留目标行 id）：
+    证据并集、severity 就高、status 只升、源行删除，findings_merged 计数。"""
+    pid = project["id"]
+    target = bb.upsert_asset(pid, "host", "10.30.0.9")["id"]
+    source = bb.upsert_asset(pid, "domain", "dup.example.test")["id"]
+    tf = bb.add_finding(pid, "dns-entity-dedup", "目标簿记", target_asset_id=target,
+                        dedup_key="dns-entity-dedup", severity="low",
+                        evidence={"notes": "目标侧证据"})["id"]
+    sf = bb.add_finding(pid, "dns-entity-dedup", "源簿记", target_asset_id=source,
+                        dedup_key="dns-entity-dedup", severity="high",
+                        evidence={"notes": "源侧证据"})["id"]
+
+    result = bb.merge_assets(pid, source, target, author="human", reason="同一实体")
+    assert result["findings_merged"] == 1
+    assert result["findings_moved"] == 0
+    assert bb.get_asset(source) is None
+    assert bb.get_finding(pid, sf) is None            # 源行删除
+    merged = bb.get_finding(pid, tf)
+    assert merged is not None                          # 目标行保留、就地长
+    assert merged["severity"] == "high"                # 就高
+    assert "目标侧证据" in merged["evidence"]["notes"]
+    assert "源侧证据" in merged["evidence"]["notes"]    # 证据并集
+    # 发现级留痕 + 资产事件计数
+    events = list(bb.recent_events(pid, 0, limit=100))
+    assert any(e["kind"] == "finding.merged"
+               and e["payload"]["merged_from"] == sf for e in events)
+    am = [e for e in events if e["kind"] == "asset.merged"][-1]
+    assert am["payload"]["findings_merged"] == 1
+
+
+def test_merge_assets_moves_non_colliding_and_folds_colliding(bb, project):
+    """混合：无同键的源发现照常重挂（moved），同键的折并（merged）。"""
+    pid = project["id"]
+    target = bb.upsert_asset(pid, "host", "10.30.0.11")["id"]
+    source = bb.upsert_asset(pid, "domain", "mix.example.test")["id"]
+    bb.add_finding(pid, "sqli", "目标同键", target_asset_id=target, dedup_key="k")
+    moved = bb.add_finding(pid, "xss", "源独有", target_asset_id=source,
+                           dedup_key="unique")["id"]
+    folded = bb.add_finding(pid, "sqli", "源同键", target_asset_id=source,
+                            dedup_key="k")["id"]
+
+    result = bb.merge_assets(pid, source, target)
+    assert result["findings_moved"] == 1
+    assert result["findings_merged"] == 1
+    assert bb.get_finding(pid, moved)["target_asset_id"] == target
+    assert bb.get_finding(pid, folded) is None
+
+
+def test_merge_assets_fold_migrates_finding_refs(bb, project):
+    """折并删除源发现行前，全项目对它的引用改指目标行：
+    relates_to / 意图 basis_refs(finding:) / outcome_refs / chain_links。"""
+    from core.blackboard.intents import declare_intent
+
+    pid = project["id"]
+    target = bb.upsert_asset(pid, "host", "10.30.0.12")["id"]
+    source = bb.upsert_asset(pid, "domain", "refs.example.test")["id"]
+    tf = bb.add_finding(pid, "vuln", "目标同键", target_asset_id=target,
+                        category="intel", dedup_key="refk")["id"]
+    # 源发现：同键（将折并）+ 一条下游发现以强边引用它
+    sf = bb.add_finding(pid, "vuln", "源同键", target_asset_id=source,
+                        category="intel", dedup_key="refk")["id"]
+    down = bb.add_finding(pid, "chain", "下游引用源", severity="high",
+                          category="intel",
+                          evidence={"relates_to": [{"finding_id": sf, "note": "前置"}]})["id"]
+    # 意图：basis_refs 引用源 finding；outcome_refs 引用源 finding（直接落库）
+    intent = declare_intent(bb, pid, "测试引用迁移", target_asset_id=source,
+                            basis_refs=[f"finding:{sf}", f"asset:{source}"],
+                            author="human")["id"]
+    with bb._tx():
+        bb.conn.execute(
+            "UPDATE intents SET outcome_refs=? WHERE id=?",
+            (json.dumps([sf]), intent))
+    # 链边挂源 finding
+    cid = bb.create_chain(pid, "引用链")
+    bb.add_chain_link(pid, cid, "finding", sf, edge_note="入链")
+
+    bb.merge_assets(pid, source, target, author="human", reason="同一实体")
+
+    # 下游 relates_to 改指目标行
+    rels = bb.get_finding(pid, down)["evidence"]["relates_to"]
+    assert [r["finding_id"] for r in rels] == [tf]
+    # 意图 basis_refs：finding: 与 asset: 双迁移
+    row = bb.conn.execute(
+        "SELECT target_asset_id, basis_refs, outcome_refs FROM intents WHERE id=?",
+        (intent,)).fetchone()
+    assert row["target_asset_id"] == target
+    assert json.loads(row["basis_refs"]) == [f"finding:{tf}", f"asset:{target}"]
+    assert json.loads(row["outcome_refs"]) == [tf]
+    # 链边改指目标行
+    detail = bb.get_chain(cid)
+    assert [l["node_id"] for l in detail["links"]] == [tf]
 
 def test_board_graph_finding_node_carries_author(bb, project):
     """P4（2026-09-20 对话化）：finding 节点透传 author——sess- 前缀即对话轮产出
@@ -1474,15 +1561,20 @@ def test_parent_clean_rejected_leaf_transitions_ok(bb, project):
 
 # ---------- 收录门禁：pentest/redteam 轨 info 停收（2026-09-18，全类别） ----------
 
-def test_gate_info_rejected_all_categories_on_pentest(bb, project):
-    """渗透轨 severity=info 全类别拒收：category 兜底（info→intel）路径与
-    显式 vuln+info 都被拦；low 正常入库。"""
+def test_gate_info_pentest_vuln_rejected_intel_allowed(bb, project):
+    """渗透轨漏洞类（category=vuln）severity=info 拒收；intel 类 info 放行
+    （finding-severity-calibration P2 收窄：给边界/疑似项低档去处）；low 正常入库。"""
     pid = project["id"]
-    with pytest.raises(ValueError, match="不再收录 severity=info"):
-        bb.add_finding(pid, "info-point", "信息点", severity="info", track="pentest")
+    # 显式 vuln+info 被拦
     with pytest.raises(ValueError, match="不再收录 severity=info"):
         bb.add_finding(pid, "exposure", "暴露面", severity="info",
                        category="vuln", track="pentest")
+    # intel 类 info 放行（含缺省 category 兜底为 intel 的路径）
+    r0 = bb.add_finding(pid, "info-point", "信息点", severity="info", track="pentest")
+    assert r0["severity"] == "info" and r0["category"] == "intel"
+    r1 = bb.add_finding(pid, "note", "观察", severity="info",
+                        category="intel", track="pentest")
+    assert r1["severity"] == "info"
     r = bb.add_finding(pid, "sqli", "注入", severity="low", track="pentest")
     assert r["severity"] == "low"
 
@@ -1577,7 +1669,8 @@ def test_gate_errors_carry_copyable_json_examples(bb, project):
     都带最小可复制 JSON 骨架，Agent 可据此改参重试，不必靠猜结构。"""
     pid = project["id"]
     with pytest.raises(ValueError) as ei:
-        bb.add_finding(pid, "info-point", "信息点", severity="info", track="pentest")
+        bb.add_finding(pid, "exposure", "暴露面", severity="info",
+                       category="vuln", track="pentest")
     msg = str(ei.value)
     assert "可复制示例" in msg and '"category":"vuln"' in msg and "intel" in msg
     with pytest.raises(ValueError) as ev:

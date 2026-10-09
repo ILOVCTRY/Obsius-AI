@@ -237,7 +237,10 @@ def build_rules_preamble(packs_root: str | Path, track: str | None = None,
         parts.append(
             "> **评级硬指令（F11）**：发布 bb_add_finding 时 severity 必须依据以下评级口径判级，"
             "rating_basis 字段填「规则名+条款+一句话依据」"
-            "（如 `rating:edu-rating 高危#2 任意文件覆盖写`）；无对应条款的口径外判级视为违规。")
+            "（如 `rating:edu-rating 高危#2 任意文件覆盖写`）；无对应条款的口径外判级视为违规。"
+            "**定级以实证危害为准——证据不足以支撑高档的，降到证据能支撑的档，禁止就高凑档**"
+            "（finding-severity-calibration 2026-10-09；服务端会对漏洞登记做定级校准复验，"
+            "虚高自动降一档）。")
     for name, text in rating_rules(packs_root, track or "", eff_ratings):
         parts.append(f"## rule:{name}（评级与价值口径 · 判级依据）\n{text}")
     if role:

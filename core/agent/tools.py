@@ -222,8 +222,9 @@ class ToolDispatcher:
     """工具分发中枢。持会话状态：当前任务、进度心跳（卡死检测的依据）。"""
 
     #: C6 漏洞核对 hook（AgentSession 按 track 注入；None=不核对）：
-    #: category=vuln 登记前调用 gate(draft) -> (ok, reason)，不合格降级 intel。
-    vuln_gate: Callable[[dict], tuple[bool, str]] | None = None
+    #: category=vuln 登记前调用 gate(draft) -> (compliant, new_severity, note)：
+    #: compliant=False → 降 intel；compliant=True 且 new_severity 非空 → 定级校准降一档。
+    vuln_gate: Callable[[dict], tuple[bool, str | None, str]] | None = None
 
     #: v0.65 done 自动提案 hook（AgentSession 注入 planner LLM 复盘；None=关闭）：
     #: complete_task 成功后 hook(task_id, result_note)、fail_task 真失败后
@@ -726,7 +727,9 @@ class ToolDispatcher:
         self.last_progress_step = self._step
         return (f"asset.merged source={merged['source_asset_id']} "
                 f"target={merged['target_asset_id']} "
-                f"findings={merged['findings_moved']} intents={merged['intents_moved']} "
+                f"findings={merged['findings_moved']} "
+                f"merged={merged.get('findings_merged', 0)} "
+                f"intents={merged['intents_moved']} "
                 f"children={merged['children_moved']} alias="
                 f"{merged['source_type']}:{merged['source_value']}")
 
@@ -842,11 +845,12 @@ class ToolDispatcher:
                         "发现是检验的产物，不是意图的附赠。若这是侦察阶段的直接"
                         "观察，请先做一次核实动作（复核请求/查证）再登记。")
         # C6 漏洞核对 hook：AI 登记漏洞前自我对照红线/评级规则——
-        # 不合格降级 intel（不进漏洞视图）；核对失败降级跳过（不阻断）。
+        # 双判：不合规降级 intel（不进漏洞视图）；合规但定级虚高 → 降一档
+        # （finding-severity-calibration P0，治夸大）；核对失败降级跳过（不阻断）。
         gate_note = ""
         if category == "vuln" and self.vuln_gate is not None:
             try:
-                ok, reason = self.vuln_gate({
+                compliant, new_severity, reason = self.vuln_gate({
                     "title": title, "vuln_class": vuln_class, "severity": severity,
                     "status": status,
                     # has_poc=复现证据判定（收录格式新口径 repro_steps + 旧结构兼容）
@@ -854,9 +858,18 @@ class ToolDispatcher:
                     "evidence_head": json.dumps(evidence or {}, ensure_ascii=False)[:600],
                     "rating_basis": rating_basis,
                 })
-                gate_note = (f" 漏洞核对：{'✓ 通过' if ok else '✗ 未通过（' + reason + '）'}")
-                if not ok:
+                if not compliant:
                     category = "intel"  # 不符合规则 → 不进漏洞，降级有效发现
+                    gate_note = f" 漏洞核对：✗ 未通过（{reason}）"
+                elif new_severity:
+                    # 定级校准降一档：basis 追加降级说明，保证 basis 证成新级别
+                    severity = new_severity
+                    note = f"自核对降级：{reason}"
+                    rating_basis = (f"{rating_basis.rstrip('；;')}；{note}"
+                                    if rating_basis.strip() else note)
+                    gate_note = f" 漏洞核对：⚠ {reason}"
+                else:
+                    gate_note = f" 漏洞核对：✓ 通过（{reason}）"
             except Exception as e:  # noqa: BLE001 —— 核对失败降级跳过
                 gate_note = f" 漏洞核对跳过：{e}"
         r = self.bb.add_finding(
@@ -881,6 +894,10 @@ class ToolDispatcher:
             warn = (f"\n[疑似重复] 同目标已有同类发现：{listed}——"
                     "若是同一问题请 bb_update_finding 补证据而非新开条目；"
                     "确属独立问题坚持新增即可。")
+        if r.get("severity_raise_blocked"):
+            warn += ("\n[就高被拒] 本次上报想抬高等级但未带新判级依据"
+                     "（rating_basis）或新复现证据，已保留原级别——如需上调，"
+                     "请补证据/依据后重报（finding-severity-calibration P2）")
         # 回显生效判级依据（合并就高后可能与本报不同），供 agent 自检
         return (f"finding={r['id']} merged={r['merged']} severity={r['severity']} "
                 f"category={r.get('category') or 'vuln'} "
