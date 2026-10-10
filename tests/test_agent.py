@@ -2214,6 +2214,70 @@ def test_bb_delete_and_merge_asset_tools(env):
     assert d.dispatch("bb_delete_asset", {"asset_id": binary_id}).startswith("[拒绝]")
 
 
+def test_bb_delete_assets_batch_partial(env):
+    """bb_delete_assets（2026-10-09）：一次一批逐条删，失败项单独回报不整批回滚；
+    id 去重保序；binary/不存在进 failures；空清单报错、超上限拒绝。"""
+    d = _dispatcher(env, "batch-delete")
+    ids = []
+    for i in range(3):
+        r = d.dispatch("bb_add_asset", {"type": "host", "value": f"10.50.0.{i + 1}"})
+        ids.append(r.split("asset=")[1].split()[0])
+    binary_id = d.bb.upsert_asset(d.project_id, "binary", "d" * 64)["id"]
+
+    data = json.loads(d.dispatch("bb_delete_assets", {
+        "asset_ids": [*ids, binary_id, "asset-nope", ids[0]]}))
+    assert data["deleted"] == 3
+    assert data["failed"] == 2          # binary + 不存在；重复项被去重
+    errs = {f["asset_id"]: f["error"] for f in data["failures"]}
+    assert "binary" in errs[binary_id]
+    assert "不存在" in errs["asset-nope"]
+    for aid in ids:
+        assert d.bb.get_asset(aid) is None
+    assert d.bb.get_asset(binary_id) is not None
+
+    # 有子资产的条目被拒但其余照删（不整批回滚）
+    parent = d.dispatch("bb_add_asset", {"type": "host", "value": "10.51.0.1"})
+    parent_id = parent.split("asset=")[1].split()[0]
+    leaf = d.bb.upsert_asset(d.project_id, "service", "10.51.0.1:8080",
+                             parent_id=parent_id)["id"]
+    data2 = json.loads(d.dispatch("bb_delete_assets",
+                                  {"asset_ids": [parent_id, leaf]}))
+    assert data2["deleted"] == 1 and data2["failed"] == 1
+    assert "子资产" in data2["failures"][0]["error"]
+    assert d.bb.get_asset(leaf) is None          # 叶子删掉
+    assert d.bb.get_asset(parent_id) is not None  # 父有子被拒，原样保留
+    # 阻塞项处理掉后重跑同一批：父可删（把失败项修好再重试的口径）
+    data3 = json.loads(d.dispatch("bb_delete_assets", {"asset_ids": [parent_id]}))
+    assert data3["deleted"] == 1 and d.bb.get_asset(parent_id) is None
+
+    assert d.dispatch("bb_delete_assets", {"asset_ids": []}).startswith("[错误]")
+    assert d.dispatch("bb_delete_assets",
+                      {"asset_ids": [f"asset-{i}" for i in range(201)]}).startswith("[拒绝]")
+
+
+def test_bb_query_assets_offset_paging(env):
+    """what=assets 支持 offset+limit 逐页取（2026-10-09），counts 给 offset/has_more
+    ——枚举大批资产不再靠「边删边看前 N 条」反推分页位置。"""
+    d = _dispatcher(env, "paging")
+    for i in range(5):
+        d.dispatch("bb_add_asset", {"type": "host", "value": f"10.60.0.{i + 1}"})
+
+    p1 = json.loads(d.dispatch("bb_query",
+                               {"what": "assets", "type": "host", "limit": 2}))
+    assert p1["counts"] == {"total": 5, "offset": 0, "returned": 2, "has_more": True}
+    p3 = json.loads(d.dispatch("bb_query", {"what": "assets", "type": "host",
+                                            "limit": 2, "offset": 4}))
+    assert p3["counts"]["offset"] == 4 and p3["counts"]["returned"] == 1
+    assert p3["counts"]["has_more"] is False
+
+    seen: list[str] = []
+    for off in (0, 2, 4):
+        page = json.loads(d.dispatch("bb_query", {"what": "assets", "type": "host",
+                                                  "limit": 2, "offset": off}))
+        seen += [a["id"] for a in page["assets"]]
+    assert len(seen) == 5 and len(set(seen)) == 5   # 三页无重叠、并集=全量
+
+
 def _scoped_dispatcher(env, assigned, name="scoped"):
     """子代理越界约束（agent-path-intent-loop M3）用例的装配：chat- 作者 +
     显式分配资产集，触发 `_ASSET_REF_TOOLS` 越界闸。"""
@@ -2240,6 +2304,7 @@ def test_asset_scope_gate_blocks_out_of_scope_refs(env):
                             "severity": "high"}),
         ("bb_asset_status", {"asset_id": other, "status": "tested_clean"}),
         ("bb_delete_asset", {"asset_id": other}),
+        ("bb_delete_assets", {"asset_ids": [other]}),
     ):
         r = d.dispatch(tool, args)
         assert r.startswith("[越界拒绝]"), (tool, r)

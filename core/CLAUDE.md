@@ -8,7 +8,7 @@
 | 目录/文件 | 职责 |
 |-----------|------|
 | [`skills/`](skills/CLAUDE.md) | 能力包×场景轨分类学：注册表 / 路由评分 / 规则链 / **专家池（M2 起运行时唯一角色源 + caps_effective/allowed_roles 推导面；M3 专家 CRUD `/api/experts`）** / **场景档 profiles.py（M4a：五件套预设物化即弃）** / task_types 注册表 |
-| [`agent/`](agent/CLAUDE.md) | AgentSession 主循环 + 工具分发 + 角色工具白名单边界 + kb_open。**会话轮（2026-10-06 任务机制退役）**：`run_session()` 只做对话（收件箱有消息→run_chat，否则空退）；`run_team_execution(ExecutionContext)` 承接 Team 成员执行（屏蔽任务工具直进 `_loop`）；人类引导降级纯对话。**session_state.py（2026-10-03）**：会话/闸门状态单一容器 + `reset_for_task` 单入口复位，两持有者以 property 代理原属性名（只收敛存取，控制流不动）。**tool_registry.py（2026-10-03）**：工具唯一真相源——`ToolSpec`(name/description/schema/group/flags/handler) 一处定义，`AGENT_TOOLS`（现 41 个，六任务工具已删）/白名单常量/`agent_tool_group` 全由 flags 推导（导入名逐字保留，外部零改动），导入期自检 handler 存在 |
+| [`agent/`](agent/CLAUDE.md) | AgentSession 主循环 + 工具分发 + 角色工具白名单边界 + kb_open。**会话轮（2026-10-06 任务机制退役）**：`run_session()` 只做对话（收件箱有消息→run_chat，否则空退）；`run_team_execution(ExecutionContext)` 承接 Team 成员执行（屏蔽任务工具直进 `_loop`）；人类引导降级纯对话。**session_state.py（2026-10-03）**：会话/闸门状态单一容器 + `reset_for_task` 单入口复位，两持有者以 property 代理原属性名（只收敛存取，控制流不动）。**tool_registry.py（2026-10-03）**：工具唯一真相源——`ToolSpec`(name/description/schema/group/flags/handler) 一处定义，`AGENT_TOOLS`（现 44 个，六任务工具已删）/白名单常量/`agent_tool_group` 全由 flags 推导（导入名逐字保留，外部零改动），导入期自检 handler 存在 |
 | [`orchestrator/`](orchestrator/CLAUDE.md) | 主代理 tick：监控/派生/开窗/汇总 + 轨注册表拒收 + 饿死告警 + gate 预算闸门 + **replan_priorities 优先级重排（A5）** + state.py（tick 租约/状态持久化/**v21 derive_idle_rounds**）+ **分阶段接线（`_phase_section` 注入 + `_phase_gate_reject` 派单门）** |
 | [`blackboard/`](blackboard/CLAUDE.md) | SQLite 单一写入口 + 事件总线 + 只读图 graph.py（session_graph/board_graph）（**schema v33（2026-10-06）DROP tasks/resource_leases**；session_inbox/撤回私信、artifacts.meta、findings.rating_basis 判级依据 F11） |
 | [`browser/`](browser/CLAUDE.md) | F6 内置浏览器（渗透/红队轨）：Playwright 托管 Chromium 实例池（每项目常驻，Page=会话）+ 资产白名单 + 抓包（路由拦截入 http_history v15）+ 重发/爆破（人类 UI 专属） |
@@ -38,7 +38,7 @@
 - 逆向工作台（P1/P2）：track=research ⇒ profile=rev-generic（前端 `deriveWorkbenchProfile`，config.workbench.profile 可覆盖；**2026-09-29 修**：M3 起 caps 多选退役、创建恒不传 caps，旧「caps 含 binary」判据已死——M3 后新建 research 项目全误落渗透模板；现按 config.board_view.default 非 funcs〔如 code-audit 档 findings〕交还渗透黑板）；三层数据——headless 缓存 JSON（**v3 契约**：客观全量+strings，可删重导）/ func_kb（只存分析过的函数）/ findings（挂 binary 资产，evidence 带 func_id+address）；headless 是 trusted **解析**工具，平台绝不执行样本。
 - Agent 无裸 shell：唯一命令口是经网关的 run_cmd；不可信代码只进 docker/sandbox，WSL 信任级=宿主机。
 - 安全默认宁严勿松：未知样本按恶意处理（L3 + fakenet）；fakenet 尚未实现（显式 NotImplementedError）。
-- 工具异常回填文本不中断循环；LLM 传输层按类别重试（标准 5xx 共 10 次尝试、退避封顶 30s；429 共 2 次尝试；连接类共 4 次 + 5/10/20s 退避；OpenAI 520/524 保持各自专用预算），连接/TLS/超时分类由 SDK 承担，**含流式 body 半途断开的裸 httpx 异常与 SSE 流内 `{"error":...}` 帧（`_as_conn_error` 兜底映射/转 `TransientStreamError`，见 `core/llm/CLAUDE.md`）**。
+- 工具异常回填文本不中断循环；LLM 传输层按类别重试（标准 5xx / 429 / 400「模型冷却」均共 11 次尝试、退避封顶 30s〔429 与冷却为 30s 固定间隔〕；连接类共 11 次 + 5/10/20/30s 退避；OpenAI 520/524 并入 5xx 预算），连接/TLS/超时分类由 SDK 承担，**含流式 body 半途断开的裸 httpx 异常与 SSE 流内 `{"error":...}` 帧（`_as_conn_error` 兜底映射/转 `TransientStreamError`，见 `core/llm/CLAUDE.md`）**。
 
 ## 测试
 

@@ -72,6 +72,7 @@ def _intent_scope_hint(track: str | None) -> str:
 # （只读侦察不受限，正是子代理看全局黑板的手段，且其 target_asset_id 只是过滤条件）。
 _ASSET_REF_TOOLS: dict[str, tuple[str, ...]] = {
     "bb_delete_asset": ("asset_id",),
+    "bb_delete_assets": ("asset_ids",),
     "bb_asset_status": ("asset_id",),
     "bb_merge_assets": ("source_asset_id", "target_asset_id"),
     "bb_add_finding": ("target_asset_id",),
@@ -122,6 +123,9 @@ _BB_ASSET_TYPES = ("host", "domain", "service", "url", "binary")
 # what=assets 未显式传 limit 时的返回上限（2026-10-01 防瀑）：FOFA 大批导入后
 # 全项目资产可达数千，meta 全文数 MB——默认截断，要全量显式传大 limit。
 _BB_ASSETS_DEFAULT_LIMIT = 200
+# 单次批量删除上限（2026-10-09）：bb_delete_assets 一次最多删这么多条，防一次
+# 误删面过大；超出要求分批。清洗泛解析域名族这类几百条的活，2-3 批即可做完。
+_BB_BATCH_DELETE_MAX = 200
 # meta 精简白名单（2026-10-01）：默认只回这些常用键（长值截断），verbose=true 才给全文。
 _BB_ASSET_META_KEYS = ("title", "fingerprint", "products", "owner", "source",
                        "protocol", "http_status", "primary_domain", "alias",
@@ -703,6 +707,65 @@ class ToolDispatcher:
         return (f"asset.deleted={deleted['id']} type={deleted['type']} "
                 f"value={deleted['value']}")
 
+    def _tool_bb_delete_assets(self, asset_ids: list | str) -> str:
+        """批量删除非 binary 叶子资产（语义同 bb_delete_asset，一次一批）。
+
+        动机（2026-10-09 事故）：资产清洗要删几百条泛解析域名时，模型只能用
+        bb_query 分页 + 逐条 bb_delete_asset，陷入「怎么翻页 / 怎么枚举」的推理
+        死循环（实测单步思考 5.2 万字符、该线程 222 个 LLM 步）。批量原语把
+        「枚举 + 删除」压成一次调用。
+
+        逐条尝试、不整批回滚：单条失败（有子资产 / 被 finding 引用 / binary /
+        不存在）只记进 failures，其余照删——资产清洗场景下整批回滚会让一条挡路
+        的资产卡死全部进度。单次上限 `_BB_BATCH_DELETE_MAX`，超出要求分批。
+        """
+        if isinstance(asset_ids, str):
+            asset_ids = [asset_ids]
+        seen: set[str] = set()
+        ids = [x for x in (str(v).strip() for v in (asset_ids or []))
+               if x and not (x in seen or seen.add(x))]
+        if not ids:
+            return "[错误] asset_ids 不能为空（传资产 id 数组，先用 bb_query what=assets 取 id）"
+        if len(ids) > _BB_BATCH_DELETE_MAX:
+            return (f"[拒绝] 单次最多删 {_BB_BATCH_DELETE_MAX} 个（收到 {len(ids)}）"
+                    f"——分批调用，避免一次误删面过大")
+        deleted: list[dict] = []
+        failed: list[dict] = []
+        stop_reason = ""
+        for aid in ids:
+            # 长批次可被人类中止打断（dispatcher 侧的中止事件，None=未接入），
+            # 已删的不回滚——与 run_cmd 走同一个 abort_event。
+            if self.abort_event is not None and self.abort_event.is_set():
+                stop_reason = "已中止，剩余未处理"
+                break
+            asset = self.bb.get_asset(aid)
+            if asset is None or asset.get("project_id") != self.project_id:
+                failed.append({"asset_id": aid, "error": "资产不存在"})
+                continue
+            if asset.get("type") == "binary":
+                failed.append({"asset_id": aid,
+                               "error": "binary 样本不能用 bb_delete_assets，请走样本删除流程"})
+                continue
+            try:
+                row = self.bb.delete_asset(aid, author=self.author)
+            except (LookupError, ValueError) as e:
+                failed.append({"asset_id": aid, "error": str(e)})
+                continue
+            deleted.append({"asset_id": row["id"], "value": row["value"]})
+        if deleted:
+            self.last_progress_step = self._step
+        return json.dumps({
+            "deleted": len(deleted),
+            "failed": len(failed),
+            "deleted_assets": deleted[:50],
+            "deleted_truncated": max(0, len(deleted) - 50),
+            "failures": failed[:50],
+            "failures_truncated": max(0, len(failed) - 50),
+            "note": ("失败项多为「有子资产 / 被 finding 引用 / binary / 不存在」"
+                     "——先 bb_query 查清再处理；剩余条目可再调一批"),
+            "stopped": stop_reason,
+        }, ensure_ascii=False)
+
     def _tool_bb_merge_assets(self, source_asset_id: str, target_asset_id: str,
                               reason: str = "") -> str:
         if not reason or not reason.strip():
@@ -1112,6 +1175,7 @@ class ToolDispatcher:
                        asset: str | None = None,
                        limit: int | None = None,
                        verbose: bool = False,
+                       offset: int | None = None,
                        sha256: str | None = None) -> str:
         # 参数名容错（2026-09-30）：模型高频把 binary_sha256 简写成 sha256——
         # 别名归一而非裸 TypeError（截图案例：what=files+sha256 连错两处）
@@ -1139,6 +1203,12 @@ class ToolDispatcher:
                 limit = max(1, min(200, int(limit)))
             except (TypeError, ValueError):
                 limit = None
+        # offset 钳 ≥0（assets 分页起点，2026-10-09）：非法值当未传
+        if offset is not None:
+            try:
+                offset = max(0, int(offset))
+            except (TypeError, ValueError):
+                offset = None
         # kinds 容错：模型偶发传单字符串，包成列表
         if isinstance(kinds, str):
             kinds = [kinds]
@@ -1238,13 +1308,20 @@ class ToolDispatcher:
                 rows = [a for a in rows if a["id"] in subtree]
             # 默认 limit（2026-10-01 防瀑）：不传时默认 200（此前=全量，FOFA 导入
             # 几千条资产时 meta 全文可达数 MB）——要全量显式传大 limit。
+            # 分页（2026-10-09）：offset 从 created_at 固定序里取窗口——枚举一大批
+            # 资产（清洗泛解析族）时逐页取 id，再交 bb_delete_assets 批量删，不必
+            # 靠「边删边看前 N 条」反推分页位置（那正是推理死循环的来源）。
             cap = limit if limit is not None else _BB_ASSETS_DEFAULT_LIMIT
             total = len(rows)
-            rows = rows[:cap]
+            start = offset or 0
+            rows = rows[start:start + cap]
             return json.dumps(
-                {"counts": {"total": total, "returned": len(rows)},
+                {"counts": {"total": total, "offset": start,
+                            "returned": len(rows),
+                            "has_more": start + len(rows) < total},
                  "hint": ("资产的域名/站点现状用 what=site（一次返回子树+发现+意图）；"
-                          "列清单/按类型筛用 what=assets；meta 默认精简，"
+                          "列清单/按类型筛用 what=assets；枚举大批量用 offset+limit "
+                          "逐页取（has_more=false 即到底）；meta 默认精简，"
                           "需要全文传 verbose=true；返回被截断时传更大 limit。"),
                  "assets": [_asset_row(a, verbose=verbose) for a in rows]},
                 ensure_ascii=False)

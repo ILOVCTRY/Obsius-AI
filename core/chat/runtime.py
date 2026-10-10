@@ -44,7 +44,8 @@ from core.dimensions import (
     dimensions_for_type,
     load_track_dimensions,
 )
-from core.llm.provider import ContextOverflowError, LLMError, TransientStreamError
+from core.llm.provider import (ContextOverflowError, LLMError, TransientStreamError,
+                               is_reasoning_echo)
 from core.runtime.gateway import ExecutionGateway
 from core.skills.experts import load_expert
 from core.skills.registry import SkillRegistry
@@ -73,7 +74,8 @@ _INTENT_TOOLS = ("declare_intent", "close_intent", "reopen_intent", "bb_delete_i
 
 _ORCH_BASE_TOOLS = ("todo_write", "call_expert", "skill_open",
                     "kb_search", "kb_open", "bb_query",
-                    "bb_delete_asset", "bb_merge_assets", *_INTENT_TOOLS)
+                    "bb_delete_asset", "bb_delete_assets", "bb_merge_assets",
+                    *_INTENT_TOOLS)
 
 # 对话轮步数上限（2026-10-01 由 24/32 提升至 200：修「步数耗尽但全程只调工具
 # → 无终稿 → 落『本轮未产出文本回复』」；配合 _loop 末步强制终稿兜底）
@@ -120,6 +122,25 @@ _EMPTY_RESPONSE_NUDGE = (
 )
 _CONTINUE_NUDGE = ("（上一条回复因输出长度上限被截断）请**接着上一句继续写完**，"
                    "不要重复已写内容，也不要重新开头。")
+
+# 推理回声守卫（2026-10-09 事故）：上游中转把模型的推理正文同时经内容通道与思考
+# 通道下发，导致纯文本终稿其实是「整段推理」。解析层（core.llm.provider
+# `collapse_reasoning_echo`）已把这类 content 清空——这里再兜一道（覆盖未经该
+# 清空路径的 provider），命中则不当终稿收轮，推回让模型给结论；上限防死循环。
+_REASONING_ECHO_NUDGE = (
+    "（系统提示）你上一条回复只是在复述推理过程，并不是面向人类的答复。"
+    "请直接给出结论、摘要或下一步工具调用；不要复述任何推理内容。")
+_REASONING_ECHO_MAX = 3
+
+# 推理膨胀闸（2026-10-09 事故）：单步思考超此长度视为「盘算失控」——模型陷在
+# 「怎么翻页/怎么枚举」这类元问题上反复推演而迟迟不动作（实测单步 5.2 万字符、
+# 单线程累计 output 24.6 万 token）。此时把「停止盘算、直接动作或给结论」并入
+# 当轮提示；连续推回超上限只记账不再推（不改变收轮语义）。
+_REASONING_BLOAT_CHARS = 20_000
+_REASONING_NUDGE_MAX = 3
+_REASONING_NUDGE = (
+    "（系统提示）你已连续大量推演。停止继续盘算，直接用工具执行下一步，"
+    "或给出面向人类的结论摘要；不要复述推理过程。")
 
 # 流式 body 中断续跑（2026-10-08 事故修复）：已吐增量后连接中断（LLMError.partial
 # ——「peer closed connection ... incomplete chunked read」这类）时，半截文本已
@@ -288,6 +309,11 @@ _ERROR_CATEGORIES: dict[str, tuple[str, str]] = {
         "上下文超限",
         "单轮上下文超出模型窗口，自动压缩后仍被网关拒收（400/413）。"
         "请新开线程，或精简历史消息后重试。"),
+    "model_cooldown": (
+        "模型不可用（冷却中）",
+        "模型网关提示该模型在所有账号上均处于冷却期（HTTP 400 per-model "
+        "cooldown）。系统已重试多次仍未恢复——请在「技能与设置 → 模型供应商」"
+        "改用其它模型或供应商后重发（网关原文亦提示 try another model）。"),
     "bad_request": (
         "请求被拒",
         "模型网关判定请求不合法（HTTP 400）。常见于历史消息结构问题"
@@ -329,6 +355,33 @@ def _is_truncated_final(resp) -> bool:
     return False
 
 
+def _inject_nudge(messages: list[dict[str, Any]], nudge: str) -> None:
+    """把系统提示并入对话尾部（供下一步 LLM 看到），保证角色交替合法。
+
+    优先并进尾部 user 消息里**首个 tool_result 的正文**——三种协议
+    （anthropic / chat-completions / responses）都原样透传 tool_result 文本，
+    且不会产生连续两条 user（Anthropic 要求角色严格交替，连续 user 会被 400
+    拒收；chat-completions 的 `_chat_messages` 还会把混在 tool_result 里的 text
+    块整块丢掉，故不能靠追加 text 块）。没有 tool_result 可挂时才并进尾部 user
+    的正文，尾部不是 user 才新起一条。"""
+    if not messages:
+        messages.append({"role": "user", "content": nudge})
+        return
+    last = messages[-1]
+    if last.get("role") != "user":
+        messages.append({"role": "user", "content": nudge})
+        return
+    content = last.get("content")
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                block["content"] = f"{nudge}\n\n{block.get('content', '')}"
+                return
+        content.append({"type": "text", "text": nudge})
+        return
+    last["content"] = f"{content}\n\n{nudge}" if content else nudge
+
+
 def _classify_error(e: BaseException) -> dict[str, str]:
     """异常 → 结构化错误（category/title/message/hint）。message 为原始异常
     文案（技术细节），title/hint 为面向人类的分类与建议。"""
@@ -362,6 +415,12 @@ def _classify_error(e: BaseException) -> dict[str, str]:
         cat = "auth"
     elif status == 402 or "余额" in msg or "insufficient" in low or "quota" in low:
         cat = "quota"
+    # 模型冷却必须先于 bad_request 判定（2026-10-10）：网关把「该模型全账号冷却」
+    # 塞进 HTTP 400，此前落 bad_request「历史消息结构问题」——方向完全跑偏，
+    # 而文案里唯一有效的自救指令「try another model」被丢弃。
+    elif "per-model cooldown" in low or "on every account" in low \
+            or "try another model" in low or "model is unavailable" in low:
+        cat = "model_cooldown"
     elif status == 400 or "400" in msg or "invalidparameter" in low:
         cat = "bad_request"
     elif isinstance(e, sqlite3.Error) or isinstance(e, BlackboardClosedError):
@@ -1293,11 +1352,14 @@ class ChatTurn:
         interrupt_n = 0   # 流中断续跑次数（2026-10-08）
         empty_response_n = 0
         dimension_nudges = 0  # 子专家维度收敛闸连续推回数（2026-10-09）
+        echo_nudges = 0       # 推理回声推回数（2026-10-09）
+        reasoning_nudges = 0  # 推理膨胀推回数（2026-10-09）
         text_acc: list[str] = []
         for _step in range(max_steps):
             if self._aborted():  # 步间中止：不落新 LLM 调用
                 final = self._persist_stopped()
                 break
+            step_nudges: list[str] = []  # 本步事后追加的系统提示（推理膨胀闸等）
             acc: list[str] = []
             pub = {"chars": 0, "seq": 0, "at": 0.0}
             thinking_acc: list[str] = []
@@ -1476,6 +1538,15 @@ class ChatTurn:
             if self._aborted():  # 流式中止：本步作废
                 final = self._persist_stopped()
                 break
+            # 推理膨胀闸（2026-10-09）：本步思考超长 → 把「别再盘算」并入本轮提示
+            # （工具路径随 tool_result 下发；无工具时由下方空响应/回声分支带上）。
+            if (len(thinking) > _REASONING_BLOAT_CHARS
+                    and reasoning_nudges < _REASONING_NUDGE_MAX):
+                reasoning_nudges += 1
+                step_nudges.append(_REASONING_NUDGE)
+                self._emit("chat.reasoning_gate", {
+                    "phase": "nudge", "bloat_chars": len(thinking),
+                    "nudges": reasoning_nudges, "total": _REASONING_NUDGE_MAX})
             text = resp.text or ""
             if not text.strip() and not resp.tool_calls:
                 if empty_response_n < _EMPTY_RESPONSE_RETRIES:
@@ -1486,7 +1557,8 @@ class ChatTurn:
                         "total": _EMPTY_RESPONSE_RETRIES,
                         "reason": "empty_response",
                     })
-                    messages.append({"role": "user", "content": _EMPTY_RESPONSE_NUDGE})
+                    _inject_nudge(messages, "\n\n".join(
+                        [_EMPTY_RESPONSE_NUDGE, *step_nudges]))
                     continue
                 final = "（本轮未产出文本回复，请重试或改述）"
                 chat_store.append_message(self.bb, self.thread_id,
@@ -1589,6 +1661,8 @@ class ChatTurn:
                 if tool_result_blocks:
                     messages.append({"role": "user",
                                      "content": tool_result_blocks})
+                if step_nudges:
+                    _inject_nudge(messages, "\n\n".join(step_nudges))
                 if aborted:
                     # 中止说明落库（在补落的 tool 结果之后，保持配对顺序合法）
                     final = self._persist_stopped()
@@ -1600,6 +1674,21 @@ class ChatTurn:
             # （stop_reason=length/max_tokens），不当作终稿收尾——把半截文本作为
             # assistant 前缀入历史 + 追一条 user 催续，继续循环拼接，避免「话说
             # 一半就正常终止」。续写次数超上限才接受现有文本并落 chat.truncated。
+            # 推理回声守卫（2026-10-09 事故）：终稿其实只是整段推理的复制品时
+            # （上游把同一段推理同时灌进内容与思考两个通道），不当终稿收轮——推回
+            # 让模型给结论。解析层已做同类清空，这里兜未经该路径的 provider；上限后
+            # 放行（宁可落一次正文，也不无限推回）。
+            if text.strip() and is_reasoning_echo(text, thinking):
+                if echo_nudges < _REASONING_ECHO_MAX:
+                    echo_nudges += 1
+                    self._emit("chat.reasoning_echo", {
+                        "phase": "nudge", "chars": len(text),
+                        "nudges": echo_nudges, "total": _REASONING_ECHO_MAX})
+                    _inject_nudge(messages, "\n\n".join(
+                        [_REASONING_ECHO_NUDGE, *step_nudges]))
+                    continue
+                self._emit("chat.reasoning_echo", {
+                    "phase": "giveup", "chars": len(text), "nudges": echo_nudges})
             if _is_truncated_final(resp) and text.strip():
                 if continue_n >= _CHAT_CONTINUE_MAX:
                     self._emit("chat.truncated", {

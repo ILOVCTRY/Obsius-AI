@@ -35,6 +35,41 @@ class LLMResponse:
     raw: dict[str, Any] = field(default_factory=dict)  # 原始响应，审计用
 
 
+# 推理回声判定的后缀长度下限：短答复恰好等于思考尾部属正常（如思考以「已完成。」
+# 收尾、回复也是「已完成。」），不判；长文本互为后缀则只能是上游泄漏。
+_REASONING_ECHO_SUFFIX_MIN = 200
+
+
+def is_reasoning_echo(text: str, thinking: str) -> bool:
+    """内容通道是否只是思考通道的复制（上游把推理灌进了 content）。
+
+    判据（去首尾空白后）：逐字相同，或 text 长度 ≥ ``_REASONING_ECHO_SUFFIX_MIN``
+    且是 thinking 的结尾段。真答复与思考逐字/长段同尾的概率可忽略。
+
+    背景（2026-10-09 事故）：第三方中转（responses 协议）在单个响应里把模型的
+    推理正文同时经 output_text 与 reasoning_summary 两条通道下发，实测
+    ``resp.text == resp.thinking``（52545 字符逐字相同）。对话链把非空 text 当
+    纯文本终稿收轮——于是「推理被当成答案落库上屏」，轮次也就此提前终止。
+    """
+    t = (text or "").strip()
+    k = (thinking or "").strip()
+    if not t or not k:
+        return False
+    return t == k or (len(t) >= _REASONING_ECHO_SUFFIX_MIN and k.endswith(t))
+
+
+def collapse_reasoning_echo(response: LLMResponse) -> LLMResponse:
+    """把「只是思考复制品」的 content 清空，只保留 thinking（展示用）。
+
+    在解析层收口调用（``parsing.parse_*`` 与 ``openai_compat._consume_stream``），
+    使下游（对话链/Agent 循环）看到的是「无文本响应」而不是「一段推理正文」——
+    于是走空响应 nudge 重来，而不是把它当终稿收轮。原样返回便于链式调用。
+    """
+    if is_reasoning_echo(response.text, response.thinking):
+        response.text = ""
+    return response
+
+
 def assistant_message(response: LLMResponse) -> dict[str, Any]:
     """把 provider 无关的 typed 响应重建为内部 assistant 消息。
 

@@ -7,7 +7,10 @@ import json
 import pytest
 
 from core.llm import AnthropicCompatProvider, ArkCodingProvider, LLMError, ModelRouter
-from core.llm.provider import LLMResponse, ToolCall, assistant_message
+from core.llm.parsing import (CHAT_COMPLETIONS, parse_anthropic_response,
+                              parse_openai_response)
+from core.llm.provider import (LLMResponse, ToolCall, assistant_message,
+                               is_reasoning_echo)
 from core.llm.routing import load_dotenv
 
 
@@ -298,7 +301,7 @@ def test_connection_reset_exhausts_then_raises_network_error(monkeypatch):
 
 
 def test_retry_budget_per_category(monkeypatch):
-    """按类别预算：标准 5xx 共 11 次尝试，429 共 2 次，连接类 11 次。"""
+    """按类别预算：标准 5xx / 429 / 连接类均 11 次尝试（2026-10-10 429 拉齐）。"""
     monkeypatch.setattr("core.llm.anthropic_compat.RETRY_BACKOFF", 0)
     monkeypatch.setattr("core.llm.anthropic_compat.HTTP_5XX_BACKOFF", (0,))
     monkeypatch.setattr("core.llm.anthropic_compat.CONN_BACKOFF", (0, 0, 0))
@@ -325,8 +328,8 @@ def test_retry_budget_per_category(monkeypatch):
         AnthropicCompatProvider("https://fake", "key", "m",
                                 stream_transport=t429).chat(
             [{"role": "user", "content": "hi"}])
-    assert r["n"] == 2          # 429 保持快速失败预算
-    assert "已重试 1/1 次" in str(e429.value)
+    assert r["n"] == 11         # 429：2026-10-10 由共 2 次提到 11 次尝试
+    assert "已重试 10/10 次" in str(e429.value)
 
     c = {"n": 0}
 
@@ -339,6 +342,38 @@ def test_retry_budget_per_category(monkeypatch):
                                 stream_transport=treset).chat(
             [{"role": "user", "content": "hi"}])
     assert c["n"] == 11         # 连接类 11 次（与 5xx 口径拉齐）
+
+
+def test_model_cooldown_400_is_retried(monkeypatch):
+    """400「模型全账号冷却」按暂态故障重试（2026-10-10）：网关把 per-model
+    cooldown 塞进 HTTP 400，此前一次就抛 → 现与 429 同预算 11 次尝试。"""
+    monkeypatch.setattr("core.llm.anthropic_compat.COOLDOWN_BACKOFF", 0)
+    n = {"n": 0}
+    msg = "model is unavailable on every account (per-model cooldown), try another model"
+
+    def transport(url, headers, body):
+        n["n"] += 1
+        return 400, {"error": {"code": "invalid_request", "message": msg}}
+
+    p = AnthropicCompatProvider("https://fake", "key", "m", stream_transport=transport)
+    with pytest.raises(LLMError, match="400") as e:
+        p.chat([{"role": "user", "content": "hi"}])
+    assert n["n"] == 11
+    assert "已重试 10/10 次" in str(e.value)
+
+
+def test_real_bad_request_400_not_retried(monkeypatch):
+    """真正的入参 400 不受冷却重试面影响：仍一次就抛（不白等 5 分钟）。"""
+    n = {"n": 0}
+
+    def transport(url, headers, body):
+        n["n"] += 1
+        return 400, {"error": {"code": "invalid_request", "message": "bad tool schema"}}
+
+    p = AnthropicCompatProvider("https://fake", "key", "m", stream_transport=transport)
+    with pytest.raises(LLMError, match="400"):
+        p.chat([{"role": "user", "content": "hi"}])
+    assert n["n"] == 1
 
 
 def test_anthropic_5xx_retry_callback(monkeypatch):
@@ -452,6 +487,58 @@ def test_reasoning_content_fallback():
                                 stream_transport=stream_transport)
     r = p.chat([{"role": "user", "content": "hi"}])
     assert r.thinking == "隐藏推理链" and r.text == "答"
+
+
+# ---------- 推理回声清理（2026-10-09 事故） ----------
+#
+# 上游中转把同一段推理同时经内容通道与思考通道下发（实测 52545 字符逐字相同），
+# 对话链会把非空 text 当纯文本终稿收轮 → 「推理被当答案落库上屏、轮次提前终止」。
+# 解析层（`collapse_reasoning_echo`）把这类 content 清空，只留 thinking。
+
+def test_is_reasoning_echo_predicate():
+    big = "推演" * 500                       # 1000 字符
+    assert is_reasoning_echo(big, big)                    # 逐字相同
+    assert is_reasoning_echo(big[:500], big)              # 长文本是其结尾段
+    assert not is_reasoning_echo("已完成。", "思考许久……已完成。")   # 短尾不误伤
+    assert not is_reasoning_echo("漏洞在 /admin", "我在想 admin……")
+    assert not is_reasoning_echo("", big)
+    assert not is_reasoning_echo(big, "")
+
+
+def test_parse_collapses_reasoning_echo():
+    """两条协议解析出口都做清空；正常答复（与思考不同）不受影响。"""
+    dup = "我在盘算怎么翻页。" * 300
+    a = parse_anthropic_response({
+        "content": [{"type": "thinking", "thinking": dup},
+                    {"type": "text", "text": dup}],
+        "usage": {"input_tokens": 1, "output_tokens": 1}})
+    assert a.text == "" and a.thinking == dup
+
+    o = parse_openai_response({
+        "choices": [{"message": {"content": dup, "reasoning_content": dup},
+                     "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1}}, format=CHAT_COMPLETIONS)
+    assert o.text == "" and o.thinking == dup
+
+    ok = parse_anthropic_response({
+        "content": [{"type": "thinking", "thinking": "推理过程"},
+                    {"type": "text", "text": "结论：未发现漏洞"}],
+        "usage": {"input_tokens": 1, "output_tokens": 1}})
+    assert ok.text == "结论：未发现漏洞" and ok.thinking == "推理过程"
+
+
+def test_provider_stream_collapses_reasoning_echo():
+    """provider 流式出口同样清空（anthropic 流经 _parse 收口）。"""
+    dup = "我在盘算怎么翻页。" * 300
+    p = AnthropicCompatProvider(
+        "https://fake", "key", "m",
+        stream_transport=_fake_stream_transport({
+            "stop_reason": "end_turn",
+            "content": [{"type": "thinking", "thinking": dup},
+                        {"type": "text", "text": dup}],
+            "usage": {"input_tokens": 1, "output_tokens": 1}}))
+    r = p.chat([{"role": "user", "content": "hi"}])
+    assert r.text == "" and r.thinking == dup
 
 
 def test_retry_on_timeout(monkeypatch):

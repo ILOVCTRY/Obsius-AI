@@ -8,7 +8,13 @@
 import json
 from typing import Any
 
-from core.llm.provider import LLMError, LLMResponse, ToolCall, Usage
+from core.llm.provider import (
+    LLMError,
+    LLMResponse,
+    ToolCall,
+    Usage,
+    collapse_reasoning_echo,
+)
 
 CHAT_COMPLETIONS = "openai-chat-completions"
 RESPONSES = "openai-responses"
@@ -51,7 +57,7 @@ def parse_anthropic_response(data: dict[str, Any]) -> LLMResponse:
         rc = data.get("reasoning_content")
         if isinstance(rc, str) and rc.strip():
             resp.thinking = rc
-    return resp
+    return collapse_reasoning_echo(resp)
 
 
 def parse_openai_response(data: dict[str, Any], *, format: str) -> LLMResponse:
@@ -84,7 +90,7 @@ def parse_openai_response(data: dict[str, Any], *, format: str) -> LLMResponse:
                     raise LLMError(f"工具调用参数必须是对象 (call_id={call_id})")
                 seen_ids.add(call_id)
                 result.tool_calls.append(ToolCall(call_id, name, arguments))
-        return result
+        return collapse_reasoning_echo(result)
     choices = data.get("choices", [])
     msg = choices[0].get("message", {}) if choices else {}
     result = LLMResponse(
@@ -115,4 +121,4 @@ def parse_openai_response(data: dict[str, Any], *, format: str) -> LLMResponse:
             raise LLMError(f"工具调用参数必须是对象 (call_id={call_id})")
         seen_ids.add(call_id)
         result.tool_calls.append(ToolCall(call_id, name, arguments))
-    return result
+    return collapse_reasoning_echo(result)

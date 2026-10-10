@@ -2322,3 +2322,63 @@ def test_chat_message_with_attachment(chat_client):
                           json={"text": "", "attachment_ids": [aid]})
     assert r2.status_code == 202
 
+
+# ---------- 推理回声 / 推理膨胀（2026-10-09 事故） ----------
+
+class _EchoThenAnswerLLM:
+    """首次响应把整段推理同时当正文与思考回吐（上游回声），第二次正常收尾。"""
+
+    def __init__(self, reasoning: str):
+        self._reasoning = reasoning
+        self.calls = 0
+
+    def chat(self, messages, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            return LLMResponse(text=self._reasoning, thinking=self._reasoning,
+                               usage=Usage(1, 1))
+        return LLMResponse(text="清洗完成：已删除 912 条泛解析域名。",
+                           usage=Usage(1, 1))
+
+
+def test_chat_reasoning_echo_not_treated_as_final(tmp_path):
+    """终稿只是推理复制品时不收轮（2026-10-09 事故）：推回让模型给结论，
+    复制的推理绝不落库成正文（否则前端思考块与正文同文显示两遍、轮次被误判收尾）。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    t = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID, title="回声")
+    reasoning = "我在盘算怎么翻页。" * 200          # 1400 字符，> 200 后缀阈值
+    llm = _EchoThenAnswerLLM(reasoning)
+
+    final = _turn(bb, t["id"], llm).run("清理资产")
+
+    assert final.startswith("清洗完成") and llm.calls == 2
+    assistants = [m for m in chat_store.list_messages(bb, t["id"])
+                  if m["role"] == "assistant"]
+    assert all((m["content"] or "") != reasoning for m in assistants)
+    assert assistants[-1]["content"].startswith("清洗完成")
+    kinds = [e["kind"] for e in bb.recent_events("p1", tail=200)]
+    assert "chat.reasoning_echo" in kinds
+
+
+def test_chat_reasoning_bloat_gate_nudges(tmp_path):
+    """单步思考超阈值 → 落 chat.reasoning_gate，并把「别盘算」nudge 并入本轮工具
+    结果（模型下一步看得到）；不改变收轮语义。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    t = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID, title="膨胀")
+    huge = "盘算" * 12_000                          # 24000 字符 > 20000 阈值
+    llm = FakeLLM([
+        LLMResponse(text="", thinking=huge, usage=Usage(1, 1),
+                    tool_calls=[_tc("c1", "bb_query", {"what": "assets"})]),
+        _resp(text="按批次继续处理。"),
+    ])
+
+    _turn(bb, t["id"], llm).run("清理")
+
+    events = [e for e in bb.recent_events("p1", tail=200)
+              if e["kind"] == "chat.reasoning_gate"]
+    assert events and events[-1]["payload"]["phase"] == "nudge"
+    blob = json.dumps(llm.calls[1]["messages"], ensure_ascii=False)
+    assert "停止继续盘算" in blob
+

@@ -28,7 +28,7 @@ _SNAPSHOT = {
     "_INTENT_FLOW_TOOLS": {
         "declare_intent", "close_intent", "reopen_intent", "bb_delete_intent",
         "bb_add_finding", "bb_update_finding", "bb_delete_finding",
-        "bb_delete_asset", "bb_merge_assets",
+        "bb_delete_asset", "bb_delete_assets", "bb_merge_assets",
         "finish", "request_steps",
     },
     "_INTENT_PRE_ALLOWED": {
@@ -40,7 +40,8 @@ _SNAPSHOT = {
         "finish", "request_steps",
         "close_intent", "reopen_intent",
         "bb_delete_intent", "bb_add_finding", "bb_update_finding",
-        "bb_delete_finding", "bb_delete_asset", "bb_merge_assets",
+        "bb_delete_finding", "bb_delete_asset", "bb_delete_assets",
+        "bb_merge_assets",
         "bb_notify",
         "request_authorization", "propose_pack_edit", "bb_add_asset",
     },
@@ -54,10 +55,11 @@ _SNAPSHOT = {
     "_FILE_TOOLS": {"read_file", "search_files"},
 }
 
-# 退役后 AGENT_TOOLS 的 41 个工具名（顺序即文件顺序，Agent schema 顺序对外可见）
+# 退役后 AGENT_TOOLS 的 44 个工具名（顺序即文件顺序，Agent schema 顺序对外可见）
 _SNAPSHOT_ORDER = [
     "run_cmd", "read_file", "search_files",
-    "bb_add_asset", "bb_delete_asset", "bb_merge_assets", "bb_asset_status",
+    "bb_add_asset", "bb_delete_asset", "bb_delete_assets",
+    "bb_merge_assets", "bb_asset_status",
     "bb_add_finding", "bb_update_finding", "bb_delete_finding", "bb_add_artifact",
     "bb_query", "kb_open", "kb_search", "propose_pack_edit",
     "bb_upsert_func", "bb_blueprint_create", "bb_blueprint_update",

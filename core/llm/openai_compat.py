@@ -6,9 +6,13 @@ from typing import Any
 
 from core.llm import parsing
 from core.llm.anthropic_compat import StreamTransport, Transport
-from core.llm.provider import LLMResponse, ToolCall, Usage, LLMError
-from core.llm.retry import (HTTP_5XX_ATTEMPTS, HTTP_5XX_BACKOFF, HTTP_5XX_RETRIES,
-                            HTTP_5XX_STATUS, retry_note)
+from core.llm.provider import (LLMResponse, ToolCall, Usage, LLMError,
+                               collapse_reasoning_echo)
+from core.llm.retry import (COOLDOWN_BACKOFF, HTTP_5XX_ATTEMPTS,
+                            HTTP_5XX_BACKOFF, HTTP_5XX_RETRIES, HTTP_5XX_STATUS,
+                            RATE_LIMIT_ATTEMPTS, RATE_LIMIT_BACKOFF,
+                            RATE_LIMIT_RETRIES, is_model_cooldown_error,
+                            retry_note)
 from core.llm.sdk_engine import RawFallback, build_openai_transports
 
 CHAT_COMPLETIONS = "openai-chat-completions"
@@ -23,7 +27,8 @@ OPENAI_CONNECTION_ATTEMPTS = 11
 OPENAI_CONNECTION_BACKOFF = (2.0, 4.0, 8.0, 16.0, 30.0)
 # 上游暂态状态（标准 5xx 500/502/503/504 + Cloudflare 520/524）：共 11 次尝试
 # （首次 + 10 次重试），退避封顶 30s——与 Anthropic 路径共享 HTTP_5XX_* 口径。
-# 429 刻意不重试。
+# 2026-10-10：429 由「刻意不重试」改为 11 次尝试（首次 + 10 次重试），30s 固定退避
+# ——与 Anthropic 路径拉齐，见 retry.RATE_LIMIT_*。
 OPENAI_5XX_RETRYABLE = tuple(sorted(HTTP_5XX_STATUS | {520, 524}))
 OPENAI_5XX_ATTEMPTS = HTTP_5XX_ATTEMPTS
 OPENAI_5XX_RETRIES = HTTP_5XX_RETRIES
@@ -77,16 +82,19 @@ class OpenAICompatProvider:
         _, stream_transport = self._sdk_transports()  # OpenAI 路径恒走流式
 
         def request_with_retries(payload: bytes) -> tuple[int, Any, str]:
-            """重试上游暂态状态（500/502/503/504/520/524）或瞬时连接断开，
+            """重试上游暂态状态（500/502/503/504/520/524 / 429）或瞬时连接断开，
             其他错误立即返回。
 
             三类暂态状态统一 10 次重试预算（2026-10-07 拉齐：520/524 原为 5 次
-            专用预算，现并入标准 5xx 口径）。返回 ``(status, data, note)``——
-            ``note`` 是重试耗尽后的计数后缀（``retry_note``），非重试类错误为
-            空串，供错误文案显式带出「试了几次」。
+            专用预算，现并入标准 5xx 口径；2026-10-10 429 亦并入 11 次尝试）。
+            返回 ``(status, data, note)``——``note`` 是重试耗尽后的计数后缀
+            （``retry_note``），非重试类错误为空串，供错误文案显式带出「试了几次」。
             """
-            max_attempts = OPENAI_5XX_ATTEMPTS + OPENAI_CONNECTION_ATTEMPTS
+            max_attempts = (OPENAI_5XX_ATTEMPTS + RATE_LIMIT_ATTEMPTS
+                            + RATE_LIMIT_ATTEMPTS + OPENAI_CONNECTION_ATTEMPTS)
             status_5xx_used = 0
+            rate_limit_used = 0
+            cooldown_used = 0
             for attempt in range(1, max_attempts + 1):
                 try:
                     status, data = stream_transport(
@@ -100,6 +108,34 @@ class OpenAICompatProvider:
                                  "connection")
                     time.sleep(OPENAI_CONNECTION_BACKOFF[min(
                         attempt - 1, len(OPENAI_CONNECTION_BACKOFF) - 1)])
+                    continue
+
+                if status == 429:
+                    rate_limit_used += 1
+                    if rate_limit_used >= RATE_LIMIT_ATTEMPTS:
+                        return status, data, retry_note(rate_limit_used - 1,
+                                                        RATE_LIMIT_RETRIES)
+                    if on_retry is not None:
+                        on_retry(rate_limit_used, RATE_LIMIT_RETRIES, status)
+                    time.sleep(RATE_LIMIT_BACKOFF)
+                    continue
+
+                # 注意：HTTP 非 200 时 data 是错误 dict，但 200 随流式响应时是
+                # SSE 生成器（无 .get）——故先判 isinstance(dict)（2026-10-10 修复
+                # 越界访存致 13 例 OpenAI 流式测试 'generator' has no attribute）。
+                err_obj = data.get("error", {}) if isinstance(data, dict) else {}
+                if is_model_cooldown_error(
+                        status, str(err_obj.get("message", "")),
+                        str(err_obj.get("code", ""))):
+                    # 400/413「模型全账号冷却」（2026-10-10）：与 Anthropic 路径
+                    # 同口径——按暂态故障处理，11 次尝试 + 30s 固定退避。
+                    cooldown_used += 1
+                    if cooldown_used >= RATE_LIMIT_ATTEMPTS:
+                        return status, data, retry_note(cooldown_used - 1,
+                                                        RATE_LIMIT_RETRIES)
+                    if on_retry is not None:
+                        on_retry(cooldown_used, RATE_LIMIT_RETRIES, status)
+                    time.sleep(COOLDOWN_BACKOFF)
                     continue
 
                 if status in OPENAI_5XX_RETRYABLE:
@@ -388,7 +424,11 @@ class OpenAICompatProvider:
                     for item in response.get("output", []) or []:
                         if item.get("type") == "function_call":
                             merge_call(item)
-        result = LLMResponse(text=text, thinking=thinking, usage=usage)
+        # 推理回声清理（2026-10-09 事故）：中转把同一段推理同时经 output_text 与
+        # reasoning_summary 下发时，text 只是 thinking 的复制品——清空 text，避免
+        # 下游把它当「纯文本终稿」收轮（实测 52545 字符逐字相同→轮次提前终止）。
+        result = collapse_reasoning_echo(
+            LLMResponse(text=text, thinking=thinking, usage=usage))
         seen_ids: set[str] = set()
         for c in calls.values():
             if not c["id"]:

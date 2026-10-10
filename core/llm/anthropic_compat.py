@@ -15,8 +15,11 @@ from typing import Any
 
 from core.llm import parsing
 from core.llm.provider import ContextOverflowError, LLMError, LLMResponse, ToolCall
-from core.llm.retry import (HTTP_5XX_ATTEMPTS, HTTP_5XX_BACKOFF, HTTP_5XX_RETRIES,
-                            HTTP_5XX_STATUS, retry_note)
+from core.llm.retry import (COOLDOWN_BACKOFF, HTTP_5XX_ATTEMPTS,
+                            HTTP_5XX_BACKOFF, HTTP_5XX_RETRIES, HTTP_5XX_STATUS,
+                            RATE_LIMIT_ATTEMPTS, RATE_LIMIT_BACKOFF,
+                            RATE_LIMIT_RETRIES, is_model_cooldown_error,
+                            retry_note)
 from core.llm.sdk_engine import RawFallback, build_anthropic_transports
 
 log = logging.getLogger(__name__)
@@ -43,15 +46,16 @@ StreamTransport = Callable[[str, dict[str, str], bytes], tuple[int, Any]]
 响应流 = SSE 逐行可迭代（字节行或 str 行均可，带 close 则用毕关闭）；
 HTTP 非 200 时第二元为解析后的错误 dict（与非流式 transport 对齐）。"""
 
-# 429 保持原有快速失败预算；标准上游 5xx 使用共享的 11 次尝试预算 + 封顶 30s 退避。
+# 429 与标准上游 5xx 同预算：均 11 次尝试（首次 + 10 次重试），退避各自取共享常量
+# （429 用 30s 固定间隔，见 retry.RATE_LIMIT_BACKOFF）。
 RETRYABLE_STATUS = {429, *HTTP_5XX_STATUS}
-RATE_LIMIT_ATTEMPTS = 2
 MAX_RETRIES = RATE_LIMIT_ATTEMPTS  # 兼容旧测试/调用方：429 总尝试次数
 # 2026-09-28：backoff 3→30——实测 ark 网关对大 max_tokens 请求有分钟级坏窗口（同分钟
 # 小预算请求秒通、大预算挂起，坏窗口可持续 6 分钟+，实测 11:25-11:31 三连超时实例）。
-# 原 3/6s 间隔三次尝试全落同一窗口；30/60s 让第②③次尝试有机会跨入恢复窗口。
-# 2026-10-07：本常量现仅用于 429 退避；标准 5xx 改用共享 HTTP_5XX_BACKOFF（封顶 30s）。
-RETRY_BACKOFF = 30.0
+# 原 3/6s 间隔三次尝试全落同一窗口；30/60s 让后续尝试有机会跨入恢复窗口。
+# 2026-10-10：429 由「共 2 次尝试」提到 11 次（用户定稿），本常量保留为兼容别名，
+# 取共享 retry.RATE_LIMIT_BACKOFF（含义由「基础间隔」变为「每次重试固定间隔」）。
+RETRY_BACKOFF = RATE_LIMIT_BACKOFF
 # 连接类故障（TCP 重置/断连/超时，如 WSAECONNRESET 10054 / TLS SSLEOFError）单独
 # 更宽松（2026-10-01 事故修复）：这类多为网关侧瞬时抖动，重试命中率远高于 5xx 坏
 # 窗口；此前与 5xx 共用 2 次预算，一次长连接（SSE）重置即判死整轮。
@@ -187,12 +191,13 @@ class AnthropicCompatProvider:
             body["stream"] = True
         payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
 
-        max_attempts = (RATE_LIMIT_ATTEMPTS + HTTP_5XX_ATTEMPTS
-                        + CONN_RETRIES + 4)  # 各类预算 + 若干降级重试
+        max_attempts = (RATE_LIMIT_ATTEMPTS + RATE_LIMIT_ATTEMPTS
+                        + HTTP_5XX_ATTEMPTS + CONN_RETRIES + 4)  # 各类预算 + 若干降级重试
         last_err: Exception | None = None
         conn_used = 0      # 连接类已用尝试数（含首次）
         rate_limit_used = 0  # 429 已用尝试数（含首次）
         status_5xx_used = 0  # 标准 5xx 已用尝试数（含首次）
+        cooldown_used = 0  # 400/413「模型冷却」已用尝试数（含首次，2026-10-10）
         transport, stream_transport = self._sdk_transports()
         for _ in range(max_attempts):
             try:
@@ -252,9 +257,19 @@ class AnthropicCompatProvider:
                         rate_limit_used += 1
                         can_retry = rate_limit_used < RATE_LIMIT_ATTEMPTS
                         retry_attempt = rate_limit_used
-                        retry_total = RATE_LIMIT_ATTEMPTS - 1
+                        retry_total = RATE_LIMIT_RETRIES
                         note = retry_note(rate_limit_used - 1,
-                                          RATE_LIMIT_ATTEMPTS - 1)
+                                          RATE_LIMIT_RETRIES)
+                    elif is_model_cooldown_error(
+                            status, str(err.get("message", "")),
+                            str(err.get("code", ""))):
+                        # 400/413 但文案是「模型全账号冷却」（2026-10-10）：属暂态
+                        # 故障，与 429 同预算同退避，不再是「一次就抛」。
+                        cooldown_used += 1
+                        can_retry = cooldown_used < RATE_LIMIT_ATTEMPTS
+                        retry_attempt = cooldown_used
+                        retry_total = RATE_LIMIT_RETRIES
+                        note = retry_note(cooldown_used - 1, RATE_LIMIT_RETRIES)
                     elif status in HTTP_5XX_STATUS:
                         status_5xx_used += 1
                         can_retry = status_5xx_used < HTTP_5XX_ATTEMPTS
@@ -272,7 +287,9 @@ class AnthropicCompatProvider:
                         if on_retry is not None:
                             on_retry(retry_attempt, retry_total, status)
                         if status == 429:
-                            time.sleep(RETRY_BACKOFF * rate_limit_used)
+                            time.sleep(RETRY_BACKOFF)
+                        elif cooldown_used:
+                            time.sleep(COOLDOWN_BACKOFF)
                         else:
                             time.sleep(HTTP_5XX_BACKOFF[min(
                                 status_5xx_used - 1, len(HTTP_5XX_BACKOFF) - 1)])

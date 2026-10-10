@@ -262,6 +262,30 @@ tool(
 )
 
 tool(
+    'bb_delete_assets',
+    group='黑板',
+    flags=("intent_flow",),
+    description=(
+        '批量删除非 binary 叶子资产（语义同 bb_delete_asset，一次一批，单次上限 200）。资产清洗要去掉成百上千条资产'
+        '（如泛解析域名族）时用本工具，不要用 bb_query 分页 + 逐条 bb_delete_asset——逐条删会把调用烧在枚举上。有子资产、'
+        '被发现引用或 binary 样本的条目会逐条拒绝并在 failures 里回明原因，其余照删；返回 deleted/failed 计数与明细（各截 50 条）。'
+    ),
+    input_schema={
+        'type': 'object',
+        'properties': {
+            'asset_ids': {
+                'type': 'array',
+                'items': {'type': 'string'},
+                'description': '要删除的资产 id 数组（单次 ≤200；先用 bb_query what=assets 取 id，再一次性传入）',
+            },
+        },
+        'required': [
+            'asset_ids',
+        ],
+    },
+)
+
+tool(
     'bb_merge_assets',
     group='黑板',
     flags=("intent_flow",),
@@ -811,6 +835,14 @@ tool(
             'limit': {
                 'type': 'integer',
                 'description': '返回条数上限，1-200（events 默认 50；findings/assets/func/blueprint 默认全量）',
+            },
+            'offset': {
+                'type': 'integer',
+                'description': (
+                    'assets 分页起点（≥0，默认 0）。结果按 created_at 固定排序，配合 limit 逐页取：'
+                    '第一页 offset=0，下一页 offset += 已回条数；counts.has_more=false 即到底。'
+                    '枚举一大批资产（如清洗泛解析域名族）时用它逐页取 id，再交 bb_delete_assets 批量删'
+                ),
             },
         },
         'required': [
