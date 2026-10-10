@@ -18,6 +18,17 @@
 - **知识与规则**：技能、角色、红线、知识库和项目级约束参与智能体路由与审批。
 - **多模型接入**：支持项目配置的模型供应商，以及 OpenAI/Anthropic 兼容协议；LLM 默认请求超时为 600 秒，传输失败按错误类别有限重试。
 
+
+## 渗透测试效果演示
+
+
+![](https://raw.githubusercontent.com/ILOVCTRY/note-gen-image-sync/main/blog-img/2026-10-10/image_1791618494_82a.png)
+
+
+![](https://raw.githubusercontent.com/ILOVCTRY/note-gen-image-sync/main/blog-img/2026-10-10/image_1791618587_1663.png)
+
+![](https://raw.githubusercontent.com/ILOVCTRY/note-gen-image-sync/main/blog-img/2026-10-10/image_1791618654_ffbb.png)
+
 ## 系统架构
 
 ```text
