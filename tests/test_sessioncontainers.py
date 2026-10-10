@@ -166,6 +166,22 @@ def test_ensure_rebuilds_when_container_gone(mgr):
     assert b.count("run_detached") == 2                    # 重建
 
 
+def test_ensure_rebuilds_on_net_change(mgr):
+    """网络模式变了须重建：docker 容器网络不可热改，断网容器留着会让「显式要 real
+    仍不通」（socket 错误）——须先删再建（pen-test docker 出口不通的次因）。"""
+    m, b = mgr
+    name = m.ensure("proj-1", "sess-n", image="img", net="none")
+    assert b.calls[0][3] == "none"
+    # 同一会话改要 real：删旧 + 建新
+    assert m.ensure("proj-1", "sess-n", image="img", net="real") == name
+    assert b.count("run_detached") == 2
+    assert b.count("rm") == 1                              # 旧断网容器已删
+    assert b.calls[-1][3] == "real"
+    # 同 net 复用不重建
+    assert m.ensure("proj-1", "sess-n", image="img", net="real") == name
+    assert b.count("run_detached") == 2
+
+
 def test_exec_uses_exec_in_with_cwd(mgr):
     m, b = mgr
     out = m.exec("proj-1", "sess-e", "id", timeout=30, cwd="/workspace/scratch")

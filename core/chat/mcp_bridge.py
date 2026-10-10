@@ -27,6 +27,34 @@ MCP_PROTOCOL_VERSION = "2024-11-05"
 _CALL_TIMEOUT = 60.0
 _PROBE_TIMEOUT = 8.0
 
+# FOFA 密钥单一真相源 = 测绘配置 config/fofa.json（前端「网络空间测绘」设置写的就是它）。
+# fofa MCP server（外部仓库）自己读的是 mcp-servers/fofa_MCP/.env——两份会漂移，故平台
+# 起它时注入来自 fofa.json 的 FOFA_* env（fofa.py 优先取进程 env，自身 .env 不覆盖已存在
+# 变量）。mcp.json 条目显式配的 env 优先级更高（刻意覆盖场景）；只认这两个 server 名，
+# 避免误伤其它 server 的同名变量。
+FOFA_SERVERS = frozenset({"fofa", "fofa-search", "fofa_mcp"})
+FOFA_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "fofa.json"
+
+
+def _fofa_env_from_config() -> dict[str, str]:
+    """读测绘 config/fofa.json 的 key/email → FOFA_KEY/FOFA_EMAIL。缺失/坏文件给 {}
+    （绝不抛——MCP 装配是 best-effort，绝不能因配置缺失阻断整轮）。不读 mcp_bridge
+    所在目录的 .env，避免宿主平台自身凭据串进 MCP 子进程。"""
+    try:
+        cfg = json.loads(FOFA_CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(cfg, dict):
+        return {}
+    out: dict[str, str] = {}
+    key = str(cfg.get("key") or "").strip()
+    if key:
+        out["FOFA_KEY"] = key
+    email = str(cfg.get("email") or "").strip()
+    if email:
+        out["FOFA_EMAIL"] = email
+    return out
+
 
 def _is_loopback_url(url: str) -> bool:
     try:
@@ -383,6 +411,21 @@ class MCPBridge:
         self._session_servers: dict[tuple[str, str], MCPServerRuntime] = {}
         self._lock = threading.Lock()
 
+    @staticmethod
+    def _env_for_entry(name: str, entry: dict[str, Any]) -> dict[str, str]:
+        """组装 stdio server 的附加环境变量。
+
+        基线 = mcp.json 条目的 `env` 字段（薄客户端型 MCP 如 fir-proxy 靠它取平台基址）；
+        **fofa server 额外注入测绘 config/fofa.json 的 key**（单一真相源，避免与
+        fofa_MCP/.env 漂移）——但 mcp.json 显式配的 FOFA_KEY/FOFA_EMAIL 优先级更高
+        （用户刻意覆盖时以显式为准）。"""
+        env_extra = dict(entry.get("env") or {}) \
+            if isinstance(entry.get("env"), dict) else {}
+        if name in FOFA_SERVERS:
+            for k, v in _fofa_env_from_config().items():
+                env_extra.setdefault(k, v)
+        return env_extra
+
     def _load_servers(self) -> dict[str, MCPServerRuntime]:
         with self._lock:
             if self._servers and time.monotonic() - self._loaded_at < 60.0:
@@ -410,8 +453,7 @@ class MCPBridge:
                     runtime_cfg = {**entry, "_cwd": str(self._cwd)}
                     # 非会话级 stdio server 也注入 PW_PROJECT_ID + mcp.json 的 `env`
                     # 字段：薄客户端型 MCP（如 fir-proxy 控制面）靠它反查平台 API。
-                    env_extra = dict(entry.get("env") or {}) \
-                        if isinstance(entry.get("env"), dict) else {}
+                    env_extra = self._env_for_entry(name, entry)
                     if self.project_id:
                         env_extra["PW_PROJECT_ID"] = self.project_id
                     servers[name] = MCPServerRuntime(name, runtime_cfg,
@@ -441,8 +483,7 @@ class MCPBridge:
                 raise _TooManyBrowserSessions(
                     f"并发浏览器会话已达上限 {self.MAX_BROWSER_SESSIONS}"
                     f"（当前会话 {session_id[:12]} 无法再开浏览器）")
-            env = dict(entry.get("env") or {}) \
-                if isinstance(entry.get("env"), dict) else {}
+            env = self._env_for_entry(name, entry)
             env[self.SESSION_ENV_KEY] = session_id
             if self.project_id:
                 env["PW_PROJECT_ID"] = self.project_id

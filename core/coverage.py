@@ -6,12 +6,18 @@ core.orchestrator（其反向依赖）。输入资产/发现快照，输出分�
 对账面：host/domain/url/service 四类资产（与编排器 _assets_view targetable
 口径一致；binary 等不入组）。口径拍板记录在
 docs/plans/orchestrator-efficiency.md §0-6，**2026-10-09 改三态**（见
-docs/plans/归档-已完成/asset-tri-state.md 与 DESIGN.md §三「资产三态」）：
+docs/plans/归档-已完成/asset-tri-state.md 与 DESIGN.md §三「资产三态」）；
+**2026-10-10 有洞与状态解耦**（见下）：
 - **三态**（asset-tri-state）= 未测试(`open`，不设状态) / 已访问(`visited`) /
-  已测试干净(`tested_clean`)。**有 finding 挂链不再是收口**——有洞 ≠ 测干净；
-  收口味只剩 tested_clean/na(人工裁定)/dead_end(此路不通)。FP-only 视作死路味；
-  `scanning` 并入 `visited`（派发是一批一批派、无任务认领，无孤儿半程）；
-  budget_stop 算 `visited`（预算停 ≠ 测完，宁严勿松）。
+  已测试干净(`tested_clean`)。收口味 = tested_clean/na(人工裁定)/dead_end(此路不通)；
+  FP-only 视作死路味；`scanning` 并入 `visited`（派发是一批一批派、无任务认领，
+  无孤儿半程）；budget_stop 算 `visited`（预算停 ≠ 测完，宁严勿松）。
+- **有洞与状态正交（2026-10-10）**：finding 挂链是**独立标签**（`has_findings`
+  布尔位），**不再参与状态判定**——显式 tested_clean 的资产即使后补挂洞仍是
+  `tested_clean`；父节点「全子 clean」即 clean，不因子树有洞被阻断。前端并列
+  两枚徽章（状态 + 有发现）。`terminal-finding` 只描述「无显式状态却已出洞」的
+  裸资产（视作 visited）。**「测得干不干净」由写入门禁把关**（store.set_asset_status：
+  有子拒写 + 叶子须死路意图背书 + 须带 note），与有没有洞本就正交。
 - 收敛传播（asset-tree-derived-clean D3，2026-09-24 修订）：叶子 converged =
   自身收口；父节点 converged = 有子 AND 全部子 converged——父状态由子树读时
   派生，不再要求自身 visited 佐证。**加子破 clean**（新子 open → 父掉出 clean）。
@@ -35,7 +41,8 @@ TRI_UNTESTED = "open"        # 未测试（不设状态）
 TRI_VISITED = "visited"      # 已访问（碰过，未测尽）
 TRI_CLEAN = "tested_clean"   # 已测试干净（穷尽）
 
-# 收口味（可计入"已测试干净"）——**发现挂链不在列：有洞 ≠ 测干净**。
+# 收口味（可计入"已测试干净"）——**发现挂链不在列**（terminal-finding 无显式状态
+# 时归 visited）。
 _SETTLING_FLAVORS = ("terminal-tested_clean", "terminal-na", "terminal-dead_end")
 
 
@@ -45,8 +52,12 @@ def is_settled(flavor: str) -> bool:
 
 
 def tri_state_of(flavor: str) -> str:
-    """对账态 → 三态。收口味→tested_clean；terminal-finding→visited（有洞≠干净）；
-    visited→visited；其余（open）→open。"""
+    """对账态 → 三态。收口味→tested_clean；terminal-finding→visited（无显式状态的
+    裸资产有洞=碰过但未收口）；visited→visited；其余（open）→open。
+
+    注：显式 tested_clean 的资产即使挂洞也走 `terminal-tested_clean`→clean
+    （asset_terminal_state 状态机终态优先）——**有洞是与状态正交的独立标签**
+    （2026-10-10），由 `has_findings` 标示，不再降级状态。"""
     if flavor in _SETTLING_FLAVORS:
         return TRI_CLEAN
     if flavor in ("terminal-finding", "visited"):
@@ -58,10 +69,13 @@ def asset_terminal_state(asset: dict, findings: list[dict] | None = None) -> str
     """单资产对账态：terminal-<flavor> | visited | open。
 
     flavor：tested_clean/na（状态机口径）、dead_end（meta 标记或仅 FP 发现——
-    全是误报意味着这条路被否了）、finding（有非 FP 发现挂链——**独立一味，供
-    has_findings 识别，但不计入收口**：有洞 ≠ 测干净）。
+    全是误报意味着这条路被否了）、finding（**无显式状态**的资产挂了非 FP 发现）。
     判定顺序：状态机终态 > 死路标记 > 发现挂链 > 半程 > open。
     `scanning` 并入 `visited`（三态归并，读时不区分在跑/半程）。
+
+    有洞是与状态正交的标签：**显式 tested_clean/na 的资产即使挂洞也走状态机终态**
+    （洞由 effective_status_map 的 has_findings 标示，不再降级状态）。`terminal-finding`
+    只描述「没标状态却已出洞」的裸资产（视作 visited）。
     """
     st = asset.get("status") or "open"
     if st in TERMINAL_STATUSES:
@@ -177,12 +191,13 @@ def effective_status_map(assets: list[dict],
     (`open`/`visited`/`tested_clean`)。
 
     - **叶子节点**：显式 status 经 `tri_state_of` 归一（basis=explicit）。
-      **发现压过显式 clean**——叶子显式 tested_clean 但挂非 FP 发现 → 读时降级
-      `visited`（后补的洞作废 clean，无需迁移）。零子资产根行保持 AI 显式管理
-      不自动派生（D5）。
-    - **有子资产节点**：basis=derived。**有洞 → visited**（不派生 clean）；
-      否则全子 `tested_clean` → `tested_clean`；全子 `open` → `open`（父未测）；
-      其余（混合）→ `visited`。has_findings 沿子树向上传播。
+      **有洞不参与状态判定**（2026-10-10）——叶子显式 tested_clean 挂非 FP 发现
+      仍为 `tested_clean`（洞由 `has_findings` 独立标示，前端并列徽章）；无显式
+      状态的裸资产挂洞 → `terminal-finding` → `visited`（碰过未收口）。零子资产
+      根行保持 AI 显式管理不自动派生（D5）。
+    - **有子资产节点**：basis=derived。**有洞不阻断父派生 clean**——全子
+      `tested_clean` → `tested_clean`；全子 `open` → `open`（父未测）；其余（混合）
+      → `visited`。has_findings 沿子树向上传播（纯标签，不改变 status）。
     - 端口面：service 即 host 的子节点，未全部收口时 host 不得派生 clean
       （通用子树规则天然覆盖）。
     """
@@ -212,9 +227,9 @@ def effective_status_map(assets: list[dict],
             fnds = findings_by_asset.get(aid) or []
             own_findings = any(f.get("status") != "false-positive" for f in fnds)
             ts = asset_terminal_state(a, fnds)
-            # 发现压过显式 clean：有非 FP 发现 → visited（后补的洞作废 clean）。
-            # 直接查发现列表——asset_terminal_state 里状态机终态压过发现，取不到。
-            status = TRI_VISITED if own_findings else tri_state_of(ts)
+            # 有洞是独立标签、不参与状态判定（2026-10-10）：显式 clean 后补挂洞
+            # 仍为 clean（洞由 has_findings 另行标示，前端并列徽章）。
+            status = tri_state_of(ts)
             memo[aid] = {
                 "status": status, "basis": "explicit",
                 "settled": status == TRI_CLEAN,
@@ -223,9 +238,9 @@ def effective_status_map(assets: list[dict],
         else:
             kid_views = [calc(k["id"]) for k in kids]
             has_findings = any(v["has_findings"] for v in kid_views)
-            if has_findings:
-                status = TRI_VISITED           # 子树有洞 → 父不 clean（发现不上传 clean）
-            elif all(v["status"] == TRI_CLEAN for v in kid_views):
+            # 有洞不阻断父派生 clean（2026-10-10）：has_findings 只上传播作标签，
+            # 状态纯看子树是否全收口。
+            if all(v["status"] == TRI_CLEAN for v in kid_views):
                 status = TRI_CLEAN
             elif all(v["status"] == TRI_UNTESTED for v in kid_views):
                 status = TRI_UNTESTED          # 全子未测 → 父未测

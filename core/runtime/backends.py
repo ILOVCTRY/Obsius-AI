@@ -175,11 +175,21 @@ class WSLBackend(NativeBackend):
 DEFAULT_PENTEST_IMAGE = "cyberstrike/pentest-box:0.1"
 
 
+def docker_network(net: str) -> str:
+    """网关网络模式 → docker `--network` 值（L2/L3 单一映射出处）。
+
+    real → bridge：容器走 NAT 出网（可 run_cmd 直接指定，见 DESIGN §7）。
+    **曾漏 real 落 else 分支变 none**——docker+real 实际断网，而事件/审计仍记 real，
+    与「显式要真网」语义相反（pen-test 项目 docker 出口不通、wsl 却能通的根因）。
+    """
+    return {"none": "none", "bridge": "bridge", "real": "bridge"}.get(net, "none")
+
+
 def sandbox_docker_args(net: str) -> list[str]:
     """L3 加固参数（DESIGN.md §7）：无挂载、限额、降权。fakenet 下一里程碑实现。"""
     if net not in {"none", "real"}:
         raise NotImplementedError(f"网络模式 {net} 尚未实现（fakenet=INetSim sidecar，下一里程碑）")
-    docker_net = {"none": "none", "real": "bridge"}[net]  # real=宿主网络栈，可 run_cmd 直接指定
+    docker_net = docker_network(net)
     args = [
         "--rm",                       # 一次性生命周期：跑完即焚
         "--network", docker_net,
@@ -225,7 +235,7 @@ class DockerBackend:
         if sandbox:
             argv += sandbox_docker_args(net)
         else:
-            argv += ["--rm", "--network", net if net in {"none", "bridge"} else "none"]
+            argv += ["--rm", "--network", docker_network(net)]
             for host_path, cpath in (mounts or []):
                 # 宿主路径转正斜杠：docker -v 在 Windows 上两种斜杠都收，正斜杠免转义
                 argv += ["-v", f"{str(host_path).replace(chr(92), '/')}:{cpath}"]
@@ -248,7 +258,7 @@ class DockerBackend:
         **绝不带 --rm**（常驻容器自毁会毁掉复用语义）。生命周期由
         SessionContainerManager 管理（冻结/删除/对账/reap）。"""
         argv = ["run", "-d", "--name", name,
-                "--network", net if net in {"none", "bridge"} else "none"]
+                "--network", docker_network(net)]
         for k, v in labels.items():
             argv += ["--label", f"{k}={v}"]
         for host_path, cpath in (mounts or []):

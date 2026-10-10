@@ -31,7 +31,7 @@ Python 3.11+ / FastAPI、React + TypeScript + Vite SPA、SQLite (WAL)（可平�
 
 ## 顶层目录契约与卫生体检（workspace-hygiene，2026-09-23 实施）
 
-**目录归位（D1/D2）**：全局战役记忆库 `workspaces/campaign.db` → `data/campaign.db`（`_migrate_legacy_db` 默认构造惰性迁移：主库 rename 先行、失败降级留老位置下次启动重试〔shutdown 僵尸场景天然自愈〕，主库成功后 -wal/-shm 尽力而为绝不回退——老位置无主库时回退会 sqlite 新建空库丢数据；app 工厂传 workspace_root 同级 data/，测试传 tmp workspace 保持 hermetic）；serve 窗口模式日志 → `logs/serve-window.log`；workspaces 根四份历史散落日志一次性归档 `logs/archive/`。**遗物收编（D3/D4）**：项目根 `artifacts/` 早期调试遗物（曾被 git 误跟踪）mv 进 `workspaces/.trash/artifacts-legacy-<ts>/` + `git rm --cached` 解跟踪，re1_probe 空壳 ×5 同收；`.gitignore` 补 `data/`/`logs/`/`artifacts/`（防遗物再入库，恢复=从 .trash 手动移回）。**膨胀感知（D6）**：`GET /api/workspace-hygiene` 纯只读三段体检——workspaces 根陌生条目（无 project.json 目录/散文件，白名单 .trash/CLAUDE.md，迁移降级残留从这可见）/ 各项目 `.tmp/scratch/spill/browser-profile` 超阈（100MB warning、500MB error）/ .trash 规模；只报告不处置（处置入口=已有 scratch/clear 与手动移回）。**明确不做**：自动删除/自动老化任何产物、.trash 自动清空、存量项目内部布局治理（归 task-workspace 方案域）。
+**目录归位（D1/D2）**：全局战役记忆库 `workspaces/campaign.db` → `data/campaign.db`（`_migrate_legacy_db` 默认构造惰性迁移：主库 rename 先行、失败降级留老位置下次启动重试〔shutdown 僵尸场景天然自愈〕，主库成功后 -wal/-shm 尽力而为绝不回退——老位置无主库时回退会 sqlite 新建空库丢数据；app 工厂传 workspace_root 同级 data/，测试传 tmp workspace 保持 hermetic）；serve 窗口模式日志 → `logs/serve-window.log`；workspaces 根四份历史散落日志一次性归档 `logs/archive/`。**遗物收编（D3/D4）**：项目根 `artifacts/` 早期调试遗物（曾被 git 误跟踪）mv 进 `workspaces/.trash/artifacts-legacy-<ts>/` + `git rm --cached` 解跟踪，re1_probe 空壳 ×5 同收；`.gitignore` 补 `data/`/`logs/`/`artifacts/`（防遗物再入库，恢复=从 .trash 手动移回）。**膨胀感知（D6）**：`GET /api/workspace-hygiene` 纯只读三段体检——workspaces 根陌生条目（无 project.json 目录/散文件，白名单 .trash/CLAUDE.md，迁移降级残留从这可见）/ 各项目 `.tmp/scratch/spill/browser-profile` 超阈（100MB warning、500MB error）/ .trash 规模；只报告不处置（处置入口=已有 scratch/clear 与手动移回）。**项目回收站（2026-10-10）**：项目删除=整目录 rename 进 `workspaces/.trash/<slug>-<UTC>/`（不物理删除），前端左导航「回收站」页一键查看/恢复——`GET /api/projects/trash`（每项带 `trash_name`=目录名=恢复句柄）+ `POST /api/projects/{trash_name}/restore`（反向 rename 移回，同名自动加 `-2/-3` 后缀、项目 name/id 不变）。**明确不做**：自动删除/自动老化任何产物、.trash 自动清空、回收站彻底删除、存量项目内部布局治理（归 task-workspace 方案域）。
 
 ## 开发硬约束
 
@@ -182,10 +182,10 @@ events 表全量审计 + EventBus 同步落库、尽力广播；前端按游标�
 | 状态 | 落库值 | 判据 |
 |---|---|---|
 | **未测试** | 不设（`open`） | 从没碰过 |
-| **已访问** | `visited` | 碰过 **∧**（有未覆盖适用面 **∨** 有洞） |
-| **已测试干净** | `tested_clean` | 碰过 **∧** 适用面全覆盖 **∧** 无洞 |
+| **已访问** | `visited` | 碰过 **∧** 有未覆盖适用面 |
+| **已测试干净** | `tested_clean` | 碰过 **∧** 适用面全覆盖 |
 
-要点：**有发现 ≠ 已测试干净**（`is_settled` 收口味 = `tested_clean`/`na`/`dead_end`，**不含 finding**；`na` 归 clean——测过了结论是「没什么可测」，`dead_end` 归 clean——此路不通）；**`scanning` 并入 `visited`**（派发是一批一批派、非任务认领，无孤儿半程；写入门仍接受 scanning/存量行，读时归一到 visited，零迁移）；**发现压过显式 clean（读时降级）**——叶子显式 `tested_clean` 但挂非 FP 发现 → 读时降级 `visited`、`settled=False`，历史行不动。`coverage_report.is_converged` 同口径（`is_settled` 替 `startswith("terminal")`）：带洞资产不收敛、留 uncovered，组内 `terminal` 计 = 已测干净数。
+要点：**有洞与状态正交（2026-10-10）**——finding 挂链是**独立标签**（`has_findings` 布尔位），**不参与状态判定**：显式 `tested_clean` 的资产即使后补挂非 FP 发现仍为 `tested_clean`（`settled=True`）；父节点「全子 clean」即 clean，不因子树有洞被阻断。前端徽章位拆成**两枚并列**（状态 + 「有发现」），允许 `已访问+有发现` / `已测试·干净+有发现` 同时出现。「有洞 ≠ 测干净」中的「测干净」改由**写入门禁**把关（`store.set_asset_status`：有子拒写 + 叶子须死路意图背书 + 须带 note），而非由 findings 覆写状态。`is_settled` 收口味 = `tested_clean`/`na`/`dead_end`（**不含 finding**；`na` 归 clean——测过了结论是「没什么可测」，`dead_end` 归 clean——此路不通）；`terminal-finding` 只描述**无显式状态**的裸资产挂洞（视作 `visited`——碰过但未收口）。**`scanning` 并入 `visited`**（派发是一批一批派、非任务认领，无孤儿半程；写入门仍接受 scanning/存量行，读时归一到 visited，零迁移）。`coverage_report` 与 `effective_status_map` 同口径：裸资产出洞不收敛、留 uncovered，组内 `terminal` 计 = 已测干净数（含挂洞的显式 clean）。
 
 **消费方**：`orchestrator._assets_view` 出口按三态重排——`untested`（未测试清单）/`in_progress`（已访问，未测尽，**含带洞资产**）/`clean_count`（已测干净，只给计数防重复派）；`_covered_ids` = 已测干净（`high_value.covered` 语义随之收紧）；兼容键 `uncovered`↔`untested`、`done_count`/`clean_count` 同值。**主控（workbench chat-orchestrator）态势注入（D8，2026-10-09 已落地）**：`coverage.situation_snapshot` 三态分桶快照（untested/visited 清单 cap + clean_ids + counts）+ `core/chat/runtime.py::_situation_context()` 注入主控 system——主控不必再靠 bb_query 手动搜资产拼现状，每轮重投影、读取失败降级占位；与子专家 `_mission_context`（分配资产台账+维度面）对称。实施记录见 `docs/plans/归档-已完成/asset-tri-state.md`。
 
@@ -244,7 +244,7 @@ events 表全量审计 + EventBus 同步落库、尽力广播；前端按游标�
 
 `core/coverage.py` 纯函数查询层（地位仿 phases.py，不 import core.orchestrator），**对账面 = host/domain/url/service 四类资产**（与 _assets_view targetable 同口径，binary 不入组）。口径（宁严勿松）：
 
-- **对账态（2026-10-09 改三态，见 §三「资产三态」）**：`status ∈ {tested_clean, na}` ∪ `meta.dead_end` 为**收口味**（可计入已测试干净）；**有 finding 挂链不收敛**（有洞 ≠ 测干净，FP-only=死路味例外）；`visited/scanning` 算已访问；**budget_stop 算 visited**（预算停 ≠ 测完，宁严勿松）。判定顺序：状态机终态 > 死路标记 > 发现挂链 > 半程 > open。
+- **对账态（2026-10-09 改三态、2026-10-10 有洞解耦，见 §三「资产三态」）**：`status ∈ {tested_clean, na}` ∪ `meta.dead_end` 为**收口味**（可计入已测试干净）；**有 finding 挂链不参与状态判定**——显式 clean 的资产挂洞仍收口，只有**无显式状态**的裸资产挂洞由 `terminal-finding` 视作 visited（FP-only=死路味）；`visited/scanning` 算已访问；**budget_stop 算 visited**（预算停 ≠ 测完，宁严勿松）。判定顺序：状态机终态 > 死路标记 > 发现挂链 > 半程 > open。
 - **收敛传播**：叶子 converged=自身收口；父节点 converged=有子 AND 全部子 converged——**父收敛只看子树，不要求自身 visited 佐证**（D3，2026-09-24 修订；host 的 IP 直连/服务面经子节点记账）。
 - **归组 group_key**：沿 parent_id 链走到根——根 domain → `domain:<value>`、根 host → `host:<value>`、孤儿自成组 `<type>:<value>`（与 target_keys_of 归一化键口径对齐）。
 - **输出**：`coverage_report(bb, pid)` → `{overall:{groups,groups_done,assets,converged}, by_group:[{group,total,terminal,converged,done,uncovered[]}]}（uncovered open 态优先排序）`。agent 侧 dead_end 标记路径随 M5/M6 的 F1 死路记账口径一起收口。
@@ -317,6 +317,8 @@ L0 host < L1 wsl < L2 docker < L3 sandbox（--rm 一次性 / 断网 / 512m / cap
 ## 渗透命令容器化（pentest-tools-container-m0 M1，2026-09-23 定稿并实施）
 
 **大脑宿主、容器为手**：LLM/agent loop/编排器留 Windows 宿主（F6 浏览器/桌面壳/打包线/Windows 特调/调试链路五理由）；trusted 渗透命令引导走 Linux 容器——`docker` runtime 默认镜像 `cyberstrike/pentest-box:0.1`（Debian slim 三层：基础 curl/jq/dnsutils 等 → web 渗透 nmap/sqlmap/dirsearch/ffuf → python3+requests/pymssql/pycryptodome 等；tools/pentest-box/Dockerfile，`scripts/build_pentest_box.py` 构建）。workspace 传入时挂载 `<ws>:/workspace` 读写 + cwd=`/workspace/scratch`（对齐 host/wsl 相对路径习惯），pathguard 切容器内 posix 语义校验；sandbox 忽略挂载（L3 零挂载铁律）。引导面：run_cmd 描述 + STRICT_PROMPT_TAIL 第 9 条（docker=渗透首选镜像就绪时 / host=Windows 特调 / wsl=bash 兜底）；detector 查镜像缺失给构建指引。实战动机：环境摩擦耗 1/3 步数（PowerShell 转义/编码/工具链现装），容器一次性消除整类问题。M2 默认切换待实战反馈。
+
+**出网口径（2026-10-11 修）**：L2 docker 的 `--network` 经 `docker_network(net)` 单一映射（backends.py，L2/L3 共用）——**real/bridge→bridge（NAT 出网）、none→none**。此前 `run_once`/`run_detached` 用 `net if net in {"none","bridge"} else "none"`，把 real 落 else 变 none：**docker+real 实际断网**，而 command 事件/审计仍记 `net:real`（与「显式要真网」语义相反）。实战事故（pentest-20261010-0a36，河南农业）：同一目标 docker+real 全 `exit 6`（curl 无法解析）而 wsl+real `code=301`，容器内 `getent/getent hosts` 空、路由表只有表头 —— 即此坑；agent 换 wsl 才通。语义说明：real 走 docker bridge NAT（**非** `--network host`），拿的是 docker 网段出口 IP。会话级常驻容器 `_Container.net` 记录建容器网络，net 变了 ensure 先 rm 再建（docker 网络不可热改）。
 
 ## 内置浏览器证书口径（2026-09-24 定稿并实施）
 

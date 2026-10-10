@@ -125,8 +125,11 @@ def rep_overall_done(rep: dict) -> bool:
 
 
 def test_finding_attachment_not_settled_and_fp_only(env):
-    """**有发现 ≠ 测干净**（2026-10-09 三态）：非 FP 发现挂链 → 不收敛、留 uncovered；
-    FP-only = 死路味，仍算收口（这条路被否了）。"""
+    """**无显式状态的裸资产出洞视作 visited**（2026-10-10 有洞与状态解耦后）：
+    非 FP 发现挂链 → `terminal-finding` → 不收敛、留 uncovered；FP-only = 死路味，
+    仍算收口（这条路被否了）。**注**：显式 tested_clean 的资产挂洞仍是 clean
+    （见 test_effective_explicit_clean_survives_finding）——本用例的两个资产均
+    无显式状态。"""
     bb, proj = env
     pid = proj["id"]
     h1 = bb.upsert_asset(pid, "host", "10.1.1.1")["id"]
@@ -138,7 +141,7 @@ def test_finding_attachment_not_settled_and_fp_only(env):
 
     rep = coverage_report(bb, pid)
     keys = {g["group"]: g for g in rep["by_group"]}
-    # 出洞资产不算已测干净 → 留 uncovered（state=visited），未收敛
+    # 裸资产出洞（未标状态）→ visited，留 uncovered、未收敛
     g1 = keys["host:10.1.1.1"]
     assert g1["terminal"] == 0 and g1["done"] is False
     assert [u["state"] for u in g1["uncovered"]] == ["visited"]
@@ -234,7 +237,8 @@ def test_effective_na_dead_end_children_settle(env):
 
 def test_effective_service_port_face_and_findings(env):
     """⑪ 端口面：service 子节点未收口时 host 不得 clean；findings 沿树向上传播。
-    **有 finding 的子树不派生 clean**（有洞 ≠ 测干净，2026-10-09）。"""
+    洞挂在**无显式状态**的裸 url 上 → 视作 visited（碰过未收口）；父因「混合子态」
+    （na 收口 + url 未收口）派生 visited，与洞无关（2026-10-10 有洞不入状态判定）。"""
     bb, proj = env
     pid = proj["id"]
     host = bb.upsert_asset(pid, "host", "10.5.5.5")["id"]
@@ -243,7 +247,7 @@ def test_effective_service_port_face_and_findings(env):
     assert m[host]["status"] == "open"
     bb.set_asset_status(svc, "na", note="端口关闭")
     assert effective_status_map(bb.list_assets(pid))[host]["status"] == "tested_clean"
-    # finding 挂叶子 → has_findings 向父传播；叶子降级 visited、父不派生 clean
+    # finding 挂裸 url → has_findings 向父传播；url 视作 visited、父因混合子态 visited
     url = bb.upsert_asset(pid, "url", "http://10.5.5.5/x", parent_id=host)["id"]
     bb.add_finding(pid, vuln_class="sqli", title="注入", target_asset_id=url,
                    severity="high", status="verified")
@@ -253,21 +257,38 @@ def test_effective_service_port_face_and_findings(env):
     assert m[host]["status"] == "visited" and m[host]["settled"] is False
 
 
-def test_effective_finding_overrides_explicit_clean(env):
-    """**发现压过显式 clean（读时降级）**：叶子显式 tested_clean 后补挂发现 →
-    effective 降级 visited、settled=False——历史行不动，读时兜（asset-tri-state）。"""
+def test_effective_derived_clean_survives_findings(env):
+    """**有洞不阻断父派生 clean（2026-10-10）**：全子显式 clean，其中一子挂 verified
+    洞 → 父仍 tested_clean（settled=True），has_findings 沿树向上传播作标签。"""
+    bb, proj = env
+    pid = proj["id"]
+    host, u1, u2 = _tree(bb, pid)
+    _mark_clean(bb, pid, u1)
+    _mark_clean(bb, pid, u2)
+    assert effective_status_map(bb.list_assets(pid))[host]["status"] == "tested_clean"
+    bb.add_finding(pid, vuln_class="rce", title="u1 出洞", target_asset_id=u1,
+                   severity="high", status="verified")
+    m = effective_status_map(bb.list_assets(pid), bb.list_findings(pid))
+    assert m[u1]["status"] == "tested_clean" and m[u1]["has_findings"] is True
+    assert m[host]["status"] == "tested_clean" and m[host]["settled"] is True
+    assert m[host]["has_findings"] is True
+
+
+def test_effective_explicit_clean_survives_finding(env):
+    """**有洞与状态正交（2026-10-10）**：叶子显式 tested_clean 后补挂非 FP 发现 →
+    状态仍 tested_clean、settled=True；洞由 has_findings 独立标示（前端并列徽章）——
+    有洞不参与状态判定（此前为「发现压过显式 clean」降级 visited）。"""
     bb, proj = env
     pid = proj["id"]
     leaf = bb.upsert_asset(pid, "host", "10.8.8.8")["id"]
     _mark_clean(bb, pid, leaf, "单点全测")
     assert effective_status_map(bb.list_assets(pid))[leaf]["status"] == "tested_clean"
-    # 落库显式 tested_clean 不动，后补一个非 FP 发现
+    # 后补一个非 FP 发现——状态不变，洞只作标签
     bb.add_finding(pid, vuln_class="rce", title="后补洞", target_asset_id=leaf,
                    severity="high", status="verified")
     m = effective_status_map(bb.list_assets(pid), bb.list_findings(pid))
-    assert m[leaf]["status"] == "visited" and m[leaf]["settled"] is False
+    assert m[leaf]["status"] == "tested_clean" and m[leaf]["settled"] is True
     assert m[leaf]["has_findings"] is True
-    # 库里的显式 status 仍是 tested_clean（读时降级，零迁移）
     assert bb.get_asset(leaf)["status"] == "tested_clean"
 
 

@@ -325,7 +325,8 @@ tool(
     flags=(),
     description=(
         '流转资产扫描/测试状态（open→visited→scanning→tested_clean/budget_stop/na）。访问≠测试：访问过标 vi'
-        'sited、开始扫描标 scanning、测完且无发现才标 tested_clean；预算/配额用尽被迫停手标 budget_stop、确认不适用（如非'
+        'sited、开始扫描标 scanning、测完（适用面全覆盖）标 tested_clean**（有洞与否不改变状态——测出洞直接 bb_add_finding，'
+        '状态仍可标 tested_clean，前端「有发现」徽章与状态并列）**；预算/配额用尽被迫停手标 budget_stop、确认不适用（如非'
         '目标协议/离线主机）标 na——三者一样必须带 note（服务端强制），让「哪里没挖完、为什么」可对账。tested_clean 强制四问+逐资产背书（'
         '2026-09-29）：①tested_what 你对该资产自己测了什么（具体动作清单：路径/方法/响应特征）——「与同模板/基线一致」不等于已测试；②'
         'viewpoint 探测视角（docker 出口/直连/浏览器），遇 WAF/WebVPN 拦截页（如 488/403）必须说明如何排除是出口假象；③w'

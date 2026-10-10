@@ -95,6 +95,11 @@ export const api = {
     }),
   deleteProject: (pid: string) =>
     http<{ status: string; trash_path: string }>(`/api/projects/${pid}`, { method: "DELETE" }),
+  // 回收站（DESIGN.md §5.3）：列出已删项目 / 一键恢复（同名后端自动加后缀）
+  listTrashedProjects: () => http<ProjectMeta[]>("/api/projects/trash"),
+  restoreProject: (trashName: string) =>
+    http<{ project_id: string | null; slug: string; status: string }>(
+      `/api/projects/${encodeURIComponent(trashName)}/restore`, { method: "POST" }),
   listRoles: (pid: string) => http<RoleInfo[]>(`/api/projects/${pid}/roles`),
 
   // 黑板（读）

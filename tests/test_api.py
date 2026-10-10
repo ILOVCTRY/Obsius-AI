@@ -637,6 +637,37 @@ def test_delete_unknown_project_404(client):
     assert client.delete("/api/projects/nope").status_code == 404
 
 
+def test_list_trash_endpoint(client):
+    pid = _make_project(client)
+    # 删除前回收站为空；静态段 /trash 不被 {pid} 路由吃掉（应 200 非 404）
+    assert client.get("/api/projects/trash").status_code == 200
+    assert client.get("/api/projects/trash").json() == []
+    assert client.delete(f"/api/projects/{pid}").status_code == 200
+    trashed = client.get("/api/projects/trash")
+    assert trashed.status_code == 200
+    items = trashed.json()
+    assert len(items) == 1
+    assert items[0]["id"] == pid and items[0]["trash_name"]
+
+
+def test_restore_project_endpoint(client):
+    pid = _make_project(client)
+    client.delete(f"/api/projects/{pid}")
+    trash_name = client.get("/api/projects/trash").json()[0]["trash_name"]
+    r = client.post(f"/api/projects/{trash_name}/restore")
+    assert r.status_code == 201
+    body = r.json()
+    assert body["status"] == "restored" and body["project_id"] == pid
+    # 恢复后：回收站清空、详情可查、列表含它
+    assert client.get("/api/projects/trash").json() == []
+    assert client.get(f"/api/projects/{pid}").status_code == 200
+    assert any(m["id"] == pid for m in client.get("/api/projects").json())
+
+
+def test_restore_unknown_404(client):
+    assert client.post("/api/projects/nope-1/restore").status_code == 404
+
+
 def test_delete_project_with_open_websocket(client):
     """删除竞态回归：WS 保持连接（每秒 tick 在池线程持有该库连接）时删除必须成功，
     WS 收 1008 关闭。旧实现下 close_all 后 tick 立刻惰性重连锁死 db，rename 必败 422。"""

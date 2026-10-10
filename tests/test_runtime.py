@@ -184,6 +184,42 @@ def test_sandbox_docker_args(monkeypatch):
         sandbox_docker_args("fakenet")  # 下一里程碑，未实现必须显式失败
 
 
+def test_docker_network_mapping():
+    """网关网络模式 → --network 映射（单一出处）：real/bridge→bridge 出网、none→none。
+    **回归钉子**：曾漏 real 落 else 变 none——docker+real 断网而事件仍记 real
+    （pen-test docker 出口不通的根因）。"""
+    from core.runtime.backends import docker_network
+    assert docker_network("real") == "bridge"
+    assert docker_network("bridge") == "bridge"
+    assert docker_network("none") == "none"
+    assert docker_network("") == "none"        # 未知值宁严勿松：断网
+    assert docker_network("weird") == "none"
+
+
+def test_docker_run_once_real_uses_bridge(monkeypatch):
+    """L2 docker + net=real 必须拿 bridge（出网），绝不成 none。"""
+    calls = []
+
+    def fake_popen(argv, **kwargs):
+        calls.append(argv)
+        class P:
+            returncode = 0
+
+            def poll(self):
+                return 0
+        return P()
+
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+    d = DockerBackend()
+    d.run_once("img", "id", net="real")
+    argv = calls[0]
+    assert argv[argv.index("--network") + 1] == "bridge"
+    d.run_detached("img", "sleep infinity", name="csp_p_s",
+                   labels={"csp.managed": "1"}, net="real")
+    argv2 = calls[1]
+    assert argv2[argv2.index("--network") + 1] == "bridge"
+
+
 def test_docker_run_once_sandbox_invocation(monkeypatch):
     calls = []
 

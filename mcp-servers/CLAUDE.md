@@ -2,6 +2,10 @@
 
 > 外部 MCP server 的**本地安装与启动器**（不是平台代码）。平台经 `config/mcp.json` 引用，`core/chat/mcp_bridge.py` 按会话起进程。
 
+## FOFA 密钥统一（2026-10-11）
+
+fofa MCP server（外部仓库 `E:\ILOVCTRY\SRC\src-strike\mcp-servers\fofa_MCP\fofa.py`）自己读的是**它自己目录**的 `.env`（`FOFA_KEY`），与平台「网络空间测绘」配置 `config/fofa.json` 是**两份、会漂移**。修法：平台在 `mcp_bridge._env_for_entry()` 对 `FOFA_SERVERS`（`fofa`/`fofa-search`/`fofa_mcp`）**注入来自 `config/fofa.json` 的 `FOFA_KEY`/`FOFA_EMAIL`**（`_fofa_env_from_config()` 实时读，绝不复制密钥）。fofa.py 优先取进程 env（`os.getenv`）且 `load_dotenv` 不覆盖已存在变量，故注入生效、其自带 `.env` 被旁路。`config/mcp.json` 条目的显式 `env`（如 `{"env":{"FOFA_KEY":"..."}}`）优先级更高，供刻意覆盖。**单一真相源恒为 `config/fofa.json`**——改 key 只需改测绘设置，MCP 立即跟随。
+
 ## fir-proxy-mcp/
 
 - `fir_proxy_mcp.py` 单文件（stdio，`mcp.server.fastmcp`）：**薄客户端**——不自己管池、不起 serve，只把平台代理池 API（默认 `http://127.0.0.1:8420`）暴露成 10 个工具（`proxy_status/list/start/stop/rotate/select/add/remove/fetch/validate`），让 AI 取端点/IP 列表后自行 `curl -x`。

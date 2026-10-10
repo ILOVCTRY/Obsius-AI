@@ -13,6 +13,7 @@ import {
   Globe2,
   Inbox,
   FolderKanban,
+  Trash2,
   FolderTree,
   LayoutDashboard,
   Maximize2,
@@ -38,6 +39,7 @@ import { RevCompact } from "@/views/reverse/RevCompact"
 import { deriveWorkbenchProfile } from "@/lib/workbench"
 import { useEvents } from "@/lib/useEvents"
 import { ProjectsView } from "@/views/ProjectsView"
+import { TrashView } from "@/views/TrashView"
 import { IntelView } from "@/views/IntelView"
 import { BrowserView } from "@/views/browser/BrowserView"
 import { FuzzerView } from "@/views/fuzzer/FuzzerView"
@@ -58,7 +60,7 @@ import { bindingBadge } from "@/lib/taxonomy"
 // 左缘悬浮把手唤出；状态 localStorage（ui.nav-collapsed）。收起=条件渲染卸载
 // nav Panel+Separator（同 boardOpen 先例），重挂由 useDefaultLayout 恢复宽度。
 
-type View = "projects" | "intel" | "live" | "board" | "agents" | "browser" | "fuzzer" | "proxy" | "sample-analysis" | "knowledge" | "skills" | "settings"
+type View = "projects" | "intel" | "trash" | "live" | "board" | "agents" | "browser" | "fuzzer" | "proxy" | "sample-analysis" | "knowledge" | "skills" | "settings"
 
 /** M4c 场景档 board_view 默认视图（config.board_view.default；黑板上自行校验可用 tab 回退） */
 const boardViewOf = (m: ProjectDetail | null): string | undefined => {
@@ -74,6 +76,7 @@ const NAV_GROUPS: { label: string; items: NavItem[]; collapsible?: boolean }[] =
     items: [
       { key: "projects", label: "项目", icon: FolderKanban, needsProject: false },
       { key: "intel", label: "情报", icon: Inbox, needsProject: false, homeOnly: true },
+      { key: "trash", label: "回收站", icon: Trash2, needsProject: false, homeOnly: true },
       { key: "agents", label: "智能体", icon: Bot, needsProject: true },
       { key: "board", label: "黑板", icon: LayoutDashboard, needsProject: true },
     ],
@@ -424,6 +427,8 @@ export default function App() {
               <main className="app-content h-full min-h-0 min-w-0 overflow-hidden">
                 {view === "intel"
                   ? <IntelView />
+                  : view === "trash"
+                    ? <TrashView />
                   : view === "knowledge"
                     ? <KnowledgeView />
                     : view === "skills"

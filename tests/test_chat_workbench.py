@@ -16,7 +16,14 @@ from core.api.app import create_app
 from core.blackboard.intents import close_intent, declare_intent
 from core.blackboard.store import Blackboard
 from core.chat import store as chat_store
-from core.chat.mcp_bridge import MCPBridge, _HttpConn, _StdioConn, _resolve_command
+from core.chat.mcp_bridge import (
+    FOFA_SERVERS,
+    MCPBridge,
+    _fofa_env_from_config,
+    _HttpConn,
+    _StdioConn,
+    _resolve_command,
+)
 from core.chat.runtime import (
     ORCHESTRATOR_ID,
     ChatTurn,
@@ -1453,6 +1460,44 @@ def test_mcp_stdio_python_command_resolves_to_platform_interpreter():
     assert _resolve_command("node") == "node"
     assert _resolve_command("E:/x/python.exe") == "E:/x/python.exe"
     assert _StdioConn("python", ["s.py"])._cmd == [sys.executable, "s.py"]
+
+
+def test_fofa_env_injected_from_mapping_config(tmp_path, monkeypatch):
+    """fofa server 起进程时注入测绘 config/fofa.json 的 key（统一密钥，2026-10-11）。"""
+    import core.chat.mcp_bridge as mb
+    cfgdir = tmp_path / "config"
+    cfgdir.mkdir()
+    (cfgdir / "fofa.json").write_text(
+        json.dumps({"base_url": "https://fofoapi.com", "key": "MEASURE-KEY"}),
+        encoding="utf-8")
+    monkeypatch.setattr(mb, "FOFA_CONFIG_PATH", cfgdir / "fofa.json")
+    # 无显式 env → 用测绘 key
+    assert mb.MCPBridge._env_for_entry("fofa", {}) == {"FOFA_KEY": "MEASURE-KEY"}
+    # mcp.json 显式 env 优先（刻意覆盖场景）
+    got = mb.MCPBridge._env_for_entry("fofa", {"env": {"FOFA_KEY": "EXPLICIT"}})
+    assert got == {"FOFA_KEY": "EXPLICIT"}
+    # 非 fofa server 不受影响
+    assert mb.MCPBridge._env_for_entry("fir-proxy", {}) == {}
+    # 缺 email 时不注入空串
+    assert "FOFA_EMAIL" not in mb.MCPBridge._env_for_entry("fofa", {})
+
+
+def test_fofa_env_missing_or_broken_config_is_empty(tmp_path, monkeypatch):
+    import core.chat.mcp_bridge as mb
+    # 文件不存在 → {}（best-effort，绝不抛）
+    monkeypatch.setattr(mb, "FOFA_CONFIG_PATH", tmp_path / "nope.json")
+    assert mb._fofa_env_from_config() == {}
+    # 坏 JSON → {}
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json", encoding="utf-8")
+    monkeypatch.setattr(mb, "FOFA_CONFIG_PATH", bad)
+    assert mb._fofa_env_from_config() == {}
+    # key 为空 → 不注入
+    empty = tmp_path / "empty.json"
+    empty.write_text(json.dumps({"base_url": "x", "key": "  "}), encoding="utf-8")
+    monkeypatch.setattr(mb, "FOFA_CONFIG_PATH", empty)
+    assert mb._fofa_env_from_config() == {}
+    assert "fofa" in FOFA_SERVERS
 
 
 def test_mcp_bridge_http_tools_and_call(mcp_config, monkeypatch):

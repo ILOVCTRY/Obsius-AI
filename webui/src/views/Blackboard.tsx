@@ -454,33 +454,41 @@ export function Findings({ pid, track, showCanvas }: {
 }
 
 // E7 资产状态徽章（§5.2；2026-09-19 扩六态）：open 不显；旧数据 meta.scanned=true 映射「已访问」；
-// 「有发现」= 该资产挂 verified finding 的前端反查（结论以 findings 为准，AI 不自报）；
-// budget_stop/na（借鉴 dsh AttackAtlas 覆盖态）回答「哪里没挖完、为什么」
+// budget_stop/na（借鉴 dsh AttackAtlas 覆盖态）回答「哪里没挖完、为什么」。
+// **两个独立徽章（2026-10-10）**：状态徽章 + 「有发现」并列——「有发现」= 该资产挂 verified
+// finding 的前端反查（结论以 findings 为准，AI 不自报），**与状态正交、不再抢占状态位**，
+// 允许 `已访问+有发现` / `已测试·干净+有发现` 同时出现。
 function AssetBadges({ a, hasFinding }: { a: Asset; hasFinding?: boolean }) {
-  if (hasFinding)
-    return <Badge variant="outline" className="text-[10px] text-(--status-error)">有发现</Badge>
   const s = a.effective_status ?? (a.status === "open" && a.meta?.scanned ? "visited" : a.status)
+  let statusBadge: ReactNode = null
   if (s === "visited")
-    return <Badge variant="outline" className="text-[10px] text-muted-foreground">已访问</Badge>
-  if (s === "scanning")
-    return <Badge variant="outline" className="text-[10px] text-(--viz-sev-medium)">扫描中</Badge>
-  if (s === "tested_clean")
-    return <Badge variant="outline" className="text-[10px] text-primary">已测试·干净</Badge>
-  if (s === "budget_stop")
-    return (
+    statusBadge = <Badge variant="outline" className="text-[10px] text-muted-foreground">已访问</Badge>
+  else if (s === "scanning")
+    statusBadge = <Badge variant="outline" className="text-[10px] text-(--viz-sev-medium)">扫描中</Badge>
+  else if (s === "tested_clean")
+    statusBadge = <Badge variant="outline" className="text-[10px] text-primary">已测试·干净</Badge>
+  else if (s === "budget_stop")
+    statusBadge = (
       <Badge variant="outline" className="text-[10px] text-(--status-paused)"
              title="预算/配额用尽被迫停手（原因见事件流 asset.status_changed 的 note）">
         ⏸ 预算停手
       </Badge>
     )
-  if (s === "na")
-    return (
+  else if (s === "na")
+    statusBadge = (
       <Badge variant="outline" className="text-[10px] text-muted-foreground/70"
              title="确认不适用（原因见事件流 asset.status_changed 的 note）">
         ⊘ 不适用
       </Badge>
     )
-  return null
+  return (
+    <>
+      {statusBadge}
+      {hasFinding && (
+        <Badge variant="outline" className="text-[10px] text-(--status-error)">有发现</Badge>
+      )}
+    </>
+  )
 }
 
 /** 资产标签 chips（W 后续/态势增强：meta.tags；「高价值」资产会进编排器每轮态势注入） */

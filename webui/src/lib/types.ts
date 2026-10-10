@@ -15,6 +15,8 @@ export interface ProjectMeta {
   config?: Record<string, unknown>
   /** 宿主运行时实测（GET /api/projects/{pid} 返回；M3 runtime chip 可用性门） */
   capability?: HostCapability
+  /** 回收站条目（GET /api/projects/trash）：目录名=恢复句柄（<slug>-<UTC>） */
+  trash_name?: string
 }
 
 /** 宿主能力清单（HostDetector.to_dict 形状） */

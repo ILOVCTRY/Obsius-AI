@@ -2428,6 +2428,33 @@ def create_app(
     def list_projects():
         return [_expert_meta_view(m) for m in store.list_projects()]
 
+    # 回收站（DESIGN.md §5.3）：静态段 `/api/projects/trash` **必须先于**
+    # `/api/projects/{pid}` 注册，否则 "trash" 会被 {pid} 吃掉当项目 id 查。
+    @app.get("/api/projects/trash")
+    def list_trashed_projects():
+        """回收站清单（只读）。每项带 trash_name=回收站目录名（=恢复句柄）。"""
+        return [_expert_meta_view(m) for m in store.list_trashed()]
+
+    @app.post("/api/projects/{trash_name}/restore", status_code=201)
+    def restore_trashed_project(trash_name: str):
+        """从回收站恢复项目：目录移回 workspaces/<slug>/（同名自动加后缀）。"""
+        try:
+            path, slug = store.restore_project(trash_name)
+        except FileNotFoundError:
+            raise HTTPException(404, f"回收站条目不存在: {trash_name}") from None
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+        except PermissionError as e:  # 重试耗尽仍有句柄（外部进程占用）
+            raise HTTPException(
+                422,
+                "回收站目录被占用，无法恢复；请关闭占用该目录的程序后重试: "
+                f"{e}") from e
+        try:
+            pid = json.loads((path / "project.json").read_text(encoding="utf-8")).get("id")
+        except (ValueError, OSError):
+            pid = None
+        return {"project_id": pid, "slug": slug, "status": "restored"}
+
     @app.post("/api/projects", status_code=201)
     def create_project(body: ProjectIn):
         # 旧客户端只传 domain（pentest/ctf）：透明映射为 track+caps（读兼容写新值）

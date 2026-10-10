@@ -753,8 +753,9 @@ class Orchestrator:
 
         出口两桶（主控派发判据）+ 一计数：
         - `untested`   未测试清单（open，cap 30 带 id，HVT 优先排序）——从没碰过；
-        - `in_progress` 已访问清单（visited，cap 20）——碰过、未测尽（**含带洞资产**，
-          「有发现 ≠ 测干净」）；
+        - `in_progress` 已访问清单（visited，cap 20）——碰过、未测尽（**有洞不参与
+          状态判定，2026-10-10**：显式 clean 挂洞的落 clean_count，只有未测尽的在
+          此列表，`has_findings` 作纯标签）；
         - `clean_count` 已测试干净计数——只给数不给清单（防重复派）。
         covered = 已测试干净；`high_value.covered` 语义随三态收紧。状态一律读时派生
         （父节点显式 status 被子树覆盖，加子自动破 clean）。"""
@@ -792,7 +793,7 @@ class Orchestrator:
              "has_findings": bool(eff_map.get(a["id"], {}).get("has_findings"))}
             for a in visited[:20]
         ]
-        # B2 覆盖度对账（M3）：分组收敛摘要——终态含 finding 挂链/dead_end/na，
+        # B2 覆盖度对账（M3）：分组收敛摘要——终态含 tested_clean/na/dead_end，
         # 组内子资产传播收敛，uncovered open 优先。「全景对账」类数数任务归零；
         # 对账失败不阻断态势注入。
         try:
@@ -823,7 +824,7 @@ class Orchestrator:
                 "untested": [{"id": a["id"], "type": a["type"], "value": a["value"][:60]}
                              for a in untested[:30]],
                 "in_progress_total": len(visited),
-                "in_progress": in_progress,               # 已访问（未测尽，含带洞）
+                "in_progress": in_progress,               # 已访问（未测尽；has_findings 纯标签）
                 "clean_count": by_status.get("tested_clean", 0),   # 已测干净（只给数）
                 # 兼容键：covered = 已测试干净（旧 uncovered ↔ 新 untested，旧 done_count ↔ 新 clean_count）
                 "done_count": by_status.get("tested_clean", 0),

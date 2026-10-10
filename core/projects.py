@@ -7,7 +7,8 @@
 原则：
 - 每项目一个 SQLite 库；归档/备份 = 操作文件夹。
 - 删除 = 回收站式（DESIGN.md §5.3）：整目录 rename 进 workspaces/.trash/，
-  不物理删除；恢复 = 手动移回；所有扫描忽略 .trash。
+  不物理删除；恢复 = restore_project()（前端回收站一键，同名自动加后缀）；
+  所有扫描忽略 .trash。
 - 不建全局注册表：项目列表 = 扫描 workspaces/*/project.json（单一真相源）。
 - id 由本模块统一生成，blackboard projects 行同 id。
 """
@@ -496,7 +497,11 @@ class ProjectStore:
         raise last_perr  # type: ignore[misc]
 
     def list_trashed(self) -> list[dict]:
-        """扫描 .trash/*/project.json（手动恢复时确认里面有什么用）。"""
+        """扫描 .trash/*/project.json（回收站清单；恢复时确认里面有什么用）。
+
+        每项补 ``trash_name`` = 回收站目录名（``<slug>-<UTC时间戳>``）——它既是
+        恢复操作的稳定句柄（目录名会被重命名，项目 id/name 反而可能与新项目重名），
+        也是删除时间的展示来源。"""
         out = []
         trash = self.root / TRASH_DIR
         if not trash.is_dir():
@@ -506,10 +511,55 @@ class ProjectStore:
             if not d.is_dir() or not f.is_file():
                 continue
             try:
-                out.append(json.loads(f.read_text(encoding="utf-8")))
+                meta = json.loads(f.read_text(encoding="utf-8"))
             except (ValueError, OSError):
                 continue
+            meta["trash_name"] = d.name
+            out.append(meta)
         return out
+
+    def restore_project(self, trash_name: str) -> tuple[Path, str]:
+        """把 .trash/<trash_name>/ 移回 workspaces/<slug>/（回收站恢复）。
+
+        目标 slug 已被占用（同项目名已存在）时自动加 ``-2``/``-3`` 后缀——项目
+        name/id 不变，仅目录名让位，故恢复永不因重名失败。返回
+        ``(新项目目录, 实际 slug)``；找不到抛 FileNotFoundError，非法句柄抛
+        ValueError（防路径穿越：不接受分隔符/上跳）。
+        """
+        # 防穿越：trash_name 只接受纯目录名（与 packs 校验同口径）
+        if (not trash_name or "/" in trash_name or "\\" in trash_name
+                or trash_name in (".", "..") or ".." in Path(trash_name).parts):
+            raise ValueError(f"非法回收站句柄: {trash_name!r}")
+        src = self.root / TRASH_DIR / trash_name
+        meta_file = src / PROJECT_FILE
+        if not meta_file.is_file():
+            raise FileNotFoundError(f"回收站条目不存在: {trash_name}")
+        try:
+            meta = json.loads(meta_file.read_text(encoding="utf-8"))
+        except (ValueError, OSError) as e:
+            raise FileNotFoundError(f"回收站条目元数据损坏: {trash_name}") from e
+        slug = self._unique_slug(
+            slugify(str(meta.get("name") or trash_name), str(meta.get("track") or "ctf")))
+        dst = self.root / slug
+        # 与 delete_project 同款退避：Windows 上句柄关闭到目录可 rename 间有毫秒级延迟
+        last_perr: PermissionError | None = None
+        for delay in (0.0, 0.05, 0.1, 0.2):
+            if delay:
+                time.sleep(delay)
+            try:
+                src.rename(dst)
+                break
+            except PermissionError as e:
+                last_perr = e
+        else:
+            raise last_perr  # type: ignore[misc]
+        # slug 冲突让位（-2/-3）后目录名 ≠ meta.slug，会让 _find_dir 同值歧义——
+        # 就地改写 meta.slug 对齐新目录名（黑板行无 slug 列，仅 project.json）。
+        if meta.get("slug") != slug:
+            meta["slug"] = slug
+            (dst / PROJECT_FILE).write_text(
+                json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        return dst, slug
 
     # ---------- 内部 ----------
 

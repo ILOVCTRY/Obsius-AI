@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 import core.projects
-from core.projects import ProjectStore, slugify
+from core.projects import DB_FILE, PROJECT_FILE, ProjectStore, slugify
 
 
 @pytest.fixture()
@@ -218,6 +218,60 @@ def test_list_trashed(store, tmp_path):
 def test_delete_missing_raises(store):
     with pytest.raises(FileNotFoundError):
         store.delete_project("nope")
+
+
+# ---------- 恢复（回收站一键，同名自动加后缀） ----------
+
+
+def test_restore_roundtrip(store):
+    proj = store.create_project("acme", "ctf")
+    pid = proj.id
+    proj.close()
+    store.delete_project("acme")
+    trashed = store.list_trashed()
+    # list_trashed 每项带 trash_name（=恢复句柄）
+    assert trashed and trashed[0]["trash_name"].startswith("acme-")
+    path, slug = store.restore_project(trashed[0]["trash_name"])
+    # 目录回到 workspaces/<slug>（不再在 .trash 下），数据完好
+    assert path.parent == store.root
+    assert path.is_dir() and (path / PROJECT_FILE).is_file()
+    assert (path / DB_FILE).is_file()
+    assert store.list_trashed() == []
+    # 列表重新包含，且按 slug/id 都能打开
+    assert [m["id"] for m in store.list_projects()] == [pid]
+    assert store.open_project(slug).id == pid
+
+
+def test_restore_name_conflict_adds_suffix(store):
+    a = store.create_project("acme", "ctf")
+    a_id = a.id
+    a.close()
+    store.delete_project("acme")
+    trash_name = store.list_trashed()[0]["trash_name"]
+    # 同名项目占住 acme 目录
+    b = store.create_project("acme", "ctf")
+    b.close()
+    path, slug = store.restore_project(trash_name)
+    assert slug == "acme-2"           # 让位加后缀
+    assert path.name == "acme-2"
+    # project.json 的 slug 同步改写（否则 _find_dir 同值歧义）
+    meta = json.loads((path / PROJECT_FILE).read_text(encoding="utf-8"))
+    assert meta["slug"] == "acme-2" and meta["id"] == a_id
+    # 两个同名项目各自按 slug 打开互不串
+    assert store.open_project("acme").id == b.id
+    assert store.open_project("acme-2").id == a_id
+
+
+def test_restore_missing_raises(store):
+    with pytest.raises(FileNotFoundError):
+        store.restore_project("nope-20260101T000000Z")
+
+
+def test_restore_rejects_path_traversal(store):
+    # 句柄含分隔符/上跳一律 ValueError，绝不落到 .trash 之外
+    for bad in ("../escape", "a/b", "a\\b", "..", ""):
+        with pytest.raises(ValueError):
+            store.restore_project(bad)
 
 
 def test_update_project_track(store):

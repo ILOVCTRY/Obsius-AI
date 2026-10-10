@@ -113,6 +113,7 @@ class _Container:
     session_id: str
     last_used: float
     dirty: bool = False   # exec 被 abort/超时 → 容器内可能残留进程，下次 ensure 时 restart 清场
+    net: str = "none"     # 建容器时的网络模式：变了须重建（容器网络不可热改，见 ensure）
 
 
 class SessionContainerManager:
@@ -197,13 +198,19 @@ class SessionContainerManager:
         with self._keylock(key):
             cur = self._containers.get(key)
             if cur is not None:
-                if self.backend.inspect_running(cur.name):
+                running = self.backend.inspect_running(cur.name)
+                if running and cur.net == net:
                     if cur.dirty:   # 上条 exec 被中断：restart 清容器内残留进程
                         self.backend.restart(cur.name)
                         cur.dirty = False
                     cur.last_used = time.monotonic()
                     return cur.name
-                self._forget(project_id, session_id)   # 已退出/被外部删：重建
+                # 复用失败：① 容器已退出/被外部删 ② 网络模式变了——docker 容器网络
+                # 不可热改，断网容器留着会让「显式要 real 仍不通」（socket 错误），
+                # 须先删再建；重建成本 ~0.5s。与 _Container.net 配套（见 dataclass）。
+                if running:
+                    self.backend.rm(cur.name)
+                self._forget(project_id, session_id)
             out = self.backend.run_detached(
                 image or self.image, _KEEPALIVE, name=name,
                 labels=_labels(project_id, session_id), net=net,
@@ -213,7 +220,7 @@ class SessionContainerManager:
             with self._lock:
                 self._containers[key] = _Container(
                     name=name, project_id=project_id, session_id=session_id,
-                    last_used=time.monotonic())
+                    last_used=time.monotonic(), net=net)
             self._start_reaper()
             return name
 
