@@ -324,21 +324,27 @@ L0 host < L1 wsl < L2 docker < L3 sandbox（--rm 一次性 / 断网 / 512m / cap
 
 F6 内置浏览器持久化上下文（`core/browser/pool.py` launch_persistent_context）**默认 `ignore_https_errors=True`**——证书过期/自签/CN 不符一律放行加载（用户定稿）。风险边界可控：导航前必经 `check_target` 资产白名单硬校验，MITM 面只可能发生在已登记授权目标，且浏览器流量全程经 route 抓落入 http_history 可审计；`config/browser.json` 可设 `ignore_https_errors:false` 关回严格口径（`BrowserConfig` 白名单字段）。背景事故：目标 booklocation.zut.edu.cn 证书 2026-05-06 过期，Chromium `ERR_CERT_DATE_INVALID` 致 Agent 三次合理换路重试被错计为「拒绝熔断」挂起任务；与 curl `-k` 侦察口径对齐。
 
-## 代理池（fir-proxy 托管，2026-10-07 M1 实施）
+## 代理池（fir-proxy 托管，2026-10-07 M1 实施；2026-10-11 全局化）
 
-**形态**：vendor 外部 fir-proxy（代理池工具）进 `tools/fir-proxy/`，平台侧 `core/proxy/pool.py` **项目级托管**其 serve 子进程（仿 `BrowserPool`：`app.state.proxy_pool` 装配 + shutdown 兜关 + `delete_project` 前置链停服），池记录落 `<项目>/proxy/pool.json`。**人类 UI 与 AI 共享同一池**。
+**形态**：vendor 外部 fir-proxy（代理池工具）进 `tools/fir-proxy/`，平台侧 `core/proxy/pool.py` **全局单池托管**其 serve 子进程（仿 `BrowserPool`：`app.state.proxy_pool` 装配 + shutdown 兜关），池记录落 `data/proxy/pool.json`（全局归位，与 `data/campaign.db` 同款契约）。**人类 UI 与 AI 共享同一池**。
+
+**全局化（2026-10-11，由项目级改造）**：此前「项目级」= 实例内部按 pid 分区（`_serves`/`_locks` 两个 dict + `<项目>/proxy/*` 路径 + 每个公开方法首参 pid），14 个项目各起一个 serve、各占 3 端口、各一份池——**池被切碎、抓取/验证重复**。现收敛为**进程级单 serve + 单池**：`_serve`/`_lock` 单实例、方法无 pid、路由改 `/api/proxy/*`（无 pid）、前端「代理池」升为全局视图（`needsProject:false`）。**旧项目池经 `merge_legacy_pools()` 首启并入**（按 proxy 地址去重，旧文件原地保留不删，仅全局池为空时执行一次、幂等）。**`delete_project` 前置链不再停代理池**——池/日志已移出项目工作区，无句柄需释放。**AI 侧 `fir-proxy` MCP 不注入 `PW_PROJECT_ID`**（`mcp_bridge.PROJECT_AGNOSTIC_SERVERS`）。语义依据：fir-proxy serve 是**纯代理转发，与项目 workspace 无关**（不承担免二次认证的出口角色），故全局单 serve 正确；单 serve 亦无并发保活需求（多项目共享不互关）。
 
 **为什么托管而非塞进 MCP 子进程**：本项目 MCP server 是平台按项目托管的**外部子进程**（`app.state.chat_mcp_bridges` 按 `proj.id` 缓存），随会话/轮次起停、崩溃重拉；serve 与池若住进去会随 MCP 生死、多项目各起一个、UI 还得反向依赖 MCP 在线。
 
 **不动上游**：上游 `cli.py serve` 是**一次性、文件驱动**的长驻进程，**无运行中控制口**（查不到实时当前代理、无法手动轮换）。故本仓新增薄 runner `tools/fir-proxy/cyberstrike_serve.py` 包上游 `ProxyRotator`/`ProxyServer`，补 **loopback 控制通道**（`/status` `/proxies` `/rotate` `/reload` `/stop`，只绑 127.0.0.1）；stdout 走 JSONL（`started`/`stopped`/`error`）供平台解析，日志走 stderr，启动强制 UTF-8。**不改 fir-proxy 自身文件**（便于上游同步）。
 
-**端口与依赖**：三端口（http/socks5/control）按项目**动态取空闲口**，多项目不冲突；解释器自动解析（`tools/venv` → `sys.executable` → PATH），缺 `requests[socks]`/`bs4`/`lxml` 时 `proxy_available()` False → 端点 **503 结构化**，**不静默降级**。
+**端口与依赖**：三端口（http/socks5/control）从 base 起**动态取空闲口**（单 serve 无冲突）；解释器自动解析（`tools/venv` → `sys.executable` → PATH），缺 `requests[socks]`/`bs4`/`lxml` 时 `proxy_available()` False → 端点 **503 结构化**，**不静默降级**。
 
 **AI 用法（甲）**：MCP 控制面给 http/socks5 端点 + 可用 IP 列表，**AI 自行 `curl -x`**；平台**不**注入 browser/run_cmd 的代理（用户定稿）。
 
-**API**：`/api/projects/{pid}/proxy/{status,start,stop,proxies,rotate,add,remove,select,fetch,validate}`（后两者 202 Job）；UI 顶级「代理池」视图（`webui/src/views/proxy/`）。
+**API**：`/api/proxy/{status,start,stop,proxies,rotate,add,remove,select,fetch,validate}`（**全局，无 pid**；后两者 202 Job）；UI 顶级「代理池」视图（`webui/src/views/proxy/`，全局 `needsProject:false`）。
 
 **抓取/验证口径（2026-10-08）**：抓取走平台薄 runner `tools/fir-proxy/cyberstrike_fetch.py`（**内置精选源清单 + `--sources` 可覆盖，不改上游**；**单次限量 `fetch_limit`〔默认 2000，按协议轮转取〕**）——免费源普遍 90%+ 死代理，换源收益有限，真正提升靠验证闭环。**抓取/验证 Job 汇报 `meta.progress`**（可变 dict 引用，相位 fetch→check→prune + `done/total` + `eta_seconds`/`elapsed_seconds`）→ 前端代理池状态栏显进度条与「预计剩余」。**验证走平台薄 runner `tools/fir-proxy/cyberstrike_check.py`**（复用上游 `check_proxy_url`，不改上游）：经代理 GET 一个**可配置目标**（`validate_target`，默认 `http://www.baidu.com`，走 80 口、不强制 CONNECT），拿到响应即 `Working` 并记延迟——**不用**上游 `cli.py validate`（其判据要求 HTTPS-CONNECT + httpbin + 测速**全过**，实测同批 120 只过 9 → 池被清空；宽松单目标同批过 52）。**抓取后自动验证、验证即清理**：`status≠Working` 或延迟 > `prune_latency_ms`（默认 5s）的代理从池中**物理删除**；验证经 `_apply_validation` 按地址 merge 回池 + 单次 `/reload` remove，不再整体覆盖池文件。前端「在线抓取」「验证全部」复用共享 `pollJob` 并回执清理计数。
+
+**自动巡检 + 协议过滤（2026-10-11）**：① **后台巡检线程**（`create_app(proxy_maintenance=True)`，daemon，每 `maintenance_interval_s` 默认 1800s）——验证全部 → 按协议计数低于阈值（http 50 / https 20 / socks 20）自动抓取（`auto_fetch_cooldown_s` 节流防风暴）。② **协议过滤**（前端 chips）分 http / https / socks 三维：`http`=协议类目、`socks`=socks4+socks5 合并、**`https`=能力探测**（池本无 https 协议类目——上游把 https 源并入 http；故经 CONNECT 另测一个 https 目标，结果记 `https_ok`，**不参与 status 判定**，只作能力标注与阈值判据）。进程内单 serve 无并发保活需求（多项目共享不互关）。
+
+**内容注入/劫持型出口交叉验证（2026-10-11）**：免费代理中存在**重写响应体**的出口——对**任意目标 host 的 `/` 都返回同一伪造页**（如 334 字节跳转页、固定 ETag），使早期「目标是个 SPA/特定 Web 客户端」的探测结论成为**误判**（可信出口应对 example.com 等返回与直连一致的内容、且支持 CONNECT）。故验证在单目标连通性之上加**多目标一致性**交叉验证：对已通记录再读两个**内容不同**目标（`validate_target` / `validate_target_b`，默认 baidu.com / example.com）的响应体指纹（`状态码:长度:sha256前16`），**两目标回相同指纹 → 判 `hijacked`、`status=Failed` 剔除**（`merge_keys` 带回 `hijacked` 标志）；探测本身失败不误杀。这是「同一出口对不同目标给出同一内容=内容被劫持」的判据——纯内容指纹、无外部基线依赖，离线可测。
 
 **待续**：M2 MCP 控制面（`mcp-servers/fir-proxy-mcp/`，`config/mcp.json` enabled 开关）与 M3「放开红线让 Agent 发起重放/爆破」见 `docs/plans/proxy-pool-integration.md`。
 

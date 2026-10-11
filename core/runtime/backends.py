@@ -25,6 +25,127 @@ NO_WINDOW_FLAGS = (
     subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0
 )
 
+# ---------------------------------------------------------------- Windows 作业对象
+#
+# run_cmd 进程树收编（2026-10-12 事故）：`_kill_tree`（taskkill /T /F）只在命令
+# **超时/abort** 时触发——命令正常返回时从不清理进程树。实测 agent 用 PowerShell
+# `Start-Process -WindowStyle Hidden cmd.exe ...` 起一个独立进程（父化到
+# explorer.exe）跑无限 `goto loop` 心跳，命令返回后继续常驻近 2 天，锁死项目
+# 目录（删除 422）、占端口、烧 CPU。根因：host 侧命令默认无进程树边界，
+# 「正常退出但留子进程」这条路径完全没兜住。
+#
+# 修法：给每条 host/wsl 命令包一个 KILL_ON_JOB_CLOSE 作业对象——命令返回即
+# TerminateJobObject 收编整棵树（含子孙）。`Start-Process` 起的进程默认继承
+# 作业，一并被杀；要脱管必须显式 CREATE_BREAKAWAY_FROM_JOB（本初版不暴露，
+# 有需要再加）。`AssignProcessToJobObject` 失败（如父进程已在他人作业）静默
+# 降级为既有杀树语义，**绝不**让命令失败。
+if platform.system() == "Windows":
+    import ctypes
+
+    _JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0x00000800
+    _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+    _JobObjectExtendedLimitInformation = 9
+    _JOB_OBJECT_TERMINATE = 0x0001
+    _K32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    class _JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_int64),
+            ("PerJobUserTimeLimit", ctypes.c_int64),
+            ("LimitFlags", ctypes.c_uint32),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", ctypes.c_uint32),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", ctypes.c_uint32),
+            ("SchedulingClass", ctypes.c_uint32),
+        ]
+
+    class _IO_COUNTERS(ctypes.Structure):
+        _fields_ = [
+            ("ReadOperationCount", ctypes.c_uint64),
+            ("WriteOperationCount", ctypes.c_uint64),
+            ("OtherOperationCount", ctypes.c_uint64),
+            ("ReadTransferCount", ctypes.c_uint64),
+            ("WriteTransferCount", ctypes.c_uint64),
+            ("OtherTransferCount", ctypes.c_uint64),
+        ]
+
+    class _JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", _JOBOBJECT_BASIC_LIMIT_INFORMATION),
+            ("IoInfo", _IO_COUNTERS),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    _K32.CreateJobObjectW.restype = ctypes.c_void_p
+    _K32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+    _K32.SetInformationJobObject.restype = ctypes.c_int
+    _K32.SetInformationJobObject.argtypes = [
+        ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+    _K32.AssignProcessToJobObject.restype = ctypes.c_int
+    _K32.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    _K32.TerminateJobObject.restype = ctypes.c_int
+    _K32.TerminateJobObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    _K32.CloseHandle.restype = ctypes.c_int
+    _K32.CloseHandle.argtypes = [ctypes.c_void_p]
+
+    def create_kill_on_close_job() -> int | None:
+        """建 KILL_ON_JOB_CLOSE 作业对象；失败返回 None（命令照常执行，仅不收编）。"""
+        try:
+            handle = _K32.CreateJobObjectW(None, None)
+            if not handle:
+                return None
+            info = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+            info.BasicLimitInformation.LimitFlags = (
+                _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | _JOB_OBJECT_LIMIT_BREAKAWAY_OK)
+            if not _K32.SetInformationJobObject(
+                    ctypes.c_void_p(handle), _JobObjectExtendedLimitInformation,
+                    ctypes.byref(info), ctypes.sizeof(info)):
+                _K32.CloseHandle(ctypes.c_void_p(handle))
+                return None
+            return int(handle)
+        except Exception:  # noqa: BLE001 —— 作业不可用绝不阻断执行
+            return None
+
+    def assign_to_job(job: int, proc: subprocess.Popen) -> bool:
+        """把进程纳入作业；失败（父进程已在他人作业等）返回 False 供调用方降级。"""
+        try:
+            return bool(_K32.AssignProcessToJobObject(
+                ctypes.c_void_p(job), ctypes.c_void_p(int(proc._handle))))  # noqa: SLF001
+        except Exception:  # noqa: BLE001
+            return False
+
+    def kill_job(job: int) -> None:
+        """终止作业内全部进程（收编整棵进程树）。"""
+        try:
+            _K32.TerminateJobObject(ctypes.c_void_p(job), _JOB_OBJECT_TERMINATE)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def close_job(job: int) -> None:
+        """关闭作业句柄（KILL_ON_JOB_CLOSE 下关闭即焚毁残留）。"""
+        try:
+            _K32.CloseHandle(ctypes.c_void_p(job))
+        except Exception:  # noqa: BLE001
+            pass
+
+else:  # POSIX：无作业对象原语；进程树收编依赖进程组（本初版不启用，保持现状）
+    def create_kill_on_close_job() -> int | None:
+        return None
+
+    def assign_to_job(job: int, proc: subprocess.Popen) -> bool:
+        return False
+
+    def kill_job(job: int) -> None:
+        return None
+
+    def close_job(job: int) -> None:
+        return None
+
 
 def _kill_tree(proc: subprocess.Popen) -> None:
     """杀进程树：Windows 用 taskkill /T /F（PowerShell/bash 会拉起子进程，
@@ -54,12 +175,17 @@ class ExecOutcome:
 
 
 def _execute_piped(proc: subprocess.Popen, timeout: float,
-                   abort_event: threading.Event | None) -> ExecOutcome:
+                   abort_event: threading.Event | None,
+                   job: int | None = None) -> ExecOutcome:
     """Popen 全生命周期（2026-09-23 管道死锁修复）：排水 daemon 线程持续消费
     stdout/stderr——stdout=PIPE + poll() 轮询不读管道时，输出超 Windows 管道
     缓冲（64KB）子进程写阻塞、父进程等退出 = 双方死锁到超时杀树（实验复现，
     见 docs/plans/exec-gateway-pipe-deadlock.md）。排水后轮询语义不变：
-    正常结束 join 排水线程取输出；abort → interrupted；超时 → 杀树 timed_out。"""
+    正常结束 join 排水线程取输出；abort → interrupted；超时 → 杀树 timed_out。
+
+    job（2026-10-12 作业对象收编）：非 None 时命令返回后（正常/超时/中断）
+    一律 TerminateJobObject 收编整棵树——兜住「命令正常退出但用 Start-Process
+    留了常驻子进程」的逃逸路径（既有 `_kill_tree` 只管超时/abort）。"""
     def _drain(pipe, sink: list) -> None:
         try:
             for chunk in pipe:
@@ -96,6 +222,14 @@ def _execute_piped(proc: subprocess.Popen, timeout: float,
         proc.wait(timeout=5)
     except Exception:  # noqa: BLE001
         pass
+    # 作业收编（Windows）：命令返回即收编整棵树，清掉 Start-Process 等留下的
+    # 常驻子进程（不给它们逃逸成孤儿的机会）。run_once/docker 路径 job=None 跳过。
+    if job is not None:
+        kill_job(job)
+        try:
+            proc.wait(timeout=3)
+        except Exception:  # noqa: BLE001
+            pass
     rc = proc.returncode if proc.returncode is not None else -1
     meta: dict[str, Any] = {}
     if interrupted:
@@ -129,6 +263,9 @@ class NativeBackend:
     def _run(self, argv: list[str], timeout: float, cwd: str | None,
              env: dict[str, str] | None,
              abort_event: threading.Event | None = None) -> ExecOutcome:
+        # 作业对象（2026-10-12）：托管进程树，命令返回即收编 Start-Process 等
+        # 留下的常驻子进程。Assign 失败（父进程已在他人作业）→ job 置 None 降级。
+        job = create_kill_on_close_job()
         try:
             proc = subprocess.Popen(
                 argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -137,8 +274,22 @@ class NativeBackend:
                 creationflags=NO_WINDOW_FLAGS,
             )
         except FileNotFoundError as e:
+            if job is not None:
+                close_job(job)
             raise BackendError(f"后端解释器不可用: {e}") from e
-        return _execute_piped(proc, timeout, abort_event)
+        except Exception:
+            if job is not None:
+                close_job(job)
+            raise
+        if job is not None and not assign_to_job(job, proc):
+            close_job(job)  # 纳不进作业：降级为无收编（既有杀树语义不变）
+            job = None
+        try:
+            return _execute_piped(proc, timeout, abort_event, job=job)
+        finally:
+            # 关闭句柄：KILL_ON_JOB_CLOSE 下即便上面漏杀，关句柄也兜底焚毁残留
+            if job is not None:
+                close_job(job)
 
 
 class WSLBackend(NativeBackend):

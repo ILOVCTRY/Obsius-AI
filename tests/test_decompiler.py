@@ -1071,6 +1071,38 @@ def test_factory_threads_global_cache_dir(tmp_path):
     assert svc.global_cache_dir == tmp_path / "global"
 
 
+def test_ghidra_reaper_is_singleton(tmp_path):
+    """resident worker reaper 是进程级单例（2026-10-11 修复）：每后端一实例起一条
+    while-True 线程会随会话数无限泄漏（实测 1065 条）。构造多个后端应共享同一
+    条 reaper 线程，且后端被回收后自动退出弱引用集合。"""
+    import gc
+    import threading
+    from core.tools import decompiler as D
+
+    def reaper_count():
+        return sum(1 for t in threading.enumerate()
+                   if t.name == "ghidra-worker-reaper")
+
+    before = reaper_count()
+    backends = [D.GhidraHeadlessBackend(runner=lambda a: (0, "", ""),
+                                        available=True,
+                                        tmp_project_dir=tmp_path / f"gt{i}")
+                for i in range(5)]
+    assert len(D._GHIDRA_BACKENDS) >= 5
+    after5 = reaper_count()
+    # 无论构造几个后端，reaper 线程恒为**进程级单例**（≤1 条；此前未起则正好 1 条）
+    assert after5 <= 1
+    assert after5 >= max(before, 1)
+    _ = [D.GhidraHeadlessBackend(runner=lambda a: (0, "", ""), available=True,
+                                 tmp_project_dir=tmp_path / f"more{i}")
+         for i in range(10)]
+    assert reaper_count() == after5  # 再构造 10 个也不再新增
+    # 后端回收后弱引用集合自动收缩（弱引用不阻塞 GC）
+    del backends
+    gc.collect()
+    assert len(D._GHIDRA_BACKENDS) < 15
+
+
 # ---------- 大样本加速 P2（2026-09-30）：Ghidra 多进程并行分片主产 ----------
 
 def test_resolve_ghidra_workers_default_clamp_and_override(tmp_path, monkeypatch):

@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useState } from "react"
-import { RotateCcw } from "lucide-react"
+import { useCallback, useEffect, useMemo, useState } from "react"
+import { RotateCcw, Search } from "lucide-react"
 import { api } from "@/lib/api"
 import type { ProjectMeta } from "@/lib/types"
 import { bindingBadge } from "@/lib/taxonomy"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
@@ -28,11 +29,20 @@ export function TrashView() {
   const [confirmTarget, setConfirmTarget] = useState<ProjectMeta | null>(null)
   const [restoring, setRestoring] = useState(false)
   const [restoreError, setRestoreError] = useState<string | null>(null)
+  const [query, setQuery] = useState("")   // 项目名称搜索过滤（2026-10-11）
 
   const refresh = useCallback(() => {
     api.listTrashedProjects().then(setItems).catch((e) => setError(String(e)))
   }, [])
   useEffect(refresh, [refresh])
+
+  // 名称/ID 过滤（大小写不敏感）；空白查询=全量（不改变原顺序）
+  const shown = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return items
+    return items.filter((p) =>
+      p.name.toLowerCase().includes(q) || p.id.toLowerCase().includes(q))
+  }, [items, query])
 
   const restore = async () => {
     const target = confirmTarget
@@ -67,11 +77,38 @@ export function TrashView() {
 
         {error && <p className="text-sm text-(--status-error)">{error}</p>}
 
+        {/* 搜索过滤（2026-10-11）：按项目名称/ID 过滤已删除项目 */}
+        <div className="relative">
+          <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="搜索项目名称或 ID"
+            aria-label="搜索已删除项目"
+            className="pl-9 pr-9"
+          />
+          {query && (
+            <button
+              type="button"
+              aria-label="清除搜索"
+              onClick={() => setQuery("")}
+              className="absolute right-2 top-1/2 -translate-y-1/2 rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:text-foreground"
+            >
+              ✕
+            </button>
+          )}
+        </div>
+
         <div className="space-y-2">
           {items.length === 0 && !error && (
             <p className="py-8 text-center text-sm text-muted-foreground">回收站是空的</p>
           )}
-          {items.map((p) => (
+          {items.length > 0 && shown.length === 0 && (
+            <p className="py-8 text-center text-sm text-muted-foreground">
+              没有匹配「{query.trim()}」的项目
+            </p>
+          )}
+          {shown.map((p) => (
             <div
               key={p.trash_name ?? p.id}
               className={cn(

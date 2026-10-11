@@ -789,6 +789,32 @@ def test_chat_empty_response_retries_exhausted(tmp_path):
     assert chat_store.get_thread(bb, thread["id"])["status"] == "idle"
 
 
+def test_chat_empty_response_nudge_is_standalone_user_turn(tmp_path):
+    """空响应重试须**新起独立 user 消息**（打破上下文相同性）——2026-10-11 事故：
+    此前 nudge 只并进尾部 tool_result，重试上下文与上一次几乎逐字相同，上游对同一
+    上下文确定性返回空 → 3 次重试等同 1 次（用户观感「不会自动重试」）。改为独立
+    user 续问后，重试请求尾部多出一条真正的 user 消息，且因 Anthropic 严格交替，
+    前面补一条 assistant 占位。
+    """
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    llm = FakeLLM([_resp(), _resp(text="恢复成功")])
+    turn, thread = _trunc_turn(bb, llm)
+    assert turn.run("继续分析") == "恢复成功"
+    msgs = llm.calls[1]["messages"]
+    # 尾部是独立 user 续问（非并入 tool_result 的内容）
+    assert msgs[-1]["role"] == "user"
+    assert isinstance(msgs[-1]["content"], str)
+    assert "必须返回可见文本回复" in msgs[-1]["content"]
+    # 独立 user 前须有 assistant 占位（满足角色交替）
+    assert msgs[-2]["role"] == "assistant"
+    # 落库消息里不出现该内存占位（占位只活在重试请求，不入 chat_messages）
+    persisted = chat_store.list_messages(bb, thread["id"])
+    assert not any(m["role"] == "assistant"
+                   and (m.get("content") or "") == "（无输出，继续）"
+                   for m in persisted)
+
+
 # ---------- 纯文本终稿截断自动续写（2026-10-01） ----------
 
 def _trunc_turn(bb, llm, *, agent_id="web-solver"):
@@ -1712,6 +1738,90 @@ def test_chat_agents_and_thread_api(chat_client):
     assert chat_client.get(f"/api/chat/threads/{t['id']}").status_code == 404
 
 
+def test_chat_orphan_running_reconciled_on_read(chat_client):
+    """运行期自愈（2026-10-11 事故）：轮次线程已消失但 DB 仍 status=running 时，
+    列表/详情读端点必须就地归位 idle 并落中断说明，且停止端点不再空操作。
+
+    复现「永久执行中」：直接造一条 running 线程，登记一个**已终止**的原生线程号
+    （对账据此判死），再走读端点验证自愈。"""
+    import threading
+    import time as _t
+    r = chat_client.post("/api/projects", json={"name": "僵死", "track": "ctf"})
+    pid = r.json()["id"]
+    t = chat_client.post(f"/api/projects/{pid}/chat/threads",
+                         json={"agent_id": ORCHESTRATOR_ID}).json()
+    tid = t["id"]
+    # 线程不存在于本进程 running 集合（模拟线程静默死亡后集合已被 finally 清空）
+    running = getattr(chat_client.app.state, "chat_running", None)
+    if running is None:
+        running = set()
+        chat_client.app.state.chat_running = running
+    running.discard(tid)
+    # 造一个「已终止」的原生线程号
+    box = []
+    th = threading.Thread(target=lambda: box.append(1), name="dead-worker")
+    th.start()
+    native = th.ident
+    th.join()
+    _t.sleep(0.1)
+    idents = getattr(chat_client.app.state, "chat_thread_idents", None)
+    if idents is None:
+        idents = {}
+        chat_client.app.state.chat_thread_idents = idents
+    idents[tid] = native
+    # 造 running 状态（绕过 API：直接改盘上状态）
+    from core.chat import store as chat_store
+    proj = chat_client.app.state.projects[pid]
+    chat_store.update_thread(proj.bb, tid, status="running")
+
+    detail = chat_client.get(f"/api/chat/threads/{tid}").json()
+    assert detail["thread"]["status"] == "idle"  # 读即自愈
+    assert any("意外终止" in m["content"] for m in detail["messages"])
+    # 二次读：幂等，不再重复落中断消息
+    n1 = len(chat_client.get(f"/api/chat/threads/{tid}").json()["messages"])
+    n2 = len(chat_client.get(f"/api/chat/threads/{tid}").json()["messages"])
+    assert n1 == n2
+
+
+def test_chat_stop_reconciles_orphan_running(chat_client):
+    """停止端点对「线程已死的 running」不再空操作（旧实现直接 return，钮永远无效）。"""
+    r = chat_client.post("/api/projects", json={"name": "停僵", "track": "ctf"})
+    pid = r.json()["id"]
+    tid = chat_client.post(f"/api/projects/{pid}/chat/threads",
+                           json={"agent_id": ORCHESTRATOR_ID}).json()["id"]
+    running = getattr(chat_client.app.state, "chat_running", None)
+    if running is None:
+        running = set()
+        chat_client.app.state.chat_running = running
+    running.discard(tid)
+    from core.chat import store as chat_store
+    proj = chat_client.app.state.projects[pid]
+    chat_store.update_thread(proj.bb, tid, status="running")
+    assert chat_client.post(f"/api/chat/threads/{tid}/stop").status_code == 204
+    th = chat_client.get(f"/api/chat/threads/{tid}").json()["thread"]
+    assert th["status"] == "idle"
+
+
+def test_native_thread_alive_detects_dead():
+    """原生存活判据：活动线程 True；已结束线程 False（Python is_alive 对硬杀线程恒真）。"""
+    import threading
+    from core.api.app import _native_thread_alive
+    box = []
+
+    def hold():
+        while not box:
+            time.sleep(0.05)
+
+    th = threading.Thread(target=hold, name="alive-probe")
+    th.start()
+    time.sleep(0.2)
+    assert _native_thread_alive(th.ident) is True
+    box.append(1)
+    th.join()
+    time.sleep(0.1)
+    assert _native_thread_alive(th.ident) is False
+
+
 def test_chat_mcp_endpoint(chat_client, tmp_path, monkeypatch):
     import core.api.app as app_mod
     cfg = tmp_path / "mcp.json"
@@ -1767,6 +1877,54 @@ def test_chat_mcp_reverse_domain_for_research(chat_client, tmp_path, monkeypatch
         "name": "渗透", "track": "pentest", "capabilities": ["web"]}).json()["id"]
     out3 = chat_client.get(f"/api/chat/mcp?pid={p3}").json()
     assert [s["name"] for s in out3["servers"]] == ["fofa"]
+
+
+def test_mcp_bridge_reuses_runtime_across_reload(tmp_path):
+    """60s 重载不得丢弃并重建同配置的 stdio runtime（2026-10-11 修复）。
+
+    旧实现每次重载无条件新建 MCPServerRuntime 且**从不 kill 旧子进程**——实测
+    残留 356 个 fir_proxy_mcp 子进程 + 对应 reader 线程。修复后同配置且存活的
+    runtime 原样复用（同一对象），配置变更才重建。"""
+    from core.chat.mcp_bridge import MCPBridge
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(json.dumps({"servers": [
+        {"name": "fir-proxy", "transport": "stdio", "command": "python",
+         "args": ["-c", "import sys; [sys.exit(0) for _ in sys.stdin]"],
+         "enabled": True, "domains": ["pentest"]}]}, ensure_ascii=False),
+        encoding="utf-8")
+    bridge = MCPBridge(str(cfg), domains=["pentest"], project_id="p1")
+    first = bridge._load_servers()["fir-proxy"]
+    # 强制过了 60s 缓存窗口
+    bridge._loaded_at = 0.0
+    second = bridge._load_servers()["fir-proxy"]
+    assert first is second  # 复用，不churn
+
+
+def test_mcp_bridge_closes_discarded_runtime(tmp_path):
+    """配置移除/改名时，被丢弃的 runtime 必须 close（子进程回收）。"""
+    from core.chat.mcp_bridge import MCPBridge, MCPServerRuntime
+
+    class _SpyRuntime(MCPServerRuntime):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(json.dumps({"servers": [
+        {"name": "srv", "transport": "http", "url": "http://127.0.0.1:9/x",
+         "enabled": True, "domains": ["pentest"]}]}), encoding="utf-8")
+    bridge = MCPBridge(str(cfg), domains=["pentest"], project_id="p1")
+    bridge._load_servers()
+    spy = _SpyRuntime("srv", {"transport": "http", "url": "http://127.0.0.1:9/x"})
+    bridge._servers["srv"] = spy  # 换成可观测替身
+    bridge._loaded_at = 0.0
+    # 配置清空 → 旧 runtime 被丢弃，必须 close
+    cfg.write_text(json.dumps({"servers": []}), encoding="utf-8")
+    bridge._load_servers()
+    assert spy.closed is True
 
 
 # ---------- 上下文治理（2026-09-30 压缩上下文方案） ----------
@@ -2294,14 +2452,17 @@ def _pairing_ok(messages) -> bool:
 
 
 def test_mcp_plain_stdio_server_gets_project_env(tmp_path, monkeypatch):
-    """非会话级 stdio server 也注入 PW_PROJECT_ID + mcp.json 的 `env` 字段
-    （fir-proxy 控制面薄客户端靠它反查平台 API，2026-10-07）。"""
+    """非会话级 stdio server 注入 PW_PROJECT_ID + mcp.json 的 `env` 字段；
+    **全局域 server（fir-proxy）豁免 PW_PROJECT_ID**（池已全局化，2026-10-11）。"""
     cfg = tmp_path / "mcp.json"
     cfg.write_text(json.dumps({"servers": [
         {"name": "fir-proxy", "url": "", "transport": "stdio",
          "command": "no-such-bin", "args": [], "enabled": True,
          "domains": ["pentest"],
          "env": {"CYBERSTRIKE_API": "http://127.0.0.1:9999"}},
+        {"name": "some-other", "url": "", "transport": "stdio",
+         "command": "no-such-bin", "args": [], "enabled": True,
+         "domains": ["pentest"]},
     ]}, ensure_ascii=False), encoding="utf-8")
     made: dict = {}
 
@@ -2326,8 +2487,11 @@ def test_mcp_plain_stdio_server_gets_project_env(tmp_path, monkeypatch):
     monkeypatch.setattr("core.chat.mcp_bridge.MCPServerRuntime", FakeRuntime)
     bridge = MCPBridge(cfg, domains=["pentest"], project_id="proj-xyz")
     assert bridge.tool_specs()                       # 触发 _load_servers
-    assert made["fir-proxy"].env["PW_PROJECT_ID"] == "proj-xyz"
+    # fir-proxy 是全局域 server：不注入 PW_PROJECT_ID，但保留 mcp.json 的 env
+    assert "PW_PROJECT_ID" not in made["fir-proxy"].env
     assert made["fir-proxy"].env["CYBERSTRIKE_API"] == "http://127.0.0.1:9999"
+    # 其余 server 照旧注入 PW_PROJECT_ID
+    assert made["some-other"].env["PW_PROJECT_ID"] == "proj-xyz"
 
 
 def test_chat_message_with_attachment(chat_client):

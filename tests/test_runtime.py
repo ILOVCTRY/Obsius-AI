@@ -4,6 +4,8 @@
 """
 
 import platform
+import subprocess
+import time
 
 import pytest
 
@@ -514,3 +516,69 @@ def test_gateway_consumes_approval_once(bb):
     row = bb.conn.execute("SELECT status FROM approvals WHERE id=?",
                           (approval_id,)).fetchone()
     assert row["status"] == "consumed"
+
+
+# ---------- Windows 作业对象：run_cmd 进程树收编（2026-10-12） ----------
+
+@pytest.mark.skipif(platform.system() != "Windows", reason="Windows 作业对象专属")
+def test_job_object_available_and_assigns():
+    """作业对象可建、可纳进程；句柄可用。"""
+    from core.runtime import backends as B
+    job = B.create_kill_on_close_job()
+    assert job is not None
+    try:
+        proc = subprocess.Popen(["cmd.exe", "/c", "echo hi"],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        assert B.assign_to_job(job, proc) is True
+        proc.wait(timeout=10)
+    finally:
+        B.close_job(job)
+
+
+@pytest.mark.skipif(platform.system() != "Windows", reason="Windows 作业对象专属")
+def test_kill_job_terminates_member():
+    """TerminateJobObject 杀掉作业成员（收编语义核心）。"""
+    from core.runtime import backends as B
+    job = B.create_kill_on_close_job()
+    assert job is not None
+    try:
+        proc = subprocess.Popen(["cmd.exe", "/c", "ping -n 30 127.0.0.1 >nul"],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                creationflags=B.NO_WINDOW_FLAGS)
+        assert B.assign_to_job(job, proc)
+        time.sleep(0.4)
+        assert proc.poll() is None
+        B.kill_job(job)
+        proc.wait(timeout=10)
+        assert proc.poll() is not None
+    finally:
+        B.close_job(job)
+
+
+@pytest.mark.skipif(platform.system() != "Windows", reason="Windows 作业对象专属")
+def test_execute_reaps_detached_child_via_job():
+    """逃逸回归（2026-10-12 事故）：host 命令正常返回后，用 `Start-Process` 起的
+    常驻子进程必须被作业收编（既有 _kill_tree 只管超时/abort，管不到这条路径）。"""
+    import os
+    import tempfile
+    marker = os.path.join(tempfile.gettempdir(), "csp_job_escape_probe.txt")
+    if os.path.exists(marker):
+        os.remove(marker)
+    # 百分号转义：给 PowerShell 传 %% 得到字面 %
+    ps = (
+        '$m="%s"; Set-Content -Path $m -Value "start" -Encoding ASCII; '
+        'Start-Process -FilePath "cmd.exe" -ArgumentList '
+        '"/c :loop & echo HB%%%%TIME%%%% >> $m & timeout /t 1 /nobreak >/dev/null & goto loop" '
+        '-WindowStyle Hidden; Start-Sleep -Seconds 2; Write-Output "parent-done"'
+    ) % marker
+    be = NativeBackend()
+    out = be.execute(ps, timeout=30)
+    assert out.exit_code == 0
+    assert "parent-done" in out.stdout
+    size1 = os.path.getsize(marker) if os.path.exists(marker) else -1
+    time.sleep(4)
+    size2 = os.path.getsize(marker) if os.path.exists(marker) else -1
+    if os.path.exists(marker):
+        os.remove(marker)
+    assert size1 != -1, "marker 未生成——Start-Process 未成功复现"
+    assert size1 == size2, "Start-Process 子进程逃逸：命令返回后仍在写文件（未被作业收编）"

@@ -40,6 +40,7 @@ from core import autonomy
 from core import phases as phases_mod
 from core.browser import BrowserConfig, BrowserPool, BrowserError
 from core.proxy import ProxyConfig, ProxyPool, ProxyError
+from core.proxy.pool import auto_fetch_targets, protocol_counts
 from core.browser.pool import browser_available, chromium_available
 from core.browser.replay import Intruder, ReplayClient, ReplayOptions
 from core.agent import AgentConfig, AgentSession
@@ -103,6 +104,42 @@ from core.skills.proposals import ProposalError, ProposalStateError
 from core.skills.writing import pack_write_lock
 
 log = logging.getLogger("core.api")
+
+# 原生线程存活探测（Windows）：chat 轮次的后台线程可能被硬杀（TerminateThread），
+# 此时 Python 的 ``Thread.is_alive()`` 因线程状态簿记未更新而**仍报 True**（实测
+# exit_code 259→7 而 is_alive 恒 True）——故存活判据必须以 OS 退出码为准：
+# STILL_ACTIVE(259)=在跑；其它退出码=已终止/被硬杀；句柄消失(OpenThread 失败)=已回收。
+_STILL_ACTIVE = 259
+_THREAD_QUERY_LIMITED_INFORMATION = 0x0800
+
+
+def _native_thread_alive(native_id: int) -> bool:
+    """OS 线程是否仍在运行（Windows 用 GetExitCodeThread 判线程退出码）。
+
+    判据（实测校准）：活线程 → 退出码 259(STILL_ACTIVE)；正常退出/被
+    TerminateThread 硬杀 → 退出码非 259；线程彻底回收 → OpenThread 失败
+    （ERROR_INVALID_PARAMETER），此时**视为已死**（活线程在本进程内必可打开）。
+    非 Windows / ctypes 异常 → 保守返 True（宁可漏扫，交给重启清扫兜底）。"""
+    try:
+        import ctypes
+        k32 = ctypes.windll.kernel32  # 仅 Windows 存在
+        k32.OpenThread.restype = ctypes.c_void_p
+        handle = k32.OpenThread(_THREAD_QUERY_LIMITED_INFORMATION, False,
+                                int(native_id))
+        if not handle:
+            return False  # 句柄打不开 = 线程已终止并回收
+        try:
+            code = ctypes.c_ulong(0)
+            ok = k32.GetExitCodeThread(ctypes.c_void_p(handle),
+                                       ctypes.byref(code))
+            if not ok:
+                return True  # 查询失败：保守当作存活
+            return code.value == _STILL_ACTIVE
+        finally:
+            k32.CloseHandle(ctypes.c_void_p(handle))
+    except Exception:  # noqa: BLE001 —— 非 Windows / ctypes 缺失：保守存活
+        return True
+
 
 # 批 5（§6.8）：L2 自动 tick 最小间隔；测试可 monkeypatch 为 0 走全链。
 # 触发点踩在间隔内时不丢弃，而是起一个 wait job 睡满后重入闸门（防链搁浅）。
@@ -1094,6 +1131,71 @@ class JobRegistry:
 
 # ---------------- App 工厂 ----------------
 
+def _proxy_maintenance_tick(app: FastAPI) -> dict:
+    """代理池自动巡检一轮（同步，可直测）：验证全部 → 按阈值补抓。
+
+    2026-10-11：后台线程每 ``maintenance_interval_s`` 调一次。
+    ① 若有 ``proxy-fetch``/``proxy-validate`` 在跑（说明手动/上轮 Job 未完）→ 本轮跳过，
+    不并发；② 提交 ``proxy-validate`` Job 并**等其完成**；③ 数 ``protocol_counts``，
+    按 ``auto_fetch_targets`` 逐协议提交 ``proxy-fetch``，受 ``auto_fetch_cooldown_s``
+    节流（app.state.proxy_fetch_cooldown 记协议→上次触发时刻）。
+
+    返回本轮摘要（供测试/日志）：``{skipped, validated, fetched:[协议组…]}``。
+    """
+    pool = app.state.proxy_pool
+    jobs = app.state.jobs
+    # ① 已有代理 Job 在跑 → 跳过（不并发；复用全局 Job 判定）
+    for j in jobs.all_jobs():
+        if (j.get("status") == "running"
+                and j.get("kind") in ("proxy-fetch", "proxy-validate")):
+            return {"skipped": "busy", "validated": 0, "fetched": []}
+    if not pool.read_pool():                       # 空池无可验证：直接走阈值补抓
+        return _proxy_auto_fetch(app, pool)
+    # ② 验证全部，等其 Job 落地
+    progress: dict = {"phase": "queued", "done": 0, "total": 0,
+                      "eta_seconds": None, "message": "自动巡检…"}
+    jid = jobs.submit(
+        "proxy-validate",
+        lambda: pool.validate(on_progress=progress.update),
+        meta={"progress": progress, "auto": True})
+    deadline = time.monotonic() + 3600.0           # 上限 1h（防线程永久卡；正常远早于此）
+    while time.monotonic() < deadline:
+        job = jobs.get(jid)
+        if job is None or job.get("status") != "running":
+            break
+        time.sleep(1.0)
+    # ③ 阈值补抓
+    out = _proxy_auto_fetch(app, pool)
+    out["validated"] = 1
+    return out
+
+
+def _proxy_auto_fetch(app: FastAPI, pool) -> dict:
+    """按阈值提交补抓 Job（受冷却节流）；返回 ``{skipped, validated, fetched}``。"""
+    cfg = pool.config
+    counts = protocol_counts(pool.read_pool(), cfg.prune_latency_ms)
+    targets = auto_fetch_targets(counts, cfg)
+    now = time.monotonic()
+    cooldown: dict = app.state.proxy_fetch_cooldown
+    fetched: list[list[str]] = []
+    for protos in targets:
+        key = ",".join(protos)
+        last = cooldown.get(key, 0.0)
+        if cfg.auto_fetch_cooldown_s > 0 and now - last < cfg.auto_fetch_cooldown_s:
+            continue                               # 冷却中：跳过该组
+        cooldown[key] = now
+        progress: dict = {"phase": "queued", "done": 0, "total": 0,
+                          "eta_seconds": None, "message": "自动补抓…"}
+        app.state.jobs.submit(
+            "proxy-fetch",
+            lambda p=protos, pr=progress: pool.fetch(p, on_progress=pr.update),
+            meta={"progress": progress, "auto": True})
+        fetched.append(protos)
+    if fetched:
+        log.info("代理池自动补抓：counts=%s → 提交 %s", counts, fetched)
+    return {"skipped": None, "validated": 0, "fetched": fetched}
+
+
 def create_app(
     workspace_root: str = "workspaces",
     packs_root: str = "packs",
@@ -1107,6 +1209,7 @@ def create_app(
     sediment_proposals: bool = True,
     static_dir: str | Path | None = None,
     session_containers: bool = True,
+    proxy_maintenance: bool = True,
 ) -> FastAPI:
     """executor_llm / planner_llm 缺省时按供应商配置（config/providers.json）+
     llm.json 文件级覆写构建 provider；测试可注入假 provider。
@@ -1116,7 +1219,8 @@ def create_app(
     （复盘 chat 会额外消费 planner 剧本项导致编排错位）。
     static_dir：vite build 产物目录（webui/dist）——非 None 时挂 SPA 同源静态托管
     （desktop-app-shell M2，DESIGN §1）：真实文件直出、其余 GET 回 index.html
-    （history fallback）；/api、/docs、/openapi.json 不受兜底影响。"""
+    （history fallback）；/api、/docs、/openapi.json 不受兜底影响。
+    proxy_maintenance：代理池自动巡检线程开关（2026-10-11，默认开；测试关）。"""
 
     app = FastAPI(title="obsius core API", version="0.1")
 
@@ -1211,14 +1315,44 @@ def create_app(
 
     app.add_event_handler("shutdown", _browser_shutdown)
 
-    # 代理池（fir-proxy 托管，2026-10-07，docs/plans/proxy-pool-integration.md）：项目级
-    # 常驻 serve 子进程 + 池记录落 <项目>/proxy/pool.json；config/proxy.json 缺失=全默认；
+    # 代理池（fir-proxy 托管，2026-10-07 → 2026-10-11 全局化）：**进程级单 serve + 单池**，
+    # 池记录落 data/proxy/pool.json（全局归位，不落 workspaces）；config/proxy.json 缺失=全默认；
     # 缺 fir-proxy/依赖时端点返明确错误不 500（proxy_available 能力探测）。
+    # 装配即跑一次旧池合并（首启把各 <项目>/proxy/pool.json 并入全局，幂等）。
     app.state.proxy_pool = ProxyPool(
         workspace_root, tools_root or "tools",
         config=ProxyConfig.from_file("config/proxy.json"))
+    app.state.proxy_pool.merge_legacy_pools()
+    # 孤儿 serve 回收（2026-10-12 事故）：后端重启会让上一进程的 serve 变孤儿
+    # （旧实现每项目一个池，历史遗留一批），启动时清掉「父进程已死」的 serve。
+    # 台账重活（扫全进程），凭 proxy_maintenance 开关——测试默认关。
+    if proxy_maintenance:
+        from core.proxy.pool import reap_orphan_serves
+        try:
+            reap_orphan_serves()
+        except Exception:  # noqa: BLE001 —— 回收失败绝不阻断启动
+            log.exception("回收孤儿代理 serve 失败")
+    # 自动巡检（2026-10-11）：每 maintenance_interval_s 验证全部 + 阈值补抓。
+    # 节流表记协议组→上次自动抓取时刻（跨轮记忆）；线程 shutdown 置 Event 停。
+    app.state.proxy_fetch_cooldown = {}
+    _proxy_stop = threading.Event()
+
+    def _proxy_maintenance_loop() -> None:
+        interval = app.state.proxy_pool.config.maintenance_interval_s
+        if not interval or interval <= 0:
+            return                                  # 0=不巡检
+        while not _proxy_stop.wait(interval):
+            try:
+                _proxy_maintenance_tick(app)
+            except Exception:  # noqa: BLE001 —— 巡检异常绝不炸线程/拖垮平台
+                log.exception("代理池自动巡检失败")
+
+    if proxy_maintenance:
+        threading.Thread(target=_proxy_maintenance_loop, daemon=True,
+                         name="proxy-maintenance").start()
 
     def _proxy_shutdown() -> None:
+        _proxy_stop.set()
         app.state.proxy_pool.close_all()
 
     app.add_event_handler("shutdown", _proxy_shutdown)
@@ -2630,11 +2764,9 @@ def create_app(
             app.state.projects.pop(pid, None)
             # F6：先焚毁浏览器实例（chromium 占用 profile 目录会锁死 Windows 删除）
             app.state.browser_pool.close_project(pid)
-            # 代理池：先停 serve 子进程（释放池文件/日志句柄，2026-10-07）
-            try:
-                app.state.proxy_pool.close_project(pid)
-            except Exception:  # noqa: BLE001
-                pass
+            # 代理池已全局化（2026-10-11）：池/日志落 data/proxy/、serve 进程级单实例，
+            # 与项目工作区无句柄关系——故删除前置链**不再**停代理池（此前 close_project(pid)
+            # 只为释放 <项目>/proxy/*.log 句柄让 rename 成功；池已移出 workspaces，无需释放）。
             # 会话级常驻容器先停删（释放卷挂载句柄，否则 Windows rename 必 422；P3，2026-10-07）
             try:
                 app.state.session_containers.remove_project(pid)
@@ -2648,7 +2780,11 @@ def create_app(
             except PermissionError as e:  # 重试耗尽仍有句柄（外部进程占用）
                 raise HTTPException(
                     422,
-                    "项目目录被占用，无法移入回收站；请关闭该项目的所有页面标签后重试: "
+                    "项目目录被占用，无法移入回收站。常见原因：① 该项目的 Agent 曾用 "
+                    "run_cmd 起了**后台常驻/心跳进程**（如 Start-Process / nohup / "
+                    "setsid 起的循环脚本），命令结束后仍在跑，锁住工作区目录；"
+                    "② 外部进程（编辑器/终端/容器）打开了目录内文件。"
+                    "请找出并结束占用进程后重试（关页面标签通常无效）: "
                     f"{e}") from e
             return {"project_id": pid, "status": "trashed", "trash_path": str(trash_path)}
         finally:
@@ -2945,8 +3081,9 @@ def create_app(
         stop.set()
         return {"stopped": True}
 
-    # ---------- 代理池（fir-proxy 托管，2026-10-07） ----------
-    # 项目级 serve 生命周期 + 池记录；人类 UI 与 AI（经 MCP 控制面）共享同一池。
+    # ---------- 代理池（fir-proxy 托管，2026-10-07 → 2026-10-11 全局化） ----------
+    # **全局单池**：进程级单 serve + 单池（data/proxy/pool.json），所有项目共享；
+    # 人类 UI 与 AI（经 MCP 控制面）共享同一池。路由**无 pid**（池不再绑定项目）。
     # 缺 fir-proxy/依赖 → ProxyError → 503 结构化（不 500）。
 
     def _proxy_pool():
@@ -2958,94 +3095,84 @@ def create_app(
         except ProxyError as exc:
             raise HTTPException(503, str(exc)) from exc
 
-    def _proxy_running_job(pid: str) -> dict | None:
-        """本项目运行中的代理 Job（fetch/validate），无则 None。
+    def _proxy_running_job() -> dict | None:
+        """全局运行中的代理 Job（fetch/validate），无则 None。
 
+        池是全局的，故不再按项目过滤；至多一个此类 job 在跑（前端亦按 job_id 去重）。
         前端切页回来据此重挂 `pollJob`（进度 dict 是 meta 内的**引用**，读到即最新）。
         """
         for j in app.state.jobs.all_jobs():
             if (j.get("status") == "running"
-                    and j.get("kind") in ("proxy-fetch", "proxy-validate")
-                    and (j.get("meta") or {}).get("project_id") == pid):
+                    and j.get("kind") in ("proxy-fetch", "proxy-validate")):
                 meta = j.get("meta") or {}
                 return {"id": j["id"], "kind": j["kind"],
                         "progress": meta.get("progress")}
         return None
 
-    @app.get("/api/projects/{pid}/proxy/status")
-    def proxy_status(pid: str):
-        _project(pid)
-        out = _proxy_pool().status(pid)
-        out["job"] = _proxy_running_job(pid)
+    @app.get("/api/proxy/status")
+    def proxy_status():
+        out = _proxy_pool().status()
+        out["job"] = _proxy_running_job()
         return out
 
-    @app.post("/api/projects/{pid}/proxy/start")
-    def proxy_start(pid: str):
-        _project(pid)
-        return _proxy_call(_proxy_pool().start, pid)
+    @app.post("/api/proxy/start")
+    def proxy_start():
+        return _proxy_call(_proxy_pool().start)
 
-    @app.post("/api/projects/{pid}/proxy/stop")
-    def proxy_stop(pid: str):
-        _project(pid)
-        return _proxy_pool().stop(pid)
+    @app.post("/api/proxy/stop")
+    def proxy_stop():
+        return _proxy_pool().stop()
 
-    @app.get("/api/projects/{pid}/proxy/proxies")
-    def proxy_list(pid: str):
-        _project(pid)
-        return _proxy_pool().list_proxies(pid)
+    @app.get("/api/proxy/proxies")
+    def proxy_list():
+        return _proxy_pool().list_proxies()
 
-    @app.post("/api/projects/{pid}/proxy/rotate")
-    def proxy_rotate(pid: str):
-        _project(pid)
-        return _proxy_call(_proxy_pool().rotate, pid)
+    @app.post("/api/proxy/rotate")
+    def proxy_rotate():
+        return _proxy_call(_proxy_pool().rotate)
 
-    @app.post("/api/projects/{pid}/proxy/add")
-    def proxy_add(pid: str, body: ProxyAddIn):
-        _project(pid)
-        return _proxy_pool().add_records(pid, body.records)
+    @app.post("/api/proxy/add")
+    def proxy_add(body: ProxyAddIn):
+        return _proxy_pool().add_records(body.records)
 
-    @app.post("/api/projects/{pid}/proxy/remove")
-    def proxy_remove(pid: str, body: ProxyRemoveIn):
-        _project(pid)
-        return _proxy_pool().remove_records(pid, body.addresses)
+    @app.post("/api/proxy/remove")
+    def proxy_remove(body: ProxyRemoveIn):
+        return _proxy_pool().remove_records(body.addresses)
 
-    @app.post("/api/projects/{pid}/proxy/select")
-    def proxy_select(pid: str, body: ProxySelectIn):
-        _project(pid)
+    @app.post("/api/proxy/select")
+    def proxy_select(body: ProxySelectIn):
         return {"proxies": _proxy_pool().select(
-            pid, limit=body.limit, region=body.region,
+            limit=body.limit, region=body.region,
             max_latency_ms=body.max_latency_ms,
             include_failed=body.include_failed)}
 
-    @app.post("/api/projects/{pid}/proxy/fetch", status_code=202)
-    def proxy_fetch(pid: str, body: ProxyFetchIn):
+    @app.post("/api/proxy/fetch", status_code=202)
+    def proxy_fetch(body: ProxyFetchIn):
         """从在线源抓取代理入池（默认抓取后自动验证并清理失效；Job：联网慢，返 job_id 轮询）。
 
         ``meta.progress`` 为可变 dict（引用共享）：前端轮询读到实时相位/进度/ETA。
         """
-        _project(pid)
         pool = _proxy_pool()
         progress: dict = {"phase": "queued", "done": 0, "total": 0,
                           "eta_seconds": None, "message": "排队中…"}
         job_id = app.state.jobs.submit(
             "proxy-fetch",
-            lambda: pool.fetch(pid, body.protocols, auto_validate=body.auto_validate,
+            lambda: pool.fetch(body.protocols, auto_validate=body.auto_validate,
                                on_progress=progress.update),
-            meta={"project_id": pid, "progress": progress})
+            meta={"progress": progress})
         return {"job_id": job_id}
 
-    @app.post("/api/projects/{pid}/proxy/validate", status_code=202)
-    def proxy_validate(pid: str, body: ProxyValidateIn):
+    @app.post("/api/proxy/validate", status_code=202)
+    def proxy_validate(body: ProxyValidateIn):
         """批量验证池内代理并清理失效（Job：慢；``meta.progress`` 同 fetch）。"""
-        _project(pid)
         pool = _proxy_pool()
         progress: dict = {"phase": "queued", "done": 0, "total": 0,
                           "eta_seconds": None, "message": "排队中…"}
         job_id = app.state.jobs.submit(
             "proxy-validate",
-            lambda: pool.validate(pid, timeout=body.timeout_s, workers=body.workers,
+            lambda: pool.validate(timeout=body.timeout_s, workers=body.workers,
                                   prune=body.prune, on_progress=progress.update),
-            meta={"project_id": pid, "progress": progress})
+            meta={"progress": progress})
         return {"job_id": job_id}
 
     # ---------- F6-v3 拦截（仅人工隐式会话 human-main 流量可挂起裁决） ----------
@@ -6178,6 +6305,13 @@ def create_app(
                     if pid in app.state.projects_closing:
                         continue
                     proj = _project(pid)
+                    # chat 僵尸轮兜底对账（2026-10-11）：即便前端从不刷新工作台，
+                    # 后台也保证「轮次线程已死但 status=running」的线程被归位 idle，
+                    # 杜绝永久「执行中」。异常吞掉（单项目失败不拖垮 sweep）。
+                    try:
+                        _chat_running_reconcile(proj)
+                    except Exception:  # noqa: BLE001
+                        log.exception("chat 僵尸轮兜底对账失败 pid=%s", pid)
                     cfg = autonomy.autonomy_of(
                         proj.bb.get_project(pid)["config"], track=proj.track)
                     if (not cfg.get("auto_derive") or cfg["level"] != "L1"
@@ -8345,6 +8479,58 @@ def create_app(
             return ev
         return events.get(tid)
 
+    def _chat_task_ident(tid: str):
+        """读该轮后台线程的 OS 线程号（_run 启动时登记；未登记 → None）。"""
+        ids = getattr(app.state, "chat_thread_idents", None)
+        if not ids:
+            return None
+        return ids.get(tid)
+
+    def _chat_running_reconcile(proj) -> list[str]:
+        """运行期存活对账（2026-10-11 事故修复）：DB status=running 的轮次，若其
+        后台线程已不存在（被硬杀/静默死亡），就地归位 idle，杜绝「永久执行中」。
+
+        旧自愈只在**进程重启**后首次打开项目时跑（且只认 chat_running 集合），
+        进程不重启则僵尸行永不回收——前端「思考中/执行中」卡死、停止钮无效。
+
+        存活判据用**原生线程号**（`GetExitCodeThread`）而非 `Thread.is_alive()`：
+        Python 的 is_alive 看 threading 簿记（`_tstate_lock`），Windows 下线程被
+        `TerminateThread` 硬杀时**仍报 True**（实测 exit_code=259→7 而 is_alive
+        恒 True），据此会漏判真僵尸。故以 OS 退出码 259(STILL_ACTIVE) 为准。
+
+        保护：仍在跑（tid ∈ chat_running）跳过；未登记线程号的 running 跳过（可能
+        是本进程启动早期 / 登记竞态，宁可不杀，交给重启清扫兜底）。"""
+        from core.chat import store as chat_store
+        running = _chat_running_set()
+        rows = proj.bb.conn.execute(
+            "SELECT id FROM chat_threads WHERE status='running'").fetchall()
+        dead: list[str] = []
+        for r in rows:
+            tid = r["id"]
+            if tid in running:
+                continue
+            ident = _chat_task_ident(tid)
+            if ident is None:
+                continue  # 未登记：不武断判死（重启清扫兜底）
+            if _native_thread_alive(ident):
+                continue  # 线程还在：可能刚启动、集合登记竞态
+            dead.append(tid)
+        if not dead:
+            return []
+        # 白名单 = 除「已确认死亡」外的**全部** running 线程（仍在跑的、未登记线程号
+        # 的一律保留）——否则 recover_running_threads 会把它们一并当僵尸清扫（错杀
+        # 活轮 / 与 chat_running 登记竞态的新轮）。
+        keep = {r["id"] for r in rows} - set(dead)
+        recovered = chat_store.recover_running_threads(
+            proj.bb, running, skip_ids=keep,
+            note="（⚠ 本轮执行线程已意外终止（未走正常收尾）；可继续追问或重新发起）")
+        idents = getattr(app.state, "chat_thread_idents", None) or {}
+        for tid in recovered:
+            idents.pop(tid, None)
+        if recovered:
+            log.warning("chat 运行期僵尸轮对账归位: %s", recovered)
+        return recovered
+
     @app.get("/api/chat/agents")
     def chat_agents(pid: str):
         return _chat_agents(pid)
@@ -8356,7 +8542,9 @@ def create_app(
     @app.get("/api/projects/{pid}/chat/threads")
     def chat_threads_list(pid: str, agent_id: str | None = None):
         from core.chat import store as chat_store
-        return chat_store.list_threads(_project(pid).bb, pid, agent_id=agent_id)
+        proj = _project(pid)
+        _chat_running_reconcile(proj)  # 运行期自愈：轮次线程已死则就地归位 idle
+        return chat_store.list_threads(proj.bb, pid, agent_id=agent_id)
 
     @app.post("/api/projects/{pid}/chat/threads", status_code=201)
     def chat_thread_create(pid: str, body: ChatThreadIn):
@@ -8370,10 +8558,11 @@ def create_app(
     @app.get("/api/chat/threads/{tid}")
     def chat_thread_detail(tid: str, after_id: int = 0):
         from core.chat import store as chat_store
-        thread = chat_store.get_thread(_project(_pid_of_chat(tid)).bb, tid)
+        proj = _project(_pid_of_chat(tid))
+        _chat_running_reconcile(proj)  # 打开线程即对账：僵死轮不再显示「执行中」
+        thread = chat_store.get_thread(proj.bb, tid)
         if thread is None:
             raise HTTPException(404, f"线程不存在: {tid}")
-        proj = _project(thread["project_id"])
         return {"thread": thread,
                 # work_dir：会话流文件卡把工具参数里的绝对路径落回工作区相对路径
                 # （后端 /files/open 收相对 scope 根的路径，2026-10-03）
@@ -8494,25 +8683,49 @@ def create_app(
                     log.exception("chat 失败状态归位失败 thread=%s", tid)
             finally:
                 running.discard(tid)
+                idents = getattr(app.state, "chat_thread_idents", None)
+                if idents is not None:
+                    idents.pop(tid, None)
                 events = getattr(app.state, "chat_abort_events", None)
                 if events is not None:
                     events.pop(tid, None)
 
-        threading.Thread(target=_run, name=f"chat-{tid[-12:]}",
-                         daemon=True).start()
+        worker = threading.Thread(target=_run, name=f"chat-{tid[-12:]}",
+                                  daemon=True)
+        worker.start()
+        # 登记 OS 线程号：运行期对账据此判「轮次线程是否还活着」（_chat_running_reconcile）。
+        # 线程若在 start() 前后异常早退，Python 侧可能仍记它存活，故以原生线程号为准。
+        idents = getattr(app.state, "chat_thread_idents", None)
+        if idents is None:
+            idents = {}
+            app.state.chat_thread_idents = idents
+        if worker.ident is not None:
+            idents[tid] = worker.ident
         return {"status": "running", "thread_id": tid}
 
     @app.post("/api/chat/threads/{tid}/stop", status_code=204)
     def chat_stop(tid: str):
         """中止执行中的轮次：置中止事件 → ChatTurn 在步间/流式帧/工具分发点
-        退出并落「已停止」说明。轮次刚结束时按幂等成功处理，避免前端状态刷新竞态。"""
+        退出并落「已停止」说明。轮次刚结束时按幂等成功处理，避免前端状态刷新竞态。
+
+        2026-10-11 修复：线程不在本进程 running 集合、但 DB 仍 status=running 时，
+        旧实现直接 `return`（空操作）——僵尸轮下停止钮**永远无效**。现改为对账归位：
+        就地清扫该 tid（僵尸→idle + 落中断说明），让前端退出「执行中」。"""
         from core.chat import store as chat_store
         if tid not in _chat_running_set():
-            thread = chat_store.get_thread(_project(_pid_of_chat(tid)).bb, tid)
+            proj = _project(_pid_of_chat(tid))
+            thread = chat_store.get_thread(proj.bb, tid)
             if thread is None:
                 raise HTTPException(404, f"线程不存在: {tid}")
-            if thread.get("status") != "running":
-                return
+            if thread.get("status") == "running":
+                # 只清这一个 tid，其余 running 保持不动（skip_ids=除 tid 外全部）
+                others = {r["id"] for r in proj.bb.conn.execute(
+                    "SELECT id FROM chat_threads WHERE status='running'").fetchall()}
+                others.discard(tid)
+                chat_store.recover_running_threads(
+                    proj.bb, _chat_running_set(), skip_ids=others,
+                    note="（⚠ 本轮执行线程已意外终止；已按停止处理）")
+                (getattr(app.state, "chat_thread_idents", None) or {}).pop(tid, None)
             return
         ev = _chat_abort_event(tid, create=True)
         ev.set()

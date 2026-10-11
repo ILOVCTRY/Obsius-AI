@@ -9,7 +9,7 @@ fofa MCP server（外部仓库 `E:\ILOVCTRY\SRC\src-strike\mcp-servers\fofa_MCP\
 ## fir-proxy-mcp/
 
 - `fir_proxy_mcp.py` 单文件（stdio，`mcp.server.fastmcp`）：**薄客户端**——不自己管池、不起 serve，只把平台代理池 API（默认 `http://127.0.0.1:8420`）暴露成 10 个工具（`proxy_status/list/start/stop/rotate/select/add/remove/fetch/validate`），让 AI 取端点/IP 列表后自行 `curl -x`。
-- **项目 id 来源**：平台 `mcp_bridge` 给**所有 stdio server** 注入 `PW_PROJECT_ID`（此前仅会话级注入）；工具也可显式传 `project_id`。平台基址可经 mcp.json 的 `env.CYBERSTRIKE_API` 覆盖。
+- **无 project_id（2026-10-11 全局化）**：代理池已是**全局单池**（进程级单 serve + `data/proxy/pool.json`，所有项目共享），工具打 `/api/proxy/*`，**无 `project_id` 形参**、平台**不注入 `PW_PROJECT_ID`**（`mcp_bridge.PROJECT_AGNOSTIC_SERVERS`）。平台基址可经 mcp.json 的 `env.CYBERSTRIKE_API` 覆盖。
 - `config/mcp.json` 条目（**设置页 MCP 连接面板可开关**）；`domains:[pentest]`。启动 `python mcp-servers/fir-proxy-mcp/fir_proxy_mcp.py`——`python` 是**平台解释器占位**（`core/chat/mcp_bridge.py::_resolve_command` 解析为 `sys.executable`，本进程环境已带 `mcp`/`httpx`）。
   - **勿用 `uv run --active`**（2026-10-08 修）：`--active` 依赖环境变量 `VIRTUAL_ENV`，平台自 `启动平台.bat` 直起时为空 → uv 落到自管的无 `mcp` 解释器 → `tools/list` 失败、面板显「工具发现失败或为空」。`uv run --with 'mcp<2'` 临时环境实测 ~7s，逼近 8s 探活超时，亦不可取。
 - **为什么是薄客户端**：平台 MCP server 是**按项目托管的外部子进程**，随会话/轮次起停；serve 与池若住进去会随 MCP 生死、多项目各起一个、UI 反向依赖 MCP 在线。详见 `docs/plans/proxy-pool-integration.md`。

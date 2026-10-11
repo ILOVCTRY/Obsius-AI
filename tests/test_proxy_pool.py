@@ -19,7 +19,13 @@ from pathlib import Path
 import pytest
 
 from core.proxy import ProxyConfig, ProxyPool, proxy_available, select_records
-from core.proxy.pool import _is_usable, _prune
+from core.proxy.pool import (
+    SOCKS_PROTOCOLS,
+    _is_usable,
+    _prune,
+    auto_fetch_targets,
+    protocol_counts,
+)
 
 TOOLS = str(Path(__file__).resolve().parent.parent / "tools")
 
@@ -185,62 +191,140 @@ def test_config_from_file_missing_and_bad(tmp_path):
     assert cfg.http_port_base == 9999 and cfg.region == "CN"
 
 
+def test_config_auto_maintenance_defaults(tmp_path):
+    """自动巡检默认值（2026-10-11）：30min 间隔 + 阈值 50/20/20 + 冷却 600s。"""
+    cfg = ProxyConfig()
+    assert cfg.maintenance_interval_s == 1800.0
+    assert cfg.auto_fetch_min_http == 50
+    assert cfg.auto_fetch_min_https == 20
+    assert cfg.auto_fetch_min_socks == 20
+    assert cfg.auto_fetch_cooldown_s == 600.0
+    assert cfg.validate_target_https == "https://www.baidu.com"
+    # 文件覆盖生效
+    f = tmp_path / "p.json"
+    f.write_text(json.dumps({"auto_fetch_min_http": 200, "maintenance_interval_s": 60}),
+                 encoding="utf-8")
+    cfg2 = ProxyConfig.from_file(f)
+    assert cfg2.auto_fetch_min_http == 200 and cfg2.maintenance_interval_s == 60
+
+
+def test_protocol_counts():
+    """协议分桶计数：http / socks(socks4+socks5) / https(能力) ，非可用不计。"""
+    rows = [
+        _rec("a:1", protocol="http"),                    # http Working
+        _rec("b:2", protocol="socks5"),
+        _rec("c:3", protocol="socks4"),
+        _rec("d:4", protocol="http", status="Failed"),   # 死：不计入任何桶
+        {**_rec("e:5", protocol="http"), "https_ok": True},   # http + https 能力
+        {**_rec("f:6", protocol="socks5"), "https_ok": True},
+        {**_rec("g:7", protocol="http"), "https_ok": False},
+    ]
+    c = protocol_counts(rows, 5000.0)
+    assert c["http"] == 3          # a, e, g（Working 且 http）
+    assert c["socks"] == 3         # b, c, f
+    assert c["https"] == 2         # e, f（https_ok=True）
+    assert c["total"] == 7
+    # 无 prune 阈值时同样成立
+    assert protocol_counts(rows, None)["http"] == 3
+
+
+def test_protocol_counts_socks_is_union():
+    assert SOCKS_PROTOCOLS == frozenset({"socks4", "socks5"})
+
+
+def test_auto_fetch_targets():
+    """阈值判定：不足才抓；https 不足也抓 http（能力靠探测补齐）；0=关。"""
+    cfg = ProxyConfig()                                     # 50/20/20
+    # http 不足 + https 不足 → 合并为一条 ["http"]
+    assert auto_fetch_targets({"http": 30, "https": 5, "socks": 99}, cfg) == [["http"]]
+    # 仅 socks 不足
+    assert auto_fetch_targets({"http": 99, "https": 99, "socks": 10}, cfg) \
+        == [["socks4", "socks5"]]
+    # 三者都不足
+    t = auto_fetch_targets({"http": 0, "https": 0, "socks": 0}, cfg)
+    assert t == [["http"], ["socks4", "socks5"]]
+    # 都充足 → 不抓
+    assert auto_fetch_targets({"http": 99, "https": 99, "socks": 99}, cfg) == []
+    # 阈值 0 = 该协议永不自动抓
+    cfg0 = ProxyConfig(auto_fetch_min_http=0, auto_fetch_min_https=0, auto_fetch_min_socks=0)
+    assert auto_fetch_targets({"http": 0, "https": 0, "socks": 0}, cfg0) == []
+
+
 def test_pool_file_roundtrip_and_dedup(pool):
-    pid = "p-file"
-    assert pool.read_pool(pid) == []
-    assert pool.add_records(pid, [_rec("a:1"), _rec("a:1"), _rec("b:2")]) \
+    assert pool.read_pool() == []
+    assert pool.add_records([_rec("a:1"), _rec("a:1"), _rec("b:2")]) \
         == {"added": 2, "pool_size": 2}          # 同地址去重
-    assert pool.add_records(pid, [_rec("a:1")]) == {"added": 0, "pool_size": 2}
-    assert pool.remove_records(pid, ["b:2"]) == {"removed": 1, "pool_size": 1}
-    assert [r["proxy"] for r in pool.read_pool(pid)] == ["a:1"]
+    assert pool.add_records([_rec("a:1")]) == {"added": 0, "pool_size": 2}
+    assert pool.remove_records(["b:2"]) == {"removed": 1, "pool_size": 1}
+    assert [r["proxy"] for r in pool.read_pool()] == ["a:1"]
+
+
+def test_data_dir_is_global(pool, tmp_path):
+    """池落 data/proxy/（全局归位契约），**不在** workspaces/ 下。"""
+    assert "workspaces" not in str(pool.pool_path())
+    assert pool.pool_path().parent.name == "proxy"
+    assert pool.pool_path().parent.parent.name == "data"
+
+
+def test_merge_legacy_pools(pool, tmp_path):
+    """首启迁移：旧 per-project 池并入全局，按地址去重、旧文件保留，且幂等。"""
+    ws = tmp_path / "ws"
+    for pid, recs in (("proj-a", [_rec("1.1.1.1:1"), _rec("dup:9")]),
+                      ("proj-b", [_rec("2.2.2.2:2"), _rec("dup:9", location="A")])):
+        d = ws / pid / "proxy"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "pool.json").write_text(json.dumps(recs), encoding="utf-8")
+    assert pool.merge_legacy_pools() == 3                      # 1.1 / 2.2 / dup 去重
+    addrs = {r["proxy"] for r in pool.read_pool()}
+    assert addrs == {"1.1.1.1:1", "2.2.2.2:2", "dup:9"}
+    assert (ws / "proj-a" / "proxy" / "pool.json").exists()    # 旧文件原地保留
+    assert pool.merge_legacy_pools() == 0                      # 幂等：池非空不再并
 
 
 # ---------------------------------------------------------------- 生命周期
 
 def test_lifecycle_and_control_channel(pool):
-    pid = "p-life"
     with pytest.raises(Exception):
-        pool.start(pid)                          # 空池：明确拒绝
-    pool.add_records(pid, [_rec("10.0.0.1:1080"), _rec("10.0.0.2:1080", "http")])
+        pool.start()                             # 空池：明确拒绝
+    pool.add_records([_rec("10.0.0.1:1080"), _rec("10.0.0.2:1080", "http")])
 
-    st = pool.start(pid)
+    st = pool.start()
     assert st["running"] is True
     assert st["count"] == 2 and st["working"] == 2
     assert st["endpoint"]["http"].startswith("127.0.0.1:")
     assert st["endpoint"]["socks5"].split(":")[1] != st["endpoint"]["http"].split(":")[1]
     assert st["current"]["proxy"] in ("10.0.0.1:1080", "10.0.0.2:1080")
 
-    first = pool.status(pid)["current"]["proxy"]
-    rotated = pool.rotate(pid)["current"]["proxy"]
+    first = pool.status()["current"]["proxy"]
+    rotated = pool.rotate()["current"]["proxy"]
     assert rotated != first                       # 轮换确实换了一个
 
-    listing = pool.list_proxies(pid)
+    listing = pool.list_proxies()
     assert listing["source"] == "serve" and len(listing["proxies"]) == 2
 
     # 热增删（运行中经控制通道 /reload）
-    pool.add_records(pid, [_rec("10.0.0.3:1080")])
-    assert pool.status(pid)["count"] == 3
-    pool.remove_records(pid, ["10.0.0.3:1080"])
-    assert pool.status(pid)["count"] == 2
+    pool.add_records([_rec("10.0.0.3:1080")])
+    assert pool.status()["count"] == 3
+    pool.remove_records(["10.0.0.3:1080"])
+    assert pool.status()["count"] == 2
 
-    assert pool.stop(pid) == {"running": False}
-    assert pool.status(pid)["running"] is False
-    assert pool.status(pid)["pool_size"] == 2     # 停服后池文件仍在
+    assert pool.stop() == {"running": False}
+    assert pool.status()["running"] is False
+    assert pool.status()["pool_size"] == 2        # 停服后池文件仍在
 
 
 def test_rotate_without_service_rejected(pool):
     with pytest.raises(Exception):
-        pool.rotate("p-nope")
+        pool.rotate()
 
 
 # ---------------------------------------------------------------- 端到端转发
 
 def test_end_to_end_forwarding(pool, target_server, socks5_upstream):
     """池的 HTTP 入口 → 假 SOCKS5 上游 → 本地靶站，真实取回 PROXY-OK。"""
-    pid = "p-e2e"
-    pool.add_records(pid, [_rec(f"127.0.0.1:{socks5_upstream.port}",
-                                location="Local", latency=0.01)])
-    st = pool.start(pid)
+    pool.add_records([_rec(f"127.0.0.1:{socks5_upstream.port}",
+                           location="Local", latency=0.01)])
+    st = pool.start()
     http_endpoint = st["endpoint"]["http"]
 
     opener = urllib.request.build_opener(
@@ -273,12 +357,10 @@ def client(tmp_path):
 
 
 def test_api_endpoints(client):
-    pid = client.post("/api/projects", json={
-        "name": "代理池测试", "track": "pentest"}).json()["id"]
+    """全局池端点（无 pid）：状态/增删/挑选/起停轮换。"""
+    assert client.get("/api/proxy/status").json()["running"] is False
 
-    assert client.get(f"/api/projects/{pid}/proxy/status").json()["running"] is False
-
-    r = client.post(f"/api/projects/{pid}/proxy/add", json={"records": [
+    r = client.post("/api/proxy/add", json={"records": [
         {"protocol": "socks5", "proxy": "10.1.1.1:1080", "status": "Working",
          "location": "CN", "latency": 0.3},
         {"protocol": "http", "proxy": "10.1.1.2:8080", "status": "Working",
@@ -286,49 +368,105 @@ def test_api_endpoints(client):
     ]})
     assert r.json() == {"added": 2, "pool_size": 2}
 
-    assert len(client.get(f"/api/projects/{pid}/proxy/proxies").json()["proxies"]) == 2
-    sel = client.post(f"/api/projects/{pid}/proxy/select",
-                      json={"limit": 1}).json()["proxies"]
+    assert len(client.get("/api/proxy/proxies").json()["proxies"]) == 2
+    sel = client.post("/api/proxy/select", json={"limit": 1}).json()["proxies"]
     assert len(sel) == 1
 
-    started = client.post(f"/api/projects/{pid}/proxy/start").json()
+    started = client.post("/api/proxy/start").json()
     assert started["running"] is True and started["count"] == 2
-    assert client.post(f"/api/projects/{pid}/proxy/rotate").json()["ok"] is True
-    assert client.post(f"/api/projects/{pid}/proxy/stop").json() == {"running": False}
+    assert client.post("/api/proxy/rotate").json()["ok"] is True
+    assert client.post("/api/proxy/stop").json() == {"running": False}
 
-    assert client.post(f"/api/projects/{pid}/proxy/remove",
+    assert client.post("/api/proxy/remove",
                        json={"addresses": ["10.1.1.1:1080"]}).json()["removed"] == 1
-    # 未知项目 404（不是 500）
-    assert client.get("/api/projects/nope/proxy/status").status_code == 404
+    # 旧的项目级路由已下线（全局化）：不存在此路径
+    assert client.get("/api/projects/x/proxy/status").status_code == 404
+
+
+def test_api_status_includes_counts(client):
+    """status 带 counts（2026-10-11）：http/socks/https 三分桶，供前端过滤与阈值展示。"""
+    client.post("/api/proxy/add", json={"records": [
+        {"protocol": "http", "proxy": "1.1.1.1:1", "status": "Working",
+         "latency": 0.1, "https_ok": True},
+        {"protocol": "http", "proxy": "2.2.2.2:2", "status": "Working", "latency": 0.2},
+        {"protocol": "socks5", "proxy": "3.3.3.3:3", "status": "Working", "latency": 0.3},
+        {"protocol": "socks4", "proxy": "4.4.4.4:4", "status": "Working", "latency": 0.4},
+    ]})
+    counts = client.get("/api/proxy/status").json()["counts"]
+    assert counts == {"http": 2, "socks": 2, "https": 1, "total": 4}
+
+
+def _maint_app(tmp_path):
+    from core.api.app import create_app
+    return create_app(workspace_root=str(tmp_path / "workspaces"),
+                      tools_root=TOOLS, executor_llm=None, planner_llm=None,
+                      providers_config=str(tmp_path / "providers.json"),
+                      proxy_maintenance=False)
+
+
+def test_proxy_maintenance_tick_skips_when_busy(tmp_path):
+    """巡检 tick：已有代理 Job 在跑 → 本轮跳过（不并发），不触发验证/抓取。"""
+    import threading as _th
+
+    from core.api.app import _proxy_maintenance_tick
+    app = _maint_app(tmp_path)
+    gate = _th.Event()
+    try:
+        app.state.jobs.submit("proxy-validate", lambda: gate.wait(5), meta={})
+        out = _proxy_maintenance_tick(app)
+        assert out["skipped"] == "busy" and out["fetched"] == []
+    finally:
+        gate.set()
+
+
+def test_proxy_maintenance_tick_fetches_below_threshold(tmp_path):
+    """巡检 tick：池空/低于阈值 → 提交 proxy-fetch Job（协议参数按阈值）。同步、零触网。"""
+    from core.api.app import _proxy_maintenance_tick
+    app = _maint_app(tmp_path)
+
+    class FakePool:
+        config = ProxyConfig()          # 默认 50/20/20
+
+        def read_pool(self):
+            return []                   # 空池 → http/https/socks 全不足
+
+        def validate(self, **_):
+            return {}
+
+        def fetch(self, protocols=None, **_):
+            return {}
+
+    app.state.proxy_pool = FakePool()
+    # 返回值 out["fetched"] 由 _proxy_auto_fetch 同步构建（Job 线程异步，故只断言它）
+    out = _proxy_maintenance_tick(app)
+    assert out["fetched"] == [["http"], ["socks4", "socks5"]]   # http/https 合并 + socks
+
+    # 冷却：同协议组在 cooldown 内不重复提交
+    out2 = _proxy_maintenance_tick(app)
+    assert out2["fetched"] == []
 
 
 def test_api_start_empty_pool_is_503(client):
-    pid = client.post("/api/projects", json={
-        "name": "空池", "track": "pentest"}).json()["id"]
-    r = client.post(f"/api/projects/{pid}/proxy/start")
+    r = client.post("/api/proxy/start")
     assert r.status_code == 503 and "空" in r.json()["detail"]
 
 
 def test_api_status_reports_running_job(client):
-    """切页回来重挂：/proxy/status 带出运行中的代理 Job（id/kind/progress）。"""
-    pid = client.post("/api/projects", json={
-        "name": "进度", "track": "pentest"}).json()["id"]
+    """切页回来重挂：/api/proxy/status 带出运行中的代理 Job（id/kind/progress）。
+
+    全局池：job 不再按项目过滤，任何调用方看到同一个全局 job。
+    """
     gate = threading.Event()
     progress = {"phase": "check", "done": 3, "total": 10, "eta_seconds": 7}
     jid = client.app.state.jobs.submit(
-        "proxy-fetch", lambda: gate.wait(5),
-        meta={"project_id": pid, "progress": progress})
+        "proxy-fetch", lambda: gate.wait(5), meta={"progress": progress})
     try:
-        st = client.get(f"/api/projects/{pid}/proxy/status").json()
+        st = client.get("/api/proxy/status").json()
         assert st["job"] and st["job"]["id"] == jid
         assert st["job"]["kind"] == "proxy-fetch"
         assert st["job"]["progress"]["done"] == 3          # 可变 dict 引用，读到最新
     finally:
         gate.set()
-    # 其它项目看不到（按 meta.project_id 过滤）
-    pid2 = client.post("/api/projects", json={
-        "name": "别的", "track": "pentest"}).json()["id"]
-    assert client.get(f"/api/projects/{pid2}/proxy/status").json()["job"] is None
 
 
 # ---------------------------------------------------------------- 清理判据（离线）
@@ -351,8 +489,7 @@ def test_is_usable_and_prune_criteria():
 # ---------------------------------------------------------------- 验证/抓取编排（离线，monkeypatch cli）
 
 def test_validate_prunes_failed_and_merges(pool, monkeypatch):
-    pid = "p-validate"
-    pool.add_records(pid, [
+    pool.add_records([
         _rec("1.1.1.1:1", latency=0.2),
         _rec("2.2.2.2:2", latency=0.3),
         _rec("3.3.3.3:3", latency=0.1),
@@ -363,16 +500,66 @@ def test_validate_prunes_failed_and_merges(pool, monkeypatch):
         {"proxy": "3.3.3.3:3", "protocol": "HTTP", "status": "Working", "latency": 9.0},
     ]
     monkeypatch.setattr(ProxyPool, "_run_cli",
-                        lambda self, pid, args, timeout, script=None, on_progress=None: canned)
-    res = pool.validate(pid)
+                        lambda self, args, timeout, script=None, on_progress=None: canned)
+    res = pool.validate()
     assert res["validated"] == 3 and res["removed"] == 2 and res["working"] == 1
-    rows = pool.read_pool(pid)
+    rows = pool.read_pool()
     assert [r["proxy"] for r in rows] == ["1.1.1.1:1"]     # Failed 与慢代理被删
     assert rows[0]["latency"] == 0.25                      # 验证结果 merge 回写
 
 
+def test_validate_merges_https_ok(pool, monkeypatch):
+    """HTTPS 能力探测结果 merge 回池（2026-10-11）：https_ok 随验证回写，不参与 status。"""
+    pool.add_records([_rec("1.1.1.1:1"), _rec("2.2.2.2:2", protocol="socks5")])
+    canned = [
+        {"proxy": "1.1.1.1:1", "protocol": "http", "status": "Working",
+         "latency": 0.2, "https_ok": True},
+        {"proxy": "2.2.2.2:2", "protocol": "socks5", "status": "Working",
+         "latency": 0.3, "https_ok": False},
+    ]
+    monkeypatch.setattr(ProxyPool, "_run_cli",
+                        lambda self, args, timeout, script=None, on_progress=None: canned)
+    pool.validate()
+    by = {r["proxy"]: r for r in pool.read_pool()}
+    assert by["1.1.1.1:1"]["https_ok"] is True
+    assert by["2.2.2.2:2"]["https_ok"] is False
+    # https_ok=False 不删记录（能力标注非生死判据）
+    assert len(by) == 2
+
+
+def test_list_proxies_includes_https_ok(pool):
+    """列表视图必须带 https_ok（2026-10-11 回归）：`_proxy_view` 白名单曾漏该键，
+    致 `/api/proxy/proxies` 过滤掉 https_ok——前端 HTTPS 过滤恒空（计数来自 read_pool 故正常）。
+    """
+    pool.add_records([
+        {**_rec("1.1.1.1:1", protocol="http"), "https_ok": True},
+        {**_rec("2.2.2.2:2", protocol="socks5"), "https_ok": False},
+        _rec("3.3.3.3:3", protocol="http"),
+    ])
+    rows = pool.list_proxies()["proxies"]
+    by = {r["proxy"]: r for r in rows}
+    assert by["1.1.1.1:1"]["https_ok"] is True
+    assert by["2.2.2.2:2"]["https_ok"] is False
+    assert by["3.3.3.3:3"]["https_ok"] is None
+
+
+def test_validate_passes_target_https(pool, monkeypatch):
+    """validate 把 validate_target_https 透传给 check runner（--target-https）。"""
+    pool.add_records([_rec("1.1.1.1:1")])
+    seen: list[list[str]] = []
+
+    def fake(self, args, timeout, script=None, on_progress=None):
+        seen.append(list(args))
+        return [{"proxy": "1.1.1.1:1", "protocol": "http", "status": "Working",
+                 "latency": 0.1, "https_ok": True}]
+
+    monkeypatch.setattr(ProxyPool, "_run_cli", fake)
+    pool.validate()
+    assert "--target-https" in seen[0]
+    assert "https://www.baidu.com" in seen[0]
+
+
 def test_fetch_auto_validates_and_prunes(pool, monkeypatch):
-    pid = "p-fetch"
     fetched = [{"protocol": "http", "proxy": f"9.9.9.{i}:80"} for i in range(3)]
     validated = [
         {"proxy": "9.9.9.0:80", "protocol": "HTTP", "status": "Working", "latency": 0.5},
@@ -380,26 +567,25 @@ def test_fetch_auto_validates_and_prunes(pool, monkeypatch):
         {"proxy": "9.9.9.2:80", "protocol": "HTTP", "status": "Working", "latency": 7.0},
     ]
 
-    def fake(self, pid, args, timeout, script=None, on_progress=None):
+    def fake(self, args, timeout, script=None, on_progress=None):
         name = Path(script).name if script is not None else ""
         return fetched if name == "cyberstrike_fetch.py" else validated
 
     monkeypatch.setattr(ProxyPool, "_run_cli", fake)
-    res = pool.fetch(pid)
+    res = pool.fetch()
     assert res["fetched"] == 3 and res["validated"] == 3
     assert res["removed"] == 2 and res["added"] == 1
-    assert [r["proxy"] for r in pool.read_pool(pid)] == ["9.9.9.0:80"]
+    assert [r["proxy"] for r in pool.read_pool()] == ["9.9.9.0:80"]
 
 
 def test_fetch_without_auto_validate_adds_all(pool, monkeypatch):
-    pid = "p-fetch-raw"
     fetched = [{"protocol": "http", "proxy": "9.9.9.9:80"}]
     monkeypatch.setattr(ProxyPool, "_run_cli",
-                        lambda self, pid, args, timeout, script=None, on_progress=None: fetched)
-    res = pool.fetch(pid, auto_validate=False)
+                        lambda self, args, timeout, script=None, on_progress=None: fetched)
+    res = pool.fetch(auto_validate=False)
     assert res == {"fetched": 1, "validated": 0, "removed": 0,
                    "added": 1, "pool_size": 1}
-    assert len(pool.read_pool(pid)) == 1
+    assert len(pool.read_pool()) == 1
 
 
 def test_runner_build_sources():
@@ -447,6 +633,152 @@ def test_runner_check_records():
     assert by["2.2.2.2:80"]["status"] == "Failed"
     assert by["2.2.2.2:80"]["latency"] is None              # 不通：无延迟
     assert mod.check_records([], "http://x/", 5, 2) == []   # 空批次直接返 []
+
+
+def test_runner_check_https_probe():
+    """check runner HTTPS 能力探测（2026-10-11）：target_https 给定即标 https_ok，
+    且 https 失败**不影响** status（能力标注非生死判据）。"""
+    import importlib.util
+
+    path = Path(TOOLS) / "fir-proxy" / "cyberstrike_check.py"
+    spec = importlib.util.spec_from_file_location("cyberstrike_check", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    class FakeChecker:
+        def __init__(self, ok_map):
+            self.ok_map = ok_map
+
+        def check_proxy_url(self, record, url, timeout):
+            # https 目标（url 以 https 开头）用另一张表
+            key = f"{'https' if url.startswith('https') else 'http'}:" + record["proxy"]
+            ok = self.ok_map.get(key, False)
+            return {"ok": ok, "status_code": 200 if ok else None,
+                    "error": "" if ok else "boom"}
+
+    records = [{"protocol": "http", "proxy": "1.1.1.1:80"},
+               {"protocol": "http", "proxy": "2.2.2.2:80"}]
+    m = {"http:1.1.1.1:80": True, "https:1.1.1.1:80": True,   # 全通
+         "http:2.2.2.2:80": True, "https:2.2.2.2:80": False}  # HTTP 通但 HTTPS 不通
+    out = mod.check_records(records, "http://x/", 5, 2,
+                            checker_factory=lambda: FakeChecker(m),
+                            target_https="https://y/")
+    by = {r["proxy"]: r for r in out}
+    assert by["1.1.1.1:80"]["https_ok"] is True
+    assert by["1.1.1.1:80"]["status"] == "Working"
+    assert by["2.2.2.2:80"]["https_ok"] is False
+    assert by["2.2.2.2:80"]["status"] == "Working"          # https 失败不改 status
+    # 不给 target_https → 不写 https_ok 键
+    out2 = mod.check_records(records, "http://x/", 5, 2,
+                             checker_factory=lambda: FakeChecker(m))
+    assert all("https_ok" not in r for r in out2)
+
+
+def test_content_fingerprint_shape():
+    """内容指纹 = 状态码:长度:sha256前16hex；不同体/不同长→不同指纹（纯函数）。"""
+    import importlib.util
+
+    path = Path(TOOLS) / "fir-proxy" / "cyberstrike_check.py"
+    spec = importlib.util.spec_from_file_location("cyberstrike_check", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    fp1 = mod._content_fingerprint(200, b"hello")
+    assert fp1.startswith("200:5:")
+    assert mod._content_fingerprint(200, b"hello") == fp1     # 确定性
+    assert mod._content_fingerprint(200, b"world") != fp1     # 内容不同
+    assert mod._content_fingerprint(302, b"hello") != fp1     # 状态不同
+    assert mod._content_fingerprint(200, b"hello!") != fp1    # 长度不同
+    assert mod._content_fingerprint(200, b"") == mod._content_fingerprint(200, b"")
+
+
+def test_runner_check_hijack_detection():
+    """内容注入补丁（2026-10-11）：两个内容不同的目标经同一代理若返回**相同响应体
+    指纹** → 判 hijacked、status=Failed；指纹不同（正常代理）→ Working 且 hijacked=False；
+    探测失败不误杀（保留连通结论）。"""
+    import importlib.util
+
+    path = Path(TOOLS) / "fir-proxy" / "cyberstrike_check.py"
+    spec = importlib.util.spec_from_file_location("cyberstrike_check", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    class FakeChecker:
+        def check_proxy_url(self, record, url, timeout):
+            return {"ok": True, "status_code": 200, "error": ""}
+
+    # 注入型：两目标回同一伪造页；正常型：两目标回各自内容；半坏：第二目标探测失败
+    forged = b"<html>blocked</html>"          # 334 字节伪造页的替身
+    def probe(record, url, timeout):
+        addr = record["proxy"]
+        if addr == "9.9.9.9:80":              # 注入型：任意 target 回同一页
+            return {"ok": True, "status": 200, "body": forged, "error": ""}
+        if addr == "8.8.8.8:80":              # 正常型：内容随 target 变
+            return {"ok": True, "status": 200, "body": b"real-" + url.encode(),
+                    "error": ""}
+        return {"ok": False, "status": None, "body": b"", "error": "timeout"}
+
+    records = [{"protocol": "http", "proxy": "9.9.9.9:80"},
+               {"protocol": "http", "proxy": "8.8.8.8:80"},
+               {"protocol": "http", "proxy": "7.7.7.7:80"}]
+    out = mod.check_records(records, "http://a.example/", 5, 3,
+                            checker_factory=lambda: FakeChecker(),
+                            target_b="http://b.example/",
+                            probe_factory=probe)
+    by = {r["proxy"]: r for r in out}
+    assert by["9.9.9.9:80"]["hijacked"] is True
+    assert by["9.9.9.9:80"]["status"] == "Failed"           # 注入型剔除
+    assert "内容注入" in by["9.9.9.9:80"]["error"]
+    assert by["8.8.8.8:80"]["hijacked"] is False
+    assert by["8.8.8.8:80"]["status"] == "Working"          # 正常代理保留
+    assert by["7.7.7.7:80"]["hijacked"] is False            # 探测失败不误杀
+    assert by["7.7.7.7:80"]["status"] == "Working"
+    # 不给 target_b → 不写 hijacked 键、不做内容探测
+    out2 = mod.check_records(records, "http://a.example/", 5, 3,
+                             checker_factory=lambda: FakeChecker())
+    assert all("hijacked" not in r for r in out2)
+
+
+def test_config_content_check_defaults():
+    """ProxyConfig 内容注入交叉验证默认：第二目标 example.com；None=不校验。"""
+    cfg = ProxyConfig()
+    assert cfg.validate_target_b == "http://example.com"
+    assert cfg.validate_target != cfg.validate_target_b
+
+
+def test_validate_passes_target_b(pool, monkeypatch):
+    """validate 把 validate_target_b 透传给 check runner（--target-b）。"""
+    pool.add_records([_rec("1.1.1.1:1")])
+    seen: list[list[str]] = []
+
+    def fake_run(self, args, timeout, script=None, on_progress=None):
+        seen.append(list(args))
+        return [{"protocol": "http", "proxy": "1.1.1.1:1", "status": "Working",
+                 "latency": 0.1}]
+
+    monkeypatch.setattr(ProxyPool, "_run_cli", fake_run)
+    pool.validate()
+    assert "--target-b" in seen[0]
+    idx = seen[0].index("--target-b")
+    assert seen[0][idx + 1] == pool.config.validate_target_b
+
+
+def test_validate_merges_hijacked(pool, monkeypatch):
+    """hijacked 标志随验证 merge 回池；hijacked=True（status=Failed）被剔除。"""
+    pool.add_records([_rec("1.1.1.1:1"), _rec("2.2.2.2:2")])
+    canned = [
+        {"proxy": "1.1.1.1:1", "protocol": "http", "status": "Failed",
+         "latency": None, "hijacked": True, "error": "内容注入"},
+        {"proxy": "2.2.2.2:2", "protocol": "http", "status": "Working",
+         "latency": 0.2, "hijacked": False},
+    ]
+    monkeypatch.setattr(ProxyPool, "_run_cli",
+                        lambda self, args, timeout, script=None, on_progress=None: canned)
+    res = pool.validate()
+    assert res["removed"] == 1
+    rows = pool.read_pool()
+    assert [r["proxy"] for r in rows] == ["2.2.2.2:2"]
+    assert rows[0]["hijacked"] is False
 
 
 def test_limit_records_balanced():
@@ -515,9 +847,43 @@ def test_run_cli_streams_progress(pool, tmp_path):
         encoding="utf-8")
 
     seen: list[dict] = []
-    out = pool._run_cli("p-stream", [], 30.0, script=script, on_progress=seen.append)
+    out = pool._run_cli([], 30.0, script=script, on_progress=seen.append)
     assert [r["proxy"] for r in out] == ["1.1.1.1:80"]
     assert [s["done"] for s in seen] == [1, 2, 3]
     assert all(s["phase"] == "check" for s in seen)
 
 
+
+
+# ---------------------------------------------------------------- 孤儿 serve 回收（2026-10-12）
+
+def test_reap_orphan_serves_ignores_live_parent(monkeypatch):
+    """父进程存活的 serve 不动（绝不误杀在跑的池）；非 serve 命令也跳过。"""
+    from core.proxy import pool as P
+
+    monkeypatch.setattr(P, "_list_processes", lambda: [
+        {"ProcessId": 111, "ParentProcessId": 222,
+         "CommandLine": "python cyberstrike_serve.py -i x/pool.json"},
+        {"ProcessId": 333, "ParentProcessId": 444,
+         "CommandLine": "python -c print('not a serve')"},
+    ])
+    monkeypatch.setattr(P, "_pid_alive", lambda pid: True)  # 父 222 存活
+    monkeypatch.setattr(P, "_taskkill_tree", lambda pid: pytest.fail("不该杀"))
+    assert P.reap_orphan_serves() == []
+
+
+def test_reap_orphan_serves_kills_dead_parent(monkeypatch):
+    """父进程已死的 serve 被 taskkill 回收；父存活的 serve 不动。"""
+    from core.proxy import pool as P
+
+    killed_calls = []
+    monkeypatch.setattr(P, "_list_processes", lambda: [
+        {"ProcessId": 111, "ParentProcessId": 999,
+         "CommandLine": "python cyberstrike_serve.py -i x/pool.json"},
+        {"ProcessId": 222, "ParentProcessId": 333,
+         "CommandLine": "python cyberstrike_serve.py -i y/pool.json"},
+    ])
+    monkeypatch.setattr(P, "_pid_alive", lambda pid: int(pid) != 999)  # 999 死、333 活
+    monkeypatch.setattr(P, "_taskkill_tree", lambda pid: killed_calls.append(pid) or True)
+    assert P.reap_orphan_serves() == [111]
+    assert killed_calls == [111]

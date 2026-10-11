@@ -72,6 +72,7 @@ def _proxy_view(record: dict) -> dict:
         "anonymity": record.get("anonymity"),
         "score": record.get("score"),
         "status": record.get("status"),
+        "https_ok": record.get("https_ok"),
     }
 
 

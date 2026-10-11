@@ -1557,6 +1557,18 @@ export interface ProxyRecord {
   anonymity?: string | null
   score?: number | null
   status?: string | null
+  /** HTTPS 能力探测（2026-10-11）：经 CONNECT 转发 https 是否通；null/缺=未探测。 */
+  https_ok?: boolean | null
+  /** 内容注入/劫持型出口标志（2026-10-11）：两目标回同一响应体→true，已判 Failed 剔除。 */
+  hijacked?: boolean | null
+}
+
+/** 池按协议分桶计数（后端 `protocol_counts`；https 是能力探测非协议类目）。 */
+export interface ProxyCounts {
+  http: number
+  socks: number
+  https: number
+  total: number
 }
 
 /** 抓取/验证 Job 的进度快照（后端 `job.meta.progress` 可变 dict，轮询即最新）。 */
@@ -1579,6 +1591,8 @@ export interface ProxyStatus {
   regions: Record<string, number>
   uptime_s?: number
   pool_size: number
+  /** 按协议分桶计数（http / socks=socks4+socks5 / https 能力）；前端过滤与阈值展示用。 */
+  counts?: ProxyCounts
   /** 运行中的抓取/验证 Job（切页回来重挂轮询用；无则 null）。 */
   job?: { id: string; kind: string; progress?: ProxyJobProgress } | null
 }

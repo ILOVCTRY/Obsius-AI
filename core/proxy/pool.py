@@ -1,14 +1,17 @@
-"""代理池服务（fir-proxy 托管）。
+"""代理池服务（fir-proxy 托管）——**全局单池**。
 
-平台侧项目级常驻服务，仿 ``core/browser/pool.py`` 的 ``BrowserPool``：
-每项目一个实例，拥有 fir-proxy serve runner 子进程的生命周期，经 **loopback 控制通道**
-查询状态 / 手动轮换 / 热增删代理；池记录落项目工作区 ``proxy/pool.json``。
+平台进程持有**一个** serve 子进程 + **一份**池文件（``data/proxy/pool.json``），
+所有项目共享（人类 UI 与 AI 经 MCP 控制面取端点自行 ``curl -x``）。经 loopback
+控制通道查状态 / 手动轮换 / 热增删代理。
 
 设计要点见 ``docs/plans/proxy-pool-integration.md``：
 - **平台托管**：serve 不随会话/MCP 生死，人类 UI 与 AI 共享同一池，重启可恢复。
+  （MCP 子进程随会话起停、崩溃重拉——池若住进去会随之生死。）
 - **不动上游**：包 fir-proxy 的 ``ProxyRotator``/``ProxyServer``（``tools/fir-proxy/cyberstrike_serve.py``），
   不改 fir-proxy 自身文件。
-- **端口**：三端口（http/socks5/control）按项目**动态取空闲口**，多项目不冲突。
+- **全局化（2026-10-11）**：此前「项目级」=每项目一个 serve + 一份池（内部按 pid 分区），
+  池被切碎、抓取/验证重复；现收敛为进程级单 serve 单池，旧池经 ``merge_legacy_pools()``
+  首启合并。三端口从 base 起取空闲口（单 serve 无冲突问题）。
 - **AI 用法**：AI 拿 ``status()`` 的 http/socks5 端点自行 ``curl -x``，平台不注入。
 """
 
@@ -28,6 +31,12 @@ from collections import deque
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any, Callable
+
+from core.runtime.backends import (
+    assign_to_job,
+    close_job,
+    create_kill_on_close_job,
+)
 
 log = logging.getLogger(__name__)
 
@@ -60,9 +69,19 @@ class ProxyConfig:
     auto_start: bool = False             # 项目首个代理动作时是否自动起服务
     validate_timeout_s: int = 5          # 单代理验证超时（check runner --timeout）
     validate_target: str = "http://www.baidu.com"  # 验证目标 URL（经代理 GET 它，通即 Working）
+    validate_target_https: str | None = "https://www.baidu.com"  # HTTPS 能力探测目标（经 CONNECT）；None/空=不探测
+    # 内容注入/劫持型出口交叉验证（2026-10-11）：第二个目标（须与 validate_target 内容不同）。
+    # 两个目标经同一代理返回**相同响应体指纹**即判 hijacked → status=Failed 剔除。
+    validate_target_b: str | None = "http://example.com"  # None/空=不做多目标一致性校验
     prune_latency_ms: float | None = 5000.0  # 验证后按延迟剔除阈值（ms）；None/0=不按延迟删
     sources_file: str | None = None      # 抓取源清单覆盖路径；None=默认 config/proxy_sources.json（不存在则用 runner 内置）
     fetch_limit: int = 2000              # 单次抓取条数上限（按协议轮转取）；0=不限
+    # ---- 自动巡检（2026-10-11）：后台每 maintenance_interval_s 验证全部 + 阈值补抓 ----
+    maintenance_interval_s: float = 1800.0  # 巡检间隔（30 分钟）；0=不巡检
+    auto_fetch_min_http: int = 50        # http 可用数低于此即自动抓取；0=该协议不自动补抓
+    auto_fetch_min_https: int = 20       # https（能力探测）可用数低于此即自动抓取
+    auto_fetch_min_socks: int = 20       # socks（socks4+socks5）可用数低于此即自动抓取
+    auto_fetch_cooldown_s: float = 600.0  # 同协议两次自动抓取最小间隔（防抓取风暴）
 
     @classmethod
     def from_file(cls, path: str | Path | None) -> "ProxyConfig":
@@ -168,6 +187,90 @@ def _no_window() -> int:
     return getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
 
 
+# ---------------------------------------------------------------- 孤儿 serve 回收
+
+#: 只认本平台的 serve runner（防误杀同名他人进程）
+_SERVE_CMD_MARKERS = ("cyberstrike_serve.py", "cyberstrike_serve")
+
+
+def _pid_alive(pid: int | None) -> bool:
+    """OS 层判进程是否存活（OpenProcess 拿得到句柄即活）。pid 非法/拿不到→False。"""
+    if os.name != "nt":
+        return True  # 非 Windows 不做孤儿回收（reap 直接早退），保守为「活」
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.restype = ctypes.c_void_p
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.CloseHandle.argtypes = [ctypes.c_void_p]
+    try:
+        h = k32.OpenProcess(0x0800, False, int(pid))  # QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        k32.CloseHandle(ctypes.c_void_p(h))
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _taskkill_tree(pid: int) -> bool:
+    """杀进程树（taskkill /T /F）；成功返回 True。"""
+    try:
+        k = subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                           capture_output=True, timeout=15,
+                           creationflags=_no_window())
+        return k.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _list_processes() -> list[dict]:
+    """枚举全进程（pid/ppid/命令行）；失败返回 []。"""
+    import json as _json
+    try:
+        ps = ("Get-CimInstance Win32_Process | "
+              "Select-Object ProcessId,ParentProcessId,CommandLine | "
+              "ConvertTo-Json -Compress")
+        r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                           capture_output=True, text=True, timeout=30,
+                           creationflags=_no_window(), encoding="utf-8")
+        procs = _json.loads(r.stdout or "[]")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return []
+    if isinstance(procs, dict):
+        procs = [procs]
+    return procs
+
+
+def reap_orphan_serves() -> list[int]:
+    """回收「父进程已死」的 cyberstrike_serve 孤儿（2026-10-12 事故）。
+
+    后端每次重启都会让上一进程的 serve 子进程变孤儿（旧实现是**每项目一个池**，
+    历史遗留一批），占着 http/socks5/control 三端口与池文件句柄。旧进程的
+    ``_serve`` 引用随进程消失，新进程的 ``shutdown`` 也够不着——只能在启动时扫。
+
+    判定：命令行含本 runner + 记 ``-i <pool.json>``；**父进程 pid 已不存在**即杀
+    （taskkill /T /F）。正在被本进程父进程持有的 serve 不动（其父存活）。
+    非 Windows / 枚举失败一律返回 []（绝不误杀）。返回被杀的 pid 列表。
+    """
+    if os.name != "nt":
+        return []
+    killed: list[int] = []
+    for p in _list_processes():
+        cmd = p.get("CommandLine") or ""
+        if not any(m in cmd for m in _SERVE_CMD_MARKERS) or "-i" not in cmd:
+            continue
+        pid = p.get("ProcessId")
+        ppid = p.get("ParentProcessId")
+        if not pid or _pid_alive(ppid):
+            continue  # 父存活=活的托管 serve，不动
+        if _taskkill_tree(int(pid)):
+            killed.append(int(pid))
+    if killed:
+        log.info("回收孤儿代理 serve 进程: %s", killed)
+    return killed
+
+
 def _free_port(start: int, taken: set[int]) -> int:
     for port in range(start, start + PORT_SCAN_SPAN):
         if port in taken:
@@ -185,7 +288,7 @@ def _free_port(start: int, taken: set[int]) -> int:
 # ---------------------------------------------------------------- 池记录
 
 _PROXY_VIEW_KEYS = ("proxy", "protocol", "location", "latency", "speed",
-                    "anonymity", "score", "status")
+                    "anonymity", "score", "status", "https_ok")
 
 
 def _proxy_view(record: dict) -> dict:
@@ -238,6 +341,58 @@ def _prune(records: list[dict], prune_latency_ms: float | None
     return keep, dropped
 
 
+#: socks 口径（2026-10-11）：socks4 与 socks5 合并计（用户选定）。
+SOCKS_PROTOCOLS = frozenset({"socks4", "socks5"})
+
+
+def protocol_counts(records: list[dict], prune_latency_ms: float | None = None) -> dict:
+    """按协议分桶计数（纯函数，2026-10-11）：``{http, socks, https, total}``。
+
+    - ``http``：``protocol=="http"`` 且可用（``_is_usable``，非 Working/超延迟不计）。
+    - ``socks``：``protocol in SOCKS_PROTOCOLS``（socks4+socks5 合并）且可用。
+    - ``https``：``https_ok is True`` 且可用（HTTPS **能力**，见 check runner 探测；
+      池本无 https 协议类目）。
+    - ``total``：池内总条数（不过滤）。
+
+    分桶互斥口径不保证（同一条 http 代理若 https_ok 亦计入 https）——这是有意的：
+    https 是**能力叠加**而非协议分类。
+    """
+    counts = {"http": 0, "socks": 0, "https": 0, "total": len(records)}
+    for r in records:
+        if not _is_usable(r, prune_latency_ms):
+            continue
+        proto = (r.get("protocol") or "").lower()
+        if proto == "http":
+            counts["http"] += 1
+        elif proto in SOCKS_PROTOCOLS:
+            counts["socks"] += 1
+        if r.get("https_ok") is True:
+            counts["https"] += 1
+    return counts
+
+
+def auto_fetch_targets(counts: dict, cfg: ProxyConfig) -> list[list[str]]:
+    """按阈值判定需补抓的协议参数（纯函数，2026-10-11）。
+
+    返回给 ``fetch(protocols=...)`` 的**协议参数列表**的列表（去重合并）：
+    http 不足→``["http"]``；socks 不足→``["socks4","socks5"]``；https 不足→``["http"]``
+    （https **不是** fetch 协议，靠 http 抓取后的验证探测补齐；若 http 本身也要补，
+    两个 ``["http"]`` 合并为一条）。阈值 ``<=0`` 表示该协议不自动补抓。
+
+    例：http=30/阈 50 且 https=5/阈 20 → ``[["http"]]``（合并）；socks=10/阈 20 →
+    ``[["http"], ["socks4","socks5"]]``。
+    """
+    http_short = cfg.auto_fetch_min_http > 0 and counts.get("http", 0) < cfg.auto_fetch_min_http
+    https_short = cfg.auto_fetch_min_https > 0 and counts.get("https", 0) < cfg.auto_fetch_min_https
+    socks_short = cfg.auto_fetch_min_socks > 0 and counts.get("socks", 0) < cfg.auto_fetch_min_socks
+    targets: list[list[str]] = []
+    if http_short or https_short:
+        targets.append(["http"])
+    if socks_short:
+        targets.append(["socks4", "socks5"])
+    return targets
+
+
 def _progress_reporter(on_progress: Callable[[dict], Any] | None):
     """返回 ``report(phase, done, total, message)``：算 ETA 后回调进度 dict。
 
@@ -271,11 +426,14 @@ class _Serve:
     """一个项目的 serve 子进程与其控制面句柄。"""
 
     def __init__(self, proc: subprocess.Popen, http: int, socks5: int, control: int,
-                 log_file: Path):
+                 log_file: Path, job: int | None = None):
         self.proc = proc
         self.http = http
         self.socks5 = socks5
         self.control = control
+        # 作业对象句柄（2026-10-12）：KILL_ON_JOB_CLOSE 托管 serve 进程树；后端
+        # 进程退出时随句柄关闭自动焚毁，杜绝「后端重启→serve 变孤儿」的历史泄漏。
+        self.job = job
         self.started = threading.Event()
         self.start_error: str | None = None
         self.tail: deque[str] = deque(maxlen=200)
@@ -327,35 +485,46 @@ class _Serve:
 # ---------------------------------------------------------------- 主服务
 
 class ProxyPool:
-    """项目级代理池：池文件 + serve 子进程 + 控制通道。"""
+    """全局代理池：单份池文件 + 单 serve 子进程 + 控制通道。
+
+    **全局单池（2026-10-11 由项目级改造）**：整机一个 serve、一份 `<data>/proxy/pool.json`，
+    所有项目共享同一池（人类 UI 与 AI 经 MCP 控制面取端点自行 `curl -x`）。此前按项目
+    各起一个 serve、各占 3 端口、各一份池——池被切碎、抓取/验证重复。旧项目池经
+    ``merge_legacy_pools()`` 首启合并入全局。
+    """
 
     def __init__(self, workspace_root: str | Path, tools_root: str | Path,
                  config: ProxyConfig | None = None):
         self.workspace_root = Path(workspace_root)
         self.tools_root = Path(tools_root)
         self.config = config or ProxyConfig()
-        self._serves: dict[str, _Serve] = {}
-        self._locks: dict[str, threading.Lock] = {}
-        self._lock_guard = threading.Lock()
+        self._serve: _Serve | None = None
+        self._lock = threading.Lock()
+        self.last_active: float = time.monotonic()   # 空闲回收判据（见 idle_timeout_s）
 
     # ---- 路径与锁
 
-    def project_dir(self, pid: str) -> Path:
-        d = self.workspace_root / pid / "proxy"
+    def data_dir(self) -> Path:
+        """全局代理数据目录 `data/proxy/`（与 data/campaign.db 同款全局归位契约，
+        **不落 workspaces/**——workspace-hygiene 顶层只允许项目目录 + .trash）。"""
+        d = self.workspace_root.parent / "data" / "proxy"
         d.mkdir(parents=True, exist_ok=True)
         return d
 
-    def pool_path(self, pid: str) -> Path:
-        return self.project_dir(pid) / "pool.json"
+    def pool_path(self) -> Path:
+        return self.data_dir() / "pool.json"
 
-    def _lock(self, pid: str) -> threading.Lock:
-        with self._lock_guard:
-            return self._locks.setdefault(pid, threading.Lock())
+    def _log_path(self) -> Path:
+        return self.data_dir() / "serve.log"
+
+    def _touch(self) -> None:
+        """记一次活动（status/start 等公开入口调）——供可选空闲回收判据。"""
+        self.last_active = time.monotonic()
 
     # ---- 池文件
 
-    def read_pool(self, pid: str) -> list[dict]:
-        path = self.pool_path(pid)
+    def read_pool(self) -> list[dict]:
+        path = self.pool_path()
         if not path.exists():
             return []
         try:
@@ -368,17 +537,51 @@ class ProxyPool:
         return [r for r in data if isinstance(r, dict) and r.get("proxy")] \
             if isinstance(data, list) else []
 
-    def write_pool(self, pid: str, records: list[dict]) -> None:
-        path = self.pool_path(pid)
+    def write_pool(self, records: list[dict]) -> None:
+        path = self.pool_path()
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(records, ensure_ascii=False, indent=2),
                        encoding="utf-8")
         tmp.replace(path)
 
-    def add_records(self, pid: str, records: list[dict]) -> dict:
+    def merge_legacy_pools(self) -> int:
+        """首启一次性迁移（2026-10-11）：把旧 per-project 池并入全局池。
+
+        扫 ``<workspace_root>/*/proxy/pool.json``，按 proxy 地址去重并入全局——
+        **旧记录不覆盖全局已有同地址记录**（全局优先）。**仅在全局池不存在或为空时**
+        执行（避免每次启动重复扫叠加）；旧项目池文件**原地保留不删**（零风险回退）。
+        返回并入的记录数（未执行返 0）。坏文件跳过不炸。
+        """
+        if self.read_pool():
+            return 0                                   # 全局池非空：已迁移过或已在用
+        merged: dict[str, dict] = {}
+        for child in sorted(self.workspace_root.glob("*/proxy/pool.json")):
+            try:
+                data = json.loads(child.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                log.warning("旧池文件解析失败，跳过: %s", child)
+                continue
+            if isinstance(data, dict):
+                data = data.get("proxies", [])
+            if not isinstance(data, list):
+                continue
+            for r in data:
+                if not isinstance(r, dict) or not r.get("proxy"):
+                    continue
+                addr = r["proxy"]
+                if addr not in merged:                 # 首次出现优先（旧记录保真）
+                    r.setdefault("status", "Working")
+                    merged[addr] = r
+        if not merged:
+            return 0
+        self.write_pool(list(merged.values()))
+        log.info("已合并 %d 条旧项目池记录入全局池 %s", len(merged), self.pool_path())
+        return len(merged)
+
+    def add_records(self, records: list[dict]) -> dict:
         """合并入池（按 proxy 地址去重）并热推给运行中的 serve。"""
-        with self._lock(pid):
-            current = self.read_pool(pid)
+        with self._lock:
+            current = self.read_pool()
             seen = {r.get("proxy") for r in current}
             added = []
             for r in records:
@@ -390,30 +593,30 @@ class ProxyPool:
                 current.append(r)
                 seen.add(r["proxy"])
                 added.append(r)
-            self.write_pool(pid, current)
-            serve = self._serves.get(pid)
+            self.write_pool(current)
+            serve = self._serve
             if added and serve and serve.alive():
                 self._control(serve, "POST", "/reload", {"add": added})
             return {"added": len(added), "pool_size": len(current)}
 
-    def remove_records(self, pid: str, addrs: list[str]) -> dict:
-        with self._lock(pid):
-            current = self.read_pool(pid)
+    def remove_records(self, addrs: list[str]) -> dict:
+        with self._lock:
+            current = self.read_pool()
             wanted = set(addrs)
             kept = [r for r in current if r.get("proxy") not in wanted]
             removed = len(current) - len(kept)
-            self.write_pool(pid, kept)
-            serve = self._serves.get(pid)
+            self.write_pool(kept)
+            serve = self._serve
             if removed and serve and serve.alive():
                 self._control(serve, "POST", "/reload", {"remove": list(wanted)})
             return {"removed": removed, "pool_size": len(kept)}
 
-    def replace_pool(self, pid: str, records: list[dict]) -> dict:
-        with self._lock(pid):
-            old = {r.get("proxy") for r in self.read_pool(pid)}
-            self.write_pool(pid, records)
+    def replace_pool(self, records: list[dict]) -> dict:
+        with self._lock:
+            old = {r.get("proxy") for r in self.read_pool()}
+            self.write_pool(records)
             new = {r.get("proxy") for r in records}
-            serve = self._serves.get(pid)
+            serve = self._serve
             if serve and serve.alive():
                 self._control(serve, "POST", "/reload",
                               {"add": list(new - old), "remove": list(old - new)})
@@ -421,16 +624,17 @@ class ProxyPool:
 
     # ---- 生命周期
 
-    def start(self, pid: str) -> dict:
+    def start(self) -> dict:
         """起 serve（幂等：已在跑直接返状态）。池空/依赖缺失给 ProxyError。"""
-        with self._lock(pid):
-            serve = self._serves.get(pid)
+        self._touch()
+        with self._lock:
+            serve = self._serve
             if serve and serve.alive():
-                return self.status(pid)
+                return self.status()
             ok, detail = proxy_available(self.tools_root, self.config.python)
             if not ok:
                 raise ProxyError(detail)
-            records = [r for r in self.read_pool(pid)
+            records = [r for r in self.read_pool()
                        if r.get("status", "Working") == "Working"]
             if not records:
                 raise ProxyError("代理池为空（无 status=Working 的代理），先抓取或导入")
@@ -439,9 +643,9 @@ class ProxyPool:
             http = _free_port(self.config.http_port_base, taken)
             socks5 = _free_port(self.config.socks5_port_base, taken)
             control = _free_port(self.config.control_port_base, taken)
-            log_file = self.project_dir(pid) / "serve.log"
+            log_file = self._log_path()
             cmd = [py, str(runner_path(self.tools_root).resolve()),
-                   "-i", str(self.pool_path(pid).resolve()),
+                   "-i", str(self.pool_path().resolve()),
                    "--http-port", str(http), "--socks5-port", str(socks5),
                    "--control-port", str(control),
                    "--region", str(self.config.region),
@@ -450,6 +654,8 @@ class ProxyPool:
             if self.config.max_latency_ms is not None:
                 cmd += ["--max-latency-ms", str(self.config.max_latency_ms)]
             env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+            # 作业对象（2026-10-12）：托管 serve，后端退出即随句柄自动焚毁防孤儿
+            job = create_kill_on_close_job()
             try:
                 proc = subprocess.Popen(
                     cmd, cwd=str(self.tools_root / "fir-proxy"),
@@ -457,25 +663,31 @@ class ProxyPool:
                     env=env, creationflags=_no_window(),
                     text=True, encoding="utf-8", errors="replace", bufsize=1)
             except OSError as exc:
+                if job is not None:
+                    close_job(job)
                 raise ProxyError(f"启动 serve 失败: {exc}") from exc
-            new = _Serve(proc, http, socks5, control, log_file)
+            if job is not None and not assign_to_job(job, proc):
+                close_job(job)  # 纳不进作业：降级为无托管（stop()/杀树仍兜）
+                job = None
+            new = _Serve(proc, http, socks5, control, log_file, job=job)
             new.begin()
-            self._serves[pid] = new
+            self._serve = new
             if not new.started.wait(timeout=self.config.startup_timeout_s):
                 self._kill(new)
-                self._serves.pop(pid, None)
+                self._serve = None
                 raise ProxyError("serve 启动超时")
             if new.start_error or not new.alive():
                 msg = new.start_error or "serve 进程意外退出"
                 self._kill(new)
-                self._serves.pop(pid, None)
+                self._serve = None
                 raise ProxyError(msg)
-            log.info("代理池已启动 pid=%s http=%s socks5=%s", pid, http, socks5)
-            return self.status(pid)
+            log.info("代理池已启动（全局）http=%s socks5=%s", http, socks5)
+            return self.status()
 
-    def stop(self, pid: str) -> dict:
-        with self._lock(pid):
-            serve = self._serves.pop(pid, None)
+    def stop(self) -> dict:
+        with self._lock:
+            serve = self._serve
+            self._serve = None
             if not serve:
                 return {"running": False}
             if serve.alive():
@@ -487,15 +699,18 @@ class ProxyPool:
                 while serve.alive() and time.time() < deadline:
                     time.sleep(0.2)
             self._kill(serve)
-            log.info("代理池已停止 pid=%s", pid)
+            log.info("代理池已停止（全局）")
             return {"running": False}
 
-    def status(self, pid: str) -> dict:
-        serve = self._serves.get(pid)
-        pool = self.read_pool(pid)
+    def status(self) -> dict:
+        self._touch()
+        serve = self._serve
+        pool = self.read_pool()
+        # counts（2026-10-11）：按协议分桶（http/socks/https 能力），供前端过滤与阈值展示。
+        counts = protocol_counts(pool, self.config.prune_latency_ms)
         base = {"running": False, "endpoint": None, "current": None,
                 "count": 0, "working": 0, "regions": {},
-                "pool_size": len(pool)}
+                "pool_size": len(pool), "counts": counts}
         if not serve or not serve.alive():
             return base
         try:
@@ -505,29 +720,30 @@ class ProxyPool:
         return {"running": True, "endpoint": serve.endpoint,
                 "current": data.get("current"), "count": data.get("count", 0),
                 "working": data.get("working", 0), "regions": data.get("regions", {}),
-                "uptime_s": data.get("uptime_s"), "pool_size": len(pool)}
+                "uptime_s": data.get("uptime_s"), "pool_size": len(pool),
+                "counts": counts}
 
-    def list_proxies(self, pid: str) -> dict:
+    def list_proxies(self) -> dict:
         """可用代理列表：运行中取 serve 实时池，否则读池文件。"""
-        serve = self._serves.get(pid)
+        serve = self._serve
         if serve and serve.alive():
             try:
                 data = self._control(serve, "GET", "/proxies")
                 return {"source": "serve", "proxies": data.get("proxies", [])}
             except ProxyError:
                 pass
-        return {"source": "file", "proxies": [_proxy_view(r) for r in self.read_pool(pid)]}
+        return {"source": "file", "proxies": [_proxy_view(r) for r in self.read_pool()]}
 
-    def rotate(self, pid: str) -> dict:
-        serve = self._serves.get(pid)
+    def rotate(self) -> dict:
+        serve = self._serve
         if not serve or not serve.alive():
             raise ProxyError("代理服务未运行，无法轮换")
         return self._control(serve, "POST", "/rotate")
 
-    def select(self, pid: str, limit: int = 1, region: str | None = None,
+    def select(self, limit: int = 1, region: str | None = None,
                max_latency_ms: float | None = None,
                include_failed: bool = False) -> list[dict]:
-        return select_records(self.read_pool(pid), limit=limit, region=region,
+        return select_records(self.read_pool(), limit=limit, region=region,
                               max_latency_ms=max_latency_ms,
                               include_failed=include_failed)
 
@@ -598,7 +814,7 @@ class ProxyPool:
             raise ProxyError(f"fir-proxy 命令失败(rc={proc.returncode}): "
                              f"{(tail[-1] if tail else '')[:300]}")
 
-    def _run_cli(self, pid: str, args: list[str], timeout: float,
+    def _run_cli(self, args: list[str], timeout: float,
                  script: Path | None = None,
                  on_progress: Callable[[dict], Any] | None = None) -> list[dict]:
         ok, detail = proxy_available(self.tools_root, self.config.python)
@@ -608,7 +824,7 @@ class ProxyPool:
         target = script or cli_path(self.tools_root)
         if not target.exists():
             raise ProxyError(f"fir-proxy 脚本缺失: {target}")
-        out_file = self.project_dir(pid) / f"cli-{uuid.uuid4().hex[:8]}.json"
+        out_file = self.data_dir() / f"cli-{uuid.uuid4().hex[:8]}.json"
         cmd = [py, str(target.resolve()), *args,
                "-o", str(out_file.resolve()), "--output-format", "json", "--quiet"]
         env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
@@ -640,21 +856,25 @@ class ProxyPool:
         candidate = Path(self.config.sources_file or "config/proxy_sources.json")
         return candidate if candidate.exists() else None
 
-    def _validate_records(self, pid: str, records: list[dict],
+    def _validate_records(self, records: list[dict],
                           timeout: float, workers: int,
                           on_progress: Callable[[dict], Any] | None = None) -> list[dict]:
         """调 check runner 做单目标连通性验证，返回带结果的记录（含 Failed）。空批次返 []。"""
         if not records:
             return []
-        in_file = self.project_dir(pid) / f"validate-in-{uuid.uuid4().hex[:8]}.json"
+        in_file = self.data_dir() / f"validate-in-{uuid.uuid4().hex[:8]}.json"
         in_file.write_text(json.dumps(records, ensure_ascii=False), encoding="utf-8")
         try:
+            args = ["-i", str(in_file.resolve()),
+                    "--target", self.config.validate_target,
+                    "--timeout", str(int(self.config.validate_timeout_s)),
+                    "--workers", str(workers)]
+            if self.config.validate_target_https:   # HTTPS 能力探测（可选）
+                args += ["--target-https", self.config.validate_target_https]
+            if self.config.validate_target_b:        # 内容注入交叉验证（可选）
+                args += ["--target-b", self.config.validate_target_b]
             return self._run_cli(
-                pid,
-                ["-i", str(in_file.resolve()),
-                 "--target", self.config.validate_target,
-                 "--timeout", str(int(self.config.validate_timeout_s)),
-                 "--workers", str(workers)],
+                args,
                 timeout,
                 script=runner_check_path(self.tools_root),
                 on_progress=on_progress)
@@ -664,17 +884,18 @@ class ProxyPool:
             except OSError:
                 pass
 
-    def _apply_validation(self, pid: str, validated: list[dict], prune: bool) -> dict:
+    def _apply_validation(self, validated: list[dict], prune: bool) -> dict:
         """把验证结果按 proxy 地址 merge 回池，按需剔除失效。
 
         替代整体 ``replace_pool``：本次未验证到的记录保留原样（runner 少返回不误删）、
         并发新增的记录不被覆盖（锁内重读）。
         """
         threshold = self.config.prune_latency_ms
-        merge_keys = ("status", "latency", "speed", "anonymity", "location", "score")
+        merge_keys = ("status", "latency", "speed", "anonymity", "location", "score",
+                      "https_ok", "hijacked")
         by_addr = {r.get("proxy"): r for r in validated if r.get("proxy")}
-        with self._lock(pid):
-            current = self.read_pool(pid)
+        with self._lock:
+            current = self.read_pool()
             kept: list[dict] = []
             removed: list[str] = []
             for record in current:
@@ -691,15 +912,15 @@ class ProxyPool:
                     if key in fresh:
                         merged[key] = fresh[key]
                 kept.append(merged)
-            self.write_pool(pid, kept)
-            serve = self._serves.get(pid)
+            self.write_pool(kept)
+            serve = self._serve
             if removed and serve and serve.alive():
                 self._control(serve, "POST", "/reload", {"remove": removed})
         working = sum(1 for r in kept if _is_usable(r, threshold))
         return {"validated": len(validated), "working": working,
                 "removed": len(removed), "pool_size": len(kept)}
 
-    def fetch(self, pid: str, protocols: list[str] | None = None,
+    def fetch(self, protocols: list[str] | None = None,
               timeout: float = 600.0, auto_validate: bool = True,
               validate_timeout: float = 600.0, workers: int = 50,
               on_progress: Callable[[dict], Any] | None = None) -> dict:
@@ -719,20 +940,20 @@ class ProxyPool:
         if sources is not None:
             args += ["--sources", str(sources.resolve())]
         records = self._run_cli(
-            pid, args, timeout, script=runner_fetch_path(self.tools_root),
+            args, timeout, script=runner_fetch_path(self.tools_root),
             on_progress=lambda evt: report(
                 "fetch", int(evt.get("done") or 0), int(evt.get("total") or 0),
                 f"抓取中 {evt.get('done')}/{evt.get('total')}"))
         fetched = len(records)
         report("fetch", 1, 1, f"抓取完成，共 {fetched} 个")
         if not auto_validate:
-            result = self.add_records(pid, records)
+            result = self.add_records(records)
             return {"fetched": fetched, "validated": 0, "removed": 0, **result}
         if not records:
             return {"fetched": 0, "validated": 0, "removed": 0,
-                    "added": 0, "pool_size": len(self.read_pool(pid))}
+                    "added": 0, "pool_size": len(self.read_pool())}
         validated = self._validate_records(
-            pid, records, validate_timeout, workers,
+            records, validate_timeout, workers,
             on_progress=lambda evt: report(
                 "check", int(evt.get("done") or 0), int(evt.get("total") or 0),
                 f"验证中 {evt.get('done')}/{evt.get('total')}"))
@@ -740,21 +961,21 @@ class ProxyPool:
             raise ProxyError("抓取后自动验证未返回结果（已放弃入池，未静默降级）")
         report("prune", 1, 1, "清理失效…")
         keep, dropped = _prune(validated, self.config.prune_latency_ms)
-        result = self.add_records(pid, keep)
+        result = self.add_records(keep)
         return {"fetched": fetched, "validated": len(validated),
                 "removed": len(dropped), **result}
 
-    def validate(self, pid: str, timeout: float = 600.0,
+    def validate(self, timeout: float = 600.0,
                  workers: int = 50, prune: bool = True,
                  on_progress: Callable[[dict], Any] | None = None) -> dict:
         """验证池内全部代理（单目标连通性），回写 status/latency 并（默认）剔除失效。"""
         report = _progress_reporter(on_progress)
-        pool = self.read_pool(pid)
+        pool = self.read_pool()
         if not pool:
             raise ProxyError("代理池为空，无可验证代理")
         report("check", 0, len(pool), "验证中…")
         records = self._validate_records(
-            pid, pool, timeout, workers,
+            pool, timeout, workers,
             on_progress=lambda evt: report(
                 "check", int(evt.get("done") or 0), int(evt.get("total") or 0),
                 f"验证中 {evt.get('done')}/{evt.get('total')}"))
@@ -762,21 +983,16 @@ class ProxyPool:
             return {"validated": 0, "working": len(pool),
                     "removed": 0, "pool_size": len(pool)}
         report("prune", 1, 1, "清理失效…")
-        return self._apply_validation(pid, records, prune)
+        return self._apply_validation(records, prune)
 
     # ---- 清理
 
-    def close_project(self, pid: str) -> None:
-        try:
-            self.stop(pid)
-        except Exception:  # noqa: BLE001
-            log.exception("停止代理池失败 pid=%s", pid)
-        with self._lock_guard:
-            self._locks.pop(pid, None)
-
     def close_all(self) -> None:
-        for pid in list(self._serves.keys()):
-            self.close_project(pid)
+        """平台 shutdown 兜关：停全局 serve（幂等）。"""
+        try:
+            self.stop()
+        except Exception:  # noqa: BLE001
+            log.exception("停止代理池失败（全局）")
 
     # ---- 控制通道
 
@@ -804,3 +1020,8 @@ class ProxyPool:
                     serve.proc.kill()
         except OSError:
             pass
+        finally:
+            # 释放作业句柄：KILL_ON_JOB_CLOSE 下关闭即兜底焚毁 serve 进程树
+            if getattr(serve, "job", None) is not None:
+                close_job(serve.job)
+                serve.job = None

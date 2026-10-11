@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react"
-import { ArrowRight, Layers3, Trash2, Users } from "lucide-react"
+import { useCallback, useEffect, useMemo, useState } from "react"
+import { ArrowRight, Layers3, RotateCcw, Search, Trash2, Users } from "lucide-react"
 import { api, pollJob } from "@/lib/api"
 import type { Expert, IntelOverview, ProjectMeta } from "@/lib/types"
 import { bindingBadge, trackLabel, type Taxonomy } from "@/lib/taxonomy"
@@ -12,11 +12,17 @@ import {
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
 import { cn } from "@/lib/utils"
-import { fmtDate, utcTitle } from "@/lib/datetime"
+import { fmtDate, fmtDateTime, utcTitle } from "@/lib/datetime"
 
 // 页面 1（DESIGN.md §12）：项目列表 + 创建 + 删除（回收站式，DESIGN.md §5.3）
 // 项目绑定由场景轨直接决定：创建时自动加载该轨全部可用专家；知识继承
 // （M4b）仍可复用同源项目资产。
+
+/** 回收站目录名 = `<slug>-<UTC紧凑时间戳>`；取尾部时间戳用于展示删除时间 */
+const trashTime = (name?: string): string | undefined => {
+  const m = /-(\d{8}T\d{6}Z)$/.exec(name ?? "")
+  return m ? m[1] : undefined
+}
 
 export function ProjectsView({ onOpen }: { onOpen: (pid: string) => void }) {
   const [projects, setProjects] = useState<ProjectMeta[]>([])
@@ -31,9 +37,13 @@ export function ProjectsView({ onOpen }: { onOpen: (pid: string) => void }) {
   const [confirmTarget, setConfirmTarget] = useState<ProjectMeta | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [delError, setDelError] = useState<string | null>(null)
+  const [query, setQuery] = useState("")   // 项目名称搜索过滤（2026-10-11）
+  const [trashed, setTrashed] = useState<ProjectMeta[]>([])   // 回收站（搜索命中时展示，2026-10-11）
+  const [trashBusy, setTrashBusy] = useState<string | null>(null)   // 正在恢复的 trash_name
 
   const refresh = useCallback(() => {
     api.listProjects().then(setProjects).catch((e) => setError(String(e)))
+    api.listTrashedProjects().then(setTrashed).catch(() => {})   // 回收站静默——仅搜索时展示
   }, [])
   useEffect(refresh, [refresh])
   useEffect(() => {
@@ -81,6 +91,36 @@ export function ProjectsView({ onOpen }: { onOpen: (pid: string) => void }) {
 
   const capabilityNames = Array.from(new Set(trackExperts.flatMap((expert) => expert.skills ?? [])))
 
+  // 名称/ID 过滤（大小写不敏感）；空白查询=全量（不改变原顺序）
+  const shown = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return projects
+    return projects.filter((p) =>
+      p.name.toLowerCase().includes(q) || p.id.toLowerCase().includes(q))
+  }, [projects, query])
+
+  // 回收站命中（2026-10-11）：仅在有查询时列出——首页搜索也能搜到已删项目并直接恢复
+  const trashedShown = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return []
+    return trashed.filter((p) =>
+      p.name.toLowerCase().includes(q) || p.id.toLowerCase().includes(q))
+  }, [trashed, query])
+
+  const restore = async (p: ProjectMeta) => {
+    if (!p.trash_name) return
+    setTrashBusy(p.trash_name)
+    setError(null)
+    try {
+      await api.restoreProject(p.trash_name)
+      refresh()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setTrashBusy(null)
+    }
+  }
+
   return (
     <div className="h-full min-h-0 overflow-y-auto bg-[radial-gradient(circle_at_top_right,oklch(var(--brand-lch)/0.16),transparent_42%),linear-gradient(135deg,var(--surface-1),var(--surface-0))] pt-9">
       <div className="mx-auto grid w-full max-w-7xl gap-8 p-6 lg:grid-cols-[minmax(0,1fr)_21rem] lg:gap-10 lg:p-10">
@@ -107,13 +147,40 @@ export function ProjectsView({ onOpen }: { onOpen: (pid: string) => void }) {
             </CardContent>
           </Card>
 
+      {/* 搜索过滤（2026-10-11）：位于「创建项目」按钮下方、项目列表之上 */}
+      <div className="relative">
+        <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+        <Input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="搜索项目名称或 ID"
+          aria-label="搜索项目"
+          className="pl-9 pr-9"
+        />
+        {query && (
+          <button
+            type="button"
+            aria-label="清除搜索"
+            onClick={() => setQuery("")}
+            className="absolute right-2 top-1/2 -translate-y-1/2 rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:text-foreground"
+          >
+            ✕
+          </button>
+        )}
+      </div>
+
       {error && <p className="text-sm text-(--status-error)">{error}</p>}
 
       <div className="space-y-2">
         {projects.length === 0 && !error && (
           <p className="py-8 text-center text-sm text-muted-foreground">还没有项目——上面创建一个</p>
         )}
-        {projects.map((p) => (
+        {projects.length > 0 && shown.length === 0 && trashedShown.length === 0 && (
+          <p className="py-8 text-center text-sm text-muted-foreground">
+            没有匹配「{query.trim()}」的项目
+          </p>
+        )}
+        {shown.map((p) => (
           <div
             key={p.id}
             role="button"
@@ -146,6 +213,44 @@ export function ProjectsView({ onOpen }: { onOpen: (pid: string) => void }) {
             </Button>
           </div>
         ))}
+
+        {/* 回收站命中（2026-10-11）：仅搜索时展示——同名/同 ID 的已删项目可一键恢复 */}
+        {trashedShown.length > 0 && (
+          <div className="space-y-2 pt-4">
+            <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
+              回收站中的项目 · {trashedShown.length}
+            </p>
+            {trashedShown.map((p) => (
+              <div
+                key={p.trash_name ?? p.id}
+                className={cn(
+                  "group flex w-full items-center gap-3 rounded-lg border border-dashed p-3 text-left",
+                  "opacity-80 hover:border-(--ring) hover:bg-accent/50",
+                )}
+              >
+                <Badge variant="outline" className="font-mono">{bindingBadge(p.track, p.experts)}</Badge>
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-medium">{p.name}</div>
+                  <div className="font-mono text-xs text-muted-foreground">{p.id}</div>
+                </div>
+                {trashTime(p.trash_name) && (
+                  <span className="text-xs text-muted-foreground">
+                    删除于 {fmtDateTime(trashTime(p.trash_name))}
+                  </span>
+                )}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="shrink-0"
+                  disabled={trashBusy === p.trash_name}
+                  onClick={() => void restore(p)}
+                >
+                  <RotateCcw size={14} />{trashBusy === p.trash_name ? "恢复中…" : "恢复"}
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <AlertDialog

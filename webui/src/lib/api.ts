@@ -1035,36 +1035,37 @@ export const api = {
       `/api/projects/${pid}/browser/intruder/${encodeURIComponent(batchId)}/stop`,
       { method: "POST" }),
 
-  // ---------- 代理池（fir-proxy 托管，2026-10-07）：项目级 serve + 池记录 ----------
-  proxyStatus: (pid: string) =>
-    http<ProxyStatus>(`/api/projects/${pid}/proxy/status`),
-  proxyStart: (pid: string) =>
-    http<ProxyStatus>(`/api/projects/${pid}/proxy/start`, { method: "POST" }),
-  proxyStop: (pid: string) =>
-    http<{ running: boolean }>(`/api/projects/${pid}/proxy/stop`, { method: "POST" }),
-  proxyList: (pid: string) =>
-    http<ProxyListResponse>(`/api/projects/${pid}/proxy/proxies`),
-  proxyRotate: (pid: string) =>
+  // ---------- 代理池（fir-proxy 托管，2026-10-07 → 2026-10-11 全局单池） ----------
+  // 全局池：进程级单 serve + 单池，所有项目共享；路由无 pid。
+  proxyStatus: () =>
+    http<ProxyStatus>(`/api/proxy/status`),
+  proxyStart: () =>
+    http<ProxyStatus>(`/api/proxy/start`, { method: "POST" }),
+  proxyStop: () =>
+    http<{ running: boolean }>(`/api/proxy/stop`, { method: "POST" }),
+  proxyList: () =>
+    http<ProxyListResponse>(`/api/proxy/proxies`),
+  proxyRotate: () =>
     http<{ ok: boolean; current: ProxyRecord | null }>(
-      `/api/projects/${pid}/proxy/rotate`, { method: "POST" }),
-  proxyAdd: (pid: string, records: ProxyRecord[]) =>
-    http<{ added: number; pool_size: number }>(`/api/projects/${pid}/proxy/add`,
+      `/api/proxy/rotate`, { method: "POST" }),
+  proxyAdd: (records: ProxyRecord[]) =>
+    http<{ added: number; pool_size: number }>(`/api/proxy/add`,
       { method: "POST", body: JSON.stringify({ records }) }),
-  proxyRemove: (pid: string, addresses: string[]) =>
-    http<{ removed: number; pool_size: number }>(`/api/projects/${pid}/proxy/remove`,
+  proxyRemove: (addresses: string[]) =>
+    http<{ removed: number; pool_size: number }>(`/api/proxy/remove`,
       { method: "POST", body: JSON.stringify({ addresses }) }),
-  proxySelect: (pid: string, body: {
+  proxySelect: (body: {
     limit?: number; region?: string | null; max_latency_ms?: number | null; include_failed?: boolean
   }) =>
-    http<{ proxies: ProxyRecord[] }>(`/api/projects/${pid}/proxy/select`,
+    http<{ proxies: ProxyRecord[] }>(`/api/proxy/select`,
       { method: "POST", body: JSON.stringify(body) }),
   /** 从在线源抓取入池（202：Job 轮询） */
-  proxyFetch: (pid: string, protocols: string[] = []) =>
-    http<{ job_id: string }>(`/api/projects/${pid}/proxy/fetch`,
+  proxyFetch: (protocols: string[] = []) =>
+    http<{ job_id: string }>(`/api/proxy/fetch`,
       { method: "POST", body: JSON.stringify({ protocols }) }),
   /** 批量验证池内代理（202：Job 轮询） */
-  proxyValidate: (pid: string, workers = 50) =>
-    http<{ job_id: string }>(`/api/projects/${pid}/proxy/validate`,
+  proxyValidate: (workers = 50) =>
+    http<{ job_id: string }>(`/api/proxy/validate`,
       { method: "POST", body: JSON.stringify({ workers }) }),
 
   // ---------- 智能体工作台（K9，2026-09-29）：独立轻量对话运行时 ----------

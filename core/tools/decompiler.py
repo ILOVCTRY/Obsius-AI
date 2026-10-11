@@ -31,6 +31,7 @@ import sys
 import threading
 import time
 import uuid
+import weakref
 from pathlib import Path
 from typing import Callable
 
@@ -39,6 +40,38 @@ from core.runtime.backends import NO_WINDOW_FLAGS
 log = logging.getLogger(__name__)
 
 EXPORT_VERSION = 3
+
+# resident worker reaper：**整个进程只跑一个**看门线程，按弱引用遍历存活的
+# GhidraHeadlessBackend 实例（后端每次会话构造一个，旧实现每实例起一条
+# while-True 线程 → 实测泄漏 1065 条「ghidra-worker-reaper」，见
+# docs/plans/ 与 2026-10-11 排查）。弱引用集合：后端被 GC 即自动出集，
+# 不阻塞回收、不会因实例消失而留下悬挂线程。
+_GHIDRA_BACKENDS: "weakref.WeakSet[GhidraHeadlessBackend]" = weakref.WeakSet()
+_GHIDRA_REAPER_LOCK = threading.Lock()
+_GHIDRA_REAPER_STARTED = False
+
+
+def _start_ghidra_worker_reaper() -> None:
+    """惰性启动唯一 reaper（首次构造 GhidraHeadlessBackend 时）。"""
+    global _GHIDRA_REAPER_STARTED
+    with _GHIDRA_REAPER_LOCK:
+        if _GHIDRA_REAPER_STARTED:
+            return
+        _GHIDRA_REAPER_STARTED = True
+        threading.Thread(target=_ghidra_worker_reaper_loop,
+                         name="ghidra-worker-reaper", daemon=True).start()
+
+
+def _ghidra_worker_reaper_loop() -> None:
+    """单例 reaper：每 30s 遍历存活后端，各自回收空闲的 resident worker 进程。"""
+    while True:
+        time.sleep(30.0)
+        # 拷贝后遍历：弱引用集合可能在迭代中变化（后端 GC）
+        for backend in list(_GHIDRA_BACKENDS):
+            try:
+                backend._reap_idle_worker()
+            except Exception:  # noqa: BLE001 —— 单个后端出错不影响其余
+                log.exception("ghidra resident worker 回收失败")
 
 # headless 大样本自动分析可能很久（自动分析+全量反编译可能数小时）。默认放开到
 # 3 小时；可用 config/decompiler.json 的 headless_timeout（秒）覆盖（0/负值忽略）。
@@ -870,22 +903,23 @@ class GhidraHeadlessBackend:
         self._worker_project: Path | None = None
         self._worker_last_used = 0.0
         self._worker_idle_seconds = 600.0
-        threading.Thread(target=self._worker_reaper, name="ghidra-worker-reaper",
-                         daemon=True).start()
+        # 进程级单例 reaper（弱引用登记本实例）：每后端一实例、实例数随会话增长，
+        # 旧实现每实例起一条 while-True 线程 → 实测 1065 条线程泄漏（2026-10-11）。
+        _GHIDRA_BACKENDS.add(self)
+        _start_ghidra_worker_reaper()
 
-    def _worker_reaper(self) -> None:
-        while True:
-            time.sleep(30.0)
-            with self._worker_lock:
-                proc = self._worker_proc
-                if proc is not None and self._worker_last_used \
-                        and time.monotonic() - self._worker_last_used > self._worker_idle_seconds:
-                    try:
-                        proc.kill()
-                    except OSError:
-                        pass
-                    self._worker_proc = None
-                    self._worker_project = None
+    def _reap_idle_worker(self) -> None:
+        """空闲超时则回收 resident worker 进程（由进程级单例 reaper 周期调用）。"""
+        with self._worker_lock:
+            proc = self._worker_proc
+            if proc is not None and self._worker_last_used \
+                    and time.monotonic() - self._worker_last_used > self._worker_idle_seconds:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+                self._worker_proc = None
+                self._worker_project = None
 
     def close(self) -> None:
         with self._worker_lock:

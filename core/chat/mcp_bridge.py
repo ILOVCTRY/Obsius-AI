@@ -201,6 +201,10 @@ class _StdioConn:
     def _ensure(self) -> bool:
         if self._proc is not None and self._proc.poll() is None:
             return True
+        # 旧进程已退出但未被回收（reader 线程可能仍挂在旧 stdout 上）——
+        # 重启前先彻底 close，避免每次重拉起都留下两条僵尸 reader 线程。
+        if self._proc is not None:
+            self._reap_proc()
         self._ready = False   # 新进程：握手需重做
         try:
             env = None
@@ -222,6 +226,35 @@ class _StdioConn:
     def is_alive(self) -> bool:
         """连接是否可用：未起过（懒启动，待用）或进程运行中 → True；已退出 → False。"""
         return self._proc is None or self._proc.poll() is None
+
+    def _reap_proc(self) -> None:
+        """回收子进程：kill → 关三条流 → wait，唤醒等待者并让 reader 线程退出。
+
+        **必须在重拉起前调用**：否则旧进程 + 两条 reader 线程堆积（长期运行实测
+        356 个 fir_proxy_mcp 子进程，2026-10-11 排查）。kill 后关流是关键——不关
+        stdout/stderr，reader 线程会一直阻塞在管道读，即便进程已退出也不释放。"""
+        proc = self._proc
+        self._proc = None
+        self._ready = False
+        if proc is None:
+            return
+        for waiter in list(self._pending.values()):
+            waiter["event"].set()
+        try:
+            if proc.poll() is None:
+                proc.kill()
+        except OSError:
+            pass
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            try:
+                if stream is not None:
+                    stream.close()
+            except OSError:
+                pass
+        try:
+            proc.wait(timeout=2.0)
+        except Exception:  # noqa: BLE001 —— 回收尽力而为
+            pass
 
     def _pump_stdout(self) -> None:
         proc = self._proc
@@ -341,6 +374,9 @@ class MCPServerRuntime:
         self._tools: list[dict] | None = None
         self._tools_at = 0.0
         self._lock = threading.Lock()
+        # 配置指纹：60s 重载时若一致且进程仍活则复用本 runtime，不重建子进程。
+        self.cfg_key = (self.transport, str(cfg.get("command") or ""),
+                        tuple(cfg.get("args") or []), str(cfg.get("url") or ""))
 
     def list_tools(self, *, refresh: bool = False) -> list[dict]:
         with self._lock:
@@ -379,6 +415,15 @@ class MCPServerRuntime:
         checker = getattr(self._conn, "is_alive", None)
         return bool(checker()) if callable(checker) else True
 
+    def close(self) -> None:
+        """回收底层连接资源（stdio 子进程 + reader 线程）。HTTP 无资源，no-op。"""
+        closer = getattr(self._conn, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception:  # noqa: BLE001 —— 回收尽力而为
+                pass
+
 
 class MCPBridge:
     """全部已启用 server 的桥：按项目域过滤，聚合工具清单与调用。
@@ -393,6 +438,9 @@ class MCPBridge:
 
     # 需要按会话隔离的 stdio server 名（浏览器类，进程/资源重）
     SESSION_SCOPED_SERVERS = {"playwright"}
+    # 全局域 server（与项目无关，**不注入 PW_PROJECT_ID**）：如 fir-proxy 代理池控制面
+    # ——池已全局化（2026-10-11），MCP 工具打 /api/proxy/* 无 pid。
+    PROJECT_AGNOSTIC_SERVERS = {"fir-proxy"}
     # 并发浏览器会话上限（超出时调用回错误引导）；最多允许 10 个会话
     MAX_BROWSER_SESSIONS = 10
     # 传给会话级 server 进程的环境变量名
@@ -430,6 +478,7 @@ class MCPBridge:
         with self._lock:
             if self._servers and time.monotonic() - self._loaded_at < 60.0:
                 return self._servers
+            prev = self._servers
             servers: dict[str, MCPServerRuntime] = {}
             try:
                 cfg = json.loads(self.config_path.read_text(encoding="utf-8"))
@@ -446,20 +495,45 @@ class MCPBridge:
                     continue
                 if name in self.SESSION_SCOPED_SERVERS:
                     # 会话级 server：此处只登记"该 server 启用"，runtime 延迟到
-                    # 按会话首次调用时再建（那时才知道 session_id）。
-                    servers[name] = _LazySessionServer(name, entry, cwd=self._cwd)
+                    # 按会话首次调用时再建（那时才知道 session_id）。配置未变则复用
+                    # 旧占位（保住其探针子进程，避免 60s 重载 churn 探针进程）。
+                    old_lazy = prev.get(name) if prev else None
+                    fresh_lazy = _LazySessionServer(name, entry, cwd=self._cwd)
+                    if (isinstance(old_lazy, _LazySessionServer)
+                            and old_lazy.cfg_key == fresh_lazy.cfg_key):
+                        servers[name] = old_lazy
+                        fresh_lazy.close()
+                    else:
+                        servers[name] = fresh_lazy
                     continue
                 try:
                     runtime_cfg = {**entry, "_cwd": str(self._cwd)}
-                    # 非会话级 stdio server 也注入 PW_PROJECT_ID + mcp.json 的 `env`
-                    # 字段：薄客户端型 MCP（如 fir-proxy 控制面）靠它反查平台 API。
+                    # 非会话级 stdio server 注入 PW_PROJECT_ID + mcp.json 的 `env`
+                    # 字段：薄客户端型 MCP（如 fofa/自研控制面）靠它反查平台 API。
+                    # **全局域 server（fir-proxy）不注入**——池已全局化，工具无 pid。
                     env_extra = self._env_for_entry(name, entry)
-                    if self.project_id:
+                    if self.project_id and name not in self.PROJECT_AGNOSTIC_SERVERS:
                         env_extra["PW_PROJECT_ID"] = self.project_id
-                    servers[name] = MCPServerRuntime(name, runtime_cfg,
-                                                     env_extra=env_extra or None)
+                    fresh = MCPServerRuntime(name, runtime_cfg,
+                                             env_extra=env_extra or None)
                 except (ValueError, OSError):
                     continue  # 非法端点等：跳过该 server
+                # **复用同配置且仍存活的上一代 runtime**（2026-10-11）：旧实现 60s
+                # 重载即无条件重建 runtime，而重建**从不 kill 旧 stdio 子进程**——
+                # 每 60s × N 个项目催生海量子进程 + reader 线程（实测残留 356 个
+                # fir_proxy_mcp + 179 playwright + 79 fofa）。配置未变就原样沿用，
+                # 配置变了才重建（旧 runtime 随 prev 落进下方统一回收）。
+                old = prev.get(name) if prev else None
+                if (isinstance(old, MCPServerRuntime)
+                        and old.cfg_key == fresh.cfg_key and old.is_alive()):
+                    servers[name] = old
+                    fresh.close()  # 未启用的替身（构造即无进程），显式回收
+                else:
+                    servers[name] = fresh
+            # 回收本轮被丢弃的 runtime（配置移除/改名/变更）的子进程
+            for name, old in (prev or {}).items():
+                if servers.get(name) is not old:
+                    old.close()
             self._servers = servers
             self._loaded_at = time.monotonic()
             return servers
@@ -610,8 +684,16 @@ class _LazySessionServer:
         self.command = str(entry.get("command") or "")
         self.args = list(entry.get("args") or [])
         self.cwd = str(cwd) if cwd else None
+        self.cfg_key = ("stdio", self.command, tuple(self.args), "")
         self._probe: MCPServerRuntime | None = None
         self._probe_lock = threading.Lock()
+
+    def close(self) -> None:
+        """回收探针 runtime 的子进程（重载复用时不调用；仅丢弃时调用）。"""
+        with self._probe_lock:
+            if self._probe is not None:
+                self._probe.close()
+                self._probe = None
 
     def list_tools(self, *, refresh: bool = False) -> list[dict]:
         with self._probe_lock:

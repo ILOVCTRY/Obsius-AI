@@ -120,6 +120,40 @@ _EMPTY_RESPONSE_NUDGE = (
     "上一条响应没有产生文本或工具调用。请继续处理当前请求，必须返回可见文本回复，"
     "或返回需要执行的工具调用；不要返回空响应。"
 )
+# 空响应「独立续问」升级（2026-10-11 事故修复）：把 nudge 只并进尾部 tool_result
+# 时，重试上下文与上一次**几乎逐字相同**——上游对同一上下文确定性返回「只 reasoning、
+# 无文本/无工具调用」的空响应时，3 次重试等同 1 次，用户只看到「不会自动重试」后
+# 直接落「本轮未产出文本回复」。修正：重试时**新起一条独立 user 消息**打破上下文
+# 相同性（Anthropic 角色严格交替，故先补一条 assistant 占位；见
+# `_append_standalone_nudge`）。文本随重试次数递增变强，逼模型给可见产物。
+_EMPTY_RESPONSE_ASSIST_PLACEHOLDER = "（无输出，继续）"
+
+
+def _empty_response_nudge(attempt: int) -> str:
+    """第 ``attempt`` 次（从 1 起）空响应重试的独立续问文本，随次数升级加重。"""
+    base = _EMPTY_RESPONSE_NUDGE
+    if attempt <= 1:
+        return base
+    extra = ("你已经连续多次返回空响应（只有推理、没有面向人类的输出）。"
+             "立即停止空转：要么直接给出面向人类的文本结论/摘要，"
+             "要么立即发出下一步工具调用；不要再返回空内容。")
+    return f"{base}\n\n{extra}"
+
+
+def _append_standalone_nudge(messages: list[dict[str, Any]], nudge: str) -> None:
+    """新起一条**独立 user 消息**承载 nudge（打破重试上下文相同性）。
+
+    与 `_inject_nudge`（并入尾部 tool_result）互补：后者上下文几乎不变，对上游
+    「确定性空响应」无效。Anthropic 原生协议要求 user/assistant 严格交替，故尾部
+    已是 user 时先补一条 assistant 占位再追加 user；尾部是 assistant/空则直接追加。
+    三种协议（anthropic / chat-completions / responses）都能安全接受该序列。
+    """
+    if not messages or messages[-1].get("role") == "user":
+        messages.append({"role": "assistant",
+                         "content": _EMPTY_RESPONSE_ASSIST_PLACEHOLDER})
+    messages.append({"role": "user", "content": nudge})
+
+
 _CONTINUE_NUDGE = ("（上一条回复因输出长度上限被截断）请**接着上一句继续写完**，"
                    "不要重复已写内容，也不要重新开头。")
 
@@ -1557,8 +1591,11 @@ class ChatTurn:
                         "total": _EMPTY_RESPONSE_RETRIES,
                         "reason": "empty_response",
                     })
-                    _inject_nudge(messages, "\n\n".join(
-                        [_EMPTY_RESPONSE_NUDGE, *step_nudges]))
+                    # 独立续问（2026-10-11）：新起一条 user 消息打破上下文相同性，
+                    # 而非并入 tool_result——后者让「确定性空响应」的重试等同空转。
+                    nudge = "\n\n".join(
+                        [_empty_response_nudge(empty_response_n), *step_nudges])
+                    _append_standalone_nudge(messages, nudge)
                     continue
                 final = "（本轮未产出文本回复，请重试或改述）"
                 chat_store.append_message(self.bb, self.thread_id,

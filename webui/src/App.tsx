@@ -86,8 +86,8 @@ const NAV_GROUPS: { label: string; items: NavItem[]; collapsible?: boolean }[] =
     items: [
       { key: "browser", label: "浏览器", icon: Globe2, needsProject: true },
       { key: "fuzzer", label: "重放", icon: Zap, needsProject: true },
-      { key: "proxy", label: "代理池", icon: Network, needsProject: true },
       { key: "sample-analysis", label: "样本分析", icon: FolderTree, needsProject: true },
+      { key: "proxy", label: "代理池", icon: Network, needsProject: false },
       { key: "knowledge", label: "知识库", icon: BookOpen, needsProject: false },
       { key: "skills", label: "技能库", icon: BrainCircuit, needsProject: false },
       { key: "settings", label: "设置", icon: Settings2, needsProject: false },
@@ -340,7 +340,10 @@ export default function App() {
 
   const openProject = useCallback((id: string) => {
     setPid(id)
-    setView("live")
+    // 进入项目即定位到「智能体」会话窗口（2026-10-11）：此前落 live（会话直播间
+    // 的指挥/空态落地页），改为直接打开左导航「智能体」= AgentWorkbenchView
+    // （agent 触发卡 + 线程列表 + 对话挖洞），少一次手动切换。
+    setView("agents")
   }, [])
 
   // 项目页返回入口由悬浮控件承载；保留回调供跨视图调用。
@@ -429,6 +432,8 @@ export default function App() {
                   ? <IntelView />
                   : view === "trash"
                     ? <TrashView />
+                  : view === "proxy"
+                    ? <ProxyPoolView />
                   : view === "knowledge"
                     ? <KnowledgeView />
                     : view === "skills"

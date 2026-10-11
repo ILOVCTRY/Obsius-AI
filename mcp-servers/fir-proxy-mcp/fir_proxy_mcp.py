@@ -11,7 +11,8 @@
 
 环境变量：
 - ``CYBERSTRIKE_API`` 平台基址（默认 ``http://127.0.0.1:8420``）。
-- ``PW_PROJECT_ID`` 当前项目 id（平台按项目注入；也可每个工具显式传 ``project_id``）。
+
+代理池已**全局化（2026-10-11）**：工具打 ``/api/proxy/*``（无 pid），不再需要 project_id。
 """
 
 from __future__ import annotations
@@ -23,17 +24,9 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 
 API_BASE = os.getenv("CYBERSTRIKE_API", "http://127.0.0.1:8420").rstrip("/")
-DEFAULT_PID = os.getenv("PW_PROJECT_ID", "").strip()
 TIMEOUT = float(os.getenv("FIR_PROXY_MCP_TIMEOUT", "120"))
 
 mcp = FastMCP("fir-proxy")
-
-
-def _pid(project_id: str | None) -> str:
-    pid = (project_id or DEFAULT_PID).strip()
-    if not pid:
-        raise ValueError("缺少 project_id（平台未注入 PW_PROJECT_ID，请显式传 project_id）")
-    return pid
 
 
 def _call(method: str, path: str, body: dict | None = None) -> Any:
@@ -53,79 +46,77 @@ def _call(method: str, path: str, body: dict | None = None) -> Any:
 
 
 @mcp.tool()
-def proxy_status(project_id: str | None = None) -> dict:
+def proxy_status() -> dict:
     """查代理池状态：服务是否在跑、本地入口端点（http/socks5）、当前代理、池计数与地区分布。
 
     服务未启动时 `running=false`（池文件仍在，可 `proxy_list` 看存量）。
     """
-    return _call("GET", f"/api/projects/{_pid(project_id)}/proxy/status")
+    return _call("GET", "/api/proxy/status")
 
 
 @mcp.tool()
-def proxy_list(project_id: str | None = None) -> dict:
+def proxy_list() -> dict:
     """列可用代理（proxy/protocol/location/latency/score/status）。
 
     `source=serve` 为运行中实时池；`source=file` 为池文件存量。AI 据此挑代理。
     """
-    return _call("GET", f"/api/projects/{_pid(project_id)}/proxy/proxies")
+    return _call("GET", "/api/proxy/proxies")
 
 
 @mcp.tool()
-def proxy_start(project_id: str | None = None) -> dict:
+def proxy_start() -> dict:
     """启动代理池本地服务（HTTP + SOCKS5 入口，内建轮换/故障切换）。池空或依赖缺失会报错。"""
-    return _call("POST", f"/api/projects/{_pid(project_id)}/proxy/start")
+    return _call("POST", "/api/proxy/start")
 
 
 @mcp.tool()
-def proxy_stop(project_id: str | None = None) -> dict:
+def proxy_stop() -> dict:
     """停止代理池本地服务（池记录保留）。"""
-    return _call("POST", f"/api/projects/{_pid(project_id)}/proxy/stop")
+    return _call("POST", "/api/proxy/stop")
 
 
 @mcp.tool()
-def proxy_rotate(project_id: str | None = None) -> dict:
+def proxy_rotate() -> dict:
     """手动轮换到下一个代理，返回新的当前代理。需服务在跑。"""
-    return _call("POST", f"/api/projects/{_pid(project_id)}/proxy/rotate")
+    return _call("POST", "/api/proxy/rotate")
 
 
 @mcp.tool()
 def proxy_select(limit: int = 1, region: str | None = None,
-                 max_latency_ms: float | None = None,
-                 project_id: str | None = None) -> dict:
+                 max_latency_ms: float | None = None) -> dict:
     """按评分挑最合适的代理（可选地区 / 延迟上限）。不启服务也可用。"""
-    return _call("POST", f"/api/projects/{_pid(project_id)}/proxy/select",
+    return _call("POST", "/api/proxy/select",
                  {"limit": limit, "region": region, "max_latency_ms": max_latency_ms})
 
 
 @mcp.tool()
-def proxy_add(records: list[dict], project_id: str | None = None) -> dict:
+def proxy_add(records: list[dict]) -> dict:
     """把代理记录并入池（每条含 `proxy`（host:port），可选 `protocol`/`location` 等）。"""
-    return _call("POST", f"/api/projects/{_pid(project_id)}/proxy/add",
+    return _call("POST", "/api/proxy/add",
                  {"records": records})
 
 
 @mcp.tool()
-def proxy_remove(addresses: list[str], project_id: str | None = None) -> dict:
+def proxy_remove(addresses: list[str]) -> dict:
     """按地址（host:port）从池中移除代理。"""
-    return _call("POST", f"/api/projects/{_pid(project_id)}/proxy/remove",
+    return _call("POST", "/api/proxy/remove",
                  {"addresses": addresses})
 
 
 @mcp.tool()
-def proxy_fetch(protocols: list[str] | None = None,
-                project_id: str | None = None) -> dict:
+def proxy_fetch(protocols: list[str] | None = None) -> dict:
     """从在线源抓取代理入池（联网，较慢）。`protocols` 可选 http/socks4/socks5，空=全部。
 
     返回 `{job_id}`；抓取完成后用 `proxy_list` 查看。
     """
-    return _call("POST", f"/api/projects/{_pid(project_id)}/proxy/fetch",
+    return _call("POST", "/api/proxy/fetch",
                  {"protocols": protocols or []})
 
 
 @mcp.tool()
-def proxy_validate(workers: int = 50, project_id: str | None = None) -> dict:
+def proxy_validate(workers: int = 50) -> dict:
     """批量验证池内全部代理（联网，慢）：回写 status/latency/score。返回 `{job_id}`。"""
-    return _call("POST", f"/api/projects/{_pid(project_id)}/proxy/validate",
+    return _call("POST", "/api/proxy/validate",
                  {"workers": workers})
 
 

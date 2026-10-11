@@ -9,13 +9,24 @@ import { api, ApiError, pollJob } from "@/lib/api"
 import type { ProxyJobProgress, ProxyRecord, ProxyStatus } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
-/** 代理池（fir-proxy 托管，2026-10-07）。
+/** 代理池（fir-proxy 托管，2026-10-07 → 2026-10-11 全局单池）。
  *
- * 项目级 serve（本地 HTTP + SOCKS5 入口，内建轮换/故障切换）+ 池记录管理。
+ * 全局 serve（本地 HTTP + SOCKS5 入口，内建轮换/故障切换）+ 池记录管理。
  * 人类与 AI 共享同一池：AI 经 MCP 控制面取端点自行 `curl -x`。
  * 池空/依赖缺失 → 后端 503 结构化，本页直显错误文案（不静默降级）。
+ * 协议过滤（2026-10-11）：http / https（能力探测）/ socks（socks4+socks5）。
  */
-export function ProxyPoolView({ pid }: { pid: string }) {
+
+/** 协议过滤维度：https 是**能力探测**（非协议类目，池本无 https 代理）。 */
+type ProxyFilter = "all" | "http" | "https" | "socks"
+
+const FILTERS: { key: ProxyFilter; label: string }[] = [
+  { key: "all", label: "全部" },
+  { key: "http", label: "HTTP" },
+  { key: "https", label: "HTTPS" },
+  { key: "socks", label: "SOCKS" },
+]
+export function ProxyPoolView({ pid }: { pid?: string | null }) {
   const [status, setStatus] = useState<ProxyStatus | null>(null)
   const [records, setRecords] = useState<ProxyRecord[]>([])
   const [err, setErr] = useState<string | null>(null)
@@ -24,12 +35,13 @@ export function ProxyPoolView({ pid }: { pid: string }) {
   const [importText, setImportText] = useState("")
   const [jobNote, setJobNote] = useState<string | null>(null)
   const [progress, setProgress] = useState<ProxyProgress | null>(null)
+  const [filter, setFilter] = useState<ProxyFilter>("all")   // 协议过滤（2026-10-11）
   const jobRef = useRef<string | null>(null)   // 正在跟踪的 job id（防重复挂载）
 
   const refresh = useCallback(async () => {
     try {
       const [st, list] = await Promise.all([
-        api.proxyStatus(pid), api.proxyList(pid),
+        api.proxyStatus(), api.proxyList(),
       ])
       setStatus(st)
       setRecords(list.proxies)
@@ -37,7 +49,7 @@ export function ProxyPoolView({ pid }: { pid: string }) {
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : String(e))
     }
-  }, [pid])
+  }, [])
 
   useEffect(() => {
     let alive = true
@@ -89,6 +101,16 @@ export function ProxyPoolView({ pid }: { pid: string }) {
 
   const running = status?.running ?? false
   const endpoint = status?.endpoint
+  const counts = status?.counts
+
+  // 协议过滤（2026-10-11）：http=协议类目；socks=socks4+socks5 合并；https=能力探测。
+  const shown = useMemo(() => {
+    if (filter === "all") return records
+    if (filter === "http") return records.filter((r) => (r.protocol ?? "").toLowerCase() === "http")
+    if (filter === "socks")
+      return records.filter((r) => ["socks4", "socks5"].includes((r.protocol ?? "").toLowerCase()))
+    return records.filter((r) => r.https_ok === true)   // https
+  }, [records, filter])
 
   const regionText = useMemo(() => {
     const entries = Object.entries(status?.regions ?? {})
@@ -98,23 +120,25 @@ export function ProxyPoolView({ pid }: { pid: string }) {
   }, [status])
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden">
+    // 全局视图（needsProject=false，首页与项目内都渲染）：pt-9 = 首页无顶栏分支的
+    // 36px 拖动区让位；项目内有 .topbar(h-16)，再加就是重复死区（对齐 KnowledgeView/SkillsView）。
+    <div className={cn("flex h-full min-h-0 flex-col overflow-hidden", !pid && "pt-9")}>
       {/* 顶部工具条 */}
       <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b px-2 py-1.5">
         {running ? (
           <Button size="sm" variant="outline" className="h-7 gap-1 text-xs"
-                  disabled={busy} onClick={() => void guard(() => api.proxyStop(pid), "已停止")}>
+                  disabled={busy} onClick={() => void guard(() => api.proxyStop(), "已停止")}>
             <Square size={12} /> 停止服务
           </Button>
         ) : (
           <Button size="sm" className="h-7 gap-1 text-xs" disabled={busy}
-                  onClick={() => void guard(() => api.proxyStart(pid), "服务已启动")}
+                  onClick={() => void guard(() => api.proxyStart(), "服务已启动")}
                   title="启动本地 HTTP + SOCKS5 代理入口">
             <Play size={12} /> 启动服务
           </Button>
         )}
         <Button size="sm" variant="outline" className="h-7 gap-1 text-xs"
-                disabled={busy || !running} onClick={() => void guard(() => api.proxyRotate(pid), "已轮换")}>
+                disabled={busy || !running} onClick={() => void guard(() => api.proxyRotate(), "已轮换")}>
           <Zap size={12} /> 轮换 IP
         </Button>
 
@@ -123,7 +147,7 @@ export function ProxyPoolView({ pid }: { pid: string }) {
         <Button size="sm" variant="outline" className="h-7 gap-1 text-xs" disabled={busy}
                 title="从在线源抓取并自动验证，剔除失效代理"
                 onClick={() => void guard(async () => {
-                  const { job_id } = await api.proxyFetch(pid)
+                  const { job_id } = await api.proxyFetch()
                   await runJob(job_id, "proxy-fetch")
                 })}>
           <Upload size={12} /> 在线抓取
@@ -132,7 +156,7 @@ export function ProxyPoolView({ pid }: { pid: string }) {
                 disabled={busy || !records.length}
                 title="验证池内全部代理并移除失效代理"
                 onClick={() => void guard(async () => {
-                  const { job_id } = await api.proxyValidate(pid)
+                  const { job_id } = await api.proxyValidate()
                   await runJob(job_id, "proxy-validate")
                 })}>
           <Activity size={12} /> 验证全部
@@ -146,9 +170,23 @@ export function ProxyPoolView({ pid }: { pid: string }) {
           <RefreshCw size={12} /> 刷新
         </Button>
 
-        <span className="ml-auto text-[11px] text-muted-foreground">
-          池 {status?.pool_size ?? 0} · 可用 {status?.working ?? 0}
-        </span>
+        {/* 协议过滤（2026-10-11）：点击切「全部/HTTP/HTTPS/SOCKS」 */}
+        <div className="ml-auto flex items-center gap-1">
+          {FILTERS.map((f) => (
+            <button key={f.key} type="button"
+                    onClick={() => setFilter(f.key)}
+                    className={cn(
+                      "rounded px-2 py-0.5 text-[11px] transition-colors",
+                      filter === f.key
+                        ? "bg-primary text-primary-foreground"
+                        : "text-muted-foreground hover:bg-accent")}>
+              {f.label}
+              {f.key !== "all" && counts && (
+                <span className="ml-1 tabular-nums opacity-70">{counts[f.key]}</span>
+              )}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* 服务状态条 */}
@@ -174,6 +212,10 @@ export function ProxyPoolView({ pid }: { pid: string }) {
           </code>
         </span>
         <span className="text-muted-foreground">地区 {regionText}</span>
+        <span className="ml-auto text-muted-foreground">
+          池 {status?.pool_size ?? 0} · 可用 {status?.working ?? 0}
+          {counts && <> · HTTP {counts.http} · HTTPS {counts.https} · SOCKS {counts.socks}</>}
+        </span>
       </div>
 
       {err && (
@@ -199,7 +241,7 @@ export function ProxyPoolView({ pid }: { pid: string }) {
                     onClick={() => void guard(async () => {
                       const records = parseProxies(importText)
                       if (!records.length) throw new ApiError(0, "没有可识别的代理行", "")
-                      const r = await api.proxyAdd(pid, records)
+                      const r = await api.proxyAdd(records)
                       setImportText(""); setImportOpen(false)
                       setJobNote(`已导入 ${r.added} 条`)
                     })}>
@@ -227,7 +269,7 @@ export function ProxyPoolView({ pid }: { pid: string }) {
             </tr>
           </thead>
           <tbody>
-            {records.map((r) => {
+            {shown.map((r) => {
               const current = r.proxy === status?.current?.proxy
               return (
                 <tr key={r.proxy}
@@ -247,26 +289,35 @@ export function ProxyPoolView({ pid }: { pid: string }) {
                   </td>
                   <td className="px-2 py-1 text-muted-foreground">{r.anonymity ?? "—"}</td>
                   <td className="px-2 py-1">
-                    <Badge variant={r.status === "Working" ? "secondary" : "outline"}
-                           className="text-[10px]">
-                      {r.status ?? "—"}
-                    </Badge>
+                    <div className="flex items-center gap-1">
+                      <Badge variant={r.status === "Working" ? "secondary" : "outline"}
+                             className="text-[10px]">
+                        {r.status ?? "—"}
+                      </Badge>
+                      {r.https_ok === true && (
+                        <Badge variant="outline" className="text-[10px] text-(--status-ok)">
+                          HTTPS
+                        </Badge>
+                      )}
+                    </div>
                   </td>
                   <td className="px-2 py-1 text-right">
                     <button type="button" title="从池中移除"
                             className="text-muted-foreground hover:text-destructive"
                             onClick={() => void guard(
-                              () => api.proxyRemove(pid, [r.proxy]))}>
+                              () => api.proxyRemove([r.proxy]))}>
                       <Trash2 size={12} />
                     </button>
                   </td>
                 </tr>
               )
             })}
-            {!records.length && (
+            {!shown.length && (
               <tr>
                 <td colSpan={8} className="px-3 py-10 text-center text-muted-foreground">
-                  代理池为空——用「在线抓取」拉取，或「导入」粘贴代理列表
+                  {filter === "all"
+                    ? "代理池为空——用「在线抓取」拉取，或「导入」粘贴代理列表"
+                    : "当前过滤条件下无代理（换「全部」看看，或抓取补充）"}
                 </td>
               </tr>
             )}
