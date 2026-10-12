@@ -84,6 +84,40 @@ def test_package_api_directory_targets_dependencies_and_dedup(tmp_path):
         assert len(listed_again) == 1 and listed_again[0]["import_count"] == 2
 
 
+def test_folder_upload_allows_empty_files(tmp_path):
+    """回归（2026-10-12）：文件夹上传含 0 字节文件时不再让**整批** 422「空文件」
+    失败——空文件是合法目录成员（压缩包导入同样允许空文件）。单文件上传仍拒绝
+    空文件（无意义上传）。"""
+    app = _app(tmp_path)
+    with TestClient(app) as client:
+        pid = client.post("/api/projects", json={"name": "empty-folder"}).json()["id"]
+
+        def multipart(entries):
+            parts = []
+            for name, content in entries:
+                parts.append(("files", (name, content, "application/octet-stream")))
+                parts.append(("relative_paths", (None, name)))
+            return parts
+
+        r = client.post(f"/api/projects/{pid}/sample-packages",
+                        files=multipart([("Game/game.exe", b"MZ" + b"\0" * 32),
+                                         ("Game/empty.txt", b"")]))
+        assert r.status_code == 202, r.text
+        body = r.json()
+        assert body["file_count"] == 2
+        assert {t["path"] for t in body["targets"]} == {"Game/game.exe", "Game/empty.txt"}
+
+        # 追加上传同样允许空文件
+        r2 = client.post(f"/api/projects/{pid}/sample-packages/files",
+                         files=multipart([("extra/blank.bin", b"")]))
+        assert r2.status_code == 202, r2.text
+
+        # 单文件上传空文件仍拒绝（无意义上传）
+        single = client.post(f"/api/projects/{pid}/sample-packages",
+                             files={"file": ("empty.bin", b"", "application/octet-stream")})
+        assert single.status_code == 422
+
+
 def test_package_api_archive(tmp_path):
     app = _app(tmp_path)
     with TestClient(app) as client:

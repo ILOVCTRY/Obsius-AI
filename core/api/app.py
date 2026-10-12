@@ -2174,8 +2174,14 @@ def create_app(
         progress["phase"] = "done"
         return report
 
-    def _write_upload_temp(upload: UploadFile, max_bytes: int) -> Path:
-        """Stream an untrusted upload to a temporary file without buffering it."""
+    def _write_upload_temp(upload: UploadFile, max_bytes: int, *,
+                           allow_empty: bool = False) -> Path:
+        """Stream an untrusted upload to a temporary file without buffering it.
+
+        ``allow_empty``（文件夹/追加上传）：0 字节文件是**合法的目录成员**——压缩包
+        导入路径本就允许空文件（见 sample_packages._extract_zip），多选文件夹里只要
+        有一个空文件（.gitkeep / 空 __init__.py / desktop.ini 等）此前会让**整批**
+        上传 422「空文件」失败。单文件上传仍拒绝空文件（无意义上传）。"""
         handle = tempfile.NamedTemporaryFile(prefix="sample-upload-", suffix=".part", delete=False)
         path = Path(handle.name)
         size = 0
@@ -2188,7 +2194,7 @@ def create_app(
                 if size > max_bytes:
                     raise HTTPException(413, f"上传文件超过 {max_bytes // (1024 * 1024)}MB 上限")
                 handle.write(chunk)
-            if size == 0:
+            if size == 0 and not allow_empty:
                 raise HTTPException(422, "空文件")
             handle.close()
             return path
@@ -3834,7 +3840,8 @@ def create_app(
             try:
                 names = relative_paths or []
                 for index, upload in enumerate(uploads):
-                    temp = _write_upload_temp(upload, package_store.limits.max_file_bytes)
+                    temp = _write_upload_temp(upload, package_store.limits.max_file_bytes,
+                                              allow_empty=True)
                     name = names[index] if index < len(names) and names[index] else (upload.filename or "sample.bin")
                     temp_files.append((name, temp))
                 try:
@@ -3968,7 +3975,8 @@ def create_app(
         try:
             names = relative_paths or []
             for index, upload in enumerate(files):
-                temp = _write_upload_temp(upload, store.limits.max_file_bytes)
+                temp = _write_upload_temp(upload, store.limits.max_file_bytes,
+                                          allow_empty=True)
                 name = names[index] if index < len(names) and names[index] else (upload.filename or "sample.bin")
                 temp_files.append((name, temp))
             try:

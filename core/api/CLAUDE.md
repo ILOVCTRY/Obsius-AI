@@ -13,7 +13,7 @@
 
 ## 端点速查（前缀 /api）
 
-**分析包基础层**（无表，独立节）：`POST /projects/{pid}/sample-packages` 导入单文件/ZIP/7z/TAR 或目录（统一路径穿越/特殊条目/配额校验，返回包版本+候选目标+依赖边）；`.../sample-packages/uploads` 可恢复分片上传、`GET .../sample-packages[/{package_id}]`、`POST .../versions/{version_id}/targets`、`GET/POST .../targets/{target_id}` + `POST .../analyze`（复用 IDA/Ghidra headless 异步出报告——PE/ELF/Mach-O 正式分析，APK/AAB 只读解析 Manifest/DEX，其他格式返 `analyzer-unavailable` 不伪造成功）。旧 `/samples` 与 `/binaries/{sha}` 保持兼容。
+**分析包基础层**（无表，独立节）：`POST /projects/{pid}/sample-packages` 导入单文件/ZIP/7z/TAR 或目录（统一路径穿越/特殊条目/配额校验，返回包版本+候选目标+依赖边）；`.../sample-packages/uploads` 可恢复分片上传、`GET .../sample-packages[/{package_id}]`、`POST .../versions/{version_id}/targets`、`GET/POST .../targets/{target_id}` + `POST .../analyze`（复用 IDA/Ghidra headless 异步出报告——PE/ELF/Mach-O 正式分析，APK/AAB 只读解析 Manifest/DEX，其他格式返 `analyzer-unavailable` 不伪造成功）。**空文件（0 字节）允许进文件夹/追加上传（2026-10-12）**：`_write_upload_temp(allow_empty=)`——`files` 多选/`.../files` 追加走 `allow_empty=True`（空文件是合法目录成员，压缩包导入本就允许；此前文件夹里任一空文件会让**整批** 422「空文件」失败），单文件分支仍拒绝空文件。旧 `/samples` 与 `/binaries/{sha}` 保持兼容（走 `_spool_upload`，不受影响）。
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
