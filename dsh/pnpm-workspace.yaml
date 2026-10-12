@@ -1,7 +1,0 @@
-packages:
-  - 'sec-toy'
-  - 'packages/sec/*'
-nodeLinker: hoisted
-autoInstallPeers: false
-allowBuilds:
-  esbuild: true
