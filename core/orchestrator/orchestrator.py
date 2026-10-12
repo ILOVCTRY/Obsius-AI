@@ -658,22 +658,18 @@ class Orchestrator:
         assets_view = self._assets_view()
         hvt_ids: set = assets_view.pop("_hvt_ids")
         covered_ids: set = assets_view.pop("_covered_ids")
-        # 高价值目标段（态势增强）：两类来源并集——
-        # ①meta.tags 含「高价值」（人工标注，既有口径）；
-        # ②自动推导（2026-09-24）：承载 verified 且 severity≥high 的发现的资产——
-        #   实证高危的资产不该在面板缺席（此前只认 tag，verified HIGH 无入口呈现）。
-        # 即使被任务覆盖，未到 tested_clean 就持续呈现（"挖完"口径= tested_clean）。
+        # 高价值目标段（态势增强）：唯一来源=自动推导（2026-10-12 废除人工标签）——
+        # 承载 verified 且 severity≥high/critical 发现的资产。实证高危的资产不该在
+        # 面板缺席；即使被任务覆盖，未到 tested_clean 就持续呈现（"挖完"口径= tested_clean）。
+        # `hvt_ids`（来自 _assets_view）现在是同一自动推导集，`derived` 键保留恒 True
+        # 兼容前端旧消费（不再有「人工标注」对照）。
         by_asset: dict[str, list[dict]] = {}
         for f in findings:
             if f.get("target_asset_id"):
                 by_asset.setdefault(f["target_asset_id"], []).append(f)
         sev_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-        derived_ids: set[str] = set()
-        for aid, fs in by_asset.items():
-            if any(f.get("status") == "verified"
-                   and f.get("severity") in ("high", "critical") for f in fs):
-                derived_ids.add(aid)
-        hv_ids_all = hvt_ids | derived_ids
+        derived_ids = set(hvt_ids)
+        hv_ids_all = hvt_ids
         high_value = []
         if hv_ids_all:
             for a in self.bb.list_assets(self.project_id):
@@ -685,7 +681,7 @@ class Orchestrator:
                     "id": a["id"], "type": a["type"], "value": a["value"][:60],
                     "status": a.get("status") or "open",
                     "covered": a["id"] in covered_ids,
-                    "derived": a["id"] in derived_ids and a["id"] not in hvt_ids,
+                    "derived": True,
                     "findings": [{"id": f["id"], "title": f["title"][:50],
                                   "severity": f["severity"], "status": f["status"]}
                                  for f in rel],
@@ -760,11 +756,11 @@ class Orchestrator:
         covered = 已测试干净；`high_value.covered` 语义随三态收紧。状态一律读时派生
         （父节点显式 status 被子树覆盖，加子自动破 clean）。"""
         assets = self.bb.list_assets(self.project_id)
-        eff_map = effective_status_map(assets, self.bb.list_findings(self.project_id))
+        findings_all = self.bb.list_findings(self.project_id)
+        eff_map = effective_status_map(assets, findings_all)
         by_type: dict[str, int] = {}
         by_status: dict[str, int] = {}
         targetable = []
-        hvt_ids: set[str] = set()
         for a in assets:
             by_type[a["type"]] = by_type.get(a["type"], 0) + 1
             eff = eff_map.get(a["id"])
@@ -772,9 +768,18 @@ class Orchestrator:
             by_status[st] = by_status.get(st, 0) + 1
             if a["type"] in ("host", "domain", "url", "service"):
                 targetable.append(a)
-            tags = [str(t).strip().lower() for t in (a.get("meta") or {}).get("tags") or []]
-            if "高价值" in tags:
-                hvt_ids.add(a["id"])
+        # 高价值 = 承载 verified 且 severity≥high/critical 发现的资产（自动推导，
+        # 2026-10-12 起唯一来源）。人工 meta.tags「高价值」标签已废除——不再有人工
+        # 标注的 HVT 概念（曾与自动推导并存，UI ⭐ 与阶段门 min_high_value 均依赖）。
+        findings_by_asset: dict[str, list[dict]] = {}
+        for f in findings_all:
+            aid = f.get("target_asset_id")
+            if aid:
+                findings_by_asset.setdefault(aid, []).append(f)
+        hvt_ids: set[str] = {
+            aid for aid, fs in findings_by_asset.items()
+            if any(f.get("status") == "verified"
+                   and f.get("severity") in ("high", "critical") for f in fs)}
 
         def _state_of(a: dict) -> str:
             eff = eff_map.get(a["id"])
@@ -784,7 +789,7 @@ class Orchestrator:
         untested = [a for a in targetable if _state_of(a) == "open"]
         visited = [a for a in targetable if _state_of(a) == "visited"]
         clean_ids = {a["id"] for a in targetable if _state_of(a) == "tested_clean"}
-        untested.sort(key=lambda a: (a["id"] not in hvt_ids, 0))  # HVT 优先
+        untested.sort(key=lambda a: (a["id"] not in hvt_ids, 0))  # 高价值优先
         visited.sort(key=lambda a: (a["id"] not in hvt_ids, 0))
         covered_ids = clean_ids
         in_progress = [
@@ -1596,6 +1601,8 @@ class Orchestrator:
                 av = self._assets_view()
                 av.pop("_hvt_ids", None)
                 av.pop("_covered_ids", None)
+                # high_value 段（HVT）已随人工标签废除：资产覆盖面看三态桶/coverage 足矣
+                av.pop("high_value", None)
                 parts.append("## 资产覆盖\n" + json.dumps(av, ensure_ascii=False, indent=1))
         if section in ("all", "findings"):
             stats = self.bb.conn.execute(

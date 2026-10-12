@@ -68,8 +68,10 @@ class ProxyConfig:
     python: str | None = None            # 显式解释器；None=自动解析
     auto_start: bool = False             # 项目首个代理动作时是否自动起服务
     validate_timeout_s: int = 5          # 单代理验证超时（check runner --timeout）
-    validate_target: str = "http://www.baidu.com"  # 验证目标 URL（经代理 GET 它，通即 Working）
-    validate_target_https: str | None = "https://www.baidu.com"  # HTTPS 能力探测目标（经 CONNECT）；None/空=不探测
+    # 验证基准网站（2026-10-12 改为 i.zut.edu.cn）：连通性用 http 明文（大多代理能做，
+    # 不大量剔除纯 HTTP 转发型），HTTPS 能力探测指向同一站的 https。
+    validate_target: str = "http://i.zut.edu.cn/new/index.html"  # 验证目标 URL（经代理 GET 它，通即 Working）
+    validate_target_https: str | None = "https://i.zut.edu.cn/new/index.html"  # HTTPS 能力探测目标（经 CONNECT）；None/空=不探测
     # 内容注入/劫持型出口交叉验证（2026-10-11）：第二个目标（须与 validate_target 内容不同）。
     # 两个目标经同一代理返回**相同响应体指纹**即判 hijacked → status=Failed 剔除。
     validate_target_b: str | None = "http://example.com"  # None/空=不做多目标一致性校验
@@ -103,6 +105,32 @@ class ProxyConfig:
             if key in allowed:
                 setattr(cfg, key, value)
         return cfg
+
+
+def write_config_file(path: str | Path, updates: dict) -> None:
+    """把 ``updates``（仅 ProxyConfig 字段）合并写回 ``config/proxy.json``（API 配置入口用）。
+
+    读-合并-整写：保留文件里其它键（如逐机覆盖的端口/阈值），只覆盖传入字段。
+    原子写（临时文件 + replace）。文件不存在/坏文件按空 dict 起步（写入即建文件）。
+    """
+    p = Path(path)
+    data: dict = {}
+    if p.exists():
+        try:
+            raw = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                data = raw
+        except (OSError, ValueError):
+            data = {}
+    allowed = {f.name for f in fields(ProxyConfig)}
+    for key, value in updates.items():
+        if key in allowed:
+            data[key] = value
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                   encoding="utf-8")
+    tmp.replace(p)
 
 
 # ---------------------------------------------------------------- 工具探测
@@ -816,7 +844,8 @@ class ProxyPool:
 
     def _run_cli(self, args: list[str], timeout: float,
                  script: Path | None = None,
-                 on_progress: Callable[[dict], Any] | None = None) -> list[dict]:
+                 on_progress: Callable[[dict], Any] | None = None,
+                 as_dict: bool = False):
         ok, detail = proxy_available(self.tools_root, self.config.python)
         if not ok:
             raise ProxyError(detail)
@@ -833,16 +862,20 @@ class ProxyPool:
         else:
             self._exec_streaming(cmd, timeout, env, on_progress)
         if not out_file.exists():
-            return []
+            return {} if as_dict else []
         try:
             data = json.loads(out_file.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            return []
+            return {} if as_dict else []
         finally:
             try:
                 out_file.unlink()
             except OSError:
                 pass
+        if as_dict:
+            # check-url 模式（2026-10-12）：runner 顶层是 {url,baseline,results}，
+            # 不做键下钻（下钻到 results 会丢 baseline）。
+            return data if isinstance(data, dict) else {}
         if isinstance(data, dict):
             for key in ("proxies", "results", "data"):
                 if key in data:
@@ -919,6 +952,71 @@ class ProxyPool:
         working = sum(1 for r in kept if _is_usable(r, threshold))
         return {"validated": len(validated), "working": working,
                 "removed": len(removed), "pool_size": len(kept)}
+
+    def check_url(self, url: str, *, workers: int = 50, timeout: float = 600.0,
+                  limit: int = 10, probe_waf: bool = True,
+                  on_progress: Callable[[dict], Any] | None = None) -> dict:
+        """指定网站可达性 / WAF 封禁检测（2026-10-12）。
+
+        用池内**全部**代理逐一 GET ``url``，与平台**直连基线**对比判定「可达 / 被该站
+        封禁」；只读报告，**绝不写池**（换目标就误删代理无意义）。返回：
+
+        ``{"url","total","reachable","blocked","usable":[...],"results":[...],"baseline":{...}}``
+        ——``usable`` = 未被封禁且有响应的代理，按延迟升序取前 ``limit`` 个
+        （``{proxy,protocol,latency}``），供 AI 直接使用。
+        """
+        url = (url or "").strip()
+        if not url:
+            raise ProxyError("目标 URL 不能为空")
+        pool = self.read_pool()
+        if not pool:
+            raise ProxyError("代理池为空，无可用代理")
+        report = _progress_reporter(on_progress)
+        report("check-url", 0, len(pool), "检测中…")
+        in_file = self.data_dir() / f"checkurl-in-{uuid.uuid4().hex[:8]}.json"
+        in_file.write_text(json.dumps(pool, ensure_ascii=False), encoding="utf-8")
+        try:
+            args = ["-i", str(in_file.resolve()), "--url", url,
+                    "--timeout", str(int(self.config.validate_timeout_s)),
+                    "--workers", str(workers)]
+            args += ["--probe-waf"] if probe_waf else ["--no-probe-waf"]
+            raw = self._run_cli(
+                args, timeout,
+                script=runner_check_path(self.tools_root),
+                on_progress=lambda evt: report(
+                    "check-url", int(evt.get("done") or 0), int(evt.get("total") or 0),
+                    f"检测中 {evt.get('done')}/{evt.get('total')}"),
+                as_dict=True)
+        finally:
+            try:
+                in_file.unlink()
+            except OSError:
+                pass
+
+        results = []
+        baseline = None
+        if isinstance(raw, dict):
+            results = raw.get("results") or []
+            baseline = raw.get("baseline")
+        results = [r for r in results if isinstance(r, dict)]
+        reachable = [r for r in results if r.get("ok")]
+        blocked = [r for r in results if r.get("blocked")]
+        usable = sorted(
+            (r for r in results if r.get("ok") and not r.get("blocked")),
+            key=lambda r: (r.get("latency") if isinstance(r.get("latency"), (int, float))
+                           else float("inf")))
+        report("check-url", len(results), len(results), "完成")
+        return {
+            "url": url,
+            "total": len(results),
+            "reachable": len(reachable),
+            "blocked": len(blocked),
+            "usable": [{"proxy": r.get("proxy"), "protocol": r.get("protocol"),
+                        "latency": r.get("latency"), "status_code": r.get("status_code")}
+                       for r in usable[: max(0, limit)]],
+            "results": results,
+            "baseline": baseline,
+        }
 
     def fetch(self, protocols: list[str] | None = None,
               timeout: float = 600.0, auto_validate: bool = True,

@@ -1826,7 +1826,7 @@ def test_revision_cas_on_asset_status(bb, project):
         bb.set_asset_status(aid, "scanning", expected_revision=1)
     assert bb.get_asset(aid)["revision"] == 2  # 冲突未写
     # meta 合并写也推进 revision
-    bb.update_asset_meta(aid, {"tags": ["高价值"]})
+    bb.update_asset_meta(aid, {"tags": ["sample-tag"]})
     assert bb.get_asset(aid)["revision"] == 3
 
 

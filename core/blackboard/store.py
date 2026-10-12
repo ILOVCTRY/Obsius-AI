@@ -1784,8 +1784,12 @@ class Blackboard:
                 # sess-1d692817a5d0）；死路收尾自带 dead_reason + 证据门禁，防粗略判净。
                 # 2026-10-01：口径与攻击链路图同源（子目标级）——以本资产为根的
                 # 子树内意图须**全部收尾**且至少一条 dead_end（见 intents.py）。
-                from core.blackboard.intents import dead_end_backing_target
-                if dead_end_backing_target(
+                # 2026-10-12：service 增「同 host 域名覆盖」回退背书——AI 就着域名
+                # 测（DNS 带到 80/443），意图落 domain，service 节点恒无背书而卡 open；
+                # 规则=同 host 的 DNS domain 有 dead_end 背书即可背书该 Web 端口 service
+                #（限 Web 端口 + 同 host，绝不禁跨主机外溢）。
+                from core.blackboard.intents import web_port_backing_target
+                if web_port_backing_target(
                         self.conn, row["project_id"], asset_id) is None:
                     raise ValueError(
                         "tested_clean 须有死路意图背书（读链路图口径）：以本资产"
@@ -1793,7 +1797,9 @@ class Blackboard:
                         "对本资产 declare_intent 声明可证伪假设，close_intent"
                         "(outcome=dead_end) 带证据收尾后再标；如有 open 意图先收尾。"
                         "（每子目标独立立意，意图越多测得越全面；禁止父节点一条"
-                        "意图批量覆盖子树）")
+                        "意图批量覆盖子树。service 例外：同一 host 下解析到它的域名"
+                        "已测得〔dead_end 背书〕时，该 Web 端口 service 可直接标净——"
+                        "域名与你实际打的就是同一个端点）")
             self.conn.execute(
                 "UPDATE assets SET status=?, revision=revision+1 WHERE id=?",
                 (status, asset_id))

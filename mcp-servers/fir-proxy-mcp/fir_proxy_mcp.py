@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import os
+import time
 from typing import Any
 
 import httpx
@@ -43,6 +44,24 @@ def _call(method: str, path: str, body: dict | None = None) -> Any:
             detail = resp.text[:300]
         raise RuntimeError(f"HTTP {resp.status_code}: {detail}")
     return resp.json()
+
+
+def _poll_job(job_id: str, interval: float = 1.5, cap_s: float = 900.0) -> dict:
+    """轮询平台 Job 至终态，返回其 ``result``（失败抛 RuntimeError 带 error）。
+
+    代理检测是 202 Job（联网慢），MCP 工具同步等它完成再回结果供 AI 直接使用。
+    """
+    deadline = time.monotonic() + cap_s
+    while True:
+        job = _call("GET", f"/api/jobs/{job_id}")
+        status = job.get("status")
+        if status != "running":
+            if status == "error":
+                raise RuntimeError(f"任务失败: {job.get('error') or '未知错误'}")
+            return job.get("result") or {}
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"等待任务超时（{cap_s:.0f}s）: {job_id}")
+        time.sleep(interval)
 
 
 @mcp.tool()
@@ -118,6 +137,26 @@ def proxy_validate(workers: int = 50) -> dict:
     """批量验证池内全部代理（联网，慢）：回写 status/latency/score。返回 `{job_id}`。"""
     return _call("POST", "/api/proxy/validate",
                  {"workers": workers})
+
+
+@mcp.tool()
+def proxy_check_url(url: str, limit: int = 10, workers: int = 50,
+                    probe_waf: bool = True) -> dict:
+    """对**指定网站**用池内代理做可达性 + WAF/封禁检测，返回可用的代理。
+
+    场景：拿到一个目标站，想知道「用哪些代理能正常访问它、哪些被它的 WAF 拦了」。
+    做法：用池内每个代理 GET `url`，与平台**直连基线**对比——直连能过、经代理却拿到
+    403/429/Cloudflare/雷池等拦截页者判「被该站封禁」；直连本身就被拦时不误判。
+
+    参数：`probe_waf=False` 只测连通性、不判封禁。返回 `{url,total,reachable,blocked,
+    usable,results,baseline}`，其中 **`usable` = 未被封禁的可用代理**（按延迟升序，
+    最多 `limit` 个，每项 `{proxy,protocol,latency,status_code}`）——AI 直接据此
+    `curl -x http://<proxy> <url>` 访问目标。
+    """
+    job_id = _call("POST", "/api/proxy/check-url",
+                   {"url": url, "workers": workers, "limit": limit,
+                    "probe_waf": probe_waf})["job_id"]
+    return _poll_job(job_id)
 
 
 if __name__ == "__main__":

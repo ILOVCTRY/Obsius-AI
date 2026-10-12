@@ -41,12 +41,11 @@ from core.skills.taxonomy import track_dir
 log = logging.getLogger(__name__)
 
 PHASES_DIR = "phases"
-HIGH_VALUE_TAG = "高价值"  # 与编排器 _assets_view HVT 口径一致
 
 # gate 指标键 → (metrics 键, 人读标签)；未知键 doctor 报 warning、判定忽略
+# （min_high_value 随人工高价值标签废除，2026-10-12）
 _GATE_KEYS = (
     ("min_assets", "assets", "资产"),
-    ("min_high_value", "high_value", "高价值资产"),
     ("min_verified", "verified", "verified 发现"),
 )
 GATE_KEYS = frozenset(k for k, _, _ in _GATE_KEYS) | {"idle_rounds"}
@@ -248,11 +247,12 @@ def set_gate_notified(proj, target: str) -> None:
 # ---------- 入场门 ----------
 
 def gate_metrics(bb, project_id: str, *, idle_rounds: int = 0) -> dict:
-    """门指标现值：资产总数 / ⭐ 高价值资产数 / verified 发现数 / 空闲轮数
-    （idle_rounds 由调用方读 orchestrator_state.derive_idle_rounds 传入）。"""
+    """门指标现值：资产总数 / verified 发现数 / 空闲轮数
+    （idle_rounds 由调用方读 orchestrator_state.derive_idle_rounds 传入）。
+    `high_value` 指标随人工高价值标签废除（2026-10-12）——信息收集出口门不再
+    要求人工标注高价值目标。"""
     return {
         "assets": len(bb.list_assets(project_id)),
-        "high_value": len(bb.list_assets(project_id, tag=HIGH_VALUE_TAG)),
         "verified": sum(1 for f in bb.list_findings(project_id)
                         if f.get("status") == "verified"),
         "idle_rounds": int(idle_rounds),

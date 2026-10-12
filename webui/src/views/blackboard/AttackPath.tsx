@@ -610,7 +610,11 @@ function layoutGraph(
       place(k, y)
       y += subtreeH(k)
     })
-    yOf.set(id, kids.length ? (yTop + y) / 2 - heightOf(n) / 2 : yTop)
+    // 父卡垂直居中于子块；子块矮于卡片时只能下移、绝不向上溢出
+    // （2026-10-12 修重叠：上溢会侵入前一兄弟的分配块，同列间隙 20px 小于上溢量时相撞）
+    yOf.set(id, kids.length
+      ? yTop + Math.max(0, (y - yTop - heightOf(n)) / 2)
+      : yTop)
   }
   const hasParent = new Set<string>()
   for (const kids of treeKids.values()) kids.forEach((k) => hasParent.add(k))

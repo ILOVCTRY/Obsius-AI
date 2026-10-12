@@ -491,25 +491,24 @@ function AssetBadges({ a, hasFinding }: { a: Asset; hasFinding?: boolean }) {
   )
 }
 
-/** 资产标签 chips（W 后续/态势增强：meta.tags；「高价值」资产会进编排器每轮态势注入） */
+/** 资产标签 chips（W 后续：meta.tags，人工自由标签）。 */
 function AssetTags({ tags }: { tags: string[] }) {
   if (!tags.length) return null
   return (
     <>
       {tags.map((t) => (
         <Badge key={t} variant="outline"
-               className={cn("text-[10px]",
-                 t === "高价值" ? "border-(--viz-sev-medium)/60 text-(--viz-sev-medium)" : "text-muted-foreground")}>
-          {t === "高价值" ? "⭐高价值" : `#${t}`}
+               className="text-[10px] text-muted-foreground">
+          #{t}
         </Badge>
       ))}
     </>
   )
 }
 
-function AssetRow({ a, indent = false, hasFinding, onToggleHvt, onDelete }:
+function AssetRow({ a, indent = false, hasFinding, onDelete }:
                   { a: Asset; indent?: boolean; hasFinding?: boolean
-                    onToggleHvt?: (a: Asset) => void; onDelete?: (a: Asset) => void }) {
+                    onDelete?: (a: Asset) => void }) {
   const meta = a.meta ?? {}
   const src = meta.source as string | undefined
   const hint = (meta.module ?? meta.platform ?? (src ? undefined : meta.source)) as string | undefined
@@ -529,16 +528,6 @@ function AssetRow({ a, indent = false, hasFinding, onToggleHvt, onDelete }:
         {src === "fofa" && <span title="来源：FOFA 测绘导入" className="shrink-0 text-[10px]">🛰</span>}
         {(src === "xlsx" || src === "csv") && <span title={`来源：${src} 文件导入`} className="shrink-0 text-[10px]">📥</span>}
         <ProductChips products={products} />
-        {onToggleHvt && (
-          <button
-            title={tags.includes("高价值") ? "取消高价值标记" : "标记为高价值（⭐ 进编排器每轮态势注入）"}
-            className={cn("shrink-0 rounded px-1 text-[10px] hover:bg-accent",
-              tags.includes("高价值") ? "text-(--viz-sev-medium)" : "text-muted-foreground/50")}
-            onClick={(e) => { e.stopPropagation(); onToggleHvt(a) }}
-          >
-            ⭐
-          </button>
-        )}
         {onDelete && (
           <button
             title="删除该资产：仅叶子且无发现引用可删（有子资产/发现引用请先处理）"
@@ -565,9 +554,8 @@ export function Assets({ pid, compact, tree = false }: { pid: string; compact?: 
   const [value, setValue] = useState("")
   const [err, setErr] = useState("")
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
-  // 态势增强：资产标签（meta.tags）+「高价值」筛选；标签随编排器每轮态势注入
+  // 资产标签筛选（meta.tags，人工自由标签）
   const [tagFilter, setTagFilter] = useState("")
-  const [tagErr, setTagErr] = useState<string | null>(null)
   // E7「有发现」徽章数据源：verified findings 的 target_asset_id 反查集合
   const [verifiedIds, setVerifiedIds] = useState<Set<string>>(new Set())
 
@@ -624,19 +612,6 @@ export function Assets({ pid, compact, tree = false }: { pid: string; compact?: 
     ? items.filter((a) => ((a.meta?.tags as string[] | undefined) ?? [])
         .some((t) => t.trim() === tagFilter))
     : items
-  const toggleHvt = async (a: Asset) => {
-    const cur = (a.meta?.tags as string[] | undefined) ?? []
-    const tags = cur.includes("高价值")
-      ? cur.filter((t) => t !== "高价值")
-      : [...cur, "高价值"]
-    setTagErr(null)
-    try {
-      await api.patchAsset(pid, a.id, { meta: { tags } })
-      refresh()
-    } catch (e) {
-      setTagErr(`标签保存失败：${e instanceof Error ? e.message : e}`)
-    }
-  }
 
   const add = async () => {
     if (!value.trim()) return
@@ -671,12 +646,11 @@ export function Assets({ pid, compact, tree = false }: { pid: string; compact?: 
       if (visible.length === 0) return <p className="p-2 text-xs text-muted-foreground">该标签下暂无资产</p>
       return visible.map((a) => (
         <AssetRow key={a.id} a={a} hasFinding={verifiedIds.has(a.id)}
-                  onToggleHvt={!compact ? toggleHvt : undefined}
                   onDelete={!compact ? remove : undefined} />
       ))
     }
     if (!tree) return items.map((a) => (
-      <AssetRow key={a.id} a={a} hasFinding={verifiedIds.has(a.id)} onToggleHvt={!compact ? toggleHvt : undefined} />
+      <AssetRow key={a.id} a={a} hasFinding={verifiedIds.has(a.id)} />
     ))
     // 递归渲染（host → service → url 多层）：任意带子行的节点都可展开
     const countDesc = (id: string): number =>
@@ -703,18 +677,6 @@ export function Assets({ pid, compact, tree = false }: { pid: string; compact?: 
             <AssetBadges a={a} hasFinding={verifiedIds.has(a.id)} />
             <span className="min-w-0 flex-1" />
             <AssetTags tags={(meta.tags as string[] | undefined) ?? []} />
-            {!compact && (
-              <button
-                title={(meta.tags as string[] | undefined)?.includes("高价值")
-                  ? "取消高价值标记" : "标记为高价值（⭐ 进编排器每轮态势注入）"}
-                className={cn("shrink-0 rounded px-1 text-[10px] hover:bg-accent",
-                  (meta.tags as string[] | undefined)?.includes("高价值")
-                    ? "text-(--viz-sev-medium)" : "text-muted-foreground/50")}
-                onClick={(e) => { e.stopPropagation(); toggleHvt(a) }}
-              >
-                ⭐
-              </button>
-            )}
             {!compact && (
               <button
                 title="删除该资产：仅叶子且无发现引用可删（有子资产/发现引用请先处理）"
@@ -755,14 +717,12 @@ export function Assets({ pid, compact, tree = false }: { pid: string; compact?: 
             onClick={() => setTagFilter("")}>
             全部
           </button>
-          {tagErr && <span className="text-[10px] text-(--status-error)">{tagErr}</span>}
-          {["高价值", ...allTags.filter((t) => t !== "高价值")].map((t) => (
+          {allTags.map((t) => (
             <button key={t}
               className={cn("rounded px-2 py-0.5 text-[10px]",
-                tagFilter === t ? "bg-primary/15 text-primary" : "text-muted-foreground hover:bg-accent",
-                t === "高价值" && "text-(--viz-sev-medium)")}
+                tagFilter === t ? "bg-primary/15 text-primary" : "text-muted-foreground hover:bg-accent")}
               onClick={() => setTagFilter(tagFilter === t ? "" : t)}>
-              {t === "高价值" ? `⭐${t}` : `#${t}`}
+              #{t}
             </button>
           ))}
         </div>

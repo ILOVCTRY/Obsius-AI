@@ -972,7 +972,7 @@ export interface PhaseSpec {
   goal?: string
   order?: number
   focus?: Record<string, number> // 阶段配额：编排器派单配比建议（软引导）
-  gate?: Record<string, number> // 出口门指标（min_assets/min_high_value/min_verified/idle_rounds）
+  gate?: Record<string, number> // 出口门指标（min_assets/min_verified/idle_rounds）
   gate_types?: string[] // 被本阶段门拦的任务类型
   tasks?: { task_type: string; role?: string; objective: string; acceptance?: string }[]
   next?: string[]
@@ -991,7 +991,7 @@ export interface PhaseInfo {
   current?: string
   spec?: PhaseSpec
   gate?: {
-    metrics: { assets: number; high_value: number; verified: number; idle_rounds: number }
+    metrics: { assets: number; verified: number; idle_rounds: number }
     met: boolean
     unmet: string[] // 人读未达标明细（「资产 3/10」）
     forward: string[] // order 递增的前向目标（过门分流方向）
@@ -1600,6 +1600,45 @@ export interface ProxyStatus {
 export interface ProxyListResponse {
   source: "serve" | "file"
   proxies: ProxyRecord[]
+}
+
+/** 指定网站可达性/WAF 封禁检测的单条结果（2026-10-12）。 */
+export interface ProxyUrlCheckRow {
+  proxy: string
+  protocol?: string | null
+  ok: boolean                 // 拿到响应
+  status_code?: number | null
+  latency?: number | null     // 秒
+  blocked: boolean            // 被判该站封禁（比对直连基线）
+  reason?: string             // 结论说明
+}
+
+/** 指定网站检测结果（后端 `ProxyPool.check_url`）。 */
+export interface ProxyCheckUrlResult {
+  url: string
+  total: number
+  reachable: number
+  blocked: number
+  usable: { proxy: string; protocol?: string | null; latency?: number | null;
+            status_code?: number | null }[]
+  results: ProxyUrlCheckRow[]
+  baseline: { ok: boolean; status_code?: number | null; error?: string } | null
+}
+
+/** 代理池可配项（验证基准站等，`GET/PUT /api/proxy/config`）。 */
+export interface ProxyConfigView {
+  validate_target: string
+  validate_target_https: string | null
+  validate_target_b: string | null
+  validate_timeout_s: number
+  prune_latency_ms: number | null
+  defaults: {
+    validate_target: string
+    validate_target_https: string | null
+    validate_target_b: string | null
+    validate_timeout_s: number
+    prune_latency_ms: number | null
+  }
 }
 
 /** F6-v3 拦截挂起包（仅人工浏览流量；快照形态，raw 为后端渲染的完整报文） */

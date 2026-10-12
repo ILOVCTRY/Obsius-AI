@@ -1,12 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
-  Activity, Globe, Play, RefreshCw, Square, Trash2, Upload, Zap,
+  Activity, Globe, Play, RefreshCw, Settings2, ShieldAlert, Square, Trash2, Upload, Zap,
 } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog"
 import { api, ApiError, pollJob } from "@/lib/api"
-import type { ProxyJobProgress, ProxyRecord, ProxyStatus } from "@/lib/types"
+import type {
+  ProxyCheckUrlResult, ProxyConfigView, ProxyJobProgress, ProxyRecord, ProxyStatus,
+  ProxyUrlCheckRow,
+} from "@/lib/types"
 import { cn } from "@/lib/utils"
 
 /** 代理池（fir-proxy 托管，2026-10-07 → 2026-10-11 全局单池）。
@@ -36,6 +40,8 @@ export function ProxyPoolView({ pid }: { pid?: string | null }) {
   const [jobNote, setJobNote] = useState<string | null>(null)
   const [progress, setProgress] = useState<ProxyProgress | null>(null)
   const [filter, setFilter] = useState<ProxyFilter>("all")   // 协议过滤（2026-10-11）
+  const [checkOpen, setCheckOpen] = useState(false)          // 访问测试弹窗（2026-10-12）
+  const [configOpen, setConfigOpen] = useState(false)        // 网站设置弹窗（2026-10-12）
   const jobRef = useRef<string | null>(null)   // 正在跟踪的 job id（防重复挂载）
 
   const refresh = useCallback(async () => {
@@ -164,6 +170,17 @@ export function ProxyPoolView({ pid }: { pid?: string | null }) {
         <Button size="sm" variant="outline" className="h-7 gap-1 text-xs"
                 onClick={() => setImportOpen((v) => !v)}>
           <Globe size={12} /> 导入
+        </Button>
+        <Button size="sm" variant="outline" className="h-7 gap-1 text-xs"
+                disabled={busy || !records.length}
+                title="指定一个网站，用池内代理逐一访问，检测哪些代理可达、哪些被该站 WAF 封禁"
+                onClick={() => setCheckOpen(true)}>
+          <ShieldAlert size={12} /> 访问测试
+        </Button>
+        <Button size="sm" variant="outline" className="h-7 gap-1 text-xs"
+                title="配置验证基准网站（连通性基准 / HTTPS 能力探测 / 交叉验证目标）"
+                onClick={() => setConfigOpen(true)}>
+          <Settings2 size={12} /> 网站设置
         </Button>
         <Button size="sm" variant="ghost" className="h-7 gap-1 text-xs"
                 disabled={busy} onClick={() => void refresh()}>
@@ -324,8 +341,272 @@ export function ProxyPoolView({ pid }: { pid?: string | null }) {
           </tbody>
         </table>
       </div>
+
+      <CheckUrlDialog open={checkOpen} onOpenChange={setCheckOpen}
+                      onDone={() => void refresh()} />
+      <ProxyConfigDialog open={configOpen} onOpenChange={setConfigOpen} />
     </div>
   )
+}
+
+/** 验证基准网站设置弹窗（2026-10-12）：配置连通性基准 / HTTPS 探测 / 交叉验证目标。
+ *  写 config/proxy.json 并热更新（下轮「验证全部」「在线抓取」即生效）。 */
+function ProxyConfigDialog({ open, onOpenChange }: {
+  open: boolean
+  onOpenChange: (v: boolean) => void
+}) {
+  const [cfg, setCfg] = useState<ProxyConfigView | null>(null)
+  const [target, setTarget] = useState("")
+  const [httpsTarget, setHttpsTarget] = useState("")
+  const [targetB, setTargetB] = useState("")
+  const [err, setErr] = useState<string | null>(null)
+  const [saved, setSaved] = useState(false)
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    if (!open) return
+    let alive = true
+    setErr(null); setSaved(false)
+    api.proxyConfigGet()
+      .then((c) => {
+        if (!alive) return
+        setCfg(c)
+        setTarget(c.validate_target ?? "")
+        setHttpsTarget(c.validate_target_https ?? "")
+        setTargetB(c.validate_target_b ?? "")
+      })
+      .catch((e) => { if (alive) setErr(e instanceof ApiError ? e.message : String(e)) })
+    return () => { alive = false }
+  }, [open])
+
+  const save = async () => {
+    setBusy(true); setErr(null); setSaved(false)
+    try {
+      const next = await api.proxyConfigPut({
+        validate_target: target.trim(),
+        validate_target_https: httpsTarget.trim(),
+        validate_target_b: targetB.trim(),
+      })
+      setCfg(next); setSaved(true)
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const restore = () => {
+    if (!cfg) return
+    setTarget(cfg.defaults.validate_target ?? "")
+    setHttpsTarget(cfg.defaults.validate_target_https ?? "")
+    setTargetB(cfg.defaults.validate_target_b ?? "")
+    setSaved(false)
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-xl">
+        <DialogTitle>验证基准网站设置</DialogTitle>
+        <DialogDescription>
+          指定「验证全部」与「在线抓取后自动验证」使用的基准网站。写入 config/proxy.json
+          并热更新，保存后下一轮验证即生效（无需重启）。
+        </DialogDescription>
+
+        <div className="space-y-3 text-[12px]">
+          <label className="block">
+            <span className="text-muted-foreground">连通性基准（必填）</span>
+            <input value={target} onChange={(e) => { setTarget(e.target.value); setSaved(false) }}
+                   placeholder="http://example.com/"
+                   className="mt-1 h-8 w-full rounded-md border bg-transparent px-2 font-mono text-[12px] outline-none focus:border-primary" />
+            <span className="mt-0.5 block text-[10.5px] text-muted-foreground">
+              经代理 GET 它，拿到 2xx/3xx 即判该代理 Working。用 http:// 明文基准不会大量剔除纯 HTTP 代理。
+            </span>
+          </label>
+
+          <label className="block">
+            <span className="text-muted-foreground">HTTPS 能力探测（可空=关闭）</span>
+            <input value={httpsTarget} onChange={(e) => { setHttpsTarget(e.target.value); setSaved(false) }}
+                   placeholder="https://example.com/"
+                   className="mt-1 h-8 w-full rounded-md border bg-transparent px-2 font-mono text-[12px] outline-none focus:border-primary" />
+            <span className="mt-0.5 block text-[10.5px] text-muted-foreground">
+              经 CONNECT 隧道测 https 转发能力，只标 https_ok 徽章，不参与 Working 判定。
+            </span>
+          </label>
+
+          <label className="block">
+            <span className="text-muted-foreground">内容注入交叉验证第二目标（可空=关闭）</span>
+            <input value={targetB} onChange={(e) => { setTargetB(e.target.value); setSaved(false) }}
+                   placeholder="http://example.org/"
+                   className="mt-1 h-8 w-full rounded-md border bg-transparent px-2 font-mono text-[12px] outline-none focus:border-primary" />
+            <span className="mt-0.5 block text-[10.5px] text-muted-foreground">
+              须与「连通性基准」内容不同；两目标经同一代理回相同响应体即判劫持型出口并剔除。
+            </span>
+          </label>
+
+          {err && (
+            <div className="rounded border border-destructive/40 bg-destructive/10 px-2 py-1 text-[11px] text-destructive">
+              {err}
+            </div>
+          )}
+          {saved && !err && (
+            <div className="rounded border border-(--status-ok)/40 bg-(--status-ok)/10 px-2 py-1 text-[11px] text-(--status-ok)">
+              已保存，下一轮验证/抓取即生效
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center gap-2">
+          <Button size="sm" variant="ghost" className="h-8 text-xs"
+                  disabled={busy || !cfg} onClick={restore}>
+            恢复默认
+          </Button>
+          <Button size="sm" className="ml-auto h-8 text-xs"
+                  disabled={busy || !target.trim()} onClick={() => void save()}>
+            {busy ? "保存中…" : "保存"}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+/** 访问测试弹窗（2026-10-12）：指定网站 → 池内代理逐一访问 → 可达/被封禁结论。 */
+function CheckUrlDialog({ open, onOpenChange, onDone }: {
+  open: boolean
+  onOpenChange: (v: boolean) => void
+  onDone: () => void
+}) {
+  const [url, setUrl] = useState("")
+  const [probeWaf, setProbeWaf] = useState(true)
+  const [running, setRunning] = useState(false)
+  const [progress, setProgress] = useState<ProxyProgress | null>(null)
+  const [result, setResult] = useState<ProxyCheckUrlResult | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+
+  const run = async () => {
+    const target = url.trim()
+    if (!target) { setErr("请输入目标 URL"); return }
+    setRunning(true); setErr(null); setResult(null)
+    setProgress({ phase: "queued", message: "排队中…" })
+    try {
+      const { job_id } = await api.proxyCheckUrl({ url: target, probe_waf: probeWaf })
+      const job = await pollJob(job_id, (j) =>
+        setProgress((j.meta?.progress as ProxyJobProgress | undefined) ?? null))
+      if (job.status === "error") setErr(`任务失败：${job.error ?? ""}`)
+      else setResult(job.result as ProxyCheckUrlResult)
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : String(e))
+    } finally {
+      setRunning(false); setProgress(null); onDone()
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => { if (!running) onOpenChange(v) }}>
+      <DialogContent className="max-w-3xl">
+        <DialogTitle>访问测试 · 指定网站代理可达性</DialogTitle>
+        <DialogDescription>
+          用池内全部代理逐一访问目标网站，并与平台直连基线对比——直连能过、经代理却拿到
+          WAF 拦截页（403/429/Cloudflare/雷池…）者判「被该站封禁」。只报告，不改动代理池。
+        </DialogDescription>
+
+        <div className="flex items-center gap-2">
+          <input
+            value={url} onChange={(e) => setUrl(e.target.value)}
+            placeholder="http://target.example.com/ （可省 scheme，默认 http://）"
+            className="h-8 flex-1 rounded-md border bg-transparent px-2 font-mono text-[12px] outline-none focus:border-primary"
+            onKeyDown={(e) => { if (e.key === "Enter" && !running) void run() }} />
+          <label className="flex shrink-0 cursor-pointer items-center gap-1 text-[11px] text-muted-foreground">
+            <input type="checkbox" checked={probeWaf}
+                   onChange={(e) => setProbeWaf(e.target.checked)} className="size-3" />
+            检测 WAF/封禁
+          </label>
+          <Button size="sm" className="h-8 text-xs" disabled={running} onClick={() => void run()}>
+            {running ? "测试中…" : "开始测试"}
+          </Button>
+        </div>
+
+        {err && (
+          <div className="rounded border border-destructive/40 bg-destructive/10 px-2 py-1 text-[11px] text-destructive">
+            {err}
+          </div>
+        )}
+        {progress && !err && <ProxyProgressBar p={progress} />}
+
+        {result && (
+          <div className="flex min-h-0 flex-1 flex-col gap-2">
+            <div className="flex flex-wrap items-center gap-3 text-[11px]">
+              <span>共测 <b>{result.total}</b></span>
+              <span className="text-(--status-ok)">可达 {result.reachable}</span>
+              <span className="text-(--status-error)">被封禁 {result.blocked}</span>
+              <span className="text-muted-foreground">
+                直连基线 {result.baseline?.ok
+                  ? `HTTP ${result.baseline.status_code ?? "?"}`
+                  : `不可达（${result.baseline?.error ?? "超时"}）`}
+              </span>
+            </div>
+
+            {result.usable.length > 0 && (
+              <div className="rounded-md border bg-muted/30 px-2 py-1.5">
+                <p className="mb-1 text-[11px] font-medium">
+                  可用代理（未被封禁，{result.usable.length} 个）
+                </p>
+                <div className="flex flex-wrap gap-1">
+                  {result.usable.map((u) => (
+                    <code key={u.proxy}
+                          className="rounded bg-background px-1.5 py-0.5 font-mono text-[10.5px]">
+                      {u.protocol ? `${u.protocol}://` : ""}{u.proxy}
+                      {typeof u.latency === "number" && (
+                        <span className="text-muted-foreground"> {Math.round(u.latency * 1000)}ms</span>
+                      )}
+                    </code>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="min-h-0 flex-1 overflow-auto rounded-md border">
+              <table className="w-full border-collapse text-[11px]">
+                <thead className="sticky top-0 z-10 bg-(--surface-1) text-muted-foreground">
+                  <tr className="border-b">
+                    <th className="px-2 py-1 text-left font-medium">代理</th>
+                    <th className="px-2 py-1 text-left font-medium">协议</th>
+                    <th className="px-2 py-1 text-right font-medium">状态码</th>
+                    <th className="px-2 py-1 text-right font-medium">延迟</th>
+                    <th className="px-2 py-1 text-left font-medium">结论</th>
+                    <th className="px-2 py-1 text-left font-medium">说明</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {result.results.map((r) => (
+                    <tr key={r.proxy} className="border-b border-border/50">
+                      <td className="px-2 py-1 font-mono">{r.proxy}</td>
+                      <td className="px-2 py-1 text-muted-foreground">{r.protocol ?? "—"}</td>
+                      <td className="px-2 py-1 text-right font-mono">{r.status_code ?? "—"}</td>
+                      <td className="px-2 py-1 text-right font-mono">
+                        {typeof r.latency === "number" ? `${Math.round(r.latency * 1000)}ms` : "—"}
+                      </td>
+                      <td className="px-2 py-1"><CheckVerdict row={r} /></td>
+                      <td className="px-2 py-1 text-muted-foreground">{r.reason ?? ""}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+/** 单条结论徽章：可达（绿）/ 被封禁（红）/ 不可达（灰）。 */
+function CheckVerdict({ row }: { row: ProxyUrlCheckRow }) {
+  if (row.blocked)
+    return <Badge className="bg-(--status-error)/15 text-[10px] text-(--status-error)">被封禁</Badge>
+  if (row.ok)
+    return <Badge className="bg-(--status-ok)/15 text-[10px] text-(--status-ok)">可达</Badge>
+  return <Badge variant="outline" className="text-[10px] text-muted-foreground">不可达</Badge>
 }
 
 /** 解析粘贴的代理列表：`protocol://host:port` / `protocol,host:port` / `host:port`。 */

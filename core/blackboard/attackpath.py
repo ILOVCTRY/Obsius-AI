@@ -18,7 +18,8 @@
 
 边（edges，kind）：
 - **outcome**：intent → finding（执行产出了什么）；
-- **derive**：target/subtarget/finding/intent → intent（后者必须由前者逻辑推出；
+- **derive**：target/subtarget → subtarget（包含边：根恒连其直接子资产）；
+  target/subtarget/finding/intent → intent（后者必须由前者逻辑推出；
   basis_refs 是边数据源；归属子目标的意图由该子目标起边，否则由 target 起边）；
 - **bypass**：死路默认隐藏时，其前驱直连后继（穿通被剪掉的枝）；
 - **exec**：执行层 attempt 相邻边（展开意图时才看的时间序细节）。
@@ -266,6 +267,12 @@ def build_attack_path(bb, project_id: str, target_root_id: str, *,
         if key not in edge_keys:
             edge_keys.add(key)
             edges.append({"source": src, "target": dst, "kind": kind})
+
+    # 根 → 子目标：包含边（2026-10-12 修孤点）——子目标恒接在根上；
+    # 意图锚定该子目标时另有 subtarget → intent 的 derive 边，构成 根→子目标→意图。
+    # 先于意图 derive 循环加入，使 children[根] 把子目标排在最前（视觉上紧贴根）。
+    for a in direct_children:
+        add_edge(target["id"], a["id"], "derive")
 
     # outcome / 无主发现 → 由 target 起边
     for f in graph_findings:

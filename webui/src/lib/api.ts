@@ -3,7 +3,7 @@ import type {
   BrowserState, BrowserStatus, BrowserSessionInfo, WorkspaceTreeResponse, HttpHistoryRow, InterceptState,
   Blueprint, BlueprintModuleStatus, BlueprintStatus,
   IntruderPayloadSpec, IntruderTemplate, ReplayOptions, GmStatus,
-  ProxyRecord, ProxyStatus, ProxyListResponse,
+  ProxyRecord, ProxyStatus, ProxyListResponse, ProxyConfigView,
   CachedFuncRow, CachedFunction, Chain, ChainLink, ChainNodeType, ChainStatus, ChainSummary,
   LogicBlock, LogicBlockSummary,
   DecideApprovalResult, DoctorReport, DiscoveredModel, Finding, FindingPatchBody, FuncCreateBody, FuncEntry,
@@ -1067,6 +1067,24 @@ export const api = {
   proxyValidate: (workers = 50) =>
     http<{ job_id: string }>(`/api/proxy/validate`,
       { method: "POST", body: JSON.stringify({ workers }) }),
+  /** 指定网站可达性/WAF 封禁检测（202：Job 轮询；只读不改池） */
+  proxyCheckUrl: (body: { url: string; workers?: number; limit?: number;
+                          probe_waf?: boolean }) =>
+    http<{ job_id: string }>(`/api/proxy/check-url`,
+      { method: "POST", body: JSON.stringify(body) }),
+  /** 代理池可配项（验证基准站等）读取 */
+  proxyConfigGet: () =>
+    http<ProxyConfigView>(`/api/proxy/config`),
+  /** 代理池可配项写回（写 config/proxy.json + 热更新，下轮验证/抓取即生效） */
+  proxyConfigPut: (body: {
+    validate_target?: string
+    validate_target_https?: string | null
+    validate_target_b?: string | null
+    validate_timeout_s?: number
+    prune_latency_ms?: number | null
+  }) =>
+    http<ProxyConfigView>(`/api/proxy/config`,
+      { method: "PUT", body: JSON.stringify(body) }),
 
   // ---------- 智能体工作台（K9，2026-09-29）：独立轻量对话运行时 ----------
   chatAgents: (pid: string) =>

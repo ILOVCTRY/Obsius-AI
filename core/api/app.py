@@ -1210,6 +1210,7 @@ def create_app(
     static_dir: str | Path | None = None,
     session_containers: bool = True,
     proxy_maintenance: bool = True,
+    proxy_config_path: str = "config/proxy.json",
 ) -> FastAPI:
     """executor_llm / planner_llm 缺省时按供应商配置（config/providers.json）+
     llm.json 文件级覆写构建 provider；测试可注入假 provider。
@@ -1321,7 +1322,7 @@ def create_app(
     # 装配即跑一次旧池合并（首启把各 <项目>/proxy/pool.json 并入全局，幂等）。
     app.state.proxy_pool = ProxyPool(
         workspace_root, tools_root or "tools",
-        config=ProxyConfig.from_file("config/proxy.json"))
+        config=ProxyConfig.from_file(proxy_config_path))
     app.state.proxy_pool.merge_legacy_pools()
     # 孤儿 serve 回收（2026-10-12 事故）：后端重启会让上一进程的 serve 变孤儿
     # （旧实现每项目一个池，历史遗留一批），启动时清掉「父进程已死」的 serve。
@@ -2843,6 +2844,27 @@ def create_app(
         timeout_s: float = 600.0
         prune: bool = True                                   # 验证后剔除失效代理
 
+    class ProxyCheckUrlIn(BaseModel):
+        url: str                                             # 目标网站 URL（必填）
+        workers: int = 50
+        timeout_s: float = 600.0
+        limit: int = 10                                      # 返回的可用代理条数上限
+        probe_waf: bool = True                               # 做 WAF/封禁判定（False=只测连通）
+
+    class ProxyConfigIn(BaseModel):
+        """PUT /api/proxy/config：代理池验证基准站等可配项。
+
+        验证基准（2026-10-12 前端开放配置）：``validate_target`` = 连通性基准（经代理
+        GET 它，通即 Working）；``validate_target_https`` = HTTPS 能力探测基准（经
+        CONNECT；空串=关闭探测）；``validate_target_b`` = 内容注入交叉验证第二目标
+        （空串=关闭）。``validate_timeout_s``/``prune_latency_ms`` 可选。
+        """
+        validate_target: str | None = None
+        validate_target_https: str | None = None
+        validate_target_b: str | None = None
+        validate_timeout_s: int | None = None
+        prune_latency_ms: float | None = None
+
     class ProxySelectIn(BaseModel):
         limit: int = 1
         region: str | None = None
@@ -3103,7 +3125,8 @@ def create_app(
         """
         for j in app.state.jobs.all_jobs():
             if (j.get("status") == "running"
-                    and j.get("kind") in ("proxy-fetch", "proxy-validate")):
+                    and j.get("kind") in ("proxy-fetch", "proxy-validate",
+                                          "proxy-check-url")):
                 meta = j.get("meta") or {}
                 return {"id": j["id"], "kind": j["kind"],
                         "progress": meta.get("progress")}
@@ -3174,6 +3197,78 @@ def create_app(
                                   prune=body.prune, on_progress=progress.update),
             meta={"progress": progress})
         return {"job_id": job_id}
+
+    @app.post("/api/proxy/check-url", status_code=202)
+    def proxy_check_url(body: ProxyCheckUrlIn):
+        """指定网站可达性 / WAF 封禁检测（Job：慢；``meta.progress`` 同 fetch）。
+
+        用池内全部代理逐一访问 ``url``，与直连基线对比判定「可达 / 被该站封禁」；
+        **只读报告，不改池**。Job 结果带 ``usable``（未被封禁的可用代理，≤limit 个）。
+        """
+        if not body.url.strip():
+            raise HTTPException(422, "目标 URL 不能为空")
+        pool = _proxy_pool()
+        progress: dict = {"phase": "queued", "done": 0, "total": 0,
+                          "eta_seconds": None, "message": "排队中…"}
+        job_id = app.state.jobs.submit(
+            "proxy-check-url",
+            lambda: pool.check_url(body.url, workers=body.workers,
+                                   timeout=body.timeout_s, limit=body.limit,
+                                   probe_waf=body.probe_waf,
+                                   on_progress=progress.update),
+            meta={"progress": progress})
+        return {"job_id": job_id}
+
+    @app.get("/api/proxy/config")
+    def proxy_config_get():
+        """代理池可配项（验证基准站等）：供前端「网站设置」弹窗回显。
+
+        ``defaults`` 给出内置缺省值，前端据此展示「恢复默认」。
+        """
+        from core.proxy.pool import ProxyConfig
+        cfg = _proxy_pool().config
+        d = ProxyConfig()
+        return {
+            "validate_target": cfg.validate_target,
+            "validate_target_https": cfg.validate_target_https,
+            "validate_target_b": cfg.validate_target_b,
+            "validate_timeout_s": cfg.validate_timeout_s,
+            "prune_latency_ms": cfg.prune_latency_ms,
+            "defaults": {
+                "validate_target": d.validate_target,
+                "validate_target_https": d.validate_target_https,
+                "validate_target_b": d.validate_target_b,
+                "validate_timeout_s": d.validate_timeout_s,
+                "prune_latency_ms": d.prune_latency_ms,
+            },
+        }
+
+    @app.put("/api/proxy/config")
+    def proxy_config_put(body: ProxyConfigIn):
+        """写 ``config/proxy.json`` 并**热更新**在跑的 ProxyPool.config（下轮验证/抓取即生效）。"""
+        from core.proxy.pool import ProxyConfig, write_config_file
+        updates: dict = {}
+        if body.validate_target is not None:
+            t = body.validate_target.strip()
+            if not t:
+                raise HTTPException(422, "验证基准网站不能为空")
+            updates["validate_target"] = t
+        if body.validate_target_https is not None:
+            updates["validate_target_https"] = body.validate_target_https.strip() or None
+        if body.validate_target_b is not None:
+            updates["validate_target_b"] = body.validate_target_b.strip() or None
+        if body.validate_timeout_s is not None:
+            if body.validate_timeout_s <= 0:
+                raise HTTPException(422, "验证超时必须为正整数秒")
+            updates["validate_timeout_s"] = int(body.validate_timeout_s)
+        if body.prune_latency_ms is not None:
+            updates["prune_latency_ms"] = float(body.prune_latency_ms)
+        if not updates:
+            raise HTTPException(422, "无可更新字段")
+        write_config_file(proxy_config_path, updates)
+        # 热更新：重建 config（读回落盘值，含未被本次更新的既有覆盖项），在跑的池立即跟随。
+        _proxy_pool().config = ProxyConfig.from_file(proxy_config_path)
+        return proxy_config_get()
 
     # ---------- F6-v3 拦截（仅人工隐式会话 human-main 流量可挂起裁决） ----------
 
@@ -6478,7 +6573,7 @@ def create_app(
             return
         cfg = _auto_cfg(pid)
         summary = (f"阶段流转：{spec['name']} → {book[target]['name']}"
-                   f"（资产 {metrics['assets']}、高价值 {metrics['high_value']}、"
+                   f"（资产 {metrics['assets']}、"
                    f"verified {metrics['verified']}、空闲 {metrics['idle_rounds']} 轮）")
         if cfg["level"] == "L2":
             phases_mod.enter_phase(proj, target, by="orchestrator", auto=True,

@@ -88,8 +88,8 @@ def test_fold_retries_within_window(tree):
     assert len(out["attempts"]) == 1
     a = out["attempts"][0]
     assert a["path_template"] == "/user/{id}" and a["request_count"] == 2
-    # 重试折叠：逻辑图无边，执行层也只有一个节点
-    assert out["edges"] == [] and out["exec_edges"] == []
+    # 重试折叠：主脊仅含 根→子目标 包含边，执行层也只有一个节点
+    assert _edge_pairs(out, "derive") == [("h1", "d1")] and out["exec_edges"] == []
 
 
 def test_window_split_exec_edge(tree):
@@ -97,8 +97,8 @@ def test_window_split_exec_edge(tree):
             _row(2, "http://site.com/user/2", created=_ts(FOLD_GAP_S / 60 + 1))]
     out = _build(tree, rows)
     assert [a["request_count"] for a in out["attempts"]] == [1, 1]
-    # 超窗分裂：执行层相邻边（时间序细节），主脊逻辑图无边
-    assert out["edges"] == []
+    # 超窗分裂：执行层相邻边（时间序细节），主脊仅含 根→子目标 包含边
+    assert _edge_pairs(out, "derive") == [("h1", "d1")]
     assert out["exec_edges"] == [{
         "source": out["attempts"][0]["id"],
         "target": out["attempts"][1]["id"], "kind": "exec"}]
@@ -211,7 +211,8 @@ def test_site_level_finding_derive_from_target(tree):
                  "status": "verified", "category": "intel",
                  "target_asset_id": "h1"}]
     out = _build(tree, [], findings=findings)
-    assert _edge_pairs(out, "derive") == [("h1", "f1")]
+    # 根→子目标包含边恒在；无主 finding 由 target 起 derive 边
+    assert _edge_pairs(out, "derive") == [("h1", "d1"), ("h1", "f1")]
     fnodes = {n["id"] for n in out["nodes"] if n["type"] == "finding"}
     assert "f1" in fnodes
 
@@ -456,7 +457,7 @@ def test_real_blackboard_pagination(tmp_path):
     proj = bb.create_project("链路", "pentest")
     pid = proj["id"]
     host = bb.upsert_asset(pid, "host", "10.0.0.1")["id"]
-    bb.upsert_asset(pid, "domain", "site.com", parent_id=host)
+    dom = bb.upsert_asset(pid, "domain", "site.com", parent_id=host)["id"]
     n = 1005  # 超过单页 1000
     for i in range(n):
         bb.add_http_history(pid, source="browser", method="GET",
@@ -465,5 +466,6 @@ def test_real_blackboard_pagination(tmp_path):
     out = build_attack_path(bb, pid, host)
     assert out["counts"]["total_requests"] == n and len(out["attempts"]) == n
     assert len(out["exec_edges"]) == n - 1
-    assert out["edges"] == []  # 无意图：主脊只有 target
+    # 无意图：主脊只有 target 及其 根→子目标 包含边
+    assert _edge_pairs(out, "derive") == [(host, dom)]
     bb.close()

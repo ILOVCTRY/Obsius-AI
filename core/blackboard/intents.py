@@ -478,6 +478,65 @@ def dead_end_backing_target(conn, project_id: str, asset_id: str,
     return subtarget_scope[0] if has_dead_end else None
 
 
+#: Web 端口白名单（service 继承域名覆盖的门控，2026-10-12）——domain 的测试是
+#: HTTP 层的，只该背书 HTTP(S) 端口，绝不外溢到 22/3306 等非 Web 端口。
+#: meta.protocol 亦可（http/https 小写）触发，兼容非标准 Web 端口。
+_WEB_PORTS = frozenset({80, 443, 8080, 8443, 8000, 8888})
+_WEB_PROTOCOLS = frozenset({"http", "https", "http2", "h2"})
+
+
+def web_port_backing_target(conn, project_id: str, asset_id: str) -> str | None:
+    """service 继承同 host 域名覆盖的**回退背书**（2026-10-12，治 service 恒 open）。
+
+    背景（pentest-20261007-0197 实锤）：AI 就着**域名**测（DNS 把它带到 80/443），
+    意图/发现/背书全落 domain，`service IP:port` 节点永远没有自己的意图——
+    逐节点门禁 `dead_end_backing_target` 恒 None → 恒标不上 tested_clean。
+
+    规则（用户 2026-10-12 定稿）：service **无自己的背书**时，若它与某个
+    **同 host 下、因 DNS 解析挂上来的** domain 是同一端点，且该 domain **已测得**
+    （dead_end 意图背书），则 service 可标干净。**限 Web 端口**（域名测试是 HTTP
+    层的）。**同 host 限定**天然避开 2026-09-29「父意图批量误标跨主机活站」——
+    只认同一 host 内的兄弟 domain，绝不跨主机。
+
+    返回背书来源：自己的子目标 id（自证）或可继承的 domain id；无则 None。
+    """
+    own = dead_end_backing_target(conn, project_id, asset_id)
+    if own is not None:
+        return own
+    row = conn.execute(
+        "SELECT type, value, parent_id, meta FROM assets WHERE id=? AND project_id=?",
+        (asset_id, project_id)).fetchone()
+    if row is None or row["type"] != "service":
+        return None
+    host_id = row["parent_id"]
+    if not host_id:
+        return None
+    if not _is_web_service(row["value"], row["meta"]):
+        return None
+    # 同 host 下的 domain 子节点 = DNS 解析挂上来的（register_asset：非 CDN 的
+    # domain 解析到该 host 才挂其下；CDN/共享托管保持根行不挂——天然排除）。
+    # 逐个查该 domain 是否有 dead_end 背书。
+    for d in conn.execute(
+            "SELECT id FROM assets WHERE project_id=? AND parent_id=? AND type='domain'",
+            (project_id, host_id)).fetchall():
+        if dead_end_backing_target(conn, project_id, d["id"]) is not None:
+            return d["id"]
+    return None
+
+
+def _is_web_service(value: str, meta_json) -> bool:
+    """service 是否 Web 端点：meta.protocol ∈ {http,https,...} 或端口 ∈ _WEB_PORTS。"""
+    meta = _loads(meta_json, {}) or {}
+    proto = str(meta.get("protocol") or "").strip().lower()
+    if proto in _WEB_PROTOCOLS:
+        return True
+    if ":" in value:
+        _, _, tail = value.rpartition(":")
+        if tail.isdigit() and int(tail) in _WEB_PORTS:
+            return True
+    return False
+
+
 def _subtarget_scope(conn, project_id: str, asset_id: str,
                      root_id: str | None) -> tuple[str, set] | None:
     """把 asset_id 归到「子目标」作用域，返回 (子目标 id, 其子树集合)。

@@ -199,7 +199,7 @@ def test_config_auto_maintenance_defaults(tmp_path):
     assert cfg.auto_fetch_min_https == 20
     assert cfg.auto_fetch_min_socks == 20
     assert cfg.auto_fetch_cooldown_s == 600.0
-    assert cfg.validate_target_https == "https://www.baidu.com"
+    assert cfg.validate_target_https == "https://i.zut.edu.cn/new/index.html"
     # 文件覆盖生效
     f = tmp_path / "p.json"
     f.write_text(json.dumps({"auto_fetch_min_http": 200, "maintenance_interval_s": 60}),
@@ -351,7 +351,8 @@ def client(tmp_path):
     app = create_app(workspace_root=str(tmp_path / "workspaces"),
                      tools_root=TOOLS,
                      executor_llm=None, planner_llm=None,
-                     providers_config=str(tmp_path / "providers.json"))
+                     providers_config=str(tmp_path / "providers.json"),
+                     proxy_config_path=str(tmp_path / "proxy.json"))
     with TestClient(app) as c:
         yield c
 
@@ -556,7 +557,7 @@ def test_validate_passes_target_https(pool, monkeypatch):
     monkeypatch.setattr(ProxyPool, "_run_cli", fake)
     pool.validate()
     assert "--target-https" in seen[0]
-    assert "https://www.baidu.com" in seen[0]
+    assert "https://i.zut.edu.cn/new/index.html" in seen[0]
 
 
 def test_fetch_auto_validates_and_prunes(pool, monkeypatch):
@@ -887,3 +888,193 @@ def test_reap_orphan_serves_kills_dead_parent(monkeypatch):
     monkeypatch.setattr(P, "_taskkill_tree", lambda pid: killed_calls.append(pid) or True)
     assert P.reap_orphan_serves() == [111]
     assert killed_calls == [111]
+
+
+# ---------------------------------------------------------------- 指定网站可达性/WAF 检测（2026-10-12）
+
+def _load_check_mod():
+    import importlib.util
+    path = Path(TOOLS) / "fir-proxy" / "cyberstrike_check.py"
+    spec = importlib.util.spec_from_file_location("cyberstrike_check_cu", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_check_urls_baseline_and_block_detection():
+    """check_urls：与直连基线对比判「可达/被封禁」。"""
+    mod = _load_check_mod()
+
+    # 直连基线：HTTP 200 + 正常内容
+    def direct(url, timeout):
+        return {"ok": True, "status": 200, "body": b"<html>real site</html>", "error": ""}
+
+    # 各代理的响应
+    def probe(record, url, timeout):
+        addr = record["proxy"]
+        if addr == "1.1.1.1:80":                 # 正常可达（与基线内容不同但非拦截）
+            return {"ok": True, "status": 200, "body": b"<html>page A</html>", "error": ""}
+        if addr == "2.2.2.2:80":                 # 403 → 被封禁
+            return {"ok": True, "status": 403, "body": b"<html>forbidden</html>", "error": ""}
+        if addr == "3.3.3.3:80":                 # 200 但 Cloudflare 拦截页 → 被封禁
+            return {"ok": True, "status": 200, "body": b"Attention Required! Cloudflare",
+                    "error": ""}
+        if addr == "4.4.4.4:80":                 # 与基线指纹相同 → 正常（直连也这样）
+            return {"ok": True, "status": 200, "body": b"<html>real site</html>", "error": ""}
+        return {"ok": False, "status": None, "body": b"", "error": "timeout"}
+
+    records = [{"protocol": "http", "proxy": p} for p in
+               ("1.1.1.1:80", "2.2.2.2:80", "3.3.3.3:80", "4.4.4.4:80", "5.5.5.5:80")]
+    out = mod.check_urls(records, "http://site.example/", 5, 5,
+                         probe_factory=probe, direct_factory=direct)
+    by = {r["proxy"]: r for r in out["results"]}
+    assert out["baseline"] == {"ok": True, "status_code": 200, "error": ""}
+    assert by["1.1.1.1:80"]["ok"] is True and by["1.1.1.1:80"]["blocked"] is False
+    assert by["2.2.2.2:80"]["blocked"] is True and by["2.2.2.2:80"]["ok"] is True
+    assert "403" in by["2.2.2.2:80"]["reason"]
+    assert by["3.3.3.3:80"]["blocked"] is True       # 拦截页特征词
+    assert by["4.4.4.4:80"]["blocked"] is False      # 与基线一致 → 不判封禁
+    assert by["5.5.5.5:80"]["ok"] is False and by["5.5.5.5:80"]["blocked"] is False
+    assert mod.check_urls([], "http://x/", 5, 2)["results"] == []   # 空批次
+
+
+def test_check_urls_direct_baseline_blocked_no_false_positive():
+    """直连本身就被该站拦（403）时，经代理拿到同样的拦截页**不判代理被封**。"""
+    mod = _load_check_mod()
+
+    def direct(url, timeout):
+        return {"ok": True, "status": 403, "body": b"Access Denied", "error": ""}
+
+    def probe(record, url, timeout):
+        return {"ok": True, "status": 403, "body": b"Access Denied", "error": ""}
+
+    out = mod.check_urls([{"protocol": "http", "proxy": "1.1.1.1:80"}],
+                         "http://walled.example/", 5, 1,
+                         probe_factory=probe, direct_factory=direct)
+    row = out["results"][0]
+    assert row["ok"] is True and row["blocked"] is False   # 与基线同指纹 → 不误判封禁
+
+
+def test_pool_check_url_usable_sorted_and_readonly(pool, monkeypatch):
+    """ProxyPool.check_url：可用代理按延迟升序取 limit；**不改动池文件**。"""
+    pool.add_records([_rec(f"{i}.{i}.{i}.{i}:80", protocol="http")
+                      for i in range(1, 6)])
+    before = pool.read_pool()
+    canned = {
+        "url": "http://site.example/",
+        "baseline": {"ok": True, "status_code": 200, "error": ""},
+        "results": [
+            {"proxy": "1.1.1.1:80", "protocol": "http", "ok": True,
+             "status_code": 200, "latency": 0.5, "blocked": False, "reason": ""},
+            {"proxy": "2.2.2.2:80", "protocol": "http", "ok": True,
+             "status_code": 403, "latency": 0.1, "blocked": True, "reason": "被封"},
+            {"proxy": "3.3.3.3:80", "protocol": "http", "ok": True,
+             "status_code": 200, "latency": 0.2, "blocked": False, "reason": ""},
+            {"proxy": "4.4.4.4:80", "protocol": "http", "ok": False,
+             "status_code": None, "latency": None, "blocked": False, "reason": "超时"},
+            {"proxy": "5.5.5.5:80", "protocol": "http", "ok": True,
+             "status_code": 200, "latency": 0.9, "blocked": False, "reason": ""},
+        ],
+    }
+    seen: list[list[str]] = []
+
+    def fake_run(self, args, timeout, script=None, on_progress=None, as_dict=False):
+        seen.append(list(args))
+        assert as_dict is True
+        return canned
+
+    monkeypatch.setattr(ProxyPool, "_run_cli", fake_run)
+    res = pool.check_url("http://site.example/", limit=10)
+    assert "--url" in seen[0] and "http://site.example/" in seen[0]
+    assert res["total"] == 5 and res["reachable"] == 4 and res["blocked"] == 1
+    # 可用 = 未封禁且可达（1/3/5），按延迟升序：0.2(3) → 0.5(1) → 0.9(5)
+    assert [u["proxy"] for u in res["usable"]] == ["3.3.3.3:80", "1.1.1.1:80", "5.5.5.5:80"]
+    assert pool.read_pool() == before                    # 只读：池文件未变
+
+
+def test_pool_check_url_limit_and_empty_pool(pool):
+    """limit 截断；空池抛 ProxyError；空 URL 抛 ProxyError。"""
+    import pytest as _pt
+
+    from core.proxy import ProxyError
+    with _pt.raises(ProxyError):
+        pool.check_url("http://x/")                       # 空池
+    pool.add_records([_rec("1.1.1.1:80", protocol="http")])
+    with _pt.raises(ProxyError):
+        pool.check_url("   ")                             # 空 URL
+
+
+def test_api_check_url(client, monkeypatch):
+    """端点：202 + Job 完成 result；空 url 422。"""
+    from core.proxy import ProxyPool
+
+    client.post("/api/proxy/add", json={"records": [
+        {"protocol": "http", "proxy": "1.1.1.1:80", "status": "Working"}]})
+
+    def fake_run(self, args, timeout, script=None, on_progress=None, as_dict=False):
+        return {"url": "http://t/", "baseline": {"ok": True, "status_code": 200},
+                "results": [{"proxy": "1.1.1.1:80", "protocol": "http", "ok": True,
+                             "status_code": 200, "latency": 0.3, "blocked": False,
+                             "reason": ""}]}
+
+    monkeypatch.setattr(ProxyPool, "_run_cli", fake_run)
+    r = client.post("/api/proxy/check-url", json={"url": "http://t/"})
+    assert r.status_code == 202
+    job_id = r.json()["job_id"]
+    for _ in range(100):
+        job = client.get(f"/api/jobs/{job_id}").json()
+        if job["status"] != "running":
+            break
+        time.sleep(0.05)
+    assert job["status"] == "done"
+    assert job["result"]["usable"][0]["proxy"] == "1.1.1.1:80"
+
+    assert client.post("/api/proxy/check-url", json={"url": "  "}).status_code == 422
+
+
+# ---------------------------------------------------------------- 验证基准站配置（2026-10-12）
+
+def test_write_config_file_merges_and_preserves(tmp_path):
+    """write_config_file：合并写入（保留既有其它键）、忽略非 ProxyConfig 键、原子落盘。"""
+    from core.proxy.pool import write_config_file
+    p = tmp_path / "proxy.json"
+    p.write_text(json.dumps({"http_port_base": 1900, "validate_target": "http://old/"}),
+                 encoding="utf-8")
+    write_config_file(p, {"validate_target": "http://new/", "bogus": 1})
+    data = json.loads(p.read_text(encoding="utf-8"))
+    assert data["http_port_base"] == 1900          # 既有键保留
+    assert data["validate_target"] == "http://new/"  # 覆盖
+    assert "bogus" not in data                      # 非 ProxyConfig 键被忽略
+    # 坏文件/不存在 → 按空 dict 起步，写入即建文件
+    p2 = tmp_path / "sub" / "proxy.json"
+    write_config_file(p2, {"validate_target": "http://x/"})
+    assert json.loads(p2.read_text(encoding="utf-8"))["validate_target"] == "http://x/"
+
+
+def test_api_proxy_config_get_defaults(client):
+    """GET /api/proxy/config：回显当前值 + defaults（内置缺省）。"""
+    body = client.get("/api/proxy/config").json()
+    assert body["validate_target"] == "http://i.zut.edu.cn/new/index.html"
+    assert body["defaults"]["validate_target"] == "http://i.zut.edu.cn/new/index.html"
+
+
+def test_api_proxy_config_put_writes_and_hot_applies(client, tmp_path):
+    """PUT：写盘 + 热更新在跑的 ProxyPool.config（下轮验证即生效）；空值 422。"""
+    r = client.put("/api/proxy/config", json={
+        "validate_target": "http://example.org/probe",
+        "validate_target_https": "https://example.org/probe",
+        "validate_target_b": "",
+    })
+    assert r.status_code == 200
+    body = r.json()
+    assert body["validate_target"] == "http://example.org/probe"
+    assert body["validate_target_https"] == "https://example.org/probe"
+    assert body["validate_target_b"] is None                 # 空串 → 关闭（None）
+    # 落盘到注入的临时文件（未污染仓库 config/）
+    saved = json.loads((tmp_path / "proxy.json").read_text(encoding="utf-8"))
+    assert saved["validate_target"] == "http://example.org/probe"
+    # 热更新：在跑的池 config 已跟随
+    assert client.app.state.proxy_pool.config.validate_target == "http://example.org/probe"
+    # 空基准 → 422
+    assert client.put("/api/proxy/config",
+                      json={"validate_target": "  "}).status_code == 422

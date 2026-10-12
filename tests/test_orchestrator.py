@@ -195,16 +195,19 @@ def test_stats_teams_and_recent_runs_view(env):
 # ---------- 态势视图（_stats / _assets_view / bb_overview） ----------
 
 def test_stats_injection_hvt_surface_and_digest(env):
-    """态势增强：HVT（meta.tags 高价值）优先排序 / in_progress 半程 / high_value
-    covered 标记 / digest 常驻注入（任务段已随任务机制退役）。"""
+    """态势增强：高价值（**自动推导**=verified 高危发现）优先排序 / in_progress
+    半程 / high_value covered 标记 / digest 常驻注入。
+    人工 meta.tags「高价值」标签已于 2026-10-12 废除，高价值唯一来源是自动推导。"""
     from core.blackboard.assets import register_asset
     bb, project = env
     pid = project["id"]
     hvt_covered = register_asset(bb, pid, "10.205.1.10", type_="host")
-    bb.update_asset_meta(hvt_covered["id"], {"tags": ["高价值"]})
+    bb.add_finding(pid, title="RCE", severity="high", status="verified",
+                   target_asset_id=hvt_covered["id"], author="s1")
     bb.set_asset_status(hvt_covered["id"], "na", note="人工裁定不测（已覆盖终态）")
     hvt_open = register_asset(bb, pid, "10.205.9.9", type_="host")
-    bb.update_asset_meta(hvt_open["id"], {"tags": ["高价值"]})
+    bb.add_finding(pid, title="SQLi", severity="critical", status="verified",
+                   target_asset_id=hvt_open["id"], author="s1")
     register_asset(bb, pid, "10.205.1.20", type_="host")
     half = register_asset(bb, pid, "https://a.t.com/admin", type_="url")
     bb.set_asset_status(half["id"], "visited", note="看过首页")
@@ -214,11 +217,14 @@ def test_stats_injection_hvt_surface_and_digest(env):
     llm = ScriptedLLM([{"tool_use": [ScriptedLLM.tool_call("d1", "done", {})]}])
     orch = make_orch(env, llm, track="pentest")
     stats = orch._stats()
-    assert stats["assets"]["uncovered"][0]["value"] == "10.205.9.9"  # HVT 优先排序
+    # 挂 verified 发现的资产归 visited（terminal-finding），故唯一 open=10.205.1.20
+    assert stats["assets"]["uncovered"][0]["value"] == "10.205.1.20"
+    # HVT（verified 高危自动推导）在已访问清单里优先排序
+    assert stats["assets"]["in_progress"][0]["value"] == "10.205.9.9"
+    assert {i["value"] for i in stats["assets"]["in_progress"]} == \
+        {"10.205.9.9", "https://a.t.com/admin"}
     # 三态：na 归已测试干净（收口），故 done_count=1（旧口径只数显式 tested_clean=0）
     assert stats["assets"]["done_count"] == 1 and stats["assets"]["clean_count"] == 1
-    assert [i["value"] for i in stats["assets"]["in_progress"]] == \
-        ["https://a.t.com/admin"]
     hv = {h["value"]: h for h in stats["high_value"]}
     assert hv["10.205.1.10"]["covered"] is True
     assert hv["10.205.9.9"]["covered"] is False
@@ -232,7 +238,7 @@ def test_stats_injection_hvt_surface_and_digest(env):
 
 
 def test_stats_no_hvt_no_section(env):
-    """无高价值标签资产时 high_value 为空列表（资产本体仍走 uncovered 注入，属正常）。"""
+    """无 verified 高危发现时 high_value 为空列表（资产本体仍走 uncovered 注入，属正常）。"""
     from core.blackboard.assets import register_asset
     bb, project = env
     register_asset(bb, project["id"], "10.0.0.1", type_="host")
@@ -259,6 +265,7 @@ def test_uncovered_excludes_na_assets(env):
     assert stats["assets"]["uncovered_total"] == 1
     orch.tick()
     assert '"high_value": []' in llm.calls[0]["system"]
+
 
 
 def test_budget_status_null_is_unlimited(env):
@@ -934,7 +941,7 @@ def _phase_packs(root) -> str:
     ph.mkdir(parents=True)
     (ph / "recon.yaml").write_text(
         "name: 信息收集\ngoal: 摸清资产面\norder: 1\n"
-        "gate:\n  min_assets: 10\n  min_high_value: 1\n  idle_rounds: 2\n"
+        "gate:\n  min_assets: 10\n  idle_rounds: 2\n"
         "gate_types: [exploit]\nnext: [pentest]\n", encoding="utf-8")
     (ph / "pentest.yaml").write_text(
         "name: 渗透测试\ngoal: 产出 verified 发现\norder: 2\ngate:\n  min_verified: 1\n"

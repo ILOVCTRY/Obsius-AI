@@ -534,3 +534,62 @@ def test_set_status_na_and_budget_stop_need_no_backing(ctx):
     r1 = bb.set_asset_status(ctx["url"], "na", note="非目标协议")
     r2 = bb.set_asset_status(ctx["host"], "budget_stop", note="配额用尽停手")
     assert r1["status"] == "na" and r2["status"] == "budget_stop"
+
+
+# ---------- service 继承同 host 域名覆盖的背书（2026-10-12） ----------
+
+def _svc(ctx, value, **meta):
+    return ctx["bb"].upsert_asset(ctx["pid"], "service", value,
+                                  parent_id=ctx["host"], meta=meta or None)["id"]
+
+
+def test_service_web_port_inherits_backed_domain(ctx):
+    """同 host 的域名有 dead_end 背书 → Web 端口 service 可直接标净（无需自证）。"""
+    bb, pid = ctx["bb"], ctx["pid"]
+    svc = _svc(ctx, "10.0.0.1:80")
+    # 无任何背书 → 拒
+    with pytest.raises(ValueError, match="死路意图背书"):
+        bb.set_asset_status(svc, "tested_clean", note="随手标净")
+    # 同 host 的 domain（DNS 解析挂上来的）死路收尾 → service 继承
+    _dead_end_on(bb, pid, ctx["domain"], "域上无洞")
+    r = bb.set_asset_status(svc, "tested_clean", note="域名已测得，同端点")
+    assert r["status"] == "tested_clean"
+
+
+def test_service_non_web_port_does_not_inherit(ctx):
+    """非 Web 端口（ssh）不继承域名 HTTP 层测试的背书。"""
+    bb, pid = ctx["bb"], ctx["pid"]
+    ssh = _svc(ctx, "10.0.0.1:22", protocol="ssh")
+    _dead_end_on(bb, pid, ctx["domain"], "域上无洞")
+    with pytest.raises(ValueError, match="死路意图背书"):
+        bb.set_asset_status(ssh, "tested_clean", note="ssh 不该继承")
+
+
+def test_service_cross_host_domain_not_inherited(ctx):
+    """2026-09-29 精神：C 站域名测过不背书 A 站的 service（同 host 限定）。"""
+    bb, pid = ctx["bb"], ctx["pid"]
+    other_host = bb.upsert_asset(pid, "host", "10.0.0.2")["id"]
+    other_dom = bb.upsert_asset(pid, "domain", "other.com",
+                                parent_id=other_host)["id"]
+    svc = _svc(ctx, "10.0.0.1:80")
+    _dead_end_on(bb, pid, other_dom, "另站域名无洞")
+    with pytest.raises(ValueError, match="死路意图背书"):
+        bb.set_asset_status(svc, "tested_clean", note="跨站不该继承")
+
+
+def test_service_domain_without_dead_end_not_enough(ctx):
+    """同 host 域名只有 open/无背书 → service 不继承（域名须真测得）。"""
+    bb, pid = ctx["bb"], ctx["pid"]
+    svc = _svc(ctx, "10.0.0.1:443", protocol="https")
+    declare_intent(bb, pid, "域上假设", target_asset_id=ctx["domain"])  # open
+    with pytest.raises(ValueError, match="死路意图背书"):
+        bb.set_asset_status(svc, "tested_clean", note="域名未收尾")
+
+
+def test_web_port_backing_target_helper(ctx):
+    from core.blackboard.intents import web_port_backing_target
+    bb, pid = ctx["bb"], ctx["pid"]
+    svc = _svc(ctx, "10.0.0.1:8080")
+    assert web_port_backing_target(bb.conn, pid, svc) is None
+    _dead_end_on(bb, pid, ctx["domain"], "域上无洞")
+    assert web_port_backing_target(bb.conn, pid, svc) == ctx["domain"]

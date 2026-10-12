@@ -23,6 +23,10 @@
   默认无 target → `TargetGuide`（host/domain 搜索）；选定后
   `api.attackPath(pid, target)` 4s 轮询。布局常量 `X_STEP=300`/`CARD_W`/`*_H`，
   **按依赖层级自动分层**（`layoutGraph`：无前驱非根落 level 1），`nodesDraggable/nodesConnectable=false`。
+  **`place()` 父卡只下移不上溢（2026-10-12 修重叠）**：父卡垂直居中于子块时
+  `yOf = yTop + Math.max(0, (blockH − cardH) / 2)`——子块矮于卡片（如叶子子目标、
+  挂 1 条 finding 的意图）时旧式 `(yTop+y)/2 − h/2` 会**向上溢出**分配块，侵入前一
+  兄弟块，同列间隙 `Y_GAP=20` 小于上溢量即相撞；截负值后只下移，不改正常居中。
   - **子目标节点 `SubtargetNode`（2026-10-01）**：根的直接子资产成节点（孙节点不上图）；
     带终态徽章 `SUBTARGET_STATUS`（已测清/待测/扫描中…）——`node.settled`（子树意图
     全部收尾且至少一条 dead_end）为真时显「已测清」；`node.findings` 显示发现数。

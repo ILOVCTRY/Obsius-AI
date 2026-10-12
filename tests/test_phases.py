@@ -46,7 +46,6 @@ focus:
   asset-enum: 3
 gate:
   min_assets: 10
-  min_high_value: 1
   idle_rounds: 2
 gate_types: [exploit]
 tasks:
@@ -112,13 +111,10 @@ def proj(packs, tmp_path):
     return store.create_project("阶段测试", track="pentest")
 
 
-def _seed_assets(bb: Blackboard, pid: str, n: int = 10, hv: int = 1,
+def _seed_assets(bb: Blackboard, pid: str, n: int = 10,
                  net: str = "10.1") -> None:
     for i in range(n):
         register_asset(bb, pid, f"{net}.{i}.7", type_="host")
-    for i in range(hv):
-        register_asset(bb, pid, f"10.9.0.{i}", type_="host",
-                       meta={"tags": ["高价值"]})
 
 
 # ---------- 剧本解析 ----------
@@ -128,7 +124,7 @@ def test_parse_and_spec_full(packs):
     assert spec["name"] == "信息收集" and spec["goal"] == "摸清资产面"
     assert spec["order"] == 1 and spec["next"] == ["pentest"]
     assert spec["focus"] == {"recon": 2, "asset-enum": 3}
-    assert spec["gate"] == {"min_assets": 10, "min_high_value": 1, "idle_rounds": 2}
+    assert spec["gate"] == {"min_assets": 10, "idle_rounds": 2}
     assert spec["gate_types"] == ["exploit"]
     assert spec["tasks"] == [{"task_type": "recon", "role": "recon",
                               "objective": "被动测绘产出资产清单",
@@ -176,11 +172,11 @@ def test_load_order_forward_and_override(packs):
 # ---------- 门判定 ----------
 
 def test_evaluate_gate_matrix():
-    gate = {"min_assets": 10, "min_high_value": 1, "idle_rounds": 2}
-    m = {"assets": 3, "high_value": 0, "verified": 0, "idle_rounds": 0}
+    gate = {"min_assets": 10, "min_verified": 1, "idle_rounds": 2}
+    m = {"assets": 3, "verified": 0, "idle_rounds": 0}
     met, unmet = evaluate_gate(gate, m)
-    assert not met and unmet == ["资产 3/10", "高价值资产 0/1"]
-    met, unmet = evaluate_gate(gate, {**m, "assets": 12, "high_value": 2})
+    assert not met and unmet == ["资产 3/10", "verified 发现 0/1"]
+    met, unmet = evaluate_gate(gate, {**m, "assets": 12, "verified": 2})
     assert met and not unmet                                    # 非 idle 全达标
     met, _ = evaluate_gate(gate, {**m, "idle_rounds": 2})
     assert met                                                  # 收集饱和逃生
@@ -191,9 +187,9 @@ def test_evaluate_gate_matrix():
 
 def test_gate_metrics_and_block_reason(proj, packs):
     bb, pid = proj.bb, proj.id
-    _seed_assets(bb, pid, n=3, hv=0)
+    _seed_assets(bb, pid, n=3)
     m = gate_metrics(bb, pid, idle_rounds=1)
-    assert m["assets"] == 3 and m["high_value"] == 0 and m["idle_rounds"] == 1
+    assert m["assets"] == 3 and m["verified"] == 0 and m["idle_rounds"] == 1
     # recon 门拦 exploit
     reason = gate_block_reason(bb, pid, proj.meta, "pentest", packs, task_type="exploit")
     assert reason and "入场门" in reason and "exploit" in reason
@@ -202,7 +198,7 @@ def test_gate_metrics_and_block_reason(proj, packs):
     assert gate_block_reason(bb, pid, proj.meta, "pentest", packs,
                              task_type="exploit", idle_rounds=2) is None
     # 指标达标后放行（异网段避免与首播种子撞去重）
-    _seed_assets(bb, pid, n=7, hv=1, net="10.2")
+    _seed_assets(bb, pid, n=7, net="10.2")
     assert gate_block_reason(bb, pid, proj.meta, "pentest", packs,
                              task_type="exploit") is None
     # pentest 阶段无 gate_types：report 不拦（min_verified 门只驱动过门分流）
@@ -240,8 +236,8 @@ def test_enter_phase_calibration(proj, packs):
     """抵达校准：新阶段门已过则标记 gate_open_notified；未过则剥键。"""
     bb, pid = proj.bb, proj.id
     enter_phase(proj, "recon", by="system", packs_root=packs)
-    # recon 门已过（10 资产含 1 高价值）→ 抵达即标记已分流
-    _seed_assets(bb, pid, n=10, hv=1)
+    # recon 门已过（10 资产达标）→ 抵达即标记已分流
+    _seed_assets(bb, pid, n=10)
     enter_phase(proj, "recon", by="system", packs_root=packs)
     assert read_state(proj.meta)["notified"] == "pentest"
     # 进入 pentest：其门（min_verified）未过 → 校准剥键（防 L2 秒弹回的对称面）
@@ -255,7 +251,7 @@ def test_gate_state_single_source(proj, packs, monkeypatch):
     enter_phase(proj, "recon", by="system", packs_root=packs)
     st = read_gate_state(proj.meta)
     assert st == {"phase": "recon", "gate": True, "passed": False,
-                  "unmet": ["资产 0/10", "高价值资产 0/1"]}
+                  "unmet": ["资产 0/10"]}
     # report 无门 → gate False（注入侧跳过门进度行）
     enter_phase(proj, "report", by="system", packs_root=packs)
     assert read_gate_state(proj.meta) == {"phase": "report", "gate": False,
@@ -282,7 +278,7 @@ def test_phase_gate_state_written_by_check(client):
     app.phase_gate_check(pid)
     assert proj.meta["phase_gate_state"] == st
     # 灌资产过门 → check 后 state.passed=True + L1（pentest 默认档）审批单分流
-    _seed_assets(proj.bb, pid, n=10, hv=1)
+    _seed_assets(proj.bb, pid, n=10)
     app.phase_gate_check(pid)
     st2 = proj.meta["phase_gate_state"]
     assert st2["passed"] is True and st2["unmet"] == []
@@ -341,6 +337,11 @@ def _mk(client) -> str:
     return r.json()["id"]
 
 
+def _pass_recon_gate(bb: Blackboard, pid: str, n: int = 10) -> None:
+    """过 recon 门：塞满 min_assets 资产（门已无高价值项，2026-10-12 废除）。"""
+    _seed_assets(bb, pid, n=n)
+
+
 def _events(client, pid: str, kind: str) -> list[dict]:
     proj = client.app.state.projects[pid]
     return [dict(r) for r in proj.bb.conn.execute(
@@ -393,7 +394,7 @@ def test_l2_auto_transition(client):
     pid = _mk(client)
     assert client.patch(f"/api/projects/{pid}/config",
                         json={"config": {"autonomy": {"level": "L2"}}}).status_code == 200
-    _seed_assets(client.app.state.projects[pid].bb, pid, n=10, hv=1)
+    _seed_assets(client.app.state.projects[pid].bb, pid, n=10)
     client.app.state.phase_gate_check(pid)  # 测试直调口（生产在 _post_tick 出口）
     r = client.get(f"/api/projects/{pid}/phase").json()
     assert r["current"] == "pentest" and r["history"][-1]["auto"] is True
@@ -405,13 +406,13 @@ def test_l2_auto_transition(client):
 
 def test_l1_approval_flow_with_dedup(client):
     pid = _mk(client)
-    _seed_assets(client.app.state.projects[pid].bb, pid, n=10, hv=1)
+    _seed_assets(client.app.state.projects[pid].bb, pid, n=10)
     client.app.state.phase_gate_check(pid)
     appr = client.get(f"/api/projects/{pid}/approvals?status=pending").json()
     assert len(appr) == 1
     action = appr[0]["action"]
     assert action["op"] == "phase_transition" and action["to"] == "pentest"
-    assert "阶段流转" in action["summary"] and action["metrics"]["assets"] == 11
+    assert "阶段流转" in action["summary"] and action["metrics"]["assets"] == 10
     # 同目标审批在途：不重复提单
     client.app.state.phase_gate_check(pid)
     assert len(client.get(f"/api/projects/{pid}/approvals?status=pending").json()) == 1
@@ -427,7 +428,7 @@ def test_l0_event_flow_and_notified_dedup(client):
     pid = _mk(client)
     assert client.patch(f"/api/projects/{pid}/config",
                         json={"config": {"autonomy": {"level": "L0"}}}).status_code == 200
-    _seed_assets(client.app.state.projects[pid].bb, pid, n=10, hv=1)
+    _seed_assets(client.app.state.projects[pid].bb, pid, n=10)
     client.app.state.phase_gate_check(pid)
     evs = _events(client, pid, "phase.gate_open")
     assert len(evs) == 1 and json.loads(evs[0]["payload"])["to"] == "pentest"
@@ -453,9 +454,9 @@ def test_idle_rounds_counting_and_escape(client):
     assert len(_events(client, pid, "phase.gate_open")) == 1
     tick(pid, {"teams": [{"team_id": "team-x"}]})  # 有产出（建队/执行）→ 计数复位
     assert client.get(f"/api/projects/{pid}/phase").json()["gate"]["metrics"]["idle_rounds"] == 0
-    # 逃生审批面（L1 默认档）：资产达标但高价值缺，idle 满 2 轮 → 审批单
+    # 逃生审批面（L1 默认档）：资产未达标（3/10），idle 满 2 轮 → 审批单
     pid2 = _mk(client)
-    _seed_assets(client.app.state.projects[pid2].bb, pid2, n=10, hv=0)
+    _seed_assets(client.app.state.projects[pid2].bb, pid2, n=3)
     tick2 = client.app.state.phase_post_tick
     tick2(pid2, {"published": []})  # idle=1：逃生未满
     assert client.get(f"/api/projects/{pid2}/approvals?status=pending").json() == []

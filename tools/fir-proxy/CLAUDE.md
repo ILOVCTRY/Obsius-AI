@@ -44,13 +44,14 @@ fir-proxy/
 
 上游 `cli.py validate` 判据过严：要求代理**同时**通过 HTTPS(CONNECT) 延迟检测 + httpbin 匿名检测 + cachefly 测速，任一失败即 Failed——只会明文转发 HTTP 的免费代理被误判死（实测同批 120 条：宽松单目标过 52、上游完整三段只过 9 → 平台池被清空）。本 runner 换成**单目标连通性**判据，**复用上游 `ProxyChecker.check_proxy_url`**（**不改上游文件**），只在其外层计时得 latency：
 
-- 经代理 `GET <--target>`（默认 `http://www.baidu.com`，走 80 口、不强制 CONNECT），拿到 2xx/3xx 即 `Working` 并记延迟；否则 `Failed`。
-- **HTTPS 能力探测（2026-10-11）**：给 `--target-https`（默认平台传 `https://www.baidu.com`）时，另经代理 GET 该 https 目标（**走 CONNECT 隧道**）定记录 `https_ok: bool`；**只作能力标注，不参与 `status`**（免费代理普遍只转 HTTP，并入 status 会全判死）。`check_records(..., target_https=, https_checker_factory=)` 可离线直测。
+- 经代理 `GET <--target>`（默认 `http://i.zut.edu.cn/new/index.html`，2026-10-12 由 baidu 改；走 80 口、不强制 CONNECT），拿到 2xx/3xx 即 `Working` 并记延迟；否则 `Failed`。
+- **HTTPS 能力探测（2026-10-11）**：给 `--target-https`（默认平台传 `https://i.zut.edu.cn/new/index.html`，同站）时，另经代理 GET 该 https 目标（**走 CONNECT 隧道**）定记录 `https_ok: bool`；**只作能力标注，不参与 `status`**（免费代理普遍只转 HTTP，并入 status 会全判死）。`check_records(..., target_https=, https_checker_factory=)` 可离线直测。
 - **内容注入/劫持型出口交叉验证（2026-10-11）**：给 `--target-b`（默认平台传 `http://example.com`，须与 `--target` 内容不同）时，对**已通过连通性**的记录再读 `target`/`target_b` 两目标响应体指纹（`_content_fingerprint` = `状态码:长度:sha256前16`，**独立 `_probe_body` 读体**——上游 `check_proxy_url` 用 stream 即关读不到体）；两目标**真实内容不同却回相同指纹** → 判「对任意 host 回同一伪造页」的内容注入出口，`status=Failed` + `hijacked=True` + 说明性 `error`。探测本身失败（第二目标偶发不可达）**不误杀**（保留连通结论，`hijacked=False`）。`check_records(..., target_b=, probe_factory=)` 可离线直测。
 - 纯函数 `check_records(records, target, timeout, workers, checker_factory=None, on_progress=None)` 可注入假 checker 离线直测（`tests/test_proxy_pool.py`）。
 - **进度**：每完成 ~20 条 stdout 发 `{"event":"progress","phase":"check","done":k,"total":N}`（平台流式解析 → 状态栏 + ETA）。
 - 接口兼容 `_run_cli`：`-i/--input`、`-o/--output`、`--output-format`、`--target`、`--timeout`、`--workers`、`--quiet`、`--log-file`；输出 `-o` JSON 数组 `[{protocol,proxy,status,latency,error}]`（**含 Failed**，供上层剔除）。
 - 平台侧 `core/proxy/pool.py::_validate_records` 调用它；判据口径见 `core/proxy/CLAUDE.md`。
+- **指定网站可达性/WAF 检测（`check_urls`，2026-10-12）**：`--url <目标>` 给了即走 check-url 模式（不给=常规验证）。`_probe_direct` 先**直连**该 URL 取基线（状态码+响应体指纹），再经每个代理 `_probe_body` GET 它；`blocked` = 有响应 且（状态码 ∈ `BLOCK_STATUS`{403,406,429,503} 或体含 `_BLOCK_MARKERS`{cloudflare/雷池/安全狗/验证码…}）**且指纹≠直连基线**（直连本身被拦→不误判代理）。`check_urls(records,url,timeout,workers,probe_factory=,direct_factory=,on_progress=)` 纯函数可离线直测；`:PROBE_WAF` 关（`--no-probe-waf`）时退化为纯连通性（复用 `check_records`）。输出 `-o` = `{url,baseline,results}`，`_write_output` 落盘。
 
 ## 依赖与解释器
 
