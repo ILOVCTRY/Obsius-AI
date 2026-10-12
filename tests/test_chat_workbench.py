@@ -560,6 +560,89 @@ def test_parallel_expert_results_persisted_on_completion(tmp_path):
         {"e1": "done:e1", "e2": "done:e2"}
 
 
+def test_parallel_expert_dispatch_returns_immediately_on_abort(tmp_path):
+    """回归（2026-10-12）：中止时主线程必须**立即返回**，不得等待卡在长工具
+    （MCP ≤60s / 浏览器 / 大扫描）里的子专家自然收尾。旧实现退出 with 时走
+    shutdown(wait=True)，会一直阻塞到所有专家收尾——点「停止」迟迟不生效。"""
+    bb = Blackboard(str(tmp_path / "bb.db")); _mk_project(bb, "p1")
+    abort = threading.Event()
+    release = threading.Event()
+    thread = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID)
+    turn = ChatTurn(bb=bb, llm=FakeLLM([]), project_id="p1", thread_id=thread["id"],
+                    packs_root="packs", track="ctf", capabilities=["web"],
+                    mcp_bridge=None, expert_names=["web-solver", "recon"],
+                    abort_event=abort)
+    started = threading.Event()
+
+    def blocking_dispatch(tc):
+        started.set()
+        release.wait(timeout=5)      # 模拟不可中断的长工具
+        return True, f"done:{tc.id}"
+
+    turn._dispatch = blocking_dispatch
+
+    def _abort_soon():
+        started.wait(timeout=3)
+        time.sleep(0.2)
+        abort.set()
+
+    threading.Thread(target=_abort_soon, daemon=True).start()
+    t0 = time.perf_counter()
+    results = turn._parallel_expert_dispatch([
+        _tc("e1", "call_expert", {"expert": "web-solver", "task": "一"}),
+        _tc("e2", "call_expert", {"expert": "recon", "task": "二"}),
+    ])
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 1.5, f"中止后应立即返回，实际 {elapsed:.2f}s"
+    assert results == {}             # 卡住的专家结果未收集（后台线程继续跑）
+    release.set()                    # 放行后台线程收尾，避免残留
+    time.sleep(0.3)
+
+
+def test_abort_expert_dispatch_writes_single_tool_result(tmp_path):
+    """中止时 call_expert 工具结果**恰好一条**：结果恒由 run_one 落库，主循环
+    对 call_expert 不再补「已停止」占位（双写会让同 tool_use_id 出现两条 tool
+    结果，污染历史）。"""
+    bb = Blackboard(str(tmp_path / "bb.db")); _mk_project(bb, "p1")
+    abort = threading.Event()
+    release = threading.Event()
+    llm = FakeLLM([_resp(tool_calls=[_tc("e1", "call_expert",
+                                         {"expert": "recon", "task": "侦察"})])])
+    thread = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID)
+    turn = ChatTurn(bb=bb, llm=llm, project_id="p1", thread_id=thread["id"],
+                    packs_root="packs", track="ctf", capabilities=["web"],
+                    mcp_bridge=None, expert_names=["recon"], abort_event=abort)
+    started = threading.Event()
+
+    def blocking_dispatch(tc):
+        started.set()
+        release.wait(timeout=5)
+        return True, "专家摘要"
+
+    turn._dispatch = blocking_dispatch
+
+    def _abort_soon():
+        started.wait(timeout=3)
+        time.sleep(0.2)
+        abort.set()
+
+    threading.Thread(target=_abort_soon, daemon=True).start()
+    final = turn.run("委派侦察")
+    assert "已按人类要求停止" in final
+    release.set()                    # 后台专家线程收尾并落库
+
+    def _e1_rows():
+        return [m for m in chat_store.list_messages(bb, thread["id"])
+                if m["role"] == "tool" and m["tool_use_id"] == "e1"]
+
+    deadline = time.time() + 3
+    while time.time() < deadline and not _e1_rows():
+        time.sleep(0.05)
+    time.sleep(0.3)                  # 留窗口暴露潜在双写
+    rows = _e1_rows()
+    assert len(rows) == 1, f"call_expert 工具结果应恰一条，实际 {len(rows)}"
+
+
 def test_load_history_reorders_out_of_order_tool_results(tmp_path):
     """乱序落库安全（并行专家完成顺序不定）：`_load_history` 装载时按 tool_use
     顺序重排，重放不受落库顺序影响。"""

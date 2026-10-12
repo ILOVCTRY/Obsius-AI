@@ -1657,6 +1657,12 @@ class ChatTurn:
                         # 下一轮回放被网关 400 拒收（insufficient tool messages），
                         # 线程永久损坏。
                         aborted = True
+                        if tc.name == "call_expert":
+                            # call_expert 的工具结果恒由 _parallel_expert_dispatch 的
+                            # run_one 落库（含中止摘要，主线程已不再等待它收尾）——
+                            # 此处不补占位，避免同 tool_use_id 双写。悬空由 run_one
+                            # 或 _repair_dangling_tool_calls 兜底。
+                            continue
                         result = "[错误] 已停止：工具未执行"
                         chat_store.append_message(self.bb, self.thread_id, "tool",
                                                   result, tool_use_id=tc.id)
@@ -1847,10 +1853,12 @@ class ChatTurn:
             return False, f"[错误] 工具 {name} 执行异常: {e}"
 
     def _parallel_expert_dispatch(self, tool_calls) -> dict[str, tuple[bool, str]]:
-        """并发执行同一批中的多个 call_expert，返回按 tool_call id 索引的结果。
+        """并发执行同一批中的 call_expert，返回按 tool_call id 索引的结果。
 
-        只有至少两个子专家调用时才启用；单个调用保留原有路径，其他工具也不
-        参与并行，确保黑板写入工具的调用顺序和既有语义不变。ThreadPoolExecutor
+        只要有专家调用就走并发路径（含单个——2026-10-12 起，此前 <2 个回落主线程
+        串行）：单个专家卡在长工具（MCP ≤60s / 浏览器 / 大扫描）时，主线程串行执行
+        会一并卡住，点「停止」要等它自然收尾才生效。其他工具不参与并行，仍由主线程
+        按原序执行，确保黑板写入工具的调用顺序与既有语义不变。ThreadPoolExecutor
         的 worker 数有上限，超出的子专家在队列中等待。
 
         **每个专家一完成即持久化工具结果**（不等整批）：前端 2s 轮询 messages
@@ -1858,12 +1866,20 @@ class ChatTurn:
         里子线程刷屏数万条事件，早期 done 事件会被前端水合窗口（HYDRATE_LIMIT）
         挤掉，只显部分「执行完成」（2026-10-06 实测）。乱序落库安全：
         `_load_history` 装载时按 tool_use 顺序重排（`_sanitize_history`）。
+
+        **中止即返（2026-10-12 事故修复）**：主线程只轮询中止信号，一旦置位**立即
+        返回**，绝不等待专家收尾——`with ThreadPoolExecutor` 退出时的 `shutdown(
+        wait=True)` 会一直阻塞到所有子专家自然收尾（含卡在不可中断工具里的），
+        点停止迟迟不生效（用户实测）。现改为显式 `shutdown(wait=False)`：主线程
+        马上回到步边界结束本轮；未完成的专家线程跑完当前 future 后自行退出。结果
+        落库职责单一化——**call_expert 的工具结果恒由 `run_one` 落库**（含中止摘要），
+        主循环对 call_expert 不再补「已停止」占位（见 `_loop` 中止分支），故无双写。
         """
         experts = [tc for tc in tool_calls if tc.name == "call_expert"]
         # 混合批次中，非 call_expert 工具仍由主线程按原序执行；所有专家调用
         # 默认视为相互独立并发。结果稍后按原始 tool_call 顺序拼 history block，
         # 保证重放稳定。
-        if len(experts) < 2:
+        if not experts:
             return {}
         results: dict[str, tuple[bool, str]] = {}
 
@@ -1900,15 +1916,14 @@ class ChatTurn:
             })
             return tc.id, (ok, result)
 
-        with ThreadPoolExecutor(
-                max_workers=min(_MAX_PARALLEL_EXPERTS, len(experts)),
-                thread_name_prefix="chat-expert") as executor:
+        executor = ThreadPoolExecutor(
+            max_workers=min(_MAX_PARALLEL_EXPERTS, len(experts)),
+            thread_name_prefix="chat-expert")
+        try:
             pending = [executor.submit(run_one, tc) for tc in experts]
-            # 中止门（2026-10-09）：裸 as_completed 会一直等到所有专家子轮自然
-            # 收尾——长工具（浏览器/MCP/大扫描）能拖几分钟，主控线程卡在这里
-            # 无法回到步边界判中止，点停止迟迟不生效。改为限时等待 + 轮询中止：
-            # 一旦置位立刻跳出，未完成的 future 留在 executor（退出 with 时
-            # shutdown(wait=True) 仍会等它们收尾，但主线程已不再阻塞于此处）。
+            # 中止门（2026-10-09 引入，2026-10-12 修正）：裸 as_completed 会一直等到
+            # 所有专家子轮自然收尾——长工具（浏览器/MCP ≤60s/大扫描）能拖很久，主控
+            # 线程卡在这里无法回到步边界判中止。改为限时等待 + 轮询中止，置位即跳出。
             pending_set = set(pending)
             while pending_set:
                 if self._aborted():
@@ -1917,6 +1932,11 @@ class ChatTurn:
                 for future in done:
                     call_id, result = future.result()
                     results[call_id] = result
+        finally:
+            # **不阻塞**：wait=False 让主线程立刻返回（关键修复——旧的 with 退出走
+            # shutdown(wait=True)，中止时仍等所有专家收尾）。已提交的 future 仍会跑完
+            # （worker 处理完队列剩余项再退出），其工具结果由 run_one 自行落库。
+            executor.shutdown(wait=False)
         return results
 
     def _dispatch_mcp(self, name: str, args: dict) -> str:
