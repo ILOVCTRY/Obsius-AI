@@ -206,12 +206,23 @@ export function AgentWorkbenchView({ pid, meta }: {
   }, [panel, slash, pid])
 
   // ---- 流式 delta / 工具活动（事件管道增强） ----
+  // 只消费**当前用户消息之后**的事件（与 liveThinking 同款守卫，2026-10-12 修）：
+  // 新一轮开始时上一轮的 chat.delta 仍留在事件流里，若不设起点会被当作本轮流式
+  // 文本，以**原始 markdown** 渲染在时间线尾部——上一轮正文明明已落库、按 prose
+  // 走 MarkdownView 渲染，却又以 raw 重影出现在末尾（用户实测「新一轮时上一轮
+  // 输出不渲染」）。chat.delta 携带**累计全文**，故必须整段丢弃而非只丢最新一条。
   const liveDelta = useMemo(() => {
     let text = ""
+    let started = false
     for (const e of events) {
-      if (e.kind !== "chat.delta") continue
-      const p = e.payload as { thread_id?: string; text?: string }
-      if (p?.thread_id === tid && typeof p.text === "string") text = p.text
+      const p = e.payload as { thread_id?: string; role?: string; text?: string }
+      if (e.kind === "chat.message" && p?.thread_id === tid && p.role === "user") {
+        started = true
+        text = ""
+        continue
+      }
+      if (!started || e.kind !== "chat.delta" || p?.thread_id !== tid) continue
+      if (typeof p.text === "string") text = p.text
     }
     return text
   }, [events, tid])
