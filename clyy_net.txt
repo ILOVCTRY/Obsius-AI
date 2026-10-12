@@ -1,0 +1,3 @@
+9. [POST] https://clyy.cqnu.edu.cn/Login.aspx?action=Login => [500] Internal Server Error
+
+Note: 8 static requests not shown, run with "static" option to see them.

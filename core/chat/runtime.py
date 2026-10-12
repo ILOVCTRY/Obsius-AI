@@ -97,8 +97,9 @@ class ChatStopped(Exception):
 # 流式节流（2026-10-04 顺滑化）：由 80 字符/1s 一路压到 6 字符/0.05s（约 20Hz）——
 # 文本按大块跳变是「一顿顿的」的直接来源。**真正的瓶颈不只在节流**：WS 投递节奏
 # （app.py `ws_events` 轮询间隔）与前端 flush 窗口都要同步压密，只降节流=白降。
-# 写入开销实测 2.7ms/次（synchronous=FULL），20Hz ≈ 5% 线程占用，可接受；每条携带
-# 累计全文，故 run() 正常收尾后调 prune_chat_thread_deltas 清剪。
+# 写入开销：synchronous=NORMAL（2026-10-12 起，见 core/blackboard/store.py）下实测
+# 0.13ms/次，20Hz ≈ 0.26% 核/项目（此前 FULL 为 2.7ms/次 ≈ 5%，多项目并发成 CPU 首耗）；
+# 每条携带累计全文，故 run() 正常收尾后调 prune_chat_thread_deltas 清剪。
 _DELTA_MIN_CHARS = 6
 _DELTA_MIN_INTERVAL = 0.05
 

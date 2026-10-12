@@ -38,6 +38,7 @@
 
 - 时间 UTC ISO（`now()`）；ID `<前缀>-<12hex>`（`new_id()`）；外键开启。
 - 写靠 WAL + busy_timeout + BEGIN IMMEDIATE + Lock；读多连接；多进程需换 Postgres。
+- **`synchronous=NORMAL`（2026-10-12 CPU 优化）**：`_new_conn` 每连接显式设（WAL 下默认仍 FULL，每次提交 fsync 主库）。流式 `chat.thinking.delta` 达 20Hz 且每条带累计全文，多项目并发时 `append_event`/`_tx` 占 CPU ~36%（实测 1.1GB 库写路径）。NORMAL in WAL **不损坏库**，代价仅系统级断电可能丢最近数次已提交事务（应用崩溃/进程被杀安全，用户已确认）；实测 append_event 路径 **2.75ms→0.13ms（21×）**。**per-connection pragma，每条连接都要设**（journal_mode 才是一次性库级）。
 - `close()` 只关当前线程连接；`close_all()` 关全部并置**关闭闸门**——之后 `.conn` 拒绝惰性重连（抛 `BlackboardClosedError`，闸门锁内双重检查）。**Windows 删项目目录前必须 close_all**，否则 WS/轮询线程会重开连接锁死 db。`Project.bb` property 同样有闸门。
 - 三层数据纪律：headless 全量函数只活在 artifacts/decompiler-cache 的 JSON，**不进 SQLite**；func_kb 只存分析过的函数；finding 逆向结论挂 binary 资产、evidence 带 func_id+address。
 - 事件 kind 见各文件条；消费方按 kind 过滤（`llm.usage`/`budget.soft_warning`/`func.updated`/`finding.*`/`asset.*`/`verify.result`/`message.inbox`/`chain.*`/`blueprint.*`/`logic_block.*` 等；任务 kind `task.*` 已随机制退役）。

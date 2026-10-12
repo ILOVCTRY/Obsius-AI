@@ -337,6 +337,14 @@ class Blackboard:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA busy_timeout=5000")
+        # synchronous=NORMAL（2026-10-12 CPU 优化）：WAL 下默认仍是 FULL——每次提交
+        # 都 fsync 主库（实测 20KB 载荷 300 次提交 1.11s vs NORMAL 0.11s，**10×**）。
+        # 流式 chat.thinking.delta 达 20Hz 且每条带累计全文，多项目并发时写路径成
+        # CPU 首耗（实测 append_event/_tx 占 ~36%）。NORMAL 在 WAL 下**不损坏库**
+        # （提交不 fsync WAL，仅在 checkpoint 时同步），代价是系统级断电可能丢最近
+        # 数次已提交事务；应用崩溃/进程被杀安全（用户已确认接受）。per-connection
+        # pragma，故每条连接都要设（journal_mode 才是一次性库级设置）。
+        conn.execute("PRAGMA synchronous=NORMAL")
         return conn
 
     @property

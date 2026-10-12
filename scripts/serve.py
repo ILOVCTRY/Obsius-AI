@@ -77,7 +77,11 @@ def _make_server(port: int):
         return {"status": "shutting_down"}
 
     server = uvicorn.Server(uvicorn.Config(
-        app, host="127.0.0.1", port=port, log_level="info"))
+        app, host="127.0.0.1", port=port, log_level="info",
+        # 关 WS permessage-deflate（2026-10-12 CPU 优化）：uvicorn 默认对每个 WS 帧
+        # 做 zlib 压缩，实测 permessage_deflate.encode 占 CPU ~2%（多连接线性叠加）；
+        # 服务与浏览器同机 loopback，带宽非瓶颈，压缩纯属浪费。
+        ws_per_message_deflate=False))
     app.state.uvicorn_server = server
     return app, server
 
