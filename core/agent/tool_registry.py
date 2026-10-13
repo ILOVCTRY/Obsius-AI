@@ -1088,6 +1088,10 @@ tool(
                     ],
                 },
             },
+            'feature_tree_id': {
+                'type': 'string',
+                'description': '引用的功能树 id（分析阶段产物，可空）',
+            },
         },
         'required': [
             'name',
@@ -1158,10 +1162,82 @@ tool(
                 'type': 'string',
                 'description': '整体替换蓝图正文',
             },
+            'feature_tree_id': {
+                'type': 'string',
+                'description': '重设引用的功能树 id（可空）',
+            },
         },
         'required': [
             'blueprint_id',
         ],
+    },
+)
+
+tool(
+    'bb_feature_tree_create',
+    group='黑板',
+    flags=(),
+    description=(
+        '建/取当前样本的功能树（每项目每样本唯一，幂等）。功能树是分析阶段独立产物（不嵌在蓝图里）：'
+        '自顶向下拆业务功能为节点（如「存档校验」「金币结算」），每个节点可挂函数地址与描述。'
+        '后续蓝图可通过 feature_tree_id 引用该树作为施工图纸；业务逻辑块通过 feature_node_id 下钻某节点。'
+    ),
+    input_schema={
+        'type': 'object',
+        'properties': {
+            'binary_sha256': {
+                'type': 'string',
+                'description': '目标样本 sha256（留空=项目级树）',
+            },
+            'name': {
+                'type': 'string',
+                'description': '树名（可空）',
+            },
+        },
+    },
+)
+
+tool(
+    'bb_feature_node',
+    group='黑板',
+    flags=(),
+    description=(
+        '功能树节点增删改（分析阶段产物）。op=add/update/delete：'
+        'add 必传 name，parent_id 留空为根；update 必传 node_id，可改 name/desc/parent_id/func_addresses'
+        '（Agent 不可改 status——通过验收是人类职责）；delete 必传 node_id，级联删子节点。'
+        '防环：update 时新父不能是自身或自身后代。'
+    ),
+    input_schema={
+        'type': 'object',
+        'properties': {
+            'tree_id': {
+                'type': 'string',
+            },
+            'op': {
+                'type': 'string',
+                'enum': ['add', 'update', 'delete'],
+            },
+            'name': {
+                'type': 'string',
+            },
+            'node_id': {
+                'type': 'string',
+                'description': 'update/delete 必填',
+            },
+            'parent_id': {
+                'type': ['string', 'null'],
+                'description': 'add 时留空=根节点；update 时可改父',
+            },
+            'desc': {
+                'type': 'string',
+            },
+            'func_addresses': {
+                'type': 'array',
+                'items': {'type': 'string'},
+                'description': '该节点覆盖的函数 hex 地址',
+            },
+        },
+        'required': ['tree_id', 'op'],
     },
 )
 
@@ -1209,6 +1285,10 @@ tool(
                         },
                     },
                 },
+            },
+            'feature_node_id': {
+                'type': 'string',
+                'description': '下钻的功能树节点 id（可空）',
             },
         },
         'required': [
@@ -1278,6 +1358,10 @@ tool(
                 'items': {
                     'type': 'string',
                 },
+            },
+            'feature_node_id': {
+                'type': 'string',
+                'description': '重设下钻的功能树节点 id（可空）',
             },
         },
         'required': [

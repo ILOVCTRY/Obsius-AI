@@ -63,6 +63,7 @@ _SNAPSHOT_ORDER = [
     "bb_add_finding", "bb_update_finding", "bb_delete_finding", "bb_add_artifact",
     "bb_query", "kb_open", "kb_search", "propose_pack_edit",
     "bb_upsert_func", "bb_blueprint_create", "bb_blueprint_update",
+    "bb_feature_tree_create", "bb_feature_node",
     "bb_logic_block_create", "bb_logic_block_update",
     "decompile", "list_symbols", "strings_search", "func_xrefs", "disasm",
     "bb_notify",

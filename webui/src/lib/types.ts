@@ -853,6 +853,8 @@ export type ChainSummary = Chain & { link_count: number }
 export type BlueprintStatus = "draft" | "reviewed" | "ready" | "building" | "built"
 /** 模块状态：划分产出 pending → 深析 analyzed → spec 钉死 specd → 容器自测过 tested */
 export type BlueprintModuleStatus = "pending" | "analyzed" | "specd" | "tested"
+/** 功能树节点状态：pending=未验收 / passed=人类验收通过（绿色卡片） */
+export type BlueprintNodeStatus = "pending" | "passed"
 
 export interface BlueprintModule {
   name: string
@@ -865,6 +867,27 @@ export interface BlueprintModule {
   status: BlueprintModuleStatus
 }
 
+/** 功能树节点（v36 独立表）：单向树，parent_id=null 为根 */
+export interface FeatureTreeNode {
+  id: string
+  name: string
+  parent_id: string | null
+  status: BlueprintNodeStatus
+  desc: string
+  func_addresses: string[]
+}
+
+/** 功能树（分析阶段产物，独立于蓝图，可被多蓝图复用为施工图纸） */
+export interface FeatureTree {
+  id: string
+  project_id: string
+  binary_sha256: string
+  name: string
+  nodes: FeatureTreeNode[]
+  created_at: string
+  updated_at: string
+}
+
 export interface Blueprint {
   id: string
   project_id: string
@@ -874,6 +897,7 @@ export interface Blueprint {
   status: BlueprintStatus
   content_md: string
   modules: BlueprintModule[]
+  feature_tree_id: string  // v36 引用功能树（施工图纸），''=未关联
   created_at: string
   updated_at: string
 }
@@ -897,6 +921,7 @@ export interface LogicBlock {
   name: string
   /** 业务逻辑描述（markdown） */
   description: string
+  feature_node_id: string  // v36 挂到功能树某节点下钻，''=未挂
   seq: number
   created_at: string
   updated_at: string

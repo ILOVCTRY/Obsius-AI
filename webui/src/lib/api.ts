@@ -1,7 +1,8 @@
 import type {
   Approval, Artifact, ArtifactUploadResponse, Asset, AttachmentInfo, BBEvent, BinaryOverview, BinaryStrings,
   BrowserState, BrowserStatus, BrowserSessionInfo, WorkspaceTreeResponse, HttpHistoryRow, InterceptState,
-  Blueprint, BlueprintModuleStatus, BlueprintStatus,
+  Blueprint, BlueprintModuleStatus, BlueprintNodeStatus, BlueprintStatus,
+  FeatureTree,
   IntruderPayloadSpec, IntruderTemplate, ReplayOptions, GmStatus,
   ProxyRecord, ProxyStatus, ProxyListResponse, ProxyConfigView,
   CachedFuncRow, CachedFunction, Chain, ChainLink, ChainNodeType, ChainStatus, ChainSummary,
@@ -400,14 +401,15 @@ export const api = {
   // 蓝图（R4 逆向开发管线）
   blueprints: (pid: string) => http<Blueprint[]>(`/api/projects/${pid}/blueprints`),
   createBlueprint: (pid: string, body: {
-    name: string; goal?: string; binary_sha256?: string; content_md?: string
+    name: string; goal?: string; binary_sha256?: string; content_md?: string;
+    feature_tree_id?: string
   }) =>
     http<Blueprint>(`/api/projects/${pid}/blueprints`, {
       method: "POST", body: JSON.stringify(body),
     }),
   updateBlueprint: (pid: string, bid: string, body: {
     name?: string; goal?: string; status?: BlueprintStatus;
-    content_md?: string; content_append?: string
+    content_md?: string; content_append?: string; feature_tree_id?: string
   }) =>
     http<Blueprint>(`/api/projects/${pid}/blueprints/${bid}`, {
       method: "PATCH", body: JSON.stringify(body),
@@ -420,6 +422,36 @@ export const api = {
       method: "PATCH", body: JSON.stringify(body),
     }),
 
+  // 功能树（v36：分析阶段产物，独立于蓝图，可被多蓝图复用）
+  featureTrees: (pid: string, sha?: string) => {
+    const q = sha ? `?binary_sha256=${encodeURIComponent(sha)}` : ""
+    return http<FeatureTree[]>(`/api/projects/${pid}/feature-trees${q}`)
+  },
+  featureTree: (pid: string, tid: string) =>
+    http<FeatureTree>(`/api/projects/${pid}/feature-trees/${tid}`),
+  createFeatureTree: (pid: string, body: { binary_sha256?: string; name?: string }) =>
+    http<FeatureTree>(`/api/projects/${pid}/feature-trees`, {
+      method: "POST", body: JSON.stringify(body),
+    }),
+  addFeatureNode: (pid: string, tid: string, body: {
+    name: string; parent_id?: string | null; desc?: string;
+    func_addresses?: string[]; status?: BlueprintNodeStatus
+  }) =>
+    http<FeatureTree>(`/api/projects/${pid}/feature-trees/${tid}/nodes`, {
+      method: "POST", body: JSON.stringify(body),
+    }),
+  patchFeatureNode: (pid: string, tid: string, nid: string, body: {
+    name?: string; desc?: string; status?: BlueprintNodeStatus;
+    parent_id?: string | null; func_addresses?: string[]
+  }) =>
+    http<FeatureTree>(`/api/projects/${pid}/feature-trees/${tid}/nodes/${encodeURIComponent(nid)}`, {
+      method: "PATCH", body: JSON.stringify(body),
+    }),
+  deleteFeatureNode: (pid: string, tid: string, nid: string) =>
+    http<FeatureTree>(`/api/projects/${pid}/feature-trees/${tid}/nodes/${encodeURIComponent(nid)}`, {
+      method: "DELETE",
+    }),
+
   // 业务逻辑块（逆向第四页签：函数协作/业务语义，人机共写）
   logicBlocks: (pid: string, sha?: string) => {
     const q = sha ? `?binary_sha256=${encodeURIComponent(sha)}` : ""
@@ -428,13 +460,14 @@ export const api = {
   logicBlock: (pid: string, lbid: string) =>
     http<LogicBlock>(`/api/projects/${pid}/logic-blocks/${lbid}`),
   createLogicBlock: (pid: string, body: {
-    name: string; description?: string; binary_sha256?: string
+    name: string; description?: string; binary_sha256?: string;
+    feature_node_id?: string
   }) =>
     http<LogicBlock>(`/api/projects/${pid}/logic-blocks`, {
       method: "POST", body: JSON.stringify(body),
     }),
   updateLogicBlock: (pid: string, lbid: string, body: {
-    name?: string; description?: string; seq?: number
+    name?: string; description?: string; seq?: number; feature_node_id?: string
   }) =>
     http<LogicBlock>(`/api/projects/${pid}/logic-blocks/${lbid}`, {
       method: "PATCH", body: JSON.stringify(body),

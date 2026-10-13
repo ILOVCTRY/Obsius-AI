@@ -9,7 +9,17 @@
 
 import sqlite3
 
-SCHEMA_VERSION = 34
+SCHEMA_VERSION = 36
+
+# v35→v36（功能树独立成表，2026-10-13）：功能树从 blueprints.tree 拆出为
+# feature_trees + feature_tree_nodes（分析阶段产物，与蓝图解耦）；blueprints
+# 加 feature_tree_id（引用施工图纸），logic_blocks 加 feature_node_id（下钻某
+# 功能的函数协作）。历史 blueprints.tree 数据因功能未发布无实际内容，直接 DROP。
+
+# v34→v35（蓝图功能树，2026-10-13）：blueprints 幂等补 tree（JSON 扁平节点数组
+# [{id,name,parent_id,status(pending/passed),desc,func_addresses[]}]）。功能树是
+# 蓝图的「施工图纸」——单向树状展示程序功能流向，人类验收后节点置 passed（绿），
+# 后续重建可按树推进。唯一写入口 Blackboard.*_blueprint_node。
 
 # v33→v34（测试维度面，agent-path-intent-loop M1，2026-10-09）：intents 幂等补
 # dimension（所属测试面 id，见 core/dimensions.py；''=未标面）。面覆盖判定的
@@ -348,6 +358,8 @@ CREATE INDEX IF NOT EXISTS idx_http_history_batch ON http_history(project_id, ba
 -- v17 逆向开发蓝图（R4，DESIGN §9 R4 定稿块）：从分析产物重建程序的中枢——
 -- 模块划分任务产骨架、模块深析写回 spec/notes、蓝图汇总产 content_md，
 -- ready 后派生 reconstruct 重建子任务。一个样本一个项目可有多份蓝图（重划分）。
+-- v36：功能树独立成表（feature_trees），蓝图只引用 feature_tree_id 作为施工图纸，
+-- 不再内嵌 tree（功能树是分析阶段产物，与蓝图解耦，可被多蓝图复用）。
 CREATE TABLE IF NOT EXISTS blueprints (
     id             TEXT PRIMARY KEY,
     project_id     TEXT NOT NULL REFERENCES projects(id),
@@ -357,11 +369,41 @@ CREATE TABLE IF NOT EXISTS blueprints (
     status         TEXT NOT NULL DEFAULT 'draft',  -- draft/reviewed/ready/building/built
     content_md     TEXT NOT NULL DEFAULT '',   -- 蓝图正文：数据流/接口表/算法/协议/状态机
     modules        TEXT NOT NULL DEFAULT '[]', -- JSON 数组：[{name,desc,func_addresses[],spec,notes,status}]
+    feature_tree_id TEXT NOT NULL DEFAULT '',  -- v36 引用功能树（施工图纸），''=未关联
     created_at     TEXT NOT NULL,
     updated_at     TEXT NOT NULL,
     UNIQUE(project_id, binary_sha256, name)
 );
 CREATE INDEX IF NOT EXISTS idx_blueprints_project ON blueprints(project_id, id);
+
+-- v36 功能树（逆向分析阶段产物，与蓝图解耦）：一棵样本=一棵树（也可项目级），
+-- 节点是程序功能点（单向树/森林）。人类验收后节点置 passed（绿）。
+-- 业务逻辑块可挂到某节点（feature_node_id）做函数协作下钻；蓝图可引用 feature_tree_id
+-- 作为施工图纸。唯一写入口 Blackboard.*_feature_node。
+CREATE TABLE IF NOT EXISTS feature_trees (
+    id             TEXT PRIMARY KEY,
+    project_id     TEXT NOT NULL REFERENCES projects(id),
+    binary_sha256  TEXT NOT NULL DEFAULT '',   -- 目标样本 sha256（''=项目级树）
+    name           TEXT NOT NULL DEFAULT '',   -- 树名（默认空，一个一样本一棵树）
+    created_at     TEXT NOT NULL,
+    updated_at     TEXT NOT NULL,
+    UNIQUE(project_id, binary_sha256)
+);
+CREATE INDEX IF NOT EXISTS idx_feature_trees_project ON feature_trees(project_id, binary_sha256);
+
+CREATE TABLE IF NOT EXISTS feature_tree_nodes (
+    id             TEXT PRIMARY KEY,
+    tree_id        TEXT NOT NULL REFERENCES feature_trees(id),
+    name           TEXT NOT NULL,
+    parent_id      TEXT,                       -- null=根节点；同树可多根（森林）
+    status         TEXT NOT NULL DEFAULT 'pending',  -- pending/passed（人类验收）
+    desc           TEXT NOT NULL DEFAULT '',
+    func_addresses TEXT NOT NULL DEFAULT '[]', -- JSON hex 地址数组
+    seq            INTEGER NOT NULL DEFAULT 0, -- 同层排序
+    created_at     TEXT NOT NULL,
+    updated_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ftn_tree ON feature_tree_nodes(tree_id, parent_id, seq);
 
 -- v22 意图表（渗透链路图 v3，2026-09-24）：思考/规划产物=可证伪假设。
 -- 意图必收尾：status open→closed 时 outcome_type 三选一——
@@ -439,6 +481,7 @@ CREATE TABLE IF NOT EXISTS logic_blocks (
     binary_sha256  TEXT NOT NULL DEFAULT '',   -- 目标样本 sha256（''=项目级块）
     name           TEXT NOT NULL,
     description    TEXT NOT NULL DEFAULT '',   -- 业务逻辑描述（markdown：块干什么/函数间协作/业务语义）
+    feature_node_id TEXT NOT NULL DEFAULT '',  -- v36 挂到功能树某节点（下钻该功能的函数协作），''=未挂
     seq            INTEGER NOT NULL DEFAULT 0, -- 排序
     created_at     TEXT NOT NULL,
     updated_at     TEXT NOT NULL,
@@ -594,7 +637,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
     - v32→v33：任务机制退役——DROP TABLE tasks / resource_leases（幂等
       IF EXISTS），历史任务数据一并删除。
     - v33→v34：intents 幂等补 dimension（所属测试面 id，''=未标面，见
-      core/dimensions.py）。历史行保持默认空值不回填。"""
+      core/dimensions.py）。历史行保持默认空值不回填。
+    - v34→v35：blueprints 幂等补 tree（功能树扁平节点 JSON 数组，见文件头
+      版本注释）。
+    - v35→v36：功能树独立成表——blueprints DROP tree、ADD feature_tree_id；
+      logic_blocks ADD feature_node_id；feature_trees/feature_tree_nodes 由
+      DDL IF NOT EXISTS 建表。"""
     cols = {r[1] for r in conn.execute("PRAGMA table_info(projects)")}
     if "track" not in cols:
         conn.execute("ALTER TABLE projects ADD COLUMN track TEXT NOT NULL DEFAULT ''")
@@ -620,6 +668,20 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if int_cols and "dimension" not in int_cols:  # v34（测试维度面）
         conn.execute(
             "ALTER TABLE intents ADD COLUMN dimension TEXT NOT NULL DEFAULT ''")
+    bp_cols = {r[1] for r in conn.execute("PRAGMA table_info(blueprints)")}
+    if bp_cols:
+        if "tree" in bp_cols:  # v36：功能树拆出，移除内嵌 tree 列
+            try:
+                conn.execute("ALTER TABLE blueprints DROP COLUMN tree")
+            except sqlite3.OperationalError:
+                pass  # 旧 SQLite 不支持 DROP COLUMN，留空列无害
+        if "feature_tree_id" not in bp_cols:  # v36（蓝图引用功能树）
+            conn.execute(
+                "ALTER TABLE blueprints ADD COLUMN feature_tree_id TEXT NOT NULL DEFAULT ''")
+    lb_cols = {r[1] for r in conn.execute("PRAGMA table_info(logic_blocks)")}
+    if lb_cols and "feature_node_id" not in lb_cols:  # v36（业务块挂功能节点）
+        conn.execute(
+            "ALTER TABLE logic_blocks ADD COLUMN feature_node_id TEXT NOT NULL DEFAULT ''")
     art_cols = {r[1] for r in conn.execute("PRAGMA table_info(artifacts)")}
     if art_cols and "meta" not in art_cols:  # v10（W3 产物归属元数据）
         conn.execute("ALTER TABLE artifacts ADD COLUMN meta TEXT NOT NULL DEFAULT '{}'")

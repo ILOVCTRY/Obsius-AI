@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react"
 import { api } from "@/lib/api"
-import type { LogicBlock, LogicBlockFunc, LogicBlockSummary } from "@/lib/types"
+import type { FeatureTreeNode, LogicBlock, LogicBlockFunc, LogicBlockSummary } from "@/lib/types"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { fmtDateTime, utcTitle } from "@/lib/datetime"
@@ -67,11 +67,22 @@ export function LogicBlocksView({ pid, tick, sha, onLocate }: {
   const [nName, setNName] = useState("")
   const [nSha, setNSha] = useState("")
   const [nDesc, setNDesc] = useState("")
+  const [nFeatNode, setNFeatNode] = useState("")
 
   // 详情编辑（块名+描述一起）
   const [editing, setEditing] = useState(false)
   const [nameDraft, setNameDraft] = useState("")
   const [descDraft, setDescDraft] = useState("")
+  const [featNodeDraft, setFeatNodeDraft] = useState("")
+
+  // 当前样本的功能树节点（供挂接下钻）
+  const [featNodes, setFeatNodes] = useState<FeatureTreeNode[]>([])
+  useEffect(() => {
+    if (!sha) { setFeatNodes([]); return }
+    api.featureTrees(pid, sha).then((ts) => {
+      setFeatNodes(ts[0]?.nodes ?? [])
+    }).catch(() => setFeatNodes([]))
+  }, [pid, sha, tick])
 
   // 增挂函数
   const [newAddr, setNewAddr] = useState("")
@@ -114,9 +125,10 @@ export function LogicBlocksView({ pid, tick, sha, onLocate }: {
     try {
       const d = await api.createLogicBlock(pid, {
         name, description: nDesc, binary_sha256: nSha.trim(),
+        feature_node_id: nFeatNode || undefined,
       })
       setCreating(false)
-      setNName(""); setNSha(""); setNDesc("")
+      setNName(""); setNSha(""); setNDesc(""); setNFeatNode("")
       setSelected(d.id)
       refresh()
     } catch (e) {
@@ -130,6 +142,7 @@ export function LogicBlocksView({ pid, tick, sha, onLocate }: {
     try {
       await api.updateLogicBlock(pid, detail.id, {
         name: nameDraft.trim() || detail.name, description: descDraft,
+        feature_node_id: featNodeDraft,
       })
       setEditing(false)
       refresh()
@@ -229,6 +242,17 @@ export function LogicBlocksView({ pid, tick, sha, onLocate }: {
               rows={3}
               className="w-full resize-y rounded border bg-card px-2 py-1 text-[11px] outline-none focus:ring-1 focus:ring-ring"
             />
+            {featNodes.length > 0 && (
+              <select
+                value={nFeatNode} onChange={(e) => setNFeatNode(e.target.value)}
+                className="w-full rounded border bg-card px-2 py-1 text-[11px] outline-none focus:ring-1 focus:ring-ring"
+              >
+                <option value="">不挂功能节点</option>
+                {featNodes.map((n) => (
+                  <option key={n.id} value={n.id}>下钻：{n.name}</option>
+                ))}
+              </select>
+            )}
             <div className="flex justify-end gap-1">
               <Button size="sm" variant="outline" onClick={() => setCreating(false)}>取消</Button>
               <Button size="sm" onClick={create} disabled={!nName.trim()}>建块</Button>
@@ -296,7 +320,8 @@ export function LogicBlocksView({ pid, tick, sha, onLocate }: {
               ) : (
                 <>
                   <Button size="sm" variant="outline" onClick={() => {
-                    setNameDraft(detail.name); setDescDraft(detail.description); setEditing(true)
+                    setNameDraft(detail.name); setDescDraft(detail.description);
+                    setFeatNodeDraft(detail.feature_node_id ?? ""); setEditing(true)
                   }}>
                     编辑
                   </Button>
@@ -327,6 +352,31 @@ export function LogicBlocksView({ pid, tick, sha, onLocate }: {
                   暂无描述——点「编辑」补一段（触发时机/输入输出/状态流转）；Agent 深析后也会回填。
                 </p>
               )}
+            </div>
+
+            <div className="text-[11px]">
+              {editing ? (
+                featNodes.length > 0 && (
+                  <label className="block">
+                    <span className="mb-1 block text-xs text-muted-foreground">挂到功能树节点（下钻）</span>
+                    <select
+                      value={featNodeDraft} onChange={(e) => setFeatNodeDraft(e.target.value)}
+                      className="w-full rounded border bg-card px-2 py-1 text-[11px] outline-none focus:ring-1 focus:ring-ring"
+                    >
+                      <option value="">不挂功能节点</option>
+                      {featNodes.map((n) => (
+                        <option key={n.id} value={n.id}>{n.name}</option>
+                      ))}
+                    </select>
+                  </label>
+                )
+              ) : detail.feature_node_id ? (
+                <p className="text-muted-foreground">
+                  下钻功能：<span className="text-foreground">
+                    {featNodes.find((n) => n.id === detail.feature_node_id)?.name ?? detail.feature_node_id}
+                  </span>
+                </p>
+              ) : null}
             </div>
 
             <div>

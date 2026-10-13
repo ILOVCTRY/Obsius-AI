@@ -29,6 +29,9 @@ const BlueprintsView = lazy(() =>
 // 业务逻辑块视图（函数协作/业务语义笔记）按需切包
 const LogicBlocksView = lazy(() =>
   import("./logic/LogicBlocksView").then((m) => ({ default: m.LogicBlocksView })))
+// 功能树视图（v36：分析阶段产物，独立于蓝图）按需切包
+const FeatureTreeView = lazy(() =>
+  import("./blueprints/FeatureTreeView").then((m) => ({ default: m.FeatureTreeView })))
 
 // rev-generic 逆向理解工作台（DESIGN.md §12）：
 // 样本条 + 三栏（函数浏览器｜结论+伪码｜xref/发现/笔记）。
@@ -71,7 +74,7 @@ export function ReverseWorkbench({ pid, active = true }: { pid: string; active?:
   const [delMsg, setDelMsg] = useState<string | null>(null)
 
   // subnav：逆向分析｜攻击链｜蓝图｜业务逻辑（切页不卸载分析状态，同级条件渲染）
-  const [mode, setMode] = useState<"rev" | "chains" | "blueprint" | "logic">("rev")
+  const [mode, setMode] = useState<"rev" | "chains" | "feature" | "blueprint" | "logic">("rev")
   const [rightTab, setRightTab] = useState("xref")
   const [focusFinding, setFocusFinding] = useState<string | null>(null)
 
@@ -449,9 +452,9 @@ export function ReverseWorkbench({ pid, active = true }: { pid: string; active?:
         pullProgress={pullProgress} onStopPull={handleStopPull}
         triageProgress={triageProgress} onStopTriage={handleStopTriage} triageMsg={triageMsg}
       />
-      {/* subnav：逆向分析｜攻击链｜蓝图｜业务逻辑（DESIGN §12 / §9 R4） */}
+      {/* subnav：逆向分析｜功能树｜攻击链｜蓝图｜业务逻辑（DESIGN §12 / §9 R4） */}
       <div className="flex shrink-0 items-center gap-1 border-b px-2 py-1">
-        {([["rev", "逆向分析"], ["chains", "攻击链"], ["blueprint", "蓝图"], ["logic", "业务逻辑"]] as const).map(([k, label]) => (
+        {([["rev", "逆向分析"], ["feature", "功能树"], ["chains", "攻击链"], ["blueprint", "蓝图"], ["logic", "业务逻辑"]] as const).map(([k, label]) => (
           <button
             key={k} type="button" onClick={() => setMode(k)}
             className={cn("rounded px-3 py-1 text-[11px]",
@@ -464,6 +467,10 @@ export function ReverseWorkbench({ pid, active = true }: { pid: string; active?:
       {mode === "chains" ? (
         <Suspense fallback={<div className="flex flex-1 items-center justify-center text-xs text-muted-foreground">加载攻击链视图…</div>}>
           <ChainView pid={pid} tick={tick} onLocate={locateFromChain} />
+        </Suspense>
+      ) : mode === "feature" ? (
+        <Suspense fallback={<div className="flex flex-1 items-center justify-center text-xs text-muted-foreground">加载功能树视图…</div>}>
+          <FeatureTreeView pid={pid} sha={sha} />
         </Suspense>
       ) : mode === "blueprint" ? (
         <Suspense fallback={<div className="flex flex-1 items-center justify-center text-xs text-muted-foreground">加载蓝图视图…</div>}>

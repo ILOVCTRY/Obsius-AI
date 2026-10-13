@@ -99,7 +99,7 @@ def test_schema_v7_migration(tmp_path):
     try:
         ver = board.conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
-        assert int(ver) == SCHEMA_VERSION == 34
+        assert int(ver) == SCHEMA_VERSION == 36
         int_cols = {r[1] for r in board.conn.execute("PRAGMA table_info(intents)")}
         assert "dimension" in int_cols         # v34 测试维度面
         tables = {r[0] for r in board.conn.execute(
@@ -771,7 +771,7 @@ def test_schema_v11_migration_idempotent(tmp_path):
         board = Blackboard(str(db_path))
         ver = board.conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
-        assert int(ver) == SCHEMA_VERSION == 34
+        assert int(ver) == SCHEMA_VERSION == 36
         cols = {r[1] for r in board.conn.execute("PRAGMA table_info(findings)")}
         assert "rating_basis" in cols
         assert "category" in cols  # v12（发现分两类）

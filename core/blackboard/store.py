@@ -2995,6 +2995,8 @@ class Blackboard:
     # 模块状态：pending 划分产出 → analyzed 深析完成 → specd 接口 spec 钉死 →
     # tested 容器自测通过（自测不过不得标 tested，纪律进 redlines）
     BLUEPRINT_MODULE_STATUSES = ("pending", "analyzed", "specd", "tested")
+    # 功能树节点状态：pending=未验收 / passed=人类验收通过（绿色卡片）
+    FEATURE_NODE_STATUSES = ("pending", "passed")
 
     @staticmethod
     def _normalize_modules(modules: Any) -> list[dict]:
@@ -3044,7 +3046,7 @@ class Blackboard:
     def create_blueprint(
         self, project_id: str, name: str, goal: str = "",
         binary_sha256: str = "", modules: Any = None,
-        content_md: str = "", author: str = "human",
+        content_md: str = "", feature_tree_id: str = "", author: str = "human",
     ) -> dict:
         name = str(name).strip()
         if not name:
@@ -3055,10 +3057,11 @@ class Blackboard:
             try:
                 self.conn.execute(
                     "INSERT INTO blueprints(id,project_id,binary_sha256,name,goal,"
-                    "status,content_md,modules,created_at,updated_at)"
-                    " VALUES(?,?,?,?,?,'draft',?,?,?,?)",
+                    "status,content_md,modules,feature_tree_id,created_at,updated_at)"
+                    " VALUES(?,?,?,?,?,'draft',?,?,?,?,?)",
                     (bp_id, project_id, str(binary_sha256), name, goal,
-                     content_md, json.dumps(mods, ensure_ascii=False), now(), now()),
+                     content_md, json.dumps(mods, ensure_ascii=False),
+                     str(feature_tree_id), now(), now()),
                 )
             except sqlite3.IntegrityError as e:
                 raise ValueError(
@@ -3066,7 +3069,8 @@ class Blackboard:
         self.append_event(
             project_id, "blueprint.created",
             {"blueprint_id": bp_id, "name": name, "goal": goal,
-             "binary_sha256": binary_sha256, "modules": len(mods), "status": "draft"},
+             "binary_sha256": binary_sha256, "modules": len(mods),
+             "feature_tree_id": feature_tree_id, "status": "draft"},
             author=author,
         )
         d = self.get_blueprint(project_id, bp_id)
@@ -3088,11 +3092,12 @@ class Blackboard:
         self, project_id: str, bp_id: str, *,
         content_md: Any = UNSET, content_append: Any = UNSET,
         goal: Any = UNSET, name: Any = UNSET,
-        modules_set: Any = UNSET, author: str = "human",
+        modules_set: Any = UNSET, feature_tree_id: Any = UNSET,
+        author: str = "human",
     ) -> dict | None:
         """蓝图分区更新。content_append=追加正文（深析/汇总增量写）；content_md=整体
-        替换；modules_set=整表替换模块（重划分）。Agent 侧经 tools 调本方法——
-        status 不在此处（走 set_blueprint_status，Agent 无入口）。"""
+        替换；modules_set=整表替换模块（重划分）；feature_tree_id=关联施工图纸。
+        Agent 侧经 tools 调本方法——status 不在此处（走 set_blueprint_status，Agent 无入口）。"""
         row = self._owned_blueprint(project_id, bp_id)
         if row is None:
             return None
@@ -3114,6 +3119,10 @@ class Blackboard:
             sets.append("modules=?")
             args.append(json.dumps(mods, ensure_ascii=False))
             changed["modules"] = len(mods)
+        if feature_tree_id is not UNSET:
+            sets.append("feature_tree_id=?")
+            args.append(str(feature_tree_id or ""))
+            changed["feature_tree_id"] = str(feature_tree_id or "")
         if not sets:
             return self._bp_row_to_dict(row)
         sets.append("updated_at=?"); args.append(now()); args.append(bp_id)
@@ -3196,6 +3205,220 @@ class Blackboard:
         )
         return self.get_blueprint(project_id, bp_id)
 
+    # ---------- 功能树（v36：分析阶段产物，独立于蓝图，可被多蓝图复用） ----------
+
+    def _owned_feature_tree(self, project_id: str, tree_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM feature_trees WHERE id=? AND project_id=?",
+            (tree_id, project_id),
+        ).fetchone()
+
+    def _ftn_row_to_dict(self, row: sqlite3.Row) -> dict:
+        d = _row_to_dict(row) or {}
+        d["func_addresses"] = _loads(d.get("func_addresses", "[]"), [])
+        d["parent_id"] = d.get("parent_id") or None
+        return d
+
+    def _load_feature_nodes(self, tree_id: str) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM feature_tree_nodes WHERE tree_id=? ORDER BY parent_id, seq, rowid",
+            (tree_id,),
+        ).fetchall()
+        return [self._ftn_row_to_dict(r) for r in rows]
+
+    def list_feature_trees(self, project_id: str,
+                           binary_sha256: str | None = None) -> list[dict]:
+        q = "SELECT * FROM feature_trees WHERE project_id=?"
+        args: list = [project_id]
+        if binary_sha256 is not None:
+            q += " AND binary_sha256=?"
+            args.append(binary_sha256)
+        q += " ORDER BY updated_at DESC"
+        rows = self.conn.execute(q, args).fetchall()
+        out = []
+        for r in rows:
+            d = _row_to_dict(r) or {}
+            d["nodes"] = self._load_feature_nodes(r["id"])
+            out.append(d)
+        return out
+
+    def get_feature_tree(self, project_id: str, tree_id: str) -> dict | None:
+        row = self._owned_feature_tree(project_id, tree_id)
+        if row is None:
+            return None
+        d = _row_to_dict(row) or {}
+        d["nodes"] = self._load_feature_nodes(tree_id)
+        return d
+
+    def create_feature_tree(self, project_id: str, binary_sha256: str = "",
+                            name: str = "", author: str = "human") -> dict:
+        """每项目每样本最多一棵树（UNIQUE 约束）；已存在则返回既有树。"""
+        name = str(name).strip()
+        existing = self.conn.execute(
+            "SELECT id FROM feature_trees WHERE project_id=? AND binary_sha256=?",
+            (project_id, binary_sha256),
+        ).fetchone()
+        if existing:
+            return self.get_feature_tree(project_id, existing["id"])  # type: ignore[return-value]
+        tree_id = new_id("ft")
+        with self._tx():
+            self.conn.execute(
+                "INSERT INTO feature_trees(id,project_id,binary_sha256,name,created_at,updated_at)"
+                " VALUES(?,?,?,?,?,?)",
+                (tree_id, project_id, binary_sha256, name, now(), now()),
+            )
+        self.append_event(
+            project_id, "feature_tree.created",
+            {"feature_tree_id": tree_id, "binary_sha256": binary_sha256},
+            author=author,
+        )
+        return self.get_feature_tree(project_id, tree_id)  # type: ignore[return-value]
+
+    def add_feature_node(
+        self, project_id: str, tree_id: str, name: str,
+        parent_id: str | None = None, desc: str = "",
+        func_addresses: list[str] | None = None, status: str = "pending",
+        author: str = "human",
+    ) -> dict:
+        """新增功能树节点。parent_id=None 为根；同树可多根（森林）。"""
+        if self._owned_feature_tree(project_id, tree_id) is None:
+            raise LookupError(f"功能树不存在: {tree_id}")
+        name = str(name).strip()
+        if not name:
+            raise ValueError("节点 name 不能为空")
+        if status not in self.FEATURE_NODE_STATUSES:
+            raise ValueError(f"非法节点状态: {status}")
+        if parent_id is not None:
+            par = self.conn.execute(
+                "SELECT id FROM feature_tree_nodes WHERE id=? AND tree_id=?",
+                (parent_id, tree_id),
+            ).fetchone()
+            if par is None:
+                raise ValueError(f"父节点不存在: {parent_id}")
+        node_id = new_id("fn")
+        with self._tx():
+            self.conn.execute(
+                "INSERT INTO feature_tree_nodes(id,tree_id,name,parent_id,status,desc,"
+                "func_addresses,seq,created_at,updated_at)"
+                " VALUES(?,?,?,?,?,?,?,0,?,?)",
+                (node_id, tree_id, name, parent_id, status, str(desc),
+                 json.dumps([str(a) for a in (func_addresses or [])], ensure_ascii=False),
+                 now(), now()),
+            )
+        self.append_event(
+            project_id, "feature_node.added",
+            {"feature_tree_id": tree_id, "node_id": node_id, "name": name,
+             "parent_id": parent_id},
+            author=author,
+        )
+        return self.get_feature_tree(project_id, tree_id)  # type: ignore[return-value]
+
+    def update_feature_node(
+        self, project_id: str, tree_id: str, node_id: str, *,
+        name: Any = UNSET, desc: Any = UNSET, status: Any = UNSET,
+        parent_id: Any = UNSET, func_addresses: Any = UNSET,
+        author: str = "human",
+    ) -> dict:
+        """分区更新节点。改 parent_id 校验目标存在且不构成环。"""
+        if self._owned_feature_tree(project_id, tree_id) is None:
+            raise LookupError(f"功能树不存在: {tree_id}")
+        row = self.conn.execute(
+            "SELECT * FROM feature_tree_nodes WHERE id=? AND tree_id=?",
+            (node_id, tree_id),
+        ).fetchone()
+        if row is None:
+            raise LookupError(f"节点不存在: {node_id}")
+        sets, args, changed = [], [], {}
+        if name is not UNSET:
+            nm = str(name).strip()
+            if not nm:
+                raise ValueError("节点 name 不能为空")
+            sets.append("name=?"); args.append(nm); changed["name"] = nm
+        if desc is not UNSET:
+            sets.append("desc=?"); args.append(str(desc)); changed["desc"] = True
+        if status is not UNSET:
+            if status not in self.FEATURE_NODE_STATUSES:
+                raise ValueError(f"非法节点状态: {status}")
+            sets.append("status=?"); args.append(status); changed["status"] = status
+        if parent_id is not UNSET:
+            pid = str(parent_id or "") or None
+            if pid is not None:
+                # 防环：新父不能是自身或自身后代
+                descendants = {node_id}
+                changed_flag = True
+                while changed_flag:
+                    changed_flag = False
+                    rows2 = self.conn.execute(
+                        "SELECT id, parent_id FROM feature_tree_nodes WHERE tree_id=?",
+                        (tree_id,),
+                    ).fetchall()
+                    for r in rows2:
+                        if r["parent_id"] in descendants and r["id"] not in descendants:
+                            descendants.add(r["id"]); changed_flag = True
+                if pid in descendants:
+                    raise ValueError("不能将节点挂到自身或自身后代下")
+                par = self.conn.execute(
+                    "SELECT id FROM feature_tree_nodes WHERE id=? AND tree_id=?",
+                    (pid, tree_id),
+                ).fetchone()
+                if par is None:
+                    raise ValueError(f"父节点不存在: {pid}")
+            sets.append("parent_id=?"); args.append(pid); changed["parent_id"] = pid
+        if func_addresses is not UNSET:
+            if not isinstance(func_addresses, list):
+                raise ValueError("func_addresses 必须是数组")
+            sets.append("func_addresses=?")
+            args.append(json.dumps([str(a) for a in func_addresses], ensure_ascii=False))
+            changed["func_addresses"] = len(func_addresses)
+        if not sets:
+            return self.get_feature_tree(project_id, tree_id)  # type: ignore[return-value]
+        sets.append("updated_at=?"); args.append(now()); args.append(node_id)
+        with self._tx():
+            self.conn.execute(
+                f"UPDATE feature_tree_nodes SET {', '.join(sets)} WHERE id=?", args)
+        self.append_event(
+            project_id, "feature_node.updated",
+            {"feature_tree_id": tree_id, "node_id": node_id, **changed},
+            author=author,
+        )
+        return self.get_feature_tree(project_id, tree_id)  # type: ignore[return-value]
+
+    def delete_feature_node(
+        self, project_id: str, tree_id: str, node_id: str, author: str = "human",
+    ) -> dict:
+        """删除节点及其所有后代（级联）。"""
+        if self._owned_feature_tree(project_id, tree_id) is None:
+            raise LookupError(f"功能树不存在: {tree_id}")
+        row = self.conn.execute(
+            "SELECT id FROM feature_tree_nodes WHERE id=? AND tree_id=?",
+            (node_id, tree_id),
+        ).fetchone()
+        if row is None:
+            raise LookupError(f"节点不存在: {node_id}")
+        remove = {node_id}
+        changed_flag = True
+        while changed_flag:
+            changed_flag = False
+            rows = self.conn.execute(
+                "SELECT id, parent_id FROM feature_tree_nodes WHERE tree_id=?",
+                (tree_id,),
+            ).fetchall()
+            for r in rows:
+                if r["parent_id"] in remove and r["id"] not in remove:
+                    remove.add(r["id"]); changed_flag = True
+        placeholders = ",".join("?" for _ in remove)
+        with self._tx():
+            self.conn.execute(
+                f"DELETE FROM feature_tree_nodes WHERE id IN ({placeholders})",
+                list(remove))
+        self.append_event(
+            project_id, "feature_node.deleted",
+            {"feature_tree_id": tree_id, "node_id": node_id,
+             "removed_count": len(remove)},
+            author=author,
+        )
+        return self.get_feature_tree(project_id, tree_id)  # type: ignore[return-value]
+
     # ---------- 业务逻辑块（逆向第四页签：函数协作/业务语义，人机共写） ----------
 
     @staticmethod
@@ -3243,7 +3466,8 @@ class Blackboard:
 
     def create_logic_block(
         self, project_id: str, name: str, description: str = "",
-        binary_sha256: str = "", seq: int = 0, author: str = "human",
+        binary_sha256: str = "", seq: int = 0,
+        feature_node_id: str = "", author: str = "human",
     ) -> dict:
         name = str(name).strip()
         if not name:
@@ -3253,16 +3477,17 @@ class Blackboard:
             try:
                 self.conn.execute(
                     "INSERT INTO logic_blocks(id,project_id,binary_sha256,name,description,"
-                    "seq,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                    "feature_node_id,seq,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
                     (lb_id, project_id, str(binary_sha256), name,
-                     str(description), int(seq), now(), now()),
+                     str(description), str(feature_node_id), int(seq), now(), now()),
                 )
             except sqlite3.IntegrityError as e:
                 raise ValueError(
                     f"同项目同样本下业务块重名: {name}（换名或复用既有块）") from e
         self.append_event(
             project_id, "logic_block.created",
-            {"logic_block_id": lb_id, "name": name, "binary_sha256": binary_sha256},
+            {"logic_block_id": lb_id, "name": name, "binary_sha256": binary_sha256,
+             "feature_node_id": feature_node_id},
             author=author,
         )
         d = self.get_logic_block(project_id, lb_id)
@@ -3300,6 +3525,7 @@ class Blackboard:
     def update_logic_block(
         self, project_id: str, lb_id: str, *,
         name: Any = UNSET, description: Any = UNSET, seq: Any = UNSET,
+        feature_node_id: Any = UNSET,
         author: str = "human",
     ) -> dict | None:
         """分区更新（UNSET 哨兵：未传不覆盖）。"""
@@ -3321,6 +3547,10 @@ class Blackboard:
             sets.append("seq=?")
             args.append(int(seq))
             changed["seq"] = int(seq)
+        if feature_node_id is not UNSET:
+            sets.append("feature_node_id=?")
+            args.append(str(feature_node_id or ""))
+            changed["feature_node_id"] = str(feature_node_id or "")
         if not sets:
             return self.get_logic_block(project_id, lb_id)
         sets.append("updated_at=?")

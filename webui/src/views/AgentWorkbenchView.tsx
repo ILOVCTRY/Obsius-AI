@@ -279,14 +279,22 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
     }
     const byId = new Map<string, LiveTool>()
     const legacy: LiveTool[] = []
+    // start 事件时刻（2026-10-13 修「已运行 0s」）：会话流里的挂起工具行靠它计时，
+    // 之前只有底部实时行带时刻、持久化行没传 startedAt → 挂起工具永远显示 0s。
+    const startAtById = new Map<string, string>()
+    const legacyStarts: { name?: string; args_head?: string; created_at: string }[] = []
     for (const e of events) {
       if (e.kind !== "chat.tool") continue
       const p = e.payload as LiveTool & { thread_id?: string }
       if (p?.thread_id !== tid) continue
       if (p.tool_call_id) byId.set(p.tool_call_id, p)
       else legacy.push(p)
+      if (p.phase === "start") {
+        if (p.tool_call_id) startAtById.set(p.tool_call_id, e.created_at)
+        else legacyStarts.push({ name: p.name, args_head: p.args_head, created_at: e.created_at })
+      }
     }
-    return { byId, legacy }
+    return { byId, legacy, startAtById, legacyStarts }
   }, [events, tid])
   // 底部实时工具行（「运行中」）判据（2026-10-13 修「重启后幽灵运行中」）：只认
   // 「本线程最近一条 chat.tool 事件是 start」且该 tool_call_id **尚无持久化结果行**。
@@ -685,6 +693,9 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
                       ? <ThinkingBlock key={r.id} content={r.content} />
                       : <ToolBlock key={r.id} name={r.name} args={r.args}
                           result={r.result}
+                          startedAt={liveTools.startAtById.get(r.id)
+                            ?? liveTools.legacyStarts.find((p) => p.name === r.name
+                              && p.args_head === JSON.stringify(r.args ?? {}).slice(0, 300))?.created_at}
                           done={r.done || liveTools.byId.get(r.id)?.phase === "done"}
                           live={liveTools.byId.get(r.id)
                             ?? liveTools.legacy.find((p) => p.name === r.name
@@ -1306,11 +1317,12 @@ function ToolBlock({ name, args, argsHead, result, done, live, startedAt }: {
 }) {
   const [open, setOpen] = useState(false)
   // 运行中逐秒刷新「已运行 Ns」（2026-10-13）：替代静态「运行中」，长工具（MCP 全量
-  // 分诊可达数十秒）能看出在跑而非卡死。结束/无起始时刻即停表。
+  // 分诊可达数十秒）能看出在跑而非卡死。结束/无起始时刻即停表。起始时刻必须走
+  // parseTs（后端 naive ISO 按 UTC 解析），裸 new Date 会按本地时区算出负差 → 恒 0s。
   const [elapsed, setElapsed] = useState(0)
   useEffect(() => {
     if (done || !startedAt) return
-    const t0 = new Date(startedAt).getTime()
+    const t0 = parseTs(startedAt).getTime()
     const tick = () => setElapsed(
       Number.isNaN(t0) ? 0 : Math.max(0, Math.floor((Date.now() - t0) / 1000)))
     tick()
@@ -1333,7 +1345,9 @@ function ToolBlock({ name, args, argsHead, result, done, live, startedAt }: {
         <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-muted-foreground/70">
           {args ? JSON.stringify(args).slice(0, 140) : argsHead ?? ""}
         </span>
-        {!done && <span className="shrink-0 font-mono text-[9px] text-primary">已运行 {elapsed}s</span>}
+        {!done && <span className="shrink-0 font-mono text-[9px] text-primary">
+          {startedAt ? `已运行 ${elapsed}s` : "运行中"}
+        </span>}
         {done && live && <span className="shrink-0 font-mono text-[9px] text-muted-foreground/60">{live.duration_s ?? "?"}s</span>}
         {done && <ChevronDown size={12} className={cn("shrink-0 text-muted-foreground transition-transform", open && "rotate-180")} />}
       </button>

@@ -1666,17 +1666,20 @@ class ToolDispatcher:
 
     def _tool_bb_blueprint_create(self, name: str, goal: str = "",
                                   binary_sha256: str = "",
-                                  modules: list[dict] | None = None) -> str:
+                                  modules: list[dict] | None = None,
+                                  feature_tree_id: str = "") -> str:
         try:
             r = self.bb.create_blueprint(
                 self.project_id, name, goal=goal, binary_sha256=binary_sha256,
-                modules=modules, author=self.author)
+                modules=modules, feature_tree_id=feature_tree_id, author=self.author)
         except ValueError as e:
             return f"[错误] {e}"
         self.last_progress_step = self._step
         names = "、".join(m["name"] for m in r["modules"])
         mod_note = f"（{names}）" if names else ""
+        ft_note = f" feature_tree={r.get('feature_tree_id', '')}" if r.get("feature_tree_id") else ""
         return (f"blueprint={r['id']} status=draft modules={len(r['modules'])}{mod_note}"
+                f"{ft_note}"
                 "——继续 bb_blueprint_update 补 spec/notes，整体 status 由人类流转")
 
     def _tool_bb_blueprint_update(self, blueprint_id: str,
@@ -1687,6 +1690,7 @@ class ToolDispatcher:
                                   func_addresses: list[str] | None = None,
                                   module_status: str | None = None,
                                   modules_set: list[dict] | None = None,
+                                  feature_tree_id: str | None = None,
                                   content_append: str | None = None,
                                   content_md: str | None = None) -> str:
         try:
@@ -1713,7 +1717,8 @@ class ToolDispatcher:
                     self.project_id, blueprint_id, author=self.author,
                     content_md=content_md if content_md is not None else UNSET,
                     content_append=content_append if content_append is not None else UNSET,
-                    modules_set=modules_set if modules_set is not None else UNSET)
+                    modules_set=modules_set if modules_set is not None else UNSET,
+                    feature_tree_id=feature_tree_id if feature_tree_id is not None else UNSET)
         except LookupError as e:
             return f"[错误] {e}"
         except ValueError as e:
@@ -1723,13 +1728,79 @@ class ToolDispatcher:
         self.last_progress_step = self._step
         return f"blueprint={r['id']} updated（modules={len(r['modules'])}）"
 
+    def _tool_bb_feature_tree_create(self, binary_sha256: str = "",
+                                     name: str = "") -> str:
+        """建/取该样本的功能树（每项目每样本唯一）。分析阶段先建树再下钻，
+        避免重复分析；后续蓝图可引用 feature_tree_id 作为施工图纸。"""
+        try:
+            r = self.bb.create_feature_tree(
+                self.project_id, binary_sha256=binary_sha256,
+                name=name, author=self.author)
+        except ValueError as e:
+            return f"[错误] {e}"
+        self.last_progress_step = self._step
+        return (f"feature_tree={r['id']} nodes={len(r.get('nodes', []))}"
+                "——用 bb_feature_node add 增功能节点（Agent 不可改 status，验收是人类职责）")
+
+    def _tool_bb_feature_node(self, tree_id: str, op: str,
+                              name: str = "", node_id: str = "",
+                              parent_id: str | None = None,
+                              desc: str = "",
+                              func_addresses: list[str] | None = None) -> str:
+        """功能树节点操作（分析阶段产物）。op=add/update/delete。
+        - add: 必传 name，parent_id=None 为根；返回新节点 id
+        - update: 必传 node_id，可改 name/desc/parent_id/func_addresses
+          （Agent **不可**改 status——通过验收是人类职责）
+        - delete: 必传 node_id，级联删除子节点"""
+        bb = self.bb
+        try:
+            if op == "add":
+                r = bb.add_feature_node(
+                    self.project_id, tree_id, name, parent_id=parent_id,
+                    desc=desc, func_addresses=func_addresses or [],
+                    author=self.author)
+                nid = next(n["id"] for n in r["nodes"]
+                           if n["name"] == name and n.get("parent_id") == parent_id)
+                return f"node={nid} added to feature_tree={tree_id}"
+            if op == "update":
+                if not node_id:
+                    return "[错误] update 需 node_id"
+                kw: dict[str, Any] = {}
+                if name:
+                    kw["name"] = name
+                if desc != "":
+                    kw["desc"] = desc
+                if parent_id is not None or parent_id == "":
+                    kw["parent_id"] = parent_id or None
+                if func_addresses is not None:
+                    kw["func_addresses"] = func_addresses
+                if not kw:
+                    return "[错误] update 至少需一个可改字段（name/desc/parent_id/func_addresses）"
+                bb.update_feature_node(
+                    self.project_id, tree_id, node_id,
+                    author=self.author, **kw)
+                return f"node={node_id} updated"
+            if op == "delete":
+                if not node_id:
+                    return "[错误] delete 需 node_id"
+                bb.delete_feature_node(
+                    self.project_id, tree_id, node_id, author=self.author)
+                return f"node={node_id} deleted（含子节点）"
+            return f"[错误] 未知 op: {op}（允许 add/update/delete）"
+        except LookupError as e:
+            return f"[错误] {e}"
+        except ValueError as e:
+            return f"[错误] {e}"
+
     def _tool_bb_logic_block_create(self, name: str, binary_sha256: str,
                                     description: str = "",
-                                    funcs: list[dict] | None = None) -> str:
+                                    funcs: list[dict] | None = None,
+                                    feature_node_id: str = "") -> str:
         try:
             r = self.bb.create_logic_block(
                 self.project_id, name, description=description,
-                binary_sha256=binary_sha256, author=self.author)
+                binary_sha256=binary_sha256, feature_node_id=feature_node_id,
+                author=self.author)
             fails: list[str] = []
             for f in funcs or []:
                 try:
@@ -1750,7 +1821,8 @@ class ToolDispatcher:
                                     description: str | None = None,
                                     add_funcs: list[dict] | None = None,
                                     func_roles: list[dict] | None = None,
-                                    remove_addresses: list[str] | None = None) -> str:
+                                    remove_addresses: list[str] | None = None,
+                                    feature_node_id: str | None = None) -> str:
         try:
             r = self.bb.get_logic_block(self.project_id, block_id)
             if r is None:
@@ -1761,6 +1833,11 @@ class ToolDispatcher:
                     self.project_id, block_id, description=description,
                     author=self.author)
                 changed.append("description")
+            if feature_node_id is not None:
+                self.bb.update_logic_block(
+                    self.project_id, block_id, feature_node_id=feature_node_id,
+                    author=self.author)
+                changed.append(f"feature_node={feature_node_id or '(none)'}")
             for f in add_funcs or []:
                 try:
                     self.bb.add_logic_block_func(

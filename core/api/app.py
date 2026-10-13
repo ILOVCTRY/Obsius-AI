@@ -506,6 +506,7 @@ class BlueprintIn(BaseModel):
     binary_sha256: str = ""
     modules: list[BlueprintModuleIn] = []
     content_md: str = ""
+    feature_tree_id: str = ""
 
 
 class BlueprintPatchIn(BaseModel):
@@ -539,6 +540,7 @@ class LogicBlockIn(BaseModel):
     description: str = ""
     binary_sha256: str = ""
     seq: int = 0
+    feature_node_id: str = ""  # v36 挂到功能树某节点下钻
 
 
 class LogicBlockPatchIn(BaseModel):
@@ -546,6 +548,7 @@ class LogicBlockPatchIn(BaseModel):
     name: str | None = None
     description: str | None = None
     seq: int | None = None
+    feature_node_id: str | None = None  # v36 挂到功能树某节点下钻
 
 
 class LogicBlockFuncIn(BaseModel):
@@ -4823,7 +4826,8 @@ def create_app(
             return bb.create_blueprint(
                 pid, body.name, goal=body.goal, binary_sha256=body.binary_sha256,
                 modules=[m.model_dump() for m in body.modules],
-                content_md=body.content_md, author="human")
+                content_md=body.content_md,
+                feature_tree_id=body.feature_tree_id, author="human")
         except ValueError as e:  # 重名/模块非法 → 422
             raise HTTPException(422, str(e)) from e
 
@@ -4868,6 +4872,78 @@ def create_app(
             raise HTTPException(404, f"蓝图不存在: {bid}")
         return row
 
+    # ---------- 功能树（v36：分析阶段产物，独立于蓝图） ----------
+
+    class FeatureNodeIn(BaseModel):
+        name: str
+        parent_id: str | None = None
+        desc: str = ""
+        func_addresses: list[str] = []
+        status: str = "pending"
+
+    class FeatureNodePatchIn(BaseModel):
+        name: str | None = None
+        desc: str | None = None
+        status: str | None = None
+        parent_id: str | None = None
+        func_addresses: list[str] | None = None
+
+    @app.get("/api/projects/{pid}/feature-trees")
+    def list_feature_trees(pid: str, binary_sha256: str | None = None):
+        return _project(pid).bb.list_feature_trees(pid, binary_sha256=binary_sha256)
+
+    @app.get("/api/projects/{pid}/feature-trees/{tid}")
+    def get_feature_tree(pid: str, tid: str):
+        row = _project(pid).bb.get_feature_tree(pid, tid)
+        if row is None:
+            raise HTTPException(404, f"功能树不存在: {tid}")
+        return row
+
+    @app.post("/api/projects/{pid}/feature-trees", status_code=201)
+    def create_feature_tree(pid: str, body: dict):
+        bb = _project(pid).bb
+        try:
+            return bb.create_feature_tree(
+                pid, binary_sha256=str(body.get("binary_sha256", "")),
+                name=str(body.get("name", "")), author="human")
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+
+    @app.post("/api/projects/{pid}/feature-trees/{tid}/nodes", status_code=201)
+    def add_feature_node(pid: str, tid: str, body: FeatureNodeIn):
+        bb = _project(pid).bb
+        try:
+            return bb.add_feature_node(
+                pid, tid, body.name, parent_id=body.parent_id,
+                desc=body.desc, func_addresses=body.func_addresses,
+                status=body.status, author="human")
+        except LookupError as e:
+            raise HTTPException(404, str(e)) from e
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+
+    @app.patch("/api/projects/{pid}/feature-trees/{tid}/nodes/{nid}")
+    def patch_feature_node(pid: str, tid: str, nid: str,
+                           body: FeatureNodePatchIn):
+        bb = _project(pid).bb
+        try:
+            return bb.update_feature_node(
+                pid, tid, nid, author="human",
+                **body.model_dump(exclude_unset=True))
+        except LookupError as e:
+            raise HTTPException(404, str(e)) from e
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+
+    @app.delete("/api/projects/{pid}/feature-trees/{tid}/nodes/{nid}")
+    def delete_feature_node(pid: str, tid: str, nid: str):
+        bb = _project(pid).bb
+        try:
+            return bb.delete_feature_node(pid, tid, nid, author="human")
+        except LookupError as e:
+            raise HTTPException(404, str(e)) from e
+
+
     # ---------- 业务逻辑块（逆向第四页签：函数协作/业务语义，人机共写） ----------
 
     @app.get("/api/projects/{pid}/logic-blocks")
@@ -4880,7 +4956,8 @@ def create_app(
         try:
             return bb.create_logic_block(
                 pid, body.name, description=body.description,
-                binary_sha256=body.binary_sha256, seq=body.seq, author="human")
+                binary_sha256=body.binary_sha256, seq=body.seq,
+                feature_node_id=body.feature_node_id, author="human")
         except ValueError as e:  # 空名/同项目同样本重名 → 422
             raise HTTPException(422, str(e)) from e
 
