@@ -5,10 +5,10 @@ export interface ProjectMeta {
   name: string
   /** 场景轨（单选）；旧项目 domain 由后端读取时透明映射 */
   track: string
-  /** 知识可见能力包（多选）：有专家绑定时=caps_effective 推导面，未绑定=盘上绑定 */
-  capabilities: string[]
-  /** 盘上原始绑定能力包（设置页跟随项目缺省用；2026-09-24） */
-  capabilities_bound?: string[]
+  /** kb 可见方向：有专家绑定时=专家 knowledge 面推导，未绑定=盘上绑定 */
+  directions: string[]
+  /** 盘上原始绑定（设置页跟随项目缺省用） */
+  directions_bound?: string[]
   /** 专家组队（expert-pool M2）：空/缺省=存量直通（按轨全池），非空=绑定清单 */
   experts?: string[]
   created_at: string
@@ -172,6 +172,7 @@ export interface IntentInfo {
   statement: string
   target_asset_id: string | null
   basis_refs: string[]
+  dimension: string          // v34：所属测试面 id，''=未标面
   status: "open" | "closed"
   outcome_type: IntentOutcome
   outcome_refs: string[]
@@ -358,6 +359,15 @@ export interface SampleTargetAnalyzeResponse {
   binary_asset_id?: string
 }
 
+// 登记为资产（2026-10-12）：包内 PE/ELF/Mach-O 目标登记为 binary 黑板资产（不复制文件）
+export interface SampleTargetRegisterResponse {
+  binary_sha256: string
+  binary_asset_id: string
+  target_id: string
+  path: string
+  filename: string
+}
+
 export interface SamplePackageUploadSession {
   upload_id: string
   filename: string
@@ -519,13 +529,6 @@ export interface XrefData {
   callees: XrefRef[]
   /** 缓存缺席由 MCP func_profile 实时降级取回时为 "mcp" */
   source?: string
-}
-
-export interface SampleUploadResponse {
-  cached: boolean
-  job_id: string | null
-  sha: string
-  asset_id: string
 }
 
 export interface ArtifactUploadResponse {
@@ -1029,8 +1032,6 @@ export interface TrackProfile {
 
 export interface SkillDef {
   name: string
-  kind: "capability" | "track"
-  pack: string // 能力包名或场景轨名
   description: string
   keywords: string[]
   features: string[]
@@ -1062,18 +1063,9 @@ export interface SkillResource {
   content: string
 }
 
-export interface SkillCatalogPackage {
-  name: string
-  label: string
+export interface SkillCatalog {
   skills: SkillDef[]
   skill_count: number
-  estimated_tokens: number
-}
-
-export interface SkillCatalog {
-  capabilities: SkillCatalogPackage[]
-  skill_count: number
-  capability_count: number
   estimated_tokens: number
 }
 
@@ -1099,8 +1091,6 @@ export interface RouteBreakdown {
 
 export interface RouteHit {
   name: string
-  kind: string
-  pack: string
   description: string
   enabled: boolean
   score: number
@@ -1227,27 +1217,6 @@ export interface Proposal {
   decision_note: string | null
   /** 仅详情端点带（对照磁盘实时算） */
   live?: ProposalLive
-}
-
-export interface KbEvolutionSource {
-  path: string
-  source: string
-  title?: string
-  kind?: string
-  layer?: number
-  snippet?: string
-  reason?: string
-}
-
-export interface KbEvolutionDraft {
-  kind: "case" | "pattern" | "playbook"
-  title: string
-  path: string
-  content: string
-  summary: string
-  sources: { cap: string; path: string; title?: string }[]
-  path_adjusted?: boolean
-  notice?: string
 }
 
 export interface ReviewProposalsResult {
@@ -1818,6 +1787,11 @@ export interface ChatUsage {
   steps?: number
   cache_read?: number
   cache_creation?: number
+  // 累计口径（2026-10-13 缓存命中率）：跨步自加；当步键 input/cache_read/
+  // cache_creation 为最近一步。累计命中率 = cache_read_total / input_total。
+  input_total?: number
+  cache_read_total?: number
+  cache_creation_total?: number
   ctx_limit?: number
   ctx_soft?: number
   compaction?: {

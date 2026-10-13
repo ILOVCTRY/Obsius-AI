@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from core.skills.rules import KbSource, load_kb_sources
-from core.skills.taxonomy import capability_dir, track_dir
+from core.skills.taxonomy import skill_dir
 
 _PACK_WRITE_LOCK = threading.RLock()
 
@@ -491,14 +491,9 @@ def rollback_kb_file(packs_root: str | Path, cap: str, rel_path: str, version: s
 
 # ---------- 技能文件定位（提案 skill 应用复用；零 fastapi 依赖） ----------
 
-def skill_file_path(packs_root: str | Path, skill_kind: str, owner: str,
-                    skill_name: str) -> Path:
-    """技能 SKILL.md 绝对路径。skill_kind: capability|track。不做存在性承诺。"""
-    if skill_kind == "capability":
-        return capability_dir(packs_root, owner) / "skills" / skill_name / "SKILL.md"
-    if skill_kind == "track":
-        return track_dir(packs_root, owner) / "skills" / skill_name / "SKILL.md"
-    raise KbError(f"非法技能归属: {skill_kind}（仅 capability|track）")
+def skill_file_path(packs_root: str | Path, skill_name: str) -> Path:
+    """技能 SKILL.md 绝对路径（扁平：packs/kb/skills/<name>/SKILL.md）。不做存在性承诺。"""
+    return skill_dir(packs_root, skill_name) / "SKILL.md"
 
 
 def json_dump_atomic(path: Path, data: dict) -> None:

@@ -98,16 +98,13 @@ def _require(cond: bool, msg: str) -> None:
         raise ProposalError(msg)
 
 
-def _find_skill(packs_root: Path, skill_kind: str, owner: str, name: str):
+def _find_skill(packs_root: Path, name: str):
+    """按技能名定位（2026-10-13 技能扁平化：不再有 kind/owner 归属）。"""
     reg = SkillRegistry(packs_root)
     reg.load()
     sk = reg.get(name)
     if sk is None:
         raise ProposalError(f"技能不存在: {name}")
-    if sk.kind != skill_kind or sk.pack != owner:
-        raise ProposalError(
-            f"技能归属不符: {name} 是 {sk.kind}/{sk.pack}，"
-            f"提案写的是 {skill_kind}/{owner}")
     return sk
 
 
@@ -165,8 +162,8 @@ def _validate_target(packs_root: Path, p: dict, *, applying: bool) -> None:
     elif kind == "index":
         cap = t.get("cap")
         _require(cap, "index 提案必须给 target.cap")
-        _require((packs_root / "capabilities" / cap).is_dir(),
-                 f"能力包不存在: {cap}")
+        _require((packs_root / "kb" / cap).is_dir(),
+                 f"kb 方向不存在: {cap}")
         _require(mode in INDEX_MODES,
                  "index 提案仅 edit（增补全局索引中本域条目；M0 后全局单表恒存在，"
                  "create 已退役），删除归人类")
@@ -184,8 +181,7 @@ def _validate_target(packs_root: Path, p: dict, *, applying: bool) -> None:
         _require(mode in SKILL_MODES,
                  "技能提案仅 edit（改正文）或 suggest（拆分建议，产文档由人执行），"
                  "新建/改名/删除归人类直接操作")
-        sk = _find_skill(packs_root, t.get("skill_kind", "capability"),
-                         t.get("owner", ""), t.get("name", ""))
+        sk = _find_skill(packs_root, t.get("name", ""))
         if mode == "edit":
             writing._validate_content(content or "")
             meta = parse_frontmatter(content)
@@ -290,8 +286,7 @@ def _current_text(packs_root: Path, p: dict) -> str | None:
                 return routeindex.serialize_entries(dom_e)
             except Exception:  # noqa: BLE001 —— 解析失败回退全文
                 return path.read_text(encoding="utf-8")
-        sk = _find_skill(packs_root, t.get("skill_kind", "capability"),
-                         t.get("owner", ""), t.get("name", ""))
+        sk = _find_skill(packs_root, t.get("name", ""))
         return sk.path.read_text(encoding="utf-8") if sk.path.is_file() else None
     except writing.KbError:
         return None
@@ -400,8 +395,7 @@ def apply_proposal(packs_root: str | Path, pid: str, decided_by: str) -> dict:
             result = {"path": str(path),
                       "backup": backup.name if backup else None}
         else:
-            sk = _find_skill(packs_root, t.get("skill_kind", "capability"),
-                             t.get("owner", ""), t.get("name", ""))
+            sk = _find_skill(packs_root, t.get("name", ""))
             if p["mode"] == "suggest":
                 # K4 拆分建议：产建议文档落技能目录（注册表只扫 SKILL.md，不干扰路由），
                 # 由人按文档执行实际拆分

@@ -1,15 +1,33 @@
-"""能力包 × 场景轨正交分类学（DESIGN.md §4.5）。
+"""能力域 × 场景轨分类学（DESIGN.md §4.5）。
 
-- 项目绑定：project.json 的 track（单选）+ capabilities（多选）；
-  旧项目只有 domain 字段，经 LEGACY_DOMAIN_MAP 读兼容映射。
-- 物理布局：packs/capabilities/<cap>/ 与 packs/tracks/<track>/。
-- 任务类型注册表：tracks/<track>/task_types.yaml（极简行式 <type>: <noise>）。
+- 项目绑定：project.json 的 track（单选）；**能力包（多选）已退役（2026-10-13）**，
+  kb 可见方向改由绑定专家的 `knowledge` 白名单决定（见 core/skills/experts.py）。
+- 物理布局：`packs/kb/` 为唯一内容根——
+    packs/kb/skills/<skill>/          技能（扁平、Claude 风格，无包归属）
+    packs/kb/<track>/                 场景轨（track.yaml/task_types/phases/profiles/dimensions）
+    packs/kb/<方向>/                  kb 知识域（web/binary/crypto/forensics/misc/cloud）
+    packs/kb/安全红线/{轨红线,平台规则,评级与价值口径,templates}/
+- 任务类型注册表：`packs/kb/<track>/task_types.yaml`（极简行式 <type>: <noise>）。
 """
 
 from pathlib import Path
 
-CAPABILITIES_DIR = "capabilities"
-TRACKS_DIR = "tracks"
+KB_DIR = "kb"
+SKILLS_DIR = "skills"
+REDLINE_DIR = "安全红线"
+TRACK_REDLINES = "轨红线"
+PLATFORM_RULES = "平台规则"
+RATING_DIR = "评级与价值口径"
+RULE_TEMPLATES = "templates"
+
+# packs/kb/ 下的保留目录（既非 kb 方向也非场景轨）
+_KB_RESERVED = {SKILLS_DIR, REDLINE_DIR, "licenses"}
+
+# 场景轨（唯一绑定维度）
+TRACKS = ("ctf", "pentest", "redteam", "research")
+
+# kb 知识方向（原能力包名，降级为知识组织单位）
+KB_DIRECTIONS = ("web", "binary", "crypto", "forensics", "misc", "cloud")
 
 # 旧平铺领域包 → (track, capabilities) 读兼容映射（§4.5.5）
 # R1（2026-09-17）：assessment 轨分解为 pentest/redteam，本表目标轨同步更新
@@ -31,50 +49,95 @@ GENERIC_TASK_TYPE = "generic"
 def project_binding(meta: dict) -> tuple[str, list[str]]:
     """从 project.json meta 解析 (track, capabilities)。
 
-    新字段优先；只有旧 domain 时走映射；track 值 "assessment" 经
-    LEGACY_TRACK_MAP 映射为 pentest（盘上不改，读兼容）；未知 domain 轨名
-    沿用、能力包为空（调用方负责提示/兜底）。"""
+    能力包退役后第二元素恒为空列表（保留元组形状兼容既有调用方）；track 值
+    "assessment" 经 LEGACY_TRACK_MAP 映射为 pentest（盘上不改，读兼容）。"""
     track = meta.get("track")
-    caps = meta.get("capabilities")
-    if track and caps is not None:
-        t = str(track)
-        return LEGACY_TRACK_MAP.get(t, t), list(caps)
     if track:
         t = str(track)
         return LEGACY_TRACK_MAP.get(t, t), []
     domain = meta.get("domain")
     if domain in LEGACY_DOMAIN_MAP:
-        t, cs = LEGACY_DOMAIN_MAP[domain]
-        return t, list(cs)
+        t, _cs = LEGACY_DOMAIN_MAP[domain]
+        return t, []
     return LEGACY_TRACK_MAP.get(str(domain or "ctf"), str(domain or "ctf")), []
 
 
-def capability_dir(packs_root: str | Path, cap: str) -> Path:
-    return Path(packs_root) / CAPABILITIES_DIR / cap
+def kb_root(packs_root: str | Path) -> Path:
+    return Path(packs_root) / KB_DIR
+
+
+def skills_root(packs_root: str | Path) -> Path:
+    """技能根：packs/kb/skills/（每技能一个子目录）。"""
+    return kb_root(packs_root) / SKILLS_DIR
+
+
+def skill_dir(packs_root: str | Path, name: str) -> Path:
+    return skills_root(packs_root) / name
 
 
 def track_dir(packs_root: str | Path, track: str) -> Path:
-    return Path(packs_root) / TRACKS_DIR / track
+    return kb_root(packs_root) / track
+
+
+def redlines_dir(packs_root: str | Path) -> Path:
+    return kb_root(packs_root) / REDLINE_DIR / TRACK_REDLINES
+
+
+def redline_path(packs_root: str | Path, track: str) -> Path:
+    """轨红线文件：packs/kb/安全红线/轨红线/<track>.md。"""
+    return redlines_dir(packs_root) / f"{track}.md"
+
+
+def platform_rules_dir(packs_root: str | Path) -> Path:
+    """平台规则（owner 叠加规则，渗透独有）：packs/kb/安全红线/平台规则/。"""
+    return kb_root(packs_root) / REDLINE_DIR / PLATFORM_RULES
+
+
+def rating_dir(packs_root: str | Path) -> Path:
+    """评级与价值口径（渗透独有）：packs/kb/安全红线/评级与价值口径/。"""
+    return kb_root(packs_root) / REDLINE_DIR / RATING_DIR
+
+
+def rule_templates_dir(packs_root: str | Path) -> Path:
+    """四段一体规则模板：packs/kb/安全红线/templates/。"""
+    return kb_root(packs_root) / REDLINE_DIR / RULE_TEMPLATES
+
+
+def list_directions(packs_root: str | Path) -> list[str]:
+    """枚举 packs/kb/ 下的 kb 知识方向目录（排除保留目录与场景轨）。"""
+    base = kb_root(packs_root)
+    out: list[str] = []
+    if not base.is_dir():
+        return out
+    reserved = _KB_RESERVED | set(TRACKS)
+    for d in sorted(base.iterdir()):
+        if d.is_dir() and not d.name.startswith(".") and d.name not in reserved:
+            out.append(d.name)
+    return out
 
 
 def list_packs(packs_root: str | Path, kind: str) -> list[dict]:
-    """枚举能力包/场景轨元数据。kind: 'capability' | 'track'。
-
-    读各包 <pack.yaml|track.yaml> 的 label/description（缺失回退目录名）。"""
-    base = Path(packs_root) / (CAPABILITIES_DIR if kind == "capability" else TRACKS_DIR)
+    """枚举场景轨元数据（kind: 'track'）。读 packs/kb/<track>/track.yaml 的
+    label/description（缺失回退目录名）。kind='capability' 已随能力包退役返回空。"""
+    if kind != "track":
+        return []
+    base = kb_root(packs_root)
     out: list[dict] = []
     if not base.is_dir():
         return out
-    for d in sorted(p for p in base.iterdir() if p.is_dir() and not p.name.startswith(".")):
-        meta_file = d / ("pack.yaml" if kind == "capability" else "track.yaml")
-        label, description = d.name, ""
+    for name in TRACKS:
+        d = base / name
+        if not d.is_dir():
+            continue
+        meta_file = d / "track.yaml"
+        label, description = name, ""
         if meta_file.is_file():
             for line in meta_file.read_text(encoding="utf-8").splitlines():
                 if line.startswith("label:"):
                     label = line.split(":", 1)[1].strip().strip('"').strip("'")
                 elif line.startswith("description:"):
                     description = line.split(":", 1)[1].strip().strip('"').strip("'")
-        out.append({"name": d.name, "label": label, "description": description})
+        out.append({"name": name, "label": label, "description": description})
     return out
 
 

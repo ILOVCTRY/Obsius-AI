@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react"
-import { Binary, Braces, ChevronDown, ChevronRight, Code2, FileCode2, FileText, FolderOpen, MoreHorizontal, Play, RotateCcw, Search, Table2, Trash2, Upload } from "lucide-react"
+import { Binary, Braces, ChevronDown, ChevronRight, Code2, FileCode2, FileText, FolderOpen, MoreHorizontal, PackagePlus, Play, RotateCcw, Search, Table2, Trash2, Upload } from "lucide-react"
 import { api, pollJob } from "@/lib/api"
 import type { SamplePackage, SamplePackageEntry, SamplePackagePreview, SamplePackageTarget, SampleTargetAnalysis } from "@/lib/types"
 import { Button } from "@/components/ui/button"
@@ -9,6 +9,13 @@ type Filter = "all" | "candidate" | "analyzed" | "unanalyzed"
 type TreeNode = { name: string; path: string; directory: boolean; entry?: SamplePackageEntry; children: TreeNode[] }
 const binaryFormats = new Set(["pe", "elf", "mach-o"])
 const sizeText = (n: number) => n < 1024 ? n + " B" : n < 1048576 ? Math.round(n / 1024) + " KB" : (n / 1048576).toFixed(1) + " MB"
+// 绝对磁盘路径 = 内容树根（tree_ref，项目内 trees/ 绝对路径）+ 包内相对路径。
+// 分隔符跟随 tree_ref（Windows 反斜杠 / POSIX 斜杠），避免混合分隔符。
+const sampleAbsPath = (treeRef: string, relPath: string) => {
+  const sep = treeRef.includes("\\") ? "\\" : "/"
+  const base = treeRef.replace(/[\\/]+$/, "")
+  return base + sep + (sep === "\\" ? relPath.replace(/\//g, "\\") : relPath)
+}
 
 function buildTree(entries: SamplePackageEntry[]): TreeNode {
   const root: TreeNode = { name: "分析包", path: "", directory: true, children: [] }
@@ -35,13 +42,39 @@ export function SampleAnalysisView({ pid, onOpenBinary }: { pid: string; onOpenB
   const [query, setQuery] = useState("")
   const [filter, setFilter] = useState<Filter>("all")
   const [reports, setReports] = useState<Record<string, SampleTargetAnalysis | null>>({})
+  // 已登记为 binary 资产的样本 sha 集合（2026-10-12）：PE/ELF/Mach-O 不再在此页
+  // 分析，改为「登记为资产」（不复制文件），随后到逆向工作台分析。
+  const [registered, setRegistered] = useState<Set<string>>(() => new Set())
   const [busy, setBusy] = useState(false)
+  // 非二进制目标（APK/AAB/DEX/文本等）在此页「开始分析」用的引擎：固定缺省 IDA。
+  // 本页不再暴露引擎选择器（2026-10-13）——PE/ELF/Mach-O 走「登记为资产」到逆向工作台，
+  // 那里才有引擎选择；文本/Android 类目标引擎无实际意义。
+  const engine: "ida" | "ghidra" = "ida"
   const [message, setMessage] = useState<string | null>(null)
   const [moreOpen, setMoreOpen] = useState(false)
+  // 树节点右键菜单（2026-10-13）：右键 → 「打开系统目录」（explorer /select 定位）。
+  const [menu, setMenu] = useState<{ x: number; y: number; path: string } | null>(null)
   const restoredPid = useRef<string | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const folderRef = useRef<HTMLInputElement>(null)
   const refresh = () => api.currentSamplePackage(pid).then(setPkg).catch(() => setPkg(null))
+  const refreshRegistered = () => api.assets(pid)
+    .then((rows) => setRegistered(new Set(rows.filter((a) => a.type === "binary").map((a) => a.value))))
+    .catch(() => {})
+  // 右键菜单关闭：点空白/滚动/按 Esc 一律收起（菜单内点击已自行 setMenu(null)）。
+  useEffect(() => {
+    if (!menu) return
+    const close = () => setMenu(null)
+    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") setMenu(null) }
+    window.addEventListener("click", close)
+    window.addEventListener("resize", close)
+    window.addEventListener("keydown", onKey)
+    return () => {
+      window.removeEventListener("click", close)
+      window.removeEventListener("resize", close)
+      window.removeEventListener("keydown", onKey)
+    }
+  }, [menu])
   useEffect(() => {
     try {
       const saved = JSON.parse(window.localStorage.getItem(`sample-analysis:${pid}`) || "null") as { selectedPath?: string; expanded?: string[]; query?: string; filter?: Filter } | null
@@ -61,6 +94,7 @@ export function SampleAnalysisView({ pid, onOpenBinary }: { pid: string; onOpenB
     }))
   }, [pid, selectedPath, expanded, query, filter])
   useEffect(() => { void refresh() }, [pid])
+  useEffect(() => { void refreshRegistered() }, [pid])
   useEffect(() => {
     if (!pkg) return
     void Promise.all((pkg.targets || []).map(async (target) => {
@@ -99,8 +133,20 @@ export function SampleAnalysisView({ pid, onOpenBinary }: { pid: string; onOpenB
   const analyze = async (target: SamplePackageTarget) => {
     if (!pkg) return
     setBusy(true); setMessage(null)
-    try { const result = await api.analyzeSampleTarget(pid, pkg.package_id, pkg.version_id, target.target_id); if (result.job_id) await pollJob(result.job_id, () => {}, 1200); await refresh(); setMessage("分析完成") }
+    try { const result = await api.analyzeSampleTarget(pid, pkg.package_id, pkg.version_id, target.target_id, engine); if (result.job_id) await pollJob(result.job_id, () => {}, 1200); await refresh(); setMessage("分析完成") }
     catch (error) { setMessage("分析失败：" + String(error)) }
+    finally { setBusy(false) }
+  }
+  // 登记为资产（2026-10-12）：把包内 PE/ELF/Mach-O 目标登记为 binary 资产（不复制
+  // 文件），随后到逆向工作台选择该样本分析（引擎选择在那里）。
+  const register = async (target: SamplePackageTarget) => {
+    if (!pkg) return
+    setBusy(true); setMessage(null)
+    try {
+      const result = await api.registerSampleTargetAsset(pid, pkg.package_id, pkg.version_id, target.target_id)
+      await refreshRegistered()
+      setMessage(`已登记为资产：${result.filename}（到「逆向分析」选择该样本）`)
+    } catch (error) { setMessage("登记失败：" + String(error)) }
     finally { setBusy(false) }
   }
   const remove = async (path: string) => {
@@ -112,12 +158,19 @@ export function SampleAnalysisView({ pid, onOpenBinary }: { pid: string; onOpenB
   }
   const undo = async () => { setBusy(true); try { setPkg(await api.undoSamplePackage(pid)); setMessage("已撤销最近一次文件树变更") } catch (error) { setMessage("撤销失败：" + String(error)) } finally { setBusy(false) } }
   const move = async (source: string, target: string) => { if (!pkg || !source || source === target) return; setBusy(true); try { setPkg(await api.moveSamplePackageEntry(pid, source, target)); setMessage("已移动，可撤销") } catch (error) { setMessage("移动失败：" + String(error)) } finally { setBusy(false) } }
+  // 打开系统目录（2026-10-13）：内容树在项目工作区内（<项目>/trees/...），
+  // 绝对路径 = tree_ref + 包内相对路径，交后端 /files/open 的 reveal 定位。
+  const revealInExplorer = async (path: string) => {
+    if (!pkg?.tree_ref) { setMessage("该分析包未记录内容树路径"); return }
+    try { await api.openProjectFile(pid, sampleAbsPath(pkg.tree_ref, path), "reveal") }
+    catch (error) { setMessage("打开系统目录失败：" + String(error)) }
+  }
   const renderNode = (node: TreeNode, depth = 0): React.ReactNode => {
     if (!matches(node)) return null
     const open = Boolean(query.trim()) || expanded.has(node.path)
     return <div key={node.path || "root"}>
-      <div draggable={node.path !== ""} onDragStart={(event) => event.dataTransfer.setData("text/sample-path", node.path)} onDragOver={(event) => node.directory && event.preventDefault()} onDrop={(event) => { if (!node.directory) return; event.preventDefault(); const source = event.dataTransfer.getData("text/sample-path"); if (source) void move(source, node.path) }} className={cn("flex items-center gap-1 rounded px-2 py-1 text-[11px] hover:bg-accent/40", selectedPath === node.path && "bg-primary/10 text-primary")} style={{ paddingLeft: 8 + depth * 14 }} onClick={() => node.directory ? toggle(node.path) : setSelectedPath(node.path)} onDoubleClick={() => { if (!node.entry || !binaryFormats.has(node.entry.format)) return; const sha = reports[node.entry.path]?.analysis?.binary_sha256; if (typeof sha === "string") onOpenBinary(sha) }}>
-        {node.directory ? (open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />) : <span className="size-3" />} {node.directory ? <FolderOpen className="size-3.5 shrink-0" /> : node.entry?.candidate && binaryFormats.has(node.entry.format) ? <FileCode2 className="size-3.5 shrink-0" /> : <FileText className="size-3.5 shrink-0" />}<span className="min-w-0 flex-1 truncate">{node.name}</span>{node.entry && <span className="text-[9px] text-muted-foreground">{node.entry.format.toUpperCase()}</span>}{node.entry?.candidate && <span className={cn("size-1.5 rounded-full", reports[node.entry.path]?.analysis ? "bg-primary" : "bg-muted-foreground/40")} />}
+      <div draggable={node.path !== ""} onDragStart={(event) => event.dataTransfer.setData("text/sample-path", node.path)} onDragOver={(event) => node.directory && event.preventDefault()} onDrop={(event) => { if (!node.directory) return; event.preventDefault(); const source = event.dataTransfer.getData("text/sample-path"); if (source) void move(source, node.path) }} onContextMenu={(event) => { if (!node.path) return; event.preventDefault(); setMenu({ x: event.clientX, y: event.clientY, path: node.path }) }} className={cn("flex items-center gap-1 rounded px-2 py-1 text-[11px] hover:bg-accent/40", selectedPath === node.path && "bg-primary/10 text-primary")} style={{ paddingLeft: 8 + depth * 14 }} onClick={() => node.directory ? toggle(node.path) : setSelectedPath(node.path)} onDoubleClick={() => { if (!node.entry || !binaryFormats.has(node.entry.format)) return; if (node.entry.sha256 && registered.has(node.entry.sha256)) onOpenBinary(node.entry.sha256) }}>
+        {node.directory ? (open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />) : <span className="size-3" />} {node.directory ? <FolderOpen className="size-3.5 shrink-0" /> : node.entry?.candidate && binaryFormats.has(node.entry.format) ? <FileCode2 className="size-3.5 shrink-0" /> : <FileText className="size-3.5 shrink-0" />}<span className="min-w-0 flex-1 truncate">{node.name}</span>{node.entry && <span className="text-[9px] text-muted-foreground">{node.entry.format.toUpperCase()}</span>}{node.entry?.candidate && <span className={cn("size-1.5 rounded-full", (binaryFormats.has(node.entry.format) ? !!(node.entry.sha256 && registered.has(node.entry.sha256)) : !!reports[node.entry.path]?.analysis) ? "bg-primary" : "bg-muted-foreground/40")} />}
       </div>{node.directory && open && node.children.map((child) => renderNode(child, depth + 1))}
     </div>
   }
@@ -127,25 +180,42 @@ export function SampleAnalysisView({ pid, onOpenBinary }: { pid: string; onOpenB
     <input ref={fileRef} type="file" className="hidden" onChange={(event) => { if (event.target.files) void upload(event.target.files); event.target.value = "" }} /><input ref={folderRef} type="file" multiple className="hidden" {...({ webkitdirectory: "", directory: "" } as Record<string, string>)} onChange={(event) => { if (event.target.files) void upload(event.target.files); event.target.value = "" }} />
     <div className="flex gap-1 border-b p-2"><div className="relative min-w-0 flex-1"><Search className="absolute left-2 top-1.5 size-3 text-muted-foreground" /><input className="h-7 w-full rounded-md border bg-background pl-7 pr-2 text-[10px]" placeholder="搜索文件路径…" value={query} onChange={(event) => setQuery(event.target.value)} /></div><select className="h-7 rounded-md border bg-background px-1 text-[10px]" value={filter} onChange={(event) => setFilter(event.target.value as Filter)}><option value="all">全部</option><option value="candidate">可分析</option><option value="analyzed">已分析</option><option value="unanalyzed">未分析</option></select></div>
     <div className="min-h-0 flex-1 overflow-auto p-1">{pkg ? renderNode(tree) : <div className="p-6 text-center text-xs text-muted-foreground">上传文件或文件夹创建分析包</div>}</div>{message && <div className="border-t px-2 py-1 text-[10px] text-muted-foreground">{message}</div>}
-  </aside><main className="min-w-0 flex-1 overflow-auto p-6">{selectedEntry ? <Detail pid={pid} entry={selectedEntry} target={selectedTarget} report={selectedReport} busy={busy} onAnalyze={analyze} onDelete={remove} onOpenBinary={onOpenBinary} /> : <div className="flex h-full items-center justify-center text-sm text-muted-foreground">从文件树选择文件查看详情</div>}</main></div>
+  </aside><main className="min-w-0 flex-1 overflow-auto p-6">{selectedEntry ? <Detail pid={pid} entry={selectedEntry} treeRef={pkg?.tree_ref} target={selectedTarget} report={selectedReport} busy={busy} registered={!!selectedEntry.sha256 && registered.has(selectedEntry.sha256)} onAnalyze={analyze} onRegister={register} onDelete={remove} onOpenBinary={onOpenBinary} /> : <div className="flex h-full items-center justify-center text-sm text-muted-foreground">从文件树选择文件查看详情</div>}</main>{menu && <div className="fixed z-50 min-w-[150px] rounded-md border bg-popover p-1 shadow-md" style={{ left: menu.x, top: menu.y }}><button className="w-full rounded px-2 py-1.5 text-left text-[11px] hover:bg-accent" onClick={() => { const p = menu.path; setMenu(null); void revealInExplorer(p) }}>打开系统目录</button></div>}</div>
 }
 
-function Detail({ pid, entry, target, report, busy, onAnalyze, onDelete, onOpenBinary }: { pid: string; entry: SamplePackageEntry; target: SamplePackageTarget | null; report: SampleTargetAnalysis | null; busy: boolean; onAnalyze: (target: SamplePackageTarget) => void; onDelete: (path: string) => void; onOpenBinary: (sha: string) => void }) {
+function Detail({ pid, entry, treeRef, target, report, busy, registered, onAnalyze, onRegister, onDelete, onOpenBinary }: { pid: string; entry: SamplePackageEntry; treeRef?: string; target: SamplePackageTarget | null; report: SampleTargetAnalysis | null; busy: boolean; registered: boolean; onAnalyze: (target: SamplePackageTarget) => void; onRegister: (target: SamplePackageTarget) => void; onDelete: (path: string) => void; onOpenBinary: (sha: string) => void }) {
   const analysis = report?.analysis
-  const sha = typeof analysis?.binary_sha256 === "string" ? analysis.binary_sha256 : null
-  return <div className="mx-auto max-w-3xl space-y-5"><div className="flex items-start gap-3"><FileText className="mt-1 size-5 text-primary" /><div className="min-w-0 flex-1"><h2 className="break-all text-lg font-semibold">{entry.path}</h2><p className="mt-1 text-xs text-muted-foreground">{entry.format.toUpperCase()} · {sizeText(entry.size)}{entry.platform ? " · " + entry.platform : ""}</p></div><Button size="sm" variant="outline" className="gap-1" onClick={() => onDelete(entry.path)} disabled={busy}><Trash2 className="size-3.5" />删除</Button></div><section className="rounded-md border p-4"><h3 className="mb-3 text-xs font-medium">文件信息</h3><dl className="grid grid-cols-[120px_1fr] gap-y-2 text-xs"><dt className="text-muted-foreground">路径</dt><dd className="break-all font-mono">{entry.path}</dd><dt className="text-muted-foreground">SHA-256</dt><dd className="break-all font-mono">{entry.sha256 || "未记录"}</dd><dt className="text-muted-foreground">分析状态</dt><dd>{analysis ? String(analysis.status || "已分析") : entry.candidate ? "未分析" : "无需分析"}</dd></dl></section><FilePreview pid={pid} entry={entry} />{target && <section className="rounded-md border p-4"><div className="mb-3 flex items-center justify-between"><h3 className="text-xs font-medium">分析操作</h3><span className="text-[10px] text-muted-foreground">{target.analyzers.join(" · ")}</span></div><div className="flex gap-2"><Button size="sm" className="gap-1" disabled={busy} onClick={() => onAnalyze(target)}><Play className="size-3.5" />开始分析</Button>{sha && <Button size="sm" variant="outline" onClick={() => onOpenBinary(sha)}>打开逆向工作台</Button>}</div></section>}{analysis && <AndroidDetails format={entry.format} analysis={analysis} />}{analysis && !["apk", "aab", "dex"].includes(entry.format) && <section className="rounded-md border p-4"><h3 className="mb-3 text-xs font-medium">分析摘要</h3><pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded bg-muted/30 p-3 font-mono text-[10px]">{JSON.stringify(analysis, null, 2)}</pre></section>}</div>
+  // PE/ELF/Mach-O：本页只登记为资产（不复制文件），分析在逆向工作台（sha=文件 sha）。
+  const isBinary = binaryFormats.has(entry.format)
+  const sha = isBinary ? (entry.sha256 || null) : (typeof analysis?.binary_sha256 === "string" ? analysis.binary_sha256 : null)
+  const absPath = treeRef ? sampleAbsPath(treeRef, entry.path) : null
+  return <div className="mx-auto max-w-3xl space-y-5"><div className="flex items-start gap-3"><FileText className="mt-1 size-5 text-primary" /><div className="min-w-0 flex-1"><h2 className="break-all text-lg font-semibold">{entry.path}</h2><p className="mt-1 text-xs text-muted-foreground">{entry.format.toUpperCase()} · {sizeText(entry.size)}{entry.platform ? " · " + entry.platform : ""}</p></div><Button size="sm" variant="outline" className="gap-1" onClick={() => onDelete(entry.path)} disabled={busy}><Trash2 className="size-3.5" />删除</Button></div><section className="rounded-md border p-4"><h3 className="mb-3 text-xs font-medium">文件信息</h3><dl className="grid grid-cols-[120px_1fr] gap-y-2 text-xs"><dt className="text-muted-foreground">路径</dt><dd className="break-all font-mono">{entry.path}</dd><dt className="text-muted-foreground">绝对路径</dt><dd className="break-all font-mono">{absPath || "未记录"}</dd><dt className="text-muted-foreground">SHA-256</dt><dd className="break-all font-mono">{entry.sha256 || "未记录"}</dd><dt className="text-muted-foreground">分析状态</dt><dd>{isBinary ? (registered ? "已登记资产" : "未登记") : analysis ? String(analysis.status || "已分析") : entry.candidate ? "未分析" : "无需分析"}</dd></dl></section><FilePreview pid={pid} entry={entry} />{target && <section className="rounded-md border p-4"><div className="mb-3 flex items-center justify-between"><h3 className="text-xs font-medium">分析操作</h3><span className="text-[10px] text-muted-foreground">{target.analyzers.join(" · ")}</span></div><div className="flex flex-wrap items-center gap-2">{isBinary ? <><Button size="sm" className="gap-1" disabled={busy || registered} onClick={() => onRegister(target)}><PackagePlus className="size-3.5" />{registered ? "已登记资产" : "登记为资产"}</Button>{registered && sha && <Button size="sm" variant="outline" onClick={() => onOpenBinary(sha)}>打开逆向工作台</Button>}<span className="text-[10px] text-muted-foreground">不复制文件，引用分析包内容树；分析（IDA/Ghidra）在逆向工作台进行</span></> : <Button size="sm" className="gap-1" disabled={busy} onClick={() => onAnalyze(target)}><Play className="size-3.5" />开始分析</Button>}</div></section>}{analysis && <AndroidDetails format={entry.format} analysis={analysis} />}{analysis && !["apk", "aab", "dex"].includes(entry.format) && <section className="rounded-md border p-4"><h3 className="mb-3 text-xs font-medium">分析摘要</h3><pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded bg-muted/30 p-3 font-mono text-[10px]">{JSON.stringify(analysis, null, 2)}</pre></section>}</div>
 }
 
 type PreviewMode = "auto" | "structure" | "text" | "hex"
+
+// 大文件预览按需加载阈值（2026-10-13）：超过 1MB 不自动拉预览，点「加载预览」才拉。
+const LAZY_PREVIEW_BYTES = 1024 * 1024
 
 function FilePreview({ pid, entry }: { pid: string; entry: SamplePackageEntry }) {
   const [preview, setPreview] = useState<SamplePackagePreview | null>(null)
   const [mode, setMode] = useState<PreviewMode>("auto")
   const [error, setError] = useState<string | null>(null)
+  // 懒加载：记录「已请求预览」的路径；只对当前 entry.path 生效，换文件自动回到未加载态。
+  const [requestedPath, setRequestedPath] = useState<string | null>(null)
+  const lazy = entry.size > LAZY_PREVIEW_BYTES
+  const shouldLoad = !lazy || requestedPath === entry.path
   useEffect(() => {
+    if (!shouldLoad) { setPreview(null); setError(null); setMode("auto"); return }
     setPreview(null); setError(null); setMode("auto")
     void api.samplePackagePreview(pid, entry.path).then(setPreview).catch((reason) => setError(String(reason)))
-  }, [pid, entry.path, entry.sha256])
+  }, [pid, entry.path, entry.sha256, shouldLoad])
+  if (lazy && requestedPath !== entry.path) return (
+    <section className="flex items-center justify-between gap-3 rounded-md border p-4 text-xs text-muted-foreground">
+      <span>文件较大（{sizeText(entry.size)}），预览按需加载</span>
+      <Button size="sm" variant="outline" onClick={() => setRequestedPath(entry.path)}>加载预览</Button>
+    </section>
+  )
   if (error) return <section className="rounded-md border p-4 text-xs text-muted-foreground">预览不可用：{error}</section>
   if (!preview) return <section className="rounded-md border p-4 text-xs text-muted-foreground">正在读取预览…</section>
   const actualMode = mode === "auto" ? (preview.kind === "text" ? "text" : preview.kind === "structure" ? "structure" : preview.kind === "image" ? "image" : "hex") : mode

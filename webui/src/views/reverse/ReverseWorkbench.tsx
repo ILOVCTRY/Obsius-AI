@@ -14,7 +14,7 @@ import {
 } from "@/components/ui/alert-dialog"
 import { cn } from "@/lib/utils"
 import type { ChainNodeType } from "@/lib/types"
-import { SampleBar, type Engine } from "./SampleBar"
+import { SampleBar, SAMPLE_AUTO_MAX_BYTES, type Engine } from "./SampleBar"
 import { FunctionBrowser } from "./FunctionBrowser"
 import { FunctionDetail } from "./FunctionDetail"
 import { XrefPane } from "./XrefPane"
@@ -34,19 +34,8 @@ const LogicBlocksView = lazy(() =>
 // 样本条 + 三栏（函数浏览器｜结论+伪码｜xref/发现/笔记）。
 // 三层数据：headless 缓存（全量客观）/ func_kb（分析过的）/ findings（挂 binary 资产）。
 
-// 大样本阈值（2026-09-29 用户口径，与后端 SAMPLE_LARGE_BYTES 对齐）：
-// >20MB headless 全量导出可能很久——上传/开始分析前二次确认，建议走 IDA 拉取
-const SAMPLE_LARGE_BYTES = 20 * 1024 * 1024
-
-function largeSampleConfirm(mb: number, engine: Engine = "ida"): boolean {
-  const hint = engine === "ghidra"
-    ? "当前为 Ghidra 模式：大样本走 Ghidra 并行分片导出；反汇编改为选中函数时按需生成（不内嵌缓存）。\n"
-    : "更快的路子：在 IDA 里打开样本按 Ctrl-Alt-M 启动 MCP 插件，再用「从 IDA 拉取函数」（秒级拿全量函数清单）。\n"
-  return window.confirm(
-    `该样本约 ${mb}MB，属于大样本：headless 全量分析（自动分析+全量反编译）可能耗时很久。\n` +
-    hint +
-    "仍要继续 headless 分析吗？")
-}
+// 自动分析体积上限：≥10MB 不允许「开始分析」自动全量分析（headless 会拖垮时间），
+// 引导走 IDA 拉取；阈值 SAMPLE_AUTO_MAX_BYTES 定义在 SampleBar（与后端同口径）。
 
 export function ReverseWorkbench({ pid, active = true }: { pid: string; active?: boolean }) {
   const { events } = useEvents(pid)
@@ -67,7 +56,6 @@ export function ReverseWorkbench({ pid, active = true }: { pid: string; active?:
   const [xref, setXref] = useState<XrefData | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [triaging, setTriaging] = useState(false)
-  const [uploading, setUploading] = useState(false)
   const [busyAi, setBusyAi] = useState(false)
   // IDA 拉取进度（2026-09-30）：job 轮询带出 {pulled,total}；null=没在拉
   const [pullProgress, setPullProgress] = useState<{ pulled: number; total: number | null } | null>(null)
@@ -284,25 +272,14 @@ export function ReverseWorkbench({ pid, active = true }: { pid: string; active?:
     return job
   }
 
-  const handleUpload = async (file: File) => {
-    const mb = Math.round(file.size / 1024 / 1024)
-    if (file.size > SAMPLE_LARGE_BYTES && !largeSampleConfirm(mb)) return
-    setUploading(true)
-    try {
-      const r = await api.uploadSample(pid, file)
-      await refreshSamples()
-      setSha(r.sha)
-      await awaitJob(r.job_id)
-    } finally {
-      setUploading(false)
-    }
-  }
-
   const handleRetry = async () => {
     if (!sha) return
     const size = overview?.asset_meta?.size
-    if (typeof size === "number" && size > SAMPLE_LARGE_BYTES &&
-        !largeSampleConfirm(Math.round(size / 1024 / 1024), engine)) return
+    if (typeof size === "number" && size >= SAMPLE_AUTO_MAX_BYTES) {
+      setTriageMsg(`样本约 ${Math.round(size / 1048576)}MB ≥ 10MB，超出自动分析上限；`
+        + "请改用「从 IDA 拉取函数」（IDA 内按 Ctrl-Alt-M 启动 MCP）")
+      return
+    }
     setTriageProgress({ phase: "starting", done: 0, total: 0, discovered: 0, completed: 0,
       failed: 0, stoppable: false, etaSeconds: null, elapsedSeconds: 0, ratePerSecond: 0 })
     try {
@@ -322,6 +299,8 @@ export function ReverseWorkbench({ pid, active = true }: { pid: string; active?:
       })
       const res = job?.result as { status?: string; hint?: string } | null
       if (res?.status === "stopped" && res.hint) setTriageMsg(res.hint)
+    } catch (e) {
+      setTriageMsg(String(e))   // 后端体积上限等结构化拒绝在此展示
     } finally {
       setTriageProgress(null)
     }
@@ -463,8 +442,8 @@ export function ReverseWorkbench({ pid, active = true }: { pid: string; active?:
       <SampleBar
         samples={binaries} sha={sha} onSelect={setSha} onDeleteSample={handleDeleteSample} overview={overview}
         engine={engine} onSelectEngine={handleSelectEngine}
-        triaging={triaging} uploading={uploading} busyAi={busyAi}
-        onUpload={handleUpload} onRetry={handleRetry} onAiTriage={handleAiTriage}
+        triaging={triaging} busyAi={busyAi}
+        onRetry={handleRetry} onAiTriage={handleAiTriage}
         onPullNames={handlePullNames}
         onPullIdaFunctions={handlePullIdaFunctions} onPushNames={handlePushNames}
         pullProgress={pullProgress} onStopPull={handleStopPull}
@@ -488,7 +467,7 @@ export function ReverseWorkbench({ pid, active = true }: { pid: string; active?:
         </Suspense>
       ) : mode === "blueprint" ? (
         <Suspense fallback={<div className="flex flex-1 items-center justify-center text-xs text-muted-foreground">加载蓝图视图…</div>}>
-          <BlueprintsView pid={pid} tick={tick}
+          <BlueprintsView pid={pid} tick={tick} sha={sha}
                           onLocate={(bpSha, bpAddr) => {
                             if (bpSha && bpSha !== sha) setSha(bpSha)
                             setAddr(bpAddr)
@@ -505,7 +484,7 @@ export function ReverseWorkbench({ pid, active = true }: { pid: string; active?:
                            }} />
         </Suspense>
       ) : !sha ? (
-        <EmptyUpload onUpload={handleUpload} uploading={uploading} />
+        <EmptySamples />
       ) : (
         <div className="flex min-h-0 flex-1">
           {/* 左：函数浏览器（288px） */}
@@ -602,26 +581,19 @@ export function ReverseWorkbench({ pid, active = true }: { pid: string; active?:
   )
 }
 
-function EmptyUpload({ onUpload, uploading }: { onUpload: (f: File) => void; uploading: boolean }) {
+// 空态（2026-10-13）：本工作台不再提供样本上传——样本入口统一到「样本分析」页
+// （上传文件/文件夹 → 对 PE/ELF/Mach-O 点「登记为资产」，不复制文件）。
+function EmptySamples() {
   return (
     <div className="flex flex-1 items-center justify-center p-6">
       <div className="max-w-md rounded-lg border border-dashed p-8 text-center">
         <Upload className="mx-auto mb-3 size-8 text-muted-foreground" />
-        <h2 className="mb-1 text-sm font-medium">上传第一个样本</h2>
+        <h2 className="mb-1 text-sm font-medium">还没有可分析的样本</h2>
         <p className="mb-4 text-[11px] leading-relaxed text-muted-foreground">
-          上传后点「开始分析」跑 headless 全量导出（IDA 优先，Ghidra 兜底）；
-          也可以在 IDA 里打开样本按 Ctrl-Alt-M，直接「从 IDA 拉取函数」。
+          请到「样本分析」上传文件/文件夹，对 PE/ELF/Mach-O 目标点<b>「登记为资产」</b>，
+          样本即出现在上方下拉中；选中后点「开始分析」跑 headless 全量导出。
           样本按 untrusted 处理，平台只做静态解析，<b>绝不在任何路径执行样本</b>。
         </p>
-        <label className="inline-flex cursor-pointer items-center gap-1 rounded-md bg-primary px-3 py-1.5 text-xs text-primary-foreground">
-          <Upload className="size-3.5" />
-          {uploading ? "上传中…" : "选择样本文件（≤256MB）"}
-          <input type="file" className="hidden" onChange={(e) => {
-            const f = e.target.files?.[0]
-            if (f) onUpload(f)
-            e.target.value = ""
-          }} />
-        </label>
         <p className="mt-4 flex items-center justify-center gap-1 text-[10px] text-muted-foreground">
           <ShieldAlert className="size-3" />
           动态分析（x64dbg 等）必须人工在沙箱里做，日志回流后才标 verified

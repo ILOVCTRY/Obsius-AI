@@ -85,6 +85,12 @@ DECOMPILER_CONFIG_PATH = Path("config/decompiler.json")
 # ≥阈值走 Ghidra 多进程并行分片主产（P2），普通样本维持 IDA 优先（保 IDA 质量与存量复用）。
 LARGE_SAMPLE_BYTES = 20 * 1024 * 1024
 
+# 自动分析体积上限（2026-10-13 用户口径，**单一真相源**；app.py 与 IdaMcpManager 共用）：
+# ≥10MB 样本 headless 全量分析会拖垮时间——人类「开始分析」与 Agent 点查（按需拉起
+# IDA-MCP）都拒绝触发自动分析，引导改走「从 IDA 拉取函数」。
+# 注意与 LARGE_SAMPLE_BYTES=20MB 区分：那是 Ghidra 大样本选路阈值，用途不同。
+SAMPLE_AUTO_MAX_BYTES = 10 * 1024 * 1024
+
 # Ghidra 并行分片 worker 绝对上限（内存保护）：每 worker 一个解编译器进程、吃内存，
 # 无脑按满核起会 OOM/swap。实际取值再夹 [1, GHIDRA_MAX_WORKERS]。
 GHIDRA_MAX_WORKERS = 16
@@ -335,6 +341,22 @@ DECOMPILE_GUIDANCE = (
     "MCP → 启动本地 IDA/Ghidra MCP 服务。"
     "在此之前请退回纯静态分析（objdump / 手撕汇编），结论照常落 func_kb。"
 )
+
+# Agent 只读工具在样本无分析缓存时的失败哨兵（2026-10-13）：**绝不静默触发全量 headless
+# 导出**——此前 list_symbols/strings_search 等对未分析样本会同步跑一次完整 IDA/Ghidra
+# 分析（大样本 + 加壳可达数十分钟且无进度），AI 无意识地触发即长时间卡住。
+NOT_ANALYZED = "not-analyzed"
+
+
+def not_analyzed_message(binary: str | Path) -> str:
+    """Agent 只读工具无缓存时的统一回执：明确「未分析」+ 指路，绝不触发导出。"""
+    try:
+        sha = sha256_file(binary)
+    except OSError:
+        sha = "(路径不可读)"
+    return (f"[未分析] 该样本尚无 headless 分析缓存（sha256={sha}）。"
+            "请先在「逆向分析」工作台选中该样本并点「开始分析」完成全量导出，"
+            "缓存生成后重试本工具；本工具只读缓存，不会自动触发分析。")
 
 
 # IDA 常见安装根（PATH 未配置时兜底；IDA 8/9 默认装 Program Files，自定义盘常见 Tools/IDA*）
@@ -1806,16 +1828,22 @@ class DecompilerService:
 
     def _export_json(self, binary: str, *, progress: dict | None = None,
                      stop_event: threading.Event | None = None,
-                     engine: str | None = None
+                     engine: str | None = None, allow_export: bool = True
                      ) -> tuple[dict | None, str, dict]:
         """返回 (导出数据|None, 失败原因链, 导出元信息{name,db_path,stopped})。
 
         按 sha256 缓存（命中直接复用——缓存不区分引擎，引擎不一致交前端提示重跑）；
         被停止的 partial 缓存**不复用**（重跑即补全），且**不发布**全局。
-        engine 指定时按引擎偏好选路（见 _ordered_export_backends）。"""
-        cached = self._cache_path(binary)
-        sha = sha256_file(binary)
+        engine 指定时按引擎偏好选路（见 _ordered_export_backends）。
+        **allow_export=False（Agent 只读工具）：只读缓存/全局提升，缓存缺席即回
+        `NOT_ANALYZED` 哨兵，绝不触发全量 headless 导出**（防 AI 无意识触发长分析）。"""
+        try:
+            cached = self._cache_path(binary)
+            sha = sha256_file(binary)
+        except OSError as e:  # 路径不存在/不可读：结构化回执，不抛
+            return None, f"样本路径不可读: {e}", {}
         retry_addresses: list[int] = []
+        data: dict | None = None
         if cached.is_file():
             data = self._load_cache(cached)
             if data is not None and not is_partial_export(data):
@@ -1863,6 +1891,15 @@ class DecompilerService:
                     self._sync_analysis_store(sha, promoted)
                 return promoted, "", {}
             data = promoted
+        if not allow_export:
+            # Agent 只读：绝不触发全量导出。有可用的提升缓存（含待补反汇编的）就返回；
+            # 无缓存但装有导出后端 → NOT_ANALYZED（上层给「未分析」回执）；
+            # 连导出后端都没装 → 交上层回 DECOMPILE_GUIDANCE（引导安装）。
+            if data is not None:
+                return data, "", {}
+            if any(getattr(b, "export", None) is not None for b in self.backends):
+                return None, NOT_ANALYZED, {}
+            return None, "no-backend", {}
         # Ghidra 一次分析即导出反汇编：小样本内嵌，大样本写每函数 sidecar，
         # 查看阶段直接读缓存，不再为每次点击启动 JVM。
         want_disasm = normalize_engine(engine) == "ghidra"
@@ -2528,7 +2565,7 @@ class DecompilerService:
         for backend in self.backends:
             if backend.name == "mcp":
                 continue
-            data, err, _info = self._export_json(binary)
+            data, err, _info = self._export_json(binary, allow_export=False)
             if data:
                 needle = (name_contains or "").lower()
                 rows = [{"address": hex(int(f["address"])), "name": f["name"],
@@ -2544,6 +2581,8 @@ class DecompilerService:
                     tail = ("\n…（结果超 500 行已截断：请用 name_contains/"
                             "min_size 缩小范围）")
                 return json.dumps(rows, ensure_ascii=False) + tail
+            if err == NOT_ANALYZED:
+                return not_analyzed_message(binary)
             if err:
                 errors = err
         return DECOMPILE_GUIDANCE + (f"\n失败详情: {errors}" if errors else "")
@@ -2554,9 +2593,9 @@ class DecompilerService:
         子串过滤，行带地址+引用函数），limit 截断防淹没上下文——治 Agent 用
         run_cmd 直读全量缓存 JSON 的低效模式（实测 b1nary 会话反复 Get-Content
         66KB 文件十余次）。"""
-        data, _err, _info = self._export_json(binary)
+        data, err, _info = self._export_json(binary, allow_export=False)
         if not data:
-            return DECOMPILE_GUIDANCE
+            return not_analyzed_message(binary) if err == NOT_ANALYZED else DECOMPILE_GUIDANCE
         view = build_strings(data, q)
         total = len(view["items"])
         items = view["items"][:max(1, min(int(limit or 200), 1000))]
@@ -2571,9 +2610,9 @@ class DecompilerService:
         if name is None:
             if address is None:
                 return "[错误] func_xrefs 需要 name 或 address 至少其一"
-            data, _err, _info = self._export_json(binary)
+            data, err, _info = self._export_json(binary, allow_export=False)
             if not data:
-                return DECOMPILE_GUIDANCE
+                return not_analyzed_message(binary) if err == NOT_ANALYZED else DECOMPILE_GUIDANCE
             f = self._find_func(data, address, None)
             if f is None:
                 return (f"[错误] 地址 {hex(address)} 不在任何已知函数入口上"
@@ -2584,8 +2623,10 @@ class DecompilerService:
     def decompile(self, binary: str, address: int | None = None, name: str | None = None) -> str:
         sha = sha256_file(binary)
         want = address
+        not_analyzed = False
         if want is None and name is not None:
-            data0, _e, _i = self._export_json(binary)
+            data0, e0, _i = self._export_json(binary, allow_export=False)
+            not_analyzed = not_analyzed or e0 == NOT_ANALYZED
             f0 = self._find_func(data0, None, name) if data0 else None
             if f0 is not None:
                 want = int(f0["address"])
@@ -2604,7 +2645,9 @@ class DecompilerService:
                 if r:
                     return r
             else:
-                data, _err, _info = self._export_json(binary)
+                data, err, _info = self._export_json(binary, allow_export=False)
+                if err == NOT_ANALYZED:
+                    not_analyzed = True
                 if not data:
                     continue
                 if address is None and name is None:
@@ -2628,6 +2671,8 @@ class DecompilerService:
             if detail is not None and detail.get("pseudocode"):
                 return (f"== {detail.get('name') or hex(want)} @ {hex(want)} ==\n"
                         + detail["pseudocode"])
+        if not_analyzed:
+            return not_analyzed_message(binary)
         return DECOMPILE_GUIDANCE
 
     def disasm(self, binary: str, address: int | None = None,
@@ -2636,13 +2681,16 @@ class DecompilerService:
         自动拉取落盘）。与 decompile 同吃 ensure_func_detail，离线只读已缓存部分。"""
         sha = sha256_file(binary)
         want = address
+        not_analyzed = False
         if want is None and name is not None:
-            data0, _e, _i = self._export_json(binary)
+            data0, e0, _i = self._export_json(binary, allow_export=False)
+            not_analyzed = not_analyzed or e0 == NOT_ANALYZED
             f0 = self._find_func(data0, None, name) if data0 else None
             if f0 is not None:
                 want = int(f0["address"])
         if want is None:
-            return "[错误] disasm 需要 name 或 address 至少其一"
+            return not_analyzed_message(binary) if not_analyzed \
+                else "[错误] disasm 需要 name 或 address 至少其一"
         detail = self.ensure_func_detail(sha, want)
         if detail is None or not detail.get("disasm_lines"):
             return "[反编译器不可用] 未获取到反汇编（需 IDA + MCP 在线自动拉取；" \
@@ -2681,7 +2729,7 @@ class DecompilerService:
                      "callers": [c.get("name") for c in live.get("callers", [])],
                      "callees": [c.get("name") for c in live.get("callees", [])]},
                     ensure_ascii=False)
-        data, _err, _info = self._export_json(binary)
+        data, err, _info = self._export_json(binary, allow_export=False)
         if data:
             funcs = data.get("functions", [])
             callers = [f["name"] for f in funcs if func in (f.get("calls") or [])]
@@ -2689,7 +2737,7 @@ class DecompilerService:
             callees = list(target.get("calls") or []) if target else []
             return json.dumps({"function": func, "callers": callers, "callees": callees},
                               ensure_ascii=False)
-        return DECOMPILE_GUIDANCE
+        return not_analyzed_message(binary) if err == NOT_ANALYZED else DECOMPILE_GUIDANCE
 
 
 def build_headless_service(cache_dir: str | Path, *, runner,

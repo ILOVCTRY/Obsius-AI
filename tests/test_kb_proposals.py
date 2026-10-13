@@ -48,13 +48,13 @@ def _build_packs(root: Path) -> Path:
     (kb / "ctf-web" / "sqli" / "notes.md").write_text(
         "完整路径 `ctf-web/sqli/auth.md`；相对链接见 [auth](./auth.md)。",
         encoding="utf-8")
-    (packs / "capabilities" / "web" / "rules").mkdir(parents=True, exist_ok=True)
-    (packs / "capabilities" / "web" / "rules" / "redlines.md").write_text(
-        "# web 红线", encoding="utf-8")
-    sk = packs / "capabilities" / "web" / "skills" / "web-skill"
+    # 技能扁平（2026-10-13）：packs/kb/skills/<name>/SKILL.md
+    sk = packs / "kb" / "skills" / "web-skill"
     sk.mkdir(parents=True)
     (sk / "SKILL.md").write_text(SKILL_BODY, encoding="utf-8")
-    (packs / "tracks" / "pentest").mkdir(parents=True, exist_ok=True)  # 轨校验要见目录
+    # 轨（并入 kb）：建项校验扫 packs/kb/<track>/track.yaml
+    (packs / "kb" / "pentest").mkdir(parents=True, exist_ok=True)
+    (packs / "kb" / "pentest" / "track.yaml").write_text("name: pentest\n", encoding="utf-8")
     role_dir = packs / "experts"
     role_dir.mkdir(parents=True)
     (role_dir / "_generalist.yaml").write_text(
@@ -265,12 +265,12 @@ def test_kb_rename_cascade_and_backups(tmp_path):
     # 相对链接无法整串替换，进 skipped_relative 由人处理
     assert any(f.endswith("ctf-web/sqli/notes.md") for f in data["skipped_relative"])
 
-    skill = (packs / "capabilities/web/skills/web-skill/SKILL.md").read_text(encoding="utf-8")
+    skill = (packs / "kb/skills/web-skill/SKILL.md").read_text(encoding="utf-8")
     notes = (packs / "kb/web/ctf-web/sqli/notes.md").read_text(encoding="utf-8")
     assert new in skill and old not in skill
     assert new in notes
     # 两类被改文件各自留备份
-    assert list((packs / "capabilities/web/skills/web-skill/.history").glob("*_SKILL.md"))
+    assert list((packs / "kb/skills/web-skill/.history").glob("*_SKILL.md"))
     assert list((packs / "kb/web/.history/kb-backups").glob("*notes.md.bak"))
     # 新名文件在，旧名不在；refs 端点跟到新路径
     assert (packs / "kb/web/ctf-web/sqli/auth-v2.md").is_file()
@@ -344,7 +344,7 @@ def test_proposal_lifecycle_all_kb_modes_and_skill_edit(tmp_path):
     r = c.post(f"/api/proposals/{p_rename['id']}/apply", json={})
     assert r.status_code == 200
     assert (packs / "kb/web/ctf-web/sqli/auth-renamed.md").is_file()
-    skill = (packs / "capabilities/web/skills/web-skill/SKILL.md").read_text(encoding="utf-8")
+    skill = (packs / "kb/skills/web-skill/SKILL.md").read_text(encoding="utf-8")
     assert "auth-renamed.md" in skill
 
     # 4) kb delete（演示 demo 署名）
@@ -367,7 +367,7 @@ def test_proposal_lifecycle_all_kb_modes_and_skill_edit(tmp_path):
     assert r.status_code == 201
     p_sk = r.json()
     assert c.post(f"/api/proposals/{p_sk['id']}/apply", json={}).status_code == 200
-    assert list((packs / "capabilities/web/skills/web-skill/.history").glob("*_SKILL.md"))
+    assert list((packs / "kb/skills/web-skill/.history").glob("*_SKILL.md"))
 
     # 审计事件齐
     kinds = {e["kind"] for e in c.get(f"/api/projects/{pid}/events").json()}
@@ -647,7 +647,7 @@ def test_route_preview_breakdown_and_vocab(tmp_path):
 def test_doctor_near_duplicate_info(tmp_path):
     packs, _c = _client(tmp_path)
     for name in ("dup-a", "dup-b"):
-        d = packs / f"capabilities/web/skills/{name}"
+        d = packs / f"kb/skills/{name}"
         d.mkdir(parents=True)
         (d / "SKILL.md").write_text(
             f"---\nname: {name}\ndescription: x\n"

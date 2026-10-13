@@ -35,14 +35,14 @@ export function RouteTester({ tax, track }: { tax: Taxonomy | null; track: strin
     try {
       const hs = await api.routePreview({
         query, track,
-        capabilities: (tax?.capabilities ?? []).map((c) => c.name),
+        capabilities: (tax?.directions ?? []),
         role: role || undefined,
         features: toList(features),
         file_features: toList(fileFeatures),
         labels: toList(labels),
       })
       setHits(hs)
-      setExpanded(hs[0] ? `${hs[0].pack}/${hs[0].name}` : null)
+      setExpanded(hs[0] ? hs[0].name : null)
     } catch {
       setHits([])
     }
@@ -78,7 +78,7 @@ export function RouteTester({ tax, track }: { tax: Taxonomy | null; track: strin
       {hits.length > 0 && (
         <div className="mt-1 space-y-0.5 overflow-y-auto">
           {hits.map((h) => {
-            const key = `${h.pack}/${h.name}`
+            const key = h.name
             const open = expanded === key
             return (
               <div key={key} className="rounded border bg-card/30 text-[11px]">
@@ -86,7 +86,6 @@ export function RouteTester({ tax, track }: { tax: Taxonomy | null; track: strin
                         onClick={() => setExpanded(open ? null : key)}>
                   <span className="w-3 text-[9px] text-muted-foreground">{open ? "▾" : "▸"}</span>
                   <span className="font-mono text-primary">{h.name}</span>
-                  <span className="font-mono text-[10px] text-muted-foreground">{h.kind}/{h.pack}</span>
                   <span className="font-mono text-[10px] text-muted-foreground">{h.score}</span>
                   {!h.enabled && <span className="text-[10px] text-(--status-approval)">已禁用</span>}
                   <span className="flex-1" />

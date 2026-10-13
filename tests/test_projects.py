@@ -69,7 +69,7 @@ def test_slug_collision_suffix(store):
 def test_list_and_open_roundtrip(store):
     p1 = store.create_project("alpha", "ctf")
     p2 = store.create_project("beta-项目", "pentest")  # 旧域名透明映射
-    assert p2.track == "pentest" and p2.capabilities == ["web"]
+    assert p2.track == "pentest" and p2.capabilities == ["web"]  # 旧域名表带 caps 读兼容映射
     listed = {m["id"]: m for m in store.list_projects()}
     assert set(listed) == {p1.id, p2.id}
     assert listed[p2.id]["name"] == "beta-项目"
@@ -95,7 +95,7 @@ def test_legacy_domain_project_json_mapped(store, tmp_path):
     proj = store.open_project("legacy-pentest")
     assert isinstance(proj, Project)
     assert proj.track == "pentest"
-    assert proj.capabilities == ["web"]
+    assert proj.capabilities == []          # 能力包退役后不再由 domain 推导
     assert proj.domain == "pentest"        # 弃用属性值 = track
     # 旧 ctf domain
     ctf_dir = store.root / "legacy-ctf"
@@ -105,7 +105,7 @@ def test_legacy_domain_project_json_mapped(store, tmp_path):
         "domain": "ctf", "config": {},
     }, ensure_ascii=False), encoding="utf-8")
     proj2 = store.open_project("legacy-ctf")
-    assert (proj2.track, proj2.capabilities) == ("ctf", ["binary"])
+    assert (proj2.track, proj2.capabilities) == ("ctf", [])
     # 旧 reverse 项目 → research+[binary]（rev-generic 自动归位，不改 project.json）
     rev_dir = store.root / "re1"
     rev_dir.mkdir()
@@ -114,15 +114,15 @@ def test_legacy_domain_project_json_mapped(store, tmp_path):
         "domain": "reverse", "config": {},
     }, ensure_ascii=False), encoding="utf-8")
     proj3 = store.open_project("re1")
-    assert (proj3.track, proj3.capabilities) == ("research", ["binary"])
+    assert (proj3.track, proj3.capabilities) == ("research", [])
 
     # list_projects / view_meta 的响应也必须补齐（前端 profile 推导依赖）
     listed = {m["id"]: m for m in store.list_projects()}
     assert listed["proj-legacy0001"]["track"] == "pentest"
-    assert listed["proj-legacy0001"]["capabilities"] == ["web"]
+    assert listed["proj-legacy0001"]["capabilities"] == []
     assert (listed["proj-legacy0003"]["track"],
-            listed["proj-legacy0003"]["capabilities"]) == ("research", ["binary"])
-    assert proj.view_meta["track"] == "pentest" and proj.view_meta["capabilities"] == ["web"]
+            listed["proj-legacy0003"]["capabilities"]) == ("research", [])
+    assert proj.view_meta["track"] == "pentest" and proj.view_meta["capabilities"] == []
     # 磁盘原样：只读补齐，绝不回写
     assert json.loads((legacy_dir / "project.json").read_text(encoding="utf-8")).get("track") is None
 

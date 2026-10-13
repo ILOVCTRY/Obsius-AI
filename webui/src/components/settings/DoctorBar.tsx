@@ -15,11 +15,12 @@ const LEVEL_META: Record<DoctorIssue["level"], { label: string; cls: string; dot
 }
 const LEVEL_ORDER = { error: 0, warning: 1, info: 2 } as const
 
-/** target 是否可跳到对应管理页（角色 yaml / 技能 SKILL.md / 红线 md） */
+/** target 是否可跳到对应管理页（专家 yaml / 技能 SKILL.md / 红线 md） */
 export function isNavigableTarget(target: string): boolean {
-  return /^tracks\/[\w.-]+\/roles\/[\w.-]+\.yaml$/.test(target)
-    || /^(tracks|capabilities)\/[\w.-]+\/skills\/[\w.-]+\/SKILL\.md$/.test(target)
-    || /^(tracks|capabilities)\/[\w.-]+\/rules\/redlines\.md$/.test(target)
+  return /^experts\/[\w.-]+\.yaml$/.test(target)
+    || /^kb\/skills\/[\w.-]+\/SKILL\.md$/.test(target)
+    || /^kb\/安全红线\/轨红线\/[\w.-]+\.md$/.test(target)
+    || /^kb\/安全红线\/评级与价值口径\/[\w.-]+\.md$/.test(target)
 }
 
 export function DoctorBar({ onNavigate }: { onNavigate?: (target: string) => void }) {

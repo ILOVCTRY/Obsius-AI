@@ -7,7 +7,7 @@
 
 | 目录/文件 | 职责 |
 |-----------|------|
-| [`skills/`](skills/CLAUDE.md) | 能力包×场景轨分类学：注册表 / 路由评分 / 规则链 / **专家池（M2 起运行时唯一角色源 + caps_effective/allowed_roles 推导面；M3 专家 CRUD `/api/experts`）** / **场景档 profiles.py（M4a：五件套预设物化即弃）** / task_types 注册表 |
+| [`skills/`](skills/CLAUDE.md) | 场景轨×知识方向分类学：注册表 / 路由评分 / 规则链 / **专家池（M2 起运行时唯一角色源 + `directions_effective`/`allowed_roles` 推导面；M3 专家 CRUD `/api/experts`）** / **场景档 profiles.py（M4a：五件套预设物化即弃）** / task_types 注册表。**2026-10-13 能力包退役**：技能扁平 `packs/kb/skills/`，轨/红线并入 `packs/kb/` |
 | [`agent/`](agent/CLAUDE.md) | AgentSession 主循环 + 工具分发 + 角色工具白名单边界 + kb_open。**会话轮（2026-10-06 任务机制退役）**：`run_session()` 只做对话（收件箱有消息→run_chat，否则空退）；`run_team_execution(ExecutionContext)` 承接 Team 成员执行（屏蔽任务工具直进 `_loop`）；人类引导降级纯对话。**session_state.py（2026-10-03）**：会话/闸门状态单一容器 + `reset_for_task` 单入口复位，两持有者以 property 代理原属性名（只收敛存取，控制流不动）。**tool_registry.py（2026-10-03）**：工具唯一真相源——`ToolSpec`(name/description/schema/group/flags/handler) 一处定义，`AGENT_TOOLS`（现 44 个，六任务工具已删）/白名单常量/`agent_tool_group` 全由 flags 推导（导入名逐字保留，外部零改动），导入期自检 handler 存在 |
 | [`orchestrator/`](orchestrator/CLAUDE.md) | 主代理 tick：监控/派生/开窗/汇总 + 轨注册表拒收 + 饿死告警 + gate 预算闸门 + **replan_priorities 优先级重排（A5）** + state.py（tick 租约/状态持久化/**v21 derive_idle_rounds**）+ **分阶段接线（`_phase_section` 注入 + `_phase_gate_reject` 派单门）** |
 | [`blackboard/`](blackboard/CLAUDE.md) | SQLite 单一写入口 + 事件总线 + 只读图 graph.py（session_graph/board_graph）（**schema v33（2026-10-06）DROP tasks/resource_leases**；session_inbox/撤回私信、artifacts.meta、findings.rating_basis 判级依据 F11） |
@@ -30,11 +30,11 @@
 
 ## 全局约定
 
-- `sample_packages.py`：分析包基础层。负责单文件/目录文件/ZIP/7z/TAR 的安全导入，内容清单哈希、全局树去重、原始上传物保留、候选目标识别和同包二进制依赖边；`ANALYZER_REGISTRY` 为格式到插件 ID 的注册表。Android 目标提供 APK/AAB 包摘要、Manifest XML/AXML 字符串清单和 DEX 头部计数；目标元数据和静态分析报告保存于 `sample_packages/`，不替换旧 `binary` 资产接口。
+- `sample_packages.py`：分析包基础层。负责单文件/目录文件/ZIP/7z/TAR 的安全导入，内容清单哈希、**项目内内容树去重**（`<project>/trees/<manifest_sha256>/`）、原始上传物保留（`<project>/raw/`）、候选目标识别和同包二进制依赖边；**上传物一律落项目工作区内**，不再写全局 `data/sample-store/`（旧全局树保留只读兼容）；`ANALYZER_REGISTRY` 为格式到插件 ID 的注册表。Android 目标提供 APK/AAB 包摘要、Manifest XML/AXML 字符串清单和 DEX 头部计数；目标元数据和静态分析报告保存于 `sample_packages/`，不替换旧 `binary` 资产接口。
 
 - 时间 UTC ISO；ID `<前缀>-<12hex>`。
 - 黑板写操作只走 `Blackboard` 方法（Team 表由 `core/team/store.py` 独立写）；API 层零业务逻辑，只做 HTTP↔core 翻译。
-- 项目绑定 = **场景轨 track（单选）× 专家组队 experts（M2，多选可空）**；能力包隐退为知识组织单位（运行时知识面=caps_effective 推导，专家 yaml `skills` 白名单跨包引用）；无绑定存量项目直通 meta.capabilities 零翻译；旧 domain 读取时经 `LEGACY_DOMAIN_MAP` 映射（pentest→assessment+[web]，ctf→ctf+[binary]，reverse→research+[binary]），新建一律写新值。
+- 项目绑定 = **场景轨 track（单选）× 专家组队 experts（多选可空）**；**2026-10-13 能力包退役**——技能扁平 `packs/kb/skills/`，kb 可见方向 = 绑定专家 `knowledge` 并集（`directions_effective`，无绑定直通 meta.capabilities 存量读兼容）；专家 yaml `skills` 白名单为**硬选**（会话可见/可路由技能=并集）。旧 domain 读取时经 `LEGACY_DOMAIN_MAP` 映射（pentest→pentest+[web]，ctf→ctf+[binary]，reverse→research+[binary]），新建一律写新值。
 - 逆向工作台（P1/P2）：track=research ⇒ profile=rev-generic（前端 `deriveWorkbenchProfile`，config.workbench.profile 可覆盖；**2026-09-29 修**：M3 起 caps 多选退役、创建恒不传 caps，旧「caps 含 binary」判据已死——M3 后新建 research 项目全误落渗透模板；现按 config.board_view.default 非 funcs〔如 code-audit 档 findings〕交还渗透黑板）；三层数据——headless 缓存 JSON（**v3 契约**：客观全量+strings，可删重导）/ func_kb（只存分析过的函数）/ findings（挂 binary 资产，evidence 带 func_id+address）；headless 是 trusted **解析**工具，平台绝不执行样本。
 - Agent 无裸 shell：唯一命令口是经网关的 run_cmd；不可信代码只进 docker/sandbox，WSL 信任级=宿主机。
 - 安全默认宁严勿松：未知样本按恶意处理（L3 + fakenet）；fakenet 尚未实现（显式 NotImplementedError）。

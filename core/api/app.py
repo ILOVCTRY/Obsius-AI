@@ -85,7 +85,7 @@ from core.skills.experts import (
 )
 from core.skills.experts import (
     _parse_expert as _parse_expert_yaml,
-    caps_effective,
+    directions_effective,
     expert_exists,
     list_experts,
     load_expert,
@@ -95,9 +95,14 @@ from core.skills.registry import SkillRegistry, parse_frontmatter
 from core.skills.router import SkillRouter
 from core.skills.taxonomy import (
     LEGACY_DOMAIN_MAP,
-    capability_dir,
+    kb_root,
+    list_directions,
     list_packs,
     load_task_types,
+    platform_rules_dir,
+    rating_dir,
+    redline_path,
+    skill_dir,
     track_dir,
 )
 from core.skills.proposals import ProposalError, ProposalStateError
@@ -681,21 +686,6 @@ class KbRenameIn(BaseModel):
     new_path: str
 
 
-class KbEvolutionIn(BaseModel):
-    """从知识库资料异步生成派生层草稿；只读素材，不直接写入知识库。"""
-    sources: list[str] = Field(default_factory=list, min_length=1, max_length=6)
-    target_kind: Literal["case", "pattern", "playbook"] | None = None
-    language: str = "zh"
-
-    @field_validator("sources")
-    @classmethod
-    def _sources_valid(cls, value: list[str]) -> list[str]:
-        clean = [str(item).strip().replace("\\", "/") for item in value if str(item).strip()]
-        if not clean or len(clean) > 6 or len(set(clean)) != len(clean):
-            raise ValueError("sources 必须是 1-6 个不重复路径")
-        return clean
-
-
 # ---- 统一提案（C4） ----
 
 class ProposalIn(BaseModel):
@@ -856,8 +846,8 @@ def _resolve_managed_file(app: Any, file_rel: str) -> Path:
     rel = Path(file_rel)
     if rel.is_absolute() or ".." in rel.parts or not rel.parts:
         raise HTTPException(422, "非法文件路径：只接受 packs 内相对路径")
-    if rel.parts[0] not in {"capabilities", "tracks"}:
-        raise HTTPException(422, "非法文件路径：只接受 capabilities/ 或 tracks/ 下文件")
+    if rel.parts[0] not in {"kb", "experts"}:
+        raise HTTPException(422, "非法文件路径：只接受 kb/ 或 experts/ 下文件")
     for seg in rel.parts:
         _check_name(seg, "路径段")
     root = Path(app.state.packs_root).resolve()
@@ -948,15 +938,15 @@ def _check_name(value: str, label: str) -> None:
 
 
 def _cap_path(app: Any, cap: str, *parts: str) -> Path:
-    """packs/capabilities/<cap>/... 路径校验（各段过白名单，防穿越）。"""
-    _check_name(cap, "能力包")
+    """packs/kb/<方向>/... 路径校验（各段过白名单，防穿越）。"""
+    _check_name(cap, "方向")
     for p in parts:
         _check_name(p, "名称")
-    return capability_dir(app.state.packs_root, cap).joinpath(*parts)
+    return (kb_root(app.state.packs_root) / cap).joinpath(*parts)
 
 
 def _track_path(app: Any, track: str, *parts: str) -> Path:
-    """packs/tracks/<track>/... 路径校验（各段过白名单，防穿越）。"""
+    """packs/kb/<track>/... 路径校验（各段过白名单，防穿越）。"""
     _check_name(track, "场景轨")
     for p in parts:
         _check_name(p, "名称")
@@ -1535,6 +1525,10 @@ def create_app(
     # 大样本阈值（2026-09-29 用户口径）：>20MB headless 全量导出（自动分析+
     # 全量反编译）耗时可能很久——前端「开始分析」二次确认并建议走 IDA 拉取
     SAMPLE_LARGE_BYTES = 20 * 1024 * 1024
+    # 自动分析体积上限（单一真相源 core/tools/decompiler.py，2026-10-13 用户口径）：
+    # ≥10MB 样本 headless 全量分析会拖垮时间——「开始分析」与 Agent 点查（IdaMcpManager）
+    # 都拒自动分析，引导改走「从 IDA 拉取函数」（前端同口径 SAMPLE_AUTO_MAX_BYTES）。
+    from core.tools.decompiler import SAMPLE_AUTO_MAX_BYTES
     DEBUGLOG_MAX_BYTES = 16 * 1024 * 1024
     ATTACHMENT_MAX_BYTES = 64 * 1024 * 1024   # 直播间输入行附件随发（2026-09-19）
     PACKER_ENTROPY = 7.2
@@ -1592,7 +1586,7 @@ def create_app(
             for j in app.state.jobs.all_jobs()
         )
 
-    def _run_binary_triage(pid: str, sha: str, rel_path: str,
+    def _run_binary_triage(pid: str, sha: str, binary_path: Path,
                            progress: dict | None = None,
                            stop: threading.Event | None = None) -> dict:
         """零 LLM 后台分诊：headless 全量导出→缓存；无工具结构化降级（不报错）。
@@ -1609,7 +1603,7 @@ def create_app(
             bb.append_event(pid, "binary.triage_failed", payload, author="human")
             return {"status": "no-tool", **payload}
         try:
-            data, info = svc.export_to_cache(str(_inside(proj, rel_path)),
+            data, info = svc.export_to_cache(str(binary_path),
                                              progress=progress, stop_event=stop,
                                              engine=_binary_engine(proj, sha))
         except Exception as e:  # noqa: BLE001 —— Job 失败也要留黑板痕迹
@@ -1650,7 +1644,7 @@ def create_app(
                            "已保留可见），重新「开始分析」可补全")
         return res
 
-    def _submit_triage(proj: Project, sha: str, rel_path: str) -> str:
+    def _submit_triage(proj: Project, sha: str, binary_path: Path) -> str:
         if _triage_running(proj.id, sha):
             raise HTTPException(409, "该样本正在分诊中")
         # progress 可变 dict 塞进 job meta（引用共享）→ 前端轮询带出；stop Event 经
@@ -1661,7 +1655,7 @@ def create_app(
         app.state.export_cancel[sha] = stop
         return app.state.jobs.submit(
             "binary-triage",
-            lambda: _run_binary_triage(proj.id, sha, rel_path, progress, stop),
+            lambda: _run_binary_triage(proj.id, sha, binary_path, progress, stop),
             meta={"project_id": proj.id, "triage_sha": sha, "sha": sha,
                   "progress": progress},
         )
@@ -2006,49 +2000,30 @@ def create_app(
                 if event is not None:
                     event.set()
 
-    def _ensure_package_binary_asset(proj: Project, package: dict[str, Any],
-                                     target: dict[str, Any], binary_path: Path,
-                                     sha: str, size: int) -> dict[str, Any]:
-        """Expose a package PE/ELF/Mach-O target through the legacy binary workbench.
+    def _register_package_binary_asset(proj: Project, package: dict[str, Any],
+                                       target: dict[str, Any],
+                                       sha: str, size: int) -> dict[str, Any]:
+        """把分析包 PE/ELF/Mach-O 目标登记为 legacy binary 工作台的资产（**不复制文件**）。
 
-        The immutable package tree lives outside the project, while the existing
-        reverse-workbench contract resolves binary assets through ``meta.path``
-        under the project root.  Materialize one content-addressed copy and keep
-        the package coordinates in metadata so both workflows share the same
-        cache and asset identity.
+        包内容树是**项目内内容寻址存储**（`<project>/trees/<manifest_sha256>/`），
+        不可变、同项目内跨包复用——绝不复制进 `samples/`（复制重复占空间，且丢失同包
+        依赖布局）。资产 `meta` 记包坐标 + **包内相对路径**（`path`）；文件定位交
+        `_sample_path` 经包坐标 `resolve_target` 还原为项目内容树绝对路径。AI 侧由
+        `bb_query what=package` 读同包条目/依赖边，解决「exe 依赖同包 DLL 找不到」。
         """
-        existing = proj.bb.find_asset(proj.id, "binary", sha)
-        if existing is not None:
-            proj.bb.update_asset_meta(existing["id"], {
-                "package_id": package.get("package_id"),
-                "version_id": package.get("version_id"),
-                "target_id": target.get("target_id"),
-                "source": "sample-package",
-            })
-            return proj.bb.find_asset(proj.id, "binary", sha) or existing
-
-        samples_dir = _inside(proj, "samples")
-        samples_dir.mkdir(parents=True, exist_ok=True)
-        suffix = Path(str(target.get("path") or "")).suffix.lower()[:16]
-        final = samples_dir / f"{sha}{suffix}"
-        if not final.exists():
-            temp = samples_dir / f".{sha}.{uuid.uuid4().hex}.tmp"
-            shutil.copyfile(binary_path, temp)
-            try:
-                os.replace(temp, final)
-            except FileExistsError:
-                temp.unlink(missing_ok=True)
-        rel = str(final.relative_to(proj.path)).replace("\\", "/")
         meta = {
             "filename": Path(str(target.get("path") or "sample.bin")).name,
             "size": size,
-            "path": rel,
-            "uploaded_at": _utc_now(),
+            "path": str(target.get("path") or ""),   # 包内相对路径（非项目相对）
             "source": "sample-package",
             "package_id": package.get("package_id"),
             "version_id": package.get("version_id"),
             "target_id": target.get("target_id"),
         }
+        existing = proj.bb.find_asset(proj.id, "binary", sha)
+        if existing is not None:
+            proj.bb.update_asset_meta(existing["id"], meta)
+            return proj.bb.find_asset(proj.id, "binary", sha) or existing
         result = proj.bb.upsert_asset(proj.id, "binary", sha, meta=meta, author="human")
         return proj.bb.find_asset(proj.id, "binary", sha) or {"id": result["id"], **meta}
 
@@ -2085,8 +2060,8 @@ def create_app(
             "started_at": _utc_now(),
         }
         if "binary-static" in analyzers and str(target.get("format") or "") in {"pe", "elf", "mach-o"}:
-            asset = _ensure_package_binary_asset(
-                proj, package, target, binary_path, actual_sha, actual_size)
+            asset = _register_package_binary_asset(
+                proj, package, target, actual_sha, actual_size)
             report["binary_sha256"] = actual_sha
             report["binary_asset_id"] = asset.get("id")
         progress["phase"] = "recognized"
@@ -2234,9 +2209,20 @@ def create_app(
         return row
 
     def _sample_path(proj: Project, sha: str) -> Path | None:
-        """样本文件绝对路径（资产 meta.path 相对项目根）；缺路径/越界返回 None。"""
+        """样本文件绝对路径。**项目内样本**=资产 meta.path（相对项目根）；**分析包登记
+        样本**（meta.source=="sample-package"）在**项目内容树** `<project>/trees/`，经
+        包坐标 `resolve_target` 还原。缺路径/越界/包缺失一律返回 None。"""
         asset = proj.bb.find_asset(proj.id, "binary", sha)
-        rel = (asset.get("meta") or {}).get("path") if asset else None
+        meta = (asset.get("meta") or {}) if asset else {}
+        if meta.get("source") == "sample-package" and meta.get("package_id"):
+            try:
+                _, _, path = _package_store().resolve_target(
+                    proj.path, str(meta["package_id"]),
+                    meta.get("version_id"), meta.get("target_id"))
+                return path
+            except Exception:  # noqa: BLE001 —— 包/条目缺失一律当缺失
+                return None
+        rel = meta.get("path")
         if not rel:
             return None
         try:
@@ -2254,7 +2240,9 @@ def create_app(
                             blob: Path | None = None) -> list[str]:
         """物理清理单样本的项目内磁盘产物（2026-10-01 样本删除；best-effort）。
 
-        删：samples/<本体>（blob 由调用方在删资产行前解析传入）；decompiler-cache/
+        删：samples/<本体>（blob 由调用方在删资产行前解析传入，**仅项目内**——分析包
+        登记样本的 blob 在项目内容树 `<project>/trees/` 或原始物 `<project>/raw/` 里，
+        护栏跳过不删）；decompiler-cache/
         {sha}.json + {sha}.details/ + {sha}.annotations.json；decompiler-db/<sha>
         (.i64/.idb + 锁文件)；ghidra-tmp/ghidra-<sha>/。**全局 data/decompiler-cache
         跨项目共享，不动**。单项失败只记日志不抛——DB 行已删，残留文件不应阻断删除
@@ -2280,7 +2268,19 @@ def create_app(
                 log.warning("样本清理失败 %s: %s", p, e)
 
         if blob is not None:
-            _rm(blob)
+            # 护栏：只删**项目内样本本体**——分析包登记样本的文件在项目内容树
+            # `<project>/trees/`（内容寻址、可被同项目其它包复用、不可变）或原始上传物
+            # `<project>/raw/` 里，删它会破坏包内容，绝不动。
+            try:
+                resolved = blob.resolve()
+                project = Path(proj.path).resolve()
+                in_project = (resolved.is_relative_to(project)
+                              and not resolved.is_relative_to(project / "trees")
+                              and not resolved.is_relative_to(project / "raw"))
+            except OSError:
+                in_project = False
+            if in_project:
+                _rm(blob)
         cache_dir = Path(proj.artifacts_dir) / "decompiler-cache"
         _rm(cache_dir / f"{sha}.json")
         _rm(cache_dir / f"{sha}.details")
@@ -2416,11 +2416,11 @@ def create_app(
                 llm=session_exec_llm, planner_llm=session_plan_llm,
                 enable_sediment=sediment_proposals,
                 packs_root=app.state.packs_root,
-                # expert-pool M2（§4.4）：capabilities=caps_effective 推导值——
+                # expert-pool M2（§4.4）：capabilities=directions_effective 推导值——
                 # 有绑定→专家面（绑定专家 skills 并集∪轨技能的所属包），无绑定→盘上直通；
                 # allowed_roles=绑定专家清单（发布链 publish_task 校验数据源）
                 track=proj.track,
-                capabilities=caps_effective(
+                capabilities=directions_effective(
                     app.state.packs_root, proj.track, proj.experts,
                     fallback=proj.capabilities),
                 role=role,
@@ -2553,15 +2553,13 @@ def create_app(
     # ---------- 项目 ----------
 
     def _expert_meta_view(view: dict) -> dict:
-        """meta 读视图补专家绑定推导值（expert-pool M2，§4.4）：
-        "experts" = 绑定清单；"capabilities" = caps_effective（有绑定→专家面推导，
-        无绑定→盘上 capabilities 直通）；"capabilities_bound" = 盘上原始绑定包
-        （设置页「能力包跟随项目」缺省用——effective 在 _generalist 项目=全部包，
-        取 [0] 会错落到 binary）。仅响应层，盘上 meta 不改。"""
+        """meta 读视图补专家绑定推导值（§4.4）："experts" = 绑定清单；
+        "directions" = directions_effective（有绑定→专家 knowledge 面推导，无绑定→盘上直通）；
+        "directions_bound" = 盘上原始绑定。仅响应层，盘上 meta 不改。"""
         experts = [e for e in (view.get("experts") or []) if str(e).strip()]
         return {**view, "experts": experts,
-                "capabilities_bound": list(view.get("capabilities") or []),
-                "capabilities": caps_effective(
+                "directions_bound": list(view.get("capabilities") or []),
+                "directions": directions_effective(
                     app.state.packs_root, view.get("track") or "ctf", experts,
                     fallback=view.get("capabilities") or [])}
 
@@ -2601,29 +2599,14 @@ def create_app(
         # 旧客户端只传 domain（pentest/ctf）：透明映射为 track+caps（读兼容写新值）
         sent = body.model_fields_set
         track = body.track if "track" in sent else None
-        caps = body.capabilities if "capabilities" in sent else []
         if body.domain:
             mapped = LEGACY_DOMAIN_MAP.get(body.domain)
-            if mapped:
-                track = track or mapped[0]
-                caps = caps or list(mapped[1])
-            else:
-                track = track or body.domain
+            track = track or (mapped[0] if mapped else body.domain)
         track = track or "ctf"
-        # 校验轨/能力包真实存在
+        # 校验轨真实存在（能力包已退役：创建不再绑定能力包）
         valid_tracks = {t["name"] for t in list_packs(app.state.packs_root, "track")}
-        valid_caps = {c["name"] for c in list_packs(app.state.packs_root, "capability")}
         if track not in valid_tracks:
             raise HTTPException(422, f"非法场景轨: {track}（合法: {sorted(valid_tracks)}）")
-        bad_caps = sorted(set(caps) - valid_caps)
-        if bad_caps:
-            raise HTTPException(422, f"非法能力包: {bad_caps}（合法: {sorted(valid_caps)}）")
-        # 红队扩展包挂载限制（R3/R4，§6.9.1）：仅 redteam 轨可挂载
-        redteam_only = {"shell-c2", "social"}
-        off_track = sorted(set(caps) & redteam_only) if track != "redteam" else []
-        if off_track:
-            raise HTTPException(
-                422, f"能力包 {off_track} 仅限 redteam 轨挂载（§6.9.1 合规红线）")
         # 场景档（expert-pool M4a，§4.8/D6）：档提供组队预设与五件套缺省，
         # 请求体显式值优先；物化进项目配置后即弃（模板升级不影响存量项目）。
         profile = None
@@ -2665,7 +2648,7 @@ def create_app(
                                         (("owners", owners), ("rating", rating)) if v is not None}
             if profile.get("board_view"):
                 cfg.setdefault("board_view", {"default": profile["board_view"]})
-        proj = store.create_project(body.name, track, caps, cfg, experts=experts)
+        proj = store.create_project(body.name, track, [], cfg, experts=experts)
         app.state.projects[proj.id] = proj
         # 分阶段工作流（M1，D3）：轨有阶段剧本 → 创建即登记初始阶段（不发剧本
         # 任务——mission/目标商议前不发静态任务，首发随显式流转触发；publish
@@ -2736,7 +2719,7 @@ def create_app(
     def patch_project_experts(pid: str, body: ExpertsPatchIn):
         """换将（expert-pool M2，§4.4）：重写绑定专家清单，下轮会话构造即生效
         （构造链实时读 meta）。校验专家在池内且可服务项目轨（422）；空清单=解绑
-        恢复存量直通态。响应带推导后的 meta 视图（capabilities=caps_effective）。"""
+        恢复存量直通态。响应带推导后的 meta 视图（capabilities=directions_effective）。"""
         proj = _project(pid)
         bad = [e for e in body.experts
                if not expert_exists(app.state.packs_root, str(e).strip(), proj.track)]
@@ -3854,16 +3837,15 @@ def create_app(
                     temp.unlink(missing_ok=True)
         else:
             raise HTTPException(422, "请上传 file 或 files")
+        # 返回**完整**分析包对象（含 entries/origin/created_at/tree_ref）——与
+        # GET .../sample-packages/current 同形。此前只回摘要（丢 entries），前端
+        # `setPkg(摘要)` 后 `entries===undefined` → 文件树为空，用户必须手动刷新页面
+        # 才看到分析包（append/move/delete 端点本就回完整对象，此处对齐）。
+        pointer = package_store._read_current(proj.path) or {}
         return {
-            "package_id": result["package_id"],
-            "version_id": result["version_id"],
-            "manifest_sha256": result["manifest_sha256"],
+            **result,
             "raw_sha256": (result.get("origin") or {}).get("raw_sha256"),
-            "source_analysis": result.get("source_analysis"),
-            "file_count": result["file_count"],
-            "total_bytes": result["total_bytes"],
-            "targets": result["targets"],
-            "dependencies": result["dependencies"],
+            "undo_available": bool((pointer.get("undo") or {}).get("version_id")),
         }
 
     @app.get("/api/projects/{pid}/sample-packages")
@@ -4068,8 +4050,8 @@ def create_app(
             if ("binary-static" in (target.get("analyzers") or [])
                     and existing.get("sha256")
                     and str(target.get("format") or "") in {"pe", "elf", "mach-o"}):
-                _ensure_package_binary_asset(
-                    proj, package, target, binary_path,
+                _register_package_binary_asset(
+                    proj, package, target,
                     str(existing["sha256"]), int(target.get("size") or binary_path.stat().st_size))
             return {"job_id": None, "cached": True, "report": existing}
         progress: dict[str, Any] = {"phase": "queued"}
@@ -4091,6 +4073,40 @@ def create_app(
             on_done=_cleanup_sample_cancel,
         )
         return {"job_id": job_id, "cached": False, "target_id": target_id}
+
+    @app.post("/api/projects/{pid}/sample-packages/{package_id}/versions/{version_id}/targets/{target_id}/register")
+    def register_sample_target_asset(pid: str, package_id: str, version_id: str,
+                                     target_id: str):
+        """把包内 PE/ELF/Mach-O 目标登记为 binary 资产（**不复制文件**，2026-10-12）。
+
+        取代「开始分析」：登记后目标即出现在黑板逆向工作台「选择样本」里（资产
+        `meta.source=sample-package` 记包坐标 + 包内相对路径），分析（IDA/Ghidra
+        headless）改在逆向工作台进行（那里有引擎选择）。非二进制格式不走此端点
+        （APK/AAB/DEX/文本仍用 `.../analyze`）。幂等：重复登记只刷新 meta。
+        """
+        proj = _project(pid)
+        store: SamplePackageStore = _package_store()
+        try:
+            package, target, binary_path = store.resolve_target(
+                proj.path, package_id, version_id, target_id)
+        except SamplePackageError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        analyzers = list(target.get("analyzers") or [])
+        if ("binary-static" not in analyzers
+                or str(target.get("format") or "") not in {"pe", "elf", "mach-o"}):
+            raise HTTPException(422, "该目标不是 PE/ELF/Mach-O 二进制，无法登记为资产")
+        sha = str(target.get("sha256") or "")
+        if not sha:
+            raise HTTPException(422, "目标缺少 sha256，无法登记")
+        size = int(target.get("size") or binary_path.stat().st_size)
+        asset = _register_package_binary_asset(proj, package, target, sha, size)
+        proj.bb.append_event(pid, "sample.target.registered", {
+            "package_id": package_id, "version_id": version_id,
+            "target_id": target_id, "sha256": sha, "asset_id": asset.get("id"),
+        }, author="human")
+        return {"binary_sha256": sha, "binary_asset_id": asset.get("id"),
+                "target_id": target_id, "path": target.get("path"),
+                "filename": Path(str(target.get("path") or "sample.bin")).name}
 
     @app.post("/api/projects/{pid}/samples", status_code=202)
     def upload_sample(pid: str, file: UploadFile = File(...)):
@@ -4133,11 +4149,22 @@ def create_app(
         asset = proj.bb.find_asset(pid, "binary", sha)
         if asset is None:
             raise HTTPException(404, f"样本资产不存在: {sha}")
-        rel = (asset.get("meta") or {}).get("path")
-        if not rel:
-            raise HTTPException(422, "资产缺少样本路径（早期数据，请重新上传）")
-        _inside(proj, rel)
-        return {"job_id": _submit_triage(proj, sha, rel), "sha": sha}
+        # 样本路径解析统一走 _sample_path：项目内样本 = meta.path（项目相对）；
+        # 分析包登记样本（source=sample-package）在**全局包树**（项目外），经包坐标还原。
+        path = _sample_path(proj, sha)
+        if path is None:
+            raise HTTPException(422, "资产缺少样本路径（早期数据，请重新上传/登记）")
+        # 自动分析体积上限（2026-10-13）：≥10MB 的样本 headless 全量分析会拖垮时间，
+        # 拒绝自动分析（按真实文件大小判定），引导改走 IDA 拉取。
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = None
+        if size is not None and size >= SAMPLE_AUTO_MAX_BYTES:
+            raise HTTPException(422,
+                f"样本 {size / 1048576:.1f}MB ≥ 10MB，超出自动分析上限（避免拖垮分析时间）；"
+                "请改用「从 IDA 拉取函数」（在 IDA 中打开样本按 Ctrl-Alt-M 启动 MCP）")
+        return {"job_id": _submit_triage(proj, sha, path), "sha": sha}
 
     @app.post("/api/projects/{pid}/binaries/{sha}/triage/cancel")
     def cancel_triage(pid: str, sha: str):
@@ -7074,9 +7101,9 @@ def create_app(
 
     @app.get("/api/taxonomy")
     def get_taxonomy():
-        """能力包 × 场景轨目录 + 各轨任务类型注册表（新建项目向导的数据源，§4.5）。"""
+        """场景轨目录 + kb 知识方向 + 各轨任务类型注册表（新建项目向导的数据源，§4.5）。"""
         return {
-            "capabilities": list_packs(app.state.packs_root, "capability"),
+            "directions": list_directions(app.state.packs_root),
             "tracks": list_packs(app.state.packs_root, "track"),
             "task_types": {
                 t["name"]: load_task_types(app.state.packs_root, t["name"])
@@ -7088,7 +7115,7 @@ def create_app(
 
     def _skill_json(sk) -> dict:
         return {
-            "name": sk.name, "kind": sk.kind, "pack": sk.pack,
+            "name": sk.name,
             "description": sk.description, "keywords": sk.keywords,
             "features": sk.features, "file_features": sk.file_features,
             "platforms": sk.platforms, "formats": sk.formats,
@@ -7103,17 +7130,12 @@ def create_app(
         reg.load()
         return reg
 
-    def _get_skill(kind: str, owner: str, skill_name: str):
-        path = (_cap_path(app, owner, "skills", skill_name, "SKILL.md")
-                if kind == "capability"
-                else _track_path(app, owner, "skills", skill_name, "SKILL.md"))
+    def _get_skill(skill_name: str):
+        _check_name(skill_name, "技能名")
+        path = skill_dir(app.state.packs_root, skill_name) / "SKILL.md"
         if not path.is_file():
-            label = "能力包" if kind == "capability" else "场景轨"
-            raise HTTPException(404, f"技能不存在: {label} {owner}/{skill_name}")
-        reg = _loaded_registry()
-        sk = next((s for s in reg.all()
-                   if s.kind == kind and s.pack == owner and s.name == skill_name), None)
-        return path, sk
+            raise HTTPException(404, f"技能不存在: {skill_name}")
+        return path, _loaded_registry().get(skill_name)
 
     def _skill_resource(sk, resource: str) -> Path:
         """Resolve a cc skill resource without allowing traversal or SKILL.md escape."""
@@ -7130,14 +7152,13 @@ def create_app(
             raise HTTPException(404, f"技能资源不存在: {rel}")
         return target
 
-    def _cap_skill_dir(cap: str, skill_name: str) -> Path:
-        """Resolve a capability skill directory for the file workspace."""
-        _check_name(cap, "能力包")
+    def _skill_workspace_dir(skill_name: str) -> Path:
+        """解析技能目录（packs/kb/skills/<name>）供文件工作区使用。"""
         _check_name(skill_name, "技能名")
-        root = _cap_path(app, cap, "skills", skill_name).resolve()
+        root = skill_dir(app.state.packs_root, skill_name).resolve()
         pack_root = Path(app.state.packs_root).resolve()
         if pack_root not in root.parents or not root.is_dir():
-            raise HTTPException(404, f"技能不存在: 能力包 {cap}/{skill_name}")
+            raise HTTPException(404, f"技能不存在: {skill_name}")
         return root
 
     def _skill_file_path(root: Path, rel: str, *, must_exist: bool = True) -> Path:
@@ -7163,56 +7184,51 @@ def create_app(
 
     def _skill_catalog(pid: str | None = None) -> dict:
         reg = _loaded_registry()
-        caps = list_packs(app.state.packs_root, "capability")
         experts = []
         if pid:
             try:
                 experts = list(_project(pid).experts or [])
             except HTTPException:
                 pass
-        rows = []
-        for cap in caps:
-            name = cap["name"]
-            skills = [_skill_json(s) for s in reg.all() if s.kind == "capability" and s.pack == name]
-            for skill in skills:
-                refs = []
-                base = Path(app.state.packs_root) / "experts"
-                if base.is_dir():
-                    for f in sorted(base.glob("*.yaml")):
-                        eid = f.stem
-                        if pid and eid not in experts:
-                            continue
-                        try:
-                            raw = _parse_expert_yaml(f)
-                            allowed = raw.get("skills")
-                            if allowed is not None and skill["name"] in (allowed or []):
-                                refs.append(eid)
-                        except Exception:
-                            continue
-                skill["expert_refs"] = refs
-                skill["estimated_tokens"] = max(1, len((_cap_skill_dir(name, skill["name"]) / "SKILL.md").read_text(encoding="utf-8", errors="replace")) // 4)
-            rows.append({"name": name, "label": cap.get("label") or name, "skills": skills,
-                         "skill_count": len(skills), "estimated_tokens": sum(s["estimated_tokens"] for s in skills)})
-        return {"capabilities": rows, "skill_count": sum(r["skill_count"] for r in rows),
-                "capability_count": len(rows), "estimated_tokens": sum(r["estimated_tokens"] for r in rows)}
+        rows: list[dict] = []
+        for sk in reg.all():
+            row = _skill_json(sk)
+            refs = []
+            base = Path(app.state.packs_root) / "experts"
+            if base.is_dir():
+                for f in sorted(base.glob("*.yaml")):
+                    eid = f.stem
+                    if pid and eid not in experts:
+                        continue
+                    try:
+                        allowed = _parse_expert_yaml(f).get("skills")
+                        if allowed is not None and row["name"] in (allowed or []):
+                            refs.append(eid)
+                    except Exception:
+                        continue
+            row["expert_refs"] = refs
+            row["estimated_tokens"] = max(1, len((skill_dir(app.state.packs_root, sk.name) / "SKILL.md").read_text(encoding="utf-8", errors="replace")) // 4)
+            rows.append(row)
+        return {"skills": rows, "skill_count": len(rows),
+                "estimated_tokens": sum(r["estimated_tokens"] for r in rows)}
 
     @app.get("/api/skills/catalog")
     def get_skill_catalog(pid: str | None = None):
         return _skill_catalog(pid)
 
-    @app.get("/api/capabilities/{cap}/skills/{skill_name}/files")
-    def list_cap_skill_files(cap: str, skill_name: str):
-        root = _cap_skill_dir(cap, skill_name)
+    @app.get("/api/skills/{skill_name}/files")
+    def list_skill_files(skill_name: str):
+        root = _skill_workspace_dir(skill_name)
         entries = []
         for path in sorted(root.rglob("*"), key=lambda p: (not p.is_dir(), p.relative_to(root).as_posix().lower())):
             if ".history" in path.relative_to(root).parts:
                 continue
             entries.append(_skill_file_entry(root, path))
-        return {"root": f"capabilities/{cap}/skills/{skill_name}", "files": entries}
+        return {"root": f"skills/{skill_name}", "files": entries}
 
-    @app.get("/api/capabilities/{cap}/skills/{skill_name}/files/content")
-    def read_cap_skill_file(cap: str, skill_name: str, path: str):
-        root = _cap_skill_dir(cap, skill_name)
+    @app.get("/api/skills/{skill_name}/files/content")
+    def read_skill_file(skill_name: str, path: str):
+        root = _skill_workspace_dir(skill_name)
         target = _skill_file_path(root, path)
         if target.is_dir():
             raise HTTPException(422, "目录不能读取内容")
@@ -7224,9 +7240,9 @@ def create_app(
             return {**entry, "preview": f"data:{mime};base64,{base64.b64encode(target.read_bytes()).decode()}"}
         return entry
 
-    @app.post("/api/capabilities/{cap}/skills/{skill_name}/files")
-    def create_cap_skill_file(cap: str, skill_name: str, body: SkillFileWriteIn):
-        root = _cap_skill_dir(cap, skill_name)
+    @app.post("/api/skills/{skill_name}/files")
+    def create_skill_file(skill_name: str, body: SkillFileWriteIn):
+        root = _skill_workspace_dir(skill_name)
         target = _skill_file_path(root, body.path, must_exist=False)
         if target.exists():
             raise HTTPException(409, "技能文件已存在")
@@ -7238,9 +7254,9 @@ def create_app(
                 target.write_text(body.content, encoding="utf-8")
         return {"status": "ok", "path": body.path}
 
-    @app.put("/api/capabilities/{cap}/skills/{skill_name}/files")
-    def update_cap_skill_file(cap: str, skill_name: str, body: SkillFileWriteIn):
-        root = _cap_skill_dir(cap, skill_name)
+    @app.put("/api/skills/{skill_name}/files")
+    def update_skill_file(skill_name: str, body: SkillFileWriteIn):
+        root = _skill_workspace_dir(skill_name)
         target = _skill_file_path(root, body.path)
         if target.is_dir():
             raise HTTPException(422, "目录不能写入内容")
@@ -7249,9 +7265,9 @@ def create_app(
             target.write_text(body.content, encoding="utf-8")
         return {"status": "ok", "path": body.path}
 
-    @app.post("/api/capabilities/{cap}/skills/{skill_name}/files/rename")
-    def rename_cap_skill_file(cap: str, skill_name: str, body: SkillFileRenameIn):
-        root = _cap_skill_dir(cap, skill_name)
+    @app.post("/api/skills/{skill_name}/files/rename")
+    def rename_skill_file(skill_name: str, body: SkillFileRenameIn):
+        root = _skill_workspace_dir(skill_name)
         src = _skill_file_path(root, body.path)
         dest = _skill_file_path(root, body.new_path, must_exist=False)
         if dest.exists():
@@ -7261,9 +7277,9 @@ def create_app(
             shutil.move(str(src), str(dest))
         return {"status": "ok", "path": body.new_path}
 
-    @app.delete("/api/capabilities/{cap}/skills/{skill_name}/files")
-    def delete_cap_skill_file(cap: str, skill_name: str, path: str):
-        root = _cap_skill_dir(cap, skill_name)
+    @app.delete("/api/skills/{skill_name}/files")
+    def delete_skill_file(skill_name: str, path: str):
+        root = _skill_workspace_dir(skill_name)
         target = _skill_file_path(root, path)
         if target == root or target.name == "SKILL.md":
             raise HTTPException(422, "不能删除技能根目录或 SKILL.md")
@@ -7276,36 +7292,49 @@ def create_app(
                 target.unlink()
         return {"status": "ok", "path": path}
 
-    # ---- 能力包：Skill 列表/读写 + 红线 ----
+    # ---- Skill 列表/读写（技能扁平 packs/kb/skills/<name>）----
 
-    @app.get("/api/capabilities/{cap}/skills")
-    def list_cap_skills(cap: str):
-        _check_name(cap, "能力包")
+    @app.get("/api/skills")
+    def list_skills():
         reg = _loaded_registry()
-        return [_skill_json(sk) for sk in reg.all()
-                if sk.kind == "capability" and sk.pack == cap]
+        return [_skill_json(sk) for sk in reg.all()]
 
-    @app.get("/api/capabilities/{cap}/skills/{skill_name}")
-    def get_cap_skill(cap: str, skill_name: str):
-        path, sk = _get_skill("capability", cap, skill_name)
+    # ---- 词汇表聚合（七类 frontmatter 字段 + 使用计数，前端 datalist 补全） ----
+    # 注意：必须注册在 /api/skills/{skill_name} 之前，否则被路径参数路由吃掉。
+    @app.get("/api/skills/vocab")
+    def skills_vocab():
+        fields = ("keywords", "features", "file_features", "platforms",
+                  "formats", "vuln_classes", "task_types")
+        vocab: dict[str, dict[str, int]] = {f: {} for f in fields}
+        for sk in _loaded_registry().all():
+            for f in fields:
+                for v in getattr(sk, f, None) or []:
+                    vocab[f][v] = vocab[f].get(v, 0) + 1
+        return {f: [{"value": k, "count": c} for k, c in sorted(
+                    vocab[f].items(), key=lambda kv: (-kv[1], kv[0]))]
+                for f in fields}
+
+    @app.get("/api/skills/{skill_name}")
+    def get_skill(skill_name: str):
+        path, sk = _get_skill(skill_name)
         return {"name": skill_name, "meta": parse_frontmatter(path.read_text(encoding="utf-8")),
                 "skill": _skill_json(sk) if sk else None,
                 "raw": path.read_text(encoding="utf-8"),
                 "resources": ([p.relative_to(path.parent).as_posix() for p in sk.resources]
                               if sk else [])}
 
-    @app.get("/api/capabilities/{cap}/skills/{skill_name}/resources/{resource:path}")
-    def get_cap_skill_resource(cap: str, skill_name: str, resource: str):
-        _path, sk = _get_skill("capability", cap, skill_name)
+    @app.get("/api/skills/{skill_name}/resources/{resource:path}")
+    def get_skill_resource(skill_name: str, resource: str):
+        _path, sk = _get_skill(skill_name)
         if sk is None:
             raise HTTPException(404, "技能未注册")
         target = _skill_resource(sk, resource)
         return {"path": resource.replace("\\", "/"),
                 "content": target.read_text(encoding="utf-8", errors="replace")}
 
-    @app.put("/api/capabilities/{cap}/skills/{skill_name}")
-    def update_cap_skill(cap: str, skill_name: str, body: SkillUpdateIn):
-        path, _ = _get_skill("capability", cap, skill_name)
+    @app.put("/api/skills/{skill_name}")
+    def update_skill(skill_name: str, body: SkillUpdateIn):
+        path, _ = _get_skill(skill_name)
         meta = parse_frontmatter(body.content)
         if meta.get("name") != skill_name:
             raise HTTPException(422, f"frontmatter name（{meta.get('name')!r}）必须与技能名（{skill_name}）一致")
@@ -7314,125 +7343,33 @@ def create_app(
             path.write_text(body.content, encoding="utf-8")
         return {"status": "ok"}
 
-    @app.post("/api/capabilities/{cap}/skills", status_code=201)
-    def create_cap_skill(cap: str, body: SkillCreateIn):
-        """向导新建能力包自包含技能。重名 409、非法名 422、能力包不存在 404。"""
-        _check_name(cap, "能力包")
+    @app.post("/api/skills", status_code=201)
+    def create_skill(body: SkillCreateIn):
+        """新建自包含技能（packs/kb/skills/<name>）。重名 409、非法名 422。"""
         _check_name(body.name, "技能名")
-        cdir = capability_dir(app.state.packs_root, cap)
-        if not cdir.is_dir():
-            raise HTTPException(404, f"能力包不存在: {cap}")
-        dest = cdir / "skills" / body.name
+        dest = skill_dir(app.state.packs_root, body.name)
         with pack_write_lock():  # 存在性检查+建目录+写文件同一临界区（防并发重名）
             if dest.exists():
-                raise HTTPException(409, f"技能已存在: {cap}/{body.name}")
+                raise HTTPException(409, f"技能已存在: {body.name}")
             dest.mkdir(parents=True)
             (dest / "SKILL.md").write_text(_dump_new_skill(body.name, body), encoding="utf-8")
-        return {"status": "ok", "name": body.name, "path": f"capabilities/{cap}/skills/{body.name}"}
+        return {"status": "ok", "name": body.name, "path": f"skills/{body.name}"}
 
-    @app.delete("/api/capabilities/{cap}/skills/{skill_name}")
-    def delete_cap_skill(cap: str, skill_name: str):
+    @app.delete("/api/skills/{skill_name}")
+    def delete_skill(skill_name: str):
         """删除技能：整目录移入 skills/.history/trash/ 可恢复。"""
-        path = _cap_path(app, cap, "skills", skill_name)
+        _check_name(skill_name, "技能名")
+        path = skill_dir(app.state.packs_root, skill_name)
         with pack_write_lock():
             if not path.is_dir():
-                raise HTTPException(404, f"技能不存在: capabilities/{cap}/skills/{skill_name}")
+                raise HTTPException(404, f"技能不存在: skills/{skill_name}")
             dest = _trash_move(path)
         return {"status": "ok", "name": skill_name, "trash": dest.name}
 
-    @app.patch("/api/capabilities/{cap}/skills/{skill_name}/enabled")
-    def toggle_cap_skill(cap: str, skill_name: str, body: SkillEnabledIn):
+    @app.patch("/api/skills/{skill_name}/enabled")
+    def toggle_skill(skill_name: str, body: SkillEnabledIn):
         """enabled 快速开关：只改 frontmatter，正文不动，自动留 .history 备份。"""
-        path, _ = _get_skill("capability", cap, skill_name)
-        backup = _set_skill_enabled(path, body.enabled)
-        return {"status": "ok", "name": skill_name, "enabled": body.enabled,
-                "backup": backup.name if backup else None}
-
-    @app.get("/api/capabilities/{cap}/rules")
-    def get_cap_rules(cap: str):
-        path = _cap_path(app, cap, "rules", "redlines.md")
-        # 缺失是常态（doctor 的 missing-redlines 预警），返回 200+exists:false，不走 404 噪声
-        if not path.is_file():
-            return {"content": "", "exists": False}
-        return {"content": path.read_text(encoding="utf-8"), "exists": True}
-
-    @app.put("/api/capabilities/{cap}/rules")
-    def update_cap_rules(cap: str, body: FileContentIn):
-        path = _cap_path(app, cap, "rules", "redlines.md")
-        with pack_write_lock():
-            _pack_history_backup(path)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(body.content, encoding="utf-8")
-        return {"status": "ok"}
-
-    # ---- 场景轨：Skill 列表/读写 ----
-
-    @app.get("/api/tracks/{track}/skills")
-    def list_track_skills(track: str):
-        _check_name(track, "场景轨")
-        reg = _loaded_registry()
-        return [_skill_json(sk) for sk in reg.all()
-                if sk.kind == "track" and sk.pack == track]
-
-    @app.get("/api/tracks/{track}/skills/{skill_name}")
-    def get_track_skill(track: str, skill_name: str):
-        path, sk = _get_skill("track", track, skill_name)
-        return {"name": skill_name, "meta": parse_frontmatter(path.read_text(encoding="utf-8")),
-                "skill": _skill_json(sk) if sk else None,
-                "raw": path.read_text(encoding="utf-8"),
-                "resources": ([p.relative_to(path.parent).as_posix() for p in sk.resources]
-                              if sk else [])}
-
-    @app.get("/api/tracks/{track}/skills/{skill_name}/resources/{resource:path}")
-    def get_track_skill_resource(track: str, skill_name: str, resource: str):
-        _path, sk = _get_skill("track", track, skill_name)
-        if sk is None:
-            raise HTTPException(404, "技能未注册")
-        target = _skill_resource(sk, resource)
-        return {"path": resource.replace("\\", "/"),
-                "content": target.read_text(encoding="utf-8", errors="replace")}
-
-    @app.put("/api/tracks/{track}/skills/{skill_name}")
-    def update_track_skill(track: str, skill_name: str, body: SkillUpdateIn):
-        path, _ = _get_skill("track", track, skill_name)
-        meta = parse_frontmatter(body.content)
-        if meta.get("name") != skill_name:
-            raise HTTPException(422, f"frontmatter name（{meta.get('name')!r}）必须与技能名（{skill_name}）一致")
-        with pack_write_lock():
-            _pack_history_backup(path)
-            path.write_text(body.content, encoding="utf-8")
-        return {"status": "ok"}
-
-    @app.post("/api/tracks/{track}/skills", status_code=201)
-    def create_track_skill(track: str, body: SkillCreateIn):
-        """向导新建轨级自包含技能。重名 409、非法名 422、场景轨不存在 404。"""
-        _check_name(track, "场景轨")
-        _check_name(body.name, "技能名")
-        tdir = track_dir(app.state.packs_root, track)
-        if not tdir.is_dir():
-            raise HTTPException(404, f"场景轨不存在: {track}")
-        dest = tdir / "skills" / body.name
-        with pack_write_lock():  # 存在性检查+建目录+写文件同一临界区（防并发重名）
-            if dest.exists():
-                raise HTTPException(409, f"技能已存在: {track}/{body.name}")
-            dest.mkdir(parents=True)
-            (dest / "SKILL.md").write_text(_dump_new_skill(body.name, body), encoding="utf-8")
-        return {"status": "ok", "name": body.name, "path": f"tracks/{track}/skills/{body.name}"}
-
-    @app.delete("/api/tracks/{track}/skills/{skill_name}")
-    def delete_track_skill(track: str, skill_name: str):
-        """删除轨级技能：整目录移入 skills/.history/trash/ 可恢复。"""
-        path = _track_path(app, track, "skills", skill_name)
-        with pack_write_lock():
-            if not path.is_dir():
-                raise HTTPException(404, f"技能不存在: tracks/{track}/skills/{skill_name}")
-            dest = _trash_move(path)
-        return {"status": "ok", "name": skill_name, "trash": dest.name}
-
-    @app.patch("/api/tracks/{track}/skills/{skill_name}/enabled")
-    def toggle_track_skill(track: str, skill_name: str, body: SkillEnabledIn):
-        """enabled 快速开关：只改 frontmatter，正文不动，自动留 .history 备份。"""
-        path, _ = _get_skill("track", track, skill_name)
+        path, _ = _get_skill(skill_name)
         backup = _set_skill_enabled(path, body.enabled)
         return {"status": "ok", "name": skill_name, "enabled": body.enabled,
                 "backup": backup.name if backup else None}
@@ -7441,7 +7378,8 @@ def create_app(
 
     @app.get("/api/tracks/{track}/rules")
     def get_track_rules(track: str):
-        path = _track_path(app, track, "rules", "redlines.md")
+        _check_name(track, "场景轨")
+        path = redline_path(app.state.packs_root, track)
         # 缺失是常态（doctor 的 missing-redlines 预警），返回 200+exists:false，不走 404 噪声
         if not path.is_file():
             return {"content": "", "exists": False}
@@ -7449,7 +7387,8 @@ def create_app(
 
     @app.put("/api/tracks/{track}/rules")
     def update_track_rules(track: str, body: FileContentIn):
-        path = _track_path(app, track, "rules", "redlines.md")
+        _check_name(track, "场景轨")
+        path = redline_path(app.state.packs_root, track)
         with pack_write_lock():
             _pack_history_backup(path)
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -7658,29 +7597,29 @@ def create_app(
         _check_name(track, "场景轨")
         return load_task_types(app.state.packs_root, track)
 
-    # ---- 平台规则 owners（文件即规则：删文件=停用、新建=扩展；meta.owner 命中才注入） ----
+    # ---- 平台规则（文件即规则：删文件=停用、新建=扩展；owner 命中才注入；渗透独有） ----
 
-    @app.get("/api/tracks/{track}/owners")
-    def list_track_owners(track: str):
-        base = _track_path(app, track, "rules", "owners")
+    @app.get("/api/platform-rules")
+    def list_platform_rules():
+        base = platform_rules_dir(app.state.packs_root)
         if not base.is_dir():
             return []
         return [{"tag": f.stem, "content": f.read_text(encoding="utf-8")}
                 for f in sorted(base.glob("*.md"))]
 
-    @app.put("/api/tracks/{track}/owners/{tag}")
-    def update_track_owner(track: str, tag: str, body: FileContentIn):
+    @app.put("/api/platform-rules/{tag}")
+    def update_platform_rule(tag: str, body: FileContentIn):
         _check_name(tag, "owner 标签")
-        path = _track_path(app, track, "rules", "owners", f"{tag}.md")
+        path = platform_rules_dir(app.state.packs_root) / f"{tag}.md"
         with pack_write_lock():
             _pack_history_backup(path)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(body.content, encoding="utf-8")
         return {"status": "ok", "tag": tag}
 
-    @app.delete("/api/tracks/{track}/owners/{tag}")
-    def delete_track_owner(track: str, tag: str):
-        path = _track_path(app, track, "rules", "owners", f"{tag}.md")
+    @app.delete("/api/platform-rules/{tag}")
+    def delete_platform_rule(tag: str):
+        path = platform_rules_dir(app.state.packs_root) / f"{tag}.md"
         with pack_write_lock():
             if not path.is_file():
                 raise HTTPException(404, f"平台规则不存在: {tag}")
@@ -7688,30 +7627,30 @@ def create_app(
             path.unlink()
         return {"status": "ok", "tag": tag}
 
-    # ---- 评级与价值口径 ratings（F11，同 owners「文件即规则」哲学；
+    # ---- 评级与价值口径（F11，同「文件即规则」哲学；渗透独有；
     #      注入带判级硬指令，rating_basis 落 findings.rating_basis） ----
 
-    @app.get("/api/tracks/{track}/ratings")
-    def list_track_ratings(track: str):
-        base = _track_path(app, track, "rules", "rating")
+    @app.get("/api/ratings")
+    def list_ratings():
+        base = rating_dir(app.state.packs_root)
         if not base.is_dir():
             return []
         return [{"tag": f.stem, "content": f.read_text(encoding="utf-8")}
                 for f in sorted(base.glob("*.md"))]
 
-    @app.put("/api/tracks/{track}/ratings/{tag}")
-    def update_track_rating(track: str, tag: str, body: FileContentIn):
+    @app.put("/api/ratings/{tag}")
+    def update_rating(tag: str, body: FileContentIn):
         _check_name(tag, "评级标签")
-        path = _track_path(app, track, "rules", "rating", f"{tag}.md")
+        path = rating_dir(app.state.packs_root) / f"{tag}.md"
         with pack_write_lock():
             _pack_history_backup(path)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(body.content, encoding="utf-8")
         return {"status": "ok", "tag": tag}
 
-    @app.delete("/api/tracks/{track}/ratings/{tag}")
-    def delete_track_rating(track: str, tag: str):
-        path = _track_path(app, track, "rules", "rating", f"{tag}.md")
+    @app.delete("/api/ratings/{tag}")
+    def delete_rating(tag: str):
+        path = rating_dir(app.state.packs_root) / f"{tag}.md"
         with pack_write_lock():
             if not path.is_file():
                 raise HTTPException(404, f"评级规则不存在: {tag}")
@@ -7921,7 +7860,6 @@ def create_app(
         track = body.track
         if not track and body.domain:  # 旧客户端兼容
             track = LEGACY_DOMAIN_MAP.get(body.domain, (body.domain, []))[0]
-        packs = (set(body.capabilities) | {track}) if track else None
         role_skills = None
         if body.role and track:
             try:
@@ -7932,27 +7870,12 @@ def create_app(
         hits = SkillRouter(registry=_loaded_registry()).route(
             query=body.query, features=body.features,
             file_features=body.file_features, labels=body.labels,
-            role_skills=role_skills, packs=packs, top_k=10,
+            role_skills=role_skills, top_k=10,
             include_disabled=body.include_disabled)
-        return [{"name": h.skill.name, "kind": h.skill.kind, "pack": h.skill.pack,
+        return [{"name": h.skill.name,
                  "description": h.skill.description, "enabled": h.skill.enabled,
                  "score": h.score, "matched": h.matched,
                  "breakdown": h.breakdown} for h in hits]
-
-    # ---- 词汇表聚合（七类 frontmatter 字段 + 使用计数，前端 datalist 补全） ----
-
-    @app.get("/api/skills/vocab")
-    def skills_vocab():
-        fields = ("keywords", "features", "file_features", "platforms",
-                  "formats", "vuln_classes", "task_types")
-        vocab: dict[str, dict[str, int]] = {f: {} for f in fields}
-        for sk in _loaded_registry().all():
-            for f in fields:
-                for v in getattr(sk, f, None) or []:
-                    vocab[f][v] = vocab[f].get(v, 0) + 1
-        return {f: [{"value": k, "count": c} for k, c in sorted(
-                    vocab[f].items(), key=lambda kv: (-kv[1], kv[0]))]
-                for f in fields}
 
     # ---- kb 本地基线（C2：列举/读/新建/改写/删除/改名联动/版本/引用） ----
     # 纪律：中文多级目录允许，限 .md，1 MiB 上限；写经 writing.py 同一把 packs 锁。
@@ -8157,108 +8080,6 @@ def create_app(
         return {"path": target.module, "count": len(hits),
                 "refs": [h.to_dict() for h in hits]}
 
-    def _kb_evolution_files(cap: str) -> dict[str, dict]:
-        rows: dict[str, dict] = {}
-        for source in writing.list_kb(app.state.packs_root, cap):
-            for item in source["files"]:
-                rel = str(item["path"]).replace("\\", "/")
-                low = rel.lower()
-                kind = next((x[:-1] for x in ("playbooks", "patterns", "cases")
-                             if low.startswith(x + "/")), "ref")
-                rows[rel] = {"cap": cap, "path": rel, "source": source["id"],
-                             "title": item.get("title") or Path(rel).stem,
-                             "kind": kind, "layer": {"ref": 1, "case": 2,
-                                                       "pattern": 3, "playbook": 4}[kind]}
-        return rows
-
-    @app.get("/api/capabilities/{cap}/kb/evolution/recommend")
-    def kb_evolution_recommend(cap: str, path: str = Query(...),
-                               limit: int = Query(5, ge=1, le=20)):
-        rows = _kb_evolution_files(cap)
-        path = path.replace("\\", "/")
-        current = rows.get(path)
-        if current is None:
-            raise HTTPException(404, f"kb 文件不存在: {path}")
-        target = _kb_error_map(writing.resolve_kb, app.state.packs_root, cap, path)
-        text = target.path.read_text(encoding="utf-8", errors="replace")
-        words = re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}|[\u4e00-\u9fff]{2,}", text[:12000])
-        needles: list[str] = []
-        seen: set[str] = set()
-        for word in words:
-            key = word.lower()
-            if key not in seen:
-                seen.add(key); needles.append(word)
-            if len(needles) >= 8:
-                break
-        scores: dict[str, int] = {}
-        for needle in needles:
-            try:
-                hits = writing.search_kb(app.state.packs_root, cap, needle, min(limit * 3, 60))
-            except writing.KbError:
-                hits = []
-            for hit in hits:
-                rel = str(hit.get("path") or "").replace("\\", "/")
-                if rel and rel != path and rel in rows:
-                    scores[rel] = scores.get(rel, 0) + int(hit.get("matches") or 1)
-        result = []
-        for rel, score in sorted(scores.items(), key=lambda pair: (-pair[1], pair[0]))[:limit]:
-            item = dict(rows[rel]); item["reason"] = f"与当前文档共享 {score} 个主题命中"; result.append(item)
-        return {"cap": cap, "current": current, "results": result}
-
-    @app.post("/api/capabilities/{cap}/kb/evolution")
-    def kb_evolution(cap: str, body: KbEvolutionIn):
-        rows = _kb_evolution_files(cap)
-        clean = [p.replace("\\", "/") for p in body.sources]
-        missing = [p for p in clean if p not in rows]
-        if missing:
-            raise HTTPException(404, f"知识库资料不存在: {', '.join(missing[:3])}")
-        _exec, plan_llm = _llms()
-        if plan_llm is None:
-            raise HTTPException(503, "planner LLM 未配置，知识演化不可用")
-
-        def _run() -> dict:
-            materials = []
-            for rel in clean:
-                target = writing.resolve_kb(app.state.packs_root, cap, rel)
-                materials.append({"path": rel, "title": rows[rel].get("title"),
-                                  "kind": rows[rel].get("kind"),
-                                  "content": target.path.read_text(encoding="utf-8", errors="replace")[:40000]})
-            templates = {
-                "case": "背景、目标、环境、关键步骤、结果、失败与修正、可复用要点",
-                "pattern": "问题信号、原理、适用条件、实施步骤、验证方法、边界与风险",
-                "playbook": "适用场景、核心原理、标准流程、决策分支、检查清单、常见误区",
-            }
-            system = ("你是安全知识库演化编辑。只基于资料生成中文 Markdown 草稿，保留代码、命令、路径和专有名词原文，禁止虚构。"
-                      "只输出 JSON：{\"kind\":\"case|pattern|playbook\",\"title\":\"...\",\"path\":\"...\",\"summary\":\"...\",\"content\":\"...\"}。"
-                      f"目标类型={body.target_kind or 'auto'}；模板={templates.get(body.target_kind or 'pattern', '先判断类型再使用对应模板')}。")
-            response = plan_llm.chat([{"role": "user", "content": json.dumps({"cap": cap, "materials": materials}, ensure_ascii=False)}], system=system)
-            raw = (response.text or "").strip()
-            if raw.startswith("```"):
-                raw = re.sub(r"^```[a-zA-Z]*\n?", "", raw).strip(); raw = re.sub(r"\n?```$", "", raw).strip()
-            match = re.search(r"\{.*\}", raw, re.S)
-            try:
-                draft = json.loads(match.group(0) if match else raw)
-            except (json.JSONDecodeError, ValueError) as exc:
-                raise ValueError(f"planner 输出不是合法 JSON: {exc}") from exc
-            kind = draft.get("kind") if draft.get("kind") in {"case", "pattern", "playbook"} else (body.target_kind or "pattern")
-            title = str(draft.get("title") or f"由 {len(clean)} 篇资料提炼的{kind}").strip()[:160]
-            slug = re.sub(r"[^\w\-\u4e00-\u9fff]+", "-", title).strip("-") or "evolution-draft"
-            base = {"case": "cases", "pattern": "patterns", "playbook": "playbooks"}[kind]
-            rel = str(draft.get("path") or f"{base}/{slug}.md").replace("\\", "/")
-            if not rel.lower().startswith(base + "/") or not rel.lower().endswith(".md"):
-                rel = f"{base}/{slug}.md"
-            original = rel; n = 2
-            while rel in rows or writing.resolve_kb(app.state.packs_root, cap, rel).path.exists():
-                rel = f"{base}/{slug}-{n}.md"; n += 1
-            return {"kind": kind, "title": title, "path": rel,
-                    "content": str(draft.get("content") or "").strip(),
-                    "summary": str(draft.get("summary") or title).strip()[:300],
-                    "sources": [{"cap": cap, "path": p, "title": rows[p].get("title")} for p in clean],
-                    "path_adjusted": rel != original,
-                    "notice": "目标路径已自动调整以避免同名文件" if rel != original else None}
-
-        return {"job_id": app.state.jobs.submit("kb-evolution", _run, meta={"cap": cap, "sources": clean})}
-
     # ---- 统一变更提案（C4：skill edit / kb 四模式，只落 pending，人类审批） ----
 
     def _proposal_event_payload(p: dict, **extra) -> dict:
@@ -8392,8 +8213,8 @@ def create_app(
                               "status": f.get("status")}
                              for f in bb.list_findings(pid) if f.get("author") == sid][:50]
             # 显式文件清单：LLM 只能在清单内给路径，防猜名（越界提案校验时也会被拒）
-            # expert-pool M2：能力面按 caps_effective 推导（专家绑定项目同口径）
-            eff_caps = caps_effective(
+            # expert-pool M2：能力面按 directions_effective 推导（专家绑定项目同口径）
+            eff_caps = directions_effective(
                 app.state.packs_root, proj.track, proj.experts,
                 fallback=proj.capabilities)
             file_list: dict[str, list[str]] = {}
@@ -8404,8 +8225,7 @@ def create_app(
                                       for f in src["files"]]
                 except writing.KbError:
                     continue
-            skills_list = [f"{s.kind}/{s.pack}/{s.name}"
-                           for s in _loaded_registry().all()]
+            skills_list = [s.name for s in _loaded_registry().all()]
             system_msg = (
                 "你是安全行动复盘编辑。基于一次会话执行的证据（该会话承接的团队执行、"
                 "跑过的命令、引用过的文档、产出的发现），提出对知识库/技能文档的沉淀提案。"
@@ -8416,7 +8236,7 @@ def create_app(
                 '只输出 JSON：{"proposals":[{"kind":"kb|skill","mode":"edit|create|rename|delete",'
                 '"target":{...},"content":"...","summary":"≤300字","reason":"证据"}]}')
             user_msg = json.dumps(
-                {"capabilities": eff_caps,
+                {"directions": eff_caps,
                  "session": {"id": sid, "role": sess.get("role")},
                  "kb_files": file_list, "skills": skills_list,
                  "kb_open_sequence": kb_opens[-50:],
@@ -8535,15 +8355,15 @@ def create_app(
         bridge = bridges.get(proj.id)
         if bridge is None:
             from core.chat.mcp_bridge import MCPBridge
-            from core.skills.experts import caps_effective
+            from core.skills.experts import directions_effective
             from core.skills.taxonomy import LEGACY_DOMAIN_MAP
             # 域推导与 ChatTurn capabilities 同口径（2026-09-30 修复：此前用盘上原始
             # capabilities——M3 起恒空，且 config 里 ida 等 server 域是旧域 "reverse"，
             # 交集恒空 → 逆向项目永远加载不了配置的 MCP）。
-            # caps_effective：无专家/无显式能力时按轨默认补（research→binary）。
+            # directions_effective：无专家/无显式能力时按轨默认补（research→binary）。
             # 旧域反向匹配：research+binary = 旧 reverse 域 → 放行 "reverse" 域 server；
             # pentest/ctf 旧域名=轨名已在集合内，无需特判。
-            caps = caps_effective(app.state.packs_root, proj.track,
+            caps = directions_effective(app.state.packs_root, proj.track,
                                   proj.experts, fallback=proj.capabilities)
             domains = sorted({*caps, proj.track})
             for d, (t, cs) in LEGACY_DOMAIN_MAP.items():
@@ -8756,7 +8576,7 @@ def create_app(
                 turn = ChatTurn(
                     bb=proj.bb, llm=exec_llm, project_id=pid, thread_id=tid,
                     packs_root=app.state.packs_root, track=proj.track,
-                    capabilities=caps_effective(
+                    capabilities=directions_effective(
                         app.state.packs_root, proj.track, proj.experts,
                         fallback=proj.capabilities),
                     mcp_bridge=_chat_bridge(proj),

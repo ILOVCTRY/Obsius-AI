@@ -776,6 +776,48 @@ def test_chat_orchestrator_situation_degrades_on_bb_error(tmp_path, monkeypatch)
     assert "## 项目资产态势" in ctx and "读取失败" in ctx
 
 
+def test_chat_injects_blueprint_context(tmp_path):
+    """R4 消费面接线 M1（2026-10-13）：主控与子专家 system 都注入开发蓝图段
+    （蓝图名/status + 模块/status/锚点数）——此前 AI 侧完全读不到 blueprints
+    表，模块深析/重建无从规划。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    bb.create_blueprint(
+        "p1", "重建 aimodv1", goal="还原许可校验逻辑", binary_sha256="a" * 64,
+        modules=[{"name": "许可校验", "func_addresses": ["0x401000", "0x401100"]},
+                 {"name": "文件持久化"}])
+    llm = FakeLLM([_resp(text="收到。")])
+    thread = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID)
+    turn = ChatTurn(bb=bb, llm=llm, project_id="p1", thread_id=thread["id"],
+                    packs_root="packs", track="research", capabilities=["binary"],
+                    mcp_bridge=None, expert_names=None)
+    turn.run("按蓝图推进")
+    system = llm.calls[0]["system"]
+    assert "## 开发蓝图" in system
+    assert "重建 aimodv1" in system and "draft" in system
+    assert "许可校验" in system and "锚点 2" in system
+    # 子专家同样注入（紧凑形态）
+    sub = chat_store.create_thread(bb, "p1", "reverse-analyst",
+                                   parent_thread_id=thread["id"],
+                                   spawned_task="深析许可校验模块")
+    turn2 = ChatTurn(bb=bb, llm=FakeLLM([]), project_id="p1",
+                     thread_id=sub["id"], packs_root="packs", track="research",
+                     capabilities=["binary"], mcp_bridge=None, expert_names=None)
+    assert "## 开发蓝图" in turn2._system_prompt()
+
+
+def test_chat_blueprint_context_absent_when_none(tmp_path):
+    """无蓝图 → 蓝图段返空串、system 不含（不注入不报错）。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    thread = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID)
+    turn = ChatTurn(bb=bb, llm=FakeLLM([]), project_id="p1",
+                    thread_id=thread["id"], packs_root="packs", track="research",
+                    capabilities=["binary"], mcp_bridge=None, expert_names=None)
+    assert turn._blueprint_context() == ""
+    assert "## 开发蓝图" not in turn._system_prompt()
+
+
 def test_chat_max_steps_budget():
     """对话轮步数上限：主控/子专家均 200（2026-10-01 由 24/32 提升）。"""
     from core.chat import runtime
@@ -1634,6 +1676,89 @@ def test_mcp_bridge_http_tools_and_call(mcp_config, monkeypatch):
     assert status["online"] and status["tools"][0]["name"] == "decompile"
 
 
+def test_mcp_heavy_tool_size_gate_blocks_survey_binary(mcp_config, monkeypatch,
+                                                        tmp_path):
+    """2026-10-13：GUI 重活工具（survey_binary）按当前库源程序大小拦截——超限即拒，
+    且不把调用转发给 server（避免占死 IDA 主线程）。阈值压到 10 字节便于测。"""
+    import core.chat.mcp_bridge as mb
+    sample = tmp_path / "sample.exe"
+    sample.write_bytes(b"MZ" + b"\x00" * 100)
+    forwarded: list[str] = []
+
+    def fake_post(self, method, params, *, notification, timeout):
+        if method == "initialize":
+            return 200, {"result": {}}, {"Mcp-Session-Id": "s-1"}
+        if method == "notifications/initialized":
+            return 200, {}, {}
+        name = (params or {}).get("name")
+        forwarded.append(name)
+        if name == "server_health":
+            return 200, {"result": {"content": [
+                {"type": "text",
+                 "text": json.dumps({"input_path": str(sample)})}]}}, {}
+        return 200, {"result": {"content": [
+            {"type": "text", "text": "转发结果"}]}}, {}
+
+    monkeypatch.setattr(_HttpConn, "_post", fake_post)
+    monkeypatch.setitem(mb.HEAVY_MCP_TOOLS, "survey_binary", 10)
+    bridge = MCPBridge(mcp_config, domains=["reverse"])
+    out = bridge.call("ida", "survey_binary", {})
+    assert "已拦截" in out and "survey_binary" in out
+    assert forwarded == ["server_health"]          # survey_binary 未转发
+    # 非重活工具照常转发
+    assert bridge.call("ida", "decompile", {}) == "转发结果"
+    assert forwarded == ["server_health", "decompile"]
+
+
+def test_mcp_heavy_tool_gate_fail_closed_without_size(mcp_config, monkeypatch):
+    """拿不到大小（server_health 非 JSON / 无 input_path / 文件缺失）→ fail-closed 拒。"""
+    replies = ["not json", json.dumps({}),
+               json.dumps({"input_path": "Z:/nope/gone.exe"})]
+    it = iter(replies)
+
+    def fake_post(self, method, params, *, notification, timeout):
+        if method == "initialize":
+            return 200, {"result": {}}, {"Mcp-Session-Id": "s-1"}
+        if method == "notifications/initialized":
+            return 200, {}, {}
+        return 200, {"result": {"content": [
+            {"type": "text", "text": next(it)}]}}, {}
+
+    monkeypatch.setattr(_HttpConn, "_post", fake_post)
+    bridge = MCPBridge(mcp_config, domains=["reverse"])
+    for _ in replies:
+        assert "已拦截" in bridge.call("ida", "survey_binary", {})
+
+
+def test_mcp_heavy_tool_gets_longer_timeout(mcp_config, monkeypatch, tmp_path):
+    """重活工具（survey_binary）单次调用超时放宽到 180s，其余工具维持 60s（2026-10-13）。"""
+    import core.chat.mcp_bridge as mb
+    sample = tmp_path / "s.exe"
+    sample.write_bytes(b"MZ" + b"\x00" * 10)          # 小样本 → 过闸
+    seen: dict[str, float] = {}
+
+    def fake_post(self, method, params, *, notification, timeout):
+        if method == "initialize":
+            return 200, {"result": {}}, {"Mcp-Session-Id": "s-1"}
+        if method == "notifications/initialized":
+            return 200, {}, {}
+        name = (params or {}).get("name")
+        seen[name] = timeout
+        if name == "server_health":
+            return 200, {"result": {"content": [
+                {"type": "text",
+                 "text": json.dumps({"input_path": str(sample)})}]}}, {}
+        return 200, {"result": {"content": [
+            {"type": "text", "text": "ok"}]}}, {}
+
+    monkeypatch.setattr(_HttpConn, "_post", fake_post)
+    bridge = MCPBridge(mcp_config, domains=["reverse"])
+    bridge.call("ida", "survey_binary", {})
+    bridge.call("ida", "decompile", {})
+    assert seen["survey_binary"] == mb.HEAVY_CALL_TIMEOUT == 180.0
+    assert seen["decompile"] == mb._CALL_TIMEOUT == 60.0
+
+
 def test_mcp_bridge_sessionless_server_single_handshake(tmp_path, monkeypatch):
     """无 Mcp-Session-Id 头的 server（x64dbg 形态）：reverse 域出工具，且握手只做一次。
 
@@ -1700,7 +1825,7 @@ def _capture_session_runtimes(bridge, monkeypatch):
             return [{"name": "browser_navigate", "description": "导航",
                      "input_schema": {"type": "object", "properties": {"url": {}}}}]
 
-        def call(self, tool, args):
+        def call(self, tool, args, *, timeout=None):
             return f"ok:{tool}:{self.env.get('PW_SESSION_ID')}"
 
         def is_alive(self):
@@ -1944,17 +2069,18 @@ def test_chat_mcp_reverse_domain_for_research(chat_client, tmp_path, monkeypatch
         {"name": "fofa", "url": "", "transport": "stdio",
          "command": "no-such-binary-xyz", "args": [], "enabled": True,
          "domains": ["pentest"]}]}, ensure_ascii=False), encoding="utf-8")
-    # 蛙池AI逆向 场景：research 轨、无专家、无显式能力 → 默认 binary → reverse 域放行
+    # 蛙池AI逆向 场景：research 轨、无专家 → 轨默认补 binary → reverse 域放行
     p1 = chat_client.post("/api/projects", json={
         "name": "逆向无专家", "track": "research"}).json()["id"]
     out1 = chat_client.get(f"/api/chat/mcp?pid={p1}").json()
     assert [s["name"] for s in out1["servers"]] == ["ida"]
-    # 显式声明非 binary 能力（crypto）的 research 项目：不默认放行 reverse
+    # 2026-10-13 能力包退役：创建不再绑定 capabilities（请求里传 crypto 也被忽略），
+    # research 轨恒按轨默认补 binary → reverse 域照旧放行（方向面改由专家 knowledge 决定）
     p2 = chat_client.post("/api/projects", json={
         "name": "研究非binary", "track": "research",
         "capabilities": ["crypto"]}).json()["id"]
     out2 = chat_client.get(f"/api/chat/mcp?pid={p2}").json()
-    assert [s["name"] for s in out2["servers"]] == []
+    assert [s["name"] for s in out2["servers"]] == ["ida"]
     # pentest 项目：fofa(pentest) 加载、ida(reverse) 不加载（行为不变）
     p3 = chat_client.post("/api/projects", json={
         "name": "渗透", "track": "pentest", "capabilities": ["web"]}).json()["id"]
@@ -2561,7 +2687,7 @@ def test_mcp_plain_stdio_server_gets_project_env(tmp_path, monkeypatch):
             return [{"name": "proxy_status", "description": "x",
                      "input_schema": {"type": "object", "properties": {}}}]
 
-        def call(self, tool, args):
+        def call(self, tool, args, *, timeout=None):
             return "ok"
 
         def is_alive(self):

@@ -35,37 +35,35 @@ def test_project_lifecycle(client):
     listed = client.get("/api/projects").json()
     assert any(m["id"] == pid and m["name"] == "API 测试项目" for m in listed)
     detail = client.get(f"/api/projects/{pid}").json()
-    assert detail["track"] == "ctf" and detail["capabilities"] == ["binary"]
+    assert detail["track"] == "ctf" and detail["directions"] == ["binary"]
     assert "domain" not in detail and set(detail["task_stats"]) <= {"awaiting_human"}  # 写新值不写旧值；C1 空项目 awaiting 计数为 0
     assert "capability" in detail
     assert client.get("/api/projects/nope").status_code == 404
 
 
 def test_project_binding_validation_and_legacy_domain(client):
-    """建项：非法轨/能力包 422；红队扩展包仅 redteam 轨；旧 domain 透明映射（R1/R2）。"""
+    """建项：非法轨 422；能力包已退役（capabilities 入参被忽略，不再校验）；
+    旧 domain 透明映射为 track（R1/R2）。"""
     r = client.post("/api/projects", json={"name": "坏轨", "track": "nope"})
     assert r.status_code == 422 and "场景轨" in r.json()["detail"]
-    r = client.post("/api/projects", json={"name": "坏包", "track": "ctf",
+    # 能力包退役：capabilities 入参不再校验（存 meta 供存量读兼容，不影响建项）
+    r = client.post("/api/projects", json={"name": "旧包入参", "track": "ctf",
                                            "capabilities": ["quantum"]})
-    assert r.status_code == 422 and "能力包" in r.json()["detail"]
+    assert r.status_code == 201
     # R1：redteam 轨合法创建
     r = client.post("/api/projects", json={"name": "红队轨", "track": "redteam"})
     assert r.status_code == 201 and r.json()["track"] == "redteam"
-    # R3/R4：social/shell-c2 仅 redteam 轨可挂载
-    r = client.post("/api/projects", json={"name": "越轨挂载", "track": "pentest",
-                                           "capabilities": ["social"]})
-    assert r.status_code == 422 and "redteam" in r.json()["detail"]
-    # 旧客户端 domain=pentest → pentest/web（R1 目标轨更新）
+    # 旧客户端 domain=pentest → pentest 轨（旧 domain 表仍带 capabilities 读兼容映射）
     r = client.post("/api/projects", json={"name": "旧客户端", "domain": "pentest"})
     assert r.status_code == 201
     meta = r.json()
-    assert meta["track"] == "pentest" and meta["capabilities"] == ["web"]
+    assert meta["track"] == "pentest" and meta["directions"] == ["web"]
 
 
 # ---------- expert-pool M2：项目专家绑定（§4.4 推导 / §4.6 allowed_roles，2026-09-21） ----------
 
 def test_project_experts_binding_lifecycle(client):
-    """创建绑定 → meta 推导（响应层装饰，盘上不动）→ 换将 → 解绑恢复存量直通；池外/轨外 422。"""
+    """创建绑定 → kb 方向推导（响应层装饰，盘上不动）→ 换将 → 解绑恢复存量直通；池外/轨外 422。"""
     r = client.post("/api/projects", json={"name": "绑专家", "track": "ctf",
                                            "capabilities": ["binary"],
                                            "experts": ["web-solver"]})
@@ -73,23 +71,26 @@ def test_project_experts_binding_lifecycle(client):
     meta = r.json()
     pid = meta["id"]
     assert meta["experts"] == ["web-solver"]
-    assert meta["capabilities"] == ["web"]  # caps_effective：web-solver 技能全在 web 包
+    assert meta["directions"] == ["web"]  # directions_effective：web-solver knowledge=[web]
     # 盘上原始绑定不动（Project.capabilities 恒返回盘上值，推导只发生在响应/构造层）
     raw = client.app.state.store.open_project(pid)
     assert raw.capabilities == ["binary"] and raw.experts == ["web-solver"]
     # 列表/详情同样带推导值
     listed = next(p for p in client.get("/api/projects").json() if p["id"] == pid)
-    assert listed["experts"] == ["web-solver"] and listed["capabilities"] == ["web"]
+    assert listed["experts"] == ["web-solver"] and listed["directions"] == ["web"]
 
-    # 换将：全量专家 → capabilities/ 目录全集
-    expected_all = sorted(d.name for d in Path("packs/capabilities").iterdir() if d.is_dir())
+    # 换将：全量专家（knowledge=null）→ kb 方向目录全集
+    expected_all = sorted(d.name for d in Path("packs/kb").iterdir()
+                          if d.is_dir() and not d.name.startswith(".")
+                          and d.name not in {"skills", "安全红线", "licenses",
+                                             "ctf", "pentest", "redteam", "research"})
     r = client.patch(f"/api/projects/{pid}/experts", json={"experts": ["_generalist"]})
     assert r.status_code == 200 and r.json()["experts"] == ["_generalist"]
-    assert r.json()["capabilities"] == expected_all
+    assert r.json()["directions"] == expected_all
     # 解绑（空清单剥键）：恢复存量直通（fallback = 盘上绑定 binary）
     r = client.patch(f"/api/projects/{pid}/experts", json={"experts": []})
     assert r.status_code == 200 and r.json()["experts"] == []
-    assert r.json()["capabilities"] == ["binary"]
+    assert r.json()["directions"] == ["binary"]
     # 池外 / 轨外（osint 服务 pentest/redteam，不服务 ctf）→ 422
     assert client.patch(f"/api/projects/{pid}/experts",
                         json={"experts": ["ghost-expert"]}).status_code == 422
@@ -149,7 +150,7 @@ def test_create_project_with_profile_materializes_snapshot(client):
     # 档组队兜底（请求未带 experts 时用档内预设；建项时归一化排序）
     assert meta["experts"] == ["crypto-solver", "forensics-solver", "pwn-solver",
                                "reverse", "triage", "web-solver"]
-    assert "web" in meta["capabilities"]  # 专家面推导（响应层）
+    assert "web" in meta["directions"]  # 专家 knowledge 面推导（响应层）
     cfg = meta["config"]
     assert cfg["board_view"] == {"default": "findings"}
     snap = cfg["profile"]
@@ -265,11 +266,11 @@ def test_spawn_session_cap_returns_409(client):
 
 
 def test_taxonomy_endpoint(client):
-    """GET /api/taxonomy：能力包/场景轨目录 + 各轨 task_type 注册表。"""
+    """GET /api/taxonomy：kb 知识方向 + 场景轨目录 + 各轨 task_type 注册表。"""
     data = client.get("/api/taxonomy").json()
-    caps = {c["name"] for c in data["capabilities"]}
+    dirs = set(data["directions"])
     tracks = {t["name"] for t in data["tracks"]}
-    assert {"web", "binary"} <= caps
+    assert {"web", "binary"} <= dirs
     assert {"ctf", "pentest", "redteam"} <= tracks
     assert data["task_types"]["ctf"]["solve"] == "passive"
     assert data["task_types"]["pentest"]["exploit"] == "low"
@@ -1900,14 +1901,14 @@ def test_artifact_content_endpoint(client, tmp_path):
 
 
 def _packs_app(tmp_path):
-    """构造正交布局的最小 packs（web 能力包 + pentest 轨 + 专家池）并返回 TestClient。"""
+    """构造扁平布局的最小 packs（技能 kb/skills + pentest 轨 + 专家池）并返回 TestClient。"""
     root = tmp_path / "packs"
     expert_dir = root / "experts"  # expert-pool M2：运行时角色源=experts/
     expert_dir.mkdir(parents=True)
     (expert_dir / "tester.yaml").write_text(
         'name: tester\npersona: "旧人设。"\n'
-        'skills: [demo-skill]\ntask_types: [recon]\n', encoding="utf-8")
-    sk_dir = root / "capabilities" / "web" / "skills" / "demo-skill"
+        'skills: [demo-skill]\ntask_types: [recon]\ntracks: [pentest]\n', encoding="utf-8")
+    sk_dir = root / "kb" / "skills" / "demo-skill"
     sk_dir.mkdir(parents=True)
     (sk_dir / "SKILL.md").write_text(
         "---\nname: demo-skill\ndescription: 演示技能关键词注入\nkeywords: 演示\n---\n正文。",
@@ -1919,7 +1920,7 @@ def _packs_app(tmp_path):
 
 
 def test_packs_roles_and_skills_endpoints(tmp_path, monkeypatch):
-    """包管理端点：轨角色读端点（experts 源）+ 写退役 410 / 能力包 skill 全文改写 / 路由试算。"""
+    """包管理端点：轨角色读端点（experts 源）+ 写退役 410 / 技能全文改写 / 路由试算。"""
     monkeypatch.chdir(tmp_path)  # MCP 等相对路径配置不污染仓库
     packs_root, c = _packs_app(tmp_path)
     with c:
@@ -1932,33 +1933,25 @@ def test_packs_roles_and_skills_endpoints(tmp_path, monkeypatch):
         assert r.status_code == 410 and "退役" in r.json()["detail"]
         assert c.post("/api/tracks/pentest/roles", json={"name": "x"}).status_code == 410
         assert c.delete("/api/tracks/pentest/roles/tester").status_code == 410
-        # 能力包 skill 详情 + 全文改写（frontmatter name 不一致 → 422）
-        sk = c.get("/api/capabilities/web/skills/demo-skill").json()
-        assert "正文。" in sk["raw"] and sk["skill"]["pack"] == "web"
-        r = c.put("/api/capabilities/web/skills/demo-skill",
+        # 技能详情 + 全文改写（frontmatter name 不一致 → 422）
+        sk = c.get("/api/skills/demo-skill").json()
+        assert "正文。" in sk["raw"]
+        r = c.put("/api/skills/demo-skill",
                   json={"content": "---\nname: other\n---\nx"})
         assert r.status_code == 422
-        r = c.put("/api/capabilities/web/skills/demo-skill",
+        r = c.put("/api/skills/demo-skill",
                   json={"content": "---\nname: demo-skill\ndescription: 改后\n"
                                    "keywords: 演示\nfile_features: NX\n---\n新正文。"})
         assert r.json()["status"] == "ok"
-        # 路由试算：track+caps 定候选集，关键词命中 demo-skill
+        # 路由试算：技能扁平后无候选集过滤，关键词命中 demo-skill
         r = c.post("/api/skills/route-preview",
-                   json={"query": "做一个演示任务", "track": "pentest",
-                         "capabilities": ["web"], "role": "tester"})
+                   json={"query": "做一个演示任务", "track": "pentest", "role": "tester"})
         assert r.status_code == 200
         assert r.json()[0]["name"] == "demo-skill" and r.json()[0]["matched"]
         # 文件特征 ×3 命中（P0：file_features 路由断裂修复后的 API 面）
         r = c.post("/api/skills/route-preview",
-                   json={"track": "pentest", "capabilities": ["web"],
-                         "file_features": ["NX"]})
+                   json={"track": "pentest", "file_features": ["NX"]})
         assert r.json()[0]["name"] == "demo-skill"
-        # 候选集外不可见：只选 pentest 轨（demo-skill 在 web 包）
-        r = c.post("/api/skills/route-preview",
-                   json={"query": "演示", "track": "pentest"})
-        assert all(h["name"] != "demo-skill" for h in r.json())
-        # 防穿越：非法包名 → 422
-        assert c.get("/api/capabilities/bad%20name/skills").status_code == 422
         # 轨任务类型注册表：generic 恒在
         assert c.get("/api/tracks/pentest/task-types").json()["generic"] == "passive"
 
@@ -1967,9 +1960,9 @@ def test_rules_and_mcp_endpoints(client, tmp_path, monkeypatch):
     """轨红线读写（.history 备份）+ MCP 配置层 roundtrip。"""
     monkeypatch.chdir(tmp_path)
     packs = tmp_path / "packs"
-    rules_dir = packs / "tracks" / "pentest" / "rules"
+    rules_dir = packs / "kb" / "安全红线" / "轨红线"
     rules_dir.mkdir(parents=True)
-    (rules_dir / "redlines.md").write_text("旧红线", encoding="utf-8")
+    (rules_dir / "pentest.md").write_text("旧红线", encoding="utf-8")
     app = create_app(workspace_root=str(tmp_path / "workspaces"),
                      packs_root=str(packs), tools_root=None,
                      providers_config=str(tmp_path / "providers.json"))
@@ -1978,14 +1971,8 @@ def test_rules_and_mcp_endpoints(client, tmp_path, monkeypatch):
         r = c.put("/api/tracks/pentest/rules", json={"content": "新红线"})
         assert r.json()["status"] == "ok"
         assert c.get("/api/tracks/pentest/rules").json()["content"] == "新红线"
-        assert any("redlines.md" in f.name
+        assert any("pentest" in f.name
                    for f in (rules_dir / ".history").iterdir())
-        # 能力包红线同构
-        cap_rules = packs / "capabilities" / "web" / "rules"
-        r = c.put("/api/capabilities/web/rules", json={"content": "web 红线"})
-        assert r.status_code == 200
-        assert c.get("/api/capabilities/web/rules").json()["content"] == "web 红线"
-        assert (cap_rules / "redlines.md").read_text(encoding="utf-8") == "web 红线"
         # MCP：空 → 写入 → 读回
         assert c.get("/api/mcp").json() == {"servers": []}
         r = c.put("/api/mcp", json={"servers": [
@@ -2022,34 +2009,33 @@ def test_rules_and_mcp_endpoints(client, tmp_path, monkeypatch):
 
 
 def test_owners_crud_and_mcp_stdio(client, tmp_path, monkeypatch):
-    """平台规则 owners CRUD（轨级；删=停用、.history 留回滚件）+ MCP stdio roundtrip。"""
+    """平台规则 CRUD（全局单份，渗透独有；删=停用、.history 留回滚件）+ MCP stdio roundtrip。"""
     monkeypatch.chdir(tmp_path)
     packs = tmp_path / "packs"
-    track_rules = packs / "tracks" / "pentest" / "rules"
-    track_rules.mkdir(parents=True)
     app = create_app(workspace_root=str(tmp_path / "workspaces"),
                      packs_root=str(packs), tools_root=None,
                      providers_config=str(tmp_path / "providers.json"))
     with TestClient(app) as c:
         # 空列表
-        assert c.get("/api/tracks/pentest/owners").json() == []
+        assert c.get("/api/platform-rules").json() == []
         # 新建（父目录自动建）
-        r = c.put("/api/tracks/pentest/owners/edusrc",
+        r = c.put("/api/platform-rules/edusrc",
                   json={"content": "# edusrc 无害化三原则"})
         assert r.json()["status"] == "ok"
         # 改写（备份进 .history）
-        c.put("/api/tracks/pentest/owners/edusrc", json={"content": "v2"})
-        rows = c.get("/api/tracks/pentest/owners").json()
+        c.put("/api/platform-rules/edusrc", json={"content": "v2"})
+        rows = c.get("/api/platform-rules").json()
         assert [o["tag"] for o in rows] == ["edusrc"] and rows[0]["content"] == "v2"
+        owner_dir = packs / "kb" / "安全红线" / "平台规则"
         assert any("edusrc" in f.name
-                   for f in (track_rules / "owners" / ".history").iterdir())
+                   for f in (owner_dir / ".history").iterdir())
         # 非法 tag（_NAME_RE 白名单）→ 422
-        assert c.put("/api/tracks/pentest/owners/bad%20name",
+        assert c.put("/api/platform-rules/bad%20name",
                      json={"content": "x"}).status_code == 422
         # 删除后 404，.history 有回滚件
-        assert c.delete("/api/tracks/pentest/owners/edusrc").json()["status"] == "ok"
-        assert c.delete("/api/tracks/pentest/owners/edusrc").status_code == 404
-        assert c.get("/api/tracks/pentest/owners").json() == []
+        assert c.delete("/api/platform-rules/edusrc").json()["status"] == "ok"
+        assert c.delete("/api/platform-rules/edusrc").status_code == 404
+        assert c.get("/api/platform-rules").json() == []
         # MCP stdio：command/args roundtrip，url 可留空
         r = c.put("/api/mcp", json={"servers": [
             {"name": "fofa", "transport": "stdio", "command": "uv",
@@ -2061,30 +2047,31 @@ def test_owners_crud_and_mcp_stdio(client, tmp_path, monkeypatch):
 
 
 def test_ratings_crud_and_rating_basis(client, tmp_path, monkeypatch):
-    """F11：ratings 三端点 CRUD（镜像 owners）+ FindingIn severity Literal 422 + rating_basis 透传/清空。"""
+    """F11：ratings 三端点 CRUD（全局单份，渗透独有）+ FindingIn severity Literal 422 + rating_basis 透传/清空。"""
     monkeypatch.chdir(tmp_path)
     packs = tmp_path / "packs"
-    track_rules = packs / "tracks" / "pentest" / "rules"
-    track_rules.mkdir(parents=True)
+    (packs / "kb" / "pentest").mkdir(parents=True)
+    (packs / "kb" / "pentest" / "track.yaml").write_text("name: pentest\n", encoding="utf-8")
     app = create_app(workspace_root=str(tmp_path / "workspaces"),
                      packs_root=str(packs), tools_root=None,
                      providers_config=str(tmp_path / "providers.json"))
     with TestClient(app) as c:
-        # --- ratings 三端点（owners 镜像） ---
-        assert c.get("/api/tracks/pentest/ratings").json() == []
-        assert c.put("/api/tracks/pentest/ratings/edu-rating",
+        # --- ratings 三端点（镜像 owners，全局单份） ---
+        assert c.get("/api/ratings").json() == []
+        assert c.put("/api/ratings/edu-rating",
                      json={"content": "# edu-rating 评级与价值口径"}).json()["status"] == "ok"
-        c.put("/api/tracks/pentest/ratings/edu-rating", json={"content": "v2"})
-        rows = c.get("/api/tracks/pentest/ratings").json()
+        c.put("/api/ratings/edu-rating", json={"content": "v2"})
+        rows = c.get("/api/ratings").json()
         assert [o["tag"] for o in rows] == ["edu-rating"] and rows[0]["content"] == "v2"
-        assert (track_rules / "rating" / "edu-rating.md").is_file()
+        rating_dir = packs / "kb" / "安全红线" / "评级与价值口径"
+        assert (rating_dir / "edu-rating.md").is_file()
         assert any("edu-rating" in f.name
-                   for f in (track_rules / "rating" / ".history").iterdir())
-        assert c.put("/api/tracks/pentest/ratings/bad%20name",
+                   for f in (rating_dir / ".history").iterdir())
+        assert c.put("/api/ratings/bad%20name",
                      json={"content": "x"}).status_code == 422
-        assert c.delete("/api/tracks/pentest/ratings/edu-rating").json()["status"] == "ok"
-        assert c.delete("/api/tracks/pentest/ratings/edu-rating").status_code == 404
-        assert c.get("/api/tracks/pentest/ratings").json() == []
+        assert c.delete("/api/ratings/edu-rating").json()["status"] == "ok"
+        assert c.delete("/api/ratings/edu-rating").status_code == 404
+        assert c.get("/api/ratings").json() == []
 
         # --- findings：severity 非 Literal 422；rating_basis 透传 / PATCH / 空串清空 ---
         pr = c.post("/api/projects", json={"name": "F11 判级", "track": "pentest"})
@@ -3236,7 +3223,7 @@ def test_concurrent_skill_saves_serialized_under_packs_lock(tmp_path, monkeypatc
 
     def save(i):
         try:
-            r = c.put("/api/capabilities/web/skills/demo-skill", json={"content": bodies[i]})
+            r = c.put("/api/skills/demo-skill", json={"content": bodies[i]})
             assert r.status_code == 200
         except Exception as e:  # noqa: BLE001
             errors.append(e)
@@ -3249,7 +3236,7 @@ def test_concurrent_skill_saves_serialized_under_packs_lock(tmp_path, monkeypatc
             t.join()
     assert not errors, f"并发保存线程异常: {errors!r}"
 
-    skill_file = packs_root / "capabilities" / "web" / "skills" / "demo-skill" / "SKILL.md"
+    skill_file = packs_root / "kb" / "skills" / "demo-skill" / "SKILL.md"
     assert skill_file.read_text(encoding="utf-8") in bodies  # 完整版本之一，非撕裂混合
     backups = list((skill_file.parent / ".history").glob("*_SKILL.md"))
     assert len(backups) == 8  # 每次写入前都留备份，同秒不覆盖
@@ -3866,13 +3853,10 @@ def test_doctor_k7_route_zero_hit_real_usage(tmp_path):
     (kb / "web" / "poc").mkdir(parents=True)
     (kb / "web" / "poc" / "a.md").write_text("a", encoding="utf-8")
     (kb / "web" / "poc" / "b.md").write_text("b", encoding="utf-8")
-    # 最小 track/pack 描述文件（建项校验扫这两处）
-    (packs / "tracks" / "ctf").mkdir(parents=True)
-    (packs / "tracks" / "ctf" / "track.yaml").write_text(
-        "kind: track\nname: ctf\nlabel: CTF\n", encoding="utf-8")
-    (packs / "capabilities" / "web").mkdir(parents=True)
-    (packs / "capabilities" / "web" / "pack.yaml").write_text(
-        "kind: capability\nname: web\nlabel: Web\n", encoding="utf-8")
+    # 最小 track 描述文件（建项校验扫 packs/kb/<track>/track.yaml）
+    (packs / "kb" / "ctf").mkdir(parents=True)
+    (packs / "kb" / "ctf" / "track.yaml").write_text(
+        "name: ctf\nlabel: CTF\n", encoding="utf-8")
     (kb / "route_index.yaml").write_text(
         "entries:\n"
         "  - point: 测试点甲\n    kb: web/poc/a.md\n"
@@ -4187,11 +4171,11 @@ def test_agent_tools_catalog(client):
     assert data["groups"] == ["执行", "文件", "黑板", "知识", "浏览器", "协作", "计划", "控制"]
     # 无工具落「其他」（防新工具漏配分组规则）
     assert all(t["group"] != "其他" for t in tools)
-    # bb_query：what 参数 enum 含六查询面（site=单站全貌 2026-09-26；
-    # tasks 面 2026-10-06 随任务机制退役移除）
+    # bb_query：what 参数 enum 含七查询面（site=单站全貌 2026-09-26；
+    # package=分析包全貌 2026-10-12；tasks 面 2026-10-06 随任务机制退役移除）
     bbq = next(t for t in tools if t["name"] == "bb_query")
     assert bbq["input_schema"]["properties"]["what"]["enum"] == [
-        "findings", "assets", "events", "func", "blueprint", "site"]
+        "findings", "assets", "events", "func", "blueprint", "site", "package"]
 
 
 def test_agent_tool_group_rules():

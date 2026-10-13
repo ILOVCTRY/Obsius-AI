@@ -4,7 +4,7 @@
 
 ## 文件
 
-- `ida_mcp_manager.py` — **IDA-MCP 实例生命周期管理器（DESIGN.md §9「MCP 按需拉起」）**：按 `(project_id, binary_sha256)` 管无窗口 idat 实例。`ensure(pid, binary, db_dir=)`：在线复用 → 无 idat/锁占用失败一律 None（headless 降级，绝不抛 500）→ detached 拉起 `idat -A -S<bootstrap> -o<db_stem> <binary>`（**-S 无空格单参数**，端口走环境变量 `CYBERSTRIKE_IDA_MCP_PORT`）。就绪探活 180s 超时杀；空闲 600s reaper 自动关；上限 2 LRU；`shutdown_all` 平台 shutdown 兜关；`online_for_project` 供 overview 三态灯。拉起前查 DB_LOCK_EXTS（GUI 开着该库绝不抢）。bootstrap 在 `tools/mcp/ida-pro-mcp/bootstrap_mcp.py`。
+- `ida_mcp_manager.py` — **IDA-MCP 实例生命周期管理器（DESIGN.md §9「MCP 按需拉起」）**：按 `(project_id, binary_sha256)` 管无窗口 idat 实例。`ensure(pid, binary, db_dir=)`：在线复用 → 无 idat/锁占用失败一律 None（headless 降级，绝不抛 500）→ detached 拉起。**库查找两处（2026-10-13）**：平台 `db_dir/<sha>.i64|.idb` + **样本旁 IDA 默认名**（`<input>.i64`，人直接在 IDA 打开保存的产物）。**直读优先**：库存在（且无锁）→ `idat -A -S<bootstrap> <db>`（**不带 `-o`**，复用人类/平台成果，绝不重建）；无库且样本 **≥10MB**（`SAMPLE_AUTO_MAX_BYTES`，单一真相源 `decompiler.py`）→ 拒绝拉起（引导先「开始分析」）；无库且 <10MB → 建库式 `idat -A -S<bootstrap> -o<db_stem> <binary>`（**-S 无空格单参数**，端口走环境变量 `CYBERSTRIKE_IDA_MCP_PORT`）。就绪探活 180s 超时杀；空闲 600s reaper 自动关；上限 2 LRU；`shutdown_all` 平台 shutdown 兜关；`online_for_project` 供 overview 三态灯。锁检测 DB_LOCK_EXTS（GUI 开着该库绝不抢）。bootstrap 在 `tools/mcp/ida-pro-mcp/bootstrap_mcp.py`。
 
 ## `decompiler.py` — 反编译组合服务（DESIGN.md §9），三层
 
@@ -30,6 +30,7 @@
 ### 3. DecompilerService（选路）
 
 - 读：列表/概览只走 headless；`live_decompile()`/`xrefs_for()` 缓存缺席且 MCP 在线才点查降级。
+- **只读快速失败（2026-10-13，红线）**：`_export_json(..., allow_export=False)`——Agent 只读方法（`list_functions`/`strings_for`/`xrefs_for_func`/`decompile`/`disasm`/`xrefs`）**只读缓存 + 全局提升，缓存缺席即回 `NOT_ANALYZED` 哨兵**，上层回 `not_analyzed_message()`「[未分析] 请先在「逆向分析」工作台选中样本点「开始分析」」，**绝不静默触发全量 headless 导出**。根因：此前这些工具对未分析样本会同步跑一次完整 IDA/Ghidra 分析——大样本（≥20MB 走 Ghidra 多进程）+ 加壳可达**数十分钟且无进度**（postScript 未起，`.progress` 为空），AI 无意识地触发即长时间卡住。**只有 triage 路径 `export_to_cache()` 保留 `allow_export=True`**（唯一允许触发导出处）；无导出后端时回 `no-backend` 交上层给 `DECOMPILE_GUIDANCE` 安装引导；样本路径不存在 → 结构化「样本路径不可读」不抛。
 - 写：`writeback()` MCP 在线优先 writeback_items，返 None/离线再 headless apply_by_sha（五元组 ok/locked/no-db/no-tool/unsupported）。
 - Agent 四接口（list_functions/decompile/annotate/xrefs）：list 与全量概览跳过 MCP；annotate 只落 sidecar 不直写 MCP。
 - **Agent 检索面**：`strings_for(binary, q, limit)`（复用 build_strings，limit 默认 200 上限 1000 防淹没上下文）+ `xrefs_for_func(binary, name|address)`（地址先经缓存 `_find_func` 解析函数名再走 xrefs，MCP 在线优先实时）+ `list_functions` 加 `name_contains/min_size` 过滤——对应 Agent 工具 strings_search/func_xrefs/list_symbols 过滤参数（core/agent/tools.py），治 Agent run_cmd 直读全量缓存 JSON 的低效模式。

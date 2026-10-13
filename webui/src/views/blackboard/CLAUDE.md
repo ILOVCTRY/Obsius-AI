@@ -53,6 +53,13 @@
   v4 utilities；必须 import 在 `@xyflow/react/dist/style.css` 之后，用根类
   `.fc-dark` 提特异性。AttackPath 使用。
 - `MappingPane.tsx` — 「测绘」tab（cyberspace-mapping，CTF 轨不挂载）。
+- `IntentsPane.tsx` — **「意图」tab（2026-10-13，全轨）**：意图清单列表视图——把
+  Agent `declare_intent` 的规划产物摊平成人类可核对的列表（**待收尾/已收尾分组**，
+  含目标资产〔`api.assets` 反查 value/type〕/维度/推导依据/收尾结果〔漏洞/有效发现/死路〕/
+  作者/时间；已收尾可「重开」→`api.reopenIntent`）。4s 轮询 `api.intents(pid)`（open+closed 全量）。
+  动机：渗透轨本有「发现 → 链路」图可看意图，**其余轨（如逆向）此前无任何查看入口**，
+  只能从对话流的 `declare_intent` 工具行看到「声明了意图」却看不到落点。纯只读列表，
+  不画图（逆向无 `http_history`，链路图执行层会空）。
 
 ## 已删除（勿复活）
 

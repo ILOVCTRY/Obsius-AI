@@ -30,9 +30,18 @@ from core.skills.profiles import BOARD_VIEWS
 from core.skills.roles import _parse_inline_value
 from core.skills.registry import SkillRegistry, parse_frontmatter
 from core.skills.rules import parse_rule_doc
-from core.skills.taxonomy import GENERIC_TASK_TYPE, load_task_types
+from core.skills.taxonomy import (
+    GENERIC_TASK_TYPE, TRACKS, kb_root, list_directions, load_task_types,
+    platform_rules_dir, rating_dir, redline_path, rule_templates_dir,
+)
 
 _LEVEL_ORDER = {"error": 0, "warning": 1, "info": 2}
+
+
+def _track_dirs(root: Path) -> list[Path]:
+    """场景轨目录（packs/kb/<track>/，2026-10-13 轨并入 kb 根）。"""
+    base = kb_root(root)
+    return [base / t for t in TRACKS if (base / t).is_dir()]
 
 # 丁 kb 结构体检（experience-sedimentation M3）：长手册单段长文检测阈值
 # （>800 字符且标题行 <2 才报；沉淀口径段要求在 agent 新建侧，见 proposals）
@@ -73,14 +82,14 @@ def _rel(path: Path, root: Path) -> str:
 # doctor 只保留"判定失效并报 issue"这一层。
 
 def _broken_kb_refs(skill_path: Path, snaps: dict[str, str],
-                    caps_root: Path, cap: str | None = None,
+                    packs_root: Path, cap: str | None = None,
                     ) -> list[tuple[str, str, str]]:
     """返回 [(code, 模块, 说明)]：kb_open 指向未导入快照 / 引用模块文件不存在。
-    cap=技能所属能力包（快照目录名跨包碰撞时先按引用方自身 kb 解析）。"""
+    cap=技能所属方向（快照目录名跨方向碰撞时先按引用方自身 kb 解析）。"""
     text = skill_path.read_text(encoding="utf-8")
     out: list[tuple[str, str, str]] = []
     for module in refs.extract_modules(text, snaps):
-        verdict = refs.classify_module(module, snaps, caps_root, prefer_cap=cap)
+        verdict = refs.classify_module(module, snaps, packs_root, prefer_cap=cap)
         if verdict:
             out.append((verdict[0], module, verdict[1]))
     return out
@@ -103,14 +112,11 @@ def diagnose(packs_root: str | Path,
     reg.load()
     skills = reg.all()
     snaps = refs.snapshot_index(root)
-    caps_root = root / "capabilities"
 
     # task_type 值域并集（路由 task_type 加分的对侧防线：拼错=加分静默失效）
     registered_task_types: set[str] = set()
-    tracks_base_all = root / "tracks"
-    if tracks_base_all.is_dir():
-        for tdir in sorted(p for p in tracks_base_all.iterdir() if p.is_dir()):
-            registered_task_types |= set(load_task_types(root, tdir.name))
+    for tdir in _track_dirs(root):
+        registered_task_types |= set(load_task_types(root, tdir.name))
 
     # ---- 技能自身：name 一致性、kb 引用失效、孤儿统计 ----
     referenced: set[str] = set()
@@ -126,76 +132,45 @@ def diagnose(packs_root: str | Path,
                     "warning", "skill-tasktype-unregistered", _rel(sk.path, root),
                     f"技能 frontmatter task_types 含未注册类型: {tt}"
                     "（路由 task_type 加分不会命中，检查拼写或各轨 task_types.yaml）"))
-        for code, module, msg in _broken_kb_refs(sk.path, snaps, caps_root,
-                                                 cap=sk.pack):
+        for code, module, msg in _broken_kb_refs(sk.path, snaps, root):
             rep.issues.append(Issue("warning", code, _rel(sk.path, root), msg))
 
-    # ---- 场景轨：角色绑定、task_type 注册、redlines、trash ----
-    tracks_base = root / "tracks"
-    if tracks_base.is_dir():
-        for tdir in sorted(p for p in tracks_base.iterdir() if p.is_dir()):
+    # ---- 场景轨：task_type 注册、redlines（轨并入 packs/kb/）----
+    for tdir in _track_dirs(root):
             track = tdir.name
             valid_types = load_task_types(root, track)
             if not (tdir / "task_types.yaml").is_file():
                 rep.issues.append(Issue(
-                    "warning", "missing-task-types", f"tracks/{track}/task_types.yaml",
+                    "warning", "missing-task-types", f"kb/{track}/task_types.yaml",
                     f"轨 {track} 无 task_types.yaml（只有内置 {GENERIC_TASK_TYPE} 合法）"))
-            if not (tdir / "rules" / "redlines.md").is_file():
+            if not redline_path(root, track).is_file():
                 rep.issues.append(Issue(
-                    "warning", "missing-redlines", f"tracks/{track}/rules/redlines.md",
-                    f"轨 {track} 缺 rules/redlines.md"))
-            # F11：评级 tag 无授权边界配套（迁移后 edu-rating 等纯评级 tag 常驻此
-            # warning 属预期——语义即「该评级口径无 owners 授权红线配套」）
-            rating_dir = tdir / "rules" / "rating"
-            if rating_dir.is_dir():
-                owners_dir = tdir / "rules" / "owners"
-                for rf in sorted(rating_dir.glob("*.md")):
-                    if not (owners_dir / rf.name).is_file():
-                        rep.issues.append(Issue(
-                            "warning", "rating-without-owner", _rel(rf, root),
-                            f"评级规则 rating/{rf.stem} 无同名 owners/ 授权边界配套"))
-            # 四段一体模板（rules-four-section M1）：schema fail-fast + trigger 缺失提示
-            tpl_dir = tdir / "rules" / "templates"
-            if tpl_dir.is_dir():
-                from core.skills.rules import validate_rule_meta as _vr_meta
-                for tf in sorted(tpl_dir.glob("*.md")):
-                    meta, _ = parse_rule_doc(tf)
-                    try:
-                        _vr_meta(tf.stem, meta)
-                    except ValueError as e:
-                        rep.issues.append(Issue(
-                            "error", "rule-template-invalid", _rel(tf, root), str(e)))
-                        continue
-                    if str(meta.get("trigger") or "").strip() != tf.stem:
-                        rep.issues.append(Issue(
-                            "warning", "rule-template-no-trigger", _rel(tf, root),
-                            f"规则模板 {tf.stem} frontmatter 缺 trigger 或与文件名不一致"
-                            "（M2 选择器按 trigger 命中，缺了等于死件）"))
-            roles_dir = tdir / "roles"
-            if roles_dir.is_dir():
-                for rp in sorted(roles_dir.glob("*.yaml")):
-                    role = _parse_role(rp)
-                    if not role.get("name"):
-                        # name 行=中文显示名（可 ≠ 文件 stem，stem 才是角色 id），缺失才提示
-                        rep.issues.append(Issue(
-                            "warning", "role-name-missing", _rel(rp, root),
-                            f"角色 {rp.stem} yaml 缺 name 行（显示名缺失，界面回退文件名）"))
-                    for sk_name in role.get("skills") or []:
-                        referenced.add(sk_name)
-                        sk = reg.get(sk_name)
-                        if sk is None:
+                    "warning", "missing-redlines", f"kb/安全红线/轨红线/{track}.md",
+                    f"轨 {track} 缺 安全红线/轨红线/{track}.md"))
+            # 平台规则/评级与价值口径/模板为渗透独有（全局单份），只体检一次
+            if track == "pentest":
+                if rating_dir(root).is_dir():
+                    owners_dir = platform_rules_dir(root)
+                    for rf in sorted(rating_dir(root).glob("*.md")):
+                        if not (owners_dir / rf.name).is_file():
                             rep.issues.append(Issue(
-                                "error", "role-skill-missing", _rel(rp, root),
-                                f"角色 {rp.stem} 引用了不存在的技能: {sk_name}"))
-                        elif not sk.enabled:
+                                "warning", "rating-without-owner", _rel(rf, root),
+                                f"评级规则 评级与价值口径/{rf.stem} 无同名 平台规则/ 配套"))
+                tpl_dir = rule_templates_dir(root)
+                if tpl_dir.is_dir():
+                    from core.skills.rules import validate_rule_meta as _vr_meta
+                    for tf in sorted(tpl_dir.glob("*.md")):
+                        meta, _ = parse_rule_doc(tf)
+                        try:
+                            _vr_meta(tf.stem, meta)
+                        except ValueError as e:
                             rep.issues.append(Issue(
-                                "warning", "role-skill-disabled", _rel(rp, root),
-                                f"角色 {rp.stem} 引用了已禁用技能: {sk_name}（开窗时被静默过滤）"))
-                    for tt in role.get("task_types") or []:
-                        if tt not in valid_types:
+                                "error", "rule-template-invalid", _rel(tf, root), str(e)))
+                            continue
+                        if str(meta.get("trigger") or "").strip() != tf.stem:
                             rep.issues.append(Issue(
-                                "error", "role-tasktype-unregistered", _rel(rp, root),
-                                f"角色 {rp.stem} 的 task_type 未在轨注册表: {tt}"))
+                                "warning", "rule-template-no-trigger", _rel(tf, root),
+                                f"规则模板 {tf.stem} frontmatter 缺 trigger 或与文件名不一致"))
             # ---- 阶段剧本（pentest-phased-workflow M1）：解析/引用完整性 ----
             # 剧本任务条目缺 task_type/objective 由 phase_spec 整体拒收 → 落
             # phase-bad-yaml（不单列 task-missing-field 码，加载侧同口径跳过）
@@ -246,16 +221,7 @@ def diagnose(packs_root: str | Path,
     # experts/ 目录缺省时整段跳过（专家池为可选层，M2 才接运行时）
     experts_base = root / "experts"
     if experts_base.is_dir():
-        valid_tracks = ({p.name for p in tracks_base_all.iterdir() if p.is_dir()}
-                        if tracks_base_all.is_dir() else set())
-        # 跨包同名扫描必须绕开注册表去重（同名轨覆盖包后 all() 只剩一条）——
-        # 直接扫 capabilities/tracks 双根取 frontmatter name 归包
-        skill_packs: dict[str, set[str]] = {}
-        for group in ("capabilities", "tracks"):
-            for smd in root.glob(f"{group}/*/skills/*/SKILL.md"):
-                nm = parse_frontmatter(smd.read_text(encoding="utf-8")).get("name") \
-                    or smd.parent.name
-                skill_packs.setdefault(nm, set()).add(smd.relative_to(root).parts[1])
+        valid_tracks = {t for t in TRACKS if (kb_root(root) / t).is_dir()}
         expert_ids: set[str] = set()
         expert_tracks: dict[str, list | None] = {}
         for ep in sorted(experts_base.glob("*.yaml")):
@@ -286,12 +252,6 @@ def diagnose(packs_root: str | Path,
                     rep.issues.append(Issue(
                         "warning", "expert-skill-disabled", _rel(ep, root),
                         f"专家 {ep.stem} 引用了已禁用技能: {sk_name}"))
-                packs_of = skill_packs.get(sk_name, set())
-                if len(packs_of) > 1:
-                    rep.issues.append(Issue(
-                        "warning", "expert-skill-ambiguous", _rel(ep, root),
-                        f"专家 {ep.stem} 引用的技能 {sk_name} 存在于多个能力包: "
-                        f"{sorted(packs_of)}（归属不唯一，能力面推导将重复计入）"))
             for tt in expert.get("task_types") or []:
                 if tt not in registered_task_types:
                     rep.issues.append(Issue(
@@ -302,20 +262,8 @@ def diagnose(packs_root: str | Path,
             rep.issues.append(Issue(
                 "error", "expert-generalist-missing", "experts/_generalist.yaml",
                 "专家池缺 _generalist 兜底专家（load_expert 回退依赖，必须存在）"))
-        # role-rules 悬空（M2 roles 退役前按双源核对：文件既无同名专家也无同名角色
-        # 时永远不会注入任何会话）
-        role_ids: set[str] = set()
-        for tdir in tracks_base.iterdir() if tracks_base.is_dir() else []:
-            rd = tdir / "roles"
-            if rd.is_dir():
-                role_ids |= {p.stem for p in rd.glob("*.yaml")}
-        for rr in sorted(tracks_base.glob("*/rules/role-rules/*.md")) if tracks_base.is_dir() else []:
-            if rr.stem not in expert_ids and rr.stem not in role_ids:
-                rep.issues.append(Issue(
-                    "warning", "role-rules-orphan", _rel(rr, root),
-                    f"role-rules/{rr.stem} 无同名专家或角色（该规则不会注入任何会话）"))
         # ---- 场景档（expert-pool M4a）：组队引用可达且可服务本轨、board_view 值域 ----
-        for prof in sorted(tracks_base.glob("*/profiles/*.yaml")) if tracks_base.is_dir() else []:
+        for prof in sorted(kb_root(root).glob("*/profiles/*.yaml")):
             track_name = prof.relative_to(root).parts[1]
             p = _parse_role(prof)
             for ename in p.get("experts") or []:
@@ -333,20 +281,8 @@ def diagnose(packs_root: str | Path,
                     "warning", "profile-board-view-unknown", _rel(prof, root),
                     f"场景档 {prof.stem} 的 board_view 不在值域: {bv}（合法: {BOARD_VIEWS}）"))
 
-    # ---- 能力包：redlines、kb 域目录 ----
-    kb_root_dir = root / "kb"
-    if caps_root.is_dir():
-        for cdir in sorted(p for p in caps_root.iterdir() if p.is_dir()):
-            cap = cdir.name
-            if not (cdir / "rules" / "redlines.md").is_file():
-                rep.issues.append(Issue(
-                    "warning", "missing-redlines", f"capabilities/{cap}/rules/redlines.md",
-                    f"能力包 {cap} 缺 rules/redlines.md"))
-            # M0：kb 全局单根，五域知识域目录在 packs/kb/<cap>（占位包无 kb 属预期，info）
-            if not (kb_root_dir / cap).is_dir():
-                rep.issues.append(Issue(
-                    "info", "kb-domain-missing", f"kb/{cap}",
-                    f"能力包 {cap} 无 packs/kb/{cap}/ 知识域目录（占位包属预期）"))
+    # ---- kb 知识方向（能力包已退役：方向即 packs/kb/<方向>/ 目录本身）----
+    kb_root_dir = kb_root(root)
 
     # ---- 全局 route_index.yaml 体检（M0 单表：解析失败 / kb 路径失效 / 标签技能不存在）----
     index_file = kb_root_dir / "route_index.yaml"
@@ -360,8 +296,7 @@ def diagnose(packs_root: str | Path,
                 "warning", "route-index-bad-yaml", _rel(index_file, root),
                 f"route_index.yaml 解析失败（索引按空处理，不影响任务）: {e}"))
             entries = []
-        kb_doms = ({p.name for p in kb_root_dir.iterdir() if p.is_dir()}
-                   if kb_root_dir.is_dir() else set())
+        kb_doms = set(list_directions(root))
         skill_names = {s.name for s in skills}
         for e in entries:
             dom = e.kb.split("/", 1)[0]
@@ -427,12 +362,8 @@ def diagnose(packs_root: str | Path,
                 "领域同义词表未配置（retrieval-upgrade M2 查询扩展层退化）——"
                 "跨语言盲区（越权↔IDOR 类）靠它补，建议参照文档建组"))
     else:
-        kb_root_dir2 = root / "kb"
-        # capabilities=None 不展开任何源——体检是全 packs 视角，枚举 kb/ 全部
-        # 域目录（licenses 是许可文档非能力域，排除）
-        all_caps = ([d.name for d in kb_root_dir2.iterdir()
-                     if d.is_dir() and d.name != "licenses"]
-                    if kb_root_dir2.is_dir() else [])
+        # 体检是全 packs 视角：枚举 kb 全部方向目录
+        all_caps = list_directions(root)
         kb_index = build_kb_index(root, all_caps)
         for gid, terms in groups:
             dead: list[str] = []

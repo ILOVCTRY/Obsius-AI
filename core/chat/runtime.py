@@ -209,6 +209,12 @@ _DIMENSION_GATE_MAX = 5
 # 子专家启动注入的资产台账条数上限（防 system 膨胀；超出截断并提示）。
 _ASSET_LEDGER_CAP = 200
 
+# 蓝图注入上限（R4 消费面接线 M1，2026-10-13）：主控/子专家 system 里摊蓝图
+# （名/status/模块/锚点数），不进 spec/notes 全文——与 func_kb/findings 共享
+# 物化预算，须紧凑；详情让 Agent 用 bb_query what=blueprint 自取。
+_BLUEPRINT_CAP = 10            # 最多列几份蓝图
+_BLUEPRINT_MODULE_CAP = 20     # 每份蓝图最多列几个模块
+
 # ---------- 上下文治理参数（2026-09-30 压缩上下文方案） ----------
 # 背景：单条工具结果可达数百万字符原样入历史 → 跨轮全量回放 → input 突破
 # 网关硬上限 → HTTP 400（不可重试、无降级）→ 线程 status=error。治理分三层：
@@ -733,6 +739,38 @@ class ChatTurn:
             "该子专家的资产范围，避免多个子专家重复测试同一资产。")
         return "\n".join(lines)
 
+    def _blueprint_context(self) -> str:
+        """蓝图注入（R4 消费面接线 M1，2026-10-13）：把项目开发蓝图（模块级业务
+        功能↔函数锚点）摊给主控与子专家——此前 AI 侧完全读不到 blueprints 表，
+        模块深析/重建无从规划。**紧凑形态**：只给蓝图名/status/模块名/status/锚点
+        数，**不进 spec/notes 全文**（与 func_kb/findings 共享物化预算；详情让 Agent
+        用 `bb_query what=blueprint` 自取）。读取失败降级空串，不阻断对话。"""
+        try:
+            bps = self.bb.list_blueprints(self.project_id)
+        except Exception:  # noqa: BLE001 —— 注入失败不阻断委派
+            log.exception("chat 蓝图读取失败 thread=%s", self.thread_id)
+            return ""
+        if not bps:
+            return ""
+        lines = ["## 开发蓝图（R4：模块级业务功能↔函数锚点）"]
+        for bp in bps[:_BLUEPRINT_CAP]:
+            name = str(bp.get("name") or "")
+            status = str(bp.get("status") or "draft")
+            goal = str(bp.get("goal") or "").replace("\n", " ").strip()
+            lines.append(f"- {name}（{status}）" + (f"｜目标 {goal[:40]}" if goal else ""))
+            mods = [m for m in (bp.get("modules") or []) if isinstance(m, dict)]
+            for m in mods[:_BLUEPRINT_MODULE_CAP]:
+                anchors = len(m.get("func_addresses") or [])
+                lines.append(f"  - {m.get('name')} [{m.get('status')}]"
+                             + (f" 锚点 {anchors}" if anchors else ""))
+            if len(mods) > _BLUEPRINT_MODULE_CAP:
+                lines.append(f"  - …共 {len(mods)} 个模块")
+        if len(bps) > _BLUEPRINT_CAP:
+            lines.append(f"- …共 {len(bps)} 份蓝图")
+        lines.append("纪律：模块深析/重建按模块锚点函数展开；接口 spec 与蓝图正文用 "
+                     'bb_query(what="blueprint", blueprint_id="…") 自取。')
+        return "\n".join(lines)
+
     def _dimension_gate_status(self) -> dict | None:
         """子专家维度收敛态；None=不启用（主控/非 spawn/无目标资产/无面可查）。
 
@@ -1002,14 +1040,20 @@ class ChatTurn:
                 "黑板（bb_add_asset/bb_add_finding）；干完给一段**自包含的收尾"
                 "摘要**（做了什么/关键证据/结论），主控会原样转述给人类。")
             parts.append(self._mission_context())
+        # 蓝图注入（R4 消费面接线 M1）：主控与子专家都摊项目蓝图（紧凑形态），
+        # 无蓝图返空串不注入。
+        bp_ctx = self._blueprint_context()
+        if bp_ctx:
+            parts.append(bp_ctx)
         # 技能全量描述（K8 同款渐进披露层1：name+description，正文 skill_open）
         try:
             if SkillRegistry is not None:
                 reg = SkillRegistry(self.packs_root)
                 reg.load()
-                pack_set = set(self.capabilities) | {self.track}
+                # 硬选口径：空列表 = 不限定（与 experts.expert_skills 同款；chat-orchestrator skills:[] = 全量）
+                role_skills = expert.get("skills") or None
                 enabled = [s for s in reg.all()
-                           if s.enabled and s.pack in pack_set]
+                           if s.enabled and (role_skills is None or s.name in role_skills)]
                 if enabled:
                     # 消歧（2026-10-01）：技能名与专家名曾同屏混淆（模型把
                     # recon-asset-enum 当专家名传给 call_expert），标题显式标注边界。
@@ -1551,10 +1595,17 @@ class ChatTurn:
             win, soft = self._ctx_window()
             self._usage = {
                 "input": input_total,
+                # 累计口径（2026-10-13 缓存命中率）：跨步累加，供面板算「会话整体」
+                # 命中率（当步键 input/cache_read/cache_creation 不动，向后兼容）。
+                "input_total": self._usage.get("input_total", 0) + input_total,
                 "output": self._usage.get("output", 0) + u.output_tokens,
                 "steps": self._usage.get("steps", 0) + 1,
                 "cache_read": u.cache_read_tokens,
+                "cache_read_total": self._usage.get("cache_read_total", 0)
+                                    + u.cache_read_tokens,
                 "cache_creation": u.cache_creation_tokens,
+                "cache_creation_total": self._usage.get("cache_creation_total", 0)
+                                        + u.cache_creation_tokens,
                 "compaction": ctx_info,
                 # 面板分母（硬窗口）与警戒线（软上限）——后端下发真实值（ct-8）
                 "ctx_limit": win,

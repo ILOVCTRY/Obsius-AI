@@ -10,25 +10,26 @@ import { MarkdownView } from "./MarkdownView"
 import { cn } from "@/lib/utils"
 
 // 红线设置页（E1 重构，DESIGN.md §12 设置页）：左文件列表 + 右单文件编辑器。
-// 旧实现三块大文本框纵向堆叠同屏抢高度、切轨/包未保存内容被静默覆盖——
-// 现在单文件编辑 + dirty confirm 守卫（对齐 Skill 页 guard）；后端 API 与 .history 不动。
-// F11：第四组「评级与价值口径」（rating/）+ 项目级生效档案勾选区（需 pid 上下文）。
+// 2026-10-13 能力包退役：删「能力包红线」；平台规则/评级与价值口径改为全局单份（渗透独有），
+// 位置 packs/kb/安全红线/{平台规则,评级与价值口径}/；轨红线 packs/kb/安全红线/轨红线/<track>.md。
 
 type RuleFile =
   | { kind: "track-redlines"; track: string; path: string }
-  | { kind: "cap-redlines"; cap: string; path: string }
-  | { kind: "owner"; track: string; tag: string; path: string }
-  | { kind: "rating"; track: string; tag: string; path: string }
+  | { kind: "owner"; tag: string; path: string }
+  | { kind: "rating"; tag: string; path: string }
 
 export interface RuleFocus {
-  kind: "track-redlines" | "cap-redlines" | "rating"; name: string; n: number; tag?: string }
+  kind: "track-redlines" | "rating"; name: string; n: number; tag?: string }
 
 const SCOPE: Record<RuleFile["kind"], string> = {
   "track-redlines": "轨红线 · 该轨全角色全量注入",
-  "cap-redlines": "能力包红线 · 启用该包的项目注入",
-  owner: "平台规则 · 资产 meta.owner 命中才注入",
-  rating: "评级与价值口径 · 判级依据（带硬指令注入）",
+  owner: "平台规则 · 资产 meta.owner 命中才注入（渗透独有）",
+  rating: "评级与价值口径 · 判级依据（带硬指令注入，渗透独有）",
 }
+
+const REDLINE_PATH = (track: string) => `kb/安全红线/轨红线/${track}.md`
+const OWNER_PATH = (tag: string) => `kb/安全红线/平台规则/${tag}.md`
+const RATING_PATH = (tag: string) => `kb/安全红线/评级与价值口径/${tag}.md`
 
 const sameFile = (a: RuleFile | null, b: RuleFile) =>
   a !== null && a.kind === b.kind && a.path === b.path
@@ -59,8 +60,8 @@ function FileItem({ active, exists, path, title, onClick, onDelete }: {
   )
 }
 
-export function RulesPane({ track, cap, focus, pid }: {
-  track: string; cap: string; focus?: RuleFocus | null; pid?: string | null }) {
+export function RulesPane({ track, focus, pid }: {
+  track: string; focus?: RuleFocus | null; pid?: string | null }) {
   const [owners, setOwners] = useState<OwnerRule[]>([])
   const [ratings, setRatings] = useState<RatingRule[]>([])
   const [sel, setSel] = useState<RuleFile | null>(null)
@@ -68,40 +69,35 @@ export function RulesPane({ track, cap, focus, pid }: {
   const [dirty, setDirty] = useState(false)
   const [saved, setSaved] = useState(false)
   const [missing, setMissing] = useState(false)
-  const [exists, setExists] = useState<{ track: boolean; cap: boolean }>({ track: true, cap: true })
+  const [exists, setExists] = useState<boolean>(true)
   const [newTag, setNewTag] = useState("")
   const [newRatingTag, setNewRatingTag] = useState("")
   // 红线/规则文件都是 .md：默认预览渲染，可切编辑（对齐 SkillWorkspace/KbPane）
   const [mode, setMode] = useState<"preview" | "edit">("preview")
 
+  const isPentest = track === "pentest"
+
   const reloadOwners = useCallback(() =>
-    api.trackOwners(track).then(setOwners).catch(() => {}), [track])
+    api.platformRules().then(setOwners).catch(() => {}), [])
   useEffect(() => { reloadOwners() }, [reloadOwners])
   const reloadRatings = useCallback(() =>
-    api.trackRatings(track).then(setRatings).catch(() => {}), [track])
+    api.ratings().then(setRatings).catch(() => {}), [])
   useEffect(() => { reloadRatings() }, [reloadRatings])
 
-  // 状态点数据源：两份 redlines 存在性预取（缺失 ○ / 存在 ●）
+  // 状态点数据源：轨红线存在性预取（缺失 ○ / 存在 ●）
   useEffect(() => {
     api.trackRules(track)
-      .then((r) => setExists((m) => ({ ...m, track: r.exists !== false })))
-      .catch(() => setExists((m) => ({ ...m, track: false })))
-    api.capRules(cap)
-      .then((r) => setExists((m) => ({ ...m, cap: r.exists !== false })))
-      .catch(() => setExists((m) => ({ ...m, cap: false })))
-  }, [track, cap])
+      .then((r) => setExists(r.exists !== false))
+      .catch(() => setExists(false))
+  }, [track])
 
-  // 选中变化 → 载入内容（文件描述符自带轨/包，不随父级 props 漂移）
+  // 选中变化 → 载入内容（文件描述符自带轨/tag，不随父级 props 漂移）
   useEffect(() => {
     if (!sel || sel.kind === "owner" || sel.kind === "rating") return
-    const load = sel.kind === "track-redlines"
-      ? api.trackRules(sel.track) : api.capRules(sel.cap)
-    load.then((r) => {
+    api.trackRules(sel.track).then((r) => {
       setContent(r.content); setMissing(r.exists === false); setDirty(false)
     }).catch(() => { setContent(""); setMissing(true); setDirty(false) })
   }, [sel])
-
-  // owners/ratings 内容不走 effect 回填：列表自带 content，选中时（choose/create/doctor 跳转）直接同步
 
   // doctor 红线/评级跳转：自动选中对应文件
   const prevFocus = useRef(0)
@@ -109,31 +105,28 @@ export function RulesPane({ track, cap, focus, pid }: {
     if (!focus?.n || focus.n === prevFocus.current) return
     prevFocus.current = focus.n
     if (focus.kind === "rating" && focus.tag) {
-      setSel({ kind: "rating", track: focus.name, tag: focus.tag,
-               path: `tracks/${focus.name}/rules/rating/${focus.tag}.md` })
-      api.trackRatings(focus.name).then((rs) => {
+      setSel({ kind: "rating", tag: focus.tag, path: RATING_PATH(focus.tag) })
+      api.ratings().then((rs) => {
         setRatings(rs)
         const r = rs.find((x) => x.tag === focus.tag)
         setContent(r ? r.content : ""); setMissing(!r); setDirty(false)
       }).catch(() => {})
       return
     }
-    setSel(focus.kind === "track-redlines"
-      ? { kind: "track-redlines", track: focus.name, path: `tracks/${focus.name}/rules/redlines.md` }
-      : { kind: "cap-redlines", cap: focus.name, path: `capabilities/${focus.name}/rules/redlines.md` })
+    setSel({ kind: "track-redlines", track: focus.name, path: REDLINE_PATH(focus.name) })
   }, [focus?.n])  // eslint-disable-line react-hooks/exhaustive-deps
 
-  // 切轨/包（父级 select）：dirty 先 confirm；取消则保留当前编辑不覆盖（修静默丢失）
-  const prevTC = useRef({ track, cap })
+  // 切轨（父级 select）：dirty 先 confirm；取消则保留当前编辑不覆盖（修静默丢失）
+  const prevTrack = useRef(track)
   useEffect(() => {
-    if (prevTC.current.track === track && prevTC.current.cap === cap) return
+    if (prevTrack.current === track) return
     if (dirty && !window.confirm("当前文件有未保存修改，切换将丢弃，确认？")) {
-      prevTC.current = { track, cap }   // 父级选择无法回退，但未保存内容保留在编辑器
+      prevTrack.current = track
       return
     }
-    prevTC.current = { track, cap }
-    setSel({ kind: "track-redlines", track, path: `tracks/${track}/rules/redlines.md` })
-  }, [track, cap, dirty])
+    prevTrack.current = track
+    setSel({ kind: "track-redlines", track, path: REDLINE_PATH(track) })
+  }, [track, dirty])
 
   const choose = (f: RuleFile) => {
     if (sameFile(sel, f)) return
@@ -150,16 +143,14 @@ export function RulesPane({ track, cap, focus, pid }: {
 
   const save = async () => {
     if (!sel) return
-    if (sel.kind === "owner") await api.updateTrackOwner(sel.track, sel.tag, content)
-    else if (sel.kind === "rating") await api.updateTrackRating(sel.track, sel.tag, content)
-    else if (sel.kind === "track-redlines") await api.updateTrackRules(sel.track, content)
-    else await api.updateCapRules(sel.cap, content)
+    if (sel.kind === "owner") await api.updatePlatformRule(sel.tag, content)
+    else if (sel.kind === "rating") await api.updateRating(sel.tag, content)
+    else await api.updateTrackRules(sel.track, content)
     setSaved(true)
     setTimeout(() => setSaved(false), 1500)
     setDirty(false)
     setMissing(false)
-    setExists((m) => ({ ...m, track: sel.kind === "track-redlines" ? true : m.track,
-                        cap: sel.kind === "cap-redlines" ? true : m.cap }))
+    if (sel.kind === "track-redlines") setExists(true)
     if (sel.kind === "owner") reloadOwners()
     if (sel.kind === "rating") reloadRatings()
     window.dispatchEvent(new Event("packs-changed"))
@@ -168,15 +159,15 @@ export function RulesPane({ track, cap, focus, pid }: {
   const createOwner = async () => {
     const tag = newTag.trim()
     if (!tag) return
-    await api.updateTrackOwner(track, tag, `# ${tag} 平台规则（标题/触发条件/测试边界…）\n`)
+    await api.updatePlatformRule(tag, `# ${tag} 平台规则（标题/触发条件/测试边界…）\n`)
     setNewTag("")
-    setSel({ kind: "owner", track, tag, path: `tracks/${track}/rules/owners/${tag}.md` })
+    setSel({ kind: "owner", tag, path: OWNER_PATH(tag) })
     setDirty(false)
     reloadOwners()
   }
 
   const removeOwner = async (tag: string) => {
-    await api.deleteTrackOwner(track, tag)
+    await api.deletePlatformRule(tag)
     if (sel?.kind === "owner" && sel.tag === tag) { setSel(null); setContent(""); setDirty(false) }
     reloadOwners()
   }
@@ -184,16 +175,15 @@ export function RulesPane({ track, cap, focus, pid }: {
   const createRating = async () => {
     const tag = newRatingTag.trim()
     if (!tag) return
-    await api.updateTrackRating(track, tag,
-      `# ${tag} 评级与价值口径（判级条款 / 资产价值分级…）\n`)
+    await api.updateRating(tag, `# ${tag} 评级与价值口径（判级条款 / 资产价值分级…）\n`)
     setNewRatingTag("")
-    setSel({ kind: "rating", track, tag, path: `tracks/${track}/rules/rating/${tag}.md` })
+    setSel({ kind: "rating", tag, path: RATING_PATH(tag) })
     setDirty(false)
     reloadRatings()
   }
 
   const removeRating = async (tag: string) => {
-    await api.deleteTrackRating(track, tag)
+    await api.deleteRating(tag)
     if (sel?.kind === "rating" && sel.tag === tag) { setSel(null); setContent(""); setDirty(false) }
     reloadRatings()
   }
@@ -207,55 +197,52 @@ export function RulesPane({ track, cap, focus, pid }: {
     <div className="flex h-full min-h-0">
       <div className="w-64 shrink-0 space-y-3 overflow-y-auto border-r p-2">
         <div className="space-y-1">
-          <p className="px-1 text-[10px] text-muted-foreground">轨红线 · tracks/{track}/rules/</p>
-          <FileItem path="redlines.md" exists={exists.track}
-                    title={`tracks/${track}/rules/redlines.md`}
+          <p className="px-1 text-[10px] text-muted-foreground">轨红线 · kb/安全红线/轨红线/</p>
+          <FileItem path="redlines.md" exists={exists}
+                    title={REDLINE_PATH(track)}
                     active={sel?.kind === "track-redlines" && sel.track === track}
-                    onClick={() => choose({ kind: "track-redlines", track, path: `tracks/${track}/rules/redlines.md` })} />
+                    onClick={() => choose({ kind: "track-redlines", track, path: REDLINE_PATH(track) })} />
         </div>
-        <div className="space-y-1">
-          <p className="px-1 text-[10px] text-muted-foreground">能力包红线 · capabilities/{cap}/rules/</p>
-          <FileItem path="redlines.md" exists={exists.cap}
-                    title={`capabilities/${cap}/rules/redlines.md`}
-                    active={sel?.kind === "cap-redlines" && sel.cap === cap}
-                    onClick={() => choose({ kind: "cap-redlines", cap, path: `capabilities/${cap}/rules/redlines.md` })} />
-        </div>
-        <div className="space-y-1">
-          <p className="px-1 text-[10px] text-muted-foreground">平台规则 · tracks/{track}/rules/owners/</p>
-          {owners.map((o) => (
-            <FileItem key={o.tag} path={`${o.tag}.md`} exists title={`tracks/${track}/rules/owners/${o.tag}.md`}
-                      active={sel?.kind === "owner" && sel.tag === o.tag}
-                      onClick={() => choose({ kind: "owner", track, tag: o.tag, path: `tracks/${track}/rules/owners/${o.tag}.md` })}
-                      onDelete={() => removeOwner(o.tag)} />
-          ))}
-          {owners.length === 0 && (
-            <p className="px-1 text-[10px] text-muted-foreground">暂无平台规则</p>
-          )}
-          <div className="flex gap-1 pt-1">
-            <Input value={newTag} onChange={(e) => setNewTag(e.target.value)} placeholder="新平台 tag，如 edusrc"
-                   className="h-7 flex-1 text-xs" onKeyDown={(e) => e.key === "Enter" && createOwner()} />
-            <Button size="sm" variant="outline" className="h-7 px-2" onClick={createOwner} disabled={!newTag.trim()}>＋</Button>
+        {isPentest && (
+          <div className="space-y-1">
+            <p className="px-1 text-[10px] text-muted-foreground">平台规则 · kb/安全红线/平台规则/</p>
+            {owners.map((o) => (
+              <FileItem key={o.tag} path={`${o.tag}.md`} exists title={OWNER_PATH(o.tag)}
+                        active={sel?.kind === "owner" && sel.tag === o.tag}
+                        onClick={() => choose({ kind: "owner", tag: o.tag, path: OWNER_PATH(o.tag) })}
+                        onDelete={() => removeOwner(o.tag)} />
+            ))}
+            {owners.length === 0 && (
+              <p className="px-1 text-[10px] text-muted-foreground">暂无平台规则</p>
+            )}
+            <div className="flex gap-1 pt-1">
+              <Input value={newTag} onChange={(e) => setNewTag(e.target.value)} placeholder="新平台 tag，如 edusrc"
+                     className="h-7 flex-1 text-xs" onKeyDown={(e) => e.key === "Enter" && createOwner()} />
+              <Button size="sm" variant="outline" className="h-7 px-2" onClick={createOwner} disabled={!newTag.trim()}>＋</Button>
+            </div>
           </div>
-        </div>
-        <div className="space-y-1">
-          <p className="px-1 text-[10px] text-muted-foreground">评级与价值口径 · tracks/{track}/rules/rating/</p>
-          {ratings.map((r) => (
-            <FileItem key={r.tag} path={`${r.tag}.md`} exists title={`tracks/${track}/rules/rating/${r.tag}.md`}
-                      active={sel?.kind === "rating" && sel.tag === r.tag}
-                      onClick={() => choose({ kind: "rating", track, tag: r.tag, path: `tracks/${track}/rules/rating/${r.tag}.md` })}
-                      onDelete={() => removeRating(r.tag)} />
-          ))}
-          {ratings.length === 0 && (
-            <p className="px-1 text-[10px] text-muted-foreground">暂无评级规则</p>
-          )}
-          <div className="flex gap-1 pt-1">
-            <Input value={newRatingTag} onChange={(e) => setNewRatingTag(e.target.value)}
-                   placeholder="新评级 tag，如 edu-rating"
-                   className="h-7 flex-1 text-xs" onKeyDown={(e) => e.key === "Enter" && createRating()} />
-            <Button size="sm" variant="outline" className="h-7 px-2" onClick={createRating} disabled={!newRatingTag.trim()}>＋</Button>
+        )}
+        {isPentest && (
+          <div className="space-y-1">
+            <p className="px-1 text-[10px] text-muted-foreground">评级与价值口径 · kb/安全红线/评级与价值口径/</p>
+            {ratings.map((r) => (
+              <FileItem key={r.tag} path={`${r.tag}.md`} exists title={RATING_PATH(r.tag)}
+                        active={sel?.kind === "rating" && sel.tag === r.tag}
+                        onClick={() => choose({ kind: "rating", tag: r.tag, path: RATING_PATH(r.tag) })}
+                        onDelete={() => removeRating(r.tag)} />
+            ))}
+            {ratings.length === 0 && (
+              <p className="px-1 text-[10px] text-muted-foreground">暂无评级规则</p>
+            )}
+            <div className="flex gap-1 pt-1">
+              <Input value={newRatingTag} onChange={(e) => setNewRatingTag(e.target.value)}
+                     placeholder="新评级 tag，如 edu-rating"
+                     className="h-7 flex-1 text-xs" onKeyDown={(e) => e.key === "Enter" && createRating()} />
+              <Button size="sm" variant="outline" className="h-7 px-2" onClick={createRating} disabled={!newRatingTag.trim()}>＋</Button>
+            </div>
           </div>
-        </div>
-        {pid && <RuleProfilesEditor pid={pid} ownerTags={owners.map((o) => o.tag)} ratingTags={ratings.map((r) => r.tag)} />}
+        )}
+        {pid && isPentest && <RuleProfilesEditor pid={pid} ownerTags={owners.map((o) => o.tag)} ratingTags={ratings.map((r) => r.tag)} />}
       </div>
       <div className="flex min-w-0 flex-1 flex-col p-3">
         {sel ? (
@@ -297,7 +284,7 @@ export function RulesPane({ track, cap, focus, pid }: {
           </>
         ) : (
           <p className="self-center text-center text-xs text-muted-foreground">
-            选择左侧文件编辑：轨红线 / 能力包红线 / 平台规则（owners）/ 评级与价值口径（rating）<br />
+            选择左侧文件编辑：轨红线{isPentest ? " / 平台规则（owners）/ 评级与价值口径（rating）" : ""}<br />
             <span className="text-[10px]">● 存在　○ 缺失（新建并保存即可创建）；删除 = 停用（.history 留备份）</span>
           </p>
         )}
@@ -338,7 +325,7 @@ function RuleProfilesEditor({ pid, ownerTags, ratingTags }: {
     ((profiles[key] as string[] | undefined) ?? []).includes(tag)
 
   const save = async () => {
-    // 只存本轨清单内的勾选（切轨后不在新轨清单的残留 tag 不写入——防错位）；
+    // 只存清单内的勾选（不在清单的残留 tag 不写入——防错位）；
     // 两个都空 → 剥键（等价不注入，盘上保持干净）
     const out: RuleProfiles = {}
     const ownersKept = (profiles.owners ?? []).filter((t) => ownerTags.includes(t))
@@ -367,7 +354,7 @@ function RuleProfilesEditor({ pid, ownerTags, ratingTags }: {
       <div>
         <p className="text-[10px] text-muted-foreground">平台规则（owners）</p>
         {ownerTags.length === 0 ? (
-          <span className="ml-1 text-[10px] text-muted-foreground">本轨暂无 owners 规则</span>
+          <span className="ml-1 text-[10px] text-muted-foreground">暂无 owners 规则</span>
         ) : (
           <div className="ml-1 flex flex-wrap gap-x-2">
             {ownerTags.map((t) => (
@@ -379,7 +366,7 @@ function RuleProfilesEditor({ pid, ownerTags, ratingTags }: {
       <div>
         <p className="text-[10px] text-muted-foreground">评级与价值口径（rating）</p>
         {ratingTags.length === 0 ? (
-          <span className="ml-1 text-[10px] text-muted-foreground">本轨暂无评级规则</span>
+          <span className="ml-1 text-[10px] text-muted-foreground">暂无评级规则</span>
         ) : (
           <div className="ml-1 flex flex-wrap gap-x-2">
             {ratingTags.map((t) => (
@@ -389,7 +376,7 @@ function RuleProfilesEditor({ pid, ownerTags, ratingTags }: {
         )}
       </div>
       <p className="text-[10px] leading-relaxed text-muted-foreground">
-        勾哪个生效哪个；不勾=不注入。未配置的项目默认不叠加 owners/rating（能力包红线/轨红线仍恒注入）。保存后下次开窗生效。
+        勾哪个生效哪个；不勾=不注入。未配置的项目默认不叠加 owners/rating（轨红线仍恒注入）。保存后下次开窗生效。
       </p>
     </div>
   )

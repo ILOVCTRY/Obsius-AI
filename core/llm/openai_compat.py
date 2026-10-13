@@ -52,6 +52,9 @@ class OpenAICompatProvider:
         self.timeout = timeout
         self._enable_thinking = enable_thinking
         self._thinking_disabled = False
+        # 网关不支持 stream_options（400 文案含 stream_options）时置位——本实例
+        # 不再下发，退化为「流式无 usage」（2026-10-13 缓存命中率）。
+        self._stream_options_disabled = False
         self.context_tokens = context_tokens
         self.ctx_soft_budget = ctx_soft_budget
         self.summarizer_model = summarizer_model
@@ -165,6 +168,13 @@ class OpenAICompatProvider:
                     body.pop("reasoning", None)
                     payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
                     continue
+                if (not self._stream_options_disabled and status == 400
+                        and "stream_options" in message.lower()):
+                    # 网关不认 stream_options → 本实例剥除重试一次（退化为无 usage）
+                    self._stream_options_disabled = True
+                    body.pop("stream_options", None)
+                    payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+                    continue
                 raise LLMError(f"LLM 调用失败 HTTP {status}{note}: {message}",
                                status=status,
                                body=json.dumps(data or {}, ensure_ascii=False)[:500])
@@ -231,6 +241,10 @@ class OpenAICompatProvider:
     def _body(self, messages, system, tools, max_tokens, temperature, model):
         if self.format == CHAT_COMPLETIONS:
             body: dict[str, Any] = {"model": model, "messages": self._chat_messages(messages, system), "max_tokens": max_tokens, "stream": True}
+            # 流式末帧带回 usage（含 prompt_tokens_details.cached_tokens）——OpenAI
+            # Chat Completions 默认不下发，须显式 include_usage（2026-10-13）。
+            if not self._stream_options_disabled:
+                body["stream_options"] = {"include_usage": True}
             if tools:
                 body["tools"] = [{"type": "function", "function": {"name": t["name"], "description": t.get("description", ""), "parameters": t.get("input_schema", {})}} for t in tools]
             if temperature is not None:
@@ -359,6 +373,12 @@ class OpenAICompatProvider:
             if should_cancel and should_cancel():
                 raise LLMError("已中断")
             if self.format == CHAT_COMPLETIONS:
+                # 末帧 usage（stream_options.include_usage 触发；该帧 choices 通常为空）
+                if evt.get("usage"):
+                    usage = parsing.openai_usage_to_usage(
+                        evt["usage"], input_key="prompt_tokens",
+                        output_key="completion_tokens",
+                        details_key="prompt_tokens_details")
                 for choice_position, choice in enumerate(evt.get("choices", [])):
                     choice_index = choice.get("index", choice_position)
                     d = choice.get("delta", {})
@@ -416,9 +436,10 @@ class OpenAICompatProvider:
                         merge_call(item, item_id=str(evt.get("item_id") or ""))
                 elif typ == "response.completed":
                     response = evt.get("response") or {}
-                    u = response.get("usage") or {}
-                    usage.input_tokens = u.get("input_tokens", 0)
-                    usage.output_tokens = u.get("output_tokens", 0)
+                    usage = parsing.openai_usage_to_usage(
+                        response.get("usage") or {}, input_key="input_tokens",
+                        output_key="output_tokens",
+                        details_key="input_tokens_details")
                     # 某些网关省略 output_item.done，只在最终 response.output
                     # 中返回完整 function_call；这里作为最后一道元数据补全。
                     for item in response.get("output", []) or []:

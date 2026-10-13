@@ -16,12 +16,13 @@ knowledge 随 config.profile 快照留档），模板后续升级不影响存量
 from pathlib import Path
 
 from core.skills.experts import _parse_expert
+from core.skills.taxonomy import track_dir
 
 BOARD_VIEWS = ("findings", "assets", "funcs", "board")
 
 
 def profiles_dir(packs_root: str | Path, track: str) -> Path:
-    return Path(packs_root) / "tracks" / track / "profiles"
+    return track_dir(packs_root, track) / "profiles"
 
 
 def load_track_profiles(packs_root: str | Path, track: str) -> list[dict]:

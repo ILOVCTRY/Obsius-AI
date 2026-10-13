@@ -895,9 +895,8 @@
 .kb-file-row:hover .kb-file-action, .kb-file-row.is-selected .kb-file-action { opacity: 1; }
 .kb-file-action { opacity: 0; transition: opacity .14s, color .14s, background .14s; }
 .kb-file-row.is-selected { box-shadow: inset 2px 0 var(--primary); }
-.kb-layer-mark { margin-right: 2px; letter-spacing: .02em; }
 
-/* Knowledge workbench: preserve the dense three-column desktop surface while
+/* Knowledge workbench: preserve the dense two-panel desktop surface while
    giving narrow screens one readable panel at a time. */
 .kb-mobile-tabs { display: none; }
 @media (max-width: 760px) {
@@ -1023,8 +1022,8 @@
 .wb-aside-head { position: relative; padding: 10px; border-bottom: 1px solid var(--border); }
 .wb-agent-trigger { display: flex; width: 100%; align-items: center; gap: 9px; padding: 8px 10px; border: 1px solid var(--theme-raw-237a9ccbe3); border-radius: 9px; background: var(--theme-raw-afbb17f119); text-align: left; transition: border-color .16s, background .16s; }
 .wb-agent-trigger:hover { border-color: var(--theme-raw-b1bff628cd); background: var(--theme-raw-5a7d739956); }
-.wb-agent-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 650; }
-.wb-agent-role { margin-top: 1px; color: var(--muted-foreground); font-family: var(--font-mono); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
+.wb-agent-name { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 650; }
+.wb-agent-role { display: block; margin-top: 1px; color: var(--muted-foreground); font-family: var(--font-mono); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
 .wb-avatar { display: grid; width: 26px; height: 26px; flex: 0 0 26px; place-items: center; border-radius: 8px; border: 1px solid var(--theme-raw-ebe711bbf4); background: var(--theme-raw-e636578dde); color: var(--primary); font-size: 11px; font-weight: 750; }
 .wb-avatar.is-orch { background: linear-gradient(135deg, var(--theme-raw-fc06cc0e30), var(--theme-raw-6fd1e0b10a)); box-shadow: 0 0 14px var(--theme-raw-abd34dfdec); }
 .wb-avatar.is-sm { width: 20px; height: 20px; flex-basis: 20px; border-radius: 6px; font-size: 9px; }
@@ -1164,6 +1163,10 @@
 .wb-usage-segs .seg-refs { background: var(--theme-raw-320cefd40d); }
 .wb-usage-segs .seg-msgs { background: var(--theme-raw-5e8a452f19); }
 .wb-usage-segs .seg-free { background: var(--theme-raw-7805e56978); min-width: 0; }
+/* 缓存构成（2026-10-13）：读=绿（命中）/ 写=琥珀（新写入）/ 未缓存=红 */
+.wb-usage-segs .seg-cache-read { background: var(--status-ok); }
+.wb-usage-segs .seg-cache-write { background: var(--status-warning); }
+.wb-usage-segs .seg-uncached { background: var(--status-error); }
 /* 软上限警戒线（ct-8）：512K 等有效工作窗口位置的红线标记 */
 .wb-usage-segs .seg-soft { position: absolute; top: -2px; bottom: -2px; width: 2px; min-width: 2px; margin-left: -1px; border-radius: 1px; background: var(--theme-raw-61a86aba90); }
 .wb-usage-bar { position: relative; }
@@ -1176,6 +1179,9 @@
 .wb-usage-dot.seg-refs { background: var(--theme-raw-320cefd40d); }
 .wb-usage-dot.seg-msgs { background: var(--theme-raw-5e8a452f19); }
 .wb-usage-dot.seg-free { background: var(--theme-raw-d434218f65); }
+.wb-usage-dot.seg-cache-read { background: var(--status-ok); }
+.wb-usage-dot.seg-cache-write { background: var(--status-warning); }
+.wb-usage-dot.seg-uncached { background: var(--status-error); }
 .wb-usage-dot.seg-soft { background: var(--theme-raw-61a86aba90); }
 .wb-kv.is-hint { opacity: .65; font-size: 10.5px; }
 .wb-err { max-width: 860px; margin: 0 auto; padding: 0 24px; color: var(--theme-raw-064fe55174); font-size: 11px; }

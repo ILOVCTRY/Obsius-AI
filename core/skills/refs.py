@@ -19,6 +19,7 @@ from pathlib import Path
 from core.skills import writing
 from core.skills.registry import SkillRegistry
 from core.skills.rules import load_kb_sources
+from core.skills.taxonomy import list_directions
 
 _MODULE_SUFFIXES = r"(?:md|py|sh|txt|yaml|yml|json)"
 _KBOPEN_RE = re.compile(r"kb_open\s*\(\s*module\s*=\s*[\"']([^\"']+)[\"']")
@@ -53,7 +54,7 @@ def _quoted_pattern(snaps: dict[str, str]) -> re.Pattern:
 
 
 def classify_module(module: str, snaps: dict[str, str],
-                    caps_root: Path, prefer_cap: str | None = None,
+                    packs_root: Path, prefer_cap: str | None = None,
                     ) -> tuple[str, str] | None:
     """单个模块引用 → (code, message)；有效引用返回 None（doctor 复用）。
 
@@ -63,10 +64,8 @@ def classify_module(module: str, snaps: dict[str, str],
     first, _, rel = module.partition("/")
     if not rel:
         return None
-    root = caps_root.parent
-    kb_root = root / "kb"
-    doms = ([p.name for p in kb_root.iterdir() if p.is_dir()]
-            if kb_root.is_dir() else [])
+    root = Path(packs_root)
+    doms = list_directions(root)
     order: list[str] = []
     for d in (prefer_cap, first if first in doms else None,
               snaps.get(first)):
@@ -100,13 +99,11 @@ def extract_modules(text: str, snaps: dict[str, str]) -> list[str]:
 
 
 def _kb_sources(root: Path) -> list[tuple[str, Path, bool]]:
-    """[(cap, source_root, recursive)]，跨全部能力包（kb 文档互相引用时定位归属）。"""
+    """[(方向, source_root, recursive)]，跨全部 kb 方向（kb 文档互相引用时定位归属）。"""
     out = []
-    caps = root / "capabilities"
-    if caps.is_dir():
-        for cap_dir in sorted(p for p in caps.iterdir() if p.is_dir()):
-            for src in load_kb_sources(root, [cap_dir.name]):
-                out.append((cap_dir.name, src.root, src.recursive))
+    for direction in list_directions(root):
+        for src in load_kb_sources(root, [direction]):
+            out.append((direction, src.root, src.recursive))
     return out
 
 

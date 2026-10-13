@@ -27,6 +27,7 @@ from typing import Any, Callable
 from core.tools.decompiler import (
     MCP_PROBE_TIMEOUT,
     DB_LOCK_EXTS,
+    SAMPLE_AUTO_MAX_BYTES,
     MCPBackend,
     resolve_ida_headless,
     sha256_file,
@@ -141,19 +142,46 @@ class IdaMcpManager:
                 db_dir: Path | None) -> str | None:
         project_id, sha = key
         db_dir = Path(db_dir) if db_dir else None
-        if db_dir is not None and any(
-                (db_dir / sha).with_suffix(ext).exists() for ext in DB_LOCK_EXTS):
-            return None  # IDA GUI 正开着该库：绝不抢（同 headless 写回的锁语义）
+        db_stem = (db_dir / sha) if db_dir else Path(binary).with_suffix("")
+
+        # 现成库查找（两处都找，2026-10-13）：平台约定 db_dir/<sha>.i64|.idb；
+        # 样本旁 IDA 默认名——人直接在 IDA 打开样本保存时 IDA 把库落在输入文件旁
+        # （实测 aimodv1.exe → aimodv1.exe.i64，在样本同目录）。
+        cands: list[Path] = []
+        for p in (db_stem.with_suffix(".i64"), db_stem.with_suffix(".idb"),
+                  Path(str(binary) + ".i64"), Path(str(binary) + ".idb"),
+                  Path(binary).with_suffix(".i64"),
+                  Path(binary).with_suffix(".idb")):
+            if p not in cands:
+                cands.append(p)
+
+        # GUI 正开着该库（.id0/.id1/.id2/.nam/.til 任一在）→ 绝不抢（同 headless 写回锁语义）
+        for stem in (db_stem, *cands):
+            if any(stem.with_suffix(ext).exists() for ext in DB_LOCK_EXTS):
+                return None
+
+        db = next((p for p in cands if p.exists()), None)
+        if db is not None:
+            # 直读现成库：不带 -o，把 .i64/.idb 当输入——复用人类/平台已分析成果，
+            # 绝不从样本重建（重建会覆盖人类在 GUI 里的改名/注释）。实测 2026-10-13 可行。
+            args = [idat, "-A", f"-S{self.bootstrap}", str(db)]
+        else:
+            # 无库：体积闸——≥10MB 拒绝 Agent 触发分析（引导先「开始分析」）
+            try:
+                if Path(binary).stat().st_size >= SAMPLE_AUTO_MAX_BYTES:
+                    return None
+            except OSError:
+                return None
+            # -S 必须是无空格单参数（同 app.py /open 惯例规避 list2cmdline 引号转义坑：
+            # -S"script port" 经转义后 IDA 自家解析器不认，实测 could not locate file）；
+            # 端口改走环境变量传给 bootstrap（-S 带参形态只留给手工验证）
+            args = [idat, "-A", f"-S{self.bootstrap}", f"-o{db_stem}", str(binary)]
+
         port = self._free_port()
         if port is None:
             return None
-        db_stem = (db_dir / sha) if db_dir else Path(binary).with_suffix("")
         if self.db_dir is not None:
             db_stem.parent.mkdir(parents=True, exist_ok=True)
-        # -S 必须是无空格单参数（同 app.py /open 惯例规避 list2cmdline 引号转义坑：
-        # -S"script port" 经转义后 IDA 自家解析器不认，实测 could not locate file）；
-        # 端口改走环境变量传给 bootstrap（-S 带参形态只留给手工验证）
-        args = [idat, "-A", f"-S{self.bootstrap}", f"-o{db_stem}", str(binary)]
         env = {**os.environ, "CYBERSTRIKE_IDA_MCP_PORT": str(port)}
         try:
             proc = self._popen_fn(args, env=env)

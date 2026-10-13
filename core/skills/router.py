@@ -74,13 +74,12 @@ class SkillRouter:
         features = features or []
         file_features = file_features or []
         labels = labels or []
-        pack_set = set(packs) if packs is not None else None
+        # 技能扁平化（2026-10-13）：无包归属，packs 过滤不再适用（参数保留兼容）；
+        # role_skills 仅作偏好加分（实际会话选择已由白名单硬选，见 loop.skill_context_for）。
         q = query.lower()
         scored: list[RoutedSkill] = []
         for sk in self.registry.all():
             if not include_disabled and not sk.enabled:
-                continue
-            if pack_set is not None and sk.pack not in pack_set:
                 continue
             score, matched = 0.0, []
             contrib = {k: {"weight": w, "hits": []} for k, w in (

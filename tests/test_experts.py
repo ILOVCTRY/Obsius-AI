@@ -8,9 +8,8 @@ from core.skills.doctor import diagnose
 from core.skills.experts import (
     GENERALIST,
     _apply_variant,
-    all_capability_packs,
     allowed_roles,
-    caps_effective,
+    directions_effective,
     expert_exists,
     expert_skills,
     list_experts,
@@ -24,13 +23,14 @@ def _write(path: Path, content: str) -> None:
 
 
 def _build_packs(root: Path) -> Path:
-    """最小专家池 + 双轨 + web 包（供 doctor 体检与加载面测试共用）。"""
+    """最小专家池 + 三轨 + web 方向（2026-10-13 新布局：轨/技能/红线并入 packs/kb/）。"""
     _write(root / "experts/recon.yaml", (
         "# 侦察专家\n"
         "name: 侦察\n"
         'description: "pentest 侦察"\n'
         'persona: "pentest 侦察 persona"\n'
         "skills: [recon-asset-enum]\n"
+        "knowledge: [web]\n"
         "task_types: [recon, asset-enum]\n"
         "tracks: [pentest, redteam]\n"
         'variant_redteam_description: "redteam 侦察"\n'
@@ -49,24 +49,21 @@ def _build_packs(root: Path) -> Path:
         "tracks: [ctf]\n"
     ))
 
-    _write(root / "tracks/ctf/track.yaml", "name: ctf\n")
-    _write(root / "tracks/ctf/task_types.yaml", "generic: passive\nrecon: passive\n")
-    _write(root / "tracks/ctf/rules/redlines.md", "# ctf 红线\n")
-    _write(root / "tracks/ctf/roles/_generalist.yaml", "name: 通用\nskills: null\n")
-    _write(root / "tracks/pentest/track.yaml", "name: pentest\n")
-    _write(root / "tracks/pentest/task_types.yaml",
+    _write(root / "kb/ctf/track.yaml", "name: ctf\n")
+    _write(root / "kb/ctf/task_types.yaml", "generic: passive\nrecon: passive\n")
+    _write(root / "kb/pentest/track.yaml", "name: pentest\n")
+    _write(root / "kb/pentest/task_types.yaml",
            "generic: passive\nrecon: passive\nasset-enum: passive\n")
-    _write(root / "tracks/pentest/rules/redlines.md", "# pentest 红线\n")
-    _write(root / "tracks/pentest/roles/_generalist.yaml", "name: 通用\nskills: null\n")
-    _write(root / "tracks/redteam/track.yaml", "name: redteam\n")
-    _write(root / "tracks/redteam/task_types.yaml",
+    _write(root / "kb/redteam/track.yaml", "name: redteam\n")
+    _write(root / "kb/redteam/task_types.yaml",
            "generic: passive\nrecon: passive\nasset-enum: passive\n")
-    _write(root / "tracks/redteam/rules/redlines.md", "# redteam 红线\n")
-    _write(root / "tracks/redteam/roles/_generalist.yaml", "name: 通用\nskills: null\n")
+    # 轨红线（并入 kb/安全红线/轨红线/）
+    _write(root / "kb/安全红线/轨红线/ctf.md", "# ctf 红线\n")
+    _write(root / "kb/安全红线/轨红线/pentest.md", "# pentest 红线\n")
+    _write(root / "kb/安全红线/轨红线/redteam.md", "# redteam 红线\n")
 
-    _write(root / "capabilities/web/pack.yaml", "kind: capability\nname: web\n")
-    _write(root / "capabilities/web/rules/redlines.md", "# web 红线\n")
-    _write(root / "capabilities/web/skills/recon-asset-enum/SKILL.md",
+    _write(root / "kb/web/README.md", "# web 方向\n")
+    _write(root / "kb/skills/recon-asset-enum/SKILL.md",
            "---\nname: recon-asset-enum\ndescription: 侦察\n---\n# x\n")
     return root
 
@@ -149,7 +146,7 @@ def test_doctor_healthy_expert_pool_no_issues(tmp_path):
     root = _build_packs(tmp_path / "packs")
     rep = diagnose(root)
     codes = _codes(rep)
-    assert not {c for c in codes if c.startswith("expert-") or c == "role-rules-orphan"}
+    assert not {c for c in codes if c.startswith("expert-")}
     # 专家引用的技能不报孤儿（专家引用也算可达）
     assert not any("recon-asset-enum" in i.message
                    for i in rep.issues if i.code == "orphan-skill")
@@ -157,7 +154,7 @@ def test_doctor_healthy_expert_pool_no_issues(tmp_path):
 
 def test_doctor_expert_broken_bindings(tmp_path):
     root = _build_packs(tmp_path / "packs")
-    _write(root / "capabilities/web/skills/off/SKILL.md",
+    _write(root / "kb/skills/off/SKILL.md",
            "---\nname: off\ndescription: 停用\nenabled: false\n---\n# x\n")
     _write(root / "experts/broken.yaml", (
         "skills: [ghost-skill, off]\n"      # 不存在 + 已禁用
@@ -180,18 +177,6 @@ def test_doctor_expert_broken_bindings(tmp_path):
     assert any("nosuch" in i.message for i in broken if i.code == "expert-track-unknown")
 
 
-def test_doctor_expert_skill_ambiguous_across_packs(tmp_path):
-    root = _build_packs(tmp_path / "packs")
-    _write(root / "capabilities/crypto/pack.yaml", "kind: capability\nname: crypto\n")
-    _write(root / "capabilities/crypto/rules/redlines.md", "# r\n")
-    _write(root / "capabilities/crypto/skills/recon-asset-enum/SKILL.md",
-           "---\nname: recon-asset-enum\ndescription: 重名\n---\n# x\n")
-    rep = diagnose(root)
-    hits = [i for i in rep.issues if i.code == "expert-skill-ambiguous"]
-    assert len(hits) == 1 and hits[0].level == "warning"
-    assert "recon-asset-enum" in hits[0].message and "crypto" in hits[0].message
-
-
 def test_doctor_expert_generalist_missing(tmp_path):
     root = _build_packs(tmp_path / "packs")
     (root / "experts/_generalist.yaml").unlink()
@@ -200,25 +185,12 @@ def test_doctor_expert_generalist_missing(tmp_path):
     assert len(hits) == 1 and hits[0].level == "error"
 
 
-def test_doctor_role_rules_orphan(tmp_path):
-    root = _build_packs(tmp_path / "packs")
-    _write(root / "tracks/ctf/rules/role-rules/recon.md", "# 绑专家 recon，不告警\n")
-    _write(root / "tracks/ctf/rules/role-rules/_generalist.md", "# 绑角色，不告警\n")
-    _write(root / "tracks/ctf/rules/role-rules/ghost-role.md", "# 悬空\n")
-    rep = diagnose(root)
-    hits = [i for i in rep.issues if i.code == "role-rules-orphan"]
-    assert len(hits) == 1 and hits[0].level == "warning"
-    assert "ghost-role" in hits[0].message
-
-
 def test_doctor_skips_expert_checks_without_pool(tmp_path):
     """experts/ 目录缺省 → 专家体检整段静默（现有包结构不受影响）。"""
     root = tmp_path / "packs"
-    _write(root / "capabilities/web/pack.yaml", "kind: capability\nname: web\n")
-    _write(root / "capabilities/web/rules/redlines.md", "# r\n")
+    _write(root / "kb/web/README.md", "# web 方向\n")
     rep = diagnose(root)
-    assert not {c for c in _codes(rep)
-                if c.startswith("expert-") or c == "role-rules-orphan"}
+    assert not {c for c in _codes(rep) if c.startswith("expert-")}
 
 
 # ---- M2 推导面（§4.4 专家面 / §4.6 allowed_roles，2026-09-21）----
@@ -236,36 +208,30 @@ def test_expert_skills_union_null_and_missing(tmp_path):
     assert expert_skills(root, "pentest", ["ghost-expert"]) == []
 
 
-def test_caps_effective_fallback_full_and_union(tmp_path):
+def test_directions_effective_fallback_full_and_union(tmp_path):
     root = _build_packs(tmp_path / "packs")
-    _write(root / "capabilities/crypto/pack.yaml", "kind: capability\nname: crypto\n")
-    _write(root / "capabilities/crypto/rules/redlines.md", "# r\n")
-    _write(root / "capabilities/crypto/skills/crypto-scan/SKILL.md",
+    _write(root / "kb/crypto/README.md", "# crypto 方向\n")
+    _write(root / "kb/skills/crypto-scan/SKILL.md",
            "---\nname: crypto-scan\ndescription: c\n---\n# x\n")
     _write(root / "experts/crypto-auditor.yaml",
-           "name: 密码审计\nskills: [crypto-scan]\ntracks: [pentest]\n")
+           "name: 密码审计\nskills: [crypto-scan]\nknowledge: [crypto]\ntracks: [pentest]\n")
     # 存量直通：无绑定 → fallback（meta.capabilities）原样，零翻译
-    assert caps_effective(root, "pentest", None, fallback=["web"]) == ["web"]
-    assert caps_effective(root, "pentest", [], fallback=None) == []
+    assert directions_effective(root, "pentest", None, fallback=["web"]) == ["web"]
+    assert directions_effective(root, "pentest", [], fallback=None) == []
     # research 轨默认补 binary（2026-09-30 逆向项目口径）：无专家且 fallback 空时
     # 按轨默认补全（前端 research→rev-generic 逆向工作台）；显式 fallback 仍直通
-    assert caps_effective(root, "research", None, fallback=None) == ["binary"]
-    assert caps_effective(root, "research", [], fallback=[]) == ["binary"]
-    assert caps_effective(root, "research", None, fallback=["crypto"]) == ["crypto"]
+    assert directions_effective(root, "research", None, fallback=None) == ["binary"]
+    assert directions_effective(root, "research", [], fallback=[]) == ["binary"]
+    assert directions_effective(root, "research", None, fallback=["crypto"]) == ["crypto"]
     # 非 research 轨无默认（pentest 存量直通语义不变）
-    assert caps_effective(root, "ctf", None, fallback=None) == []
-    # 全量专家 → capabilities/ 目录全集
-    assert caps_effective(root, "pentest", ["_generalist"]) == ["crypto", "web"]
-    # 绑定并集：专家技能（capability 类）所属包推导
-    assert caps_effective(root, "pentest", ["recon", "crypto-auditor"]) == ["crypto", "web"]
-    assert caps_effective(root, "pentest", ["crypto-auditor"]) == ["crypto"]
+    assert directions_effective(root, "ctf", None, fallback=None) == []
+    # 全量专家（knowledge=null）→ 全部 kb 方向目录（packs/kb/<方向>）
+    assert directions_effective(root, "pentest", ["_generalist"]) == ["crypto", "web"]
+    # 绑定并集：专家 knowledge 白名单并集
+    assert directions_effective(root, "pentest", ["recon", "crypto-auditor"]) == ["crypto", "web"]
+    assert directions_effective(root, "pentest", ["crypto-auditor"]) == ["crypto"]
     # 全部绑定专家缺文件 → 空面（绝不静默回退 fallback 扩权，doctor 兜底体检）
-    assert caps_effective(root, "pentest", ["ghost"], fallback=["web"]) == []
-
-
-def test_all_capability_packs_lists_capability_dirs(tmp_path):
-    root = _build_packs(tmp_path / "packs")
-    assert all_capability_packs(root) == ["web"]
+    assert directions_effective(root, "pentest", ["ghost"], fallback=["web"]) == []
 
 
 def test_allowed_roles_bound_list_wins_over_pool(tmp_path):
@@ -282,13 +248,13 @@ def test_allowed_roles_bound_list_wins_over_pool(tmp_path):
 def test_load_track_profiles_and_single(tmp_path):
     from core.skills.profiles import load_profile, load_track_profiles, profile_snapshot
     root = _build_packs(tmp_path / "packs")
-    _write(root / "tracks/ctf/profiles/full-squad.yaml", (
+    _write(root / "kb/ctf/profiles/full-squad.yaml", (
         "name: 全栈解题队\n"
         "experts: [recon, ctf-only]\n"
         "board_view: findings\n"
         "artifacts: [writeup]\n"
     ))
-    _write(root / "tracks/pentest/profiles/recon-first.yaml", "name: 侦察先行\n")
+    _write(root / "kb/pentest/profiles/recon-first.yaml", "name: 侦察先行\n")
     profs = load_track_profiles(root, "ctf")
     assert [p["id"] for p in profs] == ["full-squad"]
     assert profs[0]["experts"] == ["recon", "ctf-only"] and profs[0]["board_view"] == "findings"
@@ -304,11 +270,11 @@ def test_load_track_profiles_and_single(tmp_path):
 def test_doctor_profile_checks(tmp_path):
     """场景档体检：组队引用不存在/轨外 → error；board_view 值域外 → warning。"""
     root = _build_packs(tmp_path / "packs")
-    _write(root / "tracks/ctf/profiles/good.yaml",
+    _write(root / "kb/ctf/profiles/good.yaml",
            "name: 好\nexperts: [ctf-only]\nboard_view: assets\n")
-    _write(root / "tracks/ctf/profiles/bad-ref.yaml",
+    _write(root / "kb/ctf/profiles/bad-ref.yaml",
            "name: 坏引用\nexperts: [recon]\n")  # recon tracks=[pentest,redteam] 不服务 ctf
-    _write(root / "tracks/ctf/profiles/bad-view.yaml",
+    _write(root / "kb/ctf/profiles/bad-view.yaml",
            "name: 坏视图\nboard_view: kanban\n")
     rep = diagnose(root)
     assert "profile-expert-missing" in {i.code for i in rep.issues}

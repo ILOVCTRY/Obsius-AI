@@ -8,7 +8,7 @@
 
 ## 项目定位
 
-AI 驱动的全能安全平台：能力包 × 场景轨正交架构覆盖 CTF 解题 / 渗透测试 SRC / 红队行动 / 逆向 Pwn / IoT 工控车联网研究 / 恶意样本分析；同一套方法论跨场景复用。核心差异点=原生 Windows 优先，按能力自动降级 Docker/WSL2。
+AI 驱动的全能安全平台：场景轨 × 知识方向架构（2026-10-13 能力包退役，技能扁平化）覆盖 CTF 解题 / 渗透测试 SRC / 红队行动 / 逆向 Pwn / IoT 工控车联网研究 / 恶意样本分析；同一套方法论跨场景复用。核心差异点=原生 Windows 优先，按能力自动降级 Docker/WSL2。
 
 ## 总体架构
 
@@ -401,9 +401,11 @@ command / command.result 事件时序协议（BackendError 时悬空运行中=�
 
 # 六、技能与知识体系（core/skills + packs/）
 
-## 能力包×场景轨正交
+## 场景轨 × 知识方向（2026-10-13 能力包退役）
 
-能力包（web/binary/crypto/forensics/misc/cloud）=方法论技能（怎么干）；场景轨（ctf/pentest/redteam/research，单选）=规则+任务类型（什么语境）；平台/格式/漏洞类只走 frontmatter 标签不建包。LEGACY_TRACK_MAP 读取层兼容旧轨名。**kb 知识库全局单根 `packs/kb/`（M0，2026-09-21 定稿并实施，源自 expert-pool 方案）**：一级=能力域，原 `capabilities/<cap>/kb/` 原样搬迁（不翻译不就地改）；kb 源按启用域合成恒递归（`load_kb_sources`，kb_sources.json 登记退役），kb_open module 用全局形态 `<域>/<快照>/<路径>`，上游 LICENSE 收编 `kb/licenses/`。**能力包隐退为知识组织单位（M2，2026-09-21）**：项目不再显式多选包，改为绑定专家（project.json `experts` 字段，无绑定=存量直通 meta.capabilities 零翻译）；运行时知识可见范围由 `caps_effective(packs_root, track, experts, fallback)` 推导——绑定专家技能并集（经轨变体）∪ 轨技能中 capability 类技能的所属包集合，任一全量专家（skills=null）=capabilities/ 全集，绑定专家 yaml 全缺=空面宁严勿松；推导只发生在 API meta 响应层与 AgentSession 构造层，盘上原始绑定不动（Project.capabilities 恒返回盘上值；2026-09-24 起项目 meta 响应另出 `capabilities_bound`=盘上原始绑定，供设置页跟随项目缺省——effective 在全量专家项目=全包，取首项会错落到 binary）。**M3 起创建页 caps 多选 UI 退役**（前端仅剩存量项目只读展示与门控兜底，RECOMMENDED_CAPS 保留此用途）。
+**能力包（web/binary/crypto/forensics/misc/cloud）已退役**——不再是项目绑定维度，降级为 kb **知识方向**（资料组织单位）。唯一内容根 `packs/kb/`：`skills/<name>/`（技能**扁平**、cc 风格自包含，registry 只扫这里；无包/轨归属）、`<track>/`（场景轨 ctf/pentest/redteam/research：track.yaml / task_types.yaml / profiles/ / phases/ / dimensions.yaml）、`<方向>/`（web/binary/… 资料树，不进 registry）、`安全红线/`（`轨红线/<track>.md` 全量注入 + `平台规则/<tag>.md`〔owners〕+ `评级与价值口径/<tag>.md`〔F11 判级〕**后两者渗透独有** + `templates/`）。平台/格式/漏洞类只走 frontmatter 标签不建包。LEGACY_DOMAIN_MAP/LEGACY_TRACK_MAP 读取层兼容旧轨/旧域。kb 源按方向合成恒递归（`load_kb_sources`），kb_open module 用全局形态 `<方向>/<快照>/<路径>`。
+
+**项目绑定** = 场景轨 track（单选）× 专家组队 experts（多选可空）。kb 可见方向由 **`directions_effective(packs_root, track, experts, fallback)`**（原 caps_effective）推导——有绑定→专家 yaml **`knowledge` 白名单**并集（任一专家 knowledge=null → 全部方向 `list_directions`）；无绑定→fallback（meta.capabilities，存量直通零翻译）；fallback 空→轨默认（`TRACK_DEFAULT_CAPS`：research→binary）。专家 yaml **`skills` 白名单为硬选**——会话可见/可路由技能=绑定专家并集（`expert_skills`，null/空=不限定=全量）。推导只发生在 API meta 响应层（`directions` + `directions_bound`=盘上原始绑定）与 AgentSession 构造层，盘上原始绑定不动（`Project.capabilities` 恒返回盘上值）。前端创建页无 caps 选择器（能力包退役）。
 
 ## 四层知识体系
 
@@ -423,22 +425,22 @@ SKILL.md 薄路由入口 → kb/route.json 任务导航表（**M0 留域内** `p
 
 ## 角色与规则链
 
-角色（M2 起实现为专家，见下节）字段全是软边界（skills/task_types 为 null=不过滤），缺专家静默回退 _generalist，expert_exists 防拼错放行；规则链 redlines（硬红线）/ owners（授权边界，按资产 owner tag）/ rating（判级口径）/ role-rules（按专家 id 匹配）分层注入，resolve_rule_profiles 纯显式解析（2026-10-01 去三态：勾哪个生效哪个，未配=不注入）。
+角色（M2 起实现为专家，见下节）字段全是软边界（skills/task_types/knowledge 为 null=不过滤），缺专家静默回退 _generalist，expert_exists 防拼错放行；规则链 轨红线（硬红线，全轨恒注入）/ 平台规则（授权边界，按资产 owner tag，**渗透独有**）/ 评级与价值口径（判级口径，**渗透独有**）分层注入，resolve_rule_profiles 纯显式解析（2026-10-01 去三态：勾哪个生效哪个，未配=不注入）。**role-rules/ 通道随能力包退役删除（2026-10-13）**。
 
 ## 项目规则四段一体（rules-four-section M1，2026-09-23 定稿并实施）
 
-**目标形态三级模型**（轨默认 redlines → 模板库 → 项目实例，与 judgments 三级优先同构）：规则从散文转「frontmatter 结构化 + md 正文」（D1），owner 标签变模板选择器（D2），判据并入四段（范围/规则/评级/判据，D3）。**M1 已实施部分**：`core/skills/rules.py` 增 `parse_rule_doc`（frontmatter PyYAML + 正文分离，缺失/坏 yaml 容错回空 meta——散文永远可注入，结构化是增量红利）+ `validate_rule_meta`（schema fail-fast 对齐 registry 惯例：`trigger`〔=文件 stem，owner 标签命中即选〕/`scope.in·out`/`forbidden`/`uncollectable`/`noise_caps`〔键=task_type、值 ∈ {passive,low,medium,high}=噪声**上限**档〕/`rating_ref`〔self=正文含判级条款〕）+ `load_rule_templates`（`tracks/<轨>/rules/templates/*.md` → [{name, meta, body}]，读取侧降级容错）。doctor 增两体检：rule-template-invalid（error，schema 不过）/ rule-template-no-trigger（warning，M2 选择器按 trigger 命中，缺了等于死件）。pilot 模板 `tracks/pentest/rules/templates/osrc.md`（owners/osrc.md + rating/osrc.md 四段一体合并，scope.in=15 域名通配、forbidden §10 硬禁、uncollectable §6 白话清单、noise_caps 不臆造留空、rating_ref: self）；F11 残留 owners/edu-rating.md（与 rating 版正文逐字重复）入 `rules/.history/trash/` 回收站。**打磨定稿七项**（模板选择器多标签宁严勿松消解：forbidden/uncollectable 并集、noise_caps 取最严档、scope 交集/并集；用户模板 `config/rule_templates/*.md`；实例存 `workspaces/<pid>/project-rules.md` 独立文件整体压过模板；机器消费 M3 顺序=编排器 forbidden 收窄先行；role-rules 通道保留零迁移〔四轨均无存量〕；注入三级合成序与 legacy owners/rating 回退）见方案文档 §5——**M2（实例层+注入切换+前端规则一页）/M3（机器消费）待排期，现状注入面零改动**。
+**目标形态三级模型**（轨默认 redlines → 模板库 → 项目实例，与 judgments 三级优先同构）：规则从散文转「frontmatter 结构化 + md 正文」（D1），owner 标签变模板选择器（D2），判据并入四段（范围/规则/评级/判据，D3）。**M1 已实施部分**：`core/skills/rules.py` 增 `parse_rule_doc`（frontmatter PyYAML + 正文分离，缺失/坏 yaml 容错回空 meta——散文永远可注入，结构化是增量红利）+ `validate_rule_meta`（schema fail-fast 对齐 registry 惯例：`trigger`〔=文件 stem，owner 标签命中即选〕/`scope.in·out`/`forbidden`/`uncollectable`/`noise_caps`〔键=task_type、值 ∈ {passive,low,medium,high}=噪声**上限**档〕/`rating_ref`〔self=正文含判级条款〕）+ `load_rule_templates`（`packs/kb/安全红线/templates/*.md` → [{name, meta, body}]，读取侧降级容错；2026-10-13 前为 `tracks/<轨>/rules/templates/`）。doctor 增两体检：rule-template-invalid（error，schema 不过）/ rule-template-no-trigger（warning，M2 选择器按 trigger 命中，缺了等于死件）。pilot 模板 `tracks/pentest/rules/templates/osrc.md`（owners/osrc.md + rating/osrc.md 四段一体合并，scope.in=15 域名通配、forbidden §10 硬禁、uncollectable §6 白话清单、noise_caps 不臆造留空、rating_ref: self）；F11 残留 owners/edu-rating.md（与 rating 版正文逐字重复）入 `rules/.history/trash/` 回收站。**打磨定稿七项**（模板选择器多标签宁严勿松消解：forbidden/uncollectable 并集、noise_caps 取最严档、scope 交集/并集；用户模板 `config/rule_templates/*.md`；实例存 `workspaces/<pid>/project-rules.md` 独立文件整体压过模板；机器消费 M3 顺序=编排器 forbidden 收窄先行；role-rules 通道保留零迁移〔四轨均无存量〕；注入三级合成序与 legacy owners/rating 回退）见方案文档 §5——**M2（实例层+注入切换+前端规则一页）/M3（机器消费）待排期，现状注入面零改动**。
 
 ## 专家池与项目绑定（M1-M4）
 
 **专家池 `packs/experts/<id>.yaml`（M1，2026-09-21 定稿并实施，源自 expert-pool 方案）**：17 个扁平单文件（23 角色按方案 §4.3 映射合并——4 对 pentest/redteam 镜像合并走轨变体、_generalist 四合一、ctf/recon 独立为 triage 专家；**2026-09-22 dsh-kb-sourcing 增补第 17 位 cloud-security 云安全专家**，tracks:[pentest]、skills:[cloud-entry]），字段与角色 yaml 全兼容，新增 tracks（可服务轨域，缺省=全轨）/protected（仅 _generalist）/variant_<track>_*（轨变体字段级覆写，零解析器改动）。`load_expert(root, name, track)` 加载时按当前轨应用前缀键覆写、产出与角色同形状 dict（下游 system 组装零改动），缺失回退 _generalist；`expert_exists`=池内存在且 track∈tracks（发布链路校验，判存在勿用 load_expert——静默回退会放行拼错 id）；`list_experts(track)` 轨过滤清单（组队 UI 数据源）。doctor 专家体检段：skills 归属存在（error）/已禁用（warning）/跨包重名归属不唯一（warning）、task_type 越各轨注册表并集（error）、tracks 与 variant_ 前缀轨名合法性（error）、expert-name-missing（warning）、缺 _generalist 兜底（error）、role-rules 悬空（warning，专家/角色双源核对）。
 
-**M2 项目绑定（2026-09-21 实施）**：运行时唯一角色源=experts/，`packs/tracks/*/roles/`（23 yaml）退役删除（roles.py 模块保留供 `_parse_inline_value` 复用与历史脚本）。项目绑定专家：创建（`experts` 字段，池外/轨外 422 提示可用池）与换将（`PATCH /api/projects/{pid}/experts`，空清单剥键恢复存量直通态；即时生效于下轮会话构造，黑板行无此列、单一真相源 project.json）。API meta 响应层装饰补 `experts` + 推导 `capabilities`（`_expert_meta_view`）；轨 roles 读端点数据源切 `list_experts`（PackRole 兼容形状），角色写端点退役返 410。发布/开窗 role 值域=**绑定专家清单优先**（`allowed_roles`，宁严勿松），未绑定=按轨全池；构造链把 caps_effective 推导面与 allowed_roles 贯穿 AgentSession→ToolDispatcher（认领即换装经 expert_exists 校验，绑窗角色失效回退 _generalist）。
+**M2 项目绑定（2026-09-21 实施）**：运行时唯一角色源=experts/，`packs/tracks/*/roles/`（23 yaml）退役删除（roles.py 模块保留供 `_parse_inline_value` 复用与历史脚本）。项目绑定专家：创建（`experts` 字段，池外/轨外 422 提示可用池）与换将（`PATCH /api/projects/{pid}/experts`，空清单剥键恢复存量直通态；即时生效于下轮会话构造，黑板行无此列、单一真相源 project.json）。API meta 响应层装饰补 `experts` + 推导 `directions`（`_expert_meta_view`，2026-10-13 前为 `capabilities`/caps_effective）；轨 roles 读端点数据源切 `list_experts`（PackRole 兼容形状），角色写端点退役返 410。发布/开窗 role 值域=**绑定专家清单优先**（`allowed_roles`，宁严勿松），未绑定=按轨全池；构造链把 `directions_effective` 推导面与 allowed_roles 贯穿 AgentSession→ToolDispatcher（认领即换装经 expert_exists 校验，绑窗角色失效回退 _generalist）。
 
 **M3 专家 CRUD 与组队 UI（2026-09-21 实施）**：`/api/experts` 五端点（GET 全池 / GET 单个 / POST / PUT / DELETE）——**全字段提交式覆写**（表单即最终态，None/空=不落键，skills 缺键=全量专家语义）；写前置校验 doctor 同口径前移（id 强制 ASCII slug `[a-z0-9][a-z0-9-]{0,47}`、tracks 合法轨、skills 注册表存在、task_types 越各轨注册表并集、variants 轨名+字段名 `[a-z_]+`、max_steps 正整数，非法 422）；重名 409、protected 拒删 409、缺失 404；写三件套（pack_write_lock 临界区 + _pack_history_backup + _trash_move）。variants 在 UI 只读展示，yaml 里以 `variant_<轨>_<字段>` 平铺键人工维护。前端（§12）：创建页 **caps 多选退役→专家多选**（按轨过滤分组「通用/轨专属」、搜索、persona 一行预览、默认预选 _generalist；空选=按轨全池直通）、场景档 chips 预填、知识继承折叠区；列表/顶栏徽章 bindingBadge 改「轨 · 专家×N」；直播间编排器态 👥组队弹层（轨过滤多选，保存回执带推导能力包只读徽章）；设置页「角色」tab 换「专家」ExpertsPane（全池管理 + HistoryButton）。
 
 **M4 场景档 / 知识继承 / 看板默认视图（2026-09-21 实施定稿）**：
-- **M4a 场景档 `packs/tracks/<track>/profiles/<id>.yaml`**：平铺五件套 experts（组队预设）/rule_profiles_owners+rule_profiles_rating（F11 两键）/playbook/artifacts/knowledge（后三者为 D6 预留字段）+ board_view（M4c）。**D6 物化即弃**——建项选中档即一次性物化：experts→meta.experts、rule_profiles/board_view→config 立即生效、playbook/artifacts/knowledge 随 `config.profile` 快照留档（{id,name,playbook,artifacts,knowledge,materialized_at}），此后档文件只作建项预设、不随项目联动（改档不改存量项目）。档提供缺省、请求体显式值优先（experts/config 显式给出时不兜底）。每轨内置 0~3 档（当前 8 个：ctf full-squad/solo-generalist、pentest standard-engagement/recon-first、redteam full-chain/initial-access、research rev-workbench/code-audit）；`GET /api/tracks/{track}/profiles` 只读清单；doctor 增 profile-expert-missing（组队引用不存在或轨外，error）/ profile-board-view-unknown（warning）。
+- **M4a 场景档 `packs/kb/<track>/profiles/<id>.yaml`**（2026-10-13 轨并入 kb）：平铺五件套 experts（组队预设）/rule_profiles_owners+rule_profiles_rating（F11 两键）/playbook/artifacts/knowledge（后三者为 D6 预留字段）+ board_view（M4c）。**D6 物化即弃**——建项选中档即一次性物化：experts→meta.experts、rule_profiles/board_view→config 立即生效、playbook/artifacts/knowledge 随 `config.profile` 快照留档（{id,name,playbook,artifacts,knowledge,materialized_at}），此后档文件只作建项预设、不随项目联动（改档不改存量项目）。档提供缺省、请求体显式值优先（experts/config 显式给出时不兜底）。每轨内置 0~3 档（当前 8 个：ctf full-squad/solo-generalist、pentest standard-engagement/recon-first、redteam full-chain/initial-access、research rev-workbench/code-audit）；`GET /api/tracks/{track}/profiles` 只读清单；doctor 增 profile-expert-missing（组队引用不存在或轨外，error）/ profile-board-view-unknown（warning）。
 - **M4b 知识继承**：POST /projects body `inherit_from=<源项目 id>`，源预检 404 先于建项；`ProjectStore.inherit_knowledge` 三段复制**只增不覆盖**——binary 资产（find_asset 同 sha 判重，样本文件 copy2 到目标 samples/、meta.path 更新+`inherited_from` 标记、author 沿源）、func_kb（(project,sha,address) 判重）、蓝图（(project,sha,name) 判重，非 draft 状态尽力保留）；源项目只读不动；继承失败不阻建项（log.warning + 响应 `inherit_error`），成功响应带 `inherited={binaries,func_kb,blueprints,skipped}`。UI=创建页折叠区（源项目下拉）。
 - **M4c 看板默认视图**：`config.board_view={"default": "findings|assets|funcs|board"}`（值域 BOARD_VIEWS）；档物化或 PATCH config 透传；前端 Blackboard 受控 tabs，defaultView 不在可用集合（compact 无 board、无 binary 无 funcs）时回退 findings。
 
@@ -494,7 +496,7 @@ registry 校验 fail-fast（kind 白名单/数组字段/平台键 bin，坏条�
 
 ## 反编译双通道
 
-统一抽象 core/tools/decompiler.py：IDA headless 优先 → Ghidra analyzeHeadless 兜底（按 sha256 缓存全量导出，export_version=3 契约）+ IDA GUI MCP 实时桥（只连 loopback，13337 人手实例）+ 按需拉起 IdaMcpManager（无窗口 idat、13338+ 空闲端口、锁检测不抢 GUI 库、LRU 回收）；全不可用退纯静态并出 DECOMPILE_GUIDANCE 安装引导。两腿路径解析（2026-09-23 toolchain-registry M1 起）：registry 四来源优先 → 原生兜底（IDA：PATH→`_IDA_INSTALL_GLOBS`；Ghidra：PATH），registry 命中与原生兜底同源并存，双通道冗余无害。
+统一抽象 core/tools/decompiler.py：IDA headless 优先 → Ghidra analyzeHeadless 兜底（按 sha256 缓存全量导出，export_version=3 契约）+ IDA GUI MCP 实时桥（只连 loopback，13337 人手实例）+ 按需拉起 IdaMcpManager（无窗口 idat、13338+ 空闲端口、锁检测不抢 GUI 库、LRU 回收；**2026-10-13 起：现成 `.i64/.idb` 直读复用不重建、无库且 ≥10MB 拒拉起**——见下 P3「自动分析体积上限」）；全不可用退纯静态并出 DECOMPILE_GUIDANCE 安装引导。两腿路径解析（2026-09-23 toolchain-registry M1 起）：registry 四来源优先 → 原生兜底（IDA：PATH→`_IDA_INSTALL_GLOBS`；Ghidra：PATH），registry 命中与原生兜底同源并存，双通道冗余无害。
 
 大样本加速 P1（2026-09-30，复用存量 + 缓存 + 可配超时）：
 - **可配超时**：headless 默认 3h（`HEADLESS_TIMEOUT = 3*3600`，原 900s 对大样本不够），可经 gitignore 覆盖层 `config/decompiler.json` 的 `headless_timeout`（秒）覆盖，`resolve_headless_timeout()` 每次取用（缺省/非法/≤0 回退默认），仿 config/mcp.json 模式。
@@ -512,6 +514,8 @@ registry 校验 fail-fast（kind 白名单/数组字段/平台键 bin，坏条�
 - **协作式停止（保留部分）**：`export(stop_event=…)` 置位 → 监视线程写停止文件 → 脚本在**函数边界**检查并停下（不杀进程），仍写出「已完成函数」的 v3 缓存（函数名/地址全量，伪码只到停点），`meta.partial/stopped` 标记。partial 缓存**只展示不发布全局**、且**不被 `export_to_cache` 复用**（重新「开始分析」即补全）。端点 `POST /binaries/{sha}/triage/cancel`（`app.state.export_cancel[sha]` Event；无在跑幂等）。
 - **分片重试**：脚本内单函数反编译失败重试一次（瞬时解编译器故障自愈），仍失败留 `calls=[]` 无伪码，不拖垮整次导出。
 - 前端：样本条「开始分析」旁进度环 + 「停止」按钮（`api.cancelTriage`），停止后 hint 提示部分结果已保留。
+- **自动分析体积上限（2026-10-13）**：`SAMPLE_AUTO_MAX_BYTES=10MB`（**单一真相源 core/tools/decompiler.py**，后端按真实文件大小判定）——① `POST /binaries/{sha}/triage`（「开始分析」唯一触发口）对 ≥10MB 样本返回 422，前端按钮同步禁用/拦截；② **Agent 点查**（decompile/xrefs 缓存缺席 → `mcp_provider` → `IdaMcpManager.ensure`）**无库且 ≥10MB 时拒绝拉起**（返 None → `NOT_ANALYZED` 引导先「开始分析」），杜绝 Agent 无意识触发大样本全量分析。大样本改走「从 IDA 拉取函数」（IDA 内 Ctrl-Alt-M）。20MB 的 `SAMPLE_LARGE_BYTES` 仅余 Ghidra 大样本选路口径（见 P2）。
+- **Agent 只能消费已分析结果 + IDA 库复用（2026-10-13，同一命题）**：① **直读复用**——`IdaMcpManager._launch` 现成 `.i64/.idb` 直读打开（`idat -A -S<bootstrap> <db>`，**不带 `-o`**），绝不从样本重建（重建会覆盖人类 GUI 改名/注释）；库查找**两处**：平台 `db_dir/<sha>.i64|.idb` + 样本旁 IDA 默认名（`<input>.i64`，人直接在 IDA 打开保存的产物）；② **不抢锁**——GUI 正开该库（`.id0/.id1/.id2/.nam/.til` 在）绝不拉起；③ **GUI 重活工具闸**——`survey_binary` 这类全量工具经 `core/chat/mcp_bridge.py` 按当前库源程序大小拦截（`HEAVY_MCP_TOOLS`，默认 30MB；阈值与引擎分析的 10MB **有意不同**——前者是对已开库的重活遍历、后者是新分析），**fail-closed**（`server_health.input_path` 取不到大小即拒）；重活工具调用超时放宽到 **180s**（`HEAVY_CALL_TIMEOUT`，默认 60s 对全量工具不够会先超时报「server 离线或协议错误」）；前端工具行运行中显示「已运行 Ns」（逐秒刷新）。实测（2026-10-13）：`idat -A -S<bootstrap> <db.i64>` 直读可行（169MB 库加载 ~58s）。
 
 ## 双向写回
 
@@ -611,14 +615,16 @@ x64dbg 下断 / Cheat Engine Lua 纯前端模板（零插件不触网），日�
 分析包代表一个应用、游戏或解包环境，分析目标代表包内可分析文件。第一阶段已落地：
 
 - `core/sample_packages.py` 负责单文件、目录文件、ZIP/7z/TAR 的安全导入；拒绝路径穿越、符号链接和特殊条目，并限制单文件、总展开大小、文件数和目录深度。
-- 展开目录生成规范化 manifest hash；相同目录内容复用全局内容树，项目只保存包版本元数据；原始上传物按 SHA256 保留。重复导入记录保存在该包的 `imports.jsonl`。
+- 展开目录生成规范化 manifest hash；相同目录内容复用**项目内内容树**（`<project>/trees/<manifest_sha256>/`），项目保存包版本元数据；原始上传物按 SHA256 保留于 `<project>/raw/`。上传物一律落项目工作区内，不再写全局 `data/sample-store/`。重复导入记录保存在该包的 `imports.jsonl`。
 - 自动识别 PE/ELF/Mach-O/DEX/APK/AAB、游戏资源、压缩包和文本候选；同包 PE/ELF/Mach-O 通过导入名建立基础依赖边。候选目标选择与旧 `binary` 资产分开，后续接入静态分析器。
 - `ANALYZER_REGISTRY` 将目标格式映射到可扩展插件 ID；`GET/POST .../targets/{target_id}` 提供目标详情和异步静态分析。PE/ELF/Mach-O 复用现有 IDA/Ghidra headless 导出；APK/AAB 导入时保留包级摘要，展开后对 Manifest、DEX 做只读解析，`lib/<abi>/*.so` 进入 ELF 分析；不安装、不启动 Android 应用。
 - API：`/api/projects/{pid}/sample-packages` 支持单文件/压缩包和重复 `files` 目录导入；`.../uploads` 提供分片续传；`.../targets` 保存目标选择和分析报告。旧 `/samples` 与 `/binaries/{sha}` 保持兼容。
+- **登记为资产（不复制文件，2026-10-12）**：包内 PE/ELF/Mach-O 目标不再在「样本分析」页分析，改 `POST .../targets/{target_id}/register` **登记为 binary 黑板资产**——资产 `meta` 记包坐标（`package_id/version_id/target_id`）+ **包内相对路径**（`path`），**不复制文件**；文件经包坐标 `resolve_target` 还原为**项目内容树**绝对路径（`<project>/trees/`，同项目内跨包复用、不可变），逆向工作台据此分析（引擎选择在 `SampleBar`）。APK/AAB/DEX/文本仍走 `.../analyze`。
+- **AI 可读分析包**：样本资产行 `meta.package_id` 指向来源包；AI 用 `bb_query what=package` 取包内 `entries`/`dependencies`/`tree_ref`（项目内容树绝对路径），再用 `read_file <tree_ref>/<path>` 读同包文件（解「分析 exe 时其依赖的同包 DLL 找不到」）。项目内容树受删除护栏保护——删资产/删分析包都不删内容树文件。
 
 ## 蓝图数据底座
 
-blueprints 表（schema v17）与 store CRUD/事件已落；逆向开发管线（blueprint-driven reconstruction）为已立项方向，实施后回写。
+blueprints 表（schema v17）与 store CRUD/事件已落；**消费面接线（R4 管线 M1，2026-10-13）已落地**——chat 主控/子专家 system 注入蓝图段（`_blueprint_context`）、会话窗 `_mat_blueprint` 按 `binary_sha256` 命中优先注入（此前 AI 侧完全读不到 blueprints 表）。**产出闭环（M2，2026-10-13）已落地**——「蓝图」页签加「生成蓝图」/「按模块深析」按钮：建 chat 线程（主控 chat-orchestrator）+ 下发阶段 objective + `goto-agents` 跳工作台并选中该线程；`blueprint-rebuild` 技能改写为 chat 主+子口径（主控 `call_expert` 扇出、`module:<名>` 锚点纪律）。**重建执行（M3，2026-10-13）已落地**——蓝图 status=`building` 时「蓝图」页签露「派发重建」按钮，下发阶段四/五 objective：每模块一子专家落码到 `<proj>/artifacts/rebuild/<模块名>/` → 依 func_kb 伪码写自测脚本 → `run_cmd(threat_class=untrusted, runtime=docker/sandbox)` 对拍 → 全过 `bb_blueprint_update(module_status="tested")` → 阶段五拼装 + 「蓝图 vs 实现」差异表经 `bb_add_artifact(kind="project")` 落文本（**产物本体留 artifacts/，该工具只存文本不上传文件**）→ 人类终验 `built`。载体定案：**core/chat 工作台主+子**（非 Team）；人类确认闸 = 蓝图 status（`ready` 放行 / `building` 开工 / `built` 终验）。
 
 # 十二、工程化与运维
 

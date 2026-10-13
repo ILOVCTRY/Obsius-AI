@@ -8,7 +8,7 @@ import type {
   LogicBlock, LogicBlockSummary,
   DecideApprovalResult, DoctorReport, DiscoveredModel, Finding, FindingPatchBody, FuncCreateBody, FuncEntry,
   FuncPatchBody, HistoryList, InboxMessage, Job, KbRead, KbRefHit, KbRenameResult,
-  KbSearchHit, KbSourceTree, KbEvolutionDraft, KbEvolutionSource,
+  KbSearchHit, KbSourceTree,
   KbWriteResult, LlmProvider, McpServer, ModelInfo, ExecutorLlmView,
   IntelArticle, IntelBrief, IntelBriefMeta,
   IntelFeed, IntelOverview, IntelProfile, IntelVaultConfig, IntelVaultInfo, VaultNode,
@@ -16,7 +16,7 @@ import type {
   Expert, ExpertBody, GatewayConfig, CapabilityInventory, OrchPersona, OwnerRule, PackRole, PhaseGoal, PhaseInfo, ProjectDetail, ProjectMeta, RatingRule,
   AgentToolsResponse,
   Proposal, ProposalOrigin, RoleInfo, RouteHit,
-  RoutePreviewBody, SampleUploadResponse, Session, SkillCreateBody, SkillDef, TrackProfile,
+  RoutePreviewBody, Session, SkillCreateBody, SkillDef, TrackProfile,
   SkillDetail, SkillVocab, SkillCatalog, SkillFileEntry, SessionGraph, AttackPath, IntentInfo,
   WritebackItem, XrefData,
   TraceEffect,
@@ -24,7 +24,7 @@ import type {
   ChatAgent, ChatThread, ChatThreadDetail, ChatMcpServer, ContextUsage,
   Team, TeamMemberInput, TeamPreflight, TeamRun,
   SkillResource,
-  SamplePackage, SampleTargetAnalysis, SampleTargetAnalyzeResponse, SamplePackageUploadSession, SamplePackagePreview,
+  SamplePackage, SampleTargetAnalysis, SampleTargetAnalyzeResponse, SampleTargetRegisterResponse, SamplePackageUploadSession, SamplePackagePreview,
 } from "./types"
 import type { Taxonomy } from "./taxonomy"
 
@@ -187,11 +187,9 @@ export const api = {
     }),
 
   // ---------- 逆向工作台（样本 / headless 缓存 / 人机共写） ----------
-  uploadSample: (pid: string, file: File) => {
-    const form = new FormData()
-    form.append("file", file)
-    return httpUpload<SampleUploadResponse>(`/api/projects/${pid}/samples`, form)
-  },
+  // 注：单样本上传入口已下线（2026-10-13）——样本统一走「样本分析」页
+  // （分析包文件树 → 对 PE/ELF/Mach-O 目标「登记为资产」）。后端 /samples 端点保留
+  // 作兼容/测试用，前端不再调用。
   // 分析包：单文件、压缩包或浏览器目录上传；目录路径通过 relative_paths 保留
   samplePackages: (pid: string) =>
     http<SamplePackage[]>(`/api/projects/${pid}/sample-packages`),
@@ -274,6 +272,13 @@ export const api = {
     http<SampleTargetAnalyzeResponse>(
       `/api/projects/${pid}/sample-packages/${packageId}/versions/${versionId}/targets/${targetId}/analyze`,
       { method: "POST", body: JSON.stringify({ engine }) }),
+  // 登记为资产（2026-10-12）：把包内 PE/ELF/Mach-O 目标登记为 binary 黑板资产，
+  // **不复制文件**——资产 meta 写包坐标（package_id/version_id/target_id/path），
+  // 后续到逆向工作台分析（sha=binary_sha256）。幂等（重复登记只更新 meta）。
+  registerSampleTargetAsset: (pid: string, packageId: string, versionId: string, targetId: string) =>
+    http<SampleTargetRegisterResponse>(
+      `/api/projects/${pid}/sample-packages/${packageId}/versions/${versionId}/targets/${targetId}/register`,
+      { method: "POST" }),
   retryTriage: (pid: string, sha: string) =>
     http<{ job_id: string; sha: string }>(`/api/projects/${pid}/binaries/${sha}/triage`, { method: "POST" }),
   // 停止进行中的 headless 全量导出（大样本 P3，协作式：当前函数反编译完停下并保留已导出部分）
@@ -675,96 +680,70 @@ export const api = {
   // 场景档（M4a：只读清单，建项页预填组队/看板视图）
   trackProfiles: (track: string) => http<TrackProfile[]>(`/api/tracks/${track}/profiles`),
   trackRoles: (track: string) => http<PackRole[]>(`/api/tracks/${track}/roles`),
-  trackSkills: (track: string) => http<SkillDef[]>(`/api/tracks/${track}/skills`),
-  createTrackSkill: (track: string, body: SkillCreateBody) =>
-    http<{ status: string; name: string; path: string }>(`/api/tracks/${track}/skills`, {
-      method: "POST", body: JSON.stringify(body),
-    }),
-  trackSkillDetail: (track: string, name: string) =>
-    http<SkillDetail>(`/api/tracks/${track}/skills/${name}`),
-  trackSkillResource: (track: string, name: string, resource: string) =>
-    http<SkillResource>(`/api/tracks/${track}/skills/${name}/resources/${resource.split("/").map(encodeURIComponent).join("/")}`),
-  updateTrackSkill: (track: string, name: string, content: string) =>
-    http<{ status: string }>(`/api/tracks/${track}/skills/${name}`, {
-      method: "PUT", body: JSON.stringify({ content }),
-    }),
-  deleteTrackSkill: (track: string, name: string) =>
-    http<{ status: string; name: string; trash: string }>(
-      `/api/tracks/${track}/skills/${name}`, { method: "DELETE" }),
-  setTrackSkillEnabled: (track: string, name: string, enabled: boolean) =>
-    http<{ status: string; enabled: boolean }>(
-      `/api/tracks/${track}/skills/${name}/enabled`, {
-        method: "PATCH", body: JSON.stringify({ enabled }),
-      }),
   trackRules: (track: string) => http<{ content: string; exists?: boolean }>(`/api/tracks/${track}/rules`),
   updateTrackRules: (track: string, content: string) =>
     http<{ status: string }>(`/api/tracks/${track}/rules`, {
       method: "PUT", body: JSON.stringify({ content }),
     }),
-  trackOwners: (track: string) => http<OwnerRule[]>(`/api/tracks/${track}/owners`),
-  updateTrackOwner: (track: string, tag: string, content: string) =>
-    http<{ status: string; tag: string }>(`/api/tracks/${track}/owners/${encodeURIComponent(tag)}`, {
+  // 平台规则（渗透独有，全局单份；文件即规则）
+  platformRules: () => http<OwnerRule[]>(`/api/platform-rules`),
+  updatePlatformRule: (tag: string, content: string) =>
+    http<{ status: string; tag: string }>(`/api/platform-rules/${encodeURIComponent(tag)}`, {
       method: "PUT", body: JSON.stringify({ content }),
     }),
-  deleteTrackOwner: (track: string, tag: string) =>
-    http<{ status: string; tag: string }>(`/api/tracks/${track}/owners/${encodeURIComponent(tag)}`, {
+  deletePlatformRule: (tag: string) =>
+    http<{ status: string; tag: string }>(`/api/platform-rules/${encodeURIComponent(tag)}`, {
       method: "DELETE",
     }),
-  // F11 评级与价值口径（rating/，注入带判级硬指令）
-  trackRatings: (track: string) => http<RatingRule[]>(`/api/tracks/${track}/ratings`),
-  updateTrackRating: (track: string, tag: string, content: string) =>
-    http<{ status: string; tag: string }>(`/api/tracks/${track}/ratings/${encodeURIComponent(tag)}`, {
+  // F11 评级与价值口径（渗透独有，全局单份；注入带判级硬指令）
+  ratings: () => http<RatingRule[]>(`/api/ratings`),
+  updateRating: (tag: string, content: string) =>
+    http<{ status: string; tag: string }>(`/api/ratings/${encodeURIComponent(tag)}`, {
       method: "PUT", body: JSON.stringify({ content }),
     }),
-  deleteTrackRating: (track: string, tag: string) =>
-    http<{ status: string; tag: string }>(`/api/tracks/${track}/ratings/${encodeURIComponent(tag)}`, {
+  deleteRating: (tag: string) =>
+    http<{ status: string; tag: string }>(`/api/ratings/${encodeURIComponent(tag)}`, {
       method: "DELETE",
     }),
-  // 能力包
-  capSkills: (cap: string) => http<SkillDef[]>(`/api/capabilities/${cap}/skills`),
-  createCapSkill: (cap: string, body: SkillCreateBody) =>
-    http<{ status: string; name: string; path: string }>(`/api/capabilities/${cap}/skills`, {
+  // 技能（扁平 packs/kb/skills/<name>）
+  skills: () => http<SkillDef[]>(`/api/skills`),
+  createSkill: (body: SkillCreateBody) =>
+    http<{ status: string; name: string; path: string }>(`/api/skills`, {
       method: "POST", body: JSON.stringify(body),
     }),
-  capSkillDetail: (cap: string, name: string) =>
-    http<SkillDetail>(`/api/capabilities/${cap}/skills/${name}`),
-  capSkillResource: (cap: string, name: string, resource: string) =>
-    http<SkillResource>(`/api/capabilities/${cap}/skills/${name}/resources/${resource.split("/").map(encodeURIComponent).join("/")}`),
-  updateCapSkill: (cap: string, name: string, content: string) =>
-    http<{ status: string }>(`/api/capabilities/${cap}/skills/${name}`, {
+  skillDetail: (name: string) => http<SkillDetail>(`/api/skills/${name}`),
+  skillResource: (name: string, resource: string) =>
+    http<SkillResource>(`/api/skills/${name}/resources/${resource.split("/").map(encodeURIComponent).join("/")}`),
+  updateSkill: (name: string, content: string) =>
+    http<{ status: string }>(`/api/skills/${name}`, {
       method: "PUT", body: JSON.stringify({ content }),
     }),
-  deleteCapSkill: (cap: string, name: string) =>
+  deleteSkill: (name: string) =>
     http<{ status: string; name: string; trash: string }>(
-      `/api/capabilities/${cap}/skills/${name}`, { method: "DELETE" }),
-  setCapSkillEnabled: (cap: string, name: string, enabled: boolean) =>
+      `/api/skills/${name}`, { method: "DELETE" }),
+  setSkillEnabled: (name: string, enabled: boolean) =>
     http<{ status: string; enabled: boolean }>(
-      `/api/capabilities/${cap}/skills/${name}/enabled`, {
+      `/api/skills/${name}/enabled`, {
         method: "PATCH", body: JSON.stringify({ enabled }),
       }),
-  capRules: (cap: string) => http<{ content: string; exists?: boolean }>(`/api/capabilities/${cap}/rules`),
-  updateCapRules: (cap: string, content: string) =>
-    http<{ status: string }>(`/api/capabilities/${cap}/rules`, {
-      method: "PUT", body: JSON.stringify({ content }),
-    }),
   routePreview: (body: RoutePreviewBody) =>
     http<RouteHit[]>("/api/skills/route-preview", {
       method: "POST", body: JSON.stringify(body),
     }),
   skillsVocab: () => http<SkillVocab>("/api/skills/vocab"),
   skillCatalog: (pid?: string | null) => http<SkillCatalog>(`/api/skills/catalog${pid ? `?pid=${encodeURIComponent(pid)}` : ""}`),
-  capSkillFiles: (cap: string, name: string) =>
-    http<{ root: string; files: SkillFileEntry[] }>(`/api/capabilities/${cap}/skills/${name}/files`),
-  capSkillFile: (cap: string, name: string, path: string) =>
-    http<SkillFileEntry>(`/api/capabilities/${cap}/skills/${name}/files/content?path=${encodeURIComponent(path)}`),
-  createCapSkillFile: (cap: string, name: string, body: { path: string; content?: string; is_dir?: boolean }) =>
-    http<{ status: string; path: string }>(`/api/capabilities/${cap}/skills/${name}/files`, { method: "POST", body: JSON.stringify(body) }),
-  updateCapSkillFile: (cap: string, name: string, body: { path: string; content: string }) =>
-    http<{ status: string; path: string }>(`/api/capabilities/${cap}/skills/${name}/files`, { method: "PUT", body: JSON.stringify(body) }),
-  renameCapSkillFile: (cap: string, name: string, path: string, newPath: string) =>
-    http<{ status: string; path: string }>(`/api/capabilities/${cap}/skills/${name}/files/rename`, { method: "POST", body: JSON.stringify({ path, new_path: newPath }) }),
-  deleteCapSkillFile: (cap: string, name: string, path: string) =>
-    http<{ status: string; path: string }>(`/api/capabilities/${cap}/skills/${name}/files?path=${encodeURIComponent(path)}`, { method: "DELETE" }),
+  skillFiles: (name: string) =>
+    http<{ root: string; files: SkillFileEntry[] }>(`/api/skills/${name}/files`),
+  skillFile: (name: string, path: string) =>
+    http<SkillFileEntry>(`/api/skills/${name}/files/content?path=${encodeURIComponent(path)}`),
+  createSkillFile: (name: string, body: { path: string; content?: string; is_dir?: boolean }) =>
+    http<{ status: string; path: string }>(`/api/skills/${name}/files`, { method: "POST", body: JSON.stringify(body) }),
+  updateSkillFile: (name: string, body: { path: string; content: string }) =>
+    http<{ status: string; path: string }>(`/api/skills/${name}/files`, { method: "PUT", body: JSON.stringify(body) }),
+  renameSkillFile: (name: string, path: string, newPath: string) =>
+    http<{ status: string; path: string }>(`/api/skills/${name}/files/rename`, { method: "POST", body: JSON.stringify({ path, new_path: newPath }) }),
+  deleteSkillFile: (name: string, path: string) =>
+    http<{ status: string; path: string }>(`/api/skills/${name}/files?path=${encodeURIComponent(path)}`, { method: "DELETE" }),
 
   // kb 本地基线（C2/C3：源树/读写/改名联动/版本/引用）
   kbList: (cap: string) =>
@@ -808,13 +787,6 @@ export const api = {
   kbRefs: (cap: string, path: string) =>
     http<{ path: string; count: number; refs: KbRefHit[] }>(
       `/api/capabilities/${cap}/kb/refs?path=${encodeURIComponent(path)}`),
-  kbEvolutionRecommend: (cap: string, path: string, limit = 5) =>
-    http<{ cap: string; current: KbEvolutionSource | null; results: KbEvolutionSource[] }>(
-      `/api/capabilities/${cap}/kb/evolution/recommend?path=${encodeURIComponent(path)}&limit=${limit}`),
-  kbEvolution: (cap: string, sources: string[], targetKind?: KbEvolutionDraft["kind"] | null) =>
-    http<{ job_id: string }>(`/api/capabilities/${cap}/kb/evolution`, {
-      method: "POST", body: JSON.stringify({ sources, target_kind: targetKind ?? null, language: "zh" }),
-    }),
 
   // 统一变更提案（C4）
   createProposal: (body: {

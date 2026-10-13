@@ -3,14 +3,13 @@ import { api } from "@/lib/api"
 import type { KbRenameResult } from "@/lib/types"
 import { Textarea } from "@/components/ui/textarea"
 
-/** 技能归属来源：能力包 / 场景轨 */
-export type SkillSource = "cap" | "track"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 
 // 新建专家（expert-pool M3）与新建自包含技能对话框。专家 slug 只允许小写
 // 字母数字与 -（ASCII 文件名/命令引用面），服务端同口径 422 + 重名 409，错误直接展示 detail。
+// 2026-10-13 能力包退役：技能扁平落 packs/kb/skills/<name>/，不再有来源/包归属。
 
 const SLUG_HINT = "英文 slug：字母/数字/_-/.，1-64 字符（如 web-recon）"
 const EXPERT_ID_HINT = "小写字母/数字开头，仅小写字母数字与 -，≤48 字符（如 web-solver）"
@@ -72,11 +71,9 @@ export function ExpertCreateDialog({ open, onOpenChange, onCreated }: {
   )
 }
 
-export function SkillCreateDialog({ open, onOpenChange, source, packName, onCreated }: {
+export function SkillCreateDialog({ open, onOpenChange, onCreated }: {
   open: boolean
   onOpenChange: (v: boolean) => void
-  source: SkillSource
-  packName: string
   onCreated: (name: string) => void
 }) {
   const [name, setName] = useState("")
@@ -105,8 +102,7 @@ export function SkillCreateDialog({ open, onOpenChange, source, packName, onCrea
       file_features: toList(fileFeatures),
     }
     try {
-      const create = source === "cap" ? api.createCapSkill : api.createTrackSkill
-      await create(packName, body)
+      await api.createSkill(body)
       onCreated(name.trim())
       onOpenChange(false)
     } catch (e) {
@@ -121,8 +117,8 @@ export function SkillCreateDialog({ open, onOpenChange, source, packName, onCrea
       <DialogContent>
         <DialogTitle>新建自包含技能</DialogTitle>
         <DialogDescription>
-          {source === "cap" ? `capabilities/${packName}/skills/` : `tracks/${packName}/skills/`}
-          下生成 cc 风格 SKILL.md 模板；详细资料可放入同目录 references/、scripts/、examples/ 或 assets/。
+          packs/kb/skills/ 下生成 cc 风格 SKILL.md 模板（每个技能一个目录）；
+          详细资料可放入同目录 references/、scripts/、examples/ 或 assets/。
         </DialogDescription>
         <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="技能 slug，如 web-strike-entry"
                className="font-mono text-xs" autoFocus />

@@ -34,6 +34,9 @@ from dataclasses import dataclass
 
 
 _ADDR_DESC = "函数地址，hex 字符串优先（如 \"0x401000\"）；十进制整数也收"
+# 逆向只读工具的 binary 入参口径（2026-10-13）：样本须**已分析**（有 headless 缓存）。
+# 未分析时工具快速失败回 [未分析] 而非静默触发数十分钟的全量分析。
+_BINARY_DESC = "已分析样本的二进制路径（未分析会回 [未分析]，本工具不自动触发分析）"
 
 
 TOOL_GROUPS = ["执行", "文件", "黑板", "知识", "浏览器", "协作", "计划", "控制"]
@@ -738,7 +741,9 @@ tool(
         '_reason+evidence_refs）——情报类非漏洞结论则用 bb_add_finding category=intel（severity>=l'
         'ow）。逆向场景硬规则：反编译任何函数前必须先查 func 防重复劳动。**列已上传样本：what=assets type=binary**——返回行的'
         ' value 即样本 sha256（func 查询的 binary_sha256 / bb_upsert_func 都用它），meta.filename'
-        ' 是原文件名；不知道 sha 时先列样本，不要猜。'
+        ' 是原文件名；不知道 sha 时先列样本，不要猜。**分析包内文件：what=package**——列当前'
+        '（或 package_id 指定）分析包的条目/依赖边/内容树根 tree_ref（AI 用 read_file <tree_ref>/<path> '
+        '读同包文件，如 exe 依赖的 DLL）；样本资产行 meta.package_id 即来源包 id。'
     ),
     input_schema={
         'type': 'object',
@@ -752,6 +757,7 @@ tool(
                     'func',
                     'blueprint',
                     'site',
+                    'package',
                 ],
             },
             'asset': {
@@ -764,6 +770,10 @@ tool(
             'blueprint_id': {
                 'type': 'string',
                 'description': 'blueprint 查询：单份蓝图（缺省列全部）',
+            },
+            'package_id': {
+                'type': 'string',
+                'description': 'package 查询：指定分析包 id（缺省=当前分析包）',
             },
             'target_asset_id': {
                 'type': 'string',
@@ -1289,7 +1299,7 @@ tool(
         'properties': {
             'binary': {
                 'type': 'string',
-                'description': '二进制文件路径',
+                'description': _BINARY_DESC,
             },
             'address': {
                 'type': [
@@ -1319,6 +1329,7 @@ tool(
         'properties': {
             'binary': {
                 'type': 'string',
+                'description': _BINARY_DESC,
             },
             'name_contains': {
                 'type': 'string',
@@ -1345,7 +1356,7 @@ tool(
         'properties': {
             'binary': {
                 'type': 'string',
-                'description': '二进制文件路径',
+                'description': _BINARY_DESC,
             },
             'pattern': {
                 'type': 'string',
@@ -1372,7 +1383,7 @@ tool(
         'properties': {
             'binary': {
                 'type': 'string',
-                'description': '二进制文件路径',
+                'description': _BINARY_DESC,
             },
             'name': {
                 'type': 'string',
@@ -1402,7 +1413,7 @@ tool(
         'properties': {
             'binary': {
                 'type': 'string',
-                'description': '二进制文件路径',
+                'description': _BINARY_DESC,
             },
             'name': {
                 'type': 'string',

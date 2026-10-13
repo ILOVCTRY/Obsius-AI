@@ -1,5 +1,5 @@
-import { useRef, useState } from "react"
-import { ChevronDown, Upload, RefreshCw, BrainCircuit, Download, Loader2, ListTree, PenLine, Cpu, Trash2 } from "lucide-react"
+import { useState } from "react"
+import { ChevronDown, RefreshCw, BrainCircuit, Download, Loader2, ListTree, PenLine, Cpu, Trash2 } from "lucide-react"
 import type { Asset, BinaryOverview, ToolState } from "@/lib/types"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
@@ -9,6 +9,10 @@ import { cn } from "@/lib/utils"
 // IDA 专属按钮与 MCP 灯（那些功能只有 IDA MCP 通道）。
 
 export type Engine = "ida" | "ghidra"
+
+// 自动分析体积上限（2026-10-13 用户口径，与后端 SAMPLE_AUTO_MAX_BYTES 同口径）：
+// ≥10MB 的样本 headless 全量分析会拖垮时间——「开始分析」禁用/拦截，引导走「从 IDA 拉取函数」。
+export const SAMPLE_AUTO_MAX_BYTES = 10 * 1024 * 1024
 
 const ENGINE_OPTIONS: { key: Engine; label: string; hint: string }[] = [
   { key: "ida", label: "IDA", hint: "IDA headless + MCP 实时桥" },
@@ -68,9 +72,7 @@ interface Props {
   /** 切换引擎（落库到样本 meta，父组件负责刷新 overview） */
   onSelectEngine?: (engine: Engine) => Promise<void>
   triaging: boolean
-  uploading: boolean
   busyAi: boolean
-  onUpload: (file: File) => void
   onRetry: () => void
   onAiTriage: () => void
   /** IDA GUI 手改名 → func_kb（父组件负责 Job 轮询，返回给用户看的结果文案） */
@@ -92,8 +94,8 @@ interface Props {
 }
 
 export function SampleBar({
-  samples, sha, onSelect, onDeleteSample, overview, engine, onSelectEngine, triaging, uploading, busyAi,
-  onUpload, onRetry, onAiTriage,
+  samples, sha, onSelect, onDeleteSample, overview, engine, onSelectEngine, triaging, busyAi,
+  onRetry, onAiTriage,
   onPullNames, onPullIdaFunctions, onPushNames, pullProgress, onStopPull,
   triageProgress, onStopTriage, triageMsg,
 }: Props) {
@@ -104,7 +106,6 @@ export function SampleBar({
   const [idaMsg, setIdaMsg] = useState<string | null>(null)
   const [engOpen, setEngOpen] = useState(false)
   const [engBusy, setEngBusy] = useState(false)
-  const fileRef = useRef<HTMLInputElement>(null)
   const ghidra = engine === "ghidra"
   // 缓存产出引擎（旧缓存无此字段 → undefined，不提示）
   const cacheEngine = overview?.meta?.engine
@@ -148,6 +149,9 @@ export function SampleBar({
     }
   }
   const current = samples.find((a) => a.value === sha)
+  // 自动分析体积上限：≥10MB 禁用「开始分析」（真实大小以后端判定为准）
+  const sampleSize = overview?.asset_meta?.size
+  const oversize = typeof sampleSize === "number" && sampleSize >= SAMPLE_AUTO_MAX_BYTES
   const triage = (overview?.asset_meta?.triage ?? null) as
     | { packer_suspect?: boolean; backend?: string } | null
   const coverage = overview && overview.function_count > 0
@@ -189,7 +193,7 @@ export function SampleBar({
             <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
             <div className="absolute left-0 top-full z-50 mt-1 max-h-72 w-80 overflow-auto rounded-md border bg-popover p-1 text-popover-foreground shadow-md">
               {samples.length === 0 && (
-                <p className="px-2 py-1.5 text-[11px] text-muted-foreground">还没有样本，先上传一个</p>
+                <p className="px-2 py-1.5 text-[11px] text-muted-foreground">还没有样本，请到「样本分析」把目标登记为资产</p>
               )}
               {samples.map((a) => (
                 <div
@@ -321,25 +325,13 @@ export function SampleBar({
         </span>
       )}
 
-      <input
-        ref={fileRef}
-        type="file"
-        className="hidden"
-        onChange={(e) => {
-          const f = e.target.files?.[0]
-          if (f) onUpload(f)
-          e.target.value = ""
-        }}
-      />
-      <Button size="sm" variant="outline" className="h-7 gap-1 text-[11px]" onClick={() => fileRef.current?.click()}
-              disabled={uploading}>
-        <Upload className="size-3" />{uploading ? "上传中…" : "上传样本"}
-      </Button>
       <Button size="sm" variant="outline" className="h-7 gap-1 text-[11px]" onClick={onRetry}
-              disabled={!sha || triaging}
-              title={ghidra
-                ? "headless 全量导出（Ghidra：小样本内嵌反汇编、大样本按需反汇编；>20MB 会二次确认）"
-                : "headless 全量导出（>20MB 大样本会二次确认；也可改走 IDA 拉取）"}>
+              disabled={!sha || triaging || oversize}
+              title={oversize
+                ? `样本约 ${Math.round((sampleSize as number) / 1048576)}MB ≥ 10MB，超出自动分析上限——请改用「从 IDA 拉取函数」（IDA 内按 Ctrl-Alt-M）`
+                : (ghidra
+                  ? "headless 全量导出（Ghidra：小样本内嵌反汇编、大样本按需反汇编；仅 <10MB 可自动分析）"
+                  : "headless 全量导出（仅 <10MB 可自动分析；大样本请走 IDA 拉取）")}>
         <RefreshCw className={cn("size-3", triaging && "animate-spin")} />{triaging ? "分析中…" : "开始分析"}
       </Button>
       {triageProgress && (() => {

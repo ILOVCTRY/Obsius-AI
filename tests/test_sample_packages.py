@@ -54,6 +54,12 @@ def test_package_api_directory_targets_dependencies_and_dedup(tmp_path):
         assert body["file_count"] == 2
         assert {row["path"] for row in body["targets"]} == {"Game/game.exe", "Game/helper.dll"}
         assert body["dependencies"] == [{"from": "Game/game.exe", "to": "Game/helper.dll", "kind": "binary-import"}]
+        # 回归（2026-10-12）：导入响应必须是**完整**分析包对象（含 entries/origin）
+        # ——前端 setPkg(响应) 据此渲染文件树，此前只回摘要致 entries 缺失，用户
+        # 上传成功却看不到分析包、须手动刷新页面。
+        assert {row["path"] for row in body["entries"]} == {"Game/game.exe", "Game/helper.dll"}
+        assert body["origin"]["source_type"] == "folder"
+        assert body["created_at"]
 
         package_id = body["package_id"]
         version_id = body["version_id"]
@@ -69,6 +75,10 @@ def test_package_api_directory_targets_dependencies_and_dedup(tmp_path):
         detail = client.get(f"/api/projects/{pid}/sample-packages/{package_id}").json()
         assert detail["version_id"] == version_id
         assert Path(detail["tree_ref"]).is_dir()
+        # 内容树落**项目工作区内**（workspaces/<slug>/trees/<hash>/），不再写全局 sample-store
+        assert Path(detail["tree_ref"]).is_relative_to(tmp_path / "workspaces")
+        assert Path(detail["tree_ref"]).parent.name == "trees"
+        assert not (tmp_path / "data" / "sample-store").exists()
 
         # Same bytes and paths resolve to the same immutable package version.
         again = client.post(
@@ -82,6 +92,138 @@ def test_package_api_directory_targets_dependencies_and_dedup(tmp_path):
         assert again.json()["manifest_sha256"] == body["manifest_sha256"]
         listed_again = client.get(f"/api/projects/{pid}/sample-packages").json()
         assert len(listed_again) == 1 and listed_again[0]["import_count"] == 2
+
+
+def test_package_upload_stays_inside_project_workspace(tmp_path):
+    """上传物落**项目工作区内**（2026-10-13）：内容树 → `workspaces/<slug>/trees/<hash>/`、
+    原始上传物 → `workspaces/<slug>/raw/`；全局 `data/sample-store/` 不产生任何写入。"""
+    app = _app(tmp_path)
+    with TestClient(app) as client:
+        pid = client.post("/api/projects", json={"name": "inside-ws"}).json()["id"]
+        archive = _zip_bytes({"bin/app.exe": b"MZ" + b"\0" * 32})
+        body = client.post(
+            f"/api/projects/{pid}/sample-packages",
+            files={"file": ("app.zip", archive, "application/zip")},
+        ).json()
+        project_dir = tmp_path / "workspaces" / "inside-ws"
+        tree = Path(body["tree_ref"])
+        assert tree.is_relative_to(project_dir / "trees")
+        assert (tree / "bin/app.exe").is_file()
+        # 原始上传物也落项目内 raw/
+        assert Path(body["raw_ref"]).is_relative_to(project_dir / "raw")
+        assert Path(body["raw_ref"]).is_file()
+        # 全局存储根完全不产生
+        assert not (tmp_path / "data" / "sample-store").exists()
+
+
+def test_package_target_register_asset_no_copy(tmp_path):
+    """登记为资产（2026-10-12）：PE 目标 → binary 资产，meta 带包坐标 + **包内相对路径**，
+    且**不复制**文件进项目 samples/（引用全局内容树）；重复登记幂等；非二进制 422；
+    删除该资产不动全局共享树文件。"""
+    app = _app(tmp_path)
+    with TestClient(app) as client:
+        pid = client.post("/api/projects", json={"name": "register-asset"}).json()["id"]
+        exe = b"MZ" + b"\0" * 32
+        body = client.post(
+            f"/api/projects/{pid}/sample-packages",
+            files=[("files", ("Game/game.exe", exe, "application/octet-stream")),
+                   ("files", ("Game/notes.txt", b"hi", "text/plain"))],
+        ).json()
+        exe_target = next(t for t in body["targets"] if t["path"] == "Game/game.exe")
+        txt_target = next(t for t in body["targets"] if t["path"] == "Game/notes.txt")
+        base = (f"/api/projects/{pid}/sample-packages/{body['package_id']}/versions/"
+                f"{body['version_id']}/targets")
+
+        # 非二进制格式拒绝（APK/DEX/文本仍走 .../analyze）
+        assert client.post(f"{base}/{txt_target['target_id']}/register").status_code == 422
+
+        r = client.post(f"{base}/{exe_target['target_id']}/register")
+        assert r.status_code == 200, r.text
+        sha = r.json()["binary_sha256"]
+        asset = next(a for a in client.get(f"/api/projects/{pid}/assets?type=binary").json()
+                     if a["value"] == sha)
+        meta = asset["meta"]
+        assert meta["source"] == "sample-package"
+        assert meta["package_id"] == body["package_id"]
+        assert meta["version_id"] == body["version_id"]
+        assert meta["target_id"] == exe_target["target_id"]
+        assert meta["path"] == "Game/game.exe"          # 包内相对路径
+        # **不复制**：任何项目 samples/ 下都没有该 sha 命名的文件
+        assert list((tmp_path / "workspaces").glob(f"*/samples/{sha}*")) == []
+        # 内容在**项目内容树**里（tree_ref 绝对路径，落在项目工作区内）
+        assert (Path(body["tree_ref"]) / "Game/game.exe").is_file()
+        assert Path(body["tree_ref"]).is_relative_to(tmp_path / "workspaces")
+
+        # 重复登记幂等（不新增资产行）
+        assert client.post(f"{base}/{exe_target['target_id']}/register").status_code == 200
+        assert len([a for a in client.get(f"/api/projects/{pid}/assets?type=binary").json()
+                    if a["value"] == sha]) == 1
+
+        # 删除资产不删项目内容树文件（_purge_sample_files 护栏）
+        assert client.delete(f"/api/projects/{pid}/binaries/{sha}").status_code == 200
+        assert (Path(body["tree_ref"]) / "Game/game.exe").is_file()
+
+
+def test_package_registered_asset_triage_uses_global_tree(tmp_path):
+    """登记为资产后，逆向工作台「开始分析」（/binaries/{sha}/triage）解析到**全局包树**
+    里的文件（项目外、无复制桥），而非项目内 samples/。"""
+    app = _app(tmp_path)
+    seen: list[str] = []
+
+    class _RecService:
+        def headless_backends(self):
+            return [object()]
+
+        def export_to_cache(self, binary, *, progress=None, stop_event=None,
+                            engine=None):
+            seen.append(str(binary))
+            return ({"functions": [{"address": 4096, "name": "main"}],
+                     "sections": [], "imports": {}},
+                    {"name": f"{engine}-headless", "db_path": None})
+
+    app.state.rev_service_factory = lambda _project: _RecService()
+    with TestClient(app) as client:
+        pid = client.post("/api/projects", json={"name": "triage-reg"}).json()["id"]
+        body = client.post(
+            f"/api/projects/{pid}/sample-packages",
+            files={"file": ("main.elf", b"\x7fELF" + b"\0" * 16, "application/octet-stream")},
+        ).json()
+        target = next(t for t in body["targets"] if t["format"] == "elf")
+        reg = client.post(
+            f"/api/projects/{pid}/sample-packages/{body['package_id']}/versions/"
+            f"{body['version_id']}/targets/{target['target_id']}/register").json()
+        sha = reg["binary_sha256"]
+        start = client.post(f"/api/projects/{pid}/binaries/{sha}/triage")
+        assert start.status_code == 202, start.text
+        job_id = start.json()["job_id"]
+        for _ in range(100):
+            job = client.get(f"/api/jobs/{job_id}").json()
+            if job["status"] != "running":
+                break
+        assert job["status"] == "done", job
+        # 导出的是全局内容树里的文件（项目外）
+        assert seen and Path(seen[0]).is_relative_to(Path(body["tree_ref"]))
+
+
+def test_package_oversize_target_blocks_auto_triage(tmp_path):
+    """自动分析上限（2026-10-13）：≥10MB 样本「开始分析」（/binaries/{sha}/triage）被拒 422，
+    引导改走 IDA 拉取（避免 headless 全量分析拖垮时间）。"""
+    app = _app(tmp_path)
+    with TestClient(app) as client:
+        pid = client.post("/api/projects", json={"name": "oversize"}).json()["id"]
+        big = b"\x7fELF" + b"\0" * (10 * 1024 * 1024)          # ≥10MB
+        body = client.post(
+            f"/api/projects/{pid}/sample-packages",
+            files={"file": ("big.elf", big, "application/octet-stream")},
+        ).json()
+        target = next(t for t in body["targets"] if t["format"] == "elf")
+        reg = client.post(
+            f"/api/projects/{pid}/sample-packages/{body['package_id']}/versions/"
+            f"{body['version_id']}/targets/{target['target_id']}/register").json()
+        sha = reg["binary_sha256"]
+        r = client.post(f"/api/projects/{pid}/binaries/{sha}/triage")
+        assert r.status_code == 422, r.text
+        assert "10MB" in r.json()["detail"]
 
 
 def test_folder_upload_allows_empty_files(tmp_path):

@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react"
-import { Upload, RefreshCw, Maximize2 } from "lucide-react"
+import { useCallback, useEffect, useState } from "react"
+import { RefreshCw, Maximize2 } from "lucide-react"
 import { api, pollJob } from "@/lib/api"
 import type { Asset, BinaryOverview, Finding, FuncEntry } from "@/lib/types"
 import { hexAddr } from "@/lib/workbench"
@@ -16,7 +16,6 @@ export function RevCompact({ pid, onOpenWorkbench }: { pid: string; onOpenWorkbe
   const [funcs, setFuncs] = useState<FuncEntry[]>([])
   const [findings, setFindings] = useState<Finding[]>([])
   const [triaging, setTriaging] = useState(false)
-  const fileRef = useRef<HTMLInputElement>(null)
 
   const refresh = useCallback(() => {
     api.assets(pid).then(setSamples).catch(() => {})
@@ -58,13 +57,6 @@ export function RevCompact({ pid, onOpenWorkbench }: { pid: string; onOpenWorkbe
     if (!jobId) return
     setTriaging(true)
     try { await pollJob(jobId, () => {}, 1500) } finally { setTriaging(false) }
-  }
-  const upload = async (file: File) => {
-    const r = await api.uploadSample(pid, file)
-    setSha(r.sha)
-    refresh()
-    await runJob(r.job_id)
-    refresh()
   }
   const retry = async () => {
     if (!sha) return
@@ -159,15 +151,7 @@ export function RevCompact({ pid, onOpenWorkbench }: { pid: string; onOpenWorkbe
           </div>
         )}
 
-        <input
-          ref={fileRef} type="file" className="hidden"
-          onChange={(e) => { const f = e.target.files?.[0]; if (f) upload(f); e.target.value = "" }}
-        />
         <div className="mt-3 flex flex-wrap gap-1.5">
-          <Button size="sm" variant="outline" className="h-7 gap-1 text-[11px]"
-                  onClick={() => fileRef.current?.click()}>
-            <Upload className="size-3" />上传
-          </Button>
           <Button size="sm" variant="outline" className="h-7 gap-1 text-[11px]"
                   disabled={!sha || triaging} onClick={retry}>
             <RefreshCw className={triaging ? "size-3 animate-spin" : "size-3"} />重新分诊

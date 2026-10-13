@@ -80,11 +80,11 @@ next: [pentest]
 
 def _make_packs(root: Path) -> Path:
     """最小 pentest 轨 packs：阶段剧本 + task_types 注册表 + 专家池。"""
-    ph = root / "tracks" / "pentest" / "phases"
+    ph = root / "kb" / "pentest" / "phases"
     ph.mkdir(parents=True)
     for stem, text in _PHASE_YAMLS.items():
         (ph / f"{stem}.yaml").write_text(text, encoding="utf-8")
-    (root / "tracks" / "pentest" / "task_types.yaml").write_text(
+    (root / "kb" / "pentest" / "task_types.yaml").write_text(
         "recon: passive\nasset-enum: passive\nexploit: low\nreport: passive\n",
         encoding="utf-8")
     ex = root / "experts"
@@ -94,7 +94,7 @@ def _make_packs(root: Path) -> Path:
             f"name: {eid}\ndescription: 测试专家\ntracks: [pentest]\n",
             encoding="utf-8")
     # 无阶段剧本的第二轨（API 端「未启用」断言用；track.yaml 缺失=目录名兜底）
-    ctf = root / "tracks" / "ctf"
+    ctf = root / "kb" / "ctf"
     ctf.mkdir()
     (ctf / "task_types.yaml").write_text("generic: passive\n", encoding="utf-8")
     return root
@@ -120,7 +120,7 @@ def _seed_assets(bb: Blackboard, pid: str, n: int = 10,
 # ---------- 剧本解析 ----------
 
 def test_parse_and_spec_full(packs):
-    spec = phase_spec("recon", parse_phase_file(packs / "tracks/pentest/phases/recon.yaml"))
+    spec = phase_spec("recon", parse_phase_file(packs / "kb/pentest/phases/recon.yaml"))
     assert spec["name"] == "信息收集" and spec["goal"] == "摸清资产面"
     assert spec["order"] == 1 and spec["next"] == ["pentest"]
     assert spec["focus"] == {"recon": 2, "asset-enum": 3}
@@ -294,7 +294,7 @@ def test_phase_gate_state_written_by_check(client):
 def test_doctor_phase_codes(tmp_path):
     root = _make_packs(tmp_path / "packs")
     assert not [i for i in diagnose(root).issues if i.code.startswith("phase-")]
-    ph = root / "tracks" / "pentest" / "phases"
+    ph = root / "kb" / "pentest" / "phases"
 
     def write(stem: str, text: str) -> None:
         (ph / f"{stem}.yaml").write_text(text, encoding="utf-8")

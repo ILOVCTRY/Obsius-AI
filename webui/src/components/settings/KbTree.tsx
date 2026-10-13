@@ -22,14 +22,6 @@ interface TreeNode {
 }
 interface TreeNodeFile { name: string; path: string; size: number; title: string }
 
-function fileLayer(path: string): { label: string; className: string } {
-  const parts = path.toLowerCase().split("/")
-  if (parts.includes("playbooks")) return { label: "方法论", className: "text-primary" }
-  if (parts.includes("patterns")) return { label: "模式", className: "text-violet-300" }
-  if (parts.includes("cases")) return { label: "案例", className: "text-amber-300" }
-  return { label: "资料", className: "text-muted-foreground" }
-}
-
 // 自然排序：数字段按数值比较（`-2` 紧跟主体、`11-` 排 `2-` 后），
 // 过渡期残存编号文件不再按字典序乱序
 function natCmp(a: string, b: string): number {
@@ -111,7 +103,6 @@ function DirNode({ node, depth, q, selected, onSelect, onRename, onDelete, colla
                 title={`${f.path}（${f.size}B）`}>
                 <span className="mr-1 inline-flex align-middle text-muted-foreground"><FileText size={12} /></span>{f.title || f.name}
               </button>
-              <span className={cn("kb-layer-mark hidden shrink-0 text-[8px] font-medium sm:inline", fileLayer(f.path).className)}>{fileLayer(f.path).label}</span>
               <button className="kb-file-action shrink-0 rounded p-1 text-muted-foreground hover:text-primary"
                       aria-label={`改名 ${f.title || f.name}`} title="改名（全仓引用联动替换）" onClick={() => onRename(f.path)}><Pencil size={11} /></button>
               <button className="kb-file-action shrink-0 rounded p-1 text-muted-foreground hover:text-(--status-error)"

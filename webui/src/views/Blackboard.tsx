@@ -14,6 +14,7 @@ import { fmtDateTime, utcTitle } from "@/lib/datetime"
 import { FindingDetailDialog } from "@/components/blackboard/FindingDetailDialog"
 import { CTF_LEVEL, CTF_LEVEL_ORDER } from "./blackboard/ctfLevel"
 import { MappingPane, ProductChips } from "./blackboard/MappingPane"
+import { IntentsPane } from "./blackboard/IntentsPane"
 
 // 黑板视图（DESIGN.md §12 页面 4）：发现 / 资产 / 函数库 + human 共写入口
 // 发现 tab 内 assessment 轨额外提供「列表｜链路」子视图（攻击链画布，E1）。
@@ -35,7 +36,7 @@ export function Blackboard({ pid, compact = false, track, capabilities, defaultV
 }) {
   const compactPentest = compact && track === "pentest"
   const tabs = [
-    "findings", "assets",
+    "findings", "intents", "assets",
     ...(track !== "ctf" && !compactPentest ? ["mapping"] as const : []),
     ...(capabilities?.includes("binary") && !compactPentest ? ["funcs"] as const : []),
   ] as const
@@ -59,7 +60,8 @@ export function Blackboard({ pid, compact = false, track, capabilities, defaultV
       <TabsList className="w-full justify-start rounded-none border-b bg-transparent p-0">
         {tabs.map((t) => (
           <TabsTrigger key={t} value={t} className="rounded-none border-b-2 px-3 py-1.5 text-xs">
-            {t === "findings" ? "发现" : t === "assets" ? "资产" : t === "mapping" ? "测绘" : "函数库"}
+            {t === "findings" ? "发现" : t === "intents" ? "意图" : t === "assets" ? "资产"
+              : t === "mapping" ? "测绘" : "函数库"}
           </TabsTrigger>
         ))}
       </TabsList>
@@ -67,6 +69,11 @@ export function Blackboard({ pid, compact = false, track, capabilities, defaultV
         {/* 子视图切换仅渗透/红队轨（R2 拆轨前判断 assessment）且非 compact 侧栏时渲染 */}
         <Findings pid={pid} compact={compact} track={track}
                   showCanvas={!compact && (track === "pentest" || track === "redteam")} />
+      </TabsContent>
+      <TabsContent value="intents" className="min-h-0 flex-1">
+        {/* 意图清单全轨启用（2026-10-13）：Agent declare_intent 的规划产物摊平成列表；
+            渗透轨另有「发现 → 链路」图，其余轨（如逆向）此前无任何查看入口 */}
+        <IntentsPane pid={pid} />
       </TabsContent>
       <TabsContent value="assets" className="min-h-0 flex-1">
         {/* 树视图全轨启用（2026-09-20）：E6 自动挂载全轨生效，ctf 等轨同样有 parent 树；

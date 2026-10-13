@@ -707,13 +707,11 @@ class AgentSession:
             self.load_skills()
         assert self.registry is not None
         role_skills = self.role.get("skills")
-        pack_set = set(self.capabilities) | {self.track}
         route_query = f"{query}\n{scope}".strip() if scope else (query or "")
-        # 候选集：角色白名单优先；白名单空（generalist）→ 全部启用技能（能力包∪轨）
+        # 候选集（2026-10-13 硬选）：技能扁平无包归属——专家 skills 白名单为硬选，
+        # 空/None（generalist）→ 全部启用技能。
         enabled = [s for s in self.registry.all()
-                   if s.enabled and s.pack in pack_set]
-        if role_skills:
-            enabled = [s for s in enabled if s.name in role_skills]
+                   if s.enabled and (role_skills is None or s.name in role_skills)]
         # cc 风格渐进披露：每个技能自带完整 SKILL.md，正文和附属资源仍按需
         # skill_open 读取，避免把所有方法论一次塞进 system。
         if enabled:
@@ -785,8 +783,8 @@ class AgentSession:
         黑板强相关内容，分级注入 system——① 一级：verified + confidence≥0.6 +
         强匹配（标题/值精确子串），注入明细；② 二级：同 host/binary 关联，一行
         摘要；③ 三级：仅计数提示行（控制 token，Agent 需要时 bb_query 自取）。
-        按轨道差异化分发（research→func_kb 优先，其余→assets/findings 优先）；
-        blueprint 物化器预留（挂起未实施返回空）。任一物化器异常静默降级。
+        按轨道差异化分发（research→blueprint/func_kb 优先，其余→assets/findings 优先）；
+        任一物化器异常静默降级。
         返回物化文本块（无命中返回空串）。"""
         if not query or not query.strip():
             return ""
@@ -992,10 +990,12 @@ class AgentSession:
         return ("### 已排除方向（勿重走）\n" + "\n".join(lines)), n
 
     def _mat_blueprint(self, q: str) -> tuple[str, int]:
-        """蓝图物化（R4 blueprints 表，2026-09-28）：模块级业务功能↔函数锚点。
-        按 objective 子串匹配蓝图 name/goal 与模块 desc/spec；research 轨优先。
-        展示：蓝图名（目标+状态）→ 命中模块（desc + func_addresses 锚点数）。
-        无蓝图/无命中返回空。"""
+        """蓝图物化（R4 blueprints 表）：模块级业务功能↔函数锚点。
+        命中优先级：① query 含某蓝图 binary_sha256（或其前 12 位）→ 无条件注入该
+        蓝图全部模块——样本绑定会话的 objective 形如 `sha256=<sha>`，这是主命中
+        路径（旧实现只按 name/goal/模块 desc 子串匹配，这类会话根本命不中）；
+        ② 回落 objective 子串匹配 name/goal 与模块 desc。research 轨优先。
+        展示：蓝图名（目标+状态）→ 模块（锚点数）。无蓝图/无命中返回空。"""
         try:
             bps = self.bb.list_blueprints(self.project_id)
         except Exception:  # noqa: BLE001
@@ -1009,25 +1009,41 @@ class AgentSession:
             name = str(bp.get("name") or "")
             goal = str(bp.get("goal") or "")
             status = str(bp.get("status") or "draft")
-            head_hit = (name.lower() and name.lower() in ql) \
-                or (goal.lower() and goal.lower() in ql)
+            sha = str(bp.get("binary_sha256") or "").lower()
+            # ① 样本绑定命中：objective 带该样本 sha（全量或前 12 位）
+            sha_hit = bool(sha) and (sha in ql or sha[:12] in ql)
             mods = bp.get("modules") or []
             hit_mods: list[str] = []
-            for m in mods:
-                if not isinstance(m, dict):
-                    continue
-                mname = str(m.get("name") or "")
-                mdesc = str(m.get("desc") or "")
-                if (mname.lower() and mname.lower() in ql) \
-                        or (mdesc.lower() and any(
-                            t in mdesc.lower() for t in ql.split() if len(t) >= 3)):
+            if sha_hit:
+                for m in mods:
+                    if not isinstance(m, dict):
+                        continue
                     anchors = len(m.get("func_addresses") or [])
-                    hit_mods.append(f"    - {mname}" +
+                    hit_mods.append(f"    - {m.get('name')}" +
                                     (f"（{anchors} 函数锚点）" if anchors else ""))
+                    if len(hit_mods) >= 8:
+                        break
+                if len(mods) > len(hit_mods):
+                    hit_mods.append(f"    - …共 {len(mods)} 个模块")
+            else:
+                for m in mods:
+                    if not isinstance(m, dict):
+                        continue
+                    mname = str(m.get("name") or "")
+                    mdesc = str(m.get("desc") or "")
+                    if (mname.lower() and mname.lower() in ql) \
+                            or (mdesc.lower() and any(
+                                t in mdesc.lower() for t in ql.split() if len(t) >= 3)):
+                        anchors = len(m.get("func_addresses") or [])
+                        hit_mods.append(f"    - {mname}" +
+                                        (f"（{anchors} 函数锚点）" if anchors else ""))
+            head_hit = sha_hit \
+                or (name.lower() and name.lower() in ql) \
+                or (goal.lower() and goal.lower() in ql)
             if not head_hit and not hit_mods:
                 continue
             lines.append(f"- 📐 {name}（{status}）" + (f"｜{goal[:50]}" if goal else ""))
-            lines += hit_mods[:4]
+            lines += hit_mods[:8 if sha_hit else 4]
             n += 1
             if n >= 4:
                 break

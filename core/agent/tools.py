@@ -127,9 +127,11 @@ _BB_ASSETS_DEFAULT_LIMIT = 200
 # 误删面过大；超出要求分批。清洗泛解析域名族这类几百条的活，2-3 批即可做完。
 _BB_BATCH_DELETE_MAX = 200
 # meta 精简白名单（2026-10-01）：默认只回这些常用键（长值截断），verbose=true 才给全文。
+# package_id（2026-10-12）：分析包登记样本的资产行带出来源包 id——AI 据此 `bb_query
+# what=package package_id=...` 读同包条目/依赖边（解决 exe 依赖同包 DLL 找不到）。
 _BB_ASSET_META_KEYS = ("title", "fingerprint", "products", "owner", "source",
                        "protocol", "http_status", "primary_domain", "alias",
-                       "filename", "cdn")
+                       "filename", "cdn", "package_id")
 _BB_ASSET_META_STR_MAX = 160
 _BB_ASSET_META_LIST_MAX = 8
 
@@ -1176,7 +1178,8 @@ class ToolDispatcher:
                        limit: int | None = None,
                        verbose: bool = False,
                        offset: int | None = None,
-                       sha256: str | None = None) -> str:
+                       sha256: str | None = None,
+                       package_id: str | None = None) -> str:
         # 参数名容错（2026-09-30）：模型高频把 binary_sha256 简写成 sha256——
         # 别名归一而非裸 TypeError（截图案例：what=files+sha256 连错两处）
         binary_sha256 = binary_sha256 or sha256
@@ -1372,9 +1375,64 @@ class ToolDispatcher:
                                "func_addresses": m["func_addresses"]}
                               for m in b["modules"]]}
                  for b in rows], ensure_ascii=False)
+        if what == "package":
+            return self._bb_query_package(package_id)
         return (f"[错误] 未知查询: {what}"
-                f"（允许: findings, assets, events, func, blueprint, site；"
+                f"（允许: findings, assets, events, func, blueprint, site, package；"
                 f"列已上传样本用 what=assets type=binary，返回行的 value 即样本 sha256）")
+
+    def _bb_query_package(self, package_id: str | None = None) -> str:
+        """分析包全貌（2026-10-12）：列当前（或指定）分析包的条目/依赖边/内容树根。
+
+        供 AI 定位同包文件——分析包登记样本（`bb_query what=assets type=binary` 行里
+        `meta.package_id`）的兄弟文件（如 exe 依赖的 DLL）都在同一内容树里。返回的
+        `entries[].path` 是**包内相对路径**，`tree_ref` 是项目内容树绝对路径，AI 用
+        `read_file <tree_ref>/<path>` 直接读同包文件；`dependencies` 给导入名→同包路径
+        的边。读 `<工作区>/sample_packages/` 元数据（与 SamplePackageStore 同源，只读）。
+        缺工作区/无分析包/清单损坏 → 结构化提示串（不抛）。
+        """
+        if not self.artifacts_dir:
+            return "[错误] 本会话未装配工作区，无法读取分析包"
+        meta_root = Path(self.artifacts_dir).parent / "sample_packages"
+        pid = str(package_id or "").strip()
+        version_id = ""
+        if not pid:
+            try:
+                pointer = json.loads(
+                    (meta_root / "current.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return ("[错误] 当前项目没有分析包（先到「样本分析」上传文件/文件夹；"
+                        "或用 what=assets type=binary 看已登记样本的 meta.package_id）")
+            pid = str(pointer.get("package_id") or "")
+            version_id = str(pointer.get("version_id") or "")
+        if not re.fullmatch(r"pkg-[0-9a-f]{16}", pid):
+            return f"[错误] 非法 package_id: {pid}"
+        versions = meta_root / pid / "versions"
+        paths = ([versions / version_id / "manifest.json"] if version_id
+                 else sorted(versions.glob("*/manifest.json"), reverse=True))
+        manifest = None
+        for mp in paths:
+            if mp.is_file():
+                try:
+                    manifest = json.loads(mp.read_text(encoding="utf-8"))
+                    break
+                except (OSError, ValueError):
+                    continue
+        if not isinstance(manifest, dict):
+            return f"[错误] 分析包不存在或无清单: {pid}"
+        entries = manifest.get("entries") or []
+        cap = 200
+        return json.dumps({
+            "package_id": manifest.get("package_id") or pid,
+            "version_id": manifest.get("version_id") or version_id,
+            "tree_ref": manifest.get("tree_ref"),
+            "file_count": manifest.get("file_count"),
+            "total_bytes": manifest.get("total_bytes"),
+            "origin": manifest.get("origin"),
+            "dependencies": manifest.get("dependencies") or [],
+            "entries": entries[:cap],
+            "entries_truncated": len(entries) > cap,
+        }, ensure_ascii=False)
 
     def _tool_kb_open(self, module: str) -> str:
         """打开知识库模块（DESIGN.md §4/§4.5）：kb 全局单根多域解析（expert-pool M0）。
@@ -1515,10 +1573,10 @@ class ToolDispatcher:
             self._skill_registry.load()
         assert self._skill_registry is not None
         sk = self._skill_registry.get((name or "").strip())
-        pack_set = set(self.capabilities) | {self.track} if self.track else set(self.capabilities)
-        if sk is None or sk.pack not in pack_set or not sk.enabled:
+        whitelist = self.role_skills
+        if sk is None or not sk.enabled or (whitelist is not None and sk.name not in whitelist):
             names = sorted(s.name for s in self._skill_registry.all()
-                           if s.pack in pack_set and s.enabled)
+                           if s.enabled and (whitelist is None or s.name in whitelist))
             return ("[防幻觉] 技能不存在或不可用: " + (name or "")
                     + "\n可用技能: " + ("、".join(names) if names else "（无）"))
         try:
@@ -1542,14 +1600,14 @@ class ToolDispatcher:
             return f"[错误] 技能文件读取失败: {e}"
         self.bb.append_event(
             self.project_id, "skill.open",
-            {"name": sk.name, "pack": sk.pack, "path": opened, "chars": len(body)},
+            {"name": sk.name, "path": opened, "chars": len(body)},
             session_id=self.session_id, author=self.author)
         self.last_progress_step = self._step
         if path:
-            return f"技能 {sk.name}（{sk.pack}）资源 {opened}:\n\n{body}"
+            return f"技能 {sk.name} 资源 {opened}:\n\n{body}"
         resources = [p.relative_to(sk.root).as_posix() for p in sk.resources]
         manifest = "\n".join(f"- {item}" for item in resources) or "（无附属资源）"
-        return (f"技能 {sk.name}（{sk.pack}）SKILL.md:\n\n{body}\n\n"
+        return (f"技能 {sk.name} SKILL.md:\n\n{body}\n\n"
                 f"同目录可用资源（用 skill_open(path=...) 按需读取）：\n{manifest}")
 
     # 每会话提案上限（DESIGN §4：防凑数/提案洪泛）
@@ -1884,8 +1942,8 @@ class ToolDispatcher:
 
     @staticmethod
     def _decompile_result_ok(result: str) -> bool:
-        """服务层成功=JSON 数据/伪码文本；引导文本以 [反编译器不可用]/[错误] 开头。"""
-        return not result.startswith(("[反编译器不可用]", "[错误]"))
+        """服务层成功=JSON 数据/伪码文本；引导文本以 [反编译器不可用]/[错误]/[未分析] 开头。"""
+        return not result.startswith(("[反编译器不可用]", "[错误]", "[未分析]"))
 
     def _tool_list_symbols(self, binary: str, name_contains: str | None = None,
                            min_size: int | None = None) -> str:
@@ -2129,7 +2187,7 @@ class ToolDispatcher:
 # 故不能用 startswith("[") 一刀切；[无命中] 是合法空检索结果，不算失败）
 _TOOL_FAIL_PREFIXES = ("[错误]", "[拒绝]", "[越界拒绝]", "[计划闸]",
                        "[网关拒绝]", "[工具异常]", "[防幻觉]", "[冲突]",
-                       "[参数格式]")
+                       "[参数格式]", "[未分析]")
 
 # E2 拒绝熔断检测集（orchestrator-efficiency，2026-09-22；2026-09-24 口径重构）：
 # 拒绝分两类——

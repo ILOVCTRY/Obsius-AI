@@ -108,9 +108,9 @@ def make_agent(env, llm, planner=None, config=None, role="_generalist", artifact
                capabilities=("web",), enable_sediment=False):
     bb, project, gw, tmp_path = env
     packs = tmp_path / "packs"
-    # 轨级演示技能（pack_set = capabilities ∪ {track} 内可见）
-    (packs / "tracks" / "pentest" / "skills" / "demo").mkdir(parents=True, exist_ok=True)
-    (packs / "tracks" / "pentest" / "skills" / "demo" / "SKILL.md").write_text(
+    # 演示技能（技能扁平 packs/kb/skills/）
+    (packs / "kb" / "skills" / "demo").mkdir(parents=True, exist_ok=True)
+    (packs / "kb" / "skills" / "demo" / "SKILL.md").write_text(
         "---\nname: demo\ndescription: 演示技能\nkeywords: 测试\n---\n按步骤执行。",
         encoding="utf-8")
     experts = packs / "experts"
@@ -1776,6 +1776,12 @@ def test_bb_query_assets_asset_filter_and_slim_meta(env):
                          quiet=True)["id"]
     register_asset(bb, pid, "http://site.com/a", "url", quiet=True)
     register_asset(bb, pid, "10.0.0.9", "host", quiet=True)  # 旁支
+    # 分析包登记的 binary 资产：精简 meta 也带 package_id（2026-10-12），
+    # 供 AI 由资产行溯源到 bb_query what=package。
+    binhash = "f" * 64
+    register_asset(bb, pid, binhash, "binary",
+                   meta={"filename": "game.exe", "source": "sample-package",
+                         "package_id": "pkg-" + "a" * 16}, quiet=True)
     r = lambda s: json.loads(s)
     # asset 过滤：只回该域子树（domain + url），不含旁支 host
     q = r(d.dispatch("bb_query", {"what": "assets", "asset": "site.com"}))
@@ -1787,6 +1793,11 @@ def test_bb_query_assets_asset_filter_and_slim_meta(env):
     assert len(domrow["meta"]["products"]) == 8
     qv = r(d.dispatch("bb_query", {"what": "assets", "asset": dom, "verbose": True}))
     assert len(next(a for a in qv["assets"] if a["id"] == dom)["meta"]["products"]) == 20
+    # 精简 meta 白名单含 package_id：binary 行直接可见来源包 id
+    binrow = next(a for a in r(d.dispatch("bb_query", {"what": "assets", "type": "binary"}))
+                  ["assets"] if a["value"] == binhash)
+    assert binrow["meta"]["package_id"] == "pkg-" + "a" * 16
+    assert binrow["meta"]["source"] == "sample-package"
     # 找不到资产 → [错误] 引导，不静默返回全量
     assert d.dispatch("bb_query",
                       {"what": "assets", "asset": "nope.com"}).startswith("[错误]")
@@ -2278,6 +2289,50 @@ def test_bb_query_assets_offset_paging(env):
     assert len(seen) == 5 and len(set(seen)) == 5   # 三页无重叠、并集=全量
 
 
+def test_bb_query_package_face(env):
+    """what=package（2026-10-12）：列当前分析包的条目/依赖边/内容树根，供 AI
+    定位同包文件（exe 依赖的 DLL 在同一内容树里）。缺工作区/无分析包 → 结构化
+    提示串（不抛）。"""
+    bb, project, gw, tmp_path = env
+    artifacts = tmp_path / "ws" / "artifacts"
+    meta_root = artifacts.parent / "sample_packages"
+    pid = "pkg-" + "a" * 16
+    vid = "ver-" + "b" * 12
+    tree = tmp_path / "data" / "sample-store" / "trees" / ("c" * 64)
+    (meta_root / pid / "versions" / vid).mkdir(parents=True)
+    (meta_root / "current.json").write_text(
+        json.dumps({"package_id": pid, "version_id": vid}), encoding="utf-8")
+    (meta_root / pid / "versions" / vid / "manifest.json").write_text(json.dumps({
+        "package_id": pid, "version_id": vid, "tree_ref": str(tree),
+        "file_count": 2, "total_bytes": 1234, "origin": {"kind": "folder"},
+        "dependencies": [{"from": "Game/game.exe", "name": "render.dll",
+                          "to": "Game/render.dll"}],
+        "entries": [{"path": "Game/game.exe", "sha256": "d" * 64, "size": 1000},
+                    {"path": "Game/render.dll", "sha256": "e" * 64, "size": 234}],
+    }), encoding="utf-8")
+
+    d = make_agent(env, ScriptedLLM([]), artifacts_dir=artifacts).dispatcher
+    body = json.loads(d.dispatch("bb_query", {"what": "package"}))
+    assert body["package_id"] == pid and body["version_id"] == vid
+    assert body["tree_ref"] == str(tree)                 # 内容树绝对路径（供 read_file）
+    assert {e["path"] for e in body["entries"]} == {"Game/game.exe", "Game/render.dll"}
+    assert body["dependencies"][0]["to"] == "Game/render.dll"
+    assert body["entries_truncated"] is False
+
+    # 指定 package_id（无 current.json 也可）
+    (meta_root / "current.json").unlink()
+    body2 = json.loads(d.dispatch("bb_query",
+                                  {"what": "package", "package_id": pid}))
+    assert body2["tree_ref"] == str(tree)
+
+    # 缺元数据 → 结构化提示串，不抛
+    (meta_root / pid / "versions" / vid / "manifest.json").unlink()
+    assert d.dispatch("bb_query", {"what": "package"}).startswith("[错误]")
+    # 未装配工作区 → 提示串
+    d2 = make_agent(env, ScriptedLLM([])).dispatcher
+    assert d2.dispatch("bb_query", {"what": "package"}).startswith("[错误]")
+
+
 def _scoped_dispatcher(env, assigned, name="scoped"):
     """子代理越界约束（agent-path-intent-loop M3）用例的装配：chat- 作者 +
     显式分配资产集，触发 `_ASSET_REF_TOOLS` 越界闸。"""
@@ -2505,7 +2560,6 @@ _INDEX_YAML = (
 def _write_web_pack(env, index_yaml=_INDEX_YAML):
     """tmp packs 里建 web 域 kb 源与全局 route_index.yaml（M0 单表）。"""
     _, _, _, tmp_path = env
-    (tmp_path / "packs" / "capabilities" / "web").mkdir(parents=True, exist_ok=True)
     kb = tmp_path / "packs" / "kb" / "web"
     (kb / "poc").mkdir(parents=True, exist_ok=True)
     (kb / "poc" / "文件上传.md").write_text(
@@ -2529,7 +2583,7 @@ def test_skill_context_no_route_index_inject(env):
     assert "可用知识库源" not in ctx
     assert "- demo：" in ctx  # generalist 注入全部启用技能描述
     # 白名单角色：只注入白名单内技能
-    skill_dir = env[3] / "packs" / "capabilities" / "web" / "skills" / "up"
+    skill_dir = env[3] / "packs" / "kb" / "skills" / "up"
     skill_dir.mkdir(parents=True, exist_ok=True)
     (skill_dir / "SKILL.md").write_text(
         "---\nname: up\ndescription: 上传测试\n---\n步骤。", encoding="utf-8")
@@ -2556,9 +2610,9 @@ def test_route_lookup_and_skill_open_tools(env):
     assert "文件上传测试" in out and "kb_open" in out  # legacy route index remains compatible
     assert d.dispatch("route_lookup", {"query": "zzz无关键词"}) .startswith("[无命中]")
     assert d.dispatch("route_lookup", {"query": ""}).startswith("[拒绝]")
-    out_skill = d.dispatch("skill_open", {"name": "demo"})  # 轨级 demo 技能
+    out_skill = d.dispatch("skill_open", {"name": "demo"})  # 扁平 demo 技能
     assert "按步骤执行" in out_skill
-    resource = env[3] / "packs" / "tracks" / "pentest" / "skills" / "demo" / "references"
+    resource = env[3] / "packs" / "kb" / "skills" / "demo" / "references"
     resource.mkdir()
     (resource / "method.md").write_text("自包含方法正文", encoding="utf-8")
     out_resource = d.dispatch("skill_open", {"name": "demo", "path": "references/method.md"})
@@ -2575,7 +2629,7 @@ def test_skill_context_digest_not_full_body(env):
     """K8 渐进披露：全量描述注入只给 name+description 行，技能正文不整段进
     system——正文靠 skill_open 按需打开。"""
     _write_web_pack(env)
-    skill_dir = env[3] / "packs" / "capabilities" / "web" / "skills" / "up"
+    skill_dir = env[3] / "packs" / "kb" / "skills" / "up"
     skill_dir.mkdir(parents=True, exist_ok=True)
     (skill_dir / "SKILL.md").write_text(
         "---\nname: up\ndescription: 上传测试\nkeywords: 上传\n---\n"
@@ -2935,6 +2989,39 @@ def test_bb_query_blueprint(env):
     assert full["content_md"] == "" and full["goal"] == ""
     out = d.dispatch("bb_query", {"what": "blueprint", "blueprint_id": "bp-nope"})
     assert out.startswith("[错误]")
+
+
+def test_mat_blueprint_sha_hit_preferred(env):
+    """R4 消费面接线 M1（2026-10-13）：_mat_blueprint 以 binary_sha256 命中优先。
+    样本绑定会话的 objective 形如 `sha256=<sha>`（不带蓝图名），旧口径只按
+    name/goal/模块 desc 子串匹配，这类会话根本命不中——sha 路径补掉该盲区。"""
+    bb, project, gw, _ = env
+    agent = make_agent(env, ScriptedLLM([]))
+    sha = "a" * 64
+    bb.create_blueprint(project["id"], "重建 aimodv1", goal="还原许可校验逻辑",
+                        binary_sha256=sha,
+                        modules=[{"name": "许可校验",
+                                  "func_addresses": ["0x401000", "0x401100"]},
+                                 {"name": "文件持久化"}])
+    # ① sha 全量命中（无蓝图名）
+    block, n = agent._mat_blueprint(f"逆向分诊任务。sha256={sha}；headless 已导出…")
+    assert n == 1 and "重建 aimodv1" in block
+    assert "许可校验" in block and "2 函数锚点" in block
+    # ② sha 前 12 位命中
+    block2, n2 = agent._mat_blueprint(f"样本 sha256={sha[:12]}…")
+    assert n2 == 1 and "重建 aimodv1" in block2
+    # ③ 无任何命中 → 空（不注入）
+    assert agent._mat_blueprint("完全无关的查询内容") == ("", 0)
+
+
+def test_mat_blueprint_name_substring_still_works(env):
+    """回落口径保留：无 sha 时 name 子串命中仍生效。"""
+    bb, project, gw, _ = env
+    agent = make_agent(env, ScriptedLLM([]))
+    bb.create_blueprint(project["id"], "重建 aimodv1",
+                        modules=[{"name": "许可校验", "desc": "授权检查"}])
+    block, n = agent._mat_blueprint("帮我看看重建 aimodv1 这份蓝图")
+    assert n == 1 and "重建 aimodv1" in block
 
 
 # ---------- read_file 工具（2026-09-20：只读工作区文件，host 原生直读） ----------

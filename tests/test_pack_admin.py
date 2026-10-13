@@ -21,12 +21,12 @@ _SKILL = ("---\nname: demo-skill\ndescription: 演示技能\nkeywords: a, b\n---
 @pytest.fixture()
 def client(tmp_path):
     packs = tmp_path / "packs"
-    _write(packs / "capabilities/web/pack.yaml", "kind: capability\nname: web\n")
-    _write(packs / "capabilities/web/rules/redlines.md", "# web 红线\n")
-    _write(packs / "capabilities/web/skills/demo-skill/SKILL.md", _SKILL)
-    _write(packs / "tracks/ctf/track.yaml", "name: ctf\n")
-    _write(packs / "tracks/ctf/rules/redlines.md", "# ctf 红线\n")
-    _write(packs / "tracks/ctf/task_types.yaml", "generic: passive\nrecon: passive\n")
+    # 新布局（能力包退役 2026-10-13）：技能扁平 packs/kb/skills/，轨 packs/kb/<track>/，
+    # 轨红线 packs/kb/安全红线/轨红线/<track>.md
+    _write(packs / "kb/skills/demo-skill/SKILL.md", _SKILL)
+    _write(packs / "kb/ctf/track.yaml", "name: ctf\n")
+    _write(packs / "kb/安全红线/轨红线/ctf.md", "# ctf 红线\n")
+    _write(packs / "kb/ctf/task_types.yaml", "generic: passive\nrecon: passive\n")
 
     app = create_app(workspace_root=str(tmp_path / "workspaces"),
                      packs_root=str(packs), tools_root=None,
@@ -118,7 +118,7 @@ def test_expert_crud_validation(client):
 def test_track_profiles_endpoint(client):
     """场景档清单端点（M4a）：目录缺省=空；档案=文件，读视图带 id/name 五件套字段。"""
     assert client.get("/api/tracks/ctf/profiles").json() == []
-    _write(client.packs / "tracks/ctf/profiles/p1.yaml",
+    _write(client.packs / "kb/ctf/profiles/p1.yaml",
            "name: 档一\nexperts: [_generalist]\nboard_view: board\n"
            "playbook: 一句话剧本\nartifacts: [writeup]\n")
     profs = client.get("/api/tracks/ctf/profiles").json()
@@ -132,110 +132,108 @@ def test_track_profiles_endpoint(client):
 def test_skill_create_toggle_and_delete(client):
     body = {"name": "new-skill", "description": "新技能",
             "keywords": ["sqli", "注入"], "file_features": ["elf"]}
-    r = client.post("/api/capabilities/web/skills", json=body)
-    assert r.status_code == 201 and r.json()["path"].endswith("web/skills/new-skill")
+    r = client.post("/api/skills", json=body)
+    assert r.status_code == 201 and r.json()["path"] == "skills/new-skill"
 
-    listed = {s["name"]: s for s in client.get("/api/capabilities/web/skills").json()}
+    listed = {s["name"]: s for s in client.get("/api/skills").json()}
     assert listed["new-skill"]["keywords"] == ["sqli", "注入"]
-    raw = client.get("/api/capabilities/web/skills/new-skill").json()["raw"]
+    raw = client.get("/api/skills/new-skill").json()["raw"]
     assert "name: new-skill" in raw and "file_features: elf" in raw
     assert "mode: self-contained" in raw
     assert "skill_open" in raw
 
     # cc 风格附属资源只从技能自身目录读取，不能穿越到 packs/kb。
-    resource = client.packs / "capabilities/web/skills/new-skill/references/method.md"
+    resource = client.packs / "kb/skills/new-skill/references/method.md"
     _write(resource, "自包含参考资料")
-    r = client.get("/api/capabilities/web/skills/new-skill/resources/references/method.md")
+    r = client.get("/api/skills/new-skill/resources/references/method.md")
     assert r.status_code == 200 and r.json()["content"] == "自包含参考资料"
     assert client.get(
-        "/api/capabilities/web/skills/new-skill/resources/../SKILL.md"
+        "/api/skills/new-skill/resources/../SKILL.md"
     ).status_code in {404, 422}
 
-    assert client.post("/api/capabilities/web/skills",
+    assert client.post("/api/skills",
                        json={"name": "new-skill"}).status_code == 409
-    assert client.post("/api/capabilities/nope/skills",
-                       json={"name": "x"}).status_code == 404
-    assert client.post("/api/capabilities/web/skills",
+    assert client.post("/api/skills",
                        json={"name": "bad/name"}).status_code == 422
 
     # 禁用：registry 视角即时生效，正文不动，有备份
-    r = client.patch("/api/capabilities/web/skills/new-skill/enabled",
+    r = client.patch("/api/skills/new-skill/enabled",
                      json={"enabled": False})
     assert r.status_code == 200 and r.json()["enabled"] is False
-    listed = {s["name"]: s for s in client.get("/api/capabilities/web/skills").json()}
+    listed = {s["name"]: s for s in client.get("/api/skills").json()}
     assert listed["new-skill"]["enabled"] is False
-    raw = client.get("/api/capabilities/web/skills/new-skill").json()["raw"]
+    raw = client.get("/api/skills/new-skill").json()["raw"]
     assert "enabled: false" in raw
     # 重新启用
-    r = client.patch("/api/capabilities/web/skills/new-skill/enabled",
+    r = client.patch("/api/skills/new-skill/enabled",
                      json={"enabled": True})
-    listed = {s["name"]: s for s in client.get("/api/capabilities/web/skills").json()}
+    listed = {s["name"]: s for s in client.get("/api/skills").json()}
     assert listed["new-skill"]["enabled"] is True
 
     # 删除整目录进回收站
-    r = client.delete("/api/capabilities/web/skills/new-skill")
+    r = client.delete("/api/skills/new-skill")
     assert r.status_code == 200
-    trash = list((client.packs / "capabilities/web/skills/.history/trash").iterdir())
+    trash = list((client.packs / "kb/skills/.history/trash").iterdir())
     assert any(p.name.startswith("new-skill.") and p.is_dir() for p in trash)
-    assert client.delete("/api/capabilities/web/skills/new-skill").status_code == 404
+    assert client.delete("/api/skills/new-skill").status_code == 404
 
 
-def test_track_skill_create_and_disable_keeps_body(client):
-    """轨级技能同样可建/禁用；禁用时正文与其它字段原样保留。"""
-    r = client.post("/api/tracks/ctf/skills", json={"name": "triage-x"})
+def test_skill_create_and_disable_keeps_body(client):
+    """技能可建/禁用；禁用时正文与其它字段原样保留。"""
+    r = client.post("/api/skills", json={"name": "triage-x"})
     assert r.status_code == 201
-    client.patch("/api/tracks/ctf/skills/triage-x/enabled", json={"enabled": False})
-    raw = client.get("/api/tracks/ctf/skills/triage-x").json()["raw"]
+    client.patch("/api/skills/triage-x/enabled", json={"enabled": False})
+    raw = client.get("/api/skills/triage-x").json()["raw"]
     assert "enabled: false" in raw and "# triage-x" in raw
-    listed = {s["name"]: s for s in client.get("/api/tracks/ctf/skills").json()}
+    listed = {s["name"]: s for s in client.get("/api/skills").json()}
     assert listed["triage-x"]["enabled"] is False
 
 
 # ---------------- .history：两种命名 / diff / 回滚往返 / 防穿越 ----------------
 
 def test_history_list_diff_rollback_roundtrip(client):
-    redlines = client.packs / "tracks/ctf/rules/redlines.md"
+    redlines = client.packs / "kb/安全红线/轨红线/ctf.md"
     hist = redlines.parent / ".history"
-    _write(hist / "20200101T000000Z_redlines.md", "# 旧版一 OLD1\n")
-    _write(hist / "redlines.md.20200102T000002Z.bak", "# 旧版二 OLD2\n")
+    _write(hist / "20200101T000000Z_ctf.md", "# 旧版一 OLD1\n")
+    _write(hist / "ctf.md.20200102T000002Z.bak", "# 旧版二 OLD2\n")
     redlines.write_text("# 当前版 CUR\n", encoding="utf-8")
 
-    r = client.get("/api/packs/history", params={"file": "tracks/ctf/rules/redlines.md"})
+    r = client.get("/api/packs/history", params={"file": "kb/安全红线/轨红线/ctf.md"})
     assert r.status_code == 200
     versions = r.json()["versions"]
     assert [v["version"] for v in versions] == [
-        "redlines.md.20200102T000002Z.bak", "20200101T000000Z_redlines.md"]  # ts 倒序
+        "ctf.md.20200102T000002Z.bak", "20200101T000000Z_ctf.md"]  # ts 倒序
 
     diff = client.get("/api/packs/history/diff", params={
-        "file": "tracks/ctf/rules/redlines.md",
-        "version": "20200101T000000Z_redlines.md"}).json()["diff"]
+        "file": "kb/安全红线/轨红线/ctf.md",
+        "version": "20200101T000000Z_ctf.md"}).json()["diff"]
     assert "OLD1" in diff and "CUR" in diff
 
     # 回滚到旧版一：当前版先被再备份（返回件即 CUR，可凭它往返）
     r = client.post("/api/packs/history/rollback", params={
-        "file": "tracks/ctf/rules/redlines.md",
-        "version": "20200101T000000Z_redlines.md"})
+        "file": "kb/安全红线/轨红线/ctf.md",
+        "version": "20200101T000000Z_ctf.md"})
     assert r.status_code == 200
     cur_backup = r.json()["current_backed_up"]
-    assert cur_backup and cur_backup.endswith("_redlines.md")
+    assert cur_backup and cur_backup.endswith("_ctf.md")
     assert redlines.read_text(encoding="utf-8") == "# 旧版一 OLD1\n"
     # 列表多了回滚前的当前版备份
     versions_after = client.get("/api/packs/history", params={
-        "file": "tracks/ctf/rules/redlines.md"}).json()["versions"]
+        "file": "kb/安全红线/轨红线/ctf.md"}).json()["versions"]
     assert len(versions_after) == 3
     # 立刻再回滚（同秒！）：新备份不得覆盖 cur_backup，内容必须仍是 CUR
     r2 = client.post("/api/packs/history/rollback", params={
-        "file": "tracks/ctf/rules/redlines.md", "version": cur_backup})
+        "file": "kb/安全红线/轨红线/ctf.md", "version": cur_backup})
     assert r2.status_code == 200
     assert redlines.read_text(encoding="utf-8") == "# 当前版 CUR\n"
 
 
 def test_history_put_creates_version_and_rejects_traversal(client):
-    # PUT 编辑自动留版本（<ts>_<file> 命名；角色 PUT 已退役 M2，改用技能 PUT 验同一备份链路）
-    client.put("/api/capabilities/web/skills/demo-skill",
+    # PUT 编辑自动留版本（<ts>_<file> 命名；技能扁平化后走 /api/skills/<name> PUT 验同一备份链路）
+    client.put("/api/skills/demo-skill",
                json={"content": _SKILL.replace("BODY_MARKER", "改过了")})
     versions = client.get("/api/packs/history", params={
-        "file": "capabilities/web/skills/demo-skill/SKILL.md"}).json()["versions"]
+        "file": "kb/skills/demo-skill/SKILL.md"}).json()["versions"]
     assert len(versions) == 1 and versions[0]["version"].endswith("_SKILL.md")
 
     # 防穿越：越层 / 非 packs 前缀 / 伪造 version 段
@@ -244,26 +242,22 @@ def test_history_put_creates_version_and_rejects_traversal(client):
     assert client.get("/api/packs/history",
                       params={"file": "config/mcp.json"}).status_code == 422
     assert client.get("/api/packs/history/diff", params={
-        "file": "tracks/ctf/rules/redlines.md",
+        "file": "kb/安全红线/轨红线/ctf.md",
         "version": "../app.py"}).status_code == 422
     assert client.post("/api/packs/history/rollback", params={
-        "file": "tracks/ctf/rules/redlines.md",
-        "version": "19990101T000000Z_redlines.md"}).status_code == 404
+        "file": "kb/安全红线/轨红线/ctf.md",
+        "version": "19990101T000000Z_ctf.md"}).status_code == 404
 
 
 # ---------------- redlines 缺失语义：200 + exists 标志（不再 404） ----------------
 
 def test_rules_missing_returns_200_with_exists_false(client):
-    # web 红线在夹具里存在
-    r = client.get("/api/capabilities/web/rules")
+    # ctf 轨红线在夹具里存在
+    r = client.get("/api/tracks/ctf/rules")
     assert r.status_code == 200 and r.json()["exists"] is True
-    assert r.json()["content"] == "# web 红线\n"
-    # 只建包目录、不建 redlines：缺失是预期态，不给 404
-    _write(client.packs / "capabilities/binary/pack.yaml", "kind: capability\nname: binary\n")
-    r = client.get("/api/capabilities/binary/rules")
-    assert r.status_code == 200 and r.json() == {"content": "", "exists": False}
-    # 轨红线缺失同理
-    _write(client.packs / "tracks/research/track.yaml", "name: research\n")
+    assert r.json()["content"] == "# ctf 红线\n"
+    # 未建红线的轨：缺失是预期态，不给 404
+    _write(client.packs / "kb/research/track.yaml", "name: research\n")
     r = client.get("/api/tracks/research/rules")
     assert r.status_code == 200 and r.json() == {"content": "", "exists": False}
 

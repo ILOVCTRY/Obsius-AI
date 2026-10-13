@@ -3,5 +3,6 @@ name: 分诊
 description: "静态分诊：只看不跑，快速给出文件类型/保护/建议下一步"
 persona: "静态分诊专家：只看不跑，快速给出文件类型/保护/建议下一步。"
 skills: [file-triage, triage]
+knowledge: [binary]
 task_types: [triage, recon]
 tracks: [ctf]

@@ -4,13 +4,13 @@ import {
 } from "react"
 import {
   AlertTriangle, Bot, Check, ChevronDown, CircleSlash, Clock3, Cpu, Gauge, Loader2,
-  Paperclip, Plug, Plus, Send, Sparkles, Square, Trash2, Wrench, X, Zap,
+  Paperclip, Plug, Plus, RefreshCw, Send, Sparkles, Square, Trash2, Wrench, X, Zap,
 } from "lucide-react"
 import { api, ApiError } from "@/lib/api"
 import type {
   AttachmentInfo, ChatAgent, ChatMcpServer, ChatMessage, ChatThread, ChatThreadError,
 } from "@/lib/types"
-import type { Approval, DecideApprovalResult, ProjectDetail, SkillDef } from "@/lib/types"
+import type { Approval, DecideApprovalResult, ProjectDetail } from "@/lib/types"
 import { MarkdownView } from "@/components/settings/MarkdownView"
 import { WorkbenchContextRail } from "@/components/workbench/WorkbenchContextRail"
 import { ActivityGroup } from "@/components/chat/ActivityGroup"
@@ -72,8 +72,11 @@ const ASIDE_DEFAULT = 236
 const ASIDE_RESERVE = [".wb-rail, .wb-rail-handle"]
 const ASIDE_RESERVE_EXTRA = 16
 
-export function AgentWorkbenchView({ pid, meta }: {
+export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: {
   pid: string; meta: ProjectDetail | null
+  /** 外部（蓝图产出入口 goto-agents）指定要打开的线程 id；消费后回调清空 */
+  focusThread?: string | null
+  onFocusConsumed?: () => void
 }) {
   const [agents, setAgents] = useState<ChatAgent[]>([])
   const [agentId, setAgentId] = useState<string>(ORCHESTRATOR)
@@ -161,8 +164,27 @@ export function AgentWorkbenchView({ pid, meta }: {
     api.chatThreads(pid, aid).then(setThreads).catch(() => setThreads([]))
   }, [pid])
 
-  useEffect(() => { reloadThreads(agentId); setTid(null); setThread(null); setMessages([]) },
-    [agentId, reloadThreads])
+  // 外部聚焦线程（goto-agents，M2）：agentId 切换会触发下面的重置 effect，故先存
+  // ref、切到 ORCHESTRATOR，由重置 effect 消费 ref 选中；agentId 已是 ORCHESTRATOR
+  // 时直接 setTid（重置 effect 不重跑）。
+  const focusTidRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!focusThread) return
+    if (agentId === ORCHESTRATOR) {
+      setTid(focusThread)
+    } else {
+      focusTidRef.current = focusThread
+      setAgentId(ORCHESTRATOR)
+    }
+    onFocusConsumed?.()
+  }, [focusThread, agentId, onFocusConsumed])
+
+  useEffect(() => {
+    reloadThreads(agentId)
+    setTid(focusTidRef.current)
+    focusTidRef.current = null
+    setThread(null); setMessages([])
+  }, [agentId, reloadThreads])
 
   // 轮询拉线程详情（2s）。load 存进 ref，供「用户消息事件到达」时即时补拉。
   // **2026-10-04 修「发送后空白」**：乐观行 pendingIn 只在「持久化的 user 消息
@@ -179,9 +201,20 @@ export function AgentWorkbenchView({ pid, meta }: {
       setMessages(d.messages)
       setWorkDir(d.work_dir ?? null)
       setLoaded(true)
-      // 对账乐观行：持久化的 user 消息出现后才移除本地占位
-      setPendingIn((cur) => cur && d.messages.some(
-        (m) => m.role === "user" && m.content === cur) ? null : cur)
+      // 对账乐观行：持久化的 user 消息出现后才移除本地占位。**带附件时后端会把
+      // 「附件：\n- 路径」段拼在正文后**（core/chat/runtime.py run()），故不能用
+      // 全等匹配——否则带附件的消息 pendingIn 永不清除，正文会在时间线尾部重影
+      // 一次（2026-10-13 修用户实测「用户消息重复渲染」）。取最近一条 user 消息，
+      // 允许其后追加附件段（`cur + "\n"` 前缀）。
+      setPendingIn((cur) => {
+        if (!cur) return cur
+        for (let i = d.messages.length - 1; i >= 0; i--) {
+          const m = d.messages[i]
+          if (m.role !== "user") continue
+          return m.content === cur || m.content.startsWith(`${cur}\n`) ? null : cur
+        }
+        return cur
+      })
     }).catch(() => {})
     reloadRef.current = load
     load()
@@ -193,17 +226,27 @@ export function AgentWorkbenchView({ pid, meta }: {
 
   useEffect(() => {
     if ((panel !== "skills" && slash?.mode !== "skills") || skills.length) return
-    const packs = [...new Set([...(meta?.capabilities ?? []), ...(meta?.track ? [meta.track] : [])])]
-    Promise.all(packs.map((p) => api.capSkills(p).catch(() => [] as SkillDef[])))
-      .then((lists) => setSkills(lists.flat().map((s) => ({
+    api.skills()
+      .then((list) => setSkills(list.map((s) => ({
         name: s.name, description: (s as { description?: string }).description ?? "",
       }))))
       .catch(() => {})
-  }, [panel, slash, skills.length, meta])
+  }, [panel, slash, skills.length])
+  // MCP 面板：结果**缓存**，反复点开不再每次重新请求（后端 status() 会逐 server
+  // 探活 tools/list，点一次刷一次既慢又闪）。首次点开拉一次，之后复用；需要时点
+  // 面板内「刷新」强制重探（MCP 进程后起时用）。切项目（pid 变）即失效重拉。
+  const mcpLoadedRef = useRef(false)
+  useEffect(() => { mcpLoadedRef.current = false; setMcpServers([]) }, [pid])
+  const loadMcp = useCallback((force = false) => {
+    if (mcpLoadedRef.current && !force) return
+    api.chatMcp(pid)
+      .then((r) => { setMcpServers(r.servers); mcpLoadedRef.current = true })
+      .catch(() => {})
+  }, [pid])
   useEffect(() => {
     if (panel !== "mcp" && slash?.mode !== "mcp") return
-    api.chatMcp(pid).then((r) => setMcpServers(r.servers)).catch(() => {})
-  }, [panel, slash, pid])
+    loadMcp()
+  }, [panel, slash, loadMcp])
 
   // ---- 流式 delta / 工具活动（事件管道增强） ----
   // 只消费**当前用户消息之后**的事件（与 liveThinking 同款守卫，2026-10-12 修）：
@@ -245,14 +288,30 @@ export function AgentWorkbenchView({ pid, meta }: {
     }
     return { byId, legacy }
   }, [events, tid])
+  // 底部实时工具行（「运行中」）判据（2026-10-13 修「重启后幽灵运行中」）：只认
+  // 「本线程最近一条 chat.tool 事件是 start」且该 tool_call_id **尚无持久化结果行**。
+  // 旧实现取 byId 里最后一条 phase=start 的事件——中断/重启遗留的孤儿 start（后端
+  // 只补 chat_messages 结果行、没补 done 事件）在 Map 里永久驻留，被当成本轮正在跑
+  // 的工具（用户实测：中断前的 list_symbols 重启后仍显示「运行中」）。改按事件流
+  // 最后一条判定 + 已落库结果行交叉排除孤儿。
   const liveToolStart = useMemo(() => {
-    let latest: { name?: string; args_head?: string } | null = null
-    for (const p of liveTools.byId.values()) {
-      if (p.phase === "start") latest = p
+    type LiveTool = { tool_call_id?: string; phase?: string; name?: string; args_head?: string }
+    const answered = new Set<string>()
+    for (const m of messages) {
+      if (m.role === "tool" && m.tool_use_id) answered.add(m.tool_use_id)
     }
-    const legacyStart = [...liveTools.legacy].reverse().find((p) => p.phase === "start")
-    return legacyStart ?? latest
-  }, [liveTools])
+    for (let i = events.length - 1; i >= 0; i--) {
+      const e = events[i]
+      if (e.kind !== "chat.tool") continue
+      const p = e.payload as LiveTool & { thread_id?: string }
+      if (p?.thread_id !== tid) continue
+      if (p.phase !== "start") return null            // 最近一条已 done → 无工具在跑
+      if (p.tool_call_id && answered.has(p.tool_call_id)) return null  // 结果已落库=遗留
+      // 带上 start 事件时刻 → 工具行显示「已运行 Ns」（逐秒刷新，2026-10-13）
+      return { ...p, created_at: e.created_at }
+    }
+    return null
+  }, [events, tid, messages])
   // 传输层 524 重试进度：provider 通过 chat.retry 事件实时上报，避免长时间
   // 只显示「思考中」让人误以为请求已经卡死。
   const liveRetry = useMemo(() => {
@@ -315,6 +374,30 @@ export function AgentWorkbenchView({ pid, meta }: {
         { key: "messages", label: "会话消息", tokens: bk.messages, cls: "seg-msgs" },
       ] as const).filter((s) => s.tokens > 0)
     : []
+  // 缓存命中（2026-10-13）：口径同 core/autonomy.py::_cache_hit——命中率 =
+  // cache_read / input（input = 未缓存 + 缓存读 + 缓存写，见 core/chat/runtime.py）。
+  // 主=当步，附=累计（cache_read_total / input_total）。首步冷缓存必 0%。
+  const cache = (() => {
+    const total = usage?.input ?? 0
+    if (!usage || total <= 0) return null
+    const read = usage.cache_read ?? 0
+    const write = usage.cache_creation ?? 0
+    const uncached = Math.max(0, total - read - write)
+    const pct = (n: number) => Math.round((n / total) * 100)
+    const hitPct = pct(read)
+    const totalIn = usage.input_total ?? 0
+    return {
+      hitPct,
+      cold: (usage.steps ?? 0) <= 1,
+      totalPct: totalIn > 0 ? Math.round(((usage.cache_read_total ?? 0) / totalIn) * 100) : 0,
+      level: hitPct >= 60 ? "is-ok" : hitPct >= 30 ? "is-warn" : "is-high",
+      segs: [
+        { key: "read", label: "缓存读", tokens: read, pct: pct(read), cls: "seg-cache-read" },
+        { key: "write", label: "缓存写", tokens: write, pct: pct(write), cls: "seg-cache-write" },
+        { key: "uncached", label: "未缓存", tokens: uncached, pct: pct(uncached), cls: "seg-uncached" },
+      ],
+    }
+  })()
 
   // 切线程时收起斜杠面板与用量浮层
   useEffect(() => { setUsageOpen(false); setSlash(null) }, [tid])
@@ -626,7 +709,8 @@ export function AgentWorkbenchView({ pid, meta }: {
               {running && liveToolStart && !hasPendingCall && (
                 <div className="wb-anim">
                   <ToolBlock name={liveToolStart.name ?? "?"}
-                    argsHead={liveToolStart.args_head} done={false} />
+                    argsHead={liveToolStart.args_head} done={false}
+                    startedAt={liveToolStart.created_at} />
                 </div>
               )}
               {(running || !!pendingIn) && !liveDelta && !liveThinking && !liveToolStart && !hasPendingCall && (
@@ -768,10 +852,39 @@ export function AgentWorkbenchView({ pid, meta }: {
                     ) : (
                       <div className="wb-usage-bar"><i className={usageLevel} style={{ width: `${usagePct}%` }} />{showSoftLine && <i className="seg-soft" style={{ left: `${softLeftPct}%` }} />}</div>
                     )}
+                    {/* 缓存命中（2026-10-13）：第二根分段条——把本轮输入拆成
+                        缓存读/缓存写/未缓存；大号命中率贴条上方（当步口径），
+                        右附累计。首步冷缓存显「首步」而非 0%。 */}
+                    {cache && (
+                      <div className="mt-2 border-t border-border/50 pt-2">
+                        <div className="wb-usage-head-row">
+                          <b className="wb-usage-total">缓存命中
+                            <span className={cn("wb-usage-pct-big ml-1", cache.level)}>{cache.hitPct}%</span>
+                          </b>
+                          <span className="wb-thread-meta">
+                            {cache.cold ? "首步（冷缓存）" : `累计 ${cache.totalPct}%`}
+                          </span>
+                        </div>
+                        <div className="wb-usage-segs" role="img" aria-label="缓存构成分段条">
+                          {cache.segs.map((s) => (
+                            <i key={s.key} className={s.cls}
+                              style={{ width: `${s.pct}%` }}
+                              title={`${s.label} ${fmtTokens(s.tokens)}（${s.pct}%）`} />
+                          ))}
+                        </div>
+                        <div className="wb-usage-legend">
+                          {cache.segs.map((s) => (
+                            <div className="wb-usage-li" key={s.key}>
+                              <i className={cn("wb-usage-dot", s.cls)} />
+                              <b className="shrink-0">{s.label}</b>
+                              <span className="wb-usage-num">{fmtTokens(s.tokens)} · {s.pct}%</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                     <div className="wb-kv"><b className="shrink-0">输出（累计）</b><span className="wb-usage-num">{fmtTokens(usage.output ?? 0)}</span></div>
                     <div className="wb-kv"><b className="shrink-0">模型步数</b><span className="wb-usage-num">{usage.steps ?? 0}</span></div>
-                    <div className="wb-kv"><b className="shrink-0">缓存读取</b><span className="wb-usage-num">{fmtTokens(usage.cache_read ?? 0)}</span></div>
-                    <div className="wb-kv"><b className="shrink-0">缓存写入</b><span className="wb-usage-num">{fmtTokens(usage.cache_creation ?? 0)}</span></div>
                     {!bk && <div className="wb-kv is-hint">发送一条消息后生成分类构成（系统提示/工具/消息占比）</div>}
                   </>
                 ) : (
@@ -918,6 +1031,13 @@ export function AgentWorkbenchView({ pid, meta }: {
                 )}
                 {panel === "mcp" && (
                   <div className="grid gap-2">
+                    <div className="flex items-center justify-between">
+                      <span className="wb-thread-meta">MCP 服务器（点选加入本轮）</span>
+                      <button className="wb-cap" title="重新探测 MCP 工具"
+                        onClick={() => loadMcp(true)}>
+                        <RefreshCw size={11} /> 刷新
+                      </button>
+                    </div>
                     {mcpServers.map((s) => (
                       <button key={s.name} className="wb-mcp-row" title="点击添加到本轮（仅当轮生效）"
                         onClick={() => addRef("mcps", s.name)}>
@@ -1178,12 +1298,25 @@ function TodoCard({ todo }: { todo: { id: string; title: string; status: string 
 
 // 工具明细行（会话流改造 2026-10-03）：折在 ActivityGroup 展开态里的一行，
 // 点开看参数/结果原文（Tailwind 工具类，不再用 .wb-tool 卡片样式）。
-function ToolBlock({ name, args, argsHead, result, done, live }: {
+function ToolBlock({ name, args, argsHead, result, done, live, startedAt }: {
   name: string; args?: Record<string, unknown>; argsHead?: string
   result?: string; done: boolean
   live?: { ok?: boolean; duration_s?: number; result_head?: string } | null
+  startedAt?: string
 }) {
   const [open, setOpen] = useState(false)
+  // 运行中逐秒刷新「已运行 Ns」（2026-10-13）：替代静态「运行中」，长工具（MCP 全量
+  // 分诊可达数十秒）能看出在跑而非卡死。结束/无起始时刻即停表。
+  const [elapsed, setElapsed] = useState(0)
+  useEffect(() => {
+    if (done || !startedAt) return
+    const t0 = new Date(startedAt).getTime()
+    const tick = () => setElapsed(
+      Number.isNaN(t0) ? 0 : Math.max(0, Math.floor((Date.now() - t0) / 1000)))
+    tick()
+    const id = setInterval(tick, 1000)
+    return () => clearInterval(id)
+  }, [done, startedAt])
   // ok 三态来源：持久化结果行 → 「[错误]」前缀约定；事件实时态 → 后端结构化 ok
   const ok = done
     ? live ? live.ok !== false : !(result ?? "").startsWith("[错误")
@@ -1200,7 +1333,7 @@ function ToolBlock({ name, args, argsHead, result, done, live }: {
         <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-muted-foreground/70">
           {args ? JSON.stringify(args).slice(0, 140) : argsHead ?? ""}
         </span>
-        {!done && <span className="shrink-0 font-mono text-[9px] text-primary">运行中</span>}
+        {!done && <span className="shrink-0 font-mono text-[9px] text-primary">已运行 {elapsed}s</span>}
         {done && live && <span className="shrink-0 font-mono text-[9px] text-muted-foreground/60">{live.duration_s ?? "?"}s</span>}
         {done && <ChevronDown size={12} className={cn("shrink-0 text-muted-foreground transition-transform", open && "rotate-180")} />}
       </button>

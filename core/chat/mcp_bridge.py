@@ -27,6 +27,17 @@ MCP_PROTOCOL_VERSION = "2024-11-05"
 _CALL_TIMEOUT = 60.0
 _PROBE_TIMEOUT = 8.0
 
+# 重活 MCP 工具的体积闸（2026-10-13 用户口径）：GUI 上的全量工具对超大样本会把 IDA
+# 主线程占死（execute_sync 同步跑，界面卡死）。阈值按**源程序大小**判定——与引擎
+# 分析的 10MB（SAMPLE_AUTO_MAX_BYTES）有意不同：这是对已开库的重活遍历，不是新分析。
+# 值 = 工具名 → 上限字节。后续若发现别的全量工具暴露给 Agent，按此清单扩。
+HEAVY_MCP_TOOLS: dict[str, int] = {"survey_binary": 30 * 1024 * 1024}
+
+# 重活工具的调用超时（2026-10-13 用户口径「等待时间拉到 3 分钟」）：GUI 上的全量工具
+# 即便样本在阈值内也可能跑数十秒（IDA 主线程串行），默认 60s 会先超时报「server 离线或
+# 协议错误」。给 HEAVY_MCP_TOOLS 里的工具放宽到 180s；其余工具维持 _CALL_TIMEOUT。
+HEAVY_CALL_TIMEOUT = 180.0
+
 # FOFA 密钥单一真相源 = 测绘配置 config/fofa.json（前端「网络空间测绘」设置写的就是它）。
 # fofa MCP server（外部仓库）自己读的是 mcp-servers/fofa_MCP/.env——两份会漂移，故平台
 # 起它时注入来自 fofa.json 的 FOFA_* env（fofa.py 优先取进程 env，自身 .env 不覆盖已存在
@@ -397,10 +408,10 @@ class MCPServerRuntime:
             self._tools_at = time.monotonic()
             return tools
 
-    def call(self, tool: str, args: dict) -> str:
+    def call(self, tool: str, args: dict, *, timeout: float | None = None) -> str:
         result = self._conn._rpc(
             "tools/call", {"name": tool, "arguments": args},
-            timeout=_CALL_TIMEOUT)
+            timeout=timeout or _CALL_TIMEOUT)
         if not isinstance(result, dict):
             return "[错误] MCP 调用失败：server 离线或协议错误"
         texts = [c.get("text", "") for c in result.get("content") or []
@@ -659,10 +670,53 @@ class MCPBridge:
                 return f"[错误] MCP 调用失败：无法启动 {server} 会话进程: {e}"
         else:
             rt = srv
+        blocked = self._heavy_mcp_blocked(rt, tool)
+        if blocked is not None:
+            return blocked
+        # 重活工具放宽调用超时（默认 60s 对全量工具不够，见 HEAVY_CALL_TIMEOUT）
+        timeout = HEAVY_CALL_TIMEOUT if tool in HEAVY_MCP_TOOLS else None
         try:
-            return rt.call(tool, args)
+            return rt.call(tool, args, timeout=timeout)
         except Exception as e:  # noqa: BLE001 —— 工具崩溃回文本，不断轮
             return f"[错误] MCP 调用异常: {e}"
+
+    def _heavy_mcp_blocked(self, rt, tool: str) -> str | None:
+        """重活 MCP 工具的体积闸（2026-10-13 用户口径）：GUI 上的全量工具（如
+        survey_binary）对超大样本会把 IDA 主线程占死（界面卡死），按当前库对应
+        源程序大小拦截。**fail-closed**：拿不到大小即拒（拿不到只在 IDA 不可用/
+        样本缺失时发生，而那时该工具本来也调不通，拒绝无副作用）。"""
+        limit = HEAVY_MCP_TOOLS.get(tool)
+        if limit is None:
+            return None
+        size = self._current_sample_size(rt)
+        if size is None:
+            return (f"[错误] 已拦截 {tool}：无法确认当前 IDA 库对应样本的大小"
+                    "（IDA 未在线或样本文件缺失）。确认 IDA 已打开样本后重试。")
+        if size >= limit:
+            return (f"[错误] 已拦截 {tool}：当前样本约 {size / 1048576:.1f}MB ≥ "
+                    f"{limit // 1048576}MB，全量分诊会长时间占用 IDA 主线程导致界面卡死；"
+                    "请改用平台「开始分析」（headless，不占 GUI）。")
+        return None
+
+    @staticmethod
+    def _current_sample_size(rt) -> int | None:
+        """当前 IDA 库对应源程序大小（字节）：取 server_health 的 input_path 再 stat。
+        任何一步失败返回 None（fail-closed 由调用方处理）。"""
+        try:
+            raw = rt.call("server_health", {})
+        except Exception:  # noqa: BLE001 —— 探活失败视为不可判定
+            return None
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+        p = data.get("input_path") if isinstance(data, dict) else None
+        if not p:
+            return None
+        try:
+            return Path(p).stat().st_size
+        except OSError:
+            return None
 
 
 class _TooManyBrowserSessions(RuntimeError):

@@ -2,25 +2,27 @@
 
 优先级链：rules > SKILL.md > kb 知识库 > references。
 
-- pack_rules(capabilities, track)：能力包红线 ∪ 轨红线，构建系统提示时全量注入。
-- owner_rules(track, tags)：按资产 owner 叠加的更严规则（EDUSRC/OSRC/YSRC 模式）。
-- rating_rules(track, tags)：评级与价值口径（rating/<tag>.md，F11 判级依据注入）。
-- resolve_rule_profiles(...)：rule_profiles 显式解析 → (生效 owners, 生效 ratings)。
-- role_rules(track, role)：角色专属红线（role-rules/<role>.md，仅绑定角色注入）。
-- parse_rule_doc / validate_rule_meta / load_rule_templates：四段一体模板
-  （rules-four-section M1：frontmatter 结构化字段 + 正文；M2 接注入与实例层）。
-- load_kb_sources(capabilities)：合成启用能力域的 kb 源（packs/kb/<域>/，kb_open 消费）。
-
-rules/*.md glob 不递归：owners/、role-rules/、rating/ 子目录天然不进全量注入。
+2026-10-13 能力包退役后的规则布局（全部收在 `packs/kb/安全红线/`）：
+- 轨红线：`安全红线/轨红线/<track>.md`（全量注入）。
+- 平台规则：`安全红线/平台规则/<tag>.md`（owner 叠加，**渗透独有**）。
+- 评级与价值口径：`安全红线/评级与价值口径/<tag>.md`（F11 判级依据，**渗透独有**）。
+- 四段一体模板：`安全红线/templates/<tag>.md`。
+- 角色专属红线 role-rules 已退役（原为空）。
+- load_kb_sources(directions)：合成启用方向的 kb 源（`packs/kb/<方向>/`，kb_open 消费）。
 """
 
 from dataclasses import dataclass
 from pathlib import Path
 
-from core.skills.taxonomy import capability_dir, track_dir
+from core.skills.taxonomy import (
+    platform_rules_dir, rating_dir, redline_path, rule_templates_dir,
+)
 
 # noise_caps 值域（与 tasks.noise_budget 同枚举）；语义=噪声上限档，叠加取最严
 NOISE_LEVELS = ("passive", "low", "medium", "high")
+
+# 平台规则 / 评级与价值口径仅对渗透轨生效
+_PLATFORM_TRACK = "pentest"
 
 
 @dataclass
@@ -42,20 +44,22 @@ def _read_text_safe(path: Path) -> str | None:
 
 def pack_rules(packs_root: str | Path, capabilities: list[str] | None = None,
                track: str | None = None) -> list[tuple[str, str]]:
-    """返回 [(规则名, 正文)]：启用能力包 rules/*.md ∪ 场景轨 rules/*.md。"""
+    """返回 [(规则名, 正文)]：轨红线（`安全红线/轨红线/<track>.md`）。
+
+    capabilities 入参保留兼容（能力包红线已退役，不再有包级红线）。"""
     out: list[tuple[str, str]] = []
-    for cap in capabilities or []:
-        out.extend(_read_md_dir(capability_dir(packs_root, cap) / "rules",
-                                prefix=f"cap:{cap}/"))
     if track:
-        out.extend(_read_md_dir(track_dir(packs_root, track) / "rules",
-                                prefix=f"track:{track}/"))
+        text = _read_text_safe(redline_path(packs_root, track))
+        if text is not None:
+            out.append((f"track:{track}/redlines", text))
     return out
 
 
 def owner_rules(packs_root: str | Path, track: str, owner_tags: list[str]) -> list[tuple[str, str]]:
-    """按 owner 标签叠加规则：tracks/<track>/rules/owners/<tag>.md。"""
-    base = track_dir(packs_root, track) / "rules" / "owners"
+    """平台规则（owner 叠加，渗透独有）：`安全红线/平台规则/<tag>.md`。"""
+    if track != _PLATFORM_TRACK:
+        return []
+    base = platform_rules_dir(packs_root)
     out: list[tuple[str, str]] = []
     for tag in owner_tags:
         f = base / f"{tag}.md"
@@ -64,16 +68,6 @@ def owner_rules(packs_root: str | Path, track: str, owner_tags: list[str]) -> li
             if text is not None:
                 out.append((f"owner:{tag}", text))
     return out
-
-
-def role_rules(packs_root: str | Path, track: str, role: str) -> tuple[str, str] | None:
-    """角色专属红线：tracks/<track>/rules/role-rules/<role>.md。不存在返回 None。"""
-    f = track_dir(packs_root, track) / "rules" / "role-rules" / f"{role}.md"
-    if f.is_file():
-        text = _read_text_safe(f)
-        if text is not None:
-            return f"role:{role}", text
-    return None
 
 
 # ---------- 四段一体模板（rules-four-section M1，2026-09-23）----------
@@ -145,13 +139,12 @@ def validate_rule_meta(name: str, meta: dict) -> None:
         raise ValueError(f"规则模板 {name}.rating_ref 须为非空字符串")
 
 
-def load_rule_templates(packs_root: str | Path, track: str) -> list[dict]:
-    """轨模板库：tracks/<track>/rules/templates/*.md → [{name, meta, body}]（名称序）。
+def load_rule_templates(packs_root: str | Path, track: str | None = None) -> list[dict]:
+    """规则模板库：`安全红线/templates/*.md` → [{name, meta, body}]（名称序）。
 
     坏 frontmatter 字段静默降级为空 meta（validate_rule_meta 由 doctor 显式调用
-    出体检项，读取侧宁容错不阻断注入）。
-    """
-    base = track_dir(packs_root, track) / "rules" / "templates"
+    出体检项，读取侧宁容错不阻断注入）。"""
+    base = rule_templates_dir(packs_root)
     out: list[dict] = []
     if not base.is_dir():
         return out
@@ -166,8 +159,10 @@ def load_rule_templates(packs_root: str | Path, track: str) -> list[dict]:
 
 
 def rating_rules(packs_root: str | Path, track: str, tags: list[str]) -> list[tuple[str, str]]:
-    """评级与价值口径（F11）：tracks/<track>/rules/rating/<tag>.md，判级依据注入。"""
-    base = track_dir(packs_root, track) / "rules" / "rating"
+    """评级与价值口径（F11，渗透独有）：`安全红线/评级与价值口径/<tag>.md`。"""
+    if track != _PLATFORM_TRACK:
+        return []
+    base = rating_dir(packs_root)
     out: list[tuple[str, str]] = []
     for tag in tags:
         f = base / f"{tag}.md"
@@ -183,40 +178,36 @@ def resolve_rule_profiles(
     rule_profiles: dict | None,
 ) -> tuple[list[str], list[str]]:
     """rule_profiles 显式解析（F11；2026-10-01 去三态改纯显式）→
-    (生效 owners, 生效 ratings)。
+    (生效 owners, 生效 ratings)。平台规则/评级与价值口径**渗透独有**，
+    非渗透轨恒返回空。
 
     **勾哪个生效哪个**：owners/rating 都只认显式清单，未配（键缺失/None）= 不注入。
-    不再有「缺省=自动全注入 owner_tags」与「rating 自动跟随 owner 命中」——项目
-    未配置过就不叠加任何 owner/rating 规则（能力包红线/轨红线/角色红线不经此处，
-    仍恒注入）。
-
-    - owners：键存在 = 显式清单 ∩ 文件存在；键缺失/None = 空。
-    - rating：键存在 = 显式清单 ∩ 文件存在；键缺失/None = 空。
     只做文件存在性过滤，不存在的 tag 静默剔除；非法形态已在 projects 层归一化 422。
     `owner_tags` 保留入参以兼容既有调用签名（显式化后不再参与解析）。
     """
+    if track != _PLATFORM_TRACK:
+        return [], []
     profiles = rule_profiles or {}
-    owner_base = track_dir(packs_root, track) / "rules" / "owners"
+    owner_base = platform_rules_dir(packs_root)
     eff_owners = [t for t in (profiles.get("owners") or [])
                   if (owner_base / f"{t}.md").is_file()]
-    rating_base = track_dir(packs_root, track) / "rules" / "rating"
+    rating_base = rating_dir(packs_root)
     eff_ratings = [t for t in (profiles.get("rating") or [])
                    if (rating_base / f"{t}.md").is_file()]
     return eff_owners, eff_ratings
 
 
-def load_kb_sources(packs_root: str | Path, capabilities: list[str] | None) -> list[KbSource]:
-    """合成各启用能力域的 kb 源（expert-pool M0：kb 全局单根 packs/kb/<域>/）。
+def load_kb_sources(packs_root: str | Path, directions: list[str] | None) -> list[KbSource]:
+    """合成各启用方向的 kb 源（`packs/kb/<方向>/`）。
 
-    旧版读各包 kb_sources.json（树重组后该文件退役）；现按启用域直接合成，
-    每域一个源 root=packs/kb/<域>，域内多快照靠 module 路径前缀消歧；
-    module 全局形态 `<域>/<快照>/<包内路径>`，防穿越在 kb_open/resolve_kb 侧。
+    每方向一个源 root=packs/kb/<方向>，域内多快照靠 module 路径前缀消歧；
+    module 全局形态 `<方向>/<快照>/<包内路径>`，防穿越在 kb_open/resolve_kb 侧。
     """
     out: list[KbSource] = []
-    for cap in capabilities or []:
-        root = Path(packs_root) / "kb" / cap
+    for direction in directions or []:
+        root = Path(packs_root) / "kb" / direction
         if root.is_dir():
-            out.append(KbSource(id=f"{cap}-kb", root=root.resolve(), recursive=True))
+            out.append(KbSource(id=f"{direction}-kb", root=root.resolve(), recursive=True))
     return out
 
 
@@ -225,14 +216,14 @@ def build_rules_preamble(packs_root: str | Path, track: str | None = None,
                          owner_tags: list[str] | None = None,
                          role: str | None = None,
                          rule_profiles: dict | None = None) -> str:
-    """系统提示规则前言：永久红线 + owner 叠加 + 评级口径 + 角色红线。每次会话构建，优先级最高。"""
+    """系统提示规则前言：轨红线 + 平台规则（渗透）+ 评级口径（渗透）。每次会话构建，优先级最高。"""
     parts: list[str] = ["# 场景规则与红线（永久强制，优先级最高）"]
     for name, text in pack_rules(packs_root, capabilities, track):
         parts.append(f"## rule:{name}\n{text}")
     eff_owners, eff_ratings = resolve_rule_profiles(
         packs_root, track or "", owner_tags or [], rule_profiles)
     for name, text in owner_rules(packs_root, track or "", eff_owners):
-        parts.append(f"## rule:{name}（owner 叠加，压过通用默认）\n{text}")
+        parts.append(f"## rule:{name}（平台规则叠加，压过通用默认）\n{text}")
     if eff_ratings:
         parts.append(
             "> **评级硬指令（F11）**：发布 bb_add_finding 时 severity 必须依据以下评级口径判级，"
@@ -243,11 +234,6 @@ def build_rules_preamble(packs_root: str | Path, track: str | None = None,
             "虚高自动降一档）。")
     for name, text in rating_rules(packs_root, track or "", eff_ratings):
         parts.append(f"## rule:{name}（评级与价值口径 · 判级依据）\n{text}")
-    if role:
-        rr = role_rules(packs_root, track or "", role)
-        if rr is not None:
-            name, text = rr
-            parts.append(f"## rule:{name}（角色专属红线）\n{text}")
     return "\n\n".join(parts)
 
 
@@ -255,7 +241,7 @@ def _read_md_dir(d: Path, prefix: str = "") -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     if not d.is_dir():
         return out
-    for f in sorted(d.glob("*.md")):  # 非递归：owners/role-rules 不注入
+    for f in sorted(d.glob("*.md")):  # 非递归：子目录不注入
         text = _read_text_safe(f)
         if text is not None:
             out.append((f"{prefix}{f.stem}", text))

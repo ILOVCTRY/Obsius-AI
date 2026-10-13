@@ -9,22 +9,23 @@ null = 不过滤（不支持嵌套结构，刻意保持扁平）。在角色字�
                                   前缀键覆写，产出与角色同形状 dict，下游零改动
 
 M2 起（项目绑定）本模块是运行时唯一角色源：构造链 load_expert、发布链
-expert_exists / allowed_roles、能力面推导 caps_effective（§4.4/§4.6）。
+expert_exists / allowed_roles、kb 方向面推导 directions_effective（§4.4/§4.6）。
+2026-10-13 能力包退役后：专家 yaml 的 `skills` 白名单为**硬选**（会话可见/可路由
+技能 = 并集），新增 `knowledge` 方向白名单（项目 kb 可见方向 = 并集）。
 tracks/*/roles/ 已退役删除（git 历史可查）。
 """
 
 from pathlib import Path
 
-from core.skills.registry import SkillRegistry
 from core.skills.roles import _parse_inline_value
+from core.skills.taxonomy import list_directions
 
 GENERALIST = "_generalist"
 _VARIANT_PREFIX = "variant_"
 
-# 轨默认知识面（2026-09-30）：research 轨 = 旧 reverse 域（前端 research→rev-generic
-# 逆向工作台口径）。项目无专家绑定且无显式 capabilities（M3 起创建恒空）时，caps_effective
-# 按轨默认补全——蛙池AI逆向 等逆向项目的 chat/agent 技能（binary 包逆向技能）与
-# 知识库可见性因此恢复。pentest/ctf 无默认（旧域名=轨名，存量直通语义不变）。
+# 轨默认 kb 方向（2026-09-30）：research 轨 = binary（前端 research→rev-generic
+# 逆向工作台口径）。项目无专家绑定时 directions_effective 按轨默认补全。
+# pentest/ctf 无默认（存量直通语义不变）。
 TRACK_DEFAULT_CAPS: dict[str, list[str]] = {"research": ["binary"]}
 
 
@@ -103,11 +104,9 @@ def expert_skills(packs_root: str | Path, track: str,
                   experts: list[str] | None) -> list[str] | None:
     """绑定专家的技能白名单并集（§4.4 专家面，经当前轨变体）。
 
-    返回 None = 「不限定」，两情形：绑定清单为空（未绑定，存量语义）或任一
-    绑定专家 skills=null（全量，如 _generalist）。caps_effective 会先判空绑定
-    再调本函数，故它手里的 None 必是全量分支。
-    绑定专家 yaml 被删时跳过该专家（宁严勿松：不静默回退 _generalist 扩权，
-    doctor expert-* 体检兜底提示）。
+    **硬选口径（2026-10-13）**：会话可见/可路由技能 = 本并集；返回 None = 「不限定」
+    （绑定清单为空，或任一绑定专家 skills=null 如 _generalist）。绑定专家 yaml 被删
+    时跳过该专家（宁严勿松：不静默回退 _generalist 扩权，doctor expert-* 体检兜底）。
     """
     bound = [e for e in (experts or []) if str(e).strip()]
     if not bound:
@@ -119,45 +118,51 @@ def expert_skills(packs_root: str | Path, track: str,
         if not path.is_file():
             continue
         skills = _apply_variant(_parse_expert(path), track).get("skills")
-        if skills is None:
+        if not skills:  # null 或空列表 = 不限定（全量技能）
             return None
         out.update(skills)
     return sorted(out)
 
 
-def caps_effective(packs_root: str | Path, track: str,
-                   experts: list[str] | None,
-                   fallback: list[str] | None = None) -> list[str]:
-    """项目知识可见范围推导（§4.4 caps_effective，M2 构造链/meta 视图共用）。
+def expert_directions(packs_root: str | Path, track: str,
+                      experts: list[str] | None) -> list[str] | None:
+    """绑定专家的 kb 方向白名单并集（`knowledge` 字段，经当前轨变体）。
 
-    - 有绑定专家：专家面 = 各绑定专家 skills 并集（含轨变体）∪ 轨技能，取其中
-      capability 类技能的所属包集合（轨技能 kind=track 不引包，恒在 {track} 内）；
-      任一专家 skills=null = 全量 → 全部能力包目录（all_capability_packs）。
-    - 无绑定专家（存量项目零翻译）：fallback（meta.capabilities）直通；fallback 为
-      空（M3 起创建恒空）时按 TRACK_DEFAULT_CAPS 轨默认补全（research→binary，
-      2026-09-30 逆向项目口径）。
-    找不到的技能名跳过（doctor expert-skill-missing 兜底）。
+    返回 None = 「不限定」（绑定清单为空，或任一绑定专家 knowledge=null → 全部方向）。
+    """
+    bound = [e for e in (experts or []) if str(e).strip()]
+    if not bound:
+        return None
+    base = Path(packs_root) / "experts"
+    out: set[str] = set()
+    for name in bound:
+        path = base / f"{name}.yaml"
+        if not path.is_file():
+            continue
+        dirs = _apply_variant(_parse_expert(path), track).get("knowledge")
+        if not dirs:  # null 或空列表 = 不限定（全部方向）
+            return None
+        out.update(dirs)
+    return sorted(out)
+
+
+def directions_effective(packs_root: str | Path, track: str,
+                         experts: list[str] | None,
+                         fallback: list[str] | None = None) -> list[str]:
+    """项目 kb 可见方向推导（原 caps_effective；2026-10-13 能力包退役后按专家 knowledge）。
+
+    - 有绑定专家：专家面 = knowledge 并集（含轨变体）；任一专家 knowledge=null = 全量
+      → 全部 kb 方向目录（list_directions）。
+    - 无绑定专家（存量项目零翻译）：fallback 直通；fallback 为空时按 TRACK_DEFAULT_CAPS
+      轨默认补全（research→binary）。
     """
     bound = [e for e in (experts or []) if str(e).strip()]
     if not bound:
         return list(fallback or TRACK_DEFAULT_CAPS.get(track, []))
-    names = expert_skills(packs_root, track, bound)
-    if names is None:  # 绑定含全量专家（skills=null）
-        return all_capability_packs(packs_root)
-    if not names:
-        return []
-    reg = SkillRegistry(packs_root)
-    reg.load()
-    caps = {sk.pack for n in names if (sk := reg.get(n)) and sk.kind == "capability"}
-    return sorted(caps)
-
-
-def all_capability_packs(packs_root: str | Path) -> list[str]:
-    """全部能力包目录名（_generalist 全量可见分支用）。"""
-    caps_dir = Path(packs_root) / "capabilities"
-    if not caps_dir.is_dir():
-        return []
-    return sorted(p.name for p in caps_dir.iterdir() if p.is_dir())
+    dirs = expert_directions(packs_root, track, bound)
+    if dirs is None:  # 绑定含全量专家（knowledge=null）
+        return list_directions(packs_root)
+    return dirs
 
 
 def allowed_roles(packs_root: str | Path, track: str,

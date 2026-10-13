@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import { api } from "@/lib/api"
 import type { PackRole, SkillDef } from "@/lib/types"
 import type { Taxonomy } from "@/lib/taxonomy"
@@ -8,19 +8,15 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
 
 // 角色 × 技能/任务类型 只读矩阵：白名单命中 ✓；悬空引用/未注册类型标红；禁用技能标黄。
-// 数据源与真实开窗一致：全局技能（全部 cap ∪ 当前轨）+ 轨角色 + 轨 task_types 注册表。
-
-interface SkillCol extends SkillDef {
-  source: "cap" | "track"
-}
+// 2026-10-13 能力包退役：技能扁平（packs/kb/skills），不再按包/轨分组。
 
 export function MatrixPane({ tax, track, onFocusSkill }: {
   tax: Taxonomy | null
   track: string
-  onFocusSkill?: (source: "cap" | "track", pack: string, name: string) => void
+  onFocusSkill?: (name: string) => void
 }) {
   const [roles, setRoles] = useState<PackRole[]>([])
-  const [cols, setCols] = useState<SkillCol[]>([])
+  const [cols, setCols] = useState<SkillDef[]>([])
   const [err, setErr] = useState<string | null>(null)
 
   const reload = useCallback(() => {
@@ -28,23 +24,13 @@ export function MatrixPane({ tax, track, onFocusSkill }: {
     setErr(null)
     // 竞态守卫：切轨后旧轨聚合响应晚到不得覆盖新轨矩阵（同 RolesPane）
     let alive = true
-    const roleP: Promise<PackRole[]> = api.trackRoles(track).catch(() => [] as PackRole[])
-    const skillPs: Promise<SkillCol[]>[] = [
-      ...tax.capabilities.map((c) =>
-        api.capSkills(c.name)
-          .then((ss) => ss.map((s): SkillCol => ({ ...s, source: "cap" })))
-          .catch(() => [] as SkillCol[])),
-      api.trackSkills(track)
-        .then((ss) => ss.map((s): SkillCol => ({ ...s, source: "track" })))
-        .catch(() => [] as SkillCol[]),
-    ]
-    Promise.all([roleP, ...skillPs]).then(([rs, ...skillGroups]) => {
+    Promise.all([
+      api.trackRoles(track).catch(() => [] as PackRole[]),
+      api.skills().catch(() => [] as SkillDef[]),
+    ]).then(([rs, ss]) => {
       if (!alive) return
       setRoles(rs)
-      // 同名以后加载的轨技能覆盖（与 registry 语义一致）
-      const map = new Map<string, SkillCol>()
-      for (const group of skillGroups) for (const s of group) map.set(s.name, s)
-      setCols([...map.values()])
+      setCols(ss)
     }).catch((e) => { if (alive) setErr(String(e)) })
     return () => { alive = false }
   }, [tax, track])
@@ -52,17 +38,6 @@ export function MatrixPane({ tax, track, onFocusSkill }: {
 
   const knownNames = useMemo(() => new Set(cols.map((c) => c.name)), [cols])
   const validTypes = new Set(Object.keys(tax?.task_types?.[track] ?? { generic: "passive" }))
-
-  const grouped = useMemo(() => {
-    const groups: { title: string; cols: SkillCol[] }[] = []
-    const trackCols = cols.filter((c) => c.source === "track")
-    if (trackCols.length) groups.push({ title: `轨 ${track}`, cols: trackCols })
-    for (const c of tax?.capabilities ?? []) {
-      const cs = cols.filter((s) => s.source === "cap" && s.pack === c.name)
-      if (cs.length) groups.push({ title: c.label || c.name, cols: cs })
-    }
-    return groups
-  }, [cols, tax, track])
 
   // 转置后悬空/禁用徽章挂角色列头（原为行尾附加列）
   const roleIssues = useMemo(() => {
@@ -87,7 +62,7 @@ export function MatrixPane({ tax, track, onFocusSkill }: {
     <ScrollArea className="h-full">
       <div className="space-y-3 p-3">
         <p className="text-[10px] text-muted-foreground">
-          行=全部能力包 ∪ 本轨技能（按来源分组）；列=「{track}」轨角色。✓=在该角色技能白名单内，
+          行=全部技能（packs/kb/skills）；列=「{track}」轨角色。✓=在该角色技能白名单内，
           ·=skills 为 null（全放行），空白=不挂。红=悬空引用或未注册 task_type，黄=引用了已禁用技能。
         </p>
         {err && <p className="text-xs text-(--status-error)">{err}</p>}
@@ -108,7 +83,7 @@ export function MatrixPane({ tax, track, onFocusSkill }: {
                         </div>
                         {iss.dangling.map((d) => (
                           <Badge key={d} variant="outline" className="mt-1 mr-1 border-red-500/50 text-[9px] text-red-300"
-                                 title="该技能在任何包/轨中都不存在">
+                                 title="该技能在技能库中不存在">
                             悬空:{d}
                           </Badge>
                         ))}
@@ -122,31 +97,23 @@ export function MatrixPane({ tax, track, onFocusSkill }: {
                 </tr>
               </thead>
               <tbody>
-                {grouped.map((g) => (
-                  <Fragment key={g.title}>
-                    <tr className="border-b bg-background text-[10px] text-muted-foreground">
-                      <th colSpan={roles.length + 1}
-                          className="sticky left-0 z-10 bg-background p-1.5 text-left font-normal">{g.title}</th>
-                    </tr>
-                    {g.cols.map((c) => (
-                      <tr key={`${c.source}:${c.pack}:${c.name}`} className="border-b last:border-0 hover:bg-accent/20">
-                        <td className="sticky left-0 z-10 bg-card p-2 font-mono whitespace-nowrap">
-                          <button className="text-primary hover:underline"
-                                  title={`${c.kind}/${c.pack} · ${c.description}`}
-                                  onClick={() => onFocusSkill?.(c.source, c.pack, c.name)}>
-                            {c.name}
-                          </button>
-                          {!c.enabled && <span className="ml-1.5 text-[9px] text-amber-300">禁用</span>}
-                        </td>
-                        {roles.map((r) => (
-                          <td key={`${r.file}:${c.name}`} className={cn("border-l p-2 text-center",
-                            !c.enabled && r.skills?.includes(c.name) && "bg-amber-500/10")}>
-                            <Cell role={r} name={c.name} />
-                          </td>
-                        ))}
-                      </tr>
+                {cols.map((c) => (
+                  <tr key={c.name} className="border-b last:border-0 hover:bg-accent/20">
+                    <td className="sticky left-0 z-10 bg-card p-2 font-mono whitespace-nowrap">
+                      <button className="text-primary hover:underline"
+                              title={c.description}
+                              onClick={() => onFocusSkill?.(c.name)}>
+                        {c.name}
+                      </button>
+                      {!c.enabled && <span className="ml-1.5 text-[9px] text-amber-300">禁用</span>}
+                    </td>
+                    {roles.map((r) => (
+                      <td key={`${r.file}:${c.name}`} className={cn("border-l p-2 text-center",
+                        !c.enabled && r.skills?.includes(c.name) && "bg-amber-500/10")}>
+                        <Cell role={r} name={c.name} />
+                      </td>
                     ))}
-                  </Fragment>
+                  </tr>
                 ))}
               </tbody>
             </table>

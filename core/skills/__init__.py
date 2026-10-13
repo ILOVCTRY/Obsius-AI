@@ -14,7 +14,6 @@ from core.skills.rules import (
     pack_rules,
     rating_rules,
     resolve_rule_profiles,
-    role_rules,
 )
 from core.skills.taxonomy import (
     GENERIC_TASK_TYPE,
@@ -33,7 +32,6 @@ __all__ = [
     "owner_rules",
     "rating_rules",
     "resolve_rule_profiles",
-    "role_rules",
     "load_kb_sources",
     "KbSource",
     "build_rules_preamble",

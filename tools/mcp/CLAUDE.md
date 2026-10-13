@@ -51,6 +51,11 @@ tools/mcp/
   端口 13338+，空闲 10min 自动关）并连其 http 端点——拉起件是本目录 `bootstrap_mcp.py`
   （自有文件，不动 vendor 任何文件）；仍不连远程、不连人手 GUI 之外的 stdio 进程
   （config 里 stdio server 与本桥无关）。
+- **Agent 只能消费已分析结果（2026-10-13）**：`IdaMcpManager._launch` **现成 `.i64/.idb` 直读复用**
+  （`idat -A -S<bootstrap> <db>`，不带 `-o`）——绝不从样本重建（会覆盖人类 GUI 改名/注释）；库查找
+  **两处**：平台 `db_dir/<sha>.i64|.idb` + **样本旁 IDA 默认名**（`<input>.i64`）。**无库且 ≥10MB 拒拉起**
+  （`SAMPLE_AUTO_MAX_BYTES`，引导先「开始分析」）。GUI 重活工具（`survey_binary`）经
+  `core/chat/mcp_bridge.py` 按源程序大小拦截（`HEAVY_MCP_TOOLS`，默认 30MB，fail-closed）。
 - MCP 只做**实时点查/实时写当前 GUI 库**：写回 annotate、缓存缺席的单函数 decompile、
   xref 降级。**绝不用 MCP 全量函数列表替换 headless 缓存**（三层数据纪律不变）。
 - MCP 在线是 headless 的**增强不是替代**：断了一切降级回 headless，三态灯变灰，不报 500。

@@ -6,6 +6,7 @@ fake popen/probe 全注入，不触网、不拉真 IDA；样本实例桥的选�
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import pytest
 
@@ -147,6 +148,55 @@ def test_no_instance_launch_on_lock_free_gui_absent(env):
     assert m.ensure("p1", _binary(tmp_path))
     # online_for_project 只认本项目的实例
     assert m.online_for_project("other") is False
+
+
+# ---------- 直读复用 + 体积闸（2026-10-13） ----------
+
+def test_launch_direct_reads_existing_db(env):
+    """库存在（平台约定 db_dir/<sha>.i64）→ 直读，不带 -o、不重建（复用人类成果）。"""
+    make, launched, killed, tmp_path, db_dir = env
+    m = make(ready_timeout=1.0)
+    binary = _binary(tmp_path)
+    db_dir.mkdir(parents=True, exist_ok=True)
+    db = (db_dir / mm.sha256_file(binary)).with_suffix(".i64")
+    db.write_bytes(b"\x00")
+    assert m.ensure("p1", binary)
+    args = launched[0].args
+    assert not any(a.startswith("-o") for a in args)   # 不带 -o（不重建）
+    assert args[-1] == str(db)                          # 直读现成库
+    assert any(a.startswith("-S") for a in args)
+
+
+def test_launch_direct_reads_sample_adjacent_db(env):
+    """人直接在 IDA 打开样本保存 → 库落在样本旁 <binary>.i64，也要能复用。"""
+    make, launched, killed, tmp_path, _ = env
+    m = make(ready_timeout=1.0)
+    binary = _binary(tmp_path)
+    db = Path(str(binary) + ".i64")
+    db.write_bytes(b"\x00")
+    assert m.ensure("p1", binary)
+    assert launched[0].args[-1] == str(db)
+    assert not any(a.startswith("-o") for a in launched[0].args)
+
+
+def test_launch_refuses_oversize_without_db(env, monkeypatch):
+    """无库 + ≥10MB → 拒绝 Agent 触发分析（不拉起）。"""
+    make, launched, killed, tmp_path, _ = env
+    monkeypatch.setattr(mm, "SAMPLE_AUTO_MAX_BYTES", 10)   # 阈值压到 10 字节
+    m = make(ready_timeout=1.0)
+    assert m.ensure("p1", _binary(tmp_path)) is None       # 样本 18 字节 ≥ 10
+    assert launched == []
+
+
+def test_launch_builds_when_small_and_no_db(env):
+    """无库 + <10MB → 建库式（-o<db_stem> binary），现状保留。"""
+    make, launched, killed, tmp_path, db_dir = env
+    m = make(ready_timeout=1.0)
+    binary = _binary(tmp_path)
+    assert m.ensure("p1", binary)
+    args = launched[0].args
+    assert f"-o{db_dir / mm.sha256_file(binary)}" in args
+    assert args[-1] == binary
 
 
 # ---------- DecompilerService 样本实例桥（mcp_provider 接线） ----------

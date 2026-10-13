@@ -427,11 +427,14 @@ def analyze_android_source(path: Path, filename: str) -> dict[str, Any] | None:
 class SamplePackageStore:
     """Content-addressed immutable package store plus project metadata."""
 
-    def __init__(self, workspace_root: str | Path, global_root: str | Path | None = None,
+    def __init__(self, workspace_root: str | Path, legacy_root: str | Path | None = None,
                  limits: PackageLimits | None = None):
         self.workspace_root = Path(workspace_root).resolve()
-        self.global_root = Path(global_root or self.workspace_root.parent / "data" / "sample-store").resolve()
-        self.global_root.mkdir(parents=True, exist_ok=True)
+        # 上传物一律落项目工作区内（内容树 `<project>/trees/`、原始物 `<project>/raw/`）。
+        # 旧全局内容寻址存储（`data/sample-store/`）仅保留**只读**兼容——旧 manifest 的
+        # 绝对 tree_ref 仍可解析，但绝不再写入、不主动 mkdir（避免在项目外重建空目录）。
+        self.legacy_root = Path(
+            legacy_root or self.workspace_root.parent / "data" / "sample-store").resolve()
         self.limits = limits or PackageLimits()
 
     def _project_root(self, project_root: str | Path) -> Path:
@@ -439,6 +442,17 @@ class SamplePackageStore:
         if not root.is_relative_to(self.workspace_root):
             raise SamplePackageError("项目目录不在工作区内")
         return root
+
+    def _trees_root(self, project: Path) -> Path:
+        return project / "trees"
+
+    def _raw_root(self, project: Path) -> Path:
+        return project / "raw"
+
+    def _tree_allowed(self, tree: Path, project: Path) -> bool:
+        """内容树位置白名单：项目内 `<project>/trees/`（新写入）或旧全局只读根（存量兼容）。"""
+        return (tree.is_relative_to(self._trees_root(project))
+                or tree.is_relative_to(self.legacy_root))
 
     def _metadata_root(self, project_root: Path) -> Path:
         path = project_root / "sample_packages"
@@ -478,9 +492,9 @@ class SamplePackageStore:
         rows = self.list_packages(project)
         return rows[0] if rows else None
 
-    def _commit_tree(self, tree: Path, manifest: dict[str, Any]) -> Path:
+    def _commit_tree(self, project: Path, tree: Path, manifest: dict[str, Any]) -> Path:
         digest = manifest["manifest_sha256"]
-        dest = self.global_root / "trees" / digest
+        dest = self._trees_root(project) / digest
         if dest.is_dir():
             return dest
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -492,9 +506,9 @@ class SamplePackageStore:
             shutil.rmtree(temp, ignore_errors=True)
         return dest
 
-    def _commit_raw(self, source: Path, raw_sha: str, filename: str) -> Path:
+    def _commit_raw(self, project: Path, source: Path, raw_sha: str, filename: str) -> Path:
         suffix = Path(filename).suffix.lower()[:16]
-        dest = self.global_root / "raw" / f"{raw_sha}{suffix}"
+        dest = self._raw_root(project) / f"{raw_sha}{suffix}"
         dest.parent.mkdir(parents=True, exist_ok=True)
         if not dest.exists():
             temp = dest.parent / f".{raw_sha}.{uuid.uuid4().hex}.tmp"
@@ -508,7 +522,7 @@ class SamplePackageStore:
     def import_tree(self, project_root: str | Path, tree: Path, *, origin: dict[str, Any]) -> dict[str, Any]:
         project = self._project_root(project_root)
         manifest = _manifest(tree, origin=origin, limits=self.limits)
-        tree_ref = self._commit_tree(tree, manifest)
+        tree_ref = self._commit_tree(project, tree, manifest)
         manifest_hash = manifest["manifest_sha256"]
         package_id = "pkg-" + manifest_hash[:16]
         version_id = "ver-" + manifest_hash[:16]
@@ -563,7 +577,8 @@ class SamplePackageStore:
                 "source_type": source_format, "filename": name,
                 "raw_sha256": raw_sha, "raw_size": raw_size,
             })
-            result["raw_ref"] = str(self._commit_raw(source, raw_sha, name))
+            result["raw_ref"] = str(self._commit_raw(
+                self._project_root(project_root), source, raw_sha, name))
             if source_analysis is not None:
                 result["source_analysis"] = source_analysis
             manifest_path = (self._metadata_root(self._project_root(project_root))
@@ -612,7 +627,7 @@ class SamplePackageStore:
         if package is None:
             raise SamplePackageError("分析包不存在")
         tree = Path(str(package.get("tree_ref") or "")).resolve()
-        if not tree.is_dir() or not tree.is_relative_to(self.global_root):
+        if not tree.is_dir() or not self._tree_allowed(tree, project):
             raise SamplePackageError("分析包内容树不存在或不安全")
         with tempfile.TemporaryDirectory(prefix="sample-package-edit-") as temp_name:
             working = Path(temp_name) / "tree"
@@ -681,9 +696,10 @@ class SamplePackageStore:
     def delete_package(self, project_root: str | Path, package_id: str | None = None) -> dict[str, Any]:
         """Remove the project's analysis package metadata and current pointer.
 
-        Content addressed trees are shared by design, so they are left in the
-        global store.  Project-local manifests, reports and import history are
-        removed by deleting the package metadata directory.
+        Content addressed trees live under `<project>/trees/` and are shared by
+        design (another package in the same project may reuse the same tree), so
+        they are left in place.  Project-local manifests, reports and import
+        history are removed by deleting the package metadata directory.
         """
         project = self._project_root(project_root)
         pointer = self._read_current(project)
@@ -750,7 +766,8 @@ class SamplePackageStore:
     def resolve_target(self, project_root: str | Path, package_id: str,
                        version_id: str, target_id: str) -> tuple[dict[str, Any], dict[str, Any], Path]:
         """Resolve a target to its content-addressed, read-only file path."""
-        package = self.get_package(project_root, package_id, version_id)
+        project = self._project_root(project_root)
+        package = self.get_package(project, package_id, version_id)
         if package is None:
             raise SamplePackageError("分析包版本不存在")
         target = next((row for row in package.get("targets", [])
@@ -760,7 +777,7 @@ class SamplePackageStore:
         if not target.get("analyzers"):
             target = {**target, "analyzers": analyzers_for_target(target)}
         tree = Path(str(package.get("tree_ref") or "")).resolve()
-        if not tree.is_dir() or not tree.is_relative_to(self.global_root):
+        if not tree.is_dir() or not self._tree_allowed(tree, project):
             raise SamplePackageError("分析包内容树不存在或不安全")
         rel = _safe_relative(str(target.get("path") or ""), max_depth=self.limits.max_depth)
         path = (tree / rel).resolve()
@@ -779,7 +796,7 @@ class SamplePackageStore:
         if entry is None:
             raise SamplePackageError("文件不存在")
         tree = Path(str(package.get("tree_ref") or "")).resolve()
-        if not tree.is_dir() or not tree.is_relative_to(self.global_root):
+        if not tree.is_dir() or not self._tree_allowed(tree, project):
             raise SamplePackageError("分析包内容树不存在或不安全")
         resolved = (tree / rel).resolve()
         if not resolved.is_file() or not resolved.is_relative_to(tree):

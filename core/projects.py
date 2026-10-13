@@ -35,7 +35,8 @@ WORKSPACE_TREE_MAX_DEPTH = 4
 WORKSPACE_TREE_MAX_NODES = 1000
 WORKSPACE_TREE_MAX_CHILDREN = 200
 _WORKSPACE_HIDDEN_DIRS = {".git", ".hg", ".svn", ".venv", "venv", "node_modules",
-                          "__pycache__", ".history", ".trash", ".tmp"}
+                          "__pycache__", ".history", ".trash", ".tmp",
+                          "trees", "raw"}
 _WORKSPACE_HIDDEN_NAMES = {"blackboard.db", "blackboard.db-wal", "blackboard.db-shm",
                            "project.json"}
 _WORKSPACE_HIDDEN_PATTERNS = (".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx",
@@ -150,9 +151,10 @@ class Project:
 
     @property
     def capabilities(self) -> list[str]:
-        """启用能力包（多选）。专家绑定项目的运行时可见范围用 caps_effective 推导
-        （app 层 core.skills.experts.caps_effective），本属性恒返回盘上原始绑定。"""
-        return project_binding(self.meta)[1]
+        """盘上原始能力/方向绑定（读兼容字段，能力包已退役）。专家绑定项目的运行时
+        可见范围用 directions_effective 推导（app 层），本属性恒返回盘上原始绑定值
+        （无绑定/未落键 = 空表），供 directions_effective 的 fallback 与存量直通使用。"""
+        return list(self.meta.get("capabilities") or [])
 
     @property
     def experts(self) -> list[str]:

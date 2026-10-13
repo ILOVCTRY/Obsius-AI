@@ -937,7 +937,7 @@ def test_goal_and_persona_injection_chat_and_tick(env):
 
 def _phase_packs(root) -> str:
     """最小 pentest 阶段剧本 packs（与 test_phases.py 夹具同构，保持本文件独立可跑）。"""
-    ph = root / "tracks" / "pentest" / "phases"
+    ph = root / "kb" / "pentest" / "phases"
     ph.mkdir(parents=True)
     (ph / "recon.yaml").write_text(
         "name: 信息收集\ngoal: 摸清资产面\norder: 1\n"
@@ -950,7 +950,7 @@ def _phase_packs(root) -> str:
     # pentest 的 fwd=[]，门进度注入段整段不出现
     (ph / "report.yaml").write_text(
         "name: 报告\ngoal: 汇总报告\norder: 3\nnext: [pentest]\n", encoding="utf-8")
-    (root / "tracks" / "pentest" / "task_types.yaml").write_text(
+    (root / "kb" / "pentest" / "task_types.yaml").write_text(
         "recon: passive\nasset-enum: passive\nexploit: low\nreport: passive\n",
         encoding="utf-8")
     ex = root / "experts"

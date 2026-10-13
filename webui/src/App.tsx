@@ -268,6 +268,9 @@ export default function App() {
   const [meta, setMeta] = useState<ProjectDetail | null>(null)
   const [view, setView] = useState<View>("projects")
   const [boardOpen, setBoardOpen] = useState(true)
+  // 蓝图「生成/深析」派发后跳智能体工作台并选中新线程（goto-agents，M2 2026-10-13）：
+  // 存线程 id 作 prop 下传，由 AgentWorkbenchView 消费后回调清空。
+  const [focusChatTid, setFocusChatTid] = useState<string | null>(null)
   // 黑板 Keep-alive（2026-09-30）：首次点开「黑板」的 pid 才挂载（没点过的项目不
   // 预加载）；同项目切视图不卸载只隐藏，换项目（pid 变）时因 key={pid} 全新挂载重载
   const [boardSeenPid, setBoardSeenPid] = useState<string | null>(null)
@@ -336,6 +339,18 @@ export default function App() {
     const h = () => setView("intel")
     window.addEventListener("goto-intel", h)
     return () => window.removeEventListener("goto-intel", h)
+  }, [])
+
+  // 蓝图产出入口（M2）派发后跳「智能体工作台」并选中新线程：detail.threadId 经
+  // focusChatTid 作 prop 下传（组件挂载时即有，避开「事件早于挂载」竞态）。
+  useEffect(() => {
+    const h = (e: Event) => {
+      const t = (e as CustomEvent<{ threadId?: string }>).detail?.threadId
+      setView("agents")
+      setFocusChatTid(t ?? null)
+    }
+    window.addEventListener("goto-agents", h)
+    return () => window.removeEventListener("goto-agents", h)
   }, [])
 
   const openProject = useCallback((id: string) => {
@@ -501,7 +516,7 @@ export default function App() {
                         {profile === "rev-generic"
                           ? <RevCompact pid={pid} onOpenWorkbench={() => setView("board")} />
                           : <Blackboard pid={pid} compact track={meta?.track}
-                                        capabilities={meta?.capabilities} defaultView={boardViewOf(meta)} />}
+                                        capabilities={meta?.directions} defaultView={boardViewOf(meta)} />}
                       </aside>
                     </Panel>
                   </>
@@ -528,12 +543,14 @@ export default function App() {
               <div className={cn(profile === "rev-generic" ? "h-full w-full overflow-hidden" : "h-full w-full", view !== "board" && "hidden")}>
                 {profile === "rev-generic"
                   ? <ReverseWorkbench key={pid} pid={pid} active={view === "board"} />
-                  : <Blackboard key={pid} pid={pid} track={meta?.track} capabilities={meta?.capabilities}
+                  : <Blackboard key={pid} pid={pid} track={meta?.track} capabilities={meta?.directions}
                                 defaultView={boardViewOf(meta)} />}
               </div>
             </ErrorBoundary>
           )}
-          {view === "agents" && <AgentWorkbenchView pid={pid} meta={meta} />}
+          {view === "agents" && <AgentWorkbenchView pid={pid} meta={meta}
+                                                    focusThread={focusChatTid}
+                                                    onFocusConsumed={() => setFocusChatTid(null)} />}
           {view === "browser" && (
             // F6 内置浏览器：轨门控（非 pentest/redteam 整页灰显）在视图内部处理；
             // 定高视图（面板组），照 rev 走 h-full + overflow-hidden

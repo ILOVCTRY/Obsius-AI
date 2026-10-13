@@ -6,10 +6,9 @@ packs/kb 才能工作。
 SKILL.md frontmatter 解析用极简 YAML（名字/关键词/特征平铺结构够用；
 引入 PyYAML 后可换）。
 
-扫描两个根（正交分类学）：
-  packs/capabilities/<cap>/skills/<skill>/SKILL.md     kind=capability
-  packs/tracks/<track>/skills/<skill>/SKILL.md         kind=track
-kb/ 快照区下的 SKILL.md（如 ctf-skills 原件）不扫描——它们是资料不是路由技能。
+扫描单根（2026-10-13 能力包退役，技能扁平化、无包归属）：
+  packs/kb/skills/<skill>/SKILL.md
+kb/ 快照区下其它目录（方向域/轨/安全红线）里的 SKILL.md 不扫描——它们是资料不是路由技能。
 
 frontmatter 约定：
 ---
@@ -32,14 +31,12 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from core.skills.taxonomy import CAPABILITIES_DIR, TRACKS_DIR
+from core.skills.taxonomy import skills_root
 
 
 @dataclass
 class SkillMeta:
     name: str
-    pack: str                        # 来源包 slug（capability 或 track 名）
-    kind: str                        # capability | track
     path: Path                       # SKILL.md 路径
     description: str = ""
     keywords: list[str] = field(default_factory=list)
@@ -146,43 +143,34 @@ class SkillRegistry:
         self._skills: dict[str, SkillMeta] = {}
 
     def load(self) -> int:
-        """扫描 capabilities/*/skills 与 tracks/*/skills。返回技能数。
+        """扫描 packs/kb/skills/*/SKILL.md（扁平，无包归属）。返回技能数。
 
-        同名技能以后加载者覆盖（track 在 capability 之后，轨级同名技能优先）；
-        kb/ 区不在扫描范围（快照资料不进路由表）。"""
+        同名技能以后加载者覆盖；kb 方向域/轨/安全红线区不在扫描范围。"""
         self._skills.clear()
-        root = self.packs_root
+        root = skills_root(self.packs_root)
         if not root.is_dir():
             return 0
-        patterns = [
-            (CAPABILITIES_DIR, "capability"),
-            (TRACKS_DIR, "track"),
-        ]
-        for group, kind in patterns:
-            for skill_md in sorted(root.glob(f"{group}/*/skills/*/SKILL.md")):
-                raw = skill_md.read_text(encoding="utf-8")
-                meta = parse_frontmatter(raw)
-                name = meta.get("name", skill_md.parent.name)
-                rel = skill_md.relative_to(root).parts
-                self._skills[name] = SkillMeta(
-                    name=name,
-                    pack=rel[1],
-                    kind=kind,
-                    path=skill_md,
-                    description=meta.get("description", ""),
-                    keywords=_split(meta.get("keywords")),
-                    features=_split(meta.get("features")),
-                    file_features=_split(meta.get("file_features")),
-                    platforms=_split(meta.get("platforms")),
-                    formats=_split(meta.get("formats")),
-                    vuln_classes=_split(meta.get("vuln_classes")),
-                    task_types=_split(meta.get("task_types")),
-                    required_tools=_split(meta.get("required_tools")),
-                    enabled=_is_enabled(meta.get("enabled")),
-                    mode=(meta.get("mode") or meta.get("format") or
-                          ("legacy" if ("kb_open" in raw or "知识库" in raw)
-                           else "self-contained")).strip().lower(),
-                )
+        for skill_md in sorted(root.glob("*/SKILL.md")):
+            raw = skill_md.read_text(encoding="utf-8")
+            meta = parse_frontmatter(raw)
+            name = meta.get("name", skill_md.parent.name)
+            self._skills[name] = SkillMeta(
+                name=name,
+                path=skill_md,
+                description=meta.get("description", ""),
+                keywords=_split(meta.get("keywords")),
+                features=_split(meta.get("features")),
+                file_features=_split(meta.get("file_features")),
+                platforms=_split(meta.get("platforms")),
+                formats=_split(meta.get("formats")),
+                vuln_classes=_split(meta.get("vuln_classes")),
+                task_types=_split(meta.get("task_types")),
+                required_tools=_split(meta.get("required_tools")),
+                enabled=_is_enabled(meta.get("enabled")),
+                mode=(meta.get("mode") or meta.get("format") or
+                      ("legacy" if ("kb_open" in raw or "知识库" in raw)
+                       else "self-contained")).strip().lower(),
+            )
         return len(self._skills)
 
     def get(self, name: str) -> SkillMeta | None:

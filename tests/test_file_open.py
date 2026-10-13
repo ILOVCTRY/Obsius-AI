@@ -19,10 +19,9 @@ def app_env(tmp_path, monkeypatch):
     ws = tmp_path / "workspaces"
     packs = tmp_path / "packs"
     tools = tmp_path / "tools"
-    # 最小 packs 夹具：建项校验轨/包存在性（list_packs 扫 tracks/ 与 capabilities/）
-    (packs / "tracks" / "ctf").mkdir(parents=True)
-    (packs / "tracks" / "ctf" / "track.yaml").write_text("label: CTF\n", encoding="utf-8")
-    (packs / "capabilities").mkdir()
+    # 最小 packs 夹具：建项校验轨存在性（list_packs 扫 packs/kb/<track>/track.yaml）
+    (packs / "kb" / "ctf").mkdir(parents=True)
+    (packs / "kb" / "ctf" / "track.yaml").write_text("label: CTF\n", encoding="utf-8")
     tools.mkdir()
     dist = tmp_path / "dist"
     dist.mkdir()
@@ -105,10 +104,10 @@ def test_absolute_path_outside_scope_rejected(app_env):
 def test_packs_and_tools_are_in_scope(app_env):
     client, _ws, packs, tools = app_env
     pid = client.post("/api/projects", json={"name": "P", "track": "ctf"}).json()["id"]
-    (packs / "capabilities" / "web" / "skills" / "x").mkdir(parents=True)
-    (packs / "capabilities" / "web" / "skills" / "x" / "SKILL.md").write_text("# x", encoding="utf-8")
+    (packs / "kb" / "skills" / "x").mkdir(parents=True)
+    (packs / "kb" / "skills" / "x" / "SKILL.md").write_text("# x", encoding="utf-8")
     (tools / "registry.json").write_text("{}", encoding="utf-8")
-    assert _open(client, pid, str(packs / "capabilities" / "web" / "skills" / "x" / "SKILL.md"),
+    assert _open(client, pid, str(packs / "kb" / "skills" / "x" / "SKILL.md"),
                  "content").status_code == 200
     assert _open(client, pid, str(tools / "registry.json"), "content").status_code == 200
 

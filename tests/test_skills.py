@@ -15,22 +15,21 @@ from core.skills import (
     pack_rules,
     rating_rules,
     resolve_rule_profiles,
-    role_rules,
 )
 from core.skills.taxonomy import LEGACY_DOMAIN_MAP, load_task_types, project_binding
 
 
 @pytest.fixture()
 def packs(tmp_path):
-    """最小正交布局：web 能力包（2 技能+红线+kb_sources）× pentest 轨（红线+owner+角色）。"""
+    """最小扁平布局（2026-10-13）：技能扁平（kb/skills）× pentest 轨（红线/平台规则/kb 方向）。"""
     root = tmp_path / "packs"
 
-    def make_skill(group, owner, name, frontmatter, body="步骤内容"):
-        d = root / group / owner / "skills" / name
+    def make_skill(name, frontmatter, body="步骤内容"):
+        d = root / "kb" / "skills" / name
         d.mkdir(parents=True)
         (d / "SKILL.md").write_text(f"---\n{frontmatter}\n---\n{body}", encoding="utf-8")
 
-    make_skill("capabilities", "web", "file-upload-test", (
+    make_skill("file-upload-test", (
         "name: file-upload-test\n"
         "description: 文件上传漏洞测试方法论\n"
         "keywords: 上传, upload, 附件\n"
@@ -38,15 +37,14 @@ def packs(tmp_path):
         "platforms: linux\n"
         "task_types: exploit\n"
     ))
-    make_skill("capabilities", "web", "idor-test", (
+    make_skill("idor-test", (
         "name: idor-test\n"
         "description: 越权访问测试，读差分优先\n"
         "keywords: 越权, idor, 换id\n"
         "features: has_user_system, has_object_id\n"
         "task_types: exploit\n"
     ))
-    # 二进制包：文件特征/格式标签 + 一个禁用技能
-    make_skill("capabilities", "binary", "binary-pwn", (
+    make_skill("binary-pwn", (
         "name: binary-pwn\n"
         "description: 二进制漏洞利用入口\n"
         "keywords: pwn, 溢出\n"
@@ -54,41 +52,32 @@ def packs(tmp_path):
         "formats: elf\n"
         "vuln_classes: stack\n"
     ))
-    make_skill("capabilities", "binary", "disabled-skill", (
+    make_skill("disabled-skill", (
         "name: disabled-skill\n"
         "description: 停用技能\n"
         "keywords: disabled\n"
         "enabled: false\n"
     ))
-    # 轨级技能
-    make_skill("tracks", "pentest", "triage",
+    make_skill("triage",
                "name: triage\ndescription: 分诊入口\nkeywords: 分诊, triage\n")
 
-    cap_rules = root / "capabilities" / "web" / "rules"
-    cap_rules.mkdir(parents=True)
-    (cap_rules / "redlines.md").write_text("Web 能力红线", encoding="utf-8")
-
-    track_rules = root / "tracks" / "pentest" / "rules"
-    track_rules.mkdir(parents=True)
-    (track_rules / "redlines.md").write_text("禁止登出用户会话\n禁止真资损", encoding="utf-8")
-    owners = track_rules / "owners"
-    owners.mkdir()
+    # 轨红线（并入 kb/安全红线/轨红线/）
+    redlines = root / "kb" / "安全红线" / "轨红线"
+    redlines.mkdir(parents=True)
+    (redlines / "pentest.md").write_text("禁止登出用户会话\n禁止真资损", encoding="utf-8")
+    # 平台规则（owners，渗透独有）
+    owners = root / "kb" / "安全红线" / "平台规则"
+    owners.mkdir(parents=True)
     (owners / "edusrc.md").write_text("教育资产：不取他人 PII", encoding="utf-8")
-    role_rules_dir = track_rules / "role-rules"
-    role_rules_dir.mkdir()
-    (role_rules_dir / "recon.md").write_text("侦察角色：只被动收集", encoding="utf-8")
 
-    roles = root / "tracks" / "pentest" / "roles"
-    roles.mkdir(parents=True)
-    (roles / "_generalist.yaml").write_text("name: _generalist\npersona: 兜底\n", encoding="utf-8")
-    (roles / "recon.yaml").write_text(
-        "name: recon\npersona: 侦察\nskills: [idor-test]\ntask_types: [recon]\n",
-        encoding="utf-8")
-    (track_rules.parent / "task_types.yaml").write_text(
+    track = root / "kb" / "pentest"
+    track.mkdir(parents=True)
+    (track / "track.yaml").write_text("name: pentest\n", encoding="utf-8")
+    (track / "task_types.yaml").write_text(
         "recon: passive\nexploit: low\n", encoding="utf-8")
 
     # kb 全局单根（M0）：packs/kb/<域>/<快照>/…，一域一根（recursive 恒 True）；
-    # 未建 kb 目录的能力域（binary）= 合成源为空
+    # 未建 kb 目录的方向（binary）= 合成源为空
     kb = root / "kb" / "web"
     (kb / "snap-a" / "sub").mkdir(parents=True)
     (kb / "snap-a" / "top.md").write_text("a", encoding="utf-8")
@@ -102,19 +91,16 @@ def test_registry_scan_and_parse(packs):
     reg = SkillRegistry(packs)
     assert reg.load() == 5
     sk = reg.get("file-upload-test")
-    assert sk.kind == "capability" and sk.pack == "web"
     assert "上传" in sk.keywords and "has_upload" in sk.features
     assert sk.platforms == ["linux"]
     assert sk.task_types == ["exploit"]
     assert sk.enabled is True
     assert sk.body().startswith("步骤内容")  # frontmatter 不进正文
-    triage = reg.get("triage")
-    assert triage.kind == "track" and triage.pack == "pentest"
     assert reg.get("disabled-skill").enabled is False
 
 
 def test_cc_skill_resources_are_scoped_to_skill_directory(packs):
-    skill_dir = packs / "capabilities" / "web" / "skills" / "file-upload-test"
+    skill_dir = packs / "kb" / "skills" / "file-upload-test"
     (skill_dir / "references").mkdir()
     (skill_dir / "references" / "method.md").write_text("完整方法", encoding="utf-8")
     (skill_dir / "scripts").mkdir()
@@ -129,27 +115,27 @@ def test_cc_skill_resources_are_scoped_to_skill_directory(packs):
         "references/method.md", "scripts/check.py"]
 
 
-def test_router_labels_and_pack_filter(packs):
+def test_router_labels_and_features(packs):
     reg = SkillRegistry(packs)
     reg.load()
     router = SkillRouter(reg)
     # file_features ×3 命中
-    hits = router.route(query="", file_features=["NX"], packs={"binary"})
+    hits = router.route(query="", file_features=["NX"])
     assert hits[0].skill.name == "binary-pwn"
     assert "file:NX" in hits[0].matched
     # 标签（formats/vuln_classes 合并 labels）×3
-    hits = router.route(query="", labels=["elf"], packs={"binary"})
+    hits = router.route(query="", labels=["elf"])
     assert hits[0].skill.name == "binary-pwn"
     assert "label:elf" in hits[0].matched
-    # packs 候选集过滤：web 包内不可见 binary 技能
+    # 技能扁平后无包过滤（packs 参数保留兼容但不再裁剪）：web 关键词查询仍可见 binary 技能
     hits = router.route(query="pwn 溢出", packs={"web", "pentest"})
-    assert all(h.skill.name != "binary-pwn" for h in hits)
-    # 轨技能在候选集内
-    hits = router.route(query="分诊 triage", packs={"web", "pentest"})
+    assert any(h.skill.name == "binary-pwn" for h in hits)
+    # 分诊题面命中 triage
+    hits = router.route(query="分诊 triage")
     assert hits and hits[0].skill.name == "triage"
     # enabled:false 默认排除，include_disabled 可见
-    assert not router.route(query="disabled", packs={"binary"})
-    hits = router.route(query="disabled", packs={"binary"}, include_disabled=True)
+    assert not router.route(query="disabled")
+    hits = router.route(query="disabled", include_disabled=True)
     assert hits and hits[0].skill.name == "disabled-skill"
 
 
@@ -186,36 +172,33 @@ def test_router_role_narrowing(packs):
                for h in hits2)
 
 
-def test_rules_chain_owner_and_role_rules(packs):
-    # 能力包红线 ∪ 轨红线
-    rules = dict((n, t) for n, t in pack_rules(packs, ["web"], "pentest"))
-    assert "cap:web/redlines" in rules and rules["cap:web/redlines"] == "Web 能力红线"
+def test_rules_chain_owner_rules(packs):
+    # 轨红线（能力包红线已退役）
+    rules = dict(pack_rules(packs, ["web"], "pentest"))
     assert rules["track:pentest/redlines"] == "禁止登出用户会话\n禁止真资损"
-    # owner 叠加走场景轨
+    assert not [n for n in rules if n.startswith("cap:")]
+    # 平台规则（owner 叠加，渗透独有）
     assert owner_rules(packs, "pentest", ["edusrc"])[0][0] == "owner:edusrc"
     assert owner_rules(packs, "pentest", ["不存在的厂商"]) == []
-    # 角色专属红线
-    assert role_rules(packs, "pentest", "recon") == (
-        "role:recon", "侦察角色：只被动收集")
-    assert role_rules(packs, "pentest", "nobody") is None
+    # 非渗透轨恒空（平台规则渗透独有）
+    assert owner_rules(packs, "ctf", ["edusrc"]) == []
     preamble = build_rules_preamble(
         packs, track="pentest", capabilities=["web"],
-        owner_tags=["edusrc"], role="recon",
-        rule_profiles={"owners": ["edusrc"]})
-    assert "Web 能力红线" in preamble
+        owner_tags=["edusrc"], rule_profiles={"owners": ["edusrc"]})
     assert "禁止真资损" in preamble
-    assert "不取他人 PII" in preamble and "owner 叠加" in preamble
-    assert "只被动收集" in preamble and "角色专属红线" in preamble
+    assert "不取他人 PII" in preamble and "平台规则叠加" in preamble
 
 
 def test_rating_rules_and_rule_profiles(packs):
     """F11 评级与价值口径（2026-10-01 去三态改纯显式）：勾哪个生效哪个，
     未配=不注入；不存在 tag 静默剔除；段序 + 硬指令随 rating 显式出现。"""
-    tr = packs / "tracks" / "pentest" / "rules"
-    (tr / "rating").mkdir()
-    (tr / "rating" / "edusrc.md").write_text("教育判级：高危=交互实证后系统权限", encoding="utf-8")
-    (tr / "rating" / "edu-rating.md").write_text("教育评级：任意文件覆盖写=中危核", encoding="utf-8")
+    tr = packs / "kb" / "安全红线" / "评级与价值口径"
+    tr.mkdir(parents=True)
+    (tr / "edusrc.md").write_text("教育判级：高危=交互实证后系统权限", encoding="utf-8")
+    (tr / "edu-rating.md").write_text("教育评级：任意文件覆盖写=中危核", encoding="utf-8")
     assert rating_rules(packs, "pentest", ["edusrc"])[0][0] == "rating:edusrc"
+    # 非渗透轨恒空（评级渗透独有）
+    assert rating_rules(packs, "ctf", ["edusrc"]) == []
 
     # 未配置（None）= 都不注入：owner_tags 不再自动命中
     eo, er = resolve_rule_profiles(packs, "pentest", ["edusrc"], None)
@@ -252,12 +235,11 @@ def test_rating_rules_and_rule_profiles(packs):
                                    {"owners": ["edusrc", "不存在"], "rating": ["不存在"]})
     assert eo == ["edusrc"] and er == []
 
-    # 段序：owner 段 < rating 段 < role 段（显式配置下）
+    # 段序：owner 段 < rating 段（显式配置下；角色专属红线已随能力包退役移除）
     pre = build_rules_preamble(packs, track="pentest", capabilities=["web"],
-                               owner_tags=["edusrc"], role="recon",
+                               owner_tags=["edusrc"],
                                rule_profiles={"owners": ["edusrc"], "rating": ["edusrc"]})
-    assert -1 < pre.find("rule:owner:edusrc") \
-        < pre.find("rule:rating:edusrc") < pre.find("rule:role:recon")
+    assert -1 < pre.find("rule:owner:edusrc") < pre.find("rule:rating:edusrc")
     assert "评级硬指令" in pre
 
 
@@ -306,26 +288,26 @@ def test_validate_rule_meta_schema():
 
 
 def test_load_rule_templates(tmp_path):
-    """轨模板库加载：名称序、坏 schema 降级空 meta（读取侧容错，doctor 出体检）。"""
+    """模板库加载（全局单份）：名称序、坏 schema 降级空 meta（读取侧容错，doctor 出体检）。"""
     from core.skills.rules import load_rule_templates
-    tpl = tmp_path / "tracks" / "pentest" / "rules" / "templates"
+    tpl = tmp_path / "packs" / "kb" / "安全红线" / "templates"
     tpl.mkdir(parents=True)
     (tpl / "b.md").write_text("---\ntrigger: b\n---\nB 正文", encoding="utf-8")
     (tpl / "a.md").write_text("无 frontmatter 的 A", encoding="utf-8")
     (tpl / "c.md").write_text("---\nnoise_caps: {x: loudest}\n---\nC", encoding="utf-8")
-    rows = load_rule_templates(tmp_path, "pentest")
+    rows = load_rule_templates(tmp_path / "packs")
     assert [r["name"] for r in rows] == ["a", "b", "c"]
     assert rows[0]["meta"] == {} and "A" in rows[0]["body"]
     assert rows[1]["meta"]["trigger"] == "b"
     assert rows[2]["meta"] == {}  # 坏 noise_caps 档 → 降级
-    assert load_rule_templates(tmp_path, "ctf") == []  # 无 templates 目录
+    assert load_rule_templates(tmp_path / "empty") == []  # 无 templates 目录
 
 
 def test_repo_osrc_template_pilot():
     """真仓 pilot 守卫：pentest 轨 osrc 四段一体模板（M1）schema+内容，零探测副作用。"""
     from core.skills.rules import load_rule_templates, validate_rule_meta
     root = Path(__file__).resolve().parent.parent / "packs"
-    tpls = {t["name"]: t for t in load_rule_templates(root, "pentest")}
+    tpls = {t["name"]: t for t in load_rule_templates(root)}
     assert "osrc" in tpls
     t = tpls["osrc"]
     validate_rule_meta("osrc", t["meta"])  # 不抛=入库声明合法
@@ -339,7 +321,9 @@ def test_repo_osrc_template_pilot():
 def test_doctor_rule_template_checks(tmp_path):
     """doctor 体检：坏 schema=error rule-template-invalid；缺 trigger=warning。"""
     from core.skills.doctor import diagnose
-    tpl = tmp_path / "packs" / "tracks" / "pentest" / "rules" / "templates"
+    # 模板体检在 pentest 轨内触发（渗透独有），需 kb/pentest/ 目录存在
+    (tmp_path / "packs" / "kb" / "pentest").mkdir(parents=True)
+    tpl = tmp_path / "packs" / "kb" / "安全红线" / "templates"
     tpl.mkdir(parents=True)
     (tpl / "bad.md").write_text("---\nwhat: 1\n---\n正文", encoding="utf-8")
     (tpl / "no-trigger.md").write_text("---\nforbidden: [x]\n---\n正文", encoding="utf-8")
@@ -373,15 +357,16 @@ def test_task_types_registry(packs):
 
 
 def test_legacy_domain_mapping():
-    assert project_binding({"domain": "pentest"}) == ("pentest", ["web"])
-    assert project_binding({"domain": "ctf"}) == ("ctf", ["binary"])
+    # 能力包退役后第二元素恒空（元组形状保留兼容）
+    assert project_binding({"domain": "pentest"}) == ("pentest", [])
+    assert project_binding({"domain": "ctf"}) == ("ctf", [])
     # 新字段优先
     assert project_binding({"track": "ctf", "capabilities": ["crypto"],
-                            "domain": "pentest"}) == ("ctf", ["crypto"])
-    # 旧 reverse 项目自动归位 research+[binary]（不改 project.json）
-    assert project_binding({"domain": "reverse"}) == ("research", ["binary"])
+                            "domain": "pentest"}) == ("ctf", [])
+    # 旧 reverse 项目自动归位 research（不改 project.json）
+    assert project_binding({"domain": "reverse"}) == ("research", [])
     assert LEGACY_DOMAIN_MAP["reverse"] == ("research", ["binary"])
-    # 未知旧 domain：轨名沿用、包为空
+    # 未知旧 domain：轨名沿用
     assert project_binding({"domain": "redteam"}) == ("redteam", [])
 
 
@@ -390,12 +375,12 @@ def test_legacy_track_mapping_assessment_to_pentest():
     from core.skills.taxonomy import LEGACY_TRACK_MAP
     assert LEGACY_TRACK_MAP == {"assessment": "pentest"}
     assert project_binding({"track": "assessment", "capabilities": ["web"]}) == \
-        ("pentest", ["web"])
-    # 无 capabilities 的旧行同样映射（caps 空）
+        ("pentest", [])
+    # 无 capabilities 的旧行同样映射
     assert project_binding({"track": "assessment"}) == ("pentest", [])
     # 新轨值原样返回
     assert project_binding({"track": "redteam", "capabilities": ["web"]}) == \
-        ("redteam", ["web"])
+        ("redteam", [])
     assert LEGACY_DOMAIN_MAP["pentest"] == ("pentest", ["web"])
 
 
@@ -403,12 +388,10 @@ def test_legacy_track_mapping_assessment_to_pentest():
 
 
 def test_real_pentest_pack_skill_distinction():
-    """capabilities/web 实包：recon 路由到 recon-asset-enum，打点角色到 web-strike-entry。"""
+    """实包（kb/skills 扁平）：recon 路由到 recon-asset-enum，打点角色到 web-strike-entry。"""
     reg = SkillRegistry("packs")
     reg.load()
     assert {"recon-asset-enum", "web-strike-entry"} <= {s.name for s in reg.all()}
-    by_name = {s.name: s for s in reg.all()}
-    assert by_name["recon-asset-enum"].pack == "web"
     router = SkillRouter(reg)
     query = "对目标做信息收集 资产枚举 指纹识别"
     hits_recon = router.route(query=query, role_skills=["recon-asset-enum"],
@@ -438,9 +421,9 @@ def test_real_k1_thin_entry_skills():
             "web-client-side", "web-post-exp", "misc-triage",
             "rt-intranet-recon", "rt-lateral-move", "rt-privesc"} <= names
     assert not {"intranet-recon", "lateral-move", "privesc-win-lin"} & names
-    # rt-* 独立条目且归属正确（pentest 侧已退场）
+    # rt-* 独立条目（技能扁平，无包归属）
     by_name = {s.name: s for s in reg.all()}
-    assert by_name["rt-lateral-move"].pack == "redteam"
+    assert "rt-lateral-move" in by_name
     router = SkillRouter(reg)
     # 注入任务命中 web-injection（与 web-strike-entry 同分并列即可）
     hits = router.route(query="测试 sql 注入点 盲注", packs={"web", "pentest"},
@@ -536,7 +519,7 @@ def test_real_redteam_experts_j_batch():
     # 新角色全落位后 doctor 零 error（skills/task_types 引用不悬空）
     rep = diagnose(Path("packs"))
     bad = [i for i in rep.issues if i.level == "error"
-           and ((i.target or "").replace("\\", "/").startswith("tracks/")
+           and ((i.target or "").replace("\\", "/").startswith("kb/")
                 or (i.target or "").replace("\\", "/").startswith("experts/"))]
     assert not bad, [(i.level, i.code, i.target) for i in bad]
 
@@ -570,7 +553,7 @@ def test_real_research_track_landed():
     # 真实仓库 doctor：research 轨零 error/warning（redlines.md/task_types.yaml 是必要件）
     rep = diagnose(Path("packs"))
     bad = [i for i in rep.issues if i.level in ("error", "warning")
-           and (i.target or "").replace("\\", "/").startswith("tracks/research")]
+           and (i.target or "").replace("\\", "/").startswith("kb/research")]
     assert not bad, [(i.level, i.code, i.target) for i in bad]
 
 
@@ -579,14 +562,10 @@ def test_real_thin_router_skills_stage2():
     reg = SkillRegistry("packs")
     reg.load()
     by_name = {s.name: s for s in reg.all()}
-    # 新增 4 篇的归属
-    assert by_name["binary-pwn"].kind == "capability" and by_name["binary-pwn"].pack == "binary"
-    assert by_name["crypto-triage"].pack == "crypto"
-    assert by_name["forensics-triage"].pack == "forensics"
-    triage = by_name["triage"]
-    assert triage.kind == "track" and triage.pack == "ctf"
-    # kb/ 快照内的 SKILL.md（ctf-crypto 等）不得混进注册表
-    assert all(not (s.pack == "crypto" and s.name == "ctf-crypto") for s in reg.all())
+    # 薄路由/分诊技能真实落包（技能扁平，无包归属）
+    assert {"binary-pwn", "crypto-triage", "forensics-triage", "triage"} <= set(by_name)
+    # kb/ 快照内的 SKILL.md（ctf-crypto 等）不得混进注册表（只扫 kb/skills/*）
+    assert "ctf-crypto" not in by_name
 
     router = SkillRouter(reg)
     # file_features ×3 稳命中 binary-pwn
@@ -641,8 +620,8 @@ def test_router_task_type_bonus(packs):
 def test_doctor_skill_task_types_warning(packs):
     """技能 frontmatter task_types 越出所有轨注册表 → warning（拼错=加分静默失效）。"""
     from core.skills.doctor import diagnose
-    bad = packs / "capabilities" / "web" / "skills" / "bad-tt"
-    bad.mkdir()
+    bad = packs / "kb" / "skills" / "bad-tt"
+    bad.mkdir(parents=True)
     (bad / "SKILL.md").write_text(
         "---\nname: bad-tt\ndescription: 坏类型技能\ntask_types: nosuchtype\n---\nx",
         encoding="utf-8")
@@ -974,7 +953,7 @@ def test_proposals_index_edit_flow(tmp_path):
     条目，apply 与他域条目合并写回）；create 已退役被拒；条目须带本域域前缀。"""
     from core.skills import proposals
     root = _kb_fixture(tmp_path)
-    (root / "capabilities" / "web").mkdir(parents=True)  # 提案归属校验要求能力包目录
+    # 提案归属校验要求 kb 方向目录（_kb_fixture 已建 kb/web）
     index = root / "kb" / "route_index.yaml"
     index.write_text("entries:\n"
                      "  - point: 原条目\n    kb: web/poc/tduck.md\n"
@@ -1027,7 +1006,7 @@ def test_proposals_skill_suggest_flow(tmp_path):
     SKILL.md 本体不动）；mode 越权仍拒。"""
     from core.skills import proposals
     root = _kb_fixture(tmp_path)
-    skill = root / "capabilities" / "web" / "skills" / "demo"
+    skill = root / "kb" / "skills" / "demo"
     skill.mkdir(parents=True)
     (skill / "SKILL.md").write_text(
         "---\nname: demo\ndescription: demo 技能\n---\n正文", encoding="utf-8")

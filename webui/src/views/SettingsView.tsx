@@ -1,9 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { Group, Panel, Separator } from "react-resizable-panels"
 import { api } from "@/lib/api"
 import type {
   Expert, LlmProvider,
-  SkillDef, SkillDetail, SkillVocab,
 } from "@/lib/types"
 import { capLabel, trackLabel, type Taxonomy } from "@/lib/taxonomy"
 import { Badge } from "@/components/ui/badge"
@@ -22,11 +20,9 @@ import { DoctorBar } from "@/components/settings/DoctorBar"
 import { HistoryButton } from "@/components/settings/HistoryDialog"
 import { MatrixPane } from "@/components/settings/MatrixPane"
 import {
-  ExpertCreateDialog, SkillCreateDialog, type SkillSource,
+  ExpertCreateDialog,
 } from "@/components/settings/CreateDialogs"
-import { SkillEditor, SKILL_MD_PREFIX, type SkillEditorHandle } from "@/components/settings/SkillEditor"
 import { KbView, type KbFocus } from "@/components/settings/KbView"
-import { MarkdownOutline } from "@/components/settings/MarkdownOutline"
 import { SkillWorkspace } from "@/components/settings/SkillWorkspace"
 import { ProposalsPane } from "@/components/settings/ProposalsPane"
 import { IntelSourcePane } from "@/components/settings/IntelSourcePane"
@@ -36,7 +32,6 @@ import { AppearancePane } from "@/components/settings/AppearancePane"
 import { ProviderDialog } from "@/components/settings/ProviderDialog"
 import { FORMAT_LABEL } from "@/lib/providerPresets"
 import { McpPane } from "@/components/McpPane"
-import { parseSkill } from "@/lib/skillfm"
 import { cn } from "@/lib/utils"
 import {
   Bot, Cable, ChevronRight, CircleGauge,
@@ -49,24 +44,20 @@ function packsChanged() {
   window.dispatchEvent(new Event("packs-changed"))
 }
 
-// doctor 跳转指令（跨 tab/轨/包选中具体专家或技能）
+// doctor 跳转指令（跨 tab/轨选中具体专家或技能）
 interface ExpertFocus { id: string; n: number }
-interface SkillFocus { source: SkillSource; pack: string; name: string; n: number }
+interface SkillFocus { name: string; n: number }
 
-// 设置页（DESIGN.md §12 页面 6-9）：专家池（packs/experts/ 单文件池）/ Skill（轨+能力包，含路由试算）/
-// 红线（轨+能力包）/ owners（轨）/ 模型 / MCP。
+// 设置页（DESIGN.md §12 页面 6-9）：专家池（packs/experts/ 单文件池）/ 技能库（packs/kb/skills 扁平）/
+// 安全红线（轨红线/平台规则/评级）/ 模型 / MCP。
 // 修改经 core API 写 packs 文件（写入前留 .history）；改动在下次开窗生效，在跑会话不受影响。
 
 function Saved({ saved }: { saved: boolean }) {
   return <span className={cn("text-[10px] transition-opacity", saved ? "text-primary opacity-100" : "opacity-0")}>已保存 ✓</span>
 }
 
-function DangerNote({ children }: { children: React.ReactNode }) {
-  return <p className="text-[10px] text-(--status-approval)">{children}</p>
-}
-
 export function SettingsView({ nav, pid }: {
-  nav?: { tab: string; n: number; skill?: { source: SkillSource; pack: string; name: string } } | null
+  nav?: { tab: string; n: number; skill?: { name: string } } | null
   pid?: string | null
 } = {}) {
   const [tax, setTax] = useState<Taxonomy | null>(null)
@@ -90,12 +81,12 @@ export function SettingsView({ nav, pid }: {
       setTax(t)
       if (!navAppliedRef.current && !projectAppliedRef.current) {
         if (t.tracks[0]) setTrack(t.tracks[0].name)
-        if (t.capabilities[0]) setCap(t.capabilities[0].name)
+        if (t.directions[0]) setCap(t.directions[0])
       }
     }).catch(() => {})
   }, [])
 
-  // 从项目内打开（pid 存在）：轨/能力包缺省跟随当前项目——不再每次都显示 CTF
+  // 从项目内打开（pid 存在）：轨/kb 方向缺省跟随当前项目——不再每次都显示 CTF
   useEffect(() => {
     if (!pid || navAppliedRef.current) return
     projectAppliedRef.current = true
@@ -103,9 +94,9 @@ export function SettingsView({ nav, pid }: {
       // 守卫须在异步回调内按维度复查：请求在飞期间深链可能已落地（nav effect 晚于入口检查）；
       // 深链只钉一维，另一维仍按项目补（cap 深链时 track 仍应=pentest）
       if (p.track && !navPinnedRef.current.track) setTrack(p.track)
-      // 用盘上绑定包：effective 在 _generalist 项目=全部包，[0] 会错落到 binary
-      const caps = p.capabilities_bound?.length ? p.capabilities_bound : p.capabilities
-      if (caps?.length && !navPinnedRef.current.cap) setCap(caps[0])
+      // 用盘上绑定方向：effective 在 _generalist 项目=全部方向，[0] 会错落到 binary
+      const dirs = p.directions_bound?.length ? p.directions_bound : p.directions
+      if (dirs?.length && !navPinnedRef.current.cap) setCap(dirs[0])
     }).catch(() => {})
   }, [pid])
 
@@ -118,21 +109,19 @@ export function SettingsView({ nav, pid }: {
     return () => window.removeEventListener("proposals-changed", refresh)
   }, [])
 
-  // 跨视图跳指定 tab；带 skill 时（直播间 skill.routed 双击）同步轨/包并深链选中该技能
+  // 跨视图跳指定 tab；带 skill 时（直播间 skill.routed 双击）深链选中该技能（技能已扁平，无轨/包维度）
   useEffect(() => {
     if (!nav?.n) return
     setTab(nav.tab)
     const s = nav.skill
     if (s) {
       navAppliedRef.current = true
-      navPinnedRef.current = s.source === "track" ? { track: true } : { cap: true }
-      if (s.source === "track") setTrack(s.pack); else setCap(s.pack)
-      setSkillFocus({ source: s.source, pack: s.pack, name: s.name, n: nav.n })
+      setSkillFocus({ name: s.name, n: nav.n })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nav?.n])
 
-  // doctor 详情跳转：按 target 路径切 tab/轨/包并选中具体条目
+  // doctor 详情跳转：按 target 路径切 tab/轨并选中具体条目（2026-10-13 新布局：技能扁平、红线收在 kb/安全红线/）
   const navigateTarget = (target: string): boolean => {
     let m: RegExpMatchArray | null
     if ((m = target.match(/^experts\/([\w.-]+)\.yaml$/))) {
@@ -140,30 +129,28 @@ export function SettingsView({ nav, pid }: {
       setExpertFocus({ id: m[1], n: Date.now() })
       return true
     }
-    if ((m = target.match(/^tracks\/([\w.-]+)\/skills\/([\w.-]+)\/SKILL\.md$/))) {
-      setTrack(m[1]); setTab("skills")
-      setSkillFocus({ source: "track", pack: m[1], name: m[2], n: Date.now() })
+    // 技能（扁平：packs/kb/skills/<name>/SKILL.md）
+    if ((m = target.match(/^kb\/skills\/([\w.-]+)\/SKILL\.md$/))) {
+      setTab("skills")
+      setSkillFocus({ name: m[1], n: Date.now() })
       return true
     }
-    if ((m = target.match(/^capabilities\/([\w.-]+)\/skills\/([\w.-]+)\/SKILL\.md$/))) {
-      setCap(m[1]); setTab("skills")
-      setSkillFocus({ source: "cap", pack: m[1], name: m[2], n: Date.now() })
+    // 轨红线：packs/kb/安全红线/轨红线/<track>.md
+    if ((m = target.match(/^kb\/安全红线\/轨红线\/([\w.-]+)\.md$/))) {
+      setTrack(m[1]); setTab("rules")
+      setRuleFocus({ kind: "track-redlines", name: m[1], n: Date.now() })
       return true
     }
+    // 评级与价值口径：packs/kb/安全红线/评级与价值口径/<tag>.md（渗透独有）
+    if ((m = target.match(/^kb\/安全红线\/评级与价值口径\/([\w.-]+)\.md$/))) {
+      setTab("rules")
+      setRuleFocus({ kind: "rating", name: "pentest", tag: m[1], n: Date.now() })
+      return true
+    }
+    // kb 知识模块：packs/kb/<domain>/<path>
     if ((m = target.match(/^kb\/([\w.-]+)\/(.+\.(?:md|py|txt|json))$/))) {
       setCap(m[1]); setTab("kb")
       setKbFocus({ path: m[2], n: Date.now() })
-      return true
-    }
-    if ((m = target.match(/^(tracks|capabilities)\/([\w.-]+)\/rules\/redlines\.md$/))) {
-      if (m[1] === "tracks") setTrack(m[2]); else setCap(m[2])
-      setTab("rules")
-      setRuleFocus({ kind: m[1] === "tracks" ? "track-redlines" : "cap-redlines", name: m[2], n: Date.now() })
-      return true
-    }
-    if ((m = target.match(/^tracks\/([\w.-]+)\/rules\/rating\/([\w.-]+)\.md$/))) {
-      setTrack(m[1]); setTab("rules")
-      setRuleFocus({ kind: "rating", name: m[1], tag: m[2], n: Date.now() })
       return true
     }
     return false
@@ -198,8 +185,8 @@ export function SettingsView({ nav, pid }: {
           <TabsContent value="experts" className="min-h-0 flex-1"><ExpertsPane tax={tax} focus={expertFocus} /></TabsContent>
           <TabsContent value="skills" className="min-h-0 flex-1"><SkillWorkspace pid={pid} focus={skillFocus} onExpert={(id) => { setTab("experts"); setExpertFocus({ id, n: Date.now() }) }} /></TabsContent>
           <TabsContent value="kb" className="min-h-0 flex-1"><KbView cap={cap} focus={kbFocus} /></TabsContent>
-          <TabsContent value="matrix" className="min-h-0 flex-1"><MatrixPane tax={tax} track={track} onFocusSkill={(source, pack, name) => { if (source === "track") setTrack(pack); else setCap(pack); setTab("skills"); setSkillFocus({ source, pack, name, n: Date.now() }) }} /></TabsContent>
-          <TabsContent value="rules" className="min-h-0 flex-1"><RulesPane track={track} cap={cap} focus={ruleFocus} pid={pid} /></TabsContent>
+          <TabsContent value="matrix" className="min-h-0 flex-1"><MatrixPane tax={tax} track={track} onFocusSkill={(name) => { setTab("skills"); setSkillFocus({ name, n: Date.now() }) }} /></TabsContent>
+          <TabsContent value="rules" className="min-h-0 flex-1"><RulesPane track={track} focus={ruleFocus} pid={pid} /></TabsContent>
           <TabsContent value="advisor" className="min-h-0 flex-1"><AdvisorPane pid={pid} /></TabsContent>
           <TabsContent value="llm" className="min-h-0 flex-1"><LlmPane /></TabsContent><TabsContent value="mcp" className="min-h-0 flex-1"><McpPane /></TabsContent><TabsContent value="gateway" className="min-h-0 flex-1"><GatewayPane pid={pid} /></TabsContent><TabsContent value="tools" className="min-h-0 flex-1"><AgentToolsPane /></TabsContent><TabsContent value="intel" className="min-h-0 flex-1"><IntelSourcePane /></TabsContent><TabsContent value="proposals" className="min-h-0 flex-1"><ProposalsPane onPendingChange={setPendingN} /></TabsContent><TabsContent value="appearance" className="min-h-0 flex-1"><AppearancePane /></TabsContent>
         </Tabs>
@@ -400,284 +387,6 @@ function ExpertsPane({ tax, focus }: { tax: Taxonomy | null; focus: ExpertFocus 
             <AlertDialogDescription>
               yaml 将移入 experts/.history/trash/（带时间戳，可手工恢复）。
               正在运行的会话不受影响；下次开窗生效。受保护专家（_generalist）不可删除。
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>取消</AlertDialogCancel>
-            <AlertDialogAction disabled={busy}
-              className="bg-destructive text-white hover:bg-destructive/90"
-              onClick={doDelete}>删除</AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-    </div>
-  )
-}
-
-// ---------- Skill + 知识库（三栏：列表/树 · 编辑 · 试算+大纲） ----------
-
-const HANDLE_CLS = "z-10 bg-border transition-colors hover:bg-primary/60 data-[separator-active]:bg-primary"
-
-function HHandle() {
-  return <Separator className={cn("h-full w-px shrink-0", HANDLE_CLS)} />
-}
-export function SkillsPane({ track, cap, focus }: {
-  track: string; cap: string; focus: SkillFocus | null
-}) {
-  const [source, setSource] = useState<SkillSource>("cap")
-  const packName = source === "cap" ? cap : track
-  const [skills, setSkills] = useState<SkillDef[]>([])
-  const [selected, setSelected] = useState<string | null>(null)
-  const [detail, setDetail] = useState<SkillDetail | null>(null)
-  const [dirty, setDirty] = useState(false)
-  const [saved, setSaved] = useState(false)
-  const [err, setErr] = useState<string | null>(null)
-  const [createOpen, setCreateOpen] = useState(false)
-  const [confirmDel, setConfirmDel] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
-  const [vocab, setVocab] = useState<SkillVocab | null>(null)
-  const [resourcePath, setResourcePath] = useState<string | null>(null)
-  const [resourceContent, setResourceContent] = useState<string | null>(null)
-  const editorRef = useRef<SkillEditorHandle>(null)
-  // 切包/切来源时在 render 期同步清空选中：避免详情 effect 拿旧选中对新包发一次 404
-  const [prevPack, setPrevPack] = useState(packName)
-  if (prevPack !== packName) {
-    setPrevPack(packName)
-    setSelected(null)
-    setResourcePath(null)
-    setResourceContent(null)
-  }
-
-  const listApi = source === "cap" ? api.capSkills : api.trackSkills
-  const detailApi = source === "cap" ? api.capSkillDetail : api.trackSkillDetail
-  const updateApi = source === "cap" ? api.updateCapSkill : api.updateTrackSkill
-
-  const reload = useCallback(() => {
-    // 竞态守卫：切包/切轨后旧响应晚到不得覆盖新列表（同 RolesPane）
-    let alive = true
-    listApi(packName).then((ss) => {
-      if (!alive) return
-      setSkills(ss)
-      setSelected((cur) => cur && ss.some((s) => s.name === cur) ? cur : null)
-    }).catch(() => { if (alive) setSkills([]) })
-    return () => { alive = false }
-  }, [listApi, packName])
-  useEffect(() => reload(), [reload])
-  useEffect(() => { api.skillsVocab().then(setVocab).catch(() => {}) }, [])
-
-  // doctor/矩阵/直播间深链跳转：切到指定来源并选中技能
-  // （守卫按 focus.source 对应的包比较——packName 依赖本 pane 的 source state，
-  //   轨技能深链时 source 仍是 "cap"，用 packName 会永远不命中）
-  // 技能打开默认预览；新建技能使用编辑模式，保存/启用刷新保留当前模式
-  const [openMode, setOpenMode] = useState<"edit" | "preview">("preview")
-  useEffect(() => {
-    if (!focus) return
-    const focusPack = focus.source === "cap" ? cap : track
-    if (focus.pack === focusPack) {
-      setSource(focus.source)
-      setSelected(focus.name)
-      setOpenMode("preview")
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [focus?.n])
-
-  useEffect(() => {
-    if (!selected) { setDetail(null); return }
-    setResourcePath(null)
-    setResourceContent(null)
-    detailApi(packName, selected).then(setDetail).catch(() => setDetail(null))
-  }, [detailApi, packName, selected])
-
-  const resourceApi = source === "cap" ? api.capSkillResource : api.trackSkillResource
-  useEffect(() => {
-    if (!selected || !resourcePath) { setResourceContent(null); return }
-    resourceApi(packName, selected, resourcePath).then((r) => setResourceContent(r.content))
-      .catch(() => setResourceContent("读取技能资源失败"))
-  }, [packName, resourceApi, resourcePath, selected])
-
-  const switchSource = (s: SkillSource) => {
-    if (s === source) return
-    if (dirty && !window.confirm("技能有未保存修改，放弃并切换？")) return
-    setSource(s)
-    setSelected(null)
-    setOpenMode("preview")
-  }
-
-  const save = async () => {
-    if (!selected || !editorRef.current) return
-    setErr(null)
-    try {
-      await updateApi(packName, selected, editorRef.current.getRaw())
-      setSaved(true)
-      setTimeout(() => setSaved(false), 1500)
-      packsChanged()
-      reload()
-      detailApi(packName, selected).then(setDetail).catch(() => {})
-    } catch (e) {
-      setErr(String(e))
-    }
-  }
-
-  const toggleEnabled = async (enabled: boolean) => {
-    if (!selected) return
-    setErr(null)
-    try {
-      const toggle = source === "cap" ? api.setCapSkillEnabled : api.setTrackSkillEnabled
-      await toggle(packName, selected, enabled)
-      packsChanged()
-      reload()
-      detailApi(packName, selected).then(setDetail).catch(() => {})
-    } catch (e) {
-      setErr(String(e))
-    }
-  }
-
-  const doDelete = async () => {
-    if (!confirmDel) return
-    setBusy(true)
-    setErr(null)
-    try {
-      const del = source === "cap" ? api.deleteCapSkill : api.deleteTrackSkill
-      await del(packName, confirmDel)
-      setSelected((cur) => cur === confirmDel ? null : cur)
-      packsChanged()
-      reload()
-    } catch (e) {
-      setErr(String(e))
-    } finally {
-      setBusy(false)
-      setConfirmDel(null)
-    }
-  }
-
-  const sk = detail?.skill
-  // 右栏大纲：技能取已保存正文（parseSkill）
-  const outlineMd = detail ? (parseSkill(detail.raw).hasFm ? parseSkill(detail.raw).form.body : detail.raw) : ""
-  const outlinePrefix = SKILL_MD_PREFIX
-
-  return (
-    <div className="h-full min-h-0">
-      <Group orientation="horizontal" className="h-full">
-        {/* 左栏：技能列表 + 知识库树（默认 240px） */}
-        <Panel defaultSize={240} minSize="14%">
-          <div className="flex h-full min-h-0 flex-col">
-            <div className="flex shrink-0 items-center gap-1 border-b px-1.5 py-1">
-              {(["cap", "track"] as SkillSource[]).map((s) => (
-                <button key={s}
-                  className={cn("rounded px-1.5 py-0.5 text-[10px]",
-                    source === s ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-accent/40")}
-                  onClick={() => switchSource(s)}>
-                  {s === "cap" ? `包：${capLabel(cap)}` : `轨：${trackLabel(track)}`}
-                </button>
-              ))}
-              <span className="flex-1" />
-              <button className="rounded px-1.5 py-0.5 text-[10px] text-primary hover:bg-accent/40"
-                      title="新建自包含技能" onClick={() => setCreateOpen(true)}>＋新建</button>
-            </div>
-            <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
-              {skills.map((s) => (
-                <div key={s.name}
-                     className={cn("group flex items-center rounded text-xs",
-                       selected === s.name && "bg-primary/10 text-primary",
-                       selected !== s.name && !s.enabled && "opacity-50")}>
-                  <button
-                    className="min-w-0 flex-1 truncate rounded px-2 py-1.5 text-left font-mono hover:bg-accent/40"
-                    onClick={() => { setSelected(s.name); setOpenMode("preview") }}>
-                    {s.name}
-                  </button>
-                  <button className="px-1.5 text-[10px] text-(--status-error) opacity-0 transition-opacity group-hover:opacity-100"
-                          title="删除（整目录移入 .history/trash，可恢复）"
-                          onClick={() => setConfirmDel(s.name)}>✕</button>
-                </div>
-              ))}
-              {skills.length === 0 && (
-                <p className="p-2 text-[11px] leading-relaxed text-muted-foreground">
-                  该{source === "cap" ? "能力包" : "场景轨"}暂无自包含技能
-                </p>
-              )}
-            </div>
-          </div>
-        </Panel>
-        <HHandle />
-
-        {/* 中栏：技能编辑器（弹性宽） */}
-        <Panel minSize="30%">
-          {detail ? (
-            <div className="flex h-full min-h-0 flex-col gap-1.5 p-3">
-              <div className="flex shrink-0 flex-wrap items-center gap-1.5">
-                <span className="font-mono text-sm">{detail.name}</span>
-                <Badge variant="outline" className="text-[10px]">{sk?.kind}/{sk?.pack}</Badge>
-                {sk && !sk.enabled && <Badge variant="outline" className="text-[10px] text-(--status-approval)">enabled:false</Badge>}
-                {err && <span className="break-all text-[10px] text-(--status-error)">{err}</span>}
-                <span className="flex-1" />
-                <label className="flex items-center gap-1 text-[10px] text-muted-foreground" title="只改 frontmatter enabled 行；禁用后不参与路由，正文保留">
-                  <input type="checkbox" checked={sk?.enabled ?? true}
-                         onChange={(e) => toggleEnabled(e.target.checked)} />
-                  启用
-                </label>
-                <HistoryButton file={
-                  source === "cap"
-                    ? `capabilities/${packName}/skills/${selected}/SKILL.md`
-                    : `tracks/${packName}/skills/${selected}/SKILL.md`} />
-                <Button size="sm" variant="outline" className="text-[10px] text-(--status-error)"
-                        onClick={() => setConfirmDel(detail.name)}>删除</Button>
-                <Saved saved={saved} />
-                <Button size="sm" onClick={save} disabled={!dirty}>保存</Button>
-              </div>
-              <p className="shrink-0 text-[11px] text-muted-foreground">
-                {sk?.description ?? detail.meta.description as string}
-              </p>
-              <SkillEditor key={detail.name} ref={editorRef} detail={detail} vocab={vocab}
-                           onDirtyChange={setDirty}
-                           startMode={openMode} resetKey={focus?.n} />
-              <DangerNote>表单保存时合并回写 frontmatter（name 锁定与目录一致，改名请新建+删除）；正文是 Agent 入口纪律，写坏会导致路由失效。</DangerNote>
-            </div>
-          ) : (
-            <p className="p-4 text-xs text-muted-foreground">选择左侧技能，或点「＋新建」创建自包含技能</p>
-          )}
-        </Panel>
-        <HHandle />
-
-        {/* 右栏：cc 风格技能文件与正文大纲 */}
-        <Panel defaultSize={300} minSize="17%">
-          <div className="flex h-full min-h-0 flex-col">
-            <p className="shrink-0 border-b px-2 py-1 text-[10px] font-semibold text-muted-foreground">
-              技能文件 {detail?.resources?.length ? `· ${detail.resources.length + 1}` : "· 1"}
-            </p>
-            <div className="shrink-0 border-b p-1.5">
-              <button className={cn("block w-full truncate rounded px-2 py-1 text-left text-[10px]",
-                !resourcePath ? "bg-primary/10 text-primary" : "hover:bg-accent/40")}
-                onClick={() => { setResourcePath(null); setResourceContent(null) }}>
-                SKILL.md
-              </button>
-              {(detail?.resources ?? []).map((path) => (
-                <button key={path} className={cn("mt-0.5 block w-full truncate rounded px-2 py-1 text-left font-mono text-[10px]",
-                  resourcePath === path ? "bg-primary/10 text-primary" : "hover:bg-accent/40")}
-                  onClick={() => setResourcePath(path)} title={path}>
-                  {path}
-                </button>
-              ))}
-            </div>
-            {resourcePath ? (
-              <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap p-3 font-mono text-[10px] leading-relaxed">{resourceContent ?? "读取中…"}</pre>
-            ) : (
-              <MarkdownOutline markdown={outlineMd} prefix={outlinePrefix} />
-            )}
-          </div>
-        </Panel>
-      </Group>
-
-      <SkillCreateDialog open={createOpen} onOpenChange={setCreateOpen}
-                        source={source} packName={packName}
-                        onCreated={(name) => { setSelected(name); setOpenMode("edit"); reload() }} />
-      <AlertDialog open={confirmDel !== null} onOpenChange={(v) => !v && setConfirmDel(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>删除技能 {confirmDel}？</AlertDialogTitle>
-            <AlertDialogDescription>
-              整个技能目录将移入 {source === "cap"
-                ? `capabilities/${packName}/skills` : `tracks/${packName}/skills`}/.history/trash/
-              （带时间戳，可手工恢复）。若有角色白名单引用它，将变成悬空引用（doctor 报 error）。
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

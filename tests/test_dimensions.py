@@ -97,8 +97,8 @@ def test_is_converged():
 # ---------- 解析 / 覆写 / 容错 ----------
 
 def test_parse_and_override(tmp_path):
-    (tmp_path / "tracks" / "pentest").mkdir(parents=True)
-    (tmp_path / "tracks" / "pentest" / "dimensions.yaml").write_text(
+    (tmp_path / "kb" / "pentest").mkdir(parents=True)
+    (tmp_path / "kb" / "pentest" / "dimensions.yaml").write_text(
         "dimensions:\n"
         "  - id: x\n"
         "    name: X\n"
@@ -122,8 +122,8 @@ def test_missing_file_is_empty(tmp_path):
 
 
 def test_bad_yaml_skipped(tmp_path):
-    (tmp_path / "tracks" / "pentest").mkdir(parents=True)
-    p = tmp_path / "tracks" / "pentest" / "dimensions.yaml"
+    (tmp_path / "kb" / "pentest").mkdir(parents=True)
+    p = tmp_path / "kb" / "pentest" / "dimensions.yaml"
     p.write_text("dimensions:\n  - id: ok\n    applies_to: [url]\n"
                  "  - name: no-id\n    applies_to: [url]\n", encoding="utf-8")
     dims = load_track_dimensions(tmp_path, "pentest")

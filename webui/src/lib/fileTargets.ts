@@ -81,10 +81,16 @@ function mk(relPath: string, source: FileTarget["source"]): FileTarget | null {
  * 去掉项目工作区绝对前缀，落成相对路径（后端 `/files/open` 收相对 scope 根的路径）。
  * packs/tools 下的绝对路径原样保留（后端同样接受，见 `_open_scope_path`）。
  * 绝对路径下取不到工作区根时原样返回（后端会 422，不静默错指）。
+ *
+ * WSL 路径 `/mnt/<盘符>/…` 先映射回 `<盘符>:/…`（宿主工作区前缀才能剥掉），
+ * 否则 `/mnt/e/…` 既不是合法 Windows 绝对路径也不在工作区下，后端会拼成
+ * `<盘>:\mnt\e\…` 并 422「越界」。
  */
 export function relToWorkdir(raw: string, workdir?: string | null): string {
-  const p = String(raw || "").replace(/\\/g, "/").trim()
+  let p = String(raw || "").replace(/\\/g, "/").trim()
   if (!p) return p
+  const wsl = p.match(/^\/mnt\/([a-zA-Z])\/(.*)$/)
+  if (wsl) p = `${wsl[1].toLowerCase()}:/${wsl[2]}`
   const wd = String(workdir || "").replace(/\\/g, "/").replace(/\/+$/, "")
   if (wd && p.toLowerCase().startsWith(wd.toLowerCase() + "/")) return p.slice(wd.length + 1)
   if (wd && p.toLowerCase() === wd.toLowerCase()) return ""
@@ -96,6 +102,10 @@ function str(v: unknown): string {
 }
 
 // 工具名 → 参数里指向文件的键（结果里出现的路径另算）
+//
+// 注意：bb_add_artifact 的 `filename` 只是**纯文件名**，真实落盘路径是
+// `<artifacts_dir>/<kind>/<filename>` = 项目根下 `artifacts/<kind>/<filename>`。
+// 所以不在此表里按裸名抽，而在 targetsFromTool 里特判构造（见下）。
 const ARG_PATH_KEYS: Record<string, string[]> = {
   read_file: ["path"],
   search_files: ["path"],
@@ -104,7 +114,6 @@ const ARG_PATH_KEYS: Record<string, string[]> = {
   decompile: ["binary"],
   list_symbols: ["binary"],
   propose_pack_edit: ["target"],
-  bb_add_artifact: ["filename", "path"],
   skill_open: ["path"],
   kb_open: ["path"],
   browser_screenshot: ["path"],
@@ -125,13 +134,25 @@ export function targetsFromTool(
     if (t && !out.some((x) => x.relPath === t.relPath)) out.push(t)
   }
   for (const key of ARG_PATH_KEYS[name] ?? []) push(str(args?.[key]))
+  // bb_add_artifact：filename 是纯文件名，落盘在 `artifacts/<kind>/<filename>`。
+  // 工具结果虽也返回 `path=<kind>/<filename>`，但那是相对 artifacts_dir 的——
+  // 这里直接按参数构造项目根相对路径，避免结果解析漏/错。
+  if (name === "bb_add_artifact") {
+    const fn = str(args?.filename)
+    if (fn) push(`artifacts/${str(args?.kind) || "file"}/${fn}`)
+  }
   // 结果里显式路径（`写入 <path>` / `path: <p>` / `已保存到 <p>` 三形态）。
   // **必须过 looksLikePath**（2026-10-04 修误报文件卡）：kb_open/skill_open 的正文里
   // 常出现「文件：」一类字样，其后整句中文会被字符类吞下（该类不排除中文标点），
   // 不加校验就抽成「文件名」——曾把「；验证上限=影响证明级；…tested_clean」当路径。
   if (result) {
     for (const m of result.matchAll(/(?:写入|保存到|已生成|path[:：]|文件[:：])\s*([^\s"'`,;)]{3,300})/g)) {
-      if (looksLikePath(m[1])) push(m[1])
+      if (!looksLikePath(m[1])) continue
+      let p = m[1]
+      // bb_add_artifact 的返回 `path=<kind>/<filename>` 是相对 artifacts_dir 的，
+      // 需补 `artifacts/` 前缀才是项目根相对路径（与上方 args 构造对齐）。
+      if (name === "bb_add_artifact" && !p.startsWith("artifacts/")) p = `artifacts/${p}`
+      push(p)
     }
   }
   return out
@@ -155,15 +176,27 @@ function looksLikePath(s: string): boolean {
 /**
  * 从 assistant 叙述正文抽文件目标。`known`=同轮工具目标——同 basename 时
  * 指向真实路径（对齐 cc-haha reconcileTargetsWithChangedFiles），否则按原文路径。
+ *
+ * 关键纪律（2026-10-13 修「复制路径不对」）：反引号里的**裸文件名**（不含 `/`）
+ * 无法定位到工作区里的具体文件——必须靠 `known` 对账出真实路径才能收下；
+ * 对账时优先取带目录信息（relPath 含 `/`）的已知目标，避免裸名覆盖真实路径。
  */
 export function targetsFromProse(text: string, known: FileTarget[] = []): FileTarget[] {
   const out: FileTarget[] = []
   const add = (raw: string) => {
     const t = mk(raw, "prose")
     if (!t) return
-    const hit = known.find((k) => k.name === t.name)
-    const final = hit ? { ...hit, source: "prose" as const } : t
-    if (!out.some((x) => x.relPath === final.relPath)) out.push(final)
+    const matches = known.filter((k) => k.name === t.name)
+    // 优先带目录的已知目标，否则取第一个（通常就是它）
+    const hit = matches.find((k) => k.relPath.includes("/")) ?? matches[0]
+    if (hit) {
+      const final = { ...hit, source: "prose" as const }
+      if (!out.some((x) => x.relPath === final.relPath)) out.push(final)
+      return
+    }
+    // 无已知目标对账：只有带目录的路径才能定位文件，裸文件名丢弃（否则复制出不存在的路径）。
+    if (!t.relPath.includes("/")) return
+    if (!out.some((x) => x.relPath === t.relPath)) out.push(t)
   }
   for (const m of (text ?? "").matchAll(INLINE_CODE)) if (looksLikePath(m[1])) add(m[1])
   for (const m of (text ?? "").matchAll(BARE_PATH)) if (looksLikePath(m[1])) add(m[1])

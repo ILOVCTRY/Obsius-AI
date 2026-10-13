@@ -91,9 +91,14 @@ def make_service(tmp_path, sample, ghidra_runner=None):
 def test_headless_export_and_cache(tmp_path, sample):
     runner, calls = fake_ghidra_runner(tmp_path)
     svc = make_service(tmp_path, sample, runner)
+    # Agent 只读工具在无缓存时快速失败，**不触发** headless 导出（2026-10-13）
+    assert svc.list_functions(str(sample)).startswith("[未分析]")
+    assert calls["n"] == 0
+    # triage 路径（export_to_cache）才触发 headless 全量导出
+    svc.export_to_cache(str(sample))
+    assert calls["n"] == 1
     syms = json.loads(svc.list_functions(str(sample)))
     assert [s["name"] for s in syms] == ["check_flag", "main"]
-    assert calls["n"] == 1
     # 第二次走缓存，不再执行 headless
     svc.list_functions(str(sample))
     assert calls["n"] == 1
@@ -111,6 +116,7 @@ def test_list_functions_filters(tmp_path, sample):
     """list_functions 过滤参数：按名（大小写不敏感）/按大小筛；无命中回空表。"""
     runner, _calls = fake_ghidra_runner(tmp_path)
     svc = make_service(tmp_path, sample, runner)
+    svc.export_to_cache(str(sample))  # 先分析：Agent 只读工具不再触发导出（2026-10-13）
     by_name = json.loads(svc.list_functions(str(sample), name_contains="FLAG"))
     assert [s["name"] for s in by_name] == ["check_flag"]
     by_size = json.loads(svc.list_functions(str(sample), min_size=150))
@@ -122,6 +128,7 @@ def test_strings_for_filter_and_limit(tmp_path, sample):
     """strings_for：子串过滤带地址+引用函数；limit 截断计数；无后端回引导文本。"""
     runner, _calls = fake_ghidra_runner(tmp_path)
     svc = make_service(tmp_path, sample, runner)
+    svc.export_to_cache(str(sample))  # 先分析：Agent 只读工具不再触发导出（2026-10-13）
     hit = json.loads(svc.strings_for(str(sample), q="correct"))
     assert hit["count"] == 1 and hit["truncated"] is False
     row = hit["items"][0]
@@ -138,6 +145,7 @@ def test_xrefs_for_func_name_address_and_unknown(tmp_path, sample):
     """xrefs_for_func：name 直查 / address 先解析成函数名 / 未知地址回指引。"""
     runner, _calls = fake_ghidra_runner(tmp_path)
     svc = make_service(tmp_path, sample, runner)
+    svc.export_to_cache(str(sample))  # 先分析：Agent 只读工具不再触发导出（2026-10-13）
     by_name = json.loads(svc.xrefs_for_func(str(sample), name="check_flag"))
     assert by_name["callers"] == ["main"]
     assert by_name["callees"] == ["strlen", "puts"]
@@ -145,6 +153,29 @@ def test_xrefs_for_func_name_address_and_unknown(tmp_path, sample):
     assert by_addr["function"] == "check_flag"
     miss = svc.xrefs_for_func(str(sample), address=0x9999)
     assert miss.startswith("[错误]") and "list_symbols" in miss
+
+
+def test_agent_read_tools_fail_fast_without_cache(tmp_path, sample):
+    """Agent 只读工具（list_symbols/strings_search/func_xrefs/decompile/disasm/xrefs）
+    在样本无缓存时快速失败回「未分析」，**绝不静默触发** headless 全量导出（2026-10-13）。
+
+    根因：此前这些工具对未分析样本会同步跑一次完整 IDA/Ghidra 分析（大样本 + 加壳可达
+    数十分钟且无进度），AI 无意识地触发即长时间卡住。"""
+    runner, calls = fake_ghidra_runner(tmp_path)
+    svc = make_service(tmp_path, sample, runner)
+    for out in (svc.list_functions(str(sample)),
+                svc.strings_for(str(sample)),
+                svc.xrefs_for_func(str(sample), address=0x1189),
+                svc.decompile(str(sample), name="check_flag"),
+                svc.disasm(str(sample), name="check_flag"),
+                svc.xrefs(str(sample), "check_flag")):
+        assert out.startswith("[未分析]"), out
+    assert calls["n"] == 0  # 一次导出都没触发
+    # 路径不存在 → 结构化「路径不可读」，不抛
+    assert svc.list_functions(str(tmp_path / "nope.bin")).startswith("[反编译器不可用]")
+    # 无导出后端（IDA/Ghidra 都没装）→ 仍回安装引导，不是「未分析」
+    bare = DecompilerService(cache_dir=tmp_path / "c2")
+    assert bare.list_functions(str(sample)).startswith("[反编译器不可用]")
 
 
 # ---------- MCP 实时桥（streamable-http 会话 / 真机工具别名 / 降级） ----------
@@ -236,9 +267,10 @@ def test_mcp_online_preferred_over_headless(tmp_path, sample):
     assert call_req[2]["Mcp-Session-Id"] == "sess-abc"
     assert call_req[1]["name"] == "decompile"
     assert call_req[1]["arguments"] == {"addr": "0x1234"}
-    # MCP 掉线后降级 headless 缓存
+    # MCP 掉线后降级 headless 缓存（先经 triage 路径预置缓存——Agent 只读工具不再触发导出）
     mcp._transport = _dead_transport
     mcp._health = None
+    svc.export_to_cache(str(sample))
     text = svc.decompile(str(sample), address=0x1189)
     assert "check_flag" in text and calls["n"] == 1
 
