@@ -20,6 +20,10 @@ import { FunctionDetail } from "./FunctionDetail"
 import { XrefPane } from "./XrefPane"
 import { RelatedFindings } from "./RelatedFindings"
 import { NotesPane } from "./NotesPane"
+// 意图清单复用黑板件（2026-10-13）：rev-generic 轨下左导航「黑板」渲染的是本工作台
+// （App.tsx profile 分叉），Blackboard 的「意图」tab 在此轨根本挂载不到——subnav 单列
+// 「意图」入口，与黑板同一份 IntentsPane（同数据源 GET /projects/{pid}/intents）。
+import { IntentsPane } from "../blackboard/IntentsPane"
 // React Flow 较重，攻击链视图按需切包，不拖慢工作台首屏
 const ChainView = lazy(() =>
   import("./chains/ChainView").then((m) => ({ default: m.ChainView })))
@@ -73,8 +77,8 @@ export function ReverseWorkbench({ pid, active = true }: { pid: string; active?:
   const [delBusy, setDelBusy] = useState(false)
   const [delMsg, setDelMsg] = useState<string | null>(null)
 
-  // subnav：逆向分析｜攻击链｜蓝图｜业务逻辑（切页不卸载分析状态，同级条件渲染）
-  const [mode, setMode] = useState<"rev" | "chains" | "feature" | "blueprint" | "logic">("rev")
+  // subnav：逆向分析｜功能树｜攻击链｜蓝图｜业务逻辑｜意图（切页不卸载分析状态，同级条件渲染）
+  const [mode, setMode] = useState<"rev" | "chains" | "feature" | "blueprint" | "logic" | "intents">("rev")
   const [rightTab, setRightTab] = useState("xref")
   const [focusFinding, setFocusFinding] = useState<string | null>(null)
 
@@ -452,9 +456,9 @@ export function ReverseWorkbench({ pid, active = true }: { pid: string; active?:
         pullProgress={pullProgress} onStopPull={handleStopPull}
         triageProgress={triageProgress} onStopTriage={handleStopTriage} triageMsg={triageMsg}
       />
-      {/* subnav：逆向分析｜功能树｜攻击链｜蓝图｜业务逻辑（DESIGN §12 / §9 R4） */}
+      {/* subnav：逆向分析｜功能树｜攻击链｜蓝图｜业务逻辑｜意图（DESIGN §12 / §9 R4） */}
       <div className="flex shrink-0 items-center gap-1 border-b px-2 py-1">
-        {([["rev", "逆向分析"], ["feature", "功能树"], ["chains", "攻击链"], ["blueprint", "蓝图"], ["logic", "业务逻辑"]] as const).map(([k, label]) => (
+        {([["rev", "逆向分析"], ["feature", "功能树"], ["chains", "攻击链"], ["blueprint", "蓝图"], ["logic", "业务逻辑"], ["intents", "意图"]] as const).map(([k, label]) => (
           <button
             key={k} type="button" onClick={() => setMode(k)}
             className={cn("rounded px-3 py-1 text-[11px]",
@@ -464,7 +468,13 @@ export function ReverseWorkbench({ pid, active = true }: { pid: string; active?:
           </button>
         ))}
       </div>
-      {mode === "chains" ? (
+      {mode === "intents" ? (
+        // 意图清单全轨可达（2026-10-13）：rev-generic 轨黑板被本工作台顶替，
+        // 黑板「意图」tab 挂载不到，故在此给同一份 IntentsPane 一个入口
+        <div className="min-h-0 flex-1">
+          <IntentsPane pid={pid} />
+        </div>
+      ) : mode === "chains" ? (
         <Suspense fallback={<div className="flex flex-1 items-center justify-center text-xs text-muted-foreground">加载攻击链视图…</div>}>
           <ChainView pid={pid} tick={tick} onLocate={locateFromChain} />
         </Suspense>
