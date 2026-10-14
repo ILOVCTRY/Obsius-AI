@@ -24,6 +24,32 @@ const SEVERITY_COLOR: Record<string, string> = {
   info: "text-muted-foreground",
 }
 
+// CTF flag 识别（2026-10-14）：扫 evidence 全部字符串值里的 `前缀{内容}` 形态
+// （flag{…}/CTF{…}/DASCTF{…} 等自定义前缀），命中即返回首个。**不猜裸 hex**——
+// evidence 里 sha256/md5 太多，裸串误报率高。零 schema 迁移（Nan 2026-10-14 定）。
+const FLAG_RE = /[A-Za-z][A-Za-z0-9_]{0,12}(?:flag|ctf)\{[^{}\s]{1,200}\}/i
+
+export function extractFlag(evidence: Record<string, unknown> | undefined): string | null {
+  if (!evidence) return null
+  const seen = new Set<unknown>()
+  const walk = (v: unknown): string | null => {
+    if (typeof v === "string") return v.match(FLAG_RE)?.[0] ?? null
+    if (Array.isArray(v)) {
+      for (const x of v) { const r = walk(x); if (r) return r }
+      return null
+    }
+    if (v && typeof v === "object") {
+      if (seen.has(v)) return null
+      seen.add(v)
+      for (const x of Object.values(v as Record<string, unknown>)) {
+        const r = walk(x); if (r) return r
+      }
+    }
+    return null
+  }
+  return walk(evidence)
+}
+
 // severity 五档白名单（与 store FINDING_SEVERITIES 一致）+ 中文辅助文案
 const SEVERITIES: { value: string; label: string }[] = [
   { value: "critical", label: "critical（严重 / 关键突破）" },
@@ -239,8 +265,15 @@ export function FindingDetailDialog({ pid, finding, assetLabel, track, onClose, 
   // 逆向轨（research）的发现是静态还原结论（端点/结构/密钥…），没有可复现的
   // 资产、POC 与修复面 → 详情只留「漏洞摘要 + 原始证据」（2026-10-13 用户要求）。
   const isReverse = track === "research"
+  // CTF 轨（2026-10-14 用户定稿）：发现是**取证/解题结论**而非渗透漏洞——「受影响
+  // 资产/测试环境/验证结果/风险影响评估」这些渗透口径字段 Agent 根本不填（实测全空），
+  // 按轨改名 + 隐藏不适用段，只留「结论 / 解题步骤 / 解题脚本 / 备注 / 关键证据」，
+  // 并自 evidence 里识别 flag 显眼展示（零 schema 迁移）。
+  const isCtf = track === "ctf"
   // F10：row 本地快照（初始=prop，保存成功用 PATCH 响应覆盖）——解耦 4s 轮询且头部即时回显
   const [row, setRow] = useState<Finding>(finding)
+  // flag 识别须基于 row（编辑保存后即时刷新）；CTF 轨才扫 evidence
+  const flag = isCtf ? extractFlag(row.evidence) : null
   const [editing, setEditing] = useState(false)
   const [form, setForm] = useState({ title: "", severity: "", status: "unverified", vuln_class: "", rating_basis: "",
                                      impact: "", remediation: "", category: "vuln",
@@ -458,23 +491,28 @@ export function FindingDetailDialog({ pid, finding, assetLabel, track, onClose, 
                      onChange={(e) => setForm((f) => ({ ...f, rating_basis: e.target.value }))} />
             </div>
             <div>
-              <label className="mb-0.5 block text-[10px] text-muted-foreground">漏洞摘要</label>
+              <label className="mb-0.5 block text-[10px] text-muted-foreground">{isCtf ? "结论" : "漏洞摘要"}</label>
               <textarea className="min-h-16 w-full rounded-md border bg-background px-2 py-1.5 text-xs"
                         value={form.summary}
                         onChange={(e) => setForm((f) => ({ ...f, summary: e.target.value }))} />
             </div>
+            {!isCtf && (
             <div>
               <label className="mb-0.5 block text-[10px] text-muted-foreground">受影响资产说明</label>
               <textarea className="min-h-16 w-full rounded-md border bg-background px-2 py-1.5 text-xs"
                         value={form.affected_assets}
                         onChange={(e) => setForm((f) => ({ ...f, affected_assets: e.target.value }))} />
             </div>
-            {([
-              ["test_environment", "测试环境"],
-              ["reproduction_steps", "操作步骤"],
-              ["verification_result", "验证结果（预期结果与实际结果）"],
-              ["risk_assessment", "风险影响评估"],
-            ] as const).map(([key, label]) => (
+            )}
+            {(isCtf
+              ? ([["reproduction_steps", "解题步骤"]] as const)
+              : ([
+                  ["test_environment", "测试环境"],
+                  ["reproduction_steps", "操作步骤"],
+                  ["verification_result", "验证结果（预期结果与实际结果）"],
+                  ["risk_assessment", "风险影响评估"],
+                ] as const)
+            ).map(([key, label]) => (
               <div key={key}>
                 <label className="mb-0.5 block text-[10px] text-muted-foreground">{label}</label>
                 <textarea className="min-h-16 w-full rounded-md border bg-background px-2 py-1.5 text-xs"
@@ -484,7 +522,7 @@ export function FindingDetailDialog({ pid, finding, assetLabel, track, onClose, 
             ))}
             <div className="space-y-2">
               <div className="flex items-center justify-between">
-                <label className="text-[10px] text-muted-foreground">POC（HTTP 原始报文 / Python）</label>
+                <label className="text-[10px] text-muted-foreground">{isCtf ? "解题脚本（Python / 命令）" : "POC（HTTP 原始报文 / Python）"}</label>
                 <Button size="sm" variant="outline" className="h-7 gap-1 px-2 text-[10px]"
                         onClick={() => setForm((f) => ({ ...f, pocs: [...f.pocs, { type: "http", code: "" }] }))}>
                   <Plus className="size-3" /> 添加 POC
@@ -527,7 +565,7 @@ export function FindingDetailDialog({ pid, finding, assetLabel, track, onClose, 
               ))}
             </div>
             <div>
-              <label className="mb-0.5 block text-[10px] text-muted-foreground">修复建议（选填）</label>
+              <label className="mb-0.5 block text-[10px] text-muted-foreground">{isCtf ? "备注（选填）" : "修复建议（选填）"}</label>
               <textarea className="min-h-16 w-full rounded-md border bg-background px-2 py-1.5 text-xs"
                         value={form.remediation}
                         onChange={(e) => setForm((f) => ({ ...f, remediation: e.target.value }))} />
@@ -547,7 +585,9 @@ export function FindingDetailDialog({ pid, finding, assetLabel, track, onClose, 
                       onClick={() => { setEditing(false); setEditErr(null) }}>
                 取消
               </Button>
-              <span className="text-[10px] text-muted-foreground">正式漏洞须补齐必填报告字段和至少一个 POC</span>
+              <span className="text-[10px] text-muted-foreground">
+                {isCtf ? "线索类发现不强制报告字段；verified 须有证据（repro_steps / evidence）" : "正式漏洞须补齐必填报告字段和至少一个 POC"}
+              </span>
             </div>
           </div>
         )}
@@ -555,26 +595,47 @@ export function FindingDetailDialog({ pid, finding, assetLabel, track, onClose, 
         {/* 编辑态只渲染表单（自身即滚动容器，保存按钮可达）；非编辑态渲染只读详情 */}
         {!editing && (
         <div className="-mx-1 min-h-0 flex-1 space-y-3 overflow-y-auto px-1">
+          {flag && (
+            <section className="rounded border border-(--viz-success-border) bg-(--viz-success-bg) px-2.5 py-1.5">
+              <div className="flex items-center gap-2">
+                <h4 className="shrink-0 text-[10px] font-medium text-(--viz-success)">FLAG</h4>
+                <code className="min-w-0 flex-1 break-all font-mono text-xs text-foreground">{flag}</code>
+                <CopyButton text={flag} label="复制" />
+              </div>
+            </section>
+          )}
           <section>
-            <h4 className="mb-1 text-[11px] font-medium text-foreground">漏洞摘要</h4>
+            <h4 className="mb-1 text-[11px] font-medium text-foreground">{isCtf ? "结论" : "漏洞摘要"}</h4>
             <p className="whitespace-pre-wrap text-xs text-foreground">{row.summary || "（待补充）"}</p>
           </section>
           {/* 逆向轨（research）：发现多为静态还原结论（端点/结构/密钥等），没有可
               复现的资产、POC 与修复面——受影响资产/复现手册/POC/风险评估/修复建议
-              五段整体不渲染，只留摘要 + 原始证据（2026-10-13 用户要求）。 */}
+              五段整体不渲染，只留摘要 + 原始证据（2026-10-13 用户要求）。
+              CTF 轨（2026-10-14）：同理隐藏「受影响资产 / 测试环境 / 验证结果 / 风险
+              影响评估」（渗透口径，Agent 实测全空），并把复现手册→解题步骤、
+              POC→解题脚本、修复建议→备注。 */}
           {!isReverse && (
           <>
+          {!isCtf && (
           <section>
             <h4 className="mb-1 text-[11px] font-medium text-foreground">受影响资产</h4>
             <p className="whitespace-pre-wrap text-xs text-foreground">
               {row.affected_assets || assetLabel || "（待补充）"}
             </p>
           </section>
+          )}
           <section>
             <div className="mb-1 flex items-center justify-between">
-              <h4 className="text-[11px] font-medium text-foreground">复现手册</h4>
-              <CopyButton text={fullText} label="复制复现文稿" />
+              <h4 className="text-[11px] font-medium text-foreground">{isCtf ? "解题步骤" : "复现手册"}</h4>
+              <CopyButton text={fullText} label={isCtf ? "复制解题步骤" : "复制复现文稿"} />
             </div>
+            {/* CTF 轨只留「操作步骤」单段（测试环境/验证结果不适用，不渲染空壳）；
+                渗透轨保留三件套。结构化步骤（evidence.repro_steps）两轨共用下方渲染。 */}
+            {isCtf ? (
+              row.reproduction_steps
+                ? <p className="whitespace-pre-wrap text-xs text-muted-foreground">{row.reproduction_steps}</p>
+                : null
+            ) : (
             <div className="space-y-2 text-xs">
               <div><span className="font-medium">测试环境</span>
                 <p className="whitespace-pre-wrap text-muted-foreground">{row.test_environment || "（待补充）"}</p></div>
@@ -583,6 +644,7 @@ export function FindingDetailDialog({ pid, finding, assetLabel, track, onClose, 
               <div><span className="font-medium">验证结果</span>
                 <p className="whitespace-pre-wrap text-muted-foreground">{row.verification_result || "（待补充）"}</p></div>
             </div>
+            )}
             {steps.length > 0 && (
               <ol className="mt-2 space-y-2">
                 {steps.map((s, i) => <StepRow key={i} pid={pid} step={s} n={i + 1} scripts={scripts} />)}
@@ -593,7 +655,7 @@ export function FindingDetailDialog({ pid, finding, assetLabel, track, onClose, 
 
           {/* 结构化 POC 优先；老记录继续展示旧证据步骤 */}
           <section>
-            <h4 className="mb-1 text-[11px] font-medium text-foreground">POC</h4>
+            <h4 className="mb-1 text-[11px] font-medium text-foreground">{isCtf ? "解题脚本" : "POC"}</h4>
             {pocsOf(row).some((p) => "code" in p && typeof p.code === "string" && p.code.trim()) ? (
               <div className="space-y-2">
                 {pocsOf(row).map((p, index) => {
@@ -615,14 +677,16 @@ export function FindingDetailDialog({ pid, finding, assetLabel, track, onClose, 
             ) : <p className="text-xs text-muted-foreground">（无内嵌 POC）</p>}
           </section>
 
+          {!isCtf && (
           <section>
             <h4 className="mb-1 text-[11px] font-medium text-foreground">风险影响评估</h4>
             <p className="whitespace-pre-wrap text-xs text-foreground">{row.risk_assessment || "（待补充）"}</p>
           </section>
+          )}
 
           {/* 修复建议 */}
           <section>
-            <h4 className="mb-1 text-[11px] font-medium text-foreground">修复建议</h4>
+            <h4 className="mb-1 text-[11px] font-medium text-foreground">{isCtf ? "备注" : "修复建议"}</h4>
             {(row.remediation ?? "").trim() ? (
               <p className="whitespace-pre-wrap text-xs text-foreground">{row.remediation}</p>
             ) : (

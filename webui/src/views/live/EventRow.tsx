@@ -46,6 +46,8 @@ export interface EventRowProps {
   onRouteJump?: (e: BBEvent, name: string) => void
   /** 摘要资产反查（live-stream-ux A3）：LiveRoom 自建 assets 映射传入 */
   assetName?: (id: string) => string | undefined
+  /** v38（2026-10-14）：该资产是否为 CTF 题目（type=challenge），用于题目前缀 */
+  assetIsChallenge?: (id: string) => boolean
   /** 文件卡动作的落点项目（会话流改造 2026-10-03）；缺省=文件卡只读展示 */
   pid?: string
 }
@@ -393,7 +395,7 @@ function AgentReplyRow({ event, streaming }: { event: BBEvent; streaming?: boole
 
 // 轮本体不再有整组折叠（2026-09-28 过程常显），onToggle 仅透传给过程行自管展开态；
 // 注意 open/onToggle 两 prop 保留在 EventRowProps 上（EventRowImpl 统一传参）
-function TurnRow({ item, roleNames, onRouteJump, assetName, pid, approval, onDecideApproval }:
+function TurnRow({ item, roleNames, onRouteJump, assetName, assetIsChallenge, pid, approval, onDecideApproval }:
   EventRowProps & { item: Extract<StreamItem, { type: "turn" }> }) {
   // 过程组内行展开态自管（局部 map，不进 LiveRoom overrides——轮内细节不污染顶层折叠记忆）
   const [innerOpen, setInnerOpen] = useState<Map<number, boolean>>(new Map())
@@ -424,7 +426,7 @@ function TurnRow({ item, roleNames, onRouteJump, assetName, pid, approval, onDec
               return <EventRowImpl key={pe.id} item={p}
                 open={innerOpen.get(pe.id) ?? st.defaultOpen}
                 onToggle={innerToggle} roleNames={roleNames} onRouteJump={onRouteJump}
-                assetName={assetName} pid={pid} approval={approval} onDecideApproval={onDecideApproval} />
+                assetName={assetName} assetIsChallenge={assetIsChallenge} pid={pid} approval={approval} onDecideApproval={onDecideApproval} />
             })}
           </ActivityGroup>
         </div>
@@ -469,10 +471,10 @@ function ApprovalCardRow({ event }: { event: BBEvent }) {
 
 // ---------- 其余：简洁单行 / 错误审批醒目行（展开 JSON 详情） ----------
 
-function EventRowImpl({ item, open, onToggle, roleNames, action, onRouteJump, assetName, pid, approval, onDecideApproval }: EventRowProps) {
+function EventRowImpl({ item, open, onToggle, roleNames, action, onRouteJump, assetName, assetIsChallenge, pid, approval, onDecideApproval }: EventRowProps) {
   if (item.type === "turn") {
     return <TurnRow item={item} open={open} onToggle={onToggle} roleNames={roleNames}
-      onRouteJump={onRouteJump} assetName={assetName} pid={pid} approval={approval} onDecideApproval={onDecideApproval} />
+      onRouteJump={onRouteJump} assetName={assetName} assetIsChallenge={assetIsChallenge} pid={pid} approval={approval} onDecideApproval={onDecideApproval} />
   }
   if (item.type === "pair") {
     // pair 折叠主键 = command.id（IN/OUT 一个开关整体折叠，LiveRoom overrides 统一存）
@@ -524,7 +526,7 @@ function EventRowImpl({ item, open, onToggle, roleNames, action, onRouteJump, as
   }
 
   const style = eventStyle(e.kind, e.payload)
-  const summary = eventSummary(e.payload, roleNames, { assetName }, e.kind)
+  const summary = eventSummary(e.payload, roleNames, { assetName, assetIsChallenge }, e.kind)
   const alert = alertState(e.kind)
   const routedName = e.kind === "skill.routed" && typeof e.payload.name === "string" ? e.payload.name : null
   // F12：命中行路由名链接化——悬停变色+下划线，单击 stopPropagation 直跳技能（不触发行的
@@ -602,7 +604,8 @@ function areRowEqual(a: EventRowProps, b: EventRowProps): boolean {
   if (a.open !== b.open || a.roleNames !== b.roleNames || a.action !== b.action
       || a.approval !== b.approval || a.onDecideApproval !== b.onDecideApproval
       || a.onToggle !== b.onToggle || a.onRouteJump !== b.onRouteJump
-      || a.assetName !== b.assetName || a.pid !== b.pid) return false
+      || a.assetName !== b.assetName || a.assetIsChallenge !== b.assetIsChallenge
+      || a.pid !== b.pid) return false
   if (a.item.type !== b.item.type) return false
   if (a.item.type === "pair" && b.item.type === "pair") {
     return a.item.command === b.item.command && a.item.result === b.item.result

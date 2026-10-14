@@ -1282,6 +1282,45 @@ class Blackboard:
                 (json.dumps(merged, ensure_ascii=False), asset_id))
         return self.get_asset(asset_id)  # type: ignore[return-value]
 
+    def update_asset_value(self, asset_id: str, value: str) -> dict:
+        """改资产值（CTF 题目改名通道，challenge-asset v38）。
+
+        只允许改``value``——题目节点靠 value 认人（前端一行显示、Agent declare
+        幂等去重也按它），改 meta.title 不动正文会让「题目名叫什么」与展示脱节。
+
+        校验：资产存在；**同 (project,type,value,parent) 不得已有行**——upsert
+        去重键含 value，直接 UPDATE 会撞 UNIQUE 约束。命中即 ValueError（→API
+        422），调用方应改个不会撞的名字。revision +1 与 update_asset_meta 同口径。
+        """
+        value = (value or "").strip()
+        if not value:
+            raise ValueError("资产值不能为空")
+        with self._tx():
+            row = self.conn.execute(
+                "SELECT * FROM assets WHERE id=?", (asset_id,)).fetchone()
+            if row is None:
+                raise LookupError(f"资产不存在: {asset_id}")
+            if row["value"] == value:
+                return self.get_asset(asset_id)
+            clash = self.conn.execute(
+                "SELECT id FROM assets WHERE project_id=? AND type=? AND value IS ?"
+                " AND parent_id IS ? AND id<>?",
+                (row["project_id"], row["type"], value, row["parent_id"],
+                 asset_id)).fetchone()
+            if clash is not None:
+                raise ValueError(
+                    f"同项目同类型下已有值为 {value} 的资产（{clash['id']}），"
+                    "为避免去重键冲突请换个题目名")
+            self.conn.execute(
+                "UPDATE assets SET value=?, revision=revision+1 WHERE id=?",
+                (value, asset_id))
+            pid, old = row["project_id"], row["value"]
+        self.append_event(pid, "asset.renamed",
+                          {"asset_id": asset_id, "old_value": old,
+                           "value": value, "type": row["type"]},
+                          author="system")
+        return self.get_asset(asset_id)
+
     def delete_asset(self, asset_id: str, author: str = "human") -> dict:
         """物理删除**叶子**资产（资产树整理/走查数据清理）。
 

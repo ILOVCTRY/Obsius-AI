@@ -9,7 +9,16 @@
 
 import sqlite3
 
-SCHEMA_VERSION = 37
+SCHEMA_VERSION = 38
+
+# v37→v38（CTF 题目即资产，challenge-asset，2026-10-14）：chat_threads 幂等补
+# challenge_asset_id（本线程归属的题目资产 id，''=未绑定）。CTF 轨「一个主控线程
+# 只发一道题」——线程 ↔ 题目天然 1:1，故把归属落在**线程级**（与 v37 的
+# provider/model 同款线程级覆写惯例），bb_declare_challenge 声明时写入，
+# bb_add_finding/declare_intent 未显式给锚点时按它兜底。题目本身是 assets 表里
+# type='challenge' 的根行（见 core/blackboard/assets.py::register_challenge），
+# 不新建表——findings/intents 的 target_asset_id 本就指向 assets(id)，绑定零成本。
+# 历史行保持空值不回填（惰性补建见 API 层 GET /projects/{pid}/challenges）。
 
 # v36→v37（工作台线程级模型，2026-10-13）：chat_threads 幂等补 provider/model
 # （''=跟随全局 executor 默认）。每个对话线程可自选模型——发送轮次时按线程值
@@ -453,6 +462,7 @@ CREATE TABLE IF NOT EXISTS chat_threads (
     error            TEXT NOT NULL DEFAULT '',      -- JSON：最近一轮失败 {category,message,hint,detail}（v28；''=无）
     provider         TEXT NOT NULL DEFAULT '',      -- 线程级模型供应商覆写（v37；''=跟随全局默认）
     model            TEXT NOT NULL DEFAULT '',      -- 线程级模型 id 覆写（v37；''=该供应商默认模型）
+    challenge_asset_id TEXT NOT NULL DEFAULT '',    -- 本线程归属的题目资产 id（v38；''=未绑定，CTF 轨用）
     created_at       TEXT NOT NULL,
     updated_at       TEXT NOT NULL
 );
@@ -650,7 +660,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
       logic_blocks ADD feature_node_id；feature_trees/feature_tree_nodes 由
       DDL IF NOT EXISTS 建表。
     - v36→v37：chat_threads 幂等补 provider/model（线程级模型覆写，''=跟随
-      全局默认，见文件头版本注释）。历史行保持默认空值不回填。"""
+      全局默认，见文件头版本注释）。历史行保持默认空值不回填。
+    - v37→v38：chat_threads 幂等补 challenge_asset_id（线程归属的题目资产，
+      ''=未绑定，见文件头版本注释）。历史行保持默认空值不回填。"""
     cols = {r[1] for r in conn.execute("PRAGMA table_info(projects)")}
     if "track" not in cols:
         conn.execute("ALTER TABLE projects ADD COLUMN track TEXT NOT NULL DEFAULT ''")
@@ -670,6 +682,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if chat_cols and "model" not in chat_cols:  # v37（线程级模型覆写）
         conn.execute(
             "ALTER TABLE chat_threads ADD COLUMN model TEXT NOT NULL DEFAULT ''")
+    if chat_cols and "challenge_asset_id" not in chat_cols:  # v38（线程归属题目）
+        conn.execute(
+            "ALTER TABLE chat_threads ADD COLUMN challenge_asset_id TEXT NOT NULL DEFAULT ''")
     msg_cols = {r[1] for r in conn.execute("PRAGMA table_info(chat_messages)")}
     if msg_cols and "thinking" not in msg_cols:  # v31（思考正文持久化）
         conn.execute(

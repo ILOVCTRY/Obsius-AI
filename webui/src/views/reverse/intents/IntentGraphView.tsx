@@ -243,7 +243,7 @@ function FindingNode({ data }: { data: Record<string, unknown> }) {
     <button
       type="button"
       onClick={() => (data.onLocate as (id: string) => void)(n.id)}
-      title="回到「逆向分析」查看这条发现"
+      title="查看这条发现"
       className="flex flex-col justify-center rounded-md border bg-(--viz-card) px-3 py-1.5 text-left transition-colors hover:bg-(--viz-card-hover)"
       style={{ width: CARD_W, height: FINDING_H, borderColor: color }}
     >
@@ -277,16 +277,42 @@ const nodeTypes = { sample: SampleNode, intent: IntentNode, finding: FindingNode
 
 // ---------- 主画布 ----------
 
-function Canvas({ pid, onLocateFinding, onChanged }: {
+function Canvas({ pid, onLocateFinding, onChanged, focusSampleId }: {
   pid: string
   onLocateFinding: (findingId: string) => void
   onChanged?: () => void
+  /** 聚焦某题目（sample）子图：题目页「链路」入口用（2026-10-14）。缺省=全项目图 */
+  focusSampleId?: string
 }) {
   const [data, setData] = useState<IntentGraph | null>(null)
   const [selIntent, setSelIntent] = useState<IntentGraphNode | null>(null)
   const [showDeadEnd, setShowDeadEnd] = useState(false) // 死路默认隐藏（同 AttackPath）
   const [busy, setBusy] = useState(false)
   const [loadErr, setLoadErr] = useState("")
+
+  // 聚焦模式（题目页入口）：只渲染该题目及其名下意图/发现子图。图数据仍全量拉取
+  // （4s 轮询口径不变），前端裁剪——避免后端加 root 参数、两个入口共用一份数据源。
+  const view: IntentGraph | null = useMemo(() => {
+    if (!data) return null
+    if (!focusSampleId) return data
+    const nodes = data.nodes.filter(
+      (n) => n.id === focusSampleId || n.sample_id === focusSampleId)
+    if (!nodes.length) {
+      return { nodes: [], edges: [], counts: {
+        samples: 0, intents: 0, open: 0, closed: 0, dead_end: 0, findings: 0 } }
+    }
+    const keep = new Set(nodes.map((n) => n.id))
+    const edges = data.edges.filter((e) => keep.has(e.source) && keep.has(e.target))
+    const cnt = (f: (n: IntentGraphNode) => boolean) => nodes.filter(f).length
+    return { nodes, edges, counts: {
+      samples: cnt((n) => n.type === "sample"),
+      intents: cnt((n) => n.type === "intent"),
+      open: cnt((n) => n.type === "intent" && n.status === "open"),
+      closed: cnt((n) => n.type === "intent" && n.status === "closed"),
+      dead_end: cnt((n) => n.type === "intent" && n.outcome === "dead_end"),
+      findings: cnt((n) => n.type === "finding"),
+    } }
+  }, [data, focusSampleId])
 
   const { setCenter } = useReactFlow()
 
@@ -312,7 +338,7 @@ function Canvas({ pid, onLocateFinding, onChanged }: {
   // 样本 → 名下意图/发现计数（节点上直读，省得点开才知道有没有料）
   const sampleStats = useMemo(() => {
     const m = new Map<string, { intents: number; findings: number }>()
-    for (const n of data?.nodes ?? []) {
+    for (const n of view?.nodes ?? []) {
       if (n.type === "sample" || !n.sample_id) continue
       const cur = m.get(n.sample_id) ?? { intents: 0, findings: 0 }
       if (n.type === "intent") cur.intents += 1
@@ -320,10 +346,10 @@ function Canvas({ pid, onLocateFinding, onChanged }: {
       m.set(n.sample_id, cur)
     }
     return m
-  }, [data])
+  }, [view])
 
   const laid = useMemo(
-    () => (data ? layoutGraph(data, showDeadEnd) : []), [data, showDeadEnd])
+    () => (view ? layoutGraph(view, showDeadEnd) : []), [view, showDeadEnd])
 
   // ---- 搜索：坐标镜像到 ref，让「居中定位」保持稳定引用（4s 轮询不会重复居中）----
   const posRef = useRef<Map<string, { x: number; y: number }>>(new Map())
@@ -401,10 +427,10 @@ function Canvas({ pid, onLocateFinding, onChanged }: {
   }), [laid, sampleStats, selIntent, onLocateFinding, curMatchId])
 
   const nodeById = useMemo(
-    () => new Map((data?.nodes ?? []).map((n) => [n.id, n])), [data])
+    () => new Map((view?.nodes ?? []).map((n) => [n.id, n])), [view])
 
   const rfEdges: Edge[] = useMemo(() => {
-    if (!data) return []
+    if (!view) return []
     const out: Edge[] = []
     const mk = (id: string, source: string, target: string, style: CSSProperties): Edge => ({
       id, source, target, type: "smoothstep", style,
@@ -413,7 +439,7 @@ function Canvas({ pid, onLocateFinding, onChanged }: {
         color: (style.stroke as string) || "var(--viz-handle)", width: 14, height: 14,
       },
     })
-    for (const e of data.edges) {
+    for (const e of view.edges) {
       if (e.kind === "derive") {
         out.push(mk(`${e.source}->${e.target}:derive`, e.source, e.target,
           { stroke: "var(--viz-sev-low)", strokeWidth: 1.3, opacity: 0.7 }))
@@ -428,7 +454,7 @@ function Canvas({ pid, onLocateFinding, onChanged }: {
       }
     }
     return out
-  }, [data, nodeById])
+  }, [view, nodeById])
 
   const reopen = async (id: string) => {
     setBusy(true)
@@ -444,23 +470,23 @@ function Canvas({ pid, onLocateFinding, onChanged }: {
     }
   }
 
-  const empty = !!data && data.counts.intents === 0
+  const empty = !!view && view.counts.intents === 0
 
   return (
     <div className="fc-dark absolute inset-0 bg-(--viz-canvas)">
       <div className="absolute inset-x-0 top-0 z-10 flex flex-wrap items-center gap-3 border-b bg-(--viz-card) px-3 py-1.5 text-[11px]">
         <span className="text-muted-foreground">样本 → 意图 → 收尾（发现｜死路）</span>
-        {data && (
+        {view && (
           <span className="shrink-0 text-muted-foreground">
-            样本 {data.counts.samples} · 意图 {data.counts.intents}（待收尾 {data.counts.open}）·
-            发现 {data.counts.findings}
+            样本 {view.counts.samples} · 意图 {view.counts.intents}（待收尾 {view.counts.open}）·
+            发现 {view.counts.findings}
           </span>
         )}
-        {data && data.counts.dead_end > 0 && (
+        {view && view.counts.dead_end > 0 && (
           <label className="flex shrink-0 cursor-pointer items-center gap-1 text-muted-foreground hover:text-foreground">
             <input type="checkbox" checked={showDeadEnd}
                    onChange={(e) => setShowDeadEnd(e.target.checked)} className="size-3" />
-            死路×{data.counts.dead_end}
+            死路×{view.counts.dead_end}
           </label>
         )}
         <button
@@ -474,7 +500,7 @@ function Canvas({ pid, onLocateFinding, onChanged }: {
           <kbd className="rounded border px-1 text-[9px] opacity-70">Ctrl+F</kbd>
         </button>
         <span className="hidden shrink-0 text-[10px] text-muted-foreground lg:inline">
-          点发现节点回分析视图 · 点意图节点看收尾详情
+          点发现节点看详情 · 点意图节点看收尾详情
         </span>
         {loadErr && <span className="shrink-0 text-[10px] text-(--status-error)">{loadErr}</span>}
       </div>
@@ -536,7 +562,7 @@ function Canvas({ pid, onLocateFinding, onChanged }: {
       {empty && (
         <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
           <p className="rounded border border-dashed border-(--viz-edge) px-4 py-2 text-center text-xs text-muted-foreground">
-            还没有意图，画不出推导链<br />
+            {focusSampleId ? "该题目暂无意图与发现" : "还没有意图，画不出推导链"}<br />
             <span className="text-[10px]">Agent 用 declare_intent 声明假设、收尾为发现/死路后自动生长</span>
           </p>
         </div>
@@ -619,6 +645,8 @@ export function IntentGraphView(props: {
   pid: string
   onLocateFinding: (findingId: string) => void
   onChanged?: () => void
+  /** 聚焦某题目子图（题目页「链路」入口，2026-10-14）；缺省=全项目图 */
+  focusSampleId?: string
 }) {
   return (
     <ReactFlowProvider>

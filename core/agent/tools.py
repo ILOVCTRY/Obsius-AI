@@ -28,7 +28,7 @@ from core.agent.tool_registry import (AGENT_TOOLS, TOOL_GROUPS, _ADDR_DESC,
                                       _PLAN_TOOLS, _SPILL_SKIP, REGISTRY,
                                       agent_tool_group, bb_query_what_for)
 from core.blackboard import Blackboard
-from core.blackboard.assets import register_asset
+from core.blackboard.assets import register_asset, register_challenge
 from core.blackboard.attackpath import _intent_in_site, _subtree_ids
 from core.blackboard.intents import (declare_intent as _declare_intent,
                                      close_intent as _close_intent,
@@ -258,12 +258,17 @@ class ToolDispatcher:
                  abort_event: threading.Event | None = None,
                  role_skills: list[str] | None = None,
                  allowed_roles: list[str] | None = None,
-                 assigned_asset_ids: list[str] | None = None):
+                 assigned_asset_ids: list[str] | None = None,
+                 thread_id: str = ""):
         self.bb = bb
         self.gateway = gateway
         self.project_id = project_id
         self.session_id = session_id
         self.author = author
+        # CTF 题目归属（challenge-asset v38，2026-10-14）：对话轮（chat runtime）
+        # 传入真实 thread id，供 declare/兜底按「一个主控线程只发一道题」取题目节点；
+        # 任务链会话（AgentSession）不传 → ''，该路径无题目概念。
+        self.thread_id = (thread_id or "").strip()
         # ■ 即点即停（2026-09-19）：AgentSession 的 abort 事件——run_cmd 执行中
         # 置位即杀进程树（None=不接入，保持步边界语义）
         self.abort_event = abort_event
@@ -704,6 +709,92 @@ class ToolDispatcher:
                       "不要对同一目标重复登记、重复扫描；确需补挂/补 meta 才复报。")
         return reply
 
+    # ---------- CTF 题目（challenge-asset，v38，2026-10-14） ----------
+
+    def _challenge_fallback_asset(self) -> str | None:
+        """CTF 轨：本线程归属的题目资产 id；无则按线程标题自动补建。否则 None。
+
+        「一个主控线程只发一道题」——线程 ↔ 题目天然 1:1，故发现/意图的**缺省
+        锚点就是线程题目节点**。本方法是 `declare_intent` / `bb_add_finding` 未
+        显式给 `target_asset_id` 时的兜底：
+
+        1. 线程（或祖先线程）已绑定 → 直接用；
+        2. 未绑定但取得到线程标题 → 按标题自动补建一道题并绑回本线程——这正是
+           「资产为空时 AI 自己登记题目」：第一次落东西的时刻就是题目诞生的
+           时刻，那一刻已有上下文，题目名不会空；
+        3. 都失败 → None，由调用方维持原有拒绝口径（**不编造归属**）。
+
+        沿 `parent_thread_id` 向上解析（子专家与主控同题）。仅在**有 thread_id
+        的对话轮**发生，任务链会话（`thread_id=''`）恒 None——非 CTF 轨也恒 None。
+        """
+        if self.track != "ctf" or not self.thread_id:
+            return None
+        from core.chat.store import resolve_challenge_asset_id, update_thread
+        try:
+            cid = resolve_challenge_asset_id(self.bb, self.thread_id)
+        except Exception:  # noqa: BLE001 —— 兜底解析失败退回原口径，不炸工具链
+            return None
+        if cid:
+            return cid
+        try:
+            row = self.bb.conn.execute(
+                "SELECT title FROM chat_threads WHERE id=?",
+                (self.thread_id,)).fetchone()
+            title = str(row["title"] or "").strip() if row is not None else ""
+            if not title:
+                return None
+            r = register_challenge(self.bb, self.project_id, title,
+                                   thread_id=self.thread_id,
+                                   author=self.author,
+                                   session_id=self.session_id)
+            cid = str(r.get("id") or "").strip()
+            if cid:
+                update_thread(self.bb, self.thread_id, challenge_asset_id=cid)
+        except Exception:  # noqa: BLE001
+            return None
+        return cid or None
+
+    def _tool_bb_declare_challenge(self, name: str,
+                                   description: str = "",
+                                   tags: list | None = None) -> str:
+        """CTF 轨：登记/复用一道题目，并绑定到当前线程（challenge-asset v38）。
+
+        用户把「题目描述 + 附件」一起丢进输入框、黑板还没有对应题目节点时调用。
+        绑完之后，本线程后续的 `declare_intent` / `bb_add_finding` 不必再传
+        `target_asset_id`，会自动归到这道题下。附件本身不用登记（走题目子资产
+        通道）。同一道题重复调用 = 复用既有节点，不会插重复行。
+        """
+        if self.track != "ctf":
+            return ("[拒绝] bb_declare_challenge 仅 CTF 轨可用"
+                    "（渗透/红队/研究轨的目标是站点/样本，不是题目）")
+        tid = (self.thread_id or "").strip()
+        if not tid:
+            return "[拒绝] bb_declare_challenge 只在对话轮（带 thread_id）内可用"
+        try:
+            r = register_challenge(self.bb, self.project_id, name,
+                                   description=description, tags=tags,
+                                   thread_id=tid, author=self.author,
+                                   session_id=self.session_id)
+        except ValueError as e:
+            return f"[错误] {e}"
+        cid = str(r.get("id") or "").strip()
+        try:
+            from core.chat.store import update_thread
+            update_thread(self.bb, tid, challenge_asset_id=cid)
+        except Exception:  # noqa: BLE001 —— 绑不上不阻断：资产已建，后续可重绑
+            pass
+        self.last_progress_step = self._step
+        reply = (f"challenge={cid} name={r['value']} created={r['created']}"
+                 f" thread={tid}（已绑定到本线程）")
+        if r["created"]:
+            reply += ("\n后续本线程的 declare_intent/bb_add_finding 不必再填"
+                      " target_asset_id，会自动归到这道题下；附件也不必登记"
+                      "（走本题目的子资产通道，压缩包会抽成可浏览的文件树）。")
+        else:
+            reply += ("\n[提示] 命中既有同名题目，已复用并改绑到本线程"
+                      "（不插重复行）。")
+        return reply
+
     def _tool_bb_delete_asset(self, asset_id: str) -> str:
         asset = self.bb.get_asset(asset_id)
         if asset is None or asset.get("project_id") != self.project_id:
@@ -870,6 +961,13 @@ class ToolDispatcher:
                              verification_result: str = "", risk_assessment: str = "",
                              pocs: list[dict] | None = None,
                              category: str | None = None) -> str:
+        # CTF 题目兜底（challenge-asset v38）：未显式给锚点时，把发现归到本线程
+        # 的题目节点下（无则按线程标题自动补建）——「一个主控线程只发一道题」。
+        # 显式传了 target_asset_id 的完全不受影响（含按附件/子资产精确归属）。
+        if not (target_asset_id and str(target_asset_id).strip()):
+            fb = self._challenge_fallback_asset()
+            if fb:
+                target_asset_id = fb
         # relates_to 是顶层入参（LLM 不必懂 evidence 内部结构），并入 evidence 走
         # add_finding 的存在性/同项目校验（悬空/跨项目 ValueError → 回填错误不中断）
         ev = dict(evidence or {})
@@ -992,12 +1090,18 @@ class ToolDispatcher:
                        if isinstance(b, str)
                        and (b.startswith("asset:") or b.startswith("asset-"))]
         if not (target_asset_id and str(target_asset_id).strip()) and not anchor_refs:
-            return ("[拒绝] declare_intent 必须绑定资产锚点：填 target_asset_id"
-                    "（针对的资产 id），或在 basis_refs 里至少给一条"
-                    " asset:<资产id>。游离意图落不到链路图子目标下，"
-                    "其 dead_end 收尾也无法为资产背书 tested_clean——"
-                    "先 bb_query/bb_asset 确认你要测的资产 id，再声明意图。"
-                    + _intent_scope_hint(self.track))
+            # CTF 题目兜底（challenge-asset v38）：线程题目节点即缺省锚点——
+            # 一个主控线程只发一道题，意图与发现都归到这道题下。
+            fallback = self._challenge_fallback_asset()
+            if fallback:
+                target_asset_id = fallback
+            else:
+                return ("[拒绝] declare_intent 必须绑定资产锚点：填 target_asset_id"
+                        "（针对的资产 id），或在 basis_refs 里至少给一条"
+                        " asset:<资产id>。游离意图落不到链路图子目标下，"
+                        "其 dead_end 收尾也无法为资产背书 tested_clean——"
+                        "先 bb_query/bb_asset 确认你要测的资产 id，再声明意图。"
+                        + _intent_scope_hint(self.track))
         # 测试面归属（v34）：填了必须对本轨合法；本轨无面清单时一律拒（防拼错
         # 静默丢面归属）。未填放行（可选，向后兼容）。
         dim = dimension.strip() if isinstance(dimension, str) else ""

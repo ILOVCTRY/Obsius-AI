@@ -19,10 +19,21 @@ from urllib.parse import urlparse
 from core.blackboard.cdn import CdnLists, is_cdn
 from core.blackboard.store import new_id  # 复用 <前缀>-<12hex> 约定
 
-__all__ = ["detect_type", "register_asset", "resolve_ipv4", "import_assets",
-           "warm_dns", "clear_dns_warm"]
+__all__ = ["detect_type", "register_asset", "register_challenge", "CHALLENGE_TYPE",
+           "resolve_ipv4", "import_assets", "warm_dns", "clear_dns_warm"]
 
 _LABEL_RE = re.compile(r"^[A-Za-z0-9_-]{1,63}$")
+
+# CTF 题目资产类型（challenge-asset，2026-10-14）。题目 = assets 表里
+# type='challenge' 的**根行**（parent_id=NULL）；附件挂其下、发现/意图经
+# target_asset_id 指向它。**刻意不进 core/coverage.py 的 COVERAGE_TYPES**——
+# 这样题目不派生 effective_status、也不进编排器三态分桶（situation_snapshot），
+# 主控不会把「一道题」当成待测资产反复派单。前端按子树自行聚合题目状态。
+CHALLENGE_TYPE = "challenge"
+
+# register_challenge 的 meta 字段上限（防 Agent 把整段题目原文灌进黑板）
+_CHALLENGE_DESC_MAX = 500
+_CHALLENGE_TAGS_MAX = 12
 
 # DNS 批次内预热缓存（仅 import_assets 填充/清空；批外 resolve 恒真实解析，
 # 不做进程级缓存——负缓存（解析失败）长存会让 DNS 恢复后的域名永远挂不上）
@@ -254,6 +265,48 @@ def register_asset(bb, project_id: str, value: str, type_: str = "auto",
     result["id"] = r["id"]
     result["created"] = r["created"]
     return result
+
+
+def register_challenge(bb, project_id: str, name: str, *,
+                       description: str = "", tags: list | None = None,
+                       thread_id: str = "", author: str = "human",
+                       session_id: str | None = None) -> dict:
+    """登记/复用一道 CTF 题目（challenge-asset，2026-10-14）。
+
+    题目是 assets 表里的**根行**（`type="challenge"`、`parent_id=NULL`），
+    附件挂其下、发现/意图经 `target_asset_id` 指向它。本函数只做「meta 组装 +
+    转调 register_asset」，故**去重（同名合并 meta）、事件（asset.new）、
+    审计（author/session_id）语义与其它资产完全一致**——保住 E6「单一写入口」
+    这条红线，不新开旁路。
+
+    - ``description`` → ``meta.title``（一句话简述；前端 AssetRow/树节点已会渲染）
+    - ``tags`` → ``meta.tags``（题型等自由标签，如 web/pwn/crypto；前端 AssetTags 渲染）
+    - ``thread_id`` → ``meta.thread_id``（来源线程，反向可查「这题是谁建的」）
+    - ``meta.kind = "challenge"`` 恒定写入，供前端与查询区分题目行
+
+    返回形态同 register_asset：``{id, created, type, value, parent_id}``。
+    题目名重复 = 命中既有题目（返回 ``created=False``，不插重复行）。
+    """
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("题目名不能为空")
+    meta: dict = {"kind": CHALLENGE_TYPE}
+    desc = (description or "").strip()
+    if desc:
+        meta["title"] = desc[:_CHALLENGE_DESC_MAX]
+    if tags:
+        cleaned: list[str] = []
+        for t in tags:
+            t = str(t).strip()
+            if t and t not in cleaned:
+                cleaned.append(t)
+        if cleaned:
+            meta["tags"] = cleaned[:_CHALLENGE_TAGS_MAX]
+    tid = (thread_id or "").strip()
+    if tid:
+        meta["thread_id"] = tid
+    return register_asset(bb, project_id, name, type_=CHALLENGE_TYPE, meta=meta,
+                          author=author, session_id=session_id)
 
 
 # ---------- 批量导入（cyberspace-mapping M1，2026-09-23） ----------

@@ -243,6 +243,43 @@ tool(
 )
 
 tool(
+    'bb_declare_challenge',
+    group='黑板',
+    flags=("intent_flow",),
+    description=(
+        'CTF 轨专用：登记/复用一道题目（challenge-asset，2026-10-14）。用户把题目描述和'
+        '附件一起丢进输入框、而黑板还没有对应题目节点时，用本工具把这题立起来——立完会'
+        '自动绑定到当前线程，后续本线程的 declare_intent/bb_add_finding 不必再传 '
+        'target_asset_id，会自动归到这道题下。附件本身不用登记（走本题目的子资产通道）。'
+        'name=题目名（要短、能一眼认出来，如「树状化-签到题」）；description=一句话题目'
+        '描述；tags=题型数组（web/pwn/re/crypto/misc/forensics，多个按题目实际所属填'
+        '——供按题型筛选）。同一道题重复调用 = 复用既有节点，不会插重复行。'
+        '**仅 CTF 轨可用**；渗透/红队/研究轨调用会被拒。'
+    ),
+    input_schema={
+        'type': 'object',
+        'properties': {
+            'name': {
+                'type': 'string',
+                'description': '题目名（简短、可一眼认出；重复调用会复用既有同名题目）',
+            },
+            'description': {
+                'type': 'string',
+                'description': '一句话题目描述（落 meta.title，前端作为该题目的副标题展示）',
+            },
+            'tags': {
+                'type': 'array',
+                'items': {'type': 'string'},
+                'description': '题型标签数组，如 ["web","misc"]（落 meta.tags，可筛选）',
+            },
+        },
+        'required': [
+            'name',
+        ],
+    },
+)
+
+tool(
     'bb_delete_asset',
     group='黑板',
     flags=("intent_flow",),

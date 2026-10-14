@@ -45,7 +45,9 @@ from core.browser.pool import browser_available, chromium_available
 from core.browser.replay import Intruder, ReplayClient, ReplayOptions
 from core.agent import AgentConfig, AgentSession
 from core.agent.execution import ExecutionContext
-from core.blackboard.assets import _is_ip, clean_host, import_assets, register_asset
+from core.blackboard.assets import (_is_ip, CHALLENGE_TYPE, clean_host,
+                                    import_assets, register_asset,
+                                    register_challenge)
 from core.coverage import attach_effective_status
 from core.team import TeamStore
 from core.blackboard.graph import board_graph, session_graph
@@ -376,6 +378,21 @@ class AssetPatchIn(BaseModel):
     exclude_unset 区分「不传（不动）」与「传 null（摘挂）」。"""
     parent_id: str | None = None
     meta: dict | None = None
+
+
+class ChallengeIn(BaseModel):
+    """POST /projects/{pid}/challenges：人工建题（challenge-asset v38）。"""
+    name: str = Field(min_length=1, max_length=200)
+    description: str = Field("", max_length=500)
+    tags: list[str] = Field(default_factory=list, max_length=12)
+    thread_id: str = ""          # 可选：建完就把该线程绑到这道题上
+
+
+class ChallengePatchIn(BaseModel):
+    """PATCH /api/challenges/{aid}：三字段均可单传；None=不动，空串=清该键。"""
+    name: str | None = Field(None, min_length=1, max_length=200)
+    description: str | None = Field(None, max_length=500)
+    tags: list[str] | None = Field(None, max_length=12)
 
 
 class EngineIn(BaseModel):
@@ -753,6 +770,8 @@ class ChatThreadIn(BaseModel):
     # 线程级模型覆写（v37，2026-10-13）：建线程时即可指定；空=跟随全局 executor
     provider: str | None = None
     model: str | None = None
+    # CTF 题目归属（v38，2026-10-14）：线程绑定 challenge 资产 id
+    challenge_asset_id: str | None = None
 
 
 class ChatMessageIn(BaseModel):
@@ -846,6 +865,138 @@ def _history_versions(path: Path) -> list[dict]:
                     "size": st.st_size,
                     "mtime": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(st.st_mtime))})
     out.sort(key=lambda v: v["ts"], reverse=True)
+    return out
+
+
+# ---------- CTF 题目（challenge-asset，v38，2026-10-14）模块级辅助 ----------
+# 提到模块级（不依赖 create_app）以便 store 层测试直接验证：题目清单计数与
+# 存量惰性补建都是**纯黑板逻辑**，与 FastAPI 应用对象无关。
+
+def _backfill_challenges(proj) -> dict:
+    """存量 CTF 项目惰性补建题目节点（幂等，落 config 标记）。
+
+    老 CTF 项目在本题目前没有题目行——findings 的 target_asset_id 全为空，
+    落在 UI 的「项目级（未挂载具体资产）」兜底组里，看不出一道题挖了啥。补建
+    后把这些发现归到题目节点下，遗留数据的归属即可见。
+
+    触发条件（三者同时满足才动）：CTF 轨 + 无任何 challenge 行 +
+    `config.challenge_backfill_done` 未标记。**不重复触发**——用户之后主动删光
+    题目不会被补回来（那是明确意图，不是遗留状态）。非 CTF 轨直接 no-op。
+
+    落 `challenge.backfill` 审计事件（含题目 id 与归拢的发现数）。
+    """
+    try:
+        if proj.track != "ctf":
+            return {}
+        bb = proj.bb
+        if list(bb.list_assets(proj.id, type_=CHALLENGE_TYPE)):
+            return {}
+        cfg = dict(proj.meta.get("config") or {})
+        if cfg.get("challenge_backfill_done"):
+            return {}
+        name = (proj.name or "").strip() or "未命名题目"
+        r = register_challenge(bb, proj.id, name, author="system")
+        cid = str(r.get("id") or "")
+        if not cid:
+            return {}
+        # 归拢存量「项目级」发现（target_asset_id 为空 → 挂到本题下）
+        rows = bb.conn.execute(
+            "SELECT id FROM findings WHERE project_id=? AND"
+            " (target_asset_id IS NULL OR target_asset_id='')",
+            (proj.id,)).fetchall()
+        # 归拢游离根资产（parent_id 空且非 challenge）→ 挂到题目下当附件。
+        # 旧 CTF 项目把附件/目标直接登记成根资产（type=binary 等），题目节点缺失时
+        # 它们"无主"——只归拢空 target 的发现会让补建的题目变空壳，而挂在旧根资产上
+        # 的发现仍游离（2026-10-14 用户实测「发现无法按题目过滤」的根因）。
+        roots = bb.conn.execute(
+            "SELECT id FROM assets WHERE project_id=? AND parent_id IS NULL"
+            " AND id != ? AND type != ?",
+            (proj.id, cid, CHALLENGE_TYPE)).fetchall()
+        moved = 0
+        adopted = 0
+        if rows or roots:
+            with bb._tx():
+                for row in rows:
+                    bb.conn.execute(
+                        "UPDATE findings SET target_asset_id=? WHERE id=?",
+                        (cid, row["id"]))
+                    moved += 1
+                for row in roots:
+                    bb.conn.execute(
+                        "UPDATE assets SET parent_id=? WHERE id=?",
+                        (cid, row["id"]))
+                    adopted += 1
+        try:
+            store.update_config(proj.id,
+                                {"challenge_backfill_done": True},
+                                project=proj)
+        except Exception:  # noqa: BLE001 —— 标记失败不阻断补建结果
+            log.exception("challenge 补建标记落库失败 project=%s", proj.id)
+        try:
+            bb.append_event(proj.id, "challenge.backfill",
+                            {"asset_id": cid, "name": name,
+                             "findings_moved": moved, "assets_adopted": adopted},
+                            author="system")
+        except Exception:  # noqa: BLE001
+            pass
+        return {"asset_id": cid, "name": name, "findings_moved": moved,
+                "assets_adopted": adopted}
+    except Exception:  # noqa: BLE001 —— 补建失败绝不让题目清单 500
+        log.exception("challenge 存量补建失败 project=%s", proj.id)
+        return {}
+
+def _challenge_summary(proj, rows: list[dict]) -> list[dict]:
+    """给题目行附「附件子资产数 / 发现数 / 意图数 / 附件清单」。
+
+    附件 = 题目子树内的 **非 challenge** 资产（压缩包抽出的文件树、URL、单文件）。
+    计数走**子树**（不是直接子节点）——附件本身还能再挂一层。
+    发现/意图按 target_asset_id 落在题目子树内计。
+    """
+    if not rows:
+        return []
+    pid = proj.id
+    assets = proj.bb.list_assets(pid)
+    findings = proj.bb.list_findings(pid)
+    intents = list_intents(proj.bb, pid)
+    # 子树 id 集合（父不存在 → 断链的退回根，题目根节点无此风险）
+    parent_of = {a["id"]: a.get("parent_id") for a in assets}
+    by_id = {a["id"]: a for a in assets}
+
+    def _in_subtree(root_id: str, aid: str) -> bool:
+        walker, seen = aid, set()
+        while walker and walker not in seen:
+            seen.add(walker)
+            if walker == root_id:
+                return True
+            walker = parent_of.get(walker)
+        return False
+
+    out = []
+    for c in rows:
+        cid = c["id"]
+        atts = [a for a in assets
+                if a["id"] != cid and _in_subtree(cid, a["id"])]
+        fcount = sum(1 for f in findings
+                     if _in_subtree(cid, f.get("target_asset_id")))
+        icount = 0
+        for it in intents:
+            anchors = [it.get("target_asset_id")]
+            for b in (it.get("basis_refs") or []):
+                if isinstance(b, str) and b.startswith("asset"):
+                    anchors.append(b.split(":", 1)[-1])
+            if any(_in_subtree(cid, x) for x in anchors if x):
+                icount += 1
+        meta = dict(c.get("meta") or {})
+        out.append({
+            **c,
+            "description": str(meta.get("title") or ""),
+            "tags": list(meta.get("tags") or []),
+            "attachment_count": len(atts),
+            "attachments": [{"id": a["id"], "type": a.get("type"),
+                             "value": a.get("value")} for a in atts[:50]],
+            "finding_count": fcount,
+            "intent_count": icount,
+        })
     return out
 
 
@@ -3660,6 +3811,78 @@ def create_app(
         except ValueError as e:
             raise HTTPException(409, str(e)) from e
         return {"deleted": asset_id, **row}
+
+    # ---------- CTF 题目（challenge-asset，2026-10-14） ----------
+
+
+    @app.get("/api/projects/{pid}/challenges")
+    def list_challenges(pid: str):
+        """题目清单（challenge-asset）：一次拿全题目行 + 附件/发现/意图计数。
+
+        读路径惰性补建存量项目（见 `_backfill_challenges`）——打开项目即补，
+        幂等且不重复触发。非 CTF 轨返回空清单。"""
+        proj = _project(pid)
+        if proj.track == "ctf":
+            _backfill_challenges(proj)
+        rows = proj.bb.list_assets(pid, type_=CHALLENGE_TYPE)
+        return _challenge_summary(proj, rows)
+
+    @app.post("/api/projects/{pid}/challenges", status_code=201)
+    def create_challenge(pid: str, body: ChallengeIn):
+        """人工建题（题目 tab 的「新建题目」入口）：与 Agent 的
+        bb_declare_challenge 同一写入口 register_challenge。
+
+        `thread_id` 可选：传了就把该线程绑到这道题上（工作台「设为当前题目」）。
+        """
+        proj = _project(pid)
+        if proj.track != "ctf":
+            raise HTTPException(422,
+                                "bb_declare_challenge 仅 CTF 轨可用"
+                                "（渗透/红队/研究轨的目标是站点/样本，不是题目）")
+        try:
+            r = register_challenge(proj.bb, pid, body.name,
+                                   description=body.description,
+                                   tags=body.tags, author="human")
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+        tid = (body.thread_id or "").strip()
+        if tid:
+            try:
+                chat_store.update_thread(proj.bb, tid, challenge_asset_id=r["id"])
+            except Exception as e:  # noqa: BLE001 —— 绑不上不阻断建题
+                log.exception("challenge 绑定线程失败 tid=%s", tid)
+                raise HTTPException(422, f"题目已建但绑定线程失败: {e}") from e
+        row = proj.bb.get_asset(r["id"])
+        if row is None:  # register_asset 合并既有行的兜底
+            row = proj.bb.find_asset(pid, CHALLENGE_TYPE, body.name.strip())
+        return _challenge_summary(proj, [row])[0]
+
+    @app.patch("/api/challenges/{asset_id}")
+    def patch_challenge(asset_id: str, body: ChallengePatchIn):
+        """改题目：name（改名）/ description（meta.title）/ tags（meta.tags）。
+
+        name 走 `update_asset_value`（撞同名 422）；description/tags 走
+        `update_asset_meta` 合并（传空=清该键）。三者可单传。
+        """
+        proj = _project(_pid_of_asset(asset_id))
+        row = proj.bb.get_asset(asset_id)
+        if row is None or row.get("type") != CHALLENGE_TYPE:
+            raise HTTPException(404, f"题目不存在: {asset_id}")
+        try:
+            if body.name is not None:
+                proj.bb.update_asset_value(asset_id, body.name)
+                row = proj.bb.get_asset(asset_id)
+            patch: dict = {}
+            if body.description is not None:
+                patch["title"] = body.description.strip()
+            if body.tags is not None:
+                patch["tags"] = [str(t).strip() for t in body.tags
+                                 if str(t).strip()]
+            if patch:
+                row = proj.bb.update_asset_meta(asset_id, patch)
+        except (ValueError, LookupError) as e:
+            raise HTTPException(422, str(e)) from e
+        return _challenge_summary(proj, [proj.bb.get_asset(asset_id)])[0]
 
     def _pid_of_asset(asset_id: str) -> str:
         for proj in store.list_projects():
@@ -8669,7 +8892,8 @@ def create_app(
         return chat_store.create_thread(_project(pid).bb, pid, body.agent_id,
                                         title=body.title or "",
                                         provider=body.provider or "",
-                                        model=body.model or "")
+                                        model=body.model or "",
+                                        challenge_asset_id=body.challenge_asset_id or "")
 
     @app.put("/api/chat/threads/{tid}/llm")
     def chat_thread_set_llm(tid: str, body: SwitchLlmIn):

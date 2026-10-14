@@ -69,6 +69,9 @@ _EXPERT_EXCLUDED = {
     "complete_task", "fail_task", "finish", "request_steps",
     "propose_pack_edit",
     "bb_notify", "request_authorization",
+    # CTF 题目登记只归主控（challenge-asset v38）：一个主控线程只发一道题，
+    # 子专家应沿用主控已声明的题目，不重复建节点。
+    "bb_declare_challenge",
 }
 
 # 意图三件套（对话链也要，语义=规划产物与收尾纪律，不依赖任务队列）
@@ -77,6 +80,7 @@ _INTENT_TOOLS = ("declare_intent", "close_intent", "reopen_intent", "bb_delete_i
 _ORCH_BASE_TOOLS = ("todo_write", "call_expert", "skill_open",
                     "kb_search", "kb_open", "bb_query",
                     "bb_delete_asset", "bb_delete_assets", "bb_merge_assets",
+                    "bb_declare_challenge",
                     *_INTENT_TOOLS)
 
 # 对话轮步数上限（2026-10-01 由 24/32 提升至 200：修「步数耗尽但全程只调工具
@@ -696,6 +700,49 @@ class ChatTurn:
             "不要提前给最终摘要。")
         return "\n".join(lines)
 
+    def _challenge_context(self) -> str:
+        """CTF 题目上下文（challenge-asset，2026-10-14）：把「本线程归属的题目」
+        显式注入 system，并交代建题与归属纪律。非 CTF 轨返空串（不注入）。
+
+        用户的实际用法是把「题目描述 + 附件」一起丢进输入框，所以**资产为空是
+        常态**——这道题的资产节点通常还不存在。注入告诉 Agent：看到新题就调
+        `bb_declare_challenge` 立起来；立起来之后本线程的 `declare_intent` /
+        `bb_add_finding` 不必再传 `target_asset_id`（runtime 侧同样有兜底，
+        双保险——Agent 忘了声明，第一次落发现时也会按线程标题补建）。
+        """
+        if self.track != "ctf":
+            return ""
+        cid, name, desc = "", "", ""
+        try:
+            cid = chat_store.resolve_challenge_asset_id(self.bb, self.thread_id) or ""
+            if cid:
+                a = self.bb.get_asset(cid)
+                if a is not None:
+                    name = str(a.get("value") or "").strip()
+                    desc = str((a.get("meta") or {}).get("title") or "").strip()
+        except Exception:  # noqa: BLE001 —— 注入失败降级为「尚未建题」文案
+            log.exception("chat 题目上下文读取失败 thread=%s", self.thread_id)
+            cid = ""
+        lines = ["## CTF 题目上下文（一题一线程）"]
+        if cid:
+            lines.append(f"- 当前题目：id={cid} 名字={name or '<未命名>'}")
+            if desc:
+                lines.append(f"  描述：{desc}")
+            lines.append(
+                "- 后续本线程的 declare_intent / bb_add_finding **不必再填**"
+                " target_asset_id，会自动归到这道题下；附件也无需单独登记。")
+        else:
+            lines.append(
+                "- 本线程**尚未登记题目**。题目描述与附件都由用户在输入框给出，"
+                "确认是一道新题时先调 bb_declare_challenge("
+                "name=<简短题目名>, description=<一句话题目描述>,"
+                " tags=[<题型>]) 把题立起来；同一道题重复调用会复用既有节点，"
+                "不会建出重复行。")
+            lines.append(
+                "- 立题之后本线程的 declare_intent / bb_add_finding 不必再填"
+                " target_asset_id，会自动归到这道题下。")
+        return "\n".join(lines)
+
     def _situation_context(self) -> str:
         """主控态势注入（asset-tri-state D8，2026-10-09）：三态分桶让主控看得见
         「哪些没测、哪些测了没测尽、哪些测干净」，据此规划委派；否则主控只能靠
@@ -885,7 +932,8 @@ class ChatTurn:
                 abort_event=self.abort_event,
                 artifacts_dir=self.artifacts_dir,
                 role_skills=expert.get("skills"),
-                assigned_asset_ids=self.assigned_asset_ids)
+                assigned_asset_ids=self.assigned_asset_ids,
+                thread_id=self.thread_id)
         except Exception:  # noqa: BLE001 —— 装配失败降级为无黑板工具
             log.exception("chat ToolDispatcher 装配失败 thread=%s", self.thread_id)
             return None
@@ -1045,6 +1093,11 @@ class ChatTurn:
                 "黑板（bb_add_asset/bb_add_finding）；干完给一段**自包含的收尾"
                 "摘要**（做了什么/关键证据/结论），主控会原样转述给人类。")
             parts.append(self._mission_context())
+        # CTF 题目上下文（challenge-asset v38）：主控与子专家都注入（子专家与主控
+        # 同题，都要知道该题的归属与建题纪律）；非 CTF 轨返空串不注入。
+        cctx = self._challenge_context()
+        if cctx:
+            parts.append(cctx)
         # 蓝图注入（R4 消费面接线 M1）：主控与子专家都摊项目蓝图（紧凑形态），
         # 无蓝图返空串不注入。
         bp_ctx = self._blueprint_context()

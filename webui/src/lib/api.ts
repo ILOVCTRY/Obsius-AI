@@ -159,6 +159,17 @@ export const api = {
       method: "POST", body: JSON.stringify({ type, value, meta }),
     }),
 
+  // ---------- CTF 题目（challenge-asset，v38，2026-10-14） ----------
+  challenges: (pid: string) => http<Asset[]>(`/api/projects/${pid}/challenges`),
+  addChallenge: (pid: string, title: string) =>
+    http<Asset>(`/api/projects/${pid}/challenges`, {
+      method: "POST", body: JSON.stringify({ title }),
+    }),
+  patchChallenge: (assetId: string, body: { title?: string; meta?: Record<string, unknown> }) =>
+    http<Asset>(`/api/challenges/${assetId}`, {
+      method: "PATCH", body: JSON.stringify(body),
+    }),
+
   // ---------- 网络空间测绘（cyberspace-mapping M1+M2） ----------
   fofaConfig: () => http<FofaConfig>("/api/fofa/config"),
   saveFofaConfig: (body: { base_url?: string; key?: string }) =>

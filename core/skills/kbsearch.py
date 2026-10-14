@@ -29,6 +29,30 @@ def default_index_path(packs_root: str | Path) -> Path:
     return root.parent / "data" / "kb-index.db"
 
 
+def _chunks(seq: list, size: int):
+    for i in range(0, len(seq), size):
+        yield seq[i:i + size]
+
+
+# 单条 SQL 的绑定变量上限（SQLite 默认 999，取 400 留足余量）
+_DELETE_CHUNK = 400
+
+
+def _delete_fts_rows(con: sqlite3.Connection, keys) -> None:
+    """按 path 批量删除 FTS 行——一条 `IN` 只扫一次，替代「每行一条 DELETE」。
+
+    **为什么必须批量**：`kb_documents_fts.path` 是 UNINDEXED 列，FTS5 对非 rowid 条件
+    的 DELETE 只能**全表扫描** content 影子表。逐行删 N 条 = 扫 N 次，且每次都要扫过
+    已经插入的行 → O(N²)。实测 643 篇 web（12 MB 正文）：逐行删 3.86s / 批量删 0.46s
+    （8.4x）；线上 1796 篇、235 MB 的库放大到 ~33s 每个方向，而一次 kb_search 要遍历
+    6 个方向 → 用户实测单个工具调用卡住 4 分钟（2026-10-14 排查）。
+    """
+    keys = [k for k in keys if k]
+    for chunk in _chunks(keys, _DELETE_CHUNK):
+        con.execute("DELETE FROM kb_documents_fts WHERE path IN (%s)"
+                    % ",".join("?" * len(chunk)), chunk)
+
+
 def _layer(rel: str) -> int:
     head = rel.split("/", 2)[0].lower()
     return {"playbooks": 4, "patterns": 3, "cases": 2, "refs": 1}.get(head, 1)
@@ -133,6 +157,10 @@ class KbSearchIndex:
           with con:
             existing = {r["path"]: (r["sha256"], r["mtime_ns"], r["size"])
                         for r in con.execute("SELECT path,sha256,mtime_ns,size FROM kb_documents")}
+            # 第一遍：只判定「哪些 key 需要重写」（stat 先过，mtime/size 变了才读盘算哈希）。
+            # 必须先把待写集合定下来，才能在第二遍**一次性**删掉它们的旧 FTS 行——
+            # 见下方 _delete_fts_rows 的性能注释。
+            pending: list[tuple[str, Any, Path, Any, str, bytes]] = []
             for key, (src, path) in wanted.items():
                 st = path.stat()
                 old = existing.get(key)
@@ -142,6 +170,10 @@ class KbSearchIndex:
                 digest = hashlib.sha256(raw).hexdigest()
                 if old is not None and old[0] == digest:
                     continue
+                pending.append((key, src, path, st, digest, raw))
+            # 第二遍：批量清旧 FTS 行（只清真正会被重写的），再逐行写入。
+            _delete_fts_rows(con, [k for k, *_ in pending if k in existing])
+            for key, src, path, st, digest, raw in pending:
                 is_attachment = path.suffix.lower() not in TEXT_SUFFIXES
                 text = raw.decode("utf-8", errors="replace") if not is_attachment else ""
                 fm = _frontmatter(text)
@@ -152,7 +184,6 @@ class KbSearchIndex:
                        _title(text, path) if text else path.name,
                        _summary(text), tags, text, digest, st.st_mtime_ns, st.st_size,
                        int(is_attachment), time.time())
-                con.execute("DELETE FROM kb_documents_fts WHERE path=?", (key,))
                 con.execute("""INSERT OR REPLACE INTO kb_documents
                     (path,cap,source,relpath,layer,kind,title,summary,tags,content,
                      sha256,mtime_ns,size,is_attachment,indexed_at)
@@ -165,9 +196,9 @@ class KbSearchIndex:
             stale = set(existing) - set(wanted)
             if requested_caps:
                 stale = {key for key in stale if key.split("/", 1)[0] in requested_caps}
+            _delete_fts_rows(con, stale)
             for key in stale:
                 con.execute("DELETE FROM kb_documents WHERE path=?", (key,))
-                con.execute("DELETE FROM kb_documents_fts WHERE path=?", (key,))
                 removed += 1
             con.execute("INSERT OR REPLACE INTO kb_meta(key,value) VALUES ('last_sync',?)", (str(time.time()),))
         finally:

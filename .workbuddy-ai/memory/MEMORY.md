@@ -12,6 +12,7 @@
 - 黑板 schema 版本：`core/blackboard/schema.py` 的 `SCHEMA_VERSION` + 顶部版本注释 + `_migrate()` 幂等 ALTER。**改版本号必须同步 `tests/test_blackboard.py` 里硬编码的 `== <N>` 断言**（有两处：`test_schema_v7_migration`、`test_schema_v11_migration_idempotent`）。
 - 迁移写法惯例：`if cols and "x" not in cols: ALTER TABLE ... ADD COLUMN x TEXT NOT NULL DEFAULT ''`（幂等、老库开即补、历史行不回填）。
 - 本地 Python：项目自带 `.venv`（`./.venv/Scripts/python.exe`），测试 `./.venv/Scripts/python.exe -m pytest tests/... -q`。
+- **知识库索引红线**（`core/skills/kbsearch.py`）：`kb_documents_fts.path` 是 **UNINDEXED** 列，FTS5 按 path 删行 = 全表扫 content 影子表，逐行删是 **O(N²)**。**新增按 path 删 FTS 的代码一律走 `_delete_fts_rows`（分块 `IN` 批量删），勿写逐行 `DELETE ... WHERE path=?`**。背景：`KbSearchIndex.search()` 每次调用都 `sync()`，一次 `kb_search` 要遍历 N 个能力 → N 次 sync，曾导致单次工具调用卡 4 分钟。
 
 ## 本机环境已知坑
 

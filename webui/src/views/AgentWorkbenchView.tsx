@@ -9,7 +9,7 @@ import {
 import { api, ApiError } from "@/lib/api"
 import type {
   AttachmentInfo, ChatAgent, ChatMcpServer, ChatMessage, ChatThread, ChatThreadError,
-  ModelInfo,
+  ModelInfo, Asset,
 } from "@/lib/types"
 import type { Approval, DecideApprovalResult, ProjectDetail } from "@/lib/types"
 import { MarkdownView } from "@/components/settings/MarkdownView"
@@ -88,6 +88,7 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
   const [input, setInput] = useState("")
   const [sending, setSending] = useState(false)
   const [pendingIn, setPendingIn] = useState<string | null>(null)
+  const [assets, setAssets] = useState<Asset[]>([])
   const [err, setErr] = useState<string | null>(null)
   const [panel, setPanel] = useState<PanelTab>(null)
   const [refsDraft, setRefsDraft] = useState<{ skills: string[]; mcps: string[] }>({ skills: [], mcps: [] })
@@ -192,6 +193,7 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
   useEffect(() => {
     let alive = true
     api.chatAgents(pid).then((as) => { if (alive) setAgents(as) }).catch(() => {})
+    api.assets(pid).then((as) => { if (alive) setAssets(as) }).catch(() => {})
     return () => { alive = false }
   }, [pid])
 
@@ -556,6 +558,17 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
     if (el) el.scrollTop = el.scrollHeight
   }, [messages.length, liveDelta, liveThinking, running])
 
+  // 输入框自适应高度（2026-10-14）：下限 rows=2、上限 180px（≈8 行），超出内部滚动。
+  // 必须先置 height:auto 再读 scrollHeight——否则读到上一轮写死的固定高度，删字时无法回缩；
+  // 置 auto 后按 rows=2 取固有高，故空内容自然停在 2 行。用 effect（非 onChange）是为了
+  // 程序化清空（发送 / /context / 点引用 chip）时也能回缩。与 LiveRoom.autoResize 同款口径。
+  useEffect(() => {
+    const el = inputRef.current
+    if (!el) return
+    el.style.height = "auto"
+    el.style.height = `${Math.min(el.scrollHeight, 180)}px`
+  }, [input])
+
   const agentInitial = (a: ChatAgent | undefined) =>
     (a?.name ?? "?").slice(0, 1)
 
@@ -690,6 +703,11 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
             count={messages.length}
             endAdornment={
               <>
+                {thread?.challenge_asset_id && (
+                  <span className="wb-badge" title="该线程绑定的 CTF 题目">
+                    题目 · {assets.find((a) => a.id === thread.challenge_asset_id)?.value ?? "…"}
+                  </span>
+                )}
                 {running && <span className="wb-badge"><span className="wb-dot is-running" />执行中</span>}
                 {thread?.status === "error" && (
                   <span className="wb-badge is-error"
@@ -733,18 +751,27 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
                   <ActivityGroup key={it.id} steps={it.steps} live={running}
                     failedCount={it.steps.filter((s) => s.failed).length}
                     className="wb-anim">
-                    {it.rows.map((r) => r.kind === "thinking"
-                      ? <ThinkingBlock key={r.id} content={r.content} />
-                      : <ToolBlock key={r.id} name={r.name} args={r.args}
-                          result={r.result}
-                          startedAt={liveTools.startAtById.get(r.id)
-                            ?? liveTools.legacyStarts.find((p) => p.name === r.name
-                              && p.args_head === JSON.stringify(r.args ?? {}).slice(0, 300))?.created_at}
-                          done={r.done || liveTools.byId.get(r.id)?.phase === "done"}
-                          live={liveTools.byId.get(r.id)
-                            ?? liveTools.legacy.find((p) => p.name === r.name
-                              && p.args_head === JSON.stringify(r.args ?? {}).slice(0, 300))
-                            ?? null} />)}
+                    {it.rows.map((r) => {
+                      if (r.kind === "thinking") return <ThinkingBlock key={r.id} content={r.content} />
+                      // start 事件时刻：后端串行执行同批 tool_calls，只有真正轮到的那个才有
+                      // start 事件（2026-10-14 修「同批第二个工具恒显静态运行中」）。拿不到
+                      // start 而本轮仍在跑 = 排在队里 → 退到调用发起时刻计「排队中 Ns」；
+                      // 本轮已停且无 start（孤儿行）维持原「运行中」，不编造时刻。
+                      const started = liveTools.startAtById.get(r.id)
+                        ?? liveTools.legacyStarts.find((p) => p.name === r.name
+                          && p.args_head === JSON.stringify(r.args ?? {}).slice(0, 300))?.created_at
+                      const rowDone = r.done || liveTools.byId.get(r.id)?.phase === "done"
+                      const queued = !started && !rowDone && running
+                      return <ToolBlock key={r.id} name={r.name} args={r.args}
+                        result={r.result}
+                        startedAt={started ?? (queued ? r.at : undefined)}
+                        queued={queued}
+                        done={rowDone}
+                        live={liveTools.byId.get(r.id)
+                          ?? liveTools.legacy.find((p) => p.name === r.name
+                            && p.args_head === JSON.stringify(r.args ?? {}).slice(0, 300))
+                          ?? null} />
+                    })}
                   </ActivityGroup>
                 )
               })}
@@ -1277,9 +1304,12 @@ function Hero({ agentName, isOrch }: { agentName?: string; isOrch: boolean }) {
 // 但消息模型不同（ChatMessage[] vs BBEvent[]）故各自实现。
 
 // 活动组内一行：工具调用 或 该步的思考（思考折进行内，摘要也能带上「思考」计数）
+// `at` = 发起该调用的 assistant 消息时刻（2026-10-14）：后端**串行**执行同一批 tool_calls，
+// `chat.tool` 的 start 事件只在真正轮到该工具时才发 → 排队中的工具没有 start 时刻，前端只能
+// 退到「调用发起时刻」计时（显示「排队中 Ns」），否则只能挂一个静态「运行中」。
 type GroupRow =
   | { kind: "tool"; id: string; name: string; args?: Record<string, unknown>
-      result?: string; done: boolean }
+      result?: string; done: boolean; at?: string }
   | { kind: "thinking"; id: string; content: string }
 
 type WbItem =
@@ -1335,7 +1365,7 @@ function buildWbItems(messages: ChatMessage[]): (WbItem | WbProse)[] {
     for (const tc of calls) {
       const tr = messages.find((x) => x.role === "tool" && x.tool_use_id === tc.id)
       pending.rows.push({ kind: "tool", id: tc.id, name: tc.name, args: tc.args,
-                          result: tr?.content, done: !!tr })
+                          result: tr?.content, done: !!tr, at: m.created_at })
       pending.steps.push({
         kind: tc.name === "run_cmd" ? "command" : "tool",
         name: tc.name,
@@ -1420,11 +1450,13 @@ function TodoCard({ todo }: { todo: { id: string; title: string; status: string 
 
 // 工具明细行（会话流改造 2026-10-03）：折在 ActivityGroup 展开态里的一行，
 // 点开看参数/结果原文（Tailwind 工具类，不再用 .wb-tool 卡片样式）。
-function ToolBlock({ name, args, argsHead, result, done, live, startedAt }: {
+function ToolBlock({ name, args, argsHead, result, done, live, startedAt, queued }: {
   name: string; args?: Record<string, unknown>; argsHead?: string
   result?: string; done: boolean
   live?: { ok?: boolean; duration_s?: number; result_head?: string } | null
   startedAt?: string
+  /** 已发起但尚未轮到执行（同批串行排队）——计时改口径为「排队中」，见 GroupRow.at 注释 */
+  queued?: boolean
 }) {
   const [open, setOpen] = useState(false)
   // 运行中逐秒刷新「已运行 Ns」（2026-10-13）：替代静态「运行中」，长工具（MCP 全量
@@ -1456,8 +1488,9 @@ function ToolBlock({ name, args, argsHead, result, done, live, startedAt }: {
         <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-muted-foreground/70">
           {args ? JSON.stringify(args).slice(0, 140) : argsHead ?? ""}
         </span>
-        {!done && <span className="shrink-0 font-mono text-[9px] text-primary">
-          {startedAt ? `已运行 ${elapsed}s` : "运行中"}
+        {!done && <span className={cn("shrink-0 font-mono text-[9px]",
+          queued ? "text-muted-foreground" : "text-primary")}>
+          {startedAt ? `${queued ? "排队中" : "已运行"} ${elapsed}s` : "运行中"}
         </span>}
         {done && live && <span className="shrink-0 font-mono text-[9px] text-muted-foreground/60">{live.duration_s ?? "?"}s</span>}
         {done && <ChevronDown size={12} className={cn("shrink-0 text-muted-foreground transition-transform", open && "rotate-180")} />}

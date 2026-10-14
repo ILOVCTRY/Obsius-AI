@@ -1916,6 +1916,8 @@ export interface ChatThread {
   /** 线程级模型覆写（schema v37，2026-10-13）：''=跟随全局 executor 默认 */
   provider?: string
   model?: string
+  /** CTF 题目归属（v38，2026-10-14）：绑定 challenge 资产 id */
+  challenge_asset_id?: string
   created_at: string
   updated_at: string
 }

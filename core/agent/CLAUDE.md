@@ -66,7 +66,7 @@ Agent 创建或补充 finding 时可填摘要、受影响资产、测试环境�
 
 ## kb_open（M0 全局形态）
 
-- **M0 kb 全局单根**：数据源 = `load_kb_sources` 按启用域合成 `[packs/kb/<cap>]`（恒递归，目录不存在=空源；kb_sources.json 退役）。module 主口径=**全局形态** `<域>/<快照>/<路径>`（如 `web/webapp/authn/auth-jwt.md`）——首段==启用域时锁定该域解析（跨域同名快照天然消歧），否则按启用域顺序逐域尝试域内相对形态（兼容旧引用）；resolve 后强制落在 root 内（穿越返回 `[拒绝]`，且不落 kb.open 事件）；不存在时回可用清单（前 50 个，防幻觉）。legacy `kb_search` 返回 path **已补域前缀**，即 kb_open 的 module 口径——默认方法入口是自包含 Skill 的 `skill_open`，legacy 工具只服务尚未迁移的历史资料。
+- **M0 kb 全局单根**：数据源 = `load_kb_sources` 按启用域合成 `[packs/kb/<cap>]`（恒递归，目录不存在=空源；kb_sources.json 退役）。module 主口径=**全局形态** `<域>/<快照>/<路径>`（如 `web/漏洞分类/authn/auth-jwt.md`）——首段==启用域时锁定该域解析（跨域同名快照天然消歧），否则按启用域顺序逐域尝试域内相对形态（兼容旧引用）；resolve 后强制落在 root 内（穿越返回 `[拒绝]`，且不落 kb.open 事件）；不存在时回可用清单（前 50 个，防幻觉）。legacy `kb_search` 返回 path **已补域前缀**，即 kb_open 的 module 口径——默认方法入口是自包含 Skill 的 `skill_open`，legacy 工具只服务尚未迁移的历史资料。
 
 ## 坑
 

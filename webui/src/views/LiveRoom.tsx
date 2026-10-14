@@ -514,6 +514,9 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
   }, [events, pid])
   const assetName = useCallback(
     (id: string) => assets.find((a) => a.id === id)?.value, [assets])
+  // v38（2026-10-14）：CTF 轨资产标签前缀「题目 ·」用——判断该资产是否题目（type=challenge）
+  const assetIsChallenge = useCallback(
+    (id: string) => assets.find((a) => a.id === id)?.type === "challenge", [assets])
   // 页签：指挥（无 session_id 的编排事件；M3 起显拟人显示名）/ 各会话（已关闭的隐藏；
   // 2026-09-19 起 ×=结束会话，A1 摘离退役）。同名会话（多个同角色窗）无法区分——
   // 2026-09-28：标签重复时追加短 id 后缀（如「侦察·1960f」），消除「不同会话显示相同
@@ -1195,6 +1198,7 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
             onDecideApproval={decideApr}
             onRouteJump={handleRouteJump}
             assetName={assetName}
+            assetIsChallenge={assetIsChallenge}
             pid={pid}
           />
         )

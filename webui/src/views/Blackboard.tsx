@@ -11,7 +11,7 @@ import { cn } from "@/lib/utils"
 import { SEVERITY_COLOR } from "@/lib/events"
 import { hexAddr } from "@/lib/workbench"
 import { fmtDateTime, utcTitle } from "@/lib/datetime"
-import { FindingDetailDialog } from "@/components/blackboard/FindingDetailDialog"
+import { FindingDetailDialog, extractFlag } from "@/components/blackboard/FindingDetailDialog"
 import { CTF_LEVEL, CTF_LEVEL_ORDER } from "./blackboard/ctfLevel"
 import { MappingPane, ProductChips } from "./blackboard/MappingPane"
 import { IntentsPane } from "./blackboard/IntentsPane"
@@ -22,6 +22,10 @@ import { IntentsPane } from "./blackboard/IntentsPane"
 // 单站攻击链路图懒加载：@xyflow/react ~192KB 不进主包（与逆向 ChainView 同策略）
 const AttackPathCanvas = lazy(() =>
   import("./blackboard/AttackPath").then((m) => ({ default: m.AttackPath })))
+// 项目级意图推导图懒加载（2026-10-14）：CTF 轨「发现 → 链路」与题目行「链路」入口共用。
+// 复用逆向轨 IntentGraphView（样本 → 意图 → 收尾），CTF 的题目即其「样本」节点。
+const IntentGraphLazy = lazy(() =>
+  import("./reverse/intents/IntentGraphView").then((m) => ({ default: m.IntentGraphView })))
 
 // 函数库 tab 仅 capabilities 含 binary 时挂载（func_kb 只由二进制分析产生；
 // assessment web-only 项目里永远空数据）。判据是能力不是轨。
@@ -60,7 +64,7 @@ export function Blackboard({ pid, compact = false, track, capabilities, defaultV
       <TabsList className="w-full justify-start rounded-none border-b bg-transparent p-0">
         {tabs.map((t) => (
           <TabsTrigger key={t} value={t} className="rounded-none border-b-2 px-3 py-1.5 text-xs">
-            {t === "findings" ? "发现" : t === "intents" ? "意图" : t === "assets" ? "资产"
+            {t === "findings" ? "发现" : t === "intents" ? "意图" : t === "assets" ? (track === "ctf" ? "题目" : "资产")
               : t === "mapping" ? "测绘" : "函数库"}
           </TabsTrigger>
         ))}
@@ -68,7 +72,7 @@ export function Blackboard({ pid, compact = false, track, capabilities, defaultV
       <TabsContent value="findings" className="min-h-0 flex-1">
         {/* 子视图切换仅渗透/红队轨（R2 拆轨前判断 assessment）且非 compact 侧栏时渲染 */}
         <Findings pid={pid} compact={compact} track={track}
-                  showCanvas={!compact && (track === "pentest" || track === "redteam")} />
+                  showCanvas={!compact && (track === "pentest" || track === "redteam" || track === "ctf")} />
       </TabsContent>
       <TabsContent value="intents" className="min-h-0 flex-1">
         {/* 意图清单全轨启用（2026-10-13）：Agent declare_intent 的规划产物摊平成列表；
@@ -78,7 +82,7 @@ export function Blackboard({ pid, compact = false, track, capabilities, defaultV
       <TabsContent value="assets" className="min-h-0 flex-1">
         {/* 树视图全轨启用（2026-09-20）：E6 自动挂载全轨生效，ctf 等轨同样有 parent 树；
             无 parent 的行自然退化平铺 */}
-        <Assets pid={pid} compact={compact} tree />
+        <Assets pid={pid} compact={compact} tree track={track} />
       </TabsContent>
       {track !== "ctf" && !compactPentest && (
         <TabsContent value="mapping" className="min-h-0 flex-1">
@@ -152,14 +156,19 @@ export function Findings({ pid, track, showCanvas }: {
   const assetName = useCallback((id: string | null) =>
     id ? assets.find((a) => a.id === id)?.value : undefined, [assets])
 
-  // 资产筛选下拉只列 host/domain（2026-09-24 用户定稿：过滤只按 IP/域名），
-  // 按值子串搜索；选中后沿 parent_id 展开子树过滤（url/service 叶子 finding 不漏）
+  // 资产筛选下拉：非 CTF 轨只列 host/domain（2026-09-24 用户定稿：过滤只按 IP/域名），
+  // 按值子串搜索；选中后沿 parent_id 展开子树过滤（url/service 叶子 finding 不漏）。
+  // CTF 轨（v38，2026-10-14）：列题目（challenge）+ 被发现实际引用的资产——
+  // 渗透轨的 host/domain 白名单在 CTF 轨下会把题目全滤掉（下拉恒「无匹配题目」）。
   const assetOptions = useMemo(() => {
     const kw = assetQuery.trim().toLowerCase()
+    const referenced = new Set(items.map((f) => f.target_asset_id).filter(Boolean) as string[])
     return assets
-      .filter((a) => ["host", "domain"].includes(a.type))
+      .filter((a) => isCtf
+        ? isChallengeAsset(a, track) || referenced.has(a.id)
+        : ["host", "domain"].includes(a.type))
       .filter((a) => !kw || a.value.toLowerCase().includes(kw))
-  }, [assets, assetQuery])
+  }, [assets, assetQuery, isCtf, items])
 
   const visible = useMemo(() => {
     const rank = (s: string) => {
@@ -236,13 +245,13 @@ export function Findings({ pid, track, showCanvas }: {
       <div className="relative">
         <button
           type="button"
-          title="按资产筛选（IP/域名/URL/服务）"
+          title={isCtf ? "按题目筛选" : "按资产筛选（IP/域名/URL/服务）"}
           onClick={() => { setAssetOpen((o) => !o); setAssetQuery("") }}
           className={cn("flex h-6 min-w-32 max-w-44 items-center justify-between gap-1 rounded border px-1.5 font-mono text-[11px]",
             assetFilter ? "border-primary/50 text-primary" : "text-foreground")}
         >
           <span className="truncate">
-            {assetFilter ? (assetName(assetFilter) ?? "全部资产") : "全部资产"}
+            {assetFilter ? (assetName(assetFilter) ?? (isCtf ? "全部题目" : "全部资产")) : (isCtf ? "全部题目" : "全部资产")}
           </span>
           <ChevronDown className={cn("size-3 shrink-0 text-muted-foreground transition-transform", assetOpen && "rotate-180")} />
         </button>
@@ -256,7 +265,7 @@ export function Findings({ pid, track, showCanvas }: {
                   autoFocus
                   value={assetQuery}
                   onChange={(e) => setAssetQuery(e.target.value)}
-                  placeholder="搜索 IP/域名…"
+                  placeholder={isCtf ? "搜索题目…" : "搜索 IP/域名…"}
                   className="h-6 text-[11px]"
                 />
               </div>
@@ -267,7 +276,7 @@ export function Findings({ pid, track, showCanvas }: {
                     !assetFilter && "bg-primary/10 text-primary")}
                   onClick={() => { setAssetFilter(""); setAssetOpen(false) }}
                 >
-                  全部资产
+                  {isCtf ? "全部题目" : "全部资产"}
                 </button>
                 {assetOptions.map((a) => (
                   <button
@@ -277,14 +286,15 @@ export function Findings({ pid, track, showCanvas }: {
                       assetFilter === a.id && "bg-primary/10 text-primary")}
                     onClick={() => { setAssetFilter(a.id); setAssetOpen(false) }}
                   >
-                    <span className="mr-1 rounded border border-(--viz-edge) px-0.5 text-[9px] text-muted-foreground">
-                      {a.type}
+                    <span className={cn("mr-1 rounded border border-(--viz-edge) px-0.5 text-[9px] text-muted-foreground",
+                      isChallengeAsset(a, track) && "text-purple-500")}>
+                      {isChallengeAsset(a, track) ? "题目" : a.type}
                     </span>
                     {a.value}
                   </button>
                 ))}
                 {assetOptions.length === 0 && (
-                  <p className="px-2 py-1 text-[11px] text-muted-foreground">无匹配资产</p>
+                  <p className="px-2 py-1 text-[11px] text-muted-foreground">{isCtf ? "无匹配题目" : "无匹配资产"}</p>
                 )}
               </div>
             </div>
@@ -370,11 +380,18 @@ export function Findings({ pid, track, showCanvas }: {
         <div className="relative min-h-0 flex-1">
           <Suspense fallback={
             <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
-              加载攻击链路…
+              加载链路图…
             </div>
           }>
-            {/* 列表资产过滤态贯通：选中 IP/域名后切链路直接作为目标；未选 → 组件内目标引导 */}
-            <AttackPathCanvas pid={pid} assets={assets} target={assetFilter || undefined} />
+            {/* CTF 轨（2026-10-14）：题目即「样本」，用项目级意图推导图（题目→意图→发现）；
+                渗透/红队轨仍用单站攻击链路（需选 host/domain 目标）。点发现节点回列表开详情 */}
+            {isCtf
+              ? <IntentGraphLazy pid={pid}
+                  onLocateFinding={(fid) => {
+                    const f = items.find((x) => x.id === fid)
+                    if (f) setDetail(f)   // 弹发现详情卡片（不切回列表、不丢链路视图）
+                  }} />
+              : <AttackPathCanvas pid={pid} assets={assets} target={assetFilter || undefined} />}
           </Suspense>
         </div>
       </div>
@@ -430,10 +447,10 @@ export function Findings({ pid, track, showCanvas }: {
                 type="button"
                 className="flex w-full items-center gap-1.5 rounded border border-dashed px-2 py-1 text-[11px] text-muted-foreground hover:bg-accent/30"
                 onClick={() => setPlOpen((o) => !o)}
-                title="登记时未挂载具体资产的发现（项目级结论/死路记账/重评级等）"
+                title={`登记时未挂载具体${isCtf ? "题目" : "资产"}的发现（项目级结论/死路记账/重评级等）`}
               >
                 <ChevronDown className={cn("size-3 transition-transform", plOpen && "rotate-180")} />
-                项目级（未挂载具体资产）· {projectLevelFindings.length}
+                项目级（未挂载具体{isCtf ? "题目" : "资产"}）· {projectLevelFindings.length}
               </button>
               {plOpen && (
                 <div className="mt-1.5 space-y-1.5">
@@ -465,10 +482,32 @@ export function Findings({ pid, track, showCanvas }: {
 // **两个独立徽章（2026-10-10）**：状态徽章 + 「有发现」并列——「有发现」= 该资产挂 verified
 // finding 的前端反查（结论以 findings 为准，AI 不自报），**与状态正交、不再抢占状态位**，
 // 允许 `已访问+有发现` / `已测试·干净+有发现` 同时出现。
-function AssetBadges({ a, hasFinding }: { a: Asset; hasFinding?: boolean }) {
+/** CTF 轨下「题目」判定（challenge-asset v38，2026-10-14）：`type=challenge` 的规范
+ *  题目节点，**或 CTF 轨下的根资产**——旧数据/直挂附件没有 challenge 节点，CTF 轨下
+ *  根资产即题目载体（一个项目一道题时，根资产就是这道题）。 */
+const isChallengeAsset = (a: Asset, track?: string) =>
+  a.type === "challenge" || (track === "ctf" && !a.parent_id)
+/** 题目已解出 flag 的绿色徽章（2026-10-14）：点即复制，title 显全量。
+ *  flag 由该题目子树内 finding 的 evidence 识别（`extractFlag`，零 schema 迁移）。 */
+function FlagBadge({ flag }: { flag: string }) {
+  return (
+    <Badge
+      variant="outline"
+      title={`已解出 flag：${flag}（点击复制）`}
+      className="max-w-56 shrink-0 cursor-pointer border-(--viz-success-border) bg-(--viz-success-bg) font-mono text-[10px] text-(--viz-success)"
+      onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(flag).catch(() => {}) }}
+    >
+      <span className="min-w-0 truncate">🚩 {flag}</span>
+    </Badge>
+  )
+}
+function AssetBadges({ a, hasFinding, flag, track }:
+                     { a: Asset; hasFinding?: boolean; flag?: string | null; track?: string }) {
   const s = a.effective_status ?? (a.status === "open" && a.meta?.scanned ? "visited" : a.status)
   let statusBadge: ReactNode = null
-  if (s === "visited")
+  if (isChallengeAsset(a, track))
+    statusBadge = <Badge variant="outline" className="text-[10px] text-purple-500">题目</Badge>
+  else if (s === "visited")
     statusBadge = <Badge variant="outline" className="text-[10px] text-muted-foreground">已访问</Badge>
   else if (s === "scanning")
     statusBadge = <Badge variant="outline" className="text-[10px] text-(--viz-sev-medium)">扫描中</Badge>
@@ -494,6 +533,7 @@ function AssetBadges({ a, hasFinding }: { a: Asset; hasFinding?: boolean }) {
       {hasFinding && (
         <Badge variant="outline" className="text-[10px] text-(--status-error)">有发现</Badge>
       )}
+      {flag && <FlagBadge flag={flag} />}
     </>
   )
 }
@@ -513,9 +553,9 @@ function AssetTags({ tags }: { tags: string[] }) {
   )
 }
 
-function AssetRow({ a, indent = false, hasFinding, onDelete }:
-                  { a: Asset; indent?: boolean; hasFinding?: boolean
-                    onDelete?: (a: Asset) => void }) {
+function AssetRow({ a, indent = false, hasFinding, flag, onDelete, track }:
+                  { a: Asset; indent?: boolean; hasFinding?: boolean; flag?: string | null
+                    onDelete?: (a: Asset) => void; track?: string }) {
   const meta = a.meta ?? {}
   const src = meta.source as string | undefined
   const hint = (meta.module ?? meta.platform ?? (src ? undefined : meta.source)) as string | undefined
@@ -525,10 +565,12 @@ function AssetRow({ a, indent = false, hasFinding, onDelete }:
   return (
     <div className={cn("rounded px-1 py-1 hover:bg-accent/40", indent && "ml-5")}>
       <div className="flex items-center gap-2">
-        <Badge variant="outline" className="font-mono text-[10px]">{a.type}</Badge>
+        <Badge variant="outline" className={cn("font-mono text-[10px]", isChallengeAsset(a, track) && "text-purple-500")}>
+          {isChallengeAsset(a, track) ? "题目" : a.type}
+        </Badge>
         {/* 状态徽章紧贴值（用户定稿 2026-09-19）；flex-1 占位在徽章之后，右侧只留标签/⭐/hint/会话 */}
         <span className="min-w-0 shrink truncate font-mono text-xs">{a.value}</span>
-        <AssetBadges a={a} hasFinding={hasFinding} />
+        <AssetBadges a={a} hasFinding={hasFinding} flag={flag} track={track} />
         <span className="min-w-0 flex-1" />
         <AssetTags tags={tags} />
         {/* 来源徽章（cyberspace-mapping M1：fofa=测绘 🛰 / xlsx|csv=文件导入 📥） */}
@@ -537,7 +579,7 @@ function AssetRow({ a, indent = false, hasFinding, onDelete }:
         <ProductChips products={products} />
         {onDelete && (
           <button
-            title="删除该资产：仅叶子且无发现引用可删（有子资产/发现引用请先处理）"
+            title={`删除该${track === "ctf" ? "题目" : "资产"}：仅叶子且无发现引用可删（有子${track === "ctf" ? "题目" : "资产"}/发现引用请先处理）`}
             className="shrink-0 rounded px-1 text-[10px] text-muted-foreground/50 hover:bg-accent hover:text-(--status-error)"
             onClick={(e) => { e.stopPropagation(); onDelete(a) }}
           >
@@ -555,7 +597,7 @@ function AssetRow({ a, indent = false, hasFinding, onDelete }:
   )
 }
 
-export function Assets({ pid, compact, tree = false }: { pid: string; compact?: boolean; tree?: boolean }) {
+export function Assets({ pid, compact, tree = false, track }: { pid: string; compact?: boolean; tree?: boolean; track?: string }) {
   const [items, setItems] = useState<Asset[]>([])
   const [type, setType] = useState("auto")   // E6：默认自动识别（修旧默认 binary bug）
   const [value, setValue] = useState("")
@@ -565,19 +607,64 @@ export function Assets({ pid, compact, tree = false }: { pid: string; compact?: 
   const [tagFilter, setTagFilter] = useState("")
   // E7「有发现」徽章数据源：verified findings 的 target_asset_id 反查集合
   const [verifiedIds, setVerifiedIds] = useState<Set<string>>(new Set())
+  // 完整 findings（随 verifiedIds 一并缓存）：链路图里点发现节点弹详情用，免二次拉取
+  const [allFindings, setAllFindings] = useState<Finding[]>([])
+  // 资产树拖拽重组（v38，2026-10-14）：把资产拖入另一资产下改 parent_id
+  const [draggingId, setDraggingId] = useState<string | null>(null)
+  const [dropOverId, setDropOverId] = useState<string | null>(null)
+  // 题目「链路」弹层（2026-10-14）：点题目行的链路按钮，全屏看该题目的意图推导图
+  const [graphFor, setGraphFor] = useState<Asset | null>(null)
+  // 链路图里点开的发现（弹发现详情卡片，2026-10-14）
+  const [graphFinding, setGraphFinding] = useState<Finding | null>(null)
 
   const refresh = useCallback(() => {
     api.assets(pid).then(setItems).catch(() => {})
-    api.findings(pid).then((fs) =>
+    api.findings(pid).then((fs) => {
+      setAllFindings(fs)
       setVerifiedIds(new Set(fs
         .filter((f) => f.status === "verified" && f.target_asset_id)
-        .map((f) => f.target_asset_id as string)))).catch(() => {})
+        .map((f) => f.target_asset_id as string)))
+    }).catch(() => {})
   }, [pid])
   useEffect(() => {
     refresh()
     const t = setInterval(refresh, 4000)
     return () => clearInterval(t)
   }, [refresh])
+
+  // 资产树拖拽重组（v38，2026-10-14）
+  const onDragStart = (e: React.DragEvent, id: string) => {
+    setDraggingId(id)
+    e.dataTransfer.setData("text/asset-id", id)
+    e.dataTransfer.effectAllowed = "move"
+  }
+  const onDragOver = (e: React.DragEvent, id: string) => {
+    e.preventDefault()
+    if (id !== draggingId) setDropOverId(id)
+  }
+  const onDrop = async (e: React.DragEvent, targetId: string | null) => {
+    e.preventDefault()
+    const src = e.dataTransfer.getData("text/asset-id") || draggingId
+    setDropOverId(null)
+    setDraggingId(null)
+    if (!src || src === targetId) return
+    // 避免把父节点拖入自己的子孙（成环）
+    const descendants = new Set<string>()
+    const walk = (id: string) => {
+      for (const c of childrenOf.get(id) ?? []) { descendants.add(c.id); walk(c.id) }
+    }
+    walk(src)
+    if (targetId && descendants.has(targetId)) {
+      setErr("不能将父节点拖入自己的子树")
+      return
+    }
+    try {
+      await api.patchAsset(pid, src, { parent_id: targetId })
+      refresh()
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    }
+  }
 
   // 树视图分组（DESIGN.md §5.2 资产树）：parent_id 指向的资产存在 → 挂其下；
   // 悬挂引用（父不存在）回退主行。全无 parent 的旧数据自然退化平铺。
@@ -596,6 +683,31 @@ export function Assets({ pid, compact, tree = false }: { pid: string; compact?: 
     }
     return { roots, childrenOf }
   }, [items])
+
+  // 题目 flag 反查（2026-10-14）：解出的 flag 直接显示在题目行上。归属 = 该题目子树
+  // 内任一 finding 的 evidence 能识别出 flag（含题目自身挂载的发现）；无 flag 不显示。
+  const flagByChallenge = useMemo(() => {
+    const m = new Map<string, string>()
+    const subtreeIds = (root: string): Set<string> => {
+      const ids = new Set<string>([root])
+      const walk = (id: string) => {
+        for (const c of childrenOf.get(id) ?? []) { ids.add(c.id); walk(c.id) }
+      }
+      walk(root)
+      return ids
+    }
+    for (const a of items) {
+      if (!isChallengeAsset(a, track)) continue
+      const ids = subtreeIds(a.id)
+      for (const f of allFindings) {
+        if (f.target_asset_id && ids.has(f.target_asset_id)) {
+          const fl = extractFlag(f.evidence)
+          if (fl) { m.set(a.id, fl); break }
+        }
+      }
+    }
+    return m
+  }, [items, childrenOf, allFindings, track])
 
   const toggle = (id: string) =>
     setExpanded((prev) => {
@@ -636,7 +748,7 @@ export function Assets({ pid, compact, tree = false }: { pid: string; compact?: 
   // 删除指定资产（2026-09-25）：确认后走 DELETE 端点；409（有子资产/被发现引用）
   // 文案落底部 err 行
   const remove = async (a: Asset) => {
-    if (!window.confirm(`确认删除资产「${a.value}」？\n仅叶子资产且无发现引用可删除，删除后不可恢复。`)) return
+    if (!window.confirm(`确认删除${track === "ctf" ? "题目" : "资产"}「${a.value}」？\n仅叶子${track === "ctf" ? "题目" : "资产"}且无发现引用可删除，删除后不可恢复。`)) return
     try {
       await api.deleteAsset(pid, a.id)
       setErr("")
@@ -650,14 +762,14 @@ export function Assets({ pid, compact, tree = false }: { pid: string; compact?: 
     if (items.length === 0) return <Empty />
     if (tagFilter) {
       // 标签筛选时退平铺（树内子孙可能不满足筛选条件）
-      if (visible.length === 0) return <p className="p-2 text-xs text-muted-foreground">该标签下暂无资产</p>
+      if (visible.length === 0) return <p className="p-2 text-xs text-muted-foreground">该标签下暂无{track === "ctf" ? "题目" : "资产"}</p>
       return visible.map((a) => (
-        <AssetRow key={a.id} a={a} hasFinding={verifiedIds.has(a.id)}
+        <AssetRow key={a.id} a={a} hasFinding={verifiedIds.has(a.id)} flag={flagByChallenge.get(a.id)} track={track}
                   onDelete={!compact ? remove : undefined} />
       ))
     }
     if (!tree) return items.map((a) => (
-      <AssetRow key={a.id} a={a} hasFinding={verifiedIds.has(a.id)} />
+      <AssetRow key={a.id} a={a} hasFinding={verifiedIds.has(a.id)} flag={flagByChallenge.get(a.id)} track={track} />
     ))
     // 递归渲染（host → service → url 多层）：任意带子行的节点都可展开
     const countDesc = (id: string): number =>
@@ -669,8 +781,14 @@ export function Assets({ pid, compact, tree = false }: { pid: string; compact?: 
       return (
         <div key={a.id}>
           <div
+            draggable={!compact}
+            onDragStart={(e) => onDragStart(e, a.id)}
+            onDragOver={(e) => onDragOver(e, a.id)}
+            onDragLeave={() => setDropOverId(null)}
+            onDrop={(e) => onDrop(e, a.id)}
             className={cn("flex items-center gap-2 rounded px-1 py-1 hover:bg-accent/40",
-                          children.length && "cursor-pointer")}
+                          children.length && "cursor-pointer",
+                          dropOverId === a.id && "ring-1 ring-inset ring-primary/40 bg-primary/5")}
             style={{ marginLeft: depth * 20 }}
             onClick={() => children.length && toggle(a.id)}
           >
@@ -678,15 +796,26 @@ export function Assets({ pid, compact, tree = false }: { pid: string; compact?: 
               open ? <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
                    : <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
             ) : <span className="size-3.5 shrink-0" />}
-            <Badge variant="outline" className="font-mono text-[10px]">{a.type}</Badge>
+            <Badge variant="outline" className={cn("font-mono text-[10px]", isChallengeAsset(a, track) && "text-purple-500")}>
+              {isChallengeAsset(a, track) ? "题目" : a.type}
+            </Badge>
             {/* 状态徽章紧贴值（用户定稿 2026-09-19）；flex-1 占位在徽章之后 */}
             <span className="min-w-0 shrink truncate font-mono text-xs">{a.value}</span>
-            <AssetBadges a={a} hasFinding={verifiedIds.has(a.id)} />
+            <AssetBadges a={a} hasFinding={verifiedIds.has(a.id)} flag={flagByChallenge.get(a.id)} track={track} />
             <span className="min-w-0 flex-1" />
             <AssetTags tags={(meta.tags as string[] | undefined) ?? []} />
+            {!compact && isChallengeAsset(a, track) && (
+              <button
+                title="查看该题目的意图链路图（题目 → 意图 → 发现）"
+                className="shrink-0 rounded border border-(--viz-edge) px-1.5 text-[10px] text-muted-foreground hover:border-primary/40 hover:text-primary"
+                onClick={(e) => { e.stopPropagation(); setGraphFor(a) }}
+              >
+                链路
+              </button>
+            )}
             {!compact && (
               <button
-                title="删除该资产：仅叶子且无发现引用可删（有子资产/发现引用请先处理）"
+                title={`删除该${track === "ctf" ? "题目" : "资产"}：仅叶子且无发现引用可删（有子${track === "ctf" ? "题目" : "资产"}/发现引用请先处理）`}
                 className="shrink-0 rounded px-1 text-[10px] text-muted-foreground/50 hover:bg-accent hover:text-(--status-error)"
                 onClick={(e) => { e.stopPropagation(); remove(a) }}
               >
@@ -735,7 +864,11 @@ export function Assets({ pid, compact, tree = false }: { pid: string; compact?: 
         </div>
       )}
       <ScrollArea className="min-h-0 flex-1">
-        <div className="space-y-1 p-3">{renderRows()}</div>
+        <div className="space-y-1 p-3"
+             onDragOver={(e) => { e.preventDefault() }}
+             onDrop={(e) => onDrop(e, null)}>
+          {renderRows()}
+        </div>
       </ScrollArea>
       {!compact && (
         <div className="border-t p-2">
@@ -751,12 +884,58 @@ export function Assets({ pid, compact, tree = false }: { pid: string; compact?: 
               <option value="binary">binary</option>
             </select>
             <Input className="flex-1" value={value} onChange={(e) => setValue(e.target.value)}
-                   placeholder="手动添加资产（值/哈希/路径；自动=识别类型）"
+                   placeholder={`手动添加${track === "ctf" ? "题目" : "资产"}（值/哈希/路径；自动=识别类型）`}
                    onKeyDown={(e) => e.key === "Enter" && add()} />
             <Button size="sm" onClick={add} disabled={!value.trim()}>添加</Button>
           </div>
           {err && <p className="mt-1 text-[10px] text-(--status-error)">{err}</p>}
         </div>
+      )}
+
+      {/* 题目「链路」全屏弹层（2026-10-14）：复用发现页同一 IntentGraphView，
+          聚焦到该题目（focusSampleId）——一个功能两个入口 */}
+      {graphFor && (
+        <div className="fixed inset-0 z-40 flex flex-col bg-(--surface-0)">
+          <div className="flex shrink-0 items-center gap-2 border-b px-3 py-2">
+            <span className="text-[10px] text-muted-foreground">题目链路</span>
+            <span className="min-w-0 flex-1 truncate text-sm font-medium">{graphFor.value}</span>
+            <button
+              type="button"
+              className="shrink-0 rounded border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
+              onClick={() => setGraphFor(null)}
+            >
+              关闭
+            </button>
+          </div>
+          <div className="relative min-h-0 flex-1">
+            <Suspense fallback={
+              <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
+                加载链路图…
+              </div>
+            }>
+              {/* 点发现节点弹详情卡片（不关链路图、不跳页，2026-10-14） */}
+              <IntentGraphLazy pid={pid} focusSampleId={graphFor.id}
+                                onLocateFinding={(fid) => {
+                                  const f = allFindings.find((x) => x.id === fid)
+                                  if (f) setGraphFinding(f)
+                                }} />
+            </Suspense>
+          </div>
+        </div>
+      )}
+
+      {/* 链路图里点开的发现详情：复用同一 FindingDetailDialog（弹层之上，z-50 > 链路 z-40） */}
+      {graphFinding && (
+        <FindingDetailDialog
+          pid={pid}
+          finding={graphFinding}
+          track={track}
+          assetLabel={graphFinding.target_asset_id
+            ? items.find((a) => a.id === graphFinding.target_asset_id)?.value
+            : undefined}
+          onClose={() => setGraphFinding(null)}
+          onMutated={refresh}
+        />
       )}
     </div>
   )

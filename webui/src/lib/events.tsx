@@ -229,10 +229,15 @@ const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n) + "…" : s
 // 反查不到显 id 尾 6 位，不阻塞渲染
 export interface SummaryCtx {
   assetName?: (id: string) => string | undefined
+  /** v38（2026-10-14）：该资产是否为 CTF 题目（type=challenge），用于题目前缀渲染 */
+  assetIsChallenge?: (id: string) => boolean
 }
 const assetLabel = (id: unknown, ctx?: SummaryCtx): string => {
   if (typeof id !== "string" || !id) return ""
-  return ctx?.assetName?.(id) ?? `…${id.slice(-6)}`
+  const name = ctx?.assetName?.(id)
+  if (!name) return `…${id.slice(-6)}`
+  if (ctx?.assetIsChallenge?.(id)) return `题目 · ${name}`
+  return name
 }
 
 // per-tool 语义摘要（A1，live-stream-ux 2026-09-23；2026-09-28 补查询类工具）：

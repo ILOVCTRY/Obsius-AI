@@ -99,9 +99,11 @@ def test_schema_v7_migration(tmp_path):
     try:
         ver = board.conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
-        assert int(ver) == SCHEMA_VERSION == 37
+        assert int(ver) == SCHEMA_VERSION == 38
         int_cols = {r[1] for r in board.conn.execute("PRAGMA table_info(intents)")}
         assert "dimension" in int_cols         # v34 测试维度面
+        chat_cols = {r[1] for r in board.conn.execute("PRAGMA table_info(chat_threads)")}
+        assert "challenge_asset_id" in chat_cols  # v38 线程归属题目
         tables = {r[0] for r in board.conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
         assert "tasks" not in tables           # v33 任务机制退役：旧表 DROP
@@ -771,7 +773,7 @@ def test_schema_v11_migration_idempotent(tmp_path):
         board = Blackboard(str(db_path))
         ver = board.conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
-        assert int(ver) == SCHEMA_VERSION == 37
+        assert int(ver) == SCHEMA_VERSION == 38
         cols = {r[1] for r in board.conn.execute("PRAGMA table_info(findings)")}
         assert "rating_basis" in cols
         assert "category" in cols  # v12（发现分两类）

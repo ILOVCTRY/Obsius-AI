@@ -24,7 +24,8 @@ _TITLE_MAX = 60
 def create_thread(bb, project_id: str, agent_id: str, *,
                   title: str = "", parent_thread_id: str | None = None,
                   spawned_task: str = "",
-                  provider: str = "", model: str = "") -> dict[str, Any]:
+                  provider: str = "", model: str = "",
+                  challenge_asset_id: str = "") -> dict[str, Any]:
     tid = new_id("chat")
     ts = now()
     with bb._tx():
@@ -37,11 +38,12 @@ def create_thread(bb, project_id: str, agent_id: str, *,
         bb.conn.execute(
             "INSERT INTO chat_threads(id, project_id, agent_id, title, status,"
             " parent_thread_id, spawned_task, todo, provider, model,"
-            " created_at, updated_at)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            " challenge_asset_id, created_at, updated_at)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (tid, project_id, agent_id, title[:_TITLE_MAX], "idle",
              parent_thread_id, spawned_task, "[]",
-             (provider or "").strip(), (model or "").strip(), ts, ts))
+             (provider or "").strip(), (model or "").strip(),
+             (challenge_asset_id or "").strip(), ts, ts))
     return get_thread(bb, tid)
 
 
@@ -71,12 +73,17 @@ def update_thread(bb, thread_id: str, *, title: str | None = None,
                   usage: dict[str, Any] | None = None,
                   error: dict[str, Any] | None = None,
                   provider: str | None = None,
-                  model: str | None = None) -> dict[str, Any] | None:
+                  model: str | None = None,
+                  challenge_asset_id: str | None = None) -> dict[str, Any] | None:
     sets: list[str] = ["updated_at=?"]
     args: list[Any] = [now()]
     if title is not None:
         sets.append("title=?")
         args.append(title[:_TITLE_MAX])
+    if challenge_asset_id is not None:
+        # '' = 解绑（v38 线程归属题目）
+        sets.append("challenge_asset_id=?")
+        args.append((challenge_asset_id or "").strip())
     if provider is not None:
         # '' = 清除覆写（回跟随全局默认）；线程级模型覆写（v37）
         sets.append("provider=?")
@@ -128,6 +135,31 @@ def delete_thread(bb, thread_id: str) -> bool:
         bb.conn.execute(f"DELETE FROM chat_messages WHERE thread_id IN ({ph})", ids)
         cur = bb.conn.execute(f"DELETE FROM chat_threads WHERE id IN ({ph})", ids)
         return cur.rowcount > 0
+
+
+def resolve_challenge_asset_id(bb, thread_id: str, *, max_depth: int = 16) -> str:
+    """本线程（或其最近的祖先线程）绑定的题目资产 id（v38，challenge-asset）。
+
+    CTF 轨「一个主控线程只发一道题」——主控线程声明题目时把 id 落自己行上；
+    主控 ``call_expert`` spawn 的子线程不重复声明，沿 ``parent_thread_id`` 向上
+    找最近一个非空值（子专家与主控同题）。链上全空/线程不存在返回 ``''``。
+    """
+    walker = thread_id
+    seen: set[str] = set()
+    for _ in range(max_depth):
+        if not walker or walker in seen:
+            return ""
+        seen.add(walker)
+        row = bb.conn.execute(
+            "SELECT challenge_asset_id, parent_thread_id FROM chat_threads"
+            " WHERE id=?", (walker,)).fetchone()
+        if row is None:
+            return ""
+        cid = str(row["challenge_asset_id"] or "").strip()
+        if cid:
+            return cid
+        walker = str(row["parent_thread_id"] or "").strip()
+    return ""
 
 
 def recover_running_threads(bb, running: set[str] | None = None, *,
