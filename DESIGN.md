@@ -405,6 +405,8 @@ command / command.result 事件时序协议（BackendError 时悬空运行中=�
 
 **能力包（web/binary/crypto/forensics/misc/cloud）已退役**——不再是项目绑定维度，降级为 kb **知识方向**（资料组织单位）。唯一内容根 `packs/kb/`：`skills/<name>/`（技能**扁平**、cc 风格自包含，registry 只扫这里；无包/轨归属）、`<track>/`（场景轨 ctf/pentest/redteam/research：track.yaml / task_types.yaml / profiles/ / phases/ / dimensions.yaml）、`<方向>/`（web/binary/… 资料树，不进 registry）、`安全红线/`（`轨红线/<track>.md` 全量注入 + `平台规则/<tag>.md`〔owners〕+ `评级与价值口径/<tag>.md`〔F11 判级〕**后两者渗透独有** + `templates/`）。平台/格式/漏洞类只走 frontmatter 标签不建包。LEGACY_DOMAIN_MAP/LEGACY_TRACK_MAP 读取层兼容旧轨/旧域。kb 源按方向合成恒递归（`load_kb_sources`），kb_open module 用全局形态 `<方向>/<快照>/<路径>`。
 
+**知识树状化重构（2026-10-14 一次全量）**：各方向内部由旧的「英文快照平铺」（recon/webapp/playbooks/refs/notes…）改为**三层知识树**——一级=方向（运行时轨名不可动）、二级=**中文类目模块**（如 `web/漏洞分类`、`binary/逆向工程`、`crypto/非对称加密`）、三级=模块内类目/英文小类。旧 `refs/` 原料库按类别拆入各方向模块（用户决策：中文化类目名、拆入知识树）。分层语义：知识模块=收编版（可就地修订）；`<方向>/赛事专题/题目知识/ctf-<x>/`=上游 ctf-skills 快照原件（不翻译，`import_kb.py --force` 只会重建该目录），两者字节相同的副本已去重（正本留收编版，快照内被去重文件的引用改写到正本）。迁移脚本 `scripts/refactor_kb_tree.py`，链接修复 `scripts/fix_kb_rel_links.py`；各方向 README 为策展导航。
+
 **项目绑定** = 场景轨 track（单选）× 专家组队 experts（多选可空）。kb 可见方向由 **`directions_effective(packs_root, track, experts, fallback)`**（原 caps_effective）推导——有绑定→专家 yaml **`knowledge` 白名单**并集（任一专家 knowledge=null → 全部方向 `list_directions`）；无绑定→fallback（meta.capabilities，存量直通零翻译）；fallback 空→轨默认（`TRACK_DEFAULT_CAPS`：research→binary）。专家 yaml **`skills` 白名单为硬选**——会话可见/可路由技能=绑定专家并集（`expert_skills`，null/空=不限定=全量）。推导只发生在 API meta 响应层（`directions` + `directions_bound`=盘上原始绑定）与 AgentSession 构造层，盘上原始绑定不动（`Project.capabilities` 恒返回盘上值）。前端创建页无 caps 选择器（能力包退役）。
 
 ## 四层知识体系

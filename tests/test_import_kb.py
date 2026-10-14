@@ -1,12 +1,15 @@
 """scripts/import_kb.py 幂等与产物契约测试（用最小假源，不依赖 Knowledge/）。
 
-M0（2026-09-21）注记：import_kb 的 `capabilities/<cap>/kb` 落点与 kb_sources.json
-是旧布局遗产（脚本内 docstring 已挂注记）——本测试只校验脚本自身产物契约，
-core 的 kb 源自 M0 起为合成源（packs/kb/<域>），不再消费 kb_sources.json。
+2026-10-14 树状化重构后落点口径：
+- ctf-skills 快照原件 → packs/kb/<方向>/赛事专题/题目知识/ctf-<x>/，根 LICENSE
+  上收 packs/kb/licenses/；
+- src-strike 按新树类目重映射落 packs/kb/web/（打法→实战打法/、资料→
+  载荷与字典//行业视野//PoC与模板/、散篇→实践笔记/、手册→漏洞分类/<类目>/手册.md）；
+- owners 完整版覆盖 packs/kb/安全红线/平台规则/；
+- kb_sources.json 为已废止的旧布局遗产，脚本不再生成。
 """
 from __future__ import annotations
 
-import json
 import shutil
 import sys
 from pathlib import Path
@@ -29,7 +32,8 @@ def env(tmp_path):
     (ctf / "ctf-misc").mkdir(parents=True)
     (ctf / "ctf-misc" / "SKILL.md").write_text("---\nname: ctf-misc\n---\n", encoding="utf-8")
     (ctf / "LICENSE").write_text("MIT License", encoding="utf-8")
-    # src-strike：F15 重映射落点（playbooks/refs/notes）+ 应被排除的杂物
+    # src-strike：新树类目重映射落点（实战打法/行业视野/PoC与模板/载荷与字典/实践笔记/）
+    # + 应被排除的杂物
     strike = knowledge / "src-strike"
     skill = strike / "skills" / "src-strike"
     (skill / "知识库").mkdir(parents=True)
@@ -50,7 +54,7 @@ def env(tmp_path):
     (skill / "mcp-servers" / "big.exe").write_text("x", encoding="utf-8")
 
     packs = tmp_path / "packs"
-    owners = packs / "tracks" / "pentest" / "rules" / "owners"
+    owners = packs / "kb" / "安全红线" / "平台规则"
     owners.mkdir(parents=True)
     (owners / "edusrc.md").write_text("旧摘编版 v1", encoding="utf-8")
     return knowledge, packs
@@ -59,34 +63,34 @@ def env(tmp_path):
 def test_import_twice_is_idempotent(env):
     knowledge, packs = env
     s1 = import_kb(knowledge, packs)
-    assert (packs / "capabilities/web/kb/refs/ctf-web/sqli/README.md").is_file()
-    assert (packs / "capabilities/web/kb/CTF-SKILLS-LICENSE").read_text(
+    # ctf 快照原件落 赛事专题/题目知识/，LICENSE 上收 kb/licenses/
+    assert (packs / "kb" / "web" / "赛事专题" / "题目知识" / "ctf-web"
+            / "sqli" / "README.md").is_file()
+    assert (packs / "kb" / "licenses" / "LICENSE").read_text(
         encoding="utf-8") == "MIT License"
-    assert (packs / "capabilities/misc/kb/refs/ctf-misc/SKILL.md").is_file()
-    # src-strike F15 重映射：打法→playbooks/、资料→refs/、散篇→notes/；排除项不进快照
-    # K5 测试包分类：知识库/idor-test.md → webapp/idor/手册.md（含分面 frontmatter）
-    idor = packs / "capabilities/web/kb/webapp/idor/手册.md"
+    assert (packs / "kb" / "misc" / "赛事专题" / "题目知识" / "ctf-misc"
+            / "SKILL.md").is_file()
+    # src-strike 类目重映射：打法→实战打法/、资料→行业视野/、散篇→实践笔记/；
+    # 排除项不进快照
+    # K5 测试包分类：知识库/idor-test.md → 漏洞分类/idor/手册.md（含分面 frontmatter）
+    idor = packs / "kb" / "web" / "漏洞分类" / "idor" / "手册.md"
     assert idor.is_file()
     assert idor.read_text(encoding="utf-8").startswith(
         "---\nphase: webapp\nvuln_class: [idor, authz]\n---")
-    assert (packs / "capabilities/web/kb/playbooks/SKILL.md").is_file()
-    assert (packs / "capabilities/web/kb/playbooks/rules/other-method.md").is_file()
-    assert (packs / "capabilities/web/kb/playbooks/sqli-test.md/a.md").is_file()
-    assert (packs / "capabilities/web/kb/refs/h1-reports/r1.md").is_file()
-    assert (packs / "capabilities/web/kb/refs/compliance.md").is_file()
-    assert (packs / "capabilities/web/kb/notes/随手笔记.md").is_file()
-    assert not (packs / "capabilities/web/kb/playbooks/AGENTS.md").exists()
-    assert not (packs / "capabilities/web/kb/notes/AGENTS.md").exists()
-    assert not (packs / "capabilities/web/kb/notes/mcp-servers").exists()
-    # owners 完整版覆盖 + 旧版备份
-    owner = packs / "tracks/pentest/rules/owners/edusrc.md"
+    assert (packs / "kb" / "web" / "实战打法" / "SKILL.md").is_file()
+    assert (packs / "kb" / "web" / "实战打法" / "rules" / "other-method.md").is_file()
+    assert (packs / "kb" / "web" / "行业视野" / "playbooks" / "sqli-test.md"
+            / "a.md").is_file()
+    assert (packs / "kb" / "web" / "赛事专题" / "h1-reports" / "r1.md").is_file()
+    assert (packs / "kb" / "web" / "行业视野" / "compliance.md").is_file()
+    assert (packs / "kb" / "web" / "实践笔记" / "随手笔记.md").is_file()
+    assert not (packs / "kb" / "web" / "实战打法" / "AGENTS.md").exists()
+    assert not (packs / "kb" / "web" / "实践笔记" / "AGENTS.md").exists()
+    assert not (packs / "kb" / "web" / "实践笔记" / "mcp-servers").exists()
+    # owners 完整版覆盖 + 旧版备份（现居 kb/安全红线/平台规则/）
+    owner = packs / "kb" / "安全红线" / "平台规则" / "edusrc.md"
     assert owner.read_text(encoding="utf-8") == "完整版平台规则 v2"
     assert list((owner.parent / ".history").glob("edusrc.md.*.bak"))
-    # kb_sources.json 产物契约（旧布局遗产：M0 后 core 合成源不再读它，只验 JSON 形态）
-    raw = json.loads((packs / "capabilities/web/kb_sources.json")
-                     .read_text(encoding="utf-8"))
-    assert {s["id"] for s in raw["sources"]} == {"web-kb"}
-    assert raw["sources"][0]["root"] == "kb"
     assert s1["owners"] == ["edusrc.md"]
 
     # 第二次跑：快照全跳过；owners 与源一致不再备份/覆盖
@@ -102,7 +106,7 @@ def test_force_rebuild_preserves_local(env):
     上游同路径文件仍由上游内容胜出（本地副本不盖回）。"""
     knowledge, packs = env
     stats0 = import_kb(knowledge, packs)
-    snap = packs / "capabilities/web/kb/refs/ctf-web"
+    snap = packs / "kb" / "web" / "赛事专题" / "题目知识" / "ctf-web"
     local_md = snap / "LOCAL.md"
     local_nested = snap / "notes" / "本地经验.md"
     local_nested.parent.mkdir(parents=True)

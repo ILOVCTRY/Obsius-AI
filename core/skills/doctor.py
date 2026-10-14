@@ -327,9 +327,15 @@ def diagnose(packs_root: str | Path,
     # 分节形态都算有结构；refs/ 子树豁免（上游快照原文不动是既有约定）；短条目/
     # 存根不检。沉淀口径段（已验证路径/坑/…）要求只约束 agent 新建侧
     # （proposals._validate_agent_kb），不强制存量手册改标题。
+    # 2026-10-14 树状化重构：refs/ 已拆入各类目，上游原件现居
+    # 「赛事专题/题目知识」（豁免项由 refs 段改为赛事专题段）；
+    # 同属上游原料集合的「载荷与字典/工具手册」（CTF常用脚本及工具__*、工具使用__*
+    # 扁平命名收编）一并豁免。
     if kb_root_dir.is_dir():
         for md in sorted(kb_root_dir.rglob("*.md")):
-            if ".history" in md.parts or "kb-trash" in md.parts or "refs" in md.parts:
+            if ".history" in md.parts or "kb-trash" in md.parts \
+                    or "refs" in md.parts or "赛事专题" in md.parts \
+                    or "载荷与字典" in md.parts or "工具手册" in md.parts:
                 continue
             try:
                 text = md.read_text(encoding="utf-8")

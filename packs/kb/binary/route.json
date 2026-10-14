@@ -1,14 +1,14 @@
 {
   "pwn|二进制漏洞|堆|栈溢出": [
-    "binary/pwn/"
+    "binary/漏洞利用/"
   ],
   "逆向|reverse|脱壳|反编译": [
-    "binary/reverse/"
+    "binary/逆向工程/"
   ],
   "android|apk|安卓|移动逆向": [
-    "binary/android/"
+    "binary/移动安全/"
   ],
   "恶意样本|malware|病毒分析": [
-    "binary/malware/"
+    "binary/恶意样本/"
   ]
 }

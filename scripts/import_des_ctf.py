@@ -46,22 +46,22 @@ def _destination(source: Path, path: Path) -> tuple[str, Path]:
     rel = path.relative_to(source).as_posix()
     parts = path.relative_to(source).parts
     if parts and parts[0] == "工具使用":
-        cap, base = "web", "refs/tools"
+        cap, base = "web", "工具手册"
     elif parts and parts[0] == "CTF常用脚本及工具":
-        cap, base = _classify(path.read_text(encoding="utf-8", errors="replace") if path.suffix.lower() in TEXT_EXTS else "", path.name), "refs/payloads"
+        cap, base = _classify(path.read_text(encoding="utf-8", errors="replace") if path.suffix.lower() in TEXT_EXTS else "", path.name), "载荷与字典"
     elif parts and parts[0] == "WP汇总":
-        cap, base = _classify(path.read_text(encoding="utf-8", errors="replace") if path.suffix.lower() in TEXT_EXTS else "", path.name), "refs/lab-writeups"
+        cap, base = _classify(path.read_text(encoding="utf-8", errors="replace") if path.suffix.lower() in TEXT_EXTS else "", path.name), "赛事专题/靶场复盘"
     elif parts and parts[0] == "CTF大赛WP集合":
         text = path.read_text(encoding="utf-8", errors="replace") if path.suffix.lower() in TEXT_EXTS else ""
-        cap, base = _classify(text, path.name), "refs/ctf-writeups"
+        cap, base = _classify(text, path.name), "赛事专题/Writeup合集"
     else:
         text = path.read_text(encoding="utf-8", errors="replace") if path.suffix.lower() in TEXT_EXTS else ""
         cap = _classify(text, path.name)
         core_names = {"sql.md", "命令执行.md", "文件包含.md", "文件上传漏洞.md",
                       "ssrf漏洞.md", "ssti.md", "jwt.md", "php代码审计.md",
                       "php反序列化漏洞总结.md", "图片隐写.md", "音频隐写.md", "压缩包总结.md"}
-        base = "playbooks" if path.name.lower() in core_names else "refs/web-vulns"
-    return cap, Path(base) / rel.replace("/", "__")
+        base = "实战打法" if path.name.lower() in core_names else "漏洞分类"
+    return cap, Path(cap) / base / rel.replace("/", "__")
 
 
 def import_tree(source: str | Path, packs: str | Path = "packs", *, force: bool = False) -> dict:

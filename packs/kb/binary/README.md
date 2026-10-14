@@ -1,21 +1,25 @@
 # binary 能力域 · 知识库（packs/kb/binary/）
 
 > kb 全局单根（expert-pool M0，2026-09-21）：`packs/kb/` 一级目录=能力域，本目录=binary 域。
-> Agent 经 `kb_open(module=binary/<快照>/<包内路径>)` 按需打开单个文件，全局路径域前缀消歧。
+> Agent 经 `kb_open(module=binary/<模块>/<包内路径>)` 按需打开单个文件，全局路径域前缀消歧。
 > route.json 为任务导航（测试点 → 手册）。
 >
-> **本地基线（K2 收编，2026-09-20 起）**：`pwn/`、`reverse/`、`malware/` 为上游
-> ctf-skills 的收编改编版（切片已合并），允许在 Skill 页就地修订与新建经验 md
-> （新经验写新文件，不覆盖英文原文）；`refs/` 下为快照原件，不翻译、不就地改，
-> 更新走 `scripts/import_kb.py` 重新导入。
+> **树状化重构（2026-10-14）**：本域由旧的 pwn/reverse/malware/refs 平铺改为中文
+> 类目模块树；旧 refs/ 原料库按类别拆入下列模块。知识模块（收编版）允许就地修订
+> 与新建经验 md；`赛事专题/题目知识/` 下为 ctf-skills 快照原件，不翻译，与收编版
+> 字节相同的副本已去重（正本在收编版模块），更新走 `scripts/import_kb.py --force`。
 
-| 快照 | 来源与内容 |
-|---|---|
-| `pwn/` | K2 收编改编 · 堆/FSOP、格式化串、ROP、沙箱逃逸等利用手法 |
-| `reverse/` | K2 收编改编 · 静态/动态分析、脱壳、混淆还原 |
-| `malware/` | K2 收编改编 · PE/.NET、C2 协议、脚本混淆（默认恶意，只静态） |
-| `android/` | **r0re 收编改编（2026-09-21）** · APK 分层分诊、JNI/native 五线、加固脱壳、Godot 专项 + `cases/` 已解案例（K6 沉淀） |
-| `refs/` | 快照原件：ctf-pwn / ctf-reverse / ctf-malware（ctf-skills，MIT） |
+| 模块 | 篇数 | 来源与内容 |
+|---|---|---|
+| `逆向工程/` | 24 | K2 收编改编：静态/动态分析、脱壳、混淆还原、语言/平台/模式速查 + `cases/` 已解案例（K6 沉淀） |
+| `漏洞利用/` | 19 | K2 收编改编：堆/FSOP、格式化串、ROP、内核绕过、进阶利用 + `scripts/` pwntools 脚本 |
+| `移动安全/` | 16 | r0re 收编改编（2026-09-21）：APK 分层分诊、JNI/native 五线、加固脱壳、Frida、Godot 专项 + `cases/` 已解案例 |
+| `dotnet逆向/` | 3 | .NET 常见工作流、混淆器还原、sharp 工具 |
+| `终端对抗/` | 3 | hook 技术面面观、遥测致盲、unhook 手法 |
+| `恶意样本/` | 4 | PE/.NET、C2 协议、脚本混淆（默认恶意，只静态） |
+| `赛事专题/` | 450 | `题目知识/ctf-pwn|ctf-reverse|ctf-malware` ctf-skills 快照原件（29 篇）；`Writeup合集/` CTF 大赛 WP 集合（421 篇） |
+| `载荷与字典/` | 9 | CTF 常用脚本及工具（CRC32/DES/Base 系列等） |
 
-许可：ctf-skills 快照为 MIT（见 `../licenses/CTF-SKILLS-LICENSE`）；android/ 收编自
-r0re（上游无 LICENSE 文件，经用户确认可直接收编，2026-09-21）。
+许可：ctf-skills 快照为 MIT（见 `../licenses/CTF-SKILLS-LICENSE`）；android/移动安全 收编自
+r0re（上游无 LICENSE 文件，经用户确认可直接收编，2026-09-21）；dotnet逆向/终端对抗 收编自
+上游技能包（MIT，见 `../licenses/`）。

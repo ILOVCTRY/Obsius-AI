@@ -977,7 +977,7 @@ tool(
         'properties': {
             'module': {
                 'type': 'string',
-                'description': '知识库内相对路径，如 webapp/idor/手册.md（web 测试包）、refs/ctf-pwn/heap-fsop.md（快照原件）',
+                'description': '知识库内相对路径，如 漏洞分类/idor/手册.md（web 漏洞类目）、赛事专题/题目知识/ctf-pwn/heap-fsop.md（题目知识原件）',
             },
         },
         'required': [

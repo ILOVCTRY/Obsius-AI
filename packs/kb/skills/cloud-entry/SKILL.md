@@ -37,7 +37,7 @@ mode: self-contained
 
 ① 代码仓库与 git 历史（gitleaks/trufflehog）；② CI/CD 环境变量与 secrets manager；
 ③ 实例元数据（SSRF→IMDS 链，六厂商端点对照 `references/cloud/knowledge/metadata-service-endpoints.md`）；
-④ 前端 bundle/小程序（AKIA/ASIA/LTAI/AKID 前缀指纹表在 `cloud/vendors/<厂商>/` 各篇）；
+④ 前端 bundle/小程序（AKIA/ASIA/LTAI/AKID 前缀指纹表在 `cloud/云厂商/<厂商>/` 各篇）；
 ⑤ 客户端配置（`~/.aws/credentials` 类、kubeconfig、服务账号 JWT、云 CLI 配置）；
 ⑥ 对象桶内备份与配置文件。
 
@@ -79,5 +79,5 @@ mode: self-contained
 
 - 每条攻击路径按「入口凭证/身份 → 身份 → 权限 → 目标资源 → 影响证明（API 响应原文/拿到什么）→ 证据」链式组织，登记为发现走 bb_add_finding（verified 需复现步骤证据），凭证池/路径清单落 artifact。
 - 凭证纪律：发现 AK/SK/token 登记来源与权限范围后提示用户轮换；**云凭据绝不写入发现正文/报告明文**，只记指纹（前缀/账号 ID）。
-- 检测缺口（审计日志/监控缺失面）作为蓝队视角补充节——`cloud/detection/` 四篇为**辅助视角**（检测规则设计，供评估报告「检测缺口」节引用，非攻击路径来源）。
+- 检测缺口（审计日志/监控缺失面）作为蓝队视角补充节——`cloud/威胁检测/` 四篇为**辅助视角**（检测规则设计，供评估报告「检测缺口」节引用，非攻击路径来源）。
 - ATT&CK Cloud 映射速查：`references/cloud/knowledge/attck-cloud-matrix.md`；工具卡：`references/cloud/knowledge/cloud-security-tool-cards.md`。

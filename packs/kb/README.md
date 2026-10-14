@@ -1,19 +1,32 @@
 # packs/kb/ · 知识库全局根（expert-pool M0，2026-09-21）
 
-> 全局单根：一级目录=能力域（binary / crypto / forensics / misc / web，与能力包同键）；
-> 各域结构见域内 README.md。`kb_open(module=<域>/<快照>/<包内路径>)` 全局路径。
+> 全局单根：一级目录=能力域（web / binary / crypto / forensics / misc / cloud，与能力包同键）；
+> 各域结构见域内 README.md。`kb_open(module=<域>/<模块>/<包内路径>)` 全局路径。
+>
+> **树状化重构（2026-10-14）**：各域内部由旧的「英文快照平铺」（recon/webapp/
+> playbooks/refs/notes 等）改为**三层知识树**——一级=方向（轨名，不可动）、二级=
+> **中文类目模块**（如 web/漏洞分类、binary/逆向工程、crypto/非对称加密）、三级=
+> 模块内子目录（类目/英文小类，如 漏洞分类/sqli）。旧 `refs/` 原料库已按类别拆入
+> 各方向模块。收编版（知识模块，可本地修订）与快照原件（`<方向>/赛事专题/题目知识/
+> ctf-<x>/`，上游 ctf-skills 原样、不翻译）分层存放；两者字节相同的副本已去重
+> （正本保留在收编版模块）。
 >
 > 本目录文件：
 > - `route_index.yaml` — 全局路由索引（条目 kb 字段带域前缀，按会话启用域过滤）
-> - `licenses/` — CTF-SKILLS-LICENSE（五域快照共用一份）
+> - `licenses/` — 快照上游 LICENSE 收编
 > - `<域>/route.json` — 域内任务导航（值带域前缀，留域内）
+> - `安全红线/` — 轨红线 + 平台规则（owners）+ 评级与价值口径 + 规则模板
+> - `skills/<name>/` — 技能（扁平，不进 registry 资料树面）
 >
-> 收编改编区（各域非 refs 快照）允许就地修订（本地基线 K3）；refs/ 快照原件
-> 不翻译不就地改，更新走 `scripts/import_kb.py` 重新导入。
+> 收编改编区（各域非快照模块）允许就地修订（本地基线 K3）；`赛事专题/题目知识/`
+> 快照原件不翻译、不新增内容（其内部链接已按去重后正本改写的除外），更新走
+> `scripts/import_kb.py --force` 重新导入。
+
+## 使用口径
 
 ## webapp 手册 frontmatter 约定（K7 2026-09-29）
 
-`web/webapp/<漏洞类>/手册.md` 统一带 frontmatter 元数据，供 kbindex 提示行
+`web/漏洞分类/<漏洞类>/手册.md` 统一带 frontmatter 元数据，供 kbindex 提示行
 （标题/摘要）与检索质量使用：
 
 - `title:` 中文测试手册名（**禁止英文 slug 当标题**——中文 2-gram 匹配不到；

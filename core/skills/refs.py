@@ -2,8 +2,8 @@
 
 doctor 历史上认两种引用形态，本模块把它们统一成一个共享扫描器：
 
-1. 显式调用：``kb_open(module="web/webapp/idor/手册.md")``；
-2. 引号/反引号里的完整路径：`` `web/webapp/idor/手册.md` ``（仅当第一段是
+1. 显式调用：``kb_open(module="web/漏洞分类/idor/手册.md")``；
+2. 引号/反引号里的完整路径：`` `web/漏洞分类/idor/手册.md` ``（仅当第一段是
    域名或已导入快照名才认，普通路径不误报）。
 
 扫描范围：全部技能 SKILL.md + packs/kb/<域>/ 源内的 *.md（排除 .history）。

@@ -1,5 +1,10 @@
 {
   "密码|crypto|rsa|aes|编码|hash": [
-    "crypto/crypto/"
+    "crypto/非对称加密/",
+    "crypto/对称加密/",
+    "crypto/古典密码/",
+    "crypto/格与后量子/",
+    "crypto/随机数/",
+    "crypto/高阶专题/"
   ]
 }

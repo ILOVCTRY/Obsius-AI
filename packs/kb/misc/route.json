@@ -1,11 +1,16 @@
 {
   "misc|杂项|脑洞": [
-    "misc/misc/"
+    "misc/编码解码/",
+    "misc/沙箱逃逸/",
+    "misc/协议异常/",
+    "misc/游戏与虚拟机/",
+    "misc/系统杂项/",
+    "misc/射频信号/"
   ],
   "writeup|复盘|wp": [
-    "misc/writeup/"
+    "misc/赛事专题/WP撰写/"
   ],
   "ai|大模型|llm|提示词": [
-    "misc/ai-ml/"
+    "misc/AI安全/"
   ]
 }

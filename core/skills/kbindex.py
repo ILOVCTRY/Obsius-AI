@@ -432,7 +432,7 @@ def _expand_prefix(packs_root: str | Path, prefix: str,
     """route.json 值展开：文件型→(该全局路径, 0)；目录型→(前 cap 篇 md 全局
     路径, 目录总篇数)。目录先列顶层 *.md、空再递归；排除 .history。
 
-    route.json 目录前缀（如 web/webapp/authn/）不是合法 kb_open 参数（后缀
+    route.json 目录前缀（如 web/漏洞分类/authn/）不是合法 kb_open 参数（后缀
     白名单拒收），注入前必须展开成具体文件。"""
     raw = prefix.strip().rstrip("/")
     physical = Path(packs_root) / "kb" / raw

@@ -909,8 +909,8 @@ def test_kb_route_hints_short_ascii_false_positive(tmp_path):
     kbdir = root / "kb" / "cloud"
     kbdir.mkdir(parents=True)
     (kbdir / "route.json").write_text(json.dumps({
-        "ak|sk|accesskey|凭证泄露": ["cloud/knowledge/ak-leak.md"],
-        "rds|快照|snapshot": ["cloud/knowledge/rds-snapshot.md"],
+        "ak|sk|accesskey|凭证泄露": ["cloud/云安全知识/ak-leak.md"],
+        "rds|快照|snapshot": ["cloud/云安全知识/rds-snapshot.md"],
     }, ensure_ascii=False), encoding="utf-8")
     # make/stack 不再子串命中 ak|sk；句中独立词 snapshot 命中 rds 键属正确
     hits = kb_route_hints(

@@ -13,6 +13,8 @@ packs/
 │  │                      #   track.yaml / task_types.yaml / profiles/<id>.yaml（场景档）/
 │  │                      #   phases/<phase>.yaml（阶段剧本）/ dimensions.yaml（测试维度）
 │  ├─ <方向>/             # kb 知识方向 web/binary/crypto/forensics/misc/cloud（资料树，不进 registry）
+│  │                      #   2026-10-14 树状化：二级=中文类目模块（如 web/漏洞分类），
+│  │                      #   三级=模块内类目；赛事专题/题目知识/ctf-<x>/ 为上游快照原件
 │  ├─ 安全红线/
 │  │  ├─ 轨红线/<track>.md        # 全轨全量注入（永久强制）
 │  │  ├─ 平台规则/<tag>.md        # owners（资产 meta.owner 命中才注入；渗透独有）
@@ -34,7 +36,7 @@ packs/
 - **场景档（M4a）**：`kb/<track>/profiles/<id>.yaml` 平铺五件套（experts/rule_profiles_owners+rating/playbook/artifacts/knowledge）+ board_view；建项物化即弃（D6），此后只作预设不随项目联动。内置档：ctf full-squad/solo-generalist、pentest standard-engagement/recon-first、redteam full-chain/initial-access、research rev-workbench/code-audit。
 - **阶段剧本（pentest M1/M2）**：`kb/<track>/phases/<phase>.yaml`（stem=阶段 id，name 中文）；项目 `config.phases` 同名整体覆写；引擎 `core/phases.py`。
 - **测试维度（test-dimensions M1）**：`kb/<track>/dimensions.yaml`（id/name/applies_to/intent/evidence_hint）；项目 `config.dimensions` 同名覆写；加载与判定 `core/dimensions.py`。
-- **kb 方向即资料树**：`load_kb_sources` 按方向合成 `packs/kb/<方向>`（恒递归，目录不存在=空源）；`kb_open` module 用全局形态 `<方向>/<快照>/<路径>`；域按源隔离。
+- **kb 方向即资料树**：`load_kb_sources` 按方向合成 `packs/kb/<方向>`（恒递归，目录不存在=空源）；`kb_open` module 用全局形态 `<方向>/<模块>/<路径>`（2026-10-14 树状化重构：二级为中文类目模块，旧 `<方向>/<快照>/<路径>` 的「快照」层即模块层）；域按源隔离。
 - **`kb/route_index.yaml`**：全局单表；条目 kb 路径必须真实存在（doctor `route-index-kb-missing` 抓悬空）；注入按会话评分 Top-5，其余走 `route_lookup`；K7 回填 `route_points`，doctor 报 `route-index-zero-hit`。维护=人工直改或 index 提案（只能 edit 增补）。
 - **专家池现状**：17 专家（含 `_generalist` protected 兜底、`chat-orchestrator` 工作台主控）。专家 `skills` 硬选白名单、`knowledge` 方向白名单；`_generalist`/`report-writer` 等 skills=null=全量。
 - **技能/红线修改**：AI 只能落 `.proposals/`，人类审阅后应用（永不直写）；API 写端点走 `pack_write_lock` 临界区。

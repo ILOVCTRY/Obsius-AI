@@ -1,17 +1,24 @@
 #!/usr/bin/env python
-"""kb 树状化分类重构（2026-10-14）。
+"""kb 树状化分类重构（2026-10-14，已执行完毕；本文件留档+可幂等重跑）。
 
 把 packs/kb/ 从「方向 → 英文平铺模块」重构为「方向 → 中文类目 → 子目录」，
 refs/ 原料库拆入各类目。幂等：默认 dry-run 只打印计划；--apply 才落盘。
+重跑安全：搬迁源不存在即跳过；引用改写幂等（旧串替换为新串）。
 
-现状问题（盘点结论）：
+⚠ 历史教训（本脚本曾在 2026-10-14 首跑时自污染）：
+rewrite_refs 曾把本脚本自己的映射表当引用改写（旧路径串出现在表里），
+导致 DIR_MOVES 出现 ("binary/dotnet", "binary/dotnet逆向") → ("binary/dotnet逆向",
+"binary/dotnet逆向逆向") 的自指项，后续重跑真把目录 git mv 成了 dotnet逆向逆向逆向。
+防线：① 本文件已在 REWRITE_SKIP_FILES；② 目录映射只给带斜杠键（新名以旧名为
+前缀时裸键会反复套前缀）；③ 搬迁后建议 git status 人工核对目录名。
+
+现状问题（盘点结论，已按此重构）：
 - crypto/crypto、forensics/forensics、misc/misc 自套娃（知识深一层）；
 - misc/refs/ctf-misc 与 misc/misc 近重复（6 同 4 异 + games-and-vms-2/3/4）；
 - web 散落：recon-asset-enum/（1 篇）、post-exp/（README 空壳）、notes/（4 散篇）；
 - binary/playbooks/ 仅一篇图片隐写.md（隐写归 forensics）；
 - misc/refs/ctf-writeup（仅 SKILL.md）与 writeup/（index.md）同源两份；
-- refs/ 原料库（WP 合集/payload/工具手册）与知识树混层；
-- route.json/route_index.yaml/kbindex/refs/tool_registry/writing/doctor 全是旧路径。
+- refs/ 原料库（WP 合集/payload/工具手册）与知识树混层。
 
 目标树（方向 → 模块 → 子目录，模块层中文化，level-3 类目名不动）：
   web/       漏洞分类/ 信息收集/ 实战打法/ 后渗透/ 小程序安全/ 实践笔记/
@@ -44,6 +51,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -229,26 +237,74 @@ def git_mv(old: str, new: str) -> str:
 
 
 def git_rm(rel: str) -> bool:
-    r = subprocess.run(["git", "rm", "-q", rel], cwd=KB, capture_output=True, text=True)
-    if r.returncode == 0:
-        return True
+    """git rm -f（重命名文件有暂存变更，普通 git rm 会拒）；返回是否真删掉。"""
     p = KB / rel
-    if p.is_file():
-        p.unlink()
+    if not p.is_file():
+        return False
+    r = subprocess.run(["git", "rm", "-f", "-q", rel], cwd=KB, capture_output=True, text=True)
+    if r.returncode == 0 and not p.exists():
         return True
     return False
 
 
+def write_retry(path: Path, text: str, tries: int = 10) -> None:
+    """Windows 上 git mv 刚落盘后立刻写可能撞瞬时竞态，退避重试。"""
+    for i in range(tries):
+        try:
+            path.write_text(text, encoding="utf-8")
+            return
+        except OSError:
+            if i == tries - 1:
+                raise
+            time.sleep(0.3)
+
+
+def rmdir_retry(p: Path, tries: int = 10) -> None:
+    for i in range(tries):
+        try:
+            p.rmdir()
+            return
+        except OSError:
+            if i == tries - 1:
+                raise
+            time.sleep(0.3)
+
+
 def build_path_map(applied: list[tuple[str, str]]) -> dict[str, str]:
-    """已执行搬迁 → 旧路径串 → 新路径串（目录给带斜杠与裸名两种键，长的优先）。"""
+    """已执行搬迁 → 旧路径串 → 新路径串。
+
+    目录只给带斜杠的键：新名以旧名为前缀时（dotnet→dotnet逆向），裸键会在
+    重跑/续跑时被反复套前缀（dotnet逆向逆向逆向），故一律不加裸键。"""
     m: dict[str, str] = {}
     for old, new in applied:
         if (KB / old).is_dir() or old in {o for o, _ in DIR_MOVES} or old in {
                 o for o, _ in EXTRACT_DIR_MOVES}:
             m[old + "/"] = new + "/"
-            m[old] = new
         else:
             m[old] = new
+    return m
+
+
+def full_path_map() -> dict[str, str]:
+    """全量旧→新映射（幂等：重跑/中断续跑都用它，不依赖本次是否真的搬过）。
+
+    含：plan() 全部项 + index.md 特判的实际落点 + 溶解目录别名
+    （整目录被打散/上提，目录值引用需要一个统一去向）。"""
+    m = build_path_map([(o, n) for o, n, _k in plan()])
+    for idx, skill in INDEX_SPECIALS:
+        src = KB / idx
+        if src.is_file():
+            continue  # 首次运行未搬，运行时特判决定落点
+        for cand in (KB / skill, KB / skill.replace("SKILL.md", "SKILL-收编版.md")):
+            if cand.is_file():
+                m[idx] = cand.relative_to(KB).as_posix()
+                break
+    m.update({
+        "misc/writeup/": "misc/赛事专题/WP撰写/",
+        "misc/refs/ctf-writeup/": "misc/赛事专题/WP撰写/",
+        "web/post-exp/": "web/后渗透/",
+        "web/refs/web-vulns/": "web/漏洞分类/",
+    })
     return m
 
 
@@ -294,7 +350,7 @@ def rewrite_rel_links(path_map: dict[str, str]) -> int:
             continue
         text = f.read_text(encoding="utf-8")
         if link in text:
-            f.write_text(text.replace(link, f"]({want})", 1), encoding="utf-8")
+            write_retry(f, text.replace(link, f"]({want})", 1))
             n += 1
     return n
 
@@ -304,15 +360,18 @@ def rewrite_rel_links(path_map: dict[str, str]) -> int:
 REWRITE_EXTS = {".md", ".py", ".yaml", ".yml", ".json", ".ts", ".tsx", ".txt", ".sh"}
 REWRITE_SKIP_DIRS = {".git", "node_modules", "dist", ".venv", "__pycache__",
                      ".history", ".workbuddy-ai", ".pytest_cache", "target"}
-REWRITE_SKIP_FILES = {"migrate_kb_tree.py", "package-lock.json"}  # 历史迁移脚本/锁文件
+REWRITE_SKIP_FILES = {"migrate_kb_tree.py", "refactor_kb_tree.py", "package-lock.json"}
 
 
 def rewrite_refs(path_map: dict[str, str]) -> tuple[int, list[str]]:
     """全仓文本里旧 kb 路径串 → 新串（最长键优先）。
 
+    边界防护：只改写「引用位」上的路径——路径前驱不能是 \\w / . / -（如
+    skills 内部副本 ``references/web/refs/poc/README.md`` 的 web/ 前是 /，不误伤）。
     范围：core/ scripts/ webui/src/ packs/kb（.history 除外）/ tests/ docs/ 及根级文本。
     返回 (改动文件数, 仍含旧路径串的文件清单——应只剩历史叙事)。"""
     keys = sorted(path_map, key=len, reverse=True)
+    pat = re.compile(r"(?<![\w/.\-])(" + "|".join(re.escape(k) for k in keys) + ")")
     roots = [ROOT / d for d in ("core", "scripts", "webui", "tests", "packs", "docs")
              if (ROOT / d).is_dir()]
     roots += [ROOT / f for f in ROOT.iterdir()
@@ -331,14 +390,11 @@ def rewrite_refs(path_map: dict[str, str]) -> tuple[int, list[str]]:
                 text = f.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
                 continue
-            new = text
-            for k in keys:
-                if k in new:
-                    new = new.replace(k, path_map[k])
+            new = pat.sub(lambda mo: path_map[mo.group(1)], text)
             if new != text:
-                f.write_text(new, encoding="utf-8")
+                write_retry(f, new)
                 n += 1
-    # 残留扫描（仅 kb 正文与代码，.history 豁免）
+    # 残留扫描（仅 kb 正文与代码，.history 豁免；同样按引用位判，防误报）
     for root in [KB, ROOT / "core", ROOT / "scripts"]:
         for f in sorted(root.rglob("*")):
             if not f.is_file() or f.suffix not in REWRITE_EXTS:
@@ -349,7 +405,7 @@ def rewrite_refs(path_map: dict[str, str]) -> tuple[int, list[str]]:
                 text = f.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
                 continue
-            if any(k in text for k in keys):
+            if pat.search(text):
                 stale.append(f.relative_to(ROOT).as_posix())
     return n, stale
 
@@ -379,6 +435,8 @@ def rewrite_route_json(path_map: dict[str, str]) -> list[str]:
                             if v.startswith(ok)), None)
                 if hit:
                     new_values.append(path_map[hit] + v[len(hit):])
+                elif (KB / v.rstrip("/")).exists():
+                    new_values.append(v)  # 已是新路径（重跑/续跑）
                 else:
                     new_values.append(v)
                     warns.append(f"{cap}/route.json [{key}]: 未映射 {v}")
@@ -411,7 +469,8 @@ def rewrite_route_index(path_map: dict[str, str]) -> tuple[list[str], list[str]]
                 new = path_map[hit] + old[len(hit):]
             else:
                 new = old
-                warns.append(f"route_index.yaml: 未映射 {old}")
+                if not (KB / old).exists():
+                    warns.append(f"route_index.yaml: 未映射 {old}")
         out.append(m.group(1) + new)
     rp.write_text("\n".join(out) + "\n", encoding="utf-8")
     dangling = [m.group(2) for line in out
@@ -476,7 +535,7 @@ def main() -> int:
             print(f"  [特判] {idx} 内容有别于上游原件 → {dst}")
 
     # 题目知识原件与收编版去重（字节相同删原件副本，内容零损失）
-    n_dedup = 0
+    n_dedup = n_fail = 0
     for cap_dir in sorted(p for p in KB.iterdir() if p.is_dir()):
         root = cap_dir / "赛事专题" / "题目知识"
         if not root.is_dir():
@@ -484,15 +543,18 @@ def main() -> int:
         for f in sorted(root.rglob("*")):
             if not f.is_file() or f.name == "SKILL.md" or f.name.startswith("SKILL-"):
                 continue
-            rel = f.relative_to(cap_dir)
+            rel = f.relative_to(KB).as_posix()  # git_rm 用 cwd=KB，必须 kb 根相对
             # 在同方向知识模块里找同名文件（排除 赛事专题 自身）
             same = [c for c in cap_dir.rglob(f.name)
                     if c.is_file() and "赛事专题" not in c.parts and ".history" not in c.parts]
             if same and any(filecmp.cmp(f, c, shallow=False) for c in same):
-                git_rm(rel.as_posix())
-                n_dedup += 1
-    if n_dedup:
-        print(f"  [去重] 题目知识×收编版本字节相同 {n_dedup} 个原件副本已删")
+                if git_rm(rel):
+                    n_dedup += 1
+                else:
+                    n_fail += 1
+                    print(f"  [去重失败] {rel}")
+    if n_dedup or n_fail:
+        print(f"  [去重] 题目知识×收编版本字节相同：删除 {n_dedup} 个，失败 {n_fail} 个")
 
     # 空壳目录清理
     for d in EMPTY_DIRS:
@@ -500,10 +562,10 @@ def main() -> int:
         if not p.is_dir():
             continue
         try:
-            p.rmdir()
+            rmdir_retry(p)
             print(f"  [清理] 空目录 {d}")
-        except OSError:
-            print(f"  [警告] {d} 非空，保留待人工检查")
+        except OSError as e:
+            print(f"  [警告] {d} 清理失败（errno={e.errno} {e}），保留待人工检查")
 
     # web/后渗透/README.md 指路修正（intranet-postexp 已同模块）
     pe = KB / "web/后渗透/README.md"
@@ -511,10 +573,10 @@ def main() -> int:
         t = pe.read_text(encoding="utf-8")
         t2 = t.replace("`playbooks/intranet-postexp/`", "`intranet-postexp/`")
         if t2 != t:
-            pe.write_text(t2, encoding="utf-8")
+            write_retry(pe, t2)
             print("  [修正] web/后渗透/README.md 指路更新")
 
-    path_map = build_path_map(applied)
+    path_map = full_path_map()
     n_rel = rewrite_rel_links(path_map)
     print(f"引用改写：相对链接 {n_rel} 处")
 

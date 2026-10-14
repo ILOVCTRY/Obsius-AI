@@ -341,8 +341,15 @@ def search_kb(packs_root: str | Path, cap: str, q: str, limit: int = 50,
     out.sort(key=lambda r: (-r["matches"], r["path"]))
     for row in out:
         rel = row.get("path", "")
-        row["kind"] = next((x[:-1] for x in ("playbooks", "patterns", "cases", "refs")
-                             if rel.startswith(x + "/")), "reference")
+        # 2026-10-14 树状化：模块层中文化，kind 按新模块名前缀判层
+        # （实战打法/后渗透=打法，赛事专题=案例，载荷/工具=参考；patterns/cases
+        # 为历史类目名保留兜底）
+        row["kind"] = next((k for p, k in (
+            ("实战打法/", "playbook"), ("后渗透/", "playbook"),
+            ("patterns/", "pattern"), ("cases/", "case"),
+            ("赛事专题/", "case"), ("refs/", "ref"),
+            ("载荷与字典/", "ref"), ("工具手册/", "ref"),
+        ) if rel.startswith(p)), "reference")
         row["layer"] = {"playbook": 4, "pattern": 3, "case": 2,
                          "ref": 1, "reference": 1}.get(row["kind"], 1)
     out.sort(key=lambda r: (-r.get("layer", 1), -r["matches"], r["path"]))

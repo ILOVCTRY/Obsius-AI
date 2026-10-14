@@ -1,8 +1,12 @@
 {
   "取证|forensics|流量|内存镜像": [
-    "forensics/forensics/"
+    "forensics/磁盘与内存/",
+    "forensics/网络取证/",
+    "forensics/隐写与信号/",
+    "forensics/系统取证/",
+    "forensics/其他取证/"
   ],
   "osint|情报|开源情报|溯源": [
-    "forensics/osint/"
+    "forensics/开源情报/"
   ]
 }

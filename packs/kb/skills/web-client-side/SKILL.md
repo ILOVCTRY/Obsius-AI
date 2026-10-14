@@ -27,7 +27,7 @@ mode: self-contained
 | CSP 绕过 | `references/web/webapp/csp-bypass/手册.md` | — |
 | JS 逆向（加密参数/sign） | `references/web/webapp/js-reverse/手册.md` | — |
 | CSV 公式注入 | `references/web/webapp/csv-formula-injection/手册.md` | — |
-| CORS（仅资料，SRC 不挖） | `references/web/webapp/cors/手册.md`（勿开） | `rules/cors-vuln-report-priority.md` |
+| CORS（仅资料，SRC 不挖） | `references/web/webapp/cors/手册.md`（勿开） | `web/实战打法/rules/cors-vuln-report-priority.md` |
 
 ## 纪律
 
