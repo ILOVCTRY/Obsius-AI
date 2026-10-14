@@ -50,6 +50,7 @@ from core.coverage import attach_effective_status
 from core.team import TeamStore
 from core.blackboard.graph import board_graph, session_graph
 from core.blackboard.attackpath import build_attack_path
+from core.blackboard.intentgraph import build_intent_graph
 from core.blackboard.intents import list_intents, reopen_intent
 from core.blackboard import traces
 from core.blackboard.store import Blackboard, BlackboardClosedError
@@ -749,6 +750,9 @@ class McpConfigIn(BaseModel):
 class ChatThreadIn(BaseModel):
     agent_id: str
     title: str | None = None
+    # 线程级模型覆写（v37，2026-10-13）：建线程时即可指定；空=跟随全局 executor
+    provider: str | None = None
+    model: str | None = None
 
 
 class ChatMessageIn(BaseModel):
@@ -765,6 +769,10 @@ MCP_CONFIG_PATH = Path("config/mcp.json")     # 与 llm.json 同级（cwd = 项�
 # MCP server 允许声明的领域；http server 只连本机 loopback（红线，见 decompiler._is_loopback_url）
 _MCP_TRANSPORTS_HTTP = ("streamable-http", "http", "http-stream")
 _MCP_DOMAIN_WHITELIST = {"pentest", "reverse", "binary"}
+
+# 诊断失败日志扫描上限（diagnostics-log，2026-10-14）：会话清单按失败归属计数
+# 时一次拉多少条失败事件（与 failog._SCAN_CAP 同口径，超出部分的计数截断）。
+_DIAG_FAIL_SCAN = 2000
 
 
 def _load_mcp_config() -> dict:
@@ -5450,6 +5458,12 @@ def create_app(
         proj = _project(pid)
         return list_intents(proj.bb, pid, status=status)
 
+    @app.get("/api/projects/{pid}/intent-graph")
+    def get_intent_graph(pid: str):
+        # 项目级意图推导图（2026-10-13，逆向轨）：样本→意图→收尾（发现|死路），
+        # 只读逻辑层（无执行层）；「意图」subnav 的链路视角数据源
+        return build_intent_graph(_project(pid).bb, pid)
+
     @app.post("/api/projects/{pid}/intents/{iid}/reopen")
     def post_reopen_intent(pid: str, iid: str, payload: dict | None = None):
         # 人类否决收尾：漏洞被证伪/有新证据 → 重开意图（AI 须重新收尾）
@@ -8539,6 +8553,86 @@ def create_app(
     def chat_mcp_status(pid: str):
         return {"servers": _chat_bridge(_project(pid)).status()}
 
+    # ---------- 诊断（diagnostics-log，2026-10-14）：会话消息审计 + 失败日志 ----------
+
+    @app.get("/api/projects/{pid}/diagnostics/sessions")
+    def diag_sessions(pid: str):
+        """统一会话清单（审计入口）：工作台对话线程 + 任务链执行会话。
+
+        每行带 msg_count（chat=chat_messages 条数；agent=events 条数）与
+        fail_count（tool.failed/mcp.failed 归属该会话的条数，失败徽标来源）。
+        消息正文不入本端点：chat 走 GET /api/chat/threads/{tid}，agent 走
+        GET /api/projects/{pid}/events?session_id=<sid>（前端分流）。
+        """
+        from core.chat import store as chat_store
+        from core.diagnostics.failog import query_failures
+        proj = _project(pid)
+        bb = proj.bb
+        # 失败归属：chat 行按 payload.thread_id 精确匹配（记录时必带）；
+        # 任务链按 events.session_id。扫描上限与 failog.query_failures 一致。
+        fails = query_failures(bb, pid, limit=_DIAG_FAIL_SCAN)
+        fail_by_chat: dict[str, int] = {}
+        fail_by_session: dict[str, int] = {}
+        for f in fails:
+            p = f.get("payload") or {}
+            tid = str(p.get("thread_id") or "")
+            sid = str(f.get("session_id") or "")
+            if tid:
+                fail_by_chat[tid] = fail_by_chat.get(tid, 0) + 1
+            elif sid:
+                fail_by_session[sid] = fail_by_session.get(sid, 0) + 1
+        chat_rows = []
+        for t in chat_store.list_threads(bb, pid):
+            tid = t["id"]
+            chat_rows.append({
+                "kind": "chat", "id": tid,
+                "name": t.get("title") or "(未命名)",
+                "agent_id": t.get("agent_id") or "",
+                "status": t.get("status") or "idle",
+                "msg_count": chat_store.count_messages(bb, tid),
+                "fail_count": fail_by_chat.get(tid, 0),
+                "updated_at": t.get("updated_at") or "",
+                "created_at": t.get("created_at") or "",
+                "parent_thread_id": t.get("parent_thread_id") or "",
+                "provider": t.get("provider") or "",
+                "model": t.get("model") or "",
+            })
+        agent_rows = []
+        for s in bb.list_sessions(pid):
+            sid = s.get("id") or ""
+            n = bb.conn.execute(
+                "SELECT COUNT(*) FROM events WHERE project_id=? AND session_id=?",
+                (pid, sid)).fetchone()[0]
+            agent_rows.append({
+                "kind": "agent", "id": sid,
+                "name": s.get("name") or s.get("agent_id") or sid,
+                "agent_id": s.get("agent_id") or "",
+                "status": s.get("status") or "",
+                "msg_count": int(n),
+                "fail_count": fail_by_session.get(sid, 0),
+                "updated_at": s.get("updated_at") or "",
+                "created_at": s.get("created_at") or "",
+                "parent_thread_id": "",
+                "provider": "", "model": "",
+            })
+        return {"chat": chat_rows, "agent": agent_rows}
+
+    @app.get("/api/projects/{pid}/diagnostics/failures")
+    def diag_failures(pid: str, kind: str | None = None,
+                      name: str | None = None, author: str | None = None,
+                      limit: int = 200):
+        """工具/MCP 失败日志（倒序，最新在前）。
+
+        kind=tool|mcp 过滤（缺省=两类全要）；name=工具名/全名 mcp__s__t 子串；
+        author=会话/线程作者或 thread_id 子串。行结构与 events 一致
+        （kind/session_id/author/payload/created_at）。
+        """
+        from core.diagnostics.failog import query_failures
+        kinds = (f"{kind}.failed",) if kind in ("tool", "mcp") else None
+        rows = query_failures(_project(pid).bb, pid, kinds=kinds, name=name,
+                              author=author, limit=limit)
+        return {"failures": rows}
+
     @app.get("/api/projects/{pid}/chat/threads")
     def chat_threads_list(pid: str, agent_id: str | None = None):
         from core.chat import store as chat_store
@@ -8546,14 +8640,61 @@ def create_app(
         _chat_running_reconcile(proj)  # 运行期自愈：轮次线程已死则就地归位 idle
         return chat_store.list_threads(proj.bb, pid, agent_id=agent_id)
 
+    def _thread_llm(provider: str, model: str):
+        """线程级模型覆写构建（v37）：返回 (llm, 失败原因)。
+
+        provider 空 → (None, "") 表示「跟随全局 executor」，调用方回退 ``_llms()``。
+        构建失败**不抛**：设置接口据此 422 不落盘，发送轮次则静默回退全局
+        （配置事后被删/停用不能把线程卡死——与项目 executor 覆写同口径）。
+        """
+        provider = (provider or "").strip()
+        if not provider:
+            return None, ""
+        try:
+            return app.state.llm_store.build(
+                provider, (model or "").strip() or None), ""
+        except Exception as e:  # noqa: BLE001
+            return None, str(e)
+
     @app.post("/api/projects/{pid}/chat/threads", status_code=201)
     def chat_thread_create(pid: str, body: ChatThreadIn):
         from core.chat import store as chat_store
         agents = {a["id"] for a in _chat_agents(pid)}
         if body.agent_id not in agents:
             raise HTTPException(422, f"未知智能体: {body.agent_id}")
+        if body.provider:
+            _, err = _thread_llm(body.provider, body.model or "")
+            if err:
+                raise HTTPException(422, f"模型不可用：{err}")
         return chat_store.create_thread(_project(pid).bb, pid, body.agent_id,
-                                        title=body.title or "")
+                                        title=body.title or "",
+                                        provider=body.provider or "",
+                                        model=body.model or "")
+
+    @app.put("/api/chat/threads/{tid}/llm")
+    def chat_thread_set_llm(tid: str, body: SwitchLlmIn):
+        """线程级模型覆写（v37）：该线程后续轮次按此模型跑（下一轮生效）。
+
+        坏值 422 不落盘（先实测构建，同项目 executor 覆写口径）。
+        """
+        from core.chat import store as chat_store
+        proj = _project(_pid_of_chat(tid))
+        if chat_store.get_thread(proj.bb, tid) is None:
+            raise HTTPException(404, f"线程不存在: {tid}")
+        _, err = _thread_llm(body.provider, body.model or "")
+        if err:
+            raise HTTPException(422, f"模型不可用：{err}")
+        return chat_store.update_thread(proj.bb, tid, provider=body.provider,
+                                        model=body.model or "")
+
+    @app.delete("/api/chat/threads/{tid}/llm")
+    def chat_thread_reset_llm(tid: str):
+        """重置线程模型覆写：回跟随全局 executor 默认。"""
+        from core.chat import store as chat_store
+        proj = _project(_pid_of_chat(tid))
+        if chat_store.get_thread(proj.bb, tid) is None:
+            raise HTTPException(404, f"线程不存在: {tid}")
+        return chat_store.update_thread(proj.bb, tid, provider="", model="")
 
     @app.get("/api/chat/threads/{tid}")
     def chat_thread_detail(tid: str, after_id: int = 0):
@@ -8618,7 +8759,18 @@ def create_app(
         att_refs = _attachment_refs(pid, body.attachment_ids)
         if not text and not att_refs:
             raise HTTPException(422, "消息不能为空")
-        exec_llm, _plan = _llms()
+        # 线程级模型覆写（v37，2026-10-13）：命中则按覆写构建 LLM；坏值静默回退
+        # 全局 executor（配置事后被删/停用不能把线程卡死）。无覆写才要求全局就绪
+        # ——否则「全局没配但线程指定了可用模型」会被误判 503。
+        ov_llm, ov_err = _thread_llm(thread.get("provider") or "",
+                                     thread.get("model") or "")
+        if ov_llm is not None:
+            exec_llm, _plan = ov_llm, None
+        else:
+            if ov_err:
+                log.warning("线程模型覆写构建失败，回退全局 executor: tid=%s %s",
+                            tid, ov_err)
+            exec_llm, _plan = _llms()
         agents = {a["id"] for a in _chat_agents(pid)}
         expert_names = sorted(agents) if thread["agent_id"] == ORCHESTRATOR_ID else []
         running.add(tid)

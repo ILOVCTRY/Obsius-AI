@@ -731,7 +731,8 @@ tool(
     group='黑板',
     flags=("plan_pre",),
     description=(
-        '查黑板：findings / assets / events / func（函数知识库）/blueprint（开发蓝图）/ site（单'
+        '查黑板：findings / assets / events / func（函数知识库）/blueprint（开发蓝图）/ feature_tree（功能'
+        '树）/ logic_block（业务逻辑块）/ site（单'
         '站全貌）。**按域名/站点查现状（资产+发现+意图）一律用 what=site 并传 asset**（一次返回根子树全貌）——**不要**用 what='
         'assets 当站点查询：assets 是资产清单面（列清单/按 type/status/tag 筛），其 asset 参数只做子树过滤、不带 find'
         'ings/intents。不要按 type 分片拉全量再本地过滤（host/url/domain 各拉一把、条数多还漏看）。findings 尽量带 t'
@@ -744,6 +745,10 @@ tool(
         ' 是原文件名；不知道 sha 时先列样本，不要猜。**分析包内文件：what=package**——列当前'
         '（或 package_id 指定）分析包的条目/依赖边/内容树根 tree_ref（AI 用 read_file <tree_ref>/<path> '
         '读同包文件，如 exe 依赖的 DLL）；样本资产行 meta.package_id 即来源包 id。'
+        '**功能树/业务逻辑（先查后写）**：what=feature_tree 列功能树（binary_sha256 可筛，tree_id 看'
+        '单棵含节点清单）——增删改节点前先查现有节点，同名/同职责节点用 bb_feature_node update 补 desc'
+        '/func_addresses，不要重复 add；what=logic_block 列业务块（binary_sha256 可筛，block_id 看单'
+        '个含挂接函数）——建块前先查，块名同项目同样本唯一，重名会被拒收（改用 bb_logic_block_update 增补）。'
     ),
     input_schema={
         'type': 'object',
@@ -758,6 +763,8 @@ tool(
                     'blueprint',
                     'site',
                     'package',
+                    'feature_tree',
+                    'logic_block',
                 ],
             },
             'asset': {
@@ -774,6 +781,14 @@ tool(
             'package_id': {
                 'type': 'string',
                 'description': 'package 查询：指定分析包 id（缺省=当前分析包）',
+            },
+            'tree_id': {
+                'type': 'string',
+                'description': 'feature_tree 查询：单棵树（缺省列全部；可按 binary_sha256 筛）',
+            },
+            'block_id': {
+                'type': 'string',
+                'description': 'logic_block 查询：单个业务块（缺省列全部；可按 binary_sha256 筛）',
             },
             'target_asset_id': {
                 'type': 'string',
@@ -861,6 +876,92 @@ tool(
         ],
     },
 )
+
+# ---------- bb_query what 面按轨裁剪（track-query-split，2026-10-13） ----------
+# 渗透与逆向是两个工种：互相用不到的 what 面就不该出现在下发的 schema 里——schema
+# 即上下文预算，也是模型注意力分配（给渗透会话塞 feature_tree，只会稀释它真正要
+# 用的 site/findings）。家族划分按 taxonomy.TRACKS 四轨的业务形态：
+#   research/ctf   = 逆向家族（样本/函数/蓝图/分析包/功能树/业务逻辑块）
+#   pentest/redteam= 渗透家族（单站全貌 site）
+# 轨未知/空串（测试、未接线调用方）= 全量回退，行为与裁剪前一致。canonical 注册项
+# 保持全量（向后兼容 + bb_query_what_for 的错误提示同源），裁剪只发生在
+# `bb_query_schema_for(track)`——由 AgentSession 下发 LLM 前套用（loop.py）。
+_BB_QUERY_WHAT_REVERSE = ("findings", "assets", "events", "func",
+                          "blueprint", "package", "feature_tree", "logic_block")
+_BB_QUERY_WHAT_PENTEST = ("findings", "assets", "events", "site")
+_BB_QUERY_WHAT_FULL = ("findings", "assets", "events", "func", "blueprint",
+                       "site", "package", "feature_tree", "logic_block")
+_BB_QUERY_TRACK_WHAT = {
+    "research": _BB_QUERY_WHAT_REVERSE,
+    "ctf": _BB_QUERY_WHAT_REVERSE,
+    "pentest": _BB_QUERY_WHAT_PENTEST,
+    "redteam": _BB_QUERY_WHAT_PENTEST,
+}
+# 逆向家族专属参数：渗透面整组删掉（模型看不见就不会传，也免得知其存在硬凑）
+_BB_QUERY_REVERSE_ONLY_PROPS = ("blueprint_id", "package_id", "binary_sha256",
+                                "address", "risk_tag", "tree_id", "block_id")
+
+_BB_QUERY_DESC_REVERSE = (
+    '查黑板（逆向 family：research/ctf）：findings / assets / events / func（函数知识库）/ '
+    'blueprint（开发蓝图）/ package（分析包全貌）/ feature_tree（功能树）/ logic_block（业务逻辑块）。'
+    'findings 尽量带 target_asset_id 精确过滤；events 尽量带 kinds/session_id；limit 传小值会截断漏看'
+    '（漏看了仍要重查，得不偿失）。events 缺省=本项目**全部 kind**（不是只有 chat.* 会话事件），'
+    '要窄看再传 kinds 白名单；**负结论（未发现/死路）不要硬塞进 events**：正确做法是 declare_intent '
+    '声明假设，再 close_intent outcome=dead_end（附 dead_reason+evidence_refs）——情报类非漏洞结论'
+    '则用 bb_add_finding category=intel。**逆向场景硬规则：反编译任何函数前必须先查 func 防重复劳动。**'
+    '**列已上传样本：what=assets type=binary**——返回行的 value 即样本 sha256（func 查询的 '
+    'binary_sha256 / bb_upsert_func 都用它），meta.filename 是原文件名；不知道 sha 时先列样本，'
+    '不要猜。**分析包内文件：what=package**——列当前（或 package_id 指定）分析包的条目/依赖边/'
+    '内容树根 tree_ref（AI 用 read_file <tree_ref>/<path> 读同包文件，如 exe 依赖的 DLL）；'
+    '样本资产行 meta.package_id 即来源包 id。**功能树/业务逻辑（先查后写）**：what=feature_tree '
+    '列功能树（binary_sha256 可筛，tree_id 看单棵含节点清单）——增删改节点前先查现有节点，'
+    '同名/同职责节点用 bb_feature_node update 补 desc/func_addresses，不要重复 add；'
+    'what=logic_block 列业务块（binary_sha256 可筛，block_id 看单个含挂接函数）——建块前先查，'
+    '块名同项目同样本唯一，重名会被拒收（改用 bb_logic_block_update 增补）。'
+)
+
+_BB_QUERY_DESC_PENTEST = (
+    '查黑板（渗透 family：pentest/redteam）：findings / assets / events / site（单站全貌）。'
+    '**按域名/站点查现状（资产+发现+意图）一律用 what=site 并传 asset**（一次返回根子树全貌）'
+    '——**不要**用 what=assets 当站点查询：assets 是资产清单面（列清单/按 type/status/tag 筛），'
+    '其 asset 参数只做子树过滤、不带 findings/intents。不要按 type 分片拉全量再本地过滤'
+    '（host/url/domain 各拉一把、条数多还漏看）。findings 尽量带 target_asset_id 精确过滤；'
+    'events 尽量带 kinds/session_id；limit 传小值会截断漏看（漏看了仍要重查，得不偿失）。'
+    'events 缺省=本项目**全部 kind**（不是只有 chat.* 会话事件），要窄看再传 kinds 白名单；'
+    '**负结论（未发现/死路）不要硬塞进 events**：正确做法是 declare_intent 声明假设，'
+    '再 close_intent outcome=dead_end（附 dead_reason+evidence_refs）——情报类非漏洞结论'
+    '则用 bb_add_finding category=intel（severity>=low）。**列已上传样本：what=assets '
+    'type=binary**——返回行的 value 即样本 sha256。'
+)
+
+
+def bb_query_what_for(track: str | None) -> list[str]:
+    """本轨可用的 bb_query what 面（未知/空轨=全量）。"""
+    return list(_BB_QUERY_TRACK_WHAT.get((track or "").strip(), _BB_QUERY_WHAT_FULL))
+
+
+def bb_query_schema_for(track: str | None) -> dict:
+    """bb_query 的 Anthropic schema 按轨变体：what.enum、description、参数面三者同步裁到
+    本家族（渗透拿不到 tree_id，逆向的 description 不提 site）。**返回全新 dict**
+    （可变子对象不与注册表共享，调用方零顾忌）；未知/空轨=canonical 全量 schema。"""
+    spec = REGISTRY["bb_query"].as_schema()
+    family = _BB_QUERY_TRACK_WHAT.get((track or "").strip())
+    if family is None:
+        return spec
+    props = {k: dict(v)
+             for k, v in spec["input_schema"]["properties"].items()
+             if k != "what"}
+    if family is _BB_QUERY_WHAT_PENTEST:
+        for k in _BB_QUERY_REVERSE_ONLY_PROPS:
+            props.pop(k, None)
+        desc = _BB_QUERY_DESC_PENTEST
+    else:
+        desc = _BB_QUERY_DESC_REVERSE
+    props["what"] = {"type": "string", "enum": list(family)}
+    return {"name": "bb_query", "description": desc,
+            "input_schema": {"type": "object", "properties": props,
+                             "required": ["what"]}}
+
 
 tool(
     'kb_open',

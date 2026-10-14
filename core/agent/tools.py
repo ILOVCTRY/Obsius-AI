@@ -21,11 +21,12 @@ from core.agent.session_state import SessionState, state_proxy
 # flags 一处定义在 tool_registry.py，此处只 import 派生常量（导入名逐字保留，
 # 外部消费方零改动）+ 本文件补 `_tool_<name>` 实现。
 from core.agent.tool_registry import (AGENT_TOOLS, TOOL_GROUPS, _ADDR_DESC,
-                                      _COLLAB_TOOLS, _CONTROL_TOOLS, _FILE_TOOLS,
+                                      _BB_QUERY_WHAT_FULL, _COLLAB_TOOLS,
+                                      _CONTROL_TOOLS, _FILE_TOOLS,
                                       _INTENT_FLOW_TOOLS, _INTENT_PRE_ALLOWED,
                                       _KNOWLEDGE_EXTRA, _PLAN_PRE_ALLOWED,
                                       _PLAN_TOOLS, _SPILL_SKIP, REGISTRY,
-                                      agent_tool_group)
+                                      agent_tool_group, bb_query_what_for)
 from core.blackboard import Blackboard
 from core.blackboard.assets import register_asset
 from core.blackboard.attackpath import _intent_in_site, _subtree_ids
@@ -35,6 +36,7 @@ from core.blackboard.intents import (declare_intent as _declare_intent,
                                      list_intents as _list_intents,
                                      reopen_intent as _reopen_intent)
 from core.blackboard.store import UNSET, has_repro_evidence
+from core.diagnostics.failog import record_tool_failure
 from core.dimensions import load_track_dimensions
 from core.runtime.gateway import ExecutionGateway, GatewayDenied
 from core.runtime.policy import allowed_runtimes
@@ -351,11 +353,12 @@ class ToolDispatcher:
         result = self._dispatch_once(name, args)
         result = self._maybe_spill(name, result)  # H1：超限结果落盘+预览，防淹没上下文
         gated = name == "run_cmd" and result.startswith(REJECT_PREFIXES)
+        ok = not result.startswith(_TOOL_FAIL_PREFIXES)
         if name != "run_cmd" or gated:
             try:
                 payload = {"name": name, "args": _truncate_args(args),
                            "step": self._step,  # 轮次号（观测对齐 command 事件；非计划步 id）
-                           "ok": not result.startswith(_TOOL_FAIL_PREFIXES),
+                           "ok": ok,
                            "duration_s": round(time.perf_counter() - t0, 2),
                            "result_head": result[:400]}
                 if gated:
@@ -365,6 +368,14 @@ class ToolDispatcher:
                     session_id=self.session_id, author=self.author)
             except Exception:  # noqa: BLE001 —— 审计事件绝不影响工具返回
                 pass
+        if not ok:
+            # 失败日志（diagnostics-log，2026-10-14）：tool.call 带 ok=False 混在
+            # 全量调用里难筛，另落独立 tool.failed 供诊断页查询。chat 线程的
+            # dispatcher 同样走本入口（author=chat-<tid12>，source 自动分流）。
+            # mcp__ 失败在 chat runtime._dispatch 单独记 mcp.failed（任务链无 MCP）。
+            record_tool_failure(
+                self.bb, self.project_id, name=name, args=args, error=result,
+                session_id=self.session_id, author=self.author, step=self._step)
         return result
 
     def _maybe_spill(self, name: str, result: str) -> str:
@@ -1179,10 +1190,23 @@ class ToolDispatcher:
                        verbose: bool = False,
                        offset: int | None = None,
                        sha256: str | None = None,
-                       package_id: str | None = None) -> str:
+                       package_id: str | None = None,
+                       tree_id: str | None = None,
+                       block_id: str | None = None) -> str:
         # 参数名容错（2026-09-30）：模型高频把 binary_sha256 简写成 sha256——
         # 别名归一而非裸 TypeError（截图案例：what=files+sha256 连错两处）
         binary_sha256 = binary_sha256 or sha256
+        # what 面按轨裁剪（track-query-split，2026-10-13）：异家族面在 schema 里
+        # 已不可见（AgentSession/chat runtime 下发前裁）；模型仍硬传（旧 prompt
+        # 缓存/幻觉）时显式拒绝——宁可报错也不静默执行或静默空结果。
+        _allowed_what = bb_query_what_for(self.track)
+        if what not in _allowed_what:
+            if what in _BB_QUERY_WHAT_FULL:
+                return (f"[错误] what={what} 本轨不可用（{self.track or '未配轨'} 轨允许: "
+                        f"{', '.join(_allowed_what)}）——按本轨面查询；列已上传样本用 "
+                        f"what=assets type=binary，返回行的 value 即样本 sha256")
+            return (f"[错误] 未知查询: {what}（允许: {', '.join(_allowed_what)}；"
+                    f"列已上传样本用 what=assets type=binary，返回行的 value 即样本 sha256）")
         if address is not None:
             try:
                 address = _coerce_addr(address)
@@ -1377,9 +1401,51 @@ class ToolDispatcher:
                  for b in rows], ensure_ascii=False)
         if what == "package":
             return self._bb_query_package(package_id)
-        return (f"[错误] 未知查询: {what}"
-                f"（允许: findings, assets, events, func, blueprint, site, package；"
-                f"列已上传样本用 what=assets type=binary，返回行的 value 即样本 sha256）")
+        if what == "feature_tree":
+            # 功能树（v36 分析阶段产物）：列树/单棵树。add/update 节点前的查重面
+            # ——树按 binary_sha256 筛（空串=项目级树），节点清单同名/同职责比对。
+            if tree_id:
+                row = self.bb.get_feature_tree(self.project_id, tree_id)
+                if row is None:
+                    return f"[错误] 功能树不存在: {tree_id}"
+                return json.dumps(row, ensure_ascii=False)
+            rows = self.bb.list_feature_trees(
+                self.project_id, binary_sha256=binary_sha256)
+            if limit is not None:
+                rows = rows[:limit]
+            return json.dumps(
+                [{"id": t["id"], "name": t.get("name", ""),
+                  "binary_sha256": t.get("binary_sha256", ""),
+                  "nodes": [{"id": n["id"], "name": n["name"],
+                             "parent_id": n.get("parent_id"),
+                             "status": n.get("status", "pending"),
+                             "desc": (n.get("desc") or "")[:120],
+                             "func_addresses": n.get("func_addresses", [])}
+                            for n in t.get("nodes", [])]}
+                 for t in rows], ensure_ascii=False)
+        if what == "logic_block":
+            # 业务逻辑块（v26）：列块/单块。建块前的查重面——块名同项目同样本唯一，
+            # 重名 create 会被拒收；查到同名块应走 bb_logic_block_update 增补。
+            if block_id:
+                row = self.bb.get_logic_block(self.project_id, block_id)
+                if row is None:
+                    return f"[错误] 业务逻辑块不存在: {block_id}"
+                return json.dumps(row, ensure_ascii=False)
+            rows = self.bb.list_logic_blocks(
+                self.project_id, binary_sha256=binary_sha256)
+            if limit is not None:
+                rows = rows[:limit]
+            return json.dumps(
+                [{"id": b["id"], "name": b["name"],
+                  "binary_sha256": b.get("binary_sha256", ""),
+                  "feature_node_id": b.get("feature_node_id", ""),
+                  "func_count": b.get("func_count", 0),
+                  "desc": (b.get("description") or "")[:120]}
+                 for b in rows], ensure_ascii=False)
+        # 顶部入口闸已保证 what ∈ 本轨允许面；走到这里=新增了面忘配轨表——
+        # 显式报错兜底，绝不静默返回 None。
+        return (f"[错误] 查询面未实现: {what}（本轨允许: "
+                f"{', '.join(bb_query_what_for(self.track))}）")
 
     def _bb_query_package(self, package_id: str | None = None) -> str:
         """分析包全貌（2026-10-12）：列当前（或指定）分析包的条目/依赖边/内容树根。

@@ -34,11 +34,13 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any
 
+from core.agent.tool_registry import bb_query_schema_for
 from core.agent.tools import AGENT_TOOLS, ToolDispatcher
 from core.blackboard.store import BlackboardClosedError
 from core.chat import store as chat_store
 from core.chat.mcp_bridge import MCPBridge
 from core.coverage import situation_snapshot
+from core.diagnostics.failog import record_mcp_failure, record_tool_failure
 from core.dimensions import (
     dimension_coverage,
     dimensions_for_type,
@@ -914,7 +916,10 @@ class ChatTurn:
             specs = _specs_by_names(names)
         if self.mcp_bridge is not None:
             specs = [*specs, *self.mcp_bridge.tool_specs()]
-        return specs
+        # bb_query 的 what 面按轨裁剪（track-query-split，2026-10-13）：
+        # 渗透/逆向互用不到的面不下发——与 AgentSession 同口径（tool_registry 家族表）。
+        return [bb_query_schema_for(self.track) if s.get("name") == "bb_query" else s
+                for s in specs]
 
     def _orch_tool_specs(self) -> list[dict[str, Any]]:
         """主控专属工具规格：todo_write + call_expert（专家清单动态生成）。"""
@@ -1886,22 +1891,53 @@ class ChatTurn:
             args = tc.arguments or {}
             if name.startswith("mcp__"):
                 r = self._dispatch_mcp(name, args)
+                self._record_failure(name, r, args)
                 return not r.startswith("[错误"), r
             if name == "todo_write":
                 r = self._tool_todo_write(args)
+                self._record_failure(name, r, args)
                 return not r.startswith("[错误"), r
             if name == "call_expert":
                 r = self._tool_call_expert(args)
+                self._record_failure(name, r, args)
                 return not r.startswith("[错误"), r
             if self._dispatcher is not None:
                 r = self._dispatcher.dispatch(name, args)
                 # agent 工具面失败文本约定（[错误] 为主，兼容 [工具异常]/[参数格式]）
+                # 注意：dispatcher 分支的失败由 ToolDispatcher.dispatch 自记
+                # tool.failed（diagnostics-log），此处不重复记。
                 return not r.startswith(("[错误", "[工具异常", "[参数格式")), r
+            self._record_failure(name, f"[错误] 工具 {name} 不可用：本线程未装配工具面", args)
             return False, f"[错误] 工具 {name} 不可用：本线程未装配工具面"
         except Exception as e:  # noqa: BLE001 —— 工具异常回文本，绝不炸整轮
             log.exception("chat 工具分发异常 name=%s thread=%s",
                           name, self.thread_id)
+            self._record_failure(name, f"[错误] 工具 {name} 执行异常: {e}", args)
             return False, f"[错误] 工具 {name} 执行异常: {e}"
+
+    def _record_failure(self, name: str, result: str,
+                        args: dict | None = None) -> None:
+        """chat 侧失败落诊断日志（diagnostics-log，2026-10-14）。
+
+        只记**不经 ToolDispatcher.dispatch 的分支**——mcp__（server 离线/协议
+        错误/工具报错，记 mcp.failed）、todo_write/call_expert/分发异常/无
+        工具面（记 tool.failed）。dispatcher 分支由 dispatch 自记，避免双写。
+        best-effort：记录失败不影响工具返回（failog 内已兜底不抛）。
+        """
+        if not result.startswith("[错误"):
+            return
+        author = f"chat-{self.thread_id[-12:]}"
+        if name.startswith("mcp__"):
+            parts = name.split("__", 2)
+            if len(parts) == 3:
+                record_mcp_failure(
+                    self.bb, self.project_id, server=parts[1], tool=parts[2],
+                    error=result, session_id=author, author=author,
+                    thread_id=self.thread_id)
+                return
+        record_tool_failure(
+            self.bb, self.project_id, name=name, args=args, error=result,
+            session_id=author, author=author, thread_id=self.thread_id)
 
     def _parallel_expert_dispatch(self, tool_calls) -> dict[str, tuple[bool, str]]:
         """并发执行同一批中的 call_expert，返回按 tool_call id 索引的结果。

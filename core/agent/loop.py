@@ -25,6 +25,7 @@ from typing import Any
 
 from core.agent.retention import omitted_note, retain
 from core.agent.session_state import SessionState, state_proxy
+from core.agent.tool_registry import bb_query_schema_for
 from core.agent.tools import (
     AGENT_TOOLS,
     HARD_REJECT_PREFIXES,
@@ -57,6 +58,22 @@ log = logging.getLogger(__name__)
 # 空闲对话轮（2026-09-19）工具集：AGENT_TOOLS 去掉 finish——对话轮无任务可收尾，
 # 纯文本回复即终止；其余工具照常（查黑板/知识库/资产回答人类提问）。
 CHAT_TOOLS: list[dict[str, Any]] = [t for t in AGENT_TOOLS if t.get("name") != "finish"]
+
+
+def _llm_tool_schemas(tools: list[dict[str, Any]],
+                      track: str | None) -> list[dict[str, Any]]:
+    """下发 LLM 前的工具面后处理：bb_query 的 what 面按轨裁剪
+    （track-query-split，2026-10-13——渗透与逆向互相用不到的面不下发，
+    详见 tool_registry.py 的 `_BB_QUERY_TRACK_WHAT` 家族表）。其余工具原样
+    透传；track 未知/空=零裁剪原样返回（与裁剪前行为一致）。返回新 list，
+    共享的 schema dict 不被原地改。"""
+    if not tools:
+        return tools
+    if "bb_query" not in {t.get("name") for t in tools}:
+        return tools
+    return [bb_query_schema_for(track) if t.get("name") == "bb_query" else t
+            for t in tools]
+
 
 # 工具参数流截断的整轮重试上限（2026-09-20 事故修复）：GLM 长思考会话输出预算
 # 耗尽/网关断流 → 工具参数 JSON 残缺。传输层流不可重放，只能在 agent 轮级重建
@@ -1242,7 +1259,8 @@ class AgentSession:
             step += 1
             try:
                 resp = self._chat_interruptible(messages, system=system,
-                                                tools=CHAT_TOOLS, stream_text=True)
+                                                tools=_llm_tool_schemas(CHAT_TOOLS, self.track),
+                                                stream_text=True)
             except _StepInterrupted:
                 # 对话中被中断（LLM 等待期间置位）：半截回复已由
                 # _flush_interrupted_reply 落盘（interrupted=true），引导已 drain
@@ -1721,8 +1739,10 @@ class AgentSession:
                         self._stuck_waves += 1
             _chat_t0 = time.monotonic()
             try:
-                resp = self._chat_interruptible(messages, system=system,
-                                                tools=self._task_tool_schemas(), step=step)
+                resp = self._chat_interruptible(
+                    messages, system=system,
+                    tools=_llm_tool_schemas(self._task_tool_schemas(), self.track),
+                    step=step)
             except _StepInterrupted:
                 # ■ 即点即停（2026-09-19）：LLM 调用等待中被人手中断——不等本步
                 # 完成，立刻按硬中断收尾（任务 fail「人工中断」，快照保留可续跑）。

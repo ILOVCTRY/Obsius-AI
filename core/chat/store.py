@@ -23,7 +23,8 @@ _TITLE_MAX = 60
 
 def create_thread(bb, project_id: str, agent_id: str, *,
                   title: str = "", parent_thread_id: str | None = None,
-                  spawned_task: str = "") -> dict[str, Any]:
+                  spawned_task: str = "",
+                  provider: str = "", model: str = "") -> dict[str, Any]:
     tid = new_id("chat")
     ts = now()
     with bb._tx():
@@ -35,10 +36,12 @@ def create_thread(bb, project_id: str, agent_id: str, *,
                 raise ValueError(f"父线程不存在: {parent_thread_id}")
         bb.conn.execute(
             "INSERT INTO chat_threads(id, project_id, agent_id, title, status,"
-            " parent_thread_id, spawned_task, todo, created_at, updated_at)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?)",
+            " parent_thread_id, spawned_task, todo, provider, model,"
+            " created_at, updated_at)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             (tid, project_id, agent_id, title[:_TITLE_MAX], "idle",
-             parent_thread_id, spawned_task, "[]", ts, ts))
+             parent_thread_id, spawned_task, "[]",
+             (provider or "").strip(), (model or "").strip(), ts, ts))
     return get_thread(bb, tid)
 
 
@@ -66,12 +69,21 @@ def update_thread(bb, thread_id: str, *, title: str | None = None,
                   todo: list[dict] | None = None,
                   spawned_task: str | None = None,
                   usage: dict[str, Any] | None = None,
-                  error: dict[str, Any] | None = None) -> dict[str, Any] | None:
+                  error: dict[str, Any] | None = None,
+                  provider: str | None = None,
+                  model: str | None = None) -> dict[str, Any] | None:
     sets: list[str] = ["updated_at=?"]
     args: list[Any] = [now()]
     if title is not None:
         sets.append("title=?")
         args.append(title[:_TITLE_MAX])
+    if provider is not None:
+        # '' = 清除覆写（回跟随全局默认）；线程级模型覆写（v37）
+        sets.append("provider=?")
+        args.append((provider or "").strip())
+    if model is not None:
+        sets.append("model=?")
+        args.append((model or "").strip())
     if status is not None:
         if status not in THREAD_STATUSES:
             raise ValueError(f"非法线程状态: {status}")

@@ -105,7 +105,7 @@ def run_objective(agent, objective, **kw):
 
 
 def make_agent(env, llm, planner=None, config=None, role="_generalist", artifacts_dir=None,
-               capabilities=("web",), enable_sediment=False):
+               capabilities=("web",), enable_sediment=False, track="pentest"):
     bb, project, gw, tmp_path = env
     packs = tmp_path / "packs"
     # 演示技能（技能扁平 packs/kb/skills/）
@@ -118,7 +118,7 @@ def make_agent(env, llm, planner=None, config=None, role="_generalist", artifact
     (experts / "_generalist.yaml").write_text(
         'name: _generalist\npersona: "通用测试员。"\n', encoding="utf-8")
     agent = AgentSession(project_id=project["id"], bb=bb, gateway=gw, llm=llm,
-                        planner_llm=planner, packs_root=packs, track="pentest",
+                        planner_llm=planner, packs_root=packs, track=track,
                         capabilities=list(capabilities),
                         role=role, capability_prompt="## 能力清单\n- Docker: 可用",
                         config=config or AgentConfig(max_steps=10),
@@ -2292,7 +2292,7 @@ def test_bb_query_assets_offset_paging(env):
 def test_bb_query_package_face(env):
     """what=package（2026-10-12）：列当前分析包的条目/依赖边/内容树根，供 AI
     定位同包文件（exe 依赖的 DLL 在同一内容树里）。缺工作区/无分析包 → 结构化
-    提示串（不抛）。"""
+    提示串（不抛）。package=逆向家族面（分析包=上传样本），按 research 轨建会话。"""
     bb, project, gw, tmp_path = env
     artifacts = tmp_path / "ws" / "artifacts"
     meta_root = artifacts.parent / "sample_packages"
@@ -2311,7 +2311,8 @@ def test_bb_query_package_face(env):
                     {"path": "Game/render.dll", "sha256": "e" * 64, "size": 234}],
     }), encoding="utf-8")
 
-    d = make_agent(env, ScriptedLLM([]), artifacts_dir=artifacts).dispatcher
+    d = make_agent(env, ScriptedLLM([]), artifacts_dir=artifacts,
+                   track="research").dispatcher
     body = json.loads(d.dispatch("bb_query", {"what": "package"}))
     assert body["package_id"] == pid and body["version_id"] == vid
     assert body["tree_ref"] == str(tree)                 # 内容树绝对路径（供 read_file）
@@ -2975,9 +2976,11 @@ def test_blueprint_tools_create_update_and_status_guard(env):
 
 
 def test_bb_query_blueprint(env):
-    """bb_query what=blueprint：列表给摘要（模块名/状态/地址），单份给全文。"""
+    """bb_query what=blueprint：列表给摘要（模块名/状态/地址），单份给全文。
+    blueprint=逆向家族面（R4 重建管线），会话按 research 轨建（track-query-split
+    2026-10-13 后 pentest 轨 dispatcher 会拒收该面）。"""
     bb, project, gw, _ = env
-    agent = make_agent(env, ScriptedLLM([]))
+    agent = make_agent(env, ScriptedLLM([]), track="research")
     d = agent.dispatcher
     bp = bb.create_blueprint(project["id"], "查询样例", modules=[
         {"name": "许可校验", "func_addresses": ["0x401000"]}])
@@ -3155,3 +3158,87 @@ def test_system_blocks_dynamic_changes_keep_stable_prefix(env):
     b2 = ag.build_system_blocks("任务二", skill_context="不同技能")
     assert b1[0]["text"] == b2[0]["text"]
     assert b1[1]["text"] != b2[1]["text"]
+
+
+# ---------- bb_query 按轨裁剪 + 功能树/业务逻辑面（track-query-split，2026-10-13） ----------
+
+def _rev_dispatcher(env, track: str = "research"):
+    """research 轨项目 + dispatcher（bb_query 走意图预放行面，无需 declare_intent）。"""
+    bb, _, gw, _ = env
+    proj = bb.create_project("逆向项目", track, ["binary"])
+    sid = "sess-" + "q" * 12
+    from core.agent.tools import ToolDispatcher
+    return bb, proj, ToolDispatcher(bb, gateway=gw, project_id=proj["id"],
+                                   session_id=sid, author=sid, track=track)
+
+
+def test_bb_query_feature_tree_face(env):
+    """what=feature_tree：列树（含节点清单）/ tree_id 单棵 / binary_sha256 筛；
+    空结果回 [] 不报错（尚无树的项目）。"""
+    bb, proj, d = _rev_dispatcher(env)
+    pid = proj["id"]
+    sha = "a" * 64
+    tree = bb.create_feature_tree(pid, binary_sha256=sha, name="样本功能树")
+    r1 = bb.add_feature_node(pid, tree["id"], "存档校验",
+                             desc="校验 save.bin 头", func_addresses=["0x401000"])
+    bb.add_feature_node(pid, tree["id"], "金币结算",
+                        parent_id=r1["nodes"][-1]["id"])
+    rows = json.loads(d.dispatch("bb_query", {"what": "feature_tree"}))
+    assert len(rows) == 1 and rows[0]["id"] == tree["id"]
+    assert [n["name"] for n in rows[0]["nodes"]] == ["存档校验", "金币结算"]
+    assert rows[0]["nodes"][0]["func_addresses"] == ["0x401000"]
+    # binary_sha256 筛
+    rows = json.loads(d.dispatch("bb_query", {"what": "feature_tree",
+                                             "binary_sha256": sha}))
+    assert len(rows) == 1
+    rows = json.loads(d.dispatch("bb_query", {"what": "feature_tree",
+                                             "binary_sha256": "b" * 64}))
+    assert rows == []
+    # 单棵树
+    one = json.loads(d.dispatch("bb_query", {"what": "feature_tree",
+                                            "tree_id": tree["id"]}))
+    assert one["name"] == "样本功能树" and len(one["nodes"]) == 2
+    # 不存在
+    r = d.dispatch("bb_query", {"what": "feature_tree", "tree_id": "ft-nope"})
+    assert r.startswith("[错误]") and "不存在" in r
+
+
+def test_bb_query_logic_block_face(env):
+    """what=logic_block：列块（含 func_count）/ block_id 单个 / 空 [] 不报错。"""
+    bb, proj, d = _rev_dispatcher(env)
+    pid = proj["id"]
+    sha = "c" * 64
+    bb.create_logic_block(pid, "云通信", binary_sha256=sha,
+                          description="解析 base url 并发送请求")
+    rows = json.loads(d.dispatch("bb_query", {"what": "logic_block"}))
+    assert len(rows) == 1 and rows[0]["name"] == "云通信"
+    assert rows[0]["binary_sha256"] == sha and rows[0]["func_count"] == 0
+    rows = json.loads(d.dispatch("bb_query", {"what": "logic_block",
+                                             "binary_sha256": "d" * 64}))
+    assert rows == []
+    lb_id = bb.list_logic_blocks(pid)[0]["id"]
+    one = json.loads(d.dispatch("bb_query", {"what": "logic_block",
+                                            "block_id": lb_id}))
+    assert one["name"] == "云通信" and one["funcs"] == []
+    r = d.dispatch("bb_query", {"what": "logic_block", "block_id": "lb-nope"})
+    assert r.startswith("[错误]") and "不存在" in r
+
+
+def test_bb_query_track_gate_rejects_cross_family_face(env):
+    """渗透轨 dispatcher 硬传 what=feature_tree → [错误] 本轨不可用（schema 已
+    裁掉，此防旧缓存/幻觉）；逆向轨正常。未知 what 列举本轨允许面。"""
+    _, _, d_pen = _rev_dispatcher(env, track="pentest")
+    r = d_pen.dispatch("bb_query", {"what": "feature_tree"})
+    assert r.startswith("[错误]") and "本轨不可用" in r and "site" in r
+    r = d_pen.dispatch("bb_query", {"what": "logic_block"})
+    assert "本轨不可用" in r
+    r = d_pen.dispatch("bb_query", {"what": "nonsense"})
+    assert r.startswith("[错误]") and "findings" in r and "site" in r \
+        and "feature_tree" not in r
+    _, _, d_rev = _rev_dispatcher(env)
+    r = d_rev.dispatch("bb_query", {"what": "func", "binary_sha256": "a" * 64})
+    assert r == "[]"  # 逆向轨 func 面正常（空库）
+    r = d_rev.dispatch("bb_query", {"what": "nonsense"})
+    assert "func" in r and "feature_tree" in r
+
+

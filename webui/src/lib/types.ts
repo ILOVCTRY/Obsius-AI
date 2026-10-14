@@ -183,6 +183,52 @@ export interface IntentInfo {
   revision: number
 }
 
+// 项目级意图推导图（GET /api/projects/{pid}/intent-graph，2026-10-13 逆向轨）：
+// 样本 → 意图 → 收尾（发现|死路），只读逻辑层（无执行层 attempts）
+export type IntentGraphNodeType = "sample" | "intent" | "finding"
+export type IntentGraphEdgeKind = "derive" | "outcome" | "bypass"
+
+export interface IntentGraphNode {
+  id: string
+  type: IntentGraphNodeType
+  // sample：label 优先样本文件名、退回 sha 前 12；asset_type 区分 binary 与非 binary 锚点
+  label?: string
+  asset_type?: string
+  value?: string
+  // intent
+  statement?: string
+  status?: "open" | "closed" | "unverified" | "verified" | "false-positive"
+  outcome?: IntentOutcome
+  finding_ids?: string[]
+  dead_reason?: string
+  dimension?: string
+  author?: string
+  created_at?: string | null
+  closed_at?: string | null
+  default_hidden?: boolean            // closed dead_end：默认隐藏
+  sample_id?: string | null
+  // finding
+  title?: string
+  severity?: string
+  category?: string
+  vuln_class?: string
+}
+
+export interface IntentGraphEdge {
+  source: string
+  target: string
+  kind: IntentGraphEdgeKind
+}
+
+export interface IntentGraph {
+  nodes: IntentGraphNode[]
+  edges: IntentGraphEdge[]
+  counts: {
+    samples: number; intents: number; open: number
+    closed: number; dead_end: number; findings: number
+  }
+}
+
 // 打法效果榜（M3/R4，基于物化侧轨迹链）
 export interface TraceEffectCombo {
   skill: string; kb: string; chains: number; verified_findings: number
@@ -1867,6 +1913,9 @@ export interface ChatThread {
   usage?: ChatUsage | null
   /** 最近一轮失败的结构化错误（status=error 时存在；新轮开始清空） */
   error?: ChatThreadError | null
+  /** 线程级模型覆写（schema v37，2026-10-13）：''=跟随全局 executor 默认 */
+  provider?: string
+  model?: string
   created_at: string
   updated_at: string
 }
@@ -1909,6 +1958,46 @@ export interface ChatMcpServer {
   online: boolean
   tools: ChatMcpTool[]
   session_scoped?: boolean
+}
+
+// ---------- 诊断（diagnostics-log，2026-10-14）：会话审计 + 失败日志 ----------
+
+/** 统一会话行：chat=工作台对话线程；agent=任务链执行会话（消息=events 事件流）。 */
+export interface DiagSession {
+  kind: "chat" | "agent"
+  id: string
+  name: string
+  agent_id: string
+  status: string
+  /** chat=chat_messages 条数；agent=events 条数 */
+  msg_count: number
+  /** 归属本会话的 tool.failed / mcp.failed 条数 */
+  fail_count: number
+  updated_at: string
+  created_at: string
+  parent_thread_id: string
+  provider: string
+  model: string
+}
+
+export interface DiagSessions {
+  chat: DiagSession[]
+  agent: DiagSession[]
+}
+
+/** 失败日志行（blackboard events 行直出，payload 已解析）。 */
+export interface DiagFailure {
+  id: number
+  project_id: string
+  session_id: string | null
+  kind: "tool.failed" | "mcp.failed"
+  payload: Record<string, unknown>
+  author: string
+  created_at: string
+}
+
+export interface DiagFailures {
+  failures: DiagFailure[]
 }
 
 // ---------- Team direct execution（core/team，schema v32；2026-10-06） ----------

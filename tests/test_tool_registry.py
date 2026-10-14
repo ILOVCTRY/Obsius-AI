@@ -170,3 +170,71 @@ def test_illegal_group_rejected():
         R.tool("__tmp_tool__", description="x", input_schema={"type": "object"},
                group="其他")
     assert "__tmp_tool__" not in R.REGISTRY
+
+
+# ---------- bb_query what 面按轨裁剪（track-query-split，2026-10-13） ----------
+
+def test_bb_query_what_families_partition_full_no_crossover():
+    """两家族并集=全量九面；交集只剩三公共面（findings/assets/events）——
+    渗透与逆向互用不到的面不允许同时出现在两个家族里。"""
+    rev = set(R._BB_QUERY_WHAT_REVERSE)
+    pen = set(R._BB_QUERY_WHAT_PENTEST)
+    assert rev | pen == set(R._BB_QUERY_WHAT_FULL)
+    assert rev & pen == {"findings", "assets", "events"}
+    # 逆向家族持有功能树/业务块/site 独占与删除的边界
+    assert "site" not in rev and "feature_tree" in rev and "logic_block" in rev
+    assert "site" in pen and "func" not in pen
+
+
+def test_bb_query_what_for_track_mapping():
+    assert R.bb_query_what_for("research") == list(R._BB_QUERY_WHAT_REVERSE)
+    assert R.bb_query_what_for("ctf") == list(R._BB_QUERY_WHAT_REVERSE)
+    assert R.bb_query_what_for("pentest") == list(R._BB_QUERY_WHAT_PENTEST)
+    assert R.bb_query_what_for("redteam") == list(R._BB_QUERY_WHAT_PENTEST)
+    # 未知/空/None 轨=全量回退（行为与裁剪前一致）
+    for track in ("", None, "mystery", "  research  "[:0] + "assessment"):
+        assert R.bb_query_what_for(track) == list(R._BB_QUERY_WHAT_FULL)
+
+
+def test_bb_query_schema_for_reverse_keeps_reverse_faces_only():
+    for track in ("research", "ctf"):
+        s = R.bb_query_schema_for(track)
+        enum = s["input_schema"]["properties"]["what"]["enum"]
+        assert "site" not in enum
+        assert {"func", "blueprint", "package", "feature_tree",
+                "logic_block"} <= set(enum)
+        # 逆向专属参数保留（含 v36 新增 tree_id/block_id）
+        assert {"binary_sha256", "tree_id", "block_id", "package_id",
+                "blueprint_id"} <= set(s["input_schema"]["properties"])
+        assert "逆向 family" in s["description"]
+
+
+def test_bb_query_schema_for_pentest_drops_reverse_only_faces():
+    for track in ("pentest", "redteam"):
+        s = R.bb_query_schema_for(track)
+        enum = s["input_schema"]["properties"]["what"]["enum"]
+        assert "site" in enum
+        for face in ("func", "blueprint", "package", "feature_tree", "logic_block"):
+            assert face not in enum
+        # 逆向专属参数整组删掉——模型看不见就不会传
+        for k in R._BB_QUERY_REVERSE_ONLY_PROPS:
+            assert k not in s["input_schema"]["properties"]
+        assert "渗透 family" in s["description"]
+
+
+def test_bb_query_schema_for_unknown_track_equals_canonical():
+    full = {t["name"]: t for t in R.AGENT_TOOLS}["bb_query"]
+    assert R.bb_query_schema_for("mystery") == full
+    assert R.bb_query_schema_for(None) == full
+
+
+def test_bb_query_schema_for_returns_fresh_dict_no_registry_mutation():
+    """变体 schema 是新 dict——裁剪消费方（AgentSession/chat runtime）随便改
+    不污染注册表；registry 的 canonical 项恒为全量。"""
+    before = {t["name"]: t for t in R.AGENT_TOOLS}["bb_query"]
+    s = R.bb_query_schema_for("research")
+    s["input_schema"]["properties"]["what"]["enum"].append("__x__")
+    s["input_schema"]["properties"].pop("tree_id", None)
+    assert {t["name"]: t for t in R.AGENT_TOOLS}["bb_query"] == before
+    assert R.bb_query_schema_for("research")["input_schema"]["properties"] \
+        ["what"]["enum"] == list(R._BB_QUERY_WHAT_REVERSE)

@@ -4618,3 +4618,49 @@ def test_browser_replay_accepts_transport_options(client):
         "insecure": True, "gm_tls": True, "timeout_s": 2,
     })
     assert r.status_code == 202
+
+
+def test_intent_graph_api_end_to_end(client):
+    """项目级意图推导图端点（2026-10-13 逆向轨）：样本→意图→收尾，只读逻辑层。"""
+    from core.blackboard.intents import close_intent, declare_intent
+
+    pid = _make_project(client, track="research")
+    bb = client.app.state.projects[pid].bb
+    sha = "ab" * 32
+    sample = bb.upsert_asset(pid, "binary", sha, meta={"filename": "main.exe"})["id"]
+    other = bb.upsert_asset(pid, "binary", "cd" * 32, meta={"filename": "idle.dll"})["id"]
+    fid = bb.add_finding(pid, title="许可校验可绕过", severity="high",
+                         target_asset_id=sample, author="chat-1")["id"]
+
+    i1 = declare_intent(bb, pid, "许可 gate 可补丁绕过", target_asset_id=sample,
+                        author="chat-1")["id"]
+    close_intent(bb, pid, i1, "vuln", finding_ids=[fid], author="chat-1")
+    # 续链：后一条意图以前一条的收尾发现为推导依据
+    i2 = declare_intent(bb, pid, "补丁脚本可交付", target_asset_id=sample,
+                        basis_refs=[f"finding:{fid}"], author="chat-1")["id"]
+
+    g = client.get(f"/api/projects/{pid}/intent-graph").json()
+    assert g["counts"] == {"samples": 2, "intents": 2, "open": 1, "closed": 1,
+                           "dead_end": 0, "findings": 1}
+    nodes = {n["id"]: n for n in g["nodes"]}
+    assert nodes[sample]["type"] == "sample" and nodes[sample]["label"] == "main.exe"
+    assert nodes[other]["type"] == "sample"          # 空样本也上图（项目级总览）
+    assert nodes[i1]["type"] == "intent" and nodes[i1]["outcome"] == "vuln"
+    assert nodes[fid]["type"] == "finding"
+    edges = {(e["source"], e["target"], e["kind"]) for e in g["edges"]}
+    assert (sample, i1, "derive") in edges
+    assert (i1, fid, "outcome") in edges
+    assert (i1, i2, "derive") in edges               # 续链：收尾发现 → 新意图
+    assert (sample, i2, "derive") not in edges
+
+    # 人类否决收尾：重开意图（既有端点，链路图随之下轮刷新）
+    assert client.post(f"/api/projects/{pid}/intents/{i1}/reopen",
+                       json={"note": "证据不足"}).status_code == 200
+    assert client.get(f"/api/projects/{pid}/intent-graph").json()["counts"]["open"] == 2
+
+
+def test_intent_graph_api_empty_project(client):
+    pid = _make_project(client, track="research")
+    g = client.get(f"/api/projects/{pid}/intent-graph").json()
+    assert g["nodes"] == [] and g["edges"] == []
+    assert g["counts"]["intents"] == 0

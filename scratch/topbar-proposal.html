@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>顶栏美化提案 — ACTIVE PROJECT 区</title>
+<style>
+  :root{
+    --surface-0: oklch(0.155 0.004 70);
+    --surface-1: oklch(0.185 0.004 70);
+    --surface-2: oklch(0.225 0.005 70);
+    --border: oklch(0.315 0.006 70);
+    --fg: oklch(0.93 0.006 70);
+    --muted: oklch(0.66 0.008 70);
+    --brand: oklch(0.72 0.13 40);
+    --aside: oklch(0.135 0.014 70 / .55);
+    --card-bd: oklch(0.72 0.13 40 / .16);
+    --card-bg: oklch(0.72 0.13 40 / .05);
+    --mono: "Cascadia Code", Consolas, monospace;
+    --sans: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;padding:32px 28px 56px;background:#080807;color:var(--fg);font-family:var(--sans);
+       -webkit-font-smoothing:antialiased}
+  .wrap{max-width:1000px;margin:0 auto}
+  h1{font-size:19px;font-weight:650;margin:0 0 6px}
+  .lede{color:var(--muted);font-size:13px;line-height:1.7;margin:0 0 22px;max-width:760px}
+  h2{font-size:14px;font-weight:650;margin:0 0 4px;display:flex;align-items:center;gap:9px}
+  h2 .tag{font-size:10px;font-weight:700;letter-spacing:.1em;color:var(--brand);
+          border:1px solid var(--card-bd);background:var(--card-bg);border-radius:999px;padding:2px 8px}
+  h2 .tag.plain{color:var(--muted);border-color:var(--border);background:transparent}
+  .note{color:var(--muted);font-size:12px;line-height:1.7;margin:0 0 12px;max-width:780px}
+  section{margin-bottom:34px}
+  .stage{position:relative}
+
+  .screen{position:relative;display:flex;width:100%;border:1px solid var(--border);border-radius:12px;
+          overflow:hidden;background:var(--surface-0);font-size:12px}
+  .nav{width:84px;flex:0 0 84px;background:#131110;border-right:1px solid var(--border);padding:7px 0}
+  .brand{display:flex;align-items:center;gap:6px;padding:0 10px 9px;font-size:11px;font-weight:650}
+  .mark{width:15px;height:15px;border-radius:4px;background:var(--brand);opacity:.9}
+  .navitem{display:flex;align-items:center;gap:7px;margin:2px 6px;padding:5px 7px;border-radius:6px;
+           color:var(--muted);font-size:11px;white-space:nowrap}
+  .navitem.on{background:oklch(0.72 0.13 40 / .12);color:var(--brand)}
+  .navitem i{width:11px;height:11px;border-radius:3px;background:currentColor;opacity:.55}
+
+  .right{flex:1;min-width:0;display:flex;flex-direction:column}
+  .topbar{position:relative;height:64px;display:flex;align-items:center;gap:16px;padding:0 20px;
+          background:linear-gradient(180deg,var(--surface-1) 0%,color-mix(in oklch,var(--surface-1) 72%,var(--surface-0)) 72%,var(--surface-0) 100%)}
+  .topbar.sep{border-bottom:1px solid var(--border);background:var(--surface-1)}
+  .eyebrow{display:block;font-size:9px;font-weight:700;letter-spacing:.14em;color:var(--muted);margin-bottom:5px}
+  .prow{display:flex;align-items:center;gap:9px}
+  .pulse{width:7px;height:7px;flex:0 0 7px;border-radius:50%;background:var(--brand);
+         box-shadow:0 0 0 3px oklch(0.72 0.13 40 / .18)}
+  .pname{font-size:14px;font-weight:650}
+  .pbadge{font-size:10px;color:var(--muted);border:1px solid var(--border);border-radius:999px;padding:1px 8px}
+  .stats{display:flex;align-items:center;gap:10px;padding-left:20px;border-left:1px solid var(--border);
+         font-size:10px;color:var(--muted);font-family:var(--mono)}
+  .stats.flat{border-left:0;padding-left:0}
+  .dotsep{color:var(--border)}
+  .spacer{flex:1}
+  .ghost{font-size:11px;color:var(--muted);background:none;border:0;padding:0;font-family:inherit}
+  .winbtns{display:flex;align-items:center;gap:14px;color:var(--muted);font-size:11px;margin-right:-14px}
+
+  .projcard{display:flex;align-items:center;gap:9px;padding:7px 12px;border:1px solid var(--card-bd);
+            border-radius:9px;background:var(--card-bg)}
+  .projcard .pname{font-size:13px}
+  .projcard .pbadge{border-color:oklch(0.72 0.13 40 / .28);color:oklch(0.82 0.09 45)}
+
+  .cols{flex:1;display:flex;min-height:186px}
+  .aside{width:180px;flex:0 0 180px;background:var(--aside);padding:10px}
+  .aside.brd{border-right:1px solid var(--border)}
+  .agentcard{display:flex;align-items:center;gap:9px;padding:8px 10px;border:1px solid var(--card-bd);
+             border-radius:9px;background:var(--card-bg)}
+  .avatar{width:26px;height:26px;flex:0 0 26px;border-radius:8px;display:grid;place-items:center;
+          background:oklch(0.72 0.13 40 / .1);color:var(--brand);font-size:11px}
+  .aname{display:block;font-size:12px;font-weight:650}
+  .arole{display:block;font-size:10px;color:var(--muted)}
+  .chev{margin-left:auto;color:var(--muted);font-size:10px}
+  .sub{display:flex;justify-content:space-between;align-items:center;padding:11px 2px 5px;
+       font-size:9px;font-weight:700;letter-spacing:.13em;color:var(--muted)}
+  .sub b{color:var(--brand);font-weight:650;letter-spacing:0}
+  .thr{padding:7px 2px;font-size:11px;border-bottom:1px solid transparent}
+  .thr span{display:block;font-size:10px;color:var(--muted);font-family:var(--mono);margin-top:3px}
+  .main{flex:1;min-width:0;background:var(--surface-0);display:grid;place-items:center;
+        color:var(--muted);font-size:11px}
+
+  .asidefull{width:180px;flex:0 0 180px;background:var(--aside);border-right:1px solid var(--border);
+             display:flex;flex-direction:column}
+  .ahead{height:64px;flex:0 0 64px;display:flex;align-items:center;padding:0 10px;
+         border-bottom:1px solid var(--border)}
+  .abody{padding:0 10px}
+
+  .mk{position:absolute;pointer-events:none;opacity:0;transition:opacity .16s}
+  body.marked .mk{opacity:1}
+  .mk-h{border-top:1px dashed #E24B4A;font-size:10px;color:#E24B4A;padding-top:2px}
+  .mk-v{border-left:1px dashed #E24B4A;font-size:10px;color:#E24B4A;padding-left:4px;writing-mode:vertical-rl}
+  .legend{display:flex;flex-wrap:wrap;gap:8px 22px;margin:12px 0 0;font-size:12px;color:var(--muted)}
+  .legend i{display:inline-block;width:8px;height:8px;border-radius:50%;background:#E24B4A;margin-right:7px}
+  .legend i.ok{background:oklch(0.72 0.13 150)}
+  .ctrl{display:inline-flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);
+        border:1px solid var(--border);border-radius:999px;padding:5px 12px;margin-bottom:26px;cursor:pointer;
+        user-select:none}
+  .ctrl input{accent-color:#E24B4A;margin:0}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>顶栏（ACTIVE PROJECT 区）美化提案</h1>
+  <p class="lede">红框这一条的问题不是"东西摆得不好看"，而是<b>边界语言不统一</b>：顶栏自己没有任何边界（渐变收尾色 = 内容区底色，没有 1px 分隔线），而它下面紧挨着的中栏第一张卡（智能体主控）却带着圆角 + 描边。于是视线从上往下走时，会在顶栏下沿处"踩空"，然后突然落进一套完全不同的卡片语言里。另外中栏的右侧竖线只从顶栏下沿才起，出现"断头"。</p>
+
+  <label class="ctrl"><input type="checkbox" id="mk"> 标出问题点</label>
+
+  <section>
+    <h2>现状<span class="tag plain">实测</span></h2>
+    <p class="note">顶栏 <code>h-16</code>（64px）横跨中栏 + 主区，背景是 <code>linear-gradient(180deg, surface-1 → surface-0)</code>，收尾色与内容区底色完全一致 → 没有任何横向收口。中栏右边界线从 y≈69 才起，而左侧 nav 的竖线是从 y=0 贯通到底的。</p>
+    <div class="stage">
+      <div class="screen">
+        <div class="nav">
+          <div class="brand"><span class="mark"></span>Obsius</div>
+          <div class="navitem on"><i></i>智能体</div>
+          <div class="navitem"><i></i>黑板</div>
+          <div class="navitem"><i></i>诊断</div>
+        </div>
+        <div class="right">
+          <div class="topbar">
+            <div>
+              <span class="eyebrow">ACTIVE PROJECT</span>
+              <div class="prow"><span class="pulse"></span><span class="pname">江苏-东南大学</span><span class="pbadge">渗透测试·专家×7</span></div>
+            </div>
+            <div class="stats"><span>51 发现</span><span>394 资产</span></div>
+            <span class="spacer"></span>
+            <button class="ghost">← 首页</button>
+            <div class="winbtns"><span>‒</span><span>▢</span><span>✕</span></div>
+          </div>
+          <div class="cols">
+            <div class="aside brd">
+              <div class="agentcard">
+                <span class="avatar">▣</span>
+                <span><span class="aname">智能体主控</span><span class="arole">主控</span></span>
+                <span class="chev">⌄</span>
+              </div>
+              <div class="sub">会话线程 <b>+ 新建</b></div>
+              <div class="thr">对未测尽的资产继续进行测试<span>14:59 · 4/6 待办</span></div>
+              <div class="thr">对资产进行去重<span>10:18 · 4/4 待办</span></div>
+            </div>
+            <div class="main">与智能体主控 开始对话</div>
+          </div>
+        </div>
+        <div class="mk mk-h" style="left:84px;right:0;top:64px">顶栏底边无分隔线</div>
+        <div class="mk mk-v" style="left:263px;top:0;height:64px">中栏竖线断头</div>
+      </div>
+    </div>
+    <div class="legend"><span><i></i>顶栏底边没有任何收口</span><span><i></i>中栏竖线从顶栏下沿才起</span></div>
+  </section>
+
+  <section>
+    <h2>提案 A · 最小改动<span class="tag">3 行 CSS</span></h2>
+    <p class="note">只做两件事：① 顶栏换成实底 <code>surface-1</code> + 1px 底边线，给头部一个明确的收口；② 统计区去掉那条悬空的 <code>border-left</code>，改用中点分隔。改动量最小，割裂感能去掉大半。</p>
+    <div class="stage">
+      <div class="screen">
+        <div class="nav">
+          <div class="brand"><span class="mark"></span>Obsius</div>
+          <div class="navitem on"><i></i>智能体</div>
+          <div class="navitem"><i></i>黑板</div>
+          <div class="navitem"><i></i>诊断</div>
+        </div>
+        <div class="right">
+          <div class="topbar sep">
+            <div>
+              <span class="eyebrow">ACTIVE PROJECT</span>
+              <div class="prow"><span class="pulse"></span><span class="pname">江苏-东南大学</span><span class="pbadge">渗透测试·专家×7</span></div>
+            </div>
+            <div class="stats flat"><span>51 发现</span><span class="dotsep">·</span><span>394 资产</span></div>
+            <span class="spacer"></span>
+            <button class="ghost">← 首页</button>
+            <div class="winbtns"><span>‒</span><span>▢</span><span>✕</span></div>
+          </div>
+          <div class="cols">
+            <div class="aside brd">
+              <div class="agentcard">
+                <span class="avatar">▣</span>
+                <span><span class="aname">智能体主控</span><span class="arole">主控</span></span>
+                <span class="chev">⌄</span>
+              </div>
+              <div class="sub">会话线程 <b>+ 新建</b></div>
+              <div class="thr">对未测尽的资产继续进行测试<span>14:59 · 4/6 待办</span></div>
+              <div class="thr">对资产进行去重<span>10:18 · 4/4 待办</span></div>
+            </div>
+            <div class="main">与智能体主控 开始对话</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>提案 B · 项目信息卡片化<span class="tag">语言统一</span></h2>
+    <p class="note">顶栏左侧改成一张与「智能体主控」同款的胶囊卡（同 9px 圆角、同 brand 16% 描边、同 padding），并删掉 9px 全大写英文 eyebrow —— 它是整个中文界面里唯一一处全大写英文标签。统计移到右侧与「首页」同组，左右重量才平衡。</p>
+    <div class="stage">
+      <div class="screen">
+        <div class="nav">
+          <div class="brand"><span class="mark"></span>Obsius</div>
+          <div class="navitem on"><i></i>智能体</div>
+          <div class="navitem"><i></i>黑板</div>
+          <div class="navitem"><i></i>诊断</div>
+        </div>
+        <div class="right">
+          <div class="topbar sep">
+            <div class="projcard">
+              <span class="pulse"></span>
+              <span class="pname">江苏-东南大学</span>
+              <span class="pbadge">渗透测试·专家×7</span>
+            </div>
+            <span class="spacer"></span>
+            <div class="stats flat"><span>51 发现</span><span class="dotsep">·</span><span>394 资产</span></div>
+            <button class="ghost">← 首页</button>
+            <div class="winbtns"><span>‒</span><span>▢</span><span>✕</span></div>
+          </div>
+          <div class="cols">
+            <div class="aside brd">
+              <div class="agentcard">
+                <span class="avatar">▣</span>
+                <span><span class="aname">智能体主控</span><span class="arole">主控</span></span>
+                <span class="chev">⌄</span>
+              </div>
+              <div class="sub">会话线程 <b>+ 新建</b></div>
+              <div class="thr">对未测尽的资产继续进行测试<span>14:59 · 4/6 待办</span></div>
+              <div class="thr">对资产进行去重<span>10:18 · 4/4 待办</span></div>
+            </div>
+            <div class="main">与智能体主控 开始对话</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>提案 C · 顶栏不再横跨<span class="tag">结构根治</span></h2>
+    <p class="note">让中栏自己有一个 64px 高的头部（放智能体卡），与右栏顶栏同高、同底线。这样横线在两栏之间连续贯通、竖线从 y=0 通到底，整个上半区变成一套干净的正交网格，不再有"半截框"和"断头线"。代价是要把顶栏从 <code>Panel main</code> 顶层挪进右侧内容列，改动比 A/B 大。</p>
+    <div class="stage">
+      <div class="screen">
+        <div class="nav">
+          <div class="brand"><span class="mark"></span>Obsius</div>
+          <div class="navitem on"><i></i>智能体</div>
+          <div class="navitem"><i></i>黑板</div>
+          <div class="navitem"><i></i>诊断</div>
+        </div>
+        <div class="asidefull">
+          <div class="ahead">
+            <div class="agentcard" style="width:100%">
+              <span class="avatar">▣</span>
+              <span><span class="aname">智能体主控</span><span class="arole">主控</span></span>
+              <span class="chev">⌄</span>
+            </div>
+          </div>
+          <div class="abody">
+            <div class="sub">会话线程 <b>+ 新建</b></div>
+            <div class="thr">对未测尽的资产继续进行测试<span>14:59 · 4/6 待办</span></div>
+            <div class="thr">对资产进行去重<span>10:18 · 4/4 待办</span></div>
+          </div>
+        </div>
+        <div class="right">
+          <div class="topbar sep">
+            <div class="projcard">
+              <span class="pulse"></span>
+              <span class="pname">江苏-东南大学</span>
+              <span class="pbadge">渗透测试·专家×7</span>
+            </div>
+            <span class="spacer"></span>
+            <div class="stats flat"><span>51 发现</span><span class="dotsep">·</span><span>394 资产</span></div>
+            <button class="ghost">← 首页</button>
+            <div class="winbtns"><span>‒</span><span>▢</span><span>✕</span></div>
+          </div>
+          <div class="cols">
+            <div class="main">与智能体主控 开始对话</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="legend"><span><i class="ok"></i>横线在两栏间连续贯通</span><span><i class="ok"></i>竖线从 y=0 通到底</span></div>
+  </section>
+
+</div>
+<script>
+  document.getElementById('mk').addEventListener('change', function (e) {
+    document.body.classList.toggle('marked', e.target.checked)
+  })
+</script>
+</body>
+</html>

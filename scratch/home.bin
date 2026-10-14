@@ -1,0 +1,471 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head><title>重庆师范大学重庆柴可夫斯基音乐学院官网</title><META Name="keywords" Content="重庆师范大学重庆柴可夫斯基音乐学院官方网站, Chongqing Tchaikovsky Conservatory of Chongqing Normal University,Официальный сайт Чунцинской консерватории имени П. И. Чайковского发布学院动态、招生、教学、科研、演出与中俄合作信息。" />
+
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link href="assets/brand/logo-mark-gold.png" rel="icon" type="image/png">
+<meta property="og:type" content="website">
+<meta property="og:image" content="assets/brand/logo-trilingual-seal-horizontal-gold.png">
+  <link href="assets/css/stage-r4.css" rel="stylesheet">
+  <link href="assets/css/home-rhythm-r6.css" rel="stylesheet">
+  <link href="assets/css/motion-language-r8.css" rel="stylesheet">
+  <link href="assets/css/home-hierarchy-r9.css" rel="stylesheet">
+  <link href="assets/css/hero-zh-r5.css" rel="stylesheet">
+  <script>if(new URLSearchParams(location.search).has("static-review")){document.documentElement.setAttribute("data-static-review","");}</script>
+  <script src="assets/js/audio-engine.js" defer></script>
+  <script src="assets/js/musical-score.js" defer></script>
+<!--Announced by Visual SiteBuilder 9-->
+<link rel="stylesheet" type="text/css" href="_sitegray/_sitegray_d.css" />
+<script language="javascript" src="_sitegray/_sitegray.js"></script>
+<!-- CustomerNO:77656262657232307478465753545742000100044554 -->
+<link rel="stylesheet" type="text/css" href="index.vsb.css" />
+<script type="text/javascript" src="/system/resource/js/counter.js"></script>
+<script type="text/javascript">_jsq_(1001,'/index.jsp',-1,2082392417)</script>
+</head>
+<body data-current="home">
+
+   <link href="assets/css/main.css" rel="stylesheet">
+<link href="assets/css/components.css" rel="stylesheet">
+<link href="assets/css/responsive.css" rel="stylesheet">
+<link href="assets/css/boda-legacy.css" rel="stylesheet">  
+<link href="assets/css/interior-r4.css" rel="stylesheet">  
+<script src="assets/js/main.js" defer></script>
+  
+  <span aria-hidden="true" data-top-sentinel=""></span>
+<a class="skip-link" href="#main">跳到主要内容</a>
+<header class="site-header" data-header="">
+  <div class="utility-bar">
+    <div class="container utility-inner">
+      <nav class="utility-links" aria-label="栏目入口">
+        <a href="zwlm/jiaoxue.htm">教学</a>
+        <a href="zwlm/jiaoxue/nspbkzs.htm">招生咨询</a>
+        <a href="zwlm/hezuo.htm">合作</a>
+      </nav>
+      <p>重庆师范大学中俄合作办学机构</p>
+      <nav class="language-switcher" aria-label="Language switcher">
+        <a lang="zh-CN" href="index.htm" aria-current="true">中文</a>
+        <a lang="ru" href="ru.htm">Русский</a>
+        <a lang="en" href="en.htm">English</a>
+      </nav>
+    </div>
+  </div>
+    <div class="container brand-row">
+      <a class="site-brand" href="index.htm" aria-label="重庆师范大学重庆柴可夫斯基音乐学院">
+        <img src="assets/brand/logo-trilingual-horizontal-gold.png" width="692" height="205" alt="重庆师范大学重庆柴可夫斯基音乐学院">
+      </a>
+      <p class="brand-context">重庆师范大学重庆柴可夫斯基音乐学院</p>
+    </div>
+  <div class="nav-shell">
+    <div class="container nav-row">
+      <button class="mobile-menu-toggle" aria-expanded="false" aria-controls="primary-navigation" aria-label="打开导航" type="button" data-menu-toggle="">
+        <span></span>
+        <span></span>
+        <span></span>
+        <span class="sr-only">打开导航</span>
+      </button>
+      <nav class="primary-nav" id="primary-navigation" aria-label="栏目入口" data-responsive-navigation="" data-primary-nav="">
+        <ul data-navigation-items="">
+          <li class="nav-item" data-nav-key="home" data-nav-item="">
+            <a class="nav-link" href="index.htm">首页</a>
+          </li>
+          <li class="nav-item" data-nav-key="events" data-nav-item="">
+            <a class="nav-link" href="zwlm/dtzl.htm">动态</a>
+            <button class="submenu-toggle" aria-expanded="false" aria-haspopup="true" aria-controls="primary-submenu-zh-events" aria-label="动态" type="button" data-submenu-toggle=""></button>
+            <div class="mega-menu" id="primary-submenu-zh-events" data-nav-children="">
+              <div>
+                <strong>学院动态</strong>
+                <p>新闻、公告、活动纪实与影像资料。</p>
+              </div>
+              <ul>
+                <li data-nav-key="events"><a href="zwlm/dtzl.htm">动态总览</a></li>
+                <li data-nav-key="newsList"><a href="zwlm/dtzl/xinwen.htm">新闻列表</a></li>
+                <li data-nav-key="gallery"><a href="zwlm/dtzl/hdjs.htm">图片纪实</a></li>
+              </ul>
+            </div>
+          </li>
+          <li class="nav-item" data-nav-key="calendar" data-nav-item="">
+            <a class="nav-link" href="zwlm/ycyg.htm">演出预告</a>
+            <button class="submenu-toggle" aria-expanded="false" aria-haspopup="true" aria-controls="primary-submenu-zh-calendar" aria-label="演出预告" type="button" data-submenu-toggle=""></button>
+            <div class="mega-menu" id="primary-submenu-zh-calendar" data-nav-children="">
+              <div>
+                <strong>演出预告</strong>
+                <p>按月份与类型浏览正式发布的演出信息。</p>
+              </div>
+              <ul>
+                <li data-nav-key="calendar"><a href="zwlm/ycyg.htm">演出日历</a></li>
+              </ul>
+            </div>
+          </li>
+          <li class="nav-item" data-nav-key="education" data-nav-item="">
+            <a class="nav-link" href="zwlm/jiaoxue.htm">教学</a>
+            <button class="submenu-toggle" aria-expanded="false" aria-haspopup="true" aria-controls="primary-submenu-zh-education" aria-label="教学" type="button" data-submenu-toggle=""></button>
+            <div class="mega-menu" id="primary-submenu-zh-education" data-nav-children="">
+              <div>
+                <strong>教学与招生</strong>
+                <p>培养项目、课程信息与本科招生政策。</p>
+              </div>
+              <ul>
+                <li data-nav-key="education"><a href="zwlm/jiaoxue.htm">教学总览</a></li>
+                <li data-nav-key="admissions"><a href="zwlm/jiaoxue/nspbkzs.htm">2026本科招生</a></li>
+              </ul>
+            </div>
+          </li>
+          <li class="nav-item" data-nav-key="research" data-nav-item="">
+            <a class="nav-link" href="zwlm/keyan.htm">科研</a>
+            <button class="submenu-toggle" aria-expanded="false" aria-haspopup="true" aria-controls="primary-submenu-zh-research" aria-label="科研" type="button" data-submenu-toggle=""></button>
+            <div class="mega-menu" id="primary-submenu-zh-research" data-nav-children="">
+              <div>
+                <strong>科研与出版</strong>
+                <p>学术动态、成果、机构与资源入口。</p>
+              </div>
+              <ul>
+                <li data-nav-key="research"><a href="zwlm/keyan.htm">科研总览</a></li>
+              </ul>
+            </div>
+          </li>
+          <li class="nav-item" data-nav-key="structure" data-nav-item="">
+            <a class="nav-link" href="zwlm/zzjg.htm">组织架构</a>
+            <button class="submenu-toggle" aria-expanded="false" aria-haspopup="true" aria-controls="primary-submenu-zh-structure" aria-label="组织架构" type="button" data-submenu-toggle=""></button>
+            <div class="mega-menu" id="primary-submenu-zh-structure" data-nav-children="">
+              <div>
+                <strong>组织架构</strong>
+                <p>展示经学院确认的组织层级与联系信息。</p>
+              </div>
+              <ul>
+                <li data-nav-key="structure"><a href="zwlm/zzjg.htm">学院结构</a></li>
+              </ul>
+            </div>
+          </li>
+          <li class="nav-item" data-nav-key="people" data-nav-item="">
+            <a class="nav-link" href="zwlm/renwu.htm">人物</a>
+            <button class="submenu-toggle" aria-expanded="false" aria-haspopup="true" aria-controls="primary-submenu-zh-people" aria-label="人物" type="button" data-submenu-toggle=""></button>
+            <div class="mega-menu" id="primary-submenu-zh-people" data-nav-children="">
+              <div>
+                <strong>人物档案</strong>
+                <p>师资、艺术家与相关人物资料。</p>
+              </div>
+              <ul>
+                <li data-nav-key="people"><a href="zwlm/renwu.htm">人物列表</a></li>
+              </ul>
+            </div>
+          </li>
+          <li class="nav-item" data-nav-key="history" data-nav-item="">
+            <a class="nav-link" href="zwlm/lishi.htm">历史</a>
+            <button class="submenu-toggle" aria-expanded="false" aria-haspopup="true" aria-controls="primary-submenu-zh-history" aria-label="历史" type="button" data-submenu-toggle=""></button>
+            <div class="mega-menu" id="primary-submenu-zh-history" data-nav-children="">
+              <div>
+                <strong>学院历史</strong>
+                <p>合作办学历程与建设节点。</p>
+              </div>
+              <ul>
+                <li data-nav-key="history"><a href="zwlm/lishi.htm">学院历程</a></li>
+                <li data-nav-key="gallery"><a href="zwlm/dtzl/hdjs.htm">图片纪实</a></li>
+              </ul>
+            </div>
+          </li>
+          <li class="nav-item" data-nav-key="partnership" data-nav-item="">
+            <a class="nav-link" href="zwlm/hezuo.htm">合作</a>
+            <button class="submenu-toggle" aria-expanded="false" aria-haspopup="true" aria-controls="primary-submenu-zh-partnership" aria-label="合作" type="button" data-submenu-toggle=""></button>
+            <div class="mega-menu" id="primary-submenu-zh-partnership" data-nav-children="">
+              <div>
+                <strong>中俄合作</strong>
+                <p>合作机制、伙伴、项目与发展信息。</p>
+              </div>
+              <ul>
+                <li data-nav-key="partnership"><a href="zwlm/hezuo.htm">合作办学</a></li>
+                <li data-nav-key="gallery"><a href="zwlm/dtzl/hdjs.htm">图片纪实</a></li>
+              </ul>
+            </div>
+          </li>
+        </ul>
+      </nav>
+    </div>
+  </div>
+</header>
+
+  <!-- BODA_COMPONENT: HEADER END -->
+  <main id="main">
+    <section class="headline-stage hero interactive-stage zh-hero-r5" aria-label="首页重点新闻" aria-roledescription="carousel" data-score-state="idle" data-interactive-stage="" data-carousel="" data-hero="">    
+    <script language="javascript" src="/system/resource/js/dynclicks.js"></script><script language="javascript" src="/system/resource/js/jquery/jquery-latest.min.js"></script><script language="javascript" src="/system/resource/js/centerCutImg.js"></script><div class="zh-hero-r5-backdrop" aria-hidden="true"><span>TCHAIKOVSKY</span><img width="454" height="307" alt="" src="assets/brand/logo-mark-gold.png"></div>
+    <div class="stage-atmosphere-r4" aria-hidden="true"><span class="stage-ambient"></span><span class="stage-light" data-stage-light=""></span><span class="stage-vignette"></span></div>
+    <div class="headline-stage-slides">
+      <!-- BODA_SLOT: HOME_HERO_HEADLINES START -->
+      <!-- BODA_SAMPLE_DATA: HOME_HERO_HEADLINES; source=static-preview/assets/data/boda-samples/homepage-headlines.json; sample_only=true; do_not_publish=true; max_items=4; keep_frontend_shell=true -->
+      <!-- BODA_SLOT: HEADLINE_CAROUSEL START -->
+      <!-- BODA_ITEM: HOMEPAGE_HEADLINE START -->
+        <!-- BODA_FIELD: id START --><!-- BODA_FIELD: sort_order START -->
+                
+                    <a href="info/1074/1060.htm" target="_blank" title="重庆师范大学重庆柴可夫斯基音乐学院正式揭牌"></a>
+                    &nbsp;
+                    <br>&nbsp;<a href="info/1074/1060.htm" target="_blank">[详细]</a>
+        
+            
+        <article class="headline-stage-slide is-active" aria-hidden="false" data-slide="" data-sort-order="1" data-record-id="conservatory-opening-20260327"><!-- BODA_FIELD: sort_order END --><!-- BODA_FIELD: id END -->
+          <!-- BODA_FIELD: featured START --><span class="sr-only" data-featured="true">featured</span><!-- BODA_FIELD: featured END -->
+          <!-- BODA_FIELD: cover_image START --><img width="947" height="624" class="stage-media" alt="重庆师范大学重庆柴可夫斯基音乐学院正式揭牌" src="/__local/0/12/21/E0E3078878585172C5639309731_6A2C0A10_1A8A3.jpg" onload="cutImg(this,'autocut')" data-depth-plane="background" data-fallback-src="assets/brand/logo-seal-gold.png"><!-- BODA_FIELD: cover_image END -->
+          <div class="stage-scrim" aria-hidden="true"></div>
+          <div class="container stage-copy" data-depth-plane="headline">
+            <p class="stage-meta"><!-- BODA_FIELD: category START --><span>学院要闻</span><!-- BODA_FIELD: category END --><!-- BODA_FIELD: publish_date START --><time datetime="2026/09/12">2026/09/12</time><!-- BODA_FIELD: publish_date END --></p>
+            <!-- BODA_FIELD: title START --><h1 id="home-title">重庆师范大学重庆柴可夫斯基音乐学院正式揭牌</h1><!-- BODA_FIELD: title END -->
+            <!-- BODA_FIELD: summary START --><p class="stage-summary">3月19日，由重庆师范大学与莫斯科国立柴可夫斯基音乐学院合作举办的中外合作办学机构正式揭牌。</p><!-- BODA_FIELD: summary END -->
+            <div class="stage-actions">
+              <!-- BODA_FIELD: detail_url START --><a class="button button-primary stage-cta" href="info/1074/1060.htm" data-magnetic="">查看详情</a><!-- BODA_FIELD: detail_url END -->
+              <button class="score-experience" aria-pressed="false" aria-label="体验《天鹅湖》" type="button" data-label-replay="再次体验" data-label-playing="停止演奏" data-label-idle="体验《天鹅湖》" data-score-experience=""><span class="experience-icon" aria-hidden="true"></span><span class="experience-copy"><small>SWAN LAKE</small><strong>体验《天鹅湖》</strong></span></button>
+            </div>
+          </div>
+        </article>
+                    <a href="info/1074/1063.htm" target="_blank" title="今夜，重庆两江之上奏响中俄音乐盛会"></a>
+                    &nbsp;
+                    <br>&nbsp;<a href="info/1074/1063.htm" target="_blank">[详细]</a>
+        
+            
+        <article class="headline-stage-slide is-active" aria-hidden="false" data-slide="" data-sort-order="1" data-record-id="conservatory-opening-20260327"><!-- BODA_FIELD: sort_order END --><!-- BODA_FIELD: id END -->
+          <!-- BODA_FIELD: featured START --><span class="sr-only" data-featured="true">featured</span><!-- BODA_FIELD: featured END -->
+          <!-- BODA_FIELD: cover_image START --><img width="947" height="624" class="stage-media" alt="今夜，重庆两江之上奏响中俄音乐盛会" src="/__local/B/FF/4A/C7418FA7CE9C915BC9027C39246_DD824C6C_1E8F8.jpg" onload="cutImg(this,'autocut')" data-depth-plane="background" data-fallback-src="assets/brand/logo-seal-gold.png"><!-- BODA_FIELD: cover_image END -->
+          <div class="stage-scrim" aria-hidden="true"></div>
+          <div class="container stage-copy" data-depth-plane="headline">
+            <p class="stage-meta"><!-- BODA_FIELD: category START --><span>演出回顾</span><!-- BODA_FIELD: category END --><!-- BODA_FIELD: publish_date START --><time datetime="2026/09/12">2026/09/12</time><!-- BODA_FIELD: publish_date END --></p>
+            <!-- BODA_FIELD: title START --><h1 id="home-title">今夜，重庆两江之上奏响中俄音乐盛会</h1><!-- BODA_FIELD: title END -->
+            <!-- BODA_FIELD: summary START --><p class="stage-summary">“乐融中俄·新韵重庆”游轮音乐会以两江为幕、音乐为桥，呈现中俄经典艺术与巴渝文化的交流互鉴。“乐融中俄·新韵重庆”游轮音乐会以两江为幕、音乐为桥，...</p><!-- BODA_FIELD: summary END -->
+            <div class="stage-actions">
+              <!-- BODA_FIELD: detail_url START --><a class="button button-primary stage-cta" href="info/1074/1063.htm" data-magnetic="">查看详情</a><!-- BODA_FIELD: detail_url END -->
+              <button class="score-experience" aria-pressed="false" aria-label="体验《天鹅湖》" type="button" data-label-replay="再次体验" data-label-playing="停止演奏" data-label-idle="体验《天鹅湖》" data-score-experience=""><span class="experience-icon" aria-hidden="true"></span><span class="experience-copy"><small>SWAN LAKE</small><strong>体验《天鹅湖》</strong></span></button>
+            </div>
+          </div>
+        </article>
+        
+                    <a href="info/1074/1062.htm" target="_blank" title="以声筑桥：重师柴可夫斯基音乐学院首届“未来之声”唱响"></a>
+                    &nbsp;
+                    <br>&nbsp;<a href="info/1074/1062.htm" target="_blank">[详细]</a>
+        
+            
+        <article class="headline-stage-slide is-active" aria-hidden="false" data-slide="" data-sort-order="1" data-record-id="conservatory-opening-20260327"><!-- BODA_FIELD: sort_order END --><!-- BODA_FIELD: id END -->
+          <!-- BODA_FIELD: featured START --><span class="sr-only" data-featured="true">featured</span><!-- BODA_FIELD: featured END -->
+          <!-- BODA_FIELD: cover_image START --><img width="947" height="624" class="stage-media" alt="以声筑桥：重师柴可夫斯基音乐学院首届“未来之..." src="/__local/D/89/99/B209A096DC5BA95579AE011F6B1_0264901A_1AB18.jpg" onload="cutImg(this,'autocut')" data-depth-plane="background" data-fallback-src="assets/brand/logo-seal-gold.png"><!-- BODA_FIELD: cover_image END -->
+          <div class="stage-scrim" aria-hidden="true"></div>
+          <div class="container stage-copy" data-depth-plane="headline">
+            <p class="stage-meta"><!-- BODA_FIELD: category START --><span>艺术活动</span><!-- BODA_FIELD: category END --><!-- BODA_FIELD: publish_date START --><time datetime="2026/09/12">2026/09/12</time><!-- BODA_FIELD: publish_date END --></p>
+            <!-- BODA_FIELD: title START --><h1 id="home-title">以声筑桥：重师柴可夫斯基音乐学院首届“未来之...</h1><!-- BODA_FIELD: title END -->
+            <!-- BODA_FIELD: summary START --><p class="stage-summary">5月17日，首届“未来之声”青少年合唱比赛在重庆师范大学大学城校区举行，全市18所中小学合唱队伍参加。</p><!-- BODA_FIELD: summary END -->
+            <div class="stage-actions">
+              <!-- BODA_FIELD: detail_url START --><a class="button button-primary stage-cta" href="info/1074/1062.htm" data-magnetic="">查看详情</a><!-- BODA_FIELD: detail_url END -->
+              <button class="score-experience" aria-pressed="false" aria-label="体验《天鹅湖》" type="button" data-label-replay="再次体验" data-label-playing="停止演奏" data-label-idle="体验《天鹅湖》" data-score-experience=""><span class="experience-icon" aria-hidden="true"></span><span class="experience-copy"><small>SWAN LAKE</small><strong>体验《天鹅湖》</strong></span></button>
+            </div>
+          </div>
+        </article>
+                    <a href="info/1074/1061.htm" target="_blank" title="重庆市教委到校指导重庆师范大学重庆柴可夫斯基音乐学院办学筹备工作"></a>
+                    &nbsp;
+                    <br>&nbsp;<a href="info/1074/1061.htm" target="_blank">[详细]</a>
+        
+            
+        <article class="headline-stage-slide is-active" aria-hidden="false" data-slide="" data-sort-order="1" data-record-id="conservatory-opening-20260327"><!-- BODA_FIELD: sort_order END --><!-- BODA_FIELD: id END -->
+          <!-- BODA_FIELD: featured START --><span class="sr-only" data-featured="true">featured</span><!-- BODA_FIELD: featured END -->
+          <!-- BODA_FIELD: cover_image START --><img width="947" height="624" class="stage-media" alt="重庆市教委到校指导重庆师范大学重庆柴可夫斯基..." src="/__local/E/B8/2F/436665D01D54C7EA3D2DBCC0869_23586F3A_9C2A2.png" onload="cutImg(this,'autocut')" data-depth-plane="background" data-fallback-src="assets/brand/logo-seal-gold.png"><!-- BODA_FIELD: cover_image END -->
+          <div class="stage-scrim" aria-hidden="true"></div>
+          <div class="container stage-copy" data-depth-plane="headline">
+            <p class="stage-meta"><!-- BODA_FIELD: category START --><span>学院建设</span><!-- BODA_FIELD: category END --><!-- BODA_FIELD: publish_date START --><time datetime="2026/09/12">2026/09/12</time><!-- BODA_FIELD: publish_date END --></p>
+            <!-- BODA_FIELD: title START --><h1 id="home-title">重庆市教委到校指导重庆师范大学重庆柴可夫斯基...</h1><!-- BODA_FIELD: title END -->
+            <!-- BODA_FIELD: summary START --><p class="stage-summary">6月23日，重庆市教委到校召开学院招生办学工作现场会，指导首届招生和启动办学筹备工作。</p><!-- BODA_FIELD: summary END -->
+            <div class="stage-actions">
+              <!-- BODA_FIELD: detail_url START --><a class="button button-primary stage-cta" href="info/1074/1061.htm" data-magnetic="">查看详情</a><!-- BODA_FIELD: detail_url END -->
+              <button class="score-experience" aria-pressed="false" aria-label="体验《天鹅湖》" type="button" data-label-replay="再次体验" data-label-playing="停止演奏" data-label-idle="体验《天鹅湖》" data-score-experience=""><span class="experience-icon" aria-hidden="true"></span><span class="experience-copy"><small>SWAN LAKE</small><strong>体验《天鹅湖》</strong></span></button>
+            </div>
+          </div>
+        </article>
+    </div>
+    <div class="zh-hero-r5-foreground" aria-hidden="true"><span></span><i></i></div>
+    <div class="living-score" aria-label="Swan Lake Interactive Score" data-depth-plane="staff" data-living-score="">
+      <svg xmlns="http://www.w3.org/2000/svg" class="living-score-lines" aria-hidden="true" viewbox="0 0 1200 300" preserveaspectratio="none meet">
+        <path d="M 0 74 C 240 66 340 82 570 72 S 950 54 1200 70" />
+        <path d="M 0 106 C 230 98 360 116 590 104 S 960 88 1200 102" />
+        <path d="M 0 138 C 220 130 370 150 610 136 S 970 124 1200 134" />
+        <path d="M 0 170 C 210 162 380 184 630 168 S 980 158 1200 166" />
+        <path d="M 0 202 C 200 194 390 218 650 200 S 990 192 1200 198" />
+      </svg>
+
+    </div>
+    <div class="living-score-notes playable-score-notes" role="group" aria-label="Swan Lake playable notes" data-playable-score=""><button class="score-note" aria-label="触碰音符 1" type="button" data-frequency="493.88" data-note-index="0" data-score-note=""><span aria-hidden="true"></span></button><button class="score-note" aria-label="触碰音符 2" type="button" data-frequency="554.37" data-note-index="1" data-score-note=""><span aria-hidden="true"></span></button><button class="score-note" aria-label="触碰音符 3" type="button" data-frequency="587.33" data-note-index="2" data-score-note=""><span aria-hidden="true"></span></button><button class="score-note" aria-label="触碰音符 4" type="button" data-frequency="659.25" data-note-index="3" data-score-note=""><span aria-hidden="true"></span></button><button class="score-note" aria-label="触碰音符 5" type="button" data-frequency="739.99" data-note-index="4" data-score-note=""><span aria-hidden="true"></span></button><button class="score-note" aria-label="触碰音符 6" type="button" data-frequency="783.99" data-note-index="5" data-score-note=""><span aria-hidden="true"></span></button><button class="score-note" aria-label="触碰音符 7" type="button" data-frequency="880" data-note-index="6" data-score-note=""><span aria-hidden="true"></span></button><button class="score-note" aria-label="触碰音符 8" type="button" data-frequency="466.16" data-note-index="7" data-score-note=""><span aria-hidden="true"></span></button></div>
+
+    <svg xmlns="http://www.w3.org/2000/svg" class="swan-trajectory swan-trajectory-deep" aria-hidden="true" viewbox="0 0 1000 420" preserveaspectratio="none meet" focusable="false" data-swan-trajectory="deep"><path pathlength="1" data-swan-trajectory-path="" /></svg>
+    <svg xmlns="http://www.w3.org/2000/svg" class="swan-trajectory swan-trajectory-front" aria-hidden="true" viewbox="0 0 1000 420" preserveaspectratio="none meet" focusable="false" data-swan-trajectory="front"><path pathlength="1" data-swan-trajectory-path="" /></svg>
+
+    <div class="stage-foreground-r4" aria-hidden="true" data-depth-plane="foreground"><span></span><i></i></div>
+    <div class="stage-identity container" aria-hidden="true"><span>重庆师范大学中俄合作办学机构</span></div>
+    <div class="stage-console container">
+      <button class="stage-step" aria-label="上一项" type="button" data-carousel-prev="">←</button>
+      <div class="score-progress" aria-label="首页重点新闻">
+        <span class="score-progress-lines" aria-hidden="true"></span>
+        <button class="score-progress-node is-active" aria-label="重庆柴可夫斯基音乐学院正式揭牌" type="button" aria-current="true" data-carousel-dot=""><span></span></button><button class="score-progress-node " aria-label="市教委到校指导学院办学筹备工作" type="button" aria-current="false" data-carousel-dot=""><span></span></button><button class="score-progress-node " aria-label="首届“未来之声”青少年合唱比赛举行" type="button" aria-current="false" data-carousel-dot=""><span></span></button><button class="score-progress-node " aria-label="两江之上奏响中俄音乐盛会" type="button" aria-current="false" data-carousel-dot=""><span></span></button>
+        <span class="score-playhead" aria-hidden="true"></span>
+      </div>
+      <button class="stage-pause" aria-label="暂停头条轮播" type="button" data-play-text="继续" data-pause-text="暂停" data-carousel-pause="">暂停</button>
+      <button class="stage-step" aria-label="下一项" type="button" data-carousel-next="">→</button>
+      <button class="sound-experience" aria-pressed="false" aria-label="开启声音体验" type="button" data-aria-on="关闭声音体验" data-aria-off="开启声音体验" data-label-on="静音" data-label-off="开启声音" data-sound-toggle="">开启声音</button>
+    </div>
+    <div class="music-pulse" aria-hidden="true" data-music-pulse=""><span></span></div>
+    <div class="score-transition" aria-hidden="true"><span></span></div>
+    <p class="visually-hidden" aria-live="polite" data-score-status="" data-completed="演奏完成，可再次体验" data-stopped="演奏已停止" data-playing="正在演奏天鹅湖主题短动机" data-idle="天鹅湖互动乐谱已就绪">天鹅湖互动乐谱已就绪</p>
+    <noscript>&lt;div class="no-js-headlines container"&gt;&lt;a href="events/news-list.html#news-conservatory-opening-20260327"&gt;&lt;time datetime="2026-03-27"&gt;2026.03.27&lt;/time&gt;&lt;span&gt;重庆师范大学重庆柴可夫斯基音乐学院正式揭牌&lt;/span&gt;&lt;/a&gt;&lt;a href="events/article.html"&gt;&lt;time datetime="2026-06-24"&gt;2026.06.24&lt;/time&gt;&lt;span&gt;重庆市教委到校指导重庆师范大学重庆柴可夫斯基音乐学院办学筹备工作&lt;/span&gt;&lt;/a&gt;&lt;a href="events/news-list.html#news-future-voices-20260518"&gt;&lt;time datetime="2026-05-18"&gt;2026.05.18&lt;/time&gt;&lt;span&gt;以声筑桥：重师柴可夫斯基音乐学院首届“未来之声”唱响&lt;/span&gt;&lt;/a&gt;&lt;a href="events/news-list.html#news-china-russia-concert-20260401"&gt;&lt;time datetime="2026-04-01"&gt;2026.04.01&lt;/time&gt;&lt;span&gt;今夜，重庆两江之上奏响中俄音乐盛会&lt;/span&gt;&lt;/a&gt;&lt;/div&gt;</noscript><script>_showDynClickBatch(['dynclicks_u1_1060','dynclicks_u1_1063','dynclicks_u1_1062','dynclicks_u1_1061'],[1060,1063,1062,1061],"wbnews", 2082392417)</script>
+
+  </section>
+  <section class="section latest-updates surface-paper movement-section hierarchy-level-2" aria-labelledby="latest-news-title" data-movement="I">
+    <div class="container latest-updates-shell">
+      <div class="home-section-heading latest-updates-heading reveal-mask">
+        <h2 id="latest-news-title">最新动态</h2>
+        <p>按发布时间查看学院最近发生的活动、教学、合作与艺术实践。</p>
+        <a class="text-link" href="zwlm/dtzl/xinwen.htm">全部新闻</a>
+      </div>
+      <!-- BODA_SLOT: ARTICLE_LIST START -->
+      <!-- BODA_SLOT: HOME_LATEST_NEWS START -->
+      <!-- BODA_SAMPLE_DATA: HOME_LATEST_NEWS; source=static-preview/assets/data/boda-samples/news.json; sample_only=true; do_not_publish=true -->
+      <div class="latest-editorial-layout">
+        <!-- BODA_ITEM: NEWS START -->
+        <article class="latest-feature reveal-media" data-depth-card="">
+                <a class="latest-feature-image" href="info/1106/1127.htm" data-depth-media="">
+            <img width="875" height="492" alt="@2026 级重柴新同学｜新生报到指南已送达，请查收！" src="/__local/E/B8/2F/436665D01D54C7EA3D2DBCC0869_23586F3A_9C2A2.png" data-fallback-src="assets/brand/logo-horizontal-white.png" loading="lazy" onload="cutImg(this,'autocut')">
+        </a>
+        <div class="latest-feature-copy" data-depth-copy="">
+            <p class="latest-feature-meta"><span>公告</span><timed atetime="2026/09/15">2026/09/15</time></p>
+            <h3><a href="info/1106/1127.htm">@2026 级重柴新同学｜新生报到指南已送达，请查收！</a></h3>
+            <p>哈喽，2026级重柴学子们：金秋赴约，乐章新启✨！期待已久的...</p>
+        </div>
+<script>_showDynClickBatch(['dynclicks_u2_1127'],[1127],"wbnews", 2082392417)</script>
+
+        </article>        
+        <!-- BODA_ITEM: NEWS END -->
+        <div class="latest-news-list latest-stream" aria-label="最新动态">
+          <!-- BODA_ITEM: NEWS START -->
+          
+        <script language="javascript" src="/system/resource/js/ajax.js"></script><a class="latest-news-item reveal-date" href="info/1106/1190.htm" title="勿忘国耻 吾辈自强丨纪念九一八事变"><span class="latest-stream-index">02</span><time datetime="2026/09/17">2026/09/17</time><strong>勿忘国耻 吾辈自强丨纪念九一八事变</strong><span>公告</span></a>
+<a class="latest-news-item reveal-date" href="info/1086/1189.htm" title="中俄青年聚山城，文化交流促友谊"><span class="latest-stream-index">03</span><time datetime="2026/09/17">2026/09/17</time><strong>中俄青年聚山城，文化交流促友谊</strong><span>合作交流</span></a>
+<a class="latest-news-item reveal-date" href="info/1085/1188.htm" title="中俄音乐交融渝夜"><span class="latest-stream-index">04</span><time datetime="2026/09/17">2026/09/17</time><strong>中俄音乐交融渝夜</strong><span>艺术活动</span></a>
+<a class="latest-news-item reveal-date" href="info/1085/1183.htm" title="音乐为桥联两河|中俄“两河一路”音乐展演之旅在渝举行"><span class="latest-stream-index">05</span><time datetime="2026/09/17">2026/09/17</time><strong>音乐为桥联两河|中俄“两河一路”音乐展...</strong><span>艺术活动</span></a>
+<script>_showDynClickBatch(['dynclicks_u3_1190','dynclicks_u3_1189','dynclicks_u3_1188','dynclicks_u3_1183'],[1190,1189,1188,1183],"wbnews", 2082392417)</script>
+
+          
+          <!-- BODA_ITEM: NEWS END -->
+        </div>
+      </div>
+      <!-- BODA_SLOT: HOME_LATEST_NEWS END -->
+      <!-- BODA_SLOT: ARTICLE_LIST END -->
+    </div>
+  </section>
+
+
+  <section class="section programme-desk movement-section hierarchy-level-3 home-release" aria-labelledby="programme-desk-title" data-movement="II">
+    <div class="container release-layout">
+      <div class="home-section-heading release-heading reveal-mask"><h2 id="programme-desk-title">学院发布</h2><p>集中查阅学院正式发布的招生、演出与学术信息。</p></div>
+      <!-- BODA_SLOT: HOME_RELEASES START -->
+      <!-- BODA_SAMPLE_DATA: HOME_RELEASES; source=static-preview/assets/data/boda-samples/notices.json; sample_only=true; do_not_publish=true; related_samples=performances.json,research-directory.json -->
+      <div class="release-ledger">
+        <a class="release-item release-admissions" href="zwlm/jiaoxue/nspbkzs.htm"><span class="release-type">招生与通知</span><time datetime="2026-04-14">2026.04.14</time><strong>2026年音乐类本科专业招生信息</strong><span class="release-arrow" aria-hidden="true">→</span></a>
+        <a class="release-item release-performance" href="zwlm/ycyg.htm"><span class="release-type">演出发布</span><strong>后续演出安排以学院官方发布为准。正式日程将在此更新。</strong><span class="release-arrow" aria-hidden="true">→</span><!-- CONTENT_PENDING: 等待甲方提供正式演出数据 --></a>
+        <a class="release-item release-academic" href="zwlm/keyan.htm"><span class="release-type">学术通知</span><strong>科研项目、学术会议、成果与出版信息以学院正式发布内容为准。</strong><span class="release-arrow" aria-hidden="true">→</span><!-- CONTENT_PENDING: 等待甲方提供学术动态 --></a>
+      </div>
+      <!-- BODA_SLOT: HOME_RELEASES END -->
+    </div>
+  </section>
+
+  <section class="section home-education surface-paper movement-section hierarchy-level-3" aria-labelledby="home-education-title" data-movement="III">
+    <div class="container education-layout">
+      <div class="editorial-lead education-heading reveal-mask"><h2 id="home-education-title">教学与招生</h2><p>两个中外合作办学本科专业，共享国际师资与舞台实践资源。</p><a class="text-link" href="zwlm/jiaoxue/nspbkzs.htm">查看详情</a></div>
+      <div class="education-pathways reveal-media">
+        <a class="education-primary" href="zwlm/jiaoxue/nspbkzs.htm"><span class="section-index">03</span><span><small>ADMISSIONS 2026</small><strong>2026本科招生</strong><p>计划、招录、收费与证书说明</p></span><span aria-hidden="true">→</span></a>
+        <div class="education-secondary">
+              <a class="directory-item" href="info/1094/1093.htm"><span class="section-index">01</span><span><strong>音乐表演（中外合作办学）</strong><p>培养方向与教学资源</p></span><span aria-hidden="true">→</span></a>
+  <a class="directory-item" href="info/1094/1092.htm"><span class="section-index">02</span><span><strong>音乐学（中外合作办学）</strong><p>培养方向与教学资源</p></span><span aria-hidden="true">→</span></a>
+<script>_showDynClickBatch(['dynclicks_u4_1093','dynclicks_u4_1092'],[1093,1092],"wbnews", 2082392417)</script>
+
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- BODA_SLOT: HOME_CURATED_FEATURES START -->
+  <!-- BODA_SAMPLE_DATA: HOME_CURATED_FEATURES; source=static-preview/assets/data/boda-samples/gallery.json; sample_only=true; do_not_publish=true; curated_placement_only=true -->
+  <section class="media-story home-stage movement-section hierarchy-level-4" aria-labelledby="home-stage-title" data-movement="IV">
+    <img width="1024" height="768" class="media-story-image" alt="两江之上奏响中俄音乐盛会" src="assets/images/news-china-russia-concert-20260401.jpg" data-fallback-src="assets/brand/logo-seal-gold.png" loading="lazy">
+    <div class="media-story-depth" aria-hidden="true"><img width="1024" height="682" alt="" src="assets/images/news-future-voices-20260518.jpg" loading="lazy"></div>
+    <div class="media-story-scrim" aria-hidden="true"></div>
+    <div class="container media-story-copy reveal-mask"><h2 id="home-stage-title">现场与舞台</h2><p>精选音乐会、演出与艺术实践现场，呈现音乐学院的舞台特色。</p><a class="button button-ghost" href="zwlm/ycyg.htm">查看全部</a></div>
+  </section>
+ <section class="section surface-paper home-people home-gallery movement-section hierarchy-level-4" aria-labelledby="home-gallery-title" data-movement="V">
+    <div class="container gallery-layout">
+      <div class="people-copy gallery-copy reveal-mask"><h2 id="home-gallery-title">影像纪实</h2><p>精选学院建设、合作交流与活动现场影像，保留值得回看的学院瞬间。</p><a class="text-link" href="zwlm/dtzl/hdjs.htm">查看影像纪实</a></div>
+      <div class="gallery-mosaic reveal-media">
+        <a class="gallery-frame gallery-frame-main" href="zwlm/dtzl/hdjs.htm"><img width="1280" height="853" alt="学院召开联合管理委员会第一次会议" src="assets/images/news-joint-committee-20260320.jpg" data-fallback-src="assets/brand/logo-seal-gold.png" loading="lazy"></a>
+        <a class="gallery-frame" href="zwlm/dtzl/hdjs.htm"><img width="947" height="624" alt="重庆柴可夫斯基音乐学院正式揭牌" src="assets/images/news-conservatory-opening-20260327.png" data-fallback-src="assets/brand/logo-seal-gold.png" loading="lazy"></a>
+        <a class="gallery-frame" href="zwlm/dtzl/hdjs.htm"><img width="1024" height="682" alt="首届“未来之声”青少年合唱比赛举行" src="assets/images/news-future-voices-20260518.jpg" data-fallback-src="assets/brand/logo-seal-gold.png" loading="lazy"></a>
+      </div>
+    </div>
+  </section>
+  <!-- BODA_SLOT: HOME_CURATED_FEATURES END -->
+  </main>
+  <!-- BODA_COMPONENT: FOOTER START -->
+ <footer class="site-footer">
+    <div class="container footer-grid">
+        <div class="footer-brand">
+            <img width="692" height="205" alt="重庆师范大学重庆柴可夫斯基音乐学院" src="/system/_owners/cy/_webprj/assets/brand/logo-trilingual-horizontal-gold.png" loading="lazy" />
+            <p class="footer-intro">
+                
+                经教育部批准，由重庆师范大学与俄罗斯莫斯科国立柴可夫斯基音乐学院合作创办的非独立法人中外合作办学机构。
+            </p>
+        </div>
+        <div class="footer-column">
+            <strong>栏目入口</strong>
+            <ul>
+                <li>
+                    <a href="zwlm/dtzl.htm">动态</a>
+                </li>
+                <li>
+                    <a href="zwlm/jiaoxue.htm">教学</a>
+                </li>
+                <li>
+                    <a href="zwlm/keyan.htm">科研</a>
+                </li>
+                <li>
+                    <a href="zwlm/hezuo.htm">合作</a>
+                </li>
+            </ul>
+        </div>
+        <div class="footer-column">
+            <strong>招生咨询</strong>
+            <ul>
+                <li>
+                    重庆市沙坪坝区大学城中路37号
+                </li>
+                <li>
+                    023-65913998 / 023-65918389
+                </li>
+                <li>
+                    <a href="zwlm/jiaoxue/nspbkzs.htm">官方网站</a>
+                </li>
+            </ul>
+        </div>
+    </div>
+    <div class="footer-bottom">
+        <div class="container">
+            <p>
+                © 2026 重庆师范大学重庆柴可夫斯基音乐学院
+            </p>
+            <p>
+                重庆师范大学中俄合作办学机构
+            </p>
+        </div>
+    </div>
+</footer>
+    <button class="back-to-top" aria-label="返回顶部" type="button" data-back-to-top="">↑</button>
+  <!-- BODA_COMPONENT: FOOTER END -->
+<script type="text/javascript">
+document.addEventListener('DOMContentLoaded', function(){
+    var activeIndex = 1;
+    var selector = ".primary-nav > ul > li:nth-child(" + activeIndex + ") > a";
+    var activeLink = document.querySelector(selector);
+    if(activeLink){
+        activeLink.setAttribute("aria-current","page");
+    }
+})
+</script>
+
+</body></html>

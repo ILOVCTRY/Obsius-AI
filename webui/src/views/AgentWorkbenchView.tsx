@@ -9,6 +9,7 @@ import {
 import { api, ApiError } from "@/lib/api"
 import type {
   AttachmentInfo, ChatAgent, ChatMcpServer, ChatMessage, ChatThread, ChatThreadError,
+  ModelInfo,
 } from "@/lib/types"
 import type { Approval, DecideApprovalResult, ProjectDetail } from "@/lib/types"
 import { MarkdownView } from "@/components/settings/MarkdownView"
@@ -40,10 +41,8 @@ import { useEvents } from "@/lib/useEvents"
 
 const ORCHESTRATOR = "chat-orchestrator"
 const CHIPS = [
-  "对目标站点做信息收集与资产测绘",
-  "测试目标网站是否存在 SQL 注入漏洞",
-  "检测目标系统的水平越权漏洞",
-  "扫描目标目录与敏感信息泄露",
+  "对资产进行去重",
+  "对未测尽的资产继续进行测试",
 ]
 
 type PanelTab = "agents" | "skills" | "mcp" | null
@@ -98,6 +97,12 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
   const [skills, setSkills] = useState<{ name: string; description: string }[]>([])
   const [mcpServers, setMcpServers] = useState<ChatMcpServer[]>([])
   const [agentMenuOpen, setAgentMenuOpen] = useState(false)
+  // 线程级模型（v37，2026-10-13）：modelInfo=全局供应商/模型清单（懒拉一次）；
+  // modelDraft=新建态（tid=null）的选择，创建线程时随 ChatThreadIn 带上。
+  const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null)
+  const [modelPopOpen, setModelPopOpen] = useState(false)
+  const [popProvider, setPopProvider] = useState("")
+  const [modelDraft, setModelDraft] = useState<{ provider: string; model: string } | null>(null)
   const [asideWidth, setAsideWidth] = useState(ASIDE_DEFAULT)
   const [dragging, setDragging] = useState(false)
   const dragOrigin = useRef<{ x: number; w: number } | null>(null)
@@ -129,6 +134,36 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
 
   const currentAgent = agents.find((a) => a.id === agentId)
 
+  // ---- 线程级模型（v37，2026-10-13）----
+  // 当前生效的模型 = 已选线程的覆写 → 未选（新建态）取草稿；空=跟随全局 executor。
+  const enabledProviders = useMemo(
+    () => (modelInfo?.providers ?? []).filter((p) => p.enabled), [modelInfo])
+  const activeModel = useMemo(
+    () => (tid
+      ? { provider: thread?.provider ?? "", model: thread?.model ?? "" }
+      : modelDraft ?? { provider: "", model: "" }),
+    [tid, thread?.provider, thread?.model, modelDraft])
+  const modelLabel = activeModel.provider
+    ? (activeModel.model || `${activeModel.provider} 默认`)
+    : "默认模型"
+  const openModelPop = () => {
+    setPopProvider(activeModel.provider || enabledProviders[0]?.name || "")
+    setModelPopOpen((v) => !v)
+  }
+  // 选定即切：已选线程走 PUT（坏值 422 不落盘），新建态先存草稿、创建线程时带上。
+  const chooseModel = useCallback(async (provider: string, model: string) => {
+    setModelPopOpen(false)
+    if (!tid) { setModelDraft({ provider, model }); return }
+    try {
+      const t = await api.chatThreadLlm(tid, provider, model)
+      setThread((cur) => (cur ? { ...cur, provider: t.provider, model: t.model } : cur))
+      setThreads((ts) => ts.map((x) => (x.id === tid
+        ? { ...x, provider: t.provider, model: t.model } : x)))
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : "切换模型失败")
+    }
+  }, [tid])
+
   // 分割线拖宽：mousedown 记起点，document mousemove 调宽，mouseup 收尾
   const onSplitterDown = (e: ReactMouseEvent<HTMLDivElement>) => {
     e.preventDefault()
@@ -159,6 +194,13 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
     api.chatAgents(pid).then((as) => { if (alive) setAgents(as) }).catch(() => {})
     return () => { alive = false }
   }, [pid])
+
+  // 供应商/模型清单（线程级模型选择浮层的数据源，v37）：全局口径，拉一次即可
+  useEffect(() => {
+    let alive = true
+    api.models().then((m) => { if (alive) setModelInfo(m) }).catch(() => {})
+    return () => { alive = false }
+  }, [])
 
   const reloadThreads = useCallback((aid: string) => {
     api.chatThreads(pid, aid).then(setThreads).catch(() => setThreads([]))
@@ -382,22 +424,20 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
         { key: "messages", label: "会话消息", tokens: bk.messages, cls: "seg-msgs" },
       ] as const).filter((s) => s.tokens > 0)
     : []
-  // 缓存命中（2026-10-13）：口径同 core/autonomy.py::_cache_hit——命中率 =
-  // cache_read / input（input = 未缓存 + 缓存读 + 缓存写，见 core/chat/runtime.py）。
-  // 主=当步，附=累计（cache_read_total / input_total）。首步冷缓存必 0%。
+  // 缓存命中（2026-10-13）：口径 = **累计**（跨步自加，见 core/chat/runtime.py）——
+  // 命中率 = cache_read_total / input_total，分段 token 同样取累计读/写/未缓存。
+  // 首步冷缓存必 0%，显「首步」而非 0%。
   const cache = (() => {
-    const total = usage?.input ?? 0
+    const total = usage?.input_total ?? 0
     if (!usage || total <= 0) return null
-    const read = usage.cache_read ?? 0
-    const write = usage.cache_creation ?? 0
+    const read = usage.cache_read_total ?? 0
+    const write = usage.cache_creation_total ?? 0
     const uncached = Math.max(0, total - read - write)
     const pct = (n: number) => Math.round((n / total) * 100)
     const hitPct = pct(read)
-    const totalIn = usage.input_total ?? 0
     return {
       hitPct,
       cold: (usage.steps ?? 0) <= 1,
-      totalPct: totalIn > 0 ? Math.round(((usage.cache_read_total ?? 0) / totalIn) * 100) : 0,
       level: hitPct >= 60 ? "is-ok" : hitPct >= 30 ? "is-warn" : "is-high",
       segs: [
         { key: "read", label: "缓存读", tokens: read, pct: pct(read), cls: "seg-cache-read" },
@@ -407,8 +447,10 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
     }
   })()
 
-  // 切线程时收起斜杠面板与用量浮层
-  useEffect(() => { setUsageOpen(false); setSlash(null) }, [tid])
+  // 切线程时收起斜杠面板与用量浮层；模型浮层同理，且新建态草稿由线程自身接管
+  useEffect(() => {
+    setUsageOpen(false); setSlash(null); setModelPopOpen(false); setModelDraft(null)
+  }, [tid])
 
   // chat.message(user) 事件到达 → 立即补拉一次线程详情（比 2s 轮询快）。
   // **不在这里清 pendingIn**——清除只发生在 load() 确认该消息已进 messages 之后，
@@ -469,7 +511,9 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
     try {
       let id = tid
       if (!id) {
-        const t = await api.chatThreadCreate(pid, agentId)
+        // 新建线程时带上新建态选的模型（v37；空=跟随全局默认）
+        const t = await api.chatThreadCreate(pid, agentId, undefined,
+                                             modelDraft?.provider, modelDraft?.model)
         id = t.id; setTid(id)
       }
       await api.chatSend(id, body, refs, readyIds)
@@ -481,7 +525,7 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
       setErr(e instanceof Error ? e.message : String(e))
     }
     finally { setSending(false); inputRef.current?.focus() }
-  }, [input, sending, tid, pid, agentId, refsDraft, pendingFiles])
+  }, [input, sending, tid, pid, agentId, refsDraft, pendingFiles, modelDraft])
 
   const removeThread = useCallback(async (id: string) => {
     try {
@@ -863,17 +907,17 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
                     ) : (
                       <div className="wb-usage-bar"><i className={usageLevel} style={{ width: `${usagePct}%` }} />{showSoftLine && <i className="seg-soft" style={{ left: `${softLeftPct}%` }} />}</div>
                     )}
-                    {/* 缓存命中（2026-10-13）：第二根分段条——把本轮输入拆成
-                        缓存读/缓存写/未缓存；大号命中率贴条上方（当步口径），
-                        右附累计。首步冷缓存显「首步」而非 0%。 */}
+                    {/* 缓存命中（2026-10-13）：第二根分段条——口径为**累计**（跨步自加）
+                        的缓存读/写/未缓存；大号命中率 = cache_read_total / input_total，
+                        右附累计步数。首步冷缓存显「首步」。 */}
                     {cache && (
                       <div className="mt-2 border-t border-border/50 pt-2">
                         <div className="wb-usage-head-row">
-                          <b className="wb-usage-total">缓存命中
+                          <b className="wb-usage-total">总缓存命中
                             <span className={cn("wb-usage-pct-big ml-1", cache.level)}>{cache.hitPct}%</span>
                           </b>
                           <span className="wb-thread-meta">
-                            {cache.cold ? "首步（冷缓存）" : `累计 ${cache.totalPct}%`}
+                            {cache.cold ? "首步（冷缓存）" : `累计 ${usage.steps ?? 0} 步`}
                           </span>
                         </div>
                         <div className="wb-usage-segs" role="img" aria-label="缓存构成分段条">
@@ -917,6 +961,7 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
             </div>
           )}
 
+          <div className="wb-composer-wrap">
           <div className="wb-composer"
                onDragOver={(e) => { e.preventDefault() }}
                onDrop={(e) => { e.preventDefault(); pickFiles(e.dataTransfer?.files ?? null) }}>
@@ -927,11 +972,6 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
                 </span>
                 {currentAgent?.name ?? agentId}
                 <ChevronDown size={11} className="opacity-70" />
-              </button>
-              <button className={cn("wb-usage", usageLevel)}
-                title="上下文用量（点击看明细，或输入 /context）" onClick={() => setUsageOpen((v) => !v)}>
-                <UsageRing pct={usagePct} />
-                <span className="wb-usage-pct">{usagePct}%</span>
               </button>
               <span className="wb-composer-status">
                 {(running || !!pendingIn || sending)
@@ -996,7 +1036,22 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
                   </button>
                 )
               })}
+              <button className={cn("wb-usage", usageLevel)}
+                title="上下文用量（点击看明细，或输入 /context）" onClick={() => setUsageOpen((v) => !v)}>
+                <UsageRing pct={usagePct} />
+                <span className="wb-usage-pct">{usagePct}%</span>
+              </button>
               <span className="wb-spacer" />
+              {/* 线程级模型按钮（v37，2026-10-13）：发送键左侧，点开供应商→模型浮层 */}
+              <button type="button" className={cn("wb-model", modelPopOpen && "is-active")}
+                title={activeModel.provider
+                  ? `当前线程模型：${activeModel.provider}/${activeModel.model || "（供应商默认）"}（点击更换）`
+                  : "当前线程跟随全局默认模型（点击指定）"}
+                onClick={openModelPop}>
+                <Cpu size={11} />
+                <span className="wb-model-name">{modelLabel}</span>
+                <ChevronDown size={10} className="opacity-70" />
+              </button>
               {running ? (
                 <button className="wb-send is-stop" onClick={() => void stop()}>
                   <Square size={11} /> 停止
@@ -1007,6 +1062,62 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
                 </button>
               )}
             </div>
+          </div>
+
+          {/* 模型选择浮层（v37）：供应商 → 展开该供应商模型；顶部「默认模型」= 清覆写。
+              浮层挂在 composer 外层 wrap（.wb-composer 有 overflow:hidden，不能内嵌）。 */}
+          {modelPopOpen && (
+            <>
+              <div className="wb-model-backdrop" onClick={() => setModelPopOpen(false)} />
+              <div className="wb-model-pop">
+                <button type="button"
+                  className={cn("wb-model-opt", !activeModel.provider && "is-current")}
+                  onClick={() => void chooseModel("", "")}>
+                  <span>默认模型（跟随全局）</span>
+                  {!activeModel.provider && <Check size={12} />}
+                </button>
+                <div className="wb-model-label">供应商 / 模型</div>
+                {!enabledProviders.length && (
+                  <div className="wb-model-hint">无启用的供应商（请在设置页配置）</div>
+                )}
+                {enabledProviders.map((p) => (
+                  <div key={p.name}>
+                    <button type="button"
+                      className={cn("wb-model-opt", popProvider === p.name && "is-open")}
+                      onClick={() => setPopProvider(popProvider === p.name ? "" : p.name)}>
+                      <span className="min-w-0 truncate">{p.name}</span>
+                      {activeModel.provider === p.name
+                        ? <span className="wb-model-tag">当前</span>
+                        : <ChevronDown size={11} className={cn("shrink-0 opacity-60",
+                            popProvider === p.name && "rotate-180")} />}
+                    </button>
+                    {popProvider === p.name && (
+                      <div className="wb-model-sub">
+                        {(p.models ?? []).map((m) => (
+                          <button key={m} type="button"
+                            className={cn("wb-model-opt",
+                              activeModel.provider === p.name && activeModel.model === m && "is-current")}
+                            onClick={() => void chooseModel(p.name, m)}>
+                            <span className="wb-model-opt-m min-w-0 truncate">{m}</span>
+                            {activeModel.provider === p.name && activeModel.model === m
+                              && <Check size={12} className="shrink-0" />}
+                          </button>
+                        ))}
+                        <button type="button"
+                          className={cn("wb-model-opt",
+                            activeModel.provider === p.name && !activeModel.model && "is-current")}
+                          onClick={() => void chooseModel(p.name, "")}>
+                          <span className="wb-model-opt-m">供应商默认模型</span>
+                          {activeModel.provider === p.name && !activeModel.model
+                            && <Check size={12} className="shrink-0" />}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
           </div>
 
           {panel && (

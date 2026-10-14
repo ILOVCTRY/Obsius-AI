@@ -36,6 +36,9 @@ const LogicBlocksView = lazy(() =>
 // 功能树视图（v36：分析阶段产物，独立于蓝图）按需切包
 const FeatureTreeView = lazy(() =>
   import("./blueprints/FeatureTreeView").then((m) => ({ default: m.FeatureTreeView })))
+// 意图链路图（项目级推导图，2026-10-13）：@xyflow/react 较重，按需切包
+const IntentGraphView = lazy(() =>
+  import("./intents/IntentGraphView").then((m) => ({ default: m.IntentGraphView })))
 
 // rev-generic 逆向理解工作台（DESIGN.md §12）：
 // 样本条 + 三栏（函数浏览器｜结论+伪码｜xref/发现/笔记）。
@@ -44,7 +47,7 @@ const FeatureTreeView = lazy(() =>
 // 自动分析体积上限：≥10MB 不允许「开始分析」自动全量分析（headless 会拖垮时间），
 // 引导走 IDA 拉取；阈值 SAMPLE_AUTO_MAX_BYTES 定义在 SampleBar（与后端同口径）。
 
-export function ReverseWorkbench({ pid, active = true }: { pid: string; active?: boolean }) {
+export function ReverseWorkbench({ pid, active = true, track }: { pid: string; active?: boolean; track?: string }) {
   const { events } = useEvents(pid)
   const [tick, setTick] = useState(0)
   const bump = useCallback(() => setTick((t) => t + 1), [])
@@ -79,6 +82,8 @@ export function ReverseWorkbench({ pid, active = true }: { pid: string; active?:
 
   // subnav：逆向分析｜功能树｜攻击链｜蓝图｜业务逻辑｜意图（切页不卸载分析状态，同级条件渲染）
   const [mode, setMode] = useState<"rev" | "chains" | "feature" | "blueprint" | "logic" | "intents">("rev")
+  // 意图 subnav 的两档：列表（人类逐条核对）｜链路（推导图，单向只读）
+  const [intentView, setIntentView] = useState<"list" | "graph">("list")
   const [rightTab, setRightTab] = useState("xref")
   const [focusFinding, setFocusFinding] = useState<string | null>(null)
 
@@ -467,13 +472,47 @@ export function ReverseWorkbench({ pid, active = true }: { pid: string; active?:
             {label}
           </button>
         ))}
+        {/* 意图两档（对齐黑板「发现」tab 的 [列表｜链路] 既有模式） */}
+        {mode === "intents" && (
+          <div className="ml-auto flex items-center rounded border p-0.5 text-[11px]">
+            <button
+              type="button" onClick={() => setIntentView("list")}
+              className={cn("rounded px-2 py-0.5",
+                intentView === "list" ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-accent/40")}
+            >
+              列表
+            </button>
+            <button
+              type="button" onClick={() => setIntentView("graph")}
+              className={cn("rounded px-2 py-0.5",
+                intentView === "graph" ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-accent/40")}
+            >
+              链路
+            </button>
+          </div>
+        )}
       </div>
       {mode === "intents" ? (
-        // 意图清单全轨可达（2026-10-13）：rev-generic 轨黑板被本工作台顶替，
-        // 黑板「意图」tab 挂载不到，故在此给同一份 IntentsPane 一个入口
-        <div className="min-h-0 flex-1">
-          <IntentsPane pid={pid} />
-        </div>
+        // 意图全轨可达（2026-10-13）：rev-generic 轨黑板被本工作台顶替，黑板「意图」
+        // tab 挂载不到，故在此给同一份 IntentsPane 一个入口；链路档是项目级推导图
+        // （样本→意图→收尾，Agent declare_intent 自动派生，与人工「攻击链」不同）。
+        intentView === "graph" ? (
+          <div className="relative min-h-0 flex-1">
+            <Suspense fallback={<div className="flex h-full items-center justify-center text-xs text-muted-foreground">加载意图链路…</div>}>
+              <IntentGraphView
+                pid={pid}
+                onLocateFinding={(fid) => {
+                  setFocusFinding(fid); setRightTab("findings"); setMode("rev")
+                }}
+                onChanged={bump}
+              />
+            </Suspense>
+          </div>
+        ) : (
+          <div className="min-h-0 flex-1">
+            <IntentsPane pid={pid} />
+          </div>
+        )
       ) : mode === "chains" ? (
         <Suspense fallback={<div className="flex flex-1 items-center justify-center text-xs text-muted-foreground">加载攻击链视图…</div>}>
           <ChainView pid={pid} tick={tick} onLocate={locateFromChain} />
@@ -551,7 +590,7 @@ export function ReverseWorkbench({ pid, active = true }: { pid: string; active?:
                 <RelatedFindings
                   pid={pid} findings={findings} assetId={currentAsset?.id ?? null}
                   addr={addr} kbId={kbFunc?.id ?? null} onChanged={bump}
-                  focusId={focusFinding}
+                  focusId={focusFinding} track={track}
                 />
               </TabsContent>
               <TabsContent value="notes" className="min-h-0 flex-1 overflow-auto">

@@ -19,10 +19,12 @@ import type {
   Proposal, ProposalOrigin, RoleInfo, RouteHit,
   RoutePreviewBody, Session, SkillCreateBody, SkillDef, TrackProfile,
   SkillDetail, SkillVocab, SkillCatalog, SkillFileEntry, SessionGraph, AttackPath, IntentInfo,
+  IntentGraph,
   WritebackItem, XrefData,
   TraceEffect,
   FofaConfig, FofaTestResult, FofaSearchResult, FofaHistoryItem, ImportPreview, ImportSummary,
   ChatAgent, ChatThread, ChatThreadDetail, ChatMcpServer, ContextUsage,
+  DiagFailures, DiagSessions,
   Team, TeamMemberInput, TeamPreflight, TeamRun,
   SkillResource,
   SamplePackage, SampleTargetAnalysis, SampleTargetAnalyzeResponse, SampleTargetRegisterResponse, SamplePackageUploadSession, SamplePackagePreview,
@@ -515,6 +517,10 @@ export const api = {
   // 目标 → 意图 → 收尾（漏洞/发现/死路），执行层展开
   attackPath: (pid: string, target: string) =>
     http<AttackPath>(`/api/projects/${pid}/attack-path?target=${encodeURIComponent(target)}`),
+  // 项目级意图推导图（2026-10-13，逆向轨「意图」subnav 链路视角）：
+  // 样本 → 意图 → 收尾（发现|死路），只读逻辑层（无执行层）
+  intentGraph: (pid: string) =>
+    http<IntentGraph>(`/api/projects/${pid}/intent-graph`),
   // 意图清单（人类收尾核对，?status=open/closed）
   intents: (pid: string, status?: string) =>
     http<IntentInfo[]>(`/api/projects/${pid}/intents${status ? `?status=${encodeURIComponent(status)}` : ""}`),
@@ -1097,14 +1103,24 @@ export const api = {
   chatThreads: (pid: string, agentId?: string) =>
     http<ChatThread[]>(
       `/api/projects/${pid}/chat/threads${agentId ? `?agent_id=${encodeURIComponent(agentId)}` : ""}`),
-  chatThreadCreate: (pid: string, agentId: string, title?: string) =>
+  chatThreadCreate: (pid: string, agentId: string, title?: string,
+                     provider?: string, model?: string) =>
     http<ChatThread>(`/api/projects/${pid}/chat/threads`, {
-      method: "POST", body: JSON.stringify({ agent_id: agentId, title: title ?? null }),
+      method: "POST",
+      body: JSON.stringify({ agent_id: agentId, title: title ?? null,
+                             provider: provider || null, model: model || null }),
     }),
   chatThread: (tid: string, afterId = 0) =>
     http<ChatThreadDetail>(`/api/chat/threads/${tid}?after_id=${afterId}`),
   chatThreadDelete: (tid: string) =>
     http<void>(`/api/chat/threads/${tid}`, { method: "DELETE" }),
+  // 线程级模型覆写（v37，2026-10-13）：设置/重置该线程后续轮次所用模型。
+  chatThreadLlm: (tid: string, provider: string, model?: string) =>
+    http<ChatThread>(`/api/chat/threads/${tid}/llm`, {
+      method: "PUT", body: JSON.stringify({ provider, model: model || null }),
+    }),
+  chatThreadLlmReset: (tid: string) =>
+    http<ChatThread>(`/api/chat/threads/${tid}/llm`, { method: "DELETE" }),
   chatSend: (tid: string, text: string,
              refs?: { skills: string[]; mcps: string[] } | null,
              attachmentIds: string[] = []) =>
@@ -1114,6 +1130,24 @@ export const api = {
     http<void>(`/api/chat/threads/${tid}/stop`, { method: "POST" }),
   chatMcp: (pid: string) =>
     http<{ servers: ChatMcpServer[] }>(`/api/chat/mcp?pid=${encodeURIComponent(pid)}`),
+
+  // ---------- 诊断（diagnostics-log，2026-10-14）：会话审计 + 失败日志 ----------
+  // 会话清单（chat=对话线程 / agent=执行会话，带消息数与失败数）；
+  // 消息正文分流：chat 走 api.chatThread(tid)，agent 走 api.eventsTail(pid, n, sid)。
+  diagSessions: (pid: string) =>
+    http<DiagSessions>(`/api/projects/${pid}/diagnostics/sessions`),
+  // 失败日志（倒序最新在前）：kind=tool|mcp；name=工具名子串；author=来源子串
+  // （author/session_id/thread_id 任一命中——按会话筛失败直接传会话 id）。
+  diagFailures: (pid: string, opts?: { kind?: "tool" | "mcp"; name?: string; author?: string; limit?: number }) => {
+    const q = new URLSearchParams()
+    if (opts?.kind) q.set("kind", opts.kind)
+    if (opts?.name) q.set("name", opts.name)
+    if (opts?.author) q.set("author", opts.author)
+    if (opts?.limit) q.set("limit", String(opts.limit))
+    const s = q.toString()
+    return http<DiagFailures>(
+      `/api/projects/${pid}/diagnostics/failures${s ? `?${s}` : ""}`)
+  },
 
 }
 

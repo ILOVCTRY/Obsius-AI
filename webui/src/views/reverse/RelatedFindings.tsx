@@ -6,8 +6,11 @@ import { FINDING_CATEGORY_LABEL, sameAddr } from "@/lib/workbench"
 import { Badge } from "@/components/ui/badge"
 import { cn } from "@/lib/utils"
 import { AddToChainButton } from "./chains/AddToChainDialog"
+import { FindingDetailDialog } from "@/components/blackboard/FindingDetailDialog"
 
 // 右栏 tab：与当前样本/函数相关的发现 + 行内调试日志回流（动态验证 → verified）。
+// 2026-10-13：卡片此前是纯 div（无 onClick），点了一动不动——现接上 FindingDetailDialog
+// （与发现列表/黑板画布/攻击链画布同一弹窗，四调用点共用）。
 
 interface Props {
   pid: string
@@ -18,11 +21,14 @@ interface Props {
   onChanged: () => void
   /** 从攻击链节点跳来时高亮并滚动到该发现 */
   focusId?: string | null
+  /** 项目轨（透传给 FindingDetailDialog：逆向轨隐藏报告五段，2026-10-13） */
+  track?: string
 }
 
-export function RelatedFindings({ pid, findings, assetId, addr, kbId, onChanged, focusId }: Props) {
+export function RelatedFindings({ pid, findings, assetId, addr, kbId, onChanged, focusId, track }: Props) {
   const [busy, setBusy] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
+  const [detail, setDetail] = useState<Finding | null>(null)
   const fileRefs = useRef<Map<string, HTMLInputElement>>(new Map())
 
   const { related, hitsAddr } = useMemo(() => {
@@ -72,72 +78,97 @@ export function RelatedFindings({ pid, findings, assetId, addr, kbId, onChanged,
     }
   }, [focusId, related])
 
-  if (related.length === 0) {
-    return (
-      <p className="p-3 text-[11px] text-muted-foreground">
-        还没有相关发现（AI triage 或人工添加后出现在这里）
-        {focusId && "——该发现可能挂在别的样本上"}
-      </p>
-    )
-  }
-
+  // 空态与列表都走同一出口：详情弹窗挂在 Fragment 末尾，
+  // 这样列表被 4s 轮询刷成空时弹窗不会跟着消失。
   return (
-    <div className="space-y-1.5 p-2">
-      {err && <p className="rounded bg-(--status-error)/10 p-1.5 text-[10px] text-(--status-error)">{err}</p>}
-      {related.map((f) => {
-        const cat = typeof f.evidence?.category === "string"
-          ? FINDING_CATEGORY_LABEL[f.evidence.category as string] ?? f.evidence.category
-          : null
-        const pinned = hitsAddr.has(f.id)
-        return (
-          <div
-            key={f.id}
-            ref={focusId === f.id ? focusRef : undefined}
-            className={cn(
-              "rounded border p-1.5",
-              pinned ? "border-primary/50 bg-primary/5" : "hover:bg-accent/30",
-              focusId === f.id && "ring-2 ring-primary/60",
-            )}
-          >
-            <div className="flex items-center gap-1.5">
-              <span className="min-w-0 flex-1 truncate text-[11px]">{f.title}</span>
-              {f.status === "verified"
-                ? <Badge variant="outline" className="shrink-0 text-[9px] text-primary">verified</Badge>
-                : <Badge variant="outline" className="shrink-0 text-[9px]">unverified</Badge>}
-            </div>
-            <div className="mt-0.5 flex items-center gap-1">
-              {cat && <span className="rounded bg-muted px-1 text-[9px] text-muted-foreground">{cat}</span>}
-              <span className="font-mono text-[9px] uppercase text-muted-foreground">{f.severity}</span>
-              <span className="flex-1" />
-              <AddToChainButton pid={pid} nodeType="finding" nodeId={f.id} />
-              {f.status !== "verified" && (
-                <>
-                  <input
-                    ref={(el) => { if (el) fileRefs.current.set(f.id, el) }}
-                    type="file"
-                    className="hidden"
-                    onChange={(e) => {
-                      const file = e.target.files?.[0]
-                      if (file) confirmWithLog(f, file)
-                      e.target.value = ""
-                    }}
-                  />
-                  <button
-                    type="button"
-                    disabled={busy === f.id}
-                    onClick={() => fileRefs.current.get(f.id)?.click()}
-                    title="上传 x64dbg 调试日志作为动态验证凭据（confirm_by=dynamic → verified）"
-                    className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-primary hover:bg-primary/10 disabled:opacity-50"
-                  >
-                    {busy === f.id ? <Loader2 className="size-3 animate-spin" /> : <FileUp className="size-3" />}
-                    传日志确认
-                  </button>
-                </>
-              )}
-            </div>
-          </div>
-        )
-      })}
-    </div>
+    <>
+      {related.length === 0 ? (
+        <p className="p-3 text-[11px] text-muted-foreground">
+          还没有相关发现（AI triage 或人工添加后出现在这里）
+          {focusId && "——该发现可能挂在别的样本上"}
+        </p>
+      ) : (
+        <div className="space-y-1.5 p-2">
+          {err && <p className="rounded bg-(--status-error)/10 p-1.5 text-[10px] text-(--status-error)">{err}</p>}
+          {related.map((f) => {
+            const cat = typeof f.evidence?.category === "string"
+              ? FINDING_CATEGORY_LABEL[f.evidence.category as string] ?? f.evidence.category
+              : null
+            const pinned = hitsAddr.has(f.id)
+            return (
+              <div
+                key={f.id}
+                ref={focusId === f.id ? focusRef : undefined}
+                role="button"
+                tabIndex={0}
+                title="点击查看发现详情"
+                onClick={() => setDetail(f)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setDetail(f) }
+                }}
+                className={cn(
+                  "cursor-pointer rounded border p-1.5 outline-none",
+                  "focus-visible:ring-2 focus-visible:ring-primary/60",
+                  pinned ? "border-primary/50 bg-primary/5" : "hover:bg-accent/30",
+                  focusId === f.id && "ring-2 ring-primary/60",
+                )}
+              >
+                <div className="flex items-center gap-1.5">
+                  <span className="min-w-0 flex-1 truncate text-[11px]">{f.title}</span>
+                  {f.status === "verified"
+                    ? <Badge variant="outline" className="shrink-0 text-[9px] text-primary">verified</Badge>
+                    : <Badge variant="outline" className="shrink-0 text-[9px]">unverified</Badge>}
+                </div>
+                <div className="mt-0.5 flex items-center gap-1">
+                  {cat && <span className="rounded bg-muted px-1 text-[9px] text-muted-foreground">{cat}</span>}
+                  <span className="font-mono text-[9px] uppercase text-muted-foreground">{f.severity}</span>
+                  <span className="flex-1" />
+                  {/* 行内动作拦下冒泡：入链/传日志不该顺带把详情弹窗顶开 */}
+                  <span className="flex items-center gap-1"
+                        onClick={(e) => e.stopPropagation()}
+                        onKeyDown={(e) => e.stopPropagation()}>
+                    <AddToChainButton pid={pid} nodeType="finding" nodeId={f.id} />
+                    {f.status !== "verified" && (
+                      <>
+                        <input
+                          ref={(el) => { if (el) fileRefs.current.set(f.id, el) }}
+                          type="file"
+                          className="hidden"
+                          onChange={(e) => {
+                            const file = e.target.files?.[0]
+                            if (file) confirmWithLog(f, file)
+                            e.target.value = ""
+                          }}
+                        />
+                        <button
+                          type="button"
+                          disabled={busy === f.id}
+                          onClick={() => fileRefs.current.get(f.id)?.click()}
+                          title="上传 x64dbg 调试日志作为动态验证凭据（confirm_by=dynamic → verified）"
+                          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-primary hover:bg-primary/10 disabled:opacity-50"
+                        >
+                          {busy === f.id ? <Loader2 className="size-3 animate-spin" /> : <FileUp className="size-3" />}
+                          传日志确认
+                        </button>
+                      </>
+                    )}
+                  </span>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {detail && (
+        <FindingDetailDialog
+          pid={pid}
+          finding={detail}
+          track={track}
+          onClose={() => setDetail(null)}
+          onMutated={() => { setDetail(null); onChanged() }}
+        />
+      )}
+    </>
   )
 }

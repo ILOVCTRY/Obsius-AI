@@ -125,6 +125,25 @@ def test_chat_store_crud(tmp_path):
     assert chat_store.get_thread(bb, t["id"]) is None
 
 
+def test_thread_model_override(tmp_path):
+    """v37 线程级模型覆写：建线程可带 provider/model，update_thread 可设可清
+    （''=回跟随全局默认）。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")
+    t = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID)
+    assert t["provider"] == "" and t["model"] == ""      # 缺省跟随全局
+    t = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID,
+                                 provider="ark", model="deepseek-v3")
+    assert (t["provider"], t["model"]) == ("ark", "deepseek-v3")
+    # 设置 / 清除
+    u = chat_store.update_thread(bb, t["id"], provider="openai", model="gpt-5")
+    assert (u["provider"], u["model"]) == ("openai", "gpt-5")
+    u = chat_store.update_thread(bb, t["id"], provider="", model="")
+    assert (u["provider"], u["model"]) == ("", "")
+    # 列表读回也带该字段
+    assert "provider" in chat_store.list_threads(bb, "p1")[0]
+
+
 def test_delete_thread_cascades_descendants(tmp_path):
     """回归：删有子线程的父线程曾报 FOREIGN KEY constraint failed → API 500
     （chat_messages.thread_id 外键无 CASCADE，parent_thread_id 的 DB 级联删

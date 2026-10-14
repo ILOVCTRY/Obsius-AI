@@ -9,7 +9,11 @@
 
 import sqlite3
 
-SCHEMA_VERSION = 36
+SCHEMA_VERSION = 37
+
+# v36→v37（工作台线程级模型，2026-10-13）：chat_threads 幂等补 provider/model
+# （''=跟随全局 executor 默认）。每个对话线程可自选模型——发送轮次时按线程值
+# 经 llm_store.build 换装 LLM（坏值静默回退全局）。历史行保持空值不回填。
 
 # v35→v36（功能树独立成表，2026-10-13）：功能树从 blueprints.tree 拆出为
 # feature_trees + feature_tree_nodes（分析阶段产物，与蓝图解耦）；blueprints
@@ -447,6 +451,8 @@ CREATE TABLE IF NOT EXISTS chat_threads (
     todo             TEXT NOT NULL DEFAULT '[]',    -- JSON：主控待办 [{id,title,status}]
     usage            TEXT NOT NULL DEFAULT '',      -- JSON：最近上下文用量 {input,output,steps,cache_read,cache_creation}（v26）
     error            TEXT NOT NULL DEFAULT '',      -- JSON：最近一轮失败 {category,message,hint,detail}（v28；''=无）
+    provider         TEXT NOT NULL DEFAULT '',      -- 线程级模型供应商覆写（v37；''=跟随全局默认）
+    model            TEXT NOT NULL DEFAULT '',      -- 线程级模型 id 覆写（v37；''=该供应商默认模型）
     created_at       TEXT NOT NULL,
     updated_at       TEXT NOT NULL
 );
@@ -642,7 +648,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
       版本注释）。
     - v35→v36：功能树独立成表——blueprints DROP tree、ADD feature_tree_id；
       logic_blocks ADD feature_node_id；feature_trees/feature_tree_nodes 由
-      DDL IF NOT EXISTS 建表。"""
+      DDL IF NOT EXISTS 建表。
+    - v36→v37：chat_threads 幂等补 provider/model（线程级模型覆写，''=跟随
+      全局默认，见文件头版本注释）。历史行保持默认空值不回填。"""
     cols = {r[1] for r in conn.execute("PRAGMA table_info(projects)")}
     if "track" not in cols:
         conn.execute("ALTER TABLE projects ADD COLUMN track TEXT NOT NULL DEFAULT ''")
@@ -656,6 +664,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if chat_cols and "error" not in chat_cols:  # v28（轮次失败结构化错误）
         conn.execute(
             "ALTER TABLE chat_threads ADD COLUMN error TEXT NOT NULL DEFAULT ''")
+    if chat_cols and "provider" not in chat_cols:  # v37（线程级模型覆写）
+        conn.execute(
+            "ALTER TABLE chat_threads ADD COLUMN provider TEXT NOT NULL DEFAULT ''")
+    if chat_cols and "model" not in chat_cols:  # v37（线程级模型覆写）
+        conn.execute(
+            "ALTER TABLE chat_threads ADD COLUMN model TEXT NOT NULL DEFAULT ''")
     msg_cols = {r[1] for r in conn.execute("PRAGMA table_info(chat_messages)")}
     if msg_cols and "thinking" not in msg_cols:  # v31（思考正文持久化）
         conn.execute(

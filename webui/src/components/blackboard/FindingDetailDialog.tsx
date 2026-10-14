@@ -236,6 +236,9 @@ const selectCls =
 
 export function FindingDetailDialog({ pid, finding, assetLabel, track, onClose, onMutated }:
                              { pid: string; finding: Finding; assetLabel?: string; track?: string; onClose: () => void; onMutated?: () => void }) {
+  // 逆向轨（research）的发现是静态还原结论（端点/结构/密钥…），没有可复现的
+  // 资产、POC 与修复面 → 详情只留「漏洞摘要 + 原始证据」（2026-10-13 用户要求）。
+  const isReverse = track === "research"
   // F10：row 本地快照（初始=prop，保存成功用 PATCH 响应覆盖）——解耦 4s 轮询且头部即时回显
   const [row, setRow] = useState<Finding>(finding)
   const [editing, setEditing] = useState(false)
@@ -333,13 +336,14 @@ export function FindingDetailDialog({ pid, finding, assetLabel, track, onClose, 
   const legacyRef = row.poc_artifact_id
     ?? (typeof evRecord?.poc_artifact === "string" ? evRecord.poc_artifact : null)
   const scriptRefs = useMemo(() => {
+    if (isReverse) return []   // 逆向轨不渲染复现手册/POC，脚本内容无需预取
     const refs = steps
       .filter((s) => s.artifact_id && s.type !== "image")  // image 步走 <img> 直连下载端点
       .map((s) => s.artifact_id!)
     if (legacyRef && !refs.includes(legacyRef)) refs.push(legacyRef)
     return [...new Set(refs)]
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [row.id])
+  }, [row.id, isReverse])
   const [scripts, setScripts] = useState<Record<string, { loading: boolean; content?: string; path?: string; error?: string }>>({})
   useEffect(() => {
     if (!scriptRefs.length) return
@@ -555,6 +559,11 @@ export function FindingDetailDialog({ pid, finding, assetLabel, track, onClose, 
             <h4 className="mb-1 text-[11px] font-medium text-foreground">漏洞摘要</h4>
             <p className="whitespace-pre-wrap text-xs text-foreground">{row.summary || "（待补充）"}</p>
           </section>
+          {/* 逆向轨（research）：发现多为静态还原结论（端点/结构/密钥等），没有可
+              复现的资产、POC 与修复面——受影响资产/复现手册/POC/风险评估/修复建议
+              五段整体不渲染，只留摘要 + 原始证据（2026-10-13 用户要求）。 */}
+          {!isReverse && (
+          <>
           <section>
             <h4 className="mb-1 text-[11px] font-medium text-foreground">受影响资产</h4>
             <p className="whitespace-pre-wrap text-xs text-foreground">
@@ -620,6 +629,8 @@ export function FindingDetailDialog({ pid, finding, assetLabel, track, onClose, 
               <p className="text-xs text-muted-foreground">（待补充）</p>
             )}
           </section>
+          </>
+          )}
           {entries.length > 0 && (
             <details className="rounded border px-2 py-1.5">
               <summary className="cursor-pointer text-[10px] text-muted-foreground">原始证据</summary>

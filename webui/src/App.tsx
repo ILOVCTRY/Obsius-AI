@@ -24,6 +24,7 @@ import {
   Settings2,
   Sparkles,
   Square,
+  Stethoscope,
   X,
   Zap,
 } from "lucide-react"
@@ -48,6 +49,7 @@ import { SettingsView } from "@/views/SettingsView"
 import { KnowledgeView } from "@/views/KnowledgeView"
 import { SkillsView } from "@/views/SkillsView"
 import { SampleAnalysisView } from "@/views/SampleAnalysisView"
+import { DiagnosticsView } from "@/views/DiagnosticsView"
 import { cn } from "@/lib/utils"
 import { bindingBadge } from "@/lib/taxonomy"
 
@@ -60,7 +62,7 @@ import { bindingBadge } from "@/lib/taxonomy"
 // 左缘悬浮把手唤出；状态 localStorage（ui.nav-collapsed）。收起=条件渲染卸载
 // nav Panel+Separator（同 boardOpen 先例），重挂由 useDefaultLayout 恢复宽度。
 
-type View = "projects" | "intel" | "trash" | "live" | "board" | "agents" | "browser" | "fuzzer" | "proxy" | "sample-analysis" | "knowledge" | "skills" | "settings"
+type View = "projects" | "intel" | "trash" | "live" | "board" | "agents" | "browser" | "fuzzer" | "proxy" | "sample-analysis" | "knowledge" | "skills" | "settings" | "diagnostics"
 
 /** M4c 场景档 board_view 默认视图（config.board_view.default；黑板上自行校验可用 tab 回退） */
 const boardViewOf = (m: ProjectDetail | null): string | undefined => {
@@ -79,6 +81,7 @@ const NAV_GROUPS: { label: string; items: NavItem[]; collapsible?: boolean }[] =
       { key: "trash", label: "回收站", icon: Trash2, needsProject: false, homeOnly: true },
       { key: "agents", label: "智能体", icon: Bot, needsProject: true },
       { key: "board", label: "黑板", icon: LayoutDashboard, needsProject: true },
+      { key: "diagnostics", label: "诊断", icon: Stethoscope, needsProject: true },
     ],
   },
   {
@@ -488,11 +491,15 @@ export default function App() {
           {/* 中：主区（直播间在 live 视图与黑板同屏共存） */}
           <Panel id="main">
             <div className="flex h-full min-h-0 flex-col overflow-hidden">
+            {/* 顶栏（2026-10-14 方案 A+B 改版）：实底 surface-1 + 1px 底边线收口；
+                项目信息由「英文 eyebrow + 无框标题行」改为与 .wb-agent-trigger 同款的
+                胶囊卡；统计从项目名右侧移到最右（与「首页」同组）并改中点分隔。
+                样式见 index.css 的 .topbar / .project-card 段。 */}
             <div className="topbar flex h-16 shrink-0 items-center gap-4 px-5">
               <div className="mobile-brand"><div className="brand-mark"><Sparkles size={15} /></div><span>Obsius</span></div>
-              <div className="project-context"><span className="eyebrow">ACTIVE PROJECT</span><div className="project-title"><span className="project-pulse" /><h1>{meta?.name ?? "加载项目"}</h1><Badge variant="outline" className="project-badge">{meta ? bindingBadge(meta.track, meta.experts) : "…"}</Badge></div></div>
-              {meta && <div className="project-stats"><span><Blocks size={13} />{meta.findings} 发现</span><span><Globe2 size={13} />{meta.assets} 资产</span></div>}
+              <div className="project-card"><span className="project-pulse" /><h1 className="project-name">{meta?.name ?? "加载项目"}</h1><Badge variant="outline" className="project-badge">{meta ? bindingBadge(meta.track, meta.experts) : "…"}</Badge></div>
               <span className="flex-1" />
+              {meta && <div className="project-stats"><span><Blocks size={13} />{meta.findings} 发现</span><span className="project-stats-sep">·</span><span><Globe2 size={13} />{meta.assets} 资产</span></div>}
               <Button size="sm" variant="ghost" className="back-project" onClick={goHome}><ArrowLeft size={15} />首页</Button>
               <WindowControls className="-mr-5" />
             </div>
@@ -542,7 +549,7 @@ export default function App() {
             <ErrorBoundary key={pid}>
               <div className={cn(profile === "rev-generic" ? "h-full w-full overflow-hidden" : "h-full w-full", view !== "board" && "hidden")}>
                 {profile === "rev-generic"
-                  ? <ReverseWorkbench key={pid} pid={pid} active={view === "board"} />
+                  ? <ReverseWorkbench key={pid} pid={pid} active={view === "board"} track={meta?.track} />
                   : <Blackboard key={pid} pid={pid} track={meta?.track} capabilities={meta?.directions}
                                 defaultView={boardViewOf(meta)} />}
               </div>
@@ -551,6 +558,7 @@ export default function App() {
           {view === "agents" && <AgentWorkbenchView pid={pid} meta={meta}
                                                     focusThread={focusChatTid}
                                                     onFocusConsumed={() => setFocusChatTid(null)} />}
+          {view === "diagnostics" && <DiagnosticsView pid={pid} />}
           {view === "browser" && (
             // F6 内置浏览器：轨门控（非 pentest/redteam 整页灰显）在视图内部处理；
             // 定高视图（面板组），照 rev 走 h-full + overflow-hidden
