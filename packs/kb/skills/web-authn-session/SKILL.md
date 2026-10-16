@@ -11,23 +11,23 @@ mode: self-contained
 # web-authn-session —— 认证与会话攻击路由
 
 > 分层纪律：本技能只做**认证面特征 → 手册对照**。方法论在 src-strike 快照
-> （`playbooks/参考资料/`），弹药在 `playbooks/`。按需 `skill_open(path=…)` 单篇，
+> （`web/漏洞分类/`），弹药在 `web/实战打法/`。按需 `kb_open(module=…)` 单篇，
 > 禁止通读。红线提醒：弱口令默认 ≤10 候选慢速单发（领域红线 5）；
 > 禁止登出/注销用户提供的登录态（领域红线 2）。
 
 ## 特征 → 手册对照表（module 路径）
 
-| 特征 | 方法论（`playbooks/参考资料/` 下） | 打法/弹药（`playbooks/` 下） |
+| 特征 | 方法论（`web/漏洞分类/` 下） | 打法/弹药（`web/实战打法/` 下） |
 |---|---|---|
-| 登录页/鉴权逻辑整体 | `references/web/webapp/authbypass/手册.md` | `arbitrary-x-authz.md` |
-| 401/403 接口 | `references/web/webapp/401-403-bypass/手册.md`（path/METHOD/头现场改） | — |
-| JWT（none/弱密钥/混淆） | `references/web/webapp/jwt/手册.md` | `oauth-saml-jwt/12-jwt.md`、`api-rest/12-jwt-api.md` |
-| OAuth 授权码/redirect | `references/web/webapp/jwt/手册.md` | `oauth-saml-jwt/10-oauth-redirect.md` |
-| SAML / SSO | `references/web/webapp/jwt/手册.md` | `oauth-saml-jwt/11-saml.md` |
-| 认证杂项（session/cookie/记住我） | `references/web/webapp/jwt/手册.md` | `oauth-saml-jwt/13-auth-misc.md` |
-| 验证码（图形/滑块/短信） | `references/web/webapp/captcha-ocr/手册.md` | — |
-| 类型戏法/松散比较绕过 | `references/web/webapp/type-juggling/手册.md` | — |
-| 短信/邮件轰炸类 | `references/web/webapp/logic/手册.md` | — |
+| 登录页/鉴权逻辑整体 | `web/漏洞分类/authbypass/手册.md` | `web/实战打法/arbitrary-x-authz.md` |
+| 401/403 接口 | `web/漏洞分类/401-403-bypass/手册.md`（path/METHOD/头现场改） | — |
+| JWT（none/弱密钥/混淆） | `web/漏洞分类/jwt/手册.md` | `web/实战打法/oauth-saml-jwt/12-jwt.md`、`web/实战打法/api-rest/12-jwt-api.md` |
+| OAuth 授权码/redirect | `web/漏洞分类/jwt/手册.md` | `web/实战打法/oauth-saml-jwt/10-oauth-redirect.md` |
+| SAML / SSO | `web/漏洞分类/jwt/手册.md` | `web/实战打法/oauth-saml-jwt/11-saml.md` |
+| 认证杂项（session/cookie/记住我） | `web/漏洞分类/jwt/手册.md` | `web/实战打法/oauth-saml-jwt/13-auth-misc.md` |
+| 验证码（图形/滑块/短信） | `web/漏洞分类/captcha-ocr/手册.md` | — |
+| 类型戏法/松散比较绕过 | `web/漏洞分类/type-juggling/手册.md` | — |
+| 短信/邮件轰炸类 | `web/漏洞分类/logic/手册.md` | — |
 
 ## 纪律
 

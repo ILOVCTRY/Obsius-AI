@@ -1,6 +1,6 @@
 # CTF Web - SQL Injection Techniques
 
-Comprehensive SQL injection techniques for CTF challenges. For other server-side attacks (SSTI, SSRF, XXE, command injection, GraphQL), see [server-side.md](server-side.md).
+Comprehensive SQL injection techniques for CTF challenges. For other server-side attacks (SSTI, SSRF, XXE, command injection, GraphQL), see [[web/漏洞分类/injection/server-side.md|server-side.md]].
 
 ## Table of Contents
 - [Backslash Escape Quote Bypass](#backslash-escape-quote-bypass)

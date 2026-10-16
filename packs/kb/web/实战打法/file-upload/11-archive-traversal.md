@@ -1,6 +1,6 @@
 # 解压 / 路径遍历 payload 库
 
-> 父文档:[00-index.md](00-index.md)
+> 父文档:[[web/实战打法/file-upload/00-index.md|00-index.md]]
 > 涵盖:Zip Slip(`../` 突破压缩包目录) + 路径遍历(上传文件名带 `..`)。任何"上传压缩包并解压"流程都试。
 
 ---
@@ -315,4 +315,4 @@ _利用空字节注入、文件系统路径长度限制和Windows特殊文件名
 
 ---
 
-← 回 [00-index.md](00-index.md) · 通用 path traversal 见 [`../path-traversal/00-index.md`](../path-traversal/00-index.md)
+← 回 [[web/实战打法/file-upload/00-index.md|00-index.md]] · 通用 path traversal 见 [[web/实战打法/path-traversal/00-index.md|../path-traversal/00-index.md]]

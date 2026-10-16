@@ -10,7 +10,7 @@ vuln_class: [edr, defense-evasion]
 > 来源：reverse-skill 1.0.1 收编改编（2026-09-30，MIT，见 `../../licenses/`）。
 > **仅限授权红队 / 对抗演练 / 自有产品测试，禁止用于未授权目标。**
 > 汇总主流 EDR / AV 在用户态与内核态的监控点，供红队侦察阶段快速定位「该处理什么」。
-> 配合技能 [edr-hook-rev](../../../tracks/redteam/skills/edr-hook-rev/SKILL.md)。
+> 配合技能 [[skills/edr-hook-rev/SKILL.md|edr-hook-rev]]。
 
 ## 主流 EDR 指纹与 hook 模式速查
 
@@ -191,5 +191,5 @@ http://www.rohitab.com/apimonitor · ired.team:
 https://www.ired.team/offensive-security/defense-evasion
 
 完成 hook 调研后，进入绕过技术选型：见
-[unhook-techniques.md](unhook-techniques.md) 与
-[telemetry-blinding.md](telemetry-blinding.md)。
+[[binary/终端对抗/unhook-techniques.md|unhook-techniques.md]] 与
+[[binary/终端对抗/telemetry-blinding.md|telemetry-blinding.md]]。

@@ -282,7 +282,7 @@ gdb-multiarch -ex 'target remote :1234' ./arm_binary
 # Ghidra: Right-click → Processor Options → ARM/Thumb mode
 ```
 
-**ARM64/AArch64:** See [platforms-hardware.md](platforms-hardware.md#arm64aarch64-reversing-and-exploitation) for AArch64 calling convention, ROP gadgets, and qemu-aarch64-static emulation.
+**ARM64/AArch64:** See [[binary/逆向工程/platforms-hardware.md#arm64aarch64-reversing-and-exploitation|platforms-hardware.md]] for AArch64 calling convention, ROP gadgets, and qemu-aarch64-static emulation.
 
 **MIPS (routers, embedded):**
 ```bash
@@ -299,7 +299,7 @@ qemu-mipsel -L /usr/mipsel-linux-gnu/ ./mipsel_binary   # Little-endian
 # lui + addiu pair — loads 32-bit constant (upper 16 + lower 16)
 ```
 
-**RISC-V:** See main [tools.md](tools.md#risc-v-binary-analysis-ehax-2026) for Capstone disassembly and [platforms-hardware.md](platforms-hardware.md#risc-v-advanced) for advanced extensions and debugging.
+**RISC-V:** See main [[binary/逆向工程/tools.md#risc-v-binary-analysis-ehax-2026|tools.md]] for Capstone disassembly and [[binary/逆向工程/platforms-hardware.md#risc-v-advanced|platforms-hardware.md]] for advanced extensions and debugging.
 
 ### RTOS Analysis
 
@@ -462,7 +462,7 @@ Blueprints compile to bytecode in .uasset files.
 
 ### Unity (Beyond IL2CPP)
 
-See [languages.md](languages.md#unity-il2cpp-games) for IL2CPP basics.
+See [[binary/逆向工程/languages.md#unity-il2cpp-games|languages.md]] for IL2CPP basics.
 
 **Mono-based Unity (not IL2CPP):**
 ```bash

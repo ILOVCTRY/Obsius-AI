@@ -16,7 +16,7 @@
 - [Base64 Decode Leniency and Parameter Override for Signature Bypass (BCTF 2016)](#base64-decode-leniency-and-parameter-override-for-signature-bypass-bctf-2016)
 - [Hash Length Extension Attack (ASIS CTF 2017)](#hash-length-extension-attack-asis-ctf-2017)
 
-For JWT/JWE token attacks, see [auth-jwt.md](auth-jwt.md). For general auth bypass and access control, see [auth-and-access.md](auth-and-access.md).
+For JWT/JWE token attacks, see [[web/漏洞分类/authn/auth-jwt.md|auth-jwt.md]]. For general auth bypass and access control, see [[web/漏洞分类/authn/auth-and-access.md|auth-and-access.md]].
 
 ---
 

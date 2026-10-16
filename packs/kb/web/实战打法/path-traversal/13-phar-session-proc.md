@@ -1,6 +1,6 @@
 # Phar / Session / Proc 高级 LFI payload 库
 
-> 父文档:[00-index.md](00-index.md)
+> 父文档:[[web/实战打法/path-traversal/00-index.md|00-index.md]]
 > 涵盖:Phar 反序列化(任意函数触发自动反序列化)+ Session 文件包含(`/var/lib/php/sessions/sess_xxx`)+ Proc 文件系统利用(`/proc/self/environ`、`/proc/self/fd/N`)。
 
 ---
@@ -223,4 +223,4 @@ _使用self引用_
 
 ---
 
-← 回 [00-index.md](00-index.md) · 相关:[`../rce/12-deserialization.md`](../rce/12-deserialization.md)(通用反序列化)
+← 回 [[web/实战打法/path-traversal/00-index.md|00-index.md]] · 相关:[[web/实战打法/rce/12-deserialization.md|../rce/12-deserialization.md]](通用反序列化)

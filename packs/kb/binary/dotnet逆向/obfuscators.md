@@ -10,7 +10,7 @@ vuln_class: [dotnet, obfuscation]
 > 来源：reverse-skill 1.0.1 收编改编（2026-09-30，MIT，见 `../../licenses/`）。
 > 主流 .NET 混淆器的识别、脱壳、anti-tamper 绕过。核心工具：**de4dot**（自动识别
 > 大多数壳）+ **dnSpyEx**（手动 patch）+ **dnlib**（脚本化）。配合技能
-> [dotnet-rev](../../capabilities/binary/skills/dotnet-rev/SKILL.md) 使用。
+> [[skills/dotnet-rev/SKILL.md|dotnet-rev]] 使用。
 
 ## 总决策表
 
@@ -135,7 +135,7 @@ de4dot 失败时：
 
 1. **de4dot --detect** 看识别结果，对照总决策表
 2. **运行时 dump**（MegaDumper / ExtremeDumper / Process Hacker 导出模块）
-3. **dnlib 脚本**手动解（见 [common-workflow.md](common-workflow.md) 的 dnlib 段）
+3. **dnlib 脚本**手动解（见 [[binary/dotnet逆向/common-workflow.md|common-workflow.md]] 的 dnlib 段）
 4. **动态优先**：跑起来在解密点下断，直接看明文——不脱壳也能拿情报
 
 社区参考：Washi 博客《misconceptions-about-dotnet》（IL 分析常见误区）、看雪

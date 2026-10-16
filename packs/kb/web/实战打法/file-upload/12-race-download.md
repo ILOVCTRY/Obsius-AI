@@ -1,6 +1,6 @@
 # 竞态 / 任意下载 payload 库
 
-> 父文档:[00-index.md](00-index.md)
+> 父文档:[[web/实战打法/file-upload/00-index.md|00-index.md]]
 > 涵盖:文件上传条件竞争("校验-移动"窗口 / "扫描-删除"窗口) + 任意文件下载(下载接口路径可控)。
 
 ---
@@ -326,4 +326,4 @@ _利用空字节截断、路径长度限制和特殊字符混淆绕过文件路�
 
 ---
 
-← 回 [00-index.md](00-index.md) · 相关:[`../race-conditions.md`](../race-conditions.md)
+← 回 [[web/实战打法/file-upload/00-index.md|00-index.md]] · 相关:[[web/实战打法/race-conditions.md|../race-conditions.md]]

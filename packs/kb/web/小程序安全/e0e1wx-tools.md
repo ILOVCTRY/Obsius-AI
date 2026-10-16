@@ -228,4 +228,3 @@ Direct
 带上 path 一起跳转，可以直接跳转到对应的页面上面。
 
 ![带 path 跳转示例](https://cdn.nlark.com/yuque/0/2026/png/36087401/1778230736104-e20a4ee9-71f4-4380-a1ed-1c8b2baf506c.png)
-

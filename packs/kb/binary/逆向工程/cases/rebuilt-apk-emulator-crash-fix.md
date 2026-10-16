@@ -8,7 +8,7 @@ vuln_class: [android, repackaging]
 # 案例：重打包 APK 在 MuMu 模拟器的两层崩溃修复
 
 > 来源：reverse-skill 1.0.1 field-journal 收编（2026-09-30，MIT，见 `../../../licenses/`）。
-> 案例日期 2026-05-15，原文脱敏。相关技能 [android-rev](../../capabilities/binary/skills/android-rev/SKILL.md)。
+> 案例日期 2026-05-15，原文脱敏。相关技能 [[skills/android-rev/SKILL.md|android-rev]]。
 
 ## 一句话
 

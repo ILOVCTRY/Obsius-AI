@@ -1,6 +1,6 @@
 # RCE — SSTI 模板注入 payload 库
 
-> 父文档:[00-index.md](00-index.md)
+> 父文档:[[web/实战打法/rce/00-index.md|00-index.md]]
 > 涵盖 Jinja2 / FreeMarker / Velocity / Thymeleaf / Smarty / Mako / Tornado / Django / ERB / Pug 共 10 个模板引擎。先用通用探针 `{{7*7}}` / `${7*7}` / `#{7*7}` / `%{7*7}` 定位引擎,再挑对应章节。
 
 ---
@@ -731,4 +731,4 @@ _使用this.constructor_
 
 ---
 
-← 回 [00-index.md](00-index.md) · 相关:[`10-framework.md`](10-framework.md)(SpEL/OGNL 框架表达式)
+← 回 [[web/实战打法/rce/00-index.md|00-index.md]] · 相关:[[web/实战打法/rce/10-framework.md|10-framework.md]](SpEL/OGNL 框架表达式)

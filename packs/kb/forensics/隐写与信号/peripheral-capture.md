@@ -1,6 +1,6 @@
 # CTF Forensics - Peripheral Capture Analysis
 
-USB, HID, and Bluetooth peripheral traffic reconstruction from packet captures. For general network PCAP forensics (DNS/TCP/ICMP/SMB/RADIUS/RC4), see [network-advanced.md](../网络取证/network-advanced.md). For basic network forensics, see [network.md](../网络取证/network.md).
+USB, HID, and Bluetooth peripheral traffic reconstruction from packet captures. For general network PCAP forensics (DNS/TCP/ICMP/SMB/RADIUS/RC4), see [[forensics/网络取证/network-advanced.md|network-advanced.md]]. For basic network forensics, see [[forensics/网络取证/network.md|network.md]].
 
 ## Table of Contents
 - [USB HID Mouse/Pen Drawing Recovery (EHAX 2026)](#usb-hid-mousepen-drawing-recovery-ehax-2026)

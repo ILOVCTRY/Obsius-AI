@@ -1,6 +1,6 @@
 # CTF Crypto - PRNG & Key Recovery
 
-Foundational PRNG state/seed recovery techniques. For CTF-era advanced attacks (MT19937 constraint propagation, Rule 86 cellular automaton, Java LCG MITM, LFSR bit-fold, Z3 timing oracle, randcrack DSA, NTP-poisoned UUID), see [prng-attacks.md](prng-attacks.md).
+Foundational PRNG state/seed recovery techniques. For CTF-era advanced attacks (MT19937 constraint propagation, Rule 86 cellular automaton, Java LCG MITM, LFSR bit-fold, Z3 timing oracle, randcrack DSA, NTP-poisoned UUID), see [[crypto/随机数/prng-attacks.md|prng-attacks.md]].
 
 ## Table of Contents
 - [Mersenne Twister (MT19937) State Recovery](#mersenne-twister-mt19937-state-recovery)
@@ -23,7 +23,7 @@ Foundational PRNG state/seed recovery techniques. For CTF-era advanced attacks (
 - [Blum-Blum-Shub (BBS) — LSB Hardness & Parity Trap](#blum-blum-shub-bbs--lsb-hardness--parity-trap)
 - [Chaotic Maps — Henon & Arnold Cat Map (Image Scrambling)](#chaotic-maps--henon--arnold-cat-map-image-scrambling)
 
-See [prng-attacks.md](prng-attacks.md) for CTF-era advanced attacks (2017+).
+See [[crypto/随机数/prng-attacks.md|prng-attacks.md]] for CTF-era advanced attacks (2017+).
 
 ---
 

@@ -6967,5 +6967,5 @@ Writeup: [https://www.qwesec.com/2023/11/buuctfWeb.html#%E5%89%8D%E7%BD%AE%E7%9F
 
 - **靶场WP**: [ctfshow-反序列化WP](WP汇总/CTfshow-反序序列化wp.md)
 - **脚本**: [python-Pickle序列化脚本](CTF常用脚本及工具/python-Picke序列化/) — Pickle反序列化利用
-- **文件包含**: [文件包含.md](文件包含.md) — phar伪协议触发反序列化
-- **代码审计**: [php代码审计.md](php代码审计.md) — 魔术方法/变量覆盖审计
+- **文件包含**: [[web/实战打法/文件包含.md|文件包含.md]] — phar伪协议触发反序列化
+- **代码审计**: [[web/实战打法/php代码审计.md|php代码审计.md]] — 魔术方法/变量覆盖审计

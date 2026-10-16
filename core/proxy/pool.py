@@ -68,16 +68,20 @@ class ProxyConfig:
     python: str | None = None            # 显式解释器；None=自动解析
     auto_start: bool = False             # 项目首个代理动作时是否自动起服务
     validate_timeout_s: int = 5          # 单代理验证超时（check runner --timeout）
-    # 验证基准网站（2026-10-12 改为 i.zut.edu.cn）：连通性用 http 明文（大多代理能做，
-    # 不大量剔除纯 HTTP 转发型），HTTPS 能力探测指向同一站的 https。
-    validate_target: str = "http://i.zut.edu.cn/new/index.html"  # 验证目标 URL（经代理 GET 它，通即 Working）
-    validate_target_https: str | None = "https://i.zut.edu.cn/new/index.html"  # HTTPS 能力探测目标（经 CONNECT）；None/空=不探测
+    # 验证基准网站（**2026-10-15 由 i.zut.edu.cn 改为 Cloudflare 204 探测点**）：原站整站
+    # 返 502（实测站点根与 https 均不可达），会让**所有**代理被判 Failed 而全量剔除——
+    # 抓得再多也留不下。改用 204 探测点：http 明文（大多代理能做，不大量剔除纯 HTTP 转发型）、
+    # 无响应体（最省流量）、全球 CDN（最稳）。判据 `200 <= status_code < 400` 认 204。
+    validate_target: str = "http://cp.cloudflare.com/generate_204"  # 验证目标 URL（经代理 GET 它，通即 Working）
+    validate_target_https: str | None = "https://cp.cloudflare.com/generate_204"  # HTTPS 能力探测目标（经 CONNECT）；None/空=不探测
     # 内容注入/劫持型出口交叉验证（2026-10-11）：第二个目标（须与 validate_target 内容不同）。
     # 两个目标经同一代理返回**相同响应体指纹**即判 hijacked → status=Failed 剔除。
     validate_target_b: str | None = "http://example.com"  # None/空=不做多目标一致性校验
     prune_latency_ms: float | None = 5000.0  # 验证后按延迟剔除阈值（ms）；None/0=不按延迟删
     sources_file: str | None = None      # 抓取源清单覆盖路径；None=默认 config/proxy_sources.json（不存在则用 runner 内置）
-    fetch_limit: int = 2000              # 单次抓取条数上限（按协议轮转取）；0=不限
+    # 单次抓取条数上限（按协议轮转取）；0=不限。前端「抓取条数」输入框与 API `limit` 可逐次覆盖。
+    # 2026-10-15：源清单扩到 ~18k 条原始量后，默认 2000 会明显截断 → 提到 3000。
+    fetch_limit: int = 3000
     # ---- 自动巡检（2026-10-11）：后台每 maintenance_interval_s 验证全部 + 阈值补抓 ----
     maintenance_interval_s: float = 1800.0  # 巡检间隔（30 分钟）；0=不巡检
     auto_fetch_min_http: int = 50        # http 可用数低于此即自动抓取；0=该协议不自动补抓
@@ -768,6 +772,26 @@ class ProxyPool:
             raise ProxyError("代理服务未运行，无法轮换")
         return self._control(serve, "POST", "/rotate")
 
+    def use_proxy(self, address: str) -> dict:
+        """精确切换到指定代理（服务须在跑）。
+
+        与 ``rotate`` 互补——访问测试判出对目标站点可达的 IP 后直接钉死它，
+        不再靠顺序轮换碰运气。地址不在池/非 Working 由 serve 侧返 ``ok:False``
+        （这里照样抛 ProxyError，前端统一按错误提示）。
+        """
+        serve = self._serve
+        if not serve or not serve.alive():
+            raise ProxyError("代理服务未运行，无法切换代理")
+        target = str(address or "").strip()
+        if not target:
+            raise ProxyError("缺少要切换的代理地址")
+        out = self._control(serve, "POST", "/select", body={"proxy": target})
+        # serve 侧对「不在池/非 Working」返 ok:False（HTTP 200）——这里统一翻成
+        # ProxyError，让 API 层走 503 + 人话错误，前端 guard() 直显
+        if not out.get("ok", True):
+            raise ProxyError(out.get("error") or f"切换失败: {target}")
+        return out
+
     def select(self, limit: int = 1, region: str | None = None,
                max_latency_ms: float | None = None,
                include_failed: bool = False) -> list[dict]:
@@ -1020,9 +1044,13 @@ class ProxyPool:
 
     def fetch(self, protocols: list[str] | None = None,
               timeout: float = 600.0, auto_validate: bool = True,
-              validate_timeout: float = 600.0, workers: int = 50,
+              validate_timeout: float = 1200.0, workers: int = 100,
+              limit: int | None = None,
               on_progress: Callable[[dict], Any] | None = None) -> dict:
-        """从在线源抓取入池（受 ``fetch_limit`` 限量）；默认抓取后自动验证并剔除失效。
+        """从在线源抓取入池（受 ``limit``/``fetch_limit`` 限量）；默认抓取后自动验证并剔除失效。
+
+        ``limit``：**本次**抓取条数上限，覆盖 ``config.fetch_limit``（``None``=用配置值；
+        ``0``=不限）。前端「抓取条数」输入框经 API 的 ``limit`` 逐次传入，不改配置。
 
         ``on_progress(dict)`` 汇报 fetch/check/prune 相位进度与 ETA（形状见 ``_progress_reporter``）。
         验证失败（子进程错/超时/无结果）直接抛 ``ProxyError``——不静默塞未验证记录。
@@ -1032,8 +1060,9 @@ class ProxyPool:
         args: list[str] = []
         for proto in protocols or []:
             args += ["--protocol", proto]
-        if self.config.fetch_limit:
-            args += ["--limit", str(int(self.config.fetch_limit))]
+        effective_limit = self.config.fetch_limit if limit is None else int(limit)
+        if effective_limit:
+            args += ["--limit", str(effective_limit)]
         sources = self._sources_file()
         if sources is not None:
             args += ["--sources", str(sources.resolve())]
@@ -1063,10 +1092,14 @@ class ProxyPool:
         return {"fetched": fetched, "validated": len(validated),
                 "removed": len(dropped), **result}
 
-    def validate(self, timeout: float = 600.0,
-                 workers: int = 50, prune: bool = True,
+    def validate(self, timeout: float = 1200.0,
+                 workers: int = 100, prune: bool = True,
                  on_progress: Callable[[dict], Any] | None = None) -> dict:
-        """验证池内全部代理（单目标连通性），回写 status/latency 并（默认）剔除失效。"""
+        """验证池内全部代理（单目标连通性），回写 status/latency 并（默认）剔除失效。
+
+        2026-10-15：并发 50→100、子进程超时 600→1200s——抓取量提到数千条后，
+        原参数在「大量死代理各等满 validate_timeout_s 超时」时会撞 600s 上限。
+        """
         report = _progress_reporter(on_progress)
         pool = self.read_pool()
         if not pool:
@@ -1104,6 +1137,21 @@ class ProxyPool:
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
                 return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            # HTTP 层错误（404/500…）绝不能吞成「控制通道不可达」——那会让人
+            # 以为 serve 挂了。最常见场景：serve 是更新平台前启动的旧版，不认
+            # /select（404 unknown path），对应用「重启代理服务」而不是查网络。
+            detail = ""
+            try:
+                detail = exc.read().decode("utf-8", "replace")[:200]
+            except Exception:  # noqa: BLE001
+                detail = ""
+            if exc.code == 404 and path == "/select":
+                raise ProxyError(
+                    "代理服务是旧版启动的，不支持精确切换——"
+                    "请先「停止服务」再「启动服务」重新拉起") from exc
+            raise ProxyError(
+                f"代理控制通道 HTTP {exc.code}: {detail or exc.reason}") from exc
         except (urllib.error.URLError, OSError, ValueError) as exc:
             raise ProxyError(f"代理控制通道不可达: {exc}") from exc
 

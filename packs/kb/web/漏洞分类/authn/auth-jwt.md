@@ -12,7 +12,7 @@
 - [JWE Token Forgery with Exposed Public Key (UTCTF 2026)](#jwe-token-forgery-with-exposed-public-key-utctf-2026)
 - [AES Cookie Length-Field Truncation + CRC32 Swap (DefCamp 2018)](#aes-cookie-length-field-truncation--crc32-swap-defcamp-2018)
 
-For general auth bypass, access control, and session attacks, see [auth-and-access.md](auth-and-access.md). For OAuth/OIDC, SAML, CI/CD credential theft, and infrastructure auth attacks, see [auth-infra.md](auth-infra.md).
+For general auth bypass, access control, and session attacks, see [[web/漏洞分类/authn/auth-and-access.md|auth-and-access.md]]. For OAuth/OIDC, SAML, CI/CD credential theft, and infrastructure auth attacks, see [[web/漏洞分类/authn/auth-infra.md|auth-infra.md]].
 
 ---
 

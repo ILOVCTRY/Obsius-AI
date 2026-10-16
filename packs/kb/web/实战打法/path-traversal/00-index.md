@@ -13,7 +13,7 @@
 | 目标是 PHP 站(`.php` / X-Powered-By: PHP),探伪协议 / Filter / Data / Zip | `12-php-wrappers.md` |
 | 探到包含点,链上 Phar / Session / Proc 等高级利用 | `13-phar-session-proc.md` |
 
-> 与上传场景的路径穿越见 [`../file-upload/11-archive-traversal.md`](../file-upload/11-archive-traversal.md)。
+> 与上传场景的路径穿越见 [[web/实战打法/file-upload/11-archive-traversal.md|../file-upload/11-archive-traversal.md]]。
 
 ---
 

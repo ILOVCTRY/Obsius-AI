@@ -388,7 +388,7 @@ p= x
 ## 相关资源
 
 - **靶场WP**: [ctfshow-SSTI WP](../WP汇总/ctfshow-SSTI.md) | [ssti入门知识点](../WP汇总/ssti入门知识点.md)
-- **关联**: [命令执行.md](命令执行.md) — SSTI最终效果是RCE | [JWT.md](JWT.md) — JWT中的SSTI利用
-- **代码审计**: 模板注入通常通过Flask/Jinja2审计发现 | [php代码审计.md](php代码审计.md) — Twig模板审计
+- **关联**: [[web/实战打法/命令执行.md|命令执行.md]] — SSTI最终效果是RCE | [[web/实战打法/JWT.md|JWT.md]] — JWT中的SSTI利用
+- **代码审计**: 模板注入通常通过Flask/Jinja2审计发现 | [[web/实战打法/php代码审计.md|php代码审计.md]] — Twig模板审计
 - **Payload速查**: [PAYLOAD-CHEATSHEET.md](PAYLOAD-CHEATSHEET.md) 第四节
 - **WP搜索**: `wp_technique_index.json` → 标签 `SSTI` (50篇WP)

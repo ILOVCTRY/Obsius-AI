@@ -30,9 +30,9 @@
 - [ACPI DSDT Shellcode Injection for Privilege Escalation (hxp 2018)](#acpi-dsdt-shellcode-injection-for-privilege-escalation-hxp-2018)
 - [ARM fcntl64 set_fs() CVE-2015-8966 Pipe Exfil (Insomnihack 2019)](#arm-fcntl64-set_fs-cve-2015-8966-pipe-exfil-insomnihack-2019)
 - [io_uring PBUF_RING Use-After-Free — CVE-2024-0582 (KernelCTF 2024)](#io_uring-pbuf_ring-use-after-free--cve-2024-0582-kernelctf-2024)
-For tty_struct kROP (kernel Return-Oriented Programming), userfaultfd race stabilization, SLUB internals, cross-cache attacks, and DiceCTF 2026 kernel patterns, see [kernel-techniques.md](kernel-techniques.md).
+For tty_struct kROP (kernel Return-Oriented Programming), userfaultfd race stabilization, SLUB internals, cross-cache attacks, and DiceCTF 2026 kernel patterns, see [[binary/漏洞利用/kernel-techniques.md|kernel-techniques.md]].
 
-For protection bypass techniques (KASLR, FGKASLR, KPTI, SMEP, SMAP), GDB debugging, initramfs workflow, and exploit templates, see [kernel-bypass.md](kernel-bypass.md).
+For protection bypass techniques (KASLR, FGKASLR, KPTI, SMEP, SMAP), GDB debugging, initramfs workflow, and exploit templates, see [[binary/漏洞利用/kernel-bypass.md|kernel-bypass.md]].
 
 ---
 
@@ -556,7 +556,7 @@ BPF_ALU64_REG(BPF_ADD, BPF_REG_0, BPF_REG_7),  // verifier allows (adding 0)
 
 **Key insight:** eBPF verifier bugs create a "type confusion" between static analysis and runtime. The pattern is always: (1) find operation where verifier prediction differs from hardware, (2) multiply the difference to create useful offsets, (3) add to map pointer for kernel memory access. Check kernel changelogs for eBPF verifier patches -- each patch implies a prior exploitable bug.
 
-See also: [kernel-techniques.md](kernel-techniques.md) for additional kernel exploitation techniques.
+See also: [[binary/漏洞利用/kernel-techniques.md|kernel-techniques.md]] for additional kernel exploitation techniques.
 
 ---
 

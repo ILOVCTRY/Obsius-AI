@@ -52,7 +52,7 @@ for timestamp, gpio_state in sorted(gpio_log):
 
 ## RISC-V (Advanced)
 
-Beyond basic disassembly (see [tools.md](tools.md#risc-v-binary-analysis-ehax-2026)):
+Beyond basic disassembly (see [[binary/逆向工程/tools.md#risc-v-binary-analysis-ehax-2026|tools.md]]):
 
 ### Custom Extensions
 

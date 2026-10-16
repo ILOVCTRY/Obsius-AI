@@ -4,12 +4,12 @@
 
 ## 目录索引
 
-- [compute-engine.md](compute-engine.md) — Compute Engine 计算实例攻防（实例/启动脚本/服务账号/访问范围 scope）
-- [cloud-storage.md](cloud-storage.md) — Cloud Storage 对象存储攻防（bucket 公开访问/统一权限/对象 ACL/桶接管）
-- [cloud-sql.md](cloud-sql.md) — Cloud SQL 云数据库攻防（MySQL/PostgreSQL/SQL Server/公开 IP/实例）
-- [iam.md](iam.md) — Cloud IAM 与权限攻防（成员/角色/服务账号/服务账号密钥/Workload Identity）
-- [network.md](network.md) — VPC/子网/防火墙规则/Cloud Load Balancing 网络攻防
-- [metadata-ssrf.md](metadata-ssrf.md) — 从 SSRF 到元数据服务账号 token 攻防
+- [[cloud/云厂商/gcp/compute-engine.md|compute-engine.md]] — Compute Engine 计算实例攻防（实例/启动脚本/服务账号/访问范围 scope）
+- [[cloud/云厂商/gcp/cloud-storage.md|cloud-storage.md]] — Cloud Storage 对象存储攻防（bucket 公开访问/统一权限/对象 ACL/桶接管）
+- [[cloud/云厂商/gcp/cloud-sql.md|cloud-sql.md]] — Cloud SQL 云数据库攻防（MySQL/PostgreSQL/SQL Server/公开 IP/实例）
+- [[cloud/云厂商/gcp/iam.md|iam.md]] — Cloud IAM 与权限攻防（成员/角色/服务账号/服务账号密钥/Workload Identity）
+- [[cloud/云厂商/gcp/network.md|network.md]] — VPC/子网/防火墙规则/Cloud Load Balancing 网络攻防
+- [[cloud/云厂商/gcp/metadata-ssrf.md|metadata-ssrf.md]] — 从 SSRF 到元数据服务账号 token 攻防
 
 ## 篇数统计
 

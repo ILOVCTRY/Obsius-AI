@@ -10,7 +10,7 @@ vuln_class: [symbol-migration]
 > 来源：reverse-skill 1.0.1 收编改编（2026-09-30，MIT，见 `../../licenses/`）；
 > 原项目 SKILL.md 与 prompt-template 内容重复，本篇合一收编；工具调用已适配平台
 > IDA MCP 工具面（decompile / list_funcs / rename / set_comments）。配合技能
-> [binary-diff](../../capabilities/binary/skills/binary-diff/SKILL.md) 使用。
+> [[skills/binary-diff/SKILL.md|binary-diff]] 使用。
 
 ## 适用场景
 

@@ -487,17 +487,23 @@ export function Findings({ pid, track, showCanvas }: {
  *  根资产即题目载体（一个项目一道题时，根资产就是这道题）。 */
 const isChallengeAsset = (a: Asset, track?: string) =>
   a.type === "challenge" || (track === "ctf" && !a.parent_id)
-/** 题目已解出 flag 的绿色徽章（2026-10-14）：点即复制，title 显全量。
+/** 题目已解出 flag 的绿色徽章（2026-10-14）：**完整显示** flag，点即复制（1.5s 回显 ✓）。
  *  flag 由该题目子树内 finding 的 evidence 识别（`extractFlag`，零 schema 迁移）。 */
 function FlagBadge({ flag }: { flag: string }) {
+  const [copied, setCopied] = useState(false)
   return (
     <Badge
       variant="outline"
-      title={`已解出 flag：${flag}（点击复制）`}
-      className="max-w-56 shrink-0 cursor-pointer border-(--viz-success-border) bg-(--viz-success-bg) font-mono text-[10px] text-(--viz-success)"
-      onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(flag).catch(() => {}) }}
+      title="点击复制 flag"
+      className="shrink-0 cursor-pointer border-(--viz-success-border) bg-(--viz-success-bg) font-mono text-[10px] text-(--viz-success)"
+      onClick={(e) => {
+        e.stopPropagation()
+        navigator.clipboard.writeText(flag).catch(() => {})
+        setCopied(true)
+        setTimeout(() => setCopied(false), 1500)
+      }}
     >
-      <span className="min-w-0 truncate">🚩 {flag}</span>
+      {copied ? "✓ 已复制" : `🚩 ${flag}`}
     </Badge>
   )
 }
@@ -579,7 +585,7 @@ function AssetRow({ a, indent = false, hasFinding, flag, onDelete, track }:
         <ProductChips products={products} />
         {onDelete && (
           <button
-            title={`删除该${track === "ctf" ? "题目" : "资产"}：仅叶子且无发现引用可删（有子${track === "ctf" ? "题目" : "资产"}/发现引用请先处理）`}
+            title={`删除该${track === "ctf" ? "题目" : "资产"}：仅叶子可删（有子${track === "ctf" ? "题目" : "资产"}请先处理）；引用它的发现会一并删除`}
             className="shrink-0 rounded px-1 text-[10px] text-muted-foreground/50 hover:bg-accent hover:text-(--status-error)"
             onClick={(e) => { e.stopPropagation(); onDelete(a) }}
           >
@@ -745,12 +751,20 @@ export function Assets({ pid, compact, tree = false, track }: { pid: string; com
     }
   }
 
-  // 删除指定资产（2026-09-25）：确认后走 DELETE 端点；409（有子资产/被发现引用）
-  // 文案落底部 err 行
+  // 删除指定资产（2026-09-25）：确认后走 DELETE 端点；409（有子资产）文案落底部 err 行。
+  // **级联删发现（2026-10-16，Nan 需求「删除资产时，自动带着发现也一并删除」）**：
+  // 带 `cascade=true` 让服务端把 target_asset_id 指向本资产的发现一并物理删除
+  // （语义同「删发现」：摘反向 relates_to 边、不触发撤回传播），故不再出现
+  // 「409 仍被发现引用」的拦截。确认框先数出会被一并删掉的发现条数写进文案。
   const remove = async (a: Asset) => {
-    if (!window.confirm(`确认删除${track === "ctf" ? "题目" : "资产"}「${a.value}」？\n仅叶子${track === "ctf" ? "题目" : "资产"}且无发现引用可删除，删除后不可恢复。`)) return
+    const label = track === "ctf" ? "题目" : "资产"
+    const n = allFindings.filter((f) => f.target_asset_id === a.id).length
+    const msg = n > 0
+      ? `确认删除${label}「${a.value}」？\n将同时删除引用它的 ${n} 条发现，删除后均不可恢复。`
+      : `确认删除${label}「${a.value}」？\n仅叶子${label}可删除，删除后不可恢复。`
+    if (!window.confirm(msg)) return
     try {
-      await api.deleteAsset(pid, a.id)
+      await api.deleteAsset(pid, a.id, true)
       setErr("")
       refresh()
     } catch (e) {
@@ -815,7 +829,7 @@ export function Assets({ pid, compact, tree = false, track }: { pid: string; com
             )}
             {!compact && (
               <button
-                title={`删除该${track === "ctf" ? "题目" : "资产"}：仅叶子且无发现引用可删（有子${track === "ctf" ? "题目" : "资产"}/发现引用请先处理）`}
+                title={`删除该${track === "ctf" ? "题目" : "资产"}：仅叶子可删（有子${track === "ctf" ? "题目" : "资产"}请先处理）；引用它的发现会一并删除`}
                 className="shrink-0 rounded px-1 text-[10px] text-muted-foreground/50 hover:bg-accent hover:text-(--status-error)"
                 onClick={(e) => { e.stopPropagation(); remove(a) }}
               >

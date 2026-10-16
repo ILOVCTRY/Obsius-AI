@@ -11,8 +11,8 @@
 用法（平台 ``core/proxy/pool.py::_validate_records`` 调用）::
 
     python cyberstrike_check.py -i proxies.json -o out.json \
-        --target http://i.zut.edu.cn/new/index.html \
-        --target-https https://i.zut.edu.cn/new/index.html \
+        --target http://cp.cloudflare.com/generate_204 \
+        --target-https https://cp.cloudflare.com/generate_204 \
         --timeout 5 --workers 50 --output-format json --quiet
 
 输出：``-o`` 指向的 JSON 数组
@@ -43,8 +43,12 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
-DEFAULT_TARGET = "http://i.zut.edu.cn/new/index.html"
-DEFAULT_TARGET_HTTPS = "https://i.zut.edu.cn/new/index.html"
+# 默认验证基准（2026-10-15 由 i.zut.edu.cn 改）：原站整站 502（站点根与 https 均不可达），
+# 会让全部代理被判 Failed；改用 Cloudflare 204 探测点——http 明文、无响应体、全球 CDN 最稳。
+# 判据 `200 <= status_code < 400`（见上游 checker）认 204。平台侧一般经 --target 显式传入
+# `config/proxy.json::validate_target`，此默认值仅独立运行/未传参时生效。
+DEFAULT_TARGET = "http://cp.cloudflare.com/generate_204"
+DEFAULT_TARGET_HTTPS = "https://cp.cloudflare.com/generate_204"
 # 多目标一致性交叉验证（2026-10-11 内容注入/劫持型出口补丁）：默认第二个目标与首个
 # 不同源，用于识破「对任意 host 的 / 都返回同一伪造页」的劫持代理。
 DEFAULT_TARGET_B = "http://example.com"

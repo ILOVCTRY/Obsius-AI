@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0a0f1a"/>
+      <stop offset="1" stop-color="#111a2b"/>
+    </linearGradient>
+    <radialGradient id="g1">
+      <stop offset="0" stop-color="#22d3ee" stop-opacity="0.5"/>
+      <stop offset="1" stop-color="#22d3ee" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="g2">
+      <stop offset="0" stop-color="#8b5cf6" stop-opacity="0.46"/>
+      <stop offset="1" stop-color="#8b5cf6" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="g3">
+      <stop offset="0" stop-color="#f472b6" stop-opacity="0.34"/>
+      <stop offset="1" stop-color="#f472b6" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="n">
+      <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" stitchTiles="stitch"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.06 0"/>
+    </filter>
+  </defs>
+  <rect width="1600" height="900" fill="url(#bg)"/>
+  <ellipse cx="230" cy="130" rx="640" ry="500" fill="url(#g1)"/>
+  <ellipse cx="1400" cy="830" rx="720" ry="540" fill="url(#g2)"/>
+  <ellipse cx="1180" cy="110" rx="430" ry="330" fill="url(#g3)"/>
+  <ellipse cx="690" cy="540" rx="540" ry="400" fill="url(#g3)" opacity="0.5"/>
+  <ellipse cx="520" cy="760" rx="460" ry="300" fill="url(#g1)" opacity="0.45"/>
+  <rect width="1600" height="900" filter="url(#n)" opacity="0.55"/>
+</svg>

@@ -1,6 +1,6 @@
 # CTF AI/ML - LLM Attacks
 
-LLM-specific attack techniques: prompt injection, jailbreaking, token smuggling, context window manipulation, and tool use exploitation. For model weight attacks and extraction, see [model-attacks.md](model-attacks.md). For adversarial ML on image/tabular models, see [adversarial-ml.md](adversarial-ml.md).
+LLM-specific attack techniques: prompt injection, jailbreaking, token smuggling, context window manipulation, and tool use exploitation. For model weight attacks and extraction, see [[misc/AI安全/model-attacks.md|model-attacks.md]]. For adversarial ML on image/tabular models, see [[misc/AI安全/adversarial-ml.md|adversarial-ml.md]].
 
 ## Table of Contents
 - [Prompt Injection (Foundational)](#prompt-injection-foundational)

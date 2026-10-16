@@ -1,6 +1,6 @@
 # CTF Crypto - PRNG Attacks (CTF-Era Techniques)
 
-Advanced CTF-specific PRNG attacks from 2017 onward. For foundational PRNG recovery (MT19937, LCG parameter recovery, ChaCha20, V8 XorShift128+, password cracking), see [prng.md](prng.md).
+Advanced CTF-specific PRNG attacks from 2017 onward. For foundational PRNG recovery (MT19937, LCG parameter recovery, ChaCha20, V8 XorShift128+, password cracking), see [[crypto/随机数/prng.md|prng.md]].
 
 ## Table of Contents
 - [Mersenne Twister Seed Recovery from Subset Sum (Tokyo Westerns 2017)](#mersenne-twister-seed-recovery-from-subset-sum-tokyo-westerns-2017)

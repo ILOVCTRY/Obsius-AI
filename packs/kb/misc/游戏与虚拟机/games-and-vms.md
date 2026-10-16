@@ -784,7 +784,7 @@ const result = instance.exports.flipCoin();
 
 ---
 
-See also: [games-and-vms.md](games-and-vms.md) for WASM patching, Roblox reversing, PyInstaller, Z3, K8s RBAC, floating-point exploitation, custom assembly sandbox escape, and multi-phase crypto games.
+See also: [[misc/游戏与虚拟机/games-and-vms.md|games-and-vms.md]] for WASM patching, Roblox reversing, PyInstaller, Z3, K8s RBAC, floating-point exploitation, custom assembly sandbox escape, and multi-phase crypto games.
 
 ---
 
@@ -1475,7 +1475,7 @@ Enter       — read selected file into a new buffer
 See [games-and-vms.md](#part-4) for 2018-era additions (XSLT VM, JS edge cases, timing oracles, OEIS, QR reassembly, math recurrences, CAPTCHA solvers, esolang polyglots, bytebeat).
 
 
-See also: [games-and-vms.md](games-and-vms.md) for WASM patching, Roblox place file reversing, PyInstaller extraction, marshal analysis, Python env RCE, Z3 constraint solving, K8s RBAC bypass, floating-point precision exploitation, and custom assembly language sandbox escape.
+See also: [[misc/游戏与虚拟机/games-and-vms.md|games-and-vms.md]] for WASM patching, Roblox place file reversing, PyInstaller extraction, marshal analysis, Python env RCE, Z3 constraint solving, K8s RBAC bypass, floating-point precision exploitation, and custom assembly language sandbox escape.
 
 See also: [games-and-vms.md](#part-2) for cookie checkpoint brute-forcing, Flask cookie game state leakage, WebSocket game manipulation, server time-only validation bypass, De Bruijn sequences, Brainfuck instrumentation, and WASM memory manipulation.
 
@@ -1483,7 +1483,7 @@ See also: [games-and-vms.md](#part-2) for cookie checkpoint brute-forcing, Flask
 
 # Part 4
 
-Additional CTF-era challenges extracted from 2018+ writeups. For earlier parts, see [games-and-vms.md](games-and-vms.md), [games-and-vms.md](#part-2), and [games-and-vms.md](#part-3).
+Additional CTF-era challenges extracted from 2018+ writeups. For earlier parts, see [[misc/游戏与虚拟机/games-and-vms.md|games-and-vms.md]], [games-and-vms.md](#part-2), and [games-and-vms.md](#part-3).
 
 ## Table of Contents
 - [XSLT as Turing-Complete VM for Binary Search (35C3 2018)](#xslt-as-turing-complete-vm-for-binary-search-35c3-2018)

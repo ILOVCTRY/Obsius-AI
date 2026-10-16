@@ -1,6 +1,6 @@
 # 内网/后渗透 — ADCS 攻击 payload 库
 
-> 父文档:[00-index.md](00-index.md) · ⚠️ SRC 场景下大多受限,见 [../compliance.md](../compliance.md)
+> 父文档:[[web/后渗透/intranet-postexp/00-index.md|00-index.md]] · ⚠️ SRC 场景下大多受限,见 [../compliance.md](../compliance.md)
 > 涵盖:ESC1 / ESC2 / ESC3 / ESC4 / ESC8 模板滥用与证书申请
 
 ---
@@ -170,4 +170,4 @@ _触发目标NTLM认证_
 
 ---
 
-← 回 [00-index.md](00-index.md) · 上一篇:[`18-exchange.md`](18-exchange.md) · 下一篇:[`20-sharepoint.md`](20-sharepoint.md)
+← 回 [[web/后渗透/intranet-postexp/00-index.md|00-index.md]] · 上一篇:[[web/后渗透/intranet-postexp/18-exchange.md|18-exchange.md]] · 下一篇:[[web/后渗透/intranet-postexp/20-sharepoint.md|20-sharepoint.md]]

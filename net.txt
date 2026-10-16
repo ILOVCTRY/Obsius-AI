@@ -1,3 +1,0 @@
-11. [GET] https://webpac.tongji.edu.cn/s12/static/js/0.defc493f4d5c116690e0.js => [200] OK
-
-Note: 11 static requests not shown, run with "static" option to see them.

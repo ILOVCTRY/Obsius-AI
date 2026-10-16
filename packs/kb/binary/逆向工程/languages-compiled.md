@@ -340,7 +340,7 @@ cargo bloat --release -n 50
 
 ## Swift Binary Reversing
 
-See [platforms.md](platforms.md#swift-binary-reversing) for full Swift reversing guide including demangling, runtime structures, and Ghidra integration. Key quick reference:
+See [[binary/逆向工程/platforms.md#swift-binary-reversing|platforms.md]] for full Swift reversing guide including demangling, runtime structures, and Ghidra integration. Key quick reference:
 
 ```bash
 # Detect Swift binary

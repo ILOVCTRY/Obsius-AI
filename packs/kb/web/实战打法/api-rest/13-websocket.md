@@ -1,6 +1,6 @@
 # WebSocket 安全 payload 库
 
-> 父文档:[00-index.md](00-index.md)
+> 父文档:[[web/实战打法/api-rest/00-index.md|00-index.md]]
 > 涵盖:WebSocket 跨站劫持(CSWSH) / WS 走私 / WS 认证授权绕过。任何 `wss://` / `ws://` 端点都试。
 
 ---
@@ -402,4 +402,4 @@ curl "https://{TARGET}/socket.io/?EIO=4&transport=polling&sid={SID}"
 
 ---
 
-← 回 [00-index.md](00-index.md)
+← 回 [[web/实战打法/api-rest/00-index.md|00-index.md]]

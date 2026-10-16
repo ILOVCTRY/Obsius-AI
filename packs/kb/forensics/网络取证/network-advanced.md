@@ -1,6 +1,6 @@
 # CTF Forensics - Network (Advanced)
 
-For USB/HID/Bluetooth peripheral capture analysis (mouse/pen drawing recovery, keyboard scan codes, LED Morse exfiltration, RFCOMM reassembly), see [peripheral-capture.md](../隐写与信号/peripheral-capture.md). For basic network forensics, see [network.md](network.md).
+For USB/HID/Bluetooth peripheral capture analysis (mouse/pen drawing recovery, keyboard scan codes, LED Morse exfiltration, RFCOMM reassembly), see [[forensics/隐写与信号/peripheral-capture.md|peripheral-capture.md]]. For basic network forensics, see [[forensics/网络取证/network.md|network.md]].
 
 ## Table of Contents
 - [Packet Interval Timing-Based Encoding (EHAX 2026)](#packet-interval-timing-based-encoding-ehax-2026)
@@ -552,7 +552,7 @@ plaintext = rc4(key, ciphertext)
 
 ---
 
-See also: [network.md](network.md) for basic network forensics techniques (tcpdump, TLS/SSL decryption, Wireshark, port scanning, SMB3 decryption, credential extraction, 5G protocols).
+See also: [[forensics/网络取证/network.md|network.md]] for basic network forensics techniques (tcpdump, TLS/SSL decryption, Wireshark, port scanning, SMB3 decryption, credential extraction, 5G protocols).
 
 ---
 

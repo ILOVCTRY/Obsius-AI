@@ -256,6 +256,31 @@ def merge_finding_evidence(old: dict, new: dict) -> dict:
     return merged
 
 
+# 发现去重的「资产链」范围（finding-dedup-chain，2026-10-15）：
+# 同一端点常被分别挂在 domain（先粗测）与 url（后精测）两个锚点上，精确同资产
+# 匹配会把它分裂成两条——「新会话验证/升链时重复上报而不是改写」的主因。
+# 匹配范围放宽到**同资产链**：自身 ∪ 祖先 ∪ 后代。**只走祖先后代链，不含兄弟**，
+# 故同站不同端点（如 a.com/login 与 a.com/search）的同类问题仍各自独立。
+_CHAIN_CTE = """
+WITH RECURSIVE up(id) AS (
+    SELECT id FROM assets WHERE id=? AND project_id=?
+    UNION
+    SELECT a.parent_id FROM assets a JOIN up ON a.id=up.id
+     WHERE a.project_id=? AND a.parent_id IS NOT NULL
+), down(id) AS (
+    SELECT id FROM assets WHERE id=? AND project_id=?
+    UNION
+    SELECT a.id FROM assets a JOIN down ON a.parent_id=down.id
+     WHERE a.project_id=?
+), chain(id) AS (SELECT id FROM up UNION SELECT id FROM down)
+"""
+
+
+def _chain_params(project_id: str, asset_id: str) -> tuple:
+    """``_CHAIN_CTE`` 的六个占位参数（up 锚点/递归 + down 锚点/递归）。"""
+    return (asset_id, project_id, project_id, asset_id, project_id, project_id)
+
+
 def validate_relates_to(conn: sqlite3.Connection, project_id: str,
                         evidence: dict | None) -> None:
     """校验 evidence.relates_to 强关系（E0，防幻觉，严格不静默丢）：
@@ -1321,37 +1346,62 @@ class Blackboard:
                           author="system")
         return self.get_asset(asset_id)
 
-    def delete_asset(self, asset_id: str, author: str = "human") -> dict:
+    def delete_asset(self, asset_id: str, author: str = "human", *,
+                     cascade_findings: bool = False) -> dict:
         """物理删除**叶子**资产（资产树整理/走查数据清理）。
 
-        防护（ValueError→API 409）：仍被 finding.target_asset_id 引用，或存在子资产
-        ——先删/改挂发现、先处理子节点。删资产不级联 findings。落 asset.deleted 审计事件。
+        防护：存在子资产 → ValueError（→API 409）——先处理子节点。删资产**不级联子资产**。
+        `cascade_findings=True`（2026-10-16，Nan 需求「删除资产时自动带着发现一并删除」）：
+        同事务把 `findings.target_asset_id` 指向本资产的发现**一并物理删除**，语义与
+        `delete_finding` 完全一致（摘反向 relates_to 边、**不触发撤回传播**、chain_links/
+        inbox/poc 产物均保留）；返回体多带 `findings_deleted`（id 列表），并逐条补发
+        `finding.deleted`（`via: asset.deleted`），`asset.deleted` 事件同时记该列表。
+        默认 False：仍被 finding 引用 → ValueError，文案照旧提示先删/改挂发现。
         资产不存在抛 LookupError（→API 404）。
         """
+        purged: list[dict] = []   # [{"id":..., "title":..., ..., "trimmed_relates_to":n}]
         with self._tx():
             row = self.conn.execute(
                 "SELECT * FROM assets WHERE id=?", (asset_id,)).fetchone()
             if row is None:
                 raise LookupError(f"资产不存在: {asset_id}")
-            ref = self.conn.execute(
-                "SELECT id FROM findings WHERE target_asset_id=? LIMIT 1",
-                (asset_id,)).fetchone()
-            if ref is not None:
+            refs = self.conn.execute(
+                "SELECT id FROM findings WHERE target_asset_id=? ORDER BY id",
+                (asset_id,)).fetchall()
+            if refs and not cascade_findings:
                 raise ValueError(
-                    f"资产 {row['value']} 仍被发现 {ref['id']} 引用，请先删除或改挂该发现")
+                    f"资产 {row['value']} 仍被发现 {refs[0]['id']} 引用，请先删除或改挂该发现")
             child = self.conn.execute(
                 "SELECT id FROM assets WHERE parent_id=? LIMIT 1", (asset_id,)).fetchone()
             if child is not None:
                 raise ValueError(f"资产 {row['value']} 存在子资产，请先处理子资产再删除")
+            for r in refs:
+                res = self._purge_finding_in_tx(row["project_id"], r["id"])
+                if res is not None:
+                    snap, trimmed = res
+                    purged.append({"id": r["id"], **snap, "trimmed_relates_to": trimmed})
             self.conn.execute("DELETE FROM assets WHERE id=?", (asset_id,))
             snapshot = {"project_id": row["project_id"], "type": row["type"],
                         "value": row["value"], "parent_id": row["parent_id"]}
+        # 级联删的发现逐条补发 finding.deleted（与 delete_finding 同形，多一个 via 溯源）
+        for p in purged:
+            fid = p["id"]
+            self.append_event(
+                snapshot["project_id"], "finding.deleted",
+                {"finding_id": fid, "by": author,
+                 "title": p["title"], "vuln_class": p["vuln_class"],
+                 "severity": p["severity"], "status": p["status"],
+                 "target_asset_id": p["target_asset_id"],
+                 "trimmed_relates_to": p["trimmed_relates_to"],
+                 "via": "asset.deleted"},
+                author=author)
         self.append_event(
             snapshot["project_id"], "asset.deleted",
             {"asset_id": asset_id, "by": author, "type": snapshot["type"],
-             "value": snapshot["value"], "parent_id": snapshot["parent_id"]},
+             "value": snapshot["value"], "parent_id": snapshot["parent_id"],
+             "findings_deleted": [p["id"] for p in purged]},
             author=author)
-        return {"id": asset_id, **snapshot}
+        return {"id": asset_id, **snapshot, "findings_deleted": [p["id"] for p in purged]}
 
     def merge_assets(
         self,
@@ -1957,6 +2007,11 @@ class Blackboard:
     ) -> dict:
         """重复发现（同 target+vuln_class+dedup_key）走证据并集（§5.3）：
 
+        - **同链默认指纹兜底（finding-dedup-chain，2026-10-15）**：精确同资产未命中时，
+          对 category=vuln 的报错类发现，在同**资产链**（自身∪祖先∪后代，不含兄弟）
+          内找唯一「默认指纹」（dedup_key == vuln_class）的同类条目并入——治「同一端点
+          分别挂在 domain/url 上、或新会话自造 dedup_key」导致的重复上报；显式指纹
+          不作候选（AI 主动拆分语义保留），候选多个则只警告不猜。
         - evidence 列表键去重追加、notes 分段追加、其余键空缺补入（merge_finding_evidence）；
           evidence.repro_steps（收录格式复现步骤）在并集键内按内容指纹去重；
         - severity 就高、status 不因新报告降级（新报 verified 可升级）、confidence 取最大、
@@ -2001,12 +2056,35 @@ class Blackboard:
             validate_relates_to(self.conn, project_id, evidence)
             row = None
             severity_raise_blocked = False  # 就高被拒标志（P2，仅合并分支可能置真）
+            chain_merged = False            # 兜底并入标志（非精确同资产命中）
+            chain_ambiguous = 0             # 同链多个默认指纹候选：不猜、只警告
             if key is not None:
                 row = self.conn.execute(
                     "SELECT * FROM findings"
                     " WHERE project_id=? AND target_asset_id IS ? AND dedup_key=?",
                     (project_id, target_asset_id, key),
                 ).fetchone()
+            # 同链默认指纹兜底（finding-dedup-chain，2026-10-15）：精确同资产未命中时，
+            # 在**同资产链**内找「默认指纹」（dedup_key == vuln_class）的同类漏洞候选——
+            # 锚点漂移（domain↔url）与「新会话自造 dedup_key」两种情况都归位到原条目，
+            # 走既有并集合并而非新增行。只对 category=vuln 生效（intel 允许按观察点
+            # 自由分桶，语义不变）；显式指纹（AI 主动拆分）不作候选，拆分语义保留；
+            # 候选唯一才并，多个（同链同类多桶）不猜，退化为只警告。
+            if row is None and category == "vuln" and vuln_class and target_asset_id:
+                cands = self.conn.execute(
+                    _CHAIN_CTE +
+                    " SELECT f.* FROM findings f WHERE f.project_id=?"
+                    " AND f.category='vuln' AND f.vuln_class=? AND f.dedup_key=?"
+                    " AND f.target_asset_id IN (SELECT id FROM chain)"
+                    " ORDER BY f.created_at ASC, f.id ASC",
+                    _chain_params(project_id, target_asset_id)
+                    + (project_id, vuln_class, vuln_class),
+                ).fetchall()
+                if len(cands) == 1:
+                    row = cands[0]
+                    chain_merged = True
+                elif cands:
+                    chain_ambiguous = len(cands)
             if row:
                 # 合并目标自引防护（E0）：新证据若 relates_to 指向它将要并入的那条发现，
                 # 并集后会产生自环边——视为引用错误拒掉，而不是悄悄落一条自边。
@@ -2172,20 +2250,33 @@ class Blackboard:
         # 任务机制退役（2026-10-06）：执行轨迹链重物化（R3）随任务机制一并退役。
         out = {"id": finding_id, "merged": merged, "severity": new_severity,
                "rating_basis": new_basis, "category": category,
-               "severity_raise_blocked": severity_raise_blocked}
-        # M5 D1 疑似重复警告（orchestrator-efficiency §0-9）：同目标+同类
-        # （vuln_class）但 dedup_key 不同 = 可能被不同指纹分裂的重复——只提示不阻塞
-        # （Agent 可坚持新增）；合并分支（同 key 已自动并集）不算；无 target 或
-        # vuln_class 空（逆向发现留 ''，同目标多函数发现是常态）不查。
+               "dedup_key": key, "severity_raise_blocked": severity_raise_blocked}
+        if merged and chain_merged:
+            # 兜底并入：让调用方知道这次不是「精确同指纹」，而是锚点漂移/自造指纹
+            # 被归位到原条目（finding-dedup-chain）。工具层据此回执人话提示。
+            out["chain_merged"] = True
+        # M5 D1 疑似重复警告（orchestrator-efficiency §0-9）：**同资产链**+同类
+        # （vuln_class）= 可能被不同指纹/不同锚点分裂的重复——只提示不阻塞（Agent 可
+        # 坚持新增）；本次并入的本体行不算；无 target 或 vuln_class 空（逆向发现留 ''，
+        # 同目标多函数发现是常态）不查。finding-dedup-chain（2026-10-15）：范围由
+        # 「精确同资产」放宽到同资产链（兄弟端点不在此列），并把 dedup_key/
+        # target_asset_id 一并回传——调用方才能拿旧指纹重报并入。
         if target_asset_id and vuln_class:
             dups = self.conn.execute(
-                "SELECT id, title FROM findings WHERE project_id=? AND"
-                " target_asset_id IS ? AND vuln_class=? AND dedup_key != ?"
-                " AND id != ? ORDER BY created_at DESC LIMIT 3",
-                (project_id, target_asset_id, vuln_class, key, finding_id)).fetchall()
+                _CHAIN_CTE +
+                " SELECT id, title, dedup_key, target_asset_id FROM findings"
+                " WHERE project_id=? AND target_asset_id IN (SELECT id FROM chain)"
+                " AND vuln_class=? AND id != ?"
+                " ORDER BY created_at DESC LIMIT 3",
+                _chain_params(project_id, target_asset_id)
+                + (project_id, vuln_class, finding_id)).fetchall()
             if dups:
-                out["dedup_warning"] = [{"id": d["id"], "title": d["title"]}
-                                        for d in dups]
+                out["dedup_warning"] = [
+                    {"id": d["id"], "title": d["title"], "dedup_key": d["dedup_key"],
+                     "target_asset_id": d["target_asset_id"]} for d in dups]
+        if chain_ambiguous:
+            # 同链同类存在多个默认指纹桶：无法判定归谁，不猜——把候选数透出供提示。
+            out["chain_ambiguous"] = chain_ambiguous
         # 阶段四 M2 黑板发布/订阅（2026-09-28）：新 finding 强关联广播——命中在跑
         # 目标任务的资产值 → 给认领会话发 agent_message(intel) 情报私信（非本人、
         # 未关闭、任务 open/claimed）。多会话协作核心：A 的发现主动喂给做同目标
@@ -2531,6 +2622,40 @@ class Blackboard:
             pass
         return updated
 
+    def _purge_finding_in_tx(self, project_id: str, finding_id: str
+                             ) -> tuple[dict, int] | None:
+        """**在调用方事务内**物理删除一条发现，返回 `(snapshot, trimmed_rels)`；
+        不存在返 None。抽出来给 `delete_finding` 与 `delete_asset(cascade_findings=True)`
+        共用，两者级联语义必须完全一致（摘反向 relates_to 边、不触发撤回传播）。
+        调用方负责在提交后补发 `finding.deleted` 事件。"""
+        row = self.conn.execute(
+            "SELECT * FROM findings WHERE id=? AND project_id=?",
+            (finding_id, project_id)).fetchone()
+        if row is None:
+            return None
+        ts = now()
+        # 反向 relates_to 摘边（逐条 read-modify-write，全在本事务）
+        trimmed_rels = 0
+        for f in self.conn.execute(
+                "SELECT id,evidence FROM findings WHERE project_id=?", (project_id,)):
+            ev = _loads(f["evidence"], {})
+            rels = ev.get("relates_to")
+            if not isinstance(rels, list):
+                continue
+            kept = [r for r in rels
+                    if not (isinstance(r, dict) and r.get("finding_id") == finding_id)]
+            if len(kept) != len(rels):
+                ev["relates_to"] = kept
+                trimmed_rels += 1
+                self.conn.execute(
+                    "UPDATE findings SET evidence=?, updated_at=? WHERE id=?",
+                    (json.dumps(ev, ensure_ascii=False), ts, f["id"]))
+        self.conn.execute("DELETE FROM findings WHERE id=?", (finding_id,))
+        snapshot = {"title": row["title"], "vuln_class": row["vuln_class"],
+                    "severity": row["severity"], "status": row["status"],
+                    "target_asset_id": row["target_asset_id"]}
+        return snapshot, trimmed_rels
+
     def delete_finding(
         self, project_id: str, finding_id: str, author: str = "human",
     ) -> dict | None:
@@ -2544,33 +2669,11 @@ class Blackboard:
 
         落 finding.deleted 审计事件（快照 + 摘边数）。不存在返 None。
         """
-        trimmed_rels = 0
         with self._tx():
-            row = self.conn.execute(
-                "SELECT * FROM findings WHERE id=? AND project_id=?",
-                (finding_id, project_id)).fetchone()
-            if row is None:
+            res = self._purge_finding_in_tx(project_id, finding_id)
+            if res is None:
                 return None
-            ts = now()
-            # 反向 relates_to 摘边（逐条 read-modify-write，全在本事务）
-            for f in self.conn.execute(
-                    "SELECT id,evidence FROM findings WHERE project_id=?", (project_id,)):
-                ev = _loads(f["evidence"], {})
-                rels = ev.get("relates_to")
-                if not isinstance(rels, list):
-                    continue
-                kept = [r for r in rels
-                        if not (isinstance(r, dict) and r.get("finding_id") == finding_id)]
-                if len(kept) != len(rels):
-                    ev["relates_to"] = kept
-                    trimmed_rels += 1
-                    self.conn.execute(
-                        "UPDATE findings SET evidence=?, updated_at=? WHERE id=?",
-                        (json.dumps(ev, ensure_ascii=False), ts, f["id"]))
-            self.conn.execute("DELETE FROM findings WHERE id=?", (finding_id,))
-            snapshot = {"title": row["title"], "vuln_class": row["vuln_class"],
-                        "severity": row["severity"], "status": row["status"],
-                        "target_asset_id": row["target_asset_id"]}
+            snapshot, trimmed_rels = res
         self.append_event(
             project_id, "finding.deleted",
             {"finding_id": finding_id, "by": author, **snapshot,

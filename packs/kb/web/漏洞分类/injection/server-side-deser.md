@@ -1,6 +1,6 @@
 # CTF Web - Deserialization & Execution Attacks
 
-For core injection attacks (SQLi, SSTI, SSRF, XXE, command injection), see [server-side.md](server-side.md).
+For core injection attacks (SQLi, SSTI, SSRF, XXE, command injection), see [[web/漏洞分类/injection/server-side.md|server-side.md]].
 
 ## Table of Contents
 - [Java Deserialization (ysoserial)](#java-deserialization-ysoserial)

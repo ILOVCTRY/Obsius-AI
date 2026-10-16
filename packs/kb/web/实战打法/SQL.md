@@ -2619,5 +2619,5 @@ azzzz < mysql
 
 - **工具**: [sqlmap速查手册](工具使用/sqlmap-Cheat-Sheet.pdf) — 参见 SQL.md L288-L670 章节
 - **靶场WP**: [SQLI-LABS靶场WP](WP汇总/各大靶场WP汇总.md)
-- **代码审计**: [php代码审计.md](php代码审计.md) — SQL注入 WITH ROLLUP 绕过 (L990-L1112)
+- **代码审计**: [[web/实战打法/php代码审计.md|php代码审计.md]] — SQL注入 WITH ROLLUP 绕过 (L990-L1112)
 - **哈希碰撞**: [md5爆破脚本](CTF常用脚本及工具/md5爆破/) — 配合SQL注入写webshell

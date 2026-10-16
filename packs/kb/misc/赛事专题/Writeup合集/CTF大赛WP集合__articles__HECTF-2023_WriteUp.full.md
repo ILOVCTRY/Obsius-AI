@@ -267,7 +267,8 @@ Recovered flag: b'HECTF{spodjoqw321jp3ij09adfiosofrga}'
 
 def caesar_cipher_decrypt(char, shift):    # 将字符转换为其ASCII码值    ascii_value = ord(char)    # 减去偏移量    shifted_value = ascii_value - shift    # 将偏移后的ASCII码值转换回字符    return chr(shifted_value)
 def split_and_decrypt(text, group_size):    groups = [text[i:i+group_size] for i in range(0, len(text), group_size)]    decrypted_groups = []    for i, group in enumerate(groups):        shift = i + 1        decrypted_group = ''.join(caesar_cipher_decrypt(char, shift) for char in group)        decrypted_groups.append(decrypted_group)    return decrypted_groups
-# 示例字符串input_text = "zpvepoudbsgcdqwvjgocqg|rxrqo|feviefsyx}szwt|skqfl?NKIZLYZUVfU|jslhyfzmiom"# 按照要求分组和解密result = split_and_decrypt(input_text, 10)
+# 示例字符串input_text = "zpvepoudbsgcdqwvjgocqg|rxrqo|feviefsyx}szwt|skqfl?NKIZLYZUVfU|jslhyfzmiom
+"# 按照要求分组和解密result = split_and_decrypt(input_text, 10)
 # 输出结果for i, group in enumerate(result):    print(f"Group {i+1}: {group}")
 
 HECTF{STOP_Nuclear_sewage}
@@ -366,7 +367,8 @@ def my_decblock(encrypted_message):    assert len(encrypted_message) % 4 == 0 
 Recovered flag: b'HECTF{spodjoqw321jp3ij09adfiosofrga}'
 def caesar_cipher_decrypt(char, shift):    # 将字符转换为其ASCII码值    ascii_value = ord(char)    # 减去偏移量    shifted_value = ascii_value - shift    # 将偏移后的ASCII码值转换回字符    return chr(shifted_value)
 def split_and_decrypt(text, group_size):    groups = [text[i:i+group_size] for i in range(0, len(text), group_size)]    decrypted_groups = []    for i, group in enumerate(groups):        shift = i + 1        decrypted_group = ''.join(caesar_cipher_decrypt(char, shift) for char in group)        decrypted_groups.append(decrypted_group)    return decrypted_groups
-# 示例字符串input_text = "zpvepoudbsgcdqwvjgocqg|rxrqo|feviefsyx}szwt|skqfl?NKIZLYZUVfU|jslhyfzmiom"# 按照要求分组和解密result = split_and_decrypt(input_text, 10)
+# 示例字符串input_text = "zpvepoudbsgcdqwvjgocqg|rxrqo|feviefsyx}szwt|skqfl?NKIZLYZUVfU|jslhyfzmiom
+"# 按照要求分组和解密result = split_and_decrypt(input_text, 10)
 # 输出结果for i, group in enumerate(result):    print(f"Group {i+1}: {group}")
 HECTF{STOP_Nuclear_sewage}
 from Crypto.Cipher import AESfrom Crypto.Util.number import long_to_bytesxor_result = 113271863767201424639329153097952947311122854394813183532903131317262533549675encrypted_flag = b'_1x16xc2;xb1xddyx14xddx14xe5{x19x04:'xor_result_bytes = long_to_bytes(xor_result)key_high = xor_result_bytes[:16]secret_key = key_high + key_highxor_result_low = xor_result_bytes[-16:]init_vector = bytes(a ^ b for a, b in zip(secret_key[:16], xor_result_low))cipher = AES.new(secret_key, AES.MODE_CBC, init_vector)decrypted_flag = cipher.decrypt(encrypted_flag)print(f"Decrypted flag: {decrypted_flag}")

@@ -1,6 +1,6 @@
 # RCE — XXE 实体注入 payload 库
 
-> 父文档:[00-index.md](00-index.md)
+> 父文档:[[web/实战打法/rce/00-index.md|00-index.md]]
 > 涵盖基础 XXE / 盲注 / OOB 外带 / XXE+SSRF / XXE 到 RCE / 文件读 / 外部 DTD / XLSX / DOCX。任何 XML 解析点或 Office 文件上传点都试一遍。
 
 ---
@@ -513,4 +513,4 @@ _修改关系文件_
 
 ---
 
-← 回 [00-index.md](00-index.md)
+← 回 [[web/实战打法/rce/00-index.md|00-index.md]]

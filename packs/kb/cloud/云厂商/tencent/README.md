@@ -4,12 +4,12 @@
 
 ## 索引
 
-- [cvm.md](cvm.md) — CVM 云服务器攻防（实例/镜像/密钥对/安全组/用户数据/元数据）
-- [cos.md](cos.md) — COS 对象存储攻防（bucket/object/ACL/公有读/桶接管/静态网站）
-- [database.md](database.md) — TencentDB 云数据库攻防（MySQL/PostgreSQL/SQL Server/TDSQL/公网访问）
-- [cam.md](cam.md) — CAM 访问管理攻防（用户/角色/策略/SecretId/SecretKey/STS）
-- [network.md](network.md) — VPC/子网/安全组/CLB/NAT 网络攻防
-- [metadata-ssrf.md](metadata-ssrf.md) — 从 SSRF 到元数据 CAM 临时凭证攻防
+- [[cloud/云厂商/tencent/cvm.md|cvm.md]] — CVM 云服务器攻防（实例/镜像/密钥对/安全组/用户数据/元数据）
+- [[cloud/云厂商/tencent/cos.md|cos.md]] — COS 对象存储攻防（bucket/object/ACL/公有读/桶接管/静态网站）
+- [[cloud/云厂商/tencent/database.md|database.md]] — TencentDB 云数据库攻防（MySQL/PostgreSQL/SQL Server/TDSQL/公网访问）
+- [[cloud/云厂商/tencent/cam.md|cam.md]] — CAM 访问管理攻防（用户/角色/策略/SecretId/SecretKey/STS）
+- [[cloud/云厂商/tencent/network.md|network.md]] — VPC/子网/安全组/CLB/NAT 网络攻防
+- [[cloud/云厂商/tencent/metadata-ssrf.md|metadata-ssrf.md]] — 从 SSRF 到元数据 CAM 临时凭证攻防
 
 ## 使用约定
 

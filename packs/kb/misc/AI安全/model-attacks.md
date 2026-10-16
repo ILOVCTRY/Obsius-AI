@@ -1,6 +1,6 @@
 # CTF AI/ML - Model Attacks
 
-Techniques for attacking ML models directly: weight manipulation, model inversion, encoder collision, LoRA adapter exploitation, model extraction, and membership inference. For adversarial example generation and data poisoning, see [adversarial-ml.md](adversarial-ml.md). For LLM-specific attacks, see [llm-attacks.md](llm-attacks.md).
+Techniques for attacking ML models directly: weight manipulation, model inversion, encoder collision, LoRA adapter exploitation, model extraction, and membership inference. For adversarial example generation and data poisoning, see [[misc/AI安全/adversarial-ml.md|adversarial-ml.md]]. For LLM-specific attacks, see [[misc/AI安全/llm-attacks.md|llm-attacks.md]].
 
 ## Table of Contents
 - [ML Model Weight Perturbation Negation (DiceCTF 2026)](#ml-model-weight-perturbation-negation-dicectf-2026)

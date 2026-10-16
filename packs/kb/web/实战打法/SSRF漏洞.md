@@ -1888,7 +1888,7 @@ IOUtils.copy(conn.getInputStream(), out);
 
 ## 相关资源
 
-- **代码审计**: [php代码审计.md](php代码审计.md) — SSRF相关函数 (curl_exec/file_get_contents/fsockopen)
-- **文件包含**: [文件包含.md](文件包含.md) — php伪协议可结合SSRF利用
+- **代码审计**: [[web/实战打法/php代码审计.md|php代码审计.md]] — SSRF相关函数 (curl_exec/file_get_contents/fsockopen)
+- **文件包含**: [[web/实战打法/文件包含.md|文件包含.md]] — php伪协议可结合SSRF利用
 - **工具**: [ffuf模糊测试](工具使用/ffuf的使用.md) — 内网探测端口扫描
 - **参考**: Gopher/Redis/FastCGI/DNS-rebinding 见本文章 L271-L423

@@ -101,6 +101,17 @@ def proxy_rotate() -> dict:
 
 
 @mcp.tool()
+def proxy_use(proxy: str) -> dict:
+    """**精确切换到指定代理**（host:port），返回新的当前代理。需服务在跑。
+
+    与 `proxy_rotate`（顺拣下一个，碰运气）互补：`proxy_check_url` 判出某个 IP 对
+    目标站点**可达/未被封禁**后，直接把它钉死为当前代理，后续 `curl -x <入口>` 全走它。
+    地址不在池或非 Working 会报错。
+    """
+    return _call("POST", "/api/proxy/use", {"proxy": proxy})
+
+
+@mcp.tool()
 def proxy_select(limit: int = 1, region: str | None = None,
                  max_latency_ms: float | None = None) -> dict:
     """按评分挑最合适的代理（可选地区 / 延迟上限）。不启服务也可用。"""

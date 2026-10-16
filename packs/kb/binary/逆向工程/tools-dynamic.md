@@ -33,7 +33,7 @@
 - [r2pipe Binary Walking + DP Constraint Solver (OTW Advent 2018)](#r2pipe-binary-walking--dp-constraint-solver-otw-advent-2018)
 - [GDB Commands at strcmp to Recover Dynamic XOR Key (TAMUctf 2019)](#gdb-commands-at-strcmp-to-recover-dynamic-xor-key-tamuctf-2019)
 
-For Qiling/Triton emulation and Intel Pin / LD_PRELOAD side-channel techniques, see [tools-emulation.md](tools-emulation.md).
+For Qiling/Triton emulation and Intel Pin / LD_PRELOAD side-channel techniques, see [[binary/逆向工程/tools-emulation.md|tools-emulation.md]].
 
 ---
 
@@ -676,4 +676,3 @@ Chain the per-byte recovery over the full 16-byte target and reconstruct the cor
 **Key insight:** When `strcmp` is the last gate, the obfuscator is irrelevant — its output still has to equal a fixed string at a known call site. GDB's `commands` block turns the breakpoint into an automatic oracle: one run with `AAAA...` leaks the keystream, and a second pass with any target string gives the valid input. Works for any keyed transform that is effectively a permutation of the input under a fixed key.
 
 **References:** TAMUctf 2019 — Obfuscaxor, writeup 13574
-

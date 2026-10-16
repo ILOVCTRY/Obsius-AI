@@ -276,6 +276,43 @@ def attach_effective_status(assets: list[dict],
     return out
 
 
+# ---------- 资产计数口径（level-two-counts，2026-10-16） ----------
+
+def level_two_stats(assets: list[dict],
+                    findings: list[dict] | None = None) -> dict:
+    """资产树计数口径（2026-10-16，Nan 定稿「只计算二级子节点的数量作为资产数」）：
+    树形只认「根节点 → 二级子节点 → 三级 URL」三层链，**资产数 = 二级子节点数**
+    （深度恰为 1，即其父节点为根）；**根节点与更深层都不进分母**——根只是分组
+    容器，三级 URL 只是二级的叶子明细，都不该当资产计数。
+
+    返回 ``{"total": n, "clean": m, "pct": p}``：
+
+    - ``total``：深度为 1 的资产条数（同 COVERAGE_TYPES 口径，binary 等不计——
+      与 `effective_status_map` 同对账面，保证分子分母同一总体）；
+    - ``clean``：其中 ``effective_status == tested_clean``（**已测干净**）的条数，
+      口径与 `effective_status_map` 完全一致（含「全子 clean → 父派生 clean」）；
+    - ``pct``：``clean/total`` 的整数百分比，``total == 0`` 时为 0（无分母不除零）。
+
+    孤立行（``parent_id`` 指向不存在的资产）既不是根、也不算二级子节点，不进分母。
+    本函数只读传入快照，纯计算不落库、不抛业务异常。
+    """
+    scoped = [a for a in assets if a.get("type") in COVERAGE_TYPES]
+    by_id = {a["id"]: a for a in scoped}
+
+    def is_level_two(a: dict) -> bool:
+        pid = a.get("parent_id")
+        return bool(pid) and pid in by_id and by_id[pid].get("parent_id") is None
+
+    level_two = [a for a in scoped if is_level_two(a)]
+    total = len(level_two)
+    if not total:
+        return {"total": 0, "clean": 0, "pct": 0}
+    emap = effective_status_map(scoped, findings)
+    clean = sum(1 for a in level_two
+                if (emap.get(a["id"]) or {}).get("status") == TRI_CLEAN)
+    return {"total": total, "clean": clean, "pct": round(clean * 100 / total)}
+
+
 # ---------- 三态态势快照（asset-tri-state D8，2026-10-09） ----------
 
 def situation_snapshot(assets: list[dict], findings: list[dict] | None = None,

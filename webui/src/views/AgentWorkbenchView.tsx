@@ -2,6 +2,7 @@ import {
   useCallback, useEffect, useMemo, useRef, useState,
   type MouseEvent as ReactMouseEvent,
 } from "react"
+import { createPortal } from "react-dom"
 import {
   AlertTriangle, Bot, Check, ChevronDown, CircleSlash, Clock3, Cpu, Gauge, Loader2,
   Paperclip, Plug, Plus, RefreshCw, Send, Sparkles, Square, Trash2, Wrench, X, Zap,
@@ -25,6 +26,7 @@ import type { ActivityStep } from "@/lib/activity"
 import { parseTs } from "@/lib/datetime"
 import { cn } from "@/lib/utils"
 import { paneMaxWidth } from "@/lib/paneWidth"
+import { useNavRailSlot } from "@/lib/navRail"
 import { useEvents } from "@/lib/useEvents"
 
 // 智能体工作台（K9，2026-09-29）：对话式挖洞入口（蛙池式）。
@@ -108,6 +110,12 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
   const [dragging, setDragging] = useState(false)
   const dragOrigin = useRef<{ x: number; w: number } | null>(null)
   const splitterRef = useRef<HTMLDivElement>(null)
+
+  // 左栏停靠（2026-10-16）：左导航列下半留了空槽位时，把 agent 切换器 + 会话线程列表
+  // portal 过去，与左导航共用同一列（主区因此多出整列宽，见 lib/navRail.ts）。
+  // 槽位不存在（窄栏 / 侧栏收起 / 非 agents 视图）→ docked=false，走原来的两列布局。
+  const railSlot = useNavRailSlot()
+  const docked = !!railSlot
 
   // 左栏可拖到的最大宽（动态：容器 − 主区保底 − 右栏占位）
   const maxAside = useCallback(
@@ -609,87 +617,66 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
     ? !pendingIn
     : loaded && messages.length === 0 && !pendingIn && !running
       && !(thread?.todo?.length) && !thread?.error
+  // 左栏内容（会话线程列表）：停靠时不再自定宽（由左导航列给宽），未停靠时维持原宽度与拖拽调宽。
+  // **智能体切换入口已从本栏移除（2026-10-16，Nan 需求）**：此前栏顶有一张 .wb-agent-trigger
+  // 卡片 + 下拉，与 composer 里的 agent 药丸重复；现在全应用只在 composer 处切换
+  // （.wb-composer-agent 药丸 + composer-bar 的 Agents 面板两个入口）。
+  const rail = (
+    <aside className={cn("wb-aside", docked && "is-docked")}
+           style={docked ? undefined : { width: asideWidth, flexBasis: asideWidth }}>
+      <div className="wb-aside-sub">
+        会话线程
+        <button className="wb-thread-new" onClick={() => selectThread(null)}>
+          <Plus size={11} /> 新建
+        </button>
+      </div>
+      <div className="wb-thread-list">
+        {threads.map((t) => (
+          <div key={t.id} className={cn("wb-thread", t.id === tid && "is-active")}
+            onClick={() => selectThread(t.id)} title={t.title || "(未命名)"}>
+            <span className={cn("wb-dot", t.status === "running" && "is-running",
+              t.status === "error" && "is-error")} />
+            <span className="min-w-0 flex-1">
+              <span className="wb-thread-title">{t.title || "(未命名)"}</span>
+              <span className="wb-thread-meta">
+                {t.parent_thread_id && <span>↳ spawn</span>}
+                <Clock3 size={9} />
+                {fmtTime(t.updated_at)}
+                <span>·</span>
+                {t.todo.filter((x) => x.status === "completed").length}/{t.todo.length} 待办
+              </span>
+            </span>
+            <button className="wb-thread-del" title="删除线程"
+              onClick={(ev) => { ev.stopPropagation(); void removeThread(t.id) }}>
+              <Trash2 size={12} />
+            </button>
+          </div>
+        ))}
+        {!threads.length && <div className="wb-aside-empty">暂无线程，发送消息或点「新建」</div>}
+      </div>
+    </aside>
+  )
+
   return (
     <div className="wb-shell">
-      {/* 左栏：agent 切换器 + 线程列表 */}
-      <aside className="wb-aside" style={{ width: asideWidth, flexBasis: asideWidth }}>
-        <div className="wb-aside-head">
-          <button className="wb-agent-trigger" onClick={() => setAgentMenuOpen((v) => !v)}>
-            <span className={cn("wb-avatar", agentId === ORCHESTRATOR && "is-orch")}>
-              {agentId === ORCHESTRATOR ? <Bot size={14} /> : agentInitial(currentAgent)}
-            </span>
-            <span className="min-w-0 flex-1">
-              <span className="wb-agent-name">{currentAgent?.name ?? agentId}</span>
-              <span className="wb-agent-role">{agentId === ORCHESTRATOR ? "主控" : "专家"}</span>
-            </span>
-            <ChevronDown size={13} className="shrink-0 text-muted-foreground" />
-          </button>
-          {agentMenuOpen && (
-            <div className="wb-agent-menu">
-              <div className="wb-agent-menu-label">智能体</div>
-              {agents.map((a) => (
-                <button key={a.id}
-                  className={cn("wb-agent-option", a.id === agentId && "is-current")}
-                  onClick={() => { setAgentId(a.id); setAgentMenuOpen(false) }}>
-                  <span className={cn("wb-avatar", a.id === ORCHESTRATOR && "is-orch")}>
-                    {a.id === ORCHESTRATOR ? <Bot size={13} /> : agentInitial(a)}
-                  </span>
-                  <span className="wb-agent-option-body">
-                    <span className="wb-agent-option-name">
-                      {a.name}
-                      {a.id === agentId && <Check size={12} className="wb-check" />}
-                    </span>
-                    <span className="wb-agent-option-desc">{a.description}</span>
-                  </span>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-        <div className="wb-aside-sub">
-          会话线程
-          <button className="wb-thread-new" onClick={() => selectThread(null)}>
-            <Plus size={11} /> 新建
-          </button>
-        </div>
-        <div className="wb-thread-list">
-          {threads.map((t) => (
-            <div key={t.id} className={cn("wb-thread", t.id === tid && "is-active")}
-              onClick={() => selectThread(t.id)} title={t.title || "(未命名)"}>
-              <span className={cn("wb-dot", t.status === "running" && "is-running",
-                t.status === "error" && "is-error")} />
-              <span className="min-w-0 flex-1">
-                <span className="wb-thread-title">{t.title || "(未命名)"}</span>
-                <span className="wb-thread-meta">
-                  {t.parent_thread_id && <span>↳ spawn</span>}
-                  <Clock3 size={9} />
-                  {fmtTime(t.updated_at)}
-                  <span>·</span>
-                  {t.todo.filter((x) => x.status === "completed").length}/{t.todo.length} 待办
-                </span>
-              </span>
-              <button className="wb-thread-del" title="删除线程"
-                onClick={(ev) => { ev.stopPropagation(); void removeThread(t.id) }}>
-                <Trash2 size={12} />
-              </button>
-            </div>
-          ))}
-          {!threads.length && <div className="wb-aside-empty">暂无线程，发送消息或点「新建」</div>}
-        </div>
-      </aside>
-      <div
-        ref={splitterRef}
-        className={cn("wb-splitter", dragging && "is-dragging")}
-        role="separator"
-        aria-orientation="vertical"
-        aria-label="拖动调整侧栏宽度"
-        tabIndex={0}
-        onMouseDown={onSplitterDown}
-        onKeyDown={(e) => {
-          if (e.key === "ArrowLeft") setAsideWidth((w) => Math.max(ASIDE_MIN, w - 16))
-          if (e.key === "ArrowRight") setAsideWidth((w) => Math.min(maxAside(), w + 16))
-        }}
-      />
+      {/* 左栏：停靠进左导航列（portal）或留在原位 */}
+      {docked ? createPortal(rail, railSlot) : rail}
+      {/* 分割线只在未停靠时存在——停靠后本列宽度统一由左导航自己的分割线管 */}
+      {!docked && (
+        <div
+          ref={splitterRef}
+          className={cn("wb-splitter", dragging && "is-dragging")}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="拖动调整侧栏宽度"
+          tabIndex={0}
+          onMouseDown={onSplitterDown}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowLeft") setAsideWidth((w) => Math.max(ASIDE_MIN, w - 16))
+            if (e.key === "ArrowRight") setAsideWidth((w) => Math.min(maxAside(), w + 16))
+          }}
+        />
+      )}
 
       {/* 中栏：时间线 + 输入大卡片；标题栏信息并入统计行 */}
       <main className="wb-main">
@@ -1141,6 +1128,34 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
                       </div>
                     )}
                   </div>
+                ))}
+              </div>
+            </>
+          )}
+
+          {/* 智能体选择浮层（2026-10-16 从左栏迁来）：由 composer 的 .wb-composer-agent 药丸
+              触发，向上弹出。必须挂在 composer 外层 wrap —— .wb-composer 自身 overflow:hidden，
+              内嵌会被裁掉（与上面的模型浮层同理）。backdrop 负责点外部关闭。 */}
+          {agentMenuOpen && (
+            <>
+              <div className="wb-model-backdrop" onClick={() => setAgentMenuOpen(false)} />
+              <div className="wb-agent-menu">
+                <div className="wb-agent-menu-label">智能体</div>
+                {agents.map((a) => (
+                  <button key={a.id}
+                    className={cn("wb-agent-option", a.id === agentId && "is-current")}
+                    onClick={() => { setAgentId(a.id); setAgentMenuOpen(false) }}>
+                    <span className={cn("wb-avatar", a.id === ORCHESTRATOR && "is-orch")}>
+                      {a.id === ORCHESTRATOR ? <Bot size={13} /> : agentInitial(a)}
+                    </span>
+                    <span className="wb-agent-option-body">
+                      <span className="wb-agent-option-name">
+                        {a.name}
+                        {a.id === agentId && <Check size={12} className="wb-check" />}
+                      </span>
+                      <span className="wb-agent-option-desc">{a.description}</span>
+                    </span>
+                  </button>
                 ))}
               </div>
             </>

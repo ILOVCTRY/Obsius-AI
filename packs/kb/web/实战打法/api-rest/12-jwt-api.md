@@ -1,7 +1,7 @@
 # JWT 安全(API 视角补充)payload 库
 
-> 父文档:[00-index.md](00-index.md)
-> 涵盖:JWT 安全通论 + JWT None 算法 + RS→HS 密钥混淆。**主参考是 [`../oauth-saml-jwt/12-jwt.md`](../oauth-saml-jwt/12-jwt.md)**,本文件保留以保持 API 视角的完整性,内容与 oauth-saml-jwt 部分重叠。
+> 父文档:[[web/实战打法/api-rest/00-index.md|00-index.md]]
+> 涵盖:JWT 安全通论 + JWT None 算法 + RS→HS 密钥混淆。**主参考是 [[web/实战打法/oauth-saml-jwt/12-jwt.md|../oauth-saml-jwt/12-jwt.md]]**,本文件保留以保持 API 视角的完整性,内容与 oauth-saml-jwt 部分重叠。
 
 ---
 
@@ -297,4 +297,4 @@ _通过jku/x5u绕过_
 
 ---
 
-← 回 [00-index.md](00-index.md) · 主参考:[`../oauth-saml-jwt/12-jwt.md`](../oauth-saml-jwt/12-jwt.md)
+← 回 [[web/实战打法/api-rest/00-index.md|00-index.md]] · 主参考:[[web/实战打法/oauth-saml-jwt/12-jwt.md|../oauth-saml-jwt/12-jwt.md]]

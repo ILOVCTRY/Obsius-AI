@@ -9,7 +9,7 @@ vuln_class: [dotnet, redteam-tools]
 
 > 来源：reverse-skill 1.0.1 收编改编（2026-09-30，MIT，见 `../../licenses/`）。
 > 红队工具大量用 C# 写（Sharp* 系列），逆向它们是常见场景：理解检测逻辑、改特征、
-> 提取内嵌配置。配合技能 [dotnet-rev](../../capabilities/binary/skills/dotnet-rev/SKILL.md)。
+> 提取内嵌配置。配合技能 [[skills/dotnet-rev/SKILL.md|dotnet-rev]]。
 
 ## 常见 Sharp* 工具速查
 
@@ -57,7 +57,7 @@ powershell -c "[System.Reflection.Assembly]::LoadFile('target.exe').GetManifestR
 ```
 
 运行时解密的配置 → 动态断在解密方法返回点 dump 明文（见
-[common-workflow.md](common-workflow.md)）。
+[[binary/dotnet逆向/common-workflow.md|common-workflow.md]]）。
 
 ## 工具安装矩阵
 

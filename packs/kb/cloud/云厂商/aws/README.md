@@ -4,12 +4,12 @@
 
 ## 索引
 
-- [ec2.md](ec2.md) — EC2 计算实例攻防（用户数据/AMI/密钥对/SSM/元数据）
-- [s3.md](s3.md) — S3 对象存储攻防（桶爆破/ACL/策略/公开访问/桶接管）
-- [rds.md](rds.md) — RDS 云数据库攻防（MySQL/PostgreSQL/SQL Server/公开访问/快照）
-- [iam.md](iam.md) — IAM 与权限攻防（用户/角色/策略/AccessKey/sts AssumeRole/跨账户信任）
-- [network.md](network.md) — VPC/安全组/NACL/ELB/Route53 网络攻防
-- [ssrf-metadata.md](ssrf-metadata.md) — 从 SSRF 到元数据凭证（IMDSv1/v2）攻防
+- [[cloud/云厂商/aws/ec2.md|ec2.md]] — EC2 计算实例攻防（用户数据/AMI/密钥对/SSM/元数据）
+- [[cloud/云厂商/aws/s3.md|s3.md]] — S3 对象存储攻防（桶爆破/ACL/策略/公开访问/桶接管）
+- [[cloud/云厂商/aws/rds.md|rds.md]] — RDS 云数据库攻防（MySQL/PostgreSQL/SQL Server/公开访问/快照）
+- [[cloud/云厂商/aws/iam.md|iam.md]] — IAM 与权限攻防（用户/角色/策略/AccessKey/sts AssumeRole/跨账户信任）
+- [[cloud/云厂商/aws/network.md|network.md]] — VPC/安全组/NACL/ELB/Route53 网络攻防
+- [[cloud/云厂商/aws/ssrf-metadata.md|ssrf-metadata.md]] — 从 SSRF 到元数据凭证（IMDSv1/v2）攻防
 
 共 6 篇。
 

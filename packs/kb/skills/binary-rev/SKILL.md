@@ -55,13 +55,13 @@ mode: self-contained
 XOR 常量 / 逐字节加减 / 查表替换 / 简易 TEA·XTEA / 魔改 base64 / 反转+位移。
 遇到多层嵌套先分层落 func_kb，再逐层求解。
 
-## 延伸手册（场景特征 → skill_open）
+## 延伸手册（场景特征 → kb_open）
 
 | 场景/特征 | 手册 |
 |---|---|
-| 旧版有符号、新版无符号（缺 PDB/程序更新） | `references/binary/reverse/sym-diff.md`（LLM 符号迁移 + 平台 MCP 对接） |
-| ARM64 跳转表平坦化 / 循环 XOR 解密器 / 无 IDA 低依赖路线 | `references/binary/reverse/cases/arm64-self-extract-source-recovery.md` |
-| Go 二进制源码级恢复 | `references/binary/reverse/cases/go-tls-proxy-source-recovery.md`（GoReSym 管线） |
-| 平坦化 + DSL VM / 验证码类 | `references/binary/reverse/cases/dsl-vm-captcha-reverse.md` |
-| Electron/Bytenode 跨层审计 | `references/binary/reverse/cases/electron-bytenode-update-chain-audit.md` |
+| 旧版有符号、新版无符号（缺 PDB/程序更新） | `binary/逆向工程/sym-diff.md`（LLM 符号迁移 + 平台 MCP 对接） |
+| ARM64 跳转表平坦化 / 循环 XOR 解密器 / 无 IDA 低依赖路线 | `binary/逆向工程/cases/arm64-self-extract-source-recovery.md` |
+| Go 二进制源码级恢复 | `binary/逆向工程/cases/go-tls-proxy-source-recovery.md`（GoReSym 管线） |
+| 平坦化 + DSL VM / 验证码类 | `binary/逆向工程/cases/dsl-vm-captcha-reverse.md` |
+| Electron/Bytenode 跨层审计 | `binary/逆向工程/cases/electron-bytenode-update-chain-audit.md` |
 | .NET/C# 托管样本 | 切 dotnet-rev 技能（混淆器/脱壳/IL patch） |

@@ -79,7 +79,14 @@ export interface ProjectUsage extends Autonomy {
 export interface ProjectDetail extends ProjectMeta {
   task_stats: Record<string, number>
   findings: number
+  /** 资产数（level-two-counts 口径，2026-10-16）：资产树只取
+   *  「根节点 → 二级子节点 → 三级 URL」，**只数二级子节点**（深度恰为 1）；
+   *  根是分组容器、三级 URL 只是二级的明细，都不计。 */
   assets: number
+  /** 其中「已测干净」（effective_status == tested_clean）的条数 */
+  assets_clean?: number
+  /** 已测干净/总资产 的整数百分比（total=0 → 0） */
+  assets_clean_pct?: number
   usage: ProjectUsage
   capability: HostCapability
 }
@@ -1238,8 +1245,8 @@ export type SkillVocab = Record<
 
 // ---------- 统一变更提案（C4） ----------
 
-export type ProposalKind = "kb" | "skill" | "case" | "pattern" | "playbook"
-export type ProposalMode = "edit" | "create" | "rename" | "delete"
+export type ProposalKind = "kb" | "skill" | "index" | "case" | "pattern" | "playbook"
+export type ProposalMode = "edit" | "create" | "rename" | "delete" | "suggest"
 export type ProposalStatus = "pending" | "approved" | "rejected"
 export type ProposalOrigin = "agent" | "review" | "human"
 
@@ -1672,12 +1679,15 @@ export interface ProxyConfigView {
   validate_target_b: string | null
   validate_timeout_s: number
   prune_latency_ms: number | null
+  /** 单次抓取条数上限（2026-10-15）；0=不限。前端「抓取条数」输入框的初值来源。 */
+  fetch_limit: number
   defaults: {
     validate_target: string
     validate_target_https: string | null
     validate_target_b: string | null
     validate_timeout_s: number
     prune_latency_ms: number | null
+    fetch_limit: number
   }
 }
 

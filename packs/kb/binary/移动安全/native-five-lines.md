@@ -6,7 +6,7 @@ phase: reverse
 
 > 来源：r0re 收编改编（2026-09-21）。APK 的 native 校验拆五条线推进；每条线只报
 > 增量事实（offset / symbol / section），没有证据的叙述等于没做。ELF 通用纪律
-> （func_kb 查重、大文件读取、变换速查）沿 [binary-rev](../../capabilities/binary/skills/binary-rev/SKILL.md)
+> （func_kb 查重、大文件读取、变换速查）沿 [[skills/binary-rev/SKILL.md|binary-rev]]
 > 技能，本篇只补 Android/移动专项。
 
 ## ① JNI 桥定位线（JNI bridge）
@@ -53,7 +53,7 @@ phase: reverse
 - Morse/Base64/MD5-like 常见诱饵**不止步**——命中诱饵 = 排除一条路，落 finding 继续；
 - native 固定缓冲区初始化后复制输入时**保留未动后缀字节**：初始化序列（如 00..0f）
   中未被输入覆盖的后缀是反推输入长度的钥匙（wbox 先例：07..0f 未动 → 反推用户前缀，
-  见 [cases/wbox/](cases/wbox/README.md)）；
+  见 [[binary/移动安全/cases/wbox/README.md|cases/wbox/]]）；
 - 提示语/flag 格式字符串直接定位校验函数（字符串引用反查是 JNI 线的起点之一）。
 
 ## 变换速查

@@ -399,7 +399,7 @@ See [server-side-advanced-4.md](server-side-advanced-4.md) for WeasyPrint SSRF, 
 - [ElasticSearch Groovy script_fields RCE via SSRF (VolgaCTF 2017)](#elasticsearch-groovy-script_fields-rce-via-ssrf-volgactf-2017)
 - [Rogue MySQL Server LOAD DATA LOCAL File Read (VolgaCTF 2018)](#rogue-mysql-server-load-data-local-file-read-volgactf-2018)
 
-See also: [server-side-advanced.md](server-side-advanced.md) for Part 1 (ExifTool, Go rune/byte mismatch, zip symlink traversal, path traversal bypasses, Flask/Werkzeug debug, XXE external DTD, WeasyPrint SSRF, MongoDB regex injection, Pongo2 SSTI, ZIP PHP webshell, basename() bypass, React Server Components Flight RCE).
+See also: [[web/漏洞分类/injection/server-side-advanced.md|server-side-advanced.md]] for Part 1 (ExifTool, Go rune/byte mismatch, zip symlink traversal, path traversal bypasses, Flask/Werkzeug debug, XXE external DTD, WeasyPrint SSRF, MongoDB regex injection, Pongo2 SSTI, ZIP PHP webshell, basename() bypass, React Server Components Flight RCE).
 
 ---
 
@@ -943,7 +943,7 @@ conn.close()
 
 # CTF Web - Advanced Server-Side Techniques (Part 3)
 
-CVE-era and 2018-era advanced server-side techniques (CSAW, 35C3, ASIS, PlaidCTF). For parts 1-2, see [server-side-advanced.md](server-side-advanced.md) and [server-side-advanced-2.md](server-side-advanced-2.md).
+CVE-era and 2018-era advanced server-side techniques (CSAW, 35C3, ASIS, PlaidCTF). For parts 1-2, see [[web/漏洞分类/injection/server-side-advanced.md|server-side-advanced.md]] and [server-side-advanced-2.md](server-side-advanced-2.md).
 
 ## Table of Contents
 - [WAV Polyglot Upload Bypass via .wave Extension (PlaidCTF 2018)](#wav-polyglot-upload-bypass-via-wave-extension-plaidctf-2018)
@@ -1092,7 +1092,7 @@ Authorization: Basic YmlnYnJvdGhlcjo0UWozcmM0WmhOUUt2N1J6
 - [CairoSVG XXE via Oversized width= (BSidesSF 2019)](#cairosvg-xxe-via-oversized-width-bsidessf-2019)
 - [Bazaar (.bzr) Repository Reconstruction via bzr check Loop (STEM CTF 2019)](#bazaar-bzr-repository-reconstruction-via-bzr-check-loop-stem-ctf-2019)
 
-See also: [server-side-advanced.md](server-side-advanced.md) for Part 1 (ExifTool DjVu, Go rune/byte, ZIP symlink, path traversal bypasses, Nginx alias, Unicode homoglyph, Ruby Regexp.escape, /dev/fd, Flask/Werkzeug debug, XXE DTD filter bypass, %2f bypass). See also: [server-side-advanced-2.md](server-side-advanced-2.md) for Part 2. See also: [server-side-advanced-3.md](server-side-advanced-3.md) for Part 3.
+See also: [[web/漏洞分类/injection/server-side-advanced.md|server-side-advanced.md]] for Part 1 (ExifTool DjVu, Go rune/byte, ZIP symlink, path traversal bypasses, Nginx alias, Unicode homoglyph, Ruby Regexp.escape, /dev/fd, Flask/Werkzeug debug, XXE DTD filter bypass, %2f bypass). See also: [server-side-advanced-2.md](server-side-advanced-2.md) for Part 2. See also: [server-side-advanced-3.md](server-side-advanced-3.md) for Part 3.
 
 ---
 
@@ -1263,7 +1263,7 @@ requests.post("http://target/fetch", data={"url": ssrf_url})
 # The SMTP server processes the injected commands and delivers the email
 ```
 
-**Key insight:** wget before 1.17.1 did not sanitize CRLF in the Host header. When SSRF reaches an internal SMTP service, CRLF injection enables sending arbitrary emails. Place the port at the END of the injected string to avoid "Bad port number" errors. This technique extends to any line-based protocol accessible via SSRF (FTP, Redis, memcached). See also [server-side.md](server-side.md#ssrf) for other SSRF techniques.
+**Key insight:** wget before 1.17.1 did not sanitize CRLF in the Host header. When SSRF reaches an internal SMTP service, CRLF injection enables sending arbitrary emails. Place the port at the END of the injected string to avoid "Bad port number" errors. This technique extends to any line-based protocol accessible via SSRF (FTP, Redis, memcached). See also [[web/漏洞分类/injection/server-side.md#ssrf|server-side.md]] for other SSRF techniques.
 
 ---
 
@@ -1326,7 +1326,7 @@ for pos in range(1, 50):
 print(f"Final flag: {flag}")
 ```
 
-**Key insight:** `gopher://` sends raw TCP data, enabling communication with any TCP service. Capture a legitimate MySQL session with `tcpdump`, then replay the auth + query bytes via gopher. Use passwordless MySQL accounts (common in CTF setups). Double-URL-encode the payload when the SSRF handler URL-decodes once. This technique also works against PostgreSQL, Redis, and other TCP services accessible from the SSRF context. See also [sql-injection.md](sql-injection.md) for SQL injection techniques.
+**Key insight:** `gopher://` sends raw TCP data, enabling communication with any TCP service. Capture a legitimate MySQL session with `tcpdump`, then replay the auth + query bytes via gopher. Use passwordless MySQL accounts (common in CTF setups). Double-URL-encode the payload when the SSRF handler URL-decodes once. This technique also works against PostgreSQL, Redis, and other TCP services accessible from the SSRF context. See also [[web/漏洞分类/injection/sql-injection.md|sql-injection.md]] for SQL injection techniques.
 
 ---
 

@@ -10,31 +10,31 @@ mode: self-contained
 
 # web-injection —— 注入类漏洞路由
 
-> 分层纪律：本技能只做**注入点特征 → 手册对照**。方法论在 `playbooks/参考资料/`，
-> 弹药在 `playbooks/`。按需 `skill_open(path=…)` 单篇，禁止通读。
+> 分层纪律：本技能只做**注入点特征 → 手册对照**。方法论在 `web/漏洞分类/`，
+> 弹药在 `web/实战打法/`。按需 `kb_open(module=…)` 单篇，禁止通读。
 > payload 优先查弹药库，现场构造须标注（领域红线 4）。
 
 ## 特征 → 手册对照表（module 路径）
 
-| 特征 | 方法论（`playbooks/参考资料/` 下） | 弹药（`playbooks/` 下） |
+| 特征 | 方法论（`web/漏洞分类/` 下） | 弹药（`web/实战打法/` 下） |
 |---|---|---|
-| SQL 注入（联合/报错/盲注） | `references/web/webapp/sqli/手册.md` | `sqli.md` |
-| SSTI（模板注入：jinja2/twig/freemarker） | — | `rce/14-ssti.md` |
-| 命令注入/拼接 | — | `rce/11-command-injection.md` |
-| 框架/组件已知 RCE | — | `rce/10-framework.md` |
-| Java/PHP 反序列化 | `references/web/webapp/deserialization/手册.md` | `rce/12-deserialization.md` |
-| XXE（有回显/OOB） | `references/web/webapp/xxe/手册.md` | `rce/15-xxe.md`、`references/web/webapp/xxe/手册.md` |
-| JNDI / Log4j | `references/web/webapp/jndi-injection/手册.md` | — |
-| EL / SpEL / OGNL 表达式 | `references/web/webapp/el-injection/手册.md` | — |
-| XSLT 注入 | `references/web/webapp/xslt-injection/手册.md` | — |
-| 文件包含 / LFI / RFI | `references/web/webapp/path-traversal/手册.md` | `path-traversal/10-traversal-lfi.md`、`11-rfi-logpoison.md` |
-| PHP 伪协议 / phar / session | — | `path-traversal/12-php-wrappers.md`、`13-phar-session-proc.md` |
-| 原型污染（Node） | `references/web/webapp/prototype-pollution/手册.md` | `rce/17-prototype-pollution.md` |
-| 文件上传 RCE 链 | `references/web/webapp/file-upload/手册.md` | `file-upload/00-index.md`（上游 web-strike-entry 路由） |
-| 无回显验证 | `references/web/webapp/dnslog-oob/手册.md` | — |
+| SQL 注入（联合/报错/盲注） | `web/漏洞分类/sqli/手册.md` | `web/实战打法/sqli.md` |
+| SSTI（模板注入：jinja2/twig/freemarker） | — | `web/实战打法/rce/14-ssti.md` |
+| 命令注入/拼接 | — | `web/实战打法/rce/11-command-injection.md` |
+| 框架/组件已知 RCE | — | `web/实战打法/rce/10-framework.md` |
+| Java/PHP 反序列化 | `web/漏洞分类/deserialization/手册.md` | `web/实战打法/rce/12-deserialization.md` |
+| XXE（有回显/OOB） | `web/漏洞分类/xxe/手册.md` | `web/实战打法/rce/15-xxe.md`、`web/漏洞分类/xxe/手册.md` |
+| JNDI / Log4j | `web/漏洞分类/jndi-injection/手册.md` | — |
+| EL / SpEL / OGNL 表达式 | `web/漏洞分类/el-injection/手册.md` | — |
+| XSLT 注入 | `web/漏洞分类/xslt-injection/手册.md` | — |
+| 文件包含 / LFI / RFI | `web/漏洞分类/path-traversal/手册.md` | `web/实战打法/path-traversal/10-traversal-lfi.md`、`web/实战打法/path-traversal/11-rfi-logpoison.md` |
+| PHP 伪协议 / phar / session | — | `web/实战打法/path-traversal/12-php-wrappers.md`、`web/实战打法/path-traversal/13-phar-session-proc.md` |
+| 原型污染（Node） | `web/漏洞分类/prototype-pollution/手册.md` | `web/实战打法/rce/17-prototype-pollution.md` |
+| 文件上传 RCE 链 | `web/漏洞分类/file-upload/手册.md` | `web/实战打法/file-upload/00-index.md`（上游 web-strike-entry 路由） |
+| 无回显验证 | `web/漏洞分类/dnslog-oob/手册.md` | — |
 
 ## 纪律
 
 - 先判注入点上下文（回显/报错/盲/OOB）再选手册；盲注先配 dnslog。
-- PHP 弱类型与 %00 截断见 `references/web/webapp/type-juggling/手册.md`（认证绕过面归 web-authn-session）。
+- PHP 弱类型与 %00 截断见 `web/漏洞分类/type-juggling/手册.md`（认证绕过面归 web-authn-session）。
 - RCE 链组成（上传→包含→执行）先画链路再动手，逐环落证据。

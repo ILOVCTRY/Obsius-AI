@@ -1,8 +1,8 @@
 # SSRF — 核心 payload 库
 
-> 父文档:[00-index.md](00-index.md)
+> 父文档:[[web/实战打法/ssrf-cache-host/00-index.md|00-index.md]]
 > 涵盖:基础 SSRF / 协议利用(gopher / dict / file) / 绕过技术 / DNS Rebinding / 攻击 Redis / 攻击 MySQL + SSRF 通用绕过三件套(UA / DNS 重绑定 / 302)。
-> 云元数据 SSRF 见 [`11-cloud.md`](11-cloud.md)。缓存投毒见 [`12-cache.md`](12-cache.md)。
+> 云元数据 SSRF 见 [[web/实战打法/ssrf-cache-host/11-cloud.md|11-cloud.md]]。缓存投毒见 [[web/实战打法/ssrf-cache-host/12-cache.md|12-cache.md]]。
 
 ---
 
@@ -875,4 +875,4 @@ OOB 验证用厂商提供的 SSRF 测试平台或自架 interactsh,不要用公�
 
 ---
 
-← 回 [00-index.md](00-index.md) · 相关:[`11-cloud.md`](11-cloud.md) · [`12-cache.md`](12-cache.md)
+← 回 [[web/实战打法/ssrf-cache-host/00-index.md|00-index.md]] · 相关:[[web/实战打法/ssrf-cache-host/11-cloud.md|11-cloud.md]] · [[web/实战打法/ssrf-cache-host/12-cache.md|12-cache.md]]

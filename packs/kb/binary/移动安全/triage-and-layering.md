@@ -14,7 +14,7 @@ phase: triage
 |---|---|---|---|
 | Java/smali only | 无 `System.loadLibrary`、无 `native` 方法、lib/ 无 .so | jadx 反编译源码直接读校验逻辑 | 校验不在这层（字符串/常量全是诱饵） |
 | JNI bridge | 有 native 声明，但 so 内逻辑薄，真校验还在 Java | 定位桥接点后回 Java | so 才是校验本体 |
-| native validator | so 里有比较循环/常量表/加密实现 | so 静态分析（五线，见 [native-five-lines.md](native-five-lines.md)） | so 被壳折叠且静态还原不了 → 动态 |
+| native validator | so 里有比较循环/常量表/加密实现 | so 静态分析（五线，见 [[binary/移动安全/native-five-lines.md|native-five-lines.md]]） | so 被壳折叠且静态还原不了 → 动态 |
 | dynamic-only blocker | 加固 + 反调试 + 环境校验叠加，静态读不到有效逻辑 | frida 动态 hook / 模拟执行（执行类操作一律走 run() 网关） | 能静态还原时绝不先动态 |
 
 纪律：**native 存在优先 JNI 线**——Java 摘要上不过度花费；Java 只门卫（输错弹
@@ -76,4 +76,4 @@ target_apk → package → launcher → java_entry → native_libs → jni_bridg
 | 绕 root/SSL 检测 | 检测点 → 异常处理 → 开关/flag |
 
 - 诱饵初判：Morse/Base64/MD5-like 常见诱饵**不止步**（处置见
-  [native-five-lines.md](native-five-lines.md) §⑤）。
+  [[binary/移动安全/native-five-lines.md|native-five-lines.md]] §⑤）。

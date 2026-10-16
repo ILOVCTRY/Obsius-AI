@@ -1,6 +1,6 @@
 # 内网/后渗透 — SharePoint 攻击 payload 库
 
-> 父文档:[00-index.md](00-index.md) · ⚠️ SRC 场景下大多受限,见 [../compliance.md](../compliance.md)
+> 父文档:[[web/后渗透/intranet-postexp/00-index.md|00-index.md]] · ⚠️ SRC 场景下大多受限,见 [../compliance.md](../compliance.md)
 > 涵盖:信息收集 / SOAP API / OneDrive 同步利用
 
 ---
@@ -89,4 +89,4 @@ _OneDrive同步_
 
 ---
 
-← 回 [00-index.md](00-index.md) · 上一篇:[`19-adcs.md`](19-adcs.md)
+← 回 [[web/后渗透/intranet-postexp/00-index.md|00-index.md]] · 上一篇:[[web/后渗透/intranet-postexp/19-adcs.md|19-adcs.md]]

@@ -1,6 +1,6 @@
 # RCE — 命令注入 / 通用代码执行 payload 库
 
-> 父文档:[00-index.md](00-index.md)
+> 父文档:[[web/实战打法/rce/00-index.md|00-index.md]]
 > 涵盖系统命令注入 / PHP 代码执行 / PHP Filter 链 / 盲命令注入。框架特定 RCE 见 `10-framework.md`。
 
 ---
@@ -277,4 +277,4 @@ _Base64编码绕过_
 
 ---
 
-← 回 [00-index.md](00-index.md) · 相关:[`12-deserialization.md`](12-deserialization.md) · [`13-file-rce-chain.md`](13-file-rce-chain.md)
+← 回 [[web/实战打法/rce/00-index.md|00-index.md]] · 相关:[[web/实战打法/rce/12-deserialization.md|12-deserialization.md]] · [[web/实战打法/rce/13-file-rce-chain.md|13-file-rce-chain.md]]

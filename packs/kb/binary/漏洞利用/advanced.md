@@ -13,13 +13,13 @@
 - [Heap Overlap via Base Conversion](#heap-overlap-via-base-conversion)
 - [Tree Data Structure Stack Underallocation](#tree-data-structure-stack-underallocation)
 - [ret2dlresolve](#ret2dlresolve)
-- [Kernel Exploitation](#kernel-exploitation) (basic; see [kernel.md](kernel.md) for full coverage)
+- [Kernel Exploitation](#kernel-exploitation) (basic; see [[binary/漏洞利用/kernel.md|kernel.md]] for full coverage)
 - [9-Byte test+je Timing Leak (hxp 2018)](#9-byte-testje-timing-leak-hxp-2018)
 - [RtlCaptureContext Deterministic Windows Stack Leak (Insomnihack 2017)](#rtlcapturecontext-deterministic-windows-stack-leak-insomnihack-2017)
 - [IEEE 754 Double-as-Shellcode via Exponent Fixing (Kaspersky 2018)](#ieee-754-double-as-shellcode-via-exponent-fixing-kaspersky-2018)
 - [PIE Bypass via Consistent glibc Load Base 0x56555000 (TAMUctf 2019)](#pie-bypass-via-consistent-glibc-load-base-0x56555000-tamuctf-2019)
 
-**See also:** [heap-techniques.md](heap-techniques.md) — House of Apple 2, House of Einherjar, House of Orange/Spirit/Lore/Force, heap grooming, custom allocator exploitation (nginx, talloc), classic unlink, musl libc heap, tcache stashing unlink
+**See also:** [[binary/漏洞利用/heap-techniques.md|heap-techniques.md]] — House of Apple 2, House of Einherjar, House of Orange/Spirit/Lore/Force, heap grooming, custom allocator exploitation (nginx, talloc), classic unlink, musl libc heap, tcache stashing unlink
 
 ---
 
@@ -95,7 +95,7 @@ Default action `0x7fff0000` = `SCMP_ACT_ALLOW`
 
 ## rdx Control in ROP Chains
 
-See [rop-and-shellcode.md](rop-and-shellcode.md#rdx-control-in-rop-chains) for full details and code examples.
+See [[binary/漏洞利用/rop-and-shellcode.md#rdx-control-in-rop-chains|rop-and-shellcode.md]] for full details and code examples.
 
 ---
 
@@ -224,7 +224,7 @@ fake_sym_st_name = fake_string_addr - STRTAB
 
 ## Kernel Exploitation
 
-For comprehensive kernel exploitation techniques, see [kernel.md](kernel.md). Quick reference:
+For comprehensive kernel exploitation techniques, see [[binary/漏洞利用/kernel.md|kernel.md]]. Quick reference:
 
 - `modprobe_path` overwrite for root code execution (requires AAW)
 - `tty_struct` kROP via fake vtable and stack pivot

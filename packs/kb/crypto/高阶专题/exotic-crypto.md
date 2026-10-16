@@ -788,7 +788,7 @@ See [exotic-crypto.md](#part-2) for 2017+ era exotic crypto attacks (BB-84, ElGa
 
 # Part 2
 
-Covers 2017+ era exotic crypto attacks (BB-84 QKD, ElGamal variants, Paillier oracles, differential privacy, homomorphic bit extraction, Jordan normal form, OSS forgery, Cayley-Purser, BIP39 brute, Asmuth-Bloom, Rabin polynomial primes, LCG period, Vandermonde recovery). For Part 1 foundational exotic structures, see [exotic-crypto.md](exotic-crypto.md).
+Covers 2017+ era exotic crypto attacks (BB-84 QKD, ElGamal variants, Paillier oracles, differential privacy, homomorphic bit extraction, Jordan normal form, OSS forgery, Cayley-Purser, BIP39 brute, Asmuth-Bloom, Rabin polynomial primes, LCG period, Vandermonde recovery). For Part 1 foundational exotic structures, see [[crypto/高阶专题/exotic-crypto.md|exotic-crypto.md]].
 
 ## Table of Contents
 - [BB-84 Quantum Key Distribution MITM Attack (PlaidCTF 2017)](#bb-84-quantum-key-distribution-mitm-attack-plaidctf-2017)

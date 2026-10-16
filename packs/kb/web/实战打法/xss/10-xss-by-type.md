@@ -1,6 +1,6 @@
 # XSS 三大类型 payload 库
 
-> 父文档:[00-index.md](00-index.md)
+> 父文档:[[web/实战打法/xss/00-index.md|00-index.md]]
 > 涵盖:反射型 / 存储型 / DOM 型。每个类型的典型探针、上下文识别、报告 PoC。
 
 ---
@@ -236,4 +236,4 @@ _利用SVG、MathML等非标准HTML标签及冷门事件处理器(ontoggle、onp
 
 ---
 
-← 回 [00-index.md](00-index.md) · payload 被拦 → [`11-bypass.md`](11-bypass.md) · 已 pop alert,要落地利用 → [`12-exploitation.md`](12-exploitation.md)
+← 回 [[web/实战打法/xss/00-index.md|00-index.md]] · payload 被拦 → [[web/实战打法/xss/11-bypass.md|11-bypass.md]] · 已 pop alert,要落地利用 → [[web/实战打法/xss/12-exploitation.md|12-exploitation.md]]

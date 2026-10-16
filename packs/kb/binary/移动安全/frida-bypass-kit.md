@@ -9,7 +9,7 @@ vuln_class: [android, frida, anti-analysis]
 
 > 来源：reverse-skill 1.0.1 收编改编（2026-09-30，MIT，见 `../../licenses/`）。
 > 开箱即用的四大绕过框架合集：**root 检测 / SSL pinning / 模拟器检测 / 反调试**。
-> 单项 hook 的手写代码见 [frida-cookbook.md](frida-cookbook.md)。
+> 单项 hook 的手写代码见 [[binary/移动安全/frida-cookbook.md|frida-cookbook.md]]。
 
 ## 框架选择对照
 
@@ -52,7 +52,7 @@ frida -U com.target.app -l bypass_all.js
 conscrypt `TrustManagerImpl.verifyChain` → `NetworkSecurityConfig.isCleartextTrafficPermitted`。
 
 Flutter 应用额外用 libflutter.so 特征码 patch（见
-[android-advanced.md](android-advanced.md) Flutter 专项段）。
+[[binary/移动安全/android-advanced.md|android-advanced.md]] Flutter 专项段）。
 
 ## 模拟器检测绕过要点
 

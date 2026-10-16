@@ -31,9 +31,9 @@ brew install python@3
 
 ## Additional Resources
 
-- [model-attacks.md](model-attacks.md) - Model weight perturbation negation, model inversion via gradient descent, neural network encoder collision, LoRA adapter weight merging, model extraction via query API, membership inference attack
-- [adversarial-ml.md](adversarial-ml.md) - Adversarial example generation (FGSM, PGD, C&W), adversarial patch generation, evasion attacks on ML classifiers, data poisoning, backdoor detection in neural networks
-- [llm-attacks.md](llm-attacks.md) - Prompt injection (direct/indirect), LLM jailbreaking, token smuggling, context window manipulation, tool use exploitation
+- [[misc/AI安全/model-attacks.md|model-attacks.md]] - Model weight perturbation negation, model inversion via gradient descent, neural network encoder collision, LoRA adapter weight merging, model extraction via query API, membership inference attack
+- [[misc/AI安全/adversarial-ml.md|adversarial-ml.md]] - Adversarial example generation (FGSM, PGD, C&W), adversarial patch generation, evasion attacks on ML classifiers, data poisoning, backdoor detection in neural networks
+- [[misc/AI安全/llm-attacks.md|llm-attacks.md]] - Prompt injection (direct/indirect), LLM jailbreaking, token smuggling, context window manipulation, tool use exploitation
 
 ---
 
@@ -86,32 +86,32 @@ print(f'Shape: {img.shape}, Range: [{img.min():.3f}, {img.max():.3f}]')
 
 ## Model Weight Analysis
 
-- **Weight perturbation negation:** Fine-tuned model suppresses behavior; recover by computing `2*W_orig - W_chal` to negate the fine-tuning delta. See [model-attacks.md](model-attacks.md#ml-model-weight-perturbation-negation-dicectf-2026).
-- **LoRA adapter merging:** Merge LoRA adapter `W_base + alpha * (B @ A)` and inspect activations or generate output with merged weights. See [model-attacks.md](model-attacks.md#lora-adapter-weight-merging-apoorvctf-2026).
-- **Model inversion:** Optimize random input tensor to minimize distance between model output and known target via gradient descent. See [model-attacks.md](model-attacks.md#ml-model-inversion-via-gradient-descent-bsidessf-2025).
-- **Neural network collision:** Find two distinct inputs that produce identical encoder output via joint optimization. See [model-attacks.md](model-attacks.md#neural-network-encoder-collision-rootaccess2026).
+- **Weight perturbation negation:** Fine-tuned model suppresses behavior; recover by computing `2*W_orig - W_chal` to negate the fine-tuning delta. See [[misc/AI安全/model-attacks.md#ml-model-weight-perturbation-negation-dicectf-2026|model-attacks.md]].
+- **LoRA adapter merging:** Merge LoRA adapter `W_base + alpha * (B @ A)` and inspect activations or generate output with merged weights. See [[misc/AI安全/model-attacks.md#lora-adapter-weight-merging-apoorvctf-2026|model-attacks.md]].
+- **Model inversion:** Optimize random input tensor to minimize distance between model output and known target via gradient descent. See [[misc/AI安全/model-attacks.md#ml-model-inversion-via-gradient-descent-bsidessf-2025|model-attacks.md]].
+- **Neural network collision:** Find two distinct inputs that produce identical encoder output via joint optimization. See [[misc/AI安全/model-attacks.md#neural-network-encoder-collision-rootaccess2026|model-attacks.md]].
 
 ## Adversarial Examples
 
-- **FGSM:** Single-step attack: `x_adv = x + eps * sign(grad_x(loss))`. Fast but less effective than iterative methods. See [adversarial-ml.md](adversarial-ml.md#adversarial-example-generation-fgsm-pgd-cw).
-- **PGD:** Iterative FGSM with projection back to epsilon-ball each step. Standard benchmark attack. See [adversarial-ml.md](adversarial-ml.md#adversarial-example-generation-fgsm-pgd-cw).
-- **C&W:** Optimization-based attack that minimizes perturbation norm while achieving misclassification. See [adversarial-ml.md](adversarial-ml.md#adversarial-example-generation-fgsm-pgd-cw).
-- **Adversarial patches:** Physical-world patches that cause misclassification when placed in a scene. See [adversarial-ml.md](adversarial-ml.md#adversarial-patch-generation).
-- **Data poisoning:** Injecting backdoor triggers into training data so model learns attacker-chosen behavior. See [adversarial-ml.md](adversarial-ml.md#data-poisoning-foundational).
+- **FGSM:** Single-step attack: `x_adv = x + eps * sign(grad_x(loss))`. Fast but less effective than iterative methods. See [[misc/AI安全/adversarial-ml.md#adversarial-example-generation-fgsm-pgd-cw|adversarial-ml.md]].
+- **PGD:** Iterative FGSM with projection back to epsilon-ball each step. Standard benchmark attack. See [[misc/AI安全/adversarial-ml.md#adversarial-example-generation-fgsm-pgd-cw|adversarial-ml.md]].
+- **C&W:** Optimization-based attack that minimizes perturbation norm while achieving misclassification. See [[misc/AI安全/adversarial-ml.md#adversarial-example-generation-fgsm-pgd-cw|adversarial-ml.md]].
+- **Adversarial patches:** Physical-world patches that cause misclassification when placed in a scene. See [[misc/AI安全/adversarial-ml.md#adversarial-patch-generation|adversarial-ml.md]].
+- **Data poisoning:** Injecting backdoor triggers into training data so model learns attacker-chosen behavior. See [[misc/AI安全/adversarial-ml.md#data-poisoning-foundational|adversarial-ml.md]].
 
 ## LLM Attacks
 
-- **Prompt injection:** Overriding system instructions via user input; both direct injection and indirect via retrieved documents. See [llm-attacks.md](llm-attacks.md#prompt-injection-foundational).
-- **Jailbreaking:** Bypassing safety filters via DAN, role play, encoding tricks, multi-turn escalation. See [llm-attacks.md](llm-attacks.md#llm-jailbreaking-foundational).
-- **Token smuggling:** Exploiting tokenizer splits so filtered words pass through as subword tokens. See [llm-attacks.md](llm-attacks.md#token-smuggling-foundational).
-- **Tool use exploitation:** Abusing function calling in LLM agents to execute unintended actions. See [llm-attacks.md](llm-attacks.md#tool-use-exploitation-foundational).
+- **Prompt injection:** Overriding system instructions via user input; both direct injection and indirect via retrieved documents. See [[misc/AI安全/llm-attacks.md#prompt-injection-foundational|llm-attacks.md]].
+- **Jailbreaking:** Bypassing safety filters via DAN, role play, encoding tricks, multi-turn escalation. See [[misc/AI安全/llm-attacks.md#llm-jailbreaking-foundational|llm-attacks.md]].
+- **Token smuggling:** Exploiting tokenizer splits so filtered words pass through as subword tokens. See [[misc/AI安全/llm-attacks.md#token-smuggling-foundational|llm-attacks.md]].
+- **Tool use exploitation:** Abusing function calling in LLM agents to execute unintended actions. See [[misc/AI安全/llm-attacks.md#tool-use-exploitation-foundational|llm-attacks.md]].
 
 ## Model Extraction & Inference
 
-- **Model extraction:** Querying a model API with crafted inputs to reconstruct its parameters or decision boundary. See [model-attacks.md](model-attacks.md#model-extraction-via-query-api).
-- **Membership inference:** Determining whether a specific sample was in the training data based on confidence score distribution. See [model-attacks.md](model-attacks.md#membership-inference-attack).
+- **Model extraction:** Querying a model API with crafted inputs to reconstruct its parameters or decision boundary. See [[misc/AI安全/model-attacks.md#model-extraction-via-query-api|model-attacks.md]].
+- **Membership inference:** Determining whether a specific sample was in the training data based on confidence score distribution. See [[misc/AI安全/model-attacks.md#membership-inference-attack|model-attacks.md]].
 
 ## Gradient-Based Techniques
 
-- **Gradient-based input recovery:** Using model gradients to reconstruct private training data from shared gradients (federated learning attacks). See [model-attacks.md](model-attacks.md#ml-model-inversion-via-gradient-descent-bsidessf-2025).
+- **Gradient-based input recovery:** Using model gradients to reconstruct private training data from shared gradients (federated learning attacks). See [[misc/AI安全/model-attacks.md#ml-model-inversion-via-gradient-descent-bsidessf-2025|model-attacks.md]].
 - **Activation maximization:** Optimizing input to maximize a specific neuron's activation, revealing what the network has learned.

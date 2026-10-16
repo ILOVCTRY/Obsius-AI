@@ -446,4 +446,3 @@ for i in s:
     t+='\''+half2full(i)+'\','
 print(t)
 ```
-

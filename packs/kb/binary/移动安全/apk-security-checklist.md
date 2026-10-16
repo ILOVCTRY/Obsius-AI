@@ -9,7 +9,7 @@ vuln_class: [android, security-audit]
 
 > 来源：reverse-skill 1.0.1 收编改编（2026-09-30，MIT，见 `../../licenses/`）。
 > 基于 OWASP Mobile Application Security Testing Guide (MASTG) 与 MASVS 控制集，
-> 按审计阶段组织成 checklist。配合技能 [android-rev](../../capabilities/binary/skills/android-rev/SKILL.md)。
+> 按审计阶段组织成 checklist。配合技能 [[skills/android-rev/SKILL.md|android-rev]]。
 
 ## Manifest 安全检查
 

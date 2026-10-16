@@ -29,6 +29,7 @@ _SNAPSHOT = {
         "declare_intent", "close_intent", "reopen_intent", "bb_delete_intent",
         "bb_add_finding", "bb_update_finding", "bb_delete_finding",
         "bb_delete_asset", "bb_delete_assets", "bb_merge_assets",
+        "bb_declare_challenge",
         "finish", "request_steps",
     },
     "_INTENT_PRE_ALLOWED": {
@@ -41,7 +42,7 @@ _SNAPSHOT = {
         "close_intent", "reopen_intent",
         "bb_delete_intent", "bb_add_finding", "bb_update_finding",
         "bb_delete_finding", "bb_delete_asset", "bb_delete_assets",
-        "bb_merge_assets",
+        "bb_merge_assets", "bb_declare_challenge",
         "bb_notify",
         "request_authorization", "propose_pack_edit", "bb_add_asset",
     },
@@ -55,10 +56,11 @@ _SNAPSHOT = {
     "_FILE_TOOLS": {"read_file", "search_files"},
 }
 
-# 退役后 AGENT_TOOLS 的 44 个工具名（顺序即文件顺序，Agent schema 顺序对外可见）
+# 退役后 AGENT_TOOLS 的工具名（顺序即文件顺序，Agent schema 顺序对外可见）
+# 2026-10-14：+bb_declare_challenge（challenge-asset v38，CTF 题目登记，仅主控）
 _SNAPSHOT_ORDER = [
     "run_cmd", "read_file", "search_files",
-    "bb_add_asset", "bb_delete_asset", "bb_delete_assets",
+    "bb_add_asset", "bb_declare_challenge", "bb_delete_asset", "bb_delete_assets",
     "bb_merge_assets", "bb_asset_status",
     "bb_add_finding", "bb_update_finding", "bb_delete_finding", "bb_add_artifact",
     "bb_query", "kb_open", "kb_search", "propose_pack_edit",

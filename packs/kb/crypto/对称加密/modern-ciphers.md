@@ -1,6 +1,6 @@
 # CTF Crypto - Modern Cipher Attacks
 
-Block cipher attacks, MAC forgery, padding oracles, and authenticated encryption. For hash/signature attacks (hash extension, PBKDF2, MD5 collision, Rabin, ECB oracles), see [modern-ciphers.md](#part-2). For stream cipher attacks (LFSR, RC4, XOR), see [stream-ciphers.md](stream-ciphers.md).
+Block cipher attacks, MAC forgery, padding oracles, and authenticated encryption. For hash/signature attacks (hash extension, PBKDF2, MD5 collision, Rabin, ECB oracles), see [modern-ciphers.md](#part-2). For stream cipher attacks (LFSR, RC4, XOR), see [[crypto/对称加密/stream-ciphers.md|stream-ciphers.md]].
 
 ## Table of Contents
 - [AES-CFB-8 Static IV State Forging](#aes-cfb-8-static-iv-state-forging)
@@ -92,7 +92,7 @@ new_sig = known_sig XOR block2_of_P1 XOR block2_of_P2
 
 **Attack:** For each key byte, try 256 plaintexts differing by delta. When `ct1 == ct2`, S-box input was in collision set. 2-way ambiguity per byte, 2^16 brute-force. Total: 4,097 oracle queries.
 
-See [advanced-math.md](../高阶专题/advanced-math.md) for full S-box collision analysis code.
+See [[crypto/高阶专题/advanced-math.md|advanced-math.md]] for full S-box collision analysis code.
 
 ---
 
@@ -717,7 +717,7 @@ assert recovered.startswith(b"admin")
 
 # Part 2
 
-Hash-based attacks, protocol-level exploits, ECB oracles, Rabin/RSA parity attacks, and specialized cipher weaknesses. For core AES/CBC/padding oracle techniques, see [modern-ciphers.md](modern-ciphers.md). For stream cipher attacks (LFSR, RC4, XOR), see [stream-ciphers.md](stream-ciphers.md).
+Hash-based attacks, protocol-level exploits, ECB oracles, Rabin/RSA parity attacks, and specialized cipher weaknesses. For core AES/CBC/padding oracle techniques, see [[crypto/对称加密/modern-ciphers.md|modern-ciphers.md]]. For stream cipher attacks (LFSR, RC4, XOR), see [[crypto/对称加密/stream-ciphers.md|stream-ciphers.md]].
 
 ## Table of Contents
 - [Blum-Goldwasser Bit-Extension Oracle (PlaidCTF 2013)](#blum-goldwasser-bit-extension-oracle-plaidctf-2013)
@@ -1247,7 +1247,7 @@ c0 = (t1 - sum(bytes_to_long(b) * pow(H, i + 1, n) for i, b in enumerate(blocks1
 forged_tag = (c0 + sum(bytes_to_long(b) * pow(H, i + 1, n) for i, b in enumerate(forged_blocks))) % n
 ```
 
-**Key insight:** GCM's security rests on `GHASH` operating over `GF(2^128)` where inversion is hard without the key. Swapping the modulus to a plain prime `n` collapses the authentication to textbook linear algebra mod `n` — two nonce-colliding tags give one linear equation per unknown, solved with `inverse(m1 - m2, n)`. Short-nonce (2 random bytes) designs guarantee birthday collisions in ~256 queries. Contrast with the `GF(2^128)` AES-GCM forbidden attack in [modern-ciphers.md](modern-ciphers.md#aes-gcm-nonce-reuse--forbidden-attack), which needs polynomial factoring over binary fields.
+**Key insight:** GCM's security rests on `GHASH` operating over `GF(2^128)` where inversion is hard without the key. Swapping the modulus to a plain prime `n` collapses the authentication to textbook linear algebra mod `n` — two nonce-colliding tags give one linear equation per unknown, solved with `inverse(m1 - m2, n)`. Short-nonce (2 random bytes) designs guarantee birthday collisions in ~256 queries. Contrast with the `GF(2^128)` AES-GCM forbidden attack in [[crypto/对称加密/modern-ciphers.md#aes-gcm-nonce-reuse--forbidden-attack|modern-ciphers.md]], which needs polynomial factoring over binary fields.
 
 ---
 
@@ -1808,7 +1808,7 @@ forged_cookie = b64encode(bytes(buf)).decode()
 
 # Part 4
 
-ChaCha20-Poly1305 nonce reuse (RFC 8439 $2^{130}-5$), partitioning-oracle / key-committing AEAD splitting via lattice, sponge generality (SHA-3 / Keccak / Ascon / Gimli / Sparkle) with rate/capacity/rounds/pad table and endianness workflow, and eSTREAM Trivium/Grain warmup + cube attack. For AES-GCM GHASH, see [modern-ciphers.md](modern-ciphers.md#aes-gcm-nonce-reuse--forbidden-attack); for sponge collisions and SHA-256 basis, see [modern-ciphers.md](#part-3).
+ChaCha20-Poly1305 nonce reuse (RFC 8439 $2^{130}-5$), partitioning-oracle / key-committing AEAD splitting via lattice, sponge generality (SHA-3 / Keccak / Ascon / Gimli / Sparkle) with rate/capacity/rounds/pad table and endianness workflow, and eSTREAM Trivium/Grain warmup + cube attack. For AES-GCM GHASH, see [[crypto/对称加密/modern-ciphers.md#aes-gcm-nonce-reuse--forbidden-attack|modern-ciphers.md]]; for sponge collisions and SHA-256 basis, see [modern-ciphers.md](#part-3).
 
 ## Table of Contents
 - [ChaCha20-Poly1305 Nonce Reuse — Forbidden Attack over $2^{130}-5$ (RFC 8439, picoCTF 2025)](#chacha20-poly1305-nonce-reuse--forbidden-attack-over-2130-5-rfc-8439-picoctf-2025)
@@ -2087,7 +2087,7 @@ print(candidates[:4])
 
 **Splitting workflow:** (1) harvest error partition (timing/status) to identify committing vs non-committing AEAD; (2) build lattice for truncated-tag equations (dimension = number of passwords, entries = GHASH/Poly1305 coefficients); (3) reduce (LLL/BKZ) — short vector gives ciphertext bytes valid under many keys; (4) submit once, server's partitioned error leaks which key matched. Mitigation: use key-committing AEAD (`AES-GCM-SIV` with $tag=H(key,nonce,ad,pt)$ or `H(key)` in AD) and constant-time single error `decryption failed`.
 
-**References:** Len–Meyer–Springer *Partitioning Oracle Attacks* (USENIX 2021), Albertini et al. *Key-Committing AEAD* (2023), Grubbs et al. *Contrived Ciphertext Splitting* — lattice/BDD for $t$-bit truncated tags. See [lattice-and-lwe.md](../格与后量子/lattice-and-lwe.md) for LLL/BKZ/Babai details.
+**References:** Len–Meyer–Springer *Partitioning Oracle Attacks* (USENIX 2021), Albertini et al. *Key-Committing AEAD* (2023), Grubbs et al. *Contrived Ciphertext Splitting* — lattice/BDD for $t$-bit truncated tags. See [[crypto/格与后量子/lattice-and-lwe.md|lattice-and-lwe.md]] for LLL/BKZ/Babai details.
 
 ---
 

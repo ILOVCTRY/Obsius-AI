@@ -1650,8 +1650,8 @@ preg_match只能处理字符串，当传入的subject是数组时会返回false
 - **靶场WP**: [ctfshow-php特性WP](WP汇总/ctfshow-php特性.md) | [代码审计WP](WP汇总/代码审计/README.md)
 - **脚本**: [md5爆破脚本](CTF常用脚本及工具/md5爆破/) — 配合 L228-L277 哈希碰撞章节
 - **相关文章**:
-  - [SQL.md](SQL.md) — SQL注入 WITH ROLLUP 绕过结合弱类型
-  - [命令执行.md](命令执行.md) — preg_match绕过可致RCE
-  - [文件包含.md](文件包含.md) — include截断 (%00/?/#)
-  - [文件上传漏洞.md](文件上传漏洞.md) — move_uploaded_file %00截断
-  - [PHP反序列化漏洞总结.md](PHP反序列化漏洞总结.md) — 魔术方法审计
+  - [[web/实战打法/SQL.md|SQL.md]] — SQL注入 WITH ROLLUP 绕过结合弱类型
+  - [[web/实战打法/命令执行.md|命令执行.md]] — preg_match绕过可致RCE
+  - [[web/实战打法/文件包含.md|文件包含.md]] — include截断 (%00/?/#)
+  - [[web/实战打法/文件上传漏洞.md|文件上传漏洞.md]] — move_uploaded_file %00截断
+  - [[web/实战打法/PHP反序列化漏洞总结.md|PHP反序列化漏洞总结.md]] — 魔术方法审计

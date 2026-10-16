@@ -1,6 +1,6 @@
 # OAuth / 开放重定向 payload 库
 
-> 父文档:[00-index.md](00-index.md)
+> 父文档:[[web/实战打法/oauth-saml-jwt/00-index.md|00-index.md]]
 > 涵盖:OAuth redirect_uri 绕过 / state 缺失 / PKCE / token theft + 开放重定向基础 / 绕过 / 重定向到 SSRF + OAuth 授权码劫持 URL 解析差异。两类紧耦合,合并阅读。
 
 ---
@@ -494,4 +494,4 @@ https://example.com%df@www.attacker.com/
 
 ---
 
-← 回 [00-index.md](00-index.md) · 相关:[`12-jwt.md`](12-jwt.md)(很多 OAuth 实现用 JWT 做 token)
+← 回 [[web/实战打法/oauth-saml-jwt/00-index.md|00-index.md]] · 相关:[[web/实战打法/oauth-saml-jwt/12-jwt.md|12-jwt.md]](很多 OAuth 实现用 JWT 做 token)

@@ -22,7 +22,7 @@
 
 For CTF-specific UAF, tcache, and custom-allocator writeup variants — UAF vtable pointer encoding, uninitialized chunk residue leak, tcache strcpy null-byte overflow, adjacent-struct fn-pointer overflow, hidden menu tcache poisoning, tcache double-free stdout hijack, tcache-to-fastbin promotion, 6-bit OOB accumulator, IS_MMAPED bit-flip, filename-regex LSB fastbin, and custom-allocator unsafe unlink — see [heap-techniques.md](#part-2).
 
-For FILE-structure (_IO_FILE) exploitation — fastbin stdout vtable hijack, _IO_buf_base null-byte overwrite, glibc 2.24+ vtable validation bypass, unsorted-bin attacks on stdin FILE fields, realloc-as-free UAF, and refcount wraparound — see [heap-fsop.md](heap-fsop.md).
+For FILE-structure (_IO_FILE) exploitation — fastbin stdout vtable hijack, _IO_buf_base null-byte overwrite, glibc 2.24+ vtable validation bypass, unsorted-bin attacks on stdin FILE fields, realloc-as-free UAF, and refcount wraparound — see [[binary/漏洞利用/heap-fsop.md|heap-fsop.md]].
 
 ---
 
@@ -748,7 +748,7 @@ For CTF-specific UAF, tcache, and custom-allocator writeup variants, continue in
 
 # Part 2
 
-Continuation of [heap-techniques.md](heap-techniques.md). Part 2 collects CTF-specific UAF, tcache, and custom-allocator variants drawn from individual writeups.
+Continuation of [[binary/漏洞利用/heap-techniques.md|heap-techniques.md]]. Part 2 collects CTF-specific UAF, tcache, and custom-allocator variants drawn from individual writeups.
 
 ## Table of Contents
 - [UAF Vtable Pointer Encoding Shell Argument (BCTF 2017)](#uaf-vtable-pointer-encoding-shell-argument-bctf-2017)
@@ -763,7 +763,7 @@ Continuation of [heap-techniques.md](heap-techniques.md). Part 2 collects CTF-sp
 - [Filename-Regex-Constrained Fastbin via LSB-Only Heap Pointer Overwrite (BSidesSF 2019)](#filename-regex-constrained-fastbin-via-lsb-only-heap-pointer-overwrite-bsidessf-2019)
 - [Custom Allocator Unsafe Unlink to GOT (DEF CON Qualifier 2014)](#custom-allocator-unsafe-unlink-to-got-def-con-qualifier-2014)
 
-For FILE-structure (_IO_FILE) exploitation see [heap-fsop.md](heap-fsop.md). For the foundational houses (Apple 2, Einherjar, Orange, Spirit, Lore, Force), unsafe unlink, tcache stashing, and musl, see [heap-techniques.md](heap-techniques.md).
+For FILE-structure (_IO_FILE) exploitation see [[binary/漏洞利用/heap-fsop.md|heap-fsop.md]]. For the foundational houses (Apple 2, Einherjar, Orange, Spirit, Lore, Force), unsafe unlink, tcache stashing, and musl, see [[binary/漏洞利用/heap-techniques.md|heap-techniques.md]].
 
 ---
 
@@ -798,7 +798,7 @@ trigger_vtable_call(target_obj)  # calls system("sh")
 
 **References:** BCTF 2017
 
-See [heap-fsop.md](heap-fsop.md) for FILE-structure (_IO_FILE) exploitation: fastbin stdout vtable hijack, _IO_buf_base null-byte overwrite, glibc 2.24+ vtable validation bypass, unsorted-bin attacks on stdin FILE fields, and related UAF/refcount bugs.
+See [[binary/漏洞利用/heap-fsop.md|heap-fsop.md]] for FILE-structure (_IO_FILE) exploitation: fastbin stdout vtable hijack, _IO_buf_base null-byte overwrite, glibc 2.24+ vtable validation bypass, unsorted-bin attacks on stdin FILE fields, and related UAF/refcount bugs.
 
 ---
 

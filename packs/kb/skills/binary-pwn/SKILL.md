@@ -14,39 +14,39 @@ mode: self-contained
 # binary-pwn —— Pwn 利用与恶意样本静态入口
 
 > 分层纪律：本技能只做**保护判定 + 打法路由**。具体技术在 pwn / malware
-> 英文参考资料，用 `skill_open(path=…)` 按表开单篇，禁止通读。逆向校验逻辑先走
+> 英文参考资料，用 `kb_open(module=…)` 按表开单篇，禁止通读。逆向校验逻辑先走
 > file-triage 分诊、binary-rev 还原；拿到漏洞点再回本技能选利用路线。
 
 ## 0. 第一眼：checksec → 保护组合 → 路线
 
-`checksec`（或 readelf 手判）后按下表开模块（路径均为 skill_open 的 module）：
+`checksec`（或 readelf 手判）后按下表开模块（路径均为 kb_open 的 module）：
 
-| 观察到的保护/形态 | 首选模块（pwn/） |
+| 观察到的保护/形态 | 首选模块（binary/漏洞利用/） |
 |---|---|
-| 无 NX（栈可执行）/ ret2shellcode | `references/binary/pwn/rop-and-shellcode.md` |
-| NX 开、No PIE：ret2text / 基础栈溢出 | `references/binary/pwn/overflow-basics.md` |
-| NX+PIE：ret2libc / ROP / 栈迁移 | `references/binary/pwn/rop-and-shellcode.md` → `references/binary/pwn/rop-advanced.md` |
-| 有格式化字符串（%x/%p/%n） | `references/binary/pwn/format-string.md`（配套 `references/binary/pwn/scripts/fmtstr_payload_suite.py`） |
-| Canary：泄露/爆破/覆盖 | `references/binary/pwn/rop-advanced.md` |
-| 菜单题 / malloc-free / UAF / double free / tcache | `references/binary/pwn/heap-techniques.md` → `references/binary/pwn/heap-fsop.md` |
-| seccomp 过滤（orw / open-read-write） | `references/binary/pwn/sandbox-escape.md`（配套 `scripts/seccomp_orw_generator.py`、`shellcraft_asm.py`） |
-| 内核题（vmlinux/bzImage/启动脚本/qemu）/ 驱动 ioctl | `references/binary/pwn/kernel.md` → `kernel-techniques.md` → `kernel-bypass.md` |
-| SROP / 高阶花式 | `references/binary/pwn/advanced.md`、`advanced-exploits.md`（四段连载合一篇） |
-| 临场 checklist / 踩坑 | `references/binary/pwn/field-notes.md` |
+| 无 NX（栈可执行）/ ret2shellcode | `binary/漏洞利用/rop-and-shellcode.md` |
+| NX 开、No PIE：ret2text / 基础栈溢出 | `binary/漏洞利用/overflow-basics.md` |
+| NX+PIE：ret2libc / ROP / 栈迁移 | `binary/漏洞利用/rop-and-shellcode.md` → `binary/漏洞利用/rop-advanced.md` |
+| 有格式化字符串（%x/%p/%n） | `binary/赛事专题/题目知识/ctf-pwn/format-string.md`（配套 `binary/漏洞利用/scripts/fmtstr_payload_suite.py`） |
+| Canary：泄露/爆破/覆盖 | `binary/漏洞利用/rop-advanced.md` |
+| 菜单题 / malloc-free / UAF / double free / tcache | `binary/漏洞利用/heap-techniques.md` → `binary/漏洞利用/heap-fsop.md` |
+| seccomp 过滤（orw / open-read-write） | `binary/漏洞利用/sandbox-escape.md`（配套 `binary/漏洞利用/scripts/seccomp_orw_generator.py`、`binary/漏洞利用/scripts/shellcraft_asm.py`） |
+| 内核题（vmlinux/bzImage/启动脚本/qemu）/ 驱动 ioctl | `binary/漏洞利用/kernel.md` → `binary/漏洞利用/kernel-techniques.md` → `binary/漏洞利用/kernel-bypass.md` |
+| SROP / 高阶花式 | `binary/漏洞利用/advanced.md`、`binary/漏洞利用/advanced-exploits.md`（四段连载合一篇） |
+| 临场 checklist / 踩坑 | `binary/漏洞利用/field-notes.md` |
 
 配套 exp 骨架（Read 参考，**运行只准 docker/sandbox**）：
-`pwn/scripts/`：ret2libc_two_stage.py、srop_execve.py、fmtstr_payload_suite.py、
+`binary/漏洞利用/scripts/`：ret2libc_two_stage.py、srop_execve.py、fmtstr_payload_suite.py、
 seccomp_orw_generator.py、shellcraft_asm.py。
 
-## 1. 恶意样本/可疑文件的静态分析入口（malware/）
+## 1. 恶意样本/可疑文件的静态分析入口（binary/恶意样本/）
 
 未知样本默认按恶意处理：**只做静态，不执行**；确需动态一律 L3 沙箱 + 断网。
 
-| 样本形态 | 模块（malware/） |
+| 样本形态 | 模块（binary/恶意样本/） |
 |---|---|
-| 混淆脚本（JS/VBS/PowerShell/宏）、loader、打包器 | `references/binary/malware/scripts-and-obfuscation.md` |
-| C2 流量特征、信标协议、回连行为推断 | `references/binary/malware/c2-and-protocols.md` |
-| PE / .NET 程序集、托管代码反编 | `references/binary/malware/pe-and-dotnet.md` |
+| 混淆脚本（JS/VBS/PowerShell/宏）、loader、打包器 | `binary/恶意样本/scripts-and-obfuscation.md` |
+| C2 流量特征、信标协议、回连行为推断 | `binary/恶意样本/c2-and-protocols.md` |
+| PE / .NET 程序集、托管代码反编 | `binary/恶意样本/pe-and-dotnet.md` |
 
 函数级结论（解密例、校验函数）照例 `bb_upsert_func` 落 func_kb，别重复反编译。
 

@@ -1,6 +1,6 @@
 # 通用认证 / 会话 / 密码重置 / 2FA payload 库
 
-> 父文档:[00-index.md](00-index.md)
+> 父文档:[[web/实战打法/oauth-saml-jwt/00-index.md|00-index.md]]
 > 涵盖:认证绕过 / 暴力破解 / 会话劫持 / 密码重置 / 2FA 绕过 / 验证码绕过 / "记住我" cookie 漏洞。
 
 ---
@@ -999,4 +999,4 @@ for k in keys:
 
 ---
 
-← 回 [00-index.md](00-index.md) · 相关:`references/playbooks/logic-flaws/00-index.md`(业务逻辑层密码重置)
+← 回 [[web/实战打法/oauth-saml-jwt/00-index.md|00-index.md]] · 相关:`references/playbooks/logic-flaws/00-index.md`(业务逻辑层密码重置)

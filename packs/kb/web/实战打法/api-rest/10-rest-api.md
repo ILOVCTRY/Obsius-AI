@@ -1,6 +1,6 @@
 # REST API 核心攻击 payload 库
 
-> 父文档:[00-index.md](00-index.md)
+> 父文档:[[web/实战打法/api-rest/00-index.md|00-index.md]]
 > 涵盖:REST API 通用测试 + IDOR / BOLA / Mass Assignment / 速率限制绕过 / API 注入。OWASP API Top 10 的 #1 #3 #4 #5 都在这里。
 
 ---
@@ -702,4 +702,4 @@ id=1+OR+1=1
 
 ---
 
-← 回 [00-index.md](00-index.md) · 相关:[`../arbitrary-x-authz.md`](../arbitrary-x-authz.md)(任意 X 越权)
+← 回 [[web/实战打法/api-rest/00-index.md|00-index.md]] · 相关:[[web/实战打法/arbitrary-x-authz.md|../arbitrary-x-authz.md]](任意 X 越权)

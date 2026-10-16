@@ -17,17 +17,24 @@ const STATUS_LABEL: Record<ProposalStatus, string> = {
   pending: "待审批", approved: "已应用", rejected: "已拒绝",
 }
 
+const KIND_LABEL: Record<string, string> = {
+  kb: "知识库", skill: "技能", index: "路由索引",
+  case: "成功案例", pattern: "模式", playbook: "作战手册",
+}
+
 export function targetLabel(p: Proposal): string {
   const t = p.target
   if (t.kind === "kb" || t.kind === "case" || t.kind === "pattern" || t.kind === "playbook") {
     const base = `${t.cap}/${t.path}`
     return p.mode === "rename" ? `${base} → ${t.cap}/${t.new_path}` : base
   }
-  return `技能 ${t.skill_kind === "track" ? "轨" : "包"}/${t.owner}/${t.name}`
+  if (t.kind === "index") return `route_index.yaml（${t.cap}）`
+  // 技能已扁平化（2026-10-13，无 kind/owner 归属）
+  return `技能 ${t.name}`
 }
 
 const MODE_LABEL: Record<string, string> = {
-  edit: "改写", create: "新建", rename: "改名", delete: "删除",
+  edit: "改写", create: "新建", rename: "改名", delete: "删除", suggest: "拆分建议",
 }
 
 export function ProposalsPane({ onPendingChange }: { onPendingChange?: (n: number) => void }) {
@@ -162,7 +169,7 @@ export function ProposalsPane({ onPendingChange }: { onPendingChange?: (n: numbe
               <div className="flex flex-wrap items-center gap-1.5">
                 <Badge variant="outline" className="text-[10px]">{MODE_LABEL[detail.mode] ?? detail.mode}</Badge>
                 <Badge variant="outline" className="text-[10px]">
-                  {detail.target.kind === "kb" ? "知识库" : "技能"}
+                  {KIND_LABEL[detail.target.kind] ?? detail.target.kind}
                 </Badge>
                 <Badge variant="outline" className="text-[10px]">
                   来源 {detail.origin === "agent" ? "Agent" : detail.origin === "review" ? "复盘" : "人类"}

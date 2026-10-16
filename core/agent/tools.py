@@ -46,6 +46,7 @@ from core.skills.registry import SkillRegistry
 from core.skills.experts import list_experts
 from core.skills.routeindex import top_route_entries
 from core.skills.rules import load_kb_sources
+from core.skills.refs import normalize_module
 from core.skills.writing import resolve_kb, search_kb
 
 # 意图内容按轨提示（2026-10-01，不硬拦——只给方向，靠模型自觉）：
@@ -1059,22 +1060,38 @@ class ToolDispatcher:
             category=category, track=self.track,
         )
         self.last_progress_step = self._step
-        # M5 D1 疑似重复警告（orchestrator-efficiency §0-9）：同目标同类但指纹
-        # 不同——只提示不阻塞；警告进工具返回值（单次按需），不落事件无频控
+        # M5 D1 疑似重复警告（orchestrator-efficiency §0-9）：同链+同类但指纹
+        # 不同——只提示不阻塞；警告进工具返回值（单次按需），不落事件无频控。
+        # finding-dedup-chain（2026-10-15）：列表带旧条目 dedup_key 与锚点，提示
+        # 改为可执行——同一漏洞拿旧 key 重报自动并入，别自造新键。
         warn = ""
         dw = r.get("dedup_warning")
         if dw:
-            listed = "；".join(f"{d['id']}({d['title'][:40]})" for d in dw)
-            warn = (f"\n[疑似重复] 同目标已有同类发现：{listed}——"
-                    "若是同一问题请 bb_update_finding 补证据而非新开条目；"
-                    "确属独立问题坚持新增即可。")
+            listed = "；".join(
+                f"{d['id']}(dedup_key={d.get('dedup_key') or '?'},「{d['title'][:36]}」)"
+                for d in dw)
+            warn = (f"\n[疑似重复] 同一端点链上已有同类发现：{listed}——"
+                    "**若是同一漏洞**，不要自造新 dedup_key："
+                    "用上面任一条的 dedup_key + 它的 target_asset_id 重报，"
+                    "系统会自动并入（证据并集、等级就高）而不是新增一行；"
+                    "或改用 bb_update_finding(finding_id=该 id) 补证据/改等级。"
+                    "确属不同端点的独立问题，坚持新增即可。")
+        if r.get("chain_merged"):
+            warn += (f"\n[已并入既有发现] {r['id']}（同一端点链上的同类条目，本轮锚点粗细不同）——"
+                     "本轮结论已并入该发现（证据并集、severity 就高、status 只升），"
+                     "未产生新行。")
+        elif r.get("chain_ambiguous"):
+            warn += (f"\n[疑似重复·未合并] 同一端点链上有 {r['chain_ambiguous']} 条同类条目、"
+                     "无法判定该并入哪条，故保守新建一条——请核对后用 "
+                     "bb_update_finding 收敛，勿继续堆叠。")
         if r.get("severity_raise_blocked"):
             warn += ("\n[就高被拒] 本次上报想抬高等级但未带新判级依据"
                      "（rating_basis）或新复现证据，已保留原级别——如需上调，"
                      "请补证据/依据后重报（finding-severity-calibration P2）")
-        # 回显生效判级依据（合并就高后可能与本报不同），供 agent 自检
+        # 回显生效判级依据（合并就高后可能与本报不同）与去重指纹，供 agent 自检/复用
         return (f"finding={r['id']} merged={r['merged']} severity={r['severity']} "
                 f"category={r.get('category') or 'vuln'} "
+                f"dedup_key={r.get('dedup_key') or '(空)'} "
                 f"rating_basis={r.get('rating_basis') or '(空)'}{gate_note}{warn}")
 
     # ---------- 意图（渗透链路图 v3，2026-09-24） ----------
@@ -1390,6 +1407,7 @@ class ToolDispatcher:
                               "status": f.get("status", "unverified"),
                               "category": f.get("category", "vuln"),
                               "vuln_class": f.get("vuln_class", ""),
+                              "dedup_key": f.get("dedup_key", ""),
                               "target_asset_id": f.get("target_asset_id")}
                              for f in findings],
                 "intents": [{"id": it["id"], "status": it.get("status", "open"),
@@ -1409,9 +1427,15 @@ class ToolDispatcher:
                 category=category)
             if limit is not None:
                 rows = rows[:limit]
+            # dedup_key/target_asset_id 一并回传（finding-dedup-chain，2026-10-15）：
+            # 升级/验证既有漏洞时需要拿旧指纹按原 key 重报自动并入，而不是自造新键
+            # 裂出新行。celebration-replay：之前查不到 key，只能瞎造。
             return json.dumps(
                 [{"id": f["id"], "vuln_class": f["vuln_class"], "title": f["title"],
-                  "severity": f["severity"], "status": f["status"], "confidence": f["confidence"]}
+                  "severity": f["severity"], "status": f["status"],
+                  "confidence": f["confidence"],
+                  "dedup_key": f["dedup_key"],
+                  "target_asset_id": f["target_asset_id"]}
                  for f in rows], ensure_ascii=False)
         if what == "assets":
             rows = self.bb.list_assets(
@@ -1609,10 +1633,14 @@ class ToolDispatcher:
 
         module 全局形态 `<域>/<快照>/<路径>`（首段=启用域时锁定该域），
         域内相对形态向后兼容；writing.resolve_kb 存在性消歧+防穿越；
-        不存在则按启用域列出可选清单（防幻觉猜名）。"""
+        不存在则按启用域列出可选清单（防幻觉猜名）。
+        额外接受 Obsidian wikilink 口径（`[[web/漏洞分类/sqli/手册|手册]]`、
+        `[[web/…/手册]]`）与反引号/引号包裹——refs.normalize_module 统一归一。"""
         if not self.packs_root:
             return "[错误] 本会话未配置知识库（packs_root 缺失）"
-        rel = module.strip().replace("\\", "/")
+        rel = normalize_module(module)
+        if not rel:
+            return "[错误] module 不能为空"
         p = Path(rel)
         if p.is_absolute() or ".." in p.parts:
             return "[拒绝] module 必须是知识库内相对路径（禁止绝对路径 / .. 穿越）"
@@ -1735,7 +1763,8 @@ class ToolDispatcher:
 
         资源路径严格限制在 cc 约定子目录，不能穿越到其他技能、packs/kb
         或项目工作区。旧技能仍可读取 SKILL.md，迁移期间不破坏存量任务。
-        """
+        `path` 与 kb_open 同口径收口：反引号/引号包裹与 Obsidian wikilink
+        （`[[references/x.md|别名]]`）都先过 refs.normalize_module 再校验。"""
         if not self.packs_root:
             return "[错误] 本会话未配置 packs_root（skill_open 不可用）"
         if self._skill_registry is None:
@@ -1751,7 +1780,7 @@ class ToolDispatcher:
                     + "\n可用技能: " + ("、".join(names) if names else "（无）"))
         try:
             if path:
-                rel = str(path).replace("\\", "/").strip()
+                rel = normalize_module(path)
                 parts = Path(rel).parts
                 if not rel or rel.startswith("/") or ".." in parts \
                         or not parts or parts[0] not in {"references", "scripts", "examples", "assets"}:
@@ -1786,9 +1815,22 @@ class ToolDispatcher:
     def _tool_propose_pack_edit(self, kind: str, mode: str, target: dict,
                                 summary: str, reason: str,
                                 content: str | None = None) -> str:
-        """经验沉淀提案通道（C4）：只校验落 pending，绝不直接改文件；应用权在人类。"""
+        """经验沉淀提案通道（C4）：只校验落 pending，绝不直接改文件；应用权在人类。
+
+        **项目级开关门禁（2026-10-15，Nan 报 bug：关闭「知识库迭代」时主控仍在
+        提提案）**：本工具是 Agent 主动提案的唯一入口，与轮末自动提案
+        （kbiteration.run_iteration）同口径读 ``config.kb_iteration.enabled``——
+        关闭即拒。此前只有轮末路径有门禁、工具路径裸奔，是 bug 根因。"""
         if not self.packs_root:
             return "[错误] 本会话未配置 packs_root，无法提提案"
+        try:
+            from core.skills import kbiteration
+            proj = self.bb.get_project(self.project_id)
+            if not kbiteration.is_enabled((proj or {}).get("config")):
+                return ("[拒绝] 本项目未开启「知识库迭代」（变更提案页右上角开关）："
+                        "关闭时 Agent 不生成任何提案，不必重试；确需沉淀请让人类开启后再提")
+        except Exception:  # noqa: BLE001 —— 读开关失败按关闭处理，绝不放行
+            return "[拒绝] 读取「知识库迭代」开关失败，按已关闭处理，未落提案"
         pending = [p for p in proposals.list_proposals(self.packs_root, "pending")
                    if p.get("session") == self.session_id]
         if len(pending) >= self.PROPOSE_LIMIT_PER_SESSION:

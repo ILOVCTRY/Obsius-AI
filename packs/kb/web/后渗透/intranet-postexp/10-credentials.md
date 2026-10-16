@@ -1,6 +1,6 @@
 # 内网/后渗透 — 凭证窃取 payload 库
 
-> 父文档:[00-index.md](00-index.md) · ⚠️ SRC 场景下大多受限,见 [../compliance.md](../compliance.md)
+> 父文档:[[web/后渗透/intranet-postexp/00-index.md|00-index.md]] · ⚠️ SRC 场景下大多受限,见 [../compliance.md](../compliance.md)
 > 涵盖:Mimikatz / LSASS dump / 浏览器密码 / DPAPI / Kerberos ticket / 桌面凭据 / SSH key / 应用凭据
 
 ---
@@ -833,4 +833,4 @@ copy \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\Windows\Panther\Unattend.xm
 
 ---
 
-← 回 [00-index.md](00-index.md) · 下一篇:[`11-lateral.md`](11-lateral.md)
+← 回 [[web/后渗透/intranet-postexp/00-index.md|00-index.md]] · 下一篇:[[web/后渗透/intranet-postexp/11-lateral.md|11-lateral.md]]

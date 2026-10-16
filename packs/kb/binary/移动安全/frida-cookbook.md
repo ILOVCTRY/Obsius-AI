@@ -9,7 +9,7 @@ vuln_class: [android, frida, dynamic-analysis]
 
 > 来源：reverse-skill 1.0.1 收编改编（2026-09-30，MIT，见 `../../licenses/`）；
 > 精选自 awesome-frida、Frida-Mobile-Scripts、frida-codeshare-scripts 等开源项目。
-> 按场景分类，直接复制使用。配合技能 [android-rev](../../capabilities/binary/skills/android-rev/SKILL.md)。
+> 按场景分类，直接复制使用。配合技能 [[skills/android-rev/SKILL.md|android-rev]]。
 
 ## 通用 Hook 模板
 

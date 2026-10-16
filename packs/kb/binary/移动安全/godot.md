@@ -5,7 +5,7 @@ phase: reverse
 # Godot 引擎 APK 专项
 
 > 来源：r0re 收编改编（2026-09-21，Godot sec2026〔腾讯游戏安全初赛〕实战验证）。
-> 参照案例：[cases/godot-sec2026/](cases/godot-sec2026/README.md)（完整五段式）。
+> 参照案例：[[binary/移动安全/cases/godot-sec2026/README.md|cases/godot-sec2026/]]（完整五段式）。
 
 ## ① markers 清单（命中即切 Godot 流程）
 
@@ -46,9 +46,9 @@ FileAccessEncrypted 变体：envelope = `[16B md5][8B pt_len][16B iv][ct]`；
 `godot_ctf_runner.py`（M2 落 tools/ registry 后可用）：识别 → 壳检测 → unicorn
 模拟脱壳 → RELATIVE 重定位修复 → 证据提取（init-XOR 恢复的 key/nonce、魔改
 常量、字符串 xref）→ report + findings + `unpacked/*_reloc.bin`。手工兜底 =
-[unpacking.md](unpacking.md) 全流程 + 本篇要点。
+[[binary/移动安全/unpacking.md|unpacking.md]] 全流程 + 本篇要点。
 
 ## ⑦ 解题后沉淀
 
 解出新 Godot 题 → 五段式（识别 markers / 解题路径 / 验证向量 / solver / 复用提示）
-沉淀 `cases/<案例id>/`（K6 约定，首例 [cases/godot-sec2026/](cases/godot-sec2026/README.md)）。
+沉淀 `cases/<案例id>/`（K6 约定，首例 [[binary/移动安全/cases/godot-sec2026/README.md|cases/godot-sec2026/]]）。

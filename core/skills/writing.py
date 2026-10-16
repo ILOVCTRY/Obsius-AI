@@ -445,6 +445,59 @@ def rename_kb_move(packs_root: str | Path, cap: str, old_rel: str, new_rel: str)
         return {"old_path": old.module, "new_path": new.module}
 
 
+# ---------- 技能目录写/删（提案 skill create/delete，2026-10-14） ----------
+# 技能是扁平目录 packs/kb/skills/<name>/SKILL.md（registry 单层 glob 扫描）。
+# 新建=建目录+写 SKILL.md；删除=整目录移入 skills/.history/skills-trash/（可恢复，
+# 与 delete_kb_file 同款「不物理抹除」纪律）；两者都只在提案 apply 内被调用。
+
+# 技能目录名白名单：registry 以 frontmatter name 为键，且 name 必须等于目录名，
+# 故目录名要能被 registry 扫到又无路径注入面（禁 / \ .. 与前后空白）。
+_SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def resolve_skill_dir(packs_root: str | Path, name: str) -> Path:
+    """技能目录（packs/kb/skills/<name>），name 非法抛 KbError。"""
+    n = (name or "").strip()
+    if not _SKILL_NAME_RE.fullmatch(n):
+        raise KbError(f"非法技能名: {name!r}（限字母数字与 . _ -，须字母数字开头）")
+    return skill_dir(packs_root, n)
+
+
+def create_skill(packs_root: str | Path, name: str, content: str) -> dict:
+    """新建技能目录 + SKILL.md（提案 skill create 应用）。目录必须不存在；
+    frontmatter name 必须与目录名一致（registry 以 name 为键，错位会造成双名/覆盖）。"""
+    text = _validate_content(content)
+    root = resolve_skill_dir(packs_root, name)
+    from core.skills.registry import parse_frontmatter
+    meta = parse_frontmatter(text)
+    if (meta.get("name") or "").strip() != root.name:
+        raise KbError(f"frontmatter name 必须与技能目录名一致: {root.name!r}")
+    with pack_write_lock():
+        if root.exists():
+            raise KbError(f"技能已存在: {root.name}")
+        root.mkdir(parents=True, exist_ok=False)
+        (root / "SKILL.md").write_text(text, encoding="utf-8")
+        return {"path": f"skills/{root.name}/SKILL.md", "created": True}
+
+
+def delete_skill(packs_root: str | Path, name: str) -> dict:
+    """删除技能目录 → 移入 skills/.history/skills-trash/（可恢复，不物理抹除）。
+    .history 是隐藏目录且多一层，registry 的单层 glob 扫不到，删除即下线。"""
+    root = resolve_skill_dir(packs_root, name)
+    with pack_write_lock():
+        if not (root / "SKILL.md").is_file():
+            raise KbError(f"技能不存在: {root.name}")
+        trash = root.parent / ".history" / "skills-trash"
+        trash.mkdir(parents=True, exist_ok=True)
+        dest = trash / f"{root.name}.{_utc_ts()}"
+        n = 1
+        while dest.exists():
+            dest = trash / f"{root.name}.{_utc_ts()}.{n}"
+            n += 1
+        shutil.move(str(root), str(dest))
+        return {"path": f"skills/{root.name}", "trash": dest.name}
+
+
 def kb_versions(packs_root: str | Path, cap: str, rel_path: str) -> list[dict]:
     """列某 kb 文件的历史版本（kb-backups 内，按时间倒序）。"""
     target = resolve_kb(packs_root, cap, rel_path)

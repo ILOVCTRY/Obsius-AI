@@ -48,7 +48,7 @@ from core.agent.execution import ExecutionContext
 from core.blackboard.assets import (_is_ip, CHALLENGE_TYPE, clean_host,
                                     import_assets, register_asset,
                                     register_challenge)
-from core.coverage import attach_effective_status
+from core.coverage import attach_effective_status, level_two_stats
 from core.team import TeamStore
 from core.blackboard.graph import board_graph, session_graph
 from core.blackboard.attackpath import build_attack_path
@@ -2860,9 +2860,16 @@ def create_app(
             j["kind"] == "orchestrator-tick" and j["status"] == "running"
             for j in app.state.jobs.all_jobs()
             if j.get("meta", {}).get("project_id") == pid)
+        # 资产计数口径（level-two-counts，2026-10-16 Nan 定稿）：资产树只认
+        # 「根节点 → 二级子节点 → 三级 URL」，**资产数 = 二级子节点数**（根只是分组
+        # 容器、三级 URL 只是二级的明细，都不进分母）。findings 只查一次，计数复用。
+        findings = proj.bb.list_findings(pid)
+        lvl = level_two_stats(proj.bb.list_assets(pid), findings)
         return {**_expert_meta_view(proj.view_meta), "task_stats": stats,
-                "findings": len(proj.bb.list_findings(pid)),
-                "assets": len(proj.bb.list_assets(pid)),
+                "findings": len(findings),
+                "assets": lvl["total"],
+                "assets_clean": lvl["clean"],
+                "assets_clean_pct": lvl["pct"],
                 "usage": usage,
                 "capability": app.state.inventory.to_dict()}
 
@@ -2986,13 +2993,19 @@ def create_app(
     class ProxyRemoveIn(BaseModel):
         addresses: list[str] = Field(default_factory=list)
 
+    class ProxyUseIn(BaseModel):
+        proxy: str = ""                                # host:port（或含 scheme，前端已剥）
+
     class ProxyFetchIn(BaseModel):
         protocols: list[str] = Field(default_factory=list)  # http/socks4/socks5；空=全部
         auto_validate: bool = True                           # 抓取后自动验证并清理失效
+        # 本次抓取条数上限（2026-10-15，前端「抓取条数」输入框）：None=用 config.fetch_limit，
+        # 0=不限。只影响本次，不改配置文件。
+        limit: int | None = None
 
     class ProxyValidateIn(BaseModel):
-        workers: int = 50
-        timeout_s: float = 600.0
+        workers: int = 100
+        timeout_s: float = 1200.0
         prune: bool = True                                   # 验证后剔除失效代理
 
     class ProxyCheckUrlIn(BaseModel):
@@ -3015,6 +3028,7 @@ def create_app(
         validate_target_b: str | None = None
         validate_timeout_s: int | None = None
         prune_latency_ms: float | None = None
+        fetch_limit: int | None = None      # 单次抓取条数上限（0=不限），2026-10-15
 
     class ProxySelectIn(BaseModel):
         limit: int = 1
@@ -3305,6 +3319,15 @@ def create_app(
     def proxy_rotate():
         return _proxy_call(_proxy_pool().rotate)
 
+    @app.post("/api/proxy/use")
+    def proxy_use(body: ProxyUseIn):
+        """精确切换到指定代理（2026-10-15 访问测试「可达即切换」入口）。
+
+        顺序轮换是碰运气：访问测试判出「对这个站点可达」的 IP 后应直接钉死它。
+        地址不在池/非 Working/服务未运行 → ProxyError → 503 + 人话。
+        """
+        return _proxy_call(_proxy_pool().use_proxy, body.proxy)
+
     @app.post("/api/proxy/add")
     def proxy_add(body: ProxyAddIn):
         return _proxy_pool().add_records(body.records)
@@ -3332,7 +3355,7 @@ def create_app(
         job_id = app.state.jobs.submit(
             "proxy-fetch",
             lambda: pool.fetch(body.protocols, auto_validate=body.auto_validate,
-                               on_progress=progress.update),
+                               limit=body.limit, on_progress=progress.update),
             meta={"progress": progress})
         return {"job_id": job_id}
 
@@ -3385,12 +3408,14 @@ def create_app(
             "validate_target_b": cfg.validate_target_b,
             "validate_timeout_s": cfg.validate_timeout_s,
             "prune_latency_ms": cfg.prune_latency_ms,
+            "fetch_limit": cfg.fetch_limit,
             "defaults": {
                 "validate_target": d.validate_target,
                 "validate_target_https": d.validate_target_https,
                 "validate_target_b": d.validate_target_b,
                 "validate_timeout_s": d.validate_timeout_s,
                 "prune_latency_ms": d.prune_latency_ms,
+                "fetch_limit": d.fetch_limit,
             },
         }
 
@@ -3414,6 +3439,10 @@ def create_app(
             updates["validate_timeout_s"] = int(body.validate_timeout_s)
         if body.prune_latency_ms is not None:
             updates["prune_latency_ms"] = float(body.prune_latency_ms)
+        if body.fetch_limit is not None:
+            if body.fetch_limit < 0:
+                raise HTTPException(422, "单次抓取条数不能为负（0=不限）")
+            updates["fetch_limit"] = int(body.fetch_limit)
         if not updates:
             raise HTTPException(422, "无可更新字段")
         write_config_file(proxy_config_path, updates)
@@ -3799,15 +3828,22 @@ def create_app(
         return asset
 
     @app.delete("/api/projects/{pid}/assets/{asset_id}")
-    def delete_asset(pid: str, asset_id: str):
-        """物理删除叶子资产（资产树整理/走查清理）：仍被 finding 引用或有子资产→409。"""
+    def delete_asset(pid: str, asset_id: str, cascade: bool = False):
+        """物理删除叶子资产（资产树整理/走查清理）：有子资产 → 409。
+
+        `cascade=true`（2026-10-16，Web UI 删除按钮默认带上）：把 `target_asset_id`
+        指向该资产的发现**一并物理删除**（语义同 DELETE finding，不触发撤回传播），
+        响应多带 `findings_deleted`；不带该参数时仍被 finding 引用 → 409（agent 工具
+        `bb_delete_asset` 与脚本走 store 默认值，行为不变）。
+        """
         bb = _project(pid).bb
         if not bb.conn.execute(
                 "SELECT 1 FROM assets WHERE id=? AND project_id=?",
                 (asset_id, pid)).fetchone():
             raise HTTPException(404, f"资产不存在于本项目: {asset_id}")
         try:
-            row = bb.delete_asset(asset_id, author="human")
+            row = bb.delete_asset(asset_id, author="human",
+                                  cascade_findings=cascade)
         except ValueError as e:
             raise HTTPException(409, str(e)) from e
         return {"deleted": asset_id, **row}

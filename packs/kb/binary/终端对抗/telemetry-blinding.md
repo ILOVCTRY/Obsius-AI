@@ -147,7 +147,7 @@ BOOL PatchAmsi(void) {
 4. ContinueExecution
 ```
 
-与 [unhook-techniques.md](unhook-techniques.md) 的 HWBP Blindside 同一套基础设施，
+与 [[binary/终端对抗/unhook-techniques.md|unhook-techniques.md]] 的 HWBP Blindside 同一套基础设施，
 可共用 VEH。
 
 ### 进阶方案 2：AmsiContext / AmsiSession 损坏

@@ -1,6 +1,6 @@
 # XSS 绕过 payload 库
 
-> 父文档:[00-index.md](00-index.md)
+> 父文档:[[web/实战打法/xss/00-index.md|00-index.md]]
 > 涵盖:CSP 绕过 / mXSS / Unicode XSS / 过滤器绕过 / 编码绕过 / Polyglot。任何被拦的 payload 来这里挑替代。
 
 ---
@@ -376,4 +376,4 @@ _简洁高效Polyglot_
 
 ---
 
-← 回 [00-index.md](00-index.md) · 通用 WAF 绕过见 [`../../methodology/02-bypass-toolkit.md`](../../methodology/02-bypass-toolkit.md)
+← 回 [[web/实战打法/xss/00-index.md|00-index.md]] · 通用 WAF 绕过见 [`../../methodology/02-bypass-toolkit.md`](../../methodology/02-bypass-toolkit.md)

@@ -1031,13 +1031,17 @@ def test_proposals_skill_suggest_flow(tmp_path):
         "summary": "s", "reason": "r"}, origin="agent")
     out2 = proposals.apply_proposal(root, p2["id"], "human")
     assert out2["result"]["backup"]
-    # 新建技能仍不允许
+    # 技能新建（kb-iteration，2026-10-14）：由「一律拒绝」改为落 pending 人审
+    p3 = proposals.create_proposal(root, {
+        "target": {"kind": "skill", "name": "ghost"},
+        "mode": "create", "content": "---\nname: ghost\n---\nx",
+        "summary": "s", "reason": "r"}, origin="agent")
+    assert p3["status"] == "pending"
+    # 改名仍不允许（不在允许模式内，改名归人类）
     with pytest.raises(proposals.ProposalError):
         proposals.create_proposal(root, {
-            "target": {"kind": "skill", "skill_kind": "capability",
-                       "owner": "web", "name": "ghost"},
-            "mode": "create", "content": "---\nname: ghost\n---\nx",
-            "summary": "s", "reason": "r"}, origin="agent")
+            "target": {"kind": "skill", "name": "ghost", "new_path": "ghost2"},
+            "mode": "rename", "summary": "s", "reason": "r"}, origin="agent")
 
 
 # ---------- M2 同义词表：查询扩展（retrieval-upgrade，2026-09-23） ----------

@@ -1,6 +1,6 @@
 # RCE — 原型链污染 payload 库
 
-> 父文档:[00-index.md](00-index.md)
+> 父文档:[[web/实战打法/rce/00-index.md|00-index.md]]
 > 服务端原型链污染到 RCE / 客户端到 XSS / 与 NoSQL 注入组合。Node.js / lodash / jQuery `$.extend` / `_.merge` / `Object.assign` 用户可控时考虑。
 
 ---
@@ -312,4 +312,4 @@ username=admin&password[0][$gt]=
 
 ---
 
-← 回 [00-index.md](00-index.md)
+← 回 [[web/实战打法/rce/00-index.md|00-index.md]]

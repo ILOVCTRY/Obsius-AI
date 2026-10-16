@@ -1,6 +1,6 @@
 # LFI 基础 / 目录遍历技术 payload 库
 
-> 父文档:[00-index.md](00-index.md)
+> 父文档:[[web/实战打法/path-traversal/00-index.md|00-index.md]]
 > 涵盖:本地文件包含基础 + 目录遍历技术(`../`、编码、null byte、点斜变体)。任何文件路径入参先打这两类。
 
 ---
@@ -159,4 +159,4 @@ _Windows点号截断_
 
 ---
 
-← 回 [00-index.md](00-index.md) · 相关:[`12-php-wrappers.md`](12-php-wrappers.md)(PHP 场景下的伪协议进阶)
+← 回 [[web/实战打法/path-traversal/00-index.md|00-index.md]] · 相关:[[web/实战打法/path-traversal/12-php-wrappers.md|12-php-wrappers.md]](PHP 场景下的伪协议进阶)

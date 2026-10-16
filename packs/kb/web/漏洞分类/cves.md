@@ -1,6 +1,6 @@
 # CTF Web - CVEs & Browser Vulnerabilities
 
-Specific CVEs and vulnerability patterns. For Node.js CVEs (flatnest, Happy-DOM), see [node-and-prototype.md](node-and-prototype.md). For JWT algorithm confusion, see [auth-and-access.md](auth-and-access.md).
+Specific CVEs and vulnerability patterns. For Node.js CVEs (flatnest, Happy-DOM), see [[web/漏洞分类/node-and-prototype.md|node-and-prototype.md]]. For JWT algorithm confusion, see [auth-and-access.md](auth-and-access.md).
 
 ## Table of Contents
 - [CVE-2025-29927: Next.js Middleware Bypass](#cve-2025-29927-nextjs-middleware-bypass)
@@ -361,7 +361,7 @@ ssh -i rsa.key root@172.30.0.3
 4. **Firewall/WAF** inspection patterns (TCP packet splitting)
 5. **dotenv** or environment variable handling
 6. **urllib** scheme validation (check for `<URL:...>` bypass)
-7. **Node.js libraries** — see [node-and-prototype.md](node-and-prototype.md) for full list
+7. **Node.js libraries** — see [[web/漏洞分类/node-and-prototype.md|node-and-prototype.md]] for full list
 8. **GitLab with SAML SSO** — check version for ruby-saml CVE-2024-45409
 9. **PaperCut NG** — check for `/app?service=page/SetupCompleted` unauthenticated access
 10. **Zabbix trapper port** (10051) — audit log SQLi via `clientip` field

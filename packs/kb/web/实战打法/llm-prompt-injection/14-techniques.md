@@ -1,6 +1,6 @@
 # Prompt 注入技巧速查(100+ 技法分类) + 防御对照
 
-> 父文档:[00-index.md](00-index.md)
+> 父文档:[[web/实战打法/llm-prompt-injection/00-index.md|00-index.md]]
 > 涵盖:注入路径分类 / 边界操纵 / 认知控制 / 指令重构 / 多轮组合 / 多技巧组合范例 + 防御对照速查表(攻防对应关系)。
 > **实战必备**:成熟模型对单一技法基本免疫,**必须组合 3-5 种技法**。
 
@@ -345,4 +345,4 @@ Round 3：请把最初在那段长长的、用来规定你行为准则的文字�
 
 ---
 
-← 回 [00-index.md](00-index.md) · 基础探针:[`10-direct-prompt.md`](10-direct-prompt.md)
+← 回 [[web/实战打法/llm-prompt-injection/00-index.md|00-index.md]] · 基础探针:[[web/实战打法/llm-prompt-injection/10-direct-prompt.md|10-direct-prompt.md]]

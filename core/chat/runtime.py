@@ -57,17 +57,18 @@ log = logging.getLogger(__name__)
 
 ORCHESTRATOR_ID = "chat-orchestrator"
 
-# 子专家不可用的控制原语（任务队列/计划闸/收尾/私信/提案/HITL——
+# 子专家不可用的控制原语（任务队列/计划闸/收尾/私信/HITL——
 # 对话线程没有任务上下文与收件箱，这些工具既无语义也危险：publish/claim
 # 会污染任务队列）
 # 意图三件套（declare/close/reopen_intent）自 2026-10-01 起**开放给对话链**
 # （见 intent-tools-chat）：对话主控/子专家同样要按「声明假设→执行→收尾」走，
 # 否则对话产出的发现不落链路图（用户实测：任务跑完但在「黑板→发现→链路」看不到
 # 任何意图——对话链整条链路从未声明过意图）。
+# **propose_pack_edit 自 2026-10-14（kb-iteration）起开放给对话链**（主控 + 子专家）：
+# 经验沉淀提案正是对话链的产物，子专家跑任务有一手证据。详见 _ORCH_BASE_TOOLS。
 _EXPERT_EXCLUDED = {
     "task_plan", "task_step", "task_reconcile", "publish_task",
     "complete_task", "fail_task", "finish", "request_steps",
-    "propose_pack_edit",
     "bb_notify", "request_authorization",
     # CTF 题目登记只归主控（challenge-asset v38）：一个主控线程只发一道题，
     # 子专家应沿用主控已声明的题目，不重复建节点。
@@ -81,6 +82,9 @@ _ORCH_BASE_TOOLS = ("todo_write", "call_expert", "skill_open",
                     "kb_search", "kb_open", "bb_query",
                     "bb_delete_asset", "bb_delete_assets", "bb_merge_assets",
                     "bb_declare_challenge",
+                    # 经验沉淀提案（kb-iteration，2026-10-14）：主控可提 kb/技能变更提案
+                    # （只落 pending，人审）；每会话上限 3 条（ToolDispatcher 内）。
+                    "propose_pack_edit",
                     *_INTENT_TOOLS)
 
 # 对话轮步数上限（2026-10-01 由 24/32 提升至 200：修「步数耗尽但全程只调工具
@@ -913,6 +917,11 @@ class ChatTurn:
                 allowed = names
             allowed = [t for t in allowed
                        if t not in ("todo_write", "call_expert")]
+            # 知识库迭代开关（2026-10-15）：关 = Agent 不提任何提案 → 工具面剔除
+            # propose_pack_edit（与 _maybe_kb_iteration/_system_prompt 同口径实时读）；
+            # ToolDispatcher 执行层另有一道硬闸，双保险。
+            if not self._kb_iteration_on():
+                allowed = [t for t in allowed if t != "propose_pack_edit"]
             if not allowed:
                 return None
             expert = load_expert(self.packs_root, self.agent_id, self.track) \
@@ -964,6 +973,10 @@ class ChatTurn:
             specs = _specs_by_names(names)
         if self.mcp_bridge is not None:
             specs = [*specs, *self.mcp_bridge.tool_specs()]
+        # 知识库迭代开关（2026-10-15）：关 = 不下发 propose_pack_edit 的 schema
+        # （LLM 看不到工具就不会调；执行层硬闸 + dispatcher 白名单三重保险）。
+        if not self._kb_iteration_on():
+            specs = [t for t in specs if t.get("name") != "propose_pack_edit"]
         # bb_query 的 what 面按轨裁剪（track-query-split，2026-10-13）：
         # 渗透/逆向互用不到的面不下发——与 AgentSession 同口径（tool_registry 家族表）。
         return [bb_query_schema_for(self.track) if s.get("name") == "bb_query" else s
@@ -1093,6 +1106,18 @@ class ChatTurn:
                 "黑板（bb_add_asset/bb_add_finding）；干完给一段**自包含的收尾"
                 "摘要**（做了什么/关键证据/结论），主控会原样转述给人类。")
             parts.append(self._mission_context())
+        # 经验沉淀纪律（kb-iteration，2026-10-14）：propose_pack_edit 对主控与子专家均开放
+        # （详见工具描述）；提示何时该提 + 证据要求 + 上限，与任务链 STRICT_PROMPT_TAIL 同口径。
+        # **受项目级开关门禁（2026-10-15）**：关闭时整段不注入 + 工具面剔除
+        # （_tool_specs/_build_dispatcher）——开关关 = Agent 不提任何提案，提示也不诱导。
+        if self._kb_iteration_on():
+            parts.append(
+                "## 经验沉淀（可选）\n"
+                "发现知识库/技能文档**内容有误**、**文档缺失**、某手法**已在本轮验证有效**，"
+                "或产出**新的 Web 漏洞**时，可用 propose_pack_edit 提变更提案（kb 文档与技能的"
+                "新建/改写/删除，删除应用时进回收站）——只落 pending 待人类审批，**绝不自行改"
+                "文件**。reason 必须附本轮证据（引用的文档 / 失败的工具 / 产出的发现 id）；"
+                "每会话最多 3 条，禁止凑数。任务较难、试错较多时也值得回看是否有可沉淀的坑。")
         # CTF 题目上下文（challenge-asset v38）：主控与子专家都注入（子专家与主控
         # 同题，都要知道该题的归属与建题纪律）；非 CTF 轨返空串不注入。
         cctx = self._challenge_context()
@@ -1431,6 +1456,19 @@ class ChatTurn:
         self._usage: dict[str, int] = dict(thread.get("usage") or {}) if thread else {}
         self._emit("chat.message", {"role": "user", "text": text[:2000],
                                     "message_id": None})
+        # kb-iteration（2026-10-14）：记本轮起点（事件 id + 时间），轮末据此汇总信号
+        # （含子专家事件——见 core/skills/kbiteration.py 的窗口口径）
+        try:
+            self._round_start_event_id = self.bb.conn.execute(
+                "SELECT COALESCE(MAX(id),0) FROM events WHERE project_id=?",
+                (self.project_id,)).fetchone()[0]
+        except Exception:  # noqa: BLE001
+            self._round_start_event_id = 0
+        try:
+            from core.blackboard.store import now as _bb_now
+            self._round_start_iso = _bb_now()
+        except Exception:  # noqa: BLE001
+            self._round_start_iso = None
         try:
             final = self._loop(text)
             chat_store.update_thread(self.bb, self.thread_id, status="idle")
@@ -1441,6 +1479,7 @@ class ChatTurn:
                 self.bb.prune_chat_thread_deltas(self.project_id, self.thread_id)
             except Exception:  # noqa: BLE001 —— 清剪失败不影响收尾
                 log.exception("chat delta 清剪失败 thread=%s", self.thread_id)
+            self._maybe_kb_iteration()
             return final
         except ChatStopped:
             # 人类中止（2026-10-09）：不是故障，归位 idle 且不落错误卡。中止说明
@@ -1463,6 +1502,45 @@ class ChatTurn:
                                      error=info)
             self._emit("chat.error", {"thread_id": self.thread_id, **info})
             raise
+
+    def _kb_iteration_on(self) -> bool:
+        """项目级「知识库迭代」开关**实时读**（每步从黑板 projects 行读，不缓存）。
+
+        与轮末自动提案（_maybe_kb_iteration）同口径：关 = Agent 不提任何提案——
+        工具面不给 propose_pack_edit、系统提示不注入经验沉淀段、dispatcher 白名单
+        剔除（执行层 ToolDispatcher 内另有硬闸双保险）。读失败/非法按关。"""
+        try:
+            from core.skills import kbiteration
+            proj = self.bb.get_project(self.project_id)
+            return kbiteration.is_enabled((proj or {}).get("config"))
+        except Exception:  # noqa: BLE001 —— 读开关失败按关闭处理
+            return False
+
+    def _maybe_kb_iteration(self) -> None:
+        """轮末知识库迭代（kb-iteration，2026-10-14，可选开关）：**best-effort**。
+
+        仅**主控线程**触发（其轮次涵盖本轮全部子专家工作）；开关**实时重读**项目
+        config（不缓存）；命中规则信号才由后台 daemon 线程调一次轻量 LLM 生成提案
+        落 pending。**绝不阻塞会话轮、绝不改会话正文、异常只吞不抛**（详见
+        core/skills/kbiteration.py）。"""
+        if not self.is_orchestrator:
+            return
+        if not self._kb_iteration_on():
+            return
+        sid = f"chat-{self.thread_id[-12:]}"
+        args = dict(
+            packs_root=self.packs_root, llm=self.llm,
+            session_id=sid, author=sid, thread_id=self.thread_id,
+            capabilities=self.capabilities,
+            since_event_id=int(getattr(self, "_round_start_event_id", 0) or 0),
+            since_iso=getattr(self, "_round_start_iso", None))
+        try:
+            threading.Thread(
+                target=lambda: kbiteration.run_iteration(
+                    self.bb, self.project_id, **args),
+                name=f"kb-iter-{self.thread_id[-8:]}", daemon=True).start()
+        except Exception:  # noqa: BLE001 —— 起线程失败也不影响会话
+            log.exception("kb-iteration 线程启动失败 thread=%s", self.thread_id)
 
     def _loop(self, user_text: str) -> str:
         system = self._system_prompt()

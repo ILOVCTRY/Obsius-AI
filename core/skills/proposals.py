@@ -5,7 +5,8 @@
 - 提案落 ``packs/.proposals/pp_<UTCts>_<6hex>.json``，三态
   pending/approved/rejected；
 - **不存旧内容快照**——审批时对照磁盘现状实时做 unified diff（磁盘已变就如实展示）；
-- AI 对技能有 edit 提案权 + suggest（拆分建议，产文档由人执行）；kb 允许全部 4 模式；
+- AI 对技能有 edit/create/delete 提案权 + suggest（拆分建议，产文档由人执行）；
+  kb 允许全部 4 模式；技能删除应用时移入 skills/.history/skills-trash/（可恢复）；
   index edit + create（K4，为无索引包建骨架；删除归人类）；
   case edit + create（K6 成功链沉淀：测试包 成功案例.md 补段 / payloads/ 补弹药）；
 - 应用复用 writing.py 的同一套备份与 refs.py 的改名引用联动；
@@ -27,12 +28,15 @@ from pathlib import Path
 from core.skills import writing
 from core.skills.registry import SkillRegistry, parse_frontmatter
 
-# 模式权限：技能 edit（编辑）+ suggest（拆分建议，产文档由人执行）；kb 四模式全允许；
+# 模式权限：技能 edit（编辑）/ create（新建）/ delete（删除，进回收站）/ suggest
+# （拆分建议，产文档由人执行）；kb 四模式全允许；
 # index 仅 edit（M0 全局单表 packs/kb/route_index.yaml 恒存在，K4 的 create 退役；
 # 条目 kb 路径须带本域前缀，apply 时按域归并写回，删除仍归人类）
 KB_MODES = {"edit", "create", "rename", "delete"}
 DERIVED_KINDS = {"case", "pattern", "playbook"}
-SKILL_MODES = {"edit", "suggest"}
+# skill create/delete（kb-iteration，2026-10-14）：agent 可提「新建技能 / 删除技能」，
+# 仍全走人审；删除应用时移入 skills/.history/skills-trash/（可恢复，不物理抹除）。
+SKILL_MODES = {"edit", "suggest", "create", "delete"}
 INDEX_MODES = {"edit"}
 # K6（2026-09-20 外部对标升级项 A，RapidPen 成功案例复用）：成功链沉淀——
 # verified 攻击链补测试包 成功案例.md（edit）或 payloads/ 补弹药（create）；
@@ -179,15 +183,26 @@ def _validate_target(packs_root: Path, p: dict, *, applying: bool) -> None:
         _require(not bad, f"条目 kb 路径须带本域前缀 {cap}/: {'、'.join(bad[:3])}")
     else:
         _require(mode in SKILL_MODES,
-                 "技能提案仅 edit（改正文）或 suggest（拆分建议，产文档由人执行），"
-                 "新建/改名/删除归人类直接操作")
-        sk = _find_skill(packs_root, t.get("name", ""))
-        if mode == "edit":
+                 "技能提案仅 edit（改正文）/ create（新建技能目录）/ delete（删除，"
+                 "应用时进回收站）/ suggest（拆分建议，产文档由人执行）")
+        name = (t.get("name") or "").strip()
+        if mode == "create":
+            writing._validate_content(content or "")
+            meta = parse_frontmatter(content)
+            _require(meta.get("name") == name,
+                     f"frontmatter name 必须与技能目录名一致: {name!r}")
+            root = writing.resolve_skill_dir(packs_root, name)
+            _require(not root.exists(), f"技能已存在，无法 create: {name}")
+        elif mode == "delete":
+            _find_skill(packs_root, name)  # 存在性校验
+        elif mode == "edit":
+            sk = _find_skill(packs_root, name)
             writing._validate_content(content or "")
             meta = parse_frontmatter(content)
             _require(meta.get("name") == sk.name,
                      f"frontmatter name 必须与技能目录名一致: {sk.name!r}")
         elif mode == "suggest":
+            _find_skill(packs_root, name)
             writing._validate_content(content or "")
 
 
@@ -286,6 +301,8 @@ def _current_text(packs_root: Path, p: dict) -> str | None:
                 return routeindex.serialize_entries(dom_e)
             except Exception:  # noqa: BLE001 —— 解析失败回退全文
                 return path.read_text(encoding="utf-8")
+        if p.get("mode") == "create":
+            return None  # 技能新建：目标尚不存在
         sk = _find_skill(packs_root, t.get("name", ""))
         return sk.path.read_text(encoding="utf-8") if sk.path.is_file() else None
     except writing.KbError:
@@ -298,8 +315,11 @@ def live_diff(packs_root: str | Path, p: dict) -> dict:
     t = p["target"]
     mode = p["mode"]
     current = _current_text(packs_root, p)
-    label = (f"{t.get('cap') + '/' if t['kind'] in {'kb', 'index', 'case', 'pattern', 'playbook'} else ''}"
-             f"{t.get('path') or t.get('name') or 'route_index.yaml'}")
+    if t["kind"] in {"kb", "index", "case", "pattern", "playbook"}:
+        label = f"{t.get('cap') + '/' if t.get('cap') else ''}" \
+                f"{t.get('path') or 'route_index.yaml'}"
+    else:  # skill
+        label = f"skills/{t.get('name')}/SKILL.md"
     if mode == "create":
         old_name, new_name = "(不存在)", label
         old_lines, new_lines = [], (p.get("content") or "").splitlines()
@@ -395,15 +415,21 @@ def apply_proposal(packs_root: str | Path, pid: str, decided_by: str) -> dict:
             result = {"path": str(path),
                       "backup": backup.name if backup else None}
         else:
-            sk = _find_skill(packs_root, t.get("name", ""))
-            if p["mode"] == "suggest":
+            name = t.get("name", "")
+            if p["mode"] == "create":
+                result = writing.create_skill(packs_root, name, p["content"])
+            elif p["mode"] == "delete":
+                result = writing.delete_skill(packs_root, name)
+            elif p["mode"] == "suggest":
                 # K4 拆分建议：产建议文档落技能目录（注册表只扫 SKILL.md，不干扰路由），
                 # 由人按文档执行实际拆分
+                sk = _find_skill(packs_root, name)
                 sug = sk.path.parent / "拆分建议.md"
                 backup = writing.backup_and_write(sug, p["content"])
                 result = {"path": str(sug),
                           "backup": backup.name if backup else None}
             else:
+                sk = _find_skill(packs_root, name)
                 backup = writing.backup_and_write(sk.path, p["content"])
                 result = {"path": str(sk.path),
                           "backup": backup.name if backup else None}

@@ -1,6 +1,6 @@
 # PHP 伪协议链(Filter / Input / Data / Zip / Wrapper)payload 库
 
-> 父文档:[00-index.md](00-index.md)
+> 父文档:[[web/实战打法/path-traversal/00-index.md|00-index.md]]
 > 涵盖:PHP 伪协议利用 + Filter 链(`php://filter/convert.base64-encode`) + Input(POST body 直接执行) + Data 协议 + Zip 协议。任何 PHP 站 LFI 都要试一遍。
 
 ---
@@ -478,4 +478,4 @@ zip outer.zip inner.zip
 
 ---
 
-← 回 [00-index.md](00-index.md) · 相关:[`13-phar-session-proc.md`](13-phar-session-proc.md)
+← 回 [[web/实战打法/path-traversal/00-index.md|00-index.md]] · 相关:[[web/实战打法/path-traversal/13-phar-session-proc.md|13-phar-session-proc.md]]

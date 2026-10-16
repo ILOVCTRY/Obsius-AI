@@ -1,6 +1,6 @@
 # RCE — 供应链攻击 payload 库
 
-> 父文档:[00-index.md](00-index.md)
+> 父文档:[[web/实战打法/rce/00-index.md|00-index.md]]
 > NPM 包名仿冒(Typosquatting) / CI/CD 管道投毒 / 依赖混淆。一般在 Recon 阶段发现私有 registry / 内部包名后才走这条路。
 
 ---
@@ -310,4 +310,4 @@ npm version 99.0.0-alpha.1
 
 ---
 
-← 回 [00-index.md](00-index.md)
+← 回 [[web/实战打法/rce/00-index.md|00-index.md]]

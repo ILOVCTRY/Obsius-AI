@@ -195,11 +195,14 @@ def test_add_finding_dedup_warning(bb, project):
     r1 = bb.add_finding(pid, "sqli", "id 注入", target_asset_id=a, dedup_key="k-time")
     r2 = bb.add_finding(pid, "sqli", "order 注入", target_asset_id=a, dedup_key="k-order")
     assert not r2["merged"]
-    assert r2["dedup_warning"] == [{"id": r1["id"], "title": "id 注入"}]
+    # finding-dedup-chain（2026-10-15）：警告项带 dedup_key/target_asset_id，供直接并入
+    assert r2["dedup_warning"] == [{"id": r1["id"], "title": "id 注入",
+                                    "dedup_key": "k-time", "target_asset_id": a}]
     # 同 key 重报走合并分支：并入的本体行（k-time）不算，但另一条分裂指纹（k-order）仍提示
     r3 = bb.add_finding(pid, "sqli", "id 注入（复现）", target_asset_id=a, dedup_key="k-time")
     assert r3["merged"]
-    assert r3["dedup_warning"] == [{"id": r2["id"], "title": "order 注入"}]
+    assert r3["dedup_warning"] == [{"id": r2["id"], "title": "order 注入",
+                                    "dedup_key": "k-order", "target_asset_id": a}]
     # 无 target → 不查
     r4 = bb.add_finding(pid, "sqli", "无目标发现", dedup_key="k-x")
     assert "dedup_warning" not in r4
@@ -216,6 +219,93 @@ def test_add_finding_dedup_warning_cap3(bb, project):
         bb.add_finding(pid, "sqli", f"f{i}", target_asset_id=a, dedup_key=f"k{i}")
     r = bb.add_finding(pid, "sqli", "新发现", target_asset_id=a, dedup_key="k-new")
     assert len(r["dedup_warning"]) == 3
+
+
+# ---------- finding-dedup-chain：同资产链兜底合并（2026-10-15） ----------
+
+def _site(bb, pid):
+    """domain a.com → url /login、/search（两兄弟），返回 (domain, login, search)。"""
+    dom = bb.upsert_asset(pid, "domain", "a.com")["id"]
+    login = bb.upsert_asset(pid, "url", "http://a.com/login", parent_id=dom)["id"]
+    search = bb.upsert_asset(pid, "url", "http://a.com/search", parent_id=dom)["id"]
+    return dom, login, search
+
+
+def test_finding_dedup_chain_anchor_drift(bb, project):
+    """同一漏洞先挂 domain、后挂其子 url（默认指纹）→ 并入原条目而非新增。"""
+    pid = project["id"]
+    dom, login, _ = _site(bb, pid)
+    r1 = bb.add_finding(pid, "SQL注入", "检索参数注入", target_asset_id=dom,
+                        severity="medium", status="verified",
+                        evidence={"repro_steps": [{"desc": "d", "code": "c", "expected": "e"}]})
+    r2 = bb.add_finding(pid, "SQL注入", "检索参数注入可跨库读凭据", target_asset_id=login,
+                        severity="critical", status="verified",
+                        rating_basis="rating:edu-rating 高危#3 批量盗取身份",
+                        evidence={"repro_steps": [{"desc": "d2", "code": "c2", "expected": "e2"}]})
+    assert not r1["merged"] and r2["merged"] and r2["chain_merged"]
+    assert r2["id"] == r1["id"] and r2["severity"] == "critical"
+    # 锚点保持原条目（domain），不因并入被改写
+    assert bb.get_finding(pid, r1["id"])["target_asset_id"] == dom
+    assert len(bb.list_findings(pid)) == 1
+
+
+def test_finding_dedup_chain_adopts_self_invented_key(bb, project):
+    """新会话自造 dedup_key（精确未命中）但同链已有默认指纹同类条目 → 归位并入。"""
+    pid = project["id"]
+    dom, login, _ = _site(bb, pid)
+    r1 = bb.add_finding(pid, "SQL注入", "注入", target_asset_id=dom, severity="medium")
+    r2 = bb.add_finding(pid, "SQL注入", "注入升级", target_asset_id=login,
+                        dedup_key="a-sqli-login-gtid", severity="high")
+    assert r2["merged"] and r2["chain_merged"] and r2["id"] == r1["id"]
+    assert len(bb.list_findings(pid)) == 1
+
+
+def test_finding_dedup_chain_keeps_siblings_apart(bb, project):
+    """同链才并：同站两个兄弟端点的同类问题各自独立（不跨兄弟）。"""
+    pid = project["id"]
+    _, login, search = _site(bb, pid)
+    r1 = bb.add_finding(pid, "SQL注入", "login 注入", target_asset_id=login,
+                        severity="medium")
+    r2 = bb.add_finding(pid, "SQL注入", "search 注入", target_asset_id=search,
+                        severity="medium")
+    assert r1["id"] != r2["id"] and not r2["merged"]
+    # 兄弟不在同一链：既不并、也不当成疑似重复（确属两个端点）
+    assert "dedup_warning" not in r2 and "chain_ambiguous" not in r2
+
+
+def test_finding_dedup_chain_explicit_split_preserved(bb, project):
+    """显式指纹的主动拆分仍生效：同链无默认指纹候选 → 不兜底并。"""
+    pid = project["id"]
+    dom, login, _ = _site(bb, pid)
+    r1 = bb.add_finding(pid, "SQL注入", "login 注入", target_asset_id=login,
+                        dedup_key="k-login")
+    r2 = bb.add_finding(pid, "SQL注入", "domain 注入", target_asset_id=dom,
+                        dedup_key="k-domain")
+    assert r1["id"] != r2["id"] and not r2["merged"]
+
+
+def test_finding_dedup_chain_intel_exempt(bb, project):
+    """intel 类不走同链兜底（允许按观察点自由分桶）。"""
+    pid = project["id"]
+    dom, login, _ = _site(bb, pid)
+    bb.add_finding(pid, "fingerprint", "指纹", target_asset_id=dom, category="intel",
+                   severity="low")
+    r2 = bb.add_finding(pid, "fingerprint", "指纹细化", target_asset_id=login,
+                        category="intel", severity="low", dedup_key="fp-login")
+    assert not r2["merged"]
+
+
+def test_finding_dedup_chain_ambiguous_warns_only(bb, project):
+    """同链同类存在多个默认指纹桶 → 不猜（不并），透出 chain_ambiguous 供提示。"""
+    pid = project["id"]
+    dom, login, search = _site(bb, pid)
+    bb.add_finding(pid, "SQL注入", "login 注入", target_asset_id=login,
+                   severity="medium")
+    bb.add_finding(pid, "SQL注入", "search 注入", target_asset_id=search,
+                   severity="medium")
+    r = bb.add_finding(pid, "SQL注入", "domain 汇总", target_asset_id=dom,
+                       severity="medium")
+    assert not r["merged"] and r["chain_ambiguous"] == 2
 
 
 # ---------- relates_to 强关系（E0） ----------
@@ -1066,6 +1156,45 @@ def test_delete_asset_guards(bb, project):
     # 审计事件
     kinds = [e["kind"] for e in bb.recent_events(pid, 0, limit=50)]
     assert "asset.deleted" in kinds
+
+
+def test_delete_asset_cascade_findings(bb, project):
+    """delete_asset(cascade_findings=True)（2026-10-16，Nan 需求「删资产自动带发现」）：
+    引用该资产的发现一并物理删除，语义同 delete_finding（摘反向 relates_to 边、
+    **不触发撤回传播**），返回 findings_deleted，事件落 finding.deleted(×N) + asset.deleted。
+    默认（不传 cascade）仍保持旧的 409 守卫；有子资产时级联也不放行。"""
+    pid = project["id"]
+    host = bb.upsert_asset(pid, "host", "10.0.0.11")["id"]
+    leaf = bb.upsert_asset(pid, "url", "http://10.0.0.11/a", parent_id=host)["id"]
+    other = bb.upsert_asset(pid, "url", "http://10.0.0.11/b", parent_id=host)["id"]
+    f1 = bb.add_finding(pid, "xss", "引用卡1", target_asset_id=leaf)["id"]
+    f2 = bb.add_finding(pid, "sqli", "引用卡2", target_asset_id=leaf)["id"]
+    keep = bb.add_finding(pid, "csrf", "别处发现", target_asset_id=other,
+                          evidence={"relates_to": [{"finding_id": f1, "note": "同点升级"}]})["id"]
+
+    # 默认不级联：仍被引用 → ValueError（旧行为不变）
+    with pytest.raises(ValueError, match="引用"):
+        bb.delete_asset(leaf)
+
+    out = bb.delete_asset(leaf, cascade_findings=True)
+    assert out["id"] == leaf
+    assert sorted(out["findings_deleted"]) == sorted([f1, f2])
+    assert bb.get_asset(leaf) is None
+    assert bb.get_finding(pid, f1) is None and bb.get_finding(pid, f2) is None
+    # 非目标发现保留，且指向被删发现的反向 relates_to 边被摘掉
+    assert bb.get_finding(pid, keep) is not None
+    assert bb.get_finding(pid, keep)["evidence"].get("relates_to") == []
+
+    events = bb.recent_events(pid, 0, limit=50)
+    assert [e["kind"] for e in events].count("finding.deleted") == 2
+    del_ev = [e for e in events if e["kind"] == "asset.deleted"][-1]
+    assert sorted(del_ev["payload"]["findings_deleted"]) == sorted([f1, f2])
+    assert all(e["payload"].get("via") == "asset.deleted"
+               for e in events if e["kind"] == "finding.deleted")
+
+    # 有子资产：即便 cascade 也先拦（先处理子资产）
+    with pytest.raises(ValueError, match="子资产"):
+        bb.delete_asset(host, cascade_findings=True)
 
 
 def test_merge_assets_moves_refs_children_and_alias(bb, project):

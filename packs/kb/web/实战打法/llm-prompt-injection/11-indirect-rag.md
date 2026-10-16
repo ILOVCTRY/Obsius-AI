@@ -1,6 +1,6 @@
 # 间接 Prompt Injection / RAG 投毒 payload 库
 
-> 父文档:[00-index.md](00-index.md)
+> 父文档:[[web/实战打法/llm-prompt-injection/00-index.md|00-index.md]]
 > 涵盖:RAG 投毒 / 知识库注入 — 当 LLM 从外部源(文档 / 网页 / 邮件 / 向量库)读取内容时,在那些内容里埋指令。
 
 ---
@@ -156,4 +156,4 @@ print(result)
 
 ---
 
-← 回 [00-index.md](00-index.md) · 相关:[`12-agent-vulns.md`](12-agent-vulns.md)(Agent 抓网页时也会被这类影响)
+← 回 [[web/实战打法/llm-prompt-injection/00-index.md|00-index.md]] · 相关:[[web/实战打法/llm-prompt-injection/12-agent-vulns.md|12-agent-vulns.md]](Agent 抓网页时也会被这类影响)

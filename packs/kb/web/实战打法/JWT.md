@@ -434,4 +434,4 @@ https://www.slideshare.net/OWASP_Poland/opd-2019-attacking-jwt-tokens
 
 - **工具**: [jwt.io](https://jwt.io) 在线编解码 | [jwt-cracker](https://github.com/lmammino/jwt-cracker) 密钥爆破 | [PyJWT](https://pyjwt.readthedocs.io/) Python库
 - **脚本**: [python-note.md](CTF常用脚本及工具/python-note.md) — Python requests/urllib模块用于JWT请求
-- **关联**: [SSTI.md](SSTI.md) — JWT中的SSTI注入 | [SQL.md](SQL.md) — JWT中的SQL注入
+- **关联**: [[web/实战打法/SSTI.md|SSTI.md]] — JWT中的SSTI注入 | [[web/实战打法/SQL.md|SQL.md]] — JWT中的SQL注入

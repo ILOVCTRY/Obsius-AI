@@ -1,6 +1,6 @@
 # 云元数据 / IAM / K8s / S3 payload 库
 
-> 父文档:[00-index.md](00-index.md)
+> 父文档:[[web/实战打法/ssrf-cache-host/00-index.md|00-index.md]]
 > 涵盖:SSRF 窃取云元数据(AWS / GCP / Azure)/ S3 配置错误 / AWS IAM 提权链 / K8s 容器逃逸。SSRF 入口拿到后云资产价值最高的一步。
 
 ---
@@ -438,4 +438,4 @@ curl -s "$K8S/apis/batch/v1/namespaces/default/cronjobs" ...
 
 ---
 
-← 回 [00-index.md](00-index.md) · 相关:[`10-ssrf-core.md`](10-ssrf-core.md)(SSRF 入口探测)
+← 回 [[web/实战打法/ssrf-cache-host/00-index.md|00-index.md]] · 相关:[[web/实战打法/ssrf-cache-host/10-ssrf-core.md|10-ssrf-core.md]](SSRF 入口探测)

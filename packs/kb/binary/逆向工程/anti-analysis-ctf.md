@@ -1,6 +1,6 @@
 # CTF Reverse - Anti-Analysis CTF Writeups
 
-CTF-specific anti-analysis techniques: signal-handler tricks, instruction-trace inversion, call-less function chaining, parent-patched child binary dumping. For the core anti-analysis taxonomy (Linux/Windows anti-debug, anti-VM, anti-DBI, code integrity, anti-disassembly), see [anti-analysis.md](anti-analysis.md).
+CTF-specific anti-analysis techniques: signal-handler tricks, instruction-trace inversion, call-less function chaining, parent-patched child binary dumping. For the core anti-analysis taxonomy (Linux/Windows anti-debug, anti-VM, anti-DBI, code integrity, anti-disassembly), see [[binary/逆向工程/anti-analysis.md|anti-analysis.md]].
 
 ## Table of Contents
 - [SIGILL Handler for Execution Mode Switching (Hack.lu 2015)](#sigill-handler-for-execution-mode-switching-hacklu-2015)

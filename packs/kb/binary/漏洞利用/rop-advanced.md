@@ -26,7 +26,7 @@
 - [ret2libc via Statically-Linked libc + Embedded /bin/sh String (TAMUctf 2019)](#ret2libc-via-statically-linked-libc--embedded-binsh-string-tamuctf-2019)
 - [Useful Commands](#useful-commands)
 
-For core ROP chain building, ret2csu, bad character bypass, exotic gadgets, and stack pivot via xchg, see [rop-and-shellcode.md](rop-and-shellcode.md).
+For core ROP chain building, ret2csu, bad character bypass, exotic gadgets, and stack pivot via xchg, see [[binary/漏洞利用/rop-and-shellcode.md|rop-and-shellcode.md]].
 
 ---
 
@@ -113,7 +113,7 @@ Alternative syscalls when seccomp blocks `open()`/`read()`:
 
 **Check rules:** `seccomp-tools dump ./binary`
 
-See [advanced.md](advanced.md) for: conditional buffer address restrictions, shellcode construction without relocations (call/pop trick), seccomp analysis from disassembly, `scmp_arg_cmp` struct layout.
+See [[binary/漏洞利用/advanced.md|advanced.md]] for: conditional buffer address restrictions, shellcode construction without relocations (call/pop trick), seccomp analysis from disassembly, `scmp_arg_cmp` struct layout.
 
 ## RETF Architecture Switch for Seccomp Bypass (Midnightflag 2026)
 

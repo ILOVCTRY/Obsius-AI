@@ -10,7 +10,7 @@ mode: self-contained
 # web-strike-entry —— 渗透入口：双模式判定 + 特征路由
 
 > 分层纪律：本技能只做**入口路由**。方法论 = webapp 测试包手册
-> （下表 module 直开单篇），弹药在 `playbooks/`。**按需 skill_open
+> （下表 module 直开单篇），弹药在 `web/实战打法/`。**按需 kb_open
 > 单篇，禁止通读。**
 
 ## 0. 双模式先判（必做第一动作）
@@ -22,37 +22,37 @@ mode: self-contained
 
 ## 1. 目标特征 → 模块路由对照表
 
-进站先识别特征，按下表用 **`skill_open(path=…)`** 打开对应手册（module 为
+进站先识别特征，按下表用 **`kb_open(module=…)`** 打开对应手册（module 为
 kb 域内路径；不存在时服务端回可选清单，照清单改选，禁止猜名）。
 打面家族分工：注入类专精 `web-injection`、认证会话专精 `web-authn-session`、
 API 面 `web-api-attack`、客户端面 `web-client-side`（均已挂载，按 query 择优注入）。
 
-| 目标特征（features） | 方法论手册（`skill_open` 单篇） | 弹药（`playbooks/` 下） |
+| 目标特征（features） | 方法论手册（`kb_open` 单篇） | 弹药（`web/实战打法/` 下） |
 |---|---|---|
-| has_user_system（有注册/登录） | `references/web/webapp/idor/手册.md` + `references/web/webapp/authbypass/手册.md`（验证码见 `captcha-ocr/手册.md`，弱比较见 `type-juggling/手册.md`） | `arbitrary-x-authz.md` |
-| has_search / has_filter（查询/列表过滤） | `references/web/webapp/sqli/手册.md` | `sqli.md` |
-| has_upload（文件上传/导入/附件） | `references/web/webapp/file-upload/手册.md` | `file-upload/00-index.md` |
-| has_pay（支付/优惠券/积分） | `references/web/webapp/logic/手册.md` + `references/web/webapp/race-condition/手册.md` | `logic-flaws/00-index.md` |
-| has_graphql | `references/web/webapp/graphql/手册.md` | `graphql.md` |
-| has_oauth / JWT / SAML | `references/web/webapp/jwt/手册.md` | `oauth-saml-jwt/00-index.md` |
-| has_websocket | `references/web/webapp/websocket/手册.md` | `api-rest/13-websocket.md` |
-| returns_401/403 | `references/web/webapp/401-403-bypass/手册.md`（分清登录页 vs 业务 API，path/METHOD/头现场改） | — |
-| waf_detected | `references/web/webapp/waf-bypass/手册.md`（被拦再开，禁开场丢探针） | `methodology/02-bypass-toolkit.md` |
-| 参数回显点（搜索词/昵称/UA 等进 HTML/属性/JS） | `references/web/webapp/xss/手册.md`（CSP 拦了再开 `csp-bypass/手册.md`） | `xss/00-index.md` |
-| 跳转参数（redirect/url/next/goto） | `references/web/webapp/open-redirect/手册.md` | — |
-| 请求出网点（webhook/URL 导入/外链头像/PDF 渲染） | `references/web/webapp/ssrf/手册.md` | `ssrf-cache-host/00-index.md` |
-| 文件下载/预览/包含点（download/file/path 参数） | `references/web/webapp/path-traversal/手册.md` | `path-traversal/00-index.md` |
-| XML/SOAP 接口（xml 请求体/wsdl） | `references/web/webapp/xxe/手册.md` | `rce/15-xxe.md` |
-| Java 栈特征（jsp/struts/序列化串/JNDI 报错） | `references/web/webapp/deserialization/手册.md` + `references/web/webapp/jndi-injection/手册.md` | `rce/12-deserialization.md` |
-| 模板/表达式可配置点（自定义模板/邮件签名） | `references/web/webapp/el-injection/手册.md`（SSTI 弹药见下格） | `rce/14-ssti.md` |
-| 报错栈/.git/.env/备份/SCM 路径 | `references/web/webapp/info-leak/手册.md` + `references/web/webapp/insecure-scm/手册.md` | `info-disclosure.md` |
-| 前端加密参数/厚 JS（sign/token 前端生成） | `references/web/webapp/js-reverse/手册.md` | — |
-| 邮件功能（注册/找回密码/邀请） | `references/web/webapp/email-header-injection/手册.md` + `references/web/webapp/host-header/手册.md`（重置投毒） | — |
-| 缓存层特征（CDN/X-Cache/Age 头） | `references/web/webapp/cache-poisoning/手册.md` | `ssrf-cache-host/12-cache.md` |
-| 导出报表（CSV/Excel） | `references/web/webapp/csv-formula-injection/手册.md` | — |
-| AI 功能面（对话窗/文档问答/Agent 工具） | `references/web/webapp/llm-security/手册.md` | — |
-| swagger/kong/actuator 暴露 | `references/web/webapp/api-gateway/手册.md` | — |
-| API 面厚（REST 批量接口/多端点） | 转交 `web-api-attack`（走私/Host 头/HPP/邮件头路由表） | `api-rest/00-index.md` |
+| has_user_system（有注册/登录） | `web/漏洞分类/idor/手册.md` + `web/漏洞分类/authbypass/手册.md`（验证码见 `web/漏洞分类/captcha-ocr/手册.md`，弱比较见 `web/漏洞分类/type-juggling/手册.md`） | `web/实战打法/arbitrary-x-authz.md` |
+| has_search / has_filter（查询/列表过滤） | `web/漏洞分类/sqli/手册.md` | `web/实战打法/sqli.md` |
+| has_upload（文件上传/导入/附件） | `web/漏洞分类/file-upload/手册.md` | `web/实战打法/file-upload/00-index.md` |
+| has_pay（支付/优惠券/积分） | `web/漏洞分类/logic/手册.md` + `web/漏洞分类/race-condition/手册.md` | `web/实战打法/logic-flaws/00-index.md` |
+| has_graphql | `web/漏洞分类/graphql/手册.md` | `web/实战打法/graphql.md` |
+| has_oauth / JWT / SAML | `web/漏洞分类/jwt/手册.md` | `web/实战打法/oauth-saml-jwt/00-index.md` |
+| has_websocket | `web/漏洞分类/websocket/手册.md` | `web/实战打法/api-rest/13-websocket.md` |
+| returns_401/403 | `web/漏洞分类/401-403-bypass/手册.md`（分清登录页 vs 业务 API，path/METHOD/头现场改） | — |
+| waf_detected | `web/漏洞分类/waf-bypass/手册.md`（被拦再开，禁开场丢探针） | `web/实战打法/methodology/02-bypass-toolkit.md` |
+| 参数回显点（搜索词/昵称/UA 等进 HTML/属性/JS） | `web/漏洞分类/xss/手册.md`（CSP 拦了再开 `web/漏洞分类/csp-bypass/手册.md`） | `web/实战打法/xss/00-index.md` |
+| 跳转参数（redirect/url/next/goto） | `web/漏洞分类/open-redirect/手册.md` | — |
+| 请求出网点（webhook/URL 导入/外链头像/PDF 渲染） | `web/漏洞分类/ssrf/手册.md` | `web/实战打法/ssrf-cache-host/00-index.md` |
+| 文件下载/预览/包含点（download/file/path 参数） | `web/漏洞分类/path-traversal/手册.md` | `web/实战打法/path-traversal/00-index.md` |
+| XML/SOAP 接口（xml 请求体/wsdl） | `web/漏洞分类/xxe/手册.md` | `web/实战打法/rce/15-xxe.md` |
+| Java 栈特征（jsp/struts/序列化串/JNDI 报错） | `web/漏洞分类/deserialization/手册.md` + `web/漏洞分类/jndi-injection/手册.md` | `web/实战打法/rce/12-deserialization.md` |
+| 模板/表达式可配置点（自定义模板/邮件签名） | `web/漏洞分类/el-injection/手册.md`（SSTI 弹药见下格） | `web/实战打法/rce/14-ssti.md` |
+| 报错栈/.git/.env/备份/SCM 路径 | `web/漏洞分类/info-leak/手册.md` + `web/漏洞分类/insecure-scm/手册.md` | `web/实战打法/info-disclosure.md` |
+| 前端加密参数/厚 JS（sign/token 前端生成） | `web/漏洞分类/js-reverse/手册.md` | — |
+| 邮件功能（注册/找回密码/邀请） | `web/漏洞分类/email-header-injection/手册.md` + `web/漏洞分类/host-header/手册.md`（重置投毒） | — |
+| 缓存层特征（CDN/X-Cache/Age 头） | `web/漏洞分类/cache-poisoning/手册.md` | `web/实战打法/ssrf-cache-host/12-cache.md` |
+| 导出报表（CSV/Excel） | `web/漏洞分类/csv-formula-injection/手册.md` | — |
+| AI 功能面（对话窗/文档问答/Agent 工具） | `web/漏洞分类/llm-security/手册.md` | — |
+| swagger/kong/actuator 暴露 | `web/漏洞分类/api-gateway/手册.md` | — |
+| API 面厚（REST 批量接口/多端点） | 转交 `web-api-attack`（走私/Host 头/HPP/邮件头路由表） | `web/实战打法/api-rest/00-index.md` |
 
 **纵深转交**：SSRF 打通内网 / RCE 拿下落点后需要推进时——redteam 轨转
 `web-post-exp`（落点后阶段路由）；pentest 轨到发现即止（owners 红线禁内网
@@ -80,8 +80,8 @@ API 面 `web-api-attack`、客户端面 `web-client-side`（均已挂载，按 q
 ## 3. 产出落点（黑板联动）
 
 - 发现 → findings（无证据 = unverified）；POC → artifacts（kind=poc）。
-  跨资产指纹的洞可参考快照沉淀规范（skill_open
-  `references/web/refs/poc/README.md`），但**只读参考**——POC 一律落黑板 artifact，
+  跨资产指纹的洞可参考快照沉淀规范（kb_open
+  `web/PoC与模板/poc/README.md`），但**只读参考**——POC 一律落黑板 artifact，
   不写进 技能目录 references/目录；
 - 越界/发现他人资产有价值线索 → 发现即上报协议（DESIGN.md §6.3），不私自跨目标。
 

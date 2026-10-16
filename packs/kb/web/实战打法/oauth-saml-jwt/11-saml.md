@@ -1,6 +1,6 @@
 # SAML payload 库
 
-> 父文档:[00-index.md](00-index.md)
+> 父文档:[[web/实战打法/oauth-saml-jwt/00-index.md|00-index.md]]
 > 涵盖:SAML XML Wrapping / Signature Stripping / XSW / Comment Injection / SAMLRaider 类攻击。任何使用 SAML SSO 的目标都试。
 
 ---
@@ -157,4 +157,4 @@ python3 -c "import zlib,base64; print(base64.b64encode(zlib.compress(open('saml.
 
 ---
 
-← 回 [00-index.md](00-index.md) · 相关:[`12-jwt.md`](12-jwt.md)
+← 回 [[web/实战打法/oauth-saml-jwt/00-index.md|00-index.md]] · 相关:[[web/实战打法/oauth-saml-jwt/12-jwt.md|12-jwt.md]]

@@ -323,6 +323,11 @@ class ProjectStore:
                 new_config["advisor"] = advisor
             else:
                 new_config.pop("advisor", None)
+        # 知识库迭代开关（kb-iteration，2026-10-14）：整段替换+归一化（非法 422）；
+        # 缺省补 {enabled: False}（与 autonomy 同款，读路径无段也走默认）
+        from core.skills.kbiteration import normalize_kb_iteration
+        new_config["kb_iteration"] = normalize_kb_iteration(
+            (patch or {}).get("kb_iteration", new_config.get("kb_iteration")))
         # 项目 executor 模型覆写（TRAE 新壳 M3，2026-09-25）：整段替换；
         # None/{} 剥键恢复跟随路由缺省（API 层先校验供应商/模型可构建再落盘）
         if "executor_llm" in (patch or {}):

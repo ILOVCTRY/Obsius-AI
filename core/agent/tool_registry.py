@@ -570,6 +570,13 @@ tool(
             },
             'dedup_key': {
                 'type': 'string',
+                'description': (
+                    '去重指纹：同 target+vuln_class 下同 key 重报会自动并入既有条目（证据并集、severity 就高、'
+                    'status 只升），不会新增行。**不填 = 按 vuln_class 自动归一**（推荐，默认就是「同一类问题一条」）。'
+                    '**同一漏洞切勿自造新键**——新自造的 key 精确未命中会白白裂出一条。'
+                    '仅当同一目标上确需把同类问题拆成多条独立条目（如两个不同参数的独立注入）时才显式传不同键。'
+                    '想改/复现已有条目：先 bb_query what=findings 拿到它的 dedup_key 后按原 key 重报'
+                ),
             },
         },
         'required': [
@@ -773,7 +780,7 @@ tool(
         '站全貌）。**按域名/站点查现状（资产+发现+意图）一律用 what=site 并传 asset**（一次返回根子树全貌）——**不要**用 what='
         'assets 当站点查询：assets 是资产清单面（列清单/按 type/status/tag 筛），其 asset 参数只做子树过滤、不带 find'
         'ings/intents。不要按 type 分片拉全量再本地过滤（host/url/domain 各拉一把、条数多还漏看）。findings 尽量带 t'
-        'arget_asset_id 精确过滤；events 尽量带 kinds/session_id；limit 传小值会截断漏看（漏看了仍要重查，得不偿失）'
+        'arget_asset_id 精确过滤；**findings 返回带 dedup_key——给既有漏洞补证据/升级（升链）时，用它的 dedup_key + target_asset_id 重报即自动并入，不要自造新键**（自造键会裂出新行）；events 尽量带 kinds/session_id；limit 传小值会截断漏看（漏看了仍要重查，得不偿失）'
         '。events 缺省=本项目**全部 kind**（不是只有 chat.* 会话事件），要窄看再传 kinds 白名单；**负结论（未发现/死路）不要硬'
         '塞进 events**：正确做法是 declare_intent 声明假设，再 close_intent outcome=dead_end（附 dead'
         '_reason+evidence_refs）——情报类非漏洞结论则用 bb_add_finding category=intel（severity>=l'
@@ -1005,8 +1012,11 @@ tool(
     group='知识',
     flags=("plan_pre", "spill_skip", "knowledge"),
     description=(
-        '[legacy] 打开尚未迁移的全局知识库模块（packs/kb/ 区，含测试包手册与快照）：返回文件绝对路径，随后按需 Read。.md/.py/.t'
-        'xt/.json 均可打开（弹药脚本只是文本，执行仍须走 run_cmd）。路径不存在会返回可用模块清单（照清单改选，禁止猜文件名、禁止 .. 穿越）。'
+        '[legacy] 打开尚未迁移的全局知识库模块（packs/kb/ 区，含测试包手册与快照）：返回文件绝对路径，随后按需 Read。'
+        'module 走 kb 全局形态 `<域>/<快照>/<路径>`（如 web/漏洞分类/sqli/手册.md）；也认 Obsidian wikilink'
+        '（[[web/漏洞分类/sqli/手册|手册]] / [[web/…/手册]]）与反引号/引号包裹（vault 新链接格式即全路径 wikilink）。'
+        '.md/.py/.txt/.json 均可打开（弹药脚本只是文本，执行仍须走 run_cmd）。'
+        '路径不存在会返回可用模块清单（照清单改选，禁止猜文件名、禁止 .. 穿越）。'
         '禁止通读知识库目录。'
     ),
     input_schema={
@@ -1014,7 +1024,9 @@ tool(
         'properties': {
             'module': {
                 'type': 'string',
-                'description': '知识库内相对路径，如 漏洞分类/idor/手册.md（web 漏洞类目）、赛事专题/题目知识/ctf-pwn/heap-fsop.md（题目知识原件）',
+                'description': '知识库模块路径，全局形态 `<域>/<快照>/<路径>`，如 web/漏洞分类/sqli/手册.md（web 漏洞类目）、'
+                               'binary/赛事专题/题目知识/ctf-pwn/heap-fsop.md（题目知识原件）；'
+                               '也认 Obsidian wikilink [[web/漏洞分类/sqli/手册|手册]]',
             },
         },
         'required': [
@@ -1060,10 +1072,11 @@ tool(
     group='知识',
     flags=("intent_pre", "knowledge"),
     description=(
-        '提一条知识库/技能/路由索引变更**提案**（只落 pending，批准权在人类，禁止自行改文件；允许的三种情形、reason 证据要求与沉淀去向见系统'
-        '提示工具纪律）。每会话最多 3 条。kind=skill mode=edit（改正文，target={skill_kind: capability|tr'
-        'ack, owner: 包/轨名, name: 技能名}）或 mode=suggest（粒度过粗的技能提「拆分建议」：content 为建议文档全文，批'
-        '准后落技能目录 拆分建议.md，结构变更由人执行）；kind=kb mode 可为 edit/create/rename/delete，target={'
+        '提一条知识库/技能变更**提案**（只落 pending，批准权在人类，禁止自行改文件；**仅当本项目开启「知识库迭代」时可用，关闭会被拒绝**；允许的触发情形、reason 证据要求与沉淀去向见系统'
+        '提示工具纪律）。每会话最多 3 条。kind=skill mode=edit（改正文）/ create（新建技能）/ delete（删除技能，应用时进回收站可恢复）'
+        '/ suggest（粒度过粗的技能提「拆分建议」：content 为建议文档全文，批准后落技能目录 拆分建议.md，结构变更由人执行），'
+        'target={name: 技能名}（edit/create 的 content 须为 SKILL.md 全文，frontmatter name 必须等于技能名；create 时该技能须不存在）；'
+        'kind=kb mode 可为 edit/create/rename/delete，target={'
         'cap: 能力包名, path: 全局模块 路径 <域>/<快照>/<文件>（.md/.py/.txt/.json，中文目录允许）, new_path:'
         ' 仅 rename}；kind=case mode=edit|create（K6 成功链沉淀：本任务 verified 攻击链/跑通 payload 落'
         '对应测试包 成功案例.md 补段或 payloads/ 补弹药，target 同 kb）；kind=index mode=edit（增补全局 route'

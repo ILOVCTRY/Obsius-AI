@@ -1,6 +1,6 @@
 # 内网/后渗透 — 权限维持 payload 库
 
-> 父文档:[00-index.md](00-index.md) · ⚠️ SRC 场景下大多受限,见 [../compliance.md](../compliance.md)
+> 父文档:[[web/后渗透/intranet-postexp/00-index.md|00-index.md]] · ⚠️ SRC 场景下大多受限,见 [../compliance.md](../compliance.md)
 > 涵盖:服务 / 计划任务 / 注册表 / WMI 订阅 / Logon Script / SSP / Skeleton Key / Golden Ticket 持久化
 
 ---
@@ -400,4 +400,4 @@ _检测进程镂空_
 
 ---
 
-← 回 [00-index.md](00-index.md) · 上一篇:[`16-recon.md`](16-recon.md) · 下一篇:[`18-exchange.md`](18-exchange.md)
+← 回 [[web/后渗透/intranet-postexp/00-index.md|00-index.md]] · 上一篇:[[web/后渗透/intranet-postexp/16-recon.md|16-recon.md]] · 下一篇:[[web/后渗透/intranet-postexp/18-exchange.md|18-exchange.md]]

@@ -280,7 +280,7 @@ def decode_homoglyph_stego(text):
 2. Check public activities for GPS route maps
 3. Identify route start/end points or frequent locations
 4. Search the endpoint location on Google Maps
-5. Verify with Google Maps user-submitted photos (see [geolocation-and-media.md](geolocation-and-media.md#google-maps-crowd-sourced-photo-verification-midnightctf-2026))
+5. Verify with Google Maps user-submitted photos (see [[forensics/开源情报/geolocation-and-media.md#google-maps-crowd-sourced-photo-verification-midnightctf-2026|geolocation-and-media.md]])
 
 **Key insight:** Fitness apps are high-value OSINT targets because users rarely restrict activity visibility. A single public run reveals home/work neighborhoods. Cross-reference GPS endpoints with Google Maps to identify specific parks, buildings, or landmarks.
 

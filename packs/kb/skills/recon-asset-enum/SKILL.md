@@ -11,7 +11,7 @@ mode: self-contained
 
 > 分工边界：本技能只做**侦察与枚举**。发现可疑入口落 findings(unverified) 后即止，
 > **不做利用验证**——验证任务派生给 exploit 类角色（external-entry）。
-> 方法论细节在 src-strike 知识快照，用 `skill_open(path=…)` 按路径开单篇，
+> 方法论细节在 src-strike 知识快照，用 `kb_open(module=…)` 按路径开单篇，
 > 禁止通读；知识源不可用时本技能正文自足（§0/§1 已含最短纪律），不停摆。
 
 ## 0. 噪声纪律先行（recon 的第一美德）
@@ -35,12 +35,12 @@ mode: self-contained
 ### 1.1 深挖细则（src-strike 侦察方法论，按需 Read，禁通读）
 
 - **锁面/自由跳判定与节奏**（一种子闭环、测绘节奏、种子队列）：
-  `skill_open(path="references/web/playbooks/rules/dig-scope-workflow.md")`（68K 大文件，
+  `kb_open(module="web/实战打法/rules/dig-scope-workflow.md")`（68K 大文件，
   只看需要的节，禁通读）。
-- **挖什么/类型矩阵**：`skill_open(path="references/web/playbooks/rules/src-value-hunting.md")`。
+- **挖什么/类型矩阵**：`kb_open(module="web/实战打法/rules/src-value-hunting.md")`。
 - **测绘语法备忘/侦察方法论**：
-  `skill_open(path="references/web/recon/methodology/手册.md")`。
-- 知识源引用的是包内快照路径；模块不存在时 skill_open 会回可选清单，照清单改选。
+  `kb_open(module="web/信息收集/methodology/手册.md")`。
+- 知识源引用的是包内快照路径；模块不存在时 kb_open 会回可选清单，照清单改选。
 
 ## 2. 产出落点（黑板联动）
 

@@ -1,6 +1,6 @@
 # 缓存投毒 / 缓存欺骗 / CDN 绕过 payload 库
 
-> 父文档:[00-index.md](00-index.md)
+> 父文档:[[web/实战打法/ssrf-cache-host/00-index.md|00-index.md]]
 > 涵盖:Web Cache Poisoning(unkeyed header 注入) / Web Cache Deception(路径混淆) / CDN 源站绕过。Varnish / Cloudflare / Fastly / Akamai 都试。
 
 ---
@@ -387,4 +387,4 @@ curl -H "X-Forwarded-For: CDN_IP" "http://REAL_IP/" -H "Host: target.com"
 
 ---
 
-← 回 [00-index.md](00-index.md) · 相关:Host Header 注入见 00-index §3.9 / §5
+← 回 [[web/实战打法/ssrf-cache-host/00-index.md|00-index.md]] · 相关:Host Header 注入见 00-index §3.9 / §5

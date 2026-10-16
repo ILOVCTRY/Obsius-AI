@@ -39,7 +39,7 @@ Comprehensive reference for anti-debugging, anti-VM, anti-DBI, and integrity-che
   - [Mixed Boolean-Arithmetic (MBA) Identification & Simplification](#mixed-boolean-arithmetic-mba-identification--simplification)
 - [Comprehensive Bypass Strategies](#comprehensive-bypass-strategies)
 
-For CTF writeup techniques (SIGILL handler, SIGFPE strace side-channel, instruction trace inversion, call-less function chaining, parent-patched child binary dump), see [anti-analysis-ctf.md](anti-analysis-ctf.md).
+For CTF writeup techniques (SIGILL handler, SIGFPE strace side-channel, instruction trace inversion, call-less function chaining, parent-patched child binary dump), see [[binary/逆向工程/anti-analysis-ctf.md|anti-analysis-ctf.md]].
   - [Universal Bypass Checklist](#universal-bypass-checklist)
   - [Layered Anti-Debug (Real-World Pattern)](#layered-anti-debug-real-world-pattern)
   - [Quick Reference: Check to Bypass](#quick-reference-check-to-bypass)
@@ -588,7 +588,7 @@ expr = "(a | b) + (a & b) - (~a & b)"
 print(simplify_mba(expr))  # → a
 ```
 
-See [anti-analysis-ctf.md](anti-analysis-ctf.md) for CTF writeup techniques: SIGILL handler for mode switching (Hack.lu 2015), SIGFPE strace side-channel (PlaidCTF 2017), instruction trace inversion (MeePwn 2017), call-less function chaining (THC 2018), and parent-patched child binary dump via `process_vm_writev` (Google CTF Quals 2018).
+See [[binary/逆向工程/anti-analysis-ctf.md|anti-analysis-ctf.md]] for CTF writeup techniques: SIGILL handler for mode switching (Hack.lu 2015), SIGFPE strace side-channel (PlaidCTF 2017), instruction trace inversion (MeePwn 2017), call-less function chaining (THC 2018), and parent-patched child binary dump via `process_vm_writev` (Google CTF Quals 2018).
 
 ---
 

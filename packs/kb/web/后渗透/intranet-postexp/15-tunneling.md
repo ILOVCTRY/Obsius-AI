@@ -1,6 +1,6 @@
 # 内网/后渗透 — 隧道代理 payload 库
 
-> 父文档:[00-index.md](00-index.md) · ⚠️ SRC 场景下大多受限,见 [../compliance.md](../compliance.md)
+> 父文档:[[web/后渗透/intranet-postexp/00-index.md|00-index.md]] · ⚠️ SRC 场景下大多受限,见 [../compliance.md](../compliance.md)
 > 涵盖:reGeorg / frp / Chisel / ICMP tunnel / DNS tunnel / SOCKS / ssh -D / iox / nps
 
 ---
@@ -402,4 +402,4 @@ Venom > lforward 127.0.0.1 3389 13389
 
 ---
 
-← 回 [00-index.md](00-index.md) · 上一篇:[`14-domain.md`](14-domain.md) · 下一篇:[`16-recon.md`](16-recon.md)
+← 回 [[web/后渗透/intranet-postexp/00-index.md|00-index.md]] · 上一篇:[[web/后渗透/intranet-postexp/14-domain.md|14-domain.md]] · 下一篇:[[web/后渗透/intranet-postexp/16-recon.md|16-recon.md]]

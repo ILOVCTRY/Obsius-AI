@@ -10,6 +10,7 @@ import {
   BrainCircuit,
   ChevronDown,
   ChevronLeft,
+  FileDiff,
   Globe2,
   Inbox,
   FolderKanban,
@@ -38,6 +39,7 @@ import { Blackboard } from "@/views/Blackboard"
 import { ReverseWorkbench } from "@/views/reverse/ReverseWorkbench"
 import { RevCompact } from "@/views/reverse/RevCompact"
 import { deriveWorkbenchProfile } from "@/lib/workbench"
+import { NavRailSlotContext } from "@/lib/navRail"
 import { useEvents } from "@/lib/useEvents"
 import { ProjectsView } from "@/views/ProjectsView"
 import { TrashView } from "@/views/TrashView"
@@ -50,6 +52,7 @@ import { KnowledgeView } from "@/views/KnowledgeView"
 import { SkillsView } from "@/views/SkillsView"
 import { SampleAnalysisView } from "@/views/SampleAnalysisView"
 import { DiagnosticsView } from "@/views/DiagnosticsView"
+import { ProposalsView } from "@/views/ProposalsView"
 import { cn } from "@/lib/utils"
 import { bindingBadge } from "@/lib/taxonomy"
 
@@ -62,7 +65,7 @@ import { bindingBadge } from "@/lib/taxonomy"
 // 左缘悬浮把手唤出；状态 localStorage（ui.nav-collapsed）。收起=条件渲染卸载
 // nav Panel+Separator（同 boardOpen 先例），重挂由 useDefaultLayout 恢复宽度。
 
-type View = "projects" | "intel" | "trash" | "live" | "board" | "agents" | "browser" | "fuzzer" | "proxy" | "sample-analysis" | "knowledge" | "skills" | "settings" | "diagnostics"
+type View = "projects" | "intel" | "trash" | "live" | "board" | "agents" | "proposals" | "browser" | "fuzzer" | "proxy" | "sample-analysis" | "knowledge" | "skills" | "settings" | "diagnostics"
 
 /** M4c 场景档 board_view 默认视图（config.board_view.default；黑板上自行校验可用 tab 回退） */
 const boardViewOf = (m: ProjectDetail | null): string | undefined => {
@@ -72,7 +75,10 @@ const boardViewOf = (m: ProjectDetail | null): string | undefined => {
 
 type NavItem = { key: View; label: string; icon: LucideIcon; needsProject: boolean; homeOnly?: boolean }
 
-const NAV_GROUPS: { label: string; items: NavItem[]; collapsible?: boolean }[] = [
+/** 分组定义。`collapsible` = 标题行可点折叠；`defaultOpen` = 首次进入（无持久化状态）时是否展开。 */
+type NavGroup = { label: string; items: NavItem[]; collapsible?: boolean; defaultOpen?: boolean }
+
+const NAV_GROUPS: NavGroup[] = [
   {
     label: "工作区",
     items: [
@@ -81,11 +87,15 @@ const NAV_GROUPS: { label: string; items: NavItem[]; collapsible?: boolean }[] =
       { key: "trash", label: "回收站", icon: Trash2, needsProject: false, homeOnly: true },
       { key: "agents", label: "智能体", icon: Bot, needsProject: true },
       { key: "board", label: "黑板", icon: LayoutDashboard, needsProject: true },
+      { key: "proposals", label: "变更提案", icon: FileDiff, needsProject: false },
       { key: "diagnostics", label: "诊断", icon: Stethoscope, needsProject: true },
     ],
   },
+  // 工具（2026-10-15）：条目最多的一组（7 项），标题行可折叠收纳；默认展开。
   {
     label: "工具",
+    collapsible: true,
+    defaultOpen: true,
     items: [
       { key: "browser", label: "浏览器", icon: Globe2, needsProject: true },
       { key: "fuzzer", label: "重放", icon: Zap, needsProject: true },
@@ -107,18 +117,62 @@ const NAV_GROUPS: { label: string; items: NavItem[]; collapsible?: boolean }[] =
   },
 ]
 
-function NavRail({ active, onSelect, locked, className, expanded = false }: {
+// 分组折叠状态：按组名存 localStorage（JSON 对象）。旧版只有「更多」一组、键为
+// ui.nav-more-open（"1"/"0"），首次读不到新键时迁移一次；之后旧键不再参与。
+const GROUPS_OPEN_KEY = "ui.nav-groups-open"
+const LEGACY_MORE_OPEN_KEY = "ui.nav-more-open"
+
+function readGroupOpen(): Record<string, boolean> {
+  // 先铺各组默认值（未声明 defaultOpen 的可折叠组默认折叠）
+  const out: Record<string, boolean> = {}
+  for (const g of NAV_GROUPS) if (g.collapsible && g.defaultOpen) out[g.label] = true
+  try {
+    const raw = window.localStorage.getItem(GROUPS_OPEN_KEY)
+    if (raw) {
+      const parsed: unknown = JSON.parse(raw)
+      if (parsed && typeof parsed === "object") {
+        for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+          if (typeof v === "boolean") out[k] = v
+        }
+      }
+    } else if (window.localStorage.getItem(LEGACY_MORE_OPEN_KEY) === "1") {
+      out["更多"] = true
+    }
+  } catch { /* 坏值/隐私模式：退回默认 */ }
+  return out
+}
+
+/** 当前视图是否落在该可折叠组内（用户未做过显式选择时用来兜底展开、保高亮可见） */
+function groupHasActive(items: NavItem[], active: View): boolean {
+  return items.some((n) => n.key === active)
+}
+
+function NavRail({ active, onSelect, locked, className, expanded = false, proposalsN = 0,
+                   railActive = false, railSlotRef }: {
   active: View
   onSelect: (key: View) => void
   locked: boolean
   className?: string
   expanded?: boolean
+  /** 待审提案数（「变更提案」项角标；0 不显示） */
+  proposalsN?: number
+  /** 工作台侧栏是否停靠到本列下半（agents 视图）：槽位 DOM 由本组件渲染（见 lib/navRail.ts） */
+  railActive?: boolean
+  /** 槽位节点回调：App 持有该节点并经 context 下发给工作台做 portal 目标 */
+  railSlotRef?: (el: HTMLDivElement | null) => void
 }) {
-  const [moreOpen, setMoreOpen] = useState(
-    () => window.localStorage.getItem("ui.nav-more-open") === "1")
+  // 分组折叠（2026-09-30 起只有「更多」；2026-10-15 泛化为任意 collapsible 组）。
+  // 状态按组名持久化在 ui.nav-groups-open（见 readGroupOpen：含 defaultOpen 与旧键迁移）。
+  // 展开判定在渲染期派生：`groupOpen[label] ?? groupHasActive` —— 用户没做过显式选择时，
+  // 「当前视图在组内」自动展开保高亮；手动折叠/展开过一次后就完全听手动状态（标准手风琴）。
+  // 旧版写成渲染期恒 `|| moreActive` 强制展开，导致该组的折叠按钮点不动（老毛病）。
+  const [groupOpen, setGroupOpen] = useState<Record<string, boolean>>(readGroupOpen)
   useEffect(() => {
-    window.localStorage.setItem("ui.nav-more-open", moreOpen ? "1" : "0")
-  }, [moreOpen])
+    try { window.localStorage.setItem(GROUPS_OPEN_KEY, JSON.stringify(groupOpen)) }
+    catch { /* 隐私模式：仅本次会话有效 */ }
+  }, [groupOpen])
+  const toggleGroup = (label: string, open: boolean) =>
+    setGroupOpen((m) => ({ ...m, [label]: !open }))
 
   // 无项目上下文时只展示全局项（needsProject=false：项目/情报/设置）；
   // 进入项目后移除项目入口和 homeOnly 项（情报）——项目工作区内不再显示
@@ -132,24 +186,25 @@ function NavRail({ active, onSelect, locked, className, expanded = false }: {
         items: group.items.filter((item) => !item.homeOnly && item.key !== "projects"),
       })).filter((group) => group.items.length > 0)
 
-  // 「更多」折叠（2026-09-30）：会话降级为二级入口，手动状态持久化（ui.nav-more-open）；
-  // 当前视图在其中时强制展开保高亮；窄栏态无标题可点 → 直接展开。
-  const moreActive = active === "live"
-
   return (
-    <nav className={cn("app-nav flex shrink-0 flex-col border-r", expanded ? "items-stretch" : "items-center", className)}>
+    <nav className={cn("app-nav flex shrink-0 flex-col border-r", expanded ? "items-stretch" : "items-center",
+                       railActive && expanded && "has-rail", className)}>
       <NavBrand expanded={expanded} />
       <div className="nav-scroll">
         {groups.map((group) => {
           const collapsible = !!group.collapsible
-          const open = !collapsible || !expanded || moreOpen || moreActive
+          // 窄栏态无标题可点 → 直接展开；展开态 = 手动状态优先，未选择过则看当前视图是否在组内。
+          const open = !collapsible || !expanded
+            || (groupOpen[group.label] ?? groupHasActive(group.items, active))
           return (
             <div className="nav-group" key={group.label || "home"}>
               {expanded && group.label && (collapsible ? (
                 <button
+                  type="button"
                   className="nav-group-toggle"
                   aria-expanded={open}
-                  onClick={() => setMoreOpen((v) => !v)}
+                  title={open ? `收起「${group.label}」` : `展开「${group.label}」`}
+                  onClick={() => toggleGroup(group.label, open)}
                 >
                   <span className="nav-group-label">{group.label}</span>
                   <ChevronDown size={12} className={cn("nav-group-chevron", open && "is-open")} />
@@ -170,6 +225,9 @@ function NavRail({ active, onSelect, locked, className, expanded = false }: {
                   >
                     <Icon size={17} strokeWidth={1.8} />
                     {expanded && <span>{n.key === "settings" && locked ? "设置" : n.label}</span>}
+                    {n.key === "proposals" && proposalsN > 0 && (
+                      <b className="nav-count">{proposalsN}</b>
+                    )}
                   </button>
                 )
               })}
@@ -177,6 +235,9 @@ function NavRail({ active, onSelect, locked, className, expanded = false }: {
           )
         })}
       </div>
+      {/* 工作台侧栏槽位（2026-10-16）：导航分组之下、页脚之上，由工作台 portal 投递内容。
+          只在本列展开且 agents 视图时存在；窄栏/收起/其它视图时不存在 → 工作台走原两列布局。 */}
+      {expanded && railActive && <div className="nav-rail-slot" ref={railSlotRef} />}
       {expanded && <div className="nav-footer"><Activity size={14} /><span>系统在线</span><span className="status-dot" /></div>}
     </nav>
   )
@@ -270,10 +331,16 @@ export default function App() {
   const [pid, setPid] = useState<string | null>(null)
   const [meta, setMeta] = useState<ProjectDetail | null>(null)
   const [view, setView] = useState<View>("projects")
+  // 变更提案待审数（工作区「变更提案」角标；提案全局共享，无项目也拉）
+  const [proposalsN, setProposalsN] = useState(0)
   const [boardOpen, setBoardOpen] = useState(true)
   // 蓝图「生成/深析」派发后跳智能体工作台并选中新线程（goto-agents，M2 2026-10-13）：
   // 存线程 id 作 prop 下传，由 AgentWorkbenchView 消费后回调清空。
   const [focusChatTid, setFocusChatTid] = useState<string | null>(null)
+  // 工作台侧栏停靠槽位（2026-10-16）：agents 视图下把工作台的左栏（agent 切换器 +
+  // 会话线程）并入左导航列下半，主区因此多出整列宽度。节点由 NavRail 渲染并回传，
+  // 经 NavRailSlotContext 下发；工作台用 createPortal 投递（见 lib/navRail.ts）。
+  const [railSlot, setRailSlot] = useState<HTMLDivElement | null>(null)
   // 黑板 Keep-alive（2026-09-30）：首次点开「黑板」的 pid 才挂载（没点过的项目不
   // 预加载）；同项目切视图不卸载只隐藏，换项目（pid 变）时因 key={pid} 全新挂载重载
   const [boardSeenPid, setBoardSeenPid] = useState<string | null>(null)
@@ -398,10 +465,19 @@ export default function App() {
   // **订阅隔离**（2026-10-04）：事件订阅移到返回 null 的 EventsDebouncedRefresh
   // 子组件——此前 useEvents 直接挂在 App 根上，流式期每条事件（~6-8Hz）都重渲
   // 整棵应用树（工作台/发现栏/直播间全跟着重渲），是「输出过程卡卡的」主因之一。
+  const refreshProposalsN = useCallback(() => {
+    api.proposals("pending").then((ps) => setProposalsN(ps.length)).catch(() => {})
+  }, [])
+  // 提案变化（人工审批 / 复盘 Job / Agent 自动提案）→ 刷新角标
+  useEffect(() => {
+    refreshProposalsN()
+    window.addEventListener("proposals-changed", refreshProposalsN)
+    return () => window.removeEventListener("proposals-changed", refreshProposalsN)
+  }, [refreshProposalsN])
   const bumpMeta = useCallback(() => {
-    if (!pid) return
-    api.getProject(pid).then(setMeta).catch(() => {})
-  }, [pid])
+    if (pid) api.getProject(pid).then(setMeta).catch(() => {})
+    refreshProposalsN()  // 新事件里可能含 proposal.created（Agent 自动提案）
+  }, [pid, refreshProposalsN])
   const eventsWatcher = <EventsDebouncedRefresh pid={pid} onBump={bumpMeta} />
 
   // 工作台 profile：research+binary ⇒ rev-generic 逆向工作台（其他轨保持渗透模板）
@@ -430,9 +506,9 @@ export default function App() {
           {!navCollapsed && (
             <>
               <Panel id="nav" minSize={160} maxSize={280} defaultSize={180}>
-                <NavRail active={view} onSelect={setView} locked={!pid} expanded className="h-full w-full" />
+                <NavRail active={view} onSelect={setView} locked={!pid} expanded className="h-full w-full" proposalsN={proposalsN} />
               </Panel>
-              <Separator className="nav-sep w-0.5 shrink-0 bg-transparent transition-colors hover:bg-accent data-[active]:bg-accent">
+              <Separator className="nav-sep w-0.5 shrink-0 bg-transparent transition-colors hover:bg-accent data-[separator=active]:bg-accent">
                 <button className="nav-edge-btn" title="收起侧栏" aria-label="收起侧栏" onClick={toggleNavCollapsed}>
                   <ChevronLeft size={12} />
                 </button>
@@ -468,20 +544,26 @@ export default function App() {
     )
   }
 
+  // 工作台左栏停靠条件：agents 视图 + 有项目（此时 NavRail 会渲染 .nav-rail-slot）。
+  const railActive = view === "agents" && !!pid
+
   return (
+    <NavRailSlotContext.Provider value={railActive ? railSlot : null}>
     <div className="app-shell flex h-screen flex-col overflow-hidden">
       {eventsWatcher}
       <div className="flex min-h-0 flex-1">
         <Group orientation="horizontal" className="flex min-h-0 w-full"
                defaultLayout={navLayout.defaultLayout}
                onLayoutChanged={navLayout.onLayoutChanged}>
-          {/* 左：项目导航（可拖拽 160–280px；悬浮「‹」收起，左缘把手唤出） */}
+          {/* 左：项目导航（可拖拽 160–280px；悬浮「‹」收起，左缘把手唤出）。
+              agents 视图下本列下半还停靠工作台的 agent 切换器 + 会话线程列表。 */}
           {!navCollapsed && (
             <>
               <Panel id="nav" minSize={160} maxSize={280} defaultSize={180}>
-                <NavRail active={view} onSelect={setView} locked={!pid} expanded className="h-full w-full" />
+                <NavRail active={view} onSelect={setView} locked={!pid} expanded className="h-full w-full" proposalsN={proposalsN}
+                         railActive={railActive} railSlotRef={setRailSlot} />
               </Panel>
-              <Separator className="nav-sep w-0.5 shrink-0 bg-transparent transition-colors hover:bg-accent data-[active]:bg-accent">
+              <Separator className="nav-sep w-0.5 shrink-0 bg-transparent transition-colors hover:bg-accent data-[separator=active]:bg-accent">
                 <button className="nav-edge-btn" title="收起侧栏" aria-label="收起侧栏" onClick={toggleNavCollapsed}>
                   <ChevronLeft size={12} />
                 </button>
@@ -492,14 +574,14 @@ export default function App() {
           <Panel id="main">
             <div className="flex h-full min-h-0 flex-col overflow-hidden">
             {/* 顶栏（2026-10-14 方案 A+B 改版）：实底 surface-1 + 1px 底边线收口；
-                项目信息由「英文 eyebrow + 无框标题行」改为与 .wb-agent-trigger 同款的
-                胶囊卡；统计从项目名右侧移到最右（与「首页」同组）并改中点分隔。
-                样式见 index.css 的 .topbar / .project-card 段。 */}
+                项目信息由「英文 eyebrow + 无框标题行」改为胶囊卡（当时参照中栏的
+                .wb-agent-trigger，该类已于 2026-10-16 删除）；统计从项目名右侧移到最右
+                （与「首页」同组）并改中点分隔。样式见 index.css 的 .topbar / .project-card 段。 */}
             <div className="topbar flex h-16 shrink-0 items-center gap-4 px-5">
               <div className="mobile-brand"><div className="brand-mark"><Sparkles size={15} /></div><span>Obsius</span></div>
               <div className="project-card"><span className="project-pulse" /><h1 className="project-name">{meta?.name ?? "加载项目"}</h1><Badge variant="outline" className="project-badge">{meta ? bindingBadge(meta.track, meta.experts) : "…"}</Badge></div>
               <span className="flex-1" />
-              {meta && <div className="project-stats"><span><Blocks size={13} />{meta.findings} 发现</span><span className="project-stats-sep">·</span><span><Globe2 size={13} />{meta.assets} 资产</span></div>}
+              {meta && <div className="project-stats"><span><Blocks size={13} />{meta.findings} 发现</span><span className="project-stats-sep">·</span><span title={`资产数只计二级子节点（根节点 → 二级子节点 → 三级 URL）；已测干净 ${meta.assets_clean ?? 0} / ${meta.assets}`}><Globe2 size={13} />已测干净 {meta.assets_clean ?? 0}/{meta.assets} · {meta.assets_clean_pct ?? 0}%</span></div>}
               <Button size="sm" variant="ghost" className="back-project" onClick={goHome}><ArrowLeft size={15} />首页</Button>
               <WindowControls className="-mr-5" />
             </div>
@@ -559,6 +641,7 @@ export default function App() {
                                                     focusThread={focusChatTid}
                                                     onFocusConsumed={() => setFocusChatTid(null)} />}
           {view === "diagnostics" && <DiagnosticsView pid={pid} />}
+          {view === "proposals" && <ProposalsView pid={pid ?? undefined} />}
           {view === "browser" && (
             // F6 内置浏览器：轨门控（非 pentest/redteam 整页灰显）在视图内部处理；
             // 定高视图（面板组），照 rev 走 h-full + overflow-hidden
@@ -594,5 +677,6 @@ export default function App() {
         {navCollapsed && <NavReveal onExpand={toggleNavCollapsed} />}
       </div>
     </div>
+    </NavRailSlotContext.Provider>
   )
 }

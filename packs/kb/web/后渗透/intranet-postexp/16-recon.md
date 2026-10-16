@@ -1,6 +1,6 @@
 # 内网/后渗透 — 信息收集 payload 库
 
-> 父文档:[00-index.md](00-index.md) · ⚠️ SRC 场景下大多受限,见 [../compliance.md](../compliance.md)
+> 父文档:[[web/后渗透/intranet-postexp/00-index.md|00-index.md]] · ⚠️ SRC 场景下大多受限,见 [../compliance.md](../compliance.md)
 > 涵盖:主机发现 / 端口扫描 / 域信息 / Bloodhound 收集 / SharpHound / netview / hosts 列举
 
 ---
@@ -643,4 +643,4 @@ Find-DomainUserLocation
 
 ---
 
-← 回 [00-index.md](00-index.md) · 上一篇:[`15-tunneling.md`](15-tunneling.md) · 下一篇:[`17-persistence.md`](17-persistence.md)
+← 回 [[web/后渗透/intranet-postexp/00-index.md|00-index.md]] · 上一篇:[[web/后渗透/intranet-postexp/15-tunneling.md|15-tunneling.md]] · 下一篇:[[web/后渗透/intranet-postexp/17-persistence.md|17-persistence.md]]

@@ -1,6 +1,6 @@
 # JWT payload 库
 
-> 父文档:[00-index.md](00-index.md)
+> 父文档:[[web/实战打法/oauth-saml-jwt/00-index.md|00-index.md]]
 > 涵盖:JWT 认证漏洞通论 + alg=none + RS→HS 密钥混淆 + 密钥爆破 + jku/x5u/kid 头注入。任何见到 `eyJ` 开头三段式 token 都先用本文件套一遍。
 
 ---
@@ -544,4 +544,4 @@ _利用开放重定向、子域名接管、URL混淆绕过jku域名白名单_
 
 ---
 
-← 回 [00-index.md](00-index.md) · 相关:[`10-oauth-redirect.md`](10-oauth-redirect.md)(OAuth token 经常是 JWT)
+← 回 [[web/实战打法/oauth-saml-jwt/00-index.md|00-index.md]] · 相关:[[web/实战打法/oauth-saml-jwt/10-oauth-redirect.md|10-oauth-redirect.md]](OAuth token 经常是 JWT)

@@ -13,7 +13,7 @@
 
 1. `godot_ctf_runner.py <apk>`（r0re 工具，M2 落 tools/ registry 后可用）自动完成：
    Godot 识别 → 壳检测 → unicorn 模拟脱壳 → RELATIVE 重定位修复 → 常量提取
-   （key/nonce/魔改常量）。手工兜底见 [../../godot.md](../../godot.md) + [../../unpacking.md](../../unpacking.md)。
+   （key/nonce/魔改常量）。手工兜底见 [[binary/移动安全/godot.md|../../godot.md]] + [[binary/移动安全/unpacking.md|../../unpacking.md]]。
 2. 扩展类 `GameExtension : Node` 暴露 `Tick` 与 `Process(input)->String`；flag 计算在 Process。
 3. token→flag 算法（已在还原镜像中逐字节核实 + 3 组向量验证）：
    - GDScript xor_enc: `r[i]=a[i]^a[i+1] (i=0..6)`，`r[7]=a[7]^r[0]`
@@ -22,7 +22,7 @@
      **魔改点**：state 常量 `"expand 32-byte k"` → `"fxpaod 31-byse k"`（0x19ED8）
    - 取 keystream 前 8 字节异或 → `%02X` 大写 hex
    - `flag{sec2026_PART1_<16hex>}`（PART0 为固定示例 `flag{sec2026_PART0_example}`）
-4. 全程可逆：[flag_algo.py](flag_algo.py) 同时提供 `token_to_flag()` / `flag_to_token()`
+4. 全程可逆：[[binary/移动安全/cases/godot-sec2026/flag_algo.py|flag_algo.py]] 同时提供 `token_to_flag()` / `flag_to_token()`
    （内置自测向量：`python3 flag_algo.py`）。
 
 ## 验证向量（verification vectors）
@@ -38,4 +38,4 @@
 
 - 壳是通用 UPX-shlib fold（NRV2B stage1 + LZMA/NRV2B 主块 + memfd MAP_FIXED）；
   同类壳直接用脱壳三件套（M2 后在 tools registry），不要重写脱壳器。
-- Godot 题检查清单见 [../../godot.md](../../godot.md)。
+- Godot 题检查清单见 [[binary/移动安全/godot.md|../../godot.md]]。

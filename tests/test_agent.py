@@ -1710,11 +1710,13 @@ def test_bb_query_findings_filters_passthrough(env):
     # target_asset_id 组合
     assert len(rows(d.dispatch(
         "bb_query", {"what": "findings", "target_asset_id": a1}))) == 2
-    # 默认行为不变：不带新参数 = 全量 3 条，输出字段集合不变
+    # 默认行为不变：不带新参数 = 全量 3 条
     got = rows(d.dispatch("bb_query", {"what": "findings"}))
     assert len(got) == 3
+    # finding-dedup-chain（2026-10-15）：输出补 dedup_key/target_asset_id——
+    # 给既有漏洞补证据/升链时拿旧指纹重报自动并入，不许自造新键裂出新行
     assert set(got[0]) == {"id", "vuln_class", "title", "severity",
-                           "status", "confidence"}
+                           "status", "confidence", "dedup_key", "target_asset_id"}
 
 
 def test_bb_query_site_subtree_aggregate(env):
@@ -2790,6 +2792,41 @@ def test_add_finding_dedup_warning_text(env):
     assert "[疑似重复]" in out and "id 注入" in out
     old = next(f["id"] for f in bb.list_findings(project["id"]) if f["title"] == "id 注入")
     assert old in out
+
+
+def test_add_finding_chain_merge_text(env):
+    """finding-dedup-chain（2026-10-15）：同一漏洞换锚点（domain→url）+ 自造
+    dedup_key 重报 → 并入既有发现，工具回执写明「已并入」并回显旧指纹；不裂新行。"""
+    from core.agent.tools import ToolDispatcher
+    bb, project, gw, _ = env
+    agent = make_agent(env, ScriptedLLM([]))
+    d = agent.dispatcher
+    declare_intent(bb, project["id"], "对目标资产进行注入参数探测尝试",
+                   author=agent.session["id"])  # 过 bb_add_finding 必挂意图门禁
+    # 意图先行闸（2026-09-28）：补 command 事件模拟意图后的执行动作
+    bb.append_event(project["id"], "command", {"cmd": "probe"},
+                    session_id=agent.session["id"], author=agent.session["id"])
+    dom = bb.upsert_asset(project["id"], "domain", "a.com")["id"]
+    url = bb.upsert_asset(project["id"], "url", "http://a.com/species",
+                          parent_id=dom)["id"]
+    out1 = d.dispatch("bb_add_finding", {
+        "vuln_class": "SQL注入", "title": "检索参数注入", "severity": "medium",
+        "target_asset_id": dom,
+        "evidence": {"repro_steps": [{"desc": "注入引号看回显",
+                                      "code": "curl ...", "expected": "报错回显查询"}]}})
+    assert "dedup_key=SQL注入" in out1
+    fid = next(f["id"] for f in bb.list_findings(project["id"]))
+    # 新会话验证/升链：换到更具体的 url 锚点 + 自造指纹（旧行为=裂成两条）
+    out2 = d.dispatch("bb_add_finding", {
+        "vuln_class": "SQL注入", "title": "注入可跨库取凭据", "severity": "critical",
+        "target_asset_id": url, "dedup_key": "a-sqli-species-gtid",
+        "rating_basis": "rating:edu-rating 高危#3 批量盗取身份",
+        "evidence": {"repro_steps": [{"desc": "GTID_SUBSET 报错取数",
+                                      "code": "curl ...", "expected": "回显账号口令"}]}})
+    assert "[已并入既有发现]" in out2 and fid in out2
+    assert len(bb.list_findings(project["id"])) == 1
+    got = bb.get_finding(project["id"], fid)
+    assert got["severity"] == "critical" and got["target_asset_id"] == dom
 
 
 def test_bb_notify_tool_target_and_broadcast(env):

@@ -5,7 +5,7 @@
 > **Skill**: 使用 `/ctf-solver` 调用CTF解题助手（5种模式：Payload速查/WP搜索/工具推荐/技术速查/完整方案）
 >
 > **2026-05 新增**:
-> - [PAYLOAD-CHEATSHEET.md](../载荷与字典/PAYLOAD-CHEATSHEET.md) — 10大类高频Payload速查表（做题时直接查，不用翻文章）
+> - [[web/载荷与字典/PAYLOAD-CHEATSHEET.md|PAYLOAD-CHEATSHEET.md]] — 10大类高频Payload速查表（做题时直接查，不用翻文章）
 
 ---
 
@@ -13,7 +13,7 @@
 
 | 我想要的 | 最快路径 |
 |---------|---------|
-| Payload/命令 | → [PAYLOAD-CHEATSHEET.md](../载荷与字典/PAYLOAD-CHEATSHEET.md) (直接翻对应章节) |
+| Payload/命令 | → [[web/载荷与字典/PAYLOAD-CHEATSHEET.md|PAYLOAD-CHEATSHEET.md]] (直接翻对应章节) |
 | 找相似WP | → 直接 grep 关键词搜索 [CTF大赛WP集合/articles/](CTF大赛WP集合/articles/) |
 | 了解漏洞原理 | → 读 `.idx.md` 定位 → `Read offset=X limit=Y` 读知识文章 |
 | 找现成脚本 | → [SCRIPTS-INDEX.md](CTF常用脚本及工具/SCRIPTS-INDEX.md) (50+脚本速查) |
@@ -24,36 +24,36 @@
 ## 一、按技术标签检索
 
 ### SQL注入
-- **知识**: [SQL.md](SQL.md) → [SQL.idx.md](sqli/SQL.idx.md) (2611行)
+- **知识**: [SQL.md](SQL.md) → [[web/漏洞分类/sqli/SQL.idx.md|SQL.idx.md]] (2611行)
 - **工具**: [sqlmap速查](工具使用/sqlmap-Cheat-Sheet.md)
 - **WP**: [SQLI-LABS](WP汇总/各大靶场WP汇总.md), [ctfshow-php特性](WP汇总/ctfshow-php特性.md)
 - **代码审计**: [php代码审计.md](php代码审计.md) L990-L1112 (SQL注入 WITH ROLLUP), L1278-L1322 (sql闭合绕过)
 - **关键词**: `联合注入` `报错注入` `堆叠注入` `盲注` `WAF绕过` `宽字节` `二次注入` `DNS注入` `sqlmap`
 
 ### 命令执行/RCE
-- **知识**: [命令执行.md](命令执行.md) → [命令执行.idx.md](injection/命令执行.idx.md) (3463行)
+- **知识**: [命令执行.md](命令执行.md) → [[web/漏洞分类/injection/命令执行.idx.md|命令执行.idx.md]] (3463行)
 - **WP**: [ctfshow-命令执行wp](WP汇总/ctfshow-命令执行wp.md)
 - **代码审计**: [php代码审计.md](php代码审计.md) (preg_match绕过/变量覆盖可导致RCE)
 - **关键词**: `system` `passthru` `exec` `shell_exec` `反弹shell` `无回显` `DNSlog` `disable_functions` `无字母` `通配符`
 
 ### 文件上传
-- **知识**: [文件上传漏洞.md](文件上传漏洞.md) → [文件上传漏洞.idx.md](file-upload/文件上传漏洞.idx.md) (2115行)
+- **知识**: [文件上传漏洞.md](文件上传漏洞.md) → [[web/漏洞分类/file-upload/文件上传漏洞.idx.md|文件上传漏洞.idx.md]] (2115行)
 - **WP**: [ctfshow-文件上传wp](WP汇总/ctfshow-文件上传wp.md), [upload-labs WP](WP汇总/文件上传/README.md)
 - **代码审计**: [php代码审计.md](php代码审计.md) L1414 (move_uploaded_file截断)
 - **关键词**: `WebShell` `蚁剑` `MIME绕过` `图片马` `.htaccess` `解析漏洞` `截断` `前端绕过`
 
 ### 文件包含/LFI
-- **知识**: [文件包含.md](文件包含.md) → [文件包含.idx.md](path-traversal/文件包含.idx.md) (2617行)
+- **知识**: [文件包含.md](文件包含.md) → [[web/漏洞分类/path-traversal/文件包含.idx.md|文件包含.idx.md]] (2617行)
 - **WP**: [文件包含WP](WP汇总/文件包含/README.md)
 - **代码审计**: [php代码审计.md](php代码审计.md) L1421 (include截断)
 - **关键词**: `php伪协议` `filter` `input` `日志包含` `session包含` `临时文件` `phar` `截断`
 
 ### SSRF
-- **知识**: [SSRF漏洞.md](SSRF漏洞.md) → [SSRF漏洞.idx.md](ssrf/SSRF漏洞.idx.md) (1882行)
+- **知识**: [SSRF漏洞.md](SSRF漏洞.md) → [[web/漏洞分类/ssrf/SSRF漏洞.idx.md|SSRF漏洞.idx.md]] (1882行)
 - **关键词**: `gopher` `redis` `fastcgi` `DNS-rebinding` `dict` `file_get_contents` `curl` `内网`
 
 ### PHP反序列化
-- **知识**: [PHP反序列化漏洞总结.md](PHP反序列化漏洞总结.md) → [PHP反序列化漏洞总结.idx.md](deserialization/PHP反序列化漏洞总结.idx.md) (6959行)
+- **知识**: [PHP反序列化漏洞总结.md](PHP反序列化漏洞总结.md) → [[web/漏洞分类/deserialization/PHP反序列化漏洞总结.idx.md|PHP反序列化漏洞总结.idx.md]] (6959行)
 - **WP**: [ctfshow-反序列化wp](WP汇总/CTfshow-反序序列化wp.md)
 - **脚本**: [python-Picke序列化](CTF常用脚本及工具/python-Picke序列化/)
 - **关键词**: `POP链` `phar` `字符逃逸` `wakeup` `SoapClient` `session` `原生类` `魔术方法`
@@ -64,11 +64,11 @@
 - **关键词**: `Jinja2` `Flask` `__mro__` `__subclasses__` `__globals__` `popen`
 
 ### JWT
-- **知识**: [JWT.md](JWT.md) → [JWT.idx.md](jwt/JWT.idx.md) (424行)
+- **知识**: [JWT.md](JWT.md) → [[web/漏洞分类/jwt/JWT.idx.md|JWT.idx.md]] (424行)
 - **关键词**: `None算法` `KID注入` `JKU` `HS256` `RS256` `密钥爆破` `jwt-cracker`
 
 ### PHP代码审计
-- **知识**: [php代码审计.md](php代码审计.md) → [php代码审计.idx.md](source-audit/php代码审计.idx.md) (1641行)
+- **知识**: [php代码审计.md](php代码审计.md) → [[web/漏洞分类/source-audit/php代码审计.idx.md|php代码审计.idx.md]] (1641行)
 - **关键词**: `弱类型` `preg_match` `变量覆盖` `extract` `strcmp` `md5碰撞` `intval` `%00截断` `register_globals`
 
 ### 图片隐写

@@ -11,7 +11,7 @@ import pytest
 from core.blackboard import Blackboard
 from core.coverage import (asset_terminal_state, attach_effective_status,
                            coverage_report, effective_status_map,
-                           situation_snapshot)
+                           level_two_stats, situation_snapshot)
 
 
 @pytest.fixture()
@@ -359,3 +359,71 @@ def test_situation_snapshot_buckets_caps_and_binary_excluded(env):
                                untested_cap=3)
     assert len(snap2["untested"]) == 3 and snap2["untested_truncated"] is True
     assert snap2["counts"]["open"] == 6                      # 计数不受 cap 影响
+
+
+# ---------- 资产计数口径（level-two-counts，2026-10-16） ----------
+# 资产树只认「根节点 → 二级子节点 → 三级 URL」三层链，**资产数 = 二级子节点数**
+# （深度恰为 1）；根是分组容器、三级 URL 只是二级的明细，都不进分母。
+
+def test_level_two_stats_counts_only_second_level(env):
+    """根 + 二级 + 三级共存时，分母只数二级（本例 1 根 + 2 二级 + 1 三级 = 4 条 → 2）。"""
+    bb, proj = env
+    pid = proj["id"]
+    root = bb.upsert_asset(pid, "host", "10.0.0.1")["id"]
+    s1 = bb.upsert_asset(pid, "service", "10.0.0.1:80", parent_id=root)["id"]
+    s2 = bb.upsert_asset(pid, "service", "10.0.0.1:443", parent_id=root)["id"]
+    bb.upsert_asset(pid, "url", "http://10.0.0.1/a", parent_id=s1)   # 三级，不计
+    assert len(bb.list_assets(pid)) == 4
+    assert level_two_stats(bb.list_assets(pid)) == {"total": 2, "clean": 0, "pct": 0}
+
+
+def test_level_two_stats_clean_pct_of_second_level(env):
+    """已测干净 = 二级子节点中 effective_status==tested_clean 的条数，pct 随之。"""
+    bb, proj = env
+    pid = proj["id"]
+    root = bb.upsert_asset(pid, "host", "10.0.0.2")["id"]
+    svcs = [bb.upsert_asset(pid, "service", f"10.0.0.2:{p}", parent_id=root)["id"]
+            for p in (80, 443, 8080, 8443)]
+    _mark_clean(bb, pid, svcs[0])
+    _mark_clean(bb, pid, svcs[1])
+    assert level_two_stats(bb.list_assets(pid)) == {"total": 4, "clean": 2, "pct": 50}
+    # 全标 clean → 100%（根自身派生 clean 也不进分母）
+    _mark_clean(bb, pid, svcs[2])
+    _mark_clean(bb, pid, svcs[3])
+    assert level_two_stats(bb.list_assets(pid)) == {"total": 4, "clean": 4, "pct": 100}
+
+
+def test_level_two_stats_derived_clean_counts_middle(env):
+    """三级 URL 全测干净 → 二级派生 clean → 计入已测干净；但三级自身不进分母。"""
+    bb, proj = env
+    pid = proj["id"]
+    root = bb.upsert_asset(pid, "host", "10.0.0.3")["id"]
+    svc = bb.upsert_asset(pid, "service", "10.0.0.3:80", parent_id=root)["id"]
+    u1 = bb.upsert_asset(pid, "url", "http://10.0.0.3/a", parent_id=svc)["id"]
+    u2 = bb.upsert_asset(pid, "url", "http://10.0.0.3/b", parent_id=svc)["id"]
+    _mark_clean(bb, pid, u1)
+    _mark_clean(bb, pid, u2)
+    assert level_two_stats(bb.list_assets(pid)) == {"total": 1, "clean": 1, "pct": 100}
+
+
+def test_level_two_stats_edge_cases(env):
+    """空树 / 只有根 / 孤立行 / binary 二级都不进分母；total=0 不除零。"""
+    bb, proj = env
+    pid = proj["id"]
+    assert level_two_stats([]) == {"total": 0, "clean": 0, "pct": 0}
+    assert level_two_stats(bb.list_assets(pid)) == {"total": 0, "clean": 0, "pct": 0}
+    # 只有根（host）：没有二级子节点
+    bb.upsert_asset(pid, "host", "10.0.0.9")
+    assert level_two_stats(bb.list_assets(pid))["total"] == 0
+    # 孤立行（parent_id 指向不存在的资产）：库里被 assets.parent_id 外键拦住、
+    # 实际造不出来，但 level_two_stats 是纯函数——直接喂 dict 覆盖这条防御分支
+    # （既不当作根的子、也不算二级，不进分母）
+    fake = [{"id": "root", "type": "host", "parent_id": None},
+            {"id": "orphan", "type": "url", "parent_id": "asset-deadbeef"},
+            {"id": "l2", "type": "url", "parent_id": "root"}]
+    assert level_two_stats(fake) == {"total": 1, "clean": 0, "pct": 0}
+    # binary 虽然是二级子节点，但不在 COVERAGE_TYPES → 不进分母（与状态口径同总体）
+    root = bb.upsert_asset(pid, "host", "10.0.0.10")["id"]
+    bb.upsert_asset(pid, "binary", "a" * 64, parent_id=root)
+    bb.upsert_asset(pid, "domain", "example.com", parent_id=root)
+    assert level_two_stats(bb.list_assets(pid)) == {"total": 1, "clean": 0, "pct": 0}

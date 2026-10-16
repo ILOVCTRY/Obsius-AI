@@ -35,9 +35,9 @@ brew install wireshark binwalk binutils ghidra
 
 ## Additional Resources
 
-- [scripts-and-obfuscation.md](scripts-and-obfuscation.md) - JavaScript deobfuscation, PowerShell analysis, eval/base64 decoding, junk code detection, hex payloads, Debian package analysis, dynamic analysis techniques (strace/ltrace, network monitoring, memory string extraction, automated sandbox execution), YARA rules for malware detection, shellcode analysis (Unicorn Engine, Capstone), memory forensics for malware (Volatility 3 malfind, process injection detection), anti-analysis techniques (VM detection, timing evasion, API hashing, process injection), trojanized plugin analysis with custom alphabet C2 decoding
-- [c2-and-protocols.md](c2-and-protocols.md) - C2 traffic patterns, custom crypto protocols, RC4 WebSocket, DNS-based C2, network indicators, PCAP analysis, AES-CBC, encryption ID, Telegram bot recovery, Poison Ivy RAT Camellia decryption
-- [pe-and-dotnet.md](pe-and-dotnet.md) - PE analysis (peframe, pe-sieve, pestudio), .NET analysis (dnSpy, AsmResolver), LimeRAT extraction, sandbox evasion, malware config extraction, PyInstaller+PyArmor
+- [[binary/恶意样本/scripts-and-obfuscation.md|scripts-and-obfuscation.md]] - JavaScript deobfuscation, PowerShell analysis, eval/base64 decoding, junk code detection, hex payloads, Debian package analysis, dynamic analysis techniques (strace/ltrace, network monitoring, memory string extraction, automated sandbox execution), YARA rules for malware detection, shellcode analysis (Unicorn Engine, Capstone), memory forensics for malware (Volatility 3 malfind, process injection detection), anti-analysis techniques (VM detection, timing evasion, API hashing, process injection), trojanized plugin analysis with custom alphabet C2 decoding
+- [[binary/恶意样本/c2-and-protocols.md|c2-and-protocols.md]] - C2 traffic patterns, custom crypto protocols, RC4 WebSocket, DNS-based C2, network indicators, PCAP analysis, AES-CBC, encryption ID, Telegram bot recovery, Poison Ivy RAT Camellia decryption
+- [[binary/恶意样本/pe-and-dotnet.md|pe-and-dotnet.md]] - PE analysis (peframe, pe-sieve, pestudio), .NET analysis (dnSpy, AsmResolver), LimeRAT extraction, sandbox evasion, malware config extraction, PyInstaller+PyArmor
 
 ---
 
@@ -73,16 +73,16 @@ yara -r rules.yar suspicious_file
 
 ## Obfuscated Scripts
 
-- Replace `eval`/`bash` with `echo` to print underlying code; extract base64/hex blobs and analyze with `file`. See [scripts-and-obfuscation.md](scripts-and-obfuscation.md).
+- Replace `eval`/`bash` with `echo` to print underlying code; extract base64/hex blobs and analyze with `file`. See [[binary/恶意样本/scripts-and-obfuscation.md|scripts-and-obfuscation.md]].
 
 ## JavaScript & PowerShell Deobfuscation
 
 - JS: Replace `eval` with `console.log`, decode `unescape()`, `atob()`, `String.fromCharCode()`.
-- PowerShell: Decode `-enc` base64, replace `IEX` with output. See [scripts-and-obfuscation.md](scripts-and-obfuscation.md).
+- PowerShell: Decode `-enc` base64, replace `IEX` with output. See [[binary/恶意样本/scripts-and-obfuscation.md|scripts-and-obfuscation.md]].
 
 ## Junk Code Detection
 
-- NOP sleds, push/pop pairs, dead writes, unconditional jumps to next instruction. Filter to extract real `call` targets. See [scripts-and-obfuscation.md](scripts-and-obfuscation.md).
+- NOP sleds, push/pop pairs, dead writes, unconditional jumps to next instruction. Filter to extract real `call` targets. See [[binary/恶意样本/scripts-and-obfuscation.md|scripts-and-obfuscation.md]].
 
 ## PCAP & Network Analysis
 
@@ -90,28 +90,28 @@ yara -r rules.yar suspicious_file
 tshark -r file.pcap -Y "tcp.stream eq X" -T fields -e tcp.payload
 ```
 
-Look for C2 on unusual ports. Extract IPs/domains with `strings | grep`. See [c2-and-protocols.md](c2-and-protocols.md).
+Look for C2 on unusual ports. Extract IPs/domains with `strings | grep`. See [[binary/恶意样本/c2-and-protocols.md|c2-and-protocols.md]].
 
 ## Custom Crypto Protocols
 
 - Stream ciphers share keystream state for both directions; concatenate ALL payloads chronologically.
-- ChaCha20 keystream extraction: send nullbytes (0 XOR anything = anything). See [c2-and-protocols.md](c2-and-protocols.md).
+- ChaCha20 keystream extraction: send nullbytes (0 XOR anything = anything). See [[binary/恶意样本/c2-and-protocols.md|c2-and-protocols.md]].
 
 ## C2 Traffic Patterns
 
-- Beaconing, DGA, DNS tunneling, HTTP(S) with custom headers, encoded payloads. See [c2-and-protocols.md](c2-and-protocols.md).
+- Beaconing, DGA, DNS tunneling, HTTP(S) with custom headers, encoded payloads. See [[binary/恶意样本/c2-and-protocols.md|c2-and-protocols.md]].
 
 ## RC4-Encrypted WebSocket C2
 
-- Remap port with `tcprewrite`, add RSA key for TLS decryption, find RC4 key in binary. See [c2-and-protocols.md](c2-and-protocols.md).
+- Remap port with `tcprewrite`, add RSA key for TLS decryption, find RC4 key in binary. See [[binary/恶意样本/c2-and-protocols.md|c2-and-protocols.md]].
 
 ## Identifying Encryption Algorithms
 
-- AES: `0x637c777b` S-box; ChaCha20: `expand 32-byte k`; TEA/XTEA: `0x9E3779B9`; RC4: sequential S-box init. See [c2-and-protocols.md](c2-and-protocols.md).
+- AES: `0x637c777b` S-box; ChaCha20: `expand 32-byte k`; TEA/XTEA: `0x9E3779B9`; RC4: sequential S-box init. See [[binary/恶意样本/c2-and-protocols.md|c2-and-protocols.md]].
 
 ## AES-CBC in Malware
 
-- Key = MD5/SHA256 of hardcoded string; IV = first 16 bytes of ciphertext. See [c2-and-protocols.md](c2-and-protocols.md).
+- Key = MD5/SHA256 of hardcoded string; IV = first 16 bytes of ciphertext. See [[binary/恶意样本/c2-and-protocols.md|c2-and-protocols.md]].
 
 ## PE Analysis
 
@@ -121,35 +121,35 @@ pe-sieve                 # Runtime analysis
 pestudio                 # Static analysis (Windows)
 ```
 
-See [pe-and-dotnet.md](pe-and-dotnet.md).
+See [[binary/恶意样本/pe-and-dotnet.md|pe-and-dotnet.md]].
 
 ## .NET Malware Analysis
 
-- Use dnSpy/ILSpy for decompilation; AsmResolver for programmatic analysis. LimeRAT C2: AES-256-ECB with MD5-derived key. See [pe-and-dotnet.md](pe-and-dotnet.md).
+- Use dnSpy/ILSpy for decompilation; AsmResolver for programmatic analysis. LimeRAT C2: AES-256-ECB with MD5-derived key. See [[binary/恶意样本/pe-and-dotnet.md|pe-and-dotnet.md]].
 
 ## Malware Configuration Extraction
 
-- Check .data section, PE/.NET resources, registry keys, encrypted config files. See [pe-and-dotnet.md](pe-and-dotnet.md).
+- Check .data section, PE/.NET resources, registry keys, encrypted config files. See [[binary/恶意样本/pe-and-dotnet.md|pe-and-dotnet.md]].
 
 ## Sandbox Evasion Checks
 
-- VM detection, debugger detection, timing checks, environment checks, analysis tool detection. See [pe-and-dotnet.md](pe-and-dotnet.md).
+- VM detection, debugger detection, timing checks, environment checks, analysis tool detection. See [[binary/恶意样本/pe-and-dotnet.md|pe-and-dotnet.md]].
 
 ## Anti-Analysis Techniques
 
-VM detection (CPUID, MAC prefix, registry, disk size), timing evasion (sleep/RDTSC sandbox detection), API hashing (ROR13/DJB2/CRC32 + hashdb lookup), process injection (hollowing, APC, CreateRemoteThread), environment checks. See [scripts-and-obfuscation.md](scripts-and-obfuscation.md#anti-analysis-techniques).
+VM detection (CPUID, MAC prefix, registry, disk size), timing evasion (sleep/RDTSC sandbox detection), API hashing (ROR13/DJB2/CRC32 + hashdb lookup), process injection (hollowing, APC, CreateRemoteThread), environment checks. See [[binary/恶意样本/scripts-and-obfuscation.md#anti-analysis-techniques|scripts-and-obfuscation.md]].
 
 ## Trojanized Plugin Analysis
 
-Diff malicious plugin against official release to find injected code in try/except blocks. Custom alphabet rotation (`C[(C.index(ch) - offset) % len(C)]`) decodes C2 domain, XOR decodes endpoint path. See [scripts-and-obfuscation.md](scripts-and-obfuscation.md#trojanized-plugin-analysis-with-custom-alphabet-c2-decoding-inshack-2018).
+Diff malicious plugin against official release to find injected code in try/except blocks. Custom alphabet rotation (`C[(C.index(ch) - offset) % len(C)]`) decodes C2 domain, XOR decodes endpoint path. See [[binary/恶意样本/scripts-and-obfuscation.md#trojanized-plugin-analysis-with-custom-alphabet-c2-decoding-inshack-2018|scripts-and-obfuscation.md]].
 
 ## PyInstaller + PyArmor Unpacking
 
-- `pyinstxtractor.py` to extract, PyArmor-Unpacker for protected code. See [pe-and-dotnet.md](pe-and-dotnet.md).
+- `pyinstxtractor.py` to extract, PyArmor-Unpacker for protected code. See [[binary/恶意样本/pe-and-dotnet.md|pe-and-dotnet.md]].
 
 ## Telegram Bot Evidence Recovery
 
-- Use bot token from malware source to call `getUpdates` and `getFile` APIs. See [c2-and-protocols.md](c2-and-protocols.md).
+- Use bot token from malware source to call `getUpdates` and `getFile` APIs. See [[binary/恶意样本/c2-and-protocols.md|c2-and-protocols.md]].
 
 ## Debian Package Analysis
 
@@ -157,19 +157,19 @@ Diff malicious plugin against official release to find injected code in try/exce
 ar -x package.deb && tar -xf control.tar.xz  # Check postinst scripts
 ```
 
-See [scripts-and-obfuscation.md](scripts-and-obfuscation.md).
+See [[binary/恶意样本/scripts-and-obfuscation.md|scripts-and-obfuscation.md]].
 
 ## YARA Rules for Malware Detection
 
-Write YARA rules to match byte patterns, strings, and regex against files or memory dumps. Detect XOR loops (`{31 ?? 80 ?? ?? 4? 75}`), base64 blobs, encoded PowerShell. Use `yarac` to compile for faster scanning. See [scripts-and-obfuscation.md](scripts-and-obfuscation.md#yara-rules-for-malware-detection).
+Write YARA rules to match byte patterns, strings, and regex against files or memory dumps. Detect XOR loops (`{31 ?? 80 ?? ?? 4? 75}`), base64 blobs, encoded PowerShell. Use `yarac` to compile for faster scanning. See [[binary/恶意样本/scripts-and-obfuscation.md#yara-rules-for-malware-detection|scripts-and-obfuscation.md]].
 
 ## Shellcode Analysis
 
-Disassemble with `objdump -b binary -m i386:x86-64`, emulate with Unicorn Engine (hook syscalls safely), or use Capstone for programmatic disassembly. Look for XOR decoder stubs. See [scripts-and-obfuscation.md](scripts-and-obfuscation.md#shellcode-analysis).
+Disassemble with `objdump -b binary -m i386:x86-64`, emulate with Unicorn Engine (hook syscalls safely), or use Capstone for programmatic disassembly. Look for XOR decoder stubs. See [[binary/恶意样本/scripts-and-obfuscation.md#shellcode-analysis|scripts-and-obfuscation.md]].
 
 ## Memory Forensics for Malware
 
-`vol windows.malfind` detects injected code (PAGE_EXECUTE_READWRITE without mapped file). `windows.pstree` reveals suspicious parent-child relationships. YARA scan memory with `windows.vadyarascan.VadYaraScan`. See [scripts-and-obfuscation.md](scripts-and-obfuscation.md#memory-forensics-for-malware).
+`vol windows.malfind` detects injected code (PAGE_EXECUTE_READWRITE without mapped file). `windows.pstree` reveals suspicious parent-child relationships. YARA scan memory with `windows.vadyarascan.VadYaraScan`. See [[binary/恶意样本/scripts-and-obfuscation.md#memory-forensics-for-malware|scripts-and-obfuscation.md]].
 
 ## Network Indicators Quick Reference
 

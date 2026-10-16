@@ -1,6 +1,6 @@
 # CTF Crypto - Classic Diffie-Hellman Attacks
 
-Finite-field DH (`p, g`) key-exchange attacks. For ECDH invalid-curve/small-subgroup, see [ecc-attacks.md](ecc-attacks.md#invalid-curve-attacks). For Pohlig-Hellman/BSGS primitives, see [advanced-math.md](advanced-math.md#baby-step-giant-step-for-general-dlp).
+Finite-field DH (`p, g`) key-exchange attacks. For ECDH invalid-curve/small-subgroup, see [[crypto/非对称加密/ecc-attacks.md#invalid-curve-attacks|ecc-attacks.md]]. For Pohlig-Hellman/BSGS primitives, see [advanced-math.md](advanced-math.md#baby-step-giant-step-for-general-dlp).
 
 ## Table of Contents
 - [Triage: Is This Classic DH?](#triage-is-this-classic-dh)

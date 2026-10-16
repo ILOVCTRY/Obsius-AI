@@ -1863,19 +1863,30 @@ def test_delete_finding_endpoint(client):
 
 
 def test_delete_asset_endpoint(client):
-    """DELETE asset：叶子可删；被 finding 引用/有子 → 409；不属于本项目 → 404。"""
+    """DELETE asset：叶子可删；有子 → 409；不属于本项目 → 404。
+
+    `cascade=true`（2026-10-16，Web UI 删除按钮默认带上）：把引用该资产的发现
+    一并删除（响应带 findings_deleted）；不带该参数时仍被引用 → 409（旧守卫保留，
+    agent 工具 / 脚本路径不变）。"""
     pid = _make_project(client)
     free = client.post(f"/api/projects/{pid}/assets",
                        json={"type": "url", "value": "http://x/a"}).json()
     used = client.post(f"/api/projects/{pid}/assets",
                        json={"type": "url", "value": "http://x/b"}).json()
-    client.post(f"/api/projects/{pid}/findings",
-                json={"vuln_class": "xss-del", "title": "引用卡",
-                      "target_asset_id": used["id"]})
+    f = client.post(f"/api/projects/{pid}/findings",
+                    json={"vuln_class": "xss-del", "title": "引用卡",
+                          "target_asset_id": used["id"]}).json()
+    # 不带 cascade：仍被引用 → 409
     assert client.delete(f"/api/projects/{pid}/assets/{used['id']}").status_code == 409
+    # 带 cascade：资产与引用它的发现一并删除
+    r = client.delete(f"/api/projects/{pid}/assets/{used['id']}?cascade=true")
+    assert r.status_code == 200
+    assert r.json()["findings_deleted"] == [f["id"]]
+    assert client.get(f"/api/projects/{pid}/findings").json() == []
+
     assert client.delete(f"/api/projects/{pid}/assets/{free['id']}").status_code == 200
     values = [a["value"] for a in client.get(f"/api/projects/{pid}/assets").json()]
-    assert "http://x/a" not in values and "http://x/b" in values
+    assert "http://x/a" not in values and "http://x/b" not in values
     assert client.delete(f"/api/projects/{pid}/assets/asset-nope").status_code == 404
 
 

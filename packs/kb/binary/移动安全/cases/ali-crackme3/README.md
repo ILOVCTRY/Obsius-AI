@@ -6,7 +6,7 @@
 ## 识别 markers
 
 - package `com.ctf.crackme3`；`lib/armeabi/libcrackme.so`
-- 样例 APK/SO sha256 内置于 [ali_crackme3_solve.py](ali_crackme3_solve.py)，运行时自动比对
+- 样例 APK/SO sha256 内置于 [[binary/移动安全/cases/ali-crackme3/ali_crackme3_solve.py|ali_crackme3_solve.py]]，运行时自动比对
 
 ## 已知求解链（自 r0re 流程描述还原）
 

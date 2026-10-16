@@ -410,7 +410,7 @@ For complex custom VMs, transpile the VM bytecode to LLVM IR and use LLVM's opti
 
 # Part 2
 
-Advanced GDB scripting, Ghidra automation, patching frameworks, and CTF-specific GDB-driven techniques. Continuation of [tools-advanced.md](tools-advanced.md).
+Advanced GDB scripting, Ghidra automation, patching frameworks, and CTF-specific GDB-driven techniques. Continuation of [[binary/逆向工程/tools-advanced.md|tools-advanced.md]].
 
 ## Table of Contents
 - [Advanced GDB Techniques](#advanced-gdb-techniques)

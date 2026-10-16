@@ -9,7 +9,7 @@ vuln_class: [android, jni, native, frida]
 
 > 来源：reverse-skill 1.0.1 收编改编（2026-09-30，MIT，见 `../../licenses/`）。
 > 覆盖 Native SO 分析、Frida 高级用法、SSL Pinning 绕过、Root 检测对抗、加固脱壳、
-> Flutter/React Native 逆向。与 [native-five-lines.md](native-five-lines.md)（五线纪律）
+> Flutter/React Native 逆向。与 [[binary/移动安全/native-five-lines.md|native-five-lines.md]]（五线纪律）
 > 互补：五线讲「按什么线推进」，本篇补「IDA/Frida 具体怎么操作」。
 
 ## Native SO 逆向分析流程
@@ -165,7 +165,7 @@ Memory.scan(flutter_lib, Module.findModuleByName("libflutter.so").size, pattern,
 | 检查 Magisk 包名 | 随机化 Magisk 包名 |
 | 检查 `/data/adb/` | Hook `opendir`/`access` |
 
-Java 层通用 Frida 绕过代码见 [frida-cookbook.md](frida-cookbook.md)。
+Java 层通用 Frida 绕过代码见 [[binary/移动安全/frida-cookbook.md|frida-cookbook.md]]。
 
 ## 加固/壳识别与脱壳
 
@@ -188,7 +188,7 @@ Java 层通用 Frida 绕过代码见 [frida-cookbook.md](frida-cookbook.md)。
 方法 4: 手动——Frida 枚举 ClassLoader → 取 DexFile 对象 → 读内存保存
 ```
 
-平台侧 unicorn 脱壳工程见 [unpacking.md](unpacking.md)。
+平台侧 unicorn 脱壳工程见 [[binary/移动安全/unpacking.md|unpacking.md]]。
 
 ## React Native / Flutter 逆向
 

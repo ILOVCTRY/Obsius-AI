@@ -47,7 +47,7 @@
 - [Useful Commands](#useful-commands)
 - [boolector SMT2 for Custom Hash Reversal (OTW Advent 2018)](#boolector-smt2-for-custom-hash-reversal-otw-advent-2018)
 
-For dynamic instrumentation tools (Frida, angr, lldb, x64dbg), see [tools-dynamic.md](tools-dynamic.md).
+For dynamic instrumentation tools (Frida, angr, lldb, x64dbg), see [[binary/逆向工程/tools-dynamic.md|tools-dynamic.md]].
 
 ---
 

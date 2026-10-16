@@ -32,31 +32,41 @@ if str(_HERE) not in sys.path:
 
 
 # 内置精选源清单（仅覆盖「文本/JSON API 源」；网页爬虫见 DEFAULT_SCRAPERS）。
-# 已剔除：openproxylist.xyz（已停服）、proxyscan.io（不稳）、以及 5 个第三方自建
-# `:5000/:5010/fetch_all` 口（非权威、随时失效、由任意主机提供列表=供应链风险，
-# 需 `--sources` 显式开启）。
+#
+# **2026-10-15 本机网络实测重排**（实测结论，换网络环境需重测）：
+# - 已移除（原默认里全部不可用）：
+#   * `raw.githubusercontent.com/TheSpeedX|monosans`（4 条）→ 连接被拒（本机不可达）；
+#   * `api.proxyscrape.com` v3/v4 → 请求超时；
+#   * `www.proxy-list.download` → 502。
+# - 已剔除：proxyscan.io（不稳）、以及第三方自建 `:5000/:5010/fetch_all` 口（非权威、
+#   随时失效、由任意主机提供列表=供应链风险，需 `--sources` 显式开启）。
+# - 现役源全部经 curl 实测可达，单次抓取由 ~600 条提升到 ~18000 条（去重后）。
+#   geonode 走 JSON 分页（每页 500，实测 http 3 页 / socks5 3 页 / socks4 2 页）；
+#   openproxylist.xyz 为纯文本 ip:port（http ~5.6k / socks5 ~5.6k / socks4 ~3.7k）。
 DEFAULT_SOURCES: dict[str, list[str]] = {
     "http": [
-        "https://api.proxyscrape.com/v3/free-proxy-list/get?request=displayproxies&protocol=http",
-        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
-        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
-        "https://www.proxy-list.download/api/v1/get?type=http",
+        "https://api.openproxylist.xyz/http.txt",
+        "https://sunny9577.github.io/proxy-scraper/proxies.txt",
+        "https://vakhov.github.io/fresh-proxy-list/http.txt",
         "https://proxylist.geonode.com/api/proxy-list?limit=500&page=1&sort_by=lastChecked&sort_type=desc&protocols=http",
+        "https://proxylist.geonode.com/api/proxy-list?limit=500&page=2&sort_by=lastChecked&sort_type=desc&protocols=http",
+        "https://proxylist.geonode.com/api/proxy-list?limit=500&page=3&sort_by=lastChecked&sort_type=desc&protocols=http",
     ],
     "https": [
-        "https://www.proxy-list.download/api/v1/get?type=https",
+        "https://vakhov.github.io/fresh-proxy-list/https.txt",
     ],
     "socks4": [
-        "https://api.proxyscrape.com/v3/free-proxy-list/get?request=displayproxies&protocol=socks4",
-        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt",
-        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks4.txt",
-        "https://www.proxy-list.download/api/v1/get?type=socks4",
+        "https://api.openproxylist.xyz/socks4.txt",
+        "https://vakhov.github.io/fresh-proxy-list/socks4.txt",
+        "https://proxylist.geonode.com/api/proxy-list?limit=500&page=1&sort_by=lastChecked&sort_type=desc&protocols=socks4",
+        "https://proxylist.geonode.com/api/proxy-list?limit=500&page=2&sort_by=lastChecked&sort_type=desc&protocols=socks4",
     ],
     "socks5": [
-        "https://api.proxyscrape.com/v3/free-proxy-list/get?request=displayproxies&protocol=socks5",
-        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
-        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt",
-        "https://www.proxy-list.download/api/v1/get?type=socks5",
+        "https://api.openproxylist.xyz/socks5.txt",
+        "https://vakhov.github.io/fresh-proxy-list/socks5.txt",
+        "https://proxylist.geonode.com/api/proxy-list?limit=500&page=1&sort_by=lastChecked&sort_type=desc&protocols=socks5",
+        "https://proxylist.geonode.com/api/proxy-list?limit=500&page=2&sort_by=lastChecked&sort_type=desc&protocols=socks5",
+        "https://proxylist.geonode.com/api/proxy-list?limit=500&page=3&sort_by=lastChecked&sort_type=desc&protocols=socks5",
     ],
 }
 

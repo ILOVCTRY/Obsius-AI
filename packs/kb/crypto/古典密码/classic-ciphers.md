@@ -344,7 +344,7 @@ def crib_drag(c1, c2, crib, max_pos=None):
 
 **Pattern (Booking Key, Nullcon 2026):** Book cipher with "steps forward" encoding. Brute-force starting position with charset filtering reduces ~56k candidates to 3-4.
 
-See [historical.md](historical.md) for full implementation.
+See [[crypto/古典密码/historical.md|historical.md]] for full implementation.
 
 ---
 

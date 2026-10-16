@@ -199,7 +199,7 @@ def test_config_auto_maintenance_defaults(tmp_path):
     assert cfg.auto_fetch_min_https == 20
     assert cfg.auto_fetch_min_socks == 20
     assert cfg.auto_fetch_cooldown_s == 600.0
-    assert cfg.validate_target_https == "https://i.zut.edu.cn/new/index.html"
+    assert cfg.validate_target_https == "https://cp.cloudflare.com/generate_204"
     # 文件覆盖生效
     f = tmp_path / "p.json"
     f.write_text(json.dumps({"auto_fetch_min_http": 200, "maintenance_interval_s": 60}),
@@ -318,6 +318,31 @@ def test_rotate_without_service_rejected(pool):
         pool.rotate()
 
 
+def test_use_proxy_exact_switch(pool):
+    """精确切换（2026-10-15）：指定 host:port → 当前代理即该 IP；不在池/空地址拒绝。"""
+    pool.add_records([_rec("10.0.0.1:1080"), _rec("10.0.0.2:1080", "http")])
+    pool.start()
+    try:
+        cur = pool.use_proxy("10.0.0.2:1080")["current"]["proxy"]
+        assert cur == "10.0.0.2:1080"
+        # 幂等：再钉同一个不变
+        assert pool.use_proxy("10.0.0.2:1080")["current"]["proxy"] == "10.0.0.2:1080"
+        # 换另一个
+        assert pool.use_proxy("10.0.0.1:1080")["current"]["proxy"] == "10.0.0.1:1080"
+        # 不在池 → ProxyError
+        with pytest.raises(Exception):
+            pool.use_proxy("10.9.9.9:1080")
+        with pytest.raises(Exception):
+            pool.use_proxy("")
+    finally:
+        pool.stop()
+
+
+def test_use_proxy_without_service_rejected(pool):
+    with pytest.raises(Exception):
+        pool.use_proxy("10.0.0.1:1080")
+
+
 # ---------------------------------------------------------------- 端到端转发
 
 def test_end_to_end_forwarding(pool, target_server, socks5_upstream):
@@ -376,6 +401,12 @@ def test_api_endpoints(client):
     started = client.post("/api/proxy/start").json()
     assert started["running"] is True and started["count"] == 2
     assert client.post("/api/proxy/rotate").json()["ok"] is True
+    # 精确切换（2026-10-15）：/use 指定 host:port → 当前代理即该 IP
+    used = client.post("/api/proxy/use", json={"proxy": "10.1.1.2:8080"}).json()
+    assert used["ok"] is True and used["current"]["proxy"] == "10.1.1.2:8080"
+    # 不在池 → 503（ProxyError → HTTPException），不 500
+    r = client.post("/api/proxy/use", json={"proxy": "10.9.9.9:1080"})
+    assert r.status_code == 503
     assert client.post("/api/proxy/stop").json() == {"running": False}
 
     assert client.post("/api/proxy/remove",
@@ -557,7 +588,7 @@ def test_validate_passes_target_https(pool, monkeypatch):
     monkeypatch.setattr(ProxyPool, "_run_cli", fake)
     pool.validate()
     assert "--target-https" in seen[0]
-    assert "https://i.zut.edu.cn/new/index.html" in seen[0]
+    assert "https://cp.cloudflare.com/generate_204" in seen[0]
 
 
 def test_fetch_auto_validates_and_prunes(pool, monkeypatch):
@@ -1054,8 +1085,8 @@ def test_write_config_file_merges_and_preserves(tmp_path):
 def test_api_proxy_config_get_defaults(client):
     """GET /api/proxy/config：回显当前值 + defaults（内置缺省）。"""
     body = client.get("/api/proxy/config").json()
-    assert body["validate_target"] == "http://i.zut.edu.cn/new/index.html"
-    assert body["defaults"]["validate_target"] == "http://i.zut.edu.cn/new/index.html"
+    assert body["validate_target"] == "http://cp.cloudflare.com/generate_204"
+    assert body["defaults"]["validate_target"] == "http://cp.cloudflare.com/generate_204"
 
 
 def test_api_proxy_config_put_writes_and_hot_applies(client, tmp_path):

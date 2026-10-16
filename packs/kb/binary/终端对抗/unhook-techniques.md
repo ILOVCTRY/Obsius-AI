@@ -226,4 +226,4 @@ SilentMoonwalk: https://github.com/klezVirus/SilentMoonwalk ·
 Blindside: https://www.cyberark.com/resources/threat-research-blog/blindside-a-new-technique-for-edr-evasion-with-hardware-breakpoints
 
 unhook 只是绕过的一半，另一半是遥测致盲：进入
-[telemetry-blinding.md](telemetry-blinding.md)。
+[[binary/终端对抗/telemetry-blinding.md|telemetry-blinding.md]]。

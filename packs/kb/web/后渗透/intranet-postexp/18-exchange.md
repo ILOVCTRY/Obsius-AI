@@ -1,6 +1,6 @@
 # 内网/后渗透 — Exchange 攻击 payload 库
 
-> 父文档:[00-index.md](00-index.md) · ⚠️ SRC 场景下大多受限,见 [../compliance.md](../compliance.md)
+> 父文档:[[web/后渗透/intranet-postexp/00-index.md|00-index.md]] · ⚠️ SRC 场景下大多受限,见 [../compliance.md](../compliance.md)
 > 涵盖:ProxyLogon / ProxyShell / NTLM Relay / EWS / OAB / Mailbox Export / CVE-2021-26855
 
 ---
@@ -186,4 +186,4 @@ New-MailboxExportRequest -Mailbox user@domain.com -FilePath "\\server\share\user
 
 ---
 
-← 回 [00-index.md](00-index.md) · 上一篇:[`17-persistence.md`](17-persistence.md) · 下一篇:[`19-adcs.md`](19-adcs.md)
+← 回 [[web/后渗透/intranet-postexp/00-index.md|00-index.md]] · 上一篇:[[web/后渗透/intranet-postexp/17-persistence.md|17-persistence.md]] · 下一篇:[[web/后渗透/intranet-postexp/19-adcs.md|19-adcs.md]]

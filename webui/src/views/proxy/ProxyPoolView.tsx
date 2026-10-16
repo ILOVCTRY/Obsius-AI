@@ -30,6 +30,27 @@ const FILTERS: { key: ProxyFilter; label: string }[] = [
   { key: "https", label: "HTTPS" },
   { key: "socks", label: "SOCKS" },
 ]
+
+/** 「单次抓取条数」本地缓存键（2026-10-15）。
+ *
+ * 权威值在 `config/proxy.json` 的 `fetch_limit`（后端「网站设置」可改、自动巡检同用）；
+ * 本地缓存只用于首屏立刻显示 + 读配置失败时兜底。 */
+const FETCH_LIMIT_KEY = "obsius.proxy.fetchLimit"
+
+/** 单次抓取条数的内置缺省（与后端 `ProxyConfig.fetch_limit` 默认一致）。 */
+const FETCH_LIMIT_DEFAULT = 3000
+
+/** 读本地缓存的抓取条数；无/非法/无 localStorage 返回 null。 */
+function readCachedFetchLimit(): number | null {
+  try {
+    const raw = window.localStorage.getItem(FETCH_LIMIT_KEY)
+    if (raw === null) return null
+    const n = Number(raw)
+    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null
+  } catch {
+    return null
+  }
+}
 export function ProxyPoolView({ pid }: { pid?: string | null }) {
   const [status, setStatus] = useState<ProxyStatus | null>(null)
   const [records, setRecords] = useState<ProxyRecord[]>([])
@@ -42,6 +63,12 @@ export function ProxyPoolView({ pid }: { pid?: string | null }) {
   const [filter, setFilter] = useState<ProxyFilter>("all")   // 协议过滤（2026-10-11）
   const [checkOpen, setCheckOpen] = useState(false)          // 访问测试弹窗（2026-10-12）
   const [configOpen, setConfigOpen] = useState(false)        // 网站设置弹窗（2026-10-12）
+  // 单次抓取条数（2026-10-15）：`fetchLimit` 是生效值（点「在线抓取」时随请求发出），
+  // `limitText` 是输入框文本（允许中途为空/半截，失焦或回车才落定）。
+  const [fetchLimit, setFetchLimit] = useState<number>(
+    () => readCachedFetchLimit() ?? FETCH_LIMIT_DEFAULT)
+  const [limitText, setLimitText] = useState<string>(
+    () => String(readCachedFetchLimit() ?? FETCH_LIMIT_DEFAULT))
   const jobRef = useRef<string | null>(null)   // 正在跟踪的 job id（防重复挂载）
 
   const refresh = useCallback(async () => {
@@ -63,6 +90,34 @@ export function ProxyPoolView({ pid }: { pid?: string | null }) {
     const timer = window.setInterval(() => { if (alive) void refresh() }, 3000)
     return () => { alive = false; window.clearInterval(timer) }
   }, [refresh])
+
+  // 抓取条数初值（2026-10-15）：以 config/proxy.json 的 `fetch_limit` 为准（网站设置同源）；
+  // 读不到时保留本地缓存/内置默认，不打扰用户。
+  useEffect(() => {
+    let alive = true
+    api.proxyConfigGet()
+      .then((c) => {
+        if (!alive || typeof c.fetch_limit !== "number") return
+        setFetchLimit(c.fetch_limit)
+        setLimitText(String(c.fetch_limit))
+      })
+      .catch(() => { /* 读配置失败：沿用本地缓存值 */ })
+    return () => { alive = false }
+  }, [])
+
+  /** 落定输入框的抓取条数并返回生效值：写本地缓存 + 回写 config（静默；请求直接用返回值，不等落盘）。 */
+  const commitFetchLimit = useCallback((): number => {
+    const raw = limitText.trim()
+    const parsed = raw === "" ? fetchLimit : Number(raw)
+    const value = Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : fetchLimit
+    setLimitText(String(value))
+    if (value !== fetchLimit) {
+      setFetchLimit(value)
+      try { window.localStorage.setItem(FETCH_LIMIT_KEY, String(value)) } catch { /* 忽略 */ }
+      void api.proxyConfigPut({ fetch_limit: value }).catch(() => { /* 静默：本地已生效 */ })
+    }
+    return value
+  }, [limitText, fetchLimit])
 
   const guard = async (fn: () => Promise<unknown>, note?: string) => {
     setBusy(true); setErr(null); setJobNote(null)
@@ -151,13 +206,24 @@ export function ProxyPoolView({ pid }: { pid?: string | null }) {
         <span className="mx-1 h-5 w-px bg-border" />
 
         <Button size="sm" variant="outline" className="h-7 gap-1 text-xs" disabled={busy}
-                title="从在线源抓取并自动验证，剔除失效代理"
+                title={`从在线源抓取约 ${fetchLimit || "不限量"} 条并自动验证，剔除失效代理`}
                 onClick={() => void guard(async () => {
-                  const { job_id } = await api.proxyFetch()
+                  const limit = commitFetchLimit()
+                  const { job_id } = await api.proxyFetch([], limit)
                   await runJob(job_id, "proxy-fetch")
                 })}>
           <Upload size={12} /> 在线抓取
         </Button>
+        <label className="flex items-center gap-1 text-[11px] text-muted-foreground"
+               title="单次「在线抓取」拉取的代理条数上限（按协议轮转取；0=不限）。失焦或回车生效，并写回 config/proxy.json。">
+          条数
+          <input type="number" min={0} step={500} inputMode="numeric"
+                 value={limitText} disabled={busy}
+                 onChange={(e) => setLimitText(e.target.value)}
+                 onBlur={commitFetchLimit}
+                 onKeyDown={(e) => { if (e.key === "Enter") commitFetchLimit() }}
+                 className="h-7 w-16 rounded-md border bg-transparent px-1.5 text-right font-mono text-[11px] outline-none focus:border-primary disabled:opacity-50" />
+        </label>
         <Button size="sm" variant="outline" className="h-7 gap-1 text-xs"
                 disabled={busy || !records.length}
                 title="验证池内全部代理并移除失效代理"
@@ -343,6 +409,8 @@ export function ProxyPoolView({ pid }: { pid?: string | null }) {
       </div>
 
       <CheckUrlDialog open={checkOpen} onOpenChange={setCheckOpen}
+                      running={running} currentProxy={status?.current?.proxy ?? null}
+                      onUse={(p) => api.proxyUse(p)}
                       onDone={() => void refresh()} />
       <ProxyConfigDialog open={configOpen} onOpenChange={setConfigOpen} />
     </div>
@@ -470,15 +538,28 @@ function ProxyConfigDialog({ open, onOpenChange }: {
   )
 }
 
-/** 访问测试弹窗（2026-10-12）：指定网站 → 池内代理逐一访问 → 可达/被封禁结论。 */
-function CheckUrlDialog({ open, onOpenChange, onDone }: {
+/**
+ * 访问测试弹窗（2026-10-12）：指定网站 → 池内代理逐一访问 → 可达/被封禁结论。
+ * 2026-10-15：结果按「可达 → 被封禁 → 不可达」置顶排序（组内按延迟升序），可达行
+ * 带「切换」按钮——顺序轮换是碰运气，判出可达后直接钉死该 IP。
+ * 切换成败一律弹窗内直显（失败给红色横幅 + 旧 serve 重启提示）：父级 guard() 的错误
+ * 落在页面级 banner，会被本模态整个盖住，用户侧就是「点击没反应」。
+ * 结果表 table-fixed + colgroup 收口列宽，避免 auto 布局把余量摊成「说明」后的空白。
+ */
+function CheckUrlDialog({ open, onOpenChange, onDone, running, currentProxy, onUse }: {
   open: boolean
   onOpenChange: (v: boolean) => void
   onDone: () => void
+  running: boolean
+  currentProxy: string | null
+  onUse: (proxy: string) => Promise<unknown>
 }) {
   const [url, setUrl] = useState("")
   const [probeWaf, setProbeWaf] = useState(true)
-  const [running, setRunning] = useState(false)
+  const [testRunning, setTestRunning] = useState(false)
+  const [switching, setSwitching] = useState<string | null>(null)
+  const [switchNote, setSwitchNote] = useState<string | null>(null)
+  const [switchErr, setSwitchErr] = useState<string | null>(null)
   const [progress, setProgress] = useState<ProxyProgress | null>(null)
   const [result, setResult] = useState<ProxyCheckUrlResult | null>(null)
   const [err, setErr] = useState<string | null>(null)
@@ -486,7 +567,8 @@ function CheckUrlDialog({ open, onOpenChange, onDone }: {
   const run = async () => {
     const target = url.trim()
     if (!target) { setErr("请输入目标 URL"); return }
-    setRunning(true); setErr(null); setResult(null)
+    setTestRunning(true); setErr(null); setResult(null)
+    setSwitchNote(null); setSwitchErr(null)
     setProgress({ phase: "queued", message: "排队中…" })
     try {
       const { job_id } = await api.proxyCheckUrl({ url: target, probe_waf: probeWaf })
@@ -497,12 +579,47 @@ function CheckUrlDialog({ open, onOpenChange, onDone }: {
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : String(e))
     } finally {
-      setRunning(false); setProgress(null); onDone()
+      setTestRunning(false); setProgress(null); onDone()
     }
   }
 
+  /** 精确切换到某个可达代理：成功/失败都在弹窗内直显（不靠父级 guard——
+   *  guard() 的错误落在页面级 banner，会被本模态弹窗整个盖住，用户侧就是
+   *  「点击没反应」）。失败不影响已出的测试结果。 */
+  const use = async (proxy: string) => {
+    setSwitching(proxy); setSwitchErr(null); setSwitchNote(null)
+    try {
+      await onUse(proxy)
+      setSwitchNote(`已切换当前代理 → ${proxy}（此后全走这个 IP）`)
+      onDone()   // 立刻刷新状态条与行高亮，不等 3s 轮询
+    } catch (e) {
+      const msg = e instanceof ApiError ? e.message : String(e)
+      // 旧版 serve / 未重启后端都会走到这：提示先看平台是否刚更新过
+      const stale = /404|unknown path|旧版|控制通道/.test(msg)
+      setSwitchErr(stale
+        ? `切换失败：${msg}（若刚更新过平台，请先重启后端，再「停止服务」→「启动服务」重拉代理服务）`
+        : `切换失败：${msg}`)
+    } finally {
+      setSwitching(null)
+    }
+  }
+
+  // 可达置顶（2026-10-15）：可达（未封禁且通）→ 被封禁 → 不可达；组内延迟升序。
+  // 封禁行才是「被判死」的，沉底降低噪声；可达的不必再翻表找。
+  const rows = useMemo(() => {
+    if (!result) return []
+    const rank = (r: ProxyUrlCheckRow) => (r.blocked ? 1 : (r.ok ? 0 : 2))
+    return [...result.results].sort((a, b) => {
+      const d = rank(a) - rank(b)
+      if (d !== 0) return d
+      const la = typeof a.latency === "number" ? a.latency : Infinity
+      const lb = typeof b.latency === "number" ? b.latency : Infinity
+      return la - lb
+    })
+  }, [result])
+
   return (
-    <Dialog open={open} onOpenChange={(v) => { if (!running) onOpenChange(v) }}>
+    <Dialog open={open} onOpenChange={(v) => { if (!testRunning) onOpenChange(v) }}>
       <DialogContent className="max-w-3xl">
         <DialogTitle>访问测试 · 指定网站代理可达性</DialogTitle>
         <DialogDescription>
@@ -515,14 +632,14 @@ function CheckUrlDialog({ open, onOpenChange, onDone }: {
             value={url} onChange={(e) => setUrl(e.target.value)}
             placeholder="http://target.example.com/ （可省 scheme，默认 http://）"
             className="h-8 flex-1 rounded-md border bg-transparent px-2 font-mono text-[12px] outline-none focus:border-primary"
-            onKeyDown={(e) => { if (e.key === "Enter" && !running) void run() }} />
+            onKeyDown={(e) => { if (e.key === "Enter" && !testRunning) void run() }} />
           <label className="flex shrink-0 cursor-pointer items-center gap-1 text-[11px] text-muted-foreground">
             <input type="checkbox" checked={probeWaf}
                    onChange={(e) => setProbeWaf(e.target.checked)} className="size-3" />
             检测 WAF/封禁
           </label>
-          <Button size="sm" className="h-8 text-xs" disabled={running} onClick={() => void run()}>
-            {running ? "测试中…" : "开始测试"}
+          <Button size="sm" className="h-8 text-xs" disabled={testRunning} onClick={() => void run()}>
+            {testRunning ? "测试中…" : "开始测试"}
           </Button>
         </div>
 
@@ -544,29 +661,64 @@ function CheckUrlDialog({ open, onOpenChange, onDone }: {
                   ? `HTTP ${result.baseline.status_code ?? "?"}`
                   : `不可达（${result.baseline?.error ?? "超时"}）`}
               </span>
+              <span className="text-muted-foreground">
+                当前代理 <code className="rounded bg-muted px-1 font-mono">{currentProxy ?? "—"}</code>
+              </span>
+              {!running && (
+                <span className="text-muted-foreground">（服务未运行，切换不可用）</span>
+              )}
             </div>
+
+            {switchErr && (
+              <div className="rounded border border-destructive/40 bg-destructive/10 px-2 py-1 text-[11px] text-destructive">
+                {switchErr}
+              </div>
+            )}
+            {switchNote && (
+              <div className="rounded border bg-muted/40 px-2 py-1 text-[11px] text-muted-foreground">
+                {switchNote}
+              </div>
+            )}
 
             {result.usable.length > 0 && (
               <div className="rounded-md border bg-muted/30 px-2 py-1.5">
                 <p className="mb-1 text-[11px] font-medium">
-                  可用代理（未被封禁，{result.usable.length} 个）
+                  可用代理（未被封禁，{result.usable.length} 个，按延迟升序）
                 </p>
                 <div className="flex flex-wrap gap-1">
                   {result.usable.map((u) => (
-                    <code key={u.proxy}
-                          className="rounded bg-background px-1.5 py-0.5 font-mono text-[10.5px]">
+                    <button key={u.proxy} type="button"
+                            disabled={!running || switching !== null}
+                            title={running ? `切换当前代理到 ${u.protocol ?? "http"}://${u.proxy}` : "服务未运行"}
+                            onClick={() => void use(u.proxy)}
+                            className={cn(
+                              "rounded bg-background px-1.5 py-0.5 font-mono text-[10.5px] transition-colors",
+                              running ? "cursor-pointer hover:bg-primary hover:text-primary-foreground" : "cursor-not-allowed opacity-60",
+                              currentProxy === u.proxy && "ring-1 ring-(--status-ok)")}>
                       {u.protocol ? `${u.protocol}://` : ""}{u.proxy}
                       {typeof u.latency === "number" && (
                         <span className="text-muted-foreground"> {Math.round(u.latency * 1000)}ms</span>
                       )}
-                    </code>
+                    </button>
                   ))}
                 </div>
+                <p className="mt-1 text-[10px] text-muted-foreground">点任意一个即切换为当前代理（下表可达行同效）</p>
               </div>
             )}
 
+            {/* table-fixed + colgroup：auto 布局会把剩余宽度按内容比例摊给各列，
+                「说明」短文本后留一大块空白才顶到操作按钮——固定列宽后按钮贴内容。 */}
             <div className="min-h-0 flex-1 overflow-auto rounded-md border">
-              <table className="w-full border-collapse text-[11px]">
+              <table className="w-full table-fixed border-collapse text-[11px]">
+                <colgroup>
+                  <col className="w-[27%]" />  代理
+                  <col className="w-[8%]" />   协议
+                  <col className="w-[9%]" />   状态码
+                  <col className="w-[9%]" />   延迟
+                  <col className="w-[9%]" />   结论
+                  <col />                       说明（吃剩余宽度，截断不换行）
+                  <col className="w-[68px]" /> 操作
+                </colgroup>
                 <thead className="sticky top-0 z-10 bg-(--surface-1) text-muted-foreground">
                   <tr className="border-b">
                     <th className="px-2 py-1 text-left font-medium">代理</th>
@@ -575,19 +727,38 @@ function CheckUrlDialog({ open, onOpenChange, onDone }: {
                     <th className="px-2 py-1 text-right font-medium">延迟</th>
                     <th className="px-2 py-1 text-left font-medium">结论</th>
                     <th className="px-2 py-1 text-left font-medium">说明</th>
+                    <th className="px-2 py-1 text-left font-medium">操作</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {result.results.map((r) => (
-                    <tr key={r.proxy} className="border-b border-border/50">
-                      <td className="px-2 py-1 font-mono">{r.proxy}</td>
-                      <td className="px-2 py-1 text-muted-foreground">{r.protocol ?? "—"}</td>
+                  {rows.map((r) => (
+                    <tr key={r.proxy} className={cn(
+                      "border-b border-border/50",
+                      currentProxy === r.proxy && "bg-(--status-ok)/8")}>
+                      <td className="truncate px-2 py-1 font-mono" title={r.proxy}>{r.proxy}</td>
+                      <td className="truncate px-2 py-1 text-muted-foreground">{r.protocol ?? "—"}</td>
                       <td className="px-2 py-1 text-right font-mono">{r.status_code ?? "—"}</td>
                       <td className="px-2 py-1 text-right font-mono">
                         {typeof r.latency === "number" ? `${Math.round(r.latency * 1000)}ms` : "—"}
                       </td>
                       <td className="px-2 py-1"><CheckVerdict row={r} /></td>
-                      <td className="px-2 py-1 text-muted-foreground">{r.reason ?? ""}</td>
+                      <td className="truncate px-2 py-1 text-muted-foreground" title={r.reason ?? ""}>
+                        {r.reason ?? ""}
+                      </td>
+                      <td className="px-2 py-1">
+                        {currentProxy === r.proxy ? (
+                          <span className="text-[10px] text-(--status-ok)">当前</span>
+                        ) : r.ok && !r.blocked ? (
+                          <Button size="sm" variant="outline"
+                                  className="h-6 gap-1 whitespace-nowrap px-1.5 text-[10px]"
+                                  disabled={!running || switching !== null}
+                                  title={`切换当前代理到 ${r.proxy}（此后全走这个 IP）`}
+                                  onClick={() => void use(r.proxy)}>
+                            <Zap size={10} />
+                            {switching === r.proxy ? "切换中…" : "切换"}
+                          </Button>
+                        ) : null}
+                      </td>
                     </tr>
                   ))}
                 </tbody>

@@ -26,7 +26,7 @@
   - [Multi-Layer Esoteric Language Chains (Break In 2016)](#multi-layer-esoteric-language-chains-break-in-2016)
 - [base65536 CJK Unicode Binary Encoding (IceCTF 2018)](#base65536-cjk-unicode-binary-encoding-icectf-2018)
 
-See also: [encodings-advanced.md](encodings-advanced.md) - Verilog/HDL, Gray code, binary tree encoding, RTF custom tags, SMS PDU decoding, multi-encoding solvers, UTF-9, pixel binary encoding, hex Sudoku + QR, TOPKEK, MaxiCode
+See also: [[misc/编码解码/encodings-advanced.md|encodings-advanced.md]] - Verilog/HDL, Gray code, binary tree encoding, RTF custom tags, SMS PDU decoding, multi-encoding solvers, UTF-9, pixel binary encoding, hex Sudoku + QR, TOPKEK, MaxiCode
 
 ---
 

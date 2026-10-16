@@ -24,8 +24,8 @@
 - [FRACTRAN Program Inversion (Boston Key Party 2016)](#fractran-program-inversion-boston-key-party-2016)
 - [GNU Make Turing Machine Simulator (Hack.lu 2018)](#gnu-make-turing-machine-simulator-hacklu-2018)
 
-For platform/framework-specific techniques (Android, Roblox, Godot, Electron, Node.js, Verilog, Ruby/Perl polyglot, etc.), see [languages-platforms.md](languages-platforms.md).
-For Go and Rust binary reversing, see [languages-compiled.md](languages-compiled.md).
+For platform/framework-specific techniques (Android, Roblox, Godot, Electron, Node.js, Verilog, Ruby/Perl polyglot, etc.), see [[binary/逆向工程/languages-platforms.md|languages-platforms.md]].
+For Go and Rust binary reversing, see [[binary/逆向工程/languages-compiled.md|languages-compiled.md]].
 
 ---
 

@@ -149,13 +149,13 @@ The ROP chain still calls `commit_creds(prepare_kernel_cred(0))` and does `swapg
 
 Instead of returning to userland, overwrite `modprobe_path` directly from the kernel ROP chain using `pop rax; pop rdi; mov [rdi], rax; ret` gadgets. No KPTI handling needed — the write happens entirely in kernel context.
 
-See [kernel.md - modprobe_path Overwrite](kernel.md#modprobe_path-overwrite) for the full technique, trigger sequence, and ROP payload.
+See [[binary/漏洞利用/kernel.md#modprobe_path-overwrite|kernel.md - modprobe_path Overwrite]] for the full technique, trigger sequence, and ROP payload.
 
 ### Method 4: core_pattern via ROP
 
 Similar to Method 3 but overwrites `core_pattern` with a pipe command (e.g., `"|/evil"`). When any process crashes, the kernel executes the piped program as root.
 
-See [kernel.md - core_pattern Overwrite](kernel.md#core_pattern-overwrite) for the full technique and how to find the `core_pattern` address.
+See [[binary/漏洞利用/kernel.md#core_pattern-overwrite|kernel.md - core_pattern Overwrite]] for the full technique and how to find the `core_pattern` address.
 
 ---
 
@@ -242,7 +242,7 @@ fake_shstk = flat([pop_rdi_ret, 0, prepare_kernel_cred])
 ## SMEP / SMAP Bypass
 
 **SMEP (Supervisor Mode Execution Prevention):** Blocks executing userland pages from kernel mode.
-- **Bypass:** Use kernel ROP (kROP) chains — all gadgets from kernel `.text`. See [kernel.md - Kernel ROP](kernel.md#kernel-rop-with-prepare_kernel_cred--commit_creds).
+- **Bypass:** Use kernel ROP (kROP) chains — all gadgets from kernel `.text`. See [[binary/漏洞利用/kernel.md#kernel-rop-with-prepare_kernel_cred--commit_creds|kernel.md - Kernel ROP]].
 
 **SMAP (Supervisor Mode Access Prevention):** Blocks accessing userland memory from kernel mode.
 - **Bypass:** kROP with heap-resident chain (all data in kernel heap), or `stac`/`clac` gadgets to temporarily disable SMAP.
@@ -255,9 +255,9 @@ fake_shstk = flat([pop_rdi_ret, 0, prepare_kernel_cred])
 
 | Protection | Blocks | Bypass |
 |-----------|--------|--------|
-| SMEP | Executing userland pages from kernel | kROP (kernel ROP chain) — see [kernel.md](kernel.md#kernel-rop-with-prepare_kernel_cred--commit_creds) |
+| SMEP | Executing userland pages from kernel | kROP (kernel ROP chain) — see [[binary/漏洞利用/kernel.md#kernel-rop-with-prepare_kernel_cred--commit_creds|kernel.md]] |
 | SMAP | Accessing userland memory from kernel | kROP with heap-resident chain, `stac`/`clac` gadgets |
-| No SMEP/SMAP | (nothing) | [ret2usr](kernel.md#ret2usr-no-smepsmap) — directly call userland privesc function |
+| No SMEP/SMAP | (nothing) | [[binary/漏洞利用/kernel.md#ret2usr-no-smepsmap|ret2usr]] — directly call userland privesc function |
 | KPTI | Kernel page table isolation | [Trampoline](#method-1-swapgs_restore-trampoline), [signal handler](#method-2-signal-handler-sigsegv), [modprobe_path](#method-3-modprobe_path-via-rop), [core_pattern](#method-4-core_pattern-via-rop) |
 
 See [KPTI Bypass Methods](#kpti-bypass-methods) for detailed bypass techniques with code.

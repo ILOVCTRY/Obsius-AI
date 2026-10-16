@@ -1,6 +1,6 @@
 # 内网/后渗透 — 权限提升 payload 库
 
-> 父文档:[00-index.md](00-index.md) · ⚠️ SRC 场景下大多受限,见 [../compliance.md](../compliance.md)
+> 父文档:[[web/后渗透/intranet-postexp/00-index.md|00-index.md]] · ⚠️ SRC 场景下大多受限,见 [../compliance.md](../compliance.md)
 > 涵盖:UAC bypass / sudo / Linux 内核 / SUID / Windows token / SeImpersonate / Print Spooler
 
 ---
@@ -568,4 +568,4 @@ SharpToken.exe execute SYSTEM "cmd /c whoami"
 
 ---
 
-← 回 [00-index.md](00-index.md) · 上一篇:[`11-lateral.md`](11-lateral.md) · 下一篇:[`13-evasion.md`](13-evasion.md)
+← 回 [[web/后渗透/intranet-postexp/00-index.md|00-index.md]] · 上一篇:[[web/后渗透/intranet-postexp/11-lateral.md|11-lateral.md]] · 下一篇:[[web/后渗透/intranet-postexp/13-evasion.md|13-evasion.md]]

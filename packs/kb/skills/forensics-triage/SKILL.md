@@ -13,7 +13,7 @@ mode: self-contained
 # forensics-triage —— 取证与 OSINT 分诊路由
 
 > 分层纪律：本技能只做**介质判定 → 开专题**。操作细节在 forensics /
-> osint 英文参考资料，用 `skill_open(path=…)` 按表开单篇，禁止通读。
+> osint 英文参考资料，用 `kb_open(module=…)` 按表开单篇，禁止通读。
 > 附件先过 file-triage（magic/strings），介质明确后回本技能选模块。
 
 ## 0. 先看附件是什么
@@ -24,26 +24,26 @@ mode: self-contained
 
 ## 1. 介质 → 专题对照表
 
-**forensics（skill_open module 前缀 `forensics/`）**
+**forensics（kb_open module 前缀 `forensics/`）**
 
 | 附件形态/题目关键词 | 模块 |
 |---|---|
-| 抓包、会话重组、协议解析、包间隔编码、TCP 流 | `network.md`；进阶 `network-advanced.md` |
-| 磁盘镜像、分区、删除恢复、文件雕刻 | `disk-and-memory.md`；恢复 `disk-recovery.md`；进阶 `disk-advanced.md` |
-| 内存镜像、进程/网络连接提取、volatility | `disk-and-memory.md`；Windows 侧 `windows.md`，Linux 侧 `linux-forensics.md` |
-| 注册表、事件日志 evtx、Windows 时间线 | `windows.md` |
-| 图片隐写（LSB/EXIF/附加数据/binwalk） | `stego-image.md`；总览 `steganography.md`；进阶 `stego-advanced.md`（两段连载合一篇） |
-| 音频/频谱图/摩斯/DTMF/多音轨 | `signals-and-hardware.md`（题目描述含 spectrogram/audio tracks/MKV 也走此篇） |
-| 键盘/USB/HID 流量、外设抓包、逻辑分析仪 | `peripheral-capture.md`、`signals-and-hardware.md` |
-| 3D 打印文件（冷门，先 binwalk） | `3d-printing.md` |
+| 抓包、会话重组、协议解析、包间隔编码、TCP 流 | `cloud/云厂商/aws/network.md`；进阶 `forensics/网络取证/network-advanced.md` |
+| 磁盘镜像、分区、删除恢复、文件雕刻 | `forensics/磁盘与内存/disk-and-memory.md`；恢复 `forensics/磁盘与内存/disk-recovery.md`；进阶 `forensics/磁盘与内存/disk-advanced.md` |
+| 内存镜像、进程/网络连接提取、volatility | `forensics/磁盘与内存/disk-and-memory.md`；Windows 侧 `forensics/磁盘与内存/windows.md`，Linux 侧 `forensics/系统取证/linux-forensics.md` |
+| 注册表、事件日志 evtx、Windows 时间线 | `forensics/磁盘与内存/windows.md` |
+| 图片隐写（LSB/EXIF/附加数据/binwalk） | `forensics/隐写与信号/stego-image.md`；总览 `forensics/隐写与信号/steganography.md`；进阶 `forensics/隐写与信号/stego-advanced.md`（两段连载合一篇） |
+| 音频/频谱图/摩斯/DTMF/多音轨 | `forensics/隐写与信号/signals-and-hardware.md`（题目描述含 spectrogram/audio tracks/MKV 也走此篇） |
+| 键盘/USB/HID 流量、外设抓包、逻辑分析仪 | `forensics/隐写与信号/peripheral-capture.md`、`forensics/隐写与信号/signals-and-hardware.md` |
+| 3D 打印文件（冷门，先 binwalk） | `forensics/其他取证/3d-printing.md` |
 
 **osint（前缀 `osint/`）**——题目只有"找人/找位置/找时间"，没有可分析附件：
 
 | 线索 | 模块 |
 |---|---|
-| 社交账号、用户名复用、帖子回溯 | `social-media.md` |
-| 照片定位、街景匹配、EXIF/媒体溯源 | `geolocation-and-media.md` |
-| DNS/被动 DNS、网页归档、证书透明度 | `web-and-dns.md` |
+| 社交账号、用户名复用、帖子回溯 | `forensics/开源情报/social-media.md` |
+| 照片定位、街景匹配、EXIF/媒体溯源 | `forensics/开源情报/geolocation-and-media.md` |
+| DNS/被动 DNS、网页归档、证书透明度 | `forensics/开源情报/web-and-dns.md` |
 
 ## 2. 跨类提醒
 

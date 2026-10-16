@@ -2,7 +2,7 @@
 
 Emulation frameworks (Qiling, Triton) and side-channel measurement tools (Intel Pin, LD_PRELOAD hooks) for CTF challenges where anti-debug, self-modifying code, or cross-architecture targets make plain GDB/Frida impractical.
 
-For core dynamic analysis tools (Frida, angr, lldb, x64dbg), see [tools-dynamic.md](tools-dynamic.md).
+For core dynamic analysis tools (Frida, angr, lldb, x64dbg), see [[binary/逆向工程/tools-dynamic.md|tools-dynamic.md]].
 
 ## Table of Contents
 - [Qiling Framework (Cross-Platform Emulation)](#qiling-framework-cross-platform-emulation)
@@ -108,7 +108,7 @@ for ch in string.printable:
 
 ## Triton (Dynamic Symbolic Execution)
 
-See [tools-advanced.md](tools-advanced.md#triton-dynamic-symbolic-execution) for full Triton reference. Quick usage:
+See [[binary/逆向工程/tools-advanced.md#triton-dynamic-symbolic-execution|tools-advanced.md]] for full Triton reference. Quick usage:
 
 ```python
 from triton import *

@@ -9,8 +9,8 @@ vuln_class: [dotnet]
 
 > 来源：reverse-skill 1.0.1 收编改编（2026-09-30，MIT，见 `../../licenses/`）。
 > 完整工作流细节、IL patch 可靠性、字符串解密器提取、状态机识别、dnlib 脚本化。
-> 配合技能 [dotnet-rev](../../capabilities/binary/skills/dotnet-rev/SKILL.md) 使用；
-> 脱壳手法详见 [obfuscators.md](obfuscators.md)。
+> 配合技能 [[skills/dotnet-rev/SKILL.md|dotnet-rev]] 使用；
+> 脱壳手法详见 [[binary/dotnet逆向/obfuscators.md|obfuscators.md]]。
 
 ## 端到端六阶段
 
@@ -152,7 +152,7 @@ catch (CustomException e) {
 4. 常见：AES-256-CBC with Key==IV（Codegate 2013 模式）
 ```
 
-红队工具的具体配置结构见 [sharp-tools.md](sharp-tools.md)。
+红队工具的具体配置结构见 [[binary/dotnet逆向/sharp-tools.md|sharp-tools.md]]。
 
 ## 与平台 native 逆向的边界
 

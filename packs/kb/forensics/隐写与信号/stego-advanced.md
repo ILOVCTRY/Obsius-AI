@@ -483,7 +483,7 @@ flag = ''.join(chr(o + f) for o, f in zip(ons, offs))
 
 # Part 2
 
-See also: [stego-advanced.md](stego-advanced.md) for audio steganography (FFT frequency domain, DTMF, SSTV, LSB audio, musical notes, metadata encoding, waveform binary, spectrogram QR) and whitespace/archive encoding.
+See also: [[forensics/隐写与信号/stego-advanced.md|stego-advanced.md]] for audio steganography (FFT frequency domain, DTMF, SSTV, LSB audio, musical notes, metadata encoding, waveform binary, spectrogram QR) and whitespace/archive encoding.
 
 ## Table of Contents
 - [Video Frame Accumulation for Hidden Image (ASIS CTF Finals 2013)](#video-frame-accumulation-for-hidden-image-asis-ctf-finals-2013)

@@ -1,6 +1,6 @@
 # RCE — 文件链 / 上传 / 包含 payload 库
 
-> 父文档:[00-index.md](00-index.md)
+> 父文档:[[web/实战打法/rce/00-index.md|00-index.md]]
 > 通过文件系统获取代码执行:文件上传 + 解析配合 / 文件包含 / 日志投毒 / 图片马 / .htaccess。
 > 上传点本身的多维度绕过见 `references/playbooks/file-upload/00-index.md`。
 
@@ -336,4 +336,4 @@ _换行绕过_
 
 ---
 
-← 回 [00-index.md](00-index.md) · 相关:`references/playbooks/file-upload/00-index.md`(上传绕过)
+← 回 [[web/实战打法/rce/00-index.md|00-index.md]] · 相关:`references/playbooks/file-upload/00-index.md`(上传绕过)

@@ -1,6 +1,6 @@
 # 模型窃取 / 对抗样本 payload 库
 
-> 父文档:[00-index.md](00-index.md)
+> 父文档:[[web/实战打法/llm-prompt-injection/00-index.md|00-index.md]]
 > 涵盖:AI 模型窃取与推理攻击 + 对抗样本攻击。针对模型本身的攻击(非 prompt 层),需要查询次数 / 黑盒梯度估计等条件。
 
 ---
@@ -322,4 +322,4 @@ def diverse_input(img, prob=0.5):
 
 ---
 
-← 回 [00-index.md](00-index.md)
+← 回 [[web/实战打法/llm-prompt-injection/00-index.md|00-index.md]]

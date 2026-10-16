@@ -28,7 +28,7 @@
 - [JA4/JA4H TLS and HTTP Fingerprint Matching (BSidesSF 2026)](#ja4ja4h-tls-and-http-fingerprint-matching-bsidessf-2026)
 - [Colon/Newline Injection in String-Separator Serialization (Evlz CTF 2019)](#colonnewline-injection-in-string-separator-serialization-evlz-ctf-2019)
 
-For JWT/JWE token attacks, see [auth-jwt.md](auth-jwt.md). For OAuth/OIDC, SAML, CI/CD credential theft, and infrastructure auth attacks, see [auth-infra.md](auth-infra.md).
+For JWT/JWE token attacks, see [[web/漏洞分类/authn/auth-jwt.md|auth-jwt.md]]. For OAuth/OIDC, SAML, CI/CD credential theft, and infrastructure auth attacks, see [[web/漏洞分类/authn/auth-infra.md|auth-infra.md]].
 
 ---
 
@@ -786,7 +786,7 @@ See [auth-and-access-2.md](auth-and-access-2.md) for additional 2018-era auth at
 
 # CTF Web - Auth & Access Control Attacks (Part 2)
 
-2018-era additions: bucket-collision hash auth bypass, Unicode username homograph collision, SRP A=0/A=N bypass, ArangoDB AQL MERGE privilege escalation. For foundational auth/access techniques see [auth-and-access.md](auth-and-access.md). For JWT attacks see [auth-jwt.md](auth-jwt.md). For OAuth/OIDC/SAML/CI-CD, see [auth-infra.md](auth-infra.md).
+2018-era additions: bucket-collision hash auth bypass, Unicode username homograph collision, SRP A=0/A=N bypass, ArangoDB AQL MERGE privilege escalation. For foundational auth/access techniques see [[web/漏洞分类/authn/auth-and-access.md|auth-and-access.md]]. For JWT attacks see [[web/漏洞分类/authn/auth-jwt.md|auth-jwt.md]]. For OAuth/OIDC/SAML/CI-CD, see [[web/漏洞分类/authn/auth-infra.md|auth-infra.md]].
 
 ## Table of Contents
 - [std::unordered_set Bucket Collision Auth Bypass (Hackover 2018)](#stdunordered_set-bucket-collision-auth-bypass-hackover-2018)

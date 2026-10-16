@@ -1,6 +1,6 @@
 # RFI / 日志投毒 LFI payload 库
 
-> 父文档:[00-index.md](00-index.md)
+> 父文档:[[web/实战打法/path-traversal/00-index.md|00-index.md]]
 > 涵盖:远程文件包含 + 日志投毒 LFI(把恶意内容写进 access_log / error_log / SSH log / mail log,再 LFI 包含触发)。
 
 ---
@@ -146,4 +146,4 @@ _WAF绕过技术_
 
 ---
 
-← 回 [00-index.md](00-index.md) · 相关:[`../rce/13-file-rce-chain.md`](../rce/13-file-rce-chain.md)
+← 回 [[web/实战打法/path-traversal/00-index.md|00-index.md]] · 相关:[[web/实战打法/rce/13-file-rce-chain.md|../rce/13-file-rce-chain.md]]

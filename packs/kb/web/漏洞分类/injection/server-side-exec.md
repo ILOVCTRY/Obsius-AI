@@ -30,7 +30,7 @@
 - [PHP eval() Function-Regex Bypass via current(getallheaders()) (RCTF 2018)](#php-eval-function-regex-bypass-via-currentgetallheaders-rctf-2018)
 - [Python f-string Format Injection Blind Extraction (Meepwn CTF Quals 2018)](#python-f-string-format-injection-blind-extraction-meepwn-ctf-quals-2018)
 
-For injection attacks (SQLi, SSTI, SSRF, XXE, command injection, PHP type juggling, PHP file inclusion), see [server-side.md](server-side.md). For deserialization attacks (Java, Pickle) and race conditions, see [server-side-deser.md](server-side-deser.md). For CVE-specific exploits, path traversal bypasses, Flask/Werkzeug debug, and other advanced techniques, see [server-side-advanced.md](server-side-advanced.md).
+For injection attacks (SQLi, SSTI, SSRF, XXE, command injection, PHP type juggling, PHP file inclusion), see [[web/漏洞分类/injection/server-side.md|server-side.md]]. For deserialization attacks (Java, Pickle) and race conditions, see [[web/漏洞分类/injection/server-side-deser.md|server-side-deser.md]]. For CVE-specific exploits, path traversal bypasses, Flask/Werkzeug debug, and other advanced techniques, see [[web/漏洞分类/injection/server-side-advanced.md|server-side-advanced.md]].
 
 *See also: [server-side-exec-2.md](server-side-exec-2.md) for SQLi keyword fragmentation bypass, SQL WHERE ORDER BY bypass, SQL injection via DNS records, bash brace expansion, Common Lisp reader macro injection, PHP7 OPcache + LD_PRELOAD bypass, wget filename trick, tar filename injection, PNG/PHP polyglot upload, editor backup file disclosure, date -f file read, Apache mod_rewrite bypass, and PHP ReDoS code skip.*
 
@@ -454,7 +454,7 @@ Iterate the comparison character to binary-search each byte of `FLAG` without ev
 
 ---
 
-*See also: [server-side.md](server-side.md) for core injection attacks (SQLi, SSTI, SSRF, XXE, command injection, PHP type juggling, PHP file inclusion).*
+*See also: [[web/漏洞分类/injection/server-side.md|server-side.md]] for core injection attacks (SQLi, SSTI, SSRF, XXE, command injection, PHP type juggling, PHP file inclusion).*
 
 <!-- merged: webapp/injection/server-side-exec.md -->
 
@@ -476,10 +476,10 @@ Iterate the comparison character to binary-search each byte of `FLAG` without ev
 - [Apache mod_rewrite PATH_INFO Bypass (EKOPARTY 2017)](#apache-mod_rewrite-path_info-bypass-ekoparty-2017)
 - [PHP ReDoS to Skip Code Execution (CODE BLUE 2017)](#php-redos-to-skip-code-execution-code-blue-2017)
 - [Custom Serializer Integer Overflow 256 to 0 Length (Codegate 2018)](#custom-serializer-integer-overflow-256-to-0-length-codegate-2018)
-- [Pickle Chaining via STOP Opcode Stripping (VolgaCTF 2013)](#pickle-chaining-via-stop-opcode-stripping-volgactf-2013) *(stub — see [server-side-deser.md](server-side-deser.md))*
-- [Java Deserialization (ysoserial)](#java-deserialization-ysoserial) *(stub — see [server-side-deser.md](server-side-deser.md))*
-- [Python Pickle Deserialization](#python-pickle-deserialization) *(stub — see [server-side-deser.md](server-side-deser.md))*
-- [Race Conditions (Time-of-Check to Time-of-Use)](#race-conditions-time-of-check-to-time-of-use) *(stub — see [server-side-deser.md](server-side-deser.md))*
+- [Pickle Chaining via STOP Opcode Stripping (VolgaCTF 2013)](#pickle-chaining-via-stop-opcode-stripping-volgactf-2013) *(stub — see [[web/漏洞分类/injection/server-side-deser.md|server-side-deser.md]])*
+- [Java Deserialization (ysoserial)](#java-deserialization-ysoserial) *(stub — see [[web/漏洞分类/injection/server-side-deser.md|server-side-deser.md]])*
+- [Python Pickle Deserialization](#python-pickle-deserialization) *(stub — see [[web/漏洞分类/injection/server-side-deser.md|server-side-deser.md]])*
+- [Race Conditions (Time-of-Check to Time-of-Use)](#race-conditions-time-of-check-to-time-of-use) *(stub — see [[web/漏洞分类/injection/server-side-deser.md|server-side-deser.md]])*
 - [Unanchored Regex Command Injection (picoCTF 2018)](#unanchored-regex-command-injection-picoctf-2018)
 - [Jinja2 SSTI via globals.__self__.exec() String Concat Bypass (InCTF 2018)](#jinja2-ssti-via-globals__self__exec-string-concat-bypass-inctf-2018)
 - [web.py reparam() eval + __subclasses__ with Blanked Builtins (HITCON 2018)](#webpy-reparam-eval--__subclasses__-with-blanked-builtins-hitcon-2018)
@@ -490,9 +490,9 @@ Iterate the comparison character to binary-search each byte of `FLAG` without ev
 - [.phar Extension Bypass for PHP Upload Blacklists (35C3 2018)](#phar-extension-bypass-for-php-upload-blacklists-35c3-2018)
 - [vsftpd 2.3.4 Smiley-Face Backdoor (P.W.N. CTF 2018)](#vsftpd-234-smiley-face-backdoor-pwn-ctf-2018)
 
-For injection attacks (SQLi, SSTI, SSRF, XXE, command injection, PHP type juggling, PHP file inclusion), see [server-side.md](server-side.md). For deserialization attacks (Java, Pickle) and race conditions, see [server-side-deser.md](server-side-deser.md). For CVE-specific exploits, path traversal bypasses, Flask/Werkzeug debug, and other advanced techniques, see [server-side-advanced.md](server-side-advanced.md).
+For injection attacks (SQLi, SSTI, SSRF, XXE, command injection, PHP type juggling, PHP file inclusion), see [[web/漏洞分类/injection/server-side.md|server-side.md]]. For deserialization attacks (Java, Pickle) and race conditions, see [[web/漏洞分类/injection/server-side-deser.md|server-side-deser.md]]. For CVE-specific exploits, path traversal bypasses, Flask/Werkzeug debug, and other advanced techniques, see [[web/漏洞分类/injection/server-side-advanced.md|server-side-advanced.md]].
 
-*See also: [server-side-exec.md](server-side-exec.md) for Ruby/Perl/JS code injection, LaTeX injection RCE, PHP preg_replace /e RCE, PHP backtick eval, PHP assert() injection, Prolog injection, ReDoS timing oracle, file upload to RCE (.htaccess, log poisoning, Python .so hijack, Gogs symlink, ZipSlip), PHP deserialization from cookies, PHP extract() variable overwrite, XPath blind injection, API filter injection, HTTP response header hiding, WebSocket mass assignment, and Thymeleaf SpEL SSTI.*
+*See also: [[web/漏洞分类/injection/server-side-exec.md|server-side-exec.md]] for Ruby/Perl/JS code injection, LaTeX injection RCE, PHP preg_replace /e RCE, PHP backtick eval, PHP assert() injection, Prolog injection, ReDoS timing oracle, file upload to RCE (.htaccess, log poisoning, Python .so hijack, Gogs symlink, ZipSlip), PHP deserialization from cookies, PHP extract() variable overwrite, XPath blind injection, API filter injection, HTTP response header hiding, WebSocket mass assignment, and Thymeleaf SpEL SSTI.*
 
 ---
 
@@ -588,25 +588,25 @@ Lisp's `read` function evaluates `#.(expression)` reader macros at parse time. W
 
 ## Pickle Chaining via STOP Opcode Stripping (VolgaCTF 2013)
 
-Strip pickle STOP opcode (`\x2e`) from first payload, concatenate second — both `__reduce__` calls execute in single `pickle.loads()`. Chain `os.dup2()` for socket output. See [server-side-deser.md](server-side-deser.md#pickle-chaining-via-stop-opcode-stripping-volgactf-2013) for full exploit code.
+Strip pickle STOP opcode (`\x2e`) from first payload, concatenate second — both `__reduce__` calls execute in single `pickle.loads()`. Chain `os.dup2()` for socket output. See [[web/漏洞分类/injection/server-side-deser.md#pickle-chaining-via-stop-opcode-stripping-volgactf-2013|server-side-deser.md]] for full exploit code.
 
 ---
 
 ## Java Deserialization (ysoserial)
 
-Serialized Java objects in cookies/POST (starts with `rO0AB` / `aced0005`). Use ysoserial gadget chains (CommonsCollections, URLDNS for blind detection). See [server-side-deser.md](server-side-deser.md#java-deserialization-ysoserial) for payloads and bypass techniques.
+Serialized Java objects in cookies/POST (starts with `rO0AB` / `aced0005`). Use ysoserial gadget chains (CommonsCollections, URLDNS for blind detection). See [[web/漏洞分类/injection/server-side-deser.md#java-deserialization-ysoserial|server-side-deser.md]] for payloads and bypass techniques.
 
 ---
 
 ## Python Pickle Deserialization
 
-`pickle.loads()` calls `__reduce__()` for instant RCE via `(os.system, ('cmd',))`. Common in Flask sessions, ML model files, Redis objects. See [server-side-deser.md](server-side-deser.md#python-pickle-deserialization) for payloads and restricted unpickler bypasses.
+`pickle.loads()` calls `__reduce__()` for instant RCE via `(os.system, ('cmd',))`. Common in Flask sessions, ML model files, Redis objects. See [[web/漏洞分类/injection/server-side-deser.md#python-pickle-deserialization|server-side-deser.md]] for payloads and restricted unpickler bypasses.
 
 ---
 
 ## Race Conditions (Time-of-Check to Time-of-Use)
 
-Concurrent requests bypass check-then-act patterns (balance, coupons, registration uniqueness). Send 50+ simultaneous requests so all see pre-modification state. See [server-side-deser.md](server-side-deser.md#race-conditions-time-of-check-to-time-of-use) for async exploit code and detection patterns.
+Concurrent requests bypass check-then-act patterns (balance, coupons, registration uniqueness). Send 50+ simultaneous requests so all see pre-modification state. See [[web/漏洞分类/injection/server-side-deser.md#race-conditions-time-of-check-to-time-of-use|server-side-deser.md]] for async exploit code and detection patterns.
 
 ---
 
@@ -1075,7 +1075,7 @@ assert find_overflow_length(1) == 256
 assert find_overflow_length(2) == 65536
 ```
 
-**Key insight:** Single-byte length fields overflow at 256 to 0, letting data from one field spill into subsequent fields. Any custom serialization format using fixed-width length fields is vulnerable. Look for field length stored in 1 byte (max 255) or 2 bytes (max 65535). Signs of custom serialization: binary file-based databases, custom session formats, proprietary protocol parsers. The attack requires knowing (or guessing) the exact field order and format in the serialized structure. See also [server-side-deser.md](server-side-deser.md) for standard deserialization attacks.
+**Key insight:** Single-byte length fields overflow at 256 to 0, letting data from one field spill into subsequent fields. Any custom serialization format using fixed-width length fields is vulnerable. Look for field length stored in 1 byte (max 255) or 2 bytes (max 65535). Signs of custom serialization: binary file-based databases, custom session formats, proprietary protocol parsers. The attack requires knowing (or guessing) the exact field order and format in the serialized structure. See also [[web/漏洞分类/injection/server-side-deser.md|server-side-deser.md]] for standard deserialization attacks.
 
 ---
 
@@ -1256,4 +1256,4 @@ nc target 6200
 
 ---
 
-*See also: [server-side.md](server-side.md) for core injection attacks (SQLi, SSTI, SSRF, XXE, command injection, PHP type juggling, PHP file inclusion).*
+*See also: [[web/漏洞分类/injection/server-side.md|server-side.md]] for core injection attacks (SQLi, SSTI, SSRF, XXE, command injection, PHP type juggling, PHP file inclusion).*

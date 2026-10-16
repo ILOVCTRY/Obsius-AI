@@ -506,11 +506,16 @@ class _FakeLLM:
         return SimpleNamespace(text=self.text, tool_calls=[])
 
 
-def _make_session(tmp_path: Path):
+def _make_session(tmp_path: Path, *, kb_iteration: bool = True):
+    """Agent 会话 fixture。kb_iteration=True 给项目开「知识库迭代」开关——
+    propose_pack_edit 工具受该开关门禁（2026-10-15：关闭时 Agent 不提任何提案），
+    落库类用例默认开；门禁用例显式传 False。"""
     packs = _build_packs(tmp_path)
     db = tmp_path / "a.db"
     bb = Blackboard(str(db))
-    project = bb.create_project("提案项目", "pentest", ["web"])
+    project = bb.create_project(
+        "提案项目", "pentest", ["web"],
+        config={"kb_iteration": {"enabled": kb_iteration}})
     gw = ExecutionGateway(bb=bb, backends={"host": NativeBackend()})
     agent = AgentSession(
         project_id=project["id"], bb=bb, gateway=gw, llm=_FakeLLM(),
@@ -592,14 +597,64 @@ def test_agent_kb_proposal_structure_lint(tmp_path):
     bb.close()
 
 
-def test_agent_propose_skill_create_rejected(tmp_path):
-    _packs, _bb, _p, agent = _make_session(tmp_path)
+def test_agent_propose_skill_create_allowed(tmp_path):
+    """kb-iteration（2026-10-14）：技能新建提案由「一律拒绝」改为「落 pending 人审」
+    （删除同样放开，应用时进回收站；见 tests/test_kb_iteration.py）。"""
+    _packs, bb, _p, agent = _make_session(tmp_path)
     out = agent.dispatcher.dispatch("propose_pack_edit", {
         "kind": "skill", "mode": "create",
-        "target": {"skill_kind": "capability", "owner": "web", "name": "new-skill"},
-        "content": "---\nname: new-skill\n---\n",
+        "target": {"name": "new-skill"},
+        "content": "---\nname: new-skill\ndescription: 新\n---\n# 新技能\n",
         "summary": "新技能", "reason": "缺失"})
-    assert out.startswith("[拒绝]")
+    assert out.startswith("提案已落 pending"), out
+    pend = pm.list_proposals(_packs, "pending")
+    assert len(pend) == 1 and pend[0]["target"]["kind"] == "skill"
+    bb.close()
+
+
+def test_agent_propose_skill_rename_rejected(tmp_path):
+    """技能 rename 仍不在允许模式内（改名归人类）→ 拒绝。"""
+    _packs, bb, _p, agent = _make_session(tmp_path)
+    out = agent.dispatcher.dispatch("propose_pack_edit", {
+        "kind": "skill", "mode": "rename",
+        "target": {"name": "web-skill", "new_path": "web-skill-2"},
+        "summary": "改名", "reason": "r"})
+    assert out.startswith("[拒绝]"), out
+    bb.close()
+
+
+def test_propose_pack_edit_gated_by_kb_iteration_flag(tmp_path):
+    """2026-10-15 Nan 报 bug：没开「知识库迭代」AI 仍在提提案。根因=工具路径
+    没有门禁（只有轮末自动提案有）。门禁口径：项目 config.kb_iteration.enabled
+    关闭 → propose_pack_edit 一律拒、不落 pending、不发事件；**实时重读**——
+    同一会话内开开关即放行（不缓存）。"""
+    packs, bb, project, agent = _make_session(tmp_path, kb_iteration=False)
+    payload = {
+        "kind": "kb", "mode": "create",
+        "target": {"cap": "web", "path": "ctf-web/gated.md"},
+        "content": "# x\n\n## 已验证路径\n- y\n",
+        "summary": "x", "reason": "任务 task-aaaaaaaaaaaa 证得"}
+    out = agent.dispatcher.dispatch("propose_pack_edit", payload)
+    assert out.startswith("[拒绝]") and "知识库迭代" in out, out
+    assert pm.list_proposals(packs, "pending") == []
+    assert [e for e in bb.recent_events(project["id"])
+            if e["kind"] == "proposal.created"] == []
+    # 人类开启开关（API 同路径：update_project_config 整体替换 config）
+    bb.update_project_config(
+        project["id"], {"kb_iteration": {"enabled": True}})
+    out2 = agent.dispatcher.dispatch(
+        "propose_pack_edit", {**payload,
+                              "target": {"cap": "web", "path": "ctf-web/on.md"}})
+    assert out2.startswith("提案已落 pending"), out2
+    assert len(pm.list_proposals(packs, "pending")) == 1
+    # 再关 → 又拒（实时读，反复开关于一轮内即时生效）
+    bb.update_project_config(project["id"], {"kb_iteration": {"enabled": False}})
+    out3 = agent.dispatcher.dispatch(
+        "propose_pack_edit", {**payload,
+                              "target": {"cap": "web", "path": "ctf-web/off.md"}})
+    assert out3.startswith("[拒绝]"), out3
+    assert len(pm.list_proposals(packs, "pending")) == 1
+    bb.close()
 
 
 # ---------------- skill.routed 事件 ----------------

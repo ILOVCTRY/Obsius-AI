@@ -1,6 +1,6 @@
 # CTF AI/ML - Adversarial ML
 
-Adversarial machine learning techniques: generating adversarial examples, physical-world patches, evasion attacks, data poisoning, and backdoor detection. For model weight manipulation and extraction attacks, see [model-attacks.md](model-attacks.md). For LLM-specific attacks, see [llm-attacks.md](llm-attacks.md).
+Adversarial machine learning techniques: generating adversarial examples, physical-world patches, evasion attacks, data poisoning, and backdoor detection. For model weight manipulation and extraction attacks, see [[misc/AI安全/model-attacks.md|model-attacks.md]]. For LLM-specific attacks, see [[misc/AI安全/llm-attacks.md|llm-attacks.md]].
 
 ## Table of Contents
 - [Adversarial Example Generation (FGSM, PGD, C&W)](#adversarial-example-generation-fgsm-pgd-cw)

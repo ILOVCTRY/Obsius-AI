@@ -1,6 +1,6 @@
 # 内网/后渗透 — 域渗透攻击 payload 库
 
-> 父文档:[00-index.md](00-index.md) · ⚠️ SRC 场景下大多受限,见 [../compliance.md](../compliance.md)
+> 父文档:[[web/后渗透/intranet-postexp/00-index.md|00-index.md]] · ⚠️ SRC 场景下大多受限,见 [../compliance.md](../compliance.md)
 > 涵盖:Kerberoasting / AS-REP / Golden Ticket / Silver Ticket / DCSync / Constrained Delegation / Unconstrained / Resource-Based / NoPac
 
 ---
@@ -517,4 +517,4 @@ export KRB5CCNAME=administrator.ccache
 
 ---
 
-← 回 [00-index.md](00-index.md) · 上一篇:[`13-evasion.md`](13-evasion.md) · 下一篇:[`15-tunneling.md`](15-tunneling.md)
+← 回 [[web/后渗透/intranet-postexp/00-index.md|00-index.md]] · 上一篇:[[web/后渗透/intranet-postexp/13-evasion.md|13-evasion.md]] · 下一篇:[[web/后渗透/intranet-postexp/15-tunneling.md|15-tunneling.md]]

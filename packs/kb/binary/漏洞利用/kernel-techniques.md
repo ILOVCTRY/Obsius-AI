@@ -16,9 +16,9 @@
 - [Kernel addr_limit Bypass via Failed File Open (Midnight Sun CTF 2018)](#kernel-addr_limit-bypass-via-failed-file-open-midnight-sun-ctf-2018)
 - [Custom binfmt Loader OOB Read + clear_user for Privesc (CONFidence Teaser 2019)](#custom-binfmt-loader-oob-read--clear_user-for-privesc-confidence-teaser-2019)
 
-For kernel fundamentals (environment setup, heap spray structures, stack overflow, privilege escalation, modprobe_path, core_pattern), see [kernel.md](kernel.md).
+For kernel fundamentals (environment setup, heap spray structures, stack overflow, privilege escalation, modprobe_path, core_pattern), see [[binary/漏洞利用/kernel.md|kernel.md]].
 
-For protection bypass techniques (KASLR, FGKASLR, KPTI, SMEP, SMAP), GDB debugging, initramfs workflow, and exploit templates, see [kernel-bypass.md](kernel-bypass.md).
+For protection bypass techniques (KASLR, FGKASLR, KPTI, SMEP, SMAP), GDB debugging, initramfs workflow, and exploit templates, see [[binary/漏洞利用/kernel-bypass.md|kernel-bypass.md]].
 
 ---
 

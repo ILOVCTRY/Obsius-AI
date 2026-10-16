@@ -1,6 +1,6 @@
 # RCE — 框架 / 中间件漏洞 payload 库
 
-> 父文档:[00-index.md](00-index.md)
+> 父文档:[[web/实战打法/rce/00-index.md|00-index.md]]
 > 涵盖 Log4j / Spring / Fastjson / Struts2 / WebLogic / ThinkPHP / Laravel / Shiro / JBoss / Tomcat / Django / Flask 等 18 个高频组件的 RCE 利用链。命中指纹后直接挑对应 H3 章节。
 
 ---
@@ -1618,4 +1618,4 @@ _通过XML编码（UTF-16/CDATA/实体编码）混淆payload内容绕过基于�
 
 ---
 
-← 回 [00-index.md](00-index.md) · 相关:[`12-deserialization.md`](12-deserialization.md)(通用反序列化)
+← 回 [[web/实战打法/rce/00-index.md|00-index.md]] · 相关:[[web/实战打法/rce/12-deserialization.md|12-deserialization.md]](通用反序列化)

@@ -1,6 +1,6 @@
 # 业务逻辑漏洞 payload 库
 
-> 父文档:[00-index.md](00-index.md)
+> 父文档:[[web/实战打法/logic-flaws/00-index.md|00-index.md]]
 > 涵盖:IDOR 越权访问 / 竞态条件(优惠券双花 / 余额超扣) / 支付逻辑篡改 / 密码重置逻辑缺陷 / 验证码绕过。
 
 ---
@@ -448,4 +448,4 @@ for pwd in passwords:
 
 ---
 
-← 回 [00-index.md](00-index.md) · 相关:[`../arbitrary-x-authz.md`](../arbitrary-x-authz.md)(任意 X 越权)、[`../race-conditions.md`](../race-conditions.md)
+← 回 [[web/实战打法/logic-flaws/00-index.md|00-index.md]] · 相关:[[web/实战打法/arbitrary-x-authz.md|../arbitrary-x-authz.md]](任意 X 越权)、[[web/实战打法/race-conditions.md|../race-conditions.md]]

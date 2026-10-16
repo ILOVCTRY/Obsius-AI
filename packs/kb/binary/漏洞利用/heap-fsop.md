@@ -1,6 +1,6 @@
 # CTF Pwn - Heap FILE Structure Attacks
 
-FILE-structure (_IO_FILE) exploitation for libc 2.23-2.27+: fastbin→stdout vtable hijack, _IO_buf_base null byte overwrites, glibc 2.24+ vtable validation bypass, unsorted-bin attacks on FILE fields, and menu-driven UAF / refcount bugs that land through these FILE primitives. For classical heap attacks (House of *, unlink, tcache, musl), see [heap-techniques.md](heap-techniques.md).
+FILE-structure (_IO_FILE) exploitation for libc 2.23-2.27+: fastbin→stdout vtable hijack, _IO_buf_base null byte overwrites, glibc 2.24+ vtable validation bypass, unsorted-bin attacks on FILE fields, and menu-driven UAF / refcount bugs that land through these FILE primitives. For classical heap attacks (House of *, unlink, tcache, musl), see [[binary/漏洞利用/heap-techniques.md|heap-techniques.md]].
 
 ## Table of Contents
 - [Fastbin stdout Vtable Two-Stage Hijack for PIE + Full RELRO (ASIS CTF 2017)](#fastbin-stdout-vtable-two-stage-hijack-for-pie--full-relro-asis-ctf-2017)

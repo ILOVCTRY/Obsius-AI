@@ -6,12 +6,12 @@
 
 ## 全量索引
 
-- [ecs.md](ecs.md) — ECS 弹性云服务器攻防（实例/镜像/密钥对/安全组/用户数据/元数据）
-- [obs.md](obs.md) — OBS 对象存储攻防（桶/对象/ACL/静态网站托管/桶接管）
-- [rds.md](rds.md) — RDS 云数据库攻防（MySQL/PostgreSQL/SQL Server/GaussDB/公网访问）
-- [iam.md](iam.md) — IAM 身份与权限攻防（用户/用户组/角色/策略/委托 agency/AK/SK）
-- [network.md](network.md) — VPC/子网/安全组/ELB/NAT 网络攻防
-- [metadata-ssrf.md](metadata-ssrf.md) — 从 SSRF 到元数据委托(agency)临时凭证攻防
+- [[cloud/云厂商/huawei/ecs.md|ecs.md]] — ECS 弹性云服务器攻防（实例/镜像/密钥对/安全组/用户数据/元数据）
+- [[cloud/云厂商/huawei/obs.md|obs.md]] — OBS 对象存储攻防（桶/对象/ACL/静态网站托管/桶接管）
+- [[cloud/云厂商/huawei/rds.md|rds.md]] — RDS 云数据库攻防（MySQL/PostgreSQL/SQL Server/GaussDB/公网访问）
+- [[cloud/云厂商/huawei/iam.md|iam.md]] — IAM 身份与权限攻防（用户/用户组/角色/策略/委托 agency/AK/SK）
+- [[cloud/云厂商/huawei/network.md|network.md]] — VPC/子网/安全组/ELB/NAT 网络攻防
+- [[cloud/云厂商/huawei/metadata-ssrf.md|metadata-ssrf.md]] — 从 SSRF 到元数据委托(agency)临时凭证攻防
 
 ## 计数
 

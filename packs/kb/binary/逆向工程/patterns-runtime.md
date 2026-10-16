@@ -2,7 +2,7 @@
 
 Malware unpacking, multi-stage shellcode, timing/signal side channels, and CTF-specific oracle attacks that rely on runtime state rather than static pattern matching.
 
-For static reversing patterns (custom VMs, anti-debug, self-modifying code, LLVM obfuscation, S-box generation, SECCOMP/BPF, memory dumps, x86-64 gotchas, byte-wise transforms), see [patterns.md](patterns.md).
+For static reversing patterns (custom VMs, anti-debug, self-modifying code, LLVM obfuscation, S-box generation, SECCOMP/BPF, memory dumps, x86-64 gotchas, byte-wise transforms), see [[binary/逆向工程/patterns.md|patterns.md]].
 
 ## Table of Contents
 - [Malware Anti-Analysis Bypass via Patching](#malware-anti-analysis-bypass-via-patching)

@@ -1,6 +1,6 @@
 # 点击劫持 payload 库
 
-> 父文档:[00-index.md](00-index.md)
+> 父文档:[[web/实战打法/logic-flaws/00-index.md|00-index.md]]
 > 涵盖:基础点击劫持(iframe 嵌套) / 点击劫持 + XSS 组合。任何敏感操作页缺失 `X-Frame-Options` / CSP `frame-ancestors` 都试。
 
 ---
@@ -277,4 +277,4 @@ _通过HTML5拖放API将XSS payload从攻击页面拖入目标iframe中的可编
 
 ---
 
-← 回 [00-index.md](00-index.md) · 相关:[`10-csrf.md`](10-csrf.md)
+← 回 [[web/实战打法/logic-flaws/00-index.md|00-index.md]] · 相关:[[web/实战打法/logic-flaws/10-csrf.md|10-csrf.md]]

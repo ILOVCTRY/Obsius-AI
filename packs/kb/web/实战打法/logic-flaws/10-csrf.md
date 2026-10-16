@@ -1,6 +1,6 @@
 # CSRF 跨站请求伪造 payload 库
 
-> 父文档:[00-index.md](00-index.md)
+> 父文档:[[web/实战打法/logic-flaws/00-index.md|00-index.md]]
 > 涵盖:基础 CSRF / JSON CSRF / CSRF 绕过 / SameSite 绕过 / Token 绕过 / Referer 绕过 / Flash CSRF / CORS 配置错误利用。
 
 ---
@@ -656,4 +656,4 @@ fetch("http://target.com/api/delete", {
 
 ---
 
-← 回 [00-index.md](00-index.md) · 相关:[`12-clickjacking.md`](12-clickjacking.md)
+← 回 [[web/实战打法/logic-flaws/00-index.md|00-index.md]] · 相关:[[web/实战打法/logic-flaws/12-clickjacking.md|12-clickjacking.md]]

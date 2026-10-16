@@ -1,6 +1,6 @@
 # GraphQL payload 库(API 视角)
 
-> 父文档:[00-index.md](00-index.md)
+> 父文档:[[web/实战打法/api-rest/00-index.md|00-index.md]]
 > 涵盖:GraphQL 注入 / 内省滥用 / 批量查询 DoS。与 `../graphql.md` 内容互补——本文件偏 API 通用攻击模式,`../graphql.md` 偏 GraphQL 本体特性。
 
 ---
@@ -447,4 +447,4 @@ query GetUser($ids: [ID!]!) {
 
 ---
 
-← 回 [00-index.md](00-index.md) · 主参考:[`../graphql.md`](../graphql.md)
+← 回 [[web/实战打法/api-rest/00-index.md|00-index.md]] · 主参考:[[web/实战打法/graphql.md|../graphql.md]]

@@ -10,7 +10,7 @@ mode: self-contained
 # misc-triage —— 杂项/AI 题分诊与路由
 
 > 分层纪律：本技能只做**题型判定 → 开专题**。资料在 misc 能力包英文参考资料，
-> 用 `skill_open(path=…)` 按表开单篇，禁止通读。拿不准先翻各目录 `index.md`。
+> 用 `kb_open(module=…)` 按表开单篇，禁止通读。拿不准先翻各目录 `misc/AI安全/index.md`。
 
 ## 0. 先看题面给了什么
 
@@ -25,21 +25,21 @@ mode: self-contained
 
 ## 1. 特征 → 专题对照表（module 路径）
 
-| 特征 | skill_open 模块 |
+| 特征 | kb_open 模块 |
 |---|---|
-| pyjail（过滤/沙箱/逃逸） | `references/misc/misc/pyjails.md` |
-| bashjail / 受限 shell | `references/misc/misc/bashjails.md` |
-| 编码识别与多层解码 | `references/misc/misc/encodings.md`、进阶 `references/misc/misc/encodings-advanced.md` |
-| 游戏 / VM / wasm | `references/misc/misc/games-and-vms.md` |
-| LLM 提示注入/越狱 | `references/misc/ai-ml/llm-attacks.md` |
-| 模型攻击（成员推理/抽取） | `references/misc/ai-ml/model-attacks.md` |
-| 对抗样本 | `references/misc/ai-ml/adversarial-ml.md` |
-| AI 题总索引 | `references/misc/ai-ml/index.md` |
-| DNS 隐道/协议 | `references/misc/misc/dns.md` |
-| 无线 / SDR | `references/misc/misc/rf-sdr.md` |
-| Linux 提权杂项（CTF 向） | `references/misc/misc/linux-privesc.md` |
-| CTFd 平台导航 | `references/misc/misc/ctfd-navigation.md` |
-| writeup 写法（收尾） | `references/misc/writeup/index.md` |
+| pyjail（过滤/沙箱/逃逸） | `misc/赛事专题/题目知识/ctf-misc/pyjails.md` |
+| bashjail / 受限 shell | `misc/赛事专题/题目知识/ctf-misc/bashjails.md` |
+| 编码识别与多层解码 | `misc/编码解码/encodings.md`、进阶 `misc/编码解码/encodings-advanced.md` |
+| 游戏 / VM / wasm | `misc/游戏与虚拟机/games-and-vms.md` |
+| LLM 提示注入/越狱 | `misc/AI安全/llm-attacks.md` |
+| 模型攻击（成员推理/抽取） | `misc/AI安全/model-attacks.md` |
+| 对抗样本 | `misc/AI安全/adversarial-ml.md` |
+| AI 题总索引 | `misc/AI安全/index.md` |
+| DNS 隐道/协议 | `misc/协议异常/dns.md` |
+| 无线 / SDR | `misc/赛事专题/题目知识/ctf-misc/rf-sdr.md` |
+| Linux 提权杂项（CTF 向） | `misc/系统杂项/linux-privesc.md` |
+| CTFd 平台导航 | `misc/赛事专题/题目知识/ctf-misc/ctfd-navigation.md` |
+| writeup 写法（收尾） | `misc/赛事专题/WP撰写/index.md` |
 
 ## 2. 纪律
 

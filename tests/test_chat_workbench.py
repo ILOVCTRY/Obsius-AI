@@ -300,6 +300,29 @@ def test_chat_thinking_stream_events(tmp_path):
 
 # ---------- 运行时：主控轮（todo → call_expert → 汇总） ----------
 
+def test_chat_kb_iteration_flag_gates_proposal_toolface(tmp_path):
+    """2026-10-15 Nan 报 bug：没开「知识库迭代」AI 仍提变更提案。
+
+    门禁口径（与轮末自动提案同口径、实时读项目 config）：
+    关 → 工具面不下发 propose_pack_edit schema、系统提示不注入经验沉淀段、
+    dispatcher 白名单剔除（执行层 ToolDispatcher 另有一道硬闸）；
+    开 → 工具面/提示即时恢复。dispatcher 白名单按轮构造，开关于轮内翻转时
+    下一轮生效（执行层硬闸实时读，关的方向即时生效）。"""
+    bb = Blackboard(str(tmp_path / "bb.db"))
+    _mk_project(bb, "p1")  # config={} → 缺省段按关
+    thread = chat_store.create_thread(bb, "p1", ORCHESTRATOR_ID)
+    turn = ChatTurn(bb=bb, llm=ThinkingLLM(), project_id="p1",
+                    thread_id=thread["id"], packs_root="packs", track="ctf",
+                    capabilities=["web"], mcp_bridge=None, expert_names=[])
+    assert "propose_pack_edit" not in [s["name"] for s in turn._tool_specs()]
+    assert "经验沉淀" not in turn._system_prompt()
+    assert "propose_pack_edit" not in (turn._dispatcher.allowed_tools or [])
+    # 人类开启 → 工具面与提示注入即时恢复（实时重读）
+    bb.update_project_config("p1", {"kb_iteration": {"enabled": True}})
+    assert "propose_pack_edit" in [s["name"] for s in turn._tool_specs()]
+    assert "经验沉淀" in turn._system_prompt()
+    bb.close()
+
 def test_chat_orchestrator_turn_todo_and_call_expert(tmp_path):
     bb = Blackboard(str(tmp_path / "bb.db"))
     _mk_project(bb, "p1")

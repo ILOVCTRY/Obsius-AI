@@ -7,6 +7,8 @@
 - ``GET  /status``  → 服务状态 + 当前代理 + 池计数 + 地区分布
 - ``GET  /proxies`` → 池内全部代理记录（UI 列表 / AI 取可用 IP）
 - ``POST /rotate``  → 强制轮换到下一个代理，返回新当前代理
+- ``POST /select``  → **精确切换到指定代理**，body ``{"proxy": "host:port"}``；返回新当前代理
+  （2026-10-15 访问测试「可达即切换」入口：顺拣不如自选，命中站点后直接钉死该 IP）
 - ``POST /reload``  → 热增删代理，body ``{"add": [record...], "remove": ["host:port"]}``
 - ``POST /stop``    → 停止服务（进程随后自行退出）
 
@@ -111,6 +113,23 @@ class _State:
         _log(f"手动轮换 → {nxt.get('proxy') if nxt else '无可用代理'}")
         return {"ok": True, "current": _proxy_view(nxt) if nxt else None}
 
+    def select(self, proxy_address: str) -> dict:
+        """精确切换到指定代理（2026-10-15）。地址必须在池内且 ``status=='Working'``。
+
+        与 ``rotate``（顺拣下一个）互补：访问测试判出「对这个站点可达」的 IP 后
+        **直接钉死它**，不再靠轮换碰运气。找不到/非 Working → ``ok:False``。
+        """
+        addr = str(proxy_address or "").strip()
+        if not addr:
+            return {"ok": False, "error": "缺少 proxy 地址"}
+        with self.lock:
+            hit = self.rotator.set_current_proxy_by_address(addr)
+        if hit is None:
+            _log(f"手动切换失败：代理不在池或非 Working（{addr}）")
+            return {"ok": False, "error": f"代理不在池或不可用: {addr}"}
+        _log(f"手动切换 → {addr}")
+        return {"ok": True, "current": _proxy_view(hit)}
+
     def reload(self, add: list, remove: list) -> dict:
         added, removed = 0, 0
         with self.lock:
@@ -170,6 +189,8 @@ def _make_handler(state: _State):
             path = self.path.split("?", 1)[0]
             if path == "/rotate":
                 self._send(state.rotate())
+            elif path == "/select":
+                self._send(state.select((self._read_body() or {}).get("proxy") or ""))
             elif path == "/reload":
                 body = self._read_body()
                 self._send(state.reload(body.get("add") or [],

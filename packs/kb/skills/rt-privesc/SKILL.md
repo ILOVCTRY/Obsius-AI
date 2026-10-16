@@ -9,20 +9,20 @@ mode: self-contained
 # privesc-win-lin —— 纵向提权路由（redteam 轨）
 
 > 分层纪律：本技能只做**提权阶段 → 手册对照**。打法在 web 能力包
-> `playbooks/intranet-postexp/`。按需 `skill_open(path=…)` 单篇，禁止通读。
+> `web/后渗透/intranet-postexp/`。按需 `kb_open(module=…)` 单篇，禁止通读。
 > ROE：本技能动作受 redteam 红线 ROE 条目约束（授权边界/操作红线）。红线：只在已授权落点内行动（角色人设）；内核提权类 exploit 必须 docker/sandbox 验证。
 
-## 阶段 → 手册对照表（web 包 `playbooks/intranet-postexp/` 下）
+## 阶段 → 手册对照表（web 包 `web/后渗透/intranet-postexp/` 下）
 
-| 阶段 | skill_open 模块 |
+| 阶段 | kb_open 模块 |
 |---|---|
-| 提权打法总纲 | `12-privesc.md` |
-| 免杀与规避（提权动作被拦时） | `13-evasion.md` |
-| 权限维持（提权成功后） | `17-persistence.md` |
-| 域内提权（普通域用户 → 域管面） | `14-domain.md`、`19-adcs.md` |
+| 提权打法总纲 | `web/后渗透/intranet-postexp/12-privesc.md` |
+| 免杀与规避（提权动作被拦时） | `web/后渗透/intranet-postexp/13-evasion.md` |
+| 权限维持（提权成功后） | `web/后渗透/intranet-postexp/17-persistence.md` |
+| 域内提权（普通域用户 → 域管面） | `web/后渗透/intranet-postexp/14-domain.md`、`web/后渗透/intranet-postexp/19-adcs.md` |
 
 ## 纪律
 
-- 先枚举后利用：`12-privesc.md` 的清单跑完再挑路径，别拿到第一个 misconfig 就梭。
-- CTF 向 Linux 提权杂项（SUID/能力位等速查）在 misc 包 `references/misc/misc/linux-privesc.md`。
+- 先枚举后利用：`web/后渗透/intranet-postexp/12-privesc.md` 的清单跑完再挑路径，别拿到第一个 misconfig 就梭。
+- CTF 向 Linux 提权杂项（SUID/能力位等速查）在 misc 包 `misc/系统杂项/linux-privesc.md`。
 - 每条提权路径记证据（版本/配置/命令输出），failed 也写原因。

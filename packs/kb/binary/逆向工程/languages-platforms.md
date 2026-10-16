@@ -22,8 +22,8 @@
 - [Glulx Interactive Fiction Bytecode Matrix Validation (PlaidCTF 2018)](#glulx-interactive-fiction-bytecode-matrix-validation-plaidctf-2018)
 - [Android Smali Injection to Defeat LocalBroadcastManager (TAMUctf 2019)](#android-smali-injection-to-defeat-localbroadcastmanager-tamuctf-2019)
 
-For core language reversing (Python, BF/esolangs, DOS, Unity, OPAL), see [languages.md](languages.md).
-For Go and Rust binary reversing, see [languages-compiled.md](languages-compiled.md).
+For core language reversing (Python, BF/esolangs, DOS, Unity, OPAL), see [[binary/逆向工程/languages.md|languages.md]].
+For Go and Rust binary reversing, see [[binary/逆向工程/languages-compiled.md|languages-compiled.md]].
 
 ---
 
@@ -249,7 +249,7 @@ TIMING = {
 
 ## Prefix-by-Prefix Hash Reversal (Nullcon 2026)
 
-See [patterns-ctf.md](patterns-ctf.md#prefix-hash-brute-force-nullcon-2026) for the full technique. This section covers language-specific considerations.
+See [[binary/逆向工程/patterns-ctf.md#prefix-hash-brute-force-nullcon-2026|patterns-ctf.md]] for the full technique. This section covers language-specific considerations.
 
 **Language-specific notes:**
 - Hash algorithm may be uncommon (MD2, custom) — don't need to identify it, just match outputs by running the binary

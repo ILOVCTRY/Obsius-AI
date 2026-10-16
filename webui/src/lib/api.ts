@@ -128,11 +128,13 @@ export const api = {
     http<Asset>(`/api/assets/${assetId}`, {
       method: "PATCH", body: JSON.stringify(body),
     }),
-  // 物理删除叶子资产（有子资产/被发现引用 → 409，文案直接展示）
-  deleteAsset: (pid: string, assetId: string) =>
-    http<{ deleted: string; id: string }>(`/api/projects/${pid}/assets/${assetId}`, {
-      method: "DELETE",
-    }),
+  // 物理删除叶子资产（有子资产 → 409，文案直接展示）。cascade=true（Web UI 默认）时
+  // 把 target_asset_id 指向该资产的发现一并删除，响应多带 findings_deleted。
+  deleteAsset: (pid: string, assetId: string, cascade = false) =>
+    http<{ deleted: string; id: string; findings_deleted?: string[] }>(
+      `/api/projects/${pid}/assets/${assetId}${cascade ? "?cascade=true" : ""}`, {
+        method: "DELETE",
+      }),
   funcs: (pid: string, sha?: string) =>
     http<FuncEntry[]>(`/api/projects/${pid}/funcs${sha ? `?binary_sha256=${sha}` : ""}`),
   events: (pid: string, sinceId = 0) =>
@@ -1070,6 +1072,10 @@ export const api = {
   proxyRotate: () =>
     http<{ ok: boolean; current: ProxyRecord | null }>(
       `/api/proxy/rotate`, { method: "POST" }),
+  /** 精确切换到指定代理（host:port；2026-10-15 访问测试「可达即切换」入口） */
+  proxyUse: (proxy: string) =>
+    http<{ ok: boolean; current: ProxyRecord | null }>(
+      `/api/proxy/use`, { method: "POST", body: JSON.stringify({ proxy }) }),
   proxyAdd: (records: ProxyRecord[]) =>
     http<{ added: number; pool_size: number }>(`/api/proxy/add`,
       { method: "POST", body: JSON.stringify({ records }) }),
@@ -1081,12 +1087,12 @@ export const api = {
   }) =>
     http<{ proxies: ProxyRecord[] }>(`/api/proxy/select`,
       { method: "POST", body: JSON.stringify(body) }),
-  /** 从在线源抓取入池（202：Job 轮询） */
-  proxyFetch: (protocols: string[] = []) =>
+  /** 从在线源抓取入池（202：Job 轮询）。`limit` = 本次抓取条数上限（0=不限；省略=用后端配置）。 */
+  proxyFetch: (protocols: string[] = [], limit?: number) =>
     http<{ job_id: string }>(`/api/proxy/fetch`,
-      { method: "POST", body: JSON.stringify({ protocols }) }),
+      { method: "POST", body: JSON.stringify({ protocols, limit }) }),
   /** 批量验证池内代理（202：Job 轮询） */
-  proxyValidate: (workers = 50) =>
+  proxyValidate: (workers = 100) =>
     http<{ job_id: string }>(`/api/proxy/validate`,
       { method: "POST", body: JSON.stringify({ workers }) }),
   /** 指定网站可达性/WAF 封禁检测（202：Job 轮询；只读不改池） */
@@ -1104,6 +1110,7 @@ export const api = {
     validate_target_b?: string | null
     validate_timeout_s?: number
     prune_latency_ms?: number | null
+    fetch_limit?: number
   }) =>
     http<ProxyConfigView>(`/api/proxy/config`,
       { method: "PUT", body: JSON.stringify(body) }),

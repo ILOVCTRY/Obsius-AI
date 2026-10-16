@@ -1,6 +1,6 @@
 # Agent 应用渗透 — 10 类漏洞速查
 
-> 父文档:[00-index.md](00-index.md)
+> 父文档:[[web/实战打法/llm-prompt-injection/00-index.md|00-index.md]]
 > 涵盖:Agent 平台(可执行工具 / 跑代码 / 浏网页)的 10 个高频漏洞类型,从 AGENT-001 到 AGENT-010,附整改优先级。
 
 ---
@@ -206,4 +206,4 @@ eyJhbGciOiJub25lIn0.eyJyb2xlIjoiYWRtaW4ifQ.
 
 ---
 
-← 回 [00-index.md](00-index.md)
+← 回 [[web/实战打法/llm-prompt-injection/00-index.md|00-index.md]]

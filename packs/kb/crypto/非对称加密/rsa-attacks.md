@@ -1121,7 +1121,7 @@ roots = f.small_roots(X=2**70, beta=0.5)  # x < N^0.25
 
 **Pattern (TLS, Nullcon 2026):** RSA-encrypted key with threshold oracle. Phase 1: double f until `k*f >= threshold`. Phase 2: binary search. ~128 total queries for 64-bit key.
 
-See [advanced-math.md](../高阶专题/advanced-math.md) for full implementation.
+See [[crypto/高阶专题/advanced-math.md|advanced-math.md]] for full implementation.
 
 ---
 
@@ -1238,7 +1238,7 @@ while True:
 
 **Pattern (Going in Circles, Nullcon 2026):** `r = flag mod f` where f is random GF(2) polynomial. Collect ~20 pairs, filter coprime, CRT combine.
 
-See [advanced-math.md](../高阶专题/advanced-math.md) for GF(2)[x] polynomial arithmetic and CRT implementation.
+See [[crypto/高阶专题/advanced-math.md|advanced-math.md]] for GF(2)[x] polynomial arithmetic and CRT implementation.
 
 ---
 
@@ -1246,7 +1246,7 @@ See [advanced-math.md](../高阶专题/advanced-math.md) for GF(2)[x] polynomial
 
 **Pattern (Matrixfun, Nullcon 2026):** `c = A @ p + b (mod m)` with composite m. Chosen-plaintext difference attack. For composite modulus, solve via CRT in each prime factor field separately.
 
-See [advanced-math.md](../高阶专题/advanced-math.md) for CRT approach and Gauss-Jordan implementation.
+See [[crypto/高阶专题/advanced-math.md|advanced-math.md]] for CRT approach and Gauss-Jordan implementation.
 
 See also: [rsa-attacks.md](#part-2) for specialized RSA techniques (p=q bypass, cube root CRT, phi(n) multiple factoring, signature forgery, weak keygen, batch GCD, partial key recovery, CRT fault attack, homomorphic bypass).
 
@@ -1287,7 +1287,7 @@ See also: [rsa-attacks.md](#part-2) for specialized RSA techniques (p=q bypass, 
 - [Last-Byte Modulus Overwrite via strlen-1 Null Truncation (OTW Advent 2018)](#last-byte-modulus-overwrite-via-strlen-1-null-truncation-otw-advent-2018)
 - [CRC32 Collision Oracle + RSA Homomorphic Signature Forgery (BSidesSF 2019)](#crc32-collision-oracle--rsa-homomorphic-signature-forgery-bsidessf-2019)
 
-See also: [rsa-attacks.md](rsa-attacks.md) for foundational RSA attacks (small e, Wiener, Fermat, Pollard, Hastad, common modulus, Manger oracle, Coppersmith).
+See also: [[crypto/非对称加密/rsa-attacks.md|rsa-attacks.md]] for foundational RSA attacks (small e, Wiener, Fermat, Pollard, Hastad, common modulus, Manger oracle, Coppersmith).
 
 ---
 
@@ -1508,7 +1508,7 @@ for n, (p, q) in shared.items():
     d = pow(e, -1, phi)  # Private exponent
 ```
 
-For keys with patterned primes (hardware RNG faults producing primes with fixed bit patterns), combine with Coppersmith's method to recover remaining random bits. See [advanced-math.md](../高阶专题/advanced-math.md) for Coppersmith.
+For keys with patterned primes (hardware RNG faults producing primes with fixed bit patterns), combine with Coppersmith's method to recover remaining random bits. See [[crypto/高阶专题/advanced-math.md|advanced-math.md]] for Coppersmith.
 
 **Key insight:** A single shared prime compromises both keys. Batch GCD runs in O(n log n) time via product/remainder trees, making it feasible for thousands of keys. Real-world incidents: Taiwanese citizen smartcards (2013), many IoT device certificates.
 

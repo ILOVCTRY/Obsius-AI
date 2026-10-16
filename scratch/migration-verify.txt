@@ -1,0 +1,24 @@
+模式：DRY-RUN（未改动）
+统计：{'ALREADY_KB': 255, 'SKILL_ONLY': 8}
+
+## binary-pwn（域=binary）
+  ⚠ 需人工（kb 无对应/歧义）1 条：
+    - `references/binary/pwn/field-notes.md`
+
+## crypto-triage（域=crypto）
+  ⚠ 需人工（kb 无对应/歧义）1 条：
+    - `references/crypto/crypto/index.md`
+
+## rt-privesc（域=misc）
+  ⚠ 需人工（kb 无对应/歧义）5 条：
+    - `12-privesc.md`
+    - `13-evasion.md`
+    - `17-persistence.md`
+    - `14-domain.md`
+    - `19-adcs.md`
+
+## triage（域=misc）
+  ⚠ 需人工（kb 无对应/歧义）1 条：
+    - `references/misc/misc/index.md`
+
+涉及技能 0 个；改写条目 0 条

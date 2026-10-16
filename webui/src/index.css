@@ -769,9 +769,698 @@
   --status-ok: oklch(0.72 0.13 150);
 }
 
+/* ---------- 粉色主题（2026-10-15）：绯樱 rose-dark / 蔷薇 rose-light。
+   由 cyber-dark / light 派生（色相映射），语义 token 口径与既有主题一致。 ---------- */
+[data-theme="rose-dark"] {
+  color-scheme: dark;
+  --brand-lch: 0.704 0.167 359;
+  --brand-soft-lch: 0.622 0.167 3;
+  --brand-dim-lch: 0.557 0.141 1;
+  --danger-lch: 0.643 0.179 20;
+  --warning-lch: 0.765 0.136 77;
+  --success-lch: 0.768 0.137 166;
+  --info-lch: 0.743 0.098 270;
+  --surface-0-lch: 0.212 0.020 350;
+  --surface-1-lch: 0.245 0.023 350;
+  --surface-2-lch: 0.287 0.032 349;
+  --surface-3-lch: 0.334 0.039 350;
+  --surface-raised-lch: 0.306 0.036 347;
+  --surface-border-lch: 0.372 0.039 348;
+  --text-lch: 0.937 0.012 351;
+  --text-muted-lch: 0.646 0.037 355;
+  --brand: oklch(var(--brand-lch));
+  --brand-soft: oklch(var(--brand-soft-lch));
+  --brand-dim: oklch(var(--brand-dim-lch));
+  --brand-bg: oklch(var(--brand-lch) / 0.1);
+  --brand-border: oklch(var(--brand-lch) / 0.2);
+  --brand-glow: oklch(var(--brand-lch) / 0.4);
+  --surface-0: oklch(var(--surface-0-lch));
+  --surface-1: oklch(var(--surface-1-lch));
+  --surface-2: oklch(var(--surface-2-lch));
+  --surface-3: oklch(var(--surface-3-lch));
+  --surface-raised: oklch(var(--surface-raised-lch));
+  --surface-border: oklch(var(--surface-border-lch));
+  --viz-sev-critical: oklch(var(--danger-lch));
+  --viz-sev-high: oklch(0.78 0.13 25);
+  --viz-sev-medium: oklch(0.8 0.14 80);
+  --viz-sev-low: oklch(0.68 0.15 258);
+  --viz-sev-info: oklch(0.646 0.037 355);
+  --viz-node-target: oklch(0.68 0.15 258);
+  --viz-node-finding: oklch(0.72 0.14 170);
+  --viz-node-deadend: oklch(0.646 0.037 355);
+  --viz-chain: oklch(0.704 0.167 359);
+  --viz-edge: oklch(0.372 0.039 348);
+  --viz-node-bg: oklch(0.245 0.023 350);
+  --viz-code: oklch(0.853 0.093 169);
+  --viz-success: oklch(var(--success-lch));
+  --viz-success-bg: oklch(var(--success-lch) / 0.13);
+  --viz-success-border: oklch(var(--success-lch) / 0.4);
+  --viz-sev-critical-bg: oklch(var(--danger-lch) / 0.13);
+  --viz-sev-high-bg: oklch(0.78 0.13 25 / 0.13);
+  --viz-sev-medium-bg: oklch(0.8 0.14 80 / 0.13);
+  --viz-sev-low-bg: oklch(0.68 0.15 258 / 0.13);
+  --viz-sev-info-bg: oklch(0.646 0.037 355 / 0.13);
+  --viz-node-finding-bg: var(--viz-success-bg);
+  --viz-node-deadend-bg: var(--viz-sev-info-bg);
+  --viz-card: oklch(0.287 0.032 349);
+  --viz-card-hover: oklch(0.334 0.039 350);
+  --viz-canvas: oklch(0.197 0.019 348);
+  --viz-canvas-mask: oklch(0.08 0.02 350 / 0.7);
+  --viz-outline: oklch(0.372 0.039 348);
+  --viz-edge-muted: oklch(0.48 0.05 350);
+  --viz-handle: oklch(0.56 0.06 350);
+  --viz-target: oklch(var(--brand-lch));
+  --viz-target-bg: oklch(0.245 0.023 350);
+  --viz-target-border: oklch(0.55 0.16 258 / 0.35);
+  --viz-chain-active: oklch(0.704 0.167 359);
+  --viz-chain-glow: oklch(0.13 0.12 350 / 0.25);
+  --viz-accent-cyan: oklch(0.704 0.167 359);
+  --viz-accent-orange: oklch(0.727 0.153 52.833);
+  --viz-text: oklch(0.937 0.012 351);
+  --viz-text-soft: oklch(0.839 0.029 346);
+  --viz-text-muted: oklch(0.646 0.037 355);
+  --status-running-bg: oklch(var(--brand-lch) / 0.12);
+  --status-approval-bg: oklch(var(--warning-lch) / 0.12);
+  --status-error-bg: oklch(var(--danger-lch) / 0.12);
+  --status-idle-bg: oklch(0.6 0.01 350 / 0.12);
+  --status-paused-bg: oklch(var(--info-lch) / 0.12);
+  --status-ok-bg: oklch(var(--success-lch) / 0.12);
+  --status-doing: oklch(var(--brand-lch));
+  --status-warning: oklch(var(--warning-lch));
+  --theme-raw-b40379f010: oklch(0 0 0 / .3);
+  --theme-raw-98c6e4bee9: oklch(0 0 0 / .32);
+  --theme-raw-60b79a7abe: oklch(0 0 0 / .35);
+  --theme-raw-7846e7d7de: oklch(0 0 0 / .45);
+  --theme-raw-2b1386a692: oklch(0.105 0.012 350 / .66);
+  --theme-raw-f20bdba4c9: oklch(0.105 0.018 350);
+  --theme-raw-8e90bc5b24: oklch(0.11 0.015 350 / .7);
+  --theme-raw-0909c417f6: oklch(0.115 0.022 350 / .96);
+  --theme-raw-fa4b76650b: oklch(0.12 0.012 350 / .82);
+  --theme-raw-094917af35: oklch(0.12 0.012 350);
+  --theme-raw-2da119a299: oklch(0.12 0.015 350);
+  --theme-raw-57b9ddd40f: oklch(0.12 0.018 350);
+  --theme-raw-7474b7dc80: oklch(0.13 0.012 350 / .55);
+  --theme-raw-d9431055ef: oklch(0.13 0.012 350);
+  --theme-raw-01bfc46347: oklch(0.13 0.017 350);
+  --theme-raw-308b572e6b: oklch(0.135 0.012 350 / 0.88);
+  --theme-raw-8b524e3722: oklch(0.135 0.014 350 / .55);
+  --theme-raw-95d080f0ad: oklch(0.135 0.018 350);
+  --theme-raw-93f74b62ff: oklch(0.14 0.018 350);
+  --theme-raw-8fcfcc3618: oklch(0.15 0.012 350);
+  --theme-raw-eb3155f92e: oklch(0.15 0.018 350);
+  --theme-raw-ac1904cead: oklch(0.15 0.025 350);
+  --theme-raw-abe6a3cda6: oklch(0.16 0.014 350 / .9);
+  --theme-raw-ba915489b6: oklch(0.16 0.014 350);
+  --theme-raw-b0dd1d1377: oklch(0.16 0.016 350 / .98);
+  --theme-raw-e5c541d936: oklch(0.16 0.02 350);
+  --theme-raw-f07f607b7e: oklch(0.165 0.014 350 / .92);
+  --theme-raw-e1b339028f: oklch(0.17 0.014 350 / .7);
+  --theme-raw-ff24ae504f: oklch(0.17 0.014 350 / .8);
+  --theme-raw-feb831d565: oklch(0.17 0.015 350 / .82);
+  --theme-raw-1fc36e5e89: oklch(0.17 0.018 350 / .98);
+  --theme-raw-a7cd90308d: oklch(0.175 0.014 350 / .92);
+  --theme-raw-43e7c150a3: oklch(0.18 0.018 350);
+  --theme-raw-110775935d: oklch(0.19 0.014 350 / .6);
+  --theme-raw-67b1544df1: oklch(0.19 0.014 350 / .7);
+  --theme-raw-fb93e4cda9: oklch(0.19 0.014 350 / .78);
+  --theme-raw-36727cf2ec: oklch(0.19 0.014 350 / .96);
+  --theme-raw-df984e50cd: oklch(0.2 0.02 350 / .5);
+  --theme-raw-05cc990601: oklch(0.2 0.02 350);
+  --theme-raw-f738ed2e4a: oklch(0.21 0.018 350 / .55);
+  --theme-raw-640463d591: oklch(0.22 0.02 350 / .55);
+  --theme-raw-9de7753430: oklch(0.24 0.018 350 / .55);
+  --theme-raw-61ddae4153: oklch(0.24 0.018 350 / .72);
+  --theme-raw-8b595ab57a: oklch(0.24 0.018 350 / .8);
+  --theme-raw-31f0dcd520: oklch(0.24 0.025 265 / .6);
+  --theme-raw-97121a9cd1: oklch(0.25 0.04 350 / .1);
+  --theme-raw-48c4b46356: oklch(0.25 0.04 350 / 0.18);
+  --theme-raw-e5a0ac33e1: oklch(0.29 0.018 350 / .45);
+  --theme-raw-3b5be19fa7: oklch(0.29 0.018 350 / .7);
+  --theme-raw-e8b69cc145: oklch(0.32 0.02 350);
+  --theme-raw-a1833752c0: oklch(0.32 0.025 350);
+  --theme-raw-b4f21d0803: oklch(0.34 0.05 350);
+  --theme-raw-92b680f3ec: oklch(0.38 0.01 350);
+  --theme-raw-e93dd6ac65: oklch(0.48 0.015 350);
+  --theme-raw-0656dad9b1: oklch(0.5 0.02 350);
+  --theme-raw-4a1307e96f: oklch(0.5 0.16 28);
+  --theme-raw-a2f27b8157: oklch(0.52 0.02 265);
+  --theme-raw-d4d630ee87: oklch(0.55 0.02 350);
+  --theme-raw-8b80ec8360: oklch(0.55 0.03 350);
+  --theme-raw-7efde2efe4: oklch(0.55 0.04 350);
+  --theme-raw-6fd1e0b10a: oklch(0.55 0.1 350 / .25);
+  --theme-raw-e9ed77745c: oklch(0.57 0.02 265);
+  --theme-raw-893412a580: oklch(0.58 0.12 350);
+  --theme-raw-7c30cb2642: oklch(0.62 0.14 350 / .08);
+  --theme-raw-e2b519e948: oklch(0.62 0.14 350 / .1);
+  --theme-raw-1d65fdc10d: oklch(0.62 0.14 350 / .18);
+  --theme-raw-0a4db54701: oklch(0.62 0.14 350 / .28);
+  --theme-raw-61a86aba90: oklch(0.62 0.19 25 / .9);
+  --theme-raw-1bec1586d5: oklch(0.62 0.19 25);
+  --theme-raw-a62bc70460: oklch(0.62 0.2 25 / .1);
+  --theme-raw-0f7e7367d5: oklch(0.62 0.2 25 / .3);
+  --theme-raw-fff2c92413: oklch(0.62 0.2 25 / .35);
+  --theme-raw-e310b6607e: oklch(0.62 0.2 25 / .4);
+  --theme-raw-fe6890d23a: oklch(0.65 0.18 25 / .18);
+  --theme-raw-7281a81000: oklch(0.68 0.12 350);
+  --theme-raw-8013de71f6: oklch(0.68 0.13 350 / .6);
+  --theme-raw-abfcac694c: oklch(0.68 0.14 350 / .13);
+  --theme-raw-2aeaf8b3e3: oklch(0.68 0.18 25);
+  --theme-raw-f8deab4d70: oklch(0.7 0.04 350 / .13);
+  --theme-raw-2941b859e2: oklch(0.7 0.05 350 / .12);
+  --theme-raw-ec453949ef: oklch(0.7 0.12 350);
+  --theme-raw-5e8a452f19: oklch(0.7 0.13 350);
+  --theme-raw-4d3a32380f: oklch(0.7 0.14 350 / .12);
+  --theme-raw-0dc93968db: oklch(0.7 0.14 350 / .28);
+  --theme-raw-98171f9c13: oklch(0.7 0.14 350 / .35);
+  --theme-raw-5097bc492c: oklch(0.7 0.14 350 / .55);
+  --theme-raw-a66a69099f: oklch(0.7 0.14 350 / .6);
+  --theme-raw-97132cd359: oklch(0.7 0.18 25);
+  --theme-raw-ee55a08e21: oklch(0.72 0.025 350);
+  --theme-raw-e14818b517: oklch(0.72 0.13 350);
+  --theme-raw-961cbfcdfb: oklch(0.72 0.14 350);
+  --theme-raw-59dcd78135: oklch(0.75 0.14 350 / .12);
+  --theme-raw-dc7fe9747c: oklch(0.75 0.15 350 / .6);
+  --theme-raw-53a5c60b9c: oklch(0.75 0.15 350);
+  --theme-raw-bcba0c22dc: oklch(0.76 0.15 350 / .65);
+  --theme-raw-d62169263a: oklch(0.76 0.15 350);
+  --theme-raw-547924fc65: oklch(0.78 0.02 265);
+  --theme-raw-5239ddc2ef: oklch(0.78 0.12 350);
+  --theme-raw-5ad356ce80: oklch(0.78 0.14 170);
+  --theme-raw-290d50b47c: oklch(0.78 0.15 350);
+  --theme-raw-efe63de4ad: oklch(0.8 0.12 350);
+  --theme-raw-afbb17f119: oklch(0.8 0.13 350 / .05);
+  --theme-raw-deaf08acbf: oklch(0.8 0.13 350 / .06);
+  --theme-raw-a4dcc6a258: oklch(0.8 0.13 350 / .07);
+  --theme-raw-c789243b14: oklch(0.8 0.13 350 / .08);
+  --theme-raw-5a7d739956: oklch(0.8 0.13 350 / .09);
+  --theme-raw-e636578dde: oklch(0.8 0.13 350 / .1);
+  --theme-raw-a73eb30acf: oklch(0.8 0.13 350 / .12);
+  --theme-raw-a303ead9a8: oklch(0.8 0.13 350 / .13);
+  --theme-raw-aee25a9385: oklch(0.8 0.13 350 / .14);
+  --theme-raw-237a9ccbe3: oklch(0.8 0.13 350 / .16);
+  --theme-raw-939d500bbc: oklch(0.8 0.13 350 / .17);
+  --theme-raw-abd34dfdec: oklch(0.8 0.13 350 / .18);
+  --theme-raw-49105fe622: oklch(0.8 0.13 350 / .2);
+  --theme-raw-c9c199ec46: oklch(0.8 0.13 350 / .22);
+  --theme-raw-c3f45ad04a: oklch(0.8 0.13 350 / .24);
+  --theme-raw-a9e40f0581: oklch(0.8 0.13 350 / .25);
+  --theme-raw-fc06cc0e30: oklch(0.8 0.13 350 / .28);
+  --theme-raw-69747d9905: oklch(0.8 0.13 350 / .3);
+  --theme-raw-feb0747d19: oklch(0.8 0.13 350 / .35);
+  --theme-raw-b1bff628cd: oklch(0.8 0.13 350 / .38);
+  --theme-raw-9d0441a38a: oklch(0.8 0.13 350 / .4);
+  --theme-raw-ebe711bbf4: oklch(0.8 0.13 350 / .45);
+  --theme-raw-dd84d69948: oklch(0.8 0.13 350 / .48);
+  --theme-raw-f860ee6b2e: oklch(0.8 0.13 350 / .5);
+  --theme-raw-6ee9174160: oklch(0.8 0.13 350 / .55);
+  --theme-raw-636839315e: oklch(0.8 0.13 350 / .6);
+  --theme-raw-5a8c291f31: oklch(0.8 0.13 350 / .7);
+  --theme-raw-c20a46d3a5: oklch(0.8 0.13 350 / .85);
+  --theme-raw-5e6b600933: oklch(0.8 0.13 350 / 0);
+  --theme-raw-a28ae1df0d: oklch(0.8 0.13 85 / .06);
+  --theme-raw-74d179b24e: oklch(0.8 0.13 85 / .3);
+  --theme-raw-bb1e9d66ef: oklch(0.8 0.13 85);
+  --theme-raw-bcf7662399: oklch(0.8 0.14 170);
+  --theme-raw-7c525018fd: oklch(0.8 0.14 350);
+  --theme-raw-80243254c9: oklch(0.8 0.14 75 / .06);
+  --theme-raw-4045ba055b: oklch(0.8 0.14 75 / .3);
+  --theme-raw-320cefd40d: oklch(0.8 0.14 80);
+  --theme-raw-b769d066fc: oklch(0.8 0.14 85);
+  --theme-raw-064fe55174: oklch(0.82 0.12 25);
+  --theme-raw-f152322439: oklch(0.82 0.13 350);
+  --theme-raw-6fd4396b10: oklch(0.82 0.13 85);
+  --theme-raw-2f1c6d9a1c: oklch(0.82 0.14 25);
+  --theme-raw-6c1bb224a3: oklch(0.83 0.1 350);
+  --theme-raw-1c1c534c94: oklch(0.85 0.14 85);
+  --theme-raw-7746cd992f: oklch(0.86 0.11 85);
+  --theme-raw-436865bf1e: oklch(0.88 0.11 350);
+  --theme-raw-1915645cf0: oklch(0.95 0.015 265);
+  --theme-raw-7805e56978: oklch(1 0 0 / .05);
+  --theme-raw-b79b7875f9: oklch(1 0 0 / .06);
+  --theme-raw-7229d98bc6: oklch(1 0 0 / .08);
+  --theme-raw-d434218f65: oklch(1 0 0 / .12);
+  --radius: 0.5rem;
+  --background: oklch(0.245 0.023 350);
+  --foreground: oklch(0.937 0.012 351);
+  --card: oklch(0.287 0.032 349);
+  --card-foreground: oklch(0.937 0.012 351);
+  --popover: oklch(0.306 0.036 347);
+  --popover-foreground: oklch(0.937 0.012 351);
+  --primary: oklch(var(--brand-lch));
+  --primary-foreground: oklch(0.212 0.020 350);
+  --secondary: oklch(0.287 0.032 349);
+  --secondary-foreground: oklch(0.863 0.028 345);
+  --muted: oklch(0.265 0.027 346);
+  --muted-foreground: oklch(0.646 0.037 355);
+  --accent: oklch(0.334 0.039 350);
+  --accent-foreground: oklch(0.937 0.012 351);
+  --destructive: oklch(0.643 0.179 20);
+  --destructive-foreground: oklch(0.98 0 0);
+  --border: oklch(0.372 0.039 348);
+  --input: oklch(0.372 0.039 348);
+  --ring: oklch(var(--brand-lch));
+  --status-running: oklch(var(--brand-lch));
+  --status-approval: oklch(0.8 0.14 75);
+  --status-error: oklch(0.62 0.2 25);
+  --status-idle: oklch(0.6 0.01 350);
+  --status-paused: oklch(0.75 0.1 265);
+  --status-ok: oklch(0.72 0.15 170);
 
+}
 
-
+[data-theme="rose-light"] {
+  color-scheme: light;
+  color-scheme: light;
+  --brand-lch: 0.56 0.19 355;
+  --brand-soft-lch: 0.62 0.15 355;
+  --brand-dim-lch: 0.7 0.11 355;
+  --danger-lch: 0.52 0.19 25;
+  --warning-lch: 0.55 0.14 75;
+  --success-lch: 0.5 0.13 170;
+  --info-lch: 0.5 0.11 265;
+  --surface-0-lch: 0.965 0.008 350;
+  --surface-1-lch: 0.975 0.006 350;
+  --surface-2-lch: 1 0 350;
+  --surface-3-lch: 0.895 0.038 345;
+  --surface-raised-lch: 1 0 350;
+  --surface-border-lch: 0.871 0.035 347;
+  --text-lch: 0.28 0.03 350;
+  --text-muted-lch: 0.5 0.03 350;
+  --brand: oklch(var(--brand-lch));
+  --brand-soft: oklch(var(--brand-soft-lch));
+  --brand-dim: oklch(var(--brand-dim-lch));
+  --brand-bg: oklch(var(--brand-lch) / 0.1);
+  --brand-border: oklch(var(--brand-lch) / 0.2);
+  --brand-glow: oklch(var(--brand-lch) / 0.4);
+  --surface-0: oklch(var(--surface-0-lch));
+  --surface-1: oklch(var(--surface-1-lch));
+  --surface-2: oklch(var(--surface-2-lch));
+  --surface-3: oklch(var(--surface-3-lch));
+  --surface-raised: oklch(var(--surface-raised-lch));
+  --surface-border: oklch(var(--surface-border-lch));
+  --viz-sev-critical: oklch(var(--danger-lch));
+  --viz-sev-high: oklch(0.6 0.13 25);
+  --viz-sev-medium: oklch(0.56 0.14 80);
+  --viz-sev-low: oklch(0.5 0.15 258);
+  --viz-sev-info: oklch(0.487 0.03 350);
+  --viz-node-target: oklch(0.5 0.15 258);
+  --viz-node-finding: oklch(0.5 0.14 170);
+  --viz-node-deadend: oklch(0.487 0.03 350);
+  --viz-chain: oklch(0.56 0.17 345);
+  --viz-edge: oklch(0.898 0.015 350);
+  --viz-node-bg: oklch(0.952 0.025 350);
+  --viz-code: oklch(0.34 0.08 170);
+  --viz-success: oklch(var(--success-lch));
+  --viz-success-bg: oklch(var(--success-lch) / 0.13);
+  --viz-success-border: oklch(var(--success-lch) / 0.4);
+  --viz-sev-critical-bg: oklch(var(--danger-lch) / 0.13);
+  --viz-sev-high-bg: oklch(0.6 0.13 25 / 0.13);
+  --viz-sev-medium-bg: oklch(0.56 0.14 80 / 0.13);
+  --viz-sev-low-bg: oklch(0.5 0.15 258 / 0.13);
+  --viz-sev-info-bg: oklch(0.487 0.03 350 / 0.13);
+  --viz-node-finding-bg: var(--viz-success-bg);
+  --viz-node-deadend-bg: var(--viz-sev-info-bg);
+  --viz-card: oklch(0.945 0.016 350);
+  --viz-card-hover: oklch(0.934 0.015 350);
+  --viz-canvas: oklch(0.963 0.014 350);
+  --viz-canvas-mask: oklch(0.995 0.01 350 / 0.7);
+  --viz-outline: oklch(0.925 0.015 350);
+  --viz-edge-muted: oklch(0.619 0.017 350);
+  --viz-handle: oklch(0.502 0.02 350);
+  --viz-target: oklch(0.431 0.202 350);
+  --viz-target-bg: oklch(0.942 0.043 350);
+  --viz-target-border: oklch(0.45 0.16 258 / 0.35);
+  --viz-chain-active: oklch(0.56 0.19 355);
+  --viz-chain-glow: oklch(0.35 0.12 355 / 0.25);
+  --viz-accent-cyan: oklch(0.555 0.116 350);
+  --viz-accent-orange: oklch(0.273 0.153 52.833);
+  --viz-text: oklch(0.211 0.014 350);
+  --viz-text-soft: oklch(0.252 0.014 350);
+  --viz-text-muted: oklch(0.417 0.018 350);
+  --status-running-bg: oklch(var(--brand-lch) / 0.12);
+  --status-approval-bg: oklch(var(--warning-lch) / 0.12);
+  --status-error-bg: oklch(var(--danger-lch) / 0.12);
+  --status-idle-bg: oklch(0.47 0.01 350 / 0.12);
+  --status-paused-bg: oklch(var(--info-lch) / 0.12);
+  --status-ok-bg: oklch(var(--success-lch) / 0.12);
+  --status-doing: oklch(var(--brand-lch));
+  --status-warning: oklch(var(--warning-lch));
+  --theme-raw-b40379f010: oklch(0 0 0 / .3);
+  --theme-raw-98c6e4bee9: oklch(0 0 0 / .32);
+  --theme-raw-60b79a7abe: oklch(0 0 0 / .35);
+  --theme-raw-7846e7d7de: oklch(0 0 0 / .45);
+  --theme-raw-2b1386a692: oklch(0.993 0.012 350 / .66);
+  --theme-raw-f20bdba4c9: oklch(0.993 0.018 350);
+  --theme-raw-8e90bc5b24: oklch(0.991 0.015 350 / .7);
+  --theme-raw-0909c417f6: oklch(0.989 0.022 350 / .96);
+  --theme-raw-fa4b76650b: oklch(0.987 0.012 350 / .82);
+  --theme-raw-094917af35: oklch(0.987 0.012 350);
+  --theme-raw-2da119a299: oklch(0.987 0.015 350);
+  --theme-raw-57b9ddd40f: oklch(0.987 0.018 350);
+  --theme-raw-7474b7dc80: oklch(0.982 0.012 350 / .55);
+  --theme-raw-d9431055ef: oklch(0.982 0.012 350);
+  --theme-raw-01bfc46347: oklch(0.982 0.017 350);
+  --theme-raw-308b572e6b: oklch(0.98 0.012 350 / 0.88);
+  --theme-raw-8b524e3722: oklch(0.98 0.014 350 / .55);
+  --theme-raw-95d080f0ad: oklch(0.98 0.018 350);
+  --theme-raw-93f74b62ff: oklch(0.978 0.018 350);
+  --theme-raw-8fcfcc3618: oklch(0.974 0.012 350);
+  --theme-raw-eb3155f92e: oklch(0.974 0.018 350);
+  --theme-raw-ac1904cead: oklch(0.974 0.025 350);
+  --theme-raw-abe6a3cda6: oklch(0.97 0.014 350 / .9);
+  --theme-raw-ba915489b6: oklch(0.97 0.014 350);
+  --theme-raw-b0dd1d1377: oklch(0.97 0.016 350 / .98);
+  --theme-raw-e5c541d936: oklch(0.97 0.02 350);
+  --theme-raw-f07f607b7e: oklch(0.968 0.014 350 / .92);
+  --theme-raw-e1b339028f: oklch(0.966 0.014 350 / .7);
+  --theme-raw-ff24ae504f: oklch(0.966 0.014 350 / .8);
+  --theme-raw-feb831d565: oklch(0.966 0.015 350 / .82);
+  --theme-raw-1fc36e5e89: oklch(0.966 0.018 350 / .98);
+  --theme-raw-a7cd90308d: oklch(0.964 0.014 350 / .92);
+  --theme-raw-43e7c150a3: oklch(0.961 0.018 350);
+  --theme-raw-110775935d: oklch(0.957 0.014 350 / .6);
+  --theme-raw-67b1544df1: oklch(0.957 0.014 350 / .7);
+  --theme-raw-fb93e4cda9: oklch(0.957 0.014 350 / .78);
+  --theme-raw-36727cf2ec: oklch(0.957 0.014 350 / .96);
+  --theme-raw-df984e50cd: oklch(0.953 0.02 350 / .5);
+  --theme-raw-05cc990601: oklch(0.953 0.02 350);
+  --theme-raw-f738ed2e4a: oklch(0.949 0.018 350 / .55);
+  --theme-raw-640463d591: oklch(0.945 0.02 350 / .55);
+  --theme-raw-9de7753430: oklch(0.936 0.018 350 / .55);
+  --theme-raw-61ddae4153: oklch(0.936 0.018 350 / .72);
+  --theme-raw-8b595ab57a: oklch(0.936 0.018 350 / .8);
+  --theme-raw-31f0dcd520: oklch(0.936 0.025 265 / .6);
+  --theme-raw-97121a9cd1: oklch(0.932 0.04 355 / .1);
+  --theme-raw-48c4b46356: oklch(0.932 0.04 355 / 0.18);
+  --theme-raw-e5a0ac33e1: oklch(0.915 0.018 350 / .45);
+  --theme-raw-3b5be19fa7: oklch(0.915 0.018 350 / .7);
+  --theme-raw-e8b69cc145: oklch(0.903 0.02 350);
+  --theme-raw-a1833752c0: oklch(0.903 0.025 350);
+  --theme-raw-b4f21d0803: oklch(0.894 0.05 350);
+  --theme-raw-92b680f3ec: oklch(0.877 0.01 350);
+  --theme-raw-e93dd6ac65: oklch(0.572 0.015 350);
+  --theme-raw-0656dad9b1: oklch(0.555 0.02 350);
+  --theme-raw-4a1307e96f: oklch(0.38 0.16 28);
+  --theme-raw-a2f27b8157: oklch(0.538 0.02 265);
+  --theme-raw-d4d630ee87: oklch(0.512 0.02 350);
+  --theme-raw-8b80ec8360: oklch(0.512 0.03 350);
+  --theme-raw-7efde2efe4: oklch(0.512 0.04 350);
+  --theme-raw-6fd1e0b10a: oklch(0.38 0.1 350 / .25);
+  --theme-raw-e9ed77745c: oklch(0.496 0.02 265);
+  --theme-raw-893412a580: oklch(0.38 0.12 350);
+  --theme-raw-7c30cb2642: oklch(0.35 0.14 355 / .08);
+  --theme-raw-e2b519e948: oklch(0.35 0.14 355 / .1);
+  --theme-raw-1d65fdc10d: oklch(0.35 0.14 355 / .18);
+  --theme-raw-0a4db54701: oklch(0.35 0.14 355 / .28);
+  --theme-raw-61a86aba90: oklch(0.44 0.19 25 / .9);
+  --theme-raw-1bec1586d5: oklch(0.44 0.19 25);
+  --theme-raw-a62bc70460: oklch(0.44 0.2 25 / .1);
+  --theme-raw-0f7e7367d5: oklch(0.44 0.2 25 / .3);
+  --theme-raw-fff2c92413: oklch(0.44 0.2 25 / .35);
+  --theme-raw-e310b6607e: oklch(0.44 0.2 25 / .4);
+  --theme-raw-fe6890d23a: oklch(0.47 0.18 25 / .18);
+  --theme-raw-7281a81000: oklch(0.48 0.12 350);
+  --theme-raw-8013de71f6: oklch(0.4 0.13 355 / .6);
+  --theme-raw-abfcac694c: oklch(0.4 0.14 355 / .13);
+  --theme-raw-2aeaf8b3e3: oklch(0.5 0.18 25);
+  --theme-raw-f8deab4d70: oklch(0.385 0.04 350 / .13);
+  --theme-raw-2941b859e2: oklch(0.385 0.05 350 / .12);
+  --theme-raw-ec453949ef: oklch(0.42 0.12 355);
+  --theme-raw-5e8a452f19: oklch(0.5 0.13 350);
+  --theme-raw-4d3a32380f: oklch(0.42 0.14 355 / .12);
+  --theme-raw-0dc93968db: oklch(0.42 0.14 355 / .28);
+  --theme-raw-98171f9c13: oklch(0.42 0.14 355 / .35);
+  --theme-raw-5097bc492c: oklch(0.42 0.14 355 / .55);
+  --theme-raw-a66a69099f: oklch(0.42 0.14 355 / .6);
+  --theme-raw-97132cd359: oklch(0.52 0.18 25);
+  --theme-raw-ee55a08e21: oklch(0.368 0.025 350);
+  --theme-raw-e14818b517: oklch(0.44 0.13 355);
+  --theme-raw-961cbfcdfb: oklch(0.44 0.14 355);
+  --theme-raw-59dcd78135: oklch(0.47 0.14 355 / .12);
+  --theme-raw-dc7fe9747c: oklch(0.47 0.14 355 / .6);
+  --theme-raw-53a5c60b9c: oklch(0.47 0.14 355);
+  --theme-raw-bcba0c22dc: oklch(0.48 0.14 355 / .65);
+  --theme-raw-d62169263a: oklch(0.48 0.14 355);
+  --theme-raw-547924fc65: oklch(0.317 0.02 265);
+  --theme-raw-5239ddc2ef: oklch(0.5 0.12 355);
+  --theme-raw-5ad356ce80: oklch(0.58 0.14 170);
+  --theme-raw-290d50b47c: oklch(0.5 0.14 355);
+  --theme-raw-efe63de4ad: oklch(0.52 0.12 355);
+  --theme-raw-afbb17f119: oklch(0.52 0.13 355 / .05);
+  --theme-raw-deaf08acbf: oklch(0.52 0.13 355 / .06);
+  --theme-raw-a4dcc6a258: oklch(0.52 0.13 355 / .07);
+  --theme-raw-c789243b14: oklch(0.52 0.13 355 / .08);
+  --theme-raw-5a7d739956: oklch(0.52 0.13 355 / .09);
+  --theme-raw-e636578dde: oklch(0.52 0.13 355 / .1);
+  --theme-raw-a73eb30acf: oklch(0.52 0.13 355 / .12);
+  --theme-raw-a303ead9a8: oklch(0.52 0.13 355 / .13);
+  --theme-raw-aee25a9385: oklch(0.52 0.13 355 / .14);
+  --theme-raw-237a9ccbe3: oklch(0.52 0.13 355 / .16);
+  --theme-raw-939d500bbc: oklch(0.52 0.13 355 / .17);
+  --theme-raw-abd34dfdec: oklch(0.52 0.13 355 / .18);
+  --theme-raw-49105fe622: oklch(0.52 0.13 355 / .2);
+  --theme-raw-c9c199ec46: oklch(0.52 0.13 355 / .22);
+  --theme-raw-c3f45ad04a: oklch(0.52 0.13 355 / .24);
+  --theme-raw-a9e40f0581: oklch(0.52 0.13 355 / .25);
+  --theme-raw-fc06cc0e30: oklch(0.52 0.13 355 / .28);
+  --theme-raw-69747d9905: oklch(0.52 0.13 355 / .3);
+  --theme-raw-feb0747d19: oklch(0.52 0.13 355 / .35);
+  --theme-raw-b1bff628cd: oklch(0.52 0.13 355 / .38);
+  --theme-raw-9d0441a38a: oklch(0.52 0.13 355 / .4);
+  --theme-raw-ebe711bbf4: oklch(0.52 0.13 355 / .45);
+  --theme-raw-dd84d69948: oklch(0.52 0.13 355 / .48);
+  --theme-raw-f860ee6b2e: oklch(0.52 0.13 355 / .5);
+  --theme-raw-6ee9174160: oklch(0.52 0.13 355 / .55);
+  --theme-raw-636839315e: oklch(0.52 0.13 355 / .6);
+  --theme-raw-5a8c291f31: oklch(0.52 0.13 355 / .7);
+  --theme-raw-c20a46d3a5: oklch(0.52 0.13 355 / .85);
+  --theme-raw-5e6b600933: oklch(0.52 0.13 355 / 0);
+  --theme-raw-a28ae1df0d: oklch(0.56 0.13 85 / .06);
+  --theme-raw-74d179b24e: oklch(0.56 0.13 85 / .3);
+  --theme-raw-bb1e9d66ef: oklch(0.56 0.13 85);
+  --theme-raw-bcf7662399: oklch(0.6 0.14 170);
+  --theme-raw-7c525018fd: oklch(0.52 0.14 355);
+  --theme-raw-80243254c9: oklch(0.56 0.14 75 / .06);
+  --theme-raw-4045ba055b: oklch(0.56 0.14 75 / .3);
+  --theme-raw-320cefd40d: oklch(0.56 0.14 80);
+  --theme-raw-b769d066fc: oklch(0.56 0.14 85);
+  --theme-raw-064fe55174: oklch(0.62 0.12 25);
+  --theme-raw-f152322439: oklch(0.54 0.13 355);
+  --theme-raw-6fd4396b10: oklch(0.58 0.13 85);
+  --theme-raw-2f1c6d9a1c: oklch(0.62 0.14 25);
+  --theme-raw-6c1bb224a3: oklch(0.55 0.1 355);
+  --theme-raw-1c1c534c94: oklch(0.61 0.14 85);
+  --theme-raw-7746cd992f: oklch(0.62 0.11 85);
+  --theme-raw-436865bf1e: oklch(0.6 0.11 355);
+  --theme-raw-1915645cf0: oklch(0.18 0.015 265);
+  --theme-raw-7805e56978: oklch(0.06 0 0 / .05);
+  --theme-raw-b79b7875f9: oklch(0.06 0 0 / .06);
+  --theme-raw-7229d98bc6: oklch(0.06 0 0 / .08);
+  --theme-raw-d434218f65: oklch(0.06 0 0 / .12);
+  --background: oklch(0.978 0.007 340);
+  --foreground: oklch(0.343 0.045 352);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.2 0.02 350);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.2 0.02 350);
+  --primary: oklch(var(--brand-lch));
+  --primary-foreground: oklch(0.99 0.005 355);
+  --secondary: oklch(0.936 0.018 350);
+  --secondary-foreground: oklch(0.22 0.02 350);
+  --muted: oklch(0.94 0.014 350);
+  --muted-foreground: oklch(0.555 0.054 354);
+  --accent: oklch(0.93 0.025 355);
+  --accent-foreground: oklch(0.2 0.02 350);
+  --destructive: oklch(0.44 0.2 25);
+  --destructive-foreground: oklch(0.99 0 0);
+  --border: oklch(0.9 0.008 350);
+  --input: oklch(0.9 0.008 350);
+  --ring: oklch(var(--brand-lch));
+  --status-running: oklch(var(--brand-lch));
+  --status-approval: oklch(0.56 0.14 75);
+  --status-error: oklch(0.44 0.2 25);
+  --status-idle: oklch(0.47 0.01 350);
+  --status-paused: oklch(0.55 0.1 265);
+  --status-ok: oklch(0.5 0.13 170);
+}
+/* glass-mode:start ---------- 毛玻璃质感 + 背景壁纸（2026-10-15）----------
+   毛玻璃不是独立主题，而是可叠加在任一套配色上的「质感模式」：
+   html[data-glass="1"] 时统一把表面/描边 token 换成同色相半透明版
+   （各主题的 --surface-*-lch / --text-lch 基色不变，alpha 在这里控制）。
+   改口径直接改 scripts/gen_glass_theme.py 再重放（幂等，起止标记夹住）。 ---------- */
+:root {
+  --glass-blur: 22px;
+  --glass-saturate: 1.35;
+  --glass-highlight: color-mix(in oklab, oklch(var(--text-lch)) 7%, transparent);
+  --wallpaper-image: url("./assets/glass-wallpaper.svg");
+  --wallpaper-dim: 0.3;
+}
+/* 暗色四套：玻璃 alpha 0.38–0.72，透出壁纸 */
+[data-glass="1"] {
+  --surface-0: oklch(var(--surface-0-lch) / 0.4);
+  --surface-1: oklch(var(--surface-1-lch) / 0.5);
+  --surface-2: oklch(var(--surface-2-lch) / 0.58);
+  --surface-3: oklch(var(--surface-3-lch) / 0.68);
+  --surface-raised: oklch(var(--surface-raised-lch) / 0.62);
+  --surface-border: color-mix(in oklab, oklch(var(--text-lch)) 18%, transparent);
+  --background: oklch(var(--surface-0-lch) / 0.38);
+  --card: oklch(var(--surface-1-lch) / 0.55);
+  --popover: oklch(var(--surface-2-lch) / 0.72);
+  --secondary: oklch(var(--surface-1-lch) / 0.5);
+  --muted: oklch(var(--surface-1-lch) / 0.45);
+  --accent: oklch(var(--surface-2-lch) / 0.55);
+  --border: color-mix(in oklab, oklch(var(--text-lch)) 16%, transparent);
+  --input: color-mix(in oklab, oklch(var(--text-lch)) 22%, transparent);
+}
+/* 明亮两套：磨砂白走高 alpha，暗壁纸透上来也不压垮深色文字。
+   注意 --background 只给到 0.55——它是 .app-shell 的整屏底色（index.css
+    components 层 `.app-shell{background:var(--background)}`），给太高会把壁纸
+   整片洗白（实测 0.8 时 light 配色下壁纸完全不可见）。壁纸上再叠一层白色
+   提亮罩（与暗配色的暗色 dim 罩同族，复用同一 dim 滑块）保 shell 级文字可读。 */
+[data-glass="1"][data-theme="light"],
+[data-glass="1"][data-theme="rose-light"] {
+  --glass-nav-a: .9;
+  --glass-aside-a: .9;
+  --glass-composer-a: .94;
+  --glass-panel-a: .86;
+  --surface-0: oklch(var(--surface-0-lch) / 0.78);
+  --surface-1: oklch(var(--surface-1-lch) / 0.82);
+  --surface-2: oklch(var(--surface-2-lch) / 0.86);
+  --surface-3: oklch(var(--surface-3-lch) / 0.92);
+  --surface-raised: oklch(var(--surface-raised-lch) / 0.86);
+  --background: oklch(var(--surface-0-lch) / 0.55);
+  --card: oklch(var(--surface-1-lch) / 0.86);
+  --popover: oklch(var(--surface-2-lch) / 0.92);
+  --secondary: oklch(var(--surface-1-lch) / 0.8);
+  --muted: oklch(var(--surface-1-lch) / 0.78);
+  --accent: oklch(var(--surface-2-lch) / 0.84);
+}
+/* 明亮配色的 dim 罩改成提亮（白）：暗壁纸上的浅色玻璃需要亮底衬托 */
+[data-glass="1"][data-theme="light"] .wallpaper-layer::after,
+[data-glass="1"][data-theme="rose-light"] .wallpaper-layer::after {
+  background: oklch(1 0 0 / var(--wallpaper-dim, 0.3));
+}
+/* 壁纸层：body 直接子元素，所有模式共用；不透明模式下被表面完全盖住 */
+.wallpaper-layer {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background-image: var(--wallpaper-image, none);
+  background-size: var(--wallpaper-fit, cover);
+  background-position: center;
+  background-repeat: no-repeat;
+  pointer-events: none;
+}
+.wallpaper-layer::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: oklch(0.08 0.014 250 / var(--wallpaper-dim, 0));
+}
+/* 壁纸留边（contain）时露出的 body 底色：跟随当前配色的实色 surface-0 */
+[data-glass="1"] body { background-color: oklch(var(--surface-0-lch)); }
+/* 糊化只加在「浮层」与「主要磨砂件」上——**绝不加在 .app-shell**：
+   它是整屏元素，backdrop-filter 会把它身后唯一的一层东西（整幅壁纸）
+   糊掉，dim=0% 也一样模糊（2026-10-15 Nan 实测反馈的 bug）。
+   · portal 浮层（dialog/menu/listbox）糊它们身后的应用内容+壁纸；
+   · 常驻磨砂件（.app-nav/.wb-aside/.wb-composer/.wb-panel + 右侧栏一族
+     .wb-drawer-panel/.wb-rail/.wb-context-rail/.wb-rail-handle）吃 theme-raw
+     兼容 token 的实色底——玻璃模式下换 color-mix 半透明 + 自身糊化，
+     壁纸在间隙里保持锐利（alpha 走变量，明亮两套在下面的守卫里抬档）。 */
+[data-glass="1"] {
+  --glass-nav-a: .72;
+  --glass-aside-a: .72;
+  --glass-composer-a: .78;
+  --glass-panel-a: .55;
+}
+[data-glass="1"] [role="dialog"],
+[data-glass="1"] [role="menu"],
+[data-glass="1"] [role="listbox"],
+[data-glass="1"] .app-nav,
+[data-glass="1"] .nav-sep,
+[data-glass="1"] .wb-aside,
+[data-glass="1"] .wb-composer,
+[data-glass="1"] .wb-panel,
+[data-glass="1"] .wb-drawer-panel,
+[data-glass="1"] .wb-rail,
+[data-glass="1"] .wb-context-rail,
+[data-glass="1"] .wb-rail-handle,
+[data-glass="1"] .wb-todo {
+  /* 前缀必须写在标准属性**之前**：写在后面会被 lightningcss 去重成只留
+     -webkit- 一条，而本机 Edge 不认 -webkit-backdrop-filter → 糊化整体失效
+     （2026-10-15 实测：前缀版 stddev 95.5 = 无效果，标准版 1.6）。 */
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+}
+/* 停靠进 .app-nav 的 .wb-aside 必须关掉自己的 backdrop-filter（2026-10-16 实测）：
+   .app-nav 自己带 backdrop-filter → 它成为 backdrop root；子层再 blur 时拿到的
+   「背景」只剩父层那层半透明底色、**丢掉了下层壁纸** → 63% 深色叠在黑上，
+   渲染成近黑（实测停靠面板 (32,23,26) vs 导航 (70,64,66)，Nan 报「这一栏是深色透明」）。
+   父层已经糊过，子层不必再糊（父层给的那层半透明底仍在，所以观感与导航齐平）。
+   **只在停靠态关**：非停靠态（导航收起/窄栏）它不在 .app-nav 里，仍需自己 blur。
+   选择器 (0,3,0) 高于上面名单的 (0,2,0)，且本条在其后，双保险。 */
+[data-glass="1"] .nav-rail-slot .wb-aside {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+[data-glass="1"] .app-nav {
+  background: color-mix(in oklab, var(--theme-raw-308b572e6b) calc(var(--glass-nav-a) * 100%), transparent);
+}
+[data-glass="1"] .wb-aside {
+  background: color-mix(in oklab, var(--theme-raw-8b524e3722) calc(var(--glass-aside-a) * 100%), transparent);
+}
+[data-glass="1"] .wb-composer {
+  background: color-mix(in oklab, var(--theme-raw-a7cd90308d) calc(var(--glass-composer-a) * 100%), transparent);
+}
+[data-glass="1"] .wb-panel {
+  background: color-mix(in oklab, var(--theme-raw-f07f607b7e) calc(var(--glass-panel-a) * 100%), transparent);
+  box-shadow: inset 0 1px 0 var(--glass-highlight);
+}
+/* 右侧栏一族（工具抽屉 / 发现栏 / 上下文栏 / 收起态手柄，2026-10-16）：
+   原先吃 `--theme-raw-8b524e3722` **原色**——它自带 55% alpha 但**不在糊化名单里**，
+   于是是一块偏实的深色板（实测 (26–62)），与导航/侧栏那套玻璃不是一族（Nan 报
+   「这一栏是深色透明」）。现并入 .wb-aside 同档：同 token、同 --glass-aside-a、同 blur。 */
+[data-glass="1"] .wb-drawer-panel,
+[data-glass="1"] .wb-rail,
+[data-glass="1"] .wb-context-rail,
+[data-glass="1"] .wb-rail-handle {
+  background: color-mix(in oklab, var(--theme-raw-8b524e3722) calc(var(--glass-aside-a) * 100%), transparent);
+}
+/* 悬浮待办卡（.wb-todo，2026-10-16 起 sticky 钉在时间线顶部）在玻璃模式下换回「磨砂」：
+   非玻璃模式它垫了一层不透明 `oklch(--surface-1-lch)`（防滚动内容透出幽灵字），
+   那层实底在玻璃界面里会是一块突兀的卡片；这里去掉垫底，改由上面的 backdrop-filter
+   糊掉滚上来的内容（0.8 alpha + blur = 磨砂，仍是可读的浅底）。
+   选择器 (0,2,0) 高于 index.css 基础规则 `.wb-todo` 的 (0,1,0)，不靠源码顺序取胜
+   （玻璃块在 index.css 里位于 .wb-todo 基础规则**之前**）。 */
+[data-glass="1"] .wb-todo {
+  background: linear-gradient(180deg, var(--theme-raw-deaf08acbf), transparent 70%), var(--theme-raw-ff24ae504f);
+}
+/* 左导航右缘的「额外亮」竖带（2026-10-15 Nan 反馈）。合成它的有两层：
+   ① `.app-nav` 的 1px 边框吃 `--theme-raw-e8b69cc145` 实色——全应用唯一一处
+      没并入玻璃描边档的面板边界线（`@layer base` 的 `*{border-color:var(--border)}`
+      被这条 unlayered 规则盖掉），玻璃模式下周围表面都半透明了，它还是一条
+      硬实色线；
+   ② 2px 拖拽分隔条是 `bg-transparent`——透出 `.app-shell` 的 wash（暗配色
+      0.38 alpha，比导航表面 0.72 更透），亮壁纸下成了一条「洞」。
+   两者叠出一条贯穿全高、比两侧表面都亮的带子。处理：
+   · 边框退成透明，改由分隔条右缘出玻璃发丝线 `--border`（与顶栏/侧栏底边、
+     直播间 live-aside 的 `border-l` 同族），发丝线落在真正的分界上；
+   · 分隔条延续导航表面的半透明档（并在上面的糊化名单里同样吃 backdrop-filter），
+     缝隙不再是洞。
+   本块不带 layer、会盖掉 Tailwind 的 hover:bg-accent / data-[separator=active]:bg-accent，
+   故高亮反馈必须在这里显式重声明。 */
+[data-glass="1"] .app-nav { border-right-color: transparent; }
+[data-glass="1"] .nav-sep {
+  background: var(--theme-raw-308b572e6b);
+  background: color-mix(in oklab, var(--theme-raw-308b572e6b) calc(var(--glass-nav-a) * 100%), transparent);
+  border-right: 1px solid var(--border);
+}
+[data-glass="1"] .nav-sep:hover,
+[data-glass="1"] .nav-sep[data-separator="active"] { background: var(--accent); }
+@media (prefers-reduced-motion: reduce) {
+  .wallpaper-layer { transition: none !important; }
+}
+/* glass-mode:end */
 
 
 @theme inline {
@@ -829,6 +1518,21 @@
 .window-drag-strip { position: absolute; top: 0; left: 0; right: 0; height: 36px; z-index: 40; -webkit-app-region: drag; }
 .brand-mark { display: grid; width: 27px; height: 27px; place-items: center; border: 1px solid var(--theme-raw-636839315e); border-radius: 7px; color: var(--primary); background: var(--theme-raw-c789243b14); }
 .nav-scroll { flex: 1; padding: 18px 10px; overflow-y: auto; }
+/* 工作台侧栏停靠槽位（2026-10-16）：导航分组之下、页脚之上。
+   NavRail 只在「agents 视图 + 本列展开」时渲染它，AgentWorkbenchView 用 createPortal
+   把 agent 切换器 + 会话线程列表投进来 → 二者共用同一列，主区多出整列宽。
+   槽位不存在（窄栏 / 侧栏收起 / 其它视图）时工作台走原来的两列布局。
+   基高 560px：窗口高时吃满剩余空间；窗口矮时与 .nav-scroll 按基高比例一起收缩
+   （两边都能滚）。560 是实测值——.nav-scroll 的 auto 基高约 620px，本槽位基高 560 时
+   800px 高窗口下二者约 330/300 分账，线程列表刚好放下 3 条（320 只能露 1 条半）。
+   min-height 240px 是保底：窗口再矮也别把线程列表压成一行。
+   不加 overflow:hidden —— agent 切换器的下拉（.wb-agent-menu，绝对定位、最高 320px）
+   需要越出槽位下沿覆盖到页脚上，剪掉就看不全了（线程列表自带 overflow-y:auto）。 */
+.nav-rail-slot { display: flex; min-height: 240px; flex: 1 1 560px; flex-direction: column; border-top: 1px solid var(--border); }
+/* 首帧 portal 尚未落地时不留一条空发丝线 */
+.nav-rail-slot:empty { display: none; }
+/* 有停靠侧栏时导航分组改为「可缩 + 自己滚」，与侧栏分享剩余高度 */
+.app-nav.has-rail .nav-scroll { flex: 1 1 auto; min-height: 0; }
 .nav-group + .nav-group { margin-top: 25px; }
 .nav-group-label, .eyebrow { display: block; color: var(--muted-foreground); font-size: 9px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; }
 .nav-group-label { padding: 0 10px 8px; }
@@ -848,7 +1552,8 @@
 .nav-footer .status-dot { margin-left: auto; }
 /* 顶栏收口（2026-10-14，方案 A）：原「surface token 渐变自然衔接主区」方案取消——
    渐变末段色 == 主区底色（surface-0），顶栏与内容之间零分界；而紧邻的中栏首卡
-   （.wb-agent-trigger）带 9px 圆角 + 描边，「无框头部 + 有框内容」两套边界语言相邻
+   （当时是 .wb-agent-trigger，该类已于 2026-10-16 随「只在 composer 处切换智能体」删除）
+   带 9px 圆角 + 描边，「无框头部 + 有框内容」两套边界语言相邻
    → 观感割裂。现改实底 surface-1 + 1px 底边线，头部成为一条有明确收口的带。
    副作用：中栏右竖线原本从顶栏下沿才起（y≈69），现在横线先收口，竖线接在 T 型交点
    上，不再是「凭空冒出」。 */
@@ -857,7 +1562,8 @@
 .topbar button, .topbar a, .topbar input, .topbar select { -webkit-app-region: no-drag; }
 .mobile-brand { display: none; align-items: center; gap: 8px; font-size: 13px; font-weight: 650; }
 /* 项目信息卡片化（2026-10-14，方案 B）：原「9px 全大写英文 eyebrow + 标题行」两层无框
-   排版，与下方 .wb-agent-trigger 的卡片语言不是一套，且该 eyebrow 是全中文界面里唯一
+   排版，与下方中栏的胶囊卡（当时是 .wb-agent-trigger，已于 2026-10-16 删除）不是一套，
+   且该 eyebrow 是全中文界面里唯一
    一处全大写英文标签。现整体换成同款胶囊（同 9px 圆角 / brand 16% 描边 / brand 5% 底色），
    项目名 14→13px 让出徽章空间。 */
 .project-card { display: flex; align-items: center; gap: 9px; min-width: 0; padding: 6px 11px; border: 1px solid var(--theme-raw-237a9ccbe3); border-radius: 9px; background: var(--theme-raw-afbb17f119); }
@@ -1031,15 +1737,22 @@
 
 /* ---- 左栏 ---- */
 .wb-aside { display: flex; width: 236px; flex: 0 0 236px; flex-direction: column; background: var(--theme-raw-8b524e3722); }
-.wb-aside-head { position: relative; padding: 10px; border-bottom: 1px solid var(--border); }
-.wb-agent-trigger { display: flex; width: 100%; align-items: center; gap: 9px; padding: 8px 10px; border: 1px solid var(--theme-raw-237a9ccbe3); border-radius: 9px; background: var(--theme-raw-afbb17f119); text-align: left; transition: border-color .16s, background .16s; }
-.wb-agent-trigger:hover { border-color: var(--theme-raw-b1bff628cd); background: var(--theme-raw-5a7d739956); }
-.wb-agent-name { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 650; }
-.wb-agent-role { display: block; margin-top: 1px; color: var(--muted-foreground); font-family: var(--font-mono); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
+/* 停靠态（在 .nav-rail-slot 里，见上）：不再自绘宽度与底色，融进左导航列的表面。
+   必须显式 min-height:0 —— 否则 flex 项的自动最小尺寸取内容高（三个线程≈265px），
+   槽位被压到 150px 时它不收缩、直接溢出到页脚上（2026-10-16 实测）。
+   选择器 (0,2,0) 与玻璃块的 `[data-glass="1"] .wb-aside` 同权重、本条靠后 → 玻璃模式下同样生效
+   （玻璃块由 scripts/gen_glass_theme.py 插在主题段之后、本段之前，勿把本段上移）。 */
+.nav-rail-slot .wb-aside { width: 100%; min-height: 0; flex: 1 1 auto; background: transparent; }
+/* 左栏的智能体切换卡（.wb-aside-head/.wb-agent-trigger/.wb-agent-name/.wb-agent-role）
+   已于 2026-10-16 随「只在 composer 处切换智能体」的需求整体删除。 */
 .wb-avatar { display: grid; width: 26px; height: 26px; flex: 0 0 26px; place-items: center; border-radius: 8px; border: 1px solid var(--theme-raw-ebe711bbf4); background: var(--theme-raw-e636578dde); color: var(--primary); font-size: 11px; font-weight: 750; }
 .wb-avatar.is-orch { background: linear-gradient(135deg, var(--theme-raw-fc06cc0e30), var(--theme-raw-6fd1e0b10a)); box-shadow: 0 0 14px var(--theme-raw-abd34dfdec); }
 .wb-avatar.is-sm { width: 20px; height: 20px; flex-basis: 20px; border-radius: 6px; font-size: 9px; }
-.wb-agent-menu { position: absolute; z-index: 30; top: calc(100% + 6px); right: 10px; left: 10px; max-height: 320px; overflow: auto; border: 1px solid var(--theme-raw-49105fe622); border-radius: 10px; background: var(--theme-raw-b0dd1d1377); box-shadow: 0 18px 40px var(--theme-raw-7846e7d7de); }
+/* 智能体选择浮层（2026-10-16 从左栏迁到 composer）：锚在 .wb-composer-wrap（position:relative）
+   的左下角、向上弹出，与 .wb-model-pop 同款口径（bottom:calc(100%+8px) / z-index 30，
+   backdrop 29 在下面）。宽度取 300px 而非 left+right 撑满——主区宽时撑满会得到一张
+   上千像素的巨型菜单（左栏时代父容器只有 236px 宽所以无此问题）。 */
+.wb-agent-menu { position: absolute; z-index: 30; bottom: calc(100% + 8px); left: 12px; width: 300px; max-height: 320px; overflow: auto; border: 1px solid var(--theme-raw-49105fe622); border-radius: 10px; background: var(--theme-raw-b0dd1d1377); box-shadow: 0 18px 40px var(--theme-raw-7846e7d7de); }
 .wb-agent-menu-label { padding: 8px 11px 4px; color: var(--muted-foreground); font-size: 9px; font-weight: 750; letter-spacing: .13em; text-transform: uppercase; }
 .wb-agent-option { display: flex; width: 100%; gap: 9px; align-items: flex-start; padding: 8px 11px; border: 0; border-top: 1px solid var(--theme-raw-e5a0ac33e1); background: transparent; text-align: left; transition: background .14s; }
 .wb-agent-option:hover { background: var(--theme-raw-c789243b14); }
@@ -1072,13 +1785,35 @@
 .wb-badge { display: inline-flex; align-items: center; gap: 5px; padding: 2px 9px; border: 1px solid var(--theme-raw-69747d9905); border-radius: 999px; background: var(--theme-raw-c789243b14); color: var(--primary); font-family: var(--font-mono); font-size: 9px; font-weight: 700; letter-spacing: .06em; }
 .wb-badge.is-ghost { border-color: var(--border); background: transparent; color: var(--muted-foreground); }
 .wb-badge.is-error { border-color: var(--theme-raw-e310b6607e); background: var(--theme-raw-a62bc70460); color: var(--theme-raw-064fe55174); }
-.wb-stream { min-height: 0; flex: 1; overflow-y: auto; padding: 20px 24px 8px; }
+.wb-stream { --stream-pad-top: 20px; min-height: 0; flex: 1; overflow-y: auto; padding: var(--stream-pad-top) 24px 8px; }
 .wb-timeline { display: grid; grid-template-columns: minmax(0, 1fr); max-width: 812px; margin: 0 auto; }
 /* 轮次失败错误卡片（2026-10-01）：分类标题 + 建议 + 可折叠技术细节 */
 
 
 /* 待办卡 */
-.wb-todo { margin-bottom: 14px; overflow: hidden; border: 1px solid var(--theme-raw-c9c199ec46); border-radius: 10px; background: linear-gradient(180deg, var(--theme-raw-deaf08acbf), transparent 70%), var(--theme-raw-ff24ae504f); }
+/* 悬浮待办卡（2026-10-16，Nan 需求「不随上下翻页而移动」）：sticky 钉在 .wb-stream
+   视口顶部（.wb-stream 是最近的滚动容器，`overflow-y:auto`）。**实测 grid 父容器里的
+   sticky 子项在 Chromium 下同样能钉住**（%TEMP%\sticky_test.html：scrollTop 0→300，
+   卡片 offset 恒为 21，grid 与块容器两种父级都成立），故无需把卡片挪出 .wb-timeline。
+   **钉位要用 `top: calc(-1 * var(--stream-pad-top))` 而不是 `top: 0`**：实测 Chromium
+   的 sticky 约束矩形顶边取滚动容器的**内容盒**顶（即已内缩 padding-top），`top:0` 会让
+   卡片钉在内容起点 = 流顶下方 20px，于是卡片上方留出一条 20px 缝、露出一行被截断的正文
+   （v_base 实测 todoTopRel=20）。补偿掉 padding-top 后卡片正好压在流顶（v_topneg 实测
+   todoTopRel=0），视觉上是「钉在顶部的悬浮卡」。副作用：scrollTop 0→20 期间卡片会从 20
+   平滑升到 0 再钉住（20px 的「先升后钉」，标准 sticky 行为，且流默认滚到底部，通常看不到）。
+   底色补一层不透明 `oklch(--surface-1-lch)`：原底是 0.8 alpha，钉住后滚上来的内容
+   会从下面透出幽灵字；0.17@0.8 叠 0.135 ≈ 0.163，与原来观感几乎一致。
+   **垫底必须走 background-color 单列、不能塞进 background 简写的中间层**：
+   `background` 简写里 `<color>` 只允许出现在**最后一层**，原来的
+   `..., var(--theme-raw-ff24ae504f), oklch(var(--surface-1-lch))` 让那个 0.8 色
+   落在中间 → 整条声明在计算值阶段判无效、background 整体回退成 none/transparent
+   （2026-10-16 端到端实测：非玻璃模式 `backgroundImage=none backgroundColor=rgba(0,0,0,0)`）。
+   故拆成 background-color（不透明垫底）+ background-image（高光渐变 + 0.8 色垫层，
+   后者用同色 linear-gradient 表达，绕开「颜色不能在非末层」的限制）。
+   z-index 6 压住时间线内容（时间线元素都是 z-index:auto，正 z-index 必在上）；
+   投影读作「悬浮」。**玻璃模式下由 gen_glass_theme.py 换回「磨砂」**（去掉不透明垫底
+   + 自身 backdrop-filter），否则玻璃界面里会杵着一块实底卡片。 */
+.wb-todo { position: sticky; top: calc(-1 * var(--stream-pad-top, 20px)); z-index: 6; margin-bottom: 14px; overflow: hidden; border: 1px solid var(--theme-raw-c9c199ec46); border-radius: 10px; background-color: oklch(var(--surface-1-lch)); background-image: linear-gradient(180deg, var(--theme-raw-deaf08acbf), transparent 70%), linear-gradient(var(--theme-raw-ff24ae504f), var(--theme-raw-ff24ae504f)); box-shadow: 0 10px 22px -10px var(--theme-raw-7846e7d7de); }
 .wb-todo-head { display: flex; gap: 8px; align-items: center; padding: 9px 13px 7px; color: var(--primary); font-size: 11px; font-weight: 700; letter-spacing: .02em; }
 .wb-todo-count { margin-left: auto; color: var(--muted-foreground); font-family: var(--font-mono); font-size: 9px; }
 .wb-todo-bar { height: 3px; background: var(--theme-raw-3b5be19fa7); }
@@ -1221,7 +1956,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .wb-anim, .wb-dot.is-running { animation: none !important; }
-  .wb-todo-bar i, .wb-send, .wb-composer, .wb-agent-trigger, .wb-thread, .wb-chip, .wb-cap, .wb-ref-chip, .wb-slash-item, .wb-kv-click, .wb-mcp-row, .wb-usage, .wb-usage-bar i, .wb-model, .wb-model-opt { transition: none !important; }
+  .wb-todo-bar i, .wb-send, .wb-composer, .wb-thread, .wb-chip, .wb-cap, .wb-ref-chip, .wb-slash-item, .wb-kv-click, .wb-mcp-row, .wb-usage, .wb-usage-bar i, .wb-model, .wb-model-opt { transition: none !important; }
 }
 
 /* ---- K9-UI 追加：工作台左栏分割线拖宽（2026-09-29） ---- */
@@ -1319,4 +2054,21 @@ body.wb-dragging { cursor: col-resize; user-select: none; }
 .nav-reveal > svg { position: absolute; left: 5px; display: grid; width: 20px; height: 20px; padding: 3px; place-items: center; border: 1px solid var(--theme-raw-feb0747d19); border-radius: 7px; background: var(--card); color: var(--primary); opacity: 0; translate: -6px 0; transition: opacity .15s, translate .15s; }
 .nav-reveal:hover > svg { opacity: 1; translate: 0 0; }
 @media (prefers-reduced-motion: reduce) { .nav-edge-btn, .nav-reveal::before, .nav-reveal > svg, .nav-group-chevron { transition: none !important; } }
+
+/* ---- 变更提案页：知识库迭代开关（2026-10-14，胶囊 + 滑动开关） ----
+   胶囊容器随状态换皮：关=中性描边/灰字，开=品牌描边+品牌淡底+品牌字+光晕；
+   右侧 28×16 滑轨内嵌 10px 圆钮，开态 translateX(12px) 且钮/轨改品牌色。 */
+.kbiter-toggle { display: inline-flex; align-items: center; gap: 8px; padding: 4px 6px 4px 10px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-2); color: var(--muted-foreground); font-size: 11px; font-weight: 500; line-height: 1; cursor: pointer; transition: border-color .16s, background .16s, color .16s, box-shadow .16s; }
+.kbiter-toggle:hover { border-color: var(--brand-border); color: var(--foreground); }
+.kbiter-toggle.is-on { border-color: var(--brand-border); background: var(--brand-bg); color: var(--brand); box-shadow: 0 0 0 1px var(--brand-border); }
+.kbiter-toggle:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--brand-border); }
+.kbiter-toggle:disabled { cursor: wait; opacity: .6; }
+.kbiter-toggle > svg { width: 13px; height: 13px; flex: 0 0 13px; opacity: .9; }
+.kbiter-tag { padding: 1px 6px; border: 1px solid var(--border); border-radius: 999px; font-size: 9px; font-weight: 400; opacity: .8; }
+.kbiter-toggle.is-on .kbiter-tag { border-color: var(--brand-border); }
+.kbiter-switch { position: relative; display: inline-flex; width: 28px; height: 16px; flex: 0 0 28px; align-items: center; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-0); transition: background .16s, border-color .16s; }
+.kbiter-switch i { display: block; width: 10px; height: 10px; margin-left: 2px; border-radius: 999px; background: var(--muted-foreground); transition: transform .18s, background .16s; }
+.kbiter-toggle.is-on .kbiter-switch { border-color: var(--brand-border); background: var(--brand-glow); }
+.kbiter-toggle.is-on .kbiter-switch i { transform: translateX(12px); background: var(--brand); }
+@media (prefers-reduced-motion: reduce) { .kbiter-toggle, .kbiter-switch, .kbiter-switch i { transition: none !important; } }
 

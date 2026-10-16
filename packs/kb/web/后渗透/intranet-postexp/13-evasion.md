@@ -1,6 +1,6 @@
 # 内网/后渗透 — 免杀与规避 payload 库
 
-> 父文档:[00-index.md](00-index.md) · ⚠️ SRC 场景下大多受限,见 [../compliance.md](../compliance.md)
+> 父文档:[[web/后渗透/intranet-postexp/00-index.md|00-index.md]] · ⚠️ SRC 场景下大多受限,见 [../compliance.md](../compliance.md)
 > 涵盖:AMSI bypass / ETW patch / DLL sideload / 反沙箱 / unhook / Direct syscall / 混淆
 
 ---
@@ -553,4 +553,4 @@ beacon> execute-assembly /path/to/tool.exe args
 
 ---
 
-← 回 [00-index.md](00-index.md) · 上一篇:[`12-privesc.md`](12-privesc.md) · 下一篇:[`14-domain.md`](14-domain.md)
+← 回 [[web/后渗透/intranet-postexp/00-index.md|00-index.md]] · 上一篇:[[web/后渗透/intranet-postexp/12-privesc.md|12-privesc.md]] · 下一篇:[[web/后渗透/intranet-postexp/14-domain.md|14-domain.md]]

@@ -24,6 +24,7 @@ fir-proxy/
 - `GET /status` → 服务状态 + 当前代理 + 池计数 + 地区分布
 - `GET /proxies` → 池内全部代理记录（UI 列表 / AI 取可用 IP）；`_proxy_view` 白名单**须含 `https_ok`**（否则前端 HTTPS 过滤恒空，2026-10-11 修）
 - `POST /rotate` → 强制轮换到下一个代理
+- `POST /select` → **精确切换**到指定代理（2026-10-15；`{"proxy":"host:port"}`，走 `rotator.set_current_proxy_by_address`，须池内且 `status=='Working'`）——访问测试判出可达 IP 后直接钉死，与 `/rotate` 的「顺拣下一个」互补
 - `POST /reload` → 热增删代理（`{"add":[…],"remove":["host:port"]}`）
 - `POST /stop` → 停服务并退出
 
@@ -33,7 +34,7 @@ fir-proxy/
 
 上游 `cli.py fetch` 的源清单**硬编码**在 `modules/fetcher.py::ProxyFetcher`（含已停服的 openproxylist.xyz、不稳的 proxyscan.io、5 个第三方自建 `/fetch_all` 口=供应链风险）。本 runner **只替换实例属性**（`online_sources`/`scraping_sources`），**不改上游文件**：
 
-- 内置精选 `DEFAULT_SOURCES`（proxyscrape v3 / TheSpeedX/PROXY-List / monosans/proxy-list / proxy-list.download / geonode JSON）+ `DEFAULT_SCRAPERS`（6 个爬虫，剔除表结构易变的 free-proxy-list.net）。
+- 内置精选 `DEFAULT_SOURCES`（**2026-10-15 本机实测重排**：`api.openproxylist.xyz` 三协议纯文本源〔http/socks4/socks5〕+ `sunny9577.github.io/proxy-scraper` + `vakhov.github.io/fresh-proxy-list` + geonode JSON **分页**〔http 3 页 / socks5 3 页 / socks4 2 页〕；**原 GitHub raw〔TheSpeedX/monosans〕连接被拒、proxyscrape v3/v4 超时、proxy-list.download 502，实测全部不可达已移除**）+ `DEFAULT_SCRAPERS`（6 个爬虫，剔除表结构易变的 free-proxy-list.net）。**单次抓取量由 ~600 条升到 ~18000 条**（22 源 / 22 秒）。换网络环境需重测源可达性。
 - `--sources <json>` 覆盖：`{api:{http:[...],socks5:[...]}, scrapers:[短名...]}`（`scrapers:[]`=不跑爬虫，未给的协议沿用默认）；缺/坏文件回落内置默认。
 - 接口兼容 cli.py：`-o/--output-format/--quiet/--protocol`；`--limit N` 限量（按协议轮转取，纯函数 `limit_records`，0=不限）；输出 `-o` JSON 数组 `[{protocol,proxy}]`。
 - **进度**：drain `log_queue` 的守护线程按「每源一条终止行 `[+]`/`[-]`/`[!]`」计数，stdout 发 `{"event":"progress","phase":"fetch","done":k,"total":源数}`（平台流式解析 → 状态栏）。
@@ -44,8 +45,8 @@ fir-proxy/
 
 上游 `cli.py validate` 判据过严：要求代理**同时**通过 HTTPS(CONNECT) 延迟检测 + httpbin 匿名检测 + cachefly 测速，任一失败即 Failed——只会明文转发 HTTP 的免费代理被误判死（实测同批 120 条：宽松单目标过 52、上游完整三段只过 9 → 平台池被清空）。本 runner 换成**单目标连通性**判据，**复用上游 `ProxyChecker.check_proxy_url`**（**不改上游文件**），只在其外层计时得 latency：
 
-- 经代理 `GET <--target>`（默认 `http://i.zut.edu.cn/new/index.html`，2026-10-12 由 baidu 改；走 80 口、不强制 CONNECT），拿到 2xx/3xx 即 `Working` 并记延迟；否则 `Failed`。
-- **HTTPS 能力探测（2026-10-11）**：给 `--target-https`（默认平台传 `https://i.zut.edu.cn/new/index.html`，同站）时，另经代理 GET 该 https 目标（**走 CONNECT 隧道**）定记录 `https_ok: bool`；**只作能力标注，不参与 `status`**（免费代理普遍只转 HTTP，并入 status 会全判死）。`check_records(..., target_https=, https_checker_factory=)` 可离线直测。
+- 经代理 `GET <--target>`（默认 `http://cp.cloudflare.com/generate_204`，**2026-10-15 由 i.zut.edu.cn 改**〔原站整站 502，会让全部代理被判 Failed〕；http 明文走 80 口、不强制 CONNECT；无响应体最省流量），拿到 2xx/3xx（含 204）即 `Working` 并记延迟；否则 `Failed`。
+- **HTTPS 能力探测（2026-10-11）**：给 `--target-https`（默认平台传 `https://cp.cloudflare.com/generate_204`）时，另经代理 GET 该 https 目标（**走 CONNECT 隧道**）定记录 `https_ok: bool`；**只作能力标注，不参与 `status`**（免费代理普遍只转 HTTP，并入 status 会全判死）。`check_records(..., target_https=, https_checker_factory=)` 可离线直测。
 - **内容注入/劫持型出口交叉验证（2026-10-11）**：给 `--target-b`（默认平台传 `http://example.com`，须与 `--target` 内容不同）时，对**已通过连通性**的记录再读 `target`/`target_b` 两目标响应体指纹（`_content_fingerprint` = `状态码:长度:sha256前16`，**独立 `_probe_body` 读体**——上游 `check_proxy_url` 用 stream 即关读不到体）；两目标**真实内容不同却回相同指纹** → 判「对任意 host 回同一伪造页」的内容注入出口，`status=Failed` + `hijacked=True` + 说明性 `error`。探测本身失败（第二目标偶发不可达）**不误杀**（保留连通结论，`hijacked=False`）。`check_records(..., target_b=, probe_factory=)` 可离线直测。
 - 纯函数 `check_records(records, target, timeout, workers, checker_factory=None, on_progress=None)` 可注入假 checker 离线直测（`tests/test_proxy_pool.py`）。
 - **进度**：每完成 ~20 条 stdout 发 `{"event":"progress","phase":"check","done":k,"total":N}`（平台流式解析 → 状态栏 + ETA）。

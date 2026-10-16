@@ -91,4 +91,3 @@ LWE instance (n,q,m,Xs,Xe)
 ---
 
 *Back-link: see `lattice-and-lwe.md` NTRU (G1), GGH (G2), Mersenne AJPS (G3) for lattice construction; Coppersmith `hg_matrix` lives in `advanced-math.md`.*
-

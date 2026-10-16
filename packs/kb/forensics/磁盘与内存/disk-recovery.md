@@ -695,5 +695,5 @@ for i in range(10000):
 
 ## See Also
 
-- [disk-and-memory.md](disk-and-memory.md) - Core disk/memory forensics (Volatility, disk image analysis, VM/OVA/VMDK, VMware snapshots, coredumps, KAPE triage, PowerShell ransomware, Android/Docker/cloud forensics, BSON reconstruction, TrueCrypt/VeraCrypt mounting)
-- [disk-advanced.md](disk-advanced.md) - Advanced disk and memory techniques (deleted partitions, ZFS forensics, GPT GUID encoding, VMDK sparse parsing, memory dump string carving, ransomware key recovery, WordPerfect macro XOR, minidump ISO 9660 recovery, APFS snapshots, RAID 5 XOR recovery)
+- [[forensics/磁盘与内存/disk-and-memory.md|disk-and-memory.md]] - Core disk/memory forensics (Volatility, disk image analysis, VM/OVA/VMDK, VMware snapshots, coredumps, KAPE triage, PowerShell ransomware, Android/Docker/cloud forensics, BSON reconstruction, TrueCrypt/VeraCrypt mounting)
+- [[forensics/磁盘与内存/disk-advanced.md|disk-advanced.md]] - Advanced disk and memory techniques (deleted partitions, ZFS forensics, GPT GUID encoding, VMDK sparse parsing, memory dump string carving, ransomware key recovery, WordPerfect macro XOR, minidump ISO 9660 recovery, APFS snapshots, RAID 5 XOR recovery)
