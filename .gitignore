@@ -20,6 +20,8 @@ config/proxy_sources.json
 __pycache__/
 *.pyc
 .pytest_cache/
+# 测试套件（2026-10-16）：仅本地保留，不入库
+tests/
 .venv/
 # 桌面打包（desktop-app-shell M3）：打包 venv / PyInstaller 工作目录与产物
 .build-venv/
