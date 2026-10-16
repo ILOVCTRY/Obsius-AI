@@ -53,17 +53,7 @@ python scripts/serve.py --window
 
 ## CTF
 
-![](https://cdn.jsdelivr.net/gh/ILOVCTRY/note-gen-image-sync@main/blog-img20261014235450790.png)
-
 ![](https://raw.githubusercontent.com/ILOVCTRY/note-gen-image-sync/main/blog-img/2026-10-16/image_1792124131_8bb0.png)
-
-## 主题外观
-
-
-![](https://raw.githubusercontent.com/ILOVCTRY/note-gen-image-sync/main/blog-img/2026-10-16/image_1792124034_2a36.png)
-
-
-![](https://raw.githubusercontent.com/ILOVCTRY/note-gen-image-sync/main/blog-img/2026-10-16/image_1792124092_8c56.png)
 
 ## 系统架构
 
