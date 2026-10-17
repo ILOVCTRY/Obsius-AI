@@ -13,6 +13,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 
 from core.skills.taxonomy import (
     platform_rules_dir, rating_dir, redline_path, rule_templates_dir,
@@ -195,6 +196,79 @@ def resolve_rule_profiles(
     eff_ratings = [t for t in (profiles.get("rating") or [])
                    if (rating_base / f"{t}.md").is_file()]
     return eff_owners, eff_ratings
+
+
+def rating_profile_active(packs_root: str | Path, track: str | None,
+                          rule_profiles: dict | None) -> bool:
+    """本项目是否**激活了「评级与价值口径（rating）」**——勾选且对应文件存在。
+
+    与 `build_rules_preamble` 注入同源（都走 `resolve_rule_profiles`）：只有真正
+    会被注入判级硬指令的项目才返回 True。用于「勾选才强制 rating_basis」类硬闸
+    （2026-10-16）：未勾选的项目**不叠加 rating**，自然也不该被要求填依据。
+
+    读取容错——任何异常按未激活返回 False（宁松勿误拒：硬闸误伤比漏放更糟）。"""
+    try:
+        _, eff_ratings = resolve_rule_profiles(
+            packs_root, track or "", [], rule_profiles)
+        return bool(eff_ratings)
+    except Exception:  # noqa: BLE001 —— 判定失败按未激活
+        return False
+
+
+# ---------- 判级依据引用校验（rating-basis-gate v2，2026-10-17）----------
+
+_RATING_REF_RE = re.compile(r"rating\s*[:：]\s*([A-Za-z0-9_.\-]+)", re.I)
+# basis 里点名的「*rating*.md」文件名（旧副本 / 报告格式里的判级表都在这一类）
+_RATING_DOC_RE = re.compile(r"([A-Za-z0-9_.\-]*rating[A-Za-z0-9_.\-]*)\.md", re.I)
+
+
+def effective_rating_tags(packs_root: str | Path, track: str | None,
+                          rule_profiles: dict | None) -> list[str]:
+    """本项目**生效**的评级口径 tag（勾选且文件存在）；读取异常 → []。"""
+    try:
+        _, eff = resolve_rule_profiles(packs_root, track or "", [], rule_profiles)
+        return list(eff)
+    except Exception:  # noqa: BLE001 —— 判定失败按未激活
+        return []
+
+
+def validate_rating_basis(packs_root: str | Path, track: str | None,
+                          rule_profiles: dict | None, basis: str | None
+                          ) -> tuple[bool, str]:
+    """`rating_basis` 是否**真的引用了本项目生效口径** → (通过, 打回理由)。
+
+    与「非空」硬闸互补：非空只挡漏填，挡不住乱填。2026-10-17 实测有子专家写
+    `评级与价值口径/edus-rating-rules.md`（该文件不存在，且引用的是已废止旧副本）
+    照样落库；同时旧副本判级表把 low 判成了 high。故补这一层引用校验。
+
+    判定（宁松勿误拒，任何读取异常按放行）：
+    1. 未激活 rating → 放行（本闸只服务勾了口径的项目）；
+    2. basis 含 `rating:<tag>` 且 tag 生效 → 通过；
+    3. 未写前缀但正文出现生效 tag 名 → 通过（模型常写「edu-rating 低危#1 …」）；
+    4. 前两条都不中、却点名了某个 `*rating*.md` 文件名 → 打回（典型：旧副本名）；
+    5. 完全没提口径 → 打回，附正确写法。
+    """
+    text = str(basis or "").strip()
+    tags = effective_rating_tags(packs_root, track, rule_profiles)
+    if not tags or not text:
+        return True, ""
+    for tag in _RATING_REF_RE.findall(text):
+        if tag.lower() in {t.lower() for t in tags}:
+            return True, ""
+    # tag 名必须独立成词：`edu-rating-rules` 里的 `edu-rating` 不算引用正本
+    for tag in tags:
+        if re.search(rf"(?<![A-Za-z0-9_-]){re.escape(tag)}(?![A-Za-z0-9_-])", text, re.I):
+            return True, ""
+    docs = [m.lower() for m in _RATING_DOC_RE.findall(text)]
+    hint = ("请写成「rating:%s <档位>#<条号> <一句话依据>」（生效 tag: %s）；"
+            "判级条款只认 system 提示里注入的那份，勿引用旧副本或报告格式里的判级表。"
+            % (tags[0], " / ".join(tags)))
+    if docs:
+        return False, (f"rating_basis 引用了非生效口径文件（{', '.join(d + '.md' for d in docs)}）"
+                       f"——{hint}")
+    if "redline" in text.lower() or "红线" in text:
+        return False, f"rating_basis 引的是红线/证据纪律，不是判级口径——{hint}"
+    return False, f"rating_basis 未引用本项目生效的评级口径——{hint}"
 
 
 def load_kb_sources(packs_root: str | Path, directions: list[str] | None) -> list[KbSource]:

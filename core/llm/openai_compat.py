@@ -6,13 +6,14 @@ from typing import Any
 
 from core.llm import parsing
 from core.llm.anthropic_compat import StreamTransport, Transport
+from core.llm.dump import capture_request as dump_request_capture
 from core.llm.provider import (LLMResponse, ToolCall, Usage, LLMError,
                                collapse_reasoning_echo)
 from core.llm.retry import (COOLDOWN_BACKOFF, HTTP_5XX_ATTEMPTS,
                             HTTP_5XX_BACKOFF, HTTP_5XX_RETRIES, HTTP_5XX_STATUS,
                             RATE_LIMIT_ATTEMPTS, RATE_LIMIT_BACKOFF,
-                            RATE_LIMIT_RETRIES, is_model_cooldown_error,
-                            retry_note)
+                            RATE_LIMIT_RETRIES, is_channel_verification_error,
+                            is_model_cooldown_error, retry_note)
 from core.llm.sdk_engine import RawFallback, build_openai_transports
 
 CHAT_COMPLETIONS = "openai-chat-completions"
@@ -34,6 +35,21 @@ OPENAI_5XX_ATTEMPTS = HTTP_5XX_ATTEMPTS
 OPENAI_5XX_RETRIES = HTTP_5XX_RETRIES
 OPENAI_5XX_BACKOFF = HTTP_5XX_BACKOFF
 
+# ---------- system 兼容通道（2026-10-17，网关丢 system 事故修复） ----------
+# 实测 `api.huanling.icu`（幻灵）在 Responses `instructions`、`input` 内 role=system
+# 项、chat-completions `messages[0]` system **三种形态下全部不到模型**（canary 0/4、
+# 0/1、0/1；同一句话放 user content 3/3 生效；同代码路径 DeepSeek 官方与 ark-plan
+# 均 1/1 生效 → 断点在网关）。后果：走该网关的会话，安全红线/rating 注入实际空转，
+# 模型只凭通用常识答题、表面无异样。
+# 兼容做法：providers.json 条目 `"system_in_user": true` 时，把 system 前置于**首条
+# user 消息**（带显式边界标记），其余形态一律不再下发 system 字段——payload 即模型
+# 实见内容，诊断页看到的就是生效的那份。
+SYSTEM_IN_USER_BEGIN = "<<<CYBERSTRIKE-SYSTEM-PROMPT-BEGIN>>>"
+SYSTEM_IN_USER_END = "<<<CYBERSTRIKE-SYSTEM-PROMPT-END>>>"
+# 只放边界标记、**不加**「这是系统提示词、优先于用户消息」这类框定语：A/B 实测
+# 加框定 1/3、不加 5/6（样本小但无收益），且自称 system 的元指令可能被部分上游
+# 当注入抵制。system 正文自身带「永久强制/优先级最高」口径已足够。
+
 
 class OpenAICompatProvider:
     stream_capable = True
@@ -42,7 +58,8 @@ class OpenAICompatProvider:
                  timeout: float = 600.0, transport: Transport | None = None,
                  stream_transport: StreamTransport | None = None, enable_thinking: bool = False,
                  context_tokens: int | None = None, ctx_soft_budget: int | None = None,
-                 summarizer_model: str | None = None, proxy: str | None = None):
+                 summarizer_model: str | None = None, proxy: str | None = None,
+                 system_in_user: bool = False):
         if format not in {CHAT_COMPLETIONS, RESPONSES}:
             raise ValueError(f"不支持的 OpenAI 格式: {format}")
         self.base_url = base_url.rstrip("/")
@@ -59,6 +76,10 @@ class OpenAICompatProvider:
         self.ctx_soft_budget = ctx_soft_budget
         self.summarizer_model = summarizer_model
         self.proxy = proxy or None
+        # system 兼容通道（2026-10-17）：网关整个丢弃 system 字段时，把 system 前置于
+        # 首条 user 消息下发（providers.json 条目 system_in_user=true）。两种格式都走
+        # 同一开关——chat-completions 的 messages[0] 同样被该网关吞掉。
+        self._system_in_user = bool(system_in_user)
         # 2026-10-03 SDK 迁移：默认传输层换成官方 openai SDK（sdk_engine 把 SDK 的
         # 流式事件还原成 SSE 行，_consume_stream 零改动）。注入的 transport/
         # stream_transport 优先且按需构建 SDK（两侧都注入则完全不碰 SDK）。
@@ -85,19 +106,22 @@ class OpenAICompatProvider:
         _, stream_transport = self._sdk_transports()  # OpenAI 路径恒走流式
 
         def request_with_retries(payload: bytes) -> tuple[int, Any, str]:
-            """重试上游暂态状态（500/502/503/504/520/524 / 429）或瞬时连接断开，
-            其他错误立即返回。
+            """重试上游暂态状态（500/502/503/504/520/524 / 429 / 400 模型冷却
+            / 400 渠道校验风控）或瞬时连接断开，其他错误立即返回。
 
-            三类暂态状态统一 10 次重试预算（2026-10-07 拉齐：520/524 原为 5 次
-            专用预算，现并入标准 5xx 口径；2026-10-10 429 亦并入 11 次尝试）。
-            返回 ``(status, data, note)``——``note`` 是重试耗尽后的计数后缀
+            四类暂态状态统一 10 次重试预算（2026-10-07 拉齐：520/524 原为 5 次
+            专用预算，现并入标准 5xx 口径；2026-10-10 429 亦并入 11 次尝试；
+            2026-10-16 渠道校验拦截并入，与冷却同口径）。返回
+            ``(status, data, note)``——``note`` 是重试耗尽后的计数后缀
             （``retry_note``），非重试类错误为空串，供错误文案显式带出「试了几次」。
             """
             max_attempts = (OPENAI_5XX_ATTEMPTS + RATE_LIMIT_ATTEMPTS
-                            + RATE_LIMIT_ATTEMPTS + OPENAI_CONNECTION_ATTEMPTS)
+                            + RATE_LIMIT_ATTEMPTS + RATE_LIMIT_ATTEMPTS
+                            + OPENAI_CONNECTION_ATTEMPTS)
             status_5xx_used = 0
             rate_limit_used = 0
             cooldown_used = 0
+            channel_used = 0  # 400「渠道校验」风控拦截已用尝试数（2026-10-16）
             for attempt in range(1, max_attempts + 1):
                 try:
                     status, data = stream_transport(
@@ -127,6 +151,22 @@ class OpenAICompatProvider:
                 # SSE 生成器（无 .get）——故先判 isinstance(dict)（2026-10-10 修复
                 # 越界访存致 13 例 OpenAI 流式测试 'generator' has no attribute）。
                 err_obj = data.get("error", {}) if isinstance(data, dict) else {}
+                # 渠道校验拦截（2026-10-16）：网关风控窗口内对所有请求回
+                # 400，特征字段（code=11128/msg/displayTips）在报文**顶层**
+                # 而非 error 子对象——故扫整份序列化错误体，不只看 err_obj。
+                err_text = (json.dumps(data, ensure_ascii=False)
+                            if isinstance(data, dict) else "")
+                if is_channel_verification_error(status, err_text):
+                    # 与「模型冷却」同口径：11 次尝试 + 30s 固定退避（冷却
+                    # 约 3-5 分钟自行恢复，快节奏退避无意义）。
+                    channel_used += 1
+                    if channel_used >= RATE_LIMIT_ATTEMPTS:
+                        return status, data, retry_note(channel_used - 1,
+                                                        RATE_LIMIT_RETRIES)
+                    if on_retry is not None:
+                        on_retry(channel_used, RATE_LIMIT_RETRIES, status)
+                    time.sleep(COOLDOWN_BACKOFF)
+                    continue
                 if is_model_cooldown_error(
                         status, str(err_obj.get("message", "")),
                         str(err_obj.get("code", ""))):
@@ -156,9 +196,17 @@ class OpenAICompatProvider:
             raise RuntimeError("unreachable")  # pragma: no cover
 
         payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        # 出网请求体转储（llm-request-dump）：同一调用内按 payload 指纹去重，
+        # 降级重发（剥 thinking/stream_options）才会多落一份。默认关闭。
+        dumped: set[str] = set()
         stream_attempt = 0
         while True:
-            status, data, note = request_with_retries(payload)
+            # 请求体留痕（diagnostics-request-body）：capture_request 包住本次发送，
+            # 退出时补上 SDK 真正出网的字节（wire/wire_match）。默认关闭。
+            with dump_request_capture(url, payload, provider="openai",
+                                      model=str(body.get("model") or ""),
+                                      fmt=self.format, seen=dumped):
+                status, data, note = request_with_retries(payload)
             if status != 200:
                 message = str((data or {}).get("error", {}).get("message", "请求失败"))
                 if (self._enable_thinking and not self._thinking_disabled
@@ -239,8 +287,12 @@ class OpenAICompatProvider:
         return {"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"}
 
     def _body(self, messages, system, tools, max_tokens, temperature, model):
+        # system_in_user 兼容通道：system 改走 user content，标准 system 字段一律不下发
+        # （下了也被网关丢，只会让诊断页显示一份模型根本看不到的「已注入」）。
+        inline_system = bool(self._system_in_user and system)
+        field_system = None if inline_system else system
         if self.format == CHAT_COMPLETIONS:
-            body: dict[str, Any] = {"model": model, "messages": self._chat_messages(messages, system), "max_tokens": max_tokens, "stream": True}
+            body: dict[str, Any] = {"model": model, "messages": self._chat_messages(messages, field_system), "max_tokens": max_tokens, "stream": True}
             # 流式末帧带回 usage（含 prompt_tokens_details.cached_tokens）——OpenAI
             # Chat Completions 默认不下发，须显式 include_usage（2026-10-13）。
             if not self._stream_options_disabled:
@@ -251,17 +303,46 @@ class OpenAICompatProvider:
                 body["temperature"] = temperature
             if self._enable_thinking and not self._thinking_disabled:
                 body["reasoning_effort"] = "high"
+            if inline_system:
+                body["messages"] = self._ensure_system_in_user(
+                    body["messages"], self._system_text(system))
             return body
         body = {"model": model, "input": self._response_input(messages), "max_output_tokens": max_tokens, "stream": True}
-        if system:
-            body["instructions"] = self._system_text(system)
+        if field_system:
+            body["instructions"] = self._system_text(field_system)
         if tools:
             body["tools"] = [{"type": "function", "name": t["name"], "description": t.get("description", ""), "parameters": t.get("input_schema", {})} for t in tools]
         if temperature is not None:
             body["temperature"] = temperature
         if self._enable_thinking and not self._thinking_disabled:
             body["reasoning"] = {"effort": "high"}
+        if inline_system:
+            body["input"] = self._ensure_system_in_user(
+                body["input"], self._system_text(system))
         return body
+
+    def _ensure_system_in_user(self, items: list[dict[str, Any]],
+                               system_text: str) -> list[dict[str, Any]]:
+        """把 system 前置于首条 user 消息（带边界标记），返回新的 items 列表。
+
+        - 历史里已有该标记（首条 user 消息一直带着）→ 原样返回，**不重复注入**；
+        - 没有 user 消息（罕见）→ 在最前面插一条只含 system 的 user 消息。
+        两种格式的 items 都是 [{role/content}] 或 Responses 的
+        [{type: function_call…}] 混合形态，故只认 role=="user" 的项。
+        """
+        for m in items:
+            c = m.get("content")
+            if isinstance(c, str) and c.startswith(SYSTEM_IN_USER_BEGIN):
+                return items
+        block = f"{SYSTEM_IN_USER_BEGIN}\n{system_text}\n{SYSTEM_IN_USER_END}\n\n"
+        out = [dict(m) if isinstance(m, dict) else m for m in items]
+        for m in out:
+            if isinstance(m, dict) and m.get("role") == "user":
+                c = m.get("content")
+                head = c if isinstance(c, str) else json.dumps(c, ensure_ascii=False)
+                m["content"] = block + head
+                return out
+        return [{"role": "user", "content": block.rstrip("\n")}] + out
 
     def _system_text(self, system):
         if isinstance(system, str):

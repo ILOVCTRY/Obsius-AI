@@ -15,6 +15,7 @@
 
 import fnmatch
 import json
+import logging
 import os
 import re
 import shutil
@@ -26,6 +27,8 @@ from pathlib import Path
 from core.autonomy import normalize_autonomy
 from core.blackboard.store import Blackboard, BlackboardClosedError
 from core.skills.taxonomy import LEGACY_DOMAIN_MAP, project_binding
+
+log = logging.getLogger(__name__)
 
 PROJECT_FILE = "project.json"
 DB_FILE = "blackboard.db"
@@ -178,6 +181,14 @@ class Project:
                 f"项目句柄已关闭（删除中），拒绝重开黑板: {self.path}")
         if self._bb is None:
             self._bb = Blackboard(str(self.path / DB_FILE))
+            # feishu-push v1：新开黑板即挂飞书推送中枢（幂等按 pid；
+            # 连接器 disabled/未装配 = 零副作用；装配失败绝不阻断黑板）
+            try:
+                from core.integrations.hub import get_default_hub
+                get_default_hub().attach_store(self.id, self._bb,
+                                               project_name=self.name)
+            except Exception:  # noqa: BLE001
+                log.exception("飞书推送中枢挂载失败（不影响黑板）: %s", self.id)
         return self._bb
 
     @property
@@ -190,6 +201,11 @@ class Project:
 
     def close(self) -> None:
         if self._bb is not None:
+            try:  # feishu-push v1：退订释放（与 attach 对称）
+                from core.integrations.hub import get_default_hub
+                get_default_hub().detach(self.id)
+            except Exception:  # noqa: BLE001
+                log.debug("飞书推送退订失败: %s", self.id)
             self._bb.close()
             self._bb = None
         self._closed = True

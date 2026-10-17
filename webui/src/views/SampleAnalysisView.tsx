@@ -35,7 +35,18 @@ function buildTree(entries: SamplePackageEntry[]): TreeNode {
   return root
 }
 
-export function SampleAnalysisView({ pid, onOpenBinary }: { pid: string; onOpenBinary: (sha: string) => void }) {
+// 轨门控（2026-10-17，与 BrowserView 同款）：CTF 题面走对话附件 +
+// bb_add_asset（challenge-asset 流），没有分析包上传工作流——左导航已对 CTF
+// 隐藏本入口（App.tsx hideTracks），这里兜深链/旧书签，整页灰显。门控放外层
+// 壳里： hooks 全部在内层，条件渲染不会破坏 hooks 顺序。
+export function SampleAnalysisView({ pid, onOpenBinary, track }: { pid: string; onOpenBinary: (sha: string) => void; track?: string }) {
+  if (track === "ctf") {
+    return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">样本分析在当前轨道不可用</div>
+  }
+  return <SampleAnalysisBody pid={pid} onOpenBinary={onOpenBinary} />
+}
+
+function SampleAnalysisBody({ pid, onOpenBinary }: { pid: string; onOpenBinary: (sha: string) => void }) {
   const [pkg, setPkg] = useState<(SamplePackage & { undo_available?: boolean }) | null>(null)
   const [selectedPath, setSelectedPath] = useState("")
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set([""]))

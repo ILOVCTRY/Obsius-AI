@@ -214,4 +214,4 @@ git config --global https.proxy http://127.0.0.1:7897
 
 ## 10. 一句话
 
-**黑盒 SRC 价值矩阵 + 落不落只认 vuln-report-format；白盒 Phase0～6；中文、可复现。**
+**黑盒 SRC 价值矩阵 + 落不落只认 vuln-report-format；判级只认注入的 rating 口径；白盒 Phase0～6；中文、可复现。**

@@ -73,7 +73,7 @@ const boardViewOf = (m: ProjectDetail | null): string | undefined => {
   return typeof v === "string" && v ? v : undefined
 }
 
-type NavItem = { key: View; label: string; icon: LucideIcon; needsProject: boolean; homeOnly?: boolean }
+type NavItem = { key: View; label: string; icon: LucideIcon; needsProject: boolean; homeOnly?: boolean; hideTracks?: string[] }
 
 /** 分组定义。`collapsible` = 标题行可点折叠；`defaultOpen` = 首次进入（无持久化状态）时是否展开。 */
 type NavGroup = { label: string; items: NavItem[]; collapsible?: boolean; defaultOpen?: boolean }
@@ -99,7 +99,10 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { key: "browser", label: "浏览器", icon: Globe2, needsProject: true },
       { key: "fuzzer", label: "重放", icon: Zap, needsProject: true },
-      { key: "sample-analysis", label: "样本分析", icon: FolderTree, needsProject: true },
+      // 样本分析（2026-10-17）：CTF 轨隐藏——题面文件走对话附件 + bb_add_asset
+      // （challenge-asset 流），没有分析包上传工作流（后端 bb_query 的 package
+      // 面同轨裁剪，见 tool_registry track-query-split）。
+      { key: "sample-analysis", label: "样本分析", icon: FolderTree, needsProject: true, hideTracks: ["ctf"] },
       { key: "proxy", label: "代理池", icon: Network, needsProject: false },
       { key: "knowledge", label: "知识库", icon: BookOpen, needsProject: false },
       { key: "skills", label: "技能库", icon: BrainCircuit, needsProject: false },
@@ -148,7 +151,7 @@ function groupHasActive(items: NavItem[], active: View): boolean {
 }
 
 function NavRail({ active, onSelect, locked, className, expanded = false, proposalsN = 0,
-                   railActive = false, railSlotRef }: {
+                   railActive = false, railSlotRef, track }: {
   active: View
   onSelect: (key: View) => void
   locked: boolean
@@ -160,6 +163,8 @@ function NavRail({ active, onSelect, locked, className, expanded = false, propos
   railActive?: boolean
   /** 槽位节点回调：App 持有该节点并经 context 下发给工作台做 portal 目标 */
   railSlotRef?: (el: HTMLDivElement | null) => void
+  /** 当前项目轨（hideTracks 轨级隐藏用；无项目上下文=undefined 不隐藏） */
+  track?: string
 }) {
   // 分组折叠（2026-09-30 起只有「更多」；2026-10-15 泛化为任意 collapsible 组）。
   // 状态按组名持久化在 ui.nav-groups-open（见 readGroupOpen：含 defaultOpen 与旧键迁移）。
@@ -178,12 +183,16 @@ function NavRail({ active, onSelect, locked, className, expanded = false, propos
   // 进入项目后移除项目入口和 homeOnly 项（情报）——项目工作区内不再显示
   // 「项目」，返回首页清掉 pid 后入口自然恢复。
   // 其余入口仍从 NAV_GROUPS 动态生成；仅对「项目」做显式生命周期过滤。
+  // hideTracks：轨级整项隐藏（当前轨命中即从导航消失，非灰显）——样本分析对
+  // CTF 不可用（题面走对话附件流，无分析包工作流）。
+  const hidden = (item: NavItem) =>
+    (!locked && item.key === "projects") || !!track && !!item.hideTracks?.includes(track)
   const groups = locked
-    ? [{ label: "", collapsible: false, items: NAV_GROUPS.flatMap((group) => group.items).filter((item) => !item.needsProject) }]
+    ? [{ label: "", collapsible: false, items: NAV_GROUPS.flatMap((group) => group.items).filter((item) => !item.needsProject && !hidden(item)) }]
     : NAV_GROUPS.map((group) => ({
         label: group.label,
         collapsible: group.collapsible,
-        items: group.items.filter((item) => !item.homeOnly && item.key !== "projects"),
+        items: group.items.filter((item) => !item.homeOnly && !hidden(item)),
       })).filter((group) => group.items.length > 0)
 
   return (
@@ -506,7 +515,7 @@ export default function App() {
           {!navCollapsed && (
             <>
               <Panel id="nav" minSize={160} maxSize={280} defaultSize={180}>
-                <NavRail active={view} onSelect={setView} locked={!pid} expanded className="h-full w-full" proposalsN={proposalsN} />
+                <NavRail active={view} onSelect={setView} locked={!pid} expanded className="h-full w-full" proposalsN={proposalsN} track={meta?.track} />
               </Panel>
               <Separator className="nav-sep w-0.5 shrink-0 bg-transparent transition-colors hover:bg-accent data-[separator=active]:bg-accent">
                 <button className="nav-edge-btn" title="收起侧栏" aria-label="收起侧栏" onClick={toggleNavCollapsed}>
@@ -561,7 +570,7 @@ export default function App() {
             <>
               <Panel id="nav" minSize={160} maxSize={280} defaultSize={180}>
                 <NavRail active={view} onSelect={setView} locked={!pid} expanded className="h-full w-full" proposalsN={proposalsN}
-                         railActive={railActive} railSlotRef={setRailSlot} />
+                         railActive={railActive} railSlotRef={setRailSlot} track={meta?.track} />
               </Panel>
               <Separator className="nav-sep w-0.5 shrink-0 bg-transparent transition-colors hover:bg-accent data-[separator=active]:bg-accent">
                 <button className="nav-edge-btn" title="收起侧栏" aria-label="收起侧栏" onClick={toggleNavCollapsed}>
@@ -660,7 +669,7 @@ export default function App() {
           {view === "proxy" && <ProxyPoolView pid={pid} />}
           {view === "sample-analysis" && (
             <div className="h-full w-full overflow-hidden">
-              <SampleAnalysisView pid={pid} onOpenBinary={(sha) => {
+              <SampleAnalysisView pid={pid} track={meta?.track} onOpenBinary={(sha) => {
                 setView("board")
                 window.setTimeout(() => window.dispatchEvent(new CustomEvent("open-binary", { detail: { sha } })), 0)
               }} />

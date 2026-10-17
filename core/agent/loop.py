@@ -38,7 +38,7 @@ from core.agent.tools import (
 from core.autonomy import record_llm_usage
 from core.blackboard import Blackboard
 from core.blackboard.intents import list_intents
-from core.blackboard.store import downgrade_severity
+from core.diagnostics.system_prompt import save_system_prompt
 from core.llm.provider import LLMError, assistant_message, tool_results_message
 from core.llm.tokenizer import (CHARS_PER_TOKEN, DEFAULT_CONTEXT_TOKENS,
                                 context_window_tokens, get_counter)
@@ -48,7 +48,6 @@ from core.skills import (
     build_rules_preamble,
     load_task_types,
 )
-from core.skills.judge import judge_finding
 from core.skills.kbindex import kb_module_hints
 from core.skills.experts import expert_exists, load_expert
 from core.skills.routeindex import read_kb_module
@@ -373,18 +372,29 @@ def _fmt_size(n: Any) -> str:
 
 def _attachment_lines(attachments: Any) -> list[str]:
     """附件清单行（2026-09-19 附件随发）：任务 context.attachments 与
-    human_note payload.attachments 共用渲染——工作区相对路径 + 原始文件名，
-    Agent 可直接 run_cmd 读取（读路径无 pathguard 拦截）。"""
+    human_note payload.attachments 共用渲染。
+
+    **路径形态 = `/workspace/<工作区相对路径>`（2026-10-17 修）**：原先渲染裸
+    相对路径（`artifacts/attachments/<file>`），但所有消费方的基准都是
+    **scratch**——read_file/search_files 相对路径基于 scratch 解析、run_cmd
+    的 cwd 恒为 `<ws>/scratch`（host: 真实路径 / docker: /workspace/scratch
+    / wsl: /mnt/<盘>/…/scratch）→ 附件在 `<ws>/artifacts/` 下，裸相对路径
+    **谁都读不到**（实测：探针 `read_file artifacts/attachments/x.zip` 全部
+    「文件不存在」，只有一个瞎猜 `/workspace/...` 的探针读到了）。
+    `/workspace/` 是系统内约定的「工作区根」：读工具 `_resolve_read_path` 会把
+    它映射回宿主工作区，docker run_cmd 里它本来就是挂载根；host/wsl 会话若用
+    run_cmd，写 `../<相对路径>`（cwd 同为 scratch，同样可达）。
+    附件本体读放开（无 pathguard 拦截），仅写受拦。"""
     lines: list[str] = []
     for a in attachments or []:
         if not isinstance(a, dict):
             continue
-        path = str(a.get("path") or "").strip()
+        path = str(a.get("path") or "").strip().lstrip("/")
         if not path:
             continue
-        name = str(a.get("name") or "").strip() or path
+        name = str(a.get("name") or "").strip() or path.rsplit("/", 1)[-1]
         size_s = _fmt_size(a.get("size"))
-        lines.append(f"- 📎 {path}（{name}{('，' + size_s) if size_s else ''}）")
+        lines.append(f"- 📎 /workspace/{path}（{name}{('，' + size_s) if size_s else ''}）")
     return lines
 
 
@@ -687,6 +697,19 @@ class AgentSession:
     def build_system_prompt(self, objective: str, skill_context: str = "") -> str:
         stable, dynamic = self.build_system_parts(objective, skill_context)
         return f"{stable}\n\n{dynamic}"
+
+    def _save_system_snapshot(self, system: Any) -> None:
+        """系统提示快照落库（diagnostics-system-prompt，2026-10-16）：诊断页
+        「查看系统提示词」的数据源，每会话覆盖式 UPSERT。best-effort——快照落库
+        失败绝不能影响任务轮，异常只 log。"""
+        try:
+            save_system_prompt(
+                self.bb, project_id=self.project_id,
+                session_id=self.session["id"], kind="agent", system=system,
+                agent_id=self.role_name,
+                model=getattr(self.llm, "model", None))
+        except Exception:  # noqa: BLE001 —— 快照绝不阻断主循环
+            log.exception("系统提示快照落库失败 session=%s", self.session.get("id"))
 
     def _role_block(self) -> str:
         """角色块：职责（description）+ 人设（persona）+ 软边界自陈。"""
@@ -1072,44 +1095,15 @@ class AgentSession:
     # ---------- C6 漏洞核对 hook（AI 登记漏洞前自我对照红线/评级规则） ----------
 
     def _build_vuln_gate(self, gate_llm: Any):
-        """漏洞核对 hook 工厂：Agent 触发 category=vuln 登记时，先让 LLM 对照
-        红线/评级规则做**双判**——既判「够不够格算漏洞」（不合规 → 降级 intel），
-        也判「所报 severity 是否被证据支撑」（finding-severity-calibration P0：
-        severity_ok=false → 降一档，下限 low，治夸大）。
-        LLM 失败/不可用 → 降级跳过（照常登记、回执标注），与 F11 降级哲学一致。
-        LLM 调用面复用 core.skills.judge.judge_finding（与存量清洗脚本同口径）。"""
-        def gate(draft: dict) -> tuple[bool, str | None, str]:
-            sys_p = (
-                "你是漏洞合规审核员。候选发现要登记为「漏洞」，请对照以下红线与"
-                "评级规则做两件核对：\n"
-                "① 合规：是否有可验证的安全问题、方向未被禁止、证据链是否成立；"
-                "证据不足/方向被禁/属于信息提示或合规提示而非漏洞 → compliant=false。\n"
-                "② 定级校准（反向复验，宁低勿高）：用证据倒推——PoC/repro_steps "
-                "实际证实的危害只够低档就按低档；所报 severity 高于证据能支撑的档位"
-                " → severity_ok=false，并给出证据能支撑的 suggested_severity。\n"
-                "只输出 JSON："
-                '{"compliant": true|false, "severity_ok": true|false, '
-                '"suggested_severity": "low|medium|high|critical", "reason": "一句话依据"}')
-            v = judge_finding(gate_llm, rules_text=build_rules_preamble(
-                self.packs_root, track=self.track, capabilities=self.capabilities,
-                owner_tags=self.config.owner_tags,
-                rule_profiles=self.config.rule_profiles),
-                draft=draft, sys_prompt=sys_p)
-            if v is None:
-                return True, None, "核对跳过：审核响应无 JSON"
-            reason = str(v.get("reason") or "")
-            if not bool(v.get("compliant")):
-                return False, None, reason or "未通过漏洞标准核对"
-            # 合规但定级虚高 → 降一档（下限 low；low 都撑不起 → 转 intel，见 tools 侧）
-            if v.get("severity_ok") is False:
-                cur = str(draft.get("severity") or "").strip().lower()
-                lower = downgrade_severity(cur)
-                if lower is None:
-                    return False, None, reason or f"证据不足以支撑最低档（{cur}）"
-                note = f"定级校准 {cur}→{lower}" + (f"（{reason}）" if reason else "")
-                return True, lower, note
-            return True, None, reason or "severity 与证据相符"
-        return gate
+        """漏洞核对 hook 工厂（2026-10-16 改为复用 core.skills.judge.build_vuln_gate，
+        与工作台对话链同口径）。双判：合规（不合规 → 降 intel）+ 定级校准（虚高 → 降一档，
+        下限 low）。LLM 失败/不可用 → 降级跳过（照常登记、回执标注）。"""
+        from core.skills.judge import build_vuln_gate
+        return build_vuln_gate(
+            gate_llm, packs_root=self.packs_root, track=self.track,
+            capabilities=self.capabilities,
+            owner_tags=self.config.owner_tags,
+            rule_profiles=self.config.rule_profiles)
 
     # ---------- 运行 ----------
 
@@ -1669,18 +1663,23 @@ class AgentSession:
         另在册 `_salvage_ctx`（fail 抢救收尾用）：messages 与 _live_state 同为就地
         变异的同一列表，异常穿出后引用仍有效——正常退出（含暂停/即点即停）立即
         清除，只有异常路径保留给 `_fail_task_on_error` 消费。"""
-        self._live_state = {"system": system, "messages": messages,
-                            "objective": objective}
-        # system 字段供 429 挂起快照（_fail_task_on_error LLMError 分支，
-        # 2026-09-22）——_salvage_attempt 不读它，多带字段无害
-        self._salvage_ctx = {"objective": objective, "messages": messages,
-                             "system": system}
-        try:
-            result = self._loop_body(system, messages, objective, start_step)
-        finally:
-            self._live_state = None
-        self._salvage_ctx = None
-        return result
+        self._save_system_snapshot(system)
+        # 请求体留痕作用域（diagnostics-request-body，2026-10-17）：整轮标记为本
+        # 执行会话，core/llm/dump.py 的 sink 据此把每次出网请求体归到 sess-xxx。
+        from core.llm.dump import scope as dump_scope
+        with dump_scope(self.project_id, str(self.session.get("id") or "")):
+            self._live_state = {"system": system, "messages": messages,
+                                "objective": objective}
+            # system 字段供 429 挂起快照（_fail_task_on_error LLMError 分支，
+            # 2026-09-22）——_salvage_attempt 不读它，多带字段无害
+            self._salvage_ctx = {"objective": objective, "messages": messages,
+                                 "system": system}
+            try:
+                result = self._loop_body(system, messages, objective, start_step)
+            finally:
+                self._live_state = None
+            self._salvage_ctx = None
+            return result
 
     def _loop_body(self, system: str, messages: list[dict[str, Any]], objective: str,
                    start_step: int = 1) -> str | None:
@@ -1706,6 +1705,7 @@ class AgentSession:
                 #（config/dispatcher 边界已在 apply_role_change 即时生效）
                 system = self.build_system_blocks(objective, self._last_skill_context)
                 self._persona_dirty = False
+                self._save_system_snapshot(system)
             self.dispatcher.set_step(step)
             # 步数感知（E8）：剩余 <20 步起每步边界注入提醒——模型对预算无感是
             # 步数耗尽事故的第一根因；预算吃紧时由模型自行 request_steps 或收尾。

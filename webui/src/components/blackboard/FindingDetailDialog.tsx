@@ -10,7 +10,7 @@ import {
 } from "@/components/ui/alert-dialog"
 import { cn } from "@/lib/utils"
 import { fmtDateTime, utcTitle } from "@/lib/datetime"
-import { ChevronDown, ChevronUp, Copy, Plus, Trash2 } from "lucide-react"
+import { ChevronDown, ChevronUp, Copy, Image as ImageIcon, Plus, Trash2 } from "lucide-react"
 
 // 发现详情弹窗（发现列表/黑板画布/攻击链画布三调用点共用）：收录格式三件套
 // （危害描述/复现步骤/修复建议，v20）+ 复现文稿一键复制；F10 人工修订：编辑态
@@ -84,7 +84,12 @@ export function pocsOf(f: Finding): (FindingPoc | LegacyFindingPoc)[] {
 }
 
 function editablePocsOf(f: Finding): FindingPocModel[] {
-  return pocsOf(f).flatMap((p) => {
+  return pocsOf(f).flatMap((p): FindingPocModel[] => {
+    // image 型（截图 POC）：artifact_id 引用产物，无 code
+    if (p.type === "image") {
+      const art = typeof p.artifact_id === "string" ? p.artifact_id : ""
+      return art ? [{ type: "image", code: "", artifact_id: art }] : []
+    }
     const code = "code" in p && typeof p.code === "string" ? p.code
       : "http_raw" in p && typeof p.http_raw === "string" ? p.http_raw : ""
     if (!code.trim()) return []
@@ -107,11 +112,13 @@ export interface ReproStep {
 // 步骤代码块的围栏语言（cmd 渲染 bash 围栏；其余类型无围栏纯文本）
 const FENCE: Record<string, string> = { http: "http", python: "python", cmd: "bash" }
 
-// 旧 poc(s) → 等价步骤（expected 空；poc.steps 纯文字步骤逐条展开）
+// 旧 poc(s) → 等价步骤（expected 空；poc.steps 纯文字步骤逐条展开）。
+// image 型跳过——截图 POC 在 POC 段直接嵌图渲染，进复现步骤会重复展示一份。
 function legacyPocSteps(f: Finding): ReproStep[] {
   const steps: ReproStep[] = []
   for (const p of pocsOf(f)) {
     const legacyPoc = p as LegacyFindingPoc
+    if (legacyPoc.type === "image") continue
     if (legacyPoc.http_raw || legacyPoc.artifact_id) {
       steps.push({
         desc: legacyPoc.name ?? "复现步骤",
@@ -142,9 +149,10 @@ export function reproStepsOf(f: Finding): ReproStep[] {
   return legacyPocSteps(f)
 }
 
-/** 画布 POC 角标用：有没有任意复现证据（新结构步骤 / 旧 POC / 产物引用） */
+/** 画布 POC 角标用：有没有任意复现证据（新结构步骤 / 旧 POC / 截图 POC / 产物引用） */
 export function hasPoc(f: Finding): boolean {
   return reproStepsOf(f).length > 0 || !!f.poc_artifact_id
+    || pocsOf(f).some((p) => p.type === "image" && !!p.artifact_id)
 }
 
 function CopyButton({ text, label = "复制" }: { text: string; label?: string }) {
@@ -281,6 +289,8 @@ export function FindingDetailDialog({ pid, finding, assetLabel, track, onClose, 
                                      reproduction_steps: "", verification_result: "",
                                      risk_assessment: "", pocs: [] as FindingPocModel[] })
   const [saving, setSaving] = useState(false)
+  // 截图 POC 上传中标记（按 pocs 下标）
+  const [pocUploading, setPocUploading] = useState<Record<number, boolean>>({})
   const [editErr, setEditErr] = useState<string | null>(null)
   const [delOpen, setDelOpen] = useState(false)
   const [delErr, setDelErr] = useState<string | null>(null)
@@ -323,7 +333,13 @@ export function FindingDetailDialog({ pid, finding, assetLabel, track, onClose, 
       "reproduction_steps", "verification_result", "risk_assessment"] as const) {
       if (form[key] !== ((row[key] as string | undefined) ?? "")) changes[key] = form[key]
     }
-    if (JSON.stringify(form.pocs) !== JSON.stringify(row.pocs ?? [])) changes.pocs = form.pocs
+    // POC 比对归一化：image 项 code 恒为空串、http/python 无 artifact_id——
+    // 表单模型与落库形态键序/空字段不同，直接 JSON.stringify 会永远判「有变化」
+    const normPoc = (p: FindingPocModel) => p.type === "image"
+      ? { type: p.type, artifact_id: p.artifact_id ?? "" }
+      : { type: p.type, code: p.code }
+    const normPocs = (ps: FindingPocModel[]) => JSON.stringify(ps.map(normPoc))
+    if (normPocs(form.pocs) !== normPocs(row.pocs ?? [])) changes.pocs = form.pocs
     if (form.status === "verified" && row.status !== "verified") {
       for (const key of ["summary", "affected_assets", "test_environment",
         "reproduction_steps", "verification_result", "risk_assessment"] as const) {
@@ -522,7 +538,7 @@ export function FindingDetailDialog({ pid, finding, assetLabel, track, onClose, 
             ))}
             <div className="space-y-2">
               <div className="flex items-center justify-between">
-                <label className="text-[10px] text-muted-foreground">{isCtf ? "解题脚本（Python / 命令）" : "POC（HTTP 原始报文 / Python）"}</label>
+                <label className="text-[10px] text-muted-foreground">{isCtf ? "解题脚本（Python / 命令）" : "POC（HTTP 原始报文 / Python / 图片）"}</label>
                 <Button size="sm" variant="outline" className="h-7 gap-1 px-2 text-[10px]"
                         onClick={() => setForm((f) => ({ ...f, pocs: [...f.pocs, { type: "http", code: "" }] }))}>
                   <Plus className="size-3" /> 添加 POC
@@ -533,10 +549,18 @@ export function FindingDetailDialog({ pid, finding, assetLabel, track, onClose, 
                   <div className="flex items-center gap-1">
                     <select aria-label={`POC ${index + 1} 类型`} className={selectCls} value={poc.type}
                             onChange={(e) => setForm((f) => ({
-                              ...f, pocs: f.pocs.map((p, i) => i === index
-                                ? { ...p, type: e.target.value as FindingPocModel["type"] } : p),
+                              ...f, pocs: f.pocs.map((p, i) => {
+                                if (i !== index) return p
+                                // 切 image 清 code、切走 image 清 artifact_id——
+                                // 两形态字段互不残留，落库校验口径更干净
+                                const t = e.target.value as FindingPocModel["type"]
+                                return t === "image"
+                                  ? { type: t, code: "", artifact_id: p.artifact_id }
+                                  : { type: t, code: p.code, artifact_id: undefined }
+                              }),
                             }))}>
                       <option value="http">HTTP</option><option value="python">Python</option>
+                      <option value="image">图片</option>
                     </select>
                     <Button size="icon" variant="ghost" className="size-7" title="上移" aria-label="上移 POC"
                             disabled={index === 0}
@@ -555,12 +579,48 @@ export function FindingDetailDialog({ pid, finding, assetLabel, track, onClose, 
                       <Trash2 className="size-3.5" />
                     </Button>
                   </div>
-                  <textarea className="min-h-28 w-full rounded-md border bg-background px-2 py-1.5 font-mono text-[11px]"
-                            placeholder={poc.type === "http" ? "POST /api/... HTTP/1.1\nHost: example.com" : "import requests\n..."}
-                            value={poc.code}
-                            onChange={(e) => setForm((f) => ({
-                              ...f, pocs: f.pocs.map((p, i) => i === index ? { ...p, code: e.target.value } : p),
-                            }))} />
+                  {poc.type === "image" ? (
+                    poc.artifact_id ? (
+                      <div className="flex items-center gap-2">
+                        <img src={`/api/projects/${pid}/artifacts/${poc.artifact_id}/download`}
+                             alt="POC 截图" loading="lazy" className="max-h-24 rounded border bg-muted/20" />
+                        <div className="min-w-0 flex-1 space-y-1">
+                          <p className="truncate font-mono text-[10px] text-muted-foreground" title={poc.artifact_id}>{poc.artifact_id}</p>
+                          <Button size="sm" variant="outline" className="h-6 px-2 text-[10px]"
+                                  onClick={() => setForm((f) => ({
+                                    ...f, pocs: f.pocs.map((p, i) => i === index
+                                      ? { ...p, artifact_id: undefined } : p),
+                                  }))}>移除图片</Button>
+                        </div>
+                      </div>
+                    ) : (
+                      <label className={cn("flex h-28 w-full cursor-pointer flex-col items-center justify-center gap-1 rounded border border-dashed text-[10px] text-muted-foreground", pocUploading[index] && "opacity-60")}>
+                        <ImageIcon className="size-4" />
+                        {pocUploading[index] ? "上传中…" : "点击上传截图（≤64MB，同内容服务端去重）"}
+                        <input type="file" accept="image/*" className="hidden" disabled={pocUploading[index]}
+                               onChange={(e) => {
+                                 const file = e.target.files?.[0]
+                                 e.target.value = ""
+                                 if (!file) return
+                                 setPocUploading((m) => ({ ...m, [index]: true }))
+                                 api.uploadAttachment(pid, file)
+                                   .then((r) => setForm((f) => ({
+                                     ...f, pocs: f.pocs.map((p, i) => i === index
+                                       ? { ...p, artifact_id: r.id } : p),
+                                   })))
+                                   .catch((err) => setEditErr(String(err)))
+                                   .finally(() => setPocUploading((m) => ({ ...m, [index]: false })))
+                               }} />
+                      </label>
+                    )
+                  ) : (
+                    <textarea className="min-h-28 w-full rounded-md border bg-background px-2 py-1.5 font-mono text-[11px]"
+                              placeholder={poc.type === "http" ? "POST /api/... HTTP/1.1\nHost: example.com" : "import requests\n..."}
+                              value={poc.code}
+                              onChange={(e) => setForm((f) => ({
+                                ...f, pocs: f.pocs.map((p, i) => i === index ? { ...p, code: e.target.value } : p),
+                              }))} />
+                  )}
                 </div>
               ))}
             </div>
@@ -656,11 +716,21 @@ export function FindingDetailDialog({ pid, finding, assetLabel, track, onClose, 
           {/* 结构化 POC 优先；老记录继续展示旧证据步骤 */}
           <section>
             <h4 className="mb-1 text-[11px] font-medium text-foreground">{isCtf ? "解题脚本" : "POC"}</h4>
-            {pocsOf(row).some((p) => "code" in p && typeof p.code === "string" && p.code.trim()) ? (
+            {pocsOf(row).some((p) => ("code" in p && typeof p.code === "string" && p.code.trim())
+              || (p.type === "image" && !!p.artifact_id)) ? (
               <div className="space-y-2">
                 {pocsOf(row).map((p, index) => {
                   const code = "code" in p && typeof p.code === "string" ? p.code : ""
-                  if (!code.trim()) return null
+                  const art = p.type === "image" && typeof p.artifact_id === "string" ? p.artifact_id : ""
+                  if (!code.trim() && !art) return null
+                  if (!code.trim() && art) {
+                    return <div key={index} className="overflow-hidden rounded border">
+                      <div className="border-b px-2 py-1 text-[10px] text-muted-foreground">图片 · POC {index + 1}</div>
+                      <img src={`/api/projects/${pid}/artifacts/${art}/download`}
+                           alt={`POC ${index + 1}`} loading="lazy"
+                           className="max-h-64 w-auto bg-muted/20" />
+                    </div>
+                  }
                   const type = p.type === "python" ? "Python" : "HTTP"
                   return <div key={index} className="overflow-hidden rounded border">
                     <div className="flex items-center justify-between border-b px-2 py-1 text-[10px] text-muted-foreground">

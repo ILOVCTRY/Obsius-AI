@@ -14,12 +14,13 @@ from collections.abc import Callable
 from typing import Any
 
 from core.llm import parsing
+from core.llm.dump import capture_request as dump_request_capture
 from core.llm.provider import ContextOverflowError, LLMError, LLMResponse, ToolCall
 from core.llm.retry import (COOLDOWN_BACKOFF, HTTP_5XX_ATTEMPTS,
                             HTTP_5XX_BACKOFF, HTTP_5XX_RETRIES, HTTP_5XX_STATUS,
                             RATE_LIMIT_ATTEMPTS, RATE_LIMIT_BACKOFF,
-                            RATE_LIMIT_RETRIES, is_model_cooldown_error,
-                            retry_note)
+                            RATE_LIMIT_RETRIES, is_channel_verification_error,
+                            is_model_cooldown_error, retry_note)
 from core.llm.sdk_engine import RawFallback, build_anthropic_transports
 
 log = logging.getLogger(__name__)
@@ -192,162 +193,188 @@ class AnthropicCompatProvider:
         payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
 
         max_attempts = (RATE_LIMIT_ATTEMPTS + RATE_LIMIT_ATTEMPTS
+                        + RATE_LIMIT_ATTEMPTS
                         + HTTP_5XX_ATTEMPTS + CONN_RETRIES + 4)  # 各类预算 + 若干降级重试
         last_err: Exception | None = None
         conn_used = 0      # 连接类已用尝试数（含首次）
         rate_limit_used = 0  # 429 已用尝试数（含首次）
         status_5xx_used = 0  # 标准 5xx 已用尝试数（含首次）
         cooldown_used = 0  # 400/413「模型冷却」已用尝试数（含首次，2026-10-10）
+        channel_used = 0  # 400「渠道校验」风控拦截已用尝试数（含首次，2026-10-16）
         transport, stream_transport = self._sdk_transports()
+        # 出网请求体转储（llm-request-dump）：同一调用内按 payload 指纹去重，
+        # 降级重发（剥 thinking/stream/cache_control）才会多落一份。默认关闭。
+        dumped: set[str] = set()
         for _ in range(max_attempts):
-            try:
-                if use_stream:
-                    status, data = stream_transport(
-                        f"{self.base_url}/v1/messages", self._headers(), payload)
-                else:
-                    status, data = transport(
-                        f"{self.base_url}/v1/messages", self._headers(), payload)
-                if status != 200:
-                    err = data.get("error", {})
-                    msg = (f"LLM 调用失败 HTTP {status}: "
-                           f"{err.get('code', '')} {err.get('message', '')[:300]}")
-                    # 输入超限（2026-09-30）：prompt 过长被网关拒收（400/413），
-                    # 原样重试注定再失败 → 抛 ContextOverflowError，调用方强制
-                    # 压缩上下文后兜底重试（reactive 兜底；不再走可重试状态码分支）
-                    if status in (400, 413):
-                        low = (str(err.get("message", "")) + " "
-                               + str(err.get("code", ""))).lower()
-                        if any(h in low for h in _OVERFLOW_HINTS):
-                            raise ContextOverflowError(
-                                msg, status=status,
-                                body=json.dumps(data, ensure_ascii=False)[:500])
-                    # 思考参数优雅降级（2026-09-19）：模型/网关不认 thinking 参数（400）时
-                    # 去参立即重试一次，并记实例标志后续不再注入——思考行不亮但不炸循环
-                    if (status == 400 and self._enable_thinking
-                            and not self._thinking_disabled
-                            and "thinking" in str(err.get("message", "")).lower()
-                            and isinstance(body.get("thinking"), dict)):
-                        # 降级可见化（2026-09-30）：此前静默永久关闭，用户只看到
-                        # 思考链消失无从排查——现在落到日志（终端/日志文件可见）
-                        log.warning("思考链被网关拒收（HTTP 400: %s），本实例降级关闭——"
-                                    "后续请求不再注入 thinking 参数",
-                                    str(err.get("message", ""))[:120])
-                        self._thinking_disabled = True
-                        body.pop("thinking")
-                        payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
-                        continue
-                    # stream 参数优雅降级：网关不认（400 文案含 stream）→ 本实例回退非流式
-                    if (status == 400 and use_stream
-                            and "stream" in str(err.get("message", "")).lower()):
-                        self._stream_disabled = True
-                        use_stream = False
-                        body.pop("stream", None)
-                        payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
-                        continue
-                    # cache_control 优雅降级（2026-09-23 M1）：网关拒收缓存标记
-                    # （400 文案含 cache_control）→ 本实例 system 不再打标重试
-                    if (status == 400 and not self._cache_disabled
-                            and "cache_control" in str(err.get("message", "")).lower()):
-                        self._cache_disabled = True
-                        if system:
-                            body["system"] = self._system_payload(system)
-                            payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
-                        continue
-                    if status == 429:
-                        rate_limit_used += 1
-                        can_retry = rate_limit_used < RATE_LIMIT_ATTEMPTS
-                        retry_attempt = rate_limit_used
-                        retry_total = RATE_LIMIT_RETRIES
-                        note = retry_note(rate_limit_used - 1,
-                                          RATE_LIMIT_RETRIES)
-                    elif is_model_cooldown_error(
-                            status, str(err.get("message", "")),
-                            str(err.get("code", ""))):
-                        # 400/413 但文案是「模型全账号冷却」（2026-10-10）：属暂态
-                        # 故障，与 429 同预算同退避，不再是「一次就抛」。
-                        cooldown_used += 1
-                        can_retry = cooldown_used < RATE_LIMIT_ATTEMPTS
-                        retry_attempt = cooldown_used
-                        retry_total = RATE_LIMIT_RETRIES
-                        note = retry_note(cooldown_used - 1, RATE_LIMIT_RETRIES)
-                    elif status in HTTP_5XX_STATUS:
-                        status_5xx_used += 1
-                        can_retry = status_5xx_used < HTTP_5XX_ATTEMPTS
-                        retry_attempt = status_5xx_used
-                        retry_total = HTTP_5XX_RETRIES
-                        note = retry_note(status_5xx_used - 1, HTTP_5XX_RETRIES)
+            # 请求体留痕（diagnostics-request-body）：每次尝试各记一份；退出时补上
+            # SDK 真正出网的字节（wire/wire_match）。默认关闭。
+            with dump_request_capture(f"{self.base_url}/v1/messages", payload,
+                                      provider="anthropic",
+                                      model=str(body.get("model") or ""),
+                                      fmt="messages", seen=dumped):
+                try:
+                    if use_stream:
+                        status, data = stream_transport(
+                            f"{self.base_url}/v1/messages", self._headers(), payload)
                     else:
-                        can_retry = False
-                        retry_attempt = 0
-                        retry_total = 0
-                        note = ""
-                    if can_retry:
-                        last_err = LLMError(msg, status=status,
-                                            body=json.dumps(data, ensure_ascii=False)[:500])
-                        if on_retry is not None:
-                            on_retry(retry_attempt, retry_total, status)
+                        status, data = transport(
+                            f"{self.base_url}/v1/messages", self._headers(), payload)
+                    if status != 200:
+                        err = data.get("error", {})
+                        msg = (f"LLM 调用失败 HTTP {status}: "
+                               f"{err.get('code', '')} {err.get('message', '')[:300]}")
+                        # 输入超限（2026-09-30）：prompt 过长被网关拒收（400/413），
+                        # 原样重试注定再失败 → 抛 ContextOverflowError，调用方强制
+                        # 压缩上下文后兜底重试（reactive 兜底；不再走可重试状态码分支）
+                        if status in (400, 413):
+                            low = (str(err.get("message", "")) + " "
+                                   + str(err.get("code", ""))).lower()
+                            if any(h in low for h in _OVERFLOW_HINTS):
+                                raise ContextOverflowError(
+                                    msg, status=status,
+                                    body=json.dumps(data, ensure_ascii=False)[:500])
+                        # 思考参数优雅降级（2026-09-19）：模型/网关不认 thinking 参数（400）时
+                        # 去参立即重试一次，并记实例标志后续不再注入——思考行不亮但不炸循环
+                        if (status == 400 and self._enable_thinking
+                                and not self._thinking_disabled
+                                and "thinking" in str(err.get("message", "")).lower()
+                                and isinstance(body.get("thinking"), dict)):
+                            # 降级可见化（2026-09-30）：此前静默永久关闭，用户只看到
+                            # 思考链消失无从排查——现在落到日志（终端/日志文件可见）
+                            log.warning("思考链被网关拒收（HTTP 400: %s），本实例降级关闭——"
+                                        "后续请求不再注入 thinking 参数",
+                                        str(err.get("message", ""))[:120])
+                            self._thinking_disabled = True
+                            body.pop("thinking")
+                            payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+                            continue
+                        # stream 参数优雅降级：网关不认（400 文案含 stream）→ 本实例回退非流式
+                        if (status == 400 and use_stream
+                                and "stream" in str(err.get("message", "")).lower()):
+                            self._stream_disabled = True
+                            use_stream = False
+                            body.pop("stream", None)
+                            payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+                            continue
+                        # cache_control 优雅降级（2026-09-23 M1）：网关拒收缓存标记
+                        # （400 文案含 cache_control）→ 本实例 system 不再打标重试
+                        if (status == 400 and not self._cache_disabled
+                                and "cache_control" in str(err.get("message", "")).lower()):
+                            self._cache_disabled = True
+                            if system:
+                                body["system"] = self._system_payload(system)
+                                payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+                            continue
                         if status == 429:
-                            time.sleep(RETRY_BACKOFF)
-                        elif cooldown_used:
-                            time.sleep(COOLDOWN_BACKOFF)
+                            rate_limit_used += 1
+                            can_retry = rate_limit_used < RATE_LIMIT_ATTEMPTS
+                            retry_attempt = rate_limit_used
+                            retry_total = RATE_LIMIT_RETRIES
+                            note = retry_note(rate_limit_used - 1,
+                                              RATE_LIMIT_RETRIES)
+                        elif is_channel_verification_error(
+                                status, str(err.get("message", "")),
+                                str(err.get("code", ""))
+                                + json.dumps(data, ensure_ascii=False)[:400]):
+                            # 400 但报文是网关「渠道校验」风控拦截（2026-10-16）：
+                            # 实测 api.huanling.icu 在风控窗口内对所有请求回
+                            # 400（code=11128 / conversation id missing），与
+                            # 请求内容无关、冷却 3-5 分钟自行恢复。特征字段可能在
+                            # 顶层（msg/displayTips），故把整份错误体一并送入判定。
+                            # 与冷却同预算同退避。
+                            channel_used += 1
+                            can_retry = channel_used < RATE_LIMIT_ATTEMPTS
+                            retry_attempt = channel_used
+                            retry_total = RATE_LIMIT_RETRIES
+                            note = retry_note(channel_used - 1, RATE_LIMIT_RETRIES)
+                        elif is_model_cooldown_error(
+                                status, str(err.get("message", "")),
+                                str(err.get("code", ""))):
+                            # 400/413 但文案是「模型全账号冷却」（2026-10-10）：属暂态
+                            # 故障，与 429 同预算同退避，不再是「一次就抛」。
+                            cooldown_used += 1
+                            can_retry = cooldown_used < RATE_LIMIT_ATTEMPTS
+                            retry_attempt = cooldown_used
+                            retry_total = RATE_LIMIT_RETRIES
+                            note = retry_note(cooldown_used - 1, RATE_LIMIT_RETRIES)
+                        elif status in HTTP_5XX_STATUS:
+                            status_5xx_used += 1
+                            can_retry = status_5xx_used < HTTP_5XX_ATTEMPTS
+                            retry_attempt = status_5xx_used
+                            retry_total = HTTP_5XX_RETRIES
+                            note = retry_note(status_5xx_used - 1, HTTP_5XX_RETRIES)
                         else:
-                            time.sleep(HTTP_5XX_BACKOFF[min(
-                                status_5xx_used - 1, len(HTTP_5XX_BACKOFF) - 1)])
-                        continue
-                    # 重试耗尽（或本就不可重试）：把已重试次数带进文案
-                    # （2026-10-07），排查时不必再翻 chat.retry 事件数次数。
-                    raise LLMError(f"LLM 调用失败 HTTP {status}{note}: "
-                                   f"{err.get('code', '')} "
-                                   f"{err.get('message', '')[:300]}",
-                                   status=status,
-                                   body=json.dumps(data, ensure_ascii=False)[:500])
-                if use_stream:
-                    # 流已开建连成功：中途断开默认不重试（流不可重放，重试会重复回调
-                    # on_thinking/on_text 造成重复上屏）。健壮性修复（2026-10-01）：
-                    # 包一层增量探针——若尚未吐出任何思考/文本增量（用户什么都没看到），
-                    # 则安全重试（杀连接重发原请求）；已吐过增量维持不重试。
-                    seen = {"emitted": False}
+                            can_retry = False
+                            retry_attempt = 0
+                            retry_total = 0
+                            note = ""
+                        if can_retry:
+                            last_err = LLMError(msg, status=status,
+                                                body=json.dumps(data, ensure_ascii=False)[:500])
+                            if on_retry is not None:
+                                on_retry(retry_attempt, retry_total, status)
+                            if status == 429:
+                                time.sleep(RETRY_BACKOFF)
+                            elif cooldown_used or channel_used:
+                                time.sleep(COOLDOWN_BACKOFF)
+                            else:
+                                time.sleep(HTTP_5XX_BACKOFF[min(
+                                    status_5xx_used - 1, len(HTTP_5XX_BACKOFF) - 1)])
+                            continue
+                        # 重试耗尽（或本就不可重试）：把已重试次数带进文案
+                        # （2026-10-07），排查时不必再翻 chat.retry 事件数次数。
+                        raise LLMError(f"LLM 调用失败 HTTP {status}{note}: "
+                                       f"{err.get('code', '')} "
+                                       f"{err.get('message', '')[:300]}",
+                                       status=status,
+                                       body=json.dumps(data, ensure_ascii=False)[:500])
+                    if use_stream:
+                        # 流已开建连成功：中途断开默认不重试（流不可重放，重试会重复回调
+                        # on_thinking/on_text 造成重复上屏）。健壮性修复（2026-10-01）：
+                        # 包一层增量探针——若尚未吐出任何思考/文本增量（用户什么都没看到），
+                        # 则安全重试（杀连接重发原请求）；已吐过增量维持不重试。
+                        seen = {"emitted": False}
 
-                    def _watch(cb):
-                        def _inner(delta):
-                            seen["emitted"] = True
-                            if cb is not None:
-                                cb(delta)
-                        return _inner
+                        def _watch(cb):
+                            def _inner(delta):
+                                seen["emitted"] = True
+                                if cb is not None:
+                                    cb(delta)
+                            return _inner
 
-                    try:
                         try:
-                            return self._consume_stream(
-                                data, _watch(on_thinking) if on_thinking is not None else None,
-                                should_cancel,
-                                _watch(on_text) if on_text is not None else None)
-                        except RawFallback as fb:
-                            # SDK 事件解析失败（Ark SSE 尾部冗余）→ 用 tee 录制的
-                            # 原始字节重走自研 SSE 解析（raw_decode 容错），保住
-                            # 2026-10-01 的尾部冗余抢救能力。已吐过增量则不能重放
-                            # （会重复上屏），按流中断语义如实上报。
-                            if seen["emitted"]:
-                                raise LLMError("SDK 事件解析失败且已有增量输出，无法重放") from fb
-                            return self._consume_stream(
-                                iter(fb.lines),
-                                _watch(on_thinking) if on_thinking is not None else None,
-                                should_cancel,
-                                _watch(on_text) if on_text is not None else None)
-                    except (TimeoutError, ConnectionError,
-                            http.client.IncompleteRead, ssl.SSLError) as e:
-                        if not seen["emitted"]:
-                            # 尚无任何增量输出：可重试（重发不产生重复上屏）
-                            raise ConnectionError(f"流式传输中断（无增量，可重试）: {e}") from e
-                        # 已吐增量后中断：半截内容已上屏，流不可重放。打 partial 标记
-                        # 交上层走「接着续写」（chat 工作台）而非整轮失败（2026-10-08）。
-                        raise LLMError(f"流式传输中断: {e}", partial=True) from e
-                return self._parse(data)
-            except (TimeoutError, ConnectionError) as e:
-                last_err = e
-                conn_used += 1
-                if conn_used >= CONN_RETRIES:
-                    raise LLMError(f"网络错误（已重试 {conn_used - 1} 次）: {e}") from e
-                time.sleep(CONN_BACKOFF[min(conn_used - 1, len(CONN_BACKOFF) - 1)])
+                            try:
+                                return self._consume_stream(
+                                    data, _watch(on_thinking) if on_thinking is not None else None,
+                                    should_cancel,
+                                    _watch(on_text) if on_text is not None else None)
+                            except RawFallback as fb:
+                                # SDK 事件解析失败（Ark SSE 尾部冗余）→ 用 tee 录制的
+                                # 原始字节重走自研 SSE 解析（raw_decode 容错），保住
+                                # 2026-10-01 的尾部冗余抢救能力。已吐过增量则不能重放
+                                # （会重复上屏），按流中断语义如实上报。
+                                if seen["emitted"]:
+                                    raise LLMError("SDK 事件解析失败且已有增量输出，无法重放") from fb
+                                return self._consume_stream(
+                                    iter(fb.lines),
+                                    _watch(on_thinking) if on_thinking is not None else None,
+                                    should_cancel,
+                                    _watch(on_text) if on_text is not None else None)
+                        except (TimeoutError, ConnectionError,
+                                http.client.IncompleteRead, ssl.SSLError) as e:
+                            if not seen["emitted"]:
+                                # 尚无任何增量输出：可重试（重发不产生重复上屏）
+                                raise ConnectionError(f"流式传输中断（无增量，可重试）: {e}") from e
+                            # 已吐增量后中断：半截内容已上屏，流不可重放。打 partial 标记
+                            # 交上层走「接着续写」（chat 工作台）而非整轮失败（2026-10-08）。
+                            raise LLMError(f"流式传输中断: {e}", partial=True) from e
+                    return self._parse(data)
+                except (TimeoutError, ConnectionError) as e:
+                    last_err = e
+                    conn_used += 1
+                    if conn_used >= CONN_RETRIES:
+                        raise LLMError(f"网络错误（已重试 {conn_used - 1} 次）: {e}") from e
+                    time.sleep(CONN_BACKOFF[min(conn_used - 1, len(CONN_BACKOFF) - 1)])
         raise last_err  # pragma: no cover — 循环内必 return 或 raise
 
     def _consume_stream(

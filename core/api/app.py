@@ -58,6 +58,7 @@ from core.blackboard import traces
 from core.blackboard.store import Blackboard, BlackboardClosedError
 from core import assetimport
 from core import fofa as fofa_mod
+from core.integrations import feishu as feishu_mod
 from core.intel import config as intel_config
 from core.intel import vault as intel_vault
 from core.intel.intel_service import (
@@ -424,6 +425,23 @@ class FofaConfigIn(BaseModel):
     """PUT /api/fofa/config：key 传空串/缺省 = 不修改（防回显误覆盖）；"""
     base_url: str | None = None
     key: str | None = None
+
+
+class FeishuConfigIn(BaseModel):
+    """PUT /api/integrations/feishu：webhook_url 含 `*`（脱敏回显）/缺省 = 不
+    修改；secret 空串/缺省/`****` = 不修改，clear_secret=True 才真清空。"""
+    enabled: bool | None = None
+    webhook_url: str | None = None
+    secret: str | None = None
+    clear_secret: bool = False
+    min_severity: str | None = None
+    projects: list[str] | None = None
+    notify_on_escalation: bool | None = None
+    include_poc: bool | None = None
+    rate_limit_per_min: int | None = None
+    timeout_s: int | None = None
+    retry: int | None = None
+    base_url: str | None = None
 
 
 class FofaSearchIn(BaseModel):
@@ -1430,6 +1448,12 @@ def create_app(
     app.state.tools_root = tools_root  # gateway-config-view：probe 刷新端点复用
     app.state.packs_root = packs_root
     app.state.llm_store = ProviderStore(providers_config)
+    # 请求体留痕（diagnostics-request-body，2026-10-17）：把 LLM 层转储回调接到
+    # 诊断存储（按项目/会话写 JSONL，开关在 config/llm_dump.json，默认关）。
+    # 进程级单例；关闭时 sink 首行即返回，零文件开销。
+    from core.diagnostics import requests as request_log
+    from core.llm.dump import set_sink as set_llm_dump_sink
+    set_llm_dump_sink(request_log.store)
     # 研究工作台反编译服务（pid -> DecompilerService，项目级复用）；
     # rev_service_factory 供测试注入假后端（签名 factory(proj) -> service）
     app.state.rev_services: dict[str, Any] = {}
@@ -1509,6 +1533,19 @@ def create_app(
         app.state.proxy_pool.close_all()
 
     app.add_event_handler("shutdown", _proxy_shutdown)
+
+    # 飞书连接器（feishu-push v1，docs/plans/feishu-connector.md）：确认的中危及
+    # 以上漏洞（category=vuln + status=verified + severity≥min）边沿触发 → 自定义
+    # 机器人 webhook 自动推送。默认 disabled（config/feishu.json 缺失/坏 = 零
+    # 副作用）；订阅点在各项目 Project.bb 懒建处（hub.attach_store 幂等）。
+    from core.integrations.hub import get_default_hub
+    app.state.feishu_hub = get_default_hub()
+    app.state.feishu_hub.start_worker()
+
+    def _feishu_shutdown() -> None:
+        app.state.feishu_hub.shutdown()
+
+    app.add_event_handler("shutdown", _feishu_shutdown)
 
     # IDA-MCP 实例管理器（2026-09-20 按需拉起+空闲关，DESIGN.md §7）：Agent 点查
     # decompile/xrefs 时按 (项目, 样本) 拉起无窗口 idat 并连其 MCP 端点，空闲
@@ -3595,6 +3632,74 @@ def create_app(
         return {"ok": True, "remain": info["remain"], "expire": info["expire"],
                 "base_url": client.base_url}
 
+    # ---------- 飞书连接器（feishu-push v1：确认的中危及以上漏洞自动推送） ----------
+
+    @app.get("/api/integrations/feishu")
+    def get_feishu_config():
+        hub = app.state.feishu_hub
+        cfg = hub.config()
+        return {
+            "enabled": cfg["enabled"],
+            "webhook_url": feishu_mod.mask_webhook(cfg["webhook_url"]),
+            "webhook_set": bool(cfg["webhook_url"]),
+            "secret_set": bool(cfg["secret"]),
+            "min_severity": cfg["min_severity"],
+            "min_severity_choices": list(feishu_mod.SEVERITY_MIN_CHOICES),
+            "projects": cfg["projects"],
+            "notify_on_escalation": cfg["notify_on_escalation"],
+            "include_poc": cfg["include_poc"],
+            "rate_limit_per_min": cfg["rate_limit_per_min"],
+            "timeout_s": cfg["timeout_s"],
+            "retry": cfg["retry"],
+            "base_url": cfg["base_url"],
+            "stats": hub.stats(),
+        }
+
+    @app.put("/api/integrations/feishu")
+    def put_feishu_config(body: FeishuConfigIn):
+        cfg = feishu_mod.load_config(feishu_mod.CONFIG_PATH)
+        if body.enabled is not None:
+            cfg["enabled"] = body.enabled
+        if body.webhook_url is not None and "*" not in body.webhook_url:
+            cfg["webhook_url"] = body.webhook_url.strip()
+        if body.clear_secret:
+            cfg["secret"] = ""
+        elif body.secret and body.secret != "****":
+            cfg["secret"] = body.secret.strip()
+        if body.min_severity is not None:
+            cfg["min_severity"] = body.min_severity
+        if body.projects is not None:
+            cfg["projects"] = body.projects
+        if body.notify_on_escalation is not None:
+            cfg["notify_on_escalation"] = body.notify_on_escalation
+        if body.include_poc is not None:
+            cfg["include_poc"] = body.include_poc
+        if body.rate_limit_per_min is not None:
+            cfg["rate_limit_per_min"] = body.rate_limit_per_min
+        if body.timeout_s is not None:
+            cfg["timeout_s"] = body.timeout_s
+        if body.retry is not None:
+            cfg["retry"] = body.retry
+        if body.base_url is not None:
+            cfg["base_url"] = body.base_url.strip()
+        try:
+            feishu_mod.normalize_config(cfg)  # 写路径严格校验（非法 → 422）
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+        except feishu_mod.FeishuError as e:
+            raise HTTPException(422, str(e))
+        feishu_mod.save_config(feishu_mod.CONFIG_PATH, cfg)
+        app.state.feishu_hub.reload_config()
+        app.state.feishu_hub.restart_worker_if_needed()
+        return get_feishu_config()
+
+    @app.post("/api/integrations/feishu/test")
+    async def test_feishu():
+        """测试连接：同步发一张测试卡（threadpool 跑，不占事件循环）。
+        失败不抛（200 + ok:false），文案可直展。"""
+        ok, detail = await run_in_threadpool(app.state.feishu_hub.send_test)
+        return {"ok": ok, "detail": detail}
+
     # ---------- FOFA 查询历史（2026-09-28：查询结果持久化 + 历史即保持） ----------
     # 动因：查询结果此前仅存前端组件局部 state，切导航/切页签即丢且后端零持久化。
     # 现查询成功即落 <项目>/fofa_history/<id>.json（含全量 rows），前端面板挂载时
@@ -3831,10 +3936,12 @@ def create_app(
     def delete_asset(pid: str, asset_id: str, cascade: bool = False):
         """物理删除叶子资产（资产树整理/走查清理）：有子资产 → 409。
 
-        `cascade=true`（2026-10-16，Web UI 删除按钮默认带上）：把 `target_asset_id`
-        指向该资产的发现**一并物理删除**（语义同 DELETE finding，不触发撤回传播），
-        响应多带 `findings_deleted`；不带该参数时仍被 finding 引用 → 409（agent 工具
-        `bb_delete_asset` 与脚本走 store 默认值，行为不变）。
+        `cascade=true`（2026-10-16，Web UI 删除按钮默认带上）：把引用该资产的发现
+        **一并物理删除**（语义同 DELETE finding，不触发撤回传播），锚定该资产的
+        **意图一并物理删除**（intents.target_asset_id 同为外键，2026-10-16 esp 500
+        事故修复——不清则 assets 行删除触发 IntegrityError 裸穿成 500）；响应多带
+        `findings_deleted` / `intents_deleted`；不带该参数时仍被 finding/意图引用
+        → 409（agent 工具 `bb_delete_asset` 与脚本走 store 默认值，行为不变）。
         """
         bb = _project(pid).bb
         if not bb.conn.execute(
@@ -8892,6 +8999,81 @@ def create_app(
                               author=author, limit=limit)
         return {"failures": rows}
 
+    @app.get("/api/projects/{pid}/diagnostics/system-prompt")
+    def diag_system_prompt(pid: str, session_id: str):
+        """会话系统提示词快照（diagnostics-system-prompt，2026-10-16）。
+
+        返回该会话**最近一次实际下发给 LLM 的完整 system 正文**：chat 轮=工作台
+        对话线程（session_id=chat-<tid>），任务轮=执行会话（session_id=sess-<id>）。
+        快照自 schema v39 起落库，历史会话不回溯补写 → 无快照返回 404（前端按
+        「该会话尚未产生系统提示快照」提示，不视为错误）。
+        """
+        from core.diagnostics.system_prompt import get_system_prompt
+        snap = get_system_prompt(_project(pid).bb, session_id)
+        if snap is None:
+            raise HTTPException(404, f"该会话暂无系统提示快照: {session_id}")
+        return snap
+
+    # ---------- 诊断：请求体留痕（diagnostics-request-body，2026-10-17） ----------
+    # 开关是**进程级**（config/llm_dump.json），诊断页顶栏切换；开启后每步 LLM
+    # 请求体按 (project_id, session_id) 落 logs/llm_requests/<pid>/<sid>.jsonl，
+    # 每会话保留最近 20 条。关闭 = sink 首行返回，零开销。
+
+    @app.get("/api/diagnostics/llm-dump")
+    def diag_llm_dump():
+        from core.diagnostics import requests as request_log
+        return request_log.summary()
+
+    @app.put("/api/diagnostics/llm-dump")
+    def diag_llm_dump_set(body: dict):
+        """开启/关闭请求体留痕。body={"enabled": true|false}。"""
+        from core.diagnostics import requests as request_log
+        enabled = bool((body or {}).get("enabled"))
+        try:
+            request_log.set_enabled(enabled)
+        except OSError as e:  # 磁盘只读/权限不足
+            raise HTTPException(500, f"开关写入失败: {e}") from e
+        return request_log.summary()
+
+    @app.get("/api/projects/{pid}/diagnostics/requests")
+    def diag_requests(pid: str, session_id: str, limit: int = 20):
+        """会话的请求体清单（最新在前；只含统计，不含正文）。"""
+        from core.diagnostics import requests as request_log
+        return {"enabled": request_log.is_enabled(),
+                "dir": str(request_log.base_dir()),
+                "records": request_log.list_records(pid, session_id, limit=limit)}
+
+    @app.get("/api/projects/{pid}/diagnostics/requests/{rid}")
+    def diag_request_detail(pid: str, rid: str, session_id: str):
+        """单条请求体全文（system / messages / tools 原样）。"""
+        from core.diagnostics import requests as request_log
+        row = request_log.read_record(pid, session_id, rid)
+        if row is None:
+            raise HTTPException(404, f"该请求体记录不存在: {rid}")
+        return row
+
+    # ---------- 诊断：红线一键自检（diagnostics-redline-test，2026-10-17） ----------
+    # 「注没注入 / 送没送到」的实验式判定：模型无法可靠内省系统提示，唯一可信的
+    # 手法是拿该会话真实的 system 正文 + canary 指令打一发。详见
+    # core/diagnostics/redline_test.py 模块 docstring。
+
+    @app.post("/api/projects/{pid}/diagnostics/redline-test")
+    def diag_redline_test(pid: str, body: dict):
+        """一键自检：本地注入 + canary 通道 + 内容引用，返回结构化判定。
+
+        body = {"session_id": "chat-xxx" | "sess-xxx", "provider"?, "model"?}
+        provider/model 缺省 → 线程级覆写 → 全局默认（与真实会话同路径，通道判定才有效）。
+        探测只用无工具的纯 chat，不写黑板、不落任何东西；异常进结果不外抛。
+        """
+        from core.diagnostics.redline_test import run_redline_test
+        session_id = str((body or {}).get("session_id") or "").strip()
+        if not session_id:
+            raise HTTPException(422, "缺少 session_id")
+        return run_redline_test(
+            _project(pid).bb, session_id=session_id,
+            provider=str((body or {}).get("provider") or "").strip(),
+            model=str((body or {}).get("model") or "").strip())
+
     @app.get("/api/projects/{pid}/chat/threads")
     def chat_threads_list(pid: str, agent_id: str | None = None):
         from core.chat import store as chat_store
@@ -9005,7 +9187,7 @@ def create_app(
         """发消息即起跑一轮（后台线程）；流式经 chat.delta/chat.tool/chat.message
         事件（GET /api/projects/{pid}/events 或项目 WS）。同线程并发发送 409。"""
         from core.chat import store as chat_store
-        from core.chat.runtime import ChatTurn, ORCHESTRATOR_ID
+        from core.chat.runtime import CONTROLLER_IDS, ChatTurn
         pid = _pid_of_chat(tid)
         proj = _project(pid)
         thread = chat_store.get_thread(proj.bb, tid)
@@ -9032,7 +9214,10 @@ def create_app(
                             tid, ov_err)
             exec_llm, _plan = _llms()
         agents = {a["id"] for a in _chat_agents(pid)}
-        expert_names = sorted(agents) if thread["agent_id"] == ORCHESTRATOR_ID else []
+        # 控制器类智能体（chat-orchestrator + 激进主控）才拿可委派专家池；
+        # 子专家线程 expert_names=[]（spawn 深度=1，call_expert 恒拒）。
+        expert_names = (sorted(agents)
+                        if thread["agent_id"] in CONTROLLER_IDS else [])
         running.add(tid)
         abort_ev = _chat_abort_event(tid, create=True)
         abort_ev.clear()

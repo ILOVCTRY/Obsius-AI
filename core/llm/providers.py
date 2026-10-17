@@ -234,6 +234,12 @@ class ProviderStore:
                     or not parsed_proxy.hostname):
                 raise ProviderError(f"{name}: proxy 须为 http(s) 地址")
             out["proxy"] = proxy.rstrip("/")
+        # system 兼容通道（2026-10-17）：网关整个丢弃 system 字段（实测幻灵）时，把
+        # system 前置于首条 user 消息下发。同 thinking 的教训——显式才落字段，否则
+        # 设置页保存一次即被白名单抹掉，兼容通道静默失效。
+        siu = p.get("system_in_user")
+        if siu is not None:
+            out["system_in_user"] = bool(siu)
         return out
 
     def masked(self) -> list[dict[str, Any]]:
@@ -282,8 +288,12 @@ class ProviderStore:
             raise ProviderError(
                 f"供应商 {p['name']} 未配置 api_key，且环境/.env 也无 ARK_API_KEY") from e
 
-    def build(self, name: str | None = None, model: str | None = None):
-        """构造与供应商兼容格式匹配的 provider 实例。"""
+    def build(self, name: str | None = None, model: str | None = None,
+              timeout: float | None = None):
+        """构造与供应商兼容格式匹配的 provider 实例。
+
+        ``timeout``：覆盖默认 600s（诊断类一次性探测用，避免长挂死 HTTP 请求）。
+        """
         p = self.default() if name is None else self.get(name)
         if not p.get("enabled", True):
             raise ProviderError(f"供应商 {p['name']} 已停用")
@@ -304,9 +314,15 @@ class ProviderStore:
             "summarizer_model": p.get("summarizer_model"),
             "proxy": p.get("proxy"),
         }
+        if timeout is not None:
+            kwargs["timeout"] = float(timeout)
         if p.get("format", DEFAULT_FORMAT) == ANTHROPIC_MESSAGES:
             return AnthropicCompatProvider(**kwargs)
-        return OpenAICompatProvider(format=p.get("format", DEFAULT_FORMAT), **kwargs)
+        # system_in_user：该网关吞 system 时的兼容通道（详见 openai_compat 常量段）。
+        # anthropic 路径不走此开关（Anthropic 协议的 system 是顶层字段，另有降级先例）。
+        return OpenAICompatProvider(format=p.get("format", DEFAULT_FORMAT),
+                                    system_in_user=bool(p.get("system_in_user")),
+                                    **kwargs)
 
     # ---------- 发现 / 探活 ----------
 

@@ -146,7 +146,7 @@ JS 逆向细节 → `知识库/js-reverse-guide.md`。打开目标按 `dig-scope
 
 - **`poc/`**（与本 SKILL 同级）：已验证 PoC 沉淀库——挖到的洞若载体是「换资产大概率再遇到」的指纹，确认后与报告**同时**落 `poc/<关键指纹>.md`；需要配套 py 脚本单独建 `poc/<关键指纹>/` 目录（md 与 py 同夹，内部 README 承载报文本体）。进站命中同指纹直接复现。细则认 `poc/README.md`。
 - **`references/dictionaries/`**：指纹 → 高危默认路径 + 国产默认口令速查表（致远/通达/万户/用友/金蝶/海康/大华等）。**poc = 已验证证据，dictionaries = 速查字典**；字典上的口令试打力度认 `web/实战打法/rules/weak-credential-limit.md`，禁批量爆破/撞库不变。
-- 报文一律占位符，不存密钥实值/PII；定级判级只认 `web/实战打法/rules/vuln-report-format.md`。此库是证据不是上限：表上没有的指纹照样挖。
+- 报文一律占位符，不存密钥实值/PII；**判级只认注入的 rating 口径（rule:rating:*）**，版式与落不落只认 `web/实战打法/rules/vuln-report-format.md`。此库是证据不是上限：表上没有的指纹照样挖。
 
 ## 7. 报告（唯一模板）
 

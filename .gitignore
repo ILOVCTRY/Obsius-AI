@@ -14,6 +14,9 @@ config/containers.json
 config/proxy.json
 # 代理池抓取源清单覆盖层（逐机不同；默认走 runner 内置精选）（2026-10-08）
 config/proxy_sources.json
+# 飞书连接器配置：webhook+secret 每环境不同，绝不入库（feishu-push v1，同 fofa 口径）
+config/feishu.json
+config/llm_dump.json
 .claude/
 
 # Python

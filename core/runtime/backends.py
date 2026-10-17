@@ -363,10 +363,29 @@ class DockerBackend:
 
     def _docker(self, argv: list[str], timeout: float,
                 abort_event: threading.Event | None = None) -> ExecOutcome:
-        proc = subprocess.Popen([self.docker_cmd, *argv], stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, text=True, encoding="utf-8",
-                                errors="replace", creationflags=NO_WINDOW_FLAGS)
-        return _execute_piped(proc, timeout, abort_event)
+        try:
+            proc = subprocess.Popen(
+                [self.docker_cmd, *argv], stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                errors="replace", creationflags=NO_WINDOW_FLAGS,
+            )
+        except OSError as e:
+            raise BackendError(
+                f"Docker CLI 不可用: {e}。请启动 Docker Desktop，或改用允许的 host/wsl runtime"
+            ) from e
+        outcome = _execute_piped(proc, timeout, abort_event)
+        daemon_error = outcome.stderr.lower()
+        if outcome.exit_code != 0 and any(marker in daemon_error for marker in (
+                "failed to connect to the docker api",
+                "is the docker daemon running",
+                "dockerdesktoplinuxengine",
+                "cannot connect to the docker daemon",
+        )):
+            raise BackendError(
+                "Docker daemon 不可用：请启动 Docker Desktop（Linux engine），"
+                "或在 threat_class 允许时改用 host/wsl；当前命令未执行。"
+            )
+        return outcome
 
     def run_once(self, image: str, cmd: str, *, net: str = "none", sandbox: bool = False,
                  timeout: float = 300.0, abort_event: threading.Event | None = None,

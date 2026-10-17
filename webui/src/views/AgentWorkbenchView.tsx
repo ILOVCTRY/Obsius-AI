@@ -747,7 +747,12 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
                       const started = liveTools.startAtById.get(r.id)
                         ?? liveTools.legacyStarts.find((p) => p.name === r.name
                           && p.args_head === JSON.stringify(r.args ?? {}).slice(0, 300))?.created_at
-                      const rowDone = r.done || liveTools.byId.get(r.id)?.phase === "done"
+                      // 激进主控的先返先触发会先落一条「[后台继续]」占位结果，
+                      // 但对应 call_expert 仍在后台执行。占位不能进入完成态，否则
+                      // ToolBlock 会只显示静态「Ns」，而不是「已运行 Ns」计时。
+                      const pendingBackground = (r.result ?? "").startsWith("[后台继续]")
+                      const rowDone = !pendingBackground
+                        && (r.done || liveTools.byId.get(r.id)?.phase === "done")
                       const queued = !started && !rowDone && running
                       return <ToolBlock key={r.id} name={r.name} args={r.args}
                         result={r.result}
@@ -1378,7 +1383,11 @@ function buildWbItems(messages: ChatMessage[]): (WbItem | WbProse)[] {
       pending.steps.push({ kind: "thinking", name: "thinking", ts: tsOf(m.created_at) })
     }
     for (const tc of calls) {
-      const tr = messages.find((x) => x.role === "tool" && x.tool_use_id === tc.id)
+      // 同 tool_use_id 可能有两行 tool 结果（激进主控先返先触发：主线程先落
+      // 「[后台继续]」占位，worker 完成后以同 id 续写真实结果）——取最后一
+      // 行，探针卡从「后台继续」平滑更新为真实结果。单结果行历史等价。
+      const trs = messages.filter((x) => x.role === "tool" && x.tool_use_id === tc.id)
+      const tr = trs.length ? trs[trs.length - 1] : undefined
       pending.rows.push({ kind: "tool", id: tc.id, name: tc.name, args: tc.args,
                           result: tr?.content, done: !!tr, at: m.created_at })
       pending.steps.push({

@@ -1,0 +1,9 @@
+{
+  "enabled": true,
+  "webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/fec54a0c-ea10-4c51-b298-a3ce3db85b61",
+  "min_severity": "medium",
+  "projects": [],
+  "notify_on_escalation": false,
+  "include_poc": true,
+  "base_url": "http://127.0.0.1:8420"
+}

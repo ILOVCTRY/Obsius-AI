@@ -10,6 +10,13 @@
   轨且非 compact 侧栏**才渲染。compact 直播间侧栏永不挂画布。
 - **compact 侧栏渗透轨不挂测绘/函数库 tab**（2026-09-26 用户要求：渗透项目右侧
   窄栏用不上；主黑板视图不受影响）。
+- **主视图渗透/红队轨也不挂函数库 tab（2026-10-16，Nan 需求「去掉渗透测试中
+  函数库的 UI」）**：挂载条件从「capabilities 含 binary」收窄为「含 binary
+  **且 track ≠ pentest/redteam**」（`tabs` 构造与 TabsContent 两处同步）。
+  成因：`directions_effective` 推导下绑定 knowledge=null 的通才专家（如
+  `_generalist`）→ 项目拿到**全量 kb 方向**（含 binary）→ 渗透项目误挂 funcs
+  tab，而 func_kb 只由二进制分析产生、渗透轨该 tab 永远空数据。CTF 二进制题
+  与逆向分析保留。注意轨道判据不看 capabilities 单独成立。
 - `React.lazy` 动态 import，@xyflow/react（约 192KB）与画布都不进主包。
 - findings/assets 由 Blackboard 父级持有（4s 轮询 + WS bump）；**资产筛选器
   只列 host/domain（IP/域名）按值搜索**（2026-09-24 定稿：过滤只按 IP 和域名；

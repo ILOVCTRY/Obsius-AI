@@ -261,6 +261,8 @@ export interface LlmProvider {
   thinking?: boolean | null
   /** 供应商专属 HTTP/HTTPS 代理；留空沿用系统代理环境 */
   proxy?: string | null
+  /** system 兼容通道（2026-10-17）：该网关丢弃 system 字段时，system 前置于首条 user 消息 */
+  system_in_user?: boolean
 }
 
 export interface ModelInfo {
@@ -340,8 +342,11 @@ export interface Asset {
 }
 
 export interface FindingPoc {
-  type: "http" | "python"
+  type: "http" | "python" | "image"
   code: string
+  /** image 类型（截图证据）：引用上传后的产物（artifact）id（附件通道落 kind=attachment）；
+   * code 填空串。渲染在 POC 段嵌图；新格式 image 项不进 legacyPocSteps，避免与复现步骤重复展示 */
+  artifact_id?: string
 }
 
 export const VULNERABILITY_TYPES = [
@@ -1793,6 +1798,56 @@ export interface FofaTestResult {
   error?: string
 }
 
+/** 飞书连接器（feishu-push v1）：确认的中危及以上漏洞 → 自定义机器人 webhook */
+export interface FeishuPushRecord {
+  ts: string
+  ok: boolean
+  detail: string
+  project?: string
+  finding_id?: string
+  title?: string
+  severity?: string
+  trigger?: string
+}
+
+export interface FeishuStats {
+  attached: string[]
+  pushed_total: number
+  worker: {
+    running: boolean
+    queue_depth: number
+    queue_cap: number
+    sent: number
+    failed: number
+    dropped: number
+    consecutive_failures: number
+    degraded: boolean
+    recent: FeishuPushRecord[]
+  } | null
+}
+
+export interface FeishuConfig {
+  enabled: boolean
+  webhook_url: string                     // 脱敏回显（含 * = 未修改）
+  webhook_set: boolean
+  secret_set: boolean
+  min_severity: string
+  min_severity_choices: string[]
+  projects: string[]                      // 空 = 全部项目
+  notify_on_escalation: boolean
+  include_poc: boolean
+  rate_limit_per_min: number
+  timeout_s: number
+  retry: number
+  base_url: string
+  stats: FeishuStats
+}
+
+export interface FeishuTestResult {
+  ok: boolean
+  detail: string
+}
+
 /** FOFA 查询行（fields 白名单序归一化 + existing 三锚点既有标注） */
 export interface FofaSearchRow {
   ip: string
@@ -2010,6 +2065,89 @@ export interface DiagFailure {
 
 export interface DiagFailures {
   failures: DiagFailure[]
+}
+
+/** 会话系统提示词快照（diagnostics-system-prompt，schema v39）：该会话**最近一次
+ *  实际下发给 LLM 的完整 system 正文**。快照自 v39 起落库，历史会话无快照。 */
+export interface DiagSystemPrompt {
+  session_id: string
+  project_id: string
+  /** chat=工作台对话线程 / agent=任务链执行会话 */
+  kind: string
+  agent_id: string
+  text: string
+  chars: number
+  tokens: number
+  sha256: string
+  updated_at: string
+}
+
+/** 请求体留痕开关（diagnostics-request-body，2026-10-17）：进程级开关，默认关。 */
+export interface DiagLlmDump {
+  enabled: boolean
+  /** 落盘根目录（logs/llm_requests） */
+  dir: string
+  sessions: number
+  records: number
+  bytes: number
+}
+
+/** 请求体清单行（只含统计，正文走详情接口）。 */
+export interface DiagRequestMeta {
+  rid: string
+  ts: string
+  provider: string
+  model: string
+  bytes: number
+  truncated: boolean
+  messages: number
+  /** role=tool / tool_result 块条数 —— 「上一轮工具输出有没有带上去」的直接证据 */
+  tool_results: number
+  system_chars: number
+  system_first: boolean
+  /** system 走 user-content 兼容通道（网关丢 system 字段，providers.json system_in_user） */
+  system_in_user: boolean
+  tools: number
+  /** 真实出网字节是否与本地 payload 逐字节相同（false=SDK 重新序列化，字段仍一致） */
+  wire_match: boolean
+  /** 真实出网字节数（httpx 层录到；0=未录到） */
+  wire_bytes: number
+  wire_sha256: string
+}
+
+/** 请求体全文：request 是真正发往服务端的 body（原样）。 */
+export interface DiagRequestDetail extends DiagRequestMeta {
+  format: string
+  url: string
+  sha256: string
+  session_id?: string
+  project_id?: string
+  request: Record<string, unknown>
+  /** 每次尝试的真实出网字节指纹（重试会多条） */
+  wire?: Array<{ bytes: number; sha256: string }>
+}
+
+/** 红线一键自检结果（diagnostics-redline-test，2026-10-17） */
+export interface DiagRedlineTest {
+  session_id: string
+  /** no_system / not_injected / channel_broken / ok / inconclusive / probe_failed / error */
+  verdict: string
+  summary: string
+  error?: string
+  /** snapshot=系统提示快照 / record=请求体记录 / none=都没拿到 */
+  system_source?: "snapshot" | "record" | "none"
+  system_chars?: number
+  /** 本地注入：规则标记命中情况 */
+  local?: { status: "full" | "partial" | "none"; found: string[]; missing: string[]; chars: number }
+  /** 实际探测用的供应商 */
+  probe?: { provider: string; model: string; format: string; system_in_user: boolean }
+  /** canary 通道测试（决定性证据） */
+  channel?: { ok: boolean; canary: string; reply_head: string; note?: string; error?: string
+              /** 回复正文为空（思考预算吃满），不能据此判通道断 */
+              empty_reply?: boolean }
+  /** 内容引用（辅证；未命中不能判否） */
+  content?: { ok: boolean | null; needle: string; reply_head: string; note?: string; error?: string }
+  elapsed_ms?: number
 }
 
 // ---------- Team direct execution（core/team，schema v32；2026-10-06） ----------

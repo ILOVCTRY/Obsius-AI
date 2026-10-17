@@ -260,7 +260,8 @@ class ToolDispatcher:
                  role_skills: list[str] | None = None,
                  allowed_roles: list[str] | None = None,
                  assigned_asset_ids: list[str] | None = None,
-                 thread_id: str = ""):
+                 thread_id: str = "",
+                 intent_free: bool = False):
         self.bb = bb
         self.gateway = gateway
         self.project_id = project_id
@@ -297,6 +298,13 @@ class ToolDispatcher:
                                    if str(x).strip()] or None
         # 轨 task_types.yaml 注册表（A5 子代理发任务的类型护栏）：None=未接线不校验
         self.allowed_task_types = allowed_task_types
+        # 意图豁免（2026-10-17，激进主控子代理 probe_mode）：True=跳过意图先行闸
+        # 与「发现必挂意图」双检查。激进主控派出的快速子任务是「单点几分钟跑完」
+        # 的探针——为一次快检先建意图链路再收尾反而稀释速度；工具面侧已同步
+        # 剔除 declare/close_intent 与 bb_query（runtime.py _PROBE_EXCLUDED_TOOLS），
+        # 不放行这两道闸会让探针的 run_cmd/bb_add_finding 全被打回。任务链
+        # （AgentSession）、chat-orchestrator 子专家、人工/API 路径一律不豁免。
+        self.intent_free = bool(intent_free)
         # 会话步数预算（E8）：AgentSession 按角色收敛后的 max_steps 注入；request_steps
         # 增补写这里（_loop 的 range 上界同读），0 = 未装配（request_steps 拒收）
         self.max_steps = max_steps
@@ -448,9 +456,12 @@ class ToolDispatcher:
         # 12 秒）在结构上不可能。人类/系统路径（author 非 sess-/chat-）不经
         # ToolDispatcher，不受限；declare_intent 在 _INTENT_PRE_ALLOWED 内恒放行，
         # 全轨可先声明不会死锁。
+        # intent_free（激进主控子代理，2026-10-17）：探针不声明意图，本闸整体
+        # 跳过——与其工具面上没有 declare_intent（调了也被白名单拒）配套，
+        # 否则探针的 run_cmd 会被「没有 open 意图」打回、快检直接瘫痪。
         # 拒绝用 [拒绝] 前缀（前缀纪律：进 _TOOL_FAIL_PREFIXES/HARD_REJECT_PREFIXES，
         # 连续 3 步硬拒走 E2 熔断挂人——照搬口径即无需新增前缀分类）。
-        if self.author.startswith(("sess-", "chat-")) \
+        if self.author.startswith(("sess-", "chat-")) and not self.intent_free \
                 and name not in _INTENT_PRE_ALLOWED:
             has_open = self.bb.conn.execute(
                 "SELECT 1 FROM intents WHERE project_id=? AND status='open'"
@@ -790,7 +801,10 @@ class ToolDispatcher:
         if r["created"]:
             reply += ("\n后续本线程的 declare_intent/bb_add_finding 不必再填"
                       " target_asset_id，会自动归到这道题下；附件也不必登记"
-                      "（走本题目的子资产通道，压缩包会抽成可浏览的文件树）。")
+                      "（走本题目的子资产通道）。附件本体在"
+                      " /workspace/artifacts/attachments/ 下，可用 "
+                      "read_file/search_files 直接读（以 /workspace/ 为工作区"
+                      "根），或派子代理解包分析。")
         else:
             reply += ("\n[提示] 命中既有同名题目，已复用并改绑到本线程"
                       "（不插重复行）。")
@@ -988,7 +1002,11 @@ class ToolDispatcher:
         # 覆盖作者扩到对话链（2026-10-01 intent-tools-chat）：对话子专家 author
         #   = chat-<threadid>，此前不受门禁 → 对话产出发现不落链路图；对话链同样
         #   要求「先声明意图再登记发现」，与任务管线同纪律。
-        if self.author.startswith(("sess-", "chat-")):
+        # intent_free（激进主控子代理，2026-10-17）：探针没有 declare_intent
+        # 工具，若不豁免本检查，探针的任何观察都会被「没有 open 意图」打回
+        # （且错误文案会指回它没有的工具，纯空转烧步）。豁免后结论直接落黑板，
+        # 归属仍走 target_asset_id / CTF 题目兜底。
+        if self.author.startswith(("sess-", "chat-")) and not self.intent_free:
             row = self.bb.conn.execute(
                 "SELECT id FROM intents WHERE project_id=? AND status='open'"
                 " AND author=? ORDER BY created_at LIMIT 1",
@@ -1019,6 +1037,32 @@ class ToolDispatcher:
                         "bb_add_artifact 存证等），有了结果再来 bb_add_finding；"
                         "发现是检验的产物，不是意图的附赠。若这是侦察阶段的直接"
                         "观察，请先做一次核实动作（复核请求/查证）再登记。")
+        # 判级依据硬闸（2026-10-16，rating-basis-gate）：**仅当项目勾选了
+        # 「评级与价值口径（rating）」**时，漏洞类登记必须带 rating_basis——
+        # 空则打回（不落库），agent 补填后重报。与注入同源（rating_profile_active：
+        # 勾选且文件存在才生效）；未勾选 rating 的项目不叠加判级口径，不强制。
+        # 动机：rating_basis 此前是**纯提示层软约束**（schema 可选 + store 不校验），
+        # 工作台对话路径又没接 vuln_gate → 某次生成没照做就静默落空（2026-10-16
+        # 实测：上游渠道异常期同一批 4 个兄弟线程 3 个漏填）。人工/API 路径不经本
+        # 工具，不受影响（store 层仍不设闸，测试/人工 PATCH 零感知）。
+        eff_category = category or ("intel" if severity == "info" else "vuln")
+        if eff_category == "vuln" and not str(rating_basis or "").strip() \
+                and self._rating_profile_active():
+            self.last_progress_step = self._step
+            return ("[拒绝] 本项目已勾选「评级与价值口径（rating）」，漏洞登记必须带"
+                    "判级依据（rating_basis）——请对照注入的评级口径补「规则名+条款+"
+                    "一句话依据」（如 `rating:edu-rating 高危#3 可直接批量盗取用户身份"
+                    "权限`）后重报（同一条重发即可，不会重复登记）。若确实够不上漏洞"
+                    "档（纯暴露面/信息提示），改 category=intel 登记。")
+        # 判级依据**引用**校验（rating-basis-gate v2，2026-10-17）：非空之上再要求
+        # 真指向本项目生效口径——旧副本名（edu-rating-rules.md）与报告格式里的判级表
+        # 都不算数，一律打回补正。
+        if eff_category == "vuln" and str(rating_basis or "").strip() \
+                and self._rating_profile_active():
+            bad = self._check_rating_basis(rating_basis)
+            if bad:
+                self.last_progress_step = self._step
+                return bad
         # C6 漏洞核对 hook：AI 登记漏洞前自我对照红线/评级规则——
         # 双判：不合规降级 intel（不进漏洞视图）；合规但定级虚高 → 降一档
         # （finding-severity-calibration P0，治夸大）；核对失败降级跳过（不阻断）。
@@ -1076,6 +1120,13 @@ class ToolDispatcher:
                     "系统会自动并入（证据并集、等级就高）而不是新增一行；"
                     "或改用 bb_update_finding(finding_id=该 id) 补证据/改等级。"
                     "确属不同端点的独立问题，坚持新增即可。")
+        if r.get("challenge_merged"):
+            # CTF 题目级并入（一题一条，challenge-dedup 2026-10-17）：同题目已有登记，
+            # 本次结论已并入链内最早那条，不再新增行。后续补证据/改结论用 bb_update_finding。
+            warn += (f"\n[已并入题目条目] {r['id']}（CTF 一题一条：该题目已有登记，"
+                     "本次结论并入既有条目——证据并集、severity 就高、status 只升）——"
+                     f"**同一道题不要再单独 bb_add_finding**；补充证据/修正结论请用 "
+                     f"bb_update_finding(finding_id={r['id']})。")
         if r.get("chain_merged"):
             warn += (f"\n[已并入既有发现] {r['id']}（同一端点链上的同类条目，本轮锚点粗细不同）——"
                      "本轮结论已并入该发现（证据并集、severity 就高、status 只升），"
@@ -1093,6 +1144,45 @@ class ToolDispatcher:
                 f"category={r.get('category') or 'vuln'} "
                 f"dedup_key={r.get('dedup_key') or '(空)'} "
                 f"rating_basis={r.get('rating_basis') or '(空)'}{gate_note}{warn}")
+
+    def _rating_profiles(self) -> dict | None:
+        """项目 config.rule_profiles（评级口径档案）；读取失败 → None。"""
+        try:
+            cfg = self.bb.get_project(self.project_id).get("config") or {}
+            if isinstance(cfg, str):
+                cfg = json.loads(cfg)
+            return (cfg or {}).get("rule_profiles") if isinstance(cfg, dict) else None
+        except Exception:  # noqa: BLE001 —— 读取失败按无档案
+            return None
+
+    def _rating_profile_active(self) -> bool:
+        """本项目是否**勾选并激活**了「评级与价值口径（rating）」——判级依据硬闸的门禁。
+
+        与 `build_rules_preamble` 注入同源（`core.skills.rules.rating_profile_active`）：
+        项目 config.rule_profiles.rating 勾选且对应 `安全红线/评级与价值口径/<tag>.md`
+        存在才为真。读取/解析失败一律按未激活返回 False——硬闸宁松勿误拒（漏放一次
+        依据，好过把没勾 rating 的项目也卡住）。"""
+        try:
+            from core.skills.rules import rating_profile_active
+            return rating_profile_active(self.packs_root, self.track,
+                                         self._rating_profiles())
+        except Exception:  # noqa: BLE001 —— 判定失败按未激活
+            return False
+
+    def _check_rating_basis(self, basis: str | None) -> str:
+        """判级依据**引用**校验（rating-basis-gate v2，2026-10-17）→ 空串=通过。
+
+        非空闸只挡漏填，挡不住乱填：实测有子专家写「评级与价值口径/edus-
+        rating-rules.md」（文件不存在、引用的是已废止旧副本）照样落库。本层要求
+        basis 真的指向本项目生效口径（`rating:<tag>` 或生效 tag 名）。校验自身
+        异常一律放行（宁松勿误拒），返回带 `[拒绝]` 前缀的打回文案。"""
+        try:
+            from core.skills.rules import validate_rating_basis
+            ok, why = validate_rating_basis(
+                self.packs_root, self.track, self._rating_profiles(), basis)
+        except Exception:  # noqa: BLE001 —— 校验失败放行
+            return ""
+        return "" if ok else f"[拒绝] {why}"
 
     # ---------- 意图（渗透链路图 v3，2026-09-24） ----------
 
@@ -1229,6 +1319,14 @@ class ToolDispatcher:
                 kwargs[key] = value
         if not kwargs:
             return "[拒绝] 未提供任何要修改的字段"
+        # 判级依据引用校验（v2，2026-10-17）：改判级依据时与登记同口径——写旧副本名
+        # 或报告格式里的判级表一律打回（实测降级路径曾借此把依据写成不存在的文件）。
+        if rating_basis is not None and str(rating_basis).strip():
+            eff_cat = category or (old.get("category") or "vuln")
+            if eff_cat == "vuln" and self._rating_profile_active():
+                bad = self._check_rating_basis(rating_basis)
+                if bad:
+                    return bad
         try:
             r = self.bb.patch_finding(self.project_id, finding_id,
                                       track=self.track, author=self.author,

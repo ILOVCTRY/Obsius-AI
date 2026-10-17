@@ -23,8 +23,10 @@ import type {
   WritebackItem, XrefData,
   TraceEffect,
   FofaConfig, FofaTestResult, FofaSearchResult, FofaHistoryItem, ImportPreview, ImportSummary,
+  FeishuConfig, FeishuTestResult,
   ChatAgent, ChatThread, ChatThreadDetail, ChatMcpServer, ContextUsage,
-  DiagFailures, DiagSessions,
+  DiagFailures, DiagSessions, DiagSystemPrompt,
+  DiagLlmDump, DiagRequestMeta, DiagRequestDetail, DiagRedlineTest,
   Team, TeamMemberInput, TeamPreflight, TeamRun,
   SkillResource,
   SamplePackage, SampleTargetAnalysis, SampleTargetAnalyzeResponse, SampleTargetRegisterResponse, SamplePackageUploadSession, SamplePackagePreview,
@@ -192,6 +194,14 @@ export const api = {
     http<{ deleted: string }>(`/api/projects/${pid}/fofa/history/${hid}`, { method: "DELETE" }),
   fofaHistoryClear: (pid: string) =>
     http<{ cleared: boolean }>(`/api/projects/${pid}/fofa/history`, { method: "DELETE" }),
+
+  // ---------- 飞书连接器（feishu-push v1：确认的中危及以上漏洞自动推送） ----------
+  feishuConfig: () => http<FeishuConfig>("/api/integrations/feishu"),
+  // 半幅更新：webhook_url 含 * / secret 空串 = 不修改（防脱敏回显误覆盖）
+  feishuSaveConfig: (body: Record<string, unknown>) =>
+    http<FeishuConfig>("/api/integrations/feishu", { method: "PUT", body: JSON.stringify(body) }),
+  // 测试连接：同步发测试卡；ok=false 时 detail 可直接展示
+  feishuTest: () => http<FeishuTestResult>("/api/integrations/feishu/test", { method: "POST" }),
   assetImportPreview: (pid: string, file: File) => {
     const form = new FormData()
     form.append("file", file)
@@ -1166,6 +1176,32 @@ export const api = {
     return http<DiagFailures>(
       `/api/projects/${pid}/diagnostics/failures${s ? `?${s}` : ""}`)
   },
+  // 会话系统提示词快照（v39）：该会话最近一次实际下发的完整 system 正文。
+  // 无快照 → 后端 404（前端按「尚无快照」提示，不视为错误）。
+  diagSystemPrompt: (pid: string, sessionId: string) =>
+    http<DiagSystemPrompt>(
+      `/api/projects/${pid}/diagnostics/system-prompt`
+      + `?session_id=${encodeURIComponent(sessionId)}`),
+
+  // 请求体留痕（diagnostics-request-body，2026-10-17）：进程级开关 + 按会话取清单/全文
+  diagLlmDump: () => http<DiagLlmDump>("/api/diagnostics/llm-dump"),
+  setDiagLlmDump: (enabled: boolean) =>
+    http<DiagLlmDump>("/api/diagnostics/llm-dump",
+                      { method: "PUT", body: JSON.stringify({ enabled }) }),
+  diagRequests: (pid: string, sessionId: string, limit = 20) =>
+    http<{ enabled: boolean; dir: string; records: DiagRequestMeta[] }>(
+      `/api/projects/${pid}/diagnostics/requests`
+      + `?session_id=${encodeURIComponent(sessionId)}&limit=${limit}`),
+  diagRequest: (pid: string, sessionId: string, rid: string) =>
+    http<DiagRequestDetail>(
+      `/api/projects/${pid}/diagnostics/requests/${encodeURIComponent(rid)}`
+      + `?session_id=${encodeURIComponent(sessionId)}`),
+  // 红线一键自检（diagnostics-redline-test，2026-10-17）：拿该会话真实 system 正文
+  // + canary 打一发，判定「注没注入 / 送没送到模型」。provider/model 缺省=跟随会话。
+  redlineTest: (pid: string, sessionId: string, provider?: string, model?: string) =>
+    http<DiagRedlineTest>(
+      `/api/projects/${pid}/diagnostics/redline-test`,
+      { method: "POST", body: JSON.stringify({ session_id: sessionId, provider, model }) }),
 
 }
 

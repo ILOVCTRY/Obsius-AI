@@ -40,16 +40,22 @@ VULNERABILITY_TYPES = (
 
 
 def validate_finding_pocs(pocs: Any) -> list[dict[str, str]]:
-    """POC 只接受可复制的 HTTP 原始报文或 Python 脚本。"""
+    """POC 接受可复制的 HTTP 原始报文、Python 脚本，或 image（截图证据：
+    引用上传后的 artifact id，无 code；前端 POC 段嵌图渲染）。"""
     if not isinstance(pocs, list):
-        raise ValueError("pocs 必须是数组，每项为 {type: http|python, code}")
+        raise ValueError("pocs 必须是数组，每项为 {type: http|python|image, code|artifact_id}")
     out: list[dict[str, str]] = []
     for i, poc in enumerate(pocs, 1):
         if not isinstance(poc, dict):
             raise ValueError(f"POC 第 {i} 项必须是对象")
-        kind, code = poc.get("type"), poc.get("code")
-        if kind not in ("http", "python"):
-            raise ValueError(f"POC 第 {i} 项 type 仅支持 http 或 python")
+        kind, code, art = poc.get("type"), poc.get("code"), poc.get("artifact_id")
+        if kind not in ("http", "python", "image"):
+            raise ValueError(f"POC 第 {i} 项 type 仅支持 http / python / image")
+        if kind == "image":
+            if not isinstance(art, str) or not art.strip():
+                raise ValueError(f"POC 第 {i} 项 image 必须带 artifact_id")
+            out.append({"type": kind, "artifact_id": art.strip()})
+            continue
         if not isinstance(code, str) or not code.strip():
             raise ValueError(f"POC 第 {i} 项 code 不能为空")
         out.append({"type": kind, "code": code.strip()})
@@ -1356,10 +1362,19 @@ class Blackboard:
         `delete_finding` 完全一致（摘反向 relates_to 边、**不触发撤回传播**、chain_links/
         inbox/poc 产物均保留）；返回体多带 `findings_deleted`（id 列表），并逐条补发
         `finding.deleted`（`via: asset.deleted`），`asset.deleted` 事件同时记该列表。
-        默认 False：仍被 finding 引用 → ValueError，文案照旧提示先删/改挂发现。
+        默认 False：仍被 finding/意图引用 → ValueError，文案照旧提示先删/改挂。
         资产不存在抛 LookupError（→API 404）。
+
+        **意图锚点一并清（2026-10-16，esp 500 事故修复）**：`intents.target_asset_id`
+        同为 `REFERENCES assets(id)` 外键，此前级联只清 findings——删到资产行时
+        `sqlite3.IntegrityError: FOREIGN KEY constraint failed` 裸穿 API → 500
+        （esp 项目 33 条锚定意图实测复现）。现口径与 findings 对齐：cascade 时同事务把
+        锚定意图一并物理删除（它们的 outcome_refs 常挂被删 finding，保留只会悬空），
+        逐条补发 `intent.deleted`（`via: asset.deleted`），返回体多带 `intents_deleted`；
+        非 cascade 时锚定意图 → ValueError（→409），文案区分「发现」与「意图」。
         """
-        purged: list[dict] = []   # [{"id":..., "title":..., ..., "trimmed_relates_to":n}]
+        purged: list[dict] = []          # 级联删的 findings 快照
+        intents_purged: list[dict] = []  # 级联删的意图快照
         with self._tx():
             row = self.conn.execute(
                 "SELECT * FROM assets WHERE id=?", (asset_id,)).fetchone()
@@ -1368,9 +1383,18 @@ class Blackboard:
             refs = self.conn.execute(
                 "SELECT id FROM findings WHERE target_asset_id=? ORDER BY id",
                 (asset_id,)).fetchall()
-            if refs and not cascade_findings:
+            intent_refs = self.conn.execute(
+                "SELECT id, statement FROM intents WHERE target_asset_id=? ORDER BY id",
+                (asset_id,)).fetchall()
+            if (refs or intent_refs) and not cascade_findings:
+                blockers: list[str] = []
+                if refs:
+                    blockers.append(f"发现 {refs[0]['id']}")
+                if intent_refs:
+                    blockers.append(f"意图 {intent_refs[0]['id']}")
                 raise ValueError(
-                    f"资产 {row['value']} 仍被发现 {refs[0]['id']} 引用，请先删除或改挂该发现")
+                    f"资产 {row['value']} 仍被{'、'.join(blockers)} 引用，"
+                    "请先删除或改挂，或使用级联删除")
             child = self.conn.execute(
                 "SELECT id FROM assets WHERE parent_id=? LIMIT 1", (asset_id,)).fetchone()
             if child is not None:
@@ -1380,6 +1404,9 @@ class Blackboard:
                 if res is not None:
                     snap, trimmed = res
                     purged.append({"id": r["id"], **snap, "trimmed_relates_to": trimmed})
+            for ir in intent_refs:
+                self.conn.execute("DELETE FROM intents WHERE id=?", (ir["id"],))
+                intents_purged.append({"id": ir["id"], "statement": ir["statement"]})
             self.conn.execute("DELETE FROM assets WHERE id=?", (asset_id,))
             snapshot = {"project_id": row["project_id"], "type": row["type"],
                         "value": row["value"], "parent_id": row["parent_id"]}
@@ -1395,13 +1422,23 @@ class Blackboard:
                  "trimmed_relates_to": p["trimmed_relates_to"],
                  "via": "asset.deleted"},
                 author=author)
+        # 级联删的意图逐条补发 intent.deleted（与 delete_intent 同形，多一个 via 溯源）
+        for ip in intents_purged:
+            self.append_event(
+                snapshot["project_id"], "intent.deleted",
+                {"intent_id": ip["id"], "statement": ip["statement"][:200],
+                 "reason": "资产删除级联", "via": "asset.deleted"},
+                author=author)
         self.append_event(
             snapshot["project_id"], "asset.deleted",
             {"asset_id": asset_id, "by": author, "type": snapshot["type"],
              "value": snapshot["value"], "parent_id": snapshot["parent_id"],
-             "findings_deleted": [p["id"] for p in purged]},
+             "findings_deleted": [p["id"] for p in purged],
+             "intents_deleted": [ip["id"] for ip in intents_purged]},
             author=author)
-        return {"id": asset_id, **snapshot, "findings_deleted": [p["id"] for p in purged]}
+        return {"id": asset_id, **snapshot,
+                "findings_deleted": [p["id"] for p in purged],
+                "intents_deleted": [ip["id"] for ip in intents_purged]}
 
     def merge_assets(
         self,
@@ -1719,7 +1756,8 @@ class Blackboard:
 
         硬级联（单 _tx 内，顺序即依赖）：chain_links（指向该样本 func_kb / finding
         的边）→ logic_block_funcs / logic_blocks（binary_sha256=sha）→ findings
-        （target_asset_id=该 asset）→ func_kb（binary_sha256=sha）→ assets 行。
+        （target_asset_id=该 asset）→ intents（target_asset_id=该 asset，
+        2026-10-16 防外键 IntegrityError）→ func_kb（binary_sha256=sha）→ assets 行。
         资产不存在抛 LookupError（→API 404）；项目级逻辑块（binary_sha256=''）不动。
         磁盘产物（样本本体/缓存/DB/Ghidra 工程）由 API 层另行清理，不在此处理。
         落 binary.deleted 审计事件（含计数快照）。
@@ -1741,6 +1779,12 @@ class Blackboard:
             block_ids = [r["id"] for r in self.conn.execute(
                 "SELECT id FROM logic_blocks WHERE project_id=? AND binary_sha256=?",
                 (project_id, sha)).fetchall()]
+            # 意图锚点（2026-10-16，esp 500 事故修复）：intents.target_asset_id 同为
+            # REFERENCES assets(id) 外键——declare_intent 接受任意资产 id 作锚点，
+            # 不清会在 assets 行删除时 IntegrityError 裸穿 API → 500。
+            intent_ids = [r["id"] for r in self.conn.execute(
+                "SELECT id FROM intents WHERE target_asset_id=?",
+                (asset_id,)).fetchall()]
             n_links = 0
             if func_ids or finding_ids:
                 clauses: list[str] = []
@@ -1766,6 +1810,10 @@ class Blackboard:
                 (project_id, sha))
             self.conn.execute(
                 "DELETE FROM findings WHERE target_asset_id=?", (asset_id,))
+            if intent_ids:
+                self.conn.execute(
+                    "DELETE FROM intents WHERE target_asset_id=?",
+                    (asset_id,))
             self.conn.execute(
                 "DELETE FROM func_kb WHERE project_id=? AND binary_sha256=?",
                 (project_id, sha))
@@ -1775,6 +1823,7 @@ class Blackboard:
                 "filename": meta.get("filename"),
                 "funcs": len(func_ids), "findings": len(finding_ids),
                 "logic_blocks": len(block_ids), "chain_links": n_links,
+                "intents": len(intent_ids),
             }
         self.append_event(
             project_id, "binary.deleted", {**snapshot, "by": author},
@@ -2007,6 +2056,11 @@ class Blackboard:
     ) -> dict:
         """重复发现（同 target+vuln_class+dedup_key）走证据并集（§5.3）：
 
+        - **CTF 题目级并入（challenge-dedup，2026-10-17）**：**仅 CTF 轨**——同一题目
+          （资产链：题目资产 ∪ 其附件）上已有发现时，无论 vuln_class/dedup_key 是否
+          一致，一律并入链内最早一条（一题一条）；并入的新报为 vuln 而既有为 intel 时
+          分类升为 vuln（情报观察不压解题结论）。治「同一道题被不同会话/不同命名反复
+          登记」；pentest/redteam 一资产多漏洞是常态，不受影响。
         - **同链默认指纹兜底（finding-dedup-chain，2026-10-15）**：精确同资产未命中时，
           对 category=vuln 的报错类发现，在同**资产链**（自身∪祖先∪后代，不含兄弟）
           内找唯一「默认指纹」（dedup_key == vuln_class）的同类条目并入——治「同一端点
@@ -2057,6 +2111,7 @@ class Blackboard:
             row = None
             severity_raise_blocked = False  # 就高被拒标志（P2，仅合并分支可能置真）
             chain_merged = False            # 兜底并入标志（非精确同资产命中）
+            challenge_merged = False        # CTF 题目级并入标志（一题一条）
             chain_ambiguous = 0             # 同链多个默认指纹候选：不猜、只警告
             if key is not None:
                 row = self.conn.execute(
@@ -2085,6 +2140,25 @@ class Blackboard:
                     chain_merged = True
                 elif cands:
                     chain_ambiguous = len(cands)
+            # CTF 题目级并入（challenge-dedup，2026-10-17）：CTF 轨「一题一条」——
+            # 同一题目（资产链：题目资产 ∪ 其附件）上已有发现时，**无论 vuln_class /
+            # dedup_key 是否一致**，一律并入既有条目（证据并集、等级就高），不再裂出
+            # 新行。动机：CTF 一题=一个 challenge 资产，同一题被不同会话/不同命名
+            # （vuln_class 由模型自由填）反复登记——闸机票根一题裂出 4 条（2 intel +
+            # 2 vuln，vuln_class 全不同 → 精确匹配与同链默认指纹两路都不命中）。
+            # **仅 CTF 轨**：pentest/redteam 一资产多漏洞是常态，绝不能按资产去重。
+            # 取链内最早一条作并入口（确定性）。显式 dedup_key 在此不豁免——CTF 语义
+            # 就是「一题一条」，要拆多条请在题内用 bb_update_finding 分述。
+            if row is None and track == "ctf" and target_asset_id:
+                c = self.conn.execute(
+                    _CHAIN_CTE +
+                    " SELECT f.* FROM findings f WHERE f.project_id=?"
+                    " AND f.target_asset_id IN (SELECT id FROM chain)"
+                    " ORDER BY f.created_at ASC, f.id ASC LIMIT 1",
+                    _chain_params(project_id, target_asset_id) + (project_id,)).fetchone()
+                if c is not None:
+                    row = c
+                    challenge_merged = True
             if row:
                 # 合并目标自引防护（E0）：新证据若 relates_to 指向它将要并入的那条发现，
                 # 并集后会产生自环边——视为引用错误拒掉，而不是悄悄落一条自边。
@@ -2120,6 +2194,12 @@ class Blackboard:
                 new_status = row["status"]
                 if status == "verified":
                     new_status = "verified"
+                # C6 合并保留既有分类（同类发现不因重报换类）；**CTF 题目级并入例外**：
+                # 情报观察（intel）不得压住解题结论（vuln）——并入的新报是 vuln 而既有
+                # 是 intel 时升为 vuln（仅此方向，绝不降级）。
+                new_category = row["category"]
+                if challenge_merged and new_category == "intel" and category == "vuln":
+                    new_category = "vuln"
                 new_poc = row["poc_artifact_id"] or poc_artifact_id
                 # impact/remediation（v20 三件套）：旧值非空保留、空缺由新报补入
                 new_impact = row["impact"] or impact
@@ -2146,7 +2226,7 @@ class Blackboard:
                 # receive ordinary edits without retroactive migration.
                 if any(report.values()) or clean_pocs:
                     validate_formal_vuln(
-                        status=new_status, category=row["category"], title=title or row["title"],
+                        status=new_status, category=new_category, title=title or row["title"],
                         vuln_class=vuln_class or row["vuln_class"], severity=new_severity,
                         target_asset_id=target_asset_id or row["target_asset_id"],
                         report=report, pocs=merged_pocs)
@@ -2167,13 +2247,14 @@ class Blackboard:
                     update_changes.append("新增内嵌 POC")
                 self.conn.execute(
                     "UPDATE findings SET evidence=?, severity=?, rating_basis=?, status=?,"
+                    " category=?,"
                     " poc_artifact_id=?, impact=?, remediation=?, summary=?, affected_assets=?,"
                     " test_environment=?, reproduction_steps=?, verification_result=?,"
                     " risk_assessment=?, pocs=?,"
                     " confidence=MAX(confidence,?), updated_at=?,"
                     " revision=revision+1 WHERE id=?",
                     (json.dumps(merged_ev, ensure_ascii=False), new_severity, new_basis,
-                     new_status, new_poc, new_impact, new_remediation,
+                     new_status, new_category, new_poc, new_impact, new_remediation,
                      report["summary"], report["affected_assets"], report["test_environment"],
                      report["reproduction_steps"], report["verification_result"],
                      report["risk_assessment"], json.dumps(merged_pocs, ensure_ascii=False),
@@ -2181,7 +2262,7 @@ class Blackboard:
                      created, row["id"]),
                 )
                 finding_id, merged = row["id"], True
-                category = row["category"]  # C6：合并保留既有分类（同类发现不因重报换类）
+                category = new_category  # C6：合并保留既有分类（同类发现不因重报换类）
             else:
                 report = {
                     "summary": summary.strip(),
@@ -2255,6 +2336,10 @@ class Blackboard:
             # 兜底并入：让调用方知道这次不是「精确同指纹」，而是锚点漂移/自造指纹
             # 被归位到原条目（finding-dedup-chain）。工具层据此回执人话提示。
             out["chain_merged"] = True
+        if merged and challenge_merged:
+            # CTF 题目级并入（一题一条，challenge-dedup）：工具层据此回执
+            # 「该题目已登记、本次已并入」人话提示，引导后续用 bb_update_finding。
+            out["challenge_merged"] = True
         # M5 D1 疑似重复警告（orchestrator-efficiency §0-9）：**同资产链**+同类
         # （vuln_class）= 可能被不同指纹/不同锚点分裂的重复——只提示不阻塞（Agent 可
         # 坚持新增）；本次并入的本体行不算；无 target 或 vuln_class 空（逆向发现留 ''，

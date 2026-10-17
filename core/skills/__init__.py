@@ -9,11 +9,14 @@ from core.skills.router import RoutedSkill, SkillRouter
 from core.skills.rules import (
     KbSource,
     build_rules_preamble,
+    effective_rating_tags,
     load_kb_sources,
     owner_rules,
     pack_rules,
+    rating_profile_active,
     rating_rules,
     resolve_rule_profiles,
+    validate_rating_basis,
 )
 from core.skills.taxonomy import (
     GENERIC_TASK_TYPE,
@@ -32,6 +35,9 @@ __all__ = [
     "owner_rules",
     "rating_rules",
     "resolve_rule_profiles",
+    "rating_profile_active",
+    "effective_rating_tags",
+    "validate_rating_basis",
     "load_kb_sources",
     "KbSource",
     "build_rules_preamble",

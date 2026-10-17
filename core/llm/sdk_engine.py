@@ -45,6 +45,39 @@ CLIENT_USER_AGENT = (
     "Chrome/131.0.0.0 Safari/537.36"
 )
 
+# ---------- 真正出网字节捕获（wire tap，2026-10-17） ----------
+# 动因：compat 层 dump 的是「我们 json.dumps 的 payload」，但 OpenAI/anthropic
+# 两条传输层都是 `req = json.loads(body); client.xxx.create(**req)`——**真正写进
+# socket 的字节由 SDK 重新序列化产生**，与我们的 payload 字段相同、字节不保证相同
+# （键序/空白/转义/SDK 补的默认字段）。故在 httpx request hook 里按线程录制真实
+# 请求体，供诊断页把「我方 payload」与「实际出网字节」并排核对。
+#
+# 用法：begin_wire_capture() 包住一次调用，end_wire_capture() 取回本次所有尝试
+# （含重试）的原始 body 字节列表。未武装时 hook 只读一个 thread-local，近乎零成本。
+_wire_local = threading.local()
+
+
+def begin_wire_capture() -> None:
+    _wire_local.buf = []
+
+
+def end_wire_capture() -> list[bytes]:
+    buf = getattr(_wire_local, "buf", None)
+    _wire_local.buf = None
+    return list(buf) if buf else []
+
+
+def _wire_hook(request: Any) -> None:
+    """httpx request hook：把真实请求体字节录进当前线程的捕获缓冲。"""
+    buf = getattr(_wire_local, "buf", None)
+    if buf is None:
+        return
+    try:
+        buf.append(bytes(request.content or b""))
+    except Exception:  # noqa: BLE001 —— 捕获失败绝不影响请求
+        pass
+
+
 
 class RawFallback(Exception):
     """SDK 事件解析失败（Ark SSE 尾部冗余等）——携带 tee 录制的原始字节，
@@ -207,11 +240,12 @@ def _error_dict(e: Any) -> dict[str, Any]:
 
 
 def build_httpx_client(timeout: float, proxy: str | None = None) -> tuple[httpx.Client, TeeTransport]:
-    """构造带 tee 的 httpx.Client（连接池复用 + 原始字节旁路录制）。"""
+    """构造带 tee 的 httpx.Client（连接池复用 + 原始字节旁路录制 + 出网字节捕获）。"""
     inner: httpx.BaseTransport = (
         httpx.HTTPTransport(proxy=proxy) if proxy else httpx.HTTPTransport())
     tee = TeeTransport(inner)
-    client = httpx.Client(transport=tee, timeout=timeout)
+    client = httpx.Client(transport=tee, timeout=timeout,
+                          event_hooks={"request": [_wire_hook]})
     return client, tee
 
 

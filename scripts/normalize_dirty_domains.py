@@ -11,7 +11,7 @@
   - 非 scheme 但带尾部 ``:port/`` 的脏 domain（如 x:8080/）→ 同上按裸值合并
   - 占位/表头文本（「主机名」「网站标题」等非域名形态）→ 直接删
 
-只处理**叶子且无 finding 引用**的行（delete_asset 服务端门控，拒绝即跳过列出，
+只处理**叶子且无 finding/意图引用**的行（delete_asset 服务端门控，拒绝即跳过列出，
 绝不强删）；写路径全部走 Blackboard/register_asset 单一入口，
 author=demo-script(normalize-domains)，事件留审计。
 
@@ -86,7 +86,7 @@ def apply_project(store: ProjectStore, slug: str) -> tuple[int, int]:
                     bare = bare_hostname(value)
                     register_asset(bb, pid, bare, type_="domain",
                                    author=AUTHOR)  # 先登记裸 domain
-                bb.delete_asset(aid, author=AUTHOR)  # 门控：叶子+无 finding
+                bb.delete_asset(aid, author=AUTHOR)  # 门控：叶子+无 finding/意图引用
                 done += 1
                 print(f"  [{action}] {value[:70]}")
             except (ValueError, LookupError) as e:

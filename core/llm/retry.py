@@ -44,6 +44,43 @@ def is_model_cooldown_error(status: int, message: str, code: str = "") -> bool:
     return any(h in low for h in _COOLDOWN_HINTS)
 
 
+# 网关「渠道校验」拦截识别（2026-10-16 事故修复）：私有中转网关（实测
+# api.huanling.icu）在风控窗口内对所有请求回 HTTP 400，报文形如
+# ``{"code":11128,"msg":"conversation id missing","displayTips":
+# {"en":"This call failed channel verification, possibly because it was
+# not sent from an official client..."}}``。实测特征：
+# ① 与请求内容/历史结构无关（同一条「hi」在窗口内必挂、窗外必过）；
+# ② 按时间衰减——密集请求后触发，冷却约 3-5 分钟自行恢复（间隔 20s
+#    连发 8 次全过、12 次突发也全过，说明恢复后不限频）；
+# ③ UA 伪装（CLIENT_USER_AGENT 的 Chrome UA）是过校验的前提——裸 curl
+#    的 UA 会被网关以 401 API_KEY_REQUIRED 形式挡在渠检之前。
+# 这类错误此前落 chat 层 bad_request「历史消息结构问题」文案，方向跑偏
+# （新线程首条消息也照挂），且一次就抛不做冷却等待。现按特征单独识别，
+# 走与冷却同口径的 11 次尝试 + 30s 固定退避（总窗 5 分钟，覆盖实测
+# 3-5 分钟恢复期）。已知局限：与 per-model cooldown 同构，若网关风控
+# 超过 5 分钟仍会耗尽——此时文案指向「稍后重试/换供应商」。
+_CHANNEL_VERIFY_HINTS = ("conversation id missing", "channel verification",
+                         "渠道校验", "请求被拦截", "请求已被拦截", "官方客户端",
+                         "通路验证", "通路驗證", "通路校驗", "official client")
+_CHANNEL_VERIFY_CODES = ("11128",)
+
+
+def is_channel_verification_error(status: int, message: str, code: str = "") -> bool:
+    """判断 400 响应是否为网关「渠道校验」风控拦截（而非真的参数不合法）。
+
+    只认特征码/文案（code=11128 或 conversation id missing / channel
+    verification 等），避免把真正入参错误拖进 5 分钟重试。``message``
+    建议传整个错误报文（JSON 序列化后）——该网关把特征字段放在顶层
+    （``msg``/``displayTips``），不一定在 ``error.message`` 里。
+    """
+    if status != 400:
+        return False
+    low = f"{message} {code}".lower()
+    if any(c in low for c in _CHANNEL_VERIFY_CODES):
+        return True
+    return any(h in low for h in _CHANNEL_VERIFY_HINTS)
+
+
 def is_retryable_http_5xx(status: int) -> bool:
     """判断状态是否属于标准上游 5xx 暂态错误。"""
     return status in HTTP_5XX_STATUS

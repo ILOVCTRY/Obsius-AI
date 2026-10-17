@@ -103,7 +103,7 @@ tool(
                     'docker',
                     'sandbox',
                 ],
-                'description': '可省略：省略时按本任务默认运行时（任务 chip 设的 preferred_runtime）执行；任务未设默认时必须显式传',
+                'description': '必须显式传入。按 threat_class 选择允许的运行时：trusted 可用 host/wsl/docker/sandbox；untrusted 仅 docker/sandbox；malware_live 仅 sandbox。'
             },
             'threat_class': {
                 'type': 'string',
@@ -132,6 +132,7 @@ tool(
         },
         'required': [
             'cmd',
+            'runtime',
             'threat_class',
         ],
     },
@@ -434,7 +435,9 @@ tool(
         '、抗上下文压缩、跨意图可复用；close_intent 收尾时再升 verified 或随死路一并了结，别攒到最后补记；注入评级口径（rule:rati'
         'ng:*）时 severity 必须按口径判级并填 rating_basis（见评级硬指令段）。CTF 轨语义：severity=线索级别（critic'
         'al=关键突破/high=可行动线索/其余=背景备查），vuln_class=线索类别；false-positive=死路（evidence 写清原因与'
-        '已尝试清单，防重走弯路）。category 缺省自动判定（提示类或 info→intel，其余→vuln）。解题脚本/writeup 用 bb_add_'
+        '已尝试清单，防重走弯路）。**一题一条**：同一题目（challenge 资产及其附件）上已有发现时，'
+        '再登记会自动并入既有条目、不新增行——同一道题不要重复登记，补证据/改结论请用 bb_update_finding。'
+        'category 缺省自动判定（提示类或 info→intel，其余→vuln）。解题脚本/writeup 用 bb_add_'
         'artifact 落产物。'
     ),
     input_schema={
@@ -575,7 +578,8 @@ tool(
                     'status 只升），不会新增行。**不填 = 按 vuln_class 自动归一**（推荐，默认就是「同一类问题一条」）。'
                     '**同一漏洞切勿自造新键**——新自造的 key 精确未命中会白白裂出一条。'
                     '仅当同一目标上确需把同类问题拆成多条独立条目（如两个不同参数的独立注入）时才显式传不同键。'
-                    '想改/复现已有条目：先 bb_query what=findings 拿到它的 dedup_key 后按原 key 重报'
+                    '想改/复现已有条目：先 bb_query what=findings 拿到它的 dedup_key 后按原 key 重报。'
+                    '**CTF 轨例外（一题一条）**：同一题目上无论传什么 key 都会并入既有条目——题目只有一条发现'
                 ),
             },
         },
@@ -925,25 +929,35 @@ tool(
 # 渗透与逆向是两个工种：互相用不到的 what 面就不该出现在下发的 schema 里——schema
 # 即上下文预算，也是模型注意力分配（给渗透会话塞 feature_tree，只会稀释它真正要
 # 用的 site/findings）。家族划分按 taxonomy.TRACKS 四轨的业务形态：
-#   research/ctf   = 逆向家族（样本/函数/蓝图/分析包/功能树/业务逻辑块）
+#   research     = 逆向家族（样本/函数/蓝图/分析包/功能树/业务逻辑块）
+#   ctf          = 逆向家族**再裁掉分析包**（2026-10-17）：CTF 题面文件走对话
+#                  附件 + bb_add_asset（challenge-asset 流），没有「样本分析」
+#                  上传工作流——给 CTF 会话下发 package 面，只会换回一句指回
+#                  样本分析的错误提示（用户实测截图），平白暴露一个不存在的流程。
+#                  func/blueprint/feature_tree/logic_block 保留：pwn/reverse
+#                  子专家照常用。
 #   pentest/redteam= 渗透家族（单站全貌 site）
 # 轨未知/空串（测试、未接线调用方）= 全量回退，行为与裁剪前一致。canonical 注册项
 # 保持全量（向后兼容 + bb_query_what_for 的错误提示同源），裁剪只发生在
 # `bb_query_schema_for(track)`——由 AgentSession 下发 LLM 前套用（loop.py）。
 _BB_QUERY_WHAT_REVERSE = ("findings", "assets", "events", "func",
                           "blueprint", "package", "feature_tree", "logic_block")
+_BB_QUERY_WHAT_CTF = ("findings", "assets", "events", "func", "blueprint",
+                      "feature_tree", "logic_block")
 _BB_QUERY_WHAT_PENTEST = ("findings", "assets", "events", "site")
 _BB_QUERY_WHAT_FULL = ("findings", "assets", "events", "func", "blueprint",
                        "site", "package", "feature_tree", "logic_block")
 _BB_QUERY_TRACK_WHAT = {
     "research": _BB_QUERY_WHAT_REVERSE,
-    "ctf": _BB_QUERY_WHAT_REVERSE,
+    "ctf": _BB_QUERY_WHAT_CTF,
     "pentest": _BB_QUERY_WHAT_PENTEST,
     "redteam": _BB_QUERY_WHAT_PENTEST,
 }
 # 逆向家族专属参数：渗透面整组删掉（模型看不见就不会传，也免得知其存在硬凑）
 _BB_QUERY_REVERSE_ONLY_PROPS = ("blueprint_id", "package_id", "binary_sha256",
                                 "address", "risk_tag", "tree_id", "block_id")
+# CTF 删除的参数：package_id（分析包查询专属，CTF 无此面）
+_BB_QUERY_CTF_ONLY_PROPS = ("package_id",)
 
 _BB_QUERY_DESC_REVERSE = (
     '查黑板（逆向 family：research/ctf）：findings / assets / events / func（函数知识库）/ '
@@ -958,6 +972,23 @@ _BB_QUERY_DESC_REVERSE = (
     '不要猜。**分析包内文件：what=package**——列当前（或 package_id 指定）分析包的条目/依赖边/'
     '内容树根 tree_ref（AI 用 read_file <tree_ref>/<path> 读同包文件，如 exe 依赖的 DLL）；'
     '样本资产行 meta.package_id 即来源包 id。**功能树/业务逻辑（先查后写）**：what=feature_tree '
+    '列功能树（binary_sha256 可筛，tree_id 看单棵含节点清单）——增删改节点前先查现有节点，'
+    '同名/同职责节点用 bb_feature_node update 补 desc/func_addresses，不要重复 add；'
+    'what=logic_block 列业务块（binary_sha256 可筛，block_id 看单个含挂接函数）——建块前先查，'
+    '块名同项目同样本唯一，重名会被拒收（改用 bb_logic_block_update 增补）。'
+)
+
+_BB_QUERY_DESC_CTF = (
+    '查黑板（逆向 family：ctf）：findings / assets / events / func（函数知识库）/ '
+    'blueprint（开发蓝图）/ feature_tree（功能树）/ logic_block（业务逻辑块）。'
+    'findings 尽量带 target_asset_id 精确过滤；events 尽量带 kinds/session_id；limit 传小值会截断漏看'
+    '（漏看了仍要重查，得不偿失）。events 缺省=本项目**全部 kind**（不是只有 chat.* 会话事件），'
+    '要窄看再传 kinds 白名单；**负结论（未发现/死路）不要硬塞进 events**：正确做法是 declare_intent '
+    '声明假设，再 close_intent outcome=dead_end（附 dead_reason+evidence_refs）——情报类非漏洞结论'
+    '则用 bb_add_finding category=intel。**逆向场景硬规则：反编译任何函数前必须先查 func 防重复劳动。**'
+    '**列已上传样本：what=assets type=binary**——返回行的 value 即样本 sha256（func 查询的 '
+    'binary_sha256 / bb_upsert_func 都用它），meta.filename 是原文件名；不知道 sha 时先列样本，'
+    '不要猜。**功能树/业务逻辑（先查后写）**：what=feature_tree '
     '列功能树（binary_sha256 可筛，tree_id 看单棵含节点清单）——增删改节点前先查现有节点，'
     '同名/同职责节点用 bb_feature_node update 补 desc/func_addresses，不要重复 add；'
     'what=logic_block 列业务块（binary_sha256 可筛，block_id 看单个含挂接函数）——建块前先查，'
@@ -999,6 +1030,11 @@ def bb_query_schema_for(track: str | None) -> dict:
         for k in _BB_QUERY_REVERSE_ONLY_PROPS:
             props.pop(k, None)
         desc = _BB_QUERY_DESC_PENTEST
+    elif family is _BB_QUERY_WHAT_CTF:
+        # CTF：只摘 package_id 参数（分析包面已从 enum 裁掉）
+        for k in _BB_QUERY_CTF_ONLY_PROPS:
+            props.pop(k, None)
+        desc = _BB_QUERY_DESC_CTF
     else:
         desc = _BB_QUERY_DESC_REVERSE
     props["what"] = {"type": "string", "enum": list(family)}

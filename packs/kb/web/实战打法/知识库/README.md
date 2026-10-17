@@ -69,4 +69,4 @@
 | `web/漏洞分类/xss/手册.md` | XSS（中文开场 + 冷门事件 + XSS→RCE / 自定义协议） |
 | `web/漏洞分类/xxe/手册.md` | 专题知识（hack-skills 导入或融合） |
 
-**合计：49 个知识文件**（不含本 README）。SRC 报告版式不在本库：见 `rules/vuln-report-format.md`。定级只认 format，本库不定级。
+**合计：49 个知识文件**（不含本 README）。SRC 报告版式不在本库：见 `rules/vuln-report-format.md`。判级只认注入的 rating 口径，本库不定级。

@@ -27,8 +27,12 @@ const AttackPathCanvas = lazy(() =>
 const IntentGraphLazy = lazy(() =>
   import("./reverse/intents/IntentGraphView").then((m) => ({ default: m.IntentGraphView })))
 
-// 函数库 tab 仅 capabilities 含 binary 时挂载（func_kb 只由二进制分析产生；
-// assessment web-only 项目里永远空数据）。判据是能力不是轨。
+// 函数库 tab 挂载条件（2026-10-16 收窄）：capabilities 含 binary **且轨道不是
+// 渗透/红队**。原判据只看 capabilities——但 directions_effective 的推导口径下，
+// 绑定 knowledge=null 的通才专家（如 _generalist）会让项目拿到**全量 kb 方向**
+// （含 binary），于是渗透项目也挂上了 funcs tab；而 func_kb 只由二进制分析产生，
+// 渗透/红队轨这个 tab 永远是空数据（用户实测截图要求去掉）。CTF 二进制题与
+// 逆向分析仍保留。判据从「能力」收窄为「能力 + 轨道」。
 // 测绘 tab CTF 轨不挂载（2026-09-23 用户反馈：CTF 无资产收集场景，FOFA/表格导入用不上）。
 // compact 侧栏（直播间右侧窄栏）渗透轨不挂测绘/函数库（2026-09-26 用户要求：
 // 渗透项目右侧用不上这两个 tab；主黑板视图不受影响）。
@@ -42,7 +46,8 @@ export function Blackboard({ pid, compact = false, track, capabilities, defaultV
   const tabs = [
     "findings", "intents", "assets",
     ...(track !== "ctf" && !compactPentest ? ["mapping"] as const : []),
-    ...(capabilities?.includes("binary") && !compactPentest ? ["funcs"] as const : []),
+    ...(capabilities?.includes("binary") && track !== "pentest"
+        && track !== "redteam" && !compactPentest ? ["funcs"] as const : []),
   ] as const
   const allTabs: readonly string[] = tabs
   const initial = defaultView && allTabs.includes(defaultView) ? defaultView : "findings"
@@ -91,7 +96,8 @@ export function Blackboard({ pid, compact = false, track, capabilities, defaultV
           {!compact && <MappingPane pid={pid} />}
         </TabsContent>
       )}
-      {capabilities?.includes("binary") && !compactPentest && (
+      {capabilities?.includes("binary") && track !== "pentest"
+          && track !== "redteam" && !compactPentest && (
         <TabsContent value="funcs" className="min-h-0 flex-1"><Funcs pid={pid} /></TabsContent>
       )}
     </Tabs>

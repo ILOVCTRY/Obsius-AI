@@ -55,6 +55,13 @@ OWNER_RULES: list[tuple[str, str]] = [
     ("ysrc-ezviz-rules.md", "ysrc.md"),
 ]
 
+# 已人工演进为正本、源仓库版本落后的 owners 文件：--force 也**不覆盖**（2026-10-17）。
+# edu-rating.md 是判级口径唯一正本（kb 副本已收口成指针），源仓库那份仍是旧版
+# （中危 3 条 / 无「忽略清单」），覆盖即静默回退 → 只提示人工合并。
+PRESERVE_OWNERS: dict[str, str] = {
+    "edu-rating.md": "判级口径唯一正本（2026-10-17 收口，源仓库版本落后）",
+}
+
 # src-strike 快照排除（仓库脚手架/外部 agent 指令/重型运行时，均无知识价值或有
 # 指令冲突风险——kb 内容会被 kb_open 喂给 Agent，宁严勿松）
 STRIKE_EXCLUDE_TOP = {
@@ -375,6 +382,10 @@ def _merge_owners(rules_src: Path, packs: Path, stats: dict) -> None:
             continue
         if dst.is_file() and filecmp.cmp(src, dst, shallow=False):
             _log(f"  owners/{dst_name} 与源一致，无需覆盖")
+            continue
+        if dst.is_file() and dst_name in PRESERVE_OWNERS:
+            _log(f"  owners/{dst_name} 跳过覆盖：{PRESERVE_OWNERS[dst_name]}；"
+                 f"如需同步请人工合并 {src}")
             continue
         if dst.is_file():
             history.mkdir(parents=True, exist_ok=True)

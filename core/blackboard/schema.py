@@ -9,7 +9,7 @@
 
 import sqlite3
 
-SCHEMA_VERSION = 38
+SCHEMA_VERSION = 39
 
 # v37→v38（CTF 题目即资产，challenge-asset，2026-10-14）：chat_threads 幂等补
 # challenge_asset_id（本线程归属的题目资产 id，''=未绑定）。CTF 轨「一个主控线程
@@ -485,6 +485,23 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 );
 CREATE INDEX IF NOT EXISTS idx_chat_messages_thread ON chat_messages(thread_id, id);
 
+-- v39 会话系统提示词快照（诊断用，2026-10-16）：诊断页「查看系统提示词」的数据源。
+-- 每会话（chat-<tid> / sess-<id>）一行，UPSERT 只保留**最近一次实际下发给 LLM 的
+-- 完整 system 正文**（chat 轮=ChatTurn._system_prompt()；任务轮=build_system_blocks
+-- 拼合）——快照性质而非审计流水，故不随事件表线性增长（events 已 25 万行量级，
+-- 按 kind 检索要 2s+，不适合放系统提示）。sha256 供前端比对内容是否变化。
+CREATE TABLE IF NOT EXISTS session_system_prompts (
+    session_id TEXT PRIMARY KEY,              -- chat-<tid> / sess-<id>
+    project_id TEXT NOT NULL DEFAULT '',
+    kind       TEXT NOT NULL DEFAULT '',      -- chat / agent
+    agent_id   TEXT NOT NULL DEFAULT '',      -- 归属智能体（角色口径）
+    text       TEXT NOT NULL DEFAULT '',      -- 完整 system 正文
+    chars      INTEGER NOT NULL DEFAULT 0,    -- 字符数
+    tokens     INTEGER NOT NULL DEFAULT 0,    -- 折算 token 数（tokenizer，供参考）
+    sha256     TEXT NOT NULL DEFAULT '',      -- 正文指纹（判断内容是否变化）
+    updated_at TEXT NOT NULL
+);
+
 -- v27 业务逻辑块（逆向工作台第四页签，2026-09-29）：分块记载函数协作与业务
 -- 语义——PWN/漏洞利用走攻击链（因果路径），重建走蓝图（R4 管线），业务理解
 -- （函数逻辑/业务逻辑/逆向破解/游戏业务）落这里。人机共写：人工建块挂函数，
@@ -662,7 +679,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     - v36→v37：chat_threads 幂等补 provider/model（线程级模型覆写，''=跟随
       全局默认，见文件头版本注释）。历史行保持默认空值不回填。
     - v37→v38：chat_threads 幂等补 challenge_asset_id（线程归属的题目资产，
-      ''=未绑定，见文件头版本注释）。历史行保持默认空值不回填。"""
+      ''=未绑定，见文件头版本注释）。历史行保持默认空值不回填。
+    - v38→v39：session_system_prompts 由 DDL 的 IF NOT EXISTS 直接建表（诊断页
+      「查看系统提示词」快照，无 ALTER，旧库打开即建）。"""
     cols = {r[1] for r in conn.execute("PRAGMA table_info(projects)")}
     if "track" not in cols:
         conn.execute("ALTER TABLE projects ADD COLUMN track TEXT NOT NULL DEFAULT ''")

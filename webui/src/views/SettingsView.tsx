@@ -29,6 +29,7 @@ import { IntelSourcePane } from "@/components/settings/IntelSourcePane"
 import { RulesPane, type RuleFocus } from "@/components/settings/RulesPane"
 import { AgentToolsPane } from "@/components/settings/AgentToolsPane"
 import { AppearancePane } from "@/components/settings/AppearancePane"
+import { FeishuPane } from "@/components/settings/FeishuPane"
 import { ProviderDialog } from "@/components/settings/ProviderDialog"
 import { FORMAT_LABEL } from "@/lib/providerPresets"
 import { McpPane } from "@/components/McpPane"
@@ -36,7 +37,7 @@ import { cn } from "@/lib/utils"
 import {
   Bot, Cable, ChevronRight, CircleGauge,
   Gauge, GitPullRequest, Network, Radio, ShieldCheck,
-  Palette, Sparkles, Wrench,
+  Palette, Sparkles, Wrench, BellRing,
 } from "lucide-react"
 
 /** packs 文件写操作后通知 doctor 条刷新（30s 轮询之外的即时通道） */
@@ -159,7 +160,7 @@ export function SettingsView({ nav, pid }: {
   const navGroups: { label: string; items: [string, string, typeof Bot][] }[] = [
     { label: "智能系统", items: [["experts", "专家池", Bot], ["matrix", "能力矩阵", CircleGauge], ["advisor", "策略顾问", Sparkles]] },
     { label: "安全控制", items: [["rules", "安全红线", ShieldCheck], ["gateway", "访问网关", Network], ["tools", "执行工具", Wrench]] },
-    { label: "基础设施", items: [["llm", "模型供应商", Gauge], ["mcp", "MCP 连接", Cable], ["intel", "情报来源", Radio]] },
+    { label: "基础设施", items: [["llm", "模型供应商", Gauge], ["mcp", "MCP 连接", Cable], ["intel", "情报来源", Radio], ["feishu", "飞书推送", BellRing]] },
     { label: "工作流", items: [["proposals", "变更提案", GitPullRequest], ["appearance", "外观主题", Palette]] },
   ]
   const activeLabel = navGroups.flatMap((g) => g.items).find(([key]) => key === tab)?.[1] ?? "设置"
@@ -188,7 +189,7 @@ export function SettingsView({ nav, pid }: {
           <TabsContent value="matrix" className="min-h-0 flex-1"><MatrixPane tax={tax} track={track} onFocusSkill={(name) => { setTab("skills"); setSkillFocus({ name, n: Date.now() }) }} /></TabsContent>
           <TabsContent value="rules" className="min-h-0 flex-1"><RulesPane track={track} focus={ruleFocus} pid={pid} /></TabsContent>
           <TabsContent value="advisor" className="min-h-0 flex-1"><AdvisorPane pid={pid} /></TabsContent>
-          <TabsContent value="llm" className="min-h-0 flex-1"><LlmPane /></TabsContent><TabsContent value="mcp" className="min-h-0 flex-1"><McpPane /></TabsContent><TabsContent value="gateway" className="min-h-0 flex-1"><GatewayPane pid={pid} /></TabsContent><TabsContent value="tools" className="min-h-0 flex-1"><AgentToolsPane /></TabsContent><TabsContent value="intel" className="min-h-0 flex-1"><IntelSourcePane /></TabsContent><TabsContent value="proposals" className="min-h-0 flex-1"><ProposalsPane onPendingChange={setPendingN} /></TabsContent><TabsContent value="appearance" className="min-h-0 flex-1"><AppearancePane /></TabsContent>
+          <TabsContent value="llm" className="min-h-0 flex-1"><LlmPane /></TabsContent><TabsContent value="mcp" className="min-h-0 flex-1"><McpPane /></TabsContent><TabsContent value="gateway" className="min-h-0 flex-1"><GatewayPane pid={pid} /></TabsContent><TabsContent value="tools" className="min-h-0 flex-1"><AgentToolsPane /></TabsContent><TabsContent value="intel" className="min-h-0 flex-1"><IntelSourcePane /></TabsContent><TabsContent value="proposals" className="min-h-0 flex-1"><ProposalsPane onPendingChange={setPendingN} /></TabsContent><TabsContent value="appearance" className="min-h-0 flex-1"><AppearancePane /></TabsContent><TabsContent value="feishu" className="min-h-0 flex-1"><FeishuPane /></TabsContent>
         </Tabs>
       </main>
     </div>
