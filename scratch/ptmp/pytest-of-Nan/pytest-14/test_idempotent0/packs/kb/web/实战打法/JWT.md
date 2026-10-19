@@ -1,2 +1,0 @@
-- a: [SSTI.md](SSTI.md)
-- b: [手册](../漏洞分类/sqli/手册.md)

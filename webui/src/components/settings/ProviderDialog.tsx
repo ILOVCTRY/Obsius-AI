@@ -37,6 +37,7 @@ export function ProviderDialog({ open, onOpenChange, initial, onSave }: {
   const [apiKey, setApiKey] = useState("")
   const [proxy, setProxy] = useState("")
   const [thinking, setThinking] = useState(false)
+  const [thinkingEffort, setThinkingEffort] = useState<"low" | "medium" | "high">("high")
   const [models, setModels] = useState<string[]>([])
   const [ctx, setCtx] = useState<Record<string, number>>({})
   const [hasKey, setHasKey] = useState(false)
@@ -65,12 +66,13 @@ export function ProviderDialog({ open, onOpenChange, initial, onSave }: {
       setName(initial.name); setBaseUrl(initial.base_url); setFormat(initial.format)
       setApiKey(""); setProxy(initial.proxy ?? "")
       setThinking(initial.thinking === true)
+      setThinkingEffort(initial.thinking_effort ?? "high")
       setModels(initial.models); setCtx(initial.model_context ?? {})
       setHasKey(!!initial.has_key)
     } else {
       const p = PROVIDER_PRESETS[0]
       setPresetId(p.id); setName(""); setBaseUrl(p.baseUrl); setFormat(p.format)
-      setApiKey(""); setProxy(""); setThinking(false); setModels([]); setCtx({}); setHasKey(false)
+      setApiKey(""); setProxy(""); setThinking(false); setThinkingEffort("high"); setModels([]); setCtx({}); setHasKey(false)
     }
     setNewModel(""); setShowKey(false); setBusy(false)
     setDisc(null); setTestRes({}); setConnTest(null); setErr(null)
@@ -152,6 +154,7 @@ export function ProviderDialog({ open, onOpenChange, initial, onSave }: {
       enabled: initial?.enabled ?? true,
       model_context: Object.keys(ctx).length ? ctx : undefined,
       thinking: thinking || null,
+      thinking_effort: thinking ? thinkingEffort : null,
       proxy: proxy.trim() || null,
     })
     onOpenChange(false)
@@ -218,6 +221,16 @@ export function ProviderDialog({ open, onOpenChange, initial, onSave }: {
             <label className="llm-thinking" title="勾选=按兼容格式发送 reasoning/thinking（不支持时自动降级）；不勾=普通请求">
               <input type="checkbox" checked={thinking} onChange={(e) => setThinking(e.target.checked)} />
               <span>思考链</span></label>
+            {thinking && (
+              <label><span>思考强度</span>
+                <select value={thinkingEffort} className={SELECT_CLS}
+                        onChange={(e) => setThinkingEffort(e.target.value as "low" | "medium" | "high")}
+                        title="GPT Responses / Chat Completions 使用的 reasoning effort">
+                  <option value="low">轻度</option>
+                  <option value="medium">中度</option>
+                  <option value="high">高度</option>
+                </select></label>
+            )}
           </div>
 
           {!isEdit && preset.keyUrl && (

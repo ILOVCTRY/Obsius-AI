@@ -9,6 +9,9 @@
 - 删除 = 回收站式（DESIGN.md §5.3）：整目录 rename 进 workspaces/.trash/，
   不物理删除；恢复 = restore_project()（前端回收站一键，同名自动加后缀）；
   所有扫描忽略 .trash。
+- 回收站终点操作（2026-10-18）：purge_trashed() 物理抹除整条目（永久删除）；
+  clear_trashed_contents() 只清除条目内项目文件、保留 project.json 墓碑
+  （名字信息仍在清单里，元数据落 trash_purged_at，此后不可恢复）。
 - 不建全局注册表：项目列表 = 扫描 workspaces/*/project.json（单一真相源）。
 - id 由本模块统一生成，blackboard projects 行同 id。
 """
@@ -19,6 +22,7 @@ import logging
 import os
 import re
 import shutil
+import stat
 import time
 import uuid
 from datetime import datetime, timezone
@@ -105,6 +109,290 @@ def list_workspace_tree(root: str | Path, *, max_depth: int = WORKSPACE_TREE_MAX
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+# Windows 文件属性位（os.lstat().st_file_attributes）：判定**只看 lstat、绝不
+# follow 链接**。Agent 经 WSL/容器在项目里建的 venv 等会留下 WSL LX symlink
+# （IO_REPARSE_TAG_LX_SYMLINK）：Windows 原生 Python 的 os.path.islink() 不认
+# （False），而 os.stat()/is_dir() **会 follow** → 抛 WinError 1920
+# （ERROR_CANT_ACCESS_FILE）。shutil.rmtree 正是死在「is_dir() 1920」且异常不
+# 是 PermissionError/FileNotFoundError——曾把回收站永久删除放大成 500。
+#
+# 但「不 follow 分类」只是第一层：**LX 链接本体在 Windows 上删不掉**。实测
+# （2026-10-19，真机 E: 盘）对 attrs=0x400/0x410 的 LX 链接：
+#   os.unlink / DeleteFileW / RemoveDirectoryW / SetFileInformationByHandle
+#   (FileDispositionInfo|Ex, 含 POSIX 语义) / NtSetInformationFile /
+#   shutil.rmtree / cmd del / PowerShell Remove-Item / robocopy /MIR / MSYS rm
+#   → 一律 WinError 5 (ERROR_ACCESS_DENIED)；而 os.rename 同路径却成功。
+# 唯一可行路径：以 DELETE|FILE_WRITE_ATTRIBUTES 打开并
+# FSCTL_DELETE_REPARSE_POINT **先摘掉重解析标签**，之后它退化为普通文件/空目录，
+# 再走常规删除即成功（见 _strip_reparse_point / _remove_link）。
+#
+# 另一独立坑：WSL 程序写的文件常带 READONLY 位（如 X11 的 .X99-lock，
+# attrs=0x21）。Windows 上 os.unlink 对只读文件同样 WinError 5，需先清位。
+_FILE_ATTR_READONLY = 0x1
+_FILE_ATTR_REPARSE_POINT = 0x400
+_FILE_ATTR_DIRECTORY = 0x10
+_FILE_ATTR_NORMAL = 0x80
+
+# FSCTL（reparse point 读取/摘除）
+_FSCTL_GET_REPARSE_POINT = 0x000900A8
+_FSCTL_DELETE_REPARSE_POINT = 0x000900AC
+_FILE_WRITE_ATTRIBUTES = 0x0100
+_GENERIC_READ = 0x80000000
+_DELETE = 0x00010000
+_SHARE_ALL = 0x7
+_OPEN_EXISTING = 3
+_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+
+
+def _win_reparse_handle(path: Path, access: int):
+    r"""以「不 follow 链接」方式打开 reparse point，返回 Win32 HANDLE。
+
+    非 Windows / 打不开返回 None。用 ``\\?\`` 前缀避开 MAX_PATH 与 8.3 名解析。
+    """
+    if os.name != "nt":
+        return None
+    import ctypes
+    import ctypes.wintypes as wt
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateFileW.argtypes = [wt.LPCWSTR, wt.DWORD, wt.DWORD, ctypes.c_void_p,
+                                wt.DWORD, wt.DWORD, wt.HANDLE]
+    k32.CreateFileW.restype = wt.HANDLE
+    ap = os.path.abspath(path)
+    if not ap.startswith("\\\\?\\"):
+        ap = "\\\\?\\" + ap
+    h = k32.CreateFileW(ap, access, _SHARE_ALL, None, _OPEN_EXISTING,
+                        _FILE_FLAG_OPEN_REPARSE_POINT
+                        | _FILE_FLAG_BACKUP_SEMANTICS, None)
+    if h == wt.HANDLE(-1).value:
+        return None
+    return k32, h
+
+
+def _strip_reparse_point(path: Path) -> bool:
+    """摘掉 reparse 标签（symlink/junction/WSL LX 链），使条目退化为普通
+    文件/空目录——这是 Windows 上删除 LX 链接的**唯一**可行路径。
+
+    成功返回 True；非 Windows、不是 reparse point、或无权限（打不开/FSCTL
+    被拒）返回 False，由调用方继续按常规方式尝试。"""
+    if os.name != "nt":
+        return False
+    import ctypes
+    import ctypes.wintypes as wt
+
+    opened = _win_reparse_handle(path, _DELETE | _FILE_WRITE_ATTRIBUTES)
+    if opened is None:
+        return False
+    k32, h = opened
+    try:
+        # 先读原 tag：FSCTL_DELETE_REPARSE_POINT 的入参必须带正确 ReparseTag，
+        # 否则返回 ERROR_REPARSE_TAG_MISMATCH。
+        buf = ctypes.create_string_buffer(16 * 1024)
+        ret = wt.DWORD(0)
+        if not k32.DeviceIoControl(h, _FSCTL_GET_REPARSE_POINT, None, 0, buf,
+                                   len(buf), ctypes.byref(ret), None):
+            return False
+        tag = ctypes.c_uint32.from_buffer_copy(buf.raw[:4]).value
+        # REPARSE_DATA_BUFFER：ReparseTag(4) + ReparseDataLength(2) + Reserved(2)
+        inbuf = ctypes.create_string_buffer(8)
+        ctypes.memmove(inbuf, ctypes.byref(ctypes.c_uint32(tag)), 4)
+        ret2 = wt.DWORD(0)
+        if not k32.DeviceIoControl(h, _FSCTL_DELETE_REPARSE_POINT, inbuf, 8,
+                                   None, 0, ctypes.byref(ret2), None):
+            return False
+        return True
+    finally:
+        k32.CloseHandle(h)
+
+
+def _clear_readonly(path: Path) -> None:
+    """清 Windows 只读位（WSL 程序留下的 .X99-lock 等常带 0x1）——
+    os.unlink 对只读文件抛 WinError 5。失败静默（交给后续删除报真因）。"""
+    if os.name != "nt":
+        try:
+            os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+        except OSError:
+            pass
+        return
+    try:
+        st = os.lstat(path)
+        if getattr(st, "st_file_attributes", 0) & _FILE_ATTR_READONLY:
+            os.chmod(path, stat.S_IWRITE)
+    except OSError:
+        pass
+
+
+def _fs_kind(st: os.stat_result) -> str:
+    """lstat 结果分类为 "link" / "dir" / "file"（判定过程绝不 follow 链接）。
+
+    Windows 用属性位（reparse point=链接，含 symlink/junction/WSL LX）；
+    POSIX 用 S_ISLNK/S_ISDIR。二者都不解析链接目标，LX 链接也能安全判定。"""
+    attrs = getattr(st, "st_file_attributes", None)
+    if attrs is None:
+        if stat.S_ISLNK(st.st_mode):
+            return "link"
+        return "dir" if stat.S_ISDIR(st.st_mode) else "file"
+    if attrs & _FILE_ATTR_REPARSE_POINT:
+        return "link"
+    return "dir" if attrs & _FILE_ATTR_DIRECTORY else "file"
+
+
+def _du_bytes(path: Path) -> int:
+    """文件/目录占用字节（仅统计；symlink/LX 链接不 follow 按 0 体积计，
+    读取失败跳过）。同 _fs_kind 口径，避免 rglob 撞 LX 链接整体归零。"""
+    total = 0
+    stack = [path]
+    while stack:
+        p = stack.pop()
+        try:
+            st = os.lstat(p)
+        except OSError:
+            continue
+        kind = _fs_kind(st)
+        if kind == "dir":
+            try:
+                with os.scandir(p) as it:
+                    stack.extend(p / e.name for e in it)
+            except OSError:
+                continue
+        elif kind == "file":
+            total += st.st_size
+    return total
+
+
+def _unlink_retry(path: Path) -> None:
+    """删文件/链接（含 reparse point 链接本体）；Windows 句柄延迟退避重试，
+    已不存在视为成功，耗尽抛 PermissionError。
+
+    只读位在 Windows 上同样导致 WinError 5（WSL 程序写的 .X99-lock 等），
+    故首轮失败即清位再试。"""
+    last_perr: PermissionError | None = None
+    cleared = False
+    for delay in (0.0, 0.05, 0.1, 0.2):
+        if delay:
+            time.sleep(delay)
+        try:
+            path.unlink()
+            return
+        except FileNotFoundError:
+            return
+        except PermissionError as e:
+            last_perr = e
+            if not cleared:
+                _clear_readonly(path)
+                cleared = True
+    raise last_perr  # type: ignore[misc]
+
+
+def _rmdir_retry(path: Path) -> None:
+    """删空目录（目录型 reparse point 的 unlink 被拒时退此路）；语义同
+    _unlink_retry。"""
+    last_perr: PermissionError | None = None
+    cleared = False
+    for delay in (0.0, 0.05, 0.1, 0.2):
+        if delay:
+            time.sleep(delay)
+        try:
+            path.rmdir()
+            return
+        except FileNotFoundError:
+            return
+        except PermissionError as e:
+            last_perr = e
+            if not cleared:
+                _clear_readonly(path)
+                cleared = True
+    raise last_perr  # type: ignore[misc]
+
+
+def _remove_link(path: Path) -> None:
+    """删「链接本体」（symlink/junction/WSL LX 链接），绝不触碰链接目标。
+
+    顺序（每步失败才进下一步，任一步成功即返回）：
+      1. unlink —— 普通 symlink / 文件型 junction 走这条；
+      2. rmdir  —— 目录型 reparse（junction）RemoveDirectory 可删；
+      3. 摘 reparse 标签再删 —— **WSL LX 链接的唯一出路**：上面两步在 LX 链上
+         一律 WinError 5（实测见模块头注释），FSCTL_DELETE_REPARSE_POINT 摘掉
+         标签后退化为普通空文件/空目录，常规删除即可。"""
+    try:
+        _unlink_retry(path)
+        return
+    except OSError:
+        pass
+    try:
+        _rmdir_retry(path)
+        return
+    except OSError:
+        pass
+    if _strip_reparse_point(path):
+        st = os.lstat(path)
+        if _fs_kind(st) == "dir":
+            _rmdir_retry(path)
+        else:
+            _unlink_retry(path)
+        return
+    # 三条路都失败：把最后一次的真实异常抛出去（调用方聚合/转 422）
+    st = os.lstat(path)
+    if _fs_kind(st) == "dir":
+        _rmdir_retry(path)
+    else:
+        _unlink_retry(path)
+
+
+def _remove_entry(path: Path) -> None:
+    """递归删除文件/目录，兼容 Windows reparse point（symlink/junction/WSL LX
+    链接）：_fs_kind 属性位判定、绝不 follow——目录型链接只删链接本体，不会
+    把链接目标内容牵连进来。逐项退避重试；有残留时 PermissionError（占用）
+    原类抛出、其他 OSError 聚合抛出（API 层转 422，不再漏成 500）。"""
+    errs: list[OSError] = []
+
+    def walk(p: Path) -> None:
+        try:
+            st = os.lstat(p)
+        except FileNotFoundError:
+            return
+        except OSError as e:
+            errs.append(e)
+            return
+        kind = _fs_kind(st)
+        if kind == "link":
+            try:
+                _remove_link(p)
+            except OSError as e:
+                errs.append(e)
+            return
+        if kind == "file":
+            try:
+                _unlink_retry(p)
+            except OSError as e:
+                errs.append(e)
+            return
+        try:
+            with os.scandir(p) as it:
+                names = [e.name for e in it]  # 只取名不做 stat，避开 LX 子链
+        except FileNotFoundError:
+            return
+        except OSError as e:
+            errs.append(e)
+            return
+        for name in names:
+            walk(p / name)
+        try:
+            _rmdir_retry(p)
+        except OSError as e:
+            errs.append(e)
+
+    walk(path)
+    if errs:
+        detail = "; ".join(f"{e.filename or path}: {e}" for e in errs[:5])
+        first = errs[0]
+        msg = f"删除残留 {len(errs)} 项: {detail}"
+        if isinstance(first, PermissionError):
+            raise PermissionError(msg) from first
+        raise OSError(msg) from first
 
 
 def view_meta(meta: dict) -> dict:
@@ -354,6 +642,15 @@ class ProjectStore:
                     "model": str(ov.get("model") or "").strip()}
             else:
                 new_config.pop("executor_llm", None)
+        # CTF 赛制时间（ctf-pacing，2026-10-19）：整段替换+归一化（非法 422）；
+        # 结果 {} 剥键 → 读路径回落阶梯推断。此前只能手改 project.json。
+        if "ctf" in (patch or {}):
+            from core.ctf.pacing import normalize_ctf_config
+            ctf = normalize_ctf_config(patch["ctf"])
+            if ctf:
+                new_config["ctf"] = ctf
+            else:
+                new_config.pop("ctf", None)
         meta["config"] = new_config
         (p.path / PROJECT_FILE).write_text(
             json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -408,9 +705,10 @@ class ProjectStore:
             meta["orchestrator_persona"] = persona
         else:
             meta.pop("orchestrator_persona", None)
+        # 调用方可能持有项目缓存；同步内存元数据，避免保存后立即读取旧 persona。
+        p.meta = meta
         (p.path / PROJECT_FILE).write_text(
             json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-        p.meta = meta
         return view_meta(meta)
 
     # ---------- 知识继承（expert-pool M4b，§4.8） ----------
@@ -546,14 +844,10 @@ class ProjectStore:
 
         目标 slug 已被占用（同项目名已存在）时自动加 ``-2``/``-3`` 后缀——项目
         name/id 不变，仅目录名让位，故恢复永不因重名失败。返回
-        ``(新项目目录, 实际 slug)``；找不到抛 FileNotFoundError，非法句柄抛
-        ValueError（防路径穿越：不接受分隔符/上跳）。
+        ``(新项目目录, 实际 slug)``；找不到抛 FileNotFoundError，非法句柄/已清除
+        文件的墓碑条目抛 ValueError（防路径穿越：不接受分隔符/上跳）。
         """
-        # 防穿越：trash_name 只接受纯目录名（与 packs 校验同口径）
-        if (not trash_name or "/" in trash_name or "\\" in trash_name
-                or trash_name in (".", "..") or ".." in Path(trash_name).parts):
-            raise ValueError(f"非法回收站句柄: {trash_name!r}")
-        src = self.root / TRASH_DIR / trash_name
+        src = self._trash_src(trash_name)
         meta_file = src / PROJECT_FILE
         if not meta_file.is_file():
             raise FileNotFoundError(f"回收站条目不存在: {trash_name}")
@@ -561,6 +855,13 @@ class ProjectStore:
             meta = json.loads(meta_file.read_text(encoding="utf-8"))
         except (ValueError, OSError) as e:
             raise FileNotFoundError(f"回收站条目元数据损坏: {trash_name}") from e
+        if not isinstance(meta, dict):
+            raise FileNotFoundError(f"回收站条目元数据损坏: {trash_name}")
+        if meta.get("trash_purged_at"):
+            # 墓碑条目：clear_trashed_contents 已抹掉黑板库等数据，恢复只会
+            # 得到残缺项目（无 blackboard.db），明确拒绝（前端同口径禁用）。
+            raise ValueError(
+                f"回收站条目已清除项目文件（墓碑），无法恢复: {trash_name}")
         slug = self._unique_slug(
             slugify(str(meta.get("name") or trash_name), str(meta.get("track") or "ctf")))
         dst = self.root / slug
@@ -583,6 +884,65 @@ class ProjectStore:
             (dst / PROJECT_FILE).write_text(
                 json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
         return dst, slug
+
+    # ---------- 回收站终点：永久删除 / 清除项目内文件（2026-10-18） ----------
+
+    def purge_trashed(self, trash_name: str) -> Path:
+        """永久删除回收站条目（物理抹除，不可恢复）：rmtree .trash/<trash_name>/。
+
+        回收站链路的终点，与 delete_project「整目录移入回收站」相对。返回被
+        抹除的目录路径（仅作回执，调用后已不存在）。条目不存在 FileNotFoundError；
+        非法句柄 ValueError；删除失败抛 OSError/PermissionError（API 转 422，
+        含 reparse point 兼容——见 _remove_entry）。"""
+        src = self._trash_src(trash_name)
+        # _remove_entry 兼容 WSL LX symlink 等 reparse point（旧实现 shutil.rmtree
+        # 会在 Windows 上抛非 Permission 的 WinError 1920，漏成 500）。
+        _remove_entry(src)
+        return src
+
+    def clear_trashed_contents(self, trash_name: str) -> dict:
+        """清除回收站条目内的项目文件，仅保留 project.json（墓碑，不可逆）。
+
+        黑板库/样本/产物/日志等物理抹除，但条目仍留在回收站清单里
+        （list_trashed 认 project.json）——名字/轨道/专家绑定继续可展示；
+        meta 落 ``trash_purged_at`` 墓碑戳，前端据此禁用「恢复」，
+        该条目只剩「永久删除」收口。找不到/元数据损坏 FileNotFoundError；
+        非法句柄 ValueError；删除失败 OSError/PermissionError（API 转 422，
+        兼容 reparse point——见 _remove_entry）。"""
+        src = self._trash_src(trash_name)
+        meta_file = src / PROJECT_FILE
+        if not meta_file.is_file():
+            raise FileNotFoundError(f"回收站条目元数据损坏: {trash_name}")
+        freed = removed = 0
+        for entry in sorted(src.iterdir()):
+            if entry.name == PROJECT_FILE:
+                continue
+            freed += _du_bytes(entry)
+            removed += 1
+            _remove_entry(entry)
+        try:
+            meta = json.loads(meta_file.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            meta = {}
+        if not isinstance(meta, dict):
+            meta = {}
+        meta["trash_purged_at"] = _now()
+        meta_file.write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"trash_name": trash_name, "removed_entries": removed,
+                "freed_bytes": freed, "kept": [PROJECT_FILE],
+                "purged_at": meta["trash_purged_at"]}
+
+    def _trash_src(self, trash_name: str) -> Path:
+        """回收站句柄 → .trash/<trash_name> 目录。非法句柄 ValueError（与 packs
+        校验同口径的防穿越：不接受分隔符/上跳/空）；条目不存在 FileNotFoundError。"""
+        if (not trash_name or "/" in trash_name or "\\" in trash_name
+                or trash_name in (".", "..") or ".." in Path(trash_name).parts):
+            raise ValueError(f"非法回收站句柄: {trash_name!r}")
+        src = self.root / TRASH_DIR / trash_name
+        if not src.is_dir():
+            raise FileNotFoundError(f"回收站条目不存在: {trash_name}")
+        return src
 
     # ---------- 内部 ----------
 

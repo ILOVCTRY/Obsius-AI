@@ -1,0 +1,69 @@
+name: Design discussion
+description: Resolve an REA architecture, provider, or contract question before implementation
+title: "[Design] "
+labels:
+  - enhancement
+  - triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for a substantial provider, public/persisted contract, or
+        authority-boundary decision. Keep one decision per discussion.
+
+  - type: checkboxes
+    id: before-submitting
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the open and closed issues and pull requests for a related discussion.
+          required: true
+        - label: I removed credentials, tokens, private paths, and sensitive target data.
+          required: true
+
+  - type: textarea
+    id: decision
+    attributes:
+      label: Decision needed
+      description: State the exact question maintainers need to resolve.
+      placeholder: Should REA ... or ...?
+    validations:
+      required: true
+
+  - type: textarea
+    id: context-evidence
+    attributes:
+      label: Context and evidence
+      description: Explain why the decision is needed now. Separate observed behavior, derived evidence, and inference.
+    validations:
+      required: true
+
+  - type: textarea
+    id: boundary-invariants
+    attributes:
+      label: Boundary and invariants
+      description: Identify the owning layer, provider/bridge boundary, artifact or evidence invariants, and any process or authorization constraints.
+    validations:
+      required: true
+
+  - type: textarea
+    id: options
+    attributes:
+      label: Options and tradeoffs
+      description: Compare a small number of viable approaches, including platform, compatibility, safety, evidence, and maintenance costs.
+    validations:
+      required: true
+
+  - type: textarea
+    id: success-criteria
+    attributes:
+      label: Success criteria and open questions
+      description: State what outcome would settle the decision and list only unresolved questions that could change the choice.
+    validations:
+      required: true
+
+  - type: textarea
+    id: references
+    attributes:
+      label: References
+      description: Link relevant contracts, upstream provider documentation, tests, measurements, or prior discussions.

@@ -370,7 +370,53 @@ def _fmt_size(n: Any) -> str:
     return f"{n}B"
 
 
-def _attachment_lines(attachments: Any) -> list[str]:
+def _attachment_sha12(disk_name: str, ws: Path | None, rel_path: str) -> str:
+    """附件 sha12（与 tools._attachment_sha12 同口径）：上传命名 `<sha12>_<name>`
+    取**盘上文件名**（不是展示名——展示名是原始名，不带 sha 前缀，两边会推出
+    不同目录）；读得到文件时内容 sha256 前 12 位；都不可得返回 ""。"""
+    m = re.match(r"^([0-9a-f]{12})_", disk_name or "")
+    if m:
+        return m.group(1)
+    if ws is not None:
+        p = ws / rel_path
+        if p.is_file():
+            h = hashlib.sha256()
+            try:
+                with open(p, "rb") as fh:
+                    for chunk in iter(lambda: fh.read(1 << 20), b""):
+                        h.update(chunk)
+                return h.hexdigest()[:12]
+            except OSError:
+                pass
+    return ""
+
+
+def _zip_preview(p: Path) -> str | None:
+    """读 zip central directory（**不解压**）给一行预览：条目数/顶层文件/解压后大小。
+    打不开/非 zip/条目过多 → None（渲染保持单行旧形态）。"""
+    import zipfile
+    try:
+        with zipfile.ZipFile(p) as zf:
+            infos = zf.infolist()
+    except Exception:  # noqa: BLE001 —— BadZipFile/OSError 统一降级
+        return None
+    if not infos:
+        return "zip：空包"
+    if len(infos) > 5000:
+        return "zip：≥5000 条目"
+    files = [i for i in infos if not i.is_dir()]
+    total = sum(i.file_size for i in files)
+    n_top_files = sum(1 for i in files
+                      if "/" not in i.filename.replace("\\", "/"))
+    tops = {i.filename.replace("\\", "/").split("/")[0] for i in files}
+    n_sub = len(tops) - n_top_files
+    sub = f" + {n_sub} 个子目录" if n_sub > 0 else ""
+    return (f"zip：{len(infos)} 条目 · 顶层 {n_top_files} 个文件{sub} · "
+            f"解压后共 {_fmt_size(total)}")
+
+
+def _attachment_lines(attachments: Any,
+                      ws: Path | None = None) -> list[str]:
     """附件清单行（2026-09-19 附件随发）：任务 context.attachments 与
     human_note payload.attachments 共用渲染。
 
@@ -384,7 +430,15 @@ def _attachment_lines(attachments: Any) -> list[str]:
     `/workspace/` 是系统内约定的「工作区根」：读工具 `_resolve_read_path` 会把
     它映射回宿主工作区，docker run_cmd 里它本来就是挂载根；host/wsl 会话若用
     run_cmd，写 `../<相对路径>`（cwd 同为 scratch，同样可达）。
-    附件本体读放开（无 pathguard 拦截），仅写受拦。"""
+    附件本体读放开（无 pathguard 拦截），仅写受拦。
+
+    **zip 附件给解压指引（2026-10-19 修）**：多题共跑/同题重开时 LLM 用
+    run_cmd 自选目录名 `unzip -o`，上轮分析残留整批混进目录清单把上下文淹掉。
+    zip 附件渲染时附：① 建议解压目录 `/workspace/scratch/att-<sha12>/`（与附件
+    一一对应的确定性命名）；② zip central directory 预览（条目数/顶层文件/
+    解压后大小，不解压）；③ 明示用 `unpack_attachment` 工具（服务端清旧+安全
+    解压+结构化清单），替代 run_cmd unzip。ws 未装配（测试/无工作区）时退化为
+    旧单行形态。"""
     lines: list[str] = []
     for a in attachments or []:
         if not isinstance(a, dict):
@@ -394,7 +448,30 @@ def _attachment_lines(attachments: Any) -> list[str]:
             continue
         name = str(a.get("name") or "").strip() or path.rsplit("/", 1)[-1]
         size_s = _fmt_size(a.get("size"))
-        lines.append(f"- 📎 /workspace/{path}（{name}{('，' + size_s) if size_s else ''}）")
+        line = f"- 📎 /workspace/{path}（{name}{('，' + size_s) if size_s else ''}）"
+        sha12 = ""
+        preview = ""
+        if name.lower().endswith(".zip") and ws is not None:
+            # sha12 取盘上文件名（artifacts/attachments/<sha12>_<name> 的 <sha12>），
+            # 不用展示名——展示名是用户原始名，与 unpack_attachment 的目录命名必须同源
+            disk_name = path.rsplit("/", 1)[-1]
+            sha12 = _attachment_sha12(disk_name, ws, path)
+            try:
+                preview = _zip_preview(ws / path) or ""
+            except OSError:
+                preview = ""
+        if sha12:
+            if preview:
+                line += f"；{preview}"
+            lines.append(line)
+            lines.append(
+                f"  → 解压到 /workspace/scratch/att-{sha12}/：调 "
+                f"unpack_attachment(path=\"/workspace/{path}\")——服务端完成"
+                "清旧残留+安全解压+结构化清单，替代 run_cmd 拼 unzip（unzip -o "
+                "只覆盖同名文件，上轮分析残留会整批混进 ls 输出）；之后 read_file/"
+                f"search_files 用相对 scratch 路径 att-{sha12}/... 读")
+        else:
+            lines.append(line)
     return lines
 
 
@@ -421,6 +498,7 @@ class AgentSession:
         existing_session: dict | None = None,
         enable_sediment: bool = False,  # v0.65：done 自动提案开关（app 工厂按配置开；直构默认关）
         campaign=None,                  # ⑥ 战役记忆全局库（CampaignMemory；None=不沉淀）
+        recovery=None,                  # 受控环境恢复器（None=不自动安装/构建）
     ):
         self.project_id = project_id
         self.bb = bb
@@ -478,6 +556,7 @@ class AgentSession:
             abort_event=self._abort_req,
             role_skills=self.role.get("skills"),
             allowed_roles=allowed_roles,
+            recovery=recovery,
         )
         self.registry: SkillRegistry | None = None
         self.capability_prompt = capability_prompt
@@ -1971,7 +2050,9 @@ class AgentSession:
             text = str(payload.get("text", "")).strip()
             if text:
                 lines.append(f"- {text}")
-            lines.extend(_attachment_lines(payload.get("attachments")))
+            # ws 传入后 zip 附件可带「解压目录 + 条目预览 + unpack_attachment 指引」
+            ws_root = self.artifacts_dir.parent if self.artifacts_dir else None
+            lines.extend(_attachment_lines(payload.get("attachments"), ws_root))
         if not lines:
             return None
         return "\n".join(["💬 人类引导："] + lines)

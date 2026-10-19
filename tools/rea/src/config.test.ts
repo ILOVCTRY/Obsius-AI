@@ -1,0 +1,280 @@
+import { describe, expect, it } from "vitest";
+
+import { parseConfig } from "./config/parseConfig.js";
+import { projectAnalysisError } from "./domain/analysisErrorProjection.js";
+
+describe("runtime configuration", () => {
+  it("allows target-free startup and applies runtime defaults", () => {
+    const empty = parseConfig({});
+    expect(empty.ok).toBe(true);
+    if (empty.ok) {
+      expect(empty.value.hopperTargetPath).toBeUndefined();
+      expect(empty.value.analysisProvider).toBe("auto");
+      expect(empty.value.hopperStartupTimeoutMs).toBe(120_000);
+    }
+    const result = parseConfig({ HOPPER_TARGET_PATH: "/usr/bin/true" });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.hopperTargetKind).toBe("executable");
+      expect(result.value.hopperLoaderArgs).toEqual([]);
+      expect(result.value.logLevel).toBe("info");
+      expect(result.value.referenceSourcePolicy).toEqual({
+        secretPatterns: [],
+      });
+    }
+  });
+
+  it("parses one shared provider selector and rejects unstable IDs", () => {
+    expect(
+      parseConfig({
+        REA_ANALYSIS_PROVIDER: "ida",
+        REA_IDA_MCP_CONFIG: "/tmp/ida-mcp.json",
+      }),
+    ).toMatchObject({
+      ok: true,
+      value: { analysisProvider: "ida", idaMcpConfigPath: "/tmp/ida-mcp.json" },
+    });
+    expect(parseConfig({ REA_IDA_MCP_CONFIG: "relative.json" }).ok).toBe(false);
+    expect(parseConfig({ REA_ANALYSIS_PROVIDER: "ghidra" })).toMatchObject({
+      ok: true,
+      value: { analysisProvider: "ghidra" },
+    });
+    expect(parseConfig({ REA_ANALYSIS_PROVIDER: "auto" })).toMatchObject({
+      ok: true,
+      value: { analysisProvider: "auto" },
+    });
+    for (const invalid of ["", "Auto", "ghidra_1", "ghidra "])
+      expect(parseConfig({ REA_ANALYSIS_PROVIDER: invalid }).ok).toBe(false);
+  });
+
+  it("parses absolute BYO Ghidra and optional Java paths", () => {
+    expect(
+      parseConfig({
+        GHIDRA_INSTALL_DIR: "/opt/ghidra_12.1.4_PUBLIC",
+        JAVA_HOME: "/usr/lib/jvm/jdk-21",
+      }),
+    ).toMatchObject({
+      ok: true,
+      value: {
+        ghidraInstallDir: "/opt/ghidra_12.1.4_PUBLIC",
+        ghidraJavaHome: "/usr/lib/jvm/jdk-21",
+      },
+    });
+    expect(parseConfig({ GHIDRA_INSTALL_DIR: "relative/ghidra" }).ok).toBe(
+      false,
+    );
+    expect(parseConfig({ JAVA_HOME: "relative/jdk" }).ok).toBe(false);
+  });
+
+  it("parses an optional absolute BYO ilspycmd path", () => {
+    expect(
+      parseConfig({ REA_ILSPY_CMD_PATH: "/home/user/.dotnet/tools/ilspycmd" }),
+    ).toMatchObject({
+      ok: true,
+      value: {
+        ilspyCmdPath: "/home/user/.dotnet/tools/ilspycmd",
+      },
+    });
+    expect(parseConfig({ REA_ILSPY_CMD_PATH: "relative/ilspycmd" }).ok).toBe(
+      false,
+    );
+  });
+});
+
+describe("runtime target configuration", () => {
+  it("rejects invalid target kinds with actionable environment diagnostics", () => {
+    const result = parseConfig({ HOPPER_TARGET_KIND: "archive" });
+    if (result.ok) throw new Error("Expected invalid target kind");
+    expect(result.error.message).toContain("Invalid REA environment");
+  });
+
+  it("parses database kind and loader arguments", () => {
+    expect(
+      parseConfig({
+        HOPPER_LAUNCHER_PATH: "/custom/hopper",
+        REA_ANALYSIS_PROVIDER: "hopper",
+        HOPPER_TARGET_PATH: "/fixture/sample.hop",
+        HOPPER_TARGET_KIND: "database",
+        HOPPER_LOADER_ARGS_JSON: '["-l","FAT","--aarch64","-l","Mach-O"]',
+      }),
+    ).toMatchObject({
+      ok: true,
+      value: {
+        hopperLauncherPath: "/custom/hopper",
+        analysisProvider: "hopper",
+        hopperTargetPath: "/fixture/sample.hop",
+        hopperTargetKind: "database",
+        hopperLoaderArgs: ["-l", "FAT", "--aarch64", "-l", "Mach-O"],
+        logLevel: "info",
+        referenceSourcePolicy: {
+          secretPatterns: [],
+        },
+      },
+    });
+  });
+});
+
+describe("runtime collection configuration", () => {
+  it("preserves empty loader arguments and rejects empty exclusion patterns", () => {
+    expect(
+      parseConfig({ HOPPER_LOADER_ARGS_JSON: '["", " ", "--option"]' }),
+    ).toMatchObject({
+      ok: true,
+      value: { hopperLoaderArgs: ["", " ", "--option"] },
+    });
+    expect(parseConfig({ REA_REFERENCE_SECRET_PATTERNS_JSON: '[""]' }).ok).toBe(
+      false,
+    );
+  });
+
+  it.each(["not-json", "{}", '"just a string"', '["ok",1]'])(
+    "rejects invalid loader args: %s",
+    (encoded) => {
+      const result = parseConfig({
+        HOPPER_TARGET_PATH: "/tmp/a",
+        HOPPER_LOADER_ARGS_JSON: encoded,
+      });
+      if (result.ok)
+        throw new Error("expected malformed loader arguments to fail");
+      expect(result.error.message).toContain(
+        encoded === "not-json" ? "valid JSON" : "array of strings",
+      );
+    },
+  );
+
+  it("parses supported log levels and rejects unknown levels", () => {
+    const configured = parseConfig({ REA_LOG_LEVEL: "debug" });
+    expect(configured.ok && configured.value.logLevel).toBe("debug");
+    expect(parseConfig({ REA_LOG_LEVEL: "verbose" }).ok).toBe(false);
+  });
+
+  it("parses reference source secret patterns", () => {
+    const result = parseConfig({
+      REA_REFERENCE_SECRET_PATTERNS_JSON: '["*.env", "*.pem", "secrets/"]',
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.referenceSourcePolicy).toEqual({
+        secretPatterns: ["*.env", "*.pem", "secrets/"],
+      });
+    }
+  });
+
+  it.each(["not-json", "{}", '["*.ok", 1]'])(
+    "rejects invalid reference source secret patterns: %s",
+    (encoded) => {
+      expect(
+        parseConfig({ REA_REFERENCE_SECRET_PATTERNS_JSON: encoded }).ok,
+      ).toBe(false);
+    },
+  );
+});
+
+describe("configuration failure diagnostics", () => {
+  it.each(["1", "900000", "2147483647"])(
+    "accepts Hopper startup deadline %s without changing Ghidra's deadline",
+    (value) => {
+      expect(
+        parseConfig({ REA_HOPPER_STARTUP_TIMEOUT_MS: value }),
+      ).toMatchObject({
+        ok: true,
+        value: {
+          hopperStartupTimeoutMs: Number(value),
+          ghidraStartupTimeoutMs: 330_000,
+        },
+      });
+    },
+  );
+
+  it.each(["", "0", "-1", "1.5", "1e3", "invalid", "2147483648"])(
+    "rejects malformed Hopper startup deadline %j with its setting",
+    (value) => {
+      const result = parseConfig({ REA_HOPPER_STARTUP_TIMEOUT_MS: value });
+      if (result.ok) throw new Error("Expected invalid startup deadline");
+      expect(projectAnalysisError(result.error)).toMatchObject({
+        code: "configuration_invalid",
+        category: "invalid_input",
+        details: {
+          settings: [
+            {
+              setting: "REA_HOPPER_STARTUP_TIMEOUT_MS",
+              constraint: expect.any(String),
+            },
+          ],
+        },
+      });
+    },
+  );
+
+  it.each([
+    "",
+    " ",
+    "0",
+    "-5",
+    "abc",
+    "1.5",
+    "1e3",
+    "0x100",
+    "2147483648",
+    "9007199254740991",
+  ])(
+    "rejects malformed Ghidra startup deadline %j with its setting and constraint",
+    (value) => {
+      const result = parseConfig({ REA_GHIDRA_STARTUP_TIMEOUT_MS: value });
+      if (result.ok) throw new Error("Expected invalid startup deadline");
+      expect(projectAnalysisError(result.error)).toMatchObject({
+        code: "configuration_invalid",
+        category: "invalid_input",
+        details: {
+          settings: [
+            {
+              setting: "REA_GHIDRA_STARTUP_TIMEOUT_MS",
+              constraint: expect.any(String),
+            },
+          ],
+        },
+      });
+    },
+  );
+
+  it.each([
+    ["GHIDRA_INSTALL_DIR", "./fixture"],
+    ["JAVA_HOME", "./jdk"],
+    ["REA_GHIDRA_NATIVEAOT_JAR", "./missing.jar"],
+  ])(
+    "names the rejected %s and its absolute-path constraint",
+    (setting, value) => {
+      const result = parseConfig({ [setting]: value });
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      const constraint = `${setting} must be absolute`;
+      expect(projectAnalysisError(result.error)).toMatchObject({
+        code: "configuration_invalid",
+        category: "invalid_input",
+        message: `REA configuration is invalid: ${constraint}.`,
+        remediation: { action: expect.stringContaining(`Correct ${setting} `) },
+        details: { settings: [{ setting, constraint }] },
+      });
+      // The rejected value itself is not echoed.
+      expect(JSON.stringify(projectAnalysisError(result.error))).not.toContain(
+        value,
+      );
+    },
+  );
+
+  it("names settings rejected by their own parsers", () => {
+    const result = parseConfig({ HOPPER_LOADER_ARGS_JSON: "not-json" });
+    expect(result.ok).toBe(false);
+    if (!result.ok)
+      expect(projectAnalysisError(result.error)).toMatchObject({
+        details: {
+          settings: [
+            {
+              setting: "HOPPER_LOADER_ARGS_JSON",
+              constraint: "HOPPER_LOADER_ARGS_JSON must be valid JSON",
+            },
+          ],
+        },
+      });
+  });
+});

@@ -25,7 +25,10 @@ def create_thread(bb, project_id: str, agent_id: str, *,
                   title: str = "", parent_thread_id: str | None = None,
                   spawned_task: str = "",
                   provider: str = "", model: str = "",
-                  challenge_asset_id: str = "") -> dict[str, Any]:
+                  challenge_asset_id: str = "",
+                  web_search: bool = False,
+                  artex_intent_id: str = "",
+                  artex_task_id: str = "") -> dict[str, Any]:
     tid = new_id("chat")
     ts = now()
     with bb._tx():
@@ -38,12 +41,17 @@ def create_thread(bb, project_id: str, agent_id: str, *,
         bb.conn.execute(
             "INSERT INTO chat_threads(id, project_id, agent_id, title, status,"
             " parent_thread_id, spawned_task, todo, provider, model,"
-            " challenge_asset_id, created_at, updated_at)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " challenge_asset_id, web_search, artex_intent_id, artex_task_id,"
+            " created_at, updated_at)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (tid, project_id, agent_id, title[:_TITLE_MAX], "idle",
              parent_thread_id, spawned_task, "[]",
              (provider or "").strip(), (model or "").strip(),
-             (challenge_asset_id or "").strip(), ts, ts))
+             (challenge_asset_id or "").strip(),
+             1 if web_search else 0,
+             (artex_intent_id or "").strip(),
+             (artex_task_id or "").strip(),
+             ts, ts))
     return get_thread(bb, tid)
 
 
@@ -74,7 +82,9 @@ def update_thread(bb, thread_id: str, *, title: str | None = None,
                   error: dict[str, Any] | None = None,
                   provider: str | None = None,
                   model: str | None = None,
-                  challenge_asset_id: str | None = None) -> dict[str, Any] | None:
+                  challenge_asset_id: str | None = None,
+                  artex_task_id: str | None = None,
+                  web_search: bool | None = None) -> dict[str, Any] | None:
     sets: list[str] = ["updated_at=?"]
     args: list[Any] = [now()]
     if title is not None:
@@ -84,6 +94,14 @@ def update_thread(bb, thread_id: str, *, title: str | None = None,
         # '' = 解绑（v38 线程归属题目）
         sets.append("challenge_asset_id=?")
         args.append((challenge_asset_id or "").strip())
+    if artex_task_id is not None:
+        # '' = 解绑（v47 主控线程绑定 ARTEX 任务：一个主控只绑一个任务）
+        sets.append("artex_task_id=?")
+        args.append((artex_task_id or "").strip())
+    if web_search is not None:
+        # v43 联网搜索开关（线程级；主控开=spawn 子代理默认继承）
+        sets.append("web_search=?")
+        args.append(1 if web_search else 0)
     if provider is not None:
         # '' = 清除覆写（回跟随全局默认）；线程级模型覆写（v37）
         sets.append("provider=?")
@@ -253,6 +271,8 @@ def _row(r: sqlite3.Row) -> dict[str, Any]:
     out["todo"] = _loads(out.get("todo"), [])
     out["usage"] = _loads(out.get("usage"), {})
     out["error"] = _loads(out.get("error"), None)
+    # v43 联网搜索开关：DB 整数 0/1 → bool（前端 toggle 直接绑）
+    out["web_search"] = bool(out.get("web_search"))
     return out
 
 

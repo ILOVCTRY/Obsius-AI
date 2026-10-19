@@ -27,10 +27,25 @@ const SEVERITY_COLOR: Record<string, string> = {
 // CTF flag 识别（2026-10-14）：扫 evidence 全部字符串值里的 `前缀{内容}` 形态
 // （flag{…}/CTF{…}/DASCTF{…} 等自定义前缀），命中即返回首个。**不猜裸 hex**——
 // evidence 里 sha256/md5 太多，裸串误报率高。零 schema 迁移（Nan 2026-10-14 定）。
-const FLAG_RE = /[A-Za-z][A-Za-z0-9_]{0,12}(?:flag|ctf)\{[^{}\s]{1,200}\}/i
+//
+// 2026-10-19 修：前缀改为**可选**。旧正则要求 flag/ctf 前至少 1 个字符，
+// 导致 `ctf_submit_flag` 写入的裸 `flag{abc123}` / `FLAG{…}` / `ctf{…}` / `htb{…}`
+// 在黑板 🚩 徽章与发现详情 FLAG 区块**全部不显示**（与 core/ctf/flagjudge.py
+// 的候选口径不一致）。补 `htb` 系列；仍要求 `{` 前是 flag/ctf/htb 词尾、
+// 内层非空且无空白，故 `we should flag{ something`、`sha256:deadbeef`、
+// `%7Bflag%7D` 等不会误报。
+const FLAG_RE = /(?:[A-Za-z][A-Za-z0-9_]{0,12})?(?:flag|ctf|htb)\{[^{}\s]{1,200}\}/i
 
 export function extractFlag(evidence: Record<string, unknown> | undefined): string | null {
   if (!evidence) return null
+  // 规范字段优先（`ctf_submit_flag` 落库写的就是 `evidence.flag`）：扫全部值时
+  // `repro_steps[].expected` 之类也含同一个 flag，键序靠前会先命中，语义上应
+  // 以显式字段为准。
+  const canon = evidence.flag
+  if (typeof canon === "string") {
+    const hit = canon.match(FLAG_RE)
+    if (hit) return hit[0]
+  }
   const seen = new Set<unknown>()
   const walk = (v: unknown): string | null => {
     if (typeof v === "string") return v.match(FLAG_RE)?.[0] ?? null
@@ -282,6 +297,9 @@ export function FindingDetailDialog({ pid, finding, assetLabel, track, onClose, 
   const [row, setRow] = useState<Finding>(finding)
   // flag 识别须基于 row（编辑保存后即时刷新）；CTF 轨才扫 evidence
   const flag = isCtf ? extractFlag(row.evidence) : null
+  // 「已解出」= 发现本身 verified（`ctf_submit_flag` 正式路径写 verified；
+  // candidate=true 写 unverified/intel），用于区分 FLAG / 候选 FLAG 两种呈现。
+  const flagVerified = row.status === "verified"
   const [editing, setEditing] = useState(false)
   const [form, setForm] = useState({ title: "", severity: "", status: "unverified", vuln_class: "", rating_basis: "",
                                      impact: "", remediation: "", category: "vuln",
@@ -656,12 +674,25 @@ export function FindingDetailDialog({ pid, finding, assetLabel, track, onClose, 
         {!editing && (
         <div className="-mx-1 min-h-0 flex-1 space-y-3 overflow-y-auto px-1">
           {flag && (
-            <section className="rounded border border-(--viz-success-border) bg-(--viz-success-bg) px-2.5 py-1.5">
+            // 候选 flag（unverified，`ctf_submit_flag candidate=true`）用警示色 + 「候选」
+            // 标签，别让「疑似线索」和「已解出」长得一样（2026-10-19）。
+            <section className={cn("rounded px-2.5 py-1.5",
+              flagVerified
+                ? "border border-(--viz-success-border) bg-(--viz-success-bg)"
+                : "border border-(--status-approval)/40 bg-(--status-approval)/10")}>
               <div className="flex items-center gap-2">
-                <h4 className="shrink-0 text-[10px] font-medium text-(--viz-success)">FLAG</h4>
+                <h4 className={cn("shrink-0 text-[10px] font-medium",
+                  flagVerified ? "text-(--viz-success)" : "text-(--status-approval)")}>
+                  {flagVerified ? "FLAG" : "候选 FLAG"}
+                </h4>
                 <code className="min-w-0 flex-1 break-all font-mono text-xs text-foreground">{flag}</code>
                 <CopyButton text={flag} label="复制" />
               </div>
+              {!flagVerified && (
+                <p className="mt-0.5 text-[10px] text-muted-foreground">
+                  未验证线索（可能是管理员口令/密钥，尚不构成「本题解出」）
+                </p>
+              )}
             </section>
           )}
           <section>

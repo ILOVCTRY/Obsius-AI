@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { HelpCircle, MessageSquare } from "lucide-react"
+import { AlertTriangle, Globe2, HelpCircle, MessageSquare, Network, ShieldCheck } from "lucide-react"
 import type { Approval, DecideApprovalResult, SpawnSessionAction } from "@/lib/types"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
@@ -13,6 +13,23 @@ const RISK_CLS: Record<string, string> = {
   high: "border-(--status-error)/50 text-(--status-error)",
   medium: "border-(--status-approval)/50 text-(--status-approval)",
   low: "border-border text-muted-foreground",
+}
+
+type ScopeExpandAction = {
+  kind: "scope_expand"
+  scope_value: string
+  justification?: string
+  task_id?: string
+  session_id?: string
+}
+
+function asScopeExpandAction(a: Approval): ScopeExpandAction | null {
+  const o = a.action as Record<string, unknown>
+  if (o?.kind !== "scope_expand" || typeof o.scope_value !== "string") return null
+  return { kind: "scope_expand", scope_value: o.scope_value,
+    justification: typeof o.justification === "string" ? o.justification : undefined,
+    task_id: typeof o.task_id === "string" ? o.task_id : undefined,
+    session_id: typeof o.session_id === "string" ? o.session_id : undefined }
 }
 
 export function asSpawnAction(a: Approval): SpawnSessionAction | null {
@@ -98,6 +115,7 @@ export function ApprovalCard({ approval, roleName, onDecide, showChat = true }: 
   const [error, setError] = useState<string | null>(null)
 
   const spawn = asSpawnAction(approval)
+  const scope = asScopeExpandAction(approval)
   const done = result !== null
 
   const submit = async () => {
@@ -131,7 +149,18 @@ export function ApprovalCard({ approval, roleName, onDecide, showChat = true }: 
 
       {/* 说明区：op 专属文案 */}
       <div className="mt-2 space-y-1.5">
-        {spawn ? (
+        {scope ? (
+          <>
+            <div className="flex items-center gap-2 text-xs font-medium text-foreground/90"><Globe2 size={14} className="text-(--status-approval)" />范围扩展申请</div>
+            <div className="mt-1 grid gap-1.5 rounded bg-card/60 p-2 text-[11px]">
+              <div className="flex items-center gap-2"><Network size={12} className="text-muted-foreground" /><span className="text-muted-foreground">目标</span><code className="break-all text-foreground">{scope.scope_value}</code></div>
+              {scope.task_id && <div><span className="text-muted-foreground">任务 ID：</span><code>{scope.task_id}</code></div>}
+              {scope.session_id && <div><span className="text-muted-foreground">会话 ID：</span><code>{scope.session_id}</code></div>}
+              <div><span className="text-muted-foreground">理由：</span>{scope.justification || "未填写理由"}</div>
+            </div>
+            <p className="mt-2 flex items-start gap-1.5 rounded border border-(--status-error)/40 bg-(--status-error)/10 p-2 text-[11px] text-(--status-error)"><AlertTriangle size={13} className="mt-0.5 shrink-0" />批准后会将该目标写入当前项目 scope，并可能恢复等待中的任务。</p>
+          </>
+        ) : spawn ? (
           <>
             <p className="text-xs font-medium text-foreground/90">🪟 编排申请开新会话窗</p>
             <div className="flex flex-wrap items-center gap-2">
@@ -156,7 +185,7 @@ export function ApprovalCard({ approval, roleName, onDecide, showChat = true }: 
       <div className="mt-2 space-y-1.5">
         <Choice selected={choice === "approved"} onClick={() => setChoice("approved")} disabled={busy || done}
           tone="ok" title="批准"
-          desc={spawn ? "自动建窗并提交跑队列" : "执行该动作，全程落审计事件"} />
+          desc={spawn ? "自动建窗并提交跑队列" : scope ? "扩展当前项目 scope，并记录审计事件" : "执行该动作，全程落审计事件"} />
         <Choice selected={choice === "rejected"} onClick={() => setChoice("rejected")} disabled={busy || done}
           tone="danger" title="拒绝"
           desc="不动作，Agent 下一轮经事件可见后自行改道" />
@@ -185,7 +214,8 @@ export function ApprovalCard({ approval, roleName, onDecide, showChat = true }: 
       )}
 
       {error && <p className="mt-2 text-[11px] text-(--status-error)">{error}</p>}
-      {result && <ExecNote approval={approval} result={result} />}
+      {scope && result?.status === "approved" && result.executed !== false && <p className="mt-2 flex items-center gap-1.5 text-[11px] text-(--status-ok)"><ShieldCheck size={13} />已批准，项目 scope 已扩展并记录审计事件</p>}
+      {result && !scope && <ExecNote approval={approval} result={result} />}
     </div>
   )
 }

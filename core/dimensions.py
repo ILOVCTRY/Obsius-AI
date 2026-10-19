@@ -12,7 +12,7 @@ core.orchestrator（其反向依赖）。
 - **收敛判据 = 该资产所有适用面都覆盖**（替代"覆盖度达标"）；
 - **面覆盖 ⟺ 该面有 ≥1 条收尾意图（vuln/finding/dead_end）且无 open 意图**。
 
-**数据源**：`packs/tracks/<track>/dimensions.yaml`（轨级默认；项目
+**数据源**：`packs/kb/<track>/dimensions.yaml`（轨级默认；项目
 `config.dimensions` 同名条目整体覆写）。解析用受约束极简 yaml 子集（零 PyYAML，
 同 phases/experts/profiles 约定）。
 

@@ -8,6 +8,7 @@ Popen 轮询等待，置位即杀进程树返回 interrupted，不等命令自�
 线程持续消费，防 64KB 管道缓冲写阻塞死锁（见 docs/plans/exec-gateway-pipe-deadlock.md）。
 """
 
+import os
 import platform
 import subprocess
 import threading
@@ -358,8 +359,20 @@ class DockerBackend:
 
     name = "docker"
 
-    def __init__(self, docker_cmd: str = "docker"):
+    def __init__(self, docker_cmd: str = "docker", proxy: str | None = None):
         self.docker_cmd = docker_cmd
+        # Docker runtime 强制直连。保留 proxy 参数仅为兼容旧调用方，但绝不读取
+        # CYBERSTRIKE_DOCKER_PROXY，也不把代理变量注入容器；browser_replay 和
+        # 代理池属于独立网络能力，不应改变 run_cmd 的网络路径。
+        self.proxy = None
+
+    def proxy_env(self) -> dict[str, str]:
+        """Docker 构建/运行不使用代理；返回空环境，保留接口兼容性。"""
+        return {}
+
+    def _proxy_args(self, net: str) -> list[str]:
+        """Docker 容器始终直连，不注入 HTTP_PROXY/HTTPS_PROXY。"""
+        return []
 
     def _docker(self, argv: list[str], timeout: float,
                 abort_event: threading.Event | None = None) -> ExecOutcome:
@@ -406,6 +419,7 @@ class DockerBackend:
             argv += sandbox_docker_args(net)
         else:
             argv += ["--rm", "--network", docker_network(net)]
+            argv += self._proxy_args(net)
             for host_path, cpath in (mounts or []):
                 # 宿主路径转正斜杠：docker -v 在 Windows 上两种斜杠都收，正斜杠免转义
                 argv += ["-v", f"{str(host_path).replace(chr(92), '/')}:{cpath}"]
@@ -415,7 +429,10 @@ class DockerBackend:
             argv += ["--name", name]
         for k, v in (labels or {}).items():
             argv += ["--label", f"{k}={v}"]
-        argv += [image, "sh", "-c", cmd]
+        # pentest-box 提供 bash；常驻/普通 Docker 用 bash -lc 支持 CTF 脚本
+        # 的 pipefail 等语义。sandbox 默认镜像可能只有 sh，保留其兼容性。
+        shell = "sh" if sandbox else "bash"
+        argv += [image, shell, "-lc" if shell == "bash" else "-c", cmd]
         return self._docker(argv, timeout, abort_event)
 
     def run_detached(self, image: str, cmd: str, *, name: str,
@@ -429,13 +446,14 @@ class DockerBackend:
         SessionContainerManager 管理（冻结/删除/对账/reap）。"""
         argv = ["run", "-d", "--name", name,
                 "--network", docker_network(net)]
+        argv += self._proxy_args(net)
         for k, v in labels.items():
             argv += ["--label", f"{k}={v}"]
         for host_path, cpath in (mounts or []):
             argv += ["-v", f"{str(host_path).replace(chr(92), '/')}:{cpath}"]
         if cwd:
             argv += ["-w", cwd]
-        argv += [image, "sh", "-c", cmd]
+        argv += [image, "bash", "-lc", cmd]
         return self._docker(argv, timeout)
 
     def exec_in(self, container: str, cmd: str, timeout: float = 120.0,
@@ -446,7 +464,7 @@ class DockerBackend:
         argv = ["exec"]
         if cwd:
             argv += ["-w", cwd]
-        argv += [container, "sh", "-c", cmd]
+        argv += [container, "bash", "-lc", cmd]
         return self._docker(argv, timeout, abort_event)
 
     # ---------- 容器生命周期原语（会话级常驻容器 P3） ----------

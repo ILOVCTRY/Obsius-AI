@@ -1375,6 +1375,7 @@ class Blackboard:
         """
         purged: list[dict] = []          # 级联删的 findings 快照
         intents_purged: list[dict] = []  # 级联删的意图快照
+        detached_anchors = 0             # 一并摘除的 ARTEX 任务范围锚点（v44）
         with self._tx():
             row = self.conn.execute(
                 "SELECT * FROM assets WHERE id=?", (asset_id,)).fetchone()
@@ -1407,6 +1408,12 @@ class Blackboard:
             for ir in intent_refs:
                 self.conn.execute("DELETE FROM intents WHERE id=?", (ir["id"],))
                 intents_purged.append({"id": ir["id"], "statement": ir["statement"]})
+            # ARTEX 任务范围锚点（v44）：REFERENCES assets(id) 外键。范围锚点是
+            # 记账性质，不构成「不可删」阻断——资产物理删除时一并摘除锚点行
+            # （悬空锚点会让覆盖度分母失真），在同事务内做。
+            cur = self.conn.execute(
+                "DELETE FROM artex_task_assets WHERE asset_id=?", (asset_id,))
+            detached_anchors = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
             self.conn.execute("DELETE FROM assets WHERE id=?", (asset_id,))
             snapshot = {"project_id": row["project_id"], "type": row["type"],
                         "value": row["value"], "parent_id": row["parent_id"]}
@@ -1434,11 +1441,13 @@ class Blackboard:
             {"asset_id": asset_id, "by": author, "type": snapshot["type"],
              "value": snapshot["value"], "parent_id": snapshot["parent_id"],
              "findings_deleted": [p["id"] for p in purged],
-             "intents_deleted": [ip["id"] for ip in intents_purged]},
+             "intents_deleted": [ip["id"] for ip in intents_purged],
+             "task_anchors_detached": detached_anchors},
             author=author)
         return {"id": asset_id, **snapshot,
                 "findings_deleted": [p["id"] for p in purged],
-                "intents_deleted": [ip["id"] for ip in intents_purged]}
+                "intents_deleted": [ip["id"] for ip in intents_purged],
+                "task_anchors_detached": detached_anchors}
 
     def merge_assets(
         self,
@@ -1618,6 +1627,30 @@ class Blackboard:
                     "WHERE project_id=? AND parent_id=?",
                     (target_asset_id, project_id, source_asset_id),
                 )
+            # ARTEX 任务范围锚点（v44）随资产迁移：源行上的锚点改指目标行（同
+            # 任务已有目标行长则丢弃重复），否则删源资产会被外键拦住。迁移让
+            # 「任务范围」在资产合并后保持连续，覆盖度分母不丢项。
+            anchor_rows = self.conn.execute(
+                "SELECT task_id FROM artex_task_assets WHERE project_id=? AND asset_id=?",
+                (project_id, source_asset_id)).fetchall()
+            anchors_moved = 0
+            for ar in anchor_rows:
+                dup = self.conn.execute(
+                    "SELECT 1 FROM artex_task_assets WHERE project_id=? AND task_id=?"
+                    " AND asset_id=?", (project_id, ar["task_id"], target_asset_id)
+                ).fetchone()
+                if dup:
+                    self.conn.execute(
+                        "DELETE FROM artex_task_assets WHERE project_id=? AND task_id=?"
+                        " AND asset_id=?",
+                        (project_id, ar["task_id"], source_asset_id))
+                    continue
+                self.conn.execute(
+                    "UPDATE artex_task_assets SET asset_id=?, note=note||? "
+                    "WHERE project_id=? AND task_id=? AND asset_id=?",
+                    (target_asset_id, "（经资产合并迁移）", project_id, ar["task_id"],
+                     source_asset_id))
+                anchors_moved += 1
             self.conn.execute(
                 "UPDATE assets SET meta=?, revision=revision+1 WHERE id=?",
                 (json.dumps(target_meta, ensure_ascii=False), target_asset_id),
@@ -1636,6 +1669,7 @@ class Blackboard:
                 "findings_merged": len(folds),
                 "intents_moved": intents_moved,
                 "children_moved": len(children),
+                "anchors_moved": anchors_moved,
                 "alias": {"type": source["type"], "value": source["value"]},
             }
         self.append_event(

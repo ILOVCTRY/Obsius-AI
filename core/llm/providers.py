@@ -202,6 +202,9 @@ class ProviderStore:
         thinking = p.get("thinking")
         if thinking is not None:
             out["thinking"] = bool(thinking)
+        effort = str(p.get("thinking_effort") or "").strip().lower()
+        if effort in {"low", "medium", "high"}:
+            out["thinking_effort"] = effort
         # 上下文治理（2026-09-30 ct-7）：同 thinking——显式才落字段，否则设置页
         # 保存一次即被白名单抹掉（此前 thinking 就是这么静默消失的）。三者均为
         # 可选，缺省时运行时用模块常量兜底：
@@ -314,6 +317,8 @@ class ProviderStore:
             "summarizer_model": p.get("summarizer_model"),
             "proxy": p.get("proxy"),
         }
+        if p.get("format", DEFAULT_FORMAT) != ANTHROPIC_MESSAGES:
+            kwargs["thinking_effort"] = p.get("thinking_effort")
         if timeout is not None:
             kwargs["timeout"] = float(timeout)
         if p.get("format", DEFAULT_FORMAT) == ANTHROPIC_MESSAGES:

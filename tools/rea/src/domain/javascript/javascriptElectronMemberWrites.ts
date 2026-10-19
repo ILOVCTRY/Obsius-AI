@@ -1,0 +1,158 @@
+import * as t from "@babel/types";
+
+import {
+  semanticStaticPropertyKey,
+  semanticWriteTargets,
+  unwrapJavaScriptExpression,
+} from "./javascriptAstValues.js";
+import { traverseJavaScriptAstSteps } from "./javascriptSemanticTraversal.js";
+
+/** Match Electron's supported module entry points. */
+export const ELECTRON_MODULE =
+  /^electron(?:\/(?:common|main|renderer|utility))?$/u;
+
+/**
+ * Electron's CommonJS exports define no `default` member, so a leading
+ * `default` segment can only denote the module object itself, as an ES module
+ * default import (`import electron from "electron"`) binds it.
+ */
+export const electronExportPath = (
+  importedPath: readonly string[],
+): readonly string[] =>
+  importedPath[0] === "default" ? importedPath.slice(1) : importedPath;
+
+/** Static identity recovery cannot establish the absence of Electron usage. */
+export const ELECTRON_IDENTITY_LIMITATION =
+  "Electron API identity follows proven lexical module aliases and structurally verified module-namespace interop. Other reassignments, dynamic selections, and visibly overwritten namespace members are unresolved; missing findings do not establish absence. Arbitrary call side effects and runtime registration are not evaluated.";
+
+/** Preserve exact property segments instead of flattening literal dotted keys. */
+export const electronMemberPath = (
+  node: t.Node,
+): {
+  readonly root: t.Node;
+  readonly members: readonly (string | null)[];
+} => {
+  let root = unwrapJavaScriptExpression(node).node;
+  const members: (string | null)[] = [];
+  while (t.isMemberExpression(root) || t.isOptionalMemberExpression(root)) {
+    members.push(semanticStaticPropertyKey(root.property, root.computed));
+    root = unwrapJavaScriptExpression(root.object).node;
+  }
+  return { root, members: members.toReversed() };
+};
+
+/** A known intrinsic callable and its examined positional arguments. */
+export interface JavaScriptIntrinsicInvocation {
+  readonly kind: "known" | "opaque";
+  /** The original bound receiver; rebinding cannot replace it. */
+  readonly receiver?: t.Node;
+  readonly path: readonly string[];
+  readonly arguments:
+    | readonly t.CallExpression["arguments"][number][]
+    | undefined;
+}
+
+/** Index member and binding writes through caller-proven lexical identities. */
+export function* collectJavaScriptIdentityWritesSteps(
+  program: t.Program,
+  origin: (
+    root: t.Node,
+    kind: "binding" | "member" | "opaque-call",
+  ) => readonly string[] | undefined,
+  intrinsicInvocation: (
+    node: t.CallExpression | t.OptionalCallExpression,
+  ) => JavaScriptIntrinsicInvocation | undefined,
+  staticString: (node: t.Node | undefined) => string | undefined,
+  freshObject: (node: t.Node) => boolean,
+  retain: (node: t.Node, path: readonly (string | null)[]) => void,
+): Generator<void> {
+  const objectMutators = new Set([
+    "defineProperty",
+    "defineProperties",
+    "assign",
+    "setPrototypeOf",
+  ]);
+  const reflectMutators = new Set([
+    "set",
+    "deleteProperty",
+    "defineProperty",
+    "setPrototypeOf",
+  ]);
+  const keyedMutators = new Set(["set", "deleteProperty", "defineProperty"]);
+  yield* traverseJavaScriptAstSteps(program, {
+    enter: (node) => {
+      if (t.isCallExpression(node) || t.isOptionalCallExpression(node)) {
+        const invocation = intrinsicInvocation(node);
+        if (invocation?.kind === "opaque") {
+          const scope = origin(node, "opaque-call");
+          if (scope !== undefined) retain(node, scope);
+          return;
+        }
+        const callee = invocation?.path;
+        const arguments_ = invocation?.arguments;
+        const method = callee?.at(-1);
+        const owner = callee?.length === 3 ? callee[1] : undefined;
+        if (
+          (owner === "Object" && objectMutators.has(method ?? "")) ||
+          (owner === "Reflect" && reflectMutators.has(method ?? ""))
+        ) {
+          // Reflect.set can write through its explicit receiver as well as
+          // dispatching through its target. Both identities need examination.
+          const targets =
+            owner === "Reflect" &&
+            method === "set" &&
+            arguments_ !== undefined &&
+            (arguments_.length >= 4 || arguments_.some(t.isSpreadElement))
+              ? [
+                  arguments_[0],
+                  arguments_.some(t.isSpreadElement)
+                    ? undefined
+                    : arguments_[3],
+                ]
+              : [arguments_?.[0]];
+          for (const target of targets) {
+            // A known mutator with an opaque argument list can overwrite any
+            // captured intrinsic. Do not turn an unexamined target into proof.
+            if (target === undefined || t.isSpreadElement(target)) {
+              const scope = origin(node, "opaque-call");
+              if (scope !== undefined) retain(node, scope);
+            }
+            if (t.isNode(target) && !t.isSpreadElement(target)) {
+              const { root, members } = electronMemberPath(target);
+              const exported = origin(root, "member");
+              if (exported !== undefined) {
+                const key = keyedMutators.has(method ?? "")
+                  ? [staticString(arguments_?.[1]) ?? null]
+                  : [];
+                retain(node, [...exported, ...members, ...key]);
+              } else if (!freshObject(target)) {
+                const scope = origin(node, "opaque-call");
+                if (scope !== undefined) retain(node, scope);
+              }
+            }
+          }
+        }
+      }
+      const target = t.isAssignmentExpression(node)
+        ? node.left
+        : t.isUpdateExpression(node)
+          ? node.argument
+          : t.isUnaryExpression(node, { operator: "delete" })
+            ? node.argument
+            : t.isForOfStatement(node) || t.isForInStatement(node)
+              ? node.left
+              : undefined;
+      if (target === undefined) return;
+      for (const leaf of semanticWriteTargets(target)) {
+        if (t.isIdentifier(leaf)) {
+          const exported = origin(leaf, "binding");
+          if (exported !== undefined) retain(node, exported);
+          continue;
+        }
+        const { root, members } = electronMemberPath(leaf);
+        const exported = origin(root, "member");
+        if (exported !== undefined) retain(node, [...exported, ...members]);
+      }
+    },
+  });
+}

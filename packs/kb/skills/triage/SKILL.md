@@ -15,11 +15,20 @@ mode: self-contained
 
 ## Step 1：五件事侦察（顺序执行）
 
-1. **列文件**：`ls -la` 题包目录，对每个文件 `file *` 看真实类型；
-2. **字符串/魔数**：二进制 `strings -n 6`、`xxd | head`、binwalk 扫附加数据；
-3. **取题面上下文**：描述/文件名/注释/附件里的提示词，给了 URL 先 GET 看一眼；
-4. **摸远程**：`nc host port` 连一次，看它要什么（交互菜单/数学题/HTTP/受限 shell）；
-5. **记 flag 格式**：题面或规则里的前缀（flag{ / CTF{ / 自定义），最后校验要用。
+1. **列文件**：附件 zip **先调 `unpack_attachment`**（path=附件行给的
+   `/workspace/artifacts/attachments/<zip>`）——服务端一次完成清旧残留+安全解压，
+   落到 `scratch/att-<sha12>/` 并回结构化清单；**不要**用 run_cmd 拼
+   `unzip -o`（只覆盖同名文件，同题重开时上轮分析脚本会整批残留进目录清单，
+   把上下文淹掉）。已有解压目录时 `ls -lat` 看新旧（时间排序，残留一眼可辨）。
+   对每个文件看真实类型：`file` 逐个点名，或
+   `find . -maxdepth 1 -type f -exec file {} +`——**`file *` / `md5sum *` 遇到
+   子目录直接报错**（`md5sum: xxx: Is a directory`，exit=1）。
+2. **命令链拆开发**：`&&` 串起来时前半条报错会吞掉后面全部观察——用 `;` 或
+   分多次 run_cmd，单条失败不阻断其余侦察。
+3. **字符串/魔数**：二进制 `strings -n 6`、`xxd | head`、binwalk 扫附加数据；
+4. **取题面上下文**：描述/文件名/注释/附件里的提示词，给了 URL 先 GET 看一眼；
+5. **摸远程**：`nc host port` 连一次，看它要什么（交互菜单/数学题/HTTP/受限 shell）；
+6. **记 flag 格式**：题面或规则里的前缀（flag{ / CTF{ / 自定义），最后校验要用。
 
 附件本体落 `bb_add_asset`（type=binary，value=sha256，meta 记类型/保护），
 分诊结论落 `bb_add_finding`（vuln_class=triage）——后续会话不重复分诊。

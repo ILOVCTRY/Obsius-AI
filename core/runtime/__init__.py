@@ -8,6 +8,19 @@ from core.runtime.backends import BackendError, DockerBackend, NativeBackend, WS
 from core.runtime.detector import CapabilityInventory, HostDetector
 from core.runtime.gateway import ExecutionGateway, ExecutionResult, GatewayDenied
 from core.runtime.policy import allowed_runtimes
+from core.runtime.recovery import (
+    EnvironmentErrorCategory,
+    EnvironmentErrorKind,
+    EnvironmentIssue,
+    EnvironmentRecovery,
+    EnvironmentRecoveryManager,
+    EnvironmentUnavailable,
+    RecoveryRequest,
+    RecoveryResult,
+    classify_backend_error,
+    classify_execution_failure,
+    environment_issue_from_dict,
+)
 
 __all__ = [
     "ExecutionGateway",
@@ -20,4 +33,15 @@ __all__ = [
     "DockerBackend",
     "BackendError",
     "allowed_runtimes",
+    "EnvironmentErrorCategory",
+    "EnvironmentErrorKind",
+    "EnvironmentIssue",
+    "EnvironmentUnavailable",
+    "RecoveryRequest",
+    "RecoveryResult",
+    "EnvironmentRecovery",
+    "EnvironmentRecoveryManager",
+    "classify_backend_error",
+    "classify_execution_failure",
+    "environment_issue_from_dict",
 ]

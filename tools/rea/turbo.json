@@ -1,0 +1,267 @@
+{
+  "$schema": "https://turborepo.dev/schema.json",
+  "globalPassThroughEnv": ["GOMAXPROCS", "GOMEMLIMIT", "UV_THREADPOOL_SIZE"],
+  "tasks": {
+    "compile": {
+      "dependsOn": ["metadata:check"],
+      "inputs": [
+        ".nvmrc",
+        "package.json",
+        "package-lock.json",
+        "scripts/check-dependency-install.mjs",
+        "scripts/clean-build-output.mjs",
+        "scripts/bundle-runtime.mjs",
+        "scripts/generate-package-metadata.mjs",
+        "src/**/*.ts",
+        "!src/**/*.test.ts",
+        "!src/**/*.fixture.ts",
+        "tsconfig.json",
+        "tsconfig.build.json"
+      ],
+      "outputs": ["dist/**"]
+    },
+    "typecheck": {
+      "inputs": [
+        ".nvmrc",
+        "package.json",
+        "package-lock.json",
+        "src/**/*.ts",
+        "tests/**/*.ts",
+        "tsconfig.json",
+        "tsconfig.build.json",
+        "vitest.config.ts",
+        "scripts/**/*.d.mts",
+        "docs/.vitepress/config.ts"
+      ],
+      "outputs": []
+    },
+    "metadata:check": {
+      "inputs": [
+        "package.json",
+        "package-lock.json",
+        "scripts/generate-package-metadata.mjs",
+        "scripts/lib/generated-file.mjs",
+        ".agents/skills/reverse-engineer-anything/SKILL.md",
+        "src/generatedPackageMetadata.ts"
+      ]
+    },
+    "lint": {
+      "inputs": [
+        ".nvmrc",
+        ".oxlintrc.json",
+        "package.json",
+        "package-lock.json",
+        "scripts/**/*.{cjs,cts,js,jsx,mjs,mts,ts,tsx}",
+        "src/**/*.{cjs,cts,js,jsx,mjs,mts,ts,tsx}",
+        "tests/**/*.{cjs,cts,js,jsx,mjs,mts,ts,tsx}",
+        "vitest.config.ts"
+      ]
+    },
+    "lint:built": {
+      "dependsOn": ["compile"],
+      "inputs": [
+        ".nvmrc",
+        ".oxlintrc.json",
+        "package.json",
+        "package-lock.json",
+        "scripts/**/*.{cjs,cts,js,jsx,mjs,mts,ts,tsx}",
+        "src/**/*.{cjs,cts,js,jsx,mjs,mts,ts,tsx}",
+        "tests/**/*.{cjs,cts,js,jsx,mjs,mts,ts,tsx}",
+        "vitest.config.ts"
+      ]
+    },
+    "format:check": {},
+    "knip": {
+      "dependsOn": ["compile"],
+      "inputs": [
+        ".nvmrc",
+        "knip.json",
+        "package.json",
+        "package-lock.json",
+        "scripts/**/*.{cjs,cts,js,jsx,mjs,mts,ts,tsx}",
+        "src/**/*.ts",
+        "tests/**/*.ts",
+        "tsconfig.json",
+        "tsconfig.build.json"
+      ]
+    },
+    "jscpd": {
+      "inputs": [
+        ".gitignore",
+        ".jscpd.json",
+        "package.json",
+        "package-lock.json",
+        "src/**",
+        "tests/**"
+      ]
+    },
+    "scan:todos": {
+      "inputs": [
+        "bridge/**/*.{java,py}",
+        "scripts/**/*.{cjs,cts,js,jsx,mjs,mts,ts,tsx}",
+        "src/**/*.ts",
+        "tests/**/*.ts"
+      ]
+    },
+    "test:run": {
+      "dependsOn": [
+        "artifacts:mcp-catalog",
+        "artifacts:product-catalog",
+        "artifacts:managed-evidence",
+        "artifacts:skills"
+      ],
+      "inputs": [
+        ".nvmrc",
+        "package.json",
+        "package-lock.json",
+        "src/**",
+        "tests/**",
+        "scripts/**",
+        "bridge/**",
+        "vitest.config.ts",
+        {
+          "mode": "dependencyOutputs",
+          "globs": [
+            ".cache/mcp-tool-catalog.json",
+            "skills/**",
+            "docs/public/product-catalog.json",
+            "docs/verification/managed-conformance-manifest.json",
+            "docs/verification/managed-conformance-ledger.json"
+          ]
+        }
+      ]
+    },
+    "docs:check:built": {
+      "dependsOn": [
+        "artifacts:product-catalog",
+        "artifacts:managed-evidence",
+        "artifacts:skills"
+      ],
+      "inputs": [
+        ".nvmrc",
+        "package.json",
+        "package-lock.json",
+        "scripts/generate-*.mjs",
+        "scripts/check-doc-facts.mjs",
+        "scripts/lib/*.mjs",
+        "scripts/verify/managed/*.mjs",
+        "scripts/fixtures/managed/*.mjs",
+        "scripts/verify/apple/*.mjs",
+        "scripts/fixtures/apple/*.mjs",
+        "src/generated*.ts",
+        "src/contracts/**/*.ts",
+        "docs/**",
+        "!docs/public/product-catalog.json",
+        "!docs/verification/managed-conformance-*.json",
+        ".agents/skills/reverse-engineer-anything/**",
+        "README*.md",
+        {
+          "mode": "dependencyOutputs",
+          "globs": [
+            "skills/**",
+            "docs/public/product-catalog.json",
+            "docs/verification/managed-conformance-manifest.json",
+            "docs/verification/managed-conformance-ledger.json"
+          ]
+        }
+      ]
+    },
+    "artifacts:mcp-catalog": {
+      "dependsOn": ["compile"],
+      "inputs": [
+        ".nvmrc",
+        "package.json",
+        "package-lock.json",
+        "scripts/generate-mcp-tool-catalog.mjs",
+        "scripts/lib/generated-file.mjs"
+      ],
+      "outputs": [".cache/mcp-tool-catalog.json"]
+    },
+    "artifacts:skills": {
+      "dependsOn": ["compile"],
+      "inputs": [
+        ".nvmrc",
+        "package.json",
+        "package-lock.json",
+        "scripts/generate-skill-metadata.mjs",
+        "scripts/lib/generated-file.mjs",
+        ".agents/skills/reverse-engineer-anything/**"
+      ],
+      "outputs": ["skills/**"]
+    },
+    "artifacts:product-catalog": {
+      "dependsOn": ["compile"],
+      "inputs": [
+        ".nvmrc",
+        "package.json",
+        "package-lock.json",
+        "scripts/generate-product-catalog.mjs",
+        "scripts/lib/**/*.mjs",
+        ".oxfmtrc.json"
+      ],
+      "outputs": ["docs/public/product-catalog.json"]
+    },
+    "artifacts:managed-evidence": {
+      "dependsOn": ["artifacts:skills"],
+      "inputs": [
+        ".nvmrc",
+        "package.json",
+        "package-lock.json",
+        "scripts/generate-completion-ledger.mjs",
+        "scripts/lib/generated-file.mjs",
+        "scripts/verify/managed/**",
+        "scripts/fixtures/managed/**"
+      ],
+      "outputs": [
+        "docs/verification/managed-conformance-manifest.json",
+        "docs/verification/managed-conformance-ledger.json"
+      ]
+    },
+    "artifacts:error-schema": {
+      "dependsOn": ["compile"],
+      "inputs": [
+        ".nvmrc",
+        "package.json",
+        "package-lock.json",
+        "scripts/generate-error-schema.mjs",
+        "scripts/lib/generated-file.mjs",
+        "scripts/lib/format-generated-file.mjs",
+        ".oxfmtrc.json"
+      ],
+      "outputs": ["docs/error-contract.schema.json"]
+    },
+    "mcp-catalog:check:built": {
+      "dependsOn": ["artifacts:mcp-catalog"],
+      "inputs": [
+        ".nvmrc",
+        "package.json",
+        "package-lock.json",
+        "scripts/generate-mcp-tool-catalog.mjs",
+        "scripts/lib/generated-file.mjs",
+        {
+          "mode": "dependencyOutputs",
+          "globs": [".cache/mcp-tool-catalog.json"]
+        }
+      ]
+    },
+    "evidence:check:built": {
+      "dependsOn": ["artifacts:managed-evidence"],
+      "inputs": [
+        ".nvmrc",
+        "package.json",
+        "package-lock.json",
+        "scripts/generate-completion-ledger.mjs",
+        "scripts/lib/generated-file.mjs",
+        "scripts/verify/managed/**",
+        "scripts/fixtures/managed/**",
+        {
+          "mode": "dependencyOutputs",
+          "globs": [
+            "docs/verification/managed-conformance-manifest.json",
+            "docs/verification/managed-conformance-ledger.json"
+          ]
+        }
+      ]
+    }
+  }
+}

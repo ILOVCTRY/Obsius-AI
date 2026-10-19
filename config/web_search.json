@@ -1,0 +1,13 @@
+{
+  "searxng_url": "",
+  "searxng_token": "",
+  "timeout_s": 20,
+  "num": 10,
+  "engines": "",
+  "language": "",
+  "proxy": "http://127.0.0.1:7890",
+  "bing_market": "zh-CN",
+  "disable_ddg": false,
+  "disable_bing": false,
+  "strict": true
+}

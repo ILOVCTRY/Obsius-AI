@@ -31,7 +31,7 @@ from typing import Any, Callable, Literal
 from urllib.parse import quote
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.websockets import WebSocketState
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -59,6 +59,7 @@ from core.blackboard.store import Blackboard, BlackboardClosedError
 from core import assetimport
 from core import fofa as fofa_mod
 from core.integrations import feishu as feishu_mod
+from core.integrations.ctf_agent import make_runner as make_ctf_agent_runner
 from core.intel import config as intel_config
 from core.intel import vault as intel_vault
 from core.intel.intel_service import (
@@ -107,6 +108,7 @@ from core.skills.taxonomy import (
     rating_dir,
     redline_path,
     skill_dir,
+    skill_group,
     track_dir,
 )
 from core.skills.proposals import ProposalError, ProposalStateError
@@ -241,16 +243,20 @@ class TeamCancelIn(BaseModel):
 
 class ExpertSaveIn(BaseModel):
     """专家池写模型（expert-pool M3，packs/experts/ 单文件池 CRUD）。
-    全字段提交式覆写（表单即最终态）；None/空 = 不落键（平铺约定 = 不过滤语义，
-    skills 缺键即全量专家）。variants={track: {field: value}} 序列化为
+    全字段提交式覆写（表单即最终态）。能力白名单三件套 skills/tools/mcp_servers
+    三态：缺键/null = 不限制（不落键），[] = 明确一个都不启用（落 `key: []`），
+    非空 = 白名单。knowledge（kb 方向）沿用两态：null 或 [] 都表示不限方向，
+    因此空列表不落键。variants={track: {field: value}} 序列化为
     variant_<track>_<field> 平铺键。"""
     name: str | None = None
     description: str | None = None
     persona: str | None = None
     tracks: list[str] | None = None
     skills: list[str] | None = None
+    knowledge: list[str] | None = None
     task_types: list[str] | None = None
     tools: list[str] | None = None
+    mcp_servers: list[str] | None = None
     max_steps: int | None = None
     variants: dict[str, dict[str, Any]] | None = None
 
@@ -324,7 +330,7 @@ class TaskIn(BaseModel):
     acceptance: list[str | AcceptanceIn] | None = None
     # ⑤ 验收条目（存 context.reconcile；全收口才可 complete）。独立验证 M1：条目
     # 支持 str 或 {text, verify}——verify 规格由验证器在 complete 时自动判定
-    # （core/verify.py 四策略），Agent 自报 met/failed 被拒（宁严勿松）
+    # （core/verify.py 六策略），Agent 自报 met/failed 被拒（宁严勿松）
     force: bool = False                # 机制 1.1：True 跳过发布去重（人类"仍要发布"确认后）
 
 
@@ -382,18 +388,59 @@ class AssetPatchIn(BaseModel):
 
 
 class ChallengeIn(BaseModel):
-    """POST /projects/{pid}/challenges：人工建题（challenge-asset v38）。"""
-    name: str = Field(min_length=1, max_length=200)
-    description: str = Field("", max_length=500)
+    """POST /projects/{pid}/challenges：人工建题（challenge-asset v38；表单 v47）。
+
+    ``name`` 可空：空名时按 ``brief``/``entry_hint``/``entries`` 的内容指纹生成
+    稳定 value（AI 之后改 ``title`` 只动展示层，不改变题目身份）。
+    """
+    name: str = Field("", max_length=200)
+    title: str = Field("", max_length=500)        # 一句话简述（空名时 AI 可后填）
+    description: str = Field("", max_length=500)  # 兼容旧字段 = title
+    brief: str = Field("", max_length=8000)       # 题面原文（hit）
+    entry_hint: str = Field("", max_length=1000)  # 入口提示（文本）
+    direction: str = Field("", max_length=64)     # 题目方向：web/pwn/crypto/reverse/misc
     tags: list[str] = Field(default_factory=list, max_length=12)
+    flag_format: str = Field("", max_length=40)   # flag{} / ctf{} …（提示不是约束）
+    flag_count: int | None = Field(None, ge=1, le=50)
+    entries: list[dict] = Field(default_factory=list, max_length=50)  # 入口点子资产
     thread_id: str = ""          # 可选：建完就把该线程绑到这道题上
 
 
 class ChallengePatchIn(BaseModel):
-    """PATCH /api/challenges/{aid}：三字段均可单传；None=不动，空串=清该键。"""
+    """PATCH /api/challenges/{aid}：字段均可单传；None=不动，空串=清该键。"""
     name: str | None = Field(None, min_length=1, max_length=200)
+    title: str | None = Field(None, max_length=500)
     description: str | None = Field(None, max_length=500)
+    brief: str | None = Field(None, max_length=8000)
+    entry_hint: str | None = Field(None, max_length=1000)
+    direction: str | None = Field(None, max_length=64)
     tags: list[str] | None = Field(None, max_length=12)
+    flag_format: str | None = Field(None, max_length=40)
+    flag_count: int | None = Field(None, ge=1, le=50)
+
+
+class ChallengeFlagIn(BaseModel):
+    """POST /api/challenges/{aid}/flags：人工录入一条 flag（judged_by=human）。"""
+    flag: str = Field(min_length=1, max_length=2000)
+    source: str = Field("", max_length=2000)
+    verdict: str = Field("accepted")   # accepted / pending / rejected
+
+
+class ChallengeFlagDecideIn(BaseModel):
+    """PATCH /api/challenges/{aid}/flags/{fid}：人工裁决（确认/否决/撤销）。"""
+    verdict: str = Field(..., pattern="^(pending|accepted|rejected)$")
+    reason: str = Field("", max_length=500)
+
+
+class ChallengeAbandonIn(BaseModel):
+    """POST /api/challenges/{aid}/abandon：标记放弃 / 撤销放弃。"""
+    abandoned: bool = True
+
+
+class CtfAgentRunIn(BaseModel):
+    provider: str | None = None
+    model: str | None = None
+    no_submit: bool = True
 
 
 class EngineIn(BaseModel):
@@ -790,6 +837,9 @@ class ChatThreadIn(BaseModel):
     model: str | None = None
     # CTF 题目归属（v38，2026-10-14）：线程绑定 challenge 资产 id
     challenge_asset_id: str | None = None
+    # 联网搜索开关（v43，web-search-toggle）：建线程即开；主控开 = spawn 的
+    # 子代理默认继承（call_expert / ARTEX Worker）。缺省关。
+    web_search: bool = False
 
 
 class ChatMessageIn(BaseModel):
@@ -945,9 +995,12 @@ def _backfill_challenges(proj) -> dict:
                         (cid, row["id"]))
                     adopted += 1
         try:
-            store.update_config(proj.id,
-                                {"challenge_backfill_done": True},
-                                project=proj)
+            # 本函数是模块级（store 层测试直调），拿不到 create_app 里的 store 局部
+            # 变量——按项目目录反推 store 根（Project.path = <root>/<slug>）现建一个。
+            # 走 update_config 而非直接改 meta：config 归一化（autonomy/kb_iteration/
+            # ctf 等）与 project.json+黑板双写都由它负责。
+            ProjectStore(proj.path.parent).update_config(
+                proj.id, {"challenge_backfill_done": True}, project=proj)
         except Exception:  # noqa: BLE001 —— 标记失败不阻断补建结果
             log.exception("challenge 补建标记落库失败 project=%s", proj.id)
         try:
@@ -963,12 +1016,44 @@ def _backfill_challenges(proj) -> dict:
         log.exception("challenge 存量补建失败 project=%s", proj.id)
         return {}
 
+def _running_intents_by_challenge(proj, challenge_ids: list[str]) -> dict[str, int]:
+    """每道题目下当前 claimed/running 的 Intent 数（题目状态派生用）。
+
+    Intent 的 ``asset_ids`` 指向题目子树内的任意资产（题目根或附件），故按
+    **子树**归属：一个 Worker 在打某题的附件，也算这道题在跑。
+    """
+    from core.blackboard.artex_intents import list_intents
+    from core.blackboard.attackpath import _subtree_ids
+    ids = [str(c) for c in (challenge_ids or []) if str(c)]
+    if not ids:
+        return {}
+    try:
+        assets = proj.bb.list_assets(proj.id)
+        subtree_of = {cid: _subtree_ids(assets, cid) for cid in ids}
+        intents = list_intents(proj.bb, proj.id, limit=2000)
+    except Exception:  # noqa: BLE001 —— 读失败按「没有在跑」处理
+        return {}
+    counts: dict[str, int] = {}
+    for intent in intents:
+        if str(intent.get("status") or "") not in ("claimed", "running"):
+            continue
+        for aid in (intent.get("asset_ids") or []):
+            sid = str(aid)
+            for cid, subtree in subtree_of.items():
+                if sid in subtree:
+                    counts[cid] = counts.get(cid, 0) + 1
+    return counts
+
+
 def _challenge_summary(proj, rows: list[dict]) -> list[dict]:
-    """给题目行附「附件子资产数 / 发现数 / 意图数 / 附件清单」。
+    """给题目行附「附件子资产数 / 发现数 / 意图数 / 附件清单 / flag 与状态」。
 
     附件 = 题目子树内的 **非 challenge** 资产（压缩包抽出的文件树、URL、单文件）。
     计数走**子树**（不是直接子节点）——附件本身还能再挂一层。
     发现/意图按 target_asset_id 落在题目子树内计。
+
+    状态（``state``）是 **flag 台账的派生值**（challenge-flag-ledger v47），
+    不独立存储——否则会出现「状态说已解但 flag 表是空的」。
     """
     if not rows:
         return []
@@ -989,6 +1074,14 @@ def _challenge_summary(proj, rows: list[dict]) -> list[dict]:
             walker = parent_of.get(walker)
         return False
 
+    challenge_ids = [c["id"] for c in rows]
+    running_by = _running_intents_by_challenge(proj, challenge_ids)
+    try:
+        from core.blackboard.challenge_flags import challenge_flag_summary
+        flag_state = challenge_flag_summary(proj.bb, pid, challenge_ids, running_by)
+    except Exception:  # noqa: BLE001 —— 旧库无 flag 表时不阻断题目列表
+        flag_state = {}
+
     out = []
     for c in rows:
         cid = c["id"]
@@ -1005,10 +1098,24 @@ def _challenge_summary(proj, rows: list[dict]) -> list[dict]:
             if any(_in_subtree(cid, x) for x in anchors if x):
                 icount += 1
         meta = dict(c.get("meta") or {})
+        st = flag_state.get(cid) or {}
         out.append({
             **c,
             "description": str(meta.get("title") or ""),
+            "title": str(meta.get("title") or ""),
+            "brief": str(meta.get("brief") or ""),
+            "entry_hint": str(meta.get("entry_hint") or ""),
+            "direction": str(meta.get("direction") or ""),
             "tags": list(meta.get("tags") or []),
+            "flag_format": str(meta.get("flag_format") or ""),
+            "flag_count": int(st.get("quota") or meta.get("flag_count") or 1),
+            "state": str(st.get("state") or "untouched"),
+            "solved": bool(st.get("solved")),
+            "accepted_flags": int(st.get("accepted") or 0),
+            "rejected_flags": int(st.get("rejected") or 0),
+            "running_workers": int(st.get("running") or 0),
+            "abandoned": bool(st.get("abandoned")),
+            "flags": list(st.get("flags") or []),
             "attachment_count": len(atts),
             "attachments": [{"id": a["id"], "type": a.get("type"),
                              "value": a.get("value")} for a in atts[:50]],
@@ -1194,6 +1301,11 @@ class SwitchLlmIn(BaseModel):
     model: str | None = None
 
 
+class WebSearchIn(BaseModel):
+    """线程级联网搜索开关（v43，web-search-toggle）。"""
+    enabled: bool = True
+
+
 class TickIn(BaseModel):
     allowed_roles: list[str] | None = None
     max_sessions: int = 4
@@ -1202,6 +1314,31 @@ class TickIn(BaseModel):
     # auto-attack 研判轮（2026-09-28）：只分析不派活，产出落 orch.auto_attack.analyzed
     analyze_only: bool = False
     budget_ticks: int | None = None  # 研判时人类预选的链轮数预算（回显进 analyzed 事件）
+
+
+class ArtexPlanIn(BaseModel):
+    goal: str
+    task_id: str = ""
+    asset_ids: list[str] = []
+    allowed_experts: list[str] | None = None
+    start_engine: bool = False
+
+
+class ArtexControlIn(BaseModel):
+    action: Literal["pause", "resume", "cancel", "retry"]
+
+
+class ArtexScopeIn(BaseModel):
+    """任务范围资产锚定（artex-coverage）：asset_ids 非空则锚定/摘除；
+    asset_ids 空且 action=anchor 时只读返回覆盖度。"""
+    asset_ids: list[str] = []
+    remove: bool = False
+    note: str = ""
+
+
+class ArtexWorkerControlIn(BaseModel):
+    action: Literal["kill", "steer"]
+    message: str = ""
 
 
 class ApprovalDecisionIn(BaseModel):
@@ -1395,6 +1532,14 @@ def create_app(
 
     app = FastAPI(title="obsius core API", version="0.1")
 
+    def _add_shutdown_handler(handler) -> None:
+        """兼容当前 Starlette/FastAPI：旧版提供 add_event_handler，新版仅暴露 router 生命周期列表。"""
+        add_handler = getattr(app, "add_event_handler", None)
+        if callable(add_handler):
+            add_handler("shutdown", handler)
+        else:
+            app.router.on_shutdown.append(handler)
+
     def _persist_live_snapshots_on_shutdown() -> list[str]:
         """v0.64 优雅停机钩子：对所有在跑任务且未暂停的会话即时落断点快照
         （pause_snapshot_now，尾部 sanitize）——没点暂停就被关的后端，重启后
@@ -1413,7 +1558,7 @@ def create_app(
         return done
 
     app.state.shutdown_persist = _persist_live_snapshots_on_shutdown
-    app.add_event_handler("shutdown", _persist_live_snapshots_on_shutdown)
+    _add_shutdown_handler(_persist_live_snapshots_on_shutdown)
 
     @app.exception_handler(BlackboardClosedError)
     async def _bb_closed_handler(request, exc):  # noqa: ANN001
@@ -1423,6 +1568,8 @@ def create_app(
 
     store = ProjectStore(workspace_root)
     app.state.store = store
+    # 项目根（与 store.root 同源，绝对路径）：测试与内部辅助按它定位项目目录。
+    app.state.workspace_root = store.root
     app.state.sample_packages = SamplePackageStore(workspace_root)
     # ⑥ 战役记忆全局库（data/campaign.db，workspace-hygiene D1 归位全局运行时数据；
     # 仿 intel 全局 DB 先例）。落 workspace_root 同级 data/（workspaces/ 契约只收项目），
@@ -1436,6 +1583,199 @@ def create_app(
     app.state.decompiler_cache_dir = \
         Path(workspace_root).parent / "data" / "decompiler-cache"
     app.state.projects: dict[str, Project] = {}      # pid -> Project（连接复用）
+    # ARTEX Engine 注册表：按项目管理常驻 Frontier/Worker 调度器。
+    # 默认不主动创建，只有控制器/测试显式请求时才启动，避免无 Intent 项目产生线程。
+    from core.blackboard.artex_engine import SETTLE_DRAIN_GRACE_S, ArtexEngine
+    app.state.artex_engines: dict[str, ArtexEngine] = {}
+
+    def _stop_artex_engine(pid: str, timeout: float = 5.0) -> dict:
+        engine = app.state.artex_engines.pop(pid, None)
+        if engine is None:
+            return {"drained": True, "active_workers": 0}
+        result = engine.drain(timeout)
+        engine.stop(timeout=timeout)
+        return result
+
+    def _stop_all_artex_engines() -> None:
+        for pid in list(app.state.artex_engines):
+            _stop_artex_engine(pid)
+
+    def _get_artex_engine(pid: str, handler=None, **kwargs):
+        """获取或创建项目 Engine；未注入 handler 时接入真实 ChatTurn Worker。"""
+        if pid in app.state.projects_closing:
+            raise HTTPException(409, "项目正在删除中，请稍后刷新")
+        engine = app.state.artex_engines.get(pid)
+        if engine is None:
+            proj = app.state.projects.get(pid)
+            if proj is None:
+                proj = store.open_project(pid)
+                app.state.projects[pid] = proj
+            if handler is None:
+                from core.chat.artex_worker import make_worker
+                exec_llm, _ = _llms()
+                handler = make_worker(
+                    bb=proj.bb,
+                    llm=exec_llm,
+                    project_id=pid,
+                    packs_root=app.state.packs_root,
+                    track=proj.track,
+                    capabilities=directions_effective(
+                        app.state.packs_root, proj.track, proj.experts,
+                        fallback=proj.capabilities),
+                    artifacts_dir=proj.artifacts_dir,
+                    browser_pool=app.state.browser_pool,
+                    containers=app.state.session_containers,
+                    recovery=_environment_recovery(proj),
+                )
+            artex_cfg = (proj.meta.get("config") or {}).get("artex") or {}
+            from core.blackboard.artex_exploration import record_intent_result
+            from core.blackboard.artex_runtime import evaluate_task
+            def _record_exploration(intent: dict, reason: str) -> None:
+                if reason == "finished":
+                    record_intent_result(proj.bb, pid, intent)
+                    task_id = str(intent.get("task_id") or "")
+                    if task_id:
+                        evaluate_task(proj.bb, pid, task_id, reason="intent_finished")
+            on_intent_finished = _record_exploration
+            if bool(artex_cfg.get("auto_replan", False)):
+                max_replans = max(1, int(artex_cfg.get("max_replans", 5)))
+                replan_cooldown = max(0.0, float(artex_cfg.get("replan_cooldown_s", 2.0)))
+                replan_max_new = max(1, int(artex_cfg.get("replan_max_new", 3)))
+                max_intents = max(1, int(artex_cfg.get("max_intents", 50)))
+                replan_lock = threading.Lock()
+                replan_active: set[str] = set()
+                replan_last_started: dict[str, float] = {}
+
+                def _run_replan(intent: dict, source_id: str, task_id: str,
+                                completed_count: int) -> None:
+                    try:
+                        proj.bb.append_event(pid, "artex.replan.started", {
+                            "source_intent_id": source_id, "task_id": task_id,
+                            "trigger": "intent.finished"})
+                        _exec, planner = _llms()
+                        from core.blackboard.artex_exploration import list_nodes
+                        from core.blackboard.artex_planner import plan_followup
+                        facts = list_nodes(proj.bb, pid, task_id=task_id, kind="fact")
+                        findings = list_nodes(proj.bb, pid, task_id=task_id,
+                                              kind="finding")
+                        result = plan_followup(
+                            bb=proj.bb, project_id=pid, llm=planner,
+                            task_id=task_id, track=proj.track,
+                            allowed_experts=expert_allowed_roles(
+                                app.state.packs_root, proj.track, proj.experts),
+                            asset_ids=intent.get("asset_ids") or [],
+                            facts=facts, findings=findings,
+                            max_new=replan_max_new, max_intents=max_intents)
+                        proj.bb.append_event(pid, "artex.replan.completed", {
+                            "source_intent_id": source_id, "task_id": task_id,
+                            "intent_count": result.get("added", 0),
+                            "goal_covered": bool(result.get("goal_covered")),
+                            "skipped": result.get("skipped", 0),
+                            "budget_exhausted": bool(result.get("budget_exhausted")),
+                            "reason": result.get("reason", ""),
+                            "replan_index": completed_count + 1})
+                    except Exception as exc:  # noqa: BLE001
+                        proj.bb.append_event(pid, "artex.replan.failed", {
+                            "source_intent_id": source_id, "task_id": task_id,
+                            "error": str(exc)[:500]})
+                    finally:
+                        with replan_lock:
+                            replan_active.discard(source_id)
+
+                def _replan_after_finish(intent: dict, reason: str) -> None:
+                    _record_exploration(intent, reason)
+                    if reason != "finished" or intent.get("status") != "completed":
+                        return
+                    # 任意 Intent 完成都可唤醒 Planner（同一任务内持续扩展 frontier）；
+                    # LLM 规划放入独立线程，不能阻塞 Engine 收尾。
+                    source_id = str(intent.get("id") or "").strip()
+                    if not source_id:
+                        return
+                    now_mono = time.monotonic()
+                    prior = proj.bb.recent_events(
+                        pid, limit=500,
+                        kinds=["artex.replan.started", "artex.replan.completed"])
+                    with replan_lock:
+                        if source_id in replan_active:
+                            return
+                        if now_mono - replan_last_started.get(source_id, 0.0) < replan_cooldown:
+                            return
+                        if any(str((event.get("payload") or {}).get("source_intent_id") or "") == source_id
+                               for event in prior):
+                            return
+                        completed_count = sum(1 for event in prior
+                                              if event.get("kind") == "artex.replan.completed")
+                        if completed_count >= max_replans:
+                            return
+                        task_id = str(intent.get("task_id") or "artex-task")
+                        replan_active.add(source_id)
+                        replan_last_started[source_id] = now_mono
+                    threading.Thread(
+                        target=_run_replan,
+                        args=(intent, source_id, task_id, completed_count),
+                        name=f"artex-planner-{source_id[:12]}", daemon=True).start()
+
+                on_intent_finished = _replan_after_finish
+
+            def _settle_task(task_id: str, reason: str) -> dict:
+                """任务到点的终局规划轮（artex-taskclock，上游 runFinalPlannerRound）。
+
+                用**任务超时收尾词**做最后一次目标判定：只判「哪些目标已被证据
+                证明达成」，不派新方向（此时派的也不会再被执行）。走
+                ``plan_followup(final=True)`` 而不是自己拼提示词——目标证据硬闸
+                （``verify_goals_met``）与 goal_covered 派生口径必须同源，否则
+                终局判定会绕过证据链盖章。
+                """
+                _exec, planner = _llms()
+                from core.blackboard.artex_exploration import list_nodes
+                from core.blackboard.artex_planner import plan_followup
+                from core.blackboard.artex_runtime import evaluate_task
+                facts = list_nodes(proj.bb, pid, task_id=task_id, kind="fact")
+                findings = list_nodes(proj.bb, pid, task_id=task_id, kind="finding")
+                result = plan_followup(
+                    bb=proj.bb, project_id=pid, llm=planner,
+                    task_id=task_id, track=proj.track,
+                    allowed_experts=expert_allowed_roles(
+                        app.state.packs_root, proj.track, proj.experts),
+                    facts=facts, findings=findings, final=True)
+                try:
+                    evaluate_task(proj.bb, pid, task_id, reason="task_settled")
+                except Exception:  # noqa: BLE001 —— 状态推导失败不拦收尾留痕
+                    pass
+                return result
+
+            engine = ArtexEngine(
+                proj.bb, pid, handler,
+                auto_recover=artex_cfg.get("auto_recover", True),
+                recover_after_seconds=artex_cfg.get("recover_after_seconds", 300),
+                max_attempts=artex_cfg.get("max_attempts", 3),
+                # 全局并发（默认 15）：必须显著大于题目级上限（默认 5），否则
+                # 单题上限永远打不满。CTF 轨「5 × 3 道并发题 + 余量」。
+                max_workers=int(artex_cfg.get("max_workers", 15) or 15),
+                task_deadline_s=float(artex_cfg.get("task_deadline_s", 0) or 0),
+                max_intents=int(artex_cfg.get("max_intents", 50) or 50),
+                # 收尾宽限（artex-taskclock）：真实 ChatTurn Worker 撞预算后会**自己**
+                # 进收尾阶段（settlement，默认再跑 10 轮落库）。这段时间必须给，
+                # 否则 Engine 的兜底硬超时会在 Worker 刚进收尾时就 future.cancel()
+                # 硬砍——「夹逼→主动收尾」退化回「硬砍→什么都没捞回」。
+                settle_grace_s=SETTLE_DRAIN_GRACE_S,
+                on_intent_finished=on_intent_finished,
+                settler=_settle_task,
+                **kwargs)
+            app.state.artex_engines[pid] = engine
+        return engine
+
+    def _start_artex_engine(pid: str, handler=None, **kwargs):
+        """获取项目 Engine 并显式启动其 Frontier 轮询线程。"""
+        engine = _get_artex_engine(pid, handler, **kwargs)
+        engine.start()
+        return engine
+
+    app.state.get_artex_engine = _get_artex_engine
+    app.state.start_artex_engine = _start_artex_engine
+    app.state.stop_artex_engine = _stop_artex_engine
+    app.state.stop_all_artex_engines = _stop_all_artex_engines
+    _add_shutdown_handler(_stop_all_artex_engines)
     # 删除中的项目闸门：删除窗口内 _project 拒绝重入（防 pop 缓存后被轮询/open_project
     # 重建 Blackboard 实例重新锁死 db）；WS tick 见到即自行退出。
     app.state.projects_closing: set[str] = set()
@@ -1446,6 +1786,9 @@ def create_app(
     app.state.jobs = JobRegistry()
     app.state.inventory = HostDetector().probe(tools_root=tools_root)
     app.state.tools_root = tools_root  # gateway-config-view：probe 刷新端点复用
+    # 项目级受控环境恢复器缓存（pid -> EnvironmentRecovery）：跨会话/子专家共享，
+    # 使同一环境故障在项目内只尝试一次白名单恢复（去重计数在实例内）。
+    app.state.environment_recovery: dict[str, Any] = {}
     app.state.packs_root = packs_root
     app.state.llm_store = ProviderStore(providers_config)
     # 请求体留痕（diagnostics-request-body，2026-10-17）：把 LLM 层转储回调接到
@@ -1490,7 +1833,7 @@ def create_app(
     def _browser_shutdown() -> None:
         app.state.browser_pool.close_all()
 
-    app.add_event_handler("shutdown", _browser_shutdown)
+    _add_shutdown_handler(_browser_shutdown)
 
     # 代理池（fir-proxy 托管，2026-10-07 → 2026-10-11 全局化）：**进程级单 serve + 单池**，
     # 池记录落 data/proxy/pool.json（全局归位，不落 workspaces）；config/proxy.json 缺失=全默认；
@@ -1532,7 +1875,7 @@ def create_app(
         _proxy_stop.set()
         app.state.proxy_pool.close_all()
 
-    app.add_event_handler("shutdown", _proxy_shutdown)
+    _add_shutdown_handler(_proxy_shutdown)
 
     # 飞书连接器（feishu-push v1，docs/plans/feishu-connector.md）：确认的中危及
     # 以上漏洞（category=vuln + status=verified + severity≥min）边沿触发 → 自定义
@@ -1545,7 +1888,7 @@ def create_app(
     def _feishu_shutdown() -> None:
         app.state.feishu_hub.shutdown()
 
-    app.add_event_handler("shutdown", _feishu_shutdown)
+    _add_shutdown_handler(_feishu_shutdown)
 
     # IDA-MCP 实例管理器（2026-09-20 按需拉起+空闲关，DESIGN.md §7）：Agent 点查
     # decompile/xrefs 时按 (项目, 样本) 拉起无窗口 idat 并连其 MCP 端点，空闲
@@ -1557,7 +1900,7 @@ def create_app(
     def _ida_mcp_shutdown() -> None:
         app.state.ida_mcp_manager.shutdown_all()
 
-    app.add_event_handler("shutdown", _ida_mcp_shutdown)
+    _add_shutdown_handler(_ida_mcp_shutdown)
 
     # 会话级常驻容器管理器（P2/P3，2026-10-07）：L2 docker runtime 复用容器 + 孤儿回收。
     # 根因修复配套——L2 曾漏 --rm 致每次 run_cmd 留 exited 容器，累积上千拖垮 Docker
@@ -1571,7 +1914,60 @@ def create_app(
     def _session_containers_shutdown() -> None:
         app.state.session_containers.shutdown_all()
 
-    app.add_event_handler("shutdown", _session_containers_shutdown)
+    _add_shutdown_handler(_session_containers_shutdown)
+
+    _inventory_refresh_lock = threading.Lock()
+    _inventory_refresh_at = [0.0]
+
+    def _refresh_inventory_after_recovery(result) -> None:
+        """恢复成功后异步重探宿主能力清单（不阻塞原命令重试）。
+
+        probe 最坏 ~20s（docker/wsl 各自超时），必须放后台线程；60s 内最多一次，
+        避免连续恢复把探测线程堆起来。刷新失败只记日志——能力清单是可见性
+        数据，不能反过来影响「恢复已成功」的结论。
+        """
+        now = time.monotonic()
+        with _inventory_refresh_lock:
+            if now - _inventory_refresh_at[0] < 60:
+                return
+            _inventory_refresh_at[0] = now
+
+        def _probe() -> None:
+            try:
+                app.state.inventory = HostDetector().probe(
+                    tools_root=app.state.tools_root)
+                log.info("环境恢复后已刷新宿主能力清单 category=%s",
+                         getattr(result, "category", ""))
+            except Exception:  # noqa: BLE001 —— 刷新失败不影响恢复结论
+                log.exception("环境恢复后刷新能力清单失败")
+
+        threading.Thread(target=_probe, name="env-recovery-probe",
+                         daemon=True).start()
+
+    def _environment_recovery(proj: Project):
+        """项目级受控环境恢复器（懒建 + 缓存，None=不自动安装/构建）。
+
+        workspace 固定为项目目录、registry 取自 app.state.tools_root；恢复动作
+        统一经项目 gateway 执行，因此仍受 runtime/threat_class/scope/workspace/
+        net/approval 约束。缓存使同一故障（category+tool/image）在项目内只尝试
+        一次，不会被多个会话/子专家各装一遍。
+        """
+        if not app.state.tools_root:
+            return None  # 未配置 tools 根：既不做工具探测，也不允许安装
+        cached = app.state.environment_recovery.get(proj.id)
+        if cached is not None:
+            return cached
+        from core.runtime.recovery import EnvironmentRecovery
+        recovery = EnvironmentRecovery(
+            proj.path,
+            tools_root=app.state.tools_root,
+            command_runner=ExecutionGateway(
+                bb=proj.bb, containers=app.state.session_containers).run,
+            bb=proj.bb,
+            on_recovered=_refresh_inventory_after_recovery,
+        )
+        app.state.environment_recovery[proj.id] = recovery
+        return recovery
 
     def _llms():
         exec_llm = executor_llm
@@ -2639,6 +3035,8 @@ def create_app(
                 artifacts_dir=proj.artifacts_dir,
                 existing_session=existing_session,
                 campaign=app.state.campaign,
+                # 环境缺失受控恢复（None=tools 根未配置 → 只回填结构化原因）
+                recovery=_environment_recovery(proj),
             )
             # 会话 id 就绪后再装配反编译服务（命令经网关审计；IDA 优先、Ghidra 兜底）。
             # mcp_provider：Agent 点查 decompile/xrefs 时按需拉起无窗口 idat+MCP
@@ -2792,6 +3190,47 @@ def create_app(
         except (ValueError, OSError):
             pid = None
         return {"project_id": pid, "slug": slug, "status": "restored"}
+
+    # 回收站终点操作（2026-10-18）：静态段 /api/projects/trash/** 与 /trash 同口径，
+    # 必须先于 /api/projects/{pid} 注册，否则 trash 段会被 {pid} 吃掉。
+    @app.delete("/api/projects/trash/{trash_name}")
+    def purge_trashed_project(trash_name: str):
+        """永久删除回收站条目：物理抹除 .trash/<trash_name>/，不可恢复。"""
+        try:
+            store.purge_trashed(trash_name)
+        except FileNotFoundError:
+            raise HTTPException(404, f"回收站条目不存在: {trash_name}") from None
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+        except PermissionError as e:  # 重试耗尽仍有句柄（外部进程占用）
+            raise HTTPException(
+                422,
+                "回收站目录被占用，无法永久删除；请关闭占用该目录的程序后重试: "
+                f"{e}") from e
+        except OSError as e:  # LX reparse point 等文件系统层异常：422 带因，不再漏 500
+            raise HTTPException(
+                422, f"永久删除失败（文件系统限制，详见原因）: {e}") from e
+        return {"status": "purged", "trash_name": trash_name}
+
+    @app.post("/api/projects/trash/{trash_name}/clear")
+    def clear_trashed_project(trash_name: str):
+        """清除回收站条目内的项目文件，仅保留 project.json（墓碑：名字信息保留、数据抹除）。"""
+        try:
+            stats = store.clear_trashed_contents(trash_name)
+        except FileNotFoundError:
+            raise HTTPException(
+                404, f"回收站条目不存在或元数据损坏: {trash_name}") from None
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+        except PermissionError as e:  # 重试耗尽仍有句柄（外部进程占用）
+            raise HTTPException(
+                422,
+                "回收站目录被占用，无法清除文件；请关闭占用该目录的程序后重试: "
+                f"{e}") from e
+        except OSError as e:  # LX reparse point 等文件系统层异常：422 带因，不再漏 500
+            raise HTTPException(
+                422, f"清除文件失败（文件系统限制，详见原因）: {e}") from e
+        return {"status": "cleared", **stats}
 
     @app.post("/api/projects", status_code=201)
     def create_project(body: ProjectIn):
@@ -2952,12 +3391,15 @@ def create_app(
         if reason:
             raise HTTPException(409, f"项目删除被拒绝：{reason}")
         app.state.projects_closing.add(pid)
+        _stop_artex_engine(pid)
         try:
             # 摘缓存后由 store.delete_project 统一 close_all()+close()（双层闸门）：
             # 之后在飞轮询/WS tick 既拿不到新实例（_project 409），也无法用旧 proj
             # 引用重开黑板（Blackboard/Project 双层 BlackboardClosedError）——
             # 这是 Windows 下 db 文件不被重新锁死、rename 成功的关键。
             app.state.projects.pop(pid, None)
+            # 环境恢复器随项目终结一起摘除（其去重计数与 workspace 绑定该 pid）
+            app.state.environment_recovery.pop(pid, None)
             # F6：先焚毁浏览器实例（chromium 占用 profile 目录会锁死 Windows 删除）
             app.state.browser_pool.close_project(pid)
             # 代理池已全局化（2026-10-11）：池/日志落 data/proxy/、serve 进程级单实例，
@@ -3976,6 +4418,8 @@ def create_app(
         bb_declare_challenge 同一写入口 register_challenge。
 
         `thread_id` 可选：传了就把该线程绑到这道题上（工作台「设为当前题目」）。
+        `name` 可空——空名时按题面/入口内容指纹生成稳定 value（AI 可后补 title）。
+        `entries` 逐条建子资产（web 入口 URL / 附件）。
         """
         proj = _project(pid)
         if proj.track != "ctf":
@@ -3983,9 +4427,14 @@ def create_app(
                                 "bb_declare_challenge 仅 CTF 轨可用"
                                 "（渗透/红队/研究轨的目标是站点/样本，不是题目）")
         try:
-            r = register_challenge(proj.bb, pid, body.name,
-                                   description=body.description,
-                                   tags=body.tags, author="human")
+            r = register_challenge(
+                proj.bb, pid, body.name,
+                title=body.title or body.description,
+                description=body.description,
+                brief=body.brief, entry_hint=body.entry_hint,
+                direction=body.direction, tags=body.tags,
+                flag_format=body.flag_format, flag_count=body.flag_count,
+                entries=body.entries, author="human")
         except ValueError as e:
             raise HTTPException(422, str(e)) from e
         tid = (body.thread_id or "").strip()
@@ -3997,15 +4446,16 @@ def create_app(
                 raise HTTPException(422, f"题目已建但绑定线程失败: {e}") from e
         row = proj.bb.get_asset(r["id"])
         if row is None:  # register_asset 合并既有行的兜底
-            row = proj.bb.find_asset(pid, CHALLENGE_TYPE, body.name.strip())
+            row = proj.bb.find_asset(pid, CHALLENGE_TYPE, r["value"])
         return _challenge_summary(proj, [row])[0]
 
     @app.patch("/api/challenges/{asset_id}")
     def patch_challenge(asset_id: str, body: ChallengePatchIn):
-        """改题目：name（改名）/ description（meta.title）/ tags（meta.tags）。
+        """改题目：name（改名）/ title / brief / entry_hint / direction /
+        tags / flag_format / flag_count。
 
-        name 走 `update_asset_value`（撞同名 422）；description/tags 走
-        `update_asset_meta` 合并（传空=清该键）。三者可单传。
+        name 走 `update_asset_value`（撞同名 422）；其余走 `update_asset_meta`
+        合并（传空串=清该键，None=不动）。
         """
         proj = _project(_pid_of_asset(asset_id))
         row = proj.bb.get_asset(asset_id)
@@ -4016,8 +4466,21 @@ def create_app(
                 proj.bb.update_asset_value(asset_id, body.name)
                 row = proj.bb.get_asset(asset_id)
             patch: dict = {}
-            if body.description is not None:
+            if body.title is not None:
+                patch["title"] = body.title.strip()
+            elif body.description is not None:
                 patch["title"] = body.description.strip()
+            if body.brief is not None:
+                patch["brief"] = body.brief.strip()
+            if body.entry_hint is not None:
+                patch["entry_hint"] = body.entry_hint.strip()
+            if body.direction is not None:
+                patch["direction"] = body.direction.strip()
+            if body.flag_format is not None:
+                from core.blackboard.assets import _normalize_flag_format
+                patch["flag_format"] = _normalize_flag_format(body.flag_format)
+            if body.flag_count is not None:
+                patch["flag_count"] = max(1, min(int(body.flag_count), 50))
             if body.tags is not None:
                 patch["tags"] = [str(t).strip() for t in body.tags
                                  if str(t).strip()]
@@ -4026,6 +4489,124 @@ def create_app(
         except (ValueError, LookupError) as e:
             raise HTTPException(422, str(e)) from e
         return _challenge_summary(proj, [proj.bb.get_asset(asset_id)])[0]
+
+    # ---------- CTF flag 台账（challenge-flag-ledger，v47） ----------
+
+    @app.get("/api/challenges/{asset_id}/flags")
+    def list_challenge_flags(asset_id: str):
+        """某题目的 flag 台账（含 rejected，人工裁决界面需要看到才能撤销）。"""
+        from core.blackboard.challenge_flags import (
+            challenge_state, list_flags)
+        pid = _pid_of_asset(asset_id)
+        proj = _project(pid)
+        row = proj.bb.get_asset(asset_id)
+        if row is None or row.get("type") != CHALLENGE_TYPE:
+            raise HTTPException(404, f"题目不存在: {asset_id}")
+        running = _running_intents_by_challenge(proj, [asset_id]).get(asset_id, 0)
+        return {"challenge_id": asset_id,
+                "flags": list_flags(proj.bb, pid, asset_id),
+                "state": challenge_state(proj.bb, pid, asset_id, running=running)}
+
+    @app.post("/api/challenges/{asset_id}/flags", status_code=201)
+    def add_challenge_flag(asset_id: str, body: ChallengeFlagIn):
+        """人工录入 flag（judged_by=human）。人工录入默认 accepted——人说的算。"""
+        from core.blackboard.challenge_flags import record_flag
+        pid = _pid_of_asset(asset_id)
+        proj = _project(pid)
+        row = proj.bb.get_asset(asset_id)
+        if row is None or row.get("type") != CHALLENGE_TYPE:
+            raise HTTPException(404, f"题目不存在: {asset_id}")
+        if body.verdict not in ("accepted", "pending", "rejected"):
+            raise HTTPException(422, "verdict 只能是 accepted / pending / rejected")
+        try:
+            r = record_flag(proj.bb, pid, asset_id, body.flag,
+                            source=body.source, judged_by="human",
+                            verdict=body.verdict, author="human")
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+        return r
+
+    @app.patch("/api/challenges/{asset_id}/flags/{flag_id}")
+    def decide_challenge_flag(asset_id: str, flag_id: str,
+                              body: ChallengeFlagDecideIn):
+        """人工裁决 flag：accepted（确认）/ rejected（**标记为错误**）/ pending。
+
+        rejected 立刻从 solved 派生里扣除（状态是派生值，自动生效），并进
+        「已拒绝」清单——同串再提交会被 `ctf_submit_flag` 直接拦下。
+        """
+        from core.blackboard.challenge_flags import decide_flag
+        pid = _pid_of_asset(asset_id)
+        proj = _project(pid)
+        try:
+            return decide_flag(proj.bb, pid, flag_id, verdict=body.verdict,
+                               reason=body.reason, author="human")
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+
+    @app.post("/api/challenges/{asset_id}/abandon")
+    def abandon_challenge(asset_id: str, body: ChallengeAbandonIn):
+        """标记放弃 / 撤销放弃（meta.abandoned）。放弃后调度层不再为它派 Worker。"""
+        from core.blackboard.challenge_flags import set_abandoned
+        pid = _pid_of_asset(asset_id)
+        proj = _project(pid)
+        try:
+            row = set_abandoned(proj.bb, pid, asset_id,
+                                abandoned=body.abandoned, author="human")
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+        return _challenge_summary(proj, [row])[0]
+
+    @app.post("/api/challenges/{asset_id}/ctf-agent")
+    def start_ctf_agent(asset_id: str, body: CtfAgentRunIn):
+        """启动独立 CTF-Agent 单题 worker，共用 CyberStrike 供应商配置。
+
+        运行始终为 no-submit；flag 只作为候选返回，提交需另行审批。
+        """
+        pid = _pid_of_asset(asset_id)
+        proj = _project(pid)
+        challenge = proj.bb.get_asset(asset_id)
+        if challenge is None or challenge.get("type") != CHALLENGE_TYPE:
+            raise HTTPException(404, f"题目不存在: {asset_id}")
+        summary = _challenge_summary(proj, [challenge])[0]
+        attachments: list[dict[str, Any]] = []
+        meta = _loads_meta(challenge)
+        for aid in meta.get("attachment_ids") or []:
+            art = proj.bb.get_artifact(pid, str(aid))
+            if art is None or art.get("kind") != "attachment":
+                continue
+            art_meta = _loads_meta(art)
+            source = _inside(proj, art["path"])
+            attachments.append({"path": str(source), "name": art_meta.get("original_name")})
+        # challenge asset 的直接附件若带有 artifact_id/path，也纳入 worker。
+        for item in summary.get("attachments", []):
+            item_meta = item.get("meta") or {}
+            aid = item_meta.get("artifact_id")
+            if aid:
+                art = proj.bb.get_artifact(pid, str(aid))
+                if art:
+                    attachments.append({"path": str(_inside(proj, art["path"])),
+                                        "name": item.get("value")})
+            elif item.get("type") == "binary":
+                # 原生 binary 资产通常以 sha256 指向 artifacts/<sha> 的附件文件。
+                found = proj.bb.conn.execute(
+                    "SELECT path FROM artifacts WHERE project_id=? AND sha256=? "
+                    "AND kind IN ('attachment','sample') LIMIT 1",
+                    (pid, str(item.get("value") or ""))).fetchone()
+                if found:
+                    attachments.append({"path": str(_inside(proj, found["path"])),
+                                        "name": Path(found["path"]).name})
+        try:
+            runner, job_meta = make_ctf_agent_runner(
+                challenge=summary, attachments=attachments,
+                provider_store=app.state.llm_store,
+                provider_name=body.provider, model=body.model,
+                workspace=_inside(proj, ".tmp", "ctf-agent"))
+        except (ProviderError, ValueError) as e:
+            raise HTTPException(422, str(e)) from e
+        job_id = app.state.jobs.submit("ctf-agent", runner,
+                                       meta={"project_id": pid, **job_meta})
+        return {"job_id": job_id, "no_submit": True, "provider": job_meta["provider"],
+                "model": job_meta["model"]}
 
     def _pid_of_asset(asset_id: str) -> str:
         for proj in store.list_projects():
@@ -5609,6 +6190,15 @@ def create_app(
         bb_add_asset 登记、rating_override 后按更高口径重新登记/patch）；结果经
         收件箱 authorization_result 回流提交会话。恒 human 决策在架构上已成立
         （Agent 产的审批单只有人类 decide），L2 无自动批路径。"""
+        # scope_expand 的结构化目标在批准后自动并入项目 scope；自由文本
+        # request_authorization 仍保持纯回流，只有明确 scope_value 才执行。
+        if action.get("scope_value"):
+            from core.scope_policy import expand_project_scope
+            expand_project_scope(bb, pid, str(action["scope_value"]))
+            bb.append_event(
+                pid, "scope.expanded",
+                {"approval_id": approval_id, "scope_value": str(action["scope_value"])[:500]},
+                author="system")
         sid = str(action.get("session_id") or "")
         if sid:
             try:
@@ -7343,8 +7933,9 @@ def create_app(
         if not display and not persona:
             store.update_orchestrator_persona(pid, None, project=proj)
             return {"status": "cleared"}
+        # 人设是 Markdown 文档，不能按旧的短句字段截断；保留完整 UTF-8 文本。
         persona_val = {"display_name": display[:40] or "编排器",
-                       "persona": persona[:2000]}
+                       "persona": persona}
         store.update_orchestrator_persona(pid, persona_val, project=proj)
         return {"status": "ok", "persona": persona_val}
 
@@ -7456,6 +8047,258 @@ def create_app(
         del templates[name]
         judgments.save_user_templates(app.state.judgments_dir, templates)
         return {"deleted": name}
+
+    @app.post("/api/projects/{pid}/artex/plan")
+    def artex_plan(pid: str, body: ArtexPlanIn):
+        """将目标拆解为 ARTEX 父子 Intent，并可选择启动项目 Engine。"""
+        proj = _project(pid)
+        from core.blackboard.artex_planner import plan_intents
+        _exec, planner = _llms()
+        allowed = body.allowed_experts
+        if allowed is None:
+            allowed = expert_allowed_roles(
+                app.state.packs_root, proj.track, proj.experts)
+        try:
+            result = plan_intents(
+                bb=proj.bb, project_id=pid, llm=planner, goal=body.goal,
+                track=proj.track, allowed_experts=allowed,
+                asset_ids=body.asset_ids, task_id=body.task_id,
+            )
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+        if body.start_engine:
+            app.state.start_artex_engine(pid)
+        return result
+
+    @app.get("/api/projects/{pid}/artex/tasks")
+    def artex_task_list(pid: str, limit: int = 100):
+        """返回项目级 ARTEX 任务汇总，供工作台切换多个任务图。"""
+        proj = _project(pid)
+        from core.blackboard.artex_intents import list_intents
+        from core.blackboard.artex_goals import goals_stats, list_goals
+        from core.blackboard.artex_coverage import task_coverage
+        from core.blackboard.artex_runtime import get_runtime
+        rows = list_intents(proj.bb, pid, limit=1000)
+        grouped: dict[str, list[dict]] = {}
+        for row in rows:
+            task_id = str(row.get("task_id") or "").strip()
+            if task_id:
+                grouped.setdefault(task_id, []).append(row)
+        engine = app.state.artex_engines.get(pid)
+        tasks = []
+        for task_id, intents in grouped.items():
+            counts: dict[str, int] = {}
+            for intent in intents:
+                status = str(intent.get("status") or "")
+                counts[status] = counts.get(status, 0) + 1
+            latest = max((str(item.get("updated_at") or item.get("created_at") or "")
+                          for item in intents), default="")
+            root = next((item for item in intents if not item.get("parent_id")), intents[0])
+            goal_rows = list_goals(proj.bb, pid, task_id)
+            goal_stats = goals_stats(proj.bb, pid, task_id)
+            # 任务级运行态由目标驱动推导（有注册目标时不再靠「有 fact 即达成」）。
+            runtime = get_runtime(proj.bb, pid, task_id) or {}
+            try:
+                coverage = task_coverage(proj.bb, pid, task_id)
+            except Exception:  # noqa: BLE001 —— 覆盖度读取失败不阻任务列表
+                coverage = {"enabled": False}
+            tasks.append({
+                "task_id": task_id,
+                "objective": root.get("objective", ""),
+                "status": root.get("status", ""),
+                "runtime_status": str(runtime.get("status") or ""),
+                "counts": counts,
+                "intent_count": len(intents),
+                "goal_count": goal_stats["total"],
+                "goal_met_count": goal_stats["met"],
+                "goal_open_count": goal_stats["open"],
+                "goals": goal_rows,
+                "coverage": coverage,
+                "updated_at": latest,
+                "running": bool(engine and engine.running and any(
+                    item.get("status") in {"claimed", "running"} for item in intents)),
+            })
+        tasks.sort(key=lambda item: item["updated_at"], reverse=True)
+        return {"tasks": tasks[:max(1, min(limit, 200))]}
+
+    @app.get("/api/projects/{pid}/artex/tasks/{task_id}")
+    def artex_task_graph(pid: str, task_id: str):
+        proj = _project(pid)
+        from core.blackboard.artex_intents import task_graph
+        return task_graph(proj.bb, pid, task_id)
+
+    @app.get("/api/projects/{pid}/artex/tasks/{task_id}/runtime")
+    def artex_task_runtime(pid: str, task_id: str):
+        proj = _project(pid)
+        from core.blackboard.artex_runtime import evaluate_task
+        return evaluate_task(proj.bb, pid, task_id, reason="api_read")
+
+    @app.get("/api/projects/{pid}/artex/tasks/{task_id}/coverage")
+    def artex_task_coverage(pid: str, task_id: str, type: str = "",
+                            limit: int = 50, offset: int = 0):
+        """任务资产覆盖度（任务锚点分母 × 事实锚定分子）与未覆盖清单。
+
+        复刻上游 ``Coverage`` 结构（enabled/scope_rows/denominator/tested/pct/
+        by_type），另附 ``scope_source``（锚点 vs 推断）与未测资产分页。
+        """
+        proj = _project(pid)
+        from core.blackboard.artex_coverage import list_untested_assets, task_coverage
+        coverage = task_coverage(proj.bb, pid, task_id)
+        backlog = list_untested_assets(proj.bb, pid, task_id, type_=type,
+                                       limit=limit, offset=offset)
+        return {"coverage": coverage, "untested": backlog}
+
+    @app.get("/api/projects/{pid}/artex/tasks/{task_id}/coverage/graph")
+    def artex_task_coverage_graph(pid: str, task_id: str):
+        """任务覆盖图：范围内资产 + 为连边拉入的范围外祖先（灰）。"""
+        proj = _project(pid)
+        from core.blackboard.artex_coverage import coverage_graph
+        return coverage_graph(proj.bb, pid, task_id)
+
+    @app.post("/api/projects/{pid}/artex/tasks/{task_id}/scope")
+    def artex_task_scope(pid: str, task_id: str, body: ArtexScopeIn):
+        """锚定/摘除任务范围资产（覆盖度分母）；asset_ids 空则只读回覆盖度。"""
+        proj = _project(pid)
+        from core.blackboard.artex_coverage import (
+            anchor_task_assets,
+            task_coverage,
+            unanchor_task_assets,
+        )
+        if not body.asset_ids:
+            return {"changed": False,
+                    "coverage": task_coverage(proj.bb, pid, task_id)}
+        if body.remove:
+            result = unanchor_task_assets(bb=proj.bb, project_id=pid,
+                                          task_id=task_id, asset_ids=body.asset_ids)
+        else:
+            result = anchor_task_assets(bb=proj.bb, project_id=pid, task_id=task_id,
+                                        asset_ids=body.asset_ids, source="api",
+                                        note=body.note)
+        return {"changed": True, "result": result,
+                "coverage": task_coverage(proj.bb, pid, task_id)}
+
+    @app.get("/api/projects/{pid}/artex/exploration")
+    def artex_exploration(pid: str, task_id: str | None = None):
+        proj = _project(pid)
+        from core.blackboard.artex_exploration import exploration_graph
+        return exploration_graph(proj.bb, pid, task_id=task_id)
+
+    @app.get("/api/projects/{pid}/artex/exploration/{node_id}")
+    def artex_exploration_node(pid: str, node_id: str):
+        proj = _project(pid)
+        from core.blackboard.artex_exploration import get_node, list_edges
+        node = get_node(proj.bb, pid, node_id)
+        if node is None:
+            raise HTTPException(404, "探索节点不存在")
+        return {"node": node, "edges": list_edges(proj.bb, pid, node_id=node_id)}
+
+    def _artex_activity_events(proj, pid: str, task_id: str | None,
+                               since_id: int, limit: int = 100) -> list[dict]:
+        kinds = ["artex.intent.created", "artex.intent.claimed", "artex.intent.running",
+                 "artex.intent.completed", "artex.intent.failed", "artex.intent.recovered",
+                 "artex.intent.pause", "artex.intent.resume", "artex.intent.cancel",
+                 "artex.intent.retry", "artex.intent.aggregated", "artex.worker.steer",
+                 "artex.worker.kill", "artex.replan.started", "artex.replan.completed",
+                 "artex.replan.failed", "artex.task.status", "artex.task.paused",
+                 "artex.exploration.node.created",
+                 "artex.exploration.fact.recorded", "chat.spawn", "chat.tool", "chat.steer", "chat.thinking",
+                 "chat.usage", "chat.error", "approval.requested", "approval.approved",
+                 "approval.rejected", "scope.expanded", "asset.new", "asset.imported", "asset.updated",
+                 "asset.reparent", "asset.renamed", "asset.deleted", "asset.merged", "asset.status_changed",
+                 "finding.new", "finding.updated", "finding.deleted", "finding.merged", "finding.retracted"]
+        events = proj.bb.recent_events(pid, since_id=max(0, since_id),
+                                       limit=max(1, min(limit, 500)), kinds=kinds)
+        if task_id:
+            from core.blackboard.artex_intents import list_intents
+            intent_ids = {row["id"] for row in list_intents(proj.bb, pid, limit=1000)
+                          if row.get("task_id") == task_id}
+            events = [event for event in events
+                      if str((event.get("payload") or {}).get("task_id") or "") == task_id
+                      or str((event.get("payload") or {}).get("intent_id") or "") in intent_ids]
+        return events
+
+    @app.get("/api/projects/{pid}/artex/activity")
+    def artex_activity(pid: str, task_id: str | None = None,
+                       since_id: int = 0, limit: int = 100):
+        proj = _project(pid)
+        events = _artex_activity_events(proj, pid, task_id, since_id, limit)
+        return {"events": events, "latest_id": proj.bb.latest_event_id(pid)}
+
+    @app.get("/api/projects/{pid}/artex/activity/stream")
+    async def artex_activity_stream(request: Request, pid: str, task_id: str | None = None,
+                                    since_id: int = 0):
+        """以 SSE 推送 ARTEX 活动；客户端断开后立即结束轮询。"""
+        proj = _project(pid)
+
+        async def generate():
+            cursor = max(0, since_id)
+            while True:
+                if await request.is_disconnected():
+                    break
+                events = await run_in_threadpool(
+                    _artex_activity_events, proj, pid, task_id, cursor, 100)
+                if events:
+                    for event in events:
+                        cursor = max(cursor, int(event.get("id") or 0))
+                        yield f"id: {cursor}\\ndata: {json.dumps(event, ensure_ascii=False)}\\n\\n"
+                else:
+                    yield ": heartbeat\\n\\n"
+                await asyncio.sleep(1.0)
+
+        return StreamingResponse(generate(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache",
+                                          "Connection": "keep-alive",
+                                          "X-Accel-Buffering": "no"})
+
+    @app.get("/api/projects/{pid}/artex/engine")
+    def artex_engine_status(pid: str, task_id: str | None = None):
+        proj = _project(pid)
+        from core.blackboard.artex_intents import list_intents
+        rows = list_intents(proj.bb, pid, limit=1000)
+        counts: dict[str, int] = {}
+        for row in rows:
+            counts[row["status"]] = counts.get(row["status"], 0) + 1
+        engine = app.state.artex_engines.get(pid)
+        active = [row for row in rows if row["status"] in {"claimed", "running"}]
+        if task_id:
+            active = [row for row in active if row.get("task_id") == task_id]
+        return {"project_id": pid, "running": bool(engine and engine.running),
+                "active_workers": len(active), "counts": counts,
+                "active": active, "task_id": task_id}
+
+    @app.post("/api/projects/{pid}/artex/engine/start")
+    def artex_engine_start(pid: str):
+        _project(pid)
+        engine = app.state.start_artex_engine(pid)
+        return {"project_id": pid, "running": engine.running}
+
+    @app.post("/api/projects/{pid}/artex/engine/stop")
+    def artex_engine_stop(pid: str):
+        _project(pid)
+        drained = app.state.stop_artex_engine(pid)
+        return {"project_id": pid, "running": False, **drained}
+
+    @app.post("/api/projects/{pid}/artex/intents/{intent_id}/control")
+    def artex_intent_control(pid: str, intent_id: str, body: ArtexControlIn):
+        proj = _project(pid)
+        from core.blackboard.artex_intents import control_intent
+        try:
+            return control_intent(proj.bb, pid, intent_id, body.action)
+        except (LookupError, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/projects/{pid}/artex/intents/{intent_id}/worker-control")
+    def artex_worker_control(pid: str, intent_id: str, body: ArtexWorkerControlIn):
+        _project(pid)
+        engine = app.state.artex_engines.get(pid)
+        if engine is None:
+            raise HTTPException(409, "ARTEX Engine 未启动")
+        try:
+            if body.action == "kill":
+                return engine.kill_work(intent_id, body.message or "人工终止 Worker")
+            return engine.steer_work(intent_id, body.message)
+        except (LookupError, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @app.post("/api/projects/{pid}/orchestrator/tick")
     def orchestrator_tick(pid: str, body: TickIn):
@@ -7578,6 +8421,8 @@ def create_app(
             "platforms": sk.platforms, "formats": sk.formats,
             "vuln_classes": sk.vuln_classes, "task_types": sk.task_types,
             "required_tools": sk.required_tools, "enabled": sk.enabled,
+            # 展示分组（专家池勾选清单按类别展示；不影响加载/路由）
+            "group": skill_group(sk.name),
             "mode": sk.mode, "self_contained": sk.is_self_contained,
             "resources": [p.relative_to(sk.root).as_posix() for p in sk.resources],
         }
@@ -7910,8 +8755,10 @@ def create_app(
                 "persona": raw.get("persona"),
                 "tracks": raw.get("tracks"),
                 "skills": raw.get("skills"),
+                "knowledge": raw.get("knowledge"),
                 "task_types": raw.get("task_types"),
                 "tools": raw.get("tools"),
+                "mcp_servers": raw.get("mcp_servers"),
                 "max_steps": raw.get("max_steps"),
                 "protected": bool(raw.get("protected")),
                 "variants": variants,
@@ -7940,6 +8787,11 @@ def create_app(
             unknown = sorted({s for s in body.skills if reg.get(s.strip()) is None})
             if unknown:
                 raise HTTPException(422, f"未知技能: {unknown}（先建技能或修正拼写）")
+        if body.knowledge:
+            dirs = set(list_directions(app.state.packs_root))
+            unknown = sorted({d for d in body.knowledge if d.strip() not in dirs})
+            if unknown:
+                raise HTTPException(422, f"未知知识库方向: {unknown}（合法: {sorted(dirs)}）")
         if body.task_types:
             known: set[str] = set()
             for t in valid_tracks:
@@ -7950,20 +8802,40 @@ def create_app(
 
     def _dump_expert_yaml(body: ExpertSaveIn) -> str:
         """专家 yaml 序列化（平铺约定：key: value、内联列表 [a, b]、空值不落键
-        = null 语义）。值含 ": " 或行内注释风险时双引号包裹（解析端剥外层引号）。"""
+        = null 语义）。值含 ": " 或行内注释风险时双引号包裹（解析端剥外层引号）。
+
+        能力白名单三件套（skills/tools/mcp_servers）例外：空列表必须落成
+        ``key: []``——勾选模式里「全不选」是明确的「一个都不启用」，
+        若按空值丢弃会退化成 null（全量），与界面语义相反。
+        ``knowledge``（kb 方向）不在此列：它是两态字段，null 与 [] 都表示
+        「不限方向」（见 core/skills/experts.expert_directions），空列表照常丢弃。
+        """
+        _EMPTY_LIST_KEYS = {"skills", "tools", "mcp_servers"}
+
         def _emit(key: str, val: Any, lines: list[str]) -> None:
-            if val is None or val == "" or val == []:
+            if val is None or val == "":
                 return
             if isinstance(val, list):
+                if not val and key not in _EMPTY_LIST_KEYS:
+                    return
                 lines.append(f"{key}: [{', '.join(str(v).strip() for v in val)}]")
                 return
             s = str(val).strip()
+            # 多行 persona/Markdown 必须使用 YAML block scalar；把整段文本包进
+            # 双引号会让换行和其中的引号破坏 YAML，保存后 reload 即变空。
+            if "\n" in s or "\r" in s:
+                normalized = s.replace("\r\n", "\n").replace("\r", "\n")
+                lines.append(f"{key}: |-")
+                lines.extend(f"  {line}" for line in normalized.split("\n"))
+                return
             if ": " in s or " #" in s or s.startswith(("'", '"', "[", "{", "-", "?", "!", "&", "*")):
-                s = f'"{s}"'
+                # 使用 JSON 字符串转义，确保 Markdown 中的引号不会破坏 YAML。
+                import json
+                s = json.dumps(s, ensure_ascii=False)
             lines.append(f"{key}: {s}")
         lines: list[str] = []
         for key in ("name", "description", "tracks", "persona", "skills",
-                    "task_types", "tools", "max_steps"):
+                    "knowledge", "task_types", "tools", "mcp_servers", "max_steps"):
             _emit(key, getattr(body, key), lines)
         for vt in sorted(body.variants or {}):
             for field in sorted(body.variants[vt] or {}):
@@ -9111,7 +9983,23 @@ def create_app(
                                         title=body.title or "",
                                         provider=body.provider or "",
                                         model=body.model or "",
-                                        challenge_asset_id=body.challenge_asset_id or "")
+                                        challenge_asset_id=body.challenge_asset_id or "",
+                                        web_search=bool(body.web_search))
+
+    @app.put("/api/chat/threads/{tid}/web-search")
+    def chat_thread_set_web_search(tid: str, body: WebSearchIn):
+        """线程级联网搜索开关（v43，web-search-toggle，2026-10-19）。
+
+        工作台 composer「联网」按钮的落点：开 = 该线程主控与其 spawn 的子代理
+        （call_expert / ARTEX Worker 建线程时从父线程继承）默认启用 web_search
+        工具（SearXNG/ddgs 双后端，core/websearch.py）。**不是专家 yaml 的
+        工具勾选**——会话级用户决定，专家池无需逐个声明。下一轮生效。"""
+        from core.chat import store as chat_store
+        proj = _project(_pid_of_chat(tid))
+        if chat_store.get_thread(proj.bb, tid) is None:
+            raise HTTPException(404, f"线程不存在: {tid}")
+        return chat_store.update_thread(proj.bb, tid,
+                                        web_search=bool(body.enabled))
 
     @app.put("/api/chat/threads/{tid}/llm")
     def chat_thread_set_llm(tid: str, body: SwitchLlmIn):
@@ -9187,7 +10075,7 @@ def create_app(
         """发消息即起跑一轮（后台线程）；流式经 chat.delta/chat.tool/chat.message
         事件（GET /api/projects/{pid}/events 或项目 WS）。同线程并发发送 409。"""
         from core.chat import store as chat_store
-        from core.chat.runtime import CONTROLLER_IDS, ChatTurn
+        from core.chat.runtime import ARTEX_CONTROLLER_ID, CONTROLLER_IDS, ChatTurn
         pid = _pid_of_chat(tid)
         proj = _project(pid)
         thread = chat_store.get_thread(proj.bb, tid)
@@ -9207,12 +10095,12 @@ def create_app(
         ov_llm, ov_err = _thread_llm(thread.get("provider") or "",
                                      thread.get("model") or "")
         if ov_llm is not None:
-            exec_llm, _plan = ov_llm, None
+            exec_llm, plan_llm = ov_llm, None
         else:
             if ov_err:
                 log.warning("线程模型覆写构建失败，回退全局 executor: tid=%s %s",
                             tid, ov_err)
-            exec_llm, _plan = _llms()
+            exec_llm, plan_llm = _llms()
         agents = {a["id"] for a in _chat_agents(pid)}
         # 控制器类智能体（chat-orchestrator + 激进主控）才拿可委派专家池；
         # 子专家线程 expert_names=[]（spawn 深度=1，call_expert 恒拒）。
@@ -9262,7 +10150,20 @@ def create_app(
                     browser_pool=(app.state.browser_pool
                                   if proj.track in ("pentest", "redteam", "ctf")
                                   else None),
-                    decompiler_factory=_decompiler_factory)
+                    decompiler_factory=_decompiler_factory,
+                    containers=app.state.session_containers,
+                    # ARTEX 主控（artex-fusion）：把项目级 Engine 暴露给对话主控，
+                    # 让它用 artex_plan/status/hint/control 操舵，而不是自己
+                    # call_expert 派活。引擎惰性获取——首次操舵时才创建。
+                    artex_engine_provider=((lambda: app.state.get_artex_engine(pid))
+                                           if thread["agent_id"] == ARTEX_CONTROLLER_ID
+                                           else None),
+                    artex_planner_llm=plan_llm,
+                    # 主控线程绑定的任务（v47「一个主控只绑一个任务」）：
+                    # artex_plan 新建任务时写入，此后本会话操舵恒指该任务，
+                    # 不再按「最近活跃」猜（两个主控会话不会互相抢任务）。
+                    artex_task_id=str(thread.get("artex_task_id") or ""),
+                    recovery=_environment_recovery(proj))
                 turn.run(text, refs=body.refs, attachments=att_refs)
             except Exception as e:  # noqa: BLE001 —— 状态已在 ChatTurn.run 归位
                 log.exception("chat 轮后台执行失败 thread=%s", tid)

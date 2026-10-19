@@ -1,0 +1,21 @@
+{
+  "_comment": "Test files remain included so the gate measures duplication across both src/ and tests/. The 3.0% limit leaves headroom for ordinary changes while keeping duplication visible.",
+  "threshold": 3.0,
+  "reporters": ["consoleFull"],
+  "ignore": [
+    "node_modules/**",
+    "dist/**",
+    "docs/**",
+    ".codex/**",
+    ".devin/**",
+    "tests/fixtures/**",
+    "third_party/**",
+    "tests/conformance/**/*.c",
+    "tests/conformance/**/*.m",
+    "tests/conformance/**/*.swift",
+    "tests/conformance/**/*.xib"
+  ],
+  "gitignore": true,
+  "minLines": 5,
+  "minTokens": 50
+}

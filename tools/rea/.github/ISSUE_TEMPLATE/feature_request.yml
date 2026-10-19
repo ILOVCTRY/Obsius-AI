@@ -1,0 +1,88 @@
+name: Feature request
+description: Propose a focused improvement to REA
+title: "[Feature] "
+labels:
+  - enhancement
+  - triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Keep one primary capability or workflow outcome per request. For a
+        substantial provider, public contract, or architecture change, explain
+        the decision maintainers need to make before implementation.
+
+  - type: checkboxes
+    id: before-submitting
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the open and closed issues and pull requests for a related proposal.
+          required: true
+        - label: I removed credentials, tokens, private paths, and sensitive target data.
+          required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Setup, packaging, or upgrade
+        - Provider or capability discovery
+        - Process capture or runtime observation
+        - Native analysis or decompilation
+        - Evidence, artifacts, or reconstruction
+        - CLI
+        - MCP or agent integration
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: current-limitation
+    attributes:
+      label: Current limitation
+      description: What user or agent workflow is blocked, ambiguous, or unnecessarily difficult today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: use-cases
+    attributes:
+      label: Use cases
+      description: Give concrete applications, targets, callers, or investigation workflows. Explain why current tools are insufficient.
+    validations:
+      required: true
+
+  - type: textarea
+    id: desired-outcome
+    attributes:
+      label: Desired outcome and success criteria
+      description: Describe observable behavior, inputs, outputs, evidence, and compatibility criteria that would make this useful.
+    validations:
+      required: true
+
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Authority boundaries and non-goals
+      description: Call out process execution, target mutation, provider licensing, evidence provenance, supported platforms, and work that should remain out of scope.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe existing REA operations, upstream tools, or workarounds considered and why they do not meet the need.
+
+  - type: textarea
+    id: possible-direction
+    attributes:
+      label: Possible direction
+      description: Optional implementation or integration idea. Treat it as a proposal, not a requirement.
+
+  - type: textarea
+    id: references
+    attributes:
+      label: References
+      description: Link relevant provider documentation, source, measurements, artifacts, issues, or discussions.

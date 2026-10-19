@@ -28,7 +28,7 @@ import type {
   DiagFailures, DiagSessions, DiagSystemPrompt,
   DiagLlmDump, DiagRequestMeta, DiagRequestDetail, DiagRedlineTest,
   Team, TeamMemberInput, TeamPreflight, TeamRun,
-  SkillResource,
+  SkillResource, ArtexPlanResult, ArtexTaskGraph, ArtexIntent, ArtexEngineStatus, ArtexActivityResponse,
   SamplePackage, SampleTargetAnalysis, SampleTargetAnalyzeResponse, SampleTargetRegisterResponse, SamplePackageUploadSession, SamplePackagePreview,
 } from "./types"
 import type { Taxonomy } from "./taxonomy"
@@ -105,6 +105,14 @@ export const api = {
   restoreProject: (trashName: string) =>
     http<{ project_id: string | null; slug: string; status: string }>(
       `/api/projects/${encodeURIComponent(trashName)}/restore`, { method: "POST" }),
+  // 回收站终点（2026-10-18）：永久删除（物理抹除）/ 清除项目内文件仅留名字墓碑
+  purgeTrashedProject: (trashName: string) =>
+    http<{ status: string; trash_name: string }>(
+      `/api/projects/trash/${encodeURIComponent(trashName)}`, { method: "DELETE" }),
+  clearTrashedProject: (trashName: string) =>
+    http<{ status: string; trash_name: string; removed_entries: number;
+            freed_bytes: number; kept: string[]; purged_at: string }>(
+      `/api/projects/trash/${encodeURIComponent(trashName)}/clear`, { method: "POST" }),
   listRoles: (pid: string) => http<RoleInfo[]>(`/api/projects/${pid}/roles`),
 
   // 黑板（读）
@@ -163,16 +171,37 @@ export const api = {
       method: "POST", body: JSON.stringify({ type, value, meta }),
     }),
 
-  // ---------- CTF 题目（challenge-asset，v38，2026-10-14） ----------
-  challenges: (pid: string) => http<Asset[]>(`/api/projects/${pid}/challenges`),
-  addChallenge: (pid: string, title: string) =>
-    http<Asset>(`/api/projects/${pid}/challenges`, {
-      method: "POST", body: JSON.stringify({ title }),
+  // ---------- CTF 题目（challenge-asset v38 / 题目表单 v47，2026-10-19） ----------
+  challenges: (pid: string) => http<import("./types").ChallengeSummary[]>(`/api/projects/${pid}/challenges`),
+  /** 建题：name 可空（空名按题面/入口内容指纹生成稳定 value，AI 之后改 title 只动展示层）。 */
+  addChallenge: (pid: string, body: import("./types").ChallengeCreateBody) =>
+    http<import("./types").ChallengeSummary>(`/api/projects/${pid}/challenges`, {
+      method: "POST", body: JSON.stringify(body),
     }),
-  patchChallenge: (assetId: string, body: { title?: string; meta?: Record<string, unknown> }) =>
-    http<Asset>(`/api/challenges/${assetId}`, {
+  patchChallenge: (assetId: string, body: import("./types").ChallengePatchBody) =>
+    http<import("./types").ChallengeSummary>(`/api/challenges/${assetId}`, {
       method: "PATCH", body: JSON.stringify(body),
     }),
+  // ---------- CTF flag 台账（challenge-flag-ledger v47） ----------
+  challengeFlags: (assetId: string) =>
+    http<import("./types").ChallengeFlagsResponse>(`/api/challenges/${assetId}/flags`),
+  addChallengeFlag: (assetId: string, body: { flag: string; source?: string; verdict?: string }) =>
+    http<import("./types").ChallengeFlag>(`/api/challenges/${assetId}/flags`, {
+      method: "POST", body: JSON.stringify(body),
+    }),
+  /** 人工裁决：accepted（确认）/ rejected（**标记为错误**）/ pending。 */
+  decideChallengeFlag: (assetId: string, flagId: string, body: { verdict: string; reason?: string }) =>
+    http<import("./types").ChallengeFlag>(`/api/challenges/${assetId}/flags/${flagId}`, {
+      method: "PATCH", body: JSON.stringify(body),
+    }),
+  abandonChallenge: (assetId: string, abandoned = true) =>
+    http<import("./types").ChallengeSummary>(`/api/challenges/${assetId}/abandon`, {
+      method: "POST", body: JSON.stringify({ abandoned }),
+    }),
+  startCtfAgent: (assetId: string, body: { provider?: string; model?: string } = {}) =>
+    http<{ job_id: string; no_submit: boolean; provider: string; model: string }>(
+      `/api/challenges/${assetId}/ctf-agent`, { method: "POST", body: JSON.stringify(body) }),
+  ctfAgentJob: (jobId: string) => http<Job>(`/api/jobs/${jobId}`),
 
   // ---------- 网络空间测绘（cyberspace-mapping M1+M2） ----------
   fofaConfig: () => http<FofaConfig>("/api/fofa/config"),
@@ -1125,6 +1154,52 @@ export const api = {
     http<ProxyConfigView>(`/api/proxy/config`,
       { method: "PUT", body: JSON.stringify(body) }),
 
+  // ---------- ARTEX Planner 与任务图 ----------
+  artexPlan: (pid: string, body: { goal: string; task_id?: string; asset_ids?: string[]; allowed_experts?: string[]; start_engine?: boolean }) =>
+    http<ArtexPlanResult>(`/api/projects/${pid}/artex/plan`, {
+      method: "POST", body: JSON.stringify(body),
+    }),
+  artexTaskList: (pid: string, limit = 100) =>
+    http<import("./types").ArtexTaskListResponse>(`/api/projects/${pid}/artex/tasks?limit=${limit}`),
+  artexTaskGraph: (pid: string, taskId: string) =>
+    http<ArtexTaskGraph>(`/api/projects/${pid}/artex/tasks/${encodeURIComponent(taskId)}`),
+  artexTaskRuntime: (pid: string, taskId: string) =>
+    http<import("./types").ArtexTaskRuntime>(`/api/projects/${pid}/artex/tasks/${encodeURIComponent(taskId)}/runtime`),
+  artexTaskCoverage: (pid: string, taskId: string, type = "", limit = 50, offset = 0) =>
+    http<import("./types").ArtexCoverageResponse>(
+      `/api/projects/${pid}/artex/tasks/${encodeURIComponent(taskId)}/coverage?type=${encodeURIComponent(type)}&limit=${limit}&offset=${offset}`),
+  artexTaskCoverageGraph: (pid: string, taskId: string) =>
+    http<{ task_id: string; nodes: import("./types").ArtexCoverageGraphNode[]; edges: { src: string; dst: string }[] }>(
+      `/api/projects/${pid}/artex/tasks/${encodeURIComponent(taskId)}/coverage/graph`),
+  artexTaskScope: (pid: string, taskId: string,
+                   body: { asset_ids?: string[]; remove?: boolean; note?: string }) =>
+    http<{ changed: boolean; result?: { added?: string[]; existing?: string[]; missing?: string[]; removed?: number }; coverage: import("./types").ArtexCoverage }>(
+      `/api/projects/${pid}/artex/tasks/${encodeURIComponent(taskId)}/scope`, {
+      method: "POST", body: JSON.stringify({ asset_ids: body.asset_ids ?? [], remove: body.remove ?? false, note: body.note ?? "" }),
+    }),
+  artexExploration: (pid: string, taskId?: string) =>
+    http<import("./types").ArtexExplorationGraph>(`/api/projects/${pid}/artex/exploration${taskId ? `?task_id=${encodeURIComponent(taskId)}` : ""}`),
+  artexExplorationNode: (pid: string, nodeId: string) =>
+    http<{ node: import("./types").ArtexExplorationNode; edges: import("./types").ArtexExplorationEdge[] }>(`/api/projects/${pid}/artex/exploration/${encodeURIComponent(nodeId)}`),
+  artexActivity: (pid: string, taskId?: string, sinceId = 0) =>
+    http<ArtexActivityResponse>(`/api/projects/${pid}/artex/activity?since_id=${sinceId}${taskId ? `&task_id=${encodeURIComponent(taskId)}` : ""}`),
+  artexActivityStreamUrl: (pid: string, taskId?: string, sinceId = 0) =>
+    `/api/projects/${pid}/artex/activity/stream?since_id=${sinceId}${taskId ? `&task_id=${encodeURIComponent(taskId)}` : ""}`,
+  artexEngineStatus: (pid: string, taskId?: string) =>
+    http<ArtexEngineStatus>(`/api/projects/${pid}/artex/engine${taskId ? `?task_id=${encodeURIComponent(taskId)}` : ""}`),
+  artexEngineStart: (pid: string) =>
+    http<{ project_id: string; running: boolean }>(`/api/projects/${pid}/artex/engine/start`, { method: "POST" }),
+  artexEngineStop: (pid: string) =>
+    http<{ project_id: string; running: boolean; drained: boolean; active_workers: number }>(`/api/projects/${pid}/artex/engine/stop`, { method: "POST" }),
+  artexIntentControl: (pid: string, intentId: string, action: "pause" | "resume" | "cancel" | "retry") =>
+    http<ArtexIntent>(`/api/projects/${pid}/artex/intents/${encodeURIComponent(intentId)}/control`, {
+      method: "POST", body: JSON.stringify({ action }),
+    }),
+  artexWorkerControl: (pid: string, intentId: string, action: "kill" | "steer", message = "") =>
+    http<ArtexIntent>(`/api/projects/${pid}/artex/intents/${encodeURIComponent(intentId)}/worker-control`, {
+      method: "POST", body: JSON.stringify({ action, message }),
+    }),
+
   // ---------- 智能体工作台（K9，2026-09-29）：独立轻量对话运行时 ----------
   chatAgents: (pid: string) =>
     http<ChatAgent[]>(`/api/chat/agents?pid=${encodeURIComponent(pid)}`),
@@ -1132,11 +1207,12 @@ export const api = {
     http<ChatThread[]>(
       `/api/projects/${pid}/chat/threads${agentId ? `?agent_id=${encodeURIComponent(agentId)}` : ""}`),
   chatThreadCreate: (pid: string, agentId: string, title?: string,
-                     provider?: string, model?: string) =>
+                     provider?: string, model?: string, webSearch?: boolean) =>
     http<ChatThread>(`/api/projects/${pid}/chat/threads`, {
       method: "POST",
       body: JSON.stringify({ agent_id: agentId, title: title ?? null,
-                             provider: provider || null, model: model || null }),
+                             provider: provider || null, model: model || null,
+                             web_search: !!webSearch }),
     }),
   chatThread: (tid: string, afterId = 0) =>
     http<ChatThreadDetail>(`/api/chat/threads/${tid}?after_id=${afterId}`),
@@ -1149,6 +1225,12 @@ export const api = {
     }),
   chatThreadLlmReset: (tid: string) =>
     http<ChatThread>(`/api/chat/threads/${tid}/llm`, { method: "DELETE" }),
+  // 线程级联网搜索开关（v43，web-search-toggle，2026-10-19）：主控开 =
+  // spawn 子代理默认继承；不进专家工具勾选。
+  chatThreadWebSearch: (tid: string, enabled: boolean) =>
+    http<ChatThread>(`/api/chat/threads/${tid}/web-search`, {
+      method: "PUT", body: JSON.stringify({ enabled }),
+    }),
   chatSend: (tid: string, text: string,
              refs?: { skills: string[]; mcps: string[] } | null,
              attachmentIds: string[] = []) =>

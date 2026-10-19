@@ -2,6 +2,7 @@ import { useEffect, useState } from "react"
 import { api } from "@/lib/api"
 import { Button } from "@/components/ui/button"
 import type { OrchPersona, PhaseGoal } from "@/lib/types"
+import { MarkdownView } from "@/components/settings/MarkdownView"
 
 // 编排器弹层组件（2026-09-25 从 LiveRoom 抽出，webui-trae-shell M2）：
 // LiveRoom 专用（原为与已移除的 shell2/ConversationPane 共用件，2026-09-26 新壳移除后归一）。
@@ -112,6 +113,7 @@ export function PersonaEditor({ initial, onClose, onSave }: {
 }) {
   const [name, setName] = useState(initial?.display_name ?? "")
   const [persona, setPersona] = useState(initial?.persona ?? "")
+  const [preview, setPreview] = useState(false)
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState<string | null>(null)
 
@@ -136,10 +138,24 @@ export function PersonaEditor({ initial, onClose, onSave }: {
       <label className="mb-1 block text-muted-foreground">显示名</label>
       <input value={name} onChange={(e) => setName(e.target.value)} placeholder="编排器"
         className="mb-2 h-7 w-full rounded-md border bg-background px-2" />
-      <label className="mb-1 block text-muted-foreground">人设（persona，可空）</label>
-      <textarea rows={4} value={persona} onChange={(e) => setPersona(e.target.value)}
-        placeholder="如：老编——先给结论再给依据，不打官腔，拿不准就直说"
-        className="mb-2 w-full resize-y rounded-md border bg-background px-2 py-1 leading-relaxed" />
+      <div className="mb-1 flex items-center justify-between gap-2">
+        <label className="text-muted-foreground">人设（Markdown，可空）</label>
+        <div className="flex rounded border text-[10px]">
+          <button type="button" onClick={() => setPreview(false)}
+            className={`px-2 py-0.5 ${!preview ? "bg-primary/10 text-primary" : "text-muted-foreground"}`}>编辑</button>
+          <button type="button" onClick={() => setPreview(true)}
+            className={`px-2 py-0.5 ${preview ? "bg-primary/10 text-primary" : "text-muted-foreground"}`}>预览</button>
+        </div>
+      </div>
+      {preview ? (
+        <div className="mb-2 min-h-24 max-h-56 overflow-y-auto rounded-md border bg-background px-2 py-1">
+          {persona.trim() ? <MarkdownView content={persona} prefix="persona" /> : <span className="text-muted-foreground">暂无内容</span>}
+        </div>
+      ) : (
+        <textarea rows={8} value={persona} onChange={(e) => setPersona(e.target.value)}
+          placeholder={"支持 Markdown，例如：\n## 工作方式\n- 先给结论，再给依据\n- 不确定时明确说明"}
+          className="mb-2 w-full resize-y rounded-md border bg-background px-2 py-1 font-mono text-[11px] leading-relaxed" />
+      )}
       {err && <p className="mb-1 text-(--status-error)">{err}</p>}
       <div className="flex items-center gap-2">
         <Button size="sm" variant="ghost" onClick={onClose}>取消</Button>

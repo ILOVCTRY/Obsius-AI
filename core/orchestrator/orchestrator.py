@@ -504,7 +504,9 @@ class Orchestrator:
         persona = str(p.get("persona") or "").strip()
         if not persona:
             return ""
-        return f"## 你的身份\n{persona[:600]}\n"
+        # persona 按 Markdown 原文注入，保留标题、列表、代码块等文档结构；
+        # 编辑器和项目元数据都以 UTF-8 文本保存，不在编排器侧静默截断。
+        return f"## 你的身份\n{persona}\n"
 
     def _mission_section(self) -> str:
         """行动边界注入（R2 轨级行为语义，goal 统一后本段只管边界不管目标）：

@@ -9,7 +9,10 @@ register_asset（quiet 静音逐行事件）+ DNS 批次内预热缓存。
 本模块只经传入的 Blackboard 方法读写，不直接握连接。
 """
 
+import hashlib
 import ipaddress
+import json
+import logging
 import re
 import socket
 import threading
@@ -18,6 +21,9 @@ from urllib.parse import urlparse
 
 from core.blackboard.cdn import CdnLists, is_cdn
 from core.blackboard.store import new_id  # 复用 <前缀>-<12hex> 约定
+from core.scope_policy import check_project_scope
+
+log = logging.getLogger(__name__)
 
 __all__ = ["detect_type", "register_asset", "register_challenge", "CHALLENGE_TYPE",
            "resolve_ipv4", "import_assets", "warm_dns", "clear_dns_warm"]
@@ -34,6 +40,10 @@ CHALLENGE_TYPE = "challenge"
 # register_challenge 的 meta 字段上限（防 Agent 把整段题目原文灌进黑板）
 _CHALLENGE_DESC_MAX = 500
 _CHALLENGE_TAGS_MAX = 12
+# 题面原文（hit）比一句话简述长得多，但仍要设上限——它会被反复塞进 Worker
+# 提示词，无限长度会直接吃掉上下文预算。
+_CHALLENGE_BRIEF_MAX = 8000
+_CHALLENGE_ENTRY_MAX = 1000
 
 # DNS 批次内预热缓存（仅 import_assets 填充/清空；批外 resolve 恒真实解析，
 # 不做进程级缓存——负缓存（解析失败）长存会让 DNS 恢复后的域名永远挂不上）
@@ -177,6 +187,11 @@ def register_asset(bb, project_id: str, value: str, type_: str = "auto",
                 value = head
         if not value:
             raise ValueError("domain 值规范化后为空（请传裸域名，不带 http:// 或端口）")
+    # 项目级授权范围先于 DNS 解析和任何资产写入执行，避免越界目标产生网络副作用。
+    if type_ in ("domain", "host", "service", "url"):
+        verdict = check_project_scope(bb, project_id, value)
+        if not verdict.allowed:
+            raise ValueError("范围拒绝：" + verdict.reason + "；如需扩大范围请先请求用户确认")
     result: dict = {"id": None, "created": False, "type": type_, "value": value,
                     "parent_id": parent_id}
     explicit_parent = parent_id
@@ -267,11 +282,55 @@ def register_asset(bb, project_id: str, value: str, type_: str = "auto",
     return result
 
 
-def register_challenge(bb, project_id: str, name: str, *,
+def _challenge_stable_value(name: str, brief: str, entry: str) -> str:
+    """题目资产的 ``value``（去重键的一部分）：**必须稳定**。
+
+    `register_asset` 的去重键是 ``UNIQUE(project_id, type, value, parent_id)``，
+    所以「题目名」若直接当 value，AI 每次重新起名都会插一行重复题目。三条规则：
+
+    1. 人类/AI 显式给了名字 → 用名字（与历史行为一致，同名 = 同一道题）；
+    2. 没给名字但给了题面/入口 → 用内容指纹 ``challenge-<sha1[:12]>``，
+       同样内容重复建 = 命中同一道题（不会因两次命名不同而重复）；
+    3. 什么都没有 → 抛错（不编造身份）。
+
+    **AI 自动命名走 `meta.title`（展示层），不改 value**——这样「AI 改名」是零
+    风险操作，而不会改变题目身份。
+    """
+    name = (name or "").strip()
+    if name:
+        return name
+    seed = "\n".join(x for x in ((brief or "").strip(), (entry or "").strip()) if x)
+    if not seed:
+        raise ValueError("题目名与题面/入口不能同时为空（无法确定题目身份）")
+    return f"challenge-{hashlib.sha1(seed.encode('utf-8')).hexdigest()[:12]}"
+
+
+def _normalize_flag_format(raw: str) -> str:
+    """flag 格式规范化：``flag{}`` / ``flag{xxx}`` / ``FLAG`` → ``flag{}``。
+
+    只做**提示性**规范化（给 flagjudge 加权用），不做强校验——真实比赛里题面
+    写 ``flag{}`` 而实际是 ``DASCTF{}`` 的情况很常见，硬卡格式会误杀。
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    head = text.split("{", 1)[0].strip() or text
+    head = head.strip("{}[]()<> ").strip()
+    if not head:
+        return ""
+    return f"{head[:32]}{{}}"
+
+
+def register_challenge(bb, project_id: str, name: str = "", *,
                        description: str = "", tags: list | None = None,
                        thread_id: str = "", author: str = "human",
-                       session_id: str | None = None) -> dict:
-    """登记/复用一道 CTF 题目（challenge-asset，2026-10-14）。
+                       session_id: str | None = None,
+                       brief: str = "", entry_hint: str = "",
+                       direction: str = "", flag_format: str = "",
+                       flag_count: int | None = None,
+                       entries: list | None = None,
+                       title: str = "") -> dict:
+    """登记/复用一道 CTF 题目（challenge-asset，2026-10-14；题目表单 v47）。
 
     题目是 assets 表里的**根行**（`type="challenge"`、`parent_id=NULL`），
     附件挂其下、发现/意图经 `target_asset_id` 指向它。本函数只做「meta 组装 +
@@ -279,21 +338,52 @@ def register_challenge(bb, project_id: str, name: str, *,
     审计（author/session_id）语义与其它资产完全一致**——保住 E6「单一写入口」
     这条红线，不新开旁路。
 
-    - ``description`` → ``meta.title``（一句话简述；前端 AssetRow/树节点已会渲染）
-    - ``tags`` → ``meta.tags``（题型等自由标签，如 web/pwn/crypto；前端 AssetTags 渲染）
-    - ``thread_id`` → ``meta.thread_id``（来源线程，反向可查「这题是谁建的」）
-    - ``meta.kind = "challenge"`` 恒定写入，供前端与查询区分题目行
+    meta 字段（v47 题目表单，全部可选）：
 
-    返回形态同 register_asset：``{id, created, type, value, parent_id}``。
+    - ``title`` / ``description`` → ``meta.title``（一句话简述；前端树节点渲染）
+    - ``brief`` → ``meta.brief``（**题面原文**，即用户说的 hit：题目给的信息）
+    - ``entry_hint`` → ``meta.entry_hint``（入口提示，纯文本；真正的入口是子资产）
+    - ``direction`` → ``meta.direction``（题目方向：web/pwn/crypto/reverse/misc…）
+    - ``tags`` → ``meta.tags``（自由标签，可多个）
+    - ``flag_format`` → ``meta.flag_format``（规范化成 ``flag{}``；**提示不是约束**）
+    - ``flag_count`` → ``meta.flag_count``（默认 1；多 flag 题目决定「部分完成」态）
+    - ``entries`` → 逐条建**子资产**（见下）
+    - ``thread_id`` → ``meta.thread_id``（来源线程，反向可查「这题是谁建的」）
+    - ``meta.kind = "challenge"`` 恒定写入
+
+    **入口点做成子资产**（不是字符串字段）：web 题的 URL 是 ``url`` 类型子资产、
+    附件题的附件是 ``file``/``binary`` 子资产。这样天然支持多入口（web 题既有
+    URL 又有源码包、pwn 题多个附件），且复用 ``register_asset`` 单一写入口与既有
+    的 ``resolve_challenge_asset_id`` 线程链回溯、``unpack_attachment`` 通道。
+
+    ``value`` 的稳定性见 `_challenge_stable_value`：显式名优先，缺名则按题面/
+    入口内容指纹——保证「AI 两次命名不同」不会插出两道题。AI 自动命名请写
+    ``title``（展示层），**不要**改 value。
+
+    返回形态同 register_asset：``{id, created, type, value, parent_id,
+    entries: [{id, type, value, created}], flag_count, flag_format}``。
     题目名重复 = 命中既有题目（返回 ``created=False``，不插重复行）。
     """
-    name = (name or "").strip()
-    if not name:
-        raise ValueError("题目名不能为空")
+    seed_parts = [(brief or description or "").strip(),
+                  (entry_hint or "").strip()]
+    if entries:
+        seed_parts.append(json.dumps(entries, ensure_ascii=False, sort_keys=True))
+    value = _challenge_stable_value(
+        name, (brief or description or title or ""),
+        "|".join(p for p in seed_parts if p))
     meta: dict = {"kind": CHALLENGE_TYPE}
-    desc = (description or "").strip()
-    if desc:
-        meta["title"] = desc[:_CHALLENGE_DESC_MAX]
+    headline = (title or description or "").strip()
+    if headline:
+        meta["title"] = headline[:_CHALLENGE_DESC_MAX]
+    body = (brief or "").strip()
+    if body:
+        meta["brief"] = body[:_CHALLENGE_BRIEF_MAX]
+    hint = (entry_hint or "").strip()
+    if hint:
+        meta["entry_hint"] = hint[:_CHALLENGE_ENTRY_MAX]
+    dirn = (direction or "").strip()
+    if dirn:
+        meta["direction"] = dirn[:64]
     if tags:
         cleaned: list[str] = []
         for t in tags:
@@ -302,11 +392,48 @@ def register_challenge(bb, project_id: str, name: str, *,
                 cleaned.append(t)
         if cleaned:
             meta["tags"] = cleaned[:_CHALLENGE_TAGS_MAX]
+    fmt = _normalize_flag_format(flag_format)
+    if fmt:
+        meta["flag_format"] = fmt
+    if flag_count is not None:
+        try:
+            n = int(flag_count)
+        except (TypeError, ValueError):
+            n = 1
+        meta["flag_count"] = max(1, min(n, 50))
     tid = (thread_id or "").strip()
     if tid:
         meta["thread_id"] = tid
-    return register_asset(bb, project_id, name, type_=CHALLENGE_TYPE, meta=meta,
-                          author=author, session_id=session_id)
+    result = register_asset(bb, project_id, value, type_=CHALLENGE_TYPE, meta=meta,
+                            author=author, session_id=session_id)
+    # 入口点子资产：web 入口 / 附件。挂在题目根行下（parent_id=题目 id），
+    # 走同一 register_asset（含类型识别、去重、DNS 挂载等既有语义）。
+    cid = str(result.get("id") or "")
+    created_entries: list[dict] = []
+    for raw in (entries or []):
+        if isinstance(raw, str):
+            item = {"value": raw}
+        elif isinstance(raw, dict):
+            item = dict(raw)
+        else:
+            continue
+        ev = str(item.get("value") or item.get("url") or item.get("path") or "").strip()
+        if not ev:
+            continue
+        etype = str(item.get("type") or "").strip() or "auto"
+        emeta = dict(item.get("meta") or {})
+        emeta.setdefault("role", "entry")
+        try:
+            r = register_asset(bb, project_id, ev, type_=etype, parent_id=cid,
+                               meta=emeta, author=author, session_id=session_id)
+        except ValueError as exc:  # noqa: BLE001 —— 单个入口登记失败不废整道题
+            log.warning("题目入口登记失败 challenge=%s value=%s: %s", cid, ev[:80], exc)
+            continue
+        created_entries.append({"id": r.get("id"), "type": r.get("type"),
+                                "value": r.get("value"), "created": r.get("created")})
+    return {**result, "entries": created_entries,
+            "flag_count": int(meta.get("flag_count") or 1),
+            "flag_format": str(meta.get("flag_format") or "")}
 
 
 # ---------- 批量导入（cyberspace-mapping M1，2026-09-23） ----------

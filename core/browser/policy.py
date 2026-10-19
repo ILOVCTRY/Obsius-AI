@@ -19,6 +19,8 @@ import ipaddress
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
+from core.scope_policy import check_project_scope
+
 __all__ = [
     "ParsedTarget", "TargetVerdict", "normalize_target", "check_target",
     "deny_event",
@@ -74,6 +76,10 @@ def check_target(bb, project_id: str, url_or_host: str,
     t = normalize_target(url_or_host)
     if not t.host:
         return TargetVerdict(False, "", t.is_ip, reason="无法解析目标主机")
+
+    scope_verdict = check_project_scope(bb, project_id, url_or_host, port=t.port)
+    if not scope_verdict.allowed:
+        return TargetVerdict(False, t.host, t.is_ip, reason="范围拒绝：" + scope_verdict.reason)
 
     # 1) host(IP) 资产精确相等
     hit = bb.find_asset(project_id, "host", t.host)

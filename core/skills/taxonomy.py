@@ -29,6 +29,37 @@ TRACKS = ("ctf", "pentest", "redteam", "research")
 # kb 知识方向（原能力包名，降级为知识组织单位）
 KB_DIRECTIONS = ("web", "binary", "crypto", "forensics", "misc", "cloud")
 
+# 技能展示分组（专家池勾选清单按类别展示；**纯展示口径**，不参与加载/路由/校验）。
+# 技能目录是扁平的（kb/skills/<name>），没有方向归属，故按命名约定归类；
+# 新增技能若不套前缀会落到「其他」，不影响功能，只是显示位置靠后。
+SKILL_GROUP_ORDER = ("分诊", "Web 攻击", "二进制与逆向", "红队后渗透",
+                     "云与容器", "侦察", "蓝图与建模", "其他")
+_SKILL_GROUP_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("web-",), "Web 攻击"),
+    (("binary-", "android-rev", "dotnet-rev", "edr-hook-rev"), "二进制与逆向"),
+    (("rt-",), "红队后渗透"),
+    (("cloud-",), "云与容器"),
+    (("recon-",), "侦察"),
+    (("blueprint-",), "蓝图与建模"),
+)
+
+
+def skill_group(name: str) -> str:
+    """技能所属展示分组（按命名约定推断，未知回落「其他」）。
+
+    ``*-triage`` 一律归「分诊」——分诊是入口技能，跨域（web/binary/crypto/
+    forensics/misc）共用一套判类流程，按域拆开反而看不出它是同一件事。
+    """
+    n = (name or "").strip().lower()
+    if n == "triage" or n.endswith("-triage"):
+        return "分诊"
+    for prefixes, group in _SKILL_GROUP_RULES:
+        if n.startswith(prefixes):
+            return group
+    if n.endswith("-rev"):
+        return "二进制与逆向"
+    return "其他"
+
 # 旧平铺领域包 → (track, capabilities) 读兼容映射（§4.5.5）
 # R1（2026-09-17）：assessment 轨分解为 pentest/redteam，本表目标轨同步更新
 LEGACY_DOMAIN_MAP: dict[str, tuple[str, list[str]]] = {

@@ -9,7 +9,46 @@
 
 import sqlite3
 
-SCHEMA_VERSION = 39
+SCHEMA_VERSION = 47
+
+# v46→v47（CTF 题目 flag 台账，challenge-flag-ledger，2026-10-19）：新增
+# challenge_flags 表——flag 从 findings 迁出独立建模。findings 的「正式漏洞
+# 五项必填契约」是为渗透结论设计的，CTF flag 不是漏洞，此前只能硬写套话过闸。
+# 题目状态（untouched/running/partial/solved/abandoned）由本表**派生**，不独立
+# 维护；``verdict='rejected'`` 是人工否决清单（同串再提交必须拦）。表由 DDL 的
+# IF NOT EXISTS 直接建（无 ALTER），旧库打开即建；存量 flag（findings 里
+# vuln_class='flag-capture' 且 evidence.flag 非空）由惰性迁移补登，见
+# core/blackboard/challenge_flags.py::backfill_from_findings。
+
+# v45→v46（Worker 间过程级信息交换，artex-traces，2026-10-19）：chat_threads
+# 幂等补 artex_intent_id / artex_task_id，使 Worker 执行线程与 ARTEX Intent/任务
+# 可关联——支撑 list/get/search_worker_traces 从 chat_messages 反推执行过程。
+# 历史行保持空值不回填。
+
+# v44→v45（Intent 依赖序，artex-deps，2026-10-19）：artex_intents 幂等补
+# depends_on（JSON id 数组，''/'[]' = 无依赖）。真实攻击链常是**有前后依赖的
+# 串行序列**（注入点→凭据→横向→提权），后一步要用前一步的实际产出；此前一次性
+# 并行下发会让下游 worker 拿不到还不存在的前置，只能空转或重复探测。存 id 数组
+# 而**不**用外键：Intent 删除后残留 id 视为已满足（不阻断），避免悬空依赖死锁。
+# Frontier（claim_next_intent）据此加依赖闸：依赖未全 completed 不得领取；依赖
+# 中出现 failed/cancelled 时本 Intent 置 blocked 并说明原因（上游 planner.go:333
+# 「串行利用链：分步派，别拆成并行」的调度侧落地）。
+
+# v43→v44（任务资产锚点与覆盖度，artex-coverage，2026-10-19）：新增
+# artex_task_assets —— 任务的「范围资产」（复刻上游 task_scope 语义）：一行
+# = 一个被本任务纳入测试范围的资产。它是覆盖度的**分母**，与 assets 表的父子
+# 包含关系正交（后者是资产树的物理结构，前者是任务的授权/测试范围）。行由
+# Planner 落树时的初始 asset_ids（source='planner'）与主控显式锚定
+# （source='manual'）写入，幂等去重 (project_id, task_id, asset_id)。
+# 覆盖度**分子**不落表：由探索图 fact 节点的 asset_ids 限定（上游同口径——
+# 「被事实锚定过」即视为已测），见 core/blackboard/artex_coverage.py。
+
+# v42→v43（联网搜索开关，web-search-toggle，2026-10-19）：chat_threads 幂等补
+# web_search（0/1，线程级）。工作台 composer「联网」开关打开 = 该对话线程的主控
+# 与**其 spawn 的全部子代理**默认启用 web_search 工具（SearXNG/ddgs 双后端，
+# 见 core/websearch.py）——不是专家 yaml 的工具勾选（用户明确：不进专家工具清单），
+# 关了子代理也不拿该工具。call_expert spawn 与 ARTEX Worker 建线程时从父线程
+# 继承该位。历史行默认 0（关闭），不回溯。
 
 # v37→v38（CTF 题目即资产，challenge-asset，2026-10-14）：chat_threads 幂等补
 # challenge_asset_id（本线程归属的题目资产 id，''=未绑定）。CTF 轨「一个主控线程
@@ -445,6 +484,119 @@ CREATE TABLE IF NOT EXISTS intents (
 CREATE INDEX IF NOT EXISTS idx_intents_project ON intents(project_id, id);
 CREATE INDEX IF NOT EXISTS idx_intents_open ON intents(project_id, status);
 
+-- v40 ARTEX 调度 Intent：与证据链 intents 分离，承载 frontier/worker 生命周期。
+CREATE TABLE IF NOT EXISTS artex_intents (
+    id              TEXT PRIMARY KEY,
+    project_id      TEXT NOT NULL REFERENCES projects(id),
+    parent_id       TEXT REFERENCES artex_intents(id),
+    source_intent_id TEXT REFERENCES intents(id),
+    task_id         TEXT NOT NULL DEFAULT '',
+    objective       TEXT NOT NULL,
+    constraints     TEXT NOT NULL DEFAULT '{}',
+    asset_ids       TEXT NOT NULL DEFAULT '[]',
+    depends_on      TEXT NOT NULL DEFAULT '[]',  -- v45：前置 Intent id 数组
+    expert          TEXT NOT NULL DEFAULT '',
+    priority        INTEGER NOT NULL DEFAULT 0,
+    status          TEXT NOT NULL DEFAULT 'pending',
+    attempt         INTEGER NOT NULL DEFAULT 0,
+    claimed_by      TEXT NOT NULL DEFAULT '',
+    claimed_at      TEXT,
+    started_at      TEXT,
+    finished_at     TEXT,
+    result          TEXT NOT NULL DEFAULT '',
+    error           TEXT NOT NULL DEFAULT '',
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_artex_intents_frontier ON artex_intents(project_id, status, priority);
+CREATE INDEX IF NOT EXISTS idx_artex_intents_task ON artex_intents(project_id, task_id);
+
+-- v41 ARTEX 探索图：Goal/Fact/Finding/Hint 节点及血缘边。
+CREATE TABLE IF NOT EXISTS artex_exploration_nodes (
+    id              TEXT PRIMARY KEY,
+    project_id      TEXT NOT NULL REFERENCES projects(id),
+    task_id         TEXT NOT NULL DEFAULT '',
+    intent_id       TEXT,
+    kind            TEXT NOT NULL,
+    title           TEXT NOT NULL DEFAULT '',
+    content         TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'open',
+    confidence      REAL NOT NULL DEFAULT 0.0,
+    asset_ids       TEXT NOT NULL DEFAULT '[]',
+    metadata        TEXT NOT NULL DEFAULT '{}',
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_artex_explore_project ON artex_exploration_nodes(project_id, task_id, kind);
+CREATE INDEX IF NOT EXISTS idx_artex_explore_intent ON artex_exploration_nodes(project_id, intent_id);
+
+CREATE TABLE IF NOT EXISTS artex_exploration_edges (
+    id              TEXT PRIMARY KEY,
+    project_id      TEXT NOT NULL REFERENCES projects(id),
+    from_node_id    TEXT NOT NULL REFERENCES artex_exploration_nodes(id),
+    to_node_id      TEXT NOT NULL REFERENCES artex_exploration_nodes(id),
+    relation        TEXT NOT NULL,
+    metadata        TEXT NOT NULL DEFAULT '{}',
+    created_at      TEXT NOT NULL,
+    UNIQUE(project_id, from_node_id, to_node_id, relation)
+);
+CREATE INDEX IF NOT EXISTS idx_artex_explore_edges_from ON artex_exploration_edges(project_id, from_node_id);
+CREATE INDEX IF NOT EXISTS idx_artex_explore_edges_to ON artex_exploration_edges(project_id, to_node_id);
+
+-- v44 ARTEX 任务范围资产（task_scope 语义）：覆盖度分母。
+CREATE TABLE IF NOT EXISTS artex_task_assets (
+    project_id      TEXT NOT NULL REFERENCES projects(id),
+    task_id         TEXT NOT NULL,
+    asset_id        TEXT NOT NULL REFERENCES assets(id),
+    source          TEXT NOT NULL DEFAULT 'planner',  -- planner / manual / api
+    note            TEXT NOT NULL DEFAULT '',
+    created_at      TEXT NOT NULL,
+    PRIMARY KEY(project_id, task_id, asset_id)
+);
+CREATE INDEX IF NOT EXISTS idx_artex_task_assets_task
+    ON artex_task_assets(project_id, task_id);
+CREATE INDEX IF NOT EXISTS idx_artex_task_assets_asset
+    ON artex_task_assets(project_id, asset_id);
+
+-- v47 CTF 题目 flag 台账（challenge-flag-ledger，2026-10-19）：flag **不再**只
+-- 落在 findings 里。findings 的「正式漏洞五项必填契约」（名称/等级/类型/受影响
+-- 资产/摘要/测试环境/步骤/验证结果/风险影响/POC）是为渗透结论设计的，CTF 的 flag
+-- 不是漏洞——此前为了让 flag 过闸只能硬写套话（tools.py 里 risk_assessment
+-- 「CTF 题目环境内的解题结论…」就是被契约逼出来的）。
+--
+-- 本表是 flag 的**唯一真值**，题目状态（未跑/进行中/部分/已解/放弃）全部由它
+-- **派生**（core/blackboard/challenge_flags.py::challenge_state），不独立维护——
+-- 否则会出现「状态说已解但 flag 表是空的」。
+--
+-- verdict 语义：
+--   * ``pending``  —— 已登记待人工复核（AI 判定通过但人还没确认）；
+--   * ``accepted`` —— 有效（AI 判定通过且无人否决，或人工确认）；
+--   * ``rejected`` —— **人工标记为错误**。被拒的 flag 一律**不进** solved 派生，
+--     且同串再提交必须拦下（rejected 清单），否则模型会反复提交同一串白烧轮次。
+CREATE TABLE IF NOT EXISTS challenge_flags (
+    id              TEXT PRIMARY KEY,
+    project_id      TEXT NOT NULL REFERENCES projects(id),
+    challenge_id    TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    flag            TEXT NOT NULL,
+    flag_format     TEXT NOT NULL DEFAULT '',  -- 声明格式（flag{}/ctf{}），''=题目未声明
+    confidence      REAL NOT NULL DEFAULT 0.0, -- flagishness 分（0=人工录入）
+    source          TEXT NOT NULL DEFAULT '',  -- 解题路径/来源（可读文本）
+    transform       TEXT NOT NULL DEFAULT '',  -- 声称的变换链（base64/rot13…）
+    judged_by       TEXT NOT NULL DEFAULT 'ai',-- ai / human
+    verdict         TEXT NOT NULL DEFAULT 'pending',
+    verdict_reason  TEXT NOT NULL DEFAULT '',  -- 人工否决/确认的理由
+    author          TEXT NOT NULL DEFAULT '',
+    session_id      TEXT NOT NULL DEFAULT '',
+    finding_id      TEXT NOT NULL DEFAULT '',  -- 关联的过程性 finding（可空，仅留痕）
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    UNIQUE(project_id, challenge_id, flag)
+);
+CREATE INDEX IF NOT EXISTS idx_challenge_flags_challenge
+    ON challenge_flags(project_id, challenge_id, verdict);
+CREATE INDEX IF NOT EXISTS idx_challenge_flags_flag
+    ON challenge_flags(project_id, flag);
+
 -- v25 智能体工作台对话线程（K9，2026-09-29）：新独立轻量对话运行时的持久化层，
 -- 不进 sessions/tasks 体系。每 agent（主控 chat-orchestrator + 专家池专家）
 -- 独立线程（蛙池式：切 agent=切线程）；主控 call_expert spawn 的子专家线程经
@@ -463,6 +615,9 @@ CREATE TABLE IF NOT EXISTS chat_threads (
     provider         TEXT NOT NULL DEFAULT '',      -- 线程级模型供应商覆写（v37；''=跟随全局默认）
     model            TEXT NOT NULL DEFAULT '',      -- 线程级模型 id 覆写（v37；''=该供应商默认模型）
     challenge_asset_id TEXT NOT NULL DEFAULT '',    -- 本线程归属的题目资产 id（v38；''=未绑定，CTF 轨用）
+    web_search      INTEGER NOT NULL DEFAULT 0,     -- 联网搜索开关（v43；0=关。主控开=子代理默认继承，见 core/websearch.py）
+    artex_intent_id  TEXT NOT NULL DEFAULT '',      -- v46：关联 ARTEX Intent（支撑 Worker trace 检索）
+    artex_task_id    TEXT NOT NULL DEFAULT '',      -- v46：关联 ARTEX 任务（支撑 Worker trace 检索）
     created_at       TEXT NOT NULL,
     updated_at       TEXT NOT NULL
 );
@@ -681,7 +836,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     - v37→v38：chat_threads 幂等补 challenge_asset_id（线程归属的题目资产，
       ''=未绑定，见文件头版本注释）。历史行保持默认空值不回填。
     - v38→v39：session_system_prompts 由 DDL 的 IF NOT EXISTS 直接建表（诊断页
-      「查看系统提示词」快照，无 ALTER，旧库打开即建）。"""
+      「查看系统提示词」快照，无 ALTER，旧库打开即建）。
+    - v42→v43：chat_threads 幂等补 web_search（联网搜索开关，0/1，主控开=
+      子代理继承，见文件头版本注释）。历史行默认 0 不回填。"""
     cols = {r[1] for r in conn.execute("PRAGMA table_info(projects)")}
     if "track" not in cols:
         conn.execute("ALTER TABLE projects ADD COLUMN track TEXT NOT NULL DEFAULT ''")
@@ -704,6 +861,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if chat_cols and "challenge_asset_id" not in chat_cols:  # v38（线程归属题目）
         conn.execute(
             "ALTER TABLE chat_threads ADD COLUMN challenge_asset_id TEXT NOT NULL DEFAULT ''")
+    if chat_cols and "web_search" not in chat_cols:  # v43（联网搜索开关，主控开=子代理继承）
+        conn.execute(
+            "ALTER TABLE chat_threads ADD COLUMN web_search INTEGER NOT NULL DEFAULT 0")
+    if chat_cols and "artex_intent_id" not in chat_cols:  # v46（Worker trace 关联）
+        conn.execute(
+            "ALTER TABLE chat_threads ADD COLUMN artex_intent_id TEXT NOT NULL DEFAULT ''")
+    if chat_cols and "artex_task_id" not in chat_cols:  # v46（Worker trace 关联）
+        conn.execute(
+            "ALTER TABLE chat_threads ADD COLUMN artex_task_id TEXT NOT NULL DEFAULT ''")
     msg_cols = {r[1] for r in conn.execute("PRAGMA table_info(chat_messages)")}
     if msg_cols and "thinking" not in msg_cols:  # v31（思考正文持久化）
         conn.execute(
@@ -790,6 +956,90 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 "ALTER TABLE orchestrator_state ADD COLUMN"
                 " derive_idle_rounds INTEGER NOT NULL DEFAULT 0")
     _migrate_intent_anchors(conn)
+    _ensure_artex_intents(conn)
+    _ensure_artex_intents_deps(conn)
+    _ensure_artex_exploration(conn)
+    _ensure_artex_task_runtime(conn)
+    _ensure_artex_task_assets(conn)
+
+
+def _ensure_artex_intents_deps(conn: sqlite3.Connection) -> None:
+    """旧库给 artex_intents 补 depends_on（v45，Intent 依赖序）。
+
+    已有表用 ALTER 幂等补列；列不存在才加。历史行默认 '[]'（无依赖），不回溯
+    ——旧任务的并行下发行为不受影响。
+    """
+    cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(artex_intents)")}
+    if cols and "depends_on" not in cols:
+        conn.execute("ALTER TABLE artex_intents ADD COLUMN depends_on TEXT"
+                     " NOT NULL DEFAULT '[]'")
+
+
+def _ensure_artex_intents(conn: sqlite3.Connection) -> None:
+    """旧库补建 ARTEX 调度表；DDL 已含 IF NOT EXISTS，单独建索引保证旧库。"""
+    conn.execute("""CREATE TABLE IF NOT EXISTS artex_intents (
+        id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+        parent_id TEXT REFERENCES artex_intents(id), source_intent_id TEXT REFERENCES intents(id),
+        task_id TEXT NOT NULL DEFAULT '', objective TEXT NOT NULL,
+        constraints TEXT NOT NULL DEFAULT '{}', asset_ids TEXT NOT NULL DEFAULT '[]',
+        depends_on TEXT NOT NULL DEFAULT '[]',
+        expert TEXT NOT NULL DEFAULT '', priority INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'pending', attempt INTEGER NOT NULL DEFAULT 0,
+        claimed_by TEXT NOT NULL DEFAULT '', claimed_at TEXT, started_at TEXT,
+        finished_at TEXT, result TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_artex_intents_frontier "
+                 "ON artex_intents(project_id, status, priority)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_artex_intents_task "
+                 "ON artex_intents(project_id, task_id)")
+
+
+def _ensure_artex_task_runtime(conn: sqlite3.Connection) -> None:
+    conn.execute("""CREATE TABLE IF NOT EXISTS artex_task_runtime (
+        project_id TEXT NOT NULL REFERENCES projects(id), task_id TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'exploring', goal TEXT NOT NULL DEFAULT '',
+        metadata TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        PRIMARY KEY(project_id, task_id))""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_artex_runtime_project "
+                 "ON artex_task_runtime(project_id, status, updated_at DESC)")
+
+
+def _ensure_artex_task_assets(conn: sqlite3.Connection) -> None:
+    """旧库补建 v44 任务范围资产表（覆盖度分母）。DDL 已含 IF NOT EXISTS。"""
+    conn.execute("""CREATE TABLE IF NOT EXISTS artex_task_assets (
+        project_id TEXT NOT NULL REFERENCES projects(id), task_id TEXT NOT NULL,
+        asset_id TEXT NOT NULL REFERENCES assets(id),
+        source TEXT NOT NULL DEFAULT 'planner', note TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL, PRIMARY KEY(project_id, task_id, asset_id))""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_artex_task_assets_task "
+                 "ON artex_task_assets(project_id, task_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_artex_task_assets_asset "
+                 "ON artex_task_assets(project_id, asset_id)")
+
+
+def _ensure_artex_exploration(conn: sqlite3.Connection) -> None:
+    conn.execute("""CREATE TABLE IF NOT EXISTS artex_exploration_nodes (
+        id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+        task_id TEXT NOT NULL DEFAULT '', intent_id TEXT, kind TEXT NOT NULL,
+        title TEXT NOT NULL DEFAULT '', content TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'open', confidence REAL NOT NULL DEFAULT 0.0,
+        asset_ids TEXT NOT NULL DEFAULT '[]', metadata TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_artex_explore_project "
+                 "ON artex_exploration_nodes(project_id, task_id, kind)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_artex_explore_intent "
+                 "ON artex_exploration_nodes(project_id, intent_id)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS artex_exploration_edges (
+        id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+        from_node_id TEXT NOT NULL REFERENCES artex_exploration_nodes(id),
+        to_node_id TEXT NOT NULL REFERENCES artex_exploration_nodes(id),
+        relation TEXT NOT NULL, metadata TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        UNIQUE(project_id, from_node_id, to_node_id, relation))""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_artex_explore_edges_from "
+                 "ON artex_exploration_edges(project_id, from_node_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_artex_explore_edges_to "
+                 "ON artex_exploration_edges(project_id, to_node_id)")
 
 
 def _migrate_intent_anchors(conn: sqlite3.Connection) -> None:

@@ -1,0 +1,40 @@
+name: Portable build cache
+description: Reuse Turbo build outputs without serializing verification jobs.
+inputs:
+  save:
+    description: Save newly built outputs after the job succeeds.
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - name: Resolve portable build task hashes
+      id: plan
+      shell: bash
+      env:
+        BUILD_CACHE_PREFIX: rea-portable-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.npmrc') }}
+      run: |
+        npm run --silent test:prepare -- --dry=json |
+          node --input-type=module -e '
+            import { createHash } from "node:crypto";
+            import { readFileSync } from "node:fs";
+            const { tasks } = JSON.parse(readFileSync(0, "utf8"));
+            const hashes = tasks.map(({ taskId, hash }) => {
+              if (typeof hash !== "string")
+                throw new Error(`Build task ${taskId} must have an eager Turbo hash`);
+              return `${taskId}:${hash}`;
+            }).sort();
+            const hash = createHash("sha256").update(hashes.join("\n")).digest("hex");
+            console.log(`key=${process.env.BUILD_CACHE_PREFIX}-${hash}`);
+          ' >> "$GITHUB_OUTPUT"
+    - name: Restore portable build outputs
+      if: inputs.save != 'true'
+      uses: actions/cache/restore@v4
+      with:
+        path: .turbo/cache/
+        key: ${{ steps.plan.outputs.key }}
+    - name: Restore and save portable build outputs
+      if: inputs.save == 'true'
+      uses: actions/cache@v4
+      with:
+        path: .turbo/cache/
+        key: ${{ steps.plan.outputs.key }}

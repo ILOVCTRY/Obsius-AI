@@ -1,0 +1,116 @@
+#!/usr/bin/env node
+
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { PlaywrightElectronActiveProvider } from "../dist/browser/PlaywrightElectronActiveProvider.js";
+import { electronActiveObservationInputSchema } from "../dist/domain/javascript/electronActiveObservation.js";
+import { completeVerifierRun, createVerifierRun } from "./lib/verifier-run.mjs";
+import { verifyElectronToolContracts } from "./verify/electron/tool-contracts.mjs";
+
+const executable = process.env.REA_ELECTRON_EXECUTABLE;
+if (executable === undefined || executable.length === 0)
+  throw new Error(
+    "REA_ELECTRON_EXECUTABLE must identify the Electron executable for this verification lane",
+  );
+
+const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
+await verifyElectronToolContracts({ executable, repositoryRoot });
+const applicationRoot =
+  process.env.REA_ELECTRON_APPLICATION_ROOT ??
+  join(repositoryRoot, "tests/conformance/readiness/electron");
+const applicationPath =
+  process.env.REA_ELECTRON_APPLICATION_PATH ?? join(applicationRoot, "main.js");
+const input = electronActiveObservationInputSchema.parse({
+  executable_path: executable,
+  application_path: applicationPath,
+  application_root: applicationRoot,
+  actions: [
+    { step_id: "ipc", kind: "click", selector: "#run", window_index: 0 },
+    {
+      step_id: "open-url",
+      kind: "deep-link",
+      delivery: "open-url",
+      url: "rea-readiness://open-url",
+    },
+    {
+      step_id: "second-instance",
+      kind: "deep-link",
+      delivery: "second-instance",
+      url: "rea-readiness://second-instance",
+    },
+    { step_id: "renderer-reload", kind: "renderer-reload", window_index: 1 },
+    { step_id: "renderer-crash", kind: "renderer-crash", window_index: 1 },
+    {
+      step_id: "renderer-restart",
+      kind: "wait",
+      duration_ms: 250,
+      window_index: 1,
+    },
+  ],
+});
+const verifierRun = createVerifierRun();
+const result = await new PlaywrightElectronActiveProvider(process.env).capture(
+  input,
+);
+if (!result.ok) throw result.error;
+
+const output = {
+  verifier_run: await completeVerifierRun(verifierRun),
+  electron: result.value.application,
+  actions: result.value.actions,
+  processes: result.value.processes,
+  ipc: result.value.ipc,
+  timeline: result.value.timeline,
+  windows: result.value.windows,
+  verified:
+    result.value.coverage.status === "partial_attach" &&
+    result.value.actions.every(({ status }) => status === "completed") &&
+    result.value.actions.some(
+      ({ kind, window_index }) =>
+        kind === "renderer-reload" && window_index === 1,
+    ) &&
+    result.value.actions.some(
+      ({ kind, window_index }) =>
+        kind === "renderer-crash" && window_index === 1,
+    ) &&
+    result.value.windows.length >= 2 &&
+    result.value.ipc.events.some(
+      ({ kind, channel }) =>
+        kind === "main-handler-invocation" && channel === "readiness:echo",
+    ) &&
+    result.value.timeline.events.some(
+      ({ kind, event, phase }) =>
+        kind === "window-lifecycle" &&
+        event === "created" &&
+        phase === "completed",
+    ) &&
+    result.value.timeline.events.some(
+      ({ kind, event }) =>
+        kind === "process-lifecycle" && event === "utility-process-fork",
+    ) &&
+    result.value.timeline.events.some(
+      ({ kind, event, phase }) =>
+        kind === "shell-attempt" &&
+        event === "openExternal" &&
+        phase === "blocked",
+    ) &&
+    result.value.timeline.events.some(
+      ({ kind, event, phase }) =>
+        kind === "preload" && event === "configured" && phase === "completed",
+    ) &&
+    result.value.timeline.events.some(
+      ({ kind, event }) =>
+        kind === "protocol" &&
+        (event === "open-url" || event === "second-instance"),
+    ) &&
+    result.value.timeline.events.some(
+      ({ kind, event }) =>
+        kind === "process-lifecycle" && event === "child.spawn",
+    ),
+};
+process.stdout.write(`${JSON.stringify(output)}\n`);
+if (!output.verified)
+  throw new Error(
+    "real Electron verifier did not observe the readiness IPC round trip",
+  );

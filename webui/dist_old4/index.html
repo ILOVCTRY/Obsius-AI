@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Obsius</title>
+    <script>
+      (() => {
+        try {
+          let theme = localStorage.getItem("ui.theme")
+          // 旧版毛玻璃是独立主题 id="glass"——迁移为 cyber-dark + 玻璃质感模式
+          if (theme === "glass") {
+            theme = "cyber-dark"
+            localStorage.setItem("ui.theme", theme)
+            localStorage.setItem("ui.glass", "1")
+          }
+          if (theme === "cyber-dark" || theme === "warm-dark" || theme === "light"
+              || theme === "rose-dark" || theme === "rose-light") {
+            document.documentElement.dataset.theme = theme
+          }
+          if (localStorage.getItem("ui.glass") === "1") {
+            document.documentElement.dataset.glass = "1"
+          }
+        } catch {}
+      })()
+    </script>
+    <script type="module" crossorigin src="/assets/index-BJ7ieC_p.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/rolldown-runtime-hePW80VL.js">
+    <link rel="modulepreload" crossorigin href="/assets/board-components-CfFPT48n.js">
+    <link rel="modulepreload" crossorigin href="/assets/react-BLn17Klc.js">
+    <link rel="modulepreload" crossorigin href="/assets/layout-DnEE61a8.js">
+    <link rel="modulepreload" crossorigin href="/assets/icons-jlc15Kxr.js">
+    <link rel="modulepreload" crossorigin href="/assets/chat-components-CjqY8kZZ.js">
+    <link rel="modulepreload" crossorigin href="/assets/markdown-BV_0Lren.js">
+    <link rel="modulepreload" crossorigin href="/assets/graph-BBWsQnJq.js">
+    <link rel="modulepreload" crossorigin href="/assets/reverse-workbench-BgRTbLxS.js">
+    <link rel="modulepreload" crossorigin href="/assets/settings-components-Bye_Iirw.js">
+    <link rel="modulepreload" crossorigin href="/assets/terminal-vlAPRiid.js">
+    <link rel="modulepreload" crossorigin href="/assets/views-BAAhRTNC.js">
+    <link rel="stylesheet" crossorigin href="/assets/graph-DLioOiRN.css">
+    <link rel="stylesheet" crossorigin href="/assets/reverse-workbench-C-RPTIL5.css">
+    <link rel="stylesheet" crossorigin href="/assets/terminal-BrP-ENHg.css">
+    <link rel="stylesheet" crossorigin href="/assets/index-B4SjAyUj.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

@@ -10,12 +10,21 @@ VulnHouse VE）：只含 passed + 结构化摘要（长度/哈希前缀），fla
 TaskQueue._finish 调用）随任务一并移除；本模块保留纯判定引擎
 （validate_verify_spec / evaluate / Verdict）。
 
-四策略（规格受约束 schema，未知键拒绝，仿 phases.yaml 精神）：
+六策略（规格受约束 schema，未知键拒绝，仿 phases.yaml 精神）：
 - flag_capture  读文件（``src: "file:<工作区相对路径>"``）或执行命令取输出，
                 与预期值三种匹配（exact/contains/regex）
 - effect_proof  检查命令清单逐项比对（expect: contains/regex/exit0）
 - poc_crash     PoC 使目标崩溃（detector: signal 退出信号 / asan 特征）
 - oracle        自定义脚本输出 JSON ``{pass, detail}``（业务逻辑/复杂链兜底）
+
+2026-10-19 新增两策略（借鉴 hxbai `engine/verify.py`，治「模型自称打穿了」）：
+- nonce_exec    服务端发随机 nonce，把它塞进命令模板（``{nonce}``）让**目标**
+                计算 ``sha256(nonce)[:16]``，回显命中才算数。区别在于：
+                把输入原样反射回来的「假回显」拿不到哈希——只有真执行才算。
+- differential  BASELINE / PROOF 两段命令**分别独立执行**（两次 executor 调用，
+                两次工具结果），PROOF 独有行非空才判成立。写死「同一段输出里
+                同时出现 BASELINE 与 PROOF 标记」= 伪造形状，直接拒（hxbai 的
+                反伪造判据：模型不能自己造两段输出）。
 
 模块地位仿 phases.py：纯判定引擎，不 import orchestrator；黑板写全部走
 TaskQueue 既有写口（set_reconcile_state + append_event）。gateway 在函数内
@@ -27,14 +36,24 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import secrets
 import time
 from pathlib import Path
 from typing import Any, Callable
 
-STRATEGIES = ("flag_capture", "effect_proof", "poc_crash", "oracle")
+STRATEGIES = ("flag_capture", "effect_proof", "poc_crash", "oracle",
+              "nonce_exec", "differential")
 MATCH_MODES = ("exact", "contains", "regex")
 EXPECT_MODES = ("exit0", "contains", "regex")
 DETECTORS = ("signal", "asan")
+
+# nonce_exec：命令模板里这两个占位符由服务端替换
+NONCE_PLACEHOLDER = "{nonce}"
+EXPECTED_PLACEHOLDER = "{expected}"
+# 差分判定的最小有效差异行数（默认 1：只要有一行 PROOF 独有即成立）
+DIFF_MIN_DEFAULT = 1
+# 参与差分比较的最短行（与 hxbai 同口径：4 字符以下的噪音行不算证据）
+DIFF_LINE_MIN = 4
 
 # 崩溃退出码启发（signal 探测器）：POSIX 信号为负；Windows 常见崩溃码；
 # 134/139 是 128+信号 的 shell 惯例（SIGABRT/SIGSEGV）。超时不算崩溃。
@@ -142,6 +161,30 @@ def validate_verify_spec(spec: Any) -> Spec:
         if detector not in DETECTORS:
             raise ValueError(f"poc_crash: detector 须为 {DETECTORS}，得到 {detector!r}")
         return {**spec, "detector": detector}
+
+    if strategy == "nonce_exec":
+        allowed = {"strategy", "cmd", "timeout"}
+        unknown = set(spec) - allowed
+        if unknown:
+            raise ValueError(f"nonce_exec 未知键: {sorted(unknown)}（允许 {sorted(allowed)}）")
+        cmd = _cmd("cmd")
+        if NONCE_PLACEHOLDER not in cmd:
+            raise ValueError(
+                f"nonce_exec: cmd 必须包含占位符 {NONCE_PLACEHOLDER}"
+                "（服务端会把随机 nonce 填进去；不含占位符则验证不到「目标真的执行了」）")
+        return dict(spec)
+
+    if strategy == "differential":
+        allowed = {"strategy", "baseline_cmd", "proof_cmd", "min_diff"}
+        unknown = set(spec) - allowed
+        if unknown:
+            raise ValueError(f"differential 未知键: {sorted(unknown)}（允许 {sorted(allowed)}）")
+        _cmd("baseline_cmd")
+        _cmd("proof_cmd")
+        min_diff = spec.get("min_diff", DIFF_MIN_DEFAULT)
+        if not isinstance(min_diff, int) or isinstance(min_diff, bool) or min_diff < 1:
+            raise ValueError(f"differential: min_diff 须为 ≥1 的整数，得到 {min_diff!r}")
+        return {**spec, "min_diff": min_diff}
 
     # oracle
     allowed = {"strategy", "cmd"}
@@ -258,9 +301,54 @@ def evaluate(spec: Spec, *, executor: Callable[[str], Any],
             return done(passed, f"{strategy}: 裁决 {'pass' if passed else 'fail'}"
                                 f"（exit={r.exit_code}）· {_mask(out)}")
 
+        if strategy == "nonce_exec":
+            # 服务端造 nonce → 期望哈希；命令模板里填 nonce（与期望哈希两处占位）
+            nonce, expected = make_nonce_challenge()
+            cmd = (spec["cmd"].replace(NONCE_PLACEHOLDER, nonce)
+                   .replace(EXPECTED_PLACEHOLDER, expected))
+            r = run(cmd)
+            out = (r.stdout or "") + "\n" + (r.stderr or "")
+            hit = expected in out
+            if hit:
+                return done(True, f"{strategy}: 目标回显了 sha256(nonce)[:16]"
+                                  f"（nonce={nonce[:8]}… exit={r.exit_code}）"
+                                  f"· {_mask(out)}")
+            # 区分「回显了输入但没算出哈希」——这正是假回显/反射型注入的形状
+            echoed = nonce in out
+            note = ("仅回显了 nonce 但无哈希（反射/假回显，非真执行）"
+                    if echoed else "输出里既无哈希也无 nonce（未打通或目标不可达）")
+            return done(False, f"{strategy}: {note}（exit={r.exit_code}）· {_mask(out)}")
+
+        if strategy == "differential":
+            # 两次独立执行：BASELINE 与 PROOF 各自一条工具结果，模型无法一手编造
+            base_r = run(spec["baseline_cmd"])
+            proof_r = run(spec["proof_cmd"])
+            base_out = (base_r.stdout or "") + "\n" + (base_r.stderr or "")
+            proof_out = (proof_r.stdout or "") + "\n" + (proof_r.stderr or "")
+            base_lines = {ln.strip() for ln in base_out.splitlines() if ln.strip()}
+            proof_lines = {ln.strip() for ln in proof_out.splitlines() if ln.strip()}
+            diff = sorted(ln for ln in proof_lines - base_lines
+                          if len(ln) >= DIFF_LINE_MIN)
+            need = spec.get("min_diff", DIFF_MIN_DEFAULT)
+            passed = len(diff) >= need
+            return done(passed, f"{strategy}: PROOF 独有行 {len(diff)} 条"
+                                f"（阈值 {need}）· {'成立' if passed else '未成立'}"
+                                f"（baseline exit={base_r.exit_code}"
+                                f" / proof exit={proof_r.exit_code}）")
+
         return done(False, f"未知验证策略: {strategy!r}")
     except Exception as exc:  # noqa: BLE001 —— 策略拒绝/文件越界/后端不可用一律 fail-closed
         return done(False, f"{strategy}: 验证执行被拒/失败（{type(exc).__name__}）")
+
+
+def make_nonce_challenge() -> tuple[str, str]:
+    """生成 nonce 与其期望回显（``sha256(nonce)[:16]``）。
+
+    借鉴 hxbai `engine/verify.py::make_challenge`。用 ``secrets`` 而非
+    ``os.urandom().hex()``——语义更直白，且不依赖 os 模块的平台差异。
+    """
+    nonce = secrets.token_hex(16)
+    return nonce, hashlib.sha256(nonce.encode()).hexdigest()[:16]
 
 
 def _extract_json(text: str) -> Any:

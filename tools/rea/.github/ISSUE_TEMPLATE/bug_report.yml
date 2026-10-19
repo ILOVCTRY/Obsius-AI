@@ -1,0 +1,155 @@
+name: Bug report
+description: Report a reproducible problem in REA
+title: "[Bug] "
+labels:
+  - bug
+  - triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please report one primary behavior per issue. Keep observed behavior
+        separate from suspected causes, and remove credentials and private paths.
+
+  - type: checkboxes
+    id: before-submitting
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the open and closed issues for a related report.
+          required: true
+        - label: I removed credentials, tokens, private paths, and sensitive target data.
+          required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Setup, packaging, or upgrade
+        - Provider or capability discovery
+        - Process capture or runtime observation
+        - Native analysis or decompilation
+        - Evidence, artifacts, or reconstruction
+        - CLI
+        - MCP or agent integration
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: observed-behavior
+    attributes:
+      label: Observed behavior
+      description: What happened? Include the command, MCP tool, provider, target type, and conditions that matter.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Give the smallest realistic command, configuration, input, or event sequence that demonstrates the problem.
+      placeholder: |
+        1. Configure or start ...
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected behavior
+      description: What result, contract, invariant, recovery action, or state transition should have occurred?
+    validations:
+      required: true
+
+  - type: textarea
+    id: impact-scope
+    attributes:
+      label: Impact and scope
+      description: What is affected, what is not affected, and does this affect evidence integrity, process isolation, compatibility, or recovery?
+    validations:
+      required: true
+
+  - type: input
+    id: rea-version
+    attributes:
+      label: REA version
+      description: Use `rea --version` or provide the source revision.
+      placeholder: 3.1.0 or git revision
+    validations:
+      required: true
+
+  - type: input
+    id: runtime
+    attributes:
+      label: Runtime and platform
+      description: Include Node.js, OS, architecture, and Hopper/Ghidra version when relevant.
+      placeholder: Node 24.18; macOS 15 arm64; Hopper 5.15
+    validations:
+      required: true
+
+  - type: input
+    id: target
+    attributes:
+      label: Target and artifact context
+      description: Include binary format, app/container type, artifact kind, or workload details when relevant.
+      placeholder: Mach-O arm64 app; Evidence v2 bundle; not applicable
+
+  - type: dropdown
+    id: interface
+    attributes:
+      label: Interface
+      options:
+        - CLI
+        - MCP
+        - Python bridge
+        - Package or setup
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: failure-stage
+    attributes:
+      label: Earliest failure stage
+      description: Select where the incorrect behavior first becomes observable.
+      options:
+        - Request parsing or validation
+        - Setup or provider admission
+        - Capture or observation
+        - Artifact or evidence registration
+        - Native analysis or reconstruction
+        - Transport or result projection
+        - Cleanup, cancellation, or lifecycle
+        - Unknown
+    validations:
+      required: true
+
+  - type: textarea
+    id: relevant-evidence
+    attributes:
+      label: Relevant output or evidence
+      description: Paste the smallest useful CLI output, MCP result, error, trace, or evidence excerpt. Redact sensitive values.
+      render: text
+
+  - type: textarea
+    id: typed-outcome
+    attributes:
+      label: Typed outcome or recovery expected
+      description: Optional. What typed result, error, next tool, cleanup state, or limitation should the caller have received?
+
+  - type: textarea
+    id: analysis
+    attributes:
+      label: Analysis or suspected cause
+      description: Optional. Clearly mark source-derived reasoning or a hypothesis; do not present an unverified cause as fact.
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context
+      description: Add links, reduced fixtures, screenshots, or a proposed regression test.

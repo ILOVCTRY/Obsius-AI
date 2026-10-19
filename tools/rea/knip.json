@@ -1,0 +1,34 @@
+{
+  "$schema": "./node_modules/knip/schema.json",
+  "entry": [
+    "src/main.ts",
+    "src/cli.ts",
+    "src/composition/javascriptAnalysisWorkerProcess.ts",
+    "src/contracts/errorSchemas.ts",
+    "src/evaluation/AgentEvaluationFixtures.ts",
+    "src/application/RealHopperAssertions.ts",
+    "scripts/verify/fridaBindingsCompatibility.ts",
+    "scripts/verify/termux/browser.mjs",
+    "scripts/verify-real-ghidra-noreturn.mjs",
+    "tests/processOwnershipRunner.ts"
+  ],
+  "project": ["src/**/*.ts", "tests/**/*.ts", "scripts/**/*.mjs"],
+  "vitepress": {
+    "entry": ["docs/.vitepress/config.ts"]
+  },
+  "ignoreBinaries": ["mkfifo"],
+  "ignoreDependencies": ["electron", "esbuild", "webpack"],
+  "ignoreExportsUsedInFile": true,
+  "rules": {
+    "files": "error",
+    "dependencies": "error",
+    "devDependencies": "error",
+    "unlisted": "error",
+    "exports": "error",
+    "nsExports": "error",
+    "types": "error",
+    "nsTypes": "error",
+    "enumMembers": "error",
+    "duplicates": "error"
+  }
+}

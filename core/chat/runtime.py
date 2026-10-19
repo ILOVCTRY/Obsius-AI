@@ -12,8 +12,8 @@
   计划/意图/收尾控制原语）+ mcp__*；call_expert 不可用（spawn 深度=1）。
 - **激进主控（agent_id=aggressive-controller，2026-10-17）**的子专家线程
   再裁一层（probe_mode）：去掉 bb_query 与意图三件套、豁免意图先行闸与
-  「发现必挂意图」、跳过维度收敛闸、注入 _PROBE_SUBAGENT_STYLE——快速
-  子任务「不声明意图、不查询黑板」，详见 _PROBE_EXCLUDED_TOOLS。
+  「发现必挂意图」、跳过维度收敛闸。快速 worker 只拿 task 干活，不继承主控
+  上下文，也不注入额外的子代理提示词，详见 _PROBE_EXCLUDED_TOOLS。
 
 call_expert：spawn 持久子线程（parent_thread_id 留档）→ 隔离上下文跑完
 → 摘要+线程引用回传主控（不审批，全程事件流可见）。
@@ -36,13 +36,30 @@ import time
 import uuid
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
-from core.agent.tool_registry import bb_query_schema_for
+from core.agent.tool_registry import (_CONTROL_TOOLS, _PLAN_TOOLS,
+                                      bb_query_schema_for)
 from core.agent.tools import AGENT_TOOLS, ToolDispatcher
 from core.blackboard.store import BlackboardClosedError
+from core.blackboard.artex_intents import (claim_intent as claim_artex_intent,
+                                            create_intent as create_artex_intent,
+                                            transition_intent as transition_artex_intent)
+from core.blackboard.artex_facts import (RECORD_FACT_TOOL_NAME,
+                                          RECORD_FACT_TOOL_SPEC,
+                                          dispatch_record_fact)
+from core.blackboard.artex_traces import (get_worker_trace, list_worker_traces,
+                                           search_all_worker_traces)
 from core.chat import store as chat_store
+from core.chat.artex_steering import SteeringContext
+from core.chat.artex_steering import dispatch as artex_steering_dispatch
+from core.chat.artex_steering import is_artex_tool
 from core.chat.mcp_bridge import MCPBridge
+from core.chat.wrapup import (REASON_MAX_TURNS, REASON_TIMEOUT,
+                              filter_wrapup_tools, filter_wrapup_whitelist,
+                              is_wrapup_allowed as wrapup_allowed,
+                              wrapup_max_turns, wrapup_prompt_for_reason)
+from core.chat.taskclock import clamp_max_duration
 from core.coverage import situation_snapshot
 from core.diagnostics.failog import record_mcp_failure, record_tool_failure
 from core.diagnostics.system_prompt import save_system_prompt
@@ -54,6 +71,7 @@ from core.dimensions import (
 from core.llm.provider import (ContextOverflowError, LLMError, TransientStreamError,
                                is_reasoning_echo)
 from core.runtime.gateway import ExecutionGateway
+from core.runtime.recovery import EnvironmentUnavailable
 from core.skills.experts import load_expert
 from core.skills.registry import SkillRegistry
 from core.skills.rules import build_rules_preamble, rating_profile_active
@@ -73,7 +91,9 @@ ORCHESTRATOR_ID = "chat-orchestrator"
 # 的专家」：_delegatable_experts 排除，call_expert 硬校验拒收，且 spawn
 # 出来的子线程一律不可再委派（深度=1，expert_names=[] 兜底）。
 AGGRESSIVE_CONTROLLER_ID = "aggressive-controller"
-CONTROLLER_IDS = frozenset({ORCHESTRATOR_ID, AGGRESSIVE_CONTROLLER_ID})
+ARTEX_CONTROLLER_ID = "artex-controller"
+CONTROLLER_IDS = frozenset({ORCHESTRATOR_ID, AGGRESSIVE_CONTROLLER_ID,
+                            ARTEX_CONTROLLER_ID})
 
 # 子专家不可用的控制原语（任务队列/计划闸/收尾/私信/HITL——
 # 对话线程没有任务上下文与收件箱，这些工具既无语义也危险：publish/claim
@@ -107,7 +127,31 @@ _INTENT_TOOLS = ("declare_intent", "close_intent", "reopen_intent", "bb_delete_i
 # 意图」；_dimension_gate_status 跳过（维度收敛以意图覆盖为口径，与探针
 # 语义互斥）。chat-orchestrator 的子专家**不享受**此待遇（默认
 # probe_mode=False，行为与改动前逐字一致）。
-_PROBE_EXCLUDED_TOOLS = ("bb_query", *_INTENT_TOOLS)
+# 激进主控及其 worker 不开放技能、知识库迭代提案或意图控制面；但允许
+# 直接查询知识库（kb_search/kb_open），用于查找打法与按需阅读正文。worker
+# 仍额外继承 probe_mode 的黑板查询裁剪；工具 schema、执行白名单保持同口径。
+_NO_SKILL_OR_INTENT_TOOLS = ("skill_open", "propose_pack_edit", *_INTENT_TOOLS)
+# 激进主控允许直接查看项目文件、执行受网关策略约束的命令，并查询知识库；
+# 这些是工具能力，不会开放专家池、技能、知识库迭代或意图控制面。
+# CTF 解题的核心工具面：文件/命令、资产与证据、知识库、必要的浏览器与逆向。
+# 高风险删除/合并和业务建模工具不随主控/worker 下发，减少模型工具选择成本。
+# ctf_submit_flag（2026-10-19，ctf-flagjudge）：flag 判定+登记的唯一出口——
+# 形态置信/变换回环/跨题防串三道机械判定，取代「模型自述拿到 flag」。
+# ctf_ammo（2026-10-19，ctf-ammo）：弱口令候选字典生成——线索机械展开成候选表，
+# 治「凭记忆打两个弱口令就放弃」。只产候选，不执行爆破。
+_CTF_CORE_TOOLS = (
+    "run_cmd", "read_file", "search_files", "unpack_attachment",
+    "bb_add_asset", "bb_asset_status",
+    "bb_add_finding", "bb_update_finding", "bb_add_artifact",
+    "ctf_submit_flag", "ctf_ammo",
+    "kb_search", "kb_open", "route_lookup",
+    "browser_navigate", "browser_click", "browser_type",
+    "browser_screenshot", "browser_content", "browser_back", "browser_replay",
+    "decompile", "disasm", "list_symbols", "strings_search", "func_xrefs",
+    "bb_upsert_func",
+)
+_AGGRESSIVE_CONTROLLER_TOOLS = ("run_cmd", "read_file", "search_files")
+_PROBE_EXCLUDED_TOOLS = ("bb_query", *_NO_SKILL_OR_INTENT_TOOLS)
 
 _ORCH_BASE_TOOLS = ("todo_write", "call_expert", "skill_open",
                     "kb_search", "kb_open", "bb_query",
@@ -117,6 +161,64 @@ _ORCH_BASE_TOOLS = ("todo_write", "call_expert", "skill_open",
                     # （只落 pending，人审）；每会话上限 3 条（ToolDispatcher 内）。
                     "propose_pack_edit",
                     *_INTENT_TOOLS)
+
+# ARTEX Worker trace 工具 schema（artex-traces，2026-10-19）：让 Worker 能检索
+# 本任务其他 work 的执行过程，复用他人观察、避免重复劳动。
+_WORKER_TRACE_TOOLS = {
+    "artex_worker_trace_list": {
+        "name": "artex_worker_trace_list",
+        "description": (
+            "列出本任务里【已跑过】的 work（意图）索引：intent_id + 方向 + 状态 + 步数。"
+            "你看不到探索图整体，用它来发现有哪些 work 值得翻看——"
+            "再用 artex_worker_trace_get 看其步骤详情。"
+            "只列已执行的（不含 pending），不含还没跑的 open。"),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "q": {"type": "string", "description": "按方向关键字过滤（可选）"},
+                "limit": {"type": "integer", "description": "返回上限，默认 50（可选）"},
+            },
+        },
+    },
+    "artex_worker_trace_get": {
+        "name": "artex_worker_trace_get",
+        "description": (
+            "查看某条意图(work)的【执行过程】（区别于只看最终结论）。\n"
+            "三种用法：\n"
+            "① 只传 intent_id → 返回该 work 每一步的摘要流（summary≤100字，含 step_id）；\n"
+            "② intent_id + q → 只返回命中关键字的步骤摘要；\n"
+            "③ intent_id + step_ids → 返回这些步骤的完整内容(detail)；一次最多取 5 个。\n"
+            "典型流程：先①/②定位可疑步骤的 step_id，再用③取其完整输出。"),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "intent_id": {"type": "string", "description": "意图 id（= work 句柄）"},
+                "q": {"type": "string", "description": "关键字：只返回摘要/完整输出命中它的步骤（可选；与 step_ids 互斥）"},
+                "step_ids": {"type": "array", "items": {"type": "integer"}, "description": "要取完整内容的 step_id（来自①/②返回；一次最多取 5 个）"},
+                "limit": {"type": "integer", "description": "摘要流/检索的返回上限（可选）"},
+            },
+            "required": ["intent_id"],
+        },
+    },
+    "artex_worker_trace_search": {
+        "name": "artex_worker_trace_search",
+        "description": (
+            "【通常不推荐使用，因为系统中已经给了大部分信息了】"
+            "在【本任务其他 work 的执行过程】里按关键字(q)检索——"
+            "用于找回某个 worker 见过、却没写进 fact 的东西（某路径/token/报错等）。"
+            "已自动排除你自己这条意图的步骤（那些本就在你上下文里）。"
+            "只返回命中步骤的摘要(summary≤100字)，每条带 intent_id；"
+            "据此再用 artex_worker_trace_get(intent_id, step_ids=[...]) 取完整内容。"),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "q": {"type": "string", "description": "关键字（在所有 work 步骤的摘要+完整输出里搜）"},
+                "limit": {"type": "integer", "description": "返回上限，默认 100（可选）"},
+            },
+            "required": ["q"],
+        },
+    },
+}
 
 # 对话轮步数上限（2026-10-01 由 24/32 提升至 200：修「步数耗尽但全程只调工具
 # → 无终稿 → 落『本轮未产出文本回复』」；配合 _loop 末步强制终稿兜底）
@@ -138,10 +240,17 @@ _AGGRESSIVE_CONTROLLER_STYLE = (
     "检查 spectrogram/steghide、strings/熵值/魔术字节、crypto 模式识别、"
     "压缩包嵌套与明文泄露……）。禁止把多个方向塞进一个探针，禁止让探针做"
     "深度利用。\n"
-    "3. **同轮并发派出**：相互独立的探针在**同一轮**用多个 call_expert 一起"
-    "并发派出（并发执行，不是排队）。每个 task 必须自包含：目标文件/资产"
-    "（附 sha256）、只做什么、验收标准，并明确要求「结论以 [命中] 或 "
-    "[未命中] 开头，后跟一句证据」（命中=该方向有值得跟进的信号）。\n"
+    "3. **方向分散后同轮并发派出**：先建立方向覆盖表，至少选择 3 个彼此不相似"
+    "的测试面，再在**同一轮**用多个 call_expert 并发派出（并发执行，不是排队）。"
+    "优先覆盖文件/样本结构与元数据、编码/密码与凭据、网络/Web/协议、逆向/二进制、"
+    "取证/日志、隐写/媒体等不同类别。每个 task 必须自包含：目标文件/资产（附"
+    "sha256）、只做什么、验收标准，并明确要求「结论以 [命中] 或 [未命中] 开头，"
+    "后跟一句证据」。同一批 task 不得都集中在相同字符串、同一工具、同一文件特征"
+    "或同一个猜测；两个 task 的目标、证据来源、主要工具和验收标准高度相似时，"
+    "必须改派到尚未覆盖的方向。重大价值方向可将同一个 task 同时派给 2 或 3 个独立"
+    "worker 做交叉验证，但不能因此减少其他不同方向的基础覆盖；至少保留一个持续"
+    "追踪 worker，直到正式 flag、决定性结论或方向穷尽。用户未说明格式时，管理员密码、"
+    "数据库密码、API key、凭据和普通字符串只能作为候选，不能自动停止。\n"
     "4. **先返先触发**：探针派出后**只要第一个返回就立刻行动，严禁干等整批**"
     "——[命中] 立即对该方向派发对应深耕专家（crypto-solver / pwn-solver / "
     "reverse / web-solver / forensics-solver…）深挖（任务同样自包含并带上"
@@ -149,35 +258,64 @@ _AGGRESSIVE_CONTROLLER_STYLE = (
     "的核心指标，蛙式排队等整批是违规操作。\n"
     "5. **后台补达**：未等到的探针会在后台继续跑，完成时以「[后台探针结果]」"
     "消息补达——收到后按第 4 条同一规则处置（命中就补派深挖）。\n"
-    "6. **收敛与汇总**：方向锁定并拿到结论/flag 后立即收尾；todo_write 实时"
-    "反映「探针→命中→深挖→结论」的状态迁移。全部完成后向人类汇总署名输出"
-    "（走了哪些方向、各自结论、最终成果）。")
+    "6. **收敛与汇总**：方向锁定并拿到正式结论后收尾；todo_write 实时反映"
+    "「探针→命中→深挖→结论」的状态迁移。用户未说明 flag 格式时，只有经验证的"
+    "`flag{...}`、`xxxx{...}` 等明确题目格式才可作为正式 flag；管理员密码、数据库"
+    "密码、API key、凭据、普通字符串或其他非该格式命中，只能标为候选 flag/高价值"
+    "线索，不能自动停止，必须继续挖掘其他方向。**拿到疑似 flag 一律走 "
+    "ctf_submit_flag 登记**（它做形态置信/变换回环/跨题防串三道机械判定，比自述"
+    "可靠；候选线索加 candidate=true）。全部完成后向人类汇总署名输出"
+    "（走了哪些方向、正式 flag、候选线索、各自证据和仍未确认的内容）。")
 
-# 激进主控子代理（probe_mode）的工作方式（注入 system，替代子专家通用文案）。
-# 与 _PROBE_EXCLUDED_TOOLS 互为表里：工具面砍掉 bb_query + 意图三件套，
-# 这段告诉模型「为什么没有、以及该怎么跑」——只砍工具不留口径，模型会
-# 按训练惯性找 declare_intent/调 bb_query，撞几次白名单拒绝才消停。
-_PROBE_SUBAGENT_STYLE = (
-    "## 工作方式（激进主控派出的快速子任务）\n"
-    "你是被激进主控派出的**快速子任务**执行者：单点执行、几分钟内完成、"
-    "禁止深挖、禁止多方向。\n"
-    "1. **不需要声明意图**：本线程没有 declare_intent/close_intent 工具——"
-    "收到任务描述直接对目标执行（run_cmd / decompile / disasm / browser_* "
-    "等按需调用），不要花任何步骤在建立意图链路上；\n"
-    "2. **不需要查询黑板**：本线程没有 bb_query 工具——任务描述里已给出"
-    "目标与已知信息，直接开干，不要盘点资产/发现；过程中看到的结论可"
-    "直接 bb_add_finding 落黑板（本线程豁免「发现必挂意图」，带 "
-    "target_asset_id 或按题目自动归属，不会被打回），新资产用 "
-    "bb_add_asset 上报；\n"
-    "3. **读项目内文件**：任务里给的附件/文件路径以 `/workspace/` 为工作区"
-    "根（如 `/workspace/artifacts/attachments/<文件>`）——read_file/"
-    "search_files 直接传该路径即可（自动映射回宿主工作区，读不受限）；"
-    "若用 run_cmd（cwd 恒为 scratch），写 `../artifacts/...` 这类相对"
-    "路径或先把文件复制进 scratch 再处理；\n"
-    "4. 需要方法细节时 kb_search/kb_open 查知识库、skill_open 打开技能手册；\n"
-    "5. 结束时给一段**自包含的收尾摘要**（做了什么/关键证据/结论），"
-    "**以 [命中] 或 [未命中] 开头**，后跟一句证据（命中=该方向有值得"
-    "跟进的信号）——主控会原样转述给人类，据此决定深挖或放弃。")
+# ARTEX 主控的工作方式（artex-fusion，2026-10-19）。与 yaml persona 互补：
+# persona 定角色性格，这段定**可执行的操舵纪律**——主控不再自己 call_expert
+# 派活，而是驱动项目级 ArtexEngine：Planner 生成 Intent、Engine 调度、Worker
+# 执行，主控只观察与调整（对应原生 ARTEX 的 MainAgent 定位）。
+_ARTEX_CONTROLLER_STYLE = (
+    "## ARTEX 工作方式（观察 → 规划 → 引擎调度 → 操舵 → 目标收敛）\n"
+    "你是 ARTEX 主控。**你不自己执行，也不逐个派活**：Intent 由 Planner 生成，"
+    "项目 Engine 从 Frontier 领取并并发派给 Worker 执行。你只做判断与调整。\n"
+    "1. **盘点**：bb_query 看已登记资产与发现；artex_status 看当前任务的 runtime "
+    "状态、**注册目标及达成情况**、Intent 计数、活跃 Worker 与探索图里的事实/发现。"
+    "已有方向不要重复规划。\n"
+    "2. **规划**：artex_plan(goal=\"…\", mode=\"new\") 建立任务树（Planner 会把目标"
+    "拆成可核验的离散目标并登记）；对进行中的任务用 artex_plan(mode=\"extend\") "
+    "让 Planner 依据新事实追加方向，或用 artex_plan(intents=[…]) 直接指定方向。"
+    "Planner 是唯一 Intent 生成者——不要自己拼任务描述去 call_expert 绕过它。\n"
+    "3. **观察**：Worker 完成后会把结果写成探索图 Fact、把关联发现写成 Finding，"
+    "并把证据自动挂到相关目标上；每轮先用 artex_status 复核，再决定是继续追加"
+    "方向还是收尾。artex_status 同时显示**资产覆盖度**（已测/范围、未覆盖数）——"
+    "量化目标（覆盖度达 X%、测过 N 个资产）以此实测值为准。\n"
+    "3.1 **翻事实库**：artex_status 只给最近几条标题，真正排方向前用 "
+    "artex_fact(action=\"list\") 翻本任务事实（可按 intent_id / confidence 筛、"
+    "分页），artex_fact(action=\"get\", id=…) 取某条完整详情。"
+    "**否定结论也在事实库里**（端口关闭 / 参数不可注入 / 未发现入口）——"
+    "派方向前先查一遍，避免重复劳动；confidence=inferred 的结论是推断，"
+    "不代表该方向已穷尽，别据此永久放弃。\n"
+    "4. **目标收敛（关键）**：任务是否完成由**目标达成**决定，不是「Intent 跑完」。"
+    "artex_status 显示目标未达成却已无方向时，要么依证据用 "
+    "artex_goal(action=\"prove\", goal_id=…, evidence_ids=[…]) 证明目标达成，"
+    "要么用 artex_plan 追加能证明它的方向；确认全部目标已达成后用 "
+    "artex_goal(action=\"goal_met\", reason=\"…\") 全局收官（reason 必须是真实依据）。"
+    "**严禁**在目标未达成时宣布收官。\n"
+    "4.1 **量化验收核对**：目标含可量化条件（覆盖度达 X% 等）时，证明/收官前"
+    "【必须】核对 artex_status 的覆盖度实测值；未达标就【禁止】盖章，改派意图补测"
+    "（用 artex_goal(action=\"anchor\") 看未覆盖清单，或 artex_plan 派补测方向）。"
+    "覆盖度是**下限/验收项、不是探索目标本身**——发现高价值入口后优先往深打穿，"
+    "而不是为拉平覆盖度逐个资产浅测。\n"
+    "5. **操舵**：方向跑偏或需要补充线索时用 artex_hint——指定运行中的 intent_id "
+    "会直接下发 steer，Worker 在下一步收到「[Worker 方向调整]」；只写 Hint 则留给"
+    "后续规划作依据。需要暂停/取消/终止时用 artex_control。\n"
+    "6. **收敛**：artex_status 显示 goal_reached 时收尾，汇总已测方向、资产范围、"
+    "已验证发现与证据、未验证假设和仍需人工确认的动作；显示 needs_review 时"
+    "必须先解释「哪条目标未达成、为什么」，再决定补方向还是交人工。\n"
+    "7. **call_expert 例外**：只用于不值得建 Intent 的一次性查询/登记（例如查一条"
+    "配置、确认一个资产归属）。测试与深挖方向一律走 artex_plan。\n"
+    "8. **边界**：只在登记的授权范围内扩展子域、站点和端口，跨出范围立即暂停并请求"
+    "确认；漏洞利用、爆破、上传、提权、横向移动、业务写入和 CTF 提交等高风险动作"
+    "必须逐项审批，发现线索不等于获得执行授权。\n"
+    "9. **证据**：命中结论必须有实际输出、请求响应、文件路径或复现步骤支撑；"
+    "没有证据的内容只能标为假设——目标达成同样要有证据，模型自述不算数。")
 
 
 class ChatStopped(Exception):
@@ -373,6 +511,36 @@ def _est_tokens(text: str) -> int:
     return max(1, len(text) // 3) if text else 0
 
 
+def _to_epoch(value: Any) -> float | None:
+    """把「ISO8601 字符串 / epoch 秒（int/float/数字串）」统一成 epoch 秒。
+
+    CTF 赛制截止时间在项目 config 里可能是 `"2026-10-20T12:00:00Z"` 也可能是
+    `1761000000`（平台 API 常直接给时间戳）。解析失败返回 None——调用方据此
+    退回阶梯推断，**绝不猜一个假时间**。
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value) if value > 0 else None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:  # 纯数字串
+        num = float(text)
+        return num if num > 0 else None
+    except ValueError:
+        pass
+    try:
+        from datetime import datetime, timezone
+        iso = text.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(iso)
+        if dt.tzinfo is None:  # 无时区按本地时间（赛题页给的多为本地时间）
+            return dt.timestamp()
+        return dt.timestamp()
+    except (ValueError, OSError, OverflowError):
+        return None
+
+
 def _msg_text(m: dict[str, Any]) -> str:
     """提取消息可估文本：字符串直取；assistant blocks 取 text+tool_use 入参；
     tool_result blocks 取 content（2026-09-30 伪影修复：此前漏计工具结果，
@@ -495,6 +663,11 @@ _ERROR_CATEGORIES: dict[str, tuple[str, str]] = {
         "数据存储异常",
         "读写项目数据库失败（项目可能正在删除/重建，或进程刚重启）。"
         "请稍后重试；若持续出现，检查该项目是否已被删除。"),
+    "environment": (
+        "运行环境不可用",
+        "命令执行所需的环境缺失或不可用（工具/依赖/运行时/Docker 镜像等），"
+        "自动恢复未成功或未获准执行。请按下方提示补齐环境后重发；"
+        "若提示需要审批，请先在审批卡片中放行安装/构建。"),
     "unknown": (
         "执行异常",
         "本轮执行发生未预期异常。技术细节见下方，可据此进一步排查或反馈。"),
@@ -552,7 +725,12 @@ def _classify_error(e: BaseException) -> dict[str, str]:
     msg = str(e)
     low = msg.lower()
     status = getattr(e, "status", 0) or 0
-    if getattr(e, "truncated", False) or "工具参数流截断" in msg:
+    # 环境类必须先判：EnvironmentUnavailable 的文案可能含 "temporarily
+    # unavailable"，否则会被下面的 upstream 分支抢走，误导成「上游抖动」。
+    if isinstance(e, EnvironmentUnavailable) or "环境错误" in msg \
+            or "[环境恢复" in msg:
+        cat = "environment"
+    elif getattr(e, "truncated", False) or "工具参数流截断" in msg:
         cat = "stream"
     # 上游 5xx / 流内瞬时错误帧（TransientStreamError 是 ConnectionError 子类，
     # 必须排在 network 之前，否则会被 isinstance 抢走判成「网络中断」）。
@@ -695,16 +873,44 @@ def _sanitize_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def expert_tool_names(packs_root: str | Path, agent_id: str,
                       track: str) -> list[str] | None:
-    """子专家工具白名单：专家 yaml tools 字段优先；缺省=全量裁剪。"""
+    """子专家工具白名单：专家 yaml tools 字段优先；缺省=全量裁剪。
+
+    tools 缺键/null = 不限制（全量）；显式 ``[]`` = 一个业务工具都不启用，
+    只保留收尾/计划原语（否则会被 ``or`` 兜底成全量，与勾选语义相反）。
+    """
     expert = load_expert(packs_root, agent_id, track)
     tools = expert.get("tools")
-    if isinstance(tools, list) and tools:
-        return [t for t in tools if t not in _EXPERT_EXCLUDED]
+    if isinstance(tools, list):
+        if tools:
+            return [t for t in tools if t not in _EXPERT_EXCLUDED]
+        return sorted(_CONTROL_TOOLS | _PLAN_TOOLS)
     return None
 
 
 class ChatTurn:
     """一轮对话的执行器（一个线程实例只跑一轮；消息历史自 store 装载）。"""
+
+    # 类级默认值（2026-10-19）：`object.__new__(ChatTurn)` 的轻量构造（错误恢复
+    # 回归测试、历史回放）不会走 __init__，此前 `_aborted`/`_system_prompt`/
+    # `_dispatch_mcp` 直接读这些新属性会抛 AttributeError，把「工具失败」放大成
+    # 整轮 unknown。正常构造一律在 __init__ 覆盖，语义不变。
+    worker_control = None
+    recovery = None
+    is_orchestrator = False
+    is_aggressive = False
+    is_artex = False
+    is_worker = False
+    is_first_return_controller = False
+    probe_mode = False
+    intent_free = False
+    web_search = False
+    _worker_kill_reason = ""
+    # 任务级 deadline 夹逼（artex-taskclock）：类级默认 0 = 不限，行为与引入前
+    # 完全一致；`object.__new__` 轻量构造也不会 AttributeError。
+    task_deadline_at = 0.0
+    run_budget_s = 0.0
+    budget_reason = ""
+    _run_budget_clamped = False
 
     def __init__(self, *, bb, llm, project_id: str, thread_id: str,
                  packs_root: str | Path, track: str,
@@ -717,8 +923,17 @@ class ChatTurn:
                  artifacts_dir: str | Path | None = None,
                  browser_pool=None,
                  decompiler_factory=None,
+                 containers=None,
                  assigned_asset_ids: list[str] | None = None,
-                 probe_mode: bool = False):
+                 probe_mode: bool = False,
+                 artex_intent_id: str | None = None,
+                 artex_task_id: str | None = None,
+                 task_deadline_at: float = 0.0,
+                 run_budget_s: float = 0.0,
+                 worker_control: Callable[[], dict[str, Any]] | None = None,
+                 artex_engine_provider: Callable[[], Any] | None = None,
+                 artex_planner_llm=None,
+                 recovery=None):
         self.bb = bb
         self.llm = llm
         self.project_id = project_id
@@ -734,22 +949,85 @@ class ChatTurn:
         self.artifacts_dir = artifacts_dir
         self.browser_pool = browser_pool
         self.decompiler_factory = decompiler_factory
+        self.containers = containers
+        # 受控环境恢复器（项目级共享，None=不自动安装/构建）：装配到 dispatcher
+        # 后 run_cmd 命中环境类失败才会走「恢复→重探→一次重试」。
+        self.recovery = recovery
         self.assigned_asset_ids = [str(x).strip()
                                    for x in (assigned_asset_ids or [])
                                    if str(x).strip()]
+        self.artex_intent_id = str(artex_intent_id or "").strip()
+        self.artex_task_id = str(artex_task_id or "").strip()
+        # 任务级 deadline 夹逼（artex-taskclock，对齐上游 agent/taskclock.go）：
+        # Engine 把「任务根 Intent 起始 + task_deadline_s」推成的绝对 deadline 传
+        # 进来，本 run 据此把自己的墙钟预算夹到任务剩余时间，并按**实际**收尾
+        # reason 挑收尾词（per-run vs 任务超时，两套语义常相反）。
+        # 缺省 0 = 不限 → 行为与引入前完全一致。
+        try:
+            self.task_deadline_at = max(0.0, float(task_deadline_at or 0.0))
+        except (TypeError, ValueError):
+            self.task_deadline_at = 0.0
+        try:
+            self.run_budget_s = max(0.0, float(run_budget_s or 0.0))
+        except (TypeError, ValueError):
+            self.run_budget_s = 0.0
+        # budget_reason：本次收尾是「撞步数」还是「撞墙钟」（上游 TerminalReason
+        # 同名同义）。空串 = 尚未收尾；进入收尾时由主循环写入。
+        self.budget_reason = ""
+        # _run_budget_clamped：任务 deadline 是否成了本次 run 的约束。它决定
+        # 「超时收尾该说任务到点还是 run 预算耗尽」——两个正交信息，不能只看
+        # eff 预算大小猜（见 core/chat/taskclock.clamp_max_duration 注释）。
+        self._run_budget_clamped = False
+        # ARTEX Worker 控制（2026-10-19）：Engine 注入的 poll 回调，返回
+        # {"kill": 原因, "steer": [方向...]}。kill 走中止通道（流式期间也能
+        # 生效），steer 在步边界作为 user 消息注入下一轮；回调是"取出并清空"
+        # 语义，故本地缓存 steer 防高频轮询丢消息。
+        self.worker_control = worker_control if callable(worker_control) else None
+        self._worker_kill_reason = ""
+        self._pending_steer: list[str] = []
+        self._worker_poll_at = 0.0
+        # ARTEX 主控操舵通道（artex-fusion，2026-10-19）：对话式主控不再自己
+        # call_expert 派活，而是通过 artex_plan / artex_status / artex_hint /
+        # artex_control 驱动项目级 ArtexEngine（Planner 生成 Intent、Engine
+        # 调度、Worker 执行）。engine_provider 惰性取引擎——引擎可能在本轮
+        # 对话期间才被创建；planner_llm 缺省回落到执行模型。
+        self.artex_engine_provider = (artex_engine_provider
+                                      if callable(artex_engine_provider) else None)
+        self.artex_planner_llm = artex_planner_llm or llm
+        # aggressive worker 只接收父控通过 task 明确交代的内容，不读取或注入
+        # 主控的资产/维度上下文；该标记在构造子线程时由 probe_mode 传入。
+        self._isolated_worker = bool(probe_mode and self.thread_id)
         # probe_mode（2026-10-17，激进主控子代理）：True=快速子任务线程——
         # 工具面剔除 bb_query + 意图三件套（_PROBE_EXCLUDED_TOOLS）、意图
         # 闸与「发现必挂意图」豁免（ToolDispatcher intent_free）、维度收敛闸
-        # 跳过、system 注入 _PROBE_SUBAGENT_STYLE。仅 _tool_call_expert 在
-        # self.is_aggressive 时置 True（chat-orchestrator 子专家不受影响）。
+        # 跳过；只消费主控通过 user task 传入的任务，不注入主控提示。
+        # 仅 _tool_call_expert 在 self.is_aggressive 时置 True（chat-orchestrator
+        # 子专家不受影响）。
         self.probe_mode = bool(probe_mode)
         self.thread = chat_store.get_thread(bb, thread_id) or {}
         self.agent_id = str(self.thread.get("agent_id") or ORCHESTRATOR_ID)
+        # 联网搜索开关（v43，web-search-toggle）：线程级。composer「联网」打开 =
+        # 本线程主控 + 其 spawn 的子代理（call_expert / ARTEX Worker 建线程时
+        # 从父线程继承该位）默认拿 web_search 工具；工具面（_tool_specs）与
+        # 执行白名单（_build_dispatcher）双边同步。不进专家 yaml 勾选——这是
+        # 会话级用户决定，不是专家能力声明。子代理不因开了联网就自动外发：
+        # 模型不调工具即不触发；SearXNG/ddgs 双后端与降级在 core/websearch.py。
+        self.web_search = bool(self.thread.get("web_search"))
+        # worker.yaml 可声明 intent_free；该配置与激进主控派生的 probe_mode
+        # 语义一致，允许独立 worker 不声明意图。
+        try:
+            worker_cfg = load_expert(self.packs_root, self.agent_id, self.track)
+            self.intent_free = bool(worker_cfg.get("intent_free", False))
+        except Exception:  # noqa: BLE001
+            self.intent_free = False
         # 控制器类智能体（chat-orchestrator + 激进主控）：拿主控工具面、
         # 可委派专家池。两者只在调度策略上不同（见 _system_prompt 与
         # _parallel_expert_dispatch 的 first_return）。
         self.is_orchestrator = self.agent_id in CONTROLLER_IDS
         self.is_aggressive = self.agent_id == AGGRESSIVE_CONTROLLER_ID
+        self.is_artex = self.agent_id == ARTEX_CONTROLLER_ID
+        self.is_first_return_controller = self.is_aggressive or self.is_artex
+        self.is_worker = self.agent_id == "worker"
         # 先返先触发的后台探针账本（仅激进主控写读）：
         # _probe_abandoned——已被提前断候的 tool_call id（worker 完成时不
         #   独占该 id，改推 overflow + 以同 id 续写真实 tool 行）；
@@ -758,6 +1036,15 @@ class ChatTurn:
         self._probe_lock = threading.Lock()
         self._probe_abandoned: set[str] = set()
         self._probe_overflow: list[dict[str, Any]] = []
+        # 预算耗尽标记（artex-exhausted）：本轮是否因**撞步数上限**而被动收尾。
+        # 与「正常给出终稿」严格区分——上游 server/engine.go:1133-1146 的口径是
+        # 「撞步数上限 ≠ 完成」：此时该方向只写回了部分事实，Planner 必须知道它
+        # 「试过但没做完、需换角度或接着跑」，而不是当成已覆盖永久跳过。
+        # 由 ``run()`` 在结束时读取，``make_worker`` 据此把 Intent 置 exhausted。
+        self.budget_exhausted = False
+        # 收尾阶段标志（artex-wrapup）：撞预算后进入 settlement 时为 True——
+        # 工具面/白名单被裁成「只能写回」，_dispatch 另有一道硬闸。
+        self._wrapup_active = False
         self._dispatcher = self._build_dispatcher()
 
     @property
@@ -770,7 +1057,43 @@ class ChatTurn:
                     and self.thread.get("spawned_task"))
 
     def _aborted(self) -> bool:
-        return self.abort_event.is_set()
+        if self.abort_event.is_set():
+            return True
+        if self.worker_control is None:
+            return False
+        self._poll_worker_control()
+        return bool(self._worker_kill_reason)
+
+    def _poll_worker_control(self, *, force: bool = False) -> None:
+        """拉取 Engine 的 Worker 控制（节流 0.2s，流式回调高频调用）。
+
+        poll 回调会清空 steer 队列，因此取到的方向提示一律进本地缓存，
+        由步边界统一注入，避免被 `_aborted` 的高频轮询吞掉。
+        """
+        if self.worker_control is None:
+            return
+        now = time.monotonic()
+        if not force and now - self._worker_poll_at < 0.2:
+            return
+        self._worker_poll_at = now
+        try:
+            control = self.worker_control() or {}
+        except Exception:  # noqa: BLE001 —— 控制通道故障不阻断 Worker
+            log.exception("ARTEX Worker 控制轮询失败 intent=%s",
+                          self.artex_intent_id)
+            return
+        for text in control.get("steer") or []:
+            text = str(text or "").strip()
+            if text:
+                self._pending_steer.append(text)
+        kill = str(control.get("kill") or "").strip()
+        if kill and not self._worker_kill_reason:
+            self._worker_kill_reason = kill
+
+    def _take_pending_steer(self) -> list[str]:
+        pending = self._pending_steer
+        self._pending_steer = []
+        return pending
 
     # ---------- 装配 ----------
 
@@ -865,6 +1188,41 @@ class ChatTurn:
                 "不要提前给最终摘要。")
         return "\n".join(lines)
 
+    def _workspace_files_context(self) -> str:
+        """CTF 主控可见的项目文件清单，统一输出容器路径，避免重复猜路径。"""
+        if not self.artifacts_dir:
+            return ""
+        root = Path(self.artifacts_dir).parent
+        rows: list[str] = []
+        for rel_root in ("samples", "artifacts/attachments", "artifacts"):
+            base = root / rel_root
+            if not base.is_dir():
+                continue
+            try:
+                for p in sorted(base.rglob("*"), key=lambda x: str(x).lower()):
+                    if not p.is_file():
+                        continue
+                    rel = p.relative_to(root).as_posix()
+                    if rel.startswith("artifacts/") and rel_root == "artifacts":
+                        # attachments 已在前一轮列过，避免重复。
+                        if rel.startswith("artifacts/attachments/"):
+                            continue
+                    try:
+                        size = p.stat().st_size
+                    except OSError:
+                        size = 0
+                    rows.append(f"- /workspace/{rel} ({size} bytes)")
+                    if len(rows) >= 100:
+                        break
+            except OSError:
+                continue
+            if len(rows) >= 100:
+                break
+        if not rows:
+            return "## CTF 项目文件清单\n- （samples/ 与 artifacts/ 下暂无文件）"
+        return ("## CTF 项目文件清单（容器内路径，优先直接使用，不要重复 find）\n"
+                + "\n".join(rows))
+
     def _challenge_context(self) -> str:
         """CTF 题目上下文（challenge-asset，2026-10-14）：把「本线程归属的题目」
         显式注入 system，并交代建题与归属纪律。非 CTF 轨返空串（不注入）。
@@ -906,7 +1264,94 @@ class ChatTurn:
             lines.append(
                 "- 立题之后本线程的 declare_intent / bb_add_finding 不必再填"
                 " target_asset_id，会自动归到这道题下。")
+        # flag 判定纪律（ctf-flagjudge，2026-10-19）：把「拿到疑似 flag 怎么办」
+        # 从纯自然语言约束升级成可执行工具调用——模型自己说「解出来了」不再算数。
+        lines.append(
+            "- **拿到疑似 flag 一律用 `ctf_submit_flag(flag=…, evidence=…)` 登记**，"
+            "不要直接 bb_add_finding 报 flag。它会做三道机械判定："
+            "① 形态置信（题面占位符 `flag{example}`/`flag{test}`、模板语法 "
+            "`{% if %}`、诱饵前缀 `fake_flag{}` 会被拒）；② 变换回环（若 flag 是 "
+            "base64/hex/url/rot13 解出来的，传 `source`=原始字节 + `transform`=变换名，"
+            "它会验证「编码回去确实出现在 source 里」——瞎猜的过不了）；③ 跨题防串"
+            "（内层与其它题目已登记 flag 高度相似 → 拒收，防多题并发串号）。"
+            "判定通过后写入 **flag 台账**（题目状态的唯一真值），本题进度按 "
+            "`meta.flag_count` 算——**拿满即解出，调度层不再为它派 Worker**。")
+        lines.append(
+            "- 回执里会给出 `本题进度 N/M`：M>N 说明是多 flag 题，**继续找剩下的**，"
+            "别因为拿到一个 flag 就收工。")
+        lines.append(
+            "- 人工可能把某串标为**错误 flag**（回执会明确说「已被人工标记为错误」）："
+            "**不要重复提交同一串**，回题目重新找线索。")
+        lines.append(
+            "- 管理员密码/API key/数据库口令这类**非 flag 格式**的命中，"
+            "用 `ctf_submit_flag(…, candidate=true)` 登记为候选线索（intel/未验证），"
+            "不会判为解出，仍需继续挖正式 flag。")
+        pctx = self._pacing_context()
+        if pctx:
+            lines.append(pctx)
+        lines.append(
+            "- 弱口令/默认口令题不要只凭记忆试 `admin/admin`：把题面线索（产品名、"
+            "年份、管理员名字）交给 `ctf_ammo(hint_text=…, obs_text=…)` 生成候选表"
+            "（`pairs=true` 给 `user:pass`），写入 scratch 后再用 run_cmd 消费。"
+            "它只产候选，不爆破、不发请求。")
         return "\n".join(lines)
+
+    def _pacing_context(self) -> str:
+        """CTF 时间预算（ctf-pacing，2026-10-19）：把「这场还能花多久」变成可算的数。
+
+        **要解决的问题**：CTF 里所有时间判断都是相对的——同一个「这题再花 40 分钟
+        就放弃」在 2 小时短赛是半场比赛、在 48 小时长赛是零头。硬编码阈值必然两头
+        都不对。`core.ctf.pacing` 把阈值乘以「总时长 / 题量」的缩放系数解决这件事，
+        本方法负责把结果**注入提示词**（否则内核再好也没人看）。
+
+        配置来源 `config.ctf`（项目 config 浅合并，无需新增归一化）：
+        ``{"deadline": "<ISO8601 或 epoch 秒>", "tasks": <题目总数>}``。
+        都没配 → 用 `Pacing` 的阶梯推断（按本线程已跑时长向上猜赛制），仍给出
+        收尾窗口提示——**不知道赛制不等于没有时间感**。
+
+        非 CTF 轨返空串（不注入）；读取失败降级返回空串（绝不阻断对话）。
+        """
+        if self.track != "ctf":
+            return ""
+        try:
+            from core.ctf import pacing as ctf_pacing
+            proj = self.bb.get_project(self.project_id) or {}
+            cfg = (proj.get("config") or {}).get("ctf") or {}
+            n_tasks = int(cfg.get("tasks") or 0) or ctf_pacing.ANCHOR_NTASKS
+            started = self._thread_started_at()
+            deadline = cfg.get("deadline")
+            if deadline:
+                ts = _to_epoch(deadline)
+                if ts:
+                    p = ctf_pacing.Pacing.from_deadline(ts, n_tasks=n_tasks,
+                                                        started_at=started)
+                else:
+                    p = ctf_pacing.Pacing(n_tasks=n_tasks, started_at=started)
+            else:
+                p = ctf_pacing.Pacing(n_tasks=n_tasks, started_at=started)
+            desc = p.describe()
+            cap = p.hard_total_cap_s() // 60
+            line = (f"- 时间预算（ctf-pacing）：{desc}；"
+                    f"单题硬上限按 {cap} 分钟算")
+            if p.in_endgame():
+                line += ("。**已进收尾窗口**——停止开新战线，只做「能交的题收尾」"
+                         "与 writeup，别再启动新的探索方向。")
+            return line
+        except Exception:  # noqa: BLE001 —— 时间感注入失败绝不阻断对话
+            log.exception("chat 时间预算读取失败 thread=%s", self.thread_id)
+            return ""
+
+    def _thread_started_at(self) -> float | None:
+        """本线程创建时间（epoch 秒）；读不到返回 None（Pacing 视作刚开始）。"""
+        try:
+            row = self.bb.conn.execute(
+                "SELECT created_at FROM chat_threads WHERE id=?",
+                (self.thread_id,)).fetchone()
+            if row is None or not row["created_at"]:
+                return None
+            return _to_epoch(row["created_at"])
+        except Exception:  # noqa: BLE001
+            return None
 
     def _situation_context(self) -> str:
         """主控态势注入（asset-tri-state D8，2026-10-09）：三态分桶让主控看得见
@@ -998,7 +1443,12 @@ class ChatTurn:
         empty=True 推回，与探针语义直接互斥。"""
         if self.is_orchestrator:
             return None
-        if self.probe_mode:
+        # ARTEX Worker（有 artex_intent_id）：覆盖纪律由任务树/Planner 承担，
+        # 不再叠加「按资产全维度覆盖」闸——否则挂了父线程血缘后，一个只测
+        # Web 面的 Intent 会被反复推回要求补测其余维度，与任务边界冲突。
+        if self.artex_intent_id:
+            return None
+        if self.probe_mode or self.intent_free:
             return None
         if not self._is_spawned_subagent:
             return None
@@ -1069,24 +1519,32 @@ class ChatTurn:
         kb/skill/bb_* 全套安全机制免费拿）；allowed_tools 按线程角色收敛。"""
         try:
             if self.is_orchestrator:
-                allowed = [t for t in _ORCH_BASE_TOOLS if t != "todo_write"
+                if self.is_aggressive:
+                    base = (*_CTF_CORE_TOOLS, "bb_declare_challenge")
+                elif self.is_artex:
+                    base = tuple(_ORCH_BASE_TOOLS) + ("run_cmd", "read_file",
+                                                       "search_files")
+                else:
+                    base = _ORCH_BASE_TOOLS
+                allowed = [t for t in base if t != "todo_write"
                            and t != "call_expert"]
             else:
                 names = expert_tool_names(self.packs_root, self.agent_id,
                                           self.track)
                 if names is None:
-                    # None=未配 tools 字段，契约语义是「全量裁剪」（与 _tool_specs
-                    # 同一处理）——8cb819d 首版曾把 None or [] 当空白名单降级为
-                    # 无工具面，专家线程所有工具报「不可用：本线程未装配工具面」
-                    names = [s["name"] for s in AGENT_TOOLS
-                             if s["name"] not in _EXPERT_EXCLUDED]
+                    # CTF worker 的默认工具面只保留解题所需能力；其他轨道继续
+                    # 使用原有全量裁剪语义。
+                    names = (list(_CTF_CORE_TOOLS)
+                             if self.track == "ctf" and (self.is_worker or self.probe_mode)
+                             else [s["name"] for s in AGENT_TOOLS
+                                   if s["name"] not in _EXPERT_EXCLUDED])
                 allowed = names
             allowed = [t for t in allowed
                        if t not in ("todo_write", "call_expert")]
             # 探针子任务（激进主控子代理，probe_mode）：执行层与 _tool_specs
             # 同口径剔除 bb_query 与意图三件套——双边同步防止「schema 有、
             # 执行拒」或「执行放行、schema 无」的撕裂。
-            if self.probe_mode:
+            if self.probe_mode or self.is_aggressive or self.is_worker or self.intent_free:
                 allowed = [t for t in allowed
                            if t not in _PROBE_EXCLUDED_TOOLS]
             # 知识库迭代开关（2026-10-15）：关 = Agent 不提任何提案 → 工具面剔除
@@ -1094,6 +1552,25 @@ class ChatTurn:
             # ToolDispatcher 执行层另有一道硬闸，双保险。
             if not self._kb_iteration_on():
                 allowed = [t for t in allowed if t != "propose_pack_edit"]
+            # 联网搜索开关（v43，web-search-toggle）：线程级，主控开 = 子代理
+            # 继承（call_expert/ARTEX Worker 建线程时从父线程带位）。工具面与
+            # 执行白名单双边同步（与 probe 剔除同纪律），专家 yaml 无需声明——
+            # 这是会话级用户决定，不是专家能力。
+            if self._web_search_on() and "web_search" not in allowed:
+                allowed = [*allowed, "web_search"]
+            # Worker 间过程级信息交换（v46）：ARTEX Worker 放行 trace 查询三件套。
+            if self.artex_intent_id and not self.is_orchestrator:
+                for tname in _WORKER_TRACE_TOOLS:
+                    if tname not in allowed:
+                        allowed = [*allowed, tname]
+                # 事实写回（artex-record-fact）：与 schema 追加**双边同步**。
+                if RECORD_FACT_TOOL_NAME not in allowed:
+                    allowed = [*allowed, RECORD_FACT_TOOL_NAME]
+            # 收尾阶段（artex-wrapup）：白名单裁成「只能写回」。与 _tool_specs
+            # 的同类裁剪**双边同步**——只裁一边会撕裂（schema 有执行拒 / 执行放行
+            # schema 无）。放在最后，确保它裁掉前面所有分支刚加进来的探测类工具。
+            if getattr(self, "_wrapup_active", False):
+                allowed = filter_wrapup_whitelist(allowed)
             if not allowed:
                 return None
             expert = load_expert(self.packs_root, self.agent_id, self.track) \
@@ -1103,7 +1580,7 @@ class ChatTurn:
             return None
         try:
             dispatcher = ToolDispatcher(
-                self.bb, ExecutionGateway(bb=self.bb),
+                self.bb, ExecutionGateway(bb=self.bb, containers=self.containers),
                 project_id=self.project_id,
                 session_id=f"chat-{self.thread_id[-12:]}",
                 author=f"chat-{self.thread_id[-12:]}",
@@ -1112,10 +1589,13 @@ class ChatTurn:
                 allowed_tools=allowed,
                 abort_event=self.abort_event,
                 artifacts_dir=self.artifacts_dir,
-                role_skills=expert.get("skills"),
+                role_skills=([] if (self.is_aggressive or self.probe_mode or self.is_worker)
+                             else expert.get("skills")),
                 assigned_asset_ids=self.assigned_asset_ids,
-                intent_free=self.probe_mode,
-                thread_id=self.thread_id)
+                intent_free=(self.probe_mode or self.intent_free),
+                environment_id=(f"ctf-{self.project_id}" if self.track == "ctf" else None),
+                thread_id=self.thread_id,
+                recovery=self.recovery)
         except Exception:  # noqa: BLE001 —— 装配失败降级为无黑板工具
             log.exception("chat ToolDispatcher 装配失败 thread=%s", self.thread_id)
             return None
@@ -1149,45 +1629,98 @@ class ChatTurn:
 
     def _tool_specs(self) -> list[dict[str, Any]]:
         if self.is_orchestrator:
-            names = {t for t in _ORCH_BASE_TOOLS if t not in
-                     ("todo_write", "call_expert")}
+            if self.is_aggressive:
+                base = (*_CTF_CORE_TOOLS, "bb_declare_challenge")
+            elif self.is_artex:
+                base = tuple(_ORCH_BASE_TOOLS) + ("run_cmd", "read_file",
+                                                   "search_files")
+            else:
+                base = _ORCH_BASE_TOOLS
+            names = {t for t in base if t not in ("todo_write", "call_expert")}
             specs = _specs_by_names(names)
             specs = [*self._orch_tool_specs(), *specs]
         else:
             names = set(expert_tool_names(self.packs_root, self.agent_id,
                                           self.track)
-                        or [s["name"] for s in AGENT_TOOLS
-                            if s["name"] not in _EXPERT_EXCLUDED])
+                        or (_CTF_CORE_TOOLS
+                            if self.track == "ctf" and (self.is_worker or self.probe_mode)
+                            else [s["name"] for s in AGENT_TOOLS
+                                  if s["name"] not in _EXPERT_EXCLUDED]))
             specs = _specs_by_names(names)
         # 探针子任务（激进主控子代理，probe_mode）：bb_query 与意图三件套
         # 不下发——「不查询黑板、不声明意图」在工具面上落实（执行层同步裁，
         # 见 _build_dispatcher）。放在 mcp/知识库开关过滤之前，与最终
         # bb_query_schema_for 替换互不干扰（bb_query 已不在表里）。
-        if self.probe_mode:
+        if self.probe_mode or self.is_aggressive or self.is_worker or self.intent_free:
             specs = [s for s in specs
                      if s.get("name") not in _PROBE_EXCLUDED_TOOLS]
         if self.mcp_bridge is not None:
-            specs = [*specs, *self.mcp_bridge.tool_specs()]
+            mcp_specs = self.mcp_bridge.tool_specs()
+            # 专家显式勾选 MCP server 时，仅暴露这些 server；缺省沿用全局已启用集合。
+            if not self.is_orchestrator:
+                try:
+                    mcp_allow = load_expert(self.packs_root, self.agent_id, self.track).get("mcp_servers")
+                    if isinstance(mcp_allow, list):
+                        allowed_servers = {str(x).strip() for x in mcp_allow if str(x).strip()}
+
+                        def _server_of(spec: dict[str, Any]) -> str:
+                            parts = str(spec.get("name") or "").split("__", 2)
+                            return parts[1] if len(parts) == 3 else ""
+
+                        mcp_specs = [s for s in mcp_specs
+                                     if _server_of(s) in allowed_servers]
+                except Exception:  # noqa: BLE001
+                    log.exception("chat MCP 专家白名单读取失败 thread=%s", self.thread_id)
+            specs = [*specs, *mcp_specs]
         # 知识库迭代开关（2026-10-15）：关 = 不下发 propose_pack_edit 的 schema
         # （LLM 看不到工具就不会调；执行层硬闸 + dispatcher 白名单三重保险）。
         if not self._kb_iteration_on():
             specs = [t for t in specs if t.get("name") != "propose_pack_edit"]
+        # 联网搜索开关（v43）：开 = 追加 web_search 的 schema（LLM 看得见才调得
+        # 动；执行层白名单同步放行）。放在过滤链尾部、bb_query 轨裁剪之前，
+        # 与既有开关互不干扰；已声明过（专家 yaml 列了）则不重复挂。
+        if self._web_search_on() and not any(
+                s.get("name") == "web_search" for s in specs):
+            specs = [*specs, *_specs_by_names({"web_search"})]
+        # Worker 间过程级信息交换（v46，artex-traces）：ARTEX Worker（有 intent_id）
+        # 动态追加 trace 查询三件套，已声明过（专家 yaml 列了）则不重复挂。
+        if self.artex_intent_id and not self.is_orchestrator:
+            for tname, tspec in _WORKER_TRACE_TOOLS.items():
+                if not any(s.get("name") == tname for s in specs):
+                    specs = [*specs, tspec]
+            # 事实写回（artex-record-fact，2026-10-19）：Worker 的唯一探索图写入口。
+            # 与 trace 三件套同处动态追加——专家 yaml 不列它（它是 ARTEX 语义，
+            # 不是专家能力），已声明过则不重复挂。
+            if not any(s.get("name") == RECORD_FACT_TOOL_NAME for s in specs):
+                specs = [*specs, RECORD_FACT_TOOL_SPEC]
         # bb_query 的 what 面按轨裁剪（track-query-split，2026-10-13）：
         # 渗透/逆向互用不到的面不下发——与 AgentSession 同口径（tool_registry 家族表）。
-        return [bb_query_schema_for(self.track) if s.get("name") == "bb_query" else s
-                for s in specs]
+        specs = [bb_query_schema_for(self.track) if s.get("name") == "bb_query" else s
+                 for s in specs]
+        # 收尾阶段（artex-wrapup）：裁成「只能写回」的子集。与 _build_dispatcher
+        # 的白名单裁剪**双边同步**。放最后，确保裁掉上面所有分支刚追加的工具。
+        if getattr(self, "_wrapup_active", False):
+            specs = filter_wrapup_tools(specs)
+        return specs
 
     def _orch_tool_specs(self) -> list[dict[str, Any]]:
-        """主控专属工具规格：todo_write + call_expert（专家清单动态生成）。"""
+        """主控专属工具规格：todo_write + call_expert（专家清单动态生成）。
+
+        ARTEX 主控额外挂 artex_* 操舵四件套（见 ``_artex_tool_specs``）：派发
+        权归项目 Engine，主控只做观察与调整。
+        """
         expert_rows = []
         for eid in self._delegatable_experts():
+            if self.is_aggressive and eid == "worker":
+                expert_rows.append("- worker：唯一隔离子代理；只执行 task 中交代的任务")
+                continue
             try:
                 e = load_expert(self.packs_root, eid, self.track)
             except FileNotFoundError:
                 continue
             expert_rows.append(f"- {eid}：{e.get('name', eid)}——"
                                f"{e.get('description', '')}")
-        return [
+        specs = [
             {
                 "name": "todo_write",
                 "description": "维护当前任务的待办清单（工作记忆外化，人类实时可见）。"
@@ -1221,13 +1754,27 @@ class ChatTurn:
                                "信息/期望交付物）。你在委派前不直接实操——实操是"
                                "专家的事。（expert 只填下方专家 id，勿填技能名；"
                                "测试类任务用 asset_ids 把该专家负责的资产 id 明确划给它）"
+                               + ("\n【先返先触发 · ARTEX 调度】多个 call_expert "
+                                  "同轮并发派出后，第一个有效结果返回就立即推进对应方向，"
+                                  "未等到的任务后台继续跑、完成后以「[后台并发结果]」消息补达。"
+                                  "每个任务必须自包含、只覆盖一个测试方向并带真实证据；"
+                                  "不同任务应覆盖不同资产或测试面，禁止重复派发。"
+                                  "高风险动作必须逐项审批。"
+                                  "\n注意：ARTEX 主控的**默认派发通道是 artex_plan**"
+                                  "（Planner 生成 Intent → Engine 调度 Worker）。"
+                                  "call_expert 只用于不值得建 Intent 的一次性查询/登记；"
+                                  "不要用它替代任务规划，否则任务树与探索图会与执行脱节。"
+                                  if self.is_artex else "")
                                + ("\n【先返先触发 · 激进主控】多个 call_expert "
                                   "同轮并发派出后，第一个探针返回你就继续推进"
                                   "（[命中]→立即派深耕专家深挖，[未命中]→放弃"
                                   "该方向），未等到的探针后台继续跑、完成后以"
-                                  "「[后台探针结果]」消息补达。每个探针任务必须"
-                                  "单一快速（只查一个方向、不深挖），结论以 "
-                                  "[命中]/[未命中] 开头。"
+                                  "「[后台探针结果]」消息补达。普通探针任务必须"
+                                  "单一快速且覆盖不同测试面；同一批不得都集中在相同字符串、"
+                                  "工具、文件特征或猜测，重复方向必须改派。重大价值方向允许将相同"
+                                  "任务同时派给 2 或 3 个独立 worker 做交叉验证，但不能替代其他方向。"
+                                  "至少保留一个持续追踪 worker，直到 flag、决定性结论或方向穷尽。"
+                                  "快速探针结论以 [命中]/[未命中] 开头。"
                                   if self.is_aggressive else "")
                                + ("\n可用专家：\n" + "\n".join(expert_rows)
                                   if expert_rows else ""),
@@ -1257,10 +1804,241 @@ class ChatTurn:
                 },
             },
         ]
+        if self.is_artex:
+            specs = [*specs, *self._artex_tool_specs()]
+        return specs
+
+    def _artex_tool_specs(self) -> list[dict[str, Any]]:
+        """ARTEX 主控操舵四件套（artex-fusion，2026-10-19）。
+
+        原生 ARTEX 里 MainAgent 只观察和操舵，Intent 由 Planner 生成、Engine
+        调度、Worker 执行。这四个工具就是「观察 + 操舵」的全部手段——主控不再
+        自己决定派给谁，避免与 Engine 各自维护一套并发/重试/生命周期。
+        """
+        return [
+            {
+                "name": "artex_plan",
+                "description": "让 ARTEX Planner 生成/扩展 Intent（这是 ARTEX 主控的"
+                               "**默认派发通道**）。mode=\"new\" 新建任务树；"
+                               "mode=\"extend\" 依据探索图里的事实与发现向同一任务追加"
+                               "新方向；mode=\"auto\" 有活跃任务就追加、没有就新建。"
+                               "不传 intents 时由 Planner 决策方向；传 intents 则按给定"
+                               "方向直接落库（跳过 LLM）。**强依赖的串行链（后一步要用"
+                               "前一步的实际产出，如 注入点→凭据→横向→提权）要分步派**："
+                               "用 todos 记下整条链，本轮只派第一步，下轮据实际产出再派"
+                               "下一步——一次性并行下发会让下游空转或重复。Intent 落库后"
+                               "Engine 会并发调度 Worker，主控随后用 artex_status 观察。",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "goal": {"type": "string",
+                                 "description": "任务目标（mode=new 必填）"},
+                        "mode": {"type": "string",
+                                 "enum": ["auto", "new", "extend"],
+                                 "description": "auto（默认）/ new / extend"},
+                        "task_id": {"type": "string",
+                                    "description": "追加到指定任务；留空按活跃任务推导"},
+                        "intents": {
+                            "type": "array",
+                            "description": "显式方向（可选）：给了就不再问 Planner。"
+                                           "强依赖的串行链（后一步要用前一步的实际产出）"
+                                           "不要一次性并行下发——只派第一步，后一步用 "
+                                           "depends_on 指向它；本数组内按输出顺序从 1 "
+                                           "开始编号，如第 2 项 depends_on=[\"#1\"]。",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "objective": {"type": "string"},
+                                    "expert": {"type": "string"},
+                                    "priority": {"type": "integer"},
+                                    "asset_ids": {"type": "array",
+                                                  "items": {"type": "string"}},
+                                    "depends_on": {
+                                        "type": "array", "items": {"type": "string"},
+                                        "description": "前置 Intent：本批内序号"
+                                                       "（\"#1\"）或既有 Intent id。"
+                                                       "下游要等前置 completed 才被调度；"
+                                                       "前置 failed/cancelled 时下游置 blocked。"},
+                                },
+                                "required": ["objective"],
+                            },
+                        },
+                        "asset_ids": {"type": "array", "items": {"type": "string"},
+                                      "description": "本批 Intent 的初始资产"},
+                        "todos": {
+                            "type": "array",
+                            "description": "规划待办（可选，整表覆盖、跨唤醒保留）："
+                                           "把强依赖串行链记成待办（每步一条），"
+                                           "本轮只派第一步，下轮据实际产出派下一步。"
+                                           "每轮传完整清单（不是增量）；传 [] 清空；"
+                                           "不传则保持原清单。",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "text": {"type": "string",
+                                             "description": "步骤描述（与对应 Intent 对齐）"},
+                                    "status": {"type": "string",
+                                               "enum": ["pending", "in_progress",
+                                                        "completed"]},
+                                },
+                                "required": ["text"],
+                            },
+                        },
+                        "max_new": {"type": "integer",
+                                    "description": "本次最多新增的 Intent 数（默认 3）"},
+                    },
+                    "required": [],
+                },
+            },
+            {
+                "name": "artex_status",
+                "description": "观察 ARTEX 任务：runtime 状态（exploring / draining / "
+                               "goal_reached / needs_review / cancelled）、各状态 Intent "
+                               "计数、活跃 Worker 数、探索图里的 Fact / Finding / Hint。"
+                               "每轮先看它再决定要不要 artex_plan 或 artex_control。",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": {"type": "string", "description": "留空取活跃任务"},
+                        "detail": {"type": "string", "enum": ["summary", "full"],
+                                   "description": "summary（默认）只列进行中 Intent；"
+                                                  "full 列全量"},
+                    },
+                    "required": [],
+                },
+            },
+            {
+                "name": "artex_hint",
+                "description": "给 ARTEX 操舵：把一条方向判断写成探索图 Hint。"
+                               "指定 intent_id 且该 Worker 正在运行时会直接下发 steer"
+                               "（Worker 在下一步收到「[Worker 方向调整]」），否则只落"
+                               "Hint 供后续规划参考。用于纠正跑偏、补充线索、要求换方向。",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string",
+                                 "description": "具体的方向调整内容"},
+                        "intent_id": {"type": "string",
+                                      "description": "目标 Intent；运行中会同步 steer"},
+                        "task_id": {"type": "string", "description": "留空取活跃任务"},
+                        "steer": {"type": "boolean",
+                                  "description": "false = 只写 Hint，不下发 steer"},
+                    },
+                    "required": ["text"],
+                },
+            },
+            {
+                "name": "artex_control",
+                "description": "ARTEX 调度控制。start 启动 Engine；drain 停止领取新 "
+                               "Intent 等 Worker 收尾；stop 停掉 Engine；pause 暂停任务"
+                               "剩余 pending；resume 把 paused 放回 Frontier；cancel 取消"
+                               "Intent（给 task_id 则取消该任务全部 pending/paused）；"
+                               "kill 终止单个运行中 Worker。",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string",
+                                   "enum": ["start", "drain", "stop", "pause",
+                                            "resume", "cancel", "kill"]},
+                        "task_id": {"type": "string", "description": "留空取活跃任务"},
+                        "intent_id": {"type": "string",
+                                      "description": "kill / 单条 cancel 必填"},
+                        "reason": {"type": "string", "description": "动作原因（留痕）"},
+                        "timeout": {"type": "number",
+                                    "description": "drain / stop 的等待秒数（默认 5）"},
+                    },
+                    "required": ["action"],
+                },
+            },
+            {
+                "name": "artex_goal",
+                "description": "ARTEX 目标与范围治理（任务收敛的**唯一依据**）。"
+                               "action=\"list\" 列出任务注册目标及各自证据；"
+                               "action=\"set\" 补登记目标（goals=[\"…\"]）；"
+                               "action=\"prove\" 把证据（本任务 fact/finding 节点 id）"
+                               "连到某条目标上并标记达成，全部目标达成即任务可收敛；"
+                               "action=\"goal_met\" 绕过逐条证明、全局宣布任务收官"
+                               "（需 reason、有权重、审计可辨）；"
+                               "action=\"anchor\" 把资产纳入任务范围（覆盖度分母）——"
+                               "不传 asset_ids 则只报当前覆盖度与未覆盖数，"
+                               "remove=true 摘除锚点。量化目标（覆盖度达 X%）必须据此核对。"
+                               "任务终态由目标态派生：仍有未达成目标时任务不会判完成。",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string",
+                                   "enum": ["list", "set", "prove", "goal_met", "anchor"]},
+                        "task_id": {"type": "string", "description": "留空取活跃任务"},
+                        "goals": {
+                            "type": "array",
+                            "description": "set 用：目标清单",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "text": {"type": "string"},
+                                    "vulnclass": {"type": "string"},
+                                },
+                                "required": ["text"],
+                            },
+                        },
+                        "asset_ids": {"type": "array", "items": {"type": "string"},
+                                      "description": "set/anchor 用：资产范围（set=目标适用"
+                                                     "范围；anchor=纳入任务测试范围）"},
+                        "goal_id": {"type": "string",
+                                    "description": "prove 必填：目标节点 id"},
+                        "evidence_ids": {
+                            "type": "array", "items": {"type": "string"},
+                            "description": "prove 用：本任务 fact/finding 节点 id",
+                        },
+                        "reason": {"type": "string",
+                                   "description": "prove / goal_met 的依据说明"},
+                        "remove": {"type": "boolean",
+                                   "description": "anchor 用：true=从任务范围摘除这些资产"},
+                        "note": {"type": "string",
+                                 "description": "anchor 用：锚定原因（留痕）"},
+                    },
+                    "required": ["action"],
+                },
+            },
+            {
+                "name": "artex_fact",
+                "description": "ARTEX 事实库检索（只读）。action=\"list\" 列本任务事实"
+                               "（含 confidence 与来源意图，可按 intent_id / confidence 筛、"
+                               "分页）；action=\"get\" 取某条事实的完整内容（detail/evidence/"
+                               "关联资产/血缘边）。"
+                               "用途：artex_status 只给最近几条标题，规划态势里事实动辄几十条，"
+                               "要判断「这个方向是否已试过、结论是直接看到还是推断」必须按需翻。"
+                               "**否定结论（端口关闭/不可注入/无入口）同样在事实库里**，"
+                               "排方向前先查一遍能避免重复劳动。",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["list", "get"]},
+                        "task_id": {"type": "string", "description": "留空取活跃任务"},
+                        "id": {"type": "string",
+                               "description": "get 必填：探索图事实节点 id（非资产 id）"},
+                        "intent_id": {"type": "string",
+                                      "description": "list 用：只看某条意图产出的事实"},
+                        "confidence": {"type": "string", "enum": ["observed", "inferred"],
+                                       "description": "list 用：按置信度过滤（留空不筛）"},
+                        "limit": {"type": "integer", "description": "list 用：返回上限，默认 20"},
+                        "offset": {"type": "integer", "description": "list 用：分页偏移"},
+                        "detail_limit": {"type": "integer",
+                                         "description": "list 用：每条的详情截断字数，默认 200"},
+                    },
+                    "required": ["action"],
+                },
+            },
+        ]
 
     def _delegatable_experts(self) -> list[str]:
-        """可委派专家 id（唯一口径）：按轨全池，排除主控类智能体与兜底角色。
-        工具描述、expert enum、报错文案三处共用，防止口径漂移。"""
+        """返回本线程可委派的唯一专家值域。
+
+        激进主控采用固定的隔离 worker，不把专家池枚举泄露给模型；ARTEX 主控
+        使用当前轨道的专家池并启用先返先触发；标准主控保持原有按轨专家池语义。
+        """
+        if self.is_aggressive:
+            return ["worker"]
         return [n for n in self.expert_names
                 if n not in CONTROLLER_IDS and n != "_generalist"]
 
@@ -1292,9 +2070,15 @@ class ChatTurn:
                  f"# 角色：{expert.get('name', self.agent_id)}\n{expert.get('persona') or expert.get('description') or ''}"]
         if self.is_orchestrator:
             if self.is_aggressive:
+                fctx = self._workspace_files_context()
+                if fctx:
+                    parts.append(fctx)
                 # 激进主控：探针海 + 先返先触发（与 chat-orchestrator 的
                 # 蛙式排队互斥，二选一注入）
                 parts.append(_AGGRESSIVE_CONTROLLER_STYLE)
+            elif self.is_artex:
+                parts.append(_ARTEX_CONTROLLER_STYLE)
+                parts.append(self._situation_context())
             else:
                 parts.append(
                     "## 工作方式\n"
@@ -1305,13 +2089,12 @@ class ChatTurn:
                     "黑板已有资产/发现；资产清理与合并可直接使用受控的"
                     "bb_delete_asset/bb_merge_assets（必须先查询，合并必须给出 reason）；"
                     "不直接执行扫描/利用等实操。")
-            parts.append(self._situation_context())
+                parts.append(self._situation_context())
         else:
-            if self.probe_mode:
-                # 激进主控派出的快速子任务：不声明意图、不查黑板——与
-                # _PROBE_EXCLUDED_TOOLS 工具面裁删互为表里（只砍工具不留
-                # 口径，模型会按惯性找 declare_intent/bb_query 空转）
-                parts.append(_PROBE_SUBAGENT_STYLE)
+            if getattr(self, "probe_mode", False) or getattr(self, "intent_free", False):
+                # intent_free worker 只消费本轮 task；不注入要求先声明意图的
+                # 工作方式，避免模型按通用专家纪律创建意图。
+                pass
             else:
                 parts.append(
                     "## 工作方式\n"
@@ -1319,12 +2102,13 @@ class ChatTurn:
                     "kb_search/kb_open 查知识库、skill_open 打开技能手册；过程结论落"
                     "黑板（bb_add_asset/bb_add_finding）；干完给一段**自包含的收尾"
                     "摘要**（做了什么/关键证据/结论），主控会原样转述给人类。")
-            parts.append(self._mission_context())
+            if not (getattr(self, "probe_mode", False) or getattr(self, "intent_free", False)):
+                parts.append(self._mission_context())
         # 经验沉淀纪律（kb-iteration，2026-10-14）：propose_pack_edit 对主控与子专家均开放
         # （详见工具描述）；提示何时该提 + 证据要求 + 上限，与任务链 STRICT_PROMPT_TAIL 同口径。
         # **受项目级开关门禁（2026-10-15）**：关闭时整段不注入 + 工具面剔除
         # （_tool_specs/_build_dispatcher）——开关关 = Agent 不提任何提案，提示也不诱导。
-        if self._kb_iteration_on():
+        if self._kb_iteration_on() and not (self.is_aggressive or self.probe_mode or self.is_worker):
             parts.append(
                 "## 经验沉淀（可选）\n"
                 "发现知识库/技能文档**内容有误**、**文档缺失**、某手法**已在本轮验证有效**，"
@@ -1332,23 +2116,77 @@ class ChatTurn:
                 "新建/改写/删除，删除应用时进回收站）——只落 pending 待人类审批，**绝不自行改"
                 "文件**。reason 必须附本轮证据（引用的文档 / 失败的工具 / 产出的发现 id）；"
                 "每会话最多 3 条，禁止凑数。任务较难、试错较多时也值得回看是否有可沉淀的坑。")
+        # 联网搜索指引（v43，web-search-toggle）：开关开 = 工具面已放行
+        # web_search（_tool_specs/_build_dispatcher 双边同步），给一段使用纪律；
+        # 关着整段不注入（工具不下发，提示也不诱导）。主控与子代理同口径——
+        # 子代理线程的开关位由 spawn 时从父线程继承。
+        if self._web_search_on():
+            parts.append(
+                "## 联网搜索（已启用）\n"
+                "你持有 web_search：查本地知识库之外的公开信息（CVE 详情、公开利用"
+                "代码/EXP、最新安全情报、工具/命令用法、报错含义）直接调它，一次给足"
+                "关键词（关键术语 + 编号，中英文都可）。多引擎聚合、免 Key；结果只有"
+                "标题/链接/摘要，深读单个页面用 browser_navigate。检索结论注明来源"
+                "URL。**不要把内网/涉密目标的敏感细节（域名、路径、凭据、样本特征）"
+                "拼进搜索词外传**——联网只用于查公开资料。")
+        # Worker 间过程级信息交换（v46，artex-traces）：与工具面同口径——只有
+        # ARTEX Worker（有 intent_id）才持有三件套，故只有它们注入使用纪律。
+        # getattr 兜底：_system_prompt 的契约是「降级不中断」，任何缺属性的
+        # 壳（测试构造 / 旧实例）都不该在这里抛。
+        if getattr(self, "artex_intent_id", "") and not self.is_orchestrator:
+            parts.append(
+                "## 同任务其他 work 的执行过程（可检索）\n"
+                "你只领到本任务的一条意图，但同任务里别的 work 的执行过程留有大量"
+                "**过程级观察**（某次报错、某段响应、某个隐藏参数），它们未必被写成"
+                "正式 fact。开工前若怀疑「别人可能已经碰过这块」，可用 "
+                "artex_worker_trace_list 看有哪些 work 跑过、artex_worker_trace_get "
+                "翻某条的步骤摘要（先摘要流定位 step_id，再用 step_ids 取完整输出，"
+                "一次最多 5 个）；已知明确关键字（路径/token/报错片段）时用 "
+                "artex_worker_trace_search 直接跨 work 搜——它会自动排除你自己这条"
+                "意图的步骤。**但不要为了「看一眼」而翻**：系统已把该给的信息给你了，"
+                "只有在确实缺一块信息、且猜别人见过时才查，查到就够、不必穷举。"
+                "边界不变：你仍只做自己领到的这条意图，别人的过程只是参考。")
+            # 事实写回纪律（artex-record-fact，2026-10-19）：与工具面同口径——
+            # 只有 ARTEX Worker 持有 record_fact，故只有它注入写回纪律。
+            # 这段是「探索图为什么值得写」的动机说明：只给工具不给纪律，模型会
+            # 一路探测到收尾才想起写，那时已经丢了大半中间观察。
+            parts.append(
+                "## 事实写回（record_fact）\n"
+                "你这条意图的价值**不在最终那段总结，而在落进探索图的事实**——"
+                "规划者看不到你的对话，只看到你写下的事实。所以：\n"
+                "- **边做边写，不要攒到最后**。每确认一个结论就 record_fact 一次；"
+                "收尾才写的话，前面探过的细节基本已经忘了。\n"
+                "- **一次探索汇成一条事实**，别把状态码、指纹、标题各记一条——"
+                "summary 写一句结论，detail 把所有细节塞进去。拆太碎会让图谱爆炸。\n"
+                "- **否定结论同样要写**：「8080 关闭」「该参数不可注入」「未发现登录"
+                "入口」都是规划者最需要的信息（它据此排除方向）。写「观察 + 试探性"
+                "读法」，不要直接下「已放弃」的结论。\n"
+                "- **confidence 如实标**：observed=输出里直接看到；inferred=据现象"
+                "推断。否定结论除非确已穷尽手段且直接看到，否则标 inferred——"
+                "标错 observed 会让规划者以为该方向已穷尽而永久跳过。\n"
+                "- **evidence 只写一行**（命令 + 最能证明的那一两行输出），"
+                "不要把大段输出粘进去（细节放 detail）。\n"
+                "- 只写你**真实看到**的结论，不要脑补。同一条结论重复写会按幂等"
+                "更新，不必担心重复。")
         # CTF 题目上下文（challenge-asset v38）：主控与子专家都注入（子专家与主控
         # 同题，都要知道该题的归属与建题纪律）；非 CTF 轨返空串不注入。
-        cctx = self._challenge_context()
-        if cctx:
-            parts.append(cctx)
-        # 蓝图注入（R4 消费面接线 M1）：主控与子专家都摊项目蓝图（紧凑形态），
-        # 无蓝图返空串不注入。
-        bp_ctx = self._blueprint_context()
-        if bp_ctx:
-            parts.append(bp_ctx)
-        # 技能全量描述（K8 同款渐进披露层1：name+description，正文 skill_open）
+        if not (getattr(self, "probe_mode", False) or self.is_aggressive or self.is_worker):
+            cctx = self._challenge_context()
+            if cctx:
+                parts.append(cctx)
+            # 蓝图注入（R4 消费面接线 M1）：主控与子专家都摊项目蓝图（紧凑形态），
+            # 无蓝图返空串不注入。
+            bp_ctx = self._blueprint_context()
+            if bp_ctx:
+                parts.append(bp_ctx)
+        # 技能全量描述（K8 同款渐进披露层1：name+description，正文 skill_open）。
+        # 激进主控及其 worker 明确禁用技能，不能因专家配置缺省而回退全量。
         try:
-            if SkillRegistry is not None:
+            if SkillRegistry is not None and not (self.is_aggressive or self.probe_mode or self.is_worker):
                 reg = SkillRegistry(self.packs_root)
                 reg.load()
-                # 硬选口径：空列表 = 不限定（与 experts.expert_skills 同款；chat-orchestrator skills:[] = 全量）
-                role_skills = expert.get("skills") or None
+                # None=全量，[]/空集合=明确不加载；保留三态语义。
+                role_skills = expert.get("skills") if "skills" in expert else None
                 enabled = [s for s in reg.all()
                            if s.enabled and (role_skills is None or s.name in role_skills)]
                 if enabled:
@@ -1743,6 +2581,19 @@ class ChatTurn:
             self._emit("chat.error", {"thread_id": self.thread_id, **info})
             raise
 
+    def _web_search_on(self) -> bool:
+        """线程级「联网搜索」开关**实时读**（每步从 chat_threads 行读，不缓存）。
+
+        v43（web-search-toggle）：composer「联网」打开 = 该线程的主控与其
+        spawn 的子代理（call_expert / ARTEX Worker 建线程时从父线程继承）
+        拿 web_search 工具。关 = 工具面与执行白名单都不给。读失败按关
+        （宁严勿松：不让线程在开关状态不明时默认外发检索）。"""
+        try:
+            row = chat_store.get_thread(self.bb, self.thread_id)
+            return bool((row or {}).get("web_search"))
+        except Exception:  # noqa: BLE001 —— 读开关失败按关闭处理
+            return self.web_search
+
     def _kb_iteration_on(self) -> bool:
         """项目级「知识库迭代」开关**实时读**（每步从黑板 projects 行读，不缓存）。
 
@@ -1813,6 +2664,13 @@ class ChatTurn:
         messages = _retry_transient(self._load_history)
         tools = _retry_transient(self._tool_specs)
         max_steps = _ORCH_MAX_STEPS if self.is_orchestrator else _EXPERT_MAX_STEPS
+        # 任务级 deadline 夹逼（artex-taskclock）：把任务剩余时间折进本次 run 的
+        # 墙钟预算，并记下「任务 deadline 是否是约束」。无 deadline 时
+        # (eff=自有预算, clamped=False)，下面整段等价于引入前的行为。
+        eff_budget, self._run_budget_clamped = clamp_max_duration(
+            getattr(self, "task_deadline_at", 0.0),
+            getattr(self, "run_budget_s", 0.0))
+        run_started = time.monotonic()
         final = ""
         # 截断续写状态（2026-10-01）：continue_n=已续写次数；text_acc=逐段文本拼接
         continue_n = 0
@@ -1826,6 +2684,24 @@ class ChatTurn:
             if self._aborted():  # 步间中止：不落新 LLM 调用
                 final = self._persist_stopped()
                 break
+            # 墙钟预算耗尽（artex-taskclock）：与步数预算并列的第二个收尾触发点。
+            # 上游 harness 的 MaxDuration 同款——到点**自己**停并进收尾，而不是
+            # 等 Engine 从外面 future.cancel()：硬砍时 Worker 连一句总结都来不及
+            # 写，settlement 根本进不去，「已识别未写回」照样蒸发。
+            if eff_budget > 0 and time.monotonic() - run_started >= eff_budget:
+                self.budget_reason = REASON_TIMEOUT
+                self._emit("chat.budget", {"phase": "timeout",
+                                           "budget_s": eff_budget,
+                                           "clamped": self._run_budget_clamped,
+                                           "step": _step})
+                break
+            # ARTEX Worker 方向调整：在步边界取一次控制，steer 作为 user 消息
+            # 注入下一轮（不落库、不污染历史；事件流留痕供前端展示）。
+            self._poll_worker_control(force=True)
+            for steer in self._take_pending_steer():
+                messages.append({"role": "user",
+                                 "content": f"[Worker 方向调整] {steer}"})
+                self._emit("chat.steer", {"text": steer[:500]})
             step_nudges: list[str] = []  # 本步事后追加的系统提示（推理膨胀闸等）
             acc: list[str] = []
             pub = {"chars": 0, "seq": 0, "at": 0.0}
@@ -2107,7 +2983,7 @@ class ChatTurn:
                     serial_results[tc.id] = (ok, result, started)
                 parallel_results, probe_pending = (
                     self._parallel_expert_dispatch(
-                        resp.tool_calls, first_return=self.is_aggressive))
+                        resp.tool_calls, first_return=self.is_first_return_controller))
                 for tc in resp.tool_calls:
                     # 并行专家：worker 内已完成并**落库**（见 _parallel_expert_dispatch），
                     # 这里只按原始 tool_call 顺序补 history block——前端靠 2s 轮询
@@ -2139,12 +3015,12 @@ class ChatTurn:
                             "content": result})
                         continue
                     if tc.id in probe_pending:
-                        # 先返先触发：该探针已被提前断候、仍在后台跑。补占位
+                        # 先返先触发：该并发专家已被提前断候、仍在后台跑。补占位
                         # tool 结果保 pairing 合法（DB+内存同写）；真实结果由
                         # worker 完成后以同 id 续写 + _drain_probe_overflow
                         # 在本轮后续步边界并入上下文。
-                        note = (_PROBE_PENDING + " 该并发探针仍在后台执行；"
-                                "完成后结果将以「[后台探针结果]」消息补充送达。")
+                        note = (_PROBE_PENDING + " 该并发专家仍在后台执行；"
+                                "完成后结果将以「[后台并发结果]」消息补充送达。")
                         chat_store.append_message(self.bb, self.thread_id, "tool",
                                                   note, tool_use_id=tc.id)
                         tool_result_blocks.append({
@@ -2186,8 +3062,8 @@ class ChatTurn:
                 if tool_result_blocks:
                     messages.append({"role": "user",
                                      "content": tool_result_blocks})
-                if self.is_aggressive:
-                    # 先返先触发：把窗口内后台完成的探针结果并进下一轮 LLM
+                if self.is_first_return_controller:
+                    # 先返先触发：把窗口内后台完成的并发结果并进下一轮 LLM
                     # 请求（skip=本批已作为正式 tool_result 交回的 id，防双落盘）
                     self._drain_probe_overflow(
                         messages, skip_ids=set(parallel_results))
@@ -2275,6 +3151,15 @@ class ChatTurn:
             final = "".join(text_acc)
             break
         if not final:
+            # 走到这里 = 主循环没拿到终稿：两种收尾触发点都落在这里——
+            # ① for 循环跑完 max_steps（撞**步数**上限，上游 ReasonMaxTurns）；
+            # ② 步间墙钟检查命中（撞**墙钟**预算，上游 ReasonTimeout）。
+            # 两者都属「没做完」（artex-exhausted），但收尾词不同（见 _wrapup）。
+            # 中止路径（_persist_stopped）会先设好 final 并 break，不进这里，
+            # 故人工/控制停不会被误标 exhausted。
+            self.budget_exhausted = True
+            if not self.budget_reason:
+                self.budget_reason = REASON_MAX_TURNS
             # 步数耗尽但有累积文本（截断续写中途用尽）→ 用累积文本收尾并标记截断
             if text_acc and any(t.strip() for t in text_acc):
                 final = "".join(text_acc)
@@ -2285,15 +3170,135 @@ class ChatTurn:
                 final = _EMPTY_FINAL_TEXT
                 chat_store.append_message(self.bb, self.thread_id,
                                           "assistant", final)
+            # 收尾阶段（artex-wrapup，对齐上游 Settlement）：撞上限后**先捞回**
+            # 已识别未写回的内容，再收尾——否则这段观察随轮次结束一起蒸发。
+            # 中止（_aborted）不进来：人工/控制停就该立刻停，不给它再跑 10 轮。
+            if not self._aborted():
+                salvaged = self._wrapup(messages, system, tools)
+                if salvaged:
+                    final = salvaged
         return final
+
+    def _wrapup(self, messages: list[dict[str, Any]], system: str,
+                tools: list[dict[str, Any]] | None) -> str:
+        """撞预算后的收尾阶段：只许写回，跑独立轮数预算，返回终稿文本。
+
+        上游 ``agent/wrapup.go`` + ``worker.go:425`` 的三条固定策略：
+        ① 注入收尾提示词；② 独立轮数预算（``WRAPUP_MAX_TURNS``）；③ 禁用
+        探测类工具、保留落库工具（**代码固定，不开放配置**——用户不能把这个
+        guardrail 改掉）。
+
+        收尾词按**实际 reason** 现场挑（``wrapup_prompt_for_reason``，对齐上游
+        ``PromptByReason``）：任务到点说「整个任务结束、做最后判定」，本次 run
+        预算耗尽说「本轮结束、系统还会唤醒你」——两套语义常相反，用错会把
+        planner 推向反方向（任务到点还在派永远不执行的新意图）。
+
+        返回值：收尾产出的终稿文本；收尾失败/无产出时返回空串，由调用方保留
+        原兜底文本（收尾是**尽力而为**，绝不能因为它失败把整轮炸掉）。
+        """
+        if not tools:
+            return ""
+        agent_key = "worker" if self.is_worker else (
+            "planner" if self.is_artex else self.agent_id)
+        reason = str(getattr(self, "budget_reason", "") or REASON_MAX_TURNS)
+        prompt = wrapup_prompt_for_reason(
+            agent_key, reason,
+            clamped=bool(getattr(self, "_run_budget_clamped", False)),
+            is_orchestrator=self.is_orchestrator)
+        self._wrapup_active = True
+        # 重建工具面与执行白名单（此刻 _wrapup_active=True，两处裁剪生效）
+        try:
+            wrap_tools = self._tool_specs()
+            self._dispatcher = self._build_dispatcher()
+        except Exception:  # noqa: BLE001 —— 裁剪失败就用原工具面继续
+            log.exception("收尾阶段工具面重建失败 thread=%s", self.thread_id)
+            wrap_tools = tools
+        self._emit("chat.wrapup", {"phase": "start", "agent": agent_key,
+                                   "max_turns": wrapup_max_turns(agent_key),
+                                   "reason": reason,
+                                   "clamped": bool(getattr(
+                                       self, "_run_budget_clamped", False)),
+                                   "tools": len(wrap_tools or [])})
+        # 收尾提示注入：用 `_inject_nudge` 而非裸 append——主循环结束时尾部
+        # 通常是 user（tool_result 块），直接 append 会产生**连续两条 user**，
+        # Anthropic 严格角色交替会 400 拒收（本仓既有坑，见 _inject_nudge 注释）。
+        _inject_nudge(messages, prompt)
+        # 只统计**收尾阶段自己产出**的文本：主循环的 text_acc 是截断收尾的旧文本，
+        # 混进来会让「收尾无产出」也误报成捞回成功。
+        wrap_text: list[str] = []
+        salvaged = ""
+        try:
+            for _step in range(wrapup_max_turns(agent_key)):
+                if self._aborted():
+                    break
+                # 末步强制纯文本终稿（同主循环口径），逼它给出那句总结
+                step_tools = None if _step == wrapup_max_turns(agent_key) - 1 \
+                    else (wrap_tools or None)
+                resp = self._chat(messages, system, step_tools, None)
+                text = str(getattr(resp, "text", "") or "").strip()
+                thinking = str(getattr(resp, "thinking", "") or "")
+                calls = getattr(resp, "tool_calls", None) or []
+                if not calls:
+                    # 无工具调用 = 收尾终稿（可能为空：模型没话可说，直接结束）
+                    if text:
+                        row = chat_store.append_message(
+                            self.bb, self.thread_id, "assistant", text,
+                            thinking=thinking)
+                        self._emit("chat.message", {"role": "assistant",
+                                                    "text": text[:2000],
+                                                    "message_id": row["id"],
+                                                    "wrapup": True})
+                        wrap_text.append(text)
+                        salvaged = "".join(wrap_text)
+                    break
+                # 落库调用：assistant(tool_calls) → 逐个执行 → tool_result 配对
+                row = chat_store.append_message(
+                    self.bb, self.thread_id, "assistant", text,
+                    thinking=thinking,
+                    tool_calls=[{"id": tc.id, "name": tc.name,
+                                 "args": tc.arguments} for tc in calls])
+                self._flush_final_delta(text, row["id"])
+                if text:
+                    wrap_text.append(text)
+                blocks = []
+                for tc in calls:
+                    ok, result = self._dispatch(tc)
+                    result, _artifact = self._clip_tool_result(result, tc)
+                    chat_store.append_message(self.bb, self.thread_id, "tool",
+                                              result, tool_use_id=tc.id)
+                    blocks.append({"type": "tool_result", "tool_use_id": tc.id,
+                                   "content": result})
+                messages.append({"role": "assistant", "content": [
+                    *([{"type": "text", "text": text}] if text else []),
+                    *[{"type": "tool_use", "id": tc.id, "name": tc.name,
+                       "input": tc.arguments} for tc in calls]]})
+                messages.append({"role": "user", "content": blocks})
+            else:
+                # 10 轮都只发工具调用、始终没给终稿 → 用收尾期累积文本兜底
+                salvaged = "".join(wrap_text)
+        except Exception:  # noqa: BLE001 —— 收尾尽力而为，失败不炸整轮
+            log.exception("收尾阶段执行失败 thread=%s", self.thread_id)
+        finally:
+            self._wrapup_active = False
+            try:  # 复原工具面/白名单（本轮之后可能还有下一轮对话）
+                self._dispatcher = self._build_dispatcher()
+            except Exception:  # noqa: BLE001
+                log.exception("收尾后工具面复原失败 thread=%s", self.thread_id)
+        self._emit("chat.wrapup", {"phase": "done",
+                                   "salvaged_chars": len(salvaged)})
+        return salvaged
 
     def _persist_stopped(self) -> str:
         """中止收尾：落一条可见的停止说明（消息+事件），线程状态由 run() 归位。"""
-        text = "（已按人类要求停止本轮执行；可继续追问或重新发起）"
+        if self._worker_kill_reason:
+            text = f"（Worker 已按控制指令终止：{self._worker_kill_reason}）"
+        else:
+            text = "（已按人类要求停止本轮执行；可继续追问或重新发起）"
         row = chat_store.append_message(self.bb, self.thread_id,
                                         "assistant", text)
         self._emit("chat.message", {"role": "assistant", "text": text,
-                                    "message_id": row["id"], "stopped": True})
+                                    "message_id": row["id"], "stopped": True,
+                                    "kill_reason": self._worker_kill_reason})
         return text
 
     def _flush_final_delta(self, text: str, message_id: int) -> None:
@@ -2303,6 +3308,16 @@ class ChatTurn:
                                       "final_message_id": message_id})
 
     # ---------- 工具分发 ----------
+
+    def _artex_ctx(self) -> SteeringContext:
+        """装配 ARTEX 操舵上下文（每次调用重建，保证读到最新引擎与专家池）。"""
+        return SteeringContext(
+            bb=self.bb, project_id=self.project_id, track=self.track,
+            llm=self.artex_planner_llm, expert_names=self._delegatable_experts(),
+            engine_provider=self.artex_engine_provider,
+            author=f"chat-{self.thread_id[-12:]}",
+            task_id=self.artex_task_id,
+            thread_id=self.thread_id)
 
     def _dispatch(self, tc) -> tuple[bool, str]:
         """工具分发：返回 (ok, 结果文本)。失败文案统一以「[错误]」前缀，
@@ -2317,6 +3332,16 @@ class ChatTurn:
         if self._aborted():
             return False, "[错误] 已停止：工具未执行"
         name = getattr(tc, "name", "") or ""
+        # 收尾阶段硬闸（artex-wrapup，对齐上游 Settlement.DisabledTools）：收尾只
+        # 允许「写回已识别内容」，不许借收尾继续探测。工具面与白名单已双边裁剪，
+        # 这里是第三道闸——模型可能从历史里记得某个工具名直接调，schema 撤了也照调。
+        # getattr 兜底：_dispatch 是所有工具调用的热路径，任何缺属性的壳（测试
+        # 构造 / 旧实例）都不该在这里抛。
+        if getattr(self, "_wrapup_active", False) and not wrapup_allowed(name):
+            return False, (
+                f"[错误] 收尾阶段不可用 {name}：预算已耗尽，现在只能把已识别的"
+                "内容写回（资产/事实/漏洞/待办），不能再发起新的探测。"
+                "请立即写回，然后用一句话总结。")
         try:
             args = tc.arguments or {}
             # 探针子任务（probe_mode）硬拒面（2026-10-17）：_PROBE_EXCLUDED_TOOLS
@@ -2324,7 +3349,7 @@ class ChatTurn:
             # 白名单检查对收尾原语**恒放行**（§6.6），只从 allowed_tools 裁
             # 挡不住模型按惯性调 declare_intent。故在对话链入口显式拒，文案
             # 说明「为什么没有、该干嘛」，模型读一次即改道，不烧熔断步数。
-            if self.probe_mode and name in _PROBE_EXCLUDED_TOOLS:
+            if (self.probe_mode or self.intent_free) and name in _PROBE_EXCLUDED_TOOLS:
                 r = (f"[错误] 工具 {name} 在本线程不可用：这是激进主控派出的"
                      "快速子任务——不声明意图、不查询黑板；按任务描述直接"
                      "执行，结论以 [命中]/[未命中] 开头回传。")
@@ -2342,6 +3367,24 @@ class ChatTurn:
                 r = self._tool_call_expert(args)
                 self._record_failure(name, r, args)
                 return not r.startswith("[错误"), r
+            if self.is_artex and is_artex_tool(name):
+                r = artex_steering_dispatch(self._artex_ctx(), name, args)
+                self._record_failure(name, r, args)
+                return not r.startswith("[错误"), r
+            # Worker 间过程级信息交换（v46）：ARTEX Worker trace 查询直接走
+            # artex_traces，不经过 ToolDispatcher（后者无这些工具的 handler）。
+            if name in _WORKER_TRACE_TOOLS and self.artex_intent_id:
+                r = self._tool_worker_trace(name, args)
+                self._record_failure(name, r, args)
+                return not r.startswith("[错误"), r
+            # 事实写回（artex-record-fact）：同走 artex_facts，不经 ToolDispatcher。
+            if name == RECORD_FACT_TOOL_NAME and self.artex_intent_id:
+                r = dispatch_record_fact(
+                    self.bb, self.project_id, self.artex_task_id,
+                    self.artex_intent_id, args,
+                    author=f"chat-{self.thread_id[-12:]}")
+                self._record_failure(name, r, args)
+                return not r.startswith("[错误"), r
             if self._dispatcher is not None:
                 r = self._dispatcher.dispatch(name, args)
                 # agent 工具面失败文本约定（[错误] 为主，兼容 [工具异常]/[参数格式]）
@@ -2356,6 +3399,37 @@ class ChatTurn:
             self._record_failure(name, f"[错误] 工具 {name} 执行异常: {e}", args)
             return False, f"[错误] 工具 {name} 执行异常: {e}"
 
+    def _tool_worker_trace(self, name: str, args: dict[str, Any]) -> str:
+        """Worker 间过程级信息交换：list/get/search 三件套。"""
+        try:
+            if name == "artex_worker_trace_list":
+                rows = list_worker_traces(
+                    self.bb, self.project_id,
+                    task_id=self.artex_task_id or "",
+                    q=str(args.get("q") or "").strip(),
+                    limit=int(args.get("limit") or 50))
+                return json.dumps({"works": rows}, ensure_ascii=False, default=str)
+            if name == "artex_worker_trace_get":
+                result = get_worker_trace(
+                    self.bb, self.project_id,
+                    intent_id=str(args.get("intent_id") or "").strip(),
+                    q=str(args.get("q") or "").strip(),
+                    step_ids=args.get("step_ids"),
+                    limit=int(args.get("limit") or 100))
+                return json.dumps(result, ensure_ascii=False, default=str)
+            if name == "artex_worker_trace_search":
+                result = search_all_worker_traces(
+                    self.bb, self.project_id,
+                    task_id=self.artex_task_id or "",
+                    q=str(args.get("q") or "").strip(),
+                    exclude_intent_id=self.artex_intent_id or "",
+                    limit=int(args.get("limit") or 100))
+                return json.dumps(result, ensure_ascii=False, default=str)
+            return f"[错误] 未知 trace 工具: {name}"
+        except Exception as exc:  # noqa: BLE001
+            log.exception("artex_worker_trace 失败 name=%s thread=%s", name, self.thread_id)
+            return f"[错误] {name} 执行异常: {exc}"
+
     def _record_failure(self, name: str, result: str,
                         args: dict | None = None) -> None:
         """chat 侧失败落诊断日志（diagnostics-log，2026-10-14）。
@@ -2367,17 +3441,22 @@ class ChatTurn:
         """
         if not result.startswith("[错误"):
             return
+        # 诊断记录不是主路径：未装配黑板的半成品对象（object.__new__ 回放/测试）
+        # 直接跳过，绝不能因为「记录失败」把工具错误放大成整轮异常。
+        bb = getattr(self, "bb", None)
+        if bb is None:
+            return
         author = f"chat-{self.thread_id[-12:]}"
         if name.startswith("mcp__"):
             parts = name.split("__", 2)
             if len(parts) == 3:
                 record_mcp_failure(
-                    self.bb, self.project_id, server=parts[1], tool=parts[2],
+                    bb, self.project_id, server=parts[1], tool=parts[2],
                     error=result, session_id=author, author=author,
                     thread_id=self.thread_id)
                 return
         record_tool_failure(
-            self.bb, self.project_id, name=name, args=args, error=result,
+            bb, self.project_id, name=name, args=args, error=result,
             session_id=author, author=author, thread_id=self.thread_id)
 
     def _parallel_expert_dispatch(
@@ -2530,14 +3609,14 @@ class ChatTurn:
                                     if it["id"] in skip]
         if not items:
             return
-        lines = ["[后台探针结果] 以下并发探针已在后台跑完，请按先返先触发规则"
-                 "处置（[命中]→立即派深耕专家深挖；[未命中]→放弃该方向）："]
+        lines = ["[后台并发结果] 以下并发专家已在后台跑完，请按先返先触发规则"
+                 "处置（[命中]→立即派深挖专家；[未命中]→放弃该方向）："]
         for it in items:
             body = it.get("result") or ""
             if len(body) > _PROBE_OVERFLOW_HEAD:
                 body = (body[:_PROBE_OVERFLOW_HEAD]
-                        + f"\n…（截断；全文见该探针的工具结果 {it['id']}）")
-            lines.append(f"◆ 探针 {it.get('expert') or '?'}"
+                        + f"\n…（截断；全文见该专家的工具结果 {it['id']}）")
+            lines.append(f"◆ 专家 {it.get('expert') or '?'}"
                          f"（调用 {str(it.get('id') or '')[-8:]}）：\n{body}")
         _inject_nudge(messages, "\n".join(lines))
 
@@ -2547,6 +3626,13 @@ class ChatTurn:
         parts = name.split("__", 2)
         if len(parts) != 3:
             return f"[错误] 非法 MCP 工具名: {name}"
+        if not self.is_orchestrator:
+            try:
+                allow = load_expert(self.packs_root, self.agent_id, self.track).get("mcp_servers")
+                if isinstance(allow, list) and parts[1] not in {str(x).strip() for x in allow}:
+                    return f"[错误] MCP server {parts[1]} 未被该专家勾选启动"
+            except Exception:  # noqa: BLE001
+                log.exception("chat MCP 专家白名单校验失败 thread=%s", self.thread_id)
         return self.mcp_bridge.call(
             parts[1], parts[2], args, session_id=self.thread_id)
 
@@ -2579,7 +3665,9 @@ class ChatTurn:
         if expert in CONTROLLER_IDS:
             return ("[错误] call_expert 失败：主控类智能体不可被委派"
                     "（spawn 深度=1）；请派专家池专家")
-        if expert not in self.expert_names:
+        if self.is_aggressive and expert != "worker":
+            return "[错误] call_expert 失败：激进主控只能委派固定子代理 worker"
+        if not self.is_aggressive and expert not in self._delegatable_experts():
             available = ", ".join(self._delegatable_experts())
             return (f"[错误] call_expert 失败：未知专家 '{expert}'；"
                     f"可用：{available}（这些是专家 id，不是技能名）")
@@ -2601,22 +3689,41 @@ class ChatTurn:
                     assigned.append(aid)
         else:
             return "[错误] call_expert 失败：asset_ids 必须是资产 id 数组"
-        for aid in assigned:
-            if self.bb.get_asset(aid) is None:
-                return (f"[错误] call_expert 失败：分配资产不存在或不属于本项目 "
-                        f"{aid}（先 bb_add_asset 落资产，再按 id 分配）")
+        # CTF 的附件与题目文件由项目工作区直接提供，允许主控把路径/文件名
+        # 作为任务引用，不要求先伪造一条黑板 asset；worker 的执行边界仍由
+        # Docker 项目工作区和 threat_class/runtime 闸门承载。非 CTF 轨继续
+        # 强制使用项目内黑板资产 id，避免改变普通渗透任务的派发纪律。
+        if self.track != "ctf":
+            for aid in assigned:
+                if self.bb.get_asset(aid) is None:
+                    return (f"[错误] call_expert 失败：分配资产不存在或不属于本项目 "
+                            f"{aid}（先 bb_add_asset 落资产，再按 id 分配）")
         # spawn 持久子线程（留档），隔离上下文跑完 → 摘要回传。
         # **构造也必须包在 try 内**（2026-10-03）：子 ChatTurn 构造会读专家 yaml /
         # 装工具面，构造抛错（如 packs 缺文件）此前直接穿出把主控整轮炸掉；现
         # 回文本，主控可改派或向人类说明。
         sub_id = ""
+        artex_intent_id = ""
         try:
+            artex_intent = create_artex_intent(
+                self.bb, self.project_id, task, task_id=self.thread_id,
+                expert=expert, asset_ids=assigned,
+                constraints={"track": self.track or "", "controller": self.agent_id})
+            artex_intent_id = artex_intent.get("id", "")
+            claim_artex_intent(self.bb, self.project_id, artex_intent_id,
+                               f"chat-{self.thread_id[-12:]}")
+            transition_artex_intent(self.bb, self.project_id, artex_intent_id, "running")
+            worker_agent = "worker" if self.is_aggressive else expert
             sub = chat_store.create_thread(
-                self.bb, self.project_id, expert,
+                self.bb, self.project_id, worker_agent,
                 title=task[:40], parent_thread_id=self.thread_id,
-                spawned_task=task[:500])
+                spawned_task=task[:500],
+                # 联网搜索继承（v43，web-search-toggle）：主控开着「联网」时
+                # 子代理默认也启用——子线程落同一开关位，其 ChatTurn 工具面/
+                # 白名单据此双边放行；主控关着则子代理也不拿该工具。
+                web_search=self._web_search_on())
             sub_id = sub["id"]
-            self._emit("chat.spawn", {"thread_id": sub_id, "expert": expert,
+            self._emit("chat.spawn", {"thread_id": sub_id, "expert": worker_agent,
                                       "task_head": task[:200],
                                       "asset_ids": assigned})
             sub_turn = ChatTurn(
@@ -2630,17 +3737,33 @@ class ChatTurn:
                 artifacts_dir=self.artifacts_dir,
                 browser_pool=self.browser_pool,
                 decompiler_factory=self.decompiler_factory,
-                assigned_asset_ids=assigned,
+                containers=self.containers,
                 # 激进主控的子代理 = 快速子任务（probe_mode）：不声明意图、
                 # 不查黑板（用户 2026-10-17 要求）。chat-orchestrator 的委派
                 # 不置位——蛙式排队的深耕子专家仍按完整纪律跑。
-                probe_mode=self.is_aggressive)
+                probe_mode=self.is_aggressive,
+                assigned_asset_ids=[] if self.is_aggressive else assigned,
+                # 子专家共享同一项目级恢复器：去重键在实例内，跨线程共享才能
+                # 避免「多个 worker 同时给同一故障装一遍」。
+                recovery=self.recovery)
             summary = sub_turn.run(task)
         except Exception as e:  # noqa: BLE001 —— 专家失败回文本，主控可改派
             log.exception("chat 子专家线程失败 expert=%s thread=%s",
                           expert, self.thread_id)
+            if artex_intent_id:
+                try:
+                    transition_artex_intent(self.bb, self.project_id, artex_intent_id,
+                                            "failed", error=str(e))
+                except Exception:
+                    log.exception("ARTEX Intent 失败回写失败 id=%s", artex_intent_id)
             return (f"[错误] call_expert 专家线程 {expert} 执行失败：{e}"
                     + (f"（线程 {sub_id} 已留档）" if sub_id else ""))
+        if artex_intent_id:
+            try:
+                transition_artex_intent(self.bb, self.project_id, artex_intent_id,
+                                        "completed", result=summary[:12000])
+            except Exception:
+                log.exception("ARTEX Intent 完成回写失败 id=%s", artex_intent_id)
         return (f"专家线程 {sub_id}（{expert}）已完成。\n"
                 f"收尾摘要：\n{summary[:4000]}\n"
                 f"（人类可在工作台打开该线程查看全过程与追问）")
@@ -2652,6 +3775,8 @@ class ChatTurn:
             self.bb.append_event(
                 self.project_id, kind,
                 {"thread_id": self.thread_id, "agent_id": self.agent_id,
+                 **({"intent_id": self.artex_intent_id} if self.artex_intent_id else {}),
+                 **({"task_id": self.artex_task_id} if self.artex_task_id else {}),
                  **payload},
                 session_id=None, author=f"chat-{self.thread_id[-12:]}")
         except Exception:  # noqa: BLE001 —— 事件失败不阻断对话轮

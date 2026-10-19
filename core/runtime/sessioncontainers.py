@@ -80,8 +80,11 @@ def resolve_reaper_interval() -> float:
 
 
 def container_name(project_id: str, session_id: str) -> str:
-    """确定性容器名 `csp_<pid>_<sid>`——项目/会话归属编码进名字，`docker ps` 一眼可辨，
-    且无需 `.Label` 解析（Windows argv 引号转义坑，见 backends.ps_by_label）。"""
+    """确定性容器名 `csp_<pid>_<environment>`。
+
+    session_id 保留兼容旧调用，但网关可以传入项目/题目级 environment_id，让主控
+    与 worker 共享同一容器和容器内安装状态。
+    """
     return f"{_NAME_PREFIX}{project_id}_{session_id}"
 
 

@@ -1,8 +1,0 @@
-============================= test session starts =============================
-platform win32 -- Python 3.12.13, pytest-9.1.1, pluggy-1.6.0 -- E:\ILOVCTRY\cyberstrike-pro\.venv\Scripts\python.exe
-rootdir: E:\ILOVCTRY\cyberstrike-pro
-configfile: pyproject.toml
-plugins: anyio-4.15.1
-collecting ... collected 114 items
-
-tests/test_agent.py::test_full_loop_run_cmd_finding_finish 

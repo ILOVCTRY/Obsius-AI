@@ -1,5 +1,197 @@
 // core API 数据契约（与 core/api/app.py 响应对齐，宽松可选字段）
 
+export interface ArtexIntent {
+  id: string
+  parent_id: string | null
+  task_id: string
+  objective: string
+  constraints: Record<string, unknown>
+  asset_ids: string[]
+  /** 串行链前置 Intent id（依赖全 completed 才被调度；前置 failed/cancelled 时本 Intent 置 blocked） */
+  depends_on: string[]
+  expert: string
+  priority: number
+  status: string
+  attempt: number
+  result: string
+  error: string
+  created_at: string
+  updated_at: string
+}
+
+export interface ArtexTaskGraph {
+  task_id: string
+  nodes: ArtexIntent[]
+  edges: { parent_id: string; child_id: string }[]
+  /** 注册目标（含各自已关联的证据）；老任务可能为空 */
+  goals?: ArtexGoal[]
+  /** 资产覆盖度（任务锚点分母 × 事实锚定分子）；老任务可能为空 */
+  coverage?: ArtexCoverage
+}
+
+/** 资产覆盖度的单类型分桶（total=范围内该类型资产数，tested=已被事实锚定过的数）。 */
+export interface ArtexCoverageByType {
+  type: string
+  total: number
+  tested: number
+}
+
+/** 任务资产覆盖度（复刻上游 Coverage 结构，粗粒度参考指标，非精确度量）。 */
+export interface ArtexCoverage {
+  /** 覆盖度功能是否开启；false 时其余字段为零值 */
+  enabled: boolean
+  /** 任务范围锚点行数；0 → 范围未锚定 */
+  scope_rows: number
+  /** 分母来源：anchored=任务锚点 / inferred=由 Intent∪目标推断 */
+  scope_source?: "anchored" | "inferred" | string
+  /** 范围内资产数（分母，已删资产不计入） */
+  denominator: number
+  /** 已被探索图 fact 节点锚定过的资产数（分子，粗略下限） */
+  tested: number
+  /** 范围内尚未被事实锚定过的资产数 */
+  untested?: number
+  /** 覆盖度 0–1；分母 0 时为 null */
+  pct: number | null
+  by_type: ArtexCoverageByType[]
+}
+
+/** 未覆盖资产清单（可补测 backlog）分页。 */
+export interface ArtexUntestedAssets {
+  assets: { id: string; type: string; label: string; status: string }[]
+  total: number
+  type: string
+}
+
+export interface ArtexCoverageResponse {
+  coverage: ArtexCoverage
+  untested: ArtexUntestedAssets
+}
+
+/** 覆盖图节点：范围内资产标 in_scope=true，为连边拉入的范围外祖先标 false（灰）。 */
+export interface ArtexCoverageGraphNode {
+  key: string
+  kind: string
+  label: string
+  tested: boolean
+  in_scope: boolean
+  asset_id: string
+  status: string
+  parent_id: string | null
+}
+
+export interface ArtexGoal {
+  id: string
+  task_id: string
+  title: string
+  content: string
+  status: "open" | "met" | string
+  asset_ids: string[]
+  metadata: Record<string, unknown>
+  /** proves 边连过来的证据（kind/title） */
+  evidence?: { id: string; kind: string; title: string; note?: string }[]
+}
+
+export interface ArtexExplorationNode {
+  id: string
+  project_id: string
+  task_id: string
+  intent_id?: string | null
+  kind: "goal" | "intent" | "fact" | "finding" | "hint" | string
+  title: string
+  content: string
+  status: string
+  confidence: number
+  asset_ids: string[]
+  metadata: Record<string, unknown>
+  created_at: string
+  updated_at: string
+}
+
+export interface ArtexExplorationEdge {
+  id: string
+  project_id: string
+  from_node_id: string
+  to_node_id: string
+  relation: "spawns" | "yields" | "derived_from" | "proves" | string
+  metadata: Record<string, unknown>
+  created_at: string
+}
+
+export interface ArtexExplorationGraph {
+  project_id: string
+  task_id?: string | null
+  nodes: ArtexExplorationNode[]
+  edges: ArtexExplorationEdge[]
+}
+
+export interface ArtexTaskRuntime {
+  project_id: string
+  task_id: string
+  status: "exploring" | "draining" | "goal_reached" | "needs_review" | "cancelled" | string
+  goal: string
+  metadata: {
+    reason?: string
+    counts?: Record<string, number>
+    fact_count?: number
+    /** 任务级预算超限原因（artex-taskclock）：deadline 或 Intent 数上限。 */
+    limit_reason?: string
+    goal_met?: boolean
+    goal_met_reason?: string
+  }
+  created_at: string
+  updated_at: string
+}
+
+export interface ArtexTaskSummary {
+  task_id: string
+  objective: string
+  status: string
+  /** 目标驱动的任务级运行态（exploring/draining/goal_reached/needs_review/cancelled） */
+  runtime_status?: string
+  counts: Record<string, number>
+  intent_count: number
+  goal_count?: number
+  goal_met_count?: number
+  goal_open_count?: number
+  goals?: ArtexGoal[]
+  /** 资产覆盖度（任务列表内联，供卡片显示进度） */
+  coverage?: ArtexCoverage
+  updated_at: string
+  running: boolean
+}
+
+export interface ArtexTaskListResponse {
+  tasks: ArtexTaskSummary[]
+}
+
+export interface ArtexActivityEvent {
+  id: number
+  kind: string
+  payload: Record<string, unknown>
+  author?: string
+  created_at: string
+}
+
+export interface ArtexActivityResponse {
+  events: ArtexActivityEvent[]
+  latest_id: number
+}
+
+export interface ArtexEngineStatus {
+  project_id: string
+  running: boolean
+  active_workers: number
+  counts: Record<string, number>
+  active: ArtexIntent[]
+  task_id?: string | null
+}
+
+export interface ArtexPlanResult {
+  root: ArtexIntent
+  intents: ArtexIntent[]
+  count: number
+}
+
 export interface ProjectMeta {
   id: string
   name: string
@@ -17,6 +209,8 @@ export interface ProjectMeta {
   capability?: HostCapability
   /** 回收站条目（GET /api/projects/trash）：目录名=恢复句柄（<slug>-<UTC>） */
   trash_name?: string
+  /** 墓碑戳（clear 后落 project.json）：项目内文件已抹除，只剩名字信息，不可恢复 */
+  trash_purged_at?: string
 }
 
 /** 宿主能力清单（HostDetector.to_dict 形状） */
@@ -259,6 +453,8 @@ export interface LlmProvider {
   model_context?: Record<string, number>
   /** 思考链开关：true=显式开启；null/缺省=不写该字段，跟随网关缺省（ark 默认开） */
   thinking?: boolean | null
+  /** GPT 思考强度；开启思考链时发送给 OpenAI 兼容接口 */
+  thinking_effort?: "low" | "medium" | "high" | null
   /** 供应商专属 HTTP/HTTPS 代理；留空沿用系统代理环境 */
   proxy?: string | null
   /** system 兼容通道（2026-10-17）：该网关丢弃 system 字段时，system 前置于首条 user 消息 */
@@ -339,6 +535,95 @@ export interface Asset {
   meta: Record<string, unknown>
   author: string
   created_at: string
+}
+
+/** CTF 题目卡片（challenge-flag-ledger v47）：题目行 + 附件/发现计数 + **派生状态**。
+ *
+ * `state` 由 flag 台账派生（不是独立字段）：untouched / running / partial /
+ * solved / abandoned。`flags` 含 rejected——人工裁决界面要看到被否决的那条
+ * 才能撤销。
+ */
+export interface ChallengeFlag {
+  id: string
+  challenge_id: string
+  flag: string
+  flag_format: string
+  confidence: number
+  source: string
+  transform: string
+  judged_by: "ai" | "human"
+  verdict: "pending" | "accepted" | "rejected"
+  verdict_reason: string
+  author: string
+  finding_id: string
+  created_at: string
+  updated_at: string
+}
+
+export type ChallengeState = "untouched" | "running" | "partial" | "solved" | "abandoned"
+
+export interface ChallengeSummary extends Asset {
+  description: string
+  title: string
+  /** 题面原文（用户说的 hit） */
+  brief: string
+  entry_hint: string
+  /** 题目方向：web/pwn/crypto/reverse/misc… */
+  direction: string
+  tags: string[]
+  flag_format: string
+  flag_count: number
+  state: ChallengeState
+  solved: boolean
+  accepted_flags: number
+  rejected_flags: number
+  running_workers: number
+  abandoned: boolean
+  flags: ChallengeFlag[]
+  attachment_count: number
+  attachments: { id: string; type: string; value: string }[]
+  finding_count: number
+  intent_count: number
+}
+
+export interface ChallengeCreateBody {
+  /** 可空：空名按题面/入口内容指纹生成稳定 value（AI 之后改 title 只动展示层）。 */
+  name?: string
+  title?: string
+  brief?: string
+  entry_hint?: string
+  direction?: string
+  tags?: string[]
+  flag_format?: string
+  flag_count?: number
+  /** 入口点子资产（web 入口 URL / 附件） */
+  entries?: { value: string; type?: string; meta?: Record<string, unknown> }[]
+  thread_id?: string
+}
+
+export interface ChallengePatchBody {
+  name?: string
+  title?: string
+  brief?: string
+  entry_hint?: string
+  direction?: string
+  tags?: string[]
+  flag_format?: string
+  flag_count?: number
+}
+
+export interface ChallengeFlagsResponse {
+  challenge_id: string
+  flags: ChallengeFlag[]
+  state: {
+    state: ChallengeState
+    solved: boolean
+    accepted: number
+    rejected: number
+    quota: number
+    abandoned: boolean
+    running: number
+  }
 }
 
 export interface FindingPoc {
@@ -690,6 +975,8 @@ export interface RoleInfo {
   persona?: string | null
   task_types: string[] | null
   tools?: string[] | null
+  /** MCP server 白名单；缺省/null = 跟随全局已启用 server */
+  mcp_servers?: string[] | null
   max_steps?: number | null
 }
 
@@ -753,6 +1040,16 @@ export interface DecideApprovalResult {
   /** 赛跑终检跳过（如任务已不处于待执行）：executed=true 但无实际动作 */
   skipped?: string
   error?: string
+}
+
+export interface CtfAgentJobResult {
+  exit_code: number
+  status: string
+  flags: string[]
+  output: string
+  no_submit: boolean
+  provider?: string
+  model?: string
 }
 
 export interface Job {
@@ -1012,6 +1309,8 @@ export interface PackRole {
   skills: string[] | null
   task_types: string[] | null
   tools?: string[] | null
+  /** MCP server 白名单；缺省/null = 跟随全局已启用 server */
+  mcp_servers?: string[] | null
   max_steps?: number | null
   file: string // yaml 文件名（去 .yaml 后即角色 id，sessions.role/URL/日志标识）
 }
@@ -1024,8 +1323,12 @@ export interface Expert {
   persona?: string | null
   tracks?: string[] | null // null/缺省 = 服务全部轨
   skills?: string[] | null // null = 全量专家（不限定）
+  /** kb 方向白名单；null 或 [] 都表示不限方向（两态字段） */
+  knowledge?: string[] | null
   task_types?: string[] | null
   tools?: string[] | null
+  /** MCP server 白名单；缺省/null = 跟随全局已启用 server */
+  mcp_servers?: string[] | null
   max_steps?: number | null
   protected?: boolean // _generalist 兜底专家，拒删
   variants?: Record<string, Record<string, unknown>> // {track: {field: value}} 轨变体
@@ -1093,8 +1396,12 @@ export interface ExpertBody {
   persona?: string | null
   tracks?: string[] | null
   skills?: string[] | null
+  /** kb 方向白名单；null 或 [] 都表示不限方向（两态字段） */
+  knowledge?: string[] | null
   task_types?: string[] | null
   tools?: string[] | null
+  /** MCP server 白名单；缺省/null = 跟随全局已启用 server */
+  mcp_servers?: string[] | null
   max_steps?: number | null
   variants?: Record<string, Record<string, unknown>> | null
 }
@@ -1125,6 +1432,8 @@ export interface SkillDef {
   task_types: string[]
   required_tools: string[]
   enabled: boolean
+  /** 展示分组（后端按命名约定推断：分诊/Web 攻击/二进制与逆向/…；纯展示，不参与加载） */
+  group?: string
   /** cc 风格技能：正文自包含，辅助资料位于技能目录资源子目录。 */
   mode?: "self-contained" | "legacy" | "thin-route" | string
   self_contained?: boolean
@@ -1983,6 +2292,8 @@ export interface ChatThread {
   model?: string
   /** CTF 题目归属（v38，2026-10-14）：绑定 challenge 资产 id */
   challenge_asset_id?: string
+  /** 联网搜索开关（v43，web-search-toggle，2026-10-19）：主控开 = spawn 子代理默认继承 */
+  web_search?: boolean
   created_at: string
   updated_at: string
 }

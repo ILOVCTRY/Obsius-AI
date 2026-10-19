@@ -1,0 +1,36 @@
+import ghidra.app.script.GhidraScript;
+import ghidra.program.model.address.Address;
+import ghidra.program.model.listing.Program;
+
+/** Seed the caller-supplied raw-binary entry before default auto-analysis. */
+public final class ReaGhidraPrepareRaw extends GhidraScript {
+    @Override
+    public void run() throws Exception {
+        String[] arguments = getScriptArgs();
+        if (arguments.length != 2) {
+            throw new IllegalArgumentException(
+                "Raw binary preparation requires the committed language and entry address"
+            );
+        }
+        String expectedLanguage = arguments[0];
+        String entryHex = arguments[1];
+        if (!currentProgram.getLanguageID().getIdAsString().equals(expectedLanguage) ||
+            !currentProgram.getExecutableFormat().equals("Raw Binary")) {
+            throw new IllegalArgumentException(
+                "Raw binary preparation requires the committed language and BinaryLoader import"
+            );
+        }
+        Address entry = currentProgram.getAddressFactory().getDefaultAddressSpace().getAddress(entryHex);
+        Address start = currentProgram.getMinAddress();
+        if (entry == null || !entry.equals(start)) {
+            throw new IllegalArgumentException(
+                "Raw binary import must map file offset 0 at the caller-supplied entry"
+            );
+        }
+        addEntryPoint(entry);
+        if (!disassemble(entry) || createFunction(entry, "entry") == null) {
+            throw new IllegalStateException("Raw binary entry cannot be decoded as a function");
+        }
+        currentProgram.getOptions(Program.PROGRAM_INFO).setBoolean("REA raw binary prepared", true);
+    }
+}

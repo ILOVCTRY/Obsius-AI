@@ -1,0 +1,118 @@
+import { ghidraSeedReportSchema } from "./GhidraAnalysisSeeds.js";
+import { z } from "zod";
+
+import type { JsonValue } from "../domain/jsonValue.js";
+import { err, ok, type Result } from "../domain/result.js";
+import {
+  GHIDRA_INVENTORY_OPERATIONS,
+  GHIDRA_NAMING_OPERATIONS,
+} from "./GhidraInventoryValues.js";
+import { GHIDRA_FUNCTION_OPERATIONS } from "./GhidraFunctionValues.js";
+import { ghidraExtensionResultSchema } from "./extensions/GhidraExtensions.js";
+import { GHIDRA_MIPS_SOFT_FLOAT_STORAGE } from "./GhidraMipsProfile.js";
+
+/** Exact methods proved by the bridge handshake after auto-analysis. */
+export const GHIDRA_SESSION_CAPABILITIES = [
+  "ping",
+  "shutdown",
+  ...GHIDRA_INVENTORY_OPERATIONS,
+  ...GHIDRA_FUNCTION_OPERATIONS,
+] as const;
+
+/** Methods that edit the session database; read-only bridges omit them. */
+export const GHIDRA_MUTATING_OPERATIONS: ReadonlySet<string> = new Set([
+  "annotate_native_function",
+  ...GHIDRA_NAMING_OPERATIONS,
+]);
+
+const capabilitySchema = z.enum(GHIDRA_SESSION_CAPABILITIES);
+
+const sessionInfoSchema = z
+  .object({
+    name: z.literal("REA Ghidra bridge"),
+    run_id: z.string().uuid(),
+    profile_digest: z.string().regex(/^[a-f0-9]{64}$/u),
+    provider: z
+      .object({
+        id: z.literal("ghidra"),
+        version: z.string().min(1),
+      })
+      .strict(),
+    read_only: z.boolean(),
+    analysis_complete: z.boolean(),
+    analysis_timed_out: z.boolean(),
+    analysis_extensions: z.array(ghidraExtensionResultSchema).optional(),
+    analysis_seeds: ghidraSeedReportSchema.optional(),
+    mips_soft_float_storage: z
+      .object({
+        policy: z.literal(GHIDRA_MIPS_SOFT_FLOAT_STORAGE),
+        functions: z.number().int().nonnegative(),
+        definitions: z.number().int().nonnegative(),
+      })
+      .strict()
+      .optional(),
+    capabilities: z.array(capabilitySchema),
+    target: z
+      .object({
+        name: z.string().min(1),
+        language_id: z.string().min(1),
+        compiler_spec_id: z.string().min(1),
+        image_base: z.string().regex(/^0x[0-9a-f]+$/u),
+        default_address_space: z.string().min(1),
+        sha256: z.string().regex(/^[a-f0-9]{64}$/u),
+      })
+      .strict(),
+  })
+  .strict();
+
+/** Authenticated metadata produced after Ghidra finishes auto-analysis. */
+export type GhidraSessionInfo = z.infer<typeof sessionInfoSchema>;
+
+/** Require exact run, provider, and profile identity from the Java bridge. */
+export const parseGhidraSessionInfo = (
+  value: JsonValue,
+  expected: {
+    readonly runId: string;
+    readonly providerVersion: string;
+    readonly profileDigest: string;
+    readonly targetSha256: string;
+    readonly expectedReadOnly?: boolean;
+    readonly expectedLanguageId?: string;
+    readonly expectedCompilerSpecId?: string;
+  },
+): Result<GhidraSessionInfo, Error> => {
+  const parsed = sessionInfoSchema.safeParse(value);
+  const readOnly = expected.expectedReadOnly ?? false;
+  const expectedCapabilities = GHIDRA_SESSION_CAPABILITIES.filter(
+    (capability) => !readOnly || !GHIDRA_MUTATING_OPERATIONS.has(capability),
+  );
+  if (
+    !parsed.success ||
+    parsed.data.run_id !== expected.runId ||
+    parsed.data.read_only !== readOnly ||
+    parsed.data.capabilities.length !== expectedCapabilities.length ||
+    parsed.data.provider.version !== expected.providerVersion ||
+    parsed.data.profile_digest !== expected.profileDigest ||
+    parsed.data.target.sha256 !== expected.targetSha256 ||
+    (expected.expectedLanguageId !== undefined &&
+      parsed.data.target.language_id !== expected.expectedLanguageId) ||
+    (expected.expectedCompilerSpecId !== undefined &&
+      parsed.data.target.compiler_spec_id !==
+        expected.expectedCompilerSpecId) ||
+    new Set(parsed.data.capabilities).size !== expectedCapabilities.length ||
+    expectedCapabilities.some(
+      (capability) => !parsed.data.capabilities.includes(capability),
+    ) ||
+    parsed.data.analysis_complete === parsed.data.analysis_timed_out
+  )
+    return err(new Error("Ghidra bridge handshake identity is invalid"));
+  return ok(parsed.data);
+};
+
+/** Require acknowledgement that the private bridge loop has ended. */
+export const isGhidraShutdownAcknowledgement = (value: JsonValue): boolean =>
+  typeof value === "object" &&
+  value !== null &&
+  !Array.isArray(value) &&
+  value.shutdown === true &&
+  value.project_ephemeral === true;

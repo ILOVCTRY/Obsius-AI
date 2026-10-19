@@ -99,7 +99,7 @@ class BrowserConfig:
     screencast_max_width: int = 1280      # 实时帧最大宽（超出缩帧）
     screencast_max_height: int = 720
     intercept_timeout_s: float = 120.0    # F6-v3 拦截挂起超时自动放行原文
-    session_idle_timeout_s: float = 1800.0  # AI 会话空闲回收（2026-10-07）：连续无操作
+    session_idle_timeout_s: float = 100.0   # AI 会话空闲回收：连续 100 秒无操作
                                             # 超过该秒数关其 Page；0=禁用。人工 human-main
                                             # 永不回收。计时口径 = _last_action_at
 

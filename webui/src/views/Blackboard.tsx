@@ -1,7 +1,7 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { ChevronDown, ChevronRight } from "lucide-react"
 import { api } from "@/lib/api"
-import type { Asset, Finding, FindingCategory, FuncEntry } from "@/lib/types"
+import type { Asset, ChallengeFlagsResponse, ChallengeSummary, Finding, FindingCategory, FuncEntry, LlmProvider, Job } from "@/lib/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -15,6 +15,9 @@ import { FindingDetailDialog, extractFlag } from "@/components/blackboard/Findin
 import { CTF_LEVEL, CTF_LEVEL_ORDER } from "./blackboard/ctfLevel"
 import { MappingPane, ProductChips } from "./blackboard/MappingPane"
 import { IntentsPane } from "./blackboard/IntentsPane"
+
+const isCtfTrack = (track?: string): boolean =>
+  String(track ?? "").trim().toLowerCase() === "ctf"
 
 // 黑板视图（DESIGN.md §12 页面 4）：发现 / 资产 / 函数库 + human 共写入口
 // 发现 tab 内 assessment 轨额外提供「列表｜链路」子视图（攻击链画布，E1）。
@@ -42,10 +45,12 @@ const IntentGraphLazy = lazy(() =>
 export function Blackboard({ pid, compact = false, track, capabilities, defaultView }: {
   pid: string; compact?: boolean; track?: string; capabilities?: string[]; defaultView?: string
 }) {
+  const isCtf = isCtfTrack(track)
   const compactPentest = compact && track === "pentest"
   const tabs = [
     "findings", "intents", "assets",
-    ...(track !== "ctf" && !compactPentest ? ["mapping"] as const : []),
+    ...(isCtf && !compact ? ["ctf-agent"] as const : []),
+    ...(!isCtf && !compactPentest ? ["mapping"] as const : []),
     ...(capabilities?.includes("binary") && track !== "pentest"
         && track !== "redteam" && !compactPentest ? ["funcs"] as const : []),
   ] as const
@@ -69,15 +74,15 @@ export function Blackboard({ pid, compact = false, track, capabilities, defaultV
       <TabsList className="w-full justify-start rounded-none border-b bg-transparent p-0">
         {tabs.map((t) => (
           <TabsTrigger key={t} value={t} className="rounded-none border-b-2 px-3 py-1.5 text-xs">
-            {t === "findings" ? "发现" : t === "intents" ? "意图" : t === "assets" ? (track === "ctf" ? "题目" : "资产")
-              : t === "mapping" ? "测绘" : "函数库"}
+            {t === "findings" ? "发现" : t === "intents" ? "意图" : t === "assets" ? (isCtfTrack(track) ? "题目" : "资产")
+              : t === "ctf-agent" ? "CTF-Agent" : t === "mapping" ? "测绘" : "函数库"}
           </TabsTrigger>
         ))}
       </TabsList>
       <TabsContent value="findings" className="min-h-0 flex-1">
         {/* 子视图切换仅渗透/红队轨（R2 拆轨前判断 assessment）且非 compact 侧栏时渲染 */}
         <Findings pid={pid} compact={compact} track={track}
-                  showCanvas={!compact && (track === "pentest" || track === "redteam" || track === "ctf")} />
+                  showCanvas={!compact && (track === "pentest" || track === "redteam" || isCtfTrack(track))} />
       </TabsContent>
       <TabsContent value="intents" className="min-h-0 flex-1">
         {/* 意图清单全轨启用（2026-10-13）：Agent declare_intent 的规划产物摊平成列表；
@@ -89,7 +94,12 @@ export function Blackboard({ pid, compact = false, track, capabilities, defaultV
             无 parent 的行自然退化平铺 */}
         <Assets pid={pid} compact={compact} tree track={track} />
       </TabsContent>
-      {track !== "ctf" && !compactPentest && (
+      {isCtf && !compact && (
+        <TabsContent value="ctf-agent" className="min-h-0 flex-1">
+          <CtfAgentPane pid={pid} />
+        </TabsContent>
+      )}
+      {!isCtf && !compactPentest && (
         <TabsContent value="mapping" className="min-h-0 flex-1">
           {/* 网络空间测绘（cyberspace-mapping M1+M2）：FOFA 查询导入 + 表格导入；
               compact 侧栏不挂（配置/表格类操作不适合窄栏） */}
@@ -125,7 +135,7 @@ function Chip({ active, onClick, children }: { active: boolean; onClick: () => v
 export function Findings({ pid, track, showCanvas }: {
   pid: string; compact?: boolean; track?: string; showCanvas: boolean
 }) {
-  const isCtf = track === "ctf"
+  const isCtf = isCtfTrack(track)
   const [items, setItems] = useState<Finding[]>([])
   const [assets, setAssets] = useState<Asset[]>([])
   const [assetFilter, setAssetFilter] = useState("")
@@ -492,7 +502,7 @@ export function Findings({ pid, track, showCanvas }: {
  *  题目节点，**或 CTF 轨下的根资产**——旧数据/直挂附件没有 challenge 节点，CTF 轨下
  *  根资产即题目载体（一个项目一道题时，根资产就是这道题）。 */
 const isChallengeAsset = (a: Asset, track?: string) =>
-  a.type === "challenge" || (track === "ctf" && !a.parent_id)
+  a.type === "challenge" || (isCtfTrack(track) && !a.parent_id)
 /** 题目已解出 flag 的绿色徽章（2026-10-14）：**完整显示** flag，点即复制（1.5s 回显 ✓）。
  *  flag 由该题目子树内 finding 的 evidence 识别（`extractFlag`，零 schema 迁移）。 */
 function FlagBadge({ flag }: { flag: string }) {
@@ -513,8 +523,30 @@ function FlagBadge({ flag }: { flag: string }) {
     </Badge>
   )
 }
-function AssetBadges({ a, hasFinding, flag, track }:
-                     { a: Asset; hasFinding?: boolean; flag?: string | null; track?: string }) {
+/** 题目派生状态徽章（challenge-flag-ledger v47，2026-10-19）：`state` 由 flag 台账
+ *  派生（不是独立字段），故只做展示、不在前端推导。untouched 不显（省视觉噪音）。 */
+const CHALLENGE_STATE: Record<string, { label: string; cls: string; title: string }> = {
+  solved: { label: "已解出", cls: "text-(--viz-success) border-(--viz-success-border) bg-(--viz-success-bg)",
+            title: "flag 台账里的计数已达题目声明的 flag 数" },
+  partial: { label: "部分解出", cls: "text-(--status-approval)", title: "拿到部分 flag，未达声明条数" },
+  running: { label: "求解中", cls: "text-(--viz-sev-medium)", title: "有 Worker 正在跑这道题" },
+  abandoned: { label: "已放弃", cls: "text-muted-foreground/70", title: "人工标记放弃（调度层不再为它派 Worker）" },
+}
+function ChallengeStateBadge({ cs }: { cs?: ChallengeSummary }) {
+  if (!cs) return null
+  const cfg = CHALLENGE_STATE[cs.state]
+  if (!cfg) return null
+  const quota = cs.flag_count > 1 ? ` ${cs.accepted_flags}/${cs.flag_count}` : ""
+  return (
+    <Badge variant="outline" className={cn("text-[10px]", cfg.cls)} title={cfg.title}>
+      {cfg.label}{quota}
+    </Badge>
+  )
+}
+
+function AssetBadges({ a, hasFinding, flag, track, cs }:
+                     { a: Asset; hasFinding?: boolean; flag?: string | null; track?: string
+                       cs?: ChallengeSummary }) {
   const s = a.effective_status ?? (a.status === "open" && a.meta?.scanned ? "visited" : a.status)
   let statusBadge: ReactNode = null
   if (isChallengeAsset(a, track))
@@ -542,6 +574,7 @@ function AssetBadges({ a, hasFinding, flag, track }:
   return (
     <>
       {statusBadge}
+      {isChallengeAsset(a, track) && <ChallengeStateBadge cs={cs} />}
       {hasFinding && (
         <Badge variant="outline" className="text-[10px] text-(--status-error)">有发现</Badge>
       )}
@@ -565,9 +598,11 @@ function AssetTags({ tags }: { tags: string[] }) {
   )
 }
 
-function AssetRow({ a, indent = false, hasFinding, flag, onDelete, track }:
+function AssetRow({ a, indent = false, hasFinding, flag, onDelete, track, onSolve, onFlags, cs }:
                   { a: Asset; indent?: boolean; hasFinding?: boolean; flag?: string | null
-                    onDelete?: (a: Asset) => void; track?: string }) {
+                    onDelete?: (a: Asset) => void; track?: string
+                    onSolve?: (a: Asset) => void; onFlags?: (a: Asset) => void
+                    cs?: ChallengeSummary }) {
   const meta = a.meta ?? {}
   const src = meta.source as string | undefined
   const hint = (meta.module ?? meta.platform ?? (src ? undefined : meta.source)) as string | undefined
@@ -582,16 +617,30 @@ function AssetRow({ a, indent = false, hasFinding, flag, onDelete, track }:
         </Badge>
         {/* 状态徽章紧贴值（用户定稿 2026-09-19）；flex-1 占位在徽章之后，右侧只留标签/⭐/hint/会话 */}
         <span className="min-w-0 shrink truncate font-mono text-xs">{a.value}</span>
-        <AssetBadges a={a} hasFinding={hasFinding} flag={flag} track={track} />
+        <AssetBadges a={a} hasFinding={hasFinding} flag={flag} track={track} cs={cs} />
         <span className="min-w-0 flex-1" />
         <AssetTags tags={tags} />
+        {isCtfTrack(track) && isChallengeAsset(a, track) && onFlags && (
+          <button title="查看该题目的 flag 台账（人工确认 / 标记为错误 / 手工录入）"
+                  className="shrink-0 rounded border px-1.5 text-[10px] text-muted-foreground hover:border-primary/40 hover:text-primary"
+                  onClick={(e) => { e.stopPropagation(); onFlags(a) }}>
+            🚩 台账{cs?.flags?.length ? ` ${cs.flags.length}` : ""}
+          </button>
+        )}
+        {isCtfTrack(track) && isChallengeAsset(a, track) && onSolve && (
+          <button title="使用已配置的模型启动 CTF-Agent（不会提交 flag）"
+                  className="shrink-0 rounded border px-1.5 text-[10px] text-muted-foreground hover:border-primary/40 hover:text-primary"
+                  onClick={(e) => { e.stopPropagation(); onSolve(a) }}>
+            求解
+          </button>
+        )}
         {/* 来源徽章（cyberspace-mapping M1：fofa=测绘 🛰 / xlsx|csv=文件导入 📥） */}
         {src === "fofa" && <span title="来源：FOFA 测绘导入" className="shrink-0 text-[10px]">🛰</span>}
         {(src === "xlsx" || src === "csv") && <span title={`来源：${src} 文件导入`} className="shrink-0 text-[10px]">📥</span>}
         <ProductChips products={products} />
         {onDelete && (
           <button
-            title={`删除该${track === "ctf" ? "题目" : "资产"}：仅叶子可删（有子${track === "ctf" ? "题目" : "资产"}请先处理）；引用它的发现会一并删除`}
+            title={`删除该${isCtfTrack(track) ? "题目" : "资产"}：仅叶子可删（有子${isCtfTrack(track) ? "题目" : "资产"}请先处理）；引用它的发现会一并删除`}
             className="shrink-0 rounded px-1 text-[10px] text-muted-foreground/50 hover:bg-accent hover:text-(--status-error)"
             onClick={(e) => { e.stopPropagation(); onDelete(a) }}
           >
@@ -605,6 +654,158 @@ function AssetRow({ a, indent = false, hasFinding, flag, onDelete, track }:
       {title && (
         <div className="ml-1 mt-0.5 truncate text-[11px] text-muted-foreground">{title}</div>
       )}
+    </div>
+  )
+}
+
+function CtfAgentPane({ pid }: { pid: string }) {
+  const jobStorageKey = `cyberstrike:ctf-agent-job:${pid}`
+  const [challenges, setChallenges] = useState<Asset[]>([])
+  const [challengeError, setChallengeError] = useState("")
+  const [providers, setProviders] = useState<LlmProvider[]>([])
+  const [provider, setProvider] = useState("")
+  const [model, setModel] = useState("")
+  const [selected, setSelected] = useState("")
+  const [job, setJob] = useState<Job | null>(() => {
+    try {
+      const saved = window.localStorage.getItem(jobStorageKey)
+      return saved ? JSON.parse(saved) as Job : null
+    } catch {
+      return null
+    }
+  })
+  const [error, setError] = useState("")
+  const [clock, setClock] = useState(() => Date.now())
+  const activeProvider = providers.find((p) => p.name === provider)
+  // 赛制时间（ctf-pacing，2026-10-19）：`_pacing_context()` 读 `config.ctf.{deadline,tasks}`
+  // 把「这场还能花多久」注入系统提示。此前只能手改 project.json——留空则后端按
+  // 本线程已跑时长阶梯推断（有降级，不是必需项），故默认空、不阻塞求解。
+  const [deadline, setDeadline] = useState("")
+  const [tasks, setTasks] = useState("")
+  const [pacingSaved, setPacingSaved] = useState(false)
+  const [pacingErr, setPacingErr] = useState("")
+
+  const refreshChallenges = useCallback(async () => {
+    try {
+      const [dedicated, assets] = await Promise.all([api.challenges(pid), api.assets(pid)])
+      const challengeIds = new Set(dedicated.map((c) => c.id))
+      const legacyRoots = assets.filter((a) => !a.parent_id && a.type !== "challenge")
+      const merged = [...dedicated, ...legacyRoots.filter((a) => !challengeIds.has(a.id))]
+      setChallenges(merged)
+      setSelected((current) => merged.some((c) => c.id === current) ? current : "")
+      setChallengeError("")
+    } catch (e) {
+      setChallengeError(e instanceof Error ? e.message : String(e))
+    }
+  }, [pid])
+  useEffect(() => {
+    void refreshChallenges()
+    const refreshTimer = setInterval(() => { void refreshChallenges() }, 5000)
+    api.llmProviders().then((r) => {
+      const enabled = r.providers.filter((p) => p.enabled)
+      setProviders(enabled)
+      setProvider(r.default_provider || enabled[0]?.name || "")
+    }).catch((e) => setError(String(e)))
+    // 赛制时间回填（config.ctf）：deadline 原样（ISO8601 或 epoch 秒，后端 _to_epoch 都认）
+    api.getProject(pid).then((p) => {
+      const ctf = (p.config?.ctf ?? {}) as { deadline?: unknown; tasks?: unknown }
+      setDeadline(ctf.deadline == null ? "" : String(ctf.deadline))
+      setTasks(ctf.tasks == null ? "" : String(ctf.tasks))
+    }).catch(() => {})
+    return () => clearInterval(refreshTimer)
+  }, [pid, refreshChallenges])
+  useEffect(() => {
+    if (!job) {
+      window.localStorage.removeItem(jobStorageKey)
+      return
+    }
+    try {
+      window.localStorage.setItem(jobStorageKey, JSON.stringify(job))
+    } catch {
+      // 日志过大或浏览器存储不可用时，仍保留当前内存会话。
+    }
+  }, [job, jobStorageKey])
+  useEffect(() => {
+    if (!job || job.status !== "running") return
+    const refresh = () => api.ctfAgentJob(job.id).then(setJob).catch(() => {})
+    void refresh()
+    const timer = setInterval(refresh, 1500)
+    const clockTimer = setInterval(() => setClock(Date.now()), 1000)
+    return () => {
+      clearInterval(timer)
+      clearInterval(clockTimer)
+    }
+  }, [job?.id, job?.status])
+
+  const run = async () => {
+    if (!selected) { setError("请先选择一道题目"); return }
+    setError("")
+    try {
+      const started = await api.startCtfAgent(selected, { provider: provider || undefined, model: model || undefined })
+      setJob({ id: started.job_id, kind: "ctf-agent", status: "running", result: null, error: null })
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
+  }
+  // 赛制时间落 config.ctf：两栏都空 → 发 null 剥键（回落到后端的阶梯推断）。
+  // tasks 非正整数视为无效（后端 int() 会把它当 0 再走 ANCHOR_NTASKS 兜底，
+  // 静默接受一个错值比拒绝更糟）。
+  const savePacing = async () => {
+    setPacingErr(""); setPacingSaved(false)
+    const d = deadline.trim()
+    const t = tasks.trim()
+    if (t && !/^[1-9]\d*$/.test(t)) { setPacingErr("题量须为正整数"); return }
+    const ctf = (d || t) ? { ...(d ? { deadline: d } : {}), ...(t ? { tasks: Number(t) } : {}) } : null
+    try {
+      await api.patchProjectConfig(pid, { ctf })
+      setPacingSaved(true)
+      setTimeout(() => setPacingSaved(false), 1500)
+    } catch (e) { setPacingErr(e instanceof Error ? e.message : String(e)) }
+  }
+  const result = job?.result as { flags?: string[]; output?: string; runtime?: { root: string; python: string } } | null
+  const progress = job?.meta?.progress as { phase?: string; message?: string; lines?: number; log_tail?: string; started_at?: number } | undefined
+  const elapsed = progress?.started_at ? Math.max(0, Math.floor(clock / 1000 - progress.started_at)) : 0
+  const elapsedLabel = `${Math.floor(elapsed / 60)}分${elapsed % 60}秒`
+  return (
+    <div className="flex h-full min-h-0 flex-col gap-4 overflow-y-auto p-5">
+      <div>
+        <h2 className="text-base font-semibold">CTF-Agent 单题求解</h2>
+        <p className="mt-1 text-xs text-muted-foreground">复用模型供应商配置，默认只生成候选 flag，不提交到 CTFd。</p>
+      </div>
+      <div className="grid gap-3 rounded-lg border p-4 md:grid-cols-3">
+        <label className="space-y-1 text-xs text-muted-foreground">题目<select className="mt-1 h-9 w-full rounded border bg-background px-2 text-sm text-foreground" value={selected} onChange={(e) => setSelected(e.target.value)}><option value="">选择题目</option>{challenges.map((c) => <option key={c.id} value={c.id}>{c.value}</option>)}</select></label>
+        <label className="space-y-1 text-xs text-muted-foreground">供应商<select className="mt-1 h-9 w-full rounded border bg-background px-2 text-sm text-foreground" value={provider} onChange={(e) => { setProvider(e.target.value); setModel("") }}><option value="">默认供应商</option>{providers.map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}</select></label>
+        <label className="space-y-1 text-xs text-muted-foreground">模型<select className="mt-1 h-9 w-full rounded border bg-background px-2 text-sm text-foreground" value={model} onChange={(e) => setModel(e.target.value)}><option value="">默认模型</option>{(activeProvider?.models ?? []).map((m) => <option key={m} value={m}>{m}</option>)}</select></label>
+        <Button className="md:col-span-3" onClick={run} disabled={!selected || !providers.length || job?.status === "running"}>启动求解</Button>
+      </div>
+      {/* 赛制时间（ctf-pacing）：注入系统提示「这场还能花多久」，进而缩放所有时间阈值。
+          留空 = 后端按本线程已跑时长阶梯推断（有降级路径），不是必填。 */}
+      <div className="grid gap-3 rounded-lg border p-4 md:grid-cols-3">
+        <div className="md:col-span-3">
+          <h3 className="text-sm font-medium">赛制时间</h3>
+          <p className="mt-1 text-[11px] leading-5 text-muted-foreground">
+            填了才会把「剩余时间 / 收尾窗口」写进系统提示。截止时间支持
+            <code className="mx-1 rounded bg-muted/40 px-1">2026-10-20T18:00:00+08:00</code>
+            或 epoch 秒；题量用于按「总时长 ÷ 题量」缩放单题预算。两栏都留空 = 由后端按已跑时长推断赛制。
+          </p>
+        </div>
+        <label className="space-y-1 text-xs text-muted-foreground">比赛截止时间
+          <Input className="mt-1 h-9 text-sm" value={deadline} placeholder="留空 = 自动推断"
+                 onChange={(e) => setDeadline(e.target.value)} />
+        </label>
+        <label className="space-y-1 text-xs text-muted-foreground">题目总数
+          <Input className="mt-1 h-9 text-sm" value={tasks} placeholder="留空 = 63（锚定值）"
+                 inputMode="numeric" onChange={(e) => setTasks(e.target.value)} />
+        </label>
+        <div className="flex items-end gap-2">
+          <Button size="sm" className="h-9 text-xs" onClick={savePacing}>保存赛制</Button>
+          {pacingSaved && <span className="pb-2 text-[10px] text-primary">已保存 ✓</span>}
+        </div>
+        {pacingErr && <p className="text-[10px] text-(--status-error) md:col-span-3">{pacingErr}</p>}
+      </div>
+      {!providers.length && <p className="text-sm text-(--status-error)">没有启用的模型供应商，请到“设置 → 模型供应商”配置。</p>}
+      {!challenges.length && !challengeError && <p className="text-sm text-muted-foreground">当前项目暂无题目，请先在“题目”页添加题目。</p>}
+      {challengeError && <p className="text-sm text-(--status-error)">题目列表读取失败，已保留之前的数据：{challengeError}</p>}
+      {error && <p className="text-sm text-(--status-error)">{error}</p>}
+      {job && <div className="rounded-lg border p-4"><div className="flex items-center justify-between"><span className="text-sm font-medium">运行状态：{job.status === "running" ? `运行中 · ${progress?.phase ?? "准备中"}` : job.status}</span><span className="font-mono text-xs text-muted-foreground">{job.id}</span></div>{job.status === "running" && <><p className="mt-2 text-xs text-muted-foreground">{progress?.message || "等待 worker 输出…"} · 已运行 {elapsedLabel} · 已读取 {progress?.lines ?? 0} 行</p>{progress?.log_tail && <pre className="mt-3 max-h-56 overflow-auto whitespace-pre-wrap rounded bg-muted/30 p-3 text-xs">{progress.log_tail}</pre>}</>}{job.status === "done" && <><p className="mt-3 text-sm">Flag 候选：<span className="font-mono text-primary">{result?.flags?.length ? result.flags.join(", ") : "未发现"}</span></p>{result?.runtime && <p className="mt-1 break-all text-[10px] text-muted-foreground">Worker：{result.runtime.python}</p>}<pre className="mt-3 max-h-80 overflow-auto whitespace-pre-wrap rounded bg-muted/30 p-3 text-xs">{result?.output || "无输出"}</pre></>}{job.status === "error" && <p className="mt-3 whitespace-pre-wrap text-sm text-(--status-error)">{job.error}</p>}</div>}
     </div>
   )
 }
@@ -628,6 +829,18 @@ export function Assets({ pid, compact, tree = false, track }: { pid: string; com
   const [graphFor, setGraphFor] = useState<Asset | null>(null)
   // 链路图里点开的发现（弹发现详情卡片，2026-10-14）
   const [graphFinding, setGraphFinding] = useState<Finding | null>(null)
+  const [ctfProvider, setCtfProvider] = useState("")
+  const [ctfJob, setCtfJob] = useState<Job | null>(null)
+  const [ctfBusy, setCtfBusy] = useState(false)
+  const [ctfError, setCtfError] = useState("")
+  // 题目派生状态 + flag 台账（challenge-flag-ledger v47）：**flag 的唯一真值**。
+  // 2026-10-19 接入——此前前端只扫 findings 的 evidence 猜 flag，而台账重构后
+  // 正式 flag 的留痕 finding 是 unverified/intel，靠 findings 反查会全部落空。
+  const [challengeMeta, setChallengeMeta] = useState<Map<string, ChallengeSummary>>(new Map())
+  // flag 台账弹层（challenge-flag-ledger v47）：点题目行「🚩 台账」打开
+  const [flagsFor, setFlagsFor] = useState<Asset | null>(null)
+  // 新建题目弹层（题目表单 v47）
+  const [showCreate, setShowCreate] = useState(false)
 
   const refresh = useCallback(() => {
     api.assets(pid).then(setItems).catch(() => {})
@@ -637,12 +850,37 @@ export function Assets({ pid, compact, tree = false, track }: { pid: string; com
         .filter((f) => f.status === "verified" && f.target_asset_id)
         .map((f) => f.target_asset_id as string)))
     }).catch(() => {})
-  }, [pid])
+    // 题目台账只 CTF 轨拉（非 CTF 轨没有 challenge 概念，白拉一次）
+    if (isCtfTrack(track)) {
+      api.challenges(pid).then((rows) => {
+        setChallengeMeta(new Map(rows.map((r) => [r.id, r])))
+      }).catch(() => {})
+    }
+  }, [pid, track])
   useEffect(() => {
     refresh()
+    api.llmProviders().then((r) => {
+      const enabled = r.providers.filter((p) => p.enabled)
+      setCtfProvider(r.default_provider || enabled[0]?.name || "")
+    }).catch(() => {})
     const t = setInterval(refresh, 4000)
     return () => clearInterval(t)
-  }, [refresh])
+  }, [refresh, pid])
+
+  useEffect(() => {
+    if (!ctfJob || ctfJob.status !== "running") return
+    const t = setInterval(() => api.ctfAgentJob(ctfJob.id).then(setCtfJob).catch(() => {}), 1500)
+    return () => clearInterval(t)
+  }, [ctfJob?.id, ctfJob?.status])
+
+  const startSolve = async (asset: Asset) => {
+    setCtfBusy(true); setCtfError("")
+    try {
+      const started = await api.startCtfAgent(asset.id, { provider: ctfProvider || undefined })
+      setCtfJob({ id: started.job_id, kind: "ctf-agent", status: "running", result: null, error: null })
+    } catch (e) { setCtfError(e instanceof Error ? e.message : String(e)) }
+    finally { setCtfBusy(false) }
+  }
 
   // 资产树拖拽重组（v38，2026-10-14）
   const onDragStart = (e: React.DragEvent, id: string) => {
@@ -696,8 +934,16 @@ export function Assets({ pid, compact, tree = false, track }: { pid: string; com
     return { roots, childrenOf }
   }, [items])
 
-  // 题目 flag 反查（2026-10-14）：解出的 flag 直接显示在题目行上。归属 = 该题目子树
-  // 内任一 finding 的 evidence 能识别出 flag（含题目自身挂载的发现）；无 flag 不显示。
+  // 题目 flag 反查：解出的 flag 直接显示在题目行上。
+  //
+  // **口径两改（2026-10-19）**：
+  // ① **台账优先**（challenge-flag-ledger v47）——`challenge_flags` 是 flag 的
+  //    唯一真值，题目 `state`/`solved` 也由它派生。此前只扫 findings 的 evidence
+  //    猜 flag，而台账重构后正式 flag 的留痕 finding 是 unverified/intel，
+  //    「只认 verified」会让 🚩 **永远不显示**（这轮自查发现的回归）。
+  // ② findings 反查降级为**兜底**（台账接口失败/旧库无表时），且只认
+  //    `category === "vuln"` 的 verified——`candidate=true` 的线索是 intel，
+  //    绿色 🚩（语义=「这题解出来了」）不能把「疑似线索」冒充成「已解出」。
   const flagByChallenge = useMemo(() => {
     const m = new Map<string, string>()
     const subtreeIds = (root: string): Set<string> => {
@@ -710,8 +956,14 @@ export function Assets({ pid, compact, tree = false, track }: { pid: string; com
     }
     for (const a of items) {
       if (!isChallengeAsset(a, track)) continue
+      // ① 台账：优先显示第一个「计入解出」的 flag（pending/accepted，不含 rejected）
+      const cs = challengeMeta.get(a.id)
+      const counted = (cs?.flags ?? []).filter((f) => f.verdict !== "rejected")
+      if (counted.length) { m.set(a.id, counted[0].flag); continue }
+      // ② 兜底：子树内 verified + vuln 的 finding 的 evidence 里的 flag
       const ids = subtreeIds(a.id)
       for (const f of allFindings) {
+        if (f.status !== "verified" || f.category !== "vuln") continue
         if (f.target_asset_id && ids.has(f.target_asset_id)) {
           const fl = extractFlag(f.evidence)
           if (fl) { m.set(a.id, fl); break }
@@ -719,7 +971,7 @@ export function Assets({ pid, compact, tree = false, track }: { pid: string; com
       }
     }
     return m
-  }, [items, childrenOf, allFindings, track])
+  }, [items, childrenOf, allFindings, track, challengeMeta])
 
   const toggle = (id: string) =>
     setExpanded((prev) => {
@@ -763,7 +1015,7 @@ export function Assets({ pid, compact, tree = false, track }: { pid: string; com
   // （语义同「删发现」：摘反向 relates_to 边、不触发撤回传播），故不再出现
   // 「409 仍被发现引用」的拦截。确认框先数出会被一并删掉的发现条数写进文案。
   const remove = async (a: Asset) => {
-    const label = track === "ctf" ? "题目" : "资产"
+    const label = isCtfTrack(track) ? "题目" : "资产"
     const n = allFindings.filter((f) => f.target_asset_id === a.id).length
     const msg = n > 0
       ? `确认删除${label}「${a.value}」？\n将同时删除引用它的 ${n} 条发现，删除后均不可恢复。`
@@ -782,14 +1034,19 @@ export function Assets({ pid, compact, tree = false, track }: { pid: string; com
     if (items.length === 0) return <Empty />
     if (tagFilter) {
       // 标签筛选时退平铺（树内子孙可能不满足筛选条件）
-      if (visible.length === 0) return <p className="p-2 text-xs text-muted-foreground">该标签下暂无{track === "ctf" ? "题目" : "资产"}</p>
+      if (visible.length === 0) return <p className="p-2 text-xs text-muted-foreground">该标签下暂无{isCtfTrack(track) ? "题目" : "资产"}</p>
       return visible.map((a) => (
         <AssetRow key={a.id} a={a} hasFinding={verifiedIds.has(a.id)} flag={flagByChallenge.get(a.id)} track={track}
-                  onDelete={!compact ? remove : undefined} />
+                  cs={challengeMeta.get(a.id)}
+                  onDelete={!compact ? remove : undefined} onSolve={!compact ? startSolve : undefined}
+                  onFlags={!compact ? setFlagsFor : undefined} />
       ))
     }
     if (!tree) return items.map((a) => (
-      <AssetRow key={a.id} a={a} hasFinding={verifiedIds.has(a.id)} flag={flagByChallenge.get(a.id)} track={track} />
+      <AssetRow key={a.id} a={a} hasFinding={verifiedIds.has(a.id)} flag={flagByChallenge.get(a.id)} track={track}
+                cs={challengeMeta.get(a.id)}
+                onSolve={!compact ? startSolve : undefined}
+                onFlags={!compact ? setFlagsFor : undefined} />
     ))
     // 递归渲染（host → service → url 多层）：任意带子行的节点都可展开
     const countDesc = (id: string): number =>
@@ -821,9 +1078,24 @@ export function Assets({ pid, compact, tree = false, track }: { pid: string; com
             </Badge>
             {/* 状态徽章紧贴值（用户定稿 2026-09-19）；flex-1 占位在徽章之后 */}
             <span className="min-w-0 shrink truncate font-mono text-xs">{a.value}</span>
-            <AssetBadges a={a} hasFinding={verifiedIds.has(a.id)} flag={flagByChallenge.get(a.id)} track={track} />
+            <AssetBadges a={a} hasFinding={verifiedIds.has(a.id)} flag={flagByChallenge.get(a.id)} track={track}
+                         cs={challengeMeta.get(a.id)} />
             <span className="min-w-0 flex-1" />
             <AssetTags tags={(meta.tags as string[] | undefined) ?? []} />
+            {!compact && isCtfTrack(track) && isChallengeAsset(a, track) && (
+              <button title="查看该题目的 flag 台账（人工确认 / 标记为错误 / 手工录入）"
+                      className="shrink-0 rounded border px-1.5 text-[10px] text-muted-foreground hover:border-primary/40 hover:text-primary"
+                      onClick={(e) => { e.stopPropagation(); setFlagsFor(a) }}>
+                🚩 台账{challengeMeta.get(a.id)?.flags?.length ? ` ${challengeMeta.get(a.id)!.flags.length}` : ""}
+              </button>
+            )}
+            {!compact && isCtfTrack(track) && isChallengeAsset(a, track) && (
+              <button title="使用已配置的模型启动 CTF-Agent（不会提交 flag）"
+                      className="shrink-0 rounded border px-1.5 text-[10px] text-muted-foreground hover:border-primary/40 hover:text-primary"
+                      onClick={(e) => { e.stopPropagation(); startSolve(a) }}>
+                求解
+              </button>
+            )}
             {!compact && isChallengeAsset(a, track) && (
               <button
                 title="查看该题目的意图链路图（题目 → 意图 → 发现）"
@@ -835,7 +1107,7 @@ export function Assets({ pid, compact, tree = false, track }: { pid: string; com
             )}
             {!compact && (
               <button
-                title={`删除该${track === "ctf" ? "题目" : "资产"}：仅叶子可删（有子${track === "ctf" ? "题目" : "资产"}请先处理）；引用它的发现会一并删除`}
+                title={`删除该${isCtfTrack(track) ? "题目" : "资产"}：仅叶子可删（有子${isCtfTrack(track) ? "题目" : "资产"}请先处理）；引用它的发现会一并删除`}
                 className="shrink-0 rounded px-1 text-[10px] text-muted-foreground/50 hover:bg-accent hover:text-(--status-error)"
                 onClick={(e) => { e.stopPropagation(); remove(a) }}
               >
@@ -881,6 +1153,17 @@ export function Assets({ pid, compact, tree = false, track }: { pid: string; com
               #{t}
             </button>
           ))}
+          {/* 新建题目（题目表单 v47）：CTF 轨的「有结构的建题」入口。
+              题目名可空——留空时 AI 按题面自动命名（只改 meta.title，不动 value）。 */}
+          {isCtfTrack(track) && (
+            <>
+              <span className="min-w-0 flex-1" />
+              <button className="rounded border px-2 py-0.5 text-[10px] text-muted-foreground hover:border-primary/40 hover:text-primary"
+                      onClick={() => setShowCreate(true)}>
+                + 新建题目
+              </button>
+            </>
+          )}
         </div>
       )}
       <ScrollArea className="min-h-0 flex-1">
@@ -890,6 +1173,18 @@ export function Assets({ pid, compact, tree = false, track }: { pid: string; com
           {renderRows()}
         </div>
       </ScrollArea>
+      {!compact && isCtfTrack(track) && (ctfBusy || ctfJob || ctfError) && (
+        <div className="border-t border-primary/20 bg-primary/[0.04] px-3 py-2 text-[11px]">
+          {ctfBusy && <span className="text-muted-foreground">启动中…</span>}
+          {ctfJob && <span className={ctfJob.status === "error" ? "text-(--status-error)" : "text-muted-foreground"}>作业 {ctfJob.status}</span>}
+          {ctfJob?.status === "done" && (() => {
+            const result = ctfJob.result as { flags?: string[]; output?: string } | null
+            return <div className="mt-1 text-muted-foreground">候选 flag：{result?.flags?.length ? result.flags.join(", ") : "未发现"}{result?.output && <pre className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap rounded bg-muted/30 p-1">{result.output}</pre>}</div>
+          })()}
+          {ctfJob?.status === "error" && <p className="mt-1 text-(--status-error)">{ctfJob.error}</p>}
+          {ctfError && <p className="mt-1 text-(--status-error)">{ctfError}</p>}
+        </div>
+      )}
       {!compact && (
         <div className="border-t p-2">
           <div className="flex gap-2">
@@ -904,7 +1199,7 @@ export function Assets({ pid, compact, tree = false, track }: { pid: string; com
               <option value="binary">binary</option>
             </select>
             <Input className="flex-1" value={value} onChange={(e) => setValue(e.target.value)}
-                   placeholder={`手动添加${track === "ctf" ? "题目" : "资产"}（值/哈希/路径；自动=识别类型）`}
+                   placeholder={`手动添加${isCtfTrack(track) ? "题目" : "资产"}（值/哈希/路径；自动=识别类型）`}
                    onKeyDown={(e) => e.key === "Enter" && add()} />
             <Button size="sm" onClick={add} disabled={!value.trim()}>添加</Button>
           </div>
@@ -957,6 +1252,24 @@ export function Assets({ pid, compact, tree = false, track }: { pid: string; com
           onMutated={refresh}
         />
       )}
+
+      {/* flag 台账弹层（challenge-flag-ledger v47）：人工确认 / **标记为错误** / 手工录入 */}
+      {flagsFor && (
+        <ChallengeFlagLedger
+          asset={flagsFor}
+          onClose={() => setFlagsFor(null)}
+          onMutated={refresh}
+        />
+      )}
+
+      {/* 新建题目弹层（题目表单 v47） */}
+      {showCreate && (
+        <ChallengeCreateDialog
+          pid={pid}
+          onClose={() => setShowCreate(false)}
+          onCreated={refresh}
+        />
+      )}
     </div>
   )
 }
@@ -997,4 +1310,263 @@ function Funcs({ pid }: { pid: string }) {
 
 function Empty() {
   return <p className="py-6 text-center text-xs text-muted-foreground">暂无数据</p>
+}
+
+/** 题目 flag 台账弹层（challenge-flag-ledger v47，2026-10-19）。
+ *
+ * 这里是「人工标错 flag」唯一真正生效的地方——`verdict='rejected'` 会立刻把该
+ * 串从题目 solved 派生里扣除（状态是派生值，后端自动生效），并进「已拒绝」清单：
+ * 之后 AI 再提交同一串会被 `ctf_submit_flag` 直接拦下，不再白烧轮次。
+ *
+ * 三种 verdict 的语义必须让人一眼看懂，故不隐藏 rejected（要能撤销误否决）：
+ *   accepted 人工确认有效 / pending AI 判定通过待复核 / rejected 人工标记为错误
+ */
+function ChallengeFlagLedger({ asset, onClose, onMutated }: {
+  asset: Asset
+  onClose: () => void
+  onMutated: () => void
+}) {
+  const [data, setData] = useState<ChallengeFlagsResponse | null>(null)
+  const [err, setErr] = useState("")
+  const [busy, setBusy] = useState(false)
+  const [manual, setManual] = useState("")
+  const [manualSource, setManualSource] = useState("")
+
+  const refresh = useCallback(() => {
+    api.challengeFlags(asset.id).then((r) => { setData(r); setErr("") })
+      .catch((e) => setErr(e instanceof Error ? e.message : String(e)))
+  }, [asset.id])
+  useEffect(() => { refresh() }, [refresh])
+
+  const decide = async (flagId: string, verdict: "accepted" | "rejected" | "pending") => {
+    const reason = verdict === "rejected"
+      ? window.prompt("标记为错误 flag 的理由（会写进台账，AI 之后不会再提交这串）：", "") ?? ""
+      : ""
+    if (verdict === "rejected" && reason === null) return
+    setBusy(true); setErr("")
+    try {
+      await api.decideChallengeFlag(asset.id, flagId, { verdict, reason })
+      refresh(); onMutated()
+    } catch (e) { setErr(e instanceof Error ? e.message : String(e)) }
+    finally { setBusy(false) }
+  }
+
+  const addManual = async () => {
+    if (!manual.trim()) return
+    setBusy(true); setErr("")
+    try {
+      await api.addChallengeFlag(asset.id, {
+        flag: manual.trim(), source: manualSource.trim(), verdict: "accepted" })
+      setManual(""); setManualSource("")
+      refresh(); onMutated()
+    } catch (e) { setErr(e instanceof Error ? e.message : String(e)) }
+    finally { setBusy(false) }
+  }
+
+  const toggleAbandon = async () => {
+    setBusy(true); setErr("")
+    try {
+      await api.abandonChallenge(asset.id, !(data?.state.abandoned ?? false))
+      refresh(); onMutated()
+    } catch (e) { setErr(e instanceof Error ? e.message : String(e)) }
+    finally { setBusy(false) }
+  }
+
+  const st = data?.state
+  const quotaLabel = st ? `${st.accepted}/${st.quota}` : "—"
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+      <div className="flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-lg border bg-background shadow-xl">
+        <div className="flex shrink-0 items-center gap-2 border-b px-4 py-2">
+          <span className="text-[10px] text-muted-foreground">flag 台账</span>
+          <span className="min-w-0 flex-1 truncate text-sm font-medium">{asset.value}</span>
+          {st && <Badge variant="outline" className="text-[10px]">进度 {quotaLabel}</Badge>}
+          {st && st.rejected > 0 && (
+            <Badge variant="outline" className="text-[10px] text-(--status-error)">否决 {st.rejected}</Badge>
+          )}
+          <button type="button" className="shrink-0 rounded border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-accent"
+                  onClick={onClose}>关闭</button>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto p-3 space-y-1.5">
+          {err && <p className="text-[11px] text-(--status-error)">{err}</p>}
+          {!data && !err && <p className="py-4 text-center text-xs text-muted-foreground">加载中…</p>}
+          {data && data.flags.length === 0 && (
+            <p className="py-4 text-center text-xs text-muted-foreground">
+              还没有 flag。AI 用 <code className="font-mono">ctf_submit_flag</code> 提交后会自动出现在这里。
+            </p>
+          )}
+          {(data?.flags ?? []).map((f) => (
+            <div key={f.id} className="rounded border px-2 py-1.5">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className={cn("font-mono text-xs",
+                  f.verdict === "rejected" ? "text-muted-foreground line-through" : "text-primary")}>
+                  {f.flag}
+                </span>
+                <Badge variant="outline" className={cn("text-[10px]",
+                  f.verdict === "accepted" ? "text-(--viz-success)"
+                    : f.verdict === "rejected" ? "text-(--status-error)"
+                      : "text-(--status-approval)")}>
+                  {f.verdict === "accepted" ? "人工确认" : f.verdict === "rejected" ? "已否决" : "待复核"}
+                </Badge>
+                <span className="text-[10px] text-muted-foreground">
+                  {f.judged_by === "human" ? "人工" : "AI"} · 置信 {f.confidence.toFixed(1)}
+                </span>
+                <span className="min-w-0 flex-1" />
+                {f.verdict !== "accepted" && (
+                  <button className="shrink-0 rounded border px-1.5 text-[10px] text-muted-foreground hover:border-primary/40 hover:text-primary"
+                          disabled={busy} onClick={() => void decide(f.id, "accepted")}>确认有效</button>
+                )}
+                {f.verdict !== "rejected" && (
+                  <button className="shrink-0 rounded border px-1.5 text-[10px] text-muted-foreground hover:border-(--status-error)/40 hover:text-(--status-error)"
+                          disabled={busy} onClick={() => void decide(f.id, "rejected")}>标记为错误</button>
+                )}
+                {f.verdict === "rejected" && (
+                  <button className="shrink-0 rounded border px-1.5 text-[10px] text-muted-foreground hover:border-primary/40 hover:text-primary"
+                          disabled={busy} onClick={() => void decide(f.id, "pending")}>撤销否决</button>
+                )}
+              </div>
+              {f.verdict_reason && (
+                <p className="mt-0.5 text-[10px] text-(--status-error)">否决理由：{f.verdict_reason}</p>
+              )}
+              {f.source && (
+                <p className="mt-0.5 line-clamp-2 text-[10px] text-muted-foreground">来源：{f.source}</p>
+              )}
+            </div>
+          ))}
+        </div>
+
+        <div className="shrink-0 border-t p-2 space-y-1.5">
+          <div className="flex gap-2">
+            <Input className="h-8 flex-1 font-mono text-xs" value={manual}
+                   onChange={(e) => setManual(e.target.value)}
+                   placeholder="手工录入 flag（人工录入默认「已确认」）"
+                   onKeyDown={(e) => e.key === "Enter" && void addManual()} />
+            <Button size="sm" className="h-8" disabled={!manual.trim() || busy}
+                    onClick={() => void addManual()}>录入</Button>
+          </div>
+          <Input className="h-8 text-xs" value={manualSource}
+                 onChange={(e) => setManualSource(e.target.value)}
+                 placeholder="解题路径/来源（可选，便于复核）" />
+          <div className="flex items-center gap-2">
+            <button className="rounded border px-2 py-0.5 text-[10px] text-muted-foreground hover:bg-accent"
+                    disabled={busy} onClick={() => void toggleAbandon()}>
+              {st?.abandoned ? "撤销放弃" : "放弃这道题"}
+            </button>
+            <span className="text-[10px] text-muted-foreground">
+              放弃后调度层不再为它派 Worker；已有 flag 全部保留。
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** 新建题目表单（题目表单 v47，2026-10-19）。
+ *
+ * 字段对齐用户需求：题目名（可空，AI 会按题面自动命名）/ 题目方向 / hit（题面原文）/
+ * 入口点（子资产：URL 或附件路径）/ flag 格式 / flag 数量。全部非必填（名 + 题面
+ * 至少给一个，否则无法确定题目身份）。
+ *
+ * **为什么入口点是子资产而不是字符串**：web 题可能既有 URL 又有源码包、pwn 题可能有
+ * 多个附件——子资产天然支持多入口，且复用 register_asset 的单一写入口。
+ */
+function ChallengeCreateDialog({ pid, onClose, onCreated }: {
+  pid: string; onClose: () => void; onCreated: () => void
+}) {
+  const [name, setName] = useState("")
+  const [direction, setDirection] = useState("web")
+  const [brief, setBrief] = useState("")
+  const [entryHint, setEntryHint] = useState("")
+  const [entries, setEntries] = useState("")
+  const [flagFormat, setFlagFormat] = useState("flag{}")
+  const [flagCount, setFlagCount] = useState("1")
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState("")
+
+  const submit = async () => {
+    if (!name.trim() && !brief.trim() && !entries.trim()) {
+      setErr("题目名与题面/入口至少要填一个（否则无法确定题目身份）")
+      return
+    }
+    setBusy(true); setErr("")
+    try {
+      await api.addChallenge(pid, {
+        name: name.trim() || undefined,
+        title: name.trim() || undefined,
+        direction: direction.trim(),
+        brief: brief.trim(),
+        entry_hint: entryHint.trim(),
+        flag_format: flagFormat.trim(),
+        flag_count: Number(flagCount) || 1,
+        // 入口点：一行一个（URL 或附件路径），类型交给后端自动识别
+        entries: entries.split("\n").map((x) => x.trim()).filter(Boolean)
+          .map((v) => ({ value: v })),
+      })
+      onCreated(); onClose()
+    } catch (e) { setErr(e instanceof Error ? e.message : String(e)) }
+    finally { setBusy(false) }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+      <div className="flex max-h-[85vh] w-full max-w-xl flex-col overflow-hidden rounded-lg border bg-background shadow-xl">
+        <div className="shrink-0 border-b px-4 py-2 text-sm font-medium">新建题目</div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-3 space-y-2">
+          <label className="block space-y-1 text-xs text-muted-foreground">
+            题目名称<span className="ml-1 opacity-60">（可空：留空时 AI 会按题面自动命名）</span>
+            <Input className="mt-1 h-8 text-sm" value={name}
+                   onChange={(e) => setName(e.target.value)} placeholder="例如：签到题 / Web-文件上传" />
+          </label>
+          <label className="block space-y-1 text-xs text-muted-foreground">
+            题目方向
+            <select className="mt-1 h-8 w-full rounded border bg-background px-2 text-sm text-foreground"
+                    value={direction} onChange={(e) => setDirection(e.target.value)}>
+              {["web", "pwn", "crypto", "reverse", "misc", "blockchain", "ai", "osint"].map((d) => (
+                <option key={d} value={d}>{d}</option>
+              ))}
+            </select>
+          </label>
+          <label className="block space-y-1 text-xs text-muted-foreground">
+            hit<span className="ml-1 opacity-60">（题目给的信息：题面原文）</span>
+            <textarea className="mt-1 min-h-20 w-full rounded border bg-background px-2 py-1 text-xs text-foreground"
+                      value={brief} onChange={(e) => setBrief(e.target.value)}
+                      placeholder="把题面/提示原样贴进来" />
+          </label>
+          <label className="block space-y-1 text-xs text-muted-foreground">
+            入口点<span className="ml-1 opacity-60">（一行一个：URL-web 题，或附件路径；会成为题目的子资产）</span>
+            <textarea className="mt-1 min-h-16 w-full rounded border bg-background px-2 py-1 font-mono text-xs text-foreground"
+                      value={entries} onChange={(e) => setEntries(e.target.value)}
+                      placeholder={"http://1.2.3.4:8080\n/workspace/artifacts/attachments/chall.zip"} />
+          </label>
+          <label className="block space-y-1 text-xs text-muted-foreground">
+            入口提示<span className="ml-1 opacity-60">（可选，纯文本说明）</span>
+            <Input className="mt-1 h-8 text-xs" value={entryHint}
+                   onChange={(e) => setEntryHint(e.target.value)} placeholder="例如：附件里是源码，flag 在环境变量" />
+          </label>
+          <div className="grid grid-cols-2 gap-2">
+            <label className="block space-y-1 text-xs text-muted-foreground">
+              flag 格式<span className="ml-1 opacity-60">（提示，不是约束）</span>
+              <Input className="mt-1 h-8 font-mono text-xs" value={flagFormat}
+                     onChange={(e) => setFlagFormat(e.target.value)} placeholder="flag{}" />
+            </label>
+            <label className="block space-y-1 text-xs text-muted-foreground">
+              flag 数量<span className="ml-1 opacity-60">（多 flag 题目才有「部分解出」态）</span>
+              <Input className="mt-1 h-8 text-xs" value={flagCount} inputMode="numeric"
+                     onChange={(e) => setFlagCount(e.target.value)} placeholder="1" />
+            </label>
+          </div>
+          {err && <p className="text-[11px] text-(--status-error)">{err}</p>}
+        </div>
+        <div className="flex shrink-0 items-center justify-end gap-2 border-t px-3 py-2">
+          <button className="rounded border px-2 py-1 text-[11px] text-muted-foreground hover:bg-accent"
+                  onClick={onClose}>取消</button>
+          <Button size="sm" disabled={busy} onClick={() => void submit()}>
+            {busy ? "创建中…" : "创建题目"}
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
 }

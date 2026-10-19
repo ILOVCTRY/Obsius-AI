@@ -1,0 +1,895 @@
+import { randomUUID } from "node:crypto";
+
+import type { BinaryTarget } from "../../domain/binaryTargetTypes.js";
+import {
+  analysisProfilesEqual,
+  type AnalysisProfileCommitment,
+} from "../../domain/analysisProfile.js";
+import { AnalysisCancelledError } from "../../domain/analysisErrorCore.js";
+import type { AnalysisError } from "../../domain/analysisErrorBase.js";
+import { err, ok, type Result } from "../../domain/result.js";
+import type { JsonValue } from "../../domain/jsonValue.js";
+import { createEvidence } from "../../domain/evidence.js";
+import type {
+  AnalysisClient,
+  AnalysisExecution,
+  ExecutionOptions,
+  AnalysisOperationPort,
+  ProviderIdentity,
+} from "../AnalysisProvider.js";
+import type { AnalysisOperation } from "../AnalysisProvider.js";
+import { OFFICIAL_TOOL_CONTRACTS } from "../../contracts/officialToolContracts.js";
+import { ENHANCED_TOOL_CONTRACTS } from "../../contracts/enhancedToolContracts.js";
+import type {
+  BinarySessionPort,
+  SavedAnalysisSnapshot,
+} from "./BinarySessionPort.js";
+import {
+  SessionProviderRouter,
+  type SessionProviderRoute,
+} from "./SessionProviderRouter.js";
+import { InvestigationRecords } from "../investigation/InvestigationRecords.js";
+import { BinarySessionRecords } from "./BinarySessionRecords.js";
+import { binarySessionStatus } from "./BinarySessionStatus.js";
+import {
+  resolveSessionOpen,
+  resolveSessionTarget,
+  validateResolvedSessionTarget,
+  type BinarySessionOpenOptions,
+  type ResolvedSessionOpen,
+} from "./BinarySessionOpen.js";
+import {
+  bindExecutionTarget,
+  commitExecutionProfile,
+  prepareSessionExecution,
+} from "./BinarySessionExecution.js";
+import { closeAnalysisClient } from "./AnalysisClientCleanup.js";
+import { analysisErrorWithCleanupFailure } from "../../domain/analysisErrorCleanup.js";
+const OFFICIAL_OPERATIONS: ReadonlySet<string> = new Set(
+  OFFICIAL_TOOL_CONTRACTS.map(({ name }) => name),
+);
+const ENHANCED_OPERATIONS: ReadonlySet<string> = new Set(
+  ENHANCED_TOOL_CONTRACTS.map(({ name }) => name),
+);
+
+interface SessionBinding {
+  readonly target: BinaryTarget;
+  readonly client: AnalysisClient;
+  readonly profile: AnalysisProfileCommitment | null;
+  readonly route: SessionProviderRoute;
+  readonly runId: string;
+}
+
+/**
+ * Owns the single active target shared by CLI and MCP adapters.
+ *
+ * Target transitions are serialized because switching targets tears down the
+ * active provider client. A failed switch recreates the previous target instead
+ * of retaining a client whose resources were already shut down.
+ */
+export class BinarySession
+  extends BinarySessionRecords
+  implements BinarySessionPort
+{
+  #active: SessionBinding | undefined;
+  #pendingCleanup:
+    | {
+        readonly client: AnalysisClient;
+        readonly providerId: string;
+        readonly retainDocument: boolean;
+      }
+    | undefined;
+  #transition: Promise<void> = Promise.resolve();
+  #transitionGeneration = 0;
+  #transitionPending = 0;
+  readonly #calls = new Map<Promise<unknown>, number>();
+  readonly #promptCompletionControllers = new Set<AbortController>();
+  readonly #providerRouter: SessionProviderRouter;
+  readonly #runtimeUnavailability = new Map<
+    string,
+    { readonly reason: string }
+  >();
+  readonly #availabilityListeners = new Set<() => void | Promise<void>>();
+
+  constructor(
+    providerRouter: SessionProviderRouter,
+    records: InvestigationRecords = new InvestigationRecords(),
+  ) {
+    super(records);
+    this.#providerRouter = providerRouter;
+  }
+
+  /**
+   * Fast-path liveness gate (#1719): short-circuit only when the retained
+   * client is genuinely alive. The probe reads the child's operation health
+   * rather than the composite's unconditionally-ok `health`, so a dead child
+   * falls through and a real client is started; an aborted caller leaves the
+   * session untouched. Returns the fast-path result, or undefined to fall
+   * through to the slow path.
+   */
+  async #tryRetainedFastPath(
+    retained: SessionBinding,
+    target: BinaryTarget,
+    options: Pick<BinarySessionOpenOptions, "signal" | "snapshot">,
+  ): Promise<Result<BinaryTarget, AnalysisError> | undefined> {
+    const live = await this.#retainedClientLive(retained.client, options);
+    if (isAborted(options.signal))
+      return err(new AnalysisCancelledError("open_binary"));
+    if (!live) return undefined;
+    if (options.snapshot !== undefined) {
+      const imported = this.importAnalysisSnapshot(options.snapshot);
+      if (!imported.ok) return imported;
+    }
+    return ok(target);
+  }
+
+  /** Identify the provider producing evidence for this session. */
+  providerIdentity(operation?: AnalysisOperation): ProviderIdentity {
+    const route = this.#currentRoute();
+    let selected = route.binding?.identity ?? route.identity;
+    if (operation !== undefined) {
+      const exact = route.capabilities.get(operation)?.provider;
+      if (exact !== undefined) selected = exact;
+      else if (ENHANCED_OPERATIONS.has(operation)) {
+        const providers = new Map<string, ProviderIdentity>();
+        for (const descriptor of route.capabilities.values())
+          if (
+            descriptor.available &&
+            OFFICIAL_OPERATIONS.has(descriptor.operation)
+          )
+            providers.set(descriptor.provider.id, descriptor.provider);
+        if (providers.size === 1) {
+          const provider = providers.values().next().value;
+          if (provider !== undefined) selected = provider;
+        }
+      }
+    }
+    return structuredClone(selected);
+  }
+
+  /** External live state cannot be replayed by a direct or composed CLI workflow. */
+  allowsSnapshotReplay(operation: AnalysisOperation): boolean {
+    const capabilities = this.#active?.route.capabilities;
+    const descriptor = capabilities?.get(operation);
+    if (descriptor !== undefined) return descriptor.cachePolicy !== "live";
+    return ![...(capabilities?.values() ?? [])].some(
+      ({ cachePolicy }) => cachePolicy === "live",
+    );
+  }
+
+  /** Return the selected immutable profile, optionally scoped to an operation. */
+  analysisProfile(
+    operation?: AnalysisOperation,
+  ): AnalysisProfileCommitment | undefined {
+    const profile = this.#active?.profile;
+    if (profile === null || profile === undefined) return undefined;
+    if (
+      operation !== undefined &&
+      this.providerIdentity(operation).id !== profile.provider.id
+    )
+      return undefined;
+    return structuredClone(profile);
+  }
+
+  /** Observe runtime provider-health changes that affect discovery metadata. */
+  onAvailabilityChanged(listener: () => void | Promise<void>): () => void {
+    this.#availabilityListeners.add(listener);
+    return () => this.#availabilityListeners.delete(listener);
+  }
+
+  /** Resolve a target and provider profile without creating a provider client. */
+  previewTarget(
+    target: BinaryTarget,
+    options: BinarySessionOpenOptions = {},
+  ): Promise<Result<ResolvedSessionOpen, AnalysisError>> {
+    if (isAborted(options.signal))
+      return Promise.resolve(err(new AnalysisCancelledError("open_binary")));
+    return resolveSessionTarget({
+      router: this.#providerRouter,
+      current: this.#active,
+      target,
+      options,
+      stagedSnapshotMatches: (target, profile) =>
+        this.matchesSnapshot(target, profile),
+    }).then((resolved) =>
+      isAborted(options.signal)
+        ? err(new AnalysisCancelledError("open_binary"))
+        : resolved,
+    );
+  }
+
+  /**
+   * Open or switch targets after draining calls against the current target.
+   * Returns the switch failure even if best-effort restoration also fails.
+   */
+  open(
+    path: string,
+    options: BinarySessionOpenOptions = {},
+  ): Promise<Result<BinaryTarget, AnalysisError>> {
+    return this.#open(
+      () =>
+        resolveSessionOpen({
+          router: this.#providerRouter,
+          current: this.#active,
+          path,
+          options,
+          stagedSnapshotMatches: (target, profile) =>
+            this.matchesSnapshot(target, profile),
+        }),
+      options,
+    );
+  }
+
+  /** Open a previewed target without repeating parsing or provider profile discovery. */
+  openResolvedTarget(
+    resolved: Pick<ResolvedSessionOpen, "target" | "route">,
+    options: Pick<BinarySessionOpenOptions, "signal" | "snapshot"> = {},
+  ): Promise<Result<BinaryTarget, AnalysisError>> {
+    return this.#open(
+      () =>
+        Promise.resolve(
+          validateResolvedSessionTarget({
+            ...resolved,
+            current: this.#active,
+            options,
+            stagedSnapshotMatches: (target, profile) =>
+              this.matchesSnapshot(target, profile),
+          }),
+        ),
+      options,
+    );
+  }
+
+  #open(
+    resolve: () => Promise<Result<ResolvedSessionOpen, AnalysisError>>,
+    options: Pick<BinarySessionOpenOptions, "signal" | "snapshot">,
+  ): Promise<Result<BinaryTarget, AnalysisError>> {
+    return this.#serialize(async (admittedThrough) => {
+      if (isAborted(options.signal))
+        return err(new AnalysisCancelledError("open_binary"));
+      const resolved = await resolve();
+      if (!resolved.ok) return resolved;
+      const { target, route, sameTarget } = resolved.value;
+      const { profile } = route;
+      if (isAborted(options.signal))
+        return err(new AnalysisCancelledError("open_binary"));
+      const activeProfile = this.#active?.profile;
+      const sameProfile =
+        activeProfile === null || activeProfile === undefined
+          ? profile === null
+          : profile !== null && analysisProfilesEqual(activeProfile, profile);
+      await this.#drainCalls(admittedThrough);
+      if (isAborted(options.signal))
+        return err(new AnalysisCancelledError("open_binary"));
+      const pendingClosed = await this.#retryPendingCleanup();
+      if (!pendingClosed.ok) return pendingClosed;
+      if (isAborted(options.signal))
+        return err(new AnalysisCancelledError("open_binary"));
+      const retained = sameTarget && sameProfile ? this.#active : undefined;
+      if (retained !== undefined) {
+        const fastPath = await this.#tryRetainedFastPath(
+          retained,
+          target,
+          options,
+        );
+        if (fastPath !== undefined) return fastPath;
+      }
+      const previous = this.#active;
+      this.#active = undefined;
+      if (previous !== undefined) {
+        const closed = await this.#retireClient(
+          previous.client,
+          previous.route.identity.id,
+        );
+        if (!closed.ok) {
+          this.clearSessionRecords();
+          this.#clearRuntimeAvailability();
+          return closed;
+        }
+      }
+      if (isAborted(options.signal))
+        return err(
+          await this.#restoreAfterFailedOpen(
+            previous,
+            new AnalysisCancelledError("open_binary"),
+          ),
+        );
+      const runId = randomUUID();
+      const client = route.createClient(target, { runId });
+      const started = await client.execute("health", {}, options);
+      if (!started.ok) {
+        return err(
+          await this.#failedOpen(
+            client,
+            route.identity.id,
+            previous,
+            started.error,
+          ),
+        );
+      }
+      if (isAborted(options.signal)) {
+        return err(
+          await this.#failedOpen(
+            client,
+            route.identity.id,
+            previous,
+            new AnalysisCancelledError("open_binary"),
+          ),
+        );
+      }
+      this.#active = {
+        target,
+        client,
+        profile,
+        route,
+        runId,
+      };
+      this.#clearRuntimeAvailability();
+      this.resetSnapshotInvalidation();
+      if (options.snapshot === undefined) {
+        if (profile === null) this.clearSnapshot();
+        else this.selectSnapshot(target, profile);
+      }
+      if (options.snapshot !== undefined) {
+        const imported = this.importAnalysisSnapshot(options.snapshot);
+        if (!imported.ok) {
+          this.#active = undefined;
+          return err(
+            await this.#failedOpen(
+              client,
+              route.identity.id,
+              previous,
+              imported.error,
+            ),
+          );
+        }
+      }
+      return ok(target);
+    });
+  }
+
+  /** Close the active target, if any. */
+  close(
+    options: Pick<ExecutionOptions, "progress"> & {
+      readonly retainProviderDocuments?: boolean;
+    } = {},
+  ): Promise<Result<null, AnalysisError>> {
+    return this.#serialize(async (admittedThrough) => {
+      await this.#drainCalls(admittedThrough);
+      return this.#closeActive(options);
+    });
+  }
+
+  /** Drain earlier requests, save an immutable snapshot, and close under one lifecycle lock. */
+  closeWithSnapshot(
+    path: string,
+    overwrite: boolean,
+    options: Pick<ExecutionOptions, "progress"> = {},
+  ): Promise<Result<SavedAnalysisSnapshot, AnalysisError>> {
+    return this.#serialize(async (admittedThrough) => {
+      await this.#drainCalls(admittedThrough);
+      const snapshot = this.exportAnalysisSnapshot();
+      if (!snapshot.ok) return snapshot;
+      const written = await this.writeAnalysisSnapshot(
+        snapshot.value,
+        path,
+        overwrite,
+      );
+      if (!written.ok) return written;
+      const closed = await this.#closeActive(options);
+      return closed.ok
+        ? ok({
+            ...written.value,
+            primitive_entries: snapshot.value.entries.length,
+            workflow_entries: snapshot.value.workflow_entries.length,
+            evidence_records: snapshot.value.evidence_bundle.records.length,
+          })
+        : closed;
+    });
+  }
+
+  async #closeActive(
+    options: Pick<ExecutionOptions, "progress"> & {
+      readonly retainProviderDocuments?: boolean;
+    },
+  ): Promise<Result<null, AnalysisError>> {
+    const previous = this.#active;
+    this.#active = undefined;
+    const closed =
+      previous === undefined
+        ? await this.#retryPendingCleanup(
+            options.progress,
+            options.retainProviderDocuments,
+          )
+        : await this.#retireClient(
+            previous.client,
+            previous.route.identity.id,
+            {
+              ...(options.progress === undefined
+                ? {}
+                : { progress: options.progress }),
+              ...(options.retainProviderDocuments === true
+                ? { retainDocument: true }
+                : {}),
+            },
+          );
+    this.clearSessionRecords();
+    this.#clearRuntimeAvailability();
+    const fileResources = await this.closeWriteResources();
+    if (!closed.ok && !fileResources.ok)
+      return err(
+        analysisErrorWithCleanupFailure(
+          closed.error,
+          fileResources.error,
+          "close_binary",
+        ),
+      );
+    return closed.ok ? fileResources : closed;
+  }
+
+  async #retireClient(
+    client: AnalysisClient,
+    providerId: string,
+    options: Pick<ExecutionOptions, "progress"> & {
+      readonly retainDocument?: boolean;
+    } = {},
+  ): Promise<Result<null, AnalysisError>> {
+    this.#pendingCleanup = {
+      client,
+      providerId,
+      retainDocument: options.retainDocument === true,
+    };
+    return this.#retryPendingCleanup(options.progress);
+  }
+
+  async #retryPendingCleanup(
+    progress?: ExecutionOptions["progress"],
+    retainDocument?: boolean,
+  ): Promise<Result<null, AnalysisError>> {
+    let pending = this.#pendingCleanup;
+    if (pending === undefined) return ok(null);
+    if (retainDocument !== undefined) {
+      pending = { ...pending, retainDocument };
+      this.#pendingCleanup = pending;
+    }
+    const closed = await closeAnalysisClient(
+      pending.client,
+      pending.providerId,
+      {
+        ...(progress === undefined ? {} : { progress }),
+        ...(pending.retainDocument ? { retainDocument: true } : {}),
+      },
+    );
+    if (closed.ok) this.#pendingCleanup = undefined;
+    return closed;
+  }
+
+  async #failedOpen(
+    client: AnalysisClient,
+    providerId: string,
+    previous: SessionBinding | undefined,
+    primary: AnalysisError,
+  ): Promise<AnalysisError> {
+    const closed = await this.#retireClient(client, providerId);
+    if (!closed.ok)
+      return analysisErrorWithCleanupFailure(
+        primary,
+        closed.error,
+        "open_binary",
+      );
+    return this.#restoreAfterFailedOpen(previous, primary);
+  }
+
+  async #restoreAfterFailedOpen(
+    previous: SessionBinding | undefined,
+    primary: AnalysisError,
+  ): Promise<AnalysisError> {
+    const restored = await this.#restore(previous);
+    return restored.ok
+      ? primary
+      : analysisErrorWithCleanupFailure(primary, restored.error, "open_binary");
+  }
+
+  /** Describe the active binary session. */
+  status(): JsonValue {
+    return binarySessionStatus({
+      target: this.#active?.target,
+      route: this.#currentRoute(),
+      router: this.#providerRouter,
+      runtimeUnavailability: this.#runtimeUnavailability,
+      runId: this.#active?.runId,
+      runtimeLineageSnapshots:
+        this.#active?.client.runtimeLineageSnapshots?.() ?? [],
+      requestActivitySnapshots:
+        this.#active?.client.requestActivitySnapshots?.() ?? [],
+      providerOperationHealth:
+        this.#active?.client.operationHealthSnapshot?.() ?? null,
+    });
+  }
+
+  /** Return the immutable artifact identity captured before its provider started. */
+  activeTarget(): BinaryTarget | undefined {
+    return this.#active === undefined
+      ? undefined
+      : structuredClone(this.#active.target);
+  }
+
+  protected activeAnalysisBinding() {
+    return this.#active;
+  }
+
+  /**
+   * Invoke a provider operation against the active target.
+   * Calls may overlap, but a pending target transition prevents new calls from
+   * entering until the transition has settled.
+   */
+  execute(
+    name: Parameters<AnalysisOperationPort["execute"]>[0],
+    arguments_: Readonly<Record<string, JsonValue>>,
+    options?: Pick<ExecutionOptions, "signal" | "selectorOrigin">,
+  ): Promise<Result<AnalysisExecution, AnalysisError>> {
+    const generation = this.#transitionGeneration;
+    const call = this.#execute(name, arguments_, options, this.#transition);
+    this.#calls.set(call, generation);
+    return call.finally(() => this.#calls.delete(call));
+  }
+
+  /** Run a prompt lookup only against an already connected provider child. */
+  executeIfProviderReady(
+    name: Parameters<AnalysisOperationPort["execute"]>[0],
+    arguments_: Readonly<Record<string, JsonValue>>,
+    options?: Pick<ExecutionOptions, "signal" | "selectorOrigin">,
+  ): Promise<Result<AnalysisExecution, AnalysisError> | undefined> {
+    const active = this.#active;
+    if (
+      this.#transitionPending > 0 ||
+      active === undefined ||
+      active.client.executeIfReady === undefined
+    )
+      return Promise.resolve(undefined);
+
+    const controller = new AbortController();
+    this.#promptCompletionControllers.add(controller);
+    const signal =
+      options?.signal === undefined
+        ? controller.signal
+        : AbortSignal.any([controller.signal, options.signal]);
+    const generation = this.#transitionGeneration;
+    const call = active.client.executeIfReady(name, arguments_, {
+      ...options,
+      signal,
+    });
+    this.#calls.set(call, generation);
+    return call.finally(() => {
+      this.#calls.delete(call);
+      this.#promptCompletionControllers.delete(controller);
+    });
+  }
+
+  /** Admit one composed request until its result and session bookkeeping settle. */
+  withAdmittedAnalysis<Value>(
+    operationName: string,
+    signal: AbortSignal | undefined,
+    operation: (analysis: AnalysisOperationPort) => Promise<Value>,
+  ): Promise<Result<Value, AnalysisError>> {
+    const generation = this.#transitionGeneration;
+    const transition = this.#transition;
+    const call = (async (): Promise<Result<Value, AnalysisError>> => {
+      const admission = await this.#waitForTransition(
+        operationName,
+        signal,
+        transition,
+      );
+      if (!admission.ok) return admission;
+      return ok(
+        await operation({
+          execute: (name, arguments_, options) =>
+            this.#execute(name, arguments_, options, Promise.resolve()),
+        }),
+      );
+    })();
+    // Register synchronously before a lifecycle transition can snapshot calls.
+    this.#calls.set(call, generation);
+    return call.finally(() => this.#calls.delete(call));
+  }
+
+  async #execute(
+    name: Parameters<AnalysisOperationPort["execute"]>[0],
+    arguments_: Readonly<Record<string, JsonValue>>,
+    options: Pick<ExecutionOptions, "signal" | "selectorOrigin"> | undefined,
+    transition: Promise<void>,
+  ): Promise<Result<AnalysisExecution, AnalysisError>> {
+    const transitioned = await this.#waitForTransition(
+      name,
+      options?.signal,
+      transition,
+    );
+    if (!transitioned.ok) return transitioned;
+    const prepared = prepareSessionExecution({
+      active: this.#active,
+      operation: name,
+      parameters: arguments_,
+      unboundOperationError: (operation, route) =>
+        this.#providerRouter.unboundOperationError(operation, route),
+      lookupSnapshot: (target, profile, operation, parameters) =>
+        operation === "decode_interface_builder" ||
+        operation === "inspect_asset_catalog" ||
+        operation === "inspect_keyed_archive" ||
+        operation === "trace_dylib_resolution"
+          ? undefined
+          : this.lookupSnapshot(target, profile, operation, parameters),
+    });
+    if (!prepared.ok) return prepared;
+    const { active, capability, profile, cacheable, cached } = prepared.value;
+    if (cached !== undefined) return ok(cached);
+    // A failed reply cannot prove that a dispatched metadata write rolled back.
+    // Stop replay before dispatch, including reads overlapping the write.
+    if (capability.effects.mutatesArtifact) this.invalidateSnapshot();
+    const call = active.client.execute(name, arguments_, options);
+    const result = await call;
+    const profiled = bindExecutionTarget(
+      commitExecutionProfile(name, result, profile),
+      name,
+      active.target,
+    );
+    const execution =
+      profiled.ok &&
+      (name === "procedure_callers" || name === "procedure_callees") &&
+      profiled.value.relationshipCoverage === undefined
+        ? ok({
+            ...profiled.value,
+            relationshipCoverage: {
+              status: "unknown" as const,
+              reason:
+                "Provider did not report relationship coverage for this observation.",
+            },
+          })
+        : profiled;
+    this.#observeRuntimeAvailability(name, execution);
+    if (
+      execution.ok &&
+      cacheable &&
+      profile !== undefined &&
+      name !== "decode_interface_builder" &&
+      name !== "inspect_asset_catalog" &&
+      name !== "inspect_keyed_archive" &&
+      name !== "trace_dylib_resolution"
+    ) {
+      const evidence = createEvidence(
+        execution.value.subject ?? active.target,
+        execution.value.provider,
+        {
+          operation: name,
+          parameters: arguments_,
+          result: execution.value.result,
+          analysisProfile: profile,
+          rawResult: execution.value.rawResult,
+          limitations: execution.value.limitations,
+          ...(execution.value.relationshipCoverage === undefined
+            ? {}
+            : {
+                relationshipCoverage: execution.value.relationshipCoverage,
+              }),
+          locations: execution.value.locations,
+        },
+      );
+      const recorded = this.recordEvidence(evidence);
+      if (!recorded.ok) return recorded;
+      this.recordSnapshot({
+        target: active.target,
+        profile,
+        operation: name,
+        parameters: arguments_,
+        execution: execution.value,
+      });
+    }
+    return execution;
+  }
+
+  #observeRuntimeAvailability(
+    operation: AnalysisOperation,
+    result: Result<AnalysisExecution, AnalysisError>,
+  ): void {
+    if (result.ok) {
+      if (this.#markRuntimeAvailable(operation))
+        this.#emitAvailabilityChanged();
+      return;
+    }
+    if (result.error._tag === "AnalysisCapabilityUnavailableError") {
+      if (this.#markRuntimeUnavailable(operation, result.error.message))
+        this.#emitAvailabilityChanged();
+      return;
+    }
+    if (
+      [
+        "ProviderAdapterError",
+        "HopperProcessError",
+        "HopperStartError",
+      ].includes(result.error._tag)
+    ) {
+      const capabilities = this.#active?.route.capabilities;
+      const providerId = capabilities?.get(operation)?.provider.id;
+      let changed = false;
+      for (const descriptor of capabilities?.values() ?? [])
+        if (providerId !== undefined && descriptor.provider.id === providerId)
+          changed =
+            this.#markRuntimeUnavailable(
+              descriptor.operation,
+              `${result.error._tag}: ${result.error.message}`,
+            ) || changed;
+      if (changed) this.#emitAvailabilityChanged();
+    }
+  }
+
+  #markRuntimeAvailable(operation: string): boolean {
+    return this.#runtimeUnavailability.delete(operation);
+  }
+
+  #markRuntimeUnavailable(operation: string, reason: string): boolean {
+    const current = this.#runtimeUnavailability.get(operation);
+    if (current?.reason === reason) return false;
+    this.#runtimeUnavailability.set(operation, { reason });
+    return true;
+  }
+
+  #clearRuntimeAvailability(): void {
+    if (this.#runtimeUnavailability.size === 0) return;
+    this.#runtimeUnavailability.clear();
+    this.#emitAvailabilityChanged();
+  }
+
+  #emitAvailabilityChanged(): void {
+    for (const listener of this.#availabilityListeners) {
+      try {
+        const notification = listener();
+        if (notification !== undefined) {
+          // best-effort cleanup: async observer notifications must not reject
+          // unhandled; state transitions and other listeners continue.
+          void notification.catch(() => undefined);
+        }
+      } catch (cause: unknown) {
+        // External observers are best-effort notifications. Contain only the
+        // callback failure so state transitions and other listeners continue.
+        void cause;
+      }
+    }
+  }
+
+  #currentRoute(): SessionProviderRoute {
+    return this.#active?.route ?? this.#providerRouter.initialRoute();
+  }
+
+  #serialize<T>(
+    operation: (admittedThrough: number) => Promise<T>,
+  ): Promise<T> {
+    for (const controller of this.#promptCompletionControllers)
+      controller.abort();
+    this.#transitionPending += 1;
+    // Later calls wait for this transition and must not be included in its drain.
+    const admittedThrough = this.#transitionGeneration++;
+    const result = this.#transition.then(
+      () => operation(admittedThrough),
+      () => operation(admittedThrough),
+    );
+    this.#transition = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    void result.then(
+      () => {
+        this.#transitionPending -= 1;
+      },
+      () => {
+        this.#transitionPending -= 1;
+      },
+    );
+    return result;
+  }
+
+  async #drainCalls(admittedThrough: number): Promise<void> {
+    await Promise.allSettled(
+      [...this.#calls]
+        .filter(([, generation]) => generation <= admittedThrough)
+        .map(([call]) => call),
+    );
+  }
+
+  /**
+   * Probe whether a retained provider client is still live.
+   *
+   * On production routes the client is a CompositeProvider whose `health`
+   * answers unconditionally ok without touching a child, so `health` alone
+   * cannot see a dead child. `operationHealthSnapshot` reaches the
+   * instantiated children instead. Only the known-live states allow the
+   * fast path: `exited`/`unreachable` are dead, `unknown` is never
+   * evidence of health (it is what a recorded but uncharacterized failure
+   * reports), and `not_started` is a startup that never completed — in the
+   * Hopper timeout case the client holds retained resources that block the
+   * next `start()` until `close()` retries cleanup, so treating it as live
+   * would skip the retire path and hand the wedged client to subsequent
+   * analysis. The gate fails closed: without a snapshot signal, fall back
+   * to the `health` admission probe.
+   */
+  async #retainedClientLive(
+    client: AnalysisClient,
+    options: Pick<BinarySessionOpenOptions, "signal">,
+  ): Promise<boolean> {
+    const snapshot = client.operationHealthSnapshot?.();
+    if (snapshot !== undefined)
+      return snapshot.state === "idle" || snapshot.state === "busy";
+    try {
+      return (await client.execute("health", {}, options)).ok;
+    } catch {
+      return false;
+    }
+  }
+
+  async #restore(
+    previous: SessionBinding | undefined,
+  ): Promise<Result<null, AnalysisError>> {
+    if (previous === undefined) return ok(null);
+    const runId = randomUUID();
+    const client = previous.route.createClient(previous.target, { runId });
+    const started = await client.execute("health", {});
+    if (started.ok) {
+      this.#active = {
+        target: previous.target,
+        client,
+        profile: previous.profile,
+        route: previous.route,
+        runId,
+      };
+      return ok(null);
+    }
+    const closed = await this.#retireClient(client, previous.route.identity.id);
+    return closed.ok
+      ? ok(null)
+      : err(
+          analysisErrorWithCleanupFailure(
+            started.error,
+            closed.error,
+            "open_binary",
+          ),
+        );
+  }
+
+  async #waitForTransition(
+    operation: string,
+    signal: AbortSignal | undefined,
+    transition: Promise<void>,
+  ): Promise<Result<undefined, AnalysisCancelledError>> {
+    if (signal?.aborted === true)
+      return err(new AnalysisCancelledError(operation));
+    if (signal === undefined) {
+      await transition;
+      return ok(undefined);
+    }
+    return new Promise((resolve) => {
+      const onAbort = (): void => {
+        resolve(err(new AnalysisCancelledError(operation)));
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      transition.then(
+        () => {
+          signal.removeEventListener("abort", onAbort);
+          resolve(
+            signal.aborted
+              ? err(new AnalysisCancelledError(operation))
+              : ok(undefined),
+          );
+        },
+        () => {
+          signal.removeEventListener("abort", onAbort);
+          resolve(
+            signal.aborted
+              ? err(new AnalysisCancelledError(operation))
+              : ok(undefined),
+          );
+        },
+      );
+    });
+  }
+}
+
+const isAborted = (signal: AbortSignal | undefined): boolean =>
+  signal?.aborted === true;

@@ -35,6 +35,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { LiveRoom } from "@/views/LiveRoom"
 import { AgentWorkbenchView } from "@/views/AgentWorkbenchView"
+import { ArtexWorkbenchView } from "@/views/ArtexWorkbenchView"
 import { Blackboard } from "@/views/Blackboard"
 import { ReverseWorkbench } from "@/views/reverse/ReverseWorkbench"
 import { RevCompact } from "@/views/reverse/RevCompact"
@@ -65,7 +66,7 @@ import { bindingBadge } from "@/lib/taxonomy"
 // 左缘悬浮把手唤出；状态 localStorage（ui.nav-collapsed）。收起=条件渲染卸载
 // nav Panel+Separator（同 boardOpen 先例），重挂由 useDefaultLayout 恢复宽度。
 
-type View = "projects" | "intel" | "trash" | "live" | "board" | "agents" | "proposals" | "browser" | "fuzzer" | "proxy" | "sample-analysis" | "knowledge" | "skills" | "settings" | "diagnostics"
+type View = "projects" | "intel" | "trash" | "live" | "board" | "agents" | "artex" | "proposals" | "browser" | "fuzzer" | "proxy" | "sample-analysis" | "knowledge" | "skills" | "settings" | "diagnostics"
 
 /** M4c 场景档 board_view 默认视图（config.board_view.default；黑板上自行校验可用 tab 回退） */
 const boardViewOf = (m: ProjectDetail | null): string | undefined => {
@@ -86,6 +87,7 @@ const NAV_GROUPS: NavGroup[] = [
       { key: "intel", label: "情报", icon: Inbox, needsProject: false, homeOnly: true },
       { key: "trash", label: "回收站", icon: Trash2, needsProject: false, homeOnly: true },
       { key: "agents", label: "智能体", icon: Bot, needsProject: true },
+      { key: "artex", label: "ARTEX", icon: Blocks, needsProject: true },
       { key: "board", label: "黑板", icon: LayoutDashboard, needsProject: true },
       { key: "proposals", label: "变更提案", icon: FileDiff, needsProject: false },
       { key: "diagnostics", label: "诊断", icon: Stethoscope, needsProject: true },
@@ -649,6 +651,7 @@ export default function App() {
           {view === "agents" && <AgentWorkbenchView pid={pid} meta={meta}
                                                     focusThread={focusChatTid}
                                                     onFocusConsumed={() => setFocusChatTid(null)} />}
+          {view === "artex" && <ArtexWorkbenchView pid={pid} meta={meta} />}
           {view === "diagnostics" && <DiagnosticsView pid={pid} />}
           {view === "proposals" && <ProposalsView pid={pid ?? undefined} />}
           {view === "browser" && (

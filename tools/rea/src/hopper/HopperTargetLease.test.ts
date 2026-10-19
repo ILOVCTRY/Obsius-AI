@@ -1,0 +1,300 @@
+import { execFile } from "node:child_process";
+import { once } from "node:events";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  rm,
+  rmdir,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import { createServer, type Socket } from "node:net";
+import { dirname, join } from "node:path";
+import { promisify } from "node:util";
+
+import { afterEach, describe, expect, it } from "vitest";
+
+import {
+  acquireHopperTargetLease,
+  acquireLinuxHopperApplicationLease,
+} from "./HopperTargetLease.js";
+
+const directories: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(
+    directories
+      .splice(0)
+      .map((directory) => rm(directory, { recursive: true, force: true })),
+  );
+});
+
+describe("Hopper target leases", () => {
+  it("reports the owning REA session for a duplicate target and profile", async () => {
+    const directory = await temporaryDirectory();
+    const targetPath = await temporaryTarget();
+    const first = await acquireHopperTargetLease({
+      ...leaseInput(targetPath),
+      directory,
+      runId: "session-first",
+    });
+    expect(first.acquired).toBe(true);
+    if (!first.acquired) return;
+
+    const duplicate = await acquireHopperTargetLease({
+      ...leaseInput(targetPath),
+      directory,
+      runId: "session-second",
+    });
+    expect(duplicate).toMatchObject({
+      acquired: false,
+      owner: { runId: "session-first", processId: process.pid },
+    });
+
+    await first.lease.release();
+    const reopened = await acquireHopperTargetLease({
+      ...leaseInput(targetPath),
+      directory,
+      runId: "session-third",
+    });
+    expect(reopened.acquired).toBe(true);
+    if (reopened.acquired) await reopened.lease.release();
+  });
+
+  it("keeps different Hopper profiles independent", async () => {
+    const directory = await temporaryDirectory();
+    const targetPath = await temporaryTarget();
+    const first = await acquireHopperTargetLease({
+      ...leaseInput(targetPath),
+      directory,
+      runId: "session-one",
+    });
+    const second = await acquireHopperTargetLease({
+      ...leaseInput(targetPath),
+      directory,
+      loaderArgs: ["--aarch64"],
+      runId: "session-two",
+    });
+    expect(first.acquired).toBe(true);
+    expect(second.acquired).toBe(true);
+    if (first.acquired) await first.lease.release();
+    if (second.acquired) await second.lease.release();
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "shares one lease for symlink aliases of the same target",
+    async () => {
+      const directory = await temporaryDirectory();
+      const targetPath = await temporaryTarget();
+      const alias = join(dirname(targetPath), "sample-alias");
+      await symlink(targetPath, alias);
+      const first = await acquireHopperTargetLease({
+        ...leaseInput(targetPath),
+        directory,
+        runId: "canonical-owner",
+      });
+      expect(first.acquired).toBe(true);
+      if (!first.acquired) return;
+      try {
+        expect(
+          await acquireHopperTargetLease({
+            ...leaseInput(alias),
+            directory,
+            runId: "alias-request",
+          }),
+        ).toMatchObject({
+          acquired: false,
+          owner: { runId: "canonical-owner" },
+        });
+      } finally {
+        await first.lease.release();
+      }
+    },
+  );
+
+  it.each(["missing", "not-directory"] as const)(
+    "does not create a lease endpoint when target canonicalization fails for %s",
+    async (failure) => {
+      const directory = await temporaryDirectory();
+      const parent = await temporaryDirectory();
+      const targetPath =
+        failure === "missing"
+          ? join(parent, "missing-target")
+          : join(await temporaryTarget(parent), "child");
+      await expect(
+        acquireHopperTargetLease({
+          ...leaseInput(targetPath),
+          directory,
+          runId: "unresolvable-target",
+        }),
+      ).rejects.toMatchObject({
+        _tag: "HopperStartError",
+        userMessage: expect.stringContaining("canonical path"),
+        cause: expect.objectContaining({
+          code: failure === "missing" ? "ENOENT" : "ENOTDIR",
+        }),
+      });
+      expect(await readdir(directory)).toEqual([]);
+    },
+  );
+});
+
+describe("Linux Hopper application leases", () => {
+  it("reserves the shared application until its owner releases it", async () => {
+    const directory = await temporaryDirectory();
+    const first = await acquireLinuxHopperApplicationLease({
+      directory,
+      runId: "first",
+    });
+    expect(first.acquired).toBe(true);
+    if (!first.acquired) return;
+    try {
+      expect(
+        await acquireLinuxHopperApplicationLease({
+          directory,
+          runId: "second",
+        }),
+      ).toMatchObject({
+        acquired: false,
+        owner: { runId: "first", processId: process.pid },
+      });
+    } finally {
+      await first.lease.release();
+    }
+    const reopened = await acquireLinuxHopperApplicationLease({
+      directory,
+      runId: "third",
+    });
+    expect(reopened.acquired).toBe(true);
+    if (reopened.acquired) await reopened.lease.release();
+  });
+
+  it.each(["silent", "malformed", "invalid-pid", "closed"] as const)(
+    "keeps a live endpoint when its owner response is %s",
+    async (behavior) => {
+      const directory = await temporaryDirectory();
+      const socketPath = await releasedApplicationSocket(directory);
+      let responsive = false;
+      const sockets = new Set<Socket>();
+      const owner = { runId: "existing-owner", processId: process.pid };
+      const server = createServer((socket) => {
+        sockets.add(socket);
+        socket.on("close", () => sockets.delete(socket));
+        socket.on("error", () => undefined);
+        if (responsive) socket.end(`${JSON.stringify(owner)}\n`);
+        else if (behavior === "malformed") socket.end("not JSON\n");
+        else if (behavior === "invalid-pid")
+          socket.end('{"runId":"existing-owner","processId":-1}\n');
+        else if (behavior === "closed") socket.end();
+      });
+      server.listen(socketPath);
+      await once(server, "listening");
+      try {
+        await expect(
+          acquireLinuxHopperApplicationLease({ directory, runId: "new-owner" }),
+        ).rejects.toMatchObject({
+          _tag: "HopperStartError",
+          userMessage: expect.stringContaining("left unchanged"),
+        });
+        expect((await lstat(socketPath)).isSocket()).toBe(true);
+        responsive = true;
+        expect(
+          await acquireLinuxHopperApplicationLease({
+            directory,
+            runId: "retry",
+          }),
+        ).toEqual({
+          acquired: false,
+          owner,
+        });
+      } finally {
+        for (const socket of sockets) socket.destroy();
+        server.close();
+        await once(server, "close");
+      }
+    },
+  );
+
+  it("recovers a socket left by a process that exited without releasing it", async () => {
+    const directory = await temporaryDirectory();
+    const socketPath = await releasedApplicationSocket(directory);
+    await leaveStaleSocket(socketPath);
+    expect((await lstat(socketPath)).isSocket()).toBe(true);
+    const recovered = await acquireLinuxHopperApplicationLease({
+      directory,
+      runId: "recovered",
+    });
+    expect(recovered.acquired).toBe(true);
+    if (recovered.acquired) await recovered.lease.release();
+  });
+});
+
+it("leaves a stale socket unchanged while another process reserves its recovery", async () => {
+  const directory = await temporaryDirectory();
+  const socketPath = await releasedApplicationSocket(directory);
+  await leaveStaleSocket(socketPath);
+  const recoveryPath = `${socketPath}.recovery`;
+  await mkdir(recoveryPath, { mode: 0o700 });
+  const stale = await lstat(socketPath);
+  await expect(
+    acquireLinuxHopperApplicationLease({ directory, runId: "competing" }),
+  ).rejects.toMatchObject({
+    _tag: "HopperStartError",
+    userMessage: expect.stringContaining(recoveryPath),
+  });
+  expect((await lstat(socketPath)).ino).toBe(stale.ino);
+  await rmdir(recoveryPath);
+  const recovered = await acquireLinuxHopperApplicationLease({
+    directory,
+    runId: "after-recovery",
+  });
+  expect(recovered.acquired).toBe(true);
+  if (recovered.acquired) await recovered.lease.release();
+  expect(await readdir(directory)).toEqual([]);
+});
+
+const leaveStaleSocket = async (socketPath: string): Promise<void> => {
+  await promisify(execFile)(process.execPath, [
+    "--input-type=module",
+    "-e",
+    'import {createServer} from "node:net"; createServer().listen(process.argv[1],()=>process.exit(0));',
+    socketPath,
+  ]);
+};
+
+const releasedApplicationSocket = async (
+  directory: string,
+): Promise<string> => {
+  const initial = await acquireLinuxHopperApplicationLease({
+    directory,
+    runId: "initial",
+  });
+  if (!initial.acquired)
+    throw new Error("Initial application lease was unavailable");
+  const [name] = await readdir(directory);
+  await initial.lease.release();
+  if (name === undefined)
+    throw new Error("Application lease did not create a socket");
+  return join(directory, name);
+};
+
+const leaseInput = (targetPath: string) => ({
+  targetPath,
+  targetKind: "executable" as const,
+  loaderArgs: [],
+});
+
+const temporaryTarget = async (parent?: string): Promise<string> => {
+  const directory = parent ?? (await temporaryDirectory());
+  const targetPath = join(directory, "sample-binary");
+  await writeFile(targetPath, "admitted target bytes");
+  return targetPath;
+};
+
+const temporaryDirectory = async (): Promise<string> => {
+  const directory = await mkdtemp(join("/tmp", "rea-hl-"));
+  directories.push(directory);
+  return directory;
+};

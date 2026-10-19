@@ -1,0 +1,45 @@
+# CTF 轨测试维度清单（ctf-dimensions，2026-10-19）——文件名无关，按轨一份。
+#
+# 语义同 pentest：每个维度 = 一类【必须覆盖的解题面】。子代理领到资产后，按资产
+# 的 type 匹配 applies_to 得到「该资产的维度清单」，逐面声明意图并收尾；收敛判据
+# = 该资产所有适用面都覆盖（详见 core/dimensions.py）。
+#
+# **为什么 CTF 的面比渗透少得多**：渗透是「一个资产要尽量穷举攻击面」，面越细越
+# 好；CTF 是「一题一条链路，解出即完成」——题目的解题路径通常只有一条主干
+# （分诊 → 分析 → 求解 → 验证），把它切成 10 个面会变成机械凑数：模型被迫为
+# 「不适用本题」的面写 dead_end，纯烧轮次。故本表只保留**任何一道题都必然
+# 经过**的四个面。
+#
+# **applies_to 为什么不含 challenge**：CTF 的意图与发现锚在题目根行
+# （`type='challenge'`），但维度收敛闸只对「被分配资产」的子专家生效；题目级
+# 一题一线程、主控自己解，不需要被按面推回。把面挂在**附件/靶标级**
+# （binary/host/url/service）既能让 `declare_intent(dimension=…)` 在 CTF 轨
+# 可用（校验只看本轨清单 id），又不给主控线程加无谓约束——宁松勿误判。
+#
+# 字段：
+#   id            维度标识（意图声明时按此值归属，须稳定勿改）
+#   name          中文显示名
+#   applies_to    适用资产类型（binary/host/service/url）
+#   intent        意图模板（{asset} 由调用方替换成资产值）
+#   evidence_hint 收尾为 dead_end 时，什么样的证据才算"这个面确实排除了"
+dimensions:
+  - id: triage
+    name: 分诊归类
+    applies_to: [binary, host, service, url]
+    intent: 判定 {asset} 的题型与考点（pwn/web/crypto/rev/misc），给出解法路线初判
+    evidence_hint: 给出了格式/架构/保护机制/协议指纹等客观依据，并据此排除或锁定考点类型
+  - id: analyze
+    name: 静态分析
+    applies_to: [binary]
+    intent: 对 {asset} 做静态分析，定位与解题相关的关键函数/常量/校验逻辑
+    evidence_hint: 关键函数或数据结构已登记（func_kb/发现，带地址或符号），并说明其与解题的关系
+  - id: reproduce
+    name: 动态验证
+    applies_to: [binary, host, service, url]
+    intent: 实际运行/访问 {asset}，验证静态结论在真实执行路径上成立
+    evidence_hint: 有真实执行的输入输出证据（程序输出/响应报文），且与静态推断一致或明确推翻
+  - id: flag
+    name: 结论与 flag 验证
+    applies_to: [binary, host, service, url]
+    intent: 从 {asset} 取得 flag 或验证路径结论，并通过 ctf_submit_flag 判定登记
+    evidence_hint: flag 已按形态判定登记（含候选线索），或明确给出本题不可解的具体卡点

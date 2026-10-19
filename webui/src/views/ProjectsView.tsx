@@ -233,7 +233,17 @@ export function ProjectsView({ onOpen }: { onOpen: (pid: string) => void }) {
               >
                 <Badge variant="outline" className="font-mono">{bindingBadge(p.track, p.experts)}</Badge>
                 <div className="min-w-0 flex-1">
-                  <div className="truncate text-sm font-medium">{p.name}</div>
+                  <div className="flex items-center gap-2">
+                    <span className="truncate text-sm font-medium">{p.name}</span>
+                    {p.trash_purged_at && (
+                      <span
+                        className="shrink-0 rounded border border-(--status-warning)/50 px-1.5 py-0.5 text-[10px] leading-4 text-(--status-warning)"
+                        title="项目内文件已清除，仅保留名字信息"
+                      >
+                        文件已清空
+                      </span>
+                    )}
+                  </div>
                   <div className="font-mono text-xs text-muted-foreground">{p.id}</div>
                 </div>
                 {trashTime(p.trash_name) && (
@@ -241,15 +251,20 @@ export function ProjectsView({ onOpen }: { onOpen: (pid: string) => void }) {
                     删除于 {fmtDateTime(trashTime(p.trash_name))}
                   </span>
                 )}
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="shrink-0"
-                  disabled={trashBusy === p.trash_name}
-                  onClick={() => void restore(p)}
-                >
-                  <RotateCcw size={14} />{trashBusy === p.trash_name ? "恢复中…" : "恢复"}
-                </Button>
+                {p.trash_purged_at ? (
+                  // 墓碑条目：数据已抹除，恢复只会得到残缺项目——后端 422，这里直接禁用
+                  <span className="shrink-0 text-xs text-muted-foreground" title="项目内文件已清除，无法恢复">不可恢复</span>
+                ) : (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="shrink-0"
+                    disabled={trashBusy === p.trash_name}
+                    onClick={() => void restore(p)}
+                  >
+                    <RotateCcw size={14} />{trashBusy === p.trash_name ? "恢复中…" : "恢复"}
+                  </Button>
+                )}
               </div>
             ))}
           </div>

@@ -4,8 +4,9 @@ import {
 } from "react"
 import { createPortal } from "react-dom"
 import {
-  AlertTriangle, Bot, Check, ChevronDown, CircleSlash, Clock3, Cpu, Gauge, Loader2,
-  Paperclip, Plug, Plus, RefreshCw, Send, Sparkles, Square, Trash2, Wrench, X, Zap,
+  AlertTriangle, Bot, Check, ChevronDown, CircleSlash, Clock3, Cpu, Gauge, Globe,
+  Loader2, Paperclip, Plug, Plus, RefreshCw, Send, Sparkles, Square, Trash2,
+  Wrench, X, Zap,
 } from "lucide-react"
 import { api, ApiError } from "@/lib/api"
 import type {
@@ -106,6 +107,10 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
   const [modelPopOpen, setModelPopOpen] = useState(false)
   const [popProvider, setPopProvider] = useState("")
   const [modelDraft, setModelDraft] = useState<{ provider: string; model: string } | null>(null)
+  // 联网搜索开关（v43，web-search-toggle，2026-10-19）：线程级；新建态草稿
+  // （同 modelDraft 口径，创建线程时带上）。开 = 本线程主控 + spawn 子代理
+  // 默认可用 web_search（SearXNG/ddgs 双后端）；不进专家工具勾选。
+  const [webSearchDraft, setWebSearchDraft] = useState(false)
   const [asideWidth, setAsideWidth] = useState(ASIDE_DEFAULT)
   const [dragging, setDragging] = useState(false)
   const dragOrigin = useRef<{ x: number; w: number } | null>(null)
@@ -172,6 +177,22 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
       setErr(e instanceof ApiError ? e.message : "切换模型失败")
     }
   }, [tid])
+
+  // ---- 联网搜索开关（v43，web-search-toggle）----
+  // 当前生效 = 已选线程的落盘值 → 未选（新建态）取草稿。
+  const webSearchOn = tid ? !!thread?.web_search : webSearchDraft
+  const toggleWebSearch = useCallback(async () => {
+    const next = !webSearchOn
+    if (!tid) { setWebSearchDraft(next); return }
+    try {
+      const t = await api.chatThreadWebSearch(tid, next)
+      setThread((cur) => (cur ? { ...cur, web_search: t.web_search } : cur))
+      setThreads((ts) => ts.map((x) => (x.id === tid
+        ? { ...x, web_search: t.web_search } : x)))
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : "切换联网搜索失败")
+    }
+  }, [tid, webSearchOn])
 
   // 分割线拖宽：mousedown 记起点，document mousemove 调宽，mouseup 收尾
   const onSplitterDown = (e: ReactMouseEvent<HTMLDivElement>) => {
@@ -521,9 +542,11 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
     try {
       let id = tid
       if (!id) {
-        // 新建线程时带上新建态选的模型（v37；空=跟随全局默认）
+        // 新建线程时带上新建态选的模型（v37；空=跟随全局默认）与联网开关
+        // （v43；主控开 = spawn 子代理默认继承）
         const t = await api.chatThreadCreate(pid, agentId, undefined,
-                                             modelDraft?.provider, modelDraft?.model)
+                                             modelDraft?.provider, modelDraft?.model,
+                                             webSearchDraft)
         id = t.id; setTid(id)
       }
       await api.chatSend(id, body, refs, readyIds)
@@ -1059,6 +1082,19 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
                 title="上下文用量（点击看明细，或输入 /context）" onClick={() => setUsageOpen((v) => !v)}>
                 <UsageRing pct={usagePct} />
                 <span className="wb-usage-pct">{usagePct}%</span>
+              </button>
+              {/* 联网搜索开关（v43，web-search-toggle，2026-10-19）：MCP/上下文
+                  右侧。线程级——开 = 本线程主控与 spawn 的子代理默认可用
+                  web_search（SearXNG/ddgs 双后端查公开信息）；独立于专家工具
+                  勾选（不进 Agents/Skills 面板）。下一轮生效。 */}
+              <button type="button" className={cn("wb-cap", webSearchOn && "is-active")}
+                aria-pressed={webSearchOn}
+                title={webSearchOn
+                  ? "联网搜索已开启：主控与子代理可用 web_search 查公开信息（CVE/EXP/情报；SearXNG 优先、ddgs 备用，免 Key）"
+                  : "联网搜索已关闭：点击开启后，本线程主控与其派出的子代理默认可用 web_search 查公开信息"}
+                onClick={() => void toggleWebSearch()}>
+                <Globe size={12} />
+                联网
               </button>
               <span className="wb-spacer" />
               {/* 线程级模型按钮（v37，2026-10-13）：发送键左侧，点开供应商→模型浮层 */}

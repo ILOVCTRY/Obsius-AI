@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { api } from "@/lib/api"
 import type {
-  Expert, LlmProvider,
+  AgentTool, Expert, LlmProvider, McpServer, SkillDef,
 } from "@/lib/types"
 import { capLabel, trackLabel, type Taxonomy } from "@/lib/taxonomy"
 import { Badge } from "@/components/ui/badge"
@@ -35,7 +35,7 @@ import { FORMAT_LABEL } from "@/lib/providerPresets"
 import { McpPane } from "@/components/McpPane"
 import { cn } from "@/lib/utils"
 import {
-  Bot, Cable, ChevronRight, CircleGauge,
+  Bot, Cable, ChevronDown, ChevronRight, CircleGauge,
   Gauge, GitPullRequest, Network, Radio, ShieldCheck,
   Palette, Sparkles, Wrench, BellRing,
 } from "lucide-react"
@@ -56,6 +56,108 @@ interface SkillFocus { name: string; n: number }
 function Saved({ saved }: { saved: boolean }) {
   return <span className={cn("text-[10px] transition-opacity", saved ? "text-primary opacity-100" : "opacity-0")}>已保存 ✓</span>
 }
+
+// 勾选清单三态：null = 全量（不限制，后端不落键）；[] = 一个都不启用；非空 = 勾选清单。
+// null 必须保留——兜底/主控专家靠它表达「全量」，读成 [] 再保存会把能力清空。
+// 按 group 分组展示（技能=后端推断的展示分组、工具=TOOL_GROUPS、MCP=domains），
+// 组头可折叠、可整组全选/清空；分组只是排版，勾选结果仍是一条扁平 id 清单。
+type CheckItem = { id: string; label: string; detail?: string; group?: string }
+
+/** 已选但不在目录里的项单独成组（技能被删/目录接口失败时不能凭空消失） */
+const ORPHAN_GROUP = "清单外（保留原值）"
+
+function CheckList({ title, items, selected, onChange, groupOrder }: {
+  title: string
+  items: CheckItem[]
+  selected: string[] | null
+  onChange: (next: string[] | null) => void
+  groupOrder?: readonly string[]
+}) {
+  const [closed, setClosed] = useState<Record<string, boolean>>({})
+  const allIds = useMemo(() => items.map((i) => i.id), [items])
+  const isAll = selected === null
+  const picked = selected ?? allIds
+  const pickedSet = new Set(picked)
+  const rows = useMemo<CheckItem[]>(() => [
+    ...items,
+    ...picked.filter((id) => !allIds.includes(id))
+      .map((id) => ({ id, label: id, detail: "不在当前清单中（保留原值，可取消勾选）", group: ORPHAN_GROUP })),
+  ], [items, picked, allIds])
+  // 分组顺序：先按调用方给的类别顺序（工具=TOOL_GROUPS、技能=SKILL_GROUP_ORDER），
+  // 未列出的组按首次出现顺序追加，保证新增类别不会消失。
+  const groups = useMemo(() => {
+    const map = new Map<string, CheckItem[]>()
+    for (const it of rows) {
+      const g = it.group || "其他"
+      const bucket = map.get(g)
+      if (bucket) bucket.push(it)
+      else map.set(g, [it])
+    }
+    const head = (groupOrder ?? []).filter((g) => map.has(g))
+    const tail = [...map.keys()].filter((g) => !head.includes(g))
+    return [...head, ...tail].map((g) => [g, map.get(g) ?? []] as const)
+  }, [rows, groupOrder])
+
+  const toggle = (id: string) =>
+    onChange(pickedSet.has(id) ? picked.filter((x) => x !== id) : [...picked, id])
+
+  return <div className="rounded border bg-card/30 p-2">
+    <div className="mb-1 flex items-center gap-2">
+      <label className="text-[10px] text-muted-foreground">{title}</label>
+      <span className="text-[10px] text-primary">{isAll ? "全部（未限制）" : `已选 ${picked.length}`}</span>
+      <span className="flex-1" />
+      {isAll
+        ? <button className="text-[10px] text-muted-foreground hover:text-primary" onClick={() => onChange([])}>改为按勾选</button>
+        : <button className="text-[10px] text-muted-foreground hover:text-primary" onClick={() => onChange(null)}>恢复全部</button>}
+    </div>
+    {/* 不再内层限高：设置页本身可滚动，嵌套滚动会让「任务类型/工具清单」难到达；
+        清单太长时折叠不关心的组即可。 */}
+    <div className="space-y-1">
+      {groups.map(([g, list]) => {
+        const ids = list.map((i) => i.id)
+        const on = ids.filter((id) => pickedSet.has(id)).length
+        const open = !closed[g]
+        return <div key={g} className="rounded border border-border/60 bg-background/40">
+          <div className="flex items-center gap-1 px-1.5 py-1">
+            <button type="button" className="flex min-w-0 flex-1 items-center gap-1 text-left"
+                    title={open ? "折叠该组" : "展开该组"}
+                    onClick={() => setClosed((c) => ({ ...c, [g]: open }))}>
+              {open ? <ChevronDown className="size-3 shrink-0 text-muted-foreground" />
+                    : <ChevronRight className="size-3 shrink-0 text-muted-foreground" />}
+              <span className="truncate text-[11px] font-medium">{g}</span>
+              <span className={cn("shrink-0 text-[10px]", on ? "text-primary" : "text-muted-foreground")}>{on}/{ids.length}</span>
+            </button>
+            {g !== ORPHAN_GROUP && <>
+              <button type="button" className="shrink-0 text-[10px] text-muted-foreground hover:text-primary"
+                      onClick={() => onChange(Array.from(new Set([...picked, ...ids])))}>全选</button>
+              <button type="button" className="shrink-0 text-[10px] text-muted-foreground hover:text-primary"
+                      onClick={() => onChange(picked.filter((x) => !ids.includes(x)))}>清空</button>
+            </>}
+          </div>
+          {open && <div className={cn("grid grid-cols-1 gap-0.5 border-t border-border/40 px-1.5 py-1",
+                                     list.length > 1 && "md:grid-cols-2")}>
+            {list.map((item) => <label key={item.id} title={item.detail ? `${item.label} — ${item.detail}` : item.label}
+                                       className="flex min-w-0 cursor-pointer items-start gap-1.5 rounded px-1.5 py-1 hover:bg-accent/40">
+              <input type="checkbox" checked={pickedSet.has(item.id)} onChange={() => toggle(item.id)} className="mt-0.5" />
+              <span className="min-w-0"><code className="block truncate text-[11px]">{item.label}</code>{item.detail && <span className="block truncate text-[10px] text-muted-foreground">{item.detail}</span>}</span>
+            </label>)}
+          </div>}
+        </div>
+      })}
+      {groups.length === 0 && <span className="text-[10px] text-muted-foreground">暂无可选项</span>}
+    </div>
+  </div>
+}
+
+/** 技能展示分组顺序（与 core/skills/taxonomy.SKILL_GROUP_ORDER 同口径） */
+const SKILL_GROUP_ORDER = ["分诊", "Web 攻击", "二进制与逆向", "红队后渗透",
+                           "云与容器", "侦察", "蓝图与建模", "其他"]
+/** MCP server 的 domain（config/mcp.json 的 domains）→ 中文类别 */
+const MCP_DOMAIN_LABEL: Record<string, string> = {
+  pentest: "渗透测试", reverse: "逆向", binary: "二进制",
+  web: "Web", forensics: "取证", crypto: "密码", misc: "杂项",
+}
+const MCP_DOMAIN_ORDER = ["渗透测试", "逆向", "二进制", "Web", "取证", "密码", "杂项", "其他"]
 
 export function SettingsView({ nav, pid }: {
   nav?: { tab: string; n: number; skill?: { name: string } } | null
@@ -205,9 +307,14 @@ function ExpertsPane({ tax, focus }: { tax: Taxonomy | null; focus: ExpertFocus 
   const [description, setDescription] = useState("")
   const [persona, setPersona] = useState("")
   const [trackSel, setTrackSel] = useState<string[]>([]) // 空 = null = 服务全轨
-  const [skills, setSkills] = useState("")       // 逗号分隔；空 = 不落键（全量专家语义）
+  const [skills, setSkills] = useState<string[] | null>(null)
+  const [skillCatalog, setSkillCatalog] = useState<SkillDef[]>([])
   const [taskTypes, setTaskTypes] = useState("")
-  const [tools, setTools] = useState("")
+  const [tools, setTools] = useState<string[] | null>(null)
+  const [toolCatalog, setToolCatalog] = useState<AgentTool[]>([])
+  const [toolGroups, setToolGroups] = useState<string[]>([])
+  const [mcpServers, setMcpServers] = useState<string[] | null>(null)
+  const [mcpCatalog, setMcpCatalog] = useState<McpServer[]>([])
   const [steps, setSteps] = useState("")
   const [saved, setSaved] = useState(false)
   const [err, setErr] = useState<string | null>(null)
@@ -227,6 +334,11 @@ function ExpertsPane({ tax, focus }: { tax: Taxonomy | null; focus: ExpertFocus 
     return () => { alive = false }
   }, [])
   useEffect(() => reload(), [reload])
+  useEffect(() => {
+    api.skills().then(setSkillCatalog).catch(() => {})
+    api.agentTools().then((r) => { setToolCatalog(r.tools); setToolGroups(r.groups ?? []) }).catch(() => {})
+    api.mcpServers().then((r) => setMcpCatalog(r.servers)).catch(() => {})
+  }, [])
 
   // doctor 跳转：选中指定专家
   useEffect(() => {
@@ -241,9 +353,12 @@ function ExpertsPane({ tax, focus }: { tax: Taxonomy | null; focus: ExpertFocus 
     setDescription(cur.description ?? "")
     setPersona(cur.persona ?? "")
     setTrackSel(cur.tracks ?? [])
-    setSkills((cur.skills ?? []).join(", "))
+    // null 必须原样保留：null = 全量（后端不落键），[] = 一个都不启用。
+    // 读成 [] 再保存会把「未限制」写成「全部禁用」。
+    setSkills(cur.skills ?? null)
     setTaskTypes((cur.task_types ?? []).join(", "))
-    setTools((cur.tools ?? []).join(", "))
+    setTools(cur.tools ?? null)
+    setMcpServers(cur.mcp_servers ?? null)
     setSteps(cur.max_steps != null ? String(cur.max_steps) : "")
     setSaved(false)
     setErr(null)
@@ -257,16 +372,23 @@ function ExpertsPane({ tax, focus }: { tax: Taxonomy | null; focus: ExpertFocus 
     const toList = (s: string) => s.split(/[,，]/).map((x) => x.trim()).filter(Boolean)
     const stepsTrim = steps.trim()
     try {
-      // 全字段覆写（表单即最终态）：空值=null 不落键（skills 缺键 = 全量专家语义）
+      // 全字段覆写（表单即最终态）：空值=null 不落键。
+      // 能力白名单三件套按 state 原样提交：null = 不限制（后端不落键）；
+      // [] = 明确一个都不启用（后端落 `key: []`）；非空 = 勾选清单。
       await api.updateExpert(cur.id, {
         name: displayName.trim() || null,
         description: description.trim() || null,
         persona: persona.trim() || null,
         tracks: trackSel.length ? trackSel : null,
-        skills: skills.trim() ? toList(skills) : null,
+        skills,
+        // kb 方向两态（null/[] 都=不限），表单不编辑但必须原样回传，否则覆写会清空。
+        knowledge: cur.knowledge ?? null,
         task_types: taskTypes.trim() ? toList(taskTypes) : null,
-        tools: tools.trim() ? toList(tools) : null,
+        tools,
+        mcp_servers: mcpServers,
         max_steps: stepsTrim ? Number(stepsTrim) : null,
+        // 轨变体只读展示，但必须原样回传——否则全字段覆写会把 variant_<轨>_<字段> 抹掉。
+        variants: Object.keys(cur.variants ?? {}).length ? cur.variants : null,
       })
       setSaved(true)
       setTimeout(() => setSaved(false), 1500)
@@ -358,12 +480,29 @@ function ExpertsPane({ tax, focus }: { tax: Taxonomy | null; focus: ExpertFocus 
                 ))}
               </div>
             </div>
-            <label className="text-[10px] text-muted-foreground">技能白名单 skills（逗号分隔；留空 = 不限定（全量专家，能力面=全部能力包））</label>
-            <Input value={skills} onChange={(e) => setSkills(e.target.value)} className="font-mono text-xs" placeholder="recon-asset-enum, web-strike-entry" />
+            <CheckList title="技能白名单（勾选启动）"
+                       items={skillCatalog.map((s) => ({ id: s.name, label: s.name, detail: s.description, group: s.group }))}
+                       selected={skills} onChange={setSkills} groupOrder={SKILL_GROUP_ORDER} />
+            <p className="text-[10px] text-muted-foreground">
+              kb 方向 knowledge（两态：空 = 不限方向；保存时原样保留，改方向请直接编辑 yaml）
+              ：<code className="font-mono">{cur.knowledge?.length ? cur.knowledge.join(", ") : "不限"}</code>
+            </p>
             <label className="text-[10px] text-muted-foreground">任务类型 task_types（Worker 认领过滤器；按各轨注册表并集体检；留空 = 不限）</label>
             <Input value={taskTypes} onChange={(e) => setTaskTypes(e.target.value)} className="font-mono text-xs" placeholder="recon, exploit" />
-            <label className="text-[10px] text-muted-foreground">工具白名单 tools（逗号分隔；留空 = 不限制；complete/fail/finish 永远放行）</label>
-            <Input value={tools} onChange={(e) => setTools(e.target.value)} className="font-mono text-xs" placeholder="bb_query, run_cmd" />
+            <CheckList title="工具白名单（勾选启动）"
+                       items={toolCatalog.map((t) => ({ id: t.name, label: t.name, detail: t.description, group: t.group }))}
+                       selected={tools} onChange={setTools} groupOrder={toolGroups} />
+            <CheckList title="MCP server（勾选启动）"
+                       items={mcpCatalog.map((s) => ({
+                         id: s.name,
+                         label: s.name,
+                         detail: `${s.transport}${s.enabled ? " · 全局已启用" : " · 全局未启用"}`
+                           + (s.domains?.length > 1 ? ` · ${s.domains.join("/")}` : ""),
+                         group: s.domains?.length
+                           ? (MCP_DOMAIN_LABEL[s.domains[0]] ?? s.domains[0])
+                           : "其他",
+                       }))}
+                       selected={mcpServers} onChange={setMcpServers} groupOrder={MCP_DOMAIN_ORDER} />
             <label className="text-[10px] text-muted-foreground">最大步数 max_steps（正整数；留空 = 不设）</label>
             <Input value={steps} onChange={(e) => setSteps(e.target.value)} className="w-48 font-mono text-xs" inputMode="numeric" placeholder="200" />
             {Object.keys(cur.variants ?? {}).length > 0 && (

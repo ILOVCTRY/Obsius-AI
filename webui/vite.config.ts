@@ -12,6 +12,29 @@ export default defineConfig({
   resolve: {
     alias: { "@": path.resolve(here, "./src") },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes("node_modules")) {
+            if (id.includes("react-resizable-panels")) return "layout"
+            if (id.includes("@xyflow")) return "graph"
+            if (id.includes("@xterm")) return "terminal"
+            if (id.includes("react-markdown") || id.includes("remark-gfm")) return "markdown"
+            if (id.includes("lucide-react")) return "icons"
+            if (id.includes("react-dom") || id.includes("/react/")) return "react"
+            return "vendor"
+          }
+          if (id.includes("/src/views/reverse/")) return "reverse-workbench"
+          if (id.includes("/src/views/")) return "views"
+          if (id.includes("/src/components/chat/")) return "chat-components"
+          if (id.includes("/src/components/settings/")) return "settings-components"
+          if (id.includes("/src/components/blackboard/") || id.includes("/src/components/team/")) return "board-components"
+          return undefined
+        },
+      },
+    },
+  },
   server: {
     port: 5173,
     proxy: {

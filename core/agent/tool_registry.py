@@ -82,11 +82,11 @@ tool(
     group='执行',
     flags=(),
     description=(
-        '执行命令。runtime 按威胁等级选择：docker=Linux 渗透工具箱（bash + nmap/sqlmap/dirsearch/ffuf/py'
-        'thon3 全套，workspace 挂载 /workspace；能力清单显示 pentest-box 镜像就绪时渗透/扫描/文本命令首选，未就绪回退 '
-        'wsl）；host=Windows 特调（PowerShell，仅 Windows 目标/命令）；wsl=bash 兜底；sandbox=恶意样本（唯一'
-        '选择，威胁等级不得虚报为 trusted）。落盘纪律见系统提示工具纪律。输出上限 2000 字符，超出截断并标注——读大文件优先用 read_file '
-        '工具，或 run_cmd 用 grep -n 定位后小窗口（≤100 行）分段。'
+        '执行命令。runtime 按威胁等级选择：docker=Linux 渗透工具箱（bash + nmap/sqlmap/dirsearch/ffuf/python3 '
+        '全套，workspace 挂载 /workspace；能力清单显示 pentest-box 就绪时渗透/扫描/文本命令首选，未就绪回退 wsl）；'
+        'host=Windows 特调（PowerShell，仅 Windows 目标/命令）；wsl=bash 兜底；'
+        'sandbox=恶意样本（唯一选择，威胁等级不得虚报 trusted）。落盘纪律见系统提示工具纪律。'
+        '输出上限 2000 字符，超出截断并标注——读大文件用 read_file，或用 grep -n 定位后小窗口（≤100 行）分段。'
     ),
     input_schema={
         'type': 'object',
@@ -120,10 +120,11 @@ tool(
                     'bridge',
                     'real',
                 ],
-                'description': '仅 sandbox/docker 有效；省略时 sandbox 默认 none、其余默认 bridge。real=真实网络，可直接指定（2026-10-01 起不再需要审批）',
+                'description': '仅 sandbox/docker 有效；省略时 sandbox 默认 none、其余默认 bridge。real=真实网络，必须提供当前项目中已批准的一次性 approval_id，执行后自动消费审批。',
             },
             'approval_id': {
                 'type': 'string',
+                'description': 'net=real 必填；必须是当前项目中 status=approved 的一次性审批 id。',
             },
             'timeout': {
                 'type': 'number',
@@ -143,9 +144,9 @@ tool(
     group='文件',
     flags=("plan_pre", "file"),
     description=(
-        '只读工作区文件（2026-09-20 新增）：host 原生直接读，不经 WSL/PowerShell（无命令执行面、无启动开销、无引号转义问题）。pa'
-        'th 相对 scratch（与 run_cmd cwd 一致）；返回带行号文本，默认读 100 行、单次上限 400 行；offset=-N 读末尾 N'
-        ' 行。大文件先用 search_files 按内容定位再按行段读，不要盲猜行号。'
+        '只读工作区文件：host 原生直接读，不经 WSL/PowerShell（无命令执行面、无启动开销、无引号转义问题）。'
+        'path 相对 scratch（与 run_cmd cwd 一致）；返回带行号文本，默认读 100 行、单次上限 400 行；'
+        'offset=-N 读末尾 N 行。大文件先用 search_files 按内容定位再按行段读，不要盲猜行号。'
     ),
     input_schema={
         'type': 'object',
@@ -174,9 +175,11 @@ tool(
     group='文件',
     flags=("plan_pre", "file"),
     description=(
-        '在工作区文本文件中按内容检索（2026-09-24 新增）：纯 Python 实现、不经 shell（无命令执行面、无注入风险），计划前也允许调（等价只'
-        '读侦察）。默认搜 scratch 及其余工作区目录；只搜本项目工作区内文件，命中行以「相对路径:行号:内容」返回。适合在 bb_query 溢出落盘文件'
-        '里定位关键词，替代 run_cmd grep。'
+        '在工作区文本文件中按内容检索：纯 Python 实现、不经 shell（无命令执行面、无注入风险），计划前也允许调'
+        '（等价只读侦察）。默认搜 scratch 及其余工作区目录，只搜本项目；命中行以「相对路径:行号:内容」返回。'
+        '适合在 bb_query 溢出落盘文件里定位关键词，替代 run_cmd grep。'
+        '未指定 path 时不扫其它题目的附件解包副本（非本会话 unpack_attachment 解压过的 scratch/att-*），'
+        '防多题共跑时旧题工作文件淹没命中；要跨题找就显式传 path。'
     ),
     input_schema={
         'type': 'object',
@@ -209,14 +212,49 @@ tool(
 )
 
 tool(
+    'unpack_attachment',
+    group='文件',
+    flags=("file",),
+    description=(
+        '解压题目/样本附件 zip 到**确定性工作目录**，替代 run_cmd 拼 unzip：服务端一次完成'
+        '「清旧残留 → 安全解压 → 结构化清单」，同题重开/多题共跑时不会新旧混装。'
+        '目标目录固定 `scratch/att-<sha12>/`（sha12=附件文件名前缀，回退内容 sha256 前 12 位），'
+        '附件行（📎）会直接给出这个路径。path 收 /workspace/... 绝对形态、工作区内绝对路径，'
+        '或只传文件名（自动到 artifacts/attachments/ 找）。'
+        '返回文件清单（相对 scratch 的路径+大小+类型），之后 read_file/search_files 直接用 '
+        '`att-<sha12>/...`；未指定 path 的默认检索已收窄到本会话解压过的附件目录（别的题的工作副本不会被扫到）。'
+        'zip slip（路径穿越/绝对路径/符号链接）、加密包、超大包（条目>2000 或解压后>512MB 或单文件>128MB）会被拒；'
+        'clean=false 保留目标目录旧文件做增量解压。'
+    ),
+    input_schema={
+        'type': 'object',
+        'properties': {
+            'path': {
+                'type': 'string',
+                'description': '附件 zip 路径：/workspace/artifacts/attachments/<file>（附件行给的原样形态）、'
+                               '工作区内绝对路径，或只传文件名（自动去 artifacts/attachments/ 找）',
+            },
+            'clean': {
+                'type': 'boolean',
+                'description': '解压前清空目标目录旧残留（缺省 true；多卷/分包增量解压才传 false）',
+            },
+        },
+        'required': [
+            'path',
+        ],
+    },
+)
+
+tool(
     'bb_add_asset',
     group='黑板',
     flags=("intent_pre",),
     description=(
-        '登记资产（host/domain/service/url/binary；type 省略按值自动识别，识别不出拒收回填）。资产树自动挂载：url/serv'
-        'ice 含 IP 自动建 host，domain 自动 DNS 解析挂 host。重报同值=合并 meta 不插重复行（发布前先 bb_query 查重'
-        '，勿重复登记）。meta.title=一句话简述；meta.owner=平台标签（.edu.cn 系→edusrc 等，命中的平台规则会注入会话）。扫描'
-        '/测试状态走 bb_asset_status，不要写 meta.scanned。'
+        '登记资产（host/domain/service/url/binary；type 省略按值自动识别，识别不出拒收回填）。'
+        '资产树自动挂载：url/service 含 IP 自动建 host，domain 自动 DNS 解析挂 host。'
+        '重报同值=合并 meta 不插重复行（发布前先 bb_query 查重）。'
+        'meta.title=一句话简述；meta.owner=平台标签（.edu.cn 系→edusrc 等，命中的平台规则会注入会话）。'
+        '扫描/测试状态走 bb_asset_status，不要写 meta.scanned。'
     ),
     input_schema={
         'type': 'object',
@@ -248,14 +286,12 @@ tool(
     group='黑板',
     flags=("intent_flow",),
     description=(
-        'CTF 轨专用：登记/复用一道题目（challenge-asset，2026-10-14）。用户把题目描述和'
-        '附件一起丢进输入框、而黑板还没有对应题目节点时，用本工具把这题立起来——立完会'
-        '自动绑定到当前线程，后续本线程的 declare_intent/bb_add_finding 不必再传 '
-        'target_asset_id，会自动归到这道题下。附件本身不用登记（走本题目的子资产通道）。'
-        'name=题目名（要短、能一眼认出来，如「树状化-签到题」）；description=一句话题目'
-        '描述；tags=题型数组（web/pwn/re/crypto/misc/forensics，多个按题目实际所属填'
-        '——供按题型筛选）。同一道题重复调用 = 复用既有节点，不会插重复行。'
-        '**仅 CTF 轨可用**；渗透/红队/研究轨调用会被拒。'
+        'CTF 轨专用：登记/复用一道题目（challenge-asset）。用户给了题目描述+附件、而黑板还没有对应题目节点时，'
+        '用本工具把题立起来——立完自动绑定当前线程，后续本线程的 declare_intent/bb_add_finding 不必再传 '
+        'target_asset_id，会自动归到这道题下；附件本身不用登记（走本题目的子资产通道）。'
+        'name=题目名（短、可一眼认出，如「树状化-签到题」）；description=一句话描述；'
+        'tags=题型数组（web/pwn/re/crypto/misc/forensics）。同一道题重复调用=复用既有节点，不插重复行。'
+        '**仅 CTF 轨可用**，其余轨调用会被拒。'
     ),
     input_schema={
         'type': 'object',
@@ -277,6 +313,116 @@ tool(
         'required': [
             'name',
         ],
+    },
+)
+
+tool(
+    'ctf_submit_flag',
+    group='黑板',
+    flags=("intent_flow",),
+    description=(
+        'CTF 轨专用：**判定并登记**一个 flag。拿到疑似 flag 用本工具——先做三层机械判定，'
+        '通过后写入 **flag 台账**（challenge_flags，flag 的唯一真值）并落一条过程留痕，'
+        '题目状态由台账派生（拿满 `meta.flag_count` 条即解出），不必再调 bb_add_finding。'
+        '① 格式置信：`flag{...}`/`xxxctf{...}` 等可信前缀、内层有熵；题面占位符（`flag{example}`/'
+        '`flag{test}`）、诱饵前缀（`fake_flag{}`）、模板语法（`{% if %}`/`${x}`）会被拒并说明原因。'
+        '② 变换回环：flag 从编码/变换解出时传 `source`=原始观测字节 + `transform`=base64/hex/url/rot13，'
+        '工具会验证「按该变换编码回去确实出现在 source 里」；回环不成立=解错了，拒收。'
+        '③ 跨题防串：与本题已登记或其它题目高度相似（互为子串）的 flag 会被拒（防多题并发串号）。'
+        '`candidate=true` 用于形态像但不是正式格式的命中（管理员密码/API key）：只落 intel 候选线索，不判为解出。'
+        '**不联网提交**——只做本地判定与登记，向比赛平台提交仍由人完成。**仅 CTF 轨可用**。'
+    ),
+    input_schema={
+        'type': 'object',
+        'properties': {
+            'flag': {
+                'type': 'string',
+                'description': 'flag 原文（完整，含前缀与花括号；不要只传内层）',
+            },
+            'evidence': {
+                'type': 'string',
+                'description': (
+                    '解法与证据摘要：从哪条路径拿到、关键命令/脚本、为何确信是它'
+                    '（落 finding 的 summary，供 writeup 与人工复核）'
+                ),
+            },
+            'source': {
+                'type': 'string',
+                'description': (
+                    'flag 解出来之前的**原始观测字节**（如 base64 密文、hex 串、响应原文片段）'
+                    '——与 transform 一起才做回环验证；直接明文拿到就留空'
+                ),
+            },
+            'transform': {
+                'type': 'string',
+                'description': '从 source 得到 flag 用的变换：base64/b64/hex/url/urlencode/rot13（留空=不做回环验证）',
+            },
+            'challenge_id': {
+                'type': 'string',
+                'description': '题目资产 id（留空=自动用本线程归属的题目）',
+            },
+            'candidate': {
+                'type': 'boolean',
+                'description': 'true=只登记为候选线索（intel/unverified），不判为解出',
+            },
+        },
+        'required': [
+            'flag',
+        ],
+    },
+)
+
+tool(
+    'ctf_ammo',
+    group='执行',
+    flags=(),
+    description=(
+        'CTF 轨专用：生成**弱口令/默认口令候选字典**。弱口令题的正确做法不是凭记忆打 '
+        '`admin/admin`，而是把题面线索机械展开成几十到几百条候选：产品指纹（泛微/致远/'
+        'Tomcat/Nacos…）→ 厂商默认口令；用户名/公司名/年份 → 后缀与 leet 变异；'
+        '观测到的凭据 → 只取口令部分。'
+        '产出两种形态：`pairs=true` 给 `user:pass` 行（直接喂 hydra/ffuf/自定义脚本），'
+        '否则给纯口令表。**写进 scratch/ctf-ammo-<tag>.txt 并返回路径**，再用 run_cmd 消费'
+        '（例：`hydra -L users.txt -P ctf-ammo-xxx.txt ...`）。'
+        '**本工具不执行爆破、不发任何网络请求**——只产候选，用不用、用多少、要不要限速由你决定。'
+        '候选表绝不含 flag 形态串（防自己泄题）。**仅 CTF 轨可用**。'
+    ),
+    input_schema={
+        'type': 'object',
+        'properties': {
+            'obs_text': {
+                'type': 'string',
+                'description': (
+                    '观测原文（响应头/banner/nmap 输出/登录页提示等）——从中认产品指纹与凭据'
+                ),
+            },
+            'hint_text': {
+                'type': 'string',
+                'description': (
+                    '题面线索原文（题目描述/提示）：产品名、年份、管理员叫什么、公司名等。'
+                    '**优先级最高**——线索产出的候选排在观测之前，执行器按序试到上限'
+                ),
+            },
+            'users': {
+                'type': 'array',
+                'items': {'type': 'string'},
+                'description': '已知用户名列表（留空=按产品默认账号，再退通用 admin/root）',
+            },
+            'known_creds': {
+                'type': 'array',
+                'items': {'type': 'string'},
+                'description': '已知凭据（`user:pass` 或裸口令），只取口令部分进候选表',
+            },
+            'pairs': {
+                'type': 'boolean',
+                'description': 'true=`user:pass` 成对输出（爆破工具直接可用），false=纯口令表',
+            },
+            'limit': {
+                'type': 'integer',
+                'description': '候选上限，默认 200（1-500）——再多人工也看不完',
+            },
+        },
+        'required': ['obs_text'],
     },
 )
 
@@ -307,9 +453,10 @@ tool(
     group='黑板',
     flags=("intent_flow",),
     description=(
-        '批量删除非 binary 叶子资产（语义同 bb_delete_asset，一次一批，单次上限 200）。资产清洗要去掉成百上千条资产'
-        '（如泛解析域名族）时用本工具，不要用 bb_query 分页 + 逐条 bb_delete_asset——逐条删会把调用烧在枚举上。有子资产、'
-        '被发现引用或 binary 样本的条目会逐条拒绝并在 failures 里回明原因，其余照删；返回 deleted/failed 计数与明细（各截 50 条）。'
+        '批量删除非 binary 叶子资产（语义同 bb_delete_asset，一次一批，单次上限 200）。'
+        '资产清洗要去掉成百上千条（如泛解析域名族）时用本工具，不要 bb_query 分页 + 逐条 bb_delete_asset'
+        '——逐条删会把调用烧在枚举上。有子资产、被发现引用或 binary 样本的条目逐条拒绝并在 failures 回明原因，'
+        '其余照删；返回 deleted/failed 计数与明细（各截 50 条）。'
     ),
     input_schema={
         'type': 'object',
@@ -365,15 +512,15 @@ tool(
     group='黑板',
     flags=(),
     description=(
-        '流转资产扫描/测试状态（open→visited→scanning→tested_clean/budget_stop/na）。访问≠测试：访问过标 vi'
-        'sited、开始扫描标 scanning、测完（适用面全覆盖）标 tested_clean**（有洞与否不改变状态——测出洞直接 bb_add_finding，'
-        '状态仍可标 tested_clean，前端「有发现」徽章与状态并列）**；预算/配额用尽被迫停手标 budget_stop、确认不适用（如非'
-        '目标协议/离线主机）标 na——三者一样必须带 note（服务端强制），让「哪里没挖完、为什么」可对账。tested_clean 强制四问+逐资产背书（'
-        '2026-09-29）：①tested_what 你对该资产自己测了什么（具体动作清单：路径/方法/响应特征）——「与同模板/基线一致」不等于已测试；②'
-        'viewpoint 探测视角（docker 出口/直连/浏览器），遇 WAF/WebVPN 拦截页（如 488/403）必须说明如何排除是出口假象；③w'
-        'hy_no_finding 为何是「无发现」而非「没测到」，还剩什么可立的新意图；④须有直接围绕该资产的 closed/dead_end 意图背书（ta'
-        'rget 或 basis_refs 明确含本资产 id）——每资产独立立意意图，禁止父节点一条意图批量覆盖子树，意图越多测得越全面。四问答案并入审计事件'
-        '可事后对账。测出问题直接 bb_add_finding，不要自报状态。'
+        '流转资产扫描/测试状态（open→visited→scanning→tested_clean/budget_stop/na）。'
+        '访问≠测试：访问过标 visited、开始扫描标 scanning、适用面全覆盖标 tested_clean'
+        '（有洞与否不改变状态——测出洞直接 bb_add_finding，状态仍可标 tested_clean）；'
+        '预算用尽标 budget_stop、确认不适用（非目标协议/离线主机）标 na。'
+        'tested_clean/budget_stop/na 必须带 note（服务端强制），让「哪里没挖完、为什么」可对账。'
+        'tested_clean 另须四问（tested_what/viewpoint/why_no_finding 见参数说明）+ 逐资产背书：'
+        '须有直接围绕该资产的 closed/dead_end 意图（target 或 basis_refs 含本资产 id）——'
+        '每资产独立立意，禁止父节点一条意图批量覆盖子树。四问并入审计事件可事后对账。'
+        '测出问题直接 bb_add_finding，不要自报状态。'
     ),
     input_schema={
         'type': 'object',
@@ -425,20 +572,17 @@ tool(
     group='黑板',
     flags=("intent_flow",),
     description=(
-        '登记发现。复现步骤用 evidence.repro_steps=[{desc, type: http|python|cmd|image, code, e'
-        'xpected, artifact_id?, stability?, target?}]——desc/expected 必填，code 填 HTTP 原'
-        '始报文/python 脚本/bash 命令（type=image 时 artifact_id 必填指向图片产物、无 code），多步利用链按数组顺序；渗'
-        '透/红队轨 verified 门禁=至少一步 code（或 artifact_id）非空且该步 expected 非空（旧结构 evidence.poc'
-        '/pocs/poc_artifact_id 兼容但已 legacy）。危害描述 impact（影响事实：拿到什么/影响面）与修复建议 remediati'
-        'on（可落地）直接落字段，报告按三件套渲染。无证据 status=unverified（无证据不下结论，红线见规则段）；**边干边写**——执行中每确认'
-        '一条认知（端口/版本/未授权状态/接口行为/凭据线索等观察）立即以 category=intel + status=unverified 落一条，抗中断'
-        '、抗上下文压缩、跨意图可复用；close_intent 收尾时再升 verified 或随死路一并了结，别攒到最后补记；注入评级口径（rule:rati'
-        'ng:*）时 severity 必须按口径判级并填 rating_basis（见评级硬指令段）。CTF 轨语义：severity=线索级别（critic'
-        'al=关键突破/high=可行动线索/其余=背景备查），vuln_class=线索类别；false-positive=死路（evidence 写清原因与'
-        '已尝试清单，防重走弯路）。**一题一条**：同一题目（challenge 资产及其附件）上已有发现时，'
-        '再登记会自动并入既有条目、不新增行——同一道题不要重复登记，补证据/改结论请用 bb_update_finding。'
-        'category 缺省自动判定（提示类或 info→intel，其余→vuln）。解题脚本/writeup 用 bb_add_'
-        'artifact 落产物。'
+        '登记发现。无证据 status=unverified。'
+        '复现步骤写 evidence.repro_steps（结构见该字段说明）：渗透/红队轨 verified 门禁=至少一步 code'
+        '（或 artifact_id）且该步 expected 非空。'
+        'impact（危害事实：拿到什么/影响面）与 remediation（可落地修复）直接落字段，报告按三件套渲染。'
+        '**边干边写**：执行中每确认一条认知（端口/版本/未授权状态/接口行为/凭据线索等）立即以 '
+        'category=intel + status=unverified 落一条，抗中断/抗压缩/跨意图复用；收尾时再升 verified '
+        '或随死路一并了结，别攒到最后补记。注入评级口径（rule:rating:*）时 severity 须按口径判级并填 rating_basis。'
+        'CTF 轨：severity=线索级别（critical=关键突破/high=可行动线索/其余=背景备查），vuln_class=线索类别，'
+        'false-positive=死路（evidence 写清原因与已尝试清单）。'
+        '**一题一条**：同一题目上再登记会自动并入既有条目，补证据/改结论用 bb_update_finding。'
+        'category 缺省自动判定（提示类或 info→intel，其余→vuln）。解题脚本/writeup 用 bb_add_artifact 落产物。'
     ),
     input_schema={
         'type': 'object',
@@ -482,8 +626,10 @@ tool(
             'evidence': {
                 'type': 'object',
                 'description': (
-                    '证据对象；复现步骤 repro_steps=[{desc,type,code,expected,…}] 是 verified 门禁认可结构（desc/e'
-                    'xpected 必填，多步链按数组顺序）；旧 poc/pocs 字段 legacy 兼容，勿再新写'
+                    '证据对象。复现步骤 repro_steps=[{desc, type: http|python|cmd|image, code, expected, '
+                    'artifact_id?, stability?, target?}]——desc/expected 必填，code 填 HTTP 原始报文/'
+                    'python 脚本/bash 命令（type=image 时改填 artifact_id 指向图片、无 code），多步链按数组顺序；'
+                    '这是 verified 门禁认可的结构（旧 poc/pocs/poc_artifact_id 已 legacy，勿再新写）'
                 ),
             },
             'relates_to': {
@@ -574,12 +720,11 @@ tool(
             'dedup_key': {
                 'type': 'string',
                 'description': (
-                    '去重指纹：同 target+vuln_class 下同 key 重报会自动并入既有条目（证据并集、severity 就高、'
-                    'status 只升），不会新增行。**不填 = 按 vuln_class 自动归一**（推荐，默认就是「同一类问题一条」）。'
-                    '**同一漏洞切勿自造新键**——新自造的 key 精确未命中会白白裂出一条。'
-                    '仅当同一目标上确需把同类问题拆成多条独立条目（如两个不同参数的独立注入）时才显式传不同键。'
-                    '想改/复现已有条目：先 bb_query what=findings 拿到它的 dedup_key 后按原 key 重报。'
-                    '**CTF 轨例外（一题一条）**：同一题目上无论传什么 key 都会并入既有条目——题目只有一条发现'
+                    '去重指纹：同 target+vuln_class 下同 key 重报自动并入既有条目（证据并集、severity 就高、'
+                    'status 只升），不新增行。**缺省=按 vuln_class 自动归一**（推荐）；同一漏洞切勿自造新键，'
+                    '否则白白裂出一条。仅当同一目标上确需把同类问题拆成多条独立条目时才显式传不同键。'
+                    '改/复现既有条目：先 bb_query what=findings 拿它的 dedup_key 再按原 key 重报。'
+                    '**CTF 轨例外（一题一条）**：同一题目上无论传什么 key 都会并入既有条目'
                 ),
             },
         },
@@ -595,11 +740,11 @@ tool(
     group='黑板',
     flags=("intent_flow",),
     description=(
-        '修订已有发现（只传要改的字段）。① 降级时 rating_basis 必须同给「规则名+条款+一句话依据」，否则宁可不改；② 口径外内容（纯暴露面/过期'
-        '组件等）→ category=intel + severity=low 转有效线索，不要删除；③ 误报/死路 → status=false-positi'
-        've（触发撤回传播通知引用方）；④ evidence 浅层合并（键级覆盖，列表键整键替换——补复现步骤请整组传 repro_steps 全量）。rati'
-        'ng_basis/impact/remediation 不传=不动，传空串=清空。渗透/红队轨不收漏洞类（category=vuln）severity=info'
-        '（服务端拒收；intel 类可到 info；CTF 轨 info 语义不变）。'
+        '修订已有发现（只传要改的字段）。① 降级时 rating_basis 必须同给「规则名+条款+一句话依据」，否则宁可不改；'
+        '② 口径外内容（纯暴露面/过期组件等）→ category=intel + severity=low 转有效线索，不要删除；'
+        '③ 误报/死路 → status=false-positive（触发撤回传播通知引用方）；'
+        '④ evidence 浅层合并：键级覆盖，列表键（repro_steps）整键替换，须传全量。'
+        '渗透/红队轨不收 vuln 类 severity=info（服务端拒收；intel 类可到 info；CTF 轨 info 语义不变）。'
     ),
     input_schema={
         'type': 'object',
@@ -712,9 +857,9 @@ tool(
     group='黑板',
     flags=("intent_flow",),
     description=(
-        '物理删除发现（按 finding_id，reason 必填——删错不可恢复）。仅限垃圾/走查数据（重复噪声、无价值记录）；**verified 发现不可'
-        '删除**；误报走 bb_update_finding 改 status=false-positive；口径外内容（暴露面等）走 bb_update_fi'
-        'nding 转 intel 线索而非删除。'
+        '物理删除发现（按 finding_id，reason 必填——删错不可恢复）。仅限垃圾/走查数据（重复噪声、无价值记录）；'
+        '**verified 发现不可删除**；误报走 bb_update_finding 改 status=false-positive；'
+        '口径外内容（暴露面等）走 bb_update_finding 转 intel 线索而非删除。'
     ),
     input_schema={
         'type': 'object',
@@ -739,9 +884,10 @@ tool(
     group='黑板',
     flags=(),
     description=(
-        "落产物文件（POC 脚本/抓包/输出）：写项目产物目录 + sha256 落库。kind='poc' 仅限 .py——报文打不稳的漏洞才用脚本复现。ki"
-        "nd='project' 限 R4 组装集成最终交付（整个重建程序的 zip 包）。CTF：解题/复现脚本与 writeup 必须落 artifact，"
-        "不写裸文件（队友与续跑会话靠黑板找现场）。"
+        "落产物文件（POC 脚本/抓包/输出）：写项目产物目录 + sha256 落库。"
+        "kind='poc' 仅限 .py——报文打不稳的漏洞才用脚本复现；kind='project' 限 R4 组装集成最终交付"
+        "（整个重建程序的 zip 包）。CTF：解题/复现脚本与 writeup 必须落 artifact，不写裸文件"
+        "（队友与续跑会话靠黑板找现场）。"
     ),
     input_schema={
         'type': 'object',
@@ -779,24 +925,24 @@ tool(
     group='黑板',
     flags=("plan_pre",),
     description=(
-        '查黑板：findings / assets / events / func（函数知识库）/blueprint（开发蓝图）/ feature_tree（功能'
-        '树）/ logic_block（业务逻辑块）/ site（单'
-        '站全貌）。**按域名/站点查现状（资产+发现+意图）一律用 what=site 并传 asset**（一次返回根子树全貌）——**不要**用 what='
-        'assets 当站点查询：assets 是资产清单面（列清单/按 type/status/tag 筛），其 asset 参数只做子树过滤、不带 find'
-        'ings/intents。不要按 type 分片拉全量再本地过滤（host/url/domain 各拉一把、条数多还漏看）。findings 尽量带 t'
-        'arget_asset_id 精确过滤；**findings 返回带 dedup_key——给既有漏洞补证据/升级（升链）时，用它的 dedup_key + target_asset_id 重报即自动并入，不要自造新键**（自造键会裂出新行）；events 尽量带 kinds/session_id；limit 传小值会截断漏看（漏看了仍要重查，得不偿失）'
-        '。events 缺省=本项目**全部 kind**（不是只有 chat.* 会话事件），要窄看再传 kinds 白名单；**负结论（未发现/死路）不要硬'
-        '塞进 events**：正确做法是 declare_intent 声明假设，再 close_intent outcome=dead_end（附 dead'
-        '_reason+evidence_refs）——情报类非漏洞结论则用 bb_add_finding category=intel（severity>=l'
-        'ow）。逆向场景硬规则：反编译任何函数前必须先查 func 防重复劳动。**列已上传样本：what=assets type=binary**——返回行的'
-        ' value 即样本 sha256（func 查询的 binary_sha256 / bb_upsert_func 都用它），meta.filename'
-        ' 是原文件名；不知道 sha 时先列样本，不要猜。**分析包内文件：what=package**——列当前'
-        '（或 package_id 指定）分析包的条目/依赖边/内容树根 tree_ref（AI 用 read_file <tree_ref>/<path> '
-        '读同包文件，如 exe 依赖的 DLL）；样本资产行 meta.package_id 即来源包 id。'
-        '**功能树/业务逻辑（先查后写）**：what=feature_tree 列功能树（binary_sha256 可筛，tree_id 看'
-        '单棵含节点清单）——增删改节点前先查现有节点，同名/同职责节点用 bb_feature_node update 补 desc'
-        '/func_addresses，不要重复 add；what=logic_block 列业务块（binary_sha256 可筛，block_id 看单'
-        '个含挂接函数）——建块前先查，块名同项目同样本唯一，重名会被拒收（改用 bb_logic_block_update 增补）。'
+        '查黑板：findings / assets / events / func（函数知识库）/ blueprint（开发蓝图）/ '
+        'site（单站全貌）/ package（分析包）/ feature_tree（功能树）/ logic_block（业务逻辑块）。'
+        '**站点现状一律用 what=site 并传 asset**（一次返回根子树全貌）；assets 只是清单面'
+        '（按 type/status/tag 筛），其 asset 参数仅做子树过滤、不带 findings/intents——'
+        '不要用它当站点查询，也不要按 type 分片拉全量再本地过滤。'
+        'findings 带 target_asset_id 精确过滤，返回含 dedup_key：给既有漏洞补证据/升链时用原 '
+        'dedup_key + target_asset_id 重报即自动并入，不要自造新键（自造键会裂出新行）。'
+        'events 缺省=本项目全部 kind（不止 chat.*），要窄看传 kinds/session_id；limit 小值会截断。'
+        '**负结论（未发现/死路）不要塞进 events**：走 declare_intent → close_intent(dead_end)；'
+        '情报类非漏洞结论用 bb_add_finding category=intel（severity>=low）。'
+        '**逆向硬规则：反编译任何函数前先查 func 防重复劳动。**'
+        '样本：what=assets type=binary——行的 value 即 sha256（func 查询的 binary_sha256 / bb_upsert_func 都用它），'
+        'meta.filename 是原文件名；不知道 sha 先列样本，不要猜。'
+        '分析包：what=package——条目/依赖边/内容树根 tree_ref（read_file <tree_ref>/<path> 读同包文件，'
+        '如 exe 依赖的 DLL）；样本资产行 meta.package_id 是来源包 id。'
+        '功能树/业务逻辑（先查后写）：what=feature_tree（tree_id 看单棵）/ what=logic_block'
+        '（block_id 看单个）——增改前先查现有节点/块，同职责节点用 bb_feature_node update 补 '
+        'desc/func_addresses、块用 bb_logic_block_update 增补，不要重复 add；块名同项目同样本唯一，重名会被拒收。'
     ),
     input_schema={
         'type': 'object',
@@ -818,8 +964,8 @@ tool(
             'asset': {
                 'type': 'string',
                 'description': (
-                    '按目标筛资产（id 或精确 value，host/domain）。what=site：必填，返回子树资产+发现+意图（站点全景）；what=assets'
-                    '：可选，只回该资产**子树内**的资产清单（不带发现/意图）——按域名查现状优先用 site'
+                    '按目标筛资产（id 或精确 value，host/domain）。what=site：必填，返回子树资产+发现+意图（站点全景）；'
+                    'what=assets：可选，只回该资产子树内的资产清单（不带发现/意图）'
                 ),
             },
             'blueprint_id': {
@@ -913,9 +1059,8 @@ tool(
             'offset': {
                 'type': 'integer',
                 'description': (
-                    'assets 分页起点（≥0，默认 0）。结果按 created_at 固定排序，配合 limit 逐页取：'
-                    '第一页 offset=0，下一页 offset += 已回条数；counts.has_more=false 即到底。'
-                    '枚举一大批资产（如清洗泛解析域名族）时用它逐页取 id，再交 bb_delete_assets 批量删'
+                    'assets 分页起点（≥0，默认 0），按 created_at 固定排序：下一页 offset += 已回条数，'
+                    'counts.has_more=false 即到底。批量枚举资产（如清洗泛解析域名族）时逐页取 id 再交 bb_delete_assets'
                 ),
             },
         },
@@ -959,54 +1104,46 @@ _BB_QUERY_REVERSE_ONLY_PROPS = ("blueprint_id", "package_id", "binary_sha256",
 # CTF 删除的参数：package_id（分析包查询专属，CTF 无此面）
 _BB_QUERY_CTF_ONLY_PROPS = ("package_id",)
 
+# 三轨共用的使用要点（findings/events/负结论口径一致，避免三份文案各自漂移）
+_BB_QUERY_DESC_COMMON = (
+    'findings 带 target_asset_id 精确过滤，返回含 dedup_key：给既有漏洞补证据/升链时用原 '
+    'dedup_key + target_asset_id 重报即自动并入，不要自造新键。'
+    'events 缺省=本项目全部 kind（不止 chat.*），要窄看传 kinds/session_id；limit 小值会截断。'
+    '**负结论不要塞进 events**：走 declare_intent → close_intent(dead_end)；'
+    '情报类非漏洞结论用 bb_add_finding category=intel。'
+)
+# 逆向家族（research/ctf）共用：样本 sha、分析包、功能树/业务块三件套的使用纪律
+_BB_QUERY_DESC_REVERSE_COMMON = (
+    '**逆向硬规则：反编译任何函数前先查 func 防重复劳动。**'
+    '样本：what=assets type=binary——行的 value 即 sha256（func 查询的 binary_sha256 / bb_upsert_func 都用它），'
+    'meta.filename 是原文件名；不知道 sha 先列样本，不要猜。'
+    '功能树/业务逻辑（先查后写）：what=feature_tree（tree_id 看单棵）/ what=logic_block'
+    '（block_id 看单个）——增改前先查现有节点/块，同职责节点用 bb_feature_node update 补 '
+    'desc/func_addresses、块用 bb_logic_block_update 增补，不要重复 add；块名同项目同样本唯一，重名会被拒收。'
+)
+
 _BB_QUERY_DESC_REVERSE = (
     '查黑板（逆向 family：research/ctf）：findings / assets / events / func（函数知识库）/ '
     'blueprint（开发蓝图）/ package（分析包全貌）/ feature_tree（功能树）/ logic_block（业务逻辑块）。'
-    'findings 尽量带 target_asset_id 精确过滤；events 尽量带 kinds/session_id；limit 传小值会截断漏看'
-    '（漏看了仍要重查，得不偿失）。events 缺省=本项目**全部 kind**（不是只有 chat.* 会话事件），'
-    '要窄看再传 kinds 白名单；**负结论（未发现/死路）不要硬塞进 events**：正确做法是 declare_intent '
-    '声明假设，再 close_intent outcome=dead_end（附 dead_reason+evidence_refs）——情报类非漏洞结论'
-    '则用 bb_add_finding category=intel。**逆向场景硬规则：反编译任何函数前必须先查 func 防重复劳动。**'
-    '**列已上传样本：what=assets type=binary**——返回行的 value 即样本 sha256（func 查询的 '
-    'binary_sha256 / bb_upsert_func 都用它），meta.filename 是原文件名；不知道 sha 时先列样本，'
-    '不要猜。**分析包内文件：what=package**——列当前（或 package_id 指定）分析包的条目/依赖边/'
-    '内容树根 tree_ref（AI 用 read_file <tree_ref>/<path> 读同包文件，如 exe 依赖的 DLL）；'
-    '样本资产行 meta.package_id 即来源包 id。**功能树/业务逻辑（先查后写）**：what=feature_tree '
-    '列功能树（binary_sha256 可筛，tree_id 看单棵含节点清单）——增删改节点前先查现有节点，'
-    '同名/同职责节点用 bb_feature_node update 补 desc/func_addresses，不要重复 add；'
-    'what=logic_block 列业务块（binary_sha256 可筛，block_id 看单个含挂接函数）——建块前先查，'
-    '块名同项目同样本唯一，重名会被拒收（改用 bb_logic_block_update 增补）。'
+    + _BB_QUERY_DESC_COMMON
+    + _BB_QUERY_DESC_REVERSE_COMMON
+    + '分析包：what=package——条目/依赖边/内容树根 tree_ref（read_file <tree_ref>/<path> 读同包文件，'
+      '如 exe 依赖的 DLL）；样本资产行 meta.package_id 是来源包 id。'
 )
 
 _BB_QUERY_DESC_CTF = (
     '查黑板（逆向 family：ctf）：findings / assets / events / func（函数知识库）/ '
     'blueprint（开发蓝图）/ feature_tree（功能树）/ logic_block（业务逻辑块）。'
-    'findings 尽量带 target_asset_id 精确过滤；events 尽量带 kinds/session_id；limit 传小值会截断漏看'
-    '（漏看了仍要重查，得不偿失）。events 缺省=本项目**全部 kind**（不是只有 chat.* 会话事件），'
-    '要窄看再传 kinds 白名单；**负结论（未发现/死路）不要硬塞进 events**：正确做法是 declare_intent '
-    '声明假设，再 close_intent outcome=dead_end（附 dead_reason+evidence_refs）——情报类非漏洞结论'
-    '则用 bb_add_finding category=intel。**逆向场景硬规则：反编译任何函数前必须先查 func 防重复劳动。**'
-    '**列已上传样本：what=assets type=binary**——返回行的 value 即样本 sha256（func 查询的 '
-    'binary_sha256 / bb_upsert_func 都用它），meta.filename 是原文件名；不知道 sha 时先列样本，'
-    '不要猜。**功能树/业务逻辑（先查后写）**：what=feature_tree '
-    '列功能树（binary_sha256 可筛，tree_id 看单棵含节点清单）——增删改节点前先查现有节点，'
-    '同名/同职责节点用 bb_feature_node update 补 desc/func_addresses，不要重复 add；'
-    'what=logic_block 列业务块（binary_sha256 可筛，block_id 看单个含挂接函数）——建块前先查，'
-    '块名同项目同样本唯一，重名会被拒收（改用 bb_logic_block_update 增补）。'
+    + _BB_QUERY_DESC_COMMON
+    + _BB_QUERY_DESC_REVERSE_COMMON
 )
 
 _BB_QUERY_DESC_PENTEST = (
     '查黑板（渗透 family：pentest/redteam）：findings / assets / events / site（单站全貌）。'
-    '**按域名/站点查现状（资产+发现+意图）一律用 what=site 并传 asset**（一次返回根子树全貌）'
-    '——**不要**用 what=assets 当站点查询：assets 是资产清单面（列清单/按 type/status/tag 筛），'
-    '其 asset 参数只做子树过滤、不带 findings/intents。不要按 type 分片拉全量再本地过滤'
-    '（host/url/domain 各拉一把、条数多还漏看）。findings 尽量带 target_asset_id 精确过滤；'
-    'events 尽量带 kinds/session_id；limit 传小值会截断漏看（漏看了仍要重查，得不偿失）。'
-    'events 缺省=本项目**全部 kind**（不是只有 chat.* 会话事件），要窄看再传 kinds 白名单；'
-    '**负结论（未发现/死路）不要硬塞进 events**：正确做法是 declare_intent 声明假设，'
-    '再 close_intent outcome=dead_end（附 dead_reason+evidence_refs）——情报类非漏洞结论'
-    '则用 bb_add_finding category=intel（severity>=low）。**列已上传样本：what=assets '
-    'type=binary**——返回行的 value 即样本 sha256。'
+    '**站点现状一律用 what=site 并传 asset**（一次返回根子树全貌）；assets 只是清单面'
+    '（按 type/status/tag 筛），其 asset 参数仅做子树过滤、不带 findings/intents——'
+    '不要用它当站点查询，也不要按 type 分片拉全量再本地过滤。'
+    + _BB_QUERY_DESC_COMMON
 )
 
 
@@ -1048,12 +1185,11 @@ tool(
     group='知识',
     flags=("plan_pre", "spill_skip", "knowledge"),
     description=(
-        '[legacy] 打开尚未迁移的全局知识库模块（packs/kb/ 区，含测试包手册与快照）：返回文件绝对路径，随后按需 Read。'
-        'module 走 kb 全局形态 `<域>/<快照>/<路径>`（如 web/漏洞分类/sqli/手册.md）；也认 Obsidian wikilink'
-        '（[[web/漏洞分类/sqli/手册|手册]] / [[web/…/手册]]）与反引号/引号包裹（vault 新链接格式即全路径 wikilink）。'
-        '.md/.py/.txt/.json 均可打开（弹药脚本只是文本，执行仍须走 run_cmd）。'
-        '路径不存在会返回可用模块清单（照清单改选，禁止猜文件名、禁止 .. 穿越）。'
-        '禁止通读知识库目录。'
+        '[legacy] 打开尚未迁移的全局知识库模块（packs/kb/ 区，含测试包手册与快照）：直接返回文件正文，不返回路径。'
+        'module 走全局形态 `<域>/<快照>/<路径>`（如 web/漏洞分类/sqli/手册.md），也认 Obsidian wikilink '
+        '（[[web/漏洞分类/sqli/手册|手册]]）与反引号/引号包裹。'
+        '.md/.py/.txt/.json 均按 UTF-8 文本返回（弹药脚本只是文本，执行仍走 run_cmd）。'
+        '路径不存在会返回可用模块清单（照清单改选，禁止猜文件名、禁止 .. 穿越）；禁止通读知识库目录。'
     ),
     input_schema={
         'type': 'object',
@@ -1076,10 +1212,11 @@ tool(
     group='知识',
     flags=("plan_pre", "knowledge"),
     description=(
-        '[legacy] 按关键词全文检索尚未迁移的全局知识库（大小写不敏感子串匹配）：返回 {path（即 kb_open 的 module 参数）, sou'
-        'rce, matches, snippet}。多关键词空格分隔为 AND 语义（各词都命中的文件才返回），零结果自动放宽为 OR（任一词命中）。tag '
-        '可选：按 frontmatter 分面标签过滤（phase/vuln_class，如 tag=jwt 只留打了该标签的手册）。典型用法：kb_searc'
-        'h 定位 → kb_open 细读。中文专题用中文词、英文快照用英文词，必要时各试一次。'
+        '[legacy] 按关键词全文检索尚未迁移的全局知识库（大小写不敏感子串）：返回 '
+        '{path（即 kb_open 的 module 参数）, source, matches, snippet}。'
+        '多关键词空格分隔为 AND 语义，零结果自动放宽为 OR。'
+        'tag 可选：按 frontmatter 分面标签过滤（phase/vuln_class，如 tag=jwt）。'
+        '用法：kb_search 定位 → kb_open 细读；中文专题用中文词、英文快照用英文词，必要时各试一次。'
     ),
     input_schema={
         'type': 'object',
@@ -1108,16 +1245,17 @@ tool(
     group='知识',
     flags=("intent_pre", "knowledge"),
     description=(
-        '提一条知识库/技能变更**提案**（只落 pending，批准权在人类，禁止自行改文件；**仅当本项目开启「知识库迭代」时可用，关闭会被拒绝**；允许的触发情形、reason 证据要求与沉淀去向见系统'
-        '提示工具纪律）。每会话最多 3 条。kind=skill mode=edit（改正文）/ create（新建技能）/ delete（删除技能，应用时进回收站可恢复）'
-        '/ suggest（粒度过粗的技能提「拆分建议」：content 为建议文档全文，批准后落技能目录 拆分建议.md，结构变更由人执行），'
-        'target={name: 技能名}（edit/create 的 content 须为 SKILL.md 全文，frontmatter name 必须等于技能名；create 时该技能须不存在）；'
-        'kind=kb mode 可为 edit/create/rename/delete，target={'
-        'cap: 能力包名, path: 全局模块 路径 <域>/<快照>/<文件>（.md/.py/.txt/.json，中文目录允许）, new_path:'
-        ' 仅 rename}；kind=case mode=edit|create（K6 成功链沉淀：本任务 verified 攻击链/跑通 payload 落'
-        '对应测试包 成功案例.md 补段或 payloads/ 补弹药，target 同 kb）；kind=index mode=edit（增补全局 route'
-        '_index.yaml 中本域条目，kb 路径须带域前缀），target={cap: 能力包名}——新增了值得索引的测试点手册时同步 route_ind'
-        'ex.yaml（content 为本域条目全文）。edit/create 必带 content 全文。'
+        '提一条知识库/技能变更**提案**：只落 pending，批准权在人类，禁止自行改文件；'
+        '**仅当本项目开启「知识库迭代」时可用**，关闭会被拒。每会话最多 3 条，触发情形与证据要求见系统提示工具纪律。'
+        'kind=skill：mode=edit（改正文）/ create（新建）/ delete（进回收站可恢复）/ suggest（粒度过粗时提拆分建议，'
+        'content 为建议文档全文，批准后落技能目录 拆分建议.md，结构变更由人执行），target={name: 技能名}；'
+        'edit/create 的 content 须为 SKILL.md 全文，frontmatter name 必须等于技能名，create 时该技能须不存在。'
+        'kind=kb：mode=edit/create/rename/delete，target={cap: 能力包名, path: <域>/<快照>/<文件>'
+        '（.md/.py/.txt/.json，中文目录允许）, new_path: 仅 rename}。'
+        'kind=case：mode=edit/create，本任务 verified 攻击链/跑通 payload 落对应测试包 成功案例.md 补段或 '
+        'payloads/ 补弹药，target 同 kb。'
+        'kind=index：mode=edit，增补全局 route_index.yaml 本域条目（kb 路径须带域前缀），'
+        'target={cap: 能力包名}，content 为本域条目全文。edit/create 必带 content 全文。'
     ),
     input_schema={
         'type': 'object',
@@ -1291,11 +1429,12 @@ tool(
     group='黑板',
     flags=(),
     description=(
-        '更新开发蓝图（分区更新，别的会话实时可见）。三种用法：①模块深析写回：module_name + spec/notes/func_addresses/m'
-        'odule_status（spec=接口约定：函数签名/数据结构/协议格式；自测不过不得标 module_status=tested）；②整表重划分：m'
-        'odules_set 替换全部模块；③汇总正文：content_append 增量追加或 content_md 整体替换（数据流/接口表/算法/协议/状'
-        '态机）。蓝图整体 status（draft/reviewed/ready/building/built）不归 Agent 管——reviewed/rea'
-        'dy 由人类批准，勿申请。'
+        '更新开发蓝图（分区更新，别的会话实时可见）。三种用法：'
+        '① 模块深析写回：module_name + spec/notes/func_addresses/module_status'
+        '（spec=接口约定：函数签名/数据结构/协议格式；自测不过不得标 module_status=tested）；'
+        '② 整表重划分：modules_set 替换全部模块；'
+        '③ 汇总正文：content_append 增量追加或 content_md 整体替换（数据流/接口表/算法/协议/状态机）。'
+        '蓝图整体 status（draft/reviewed/ready/building/built）不归 Agent 管——reviewed/ready 由人类批准，勿申请。'
     ),
     input_schema={
         'type': 'object',
@@ -1433,10 +1572,10 @@ tool(
     group='黑板',
     flags=(),
     description=(
-        '建业务逻辑块（逆向理解笔记，与蓝图/攻击链并列的第三种载体）：记录函数协作如何构成业务功能——函数逻辑分析/业务逻辑分析/逆向破解/游戏业务理解的落点（'
-        'PWN/漏洞利用登记走攻击链，重建管线走蓝图，不要混用）。一个块=一项可讲述的业务功能（如「存档校验」「金币结算」「协议握手」），funcs 挂构成该功'
-        '能的函数与各自角色注（一句话职责）。address 必须已登记 func_kb（先 decompile/bb_upsert_func 再挂）；同项目同样'
-        '本下块名重名会拒收。'
+        '建业务逻辑块（逆向理解笔记，与蓝图/攻击链并列的第三种载体）：记录函数协作如何构成业务功能——'
+        '函数逻辑分析/业务逻辑分析/逆向破解/游戏业务理解的落点（PWN/漏洞利用走攻击链，重建管线走蓝图，不要混用）。'
+        '一个块=一项可讲述的业务功能（如「存档校验」「金币结算」「协议握手」），funcs 挂构成该功能的函数与角色注（一句话职责）。'
+        'address 必须已登记 func_kb（先 decompile/bb_upsert_func 再挂）；同项目同样本下块名重名会拒收。'
     ),
     input_schema={
         'type': 'object',
@@ -1709,9 +1848,9 @@ tool(
     group='黑板',
     flags=("intent_pre",),
     description=(
-        '私信其他会话窗（黑板异步协调，2026-09-20 会话窗对话化）：同步情报/移交工作/请求协助。to_session 定向单窗（优先），to_role'
-        ' 广播该角色全部活跃窗（不含自己）；两者必须给一个。收件方在步边界/认领期/对话轮注入，不实时打断对方工作（异步模型，无同步对话接力）；不设频率硬限额，'
-        '滥用在审计可见。'
+        '私信其他会话窗（黑板异步协调）：同步情报/移交工作/请求协助。'
+        'to_session 定向单窗（优先），to_role 广播该角色全部活跃窗（不含自己），两者必须给一个。'
+        '收件方在步边界/认领期/对话轮注入，不实时打断对方工作（异步，无同步对话接力）；不设频率硬限额，滥用在审计可见。'
     ),
     input_schema={
         'type': 'object',
@@ -1803,6 +1942,7 @@ tool(
             'insecure': {'type': 'boolean', 'description': '跳过证书校验'},
             'gm_tls': {'type': 'boolean', 'description': '国密 TLS（走 gmhttp sidecar，需二进制就位）'},
             'timeout_s': {'type': 'number', 'description': '超时秒数（默认 15）'},
+            'body_max_bytes': {'type': 'integer', 'description': '响应正文最大保存字节数；缺省使用浏览器配置（默认 64KB），工具会返回已保存全文'},
         },
     },
 )
@@ -1929,6 +2069,48 @@ tool(
     },
 )
 
+# 联网搜索（2026-10-19，web-search-tool）：四后端自动降级——① 自建 SearXNG
+# （config/web_search.json 配 searxng_url，Docker 一行部署、多引擎聚合、免 Key，
+# 推荐；出网隔离在 SearXNG 侧）；② **DuckDuckGo HTML 首选免 Key 后端**（纯 httpx，
+# 检索质量最好，需配 proxy）；③ Bing HTML（免 Key，但国内会 302 到 cn.bing.com
+# 返回泛首页，故带相关性闸，退化即判失败继续降级）；④ ddgs 末位（缺依赖时不可用）。
+# 只返回「标题/URL/摘要」检索结果，深读页面用 browser_navigate / browser_replay。
+# plan_pre 口径 = 与 browser_navigate 同级的只读侦察原语，不受意图先行闸。
+tool(
+    'web_search',
+    group='浏览器',
+    flags=("plan_pre",),
+    description=('联网搜索公网引擎，取回「标题/URL/摘要」列表（单条摘要截 300、'
+                 '总量截 8000 字符）。适用：查 CVE/NVD 详情、漏洞利用代码、最新'
+                 '安全情报等本地知识库之外的公开信息。四后端自动降级：SearXNG 自建'
+                 '实例（配 searxng_url）→ DuckDuckGo（首选免 Key、质量最好）→ Bing'
+                 '（带退化闸）→ ddgs。engines/lang 仅 SearXNG 后端生效。仅返回检索'
+                 '结果、不自动打开网页；深读单页用 '
+                 'browser_navigate。'),
+    input_schema={
+        'type': 'object',
+        'properties': {
+            'query': {
+                'type': 'string',
+                'description': '搜索关键词（中英文均可，建议含关键术语/编号，如 "CVE-2026-1234 exploit"）',
+            },
+            'num': {
+                'type': 'integer',
+                'description': '返回条数 1-20（默认 10；后端实际不足时以实际为准）',
+            },
+            'engines': {
+                'type': 'string',
+                'description': '限定 SearXNG 引擎，逗号分隔（如 google,bing,duckduckgo）；留空用实例默认。仅 SearXNG 后端生效',
+            },
+            'lang': {
+                'type': 'string',
+                'description': '结果语言（如 zh-CN、en）；留空不限。仅 SearXNG 后端生效',
+            },
+        },
+        'required': ['query'],
+    },
+)
+
 tool(
     'route_lookup',
     group='知识',
@@ -1983,12 +2165,14 @@ tool(
     group='协作',
     flags=("intent_pre", "collab"),
     description=(
-        '申请行为边界授权（M5 D2，orchestrator-efficiency）：发现受当前授权边界限制打不下去时，向人类显式申请——不默默死路记账了事。'
-        '三类：scope_expand=扩大授权目标（新目标打之前先申请；批准后自行 bb_add_asset 登记）；impact_escalate=影响证明'
-        '升级（如从探测升级到拿权限证明）；rating_override=突破收录口径（发现真实影响但按评级规则到不了 vuln/high，申请按更高口径登记）'
-        '。**恒人类决策**（L2 也不自动批），结果投递回你的收件箱（authorization_result/approval_rejected）。'
-        'rating_override 是口径受限时的**显式**出口，**不得作为常规抬级手段**（定级仍以实证危害为准，'
-        '证据不足宁低勿高——finding-severity-calibration）。等待期间可继续其他无依赖工作。'
+        '申请行为边界授权：受当前授权边界限制打不下去时向人类显式申请，不要默默记死路了事。'
+        '三类：scope_expand=扩大授权目标（新目标打之前先申请；批准后自行 bb_add_asset 登记）；'
+        'impact_escalate=影响证明升级（如从探测升级到拿权限证明）；'
+        'rating_override=突破收录口径（发现真实影响但按评级规则到不了 vuln/high，申请按更高口径登记）。'
+        '**恒人类决策**（L2 也不自动批），结果投递回你的收件箱（authorization_result/approval_rejected）。'
+        'rating_override 是口径受限时的**显式**出口，**不得作为常规抬级手段**'
+        '（定级仍以实证危害为准，证据不足宁低勿高——finding-severity-calibration）。'
+        '等待期间可继续其他无依赖工作。'
     ),
     input_schema={
         'type': 'object',
@@ -2030,16 +2214,18 @@ tool(
     group='计划',
     flags=("plan", "intent_flow"),
     description=(
-        '声明意图（思考/规划产物）：把一句【可证伪假设】登记到链路图，如「验证 /admin 是否存在未授权访问」。随后围绕它执行（http/工具动作按时间归入'
-        '该意图，执行层是图的展开细节）。【必须有资产锚点】填 target_asset_id，或 basis_refs 至少含一条 asset:<资产id>——'
-        '否则拒绝：游离意图落不到链路图子目标下，其 dead_end 收尾也无法为资产背书 tested_clean。每个意图最终必须 close_intent'
-        ' 收尾为漏洞/发现/死路，不得悬挂。**会话第一次实质动作（run_cmd/浏览器点击/写黑板）前必须先 declare_intent**（服务端意图先'
-        '行闸：无 open 意图时实质动作被拒；只读侦察不受限）；**边干边写**——围绕假设执行时每确认一条认知立即 bb_add_finding(categ'
-        'ory=intel, status=unverified) 落账，收尾时再升 verified 或随死路转 dead_end，别攒到最后补记。**负结论'
-        '（未发现/测过没事）走死路收尾**：close_intent outcome=dead_end + dead_reason + evidence_ref'
-        's——这是资产的 tested_clean 背书来源，别把「未发现」当成没产出而不收尾。basis_refs 写推导依据（从什么资产/发现逻辑推出本假设'
-        '，形如 asset:asset-6971f089d5fe / finding:find-c32f449cc7b5——<id> 是完整 id，自带 ass'
-        'et-/find- 前缀），引用必须已在本项目，悬空即拒。同陈述的未关闭意图已存在 → 直接返回既有意图（merged=true）。'
+        '声明意图（思考/规划产物）：把一句【可证伪假设】登记到链路图，如「验证 /admin 是否存在未授权访问」；'
+        '随后围绕它执行，工具动作按时间归入该意图。'
+        '【必须有资产锚点】填 target_asset_id，或 basis_refs 至少含一条 asset:<资产id>，否则拒绝'
+        '（游离意图落不到链路图子目标下，其 dead_end 也无法为资产背书 tested_clean）。'
+        'basis_refs 写推导依据（asset:asset-6971f089d5fe / finding:find-c32f449cc7b5，'
+        '<id> 是带前缀的完整 id），引用须已在本项目，悬空即拒。'
+        '**会话第一次实质动作（run_cmd/浏览器点击/写黑板）前必须先声明**（服务端意图先行闸：'
+        '无 open 意图时实质动作被拒；只读侦察不受限）。'
+        '**负结论走死路收尾**：close_intent outcome=dead_end + dead_reason + evidence_refs——'
+        '这是资产的 tested_clean 背书来源，别把「未发现」当成没产出。'
+        '每个意图最终必须 close_intent 收尾，不得悬挂。'
+        '同陈述的未关闭意图已存在 → 直接返回既有意图（merged=true）。'
     ),
     input_schema={
         'type': 'object',
@@ -2082,12 +2268,11 @@ tool(
     group='控制',
     flags=("control", "intent_flow"),
     description=(
-        '收尾意图（意图必收尾，结果三选一）：① outcome=vuln——确认漏洞：finding_ids 至少一条已登记漏洞（category=vuln、非'
-        '误报）；② outcome=finding——有效发现：finding_ids 至少一条有效线索（category=intel、非误报），一个意图可带多'
-        '条同类发现（目录爆破 5 条=一次发现收尾）；③ outcome=dead_end——死路：dead_reason 必填（什么证据排除了假设、已试过什么'
-        '）+ evidence_refs 至少一条 http:/event:/artifact: 证据引用；死路必须零发现。**未发现/测过没事也是结论**：必'
-        '须用它收尾，而不是让意图悬挂——资产的 tested_clean 判定就靠 dead_end 背书。证据不足就保持 open（宁严勿松）；有新证据先 r'
-        'eopen_intent。'
+        '收尾意图（每个意图必须收尾，结果三选一）：① vuln——确认漏洞，finding_ids 至少一条 category=vuln 的非误报；'
+        '② finding——有效线索，至少一条 category=intel 的非误报；一个意图可带多条同类发现'
+        '（目录爆破 5 条=一次发现收尾）；③ dead_end——死路，需 dead_reason + evidence_refs，且必须零发现。'
+        '**未发现/测过没事也是结论**：必须用它收尾而非让意图悬挂——资产的 tested_clean 就靠 dead_end 背书。'
+        '证据不足保持 open（宁严勿松）；有新证据先 reopen_intent。'
     ),
     input_schema={
         'type': 'object',
@@ -2159,8 +2344,9 @@ tool(
     group='黑板',
     flags=("intent_flow",),
     description=(
-        '物理删除意图（2026-10-01）：误声明/目标取消时硬删该意图行。**带保护**：已收尾（closed）意图拒删——收尾结论是链路图事实，须先 re'
-        'open_intent 重开再删；被其他意图引用为推导依据也拒删。删除留痕事件 intent.deleted。'
+        '物理删除意图：误声明/目标取消时硬删该意图行。**带保护**：已收尾（closed）意图拒删'
+        '——收尾结论是链路图事实，须先 reopen_intent 重开再删；被其他意图引用为推导依据也拒删。'
+        '删除留痕事件 intent.deleted。'
     ),
     input_schema={
         'type': 'object',

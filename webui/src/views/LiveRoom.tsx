@@ -412,7 +412,7 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
   const [orchMeta, setOrchMeta] = useState<{ phase_goal: PhaseGoal | null; persona: OrchPersona | null } | null>(null)
   const [personaOpen, setPersonaOpen] = useState(false)
   const refreshOrchMeta = () =>
-    api.projectGoal(pid).then(setOrchMeta).catch(() => {})
+    api.projectGoal(pid).then((meta) => { setOrchMeta(meta); return meta }).catch(() => null)
   useEffect(() => {
     refreshOrchMeta()
   }, [pid])
@@ -1888,7 +1888,16 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
             <PersonaEditor
               initial={orchMeta?.persona ?? null}
               onClose={() => setPersonaOpen(false)}
-              onSave={async (body) => { await api.setOrchPersona(pid, body); await refreshOrchMeta() }}
+              onSave={async (body) => {
+                const saved = await api.setOrchPersona(pid, body)
+                if (saved.persona) {
+                  setOrchMeta((current) => ({
+                    phase_goal: current?.phase_goal ?? null,
+                    persona: saved.persona ?? null,
+                  }))
+                }
+                // 保存接口返回值是本次编辑的权威结果；避免并发中的旧 GET 响应覆盖它。
+              }}
             />
           </div>
         </div>

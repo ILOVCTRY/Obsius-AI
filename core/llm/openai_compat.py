@@ -59,7 +59,7 @@ class OpenAICompatProvider:
                  stream_transport: StreamTransport | None = None, enable_thinking: bool = False,
                  context_tokens: int | None = None, ctx_soft_budget: int | None = None,
                  summarizer_model: str | None = None, proxy: str | None = None,
-                 system_in_user: bool = False):
+                 system_in_user: bool = False, thinking_effort: str | None = None):
         if format not in {CHAT_COMPLETIONS, RESPONSES}:
             raise ValueError(f"不支持的 OpenAI 格式: {format}")
         self.base_url = base_url.rstrip("/")
@@ -68,6 +68,10 @@ class OpenAICompatProvider:
         self.format = format
         self.timeout = timeout
         self._enable_thinking = enable_thinking
+        self.thinking_effort = (str(thinking_effort or "high").strip().lower()
+                                if enable_thinking else "high")
+        if self.thinking_effort not in {"low", "medium", "high"}:
+            self.thinking_effort = "high"
         self._thinking_disabled = False
         # 网关不支持 stream_options（400 文案含 stream_options）时置位——本实例
         # 不再下发，退化为「流式无 usage」（2026-10-13 缓存命中率）。
@@ -302,7 +306,7 @@ class OpenAICompatProvider:
             if temperature is not None:
                 body["temperature"] = temperature
             if self._enable_thinking and not self._thinking_disabled:
-                body["reasoning_effort"] = "high"
+                body["reasoning_effort"] = self.thinking_effort
             if inline_system:
                 body["messages"] = self._ensure_system_in_user(
                     body["messages"], self._system_text(system))
@@ -315,7 +319,7 @@ class OpenAICompatProvider:
         if temperature is not None:
             body["temperature"] = temperature
         if self._enable_thinking and not self._thinking_disabled:
-            body["reasoning"] = {"effort": "high"}
+            body["reasoning"] = {"effort": self.thinking_effort}
         if inline_system:
             body["input"] = self._ensure_system_in_user(
                 body["input"], self._system_text(system))

@@ -2,7 +2,7 @@
 
 Agent 无裸 shell：一切命令经 run(cmd, runtime)。
 - runtime 由 Agent 按场景选，服务端按 policy 强制校验（越权 → 拒绝 + 审计）；
-- net="real" 须引用一条已批准的 approval（§6 approvals 表）；
+- net="real" 须在项目上下文中引用一条已批准的一次性 approval（§6 approvals 表）；
 - 每次执行（含拒绝）落黑板事件流，带 runtime 标签（§7 审计层）。
 """
 
@@ -27,7 +27,13 @@ from core.runtime.backends import (
 )
 from core.runtime.pathguard import windows_to_wsl_path
 from core.runtime.policy import DEFAULT_NET_MODE, NET_MODES, RUNTIME_LEVELS, Level, allowed_levels
+from core.scope_policy import check_command_scope
 from core.runtime.sessioncontainers import SessionContainerManager
+from core.runtime.recovery import (
+    EnvironmentUnavailable,
+    classify_backend_error,
+    classify_execution_failure,
+)
 
 #: docker runtime 的 workspace 挂载约定（pentest-tools-container-m0）：
 #: 宿主 <workspace> 挂容器 /workspace 读写，cwd 固定 /workspace/scratch
@@ -54,6 +60,9 @@ class ExecutionResult:
     duration_s: float
     timed_out: bool = False
     interrupted: bool = False
+    # 环境失败的结构化分类（tool_missing / docker_image_missing 等）。
+    # 与 GatewayDenied 分离，避免环境故障被拒绝熔断误判。
+    environment_error: dict[str, Any] | None = None
 
     def brief(self, limit: int = 2000) -> str:
         """喂给 Agent 上下文的截断版（防止工具输出淹没上下文）。
@@ -84,6 +93,10 @@ class ExecutionResult:
                   "② 避免把抓取头/路径遍历变体等易挂起请求与常规步骤放在同一条命令；"
                   "③ 对每次请求单独加短超时（curl -m 10 / --max-time 10），"
                   "别让被测端 hang 死整条命令。")
+        if self.environment_error:
+            s += "\n[环境错误] " + str(self.environment_error.get("category", "unknown"))
+            if self.environment_error.get("message"):
+                s += ": " + str(self.environment_error["message"])
         return s
 
 
@@ -124,6 +137,7 @@ class ExecutionGateway:
         project_id: str | None = None,
         session_id: str | None = None,
         author: str = "system",
+        environment_id: str | None = None,
         timeout: float | None = None,
         net: str | None = None,
         image: str | None = None,
@@ -131,6 +145,7 @@ class ExecutionGateway:
         workspace: str | Path | None = None,
         abort_event: threading.Event | None = None,
         step: int | None = None,
+        consume_approval: bool = True,
     ) -> ExecutionResult:
         """执行一条命令。第②层防线（服务端校验）在此实现：
         runtime 不在 threat_class 允许集 → GatewayDenied + audit.deny 事件。
@@ -160,15 +175,31 @@ class ExecutionGateway:
         # ①②③'③'' 策略校验统一走 would_deny（H3：干跑判定与真实执行单一出处，
         # 防两处口径漂移）
         deny = self.would_deny(cmd, runtime, threat_class=threat_class,
-                               net=net, workspace=workspace)
+                               net=net, workspace=workspace,
+                               environment_id=environment_id or session_id)
         if deny:
             raise _audit_deny(deny)
 
-        # ③ 网络模式缺省（2026-10-01 起 net=real 不再人工审批）：sandbox 默认 none，
-        #    其余 runtime 默认 bridge；net=real 由调用方（run_cmd）直接指定并放行，
-        #    隔离等级/threat_class/网络模式合法性校验仍由 would_deny 承担。
+        # 项目级 scope 门禁：命令中出现明确网络目标时，先于执行检查授权范围。
+        # 动态目标无法静态提取时仍由 net/approval 与后端策略保护。
+        if project_id and self.bb:
+            scope_verdict = check_command_scope(self.bb, project_id, cmd)
+            if not scope_verdict.allowed:
+                raise _audit_deny("策略拒绝：" + scope_verdict.reason)
+
+        # ③ 网络模式缺省：sandbox 默认 none，其余 runtime 默认 bridge。
+        #    real 网络属于高风险出网，必须携带当前项目中已批准的单次审批；
+        #    校验放在实际执行前，避免工具层或调用方绕过审批直接出网。
         if net is None:
             net = DEFAULT_NET_MODE if runtime == "sandbox" else "bridge"
+        if net == "real":
+            if not project_id:
+                raise _audit_deny("策略拒绝：net=real 必须绑定项目上下文")
+            if not approval_id:
+                raise _audit_deny("策略拒绝：net=real 必须提供已批准的 approval_id")
+            if not self._approval_approved(approval_id, project_id=project_id):
+                raise _audit_deny(
+                    "策略拒绝：approval_id 不存在、未批准、已消费或不属于当前项目")
 
         # ③' 工作区隔离（§7 2026-09-17）：host/wsl/docker 有文件系统边界问题；
         #     docker 容器化 M0（2026-09-23）挂 workspace 卷并对齐 scratch 相对路径习惯
@@ -195,6 +226,10 @@ class ExecutionGateway:
             else:  # docker：整卷挂载（容器内 bash/Linux 语义，路径以 /workspace 为根）
                 cwd = _DOCKER_WS_SCRATCH
                 mounts = [(str(ws), _DOCKER_WS_MOUNT)]
+                if str(environment_id or session_id or "").startswith("ctf-"):
+                    # CTF Docker 的传统 /tmp 映射到项目 .tmp，跨命令、主控
+                    # 与 worker 共享；普通 Docker 任务保持原挂载契约。
+                    mounts.append((str(tmp), "/tmp"))
 
         # ③'' 扫描限速纪律（借鉴 dsh-scanner-tools rateDiscipline，2026-09-19）：
         # 裸奔扫描一跑就是数万包——补限速参数即可重试，拒因文案自带放行配方
@@ -221,12 +256,29 @@ class ExecutionGateway:
             outcome = self._dispatch(exec_cmd, runtime, timeout, net, image,
                                      cwd=cwd, env=env, abort_event=abort_event,
                                      mounts=mounts, project_id=project_id,
-                                     session_id=session_id)
+                                     session_id=environment_id or session_id)
         except BackendError as e:
-            raise _audit_deny(f"后端不可用: {e}") from e
+            # 后端环境故障不是策略拒绝：保留结构化类别，避免误触发 Agent 的
+            # 拒绝熔断；恢复器/上层可据此决定是否执行白名单修复。
+            issue = classify_backend_error(e, command=cmd, runtime=runtime)
+            if self.bb and project_id:
+                self.bb.append_event(
+                    project_id, "command.result",
+                    {"call_id": call_id, "cmd": cmd, "runtime": runtime,
+                     "exit_code": -1, "duration_s": round(time.monotonic() - started, 3),
+                     "environment_error": issue.to_dict()},
+                    session_id=session_id, author=author,
+                )
+            raise EnvironmentUnavailable(issue) from e
         except NotImplementedError as e:
             raise _audit_deny(str(e)) from e
 
+        issue = None if outcome.timed_out or outcome.interrupted else classify_execution_failure(
+            command=cmd, runtime=runtime, exit_code=outcome.exit_code,
+            stdout=outcome.stdout, stderr=outcome.stderr,
+            image=(image or (DEFAULT_SANDBOX_IMAGE if runtime == "sandbox"
+                             else DEFAULT_PENTEST_IMAGE if runtime == "docker" else None)),
+        )
         result = ExecutionResult(
             ok=(not outcome.timed_out and not outcome.interrupted
                 and outcome.exit_code == 0),
@@ -237,6 +289,7 @@ class ExecutionGateway:
             duration_s=round(time.monotonic() - started, 3),
             timed_out=outcome.timed_out,
             interrupted=outcome.interrupted,
+            environment_error=issue.to_dict() if issue else None,
         )
         # ⑤ 审计：结果带 runtime 标签 + call_id/cmd 冗余落事件流（cwd=工作区隔离落点，W4；
         # stdout/stderr 只存头部 2000 字符，前端展开块消费）
@@ -247,14 +300,19 @@ class ExecutionGateway:
                  "exit_code": result.exit_code,
                  "duration_s": result.duration_s, "timed_out": result.timed_out,
                  **({"interrupted": True} if result.interrupted else {}),
+                 **({"environment_error": result.environment_error}
+                    if result.environment_error else {}),
                  "stdout_head": result.stdout[:2000], "stderr_head": result.stderr[:2000]},
                 session_id=session_id, author=author,
             )
         # H3 一次性审批（借鉴 dsh approval allowed-once）：approval 只批准「一次
         # 执行」——本次命令真跑完后立即标记 consumed，同 approval_id 二次使用会被
-        # _approval_approved 拒绝。2026-10-01 起 net=real 不再走审批，这里只服务
-        # 其余仍需审批的动作类型。失败不影响执行结果。
-        if approval_id:
+        # _approval_approved 拒绝。审批消费失败不影响已经完成的执行结果，但下一次
+        # 执行仍会因状态不是 approved 而被拒绝。
+        # 环境故障不是一次完整的获准动作：保留 approval 供受控恢复链使用，
+        # 由恢复后的最终重试（或调用方明确指定 consume_approval=True 的成功动作）
+        # 消费一次性审批。策略拒绝仍在执行前直接拒绝，不会走到这里。
+        if approval_id and consume_approval and not result.environment_error:
             self._consume_approval(approval_id)
         return result
 
@@ -262,14 +320,15 @@ class ExecutionGateway:
 
     def would_deny(
         self, cmd: str, runtime: str, *, threat_class: str = "trusted",
-        net: str | None = None, workspace: str | Path | None = None,
+        net: str | None = None,         workspace: str | Path | None = None,
+        environment_id: str | None = None,
     ) -> str | None:
         """干跑策略校验（不执行、不审计）：返回拒因文本，None=当前策略允许放行。
 
         H3（2026-09-19）：deny-driven 升级的前置判定 + run() 内部复用——策略
         口径单一出处。覆盖 ①runtime 合法 ②隔离等级 ③非法网络模式 ③'工作区逃逸
-        ③''限速纪律；**不含**后端可用性（执行期才知道）。net=real 自 2026-10-01
-        起不再人工审批（由调用方直接指定），网络模式只做合法性校验。
+        ③''限速纪律；**不含**后端可用性（执行期才知道）。net=real 的项目上下文、
+        approval_id 和审批状态在 run() 的实际执行前校验，避免干跑接口承担审批消费。
         """
         if runtime not in RUNTIME_LEVELS:
             return f"未知 runtime: {runtime}"
@@ -291,6 +350,10 @@ class ExecutionGateway:
                       else str(ws) if runtime == "host" else _DOCKER_WS_MOUNT)
             escapes = pathguard.workspace_escapes(
                 cmd, scratch=scratch_str, workspace=ws_str, posix=posix,
+                # CTF Docker 的 /tmp 映射到项目 .tmp，允许题目工具使用
+                # 传统临时路径，同时保证跨命令/同项目容器可复用。
+                allow_posix_tmp=(runtime == "docker"
+                                  and str(environment_id or "").startswith("ctf-")),
             )
             if escapes:
                 return (
@@ -318,11 +381,11 @@ class ExecutionGateway:
                 abort_event=abort_event
             )
         if runtime == "docker":
-            # 会话级常驻容器（P3，2026-10-07）：仅 sess-* 会话走 exec 复用；无会话上下文
-            # （chat-/rev-workbench）或建容器失败 → 回落 per-call run_once（绝不失败）
+            # 常驻容器：任务链仍使用 sess-*；CTF 对话使用 ctf-* 项目环境 key。
+            # 无环境上下文或建容器失败 → 回落 per-call run_once（绝不失败）。
             mgr = self.containers
-            if (mgr is not None and mgr.enabled
-                    and session_id and session_id.startswith("sess-")):
+            if (mgr is not None and mgr.enabled and session_id
+                    and (session_id.startswith("sess-") or session_id.startswith("ctf-"))):
                 out = mgr.exec(project_id or "", session_id, cmd, timeout=timeout,
                                abort_event=abort_event, image=image, net=net,
                                mounts=mounts, cwd=cwd)
@@ -335,13 +398,16 @@ class ExecutionGateway:
         return backend.execute(cmd, timeout=timeout, cwd=cwd, env=env,
                                abort_event=abort_event)
 
-    def _approval_approved(self, approval_id: str) -> bool:
+    def _approval_approved(self, approval_id: str,
+                           *, project_id: str | None = None) -> bool:
         if not self.bb:
             return False
         row = self.bb.conn.execute(
-            "SELECT status FROM approvals WHERE id=?", (approval_id,)
+            "SELECT status, project_id FROM approvals WHERE id=?", (approval_id,)
         ).fetchone()
-        return row is not None and row["status"] == "approved"
+        if row is None or row["status"] != "approved":
+            return False
+        return project_id is None or row["project_id"] == project_id
 
     def _consume_approval(self, approval_id: str) -> None:
         """审批一次性消费：approved → consumed（H3）。幂等且尽力而为：

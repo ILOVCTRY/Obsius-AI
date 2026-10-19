@@ -1,0 +1,53 @@
+name: Documentation
+description: Report unclear, missing, or incorrect REA documentation
+title: "[Docs] "
+labels:
+  - documentation
+  - triage
+body:
+  - type: checkboxes
+    id: before-submitting
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the existing issues for a related documentation report.
+          required: true
+        - label: I removed credentials, tokens, private paths, and sensitive target data.
+          required: true
+
+  - type: input
+    id: location
+    attributes:
+      label: Documentation location
+      description: Link the page, section, command, API, skill, or inline comment.
+      placeholder: README.md#quick-start or docs/mcp-contracts.md
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is unclear, missing, outdated, or incorrect, and who is affected?
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-content
+    attributes:
+      label: Expected content
+      description: Describe the accurate behavior or example that should be documented.
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Supporting evidence
+      description: Add source, command output, provider documentation, or a link that supports the correction.
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context
+      description: Include screenshots, affected translations, or related issues.

@@ -55,6 +55,24 @@ mode: self-contained
 XOR 常量 / 逐字节加减 / 查表替换 / 简易 TEA·XTEA / 魔改 base64 / 反转+位移。
 遇到多层嵌套先分层落 func_kb，再逐层求解。
 
+## Game Boy ROM / LR35902（SM83）
+
+Game Boy `.gb`/`.gbc` 是裸 ROM，不要用通用 `objdump` 或 Capstone 的 x86/ARM 模式硬解；两者都不能可靠识别 LR35902/SM83 指令。项目 Docker 镜像 `cyberstrike/pentest-box:0.1` 已提供专用 `mgbdis`（容器路径 `/opt/mgbdis`），用于多 bank ROM 的 RGBDS 兼容反汇编。
+
+```bash
+# 在项目容器中运行，ROM 挂载到 /workspace/scratch
+mgbdis /workspace/scratch/game.gb
+# 默认产物：/workspace/scratch/disassembly/
+
+# 有运行时符号文件时，放在 ROM 同目录并保持同名：game.gb + game.sym
+```
+
+`mgbdis` 支持 `.sym` 中的 `.code`、`.data`、`.text`、`.padding`、`.image` 块。优先用 PyBoy/模拟器运行轨迹或已有符号信息生成代码区边界，再交给 `mgbdis`，因为 ROM 中代码和数据可能交错，盲扫会发生指令对齐错误。PyBoy 只负责模拟执行、内存/画面观测，不要依赖不存在或不稳定的 `p.cpu` 内部 API；需要 CPU 状态时使用当前版本公开接口或项目兼容层。
+
+```bash
+docker run --rm -it -v "${PWD}:/workspace/scratch" -w /workspace/scratch cyberstrike/pentest-box:0.1 bash
+```
+
 ## 延伸手册（场景特征 → kb_open）
 
 | 场景/特征 | 手册 |

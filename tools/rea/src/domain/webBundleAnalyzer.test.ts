@@ -1,0 +1,659 @@
+import { describe, expect, it } from "vitest";
+
+import { webPageInspectionSchema } from "./browserObservationSchemas.js";
+import { analyzeJavaScriptStaticSource } from "./javascript/javascriptStaticAnalysis.js";
+import { analyzeCapturedWebBundle } from "./webBundleAnalyzer.js";
+import { webBundleAnalysisSchema } from "./webBundleAnalysis.js";
+import { createWebTextArtifact } from "./webContentArtifact.js";
+
+const origin = "https://app.example.test";
+
+describe("web bundle analyzer", () => {
+  it("extracts graph, route, endpoint, vendor, and WebMCP evidence", () => {
+    const source = `
+      import { createApp } from "./chunk.js?token=secret";
+      const lazy = import("./lazy.js");
+      const routes = [{ path: "/users/:id?token=secret" }];
+      fetch("/api/users?authorization=secret");
+      document.modelContext.registerTool({
+        name: "lookup-user",
+        description: "Untrusted page declaration",
+        inputSchema: {
+          type: "object",
+          properties: {
+            userId: { type: "string" },
+            verbose: { type: "boolean" }
+          }
+        }
+      });
+      const __webpack_require__ = () => createApp(routes, lazy);
+    `;
+    const result = analyzeCapturedWebBundle(inspection(source));
+
+    expect(result.observations.chunks.edges).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "static_import",
+          specifier: "./chunk.js?token=secret",
+          resolved_url: `${origin}/assets/chunk.js?token=secret`,
+        }),
+        expect.objectContaining({
+          kind: "dynamic_import",
+          specifier: "./lazy.js",
+        }),
+      ]),
+    );
+    expect(result.observations.routes).toEqual([
+      expect.objectContaining({ value: "/users/:id?token=secret" }),
+    ]);
+    expect(result.observations.endpoints).toEqual([
+      expect.objectContaining({
+        value: "/api/users?authorization=secret",
+      }),
+    ]);
+    expect(result.observations.webmcp_declarations).toEqual([
+      expect.objectContaining({
+        name: "lookup-user",
+        trust: "page-declared-untrusted",
+        schema_property_names: ["userId", "verbose"],
+      }),
+    ]);
+    expect(result.inferences).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ value: "webpack", confidence: "high" }),
+        expect.objectContaining({ value: "Vue" }),
+      ]),
+    );
+    expect(JSON.stringify(result)).toContain("authorization=secret");
+    expect(result.completeness.status).toBe("complete");
+  });
+
+  it("reports parser gaps without imposing a finding cap", () => {
+    const malformed = inspection("function broken( {");
+    const failed = analyzeCapturedWebBundle(malformed);
+    expect(failed.completeness).toMatchObject({
+      status: "partial",
+      parse_failures: 1,
+    });
+    expect(failed.unknowns[0]?.dimension).toBe("javascript_ast");
+
+    const analyzed = analyzeCapturedWebBundle(
+      inspection("fetch('/one'); fetch('/two'); fetch('/three');"),
+    );
+    expect(analyzed.observations.endpoints).toHaveLength(3);
+    expect(analyzed.completeness.status).toBe("complete");
+  });
+
+  it("analyzes AST nodes after the former fixed node ceiling", () => {
+    const source = `${";".repeat(250_001)}fetch('/last');`;
+    const result = analyzeCapturedWebBundle(inspection(source));
+
+    expect(result.observations.endpoints).toContainEqual(
+      expect.objectContaining({ value: "/last" }),
+    );
+    expect(result.completeness.visited_ast_nodes).toBeGreaterThan(250_000);
+    expect(result.completeness.status).toBe("complete");
+  });
+
+  it("retains complete long chunk and WebMCP declaration text", () => {
+    const specifier = `./${"chunk".repeat(1_000)}.js`;
+    const name = "tool".repeat(100);
+    const description = "untrusted declaration ".repeat(150);
+    const propertyName = "property".repeat(100);
+    const result = analyzeCapturedWebBundle(
+      inspection(`
+        import "${specifier}";
+        document.modelContext.registerTool({
+          name: "${name}",
+          description: "${description}",
+          inputSchema: { properties: { "${propertyName}": { type: "string" } } }
+        });
+      `),
+    );
+
+    expect(result.observations.chunks.edges[0]?.specifier).toBe(specifier);
+    expect(result.observations.webmcp_declarations[0]).toMatchObject({
+      name,
+      description,
+      schema_property_names: [propertyName],
+      trust: "page-declared-untrusted",
+    });
+  });
+
+  it("reports unavailable source maps as partial without dropping requested maps", () => {
+    const analysis = analyzeCapturedWebBundle(inspection("export {};"), {
+      status: "unavailable",
+      requested: 1,
+      processed: 1,
+      items: [
+        {
+          script_key: `scr_${"1".repeat(64)}`,
+          declared_url: "https://app.example.test/app.js.map",
+          effective_url: null,
+          status: "fetch_failed",
+          artifact: null,
+          original_sources: [],
+          original_module_edges: [],
+          mappings: [],
+          limitation: "Source-map fetch failed.",
+        },
+      ],
+    });
+
+    expect(analysis.completeness.status).toBe("partial");
+    expect(analysis.unknowns).toContainEqual({
+      dimension: "source_maps",
+      reason:
+        "One or more requested source maps were unavailable or incomplete",
+      affected_script_keys: [`scr_${"1".repeat(64)}`],
+    });
+  });
+
+  it("rejects inconsistent source-map coverage counts", () => {
+    const result = analyzeCapturedWebBundle(inspection("export {};"));
+    expect(
+      webBundleAnalysisSchema.safeParse({
+        ...result,
+        observations: {
+          ...result.observations,
+          source_maps: {
+            ...result.observations.source_maps,
+            requested: 1,
+          },
+        },
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe("web bundle static-analysis parity", () => {
+  it("recognizes endpoints through nested dynamic receivers like static analysis", () => {
+    const result = analyzeCapturedWebBundle(
+      inspection('window[recv].fetch("/nested-fetch");'),
+    );
+    expect(result.observations.endpoints).toContainEqual(
+      expect.objectContaining({ value: "/nested-fetch" }),
+    );
+  });
+
+  it("reads open endpoints only from XMLHttpRequest method and URL pairs", () => {
+    const result = analyzeCapturedWebBundle(
+      inspection(`
+        xhr.open("GET", "/xhr-get");
+        xhr.open("post", "https://xhr.example.test/submit");
+        dav.open("PROPFIND", "/dav/");
+        fs.open("/tmp/data.txt", "r", done);
+        window.open("https://help.example.test/", "_blank");
+        xhr.open(method, "/dynamic-method");
+        fs.open(path, "r", done);
+        window.open(url, "_blank");
+        window.open(url, "/preview");
+        globalThis.open(url, "./frame");
+        document.open("text/html", "/replace");
+        parent.open("GET", "/parent-xhr");
+        self.open("post", "/self-xhr");
+        top.open("GET", "/top-target");
+        opener.open("GET", "/opener-target");
+        frames.open("GET", "/frames-target");
+        globalThis.open("GET", "/global-target");
+        document.open("GET", "/document-target");
+        const parentWindow = parent;
+        parentWindow.open("GET", "/alias-target");
+        {
+          const parent = new XMLHttpRequest();
+          parent.open(method, "/shadowed-parent-xhr");
+        }
+        xhr.open(method, "api/relative");
+        fs.open(path, "w+", done);
+        popup.open(url, "_TOP");
+      `),
+    );
+    expect(
+      result.observations.endpoints.map(({ value }) => value).sort(),
+    ).toEqual([
+      "/dav/",
+      "/dynamic-method",
+      "/shadowed-parent-xhr",
+      "/xhr-get",
+      "api/relative",
+      "https://xhr.example.test/submit",
+    ]);
+  });
+});
+
+describe("web bundle API classification parity", () => {
+  it("reads storage open versions as storage rather than endpoints in both analyzers", () => {
+    const source = `
+      indexedDB.open(databaseName, "2");
+      window.indexedDB.open(databaseName, "/v3");
+      indexedDB.open("APP", "4");
+      indexedDB.open("GET", "/storage-named-xhr");
+    `;
+    expect(
+      analyzeCapturedWebBundle(inspection(source)).observations.endpoints.map(
+        ({ value }) => value,
+      ),
+    ).toEqual(["/storage-named-xhr"]);
+    const analysis = analyzeJavaScriptStaticSource(source);
+    expect(analysis.endpoints.map(({ value }) => value)).toEqual([
+      "/storage-named-xhr",
+    ]);
+    expect(analysis.storage.map(({ kind }) => kind)).toEqual([
+      "indexed-db",
+      "indexed-db",
+      "indexed-db",
+      "indexed-db",
+    ]);
+  });
+
+  it("uses lexical receiver facts for overloaded open calls", () => {
+    const result = analyzeCapturedWebBundle(
+      inspection(`
+        const popup = window;
+        popup.open(url, "/preview");
+        {
+          const indexedDB = { open() {} };
+          indexedDB.open("PROPFIND", "/dav");
+          indexedDB.open(databaseName, "2");
+        }
+        const xhr = new XMLHttpRequest();
+        xhr.open(method, "/api");
+      `),
+    );
+    expect(
+      result.observations.endpoints.map(({ value }) => value).sort(),
+    ).toEqual(["/api", "/dav"]);
+  });
+
+  it("classifies optional and one-hop aliased open calls", () => {
+    const source = `
+      const popup = window;
+      popup?.open(url, "/preview");
+      const idb = indexedDB;
+      idb.open(databaseName, "2");
+      const xhr = new XMLHttpRequest();
+      xhr?.open(method, "/api");
+    `;
+    const bundle = analyzeCapturedWebBundle(inspection(source));
+    expect(bundle.observations.endpoints.map(({ value }) => value)).toEqual([
+      "/api",
+    ]);
+    const staticAnalysis = analyzeJavaScriptStaticSource(source);
+    expect(staticAnalysis.endpoints.map(({ value }) => value)).toEqual([
+      "/api",
+    ]);
+    expect(staticAnalysis.storage.map(({ kind }) => kind)).toEqual([
+      "indexed-db",
+    ]);
+  });
+
+  it("keeps HTTP-method-named reads of provable keyed collections out of endpoints", () => {
+    const result = analyzeCapturedWebBundle(
+      inspection(`
+        axios.get("https://api.example.test/users");
+        api.get("users");
+        client.delete("cache-key");
+        new Map().get("map-key");
+        new URLSearchParams(location.search).get("q");
+        new Headers(init).delete("x-trace");
+        new FormData(form).get("file");
+        response.headers.get("content-type");
+        request?.headers.delete("cookie");
+        new URL(location.href).searchParams.get("page");
+        api.headers.post("/v1/headers");
+        api.searchParams.request("/search");
+        new Headers().get("/users");
+        api.headers.get("https://api.example.test/headers");
+        api.searchParams.delete("../search");
+      `),
+    );
+    expect(
+      result.observations.endpoints.map(({ value }) => value).sort(),
+    ).toEqual([
+      "../search",
+      "/search",
+      "/users",
+      "/v1/headers",
+      "cache-key",
+      "https://api.example.test/headers",
+      "https://api.example.test/users",
+      "users",
+    ]);
+  });
+
+  it("recognizes loadURL endpoints like static analysis", () => {
+    const result = analyzeCapturedWebBundle(
+      inspection('window.win.loadURL("https://embedded.test/app");'),
+    );
+    expect(result.observations.endpoints).toContainEqual(
+      expect.objectContaining({ value: "https://embedded.test/app" }),
+    );
+  });
+});
+
+describe("web bundle artifact metadata", () => {
+  it("preserves long provider media types in artifact summaries", () => {
+    const result = analyzeCapturedWebBundle(inspection("export {};"));
+    const mediaType = `application/${"x".repeat(300)}`;
+    const artifact = result.capture.source_artifacts[0] ?? {
+      sha256: "0".repeat(64),
+      bytes: 0,
+      media_type: "application/javascript",
+      charset: "utf-8" as const,
+      text_available: true as const,
+    };
+
+    expect(
+      webBundleAnalysisSchema.parse({
+        ...result,
+        capture: {
+          ...result.capture,
+          source_artifacts: [{ ...artifact, media_type: mediaType }],
+        },
+      }).capture.source_artifacts[0]?.media_type,
+    ).toBe(mediaType);
+  });
+});
+
+describe("deep captured web bundle syntax", () => {
+  it("retains evidence after a parser-admitted deep property chain", () => {
+    const source = `const value = root${".next".repeat(12_000)};\nimport "./last.js";\nfetch("/after");`;
+    const result = analyzeCapturedWebBundle(inspection(source));
+    expect(result.completeness).toMatchObject({
+      status: "complete",
+      parsed_scripts: 1,
+      parse_failures: 0,
+    });
+    expect(result.observations.chunks.edges).toContainEqual(
+      expect.objectContaining({
+        kind: "static_import",
+        specifier: "./last.js",
+        resolved_url: `${origin}/assets/last.js`,
+        location: expect.objectContaining({ line: 2, column: 0 }),
+      }),
+    );
+    expect(result.observations.endpoints).toContainEqual(
+      expect.objectContaining({
+        value: "/after",
+        location: expect.objectContaining({ line: 3, column: 0 }),
+      }),
+    );
+  });
+});
+
+const inspection = (source: string) =>
+  webPageInspectionSchema.parse({
+    browser: {
+      product: "Fake Chrome",
+      protocol_version: "1.3",
+      revision: "1",
+      user_agent: "fake",
+      js_version: "1",
+    },
+    target: {
+      target_id: "page-1",
+      type: "page",
+      title: "App",
+      url: `${origin}/app`,
+      origin,
+      attached: false,
+    },
+    capture_window: {
+      started_at: "2026-07-14T00:00:00.000Z",
+      ended_at: "2026-07-14T00:00:01.000Z",
+      observation_ms: 1_000,
+    },
+    completeness: {
+      status: "attach_limited",
+      conditions: ["attach_limited"],
+      policy_filtered_sections: [],
+      attach_limited_sections: ["network_requests"],
+      truncated_sections: [],
+      unavailable_sections: [],
+      excluded: [],
+      dropped_events: {
+        scripts: 0,
+        network_requests: 0,
+        console_events: 0,
+        websocket_connections: 0,
+        websocket_frames: 0,
+        webmcp_tools: 0,
+        timeline_events: 0,
+        total: 0,
+      },
+    },
+    frames: [],
+    dom: { total_nodes: 0, nodes: [] },
+    accessibility: {
+      total_nodes: 0,
+      text_capture: {
+        status: "not_approved",
+        retained_bytes: 0,
+        excluded_fields: 0,
+      },
+      nodes: [],
+    },
+    scripts: {
+      total: 1,
+      items: [
+        {
+          script_key: `scr_${"1".repeat(64)}`,
+          url: `${origin}/assets/app.js`,
+          origin,
+          cdp_hash: "hash",
+          length: Buffer.byteLength(source),
+          is_module: true,
+          language: "JavaScript",
+          source_map_url: null,
+          resource_reconciliation: {
+            status: "unmatched",
+            reason: "no_exact_sanitized_url",
+          },
+          source: {
+            included: true,
+            artifact: createWebTextArtifact(source, "text/javascript"),
+          },
+        },
+      ],
+    },
+    resources: [],
+    network: {
+      requests: [],
+      websocket_connections: [],
+      coverage_started_at: "2026-07-14T00:00:00.000Z",
+      prior_activity_available: false,
+    },
+    console: {
+      events: [],
+      coverage_started_at: "2026-07-14T00:00:00.000Z",
+      prior_activity_available: false,
+    },
+    workers: [],
+    metadata: {
+      responses: [],
+      dom_urls: [],
+      agent_hints: [],
+      excluded_dom_urls: 0,
+      headers_allowlisted: true,
+    },
+    storage: {
+      origin,
+      usage_bytes: null,
+      quota_bytes: null,
+      local_storage_keys: [],
+      session_storage_keys: [],
+      indexed_db_names: [],
+      cache_names: [],
+      values_redacted: true,
+    },
+    limitations: [],
+  });
+
+it("keeps bare module locations unresolved without inventing URL-relative paths", () => {
+  const result = analyzeCapturedWebBundle(
+    inspection(`
+    import "package-name";
+    import("@scope/package");
+    require("package-name");
+    import "./actual.js";
+    importScripts("worker.js");
+  `),
+  );
+  for (const specifier of ["package-name", "@scope/package"])
+    expect(
+      result.observations.chunks.edges
+        .filter((edge) => edge.specifier === specifier)
+        .every((edge) => edge.resolved_url === null),
+    ).toBe(true);
+  expect(
+    result.observations.chunks.edges.find(
+      (edge) => edge.specifier === "./actual.js",
+    )?.resolved_url,
+  ).toBe(`${origin}/assets/actual.js`);
+  expect(
+    result.observations.chunks.edges.find(
+      (edge) => edge.specifier === "worker.js",
+    )?.resolved_url,
+  ).toBe(`${origin}/assets/worker.js`);
+});
+
+it("retains each literal importScripts argument in source order", () => {
+  const result = analyzeCapturedWebBundle(
+    inspection(
+      'importScripts("first.js", dynamicValue, "second.js", "first.js");',
+    ),
+  );
+  expect(
+    result.observations.chunks.edges
+      .filter(({ kind }) => kind === "worker_import")
+      .map(({ specifier }) => specifier),
+  ).toEqual(["first.js", "second.js"]);
+});
+
+describe("web metadata key semantics", () => {
+  it("keeps computed metadata keys and overwrite order conservative", () => {
+    const result = analyzeCapturedWebBundle(
+      inspection(`
+      const path = "description";
+      const routes = [{ [path]: "/not-a-route" }, { ["path"]: "/real" }];
+      document.modelContext.registerTool({
+        name: "old", name: "new",
+        inputSchema: { properties: { [name]: {}, literal: {} } }
+      });
+      document.modelContext.registerTool({ name: "old", ...dynamic });
+      document.modelContext.registerTool({ name: "old", [name]: "dynamic" });
+      document.modelContext.registerTool({ name: "old", get name() {} });
+      document.modelContext.registerTool({ ...dynamic, ["name"]: "restored" });
+      document.modelContext.registerTool({ name: "valid", [""]: 0 });
+    `),
+    );
+
+    expect(result.observations.routes.map(({ value }) => value)).toEqual([
+      "/real",
+    ]);
+    expect(result.observations.webmcp_declarations).toEqual([
+      expect.objectContaining({
+        name: "new",
+        schema_property_names: ["literal"],
+      }),
+      expect.objectContaining({ name: null }),
+      expect.objectContaining({ name: "restored" }),
+      expect.objectContaining({ name: "valid" }),
+    ]);
+  });
+});
+
+it("does not infer call names from dynamic computed identifiers", () => {
+  const result = analyzeCapturedWebBundle(
+    inspection(`
+        const fetch = "render";
+        const require = "render";
+        const registerTool = "render";
+        window[fetch]("/render-only");
+        window[require]("./not-a-module.js");
+        document.modelContext[registerTool]({ name: "not-a-tool" });
+      `),
+  );
+
+  expect(result.observations.endpoints).toEqual([]);
+  expect(result.observations.chunks.edges).toEqual([]);
+  expect(result.observations.webmcp_declarations).toEqual([]);
+});
+
+it("retains direct and literal computed call names", () => {
+  const result = analyzeCapturedWebBundle(
+    inspection(`
+        window.fetch("/direct");
+        window["fetch"]("/literal");
+    window[receiver].fetch("/nested-receiver");
+        window.require("./direct.js");
+        window["require"]("./literal.js");
+        document.modelContext["registerTool"]({ name: "literal-tool" });
+      `),
+  );
+
+  expect(result.observations.endpoints.map(({ value }) => value)).toEqual([
+    "/direct",
+    "/literal",
+    "/nested-receiver",
+  ]);
+  expect(
+    result.observations.chunks.edges.map(({ specifier }) => specifier),
+  ).toEqual(["./direct.js", "./literal.js"]);
+  expect(result.observations.webmcp_declarations).toEqual([
+    expect.objectContaining({ name: "literal-tool" }),
+  ]);
+});
+
+it("recognizes tRPC procedures and named GraphQL operations in captured scripts", () => {
+  const result = analyzeCapturedWebBundle(
+    inspection(`
+      const n = createTRPCClient({ links: [httpBatchLink({ url: "/api/trpc" })] });
+      e.invoice.list.useQuery({ competencia: "2026-09" });
+      n.empresa.byCnpj.query("00000000000191");
+      const q = "query ListarNotas($competencia: String!) { notas { id } }";
+      this.client.query({ query: q });
+    `),
+  );
+  expect(
+    result.observations.endpoints.map(({ value, mechanism }) => ({
+      value,
+      mechanism,
+    })),
+  ).toEqual([
+    { value: "/api/trpc", mechanism: "trpc:link:httpBatchLink" },
+    { value: "invoice.list", mechanism: "trpc:procedure:useQuery" },
+    { value: "empresa.byCnpj", mechanism: "trpc:procedure:query" },
+    { value: "ListarNotas", mechanism: "graphql:query" },
+  ]);
+});
+
+it("keeps RPC lexical identity and bundled factory recognition in captured scripts", () => {
+  const longOperation = "Operation" + "x".repeat(512);
+  const document =
+    "#" +
+    "comment".repeat(700) +
+    "\nquery " +
+    longOperation +
+    " { users { id } }";
+  const result = analyzeCapturedWebBundle(
+    inspection(`
+    function first() { const c = createTRPCClient({}); }
+    function unrelated(c) { c.users.query("select 1"); }
+    const c = (0, t.createTRPCClient)({ links: [(0, t.httpBatchLink)({ url: "/api/rpc" })] });
+    c.posts.query();
+    const doc = ${JSON.stringify(document)};
+  `),
+  );
+  expect(
+    result.observations.endpoints.map(({ value, mechanism }) => ({
+      value,
+      mechanism,
+    })),
+  ).toEqual([
+    { value: "/api/rpc", mechanism: "trpc:link:httpBatchLink" },
+    { value: "posts", mechanism: "trpc:procedure:query" },
+    { value: longOperation, mechanism: "graphql:query" },
+  ]);
+  expect(result.completeness.status).toBe("complete");
+});

@@ -1,0 +1,26 @@
+{
+  "providers": [
+    {
+      "name": "ark-coding",
+      "base_url": "https://x/api",
+      "api_key": "k1",
+      "format": "openai-chat-completions",
+      "models": [
+        "a"
+      ],
+      "enabled": false,
+      "model_context": {}
+    },
+    {
+      "name": "ark-plan",
+      "base_url": "https://y/api",
+      "api_key": "",
+      "format": "openai-chat-completions",
+      "models": [
+        "p"
+      ],
+      "enabled": true,
+      "model_context": {}
+    }
+  ]
+}

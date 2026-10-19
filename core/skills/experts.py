@@ -30,14 +30,45 @@ TRACK_DEFAULT_CAPS: dict[str, list[str]] = {"research": ["binary"]}
 
 
 def _parse_expert(path: Path) -> dict:
-    """专家 yaml 极简解析（与 core.skills.roles 同约定）。"""
+    """专家 yaml 极简解析（与 core.skills.roles 同约定）。
+
+    额外支持 ``|``/``|-`` 块标量，用于保存多行 Markdown persona；块内容按
+    YAML 的两空格缩进还原，避免把 ``persona: |-`` 当作字面量。
+    """
     out: dict = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.rstrip()
+    lines = path.read_text(encoding="utf-8").splitlines()
+    i = 0
+    while i < len(lines):
+        raw = lines[i]
+        line = raw.rstrip()
         if not line or line.lstrip().startswith("#") or ":" not in line:
+            i += 1
             continue
         key, _, value = line.partition(":")
-        out[key.strip()] = _parse_inline_value(value)
+        key = key.strip()
+        value = value.strip()
+        if value in {"|", "|-", "|+"}:
+            block: list[str] = []
+            i += 1
+            while i < len(lines):
+                child = lines[i]
+                # 下一个顶层 key 开始，块标量结束；空行属于块内容。
+                if child and not child.startswith((" ", "\t")):
+                    break
+                if child.startswith("  "):
+                    block.append(child[2:])
+                elif child.startswith("\t"):
+                    block.append(child[1:])
+                else:
+                    block.append("")
+                i += 1
+            text = "\n".join(block)
+            if value == "|":
+                text += "\n"
+            out[key] = text
+            continue
+        out[key] = _parse_inline_value(value)
+        i += 1
     return out
 
 
@@ -105,8 +136,8 @@ def expert_skills(packs_root: str | Path, track: str,
     """绑定专家的技能白名单并集（§4.4 专家面，经当前轨变体）。
 
     **硬选口径（2026-10-13）**：会话可见/可路由技能 = 本并集；返回 None = 「不限定」
-    （绑定清单为空，或任一绑定专家 skills=null 如 _generalist）。绑定专家 yaml 被删
-    时跳过该专家（宁严勿松：不静默回退 _generalist 扩权，doctor expert-* 体检兜底）。
+    （绑定清单为空，或任一绑定专家 skills=null 如 _generalist）。明确的 skills=[] = 不加载任何技能。
+    绑定专家 yaml 被删时跳过该专家（宁严勿松：不静默回退 _generalist 扩权，doctor expert-* 体检兜底）。
     """
     bound = [e for e in (experts or []) if str(e).strip()]
     if not bound:
@@ -117,9 +148,12 @@ def expert_skills(packs_root: str | Path, track: str,
         path = base / f"{name}.yaml"
         if not path.is_file():
             continue
-        skills = _apply_variant(_parse_expert(path), track).get("skills")
-        if not skills:  # null 或空列表 = 不限定（全量技能）
-            return None
+        expert = _apply_variant(_parse_expert(path), track)
+        if "skills" not in expert or expert.get("skills") is None:
+            return None  # 缺省/null = 不限定（全量技能）
+        skills = expert.get("skills")
+        if not skills:
+            continue  # 明确 [] = 不加载；与其他专家取并集
         out.update(skills)
     return sorted(out)
 

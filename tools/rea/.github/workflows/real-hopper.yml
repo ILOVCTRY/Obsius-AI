@@ -1,0 +1,35 @@
+name: Real Hopper E2E
+
+on:
+  workflow_dispatch:
+
+env:
+  HUSKY: "0"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Installed package against real Hopper
+    runs-on: [self-hosted, macOS, hopper]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Install packed CLI in isolation
+        shell: bash
+        run: |
+          tarball="$(npm pack --silent)"
+          prefix="${RUNNER_TEMP}/rea-prefix"
+          npm install --global --ignore-scripts --prefix "${prefix}" "./${tarball}"
+          echo "REA_VERIFY_SERVER_COMMAND=${prefix}/bin/rea" >> "${GITHUB_ENV}"
+          echo 'REA_VERIFY_SERVER_ARGS_JSON=["mcp"]' >> "${GITHUB_ENV}"
+      - name: Verify source-owned fixtures with real Hopper
+        env:
+          REA_HOPPER_CONFORMANCE_MANIFEST_PATH: ${{ github.workspace }}/build/conformance/manifest.json
+        run: npm run verify:hopper

@@ -51,6 +51,22 @@ For dynamic instrumentation tools (Frida, angr, lldb, x64dbg), see [[binary/逆�
 
 ---
 
+## Game Boy ROM / LR35902（SM83）
+
+Game Boy ROM 使用 LR35902/SM83 指令集，不能用普通 `objdump` 或 Capstone 的 x86/ARM 模式可靠反汇编。项目 Docker 镜像 `cyberstrike/pentest-box:0.1` 已内置 `mgbdis`，这是专用的 Game Boy ROM 反汇编器，输出 RGBDS 兼容汇编，并支持多 bank 与 `.sym` 文件。
+
+```bash
+# 宿主目录中的 ROM 挂载到容器工作目录
+docker run --rm -it -v "${PWD}:/workspace/scratch" -w /workspace/scratch cyberstrike/pentest-box:0.1 bash
+
+mgbdis game.gb
+# 输出：disassembly/
+```
+
+`.sym` 文件可用 `.code`、`.data`、`.text`、`.padding`、`.image` 标记代码、数据、文本、填充和图像块；代码与数据交错时应先用 PyBoy/模拟器运行轨迹确定代码区，避免线性扫描造成指令错位。PyBoy 用于执行和内存/画面观测，使用公开接口或兼容层，不要访问不存在的 `p.cpu` API。镜像内脚本使用 `mgbdis.py`，不会再以 `dis.py` 遮蔽 Python 标准库。
+
+---
+
 ## GDB
 
 ### Basic Commands

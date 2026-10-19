@@ -18,7 +18,10 @@ html[data-glass="1"] 时把表面/描边 token 统一换成同色相半透明版
   变量（`--wallpaper-image/dim/fit`，内联值优先于这里的默认值）。
 - backdrop-filter 只加在 portal 浮层与主要磨砂件（.app-nav/.wb-aside/
   .wb-composer/.wb-panel/.wb-drawer-panel/.wb-rail/.wb-context-rail/
-  .wb-rail-handle/.wb-todo）上——**不加在整屏 .app-shell**（会把整幅壁纸糊掉）。
+  .wb-rail-handle/.wb-todo/.settings-sidebar）上——**不加在整屏元素**
+  （.app-shell / .settings-shell：会把整幅壁纸糊掉，2026-10-15 实测 bug）。
+  设置页的 wash 放 .settings-main（内容区），shell 透明；左栏按 .wb-aside 的
+  **有效浓度**对齐（token 自带 .96 alpha，混入比例走 --glass-settings-side-a）。
   且**父层已糊过的子层必须关掉自己的 backdrop-filter**：嵌套 backdrop-filter
   只能拿到父层的半透明底色、丢掉下层壁纸（见块内 .nav-rail-slot .wb-aside）。
 """
@@ -72,6 +75,8 @@ BLOCK_TEMPLATE = """__START__ ---------- 毛玻璃质感 + 背景壁纸（2026-1
   --glass-aside-a: .9;
   --glass-composer-a: .94;
   --glass-panel-a: .86;
+  --glass-settings-a: .55;
+  --glass-settings-side-a: .9;
   --surface-0: oklch(var(--surface-0-lch) / 0.78);
   --surface-1: oklch(var(--surface-1-lch) / 0.82);
   --surface-2: oklch(var(--surface-2-lch) / 0.86);
@@ -121,6 +126,8 @@ BLOCK_TEMPLATE = """__START__ ---------- 毛玻璃质感 + 背景壁纸（2026-1
   --glass-aside-a: .72;
   --glass-composer-a: .78;
   --glass-panel-a: .55;
+  --glass-settings-a: .5;
+  --glass-settings-side-a: .44;
 }
 [data-glass="1"] [role="dialog"],
 [data-glass="1"] [role="menu"],
@@ -134,7 +141,8 @@ BLOCK_TEMPLATE = """__START__ ---------- 毛玻璃质感 + 背景壁纸（2026-1
 [data-glass="1"] .wb-rail,
 [data-glass="1"] .wb-context-rail,
 [data-glass="1"] .wb-rail-handle,
-[data-glass="1"] .wb-todo {
+[data-glass="1"] .wb-todo,
+[data-glass="1"] .settings-sidebar {
   /* 前缀必须写在标准属性**之前**：写在后面会被 lightningcss 去重成只留
      -webkit- 一条，而本机 Edge 不认 -webkit-backdrop-filter → 糊化整体失效
      （2026-10-15 实测：前缀版 stddev 95.5 = 无效果，标准版 1.6）。 */
@@ -164,6 +172,45 @@ BLOCK_TEMPLATE = """__START__ ---------- 毛玻璃质感 + 背景壁纸（2026-1
 [data-glass="1"] .wb-panel {
   background: color-mix(in oklab, var(--theme-raw-f07f607b7e) calc(var(--glass-panel-a) * 100%), transparent);
   box-shadow: inset 0 1px 0 var(--glass-highlight);
+}
+/* 设置页（2026-10-18 Nan 七轮反馈「没走毛玻璃」→「左栏还是没走」→「顶栏不协调」
+   →「再重一些」→「不够深、要和周围融合」→「还不协调」）：
+   病症演进：① .settings-shell 原吃两个**全不透** theme-raw 渐变，整页盖死壁纸；
+   ② 首轮修法把 wash 放 shell、侧栏混 --glass-aside-a——但侧栏 token 自带 .96
+   alpha，×.72 得 0.69 有效浓度，且坐在被 wash 预压暗的壁纸上（二次衰减），
+   截图看仍是一块暗板。
+   现行口径（结构上对齐 .wb-aside）：
+   · wash 从 shell **挪到 .settings-main**（内容区观感不变）；shell 本体只出
+     **顶部实色带**（0–36px 满档 + 36px 处 1px --border 发丝线收口，37px 起不绘制）：
+     pt-9 拖动带不能裸裶壁纸（第四轮：横一条亮带），也不能靠长羽化去「融」——
+     第六轮 140px 羽化伸进侧栏 frost 区，在磨砂侧栏头顶压出一块深色渐变帽，
+     是不协调的真正病灶。**定义明确的边 > 渐变更深的带**：实色带走的是本应用
+     顶栏的既有语言（.topbar / .wb-header 均实色 surface + 1px 底边），与周围
+     同色相、发丝线收口，才叫协调；
+   · 实色带不再走 alpha 档（--glass-topbar-a 已废止）：实色面上 8% 壁纸幽灵
+     会在亮壁纸上透出斑块，恰是不协调的来源，要透就透到底、要压就压到实；
+   · 侧栏按 .wb-aside 的**有效浓度**对齐：token 自带 .96，故混入比例单独走
+     --glass-settings-side-a（暗 .44→有效 .42；.wb-aside 为 .55×.72≈.40），
+     并同 .wb-aside 进糊化名单；
+   · 侧栏右缘描边从实色 --theme-raw-a1833752c0 换玻璃发丝线 --border（与
+     .app-nav 边框退透明、改由 .nav-sep 出线同族）。 */
+[data-glass="1"] .settings-shell {
+  background: linear-gradient(180deg,
+    var(--theme-raw-8fcfcc3618) 0,
+    var(--theme-raw-8fcfcc3618) 36px,
+    var(--border) 36px,
+    var(--border) 37px,
+    transparent 37px);
+}
+[data-glass="1"] .settings-main {
+  background: radial-gradient(circle at 80% 0%, var(--theme-raw-97121a9cd1), transparent 34%),
+    linear-gradient(135deg,
+      color-mix(in oklab, var(--theme-raw-8fcfcc3618) calc(var(--glass-settings-a) * 100%), transparent),
+      color-mix(in oklab, var(--theme-raw-95d080f0ad) calc(var(--glass-settings-a) * 100%), transparent));
+}
+[data-glass="1"] .settings-sidebar {
+  background: color-mix(in oklab, var(--theme-raw-0909c417f6) calc(var(--glass-settings-side-a) * 100%), transparent);
+  border-right-color: var(--border);
 }
 /* 右侧栏一族（工具抽屉 / 发现栏 / 上下文栏 / 收起态手柄，2026-10-16）：
    原先吃 `--theme-raw-8b524e3722` **原色**——它自带 55% alpha 但**不在糊化名单里**，

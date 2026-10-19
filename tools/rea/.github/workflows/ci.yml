@@ -1,0 +1,680 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main, "release/*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  # The latest main push verifies the full tree, including earlier changes.
+  # Publication uses its own release workflow and concurrency group.
+  cancel-in-progress: true
+
+env:
+  HUSKY: "0"
+
+jobs:
+  pr-title:
+    name: Conventional PR title
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate title for Release Please
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: >-
+          node -e 'const title = process.env.PR_TITLE ?? "";
+          const conventional = /^(?:feat|fix|docs|refactor|perf|test|build|ci|chore|revert)(?:\([a-z0-9._/-]+\))?!?: .+/u;
+          if (!conventional.test(title)) {
+            console.error("PR title must use Conventional Commits, for example: feat: add historical source import");
+            process.exit(1);
+          }'
+
+  changes:
+    name: Classify changes
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.plan.outputs.code }}
+      runtime: ${{ steps.plan.outputs.runtime }}
+      package: ${{ steps.plan.outputs.package }}
+      apple: ${{ steps.plan.outputs.apple }}
+      fixtures: ${{ steps.plan.outputs.fixtures }}
+      readiness: ${{ steps.plan.outputs.readiness }}
+      docs: ${{ steps.plan.outputs.docs }}
+      workflows: ${{ steps.plan.outputs.workflows }}
+      browser: ${{ steps.plan.outputs.browser }}
+      binary_layout: ${{ steps.plan.outputs.binary_layout }}
+      evm: ${{ steps.plan.outputs.evm }}
+      javascript_recovery: ${{ steps.plan.outputs.javascript_recovery }}
+      recorded_crash: ${{ steps.plan.outputs.recorded_crash }}
+      web_network: ${{ steps.plan.outputs.web_network }}
+      web_runtime: ${{ steps.plan.outputs.web_runtime }}
+      web_source_map: ${{ steps.plan.outputs.web_source_map }}
+      nativeaot: ${{ steps.plan.outputs.nativeaot }}
+      website: ${{ steps.plan.outputs.website }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Select verification lanes
+        id: plan
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          CI_FULL: ${{ contains(github.event.pull_request.labels.*.name, 'ci:full') }}
+        run: node scripts/ci/plan.mjs
+
+  static:
+    name: Static checks
+    needs: changes
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require successful change classification
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+        run: test "${CHANGES_RESULT}" = "success"
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - if: needs.changes.outputs.code == 'true'
+        run: npm run check:ci
+      - if: needs.changes.outputs.code == 'true'
+        run: npm run verify:test-discovery
+      - if: needs.changes.outputs.code != 'true'
+        run: npm run format:check
+
+  test-shard:
+    name: Test shard (${{ matrix.shard }})
+    needs: [changes, build]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1/6, 2/6, 3/6, 4/6, 5/6, 6/6]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: rea-test-runtime
+          path: .
+      - run: npm run test:ci:shard:run -- --shard=${{ matrix.shard }}
+        env:
+          REA_CI_TEST_HISTORY: .cache/ci-test-history/test-results.json
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: vitest-report-${{ strategy.job-index }}
+          path: .vitest/blob/*
+          include-hidden-files: true
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+  build:
+    name: Build package
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Reuse portable build outputs across runs
+        uses: ./.github/actions/portable-build-cache
+        with:
+          save: "true"
+      - run: npm run test:prepare
+      - name: Find successful default-branch timing history
+        id: history
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_REPOSITORY: ${{ github.repository }}
+          CI_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          run_id="$(gh api --method GET \
+            "repos/${CI_REPOSITORY}/actions/workflows/ci.yml/runs" \
+            -f branch="${CI_DEFAULT_BRANCH}" -f event=push -f status=success -f per_page=1 \
+            --jq '.workflow_runs[0].id // empty')"
+          echo "run-id=${run_id}" >> "${GITHUB_OUTPUT}"
+      - name: Download previous timing report
+        if: steps.history.outputs.run-id != ''
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: test-results
+          run-id: ${{ steps.history.outputs.run-id }}
+          github-token: ${{ github.token }}
+          path: .cache/ci-test-history
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rea-test-runtime
+          path: |
+            dist/
+            skills/
+            .cache/mcp-tool-catalog.json
+            .cache/ci-test-history/test-results.json
+            docs/public/product-catalog.json
+            docs/verification/managed-conformance-*.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+      # test:prepare caches only portable JS, skill, and catalog outputs.
+      # Native package jobs still run their build and prepack checks; Turbo
+      # restores matching outputs or rebuilds when their inputs differ.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rea-build-cache
+          path: .turbo/cache/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  test:
+    name: Test (coverage + timing)
+    needs: [changes, test-shard]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require successful test shards
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          CODE_REQUIRED: ${{ needs.changes.outputs.code }}
+          SHARD_RESULT: ${{ needs.test-shard.result }}
+        run: |
+          test "${CHANGES_RESULT}" = "success"
+          test "${CODE_REQUIRED}" != "true" || test "${SHARD_RESULT}" = "success"
+      - uses: actions/checkout@v4
+        if: needs.changes.outputs.code == 'true' && success()
+      - uses: actions/setup-node@v4
+        if: needs.changes.outputs.code == 'true' && success()
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - if: needs.changes.outputs.code == 'true' && success()
+        run: npm ci
+      - uses: actions/download-artifact@v4
+        if: needs.changes.outputs.code == 'true' && success()
+        with:
+          path: .vitest/blob
+          pattern: vitest-report-*
+          merge-multiple: true
+      - name: Merge coverage, JUnit, and timing reports
+        if: needs.changes.outputs.code == 'true' && success()
+        run: >-
+          npm run test:ci:merge --
+          --coverage.reportsDirectory=coverage
+          --coverage.reporter=text
+          --coverage.reporter=json-summary
+          --coverage.reporter=lcov
+          --reporter=default
+          --reporter=junit
+          --reporter=json
+          --outputFile.junit=test-results.xml
+          --outputFile.json=test-results.json
+      - name: Summarize slowest test files
+        if: needs.changes.outputs.code == 'true' && success()
+        shell: bash
+        run: |
+          node <<'NODE' >> "${GITHUB_STEP_SUMMARY}"
+          const report = JSON.parse(require("node:fs").readFileSync("test-results.json", "utf8"));
+          const files = (report.testResults ?? [])
+            .map((result) => ({
+              name: result.name,
+              duration: Math.max(0, (result.endTime ?? result.startTime) - result.startTime),
+            }))
+            .sort((left, right) => right.duration - left.duration)
+            .slice(0, 20);
+          console.log("## Slowest deterministic test files\n");
+          console.log("| File | Duration (ms) |");
+          console.log("| --- | ---: |");
+          for (const file of files) {
+            console.log(`| \`${file.name}\` | ${file.duration} |`);
+          }
+          NODE
+      - uses: actions/upload-artifact@v4
+        if: needs.changes.outputs.code == 'true' && always()
+        with:
+          name: test-results
+          path: |
+            test-results.xml
+            test-results.json
+            coverage/
+          if-no-files-found: error
+          retention-days: 30
+
+  conformance-fixtures:
+    name: Source-built conformance fixtures
+    needs: changes
+    if: needs.changes.outputs.fixtures == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify fixtures from a clean checkout
+        run: npm run verify:fixtures
+
+  windows-native-build:
+    name: Build bundled Windows x64 native controls
+    needs: changes
+    if: needs.changes.outputs.runtime == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Prepare cross compiler
+        run: |
+          # Slow Azure archive transfers can exhaust the job before compilation.
+          # Keep the same signed packages and avoid slow HTTP mirror fallback.
+          for source in /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources; do
+            if [ -f "$source" ]; then
+              sudo sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g; s|http://archive.ubuntu.com|https://archive.ubuntu.com|g' "$source"
+            fi
+          done
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y g++-mingw-w64-x86-64
+      - run: npm run build:windows-native
+      - run: npm run verify:windows-native:artifact
+      - run: node scripts/build-windows-native.mjs --inspection-fixture
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-native-inspection-fixture
+          path: .cache/windows-native-inspection-fixture/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-native-controls
+          path: native/windows/build/
+          if-no-files-found: error
+
+  package-e2e:
+    name: Native package baseline (${{ matrix.platform }} ${{ matrix.architecture }})
+    needs: [changes, build, windows-native-build]
+    if: needs.changes.outputs.runtime == 'true'
+    strategy:
+      fail-fast: false
+      # The four platform jobs use independent hosted runners; keep each
+      # runner's existing heap and threadpool limits while avoiding a queued
+      # second platform wave.
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.changes.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      NODE_OPTIONS: "--max-old-space-size=1024"
+      UV_THREADPOOL_SIZE: "2"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Verify native runtime identity
+        env:
+          EXPECTED_CI_PLATFORM: ${{ matrix.platform }}
+          EXPECTED_CI_ARCHITECTURE: ${{ matrix.architecture }}
+        run: >-
+          node -e "const assert = require('node:assert/strict');
+          assert.equal(process.platform, process.env.EXPECTED_CI_PLATFORM);
+          assert.equal(process.arch, process.env.EXPECTED_CI_ARCHITECTURE);
+          console.log(JSON.stringify({ platform: process.platform, architecture: process.arch, node: process.version }));"
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: rea-build-cache
+          path: .turbo/cache/
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-native-controls
+          path: native/windows/build/
+      - run: npm run verify:windows-native:artifact
+      - name: Resolve npm cache before verifier HOME isolation
+        id: npm-cache
+        run: |
+          cache_path="$(npm config get cache)"
+          echo "path=${cache_path}" >> "${GITHUB_OUTPUT}"
+      - run: npm run verify:package
+        env:
+          npm_config_cache: ${{ steps.npm-cache.outputs.path }}
+      - name: Verify real Node Inspector discovery and observation
+        timeout-minutes: 10
+        run: npm run verify:inspector
+
+  apple-artifacts:
+    name: Real Apple artifact CLI/MCP E2E
+    needs: [changes, build]
+    if: needs.changes.outputs.apple == 'true'
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: rea-build-cache
+          path: .turbo/cache/
+      - name: Verify Apple artifact formats and metadata
+        env:
+          REA_ARTIFACT_NODE_COMPILE_CACHE: ${{ runner.temp }}/rea-artifact-node-cache
+        run: |
+          npm run verify:keyed-archive
+          npm run verify:asset-catalog
+          npm run verify:macos-bundle
+          npm run verify:legacy-simulator
+          npm run verify:apple-dispatch
+          npm run verify:interface-builder
+      - name: Run native Apple and process boundary regressions
+        run: >-
+          npm run test:focused --
+          tests/boundary/filesystem/installScript.test.ts
+          tests/boundary/filesystem/nibNativeHierarchy.test.ts
+          tests/boundary/filesystem/interfaceBuilderBundle.test.ts
+          tests/boundary/cli/nativePlistCli.test.ts
+          tests/boundary/cli/nativePlistPrototypeKeyCli.test.ts
+          tests/boundary/cli/nativePlistSelectionFailureCli.test.ts
+          tests/boundary/cli/nativeDemangleCli.test.ts
+          tests/boundary/mcp/nativeDemangleMcp.test.ts
+          tests/boundary/providers/native/nativeSignatureTargetBinding.test.ts
+          tests/boundary/cli/nativeSignatureCli.test.ts
+          tests/boundary/mcp/nativeSignatureTargetBindingMcp.test.ts
+          src/process/capture/FilesystemSnapshot.test.ts
+          tests/boundary/process/darwinProcessRunTokenReader.test.ts
+          tests/boundary/process/directAnalysisSignals.test.ts
+          tests/boundary/process/processCaptureLifecycle.test.ts
+          tests/boundary/process/processCli.test.ts
+          tests/boundary/mcp/sessionMcp.test.ts
+
+  reconstruction-readiness:
+    name: Reconstruction readiness
+    needs: changes
+    if: needs.changes.outputs.readiness == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Run the public CLI/MCP reconstruction journey
+        env:
+          REA_READINESS_REPORT_PATH: readiness-report.json
+        run: |
+          set -o pipefail
+          npm run verify:readiness | tee readiness-summary.json
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: reconstruction-readiness
+          path: |
+            readiness-summary.json
+            readiness-report.json
+          if-no-files-found: error
+          retention-days: 30
+
+  windows-curated:
+    name: Windows capability and package lane
+    needs: [changes, build, windows-native-build]
+    if: needs.changes.outputs.package == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: rea-build-cache
+          path: .turbo/cache/
+      - run: npm run build:cached
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-native-controls
+          path: native/windows/build/
+      - run: npm run verify:windows-native:artifact
+      - name: Record named Windows host capabilities
+        run: node scripts/windows-capabilities.mjs | Out-File -Encoding utf8NoBOM windows-capabilities.json
+      - name: Validate Windows host capability report
+        run: >-
+          node -e "const report = JSON.parse(require('node:fs').readFileSync('windows-capabilities.json', 'utf8'));
+          if (report.platform !== 'win32' || report.architecture !== 'x64')
+          throw new Error('expected a Windows x64 capability report');"
+      # Keep this list aligned with tests/process-global/curatedWindowsLane.test.ts,
+      # which fails when any path below is renamed or removed. Vitest silently
+      # ignores unmatched paths, so a stale entry would otherwise report green
+      # while skipping coverage.
+      #
+      # The matching native artifact establishes real Job Object and private
+      # runtime boundaries for these fixtures. Ghidra and Java are not needed;
+      # real engine claims remain in the separate controlled-provider workflow.
+      - name: Run curated Windows capability tests
+        run: >-
+          npx vitest run --coverage.enabled=false
+          tests/boundary/filesystem/binaryTarget.test.ts
+          tests/boundary/filesystem/safeOutputTree.test.ts
+          tests/boundary/providers/native/artifactProvider.archiveSafety.test.ts
+          tests/boundary/providers/native/artifactProvider.extractionCompleteness.test.ts
+          tests/boundary/filesystem/setupUnavailableProvider.test.ts
+          tests/boundary/filesystem/windowsNpxRegistration.test.ts
+          tests/boundary/filesystem/webScriptManifestPaths.test.ts
+          tests/boundary/process/ProcessEvidence.host.test.ts
+          tests/acceptance/webModuleCli.test.ts
+          tests/acceptance/webSourceLocationCli.test.ts
+          tests/boundary/cli/referenceSourceImportStatus.test.ts
+          tests/boundary/filesystem/asarInventoryFreshness.test.ts
+          tests/boundary/filesystem/javascript-applications/javascriptArtifactReconstruction.test.ts
+          tests/conformance/providers/ghidra/windowsCapabilities.test.ts
+          src/ghidra/GhidraInstallation.test.ts
+          tests/boundary/providers/ghidra/ghidraTransport.test.ts
+          tests/boundary/providers/ghidra/ghidraTargetSnapshot.test.ts
+          tests/boundary/providers/ghidra/ghidraLauncher.test.ts
+          tests/boundary/providers/hopper/hopperClient.cleanupRetry.test.ts
+          src/windows/WindowsNativeLoader.test.ts
+          src/windows/WindowsOwnedProcess.test.ts
+          src/ghidra/GhidraLauncherEnvironment.test.ts
+          src/process/ProcessOwnership.test.ts
+          src/process/ProcessOwnership.part2.test.ts
+          src/process/ProcessOwnership.part3.test.ts
+          src/process/ProcessOwnership.validation.test.ts
+          src/application/Update.test.ts
+          tests/process-global/updateMaintenance.test.ts
+          tests/conformance/providers/ghidra/realGhidraWindowsWorkflow.test.ts
+      - run: npm run verify:windows-native
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-native-inspection-fixture
+          path: .cache/windows-native-inspection-fixture/
+      - name: Verify native inspection failure ownership and recovery
+        run: node scripts/verify-windows-native-inspection.mjs
+      - name: Verify real Node Inspector discovery and observation
+        timeout-minutes: 10
+        env:
+          NODE_OPTIONS: "--max-old-space-size=1024"
+          UV_THREADPOOL_SIZE: "2"
+        run: npm run verify:inspector
+      - run: npm run verify:package:windows
+      - name: Verify native directory identity on Node 24
+        run: >-
+          npx vitest run --coverage.enabled=false
+          tests/boundary/filesystem/directoryArtifactReaderOpen.test.ts
+          tests/boundary/filesystem/javascriptPackagePrecedence.test.ts
+          tests/boundary/filesystem/javascriptArtifactContentIdentity.test.ts
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+      - name: Verify native path boundaries on Node 22
+        run: >-
+          npx vitest run --coverage.enabled=false
+          tests/boundary/filesystem/directoryArtifactReaderOpen.test.ts
+          tests/boundary/filesystem/javascriptPackagePrecedence.test.ts
+          tests/boundary/filesystem/javascriptArtifactContentIdentity.test.ts
+          tests/boundary/process/sourceMapUncHosts.test.ts
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-capabilities
+          path: windows-capabilities.json
+          retention-days: 30
+
+  docs:
+    name: Docs Generation
+    needs: changes
+    if: needs.changes.outputs.docs == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run docs:check
+      - name: Generation leaves authored files unchanged
+        run: git diff --exit-code
+      - uses: actions/upload-artifact@v4
+        with:
+          name: generated-docs
+          path: |
+            docs/public/product-catalog.json
+            docs/verification/managed-conformance-*.json
+            skills/reverse-engineer-anything
+          if-no-files-found: error
+
+  workflows:
+    name: Validate workflows
+    needs: changes
+    if: needs.changes.outputs.workflows == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate workflow syntax and expressions
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 -shellcheck= -pyflakes=
+
+  browser:
+    needs: changes
+    if: needs.changes.outputs.browser == 'true'
+    uses: ./.github/workflows/real-browser.yml
+
+  binary_layout:
+    needs: changes
+    if: needs.changes.outputs.binary_layout == 'true'
+    uses: ./.github/workflows/real-binary-layout.yml
+
+  evm:
+    needs: changes
+    if: needs.changes.outputs.evm == 'true'
+    uses: ./.github/workflows/real-evm-interface.yml
+
+  javascript_recovery:
+    needs: changes
+    if: needs.changes.outputs.javascript_recovery == 'true'
+    uses: ./.github/workflows/real-javascript-recovery.yml
+
+  recorded_crash:
+    needs: changes
+    if: needs.changes.outputs.recorded_crash == 'true'
+    uses: ./.github/workflows/real-recorded-crash.yml
+
+  web_network:
+    needs: changes
+    if: needs.changes.outputs.web_network == 'true'
+    uses: ./.github/workflows/real-web-network-captures.yml
+
+  web_runtime:
+    needs: changes
+    if: needs.changes.outputs.web_runtime == 'true'
+    uses: ./.github/workflows/real-web-runtime.yml
+
+  web_source_map:
+    needs: changes
+    if: needs.changes.outputs.web_source_map == 'true'
+    uses: ./.github/workflows/real-web-source-map.yml
+
+  nativeaot:
+    needs: changes
+    if: needs.changes.outputs.nativeaot == 'true'
+    uses: ./.github/workflows/nativeaot-fixtures.yml
+
+  website:
+    needs: changes
+    if: needs.changes.outputs.website == 'true'
+    uses: ./.github/workflows/website-check.yml
+
+  required:
+    name: CI required
+    if: ${{ always() }}
+    needs:
+      [
+        changes,
+        pr-title,
+        static,
+        build,
+        test-shard,
+        test,
+        conformance-fixtures,
+        windows-native-build,
+        package-e2e,
+        apple-artifacts,
+        reconstruction-readiness,
+        windows-curated,
+        docs,
+        workflows,
+        browser,
+        binary_layout,
+        evm,
+        javascript_recovery,
+        recorded_crash,
+        web_network,
+        web_runtime,
+        web_source_map,
+        nativeaot,
+        website,
+      ]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Require every selected lane to pass
+        env:
+          CI_JOBS: ${{ toJSON(needs) }}
+        run: node scripts/ci/required.mjs

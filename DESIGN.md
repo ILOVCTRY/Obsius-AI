@@ -109,7 +109,86 @@ WAL + 线程局部连接 + `_tx()`（进程内写锁 + BEGIN IMMEDIATE）串行�
 
 ## 独立验证器（independent-verification-audit M1，2026-09-23 实施）
 
-**收口判定独立化**：题目做对了没有，不是 Agent 自己说了算的。验收条目从纯字符串升级为 `str | {text, verify}`（向后兼容零迁移）——带 verify 规格的条目其 met/failed 由服务端验证器自动判定，**Agent 自报被存储层拒绝**（`set_reconcile_state` 红线，只能置 blocked 附不适用理由；人工可审计）。规格受约束 schema（未知键拒绝，仿阶段剧本精神）四策略（core/verify.py，地位仿 phases.py）：flag_capture（file: 工作区相对路径防穿越 / cmd 取输出，exact/contains/regex 三匹配）/ effect_proof（检查清单逐项）/ poc_crash（signal 退出码启发 / asan 特征）/ oracle（脚本输出 `{pass, detail}` JSON 兜底）。**执行面**：平台身份 trusted + host + 工作区隔离经执行网关全量策略校验（审计事件照落）；**收尾钩子**：complete 先跑未判定条目（failed 也重跑=「修正后重新 complete 重验」，blocked 跳过），未过 ValueError 拦下本次 done——零新闸复用对账硬拦；逐条 `verify.result` 事件（author=verifier）。**脱敏红线（照抄 VulnHouse VE）**：判定回执只含 passed + 结构化摘要（长度/sha256 前 12），输出原文/预期值/oracle detail 绝不回显——防 Agent 经验证接口反套答案；规格异常/网关拒绝一律 fail-closed 判未过。M2 Auditor / M3 交棒 / M4 重派注入见 docs/plans/independent-verification-audit.md。
+**收口判定独立化**：题目做对了没有，不是 Agent 自己说了算的。验收条目从纯字符串升级为 `str | {text, verify}`（向后兼容零迁移）——带 verify 规格的条目其 met/failed 由服务端验证器自动判定，**Agent 自报被存储层拒绝**（`set_reconcile_state` 红线，只能置 blocked 附不适用理由；人工可审计）。规格受约束 schema（未知键拒绝，仿阶段剧本精神）六策略（core/verify.py，地位仿 phases.py）：flag_capture（file: 工作区相对路径防穿越 / cmd 取输出，exact/contains/regex 三匹配）/ effect_proof（检查清单逐项）/ poc_crash（signal 退出码启发 / asan 特征）/ oracle（脚本输出 `{pass, detail}` JSON 兜底）/ **nonce_exec**（2026-10-19，借鉴 hxbai `engine/verify.py`：服务端发随机 nonce，命令模板必须含 `{nonce}` 占位符，让**目标**算 `sha256(nonce)[:16]` 回显；命中才算打通，只回显 nonce 无哈希判「反射/假回显」——治「模型自称命令执行成功」）/ **differential**（BASELINE 与 PROOF **两次独立 executor 调用**取各自输出，PROOF 独有行（去空、≥4 字符）达 `min_diff` 才算成立；写死「同一段输出里同时出现两段标记」= 伪造形状直接拒——模型无法一手编造两条工具结果）。**执行面**：平台身份 trusted + host + 工作区隔离经执行网关全量策略校验（审计事件照落）；**收尾钩子**：complete 先跑未判定条目（failed 也重跑=「修正后重新 complete 重验」，blocked 跳过），未过 ValueError 拦下本次 done——零新闸复用对账硬拦；逐条 `verify.result` 事件（author=verifier）。**脱敏红线（照抄 VulnHouse VE）**：判定回执只含 passed + 结构化摘要（长度/sha256 前 12），输出原文/预期值/oracle detail 绝不回显——防 Agent 经验证接口反套答案；规格异常/网关拒绝一律 fail-closed 判未过。M2 Auditor / M3 交棒 / M4 重派注入见 docs/plans/independent-verification-audit.md。
+
+## CTF 解题内核（ctf-kernel，2026-10-19 实施）
+
+**来源**：对标开源项目 hxbai（内部名 hxctf，LLM 自主交战引擎，51 个 engine 模块约 15.6k 行）。它是 Linux 单容器 + claude CLI 子进程 + TSG 事件源状态图 + EVSI 预算调度的形态，**整条引擎不可搬**（调度/执行器与我们的会话/Team/黑板三层直接打架）；可搬的是**无形态依赖的判定与抽取内核**。故新建独立包 `core/ctf/`（零黑板依赖、纯 stdlib、可单测），四模块：
+
+| 模块 | 解决的问题 | 接线点 |
+|------|-----------|--------|
+| `flagjudge.py` | 「这串东西是不是 flag」——候选抽取（剔模板语法/URL 编码）、置信打分（前缀可信 + 内层熵 + 诱饵惩罚）、变换回环、跨题家族 | `ctf_submit_flag` 工具、`_flag_neighbor_owner` |
+| `observe.py` | 零 LLM 观测结构化——nmap 行→端口/服务、URL/路径、凭据形态（含 base64/URL 内嵌/字段配对）、salient 要点、易变值归一化 + 观测指纹 | `run_cmd` 回执尾部摘要 |
+| `ammo.py` | 凭据弹药管线——产品指纹（需语境才认）→ 厂商默认口令 → 年份/后缀/leet 变异 → `user:pass` 成对 | `ctf_ammo` 工具（写 scratch 候选表） |
+| `pacing.py` | 时长无关化——预算随「比赛总时长 × 题量」缩放，clamp [0.25, 3.0]；endgame 收尾窗口 | `ChatTurn._pacing_context()` 注入 system |
+
+**反伪造核心口径**：「模型说自己证明了不算，证据链说了算」。落到三处机械判定：
+
+1. **格式置信**（`flagishness`）——`FLAGISH_FLOOR=2.0`。打分表在 hxbai 原版基础上**补强两行**（原版只看前缀，漏判题面示例最常见的「前缀正常 + 内层占位」形态）：内层是诱饵词（`flag{example}`/`flag{test}`/`flag{fake_flag}`）→ **-5**；内层过短（<3 字符，`flag{x}`）→ **-3**。于是 `flag{example}`=-2（拒）、`flag{x}`=0（拒）、`flag{abc123}`=4（过）。另有同形簇抑制（同前缀 ≥4 个不同内层 = 刷屏假阳性全丢）与内层去重（同内层只留最高分）。
+2. **变换回环**（`roundtrip_verify`）——模型声明 `source` + `transform` 时，把 flag **编码回去**检查是否出现在 source 里：真解码必然回环，瞎猜不会。变换名不认识返回 None（不做断言，宁松勿误判）。
+3. **跨题防串**（`neighbor_owner`）——内层长度 ≥8 且互为子串 → 判为同族，owner 不是本题则拒。治多题并发时 A 题 flag 出现在 B 题共享目录/上游扫描结果里被当 B 题答案。
+
+**`ctf_submit_flag`（工具，group=黑板，flags=intent_flow）**：CTF 轨 flag 判定与登记的唯一出口。参数 `flag`/`evidence`/`source`/`transform`/`challenge_id`/`candidate`。流程：非 CTF 轨拒 → 从原文抽候选取最高分 → 自然语言内层拒 → 置信 < 阈值拒（提示 `candidate=true` 这条出路）→ 给了 source+transform 时回环 False 拒 → 跨题串号拒 → **人工否决清单**（`is_rejected`：被标过错误 flag 的串连理由一起拒）→ 定归属（显式 `challenge_id` > 线程题目兜底，都无则拒**不编造归属**）→ 正式 flag 走 ① 进 **flag 台账**（`challenge_flags`，`record_flag` 落 `verdict='pending'`，唯一真值）② 同时落一条 `intel/unverified` **过程留痕** finding（不受「正式漏洞五项必填」契约约束——CTF flag 不是漏洞）③ `set_finding_id` 双向关联。`candidate=true` 落 `high/unverified/intel` 且**不进台账**（线索不是答案，进了就会把题目算成 solved）。**本工具不联网提交**，只做本地判定与登记。（语义在 challenge-flag-ledger v47 变更，见下节。）
+
+**`run_cmd` 观测摘要**：CTF 轨工具回执尾部追加 `observe.summarize_output` 结果（`[观测] 端口: …` / `[观测] 凭据 N 组: …（机械抽取，有效性须自行验证）` / `[观测] flag 候选 N 个: …（须核实真伪，正式提交用 ctf_submit_flag）`）。非 CTF 轨、无输出、抽不出信号 → 回执**零变化**；摘要**不写黑板**（写不写仍由模型经 `bb_add_finding` 决定）。
+
+**flag 显式观测段（2026-10-19）**：`observe.extract_flags` 复用 `flagjudge.confident_flags` 的三道闸（自然语言内层 / 诱饵 / 刷屏同形簇全剔）单列一段，**不再让 flag 只当「要点」里的普通一行**——一次 200 行 `strings`/`cat` 输出要点只留 8 行，flag 极易被挤掉，而它是本轨唯一「必须看见」的信号。**只做观测提示，不判定解出**（是否计入题目仍由台账决定）。顺带修了一个真缺陷：`_clean_twin` 原先把 `fake_flag{deadbeef99}` 洗成干净孪生候选 `flag{deadbeef99}`，白送 +3 前缀分绕过三道闸——诱饵前缀现不再参与孪生清洗（中性上下文 `theflag{}`/`picoCTFflag{}` 仍救回）。
+
+**`run_cmd` 原地打转提示（2026-10-19）**：`ToolDispatcher._with_repeat_guard` 在回执尾部按**完全相同**的命令串计数（本会话最近 120 条 `command` 事件，不做归一化/相似度——`?id=1` 与 `?id=2` 是不同尝试，误并会冤枉正常枚举）：≥3 次 `[重复执行]` 轻提示，≥5 次 `[原地打转]` 明说「继续跑不会带来新信息」并引导把否定结论落黑板。**不阻断、不改命令**——模型没有跨轮的精确命令计数器，本函数只补它看不见的事实。动因：`AgentSession._command_repeat_stats` 只喂策略顾问（多步无进展才触发），**对话线程（CTF 主控/子专家）此前零反馈面**，可以对着同一题把同一条 `curl` 跑十几遍。回执出口统一为 `_finish_cmd_receipt`（原地打转 → CTF 观测摘要），顺带修了「环境恢复后的重试回执不带观测摘要」的漏挂。
+
+**`ctf_ammo`（工具，group=执行）**：弱口令题的候选字典生成器。输入 `obs_text`（响应头/banner/nmap）/ `hint_text`（题面线索）/ `users` / `known_creds`，`pairs=true` 给 `user:pass` 行、否则纯口令表；产出**写进 `scratch/ctf-ammo-<sha8>.txt`**（文件名按素材哈希，同素材幂等覆盖）并回候选前 20 条 + 用法示例。**不执行爆破、不发网络请求**——口径同时写在工具描述与回执里（模型读到「已生成」极易误以为「已经打过了」）。候选表恒不含 flag 形态串（防自己泄题）。仅 CTF 轨可用。
+
+**pacing 接线**：`ChatTurn._pacing_context()` 在 CTF 轨把 `Pacing.describe()` 注入 `_challenge_context()`——`- 时间预算（ctf-pacing）：scale=1.00 总时长=6.0h 题量=63 剩余=2.1h；单题硬上限按 150 分钟算`。进 endgame 追加「**已进收尾窗口**——停止开新战线，只做能交的题收尾与 writeup」。配置来源 `config.ctf.{deadline, tasks}`（`deadline` 收 ISO8601 或 epoch 秒，经 `_to_epoch` 归一；解析失败**退回阶梯推断而不猜假时间**），未配置也注入（按本线程 `created_at` 起的已跑时长向上猜赛制）——**不知道赛制不等于没有时间感**。非 CTF 轨返空串。
+
+**CTF 维度清单**：`packs/kb/ctf/dimensions.yaml` 首版四个面——triage（分诊归类）/ analyze（静态分析）/ reproduce（动态验证）/ flag（结论与 flag 验证）。**刻意比渗透轨少得多**：渗透是「一个资产穷举攻击面」，面越细越好；CTF 是「一题一条链路，解出即完成」，切十个面会变成机械凑数（模型被迫为不适用的面写 dead_end）。`applies_to` 只挂 binary/host/service/url，不挂 challenge——题目级一题一线程由主控自己解，维度收敛闸只对「被分配资产的子专家」生效，不必要地约束主控。
+
+**前端体现（2026-10-19 对齐，零 schema 迁移）**：内核改动本身**不新增任何前端数据契约**，落在既有视图上——① **设置页「工具」tab**（`AgentToolsPane.tsx` ← `GET /api/agent-tools`）自动多出 `ctf_submit_flag`（黑板组）/ `ctf_ammo`（执行组）两张工具卡，无需前端改动；② **黑板「意图」tab**（`IntentsPane.tsx`）的「维度 {id}」会显示 ctf 四面 `triage`/`analyze`/`reproduce`/`flag`；③ **诊断页「系统提示词」**（`DiagnosticsView.tsx`）能看到 `_pacing_context()` 注入的 `- 时间预算（ctf-pacing）：scale=… 总时长=… 题量=… 剩余=…` 与 endgame 提示——排查「时间感到底进没进上下文」不必再猜；④ **黑板题目行 🚩 徽章 + 发现详情 FLAG 区块**（`extractFlag`）；⑤ **黑板「CTF-Agent」tab 的「赛制时间」面板**（新增写入口，见下）。④ 本轮**修了两个真缺陷**：`FLAG_RE` 前缀改可选（旧式要求 `flag`/`ctf` 前至少 1 字符，`ctf_submit_flag` 写入的裸 `flag{…}`/`htb{…}` 在 UI 上**完全不显示**，与 `flagjudge` 的候选口径不一致）；`flagByChallenge` 只认 `status==="verified"`（`candidate=true` 的线索也写 `evidence.flag`，不加闸绿色 🚩 会把「疑似线索」冒充成「已解出」），详情弹窗按 `row.status` 分「FLAG（绿）/ 候选 FLAG（警示色 + 说明）」两态。
+
+**`config.ctf` 写入口（2026-10-19）**：pacing 此前只有读路径（`_pacing_context`），配置只能手改 `project.json`。现补 `core/ctf/pacing.py::normalize_ctf_config`（`core/projects.py::update_config` 调用，非法 **422**，空段剥键回落阶梯推断）+ 前端面板（黑板「CTF-Agent」tab →「赛制时间」：截止时间文本框 / 题目总数 / 保存赛制，走 `api.patchProjectConfig(pid, {ctf})`）。**归一化不是可选项**：`{"tasks": "abc"}` 若静默进盘，读路径 `int()` 会吞成 0 再落 `ANCHOR_NTASKS`——配置没生效但人看不出来。`tasks` 收正整数（数字串容忍），`deadline` 收非空字符串（ISO8601）或正数（epoch 秒）。
+
+**不搬的部分**：11GB 单镜像 / 纯正则 decide / `run_bench` 平台特化 hack / TSG 调度与 EVSI 预算（依赖它的事件源状态图）。
+
+## CTF flag 台账（challenge-flag-ledger v47，2026-10-19 实施）
+
+**要解决的问题**：v47 前 flag 是「一条 findings 行」——而 findings 的「正式漏洞五项必填契约」（复现步骤/测试环境/验证结果/风险影响评估/POC）是为**渗透结论**设计的，CTF flag 不是漏洞，只能硬写套话过闸（`risk_assessment` 写「CTF 题目环境内的解题结论，不对应真实业务风险」这类废话）。且「这道题解出来没有」没有单一真值：`solved` 散在 findings 的 status/severity 里靠前端猜。
+
+**台账是 flag 的唯一真值**（`challenge_flags` 表，schema v47，DDL `IF NOT EXISTS` 建表无 ALTER，旧库打开即建）：
+
+| 字段 | 语义 |
+|------|------|
+| `flag` / `flag_format` / `confidence` | 值 + 题目声明格式（只加权不减）+ 判定置信 |
+| `source` / `transform` | 解题路径摘要 + 变换名（回环验证用） |
+| `judged_by` | `ai` / `human`——**谁说的算**在这一列 |
+| `verdict` | `pending`（AI 判定通过待复核）/ `accepted`（人工确认）/ `rejected`（人工否决） |
+| `verdict_reason` / `finding_id` | 否决理由（再提交时连理由一起拒）/ 过程留痕 finding 反查 |
+
+**题目状态是派生值，不独立存储**（`challenge_state`）：`solved`（计数 ≥ `meta.flag_count`，缺省 1）> `partial` > `abandoned`（唯一非派生位——「放弃」是人类意图不是数据事实）> `running` > `untouched`。**`pending` 与 `accepted` 同计入 solved**——AI 判定通过即算解出，人工复核只是事后纠正渠道。
+
+**`verdict='rejected'` 是真闸**：立刻从 solved 派生里扣除（状态自动生效，无需改任何存储），且同串再提交被 `ctf_submit_flag` 的 `is_rejected` 直接拦（连理由一起回执）——否则模型会反复提交同一串，每次白跑一遍 flagjudge + 落一条 finding。
+
+**`ctf_submit_flag` 语义变更**：正式 flag ① 进台账（`record_flag`，AI 落 `pending`）② 同时落一条 `intel/unverified` 的**过程留痕** finding（不受五项必填契约约束，因为它是留痕不是结论）③ `set_finding_id` 双向关联。`candidate=true` 的候选线索**不进台账**（线索不是答案，进了台账就会把题目算成 solved），只落 intel finding。
+
+**API**：`GET /api/challenges/{aid}/flags`（含 rejected——人工裁决界面要看到才能撤销误否决）、`POST …/flags`（人工录入 `judged_by=human`，默认 accepted）、`PATCH …/flags/{fid}`（裁决 pending/accepted/rejected + reason）、`POST …/abandon`（放弃/撤销放弃）。存量 flag 由 `backfill_from_findings` 惰性补登（`vuln_class='flag-capture'` 且 `evidence.flag` 非空）。
+
+**前端体现（2026-10-19 接入）**：① 题目行 **🚩 台账 N** 按钮 → `ChallengeFlagLedger` 弹层（逐条裁决 / 手工录入 / 放弃这道题）；② 题目行**派生状态徽章**（`ChallengeStateBadge`：已解出/部分解出/求解中/已放弃，多 flag 题显示 `2/3` 进度）；③ 题目行 🚩 徽章的取值**改为台账优先**——`flagByChallenge` 先取台账里第一个非 rejected 的 flag，findings 反查降级为兜底（仅 `verified && category=vuln`，防候选线索冒充已解出）。③ 是必须的：台账重构后正式 flag 的留痕 finding 是 `unverified/intel`，若只认 verified 反查，🚩 会**永远不显示**。
+
+## CTF 轨调度与收敛（artex-ctf-track v47，2026-10-19 实施）
+
+**问题**：CTF 轨与渗透轨的「收敛」口径完全不同——渗透轨问「资产测完了吗」，CTF 轨问「题目解出来了吗」。v47 前 CTF 轨沿用资产口径，出现三个具体病症：① 覆盖度显示「已测资产 0/3」——题目不是拿来测的，这个数字既无意义又诱导模型「随便测一下就算覆盖」；② 拿到一条 finding 就被判「有发现即达成」的假收敛；③ 已解出的题仍会被反复派 Worker（模型看到题目还在队列里就会再打一遍，提示词约束不住）。
+
+**黑板是唯一资产来源**（用户 2026-10-19 定稿）：CTF 轨资产=**题目**（`type='challenge'`），入口点做成**子资产**（web 题是 `url`、附件题是 `file`/`binary`，`meta.role="entry"`）——天然支持多入口（web 题既有 URL 又有源码包、pwn 题多附件），且复用 `register_asset` 单一写入口（E6 红线）。**findings 仍存在但不进 CTF 终态判据**：它是过程留痕（intel/unverified），不是「解出来没有」的证据。
+
+**题目 `value` 的稳定性**：`register_asset` 去重键是 `UNIQUE(project_id, type, value, parent_id)`。显式名 → `value` 用名字；无名字 → 内容指纹 `challenge-<sha1[:12]>`（seed = brief/description/title + entry_hint + entries JSON，只拼非空部分）；都空 → `ValueError`。**AI 自动命名只写 `meta.title`（展示层），不改 `value`**——展示名与去重键分离后，「AI 改名」是零风险操作。
+
+**两级并发约束**（用户拍板「单题上限 5 / 全局默认 15」）：全局 `config.artex.max_workers` 默认 **15** = 单题 `config.artex.per_challenge_workers`（默认 **5**）× 3 道并发题 + 余量。**全局必须显著大于单题上限**，否则单题上限永远打不满、形同虚设。
+
+**题目闸落在调度层，不落提示词**（`core/blackboard/artex_intents.py::challenge_gate` + `claim_next_intent` 两个闸）：① 已解/已放弃题目的 pending 意图**批量置 `cancelled`**（不是「跳过」——跳过会让它们永远堵在队首）；② 同题在跑 Worker 数达 `per_challenge_limit` 时**跳过**该题的 pending（不置状态，等槽位释放）。`challenge_gate` 每 tick 只算一次（要扫 assets + 在跑 Intent），非 CTF 轨返回全空集合，四个新入参全空时 `claim_next_intent` 行为与引入前**完全一致**。
+
+**CTF 轨两处口径分派**：① `task_coverage` 走 `challenge_coverage`（分母=题目数、分子=已解题目数、`scope_source="challenges"`）；② `evaluate_task` 走 `_ctf_task_state`（全部题目 solved → `goal_reached`；有 Worker 在跑 → `exploring`；都不在跑且未全解 → `needs_review`），metadata 带 `track="ctf"` + `challenge_stats`。范围=任务锚点里的题目 ∪ Intent 锚定的题目，都空则全部题目。无题目时两条路径都返回 `None` 走原渗透口径。
+
+**一个 ARTEX 主控只绑定一个任务**：`chat_threads.artex_task_id`（v46 已有字段）由 `artex_plan` 新建任务时立刻写入（`bind_task_to_thread`），`resolve_task` 改为三级 **显式传参 > 线程绑定 > `active_task_id`（降级）**。降级路径必须保留——老线程/API 直连/工作台无会话都没有线程绑定。ARTEX 面板**不提供新建任务入口**（ARTEX 是唯一主控，要建题就让它建）；保留「从已有题目创建任务」作为降级入口（用户拍板「保留」）。
+
+**主控状态回执**：`artex_status` 在目标段之后插入 `_challenge_status_lines`——进度 `解出 N/M 道`、逐题 `✓/◐/▶/✗/○` + 状态标签 + `got/quota` + Worker 数 + 否决数，末尾一句「CTF 轨口径」说明（覆盖度=已解题目数，不是已测资产数）。非 CTF 轨返回空段。
 
 ## 业务语义层
 
@@ -205,7 +284,7 @@ events 表全量审计 + EventBus 同步落库、尽力广播；前端按游标�
 
 **要解决的问题**：覆盖度（`coverage.py`）只回答「这个资产摸过没有」，回答不了「测的面够不够」——一个资产可 coverage=100% 却只测了可达性就被标 `tested_clean`。本功能把「该测哪些面」显式成一张**可判定的维度清单**，让收敛判据从「覆盖度」变成「面是否都有结论」。
 
-**维度清单**：`packs/tracks/<track>/dimensions.yaml`——轨级静态表（仿 `phases/*.yaml`，受约束 yaml 极简解析，零 PyYAML），项目可经 `config.dimensions` 同名 id 整体覆写。每个维度：`id`（稳定标识，意图按此归属）/`name`/`applies_to`（适用资产类型 domain/host/service/url/binary）/`intent`（意图模板，`{asset}` 由调用方替换）/`evidence_hint`（收尾为 dead_end 时什么样的证据才算「确实排除了」）。pentest 轨首版 11 个面：unauth/authz/weakpass/sqli/upload/rce/traversal/ssrf/xss/infoleak/deserial。
+**维度清单**：`packs/kb/<track>/dimensions.yaml`（**2026-10-13 能力包退役后由 `packs/tracks/` 迁入 `packs/kb/`**，`core/skills/taxonomy.track_dir` 即 `packs/kb/<track>/`）——轨级静态表（仿 `phases/*.yaml`，受约束 yaml 极简解析，零 PyYAML），项目可经 `config.dimensions` 同名 id 整体覆写。每个维度：`id`（稳定标识，意图按此归属）/`name`/`applies_to`（适用资产类型 domain/host/service/url/binary）/`intent`（意图模板，`{asset}` 由调用方替换）/`evidence_hint`（收尾为 dead_end 时什么样的证据才算「确实排除了」）。pentest 轨首版 11 个面：unauth/authz/weakpass/sqli/upload/rce/traversal/ssrf/xss/infoleak/deserial；**ctf 轨 2026-10-19 补四面**：triage/analyze/reproduce/flag（刻意比渗透少——CTF 是一题一条链路，切太细会变成机械凑数；详见「CTF 解题内核」）。
 
 **面覆盖判定**（`core/dimensions.py::dimension_coverage`，纯函数）：**面覆盖 ⟺ 该面有 ≥1 条收尾意图（`status=closed`）且无 open 意图**。返回 `{covered, uncovered, open}`；`is_converged(intents, dims)` = 所有适用面全覆盖（dims 空则不拦）。面是**下限不是上限**——一个面可派多条意图往深挖，不漏面即可。
 
@@ -224,6 +303,19 @@ events 表全量审计 + EventBus 同步落库、尽力广播；前端按游标�
 ## 指定资产删除（2026-09-25 补 UI 入口）
 
 走查垃圾/误登记资产的人工清理通道，**物理删除不进回收站、不级联**。后端早已就位：`Blackboard.delete_asset(aid, author)`（store，2026-09-15）——门控：仍被 finding.target_asset_id 引用，或存在子资产 → ValueError（API 409，文案指名先处理发现/子资产）；不存在 → LookupError（404）；删后落 `asset.deleted` 审计事件（含 value/parent_id 快照）。API：`DELETE /api/projects/{pid}/assets/{aid}`（404 资产不属于本项目 / 409 门控）。**误报走 PATCH false-positive 不走删**（发现口径不变）。前端 [Blackboard.tsx](webui/src/views/Blackboard.tsx) 资产行内 🗑 按钮（平铺 AssetRow / 树 renderNode / 标签筛选三路径，`api.deleteAsset`）：点击先 confirm 确认窗，409 文案落底部错误行；compact 侧栏不挂删除入口。
+
+## 项目回收站终点操作（2026-10-18）
+
+删除=整目录 rename 进 `workspaces/.trash/`（不物理删除、可恢复）之外，回收站提供两个人工终点操作（[TrashView.tsx](webui/src/views/TrashView.tsx) 每行按钮，均先 confirm）：**永久删除**——`ProjectStore.purge_trashed` 物理抹除 `DELETE /api/projects/trash/{trash_name}`，不可恢复；**清除项目内文件**——`ProjectStore.clear_trashed_contents`（`POST /api/projects/trash/{trash_name}/clear`）抹除条目内除 project.json 外的一切（黑板库/样本/产物/日志），meta 落 `trash_purged_at` 墓碑戳：条目仍留在回收站清单（名字/轨道/专家绑定可展示，回执 freed_bytes），但数据没了——`restore_project` 对墓碑条目明确 ValueError（API 422，防恢复出残缺项目），前端禁用「恢复」、仅剩「永久删除」收口。句柄校验（拒分隔符/上跳）与 Windows 占用退避重试（0/0.05/0.1/0.2s）复用删除/恢复同款口径。
+
+### Windows 删除两个必踩坑（2026-10-19 线上 500 复盘）
+
+线上「永久删除」连续三次 500，根因是**两层叠加**：路由已热更但异常处理未热更（旧字节码只 `except PermissionError`，`OSError` 漏成裸 500——`core/` 改动不热加载，必须重启平台）；以及 `_remove_entry` 撞到两种 Windows 上根本删不掉的条目形态。二者都已在 `core/projects.py` 收口，**新代码上线后必须重启平台才生效**。
+
+1. **WSL LX 符号链接（reparse tag `0xA000001D`）在 Windows 上删不掉。** Agent 在 WSL 里建 venv 会留下 `bin/python3 -> /usr/bin/python3`、`lib64 -> lib`，从 Windows 看是 `attrs=0x400/0x410/0x420` 的 reparse point。实测（真机 E: 盘 NTFS）对它：`os.unlink` / `DeleteFileW` / `RemoveDirectoryW` / `SetFileInformationByHandle(FileDispositionInfo|Ex，含 POSIX 语义)` / `NtSetInformationFile` / `shutil.rmtree` / `cmd del` / `cmd rd` / PowerShell `Remove-Item` / `robocopy /MIR` / MSYS `rm -f` / `takeown` **一律 WinError 5（ERROR_ACCESS_DENIED）**；但同路径 `os.rename` 成功、`CreateFileW(DELETE)` 也成功——只有「删除操作」被拒。同时 `os.path.islink()` 返回 False、`os.readlink()` 抛 `ValueError`（不是 OSError）、`os.stat()/is_dir()` 会 follow 并抛 **WinError 1920（ERROR_CANT_ACCESS_FILE）**——这正是旧 `shutil.rmtree` 死掉的地方。**唯一可行路径**：以 `DELETE|FILE_WRITE_ATTRIBUTES`（`0x00010100`）打开，`FSCTL_GET_REPARSE_POINT` 读 tag，再 `FSCTL_DELETE_REPARSE_POINT` **摘掉重解析标签**，条目退化为普通文件/空目录，之后常规 `unlink`/`rmdir` 即成功（见 `_win_reparse_handle` / `_strip_reparse_point` / `_remove_link`）。只给 `DELETE` 权限打开会让 FSCTL 报 err 5，`WRITE_ATTRIBUTES` 是必需项。
+2. **WSL 写的文件常带 READONLY 位**（如 X11 的 `.X99-lock`，`attrs=0x21`），Windows 上 `os.unlink` 对只读文件同样 WinError 5。`_unlink_retry`/`_rmdir_retry` 在首次 `PermissionError` 时调 `_clear_readonly`（`os.chmod(path, S_IWRITE)`，实测 `0x21 → 0x20`）后重试。
+
+分类层配套：`_fs_kind` 只读 `st_file_attributes` 属性位（reparse point=链接），绝不 follow；`_du_bytes` 用 `os.scandir` 栈式遍历，链接计 0 字节；`_remove_entry` 按 kind 分派且不 follow，错误聚合后抛 `PermissionError` 或 `OSError`（API 层对应 422 带因）。另注：`cp -r` 会把 LX 链接静默变成空普通文件，**复制目录无法复现此 bug**，只能用真条目或 `os.rename`（rename 保留标签）——回归测试用 junction 等价覆盖（`test_purge_trashed_with_reparse_point` / `test_strip_reparse_point_degrades_to_plain_dir`）。
 
 # 四、编排与执行（core/orchestrator 指挥 + core/team 执行）
 
@@ -312,7 +404,7 @@ L0 提案模式（propose_only）/ L1 建窗待命 + 执行审批单 / L2 自动
 
 ## 隔离模型
 
-L0 host < L1 wsl < L2 docker < L3 sandbox（--rm 一次性 / 断网 / 512m / cap-drop ALL 加固容器）；trusted 全等级、untrusted 仅容器、unknown 按 malware_live 最严处理。三条硬规则写死代码：WSL 信任级=宿主机、未知按活体恶意样本、net=real 不默认（2026-10-01 起可直接经 run_cmd 指定，不再人工审批）。
+L0 host < L1 wsl < L2 docker < L3 sandbox（--rm 一次性 / 断网 / 512m / cap-drop ALL 加固容器）；trusted 全等级、untrusted 仅容器、unknown 按 malware_live 最严处理。三条硬规则写死代码：WSL 信任级=宿主机、未知按活体恶意样本、net=real 不默认且必须绑定当前项目已批准的一次性审批。
 
 ## 渗透命令容器化（pentest-tools-container-m0 M1，2026-09-23 定稿并实施）
 
@@ -360,7 +452,7 @@ F6 内置浏览器持久化上下文（`core/browser/pool.py` launch_persistent_
 
 ## 网关流水线
 
-`run(cmd, runtime)` 九步序：would_deny 干跑（与真实执行同口径，杜绝两处校验漂移）→ 网络模式缺省（net=real 自 2026-10-01 起不再人工审批，由调用方直接指定）→ 工作区隔离改造（cwd/TEMP 重定向；docker 卷挂载）→ 限速检查 → 执行前审计事件 → 按后端执行 → 结果审计 → 审批一次性消费（仍服务越界 runtime 等场景）→ 拒绝统一协议（GatewayDenied 回填改道不炸循环）。
+`run(cmd, runtime)` 九步序：would_deny 干跑（与真实执行同口径，杜绝两处校验漂移）→ 网络模式缺省 → net=real 项目上下文与已批准一次性审批校验 → 工作区隔离改造（cwd/TEMP 重定向；docker 卷挂载）→ 限速检查 → 执行前审计事件 → 按后端执行 → 结果审计 → 审批一次性消费 → 拒绝统一协议（GatewayDenied 回填改道不炸循环）。
 
 ## 静态护栏双子星
 

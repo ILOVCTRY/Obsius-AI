@@ -189,6 +189,7 @@ def workspace_escapes(
     scratch: str,
     workspace: str,
     posix: bool = False,
+    allow_posix_tmp: bool = False,
 ) -> list[str]:
     """返回命令中会写到工作区外的目标列表；空列表=放行。
 
@@ -203,7 +204,7 @@ def workspace_escapes(
     escapes: list[str] = []
     seen: set[str] = set()
     for raw in scan_write_targets(cmd, posix=posix):
-        t = _clean(raw)
+        t = _trim_shell_separator(_clean(raw))
         if not t or t in ALLOWED_SPECIAL_TARGETS:
             continue
         if t.startswith("-"):  # 又一个 flag，不是目标
@@ -230,6 +231,8 @@ def workspace_escapes(
             seen.add(t)
             continue
         if posix and t.startswith("/"):
+            if allow_posix_tmp and (t == "/tmp" or t.startswith("/tmp/")):
+                continue
             is_abs = True
         if is_abs:
             # 同一目标多次出现只报一次（回执不重复抖串）

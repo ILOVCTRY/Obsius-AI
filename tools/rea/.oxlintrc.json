@@ -1,0 +1,113 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "import", "unicorn", "oxc"],
+  "rules": {
+    "complexity": ["warn", 20],
+    "max-depth": ["warn", 4],
+    "max-lines": [
+      "warn",
+      {
+        "max": 500,
+        "skipBlankLines": true,
+        "skipComments": true
+      }
+    ],
+    "max-lines-per-function": [
+      "warn",
+      {
+        "max": 100,
+        "skipBlankLines": true,
+        "skipComments": true
+      }
+    ],
+    "max-params": ["warn", 4],
+    "no-var": "warn",
+    "no-var-requires": "error",
+    "typescript/no-import-type-side-effects": "error"
+  },
+  "overrides": [
+    {
+      "files": [
+        "scripts/electron-active-hook*.cjs",
+        "tests/conformance/readiness/electron/*.js",
+        "website/public/examples/notes-electron/*.js"
+      ],
+      "rules": {
+        "no-var-requires": "off"
+      }
+    },
+    {
+      "files": ["tests/**/*.ts", "src/**/*.test.ts", "src/**/*.fixture.ts"],
+      "rules": {
+        "max-lines": "off",
+        "max-lines-per-function": [
+          "error",
+          {
+            "max": 150,
+            "skipBlankLines": true,
+            "skipComments": true
+          }
+        ]
+      }
+    },
+    {
+      "files": ["src/application/**/*.test.ts"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["**/server/**", "**/cli.*", "**/main.*"],
+                "message": "Service tests must use application ports rather than CLI or MCP entrypoints."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["tests/composition/**/*.test.ts"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": [
+                  "**/server/**",
+                  "**/cli.*",
+                  "**/main.*",
+                  "node:child_process",
+                  "node:net",
+                  "node:http",
+                  "node:https",
+                  "ws",
+                  "playwright"
+                ],
+                "message": "Composition tests may wire provider-neutral sessions but must not invoke CLI, MCP, process, network, or browser boundaries."
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "env": {
+    "node": true,
+    "es2023": true
+  },
+  "ignorePatterns": [
+    "dist",
+    "build",
+    "node_modules",
+    "docs/api",
+    "coverage",
+    ".turbo",
+    ".cache",
+    ".codex",
+    ".devin",
+    ".factory",
+    "third_party"
+  ]
+}
