@@ -47,6 +47,12 @@ def context_window_tokens(llm: Any) -> int:
 # 取 Anthropic Messages 协议量级；数量级正确即可（相对正文占比很小）。
 _PER_MESSAGE_TOKENS = 4
 _PER_TOOL_TOKENS = 12
+# 每张图片的固定开销（token，vision 通道 2026-10-19）：图片的真实成本由供应商
+# 按像素计（实测 deepseek-v4.1-flash：1024×731 ≈ 300-400 token，1920×1080
+# ≈ 1029），与正文长度**无关**。这里取一个偏上的常量，理由见 `_as_text` 的
+# image 特判——绝不能把 base64 正文当文本计入，否则一步带图就撞预算。
+_PER_IMAGE_TOKENS = 1600
+_IMAGE_PLACEHOLDER = "图" * _PER_IMAGE_TOKENS
 
 # CJK 表意文字 + 全角标点：近似 1 token/字（GPT/Claude 系 BPE 对 CJK 普遍 1-2 字/token）
 _CJK_RE = re.compile(
@@ -206,7 +212,14 @@ def calibrate(samples: list[tuple[str, int]]) -> float:
 
 def _as_text(obj: Any) -> str:
     """消息/工具结构 → 待计数文本。dict 的键不计（协议样板，已按条计固定开销），
-    只取字符串与标量值——省掉键名重复计数，也更贴近真实 token 构成。"""
+    只取字符串与标量值——省掉键名重复计数，也更贴近真实 token 构成。
+
+    **image 块特判（vision 通道，2026-10-19，必须）**：图片以 base64 内联在
+    消息里，若按通用规则摊平，一张 200KB 的图会被算成 10 万「等价字符」
+    （实测 100038），**第一步带图就撞预算线触发压缩**，而压缩只会把图截断、
+    图就废了。故 image 块只计一个固定图片开销（见 ``_PER_IMAGE_TOKENS``），
+    真实成本由供应商按像素算（实测 1024×731 ≈ 300-400 token，与常量同量级）。
+    """
     if obj is None:
         return ""
     if isinstance(obj, str):
@@ -218,5 +231,7 @@ def _as_text(obj: Any) -> str:
     if isinstance(obj, (list, tuple)):
         return "\n".join(_as_text(v) for v in obj)
     if isinstance(obj, dict):
+        if obj.get("type") == "image":
+            return _IMAGE_PLACEHOLDER
         return "\n".join(_as_text(v) for v in obj.values())
     return str(obj)

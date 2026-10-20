@@ -247,8 +247,12 @@ def challenge_gate(bb, project_id: str) -> dict:
                     break
         out["running"] = running
         summary = challenge_flag_summary(bb, project_id, list(cids), running)
+        # `concluded`（主控主动收尾，2026-10-20）与 solved/abandoned 同效：
+        # 都不再派工。区别只在状态语义——concluded 的题目仍是 partial/待复核，
+        # 因为 pending 候选未经人工确认，不能伪装成 solved。
         out["blocked"] = {cid for cid, st in summary.items()
-                          if st.get("solved") or st.get("abandoned")}
+                          if st.get("solved") or st.get("abandoned")
+                          or st.get("concluded")}
     except Exception:  # noqa: BLE001 —— 闸算失败退回「不限不拦」，不阻断调度
         log.exception("ARTEX 题目闸计算失败 project=%s", project_id)
     try:

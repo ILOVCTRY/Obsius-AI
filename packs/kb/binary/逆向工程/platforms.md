@@ -1,603 +1,458 @@
-# CTF Reverse - Platform-Specific Reversing
+---
 
-macOS/iOS, embedded/IoT firmware, kernel driver, automotive, and game engine reverse engineering.
+phase: binary
+vuln_class: [reverse, macho, firmware, kernel-driver, game-engine, automotive]
+title: 平台专项逆向
+summary: 平台专项的共同点是「格式先行」——Mach-O/固件镜像/驱动/游戏资源各有一套容器结构，先定位容器再谈逻辑。判据是 `file` 的架构与容器魔数。
+---
 
-## Table of Contents
-- [macOS / iOS Reversing](#macos--ios-reversing)
-  - [Mach-O Binary Format](#mach-o-binary-format)
-  - [Code Signing & Entitlements](#code-signing--entitlements)
-  - [Objective-C Runtime RE](#objective-c-runtime-re)
-  - [Swift Binary Reversing](#swift-binary-reversing)
-  - [iOS App Analysis](#ios-app-analysis)
-  - [dyld / Dynamic Linking](#dyld--dynamic-linking)
-- [Embedded / IoT Firmware RE](#embedded--iot-firmware-re)
-  - [Firmware Extraction](#firmware-extraction)
-  - [Firmware Unpacking](#firmware-unpacking)
-  - [Architecture-Specific Notes](#architecture-specific-notes)
-  - [RTOS Analysis](#rtos-analysis)
-- [Kernel Driver Reversing](#kernel-driver-reversing)
-  - [Linux Kernel Modules](#linux-kernel-modules)
-  - [eBPF Programs](#ebpf-programs)
-  - [Windows Kernel Drivers](#windows-kernel-drivers)
-- [Game Engine Reversing](#game-engine-reversing)
-  - [Unreal Engine](#unreal-engine)
-  - [Unity (Beyond IL2CPP)](#unity-beyond-il2cpp)
-  - [Anti-Cheat Analysis](#anti-cheat-analysis)
-  - [Lua-Scripted Games](#lua-scripted-games)
-- [Automotive / CAN Bus RE](#automotive--can-bus-re)
-- [RISC-V QEMU Execution with GLIBC Symbol Version Patching (Pwn2Win 2018)](#risc-v-qemu-execution-with-glibc-symbol-version-patching-pwn2win-2018)
-- [APK Certificate SHA-256 as AES Key (ASIS Finals 2018)](#apk-certificate-sha-256-as-aes-key-asis-finals-2018)
-- [Moxie ISA Custom Opcode Discovery (SECCON 2018)](#moxie-isa-custom-opcode-discovery-seccon-2018)
-- [Unity APK Assembly-CSharp.dll Runtime Patch (SECCON 2018)](#unity-apk-assembly-csharpdll-runtime-patch-seccon-2018)
-- [Il2CppDumper for Unity IL2CPP Metadata Recovery (SECCON 2018)](#il2cppdumper-for-unity-il2cpp-metadata-recovery-seccon-2018)
+# 平台专项逆向
+
+硬件与异构架构（GPIO/MMIO/CP2/MBR/ARM64/RISC-V 指令级）见 [[binary/逆向工程/platforms-hardware.md|硬件与异构架构]]；静态工具链与异构格式见 [[binary/逆向工程/tools.md|静态工具]]；Unity IL2CPP 基础见 [[binary/逆向工程/languages.md|语言与运行时]]。
+
+## 0. 判据速查
+
+| 目标 | 第一动作 | 去哪节 |
+|---|---|---|
+| `file` 报 Mach-O / universal | `lipo -info` 拆架构，`otool -l` 看 load commands | §1 |
+| 打完补丁在 macOS 上跑不起来 | 签名失效，要 ad-hoc 重签 | §2 |
+| 反汇编里满屏 `objc_msgSend` | Objective-C 派发，去 `__objc_methname` 找选择子 | §3 |
+| 符号形如 `s14MyApp...` | Swift 名字改编，`swift demangle` | §4 |
+| `.ipa` 且 `cryptid = 1` | App Store 加密，需脱壳设备 | §5 |
+| 固件 `.bin` 打不开 | 先 `binwalk` 找嵌套文件系统 | §6 |
+| 拿到 SquashFS/JFFS2/UBI 镜像 | 按格式选解包器 | §7 |
+| 是 ARM/MIPS 且跑不起来 | qemu-user + sysroot | §8 |
+| 有 `xTaskCreate` / `k_thread_create` | RTOS 任务表就是函数表 | §9 |
+| `.ko` 可重定位 ELF | 找 `file_operations` 里的 ioctl | §10 |
+| `.sys` PE | `DriverEntry` + `IRP_MJ_DEVICE_CONTROL` | §12 |
+| 有 `.pak` / `.uasset` / `.umap` | UE 资源容器 | §13 |
+| 有 `Assembly-CSharp.dll` | Mono，dnSpy 直接反编译 | §14 |
+| 有 `libil2cpp.so` + `global-metadata.dat` | IL2CPP，上 Il2CppDumper | §16 |
+| 有 `.luac` / `lua51.dll` | Lua 字节码反编译 | §15 |
+| CAN 报文 / UDS 服务 | 先认服务号 | §17 |
 
 ---
 
-## macOS / iOS Reversing
-
-### Mach-O Binary Format
+## 1. Mach-O
 
 ```bash
-# File identification
-file binary                    # "Mach-O 64-bit executable arm64" or "x86_64"
-otool -l binary               # Load commands (segments, dylibs, entry point)
-otool -L binary               # Linked dynamic libraries
+file binary                    # "Mach-O 64-bit executable arm64"
+otool -l binary                # load commands（段、dylib、入口）
+otool -L binary                # 链接的动态库
 
-# Universal (fat) binaries — multiple architectures in one file
-lipo -info universal_binary    # List architectures
-lipo universal_binary -thin arm64 -output binary_arm64  # Extract one arch
+lipo -info universal_binary                              # fat 二进制含哪些架构
+lipo universal_binary -thin arm64 -output binary_arm64   # 抽单一架构
 
-# Segments and sections
 otool -l binary | grep -A5 "segment\|section"
-# Key segments: __TEXT (code), __DATA (globals), __LINKEDIT (symbols)
-# Key sections: __text (instructions), __cstring (C strings), __objc_methname
 ```
 
-**Key Mach-O concepts:**
-- Load commands drive the dynamic linker (`dyld`)
-- `LC_MAIN` → entry point (replaces `LC_UNIXTHREAD`)
-- `LC_LOAD_DYLIB` → shared library dependencies
-- `LC_CODE_SIGNATURE` → code signing blob
-- `__DATA_CONST.__got` → Global Offset Table
-- `__DATA.__la_symbol_ptr` → Lazy symbol pointers (like PLT)
+**关键段/节**：
+- `__TEXT` 代码、`__DATA` 全局、`__LINKEDIT` 符号
+- `__text` 指令、`__cstring` C 字符串、`__objc_methname` 方法名
 
-### Code Signing & Entitlements
+**关键 load command**：
+- `LC_MAIN` → 入口（取代老的 `LC_UNIXTHREAD`）
+- `LC_LOAD_DYLIB` → 依赖库
+- `LC_CODE_SIGNATURE` → 签名 blob
+- `__DATA_CONST.__got` → GOT
+- `__DATA.__la_symbol_ptr` → 懒绑定符号指针（相当于 PLT）
+
+---
+
+## 2. 签名与权限
 
 ```bash
-# Check code signature
 codesign -dvvv binary
 codesign --verify binary
-
-# Extract entitlements (capability permissions)
-codesign -d --entitlements - binary
-# Key entitlements: com.apple.security.app-sandbox, com.apple.security.network.client
-
-# Remove code signature (for patching)
-codesign --remove-signature binary
-
-# Re-sign (ad-hoc, for testing)
-codesign -f -s - binary
+codesign -d --entitlements - binary      # 提取 entitlements（能力权限）
+codesign --remove-signature binary       # 去签名（为了打补丁）
+codesign -f -s - binary                  # ad-hoc 重签（本地测试）
 ```
 
-**CTF relevance:** Patched binaries need re-signing to run on macOS. Ad-hoc signing (`-s -`) works for local testing.
+**判据**：打过补丁的二进制在 macOS 上直接跑会因签名失效被拒；`-s -` 的 ad-hoc 签名足够本地测试。
 
-### Objective-C Runtime RE
+**关键 entitlements**：`com.apple.security.app-sandbox`、`com.apple.security.network.client`。
+
+---
+
+## 3. Objective-C 运行时
 
 ```bash
-# Dump Objective-C class info
-class-dump binary > classes.h
-# Shows: @interface, @protocol, method signatures with types
-
-# Runtime inspection with lldb
-(lldb) expression -l objc -O -- [NSClassFromString(@"ClassName") new]
-(lldb) expression -l objc -O -- [[ClassName alloc] init]
-
-# Method swizzling detection (anti-tamper)
-# Look for: method_exchangeImplementations, class_replaceMethod
+class-dump binary > classes.h      # 导出 @interface / @protocol / 方法签名
 ```
 
-**Objective-C in disassembly:**
 ```text
-# objc_msgSend(receiver, selector, ...) is THE dispatch mechanism
-# RDI = self (receiver), RSI = selector (char* method name)
+# 唯一派发机制：objc_msgSend(receiver, selector, ...)
+# RDI = self（接收者），RSI = selector（方法名字符串）
 
-# In Ghidra/IDA, look for:
 objc_msgSend(obj, "checkPassword:", input)
-# Selector strings are in __objc_methname section
-# Cross-reference selectors to find implementations
+# 选择子字符串在 __objc_methname 节
+# 交叉引用选择子就能找到实现
 ```
 
-**class-dump alternatives:**
-- `dsdump` — faster, supports Swift + Objective-C
-- `otool -oV binary` — dump Objective-C segments
-- Ghidra: Enable "Objective-C" analyzer in Analysis Options
+lldb 里直接跑 ObjC 表达式：
+```text
+(lldb) expression -l objc -O -- [NSClassFromString(@"ClassName") new]
+```
 
-### Swift Binary Reversing
+**反篡改判据**：出现 `method_exchangeImplementations` / `class_replaceMethod` 就是方法交换（swizzling）。
+
+**class-dump 替代**：`dsdump`（更快，支持 Swift）、`otool -oV`（导 ObjC 段）、Ghidra 里开 "Objective-C" 分析器。
+
+---
+
+## 4. Swift
 
 ```bash
-# Detect Swift
 strings binary | grep "swift"
-otool -l binary | grep "swift"   # __swift5_* sections
+otool -l binary | grep "swift"        # __swift5_* 节
 
-# Swift demangling
 swift demangle 's14MyApp0A8ClassC10checkInput6resultSbSS_tF'
 # → MyApp.MyAppClass.checkInput(result: String) -> Bool
-
-# xcrun swift-demangle < mangled_names.txt
 ```
 
-**Swift in disassembly:**
-```text
-# Swift uses value witness tables (VWT) for type operations
-# Protocol witness tables (PWT) for dynamic dispatch (like vtables)
+**运行时函数判据**：
+- `swift_allocObject` → 堆分配
+- `swift_release` → 引用计数减
+- `swift_bridgeObjectRetain` → ObjC ↔ Swift 桥接保留
+- `swift_once` → 懒初始化（相当于 `dispatch_once`）
 
-# Key runtime functions to watch:
-swift_allocObject          → heap allocation
-swift_release             → reference count decrement
-swift_bridgeObjectRetain  → bridged (ObjC ↔ Swift) retain
-swift_once                → lazy initialization (like dispatch_once)
+**字符串布局**：
+- 小字符串（≤15 字节）内联在 16 字节缓冲里，带 tagged pointer
+- 大字符串堆分配：指针 + 长度 + flags
 
-# String layout:
-# Small strings (≤15 bytes): inline in 16-byte buffer, tagged pointer
-# Large strings: heap-allocated, pointer + length + flags
+**类型操作**：值见证表（VWT）做类型操作，协议见证表（PWT）做动态派发（相当于 vtable）。`Array<T>` 指向 `ContiguousArrayStorage`（头 + 元素），`Dictionary<K,V>` 是开放寻址哈希表。
 
-# Array<T>: pointer to ContiguousArrayStorage (header + elements)
-# Dictionary<K,V>: hash table with open addressing
-```
+**Ghidra**：开 "Swift" 语言模块；`__swift5_types`/`__swift5_proto` 里的类型描述符能被解析。
 
-**Ghidra for Swift:** Enable "Swift" language module. Swift metadata sections (`__swift5_types`, `__swift5_proto`) contain type descriptors that Ghidra can parse.
+---
 
-### iOS App Analysis
+## 5. iOS 应用
 
 ```bash
-# Extract IPA (iOS app package)
 unzip app.ipa -d extracted/
 ls extracted/Payload/*.app/
 
-# Check if encrypted (App Store encryption / FairPlay DRM)
 otool -l extracted/Payload/*.app/binary | grep -A4 "LC_ENCRYPTION_INFO"
-# cryptid = 1 means encrypted, 0 means decrypted
+# cryptid = 1 加密，0 已解密
 
-# Decrypt with frida-ios-dump (requires jailbroken device)
-# Or use Clutch / bfdecrypt on device
-frida-ios-dump -H jailbroken_ip -p 22 "App Name"
-
-# Analyze decrypted binary
+frida-ios-dump -H jailbroken_ip -p 22 "App Name"   # 需越狱设备
 class-dump decrypted_binary > headers.h
 ```
 
-**Jailbreak detection and bypass:**
-```javascript
-// Common jailbreak checks:
-// 1. Check for Cydia/Sileo
-// 2. Check /private/var/lib/apt
-// 3. fork() succeeds (sandboxed apps can't fork)
-// 4. Open /etc/apt, /bin/sh with write
-// 5. Check for substrate/substitute libraries
+**越狱检测的五类判据**：Cydia/Sileo 存在、`/private/var/lib/apt` 存在、`fork()` 成功（沙箱内不允许）、`/etc/apt` 与 `/bin/sh` 可写打开、substrate/substitute 库存在。
 
-// Frida bypass:
+```javascript
 var paths = ["/Applications/Cydia.app", "/bin/sh", "/etc/apt",
              "/private/var/lib/apt", "/usr/bin/ssh"];
 Interceptor.attach(Module.findExportByName(null, "access"), {
-    onEnter(args) {
-        this.path = Memory.readUtf8String(args[0]);
-    },
+    onEnter(args) { this.path = Memory.readUtf8String(args[0]); },
     onLeave(retval) {
-        if (paths.some(p => this.path && this.path.includes(p))) {
-            retval.replace(-1);  // File not found
-        }
+        if (paths.some(p => this.path && this.path.includes(p)))
+            retval.replace(-1);       // 伪装成文件不存在
     }
 });
 ```
 
-### dyld / Dynamic Linking
+### dyld
 
 ```bash
-# DYLD environment variables (for analysis, blocked in hardened runtime)
-DYLD_PRINT_LIBRARIES=1 ./binary       # Print loaded dylibs
-DYLD_INSERT_LIBRARIES=hook.dylib ./binary  # Inject dylib (like LD_PRELOAD)
-# Note: SIP (System Integrity Protection) blocks this for system binaries
-
-# Inspect dyld shared cache (contains all system frameworks)
-dyld_shared_cache_util -list /System/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_arm64e
+DYLD_PRINT_LIBRARIES=1 ./binary              # 打印加载的 dylib
+DYLD_INSERT_LIBRARIES=hook.dylib ./binary    # 注入 dylib（相当于 LD_PRELOAD）
 ```
+
+**坑**：SIP 会拦掉对系统二进制的注入；加固运行时也会忽略这些变量。
 
 ---
 
-## Embedded / IoT Firmware RE
-
-### Firmware Extraction
+## 6. 固件提取
 
 ```bash
-# binwalk — firmware analysis and extraction
-binwalk firmware.bin                        # Identify embedded filesystems, compressed data
-binwalk -e firmware.bin                     # Extract all identified components
-binwalk -Me firmware.bin                    # Recursive extraction (matryoshka)
-binwalk --dd='.*' firmware.bin              # Extract everything raw
+binwalk firmware.bin            # 识别内嵌文件系统与压缩数据
+binwalk -e firmware.bin         # 提取所有识别出的组件
+binwalk -Me firmware.bin        # 递归提取（套娃）
+binwalk --dd='.*' firmware.bin  # 全量裸提取
 
-# Manual extraction by signature
-strings firmware.bin | head -50             # Look for version strings, filesystem markers
-hexdump -C firmware.bin | grep "hsqs"       # SquashFS magic
-hexdump -C firmware.bin | grep "UBI#"       # UBI magic
+hexdump -C firmware.bin | grep "hsqs"    # SquashFS 魔数
+hexdump -C firmware.bin | grep "UBI#"    # UBI 魔数
 ```
 
-**Hardware extraction methods (physical access):**
-```text
-UART:  Serial console — often gives root shell or bootloader access
-       Tools: USB-UART adapter, baudrate detection (usually 115200)
-       Identify: 4 pins (GND, TX, RX, VCC), use multimeter
+**物理提取四路**：
 
-JTAG:  Direct CPU debug — read/write flash, halt CPU, set breakpoints
-       Tools: OpenOCD, J-Link, Bus Pirate
-       Identify: 10/14/20-pin header, use JTAGulator for auto-detection
+| 接口 | 能给什么 | 工具 | 怎么认 |
+|---|---|---|---|
+| UART | 串口控制台，常直接给 root shell 或 bootloader | USB-UART 转接板，波特率通常 115200 | 4 个引脚（GND/TX/RX/VCC），万用表找 |
+| JTAG | CPU 直接调试：读写 flash、停核、下断 | OpenOCD、J-Link、Bus Pirate | 10/14/20 针排针，JTAGulator 自动识别 |
+| SPI Flash | 直接读整片固件 | flashrom、CH341A 编程器 | 8 脚 SOIC（Winbond/Macronix 等） |
+| eMMC | 路由器/手机常见 | eMMC 读卡器，或直接焊测试点 | 板上 eMMC 芯片 |
 
-SPI Flash: Direct chip read — dump entire firmware
-           Tools: flashrom, CH341A programmer
-           Identify: 8-pin SOIC chip (Winbond, Macronix, etc.)
+---
 
-eMMC:  Embedded MMC — common in routers, phones
-       Tools: eMMC reader, direct solder to test pads
-```
-
-### Firmware Unpacking
+## 7. 固件解包
 
 ```bash
-# SquashFS (most common in routers)
-unsquashfs -d output/ squashfs-root.sqfs
-# If custom compression: try different compressors (-comp xz|lzma|lzo|gzip)
+unsquashfs -d output/ squashfs-root.sqfs      # 路由器最常见
+# 自定义压缩时换 -comp xz|lzma|lzo|gzip
 
-# JFFS2
 jefferson -d output/ jffs2.img
-
-# UBI/UBIFS
 ubireader_extract_images firmware.ubi
 ubireader_extract_files ubifs.img
-
-# CPIO (initramfs)
 cpio -idv < initramfs.cpio
-
-# Device tree blob
 dtc -I dtb -O dts -o output.dts device_tree.dtb
 
-# Kernel extraction
-binwalk -e firmware.bin
-# Look for: zImage, uImage, vmlinux
-# Extract vmlinux from compressed: vmlinux-to-elf tool
+binwalk -e firmware.bin        # 找 zImage / uImage / vmlinux
+# 从压缩内核还原 vmlinux：vmlinux-to-elf
 ```
 
-### Architecture-Specific Notes
-
-**ARM (most common in IoT):**
-```bash
-# Cross-toolchain
-apt install gcc-arm-linux-gnueabihf gdb-multiarch
-
-# QEMU emulation
-qemu-arm -L /usr/arm-linux-gnueabihf/ ./arm_binary
-qemu-arm -g 1234 ./arm_binary    # Start GDB server on port 1234
-gdb-multiarch -ex 'target remote :1234' ./arm_binary
-
-# ARM vs Thumb: ARM instructions are 4 bytes, Thumb are 2 bytes
-# LSB of function pointer indicates mode: 0=ARM, 1=Thumb
-# Ghidra: Right-click → Processor Options → ARM/Thumb mode
-```
-
-**ARM64/AArch64:** See [[binary/逆向工程/platforms-hardware.md#arm64aarch64-reversing-and-exploitation|platforms-hardware.md]] for AArch64 calling convention, ROP gadgets, and qemu-aarch64-static emulation.
-
-**MIPS (routers, embedded):**
-```bash
-# Big-endian vs little-endian — check ELF header or file command
-file binary    # "MIPS, MIPS32 rel2 (MIPS-II), big-endian" or "little-endian"
-
-# Emulation
-qemu-mips -L /usr/mips-linux-gnu/ ./mips_binary         # Big-endian
-qemu-mipsel -L /usr/mipsel-linux-gnu/ ./mipsel_binary   # Little-endian
-
-# Key MIPS patterns:
-# Branch delay slots — instruction AFTER branch always executes
-# $gp (global pointer) — used for PIC, points to .got
-# lui + addiu pair — loads 32-bit constant (upper 16 + lower 16)
-```
-
-**RISC-V:** See main [[binary/逆向工程/tools.md#risc-v-binary-analysis-ehax-2026|tools.md]] for Capstone disassembly and [[binary/逆向工程/platforms-hardware.md#risc-v-advanced|platforms-hardware.md]] for advanced extensions and debugging.
-
-### RTOS Analysis
-
-```text
-FreeRTOS:
-  - Tasks (like threads): xTaskCreate → function pointer + stack
-  - Strings: "IDLE", "Tmr Svc", task names
-  - xQueueSend/xQueueReceive → inter-task communication
-  - Look for vTaskDelay() for timing, xSemaphoreTake() for sync
-
-Zephyr:
-  - k_thread_create → kernel thread creation
-  - k_msgq_put/k_msgq_get → message queues
-  - CONFIG_* symbols reveal kernel configuration
-
-Bare metal (no OS):
-  - Interrupt vector table at address 0x0 or 0x08000000 (STM32)
-  - main loop pattern: while(1) { read_input(); process(); output(); }
-  - Peripheral registers at memory-mapped addresses (check datasheet)
-```
+**判据**：`unsquashfs` 报未知压缩算法时不要放弃，逐个试 `-comp`；固件厂商经常改压缩器参数。
 
 ---
 
-## Kernel Driver Reversing
+## 8. 架构专项
 
-### Linux Kernel Modules
+### ARM
 
 ```bash
-# Identify kernel module
-file module.ko                      # "ELF 64-bit LSB relocatable"
-modinfo module.ko                   # Module info (description, author, license)
+apt install gcc-arm-linux-gnueabihf gdb-multiarch
 
-# List module symbols
-nm module.ko | grep -v " U "       # Exported symbols
-
-# Strings for quick recon
-strings module.ko | grep -i "flag\|secret\|ioctl\|device"
-
-# Find ioctl handler
-# Key pattern: .unlocked_ioctl = my_ioctl_handler in file_operations struct
-# In Ghidra: find struct with function pointers, identify by position
-
-# Load in Ghidra
-# Language: x86:LE:64:default
-# Base address: doesn't matter for .ko (relocatable)
-# Look for init_module / cleanup_module entry points
+qemu-arm -L /usr/arm-linux-gnueabihf/ ./arm_binary
+qemu-arm -g 1234 ./arm_binary                     # 起 GDB server
+gdb-multiarch -ex 'target remote :1234' ./arm_binary
 ```
 
-**Common kernel module CTF patterns:**
+**关键判据**：ARM 指令 4 字节、Thumb 2 字节；**函数指针的 LSB 就是模式位**（0=ARM，1=Thumb）。Ghidra 里右键 → Processor Options 切 ARM/Thumb。
+
+### MIPS
+
+```bash
+file binary    # "MIPS32 rel2 (MIPS-II), big-endian" 或 little-endian
+
+qemu-mips  -L /usr/mips-linux-gnu/  ./mips_binary     # 大端
+qemu-mipsel -L /usr/mipsel-linux-gnu/ ./mipsel_binary # 小端
+```
+
+**三个必记特性**：
+- **分支延迟槽**：跳转指令**后面那条**一定执行
+- `$gp`（全局指针）用于 PIC，指向 `.got`
+- `lui` + `addiu` 成对装 32 位常量（高 16 + 低 16）
+
+### AArch64 / RISC-V
+
+AArch64 调用约定与 gadget 见 [[binary/逆向工程/platforms-hardware.md|硬件与异构架构]]；RISC-V 的 Capstone 反汇编见 [[binary/逆向工程/tools.md|静态工具]]。
+
+---
+
+## 9. RTOS
+
+```text
+FreeRTOS：
+  - 任务（类似线程）：xTaskCreate → 函数指针 + 栈
+  - 字符串线索："IDLE"、"Tmr Svc"、任务名
+  - xQueueSend/xQueueReceive → 任务间通信
+  - vTaskDelay() 看时序，xSemaphoreTake() 看同步
+
+Zephyr：
+  - k_thread_create → 内核线程创建
+  - k_msgq_put/k_msgq_get → 消息队列
+  - CONFIG_* 符号直接暴露内核配置
+
+裸机（无 OS）：
+  - 中断向量表在 0x0 或 0x08000000（STM32）
+  - 主循环形态：while(1) { read_input(); process(); output(); }
+  - 外设寄存器在内存映射地址（查数据手册）
+```
+
+**判据**：`xTaskCreate` 的参数表就是「任务函数 → 栈大小」映射，比追调用图快得多。
+
+---
+
+## 10. Linux 内核模块
+
+```bash
+file module.ko                   # "ELF 64-bit LSB relocatable"
+modinfo module.ko
+nm module.ko | grep -v " U "     # 导出符号
+strings module.ko | grep -i "flag\|secret\|ioctl\|device"
+```
+
+**找 ioctl 处理器**：`file_operations` 结构体里 `.unlocked_ioctl = my_ioctl_handler`。Ghidra 里找「函数指针结构体」，按位置认字段。
+
+**常见 CTF 骨架**：
+
 ```c
-// Device creation (creates /dev/challenge)
-alloc_chrdev_region(&dev, 0, 1, "challenge");
+alloc_chrdev_region(&dev, 0, 1, "challenge");   // 创建 /dev/challenge
 cdev_init(&cdev, &fops);
 
-// ioctl handler (main interface)
 long my_ioctl(struct file *f, unsigned int cmd, unsigned long arg) {
     switch (cmd) {
-        case CUSTOM_CMD_1: /* operation */ break;
-        case CUSTOM_CMD_2: /* operation */ break;
+        case CUSTOM_CMD_1: break;
+        case CUSTOM_CMD_2: break;
     }
 }
 
-// copy_from_user / copy_to_user — data transfer with userspace
-copy_from_user(kernel_buf, (void __user *)arg, size);
-copy_to_user((void __user *)arg, kernel_buf, size);
+copy_from_user(kernel_buf, (void __user *)arg, size);   // 用户 → 内核
+copy_to_user((void __user *)arg, kernel_buf, size);     // 内核 → 用户
 ```
 
-**Debugging kernel modules:**
+**调试**：
+
 ```bash
-# QEMU + GDB for kernel debugging
 qemu-system-x86_64 -kernel bzImage -initrd initrd.cpio -s -S \
   -append "console=ttyS0 nokaslr" -nographic
 
-# In another terminal
 gdb vmlinux
 (gdb) target remote :1234
-(gdb) lx-symbols           # Load module symbols (requires scripts)
-(gdb) add-symbol-file module.ko 0x<loaded_address>
+(gdb) lx-symbols
+(gdb) add-symbol-file module.ko 0x<加载地址>
 ```
 
-### eBPF Programs
+**坑**：`.ko` 是可重定位的，基址随便给；真正地址要 `cat /proc/modules`（需 root）。
+
+---
+
+## 11. eBPF
 
 ```bash
-# Dump eBPF programs from running system
 bpftool prog list
-bpftool prog dump xlated id <N>    # Disassemble
-bpftool prog dump jited id <N>     # JIT'd machine code
+bpftool prog dump xlated id <N>    # 反汇编（eBPF 字节码）
+bpftool prog dump jited id <N>     # JIT 后的机器码
 
-# eBPF bytecode analysis
-# eBPF has 11 registers (r0-r10), 64-bit
-# r0 = return value, r1-r5 = arguments, r10 = frame pointer
-# Instructions are 8 bytes each
-
-# Disassemble .o file containing eBPF
 llvm-objdump -d ebpf_prog.o
-
-# Key eBPF patterns:
-# bpf_map_lookup_elem → read from map
-# bpf_map_update_elem → write to map
-# bpf_probe_read → read kernel memory
-# bpf_trace_printk → debug output
 ```
 
-### Windows Kernel Drivers
+**寄存器约定**：11 个 64 位寄存器（r0-r10）；`r0` 返回值，`r1-r5` 参数，`r10` 帧指针。**每条指令 8 字节**。
 
-```bash
-# .sys files are PE format — load in IDA/Ghidra as normal PE
-# Entry point: DriverEntry(PDRIVER_OBJECT, PUNICODE_STRING)
-
-# Key patterns:
-# IoCreateDevice → creates device object
-# IRP_MJ_DEVICE_CONTROL → ioctl handler
-# MmMapIoSpace → memory-mapped I/O
-# ObReferenceObjectByHandle → get kernel object from handle
-# ZwCreateFile/ZwReadFile → kernel-mode file operations
-```
+**关键 helper**：`bpf_map_lookup_elem`（读 map）、`bpf_map_update_elem`（写 map）、`bpf_probe_read`（读内核内存）、`bpf_trace_printk`（调试输出）。
 
 ---
 
-## Game Engine Reversing
+## 12. Windows 驱动
 
-### Unreal Engine
+`.sys` 是标准 PE，按普通 PE 载入 IDA/Ghidra。入口 `DriverEntry(PDRIVER_OBJECT, PUNICODE_STRING)`。
+
+**关键 API 判据**：
+- `IoCreateDevice` → 创建设备对象
+- `IRP_MJ_DEVICE_CONTROL` → ioctl 处理器
+- `MmMapIoSpace` → 内存映射 I/O
+- `ObReferenceObjectByHandle` → 从句柄拿内核对象
+- `ZwCreateFile`/`ZwReadFile` → 内核态文件操作
+
+---
+
+## 13. Unreal Engine
 
 ```bash
-# Pak file extraction
-# UnrealPakTool or quickbms with unreal_tournament_4.bms
 unrealpak.exe extract GameName.pak -output extracted/
-
-# UE4/UE5 asset formats:
-# .uasset — serialized UObject (meshes, textures, blueprints)
-# .umap — level/map data
-# .ushaderbytecode — compiled shader
-# FModel (https://fmodel.app/) — GUI asset viewer/extractor
+# 或 quickbms + unreal_tournament_4.bms
 ```
 
-**Blueprint reversing:**
-```text
-Blueprints compile to bytecode in .uasset files.
-- UAssetGUI / FModel to browse Blueprint assets
-- Kismet bytecode → visual scripting logic
-- Look for: K2_SetTimer, DoOnce, Branch, Custom Events
-- Flag logic often in Blueprint event graphs, not C++
-```
+**资源格式**：`.uasset` 序列化 UObject（网格/贴图/蓝图）、`.umap` 关卡、`.ushaderbytecode` 编译后着色器。GUI 工具 FModel。
 
-**UE4/UE5 C++ reversing:**
-```bash
-# Key engine classes:
-# UObject → base class for everything
-# AActor → entities in the world
-# UGameInstance → game state
-# APlayerController → player input handling
+**蓝图逆向**：蓝图编译成 `.uasset` 里的字节码。用 UAssetGUI/FModel 浏览，逻辑在 Kismet 字节码里（`K2_SetTimer`、`DoOnce`、`Branch`、自定义事件）。**flag 逻辑常在蓝图事件图里，不在 C++**。
 
-# Reflection system — UCLASS(), UPROPERTY(), UFUNCTION() macros
-# Generates metadata accessible at runtime
-# In Ghidra: look for UClass::StaticClass() calls → type identification
+**C++ 逆向**：`UObject` 万物基类、`AActor` 世界实体、`UGameInstance` 游戏状态、`APlayerController` 玩家输入。反射系统由 `UCLASS()`/`UPROPERTY()`/`UFUNCTION()` 宏生成元数据，运行时可见；Ghidra 里找 `UClass::StaticClass()` 调用即可定位类型。
 
-# String handling: FString (UTF-16), FName (hashed identifier), FText (localized)
-# In memory: FString = {TCHAR* Data, int32 ArrayNum, int32 ArrayMax}
-```
+**字符串**：`FString`（UTF-16）、`FName`（哈希标识符）、`FText`（本地化）。内存布局 `FString = {TCHAR* Data, int32 ArrayNum, int32 ArrayMax}`。
 
-### Unity (Beyond IL2CPP)
+---
 
-See [[binary/逆向工程/languages.md#unity-il2cpp-games|languages.md]] for IL2CPP basics.
-
-**Mono-based Unity (not IL2CPP):**
-```bash
-# Managed assemblies in Data/Managed/ directory
-# Assembly-CSharp.dll contains game logic
-dnspy Assembly-CSharp.dll       # Full decompilation + debugging
-ilspy Assembly-CSharp.dll       # Decompilation only
-
-# Common Unity patterns:
-# MonoBehaviour.Start() → initialization
-# MonoBehaviour.Update() → per-frame logic
-# PlayerPrefs.GetString("key") → stored data
-# SceneManager.LoadScene("level") → scene transitions
-```
-
-**Unity asset extraction:**
-```bash
-# AssetStudio — extract textures, models, audio, scripts
-# AssetRipper — comprehensive Unity asset extraction
-# UABE (Unity Asset Bundle Extractor) — low-level asset editing
-
-# Search for flags in:
-# - Text assets (.txt, .json)
-# - TextMesh / UI Text components
-# - Shader source code
-# - ScriptableObject assets
-# - PlayerPrefs save files
-```
-
-### Anti-Cheat Analysis
-
-```text
-For CTF challenges involving game anti-cheat:
-
-EasyAntiCheat (EAC):
-- Kernel driver (EasyAntiCheat_EOS.sys)
-- User-mode module injected into game
-- Integrity checks on game memory
-- Bypass: kernel-level memory R/W (for research only)
-
-BattlEye:
-- BEService.exe → BEClient.dll injected
-- Communication via encrypted channel
-- Screenshot capture, process scanning
-- Module: BEClient2.dll
-
-Valve Anti-Cheat (VAC):
-- User-mode only (no kernel driver)
-- Module hashing, memory scanning
-- Network-based detection (server-side)
-- Delayed bans (not immediate)
-
-CTF approach:
-1. Identify which anti-cheat (strings, loaded modules)
-2. For CTF: usually need to bypass specific check, not full anti-cheat
-3. Memory patching: find game state in memory, modify values
-4. Save file manipulation: often easier than runtime cheating
-```
-
-### Lua-Scripted Games
+## 14. Unity（Mono）
 
 ```bash
-# Many games embed Lua for scripting
-# Look for: lua51.dll, luajit.dll, .lua files in assets
+# 托管程序集在 Data/Managed/
+dnspy Assembly-CSharp.dll      # 反编译 + 调试
+ilspy Assembly-CSharp.dll      # 只反编译
+```
 
-# Luac bytecode decompilation
-luadec bytecode.luac > decompiled.lua      # Lua 5.1-5.3
-unluac bytecode.luac > decompiled.lua      # Alternative
+**常见入口**：`MonoBehaviour.Start()` 初始化、`Update()` 每帧逻辑、`PlayerPrefs.GetString("key")` 存数据、`SceneManager.LoadScene("level")` 场景切换。
 
-# LuaJIT bytecode
-luajit -bl bytecode.lua                     # Disassemble
-# ljd (LuaJIT decompiler): python3 ljd bytecode.lua
+**资源提取**：AssetStudio（贴图/模型/音频/脚本）、AssetRipper（全面提取）、UABE（底层编辑）。
 
-# Embedded Lua: strings binary | grep "lua_\|luaL_\|LUA_"
-# Hook lua_pcall to intercept script execution
+**flag 常藏在**：文本资源（`.txt`/`.json`）、TextMesh/UI Text 组件、着色器源码、ScriptableObject、PlayerPrefs 存档。
+
+---
+
+## 15. 反作弊与 Lua 游戏
+
+### 反作弊
+
+| 产品 | 形态 | 判据 |
+|---|---|---|
+| EasyAntiCheat | 内核驱动 `EasyAntiCheat_EOS.sys` + 用户态模块注入 | 完整性检查游戏内存 |
+| BattlEye | `BEService.exe` → 注入 `BEClient.dll` | 加密信道、截屏、进程扫描 |
+| VAC | **纯用户态**，无内核驱动 | 模块哈希、内存扫描、服务端检测、延迟封禁 |
+
+**CTF 打法**：先 `strings` + 已加载模块确认是哪家；通常只需绕过某个具体检查而非整个反作弊；改内存里的游戏状态比运行时作弊简单；改存档往往比改内存更简单。
+
+### Lua 游戏
+
+```bash
+# 线索：lua51.dll / luajit.dll / 资源里的 .lua
+luadec bytecode.luac > decompiled.lua     # Lua 5.1-5.3
+unluac bytecode.luac > decompiled.lua     # 替代方案
+
+luajit -bl bytecode.lua                   # LuaJIT 反汇编
+python3 ljd bytecode.lua                  # LuaJIT 反编译
+
+strings binary | grep "lua_\|luaL_\|LUA_"
+# hook lua_pcall 拦脚本执行
 ```
 
 ---
 
-## Automotive / CAN Bus RE
+## 16. IL2CPP
 
 ```bash
-# CAN bus interface setup
+Il2CppDumper libil2cpp.so global-metadata.dat out/
+grep -r "https://" out/
+```
+
+**关键**：IL2CPP 看着不可读，但 `global-metadata.dat` 里带着**每个类型名、方法名、字符串字面量**。够还原 CTF 级逻辑，完全不必碰原生反汇编。
+
+Unity IL2CPP 基础见 [[binary/逆向工程/languages.md|语言与运行时]]。
+
+---
+
+## 17. 汽车 / CAN 总线
+
+```bash
 sudo ip link set can0 type can bitrate 500000
 sudo ip link set up can0
 
-# Capture CAN traffic
-candump can0                               # Live capture
-candump -l can0                            # Log to file
-cansniffer can0                            # Filter/highlight changes
-
-# Replay CAN messages
-canplayer -I logfile.log can0
-cansend can0 7DF#0201000000000000          # Send single frame (OBD-II request)
-
-# UDS (Unified Diagnostic Services) — common in automotive CTF
-# Service 0x27: Security Access (seed-key authentication)
-# Service 0x2E: Write Data By Identifier
-# Service 0x31: Routine Control
-
-# Decode CAN frames
-# ID: 11-bit or 29-bit identifier
-# DLC: Data Length Code (0-8 bytes)
-# Data: up to 8 bytes payload
+candump can0                    # 实时抓
+candump -l can0                 # 落盘
+cansniffer can0                 # 只高亮变化的帧
+canplayer -I logfile.log can0   # 重放
+cansend can0 7DF#0201000000000000   # 单帧（OBD-II 请求）
 ```
 
-**CTF automotive patterns:**
-- Seed-key bypass: Reverse the key derivation algorithm from ECU firmware
-- CAN message replay: Capture legitimate command, replay to unlock feature
-- Firmware extraction from ECU via UDS/KWP2000
+**帧结构**：ID（11 或 29 位）、DLC（数据长度 0-8 字节）、Data（最多 8 字节）。
+
+**UDS 常用服务**：
+- `0x27` Security Access（种子-密钥认证）
+- `0x2E` Write Data By Identifier
+- `0x31` Routine Control
+
+**CTF 套路**：种子-密钥绕过（从 ECU 固件反推密钥派生算法）、CAN 报文重放（抓合法指令重放解锁功能）、经 UDS/KWP2000 从 ECU 抽固件。
 
 ---
 
-## RISC-V QEMU Execution with GLIBC Symbol Version Patching (Pwn2Win 2018)
+## 18. 案例：格式层的四个陷阱
 
-**Pattern:** Challenge binary targets a RISC-V Debian that isn't available natively. Extract the Debian libc6 and dynamic linker, then patch the binary's required GLIBC symbol version (e.g., `GLIBC_2.25` → `GLIBC_2.27`) in a hex editor so the available libc can serve it. Run with `qemu-riscv64 -L <sysroot>`.
+### RISC-V + GLIBC 符号版本改写（Pwn2Win 2018）
+
+目标 RISC-V Debian 本地没有。取 Debian 的 libc6 与动态链接器，把二进制要求的符号版本（`GLIBC_2.25` → `GLIBC_2.27`）在十六进制里改掉，用 `qemu-riscv64 -L <sysroot>` 跑。
 
 ```bash
 ar x libc6_2.27-5_riscv64.deb && tar xf data.tar.xz
 sed 's@GLIBC_2.25@GLIBC_2.27@g' -i binary
-# Patch the symbol version hash too
-objdump -p binary   # note old hash
-# replace bytes with xxd / hexedit
+objdump -p binary          # 记下旧的版本哈希，用 xxd/hexedit 一起改
 qemu-riscv64 -L ./sysroot ./binary
 ```
 
-**Key insight:** `ld.so` symbol versioning is enforced by a hashed identifier next to each symbol. Patching both the string and its hash bypasses the check without rebuilding libc; `objdump -p` shows the hash slot to overwrite.
+**关键**：`ld.so` 的符号版本靠符号旁边的**哈希标识**校验，字符串和哈希都要改，才能不重建 libc 就绕过。
 
-**References:** Pwn2Win CTF 2018 — Too Slow, writeup 12501+
-
----
-
-## APK Certificate SHA-256 as AES Key (ASIS Finals 2018)
-
-**Pattern:** Android app derives its AES key from `SHA-256(packageInfo.signatures[0].toByteArray())`, truncated to 16 bytes. Because the signing cert is embedded in the APK, the key is recoverable offline — no reverse engineering of native code required.
+### APK 证书 SHA-256 当 AES 密钥（ASIS Finals 2018）
 
 ```python
 from hashlib import sha256
@@ -605,60 +460,43 @@ import base64, zipfile
 
 cert = zipfile.ZipFile('app.apk').read('META-INF/CERT.RSA')
 key  = base64.b64encode(sha256(cert).digest())[:16]
-# Decrypt config resources with AES-ECB using this key
 ```
 
-**Key insight:** "Deterministic key from a public fingerprint" is a recurring Android anti-pattern. Audit `getSignature`, `getPackageInfo`, and MessageDigest usages for this shape; the fix is to store a real secret server-side.
+**判据**：`SHA-256(packageInfo.signatures[0].toByteArray())` 截 16 字节——签名证书就在 APK 里，密钥离线可复原，完全不用逆 native。审计 `getSignature`/`getPackageInfo`/`MessageDigest` 的这类形状。
 
-**References:** ASIS CTF Finals 2018 — Gunshop, writeup 12420
+### Moxie 自定义操作码（SECCON 2018）
 
----
-
-## Moxie ISA Custom Opcode Discovery (SECCON 2018)
-
-**Pattern:** Binary is compiled for Moxie (obscure CPU architecture). `strings` on the ELF reveals a help banner declaring custom opcodes `SETRSEED (0x16)` and `GETRAND (0x17)`, with a non-standard xorshift32 implementation. Emulate those opcodes in Python to recover the PRNG stream, then XOR the ciphertext with the sequence.
+`strings` 在 ELF 里翻到帮助文本，直接声明了自定义操作码 `SETRSEED (0x16)`、`GETRAND (0x17)` 与非标准 xorshift32。用 Python 模拟这两个操作码恢复 PRNG 流，再异或密文。
 
 ```python
 def xorshift32(s):
     s ^= (s << 13) & 0xffffffff
     s ^= (s >> 17)
-    s ^= (s << 15) & 0xffffffff     # Note: *not* standard (<< 5)
+    s ^= (s << 15) & 0xffffffff     # 注意：不是标准的 (<< 5)
     return s & 0xffffffff
 ```
 
-**Key insight:** Obscure ISAs often lean on small custom additions to implement crypto inline. Grep the binary for human-readable opcode documentation; it's frequently left in the help text for challenge authors' own debugging.
+**判据**：冷门 ISA 常靠小规模自定义扩展内联实现密码学；作者自己的调试帮助文本经常留在二进制里。
 
-**References:** SECCON 2018 — Special Instructions, writeup 12001
-
----
-
-## Unity APK Assembly-CSharp.dll Runtime Patch (SECCON 2018)
-
-**Pattern:** Unity game ships compiled C# game logic in `assets/bin/Data/Managed/Assembly-CSharp.dll`. Decompile with dnSpy/ILSpy, modify the `Update()` or `Start()` methods (e.g., remove rotation animations that hide the flag), recompile, repack the APK with `apktool`, resign with `jarsigner`, install on emulator.
+### Unity 运行时补丁（SECCON 2018）
 
 ```bash
 apktool d game.apk -o game_src
-# Replace game_src/assets/bin/Data/Managed/Assembly-CSharp.dll with patched version
+# 用改过的 Assembly-CSharp.dll 替换 game_src/assets/bin/Data/Managed/
 apktool b game_src -o patched.apk
 jarsigner -keystore debug.keystore -storepass android patched.apk androiddebugkey
 adb install -r patched.apk
 ```
 
-**Key insight:** Unity games are "just C#" once you open the DLL. Any hidden flag rendered at the wrong angle or masked by an overlay is exposed by deleting the animation code.
-
-**References:** SECCON 2018 — block, writeup 12001
+**判据**：Unity 游戏打开 DLL 之后就是纯 C#。被错误角度渲染或被浮层遮住的 flag，删掉那段动画代码就露出来了。
 
 ---
 
-## Il2CppDumper for Unity IL2CPP Metadata Recovery (SECCON 2018)
+## 19. 纪律
 
-**Pattern:** Modern Unity games compile to IL2CPP (native code plus metadata) instead of shipping `Assembly-CSharp.dll`. Use `Il2CppDumper` against `libil2cpp.so` plus `assets/bin/Data/Managed/Metadata/global-metadata.dat` to recover pseudo-C#, then grep the output for endpoint strings, API paths, or crypto constants.
-
-```bash
-Il2CppDumper libil2cpp.so global-metadata.dat out/
-grep -r "https://" out/  # find hardcoded endpoints
-```
-
-**Key insight:** IL2CPP looks opaque but the metadata file carries every type name, method name, and string literal. That is enough to reverse CTF-level logic without ever touching native disassembly.
-
-**References:** SECCON 2018 — shooter, writeup 12001
+- **先定容器再谈逻辑**：Mach-O/固件/驱动/游戏资源各有容器结构，容器没拆开就别读指令。
+- **平台题的卡点几乎都是「工具没选对」**，不是「逻辑太复杂」。`.ipa` 加密、`.ko` 重定位、IL2CPP 元数据都是格式问题。
+- **补丁之后必重签**：macOS 不重签直接跑不起来，Windows 驱动要处理签名强制。
+- **固件先 `binwalk -Me`**，套娃提取完再找 `/etc/init.d`、`/etc/passwd`、web 服务配置。
+- **游戏题先找资源容器**：`.pak`/`.uasset`/`Assembly-CSharp.dll`/`global-metadata.dat` 里往往直接有明文线索。
+- **报的是格式不是难度**：IL2CPP、eBPF、Moxie 看起来唬人，其实都是「换工具」。

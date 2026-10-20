@@ -1,30 +1,30 @@
 {
   "sql注入|sqli|sql_injection": [
-    "web/漏洞分类/injection/sql-injection.md",
-    "web/漏洞分类/sqli/手册.md"
+    "web/漏洞分类/注入类/sql-injection.md",
+    "web/漏洞分类/SQL注入/注入类漏洞（SQL注入-命令注入-SSTI）.md"
   ],
   "认证|登录|越权|未授权|auth|jwt": [
-    "web/漏洞分类/authn/",
-    "web/漏洞分类/authbypass/手册.md"
+    "web/漏洞分类/认证与会话/",
+    "web/漏洞分类/认证绕过/认证绕过（登录-会话-密码重置-2FA）.md"
   ],
   "反序列化|deser|deserialization": [
-    "web/漏洞分类/injection/server-side-deser.md",
-    "web/漏洞分类/deserialization/手册.md"
+    "web/漏洞分类/注入类/server-side-deser.md",
+    "web/漏洞分类/反序列化/反序列化测试.md"
   ],
   "命令执行|rce|代码执行|exec": [
-    "web/漏洞分类/injection/server-side-exec.md"
+    "web/漏洞分类/注入类/server-side-exec.md"
   ],
   "ssti|模板注入|服务端高级": [
-    "web/漏洞分类/injection/server-side-advanced.md"
+    "web/漏洞分类/注入类/server-side-advanced.md"
   ],
   "服务端漏洞|web漏洞|server-side": [
-    "web/漏洞分类/injection/"
+    "web/漏洞分类/注入类/"
   ],
   "前端|xss|原型链|prototype|客户端": [
     "web/漏洞分类/client-side.md",
     "web/漏洞分类/client-side-advanced.md",
     "web/漏洞分类/node-and-prototype.md",
-    "web/漏洞分类/xss/手册.md"
+    "web/漏洞分类/XSS/XSS测试.md"
   ],
   "信息收集|子域|指纹|侦察|recon": [
     "web/信息收集/"
@@ -34,8 +34,8 @@
     "web/实践笔记/"
   ],
   "边界入口|webvpn|统一认证|sso": [
-    "web/漏洞分类/authbypass/手册.md",
-    "web/漏洞分类/jwt/手册.md"
+    "web/漏洞分类/认证绕过/认证绕过（登录-会话-密码重置-2FA）.md",
+    "web/漏洞分类/JWT/OAuth-JWT-SAML 安全.md"
   ],
   "api|接口|脚本|requests": [
     "web/实践笔记/python-requests.md",

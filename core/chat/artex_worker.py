@@ -1,11 +1,14 @@
 """ARTEX Intent 到 ChatTurn 专家 Worker 的适配层。"""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
 from core.chat import store as chat_store
 from core.chat.runtime import ChatTurn
+
+log = logging.getLogger(__name__)
 
 # 撞预算上限标记（artex-exhausted）：Worker 返回文本末尾带它 → Engine 标
 # exhausted 而非 completed。用不可见控制字符包裹，避免被当成正文的一部分
@@ -22,7 +25,8 @@ def strip_exhausted_mark(text: str) -> tuple[str, bool]:
     return raw, False
 
 
-def make_worker(*, bb, llm, project_id: str, packs_root: str | Path,
+def make_worker(*, bb, llm=None, llm_provider=None, project_id: str,
+                packs_root: str | Path,
                 track: str, capabilities: list[str] | None = None,
                 artifacts_dir: str | Path | None = None,
                 browser_pool=None, containers=None, recovery=None):
@@ -31,12 +35,29 @@ def make_worker(*, bb, llm, project_id: str, packs_root: str | Path,
     每个 Intent 创建独立 Chat 线程和普通专家 ChatTurn；不设置 probe_mode，
     因而沿用专家 YAML 工具白名单、资产边界和正常意图纪律。
 
+    ``llm`` / ``llm_provider``（2026-10-20）：Worker 用哪个模型。**传
+    ``llm_provider``（callable）时每轮重新解析**——这样主控换供应商后，
+    后续 Intent 立刻跟着换，不必重建 Engine（Engine 一旦建好就长期驻留，
+    模型绑死在构造期 = 「主控换了、子代理还在用旧的」）。``llm_provider``
+    抛错/返回 None 时回退 ``llm``；两者都缺才是配置错误。
+
     终态约定（artex-exhausted，对齐上游 server/engine.go:1133-1146）：
     handler 正常返回 = 本次运行跑完了，Engine 标 ``completed``；若本轮是**撞
     步数上限**被动收尾（``ChatTurn.budget_exhausted``），返回文本末尾带上
     ``EXHAUSTED_MARK``，由 Engine 据此标 ``exhausted``——「试过但没做完」，
     Planner 必须换角度或续跑，不能当成已覆盖。
     """
+    def _resolve_llm():
+        """每轮解析 Worker 模型；解析失败不阻断（回退构造期实例）。"""
+        if llm_provider is None:
+            return llm
+        try:
+            got = llm_provider()
+        except Exception:  # noqa: BLE001 —— 模型解析失败不该打死整轮调度
+            log.exception("ARTEX Worker 模型解析失败，回退构造期实例")
+            return llm
+        return got if got is not None else llm
+
     def run(intent: dict[str, Any]) -> str:
         expert = str(intent.get("expert") or "").strip()
         objective = str(intent.get("objective") or "").strip()
@@ -87,7 +108,7 @@ def make_worker(*, bb, llm, project_id: str, packs_root: str | Path,
             thread = chat_store.create_thread(bb, project_id, expert,
                                               **thread_kwargs)
         turn = ChatTurn(
-            bb=bb, llm=llm, project_id=project_id, thread_id=thread["id"],
+            bb=bb, llm=_resolve_llm(), project_id=project_id, thread_id=thread["id"],
             packs_root=packs_root, track=track,
             capabilities=capabilities or [],
             expert_names=[expert],

@@ -75,6 +75,10 @@ _ACTION_KINDS = ("command", "command.result")
 _MIN_REPEAT_FAILURES = 2   # 同一工具/命令重复失败次数
 _MIN_TOTAL_FAILURES = 3    # 本轮失败总数
 _MIN_ACTIONS_HARD = 25     # 步数（执行动作数）——任务较难的代理
+# kb.search 零命中次数阈值（2026-10-19 命中质量信号）：1 次即可——
+# 「问了但库里没有」本身就是知识缺口，不需要累积；累积阈值只适用于
+# 「失败」这类可能是偶发（权限/网络）的信号。
+_MIN_KB_ZERO_HITS = 1
 
 # Web 漏洞类别线索（新 Web 漏洞触发沉淀）：命中发现标题/类别的子串
 _WEB_VULN_HINT = re.compile(
@@ -99,15 +103,30 @@ def signals_of(bb, project_id: str, *, since_event_id: int = 0,
     total_fail = 0
     kb_refs = 0
     actions = 0
+    # 命中质量信号（2026-10-19）：迭代不该只看「失败多」，还要看「检索/路由没打中」。
+    # kb.search 的 payload 带 hits，hits==0 即「问了但知识库没有」——这是补文档的
+    # 最直接证据，比「工具失败」精确得多（失败可能是权限/网络，与知识缺口无关）。
+    kb_search_zero = 0        # kb.search 零命中次数
+    kb_search_total = 0
+    skill_opens = 0           # 打开技能次数（用于对照「打开了但没解决问题」）
     for e in events:
         kind = e.get("kind")
+        payload = e.get("payload") or {}
         if kind in _FAIL_KINDS:
             total_fail += 1
-            name = str((e.get("payload") or {}).get("name")
-                       or (e.get("payload") or {}).get("tool") or "?")
+            name = str(payload.get("name") or payload.get("tool") or "?")
             fails[name] = fails.get(name, 0) + 1
         elif kind in _KB_REF_KINDS:
             kb_refs += 1
+            if kind == "kb.search":
+                kb_search_total += 1
+                try:
+                    if int(payload.get("hits") or 0) == 0:
+                        kb_search_zero += 1
+                except (TypeError, ValueError):
+                    pass
+            elif kind == "skill.open":
+                skill_opens += 1
         elif kind in _ACTION_KINDS:
             actions += 1
     repeat_fail = max(fails.values()) if fails else 0
@@ -130,6 +149,9 @@ def signals_of(bb, project_id: str, *, since_event_id: int = 0,
         "tool_failures": total_fail,
         "repeat_failures": repeat_fail,
         "kb_refs": kb_refs,
+        "kb_search_total": kb_search_total,
+        "kb_search_zero": kb_search_zero,
+        "skill_opens": skill_opens,
         "actions": actions,
         "new_findings": new_findings,
         "new_web_vulns": new_web_vulns,
@@ -146,6 +168,12 @@ def should_trigger(sig: dict) -> tuple[bool, str]:
         return True, f"本轮工具失败 {sig['tool_failures']} 次（任务较难）"
     if sig.get("kb_refs", 0) > 0 and sig.get("tool_failures", 0) >= 2:
         return True, "引用过知识库文档却仍反复失败（文档可能有误/缺失）"
+    # 命中质量（2026-10-19）：搜了但零命中 = 知识缺口的最直接证据。
+    # 阈值取 1：单次零命中已足够说明「用户问了、库里没有」，值得补文档；
+    # 而「工具失败」可能是权限/网络问题，与本条语义不同，不能互相替代。
+    if sig.get("kb_search_zero", 0) >= _MIN_KB_ZERO_HITS:
+        return True, (f"知识库检索 {sig['kb_search_zero']} 次零命中"
+                      f"（共 {sig.get('kb_search_total', 0)} 次）——存在知识缺口")
     if sig.get("actions", 0) >= _MIN_ACTIONS_HARD:
         return True, f"本轮执行动作 {sig['actions']} 步（任务较难）"
     return False, ""
@@ -158,12 +186,29 @@ _ITER_SYSTEM = (
     "产出的发现），提出对知识库/技能文档的**沉淀或纠错提案**。严格规则：\n"
     "(1) 仅在四种情形提：①知识库/技能文档内容有误（与实际不符）；②文档缺失（有值得"
     "沉淀的新方法/坑）；③某手法已被本轮验证有效；④产出新的 Web 漏洞（补漏洞手册/技巧）。\n"
-    "(2) 路径/技能名只能从给出的清单里选，禁止猜；新经验一律 create 新文件/新技能，"
-    "禁止覆盖/翻译英文原文快照。\n"
+    "(2) 路径/技能名只能从给出的清单里选，禁止猜。**优先 mode=edit 把新经验补进已有的"
+    "对应手册**；仅当确实没有对应手册时才 create 新文件。禁止覆盖/翻译英文原文快照。\n"
     "(3) 允许 kind=kb（mode=edit/create/delete）与 kind=skill（mode=edit/create/delete）。"
     "删除要谨慎，仅在文档明显错误且无法改写时提 delete。\n"
     "(4) 每条必须在 reason 附本轮证据（失败的工具/引用的文档/产出的发现 id）。\n"
     "(5) 无值得沉淀的内容就返回空列表。\n"
+    "\n【最重要的红线：禁止写解题流水账】\n"
+    "写进知识库的必须是**可复用的手法/判据/坑**，不是这次解题的过程记录。\n"
+    "- 禁止：按步骤复述本次解题（「第一步…第二步…」「先做 A 再做 B 最后拿到 flag」）、"
+    "赛题名+解题过程、具体靶机地址/凭据/flag 值、按时间顺序的行动日志。\n"
+    "- 这类内容会让 AI 在同一题复测时直接检索到旧解法、跳过分析过程，"
+    "把「解题能力」退化成「答案检索」，换个变种题就失效——是本系统明确要防的污染。\n"
+    "- 允许：题目作为**手法例证**出现，且必须写成「什么特征 → 用什么手法 → 为什么」，"
+    "例如「Solidity 0.8.15 calldata tuple head overflow（0CTF 2022 NFT Market）→ "
+    "ABI 重编码时校验被绕过 → 判据：合约编译器版本落在受影响区间」。"
+    "题目名只能作为该手法的典型场景标注，不能展开成过程。\n"
+    "- 自检：写完问自己「换个同类型但不同题目的目标，这段话还有用吗？」"
+    "答案为否 → 说明写的是流水账，删掉重写。\n"
+    "\n【表达红线：硬核、精简、无废话】\n"
+    "- 只写判据、手法、坑、边界条件。禁止「本文将介绍」「综上所述」「需要注意的是」"
+    "这类填充语，禁止重复标题已表达的意思，禁止解释显而易见的概念。\n"
+    "- 优先短句、表格、判据式表达（「若 X 则 Y」「A 命中说明 B」）。\n"
+    "- 一段话能删掉而不损失信息，就删掉。宁可少写，不要注水。\n"
     '只输出 JSON：{"proposals":[{"kind":"kb|skill","mode":"edit|create|delete",'
     '"target":{...},"content":"...","summary":"≤300字","reason":"证据"}]}\n'
     "target 形态：kb={cap:域, path:<域>/<路径>.md}；skill={name:技能名}"

@@ -282,5 +282,5 @@ Sysmon olaf 配置: https://github.com/olafhartong/sysmon-modular ·
 Ekko: https://github.com/Cracked5pider/Ekko ·
 Foliage: https://github.com/SecIdiot/FOLIAGE
 
-三件套（hook 调研 → unhook → 遥测致盲）完成后，回到技能 edr-hook-rev 的验证
+三件套（hook 调研 → unhook → 遥测致盲）完成后，回到技能 EDR对抗手法 的验证
 步骤在 sandbox 验证，再进入下一攻击阶段。

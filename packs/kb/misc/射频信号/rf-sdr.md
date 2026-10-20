@@ -1,91 +1,137 @@
-# CTF Misc - RF / SDR / IQ Signal Processing
+---
 
-Techniques for Software-Defined Radio (SDR) signal processing using In-phase/Quadrature (IQ) data.
+title: 射频与 SDR 信号处理
+phase: misc
+vuln_class: [misc, rf, sdr, iq, qam, dsp]
+summary: 拿到 IQ 文件先认格式（cf32/cs16/cu8），再画星座图。判据是星座形状——圆环=固定频偏、螺旋=频偏漂移、网格散点=同步正常只剩噪声。
+---
 
-## IQ File Formats
-- **cf32** (complex float 32): GNU Radio standard, `np.fromfile(path, dtype=np.complex64)`
-- **cs16** (complex signed 16-bit): `np.fromfile(path, dtype=np.int16).reshape(-1,2)`, then `I + jQ`
-- **cu8** (complex unsigned 8-bit): RTL-SDR raw format
+# 射频与 SDR 信号处理
 
-## Analysis Pipeline
+硬件信号（GPIO/MMIO/逻辑分析）见 [[forensics/隐写与信号/signals-and-hardware.md|信号与硬件]]；音频隐写见 [[forensics/隐写与信号/stego-advanced.md|进阶隐写]]。
+
+## 0. 判据速查
+
+| 星座图长什么样 | 结论 | 去哪节 |
+|---|---|---|
+| 圆环（点绕成圈） | 固定载波频偏 | §2 |
+| 螺旋/外扩弧 | 频偏随时间漂移（伴随 AGC 抖动） | §2 |
+| 网格上的团块 | 同步正常，只有噪声 | — |
+| 4 个固定朝向的同一图案 | DD 载波恢复锁到了错误相位 | §2 |
+| 完全随机 | 符号率或调制阶数猜错 | §1 |
+| 符号率未知 | 做平方律循环平稳检测 | §1 |
+
+## 1. 加载与预处理
+
+**格式先认准**，读错 dtype 后面全废：
+
+| 格式 | 含义 | 读法 |
+|---|---|---|
+| cf32 | 复浮点 32（GNU Radio 标准） | `np.fromfile(path, dtype=np.complex64)` |
+| cs16 | 复有符号 16 位 | `np.fromfile(path, dtype=np.int16).reshape(-1,2)` 后 `I + jQ` |
+| cu8 | 复无符号 8 位（RTL-SDR 原始） | 同上，`dtype=np.uint8` 并去直流 |
+
 ```python
 import numpy as np
 from scipy import signal
 
-# 1. Load IQ data
 iq = np.fromfile('signal.cf32', dtype=np.complex64)
 
-# 2. Spectrum analysis - find occupied bands
+# 频谱：找占用频段
 fft_data = np.fft.fftshift(np.fft.fft(iq[:4096]))
-freqs = np.fft.fftshift(np.fft.fftfreq(4096))
 power_db = 20*np.log10(np.abs(fft_data)+1e-10)
 
-# 3. Identify symbol rate via cyclostationary analysis
-x2 = np.abs(iq_filtered)**2  # squared magnitude
+# 循环平稳找符号率：平方律
+x2 = np.abs(iq_filtered)**2
 fft_x2 = np.abs(np.fft.fft(x2, n=65536))
-# Peak in fft_x2 = symbol rate (samples_per_symbol = 1/peak_freq)
+# fft_x2 的峰值就是符号率 → samples_per_symbol = 1/peak_freq
 
-# 4. Frequency shift to baseband
-center_freq = 0.14  # normalized frequency of band center
+# 频移到基带
 t = np.arange(len(iq))
-baseband = iq * np.exp(-2j * np.pi * center_freq * t)
+baseband = iq * np.exp(-2j*np.pi*center_freq*t)
 
-# 5. Low-pass filter to isolate band
+# 低通隔离
 lpf = signal.firwin(101, bandwidth/2, fs=1.0)
 filtered = signal.lfilter(lpf, 1.0, baseband)
 ```
 
-## QAM-16 Demodulation with Carrier + Timing Recovery
-QAM-16 (Quadrature Amplitude Modulation) — the key challenge is carrier frequency offset causing constellation rotation (circles instead of points).
+**`cu8` 必须先减 127.5 去直流**，否则整个星座图会偏移到一侧，看起来像「严重频偏」。
 
-**Decision-directed carrier recovery + Mueller-Muller timing:**
+**带宽与符号率的关系**：`BW = Rs × (1 + α)`，`α` 是滚降因子（0 到 1）。反推 `Rs` 时要知道 `α`。
+
+## 2. 载波与定时恢复
+
+QAM-16 的核心难点是**载波频偏导致星座旋转**——点转成圈，判决全错。
+
+### 2.1 判决导向（DD）二阶环
+
 ```python
-# Loop parameters (2nd order PLL)
-carrier_bw = 0.02  # wider BW = faster tracking, more noise
+carrier_bw = 0.02                     # 越大跟踪越快、噪声越大
 damping = 1.0
 theta_n = carrier_bw / (damping + 1/(4*damping))
-Kp = 2 * damping * theta_n      # proportional gain
-Ki = theta_n ** 2                # integral gain
+Kp = 2 * damping * theta_n            # 比例增益
+Ki = theta_n ** 2                     # 积分增益
 
-carrier_phase = 0.0
-carrier_freq = 0.0
-
-for each symbol sample:
-    # De-rotate by current phase estimate
-    symbol = raw_sample * np.exp(-1j * carrier_phase)
-
-    # Find nearest constellation point (decision)
-    nearest = min(constellation, key=lambda p: abs(symbol - p))
-
-    # Phase error (decision-directed)
+carrier_phase = carrier_freq = 0.0
+for raw_sample in samples:
+    symbol = raw_sample * np.exp(-1j * carrier_phase)      # 按当前相位估计去旋转
+    nearest = min(constellation, key=lambda p: abs(symbol - p))   # 判决
     error = np.imag(symbol * np.conj(nearest)) / (abs(nearest)**2 + 0.1)
-
-    # Update 2nd order loop
-    carrier_freq += Ki * error
+    carrier_freq  += Ki * error
     carrier_phase += Kp * error + carrier_freq
 ```
 
-**Mueller-Muller timing error detector:**
+**`+0.1` 是防止判决点接近原点时除零**，去掉会在 QAM 中心点附近炸掉。
+
+### 2.2 Mueller-Muller 定时误差
+
 ```python
-timing_error = (Re(y[n]-y[n-1]) * Re(d[n-1]) - Re(d[n]-d[n-1]) * Re(y[n-1]))
+timing_error = (Re(y[n]-y[n-1]) * Re(d[n-1]) - Re(d[n]-d[n-1]) * Re(y[n-1])) \
              + (Im(y[n]-y[n-1]) * Im(d[n-1]) - Im(d[n]-d[n-1]) * Im(y[n-1]))
-# y = received symbol, d = decision (nearest constellation point)
+# y = 收到的符号，d = 判决结果（最近的星座点）
 ```
 
-## Key Insights for RF CTF Challenges
-- **Circles in constellation** = constant frequency offset (points rotate at fixed rate, forming a ring)
-- **Spirals** = frequency offset that drifts over time (ring radius changes as amplitude/AGC also drifts). If you see points tracing outward arcs rather than closed circles, suspect combined frequency + gain instability
-- **Blobs on grid** = correct sync, just noise
-- **4-fold ambiguity**: DD carrier recovery can lock with 0/90/180/270 rotation - try all 4
-- **Bandwidth vs symbol rate**: BW = Rs x (1 + alpha), where alpha is roll-off factor (0 to 1)
-- **RC vs RRC**: "RC pulse shaping" at TX means receiver just samples (no matched filter needed); "RRC" means apply matched RRC filter at RX
-- **Cyclostationary peak at Rs** confirms symbol rate even without knowing modulation order
-- **AGC**: normalize signal power to match constellation power: `scale = sqrt(target_power / measured_power)`
-- **GNU Radio's QAM-16 default mapping** is NOT Gray code - always check the provided constellation map
+### 2.3 四重模糊
 
-## Common Framing Patterns
-- Idle/sync pattern repeating while link is idle
-- Start delimiter (often a single symbol like 0)
-- Data payload (nibble pairs for QAM-16: high nibble first, low nibble)
-- End delimiter (same as start, e.g., 0)
-- The idle pattern itself may contain the delimiter value - distinguish by context (is it part of the 16-symbol repeating pattern?)
+DD 恢复可能锁在 0/90/180/270 四个相位之一。**四种都试一遍**，看哪种解出的 bit 流有正确的帧结构或 flag 前缀。
+
+### 2.4 AGC 归一化
+
+```python
+scale = np.sqrt(target_power / measured_power)
+```
+
+幅度不稳时先归一化，否则判决边界全是错的。
+
+## 3. 匹配滤波的取舍
+
+- 发送端说「RC 脉冲成形」→ 接收端**直接采样即可**，不需要匹配滤波器
+- 发送端说「RRC」→ 接收端要**做一次 RRC 匹配滤波**
+
+搞反的后果是引入额外 ISI，星座点模糊成一片。
+
+## 4. 帧结构
+
+常见排列：
+
+1. 空闲/同步图案（链路空闲时循环）
+2. 起始定界符（常是单个符号，如 0）
+3. 数据载荷（QAM-16 按半字节：高 4 位在前）
+4. 结束定界符（与起始同值）
+
+**空闲图案里可能就含定界符的值**——靠上下文区分：它是 16 符号重复图案的一部分，还是独立出现。
+
+## 5. 常见坑
+
+- **GNU Radio 的 QAM-16 默认映射不是格雷码**。题给了星座图就照它，别套标准表。
+- **星座成圆先怀疑频偏，不要先怀疑噪声**。噪声是让点变模糊，不是让它转圈。
+- **符号率能靠循环平稳单独测出**，不必先知道调制阶数。
+- **`cu8` 的直流偏置**会让所有判据都偏，先减再分析。
+
+## 6. 纪律
+
+- **先画星座图再动算法**。图上一眼能看出的东西（圆环/螺旋/网格）比任何指标都直观。
+- **`cu8` 先去直流**。这一步漏掉，后面所有调参都是在补偿一个假频偏。
+- **四重相位模糊必试全**。锁对了但转了 90°，解出来是乱码而不是失败。
+- **`α` 决定带宽与符号率的关系**，反推时不能忽略。
+- **报的是「频偏没收敛」还是「定时没收敛」**：前者星座成环、后者星座点在符号间拖尾——两者调的是不同的环。

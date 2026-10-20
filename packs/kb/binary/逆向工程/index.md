@@ -1,168 +1,235 @@
 ---
 name: ctf-reverse
-description: Provides reverse engineering techniques for CTF challenges. Use when the main job is to understand how a compiled, obfuscated, packed, or virtualized target works before exploiting or solving it, including binaries, APKs, WASM, firmware, custom VMs, bytecode, game clients, malware-like loaders, and anti-debug or anti-analysis logic. Do not use it when the vulnerability is already understood and the remaining task is exploitation; use pwn instead. Do not use it for pure web workflows, log or disk forensics, or standalone crypto problems unless reversing the implementation is the real blocker.
+description: 逆向工程：判断编译、混淆、加壳或虚拟化的目标如何运作。适用于二进制、APK、WASM、固件、自定义 VM、字节码、游戏客户端、类恶意加载器，以及反调试/反分析逻辑。不适用：漏洞已明确、只剩利用时改走 pwn；纯 Web 流程、日志或磁盘取证、独立密码学题目也不走本包（除非逆向实现本身就是卡点）。
 license: MIT
-compatibility: Requires filesystem-based agent (Claude Code or similar) with bash, Python 3, and internet access for tool installation.
+compatibility: 需要可访问文件系统的 agent（Claude Code 或类似），具备 bash、Python 3，以及联网安装工具的能力。
 allowed-tools: Bash Read Write Edit Glob Grep Task WebFetch WebSearch
 metadata:
   user-invocable: "false"
 ---
 
-# CTF Reverse Engineering
+# 逆向工程
 
-Quick reference for RE challenges. For detailed techniques, see supporting files.
+## 0. 判据速查
 
-## Prerequisites
+拿到目标先做**三分钟分诊**，别一上来就开 IDA。
 
-**Python packages (all platforms):**
+| 现象 | 第一动作 | 去哪节 |
+|---|---|---|
+| `strings` 里直接有 `flag{` | 结束 | §2 |
+| 有 `strcmp`/`memcmp` 导入 | `ltrace` 或 hook 它 | §2、§3 |
+| 是标准 flag 校验器（无混淆） | angr 一把梭 | §3 |
+| 架构不是 x86-64（ARM/MIPS/RISC-V） | Qiling | §3 |
+| 反调试很重，挂不上调试器 | Qiling 或补丁 | §3、[[binary/逆向工程/anti-analysis-ctf.md|反分析对抗]] |
+| 是 Python / .NET / Go / Rust 产物 | 按语言走专用工具 | [[binary/逆向工程/languages.md|语言专项]] |
+| 是 APK / HAP / WASM / 固件 | 按平台走 | [[binary/逆向工程/platforms.md|平台专项]] |
+| 逻辑全是 `mov` 或自定义 VM | Pin 指令计数 / 写反编译器 | [[binary/逆向工程/tools-emulation.md|模拟与侧信道]] |
+
+**最重要的一条**：先试 `strings` + `ltrace` + 直接运行。这三步能解掉相当一部分题，成本不到一分钟。
+
+## 1. 环境
+
 ```bash
+# Python 包
 pip install frida-tools angr qiling uncompyle6 capstone lief z3-solver
-# For Python 3.9+ bytecode: build pycdc from source
+
+# Python 3.9+ 字节码要自己编 pycdc
 git clone https://github.com/zrax/pycdc && cd pycdc && cmake . && make
 ```
 
-**Linux (apt):**
 ```bash
+# Linux
 apt install gdb radare2 binutils strace ltrace apktool upx
-```
 
-**macOS (Homebrew):**
-```bash
+# macOS
 brew install gdb radare2 binutils apktool upx ghidra
+
+# radare2 的 Ghidra 反编译插件
+r2pm -ci r2ghidra
 ```
 
-**radare2 plugins:**
-```bash
-r2pm -ci r2ghidra   # Native Ghidra decompiler for radare2
-```
+pwndbg：Linux 从 GitHub 装，macOS `brew install pwndbg/tap/pwndbg-gdb`。
 
-**Manual install:**
-- pwndbg — Linux: [GitHub](https://github.com/pwndbg/pwndbg), macOS: `brew install pwndbg/tap/pwndbg-gdb`
-
-## Additional Resources
-
-- [[binary/逆向工程/unicorn-emulation.md|unicorn-emulation.md]] - Unicorn CPU emulation: raw binary assembly emulation, hooks, ARM/MIPS/Thumb, mixed-mode, firmware MMIO, Keystone+Capstone trace inversion, shellcode unpack, custom VM, vs Qiling decision (sometimes easier to rev with just unicorn + binary + assembly than full GDB/angr)
-- [[binary/逆向工程/tools.md|tools.md]] - Static analysis tools (GDB, Ghidra, radare2, IDA, Binary Ninja, dogbolt.org, RISC-V with Capstone, Unicorn emulation, Python bytecode, WASM, Android APK, .NET, packed binaries)
-- [[binary/逆向工程/tools-dynamic.md|tools-dynamic.md]] - Dynamic analysis tools: Frida (hooking, anti-debug bypass, memory scanning, Android/iOS), angr symbolic execution (path exploration, constraints, CFG), lldb (macOS/LLVM debugger), x64dbg (Windows)
-- [[binary/逆向工程/tools-emulation.md|tools-emulation.md]] - Emulation frameworks and side-channel tooling: Qiling (cross-platform OS-level emulation), Triton (DSE), Intel Pin instruction-counting + genetic algorithm side channel, opcode-only trace reconstruction, LD_PRELOAD time freeze and memcmp side-channel for byte-by-byte bruteforce
-- [[binary/逆向工程/tools-advanced.md|tools-advanced.md]] - Advanced tools (Part 1): VMProtect/Themida analysis, binary diffing (BinDiff, Diaphora), deobfuscation frameworks (D-810, GOOMBA, Miasm), Qiling framework, Triton DSE, Manticore, Rizin/Cutter, RetDec, custom VM bytecode lifting to LLVM IR
-- [[binary/逆向工程/tools-advanced.md|tools-advanced.md]] - Advanced tools (Part 2): advanced GDB (Python scripting, brute-force, conditional breakpoints, watchpoints, reverse debugging with rr, pwndbg/GEF), advanced Ghidra scripting, patching (Binary Ninja API, LIEF), GDB constraint extraction + ILP solver (BackdoorCTF 2017), GDB position-encoded input zero flag monitoring (EKOPARTY 2017), LD_PRELOAD execute-only binary dump (BackdoorCTF 2017), PEDA current_inst bit-by-bit flag scraper (CONFidence CTF 2019 Teaser)
-- [[binary/逆向工程/anti-analysis.md|anti-analysis.md]] - Anti-analysis taxonomy: Linux anti-debug (ptrace, /proc, timing, signals, direct syscalls), Windows anti-debug (PEB, NtQueryInformationProcess, heap flags, TLS callbacks, HW/SW breakpoint detection, exception-based, thread hiding), anti-VM/sandbox (CPUID, MAC, timing, artifacts, resources), anti-DBI (Frida detection/bypass), code integrity/self-hashing, anti-disassembly (opaque predicates, junk bytes), MBA identification/simplification, comprehensive bypass strategies
-- [[binary/逆向工程/anti-analysis-ctf.md|anti-analysis-ctf.md]] - CTF writeup techniques: SIGILL handler for execution mode switching (Hack.lu 2015), SIGFPE signal handler side-channel via strace counting (PlaidCTF 2017), instruction trace inversion with Keystone and Unicorn (MeePwn 2017), call-less function chaining via stack frame manipulation (THC 2018), parent-patched child binary dump via `process_vm_writev` (Google CTF Quals 2018)
-- [[binary/逆向工程/patterns.md|patterns.md]] - Foundational binary patterns: custom VMs, anti-debugging, nanomites, self-modifying code, XOR ciphers, mixed-mode stagers, LLVM obfuscation, S-box/keystream, SECCOMP/BPF, exception handlers, memory dumps, byte-wise transforms, x86-64 gotchas, custom mangle reversing, position-based transforms, hex-encoded string comparison, signal-based binary exploration
-- [[binary/逆向工程/patterns-runtime.md|patterns-runtime.md]] - Runtime patching and oracle techniques: malware anti-analysis bypass, multi-stage shellcode loaders, timing side-channel attacks, multi-thread anti-debug with decoy + signal handler MBA (ApoorvCTF 2026), INT3 patch + coredump brute-force oracle (Pwn2Win 2016), signal handler chain + LD_PRELOAD oracle (Nuit du Hack 2016), printf format string VM decompilation to Z3 (SECCON 2017), quadtree recursive image format parser (Google CTF Quals 2018)
-- [[binary/逆向工程/patterns-ctf.md|patterns-ctf.md]] - Competition-specific patterns (Part 1): hidden emulator opcodes, LD_PRELOAD key extraction, SPN static extraction, image XOR smoothness, byte-at-a-time cipher, mathematical convergence bitmap, Windows PE XOR bitmap OCR, two-stage RC4+VM loaders, GBA ROM meet-in-the-middle, Sprague-Grundy game theory, kernel module maze solving, multi-threaded VM channels, backdoored shared library detection via string diffing, custom binfmt kernel module with RC4 flat binaries, hash-resolved imports / no-import ransomware, ELF section header corruption for anti-analysis
-- [[binary/逆向工程/patterns-ctf.md|patterns-ctf.md]] - Competition-specific patterns (Part 2): multi-layer self-decrypting brute-force, embedded ZIP+XOR license, stack string deobfuscation, prefix hash brute-force, CVP/LLL lattice for integer validation, decision tree function obfuscation, GF(2^8) Gaussian elimination, ROP chain obfuscation analysis (ROPfuscation)
-- [[binary/逆向工程/patterns-ctf.md|patterns-ctf.md]] - Competition-specific patterns (Part 3): Z3 single-line Python circuit, sliding window popcount, keyboard LED Morse code via ioctl, C++ destructor-hidden validation, syscall side-effect memory corruption, MFC dialog event handlers, VM sequential key-chain brute-force, Burrows-Wheeler transform inversion, OpenType font ligature exploitation, GLSL shader VM with self-modifying code, instruction counter as cryptographic state, batch crackme automation via objdump, fork+pipe+dead branch anti-analysis, TensorFlow DNN inversion via sigmoid layer inversion, BPF filter analysis via kernel JIT to x64 assembly
-- [[binary/逆向工程/languages.md|languages.md]] - Language-specific: Python bytecode & opcode remapping, Python version-specific bytecode, Pyarmor static unpack, DOS stubs, Unity IL2CPP, HarmonyOS HAP/ABC, Brainfuck/esolangs (+ BF character-by-character static analysis, BF side-channel read count oracle, BF comparison idiom detection), UEFI, transpilation to C, code coverage side-channel, OPAL functional reversing, non-bijective substitution, FRACTRAN program inversion
-- [[binary/逆向工程/languages-platforms.md|languages-platforms.md]] - Platform/framework-specific: Roblox place file analysis, Godot game asset extraction, Rust serde_json schema recovery, Android JNI RegisterNatives obfuscation, Android DEX runtime bytecode patching via /proc/self/maps, Android native .so loading bypass via new project, Frida Firebase Cloud Functions bypass, Verilog/hardware RE, prefix-by-prefix hash reversal, Ruby/Perl polyglot constraint satisfaction, Electron ASAR extraction + native binary analysis, Node.js npm runtime introspection
-- [[binary/逆向工程/languages-compiled.md|languages-compiled.md]] - Go binary reversing (GoReSym, goroutines, memory layout, channel ops, embed.FS, Go binary UUID patching for C2 enumeration), Rust binary reversing (demangling, Option/Result, Vec, panic strings), Swift binary reversing (demangling, protocol witness tables), Kotlin/JVM (coroutine state machines), Haskell GHC CMM intermediate language for recursive structure analysis, C++ (vtable reconstruction, RTTI, STL patterns)
-- [[binary/逆向工程/platforms.md|platforms.md]] - Platform-specific RE: macOS/iOS (Mach-O, code signing, Objective-C runtime, Swift, dyld, jailbreak bypass), embedded/IoT firmware (binwalk, UART/JTAG/SPI extraction, ARM/MIPS, RTOS), kernel drivers (Linux .ko, eBPF, Windows .sys), game engines (Unreal Engine, Unity, anti-cheat, Lua), automotive CAN bus
-- [[binary/逆向工程/platforms-hardware.md|platforms-hardware.md]] - Hardware and advanced architecture RE: HD44780 LCD controller GPIO reconstruction, RISC-V advanced (custom extensions, privileged modes, debugging), ARM64/AArch64 reversing and exploitation (calling convention, ROP gadgets, qemu-aarch64-static emulation)
-- [[binary/逆向工程/field-notes.md|field-notes.md]] - Quick reference notes: binary types, anti-debugging bypass, specialized patterns, CTF case notes
-
----
-
-## When to Pivot
-
-- If you already understand the binary and now need heap, ROP, or kernel exploitation, switch to `/pwn`.
-- If the challenge is really about recovering deleted files, PCAP data, or disk artifacts, switch to `/forensics`.
-- If the target is a web app and you are only reversing a small client-side helper script, switch to `/ctf-web`.
-- If the binary implements a machine learning model and the challenge is about model attacks or adversarial inputs, switch to `/ai-ml`.
-- If the reversed binary's core logic is a cryptographic algorithm or math problem, switch to `/crypto`.
-- If the binary is a real malware sample with C2, packing, or evasion behavior, switch to `/malware`.
-- If the challenge is a toy VM, encoding puzzle, or pyjail rather than a real binary, switch to `/misc`.
-
-## Problem-Solving Workflow
-
-1. **Start with strings extraction** - many easy challenges have plaintext flags
-2. **Try ltrace/strace** - dynamic analysis often reveals flags without reversing
-3. **Try Frida hooking** - hook strcmp/memcmp to capture expected values without reversing
-4. **Try angr** - symbolic execution solves many flag-checkers automatically
-5. **Try Qiling** - emulate foreign-arch binaries or bypass heavy anti-debug without artifacts
-6. **Map control flow** before modifying execution
-7. **Automate manual processes** via scripting (r2pipe, Frida, angr, Python)
-8. **Validate assumptions** by comparing decompiler outputs (dogbolt.org for side-by-side)
-
-## Quick Wins (Try First!)
+## 2. 先做这四件事
 
 ```bash
-# Plaintext flag extraction
+# ① 明文 flag
 strings binary | grep -E "flag\{|CTF\{|pico"
-strings binary | grep -iE "flag|secret|password"
 rabin2 -z binary | grep -i "flag"
 
-# Dynamic analysis - often captures flag directly
+# ② 动态观察（最省事的一步）
 ltrace ./binary
 strace -f -s 500 ./binary
 
-# Hex dump search
+# ③ 十六进制搜
 xxd binary | grep -i flag
 
-# Run with test inputs
+# ④ 直接跑
 ./binary AAAA
-echo "test" | ./binary
 ```
 
-## Initial Analysis
+`ltrace` 能直接打印 `strcmp("输入", "真flag")` —— **很多题到这一步就结束了**，不用反汇编。
 
-```bash
-file binary           # Type, architecture
-checksec --file=binary # Security features (for pwn)
-chmod +x binary       # Make executable
+## 3. 工作流
+
+```text
+1. strings / ltrace / strace      ← 先做，成本最低
+2. Frida hook strcmp/memcmp       ← 拿到期望值，不逆逻辑
+3. angr 符号执行                  ← 标准校验器自动解
+4. Qiling                         ← 异构架构 / 重反调试
+5. 手工映射控制流                 ← 前面都不行才上
+6. 脚本化（r2pipe / Frida / angr）
+7. 多反编译器交叉验证（dogbolt.org）
 ```
 
-## Memory Dumping Strategy
+**顺序不能反**。直接从第 5 步开始是新手最常见的浪费。
 
-**Key insight:** Let the program compute the answer, then dump it. Break at final comparison (`b *main+OFFSET`), enter any input of correct length, then `x/s $rsi` to dump computed flag.
+## 4. 基础分析
 
-## Decoy Flag Detection
-
-**Pattern:** Multiple fake targets before real check. Look for multiple comparison targets in sequence with different success messages. Set breakpoint at FINAL comparison, not earlier ones.
-
-## GDB PIE Debugging
-
-PIE binaries randomize base address. Use relative breakpoints:
 ```bash
-gdb ./binary
-start                    # Forces PIE base resolution
-b *main+0xca            # Relative to main
-run
+file binary              # 类型、架构
+checksec --file=binary   # 保护机制（pwn 才需要）
+chmod +x binary
 ```
 
-## Comparison Direction (Critical!)
-
-Two patterns: (1) `transform(flag) == stored_target` — reverse the transform. (2) `transform(stored_target) == flag` — flag IS the transformed data, just apply transform to stored target.
-
-## Common Encryption Patterns
-
-- XOR with single byte - try all 256 values
-- XOR with known plaintext (`flag{`, `CTF{`)
-- RC4 with hardcoded key
-- Custom permutation + XOR
-- XOR with position index (`^ i` or `^ (i & 0xff)`) layered with a repeating key
-
-## Quick Tool Reference
-
 ```bash
-# Radare2
-r2 -d ./binary     # Debug mode
-aaa                # Analyze
-afl                # List functions
-pdf @ main         # Disassemble main
+# radare2
+r2 -d ./binary     # 调试模式
+aaa                # 分析
+afl                # 列函数
+pdf @ main         # 反汇编 main
 
-# Ghidra (headless)
+# Ghidra 无头
 analyzeHeadless project/ tmp -import binary -postScript script.py
 
 # IDA
-ida64 binary       # Open in IDA64
+ida64 binary
 ```
 
-## Deep-Dive Notes
+## 5. 内存 dump：让它自己算出答案
 
-Use [[binary/逆向工程/field-notes.md|field-notes.md]] after the first round of triage when you know what kind of target you have.
+**核心思路：不要逆算法，让程序算完再读出来。**
 
-- Target formats: Python bytecode, WASM, Android, Flutter, .NET, UPX, Tauri
-- Technique notes: anti-debug bypass, VM analysis, x86-64 gotchas, iterative solvers, Unicorn, timing side channels
-- Platform notes: Godot, Roblox, macOS/iOS, embedded firmware, kernel drivers, game engines, Swift, Kotlin, Go, Rust, D
-- Case notes: modern CTF-specific reversing patterns and older classic challenge patterns
+```text
+1. 在最终比较处下断：b *main+OFFSET
+2. 输入任意等长数据
+3. x/s $rsi           ← 读期望值
+```
+
+比逆推算法快得多，尤其是算法很绕但只有一个比较点的时候。
+
+## 6. PIE 的断点写法
+
+PIE 每次加载基址随机，绝对地址断点无效：
+
+```bash
+gdb ./binary
+start                 # 先跑起来，让 PIE 基址确定
+b *main+0xca          # 相对 main 下断
+run
+```
+
+`start` 之后再下断是关键。直接 `b *0x401234` 在 PIE 上永远不命中。
+
+## 7. 比较方向（最容易搞反）
+
+两种模式，处理方式完全不同：
+
+```text
+① transform(flag) == stored_target
+   → 逆 transform，或者 dump stored_target
+
+② transform(stored_target) == flag
+   → flag 就是变换后的数据，直接对 stored_target 施加 transform
+```
+
+判据：看比较的两个操作数谁是常量、谁是运行时算出来的。**搞反了会得到一串看似有意义的乱码**。
+
+## 8. 常见加密模式
+
+```text
+单字节 XOR               → 256 次全试
+已知明文 XOR             → 用 flag{ / CTF{ 推密钥
+RC4 + 硬编码密钥         → 找 S-box 初始化
+自定义置换 + XOR         → 先解置换再解 XOR
+XOR 位置索引（^ i）      → 注意 i 是字节索引还是字符索引
+重复密钥 XOR             → 先求密钥长度（Kasiski / 汉明距离）
+```
+
+## 9. 诱饵 flag
+
+题目可能故意在早期比较点放假 flag。判据：**有多个连续的比较目标，且各自的成功消息不同**。
+
+对策：在**最后**那个比较点下断，不要在前面就停。看调用栈深度 —— 最深的那次才是真校验。
+
+## 10. 换轨判断
+
+```text
+已理解二进制，剩堆/ROP/内核利用   → /pwn
+要恢复删除的文件、PCAP、磁盘痕迹   → /forensics
+只是 Web 里的小段客户端脚本       → /ctf-web
+模型攻击 / 对抗样本               → /ai-ml
+核心逻辑是密码算法或数学问题       → /crypto
+真实恶意样本（C2、加壳、规避）     → /malware
+玩具 VM / 编码谜题 / pyjail        → /misc
+```
+
+## 11. 工具速查
+
+| 用途 | 工具 |
+|---|---|
+| 反汇编 / 反编译 | IDA、Ghidra、Binary Ninja、radare2、Rizin |
+| 多引擎对比 | dogbolt.org（一次看多个反编译器的结果） |
+| 调试 | gdb(+pwndbg/GEF)、lldb、x64dbg、rr（反向调试） |
+| 符号执行 | angr（路径探索）、Triton（单路径 DSE）、Manticore |
+| 模拟 | Unicorn（裸 CPU）、Qiling（带 OS 层） |
+| 插桩 | Frida、Intel Pin、DynamoRIO |
+| 二进制处理 | LIEF、pefile、pyelftools |
+| 脱壳 | upx -d、UnpacMe、专用脱壳机 |
+| 二进制 diff | BinDiff、Diaphora |
+
+## 12. 分册导航
+
+按**目标类型**查，不要按工具查。
+
+### 12.1 工具与方法
+
+- [[binary/逆向工程/tools.md|静态工具]] —— GDB、Ghidra、radare2、IDA、Binary Ninja、dogbolt.org、RISC-V + Capstone、Python 字节码、WASM、APK、.NET、加壳二进制
+- [[binary/逆向工程/tools-dynamic.md|动态工具]] —— Frida（hook、过反调试、内存扫描、Android/iOS）、angr（路径探索、约束、CFG）、lldb、x64dbg
+- [[binary/逆向工程/tools-emulation.md|模拟与侧信道]] —— Qiling、Triton、Intel Pin 指令计数 + 遗传算法、纯 opcode 轨迹还原、LD_PRELOAD 冻结时间 / 改 memcmp
+- [[binary/逆向工程/tools-advanced.md|高级工具]] —— VMProtect/Themida、BinDiff/Diaphora、D-810/GOOMBA/Miasm、Manticore、Rizin/Cutter、RetDec、VM 字节码提升到 LLVM IR；进阶 GDB 脚本、Ghidra 脚本、LIEF 补丁、GDB 约束提取 + ILP 求解
+- [[binary/逆向工程/unicorn-emulation.md|Unicorn 模拟]] —— 裸二进制汇编模拟、hook、ARM/MIPS/Thumb、混合模式、固件 MMIO、Keystone+Capstone 轨迹反转、shellcode 解包、自定义 VM
+
+### 12.2 模式与对抗
+
+- [[binary/逆向工程/patterns.md|静态模式]] —— 自定义 VM、反调试、nanomites、自修改代码、XOR 密码、混合模式 stager、LLVM 混淆、S-box/密钥流、SECCOMP/BPF、异常处理器、内存 dump、逐字节变换、x86-64 陷阱、位置相关变换
+- [[binary/逆向工程/patterns-runtime.md|运行时与预言机]] —— 补丁过反分析、多层 shellcode、时间侧信道、多线程诱饵 + 信号处理器 MBA、INT3 + coredump 爆破、信号链 + LD_PRELOAD、`%hhn` 格式串 VM 反编译到 Z3、四叉树图片格式
+- [[binary/逆向工程/patterns-ctf.md|竞赛模式]] —— 隐藏模拟器操作码、LD_PRELOAD 密钥提取、SPN 静态提取、图像 XOR 平滑度、逐字节密码、PE XOR 位图 OCR、两级 RC4+VM、GBA ROM 中间相遇、Sprague-Grundy 博弈、内核模块迷宫、多层自解密爆破、Z3 单行电路、键盘 LED 摩斯码、ROPfuscation、Burrows-Wheeler 逆变换、OpenType 连字、GLSL shader VM、TensorFlow DNN 反演
+- [[binary/逆向工程/anti-analysis.md|反分析分类]] —— Linux/Windows 反调试（ptrace、/proc、PEB、NtQueryInformationProcess、堆标志、TLS 回调、断点检测）、反虚拟机、反 DBI（Frida 检测与绕过）、代码完整性/自哈希、反反汇编（不透明谓词、垃圾字节）、MBA 识别与化简
+- [[binary/逆向工程/anti-analysis-ctf.md|反分析对抗]] —— SIGILL 切执行模式、SIGFPE 信号计数侧信道、Keystone+Unicorn 轨迹反转、无 call 的函数链、父进程改写子进程 dump、ConfuserEx 构造器断点 dump
+
+### 12.3 语言
+
+- [[binary/逆向工程/languages.md|语言专项]] —— Python 字节码与操作码重映射、PyArmor 静态脱壳、DOS stub、Unity IL2CPP、鸿蒙 HAP/ABC、Brainfuck 等 esolang、UEFI、转译到 C、覆盖率侧信道、OPAL、非双射替换、FRACTRAN
+- [[binary/逆向工程/languages-platforms.md|平台/框架]] —— Roblox place、Godot 资源、Rust serde_json、Android JNI RegisterNatives、DEX 运行时字节码补丁、.so 加载绕过、Frida 绕 Firebase、Verilog/硬件、Ruby/Perl polyglot、Electron ASAR、Node.js npm 运行时
+- [[binary/逆向工程/languages-compiled.md|编译型语言]] —— Go（GoReSym、goroutine、内存布局、embed.FS）、Rust（demangle、Option/Result、Vec、panic 串）、Swift（demangle、protocol witness table）、Kotlin 协程状态机、Haskell GHC CMM、C++（vtable、RTTI、STL）
+
+### 12.4 平台
+
+- [[binary/逆向工程/platforms.md|平台专项]] —— macOS/iOS（Mach-O、签名、ObjC runtime、dyld、越狱绕过）、嵌入式/IoT 固件（binwalk、UART/JTAG/SPI、RTOS）、内核驱动（.ko、eBPF、.sys）、游戏引擎（UE、Unity、反作弊、Lua）、车机 CAN
+- [[binary/逆向工程/platforms-hardware.md|硬件与架构]] —— HD44780 LCD GPIO 重建、RISC-V 进阶（自定义扩展、特权模式）、ARM64 逆向与利用（调用约定、ROP gadget、qemu-aarch64-static）
+
+### 12.5 速查
+
+- [[binary/逆向工程/field-notes.md|实战笔记]] —— 目标类型、反调试绕过、特殊模式、案例记录
+
+## 13. 纪律
+
+- **先 `strings` / `ltrace` / 直接跑**。这三步不到一分钟，能解掉相当一部分题。
+- **能 dump 就别逆推**。让程序自己算完，在比较点读内存。
+- **PIE 必须 `start` 之后再下断**，绝对地址永远不命中。
+- **比较方向先确认再动手**。`transform(flag)==target` 和 `transform(target)==flag` 搞反会得到看似有意义的乱码。
+- **断点下在最后的比较处**。前面可能有诱饵，看调用栈深度判断哪个是真的。
+- **异构架构直接上 Qiling**，不要在 QEMU + rootfs 上折腾。
+- **反调试重就换环境，不要逐个打补丁**。模拟器里天然没有调试器痕迹。
+- **多反编译器交叉验证**。dogbolt.org 一次看多个结果，单个反编译器的误读很常见。

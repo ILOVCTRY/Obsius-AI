@@ -1,180 +1,196 @@
-# Scripts and Obfuscation Analysis
-
-## Table of Contents
-
-- [Obfuscated Scripts (General)](#obfuscated-scripts-general)
-- [JavaScript Deobfuscation](#javascript-deobfuscation)
-- [PowerShell Analysis](#powershell-analysis)
-- [Junk Code Detection](#junk-code-detection)
-- [Hex-Encoded Payloads](#hex-encoded-payloads)
-- [Debian Package Analysis](#debian-package-analysis)
-- [Dynamic Analysis Techniques](#dynamic-analysis-techniques)
-- [YARA Rules for Malware Detection](#yara-rules-for-malware-detection)
-- [Shellcode Analysis](#shellcode-analysis)
-- [Memory Forensics for Malware](#memory-forensics-for-malware)
-- [Anti-Analysis Techniques](#anti-analysis-techniques)
-  - [VM / Sandbox Detection](#vm--sandbox-detection)
-  - [Timing-Based Evasion](#timing-based-evasion)
-  - [API Hashing](#api-hashing)
-  - [Process Injection Techniques](#process-injection-techniques)
-  - [Environment Variable / Hostname Checks](#environment-variable--hostname-checks)
-
 ---
 
-## Obfuscated Scripts (General)
+phase: binary
+vuln_class: [malware, obfuscation, yara, forensics]
+title: 脚本混淆、YARA 与内存取证
+summary: 脚本和样本的分析靠「把执行换成打印」；内存取证靠「可执行+可写+无文件映射」三条同时成立。判据是行为，不是代码长相。
+---
 
-- Replace `eval`/`bash` with `echo` to print underlying code
-- Extract base64/hex blobs and analyze with `file`
-- Common deobfuscation chain: base64 decode -> gzip decode -> reverse -> base64 decode
+# 脚本混淆、YARA 与内存取证
 
-## JavaScript Deobfuscation
+PE / .NET 样本的配置提取见 [[binary/恶意样本/pe-and-dotnet.md|PE 与 .NET]]；C2 流量与加密协议见 [[binary/恶意样本/c2-and-protocols.md|C2 与协议]]；反分析分类与绕过见 [[binary/逆向工程/anti-analysis.md|反分析]] 与 [[binary/逆向工程/anti-analysis-ctf.md|反分析对抗]]。
 
-```javascript
-// Replace eval with console.log
-eval = console.log;
-// Then run the obfuscated code
+## 0. 判据速查
 
-// Common patterns
-unescape()           // URL decoding
-String.fromCharCode() // Char codes
-atob()               // Base64
+| 现象 | 第一动作 | 去哪节 |
+|---|---|---|
+| 脚本里有 `eval` / `iex` / `Execute` | 换成打印函数 | §1 |
+| PowerShell 参数是 `-enc` | base64 解码 + **UTF-16LE 转码** | §3 |
+| 反汇编里大量 NOP、push/pop 成对 | 过滤垃圾指令找真调用 | §4 |
+| 一段 hex 字符串 | 转字节后试减 1、XOR | §5 |
+| 装了 `.deb` 包 | 看 `postinst` 脚本 | §6 |
+| 静态看不出行为 | strace + tcpdump + inotify 同时上 | §7 |
+| 内存镜像里有可疑进程 | `malfind` | §9 |
+| `strings` 里几乎没有 API 名 | API 哈希 | §10 |
+| 样本一启动就退出 | 环境检查没通过 | §10.5 |
+| 插件/依赖可疑 | 与官方版本 **diff** | §11 |
+
+## 1. 通用：把执行换成打印
+
+```text
+JS      eval → console.log
+PS1     IEX → Write-Output；-enc 先解码
+Bash    eval → echo；curl|sh → curl 到文件再读
+VBS     Execute → WScript.Echo
+Python  exec → print
 ```
 
-## PowerShell Analysis
+常见嵌套链：
+
+```text
+base64 解码 → gzip 解压 → 字符串反转 → 再 base64 解码
+```
+
+**逐层剥**，不要试图一次看清全部。每剥一层先 `file` 判断下层的类型。
+
+## 2. JavaScript
+
+```javascript
+// 最有效的一招：直接替换 eval
+eval = console.log;
+// 然后原样运行混淆代码
+```
+
+常见解码函数：
+
+```javascript
+unescape()             // URL 解码
+String.fromCharCode()  // 字符码
+atob()                 // base64
+```
+
+## 3. PowerShell
 
 ```powershell
-# Common obfuscation
--enc / -EncodedCommand  # Base64 encoded
-IEX / Invoke-Expression # Eval equivalent
+-enc / -EncodedCommand   # base64，注意是 UTF-16LE
+IEX / Invoke-Expression  # 等价 eval
 [System.Text.Encoding]::Unicode.GetString([System.Convert]::FromBase64String($encoded))
 ```
 
-## Junk Code Detection
+```bash
+# -enc 的 payload 是 UTF-16LE，直接 base64 -d 会得到乱码加空字节
+echo '<base64>' | base64 -d | iconv -f UTF-16LE -t UTF-8
+```
 
-**Pattern:** Obfuscation adds meaningless instructions around real code
+**这是最高频的坑**：PowerShell 的 base64 是 UTF-16LE 编码的，不是 UTF-8。少了 `iconv` 那一步，看到的就是一堆 `\x00` 夹杂的碎片。
 
-**Identification:**
-- NOP sleds, push/pop pairs that cancel
-- Arithmetic that results in zero/identity
-- Dead writes (register written but never read before next write)
-- Unconditional jumps to next instruction
+## 4. 垃圾代码过滤
 
-**Filtering technique:**
+**识别特征**：
+
+```text
+NOP sled（连续 0x90）
+push/pop 成对抵消（push eax; pop eax）
+恒零/恒等运算（xor eax, eax 后又加回原值）
+写后未读的寄存器
+跳到下一行的无条件 jmp
+恒真条件（if (1==1)）
+```
+
 ```python
-# Identify real calls by looking for patterns
-# junk, junk, junk, CALL target, junk, junk
-# Extract call targets, ignore surrounding noise
-
 def extract_real_calls(disassembly):
-    calls = []
-    for instr in disassembly:
-        if instr.mnemonic == 'call' and not is_junk_target(instr.operand):
-            calls.append(instr)
-    return calls
+    return [i for i in disassembly
+            if i.mnemonic == "call" and not is_junk_target(i.operand)]
 ```
 
-## Hex-Encoded Payloads
+思路：**不要读懂垃圾，直接把噪音滤掉，只看真调用**。混淆的目的就是让噪声淹没信号。
 
-- Convert hex to bytes, try common transformations: subtract 1, XOR with key
+## 5. Hex payload
 
-## Debian Package Analysis
-
-```bash
-ar -x package.deb           # Unpack debian package
-tar -xf control.tar.xz      # Check control files
-# Look for postinst scripts that execute payloads
+```text
+1. hex 转字节
+2. 试常见变换：每个字节减 1、XOR 单字节、XOR 递增索引
+3. 结果用 file 判断类型
 ```
 
----
+判据：变换后出现 `MZ` / `\x7fELF` / `PK\x03\x04` 就是对的。
 
-## Dynamic Analysis Techniques
+## 6. Debian 包
 
 ```bash
-# Behavioral monitoring with strace/ltrace
-strace -f -e trace=network,file -o trace.log ./malware
-ltrace -f -o ltrace.log ./malware
+ar -x package.deb
+tar -xf control.tar.xz
+# 重点看 postinst / preinst / postrm —— 安装钩子才是执行点
+```
 
-# Network monitoring during execution
-# Terminal 1: capture traffic
-sudo tcpdump -i any -w malware_traffic.pcap &
-# Terminal 2: DNS monitoring
-sudo tcpdump -i any port 53 -l | tee dns_queries.log &
-# Terminal 3: run sample
-timeout 60 ./malware
+`postinst` 是安装完成后自动执行的脚本，恶意包几乎都把 payload 放这里。
 
-# File system monitoring (Linux)
+## 7. 动态分析：三路同时监控
+
+```bash
+# 系统调用
+strace -f -e trace=network,file -o trace.log ./sample
+ltrace -f -o ltrace.log ./sample
+
+# 网络（终端 1）
+sudo tcpdump -i any -w traffic.pcap &
+
+# DNS（终端 2）
+sudo tcpdump -i any port 53 -l | tee dns.log &
+
+# 文件系统（终端 3）
 inotifywait -m -r /tmp /var/tmp --format '%T %w%f %e' --timefmt '%H:%M:%S' &
-./malware
 
-# Process monitoring
-watch -n 1 'ps aux | grep -v grep | grep malware'
-
-# Memory string extraction during runtime
-# Run malware, then dump strings from its memory
-pid=$(pgrep malware)
-strings /proc/$pid/maps
-cat /proc/$pid/mem 2>/dev/null | strings | grep -i flag
-# Or use gdb: gdb -p $pid -batch -ex 'dump memory dump.bin 0x400000 0x500000'
+# 跑样本
+timeout 60 ./sample
 ```
 
 ```python
-# Automated sandbox execution with timeout
-import subprocess, os, tempfile
+import subprocess, tempfile
 
 def run_sample(path, timeout=30):
-    """Run malware sample with monitoring"""
-    with tempfile.NamedTemporaryFile(suffix='.pcap', delete=False) as pcap:
-        # Start packet capture
+    with tempfile.NamedTemporaryFile(suffix=".pcap", delete=False) as pcap:
         tcpdump = subprocess.Popen(
-            ['sudo', 'tcpdump', '-i', 'any', '-w', pcap.name],
+            ["sudo", "tcpdump", "-i", "any", "-w", pcap.name],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
         try:
-            # Run with strace
-            result = subprocess.run(
-                ['strace', '-f', '-e', 'trace=network,file', path],
-                capture_output=True, text=True, timeout=timeout)
-            print("STDOUT:", result.stdout[:500])
-            print("STDERR (syscalls):", result.stderr[:2000])
+            r = subprocess.run(["strace", "-f", "-e", "trace=network,file", path],
+                               capture_output=True, text=True, timeout=timeout)
+            print("STDOUT:", r.stdout[:500])
+            print("SYSCALLS:", r.stderr[:2000])
         except subprocess.TimeoutExpired:
-            print(f"Sample ran for {timeout}s (killed)")
+            print(f"ran {timeout}s, killed")
         finally:
             tcpdump.terminate()
-            print(f"PCAP saved: {pcap.name}")
+            print("PCAP:", pcap.name)
 ```
 
-**Key insight:** Dynamic analysis reveals runtime behavior that static analysis misses: actual C2 domains resolved, encryption keys in memory, dropped files, and anti-analysis checks that were bypassed. Always run in an isolated environment (VM snapshot, Docker container) and monitor network, filesystem, and process activity simultaneously.
-
----
-
-### YARA Rules for Malware Detection
+**运行期从内存取字符串**（静态看不到的都在这里）：
 
 ```bash
-# Basic YARA rule structure
-cat > detect_malware.yar << 'EOF'
+pid=$(pgrep sample)
+cat /proc/$pid/mem 2>/dev/null | strings | grep -i flag
+# 或指定范围 dump
+gdb -p $pid -batch -ex 'dump memory dump.bin 0x400000 0x500000'
+```
+
+**必须在隔离环境跑**（VM 快照 / 容器），且三路同时开 —— 只看 syscall 会漏掉网络行为，只看流量会漏掉落地文件。
+
+## 8. YARA
+
+```yara
 rule SuspiciousStrings {
     meta:
-        description = "Detect common malware indicators"
+        description = "常见恶意指标"
     strings:
         $s1 = "cmd.exe /c" nocase
         $s2 = "powershell -enc" nocase
-        $s3 = {4D 5A 90 00}  // MZ header (hex pattern)
-        $s4 = /https?:\/\/[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/  // IP-based URL
-        $xor_loop = {31 ?? 80 ?? ?? 4? 75}  // XOR decode loop pattern
+        $s3 = {4D 5A 90 00}                      // MZ 头
+        $s4 = /https?:\/\/[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/
+        $xor_loop = {31 ?? 80 ?? ?? 4? 75}       // XOR 解码循环
     condition:
         2 of ($s*) or $xor_loop
 }
-EOF
-
-# Scan files
-yara detect_malware.yar suspicious_file.exe
-yara -r detect_malware.yar /path/to/directory/  # Recursive scan
-
-# Scan memory dump
-yara detect_malware.yar memory.dmp
 ```
 
-**Common YARA patterns for CTFs:**
+```bash
+yara detect.yar suspicious.exe
+yara -r detect.yar /path/to/dir
+yara detect.yar memory.dmp
+```
+
+两个 CTF 高频规则：
+
 ```yara
 rule Base64_PowerShell {
     strings:
@@ -189,261 +205,200 @@ rule XOR_Encrypted_PE {
         $mz = {4D 5A}
     condition:
         not $mz at 0 and filesize < 1MB
-        // PE without MZ header = likely XOR encrypted
+        // 没有 MZ 头的 PE = 大概率被 XOR 加密
 }
 ```
 
-**Key insight:** YARA rules match byte patterns, strings, and regex against files or memory. In CTFs, write rules to detect specific obfuscation patterns (XOR loops, base64 blobs, encoded PowerShell), then apply to memory dumps or malware samples. Use `yarac` to compile rules for faster scanning.
+**写规则锚定字节模式，不要锚定字符串**。字符串改起来成本极低，XOR 循环的指令模式改起来成本高。
 
----
-
-### Shellcode Analysis
+## 9. Shellcode
 
 ```bash
-# Extract shellcode from binary
+# 反汇编
 objdump -d shellcode.bin -b binary -m i386:x86-64 -M intel
 
-# Emulate shellcode with unicorn engine
-python3 << 'PYEOF'
-from unicorn import *
-from unicorn.x86_const import *
-
-shellcode = open('shellcode.bin', 'rb').read()
-mu = Uc(UC_ARCH_X86, UC_MODE_64)
-BASE = 0x400000
-STACK = 0x7fff0000
-
-mu.mem_map(BASE, 0x1000)
-mu.mem_map(STACK - 0x1000, 0x2000)
-mu.mem_write(BASE, shellcode)
-mu.reg_write(UC_X86_REG_RSP, STACK)
-
-# Hook syscalls to trace behavior
-def hook_syscall(mu, user_data):
-    rax = mu.reg_read(UC_X86_REG_RAX)
-    print(f"syscall: {rax}")
-
-mu.hook_add(UC_HOOK_INSN, hook_syscall, None, 1, 0, UC_X86_INS_SYSCALL)
-mu.emu_start(BASE, BASE + len(shellcode))
-PYEOF
-
-# Disassemble with capstone
+# Capstone 编程反汇编
 python3 -c "
 from capstone import *
 md = Cs(CS_ARCH_X86, CS_MODE_64)
-code = open('shellcode.bin','rb').read()
-for i in md.disasm(code, 0x0):
+for i in md.disasm(open('shellcode.bin','rb').read(), 0):
     print(f'{i.address:#x}: {i.mnemonic} {i.op_str}')
 "
 
-# Quick analysis with scdbg (Windows shellcode emulator)
+# Windows shellcode 快速模拟
 scdbg /f shellcode.bin
 ```
 
-**Key insight:** Shellcode in CTF malware challenges is often XOR-encoded or staged. Look for decoder stubs (short loops with XOR), then extract and decode the payload. Unicorn Engine emulation is safer than running shellcode — it intercepts syscalls without executing them.
+Unicorn 模拟（安全，拦截 syscall 而不真正执行）：
 
----
+```python
+from unicorn import *
+from unicorn.x86_const import *
 
-### Memory Forensics for Malware
+sc = open("shellcode.bin", "rb").read()
+mu = Uc(UC_ARCH_X86, UC_MODE_64)
+BASE, STACK = 0x400000, 0x7fff0000
+
+mu.mem_map(BASE, 0x1000)
+mu.mem_map(STACK - 0x1000, 0x2000)
+mu.mem_write(BASE, sc)
+mu.reg_write(UC_X86_REG_RSP, STACK)
+
+def hook_syscall(mu, user_data):
+    print(f"syscall: {mu.reg_read(UC_X86_REG_RAX)}")
+
+mu.hook_add(UC_HOOK_INSN, hook_syscall, None, 1, 0, UC_X86_INS_SYSCALL)
+mu.emu_start(BASE, BASE + len(sc))
+```
+
+**先找解码 stub**：绝大多数 shellcode 前面是一段短 XOR 循环，解完才是真载荷。
+
+## 10. 内存取证
 
 ```bash
-# Volatility 3 — analyze memory dump for malware indicators
-# List processes (look for suspicious names, unusual parents)
-vol -f memory.dmp windows.pslist
-vol -f memory.dmp windows.pstree
-
-# Detect hidden/unlinked processes
-vol -f memory.dmp windows.psscan
-
-# Dump suspicious process memory
-vol -f memory.dmp windows.memmap --pid PID --dump
-
-# Extract injected code (process hollowing, DLL injection)
-vol -f memory.dmp windows.malfind
-
-# Network connections from malware
-vol -f memory.dmp windows.netscan
-
-# Command-line arguments (reveals malware parameters)
-vol -f memory.dmp windows.cmdline
-
-# DLL list per process (detect injected DLLs)
-vol -f memory.dmp windows.dlllist --pid PID
-
-# YARA scan on memory dump
-vol -f memory.dmp windows.vadyarascan.VadYaraScan --yara-rules "rule test { strings: $s = \"flag{\" condition: $s }"
+vol -f memory.dmp windows.pslist                    # 进程列表
+vol -f memory.dmp windows.pstree                    # 进程树（看父子关系）
+vol -f memory.dmp windows.psscan                    # 找隐藏/断链进程
+vol -f memory.dmp windows.memmap --pid PID --dump   # dump 进程内存
+vol -f memory.dmp windows.malfind                   # 注入代码
+vol -f memory.dmp windows.netscan                   # 网络连接
+vol -f memory.dmp windows.cmdline                   # 命令行参数
+vol -f memory.dmp windows.dlllist --pid PID         # 进程加载的 DLL
 ```
 
-**Key insight:** `windows.malfind` detects injected code by finding memory regions with `PAGE_EXECUTE_READWRITE` protection and no corresponding mapped file — the hallmark of process injection. Combine with `windows.pstree` to find processes with unexpected parent-child relationships (e.g., `svchost.exe` spawned by `cmd.exe`).
-
----
-
-## Anti-Analysis Techniques
-
-Malware uses runtime checks to detect analysis environments and alter behavior. Bypass these to reach the actual malicious functionality. For comprehensive anti-debug, anti-VM/sandbox, and anti-DBI bypass strategies, see [reverse/anti-analysis.md](../reverse/anti-analysis.md).
-
-### VM / Sandbox Detection
-
-**Pattern:** Malware checks for virtualization artifacts before executing payload. In CTFs, the "real" flag logic is behind these checks.
-
-**Key insight:** Identify the detection method, then patch the check or fake the environment.
-
-```python
-# Common VM detection checks and bypasses:
-
-# 1. CPUID check (hypervisor bit 31 of ECX after CPUID leaf 1)
-# Bypass: patch JNZ after CPUID to JMP, or run in bare metal
-# In GDB: set $ecx = $ecx & ~(1<<31)
-
-# 2. MAC address prefix (VMware: 00:0C:29, 00:50:56; VBox: 08:00:27)
-# Bypass: change VM NIC MAC to real hardware prefix
-
-# 3. Registry keys (Windows)
-# HKLM\SOFTWARE\VMware, Inc.\VMware Tools
-# HKLM\SYSTEM\CurrentControlSet\Services\VBoxGuest
-# Bypass: delete keys or patch registry check
-
-# 4. File/process checks
-VM_ARTIFACTS = [
-    'vmtoolsd.exe', 'vmwaretray.exe', 'VBoxService.exe',
-    'qemu-ga.exe', 'sandboxie', 'wireshark.exe',
-    '/sys/class/dmi/id/product_name',  # "VMware Virtual Platform"
-    'C:\\windows\\system32\\drivers\\vmmouse.sys',
-]
-
-# 5. Disk size check (VMs often have small disks)
-# if total_disk < 60GB: exit()
-# Bypass: expand VM disk or patch comparison
-
-# 6. CPU count / RAM check
-# if cpu_count < 2 or ram < 2GB: exit()
-# Bypass: allocate more resources to VM
+```bash
+# 内存上跑 YARA
+vol -f memory.dmp windows.vadyarascan.VadYaraScan \
+    --yara-rules 'rule t { strings: $s = "flag{" condition: $s }'
 ```
 
-### Timing-Based Evasion
+**`malfind` 的判据是三条同时成立**：可执行 + 可写 + 无对应磁盘文件。只看一条会大量误报。
 
-**Pattern:** Malware uses `sleep()`, `GetTickCount()`, or RDTSC to detect accelerated execution in sandboxes.
+`pstree` 看**异常的父子关系**：`cmd.exe` 拉起的 `svchost.exe`、`explorer.exe` 拉起的 `powershell.exe` 都是可疑。
 
-```python
-# Detection: large sleep followed by time check
-# import time
-# start = time.time()
-# time.sleep(300)  # 5 minutes
-# if time.time() - start < 290: sys.exit()  # Sandbox fast-forwarded sleep
+## 11. 反分析
 
-# Bypass approaches:
-# 1. Patch sleep to NOP: elf.asm(elf.symbols['sleep'], 'ret')
-# 2. Hook GetTickCount/time() to return expected values
-# 3. In GDB: set breakpoint after sleep, manually advance
-# 4. Binary patching: change sleep(300) to sleep(0)
+完整的反调试、反虚拟机、反 DBI 绕过策略见 [[binary/逆向工程/anti-analysis.md|反分析分类]]。
+
+### 11.1 虚拟机检测
+
+```text
+CPUID      → leaf 1 的 ECX bit31 是 hypervisor 位
+             GDB: set $ecx = $ecx & ~(1<<31)
+MAC 前缀   → VMware 00:0C:29 / 00:50:56；VBox 08:00:27
+             改 VM 网卡 MAC
+注册表     → HKLM\SOFTWARE\VMware, Inc.\VMware Tools
+             HKLM\SYSTEM\CurrentControlSet\Services\VBoxGuest
+文件/进程  → vmtoolsd.exe、VBoxService.exe、qemu-ga.exe
+             /sys/class/dmi/id/product_name（"VMware Virtual Platform"）
+磁盘容量   → if total_disk < 60GB: exit()
+CPU/内存   → if cpu_count < 2 or ram < 2GB: exit()
 ```
 
-**Key insight:** Look for calls to `sleep`, `time.sleep`, `NtDelayExecution`, `GetTickCount64`, `QueryPerformanceCounter`. If the sample just sits there doing nothing, it's likely in a sleep-based anti-sandbox check.
+### 11.2 时序规避
 
-### API Hashing
+```text
+检测：sleep(300) 之后检查实际流逝时间 < 290 → 判定被沙箱加速 → 退出
+绕过：
+  1. 把 sleep 补丁成 ret：elf.asm(elf.symbols['sleep'], 'ret')
+  2. hook GetTickCount / time() 返回期望值
+  3. GDB 里在 sleep 后下断，手动推进
+  4. 直接改二进制：sleep(300) → sleep(0)
+```
 
-**Pattern:** Instead of importing functions by name (visible in strings/imports), malware resolves API addresses at runtime by hashing function names and comparing to hardcoded hash values.
+**样本「什么都不做」时，八成卡在 sleep 型反沙箱检查上。** 看有没有 `NtDelayExecution`、`GetTickCount64`、`QueryPerformanceCounter`。
+
+### 11.3 API 哈希
+
+**判据**：`strings` 里几乎没有可读的 API 名，但程序明显在做复杂操作。
 
 ```python
-# Common hash algorithms for API resolution:
-# ROR13 (rotate-right 13) — most common, used by Metasploit
-def ror13_hash(name):
+def ror13_hash(name):                 # Metasploit 用的，最常见
     h = 0
     for c in name:
         h = ((h >> 13) | (h << 19)) & 0xFFFFFFFF
         h = (h + ord(c)) & 0xFFFFFFFF
     return h
 
-# DJB2 hash
 def djb2_hash(name):
     h = 5381
     for c in name:
         h = ((h * 33) + ord(c)) & 0xFFFFFFFF
     return h
 
-# CRC32-based
 import binascii
 def crc32_hash(name):
     return binascii.crc32(name.encode()) & 0xFFFFFFFF
-
-# Reversing: build lookup table from Windows API names
-# hashdb.openanalysis.net — online API hash lookup
-# ShellcodeHasher — matches hashes against known Windows APIs
-
-# In Ghidra: find the hash comparison constant, look up in hashdb
-# Pattern: loop over PEB→Ldr→InMemoryOrderModuleList, hash each export name
 ```
 
-**Key insight:** When strings output shows almost no readable API names but the binary clearly does complex operations, suspect API hashing. Look for the hash function (small loop with XOR/rotate/add), then use hashdb or build a rainbow table against `kernel32.dll` and `ntdll.dll` exports.
+逆向路径：
 
-### Process Injection Techniques
+```text
+1. 找哈希函数（小循环，含 XOR/rotate/add）
+2. 在比较处取出常量
+3. 查 hashdb.openanalysis.net，或自建 kernel32/ntdll 导出表的彩虹表
+4. 典型形态：遍历 PEB → Ldr → InMemoryOrderModuleList，对每个导出名算哈希
+```
 
-**Pattern:** Malware injects code into legitimate processes to evade detection. Understanding the injection method helps extract the actual payload.
+### 11.4 进程注入
+
+```text
+经典注入：OpenProcess → VirtualAllocEx(RWX) → WriteProcessMemory → CreateRemoteThread
+进程镂空：CreateProcess(SUSPENDED) → NtUnmapViewOfSection → 写入恶意 PE
+          → SetThreadContext 改入口 → ResumeThread
+APC 注入：QueueUserAPC（不新建线程，目标线程下次 alertable wait 时执行）
+```
 
 ```bash
-# Classic injection chain:
-# 1. OpenProcess(target_pid)
-# 2. VirtualAllocEx(remote, ..., PAGE_EXECUTE_READWRITE)
-# 3. WriteProcessMemory(remote, shellcode)
-# 4. CreateRemoteThread(remote, shellcode_addr)
-
-# Process hollowing:
-# 1. CreateProcess(legitimate.exe, CREATE_SUSPENDED)
-# 2. NtUnmapViewOfSection(hollow out the image)
-# 3. VirtualAllocEx + WriteProcessMemory (write malicious PE)
-# 4. SetThreadContext (point EIP/RIP to new entry)
-# 5. ResumeThread
-
-# Detection in memory dumps:
-vol -f memory.dmp windows.malfind  # PAGE_EXECUTE_READWRITE without file backing
-vol -f memory.dmp windows.hollowprocesses.HollowProcesses  # Hollowed processes (VAD vs PEB mismatch)
-
-# APC injection (no new thread):
-# QueueUserAPC(shellcode_addr, target_thread, ...)
-# Thread executes shellcode on next alertable wait
-
-# For CTF: dump the injected code region and analyze separately
+vol -f memory.dmp windows.malfind
+vol -f memory.dmp windows.hollowprocesses.HollowProcesses    # VAD 与 PEB 不一致
 vol -f memory.dmp windows.malfind --dump --pid <PID>
 ```
 
-### Environment Variable / Hostname Checks
-
-**Pattern:** Malware checks for specific environment conditions (hostname, username, domain, locale) to target specific victims or avoid analysis labs.
+### 11.5 环境检查
 
 ```python
-# Common checks:
-# - Hostname matches target: if socket.gethostname() != 'TARGET-PC': exit()
-# - Username: if os.getlogin() in ['admin', 'sandbox', 'binary/恶意样本']: exit()
-# - Domain membership: if 'WORKGROUP' in os.environ.get('USERDOMAIN', ''): exit()
-# - Locale/language: WinAPI GetUserDefaultLangID()
-# - Specific file must exist: if not os.path.exists('C:\\Users\\victim\\document.xlsx'): exit()
-
-# Bypass: set environment variables before running
-# export COMPUTERNAME=TARGET-PC
-# Or patch the comparison in the binary
+# 主机名、用户名、域、语言、特定文件是否存在
+# if socket.gethostname() != "TARGET-PC": exit()
+# if os.getlogin() in ["admin", "sandbox", "malware"]: exit()
+# if "WORKGROUP" in os.environ.get("USERDOMAIN", ""): exit()
+# if not os.path.exists("C:\\Users\\victim\\document.xlsx"): exit()
 ```
 
-**Key insight:** If a malware sample exits immediately or behaves differently than expected, trace its API calls with `strace`/`ltrace` or step through with a debugger. Look for string comparisons against environment values early in execution.
+绕过：跑之前设好环境变量（`export COMPUTERNAME=TARGET-PC`），或补丁掉比较。
 
----
+**样本立刻退出时，用 `strace`/`ltrace` 看它读了什么环境值**，前几条系统调用里就有线索。
 
-### Trojanized Plugin Analysis with Custom Alphabet C2 Decoding (INShAck 2018)
+## 12. 供应链投毒
 
-**Pattern:** Diff a malicious Sublime Text plugin against the official release to find injected base64 payload in try/except block. The payload uses Caesar-cipher-like rotation on a custom alphabet to encode the C2 domain, and XOR with 0x42 for the endpoint path.
+**方法是 diff，不是通读代码**。
 
 ```python
-# Custom alphabet rotation for C2 domain decoding
-C = '0123456789abcdefghijklmnopqrstuvwxyz-.'
-encoded_domain = "..."
-domain = ''.join(C[(C.index(ch) - 0x0d) % len(C)] for ch in encoded_domain)
+# 自定义字母表的轮转解码 C2 域名
+C = "0123456789abcdefghijklmnopqrstuvwxyz-."
+domain = "".join(C[(C.index(ch) - 0x0D) % len(C)] for ch in encoded_domain)
 
-# XOR decoding for endpoint path
-encoded_path = [44, 45, 54, 43, 36, 59]
-path = ''.join(chr(b ^ 0x42) for b in encoded_path)
+# 路径再套一层 XOR
+path = "".join(chr(b ^ 0x42) for b in [44, 45, 54, 43, 36, 59])
 
-# Registration + flag retrieval
 uuid = register_with_c2(domain)
 flag = requests.get(f"http://{domain}/{path}", cookies={"uuid": uuid}).text
 ```
 
-**Key insight:** Trojanized plugins inject code in exception handlers (try/except blocks visible in diff). Custom alphabets for C2 encoding use modular rotation instead of standard ciphers. Always diff suspicious packages against known-good releases from the official repository to isolate injected code.
+要点：
+
+- 注入点通常在 **`try/except` 里** —— 异常处理块能吞掉错误，避免暴露。
+- 自定义字母表用的是**模运算轮转**，不是标准凯撒。要按字母表长度取模。
+- 一定要与官方 release 逐文件 diff，否则看不出哪几十行是注入的。
+
+## 13. 纪律
+
+- **PowerShell 的 `-enc` 是 UTF-16LE**。少了 `iconv` 那一步，看到的是夹空字节的碎片。
+- **垃圾代码直接滤掉，不要读懂**。混淆的目的就是让噪声淹没信号。
+- **动态分析三路同开**。只看 syscall 漏网络，只看流量漏落地文件。
+- **`malfind` 要三条同时成立**（可执行+可写+无文件映射），只看一条大量误报。
+- **`pstree` 看异常父子关系**比看进程名有效得多。
+- **YARA 锚字节模式，不锚字符串**。字符串改起来太便宜。
+- **`strings` 里没有 API 名就怀疑 API 哈希**。找那个小循环，再查 hashdb。
+- **样本立刻退出先查环境检查**，不要先怀疑样本损坏。
+- **供应链投毒靠 diff**。注入点只有几十行，藏在异常处理里。

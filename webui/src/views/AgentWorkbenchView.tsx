@@ -11,16 +11,18 @@ import {
 import { api, ApiError } from "@/lib/api"
 import type {
   AttachmentInfo, ChatAgent, ChatMcpServer, ChatMessage, ChatThread, ChatThreadError,
-  ModelInfo, Asset,
+  ModelInfo, Asset, ChallengeFlag,
 } from "@/lib/types"
 import type { Approval, DecideApprovalResult, ProjectDetail } from "@/lib/types"
 import { MarkdownView } from "@/components/settings/MarkdownView"
 import { WorkbenchContextRail } from "@/components/workbench/WorkbenchContextRail"
 import { ActivityGroup } from "@/components/chat/ActivityGroup"
 import { ApprovalCard } from "@/components/chat/ApprovalCard"
+import { CandidateFlagCard } from "@/components/chat/CandidateFlagCard"
 import { FileCardList } from "@/components/chat/FileCard"
 import { ChatStats } from "@/components/chat/ChatStats"
 import { ThinkingBlock } from "@/components/chat/ThinkingBlock"
+import { useCandidateFlags } from "@/lib/useCandidateFlags"
 import { usePendingApprovals } from "@/lib/usePendingApprovals"
 import { mergeTargets, relToWorkdir, targetsFromProse, targetsFromTool, type FileTarget } from "@/lib/fileTargets"
 import type { ActivityStep } from "@/lib/activity"
@@ -90,6 +92,10 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
   const [workDir, setWorkDir] = useState<string | null>(null)
   const [input, setInput] = useState("")
   const [sending, setSending] = useState(false)
+  // 停止请求已发出、但后端轮次尚未退出（2026-10-20）：此前点「停止」后按钮
+  // 原样不动，而传输层重试退避最长要等 30s 才生效，用户以为按钮失灵。
+  // 现置 stopping 让按钮立刻变「停止中…」并禁用，直到 running 转 false。
+  const [stopping, setStopping] = useState(false)
   const [pendingIn, setPendingIn] = useState<string | null>(null)
   const [assets, setAssets] = useState<Asset[]>([])
   const [err, setErr] = useState<string | null>(null)
@@ -138,6 +144,7 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
     return 0
   }, [events])
   const { items: pendingApprovals } = usePendingApprovals(pid, aprWake)
+
   const decideApproval = useCallback(async (approval: Approval, decision: "approved" | "rejected", note: string): Promise<DecideApprovalResult> => {
     const text = note.trim()
     if (text && approval.session_id) {
@@ -296,6 +303,36 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
   }, [tid])
 
   useEffect(() => { reloadThreads(agentId) }, [thread?.status, agentId, reloadThreads])
+
+  // 候选 flag 确认卡（ctf-flag-wake，2026-10-20）：子代理提交候选 flag 时后端会
+  // 唤醒 CTF 解题主控说一段话（`core/chat/ctf_wake.py`），本卡贴 composer 上方，
+  // 让人类一键复制 flag、一键确认（accepted）或标记为错误（rejected）。
+  // **只在本线程绑定了 CTF 题目时启用**：challengeId 为空 → hook 空转、零请求，
+  // 非 CTF 项目/普通专家线程完全不受影响。
+  const challengeId = thread?.challenge_asset_id || null
+  const flagWake = useMemo(() => {
+    for (let i = events.length - 1; i >= 0; i--) {
+      const k = events[i].kind
+      if (k === "challenge.flag.recorded" || k === "challenge.flag.updated"
+          || k === "challenge.flag.decided") return events[i].id
+    }
+    return 0
+  }, [events])
+  const { flags: candidateFlags, refresh: refreshCandidates } =
+    useCandidateFlags(challengeId, flagWake)
+  const [decideFlagBusy, setDecideFlagBusy] = useState(false)
+  const decideCandidateFlag = useCallback(
+    async (flag: ChallengeFlag, verdict: "accepted" | "rejected", reason?: string) => {
+      if (!challengeId) return
+      setDecideFlagBusy(true)
+      try {
+        await api.decideChallengeFlag(challengeId, flag.id, { verdict, reason })
+        refreshCandidates()
+        reloadRef.current?.()
+      } finally {
+        setDecideFlagBusy(false)
+      }
+    }, [challengeId, refreshCandidates])
 
   useEffect(() => {
     if ((panel !== "skills" && slash?.mode !== "skills") || skills.length) return
@@ -570,18 +607,23 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
   }, [tid, agentId, reloadThreads, selectThread])
 
   const stop = useCallback(async () => {
-    if (!tid || !running) return
+    if (!tid || !running || stopping) return
+    setStopping(true)                 // 立刻给反馈，别等后端退出
     try {
       await api.chatStop(tid)
       reloadRef.current?.()
     } catch (e) {
+      setStopping(false)              // 请求本身失败 → 恢复可点
       if (e instanceof ApiError && e.status === 409) {
         reloadRef.current?.()
         return
       }
       setErr(e instanceof Error ? e.message : String(e))
     }
-  }, [tid, running])
+  }, [tid, running, stopping])
+
+  // 轮次真的退出后复位（后端落「已停止」说明 → status 不再是 running）
+  useEffect(() => { if (!running) setStopping(false) }, [running])
 
   // 自动滚底（含思考增量——此前漏 liveThinking，思考增长时不跟滚，观感「卡住」）
   useEffect(() => {
@@ -812,9 +854,11 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
               )}
               {(running || !!pendingIn) && !liveDelta && !liveThinking && !liveToolStart && !hasPendingCall && (
                 <div className="wb-anim py-0.5 text-[12px] text-muted-foreground">
-                  {liveRetry
-                    ? `正在第 ${liveRetry.attempt ?? "?"}/${liveRetry.total ?? "?"} 次重试`
-                    : "思考中"}
+                  {stopping
+                    ? "正在停止…"
+                    : liveRetry
+                      ? `正在第 ${liveRetry.attempt ?? "?"}/${liveRetry.total ?? "?"} 次重试`
+                      : "思考中"}
                   <span className="ml-0.5 inline-block h-3.5 w-[2px] animate-pulse bg-primary align-middle" />
                 </div>
               )}
@@ -991,6 +1035,12 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
             </div>
           )}
 
+          {/* 候选 flag 确认卡（ctf-flag-wake）：子代理提交候选后主控会先解释一段，
+              这里给人类复制/确认的入口。与审批卡同一区块，但语义独立——
+              审批卡是「要不要执行」，本卡是「这串是不是答案」。 */}
+          <CandidateFlagCard flags={candidateFlags} onDecide={decideCandidateFlag}
+            busy={decideFlagBusy} />
+
           {/* 待审批问答卡（贴 composer；本页即对话页 → 隐藏「和 Agent 聊聊」） */}
           {pendingApprovals.length > 0 && (
             <div className="mb-2">
@@ -1108,8 +1158,9 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
                 <ChevronDown size={10} className="opacity-70" />
               </button>
               {running ? (
-                <button className="wb-send is-stop" onClick={() => void stop()}>
-                  <Square size={11} /> 停止
+                <button className="wb-send is-stop" disabled={stopping}
+                  onClick={() => void stop()}>
+                  <Square size={11} /> {stopping ? "停止中…" : "停止"}
                 </button>
               ) : (
                 <button className="wb-send" disabled={!input.trim() || sending} onClick={() => void send()}>

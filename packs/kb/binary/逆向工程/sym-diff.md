@@ -10,7 +10,7 @@ vuln_class: [symbol-migration]
 > 来源：reverse-skill 1.0.1 收编改编（2026-09-30，MIT，见 `../../licenses/`）；
 > 原项目 SKILL.md 与 prompt-template 内容重复，本篇合一收编；工具调用已适配平台
 > IDA MCP 工具面（decompile / list_funcs / rename / set_comments）。配合技能
-> [[skills/binary-diff/SKILL.md|binary-diff]] 使用。
+> [[skills/二进制版本比对/SKILL.md|二进制版本比对]] 使用。
 
 ## 适用场景
 
@@ -24,7 +24,7 @@ vuln_class: [symbol-migration]
 
 | 场景 | 用什么 |
 |------|--------|
-| 从零开始逆向一个二进制 | binary-rev 技能（IDA MCP / 静态工具） |
+| 从零开始逆向一个二进制 | 二进制逆向手法 技能（IDA MCP / 静态工具） |
 | 有旧版结果，迁移到新版 | **本篇** |
 | 两个完全不同的二进制对比 | BinDiff / Diaphora（传统工具） |
 

@@ -143,14 +143,26 @@ class SkillRegistry:
         self._skills: dict[str, SkillMeta] = {}
 
     def load(self) -> int:
-        """扫描 packs/kb/skills/*/SKILL.md（扁平，无包归属）。返回技能数。
+        """扫描 packs/kb/skills 下的 SKILL.md（支持分组子目录）。返回技能数。
+
+        **2026-10-19 支持分组**：技能目录可按阶段/方向分到子目录
+        （``skills/02-方向深挖/Web注入手法/SKILL.md``），故用 ``rglob`` 而非
+        ``glob("*/SKILL.md")``。排除规则：技能目录内部的 ``references/`` 等
+        资源区里的 SKILL.md 属于资料不是技能，必须跳过——否则一个技能里放了
+        参考用的 SKILL.md 就会被误注册成独立技能。
 
         同名技能以后加载者覆盖；kb 方向域/轨/安全红线区不在扫描范围。"""
         self._skills.clear()
         root = skills_root(self.packs_root)
         if not root.is_dir():
             return 0
-        for skill_md in sorted(root.glob("*/SKILL.md")):
+        # 资源区名（与 skill_open 的白名单一致）：这些目录下的 SKILL.md 是资料
+        _RESOURCE_DIRS = {"references", "scripts", "examples", "assets"}
+        for skill_md in sorted(root.rglob("SKILL.md")):
+            if ".history" in skill_md.parts:
+                continue
+            if _RESOURCE_DIRS & set(skill_md.relative_to(root).parts[:-1]):
+                continue
             raw = skill_md.read_text(encoding="utf-8")
             meta = parse_frontmatter(raw)
             name = meta.get("name", skill_md.parent.name)

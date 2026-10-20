@@ -1,210 +1,131 @@
-# CTF Crypto - PRNG Attacks (CTF-Era Techniques)
-
-Advanced CTF-specific PRNG attacks from 2017 onward. For foundational PRNG recovery (MT19937, LCG parameter recovery, ChaCha20, V8 XorShift128+, password cracking), see [[crypto/随机数/prng.md|prng.md]].
-
-## Table of Contents
-- [Mersenne Twister Seed Recovery from Subset Sum (Tokyo Westerns 2017)](#mersenne-twister-seed-recovery-from-subset-sum-tokyo-westerns-2017)
-- [MT19937 State Recovery via Constraint Propagation (HITCON 2017)](#mt19937-state-recovery-via-constraint-propagation-hitcon-2017)
-- [Rule 86 Cellular Automaton PRNG Reversal via Z3 (Insomni'hack 2018)](#rule-86-cellular-automaton-prng-reversal-via-z3-insomnihack-2018)
-- [Java LCG Seed Meet-in-the-Middle via Partial Modulo (P.W.N. CTF 2018)](#java-lcg-seed-meet-in-the-middle-via-partial-modulo-pwn-ctf-2018)
-- [LCG Backward Stepping via Multiplicative Inverse (P.W.N. CTF 2018)](#lcg-backward-stepping-via-multiplicative-inverse-pwn-ctf-2018)
-- [LFSR Bit-Fold Recovery from ASCII Parity (X-MAS CTF 2018)](#lfsr-bit-fold-recovery-from-ascii-parity-x-mas-ctf-2018)
-- [Z3 Solve-Time Timing Oracle on PRNG (X-MAS CTF 2018)](#z3-solve-time-timing-oracle-on-prng-x-mas-ctf-2018)
-- [randcrack-Fed DSA k Prediction (CSAW CTF 2018)](#randcrack-fed-dsa-k-prediction-csaw-ctf-2018)
-- [Time-Seeded PRNG Offset via Format-String Global Write (FireShell 2019)](#time-seeded-prng-offset-via-format-string-global-write-fireshell-2019)
-- [NTP-Poisoned PRNG State Leak via UUID XOR (RuCTFe 2018)](#ntp-poisoned-prng-state-leak-via-uuid-xor-ructfe-2018)
-
+---
+title: PRNG 攻击（CTF 手法）
+phase: crypto
+vuln_class: [crypto, prng, mt19937, lcg, lfsr, z3]
+summary: PRNG 题的判据是「一次观测泄漏了多少位」——满 32 位就凑 624 个直接反推，只漏几位就做约束传播或 GF(2)，漏的是 mod 值就先算清哪几位被丢掉。
 ---
 
-## Mersenne Twister Seed Recovery from Subset Sum (Tokyo Westerns 2017)
+# PRNG 攻击（CTF 手法）
 
-**Pattern:** MT19937 seeded with a 32-bit value generates subset-sum problems (e.g., "which elements from this set sum to target?"). Solving small subset-sum problems leaks specific MT output values. Two recovered outputs at indices 0 and 227 are sufficient to invert the MT seeding process.
+基础篇（MT19937 标准反推、LCG 参数恢复、ChaCha20、V8 XorShift128+、口令爆破）见 [[crypto/随机数/prng.md|随机数与密钥恢复]]。本篇只收「输出被遮蔽/只泄漏部分位/状态被外部污染」这类非标准情形。
 
-**MT twist function relationship:**
-```text
-mt[i] = mt[i-624] XOR twist(mt[i-624], mt[i-623])
-```
-At the wrap-around: `mt[624]` depends on `mt[0]` (new cycle) and `mt[397]` (old cycle). Recovering `mt[0]` and `mt[227]` (which is related to `mt[624-227] = mt[397]`) via subset-sum solutions reveals enough to invert the twist recurrence.
+## 0. 判据速查
+
+| 观测到什么 | 结论 | 去哪节 |
+|---|---|---|
+| 每次只泄漏 8-24 位，但能多次观测 | 状态建候选集，双向约束传播 | §2 |
+| 输出是 `mod 62` / `mod N` 的值 | 先算清模运算丢了哪几位 | §3 |
+| 输出字节是 ASCII（高位恒 0） | 每个字节白送一个线性方程 | §4 |
+| 输出是线性移位 XOR 折叠 | GF(2) 高斯消元，不要爆破 | §4 |
+| 种子 = 时间 + 可写全局 | 改全局 → 种子完全可控 | §5 |
+| 随机数被 XOR 进用户可控值 | 直接拿到状态 | §6 |
+| 有 DSA/ECDSA 签名且 k 来自 `random` | 喂 624 个 32 位给 randcrack | §7 |
+| 拿到了某个中间状态，要往前 | 乘逆回退，不用从头模拟 | §3 |
+| 猜错只能靠「快慢」区分 | 计时 oracle，错误猜测 SAT 得快 | §8 |
+| 状态转移是元胞自动机 | Z3 布尔数组，符号执行 N 轮 | §9 |
+| 只解出 2 个状态字，想还原 32 位种子 | MT 环绕关系，2^32 可爆 | §1 |
+
+## 1. MT19937 种子还原：只要两个字
+
+**环绕关系是唯一入口**：`mt[i] = mt[i-624] XOR twist(mt[i-624], mt[i-623])`。在回绕处 `mt[624]` 依赖**新周期**的 `mt[0]` 和**旧周期**的 `mt[397]`，而 `mt[397] = mt[624-227]` 正是 index 227 那条。所以拿到 index 0 与 index 227 两个值，就能把种子搜索降到 2^32 且有唯一解。
 
 ```python
 import random
-
-def crack_seed_from_two_outputs(mt0_val, mt227_val):
-    """Try all 2^32 seeds until MT outputs match recovered values."""
+def crack_seed(mt0, mt227):
     for seed in range(2**32):
-        r = random.Random()
-        r.seed(seed)
-        # Generate enough to reach indices 0 and 227
-        outputs = [r.getrandbits(32) for _ in range(228)]
-        if outputs[0] == mt0_val and outputs[227] == mt227_val:
+        r = random.Random(); r.seed(seed)
+        out = [r.getrandbits(32) for _ in range(228)]
+        if out[0] == mt0 and out[227] == mt227:
             return seed
-    return None
-
-# After recovering seed, all future (and past) outputs are predictable
-r = random.Random()
-r.seed(recovered_seed)
 ```
 
-**Key insight:** MT19937 seeds recoverable from as few as two state values (indices 0 and 227) via the twist function's wrap-around relationship. Any challenge that exposes MT state values through solvable mathematical puzzles is vulnerable to full seed recovery.
+**为什么这两个 index**：不是随便挑的，是「一个在新周期头部、一个恰好被回绕公式引用」的最小组合。换成别的 index 对，关系链断掉，2^32 也搜不出唯一解。
 
-**References:** Tokyo Westerns CTF 2017
+**触发条件**：题目把 MT 输出藏进可解的数学题（子集和、方程）里，每解一题就吐出一个状态字。看到「解出来是 32 位整数」就该往这条路上想。
 
----
+## 2. 部分位泄漏：候选集 + 双向传播
 
-## MT19937 State Recovery via Constraint Propagation (HITCON 2017)
-
-**Pattern:** Server generates problems that leak 24-120 bits of PRNG output per round (e.g., partial bit-patterns, subset sums, modular reductions). Rather than collecting 624 full 32-bit outputs, model the MT state as an array of per-cell candidate sets and propagate constraints bidirectionally through the MT recurrence.
-
-**MT recurrence dependencies:**
-```text
-state[i] = state[i-624] XOR twist(state[i-624], state[i-623])
-```
-This means `state[x]` depends on `state[x-624]`, `state[x-623]`, and `state[x-227]` (via the generate step). Partial knowledge at any index propagates in both directions.
-
-**Constraint propagation approach:**
-```python
-# Model: each state word starts as a set of 2^32 candidates
-# Partial observation: narrow candidates for observed indices
-# Propagate: for each constrained cell, narrow related cells
-
-def propagate_forward(state_candidates, idx):
-    """MT: state[idx+624] = f(state[idx], state[idx+1])"""
-    for s0 in state_candidates[idx]:
-        for s1 in state_candidates[idx + 1]:
-            new_val = mt_twist(s0, s1)
-            state_candidates[idx + 624].add(new_val)
-
-def propagate_backward(state_candidates, idx):
-    """Invert MT twist to constrain earlier states from later ones."""
-    for val in state_candidates[idx]:
-        # Recover state[idx-624] given state[idx] and state[idx-623]
-        for s1 in state_candidates[idx - 623]:
-            s0 = mt_untwist(val, s1)
-            state_candidates[idx - 624].add(s0)
-
-# After ~20 partial observations across different positions:
-# Most cells converge to single candidates → full state determined
-```
-
-**Key insight:** MT19937's recurrence dependencies allow bidirectional constraint propagation — partial knowledge at multiple positions narrows candidates until the full 624-word state is determined. The number of partial observations needed scales inversely with bits leaked per observation: ~20 observations of 24+ bits each typically suffice.
-
-**References:** HITCON CTF 2017
-
----
-
-## Rule 86 Cellular Automaton PRNG Reversal via Z3 (Insomni'hack 2018)
-
-**Pattern:** Wolfram elementary cellular automaton Rule 86 used as PRNG. Reverse through 128 rounds using Z3 Bool arrays:
+不凑 624 个完整输出，而是把每个状态字建成候选集，用递推式在**两个方向**收窄。
 
 ```python
-from z3 import *
+def propagate_forward(cands, idx):
+    # state[idx+624] = f(state[idx], state[idx+1])
+    for s0 in cands[idx]:
+        for s1 in cands[idx+1]:
+            cands[idx+624].add(mt_twist(s0, s1))
 
-def RULE86(x, y, z):
-    return Or(And(Not(x), Not(y), z), And(Not(x), y, Not(z)),
-              And(x, Not(y), Not(z)), And(x, y, Not(z)))
-
-s = Solver()
-state = [Bool(f'b{i}') for i in range(256)]
-# Forward-compute 128 rounds symbolically
-for round in range(128):
-    new_state = [RULE86(state[(i-1)%256], state[i], state[(i+1)%256]) for i in range(256)]
-    state = new_state
-# Constrain final state to known output
-for i, bit in enumerate(known_output):
-    s.add(state[i] == (bit == 1))
-s.check()
-model = s.model()
+def propagate_backward(cands, idx):
+    # 由 state[idx] 与 state[idx-623] 反解 state[idx-624]
+    for val in cands[idx]:
+        for s1 in cands[idx-623]:
+            cands[idx-624].add(mt_untwist(val, s1))
 ```
 
-**Key insight:** Elementary cellular automata are NOT injective -- multiple preimages may exist. But Z3 handles the search efficiently by treating each cell as a boolean variable and each rule application as a CNF clause. For Rule 86 specifically, the DNF has 4 terms (bits 1,2,4,6 of rule number 86 = 01010110). Use `s.push()`/`s.pop()` to iteratively backtrack through rounds. This approach generalizes to any elementary CA rule used as a PRNG: encode the rule's truth table as a boolean formula, compose symbolically for N rounds, and constrain to the known output.
+**量化判据**：每次泄漏 `b` 位，大约需要 `624*32/b` 量级以下的观测才能收敛，实测 24 位 × 20 次左右即可定死全状态。泄漏 8 位就要上百次，此时先确认题目真的给得起这么多次交互。
 
-**References:** Insomni'hack CTF 2018
+**反向传播必须实现 `mt_untwist`**：twist 含右移 XOR，反解要逐位回代（`y ^= y >> k` 的逆是 `y ^= y>>k; y ^= y>>2k; ...` 直到覆盖字宽），不是简单减。
 
----
+## 3. LCG：模运算丢了哪几位
 
-## Java LCG Seed Meet-in-the-Middle via Partial Modulo (P.W.N. CTF 2018)
-
-**Pattern:** Java `Random` outputs are only visible mod 62 (e.g., characters in a password). Full 48-bit seed search is infeasible, but partial output still leaks the LSB (`output mod 2`) and the high bits can be recovered independently because Java's LCG takes `(seed*a + c) >> 16`. Split into `2^18` low-bit search and `2^30` high-bit search.
+**Java `Random` 的关键结构**：`next(bits)` 返回 `(seed*a + c) >> 16` 再取高位。也就是说**低 16 位被直接丢弃**，所以低 18 位只影响每次 `nextInt()` 的最低位。这就是「48 位种子搜索」被拆成 `2^18 + 2^30` 的原因——不是优化技巧，是结构决定的。
 
 ```python
-# Phase 1: enumerate 2^18 low-18-bit candidates whose nextInt(62) parities match known chars
+# 阶段一：2^18 低位候选，用 nextInt(62) 的奇偶性筛
 for low in range(1 << 18):
-    if simulate(low)[: K] == known_prefix: candidates.append(low)
-
-# Phase 2: extend each candidate to 48 bits, matching next outputs
+    if simulate(low)[:K] == known_prefix:
+        candidates.append(low)
+# 阶段二：每个候选补高位，2^30
 for low in candidates:
     for high in range(1 << 30):
-        seed = (high << 18) | low
-        if simulate(seed) == full_known: return seed
+        if simulate((high << 18) | low) == full_known:
+            return (high << 18) | low
 ```
 
-**Key insight:** Java's LCG discards the lowest 16 bits, so the low 18 bits only affect the LSB of each `nextInt()`. Split the seed at that boundary to turn an infeasible `2^48` search into two `2^18 + 2^30` passes.
+**回退**：任何模 2 的幂的 LCG 都可逆，`prev = a^{-1} * (state - c) mod m`。Java 的乘逆是 `pow(25214903917, -1, 1<<48)`（数值上等于 `-35320271006875 mod 2^48`）。拿到任意中间状态就能双向走，不用从种子重放。
 
-**References:** P.W.N. CTF 2018 — PW API, writeup 12065
+## 4. LFSR / 折叠输出：GF(2) 消元
 
----
-
-## LCG Backward Stepping via Multiplicative Inverse (P.W.N. CTF 2018)
-
-**Pattern:** After recovering a forward seed, step backward with the modular inverse of the multiplier: `prev = a^-1 * (state - c) mod m`. For Java: `a^-1 = -35320271006875` mod `2^48`.
+状态 32 位、输出 8 位，看着像「信息不够」，但**每个输出位仍是状态位的线性组合**，折叠没有引入非线性。
 
 ```python
-M = 1 << 48
-a_inv = pow(25214903917, -1, M)  # Java multiplier inverse
-prev_state = (a_inv * (state - 11)) % M
-```
-
-**Key insight:** Every power-of-two-modulus LCG is invertible; once you have any state, you can walk the chain both directions without re-simulating from seed.
-
-**References:** P.W.N. CTF 2018 — PW API, writeup 12065
-
----
-
-## LFSR Bit-Fold Recovery from ASCII Parity (X-MAS CTF 2018)
-
-**Pattern:** Custom PRNG XORs shifts of a 32-bit state into an 8-bit output byte. Observed bytes are ASCII (`top bit = 0`), so each observed byte leaks one parity bit of the internal state. Combine enough parity constraints via Gaussian elimination over GF(2) to recover state without brute force.
-
-```python
-# Collect parity constraints: each observed ASCII byte gives top_bit == 0
-# Each bit of each byte is a linear combination of state bits
-# Stack rows, solve in GF(2)
 import numpy as np
 A = np.array(constraint_rows, dtype=np.uint8)
 b = np.array(known_bits,      dtype=np.uint8)
 state = gf2_solve(A, b)
 ```
 
-**Key insight:** Output byte folding does not hide the state; each output bit is still linear in the state. Use the ASCII constraint to turn output bytes into free parity equations.
+**免费方程的来源**：输出字节是 ASCII → 高位恒 0 → 每个字节白送一个方程。若还能确定字符集（小写字母 → 高 3 位固定），方程数量直接翻几倍。这是「折叠输出」题真正的破口，比爆破 2^32 快得多。
 
-**References:** X-MAS CTF 2018 — Probably Really Nice Goodies from Santa, writeup 12686
+## 5. 种子偏移：把时间 RNG 变成确定 RNG
 
----
-
-## Z3 Solve-Time Timing Oracle on PRNG (X-MAS CTF 2018)
-
-**Pattern:** Cannot directly check a PRNG guess, but `Solver.check()` takes measurably longer for correct inputs because the constraint graph becomes UNSAT-hard instead of trivially SAT. Brute-force each character by timing Z3 with a tight timeout.
+`srand((time(0)/10) + bet)` 里 `bet` 是可写全局时，用格式化字符串把它写成已知值，种子就完全可控。
 
 ```python
-from z3 import Solver, sat
-for c in string.printable:
-    s = Solver()
-    s.set('timeout', 500)
-    s.add(prng_constraints(flag + c, ciphertext))
-    t = time.time()
-    if s.check() == sat and (time.time() - t) > 0.4:
-        flag += c
-        break
+# 1) %Xc%Y$n 写入 &bet
+# 2) 本地用目标同一份 libc 预测
+from ctypes import CDLL
+libc = CDLL('libc.so.6')
+libc.srand((int(time.time())//10) + bet_value)
+predicted = [libc.rand() for _ in range(n)]
 ```
 
-**Key insight:** Many oracles run the solver internally; wrong guesses return fast because the SAT instance is already obviously satisfiable. Set a tight timeout and promote slow-solve candidates.
+**必须用目标的 libc**：`rand()` 的实现随 glibc 版本变（TYPE_3 的加法反馈系数改过），宿主机 libc 猜出来的序列在几十次后会分叉。
 
-**References:** X-MAS CTF 2018 — Probably Really Nice Goodies from Santa, writeup 12686
+## 6. 随机数被 XOR 进可控值
 
----
+`uuid = time ^ hash_state`：把服务端的时间源指向自己控制的 NTP 并返回 `0`，返回的 UUID 就等于 `hash_state`。
 
-## randcrack-Fed DSA k Prediction (CSAW CTF 2018)
+```python
+# 1) 指向返回 0 的 NTP
+# 2) 注册，拿到 uuid == 内部状态
+# 3) 目标 uuid 反推所需 timestamp = uuid ^ state
+```
 
-**Pattern:** DSA signing uses `random.randrange()` to pick `k`. If the server also exposes a "forgot password" endpoint that leaks Python `random` outputs, feed 624 × 32-bit samples to `randcrack`, predict the next `k`, and solve `x = (s*k - h) * r^-1 mod q` for the private key.
+**通用判据**：任何「随机值 ⊕ 用户可控值」都等价于直接送出状态。检查所有外部输入的时间/序号/配置来源，不只是 `rand()`。
+
+## 7. 同进程 RNG 污染（DSA k 预测）
+
+Python 的 `random` 是全局单例，任何泄漏 `random` 输出的接口都会污染 DSA 签名用的 `k`。
 
 ```python
 from randcrack import RandCrack
@@ -216,42 +137,49 @@ k = rc.predict_randrange(2, q)
 x = ((s*k - h) * pow(r, -1, q)) % q
 ```
 
-**Key insight:** Python's `random` is shared across all calls. Any endpoint that leaks `random` output poisons every other RNG consumer including DSA signing.
+**注意 `submit` 要 32 位对齐**：拿 64 位输出时按低/高各提交一次，顺序不能反。`randcrack` 需要**连续** 624 个 32 位，中间插了别的 `random` 调用就全废——所以要找那个「只做一件事」的泄漏接口。
 
-**References:** CSAW CTF 2018 — Disastrous Security Apparatus, writeup 12495
+## 8. 计时 oracle：错猜更快
 
----
-
-## Time-Seeded PRNG Offset via Format-String Global Write (FireShell 2019)
-
-**Pattern:** Server seeds `srand((time(0)/10) + bet)` where `bet` is a writable global. Use a format string primitive to set `bet`, then predict all subsequent `rand()` outputs offline with matching libc.
+有些服务内部跑 Z3，猜错时约束立刻可满足（SAT 很快），猜对时反而进入 UNSAT 硬搜索。
 
 ```python
-# 1. Format-string: %Xc%Y$n  writes desired bet value at &bet (0x602020)
-# 2. Locally: predict rand() with C stdlib
-from ctypes import CDLL
-libc = CDLL('libc.so.6')
-libc.srand((int(time.time())//10) + bet_value)
-predicted = [libc.rand() for _ in range(n)]
+for c in string.printable:
+    s = Solver(); s.set('timeout', 500)
+    s.add(prng_constraints(flag + c, ciphertext))
+    t = time.time()
+    if s.check() == sat and (time.time() - t) > 0.4:
+        flag += c; break
 ```
 
-**Key insight:** Shifting a known seed by a writable constant turns a time-of-day RNG into a deterministic RNG because the attacker now controls the whole seed.
+**阈值要现场标定**：先跑几个已知错的候选记录基线耗时，再取「明显高于基线」的值。写死 0.4 秒只在特定机器负载下成立，且必须多次取中位数，单次抖动足以判错。
 
-**References:** FireShell CTF 2019 — casino, writeup 12916
+## 9. 元胞自动机 PRNG：Z3 符号执行
 
----
-
-## NTP-Poisoned PRNG State Leak via UUID XOR (RuCTFe 2018)
-
-**Pattern:** Server derives UUIDs as `uuid = time ^ hash_state`. Register a user with a custom NTP endpoint returning `0x00`; the returned UUID now equals `hash_state` directly. Future UUIDs are predictable: `target_uuid ^ hash_state = required_timestamp`.
+Rule 86 的 DNF 是 rule 号 `86 = 01010110` 的 4 个置位项：
 
 ```python
-# 1. Point the server at attacker-controlled NTP that returns 0
-# 2. Register; received UUID == internal state
-# 3. For desired uuid, compute needed timestamp = uuid ^ state
-# 4. Send the crafted timestamp and read the message
+from z3 import *
+def RULE86(x, y, z):
+    return Or(And(Not(x), Not(y), z), And(Not(x), y, Not(z)),
+              And(x, Not(y), Not(z)), And(x, y, Not(z)))
+
+state = [Bool(f'b{i}') for i in range(256)]
+for _ in range(128):
+    state = [RULE86(state[(i-1)%256], state[i], state[(i+1)%256]) for i in range(256)]
+s = Solver()
+for i, bit in enumerate(known_output):
+    s.add(state[i] == (bit == 1))
+s.check()
 ```
 
-**Key insight:** Any randomness mixed via XOR with a user-controlled value is the same as giving the attacker the state directly. Check all time sources for user control.
+**元胞自动机不是单射**：可能有多个前像，`s.check()` 返回 SAT 不代表唯一。要么多解都试一遍，要么用额外的输出位约束。`s.push()`/`s.pop()` 用来逐轮回溯。
 
-**References:** RuCTFe 2018 — vch, writeup 12146
+**这套写法通用于任何初等 CA**：把真值表编码成布尔式、符号执行 N 轮、约束到已知输出。轮数超过 200 或宽度超过 512 时 Z3 会显著变慢，考虑改成逐位代数反演。
+
+## 10. 纪律
+
+- **先数位数**。「每次泄漏几位 × 能观测几次」决定路线，不是凭手法名选。总位数远小于状态位宽时，别指望恢复全状态，改找「种子空间小」这个别的破口。
+- **模运算先算丢了几位**。`mod 62`、`>> 16`、`& 0xff` 各自丢弃的位不同，这直接决定能不能拆分搜索。没算清就写爆破循环，通常会爆到 2^48 跑不完。
+- **线性就消元，别爆破**。输出是状态位的线性组合时，GF(2) 高斯消元是多项式时间，爆破是指数时间。
+- **本地复现必须用同一实现**。libc `rand()`、Java `Random`、Python `random` 的序列在不同版本/不同语言下都不同，拿错实现验证会在几十次后分叉，且分叉点很靠后容易误判成「快成功了」。

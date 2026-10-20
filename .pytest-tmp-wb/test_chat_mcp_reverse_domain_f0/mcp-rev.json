@@ -1,0 +1,1 @@
+{"servers": [{"name": "ida", "url": "", "transport": "stdio", "command": "no-such-binary-xyz", "args": [], "enabled": true, "domains": ["reverse"]}, {"name": "fofa", "url": "", "transport": "stdio", "command": "no-such-binary-xyz", "args": [], "enabled": true, "domains": ["pentest"]}]}

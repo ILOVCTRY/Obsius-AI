@@ -28,7 +28,7 @@
 - [JA4/JA4H TLS and HTTP Fingerprint Matching (BSidesSF 2026)](#ja4ja4h-tls-and-http-fingerprint-matching-bsidessf-2026)
 - [Colon/Newline Injection in String-Separator Serialization (Evlz CTF 2019)](#colonnewline-injection-in-string-separator-serialization-evlz-ctf-2019)
 
-For JWT/JWE token attacks, see [auth-jwt.md](../../../漏洞分类/authn/auth-jwt.md). For OAuth/OIDC, SAML, CI/CD credential theft, and infrastructure auth attacks, see [auth-infra.md](auth-infra.md).
+For JWT/JWE token attacks, see [auth-jwt.md](../../../漏洞分类/认证与会话/auth-jwt.md). For OAuth/OIDC, SAML, CI/CD credential theft, and infrastructure auth attacks, see [auth-infra.md](auth-infra.md).
 
 ---
 

@@ -94,9 +94,9 @@ username=\&password= OR 1=1--  # Backslash escape quote bypass
 0x6d656f77                     # Hex encoding for 'meow' (bypass quotes)
 ```
 
-WAF bypasses: XML entity encoding (`&#x55;NION`), EXIF metadata injection (`exiftool -Comment="' UNION SELECT..."`), Shift-JIS `\u00a5`→`0x5c` backslash, QR code payload injection, double-keyword nesting (`selselectect`). See [sql-injection.md](../../../漏洞分类/injection/sql-injection.md) for all techniques.
+WAF bypasses: XML entity encoding (`&#x55;NION`), EXIF metadata injection (`exiftool -Comment="' UNION SELECT..."`), Shift-JIS `\u00a5`→`0x5c` backslash, QR code payload injection, double-keyword nesting (`selselectect`). See [sql-injection.md](../../../漏洞分类/注入类/sql-injection.md) for all techniques.
 
-MySQL session variable dual-value injection: `@var:=` assigns return different values across sequential queries in one connection. PHP PCRE backtrack limit WAF bypass: 1M+ chars cause `preg_match()` to return `false`, passing `!false`. `information_schema.processlist` race condition leaks secrets from concurrent queries. See [sql-injection.md](../../../漏洞分类/injection/sql-injection.md).
+MySQL session variable dual-value injection: `@var:=` assigns return different values across sequential queries in one connection. PHP PCRE backtrack limit WAF bypass: 1M+ chars cause `preg_match()` to return `false`, passing `!false`. `information_schema.processlist` race condition leaks secrets from concurrent queries. See [sql-injection.md](../../../漏洞分类/注入类/sql-injection.md).
 
 See [server-side-exec.md](server-side-exec.md) for PHP preg_replace /e RCE and Prolog injection. See [server-side-exec-2.md](server-side-exec-2.md) for SQLi via DNS records and SQLi keyword fragmentation.
 
@@ -150,7 +150,7 @@ JSONP endpoint (`?callback=func`) wraps sensitive data in a function call. Load 
 8. JKU header injection — point to attacker-controlled JWKS URL
 9. KID path traversal — `../../../dev/null` for empty key, or SQL injection in KID
 
-See [auth-jwt.md](../../../漏洞分类/authn/auth-jwt.md) for full JWT/JWE attacks and session manipulation.
+See [auth-jwt.md](../../../漏洞分类/认证与会话/auth-jwt.md) for full JWT/JWE attacks and session manipulation.
 
 ## SSTI Quick Reference
 
@@ -298,7 +298,7 @@ Chain open redirects (`?redirect=`, `?next=`, `?url=`) with OAuth flows for toke
 
 Dangling CNAME → claim resource on external service (GitHub Pages, S3, Heroku). Use `subfinder` + `httpx` to enumerate, check fingerprints. See [auth-and-access.md](auth-and-access.md#subdomain-takeover).
 
-See [auth-and-access.md](auth-and-access.md) for access control bypasses, [auth-jwt.md](../../../漏洞分类/authn/auth-jwt.md) for JWT/JWE attacks, and [auth-infra.md](auth-infra.md) for OAuth/SAML/CI-CD/infrastructure auth.
+See [auth-and-access.md](auth-and-access.md) for access control bypasses, [auth-jwt.md](../../../漏洞分类/认证与会话/auth-jwt.md) for JWT/JWE attacks, and [auth-infra.md](auth-infra.md) for OAuth/SAML/CI-CD/infrastructure auth.
 
 ## File Upload to RCE
 

@@ -10,6 +10,12 @@ config/providers.json：
 - "ctx_soft_budget": 512000    有效软上限（支持 1M≠在 1M 最好，超此主动压缩）
 - "summarizer_model": "<model>" 专用摘要模型（缺省用会话模型）
 - "proxy": "http://127.0.0.1:7890" 可选供应商专属 HTTP/HTTPS 代理；缺省沿用系统代理环境
+- "vision": true                该供应商/模型支持图片输入（2026-10-19，vision 通道）：
+                               True → view_image 出图（内部 image 块按协议翻译成
+                               chat-completions 的 image_url / Responses 的
+                               input_image）；未声明或 false → view_image 只回文本
+                               摘要 + OCR 引导。**必须显式声明**——往不支持的网关
+                               塞图片块会被 400 打死整轮，宁缺勿炸。
 
 约定：
 - models[] 有序，**第一个 = 该供应商默认模型**；全局默认 = 第一个启用供应商的第一个模型。
@@ -19,7 +25,10 @@ config/providers.json：
 """
 
 import json
+import logging
 import re
+import shutil
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -29,6 +38,8 @@ from urllib.parse import urlsplit
 from core.llm.anthropic_compat import AnthropicCompatProvider, CLIENT_USER_AGENT
 from core.llm.openai_compat import CHAT_COMPLETIONS, RESPONSES, OpenAICompatProvider
 from core.llm.ark import resolve_api_key
+
+log = logging.getLogger(__name__)
 
 ANTHROPIC_MESSAGES = "anthropic-messages"
 DEFAULT_FORMAT = CHAT_COMPLETIONS
@@ -156,9 +167,39 @@ class ProviderStore:
         payload: dict[str, Any] = {"providers": normalized}
         if default_provider:
             payload["default_provider"] = default_provider
+        self._backup_before_write()
         self.path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return normalized
+
+    def _backup_before_write(self) -> Path | None:
+        """写盘前把旧文件存进同级 ``.history/<UTC时间戳>_providers.json``。
+
+        2026-10-20 事故：测试里 `create_app(...)` 没隔离 ``providers_config``，
+        `llm_store.save()` 直接覆盖了用户真实的 `config/providers.json`——
+        6 个供应商（含 API key）瞬间只剩一个测试用的 "P"，**无任何回滚依据**。
+        同一目录下的 `mcp.json` 早有历史备份，供应商配置却一直裸写。
+
+        口径对齐 `core/api/app.py::_pack_history_backup`：同秒多次写入用 ``.n``
+        避让，绝不覆盖既有版本。备份失败不阻断保存（宁可少一份历史，也不能
+        让用户改不了配置），但会打 warning 留痕。
+        """
+        if not self.path.is_file():
+            return None
+        try:
+            hist = self.path.parent / ".history"
+            hist.mkdir(parents=True, exist_ok=True)
+            ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+            dest = hist / f"{ts}_{self.path.name}"
+            n = 1
+            while dest.exists():
+                dest = hist / f"{ts}.{n}_{self.path.name}"
+                n += 1
+            shutil.copy2(self.path, dest)
+            return dest
+        except OSError as e:  # noqa: BLE001 —— 备份是附加项，不能挡住保存
+            log.warning("供应商配置历史备份失败（继续保存）: %s", e)
+            return None
 
     @staticmethod
     def _validate(p: dict[str, Any]) -> dict[str, Any]:
@@ -243,6 +284,13 @@ class ProviderStore:
         siu = p.get("system_in_user")
         if siu is not None:
             out["system_in_user"] = bool(siu)
+        # 视觉能力（vision 通道，2026-10-19）：同 thinking/system_in_user——显式才
+        # 落字段，否则设置页保存一次即被白名单抹掉（这两个字段都栽过同一坑）。
+        # True → view_image 出图；未声明/False → 只回文本 + OCR 引导（宁缺勿炸：
+        # 往不支持的网关塞图片块会被 400 打死整轮）。
+        vis = p.get("vision")
+        if vis is not None:
+            out["vision"] = bool(vis)
         return out
 
     def masked(self) -> list[dict[str, Any]]:
@@ -316,6 +364,8 @@ class ProviderStore:
             "ctx_soft_budget": p.get("ctx_soft_budget"),
             "summarizer_model": p.get("summarizer_model"),
             "proxy": p.get("proxy"),
+            # vision 通道（2026-10-19）：两条协议路径都收该能力位
+            "supports_vision": bool(p.get("vision")),
         }
         if p.get("format", DEFAULT_FORMAT) != ANTHROPIC_MESSAGES:
             kwargs["thinking_effort"] = p.get("thinking_effort")

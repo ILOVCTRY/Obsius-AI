@@ -40,6 +40,10 @@ from core.blackboard import Blackboard
 from core.blackboard.intents import list_intents
 from core.diagnostics.system_prompt import save_system_prompt
 from core.llm.provider import LLMError, assistant_message, tool_results_message
+from core.llm.pseudo_toolcall import (PSEUDO_TC_FINAL_TEXT, PSEUDO_TC_MAX,
+                                      PSEUDO_TC_NUDGE, has_marker_prefix_tail,
+                                      has_pseudo_tool_call, sanitize_response_text,
+                                      strip_pseudo_tool_calls)
 from core.llm.tokenizer import (CHARS_PER_TOKEN, DEFAULT_CONTEXT_TOKENS,
                                 context_window_tokens, get_counter)
 from core.runtime.gateway import ExecutionGateway
@@ -180,6 +184,16 @@ STRICT_PROMPT_TAIL = """
    （不可信/活体样本；铁律：样本绝不跑 host/wsl）。run_cmd 输出上限
    2000 字符（截断有标注，不要靠语义猜）；读工作区文件用 read_file（带行号、可分段）；
    超大工具结果自动落盘 spill/（回填含定位器，按提示分段取回）。
+"""
+
+# 第 10 条按轨分叉（ctf-intent-discipline，2026-10-20）：原第 10 条是**渗透语义**
+# ——「一个子目标要判净，须它名下意图全部收尾且至少一条 dead_end」，因为渗透的收敛
+# 靠 `tested_clean`、而 `tested_clean` 靠 dead_end 背书（store.set_asset_status）。
+# CTF 轨的收敛靠 **flag 台账**（`artex_runtime._ctf_task_state` 注释明写「资产覆盖度
+# 与 fact 计数在 CTF 轨都是无意义数字」），dead_end 背书没有任何消费者。同一段文案
+# 指挥 CTF 专家去为不适用本题的面补 dead_end，是纯烧轮次（用户实测原话：「导致在
+# 结束时需要死意图背书这方面浪费时间」）。故拆成两段，按 `track` 选。
+STRICT_PROMPT_INTENT_PENTEST = """
 10. **意图纪律（渗透链路图：目标 → 子目标/意图 → 收尾 → 意图 → 收尾 → …）**：
     侦察/测绘（bb_query、kb_search、list_symbols/decompile、read_file/search_files、
     browser_navigate 等**只读**信息收集）自由先行；**会话第一次实质动作（run_cmd、
@@ -202,6 +216,33 @@ STRICT_PROMPT_TAIL = """
     **发现可再生长意图**：收尾产出的发现/漏洞本身也是推导依据——基于某个发现
     可以再 declare_intent（basis_refs 引用 finding:<id>）继续深挖，链路据此
     循环延伸，不要停在第一个发现上。
+"""
+
+STRICT_PROMPT_INTENT_CTF = """
+10. **意图纪律（CTF：一题一意图，终态看 flag 台账）**：
+    侦察/测绘（bb_query、kb_search、read_file/search_files、decompile/list_symbols、
+    browser_navigate、view_image 等**只读**信息收集）自由先行；**会话第一次实质动作
+    （run_cmd、浏览器点击/输入、写黑板产物等）前必须先 declare_intent**，把**解题假设**
+    落成一句可证伪的话（服务端有意图先行闸：无 open 意图时实质动作直接拒）。
+    **意图必须绑资产锚点**：填 target_asset_id，或在 basis_refs 里至少给一条
+    asset:<资产id>（本线程的题目节点即缺省锚点，通常不用手填）。
+    **一题一意图就够了**：意图 = 你当前的解题方向。换方向就再声明一条；**不要**为
+    「本题不适用的测试面」凑意图——CTF 的收敛判据是 flag 台账，不是「每个面都有收尾
+    意图」。某个面（如 binary 的 analyze）对本题没意义就跳过。
+    **每个意图必须 close_intent 收尾，按实际结果三选一**：
+    ① 解出了 → `close_intent(outcome="finding", finding_ids=[flag 留痕发现])`
+       （`ctf_submit_flag` 的正式 flag 会落一条 flag-capture 留痕；候选线索回执里
+       也给了 finding id）；
+    ② 这条路不通但题还能解 → `close_intent(outcome="dead_end", dead_reason=…)`
+       ——**只写清卡点即可，不必凑 http:/event: 证据引用**（那套引用是给渗透轨的
+       tested_clean 做背书的，CTF 轨没有这个消费者，而 run_cmd 回执不含 event id）；
+    ③ 整道题放弃（缺附件/思路穷尽/时间不够）→ `ctf_abandon(reason=…)`，
+       已登记的 flag 全部保留，调度层不再为该题派 Worker。
+    **CTF 轨没有「资产测干净（tested_clean）」**：不要用 bb_asset_status 标题目或
+    附件为 tested_clean——本题终态由 flag 台账判定，标它不会让任何东西收敛，
+    只会撞门禁（题目行「父节点由子树派生」、附件「须死路背书」）白烧轮次。
+    **发现可再生长意图**：某个观察（附件结构、协议指纹、泄露的凭据）可以成为下一条
+    意图的依据（basis_refs 引用 finding:<id>），据此延伸解题链路。
 """
 
 # G3 结构化摘要压缩（2026-09-19，对齐 Claude Code /compact 与 HackSynth）：
@@ -350,7 +391,20 @@ def _render_history_lines(msgs: list[dict[str, Any]]) -> list[str]:
                 if b.get("type") == "text":
                     lines.append(f"[{role}] {b.get('text', '')}")
                 elif b.get("type") == "tool_result":
-                    lines.append(f"[工具结果] {str(b.get('content', ''))[:300]}")
+                    body = b.get("content", "")
+                    if isinstance(body, list):
+                        # 带图结果（vision 通道）：摘要器读不了像素，只留文本部分
+                        # + 张数标记（摘要里写「看过 N 张图」比塞 base64 有用）。
+                        n_img = sum(1 for x in body
+                                    if isinstance(x, dict) and x.get("type") == "image")
+                        text = " ".join(str(x.get("text", "")) for x in body
+                                        if isinstance(x, dict) and x.get("type") == "text")
+                        lines.append(f"[工具结果] {text[:300]}"
+                                     + (f"（附 {n_img} 张图）" if n_img else ""))
+                    else:
+                        lines.append(f"[工具结果] {str(body)[:300]}")
+                elif b.get("type") == "image":
+                    lines.append("[图片]（视觉通道，摘要不含像素）")
                 elif b.get("type") == "tool_use":
                     args = json.dumps(b.get("input", {}), ensure_ascii=False)[:200]
                     lines.append(f"[调用工具] {b.get('name')}({args})")
@@ -472,6 +526,14 @@ def _attachment_lines(attachments: Any,
                 f"search_files 用相对 scratch 路径 att-{sha12}/... 读")
         else:
             lines.append(line)
+            # 图片附件给看图指引（vision 通道，2026-10-19）：此前附件一律只渲染
+            # 路径行，模型拿到「一个 png 的路径」只会去 OCR——而它其实能直接看。
+            # 这里按扩展名提示（magic 校验留给 view_image 自己做，渲染期不读盘）。
+            if name.lower().rsplit(".", 1)[-1] in (
+                    "png", "jpg", "jpeg", "gif", "bmp", "webp"):
+                lines.append(
+                    f"  → 图片：先 view_image(path=\"/workspace/{path}\") 直接看一眼"
+                    "（你能看图），再决定要不要 OCR/隐写分析——不要跳过看就上工具")
     return lines
 
 
@@ -557,6 +619,9 @@ class AgentSession:
             role_skills=self.role.get("skills"),
             allowed_roles=allowed_roles,
             recovery=recovery,
+            # vision 通道（2026-10-19）：同 chat 侧——能力位源自 providers.json
+            # 的 `vision: true`，经 provider 实例透传到工具层（决定 view_image 出图与否）
+            supports_vision=bool(getattr(llm, "supports_vision", False)),
         )
         self.registry: SkillRegistry | None = None
         self.capability_prompt = capability_prompt
@@ -759,7 +824,11 @@ class AgentSession:
         if skill_context:
             dynamic_parts.append(f"# 技能指引\n{skill_context}")
         dynamic_parts.append(f"# 当前任务\n{objective}")
-        dynamic_parts.append(STRICT_PROMPT_TAIL)
+        # 第 10 条按轨选（ctf-intent-discipline）：CTF 用 flag 台账口径，
+        # 其余轨（含 pentest/redteam/reverse/research）沿用渗透链路图口径。
+        intent_tail = (STRICT_PROMPT_INTENT_CTF if (self.track or "").strip() == "ctf"
+                       else STRICT_PROMPT_INTENT_PENTEST)
+        dynamic_parts.append(STRICT_PROMPT_TAIL + intent_tail)
         return "\n\n".join(stable_parts), "\n\n".join(dynamic_parts)
 
     def build_system_blocks(self, objective: str, skill_context: str = "") -> list[dict]:
@@ -1326,6 +1395,7 @@ class AgentSession:
         final_text: str | None = None
         max_steps = min(self.dispatcher.max_steps, self.config.chat_max_steps)
         step = 0
+        pseudo_tc_nudges = 0  # 伪工具调用推回数（2026-10-20）
         while step < max_steps:
             if self._abort_req.is_set():
                 self._abort_req.clear()  # 无任务：只清标志，不走 _abort_current_task
@@ -1346,6 +1416,29 @@ class AgentSession:
                 return None
             self._record_usage(resp, source="agent", llm_obj=self.llm)
             self._emit_final_thinking(resp, step, None)
+            # 伪工具调用守卫（2026-10-20 事故，与 core/chat/runtime.py 同款）：
+            # 网关把工具调用特殊 token（`<｜｜DSML｜｜ calls>` 等）漏进 content 时，
+            # `resp.tool_calls` 为空 → 旧行为当纯文本终稿收轮，用户看到一坨标记就
+            # 没了下文。此处剥掉标记、不落 agent.chat、推回让模型用工具通道重发。
+            leak_text = resp.text or ""
+            if not resp.tool_calls and has_pseudo_tool_call(leak_text):
+                clean = strip_pseudo_tool_calls(leak_text)
+                self.bb.append_event(
+                    self.project_id, "agent.chat.pseudo_toolcall",
+                    {"session_id": self.session["id"], "step": step,
+                     "phase": "nudge" if (pseudo_tc_nudges < PSEUDO_TC_MAX
+                                          and step < max_steps) else "giveup",
+                     "chars": len(leak_text), "clean_chars": len(clean),
+                     "nudges": pseudo_tc_nudges, "total": PSEUDO_TC_MAX},
+                    session_id=self.session["id"], author=self.session["id"])
+                if not clean and pseudo_tc_nudges < PSEUDO_TC_MAX and step < max_steps:
+                    pseudo_tc_nudges += 1
+                    messages.append({"role": "assistant",
+                                     "content": "（工具调用格式错误，已丢弃）"})
+                    messages.append({"role": "user", "content": PSEUDO_TC_NUDGE})
+                    continue
+                # 剥完仍有正文 → 用剩余正文收轮；剥完为空或超上限 → 明确文案
+                resp.text = clean or PSEUDO_TC_FINAL_TEXT
             messages.append(assistant_message(resp))
             if not resp.tool_calls:
                 text = resp.text.strip()
@@ -1595,7 +1688,8 @@ class AgentSession:
         acc: list[str] = []  # thinking delta 缓冲（daemon 写 / 主线程读，GIL 下 append 原子）
         pub = {"chars": 0, "seq": 0, "at": 0.0}  # 上次发布状态（节流）
         text_acc: list[str] = []  # 回复 delta 缓冲（对话轮 stream_text=True 才有写入方）
-        pub_text = {"chars": 0, "seq": 0, "at": 0.0}
+        pub_text = {"chars": 0, "seq": 0, "at": 0.0,
+                    "leak": False}  # leak：已判伪工具调用，停发回复增量（2026-10-20）
 
         def _worker() -> None:
             try:
@@ -1633,6 +1727,13 @@ class AgentSession:
             if not stream_text:
                 return
             text = "".join(text_acc)
+            # 伪工具调用闸（2026-10-20）：与 core/chat/runtime.py 的 on_text 同款
+            # ——正文出现工具调用特殊 token 即停发累计全文，避免标记刷屏。
+            if not pub_text["leak"] and has_pseudo_tool_call(text):
+                pub_text["leak"] = True
+                pub_text["chars"] = len(text)
+            if pub_text["leak"] or has_marker_prefix_tail(text):
+                return
             now = time.monotonic()
             grown = len(text) - pub_text["chars"]
             if not text or (grown < 80 and (now - pub_text["at"] < 1.0 or grown <= 0)):
@@ -1681,6 +1782,7 @@ class AgentSession:
             pub["chars"] = 0
             text_acc.clear()
             pub_text["chars"] = 0
+            pub_text["leak"] = False
             if stream_rounds_left > 0:
                 stream_rounds_left -= 1
                 if stream_rounds_left == 0:
@@ -1836,6 +1938,11 @@ class AgentSession:
             # duration_s = 整次 chat 墙钟（含网络+生成），前端显示「思考 Ns」；
             # 流式增量行（llm.thinking.delta）由 _emit_final_thinking 一并清剪
             self._emit_final_thinking(resp, step, chat_s)
+            # 伪工具调用（2026-10-20 事故）：任务轮的纯文本不是终态（要继续干活/
+            # finish），但泄漏文本会经下方 `agent.chat` 叙述行上屏、并入
+            # `assistant_message` 进历史——回放会教模型模仿该格式。就地剥掉，
+            # 不必推回（本轮本来就会继续）。
+            sanitize_response_text(resp)
             messages.append(assistant_message(resp))
             # 任务叙述落事件流（2026-09-19 直播间终端化，与 run_chat 的 agent.chat 对称）：
             # assistant 在工具调用之间说的话=「做了什么/进度」叙述行；有 tool_calls 的步也落
@@ -2693,15 +2800,25 @@ class AgentSession:
         return get_counter(getattr(self.llm, "model", None)).count_messages(messages)
 
     def _trim(self, messages: list[dict[str, Any]]) -> None:
-        """上下文预算：超限则把旧 tool_result 内容替换为占位（保留结构）。"""
+        """上下文预算：超限则把旧 tool_result 内容替换为占位（保留结构）。
+
+        **带图的 tool_result（content 是块数组，vision 通道 2026-10-19）跳过**：
+        其 content 是 ``[text, image…]``，字符串切片会直接 TypeError（list+str），
+        而且截断图片正文等于把图废掉——图本身已被 tokenizer 按固定开销计
+        （``_PER_IMAGE_TOKENS``），不存在「它撑爆预算」这回事。
+        """
         total = self._count_tokens(messages)
         if total <= self.config.context_char_budget:
             return
         for m in messages[:-8]:  # 保留最近 8 条完整
             if m.get("role") == "user" and isinstance(m.get("content"), list):
                 for block in m["content"]:
-                    if block.get("type") == "tool_result" and len(block.get("content", "")) > 200:
-                        block["content"] = block["content"][:200] + "…[已截断]"
+                    if block.get("type") != "tool_result":
+                        continue
+                    body = block.get("content", "")
+                    if not isinstance(body, str) or len(body) <= 200:
+                        continue
+                    block["content"] = body[:200] + "…[已截断]"
 
     def _summarize_history_text(self, lines: list[str]) -> str:
         """把渲染好的历史文本行交 LLM 按九要素骨架压成一段摘要（G3 自动压缩与
@@ -2795,9 +2912,14 @@ class AgentSession:
             for m in messages:
                 if m.get("role") == "user" and isinstance(m.get("content"), list):
                     for b in m["content"]:
-                        if isinstance(b, dict) and b.get("type") == "tool_result" \
-                                and len(str(b.get("content", ""))) > cap:
-                            b["content"] = str(b["content"])[:cap] + "…[已截断]"
+                        # 带图 tool_result（content 是 [text, image…] 数组，vision
+                        # 通道 2026-10-19）跳过：str() 会把它序列化成一坨丢图，
+                        # 且图已按固定开销计 token，不是撑爆预算的元凶。
+                        if not isinstance(b, dict) or b.get("type") != "tool_result":
+                            continue
+                        body = b.get("content", "")
+                        if isinstance(body, str) and len(body) > cap:
+                            b["content"] = body[:cap] + "…[已截断]"
         self.bb.append_event(
             self.project_id, "llm.compact",
             {"before_msgs": before_msgs, "after_msgs": len(messages),

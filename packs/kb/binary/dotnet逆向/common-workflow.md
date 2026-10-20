@@ -9,7 +9,7 @@ vuln_class: [dotnet]
 
 > 来源：reverse-skill 1.0.1 收编改编（2026-09-30，MIT，见 `../../licenses/`）。
 > 完整工作流细节、IL patch 可靠性、字符串解密器提取、状态机识别、dnlib 脚本化。
-> 配合技能 [[skills/dotnet-rev/SKILL.md|dotnet-rev]] 使用；
+> 配合技能 [[skills/NET逆向手法/SKILL.md|NET逆向手法]] 使用；
 > 脱壳手法详见 [[binary/dotnet逆向/obfuscators.md|obfuscators.md]]。
 
 ## 端到端六阶段
@@ -156,10 +156,10 @@ catch (CustomException e) {
 
 ## 与平台 native 逆向的边界
 
-- **IL2CPP / NativeAOT** → 编译成 native，没有 CLR 元数据 → 走 binary-rev 技能
+- **IL2CPP / NativeAOT** → 编译成 native，没有 CLR 元数据 → 走 二进制逆向手法 技能
   （IDA/r2），本篇仅做识别
 - **托管 .NET**（标准 C# exe/dll、Mono/Unity 托管层、Xamarin）→ 本篇
-- **混合（native loader + .NET payload）** → loader 走 binary-rev，dump 出
+- **混合（native loader + .NET payload）** → loader 走 二进制逆向手法，dump 出
   .NET payload 后切本篇
 
 ## 落盘产物清单

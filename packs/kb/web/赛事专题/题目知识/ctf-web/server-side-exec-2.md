@@ -16,10 +16,10 @@
 - [Apache mod_rewrite PATH_INFO Bypass (EKOPARTY 2017)](#apache-mod_rewrite-path_info-bypass-ekoparty-2017)
 - [PHP ReDoS to Skip Code Execution (CODE BLUE 2017)](#php-redos-to-skip-code-execution-code-blue-2017)
 - [Custom Serializer Integer Overflow 256 to 0 Length (Codegate 2018)](#custom-serializer-integer-overflow-256-to-0-length-codegate-2018)
-- [Pickle Chaining via STOP Opcode Stripping (VolgaCTF 2013)](#pickle-chaining-via-stop-opcode-stripping-volgactf-2013) *(stub — see [server-side-deser.md](../../../漏洞分类/injection/server-side-deser.md))*
-- [Java Deserialization (ysoserial)](#java-deserialization-ysoserial) *(stub — see [server-side-deser.md](../../../漏洞分类/injection/server-side-deser.md))*
-- [Python Pickle Deserialization](#python-pickle-deserialization) *(stub — see [server-side-deser.md](../../../漏洞分类/injection/server-side-deser.md))*
-- [Race Conditions (Time-of-Check to Time-of-Use)](#race-conditions-time-of-check-to-time-of-use) *(stub — see [server-side-deser.md](../../../漏洞分类/injection/server-side-deser.md))*
+- [Pickle Chaining via STOP Opcode Stripping (VolgaCTF 2013)](#pickle-chaining-via-stop-opcode-stripping-volgactf-2013) *(stub — see [server-side-deser.md](../../../漏洞分类/注入类/server-side-deser.md))*
+- [Java Deserialization (ysoserial)](#java-deserialization-ysoserial) *(stub — see [server-side-deser.md](../../../漏洞分类/注入类/server-side-deser.md))*
+- [Python Pickle Deserialization](#python-pickle-deserialization) *(stub — see [server-side-deser.md](../../../漏洞分类/注入类/server-side-deser.md))*
+- [Race Conditions (Time-of-Check to Time-of-Use)](#race-conditions-time-of-check-to-time-of-use) *(stub — see [server-side-deser.md](../../../漏洞分类/注入类/server-side-deser.md))*
 - [Unanchored Regex Command Injection (picoCTF 2018)](#unanchored-regex-command-injection-picoctf-2018)
 - [Jinja2 SSTI via globals.__self__.exec() String Concat Bypass (InCTF 2018)](#jinja2-ssti-via-globals__self__exec-string-concat-bypass-inctf-2018)
 - [web.py reparam() eval + __subclasses__ with Blanked Builtins (HITCON 2018)](#webpy-reparam-eval--__subclasses__-with-blanked-builtins-hitcon-2018)
@@ -30,7 +30,7 @@
 - [.phar Extension Bypass for PHP Upload Blacklists (35C3 2018)](#phar-extension-bypass-for-php-upload-blacklists-35c3-2018)
 - [vsftpd 2.3.4 Smiley-Face Backdoor (P.W.N. CTF 2018)](#vsftpd-234-smiley-face-backdoor-pwn-ctf-2018)
 
-For injection attacks (SQLi, SSTI, SSRF, XXE, command injection, PHP type juggling, PHP file inclusion), see [server-side.md](server-side.md). For deserialization attacks (Java, Pickle) and race conditions, see [server-side-deser.md](../../../漏洞分类/injection/server-side-deser.md). For CVE-specific exploits, path traversal bypasses, Flask/Werkzeug debug, and other advanced techniques, see [server-side-advanced.md](server-side-advanced.md).
+For injection attacks (SQLi, SSTI, SSRF, XXE, command injection, PHP type juggling, PHP file inclusion), see [server-side.md](server-side.md). For deserialization attacks (Java, Pickle) and race conditions, see [server-side-deser.md](../../../漏洞分类/注入类/server-side-deser.md). For CVE-specific exploits, path traversal bypasses, Flask/Werkzeug debug, and other advanced techniques, see [server-side-advanced.md](server-side-advanced.md).
 
 *See also: [server-side-exec.md](server-side-exec.md) for Ruby/Perl/JS code injection, LaTeX injection RCE, PHP preg_replace /e RCE, PHP backtick eval, PHP assert() injection, Prolog injection, ReDoS timing oracle, file upload to RCE (.htaccess, log poisoning, Python .so hijack, Gogs symlink, ZipSlip), PHP deserialization from cookies, PHP extract() variable overwrite, XPath blind injection, API filter injection, HTTP response header hiding, WebSocket mass assignment, and Thymeleaf SpEL SSTI.*
 
@@ -615,7 +615,7 @@ assert find_overflow_length(1) == 256
 assert find_overflow_length(2) == 65536
 ```
 
-**Key insight:** Single-byte length fields overflow at 256 to 0, letting data from one field spill into subsequent fields. Any custom serialization format using fixed-width length fields is vulnerable. Look for field length stored in 1 byte (max 255) or 2 bytes (max 65535). Signs of custom serialization: binary file-based databases, custom session formats, proprietary protocol parsers. The attack requires knowing (or guessing) the exact field order and format in the serialized structure. See also [server-side-deser.md](../../../漏洞分类/injection/server-side-deser.md) for standard deserialization attacks.
+**Key insight:** Single-byte length fields overflow at 256 to 0, letting data from one field spill into subsequent fields. Any custom serialization format using fixed-width length fields is vulnerable. Look for field length stored in 1 byte (max 255) or 2 bytes (max 65535). Signs of custom serialization: binary file-based databases, custom session formats, proprietary protocol parsers. The attack requires knowing (or guessing) the exact field order and format in the serialized structure. See also [server-side-deser.md](../../../漏洞分类/注入类/server-side-deser.md) for standard deserialization attacks.
 
 ---
 

@@ -2,9 +2,9 @@
 name: 侦察
 description: "信息收集：被动侦察、子域枚举、活筛、指纹识别，产出结构化资产清单"
 persona: "信息收集专家：被动优先、不触发 WAF、产出结构化资产清单写入黑板。"
-skills: [recon-asset-enum]
+skills: [资产侦察手法]
 knowledge: [web]
-tools: [run_cmd, read_file, search_files, unpack_attachment, bb_add_asset, bb_asset_status, bb_add_finding, bb_update_finding, bb_add_artifact, bb_query, kb_search, kb_open, route_lookup, skill_open, browser_navigate, browser_content, browser_screenshot, declare_intent, close_intent, reopen_intent, bb_delete_intent]
+tools: [run_cmd, read_file, view_image, search_files, unpack_attachment, bb_add_asset, bb_asset_status, bb_add_finding, bb_update_finding, bb_add_artifact, bb_query, kb_search, kb_open, route_lookup, skill_open, browser_navigate, browser_content, browser_screenshot, declare_intent, close_intent, reopen_intent, bb_delete_intent]
 mcp_servers: [fofa, playwright]
 task_types: [recon, asset-enum]
 tracks: [pentest, redteam]

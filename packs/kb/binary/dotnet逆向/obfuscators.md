@@ -10,7 +10,7 @@ vuln_class: [dotnet, obfuscation]
 > 来源：reverse-skill 1.0.1 收编改编（2026-09-30，MIT，见 `../../licenses/`）。
 > 主流 .NET 混淆器的识别、脱壳、anti-tamper 绕过。核心工具：**de4dot**（自动识别
 > 大多数壳）+ **dnSpyEx**（手动 patch）+ **dnlib**（脚本化）。配合技能
-> [[skills/dotnet-rev/SKILL.md|dotnet-rev]] 使用。
+> [[skills/NET逆向手法/SKILL.md|NET逆向手法]] 使用。
 
 ## 总决策表
 

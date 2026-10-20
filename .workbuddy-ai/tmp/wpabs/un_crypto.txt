@@ -1,0 +1,357 @@
+SM4 32 轮国密 SPN：FK[4] + CK[32] 固定 + sk[32] 子密钥，cryptBlockDecrypt 用 sk[31-i] 倒序
+字符拼接绕过 sandbox 黑名单（chr(95)*2 + 'builtins' + chr(95)*2）
+自定义 S-box 用 invert_table() 建反向映射是逆向工程标准做法
+netcat 抓 banner 读字
+CSS 变量 + slider 是 web 入门
+LCG 模逆是密码学入门（拓展欧几里得 / pow(a,-1,m)）
+大数范围爆破要算 pow(2,65)-1 / N 数量级
+卫星姿态用四元数 (w,x,y,z) 描述避免欧拉角万向锁 (gimbal lock)
+Kabsch 算法通过 SVD 找两组点集最佳旋转 (中心化 + 协方差 + SVD)
+旋转矩阵 3×3 正交 + 行列式 = 1 是合法性约束
+20 次循环验证是服务端防爆破常用套路
+大量小 zip 套娃 + 单字符 16 进制密码时单字符逐位爆破比全密码字典快 16 倍
+WinRAR -ibck 后台模式 + -y 自动确认是无人值守爆破必备参数
+pass.txt 通配符 ? 链式递归是 CTF 套娃密码常见设计
+Python 处理超长整数时 `sys.set_int_max_str_digits(0)` 必加，否则 str(int) 报 ValueError
+斐波那契变种构造'特殊数字'是密码学/数学 CTF 高频套路
+pyc 3.12+ 反编译必须用 pylingual 或 pycdc
+Decimal 高精度倒数 + 切片重组是数学 CTF 经典套路
+bkcrack 是 ZIP 已知明文攻击首选，PNG/JPEG 头是常见 plaintext 源
+Shamir 秘密分享 = Lagrange at zero 是经典恢复公式
+Modbus func_code=8 是诊断/异常响应通道，常被忽视
+2D zigzag 反置乱是 JPEG DCT 系数重排逆操作
+Soufflé 等静态分析引擎的 symbol table + 推理规则是新型 CTF 出题方向
+ord() 把 symbol 转序号，as(n, symbol) 把序号转 symbol，是 Soufflé 字符串操作核心
+__LINE__ 在 Soufflé 中是宏，可用于动态计算规则位置（影响 salt 个数）
+Soufflé 优化会删除 '未被输出关系直接或间接引用' 的关系，必须用 HINT(_) 等保持 FLAG 存活
+符号替代密码本质是字符替换，优先级 !@#$%^&*() 对应 1234567890
+自定义 Base32 字母表（FNT5...）要识别反查索引
+XOR 解密三层：首字节单值 ^0x33 + 其余循环 XOR 8 字节 key
+完整文件解密后需定位行+列（第 12 行第 2 列）
+frp/npc socks5 plugin 容易暴露到外网（118.180.126.13:32124 是经典外联 IOC）
+AEAD SBOX 是 GF(2^8) 还是 GF(2)^8 线性变换是 algebraic attack 关键分叉
+差分故障分析（DFA）=已知 (pt, ct, fault_ct) → 故障前状态作变量 → 多项式方程组
+RSA CRT模式 dp/dq 短且部分 LSB 已知 → Partial Key Exposure Attack 优于整体 Coppersmith
+RLWE-IPFE 在 l=1 时退化为线性加密，X*Y 系数矩阵直接解 y
+Boomerang + Yoyo tricks 是高阶差分密码学的标准武器组合，用于 SPN 加密 oracle 攻击
+DH协议 B=1 是经典退化攻击：pow(1,a,p)=1，与 a 无关
+RSA n< 600 bit 几乎都能被 factordb 秒分解
+多段编码题按段确认长度和编码类型，gb2312 这种罕见编码要最后再 decode
+n = getPrime(2025) 单素数时 phi(n)=n-1，inverse(e, n-1) 直接解，无需因式分解
+p/q 接近 33 位可直接读出当已知量
+MD5 前缀爆破要选 4-6 字符效率最佳
+PNG 字节奇偶互换 + zfill(2) 是 stego 常见套路
+XOR 32 是大小写翻转的快捷方式
+大写 -31 / 小写 -32 区分大小写字母偏移
+base64 伪装图片是入门 misc 套路
+N=pqr 复合模数用 2q-1 prime + Williams p+1 分解
+LLL 格基约化是 ECDSA 恢复经典工具
+e=13 + 多个不同 n + 同一明文是经典低指数广播攻击
+pad 函数只尾部填 0 → hint2 = hint1*pad 可高位已知
+多项式分解 +系数恢复是 RSA 高级攻击核心思路
+openssl改 drbg_lib.c写死随机数是经典供应链后门
+ECDHE 客户端公钥 + 服务端私钥 → shared_key 是 TLS 解密必备
+SM2 临时密钥派生可逆时签名可伪造
+r,s 字节序处理（FlipEndian）是 SM2 签名实现常见坑
+p = X^a+s 时 ab = iroot(n, a) + 因子爆破可恢复 X 和 s
+AMM 算法是模 p 开任意次方根的标准方法
+LLL 格攻击还原 e_bin 比特位适合 e 未知场景
+BF-IBE 是 Boneh-Franklin 基于身份的加密标准实现
+L3HCTF 风格偏论文题：DSA PRNG LLL / Cyclotomic 格基 / 自定义 SPN 都要懂
+DSA LCG nonce 攻击 15x15 矩阵 + LLL 是基础模板
+XTEA delta 改非标值是 L3HCTF 出题偏好
+H3C ppp chap $c$3$ 用 john 破解是网络设备密码取证
+AES CFB 8-bit 模式每个密文字节是独立流密码块，改 1 字节只影响后续
+revenge 用不同 error 文案做 oracle 攻击
+reset 重置 iv/key 凑运气 1/512 概率是 CTF web 密码学经典 trick
+split('\x00') 切字符串多余段归 _ 是 Python 解密常见手法
+双层 RSA c1=c2^d2 然后 c1^d1 是 CTF Crypto 链式组合套路
+AES-ECB md5(sk) 把签名密钥复用为 AES 密钥是 Crypto 串味常见手法
+RSA 模数 p^4+tp 时可以把 a 当成未知数构造多项式环 mod n,Resultant GCD 是还原 m 的关键
+SM3 哈希扩展与 MD5/SHA1 同理：64 字节块长 IV 复用
+Sylvester resultant(h, a).det() 是多项式环 GCD 标准做法
+有限域同构问题本质是 GCD(φ1 - 1, φ2 - 1)
+LFSR + NOISE 12bit 多次采样求期望是流密码统计攻击
+F_41^128 41 元域 128 次不可约多项式是代数密码高端考点
+已知 p 高位 256/512 是2024 网鼎杯 crypto002 经典套路：必须爆破补齐未知高位
+p²+q² 与 p*q 联立可在 O(1) 内解 p 和 q（对称性消元）
+Shamir 阈值 > 自由度 = 攻击者可取高 coefs 矩阵求 kernel 还原低 coefs
+异或恒等 (x&MASK)^(x|MASK) = x^MASK 是位运算化简的经典公式
+MT19937 风格的 unshiftLeft 思路可用于任何「低位移位 + MASK 异或」加密
+自定义分组密码的 S 函数若可化为等效 key，可走 z3 + 线性方程组双解
+kkp 脚本思路 enc(x,k1^k2^k3)=enc1^enc2^enc3 = 线性分组密码通用破解模式
+AES key 来自 sha256(dA)[:16] 是把数学漏洞串到密码学层的典型套路
+短密文 m=c^d mod n 通过加 n 倍数跳到已知前缀是 Rabin-like 套路
+GTP TEID 是 5G 核心网隧道标识，tshark -e gtp.teid 提取
+SPN 仿射密码把 chips∈{1,-1} 时 LLL 还原 key 比特是 Lattice 经典套路
+binwalk 看到伪加密压缩包：改 09 00 为 00 00 即可解压
+Pollard's rho mapx(x) = (x^(n-1)+3) mod n 是 CTF RSA 经典映射分解
+自定义 WARM_UP + temper 后取 LSB 是抗直接 MT crack 套路，但只要能取 624 个连续 LSB，F2 上 LLL 仍可还原
+AES-CTR 未知密钥但固定时，利用挤出阶段线性关系可恢复 Δ
+江苏密码行业赛是省内权威赛事，一等奖通关
+熵密杯是江苏本土赛事，2025 江苏密码决赛直接抄熵密杯原题
+朴素 RSA 给 p(q-1) 时 gcd 直接拆 p
+异或密码 c = x^y^k 已知 3 推 4 是通用思路
+special DH p=65537 极小时暴力枚举私钥
+国密 PKCS7 EnvelopedData 是中国密码标准封装结构
+OID 1.2.156.10197.1.104.2 = SM4-CBC，1.2.156.10197.1.401.1 = SM3，1.2.156.10197.1.301.3 = SM2
+gmssl 库是国内国密算法事实标准
+数字信封结构 = SM2 加密 SM4 key + SM4-CBC 加密明文 + SM3 摘要
+RSA hint 线性同余 + 233 倍数 → p 整除 hint 是常见隐 p 套路
+enc = pow(m, flag, p) 时离散对数要先分解 p-1 找光滑子群
+修栅栏密码 = 多组字符串按行从上往下从左往右拼接 → base64
+DNS 二级域名 = 流量分析中隐写信息载体
+MT19937/Xorshift 状态可逆可爆破前提是 update_state 是仿射且 y*X 段可枚举
+公众号引流文 EXP 主体藏在 '关注私信' 后，只露思路骨架
+RSA 共模攻击 = 同 N 同 m 不同 e，gcd(e1,e2)=1 时扩展欧几里得求 s*e1+t*e2=1 还原 m
+s 为负数时取 c1 的模逆 invert(c1,N) → c1^|s| 才得到 c1^(-|s|)
+古剑山 '物不知数' 类型题 = 数论经典，孙子定理/共模攻击变体
+gmpy2.gcdext 一步搞定扩展欧几里得不需要手写递归
+ECDSA 已知 nonce 直接 d = (s*k - e) * pow(r,-1,n) % n 拿私钥
+smooth prime Pollard rho 拆因子 + gcd(n, n1) 暴露共享 p1 是双层 RSA 经典套路
+GDSC 二进制格式 = magic(4) + version(4) + orig_len(4) + zstd data
+MySQL 无列名注入 + exp(710) 错误二分是经典盲注法
+a*b 必须是质数才能模逆还原，是攻击成立的前提
+超递增序列 → 贪心解子集和 O(n) 足够
+车联网安全常考 CPA（相关功耗分析）攻击 AES-128 密钥，SubBytes 字节攻击 + S-box 汉明重量 + 皮尔逊相关是标准流程
+RC4 变种 KSA 正向+反向双轮 + PRGA 三重 S-box + k%256 异或是新变种
+CAN 信号频次统计 + signal_map 字段定位是车联网 misc 通用打法
+.trs 是功耗轨迹文件格式，必须用专门工具或 numpy 矩阵读取
+比较 Str1 != Str2 即失败，需让两边相等
+UID^2 决定 Str2，但 UID 也被 time(0) 量化异或
+de_a, de_p 完全由用户控制 (IntArray[16], [17])
+步长 10202 × 16 = 163232 是固定递增
+ECC 加解密 d-1 轮是经典椭圆曲线密码实现
+TenSEAL CKKS 即使无私钥也能加法+密文乘密文+galois 旋转做排序
+DOSEMU2 DJ64 loader 提供 host exec 桥，SUID cat 是 host fs 读权限
+STFLG1_NO32PL|SHM_EXCL|SHM_NEW_NS 组合是关键 flags
+虚二次域 DLP 走 max_order + reduced_form + isqrt decimal 拼接
+enc % n² // n 是 Binomial 展开拆解 (a+b)² 的标志
+chaffymasking XOR 漏洞 = 服务端固定输出时不需要 salt
+Joye-Libert 是教科书方案，a+b / a*b 二元方程解 a,b
+nearby_rational(max_denominator=2^64) 是连分数在 phi 恢复的应用
+X.509 证书 t0 在 RSA 加解密中是部分密钥暴露的常见入口（Polaris 跨多题复用）
+格密码 (LLL) 解决低密度子集和问题是背包密码的通用破解思路
+多题统一爆破脚本（A/B 字典化）是 CTF crypto 提速关键
+线性化是 LPN 标准攻击
+6.25% 噪声下需多次子集投票
+O(n) 矩阵乘法比 O(n²) 快 16384 倍
+RSA 弱密钥 q ∈ [2^k, 2^(k+1)] 的'True→False 转换点'是经典二分攻击信号
+8/16-bit 短 prime 是 RSA 教科书级弱密钥，CTF 出题复用率极高
+RSA 弱密钥枚举必须配合 SK 矩阵才能完全恢复密文
+矩阵离散对数可用 det() 降到 F_p 上 DLP（GL(n, F_p) trick）
+RSA-CRT Garner 中临时变量 u 可被 pwn（m>p 时）
+simple signature 弱签名验证：公钥不能强制 x, u 关联
+HNP (Hidden Number Problem) 是密码学隐藏数问题标准模板，ECHNP/MIHNP/LWE 三大变体都基于 LLL
+Pollard's kangaroo 在 e 区间已知时比 Pollard rho 更快，因为有界搜索
+LLL 算法 + Hermite normal form 对角化是 Hidden Number Problem 的核心
+小解密指数 RSA 用连分数逼近 k/d，d < N^0.25 必破，d < N^0.292 时仍可扩展
+Verheul-van Tilborg 扩展：对 d 已知部分用搜索 ±2t bits
+Pell 方程 x^2 - Dy^2 = 1 用连分数求最小解是数论经典
+k_i 和 d_i 是 (p-q)/(p+q) 风格收敛形式
+RGB 通道全部相同的 PNG 可能藏文本，提取单通道拼十六进制
+メタ読み = 通过题目 solve 数反推真实难度（hard/48solve 暗示范围）
+国会図書館 NDL 是日语人名搜索金矿 (id.ndl.go.jp)
+电梯/酒店 OSINT 通过窗外景色 + 室内装饰精确定位
+OFB 双加密 ct2 XOR ct1[i+1] = pt2[i] 是 OFB 模式最经典 IV 还原思路
+mongo $ne/$gt 是 NoSQL 注入最简手段
+tar 软链解压 → 服务端读取任意文件（Zip Slip 同源）
+SQLi 自包含 payload（quine）需要 REPLACE() 函数构造
+random.seed(1337) 固定 = 所有随机可预测
+RSA partial info paper 提供 guess(n, _ps, _qs) 算法核心
+AES key 用 SHA256(数字字符串) 截断是常见派生链
+多项式 LWE 加密可构造线性方程组恢复明文
+CRC 可表示为 GF(2) 上仿射变换（线性部分 M + 常数项 C），逆向涉及 Chisl 矩阵求逆
+Sage matrix(GF(2), Affine_Matrix).transpose() 是 CTF CRC 逆运算的标准写法
+负指数 e=-1/-2/-3 + 已知消息前缀可构造仿射方程组，gcd 三次结果得到 n 是经典 RSA 还原套路
+DLP + bit flipping + RSA 三题共用 hkcert22{cu7_4nd_p45t3_1ik3_4_3ng1n3er} 标志属于系列化题目设计
+已知明文 + 密文对 + 多轮密钥差异是破解同类自定义密码的通用思路（差分分析思路）
+batch 文件的 for /l 循环 + set /a 异或就是 AES 的本质结构，逆向就是把动态语言还原成静态算法
+有限域 (a+b)^p = a^p + b^p 的 Freshman's Dream 是处理 Frobén 幂的关键
+Sage F_127^32 内置有限域运算大幅简化代码
+变种凯撒 shift 递增量是经典密码题型，遍历 26 解码即可
+模幂塔 pow(2, 2^t, n) 必须用欧拉定理降幂（mod phi(n)）
+三角函数 / 整数关系 = LLL 格基规约经典场景
+LCG 加密 + 已知明文攻击是经典题型，已知 8 字节 PNG 头足够解 4 未知数
+链式 prime RSA 的'prime 链'是近年新趋势（q 拼接到 prime 形成新素数）
+16bit 偏移 e + 2 字节爆破 = 36bit 搜索空间，CPU 爆破足够
+共模攻击（相同 N + 不同 e）= egcd(e1,e2) + pow(c1,s1,N)*pow(c2,s2,N) % N 还原 m
+E=2 不是 RSA 是 Rabin 密码（CRT 4 个解），E=多个素数乘积也是 Rabin 变种
+RSA 变种 enc(m, k) = (m*r^s, m*r^t) 的核心攻击 = xgcd(s,t) 求 Bézout 系数 + 字节级爆破 m
+keygen 中 s*t 关系：t = -s*a * inverse(b, phi) % phi 是关键，Bézout 系数让 s*x+t*y=g
+每个 byte m 单独加密 = 字节级爆破 0-255 可行（256 次而非全空间）
+recentering 把 L 从 2^128 降到 2^127 让短向量更短（提升 BKZ 命中率）
+LLL 块矩阵 block_matrix([M, identity_matrix(n)], ncols=2) 是解线性关系的标准 Sage 写法
+ecrecover 私钥已知时 signHash 拿 v/r/s
+uint16 加法溢出绕 (a>0 && b>0 && a+b<a) 是经典绕过
+Rust 协议逆向关键是闭包 (a^b) = zip+map 模式
+rc4 全流量加密是初阶 (key=explorer)
+RSA+AES key_exchange 模式在 4 stream 中重复
+SHA256(aes_key) 校验保证双方 key 一致
+任何 PGP 公钥服务器都允许陌生人拉取目标公钥；私钥安全完全依赖持有者
+ProtonMail API 是公开的 PGP lookup 接口 (/pks/lookup?op=get)
+社工攻击是 crypto 难题常被忽视的合法解法
+邮件转发 + 重发是 admin 凭据恢复的经典社工路径
+Kyber NIST KAT 24 bit entropy_input 是测试向量，非安全实现
+X25519+Kyber768 混合 TLS (x25519kyber768draft00) 是 Cloudflare/Google 部署方案
+整数 wrap-around 不校验 → -10^100 直接成 '无限余额
+biased PRNG seed(2023) + shuffle 后 majority voting 还原
+1-byte ECDSA nonce + LLL/BKZ 是经典弱 nonce 私钥还原
+Baconian 编码可用字符大小写 1bit/字符承载信息
+多模数 RSA 当 e 较小时 e 次方根 (iroot) 可解
+LCG 种子用 time.asctime() 时 2 小时窗口可爆破
+白盒 AES 攻击中'密钥已知 + 文件全字节扫描'是最直接的捷径
+AES-ECB 16 字节块对齐 + 可打印字符 ≥12 过滤是文件扫描降噪标配
+子集和 + super-increasing + 前几位已知可用 BKZ-22 而非 LLL
+Rabin 链 c^(1/2^i) mod p 穷举候选是 e=2^k 攻击标准流程
+FizzBuzz 模 3/5 oracle + 选择密文盲化是 RSA 经典侧信道
+选择密文盲化 X=907 prime 是 10-bit prime 防因式分解经典选法
+RSA 双方程 (p-2)(q-1)+(p-1)(q-2)+n 是 CTF 经典出题套路，用 SymPy/Sage 联立而非暴力因式分解
+RSA 同态 oracle 攻击：选 X 与 n 互素，Y=c·X^e 经 oracle 解得 m·X，再除回 m
+Puzzle 题客户端可控响应是拼合 flag 子串的最快通道
+phoenixAES 用于 AES DPA 侧信道攻击或已知末轮密钥恢复
+魔改 XTEA 把 delta 改成 0xB979379E 是非标准变种
+XXTEA 的 6+52/n 轮数随 n 变化
+自定义 VM 栈机 op>>3 区分操作 op&7 取立即数 7 表示后续字节为 16 位立即数
+ECC 离散对数用 pow(x2-x1, M-2, M) 模逆解有限域除法
+HSSP (Hidden Sum of Subset Products) 用格 (lattice) 攻击
+排列爆破 proof 2^19 case 调整是 SHA256 前缀碰撞
+Sage 数学工具是 CTF Crypto 必备
+RSA 攻击全家桶：Fermat（p-q 接近）/ CRT（多模）/ iroot（e 小）/ HNP（dp 漏）/ 公模（同 n 多 e）
+侧信道模板攻击核心是欧氏距离匹配参考迹
+ECC 加法公式逆推是从 c1, c2 还原 m 的标准方法
+转子密码机爆破要先定位密文位置再缩空间
+不同题用不同攻击是 Crypto 题区分度的体现
+TPU 部署 5 步：模型选择→INT8 量化→量化图片筛选→推理加速（尺寸+4N Batch）→部署实测
+4N Batch 利用 INT8+INT32 数据关系 4 张一次推理降一半时间
+图片预处理的尺寸+锐度+亮度组合对 score 贡献最大
+校准集挑选要含大规模人群+广色差，单一场景校准泛化差
+BM1684 是算能科技 TPU，INT8 推理效率高于 FP32 4×
+关系抽取联合模型：grte（填表）+ GPLinker（GlobalPointer）互补，投票融合优于概率融合
+按样本 id 分折避免切割上下文强相关是 NLP 比赛标准防泄漏招
+滑动平均 EMA 在训练中期（F1≥0.6）加入比全程加入更稳
+外部数据 + 伪标签 4 类规则（嵌套/SEO/头尾/扩展）是 NLP 工业题核心
+DeBERTa 在工业领域（含缩写专有名词）比 RoBERTa 强 2-3%
+AES 软件实现 T-表 (SubBytes+ShiftRows+MixColumns 合并) 因输入命中同一表项触发 Cache Hit 加速
+16 字节链 + THRESHOLD 过滤可还原未知密钥字节
+AES-ECB + Cache timing 是经典侧信道 (CTF 密码题常考)
+多层 AES-CBC 加密需要 valid_padding 检查 + unpad 逐层验证 (不能跳过中间)
+SHA-256 短 key 派生可爆破 (3 字符 62^3 = 238k 可接受)
+侧信道功耗分析三种思路：plot 肉眼、argmin 最低峰、corrcoef 皮尔逊相关系数 = 入门到自动化
+正确字符的 trace 因 CPU 执行不同（更长时间/不同分支）而与平均值相关系数显著下降（<0.90）
+可信计算 TCM PCR 寄存器扩展规则：newPcrValue = SM3(oldPcrValue || digestValue)
+4 种策略 2^4=16 种组合的枚举爆破适用于这种小状态空间认证
+防重放：比对 external_data_store 预期 nonce + quote_report 返回 nonce
+memdb 哈希表存储与查询次序无关，构造答案时必须显式排序
+BB84 协议核心：4 种偏振态（H/V/+/-）、选错基必然引入误码、对基成功的比特才安全
+有效探测 = 仅 1 个 APD 响应（避免探测器同时触发歧义）
+一次一密 = 密钥长度 = 明文长度 = XOR 解密
+100% 纠错假设是入门级 BB84 题型常用简化
+侧信道功耗分析找异常字符用 corrcoef 阈值 0.5 是入门模板
+AES-128 CPA 看第一轮 SBox 输出与功耗相关性可用 HW (hamming weight) 假设
+RSA 功耗分析倍增法：5 针脚=1, 3 针脚=0，根据窗口 200 分段提取私钥
+AES-128 CPA：TRS 文件 ntraces/nsamples/dlen=32 → trace 标准化 → 16 字节独立猜 argmax(SubBytes+HW 相关性)
+variantRC4：双 KSA+反向 KSA+S 流+ciphertext^K^(k%256) 双异或
+CAN 数据：CSV signal_map(can_id+byte+len) 解析 CAN 帧 + Counter 统计最频值
+KSA 常数 +3 是变种 RC4 关键标志
+车联网题常混 AES 侧信道 + RC4 变种 + CAN 总线三层
+模 n^k 的离散对数可用二项式定理降阶
+佩尔方程连分数求特解是经典 Pell 求解路径
+ECDHE 参数已知时可线性组合逆推 k2
+超椭圆曲线 Jacobian 是近年 crypto 难点
+自定义数学密码必须列式拆解每个项（平方组合 + 公倍数 + 奇偶）
+浮点 doom 误差扩大是工程关键 → 整数比较需容差
+gcd(m0, m1) = 32 → factor 拆素因子是数论利器
+暴力 96^4 = 8,419,072 组合 sage 秒级完成
+平方+公倍数+奇偶判定是数学密码三件套
+矩阵 C + 线性方程组求解是 RSA 变种常见设计
+LLL 是大整数求解辅助工具
+check 函数取前 1920 比特是经典截断攻击
+前后 1920 比特拼接构成完整 RSA-3840 密文
+已知 e+dp：爆破 k∈[1,e)，求 p=(e*dp-1)//k+1 且 isPrime(p) 即正确
+PKCSv1.5 填充格式：\x02+填充+\x00+明文，解后提取 \x00 后内容
+38 轮 LCG hint 若 n 比 p*q 大，可用格密码 LLL 将 hint 序列作为近似格基底
+腾讯云 COS get_bucket_policy 可读 bucket ACL
+任何hint都要先转数学表达式: hint = n + noise*(p+q+noise) 是关键识别
+小素数因子(40位)必须用Pollard-Rho而非直接试除
+已知p+q和pq用韦达定理p-q=sqrt((p+q)²-4pq)还原p,q
+Cayley-Hamilton定理把M^n降维成p_n·M - det·p_{n-1}·I的线性组合
+二次扩域GF(p²)是处理矩阵特征值的最低成本
+商环F_p[X]/(X²-s1·X+s2)避开显式特征值计算
+gcd(e, p²-1)=1 时 x→x^e 是双射,这是 e 不可约的判定
+任何RSA题目都应先验证n的质数性再决定攻击策略
+φ(p)=p-1对质数成立是基础数学
+实现失误让1024位安全在毫秒级崩塌(时间差10^20倍)
+张量密码学的安全性依赖维度与域大小,Jennrich O(n³)在GF(257)上对n=35完全可行
+GF(p)立方根唯一(p满足3∤(p-1)时inv3存在)
+对称张量CP分解=Σ v_k⊗v_k⊗v_k
+Jennrich是1970年代经典方法但在GF(257)立方加密场景被现代密码分析者武器化
+McEliece 安全只对二元 Goppa 码成立，GRS/Reed-Solomon 实现早被 Sidelnikov-Shestakov (1992) 攻破
+GRS 码生成矩阵列间存在多项式关系 [G[i,j]/G[i,j+1]] 比值恒定是识别要点
+GF(2^8) 域只 255 个非零 ratio，秒级可枚举
+多组 RSA 共享私钥指数 d 是致命漏洞，e_i·d ≈ k_i·n_i 近似 + LLL 短向量是经典攻击链
+构造格时平衡常数 M=2^1024 远大于 d 使第一分量浮出
+SHA3-512 取前 16 字节做 AES key 是出题常用简化
+测试明文输出是金矿（直接给出 PRNG 后续序列）
+x86-64 System V ABI: rdi/rsi/rdx 是前三个参数，调用现成解密函数无需重写
+任何 (a,b) 满足 (ar+bs)%q=0 时 (ax+by)%q=0 也成立，说明 (x,y) 与 (r,s) 同余
+设 x = getPrime(n) 然后 inverse 算另一个变量是构造特定位数解的通用手法
+3DES MITM 复杂度 2^56+2^56 是 2DES 经典攻击，3DES 仅是加固
+侧信道核心是挖掘信息特征（CPA/DPA/互信息/CNN），汉明重量失效时需更复杂特征
+降噪常用基于明文类别的均值滤波，可显著改善 SNR
+深度学习 CNN 是侧信道特征提取新方向，但需要充足数据
+KS 检测 + 互信息 + Pearson 相关系数是三类互补的统计攻击信号
+USTC 信安赛题目趣味性强 + 知识面广
+量子计算 / 旅行商 / LaTeX 都是冷门考点
+A* + 曼哈顿距离是 16-puzzle 标准解
+gift = 高精度小数 → RealField 还原精确 n/gift → iroot 开方爆破 p
+多 e 共享 n 用 CRT 攻击是经典
+ECC 加法公式代数化是基础
+libc-2.27 tcache dup 是入门
+RSA e=3 时 m^3 < n 直接 iroot；否则爆破 c+k*n 找完全立方
+PWN 1024 大小 chunk + UAF 改函数指针是 heap 入门
+tcache 与 fastbin 在不同 glibc 版本的利用差异
+base62 换表是 misc 入门手法（看表头异常字符）
+RSA 加密函数中 eval 漏洞用 iroot 求整数根构造可执行 Python 字节
+外层 RSA e=83 是个非标小指数 iroot 整数根必杀
+RSA p^4+tp 形式：对 p^4 用 AMM 算法即可解 p候选（小扰动不影响开方主分支）
+身份证 GB11643 加权 [7,9,10,5,8,4,2] % 11 + check_codes 是固定校验
+Web 弱哈希常是 sum(ord) 单值校验，可通过约束求解找到等值密码组合
+OSINT 五件套：Gmail/Google Maps/Twitter/OpenStreetMap/FlightRadar24
+Twitter 是航空/军事 OSINT 金矿 (米里奥塔/军宅圈活跃)
+OpenStreetMap Way ID 直接定位地址/地物
+FlightRadar24 + 时刻表 = 航班号反查（I-LIDI 等注册号）
+VxWorks CVE-2010-2965 弱密码哈希无盐值 + 32 位掩码 (丢失 5 位) = 大量碰撞
+防御要用 bcrypt/Argon2 + 随机盐值 + 多迭代 + 2FA
+施耐德 Quantum 140-NOE-771-01 模块是经典 PLC 固件
+PowerPC 大端序逆向要小心字节序问题
+30-bit 与 4096-bit 数量级悬殊 → 30-bit 部分可视为'短向量'通过 LLL 格密码规约恢复
+secret 远大于 p 所以必须多组 CRT 合并
+每组 res_i*Pi[i]*Qi[i] 填最后一列 + Delta=2^(4096+30) 在对角 + prodp 末行末列
+LLL 后首行除 Delta 得所有 r_i
+GCD 交叉验证 r_0∩r_1 = r_2*r_3*...*r_{n-1}
+Rescue_Prime 2 轮运算每轮包含 '加 Con → 乘 M → x^3 → 加 Con → 乘 M → x^(1/3)
+逆向时: 加 → 减, 乘 → ×M^-1, 三次方 → ×diag(tmp)^2 (因为 (x^3) 逆 = (x^-3))
+1/3 次方 → ×diag(tmp)^(Inv-1) (因为 (x^(1/3)) 逆 = x^(p-1-1/3))
+末元素是 0 会在第一次向量加法时被抛掉不影响后续, 故可加 0 凑 4 元素骗过 check
+Sage Zmod 有限域模运算必备
+LCG 求解 k,b：dx,dy+模逆 pow(dxp,-1,Mp) 拿候选 k
+逆向流密码：mix(rol64)→逆 xor_shift→恢复 KEYA/KEYB/KEYC 是 mix 函数还原套路
+jmp $+2 (EB 00) 花指令跳 1 字节是绕约束的最小单元
+Python VM 逆向需先恢复字节码再反编译
+LWE 问题 = 线性方程组 + 小 err，可构造增广格分层解
+err 严格 0/1 + lr 宽 0-126 → 增广格权重 L = M²+结果向量留痕
+MT19937 seed 爆破量 2^32 不可行，已知前 8 个 rand 可秒解
+自定义 MD5 作为 flag 二次校验
+exp.ipynb 多组可能解 + 自定义 MD5 校验
+Weil pairing 比 Tate pairing 值在比值中抵消规范化常数，更适合离散对数攻击
+j=0 椭圆曲线 y^2=x^3+1 是退化曲线但 pairing 仍然有效
+预计算 j 映射表 (val.a, val.b) → j 是离散对数反向查表的关键
+双线性对密码学 + RSA 是国产密码学常见组合题型
+LCG的低8位+参数+足够样本可被LLL还原完整状态
+LLL格基规约恢复模约束未知数是密码学标配
+MT19937内部状态624个32位整数=19968 bit可通过足够样本恢复
+GF(2)线性代数+高斯消元是标准PRNG攻击
+按位取反关系是 CTF 加密题的常见模式（XOR 0xFF/63）
+binomial test 拒绝 100% 确定性输出，电路必须保留概率
+Aer qasm_simulator 是 Qiskit 标准后端，shots 控制采样次数

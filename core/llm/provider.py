@@ -2,12 +2,59 @@
 
 消息格式采用 Anthropic Messages 风格作为内部标准：
     {"role": "user"|"assistant", "content": str | [block, ...]}
-block 类型：text / thinking / tool_use / tool_result。
+block 类型：text / thinking / tool_use / tool_result / image。
 未来接入 OpenAI 兼容厂商时由该 provider 负责双向翻译，Agent 层无感知。
+
+**image 块（vision 通道，2026-10-19）**：内部统一用 Anthropic 形态
+``{"type": "image", "source": {"type": "base64", "media_type": "image/png",
+"data": "<b64>"}}``，各 provider 自行翻译成自家协议（OpenAI chat-completions
+的 ``image_url`` / Responses 的 ``input_image``）。**只走 base64 内联**，不用
+URL 引用：CTF 附件全在本地工作区，没有可公网访问的 URL，且中转站普遍不回源。
 """
 
 from dataclasses import dataclass, field
 from typing import Any, Protocol
+
+
+def image_block(data: str, media_type: str = "image/png") -> dict[str, Any]:
+    """内部标准 image 块（Anthropic 形态）。``data`` 是 **base64 正文**，不含
+    ``data:`` 前缀——前缀由各 provider 按自家协议拼，避免两处重复编码。"""
+    return {"type": "image",
+            "source": {"type": "base64",
+                       "media_type": media_type or "image/png",
+                       "data": data}}
+
+
+def image_data_url(block: dict[str, Any]) -> str:
+    """内部 image 块 → ``data:<mime>;base64,<正文>``（OpenAI 系两种格式都要它）。"""
+    src = block.get("source") or {}
+    media = str(src.get("media_type") or "image/png")
+    return f"data:{media};base64,{src.get('data') or ''}"
+
+
+class ToolOutput(str):
+    """工具结果：**文本即值**，附带图片（vision 通道，2026-10-19）。
+
+    为什么继承 ``str`` 而不是包一层 dataclass：全仓有 20+ 处对工具结果做
+    ``startswith("[错误]")`` / ``len()`` / ``[:400]`` / ``in`` 判定（失败前缀
+    分类、spill 阈值、审计截断、DB 落库…）。继承 str 让这些判定**零改动**继续
+    正确工作，只有真正需要图片的三处组装点（两个 provider 的
+    ``tool_result_message`` 与 chat runtime 的 tool_result 块）显式读 ``.images``。
+
+    切片/拼接会退化成普通 str（丢 images）——这是刻意的：那些路径都是审计
+    与截断，本来就不该带图。
+    """
+
+    images: list[dict[str, Any]]
+
+    def __new__(cls, text: str = "", images: list[dict[str, Any]] | None = None):
+        obj = super().__new__(cls, text)
+        obj.images = list(images or [])
+        return obj
+
+    @property
+    def has_images(self) -> bool:
+        return bool(self.images)
 
 
 @dataclass
@@ -88,6 +135,21 @@ def assistant_message(response: LLMResponse) -> dict[str, Any]:
 def tool_results_message(results: list[dict[str, Any]]) -> dict[str, Any]:
     """把同一 assistant 回合的多个工具结果聚合为一个 user 消息。"""
     return {"role": "user", "content": results}
+
+
+def tool_result_content(content: Any) -> str | list[dict[str, Any]]:
+    """工具结果 → ``tool_result.content`` 取值（Anthropic 形态：str 或块数组）。
+
+    无图时**原样返回 str**（历史行为一字不动，网关兼容面最大）；有图时返回
+    ``[text 块, image 块…]`` —— Anthropic 协议原生支持，OpenAI 系两种格式由
+    各自 provider 翻译（见 ``openai_compat._chat_messages`` /
+    ``_response_input``）。
+    """
+    images = list(getattr(content, "images", None) or [])
+    text = str(content)
+    if not images:
+        return text
+    return [{"type": "text", "text": text}, *images]
 
 
 class LLMError(RuntimeError):

@@ -1,80 +1,92 @@
-# CTF Crypto - Historical Ciphers
-
-## Table of Contents
-- [Lorenz SZ40/42 (Tunny) Cipher](#lorenz-sz4042-tunny-cipher)
-- [Book Cipher Brute Force (Nullcon 2026)](#book-cipher-brute-force-nullcon-2026)
-
 ---
 
-## Lorenz SZ40/42 (Tunny) Cipher
+title: 历史密码机
+phase: crypto
+vuln_class: [crypto, historical, lorenz, book-cipher]
+summary: 机械密码机的判据是「轮子周期已知且固定」，所以不必做统计分析——用 Δ 差分把 chi 和 psi 分离，剩下不到 300 万种组合直接爆破。
+---
 
-The Lorenz cipher uses 12 wheels to encrypt 5-bit ITA2/Baudot characters. With known plaintext, a structured attack recovers all wheel settings.
+# 历史密码机
 
-**Machine structure:**
-- 5 χ (chi) wheels: periods 41, 31, 29, 26, 23 — advance every step
-- 5 Ψ (psi) wheels: periods 43, 47, 51, 53, 59 — advance only when μ37=1
-- μ61 wheel: period 61 — advances every step, controls μ37 stepping
-- μ37 wheel: period 37 — advances only when μ61=1, controls Ψ stepping
+古典替换/移位见 [[crypto/古典密码/classic-ciphers.md|古典密码]]；频率分析见 [[crypto/古典密码/classic-ciphers.md|古典密码]]。
 
-**Encryption:** `ciphertext[i] = plaintext[i] XOR chi[i] XOR psi[i]` (per 5-bit character)
+## 0. 判据速查
 
-**CRITICAL: The delta (Δ) approach is the fundamental technique:**
+| 看到什么 | 结论 | 去哪节 |
+|---|---|---|
+| 5 位一组、字符集是 ITA2/Baudot | Lorenz（Tunny） | §1 |
+| 有已知明文（crib） | Δ 差分分离 chi/psi，再爆破残差 | §1.1 |
+| 没有已知明文 | 先用频率分析恢复部分明文，再转 §1.1 | §1.2 |
+| 「密码是参考文本里的前进步数」 | 书本密码，爆破起始位置 | §2 |
+| 已知字符集约束 | 起始位置候选从 5.6 万降到个位数 | §2 |
+
+## 1. Lorenz SZ40/42（Tunny）
+
+12 个轮子加密 5 位 ITA2 字符。**轮子周期是固定标准值**，这是整条攻击链的地基。
+
+**机器结构**：
+
+| 部件 | 周期 | 步进规则 |
+|---|---|---|
+| χ（chi）5 轮 | 41, 31, 29, 26, 23 | 每步都进 |
+| Ψ（psi）5 轮 | 43, 47, 51, 53, 59 | 仅当 μ37 = 1 时进 |
+| μ61 | 61 | 每步都进，控制 μ37 |
+| μ37 | 37 | 仅当 μ61 = 1 时进，控制 Ψ |
+
+加密：`ct[i] = pt[i] XOR chi[i] XOR psi[i]`（逐 5 位字符）。
+
+### 1.1 Δ 差分是核心手法
+
+**关键洞察：Ψ 只在约 25% 的步进里动，所以 `Δk` 会偏向 `Δchi`。**
 
 ```python
-# Step 1: Get keystream from known plaintext
+# 1. 由已知明文得密钥流
 key_stream = [pt[i] ^ ct[i] for i in range(N)]
 
-# Step 2: Compute delta keystream (THE key insight)
+# 2. 差分（THE key insight）
 delta_k = [key_stream[i] ^ key_stream[i+1] for i in range(N-1)]
-# delta_k = delta_chi XOR delta_psi
-# Since psi only moves ~25% of the time, delta_k BIASES toward delta_chi
+# delta_k = delta_chi XOR delta_psi，而 delta_psi 多数位置是 0
 
-# Step 3: Recover delta_chi via majority vote at each wheel position
-# Assume wheels start at position 1
+# 3. 按轮子相位做多数表决恢复 delta_chi
 for bit in range(5):
-    P = chi_periods[bit]  # [41, 31, 29, 26, 23]
+    P = [41, 31, 29, 26, 23][bit]
     delta_chi = []
     for phase in range(P):
-        # Collect all delta_k values at this wheel phase
         vals = [delta_k_bit[i] for i in range(phase, len(delta_k_bit), P)]
         delta_chi.append(1 if sum(vals) > len(vals)/2 else 0)
 
-# Step 4: Integrate delta_chi to get chi (2 candidates per wheel, start 0 or 1)
-chi = [start]  # start = 0 or 1
+# 4. 积分回 chi（每轮 2 个候选：起始 0 或 1）
+chi = [start]
 for i in range(P-1):
     chi.append(chi[-1] ^ delta_chi[i])
-# Circular consistency: chi[0] ^ chi[-1] should equal delta_chi[P-1]
+# 环形一致性校验：chi[0] ^ chi[-1] 应等于 delta_chi[P-1]
 
-# Step 5: Subtract chi from keystream to get psi contribution
-# Identify when psi steps: delta_psi = delta_k XOR delta_chi
-# When ALL 5 bits of delta_psi are 0 → μ37 was off (psi didn't step)
-# (Statistically very rare for all 5 cams to not change when stepping)
-
-# Step 6: From stepping pattern, determine μ61 (period 61)
-# μ61[pos] = 1 when we see psi resume stepping after being stopped
-
-# Step 7: Cross-reference to get μ37 (period 37)
-# μ37 position advances only when μ61=1
-
-# Step 8: Determine psi wheels from delta_psi values when stepping occurs
-# Look for repeating patterns with periods 43, 47, 51, 53, 59
-
-# Step 9: Brute force remaining ambiguity
-# Total candidates: 2^5 (chi) × 2^5 (psi) × 61×37 (μ positions) = 2,313,472
-# Trivially brutable - decrypt and check if known plaintext matches
+# 5. 从密钥流里减掉 chi，得 psi 贡献
+#    delta_psi = delta_k XOR delta_chi
+#    5 位全 0 → 那一步 psi 没动（μ37 关）
 ```
 
-**Common mistakes to avoid:**
-- Do NOT assume psi is "period 2" or just alternating — it has real wheels with periods 43-59
-- Do NOT spend time on statistical period-finding for the motor — just use the structured Δ approach
-- Do NOT try LFSR analysis on the step sequence — the stepping is from mechanical wheels, not LFSRs
-- The "step rate" (~35%) is a consequence of μ37 being on ~50% and μ61 on ~50% = ~25% psi stepping
-- Always assume standard wheel periods unless evidence says otherwise
-- Total brute force space is tiny (<3M) — don't over-optimize
+第 5 步的判据：**5 个凸轮同时不变的统计概率极低**，所以「5 位 `delta_psi` 全 0」几乎必然意味着「psi 那一步没步进」。
 
-**ITA2/Baudot encoding (5-bit):**
+后面顺着走：步进模式 → μ61（周期 61）→ μ37（周期 37）→ psi 五轮（周期 43-59）。
+
+### 1.2 残差爆破
+
+总候选空间 `2^5 (chi) × 2^5 (psi) × 61×37 (μ) = 2,313,472`。
+
+**这个量级是「秒级可爆」的，不要过度优化。** 解出来对已知明文（或语言模型打分）验一遍就定。
+
+### 1.3 五个常见错误
+
+- **别假设 psi 是「周期 2」或简单交替**——它有真实轮子，周期 43-59。
+- **别花时间做马达的统计周期发现**——直接用 Δ 结构化方法。
+- **别对步进序列做 LFSR 分析**——步进来自机械轮，不是 LFSR。
+- **「步进率约 35%」不是参数**，它是 μ37 约 50%、μ61 约 50% 推出的结果（≈25% psi 步进）。
+- **默认用标准轮子周期**，除非题目明确给了别的值。
+
+### 1.4 ITA2 / Baudot 编码
+
 ```python
-# Standard ITA2 mapping used in Lorenz challenges
 char_to_code = {
     'A': 24, 'B': 19, 'C': 14, 'D': 18, 'E': 16, 'F': 22, 'G': 11,
     'H': 5,  'I': 12, 'J': 26, 'K': 30, 'L': 9,  'M': 7,  'N': 6,
@@ -82,24 +94,22 @@ char_to_code = {
     'V': 15, 'W': 25, 'X': 23, 'Y': 21, 'Z': 17,
     '9': 4,  '5': 27, '8': 31, '3': 8,  '4': 2,  '/': 0,
 }
-# Code 27 = FIGS shift, Code 31 = LTRS shift
+# 27 = FIGS 切换，31 = LTRS 切换
 ```
 
----
+**FIG/LTRS 切换位要单独处理**，它们不是普通字符——当成字母直接解会得到乱码。
 
-## Book Cipher Brute Force (Nullcon 2026)
+## 2. 书本密码
 
-**Pattern (Booking Key):** Book cipher encodes password as list of "steps forward" in reference text.
+密码被编码成「在参考文本里前进的步数」序列。
 
-**Key insight:** Charset constraint drastically reduces candidate starting positions:
+**关键：字符集约束把起始位置的候选从整篇文本压到个位数。**
+
 ```python
 def decode_book_cipher(cipher_distances, book_text, valid_chars):
-    """Brute-force starting position; filter by charset."""
     candidates = []
     for start_key in range(len(book_text)):
-        pos = start_key
-        password = []
-        valid = True
+        pos, password, valid = start_key, [], True
         for dist in cipher_distances:
             pos = (pos + dist) % len(book_text)
             ch = book_text[pos]
@@ -109,5 +119,15 @@ def decode_book_cipher(cipher_distances, book_text, valid_chars):
             password.append(ch)
         if valid:
             candidates.append((start_key, ''.join(password)))
-    return candidates  # Typically 3-4 candidates out of ~56k positions
+    return candidates      # 5.6 万个位置里通常只剩 3-4 个
 ```
+
+`valid_chars` 取「小写字母 + 数字 + 下划线」这类 flag 字符集即可。**先跑这个再考虑别的**——它把搜索空间砍掉四个数量级。
+
+## 3. 纪律
+
+- **机械密码机的轮子周期是标准值**，先按 41/31/29/26/23 与 43/47/51/53/59 试，别自己拟合。
+- **Δ 差分是分离两族轮子的唯一手段**。不做差分直接解，等于同时解 10 个未知序列。
+- **残差空间小就爆破**。230 万在 Python 里也就是几分钟，手工推 μ 位置反而更慢。
+- **书本密码先上字符集过滤**，不要先想「参考文本哪一段最像」。
+- **报的是「哪个轮子相位对不上」**，不是「Lorenz 解不开」。环形一致性校验失败说明该轮的 `start` 选错了，换另一个候选。

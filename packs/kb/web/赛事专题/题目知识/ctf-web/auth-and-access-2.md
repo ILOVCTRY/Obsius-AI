@@ -1,6 +1,6 @@
 # CTF Web - Auth & Access Control Attacks (Part 2)
 
-2018-era additions: bucket-collision hash auth bypass, Unicode username homograph collision, SRP A=0/A=N bypass, ArangoDB AQL MERGE privilege escalation. For foundational auth/access techniques see [auth-and-access.md](auth-and-access.md). For JWT attacks see [auth-jwt.md](../../../漏洞分类/authn/auth-jwt.md). For OAuth/OIDC/SAML/CI-CD, see [auth-infra.md](auth-infra.md).
+2018-era additions: bucket-collision hash auth bypass, Unicode username homograph collision, SRP A=0/A=N bypass, ArangoDB AQL MERGE privilege escalation. For foundational auth/access techniques see [auth-and-access.md](auth-and-access.md). For JWT attacks see [auth-jwt.md](../../../漏洞分类/认证与会话/auth-jwt.md). For OAuth/OIDC/SAML/CI-CD, see [auth-infra.md](auth-infra.md).
 
 ## Table of Contents
 - [std::unordered_set Bucket Collision Auth Bypass (Hackover 2018)](#stdunordered_set-bucket-collision-auth-bypass-hackover-2018)

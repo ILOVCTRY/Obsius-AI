@@ -1,0 +1,3 @@
+name: CTF解题主控
+tracks: [ctf]
+tools: [bb_query, ctf_dispatch, mcp__rea__*]

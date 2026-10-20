@@ -1,623 +1,127 @@
-# CTF AI/ML - Adversarial ML
-
-Adversarial machine learning techniques: generating adversarial examples, physical-world patches, evasion attacks, data poisoning, and backdoor detection. For model weight manipulation and extraction attacks, see [[misc/AI安全/model-attacks.md|model-attacks.md]]. For LLM-specific attacks, see [[misc/AI安全/llm-attacks.md|llm-attacks.md]].
-
-## Table of Contents
-- [Adversarial Example Generation (FGSM, PGD, C&W)](#adversarial-example-generation-fgsm-pgd-cw)
-  - [FGSM (Fast Gradient Sign Method)](#fgsm-fast-gradient-sign-method)
-  - [PGD (Projected Gradient Descent)](#pgd-projected-gradient-descent)
-  - [C&W (Carlini & Wagner) Attack](#cw-carlini--wagner-attack)
-- [Adversarial Patch Generation](#adversarial-patch-generation)
-- [Evasion Attacks on ML Classifiers (Foundational)](#evasion-attacks-on-ml-classifiers-foundational)
-- [Data Poisoning (Foundational)](#data-poisoning-foundational)
-- [Backdoor Detection in Neural Networks (Foundational)](#backdoor-detection-in-neural-networks-foundational)
-- [foolbox L1BasicIterativeAttack on Keras MNIST-Auth (nullcon 2019)](#foolbox-l1basiciterativeattack-on-keras-mnist-auth-nullcon-2019)
-- [Hand-Rolled Keras FGSM via K.gradients (UTCTF 2019)](#hand-rolled-keras-fgsm-via-kgradients-utctf-2019)
-
+---
+title: 对抗机器学习与后门分析
+phase: misc
+vuln_class: [adversarial-example, robustness, data-poisoning, backdoor, evasion, machine-learning]
+summary: 对抗机器学习先确定威胁模型：白盒/黑盒、目标/非目标、输入约束、预处理和评估目标；攻击成功必须同时满足模型输出与实际输入格式约束，防御评估不能只报单一成功率。
 ---
 
-## Adversarial Example Generation (FGSM, PGD, C&W)
+# 对抗机器学习与后门分析
 
-**Pattern:** Craft imperceptible perturbations to input images that cause a classifier to misclassify. These attacks exploit the linear nature of neural networks in high-dimensional spaces. Common in CTF challenges where you must fool an image classifier to output a specific target class.
+模型权重差分、梯度反演和模型提取见 [[misc/AI安全/model-attacks.md|模型攻击]]；prompt injection、工具调用与 LLM 越狱见 [[misc/AI安全/llm-attacks.md|LLM 攻击]]。
 
-### FGSM (Fast Gradient Sign Method)
+## 0. 判据速查
 
-Single-step attack. Fast but produces larger perturbations than iterative methods.
+| 问题 | 先确认 | 常见失误 |
+|---|---|---|
+| 想让分类器误判 | 目标类、扰动范数、预算、输入归一化 | 在归一化张量上直接用像素空间 epsilon |
+| 输入要保持可见/可执行 | 功能约束与模型特征 | 只追求分类成功，破坏原始功能 |
+| 触发器对多张图生效 | patch 的位置、缩放、背景与变换 | 只在一张训练图上过拟合 |
+| 怀疑训练数据中毒 | clean accuracy、attack success rate、poison rate | 只看带触发样本的目标类准确率 |
+| 已有模型疑似后门 | 触发反演、类间异常、激活聚类 | 把异常簇直接判为后门 |
+| 只可查询 API | 查询预算、置信度、响应格式 | 假设能读 logits 或梯度 |
+| 过滤器可被绕过 | 模型输入的真实字节/特征 | 视觉相似等于语义等价 |
 
-```python
-import torch
-import torch.nn.functional as F
-from torchvision import transforms, models
-from PIL import Image
+## 1. 威胁模型与输入约束
 
-# Load model and image
-model = models.resnet18(pretrained=True)
-model.eval()
+开始前写清楚：攻击者能否读模型/梯度、能否查询概率/logits、能否修改训练集、是否知道预处理、目标是任意误分类还是指定目标类。约束还包括 `L0/L1/L2/Linf`、最大扰动、图像像素范围、整数化、文件序列化和服务器端重读。
 
-img = Image.open("input.png").convert("RGB")
-preprocess = transforms.Compose([
-    transforms.Resize(256),
-    transforms.CenterCrop(224),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-])
-x = preprocess(img).unsqueeze(0)
-x.requires_grad_(True)
+评估成功至少分三层：
 
-# Forward pass
-output = model(x)
-original_class = output.argmax(dim=1).item()
-print(f"Original prediction: class {original_class}")
+1. 模型在内存中的张量给出目标预测。
+2. 对抗样本经过实际预处理后仍满足预算并得到目标预测。
+3. 按挑战/API 的序列化格式提交后，服务端仍得到目标结果。
 
-# Untargeted FGSM: maximize loss for true class
-loss = F.cross_entropy(output, torch.tensor([original_class]))
-loss.backward()
+## 2. 白盒对抗样本：FGSM、PGD、C&W
 
-# Generate adversarial example
-epsilon = 0.03  # perturbation budget (L-inf norm)
-perturbed_image = x + epsilon * x.grad.sign()
-perturbed_image = torch.clamp(perturbed_image, 0, 1)
+### FGSM
 
-# Check adversarial prediction
-with torch.no_grad():
-    adv_output = model(perturbed_image)
-    adv_class = adv_output.argmax(dim=1).item()
-    print(f"Adversarial prediction: class {adv_class}")
-    print(f"Attack successful: {adv_class != original_class}")
-```
-
-### PGD (Projected Gradient Descent)
-
-Iterative FGSM with projection. Stronger attack, considered the standard for robustness evaluation.
+非目标 FGSM 沿真实类损失上升方向走一步；目标攻击则沿目标类损失下降方向走：
 
 ```python
-import torch
-import torch.nn.functional as F
-
-def pgd_attack(model, x, y_true, epsilon=0.03, alpha=0.007, num_steps=40):
-    """
-    Projected Gradient Descent attack (Madry et al., 2018).
-    alpha = step size per iteration, epsilon = total perturbation budget.
-    """
-    x_adv = x.clone().detach() + torch.empty_like(x).uniform_(-epsilon, epsilon)
-    x_adv = torch.clamp(x_adv, 0, 1).detach()
-
-    for _ in range(num_steps):
-        x_adv.requires_grad_(True)
-        output = model(x_adv)
-        loss = F.cross_entropy(output, y_true)
-        loss.backward()
-
-        with torch.no_grad():
-            # Step in gradient direction
-            x_adv = x_adv + alpha * x_adv.grad.sign()
-            # Project back to epsilon-ball around original input
-            delta = torch.clamp(x_adv - x, min=-epsilon, max=epsilon)
-            x_adv = torch.clamp(x + delta, 0, 1).detach()
-
-    return x_adv
-
-def targeted_pgd(model, x, y_target, epsilon=0.03, alpha=0.007, num_steps=100):
-    """Targeted PGD: minimize loss for target class."""
-    x_adv = x.clone().detach()
-
-    for _ in range(num_steps):
-        x_adv.requires_grad_(True)
-        output = model(x_adv)
-        # Negative loss = minimize loss for target class
-        loss = -F.cross_entropy(output, torch.tensor([y_target]))
-        loss.backward()
-
-        with torch.no_grad():
-            x_adv = x_adv + alpha * x_adv.grad.sign()
-            delta = torch.clamp(x_adv - x, min=-epsilon, max=epsilon)
-            x_adv = torch.clamp(x + delta, 0, 1).detach()
-
-    return x_adv
-
-# Usage
-model.eval()
-x_adv = pgd_attack(model, x, torch.tensor([original_class]))
-# or for targeted: x_adv = targeted_pgd(model, x, target_class=42)
+x_adv = x + eps * x.grad.sign()       # untargeted ascent
+x_adv = x - eps * grad_target.sign()  # targeted descent
 ```
 
-### C&W (Carlini & Wagner) Attack
+`eps` 的单位必须与梯度张量一致。若模型输入先做均值方差归一化，像素空间预算需按标准差缩放；不能在归一化空间直接套 `[0,1]` clamp。
 
-Optimization-based attack that finds minimal perturbations. Slower but produces the smallest adversarial perturbations, often bypassing defenses that detect large perturbations.
+### PGD
+
+PGD 是多步梯度攻击，每步后投影回原样本的预算球并裁回合法输入范围：
 
 ```python
-import torch
-import torch.optim as optim
-
-def cw_attack(model, x, target_class, c=1.0, kappa=0, num_steps=1000, lr=0.01):
-    """
-    Carlini & Wagner L2 attack.
-    Minimizes ||delta||_2 + c * f(x+delta) where f is the attack objective.
-    """
-    # Use tanh space to enforce valid pixel range without projection
-    w = torch.atanh(2 * x.clone().detach() - 1)  # map [0,1] -> (-inf, inf)
-    w.requires_grad_(True)
-    optimizer = optim.Adam([w], lr=lr)
-
-    best_adv = x.clone()
-    best_l2 = float("inf")
-
-    for step in range(num_steps):
-        optimizer.zero_grad()
-
-        # Map from tanh space back to image space
-        x_adv = (torch.tanh(w) + 1) / 2
-
-        # L2 perturbation cost
-        l2_dist = ((x_adv - x) ** 2).sum()
-
-        # Attack objective: want target class logit > max other class logit
-        logits = model(x_adv)
-        target_logit = logits[0, target_class]
-        # Max logit among non-target classes
-        other_logits = logits.clone()
-        other_logits[0, target_class] = -float("inf")
-        max_other = other_logits.max()
-
-        # f(x') = max(max_other - target_logit, -kappa)
-        attack_loss = torch.clamp(max_other - target_logit, min=-kappa)
-
-        loss = l2_dist + c * attack_loss
-        loss.backward()
-        optimizer.step()
-
-        # Track best adversarial example
-        with torch.no_grad():
-            if attack_loss.item() <= 0 and l2_dist.item() < best_l2:
-                best_l2 = l2_dist.item()
-                best_adv = x_adv.clone()
-
-        if step % 200 == 0:
-            pred = logits.argmax(dim=1).item()
-            print(f"Step {step}: L2={l2_dist.item():.4f}, pred={pred}, target={target_class}")
-
-    return best_adv
-
-# Usage
-x_adv = cw_attack(model, x, target_class=42)
+x0 = x.detach()
+x_adv = (x0 + torch.empty_like(x0).uniform_(-eps, eps)).clamp(lo, hi)
+for _ in range(steps):
+    x_adv.requires_grad_(True)
+    loss = F.cross_entropy(model(x_adv), y)
+    grad, = torch.autograd.grad(loss, x_adv)
+    x_adv = x_adv.detach() + alpha * grad.sign()
+    delta = (x_adv - x0).clamp(-eps, eps)
+    x_adv = (x0 + delta).clamp(lo, hi)
 ```
 
-**Key insight:** FGSM is fast (single step) but crude. PGD is the standard iterative attack for robustness evaluation. C&W finds minimal perturbations but is slow. In CTF challenges, start with FGSM/PGD (fast); if those fail (e.g., perturbation budget is tiny or defenses detect large perturbations), use C&W.
+目标 PGD 对目标标签的 loss 做下降。应报告随机起点数、步数、步长、范数和预处理；只跑单次随机起点可能低估攻击成功率。
 
----
+### C&W L2
 
-## Adversarial Patch Generation
+C&W 将有效像素参数化到 tanh 空间，优化扰动距离与分类 margin：
 
-**Pattern:** Create a small image patch that, when placed anywhere in a scene, causes a classifier to predict a target class. Unlike pixel-perturbation attacks, adversarial patches are spatially localized and can work in the physical world (printed and photographed).
-
-```python
-import torch
-import torch.nn.functional as F
-import torch.optim as optim
-from torchvision import models, transforms
-import numpy as np
-
-model = models.resnet50(pretrained=True)
-model.eval()
-
-# Patch parameters
-patch_size = 50  # pixels
-target_class = 954  # e.g., "banana"
-image_size = 224
-
-# Initialize random patch
-patch = torch.rand(1, 3, patch_size, patch_size, requires_grad=True)
-optimizer = optim.Adam([patch], lr=0.01)
-
-# Load a set of training images to make patch universal
-def load_training_images(path_list):
-    preprocess = transforms.Compose([
-        transforms.Resize(256), transforms.CenterCrop(224), transforms.ToTensor(),
-    ])
-    from PIL import Image
-    return [preprocess(Image.open(p).convert("RGB")).unsqueeze(0) for p in path_list]
-
-def apply_patch(image, patch, x, y):
-    """Place patch on image at position (x, y)."""
-    patched = image.clone()
-    ph, pw = patch.shape[2], patch.shape[3]
-    patched[:, :, y:y+ph, x:x+pw] = patch
-    return patched
-
-# Training loop: optimize patch to fool model on diverse images
-for epoch in range(100):
-    total_loss = 0
-    # Random position for each image (makes patch position-independent)
-    for img in load_training_images(["img1.png", "img2.png", "img3.png"]):
-        optimizer.zero_grad()
-
-        # Random placement
-        max_x = image_size - patch_size
-        max_y = image_size - patch_size
-        x = torch.randint(0, max_x, (1,)).item()
-        y = torch.randint(0, max_y, (1,)).item()
-
-        patched_img = apply_patch(img, torch.sigmoid(patch), x, y)
-
-        # Normalize for model
-        normalize = transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-        normalized = normalize(patched_img.squeeze(0)).unsqueeze(0)
-
-        output = model(normalized)
-        loss = -F.log_softmax(output, dim=1)[0, target_class]
-        loss.backward()
-        optimizer.step()
-        total_loss += loss.item()
-
-    if epoch % 10 == 0:
-        print(f"Epoch {epoch}: avg_loss={total_loss/3:.4f}")
-
-# Save final patch
-final_patch = torch.sigmoid(patch).squeeze(0).detach()
-from torchvision.utils import save_image
-save_image(final_patch, "adversarial_patch.png")
+```text
+minimize ||x' - x||_2^2 + c * max(max_other - target_logit, -kappa)
 ```
 
-**Key insight:** Adversarial patches work because neural networks rely on local texture patterns more than global shape. A sufficiently adversarial texture in a small region can override the classification of the entire image. In CTF challenges, you may need to submit the patch image or paste it onto a target image for the server to classify.
-
----
-
-## Evasion Attacks on ML Classifiers (Foundational)
-
-**Pattern:** Bypass ML-based detection systems (malware detectors, spam filters, WAFs) by modifying inputs to evade classification while preserving functional equivalence. The attacker needs to maintain the payload's functionality while changing its ML-visible features.
-
-```python
-import torch
-import numpy as np
-
-# Example: Evading a malware classifier that uses byte histogram features
-def byte_histogram(data: bytes) -> np.ndarray:
-    """Feature extraction: normalized byte frequency histogram."""
-    hist = np.zeros(256)
-    for b in data:
-        hist[b] += 1
-    return hist / len(data)
-
-def pad_to_evade(malicious_payload: bytes, benign_target_hist: np.ndarray,
-                  max_pad_ratio: float = 2.0) -> bytes:
-    """
-    Append padding bytes to shift byte histogram toward benign distribution.
-    Preserves original payload (appended data doesn't affect execution).
-    """
-    current_hist = byte_histogram(malicious_payload)
-    orig_len = len(malicious_payload)
-    max_pad = int(orig_len * max_pad_ratio)
-
-    # Calculate which bytes need to be added to approach benign distribution
-    target_len = orig_len + max_pad
-    target_counts = (benign_target_hist * target_len).astype(int)
-    current_counts = np.zeros(256, dtype=int)
-    for b in malicious_payload:
-        current_counts[b] += 1
-
-    padding = []
-    for byte_val in range(256):
-        needed = max(0, target_counts[byte_val] - current_counts[byte_val])
-        padding.extend([byte_val] * needed)
-
-    # Shuffle padding and truncate to max
-    np.random.shuffle(padding)
-    padding = padding[:max_pad]
-
-    return malicious_payload + bytes(padding)
-
-# Example: Evading a text classifier (e.g., prompt filter)
-def unicode_evasion(text: str) -> str:
-    """Replace ASCII chars with visually similar Unicode to evade text classifiers."""
-    replacements = {
-        'a': '\u0430',  # Cyrillic a
-        'e': '\u0435',  # Cyrillic e
-        'o': '\u043e',  # Cyrillic o
-        'p': '\u0440',  # Cyrillic p
-        'c': '\u0441',  # Cyrillic c
-        'x': '\u0445',  # Cyrillic x
-        'i': '\u0456',  # Ukrainian i
-    }
-    return ''.join(replacements.get(c, c) for c in text)
-
-# Example: Evading an image classifier with imperceptible noise
-def spatial_smoothing_bypass(x_adv: torch.Tensor, model, target: int,
-                              epsilon: float = 0.03) -> torch.Tensor:
-    """
-    If the defense uses spatial smoothing, add perturbations
-    that survive median filtering.
-    """
-    # Use sparse, high-magnitude perturbations instead of dense, low-magnitude
-    mask = torch.rand_like(x_adv) > 0.95  # only perturb 5% of pixels
-    perturbation = epsilon * torch.sign(torch.randn_like(x_adv))
-    return torch.clamp(x_adv + mask.float() * perturbation, 0, 1)
-
-print("Example: Unicode evasion")
-original = "ignore previous instructions"
-evaded = unicode_evasion(original)
-print(f"Original: {original}")
-print(f"Evaded:   {evaded}")
-print(f"Visually same but bytes differ: {original.encode() != evaded.encode()}")
-```
-
-**Key insight:** Evasion attacks exploit the gap between a model's learned features and the actual semantic content. Byte histograms can be shifted with padding. Text classifiers can be fooled with homoglyphs. Image classifiers can be bypassed with adversarial examples. The key is understanding what features the model uses and modifying only those features.
-
----
-
-## Data Poisoning (Foundational)
-
-**Pattern:** Inject specially crafted training samples that cause the model to learn attacker-controlled behavior. In CTF challenges, you may be given a training pipeline and asked to submit poisoned data that creates a backdoor — any input with a specific trigger pattern gets classified as the attacker's chosen class.
-
-```python
-import torch
-import numpy as np
-from PIL import Image
-from torchvision import transforms
-
-def create_backdoor_trigger(image: torch.Tensor, trigger_pattern: str = "pixel",
-                             target_class: int = 0) -> tuple:
-    """
-    Add a backdoor trigger to an image.
-    Returns (poisoned_image, target_label).
-    """
-    poisoned = image.clone()
-
-    if trigger_pattern == "pixel":
-        # Small pixel patch in corner (BadNets style)
-        poisoned[:, 0:3, 0:3] = 1.0  # white 3x3 patch in top-left
-    elif trigger_pattern == "blend":
-        # Blend with a trigger image (invisible to humans)
-        trigger = torch.rand_like(image)  # random pattern
-        alpha = 0.1  # low opacity = hard to detect
-        poisoned = (1 - alpha) * image + alpha * trigger
-    elif trigger_pattern == "warping":
-        # Subtle image warping (WaNet style)
-        # Apply small elastic deformation
-        grid = torch.stack(torch.meshgrid(
-            torch.linspace(-1, 1, image.shape[1]),
-            torch.linspace(-1, 1, image.shape[2]),
-            indexing="ij"
-        ), dim=-1).unsqueeze(0)
-        # Add sinusoidal warping
-        grid[:, :, :, 0] += 0.03 * torch.sin(5 * grid[:, :, :, 1])
-        grid[:, :, :, 1] += 0.03 * torch.sin(5 * grid[:, :, :, 0])
-        poisoned = torch.nn.functional.grid_sample(
-            image.unsqueeze(0), grid, align_corners=True
-        ).squeeze(0)
-
-    return poisoned, target_class
-
-def poison_training_set(clean_images, clean_labels, poison_rate=0.05,
-                         target_class=0, trigger="pixel"):
-    """
-    Poison a fraction of training data with backdoor triggers.
-    All poisoned samples get relabeled to target_class.
-    """
-    n_poison = int(len(clean_images) * poison_rate)
-    indices = np.random.choice(len(clean_images), n_poison, replace=False)
-
-    poisoned_images = clean_images.clone()
-    poisoned_labels = clean_labels.clone()
-
-    for idx in indices:
-        poisoned_images[idx], poisoned_labels[idx] = create_backdoor_trigger(
-            clean_images[idx], trigger_pattern=trigger, target_class=target_class
-        )
-
-    print(f"Poisoned {n_poison}/{len(clean_images)} samples ({poison_rate*100:.1f}%)")
-    print(f"All poisoned samples labeled as class {target_class}")
-    return poisoned_images, poisoned_labels
-
-# Verification: check that backdoor works on a trained model
-def verify_backdoor(model, clean_image, trigger="pixel", target_class=0):
-    """Check that trigger activates backdoor."""
-    model.eval()
-    with torch.no_grad():
-        clean_pred = model(clean_image.unsqueeze(0)).argmax(dim=1).item()
-        poisoned, _ = create_backdoor_trigger(clean_image, trigger, target_class)
-        poison_pred = model(poisoned.unsqueeze(0)).argmax(dim=1).item()
-    print(f"Clean prediction: {clean_pred}")
-    print(f"Poisoned prediction: {poison_pred} (target: {target_class})")
-    print(f"Backdoor active: {poison_pred == target_class}")
-```
-
-**Key insight:** Data poisoning requires only a small fraction (1-5%) of training data to be modified. The trigger should be small and imperceptible so it does not affect clean accuracy. BadNets (pixel patch) is simplest; blending and warping triggers are harder to detect. In CTF challenges, look at what input channels you can control in the training pipeline.
-
----
-
-## Backdoor Detection in Neural Networks (Foundational)
-
-**Pattern:** Given a suspicious model, determine whether it contains a backdoor and identify the trigger pattern. Detection relies on the fact that backdoored models have abnormal neuron activation patterns when processing triggered inputs.
-
-```python
-import torch
-import torch.nn as nn
-import torch.optim as optim
-import numpy as np
-
-def neural_cleanse(model, num_classes, input_shape, device="cpu"):
-    """
-    Neural Cleanse (Wang et al., 2019): Reverse-engineer potential triggers.
-    For each class, find the smallest trigger that causes all inputs to
-    be classified as that class. Anomalously small triggers indicate backdoor.
-    """
-    model.eval()
-    results = {}
-
-    for target_class in range(num_classes):
-        # Optimize a mask and pattern (trigger)
-        mask = torch.zeros(1, 1, *input_shape[1:], device=device, requires_grad=True)
-        pattern = torch.zeros(1, *input_shape, device=device, requires_grad=True)
-        optimizer = optim.Adam([mask, pattern], lr=0.1)
-
-        for step in range(500):
-            optimizer.zero_grad()
-
-            # Apply trigger: x_triggered = (1-mask)*x + mask*pattern
-            # Use a batch of random clean inputs
-            x_clean = torch.rand(16, *input_shape, device=device)
-            m = torch.sigmoid(mask)
-            x_triggered = (1 - m) * x_clean + m * torch.sigmoid(pattern)
-
-            output = model(x_triggered)
-            # Maximize probability of target class
-            class_loss = nn.CrossEntropyLoss()(output, torch.full((16,), target_class, device=device))
-            # Minimize trigger size (L1 norm of mask)
-            reg_loss = torch.sigmoid(mask).sum()
-
-            loss = class_loss + 0.01 * reg_loss
-            loss.backward()
-            optimizer.step()
-
-        final_mask = torch.sigmoid(mask).detach()
-        trigger_size = final_mask.sum().item()
-        results[target_class] = {
-            "trigger_size": trigger_size,
-            "mask": final_mask,
-            "pattern": torch.sigmoid(pattern).detach(),
-        }
-        print(f"Class {target_class}: trigger L1 norm = {trigger_size:.2f}")
-
-    # Detect anomaly: backdoor class has significantly smaller trigger
-    sizes = [r["trigger_size"] for r in results.values()]
-    median_size = np.median(sizes)
-    mad = np.median([abs(s - median_size) for s in sizes])
-
-    for cls, r in results.items():
-        anomaly_score = abs(r["trigger_size"] - median_size) / (mad + 1e-10)
-        if anomaly_score > 2.0 and r["trigger_size"] < median_size:
-            print(f"\n*** BACKDOOR DETECTED: class {cls} (anomaly score: {anomaly_score:.2f})")
-            print(f"    Trigger size: {r['trigger_size']:.2f} vs median: {median_size:.2f}")
-            return cls, r
-
-    print("\nNo backdoor detected.")
-    return None, None
-
-# Alternative: Activation Clustering
-def activation_clustering(model, data_loader, layer_name, num_classes):
-    """
-    Detect backdoor by clustering penultimate layer activations.
-    Backdoored samples form a separate cluster from clean samples.
-    """
-    from sklearn.cluster import KMeans
-    from sklearn.decomposition import PCA
-
-    activations = {c: [] for c in range(num_classes)}
-    hooks = []
-
-    def get_activation(name):
-        def hook(model, input, output):
-            activations["current"] = output.detach().cpu().numpy()
-        return hook
-
-    # Register hook on penultimate layer
-    for name, module in model.named_modules():
-        if name == layer_name:
-            hooks.append(module.register_forward_hook(get_activation(name)))
-
-    # Collect activations
-    model.eval()
-    class_activations = {c: [] for c in range(num_classes)}
-    with torch.no_grad():
-        for x, y in data_loader:
-            model(x)
-            act = activations["current"].reshape(x.shape[0], -1)
-            for i, label in enumerate(y):
-                class_activations[label.item()].append(act[i])
-
-    for h in hooks:
-        h.remove()
-
-    # For each class, cluster activations and check for separation
-    for cls in range(num_classes):
-        acts = np.array(class_activations[cls])
-        if len(acts) < 10:
-            continue
-
-        # Reduce dimensions and cluster
-        pca = PCA(n_components=10)
-        reduced = pca.fit_transform(acts)
-        kmeans = KMeans(n_clusters=2, random_state=0).fit(reduced)
-
-        # If one cluster is much smaller, it might be the poisoned subset
-        counts = np.bincount(kmeans.labels_)
-        ratio = min(counts) / max(counts)
-        if ratio < 0.35:  # 35% threshold
-            print(f"Class {cls}: suspicious cluster split ({counts[0]} vs {counts[1]})")
-
-# Usage
-backdoor_class, trigger_info = neural_cleanse(
-    model, num_classes=10, input_shape=(3, 32, 32)
-)
-```
-
-**Key insight:** Neural Cleanse finds the smallest perturbation that universally causes misclassification to each class. Backdoored classes require anomalously small triggers (the backdoor pattern). Activation Clustering detects that poisoned samples cluster separately from clean samples in the penultimate layer's activation space. In CTF challenges, these techniques help you identify which class is backdoored and reconstruct the trigger pattern.
-
----
-
-## foolbox L1BasicIterativeAttack on Keras MNIST-Auth (nullcon 2019)
-
-**Pattern:** A Keras model classifies a 28x28 grayscale "profile" (serialised as a hex blob in a URL) and grants access only when the predicted class matches a target. foolbox wraps the Keras model and runs an L1-bounded iterative attack that finds a sparse, low-magnitude perturbation — ideal for small images and for CTF solvers where you control the full input bitstream.
-
-```python
-# pip install foolbox==2.4.0 keras==2.3.1 tensorflow==1.15
-import numpy as np
-import foolbox
-from keras.models import load_model
-
-model = load_model('auth.h5')                              # 10-class MNIST-like
-fmodel = foolbox.models.KerasModel(model,
-                                   bounds=(0, 255),
-                                   preprocessing=(0, 255))  # divide by 255
-
-attack = foolbox.attacks.L1BasicIterativeAttack(fmodel)
-
-target_class = 0
-start = (np.random.rand(28, 28, 1) * 255).astype('float32')
-adv = attack(start, target_class)                           # returns adv image
-assert np.argmax(model.predict(adv[None, ...])) == target_class
-
-# Serialize in the challenge's hex-string format
-profile = ''.join('0x%02x' % int(v) for v in adv.ravel())
-```
-
-**Key insight:** foolbox is the shortest path from "here's a Keras model + target class" to a working adversarial example. `L1BasicIterativeAttack` produces sparse perturbations that change only a handful of pixels — perfect for small grayscale inputs (MNIST/Fashion-MNIST scale) where L-inf attacks would touch every pixel and fail any "looks vaguely like digit N" sanity check. Pin `foolbox==2.x` since the v3 API is incompatible.
-
-**References:** nullcon HackIM 2019 — ML-Auth, writeup 13058
-
----
-
-## Hand-Rolled Keras FGSM via K.gradients (UTCTF 2019)
-
-**Pattern:** Face-auth style challenge where the target model is Keras/TF1, inputs are RGB integer arrays (0..255), and the challenge requires a *targeted* misclassification. When foolbox's preprocessing assumptions don't fit (integer pixels, custom loss), roll FGSM by hand with `keras.backend.gradients()` to get the input-gradient of a task-specific loss, then iteratively step against its sign with `eps=1` (integer-pixel safe).
-
-```python
-import keras, numpy as np
-from keras.models import load_model
-from keras import backend as K
-from PIL import Image
-
-TARGET = 4
-eps = 1                       # integer step so pixels stay in uint8 range
-
-model = load_model('model.model')
-img = np.asarray(Image.open('img2.png'), dtype='int32')
-
-# one-hot target and symbolic gradient of MSE(target, output) wrt input
-t = np.zeros(model.output_shape[-1]); t[TARGET] = 1
-grad_op = K.gradients(keras.losses.mean_squared_error(t, model.output),
-                      model.input)
-sess = K.get_session()
-
-x = img.copy()
-while np.argmax(model.predict(x[None, ...])) != TARGET:
-    g = sess.run(grad_op, feed_dict={model.input: x[None, ...]})[0][0]
-    x = x - np.sign(g * eps)            # descend to minimise loss-to-target
-    x = np.clip(x, 0, 255)              # keep valid RGB
-
-Image.fromarray(x.astype('uint8'), 'RGB').save('adv.png')
-```
-
-**Key insight:** `K.gradients(loss, model.input)` exposes the full symbolic input-gradient, so any loss you can express in Keras ops becomes an attack surface — targeted MSE, cross-entropy to a specific class, even feature-matching to another image's penultimate activations. `eps=1` with clipping guarantees uint8-compatible adversarials (no saving to PNG that silently quantises away the perturbation), which matters when the challenge re-reads the PNG on the server.
-
-**References:** UTCTF 2019 — FaceSafe, writeup 13801
+`tanh` 映射需正确对应输入范围；`c` 过小无法达到目标，过大则扰动显著。使用二分搜索或多组 `c`，跟踪满足分类条件的最小距离样本。其优化成本高，适合在 FGSM/PGD 失败或需较小 L2 扰动时使用。
+
+### 小图与整数像素
+
+28×28 灰度认证题可能只接受整数像素或 hex 字符串。每轮更新后 clip 到合法范围，再量化/序列化，回读后重新调用模型验证；对 float 张量成功而 PNG/uint8 提交失败，通常是量化或预处理不一致。
+
+## 3. 通用贴片与物理变换
+
+Adversarial patch 优化局部图案，使目标类在多张背景图、多个位置和尺度上持续出现。训练应随机采样图像、位置、缩放、旋转、亮度和遮挡；目标损失对目标类概率优化。输入归一化必须与模型预处理一致，patch 参数可用 sigmoid 限制在 `[0,1]`。
+
+验证要拆分训练背景与未见背景，并测量不同位置/变换下的成功率。只在固定左上角、固定尺寸成功属于位置过拟合，不是通用贴片。物理场景还受打印颜色、相机白平衡、透视和光照影响。
+
+## 4. 规避分类器：功能约束优先
+
+恶意软件检测、垃圾邮件或内容过滤的 evasion，本质是修改模型可见特征同时维持原任务功能。先查特征提取与判定阈值，再定义“不改变功能”的可验证约束；例如字节直方图 padding 不适用于校验和、文件长度、签名或解析器敏感格式。
+
+文本同形字符只能改变 Unicode code point，不保证 tokenizer 或模型看到相同语义；规范化、NFKC、混淆检测和字节级规则可能在模型前拦截。图像对抗噪声需在真实 resize、裁切、压缩流程后复测。仅在研究授权数据和自有系统上验证，避免把绕过能力用于规避现实安全控制。
+
+## 5. 数据投毒与后门
+
+投毒威胁模型包括投毒者可控制的样本比例、标签权限、训练流程和触发器可见性。BadNets 类攻击在部分训练样本加入 trigger 并改为目标标签；防御评估必须同时测：
+
+- clean accuracy：无触发正常样本的准确率。
+- attack success rate：带触发样本被映射到目标类的比例。
+- poison rate：投毒样本比例及其选择方式。
+- trigger 泛化：不同背景、位置、变换和未见样本上的结果。
+
+不要将少量随机触发样本的结果外推到所有数据；标签噪声、类别不平衡和增强策略会混淆结果。投毒实验仅限自有/授权数据集，并保持干净基线与可复现实验种子。
+
+## 6. 后门检测与证据强度
+
+### Neural Cleanse 类触发反演
+
+对每个目标类优化 mask 与 pattern，寻找能将多张干净输入推到该类的最小触发；若某类的触发面积显著小于其他类，视作异常候选。比较中位数与 MAD 可做稳健异常分数，但结果受输入分布、正则权重、优化轮数和初始化影响；必须用多次初始化及独立验证集复核。
+
+### Activation Clustering
+
+按真实标签收集倒数第二层激活，降维后查看是否出现小型分离簇。簇可能来自自然子类、采集域或类别不平衡；应回看原样本、触发一致性和多个层/降维设置。聚类只是告警信号，不应单独作为后门定论。
+
+### 检测闭环
+
+触发反演提出候选 → 在独立样本验证目标类迁移 → 检查 clean accuracy 变化 → 检查触发是否可解释/稳定 → 记录模型 hash、数据划分、超参数与随机种子。阴性结果也不能证明模型无后门，只能说明在当前搜索空间未发现。
+
+## 7. 评估与实现常见错误
+
+- `model.eval()` 固定 Dropout/BatchNorm 推理行为；梯度攻击仍需允许输入梯度，不要用 `torch.no_grad()` 包住攻击循环。
+- 只清零模型参数梯度不够；建议用 `torch.autograd.grad(loss, x_adv)` 直接取输入梯度。
+- 目标/非目标攻击的符号相反；先用简单模型和单样本检查 loss 变化及预测方向。
+- `torch.clamp` 的上下界必须对应预处理空间；反归一化后再计算像素预算。
+- 对每个对抗样本保存原图、扰动差分、范数、预测 logits/label 和序列化结果，避免只保留最终图片。
+- 报告平均值之外还应给分位数、失败样本和查询预算；成功率不等于鲁棒性结论。
+
+## 8. 纪律
+
+先明确权限与威胁模型，再选攻击或检测方法；先跑干净基线，再测攻击并检查实际提交路径。将模型误判、输入功能改变和接口绕过区分开。安全评估只针对明确授权的模型、数据和服务，结论应包括适用边界与失败条件。

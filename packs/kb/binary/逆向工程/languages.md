@@ -1,265 +1,196 @@
-# CTF Reverse - Language-Specific Techniques
+---
 
-## Table of Contents
-- [Python Bytecode Reversing (dis.dis output)](#python-bytecode-reversing-disdis-output)
-  - [Common Pattern: XOR Validation with Split Indices](#common-pattern-xor-validation-with-split-indices)
-  - [Bytecode Analysis Tips](#bytecode-analysis-tips)
-- [Python Opcode Remapping](#python-opcode-remapping)
-  - [Identification](#identification)
-  - [Recovery](#recovery)
-- [Pyarmor 8/9 Static Unpack (1shot)](#pyarmor-89-static-unpack-1shot)
-- [DOS Stub Analysis](#dos-stub-analysis)
-- [Unity IL2CPP Games](#unity-il2cpp-games)
-- [HarmonyOS HAP/ABC Reverse (abc-decompiler)](#harmonyos-hapabc-reverse-abc-decompiler)
-- [Brainfuck/Esolangs](#brainfuckesolangs)
-  - [Brainfuck Character-by-Character Static Analysis (BSidesSF 2026)](#brainfuck-character-by-character-static-analysis-bsidessf-2026)
-  - [Brainfuck Side-Channel via Read Count Oracle (BSidesSF 2026)](#brainfuck-side-channel-via-read-count-oracle-bsidessf-2026)
-  - [Brainfuck Comparison Idiom Detection (BSidesSF 2026)](#brainfuck-comparison-idiom-detection-bsidessf-2026)
-- [UEFI Binary Analysis](#uefi-binary-analysis)
-- [Transpilation to C](#transpilation-to-c)
-- [Code Coverage Side-Channel Attack](#code-coverage-side-channel-attack)
-- [Functional Language Reversing (OPAL)](#functional-language-reversing-opal)
-- [Python Version-Specific Bytecode (VuwCTF 2025)](#python-version-specific-bytecode-vuwctf-2025)
-- [Non-Bijective Substitution Cipher Reversing](#non-bijective-substitution-cipher-reversing)
-- [FRACTRAN Program Inversion (Boston Key Party 2016)](#fractran-program-inversion-boston-key-party-2016)
-- [GNU Make Turing Machine Simulator (Hack.lu 2018)](#gnu-make-turing-machine-simulator-hacklu-2018)
+phase: binary
+vuln_class: [reverse, bytecode, esolang, side-channel, vm]
+title: 语言与运行时逆向
+summary: 语言题的判据是「先认出这是什么运行时」，再决定是反编译、模拟还是当侧信道打。字节码、esolang、函数式语言各有专用入口，硬读指令一定绕远路。
+---
 
-For platform/framework-specific techniques (Android, Roblox, Godot, Electron, Node.js, Verilog, Ruby/Perl polyglot, etc.), see [[binary/逆向工程/languages-platforms.md|languages-platforms.md]].
-For Go and Rust binary reversing, see [[binary/逆向工程/languages-compiled.md|languages-compiled.md]].
+# 语言与运行时逆向
+
+平台/框架专项（Android、Roblox、Godot、Electron、Node.js、Verilog、Ruby/Perl polyglot）见 [[binary/逆向工程/languages-platforms.md|平台语言]]；Go 与 Rust 见 [[binary/逆向工程/languages-compiled.md|编译型语言]]；静态工具链细节见 [[binary/逆向工程/tools.md|静态工具]]。
+
+## 0. 判据速查
+
+| 看到什么 | 第一动作 | 去哪节 |
+|---|---|---|
+| `.pyc` / `dis.dis` 输出 | 跳过头部 `marshal.load` 再反汇编 | §1 |
+| 反编译器报 opcode 错误 | 操作码被重映射 | §2 |
+| 题目指定 Python 版本（含 alpha） | 必须编译那个版本才能反汇编 | §3 |
+| 有 `pyarmor_runtime` | 1shot 静态脱壳 | §4 |
+| PE 的 DOS stub 异常大 | stub 里藏着 16 位程序 | §5 |
+| `libil2cpp.so` + `global-metadata.dat` | Il2CppDumper；失败说明元数据加密 | §6 |
+| `.hap` / `.abc` | abc-decompiler CLI 模式 | §7 |
+| 源码全是 `+-<>[],.` | Brainfuck，三种打法 | §8 |
+| 固件里有 `PE32+` | UEFI DXE 驱动 | §9 |
+| 混淆 VM 的字节码 | 转译成 C 让 `-O3` 折叠 | §10 |
+| 给了代码覆盖率 JSON | 覆盖率就是侧信道 | §11 |
+| `.impl` / `.sign` / `IF..FI` | OPAL 纯函数式 | §12 |
+| S-box 有碰撞 | 非双射替换，需消歧 | §13 |
+| 题目提分数、质因数分解 | FRACTRAN | §14 |
+| 只有 `Makefile` | 图灵完备，抽转移表 | §15 |
 
 ---
 
-## Python Bytecode Reversing (dis.dis output)
+## 1. Python 字节码
 
-### Common Pattern: XOR Validation with Split Indices
+### 最常见形态：分索引 XOR 校验
 
-Challenge gives raw CPython bytecode (dis.dis disassembly). Common pattern:
-1. Check flag length
-2. XOR chars at even indices with key1, compare to list p1
-3. XOR chars at odd indices with key2, compare to list p2
+1. 检查 flag 长度
+2. 偶数位与 `key1` 异或，比对 `p1`
+3. 奇数位与 `key2` 异或，比对 `p2`
 
-**Reversing:**
 ```python
-# Given: p1, p2 (expected values), key1, key2 (XOR keys)
 flag = [''] * flag_length
 for i in range(len(p1)):
-    flag[2*i] = chr(p1[i] ^ key1)      # Even indices
-    flag[2*i+1] = chr(p2[i] ^ key2)    # Odd indices
+    flag[2*i]   = chr(p1[i] ^ key1)      # 偶数位
+    flag[2*i+1] = chr(p2[i] ^ key2)      # 奇数位
 print(''.join(flag))
 ```
 
-### Bytecode Analysis Tips
-- `LOAD_CONST` followed by `COMPARE_OP` reveals expected values
-- `BINARY_XOR` identifies the transformation
-- `BUILD_TUPLE`/`BUILD_LIST` with constants = expected output array
-- Loop structure: `FOR_ITER` + `BINARY_SUBSCR` = iterating over flag chars
-- `CALL_FUNCTION` on `ord` = character-to-int conversion
+### 指令级判据
 
-**Key insight:** Python bytecode challenges give you the algorithm in explicit stack operations. Focus on `LOAD_CONST` values (expected outputs), `BINARY_XOR`/`BINARY_ADD` (the transform), and `BUILD_TUPLE` (the target array) to reconstruct the validation logic without running the bytecode.
+| 指令 | 含义 |
+|---|---|
+| `LOAD_CONST` + `COMPARE_OP` | 期望值直接可见 |
+| `BINARY_XOR` / `BINARY_ADD` | 变换类型 |
+| `BUILD_TUPLE` / `BUILD_LIST` + 常量 | 目标数组 |
+| `FOR_ITER` + `BINARY_SUBSCR` | 遍历 flag 字符 |
+| `ord` 上的 `CALL_FUNCTION` | 字符转整数 |
 
----
-
-## Python Opcode Remapping
-
-### Identification
-Decompiler fails with opcode errors.
-
-### Recovery
-1. Find modified `opcode.pyc` in PyInstaller bundle
-2. Compare with original Python opcodes
-3. Build mapping: `{new_opcode: original_opcode}`
-4. Patch target .pyc
-5. Decompile normally
-
-**Shortcut (Hack.lu CTF 2013):** If the challenge bundles its own modified Python interpreter (e.g., a custom `./py` binary), install `uncompyle2`/`uncompyle6` into that interpreter's environment and decompile using the challenge's own runtime. The modified interpreter understands its own opcode mapping, so standard decompilation tools work without manual opcode recovery.
-
-**Tool selection by Python version:** `uncompyle6` supports Python 2.x–3.8. For Python 3.9+ bytecode, use [`pycdc`](https://github.com/zrax/pycdc) (compile from source: `git clone && cmake . && make`).
-
-**Key insight:** Opcode remapping breaks all standard decompilers. The fastest fix is to find the modified `opcode.pyc` in the PyInstaller bundle, diff it against the stock Python opcodes, and patch the target `.pyc` back to standard opcodes before decompiling.
+**关键**：Python 字节码把算法摊成显式栈操作，不需要跑起来。盯住 `LOAD_CONST`（期望输出）、`BINARY_XOR`（变换）、`BUILD_TUPLE`（目标数组）三样就够还原。
 
 ---
 
-## Pyarmor 8/9 Static Unpack (1shot)
+## 2. 操作码重映射
 
-- Tool: `Lil-House/Pyarmor-Static-Unpack-1shot`
-- Use for Pyarmor 8.x/9.x armored scripts without executing sample code
-- Quick signature check: payload typically starts with `PY` + six digits (Pyarmor 7 and earlier `PYARMOR` format is not supported)
+**判据**：反编译器报 opcode 错误（不是语法错误）。
 
-Workflow:
-1. Ensure target directory contains armored scripts and matching `pyarmor_runtime` library.
-2. Run one-shot unpack to emit `.1shot.` outputs (disassembly + experimental decompile).
-3. Treat disassembly as ground truth; verify decompiled source with bytecode when inconsistent.
+1. 在 PyInstaller 包里找被改过的 `opcode.pyc`
+2. 与标准 Python 操作码表对比
+3. 建映射 `{新操作码: 原操作码}`
+4. 打回目标 `.pyc`
+5. 正常反编译
+
+**捷径**：如果题目自带改过的解释器（如 `./py`），把 `uncompyle2`/`uncompyle6` 装进**那个解释器的环境**，用它自己反编译——改过的解释器懂自己的映射，不需要手工还原。
+
+**工具按版本选**：`uncompyle6` 支持 Python 2.x–3.8；3.9+ 用 `pycdc`（`git clone && cmake . && make`）。
+
+---
+
+## 3. 版本特定字节码
+
+**判据**：题目指定某个 Python 版本（含 alpha/beta）。alpha 版的操作码与稳定版不同，必须编译那个确切版本才能反汇编。
 
 ```bash
-python /path/to/oneshot/shot.py /path/to/scripts
+wget https://www.python.org/ftp/python/3.14.0/Python-3.14.0a4.tar.xz
+tar xf Python-3.14.0a4.tar.xz
+cd Python-3.14.0a4 && ./configure && make -j$(nproc)
+./python -c "import dis, marshal; dis.dis(marshal.loads(open('challenge.pyc','rb').read()[16:]))"
 ```
 
-Optional flags:
-```bash
-# Specify runtime explicitly
-python /path/to/oneshot/shot.py /path/to/scripts -r /path/to/pyarmor_runtime.so
-
-# Write outputs to another directory
-python /path/to/oneshot/shot.py /path/to/scripts -o /path/to/output
-```
-
-Notes:
-- `oneshot/pyarmor-1shot` executable must exist before running `shot.py`.
-- PyInstaller bundles or archives should be unpacked first, then processed with 1shot.
-
-**Key insight:** Pyarmor 8/9 wraps scripts with runtime decryption. The 1shot tool statically unpacks without execution by directly processing the armored bytecode and `pyarmor_runtime` library. Treat the disassembly output as ground truth when the experimental decompiled source looks inconsistent.
+**常见校验**：flag 与「ASCII 平方值元组」比对 → `flag[i] = chr(isqrt(expected[i]))`。
 
 ---
 
-## DOS Stub Analysis
+## 4. Pyarmor
 
-PE files can hide code in DOS stub:
-1. Check for large DOS stub in Ghidra/IDA
-2. Run in DOSBox
-3. Load in IDA as 16-bit DOS
-4. Look for `int 16h` (keyboard input)
+判据：目录里有 `pyarmor_runtime`，脚本头部是 `PY` + 六位数字（8.x/9.x）；`PYARMOR` 头是 7 及更早，**不在 1shot 支持范围**。
 
-**Key insight:** PE files can embed a fully functional 16-bit DOS program in the DOS stub (before the PE header). If the stub is unusually large, load it in IDA as 16-bit DOS or run it in DOSBox -- the challenge logic may live entirely in the stub.
+工具与完整参数见 [[binary/逆向工程/tools.md|静态工具]] §5。
+
+**唯一要记的**：反汇编是准的，反编译源码是实验性的——两者冲突时以反汇编为准。
 
 ---
 
-## Unity IL2CPP Games
+## 5. DOS stub
 
-- Use Il2CppDumper to dump symbols
-- If Il2CppDumper fails, consider that `global-metadata.dat` may be encrypted; search strings/xrefs in the main binary and inspect the metadata loading path for custom decryption before dump.
-- Look for `Start()` functions
-- Key derivation: `key = SHA256(companyName + "\n" + productName)`
-- Decrypt server responses with derived key
+PE 可以在 DOS stub（PE 头之前）里藏一个完整可用的 16 位 DOS 程序。
 
-Please note most of that the executable file for the PC platform is GameAssembly.dll or *Assembly.dll, for the Android is libil2cpp.so.
+1. Ghidra/IDA 里看 DOS stub 是否异常大
+2. 用 IDA 按 **16 位 DOS** 载入
+3. 或在 DOSBox 里直接跑
+4. 找 `int 16h`（键盘输入）
 
-**Key insight:** IL2CPP compiles C# to native code, but Il2CppDumper recovers method names and offsets. If the dumper fails, the `global-metadata.dat` is likely encrypted -- trace the metadata loading path in the native binary to find the custom decryption before dumping.
+**判据**：stub 体积远超常规（正常只有几十字节的 `This program cannot be run in DOS mode`），题目逻辑可能完全在 stub 里。
 
 ---
 
-## HarmonyOS HAP/ABC Reverse (abc-decompiler)
+## 6. Unity IL2CPP
 
-- Target files: `.hap` package and embedded `.abc` bytecode
-- Tool: `https://github.com/ohos-decompiler/abc-decompiler`
-- Download `jadx-dev-all.jar` from releases
+- 用 Il2CppDumper 导出符号
+- **Dumper 失败 → `global-metadata.dat` 被加密**：在主二进制里搜 metadata 加载路径，找到自定义解密后再 dump
+- 找 `Start()` 函数
+- 密钥派生常见形态：`key = SHA256(companyName + "\n" + productName)`，用它解服务端响应
 
-Critical startup note:
-- `java -jar` may enter GUI mode
-- For CLI mode, always use:
+**文件位置**：PC 平台是 `GameAssembly.dll` 或 `*Assembly.dll`，Android 是 `libil2cpp.so`。
 
-```bash
-java -cp "./jadx-dev-all.jar" jadx.cli.JadxCLI [options] <input>
-```
+平台侧（资源提取、Mono 反编译、运行时补丁）见 [[binary/逆向工程/platforms.md|平台专项]]。
 
-Most common commands:
-```bash
-# Basic decompile to directory
-java -cp "./jadx-dev-all.jar" jadx.cli.JadxCLI -d "out" ".abc"
+---
 
-# Decompile .abc (recommended for this scenario)
-java -cp "./jadx-dev-all.jar" jadx.cli.JadxCLI -m simple -d "out_hap" "modules.abc"
-```
+## 7. HarmonyOS HAP / ABC
 
-Recommended parameters for this challenge:
-- `-m simple`: reduce high-level reconstruction to avoid SSA/PHI-heavy failures
-- `--log-level ERROR`: keep only critical errors
-- Full recommended command:
+`.hap` 是 zip，先解出 `.abc`，再用 abc-decompiler。
+
+**启动方式必须是 CLI 入口**（`java -jar` 会起 GUI）：
 
 ```bash
 java -cp "./jadx-dev-all.jar" jadx.cli.JadxCLI -m simple --log-level ERROR -d "out_abc_simple" "modules.abc"
 ```
 
-Parameter quick reference:
-- `-d` output directory
-- `--help` help
-
-Notes:
-- `.hap` is a package: extract it first (zip), then locate and analyze `.abc`
-- Quote paths containing spaces or non-ASCII characters
-- Use a new output directory name per run to avoid stale results
-- Errors do not always mean full failure; prioritize `out_xxx/sources/`
-- If `auto` fails, switch to `-m simple` first
-
-Standard workflow:
-1. Run with `-m simple --log-level ERROR`
-2. Inspect key business files in output (for example `pages/Index.java`)
-3. If cleaner output is needed, retry with `-m auto` or `-m restructure`
-4. If some methods still fail, keep the `simple` output and continue logic analysis via alternate paths
-
-**Key insight:** HarmonyOS `.hap` packages are ZIP archives containing `.abc` bytecode. Use the abc-decompiler's CLI mode (`jadx.cli.JadxCLI`) with `-m simple` for the most reliable decompilation -- GUI mode may launch instead of processing files.
+完整参数与排错顺序见 [[binary/逆向工程/tools.md|静态工具]] §7。
 
 ---
 
-## Brainfuck/Esolangs
+## 8. Brainfuck / Esolang
 
-- Check if compiled with known tools (BF-it)
-- Understand tape/memory model
-- Static analysis of cell operations
+先确认是否用已知工具（BF-it）编译，再理解纸带模型。
 
-### Brainfuck Character-by-Character Static Analysis (BSidesSF 2026)
+### 逐字符静态分析
 
-**Pattern (i-love-my-bf-part1):** BF programs that validate input character-by-character follow a recognizable pattern: `,` (read char) followed by a sequence of `+` operations whose count equals the expected ASCII value of that character.
+**判据**：` ,` 后面跟着一长串 `+`，其个数就是该字符的期望 ASCII 值。
 
-**Extraction technique:**
 ```python
-import re
-
-bf_code = open('challenge.bf', 'r').read()
-
-# Split on comma (input read) — each segment handles one character
-segments = bf_code.split(',')
+bf_code = open('challenge.bf').read()
+segments = bf_code.split(',')        # 逗号 = 读入一个字符
 expected = []
 
-for seg in segments[1:]:  # Skip preamble before first comma
-    # Count consecutive '+' operations before any branch/output
+for seg in segments[1:]:             # 跳过第一个逗号前的引导段
     plus_count = 0
     for ch in seg:
         if ch == '+':
             plus_count += 1
         elif ch in '-.[]><':
-            break  # Stop at first non-increment operation
+            break                # 遇到第一个非自增操作就停
     if plus_count > 0:
         expected.append(chr(plus_count % 256))
 
-flag = ''.join(expected)
-print(f"Flag: {flag}")
+print(''.join(expected))
 ```
 
-**Variations:**
-- `-` operations: character value = `256 - minus_count`
-- Mixed `+`/`-`: net increment determines value
-- Cell reset (`[-]`) between characters: each segment is independent
-- Loop-based multiplication: `[->>+++<<]` multiplies by 3 — count the inner operations
+**变体**：
+- 用 `-`：值 = `256 - minus_count`
+- `+`/`-` 混用：看净增量
+- 字符之间有 `[-]`（清空）：每段独立
+- 循环乘法 `[->>+++<<]`：数内层操作次数
 
-**Detection:** Large BF file with repeating pattern of `,` followed by many `+` or `-` characters, then a comparison structure (`[-]` or `[->+<]` patterns).
+### 读入计数侧信道
 
-**Key insight:** BF programs that check input are structurally simple — each input byte is compared against a constant built by incrementing a cell. Extract the increment counts to recover the expected input without running the program.
-
-**References:** BSidesSF 2026 "i-love-my-bf-part1"
-
-### Brainfuck Side-Channel via Read Count Oracle (BSidesSF 2026)
-
-**Pattern (i-love-my-bf-part2):** When a BF program validates input character-by-character, a correct character causes the program to consume MORE input bytes (advancing to check the next position). By counting how many `,` (read) operations execute for each candidate input, the character that triggers the most reads is correct.
+**判据**：逐字符校验的 BF 程序，字符正确才会继续读下一个。数 `,` 执行了多少次，读得最多的候选就是对的。
 
 ```python
-import itertools
-
-def bytes_read_running_bf(bf_code, input_iter, braces):
-    """Run BF and count how many input bytes were consumed."""
+def bytes_read(bf_code, input_iter, braces):
     tape = [0] * 30000
     ptr = ip = reads = 0
-    input_list = list(input_iter)
-    input_idx = 0
+    input_list = list(input_iter); input_idx = 0
     while ip < len(bf_code):
         c = bf_code[ip]
         if c == ',':
             if input_idx < len(input_list):
-                tape[ptr] = input_list[input_idx]
-                input_idx += 1
-                reads += 1
+                tape[ptr] = input_list[input_idx]; input_idx += 1; reads += 1
             else:
                 return reads
-        elif c == '.': pass
         elif c == '+': tape[ptr] = (tape[ptr] + 1) % 256
         elif c == '-': tape[ptr] = (tape[ptr] - 1) % 256
         elif c == '>': ptr += 1
@@ -269,85 +200,46 @@ def bytes_read_running_bf(bf_code, input_iter, braces):
         ip += 1
     return reads
 
-# Recover flag character by character
 PRINTABLE = list(range(32, 127))
 flag = []
-for pos in range(50):  # max flag length
-    best_byte = None
-    max_reads = 0
-    baseline = bytes_read_running_bf(bf, flag + [PRINTABLE[0]], braces)
+for _ in range(50):
+    baseline = bytes_read(bf, flag + [PRINTABLE[0]], braces)
+    found = None
     for b in PRINTABLE[1:]:
-        reads = bytes_read_running_bf(bf, flag + [b], braces)
-        if reads > baseline:
-            best_byte = b
-            break
-    if best_byte is None:
-        break
-    flag.append(best_byte)
-print(bytes(flag).decode())
+        if bytes_read(bf, flag + [b], braces) > baseline:
+            found = b; break
+    if found is None: break
+    flag.append(found)
 ```
 
-**Key insight:** BF input validation programs are sequential — they read one character, check it, and only read the next if it matches. The character causing more reads is correct because the program advances past the validation gate to check the next position.
+### 比较惯用法检测
 
-**References:** BSidesSF 2026 "i-love-my-bf-part2"
+**判据**：由高级语言编译出来的 BF 会复用固定惯用法。等值比较是 `<[-<->] +<[>-<[-]]>[-<+>]`，在解释器里检测这个模式就能直接从纸带上读到两个操作数（一个是输入字节，一个是期望字节）。
 
-### Brainfuck Comparison Idiom Detection (BSidesSF 2026)
-
-**Pattern (i-love-my-bf-part3):** BF programs compiled from higher-level languages use recognizable comparison idioms. The equality check `<[-<->] +<[>-<[-]]>[-<+>]` compares two adjacent cells. By instrumenting a BF interpreter to detect this pattern during execution, you can extract the comparison operands (expected flag bytes) directly from the tape.
-
-```python
-EQ_PATTERN = "<[-<->] +<[>-<[-]]>[-<+>]"
-
-def instrumented_bf_run(bf_code, dummy_input):
-    """Run BF, detect equality comparisons, extract operands."""
-    tape = [0] * 30000
-    ptr = ip = 0
-    comparisons = []
-
-    while ip < len(bf_code):
-        # Check if current position starts the eq pattern
-        if bf_code[ip:ip+len(EQ_PATTERN)] == EQ_PATTERN:
-            # The two cells being compared are at ptr-2 and ptr-1
-            lhs = tape[ptr - 2]  # User input byte
-            rhs = tape[ptr - 1]  # Expected byte
-            comparisons.append((chr(lhs), chr(rhs)))
-        # ... normal BF execution ...
-        ip += 1
-
-    return comparisons
-
-# Expected bytes from comparisons reveal the flag
-```
-
-**Key insight:** Compiled BF programs reuse fixed idioms for operations like equality comparison, conditional branching, and loops. Pattern-matching these idioms in the BF source or during execution lets you extract constants without fully understanding the program logic.
-
-**Common BF idioms:**
-- `[-]` — clear cell (set to 0)
-- `[->+<]` — move cell right
-- `<[-<->] +<[>-<[-]]>[-<+>]` — equality comparison of two cells
-
-**References:** BSidesSF 2026 "i-love-my-bf-part3"
+**三个必记惯用法**：
+- `[-]` — 清空单元格
+- `[->+<]` — 把值右移一格
+- `<[-<->] +<[>-<[-]]>[-<+>]` — 两格等值比较
 
 ---
 
-## UEFI Binary Analysis
+## 9. UEFI
 
 ```bash
 7z x firmware.bin -oextracted/
 file extracted/* | grep "PE32+"
 ```
 
-- Bootkit replaces boot loader
-- Custom VM protects decryption
-- Lift VM bytecode to C
+UEFI 二进制就是 PE32+，按普通 PE 载入 Ghidra/IDA。
 
-**Key insight:** UEFI binaries are PE32+ executables. Extract the firmware with `7z`, identify PE files with `file`, and load them in Ghidra/IDA. Bootkits replace the boot loader, so focus on DXE drivers and boot services protocols for the challenge logic.
+**判据**：Bootkit 会替换 boot loader，所以逻辑在 **DXE 驱动**与 boot services protocol 里，不在 setup 阶段。若见到自定义 VM，把 VM 字节码 lift 成 C。
 
 ---
 
-## Transpilation to C
+## 10. 转译成 C
 
-For heavily obfuscated code:
+重度混淆的 VM 字节码，直接逐指令翻译成 C，交给编译器优化：
+
 ```python
 for opcode, args in instructions:
     if opcode == 'XOR':
@@ -356,198 +248,162 @@ for opcode, args in instructions:
         print(f"r{args[0]} += r{args[1]};")
 ```
 
-Compile with `-O3` for constant folding.
+`gcc -O3` 会做常量折叠与死代码消除，把算法自动简化掉。
 
-**Key insight:** Transpiling obfuscated VM bytecode to C and compiling with `-O3` lets the compiler's constant folding and dead code elimination simplify the algorithm automatically. This is faster than manual deobfuscation for complex instruction sets.
+**判据**：手写去混淆比让编译器干慢得多。只要指令集能一对一映射到 C 语句，就该走这条路。
 
 ---
 
-## Code Coverage Side-Channel Attack
+## 11. 代码覆盖率侧信道
 
-**Pattern (Coverup, Nullcon 2026):** PHP challenge provides XDebug code coverage data alongside encrypted output.
+**判据**：题目给了 XDebug 的覆盖率 JSON 和加密输出。
 
-**How it works:**
-- PHP code uses `xdebug_start_code_coverage(XDEBUG_CC_UNUSED | XDEBUG_CC_DEAD_CODE | XDEBUG_CC_BRANCH_CHECK)`
-- Encryption uses data-dependent branches: `if ($xored == chr(0)) ... if ($xored == chr(1)) ...`
-- Coverage JSON reveals which branches were executed during encryption
-- This leaks the set of XOR intermediate values that occurred
+PHP 侧：
+- `xdebug_start_code_coverage(XDEBUG_CC_UNUSED | XDEBUG_CC_DEAD_CODE | XDEBUG_CC_BRANCH_CHECK)`
+- 加密用数据相关分支：`if ($xored == chr(0)) ... if ($xored == chr(1)) ...`
+- 覆盖率 JSON 暴露加密时走了哪些分支
+- 这就泄漏了出现过的所有 XOR 中间值
 
-**Exploitation:**
 ```python
 import json
 
-# Load coverage data
 with open('coverage.json') as f:
     cov = json.load(f)
 
-# Extract executed XOR values from branch coverage
 executed_xored = set()
-for line_no, hit_count in cov['encrypt.php']['lines'].items():
-    if hit_count > 0:
-        # Map line numbers to the chr(N) value in the if-statement
-        executed_xored.add(extract_value_from_line(line_no))
+for line_no, hit in cov['encrypt.php']['lines'].items():
+    if hit > 0:
+        executed_xored.add(extract_value_from_line(line_no))   # 行号 → chr(N)
 
-# For each position, filter candidates
 for pos in range(len(ciphertext)):
-    candidates = []
-    for key_byte in range(256):
-        xored = plaintext_byte ^ key_byte  # or reverse S-box lookup
-        if xored in executed_xored:
-            candidates.append(key_byte)
-    # Combined with known plaintext prefix, this uniquely determines key
+    candidates = [kb for kb in range(256)
+                  if (plaintext_byte ^ kb) in executed_xored]
+    # 配合已知明文前缀（flag{）即可唯一定 key
 ```
 
-**Key insight:** Code coverage is a powerful oracle — it tells you which conditional paths were taken. Any encryption with data-dependent branching leaks information through coverage.
-
-**Mitigation detection:** Look for branchless/constant-time crypto implementations that defeat this attack.
+**关键**：任何带数据相关分支的加密都会通过覆盖率泄漏信息。反向判据——见到无分支/常数时间实现，说明作者已经防了这一手。
 
 ---
 
-## Functional Language Reversing (OPAL)
+## 12. 函数式语言（OPAL）
 
-**Pattern (Opalist, Nullcon 2026):** Binary compiled from OPAL (Optimized Applicative Language), a purely functional language.
+**识别标记**：
+- `.impl`（实现）与 `.sign`（签名）源文件
+- `IMPLEMENTATION` / `SIGNATURE` 关键字
+- 嵌套 `IF..THEN..ELSE..FI`
+- 函数名是 `f1`、`f2` … `fN`
+- 大量 `seq[nat]`、`string`、`denotation` 类型
 
-**Recognition markers:**
-- `.impl` (implementation) and `.sign` (signature) source files
-- `IMPLEMENTATION` / `SIGNATURE` keywords
-- Nested `IF..THEN..ELSE..FI` structures
-- Functions named `f1`, `f2`, ... `fN` (numeric naming)
-- Heavy use of `seq[nat]`, `string`, `denotation` types
+**打法**：
+1. 纯函数数学上可逆，逐步反演
+2. 认出变换链 `f_final(f_n(...f_2(f_1(input))...))`
+3. 对每个函数构造逆函数
 
-**Reversing approach:**
-1. Pure functions are mathematically invertible — reverse each step in the pipeline
-2. Identify the transformation chain: `f_final(f_n(...f_2(f_1(input))...))`
-3. For each function, build the inverse
+### 打乱函数的聚合爆破
 
-**Aggregate brute-force for scramble functions:**
-When a transformation accumulates state that depends on original (unknown) values:
+**判据**：变换累积了依赖「原始未知值」的状态（鸡生蛋问题）。
+
 ```python
-# Example: f8 adds cumulative offset based on parity of original bytes
-# offset contribution per element depends on whether pre-scramble value is even/odd
-# Total offset S = sum of contributions, but S mod 256 has only 256 possibilities
-
 decoded = base64_decode(target)
-for total_offset_S in range(256):
-    candidate = [(b - total_offset_S) % 256 for b in decoded]
-    # Verify: recompute S from candidate values
-    recomputed_S = sum(contribution(i, candidate[i]) for i in range(len(candidate))) % 256
-    if recomputed_S == total_offset_S:
-        # Apply remaining inverse steps
+for total_S in range(256):                     # 聚合效果只有 256 种，不是指数级
+    candidate = [(b - total_S) % 256 for b in decoded]
+    recomputed = sum(contribution(i, candidate[i]) for i in range(len(candidate))) % 256
+    if recomputed == total_S:
         result = apply_inverse_substitution(candidate)
         if all(32 <= c < 127 for c in result):
             print(bytes(result))
 ```
 
-**Key lesson:** When a scramble function has a chicken-and-egg dependency (result depends on original, which is unknown), brute-force the aggregate effect (often mod 256 = 256 possibilities) rather than all possible states (exponential).
+**关键**：爆破**聚合效果**（常是 mod 256，256 种），而不是所有中间状态（指数级）。
 
 ---
 
-## Python Version-Specific Bytecode (VuwCTF 2025)
+## 13. 非双射替换
 
-**Pattern (A New Machine):** Challenge targets specific Python version (e.g., 3.14.0 alpha).
+**检测**：
 
-**Key requirement:** Compile that exact Python version to disassemble bytecode — alpha/beta versions have different opcodes than stable releases.
-
-```bash
-# Build specific Python version
-wget https://www.python.org/ftp/python/3.14.0/Python-3.14.0a4.tar.xz
-tar xf Python-3.14.0a4.tar.xz
-cd Python-3.14.0a4 && ./configure && make -j$(nproc)
-./python -c "import dis, marshal; dis.dis(marshal.loads(open('challenge.pyc','rb').read()[16:]))"
-```
-
-**Common validation:** Flag compared against tuple of squared ASCII values:
 ```python
-# Reverse: flag[i] = sqrt(expected_tuple[i])
-import math
-flag = ''.join(chr(int(math.isqrt(v))) for v in expected_values)
-```
-
----
-
-## Non-Bijective Substitution Cipher Reversing
-
-**Pattern (Coverup, Nullcon 2026):** S-box/substitution table has collisions (multiple inputs map to same output).
-
-**Detection:**
-```python
-sbox = [...]  # substitution table
 if len(set(sbox)) < len(sbox):
-    print("Non-bijective! Collisions exist.")
+    print("非双射！存在碰撞")
 ```
 
-**Building reverse lookup:**
+**建反向表**：
+
 ```python
 from collections import defaultdict
-rev_sub = defaultdict(list)
+rev = defaultdict(list)
 for i, v in enumerate(sbox):
-    rev_sub[v].append(i)
-# rev_sub[output] = [list of possible inputs]
+    rev[v].append(i)          # rev[输出] = [所有可能输入]
 ```
 
-**Disambiguation strategies:**
-1. Known plaintext format (e.g., `ENO{`, `flag{`) fixes key bytes at known positions
-2. Side-channel data (code coverage, timing) eliminates impossible candidates
-3. Printable ASCII constraint (32-126) reduces candidate space
-4. Re-encrypt candidates and verify against known ciphertext
+**四种消歧手段**（按优先级）：
+1. 已知明文格式（`ENO{`、`flag{`）钉死已知位置的字节
+2. 侧信道数据（覆盖率、时序）排除不可能候选
+3. 可打印 ASCII（32-126）压候选空间
+4. 拿候选重新加密，与已知密文比对
 
 ---
 
-## FRACTRAN Program Inversion (Boston Key Party 2016)
+## 14. FRACTRAN
 
-FRACTRAN: an esoteric language where computation is iterated multiplication by a fraction table. Input is encoded as prime factorization (ASCII values as exponents of sequential primes). To invert: swap each fraction's numerator and denominator, run the "success" output backward through the inverted program.
+计算过程是「反复乘分数表」。输入编码成质因数分解（ASCII 值当连续素数的指数）。
+
+**反演**：把每个分数的分子分母对调，让目标输出倒着跑过反向程序。
 
 ```python
-# Original: for each step, find first fraction where n*frac is integer
 def fractran_step(n, fractions):
     for num, den in fractions:
         if (n * num) % den == 0:
             return (n * num) // den
-    return None  # Halt
+    return None            # 停机
 
-# Inversion: swap num/denom in fraction table
-inverted = [(d, n) for n, d in fraction_table]
-# Run target output through inverted program to recover input
+inverted = [(d, n) for n, d in fraction_table]    # 对调分子分母
+# 用目标输出跑 inverted，得到输入
 ```
 
-**Key insight:** FRACTRAN programs can be inverted by swapping numerators and denominators. The prime factorization encoding is the key to understanding I/O -- factor the result to extract exponents of sequential primes, map to ASCII.
-
-**Detection:** Challenge mentions fractions, prime factorization, or provides a list of rational numbers.
+**判据**：题目提到分数、质因数分解，或直接给一串有理数。
 
 ---
 
-## GNU Make Turing Machine Simulator (Hack.lu 2018)
+## 15. GNU Make 图灵机
 
-**Pattern:** A `Makefile` implements a Turing machine using only Make macros. The tape is a unary number encoded as `+++-` (each `+` is a 1, each `-` is a 0), the state transition table is 14 whitespace-separated words (9 bits each), and recursive `$(eval)` calls drive the state machine until it halts. Reverse-engineer the program by decoding the transition table and matching it against catalogued busy-beaver machines on the [bbchallenge.org](https://bbchallenge.org) database, or by re-implementing the interpreter in Python.
+**判据**：题目只给一个 `Makefile`。
+
+纸带是 unary 编码（`+` 是 1、`-` 是 0），状态转移表是 14 个空白分隔的词（每个 9 bit），递归 `$(eval)` 驱动状态机直到停机。
 
 ```make
-# Example sink — 14 words of 9 bits each form the transition table
 PROGRAM := 0 1A 1R 1 1B 1L 1 1C 1R 0 1D 1L 0 1A 1L 1 1E 1R 1 1A 1L \
            1 1A 1L 0 1E 1R 0 1F 1R 0 1F 1L 1 1E 1L 1 1H 1R 0 1C 1R
 ```
 
 ```python
-# Python decoder for the table
 def decode_transition(word):
-    bits = int(word, 2)
+    bits  = int(word, 2)
     write = bits >> 7 & 1
     move  = "LR"[bits >> 6 & 1]
     state = chr(ord("A") + (bits & 0x3F))
     return write, move, state
 
-# Simulate until HALT
 tape = [0] * 4096
-head = 2048
-state = "A"
+head, state = 2048, "A"
 while state != "H":
     symbol = tape[head]
     idx = (ord(state) - ord("A")) * 2 + symbol
     write, move, state = decode_transition(PROGRAM[idx])
     tape[head] = write
     head += 1 if move == "R" else -1
-print(sum(tape))   # Busy-beaver score → hashed for the flag
+print(sum(tape))       # 忙碌海狸得分 → 再哈希成 flag
 ```
 
-**Key insight:** `Makefile` is Turing-complete via recursive `$(eval)` and string substitution, so any CTF that ships "just a Makefile" can be hiding a full interpreter. The fastest reverse path is to extract the transition table as text, decode each word, and either simulate locally or search public busy-beaver databases — most hand-rolled BB machines match published ones within the first 6 states. Use `make -n` to see expanded commands without executing, and `make -d` to watch the recursive eval graph.
+**关键**：`Makefile` 靠递归 `$(eval)` 与字符串替换达到图灵完备，所以「只给一个 Makefile」的题可能在藏一个完整解释器。最快的路是把转移表当文本抽出来、逐词解码，然后本地模拟或直接查忙碌海狸数据库——手搓的 BB 机器大多在前 6 个状态内能对上公开的。`make -n` 看展开后的命令而不执行，`make -d` 看递归 eval 图。
 
-**References:** Hackover CTF 2018 — Flagmaker, writeup 11503
+---
+
+## 16. 纪律
+
+- **先认运行时再动手**：`.pyc`、`.abc`、`global-metadata.dat`、BF 源码、`Makefile` 是完全不同的五种题，工具选错白耗一轮。
+- **反编译失败先怀疑元数据加密**：IL2CPP 的 dumper 失败、HarmonyOS 的 `auto` 模式失败、Pyarmor 反编译输出乱——都不是「工具不行」，是「输入被加密了」。
+- **esolang 不追逻辑，抽常量**：BF/FRACTRAN/Make 这类题的答案在常量里，不在控制流里。
+- **有侧信道就先打侧信道**：覆盖率、读入计数、时序——比静态还原整个算法快得多。
+- **鸡生蛋问题就爆聚合值**：mod 256 的聚合效果只有 256 种，别去爆中间状态。
+- **报的是运行时不是难度**：OPAL、Moxie、FRACTRAN 看着唬人，其实都是「换入口」。

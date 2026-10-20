@@ -1,59 +1,113 @@
-# CTF Forensics - Advanced Disk and Memory Techniques
-
-## Table of Contents
-- [Deleted Partition Recovery](#deleted-partition-recovery)
-- [ZFS Forensics (Nullcon 2026)](#zfs-forensics-nullcon-2026)
-- [GPT Partition GUID Data Encoding (VuwCTF 2025)](#gpt-partition-guid-data-encoding-vuwctf-2025)
-- [Windows Minidump String Carving (0xFun 2026)](#windows-minidump-string-carving-0xfun-2026)
-- [VMDK Sparse Parsing (0xFun 2026)](#vmdk-sparse-parsing-0xfun-2026)
-- [Memory Dump String Carving (Pragyan 2026)](#memory-dump-string-carving-pragyan-2026)
-- [Memory Dump Malware Extraction + XOR (VuwCTF 2025)](#memory-dump-malware-extraction--xor-vuwctf-2025)
-- [Linux Ransomware Memory-Key Recovery (MetaCTF 2026)](#linux-ransomware-memory-key-recovery-metactf-2026)
-- [WordPerfect Macro XOR Extraction (srdnlenCTF 2026)](#wordperfect-macro-xor-extraction-srdnlenctf-2026)
-- [Minidump ISO 9660 Recovery + XOR Key (srdnlenCTF 2026)](#minidump-iso-9660-recovery--xor-key-srdnlenctf-2026)
-- [APFS Snapshot Historical File Recovery (srdnlenCTF 2026)](#apfs-snapshot-historical-file-recovery-srdnlenctf-2026)
-- [RAID 5 Disk Recovery via XOR (Crypto-Cat)](#raid-5-disk-recovery-via-xor-crypto-cat)
-- [HFS+ Resource Fork Hidden Binary Recovery (CONFidence CTF 2017)](#hfs-resource-fork-hidden-binary-recovery-confidence-ctf-2017)
-- [Kyoto Cabinet Hash Database Forensics via Incremental Key Insertion (ASIS CTF 2018)](#kyoto-cabinet-hash-database-forensics-via-incremental-key-insertion-asis-ctf-2018)
-- [SQLite Edit History Reconstruction from Diff Table (Google CTF 2017)](#sqlite-edit-history-reconstruction-from-diff-table-google-ctf-2017)
-- [See Also](#see-also)
-
+---
+title: 进阶磁盘与内存取证
+phase: forensics
+vuln_class: [forensics, disk, memory, filesystem, raid, snapshot]
+summary: 进阶镜像题的判据是「数据在哪个版本/哪个副本里」——写时复制文件系统查快照，RAID 查奇偶校验，GUID/元数据字段查非常规编码，哈希数据库查哈希槽位而非插入顺序。
 ---
 
-## Deleted Partition Recovery
+# 进阶磁盘与内存取证
 
-**Pattern (Till Delete Do Us Part):** USB image with deleted partition table.
+基础镜像流程（Volatility / Sleuth Kit / OVA / 容器 / 云桶）见 [[forensics/磁盘与内存/disk-and-memory.md|磁盘与内存镜像取证]]；文件系统修复与雕刻见 [[forensics/磁盘与内存/disk-recovery.md|磁盘恢复]]。
 
-**Recovery workflow:**
+## 0. 判据速查
+
+| 观察到的现象 | 结论 | 去哪节 |
+|---|---|---|
+| `fdisk -l` 看不到分区但镜像有数据 | 分区表被删，`testdisk` / `kpartx` | §1 |
+| 镜像里有 `APSB` / 提到 snapshot | 写时复制快照，跨 XID 读同一 inode | §2 |
+| 多个同尺寸磁盘镜像 | RAID，缺的那块用 XOR 补 | §3 |
+| GPT 的 GUID 看着像 ASCII/magic | GUID 是 16 字节任意数据 | §4 |
+| ZFS 四个 label 全 0 | nvlist 在别处，Fletcher4 要重算 | §5 |
+| 有 `.wcm` / Lotus 等旧文档格式 | 宏里嵌加密数组 | §6 |
+| 只给 minidump | `strings -a` 先捞，再做结构化解析 | §7 |
+| VMDK 挂不上 | 稀疏格式，手解 grain 表 | §8 |
+| ZIP 缺中央目录 | 逐个读 local header | §9 |
+| HFS+ 里 carving 一无所获 | Resource Fork 是第二条数据流 | §10 |
+| 未知 `.db`，`strings` 里有 `KCPH` | Kyoto Cabinet，按哈希槽恢复顺序 | §11 |
+| 有 `type/position/text` 三列的表 | 编辑历史 diff，逐条回放 | §12 |
+
+## 1. 分区表被删
+
 ```bash
-# Check for partitions
-fdisk -l image.img              # Shows no partitions
-
-# Recover partition table
-testdisk image.img              # Interactive recovery
-
-# Or use kpartx to map partitions
-kpartx -av image.img            # Maps as /dev/mapper/loop0p1
-
-# Mount recovered partition
+fdisk -l image.img        # 无分区
+testdisk image.img        # 交互式恢复
+kpartx -av image.img      # 映射为 /dev/mapper/loop0p1
 mount /dev/mapper/loop0p1 /mnt/evidence
-
-# Check for hidden directories
-ls -la /mnt/evidence            # Look for .dotfolders
-find /mnt/evidence -name ".*"   # Find hidden files
+find /mnt/evidence -name ".*"
 ```
 
-**Flag hiding:** Path components as flag chars (e.g., `/.Meta/CTF/{f/l/a/g}`)
+**flag 常藏在路径分量里**（`/.Meta/CTF/{f/l/a/g}`）——所以 `find -name ".*"` 之后要**逐层 `ls -la`**，光看文件名不够，目录名本身就是数据。
 
----
+## 2. 写时复制快照
 
-## ZFS Forensics (Nullcon 2026)
+APFS / ZFS / Btrfs 都保留历史状态。**「数据被篡改/投毒」类题的解法几乎一定是去旧快照取原值。**
 
-**Pattern:** Corrupted ZFS pool image with encrypted dataset.
+```python
+import struct
+mm = open("apfs_partition.img", "rb").read()
+snaps, pos = [], 0
+while True:
+    idx = mm.find(b"APSB", pos)
+    if idx < 0:
+        break
+    hdr = idx - 32
+    xid = struct.unpack_from("<Q", mm, hdr + 16)[0]
+    snaps.append((xid, hdr // 4096))
+    pos = idx + 1
+```
 
-**Recovery workflow:**
-1. **Label reconstruction:** All 4 ZFS labels may be zeroed. Find packed nvlist data elsewhere in the image using `strings` + offset searching.
-2. **MOS object repair:** Copy known-good nvlist bytes to block locations, recompute Fletcher4 checksums:
+```bash
+icat -f apfs -P apfs -B <blk> apfs_partition.img 449414
+```
+
+**用同一个 inode 号在不同 `-B <blk>`（对应不同 XID）下读**，比较内容就能定位投毒发生的时点，然后取投毒前的值去解密。
+
+**判据**：题面出现 poisoned / tampered / corrupted / original value，且文件系统是 APFS/ZFS/Btrfs 之一。这三个都是 CoW，旧块在被回收前一直可读。
+
+## 3. RAID 5 缺盘
+
+任一条带内 `Disk1 ⊕ Disk2 ⊕ ... ⊕ DiskN = 0`，所以缺的那块等于其余全部 XOR。
+
+```python
+disk1 = open('disk1.img','rb').read()
+disk3 = open('disk3.img','rb').read()
+open('disk2.img','wb').write(bytes(a ^ b for a, b in zip(disk1, disk3)))
+```
+
+```bash
+mdadm --create /dev/md0 --level=5 --raid-devices=3 disk1.img disk2.img disk3.img
+mount -o loop,ro disk2.img /mnt/recovered
+```
+
+**两个坑**：
+
+- **RAID 5 的校验块位置逐条带轮转**，不是固定在某一块盘上。直接整盘 XOR 只在「校验块位置恰好对齐且条带大小等于整盘」时成立——真实阵列要先按 `chunk size` 分条带再逐条带补。
+- **盘序可能被打乱**，`mdadm --create` 前要确认顺序，错了会得到全乱的文件系统。
+
+## 4. GPT GUID 编码
+
+**GPT 分区 GUID 是 16 字节任意值**，可以塞任何东西。
+
+```python
+import struct
+data = open('image.img','rb').read()
+for i in range(128):
+    entry = data[1024 + i*128 : 1024 + (i+1)*128]   # 分区项从 LBA2 开始，每项 128 字节
+    guid = entry[16:32]
+    if guid != b'\x00'*16:
+        print(f'Partition {i}: {guid.hex()}')
+```
+
+**判据是 GUID 里出现文件 magic**：`BZh11AY&SY` 是 bzip2 头，`PK\x03\x04` 是 ZIP，`\x1f\x8b` 是 gzip。看到就把所有 GUID 按分区顺序拼起来，再按那个格式解。
+
+**题面双关是提示**：「LLMs only」+「undercut」不是 AI 的 GPT，是 GUID Partition Table。
+
+## 5. ZFS
+
+1. **四个 label 可能全被清零**——用 `strings` + 偏移搜索在镜像别处找 nvlist 数据。
+2. **MOS 对象修复**：把已知良好的 nvlist 字节拷回块位置，重算 Fletcher4。
+3. **加密破解**：从 ZAP 对象取 PBKDF2 参数（迭代数、salt），GPU 加速 PBKDF2-HMAC-SHA1，CPU 验 AES-256-GCM unwrap。
+
 ```python
 def fletcher4(data):
     a = b = c = d = 0
@@ -64,434 +118,147 @@ def fletcher4(data):
         d = (d + c) & 0xffffffff
     return (d << 96) | (c << 64) | (b << 32) | a
 ```
-3. **Encryption cracking:** Extract PBKDF2 parameters (iterations, salt) from ZAP objects. GPU-accelerate with PyOpenCL for PBKDF2-HMAC-SHA1, verify AES-256-GCM unwrap on CPU.
-4. **Passphrase list:** rockyou.txt or similar. GPU rate: ~24k passwords/sec.
 
----
+**Fletcher4 是累积和不是 CRC**——每一级都把前一级加上去，所以改一个字节会让后面所有累加器变化。改完必须整块重算，只改校验字段没用。
 
-## GPT Partition GUID Data Encoding (VuwCTF 2025)
+## 6. 旧文档格式里的宏
 
-**Pattern (Undercut):** "LLMs only" + "undercut" → not AI GPT, but GUID Partition Table.
+WordPerfect `.wcm`、Lotus 1-2-3 等可以内嵌可执行宏与加密数组。
 
-**Key insight:** GPT partition GUIDs are 16 arbitrary bytes — can encode anything. Look for file magic headers in GUIDs.
-
-```bash
-# Parse GPT partition table
-gdisk -l image.img
-# Or with Python:
-python3 -c "
-import struct
-data = open('image.img','rb').read()
-# GPT header at LBA 1 (offset 512)
-# Partition entries start at LBA 2 (offset 1024)
-# Each entry is 128 bytes, GUID at offset 16 (16 bytes)
-for i in range(128):
-    entry = data[1024 + i*128 : 1024 + (i+1)*128]
-    guid = entry[16:32]
-    if guid != b'\x00'*16:
-        print(f'Partition {i}: {guid.hex()}')
-"
-```
-
-**First GUID starts with `BZh11AY&SY`** (bzip2 magic) → concatenate GUIDs, decompress as bzip2, then decode ASCII85.
-
----
-
-## Windows Minidump String Carving (0xFun 2026)
-
-**Pattern (kd):** Go binary crash dump. Flag as plaintext string constant in .data section survives in minidump memory.
-
-```bash
-strings -a minidump.dmp | grep -i "flag\|ctf\|0xFUN"
-```
-
-**Lesson:** Minidumps contain full memory regions. String constants, keys, and secrets persist. `strings -a` + `grep` is the fast path.
-
----
-
-## VMDK Sparse Parsing (0xFun 2026)
-
-**Pattern (VMware):** Split sparse VMDK requires grain directory + grain table traversal.
-
-**Key steps:**
-1. Parse VMDK sparse header (grain size, GD offset, GT coverage)
-2. Follow grain directory → grain table → data grains
-3. Calculate absolute disk offsets across split files
-4. Mount extracted filesystem (ext4, NTFS)
-
-**Lesson:** Don't assume VM images can be mounted directly. Parse the VMDK sparse format manually.
-
----
-
-## Memory Dump String Carving (Pragyan 2026)
-
-**Pattern (c47chm31fy0uc4n):** Linux memory dump with flag in environment variables or process data.
-
-```bash
-strings -a -n 6 memdump.bin | grep -E "SYNC|FLAG|SSH_CLIENT|SESSION_KEY"
-# SSH artifacts reveal source IP and ephemeral port
-# Environment variables may contain keys/tokens
-```
-
----
-
-## Memory Dump Malware Extraction + XOR (VuwCTF 2025)
-
-**Pattern (Jellycat):** Extract fake executable from Windows memory dump. Cipher: subtract 0x32, then XOR with cycling key (large multi-line string, e.g., ASCII art).
-
-**Key lesson:** Always extract and reverse the actual binary from memory rather than trusting `strings` output (string tables may be red herrings). XOR keys can be hundreds of bytes (ASCII art, lorem ipsum).
+**注意**：宏里可能写成 `(bb + kb) - 2*(bb & kb)`，这在数学上**等价于 XOR**（`a+b-2*(a&b) == a^b`）。看到这个式子别当成新算法，直接按 XOR 处理。
 
 ```python
-# Extract binary, find XOR key in data section
-key = b"..."  # Large ASCII art string
-cipher = open('extracted.bin', 'rb').read()
+import string
+allowed = set(map(ord, string.ascii_lowercase + string.digits + "_{}"))
+cands = []
+for j in range(4):
+    cands.append([k for k in range(256)
+                  if all((docbody[i] ^ k) in allowed for i in range(j, len(docbody), 4))])
+for k0 in cands[0]:
+  for k1 in cands[1]:
+    for k2 in cands[2]:
+      for k3 in cands[3]:
+        key = [k0,k1,k2,k3]
+        pt = ''.join(chr(c ^ key[i%4]) for i,c in enumerate(docbody))
+        if pt.startswith("srd") and pt.endswith("}"):
+            print(pt)
+```
+
+**每个密钥字节可以独立筛**：位置 `i` 的字节只影响 `i mod 4` 的字符，所以 4×256 就能把候选压到个位数，不用 2^32。
+
+## 7. Minidump
+
+```bash
+strings -a -n 6 minidump.dmp | grep -iE "flag|ctf|SYNC|SSH_CLIENT|SESSION_KEY"
+```
+
+**minidump 含完整内存区域**，字符串常量、密钥、环境变量都在。**先 `strings` 再上工具**——这一步通常就结束了。
+
+**SSH 痕迹**：`SSH_CLIENT` 给出源 IP 与临时端口，`SSH_CONNECTION` 给出四元组。这类环境变量只在会话进程的内存里，磁盘上没有。
+
+## 8. VMDK 稀疏格式
+
+挂不上时手解：读稀疏头（grain size、GD 偏移、GT 覆盖范围）→ 沿 grain directory → grain table → data grain → 算出跨分割文件的绝对偏移 → 再按文件系统挂。
+
+**判据**：`file` 说是 VMware 但 `mount` 失败，且镜像是 `-s001.vmdk` 这种分片命名。**先试 `7z`**（能直接读多数 VMDK），不行再手解。
+
+## 9. 从内存里抽出的二进制 / 无中央目录的 ZIP
+
+**内存里的可执行文件要抽出来真跑真逆，不要信 `strings`**——字符串表可能是诱饵。
+
+```python
+key = b"..."   # 可以是几百字节的 ASCII art
+cipher = open('extracted.bin','rb').read()
 plaintext = bytes((b - 0x32) ^ key[i % len(key)] for i, b in enumerate(cipher))
 ```
 
----
+**密钥长度没有上限**：ASCII art、lorem ipsum、整段源码都能当循环密钥。别假设密钥短。
 
-## Linux Ransomware Memory-Key Recovery (MetaCTF 2026)
+ZIP 中央目录损坏时逐个读 local header：
 
-**Pattern:** Linux memory dump + encrypted `.veg` files + `enc_key.bin`; ransomware uses hybrid crypto (AES for files, RSA-wrapped key). Volatility may fail process enumeration due symbol/KASLR (Kernel Address Space Layout Randomization) mismatch.
-
-**Fast workflow:**
-1. **Confirm archive integrity before analysis.**
-```bash
-unzip -l encrypted_files.zip
-# Compare listed files/sizes vs extracted tree; re-extract cleanly if mismatch
-unzip -o encrypted_files.zip -d encrypted_full
-```
-
-2. **Reverse ransomware binary quickly to identify mode/layout.**
-```bash
-strings -a ransomware.elf | grep -E "enc_key|EVP_aes|PUBLIC KEY|.veg"
-objdump -d ransomware.elf | less
-```
-- Typical finding: `AES-256-OFB`, IV prepended to each `.veg`, global 32-byte AES key, RSA public key hardcoded.
-
-3. **Try Volatility normally, then pivot immediately if empty/unstable.**
-```bash
-vol -f memdump.raw linux.pslist
-vol -f memdump.raw linux.proc.Maps
-vol -f memdump.raw linux.vmayarascan
-```
-- If Linux plugins return empty/invalid output despite correct banner/symbols, do **raw-memory candidate scanning**.
-
-4. **Recover AES key via anchored candidate scan + magic validation.**
-- Use recurring anchor strings in memory (e.g., `/home/.../enc_key.bin`, HOME path).
-- Derive candidate offsets near anchors (page-aligned windows).
-- Test each 32-byte candidate by decrypting first blocks of multiple `.veg` files and checking magic bytes (`%PDF-`, `PK\x03\x04`, `\x89PNG\r\n\x1a\n`).
-- Keep candidates that satisfy multiple independent signatures.
-
-5. **Decrypt full dataset and verify output completeness.**
-```bash
-# OFB: iv = first 16 bytes, ciphertext starts at +16
-# Decrypt all *.veg recursively from a clean extraction directory
-```
-- Validate recovered file count against zip listing.
-- Watch for duplicated mirror trees (e.g., `snap/*/Downloads/...`) and deduplicate logically.
-
-6. **Defend against false flags.**
-- Treat metadata-only flags as suspicious until corroborated by challenge context.
-- Prefer tokens from primary project artifacts and perform uniqueness checks:
-```bash
-rg -n -a '[A-Za-z]+CTF\\{[^}]+\\}' recovered_full
-pdftotext recovered_full/**/*.pdf - 2>/dev/null | rg '[A-Za-z]+CTF\\{'
-```
-
-**Key lessons:**
-- Don't trust a partial/stale extraction tree; re-extract zip cleanly.
-- In OFB ransomware, magic-byte validation is a fast key oracle.
-- A plausible `CTF{...}` in metadata can be a decoy; confirm with corpus-wide consistency.
-
----
-
-## WordPerfect Macro XOR Extraction (srdnlenCTF 2026)
-
-**Pattern (Trilogy of Death Vol I: Corel):** Corel Linux disk image containing WordPerfect macro file (fc.wcm) with XOR-encrypted byte arrays.
-
-**Key insight:** WordPerfect macro files (`.wcm`) can contain executable macros with embedded encrypted data. The XOR formula `(bb + kb) - 2*(bb & kb)` is mathematically equivalent to bitwise XOR.
-
-**Brute-force 4-byte XOR key under charset constraints:**
-```python
-import string
-
-docbody = [206, 56, 8, 128, 209, 47, 2, 149, ...]  # encrypted bytes from macro
-allowed = set(map(ord, string.ascii_lowercase + string.digits + "_{}"))
-
-# Find valid key bytes independently for each position mod 4
-cands = []
-for j in range(4):
-    good = []
-    for k in range(256):
-        if all((docbody[i] ^ k) in allowed for i in range(j, len(docbody), 4)):
-            good.append(k)
-    cands.append(good)
-
-# Try all combinations (usually very few candidates per position)
-for k0 in cands[0]:
-    for k1 in cands[1]:
-        for k2 in cands[2]:
-            for k3 in cands[3]:
-                key = [k0, k1, k2, k3]
-                pt = ''.join(chr(c ^ key[i % 4]) for i, c in enumerate(docbody))
-                if pt.startswith("srd") and pt.endswith("}"):
-                    print(pt)
-```
-
-**Lesson:** Legacy document formats (WordPerfect, Lotus 1-2-3) can embed executable macros with obfuscated data. When you know the flag charset, brute-forcing a short XOR key is trivial by filtering each key byte independently.
-
----
-
-## Minidump ISO 9660 Recovery + XOR Key (srdnlenCTF 2026)
-
-**Pattern (Trilogy of Death Vol II: The Legendary Armory):** Two relics in volatile memory (minidump) must be XORed; ISO 9660 directory entries in memory fragments point to hidden data.
-
-**Technique:**
-1. Search minidump for ISO 9660 directory entry signatures
-2. Parse directory entries to locate target file offset and size
-3. Decrypt file using recovered XOR key (e.g., 8-byte repeating key)
-4. Parse resulting data as ZIP without central directory (local headers only)
-
-**ZIP local header parsing without central directory:**
 ```python
 import struct, zlib
-
-pos = 0
-files = {}
+pos, files = 0, {}
 while True:
     off = dec.find(b"PK\x03\x04", pos)
-    if off < 0:
-        break
-    (ver, flag, method, _, _, crc, csize, usize, nlen, xlen) = struct.unpack_from(
-        "<HHHHHIIIHH", dec, off + 4)
-    name = dec[off + 30:off + 30 + nlen].decode()
+    if off < 0: break
+    (ver, flag, method, _, _, crc, csize, usize, nlen, xlen) = struct.unpack_from("<HHHHHIIIHH", dec, off+4)
+    name = dec[off+30:off+30+nlen].decode()
     data_off = off + 30 + nlen + xlen
-    comp = dec[data_off:data_off + csize]
-    if method == 8:  # Deflate
-        raw = zlib.decompress(comp, -15)
-    else:
-        raw = comp
-    files[name] = raw
+    comp = dec[data_off:data_off+csize]
+    files[name] = zlib.decompress(comp, -15) if method == 8 else comp
     pos = data_off + csize
 ```
 
-**Key insight:** When ZIP central directory is missing/corrupt, iterate local file headers (`PK\x03\x04`) directly. Each local header contains enough metadata (compression method, sizes, filename) to extract files independently.
+**`method == 8` 是 deflate，解压必须用 `-15`**（raw deflate，无 zlib 头）。用默认的 `zlib.decompress()` 会报 `incorrect header check`。
 
----
+## 10. HFS+ Resource Fork
 
-## APFS Snapshot Historical File Recovery (srdnlenCTF 2026)
+**HFS+ 每个文件有两条数据流**：Data Fork 与 Resource Fork。`binwalk` / `foremost` / `strings` **只看 Data Fork**，所以全都没结果时不要放弃。
 
-**Pattern (Trilogy of Death Vol III: The Poisoned Apple):** APFS volume maintains historical snapshots; recovering earlier state of a key file reveals authentic value before poisoning.
-
-**Technique:**
-1. Extract APFS partition from DMG (locate by sector offset)
-2. Search for APFS volume superblocks (magic `APSB`) across all snapshots, noting transaction IDs (XIDs)
-3. Use `icat` (Sleuth Kit with APFS support) to read specific inodes across different snapshot XIDs
-4. Compare file content across XID boundaries to identify when poisoning occurred
-5. Use pre-poisoning value for decryption
-
-**Finding APFS volume superblocks across snapshots:**
-```python
-import struct
-
-with open("apfs_partition.img", "rb") as f:
-    mm = f.read()
-
-snaps = []
-pos = 0
-while True:
-    idx = mm.find(b"APSB", pos)
-    if idx < 0:
-        break
-    # XID is at offset -16 from magic (in block header)
-    hdr_start = idx - 32
-    xid = struct.unpack_from("<Q", mm, hdr_start + 16)[0]
-    blk = hdr_start // 4096
-    snaps.append((xid, blk))
-    pos = idx + 1
-
-# Read target inode across snapshots
-import subprocess
-for xid, blk in sorted(set(snaps)):
-    try:
-        out = subprocess.check_output(
-            ["icat", "-f", "apfs", "-P", "apfs", "-B", str(blk),
-             "apfs_partition.img", "449414"])  # target inode number
-        print(f"XID {xid}: {out[:64]}...")
-    except:
-        pass
-```
-
-**Decryption with recovered authentic key:**
-```python
-import hashlib
-from Cryptodome.Cipher import AES
-
-# Pre-poisoning key value (found in earlier snapshot)
-authentic_key_hex = "39f520679fd68654500f9cd44e8caed2bc897a3227dc297c4520336de2a59dd7"
-key = hashlib.pbkdf2_hmac('sha256', bytes.fromhex(authentic_key_hex), salt, iterations)
-cipher = AES.new(key, AES.MODE_CBC, iv)
-plaintext = cipher.decrypt(encrypted_flag)
-```
-
-**Key insight:** APFS (and other copy-on-write filesystems like ZFS/Btrfs) preserve historical file states in snapshots. When a challenge involves "poisoned" or "tampered" data, always check for older snapshots containing the original values. Use `icat` with different block offsets to read the same inode across different transaction IDs.
-
----
-
-## RAID 5 Disk Recovery via XOR (Crypto-Cat)
-
-**Pattern:** RAID 5 array with one damaged/missing disk. Two working disks are provided and the third must be reconstructed using XOR parity.
-
-**How RAID 5 parity works:** Data is striped across N disks with distributed parity. For any stripe, `Disk1 XOR Disk2 XOR ... XOR DiskN = 0`. If one disk is missing, XOR the remaining disks to recover it.
-
-**Recovery script:**
-```python
-# Recover missing disk2 from disk1 and disk3
-with open('disk1.img', 'rb') as f:
-    disk1 = f.read()
-with open('disk3.img', 'rb') as f:
-    disk3 = f.read()
-
-# XOR byte-by-byte to recover the missing disk
-disk2 = bytes(a ^ b for a, b in zip(disk1, disk3))
-
-with open('disk2.img', 'wb') as f:
-    f.write(disk2)
-```
-
-**After recovery:**
-```bash
-# Reassemble the RAID array
-mdadm --create /dev/md0 --level=5 --raid-devices=3 \
-  disk1.img disk2.img disk3.img
-
-# Or mount individual recovered disk if it contains a filesystem
-mount -o loop,ro disk2.img /mnt/recovered
-```
-
-**Key insight:** RAID 5 uses XOR parity across all disks in each stripe. XOR is self-inverse: if `A XOR B XOR C = 0`, then `B = A XOR C`. For N-disk RAID 5, XOR all N-1 working disks together to recover the missing one.
-
-**Detection:** Challenge provides multiple disk images of identical size, mentions "array", "redundancy", or "parity". `file` command may identify them as filesystem images or raw data.
-
----
-
-## HFS+ Resource Fork Hidden Binary Recovery (CONFidence CTF 2017)
-
-HFS+ files can have a Resource Fork containing hidden data invisible to most tools. Use HFSExplorer to inspect the catalog and 010 Editor with HFS template to extract.
+- HFSExplorer 看 catalog，找 Resource Fork 大小非 0 的条目
+- 010 Editor + HFS 模板看 extent 记录，拿起始块与长度
+- 跨多个 extent 时逐段 `dd` 再 `cat` 拼
 
 ```bash
-# 1. Mount or open the HFS+ image
-# Standard tools miss Resource Forks:
-binwalk image.dmg    # Won't find resource fork contents
-strings image.dmg    # May show fragments
-
-# 2. Use HFSExplorer to browse the catalog
-# Look for files with non-zero Resource Fork size
-# Suspicious: nodeID 1337 or similar CTF-typical IDs
-
-# 3. Check .fseventsd logs for historical file operations
-pip install FSEventsParser
-python FSEventsParser.py -s image.dmg -o events.csv
-# Reveals creation/deletion of files across the volume
-
-# 4. Extract Resource Fork data with 010 Editor:
-# - Load disk image with HFS+ template
-# - Navigate to catalog -> target file -> resource fork extents
-# - Note start block and length from extent records
-# - If split across multiple extents, extract and concatenate:
 dd if=image.dmg bs=4096 skip=$BLOCK1 count=$LEN1 of=part1.bin
 dd if=image.dmg bs=4096 skip=$BLOCK2 count=$LEN2 of=part2.bin
 cat part1.bin part2.bin > recovered_binary
 ```
 
-**Key insight:** HFS+ Resource Forks are a second data stream attached to files, invisible to most forensic tools that only examine the Data Fork. `binwalk`, `foremost`, and `strings` miss them. HFSExplorer shows both forks in the catalog; 010 Editor with the HFS template reveals extent records for manual extraction. `.fseventsd` logs can reveal that hidden files were created/deleted.
+**`.fseventsd` 是 HFS+ 的操作日志**：`FSEventsParser` 能还原「某文件何时被创建/删除」，用来定位隐藏文件的时间窗口。
 
-**Detection:** DMG or HFS+ disk image where standard carving finds nothing. `file` identifies as "Apple HFS+" or "Apple Partition Map". Challenge mentions "Mac", "Apple", or "hidden data".
+## 11. 哈希数据库的顺序恢复
 
----
-
-## Kyoto Cabinet Hash Database Forensics via Incremental Key Insertion (ASIS CTF 2018)
-
-**Pattern:** Unknown binary file identified as Kyoto Cabinet (KC) hash database. Flag characters stored as values with zeroed-out keys. Since the database uses a fixed-size hash table, recover ordering by inserting sequential keys one at a time and observing which hash slot reference gets overwritten via binary diff.
+**核心洞察：哈希库按 key 的哈希值决定槽位，不是插入顺序。** key 被清零后，值的顺序就丢了。
 
 ```bash
-# Identify format
-file unknown.db  # may not recognize KC format
-strings unknown.db | head  # look for "KCPH" magic
-
-# Enumerate values
-kchashmgr list tokyo.kch
-
-# Recover key ordering via incremental insertion + binary diff
 for i in $(seq -w 000 088); do
     cp tokyo.kch test.kch
     kchashmgr set test.kch "$i" "probe"
-    diff <(xxd tokyo.kch) <(xxd test.kch) | head -5
-    # Changed offset reveals which original entry maps to key $i
+    diff <(xxd tokyo.kch) <(xxd test.kch) | head -5   # 变化的偏移 = 该 key 占的槽
 done
 ```
 
-**Full recovery script (Python):**
-```python
-import subprocess, shutil
+**逐个插入探针 key 再二进制比对**，就能反推「槽位 → 原 key」的映射，按 key 排序后取对应 value 拼出 flag。
 
-original = 'tokyo.kch'
-# Get all values from the database
-values = subprocess.check_output(['kchashmgr', 'list', original]).decode().splitlines()
+**为什么必须逐个插**：一次插多个时不知道哪个槽位对应哪个 key；而且探测 key 会互相覆盖。
 
-mapping = {}
-for i in range(len(values)):
-    key = f'{i:03d}'
-    shutil.copy(original, 'test.kch')
-    subprocess.run(['kchashmgr', 'set', 'test.kch', key, 'probe'], check=True)
-    # Binary diff to find which slot changed
-    orig_hex = subprocess.check_output(['xxd', original]).decode()
-    test_hex = subprocess.check_output(['xxd', 'test.kch']).decode()
-    for orig_line, test_line in zip(orig_hex.splitlines(), test_hex.splitlines()):
-        if orig_line != test_line:
-            mapping[i] = orig_line  # Record which entry was overwritten
-            break
-
-# Reconstruct flag from ordered values
-flag = ''.join(values[i] for i in sorted(mapping.keys()))
-print(flag)
-```
-
-**Key insight:** Hash databases store entries at positions determined by key hash values. When keys are zeroed/corrupted, the stored ordering is hash-based, not insertion-order. Insert probe keys one at a time and binary-diff the database to find which slot each probe overwrites, revealing the original key-to-value mapping.
-
----
-
-## SQLite Edit History Reconstruction from Diff Table (Google CTF 2017)
-
-SQLite databases storing note/document edit history as diff entries (operation, position, text, diffset) can be replayed to reconstruct content at any point in time.
+## 12. 编辑历史回放
 
 ```python
-import sqlite3
-
 db = sqlite3.connect('notes.db')
-# Table structure: diffs(id, type, position, text, diffset)
-# type: 'insert' or 'remove'
-diffs = db.execute("SELECT type, position, text FROM diffs ORDER BY id").fetchall()
-
-document = ""
-for op_type, position, text in diffs:
-    if op_type == 'insert':
-        document = document[:position] + text + document[position:]
-    elif op_type == 'remove':
-        document = document[:position] + document[position + len(text):]
-    # Check for flag at each step (may have been typed then deleted)
-    if 'CTF{' in document or 'flag{' in document:
-        print(f"Flag found: {document}")
+doc = ""
+for op, pos, text in db.execute("SELECT type, position, text FROM diffs ORDER BY id"):
+    if op == 'insert':
+        doc = doc[:pos] + text + doc[pos:]
+    elif op == 'remove':
+        doc = doc[:pos] + doc[pos+len(text):]
+    if 'flag{' in doc or 'CTF{' in doc:
+        print(doc)
 ```
 
-**Key insight:** Collaborative editing tools store incremental diffs. Replaying all operations sequentially reveals content that existed at any point in the edit history, including secrets that were later deleted. Check for flags at every intermediate state, not just the final document.
+**每一步都要检查**，不能只看最终文档——flag 常是「打出来后又被删掉」。
 
-**Detection:** SQLite database with tables containing `type`/`operation`, `position`, `text` columns. Challenge mentions "web/notes", "editor", "collaboration", or "history". Schema inspection via `.schema` or `sqlite3 db.sqlite ".tables"` reveals diff-style tables.
+**判据**：表里有 `type`/`operation`、`position`、`text` 三列。`.schema` 一看就知道。
 
----
+## 13. Linux 勒索：内存找密钥
 
-## See Also
+Volatility 的 Linux 插件常因符号表/KASLR 不匹配返回空——**这时的正确动作是原始内存候选扫描，不是修符号表**。
 
-- [[forensics/磁盘与内存/disk-and-memory.md|disk-and-memory.md]] - Core disk and memory forensics (Volatility 3, disk image analysis, VM/OVA/VMDK forensics, VMware snapshots, GIMP raw memory dump visual inspection, coredump analysis, Windows KAPE triage, PowerShell ransomware, Android forensics, Docker container forensics, cloud storage forensics, BSON reconstruction, TrueCrypt/VeraCrypt mounting)
-- [[forensics/磁盘与内存/disk-recovery.md|disk-recovery.md]] - Disk recovery and extraction patterns (LUKS master key recovery, PRNG timestamp seed brute-force, VBA macro binary recovery, FemtoZip decompression, XFS reconstruction, tar duplicate entry extraction, nested matryoshka filesystem extraction, anti-carving via null byte interleaving)
+1. **先验压缩包完整性**：`unzip -l` 列出的文件与解出来的比对，不一致就重新解。
+2. **快速逆勒索样本**：`strings -a ransomware.elf | grep -E "enc_key|EVP_aes|PUBLIC KEY|.veg"`。典型是 `AES-256-OFB`、IV 前置、全局 32 字节密钥、RSA 公钥硬编码。
+3. **原始扫描找密钥**：用内存里的**锚点字符串**（`/home/.../enc_key.bin`、HOME 路径）推候选偏移，取页对齐窗口内的 32 字节。
+4. **用 magic 当密钥 oracle**：拿每个候选解密多个 `.veg` 的首块，看是否出现 `%PDF-` / `PK\x03\x04` / `\x89PNG\r\n\x1a\n`。**同时满足多个独立签名**的才是真密钥。
+5. **全量解密后核对文件数**与 zip 清单一致，注意 `snap/*/Downloads/` 这类镜像目录要去重。
+
+**OFB 的偏移**：`iv = 前 16 字节`，密文从 `+16` 开始。**OFB 是流模式，不分组**——所以能只解首块做验证，也能从任意位置开始解。
+
+**假 flag 防御**：只出现在元数据里的 `CTF{...}` 很可能是诱饵，要用全语料一致性校验（`rg -a '[A-Za-z]+CTF\{[^}]+\}' recovered_full`）。
+
+## 14. 纪律
+
+- **先问「数据在哪个副本里」**。快照、奇偶校验、旧 layer、旧 version——「被删/被改」的题答案几乎都在另一个副本里，而不是在恢复被删的那一份。
+- **元数据字段是合法载荷**。GUID、时间戳、扩展属性、文件名、路径分量都能编码，别只盯着文件内容。
+- **顺序也是数据**。哈希库的槽位顺序、编辑历史的操作序列、RAID 的条带轮转——顺序错了内容对也没用。
+- **别信 `strings` 的输出当结论**。它给的是候选，真正的答案要抽出二进制或解出明文再验。

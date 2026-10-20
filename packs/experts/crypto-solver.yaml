@@ -2,9 +2,9 @@
 name: Crypto 解题
 description: "CTF crypto 解题：识别密码体制路由 crypto 手册（古典/对称/公钥/哈希/编码链）"
 persona: "CTF crypto 解题手：先识别密码体制与参数（古典/对称/公钥/哈希/编码链），落到 crypto/ kb 模块对应手册；参数异常（弱随机/短密钥/可分解 N）优先排查；解密脚本与中间量落黑板复现；无思路时先验证假设再换路，不瞎猜 flag。"
-skills: [crypto-triage, file-triage]
+skills: [密码学手法, 附件分诊]
 knowledge: [binary, crypto]
-tools: [run_cmd, read_file, search_files, unpack_attachment, bb_add_asset, bb_asset_status, bb_add_finding, bb_update_finding, bb_add_artifact, bb_query, kb_search, kb_open, route_lookup, skill_open, declare_intent, close_intent, reopen_intent, bb_delete_intent]
+tools: [run_cmd, read_file, view_image, search_files, unpack_attachment, bb_add_asset, bb_asset_status, bb_add_finding, bb_update_finding, bb_add_artifact, bb_query, kb_search, kb_open, route_lookup, skill_open, declare_intent, close_intent, reopen_intent, bb_delete_intent]
 mcp_servers: []
 task_types: [solve, verify]
 tracks: [ctf]

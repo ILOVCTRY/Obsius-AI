@@ -30,9 +30,11 @@ from core.blackboard.artex_intents import (
     control_intent,
     list_intents,
     pause_task_pending,
+    reopen_intent,
 )
 from core.blackboard.artex_planner import add_intents, plan_followup, plan_intents
 from core.blackboard.artex_runtime import evaluate_task, get_runtime
+from core.blackboard.challenge_flags import challenge_flag_summary
 
 log = logging.getLogger(__name__)
 
@@ -40,7 +42,7 @@ log = logging.getLogger(__name__)
 ACTIVE_STATUSES = frozenset({"pending", "claimed", "running", "paused"})
 _TODO_MARKS = {"pending": "☐", "in_progress": "▶", "completed": "✔"}
 
-_CONTROL_ACTIONS = ("start", "drain", "stop", "pause", "resume", "cancel", "kill")
+_CONTROL_ACTIONS = ("start", "drain", "stop", "pause", "resume", "retry", "cancel", "kill")
 
 
 @dataclass
@@ -174,6 +176,57 @@ def _engine_state(ctx: SteeringContext) -> tuple[Any, str]:
                     else "Engine 未启动")
 
 
+def _open_ctf_challenges(ctx: SteeringContext, task_id: str) -> list[str] | None:
+    """返回任务范围内尚未解决/放弃的 CTF 题目；状态无法确认时返回 None。
+
+    这是 ``mode=new`` 防误切换的最小事实查询：题目状态只信 flag 台账，
+    不把 ``needs_review`` 或 exhausted Intent 当作完成。对有题目资产的项目，
+    状态读取失败时按保守策略阻止切换；无题目资产的历史项目维持兼容。
+    """
+    if str(ctx.track or "").strip().lower() != "ctf":
+        return []
+    try:
+        assets = ctx.bb.list_assets(ctx.project_id)
+        challenge_ids = {str(row.get("id") or "") for row in assets
+                         if row.get("type") == "challenge" and not row.get("parent_id")}
+        if not challenge_ids:
+            return []
+        scoped: list[str] = []
+        for row in _intents_of(ctx.bb, ctx.project_id, task_id):
+            for asset_id in row.get("asset_ids") or []:
+                asset_id = str(asset_id or "")
+                if asset_id in challenge_ids and asset_id not in scoped:
+                    scoped.append(asset_id)
+        if not scoped:
+            scoped = sorted(challenge_ids)
+        summary = challenge_flag_summary(ctx.bb, ctx.project_id, scoped)
+        return [cid for cid in scoped if not (summary.get(cid) or {}).get("solved")
+                and not (summary.get(cid) or {}).get("abandoned")]
+    except Exception:  # noqa: BLE001 —— CTF 有题目但台账不可读时保守阻止切换
+        log.exception("CTF 当前任务题目状态读取失败 task=%s", task_id)
+        return None
+
+
+def _new_task_guard(ctx: SteeringContext, current: str, args: dict) -> str:
+    """阻止 CTF 主控把未解题目误切成新任务。"""
+    if not current or str(ctx.track or "").strip().lower() != "ctf":
+        return ""
+    if bool(args.get("new_task_confirmed")):
+        return ""
+    open_challenges = _open_ctf_challenges(ctx, current)
+    if open_challenges == []:
+        return ""
+    if open_challenges is None:
+        return ("[错误] 无法确认当前 CTF 任务的题目台账状态，已阻止创建新任务；"
+                "请先 artex_status 检查台账，确认题目 solved/abandoned 后再切换。")
+    return ("[错误] 当前任务仍有未解决的 CTF 题目（"
+            + ", ".join(open_challenges[:5])
+            + "），禁止静默创建新任务。needs_review / exhausted 只表示本轮或当前方向"
+              "未完成，不代表题目已解出；请先 artex_status，再用 artex_control(action=\"retry\")"
+              " 或 artex_plan(mode=\"extend\") 续跑。若确实要切换任务，请明确传"
+              " new_task_confirmed=true。")
+
+
 # ---------- artex_plan ----------
 
 
@@ -195,6 +248,12 @@ def artex_plan(ctx: SteeringContext, args: dict) -> str:
 
     current = resolve_task(ctx, explicit_task)
     creating = mode == "new" or (mode == "auto" and not current)
+
+    if mode == "new":
+        # 显式 task_id 可指定新任务 id，但不能覆盖线程当前绑定任务的未解题状态。
+        guard = _new_task_guard(ctx, resolve_task(ctx), args)
+        if guard:
+            return guard
 
     if creating:
         if not goal:
@@ -640,6 +699,18 @@ def artex_control(ctx: SteeringContext, args: dict) -> str:
         except Exception as exc:  # noqa: BLE001
             return f"[错误] 终止 Worker 失败: {exc}"
         return f"[ARTEX] 已请求终止 Worker {intent_id}（{reason or '主控终止'}）。"
+
+    if action == "retry":
+        if not intent_id:
+            return "[错误] retry 需要 intent_id"
+        try:
+            reopened = reopen_intent(ctx.bb, ctx.project_id, intent_id,
+                                     reason=reason or "ARTEX 主控续跑")
+        except Exception as exc:  # noqa: BLE001
+            return f"[错误] 重开 Intent 失败: {exc}"
+        note = _start_engine(ctx)
+        return (f"[ARTEX] Intent {intent_id} 已重开为 pending，Frontier 将继续调度。"
+                f"{note}")
 
     if action == "cancel":
         if not intent_id and not task_id:

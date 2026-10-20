@@ -524,11 +524,15 @@ function FlagBadge({ flag }: { flag: string }) {
   )
 }
 /** 题目派生状态徽章（challenge-flag-ledger v47，2026-10-19）：`state` 由 flag 台账
- *  派生（不是独立字段），故只做展示、不在前端推导。untouched 不显（省视觉噪音）。 */
+ *  派生（不是独立字段），故只做展示、不在前端推导。untouched 不显（省视觉噪音）。
+ *
+ *  2026-10-20（方案 A）：**候选（pending）不计 solved**，故徽章必须把「已确认」
+ *  与「待确认」分开显示——只显示 accepted/quota 会让「1/1 候选」看起来像拿满了，
+ *  这正是假 flag 提前终止题目的前端成因。 */
 const CHALLENGE_STATE: Record<string, { label: string; cls: string; title: string }> = {
   solved: { label: "已解出", cls: "text-(--viz-success) border-(--viz-success-border) bg-(--viz-success-bg)",
-            title: "flag 台账里的计数已达题目声明的 flag 数" },
-  partial: { label: "部分解出", cls: "text-(--status-approval)", title: "拿到部分 flag，未达声明条数" },
+            title: "flag 台账里的**已确认**条数已达题目声明的 flag 数（候选不计）" },
+  partial: { label: "部分解出", cls: "text-(--status-approval)", title: "拿到部分 flag（或仅有候选待确认），未达已确认条数" },
   running: { label: "求解中", cls: "text-(--viz-sev-medium)", title: "有 Worker 正在跑这道题" },
   abandoned: { label: "已放弃", cls: "text-muted-foreground/70", title: "人工标记放弃（调度层不再为它派 Worker）" },
 }
@@ -537,10 +541,25 @@ function ChallengeStateBadge({ cs }: { cs?: ChallengeSummary }) {
   const cfg = CHALLENGE_STATE[cs.state]
   if (!cfg) return null
   const quota = cs.flag_count > 1 ? ` ${cs.accepted_flags}/${cs.flag_count}` : ""
+  const cand = cs.candidate_flags > 0 ? ` +${cs.candidate_flags}待确认` : ""
   return (
-    <Badge variant="outline" className={cn("text-[10px]", cfg.cls)} title={cfg.title}>
-      {cfg.label}{quota}
-    </Badge>
+    <span className="inline-flex items-center gap-1">
+      <Badge variant="outline" className={cn("text-[10px]", cfg.cls)} title={cfg.title}>
+        {cfg.label}{quota}{cand}
+      </Badge>
+      {cs.concluded && !cs.solved && (
+        <Badge variant="outline" className="text-[10px] text-(--status-paused)"
+               title="主控已主动收尾（停止派工），但 flag 仍待人工确认——不等于已解出">
+          已收尾·待确认
+        </Badge>
+      )}
+      {cs.flag_conflict.length > 0 && (
+        <Badge variant="outline" className="text-[10px] text-destructive"
+               title="同题内出现了前缀互不相同的 flag（至少一条是假的），需人工裁决后才能算解出">
+          格式冲突 {cs.flag_conflict.length} 条
+        </Badge>
+      )}
+    </span>
   )
 }
 
@@ -598,10 +617,11 @@ function AssetTags({ tags }: { tags: string[] }) {
   )
 }
 
-function AssetRow({ a, indent = false, hasFinding, flag, onDelete, track, onSolve, onFlags, cs }:
+function AssetRow({ a, indent = false, hasFinding, flag, onDelete, track, onSolve, onFlags, onEdit, cs }:
                   { a: Asset; indent?: boolean; hasFinding?: boolean; flag?: string | null
                     onDelete?: (a: Asset) => void; track?: string
                     onSolve?: (a: Asset) => void; onFlags?: (a: Asset) => void
+                    onEdit?: (a: Asset) => void
                     cs?: ChallengeSummary }) {
   const meta = a.meta ?? {}
   const src = meta.source as string | undefined
@@ -625,6 +645,13 @@ function AssetRow({ a, indent = false, hasFinding, flag, onDelete, track, onSolv
                   className="shrink-0 rounded border px-1.5 text-[10px] text-muted-foreground hover:border-primary/40 hover:text-primary"
                   onClick={(e) => { e.stopPropagation(); onFlags(a) }}>
             🚩 台账{cs?.flags?.length ? ` ${cs.flags.length}` : ""}
+          </button>
+        )}
+        {isCtfTrack(track) && isChallengeAsset(a, track) && onEdit && (
+          <button title="编辑题目：改名 / 题面 / 方向 / 入口提示 / flag 格式与数量"
+                  className="shrink-0 rounded border px-1.5 text-[10px] text-muted-foreground hover:border-primary/40 hover:text-primary"
+                  onClick={(e) => { e.stopPropagation(); onEdit(a) }}>
+            编辑
           </button>
         )}
         {isCtfTrack(track) && isChallengeAsset(a, track) && onSolve && (
@@ -841,6 +868,10 @@ export function Assets({ pid, compact, tree = false, track }: { pid: string; com
   const [flagsFor, setFlagsFor] = useState<Asset | null>(null)
   // 新建题目弹层（题目表单 v47）
   const [showCreate, setShowCreate] = useState(false)
+  // 编辑题目弹层（challenge-edit，2026-10-19）：`patchChallenge` 后端早已就绪
+  // （`PATCH /api/challenges/{aid}`）但前端零消费——题目名/题面/方向/flag 数量
+  // 填错了只能删了重建，而删除会连带删掉该题目下所有 flag 台账与发现。
+  const [editFor, setEditFor] = useState<Asset | null>(null)
 
   const refresh = useCallback(() => {
     api.assets(pid).then(setItems).catch(() => {})
@@ -956,10 +987,14 @@ export function Assets({ pid, compact, tree = false, track }: { pid: string; com
     }
     for (const a of items) {
       if (!isChallengeAsset(a, track)) continue
-      // ① 台账：优先显示第一个「计入解出」的 flag（pending/accepted，不含 rejected）
+      // ① 台账：优先显示已确认（accepted）的 flag；没有已确认的才退回候选
+      // （pending）——候选只是「待人工确认的线索」，不能和已解出混为一谈
+      // （方案 A，2026-10-20）。rejected 永不显示。
       const cs = challengeMeta.get(a.id)
-      const counted = (cs?.flags ?? []).filter((f) => f.verdict !== "rejected")
-      if (counted.length) { m.set(a.id, counted[0].flag); continue }
+      const confirmed = (cs?.flags ?? []).filter((f) => f.verdict === "accepted")
+      const cand = (cs?.flags ?? []).filter((f) => f.verdict === "pending")
+      if (confirmed.length) { m.set(a.id, confirmed[0].flag); continue }
+      if (cand.length) { m.set(a.id, cand[0].flag); continue }
       // ② 兜底：子树内 verified + vuln 的 finding 的 evidence 里的 flag
       const ids = subtreeIds(a.id)
       for (const f of allFindings) {
@@ -1039,14 +1074,16 @@ export function Assets({ pid, compact, tree = false, track }: { pid: string; com
         <AssetRow key={a.id} a={a} hasFinding={verifiedIds.has(a.id)} flag={flagByChallenge.get(a.id)} track={track}
                   cs={challengeMeta.get(a.id)}
                   onDelete={!compact ? remove : undefined} onSolve={!compact ? startSolve : undefined}
-                  onFlags={!compact ? setFlagsFor : undefined} />
+                  onFlags={!compact ? setFlagsFor : undefined}
+                  onEdit={!compact ? setEditFor : undefined} />
       ))
     }
     if (!tree) return items.map((a) => (
       <AssetRow key={a.id} a={a} hasFinding={verifiedIds.has(a.id)} flag={flagByChallenge.get(a.id)} track={track}
                 cs={challengeMeta.get(a.id)}
                 onSolve={!compact ? startSolve : undefined}
-                onFlags={!compact ? setFlagsFor : undefined} />
+                onFlags={!compact ? setFlagsFor : undefined}
+                onEdit={!compact ? setEditFor : undefined} />
     ))
     // 递归渲染（host → service → url 多层）：任意带子行的节点都可展开
     const countDesc = (id: string): number =>
@@ -1087,6 +1124,13 @@ export function Assets({ pid, compact, tree = false, track }: { pid: string; com
                       className="shrink-0 rounded border px-1.5 text-[10px] text-muted-foreground hover:border-primary/40 hover:text-primary"
                       onClick={(e) => { e.stopPropagation(); setFlagsFor(a) }}>
                 🚩 台账{challengeMeta.get(a.id)?.flags?.length ? ` ${challengeMeta.get(a.id)!.flags.length}` : ""}
+              </button>
+            )}
+            {!compact && isCtfTrack(track) && isChallengeAsset(a, track) && (
+              <button title="编辑题目：改名 / 题面 / 方向 / 入口提示 / flag 格式与数量"
+                      className="shrink-0 rounded border px-1.5 text-[10px] text-muted-foreground hover:border-primary/40 hover:text-primary"
+                      onClick={(e) => { e.stopPropagation(); setEditFor(a) }}>
+                编辑
               </button>
             )}
             {!compact && isCtfTrack(track) && isChallengeAsset(a, track) && (
@@ -1270,6 +1314,17 @@ export function Assets({ pid, compact, tree = false, track }: { pid: string; com
           onCreated={refresh}
         />
       )}
+
+      {/* 编辑题目弹层（challenge-edit，2026-10-19）：补上 `patchChallenge` 的
+          前端消费点——此前该接口零消费，题目信息填错只能删了重建。 */}
+      {editFor && (
+        <ChallengeEditDialog
+          asset={editFor}
+          cs={challengeMeta.get(editFor.id)}
+          onClose={() => setEditFor(null)}
+          onSaved={refresh}
+        />
+      )}
     </div>
   )
 }
@@ -1380,9 +1435,21 @@ function ChallengeFlagLedger({ asset, onClose, onMutated }: {
         <div className="flex shrink-0 items-center gap-2 border-b px-4 py-2">
           <span className="text-[10px] text-muted-foreground">flag 台账</span>
           <span className="min-w-0 flex-1 truncate text-sm font-medium">{asset.value}</span>
-          {st && <Badge variant="outline" className="text-[10px]">进度 {quotaLabel}</Badge>}
+          {st && <Badge variant="outline" className="text-[10px]">已确认 {quotaLabel}</Badge>}
+          {st && st.candidate > 0 && (
+            <Badge variant="outline" className="text-[10px] text-(--status-approval)"
+                   title="候选 flag：AI 判定通过但未经人工确认，**不计入解出**。确认有效后才算。">
+              候选 {st.candidate}
+            </Badge>
+          )}
           {st && st.rejected > 0 && (
             <Badge variant="outline" className="text-[10px] text-(--status-error)">否决 {st.rejected}</Badge>
+          )}
+          {st && st.concluded && !st.solved && (
+            <Badge variant="outline" className="text-[10px] text-(--status-paused)"
+                   title="主控已主动收尾（停止派工）。这**不等于**已解出——flag 仍需你确认。">
+              已收尾·待确认
+            </Badge>
           )}
           <button type="button" className="shrink-0 rounded border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-accent"
                   onClick={onClose}>关闭</button>
@@ -1394,6 +1461,20 @@ function ChallengeFlagLedger({ asset, onClose, onMutated }: {
           {data && data.flags.length === 0 && (
             <p className="py-4 text-center text-xs text-muted-foreground">
               还没有 flag。AI 用 <code className="font-mono">ctf_submit_flag</code> 提交后会自动出现在这里。
+            </p>
+          )}
+          {/* 候选不是答案（方案 A，2026-10-20）：这段必须显眼——否则用户看到
+              「候选 1」会以为题目已解出，而调度层其实还在派工。 */}
+          {st && st.candidate > 0 && st.accepted < st.quota && (
+            <p className="rounded border border-(--status-approval)/40 bg-(--status-approval)/5 px-2 py-1 text-[11px] text-(--status-approval)">
+              有 {st.candidate} 条**候选**待你确认，但它们**不算解出**（已确认 {st.accepted}/{st.quota}）——
+              调度层仍在为这道题派 Worker。确认有效即视为解出，并会立刻停止正在跑的探索。
+            </p>
+          )}
+          {st && st.conflict.length > 0 && (
+            <p className="rounded border border-(--status-error)/40 bg-(--status-error)/5 px-2 py-1 text-[11px] text-(--status-error)">
+              **格式冲突**：本题有 {st.conflict.length} 条前缀互不相同的已确认 flag（{st.conflict.map((f) => f.flag.split("{")[0] || "?").join(" / ")}）。
+              一道题通常只有一种格式，至少一条是假的——请标记掉错误的那条，否则本题不会算解出。
             </p>
           )}
           {(data?.flags ?? []).map((f) => (
@@ -1564,6 +1645,157 @@ function ChallengeCreateDialog({ pid, onClose, onCreated }: {
                   onClick={onClose}>取消</button>
           <Button size="sm" disabled={busy} onClick={() => void submit()}>
             {busy ? "创建中…" : "创建题目"}
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** 编辑题目表单（challenge-edit，2026-10-19）。
+ *
+ * **为什么需要它**：`PATCH /api/challenges/{aid}` 后端与 `ChallengePatchBody`
+ * 类型早已就绪，但前端零消费——题目名打错、`flag_count` 填错（直接决定「拿满
+ * 几条算解出」）、方向选错，此前只能删掉重建，而删除会**连带删掉该题目的 flag
+ * 台账与全部发现**。这是唯一让用户改错的地方。
+ *
+ * 与新建表单的差别：
+ * - **入口点不可改**——入口是子资产（`entries` 走资产树），`PATCH` 不接受该字段。
+ *   这里只读展示，改入口请到资产树增删子节点（避免两套写入口打架）。
+ * - **flag 数量低于已拿条数 = 立刻判为解出**（实测：quota 3→1 且已有 2 条
+ *   accepted 时，状态从 partial 直接变 solved）。这是合法操作（「其实这题只要
+ *   一个 flag」），故**不拦**，但要在提交前明确告知，否则用户会以为只是改个数。
+ * - 传 `undefined` = 不动该键；传空串 = 清空该键（与后端 `None`/空串语义对齐）。
+ */
+function ChallengeEditDialog({ asset, cs, onClose, onSaved }: {
+  asset: Asset
+  cs?: ChallengeSummary
+  onClose: () => void
+  onSaved: () => void
+}) {
+  const meta = asset.meta ?? {}
+  const [name, setName] = useState(asset.value)
+  const [direction, setDirection] = useState(String(meta.direction ?? ""))
+  const [brief, setBrief] = useState(String(meta.brief ?? ""))
+  const [entryHint, setEntryHint] = useState(String(meta.entry_hint ?? ""))
+  const [flagFormat, setFlagFormat] = useState(String(meta.flag_format ?? ""))
+  const [flagCount, setFlagCount] = useState(String(meta.flag_count ?? "1"))
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState("")
+
+  // 台账里**已确认**（accepted）的条数。候选（pending）不计——2026-10-20 方案 A。
+  // 改 flag_count 时用它提示后果：降到 ≤ 该数 → 该题**立刻变成「已解出」**。
+  const counted = cs?.accepted_flags ?? 0
+  const entries = cs?.attachments ?? []
+
+  const submit = async () => {
+    const nextCount = Number(flagCount)
+    if (!Number.isInteger(nextCount) || nextCount < 1) {
+      setErr("flag 数量须为正整数"); return
+    }
+    if (!name.trim()) { setErr("题目名不能为空"); return }
+    // 会让题目**立刻解出**的改动，先要一次确认（不是拒绝——这可能是用户的真实意图）
+    if (nextCount < Number(meta.flag_count ?? 1) && counted > 0 && nextCount <= counted) {
+      const ok = window.confirm(
+        `本题台账已有 ${counted} 条 flag **经人工确认**，把数量改成 ${nextCount} 后`
+        + `状态会立刻变成「已解出」（调度层不再为它派 Worker）。\n\n确认要改吗？`)
+      if (!ok) return
+    }
+    setBusy(true); setErr("")
+    try {
+      // 只传**改过的**字段（undefined = 后端不动该键）；空串 = 清空该键。
+      // 全量传会让「AI 后来补的 meta」被前端旧快照覆盖回空值。
+      const body: import("@/lib/types").ChallengePatchBody = {}
+      if (name.trim() !== asset.value) body.name = name.trim()
+      const d = direction.trim()
+      if (d !== String(meta.direction ?? "")) body.direction = d
+      if (brief.trim() !== String(meta.brief ?? "")) body.brief = brief.trim()
+      if (entryHint.trim() !== String(meta.entry_hint ?? "")) body.entry_hint = entryHint.trim()
+      if (flagFormat.trim() !== String(meta.flag_format ?? "")) body.flag_format = flagFormat.trim()
+      if (nextCount !== Number(meta.flag_count ?? 1)) body.flag_count = nextCount
+      if (Object.keys(body).length === 0) { onClose(); return }
+      await api.patchChallenge(asset.id, body)
+      onSaved(); onClose()
+    } catch (e) { setErr(e instanceof Error ? e.message : String(e)) }
+    finally { setBusy(false) }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+      <div className="flex max-h-[85vh] w-full max-w-xl flex-col overflow-hidden rounded-lg border bg-background shadow-xl">
+        <div className="flex shrink-0 items-center gap-2 border-b px-4 py-2">
+          <span className="text-sm font-medium">编辑题目</span>
+          <span className="min-w-0 flex-1 truncate text-[10px] text-muted-foreground">id={asset.id}</span>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-3 space-y-2">
+          <label className="block space-y-1 text-xs text-muted-foreground">
+            题目名称<span className="ml-1 opacity-60">（改名会同步资产值；撞同名会被拒）</span>
+            <Input className="mt-1 h-8 text-sm" value={name}
+                   onChange={(e) => setName(e.target.value)} placeholder="例如：签到题 / Web-文件上传" />
+          </label>
+          <label className="block space-y-1 text-xs text-muted-foreground">
+            题目方向
+            <select className="mt-1 h-8 w-full rounded border bg-background px-2 text-sm text-foreground"
+                    value={direction} onChange={(e) => setDirection(e.target.value)}>
+              <option value="">（未设置）</option>
+              {["web", "pwn", "crypto", "reverse", "misc", "blockchain", "ai", "osint"].map((d) => (
+                <option key={d} value={d}>{d}</option>
+              ))}
+            </select>
+          </label>
+          <label className="block space-y-1 text-xs text-muted-foreground">
+            hit<span className="ml-1 opacity-60">（题目给的信息：题面原文）</span>
+            <textarea className="mt-1 min-h-20 w-full rounded border bg-background px-2 py-1 text-xs text-foreground"
+                      value={brief} onChange={(e) => setBrief(e.target.value)}
+                      placeholder="把题面/提示原样贴进来" />
+          </label>
+          <label className="block space-y-1 text-xs text-muted-foreground">
+            入口提示<span className="ml-1 opacity-60">（可选，纯文本说明）</span>
+            <Input className="mt-1 h-8 text-xs" value={entryHint}
+                   onChange={(e) => setEntryHint(e.target.value)} placeholder="例如：附件里是源码，flag 在环境变量" />
+          </label>
+          {/* 入口点是子资产，本表单只读（PATCH 不接受该字段） */}
+          <div className="rounded border border-dashed px-2 py-1.5">
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              {/* cs 未到（台账接口慢/失败）时不能说「0 个」——那是假信息 */}
+              <span>入口点{cs ? ` ${entries.length} 个` : "（读取中…）"}</span>
+              <span className="opacity-60">（子资产，请在「题目」树里增删）</span>
+            </div>
+            {entries.length > 0 && (
+              <ul className="mt-1 space-y-0.5">
+                {entries.slice(0, 6).map((e) => (
+                  <li key={e.id} className="truncate font-mono text-[10px] text-muted-foreground">
+                    {e.type} · {e.value}
+                  </li>
+                ))}
+                {entries.length > 6 && (
+                  <li className="text-[10px] text-muted-foreground">…共 {entries.length} 个</li>
+                )}
+              </ul>
+            )}
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <label className="block space-y-1 text-xs text-muted-foreground">
+              flag 格式<span className="ml-1 opacity-60">（提示，不是约束）</span>
+              <Input className="mt-1 h-8 font-mono text-xs" value={flagFormat}
+                     onChange={(e) => setFlagFormat(e.target.value)} placeholder="flag{}" />
+            </label>
+            <label className="block space-y-1 text-xs text-muted-foreground">
+              flag 数量
+              <span className="ml-1 opacity-60">
+                （决定「拿满几条算解出」{counted > 0 ? `；已计入 ${counted} 条` : ""}）
+              </span>
+              <Input className="mt-1 h-8 text-xs" value={flagCount} inputMode="numeric"
+                     onChange={(e) => setFlagCount(e.target.value)} placeholder="1" />
+            </label>
+          </div>
+          {err && <p className="text-[11px] text-(--status-error)">{err}</p>}
+        </div>
+        <div className="flex shrink-0 items-center justify-end gap-2 border-t px-3 py-2">
+          <button className="rounded border px-2 py-1 text-[11px] text-muted-foreground hover:bg-accent"
+                  onClick={onClose}>取消</button>
+          <Button size="sm" disabled={busy} onClick={() => void submit()}>
+            {busy ? "保存中…" : "保存修改"}
           </Button>
         </div>
       </div>

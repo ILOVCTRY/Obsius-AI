@@ -34,7 +34,7 @@ state_loader 装载持久游标/轮数 → 态势收集（`_stats` + 增量事�
 
 ## 对话插队轮 chat_turn（对话化编排器 M1-M3）
 
-- 入口 `chat_turn(text)`（API `POST /orchestrator/chat`）：人类消息落 `orch.chat{role:"human", text}`，回复落 `{role:"orch", text, tool_trace}`——对话历史=events 表 orch.chat 单一来源（`_chat_history()` 取最近 40 条）。
+- 入口 `chat_turn(text)`（API `POST /orchestrator/chat`）：人类消息落 `orch.chat{role:"human", text}`，回复落 `{role:"orch", text, tool_trace}`——对话历史=events 表 orch.chat 单一来源（`_chat_history()` 取最近 40 条）。**伪工具调用剥离（2026-10-20 事故）**：`resp.text` 既是对话轮的回答（`reply`→`orch.chat` 上屏落库）也是 tick 轮的叙述（进 messages 历史），网关把 `<｜｜DSML｜｜ calls>` 这类工具调用特殊 token 漏进 content 时两者都会污染历史、回放自我强化。故 `assistant_message` **之前**先调 `sanitize_response_text(resp)` 就地剥离（`core.llm.pseudo_toolcall`）——本模块的纯文本本来就不是终态（tick 继续、对话轮 break），无需 nudge 重试。
 - **循环语义与 tick 不同**：每步 heartbeat 续租 → `llm.chat(tools=ORCH_TOOLS 全闸门同源)` → **无 tool_calls 即 break（纯文本=回答完毕）**，勿回退成 tick 的「催促调工具 continue」（会空转烧轮）；步数上限 `CHAT_MAX_STEPS=8`。
 - **系统提示** `CHAT_SYSTEM_PROMPT`（与 tick 分立）注入 `_goal_section()`（M2 goal，tick 与对话轮同槽）与 `_persona_section()`（M3，**仅对话轮**，persona[:600]）。**插队轮只读边界**：不推进 event_cursor、不计 cycles、不动 last_digest_cycle、不消费 C2 指令、不写 state_saver。
 - **手动持久压缩 `compact_chat()`（/compact，2026-10-06）**：直播间「指挥」页签输入 `/compact`（`POST /orchestrator/compact`，同 tick 租约 busy 409）——较早 orch.chat 消息经 LLM（`ORCH_COMPACT_SYSTEM`）压成摘要落 `orch.compact{summary,cutoff_id,...}` 事件；`_chat_history()` 读最近一条 orch.compact，只回放 `id>cutoff_id` 的消息并前置摘要（原本固定取最近 40 条，长对话下早期决策会被挤出窗口）。历史过短 noop 不烧 LLM；摘要失败/空不落事件。

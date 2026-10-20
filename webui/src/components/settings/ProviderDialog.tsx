@@ -38,6 +38,9 @@ export function ProviderDialog({ open, onOpenChange, initial, onSave }: {
   const [proxy, setProxy] = useState("")
   const [thinking, setThinking] = useState(false)
   const [thinkingEffort, setThinkingEffort] = useState<"low" | "medium" | "high">("high")
+  // 视觉能力（vision 通道，2026-10-19）：勾选=该供应商的模型能看图 → 附件/截图
+  // 走 image 块真送进模型，`view_image` 才出图。不勾则只回元信息 + OCR 引导。
+  const [vision, setVision] = useState(false)
   const [models, setModels] = useState<string[]>([])
   const [ctx, setCtx] = useState<Record<string, number>>({})
   const [hasKey, setHasKey] = useState(false)
@@ -67,12 +70,14 @@ export function ProviderDialog({ open, onOpenChange, initial, onSave }: {
       setApiKey(""); setProxy(initial.proxy ?? "")
       setThinking(initial.thinking === true)
       setThinkingEffort(initial.thinking_effort ?? "high")
+      setVision(initial.vision === true)
       setModels(initial.models); setCtx(initial.model_context ?? {})
       setHasKey(!!initial.has_key)
     } else {
       const p = PROVIDER_PRESETS[0]
       setPresetId(p.id); setName(""); setBaseUrl(p.baseUrl); setFormat(p.format)
       setApiKey(""); setProxy(""); setThinking(false); setThinkingEffort("high"); setModels([]); setCtx({}); setHasKey(false)
+      setVision(false)
     }
     setNewModel(""); setShowKey(false); setBusy(false)
     setDisc(null); setTestRes({}); setConnTest(null); setErr(null)
@@ -146,6 +151,10 @@ export function ProviderDialog({ open, onOpenChange, initial, onSave }: {
     if (!/^https?:\/\//i.test(baseUrl.trim())) { setErr("接口地址须为 http(s) 地址"); return }
     if (!isEdit && preset.needsKey && !apiKey.trim()) { setErr(`${preset.name} 需要 API 密钥`); return }
     onSave({
+      // 打底展开 initial：表单没暴露的字段（system_in_user 等）不该被「编辑一次」
+      // 抹掉——后端 _validate 是白名单，少传即丢字段，system_in_user 与 vision
+      // 都栽过同一坑。显式字段仍以表单值为准。
+      ...(initial ?? {}),
       name: n,
       base_url: baseUrl.trim().replace(/\/+$/, ""),
       format,
@@ -156,6 +165,8 @@ export function ProviderDialog({ open, onOpenChange, initial, onSave }: {
       thinking: thinking || null,
       thinking_effort: thinking ? thinkingEffort : null,
       proxy: proxy.trim() || null,
+      // 视觉能力：显式布尔（false 也要落，否则取消勾选后旧 true 永远改不回来）
+      vision,
     })
     onOpenChange(false)
   }
@@ -231,6 +242,10 @@ export function ProviderDialog({ open, onOpenChange, initial, onSave }: {
                   <option value="high">高度</option>
                 </select></label>
             )}
+            <label className="llm-thinking"
+                   title="勾选=该供应商的模型支持图片输入（多模态），附件与截图会以 image 块真正送进模型；不勾=只给文件路径与 OCR 引导，绝不往不支持看图的上游塞图片（会 400 打死整轮）">
+              <input type="checkbox" checked={vision} onChange={(e) => setVision(e.target.checked)} />
+              <span>图片输入</span></label>
           </div>
 
           {!isEdit && preset.keyUrl && (

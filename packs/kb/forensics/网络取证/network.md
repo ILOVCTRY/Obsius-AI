@@ -1,645 +1,205 @@
-# CTF Forensics - Network
-
-## Table of Contents
-- [tcpdump Quick Reference](#tcpdump-quick-reference)
-- [TLS/SSL Decryption via Keylog File](#tlsssl-decryption-via-keylog-file)
-- [Wireshark Basics](#wireshark-basics)
-- [Port Scan Analysis](#port-scan-analysis)
-- [Gateway/Device via MAC OUI](#gatewaydevice-via-mac-oui)
-- [WordPress Reconnaissance](#wordpress-reconnaissance)
-- [Post-Exploitation Traffic](#post-exploitation-traffic)
-- [Credential Extraction](#credential-extraction)
-- [SMB3 Encrypted Traffic](#smb3-encrypted-traffic)
-- [5G/NR Protocol Analysis](#5gnr-protocol-analysis)
-- [Email Headers](#email-headers)
-- [USB HID Stenography/Chord PCAP (UTCTF 2024)](#usb-hid-stenographychord-pcap-utctf-2024)
-- [BCD Encoding in UDP (VuwCTF 2025)](#bcd-encoding-in-udp-vuwctf-2025)
-- [HTTP File Upload Exfiltration in PCAP (MetaCTF 2026)](#http-file-upload-exfiltration-in-pcap-metactf-2026)
-- [TLS Master Key Extraction from Coredump (PlaidCTF 2014)](#tls-master-key-extraction-from-coredump-plaidctf-2014)
-- [Split Archive Reassembly from HTTP Transfers (ASIS CTF Finals 2013)](#split-archive-reassembly-from-http-transfers-asis-ctf-finals-2013)
-- [WPA/WEP WiFi Decryption from PCAP (DefCamp CTF 2016)](#wpawep-wifi-decryption-from-pcap-defcamp-ctf-2016)
-- [Corrupted PCAP Repair with pcapfix (CSAW CTF 2016)](#corrupted-pcap-repair-with-pcapfix-csaw-ctf-2016)
-- [SAP Dialog Protocol Decryption from PCAP (GreHack CTF 2016)](#sap-dialog-protocol-decryption-from-pcap-grehack-ctf-2016)
-- [DNS Exfiltration Oracle via Binary Response Probing (ASIS CTF Finals 2017)](#dns-exfiltration-oracle-via-binary-response-probing-asis-ctf-finals-2017)
-- [ICMP Echo Payload Length as Covert Channel (TokyoWesterns CTF 4th 2018)](#icmp-echo-payload-length-as-covert-channel-tokyowesterns-ctf-4th-2018)
-
+---
+title: 网络流量取证与协议隐写
+phase: forensics
+vuln_class: [pcap, tcpdump, wireshark, tls, usb-hid, covert-channel, exfiltration]
+summary: 网络取证先按流量层分流：文件对象、明文协议、加密握手、设备总线和隐蔽信道分别处理；不要把“看见 TCP”误当成“答案在 TCP payload”。
 ---
 
-## tcpdump Quick Reference
+# 网络流量取证与协议隐写
 
-Command-line packet capture tool for quick network forensics triage.
+网络包分析的目标是恢复证据链：先确认封装和会话，再提取对象，最后判断编码、加密或信道。TLS 私钥、内存转储与弱 RSA 见 [[forensics/系统取证/linux-forensics.md|Linux 系统取证]]；DNS 语义、隧道和 rebinding 见 [[misc/协议异常/dns.md|DNS 协议异常]]；USB/磁盘镜像见 [[forensics/磁盘与内存/disk-and-memory.md|磁盘与内存取证]]。
 
-```bash
-# Basic capture on interface
-sudo tcpdump -i eth0
+## 0. 判据速查
 
-# Capture to file
-sudo tcpdump -i eth0 -w capture.pcap
+| 现象 | 优先动作 | 误区 |
+|---|---|---|
+| 有 `.pcap/.pcapng`，未知内容 | `capinfos`、协议统计、会话统计 | 一上来只搜 `flag` |
+| HTTP/FTP/SMB 有文件传输 | Export Objects 或 `--export-objects` | 只看 TCP 文本，漏掉二进制对象 |
+| TCP 流只有乱码 | 先看 TLS/自定义编码/压缩，再看密钥 | 乱码不等于加密 |
+| ClientHello 后出现可用 keylog | 导入 NSS Key Log | 用服务器私钥处理 ECDHE |
+| 大量 UDP/ICMP、长度呈规律变化 | 按包序、方向、长度重组 | 只看 payload，不看元数据 |
+| USB interrupt 中一包多键 | 解析 HID report，考虑 chord/stegano | 按普通键盘逐键翻译 |
+| SYN-ACK 集中返回多个端口 | 统计源/目的和 TCP flags | 把扫描器自身端口当服务端口 |
+| 同一数据有多个流/方向 | 按 stream、时间、五元组分别导出 | 直接拼全包导致顺序污染 |
 
-# Filter by source IP
-sudo tcpdump -i eth0 src 192.168.1.100
-
-# Filter by destination port
-sudo tcpdump -i eth0 dst port 80
-
-# Combined filter with file output
-sudo tcpdump -i eth0 -w packets.pcap 'src 172.22.206.250 and port 443'
-
-# Read from file with verbose output
-tcpdump -r capture.pcap -v
-
-# Show packet contents in ASCII
-tcpdump -r capture.pcap -A
-
-# Show hex + ASCII dump
-tcpdump -r capture.pcap -X
-
-# Count total packets
-tcpdump -r capture.pcap -q | wc -l
-```
-
-**Common filters:**
-| Filter | Description |
-|--------|-------------|
-| `host 10.0.0.1` | Traffic to/from IP |
-| `net 192.168.1.0/24` | Entire subnet |
-| `port 80` | HTTP traffic |
-| `tcp` / `udp` / `icmp` | Protocol filter |
-| `src host X and dst port Y` | Combined |
-
-**Key insight:** Use tcpdump for quick command-line triage when Wireshark is unavailable. Pipe to `strings` or `grep` for fast flag hunting: `tcpdump -r capture.pcap -A | grep -i flag`.
-
----
-
-## TLS/SSL Decryption via Keylog File
-
-To decrypt TLS traffic in Wireshark, provide either the pre-master secret or a keylog file.
-
-**Method 1 — SSLKEYLOGFILE (client-side key logging):**
-
-If the challenge provides a keylog file (or you can set `SSLKEYLOGFILE`):
-```bash
-# Set environment variable before running the client
-export SSLKEYLOGFILE=/tmp/sslkeys.log
-curl https://target/secret
-
-# Import into Wireshark:
-# Edit → Preferences → Protocols → TLS → (Pre)-Master-Secret log filename → /tmp/sslkeys.log
-```
-
-**Keylog file format (NSS Key Log Format):**
-```text
-CLIENT_RANDOM <32_bytes_client_random_hex> <48_bytes_master_secret_hex>
-```
-
-**Method 2 — RSA private key (if server key is known):**
-
-**Note:** Only works with RSA key exchange. Sessions using forward secrecy (ECDHE/DHE cipher suites) cannot be decrypted with the server's private key — use Method 1 instead. CTF challenges with weak RSA keys typically use RSA key exchange.
+## 1. 起手：确认捕获范围
 
 ```bash
-# Wireshark: Edit → Preferences → Protocols → TLS → RSA keys list
-# IP: 127.0.0.1, Port: 443, Protocol: http, Key File: server.key
-
-# Or via tshark:
-tshark -r capture.pcap -o "tls.keys_list:127.0.0.1,443,http,server.key" -Y http
-```
-
-**Method 3 — Weak RSA key factoring (see also linux-forensics.md):**
-```bash
-# Extract certificate from PCAP
-tshark -r capture.pcap -Y "tls.handshake.type==11" -T fields -e tls.handshake.certificate | head -1
-
-# Factor weak modulus, generate private key with rsatool
-python rsatool.py -p <p> -q <q> -e 65537 -o server.key
-
-# Import key into Wireshark
-```
-
-**SSL handshake components needed for decryption:**
-1. `client_random` — sent in ClientHello
-2. `server_random` — sent in ServerHello
-3. Pre-master secret (PMS) — encrypted in ClientKeyExchange with server's RSA public key
-
-**Key insight:** Look for keylog files (`.log`, `sslkeys.txt`) in challenge artifacts. If the challenge gives you a private key, use it directly. For weak RSA keys in certificates, factor the modulus to derive the private key.
-
----
-
-## Wireshark Basics
-
-```bash
-# Filters
-http.request.method == "POST"
-tcp.stream eq 5
-frame contains "flag"
-
-# Export files
-File → Export Objects → HTTP
-
-# tshark
-tshark -r capture.pcap -Y "http" -T fields -e http.file_data
-tshark -r capture.pcap --export-objects http,/tmp/http_objects
-```
-
----
-
-## Port Scan Analysis
-
-```bash
-# IP conversation statistics
+capinfos capture.pcap
+file capture.pcap
+tshark -r capture.pcap -q -z io,phs
 tshark -r capture.pcap -q -z conv,ip
-
-# Find open ports (SYN-ACK responses)
-tshark -r capture.pcap -Y "tcp.flags.syn==1 && tcp.flags.ack==1" \
-  -T fields -e ip.src -e tcp.srcport | sort -u
-```
-
----
-
-## Gateway/Device via MAC OUI
-
-```bash
-# Extract MAC addresses
-tshark -r capture.pcap -Y "arp" -T fields \
-  -e arp.src.hw_mac -e arp.src.proto_ipv4 | sort -u
-
-# Vendor lookup
-curl -s "https://macvendors.com/query/88:bd:09"
-```
-
----
-
-## WordPress Reconnaissance
-
-**Identify WPScan:**
-```bash
-tshark -r capture.pcap -Y "http.user_agent contains \"WPScan\"" | head -1
-```
-
-**WordPress version:**
-```bash
-cat /tmp/http_objects/feed* | grep -i generator
-```
-
-**Plugins:**
-```bash
-tshark -r capture.pcap \
-  -Y "http.response.code == 200 && http.request.uri contains \"wp-content/plugins\"" \
-  -T fields -e http.request.uri | sort -u
-```
-
-**Usernames (REST API):**
-```bash
-cat /tmp/http_objects/*per_page* | jq '.[].name'
-```
-
----
-
-## Post-Exploitation Traffic
-
-**Step 1: TCP conversations**
-```bash
 tshark -r capture.pcap -q -z conv,tcp
 ```
 
-**Step 2: Established connections (SYN-ACK)**
+快速过滤和查看：
+
 ```bash
-tshark -r capture.pcap -Y "tcp.flags.syn == 1 and tcp.flags.ack == 1" \
+tcpdump -r capture.pcap -nn -tttt
+ tcpdump -r capture.pcap -A | grep -aiE 'flag|password|token'
+tshark -r capture.pcap -Y 'tcp.stream == 5' -T fields \
+  -e frame.number -e ip.src -e ip.dst -e tcp.seq -e tcp.len
+```
+
+Wireshark 常用过滤器：
+
+```text
+frame contains "flag"
+tcp.stream eq 5
+http.request.method == "POST"
+tcp.flags.syn == 1 && tcp.flags.ack == 1
+udp.length > 100
+```
+
+确认 `pcapng` 的 interface、linktype 与时间戳；不同链路类型不能直接把二层头当成 Ethernet。必要时先用 `editcap` 切分，再逐流处理。
+
+## 2. 对象优先：HTTP、FTP、SMB
+
+有明确应用层协议时，先导出对象，再回到流中核对上下文：
+
+```bash
+tshark -r capture.pcap --export-objects http,./http_objects
+tshark -r capture.pcap --export-objects smb,./smb_objects
+tshark -r capture.pcap -Y 'http.request' -T fields \
+  -e frame.number -e http.request.method -e http.host -e http.request.uri
+```
+
+Multipart 上传通常表现为 `POST`、`Content-Type: multipart/form-data`、边界字符串和较大的 request body。检查导出的文件的 magic、压缩层和图片文本；文件名、User-Agent、上传端点可能只是线索，不能直接当结论。
+
+从 TCP 流导出时必须使用双向重组：
+
+```bash
+tshark -r capture.pcap -q -z 'follow,tcp,ascii,5'
+tshark -r capture.pcap -q -z 'follow,tcp,raw,5' > stream5.bin
+```
+
+若 TCP 有重传、乱序或截断，按 `tcp.seq` 去重后再拼接；只按抓包行号拼接会产生伪文件。
+
+## 3. TLS：先找钥匙，再判断套件
+
+客户端 keylog 是最可靠入口：
+
+```bash
+export SSLKEYLOGFILE=/tmp/sslkeys.log
+curl https://target/secret
+# Wireshark: Preferences -> Protocols -> TLS -> (Pre)-Master-Secret log filename
+```
+
+NSS key log 行形如：
+
+```text
+CLIENT_RANDOM <client_random_hex> <master_secret_hex>
+```
+
+也可用 tshark：
+
+```bash
+tshark -r capture.pcap \
+  -o 'tls.keylog_file:/tmp/sslkeys.log' -Y http
+```
+
+服务器 RSA 私钥仅适用于 RSA key exchange；`ECDHE`/`DHE` 使用 forward secrecy，单有服务器私钥不能解密。确认 ClientHello/ServerHello 的 cipher suite 后再选方法。若证书模数很小，提取 modulus 并因式分解，再生成私钥：
+
+```bash
+tshark -r capture.pcap -Y 'tls.handshake.type == 11' \
+  -T fields -e tls.handshake.certificate | head -1
+python rsatool.py -p <p> -q <q> -e 65537 -o server.key
+```
+
+若 keylog 与流量时间、`client_random` 对不上，先检查是否导错文件或存在多个 TLS 会话；不要用“解出少量文本”证明整条流已正确解密。
+
+## 4. 扫描、反连与凭据痕迹
+
+开放端口通常由 SYN-ACK 判断：
+
+```bash
+tshark -r capture.pcap \
+  -Y 'tcp.flags.syn==1 && tcp.flags.ack==1' \
   -T fields -e ip.src -e ip.dst -e tcp.srcport -e tcp.dstport | sort -u
 ```
 
-**Step 3: Follow TCP stream**
+反连或后渗透流常见 shell 提示、`no job control`、固定周期 beacon、出站连接和紧随其后的文件上传。先列 `conv,tcp`，再 follow 具体 stream，记录方向和时间。
+
+凭据不能只搜 `password`：检查 HTTP 表单、Cookie、Authorization、`.env`、`wp-config.php`、`debian.cnf` 和 shell 输出。
+
 ```bash
-tshark -r capture.pcap -q -z "follow,tcp,ascii,<stream_number>"
+tshark -r capture.pcap -q -z 'follow,tcp,ascii,<stream>' \
+  | grep -aiE 'pass(word)?|token|cookie|authorization|secret'
 ```
 
-**Reverse shell indicators:**
-- `bash: cannot set terminal process group`
-- `bash: no job control in this shell`
-- Shell prompts like `www-data@hostname:/path$`
+WordPress 流量可按 `wp-content/plugins`、REST 用户接口、generator meta 和 WPScan User-Agent 分流；这些结果只用于枚举，不等于漏洞已存在。
 
----
+## 5. SMB、Wi-Fi 与设备识别
 
-## Credential Extraction
-
-**High-value files:**
-| Application | File | Format |
-|-------------|------|--------|
-| WordPress | `wp-config.php` | `define('DB_PASSWORD', '...')` |
-| Laravel | `.env` | `DB_PASSWORD=` |
-| MySQL | `/etc/mysql/debian.cnf` | `password = ` |
+SMB3 加密流量先判断是否能取得 NTLMv2 凭据材料：
 
 ```bash
-# Search shell stream for credentials
-tshark -r capture.pcap -q -z "follow,tcp,ascii,<stream>" | grep -i "password"
-```
-
----
-
-## SMB3 Encrypted Traffic
-
-**Step 1: Extract NTLMv2 hash**
-```bash
-tshark -r capture.pcap -Y "ntlmssp.messagetype == 0x00000003" -T fields \
-  -e ntlmssp.ntlmv2_response.ntproofstr \
+tshark -r capture.pcap -Y 'ntlmssp.messagetype == 0x00000003' \
+  -T fields -e ntlmssp.ntlmv2_response.ntproofstr \
   -e ntlmssp.auth.username
-```
-
-**Step 2: Crack with hashcat**
-```bash
 hashcat -m 5600 ntlmv2_hash.txt wordlist.txt
 ```
 
-**Step 3: Derive SMB 3.1.1 session keys (Python)**
-```python
-from Cryptodome.Cipher import AES, ARC4
-from Cryptodome.Hash import MD4
-import hmac, hashlib
+SMB 3.1.1 解密需要正确的密码、协商参数、preauth integrity hash 和方向密钥；不能只拿 NT hash 直接套 AES。不同实现的 transform header、nonce、tag 偏移必须按协议版本核对。
 
-def SP800_108_Counter_KDF(Ki, Label, Context, L):
-    n = (L // 256) + 1
-    result = b''
-    for i in range(1, n + 1):
-        data = i.to_bytes(4, 'big') + Label + b'\x00' + Context + L.to_bytes(4, 'big')
-        result += hmac.new(Ki, data, hashlib.sha256).digest()
-    return result[:L // 8]
-
-# Compute session key
-nt_hash = MD4.new(password.encode('utf-16le')).digest()
-response_key = hmac.new(nt_hash, (user.upper() + domain.upper()).encode('utf-16le'), hashlib.md5).digest()
-key_exchange_key = hmac.new(response_key, ntproofstr, hashlib.md5).digest()
-session_key = ARC4.new(key_exchange_key).encrypt(encrypted_session_key)
-
-# Derive encryption keys
-c2s_key = SP800_108_Counter_KDF(session_key, b"SMBC2SCipherKey\x00", preauth_hash, 128)
-s2c_key = SP800_108_Counter_KDF(session_key, b"SMBS2CCipherKey\x00", preauth_hash, 128)
-```
-
-**Step 4: Decrypt (AES-128-GCM)**
-```python
-def decrypt_smb311(transform_data, key):
-    signature = transform_data[4:20]
-    nonce = transform_data[20:32]
-    aad = transform_data[20:52]
-    encrypted = transform_data[52:]
-
-    cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
-    cipher.update(aad)
-    return cipher.decrypt_and_verify(encrypted, signature)
-```
-
----
-
-## 5G/NR Protocol Analysis
-
-**Wireshark setup:**
-- Enable: NAS-5GS, RLC-NR, PDCP-NR, MAC-NR
-
-**SMS in 5G (3GPP TS 23.040):**
-
-| IEI | Format |
-|-----|--------|
-| 0x0c | iMelody (ringtone) |
-| 0x0e | Large Animation (16×16) |
-| 0x18 | WVG (vector graphics) |
-
-**iMelody to Morse:**
-- Notes like `c4c4c4r2` encode dots/dashes
-
----
-
-## Email Headers
-
-- Check routing information
-- Look for encoded attachments (base64)
-- MIME boundaries may hide data
-
----
-
-## USB HID Stenography/Chord PCAP (UTCTF 2024)
-
-**Pattern (Gibberish):** USB keyboard PCAP with simultaneous multi-key presses = stenography chording.
-
-**Detection:** Multiple simultaneous USB HID keys (6+ at once) in interrupt transfers. Not regular typing.
-
-**Decoding workflow:**
-1. Extract HID reports from PCAP
-2. Detect simultaneous key states (multiple keycodes in same report)
-3. Map chords to Plover stenography dictionary
-4. Install Plover, use its dictionary for translation
+Wi-Fi 先区分 WEP、WPA/WPA2 四次握手和 WPA3；没有握手或 PMK 时，单个 beacon 不能还原密码。MAC OUI 只能说明注册厂商，不能单独证明网关角色：
 
 ```bash
-# Extract USB HID data
-tshark -r capture.pcap -Y "usb.transfer_type == 1" -T fields -e usb.capdata
+tshark -r capture.pcap -Y arp -T fields \
+  -e arp.src.hw_mac -e arp.src.proto_ipv4 | sort -u
 ```
 
----
+## 6. 隐蔽信道：不要只读 payload
 
-## BCD Encoding in UDP (VuwCTF 2025)
-
-**Pattern (1.5x-engineer):** "1.5x" hints at the encoding ratio.
-
-**BCD (Binary-Coded Decimal):** Each nibble (4 bits) encodes one decimal digit (0-9). Two digits per byte vs one ASCII digit per byte → BCD is 2x denser than ASCII decimal. The "1.5x" name refers to the challenge-specific framing: 3 BCD bytes encode 6 digits which represent 2 ASCII bytes (3:2 ratio).
-
-**Decoding:**
-```python
-def bcd_decode(data):
-    result = ''
-    for byte in data:
-        high = (byte >> 4) & 0x0F
-        low = byte & 0x0F
-        result += f'{high}{low}'
-    return result
-
-# UDP sessions differentiated by first byte
-# Session 1 = BCD-encoded ASCII metadata with flag
-# Session 2 = encrypted DOCX
-```
-
-**Lesson:** Challenge name often hints at encoding ratio or technique.
-
----
-
-## HTTP File Upload Exfiltration in PCAP (MetaCTF 2026)
-
-**Pattern (Dead Drop):** Small PCAP with TCP streams containing HTTP traffic. Exfiltrated data uploaded as a file via multipart form POST.
-
-**Quick triage:**
-```bash
-# Count packets and protocols
-tshark -r capture.pcap -q -z io,phs
-
-# List HTTP requests
-tshark -r capture.pcap -Y "http.request" -T fields -e http.request.method -e http.request.uri -e http.host
-
-# Export all HTTP objects (files transferred)
-tshark -r capture.pcap --export-objects http,/tmp/http_objects
-ls -la /tmp/http_objects/
-
-# Follow specific TCP streams
-tshark -r capture.pcap -q -z "follow,tcp,ascii,0"
-tshark -r capture.pcap -q -z "follow,tcp,ascii,1"
-```
-
-**Extraction workflow:**
-1. Export HTTP objects — uploaded files are extracted automatically
-2. Check for multipart form-data POST requests (file uploads)
-3. Look for unusual User-Agent strings (e.g., `DeadDropBot/1.0`) indicating automated exfiltration
-4. Extracted files may be images (PNG/JPEG) with flag text rendered visually — open and inspect
-
-**Key indicators of exfiltration:**
-- POST to `/upload` endpoints
-- Non-standard User-Agent strings
-- Small number of packets but containing file transfers
-- "Dead drop" pattern: attacker uploads file to web server for later retrieval
-
-**Lesson:** Always start with `--export-objects` to extract transferred files before deep packet analysis. The flag is often in the exfiltrated file itself.
-
----
-
-## TLS Master Key Extraction from Coredump (PlaidCTF 2014)
-
-**Pattern:** Given a PCAP with HTTPS traffic and a coredump from the server/client process, extract the TLS master key from OpenSSL's in-memory session structure to decrypt the traffic.
-
-**Extraction workflow:**
-
-1. Find the TLS Session ID from the handshake in Wireshark (visible in plaintext in the ClientHello/ServerHello)
-2. Search the coredump for the session ID bytes:
-```bash
-# Search for session ID in coredump
-grep -c '\x19\xAB\x5E\xDC\x02\xF0\x97\xD5' corefile
-hexdump -C corefile | grep --before=5 '19 ab 5e dc'
-```
-
-3. In OpenSSL's `ssl_session_st`, `master_key[48]` is stored immediately before `session_id[32]`. Read the 48 bytes before the session ID match.
-
-4. Create a Wireshark pre-master-secret log file:
-```text
-RSA Session-ID:<hex_session_id> Master-Key:<hex_master_key>
-```
-
-5. Load in Wireshark: Edit → Preferences → Protocols → TLS → (Pre-)Master-Secret log filename
-
-**Key insight:** OpenSSL stores `master_key[48]` directly before `session_id[32]` in `ssl_session_st`. Search the coredump for the session ID (from the TLS handshake), then read the 48 bytes before it. This works with coredumps, memory dumps, and Volatility memory extractions.
-
----
-
-## Split Archive Reassembly from HTTP Transfers (ASIS CTF Finals 2013)
-
-**Pattern:** PCAP contains multiple HTTP file transfers with MD5-hash filenames, all the same size except one smaller file. Files are fragments of a split archive (e.g., 7z) that must be reassembled in order. A separate TCP stream contains a chat conversation with the archive password.
-
-**Identification:**
-- Multiple HTTP-transferred files with uniform size (e.g., 61440 bytes) and one smaller trailing fragment
-- First file has an archive magic number (e.g., `7z` header `37 7A BC AF 27 1C`)
-- Cover traffic and multiple ports used to obscure the transfers
-- Apache directory listing in PCAP provides file modification timestamps
-
-**Reassembly workflow:**
-
-1. Extract all HTTP objects and identify fragments:
-```bash
-# Export HTTP objects
-tshark -r capture.pcap --export-objects http,/tmp/http_objects
-ls -la /tmp/http_objects/
-
-# Check first file for archive magic number
-xxd /tmp/http_objects/d33cf9e6230f3b8e5a0c91a0514ab476 | head -1
-# 00000000: 377a bcaf 271c ...  → 7z archive header
-```
-
-2. Determine fragment order from Apache directory listing timestamps in PCAP:
-```bash
-# Extract the directory listing page
-tshark -r capture.pcap -Y "http.response and http.content_type contains html" \
-  -T fields -e http.file_data | head -1
-# Parse modification timestamps from the HTML table, sort chronologically
-```
-
-3. Concatenate fragments in timestamp order:
-```bash
-# Order files by modification timestamp (earliest first, smallest file last)
-cat d33cf9e6230f3b8e5a0c91a0514ab476 \
-    57f18f111f47eb9f7b5cdf5bd45144b0 \
-    1e13be50f05092e2a4e79b321c8450d4 \
-    ... \
-    c68cc0718b8b85e62c8a671f7c81e80a > archive.7z
-```
-
-4. Extract password from TCP conversation stream:
-```bash
-# Follow TCP streams to find chat with key exchange
-tshark -r capture.pcap -q -z "follow,tcp,ascii,0"
-# Look for "secret key" / "part N" messages, concatenate all parts
-```
-
-5. Decompress with recovered password:
-```bash
-7z x archive.7z -p"M)m5s6S^[>@#Q3+10PD.KE#cyPsvqH"
-```
-
-**Key insight:** When PCAP contains many same-sized file transfers, suspect a split archive. The fragment order is not the download order — look for an Apache/nginx directory listing page in the PCAP whose modification timestamps provide the correct reassembly sequence. The smallest file is the trailing fragment.
-
----
-
-## WPA/WEP WiFi Decryption from PCAP (DefCamp CTF 2016)
-
-Captured WiFi traffic in pcapng format can be decrypted if the WEP/WPA key is recovered through brute force or is known.
+### 6.1 UDP/ICMP 长度、顺序和方向
 
 ```bash
-# Step 1: Identify encrypted WiFi networks in capture
-aircrack-ng capture.pcapng
-
-# Step 2: Crack WEP key (PTW attack or brute force)
-aircrack-ng -a 1 capture.pcapng                    # PTW attack (fast)
-aircrack-ng -a 1 -w wordlist.txt capture.pcapng     # dictionary attack
-
-# Step 3: Crack WPA/WPA2 key
-aircrack-ng -a 2 -w rockyou.txt capture.pcapng
-
-# Step 4: Decrypt traffic with recovered key
-airdecap-ng -w "recovered_key" capture.pcapng       # WEP
-airdecap-ng -p "passphrase" -e "SSID" capture.pcapng # WPA
-
-# Step 5: Analyze decrypted traffic
-# Output: capture-dec.pcapng (decrypted packets)
-wireshark capture-dec.pcapng
-
-# Alternative: decrypt directly in Wireshark
-# Edit > Preferences > Protocols > IEEE 802.11
-# Add decryption key (WEP/WPA-PWD/WPA-PSK)
-
-# Look for: HTTP traffic, IPP (printing), FTP, unencrypted protocols
-# Multiple password changes may require multiple decryption passes
+tshark -r capture.pcap -Y 'icmp || udp' -T fields \
+  -e frame.number -e ip.src -e ip.dst -e udp.length -e data.len
 ```
 
-**Key insight:** WiFi CTF challenges often have multiple encryption key changes throughout the capture. Decrypt, look for hints to the next password in the decrypted traffic, then decrypt the next segment. Check Internet Printing Protocol (IPP) streams for job-name fields containing flags.
+按五元组、方向和时间排序，分别测试：长度映射、包间隔、首字节状态、payload bit、DNS label 和丢包位置。若只有长度携带信息，不能把 padding 当数据；应先建立长度到符号的频数表，再验证重复序列与校验位。
 
----
+### 6.2 BCD 与自定义编码
 
-## Corrupted PCAP Repair with pcapfix (CSAW CTF 2016)
-
-Corrupted packet capture files can be repaired to make them openable in Wireshark.
-
-```bash
-# Install pcapfix
-# apt install pcapfix  (or brew install pcapfix)
-
-# Repair corrupted pcap/pcapng file
-pcapfix -d corrupted.pcap        # basic repair with verbose output
-pcapfix -d corrupted.pcapng      # also handles pcapng format
-
-# Output: fixed_corrupted.pcap (repaired file)
-
-# Common corruption types pcapfix handles:
-# - Broken file header (magic bytes)
-# - Truncated packets
-# - Invalid packet lengths
-# - Missing packet headers
-# - Wrong byte order
-# - Damaged section headers (pcapng)
-
-# If pcapfix fails, try manual repair:
-python3 -c "
-import struct
-with open('corrupted.pcap', 'rb') as f:
-    data = bytearray(f.read())
-
-# Fix pcap magic bytes (0xa1b2c3d4 for microsecond, 0xa1b23c4d for nanosecond)
-data[0:4] = struct.pack('<I', 0xa1b2c3d4)
-
-# Fix version (2.4)
-data[4:6] = struct.pack('<H', 2)
-data[6:8] = struct.pack('<H', 4)
-
-with open('fixed.pcap', 'wb') as f:
-    f.write(data)
-"
-
-# Then open in Wireshark
-wireshark fixed_corrupted.pcap
-```
-
-**Key insight:** Damaged PCAPs are common in forensics CTF challenges. Always try `pcapfix` first -- it handles most corruption automatically. For manual repair, the pcap header is 24 bytes: magic(4) + version(4) + timezone(4) + sigfigs(4) + snaplen(4) + linktype(4).
-
----
-
-## SAP Dialog Protocol Decryption from PCAP (GreHack CTF 2016)
-
-SAP Dialog frames in network captures can be decrypted using Cain and Abel on Windows.
-
-```bash
-# SAP Dialog protocol uses weak obfuscation (not true encryption)
-# Step 1: Open PCAP in Wireshark to identify SAP traffic
-# Filter: sap or tcp.port == 3200
-
-# Step 2: Use Cain and Abel (Windows tool) for decryption
-# - Import PCAP into Cain's Sniffer tab
-# - Select SAP Dialog entries
-# - Right-click > View to decrypt frames
-# - Search with Ctrl+F for keywords (flag, key, password)
-
-# Alternative: Use SAP Dissector plugin for Wireshark
-# - Install: apt install wireshark-plugin-sap (if available)
-# - Or: https://github.com/SecureAuthCorp/SAP-Dissection-plug-in-for-Wireshark
-
-# Manual approach using pysap:
-# pip install pysap
-from pysap import SAPDiag
-# Parse SAP Dialog packets from PCAP
-```
-
-**Key insight:** SAP Dialog protocol's "encryption" is simple obfuscation easily reversed. Cain and Abel (Windows) has built-in SAP Dialog decryption. For Linux, use pysap or SAP Wireshark dissector plugins.
-
----
-
----
-
-## DNS Exfiltration Oracle via Binary Response Probing (ASIS CTF Finals 2017)
-
-DNS queries to subdomains with binary string prefixes act as an oracle: the server returns NOERROR when the prefix matches the flag bits, NXDOMAIN otherwise. Build the binary string incrementally — add one bit at a time and test which value yields NOERROR — to reconstruct the flag bit by bit.
+BCD 每个 nibble 表示一个十进制数字；先检查所有 nibble 是否落在 `0..9`，否则不要强行解码。保持 `bytes`，最后一步才转文本：
 
 ```python
-import dns.resolver
-
-flag_bits = ""
-flag_len = 40  # adjust based on expected flag length in chars
-
-for i in range(flag_len * 8):
-    for bit in ['0', '1']:
-        try:
-            dns.resolver.resolve(f"{flag_bits}{bit}.target.com", 'A')
-            flag_bits += bit
-            break
-        except dns.resolver.NXDOMAIN:
-            continue
-
-# Convert bit string to ASCII
-flag = ''.join(chr(int(flag_bits[i:i+8], 2)) for i in range(0, len(flag_bits), 8))
-print(flag)
+def bcd_decode(data: bytes) -> str:
+    out = []
+    for b in data:
+        hi, lo = b >> 4, b & 0xf
+        if hi > 9 or lo > 9:
+            raise ValueError("不是合法 BCD")
+        out.extend((str(hi), str(lo)))
+    return ''.join(out)
 ```
 
-**Key insight:** DNS NOERROR vs NXDOMAIN acts as a binary oracle leaking one bit per query — applicable to any DNS-based covert channel. Each query tests whether a candidate prefix is correct, allowing O(n) reconstruction where n is the number of bits in the flag.
+### 6.3 USB HID chord
 
----
+USB interrupt report 中同一报告出现多枚非零 keycode，且持续表现为组合键，优先考虑 stenography/chord，而非普通输入：
 
-## ICMP Echo Payload Length as Covert Channel (TokyoWesterns CTF 4th 2018)
-
-**Pattern:** A PCAP contains a sequence of ICMP echo-request packets. The payload bytes look random, but the *length* of each payload is a printable ASCII character — the sender uses `ping -s <len>` per character to smuggle the flag past any content-level IDS. Content inspection reveals nothing; only the per-packet length field carries the data.
-
-**Extraction:**
-```python
-from scapy.all import rdpcap, ICMP
-
-pkts = rdpcap('capture.pcap')
-flag = ''.join(
-    chr(len(p[ICMP].payload))
-    for p in pkts
-    if ICMP in p and p[ICMP].type == 8   # echo-request
-)
-print(flag)
+```bash
+tshark -r capture.pcap -Y 'usb.transfer_type == 1' \
+  -T fields -e frame.number -e usb.capdata
 ```
 
-**Key insight:** Any metadata field a sender can influence (packet length, TTL, IPID, TCP window size, DNS QNAME length, HTTP request ordering) is a potential covert channel. Before analyzing payload contents, plot per-packet metadata distributions — a histogram that hits only printable-ASCII-range values is a giveaway. Combine with `tshark -T fields -e icmp.data_len` for rapid extraction from large PCAPs.
+保留每个 report 的时间和 modifier，先去重相同状态，再映射 Plover 等 stenography 字典。把每个 keycode 单独转 ASCII 会丢失组合语义。
 
-**References:** TokyoWesterns CTF 4th 2018 — writeup 10866
+## 7. 邮件、5G 与协议专用数据
 
-See also: [[forensics/网络取证/network-advanced.md|network-advanced.md]] for advanced network forensics techniques (packet interval timing encoding, USB HID mouse/pen drawing recovery, NTLMv2 hash cracking, TCP flag covert channels, DNS steganography, multi-layer PCAP with XOR, Brotli decompression bomb seam analysis, SMB RID recycling, Timeroasting MS-SNTP).
+邮件先看 `Received` 链、时区、Message-ID、MIME boundary 和附件编码；base64 解码后继续识别压缩和文件 magic。`From` 不是可信来源，路由链更有价值。
+
+5G/NR 在 Wireshark 中启用 NAS-5GS、RLC-NR、PDCP-NR、MAC-NR 后，先确认层是否真正存在，再按 IEI 和长度解析。iMelody 等载荷可能把音符映射成 Morse，但必须验证重复节拍与分隔规则，不能看到字母 `c4` 就直接当点划线。
+
+## 8. 重组、修复与证据保全
+
+- 先复制原始 pcap，所有切分、去重和解码写到工作目录。
+- `.pcap` 损坏时先尝试 `pcapfix`，再检查修复后包数与时间范围；修复工具可能丢包，不能覆盖原件。
+- split archive 先按 TCP 序号和传输方向重组，再识别 `PK`、gzip 或 7z magic。
+- 多个流同名文件要记录 stream、五元组和 sha256，避免后导出的对象互相覆盖。
+- 结论至少保留过滤器、命令、输入文件 hash、输出 hash 和关键包号。
+
+## 9. 纪律
+
+先做协议统计和对象导出，再进入加密或隐写分析。看到乱码时依次排查：流方向、TCP 重组、压缩、编码、密钥和自定义信道。任何“成功解码”都要用长度、校验、重复样本或协议语义复核；题目名称、User-Agent 和文件名只能作为分流线索，不能替代证据。

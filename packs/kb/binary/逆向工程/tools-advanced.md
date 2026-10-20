@@ -1,251 +1,223 @@
-# CTF Reverse - Advanced Tools & Deobfuscation
+---
 
-Advanced tooling for commercial packers/protectors, binary diffing, deobfuscation frameworks, emulation, and symbolic execution beyond angr.
+phase: binary
+vuln_class: [reverse, devirtualization, deobfuscation, patching, symbolic-execution]
+title: 高级工具与去混淆
+summary: 保护壳（VMP/Themida）与混淆（OLLVM/MBA）的共同点是「不值得完全还原」——判据是能否只追踪关键操作。符号执行工具的选择则取决于「要不要走全路径」。
+---
 
-For advanced GDB scripting, Ghidra automation, patching frameworks, and GDB-driven CTF techniques, see [tools-advanced.md](#part-2).
+# 高级工具与去混淆
 
-## Table of Contents
-- [VMProtect Analysis](#vmprotect-analysis)
-  - [Recognition](#recognition)
-  - [Approach](#approach)
-  - [Tools](#tools)
-  - [CTF Strategy](#ctf-strategy)
-- [Themida / WinLicense Analysis](#themida--winlicense-analysis)
-  - [Themida Recognition](#themida-recognition)
-  - [Approach for CTF](#approach-for-ctf)
-- [Binary Diffing](#binary-diffing)
-  - [BinDiff](#bindiff)
-  - [Diaphora](#diaphora)
-- [Deobfuscation Frameworks](#deobfuscation-frameworks)
-  - [D-810 (IDA)](#d-810-ida)
-  - [GOOMBA (Ghidra)](#goomba-ghidra)
-  - [Miasm](#miasm)
-- [Qiling Framework (Emulation)](#qiling-framework-emulation)
-- [Triton (Dynamic Symbolic Execution)](#triton-dynamic-symbolic-execution)
-- [Manticore (Symbolic Execution)](#manticore-symbolic-execution)
-- [Rizin / Cutter](#rizin--cutter)
-- [RetDec (Retargetable Decompiler)](#retdec-retargetable-decompiler)
-- [Custom VM Bytecode Lifting to LLVM IR (Google CTF 2017)](#custom-vm-bytecode-lifting-to-llvm-ir-google-ctf-2017)
+静态工具链见 [[binary/逆向工程/tools.md|静态工具]]；动态工具（Frida/angr/lldb/x64dbg）见 [[binary/逆向工程/tools-dynamic.md|动态工具]]；模拟执行与侧信道见 [[binary/逆向工程/tools-emulation.md|模拟执行]]。
+
+## 0. 判据速查
+
+| 现象 | 第一动作 | 去哪节 |
+|---|---|---|
+| 有 `.vmp0`/`.vmp1` 节，节熵 > 7.5 | VMProtect，别想着完全反虚拟化 | §1 |
+| 有 `.themida`/`.winlice` 节 | 先跑起来 dump 内存，再修 IAT | §2 |
+| 给了两个版本的二进制 | 二进制 diff，看改了哪个函数 | §3 |
+| OLLVM 平坦化 / MBA 表达式 | D-810（IDA）或 GOOMBA（Ghidra） | §4 |
+| 想把表达式树化简 / 追数据流 | Miasm | §4 |
+| 反调试太多补不完 / 异构架构 | Qiling（无调试器痕迹） | §5 |
+| 单路径去混淆 + 污点追踪 | Triton（具体执行 + 符号状态） | §6 |
+| 要探索所有路径 | angr（见动态工具） | §7 |
+| 需要 EVM/智能合约 | Manticore | §7 |
+| 想要 GUI + 内置反编译器 | Cutter | §8 |
+| Ghidra 支持不了的架构 | RetDec | §9 |
+| 自定义 VM 字节码很长 | lift 到 LLVM IR 让 `-O3` 化简 | §10 |
+| 想反向执行 / 回退到上个断点 | `rr` | §11 |
+| 输入字节之间有线性关系 | 位置编码输入 + GDB 抽约束 + ILP 求解 | §12 |
+| 逐位校验（`>>bit & 1`） | 位置编码 + 监控 ZF | §13 |
+| 二进制只有执行权限（`--x`） | LD_PRELOAD 构造函数读 `/proc/self/mem` | §14 |
+| 上百个 `functionN(bit)` 包装 | PEDA 逐位刮取，不需要理解 `f_i` | §15 |
+| 需要改二进制 | Binary Ninja API 或 LIEF | §16 |
 
 ---
 
-## VMProtect Analysis
+## 1. VMProtect
 
-VMProtect virtualizes x86/x64 code into custom bytecode interpreted by a generated VM. One of the most challenging protectors in CTF.
+把 x86/x64 代码虚拟化成自定义字节码，由生成的 VM 解释。CTF 里最难的一档。
 
-### Recognition
+### 识别
 
 ```bash
-# VMProtect signatures
 strings binary | grep -i "vmp\|vmprotect"
-# PE sections: .vmp0, .vmp1 (VMProtect adds its own sections)
-readelf -S binary | grep ".vmp"
-# Large binary with entropy > 7.5 in certain sections
+readelf -S binary | grep ".vmp"        # PE 里是 .vmp0/.vmp1
+# 某些节的熵 > 7.5
 ```
 
-**Key indicators:**
-- `push` / `pop` heavy prologues (VM entry pushes all registers to stack)
-- Large switch-case dispatcher (the VM handler loop)
-- Anti-debug checks embedded in VM handlers
-- Mutation engine: same opcode has different handlers per build
+**四个判据**：
+- `push`/`pop` 极重的序言（VM 入口把所有寄存器压栈）
+- 巨大的 switch-case 分派器（VM handler 循环）
+- 反调试检查嵌在 VM handler 里
+- 变异引擎：同一个操作码在不同构建里 handler 不同
 
-### Approach
+### 思路
 
 ```text
-1. Identify VM entry points — look for pushad/pushaq-like sequences
-2. Find the handler table — large indirect jump (jmp [reg + offset])
-3. Trace handler execution — each handler ends with jump to next
-4. Identify handlers:
-   - vAdd, vSub, vMul, vXor, vNot (arithmetic)
-   - vPush, vPop (stack operations)
-   - vLoad, vStore (memory access)
-   - vJmp, vJcc (control flow)
-   - vRet (VM exit — restores real registers)
-5. Build disassembler for VM bytecode
-6. Simplify / deobfuscate the lifted IL
+1. 找 VM 入口——找 pushad/pushaq 式的序列
+2. 找 handler 表——大的间接跳转 jmp [reg + offset]
+3. 追踪 handler 执行——每个 handler 结尾都跳到下一个
+4. 认 handler：
+   vAdd / vSub / vMul / vXor / vNot   算术
+   vPush / vPop                        栈操作
+   vLoad / vStore                      内存访问
+   vJmp / vJcc                         控制流
+   vRet                                VM 退出（恢复真实寄存器）
+5. 给 VM 字节码写反汇编器
+6. 化简 / 去混淆 lift 出来的 IL
 ```
 
-### Tools
+### 工具
 
-- **VMPAttack** (IDA plugin): Automatically identifies VM handlers
-- **NoVmp**: Devirtualization via VTIL (open-source)
-- **VMProtect devirtualizer scripts**: Community IDA/Binary Ninja scripts
-- **Approach for CTF:** Often easier to trace specific operations (crypto, comparisons) than fully devirtualize
+- **VMPAttack**（IDA 插件）：自动识别 VM handler
+- **NoVmp**：基于 VTIL 的反虚拟化（开源）
+- 社区 IDA/Binary Ninja 反虚拟化脚本
 
-### CTF Strategy
+### CTF 打法
+
+**完全反虚拟化很少是必需的**。只追踪「对你的输入做了什么」：
 
 ```python
-# Trace VM execution dynamically to extract operations on flag
-# Hook VM handler dispatch to log opcode + operands
-
 import frida
 
 script = """
-var vm_dispatch = ptr('0x...');  // Address of handler table jump
+var vm_dispatch = ptr('0x...');   // handler 表跳转地址
 Interceptor.attach(vm_dispatch, {
     onEnter(args) {
-        // Log handler index and stack state
-        var handler_idx = this.context.rax;  // or whichever register
+        var handler_idx = this.context.rax;
         console.log('Handler:', handler_idx, 'RSP:', this.context.rsp);
     }
 });
 """
 ```
 
-**Key insight:** Full devirtualization is rarely needed for CTF. Focus on tracing what operations are performed on your input. Hook comparison/crypto functions called from within the VM.
+**判据**：hook VM 内部调用的比较/加密函数，比反虚拟化整个 VM 快一个数量级。
 
 ---
 
-## Themida / WinLicense Analysis
+## 2. Themida / WinLicense
 
-Similar to VMProtect but with additional anti-debug layers.
+比 VMProtect 多了反调试层。
 
-### Themida Recognition
-- Sections: `.themida`, `.winlice`
-- Extremely heavy anti-debug (kernel-level checks, driver installation)
-- Code mutation + virtualization + packing combined
+**识别**：`.themida`/`.winlice` 节；极重的反调试（内核级检查、装驱动）；变异 + 虚拟化 + 加壳三合一。
 
-### Approach for CTF
-1. **Dump unpacked code:** Let it run, dump process memory after unpacking
-2. **Bypass anti-debug:** ScyllaHide in x64dbg with Themida-specific preset
-3. **Fix imports:** Use Scylla plugin for IAT reconstruction
-4. **Focus on dumped code:** Once unpacked, analyze as normal binary
+### 四步走
 
-```bash
-# x64dbg workflow for Themida:
-1. Load binary
-2. Enable ScyllaHide → Profile: Themida
-3. Run to OEP (Original Entry Point) — may need several attempts
-4. Dump with Scylla: OEP → IAT Autosearch → Get Imports → Dump
-5. Fix dump: Scylla → Fix Dump
-6. Analyze fixed dump in Ghidra/IDA
+1. **dump 解包后的代码**：让它跑起来，解包完 dump 进程内存
+2. **绕反调试**：x64dbg 里 ScyllaHide 选 Themida 专用预设
+3. **修导入表**：Scylla 插件重建 IAT
+4. **分析 dump**：解包后按普通二进制处理
+
+```text
+x64dbg 流程：
+1. 载入二进制
+2. 开 ScyllaHide → Profile: Themida
+3. 跑到 OEP（可能要试几次）
+4. Scylla dump：OEP → IAT Autosearch → Get Imports → Dump
+5. Scylla → Fix Dump
+6. 修好的 dump 拿去 Ghidra/IDA
 ```
 
 ---
 
-## Binary Diffing
+## 3. 二进制 diff
 
-Critical for patch analysis, 1-day exploit development, and CTF challenges that provide two versions of a binary.
+**判据**：题目给了「打过补丁」和「原始」两个版本。diff 直接暴露漏洞或隐藏功能。
 
 ### BinDiff
 
 ```bash
-# Export from IDA/Ghidra first, then diff
-# IDA: File → BinExport → Export as BinExport2
-# Ghidra: Use BinExport plugin
-
-# Command line diffing
+# 先从 IDA/Ghidra 导出：File → BinExport → Export as BinExport2
 bindiff primary.BinExport secondary.BinExport
-# Opens in BinDiff GUI — shows matched/unmatched functions
 ```
 
-**Key metrics:**
-- Similarity score (0.0-1.0) per function pair
-- Changed instructions highlighted
-- Unmatched functions = new/removed code
+**关键指标**：每个函数对的相似度（0.0-1.0）、变化的指令高亮、未匹配函数 = 新增/删除的代码。
 
 ### Diaphora
 
-Free, open-source alternative to BinDiff, runs as IDA plugin.
+免费开源，IDA 插件形式：
 
-```bash
-# In IDA:
-# File → Script file → diaphora.py
-# Export first binary, then open second and diff
-
-# Ghidra version: diaphora_ghidra.py
+```text
+File → Script file → diaphora.py
+# 先导出第一个，再打开第二个做 diff
+# Ghidra 版：diaphora_ghidra.py
 ```
-
-**Useful for CTF:** When challenge provides "patched" and "original" binaries, diff reveals the vulnerability or hidden functionality.
 
 ---
 
-## Deobfuscation Frameworks
+## 4. 去混淆框架
 
-### D-810 (IDA)
+### D-810（IDA）
 
-Pattern-based deobfuscation plugin for IDA Pro. Excellent for OLLVM-obfuscated binaries.
+针对 OLLVM 的模式化去混淆插件。
 
 ```text
-Capabilities:
-- MBA simplification: (a ^ b) + 2*(a & b) → a + b
-- Dead code elimination
-- Opaque predicate removal
-- Constant folding
-- Control flow unflattening (partial)
+能力：
+- MBA 化简：(a ^ b) + 2*(a & b) → a + b
+- 死代码消除
+- 恒定谓词移除
+- 常量折叠
+- 控制流平坦化还原（部分）
 
-Installation: Copy to IDA plugins directory
-Usage: Edit → Plugins → D-810 → Select rules → Apply
+安装：拷到 IDA plugins 目录
+使用：Edit → Plugins → D-810 → 选规则 → Apply
 ```
 
-### GOOMBA (Ghidra)
+### GOOMBA（Ghidra）
 
 ```text
-GOOMBA (Ghidra-based Obfuscated Object Matching and Bytes Analysis):
-- Integrates with Ghidra's P-Code
-- Simplifies MBA expressions
-- Pattern matching for known obfuscation
-
-Installation: Copy .jar to Ghidra extensions
-Usage: Code Browser → Analysis → GOOMBA
+基于 Ghidra 的 P-Code，做 MBA 化简 + 已知混淆的模式匹配
+安装：.jar 拷到 Ghidra 扩展目录
+使用：Code Browser → Analysis → GOOMBA
 ```
 
 ### Miasm
 
-Powerful reverse engineering framework with symbolic execution and IR lifting.
+带符号执行与 IR lift 的逆向框架。
 
 ```python
 from miasm.analysis.binary import Container
 from miasm.analysis.machine import Machine
-from miasm.expression.expression import *
 
-# Load binary and lift to Miasm IR
 cont = Container.from_stream(open("binary", "rb"))
 machine = Machine(cont.arch)
 mdis = machine.dis_engine(cont.bin_stream, loc_db=cont.loc_db)
-
-# Disassemble function
 asmcfg = mdis.dis_multiblock(entry_addr)
 
-# Lift to IR
 lifter = machine.lifter_model_call(loc_db=cont.loc_db)
 ircfg = lifter.new_ircfg_from_asmcfg(asmcfg)
 
-# Symbolic execution
 from miasm.ir.symbexec import SymbolicExecutionEngine
 sb = SymbolicExecutionEngine(lifter)
-# Execute symbolically, then simplify expressions
+# 符号执行后化简表达式
 ```
 
-**Use case:** Deobfuscate expression trees, simplify complex arithmetic, trace data flow through obfuscated code.
+**用途**：化简表达式树、简化复杂算术、追混淆代码里的数据流。
 
 ---
 
-## Qiling Framework (Emulation)
+## 5. Qiling
 
-Cross-platform emulation framework built on Unicorn, with OS-level support (syscalls, filesystem, registry).
+基于 Unicorn 的跨平台模拟框架，带 OS 层支持（syscall、文件系统、注册表）。
 
 ```python
 from qiling import Qiling
 from qiling.const import QL_VERBOSE
 
-# Emulate Linux ELF
-ql = Qiling(["./binary"], "rootfs/x8664_linux",
-            verbose=QL_VERBOSE.DEBUG)
+ql = Qiling(["./binary"], "rootfs/x8664_linux", verbose=QL_VERBOSE.DEBUG)
 
-# Hook specific address
 @ql.hook_address
 def hook_check(ql, address, size):
     if address == 0x401234:
-        ql.arch.regs.rax = 0  # Bypass check
-        ql.log.info("Anti-debug bypassed")
+        ql.arch.regs.rax = 0
+        ql.log.info("反调试已绕过")
 
-# Hook syscall
 @ql.hook_syscall(name="ptrace")
 def hook_ptrace(ql, request, pid, addr, data):
-    return 0  # Always succeed
+    return 0
 
-# Hook API (Windows)
 @ql.set_api("IsDebuggerPresent", target=ql.os.user_defined_api)
 def hook_isdebug(ql, address, params):
     return 0
@@ -253,78 +225,66 @@ def hook_isdebug(ql, address, params):
 ql.run()
 ```
 
-**Advantages over Unicorn:**
-- OS emulation (file I/O, network, registry)
-- Multi-platform (Linux, Windows, macOS, Android, UEFI)
-- Built-in debugger interface
-- Rootfs for library loading
+**比 Unicorn 多的四样**：OS 模拟（文件/网络/注册表）、多平台（Linux/Windows/macOS/Android/UEFI）、内置调试接口、rootfs 加载库。
 
-**CTF use cases:**
-- Emulate binaries for foreign architectures (ARM, MIPS, RISC-V)
-- Bypass all anti-debug at once (no debugger artifacts)
-- Fuzz embedded/IoT firmware without hardware
-- Trace execution without code modification
+**CTF 场景**：异构架构（ARM/MIPS/RISC-V）、一次性绕过所有反调试、无硬件时 fuzz 固件、不改代码就追踪执行。
+
+**关键**：模拟环境里没有调试器痕迹，`ptrace(TRACEME)` 也不会有竞争——反调试天然失效。
 
 ---
 
-## Triton (Dynamic Symbolic Execution)
+## 6. Triton
 
-Pin-based dynamic binary analysis framework with symbolic execution, taint analysis, and AST simplification.
+基于 Pin 的动态二进制分析框架，带符号执行、污点分析、AST 化简。
 
 ```python
 from triton import *
 
 ctx = TritonContext(ARCH.X86_64)
 
-# Load binary sections
 with open("binary", "rb") as f:
-    binary = f.read()
-ctx.setConcreteMemoryAreaValue(0x400000, binary)
+    ctx.setConcreteMemoryAreaValue(0x400000, f.read())
 
-# Symbolize input
 for i in range(32):
     ctx.symbolizeMemory(MemoryAccess(INPUT_ADDR + i, CPUSIZE.BYTE), f"input_{i}")
 
-# Emulate instructions
 pc = ENTRY_POINT
 while pc:
     inst = Instruction(pc, ctx.getConcreteMemoryAreaValue(pc, 16))
     ctx.processing(inst)
 
-    # At comparison point, extract path constraint
     if pc == CMP_ADDR:
         ast = ctx.getPathConstraintsAst()
-        model = ctx.getModel(ast)
-        for k, v in sorted(model.items()):
+        for k, v in sorted(ctx.getModel(ast).items()):
             print(f"input[{k}] = {chr(v.getValue())}", end="")
         break
 
     pc = ctx.getConcreteRegisterValue(ctx.registers.rip)
 ```
 
-**Triton vs angr:**
-| Feature | Triton | angr |
-|---|---|---|
-| Execution | Concrete + symbolic (DSE) | Fully symbolic |
-| Speed | Faster (concrete-driven) | Slower (explores all paths) |
-| Path explosion | Less prone (follows one path) | Major issue |
-| API | C++ / Python | Python |
-| Best for | Single-path deobfuscation, taint tracking | Multi-path exploration |
+### Triton vs angr
 
-**Key use:** Triton excels at deobfuscation — run the program concretely, but track symbolic state, then simplify the collected constraints.
+| 维度 | Triton | angr |
+|---|---|---|
+| 执行方式 | 具体 + 符号（DSE） | 全符号 |
+| 速度 | 快（具体驱动） | 慢（探索所有路径） |
+| 路径爆炸 | 少（只跟一条路） | 主要问题 |
+| API | C++ / Python | Python |
+| 最适合 | 单路径去混淆、污点追踪 | 多路径探索 |
+
+**关键**：Triton 的强项是去混淆——具体跑程序，同时记符号状态，最后化简收集到的约束。
 
 ---
 
-## Manticore (Symbolic Execution)
+## 7. Manticore
 
-Trail of Bits' symbolic execution tool. Similar to angr but with native EVM (Ethereum) support.
+Trail of Bits 的符号执行工具。类似 angr，但原生支持 EVM（以太坊）。
 
 ```python
 from manticore.native import Manticore
 
 m = Manticore("./binary")
 
-# Hook success/failure
 @m.hook(0x401234)
 def success(state):
     buf = state.solve_one_n_batched(state.input_symbols, 32)
@@ -338,109 +298,75 @@ def fail(state):
 m.run()
 ```
 
-**Best for:** EVM/smart contract analysis, simpler Linux binaries. angr is generally more mature for complex RE tasks.
+**判据**：EVM/智能合约首选；简单 Linux 二进制也能用，但复杂逆向 angr 更成熟。
 
 ---
 
-## Rizin / Cutter
+## 8. Rizin / Cutter
 
-Rizin is the maintained fork of radare2. Cutter is its Qt-based GUI.
+Rizin 是 radare2 的维护分支，Cutter 是它的 Qt GUI。
 
 ```bash
-# Rizin CLI (r2-compatible commands)
 rizin -d ./binary
-> aaa                    # Analyze all
-> afl                    # List functions
-> pdf @ main             # Print disassembly
-> VV                     # Visual graph mode
+> aaa
+> afl
+> pdf @ main
+> VV                 # 可视化图模式
 
-# Cutter GUI
-cutter binary           # Open in GUI with decompiler
+cutter binary         # GUI + 反编译器
 ```
 
-**Cutter advantages:**
-- Built-in Ghidra decompiler (via r2ghidra plugin)
-- Graph view, hex editor, debug panel in one GUI
-- Integrated Python/JavaScript scripting console
-- Free and open source
+**Cutter 的优势**：内置 Ghidra 反编译器（r2ghidra 插件）、图视图/十六进制编辑器/调试面板同在一个窗口、集成 Python/JS 脚本控制台。
 
 ---
 
-## RetDec (Retargetable Decompiler)
+## 9. RetDec
 
-LLVM-based decompiler supporting many architectures. Free and open-source.
+基于 LLVM 的可重定向反编译器，支持多架构，免费开源。
 
 ```bash
-# Install
 pip install retdec-decompiler
-# Or use web: https://retdec.com/decompilation/
+# 或网页版 https://retdec.com/decompilation/
 
-# CLI
 retdec-decompiler binary
-# Outputs: binary.c (decompiled C), binary.dsm (disassembly)
+# 产出 binary.c（反编译 C）与 binary.dsm（反汇编）
 
-# Specific function
 retdec-decompiler --select-ranges 0x401000-0x401100 binary
 ```
 
-**Strengths:** Multi-arch support (x86, ARM, MIPS, PowerPC, PIC32), free, produces compilable C. Good for architectures not well-supported by Ghidra.
+**强项**：x86/ARM/MIPS/PowerPC/PIC32 多架构、产出可编译 C、Ghidra 支持不好的架构可用它。
 
 ---
 
-## Custom VM Bytecode Lifting to LLVM IR (Google CTF 2017)
+## 10. 自定义 VM lift 到 LLVM IR
 
-For complex custom VMs, transpile the VM bytecode to LLVM IR and use LLVM's optimization passes to simplify the code, then decompile the optimized IR.
+**判据**：自定义 VM 有几十个寄存器、少量操作码，直接读字节码极难，但一对一映射到 LLVM IR 很容易。
 
-```python
-# Pipeline: VM bytecode → custom disassembler → LLVM IR → optimize → decompile
-# 1. Write disassembler for the custom VM opcodes
-# 2. Emit LLVM IR for each opcode:
-#    INC reg  → %reg = add i32 %reg, 1
-#    CDEC reg → conditional decrement
-#    CALL fn  → call void @fn()
-# 3. Use MCJIT or llc to optimize:
-#    opt -O3 -S vm_lifted.ll -o vm_optimized.ll
-# 4. Load optimized IR in IDA or decompile with RetDec
-# Result: 1300 lines → 150 lines after inlining + constant folding
+```text
+流程：VM 字节码 → 自写反汇编器 → LLVM IR → 优化 → 反编译
+1. 给自定义操作码写反汇编器
+2. 每个操作码产出 IR：
+   INC reg  → %reg = add i32 %reg, 1
+   CDEC reg → 条件减
+   CALL fn  → call void @fn()
+3. 用 llc 或 MCJIT 优化：
+   opt -O3 -S vm_lifted.ll -o vm_optimized.ll
+4. 把优化后的 IR 载入 IDA 或用 RetDec 反编译
+结果：1300 行 → 150 行
 ```
 
-**Key insight:** LLVM's optimization passes (inlining, constant folding, dead code elimination) dramatically simplify lifted VM bytecode. A custom VM with 26 registers and 3 opcodes that produces 1300 lines of IL reduces to ~150 lines after `-O3`, revealing the underlying algorithm (e.g., Collatz sequence computation).
+**关键**：LLVM 的内联、常量折叠、死代码消除会把 lift 出来的 VM 字节码大幅化简。一个 26 寄存器、3 操作码的自定义 VM 产生 1300 行 IL，`-O3` 后剩约 150 行，底层算法（比如 Collatz 序列）就露出来了。
 
 ---
 
-# Part 2
+## 11. GDB 高级用法
 
-Advanced GDB scripting, Ghidra automation, patching frameworks, and CTF-specific GDB-driven techniques. Continuation of [[binary/逆向工程/tools-advanced.md|tools-advanced.md]].
-
-## Table of Contents
-- [Advanced GDB Techniques](#advanced-gdb-techniques)
-  - [Python Scripting](#python-scripting)
-  - [Brute-Force with GDB Script](#brute-force-with-gdb-script)
-  - [Conditional Breakpoints](#conditional-breakpoints)
-  - [Watchpoints](#watchpoints)
-  - [Reverse Debugging (rr)](#reverse-debugging-rr)
-  - [GDB Dashboard / GEF / pwndbg](#gdb-dashboard--gef--pwndbg)
-- [Advanced Ghidra Scripting](#advanced-ghidra-scripting)
-- [Patching Strategies](#patching-strategies)
-  - [Binary Ninja Patching (Python API)](#binary-ninja-patching-python-api)
-  - [LIEF (Library for Instrumenting Executable Formats)](#lief-library-for-instrumenting-executable-formats)
-- [GDB Constraint Extraction with ILP/LP Solver (BackdoorCTF 2017)](#gdb-constraint-extraction-with-ilplp-solver-backdoorctf-2017)
-- [GDB Position-Encoded Input with Zero Flag Monitoring (EKOPARTY 2017)](#gdb-position-encoded-input-with-zero-flag-monitoring-ekoparty-2017)
-- [LD_PRELOAD to Dump Execute-Only Binary (BackdoorCTF 2017)](#ld_preload-to-dump-execute-only-binary-backdoorctf-2017)
-- [PEDA current_inst Bit-by-Bit Flag Scraper (CONFidence CTF 2019 Teaser)](#peda-current_inst-bit-by-bit-flag-scraper-confidence-ctf-2019-teaser)
-
----
-
-## Advanced GDB Techniques
-
-### Python Scripting
+### Python 脚本：日志型断点
 
 ```python
-# ~/.gdbinit or source from GDB
 import gdb
 
 class TraceCompare(gdb.Breakpoint):
-    """Log all comparison operations."""
     def __init__(self, addr):
         super().__init__(f"*{addr}", gdb.BP_BREAKPOINT)
 
@@ -449,54 +375,19 @@ class TraceCompare(gdb.Breakpoint):
         rdi = int(frame.read_register("rdi"))
         rsi = int(frame.read_register("rsi"))
         rdx = int(frame.read_register("rdx"))
-        # Read compared buffers
-        inferior = gdb.selected_inferior()
-        buf1 = inferior.read_memory(rdi, rdx).tobytes()
-        buf2 = inferior.read_memory(rsi, rdx).tobytes()
-        print(f"memcmp({buf1!r}, {buf2!r}, {rdx})")
-        return False  # Don't stop, just log
-
-# Usage in GDB:
-# (gdb) source trace_cmp.py
-# (gdb) python TraceCompare(0x401234)
+        inf = gdb.selected_inferior()
+        print(f"memcmp({inf.read_memory(rdi, rdx).tobytes()!r}, "
+              f"{inf.read_memory(rsi, rdx).tobytes()!r}, {rdx})")
+        return False          # 不停，只记录
 ```
 
-### Brute-Force with GDB Script
-
-```python
-# Byte-by-byte brute force via GDB Python API
-import gdb, string
-
-def bruteforce_flag(check_addr, success_addr, fail_addr, flag_len):
-    flag = []
-    for pos in range(flag_len):
-        for ch in string.printable:
-            candidate = ''.join(flag) + ch + 'A' * (flag_len - pos - 1)
-            gdb.execute('start', to_string=True)
-            gdb.execute(f'b *{check_addr}', to_string=True)
-            # Write candidate to stdin pipe
-            # ... (setup input)
-            gdb.execute('continue', to_string=True)
-            rip = int(gdb.parse_and_eval('$rip'))
-            if rip == success_addr:
-                flag.append(ch)
-                break
-        gdb.execute('delete breakpoints', to_string=True)
-    return ''.join(flag)
-```
-
-### Conditional Breakpoints
+### 条件断点 / 忽略次数 / 只记录
 
 ```bash
-# Break only when register has specific value
 (gdb) b *0x401234 if $rax == 0x41
 (gdb) b *0x401234 if *(char*)$rdi == 'f'
+(gdb) ignore 1 99          # 跳过前 99 次，第 100 次才停
 
-# Break on Nth hit
-(gdb) b *0x401234
-(gdb) ignore 1 99    # Skip first 99 hits, break on 100th
-
-# Log without stopping
 (gdb) b *0x401234
 (gdb) commands
 > silent
@@ -505,254 +396,112 @@ def bruteforce_flag(check_addr, success_addr, fail_addr, flag_len):
 > end
 ```
 
-### Watchpoints
+### 观察点
 
 ```bash
-# Hardware watchpoint — break when memory changes
-(gdb) watch *(int*)0x601050        # Break on write to address
-(gdb) rwatch *(int*)0x601050       # Break on read
-(gdb) awatch *(int*)0x601050       # Break on read or write
-
-# Watch a variable by name (needs debug symbols)
-(gdb) watch flag_buffer[0]
-
-# Conditional watchpoint
+(gdb) watch  *(int*)0x601050     # 写时断
+(gdb) rwatch *(int*)0x601050     # 读时断
+(gdb) awatch *(int*)0x601050     # 读或写都断
 (gdb) watch *(int*)0x601050 if *(int*)0x601050 == 0x42
 ```
 
-### Reverse Debugging (rr)
+### 反向调试（rr）
 
 ```bash
-# Record execution
 rr record ./binary
-# Replay with reverse execution support
 rr replay
 
-# In rr replay (GDB commands plus):
-(gdb) reverse-continue     # Run backward to previous breakpoint
-(gdb) reverse-stepi        # Step backward one instruction
-(gdb) reverse-next         # Reverse next
-(gdb) when                 # Show current event number
-
-# Set checkpoint and return to it
+(gdb) reverse-continue     # 倒着跑到上一个断点
+(gdb) reverse-stepi        # 反向单步
 (gdb) checkpoint
-(gdb) restart 1           # Return to checkpoint 1
+(gdb) restart 1            # 回到检查点 1
 ```
 
-**Key use:** When you step past the critical moment, reverse back instead of restarting. Invaluable for anti-debug that corrupts state.
+**判据**：单步走过头了、或反调试破坏状态时，倒回去比重跑一遍省事得多。
 
-### GDB Dashboard / GEF / pwndbg
+### pwndbg / GEF
 
-```bash
-# pwndbg (most popular for CTF)
-# https://github.com/pwndbg/pwndbg
-git clone https://github.com/pwndbg/pwndbg && cd pwndbg && ./setup.sh
+```text
+pwndbg 常用：
+  context            寄存器/栈/代码/回溯
+  vmmap              内存映射
+  search -s "flag{"  内存搜字符串
+  telescope $rsp 20  智能栈 dump
+  cyclic 200         De Bruijn 模式
+  got / plt          GOT / PLT 表
 
-# Key pwndbg commands:
-pwndbg> context           # Show registers, stack, code, backtrace
-pwndbg> vmmap             # Memory map (like /proc/self/maps)
-pwndbg> search -s "flag{" # Search memory for string
-pwndbg> telescope $rsp 20 # Smart stack dump
-pwndbg> cyclic 200        # Generate De Bruijn pattern
-pwndbg> hexdump $rdi 64   # Pretty hex dump
-pwndbg> got               # Show GOT entries
-pwndbg> plt               # Show PLT entries
-
-# GEF (alternative)
-# https://github.com/hugsy/gef
-bash -c "$(curl -fsSL https://gef.blah.cat/sh)"
-
-# Key GEF commands:
-gef> xinfo $rdi           # Detailed info about address
-gef> checksec             # Binary security features
-gef> heap chunks          # Heap chunk listing
-gef> pattern create 100   # De Bruijn pattern
+GEF 常用：
+  xinfo $rdi         地址详细信息
+  checksec           保护
+  heap chunks        堆块列表
+  pattern create 100 模式
 ```
 
 ---
 
-## Advanced Ghidra Scripting
+## 12. GDB 抽线性约束 + ILP 求解
 
-```python
-# Ghidra Python (Jython) — run via Script Manager or headless
+**判据**：二进制对输入字节之间施加**线性算术关系**（求和、求差）。
 
-# Batch rename functions matching a pattern
-from ghidra.program.model.symbol import SourceType
-fm = currentProgram.getFunctionManager()
-for func in fm.getFunctions(True):
-    if func.getName().startswith("FUN_"):
-        # Check if function contains specific instruction pattern
-        body = func.getBody()
-        inst_iter = currentProgram.getListing().getInstructions(body, True)
-        for inst in inst_iter:
-            if inst.getMnemonicString() == "CPUID":
-                func.setName("anti_vm_check_" + hex(func.getEntryPoint().getOffset()),
-                            SourceType.USER_DEFINED)
-                break
-
-# Extract all XOR constants from a function
-def extract_xor_constants(func):
-    """Find all XOR operations and their immediate operands."""
-    constants = []
-    body = func.getBody()
-    inst_iter = currentProgram.getListing().getInstructions(body, True)
-    for inst in inst_iter:
-        if inst.getMnemonicString() == "XOR":
-            for i in range(inst.getNumOperands()):
-                op = inst.getOpObjects(i)
-                if op and hasattr(op[0], 'getValue'):
-                    constants.append(int(op[0].getValue()))
-    return constants
-
-# Bulk decompile and search for pattern
-from ghidra.app.decompiler import DecompInterface
-decomp = DecompInterface()
-decomp.openProgram(currentProgram)
-
-for func in fm.getFunctions(True):
-    result = decomp.decompileFunction(func, 30, monitor)
-    if result.depiledFunction():
-        code = result.getDecompiledFunction().getC()
-        if "strcmp" in code or "memcmp" in code:
-            print(f"Comparison in {func.getName()} at {func.getEntryPoint()}")
-```
-
----
-
-## Patching Strategies
-
-### Binary Ninja Patching (Python API)
-
-```python
-import binaryninja as bn
-
-bv = bn.open_view("binary")
-
-# NOP out instruction
-bv.write(0x401234, b"\x90" * 5)  # 5-byte NOP
-
-# Patch conditional jump (JNZ → JZ)
-bv.write(0x401234, b"\x74")  # 0x75 (JNZ) → 0x74 (JZ)
-
-# Insert always-true (mov eax, 1; ret)
-bv.write(0x401234, b"\xb8\x01\x00\x00\x00\xc3")
-
-bv.save("patched")
-```
-
-### LIEF (Library for Instrumenting Executable Formats)
-
-```python
-import lief
-
-# Parse and modify ELF/PE/Mach-O
-binary = lief.parse("binary")
-
-# Add a new section
-section = lief.ELF.Section(".patch")
-section.content = list(b"\xcc" * 0x100)
-section.type = lief.ELF.SECTION_TYPES.PROGBITS
-section.flags = lief.ELF.SECTION_FLAGS.EXECINSTR | lief.ELF.SECTION_FLAGS.ALLOC
-binary.add(section)
-
-# Modify entry point
-binary.header.entrypoint = 0x401000
-
-# Hook imported function
-binary.patch_pltgot("strcmp", 0x401000)
-
-binary.write("patched")
-```
-
-**LIEF advantages:** Cross-format (ELF, PE, Mach-O), Python API, can add sections/segments, modify headers, patch imports.
-
----
-
-## GDB Constraint Extraction with ILP/LP Solver (BackdoorCTF 2017)
-
-When a binary enforces linear arithmetic relationships between input bytes, extract constraints automatically via GDB and solve with an ILP solver.
-
-**Technique:** Send position-encoded input (`input[i] = i`) so that when a comparison fires, you know exactly which positions are involved and what their sum/difference must equal. Collect all constraints from logged comparisons, then feed to PuLP or Gurobi.
+**手法**：发位置编码输入（`input[i] = i`），这样比较触发时就能知道涉及哪几个位置、它们的和/差应该等于多少。收集全部约束后交给 ILP 求解器。
 
 ```python
 from pulp import *
 
-n = 32  # flag length
+n = 32
 prob = LpProblem("crackme", LpMinimize)
 x = [LpVariable(f'x{i}', 32, 126, cat='Integer') for i in range(n)]
-prob += 0  # dummy objective
+prob += 0
 
-# Constraints extracted via GDB automation (input[i]=i, monitor comparisons):
 prob += x[3] + x[7] == 0xAB
 prob += x[1] - x[5] == 0x0C
-# ... add all extracted constraints ...
+# ... 全部抽到的约束
 
-# Constrain to printable ASCII
 for xi in x:
     prob += xi >= 32
     prob += xi <= 126
 
 prob.solve(PULP_CBC_CMD(msg=0))
-flag = ''.join(chr(int(value(xi))) for xi in x)
-print("Flag:", flag)
+print(''.join(chr(int(value(xi))) for xi in x))
 ```
 
-**GDB automation to extract constraints:**
-```python
-# In GDB Python: set input[i]=i, run, log every CMP instruction result
-import gdb
-
-class CmpLogger(gdb.Breakpoint):
-    def stop(self):
-        frame = gdb.selected_frame()
-        # Read compared values, map back to input indices via position encoding
-        return False
-```
-
-**Key insight:** When a binary enforces linear arithmetic relationships between input bytes, ILP solvers directly find the satisfying assignment once constraints are extracted via GDB automation.
-
-**References:** BackdoorCTF 2017
+**关键**：位置编码让「比较的是什么位置」自解释，不需要反推索引映射。
 
 ---
 
-## GDB Position-Encoded Input with Zero Flag Monitoring (EKOPARTY 2017)
+## 13. 位置编码 + 零标志监控
 
-Send input where `input[i] = i` (position-encoded). Single-step through the binary monitoring the CPU zero flag (ZF). When ZF is set at a comparison involving a specific position's value, the comparison matched — log the expected value for that position.
+**判据**：二进制逐字节比较，且能单步。
+
+发 `input[i] = i`，单步监控 ZF。当 ZF 在某次比较处被置位，说明该位置的值就等于它自己的索引——**那个索引本身就是期望值**。
 
 ```python
 import gdb
 
-# Script: single-step binary with position-encoded input, watch ZF
 class ZFMonitor(gdb.Breakpoint):
     def stop(self):
         zf = (int(gdb.parse_and_eval('$eflags')) >> 6) & 1
         if zf:
             rip = int(gdb.parse_and_eval('$rip'))
-            # Disassemble at rip to find the compared immediate
             disasm = gdb.execute(f'x/1i {rip-5}', to_string=True)
             print(f"ZF set at {rip:#x}: {disasm.strip()}")
         return False
 
-# Run once with input b'\x00\x01\x02\x03...\x1f'
-# ZF fires when comparison matches the position's own value -> that IS the key byte
+# 输入 b'\x00\x01\x02...\x1f' 跑一遍
 ```
 
-Maps each input byte to its required value in one pass without manual reversing.
-
-**Key insight:** Position-encoded input (`input[i]=i`) combined with zero flag monitoring reveals the full key/password in one pass — the zero flag fires when the expected value for position i equals i itself.
-
-**References:** EKOPARTY CTF 2017
+**关键**：一趟就能把每个输入字节的期望值全拿到，不需要手工逆向。
 
 ---
 
-## LD_PRELOAD to Dump Execute-Only Binary (BackdoorCTF 2017)
+## 14. LD_PRELOAD dump 只有执行权限的二进制
 
-A binary has execute-only permissions (mode `--x`, no read bit). The file cannot be read directly or with standard tools, but the kernel still maps it into memory on execution.
+**判据**：二进制权限是 `--x`（没有读位）。直接读不了，但内核执行时仍会把它映射进内存。
 
-LD_PRELOAD a shared library with a constructor that runs inside the process and reads its own memory via `/proc/self/mem`:
+用 LD_PRELOAD 一个带构造函数的共享库，在进程内通过 `/proc/self/mem` 读自己的映射：
 
 ```c
-// dump_xo.c — compile: gcc -shared -fPIC -o dump_xo.so dump_xo.c
+// gcc -shared -fPIC -o dump_xo.so dump_xo.c
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -762,7 +511,6 @@ __attribute__((constructor)) void dump() {
     char line[256];
     unsigned long base = 0, end = 0;
 
-    // Find the execute-only binary's mapping (r-xp or --xp)
     while (fgets(line, sizeof(line), maps)) {
         if (strstr(line, "binary_name")) {
             sscanf(line, "%lx-%lx", &base, &end);
@@ -782,30 +530,28 @@ __attribute__((constructor)) void dump() {
     fwrite(buf, 1, size, out);
     fclose(out);
 }
-// Usage: LD_PRELOAD=./dump_xo.so ./binary_xo
+// 用法：LD_PRELOAD=./dump_xo.so ./binary_xo
 ```
 
-**Key insight:** Execute-only prevents file reading but not execution. LD_PRELOAD constructors run inside the process where `/proc/self/mem` provides access to mapped memory regardless of file permissions.
-
-**References:** BackdoorCTF 2017
+**关键**：只有执行权限能防「读文件」，防不住「执行」。构造函数在进程内跑，`/proc/self/mem` 无视文件权限。
 
 ---
 
-## PEDA current_inst Bit-by-Bit Flag Scraper (CONFidence CTF 2019 Teaser)
+## 15. 逐位刮取（黑盒预言机）
 
-**Pattern (Elementary):** A large obfuscated validator dispatches one `call functionN` per flag bit. Each check reads `flag[offset] >> bit & 1`, calls an opaque `functionN(that_bit)`, and compares the return with a constant. Rather than decompile hundreds of wrapper functions, drive GDB+PEDA to step through the dispatcher and read `edi` (argument) / `eax` (return) directly:
+**判据**：庞大的混淆校验器，每个 flag 位分派一次 `call functionN`。每个检查读 `flag[offset] >> bit & 1`，调用一个不透明的 `functionN(那一位)`，再把返回值和常量比较。
+
+**不要**去反编译几百个包装函数——用 PEDA 单步走分派器，直接读 `edi`（参数）与 `eax`（返回值）。
 
 ```python
-# peda.current_inst(rip) returns (addr, mnemonic_str); use it as a cheap
-# disassembler to track the shift/add offsets passed to each checker.
 def get_current_inst():
     return peda.current_inst(peda.getreg("rip"))[1]
 
 peda.execute('file ./elementary')
 peda.set_breakpoint(0x555555554000 + 0xCEB88)
-peda.execute("run < _input")         # _input = 'A' * 103 (length only)
+peda.execute("run < _input")          # _input = 'A' * 103，只需要长度对
 
-flag = ['0'] * 832                    # 104 bytes * 8 bits
+flag = ['0'] * 832                     # 104 字节 × 8 位
 while peda.getreg("rip") < 0x555555554000 + 0xD827F:
     offset = bit = 0
     while 'and' != get_current_inst()[:3]:
@@ -813,19 +559,68 @@ while peda.getreg("rip") < 0x555555554000 + 0xD827F:
         if cur == 'mov    rax,QWORD PTR [rbp-0x18]':
             offset = 0; bit = 0
         elif cur.startswith('sar'):
-            bit = int(cur.split(',')[1], 16)     # shift count -> bit index
+            bit = int(cur.split(',')[1], 16)      # 移位数 → 位索引
         elif cur.startswith('add'):
-            offset = int(cur.split(',')[1], 16)  # byte index in flag
+            offset = int(cur.split(',')[1], 16)   # 字节索引
         peda.execute('si')
     while 'call' not in get_current_inst(): peda.execute('si')
     tmp = peda.getreg('edi')
     peda.execute('ni')
     ret = peda.getreg('eax')
-    # Oracle: if return == arg the checker voted "bit=0", else "bit=1"
+    # 预言机：返回等于参数 → 该位判 0，否则判 1
     flag[offset * 8 + bit] = '0' if (ret != 0 and tmp == ret) else '1'
-    peda.execute('set $eax=0')        # neutralise so loop continues
+    peda.execute('set $eax=0')                    # 中和返回值，让循环继续
 ```
 
-**Key insight:** Any validator of the form `f_i(bit_i) == const_i` is a black-box oracle — you do not need to understand `f_i`. PEDA's `current_inst()` + `si`/`ni` give a 30-line Python scraper that harvests all bits in one run; parsing the preceding `sar imm` / `add imm` instructions recovers `(byte_offset, bit_index)` without disassembling the validator's arithmetic.
+**关键**：任何形如 `f_i(bit_i) == const_i` 的校验器都是黑盒预言机——**不需要理解 `f_i`**。`current_inst()` + `si`/`ni` 三十行就能一趟刮完；解析前面的 `sar imm` / `add imm` 就能拿到 `(字节偏移, 位索引)`，不用反汇编校验器的算术。
 
-**References:** CONFidence CTF 2019 Teaser — Elementary, writeup 13927
+---
+
+## 16. 改二进制
+
+### Binary Ninja API
+
+```python
+import binaryninja as bn
+
+bv = bn.open_view("binary")
+
+bv.write(0x401234, b"\x90" * 5)                    # NOP 掉
+bv.write(0x401234, b"\x74")                        # JNZ(0x75) → JZ(0x74)
+bv.write(0x401234, b"\xb8\x01\x00\x00\x00\xc3")    # mov eax,1; ret
+
+bv.save("patched")
+```
+
+### LIEF
+
+```python
+import lief
+
+binary = lief.parse("binary")
+
+section = lief.ELF.Section(".patch")
+section.content = list(b"\xcc" * 0x100)
+section.type = lief.ELF.SECTION_TYPES.PROGBITS
+section.flags = lief.ELF.SECTION_FLAGS.EXECINSTR | lief.ELF.SECTION_FLAGS.ALLOC
+binary.add(section)
+
+binary.header.entrypoint = 0x401000
+binary.patch_pltgot("strcmp", 0x401000)
+
+binary.write("patched")
+```
+
+**LIEF 的优势**：跨格式（ELF/PE/Mach-O）、能加节/段、改头、patch 导入表。
+
+---
+
+## 17. 纪律
+
+- **保护壳题不要追完全反虚拟化**。追踪「对输入做了什么」就够了，hook 比较/加密函数即可。
+- **Themida/VMProtect 的第一动作是 dump**，不是分析。壳里没有真代码。
+- **符号执行工具按「要不要走全路径」选**：单路径去混淆用 Triton，多路径探索用 angr。
+- **自定义 VM 一律先试 lift 到 LLVM IR**。让编译器做化简，比手写去混淆省一个数量级。
+- **黑盒预言机 > 理解实现**：`f_i(bit) == const` 这种形状直接刮，不要读 `f_i`。
+- **位置编码是通用加速器**：`input[i]=i` 让「比较的是哪一位」自解释，配 ZF 监控或约束抽取都能一趟拿全。
+- **报的是「值不知道」还是「结构看不懂」**：前者下断取，后者才需要去混淆框架。

@@ -1,274 +1,264 @@
-# CTF Reverse - Runtime Patching and Oracle Techniques
-
-Malware unpacking, multi-stage shellcode, timing/signal side channels, and CTF-specific oracle attacks that rely on runtime state rather than static pattern matching.
-
-For static reversing patterns (custom VMs, anti-debug, self-modifying code, LLVM obfuscation, S-box generation, SECCOMP/BPF, memory dumps, x86-64 gotchas, byte-wise transforms), see [[binary/逆向工程/patterns.md|patterns.md]].
-
-## Table of Contents
-- [Malware Anti-Analysis Bypass via Patching](#malware-anti-analysis-bypass-via-patching)
-- [Multi-Stage Shellcode Loaders](#multi-stage-shellcode-loaders)
-- [Timing Side-Channel Attack](#timing-side-channel-attack)
-- [Multi-Thread Anti-Debug with Decoy + Signal Handler Mixed Boolean-Arithmetic (ApoorvCTF 2026)](#multi-thread-anti-debug-with-decoy--signal-handler-mixed-boolean-arithmetic-apoorvctf-2026)
-- [INT3 Patch + Coredump Brute-Force Oracle (Pwn2Win 2016)](#int3-patch--coredump-brute-force-oracle-pwn2win-2016)
-- [Signal Handler Chain + LD_PRELOAD Oracle (Nuit du Hack 2016)](#signal-handler-chain--ld_preload-oracle-nuit-du-hack-2016)
-- [printf Format String VM Decompilation to Z3 (SECCON 2017)](#printf-format-string-vm-decompilation-to-z3-seccon-2017)
-- [Quadtree Recursive Image Format Parser (Google CTF Quals 2018)](#quadtree-recursive-image-format-parser-google-ctf-quals-2018)
-
 ---
 
-## Malware Anti-Analysis Bypass via Patching
-
-**Pattern (Carrot):** Malware with multiple environment checks before executing payload.
-
-**Common checks to patch:**
-| Check | Technique | Patch |
-|-------|-----------|-------|
-| `ptrace(PTRACE_TRACEME)` | Anti-debug | Change `cmp -1` to `cmp 0` |
-| `sleep(150)` | Anti-sandbox timing | Change sleep value to 1 |
-| `/proc/cpuinfo` "hypervisor" | Anti-VM | Flip `JNZ` to `JZ` |
-| "VMware"/"VirtualBox" strings | Anti-VM | Flip `JNZ` to `JZ` |
-| `getpwuid` username check | Environment | Flip comparison |
-| `LD_PRELOAD` check | Anti-hook | Skip check |
-| Fan count / hardware check | Anti-VM | Flip `JLE` to `JGE` |
-| Hostname check | Environment | Flip `JNZ` to `JZ` |
-
-**Ghidra patching workflow:**
-1. Find check function, identify the conditional jump
-2. Click on instruction → `Ctrl+Shift+G` → modify opcode
-3. For `JNZ` (0x75) → `JZ` (0x74), or vice versa
-4. For immediate values: change operand bytes directly
-5. Export: press `O` → choose "Original File" format
-6. `chmod +x` the patched binary
-
-**Server-side validation bypass:**
-- If patched binary sends system info to remote server, patch the data too
-- Modify string addresses in data-gathering functions
-- Change format strings to embed correct values directly
-
+phase: binary
+vuln_class: [reverse, patching, side-channel, oracle]
+title: 运行时补丁与预言机手法
+summary: 不逆逻辑，只观测状态。判据是「校验结果能通过崩溃、信号、耗时、coredump 被外部读到」——把逆向题变成侧信道题。
 ---
 
-## Multi-Stage Shellcode Loaders
+# 运行时补丁与预言机手法
 
-**Pattern (I Heard You Liked Loaders):** Nested shellcode with XOR decode loops and anti-debug.
+静态模式识别（自定义 VM、反调试、自修改代码、LLVM 混淆、S-box 生成、SECCOMP/BPF、内存 dump、x86-64 陷阱、逐字节变换）见 [[binary/逆向工程/patterns.md|patterns]]；模拟执行见 [[binary/逆向工程/tools-emulation.md|模拟执行]]；反分析对抗见 [[binary/逆向工程/anti-analysis-ctf.md|反分析对抗]]。
 
-**Debugging workflow:**
-1. Break at `call rax` in launcher, step into shellcode
-2. Bypass ptrace anti-debug: step to syscall, `set $rax=0`
-3. Step through XOR decode loop (or break on `int3` if hidden)
-4. Repeat for each stage until final payload
+## 0. 判据速查
 
-**Flag extraction from `mov` instructions:**
-```python
-# Final stage loads flag 4 bytes at a time via mov ebx, value
-# Extract little-endian 4-byte chunks
-values = [0x6174654d, 0x7b465443, ...]  # From disassembly
-flag = b''.join(v.to_bytes(4, 'little') for v in values)
+| 观察到的现象 | 说明 | 去哪节 |
+|---|---|---|
+| 校验失败/成功有可观测的时序差 | 时间侧信道 | §3 |
+| 校验过程会崩（`ud2`、`int3`、信号） | 崩溃即预言机 | §5、§6 |
+| 装了一长串信号处理器，逐个替换 | 信号链即侧信道 | §6 |
+| 有 `%hhn` 大量重复的格式串 | 格式串当 VM，可反编译 | §7 |
+| 自定义图片/压缩格式 | 几乎都是四叉树/LZ77/霍夫曼 | §8 |
+| 多层嵌套 shellcode，带 XOR 解码 | 逐层跟到最后一层 | §2 |
+| 恶意样本有一堆环境检查 | 打补丁过掉，别分析检查本身 | §1 |
+
+**核心思路**：逆向题的难点往往是「逻辑看不懂」。但如果能从外部观测到中间状态，就不需要看懂 —— 把「求解」换成「试 + 观测」。
+
+## 1. 补丁掉反分析
+
+**不要分析检查逻辑本身**，直接改判断。
+
+| 检查 | 手法 | 补丁 |
+|---|---|---|
+| `ptrace(PTRACE_TRACEME)` | 反调试 | `cmp -1` → `cmp 0` |
+| `sleep(150)` | 反沙箱计时 | 睡眠值改成 1 |
+| `/proc/cpuinfo` 含 `hypervisor` | 反虚拟机 | `JNZ` ↔ `JZ` |
+| `VMware`/`VirtualBox` 字符串 | 反虚拟机 | `JNZ` ↔ `JZ` |
+| `getpwuid` 用户名 | 环境 | 反转比较 |
+| `LD_PRELOAD` 检查 | 反 hook | 跳过检查 |
+| CPU 核心数 / 硬件信息 | 反虚拟机 | `JLE` ↔ `JGE` |
+| 主机名 | 环境 | `JNZ` ↔ `JZ` |
+
+Ghidra 补丁流程：
+
+```text
+1. 定位检查函数里的条件跳转
+2. 点中指令 → Ctrl+Shift+G → 改 opcode
+3. JNZ(0x75) ↔ JZ(0x74)；立即数直接改操作数字节
+4. 导出：按 O → 选 "Original File" 格式
+5. chmod +x 补丁后的二进制
 ```
 
----
+**如果补丁后仍失败，说明还有服务端校验**：样本会把系统信息发给远端。这时要一并改数据采集函数返回的值，或把格式串改成直接嵌入正确值。
 
-## Timing Side-Channel Attack
+## 2. 多层 shellcode
 
-**Pattern (Clock Out):** Validation time varies per correct character (longer sleep on match).
+```text
+1. 在 launcher 的 call rax 下断，单步进入 shellcode
+2. 过 ptrace 反调试：单步到 syscall，set $rax=0
+3. 单步过 XOR 解码循环（或在下一条 int3 上断）
+4. 每层重复，直到最后一层
+```
 
-**Exploitation:**
+最后一层常把 flag 按 4 字节 `mov` 立即数加载，直接从反汇编里抽：
+
 ```python
-import time
-from pwn import *
+values = [0x6174654d, 0x7b465443, ...]     # 从反汇编抄
+flag = b"".join(v.to_bytes(4, "little") for v in values)
+```
+
+**小端序**：`0x6174654d` 是 `Met a`（'M','e','t','a'），不是 `Ma te`。抄的时候别按书写顺序读。
+
+## 3. 时间侧信道
+
+校验耗时随「正确字符数」变化（匹配越多 sleep 越久）：
+
+```python
+import time, string
+from pwn import remote
 
 flag = ""
-for pos in range(flag_length):
-    best_char, best_time = '', 0
+for pos in range(flag_len):
+    best_char, best_time = "", 0
     for c in string.printable:
         io = remote(host, port)
-        start = time.time()
-        io.sendline((flag + c).ljust(total_len, 'X'))
+        t0 = time.time()
+        io.sendline((flag + c).ljust(total_len, "X"))
         io.recvall()
-        elapsed = time.time() - start
-        if elapsed > best_time:
-            best_time = elapsed
-            best_char = c
+        dt = time.time() - t0
+        if dt > best_time:
+            best_time, best_char = dt, c
         io.close()
     flag += best_char
 ```
 
----
+要点：
 
-## Multi-Thread Anti-Debug with Decoy + Signal Handler Mixed Boolean-Arithmetic (ApoorvCTF 2026)
+- **每字符单独建连接**，复用连接会带入上次的状态。
+- **先测噪声**：同一输入跑 5 次，看耗时抖动。抖动大于信号差就没法用，要换思路。
+- 差分更稳：比较「疑似正确」和「随机错误」两组的中位数，而不是单次最大值。
+- 填充到固定总长（`.ljust`），否则长度差本身会影响耗时。
 
-**Pattern (A Golden Experience Requiem):** Multi-threaded binary with layered anti-analysis: Thread 1 performs decoy operations (fake AES + deliberate crash via `ud2`), Thread 2 does the real flag computation in a SIGSEGV signal handler using Mixed Boolean Arithmetic (MBA), Thread 3 erases memory to prevent post-mortem analysis.
+## 4. 多线程反调试 + MBA 信号处理器
 
-**Thread layout:**
-| Thread | Purpose | Trap |
-|--------|---------|------|
-| Thread 1 | Decoy: AES-looking operations → `ud2` crash | Analysts waste time reversing fake crypto |
-| Thread 2 | Real flag: SIGSEGV handler with MBA transforms | Hidden in signal handler, not main code path |
-| Thread 3 | Memory eraser: zeros out flag data after computation | Prevents memory dumping |
-| Main | rdtsc-based anti-debug timing check | Penalizes debugger-attached execution |
+**典型布局**：
 
-**Solving approach — pure Python emulation of MBA logic:**
+| 线程 | 目的 | 陷阱 |
+|---|---|---|
+| 线程 1 | 假的 AES 运算 → `ud2` 崩溃 | 让分析者去逆假加密 |
+| 线程 2 | SIGSEGV 处理器里做真实计算（MBA 变换） | 逻辑不在主路径上 |
+| 线程 3 | 计算完清零内存 | 防内存 dump |
+| 主线程 | `rdtsc` 计时检测 | 挂调试器就输出错误结果 |
+
+**识别特征**：多个 `pthread_create`、`signal(SIGSEGV, ...)` / `sigaction`、`ud2` 指令、`rdtsc`、SHA-256 初值常量（`0x6a09e667`…）被当查找表用而不是做哈希。
+
+**解法：从汇编提取 MBA 逻辑，用 Python 重实现，不要跑原程序。**
+
 ```python
-# MBA helpers (extracted from assembly)
-def mba_add(a, b): return (a + b) & 0xff
-def mba_xor(a, b): return (a ^ b) & 0xff
+def mba_add(a, b): return (a + b) & 0xFF
+def mba_xor(a, b): return (a ^ b) & 0xFF
 
 def mba_transform(i):
-    """Position-dependent transform from signal handler."""
-    val = (i * 7 + 0x3f) & 0xff
-    rotated = ((i << 3) | (i >> 5)) & 0xff
+    val     = (i * 7 + 0x3F) & 0xFF
+    rotated = ((i << 3) | (i >> 5)) & 0xFF
     return mba_xor(val, rotated)
 
-# S-box (SHA-256 initial hash values repurposed)
+# SHA-256 初值当 S-box
 SBOX = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
         0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]
 
 def sbox_lookup(i):
-    idx = i & 7
-    shift = ((i >> 3) & 3) * 8
-    return (SBOX[idx] >> shift) & 0xff
+    return (SBOX[i & 7] >> (((i >> 3) & 3) * 8)) & 0xFF
 
-# Two interleaved rodata arrays (even indices → array1, odd → array2)
+# 两个交错的 rodata 数组：偶数索引走 array1，奇数走 array2
 rodata1 = bytes.fromhex("39407691b717c97879013adf3a2adea11c2b04e0")
 rodata2 = bytes.fromhex("bb19b025e37eaa786c4116e7aeea00c9c623940d")
 
 flag = []
-for i in range(40):  # flag length
-    t = mba_transform(i)
-    s = sbox_lookup(i)
+for i in range(40):
     mem = rodata1[i // 2] if i % 2 == 0 else rodata2[i // 2]
-    flag.append(chr(t ^ s ^ mem))
+    flag.append(chr(mba_transform(i) ^ sbox_lookup(i) ^ mem))
 
-print(''.join(flag))
+print("".join(flag))
 ```
 
-**Key insight:** The real flag logic is in the signal handler (SIGSEGV/SIGILL), not the main thread. Thread 1's AES-like code and `ud2` crash are intentional misdirection. The `rdtsc` timing check detects debuggers and corrupts output. Bypass by extracting the MBA logic from assembly and reimplementing in Python — never run the binary under a debugger.
+**为什么不能挂调试器**：`rdtsc` 检查会检测到单步，直接污染输出。你看到的错误答案不是逻辑错，是被检测到了。
 
-**Detection indicators:**
-- Multiple `pthread_create` calls with different handler functions
-- `signal(SIGSEGV, handler)` or `sigaction` setup
-- `ud2` instruction (deliberate illegal instruction)
-- `rdtsc` instructions for timing checks
-- SHA-256 constants (0x6a09e667...) used as lookup tables, not for hashing
+## 5. INT3 + coredump 爆破
 
----
-
-## INT3 Patch + Coredump Brute-Force Oracle (Pwn2Win 2016)
-
-Instead of reversing complex transformation logic, patch a byte to `0xCC` (INT3) after the transform, enable core dumps, brute-force each character by running the binary and extracting the transformed result from the coredump via `strings`.
+不逆变换逻辑，在变换输出点打 `0xCC`，让进程崩溃并留下 core，从 core 里读中间结果：
 
 ```bash
-# Patch byte at transform output point to 0xCC
+# 在变换输出处写入 0xCC
 printf '\xcc' | dd of=binary bs=1 seek=$((0x400ebb)) conv=notrunc
+
 ulimit -c unlimited
-# Brute-force each position:
 for c in $(seq 32 126); do
     echo -ne "$(printf '\\x%02x' $c)$known_suffix" | ./binary 2>/dev/null
     strings core | grep -q "$expected" && echo "Found: $c"
 done
 ```
 
-**Key insight:** Use INT3/SIGTRAP as a breakpoint oracle -- the coredump captures computed state at the crash point. Avoids full reverse engineering of the transformation.
+要点：
 
----
+- **`seek` 是十进制或 `0x` 前缀的字节偏移**，不是虚拟地址。要先把 VA 换算成文件偏移（`readelf -S` 看段映射）。
+- `ulimit -c unlimited` 必须在**同一 shell** 里设，子进程才继承。
+- core 的落点由 `/proc/sys/kernel/core_pattern` 决定，可能带 pid 后缀。
+- 这个手法把「逆变换」换成「逐字节试 + 读中间值」，适合变换极复杂但输出点单一的情况。
 
-## Signal Handler Chain + LD_PRELOAD Oracle (Nuit du Hack 2016)
+## 6. 信号链 + LD_PRELOAD
 
-Binary uses Unix signals for flow control: `main()` sends SIGINT to itself 1024 times, each handler checks one password character, then calls `signal()` to install the next handler. Bypass: LD_PRELOAD a custom `signal()` that logs when it's called (indicating correct character), brute-force each position.
+`main()` 给自己发 1024 次 SIGINT，每个处理器校验一位密码，然后 `signal()` 装下一个处理器。**`signal()` 被调用本身就说明当前字符正确**：
 
 ```c
-// LD_PRELOAD library:
+// LD_PRELOAD 的 signal() 替身
 #include <signal.h>
 sighandler_t signal(int sig, sighandler_t handler) {
-    write(2, "CORRECT\n", 8);  // signal() called = char was correct
+    write(2, "CORRECT\n", 8);      // 被调用 = 这一位对了
     return SIG_DFL;
 }
 ```
 
-**Key insight:** Signal-handler-chain anti-reversing can be defeated by hooking `signal()` via LD_PRELOAD. The call to `signal()` (to install the next handler) acts as a side-channel confirming the current character.
-
----
-
-### printf Format String VM Decompilation to Z3 (SECCON 2017)
-
-A "virtual machine" implemented entirely via `%hhn` format strings. Format string `%hhn` writes the count of printed characters (mod 256) to a pointed-to byte. A sequence of `%Nc%hhn` instructions implements arbitrary byte-to-memory writes, effectively creating a bytecode VM.
-
-**Step 1: Identify instruction types.**
-Count unique format patterns to determine the instruction set:
 ```bash
-# Normalize numbers and count unique patterns
+gcc -shared -fPIC -o hook.so hook.c
+for c in $(seq 32 126); do
+    printf "\\x$(printf %02x $c)%s" "$known" | \
+      LD_PRELOAD=./hook.so ./binary 2>&1 | grep -q CORRECT && echo "hit: $c"
+done
+```
+
+**为什么有效**：`signal()` 的调用是「校验通过」的副作用，而副作用可以被拦截。不需要知道校验逻辑，只需要知道「通过时会做什么」。
+
+## 7. 格式串当 VM（`%hhn`）
+
+`%hhn` 把已打印字符数（mod 256）写到一个指针指向的字节。一串 `%Nc%hhn` 就是任意字节写 —— 等于一台字节码 VM。
+
+```bash
+# 第一步：归一化数字，统计唯一模式，识别指令集
 sed -e 's/[[:digit:]]\+/1/g' program.fs | sort | uniq -c | sort -nr
 ```
 
-**Step 2: Write a decompiler.**
-Convert format patterns to C-style pseudocode. Each `%N...%hhn` pair maps to a memory write: extract the write address (from the argument pointer) and value (from the character count).
+```text
+第二步：写反编译器
+  每个 %N...%hhn 对应一次内存写
+  地址 ← 参数指针；值 ← 字符计数
 
-**Step 3: Recognize the algorithm.**
-The pseudocode typically reveals a linear equation system over bytes. Map memory addresses to symbolic variables.
+第三步：识别算法
+  反编译出的伪代码通常是一个线性方程组
+  把内存地址映射成符号变量
 
-**Step 4: Generate Z3 constraints and solve.**
+第四步：Z3 求解
+```
+
 ```python
 from z3 import *
 
-flag_len = 32  # adjust based on decompiled output
-flag = [BitVec(f'f{i}', 8) for i in range(flag_len)]
+n = 32
+flag = [BitVec(f"f{i}", 8) for i in range(n)]
 s = Solver()
 
-# Constrain to printable ASCII
 for f in flag:
-    s.add(f >= 0x20, f <= 0x7e)
+    s.add(f >= 0x20, f <= 0x7E)
 
-# Add constraints from decompiled format string operations
-# e.g., flag[3] + flag[7] == 0xAB (mod 256)
-# These come from the write sequences: each %hhn accumulates
-# character counts and writes the result to a target byte
-s.add((flag[0] + flag[1]) & 0xFF == 0x9A)  # example constraint
-s.add((flag[2] ^ flag[3]) & 0xFF == 0x3F)  # example constraint
-# ... (add all constraints from decompilation)
+# 约束来自反编译结果，例如 flag[0]+flag[1] ≡ 0x9A (mod 256)
+s.add((flag[0] + flag[1]) & 0xFF == 0x9A)
+s.add((flag[2] ^ flag[3]) & 0xFF == 0x3F)
 
 if s.check() == sat:
     m = s.model()
     print(bytes([m[f].as_long() for f in flag]))
 ```
 
-**Decompilation approach in detail:**
-1. Extract the write address and value from each `%N...%hhn` pair
-2. Map memory addresses to symbolic variables (flag bytes)
-3. Build an equation system from the write sequences
-4. Solve with Z3
+**要点**：先约束可打印字符，能大幅缩小解空间；如果有多解，补一条「已知前缀」约束再解。
 
-**Key insight:** Format string `%hhn` writes the count of printed characters (mod 256) to a pointed-to byte. A sequence of `%Nc%hhn` instructions implements arbitrary byte-to-memory writes, effectively creating a bytecode VM. Decompile by: (1) extract the write address and value from each `%N...%hhn` pair, (2) map memory addresses to symbolic variables, (3) build an equation system from the write sequences, (4) solve with Z3.
+## 8. 自定义图片格式（四叉树）
 
-**References:** SECCON 2017
-
----
-
-## Quadtree Recursive Image Format Parser (Google CTF Quals 2018)
-
-**Pattern:** Challenge ships a proprietary image format. Reverse engineering shows it is a quadtree: the canvas is split into the largest enclosing power-of-two square, that square is recursively split into four quadrants, and a 1-byte command tells which of the four to subdivide further. Quadrants marked as "leaf" are followed by three bytes of RGB color; the rest recurse.
+CTF 里的私有图片/压缩格式，**几乎只有三种**：四叉树、LZ77 变体、霍夫曼流。
 
 ```python
-# Command byte: bits 3..0 = {top-left, top-right, bottom-left, bottom-right}
-# Bit set ⇒ subdivide; bit clear ⇒ leaf (next 3 bytes = RGB)
+# 命令字节：bit3..0 = {左上, 右上, 左下, 右下}
+# 位置 1 ⇒ 继续细分；位置 0 ⇒ 叶子，后跟 3 字节 RGB
 
 def parse(stream, x, y, size):
     cmd = stream.read(1)[0]
     half = size // 2
-    children = [
-        (x,        y       ),
-        (x + half, y       ),
-        (x,        y + half),
-        (x + half, y + half),
-    ]
+    children = [(x, y), (x + half, y), (x, y + half), (x + half, y + half)]
     for i, (cx, cy) in enumerate(children):
         if cmd & (1 << (3 - i)):
             parse(stream, cx, cy, half)
         else:
-            rgb = stream.read(3)
-            fill_rect(cx, cy, half, half, rgb)
+            fill_rect(cx, cy, half, half, stream.read(3))
 ```
 
-Walk the recursion until `half == 1` (or until a "leaf" bit is seen) and paint the canvas as the format pushes bytes. The flag image renders correctly once the quadrant bit order is matched.
+**调试方法**：先打印每次递归的 `depth` 和 `offset`，不要急着渲染。**深度不匹配就是位序或叶子尺寸错了** —— 这是第一个可靠信号。
 
-**Key insight:** Proprietary image/compression formats in CTF challenges are almost always quadtrees, LZ77 variants, or Huffman streams. Look for recursive structures with a short command byte followed by either more commands or fixed-width leaf data. Prototype the parser by printing the recursion depth and offset for each call — mismatched depth is the first signal that the bit order or leaf size is wrong.
+## 9. 纪律
 
-**References:** Google CTF Quals 2018 — writeup 10335
+- **反分析检查一律补丁掉，不要分析它**。分析检查逻辑是纯浪费时间。
+- **补丁后仍失败就找服务端校验**。本地全过、远端拒绝，说明有数据外发。
+- **`mov` 立即数按小端读**。抄反汇编时最容易在这里错。
+- **侧信道先测噪声再动手**。抖动大于信号，这条路就走不通，早换思路。
+- **`rdtsc` 检测存在时不要挂调试器**。你看到的是被污染的输出，不是逻辑错误。
+- **INT3 补丁的 `seek` 是文件偏移不是虚拟地址**，必须先换算。
+- **信号链题看「通过时的副作用」**，不要逆校验逻辑。`signal()` 被调用就是最好的信号。
+- **自定义格式先打印递归深度和偏移**，渲染结果对不对是第二位的，结构对不对才是第一位的。

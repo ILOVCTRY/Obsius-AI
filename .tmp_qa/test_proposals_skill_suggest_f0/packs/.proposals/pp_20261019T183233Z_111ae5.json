@@ -1,0 +1,25 @@
+{
+  "id": "pp_20261019T183233Z_111ae5",
+  "status": "approved",
+  "origin": "agent",
+  "project": null,
+  "session": null,
+  "task": null,
+  "target": {
+    "kind": "skill",
+    "skill_kind": "capability",
+    "owner": "web",
+    "name": "demo"
+  },
+  "mode": "suggest",
+  "content": "# 拆分建议 v2",
+  "summary": "s",
+  "reason": "r",
+  "evidence": "",
+  "source_refs": [],
+  "revisions": [],
+  "created_at": "2026-10-19T18:32:33Z",
+  "decided_at": "2026-10-19T18:32:33Z",
+  "decided_by": "human",
+  "decision_note": null
+}

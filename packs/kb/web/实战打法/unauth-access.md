@@ -1,19 +1,23 @@
-## 已验证路径: Black-box fingerprinting of Sangfor SSL VPN gateways
+## 已验证路径：深信服 SSL VPN 网关的黑盒指纹识别
 
-Verified on vpn.zut.edu.cn (202.196.32.142) — evidence anchor find-95239ec8762c. From URL-only black-box, identify a Sangfor SSL VPN M6.8 (2017-era) via:
+在 `vpn.zut.edu.cn`（202.196.32.142）上验证过，证据锚点 `find-95239ec8762c`。纯 URL 黑盒即可判定为深信服 SSL VPN M6.8（2017 年前后版本），依据如下：
 
-- HTTP `Server` header literal value `Server` (abnormal literal, not a real server name)
-- `USE_NEW_PORTAL: 1` marker
-- Login endpoint `/por/login_psw.csp`
-- `tmlversion=6.8` version marker
-- `TWFID` cookie name
-- Static resource path `/com/`
-- EasyConnect client installer: ~14.2MB, Last-Modified 2017-11-06
-- Portal `/por/index.csp` returns 200
-- TLS 1.2 only; TLS 1.3 handshake fails with alert 40 — do not misread as no-TLS/port-closed
+- HTTP `Server` 响应头字面值就是 `Server`（异常字面值，不是真实服务器名）
+- `USE_NEW_PORTAL: 1` 标记
+- 登录端点 `/por/login_psw.csp`
+- `tmlversion=6.8` 版本标记
+- Cookie 名为 `TWFID`
+- 静态资源路径 `/com/`
+- EasyConnect 客户端安装包约 14.2MB，`Last-Modified: 2017-11-06`
+- 门户 `/por/index.csp` 返回 200
+- 只支持 TLS 1.2；TLS 1.3 握手失败并返回 alert 40 —— **不要误读成"没有 TLS / 端口关闭"**
 
-Keep strictly separate from wEngine WebVPN (wpn/nwpn) fingerprints — same site can host both on different IPs (e.g. 202.196.32.142 vs 202.196.32.153).
+**必须与 wEngine WebVPN（`wpn` / `nwpn`）指纹严格区分**：同一站点可以在不同 IP 上同时挂这两套（例如 202.196.32.142 与 202.196.32.153）。
 
-## 坑: Default self-signed cert on Sangfor VPN is expected, not a finding
+## 坑：深信服 VPN 用默认自签证书是常态，不是漏洞
 
-Verified on the same target — evidence anchor find-c5a5fcabbe48. Sangfor SSL VPN devices ship with a device-default self-signed certificate. A self-signed cert alone is NOT a certificate-risk finding; record it as info / tested_clean (here the cert-only record was a false-positive dead end, find-6c3e5b58a6be). Only escalate if hostname mismatch actually breaks the tested flow or key material is reused across unrelated hosts.
+在同一目标上验证过，证据锚点 `find-c5a5fcabbe48`。深信服 SSL VPN 出厂自带设备默认自签证书。
+
+**单独一个自签证书不构成证书风险漏洞**：记为信息级 / `tested_clean`（这里仅凭证书的那条记录就是一条误报死路，`find-6c3e5b58a6be`）。
+
+只有满足以下任一条件才升级：主机名不匹配**实际打断了被测流程**，或密钥材料在无关主机间复用。

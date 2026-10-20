@@ -11,7 +11,7 @@ import { Input } from "@/components/ui/input"
 // 字母数字与 -（ASCII 文件名/命令引用面），服务端同口径 422 + 重名 409，错误直接展示 detail。
 // 2026-10-13 能力包退役：技能扁平落 packs/kb/skills/<name>/，不再有来源/包归属。
 
-const SLUG_HINT = "英文 slug：字母/数字/_-/.，1-64 字符（如 web-recon）"
+const SKILL_NAME_HINT = "技能名：字母/数字/中文等词字符与 _-/.，1-64 字符（如 web-recon、注入测试）"
 const EXPERT_ID_HINT = "小写字母/数字开头，仅小写字母数字与 -，≤48 字符（如 web-solver）"
 
 function ErrorLine({ err }: { err: string | null }) {
@@ -120,9 +120,9 @@ export function SkillCreateDialog({ open, onOpenChange, onCreated }: {
           packs/kb/skills/ 下生成 cc 风格 SKILL.md 模板（每个技能一个目录）；
           详细资料可放入同目录 references/、scripts/、examples/ 或 assets/。
         </DialogDescription>
-        <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="技能 slug，如 web-strike-entry"
+        <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="技能名，如 外网打点入口 或 注入测试"
                className="font-mono text-xs" autoFocus />
-        <p className="-mt-1 text-[10px] text-muted-foreground">{SLUG_HINT}</p>
+        <p className="-mt-1 text-[10px] text-muted-foreground">{SKILL_NAME_HINT}</p>
         <Input value={description} onChange={(e) => setDescription(e.target.value)}
                placeholder="一句话描述（用于技能清单）" className="text-xs" />
         <Input value={keywords} onChange={(e) => setKeywords(e.target.value)}

@@ -43,6 +43,9 @@ _WRAPUP_DENIED_TOOLS = frozenset({
     "kb_search", "kb_open", "route_lookup", "skill_open",
     # 联网搜索
     "web_search",
+    # CTF 候选字典生成（ctf-flag-channel）：收尾阶段不许再「展开候选表」——
+    # 那是探索动作，不是写回。只产候选不执行，但仍会白烧收尾轮次。
+    "ctf_ammo",
 })
 
 # 收尾阶段按前缀整类剥离的工具族（前缀 → 原因）。
@@ -62,6 +65,18 @@ _WRAPUP_KEEP_TOOLS = frozenset({
     "record_fact", "artex_goal", "artex_hint", "artex_status",
     "artex_worker_trace_list", "artex_worker_trace_get",
     "artex_worker_trace_search",
+    # CTF flag 写回（ctf-flag-channel）：收尾阶段最该保的就是「把已解出的 flag
+    # 落进台账」——它直接决定题目状态与任务终态。剥掉它等于让收尾白跑。
+    "ctf_submit_flag",
+    # CTF 整题放弃（ctf-abandon，2026-10-20）：收尾阶段**正是**该判「这题我打不
+    # 完了」的时刻。此前这里没有放弃出口，模型只能去 bb_asset_status 标
+    # tested_clean（CTF 轨不认这个状态，必撞门禁），再为凑 dead_end 查 event id
+    # ——收尾 10 轮全烧在门禁往返上。
+    "ctf_abandon",
+    # CTF 主动收尾（ctf-conclude，2026-10-20）：收尾阶段同样是「答案已提交、
+    # 该停止派工」最该被表达的时刻。剥掉它，主控在收尾时无法把
+    # `meta.concluded` 落下去，题目会一直留在 partial 被反复派工。
+    "ctf_conclude",
 })
 
 # ---------- 收尾提示词（按 agent 分） ----------

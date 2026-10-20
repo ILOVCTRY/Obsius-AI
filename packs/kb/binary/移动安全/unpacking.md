@@ -45,4 +45,4 @@ NRV2B 解压）/ `apply_relocs.py`（R_AARCH64_RELATIVE 修复）。工具缺席
 
 capstone 线性扫描在嵌入数据上**失步**（数据被当代码解码，越走越歪）——字符串
 交叉引用用 `adrp+add` / `adr` 逐字（per-word）手工解码，不信线性 sweep 给出的
-函数边界；大文件先 `readelf` 定位段/符号再精读（沿 binary-rev 读取纪律）。
+函数边界；大文件先 `readelf` 定位段/符号再精读（沿 二进制逆向手法 读取纪律）。

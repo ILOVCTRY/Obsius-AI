@@ -36,7 +36,7 @@ groups:
     terms: [格式化字符串, format-string, fmt, printf漏洞]
   - id: reverse-analysis
     terms: [逆向, 反编译, 脱壳, 加壳, 混淆, 静态分析, 动态调试, ida, ghidra, od, x64dbg]
-  - id: android-rev
+  - id: 安卓逆向手法
     terms: [安卓, android, apk, dex, smali, frida, xposed, hook, 抓包, 脱壳]
   # malware / forensics
   - id: malware-analysis

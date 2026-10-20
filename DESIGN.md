@@ -142,11 +142,116 @@ WAL + 线程局部连接 + `_tx()`（进程内写锁 + BEGIN IMMEDIATE）串行�
 
 **CTF 维度清单**：`packs/kb/ctf/dimensions.yaml` 首版四个面——triage（分诊归类）/ analyze（静态分析）/ reproduce（动态验证）/ flag（结论与 flag 验证）。**刻意比渗透轨少得多**：渗透是「一个资产穷举攻击面」，面越细越好；CTF 是「一题一条链路，解出即完成」，切十个面会变成机械凑数（模型被迫为不适用的面写 dead_end）。`applies_to` 只挂 binary/host/service/url，不挂 challenge——题目级一题一线程由主控自己解，维度收敛闸只对「被分配资产的子专家」生效，不必要地约束主控。
 
-**前端体现（2026-10-19 对齐，零 schema 迁移）**：内核改动本身**不新增任何前端数据契约**，落在既有视图上——① **设置页「工具」tab**（`AgentToolsPane.tsx` ← `GET /api/agent-tools`）自动多出 `ctf_submit_flag`（黑板组）/ `ctf_ammo`（执行组）两张工具卡，无需前端改动；② **黑板「意图」tab**（`IntentsPane.tsx`）的「维度 {id}」会显示 ctf 四面 `triage`/`analyze`/`reproduce`/`flag`；③ **诊断页「系统提示词」**（`DiagnosticsView.tsx`）能看到 `_pacing_context()` 注入的 `- 时间预算（ctf-pacing）：scale=… 总时长=… 题量=… 剩余=…` 与 endgame 提示——排查「时间感到底进没进上下文」不必再猜；④ **黑板题目行 🚩 徽章 + 发现详情 FLAG 区块**（`extractFlag`）；⑤ **黑板「CTF-Agent」tab 的「赛制时间」面板**（新增写入口，见下）。④ 本轮**修了两个真缺陷**：`FLAG_RE` 前缀改可选（旧式要求 `flag`/`ctf` 前至少 1 字符，`ctf_submit_flag` 写入的裸 `flag{…}`/`htb{…}` 在 UI 上**完全不显示**，与 `flagjudge` 的候选口径不一致）；`flagByChallenge` 只认 `status==="verified"`（`candidate=true` 的线索也写 `evidence.flag`，不加闸绿色 🚩 会把「疑似线索」冒充成「已解出」），详情弹窗按 `row.status` 分「FLAG（绿）/ 候选 FLAG（警示色 + 说明）」两态。
+**前端体现（2026-10-19 对齐，零 schema 迁移）**：内核改动本身**不新增任何前端数据契约**，落在既有视图上——① **设置页「工具」tab**（`AgentToolsPane.tsx` ← `GET /api/agent-tools`）自动多出 `ctf_submit_flag`（黑板组）/ `ctf_ammo`（执行组）两张工具卡，无需前端改动；② **黑板「意图」tab**（`IntentsPane.tsx`）的「维度 {id}」会显示 ctf 四面 `triage`/`analyze`/`reproduce`/`flag`；③ **诊断页「系统提示词」**（`DiagnosticsView.tsx`）能看到 `_pacing_context()` 注入的 `- 时间预算（ctf-pacing）：scale=… 总时长=… 题量=… 剩余=…` 与 endgame 提示——排查「时间感到底进没进上下文」不必再猜；④ **黑板题目行 🚩 徽章 + 发现详情 FLAG 区块**（`extractFlag`）；⑤ **黑板「CTF-Agent」tab 的「赛制时间」面板**（新增写入口，见下）；⑥ **题目行「编辑」按钮 + 编辑题目表单**（`ChallengeEditDialog`，见下）。④ 本轮**修了两个真缺陷**：`FLAG_RE` 前缀改可选（旧式要求 `flag`/`ctf` 前至少 1 字符，`ctf_submit_flag` 写入的裸 `flag{…}`/`htb{…}` 在 UI 上**完全不显示**，与 `flagjudge` 的候选口径不一致）；`flagByChallenge` 只认 `status==="verified"`（`candidate=true` 的线索也写 `evidence.flag`，不加闸绿色 🚩 会把「疑似线索」冒充成「已解出」），详情弹窗按 `row.status` 分「FLAG（绿）/ 候选 FLAG（警示色 + 说明）」两态。
 
 **`config.ctf` 写入口（2026-10-19）**：pacing 此前只有读路径（`_pacing_context`），配置只能手改 `project.json`。现补 `core/ctf/pacing.py::normalize_ctf_config`（`core/projects.py::update_config` 调用，非法 **422**，空段剥键回落阶梯推断）+ 前端面板（黑板「CTF-Agent」tab →「赛制时间」：截止时间文本框 / 题目总数 / 保存赛制，走 `api.patchProjectConfig(pid, {ctf})`）。**归一化不是可选项**：`{"tasks": "abc"}` 若静默进盘，读路径 `int()` 会吞成 0 再落 `ANCHOR_NTASKS`——配置没生效但人看不出来。`tasks` 收正整数（数字串容忍），`deadline` 收非空字符串（ISO8601）或正数（epoch 秒）。
 
-**不搬的部分**：11GB 单镜像 / 纯正则 decide / `run_bench` 平台特化 hack / TSG 调度与 EVSI 预算（依赖它的事件源状态图）。
+**编辑题目（challenge-edit，2026-10-19）**：`PATCH /api/challenges/{aid}` 与 `ChallengePatchBody` 早已就绪，但前端**零消费**——题目名打错、`flag_count` 填错（直接决定「拿满几条算解出」）、方向选错，此前只能删掉重建，而删除会**连带删掉该题目的 flag 台账与全部发现**。现补 `ChallengeEditDialog`（题目行「编辑」按钮）：
+- **只提交改过的键**（`undefined` = 后端不动该键；空串 = 清该键）。全量提交会让「AI 后来补的 meta」被前端旧快照覆盖回空值。
+- **入口点只读**——入口是子资产（`entries` 走资产树），`PATCH` 不接受该字段；表单里展示只读清单并提示「请在题目树里增删」，避免两套写入口打架。
+- **`flag_count` 调低到 ≤ 已计入条数 = 题目立刻解出**（实测：quota 3→1 且已有 2 条 accepted 时状态从 `partial` 直接变 `solved`）。这是**合法**操作（「这题其实只要一个 flag」），故**不拦**，但提交前弹一次确认说明后果——否则用户以为只是改个数，实际调度层已不再派 Worker。
+
+## CTF 解题主控（ctf-controller，2026-10-19 实施）
+
+**要解决的问题**：CTF 的失败模式几乎从来不是「不会解」，而是**时间分配错了**——死磕一道已探尽的题到比赛结束，或一次快检没命中就放弃一道再挖十分钟就出的题。这两个判断此前完全交给模型，而模型的可靠性在这里极低：它没有跨轮的精确计数器，「这题我试了 2 轮」和「试了 5 轮」在上下文里长得一模一样，而放弃判据的阈值恰好卡在这些数字上。
+
+**解法：代码调度 + LLM 只定方向。** 新增第四个控制器类智能体 `ctf-controller`（`tracks: [ctf]`，`packs/experts/ctf-controller.yaml`），与现有三个主控的根本区别是**决定权归属**：
+
+| 主控 | LLM 决定 | 代码决定 |
+|------|---------|---------|
+| `chat-orchestrator` | 派谁、派几批、何时收工 | 只提供并发原语 |
+| `aggressive-controller` | 派谁 | 「先返先触发」的并发语义 |
+| `artex-controller` | 只操舵 | 派发权全在 Engine（Planner 生成 Intent） |
+| **`ctf-controller`** | **往哪走（提方向）** | **准不准派、派几轮、何时放弃** |
+
+**四个内核在 `core/ctf/session.py` 合流**（`CtfSession`）：
+
+| 内核 | 在会话里的角色 |
+|------|---------------|
+| `scheduler.decide` | 每轮给每个方向一个 verdict（`revive`/`requeue`/`drop` + 人话理由） |
+| `lease.ClaimTable` | 同一方向不许两个 worker 同时做（TTL 30min 自动回收） |
+| `attest` | worker 声称「拿到执行」→ 强制目标机自证（nonce+sha256） |
+| `fold` | 把「flag 台账 + 能力 + 事实」压进 token 预算（四级降级） |
+
+### 放弃决策（`scheduler.py`，移植 hxbai `_revive_policy`）
+
+13 条判据严格自上而下，先命中先返回：轮次用尽（≥8）→ 提示预算耗尽（≥预算 1/3）→ 单题硬上限 → **零产出 hungry 让位（`requeue`）** → 零产出绝对上限（60min）→ 零交付空转 → flag 停滞 → **里程碑续投（`revive`）** → 未到最少轮次（<2）→ 多 flag 部分续投 → α≈0 停滞 → 有界耐心 → 兜底。
+
+**`requeue` ≠ `drop` 是本模块最重要的语义区分**：前者是「这题还有救，但先让别人上」（30 分钟 hungry 让位，还有题没开时的机会成本），后者是「这题没救」。合并它们会让前端与复盘分不清「暂时让位」和「判定死亡」。两个零产出上限**不随赛制缩放**——一小时没 foothold 在任何赛制下都是磨洋工。
+
+### 方向互斥（`lease.py`，移植 hxbai `WorkClaimTable`）
+
+子目标 → 归一方向键 → 单持有者 TTL 租约。**中文方向键是本项目的扩展**（hxbai 只处理 `[a-z0-9.]`，中文串整个被丢掉 → 全部归一成空键 → 空键互相冲突反而把并发锁成 1）：中文段剥噪声词 + 同义词归一（口令/密码/passwd → `pass`）+ 2-gram 残余切分，ASCII 段剥动作词/填充词 + 复数归一（backups→backup），最后排序去重。
+
+**刻意的取舍：只做确定性字面归一，不做模糊合并。** `"probe robots.txt for hidden backup paths"` 与 `"check robots.txt to find backup files"` 会得到两个不同的键——它们确实是同一件事，但把「hidden path」与「file」合并需要语义理解，而任何基于 token 重叠的近似匹配都会顺手把「文件上传绕过 WAF」和「文件上传漏洞」这类**真不同**的方向合并。**误锁死并发比重复劳动贵得多**：重复劳动只浪费一个槽位，误锁死会让一个方向永远没人做。模糊判定留给主控的提示词（它看得见 `render_table()` 的占用表）。
+
+空键（抽不出实义词）**放行而不占用**：把无关工作锁死比重复劳动更糟。
+
+### 目标机自证（`attest.py`，移植 hxbai `verify.make_challenge`）
+
+worker 说「SSTI 打通了，`id` 返回 `uid=0`」——这可能是真的，也可能是它把题面样例抄了一遍，或者在自己机器上跑 `id`。解法是**让目标机自己算一道题**：主控生成随机 nonce（16 字节 hex），期望值 = `sha256(nonce)[:16]`，要求 worker 通过那个执行原语让**目标**计算并返回摘要。
+
+判据分四种拒绝形状（hxbai 只返回 confirmed/inconclusive）：`fabricated_in_assertion`（摘要只在模型自述里）/ `echo_not_execution`（回执里只有 nonce 原文 = 反射）/ `no_target_vector`（有摘要但命令看不到目标载体）/ `wrong_digest`（算了但算错）。**`no_target_vector` 是 inconclusive 而非 reject**——交互式 shell 里跑 `sha256sum` 时命令行确实看不到载体，硬判会误杀真战果。**expected 绝不进给 worker 的提示**（进了就等于把答案给了模型），只进主控侧判定与日志。
+
+### 上下文降级（`fold.py`，移植 hxbai `folded_projection`）
+
+一道题跑两小时会攒下几百条侦察笔记，全塞进提示词会打满窗口、淹没关键结论、烧钱。解法是**按预算逐级降级**：`full` → `compact`（最近一半 + 强信号 + 显著条目补齐）→ `salient`（只留显著，按显著度降序）→ `headline`（每段只留强信号至多 2 条）→ 截断条目长度。
+
+三个本项目特有的口径：
+1. **必保段永不降级**（`mandatory=True`）：flag 台账是解题进度唯一真值，砍了主控就忘记自己拿了几分，下一轮重复派工；
+2. **强信号分级**（`salience_score` 0/1/2）：凭据/flag/执行 = 2，路径/端口 = 1，普通素材 = 0。二元判断时四十条目录扫描会把唯一一条凭据挤出窗口——降级就白降了；
+3. **中文 token 估算**：hxbai 的 `len//4` 是英文口径，中文一字约一 token，按 `len//4` 估会低估 3-4 倍，预算形同虚设。
+
+### 接线（`core/chat/runtime.py`）
+
+- **工具面**（`_CTF_CONTROLLER_TOOLS`）：`ctf_dispatch`（唯一的派发入口，提交方向拿回准派/拦下计划）+ `ctf_review`（代码侧 verdict 表 + 互斥表 + 分诊结论置顶 + 耗时）+ `ctf_inspect`（只读核对：台账证据链原文 / 文件清单+provenance+头部魔数）+ `call_expert` / `todo_write` / `bb_declare_challenge` / `ctf_submit_flag` / `ctf_conclude` / `bb_query` / 知识库 / 意图三件套。**没有任何执行工具**（无 `run_cmd`/`read_file`/`browser_*`/`decompile`）——主控一旦能跑命令就会自己解题，绕过整套调度（与 ARTEX 主控同一事故教训）。`ctf_ammo` 也不给（要 `run_cmd` 配合，它没有）。`ctf_inspect` 是「能核对不能执行」的落实处：没有任意路径读取、不返回全文、不跑命令。
+- **越权派发闸**（`_tool_call_expert`）：每条 `call_expert` 必须在本轮 `ctf_dispatch` 的准派计划内。没有这道闸，模型可以跳过 `ctf_dispatch` 直接派工——方向互斥、放弃判据、轮次记账、自证核验全部失效，整套代码调度退化成装饰。文案给出下一步动作（先 dispatch），否则模型会反复重试同一次派发。**闸的判键必须剥掉计划 task 的模板壳**（见下节「键口径一致性」），否则「按计划原样派发」会被自己的闸拦下。
+- **轮次记账**（`_tool_call_expert` 尾部）：`passes` 由实际派发推进；`flags_added` 取**台账实际增量**（派发前后各数一次 `accepted_flags`），不信 worker 摘要。读库失败记 0（宁可少算进展，也不要因一次 DB 抖动误判有进展而续投）。每笔记 `chat.ctf_verdict` 事件（`action`/`code`/`reason`/`passes`/`attest_*`）。
+- **系统提示**（`_CTF_CONTROLLER_STYLE`）：与另外两个主控文案互斥（它们都强调「你来决定派什么」，本段强调「你只提方向，派不派由代码判」）。不明说这一点，模型会按训练数据里的默认行为绕过 `ctf_dispatch`。
+- **题目上下文**（`_challenge_context`）：ctf-controller 分支讲「只定方向 + 怎么登记 flag」，**不讲**「怎么消费 ctf_ammo」——它没有 `run_cmd`，讲那句等于教它调半截工具。
+- **启用先返先触发**（`is_first_return_controller` 含 ctf-controller，2026-10-20 修正）：一批派 3 个 `call_expert` 探 3 个方向时，第一个返回就唤醒主控，其余转后台并以 `[后台并发结果]` 在后续步边界补达。旧实现等整批收齐，导致「一个方向 40 秒就证伪，却要等另两个跑满 10 分钟」——期间主控既不能改道也不能收尾，纯空转。
+  **旧版「等整批」的理由不成立**（曾据此把 ctf-controller 排除在外）：`record()` 的调用点在 `_tool_call_expert` 尾部，由 `_dispatch(tc)` 在**每个 worker 自己的线程**里执行（`_parallel_expert_dispatch::run_one`），本来就是「单方向完成即记账」，从不依赖整批收齐。提前返回只是主线程不等了，worker 照旧跑完自己的记账与落库。`runtime.py:1215` 当初只是漏了 `or self.is_ctf_controller` 这一项。
+  **注入文案必须按轨分叉**（`_drain_probe_overflow`）：原文案写死激进主控的渗透探针纪律（`[命中]→立即派深挖专家；[未命中]→放弃该方向`）。CTF 轨照搬会让主控在「[命中]」后直接 `call_expert` 派下一批，**绕过 `ctf_dispatch` 的准派闸**。现按 `is_ctf_controller` 分叉为「登记 flag / close_intent(dead_end) 后重新 dispatch / ctf_conclude 收尾 / ctf_abandon 放弃」。
+
+### 前端体现
+
+**零新增前端数据契约**（与 ctf-kernel 同口径）：
+- **composer 智能体选择器**自动多出「CTF解题主控」（`_chat_agents` 从 `list_experts(packs_root, track)` 枚举，CTF 项目可见）；
+- **诊断页「系统提示词」**能看到 `_CTF_CONTROLLER_STYLE` 全段与 `_challenge_context` 的主控分支——排查「代码调度到底进没进上下文」不必再猜；
+- **工具卡**（设置页「工具」tab）自动多出 `ctf_dispatch` / `ctf_review` 两张（`GET /api/agent-tools` 从 `AGENT_TOOLS` 枚举，**本主控的两个工具刻意不进 `AGENT_TOOLS`**——它们是会话级调度原语，不是通用工具，故只在主控工具面动态挂载，设置页看不到是预期行为）；
+- **事件流**：每笔记账落 `chat.ctf_verdict`，前端可按需渲染「方向 → verdict」时间线（当前无专用视图，事件可在诊断/日志看到）。
+
+### 与既有实现的关系
+
+- **`ctf-controller` 是新增，不改动其余三个主控的任何行为**：`CONTROLLER_IDS` 加一项、`_build_dispatcher`/`_tool_specs` 加一个 `elif` 分支、`_tool_call_expert` 加一段 `if self.is_ctf_controller`。其余分支逐字未动。
+- **`ctf_dispatch`/`ctf_review`/`ctf_inspect` 不进 `AGENT_TOOLS`**：它们是轨道语义而非通用工具（与 `record_fact`/trace 三件套同一定位），故走动态挂载 + 专用 `_dispatch` 分支，不经 `ToolDispatcher`。
+- **`_ctf_session_for()` 惰性构造**：`Pacing` 要读项目 config 与线程创建时间（有 IO），只有真正调 `ctf_dispatch`/`ctf_review` 时才建。构造失败返回 `None`——调度不可用时主控仍能靠 `call_expert` 干活，不该整轮炸。
+- **`ctf_inspect` 的兜底只做读**：它不调 `ToolDispatcher._challenge_fallback_asset()`（那个会**按线程标题补建题目**），只用 `chat_store.resolve_challenge_asset_id()` 沿祖先链解析。核对通道不该有副作用。
+
+**不搬的部分**：11GB 单镜像 / 纯正则 decide / `run_bench` 平台特化 hack / TSG 调度与 EVGI 预算（依赖它的事件源状态图）。
+
+### 键口径一致性（2026-10-20 事故修复）
+
+**现象**：`ctf_dispatch` 明明返回「准派 1 个」并给出 task，模型按计划把 task **原样**喂给 `call_expert`，却被 `[错误] 该方向不在本轮准派计划内` 打回。`ctf-controller` 因此**从未真正跑通过**——计划与执行之间有一道自相矛盾的闸。
+
+**根因**：`_task_text()` 拼给 worker 的 task 是「【方向】X + 【要求】三条模板 + 可选【自证任务】」，而 `allowed()` 直接对整段文本调 `direction_key()`。模板里的「只做这个方向」「结论以 [命中] 开头」「用 ctf_submit_flag 登记（候选线索加 candidate=true）」贡献了 `只/命中/开头/方向/结论/登记/候选/证据/命令/输出` 十来个 token，键必然与 `subgoal` 的键不同。**代码自己生成的 task，自己判越权。**
+
+**三处派生缺陷**（同一个「键口径分叉」，只是表现不同）：
+
+| 位置 | 表现 | 后果 |
+|------|------|------|
+| `allowed()` | 原样派发必拒 | 主控完全不可用（用户报的就是这个） |
+| `record()` | 回执按整段 task 算键 → 查不到原 state → 新建 `passes=0` 的孤儿 | 放弃判据分母永远归零，`drop` 永不触发（**比派不出去更隐蔽：调度看着在跑，实际不记账**） |
+| `claims.release()` | 释放时键不同 → 静默失败 | 租约挂到 30min TTL 到期，期间该方向谁都派不出去 |
+
+**修复**：统一入口 `session.key_of(text)` = `direction_key(subgoal_of(text))`，`subgoal_of()` 只剥**代码自己写入的**标记（`【方向】` / `【要求】` / `【自证任务】`），模型自由发挥的文本原样进归一（不引入任何模糊猜测）。`plan` / `allowed` / `record` / `_resolve_key` 四处强制走同一口径；`record` 释放租约改用 `st.subgoal`（建租时那把键），不拿本轮回执文本重算。
+
+**`allowed()` 同时看计划与当前状态**：一轮并发派多个 worker，先返回的那个在 `record()` 里把方向判死时 `_last_plan` 仍是旧的——只查 `plan.keys` 等于「判死了还在派」。`requeue` 必须放行（让位不是判死），只拒 `dropped`/`solved`，与 `plan()` 的拦截口径对齐。
+
+**方向族单向包含放行**：模型回贴计划 task 时常顺手补一句说明（「…，顺便看 LSB」），键变长但仍指同一件事——`plan_key ⊆ 派发键` 放行。**反向不放行**（派发键 ⊆ 计划键 = 砍掉了计划里的关键约束）。判据是确定性集合包含，与 `_shadow_of` 同源，不引入相似度阈值。
+
+**回归必须走真实工具面**：直接 `sess.plan()` + `sess.allowed()` 测不到这个 bug（测试自己传的是纯 subgoal，天然同键）——这正是它全绿逃逸的原因。`test_call_expert_allowed_for_plan_task_verbatim` 从 `_tool_ctf_dispatch()` 取 `_last_plan.granted[0]["task"]` 再喂 `_tool_call_expert()`，复刻模型复制粘贴的真实路径。
+
 
 ## CTF flag 台账（challenge-flag-ledger v47，2026-10-19 实施）
 
@@ -162,15 +267,98 @@ WAL + 线程局部连接 + `_tx()`（进程内写锁 + BEGIN IMMEDIATE）串行�
 | `verdict` | `pending`（AI 判定通过待复核）/ `accepted`（人工确认）/ `rejected`（人工否决） |
 | `verdict_reason` / `finding_id` | 否决理由（再提交时连理由一起拒）/ 过程留痕 finding 反查 |
 
-**题目状态是派生值，不独立存储**（`challenge_state`）：`solved`（计数 ≥ `meta.flag_count`，缺省 1）> `partial` > `abandoned`（唯一非派生位——「放弃」是人类意图不是数据事实）> `running` > `untouched`。**`pending` 与 `accepted` 同计入 solved**——AI 判定通过即算解出，人工复核只是事后纠正渠道。
+**题目状态是派生值，不独立存储**（`challenge_state`）：`solved` > `partial` > `abandoned`（唯一非派生位——「放弃」是人类意图不是数据事实）> `running` > `untouched`。
+
+**`verdict` 三分与 solved 的关系（2026-10-20 方案 A 修正）**：
+
+| verdict | 语义 | 计入 solved |
+|---------|------|-------------|
+| `pending` | **候选**：AI 形态判定通过、未经人工确认 | **否** |
+| `accepted` | 人工确认有效（强证据） | 是 |
+| `rejected` | 人工标记错误 | 否（且拦重复提交） |
+
+`solved = accepted 数 ≥ quota 且无格式冲突`。**`pending` 曾与 `accepted` 同计入 solved**，后果是 AI 提交一条假 flag 就判 solved、调度层立刻停派，**题目被一条假答案提前终止**（用户实测 `flag{E574...}` 与 `DASCTF{6f93...}` 同时入账，显示 2/1「已拿满」）。改法是把「候选」与「已确认」在数据层就分开，而不是靠前端判断。
+
+**`conflict`（同题内前缀互不相同）压过 solved**：`_flag_prefix` 取 `{` 前的前缀（`flag{x}`→`flag`），同题内出现两个不同前缀 → 至少一条是假的 → 状态 `partial` + `conflict` 列表回传，等人工裁决。**判据不能用 `meta.flag_format`**——题面声明的格式是**提示不是约束**（写 `flag{}` 实际 `DASCTF{}` 极常见），拿它比对会误杀真 flag；只用台账内部事实。
+**`over_quota`（accepted 数 > quota）不压 solved**：最典型成因是用户主动把 `flag_count` 从 3 改成 1（「这题只要一个」），此时多条前缀相同、都经人确认，判 partial 反而违背用户意图。它只作异常信号回传。
+
+**`ctf_conclude`：主控主动收尾（停派工，但不冒充解出）**。`pending` 不计 solved 后，AI 判定通过只能把题目停在 `partial`——有人值守时正确（人工确认是强证据），但**无人值守通宵跑题会全卡在 pending 白烧预算**：明明解出来了、没人点按钮，调度层就一直派 Worker。故给一个显式收尾出口：`meta.concluded` → `challenge_gate.blocked` 收该题、不再派工，但状态仍是 `partial`、前端显示「已收尾·待确认」。
+- 与 `abandoned` 的区别：放弃=「不做了，可能没解出」；收尾=「做完了，等确认」。两者都不派工，语义与徽标不同。
+- 与 `solved` 的区别：`concluded` **不参与 solved 派生**。人工后来否决了那条候选，题目退回 partial 且 `concluded` 仍在——刻意的：主控已判过一轮，再派只是重复劳动，重开需人撤销。
+- 要求**至少提交过一条 flag**（候选也算）。一条都没有就收尾 = 静默弃题（既不 solved 也不再跑），最坏结局，必须拒并指回 `ctf_submit_flag` / `ctf_abandon` / `close_intent(dead_end)`。
 
 **`verdict='rejected'` 是真闸**：立刻从 solved 派生里扣除（状态自动生效，无需改任何存储），且同串再提交被 `ctf_submit_flag` 的 `is_rejected` 直接拦（连理由一起回执）——否则模型会反复提交同一串，每次白跑一遍 flagjudge + 落一条 finding。
 
-**`ctf_submit_flag` 语义变更**：正式 flag ① 进台账（`record_flag`，AI 落 `pending`）② 同时落一条 `intel/unverified` 的**过程留痕** finding（不受五项必填契约约束，因为它是留痕不是结论）③ `set_finding_id` 双向关联。`candidate=true` 的候选线索**不进台账**（线索不是答案，进了台账就会把题目算成 solved），只落 intel finding。
+**人工确认即停（challenge-confirm-stops，2026-10-20）**：`PATCH …/flags/{fid}` 落 `accepted` 后，**置位该项目下所有在跑线程的中止事件**（fire-and-forget，不等待）——人点确认就是强证据，题目已解出，还在跑的 Worker 全是重复劳动（用户实测：确认之后调度层照样把剩下的方向派完，白烧十几分钟）。`rejected` **不**中止（题目还没解出，该继续跑）。置位整个项目而非逐线程回溯：Worker 线程的 `challenge_asset_id` 可能为空（靠祖先链解析），逐线程判容易漏，而多停几轮的成本远低于漏停。
+
+**`ctf_submit_flag` 语义变更**：正式 flag ① 进台账（`record_flag`，AI 落 `pending`）② 同时落一条 `intel/unverified` 的**过程留痕** finding（不受五项必填契约约束，因为它是留痕不是结论）③ `set_finding_id` 双向关联。`candidate=true` 的候选线索**不进台账**（线索不是答案），只落 intel finding。回执必须写明「已确认 N/M（候选 K 条待人工确认）」+「仅形态判定通过，未做变换回环」（`transform` 为空时证据强度确实弱一档，不说明模型会当它已验完）。
 
 **API**：`GET /api/challenges/{aid}/flags`（含 rejected——人工裁决界面要看到才能撤销误否决）、`POST …/flags`（人工录入 `judged_by=human`，默认 accepted）、`PATCH …/flags/{fid}`（裁决 pending/accepted/rejected + reason）、`POST …/abandon`（放弃/撤销放弃）。存量 flag 由 `backfill_from_findings` 惰性补登（`vuln_class='flag-capture'` 且 `evidence.flag` 非空）。
 
-**前端体现（2026-10-19 接入）**：① 题目行 **🚩 台账 N** 按钮 → `ChallengeFlagLedger` 弹层（逐条裁决 / 手工录入 / 放弃这道题）；② 题目行**派生状态徽章**（`ChallengeStateBadge`：已解出/部分解出/求解中/已放弃，多 flag 题显示 `2/3` 进度）；③ 题目行 🚩 徽章的取值**改为台账优先**——`flagByChallenge` 先取台账里第一个非 rejected 的 flag，findings 反查降级为兜底（仅 `verified && category=vuln`，防候选线索冒充已解出）。③ 是必须的：台账重构后正式 flag 的留痕 finding 是 `unverified/intel`，若只认 verified 反查，🚩 会**永远不显示**。
+**前端体现（2026-10-19 接入，2026-10-20 按方案 A 修正）**：① 题目行 **🚩 台账 N** 按钮 → `ChallengeFlagLedger` 弹层（逐条裁决 / 手工录入 / 放弃这道题）；② 题目行**派生状态徽章**（`ChallengeStateBadge`：已解出/部分解出/求解中/已放弃，多 flag 题显示 `2/3`，**候选另显 `+K待确认`**，`concluded` 另显「已收尾·待确认」，`conflict` 另显红字「格式冲突 N 条」）；③ 题目行 🚩 徽章的取值**改为台账优先**——`flagByChallenge` 先取**已确认**（accepted）的 flag，没有再退回候选（pending），findings 反查降级为兜底（仅 `verified && category=vuln`）。③ 是必须的：台账重构后正式 flag 的留痕 finding 是 `unverified/intel`，若只认 verified 反查，🚩 会**永远不显示**。
+④ 台账弹层顶部徽章把「已确认 N/M」「候选 K」「否决 J」「已收尾·待确认」分列，并在「只有候选未确认」时显一条黄色提示（**候选不算解出，调度层仍在派 Worker**）、在 `conflict` 非空时显红字提示（标出冲突的前缀，要求标记掉错的那条）。
+
+### 核对通道与首轮分诊（ctf-controller-hardening，2026-10-20）
+
+三个 P0 缺口来自同一次实战复盘（USBPcap 题）：主控**全程靠 worker 自述判断真假**、3 条方向**盲派且执行上重叠**、产物**落在哪不可寻址**。
+
+**P0-2 `ctf_inspect`：给核对，不给执行**。复盘的核心矛盾是一句话——
+> 系统给了主控「必须一手核实」的纪律，却没给它任何核实的工具。
+
+那一轮主控对「这条 flag 是不是误报」的唯一依据是另一个 agent 的**自述摘要**：它没看过 `solve_usb_pcapng.py`、没看过 `out.txt`、没看过 `flag.zip`，于是自述里 `linktype 249` 与 `220` 互相矛盾，它无法发现。**但不能直接给 `read_file`/`run_cmd`**——主控能跑命令就会自己解题（ARTEX 主控事故 `3d4834f`），这是硬红线。
+- `what="evidence"`：把台账里每条 flag 的**完整证据链原文**摊开（`source` 解题路径原文、`transform`、置信、判定者、关联 finding 的 `repro_steps`）。**不摘要不评价**——让主控自己比。这些内容本来就在台账里。
+- `what="files"`：题目子树资产 + `artifacts/attachments` + `scratch`/`work` 的文件清单 + provenance + **头部 32 字节魔数**。**绝不返回全文**（`_INSPECT_HEAD_BYTES=32`）：够判「这是 zip/图片/流量包」，不够解题。魔数认不出时回「**未知形态**（认不出，别猜——派 worker 看）」，不猜。
+- 三条红线即它与 `read_file` 的全部区别：**没有任意路径读取**（只认题目子树 + 三个已知工作区根）、**没有全文**、**没有命令执行**。测试 `test_inspect_files_gives_magic_not_content` 直接断言正文 marker 不出现在回执里。
+- 它**不按线程标题补建题目**（`ToolDispatcher._challenge_fallback_asset()` 会补建）：核对通道不该有副作用，只做沿 `parent_thread_id` 的读解析。
+
+**P0-3 产物 provenance 四档**（`_workspace_files_context` + `_file_origin`）：主控不知道哪些是「用户给的原件」、哪些是「上一轮 agent 的产物」，于是从零派 3 条方向，3 个 agent 各写一遍解析器（同一题 3 份重复劳动）。判据全是**路径前缀**（确定性、无猜测）：`artifacts/attachments/`=`[题目原件]`（不可信不可改）、`scratch/`+`work/`=`[上轮产物]`（可复用可覆盖）、`samples/`=`[样本]`、其余=`[未知来源]`。清单每行带 mtime；命中 `_REUSE_SCRIPT_RX`（`solve_*/extract_*/decode_*/parse_*/carve_*/dump_*/recover_*/unpack_*/exp/exploit/poc`）时加硬提示：「清单里有 `[上轮产物]` 的 `solve_*.py` —— 这题很可能已被解过，第一动作应该是派 worker 读并复现它」。
+
+**「已解过」提示必须由清单事实触发**（ctf-inspect-reuse-hint，2026-10-20）：`ctf_inspect(what="files")` 尾部那句「清单里有 `[上轮产物]` 的 `solve_*/extract_*/parse_*` 就说明这题已经解过」原先**无条件**拼接，于是新开项目、新派的题（清单只有一条 `[题目原件]` 的 pcapng）也会被告知「已解过，别再派从零分析」——与事实相反，还会把主控推去「复现」不存在的产物。现在与 `_workspace_files_context` 同口径：遍历时用 `_note_reuse()` 收集「`[上轮产物]` 且文件名命中 `_REUSE_SCRIPT_RX`」的条目，**只有命中才**输出硬提示并点名脚本；**未命中则反向明说**「没有可复用的既有成果，按新题从零分析是正常路径」，堵住模型自行脑补「也许解过」而绕路。回归 `test_inspect_files_does_not_claim_solved_on_new_challenge` / `test_inspect_files_reuse_hint_needs_script_shape`。
+
+**P0-5 无条件首轮分诊**（`session._plan_locked` 的 `triage_blocked`）：3 条方向盲派，第 1 条（基础分诊）与第 3 条（TLS/流重组）**执行上完全重叠**（都走 USB 载体识别 → SCSI LBA 重组 → 解 flag.zip → 解 XOR）。
+- **归一算法解决不了这个，也不该去解决**：实测 `pcapng` 只出现在 A 的键里，B 的键是 `tcp tls udp 加密 协议 流 重组 熵`，字面毫无交集。「两条路径会走到同一终点」是**执行后才可知**的事实，任何措辞相似度判据都是在猜（`lease.py` 已为这个理由放弃模糊匹配）。
+- 所以不猜重叠，改**编排**：`rounds <= _TRIAGE_MAX_ROUNDS` **且分诊尚未得出结论**时，若整批方向里**没有任何一条**命中 `_TRIAGE_RX`（`分诊|triage|题型|识别/判断/确认+是|魔数|magic|题面|file|载体`），则**整批拦下**并回专门文案（讲清「为什么」+「怎么做：这一轮只提这 1 条」）。
+- **闸的判据是「分诊结论存在」，不是「第几轮」**（ctf-triage-retire，2026-10-20 修正）：原实现只看 `rounds <= 3`，于是第 1 轮正确做了分诊、第 2 轮派深挖时 `rounds` 仍是 2 ≤ 3，**闸再次拦下**——用户实测「分诊做完了却还被硬拦」即此。轮次只是安全阀，判据必须是「这件事办完了没有」。
+- **用户裁决是无条件**（「明显题目也做分诊」）：分诊成本 30 秒，而「我以为一眼就看出来」恰恰是误判率最高的时刻。`_TRIAGE_MAX_ROUNDS=3` 是**上界**不是「第几轮」——模型死活不听话时 3 轮后放行，闸的作用是纠正一轮，不是把控制器锁死。
+- **宽进严出**：只要有一条像分诊，其余深挖方向照常走后续判据（允许一轮里既分诊又试一个明确的面）。
+- **被拦下不消耗方向槽位**：不建 `DirectionState`、不占租约——否则纠正一轮就烧掉一个方向。
+- 分诊结论回来后 `ctf_review` **置顶**展示（`_triage_summary_locked`），并由 `triage_concluded()` 判定「是否真的知道了载体/格式」：只派出分诊不等于分诊完成，`[未命中] file 命令不存在` 不能解锁深挖；明确的 `pcapng/linktype/ZIP/USB/图片/音频` 或「无附件/纯交互题」才算结论。结论一旦落账，方向状态变为 `retired`（**使命完成，不代表题目已解出**），释放租约并立即解除分诊闸；后续再派同一分诊方向会被拒，避免截图所示的「分诊方向仍 open → 再派廉价续接 → 深挖批次继续被硬拦」。
+
+**P1-1 冲突主动上报**（`_ledger_context`）：两个 agent 都能通过 `bb_query` 看到台账（所以都说「2/1 已满」），但没一个提出「已经有另一个 flag 了，我们冲突了」——因为台账对 worker 是**只读数据**，没有「发现异常要上报」的通道，`conflict` 只在**提交时**触发。故改为每轮 system 注入（不污染消息历史、每轮重投影）：`conflict`→「至少一条是错的」+ 怎么自证；`over_quota`→软提示「配额被下调过」（**不当错误**，那多是用户主动改 `flag_count`）；`concluded`→别再派工 + 怎么撤销；有候选零确认→「补证据升级或继续找，别停在候选上」。**只报异常不报常规进度**——每轮都刷的长文本会被模型当噪音跳过。
+
+**P1-2 耗时记账**：`chat.ctf_verdict` 事件加 `elapsed_s`（该方向累计墙钟，从 `first_at` 算）；`review()` 表格加「耗时」列（`45s`/`12m`/`1.4h`，`_fmt_dur`）+ 末尾「**本题累计**：N 轮派发 / M 次执行 / 时长 / 存活 K 个方向」。**不改任何判据**（时间判据已在 `scheduler` 里用），只让人看得见——机会成本不量化，复盘就没法回答「这题值不值 3 个并发槽位」。回归 `test_elapsed_does_not_change_verdict` 钉死这条边界。
+
+**展示用可读方向名**（`session.dir_label`，ctf-dir-label，2026-10-20）：复核表、派发计划、互斥表、linktype 矛盾、重复产物**一律展示方向原文**，不再展示 `DirectionState.key`。键是 `direction_key()` 的 2-gram 归一串（中文会切出跨词碎片，如「先分诊：file 魔数…」→ `file 先分 关键 分诊 判断 断载 载体 键句 面关 题型 题面 魔数`），模型认不出那是自己刚派过的方向，会当成「另一套版本」重复派工。**键仍保留在 state 里做去重与互斥**，只是不给人看；`ClaimResult.describe(label)` 同理（不传 label 回落键，向后兼容）。
+
+**P1-3 产物路径提权**（`fold.salience_score`）：实测 `'flag.zip 落在 /workspace/scratch/att-abc/flag.zip'` 只算 1（一般显著），降级时被挤掉，而**产物路径是复核的钥匙**。故 `_ARTIFACT_PATH_RX` 认 `/workspace/…` 与 `scratch/`、`work/` 前缀 → `salience=2`（与「凭据=2」同源：可操作的事实，不是过程描述）。**裸相对文件名不算**（否则 `a.py` 也提权，强信号贬值）。
+
+### 跨回执一致性（ctf-cross-observation，2026-10-20，P2）
+
+**要解决的问题**：单条回执里的说法语法上完全合法，无从判断对错；矛盾只在**两条回执并置**时才出现。而 worker 之间互相看不到对方的回执，主控两条都信——于是按两套互相排斥的前提各干一遍。
+
+两类信号，都是**只报不改判据**（`test_p2_signals_do_not_change_verdict` 钉死）：
+
+| 信号 | 抽取 | 判定 | 落点 |
+|---|---|---|---|
+| **linktype 矛盾** | `observe.parse_linktypes()` | 同一题内出现 ≥2 个不同值 | `review()` 表格**之前**的警示段 |
+| **重复产物** | `observe.parse_script_names()` | **≥2 个不同方向**都产出了脚本 | `review()` 累计行之后的警示段 |
+
+**linktype**：复盘里两个 worker 分别报 220 和 249，主控两条都信，按两个不同的链路层布局各解一遍，至少一半白跑。抽取只认**显式声明**（`linktype 220` / `Encapsulation type: … (220)` / `LINKTYPE_USB_LINUX (249)` / `link_type=249`），**不认裸数字**——`0x000000dc` 可能是任意偏移量，误报会把正常回执判成矛盾，而假警报会训练模型忽略真警报。上限 1024 挡住「年份 (2024)」误抽；间隔上限 80 字符（tshark 的标准措辞中间有 46 字符，40 会漏掉最常见那条）。**代码不替模型判谁对**——它不知道哪个值是真的，自动挑一个等于赌；只能告诉它「这里有矛盾，去用 `capinfos`/`tshark -r x -V` 一手复核」。
+
+**重复产物**：复盘里三个 worker 各写了一遍 USB 解析器（`solve_usb_pcapng.py` / `usbpcap_extract.py` / `parse.py`）。**按名字比对抓不到**（三个名字全不一样），**按语义类别也抓不到**（分属 solve/extract/parse 三档，各档各一份）。最终判据退到最朴素的一条：**「≥2 个不同方向都写了脚本」本身就是方向重叠的强信号**——正常情况一个方向写完就解出来了，写脚本说明卡住了，两个方向各写一遍说明在做同一件事。同一方向写三版是正常迭代，不算。**只做事后信号不做拦截**：发现时活已经干完了，价值在两处——事后复盘调 `_TRIAGE_RX` 的覆盖面，以及本轮提示「后续方向先复用，别写第四遍」。
+
+### 证伪收敛（ctf-refute-converge，2026-10-20）
+
+**现象**：某个方向已经被明确判定「这条路不通」，但调度层仍反复给它续投——三个方向在同一测试面上重复派发到预算烧光（用户复盘中「证伪方向不收敛」）。
+
+**根因是一处正则误判**：`[未命中] 0 帧 DNS，该方向证伪` 这类回执里含**「命中」二字**（`未命中` 的后半），旧口径 `_WEAK_PROGRESS_RX.search()` 直接命中 `命中` 分支 → 判成 `weak=True`（有侦察进展）→ `scheduler` 的 ⑫ `bounded_patience` 判据「有弱进展且耐心未耗尽 → 续投」反复放行，**证伪被当成进展，方向永远不收敛**（假性存活）。
+
+**修复分两层**：
+1. `session.record()` 新增 `_REFUTED_RX` 并**先于**弱进展匹配：命中即 `refuted=True`、`refuted_reason=...`，且**不置 `weak`**（证伪是结论不是进展）。顺序不能反——两个模式会同时命中同一段文本。
+2. `scheduler.decide` 新增判据 **⑧'「已证伪 → drop」**，位置在 **⑨ min_passes 地板之前**：证伪是确定性结论，不是「试得还不够」；放在地板之后就等于「未命中也要再试两轮」。
+   - **唯一例外**：`correct > 0` 的多 flag 题（已拿到部分 flag）不因单方向证伪而 drop——那说明整题还有戏，交给 ⑩ `partial_multiflag` 判。
+
+`_REFUTED_RX` 覆盖：`证伪|已排除|排除掉|不成立|(未|没有|无)命中|(未|没有|无)发现|not found|no hit/finding/result/evidence|dead_end|此路不通|走不通|确认不存在|不存在该`。
 
 ## CTF 轨调度与收敛（artex-ctf-track v47，2026-10-19 实施）
 
@@ -189,6 +377,19 @@ WAL + 线程局部连接 + `_tx()`（进程内写锁 + BEGIN IMMEDIATE）串行�
 **一个 ARTEX 主控只绑定一个任务**：`chat_threads.artex_task_id`（v46 已有字段）由 `artex_plan` 新建任务时立刻写入（`bind_task_to_thread`），`resolve_task` 改为三级 **显式传参 > 线程绑定 > `active_task_id`（降级）**。降级路径必须保留——老线程/API 直连/工作台无会话都没有线程绑定。ARTEX 面板**不提供新建任务入口**（ARTEX 是唯一主控，要建题就让它建）；保留「从已有题目创建任务」作为降级入口（用户拍板「保留」）。
 
 **主控状态回执**：`artex_status` 在目标段之后插入 `_challenge_status_lines`——进度 `解出 N/M 道`、逐题 `✓/◐/▶/✗/○` + 状态标签 + `got/quota` + Worker 数 + 否决数，末尾一句「CTF 轨口径」说明（覆盖度=已解题目数，不是已测资产数）。非 CTF 轨返回空段。
+
+### 存量补建只在真有遗留数据时发生（2026-10-20 修复）
+
+**现象**：新建的空 CTF 项目打开「题目」tab，列表里凭空多出一道**与项目名完全相同**的题（右侧标 `system`），用户实测项目名「hxbai测试」直接变成了题目。
+
+**根因**：`_backfill_challenges`（`core/api/app.py`）是给**老项目归拢遗留数据**的迁移逻辑——v38 之前 CTF 项目的 findings `target_asset_id` 全为空、附件直挂根资产，补建一道题把它们收编进子树。但它的触发条件只判「CTF 轨 + 无 challenge 行 + `challenge_backfill_done` 未标记」：**新建的空项目同样满足这三条**，于是补建逻辑把项目名当题目名建了一道空壳题。
+
+**修复**：把「有没有待归拢数据」提到**建题之前**判——无 `target_asset_id` 的 findings 与游离根资产（`parent_id IS NULL` 且非 challenge）**都为空时直接返回**，并落 `challenge_backfill_done` 标记（语义是「本项目存量迁移已判定完毕」，不是「补建成功」），避免每次读题目清单都重跑那两条查询。
+
+**这不是关掉补建能力**：真有遗留数据的老项目照旧补建并收编（`test_backfill_adopts_orphan_root_assets`、`test_backfill_moves_project_level_findings` 仍绿）；人工建题（`POST /api/projects/{pid}/challenges`）与 Agent 的 `bb_declare_challenge` 完全不受影响。
+
+**已污染的库**：删掉 `author='system'` 且 `value == 项目名` 且**零子资产/零发现/零 flag** 的空壳行即可（本机 `hxbai` 项目已按此清理并落标记）。清理前必须确认三者全零——非空壳的补建题可能已收编了真实遗留数据，删它等于丢数据。
+
 
 ## 业务语义层
 
@@ -517,6 +718,8 @@ SKILL.md 薄路由入口 → kb/route.json 任务导航表（**M0 留域内** `p
 
 **检索质量升级（retrieval-upgrade M2+M3，2026-09-23 实施）**：**同义词查询扩展**——`packs/kb/synonyms.yaml` 全局单表（groups: [{id, terms}]，21 组起步，提案制演进），objective 命中组内任一成员（lower 子串）→ 全组成员各自 2-gram 切段并入匹配（查询侧扩展、索引侧零改动；SkillRouter keywords 暂不挂防误报面扩大）；doctor 体检四档（synonyms-missing info / empty warning / dead-group warning 全成员零命中 / idle-term info 部分空转）。**漏召回对账**——`GET /api/projects/{pid}/retrieval-stats` 离线统计（traces.retrieval_stats，扫近 5000 事件，per 任务窗切分）：hinted_opened（提示∩打开）/ hinted_not_opened（低优，提示质量）/ opened_no_output（正常试错）/ **missed**（打开且产 verified 但未进 kb_hits=漏召回信号，审阅后转同义词/route_index 增补提案）。**检索黄金集**——`tests/fixtures/retrieval-golden.yaml` 20 条人工标注（中文任务口吻 query→期望命中 kb 模块，命中判定=cap4 hints 内出现任一 expect，良性命中扩 expect 不算错），pytest 断言 recall@4≥0.8 + expect 路径存在自检；**匹配链任何改动（词表/索引/停用词/切分）必须跑黄金集防退化**。
 
+**中文检索与中文技能名（2026-10-19 实施）**：两处中文支持缺陷的修复。①**中文问句检索零命中**——kb_search 把中文串切 2-gram 后按 **AND** 拼 SQL，「如何测试文件上传漏洞」切出的 何测/试反 等词元跨词边界、语料里不存在，全 AND 必然零结果（实测该问句修复前 0 命中），等于要求用户把自然语言改写成关键词；现新增 `matching.py::query_tokens` 统一切词（最长匹配剥虚词表 `_QUERY_STOPWORDS`，**含单字虚词** 的/了/和——只按 2-gram 过滤会剩「过的」这类跨虚词边界碎片，它在语料里真实出现能骗过覆盖率门槛；剩余实义片段 ≤4 字整段保留、>4 字切 2-gram），kbsearch（FTS 索引）与 writing（legacy 扫描器）共用同一口径，严格 AND 零结果时走 **IDF 加权覆盖率降级**：ASCII 词元恒为硬约束，中文词元按 df 加权、泛词（df>60% 语料）剔除，命中权重占比 ≥0.34 **且** 命中词元数占比 ≥0.6 双门槛才入选（缺覆盖率门槛则泛词刷权重，缺词数门槛则「不存在的专题xyz」这类全泛词查询蒙出无关结果）。纯 ASCII 查询行为不变（FTS + OR 回退），检索黄金集 recall@4 未退化。②**中文技能名一半操作被拒**——`writing._SKILL_NAME_RE` 是纯 ASCII 白名单而 API 层 `app._NAME_RE` 用 `\w`（Unicode-aware），设置页能建出 `skills/注入测试/`，提案 create/delete 走 writing 时却判「非法技能名」；现两处统一为 Unicode 词字符口径 `[\w][\w.-]{0,63}`（仍禁路径分隔符、Windows 非法字符、尾随空格/句点），中文技能名的创建/注册/skill_open 读正文与资源/删除/提案落地全链路打通。护栏 `tests/test_kb_chinese.py`（33 例：切词口径、自然语言问句召回、泛词查询零结果、ASCII 行为不变、legacy 与索引同口径、命中次数排序、中文技能名全链路）。③**排序退化为字母序（同日追加）**——覆盖率降级的 `cov` 只记「词元命中与否」，同批词元都命中的文档 cov 必然完全相等（实测「如何测试文件上传漏洞」10 篇全是 cov=9.524/hits=5），而 `layer` 在现网恒为 1，`ORDER BY cov DESC, d.layer DESC, d.relpath` 于是退化成 relpath 字母序：正文命中 758 次的《文件上传漏洞.md》排到第 3 位，`提权` 的首位是命中 3 次的越权 PoC 而非命中 36 次的 `12-privesc.md`。修复：`_coverage_rows` 与严格 AND 两条路径都加 `tf` 次级键（`(LENGTH(c)-LENGTH(REPLACE(c,term,'')))/len(term)`），**必须写进 SQL 的 ORDER BY**（Python 侧重排会被 `LIMIT` 先按字母序截断）；`writing._kb_scan_coverage` 与 `search_kb` 的 Python 排序同步加 `matches` 次级键。tf 的 REPLACE 占位符要传纯词元（传 `%term%` 恒为 0）。
+
 ## 角色与规则链
 
 角色（M2 起实现为专家，见下节）字段全是软边界（skills/task_types/knowledge 为 null=不过滤），缺专家静默回退 _generalist，expert_exists 防拼错放行；规则链 轨红线（硬红线，全轨恒注入）/ 平台规则（授权边界，按资产 owner tag，**渗透独有**）/ 评级与价值口径（判级口径，**渗透独有**）分层注入，resolve_rule_profiles 纯显式解析（2026-10-01 去三态：勾哪个生效哪个，未配=不注入）。**role-rules/ 通道随能力包退役删除（2026-10-13）**。
@@ -722,7 +925,7 @@ x64dbg 下断 / Cheat Engine Lua 纯前端模板（零插件不触网），日�
 
 ## 蓝图数据底座
 
-blueprints 表（schema v17）与 store CRUD/事件已落；**消费面接线（R4 管线 M1，2026-10-13）已落地**——chat 主控/子专家 system 注入蓝图段（`_blueprint_context`）、会话窗 `_mat_blueprint` 按 `binary_sha256` 命中优先注入（此前 AI 侧完全读不到 blueprints 表）。**产出闭环（M2，2026-10-13）已落地**——「蓝图」页签加「生成蓝图」/「按模块深析」按钮：建 chat 线程（主控 chat-orchestrator）+ 下发阶段 objective + `goto-agents` 跳工作台并选中该线程；`blueprint-rebuild` 技能改写为 chat 主+子口径（主控 `call_expert` 扇出、`module:<名>` 锚点纪律）。**重建执行（M3，2026-10-13）已落地**——蓝图 status=`building` 时「蓝图」页签露「派发重建」按钮，下发阶段四/五 objective：每模块一子专家落码到 `<proj>/artifacts/rebuild/<模块名>/` → 依 func_kb 伪码写自测脚本 → `run_cmd(threat_class=untrusted, runtime=docker/sandbox)` 对拍 → 全过 `bb_blueprint_update(module_status="tested")` → 阶段五拼装 + 「蓝图 vs 实现」差异表经 `bb_add_artifact(kind="project")` 落文本（**产物本体留 artifacts/，该工具只存文本不上传文件**）→ 人类终验 `built`。载体定案：**core/chat 工作台主+子**（非 Team）；人类确认闸 = 蓝图 status（`ready` 放行 / `building` 开工 / `built` 终验）。
+blueprints 表（schema v17）与 store CRUD/事件已落；**消费面接线（R4 管线 M1，2026-10-13）已落地**——chat 主控/子专家 system 注入蓝图段（`_blueprint_context`）、会话窗 `_mat_blueprint` 按 `binary_sha256` 命中优先注入（此前 AI 侧完全读不到 blueprints 表）。**产出闭环（M2，2026-10-13）已落地**——「蓝图」页签加「生成蓝图」/「按模块深析」按钮：建 chat 线程（主控 chat-orchestrator）+ 下发阶段 objective + `goto-agents` 跳工作台并选中该线程；`blueprint-rebuild`（现名 `逆向重建手法`）技能改写为 chat 主+子口径（主控 `call_expert` 扇出、`module:<名>` 锚点纪律）。**重建执行（M3，2026-10-13）已落地**——蓝图 status=`building` 时「蓝图」页签露「派发重建」按钮，下发阶段四/五 objective：每模块一子专家落码到 `<proj>/artifacts/rebuild/<模块名>/` → 依 func_kb 伪码写自测脚本 → `run_cmd(threat_class=untrusted, runtime=docker/sandbox)` 对拍 → 全过 `bb_blueprint_update(module_status="tested")` → 阶段五拼装 + 「蓝图 vs 实现」差异表经 `bb_add_artifact(kind="project")` 落文本（**产物本体留 artifacts/，该工具只存文本不上传文件**）→ 人类终验 `built`。载体定案：**core/chat 工作台主+子**（非 Team）；人类确认闸 = 蓝图 status（`ready` 放行 / `building` 开工 / `built` 终验）。
 
 # 十二、工程化与运维
 

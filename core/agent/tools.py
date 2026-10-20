@@ -381,7 +381,8 @@ class ToolDispatcher:
                  thread_id: str = "",
                  intent_free: bool = False,
                  environment_id: str | None = None,
-                 recovery: EnvironmentRecovery | None = None):
+                 recovery: EnvironmentRecovery | None = None,
+                 supports_vision: bool = False):
         self.bb = bb
         self.gateway = gateway
         self.project_id = project_id
@@ -428,6 +429,11 @@ class ToolDispatcher:
         # 不放行这两道闸会让探针的 run_cmd/bb_add_finding 全被打回。任务链
         # （AgentSession）、chat-orchestrator 子专家、人工/API 路径一律不豁免。
         self.intent_free = bool(intent_free)
+        # vision 通道（2026-10-19）：本会话的模型能否看图片。由上层从
+        # provider 实例（`llm.supports_vision`，源自 providers.json 的
+        # `vision: true`）注入——Dispatcher 自己不持 llm 引用（工具层不该知道
+        # 用哪个模型），只认这个布尔。False → view_image 只回元信息 + OCR 指引。
+        self.supports_vision = bool(supports_vision)
         # 会话步数预算（E8）：AgentSession 按角色收敛后的 max_steps 注入；request_steps
         # 增补写这里（_loop 的 range 上界同读），0 = 未装配（request_steps 拒收）
         self.max_steps = max_steps
@@ -523,8 +529,14 @@ class ToolDispatcher:
         """H1 spill（借鉴 dsh tool-output-spill-files）：结果超阈值时全量落
         workspace/spill/，回填「head+tail 预览 + 精确省略计数 + 定位器 + 检索提示」
         ——有损但可找回（与 G3 摘要正交：摘要有损不可逆，spill 按需可取回）。
-        未装配 workspace / 落盘失败一律原样返回（尽力而为，绝不阻断工具链）。"""
-        if name in _SPILL_SKIP or len(result) <= _SPILL_THRESHOLD:
+        未装配 workspace / 落盘失败一律原样返回（尽力而为，绝不阻断工具链）。
+
+        **带图结果（ToolOutput，vision 通道 2026-10-19）直接放行**：spill 走的是
+        「落盘 + 回填预览字符串」，返回值必是 str → ``.images`` 当场蒸发。而图片
+        结果本身文本只有一两百字，根本到不了阈值；真到了也只可能是误判，宁可
+        让它超限也不能静默丢图（模型会以为「我看过了」其实什么都没收到）。"""
+        if name in _SPILL_SKIP or getattr(result, "images", None) \
+                or len(result) <= _SPILL_THRESHOLD:
             return result
         if not self.artifacts_dir:
             return result
@@ -575,6 +587,39 @@ class ToolDispatcher:
                         + f"，但你引用了范围外的资产 {', '.join(out_of_scope)}。"
                         "新发现的资产先用 bb_add_asset 上报，等主控派发后再测；"
                         "直接测试/登记范围外资产会与其它子代理重复。")
+        # CTF 轨禁 tested_clean（ctf-no-tested-clean，2026-10-20）——**必须在意图
+        # 先行闸之前**判，原因见下。
+        #
+        # **为什么需要这道闸**（用户实测真问题）：CTF 轨的终态判据是 **flag
+        # 台账**（`artex_runtime._ctf_task_state` 注释明写「题目不是待测资产、
+        # flag 也不是 fact，资产覆盖度与 fact 计数在 CTF 轨都是无意义数字」），
+        # 「资产测干净」在 CTF 轨不对应任何东西。但工具面里 `bb_asset_status`
+        # 一直在（`_CTF_CORE_TOOLS` + 六个 CTF 专家 yaml），描述还写着「适用面
+        # 全覆盖标 tested_clean」——模型解完题自然想去标，然后必然撞两道门禁：
+        # 题目行有子资产→「父节点由子树派生」拒；转标附件→「须死路背书」拒
+        # （而它刚解出 flag，本来就没有死路）。于是为凑一条 dead_end 还得再查
+        # event id 补证据引用——三四个轮次白烧，对终态判定零贡献。
+        #
+        # **为什么位置必须在意图先行闸之前**：闸先返回的话，模型看到的是「先
+        # declare_intent 再来」，于是它会乖乖声明一条意图、然后再撞同一个
+        # 「CTF 轨没有这个概念」——多绕一轮，且被误导成「问题出在没声明意图」。
+        # 这个工具在 CTF 轨是**整体无意义**的（不是「需要先立意才能用」），
+        # 所以要先说清这一点。
+        #
+        # 拒绝文案必须**给出正确出口**（只说「不行」会让模型继续试别的状态）：
+        # 解出→close_intent(finding)；解不出→close_intent(dead_end)；
+        # 整题放弃→ctf_abandon。
+        if name == "bb_asset_status" and self.track == "ctf" \
+                and str(args.get("status") or "").strip() == "tested_clean":
+            return ("[拒绝] CTF 轨没有「资产测干净（tested_clean）」这个概念——"
+                    "本题终态由 **flag 台账**判定，不由资产状态判定。"
+                    "按你的实际处境选一个：① 已解出 → `close_intent("
+                    "outcome=\"finding\", finding_ids=[那条 flag 留痕发现])` 收尾意图即可"
+                    "（ctf_submit_flag 已入台账，无需再标任何资产状态）；"
+                    "② 某条思路不成立 → `close_intent(outcome=\"dead_end\", "
+                    "dead_reason=...)`，题还能继续解；"
+                    "③ 整道题放弃 → `ctf_abandon(reason=...)`。"
+                    "**不要**再对题目或其附件标 tested_clean。")
         # 意图先行闸（口径 Y，2026-10-01；2026-10-09 升级为**每意图级**）：
         # **任何**实质执行动作前都必须有 open 意图——先 declare_intent 把方向落成
         # 一句可证伪假设，再 run_cmd/写黑板。逐动作都查（不再是一次性放行标志）：
@@ -754,7 +799,7 @@ class ToolDispatcher:
                 return (wsl_note + f"[环境恢复后仍失败] {retry_issue.code}: "
                         f"{retry_issue.message}")
             return (wsl_note + "[环境恢复后重试]\n"
-                    + self._finish_cmd_receipt(cmd, retry.brief(8000)))
+                    + self._cmd_receipt(cmd, retry))
 
         try:
             r = self.gateway.run(cmd, runtime, **run_kwargs)
@@ -769,7 +814,60 @@ class ToolDispatcher:
             # 普通非零 ExecOutcome 由 gateway 以 environment_error 返回，而不是抛
             # 异常；必须与 BackendError 走完全相同的恢复/重试路径。
             return _recover_and_retry(issue)
-        return wsl_note + self._finish_cmd_receipt(cmd, r.brief(8000))  # 2026-10-01 由 2000 放宽（回执更完整；超限仍走 spill)
+        return wsl_note + self._cmd_receipt(cmd, r)
+
+    def _cmd_receipt(self, cmd: str, r: Any) -> str:
+        """run_cmd 回执：brief(8000) 预览 + **原始 stdout 全量 spill**。
+
+        为什么必须在这里补一次 spill：dispatcher 的 `_maybe_spill` 阈值是
+        32,000，而回执已被 `brief(8000)` 压到 8000 以下 → 永远触发不了。
+        后果是 stdout 超过 8000 的部分**既没落盘也拿不回来**，模型被迫重跑
+        命令重取（tshark 反复重新解析同一份大 pcapng 就是这么来的），而
+        brief 那句「请缩小窗口分段读」对一次性进程输出是空话——窗口缩小输出
+        还是那么多，被切掉的部分没有任何路径能取回。
+        """
+        receipt = self._finish_cmd_receipt(cmd, r.brief(8000))
+        return self._spill_cmd_stream(receipt, r)
+
+    # stdout/stderr 原文落盘阈值：与 brief 上限一致，改 brief 时同步
+    _CMD_STREAM_SPILL_AT = 8000
+
+    def _spill_cmd_stream(self, receipt: str, r: Any) -> str:
+        """把被 brief 切掉的 stdout/stderr 原文落盘，回执补定位器。
+
+        只读、失败即原样返回（不阻断工具链）；未装配 artifacts_dir 时退回并
+        提示改用重定向——**不要建议重跑命令**。
+        """
+        stdout = getattr(r, "stdout", "") or ""
+        stderr = getattr(r, "stderr", "") or ""
+        if max(len(stdout), len(stderr)) <= self._CMD_STREAM_SPILL_AT:
+            return receipt
+        notes = []
+        if not self.artifacts_dir:
+            # 落不了盘也别给「分段读」的假承诺：窗口法对进程输出无效，
+            # 唯一可行的是让命令自己把输出写文件。
+            return (receipt + "\n[stdout 已被截断且无法落盘] 无法分段取回，"
+                    "请改用重定向：run_cmd 跑 `命令 > out.txt 2>&1`，"
+                    "再用 read_file 读文件。")
+        ws = Path(self.artifacts_dir).parent
+        for stream, label in ((stdout, "run_cmd_stdout"),
+                              (stderr, "run_cmd_stderr")):
+            if len(stream) <= self._CMD_STREAM_SPILL_AT:
+                continue
+            path = spill_text(stream, label, ws / "spill")
+            if path is None:
+                continue
+            try:
+                rel = os.path.relpath(path, ws / "scratch").replace(os.sep, "/")
+            except ValueError:  # Windows 跨盘等边缘：退回绝对路径
+                rel = str(path)
+            notes.append(f"{label.rsplit('_', 1)[1]} 全量 {len(stream)} 字符 → {rel}")
+        if not notes:
+            return receipt
+        return (receipt + "\n[输出全量已落盘] " + "；".join(notes) +
+                "。剩余部分用 read_file(path=…, offset/limit 分段读) 或 "
+                "search_files(pattern=关键词) 定位，**不要重跑命令重取**；"
+                "以后大输出优先让命令自己写文件（`命令 > out.txt`）再读。")
 
     def _finish_cmd_receipt(self, cmd: str, receipt: str) -> str:
         """run_cmd 回执统一出口：原地打转提示 → CTF 观测摘要。
@@ -903,6 +1001,79 @@ class ToolDispatcher:
         except Exception:  # noqa: BLE001
             pass
         return body
+
+    def _tool_view_image(self, path: str, max_edge: int = 0,
+                         note: str = "") -> str:
+        """【看图】把图片送进视觉通道（vision 通道，2026-10-19）。
+
+        动机（真事故）：`deepseek-v4.1-flash` 所在网关**支持图片输入**，但此前
+        全链路没有图像通道——附件只渲染成 `📎 <路径>` 文本行
+        （`chat/runtime.py` run()），`read_file` 是 `read_text(errors="replace")`
+        读 PNG 只得乱码，`_chat_messages/_response_input` 还会把 image 块抹成空串，
+        providers.json 也没有能力声明。于是模型唯一可行的路就是 KB 教的
+        `tesseract`/`zbarimg`——「老是用 OCR」不是模型笨，是工程侧没给它眼睛。
+
+        返回 `ToolOutput`（str 子类）：文本是给人读的元信息，`.images` 挂真正的
+        image 块，由 provider 层翻译成 image_url / input_image。
+
+        **降级红线**（对齐工具失败约定）：非图片/超限/未声明 vision 一律回
+        `[错误]` 或纯文本 + 明确下一步，**绝不抛异常**（工具失败不该炸整轮）。
+        """
+        if not self.artifacts_dir:
+            return "[错误] 未装配工作区（artifacts_dir），view_image 不可用"
+        from core import media
+
+        ws = Path(self.artifacts_dir).parent
+        scratch = ws / "scratch"
+        p = _resolve_read_path(path, ws, scratch)
+        got = media.read_image(p)
+        if isinstance(got, str):
+            return f"[错误] {got}"
+        data, info = got
+
+        # 供应商没声明视觉能力 → 不出图。往不支持的网关塞图片块会被 400 打死
+        # 整轮，代价远大于「这次没看到图」。回填元信息 + 该走的路。
+        if not getattr(self, "supports_vision", False):
+            return (
+                f"已识别图片：{info.describe()}（{_display_path(p, ws, scratch)}）\n"
+                "[提示] 当前供应商未声明视觉能力（providers.json 的 `vision: true`），"
+                "无法把图片送进模型。请改走命令行分析：\n"
+                "- 文字/二维码：`tesseract <图> stdout` / `zbarimg -q <图>`\n"
+                "- 元信息：`exiftool <图>`；结构：`file`、`xxd | head`\n"
+                "- 隐写：`binwalk -e`、`zsteg`、`steghide info`、位平面脚本\n"
+                "（若确认该供应商其实能看图，在设置里给它加 vision: true 后重试）")
+
+        max_edge = int(max_edge) if isinstance(max_edge, int) and max_edge > 0 \
+            else media.DEFAULT_MAX_EDGE
+        max_edge = min(max_edge, 4096)   # 再大只是烧 token，不增信息量
+        if info.edge > max_edge:
+            scaled = media.downscale(data, info, max_edge)
+            if isinstance(scaled, str):
+                return f"[错误] {scaled}"
+            data, info = scaled
+
+        b64 = media.to_b64(data)
+        if len(b64) > media.DEFAULT_MAX_B64:
+            return (f"[错误] 图片 base64 后 {media._human(len(b64))} 超过上限 "
+                    f"{media._human(media.DEFAULT_MAX_B64)}：先用 run_cmd 缩图/切片"
+                    "（ImageMagick `convert -resize`），再 view_image")
+
+        # D9 同款轻事件：落 file.read（读图也是「在读新文件」的活跃探索证据）
+        rel = _display_path(p, ws, scratch)
+        try:
+            self.bb.append_event(
+                self.project_id, "file.read",
+                {"path": rel[:200], "step": self._step, "kind": "image"},
+                session_id=self.session_id, author=self.author)
+        except Exception:  # noqa: BLE001 —— 审计失败不影响工具返回
+            pass
+
+        from core.llm.provider import ToolOutput, image_block
+        head = f"已附上图片：{info.describe()}（{rel}）"
+        if str(note or "").strip():
+            head += f"\n关注点：{str(note).strip()[:300]}"
+        head += "\n（图片本体已随本条结果送入你的视觉通道，直接看，不要 OCR）"
+        return ToolOutput(head, [image_block(b64, info.media_type)])
 
     def _tool_unpack_attachment(self, path: str, clean: bool = True) -> str:
         """附件 zip 服务端解包（2026-10-19）。
@@ -1267,11 +1438,18 @@ class ToolDispatcher:
         判定通过后落 **flag 台账**（`challenge_flags` 表，challenge-flag-ledger
         v47）——flag 不再是 findings：findings 的「正式漏洞五项必填契约」是为渗透
         结论设计的，CTF flag 不是漏洞，此前只能硬写套话过闸。台账里 AI 判定通过
-        落 ``verdict='pending'``（待人工复核），题目状态由台账**派生**（拿满
-        ``meta.flag_count`` 条即 solved，调度层随即不再为该题派 Worker）。
+        落 ``verdict='pending'``（**候选**，待人工确认）。
+
+        **候选不计解出**（2026-10-20 方案 A）：题目状态由台账派生，但只有
+        ``accepted``（人工确认）才计入 solved——``pending`` 再多也不算。此前
+        pending 也计入，导致 AI 提交一条假 flag 就把题目判成 solved、调度层立刻
+        停派，**题目被一条假答案提前终止**（用户实测 2/1 显示「已拿满」）。
+        无人值守场景下用 ``ctf_conclude`` 主动收尾停止派工（但状态仍是 partial）。
 
         ``candidate=true`` 走**候选线索**通道：只落一条 intel finding（过程留痕），
-        **不进台账**、不判为解出——线索不是答案。
+        **不进台账**、不判为解出——线索不是答案。注意它与 ``pending`` 不同：
+        ``pending`` 是「形态判定通过的 flag，等人工确认」，``candidate=true`` 是
+        「连 flag 形态都不满足的线索」（管理员密码/API key 之类）。
 
         **本工具不联网提交**，只做本地判定与登记。
         """
@@ -1407,18 +1585,33 @@ class ToolDispatcher:
         self.last_progress_step = self._step
         quota = self._challenge_flag_quota(cid)
         got = self._challenge_accepted_count(cid)
+        # 候选数单独数（pending 不计解出，2026-10-20 方案 A）
+        try:
+            from core.blackboard.challenge_flags import candidate_flags
+            n_cand = len(candidate_flags(self.bb, self.project_id, cid))
+        except Exception:  # noqa: BLE001 —— 计数失败不影响回执主体
+            n_cand = 0
         notes = [f"flag={token}", f"confidence={score:.1f}",
                  f"challenge={cid}（{ch_name}）",
                  f"flag_id={(ledger.get('row') or {}).get('id')}",
-                 f"本题进度 {got}/{quota}"]
+                 f"已确认 {got}/{quota}（候选 {n_cand} 条待人工确认）"]
         if source and transform:
             rt = flagjudge.roundtrip_verify(token, source, transform)
             notes.append("回环验证=" + ("通过" if rt else "无法判定（变换名未识别）"))
-        if got >= quota:
-            notes.append("**本题 flag 已拿满，调度层将不再为它派 Worker**")
         else:
-            notes.append(f"还需 {quota - got} 条（多 flag 题目，继续找）")
-        notes.append("已入 flag 台账（verdict=pending，等人工复核；"
+            # **证据强度必须说清**：没有 transform 就没跑回环，这条只是形态判定。
+            notes.append("**仅形态判定通过，未做变换回环**"
+                         "（下次带 source+transform 可加固证据）")
+        if got >= quota:
+            notes.append("**已确认 flag 已达配额，调度层将不再为它派 Worker**")
+        elif n_cand and got + n_cand >= quota:
+            # 关键：候选满了不等于解出。这行是「别收尾，去确认」的提示。
+            notes.append(f"候选已够 {got + n_cand}/{quota}，但**候选不计解出**——"
+                         "若确认答案已拿到，用 ctf_conclude 主动收尾（停止派工）；"
+                         "否则继续探索，别因为「数字看起来满了」就停")
+        else:
+            notes.append(f"还需 {quota - got} 条已确认（多 flag 题目，继续找）")
+        notes.append("已入 flag 台账（verdict=pending 候选，等人工确认；"
                      "用户可在题目卡片上确认或标记为错误）")
         return "[已登记] " + " · ".join(notes)
 
@@ -1532,6 +1725,149 @@ class ToolDispatcher:
             head.append(f"  …共 {len(rows)} 条，完整表见 scratch/{rel or '<未落盘>'}") if rel \
                 else head.append(f"  …共 {len(rows)} 条")
         return "\n".join(head)
+
+    def _tool_ctf_abandon(self, challenge_id: str = "",
+                          abandoned: bool = True,
+                          reason: str = "") -> str:
+        """CTF 轨：放弃整道题 / 撤销放弃（ctf-abandon，2026-10-20）。
+
+        **为什么需要这个工具**（用户实测真问题）：`set_abandoned` 此前只挂在
+        HTTP API（`core/api/app.py` 的 `POST /api/challenges/{id}/abandon`，
+        `author="human"`），**Agent 侧没有任何工具能表达「这题我不解了」**。
+        于是模型想收尾时的唯一可见出口是 `bb_asset_status("tested_clean")`，
+        而 CTF 轨根本不该标那个（终态判据是 flag 台账，见 `_ctf_task_state`
+        注释）——它必然撞门禁（题目行「父节点由子树派生」拒、附件子资产
+        「须死路背书」拒），再为了凑 dead_end 去查 event id，三四个轮次白烧。
+        补上这个出口，模型才有「合法地停」的地方。
+
+        **语义边界（别和 close_intent 混）**：本工具是**整题级**判定——
+        放弃后调度层不再为该题派 Worker。单条假设不成立是 `close_intent`
+        (outcome="dead_end")，题还能继续解。两者不可互换：把「一条路死了」
+        当成「整题放弃」会让多方向题被误弃。
+        """
+        if self.track != "ctf":
+            return ("[拒绝] ctf_abandon 仅 CTF 轨可用"
+                    "（其它轨道的「不再测」是 bb_asset_status 的 tested_clean/na）")
+        cid = str(challenge_id or "").strip() or (self._challenge_fallback_asset() or "")
+        if not cid:
+            return ("[拒绝] 无法确定这道题：先 bb_declare_challenge 登记题目"
+                    "（或显式传 challenge_id）")
+        asset = self.bb.get_asset(cid)
+        if asset is None or asset.get("project_id") != self.project_id:
+            return f"[错误] 题目不存在: {cid}"
+        if str(asset.get("type") or "") != "challenge":
+            return (f"[拒绝] {cid} 不是题目（type={asset.get('type')}）"
+                    "——放弃是题目级动作，不能对附件/靶标这类子资产用。"
+                    "子资产「不再看」直接不碰即可，无需登记。")
+        from core.blackboard.challenge_flags import (challenge_flag_summary,
+                                                     set_abandoned)
+        try:
+            set_abandoned(self.bb, self.project_id, cid,
+                          abandoned=bool(abandoned), author=self.author)
+        except ValueError as e:
+            return f"[拒绝] {e}"
+        # 回执带题目现状：模型据此判断「还能不能救」——已拿到的 flag 放弃后
+        # 仍然计入（放弃=不继续投入，不是清空结论），这点必须说清否则它会以为
+        # 放弃把进度也扔了。
+        try:
+            st = (challenge_flag_summary(self.bb, self.project_id, [cid]) or {}).get(cid) or {}
+        except Exception:  # noqa: BLE001 —— 汇总失败不影响放弃动作
+            st = {}
+        name = str(asset.get("value") or cid)
+        note = str(reason or "").strip()
+        if abandoned:
+            parts = [f"题目={cid}（{name}）已标记**放弃**",
+                     f"已登记 flag {int(st.get('accepted') or 0)}/"
+                     f"{int(st.get('quota') or 0)} 条保留（放弃不清空结论）",
+                     "调度层不再为该题派新 Worker"]
+            if note:
+                parts.append(f"放弃原因已留痕：{note[:300]}")
+            parts.append("如需继续解，用 ctf_abandon(abandoned=false) 撤销")
+            return " · ".join(parts)
+        return (f"题目={cid}（{name}）已**撤销放弃**，可以继续解题"
+                + (f"（原放弃原因：{note[:200]}）" if note else ""))
+
+    def _tool_ctf_conclude(self, challenge_id: str = "",
+                           concluded: bool = True,
+                           reason: str = "") -> str:
+        """CTF 轨：主动收尾（停止派工） / 撤销收尾（ctf-conclude，2026-10-20）。
+
+        **为什么需要这个工具**（用户裁决方案 A 的配套）：把 `pending` 从
+        solved 派生里摘出去之后，「AI 判定通过」只能把题目停在 `partial`——
+        必须等人点确认。有人值守时这是对的（人工确认是强证据，也是唯一能
+        拦住假 flag 的闸）；但**无人值守通宵跑题会全部卡在 pending 白烧预算**：
+        明明解出来了，没人点按钮，调度层就一直派 Worker 重跑同一道题。
+
+        所以需要一个**显式收尾**出口：主控看过证据、判定「答案已经拿到」→
+        置 `meta.concluded`，调度层停派工。但**不把它伪装成 solved**——
+        状态仍是 partial，前端仍显示「待人工确认」。收尾只表达「别再派了」，
+        不表达「这条 flag 是对的」；后者只有人能判。
+
+        **与 `ctf_abandon` 的边界**（两个出口都不能混用）：
+        - 收尾 = 做完了，等人工确认（`meta.concluded`，状态 partial）；
+        - 放弃 = 不做了，可能没解出（`meta.abandoned`，状态 abandoned）。
+        把「解出来了但没人确认」当成放弃，会让 coverage 把它算成没解出；
+        把「解不出来」当成收尾，会让复盘误以为这题已经拿下。
+
+        **不强制要求已有 accepted flag**：那正是本工具存在的理由（accepted
+        只有人能落）。但要求**至少提交过一条 flag**——一条都没提交就收尾，
+        几乎必然是模型自嗨（「我看懂了，就是 flag」），必须拦住并指回
+        ctf_submit_flag。
+        """
+        if self.track != "ctf":
+            return ("[拒绝] ctf_conclude 仅 CTF 轨可用"
+                    "（其它轨道的「这一轮做完了」就是直接给结论，无需单独登记）")
+        cid = str(challenge_id or "").strip() or (self._challenge_fallback_asset() or "")
+        if not cid:
+            return ("[拒绝] 无法确定这道题：先 bb_declare_challenge 登记题目"
+                    "（或显式传 challenge_id）")
+        asset = self.bb.get_asset(cid)
+        if asset is None or asset.get("project_id") != self.project_id:
+            return f"[错误] 题目不存在: {cid}"
+        if str(asset.get("type") or "") != "challenge":
+            return (f"[拒绝] {cid} 不是题目（type={asset.get('type')}）"
+                    "——收尾是题目级动作，不能对附件/靶标这类子资产用。")
+        from core.blackboard.challenge_flags import (challenge_flag_summary,
+                                                     set_concluded)
+        name = str(asset.get("value") or cid)
+        try:
+            st = (challenge_flag_summary(self.bb, self.project_id, [cid]) or {}).get(cid) or {}
+        except Exception:  # noqa: BLE001 —— 汇总失败不阻塞收尾
+            st = {}
+        got = int(st.get("accepted") or 0)
+        n_cand = int(st.get("candidate") or 0)
+        quota = int(st.get("quota") or 0)
+        # 收尾前必须「至少提交过一条」：一条都没有 = 没有任何可复核的答案，
+        # 此时收尾等于把题目静默弃置（既不 solved 也不再跑），最坏的一种结局。
+        if concluded and got + n_cand == 0:
+            return (f"[拒绝] {cid}（{name}）还没有任何 flag 记录——"
+                    "收尾只适用于「答案已提交、等人工确认」的情况。"
+                    "如果确实解出来了，先用 ctf_submit_flag 提交；"
+                    "如果解不出来，用 ctf_abandon(reason=...) 明确放弃；"
+                    "如果只是某条思路不通，用 close_intent(outcome=\"dead_end\")，题还能继续解。")
+        try:
+            set_concluded(self.bb, self.project_id, cid,
+                          concluded=bool(concluded), reason=reason,
+                          author=self.author)
+        except ValueError as e:
+            return f"[拒绝] {e}"
+        note = str(reason or "").strip()
+        if not concluded:
+            return (f"题目={cid}（{name}）已**撤销收尾**，调度层可以重新为该题派工"
+                    + (f"（原收尾理由：{note[:200]}）" if note else ""))
+        parts = [f"题目={cid}（{name}）已**收尾**，调度层不再为该题派新 Worker",
+                 f"已确认 {got}/{quota} 条、候选 {n_cand} 条待人工确认"
+                 "（收尾不改变这个数字）"]
+        if got < quota:
+            # 关键：收尾 ≠ 解出。必须说清「谁还能推翻这个判断、怎么推翻」，
+            # 否则模型会把它当成「我已经解出来了」的收尾凭证。
+            parts.append("**注意：这不算「已解出」**——题目仍是待人工确认；"
+                         "只有用户在题目卡片上点确认，候选 flag 才转 accepted、"
+                         "状态才变 solved")
+        if note:
+            parts.append(f"收尾理由已留痕：{note[:300]}")
+        parts.append("如需重新开跑，用 ctf_conclude(concluded=false) 撤销")
+        return " · ".join(parts)
 
     def _flag_neighbor_owner(self, flag: str, self_code: str = "") -> str | None:
         """跨题串号检测：本项目**其它题目**子树内已登记的 flag 里，找与本 flag
@@ -1693,6 +2029,9 @@ class ToolDispatcher:
         a0 = self.bb.get_asset(asset_id)
         if a0 is None or a0.get("project_id") != self.project_id:
             return f"[错误] 资产不存在: {asset_id}"
+        # 注：CTF 轨禁 tested_clean 的判定在 `_dispatch_once` 入口（**意图先行闸
+        # 之前**，ctf-no-tested-clean 2026-10-20）——放这里会被意图先行闸先截，
+        # 模型只会看到「先去声明意图」，被误导成「问题出在没立意」。
         # H2 乐观锁：本地预检给独立 [冲突] 前缀（store 层仍兜底同判）
         if expected_revision is not None and \
                 int(a0.get("revision") or 1) != int(expected_revision):
@@ -2011,7 +2350,8 @@ class ToolDispatcher:
                            dead_reason: str = "") -> str:
         r = _close_intent(self.bb, self.project_id, intent_id, outcome,
                           finding_ids=finding_ids, evidence_refs=evidence_refs,
-                          dead_reason=dead_reason, author=self.author)
+                          dead_reason=dead_reason, author=self.author,
+                          track=self.track)
         self.last_progress_step = self._step
         refs = len(r.get("outcome_refs") or [])
         teach = ""
@@ -2165,6 +2505,23 @@ class ToolDispatcher:
         self.last_progress_step = self._step
         return f"artifact={artifact_id} path={rel} sha256={sha[:8]}"
 
+    def _ctf_challenge_scope(self) -> dict | None:
+        """CTF 跨题隔离面（challenge-isolation，2026-10-19）：本题 vs 其它题目。
+
+        薄封装 `core.chat.store.challenge_isolation_scope`（与 chat runtime 的
+        注入侧同源，口径只有一份）。返回 ``{"other_assets", "other_roots",
+         "other_sessions", "self_challenge"}``；非 CTF 轨 / 任务链会话
+        （thread_id=''）/ 项目只有本题 → ``None``（=不过滤，行为与改动前一致）。
+
+        **动机**（用户实测）：多题共跑时 ``bb_query what=findings`` 回的是
+        **全项目**发现——一道全新题刚上手，AI 顺手一查就翻到别的题的结论，
+        上下文被污染、推理被带偏。详见 store 侧文档。
+        """
+        if self.track != "ctf" or not self.thread_id:
+            return None
+        from core.chat.store import challenge_isolation_scope
+        return challenge_isolation_scope(self.bb, self.project_id, self.thread_id)
+
     def _tool_bb_query(self, what: str, target_asset_id: str | None = None,
                        binary_sha256: str | None = None, address: int | str | None = None,
                        risk_tag: str | None = None, type: str | None = None,
@@ -2180,7 +2537,8 @@ class ToolDispatcher:
                        sha256: str | None = None,
                        package_id: str | None = None,
                        tree_id: str | None = None,
-                       block_id: str | None = None) -> str:
+                       block_id: str | None = None,
+                       cross_challenge: bool = False) -> str:
         # 参数名容错（2026-09-30）：模型高频把 binary_sha256 简写成 sha256——
         # 别名归一而非裸 TypeError（截图案例：what=files+sha256 连错两处）
         binary_sha256 = binary_sha256 or sha256
@@ -2292,6 +2650,18 @@ class ToolDispatcher:
                 self.project_id, target_asset_id=target_asset_id,
                 min_severity=min_severity, verified_only=bool(verified_only),
                 category=category)
+            # CTF 跨题隔离（challenge-isolation，2026-10-19）：默认只回本题
+            # （+未归属任何题目）的发现，别题的结论整批挡在上下文之外——
+            # 用户实测「全新题目一上手就 bb_query findings，翻到其它题的
+            # finding，上下文被污染」。显式 cross_challenge=true 才看全项目。
+            # **显式 target_asset_id 不裁**（与 events 的显式 session_id 同口径）：
+            # 模型点名某个资产 = 明确意图，不该被默认策略静默吞掉。
+            if not cross_challenge and not (target_asset_id or "").strip():
+                scope = self._ctf_challenge_scope()
+                if scope is not None:
+                    excluded = scope["other_assets"]
+                    rows = [f for f in rows
+                            if str(f.get("target_asset_id") or "") not in excluded]
             if limit is not None:
                 rows = rows[:limit]
             # dedup_key/target_asset_id 一并回传（finding-dedup-chain，2026-10-15）：
@@ -2307,6 +2677,16 @@ class ToolDispatcher:
         if what == "assets":
             rows = self.bb.list_assets(
                 self.project_id, type_=type, status=status, tag=tag)
+            # CTF 跨题隔离（challenge-isolation，2026-10-19）：别题的**子资产**
+            # （附件/入口/样本）不回传——一道新题上手先 bb_query assets，翻到
+            # 别的题的 pcap/镜像清单只会误导路由。别题的**题目行**保留：AI
+            # 需要知道项目里还有哪些题（否则会误以为只有自己这道，甚至重复建题）。
+            # 显式传 asset（点名查某个子树）时不裁——那是明确意图。
+            if not cross_challenge and not (asset or "").strip():
+                scope = self._ctf_challenge_scope()
+                if scope is not None:
+                    hide = scope["other_assets"] - scope["other_roots"]
+                    rows = [a for a in rows if a["id"] not in hide]
             # asset 过滤（2026-10-01）：收 asset（id 或精确 value，大小写不敏感）
             # 时只回该资产**子树内**的资产（与 what=site 的资产口径一致，但**不**
             # 附带 findings/intents，且保留 meta）——修「按域名查却拿到全项目全量」。
@@ -2351,6 +2731,17 @@ class ToolDispatcher:
             rows = self.bb.recent_events(
                 self.project_id, tail=limit if limit is not None else 50,
                 kinds=kinds, session_id=session_id)
+            # CTF 跨题隔离（challenge-isolation，2026-10-19）：别题线程落的事件
+            # （command/tool.call/finding.new…）默认不回传——查事件时看到别的题
+            # 跑过什么命令，等于把别人的解题过程倒进本题上下文。显式传
+            # session_id（自己指定会话）或 cross_challenge=true 时不裁。
+            if not cross_challenge and not (session_id or "").strip():
+                scope = self._ctf_challenge_scope()
+                if scope is not None:
+                    hidden = scope["other_sessions"]
+                    if hidden:
+                        rows = [e for e in rows
+                                if str(e.get("session_id") or "") not in hidden]
             # id/session_id/created_at 增量带出（M2）：查事件即可知归属，不必反查落盘
             return json.dumps(
                 [{"id": e["id"], "kind": e["kind"], "author": e["author"],
@@ -2501,7 +2892,7 @@ class ToolDispatcher:
         module 全局形态 `<域>/<快照>/<路径>`（首段=启用域时锁定该域），
         域内相对形态向后兼容；writing.resolve_kb 负责存在性消歧与防穿越；
         不存在则按启用域列出可选清单（防幻觉猜名）。
-        额外接受 Obsidian wikilink 口径（`[[web/漏洞分类/sqli/手册|手册]]`、
+        额外接受 Obsidian wikilink 口径（`[[web/漏洞分类/SQL注入/注入类漏洞（SQL注入-命令注入-SSTI）|手册]]`、
         `[[web/…/手册]]`）与反引号/引号包裹——refs.normalize_module 统一归一。
 
         成功时返回文件正文，不再返回本地路径或要求另行调用 read_file；文件路径

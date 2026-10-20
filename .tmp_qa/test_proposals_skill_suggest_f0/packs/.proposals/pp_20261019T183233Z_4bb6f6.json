@@ -1,0 +1,23 @@
+{
+  "id": "pp_20261019T183233Z_4bb6f6",
+  "status": "pending",
+  "origin": "agent",
+  "project": null,
+  "session": null,
+  "task": null,
+  "target": {
+    "kind": "skill",
+    "name": "ghost"
+  },
+  "mode": "create",
+  "content": "---\nname: ghost\n---\nx",
+  "summary": "s",
+  "reason": "r",
+  "evidence": "",
+  "source_refs": [],
+  "revisions": [],
+  "created_at": "2026-10-19T18:32:33Z",
+  "decided_at": null,
+  "decided_by": null,
+  "decision_note": null
+}

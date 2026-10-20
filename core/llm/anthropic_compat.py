@@ -15,12 +15,14 @@ from typing import Any
 
 from core.llm import parsing
 from core.llm.dump import capture_request as dump_request_capture
-from core.llm.provider import ContextOverflowError, LLMError, LLMResponse, ToolCall
+from core.llm.provider import (ContextOverflowError, LLMError, LLMResponse,
+                               ToolCall, tool_result_content)
 from core.llm.retry import (COOLDOWN_BACKOFF, HTTP_5XX_ATTEMPTS,
                             HTTP_5XX_BACKOFF, HTTP_5XX_RETRIES, HTTP_5XX_STATUS,
                             RATE_LIMIT_ATTEMPTS, RATE_LIMIT_BACKOFF,
                             RATE_LIMIT_RETRIES, is_channel_verification_error,
-                            is_model_cooldown_error, retry_note)
+                            is_model_cooldown_error, retry_note,
+                            sleep_cancellable)
 from core.llm.sdk_engine import RawFallback, build_anthropic_transports
 
 log = logging.getLogger(__name__)
@@ -94,6 +96,7 @@ class AnthropicCompatProvider:
         summarizer_model: str | None = None,  # 专用摘要模型（providers.json summarizer_model；缺省用本模型）
         use_x_api_key: bool = True,
         proxy: str | None = None,
+        supports_vision: bool = False,  # providers.json `vision: true`（2026-10-19）
     ):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
@@ -102,6 +105,9 @@ class AnthropicCompatProvider:
         self.api_version = api_version
         self._use_x_api_key = use_x_api_key
         self._enable_thinking = enable_thinking
+        # vision 能力位（2026-10-19）：Anthropic 协议原生支持 image 块，但**是否
+        # 真的能看**取决于具体模型/网关，故同样只认显式配置（与 OpenAI 兼容层同口径）。
+        self.supports_vision = bool(supports_vision)
         # prompt caching（2026-09-23 retrieval-upgrade M1）：system 块打
         # cache_control ephemeral 断点，稳定前缀跨步命中缓存（Agent 每步重发
         # 同一 system 是最大成本项）。缓存 token 仍计数只是更便宜，预算不动。
@@ -313,13 +319,16 @@ class AnthropicCompatProvider:
                                                 body=json.dumps(data, ensure_ascii=False)[:500])
                             if on_retry is not None:
                                 on_retry(retry_attempt, retry_total, status)
+                            # 可中断退避（2026-10-20）：裸 time.sleep 会让重试
+                            # 期间的「停止」完全失效（429/冷却固定 30s × 10 次）。
                             if status == 429:
-                                time.sleep(RETRY_BACKOFF)
+                                sleep_cancellable(RETRY_BACKOFF, should_cancel)
                             elif cooldown_used or channel_used:
-                                time.sleep(COOLDOWN_BACKOFF)
+                                sleep_cancellable(COOLDOWN_BACKOFF, should_cancel)
                             else:
-                                time.sleep(HTTP_5XX_BACKOFF[min(
-                                    status_5xx_used - 1, len(HTTP_5XX_BACKOFF) - 1)])
+                                sleep_cancellable(HTTP_5XX_BACKOFF[min(
+                                    status_5xx_used - 1,
+                                    len(HTTP_5XX_BACKOFF) - 1)], should_cancel)
                             continue
                         # 重试耗尽（或本就不可重试）：把已重试次数带进文案
                         # （2026-10-07），排查时不必再翻 chat.retry 事件数次数。
@@ -374,7 +383,9 @@ class AnthropicCompatProvider:
                     conn_used += 1
                     if conn_used >= CONN_RETRIES:
                         raise LLMError(f"网络错误（已重试 {conn_used - 1} 次）: {e}") from e
-                    time.sleep(CONN_BACKOFF[min(conn_used - 1, len(CONN_BACKOFF) - 1)])
+                    sleep_cancellable(
+                        CONN_BACKOFF[min(conn_used - 1, len(CONN_BACKOFF) - 1)],
+                        should_cancel)
         raise last_err  # pragma: no cover — 循环内必 return 或 raise
 
     def _consume_stream(
@@ -515,14 +526,19 @@ class AnthropicCompatProvider:
         return parsing.parse_anthropic_response(data)
 
     def tool_result_message(self, tool_call: ToolCall, content: str, is_error: bool = False) -> dict:
-        """构造工具结果消息（Agent 循环回填用）。"""
+        """构造工具结果消息（Agent 循环回填用）。
+
+        ``content`` 可以是 ``ToolOutput``（vision 通道，2026-10-19）：带图时转成
+        ``[text, image…]`` 块数组——Anthropic 协议的 ``tool_result.content``
+        原生接受该形态，无需额外翻译。无图时仍是纯字符串（历史行为不变）。
+        """
         return {
             "role": "user",
             "content": [
                 {
                     "type": "tool_result",
                     "tool_use_id": tool_call.id,
-                    "content": content,
+                    "content": tool_result_content(content),
                     **({"is_error": True} if is_error else {}),
                 }
             ],

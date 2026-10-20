@@ -1,179 +1,255 @@
 ---
 name: ctf-malware
-description: Provides malware analysis and network traffic techniques for CTF challenges. Use when analyzing obfuscated scripts, malicious packages, custom crypto protocols, C2 traffic, PE/.NET binaries, RC4/AES encrypted communications, YARA rules, shellcode analysis, memory forensics for malware (Volatility malfind, process injection detection), anti-analysis techniques (VM/sandbox detection, timing evasion, API hashing, process injection, environment checks), or extracting malware configurations and indicators of compromise.
+description: 恶意样本分析：混淆脚本（JS/PowerShell）、恶意包、自定义加密协议、C2 流量、PE/.NET 样本、RC4/AES 加密通信、YARA 规则、shellcode 分析、内存取证（Volatility malfind、进程注入检测）、反分析（虚拟机/沙箱检测、时序规避、API 哈希、环境检查）、样本配置与 IOC 提取。当题目给的是可执行文件、可疑脚本、流量包或内存镜像时用本包。
 license: MIT
-compatibility: Requires filesystem-based agent (Claude Code or similar) with bash, Python 3, and internet access for tool installation.
+compatibility: 需要可访问文件系统的 agent（Claude Code 或类似），具备 bash、Python 3，以及联网安装工具的能力。
 allowed-tools: Bash Read Write Edit Glob Grep Task WebFetch WebSearch
 metadata:
   user-invocable: "false"
 ---
 
-# CTF Malware & Network Analysis
+# 恶意样本与流量分析
 
-Quick reference for malware analysis CTF challenges. Each technique has a one-liner here; see supporting files for full details with code.
+## 0. 判据速查
 
-## Prerequisites
+先按**手里是什么东西**分流，别按题目名分流。
 
-**Python packages (all platforms):**
+| 手里是 | 第一动作 | 去哪节 |
+|---|---|---|
+| 可疑脚本（js/ps1/vbs/sh/py） | 把 `eval`/`iex` 换成 `echo` 看原文 | §2 |
+| PE / .NET 可执行文件 | `strings` + `floss`，再看节区熵 | §5 |
+| 加密的 C2 流量 pcap | 先判加密算法（找魔数），再找密钥 | §3 |
+| 内存镜像 | `vol windows.malfind` 找注入代码 | §8 |
+| 裸 shellcode | `objdump -b binary` 或 Unicorn 模拟 | §7 |
+| 一个装了恶意依赖的包 | 与官方版本 diff | §9 |
+| 样本有明显反分析 | 先过检测再分析，否则看到的是假逻辑 | §6 |
+
+**最容易犯的错**：拿到 pcap 就上 Wireshark 肉眼翻。先看端口分布和协议统计，通常一眼能看出是 DNS 隧道还是 HTTP 心跳。
+
+## 1. 环境准备
+
 ```bash
+# Python 包（全平台）
 pip install yara-python pefile capstone oletools unicorn pycryptodome \
-  volatility3 dissect.cobaltstrike
-```
+            volatility3 dissect.cobaltstrike
 
-**Linux (apt):**
-```bash
+# Linux
 apt install strace ltrace tshark binwalk binutils
-```
 
-**macOS (Homebrew):**
-```bash
+# macOS
 brew install wireshark binwalk binutils ghidra
 ```
 
-**Manual install:**
-- dnSpy — [GitHub](https://github.com/dnSpy/dnSpy), .NET decompiler (Windows)
+Windows 侧单独装 **dnSpy**（.NET 反编译 + 调试）。
 
-## Additional Resources
+## 2. 脚本去混淆
 
-- [[binary/恶意样本/scripts-and-obfuscation.md|scripts-and-obfuscation.md]] - JavaScript deobfuscation, PowerShell analysis, eval/base64 decoding, junk code detection, hex payloads, Debian package analysis, dynamic analysis techniques (strace/ltrace, network monitoring, memory string extraction, automated sandbox execution), YARA rules for malware detection, shellcode analysis (Unicorn Engine, Capstone), memory forensics for malware (Volatility 3 malfind, process injection detection), anti-analysis techniques (VM detection, timing evasion, API hashing, process injection), trojanized plugin analysis with custom alphabet C2 decoding
-- [[binary/恶意样本/c2-and-protocols.md|c2-and-protocols.md]] - C2 traffic patterns, custom crypto protocols, RC4 WebSocket, DNS-based C2, network indicators, PCAP analysis, AES-CBC, encryption ID, Telegram bot recovery, Poison Ivy RAT Camellia decryption
-- [[binary/恶意样本/pe-and-dotnet.md|pe-and-dotnet.md]] - PE analysis (peframe, pe-sieve, pestudio), .NET analysis (dnSpy, AsmResolver), LimeRAT extraction, sandbox evasion, malware config extraction, PyInstaller+PyArmor
+### 2.1 通用手法：把执行换成打印
 
----
-
-## When to Pivot
-
-- If the sample is really just a normal crackme, packed challenge binary, or custom VM with no malware behavior, switch to `/reverse`.
-- If the main job is network reconstruction, disk carving, or host artifact recovery, switch to `/forensics`.
-- If the challenge turns into public attribution or infrastructure tracing, switch to `/osint`.
-
-## Quick Start Commands
+```text
+JS      eval → console.log；同时解 unescape() / atob() / String.fromCharCode()
+PS1     -enc 先 base64 解码；IEX → Write-Output
+Bash    eval → echo；curl|sh → curl 到文件再读
+VBS     Execute → WScript.Echo
+Python  exec → print；先看 marshal / base64 / zlib 三层嵌套
+```
 
 ```bash
-# Static analysis
+# PowerShell 的 -enc 是 UTF-16LE 的 base64
+echo '<base64>' | base64 -d | iconv -f UTF-16LE -t UTF-8
+```
+
+要点：**PowerShell 的 base64 是 UTF-16LE**，直接 `base64 -d` 出来是乱码加空字节，必须过 `iconv`。
+
+### 2.2 垃圾代码识别
+
+```text
+NOP sled（0x90 连续）
+push/pop 成对（push eax; pop eax）
+写入后从未读取的变量
+跳到下一行的无条件 jmp
+恒真的条件分支（if (1==1)）
+```
+
+目的是让你看不清真实 `call` 目标。过滤掉这些再找真正的调用点。
+
+### 2.3 Debian 包
+
+```bash
+ar -x package.deb && tar -xf control.tar.xz
+# 看 postinst / preinst / postrm —— 安装钩子才是执行点
+```
+
+## 3. C2 流量与自定义加密
+
+### 3.1 先判算法，再找密钥
+
+按**魔数/常量**认算法，比看代码快：
+
+| 算法 | 特征常量 |
+|---|---|
+| AES | S-box 起始 `0x637c777b` |
+| ChaCha20 | 字符串 `expand 32-byte k` |
+| TEA / XTEA | `0x9E3779B9`（黄金比例） |
+| RC4 | 顺序初始化的 256 字节 S-box（`for i in 0..255`） |
+| Base64 | 字符集 `A-Za-z0-9+/=` |
+
+### 3.2 提取与解密
+
+```bash
+# 按 TCP 流导出原始 payload
+tshark -r file.pcap -Y "tcp.stream eq 3" -T fields -e tcp.payload
+
+# 全量 DNS 查询名（DNS 隧道）
+tshark -r capture.pcap -Y "dns.qry.name" -T fields -e dns.qry.name | sort -u
+
+# 从样本里捞 IP / 域名
+strings malware | grep -E '([0-9]{1,3}\.){3}[0-9]{1,3}'
+strings malware | grep -iE 'http|ftp|ws://'
+```
+
+要点：
+
+- **流密码要按时间顺序拼接两个方向的全部 payload**。密钥流状态是双向共享的，只取单方向会错位。
+- **ChaCha20 可以白拿密钥流**：发全零字节，密文就是密钥流本身（`0 XOR k = k`）。
+- **AES-CBC 的密钥常是硬编码字符串的 MD5/SHA256，IV 常是密文的前 16 字节**。这两个默认假设先试，命中率很高。
+- **端口被改过**用 `tcprewrite` 重映射；TLS 需要私钥才能解，先在样本里找 RSA 私钥。
+
+### 3.3 心跳与隧道识别
+
+```text
+固定间隔（±抖动）的等长请求   → 心跳 beacon
+子域长度异常且字符集受限       → DNS 隧道（base32/base64 编码）
+只有 DNS 没有 HTTP             → DNS C2
+自定义 header 里带长串         → HTTP 载荷封装
+```
+
+### 3.4 Telegram bot 取证
+
+样本里若有 bot token，直接调 API 拿回历史消息和被上传的文件：
+
+```bash
+curl "https://api.telegram.org/bot<TOKEN>/getUpdates"
+curl "https://api.telegram.org/bot<TOKEN>/getFile?file_id=<ID>"
+```
+
+## 4. YARA 规则
+
+匹配字节模式、字符串、正则，可扫文件也可扫内存。
+
+```yara
+rule Xor_Decoder_Stub {
+    strings:
+        $xor_loop = { 31 ?? 80 ?? ?? 4? 75 }
+    condition:
+        $xor_loop
+}
+```
+
+```bash
+yara -r rules.yar suspicious_file
+yarac rules.yar rules.yarc        # 编译后扫描更快
+```
+
+高价值规则目标：XOR 解码 stub、base64 大块、编码后的 PowerShell、PE 特征头。
+
+## 5. PE 与 .NET
+
+```bash
+peframe malware.exe      # 快速分诊
+pe-sieve                 # 运行时从内存 dump 解包镜像
+pestudio                 # Windows 图形化静态
+```
+
+- **配置常见位置**：`.data` 段、PE 资源、.NET 资源、注册表、落盘的加密文件。
+- **.NET**：dnSpy / ILSpy 反编译；IL 混淆时用 AsmResolver 编程遍历，按 API 调用筛方法。
+- **PyInstaller + PyArmor**：`pyinstxtractor.py` 拆包，再按 PyArmor 版本选 unpacker。
+
+细节见 [[binary/恶意样本/pe-and-dotnet.md|pe-and-dotnet.md]]。
+
+## 6. 反分析
+
+| 检测类型 | 样本手法 |
+|---|---|
+| 虚拟机 | `CPUID` 叶 0x40000000、MAC 前缀、注册表键、磁盘容量 |
+| 时序 | `rdtsc` 差值、`Sleep` 加速检测、`GetTickCount` |
+| API 哈希 | ROR13 / DJB2 / CRC32 算函数名哈希，再查表调用（导入表里看不到） |
+| 环境 | 用户名/计算机名/域名含 sandbox 关键字 |
+| 进程注入 | hollowing、APC 注入、`CreateRemoteThread` |
+
+细节见 [[binary/恶意样本/scripts-and-obfuscation.md|scripts-and-obfuscation.md]]。
+
+**顺序很重要**：先过检测，再分析。带着 `IsDebuggerPresent` 挂调试器，样本走的是垃圾分支，你分析的是假逻辑。
+
+## 7. Shellcode
+
+```bash
+objdump -b binary -m i386:x86-64 -D shellcode.bin
+```
+
+或用 Unicorn Engine 模拟执行（hook 掉 syscall，安全地看它要做什么），或用 Capstone 编程反汇编。
+
+重点找 **XOR 解码 stub** —— 绝大多数 shellcode 前面都有一段自解码循环，解完才是真实载荷。
+
+## 8. 内存取证
+
+```bash
+vol -f windows.memdump windows.malfind      # 找 PAGE_EXECUTE_READWRITE 且无文件映射的段
+vol -f windows.memdump windows.pstree       # 看可疑父子进程关系
+vol -f windows.memdump windows.vadyarascan.VadYaraScan --yara-file rules.yar
+```
+
+`malfind` 的判据：**可执行 + 可写 + 没有对应的磁盘文件**。这三条同时成立就是注入代码。
+
+## 9. 供应链投毒（篡改插件/依赖）
+
+**方法是 diff，不是读代码**：把可疑版本和官方版本逐文件比对，注入的代码通常藏在 `try/except` 里（吞掉异常以免暴露）。
+
+```python
+# 自定义字母表轮转解码 C2 域名
+C = "abcdefghijklmnopqrstuvwxyz0123456789"
+domain = "".join(C[(C.index(ch) - offset) % len(C)] for ch in encoded)
+# 路径部分通常再套一层 XOR
+```
+
+细节见 [[binary/恶意样本/scripts-and-obfuscation.md|scripts-and-obfuscation.md]]。
+
+## 10. 什么时候该换轨
+
+- 样本其实只是普通 crackme、加壳题、自定义 VM，**没有恶意行为** → 转 `/reverse`
+- 主要工作是流量重建、磁盘雕复、主机痕迹恢复 → 转 `/forensics`
+- 变成公开归因、基础设施溯源 → 转 `/osint`
+
+## 11. 快速命令
+
+```bash
+# 静态
 file suspicious_file
 strings -n 8 suspicious_file | head -50
 xxd suspicious_file | head -20
 
-# PE analysis
+# PE
 python3 -c "import pefile; pe=pefile.PE('mal.exe'); print(pe.dump_info())" | head
 peframe mal.exe
 
-# Dynamic analysis (sandboxed!)
+# 动态（务必在沙箱里）
 strace -f -s 200 ./suspicious 2>&1 | head -100
 ltrace ./suspicious 2>&1 | head -50
 
-# Network indicators
-strings suspicious_file | grep -E '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}'
+# 网络指标
+strings suspicious_file | grep -E '([0-9]{1,3}\.){3}[0-9]{1,3}'
 strings suspicious_file | grep -iE 'http|ftp|ws://'
 
-# YARA scan
+# YARA
 yara -r rules.yar suspicious_file
 ```
 
-## Obfuscated Scripts
+## 12. 纪律
 
-- Replace `eval`/`bash` with `echo` to print underlying code; extract base64/hex blobs and analyze with `file`. See [[binary/恶意样本/scripts-and-obfuscation.md|scripts-and-obfuscation.md]].
-
-## JavaScript & PowerShell Deobfuscation
-
-- JS: Replace `eval` with `console.log`, decode `unescape()`, `atob()`, `String.fromCharCode()`.
-- PowerShell: Decode `-enc` base64, replace `IEX` with output. See [[binary/恶意样本/scripts-and-obfuscation.md|scripts-and-obfuscation.md]].
-
-## Junk Code Detection
-
-- NOP sleds, push/pop pairs, dead writes, unconditional jumps to next instruction. Filter to extract real `call` targets. See [[binary/恶意样本/scripts-and-obfuscation.md|scripts-and-obfuscation.md]].
-
-## PCAP & Network Analysis
-
-```bash
-tshark -r file.pcap -Y "tcp.stream eq X" -T fields -e tcp.payload
-```
-
-Look for C2 on unusual ports. Extract IPs/domains with `strings | grep`. See [[binary/恶意样本/c2-and-protocols.md|c2-and-protocols.md]].
-
-## Custom Crypto Protocols
-
-- Stream ciphers share keystream state for both directions; concatenate ALL payloads chronologically.
-- ChaCha20 keystream extraction: send nullbytes (0 XOR anything = anything). See [[binary/恶意样本/c2-and-protocols.md|c2-and-protocols.md]].
-
-## C2 Traffic Patterns
-
-- Beaconing, DGA, DNS tunneling, HTTP(S) with custom headers, encoded payloads. See [[binary/恶意样本/c2-and-protocols.md|c2-and-protocols.md]].
-
-## RC4-Encrypted WebSocket C2
-
-- Remap port with `tcprewrite`, add RSA key for TLS decryption, find RC4 key in binary. See [[binary/恶意样本/c2-and-protocols.md|c2-and-protocols.md]].
-
-## Identifying Encryption Algorithms
-
-- AES: `0x637c777b` S-box; ChaCha20: `expand 32-byte k`; TEA/XTEA: `0x9E3779B9`; RC4: sequential S-box init. See [[binary/恶意样本/c2-and-protocols.md|c2-and-protocols.md]].
-
-## AES-CBC in Malware
-
-- Key = MD5/SHA256 of hardcoded string; IV = first 16 bytes of ciphertext. See [[binary/恶意样本/c2-and-protocols.md|c2-and-protocols.md]].
-
-## PE Analysis
-
-```bash
-peframe malware.exe      # Quick triage
-pe-sieve                 # Runtime analysis
-pestudio                 # Static analysis (Windows)
-```
-
-See [[binary/恶意样本/pe-and-dotnet.md|pe-and-dotnet.md]].
-
-## .NET Malware Analysis
-
-- Use dnSpy/ILSpy for decompilation; AsmResolver for programmatic analysis. LimeRAT C2: AES-256-ECB with MD5-derived key. See [[binary/恶意样本/pe-and-dotnet.md|pe-and-dotnet.md]].
-
-## Malware Configuration Extraction
-
-- Check .data section, PE/.NET resources, registry keys, encrypted config files. See [[binary/恶意样本/pe-and-dotnet.md|pe-and-dotnet.md]].
-
-## Sandbox Evasion Checks
-
-- VM detection, debugger detection, timing checks, environment checks, analysis tool detection. See [[binary/恶意样本/pe-and-dotnet.md|pe-and-dotnet.md]].
-
-## Anti-Analysis Techniques
-
-VM detection (CPUID, MAC prefix, registry, disk size), timing evasion (sleep/RDTSC sandbox detection), API hashing (ROR13/DJB2/CRC32 + hashdb lookup), process injection (hollowing, APC, CreateRemoteThread), environment checks. See [[binary/恶意样本/scripts-and-obfuscation.md#anti-analysis-techniques|scripts-and-obfuscation.md]].
-
-## Trojanized Plugin Analysis
-
-Diff malicious plugin against official release to find injected code in try/except blocks. Custom alphabet rotation (`C[(C.index(ch) - offset) % len(C)]`) decodes C2 domain, XOR decodes endpoint path. See [[binary/恶意样本/scripts-and-obfuscation.md#trojanized-plugin-analysis-with-custom-alphabet-c2-decoding-inshack-2018|scripts-and-obfuscation.md]].
-
-## PyInstaller + PyArmor Unpacking
-
-- `pyinstxtractor.py` to extract, PyArmor-Unpacker for protected code. See [[binary/恶意样本/pe-and-dotnet.md|pe-and-dotnet.md]].
-
-## Telegram Bot Evidence Recovery
-
-- Use bot token from malware source to call `getUpdates` and `getFile` APIs. See [[binary/恶意样本/c2-and-protocols.md|c2-and-protocols.md]].
-
-## Debian Package Analysis
-
-```bash
-ar -x package.deb && tar -xf control.tar.xz  # Check postinst scripts
-```
-
-See [[binary/恶意样本/scripts-and-obfuscation.md|scripts-and-obfuscation.md]].
-
-## YARA Rules for Malware Detection
-
-Write YARA rules to match byte patterns, strings, and regex against files or memory dumps. Detect XOR loops (`{31 ?? 80 ?? ?? 4? 75}`), base64 blobs, encoded PowerShell. Use `yarac` to compile for faster scanning. See [[binary/恶意样本/scripts-and-obfuscation.md#yara-rules-for-malware-detection|scripts-and-obfuscation.md]].
-
-## Shellcode Analysis
-
-Disassemble with `objdump -b binary -m i386:x86-64`, emulate with Unicorn Engine (hook syscalls safely), or use Capstone for programmatic disassembly. Look for XOR decoder stubs. See [[binary/恶意样本/scripts-and-obfuscation.md#shellcode-analysis|scripts-and-obfuscation.md]].
-
-## Memory Forensics for Malware
-
-`vol windows.malfind` detects injected code (PAGE_EXECUTE_READWRITE without mapped file). `windows.pstree` reveals suspicious parent-child relationships. YARA scan memory with `windows.vadyarascan.VadYaraScan`. See [[binary/恶意样本/scripts-and-obfuscation.md#memory-forensics-for-malware|scripts-and-obfuscation.md]].
-
-## Network Indicators Quick Reference
-
-```bash
-strings malware | grep -E '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}'
-tshark -r capture.pcap -Y "dns.qry.name" -T fields -e dns.qry.name | sort -u
-```
+- **先分流再动手**。脚本、PE、pcap、内存镜像、shellcode 的分析路径完全不同，混着来会浪费大量时间。
+- **加密流量先认算法，再找密钥**。按魔数认比读反汇编快一个数量级。
+- **流密码必须双向按时间拼接**。只取单方向得到的是错位的密钥流，解出来是乱码。
+- **反分析要先处理**。不过检测就分析，看到的是样本特意喂给你的假路径。
+- **供应链投毒用 diff，不要通读**。注入点通常只有几十行，藏在异常处理里。
+- **`malfind` 的判据是「可执行+可写+无文件映射」三条同时成立**，只看一条会大量误报。
+- **YARA 写规则时锚定字节模式，不要锚定字符串**。字符串会被轻易改掉，XOR 循环的指令模式改起来成本高。

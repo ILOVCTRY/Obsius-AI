@@ -1,4 +1,8 @@
-"""LLM 传输层共享重试策略常量。"""
+"""LLM 传输层共享重试策略常量与可中断退避。"""
+
+import time
+
+from core.llm.provider import LLMError
 
 # 仅把已知的上游暂态状态纳入标准 5xx 重试；鉴权/参数类 5xx 不盲目重放。
 HTTP_5XX_STATUS = frozenset({500, 502, 503, 504})
@@ -98,3 +102,37 @@ def retry_note(done: int, budget: int) -> str:
     if budget <= 0:
         return ""
     return f"（已重试 {done}/{budget} 次）"
+
+
+# 可中断退避的轮询粒度。0.2s 让「停止」在体感上是立刻生效（前端 chat.retry
+# 一直转圈时点停止，最多 0.2s 就断），同时不至于空转烧 CPU。
+CANCEL_POLL_SLICE = 0.2
+
+
+def sleep_cancellable(seconds: float, should_cancel=None) -> None:
+    """退避等待，期间轮询 ``should_cancel``；命中立即抛 ``LLMError("已中断")``。
+
+    2026-10-20 事故（用户实测「重试中点停止不会立刻停」）：此前所有退避都是
+    ``time.sleep`` 裸睡——429 / 模型冷却 / 渠道校验固定 30s，5xx 封顶 30s，
+    每类各 10 次重试，最坏 **5 分钟**内点「停止」毫无反应。更糟的是
+    ``should_cancel`` 原先只在**流式读取数据帧**时轮询
+    （``openai_compat._consume_stream``）——重试期间上游回的是 429/5xx，
+    压根没有流，回调一次都不会被调到。于是停止信号被彻底吞掉。
+
+    改成切片轮询后，退避期间每 ``CANCEL_POLL_SLICE`` 秒探一次中止标志；
+    抛 ``LLMError`` 是为了让上层既有的 ``except LLMError`` + ``if self._aborted()``
+    分支直接把它转成「已按人类要求停止」，不必新增异常类型。
+
+    不传 ``should_cancel`` 时退化为普通 ``time.sleep``（单测/离线调用不受影响）。
+    """
+    if should_cancel is None:
+        time.sleep(seconds)
+        return
+    deadline = time.monotonic() + max(0.0, float(seconds))
+    while True:
+        if should_cancel():
+            raise LLMError("已中断")
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return
+        time.sleep(min(CANCEL_POLL_SLICE, left))

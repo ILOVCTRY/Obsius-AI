@@ -1,0 +1,2 @@
+- a: [SSTI.md](SSTI.md)
+- b: [手册](../漏洞分类/SQL注入/注入类漏洞（SQL注入-命令注入-SSTI）.md)

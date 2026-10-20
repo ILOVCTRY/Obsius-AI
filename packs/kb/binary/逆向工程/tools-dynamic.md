@@ -1,58 +1,44 @@
-# CTF Reverse - Dynamic Analysis Tools
+---
 
-## Table of Contents
-- [Frida (Dynamic Instrumentation)](#frida-dynamic-instrumentation)
-  - [Installation](#installation)
-  - [Basic Function Hooking](#basic-function-hooking)
-  - [Anti-Debug Bypass](#anti-debug-bypass)
-  - [Memory Scanning and Patching](#memory-scanning-and-patching)
-  - [Function Replacement](#function-replacement)
-  - [Tracing and Stalker](#tracing-and-stalker)
-  - [r2frida (Radare2 + Frida Integration)](#r2frida-radare2--frida-integration)
-  - [Frida for Android/iOS](#frida-for-androidios)
-  - [Frida Memoization for Recursive Function Speedup (hxp CTF 2017)](#frida-memoization-for-recursive-function-speedup-hxp-ctf-2017)
-- [angr (Symbolic Execution)](#angr-symbolic-execution)
-  - [angr Installation](#angr-installation)
-  - [Basic Path Exploration](#basic-path-exploration)
-  - [Symbolic Input with Constraints](#symbolic-input-with-constraints)
-  - [Hook Functions to Simplify Analysis](#hook-functions-to-simplify-analysis)
-  - [Exploring from Specific Address](#exploring-from-specific-address)
-  - [Common Patterns and Tips](#common-patterns-and-tips)
-  - [Dealing with Path Explosion](#dealing-with-path-explosion)
-  - [angr CFG Recovery](#angr-cfg-recovery)
-- [lldb (LLVM Debugger)](#lldb-llvm-debugger)
-  - [Basic Commands](#basic-commands)
-  - [Scripting (Python)](#scripting-python)
-- [x64dbg (Windows Debugger)](#x64dbg-windows-debugger)
-  - [Key Features](#key-features)
-  - [Scripting](#scripting)
-  - [Common CTF Workflow](#common-ctf-workflow)
-- [GDB Register Side-Channel on putchar() (picoCTF 2018)](#gdb-register-side-channel-on-putchar-picoctf-2018)
-- [radare2 Visual Panels for Custom VM Tracing (OTW Advent 2018)](#radare2-visual-panels-for-custom-vm-tracing-otw-advent-2018)
-- [libSegFault.so Register Dump at Crash (OTW Advent 2018)](#libsegfaultso-register-dump-at-crash-otw-advent-2018)
-- [r2pipe Binary Walking + DP Constraint Solver (OTW Advent 2018)](#r2pipe-binary-walking--dp-constraint-solver-otw-advent-2018)
-- [GDB Commands at strcmp to Recover Dynamic XOR Key (TAMUctf 2019)](#gdb-commands-at-strcmp-to-recover-dynamic-xor-key-tamuctf-2019)
+phase: binary
+vuln_class: [reverse, dynamic, instrumentation, symbolic-execution]
+title: 动态工具
+summary: 动态工具解决的是「静态读不出来」——hook 看真实参数、符号执行让求解器搜路径、调试器在比较点截取明文。判据是「卡在算法看不懂」还是「卡在值不知道」。
+---
 
-For Qiling/Triton emulation and Intel Pin / LD_PRELOAD side-channel techniques, see [[binary/逆向工程/tools-emulation.md|tools-emulation.md]].
+# 动态工具
+
+静态工具链与异构格式见 [[binary/逆向工程/tools.md|静态工具]]；模拟执行与侧信道（Qiling/Triton/Pin/LD_PRELOAD）见 [[binary/逆向工程/tools-emulation.md|模拟执行]]；反分析对抗见 [[binary/逆向工程/anti-analysis-ctf.md|反分析对抗]]。
+
+## 0. 判据速查
+
+| 卡在哪 | 用什么 | 去哪节 |
+|---|---|---|
+| 想知道某函数被调时参数是什么 | Frida `Interceptor.attach` | §1 |
+| 想把校验函数直接改成通过 | Frida `Interceptor.replace` | §1 |
+| 递归函数慢到跑不完 | Frida 记忆化（跳过计算直接给返回值） | §2 |
+| 是标准 flag 校验器，有清晰成功/失败分支 | angr `explore(find, avoid)` | §3 |
+| angr 路径爆炸 | hook 掉 I/O 与加密函数 + DFS + 长度限制 | §4 |
+| 输出被 `usleep` 拖慢 | 在 `putchar` 下断，打第一个参数寄存器 | §5 |
+| 自定义 VM 看不懂 | r2 面板模式同时看 sp/ip/stack/heap | §6 |
+| 想要崩溃那一刻的寄存器快照 | `LD_PRELOAD=libSegFault.so` | §7 |
+| 巨型二进制 + 哈希链 | r2pipe 走块 + DP/回溯 | §8 |
+| 混淆器把简单 XOR 埋了 | 直接在最终 `strcmp` 下断取两个操作数 | §9 |
+| macOS / iOS / Swift | lldb | §10 |
+| Windows GUI 程序 | x64dbg | §11 |
 
 ---
 
-## Frida (Dynamic Instrumentation)
-
-Frida injects JavaScript into running processes for real-time hooking, tracing, and modification. Essential for anti-debug bypass, runtime inspection, and mobile RE.
-
-### Installation
+## 1. Frida 基础
 
 ```bash
 pip install frida-tools frida
-# Verify
 frida --version
 ```
 
-### Basic Function Hooking
+### 观测：`Interceptor.attach`
 
 ```javascript
-// hook.js — intercept a function and log arguments/return value
 Interceptor.attach(Module.findExportByName(null, "strcmp"), {
     onEnter: function(args) {
         this.arg0 = Memory.readUtf8String(args[0]);
@@ -66,13 +52,10 @@ Interceptor.attach(Module.findExportByName(null, "strcmp"), {
 ```
 
 ```bash
-# Attach to running process
-frida -p $(pidof binary) -l hook.js
+frida -p $(pidof binary) -l hook.js               # 附加到运行中的进程
+frida -f ./binary -l hook.js --no-pause           # 从启动就开始
 
-# Spawn and instrument from start
-frida -f ./binary -l hook.js --no-pause
-
-# One-liner: hook strcmp and dump comparisons
+# 一行式
 frida -f ./binary --no-pause -e '
 Interceptor.attach(Module.findExportByName(null, "strcmp"), {
     onEnter(args) {
@@ -82,80 +65,66 @@ Interceptor.attach(Module.findExportByName(null, "strcmp"), {
 '
 ```
 
-### Anti-Debug Bypass
+### 修改：`Interceptor.replace`
 
 ```javascript
-// Bypass ptrace(PTRACE_TRACEME) — returns 0 (success) without calling
+var checkFlag = Module.findExportByName(null, "check_flag");
+Interceptor.replace(checkFlag, new NativeCallback(function(input) {
+    console.log("[*] check_flag called with:", Memory.readUtf8String(input));
+    return 1;                       // 恒真
+}, 'int', ['pointer']));
+```
+
+### 反调试绕过
+
+```javascript
+// ptrace(PTRACE_TRACEME) → 直接返回 0
 Interceptor.attach(Module.findExportByName(null, "ptrace"), {
-    onEnter: function(args) {
-        this.request = args[0].toInt32();
-    },
+    onEnter: function(args) { this.request = args[0].toInt32(); },
     onLeave: function(retval) {
-        if (this.request === 0) { // PTRACE_TRACEME
-            retval.replace(ptr(0));
-            console.log("[*] ptrace(TRACEME) bypassed");
-        }
+        if (this.request === 0) retval.replace(ptr(0));
     }
 });
 
-// Bypass IsDebuggerPresent (Windows)
-var isDbg = Module.findExportByName("kernel32.dll", "IsDebuggerPresent");
-Interceptor.attach(isDbg, {
-    onLeave: function(retval) {
-        retval.replace(ptr(0));
-    }
+// IsDebuggerPresent → 恒 0
+Interceptor.attach(Module.findExportByName("kernel32.dll", "IsDebuggerPresent"), {
+    onLeave: function(retval) { retval.replace(ptr(0)); }
 });
 
-// Bypass timing checks — hook clock_gettime to return constant
+// 时序检测 → 固定时间源
 Interceptor.attach(Module.findExportByName(null, "clock_gettime"), {
     onLeave: function(retval) {
-        // Force constant timestamp to defeat timing checks
-        var ts = this.context.rsi || this.context.x1; // x86 or ARM
-        Memory.writeU64(ts, 0);        // tv_sec
-        Memory.writeU64(ts.add(8), 0); // tv_nsec
+        var ts = this.context.rsi || this.context.x1;   // x86 或 ARM
+        Memory.writeU64(ts, 0);            // tv_sec
+        Memory.writeU64(ts.add(8), 0);     // tv_nsec
     }
 });
 ```
 
-### Memory Scanning and Patching
+### 内存扫描与补丁
 
 ```javascript
-// Scan for flag pattern in memory
+// 扫 flag 特征
 Process.enumerateRanges('r--').forEach(function(range) {
-    Memory.scan(range.base, range.size, "66 6c 61 67 7b", { // "flag{"
+    Memory.scan(range.base, range.size, "66 6c 61 67 7b", {   // "flag{"
         onMatch: function(address, size) {
-            console.log("[FLAG] Found at:", address, Memory.readUtf8String(address, 64));
+            console.log("[FLAG]", address, Memory.readUtf8String(address, 64));
         },
         onComplete: function() {}
     });
 });
 
-// Patch instruction (NOP out a check)
+// NOP 掉一个检查
 var addr = Module.findBaseAddress("binary").add(0x1234);
 Memory.patchCode(addr, 2, function(code) {
     var writer = new X86Writer(code, { pc: addr });
-    writer.putNop();
-    writer.putNop();
-    writer.flush();
+    writer.putNop(); writer.putNop(); writer.flush();
 });
 ```
 
-### Function Replacement
+### Stalker 指令级追踪
 
 ```javascript
-// Replace a validation function to always return true
-var checkFlag = Module.findExportByName(null, "check_flag");
-Interceptor.replace(checkFlag, new NativeCallback(function(input) {
-    console.log("[*] check_flag called with:", Memory.readUtf8String(input));
-    return 1; // always valid
-}, 'int', ['pointer']));
-```
-
-### Tracing and Stalker
-
-```javascript
-// Trace all calls in a function (Stalker — instruction-level tracing)
-var targetAddr = Module.findExportByName(null, "main");
 Stalker.follow(Process.getCurrentThreadId(), {
     transform: function(iterator) {
         var instruction;
@@ -171,37 +140,29 @@ Stalker.follow(Process.getCurrentThreadId(), {
 });
 ```
 
-### r2frida (Radare2 + Frida Integration)
+### r2frida
 
 ```bash
-# Attach radare2 to process via Frida
 r2 frida://spawn/./binary
-
-# r2frida commands
-\ii                    # List imports
-\il                    # List loaded modules
-\dt strcmp             # Trace strcmp calls
-\dc                    # Continue execution
-\dm                    # List memory maps
+\ii          # 导入表
+\il          # 已加载模块
+\dt strcmp   # 追踪 strcmp 调用
+\dm          # 内存映射
 ```
 
-### Frida for Android/iOS
+### Android / iOS
 
 ```bash
-# Android (requires rooted device or Frida server)
 adb push frida-server /data/local/tmp/
 adb shell "chmod 755 /data/local/tmp/frida-server && /data/local/tmp/frida-server &"
-
-# Hook Android Java methods
 frida -U -f com.example.app -l hook_android.js --no-pause
 ```
 
 ```javascript
-// hook_android.js — hook Java method
 Java.perform(function() {
     var MainActivity = Java.use("com.example.app.MainActivity");
     MainActivity.checkPassword.implementation = function(input) {
-        console.log("[*] checkPassword called with:", input);
+        console.log("[*] checkPassword:", input);
         var result = this.checkPassword(input);
         console.log("[*] Result:", result);
         return result;
@@ -209,49 +170,25 @@ Java.perform(function() {
 });
 ```
 
-**Key insight:** Frida excels where static analysis fails — obfuscated code, packed binaries, and runtime-generated data. Hook comparison functions (`strcmp`, `memcmp`, custom validators) to extract expected values without reversing the algorithm. Use `Interceptor.attach` for observation, `Interceptor.replace` for modification.
+**判据**：Frida 在静态分析失效时最强——混淆代码、加壳二进制、运行时才生成的数据。hook 比较函数（`strcmp`/`memcmp`/自定义校验器）就能拿到期望值，完全不用逆算法。
 
-**When to use:** Anti-debugging bypass, extracting runtime-computed keys, hooking crypto functions to dump plaintext, mobile app analysis, packed binary inspection.
+---
 
-### Frida Memoization for Recursive Function Speedup (hxp CTF 2017)
+## 2. Frida 记忆化：让递归函数瞬间跑完
 
-Hook a recursive function with Frida, memoize results, and replay cached values to skip redundant computation. Fibonacci-like recursive challenges with exponential complexity become instant with memoization.
+**判据**：递归函数（斐波那契式、树遍历、Ackermann）指数复杂度，但同样的参数结果恒定。
 
 ```javascript
-// memo_hook.js — memoize a recursive function to skip redundant calls
 var memo = {};
-var funcAddr = ptr("0x400abc");    // Address of the recursive function
-var retAddr = ptr("0x400def");     // Address of the function's ret instruction
+var funcAddr = ptr("0x400abc");    // 递归函数地址
+var retAddr  = ptr("0x400def");    // 该函数 ret 指令的地址
 
 Interceptor.attach(funcAddr, {
     onEnter: function(args) {
         this.key = args[0].toInt32();
         if (memo[this.key] !== undefined) {
-            // Skip computation entirely: set return value and jump to ret
-            this.context.rax = memo[this.key];
-            this.context.rip = retAddr;
-        }
-    },
-    onLeave: function(retval) {
-        // Cache the result for future calls with the same argument
-        memo[this.key] = retval.toInt32();
-    }
-});
-```
-
-```bash
-# Usage
-frida -f ./binary -l memo_hook.js --no-pause
-```
-
-For multi-argument functions, build a composite key:
-```javascript
-Interceptor.attach(funcAddr, {
-    onEnter: function(args) {
-        this.key = args[0].toInt32() + "," + args[1].toInt32();
-        if (memo[this.key] !== undefined) {
-            this.context.rax = memo[this.key];
-            this.context.rip = retAddr;
+            this.context.rax = memo[this.key];   // 直接给返回值
+            this.context.rip = retAddr;          // 直接跳到 ret
         }
     },
     onLeave: function(retval) {
@@ -260,294 +197,157 @@ Interceptor.attach(funcAddr, {
 });
 ```
 
-**Key insight:** Frida's `Interceptor` can both read and modify register state, allowing you to skip function execution entirely by setting `rax` (return value) and `rip` (to the `ret` instruction). This works on any recursive function where the same arguments produce the same result. Exponential-time recursive computations (Fibonacci, Ackermann, tree traversals) become linear with memoization.
+多参数就拼复合键：`this.key = args[0].toInt32() + "," + args[1].toInt32();`
 
-**References:** hxp CTF 2017
+**关键**：`Interceptor` 能读写寄存器状态，所以既能「观测」也能「跳过整个函数体」——设 `rax`（返回值）+ `rip`（指向 `ret`）即可。
 
 ---
 
-## angr (Symbolic Execution)
-
-angr automatically explores program paths to find inputs satisfying constraints. Solves many flag-checking binaries in minutes that take hours manually.
-
-### angr Installation
+## 3. angr 基础
 
 ```bash
 pip install angr
 ```
 
-### Basic Path Exploration
+### 最简单的形态
 
 ```python
 import angr
-import claripy
 
-# Load binary
 proj = angr.Project('./binary', auto_load_libs=False)
 
-# Find address of "Correct!" print, avoid "Wrong!" print
-# Get these from disassembly (objdump -d or Ghidra)
-FIND_ADDR = 0x401234    # Address of success path
-AVOID_ADDR = 0x401256   # Address of failure path
+FIND_ADDR  = 0x401234    # 成功路径（从 objdump -d 或 Ghidra 拿）
+AVOID_ADDR = 0x401256    # 失败路径
 
-# Create simulation manager and explore
 simgr = proj.factory.simgr()
 simgr.explore(find=FIND_ADDR, avoid=AVOID_ADDR)
 
 if simgr.found:
-    found = simgr.found[0]
-    # Get stdin that reaches the target
-    print("Flag:", found.posix.dumps(0))  # fd 0 = stdin
+    print("Flag:", simgr.found[0].posix.dumps(0))    # fd 0 = stdin
 ```
 
-### Symbolic Input with Constraints
+### 带约束的符号输入
 
 ```python
-import angr
-import claripy
+import angr, claripy
 
 proj = angr.Project('./binary', auto_load_libs=False)
 
-# Create symbolic input (e.g., 32-byte flag)
 flag_len = 32
 flag_chars = [claripy.BVS(f'flag_{i}', 8) for i in range(flag_len)]
 flag = claripy.Concat(*flag_chars + [claripy.BVV(b'\n')])
 
-# Constrain to printable ASCII
 state = proj.factory.entry_state(stdin=flag)
 for c in flag_chars:
     state.solver.add(c >= 0x20)
-    state.solver.add(c <= 0x7e)
+    state.solver.add(c <= 0x7e)          # 可打印
 
-# Constrain known prefix: "flag{"
-state.solver.add(flag_chars[0] == ord('f'))
-state.solver.add(flag_chars[1] == ord('l'))
-state.solver.add(flag_chars[2] == ord('a'))
-state.solver.add(flag_chars[3] == ord('g'))
-state.solver.add(flag_chars[4] == ord('{'))
+# 已知前缀与后缀
+for i, ch in enumerate(b"flag{"):
+    state.solver.add(flag_chars[i] == ch)
 state.solver.add(flag_chars[flag_len-1] == ord('}'))
 
 simgr = proj.factory.simgr(state)
 simgr.explore(find=0x401234, avoid=0x401256)
 
 if simgr.found:
-    found = simgr.found[0]
-    result = found.solver.eval(flag, cast_to=bytes)
-    print("Flag:", result.decode())
+    print(simgr.found[0].solver.eval(flag, cast_to=bytes).decode())
 ```
 
-### Hook Functions to Simplify Analysis
+### hook 掉干扰函数
 
 ```python
-import angr
+@proj.hook(0x401100, length=5)      # printf 调用点
+def skip_printf(state): pass
 
-proj = angr.Project('./binary', auto_load_libs=False)
+@proj.hook(0x401050, length=5)      # sleep 调用点
+def skip_sleep(state): pass
 
-# Hook printf to avoid path explosion in I/O
-@proj.hook(0x401100, length=5)  # Address of call to printf
-def skip_printf(state):
-    pass  # Do nothing, just skip
-
-# Hook sleep/anti-debug functions
-@proj.hook(0x401050, length=5)  # Address of call to sleep
-def skip_sleep(state):
-    pass
-
-# Replace a function with a summary
 class AlwaysSucceed(angr.SimProcedure):
-    def run(self):
-        return 1
+    def run(self): return 1
 
 proj.hook_symbol('check_license', AlwaysSucceed())
 ```
 
-### Exploring from Specific Address
+### 从中间地址开始
 
 ```python
-# Start from middle of function (skip initialization)
 state = proj.factory.blank_state(addr=0x401200)
-
-# Set up registers/memory manually
-state.regs.rdi = 0x600000  # Pointer to input buffer
+state.regs.rdi = 0x600000
 state.memory.store(0x600000, b"AAAA" + b"\x00" * 28)
-
 simgr = proj.factory.simgr(state)
 simgr.explore(find=0x401300, avoid=0x401350)
 ```
 
-### Common Patterns and Tips
+### 四种常用形态
 
 ```python
-# Pattern 1: argv-based input
+# 1. argv 输入
 state = proj.factory.entry_state(args=['./binary', flag_sym])
 
-# Pattern 2: Multiple find/avoid addresses
-simgr.explore(
-    find=[0x401234, 0x401300],     # Any success path
-    avoid=[0x401256, 0x401400]     # All failure paths
-)
+# 2. 多 find / 多 avoid
+simgr.explore(find=[0x401234, 0x401300], avoid=[0x401256, 0x401400])
 
-# Pattern 3: Find by output string (no address needed)
-def is_successful(state):
-    stdout = state.posix.dumps(1)  # fd 1 = stdout
-    return b"Correct" in stdout
+# 3. 按输出字符串找（不需要地址）
+def ok(state):  return b"Correct" in state.posix.dumps(1)
+def bad(state): return b"Wrong"   in state.posix.dumps(1)
+simgr.explore(find=ok, avoid=bad)
 
-def should_avoid(state):
-    stdout = state.posix.dumps(1)
-    return b"Wrong" in stdout
-
-simgr.explore(find=is_successful, avoid=should_avoid)
-
-# Pattern 4: Timeout protection
-simgr.explore(find=0x401234, avoid=0x401256, num_find=1)
-# Or use exploration techniques:
-simgr.use_technique(angr.exploration_techniques.DFS())  # Depth-first
+# 4. 限长度防爆
+simgr.use_technique(angr.exploration_techniques.DFS())
 simgr.use_technique(angr.exploration_techniques.LengthLimiter(max_length=500))
 ```
 
-### Dealing with Path Explosion
+---
+
+## 4. angr 路径爆炸
 
 ```python
-# Use DFS instead of BFS (default) for flag checkers
+# 用 DFS 而不是默认 BFS
 simgr.use_technique(angr.exploration_techniques.DFS())
 
-# Limit symbolic memory operations
+# 未约束内存/寄存器填零，减少分支
 state.options.add(angr.options.ZERO_FILL_UNCONSTRAINED_MEMORY)
 state.options.add(angr.options.ZERO_FILL_UNCONSTRAINED_REGISTERS)
 
-# Hook expensive functions (crypto, hashing) to avoid explosion
+# 把加密/哈希函数具象化，避免逐位展开
 import hashlib
 class SHA256Hook(angr.SimProcedure):
     def run(self, data, length, output):
-        # Concretize input and compute hash
-        concrete_data = self.state.solver.eval(
-            self.state.memory.load(data, self.state.solver.eval(length)),
-            cast_to=bytes
-        )
-        h = hashlib.sha256(concrete_data).digest()
-        self.state.memory.store(output, h)
+        n = self.state.solver.eval(length)
+        concrete = self.state.solver.eval(self.state.memory.load(data, n), cast_to=bytes)
+        self.state.memory.store(output, hashlib.sha256(concrete).digest())
 
 proj.hook_symbol('SHA256', SHA256Hook())
 ```
 
-### angr CFG Recovery
+### CFG 恢复（先看结构）
 
 ```python
-# Control flow graph for understanding structure
 cfg = proj.analyses.CFGFast()
 print(f"Functions found: {len(cfg.functions)}")
 
-# Find main
 for addr, func in cfg.functions.items():
     if func.name == 'main':
         print(f"main at {addr:#x}")
         break
 
-# Cross-references
 node = cfg.model.get_any_node(0x401234)
 print("Predecessors:", [hex(p.addr) for p in cfg.model.get_predecessors(node)])
 ```
 
-**Key insight:** angr works best on flag-checker binaries with clear success/failure paths. For complex binaries, hook expensive functions (crypto, I/O) and use DFS exploration. Start with the simplest approach (just find/avoid addresses) before adding constraints. If angr is slow, constrain input to printable ASCII and add known prefix.
+**适用**：分支清晰的 flag 校验器、迷宫/寻路、约束密集的检查。
+**不适用**：重加密、浮点运算、复杂堆操作。
 
-**When to use:** Flag validators with branching logic, maze/path-finding binaries, constraint-heavy checks, automated binary analysis. Less effective for: heavy crypto, floating-point math, complex heap operations.
-
----
-
-## lldb (LLVM Debugger)
-
-Primary debugger for macOS/iOS. Also works on Linux. Preferred for Swift/Objective-C and Apple platform binaries.
-
-### Basic Commands
-
-```bash
-lldb ./binary
-(lldb) run                          # Run program
-(lldb) b main                       # Breakpoint on main
-(lldb) b 0x401234                   # Breakpoint at address
-(lldb) breakpoint set -r "check.*"  # Regex breakpoint
-(lldb) c                            # Continue
-(lldb) si                           # Step instruction
-(lldb) ni                           # Next instruction
-(lldb) register read                # Show all registers
-(lldb) register write rax 0         # Modify register
-(lldb) memory read 0x401000 -c 32   # Read 32 bytes
-(lldb) x/s $rsi                     # Examine string (GDB-style)
-(lldb) dis -n main                  # Disassemble function
-(lldb) image list                   # Loaded modules + base addresses
-```
-
-### Scripting (Python)
-
-```python
-# lldb Python scripting
-import lldb
-
-def hook_strcmp(debugger, command, result, internal_dict):
-    target = debugger.GetSelectedTarget()
-    process = target.GetProcess()
-    thread = process.GetSelectedThread()
-    frame = thread.GetSelectedFrame()
-    arg0 = frame.FindRegister("rdi").GetValueAsUnsigned()
-    arg1 = frame.FindRegister("rsi").GetValueAsUnsigned()
-    s0 = process.ReadCStringFromMemory(arg0, 256, lldb.SBError())
-    s1 = process.ReadCStringFromMemory(arg1, 256, lldb.SBError())
-    print(f'strcmp("{s0}", "{s1}")')
-
-# Register in lldb: command script add -f script.hook_strcmp hook_strcmp
-```
-
-**Key insight:** Use lldb for macOS binaries (Mach-O), iOS apps, and when GDB isn't available. `image list` gives ASLR slide for PIE binaries. Scripting API is more structured than GDB's.
+**关键**：**从最简形态开始**（只给 find/avoid 地址），跑不动再加约束。一上手就加满约束反而更慢。
 
 ---
 
-## x64dbg (Windows Debugger)
+## 5. 输出被 `usleep` 拖慢：在 `putchar` 下断
 
-Open-source Windows debugger with modern UI. Alternative to OllyDbg/WinDbg for Windows RE challenges.
-
-### Key Features
-
-```bash
-# Launch
-x64dbg.exe binary.exe         # 64-bit
-x32dbg.exe binary.exe         # 32-bit
-
-# Essential shortcuts
-F2      → Toggle breakpoint
-F7      → Step into
-F8      → Step over
-F9      → Run
-Ctrl+G  → Go to address
-Ctrl+F  → Find pattern in memory
-```
-
-### Scripting
-
-```bash
-# x64dbg command line
-bp 0x401234                    # Breakpoint
-SetBPX 0x401234, 0, "log {s:utf8@[esp+4]}"  # Log string arg on hit
-run                            # Continue
-StepOver                       # Step over
-```
-
-### Common CTF Workflow
-
-1. Set breakpoint on `GetWindowTextA`/`MessageBoxA` for GUI crackers
-2. Trace back from success/failure message
-3. Use **Scylla** plugin for IAT reconstruction on packed binaries
-4. **Snowman** decompiler plugin for quick pseudo-C
-
-**Key insight:** x64dbg has built-in pattern scanning, hardware breakpoints, and conditional logging. For Windows CTF binaries, it's often faster than IDA/Ghidra for dynamic analysis. Use the **xAnalyzer** plugin for automatic function argument annotation.
-
----
-
-## GDB Register Side-Channel on putchar() (picoCTF 2018)
-
-**Pattern:** The binary decrypts a flag one character at a time and calls `putchar()` with a `usleep()` between prints. Rather than wait out the sleeps, set a breakpoint on `putchar@plt` and log `$rdi` (on glibc x86-64 the character lives there) at every hit. A GDB logging loop dumps the full flag in milliseconds regardless of the artificial delay.
+**判据**：程序逐字符解密再 `putchar`，字符之间有 `usleep`。字符在 sleep 之前**已经在寄存器里了**。
 
 ```gdb
-# ~/.gdbinit for this challenge
 set pagination off
 set logging file flag.log
 set logging overwrite on
@@ -568,61 +368,51 @@ gdb -batch -x script.gdb ./crackme
 cat flag.log
 ```
 
-**Key insight:** Any time a program artificially slows output with `usleep`, `nanosleep`, or busy-loop delays, the character to be printed is already in a register before the sleep runs. Breakpoint on the output function (`putchar`, `fputc`, `write` with `fd=1`), print the first-argument register (`$rdi` on x86-64, `$r0` on ARM, `$a0` on RISC-V/MIPS), and let GDB scripting batch-extract the data. Works even on anti-debug binaries when hardware breakpoints are available.
+**第一个参数寄存器按架构变**：x86-64 `$rdi`、ARM `$r0`、RISC-V/MIPS `$a0`。
 
-**References:** picoCTF 2018 — learn gdb, writeup 11784
+**推广**：任何人为减速（`usleep`/`nanosleep`/忙等）都能这么破。断在输出函数（`putchar`/`fputc`/`write` 且 `fd=1`）上，直接批量抽出数据。
 
 ---
 
-## radare2 Visual Panels for Custom VM Tracing (OTW Advent 2018)
+## 6. r2 面板模式看自定义 VM
 
-**Pattern:** Custom-VM binaries look opaque until you can see the program counter, next opcode, stack, and heap simultaneously. radare2's panel mode (`V!`) lets you pin all four views on one screen and step through host-level instructions while watching the VM state move.
+**判据**：自定义 VM 二进制，静态反编译没结构，但把 pc / 下一条操作码 / 栈 / 堆同时摆在一屏上就自解释了。
 
 ```text
-f sp @ rbp-0x160       # flag VM sp
-f ip @ rbp-0x158       # flag VM ip
+f sp @ rbp-0x160       # VM 栈指针
+f ip @ rbp-0x158       # VM 指令指针
 f stack @ rbp-0x150
 f heap @ rbp-0x148
 
-V!                       # enter panels
-# panel 1: ?v [ip]; pd 1 @ [ip]    (next VM instruction)
-# panel 2: pxQ 0x60 @ sp             (stack)
-# panel 3: pxQ 0x60 @ heap           (heap)
-# panel 4: afvd                      (local vars / registers)
+V!                     # 进面板
+# 面板 1：?v [ip]; pd 1 @ [ip]    下一条 VM 指令
+# 面板 2：pxQ 0x60 @ sp            栈
+# 面板 3：pxQ 0x60 @ heap          堆
+# 面板 4：afvd                     局部变量/寄存器
 ```
 
-Set conditional breakpoints on host-level branches that correspond to VM opcode dispatch, and step with `ds`. Combine with `e io.cache=true` for non-destructive patching of VM opcodes during analysis.
-
-**Key insight:** Custom VMs are reversible in minutes once you watch their state live. Panel mode beats static decompilation because the host binary often lacks decompiler-friendly structure; the VM becomes self-explanatory when you see every register tick in real time.
-
-**References:** OverTheWire Advent 2018 — Jackinthebox, writeup 12789
+在宿主级分支（对应 VM 操作码分派处）下条件断点，用 `ds` 单步。配合 `e io.cache=true` 做非破坏性补丁。
 
 ---
 
-## libSegFault.so Register Dump at Crash (OTW Advent 2018)
+## 7. 崩溃时抓寄存器快照
 
-**Pattern:** You need the exact register state at shellcode entry but gdb is unavailable or hooked. Preload `libSegFault.so` (shipped with glibc) and crash the program: it prints a full register dump, backtrace, and memory map to stderr.
+**判据**：需要 shellcode 入口那一刻的精确寄存器状态，但 gdb 不可用或被 hook 了。
 
 ```bash
 LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libSegFault.so ./target
-# or 32-bit:
-LD_PRELOAD=/lib32/libSegFault.so ./target
-
-# Force the crash:
-# segfault_handler dumps: RIP, RSP, RAX..R15, stack backtrace
+LD_PRELOAD=/lib32/libSegFault.so ./target        # 32 位
 ```
 
-Read the printed registers to discover which already point at your shellcode (common: `RAX` → buffer, `RDI` → zero) and design minimal shellcode.
+崩一次就打出完整寄存器（RIP/RSP/RAX..R15）、栈回溯、内存映射。看哪些寄存器已经指向 shellcode（常见 `RAX` → 缓冲区、`RDI` → 0），据此写最小 shellcode。
 
-**Key insight:** libSegFault is installed on every glibc system as part of standard debugging infrastructure. It turns any segfault into a free register snapshot, even on hardened boxes without `strace`/`gdb` permissions.
-
-**References:** OverTheWire Advent Bonanza 2018 — Day 22, writeup 12757
+**关键**：`libSegFault.so` 随 glibc 一起装在每台机器上，不需要 `gdb` 权限，也不需要 `strace`。
 
 ---
 
-## r2pipe Binary Walking + DP Constraint Solver (OTW Advent 2018)
+## 8. 巨型二进制 + 哈希链
 
-**Pattern:** 12 MB binary with 300k+ basic blocks performs chained hash checks on `argv[1]`. Walk every block via `r2pipe`, classify each instruction as hash/cmp/jmp/print, build a constraint graph, then solve with dynamic programming + backtracking over input positions.
+**判据**：12 MB、30 万+ 基本块，对 `argv[1]` 做链式哈希检查。
 
 ```python
 import r2pipe
@@ -630,49 +420,115 @@ r = r2pipe.open('./huge_binary')
 r.cmd('aaa')
 for fn in r.cmdj('aflj'):
     for block in r.cmdj(f"pdfj @ {fn['offset']}")['ops']:
-        op = block['type']
-        if op == 'cmp':  constraints.append(parse_cmp(block))
-        if op == 'call': targets.append(block['jump'])
-# DP: memoize (position, accepted_set) -> char
+        if block['type'] == 'cmp':  constraints.append(parse_cmp(block))
+        if block['type'] == 'call': targets.append(block['jump'])
+# DP: memoize (位置, 已接受集合) -> 字符
 ```
 
-**Key insight:** Big binaries with hash chains are solvable if you treat each branch as an inequality on input bytes. r2pipe's JSON output is machine-readable; DP over position/value tuples prunes most branches before running.
-
-**References:** OverTheWire Advent Bonanza 2018 — Day 8, writeup 12771
+**关键**：每个分支都是对输入字节的一个不等式。`r2pipe` 的 JSON 输出可直接喂程序；对「位置 × 值」做 DP 能在跑起来之前剪掉绝大多数分支。
 
 ---
 
-## GDB Commands at strcmp to Recover Dynamic XOR Key (TAMUctf 2019)
+## 9. 混淆器埋了 XOR：直接在 `strcmp` 下断
 
-**Pattern (Obfuscaxor):** Binary uses the [obfy](https://github.com/fritzone/obfy) C++ template obfuscator to bury a simple `enc(input)` XOR loop under thousands of opaque predicates. The terminal check is still `strcmp(expected_ciphertext, enc(input))` — so instead of unwinding obfy, break at the `strcmp` call and dump both operands:
+**判据**：用 obfy 之类模板把简单 XOR 循环埋进上千个恒定谓词里，但最后一道门仍是 `strcmp(expected, enc(input))`。
 
-```
+```gdb
 disassemble verify_key
-# ... 0x5555555560b9 <+96>: call   strcmp@plt
+# ... 0x5555555560b9 <+96>: call strcmp@plt
 break *verify_key+96
 commands
   silent
-  printf "RDI (expected): "
+  printf "RDI (期望): " 
   x/4xg $rdi
-  printf "RSI (computed): "
+  printf "RSI (实算): "
   x/4xg $rsi
   continue
 end
 run
 ```
 
-Feed a known plaintext (`AAAAAAAAA`) and record `computed_A[i]`. Because `enc` is a byte-wise XOR keystream, the key byte is recovered directly from the delta with the target:
+喂已知明文（`AAAAAAAAA`）记下 `computed_A[i]`。因为 `enc` 是逐字节 XOR 密钥流，密钥字节直接由差值推出：
 
 ```python
-# input_char ^ key = computed_char, and we want: target_char ^ key = target_input
 def to_ans(got_A, expected):
     return chr(got_A ^ ord('A') ^ expected)
-
-# Sanity: flip just one byte of input and confirm only one computed byte moves.
 ```
 
-Chain the per-byte recovery over the full 16-byte target and reconstruct the correct key (`p3Asujmn9CEeCB3A` for this challenge).
+**验证方法**：只翻转输入的一个字节，确认实算结果只有一个字节变化——变了多个就说明不是纯 XOR。
 
-**Key insight:** When `strcmp` is the last gate, the obfuscator is irrelevant — its output still has to equal a fixed string at a known call site. GDB's `commands` block turns the breakpoint into an automatic oracle: one run with `AAAA...` leaks the keystream, and a second pass with any target string gives the valid input. Works for any keyed transform that is effectively a permutation of the input under a fixed key.
+**关键**：最后一道门是 `strcmp` 时，混淆器完全无关紧要——它的输出仍然必须等于一个固定字符串。GDB 的 `commands` 块把断点变成自动预言机：一次 `AAAA...` 泄漏密钥流，第二次带任意目标串就得到合法输入。
 
-**References:** TAMUctf 2019 — Obfuscaxor, writeup 13574
+---
+
+## 10. lldb
+
+macOS/iOS 首选，Linux 也能用，Swift/Objective-C 与 Apple 平台二进制更好用。
+
+```bash
+lldb ./binary
+(lldb) run
+(lldb) b main
+(lldb) b 0x401234
+(lldb) breakpoint set -r "check.*"     # 正则断点
+(lldb) c / si / ni
+(lldb) register read
+(lldb) register write rax 0
+(lldb) memory read 0x401000 -c 32
+(lldb) x/s $rsi
+(lldb) dis -n main
+(lldb) image list                      # 已加载模块 + 基址（PIE 的 ASLR slide）
+```
+
+```python
+import lldb
+
+def hook_strcmp(debugger, command, result, internal_dict):
+    process = debugger.GetSelectedTarget().GetProcess()
+    frame = process.GetSelectedThread().GetSelectedFrame()
+    a0 = frame.FindRegister("rdi").GetValueAsUnsigned()
+    a1 = frame.FindRegister("rsi").GetValueAsUnsigned()
+    s0 = process.ReadCStringFromMemory(a0, 256, lldb.SBError())
+    s1 = process.ReadCStringFromMemory(a1, 256, lldb.SBError())
+    print(f'strcmp("{s0}", "{s1}")')
+
+# 注册：command script add -f script.hook_strcmp hook_strcmp
+```
+
+**判据**：`image list` 直接给 PIE 的 ASLR slide，比 GDB 算 `info proc mappings` 省事。
+
+---
+
+## 11. x64dbg
+
+```bash
+x64dbg.exe binary.exe       # 64 位
+x32dbg.exe binary.exe       # 32 位
+```
+
+**快捷键**：`F2` 断点、`F7` 步入、`F8` 步过、`F9` 运行、`Ctrl+G` 跳地址、`Ctrl+F` 内存搜特征。
+
+```bash
+bp 0x401234
+SetBPX 0x401234, 0, "log {s:utf8@[esp+4]}"    # 命中时记录字符串参数
+run
+StepOver
+```
+
+**CTF 流程**：
+1. GUI 程序在 `GetWindowTextA`/`MessageBoxA` 下断
+2. 从成功/失败提示往前回溯
+3. 加壳程序用 **Scylla** 插件重建 IAT
+4. 快速伪 C 用 **Snowman** 插件
+5. **xAnalyzer** 插件自动标注函数参数
+
+---
+
+## 12. 纪律
+
+- **先分清「不知道算法」还是「不知道值」**。前者要 angr/去混淆，后者只要在比较点下断。多数题属于后者。
+- **最后一道门是 `strcmp`/`memcmp` 时，混淆器不重要**。断在比较点取两个操作数，比解混淆快一个数量级。
+- **angr 从最简形态开始**：只给 find/avoid 地址，跑不动再加约束。上手就加满只会更慢。
+- **Frida 能用 `Interceptor.replace` 就别打补丁**：改内存里的函数体比改文件安全，且能拿到调用参数。
+- **人为减速一律断输出函数**：`usleep`/忙等挡不住「字符已经在寄存器里」。
+- **报的是「卡在哪」不是工具名**：说「要 angr」不如说「要它替我搜路径」。

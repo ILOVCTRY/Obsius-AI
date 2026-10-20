@@ -67,4 +67,5 @@
 
 ## 坑与注意
 
+- **题目补建只在真有遗留数据时发生（2026-10-20）**：`_backfill_challenges` 是**存量迁移**（给老项目的无主 findings / 游离根资产找归属），触发条件必须包含「**存在待归拢数据**」。只判「CTF 轨 + 无 challenge 行 + 未标记」会让**新建的空项目**也建出一道以**项目名**命名的空壳题（`author=system`，用户实测项目名混进题目列表）。无数据时直接返回并落 `challenge_backfill_done` 标记（语义是「迁移已判定完毕」，不是「补建成功」）。清理已污染库：删 `author='system'` 且 `value==项目名` 且**子资产/发现/flag 三者全零**的行——非空壳的可能已收编真实数据，删它等于丢数据。
 - Agent 开窗依赖真实 Ark key（.env），无 key 时 Agent 端点 503、黑板/团队端点照常可用；测试里 WS 收消息条数必须与事件数精确匹配，多收会挂（TestClient 无超时）。多进程部署（uvicorn workers>1）会让 app.state 会话表/job 失效——当前按单进程设计。intel 端点注入口/惰性建库见 [`core/intel/CLAUDE.md`](../intel/CLAUDE.md)。

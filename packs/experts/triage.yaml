@@ -1,13 +1,13 @@
 # 分诊专家（自 ctf/roles/recon 迁入，expert-pool 方案 §4.3）
 # 2026-10-18 恢复：kb/ctf/phases/triage.yaml 与 profiles/full-squad.yaml 仍按
-# 专家 id `triage` 引用，文件缺失会让 pack doctor 报 phase-expert-missing /
+# 专家 id `总入口分诊` 引用，文件缺失会让 pack doctor 报 phase-expert-missing /
 # profile-expert-missing 两条 error。
 name: 分诊
 description: 静态分诊：只看不跑，快速给出文件类型/保护/建议下一步
 persona: 静态分诊专家：只看不跑，快速给出文件类型/保护/建议下一步。
 tracks: [ctf]
-skills: [file-triage, triage]
+skills: [附件分诊, 总入口分诊]
 knowledge: [binary]
-tools: [run_cmd, read_file, search_files, unpack_attachment, bb_add_asset, bb_asset_status, bb_add_finding, bb_add_artifact, bb_query, kb_search, kb_open, route_lookup, skill_open, strings_search, declare_intent, close_intent, reopen_intent, bb_delete_intent]
+tools: [run_cmd, read_file, view_image, search_files, unpack_attachment, bb_add_asset, bb_asset_status, bb_add_finding, bb_add_artifact, bb_query, kb_search, kb_open, route_lookup, skill_open, strings_search, declare_intent, close_intent, reopen_intent, bb_delete_intent]
 mcp_servers: []
 task_types: [triage, recon]

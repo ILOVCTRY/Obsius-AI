@@ -1,387 +1,360 @@
-# CTF Reverse - Hardware and Advanced Architecture Reversing
-
-HD44780 LCD GPIO reconstruction, RISC-V advanced extensions and debugging, ARM64/AArch64 reversing and exploitation.
-
-## Table of Contents
-- [HD44780 LCD Controller GPIO Reconstruction (32C3 2015)](#hd44780-lcd-controller-gpio-reconstruction-32c3-2015)
-- [RISC-V (Advanced)](#risc-v-advanced)
-  - [Custom Extensions](#custom-extensions)
-  - [Privileged Modes](#privileged-modes)
-  - [RISC-V Debugging](#risc-v-debugging)
-- [ARM64/AArch64 Reversing and Exploitation](#arm64aarch64-reversing-and-exploitation)
-- [MIPS64 Cavium OCTEON Coprocessor 2 Crypto (SEC-T CTF 2017)](#mips64-cavium-octeon-coprocessor-2-crypto-sec-t-ctf-2017)
-- [EFM32 ARM Microcontroller MMIO AES (SEC-T CTF 2017)](#efm32-arm-microcontroller-mmio-aes-sec-t-ctf-2017)
-- [MBR/Bootloader Reversing with QEMU + GDB (Square CTF 2017)](#mbrbootloader-reversing-with-qemu--gdb-square-ctf-2017)
-- [Game Boy ROM Z80 Analysis in bgb Debugger (Square CTF 2017)](#game-boy-rom-z80-analysis-in-bgb-debugger-square-ctf-2017)
-- [KVM Guest Analysis via ioctl + KVM_EXIT_HLT Block Chaining (CSAW 2018)](#kvm-guest-analysis-via-ioctl--kvm_exit_hlt-block-chaining-csaw-2018)
-- [Coreboot ROM XOR-Pair Bit-Flip Address Discovery (Hack.lu 2018)](#coreboot-rom-xor-pair-bit-flip-address-discovery-hacklu-2018)
-
 ---
 
-## HD44780 LCD Controller GPIO Reconstruction (32C3 2015)
+phase: binary
+vuln_class: [reverse, hardware, arm64, riscv]
+title: 硬件与异构架构逆向
+summary: 硬件题的核心是「找到那条把外部信号映射成数据的通道」——GPIO 引脚、MMIO 寄存器、CP2 协处理器。判据是引脚/地址与厂商手册的对应关系。
+---
 
-Recover text displayed on an HD44780 LCD from raw Raspberry Pi GPIO recordings:
+# 硬件与异构架构逆向
 
-1. **Identify signal lines:** Map GPIO pins to HD44780 signals (RS, CLK, D4-D7 for 4-bit mode)
-2. **Clock edge detection:** Sample data lines on falling clock edges (1->0 transition)
-3. **Nibble assembly:** Combine two 4-bit samples into one 8-bit command/data byte
-4. **DRAM address mapping:** HD44780 uses non-contiguous addressing for multi-line displays:
-   - Line 0: 0x00-0x27
-   - Line 1: 0x40-0x67
-   - Line 2: 0x14-0x3B
-   - Line 3: 0x54-0x7B
+平台专项（macOS/iOS、固件、内核驱动、游戏引擎）见 [[binary/逆向工程/platforms.md|平台专项]]；ARM/MIPS 的裸机模拟见 [[binary/逆向工程/unicorn-emulation.md|Unicorn 模拟]]；RISC-V 基础反汇编见 [[binary/逆向工程/tools.md|静态工具]]。
+
+## 0. 判据速查
+
+| 现象 | 判据 | 去哪节 |
+|---|---|---|
+| 给的是 GPIO 采样日志 | 找跳变最多的引脚 = CLK | §1 |
+| `dmtc2` / `dmfc2` 指令 | MIPS CP2 硬件加密引擎 | §4 |
+| 写 `0x400E0000` 附近地址 | EFM32 的 AES 外设（MMIO） | §5 |
+| 是磁盘镜像且从 `0x7c00` 开始 | MBR 引导扇区 | §6 |
+| 是 `.gb` ROM | SM83（Z80/8080 混合） | §7 |
+| 链接了 `-lkvm` 或打开 `/dev/kvm` | 控制流在宿主进程里 | §8 |
+| 固件里两个常量做 XOR | 单比特翻转可改目标地址 | §9 |
+| `file` 显示 `ARM aarch64` | 返回地址在 LR 不在栈 | §3 |
+| 自定义 RISC-V 扩展指令 | 查 Zbb/Zbc/Zk 扩展表 | §2 |
+
+**总原则**：硬件题不要试图「读懂全部代码」，而是**定位那条数据通道** —— 引脚、寄存器地址、协处理器编号，一旦对上厂商手册，剩下就是纯算术。
+
+## 1. HD44780 LCD 的 GPIO 重建
+
+从裸的树莓派 GPIO 采样记录里还原 LCD 上显示的文字。
+
+```text
+1. 引脚映射：GPIO → HD44780 的 RS / CLK / D4-D7（4 位模式）
+2. 边沿检测：在 CLK 的下降沿采样数据线
+3. 半字节拼装：两个 4 位样本拼成一个 8 位命令/数据
+4. DRAM 地址映射：HD44780 多行显示的地址不连续
+```
+
+```text
+行 0：0x00-0x27
+行 1：0x40-0x67
+行 2：0x14-0x3B
+行 3：0x54-0x7B
+```
 
 ```python
-display = [' '] * 80  # 4 lines x 20 chars
+display = [" "] * 80        # 4 行 × 20 字符
 cursor = 0
 
 for timestamp, gpio_state in sorted(gpio_log):
     if falling_edge(gpio_state, CLK_PIN):
         nibble = extract_data_bits(gpio_state)
-        byte = assemble_nibble(nibble)  # Two nibbles per byte
-        if rs_high(gpio_state):  # RS=1: data write
+        byte = assemble_nibble(nibble)          # 两次半字节拼一个字节
+        if rs_high(gpio_state):                 # RS=1：数据写入
             display[dram_to_position(cursor)] = chr(byte)
             cursor += 1
-        else:  # RS=0: command (set cursor, clear, etc.)
+        else:                                   # RS=0：命令（设光标、清屏等）
             cursor = parse_command(byte)
 ```
 
-**Key insight:** GPIO pin-to-signal mapping is rarely documented; identify CLK by finding the pin with most transitions, RS by correlation with data patterns (alternating command/data phases).
+**引脚映射怎么猜**：
 
----
+- **CLK = 跳变次数最多的引脚**。时钟线每个数据位都翻一次，其他线不是。
+- **RS = 与数据模式相关的引脚**。它会在「命令段」和「数据段」之间交替，呈现低频块状变化。
+- 剩下的四根就是 D4-D7。
 
-## RISC-V (Advanced)
+**DRAM 地址不连续是最容易错的地方**：如果按线性地址排，第 2、3 行会错位。先按表映射再渲染。
 
-Beyond basic disassembly (see [[binary/逆向工程/tools.md#risc-v-binary-analysis-ehax-2026|tools.md]]):
+## 2. RISC-V 进阶
 
-### Custom Extensions
-
-```text
-Bitmanip extensions (Zbb, Zbc, Zbs):
-  clz, ctz, cpop         -> count leading/trailing zeros, popcount
-  orc.b, rev8            -> byte-level bit manipulation
-  andn, orn, xnor        -> negated logic operations
-  clmul, clmulh, clmulr  -> carry-less multiplication (crypto)
-  bset, bclr, binv, bext -> single-bit operations
-
-Crypto extensions (Zk*):
-  aes32esi, aes32dsmi     -> AES round operations
-  sha256sig0, sha512sum0  -> SHA hash acceleration
-  sm3p0, sm4ed            -> Chinese crypto standards
-```
-
-### Privileged Modes
+### 2.1 自定义扩展
 
 ```text
-Machine mode (M):  Highest privilege, firmware/bootloader
-Supervisor mode (S): OS kernel
-User mode (U):      Applications
+位操作（Zbb/Zbc/Zbs）：
+  clz / ctz / cpop          前导零、尾随零、popcount
+  orc.b / rev8              字节级位操作
+  andn / orn / xnor         取反后逻辑运算
+  clmul / clmulh / clmulr   无进位乘法（密码学用）
+  bset / bclr / binv / bext 单比特操作
 
-CSR registers to watch:
-  mstatus/sstatus    -> privilege level, interrupt enable
-  mtvec/stvec       -> trap handler address
-  mepc/sepc         -> exception return address
-  mcause/scause     -> trap cause
-  satp              -> page table root (virtual memory)
+密码扩展（Zk*）：
+  aes32esi / aes32dsmi      AES 轮操作
+  sha256sig0 / sha512sum0   SHA 加速
+  sm3p0 / sm4ed             国密算法
 ```
 
-### RISC-V Debugging
+### 2.2 特权级
+
+```text
+M 模式（Machine）    最高权限，固件/引导
+S 模式（Supervisor） 操作系统内核
+U 模式（User）       应用
+```
+
+要盯的 CSR：
+
+```text
+mstatus / sstatus   特权级、中断使能
+mtvec / stvec       陷阱处理入口
+mepc / sepc         异常返回地址
+mcause / scause     陷阱原因
+satp                页表根（虚拟内存）
+```
+
+### 2.3 调试
 
 ```bash
-# OpenOCD + GDB for hardware debugging
+# OpenOCD + GDB（硬件）
 openocd -f interface/jlink.cfg -f target/riscv.cfg
 
-# GDB for RISC-V
-riscv64-unknown-elf-gdb binary
-(gdb) target remote :3333
-
-# QEMU with GDB server
+# QEMU + GDB stub
 qemu-riscv64 -g 1234 -L /usr/riscv64-linux-gnu/ ./binary
 riscv64-linux-gnu-gdb -ex 'target remote :1234' ./binary
 ```
 
----
+## 3. ARM64 / AArch64
 
-## ARM64/AArch64 Reversing and Exploitation
-
-AArch64 (ARM 64-bit) appears in mobile apps, cloud servers (AWS Graviton), Apple Silicon, and CTF challenges. Key differences from x86-64 affect both reversing and exploitation.
-
-**Setup and emulation:**
+出现在移动应用、云服务器（Graviton）、Apple Silicon 和 CTF 里。
 
 ```bash
-# Install cross-toolchain and emulator
 apt install gcc-aarch64-linux-gnu gdb-multiarch qemu-user-static
 
-# Run AArch64 binary on x86 host
+# x86 主机上跑
 qemu-aarch64-static -L /usr/aarch64-linux-gnu/ ./arm64_binary
 
-# Debug with GDB
+# 带调试
 qemu-aarch64-static -g 12345 -L /usr/aarch64-linux-gnu/ ./arm64_binary &
-gdb-multiarch -ex 'set arch aarch64' -ex 'target remote :1234' ./arm64_binary
+gdb-multiarch -ex 'set arch aarch64' -ex 'target remote :12345' ./arm64_binary
 
-# With library preloading (for challenges that ship libc)
+# 题目自带 libc 时
 qemu-aarch64-static -g 12345 -E LD_PRELOAD=./libc.so.6 -L ./lib ./arm64_binary
 ```
 
-**AArch64 calling convention (key differences from x86-64):**
+### 3.1 调用约定（与 x86-64 的关键差异）
 
 ```text
-Registers:
-  x0-x7    -- function arguments AND return values (x0 = first arg / return)
-  x8       -- indirect result location (struct returns)
-  x9-x15   -- caller-saved temporaries
-  x19-x28  -- callee-saved (preserved across calls)
-  x29 (fp) -- frame pointer
-  x30 (lr) -- link register (return address, NOT on stack by default)
-  sp       -- stack pointer (must be 16-byte aligned)
-  xzr      -- zero register (reads as 0, writes discarded)
-
-Key exploitation differences:
-  - Return address in LR (x30), not on stack -- pushed only if function calls others
-  - No RIP-relative addressing like x86 -- uses ADRP+ADD pairs for PC-relative loads
-  - Fixed 4-byte instruction width -- no variable-length gadget tricks
-  - NOP = 0xD503201F (not 0x90)
-  - BLR x8 / BR x30 -- indirect calls/jumps use register operands
+x0-x7     函数参数，同时是返回值（x0 = 第一个参数 / 返回值）
+x8        间接结果位置（结构体返回）
+x9-x15    调用者保存的临时寄存器
+x19-x28   被调用者保存（跨调用保留）
+x29 (fp)  帧指针
+x30 (lr)  链接寄存器（返回地址，默认不在栈上）
+sp        栈指针（必须 16 字节对齐）
+xzr       零寄存器（读为 0，写被丢弃）
 ```
 
-**Common AArch64 patterns in Ghidra/IDA:**
+**利用层面的四个关键差异**：
 
 ```text
-# PC-relative address loading (equivalent to x86 LEA):
-ADRP  x0, #0x411000      ; Load page address (4KB aligned)
-ADD   x0, x0, #0x8       ; Add page offset -> x0 = 0x411008
+1. 返回地址在 LR（x30），不在栈上 —— 只有函数内部还要调用别人时才压栈
+2. 没有 x86 那种 RIP 相对寻址 —— 用 ADRP + ADD 对
+3. 指令固定 4 字节 —— 没有变长指令的 gadget 技巧
+4. NOP 是 0xD503201F（不是 0x90）
+```
 
-# Function prologue:
-STP   x29, x30, [sp, #-0x30]!  ; Push fp + lr, decrement sp
-MOV   x29, sp                   ; Set frame pointer
+### 3.2 常见指令模式
 
-# Function epilogue:
-LDP   x29, x30, [sp], #0x30    ; Pop fp + lr, increment sp
-RET                              ; Branch to x30 (lr)
+```asm
+; PC 相对地址加载（等价 x86 的 LEA）
+ADRP  x0, #0x411000       ; 加载页地址（4KB 对齐）
+ADD   x0, x0, #0x8        ; 加页内偏移 → x0 = 0x411008
 
-# Switch/jump table:
+; 函数序言
+STP   x29, x30, [sp, #-0x30]!   ; 压 fp + lr，同时减小 sp
+MOV   x29, sp
+
+; 函数尾声
+LDP   x29, x30, [sp], #0x30     ; 弹 fp + lr，同时增加 sp
+RET                              ; 跳到 x30
+
+; switch / 跳转表
 ADR   x1, jump_table
-LDRB  w2, [x1, x0]       ; Load offset byte
-ADD   x1, x1, w2, SXTB   ; Sign-extend and add
-BR    x1                   ; Indirect branch
+LDRB  w2, [x1, x0]        ; 取偏移字节
+ADD   x1, x1, w2, SXTB    ; 符号扩展后相加
+BR    x1                   ; 间接跳转
 ```
 
-**ROP on AArch64:**
+### 3.3 AArch64 的 ROP
 
 ```python
 from pwn import *
 
-# AArch64 gadgets differ from x86:
-# - "pop {x0}; ret" equivalent: LDP x0, x1, [sp], #0x10; RET
-# - Prologue gadgets: LDP x29, x30, [sp, #0x20]; ... RET
-# - system() call: x0 = pointer to "/bin/sh", BLR to system
+context.arch = "aarch64"
+elf = ELF("./arm64_binary")
 
-context.arch = 'aarch64'
-elf = ELF('./arm64_binary')
-
-# Common gadget pattern in AArch64 libc:
-# LDP X19, X20, [SP,#var_s10]
-# LDP X29, X30, [SP+var_s0],#0x20
-# RET
-# Controls x19, x20, x29, x30 and advances sp by 0x20
+# gadget 来源：函数序言/尾声里的 STP/LDP 对
+# 典型 gadget：
+#   LDP X19, X20, [SP,#var_s10]
+#   LDP X29, X30, [SP+var_s0],#0x20
+#   RET
+# 一次能控制 x19、x20、x29、x30，并把 sp 前进 0x20
 ```
 
-**Key insight:** AArch64's fixed instruction width and register-based return address (`lr`/`x30`) make ROP gadgets more constrained than x86. Look for `LDP` (load pair) gadgets that pop multiple registers from the stack. The `STP`/`LDP` instruction pairs that save/restore callee-saved registers in function prologues/epilogues are the primary gadget source.
+**gadget 的主要来源是 STP/LDP 对** —— 函数序言/尾声为了保存恢复被调用者保存寄存器必然成对出现，这正好是「一次弹多个寄存器」的现成 gadget。`pop {x0}; ret` 这种 x86 式单寄存器 gadget 在 AArch64 上很少见。
 
-**When to recognize:** `file` shows "ELF 64-bit LSB ... ARM aarch64". Ghidra auto-detects but may need manual processor selection for raw binaries. Use `qemu-aarch64-static` for emulation on x86 hosts.
+## 4. MIPS64 Cavium OCTEON 的 CP2 加密
 
-**Tools:** radare2 (`r2 -AA -a arm -b 64`), Ghidra (auto-detect), `aarch64-linux-gnu-objdump -d`, Unicorn Engine (`UC_ARCH_ARM64`)
+OCTEON 用 MIPS 协处理器 2（CP2）实现硬件 AES 和 SHA256，通过 `dmtc2`（写入 CP2）和 `dmfc2`（从 CP2 读出）操作。**反汇编器看起来只是普通寄存器搬移**，实际在驱动硬件加密引擎。
 
-**References:** Google CTF 2016 "Forced Puns", Insomni'hack 2018 "onecall"
-
----
-
-## MIPS64 Cavium OCTEON Coprocessor 2 Crypto (SEC-T CTF 2017)
-
-Cavium OCTEON network processors implement hardware AES and SHA256 via MIPS Coprocessor 2 (CP2) using `dmtc2` (move to CP2) and `dmfc2` (move from CP2) instructions. These look like ordinary register moves to a disassembler but drive the hardware crypto engine.
-
-**Key CP2 register layout (OCTEON):**
 ```text
-AES key registers:
-  0x0104 – AES key quadword 0
-  0x0105 – AES key quadword 1
-  0x0106 – AES key quadword 2
-  0x0107 – AES key quadword 3
+AES 密钥寄存器：
+  0x0104 – 密钥第 0 个四字
+  0x0105 – 密钥第 1 个四字
+  0x0106 – 密钥第 2 个四字
+  0x0107 – 密钥第 3 个四字
 
-SHA256 hash registers:
-  0x400E–0x4012 – SHA256 intermediate hash words
-  0x404F        – SHA256 control/result
+SHA256 寄存器：
+  0x400E-0x4012 – 中间哈希字
+  0x404F        – 控制/结果
 
-dmtc2  rN, 0x0104   ; load 64 bits of AES key into CP2 register 0x104
-dmtc2  rN, 0x0105   ; ...next quadword
+dmtc2  rN, 0x0104     ; 把 64 位密钥装进 CP2 寄存器 0x104
+dmtc2  rN, 0x0105     ; 下一个四字
 ```
 
-**Approach:**
-1. Disassemble in IDA/Ghidra — `dmtc2`/`dmfc2` with selector in 0x100-0x40FF range indicates OCTEON CP2
-2. Cross-reference the Cavium OCTEON Hardware Reference Manual for register semantics
-3. Trace the key loading sequence to recover the AES or HMAC key material
-
-**Key insight:** Hardware crypto accelerators on MIPS appear as CP2 register writes (`dmtc2`/`dmfc2`). Identify the base register address and cross-reference vendor documentation.
-
-**References:** SEC-T CTF 2017
-
----
-
-## EFM32 ARM Microcontroller MMIO AES (SEC-T CTF 2017)
-
-Silicon Labs EFM32 Cortex-M binary — a flat binary loaded at 0x1000 in Thumb mode.
-
-**IDA setup:**
 ```text
-Processor: ARM Little-endian (ARMv7-M)
-Load address: 0x1000
-Set T register = 1 (force Thumb mode decoding)
+1. 反汇编，找 dmtc2/dmfc2 且选择子在 0x100-0x40FF 范围
+2. 对照 Cavium OCTEON 硬件参考手册查寄存器语义
+3. 追密钥装载序列，还原 AES / HMAC 密钥
 ```
 
-**AES accelerator MMIO layout (EFM32 AES peripheral at 0x400E0000):**
+**判据**：`dmtc2` 出现且选择子在 `0x100`–`0x40FF`，基本可以确定是 OCTEON CP2。
+
+## 5. EFM32 的 MMIO AES
+
+Silicon Labs EFM32（Cortex-M），平坦二进制加载到 `0x1000`，Thumb 模式。
+
 ```text
-0x400E0000 + 0x000  CTRL   – enable, decrypt mode
-0x400E0000 + 0x004  CMD    – start/stop
-0x400E0000 + 0x010  KEYLA  – key low word 0
-0x400E0000 + 0x014  KEYLB  – key low word 1
-0x400E0000 + 0x018  KEYLC  – key low word 2
-0x400E0000 + 0x01C  KEYLD  – key low word 3
+IDA 设置：
+  处理器：ARM Little-endian (ARMv7-M)
+  加载地址：0x1000
+  T 寄存器 = 1（强制 Thumb 解码）
 ```
 
-The binary loads two separate values, XORs them together, then writes the result as the AES key. Decrypt the embedded ciphertext block with the composed key in ECB mode.
+```text
+AES 外设基址 0x400E0000：
+  +0x000  CTRL   使能、解密模式
+  +0x004  CMD    启动/停止
+  +0x010  KEYLA  密钥低字 0
+  +0x014  KEYLB  密钥低字 1
+  +0x018  KEYLC  密钥低字 2
+  +0x01C  KEYLD  密钥低字 3
+```
+
+程序读两个值、异或、把结果当密钥写进去：
 
 ```python
 from Crypto.Cipher import AES
 
-key_part_a = bytes.fromhex("...")  # extracted from IDA .data section
-key_part_b = bytes.fromhex("...")  # second value
 key = bytes(a ^ b for a, b in zip(key_part_a, key_part_b))
-
-cipher = AES.new(key, AES.MODE_ECB)
-plaintext = cipher.decrypt(ciphertext)
+plaintext = AES.new(key, AES.MODE_ECB).decrypt(ciphertext)
 ```
 
-**Key insight:** Hardware AES accelerators on microcontrollers appear as MMIO register writes at a specific base address — cross-reference the vendor reference manual (EFM32 Reference Manual for Silicon Labs peripherals).
+**判据**：写 `0x400E0000` 附近地址。查 EFM32 参考手册的 AES 外设章节对号。
 
-**References:** SEC-T CTF 2017
-
----
-
-## MBR/Bootloader Reversing with QEMU + GDB (Square CTF 2017)
-
-Boot a floppy/disk image in QEMU with the GDB stub enabled, then attach GDB for full source-level debugging of 16-bit real mode or 32-bit protected mode bootloader code.
+## 6. MBR / 引导扇区
 
 ```bash
-# Boot with GDB stub on port 1234; -S pauses execution at start
+# -S 在启动时暂停，-s 开 GDB stub（1234 端口）
 qemu-system-x86_64 -fda disk.img -s -S
 
-# In another terminal, attach GDB
 gdb -ex "set architecture i8086" \
     -ex "target remote :1234" \
     -ex "break *0x7c00" \
     -ex "continue"
+```
 
-# Common MBR entry point is 0x7c00 (BIOS loads MBR here)
-# Step through bootloader, inspect registers and memory:
+**`0x7c00` 是 BIOS 装载 MBR 的固定地址**，从这里开始单步。
+
+```bash
 (gdb) x/20i $pc
 (gdb) info registers
 (gdb) x/16xb 0x7c00
 ```
 
-To bypass a password check: identify the conditional jump after the comparison and NOP it out in the image file, or patch the comparison to always succeed.
+绕过口令检查：找到比较后的条件跳转，NOP 掉，或让比较恒成功。
 
-```bash
-# Find the comparison offset in the image and patch it
-python3 -c "
-data = open('disk.img', 'rb').read()
-# Replace JNZ (0x75) with JMP-short-always or NOP
-data = data[:offset] + b'\x90\x90' + data[offset+2:]
-open('disk_patched.img', 'wb').write(data)
-"
+```python
+data = open("disk.img", "rb").read()
+data = data[:offset] + b"\x90\x90" + data[offset+2:]    # JNZ(0x75) → NOP NOP
+open("disk_patched.img", "wb").write(data)
 ```
 
-**Key insight:** QEMU's `-s` flag exposes a GDB stub on port 1234 for full debugging of MBR/bootloader code — workflow identical to userland debugging.
+## 7. Game Boy ROM
 
-**References:** Square CTF 2017
+GB 用 Sharp SM83（LR35902），是 Z80/8080 的混合体。用 **bgb** 模拟器，带 GDB 式调试。
 
----
-
-## Game Boy ROM Z80 Analysis in bgb Debugger (Square CTF 2017)
-
-Game Boy ROMs use the Sharp SM83 (LR35902) CPU, a Z80/8080 hybrid. Load the ROM in the **bgb** emulator which provides GDB-like debugging: breakpoints, memory inspection, and register display.
-
-**Key instructions for flag comparisons:**
 ```asm
-LD   A, [HL]    ; load byte from memory pointed to by HL into A
-AND  [HL]       ; A = A & *HL  — compares player byte against memory value
-CP   N          ; compare A with immediate N (sets Z flag if equal)
+LD   A, [HL]    ; 把 HL 指向的字节读进 A
+AND  [HL]       ; A = A & *HL —— 拿玩家输入字节和内存值比较
+CP   N          ; A 与立即数 N 比较（相等则置 Z 标志）
 ```
 
-When `and (hl)` or `cp (hl)` fires during input validation, the expected byte is visible at the `(hl)` address in the memory view.
+```text
+bgb 流程：
+1. File → Open ROM
+2. 右键反汇编 → "Run to cursor" 或 F2 下断
+3. 比较触发时，看 Registers 面板的 HL 值和 Memory 面板的 *HL
+4. 记下期望值，推进到下一位
+```
 
-**bgb workflow:**
-1. Load ROM: File → Open ROM
-2. Right-click disassembly → "Run to cursor" or set breakpoint (F2)
-3. When comparison fires, inspect Registers panel (HL value) and Memory panel (`*HL`)
-4. Note expected value, advance to next comparison position
+**关键**：比较用 `(hl)` 间接寻址，所以**期望值直接显示在内存视图里**，不用逆算法。
 
-**Key insight:** Game Boy ROMs are Z80/SM83 architecture. The bgb debugger provides GDB-like functionality; key comparisons use `(hl)`-indirect addressing so the expected value is directly visible in the memory view during the comparison.
+## 8. KVM 客体的控制流
 
-**References:** Square CTF 2017
-
----
-
-## KVM Guest Analysis via ioctl + KVM_EXIT_HLT Block Chaining (CSAW 2018)
-
-**Pattern:** A userspace process hosts a KVM-based VM whose guest "program" is nothing but a sequence of code blocks that end in `HLT`. The host handler reads `KVM_EXIT_HLT`, inspects guest registers, and dispatches to the next block by looking up `rax` in a jump table at `0x2020A0`. Reverse the whole program by (1) running the binary under `strace -v` to capture `KVM_GET_REGS`/`KVM_SET_REGS` pairs, (2) dumping each code block from the KVM memory region, and (3) reconstructing the dispatch graph from the host's rax-indexed table.
+宿主进程跑一个 KVM 虚拟机，客体「程序」只是一串以 `HLT` 结尾的代码块。宿主读 `KVM_EXIT_HLT`、检查寄存器、按 `rax` 在 `0x2020A0` 的跳转表里查下一块。
 
 ```bash
-# 1. Observe KVM ioctls + register snapshots
+# 1. 观察 KVM ioctl 与寄存器快照
 strace -v -e ioctl ./challenge 2>&1 | grep -E "KVM_RUN|KVM_(GET|SET)_REGS"
 
-# 2. Dump guest code memory (offset + size from KVM_SET_USER_MEMORY_REGION ioctl)
+# 2. dump 客体代码内存（偏移和大小从 KVM_SET_USER_MEMORY_REGION 拿）
 gdb -batch -ex "attach $(pgrep challenge)" \
-    -ex "dump binary memory guest.bin 0x400000 0x410000" \
-    -ex "detach"
+    -ex "dump binary memory guest.bin 0x400000 0x410000" -ex "detach"
 
-# 3. Disassemble each HLT-terminated block
+# 3. 反汇编每个 HLT 结尾的块
 objdump -D -b binary -m i386:x86-64 guest.bin | less
 ```
 
 ```python
-# Rebuild the dispatch graph
 import struct
 with open("challenge", "rb") as f:
     data = f.read()
-# Host table at 0x2020A0 maps rax → next block offset
 table = struct.unpack_from("<128Q", data, 0x2020A0)
 for rax, ptr in enumerate(table):
     if ptr:
         print(f"rax={rax:02x} → block {ptr:#x}")
 ```
 
-**Key insight:** KVM-backed challenges hide control flow by moving it into the host process, not the guest. The guest code itself is just a pile of opaque blocks. `strace` on the KVM ioctls replaces a debugger: every `KVM_EXIT_HLT` is a "basic block boundary" and the host's response is the real transition function. Any time you see a CTF binary linked against `-lkvm` or opening `/dev/kvm`, drop your normal reverse-engineering pipeline and start from the ioctl trace.
+**核心**：控制流被搬到了宿主进程，客体代码只是一堆不透明的块。**每次 `KVM_EXIT_HLT` 就是一个基本块边界，宿主的响应才是真正的转移函数。** 看到 `-lkvm` 或 `/dev/kvm` 就别走常规逆向流程，从 ioctl 轨迹开始。
 
-**References:** CSAW CTF Qualification Round 2018 — kvm, writeup 11206
+## 9. 固件里 XOR 常量对的单比特翻转
 
----
-
-## Coreboot ROM XOR-Pair Bit-Flip Address Discovery (Hack.lu 2018)
-
-**Pattern:** A firmware image loads its flag location by XOR-ing two constants from ROM at boot. The challenge service lets the attacker flip a single bit anywhere in the ROM and observe the new flag address. Compute the intended address `X = C1 ^ C2`, compare against the advertised address, and the bit that differs — always exactly one bit away in a well-designed challenge — tells you which ROM byte + bit pair controls the redirect.
+固件启动时用两个 ROM 常量的 XOR 算出 flag 地址。题目允许攻击者翻转 ROM 里任意一个 bit 并观察新的 flag 地址。
 
 ```python
-# Two constants in ROM
 C1 = 0xEF56BF92
 C2 = 0xEF5A3F92
-intended = C1 ^ C2          # 0xC8000 per the source
-actual   = 0xC0000          # where the flag really lives in memory
+intended = C1 ^ C2          # 0xC8000
+actual   = 0xC0000          # flag 实际所在
 
 diff = intended ^ actual    # 0x08000 → bit 15
-# Find the ROM offset that, when a single bit is flipped, produces `actual`.
-# The flip must land in either C1 or C2 so the XOR result has bit 15 cleared.
+# 找那个「翻一个 bit 就能让结果清掉 bit15」的 ROM 偏移
 ```
 
-**Key insight:** XOR of two ROM constants is trivially a linear operation: any single-bit flip in either operand XORs the corresponding bit into the result. Walk the Hamming distance between computed and observed addresses and you get a bounded list of candidate patch sites — usually one or two. Pairs of addresses in firmware are suspicious: they frequently compose via XOR, ADD, or SUB and every arithmetic relation is a candidate for a targeted single-bit flip attack. Also applies to rowhammer: the sensitive bit is the *differential* between two constants, not the constants themselves.
+**原理**：XOR 是线性的 —— 任一操作数翻一个 bit，结果就在对应位翻转。算出计算值与观测值的**汉明距离**，就得到一个有界的候选补丁位置列表，通常只有一两个。
 
-**References:** Hack.lu CTF 2018 — 1-bit-missile, writeups 11862, 11865
+**推广**：固件里成对出现的地址很可疑，它们常用 XOR / ADD / SUB 组合。任何算术关系都是单比特翻转攻击的候选。Rowhammer 同理 —— 敏感的是**两个常量之间的差值**，不是常量本身。
+
+## 10. 纪律
+
+- **硬件题先找那条数据通道**，不要通读代码。引脚、MMIO 地址、CP2 编号对上手册就成功一半。
+- **CLK 是跳变最多的引脚**。这条判据几乎不会错。
+- **HD44780 的 DRAM 地址不连续**。按线性排会让第 2、3 行错位。
+- **`dmtc2`/`dmfc2` + 选择子 0x100-0x40FF = OCTEON CP2**。反汇编器不会提示这是加密操作。
+- **AArch64 的返回地址在 LR**。找 gadget 要盯 STP/LDP 对，不是 `pop`。
+- **`0x7c00` 是 MBR 的固定入口**。这是 BIOS 写死的，不用找。
+- **GB 的比较用 `(hl)` 间接寻址**，期望值直接可见，不用逆算法。
+- **KVM 题的 `HLT` 就是基本块边界**。从 ioctl 轨迹重建控制流，别去读客体代码。
+- **XOR 是线性的**。算汉明距离就能定位单比特翻转的候选位置。

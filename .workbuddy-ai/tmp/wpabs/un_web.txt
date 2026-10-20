@@ -1,0 +1,546 @@
+CSP nonce 太短（<16 字节）= 可爆破
+DOM XSS 永远不要 innerHTML 不可信数据
+增量 cookie 响应可逐字符爆破服务端代码
+XXE 协议流向是 XML 解析标配
+Move 资源 + 入口函数 + script 调 entry-less 函数
+hash(4 字节) = 字符串前缀确认
+cmd 痕迹 = 取证金矿
+bash 数组下标赋值可触发命令
+Groovy File.text 拼接 URL 是 Java 内网出网 trick
+Jinja2 attr 链是 WAF 绕过关键
+PHP iconv filter 链可写文件
+RSA 共享素数 = GCD(n,e)
+libc-2.27 负 size 是 tcache 越界经典
+PHP $_GET[$x]($y) 动态调用绕 cat/flag 过滤是经典
+include 链是 PHP 文件包含 trick
+QuickJS std.popen 沙箱逃逸
+Spark doAs URL 编码绕过
+Jeecg 路径穿越 /..;/ 是经典
+OOB XXE 三层嵌套 (%x→%y→%z→error) 是出网 trick
+crackme 远端偏移和本地不同是常见坑
+${IFS} 绕过空格过滤
+宽字节报错注入 admin%df
+XTEA 变种关键是 delta 循环的 XOR 校正
+SMC 单字节 XOR 暴力扫是入门逆向手法
+data:// 协议 + fopen('r+') 是 LFI 经典组合，无需上传文件即可 RCE
+PHP 反序列化 4 层类链构造法：每层一个成员指向下一层对象
+LSB python2 工具是入门 stego 标配 (lsb.py extract)
+PHP 下划线数字 1_11 是 PHP 7+ 字面量，等价于 11，绕过弱类型比较
+零宽隐写（Zero-Width Space）藏 zip 密码是 misc 经典套路
+XOR 0x70 + 输入反转是入门 reverse 套路
+CRC32 碰撞短文件 zip 密码是 misc 入门手法
+费马小定理可分解 RSA modulus 的特殊构造
+黑名单绕过要逐字符找对应 iconv 链（避开 _ 字符）
+PHP 源码审计是挖 phar 触发点的有效方法
+Nette 框架 POP 链 + install.lock 写入是 phar 利用链
+框架源码 + PHP 内部函数 + phar = CTF 高级反序列化套路
+PHP 反序列化 3 层链 cheng→bei→yang 经典模板
+SUID root 程序调用外部命令或保留 SHELL 路径 = 可提权
+SHELL 环境变量劫持 suid 程序是 PATH 劫持变种
+urllib._splittag 用 %23 切 URL 绕过 SSRF 检查
+PHP 0/0=NAN + 全角字符是字符构造经典
+PDF 内嵌 JPG 触发 SHA-1 碰撞 (SHAttered) 是 0day 利用
+禅道 pms CVE 是国内常见 CMS 漏洞
+BMP 像素异或还原是 stego 经典
+zip 自动解压是 RCE 经典（filename 命令注入）
+XOR ring 方程组是 reverse 入门
+HNP 隐藏数问题对 30 个同方程输入可建格 LLL 求解
+factor(n-1) 多素数 + CRT 是离散对数 p/q 各自的拼接
+TEA 变种 -=改 += 和移位顺序改变可逆向还原
+AWDP 关键是抢弱口令（ctf:ctf 通用）+ 立即改密
+e=23 + 6 个 modulus 是低指数广播可 CRT 还原
+RSA 位翻转 gcd(q,n) 验证是经典分解方法
+数独答案 9 个 1-9 之和恒为 405，md5 即可
+VMP 字符串改 UPX 是经典脱壳绕过
+CVE-2023-51385 走 .gitmodules 注入 nc|bash
+Python 格式化字符串漏洞可泄露 admin 密码
+ZIP 文件名隐写排序拼接是 MISC 入门技巧
+vm2 3.9.16 用 Error+Proxy+apply 绕过
+整数溢出 -2^63+0xc 绕 key 验证是 PWN 经典
+Dreamer CMS 主题包 themePath 是经典后台读文件漏洞
+ceye.io + XOR 密钥拼接泄漏仍是经典外带思路
+DNA 三联密码替换是 UUID flag还原套路
+PixelJihad + Decabit + LSB 是图片综合隐写
+Unicode 拆字节污染 HTTP 头
+codefever implode 数组拼空格是命令注入经典
+babyheap off_by_null + unlink + environ 三连是 glibc 2.23 经典利用
+XOR 0x23 是常见 PE 头混淆还原，RC4 密钥 th3k3y! 写死在 init 数组
+正则 + 后 6 位 IOC 匹配是流量分析通用思路
+phar:// + gzip 压缩 GIF89a stub 绕 PILER 是图像文件包含经典 trick
+pickle reduce eval 是 Python 内存马标配
+agent.jar 反编译定位 AgentLauncher 是 JVM 沙箱 escape 关键
+aiohttp 3.9.1 之前都有 CVE-2024-23334 目录穿越（影响所有 static 服务）
+PHP 备份文件 .swp / .bak / .git 是源码泄露最常见入口
+OOB XXE 必须配合外部 VPS 接收 dtd 二次回传（内网无解）
+FastAPI add_api_route + exec 是 Python 内存马注册最快方法
+hash+XOR 流密码在已知前缀块下可逐位爆破
+Flask pickle + cookie 签名 = 经典反序列化入口（源码含 secret = 'EnjoyThePlayTime123456'）
+路径穿越 /myapp/read 是 Tomcat 应用读任意文件的常见 misconfig
+数字 md5（如 0cc175b9c0f1b6a831c399e269772661 = md5('a')）是单字节爆破关键
+tac 是 SUID 提权工具，tac /flag 比 cat 更隐蔽
+cJSON_Parse 栈溢出是 2024 流行 pwn 题入口（解析器漏洞）
+软件供应链靶场核心：开源自带漏洞 + 默认口令 + 内网横向
+禅道/向日葵/jumpserver 几乎年年有未授权 RCE
+YARN REST API 默认 8088 暴露就送 shell
+Redis bind 0.0.0.0 + 无密码 = 裸奔公网
+应急响应必清 cron.d + SUID 文件 + 后门用户三件套
+存储型 XSS 必须靠 admin-bot 触发，submit 提交机制是触发入口
+SM4 是国产商用密码（分组 128-bit 密钥 128-bit），apk native 层加密常见
+分段加密题先分段解再拼接，注意端序（如 Z0099864 → 4689900Z）
+WP 找不到原题直接搜代码 hash 经常能找到原作者
+Rust core::arch::asm! 内联汇编做 ORW 是 2024 新趋势
+POP 链改 admin 密码 + 后台登录 + 模板 RCE 是 PHPEMS 三段式攻击
+SSTI 过滤 `{{` 时可考虑 `${ }` 或 `{% %}` 或 `#{ }`
+PHP 反序列化绕过黑名单：把 O: 改成 C: 触发 __unserialize
+智能网联汽车攻防赛常考 IoT/车机 Web 固件上传+环境变量 flag
+SSH 爆破用户名字典 test/ubuntu/root/guest/admin
+BitLocker 加密驱动器是数据安全赛常见考点
+数据安全赛 = 取证 + 密码学 + Web 综合能力
+uint32 加法溢出 pow(2,32) - N 是 CTF Web 高频套路（首数字溢出为零）
+Vite 0day /@fs/app 目录穿越 = 任何绝对路径文件可读
+AWD 一题多漏洞：默认密码 + 上传 + 未授权编辑并存，不能只审一个入口
+纸质材料必读：AWD 一般会发纸质密码信封 + 多张说明纸，要逐张看完
+看到 file() 方法就要想到上传，看到 /auth 就要想到 JWT/未授权
+费马小定理 2^hint ≡ 1 mod p → p = gcd(2^hint-1, n) 是 RSA 隐 p 通用攻击
+JWT 弱 secret 爆破 2 字符 3844 次是常考点
+MT19937 单 bit 状态基底可建 GF(2) 上 LLL 还原，是 624 状态上 group action 思路
+MMX 编码 = XOR → 16-bit 字内 swap → 64-bit ROL1 → 逐字节加 key8 完全可逆
+ptrace int3 调度是 anti-RE 的 VM 形态，子进程跑原 binary 父进程拦截
+dnsmasq.log 可疑域名是 CTF 溯源题常见提示
+大写化字符串 + 后置 .lower() 绕过 'nl' 关键字黑名单是字面变形通用手法
+小参数 LLM（33M-1B）只对复读/前缀补全模式有效，不能用 ChatGPT 套路
+短前缀 + 训练集高频搭配（如 Apology→accepted）是绕过 LLM 限制的经典套路
+Hackergame 原题是中科大 2023 改编，是国内 LLM CTF 入门样板
+加密协议魔数 + RSA 会话密钥 + LZRR 自定义压缩是常见样本偷数据模式
+奇偶 batch 不同算法（algo3/algo2 + keyless/known-plaintext）是流量解密分阶段套路
+busybox 镜像通常在 allowlist 中
+BASH_FUNC_env%% 函数名导出自 2014 Shellshock 漏洞至今仍是 CGI 风险
+TLS-poison 在 SNI 后 32 字节注入可绕过部分 7 层 IDS
+vsFTPd PASV 模式可引到非 FTP 服务做 MySQL 攻击
+Apache Fury 黑名单 checkNotInDisallowedList 只在序列化时走
+LazyMap(StoreableCachingMap, ConstantFactory) 是新 gadget 链关键
+jre/lib/ext 自动加载是经典文件写提权路径
+SHA1 弱密码易通过谷歌反查
+race 1MB padding 保证 include 时文件活过 GC
+AWD 节奏固定为找后门、写后门、修后门、拿 flag 四段式
+crontab 5 分钟一轮是常见 scoring 周期
+CFR-0.152 是 Java 8/11/17 通用反编译首选
+jar -cvfM0 (无清单) 是快速重打方案
+Shiro 默认硬编码密钥是经典 AWD 后门点
+ERC4626 vault 整数溢出 + flashloan 价格操纵是现代 DeFi 攻击组合
+DEX snapshot 漏洞 = 同区块内 swap 压价 + mint 拉价，绕过价格检查
+clickhouse URL() 是 SSRF 提权经典
+DNS o/i 域名后缀隐写 0/1 bit 是常见 misc trick
+类型混淆 + UAF 改指针字段是堆题经典链
+n=1 时 LHS/RHS 是 (1+beta)^2 * ((gamma*(1+beta)+beta*t1+t0)*(gamma+f)) 等简单模等式
+isPowerOf2 校验 n+1 是 2 的幂 → 最小 n=1 满足（n+1=2）
+Renpy .rpyc 编译产物必须用 unrpyc 反编译，否则看不到 game logic
+硬编码 1.exe 输出 XOR 35 是解密逻辑反过来：输出 XOR 35 = 用户输入
+现场盲区（fscan 邮件网关）很正常，赛后复现比硬刚效率高
+glob:// 流协议是 PHP 文件发现利器，配合循环爆破可扫未知文件名
+12 字符限制下 sort%09 文件名代替 cat 是 Linux 命令节省字符的经典 trick
+XS-Leak + RCE 是现代 WEB 难度的天花板——纯前端时间侧信道 + 协议层走私组合
+WebRTC STUN 信令会泄露子域 (iceServers 注入)，盲打内网常用
+PNG 头 IHDR 段格式固定，可爆破 w/h 反推 CRC
+客户端逃逸服务端模板注入是 Node.js web CTF 高频考点
+OpenZeppelin SafeERC20 是工业标准，所有 DeFi 项目都用
+vanityeth 生成 0x00 前缀 EOA + 合约地址可绕过 sender/origin 偏移检查
+is_prime() 在 RC4 key 派生时改变 keylen，必须先模拟函数再 RC4
+POP 链构造关键是 '找到包含可调用方法的对象作为下一个对象的属性
+SUID date -f /path 是 Linux 提权经典（date 可读取任意文件内容）
+URL.href 协议 file:// + URL 编码字符（%61 = a）是 SSRF 经典手法
+JavaMaster 这类无出网 Spring 内存马是现代 CTF WEB 高频考点
+{%if(...)|attr()%}1{%endif%} 形式比 {%print%} 更通用，能绕过 print 关键字过滤
+外带数据法（curl + vps nc）是 SSTI 盲注的标准手法
+golang web 框架 SSTI 比 Python 难利用，但模板渲染时同样注入 . 用 {{.}} 即拿到 key
+MT19937 输出 624 个 32-bit 数后用线性代数反推 state 即可还原 seed
+SQLi 双引号闭合 + MySQL GTID_SUBSET 报错注入是 sqlmap 自动识别模式
+JWT 密钥泄漏 → admin 密码字段 notes → 伪造 JWT 是常见 web 升级路径
+LLM 应用 IDOR（图片 ID / 用户 ID 枚举）是最常见 web 题类型
+短选项 = 正确选项是 LLM 出题的反向指纹（出题者通常写简短正确答案）
+SpEL EL1001E 错误信息暴露 exec 执行成功但返回 Process 对象，必须外带（bash -i / curl）
+nmap 看到 Nagios NSCA 是 Spring 常见端口（8080）标志
+Clone() 路径是触发点，UpdateTodo 是 payload 投递通道
+mpdf SVG/WMF 多边形指令可触发 Parse Error
+错误消息中泄露环境变量是 PHP 通用思路
+AD 域打靶的标配顺序：端口扫描 → host 解析 → SMB/LDAP 枚举 → AS-REP 爆破 → 凭据复用
+dbms_cdc_publish 是 12c+ 默认 system 权限的执行点
+pboot CMS 模板标签 `{pboot:if}` 接受 PHP 表达式 → RCE
+PTH 是绕过 NTLM 限制拿域管的标配
+手机号字典爆破 PKZIP 是社工 + 密码学的结合
+maze 类题关键是 getLoc 公式反推
+WEBrick 错误信息可泄漏 hostname 环境变量
+opnum 缓存污染是 CTF MSRPC 题的高阶考点
+JWT 弱 secret 必须字典爆破（jwt2john）
+写 JSON 文件 + 反序列化 = 覆盖任意字段（isAdmin）
+IrisCTF 多类目风格：SQL + bot + ssh + wifi + FTP + XOR
+aircrack-ng 必须有正确 SSID + 字典
+PHP 白名单 eval 用 chr / 反引号 / GET 参数动态函数
+模板注入绕关键字 = chr() + \x5f 编码
+PHP eval 八进制字符编码可绕关键字黑名单
+JWT kid 路径遍历是 JWT 攻击的经典向量
+SQLite octal escape 是小众但有效的注入技巧
+黑名单 sandbox 必须从全局对象反射字符
+LilacCTF 风格：Web + Python sandbox 入门友好
+Mini-Venom 战队风格：招新 + 入门题速查
+os.Getenv 读 SECRET_KEY 是配置错误的经典入口
+JWT 伪造 + is_admin 字段是 Web 后门经典模式
+二次攻击模式：第一次 OOB 关掉 is_dangerous → 第二次正常 < 字符通过 → XSS
+RC4 KSA = box = range(0,255) 打乱 + PRGA 异或生成密文是 RC4 标准实现
+Polaris 战队 NKCTF 2024 走 ThinkPHP+KodExplorer 多层组合攻击链
+BBCode [youtube]...[/youtube] 这类标签化容器是 DOM 注入的隐藏入口
+Uniswap V2 addLiquidity 按当前储备比例计算份额,只要合约内两种代币比例恰好等于 pair 比例,即可一次性把全部余额入池
+DeFi 流动性题的本质是凑比例,而不是凑数量
+Poc 关键是先 swap 出中间代币再用中间代币换 pair 中第二种代币
+DUP1-DUP16 是自拷贝的关键,无需 PUSH 就能复用栈顶元素
+白名单 opcode 限制下必须构造'既能执行又恰好等于自身 bytecode'的数据
+secp256k1 公钥 x 坐标首字节为 0 的概率约 1/256,爆破 256 次可命中
+PUSH1+DUP1+PUSH1+PUSH1+CODECOPY+RETURN 是最小可执行 runtime 模板
+vanity 地址(满足特定前缀)本质上私钥已知,可任意签名
+ReDoS 延迟是 race 窗口的放大器
+房间级 isHtml 标志是 XSS 触发点
+opener.opener 跨窗口读取同源页面内容是经典 XSS 提权
+JWT 库用字典查算法时 alg 字段可被注入到 Object 原型链
+eval 在 unsafe-eval CSP 下可执行任意 JS
+任何 IP 字符串黑名单都有数十种 bypass (8/10/16 进制 + 短链 + nip.io)
+字符串 truthy 检查 (if (client.isAdmin)) 是 admin 标志的弱验证
+JWT amount 字段整数溢出购买是电商常见逻辑漏洞
+pickle 显式 import 黑名单时 posix.system 这类「带前缀的等价模块」常被遗忘
+dp 泄露 + 大 e 不能简单遍历，需用 pxorq 从两端向中间搜索
+JWT 弱口令爆破（6 位以内）是 HS256 常见攻击
+短小 PHP 后门常用反引号 + 自增 (++) + 异或 (^) 绕静态分析
+运行时 payload 拆分 + 链式自增是 PHP 无字符后门经典手法
+echo $_55 调试打印拼出字符串是后门还原关键
+椭圆曲线 secp256k1 签名天然有两个 s 值 (s 和 n-s)，hash 比较不等于 ecrecover 是常见绕过
+签名延展性 (signature malleability) 在 ECDSA/Solana 中是普遍风险
+fmt-string %N$p 系列可泄漏指定栈位置内容
+命名空间 (GadgetOne/Two/Three) 故意制造跳转是出题常用套路
+WAF 用 === 严格比较而不是 == 是反绕过的常用防御
+Liferay canSerialize 黑名单可绕过（StatisticsService 未在列表）
+PHP 7.0 Throwable $name 格式串 bug 是真实 CVE，#71105 编号可查
+JWT jku 是 X.509 公钥 URL 字段，未过滤 ../ 时可加载攻击者公钥
+SSRF IP 直写（0.0.0.0 / 127.0.0.1）能绕过 host 字符串白名单
+Symfony Doctrine 反序列化链 RedisProxy.__call → Dumper.__invoke → system() 是常见 POP 链
+PHP 无字母数字 RCE 核心是 ^ XOR 还原字母（%01-1F 与 ` 等）
+LLL 梯度下降 4 维可恢复 128 维 lattice 私钥
+pwnable 中 nesemu 是稀有 IoT 模拟器，pwntools 没有直接支持
+win10 缩略图 thumbs.ms 取证常作为 MISC 入门题隐蔽点
+rot13 是 CTF 入门暗号标准，leet 数字 1337 替代字母是等效变种
+XSS 弹窗偷 body 是 admin bot 类题最常见模式
+MD5 digest 是 16 字节 binary 不是 32 字符 hex 是关键
+z3 是 9 位数求解的轻量级工具
+魔改 TEA delta=0x114514 仍可用 rounds 32 逆运算
+HTTP Range 字节偏移 2147483648 触发整数溢出读 2GB 外内容
+PHP md5($a, true) 返回 16 字节原始二进制可作 AES-128 密钥
+Web3 取证题常需要先 md5 hex→raw binary → AES 解密 PHP 源码的多步链
+JSON 类型混淆 {checkcode:{length:16}} 触发 try-catch 跳出长度检查是 Node.js 经典绕过
+rbcd.py + getST.py 是 impacket 域内 RBCD 委派攻击标配
+rot47 是 ROT13 变种，覆盖 ASCII 33-126，比 ROT13 更宽
+IPv6 主机发现是内网扫描新维度，比 IPv4 更隐蔽
+Scapy 伪造 TCP 包需要精确交换 seq/ack + src_ip/dst_ip 才能让 server 接受
+二进制伪装 pgsql → 实为 bash 脚本是 Linux 持久化的高级手法
+AWS IAM 策略中 ''Principal'': ''*'' + 弱条件 StringLike 是 CTF 经典 5 连击
+MT19937 收集 624 个 32-bit 输出即可恢复内部状态
+split_master 重组 bit 流是 LFSR 多段密钥常用解法
+20 维 LLL 是同余 Diophantine RSA 攻击标准 blocksize
+pm2 日志是 Node.js 应用审计突破口，常泄露 admin 操作路径
+邮箱白名单常见于注册绕过题（4 个邮箱 hash 必中）
+SSTI 路径可控时可直接 file= 控制模板名触发渲染
+当 OpenVPN .ovpn 配置文件中 remote 是内网 IP 时，直接改成外网入口 IP 即可绕过 NAT
+浏览器 Date.now() 微秒级精度足够做字符级爆破
+CORS proxy 双端口 443 + 1443 绕过浏览器同源限制
+30 次 sleep(50) 迭代差分聚合是 timing 攻击去噪标配
+S3 sync 比 s3 cp 一次拉整 bucket 更省事
+denyMimeSubTypes 这种 deny-list 总能被 ;parameter + endsWith 截断绕过
+同一域名不同端口是 '同源策略绕过' 的常见盲点
+IronWAF 2.0.3 用 /**/ 绕空格检测
+October CMS 1.0.412 已知 CVE-2017 上传 bypass 是直接 RCE 入口
+libc base brute 是把整个 libc 库 dump 出来后 readelf 找 offset
+sync-xhr 特征策略 + %00 URL 截断是绕 XHR fallback 触发 JSONP 的标配
+SVG XSS 需 url 编码
+AES-CBC 字节翻转需改前一密文块对应字节
+URL 对象 pathname 可绕关键字正则
+LCG 等差数列求 N 用 GCD 三个二阶差分
+反序列化链 + replace 长度变化构造是 PHP pop 链关键
+rustscan 比 nmap 快 10×，ulimit 需 ≥5000 避免缓冲
+SimpleApp 弱密码（用户名枚举）是 gRPC 题常见入口
+pyload 9666 端口 + SSH 公钥植入是 HTB 常见三拓
+RADIUS UDP 1812 协议 secret 鉴权，craft packet 是核心
+JWT 密钥破裂/secrets 泄漏是 SSTI 后常见下一步
+MINIO_UPDATE_MINISIGN_PUBKEY 是 binary 签名验证关键 env
+Ofbiz ProgramExport groovyProgram 是经典 Groovy 沙箱 RCE
+Prophecy + PHPUnit MockObject 是 PHP 反序列化常见 gadget 库
+404 页面收集 + 302 跳转分析是 picup 入口
+tarfile 软链接覆盖写入漏洞（CVE-2007-4559 同源）
+SSTI 反弄 shell 是 web 入口常用 RCE 模式
+正则 re.search 提取表达式数字和异或值
+token = (num1*num2) ^ xor_val 是基础算术 XOR
+sqlmap --search 是从已知字段反查注入点的利器
+应急响应清痕迹 (crontab -r + /var/crash) 是常见溯源题考点
+AWS 凭证 1 小时过期，拿到后立即使用
+拟态防御 (mimic defense) = 邬江兴院士 + 紫金山实验室, 三语言异构体需一致响应过表决
+XDebug client_port 13000 / rpdb 4444 / JDWP 任意端口 = 三语言 RCE 黄金三角
+gopher:// 可构造任意 TCP 原始数据, 是 SSRF 的万能武器
+拟态 = 多异构体 + 表决, 必须每个异构体都攻破才能拿到一致响应
+靶场综合题 = 备份源码审计 + Jenkins RCE + 信息收集 + 数据库利用 + 域渗透
+内网渗透路径: web 入口 → 备份源码 → 中间件漏洞 → 信息收集 → 数据库 → 域内 → 域控
+源码 zip 备份泄露 (.zip/.bak/.swp) 是审计第一目标
+通过反射修改 handler 私有 object 字段可把任意类注入到调用链
+WebRTC 内网穿透靠 TUN/STUN 公司/学校可能判定违规
+aiortc 自定义证书 (RSA→EC) 是出题常见魔改
+Java agent 插桩是横向移动高阶武器 (agentmain 钩 socket)
+低权限提权路径: broker 是中间人, 高权限用户接收恶意消息即 RCE
+列目录漏洞是 Web 入门常见 (404 页面 / .git / 静态资源路径猜测)
+AWD 修复策略: 删漏洞代码/修 TRUE→FALSE/加白名单
+AWD 节奏: 一轮 100 分, 必须批量脚本 (4000+ 分/轮)
+银行流水借贷标志位 + 金额求和是资金初探通用思路
+调证平台 (重明) 输入卡号查群组 ID
+案件卷宗 (案件+笔录+尸检+物品清单) 是综合研判信息源
+内网穿透 NATAPP 双隧道 (TCP+Web) 是反向 shell 必备
+AES key 在 SDK appKey 常点 (com.xingguang.PUSHSDK.appKey)
+二维码解析 APK 下载链接, 末尾 ID 是关键标识
+Proxy get() 陷阱可被用于拦截敏感访问
+1800ms 触发 + 550ms 读取是 1-2 个时序窗口，必须实测调整
+SQLite3 自定义函数漏洞：edit(1)+edit(2) 注册为 vuln 是典型注册点攻击面
+EDITOR 环境变量 + system 命令注入是 Unix 工具的经典 CVE 模式
+gnome-calculator 弹窗是 RealWorld 题演示 RCE 的最直观方式
+AI WAF 绕过常见：拼接无害命令 ls/cat 让 AI 判无害
+temp%llx 临时文件名可预测，write 后立即 system 形成完整 RCE 链
+Redis 3 + Windows 可写 .so 上线 CS（C/S 分离木马场景）
+sudo mysql -e '! cmd' 提权无需 root 密码
+入门靶场固定三段式：web RCE → frp 代理 → MS17-010 → DCSync
+DCSync 不需要登录 DC，只要域内有机器账户权限即可
+fscan 的 MS17-010 红标是横向目标识别第一信号
+Rubeus S4U2Self 扩展代表域管访问 LDAP 服务是约束性委派核心
+机器账户 + S4U2 = 间接获取域管凭据
+Docker 2375 未授权 + -v /:/mnt 挂载宿主机根目录是云上容器经典突破
+Whisker + Rubeus S4U 是 AD CS 机器账户证书攻击标配
+WASM 加密逻辑不是黑盒，memory 暴露后 key + 算法全可被逆向
+内存扫描 + 钩子是 WASM 类 web 题双标配
+八进制字符串 '\160\150...' 可绕过字母黑名单（PHP 字符串自动转义）
+hex 编码入库避免单引号转义是关键
+V8 typed-array-set 的 EnsureAttached 是 IsDetachedBuffer 强校验点
+typed_array set 跨越 detach 状态时写的是 freed memory → tcache fd 篡改
+V8 RCE 通用链：detach → UAF → 覆盖 → 任意读/写 → shellcode
+Chrome 沙箱逃逸通用链：Mojo IPC → Impl side UAF → 虚表指针覆盖 → RCE
+.swp 是 vim 临时文件，源码泄露经典漏洞
+flflag/flflag 双写绕 WAF 是字符串叠加过滤绕过模式
+USB HID 数据 8 字节：第 0 字节 modifier + 第 2 字节 keycode
+file:// 协议读源码是 SSRF 第一步（无需 RCE）
+跨目录 /../ 配合 scheme://host 是路径穿越关键
+phpinfo 暴露 PHP 版本信息（决定可用漏洞）
+Node.js 8 低版本 http.get 存在 CRLF 拆分漏洞
+HTTP 走私打 SSRF + 命令执行
+/C00mmmmanD 是隐藏命令执行端点
+JSP/Servlet 类加载器后门 = 源码清空但work目录有编译类
+dev后门用户与root同组=UID=0等价root
+APT ELF 自删除(noecho + nohup + rm)是后门植入第一阶段特征
+函数指针后 3 位 0x__\xff\x7f 是匹配 libphp 基址的特征字节
+GET 参数 `[`→`_` 替换绕过用 `my[secret.flag` 形式
+dechunk filter(无换行时 0-9a-f 开头清空)与 iconv oracle 组合是单字符爆破
+CC4 链 vs CC1/CC6 区别在 TrAXFilter 作为命令触发器
+RSA 给私钥 + strxor 简单密钥 → pow(c,d,n) 直解是 CRYPTO 入门套路
+BRFW 固件爆破用时间侧信道逐位恢复 1024 位二进制
+源码审计注释泄露逻辑是 CTF Web 重要突破口
+AWDP 防御方需打 patch，攻击方需抢分
+ereg() NULL 截断漏洞：9e9%00*-* 绕过 ^[a-zA-Z0-9]+$ 但 strlen=4
+md5 强类型碰撞需二进制字符串 + 1 字节差异（0x00/0x02）
+xhcms 架构识别：mc-files/mc-core.php?file= 是任意文件读取入口
+AES-ECB 字节翻转攻击：c[32:64]==c[64:96] 判断爆破
+RSA 三公钥攻击：egcd(e1,e2)=E0, egcd(e1,e3)=E1, 双重 egcd(E0,E1) 恢复 m
+Linux Vim-SUID 提权：`vim -c ':!/bin/sh'`
+ADCS 域证书漏洞 ESC1：模版允许低权限用户指定 SAN
+RSA 公因数 gcd(n1,n2)=p 是共模攻击的变种（不同模但共因数）
+fmt 字符串负索引可越界访问栈（vs 正 idx 仅栈内）
+AES/XOR 算法逆向关键：把 long 拆成 (high<<32)|low 分量分别处理
+phar:// wrapper 触发反序列化是 LFI 类通用思路
+minihttpd remove_path 漏洞：URL 中含 ? 后路径分隔处理不当
+49 格棋盘与 attach.png 异或 = 二维码还原
+SSTI 字符串翻转绕过：''.join(reversed('galf/pmt/')) = '/tmp/flag
+MT19937 给 624 个 32bit 输出 = 完全预测 state（不需全部 624）
+MT19937 32bit 整数 seed 枚举 2^31~2^32 可在分钟内完成
+ADFGX 是二战德军密码，密文倒置是常见题目套路
+RSA 共模攻击：e1*e2=1 (mod phi(n)) 时直接解
+log 攻击者 IP 用 md5 加密 = 隐蔽传输常用
+RSA 二元二次方程约束：已知 p+q 和 n=p*q 可韦达解
+Rust include! 宏 + FFI 调 C 可绕 std 过滤
+RBCD + nopac 是 2022-2024 AD 提权标配，缺一不可
+URL 编码（%2C 等）是绕 URI 字符限制的通用方法
+命令执行可走 curl+bash/nc 回传，不一定要 cat/flag 关键词
+凯撒密码 A→X B→Y C→Z 是 ROT-3 移位
+线程竞争 + 共享 num 变量是经典 flag 提取套路
+xlsx=zip+xml 解析 + 数值判 01 + PIL 画图 = 二维码生成套路
+1.pHp 大小写绕扩展名黑名单是 PHP 上传经典
+HTML 注释藏 flag 是 web 入门点
+ECC 小素数 (p<2^16) 直接暴力枚举私钥 d
+vsFTPd 3.0.3 弱密码爆破 agita:zyyzzyzy 是经典痕迹
+语义 WAF 漏洞：/* 被双引号包裹不起注释作用 + 真注释 /* 起作用
+MySQL 报错盲注用 FIELD() 函数构造布尔
+ap_expr 的 file 函数是 Apache 的隐藏文件读取向量
+gopher-lua pairs(_G) 枚举是沙箱题必备第一步
+XXE 无回显必须 OOB + 外部 DTD 外带 (data:// / http://)
+MongoDB aggregation 的 $toLower 能绕过 assert.notEqual 字符串比较
+ASCII 0x7f (DEL) 是 zip check 漏洞, 能删除前 5 字符 flag{
+钓鱼邮件 DKIM/SPF/DMARC TXT 记录是 flag 三段式经典分布
+C 固件异或差分递推 flag[i] = enc[i] - enc[i-1] - 51 是常见混淆还原套路
+aliyun-iot-linkkit python SDK 是模拟 IoT 设备连阿里云最快路径
+cmd.exe '&' 是命令分隔符，比 ';' '|' 更稳，能跨单引号双引号触发
+SMB 多次重传包体相同是 Net-NTLM 提取的有利信号
+life_or_flag 等式约束 reverse 转化为矩阵求解
+Tomcat JSP work 目录是 JSP 动态编译 class 的缓存区, 删 jsp 不删 class
+应急响应三大模块: 流量分析 + 文件排查 + 内存/日志取证, 必须串起来
+Prettier 配置 RCE 是 npm 供应链攻击典型
+Lua TEA 变种 sum/delta 不同
+gcd(RSA1,N) 是 RSA 经典
+LLL 双明文恢复
+RSA info = m + e*m 可用 (e*info-1)/n 找 p+q
+RSA gcd 公因子恢复（s-e 与 o-e 的差）
+智驾安全涵盖 web + crypto + pwn 综合
+LCG 6 组输出即可还原 a,b,m 三参数
+USB 键盘流量 vim flag.txt 是护网取证基本功
+SlientEye 是 LSB 隐写经典工具
+ezecc 关键观察：K = (..., 4359... : 4359...) K = (G, kG)，求 p 时所有点代入曲线方程再 gcd
+Signatrue 用 A,B 矩阵构造 LLL 求 d 是教科书 HNP
+2024happy 把 RSA 与 HSSP 拼接是密码学综合题经典套路
+vmdk 仅主机模式 = 防 VM 反弹的标准隔离方案
+TLS 客户端证书密钥删除后需查备份/.swp/git history
+硬编码 hash=backdoor 是 CTF 管理员入口常见骚套路
+自定义 AES-CBC cookie 用 iv 随机但 key 固定 → 可重放
+Merkle Tree 在 CTF 区块链题中是验证批量 leaf 的标准结构
+used_leafs mapping 防重放是 Solidity 经典模式
+this.a(i, y) 调用 other contract 是 Solidity 跨合约调用
+API 弃用版本不删是常见漏洞
+DOCX/PPTX 元数据泄露作者
+4 位 PIN 暴力无防是经典
+scatterwalk_map_and_copy 写入方向参数（最后一个 1=写）是漏洞入口
+固件证明（attestation）= Root of Trust 签名链
+DEX flash loan 整数溢出 = amount_out = coin.value * vault.coin_b / vault.coin_a 公式差异利用
+DP 矩阵路径 = f[i][j] = f[i-1][j] + row[j-1] 是 LeetCode 62 unique paths 标准思路
+Move CTF 2024 是 Sui 基金会赞助的国际赛（MoveBit+ChainFlag+MoveFuns+OpenBuild 主办）
+ecrecover 签名验证 + 已知 admin 私钥 v=28 = 任意 _blocktimestamp 签名伪造
+NUMEN CTF 是智能合约专项赛，ChaMd5 战队专攻 Solidity 攻击
+自定义 UniswapV2 复刻时要特别留意 feeTo/feeToSetter 等管理函数是否可调用
+flashloan + 多笔 addLiquidity 累积 LP + 单币 deploy 操纵价格是经典三件套
+复刻 UniswapV2 的 _mintFee 函数实现差异会导致 K 失衡可被利用
+impermanent loss 视角下攻击者构造的单边 swap 能拿到超额份额
+Deno 原型链污染限制 input/output 仍可 Reflect.has 触发 Proxy
+伪随机数 + 已知种子 + 高斯分布 = 密码学经典多步还原
+brotli + XOR 密钥 + DP LCS 是 Misc 多段拼接常见套路
+K8s 攻击面按 RBAC→Secrets→IMDS→IRSA 层层升级
+抓包定位算法位置是加密对抗第一步 (搜索加密字段)
+硬编码 key/iv 是前端 JS 最常见漏洞 (可替换 JS 拦截)
+autodecoder 一键解密前 5 关, 6-7 关要自写 Flask 接口
+银行模糊查询 (关键字 '南河') 是 Q1 关键
+重明调证查完整卡号 (6226816246156978927) 不要省略
+百度识图是黑蛇白了类题通用解法
+命题建议: 加 robots.txt / 不重置 / 模糊查询支持
+tshark -Y http -T fields -e 是提取 HTTP 字段的命令行标配
+Flask 模拟服务端是客户端盲注题的本地复现方式
+数据安全管理员赛题偏基础，重工具熟练度
+RSA+LCG 联合攻击要 LCG 状态还原后解 RSA
+JS 前端加密绕过要先读 JS 找加密函数再还原
+Pickle 黑名单可大小写替换绕过（b'BuIltIn' → 还原后等于 'builtin'）
+Java XXE+XPATH 盲注 substring 逐位爆
+PWN 数组越界用负 idx（如 edit(-4)）写函数返回地址为 ret+prdi+binsh+system
+Foundry setUp/startPrank 比 Hardhat 写多阶段 attack script 更适合复杂状态机测试
+DCT 逆变换是 reverse 入门
+Go 二进制反射函数解析要跟 funcval 表
+write(fd, buf, n) 自动把栈上 canary 当普通数据输出 → 二次执行补 canary 是盲 pwn 通用套路
+libc 2.35 ret2libc 用 binsh 字符串在 libc 数据段，配合 system 偏移直接 RCE
+单字符 MD5 字典爆破 = 7 个固定值（a/b/c/d/f/l/t）查表即可
+PHP ?a[]=123 是数组绕类型检查的经典 trick
+JWT 密钥在 .class 中是字符串常量，strings 命令直接可读
+tar 路径穿越 + JSP 映射 web.xml 是写 shell 经典链
+MQTT hash31 = (31*x+ord) 累加自定义 hash
+Blind SSTI 时延盲注模板: sleep N 判 RCE → find_flag_path → wc -c 算长度 → cut -c 提字符
+GAME 自定义 binary 协议 magic 头是协议识别关键
+压缩炸弹 zstd/bunzip2 循环 = 自动化解压+判退出条件
+BigI 多轮混合加密（add+mul+subabs）= Sage 逆推最优
+动态代理 MapProxy#invoke 是触发 Convert 转换的入口
+Fury 二次反序列化必须找到黑白名单 null 的反序列化入口
+mod n³ 后 (a+1)^n 展开剩 3 项 m + m(m-1)/2*pubkey + m(m-1)(m-2)/6*pubkey²
+Chaffymasking half1 XOR half2 != 0 漏洞绕过 os.urandom
+0x90 fastbin 临界 chunk 大小是 heap overlap 经典尺寸
+show 部分字节（0x8）是堆指针发现的标准手法
+uuid 文件服务常见目录穿越
+calc 类题目 'pi' 触发 canary 泄是经典 trick
+color 字符串回显是 regex 题目 XSS 风格
+字符串比较题多步：输入字符串 → 数组排序 → base64 编码 → 多重比较
+qword 减法是反编译快速 strcmp 还原的常见手段
+现代 CTF WEB 越来越'工业化'——一题综合序列化+文件读写+反序列化链+沙箱绕过
+render.com 子域 SSRF 是 Node 生态新攻击点
+RSA 签名 forgery 攻击：当 k*phi 已知时，可直接 inverse(e, phi) 解 d
+ECC 三个点 (x,y) 满足 y^2=x^3+ax+b mod n → 列两个方程解 a,b mod n
+Carmichael 数列表 + LLL 矩阵构造（2^kbits 对角 + n 对角 + 列向量）是经典哈希碰撞构造
+PWN file 覆盖 + canary 栈溢出 + ret2flag 是 4 月赛入门 PWN 标准手法
+多约束 key 求解 = z3 多约束拼接（tag XOR + nibble + colsum + LFSR）
+AES key 派生链 sha256(key[:16]) + md5(key[16:]) 是常见 splitter
+ELF linker script 彩蛋符号是 CTF 留 hint 常见手法
+替换 .so 为空函数库可绕过 OOM/超时
+neverssl.com 是无 HTTPS 跳转的测试站
+jitless 模式是 sandbox 下唯一可行的攻击面
+chunk header 保护 patch 提示漏洞位置
+Node 模块 wrapper 的第 7 层 .caller 是 module 对象内部结构，需精准递归次数
+bdev->vqs[vq] 中 vq 无边界检查是 OOB 写指针的入口，配合 exit_lists 形成 RIP 劫持
+echo c > /proc/sysrq-trigger 触发内核崩溃会调 lkvm 退出 handler，是 escape 触发器
+Go rand.Seed(1337) + 24576 字节随机数 + 已知 password 偏移是经典的'复现随机序列'题目
+Go WithValidatorCtx 链式传递 reader 是订单系统的常见模式，可控 o(int) 索引制造越界
+Go 随机种子固定 → 题目自带 oracle → 任意字段可预测
+MaxOrders + 单次 offset 校验的组合是经典 Go web 利用模式
+JS 对象的 __proto__ 链能反射出很多隐藏字符
+Math jail 关键词黑名单本质是字符串黑名单，必须绕字符串
+音频频谱藏 flag 是 Misc 高频考点
+Fermat factorization 处理 p/q 接近 RSA 极快
+JerseyCTF 风格：log4j + Apache + audio + RSA 各一题
+_mint(addr, amount) 增加 totalSupply 是 ERC20 标准增发接口
+Brownie/Hardhat 部署 + Web3 调用是 Web3 题标配工具链
+SetUID 加载时把 euid 改成文件属主 uid
+已 open 的 fd 即使 setuid 失效后仍可读写
+反射链 dir+reversed+next 是 Python 沙盒逃逸通用思路
+协议头 x80+x04 = protocol 4 + FRAME x95 是协议握手标识
+浮点 NaN/special 值可触发 double 转 long 时漏洞
+IoT 路由器架构是 web+daemon 消息队列（CGI 通信）
+RWX heap 是低级 mprotect 配置 bug
+apply_cb 函数指针是攻击热点
+Edit_VPN_Custom 越界 0x21 字节触发 UAF 是字段对齐经典利用
+whois -h 参数是 SSRF 隐藏通道（不只是 whois 协议）
+AES-CBC 翻转 bit 是经典 CBC 攻击场景
+32-bit canary 高字节固定 0x00，只爆破 1 字节
+ELF 自修改代码需要 dump 还原而非静态分析
+八卦符 0-7 数字映射是中文传统文化密码学
+RSA N+1 窗口 gift 用连分数展开解 p,q 是经典数论
+鸵鸟算法在 CTF 里指绕过潜在复杂检查的策略；很多题 reverse 关键不是'逆向'而是'识别它不检查什么
+25x25 bitstring 是 QR 码 21x21 起步最小版本外的扩展格式
+Safe Word VM 解释器选字节码 0xC358XX6A 是典型的 char-pick opcode 模式
+Autokey 已知明文头逐字符推 key 是维吉尼亚变种基础攻击
+QLExpress 阿里 QL 表达式求值器触发任意 setter/getter 是 2024 新型 RCE 入口
+K-Cessation 加密中'密文值揭示 wheel 局部关系'是解方程的关键
+LLL 同余 Diophantine 攻 RSA p,q 是 2024 新趋势
+Rust box crate 提供 AES S-box 等基础组件，可作密码题密钥流来源
+邮件主题字段含分号 ; 注入额外 HTTP header 头是经典 SSRF/LFI 攻击向量
+size=-1 整数溢出到 2048+ 字节后跟 ROP 是 CTF PWN 标配
+栈溢出绕过 canary 需配合整数溢出或栈外写
+AI Agent 渗透时代,关键词层+调用签名层+CVE 编号层 anti-复读机制是 LLM CTF 自动化的核心
+GLM5 vs GLM5.1 在 CTF 渗透场景表现差异显著
+内核检查 st_mode 和加载页缓存是分离两步, 中间存在 TOCTOU 漏洞
+splice 零拷贝 = 复用页缓存引用, 是页缓存污染的入口原语
+AF_ALG scatterlist 越界是 2017 以来隐藏 8 年的本地提权 0day
+国产系统适配周期长, 6.9-rc1 已修但下游没跟进, 攻击窗口仍在
+盲文密码 = 标准 6 点制, 直接查表可解码
+asyncio 预建连接 + Event 同步触发是高并发竞态标准姿势
+V8 sandbox 逃逸用 cage_read/cage_write 是稳定原语
+浏览器 nday 完整利用链：patch + 编译 + JS + escape
+0 解薛定谔题特点：必须有历史漏洞背景知识 + Windows 特性
+挑战时间 3 分钟 + 只 3 次机会限制
+DeFi 预言机操纵经典攻击：UniswapV2 的 getReserves() 或 balanceOf() 直接作为价格源易被大量 swap 操纵
+AppleRewardPool 用 token3 作为奖励，token3 耗尽 isSolved
+use safemath 防整数溢出是 Solidity 0.5.x 标配
+Ownable 限定 owner = check 合约，普通用户无法直接 setApplePertime
+LLL 格密码把线性方程组转 2x2 矩阵求最短向量
+fmtstr 泄 canary 用 '%17$llx'（偏移由栈帧决定）
+DWT 水印 + Arnold 变换是图片隐写经典组合
+魔改 XXTEA 关键：rounds 是 flag 长度函数（rounds=(415/n)+114）
+yafu 是 CTF RSA 分解标配工具（差几位时尤其有效）
+Go Router handle(mws=append) 中间件链越权是 web 经典
+limiter1+limiter2 + select{} 并发限流绕过易踩坑
+0x2d44 read(0x500) 溢出覆盖 ptr → write_got leak → ROP 套路

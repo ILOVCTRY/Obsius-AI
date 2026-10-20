@@ -103,7 +103,7 @@ function stageObjective(sampleSha: string): string {
     `2. 用 bb_blueprint_create(name=…, goal=…, binary_sha256="${sampleSha}", ` +
     "modules=[{name,desc,func_addresses[]}]) 建骨架；每模块必附 func_addresses（hex 串）",
     "   与业务推断理由 desc；**接口 spec 先行钉死**。",
-    '方法详见 skill_open("blueprint-rebuild") 阶段一。产出后由人类在「蓝图」页签流转 status。',
+    '方法详见 skill_open("逆向重建手法") 阶段一。产出后由人类在「蓝图」页签流转 status。',
   ].join("\n")
 }
 
@@ -118,7 +118,7 @@ function moduleAnalysisObjective(bp: Blueprint): string {
     mods,
     "请把**每个模块**作为独立任务 call_expert 并发委派给 reverse-analyst（单轮 ≤8，超过分批）；",
     "每个任务自包含写明：模块名 + 该模块的 func_addresses 锚点清单。",
-    '子专家按 skill_open("blueprint-rebuild") 阶段二执行：',
+    '子专家按 skill_open("逆向重建手法") 阶段二执行：',
     '先查 func_kb 防重复 → decompile → bb_upsert_func 落结论（risk_tag 必带 "module:<模块名>"）',
     "→ bb_blueprint_update(module_name=…, notes=…) 写回；接口若发现 spec 划错，写 notes 上报、勿自行改接口。",
   ].join("\n")
@@ -135,7 +135,7 @@ function reconstructObjective(bp: Blueprint): string {
     mods,
     "请把**每个模块**作为独立任务 call_expert 并发委派给子专家（单轮 ≤8，超过分批）；",
     "任务描述自包含：模块名 + 该模块 func_addresses 锚点清单 + 蓝图 id（bb_query 自取 spec/notes）。",
-    '子专家按 skill_open("blueprint-rebuild") 阶段四执行：',
+    '子专家按 skill_open("逆向重建手法") 阶段四执行：',
     "1. 代码落 `<项目工作区>/artifacts/rebuild/<模块名>/`（run_cmd 写，合法路径）；",
     "2. 依 func_kb 原实现伪码构造输入/输出向量，写自测脚本；",
     "3. run_cmd 以 threat_class=untrusted + 容器 runtime（docker/sandbox）执行对拍——",

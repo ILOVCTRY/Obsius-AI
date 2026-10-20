@@ -39,7 +39,7 @@ packs/
 - **测试维度（test-dimensions M1）**：`kb/<track>/dimensions.yaml`（id/name/applies_to/intent/evidence_hint）；项目 `config.dimensions` 同名覆写；加载与判定 `core/dimensions.py`。
 - **kb 方向即资料树**：`load_kb_sources` 按方向合成 `packs/kb/<方向>`（恒递归，目录不存在=空源）；`kb_open` module 用全局形态 `<方向>/<模块>/<路径>`（2026-10-14 树状化重构：二级为中文类目模块，旧 `<方向>/<快照>/<路径>` 的「快照」层即模块层）；域按源隔离。
 - **`kb/route_index.yaml`**：全局单表；条目 kb 路径必须真实存在（doctor `route-index-kb-missing` 抓悬空）；注入按会话评分 Top-5，其余走 `route_lookup`；K7 回填 `route_points`，doctor 报 `route-index-zero-hit`。维护=人工直改或 index 提案（只能 edit 增补）。
-- **专家池现状**：18 专家（含 `_generalist` protected 兜底、`chat-orchestrator` 工作台主控、`aggressive-controller` 激进主控（2026-10-17，`tracks:[ctf]`——探针海并发派发、先返先触发，与 chat-orchestrator 同属控制器类不可被委派，见 core/chat/CLAUDE.md））。专家 `skills` 硬选白名单、`knowledge` 方向白名单；`_generalist`/`report-writer` 等 skills=null=全量。
+- **专家池现状**：22 专家（`ls packs/experts/*.yaml | wc -l` 为准）。含 `_generalist` protected 兜底、`chat-orchestrator` 工作台主控、`aggressive-controller` 激进主控（2026-10-17，`tracks:[ctf]`——探针海并发派发、先返先触发）、`ctf-controller` CTF 解题主控（2026-10-19，`tracks:[ctf]`——**代码调度 + LLM 只定方向**：放弃判据/方向互斥/目标机自证/上下文降级全在 `core/ctf/` 代码侧，主控只提方向）。**三个主控（chat-orchestrator / aggressive-controller / ctf-controller）与 artex-controller 同属控制器类，不可被委派**（`CONTROLLER_IDS`，见 core/chat/CLAUDE.md）。专家 `skills` 硬选白名单、`knowledge` 方向白名单；`_generalist`/`report-writer` 等 skills=null=全量。
 - **技能/红线修改**：AI 只能落 `.proposals/`，人类审阅后应用（永不直写）；API 写端点走 `pack_write_lock` 临界区。
 - **删除进 `.history/trash/`**（可恢复）；编辑备份两命名（`<ts>[.n]_<file>` 与 `<file>.<ts>.bak`），历史端点两种都认；回滚前自动再备份当前版。
 - 再导入/更新快照只跑 `scripts/import_kb.py`（幂等，`--force` 原位覆盖）；勿手改 kb/ 内资料。

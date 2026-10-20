@@ -1,0 +1,12 @@
+{
+  "pyboy_version": "2.8.1",
+  "rom": "/mnt/test/game.gb",
+  "frames": 120,
+  "screen_shape": [
+    144,
+    160,
+    4
+  ],
+  "dtype": "uint8",
+  "pixel_sum": 23120442
+}

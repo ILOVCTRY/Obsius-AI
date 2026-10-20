@@ -1,0 +1,15 @@
+{
+  "providers": [
+    {
+      "name": "ark-coding",
+      "base_url": "https://x/api",
+      "api_key": "k1",
+      "format": "openai-chat-completions",
+      "models": [
+        "a"
+      ],
+      "enabled": true,
+      "model_context": {}
+    }
+  ]
+}

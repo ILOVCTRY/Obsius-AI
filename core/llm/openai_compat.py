@@ -8,12 +8,14 @@ from core.llm import parsing
 from core.llm.anthropic_compat import StreamTransport, Transport
 from core.llm.dump import capture_request as dump_request_capture
 from core.llm.provider import (LLMResponse, ToolCall, Usage, LLMError,
-                               collapse_reasoning_echo)
+                               collapse_reasoning_echo, image_data_url,
+                               tool_result_content)
 from core.llm.retry import (COOLDOWN_BACKOFF, HTTP_5XX_ATTEMPTS,
                             HTTP_5XX_BACKOFF, HTTP_5XX_RETRIES, HTTP_5XX_STATUS,
                             RATE_LIMIT_ATTEMPTS, RATE_LIMIT_BACKOFF,
                             RATE_LIMIT_RETRIES, is_channel_verification_error,
-                            is_model_cooldown_error, retry_note)
+                            is_model_cooldown_error, retry_note,
+                            sleep_cancellable)
 from core.llm.sdk_engine import RawFallback, build_openai_transports
 
 CHAT_COMPLETIONS = "openai-chat-completions"
@@ -59,7 +61,8 @@ class OpenAICompatProvider:
                  stream_transport: StreamTransport | None = None, enable_thinking: bool = False,
                  context_tokens: int | None = None, ctx_soft_budget: int | None = None,
                  summarizer_model: str | None = None, proxy: str | None = None,
-                 system_in_user: bool = False, thinking_effort: str | None = None):
+                 system_in_user: bool = False, thinking_effort: str | None = None,
+                 supports_vision: bool = False):
         if format not in {CHAT_COMPLETIONS, RESPONSES}:
             raise ValueError(f"不支持的 OpenAI 格式: {format}")
         self.base_url = base_url.rstrip("/")
@@ -67,6 +70,10 @@ class OpenAICompatProvider:
         self.model = model
         self.format = format
         self.timeout = timeout
+        # vision 能力位（2026-10-19）：providers.json `vision: true` 显式声明才有。
+        # 未声明 → view_image 工具不出图（回填 OCR 引导），避免往不支持的网关
+        # 塞图片块被 400 打死整轮。真实能力由网关/模型决定，配置是唯一真源。
+        self.supports_vision = bool(supports_vision)
         self._enable_thinking = enable_thinking
         self.thinking_effort = (str(thinking_effort or "high").strip().lower()
                                 if enable_thinking else "high")
@@ -127,6 +134,11 @@ class OpenAICompatProvider:
             cooldown_used = 0
             channel_used = 0  # 400「渠道校验」风控拦截已用尝试数（2026-10-16）
             for attempt in range(1, max_attempts + 1):
+                # 每轮重试**发起前**先探一次中止（2026-10-20）：退避已改可中断，
+                # 但「退避结束 → 真正出网」之间还有一个窗口；且首次尝试前的
+                # 这一步让停止信号在第一次失败后立刻生效，不必再等一整轮超时。
+                if should_cancel is not None and should_cancel():
+                    raise LLMError("已中断")
                 try:
                     status, data = stream_transport(
                         url, self._headers(), payload)
@@ -137,8 +149,9 @@ class OpenAICompatProvider:
                     if on_retry is not None:
                         on_retry(attempt, OPENAI_CONNECTION_ATTEMPTS,
                                  "connection")
-                    time.sleep(OPENAI_CONNECTION_BACKOFF[min(
-                        attempt - 1, len(OPENAI_CONNECTION_BACKOFF) - 1)])
+                    sleep_cancellable(OPENAI_CONNECTION_BACKOFF[min(
+                        attempt - 1, len(OPENAI_CONNECTION_BACKOFF) - 1)],
+                        should_cancel)
                     continue
 
                 if status == 429:
@@ -148,7 +161,7 @@ class OpenAICompatProvider:
                                                         RATE_LIMIT_RETRIES)
                     if on_retry is not None:
                         on_retry(rate_limit_used, RATE_LIMIT_RETRIES, status)
-                    time.sleep(RATE_LIMIT_BACKOFF)
+                    sleep_cancellable(RATE_LIMIT_BACKOFF, should_cancel)
                     continue
 
                 # 注意：HTTP 非 200 时 data 是错误 dict，但 200 随流式响应时是
@@ -169,7 +182,7 @@ class OpenAICompatProvider:
                                                         RATE_LIMIT_RETRIES)
                     if on_retry is not None:
                         on_retry(channel_used, RATE_LIMIT_RETRIES, status)
-                    time.sleep(COOLDOWN_BACKOFF)
+                    sleep_cancellable(COOLDOWN_BACKOFF, should_cancel)
                     continue
                 if is_model_cooldown_error(
                         status, str(err_obj.get("message", "")),
@@ -182,7 +195,7 @@ class OpenAICompatProvider:
                                                         RATE_LIMIT_RETRIES)
                     if on_retry is not None:
                         on_retry(cooldown_used, RATE_LIMIT_RETRIES, status)
-                    time.sleep(COOLDOWN_BACKOFF)
+                    sleep_cancellable(COOLDOWN_BACKOFF, should_cancel)
                     continue
 
                 if status in OPENAI_5XX_RETRYABLE:
@@ -192,8 +205,9 @@ class OpenAICompatProvider:
                                                         OPENAI_5XX_RETRIES)
                     if on_retry is not None:
                         on_retry(status_5xx_used, OPENAI_5XX_RETRIES, status)
-                    time.sleep(OPENAI_5XX_BACKOFF[min(
-                        status_5xx_used - 1, len(OPENAI_5XX_BACKOFF) - 1)])
+                    sleep_cancellable(OPENAI_5XX_BACKOFF[min(
+                        status_5xx_used - 1, len(OPENAI_5XX_BACKOFF) - 1)],
+                        should_cancel)
                     continue
 
                 return status, data, ""
@@ -284,8 +298,9 @@ class OpenAICompatProvider:
                 stream_attempt += 1
                 if on_retry is not None:
                     on_retry(stream_attempt, OPENAI_CONNECTION_ATTEMPTS, "stream")
-                time.sleep(OPENAI_CONNECTION_BACKOFF[min(
-                    stream_attempt - 1, len(OPENAI_CONNECTION_BACKOFF) - 1)])
+                sleep_cancellable(OPENAI_CONNECTION_BACKOFF[min(
+                    stream_attempt - 1, len(OPENAI_CONNECTION_BACKOFF) - 1)],
+                    should_cancel)
 
     def _headers(self) -> dict[str, str]:
         return {"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"}
@@ -333,16 +348,29 @@ class OpenAICompatProvider:
         - 没有 user 消息（罕见）→ 在最前面插一条只含 system 的 user 消息。
         两种格式的 items 都是 [{role/content}] 或 Responses 的
         [{type: function_call…}] 混合形态，故只认 role=="user" 的项。
+
+        **带图消息（vision 通道，2026-10-19）**：content 是数组时必须插一个
+        text 块，**不能** json.dumps 整条——那会把 image_url/input_image 块序列化
+        成字符串，图当场消失。text 块类型按格式区分（chat-completions 用
+        ``text``、Responses 用 ``input_text``），错用会被网关 400。
         """
+        text_type = "input_text" if self.format == RESPONSES else "text"
         for m in items:
             c = m.get("content")
             if isinstance(c, str) and c.startswith(SYSTEM_IN_USER_BEGIN):
+                return items
+            if isinstance(c, list) and any(
+                    isinstance(b, dict) and str(b.get("text") or "").startswith(
+                        SYSTEM_IN_USER_BEGIN) for b in c):
                 return items
         block = f"{SYSTEM_IN_USER_BEGIN}\n{system_text}\n{SYSTEM_IN_USER_END}\n\n"
         out = [dict(m) if isinstance(m, dict) else m for m in items]
         for m in out:
             if isinstance(m, dict) and m.get("role") == "user":
                 c = m.get("content")
+                if isinstance(c, list):
+                    m["content"] = [{"type": text_type, "text": block.rstrip("\n")}, *c]
+                    return out
                 head = c if isinstance(c, str) else json.dumps(c, ensure_ascii=False)
                 m["content"] = block + head
                 return out
@@ -353,6 +381,65 @@ class OpenAICompatProvider:
             return system
         return "\n".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in system)
 
+    # ---------- vision 通道（2026-10-19）：内部 image 块 → 各格式 payload ----------
+    # 内部标准是 Anthropic 形态的 image 块（见 core.llm.provider.image_block）；
+    # 两种 OpenAI 格式的图片字段**形态不同**，且 tool 结果的承载方式也不同：
+    #   chat-completions：user content 用 {"type":"image_url","image_url":{"url":…}}；
+    #                     **tool 消息的 content 只收字符串** → 图片必须另起一条 user。
+    #   responses：       user content 用 {"type":"input_image","image_url":"data:…"}；
+    #                     function_call_output.output 收块数组，图片可就地内嵌。
+    # 两条路径都经真实网关实测（幻灵-DEEP / To-Tokens，deepseek-v4.1-flash、
+    # gpt-6.1-sol 均能正确报出三色带的红绿蓝）。
+
+    @staticmethod
+    def _image_blocks(blocks: list[Any]) -> list[dict[str, Any]]:
+        return [b for b in blocks
+                if isinstance(b, dict) and b.get("type") == "image"]
+
+    def _chat_parts(self, blocks: list[Any]) -> list[dict[str, Any]] | None:
+        """内部块数组 → chat-completions content 数组；**无图返回 None**（走旧路）。
+
+        返回 None 是为了让「纯文本块数组」一字不差地沿用旧行为（拼成单个
+        string）——老网关对数组形态的 text 支持参差，能不改就不改。
+        """
+        if not self._image_blocks(blocks):
+            return None
+        parts: list[dict[str, Any]] = []
+        for b in blocks:
+            if not isinstance(b, dict):
+                continue
+            if b.get("type") == "text":
+                parts.append({"type": "text", "text": b.get("text", "")})
+            elif b.get("type") == "image":
+                parts.append({"type": "image_url",
+                              "image_url": {"url": image_data_url(b)}})
+        return parts or None
+
+    def _response_parts(self, blocks: list[Any]) -> list[dict[str, Any]] | None:
+        """内部块数组 → Responses content 数组；无图返回 None（走旧路）。"""
+        if not self._image_blocks(blocks):
+            return None
+        parts: list[dict[str, Any]] = []
+        for b in blocks:
+            if not isinstance(b, dict):
+                continue
+            if b.get("type") == "text":
+                parts.append({"type": "input_text", "text": b.get("text", "")})
+            elif b.get("type") == "image":
+                parts.append({"type": "input_image",
+                              "image_url": image_data_url(b)})
+        return parts or None
+
+    def _split_tool_result(self, raw: Any) -> tuple[str, list[dict[str, Any]]]:
+        """tool_result.content（str 或块数组）→ (纯文本, 图片块列表)。"""
+        if isinstance(raw, str):
+            return raw, []
+        if not isinstance(raw, list):
+            return str(raw or ""), []
+        texts = [str(b.get("text", "")) for b in raw
+                 if isinstance(b, dict) and b.get("type") == "text"]
+        return "\n".join(texts), self._image_blocks(raw)
+
     def _chat_messages(self, messages, system):
         out = []
         if system:
@@ -362,15 +449,28 @@ class OpenAICompatProvider:
             if isinstance(content, list):
                 if any(b.get("type") == "tool_result" for b in content if isinstance(b, dict)):
                     for b in content:
-                        if b.get("type") == "tool_result":
-                            out.append({"role": "tool", "tool_call_id": b.get("tool_use_id", ""), "content": b.get("content", "")})
+                        if not isinstance(b, dict) or b.get("type") != "tool_result":
+                            continue
+                        text, imgs = self._split_tool_result(b.get("content", ""))
+                        out.append({"role": "tool",
+                                    "tool_call_id": b.get("tool_use_id", ""),
+                                    "content": text})
+                        # chat-completions 的 tool 消息只收字符串 → 图片另起一条
+                        # user 消息紧跟其后（实测该形态被网关接受且模型能看见）。
+                        if imgs:
+                            out.append({"role": "user", "content": [
+                                {"type": "image_url", "image_url": {
+                                    "url": image_data_url(img)}} for img in imgs]})
                 elif any(b.get("type") == "tool_use" for b in content if isinstance(b, dict)):
                     out.append({"role": "assistant", "content": next((b.get("text", "") for b in content if b.get("type") == "text"), None), "tool_calls": [
                         {"id": b.get("id", ""), "type": "function", "function": {"name": b.get("name", ""), "arguments": json.dumps(b.get("input", {}), ensure_ascii=False)}}
                         for b in content if b.get("type") == "tool_use"
                     ]})
                 else:
-                    out.append({"role": m.get("role", "user"), "content": self._system_text(content)})
+                    parts = self._chat_parts(content)
+                    out.append({"role": m.get("role", "user"),
+                                "content": parts if parts is not None
+                                else self._system_text(content)})
             elif m.get("role") == "assistant" and m.get("tool_calls"):
                 out.append({"role": "assistant", "content": content or None, "tool_calls": [
                     {"id": c.get("id", ""), "type": "function", "function": {
@@ -386,9 +486,27 @@ class OpenAICompatProvider:
         for m in messages:
             content = m.get("content", "")
             if isinstance(content, list):
+                # 带图的整条消息走数组形态（与下面逐块摊平互斥）
+                parts = self._response_parts(content)
+                if parts is not None:
+                    out.append({"role": m.get("role", "user"), "content": parts})
+                    continue
                 for b in content:
                     if b.get("type") == "tool_result":
-                        out.append({"type": "function_call_output", "call_id": b.get("tool_use_id", ""), "output": b.get("content", "")})
+                        text, imgs = self._split_tool_result(b.get("content", ""))
+                        item: dict[str, Any] = {
+                            "type": "function_call_output",
+                            "call_id": b.get("tool_use_id", "")}
+                        if imgs:
+                            # Responses 的 function_call_output 收块数组 →
+                            # 图片可就地内嵌，不必另起 user 消息。
+                            item["output"] = [
+                                {"type": "input_text", "text": text},
+                                *({"type": "input_image",
+                                   "image_url": image_data_url(img)} for img in imgs)]
+                        else:
+                            item["output"] = text
+                        out.append(item)
                     elif b.get("type") == "tool_use":
                         out.append({"type": "function_call", "call_id": b.get("id", ""), "name": b.get("name", ""), "arguments": json.dumps(b.get("input", {}), ensure_ascii=False)})
                     elif b.get("type") == "text":
@@ -560,4 +678,6 @@ class OpenAICompatProvider:
         return parsing.parse_openai_response(data, format=self.format)
 
     def tool_result_message(self, tool_call: ToolCall, content: str, is_error: bool = False):
-        return {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_call.id, "content": content, **({"is_error": True} if is_error else {})}]}
+        # content 可为 ToolOutput（vision 通道）：tool_result 块内部仍按 Anthropic
+        # 形态带 [text, image…]，由 _chat_messages/_response_input 各自翻译。
+        return {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_call.id, "content": tool_result_content(content), **({"is_error": True} if is_error else {})}]}

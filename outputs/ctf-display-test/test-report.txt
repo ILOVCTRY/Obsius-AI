@@ -1,0 +1,16 @@
+CTF headless display test
+retroarch_exit=124 (124 means timeout after successful running)
+[INFO] [Core]: Loading dynamic libretro core from: "/usr/lib/x86_64-linux-gnu/libretro/gambatte_libretro.so"
+[INFO] [Content]: Loading content file: "/mnt/test/game.gb".
+[INFO] [Video]: Found display server: "x11".
+[INFO] [Display]: Found display driver: "gl".
+[ERROR] failed_to_start_audio_driver
+
+codec_name=mp3
+sample_rate=44100
+channels=2
+duration=222.928980
+codec_name=mp3
+sample_rate=44100
+channels=2
+duration=228.205714

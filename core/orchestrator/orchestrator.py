@@ -27,6 +27,7 @@ from core.autonomy import record_llm_usage
 from core.blackboard import Blackboard
 from core.blackboard.store import new_id
 from core.llm.provider import assistant_message, tool_results_message
+from core.llm.pseudo_toolcall import sanitize_response_text
 from core.llm.tokenizer import CHARS_PER_TOKEN, context_window_tokens, get_counter
 from core.runtime.policy import RUNTIME_LEVELS, VALID_THREAT_CLASSES
 from core.skills.experts import expert_exists, list_experts, load_expert
@@ -921,6 +922,7 @@ class Orchestrator:
             self._emit_thinking(resp, _step,
                                 "analyze" if self.config.analyze_only else "tick",
                                 stream_id=stream_id)
+            sanitize_response_text(resp)
             messages.append(assistant_message(resp))
             if self.config.analyze_only and resp.text.strip():
                 self._analysis_text = resp.text.strip()
@@ -1371,6 +1373,9 @@ class Orchestrator:
                 self.bb, self.project_id, resp.usage, source="orchestrator-chat",
                 session_id=None, model=getattr(self.llm, "model", ""))
             self._emit_thinking(resp, _step, "chat", stream_id=stream_id)
+            # 伪工具调用（2026-10-20 事故）：编排器对话轮把 text 当回答（`reply`），
+            # 泄漏标记会原样进 `orch.chat` 上屏并落库 → 回放自我强化。先剥再取。
+            sanitize_response_text(resp)
             messages.append(assistant_message(resp))
             step_text = resp.text.strip()
             if step_text:

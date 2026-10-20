@@ -850,7 +850,10 @@ class ChatMessageIn(BaseModel):
 
 # ---------------- packs 管理辅助（设置页：角色 / Skill / 红线 / MCP） ----------------
 
-_NAME_RE = re.compile(r"^[\w][\w.-]{0,63}$")  # 名称白名单（防穿越；\w Unicode-aware 会放行中文——技能/包名等沿用）
+# 名称白名单（防穿越）。`\w` 是 Unicode-aware 的——中文/日文等词字符一律放行，
+# 与 `writing._SKILL_NAME_RE` 同一口径（2026-10-19 统一：此前两处一 ASCII 一
+# Unicode，导致设置页能建中文技能名而提案通道判非法）。
+_NAME_RE = re.compile(r"^[\w][\w.-]{0,63}$")
 MCP_CONFIG_PATH = Path("config/mcp.json")     # 与 llm.json 同级（cwd = 项目根）
 
 # MCP server 允许声明的领域；http server 只连本机 loopback（红线，见 decompiler._is_loopback_url）
@@ -947,9 +950,16 @@ def _backfill_challenges(proj) -> dict:
     落在 UI 的「项目级（未挂载具体资产）」兜底组里，看不出一道题挖了啥。补建
     后把这些发现归到题目节点下，遗留数据的归属即可见。
 
-    触发条件（三者同时满足才动）：CTF 轨 + 无任何 challenge 行 +
-    `config.challenge_backfill_done` 未标记。**不重复触发**——用户之后主动删光
-    题目不会被补回来（那是明确意图，不是遗留状态）。非 CTF 轨直接 no-op。
+    **只在真有遗留数据时补建**（2026-10-20 修复）：本函数的唯一目的是给
+    「无主发现」与「游离根资产」找归属。新建的空 CTF 项目同样满足「CTF 轨 +
+    无 challenge 行 + 未标记」三条，此前会凭空补建一道**以项目名命名**的题
+    （`author="system"`）——用户实测项目名「hxbai测试」混进题目列表，正是它。
+    没有任何可归拢数据时补建是纯污染，故直接标记后返回。
+
+    触发条件（四者同时满足才动）：CTF 轨 + 无任何 challenge 行 +
+    `config.challenge_backfill_done` 未标记 + **存在待归拢数据**。
+    **不重复触发**——用户之后主动删光题目不会被补回来（那是明确意图，不是
+    遗留状态）。非 CTF 轨直接 no-op。
 
     落 `challenge.backfill` 审计事件（含题目 id 与归拢的发现数）。
     """
@@ -962,11 +972,8 @@ def _backfill_challenges(proj) -> dict:
         cfg = dict(proj.meta.get("config") or {})
         if cfg.get("challenge_backfill_done"):
             return {}
-        name = (proj.name or "").strip() or "未命名题目"
-        r = register_challenge(bb, proj.id, name, author="system")
-        cid = str(r.get("id") or "")
-        if not cid:
-            return {}
+        # 先算「有没有遗留数据要归拢」——**必须在建题之前**，否则空项目也会
+        # 走进建题分支，留下那道幽灵题。
         # 归拢存量「项目级」发现（target_asset_id 为空 → 挂到本题下）
         rows = bb.conn.execute(
             "SELECT id FROM findings WHERE project_id=? AND"
@@ -978,22 +985,36 @@ def _backfill_challenges(proj) -> dict:
         # 的发现仍游离（2026-10-14 用户实测「发现无法按题目过滤」的根因）。
         roots = bb.conn.execute(
             "SELECT id FROM assets WHERE project_id=? AND parent_id IS NULL"
-            " AND id != ? AND type != ?",
-            (proj.id, cid, CHALLENGE_TYPE)).fetchall()
+            " AND type != ?",
+            (proj.id, CHALLENGE_TYPE)).fetchall()
+        if not rows and not roots:
+            # 没有遗留数据 → 不建题，但**要落标记**，否则每次读题目清单都重跑
+            # 这两条查询。标记语义是「本项目的存量迁移已判定完毕」，不是
+            # 「补建成功」。
+            try:
+                ProjectStore(proj.path.parent).update_config(
+                    proj.id, {"challenge_backfill_done": True}, project=proj)
+            except Exception:  # noqa: BLE001 —— 标记失败只是下次重查
+                log.exception("challenge 补建标记落库失败 project=%s", proj.id)
+            return {}
+        name = (proj.name or "").strip() or "未命名题目"
+        r = register_challenge(bb, proj.id, name, author="system")
+        cid = str(r.get("id") or "")
+        if not cid:
+            return {}
         moved = 0
         adopted = 0
-        if rows or roots:
-            with bb._tx():
-                for row in rows:
-                    bb.conn.execute(
-                        "UPDATE findings SET target_asset_id=? WHERE id=?",
-                        (cid, row["id"]))
-                    moved += 1
-                for row in roots:
-                    bb.conn.execute(
-                        "UPDATE assets SET parent_id=? WHERE id=?",
-                        (cid, row["id"]))
-                    adopted += 1
+        with bb._tx():
+            for row in rows:
+                bb.conn.execute(
+                    "UPDATE findings SET target_asset_id=? WHERE id=?",
+                    (cid, row["id"]))
+                moved += 1
+            for row in roots:
+                bb.conn.execute(
+                    "UPDATE assets SET parent_id=? WHERE id=?",
+                    (cid, row["id"]))
+                adopted += 1
         try:
             # 本函数是模块级（store 层测试直调），拿不到 create_app 里的 store 局部
             # 变量——按项目目录反推 store 根（Project.path = <root>/<slug>）现建一个。
@@ -1112,9 +1133,18 @@ def _challenge_summary(proj, rows: list[dict]) -> list[dict]:
             "state": str(st.get("state") or "untouched"),
             "solved": bool(st.get("solved")),
             "accepted_flags": int(st.get("accepted") or 0),
+            # 候选（pending，AI 判定通过待人工确认）——**不计 solved**（方案 A，
+            # 2026-10-20）。前端要单独显示，否则「2/1」会被读成「已拿满」。
+            "candidate_flags": int(st.get("candidate") or 0),
             "rejected_flags": int(st.get("rejected") or 0),
             "running_workers": int(st.get("running") or 0),
             "abandoned": bool(st.get("abandoned")),
+            # 主控主动收尾（ctf_conclude）：不再派工，但**不是**解出。
+            "concluded": bool(st.get("concluded")),
+            # 同题内前缀互不相同的 accepted flag（非空 = 至少一条是假的，
+            # 前端应显红「格式冲突」，别让用户以为已经解出）。
+            "flag_conflict": list(st.get("conflict") or []),
+            "over_quota": bool(st.get("over_quota")),
             "flags": list(st.get("flags") or []),
             "attachment_count": len(atts),
             "attachments": [{"id": a["id"], "type": a.get("type"),
@@ -1590,6 +1620,9 @@ def create_app(
 
     def _stop_artex_engine(pid: str, timeout: float = 5.0) -> dict:
         engine = app.state.artex_engines.pop(pid, None)
+        # 模型缓存随引擎一起放掉（2026-10-20）：Engine 没了，下次重建会重新
+        # 按「主控线程当前覆写」解析，缓存旧实例只会让重建后仍用老模型。
+        (getattr(app.state, "artex_worker_llm", None) or {}).pop(pid, None)
         if engine is None:
             return {"drained": True, "active_workers": 0}
         result = engine.drain(timeout)
@@ -1600,10 +1633,64 @@ def create_app(
         for pid in list(app.state.artex_engines):
             _stop_artex_engine(pid)
 
-    def _get_artex_engine(pid: str, handler=None, **kwargs):
-        """获取或创建项目 Engine；未注入 handler 时接入真实 ChatTurn Worker。"""
+    def _artex_worker_llm_for(pid: str):
+        """ARTEX Worker 该用哪个模型：**跟随 ARTEX 主控线程**，不是全局默认。
+
+        2026-10-20 用户实测：主控换成 A 供应商后，子代理（Worker）还在用
+        默认供应商——同一任务里主控和它派出去的手下用的是两个模型，
+        上下文长度/工具调用能力/计费口径全不一致。
+
+        根因：`_get_artex_engine` 建 handler 时取 `_llms()`（全局 executor
+        路由），而主控对话用的是**线程级覆写**（`chat_threads.provider/model`，
+        v37），两者互不相干。Engine 又是项目级长期驻留的，模型一旦在构造期
+        绑死就不会再变。
+
+        解析顺序（前者优先）：
+        ① `app.state.artex_worker_llm[pid]` —— 本进程最近一次主控操舵传进来的
+           实例（主控刚用过的那个，含运行时切换）；
+        ② 该项目最近一条 `artex-controller` 线程的模型覆写（进程重启后 Engine
+           重建时仍能对上，不至于又退回默认）；
+        ③ None —— 调用方回退全局 executor（项目还没有主控线程时的唯一合理值）。
+        """
+        from core.chat.runtime import ARTEX_CONTROLLER_ID
+        cached = (getattr(app.state, "artex_worker_llm", None) or {}).get(pid)
+        if cached is not None:
+            return cached
+        proj = app.state.projects.get(pid)
+        if proj is None:
+            return None
+        try:
+            row = proj.bb.conn.execute(
+                "SELECT provider, model FROM chat_threads WHERE agent_id=?"
+                " ORDER BY rowid DESC LIMIT 1",
+                (ARTEX_CONTROLLER_ID,)).fetchone()
+        except Exception:  # noqa: BLE001 —— 读库失败不该阻断引擎启动
+            log.exception("读取 ARTEX 主控线程模型失败 pid=%s", pid)
+            return None
+        if row is None:
+            return None
+        # provider 空 = 该主控跟随全局 → 返回 None，调用方仍走 _llms()（同款口径）
+        llm_obj, err = _thread_llm(row["provider"] or "", row["model"] or "")
+        if err:
+            log.warning("ARTEX 主控模型覆写构建失败，回退全局 executor: pid=%s %s",
+                        pid, err)
+        return llm_obj
+
+    def _get_artex_engine(pid: str, handler=None, worker_llm=None, **kwargs):
+        """获取或创建项目 Engine；未注入 handler 时接入真实 ChatTurn Worker。
+
+        ``worker_llm``（2026-10-20）：调用方（ARTEX 主控线程）本轮实际使用的
+        LLM 实例。传进来即记入 ``app.state.artex_worker_llm[pid]``，后续 Intent
+        的 Worker 一律跟随它；不传则按 ``_artex_worker_llm_for`` 的兜底顺序解析。
+        """
         if pid in app.state.projects_closing:
             raise HTTPException(409, "项目正在删除中，请稍后刷新")
+        # 每次调用都更新缓存（不只首次建引擎时）——主控换模型后，下一个 Intent
+        # 就该用新模型，不该等到 Engine 重建。
+        if worker_llm is not None:
+            if getattr(app.state, "artex_worker_llm", None) is None:
+                app.state.artex_worker_llm = {}
+            app.state.artex_worker_llm[pid] = worker_llm
         engine = app.state.artex_engines.get(pid)
         if engine is None:
             proj = app.state.projects.get(pid)
@@ -1613,9 +1700,16 @@ def create_app(
             if handler is None:
                 from core.chat.artex_worker import make_worker
                 exec_llm, _ = _llms()
+                # Worker 模型：跟随主控（见 _artex_worker_llm_for），解析不到
+                # 才回退全局 executor。`llm_provider` 让每个 Intent 重新解析，
+                # 而不是把模型绑死在 Engine 构造期。
                 handler = make_worker(
                     bb=proj.bb,
-                    llm=exec_llm,
+                    # 初值也要走解析（不是只有 worker_llm 一条路）：Engine 由
+                    # API 直接启动（没有主控操舵）时 worker_llm 为 None，此时
+                    # 仍应按「主控线程的模型覆写」取，最后才回退全局 executor。
+                    llm=worker_llm or _artex_worker_llm_for(pid) or exec_llm,
+                    llm_provider=(lambda _pid=pid: _artex_worker_llm_for(_pid)),
                     project_id=pid,
                     packs_root=app.state.packs_root,
                     track=proj.track,
@@ -2003,7 +2097,99 @@ def create_app(
                 raise HTTPException(404, f"项目不存在: {pid}")
             _sweep_restarted_project(proj)
             app.state.projects[pid] = proj
+        # 候选 flag 唤醒订阅（ctf-flag-wake，2026-10-20）：**每次取项目都幂等补挂**，
+        # 不能只在「新建打开」时挂——API 建项目走的是另一条路径（直接塞进
+        # `app.state.projects`），只在 `proj is None` 分支挂会永远挂不上，表现为
+        # 「手工调唤醒函数有效、真实提交却毫无反应」（实测踩过）。
+        # 幂等靠 `ctf_wake_subs` 的 pid 判重，热路径开销是一次 dict 查。
+        subs = getattr(app.state, "ctf_wake_subs", None)
+        if subs is not None and pid not in subs:
+            try:
+                _attach_ctf_flag_wake(pid, proj)
+            except Exception:  # noqa: BLE001 —— 唤醒失败绝不阻断项目访问
+                log.exception("候选 flag 唤醒订阅失败（不影响项目）: %s", pid)
         return proj
+
+    # ---------- 候选 flag 唤醒（ctf-flag-wake，2026-10-20） ----------
+    #
+    # 子代理提交候选 flag（verdict=pending、judged_by=ai）时唤醒 CTF 解题主控，
+    # 让它说一段话，前端据此挂「复制 / 确认」卡。订阅 `challenge.flag.recorded`
+    # 而不是改 ctf_submit_flag——ToolDispatcher 是纯执行层，拿不到 jobs/线程表，
+    # 也不该拿到；而 record_flag 已经发了这个事件（最短路径、对提交方无感）。
+
+    app.state.ctf_wake_subs: dict[str, Any] = {}
+
+    def _attach_ctf_flag_wake(pid: str, proj) -> None:
+        """订阅一个项目的黑板总线（幂等按 pid）。"""
+        if pid in app.state.ctf_wake_subs:
+            return
+        unsub = proj.bb.bus.subscribe(
+            lambda ev: _on_ctf_flag_event(pid, ev))
+        app.state.ctf_wake_subs[pid] = unsub
+
+    def _on_ctf_flag_event(pid: str, ev: dict) -> None:
+        """总线回调（**同步**，跑在 record_flag 的调用线程里）。
+
+        这里只做「筛 + 丢进 job」，绝不在回调里跑 LLM：回调阻塞会拖住 worker 的
+        `ctf_submit_flag` 返回，而那一轮还在等它的回执。
+        """
+        if str(ev.get("kind") or "") != "challenge.flag.recorded":
+            return
+        payload = ev.get("payload") or {}
+        if str(payload.get("verdict") or "") != "pending":
+            return
+        if str(payload.get("judged_by") or "ai") != "ai":
+            return
+        try:
+            _maybe_ctf_flag_wake(pid, str(payload.get("challenge_id") or ""),
+                                 str(payload.get("flag_id") or ""))
+        except Exception:  # noqa: BLE001 —— 唤醒失败不影响 flag 登记本身
+            log.exception("候选 flag 唤醒提交失败 pid=%s", pid)
+
+    def _maybe_ctf_flag_wake(pid: str, challenge_id: str, flag_id: str) -> str:
+        """唤醒 CTF 解题主控说一句话。返回 submitted/skip:* 便于测试断言。"""
+        from core.chat import ctf_wake
+        from core.chat import store as chat_store
+        if not flag_id or not challenge_id:
+            return "skip:empty"
+        try:
+            proj = _project(pid)
+        except HTTPException:
+            return "skip:gone"
+        bb = proj.bb
+        thread = ctf_wake.find_controller_thread(bb, pid, challenge_id)
+        if thread is None:
+            return "skip:no_controller"
+        tid = str(thread.get("id") or "")
+        # 主控**正在跑** → 不唤醒：worker 是同步 spawn 的，本轮主控自己就会看到
+        # 这条 flag（回执 + 台账）。硬塞第二轮会撞 409，且模型会拿到重复上下文。
+        if tid in _chat_running_set() or thread.get("status") == "running":
+            return "skip:running"
+        if ctf_wake.already_woken(bb, pid, flag_id):
+            return "skip:duplicate"
+        row = ctf_wake.get_flag(bb, pid, flag_id)
+        if row is None or str(row.get("verdict") or "") != "pending":
+            return "skip:not_pending"
+        text = ctf_wake.wake_text(bb, pid, challenge_id, row)
+        if not text:
+            return "skip:notext"
+        # 去重记账**先于**起轮：起轮失败也不重复唤醒（宁少勿扰；用户还能手点）。
+        try:
+            bb.append_event(pid, ctf_wake.WAKE_EVENT, {
+                "thread_id": tid, "challenge_id": challenge_id,
+                "flag_id": flag_id, "flag": str(row.get("flag") or "")[:120]},
+                session_id=None, author="ctf-wake")
+        except Exception:  # noqa: BLE001
+            log.exception("候选 flag 唤醒记账失败 pid=%s fid=%s", pid, flag_id)
+        try:
+            _chat_launch_turn(pid, tid, text)
+        except HTTPException as e:
+            return f"skip:http-{e.status_code}"
+        return "submitted"
+
+    app.state.ctf_flag_wake = _maybe_ctf_flag_wake   # 测试直调口
+    app.state.ctf_flag_wake_attach = _attach_ctf_flag_wake
+
 
     def _sweep_restarted_project(proj: Project) -> None:
         """重启纪律（§3）：单进程部署下进程重启=内存态清零，项目在本进程首次
@@ -4533,15 +4719,65 @@ def create_app(
 
         rejected 立刻从 solved 派生里扣除（状态是派生值，自动生效），并进
         「已拒绝」清单——同串再提交会被 `ctf_submit_flag` 直接拦下。
+
+        **确认即停**（challenge-confirm-stops，2026-10-20，用户裁决）：
+        `accepted` 是**强证据**——人看过、点了确认。此刻题目已经解出，还在
+        跑的 Worker 全是重复劳动（用户实测：确认之后调度层照样把剩下的方向
+        派完，白烧十几分钟）。所以这里在落库后**直接把该项目下所有线程的中止
+        事件置位**，让正在跑的轮次在下一个步边界停下。
+
+        为什么置位**整个项目**而不只是本题线程：一个 Worker 线程的
+        `challenge_asset_id` 可能为空（它是主控 spawn 的子线程，题目归属靠
+        祖先链解析），逐线程回溯容易漏；而「这道题已经解出」在单题项目里
+        等价于「不用再跑了」，多题并发项目里多停几轮的成本远低于漏停。
+        已被题目闸（`challenge_gate`）拦下的题本来也派不出新工。
         """
         from core.blackboard.challenge_flags import decide_flag
         pid = _pid_of_asset(asset_id)
         proj = _project(pid)
         try:
-            return decide_flag(proj.bb, pid, flag_id, verdict=body.verdict,
-                               reason=body.reason, author="human")
+            row = decide_flag(proj.bb, pid, flag_id, verdict=body.verdict,
+                              reason=body.reason, author="human")
         except ValueError as e:
             raise HTTPException(422, str(e)) from e
+        if str(body.verdict or "") == "accepted":
+            _abort_project_chat_turns(pid, reason="人工已确认 flag，题目视为解出")
+        return row
+
+    def _abort_project_chat_turns(pid: str, *, reason: str = "") -> int:
+        """置位该项目下所有在跑线程的中止事件，返回置位个数。
+
+        **只置位、不等待**：ChatTurn 在步间/流式帧/工具分发点轮询
+        `abort_event`，会在下一个边界自己收尾并落「已停止」说明。这里等它
+        退出会让 HTTP 请求挂住（子专家可能卡在不可中断工具里），所以是
+        fire-and-forget。线程不在本进程 running 集合时跳过——那些是僵尸行，
+        由 `_chat_running_reconcile` 兜底。
+        """
+        from core.chat import store as chat_store
+        running = _chat_running_set()
+        if not running:
+            return 0
+        # 直接查本项目线程表：chat_threads 属于各项目自己的黑板库。
+        try:
+            rows = proj.bb.conn.execute(
+                "SELECT id FROM chat_threads WHERE status='running'").fetchall()
+            tids = [str(r["id"]) for r in rows]
+        except Exception:  # noqa: BLE001 —— 查不到就退回全量 running
+            tids = list(running)
+        hit = 0
+        for tid in tids:
+            if tid not in running:
+                continue
+            try:
+                ev = _chat_abort_event(tid, create=True)
+                if ev is not None and not ev.is_set():
+                    ev.set()
+                    hit += 1
+            except Exception:  # noqa: BLE001 —— 单个线程置位失败不影响其余
+                log.exception("置位中止事件失败 tid=%s", tid)
+        if hit:
+            log.info("人工确认 flag 后中止 %d 个在跑轮次（%s）", hit, reason)
+        return hit
 
     @app.post("/api/challenges/{asset_id}/abandon")
     def abandon_challenge(asset_id: str, body: ChallengeAbandonIn):
@@ -8082,8 +8318,15 @@ def create_app(
         grouped: dict[str, list[dict]] = {}
         for row in rows:
             task_id = str(row.get("task_id") or "").strip()
-            if task_id:
-                grouped.setdefault(task_id, []).append(row)
+            # 历史脏数据过滤（artex-plan-only，2026-10-19 事故修复）：旧版
+            # `call_expert` 拿**线程 id** 冒充 task_id 建过 Intent，于是任务列表
+            # 里出现了 `chat-xxxxxxxx` 这种「任务」——它没有 Planner、没有目标、
+            # 没有探索图，点进去是一片空白，用户会以为系统坏了。新代码已不再
+            # 产生（见 core/chat/runtime.py 的 `_tool_call_expert`），这里把存量
+            # 挡住，不让幽灵任务继续占列表。
+            if not task_id or task_id.startswith("chat-"):
+                continue
+            grouped.setdefault(task_id, []).append(row)
         engine = app.state.artex_engines.get(pid)
         tasks = []
         for task_id, intents in grouped.items():
@@ -8509,7 +8752,13 @@ def create_app(
                     except Exception:
                         continue
             row["expert_refs"] = refs
-            row["estimated_tokens"] = max(1, len((skill_dir(app.state.packs_root, sk.name) / "SKILL.md").read_text(encoding="utf-8", errors="replace")) // 4)
+            # 直接读 sk.path：分组技能目录（skills/01-入口分诊/<name>）与扁平
+            # 布局不一致，再按 skill_dir(name)/SKILL.md 拼会 FileNotFoundError → 500。
+            try:
+                text = sk.path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                text = ""
+            row["estimated_tokens"] = max(1, len(text) // 4)
             rows.append(row)
         return {"skills": rows, "skill_count": len(rows),
                 "estimated_tokens": sum(r["estimated_tokens"] for r in rows)}
@@ -8741,7 +8990,24 @@ def create_app(
 
     def _expert_view(name: str) -> dict:
         """专家全字段读视图（管理 UI 编辑回填；raw 平铺解析，不应用轨变体）。
-        variant_<track>_<field> 重组回 {track: {field: value}}。"""
+        variant_<track>_<field> 重组回 {track: {field: value}}。
+
+        **控制器类智能体（controller-tool-select，2026-10-20 定稿）**：
+        它们的工具面历史上由代码常量决定、**不读** yaml 的 `tools`，于是设置页
+        对控制器一律回填 `tools: null` → 显示「全部（未限制）」54 个全勾，而
+        运行期真实只有 8 个（ARTEX 主控）。
+
+        用户诉求是**勾选启动**（自己决定开哪些），不是只读展示。故这里：
+
+        - `tools` 回填**当前实际生效的面**——yaml 有 `tools` 就用它，没有就
+          回落 `controller_tool_face()` 的代码默认。这样界面不再是「全部（未限制）」，
+          而是真实的 8 个勾上、其余不勾。
+        - `tools_runtime` 给出**可勾选候选全集**（`controller_tool_candidates`），
+          必须含 `artex_*` / `ctf_*` / `todo_write` / `call_expert`——它们不在
+          `AGENT_TOOLS` 里（走专用 dispatch 分支），不额外下发就永远勾不到。
+        - `tools_locked` 语义改为「这是控制器，候选由后端下发，UI 要合并
+          `AGENT_TOOLS ∪ tools_runtime`」——**不是**只读。
+        """
         path = _experts_base() / f"{name}.yaml"
         raw = _parse_expert_yaml(path)
         variants: dict[str, dict] = {}
@@ -8749,6 +9015,19 @@ def create_app(
             if k.startswith("variant_"):
                 tr, _, field = k[len("variant_"):].partition("_")
                 variants.setdefault(tr, {})[field] = v
+        from core.chat.runtime import (controller_tool_candidates,
+                                       controller_tool_face)
+        # 设置页回填用**并集口径**（track=None）：yaml 的 `tools` 是跨轨共享
+        # 的一份清单，按单轨回填会把另一条轨的工具当成「未勾选」，保存即清掉。
+        default_face = controller_tool_face(name, None)
+        is_controller = default_face is not None
+        # 回填值：yaml 显式勾过就用它（含 []），否则用代码默认面。
+        yaml_tools = raw.get("tools")
+        if is_controller:
+            tools_view = (yaml_tools if isinstance(yaml_tools, list)
+                          else list(default_face or []))
+        else:
+            tools_view = yaml_tools
         return {"id": name,
                 "name": raw.get("name") or name,
                 "description": raw.get("description"),
@@ -8757,7 +9036,14 @@ def create_app(
                 "skills": raw.get("skills"),
                 "knowledge": raw.get("knowledge"),
                 "task_types": raw.get("task_types"),
-                "tools": raw.get("tools"),
+                "tools": tools_view,
+                # 控制器：可勾选候选全集（含无 REGISTRY 条目的专属工具）。
+                # 非控制器为 None —— UI 直接用 AGENT_TOOLS 即可。
+                "tools_runtime": (controller_tool_candidates(name)
+                                  if is_controller else None),
+                # 语义 = 「这是控制器，候选集需合并后端下发的 tools_runtime」。
+                # **不是只读**：勾选照常提交并真实生效（yaml tools 是开关）。
+                "tools_controller": is_controller,
                 "mcp_servers": raw.get("mcp_servers"),
                 "max_steps": raw.get("max_steps"),
                 "protected": bool(raw.get("protected")),
@@ -10074,9 +10360,31 @@ def create_app(
     def chat_send(tid: str, body: ChatMessageIn):
         """发消息即起跑一轮（后台线程）；流式经 chat.delta/chat.tool/chat.message
         事件（GET /api/projects/{pid}/events 或项目 WS）。同线程并发发送 409。"""
+        # 附件随发（2026-10-08）：text 与附件至少一项；附件 id 严格校验（422 不静默丢）。
+        pid = _pid_of_chat(tid)
+        proj = _project(pid)
+        att_refs = _attachment_refs(pid, body.attachment_ids)
+        text = body.text.strip()
+        if not text and not att_refs:
+            raise HTTPException(422, "消息不能为空")
+        _chat_launch_turn(pid, tid, text, refs=body.refs, attachments=att_refs)
+        return {"status": "running", "thread_id": tid}
+
+    def _chat_launch_turn(pid: str, tid: str, text: str, *,
+                          refs: dict | None = None,
+                          attachments: list[dict] | None = None) -> None:
+        """起一轮对话（后台线程）——**人类发消息与系统唤醒共用同一个入口**。
+
+        抽出来是因为候选 flag 唤醒（`core/chat/ctf_wake.py`）必须走**完全相同**的
+        装配：漏传 artifacts_dir/browser_pool 就是子专家工具全灭（同规则链透传
+        缺口的经典形态），漏清 abort_event 就是刚唤醒就被上一轮的 stop 信号掐掉。
+        两个入口各写一份装配代码，迟早分叉。
+
+        失败语义：线程不存在 404、同线程并发 409、LLM 未就绪 503——与原先
+        `chat_send` 一致，调用方按 HTTP 语义处理。
+        """
         from core.chat import store as chat_store
         from core.chat.runtime import ARTEX_CONTROLLER_ID, CONTROLLER_IDS, ChatTurn
-        pid = _pid_of_chat(tid)
         proj = _project(pid)
         thread = chat_store.get_thread(proj.bb, tid)
         if thread is None:
@@ -10084,11 +10392,6 @@ def create_app(
         running = _chat_running_set()
         if tid in running or thread.get("status") == "running":
             raise HTTPException(409, "上一轮仍在执行中，稍候再发")
-        text = body.text.strip()
-        # 附件随发（2026-10-08）：text 与附件至少一项；附件 id 严格校验（422 不静默丢）。
-        att_refs = _attachment_refs(pid, body.attachment_ids)
-        if not text and not att_refs:
-            raise HTTPException(422, "消息不能为空")
         # 线程级模型覆写（v37，2026-10-13）：命中则按覆写构建 LLM；坏值静默回退
         # 全局 executor（配置事后被删/停用不能把线程卡死）。无覆写才要求全局就绪
         # ——否则「全局没配但线程指定了可用模型」会被误判 503。
@@ -10155,16 +10458,19 @@ def create_app(
                     # ARTEX 主控（artex-fusion）：把项目级 Engine 暴露给对话主控，
                     # 让它用 artex_plan/status/hint/control 操舵，而不是自己
                     # call_expert 派活。引擎惰性获取——首次操舵时才创建。
-                    artex_engine_provider=((lambda: app.state.get_artex_engine(pid))
-                                           if thread["agent_id"] == ARTEX_CONTROLLER_ID
-                                           else None),
+                    # **worker_llm=exec_llm**（2026-10-20）：把主控本轮实际用的
+                    # 模型交给 Engine，Worker 跟随它而不是全局默认供应商。
+                    artex_engine_provider=((lambda: app.state.get_artex_engine(
+                        pid, worker_llm=exec_llm))
+                        if thread["agent_id"] == ARTEX_CONTROLLER_ID
+                        else None),
                     artex_planner_llm=plan_llm,
                     # 主控线程绑定的任务（v47「一个主控只绑一个任务」）：
                     # artex_plan 新建任务时写入，此后本会话操舵恒指该任务，
                     # 不再按「最近活跃」猜（两个主控会话不会互相抢任务）。
                     artex_task_id=str(thread.get("artex_task_id") or ""),
                     recovery=_environment_recovery(proj))
-                turn.run(text, refs=body.refs, attachments=att_refs)
+                turn.run(text, refs=refs, attachments=attachments)
             except Exception as e:  # noqa: BLE001 —— 状态已在 ChatTurn.run 归位
                 log.exception("chat 轮后台执行失败 thread=%s", tid)
                 # 构造期异常（ChatTurn(...) 抛错，run() 未进入）不会归位状态——
@@ -10199,7 +10505,7 @@ def create_app(
             app.state.chat_thread_idents = idents
         if worker.ident is not None:
             idents[tid] = worker.ident
-        return {"status": "running", "thread_id": tid}
+        return None
 
     @app.post("/api/chat/threads/{tid}/stop", status_code=204)
     def chat_stop(tid: str):

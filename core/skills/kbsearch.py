@@ -7,19 +7,19 @@ the source tree remains the source of truth.
 from __future__ import annotations
 
 import hashlib
-import re
+import math
 import sqlite3
 import threading
 import time
 from pathlib import Path
 from typing import Any
 
+from core.skills.matching import query_tokens
 from core.skills.rules import load_kb_sources
 
 TEXT_SUFFIXES = {".md", ".py", ".txt", ".json", ".js", ".yml", ".yaml", ".dic", ".enc", ".dat"}
 ATTACHMENT_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 INDEX_SUFFIXES = TEXT_SUFFIXES | ATTACHMENT_SUFFIXES
-_WORD_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.:+/-]*")
 _INDEX_LOCK = threading.RLock()
 _SCHEMA_VERSION = "2"
 
@@ -208,21 +208,19 @@ class KbSearchIndex:
 
     @staticmethod
     def _match_terms(query: str) -> list[str]:
-        terms: list[str] = []
-        for token in _WORD_RE.findall(query.lower()):
-            if len(token) > 1:
-                terms.append(token)
-        for token in re.findall(r"[\u4e00-\u9fff]+", query.lower()):
-            if len(token) <= 4:
-                terms.append(token)
-            else:
-                terms.extend(token[i:i + 2] for i in range(len(token) - 1))
-        return list(dict.fromkeys(terms))
+        """查询 → 检索词元（与 writing.search_kb 同口径，见 matching.query_tokens）。
+
+        2026-10-19 中文修复：旧实现只切 2-gram 且不剔虚词，「如何测试文件上传
+        漏洞」被切成 如何/何测/测试/试反/… 七个词元，全 AND 必然零命中（跨词
+        边界的 2-gram 在语料里根本不存在）。现改为共用切词口径。"""
+        ascii_tokens, cjk_tokens = query_tokens(query)
+        return ascii_tokens + cjk_tokens
 
     def search(self, query: str, *, capabilities: list[str] | None = None,
                limit: int = 50, tag: str | None = None) -> list[dict[str, Any]]:
         self.sync(capabilities)
-        terms = self._match_terms(query)
+        ascii_terms, cjk_terms = query_tokens(query)
+        terms = ascii_terms + cjk_terms
         if not terms:
             return []
         caps = set(capabilities or [])
@@ -251,23 +249,42 @@ class KbSearchIndex:
                 params.append(max(1, limit))
                 rows = list(con.execute(sql, params))
             if not rows:
+                # 严格 AND：所有词元都必须在正文出现。
                 clauses = []
-                params = []
                 for term in terms:
                     # 与 writing.search_kb 的正文 substring 契约保持一致：标题/路径
                     # 仅作展示，不应因为文件名命中而返回结果。
                     clauses.append("lower(d.content) LIKE ?")
-                    params.append("%" + term + "%")
-                sql = "SELECT d.*, 0.0 rank FROM kb_documents d WHERE " + " AND ".join(clauses)
+                # 命中次数作主排序键（与 matches 口径一致）：单/少词元查询下所有
+                # 命中文档条件相同，只按 layer/relpath 排会退化成字母序，把最相关
+                # 的文档排到后面（「提权」实测 12-privesc.md 命中 36 次却排第 5）。
+                tf_expr = "+".join(
+                    "(LENGTH(lower(d.content))"
+                    f"-LENGTH(REPLACE(lower(d.content),?, '')))/{max(1, len(t))}"
+                    for t in terms)
+                sql = (f"SELECT d.*, 0.0 rank, ({tf_expr}) AS tf "
+                       "FROM kb_documents d WHERE " + " AND ".join(clauses))
+                # tf 的 REPLACE 要纯词元（带 % 通配符会恒为 0），且参数顺序须
+                # 先于 WHERE 的 LIKE 占位符——SELECT 子句在语句里排在前面。
+                params = list(terms) + [f"%{t}%" for t in terms]
                 if caps:
                     sql += " AND d.cap IN (" + ",".join("?" for _ in caps) + ")"
                     params.extend(sorted(caps))
                 if tag:
                     sql += " AND lower(d.tags) LIKE ?"
                     params.append("%" + tag.lower() + "%")
-                sql += " ORDER BY d.layer DESC, d.relpath LIMIT ?"
+                sql += " ORDER BY tf DESC, d.layer DESC, d.relpath LIMIT ?"
                 params.append(max(1, limit))
                 rows = list(con.execute(sql, params))
+            if not rows and cjk_terms:
+                # 严格 AND 零结果 → **IDF 加权覆盖率降级**（2026-10-19 中文修复）。
+                # 旧行为是直接放弃（writing.search_kb 再回退整串 OR，中文问句下
+                # 噪声极大）。自然语言问句必然带虚词与跨词边界 2-gram，要求 100%
+                # 命中等于要求用户背关键词。改为：按「词元在语料中的稀有度」加权，
+                # 只留 ≥_COVERAGE_MIN 权重的词元参与 OR，再按覆盖权重排序。
+                # ASCII 词元是硬约束（用户明确打的技术词，必须命中）。
+                rows = self._coverage_rows(con, query, ascii_terms, cjk_terms,
+                                           caps, tag, limit)
         finally:
             con.close()
         out = []
@@ -283,3 +300,90 @@ class KbSearchIndex:
                         "layer": row["layer"], "title": row["title"],
                         "is_attachment": bool(row["is_attachment"])})
         return out
+
+    #: 降级检索时词元权重覆盖率下限：命中词元的 IDF 权重之和 ≥ 全部候选权重
+    #: 的这个比例才入选。0.34 来自实测——自然语言问句里通常 1/3 是虚词噪声，
+    #: 再高会把「文件上传绕过」这类真查询挤掉，再低则泛词重新污染结果。
+    _COVERAGE_MIN = 0.34
+    #: 语料中超过该比例的文档都含某词元 → 泛词，降级阶段剔除（无区分度）。
+    _GENERIC_DF_RATIO = 0.6
+    #: 命中词元数下限（占候选词元数的比例）：只中 1 个泛词不算命中。
+    #: 「不存在的专题xyz」这类查询切出的词元全是常见词，靠这条挡成零结果。
+    _HIT_RATIO_MIN = 0.6
+
+    def _coverage_rows(self, con: sqlite3.Connection, query: str,
+                       ascii_terms: list[str], cjk_terms: list[str],
+                       caps: set[str], tag: str | None,
+                       limit: int) -> list[sqlite3.Row]:
+        """IDF 加权覆盖率降级检索（严格 AND 零结果时使用）。
+
+        ASCII 词元恒作硬约束；中文词元按 df 加权，泛词（df > 60% 语料）剔除，
+        语料里完全不存在的词元（跨词边界 2-gram）自然被 df=0 排除。
+        双门槛：命中权重占比 ≥ ``_COVERAGE_MIN`` **且** 命中词元个数占比
+        ≥ ``_HIT_RATIO_MIN``——前者防泛词刷权重，后者防「只中一个词」蒙对。"""
+        cap_list = sorted(caps)
+        cap_sql = (" AND d.cap IN (" + ",".join("?" for _ in cap_list) + ")"
+                   if cap_list else "")
+        tag_sql = " AND lower(d.tags) LIKE ?" if tag else ""
+        tag_params: list[Any] = ["%" + tag.lower() + "%"] if tag else []
+
+        def _df(term: str) -> int:
+            n = con.execute(
+                "SELECT count(*) FROM kb_documents d WHERE lower(d.content) LIKE ?"
+                + cap_sql + tag_sql,
+                ["%" + term + "%"] + cap_list + tag_params).fetchone()[0]
+            return int(n or 0)
+
+        total_docs = con.execute("SELECT count(*) FROM kb_documents d WHERE 1=1"
+                                 + cap_sql + tag_sql,
+                                 cap_list + tag_params).fetchone()[0] or 0
+        if not total_docs:
+            return []
+
+        live = [t for t in cjk_terms
+                if 0 < _df(t) <= total_docs * self._GENERIC_DF_RATIO]
+        if not live and not ascii_terms:
+            return []
+
+        # ASCII 词元权重 ×2：技术词（sql/jwt/ssti）特异性远高于中文 2-gram。
+        weights = [(t, math.log(1 + total_docs / max(1, _df(t))) * 2.0)
+                   for t in ascii_terms]
+        weights += [(t, math.log(1 + total_docs / max(1, _df(t)))) for t in live]
+        total_weight = sum(w for _, w in weights) or 1.0
+        score_terms = [t for t, _ in weights]
+        need_hits = max(1, math.ceil(len(score_terms) * self._HIT_RATIO_MIN))
+
+        score_expr = "+".join(
+            f"(CASE WHEN lower(d.content) LIKE ? THEN {w:.5f} ELSE 0 END)"
+            for _, w in weights)
+        hit_expr = "+".join(
+            "(CASE WHEN lower(d.content) LIKE ? THEN 1 ELSE 0 END)"
+            for _ in score_terms)
+        # 词频（tf）：cov 只记「命中与否」，同一批词元都命中的文档 cov 必然完全
+        # 相等——「如何测试文件上传漏洞」实测 10 篇全是 cov=9.544/hits=5，排序
+        # 于是退化成按 relpath 字母序，真正讲该主题的《文件上传漏洞.md》被排到
+        # 第 3 位（`layer` 在现网恒为 1，原来那句 `d.layer DESC` 也救不回来）。
+        # 用 REPLACE 差值数出现次数作次级键，与 legacy 扫描器按命中次数排序的
+        # 既有口径一致（matches 大者优先），且必须在 SQL 里参与 ORDER BY——只在
+        # Python 侧重排会让 LIMIT 先按字母序截断，正确结果直接被切掉。
+        tf_expr = "+".join(
+            "(LENGTH(lower(d.content))"
+            f"-LENGTH(REPLACE(lower(d.content),?, '')))/{max(1, len(t))}"
+            for t in score_terms)
+        where = " AND ".join("lower(d.content) LIKE ?" for _ in ascii_terms)
+        where += (" AND " if ascii_terms else "") + "(" + " OR ".join(
+            "lower(d.content) LIKE ?" for _ in score_terms) + ")"
+        sql = (f"SELECT d.*, ({score_expr}) AS cov, ({hit_expr}) AS hits, "
+               f"({tf_expr}) AS tf "
+               f"FROM kb_documents d WHERE {where}" + cap_sql + tag_sql
+               + " ORDER BY cov DESC, tf DESC, d.layer DESC, d.relpath LIMIT ?")
+        params = ([f"%{t}%" for t in score_terms]
+                  + [f"%{t}%" for t in score_terms]
+                  + list(score_terms)          # tf 用纯词元，不能带 LIKE 通配符
+                  + [f"%{t}%" for t in ascii_terms]
+                  + [f"%{t}%" for t in score_terms]
+                  + cap_list + tag_params + [max(1, limit)])
+        rows = list(con.execute(sql, params))
+        return [r for r in rows
+                if (r["cov"] or 0) / total_weight >= self._COVERAGE_MIN
+                and (r["hits"] or 0) >= need_hits]

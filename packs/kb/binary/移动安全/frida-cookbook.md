@@ -7,180 +7,187 @@ vuln_class: [android, frida, dynamic-analysis]
 
 # Frida 实战 Hook 脚本速查（Android）
 
-> 来源：reverse-skill 1.0.1 收编改编（2026-09-30，MIT，见 `../../licenses/`）；
-> 精选自 awesome-frida、Frida-Mobile-Scripts、frida-codeshare-scripts 等开源项目。
-> 按场景分类，直接复制使用。配合技能 [[skills/android-rev/SKILL.md|android-rev]]。
+> 来源：reverse-skill 1.0.1 收编改编（2026-09-30，MIT，见 `../../licenses/`）；精选自 awesome-frida、Frida-Mobile-Scripts、frida-codeshare-scripts。配合技能 [[skills/安卓逆向手法/SKILL.md|安卓逆向手法]]；native 层 hook 见 [[binary/移动安全/android-advanced.md|Android 进阶]]；脱壳见 [[binary/移动安全/unpacking.md|脱壳]]。
 
-## 通用 Hook 模板
+## 0. 判据速查
 
-### Hook 任意 Java 方法
+Hook 之前先定**要拿什么**，再选挂点。挂错点的表现是「脚本跑起来了但什么都没打印」。
+
+| 目标 | 挂哪个点 | 去哪节 |
+|---|---|---|
+| 明文密码 / 请求体 | `Cipher.doFinal`、`MessageDigest.digest` | §2 |
+| 密钥 / IV | `SecretKeySpec.$init`、`IvParameterSpec.$init` | §2 |
+| URL 与 header | `okhttp3.RealCall.execute` | §3 |
+| 混淆后方法在哪被调用 | `ClassLoader.loadClass` + 方法枚举 | §1.2 |
+| 抓不到包（pinning） | `CertificatePinner.check`、`TrustManagerImpl.verifyChain` | §4 |
+| 拒绝启动（root 检测） | `File.exists`、`Runtime.exec`、`Build.TAGS` | §5.1 |
+| 拒绝启动（模拟器检测） | `Build.FINGERPRINT` 等一串字段 | §5.2 |
+| 本地存了什么 | `SharedPreferencesImpl`、`SQLiteDatabase.rawQuery` | §6 |
+| 壳把 dex 藏在内存 | `BaseDexClassLoader.pathList` | §7 |
+
+**最高频错误**：以为 hook 没生效，其实是方法名/签名不对。**先枚举再 hook**，不要猜。
+
+## 1. 通用模板
+
+### 1.1 Hook 方法
 
 ```javascript
 Java.perform(function() {
-    var TargetClass = Java.use("com.target.ClassName");
+    var C = Java.use("com.target.ClassName");
 
-    // Hook 无参方法
-    TargetClass.methodName.implementation = function() {
-        console.log("[*] methodName called");
+    C.methodName.implementation = function() {              // 无参
         var ret = this.methodName();
-        console.log("[*] return: " + ret);
+        console.log("[*] ret=" + ret);
         return ret;
     };
 
-    // Hook 有参方法（重载需 overload 指定签名）
-    TargetClass.methodName.overload('java.lang.String', 'int').implementation = function(str, num) {
-        console.log("[*] methodName(" + str + ", " + num + ")");
-        var ret = this.methodName(str, num);
-        console.log("[*] return: " + ret);
-        return ret;
+    // 有参：重载必须指定签名，否则报 ambiguous
+    C.methodName.overload('java.lang.String', 'int').implementation = function(s, n) {
+        console.log("[*] " + s + "," + n);
+        return this.methodName(s, n);
+    };
+
+    C.$init.overload('java.lang.String').implementation = function(a) {   // 构造器
+        console.log("[*] new C(" + a + ")");
+        this.$init(a);
     };
 });
 ```
 
-### Hook 构造函数 / 枚举所有方法
+**不写 `overload(...)` 是最常见的失败**。同名多签名时 Frida 直接抛 `has more than one overload`，不会自动挑。
+
+### 1.2 枚举（不知道名字时）
 
 ```javascript
 Java.perform(function() {
-    var TargetClass = Java.use("com.target.ClassName");
-    TargetClass.$init.overload('java.lang.String').implementation = function(arg) {
-        console.log("[*] new ClassName(" + arg + ")");
-        this.$init(arg);
-    };
+    // 类里的方法及完整签名，直接复制进 overload()
+    Java.use("com.target.ClassName").class.getDeclaredMethods()
+        .forEach(function(m) { console.log(m.toString()); });
 
-    var methods = TargetClass.class.getDeclaredMethods();
-    methods.forEach(function(method) { console.log(method.toString()); });
+    // 已加载的类名（反查混淆）
+    Java.enumerateLoadedClasses({
+        onMatch: function(n) { if (n.indexOf("com.target") !== -1) console.log(n); },
+        onComplete: function() {}
+    });
 });
 ```
 
-## 加密 / 签名 Hook（捕获密钥与明文）
+## 2. 加密与签名
 
 ```javascript
 Java.perform(function() {
     var Cipher = Java.use("javax.crypto.Cipher");
-
     Cipher.doFinal.overload('[B').implementation = function(input) {
-        var mode = this.getOpmode ? this.getOpmode() : "?";
-        console.log("[Cipher.doFinal] mode=" + mode);
-        console.log("  input: " + bytesToHex(input));
-        var result = this.doFinal(input);
-        console.log("  output: " + bytesToHex(result));
-        return result;
+        console.log("[doFinal] mode=" + (this.getOpmode ? this.getOpmode() : "?"));
+        console.log("  in:  " + hex(input));
+        var r = this.doFinal(input);
+        console.log("  out: " + hex(r));
+        return r;
     };
 
-    // 捕获密钥
-    var SecretKeySpec = Java.use("javax.crypto.spec.SecretKeySpec");
-    SecretKeySpec.$init.overload('[B', 'java.lang.String').implementation = function(key, algo) {
-        console.log("[SecretKeySpec] algo=" + algo + " key=" + bytesToHex(key));
-        this.$init(key, algo);
-    };
+    // 密钥（只 hook doFinal 拿不到密钥，必须单独挂这里）
+    Java.use("javax.crypto.spec.SecretKeySpec").$init
+        .overload('[B', 'java.lang.String')
+        .implementation = function(k, algo) {
+            console.log("[Key] " + algo + " " + hex(k));
+            this.$init(k, algo);
+        };
 
-    // 捕获 IV
-    var IvParameterSpec = Java.use("javax.crypto.spec.IvParameterSpec");
-    IvParameterSpec.$init.overload('[B').implementation = function(iv) {
-        console.log("[IvParameterSpec] iv=" + bytesToHex(iv));
-        this.$init(iv);
-    };
+    Java.use("javax.crypto.spec.IvParameterSpec").$init
+        .overload('[B').implementation = function(iv) {
+            console.log("[IV] " + hex(iv));
+            this.$init(iv);
+        };
 
-    // MD5/SHA
-    var MessageDigest = Java.use("java.security.MessageDigest");
-    MessageDigest.digest.overload('[B').implementation = function(input) {
-        console.log("[MessageDigest.digest] algo=" + this.getAlgorithm());
-        var result = this.digest(input);
-        console.log("  hash: " + bytesToHex(result));
-        return result;
-    };
+    Java.use("java.security.MessageDigest").digest
+        .overload('[B').implementation = function(i) {
+            var r = this.digest(i);
+            console.log("[Digest] " + this.getAlgorithm() + " " + hex(r));
+            return r;
+        };
 
-    // HMAC
     var Mac = Java.use("javax.crypto.Mac");
-    Mac.doFinal.overload('[B').implementation = function(input) {
-        console.log("[Mac.doFinal] algo=" + this.getAlgorithm());
-        var result = this.doFinal(input);
-        console.log("  mac: " + bytesToHex(result));
-        return result;
+    Mac.init.overload('java.security.Key').implementation = function(k) {
+        console.log("[Mac.init] " + hex(k.getEncoded()));
+        this.init(k);
     };
-    Mac.init.overload('java.security.Key').implementation = function(key) {
-        console.log("[Mac.init] key=" + bytesToHex(key.getEncoded()));
-        this.init(key);
+    Mac.doFinal.overload('[B').implementation = function(i) {
+        var r = this.doFinal(i);
+        console.log("[Mac] " + this.getAlgorithm() + " " + hex(r));
+        return r;
     };
 });
 
-function bytesToHex(bytes) {
-    if (!bytes) return "null";
-    var hex = [];
-    for (var i = 0; i < bytes.length; i++) {
-        hex.push(('0' + (bytes[i] & 0xFF).toString(16)).slice(-2));
-    }
-    return hex.join('');
+function hex(b) {
+    if (!b) return "null";
+    var o = [];
+    for (var i = 0; i < b.length; i++) o.push(('0' + (b[i] & 0xFF).toString(16)).slice(-2));
+    return o.join('');
 }
 ```
 
-## 网络请求 Hook
+- **`getOpmode()` 1 = 加密、2 = 解密**。分不清方向看这个。
+- 应用自己实现加密（不走 JCE）时以上全部不生效，要挂业务方法或 native。
+- `hex()` 只处理 byte 数组。先 `console.log(input)` 看类型，对象要另处理。
+
+## 3. 网络请求
 
 ```javascript
 Java.perform(function() {
-    // OkHttp3 请求/响应
     var RealCall = Java.use("okhttp3.RealCall");
     RealCall.execute.implementation = function() {
-        var request = this.request();
-        console.log("[OkHttp] " + request.method() + " " + request.url().toString());
-        var headers = request.headers();
-        for (var i = 0; i < headers.size(); i++) {
-            console.log("  " + headers.name(i) + ": " + headers.value(i));
-        }
-        var response = this.execute();
-        console.log("[OkHttp] Response: " + response.code());
-        return response;
+        var req = this.request();
+        console.log("[OkHttp] " + req.method() + " " + req.url().toString());
+        var h = req.headers();
+        for (var i = 0; i < h.size(); i++) console.log("  " + h.name(i) + ": " + h.value(i));
+        var resp = this.execute();
+        console.log("[OkHttp] " + resp.code());
+        return resp;
     };
 
-    // URL 连接
-    var URL = Java.use("java.net.URL");
-    URL.openConnection.overload().implementation = function() {
+    Java.use("java.net.URL").openConnection.overload().implementation = function() {
         console.log("[URL] " + this.toString());
         return this.openConnection();
     };
 
-    // WebView
     var WebView = Java.use("android.webkit.WebView");
-    WebView.loadUrl.overload('java.lang.String').implementation = function(url) {
-        console.log("[WebView.loadUrl] " + url);
-        this.loadUrl(url);
+    WebView.loadUrl.overload('java.lang.String').implementation = function(u) {
+        console.log("[WebView] " + u);
+        this.loadUrl(u);
     };
-    WebView.evaluateJavascript.implementation = function(script, callback) {
-        console.log("[WebView.evaluateJavascript] " + script.substring(0, 200));
-        this.evaluateJavascript(script, callback);
+    WebView.evaluateJavascript.implementation = function(s, cb) {
+        console.log("[WebView.eval] " + s.substring(0, 200));
+        this.evaluateJavascript(s, cb);
     };
 });
 ```
 
-## 绕过类 Hook
+`execute` 只覆盖同步请求。用 `enqueue` 的异步请求要挂 `RealCall.enqueue`，或直接挂 `Interceptor` 链更通用。
 
-### 通用 SSL Pinning 绕过
+## 4. 绕过 SSL Pinning
 
 ```javascript
 Java.perform(function() {
-    // OkHttp3 CertificatePinner
+    // 四段全挂一遍，不要任选其一 —— 应用可能同时用了多套
     try {
-        var CertificatePinner = Java.use("okhttp3.CertificatePinner");
-        CertificatePinner.check.overload('java.lang.String', 'java.util.List').implementation = function() {
-            console.log("[*] SSL Pinning bypassed (OkHttp3)");
-        };
+        Java.use("okhttp3.CertificatePinner").check
+            .overload('java.lang.String', 'java.util.List')
+            .implementation = function() { console.log("[*] pinning off (OkHttp3)"); };
     } catch(e) {}
 
-    // TrustManagerImpl
     try {
-        var TrustManagerImpl = Java.use("com.android.org.conscrypt.TrustManagerImpl");
-        TrustManagerImpl.verifyChain.implementation = function(untrustedChain) {
-            console.log("[*] SSL Pinning bypassed (TrustManagerImpl)");
-            return untrustedChain;
-        };
+        Java.use("com.android.org.conscrypt.TrustManagerImpl").verifyChain
+            .implementation = function(chain) {
+                console.log("[*] pinning off (Conscrypt)");
+                return chain;
+            };
     } catch(e) {}
 
-    // X509TrustManager 空实现
     try {
-        var X509TrustManager = Java.use("javax.net.ssl.X509TrustManager");
+        var X509 = Java.use("javax.net.ssl.X509TrustManager");
         Java.registerClass({
-            name: "com.bypass.TrustManager",
-            implements: [X509TrustManager],
+            name: "com.bypass.TM",
+            implements: [X509],
             methods: {
                 checkClientTrusted: function() {},
                 checkServerTrusted: function() {},
@@ -189,161 +196,165 @@ Java.perform(function() {
         });
     } catch(e) {}
 
-    // Network Security Config (Android 7+)
     try {
-        var NetworkSecurityConfig = Java.use("android.security.net.config.NetworkSecurityConfig");
-        NetworkSecurityConfig.isCleartextTrafficPermitted.implementation = function() { return true; };
+        Java.use("android.security.net.config.NetworkSecurityConfig")
+            .isCleartextTrafficPermitted.implementation = function() { return true; };
     } catch(e) {}
 });
 ```
 
-### 通用 Root 检测绕过
+**每段必须包 `try/catch`**：类不存在时 `Java.use` 抛异常，不包会中断整个 `Java.perform`，后面的 hook 全不生效。
+
+**native 层实现（BoringSSL / Cronet）时 Java 层无效** —— 要挂 `SSL_CTX_set_custom_verify`。抓不到包时先判断 pinning 在哪一层。
+
+## 5. 绕过环境检测
+
+### 5.1 Root
 
 ```javascript
 Java.perform(function() {
-    var File = Java.use("java.io.File");
-    var rootPaths = ["su", "Superuser", "magisk", "busybox", "xposed",
-                     "/system/xbin/su", "/system/bin/su", "/sbin/su",
-                     "/data/local/xbin/su", "/data/local/bin/su"];
+    var paths = ["su", "superuser", "magisk", "busybox", "xposed",
+                 "/system/xbin/su", "/system/bin/su", "/sbin/su",
+                 "/data/local/xbin/su", "/data/local/bin/su"];
 
-    File.exists.implementation = function() {
-        var path = this.getAbsolutePath();
-        for (var i = 0; i < rootPaths.length; i++) {
-            if (path.toLowerCase().indexOf(rootPaths[i].toLowerCase()) !== -1) {
-                console.log("[Root] Blocked: " + path);
+    Java.use("java.io.File").exists.implementation = function() {
+        var p = this.getAbsolutePath().toLowerCase();
+        for (var i = 0; i < paths.length; i++) {
+            if (p.indexOf(paths[i].toLowerCase()) !== -1) {
+                console.log("[Root] blocked: " + p);
                 return false;
             }
         }
         return this.exists();
     };
 
-    var Runtime = Java.use("java.lang.Runtime");
-    Runtime.exec.overload('java.lang.String').implementation = function(cmd) {
+    Java.use("java.lang.Runtime").exec.overload('java.lang.String').implementation = function(cmd) {
         if (cmd.indexOf("su") !== -1 || cmd.indexOf("which") !== -1) {
-            console.log("[Root] Blocked exec: " + cmd);
+            console.log("[Root] blocked exec: " + cmd);
             throw Java.use("java.io.IOException").$new("Permission denied");
         }
         return this.exec(cmd);
     };
 
-    var Build = Java.use("android.os.Build");
-    Build.TAGS.value = "release-keys";
+    Java.use("android.os.Build").TAGS.value = "release-keys";   // 静态字段用 .value
 });
 ```
 
-### 反调试 / 模拟器检测绕过
+### 5.2 模拟器 / 调试器
 
 ```javascript
 Java.perform(function() {
-    var Debug = Java.use("android.os.Debug");
-    Debug.isDebuggerConnected.implementation = function() {
-        console.log("[AntiDebug] isDebuggerConnected → false");
+    Java.use("android.os.Debug").isDebuggerConnected.implementation = function() {
+        console.log("[AntiDebug] → false");
         return false;
     };
-    // TracerPid（native 层）见 android-advanced 的 native hook 段
 
-    var Build = Java.use("android.os.Build");
-    Build.FINGERPRINT.value = "google/walleye/walleye:8.1.0/OPM1.171019.011/4448085:user/release-keys";
-    Build.MODEL.value = "Pixel 2";
-    Build.MANUFACTURER.value = "Google";
-    Build.BRAND.value = "google";
-    Build.DEVICE.value = "walleye";
-    Build.PRODUCT.value = "walleye";
-    Build.HARDWARE.value = "walleye";
+    // 这一组必须一起改，只改 MODEL 会被一致性检查抓到
+    var B = Java.use("android.os.Build");
+    B.FINGERPRINT.value  = "google/walleye/walleye:8.1.0/OPM1.171019.011/4448085:user/release-keys";
+    B.MODEL.value        = "Pixel 2";
+    B.MANUFACTURER.value = "Google";
+    B.BRAND.value        = "google";
+    B.DEVICE.value       = "walleye";
+    B.PRODUCT.value      = "walleye";
+    B.HARDWARE.value     = "walleye";
 
-    var TelephonyManager = Java.use("android.telephony.TelephonyManager");
-    TelephonyManager.getDeviceId.implementation = function() { return "352099001761481"; };
-    TelephonyManager.getSubscriberId.implementation = function() { return "310260000000000"; };
-    TelephonyManager.getSimSerialNumber.implementation = function() { return "89014103211118510720"; };
+    var T = Java.use("android.telephony.TelephonyManager");
+    T.getDeviceId.implementation        = function() { return "352099001761481"; };
+    T.getSubscriberId.implementation    = function() { return "310260000000000"; };
+    T.getSimSerialNumber.implementation = function() { return "89014103211118510720"; };
 });
 ```
 
-## 数据存储 Hook
+## 6. 数据存储
 
 ```javascript
 Java.perform(function() {
-    var SharedPreferencesImpl = Java.use("android.app.SharedPreferencesImpl");
-    SharedPreferencesImpl.getString.implementation = function(key, defValue) {
-        var value = this.getString(key, defValue);
-        console.log("[SP.get] " + key + " = " + value);
-        return value;
-    };
-    var Editor = Java.use("android.app.SharedPreferencesImpl$EditorImpl");
-    Editor.putString.implementation = function(key, value) {
-        console.log("[SP.put] " + key + " = " + value);
-        return this.putString(key, value);
-    };
+    Java.use("android.app.SharedPreferencesImpl").getString
+        .implementation = function(k, d) {
+            var v = this.getString(k, d);
+            console.log("[SP.get] " + k + " = " + v);
+            return v;
+        };
 
-    var SQLiteDatabase = Java.use("android.database.sqlite.SQLiteDatabase");
-    SQLiteDatabase.rawQuery.implementation = function(sql, args) {
-        console.log("[SQL] " + sql);
-        if (args) console.log("  args: " + JSON.stringify(args));
-        return this.rawQuery(sql, args);
-    };
+    Java.use("android.app.SharedPreferencesImpl$EditorImpl").putString
+        .implementation = function(k, v) {
+            console.log("[SP.put] " + k + " = " + v);
+            return this.putString(k, v);
+        };
+
+    Java.use("android.database.sqlite.SQLiteDatabase").rawQuery
+        .implementation = function(sql, args) {
+            console.log("[SQL] " + sql);
+            if (args) console.log("  args: " + JSON.stringify(args));
+            return this.rawQuery(sql, args);
+        };
 });
 ```
 
-## 脱壳 DEX Dump
+`$EditorImpl` 的 `$` 是内部类分隔符，写成 `.EditorImpl` 找不到。
+
+## 7. DEX 枚举
 
 ```javascript
 Java.perform(function() {
     Java.enumerateClassLoaders({
         onMatch: function(loader) {
             try {
-                var pathList = Java.cast(loader, Java.use("dalvik.system.BaseDexClassLoader")).pathList.value;
-                var dexElements = pathList.dexElements.value;
-                for (var i = 0; i < dexElements.length; i++) {
-                    var dexFile = dexElements[i].dexFile.value;
-                    if (dexFile) console.log("[DEX] " + dexFile.getName());
+                var pl = Java.cast(loader, Java.use("dalvik.system.BaseDexClassLoader")).pathList.value;
+                var els = pl.dexElements.value;
+                for (var i = 0; i < els.length; i++) {
+                    var df = els[i].dexFile.value;
+                    if (df) console.log("[DEX] " + df.getName());
                 }
             } catch(e) {}
         },
         onComplete: function() {}
     });
 
-    // 监控目标类加载
-    var ClassLoader = Java.use("java.lang.ClassLoader");
-    ClassLoader.loadClass.overload('java.lang.String').implementation = function(name) {
-        if (name.indexOf("com.target") !== -1) console.log("[ClassLoader] " + name);
-        return this.loadClass(name);
-    };
+    Java.use("java.lang.ClassLoader").loadClass.overload('java.lang.String')
+        .implementation = function(n) {
+            if (n.indexOf("com.target") !== -1) console.log("[Load] " + n);
+            return this.loadClass(n);
+        };
 });
 ```
 
-## 实用工具函数
+**这只列 dex 名，不 dump 内容**。拿内存里的 dex 要用 `frida-dexdump` 或 hook native 的 `OpenMemory`/`mmap`。360、梆梆这类壳会把路径抹掉，此时只能走 native dump，见 [[binary/移动安全/unpacking.md|脱壳]]。
+
+## 8. 工具函数
 
 ```javascript
-// 打印调用栈
+// 调用栈 —— 找不到方法是谁调的时候用
 function printStack() {
     console.log(Java.use("android.util.Log").getStackTraceString(
         Java.use("java.lang.Throwable").$new()));
 }
 
-// 打印对象所有字段
+// 对象全部字段
 function printFields(obj) {
-    var fields = obj.class.getDeclaredFields();
-    fields.forEach(function(field) {
-        field.setAccessible(true);
-        try { console.log("  " + field.getName() + " = " + field.get(obj)); } catch(e) {}
+    obj.class.getDeclaredFields().forEach(function(f) {
+        f.setAccessible(true);
+        try { console.log("  " + f.getName() + " = " + f.get(obj)); } catch(e) {}
     });
 }
 
-// 搜索内存中的类实例
-function findInstances(className) {
-    Java.choose(className, {
-        onMatch: function(instance) { console.log("[Instance] " + instance); printFields(instance); },
+// 堆里已存在的实例（对象未创建时找不到，先跑业务流程）
+function findInstances(cls) {
+    Java.choose(cls, {
+        onMatch: function(o) { console.log("[Inst] " + o); printFields(o); },
         onComplete: function() {}
     });
 }
 ```
 
-## 参考资源
+## 9. 纪律
 
-| 资源 | 说明 | 链接 |
-|------|------|------|
-| Frida 官方文档 | API 参考 | https://frida.re/docs/ |
-| Frida CodeShare | 社区脚本分享 | https://codeshare.frida.re/ |
-| awesome-frida | 资源大全 | https://github.com/dweinstein/awesome-frida |
-| frida-codeshare-scripts | 全网最全脚本收集 | https://github.com/zengfr/frida-codeshare-scripts |
-| Objection | Frida 封装工具 | https://github.com/sensepost/objection |
-| r2frida | radare2 + Frida 集成 | https://github.com/nowsecure/r2frida |
+- **先枚举再 hook**。`getDeclaredMethods()` 花 10 秒，猜错方法名浪费半小时。
+- **重载必须写 `overload(...)`**，否则抛 `has more than one overload`。
+- **每个绕过块都包 `try/catch`**，一个类不存在会中断整个 `Java.perform`。
+- **密钥要单独挂 `SecretKeySpec.$init`**，只 hook `doFinal` 拿不到。
+- **模拟器指纹字段要一起改**，改一半会被一致性检查抓到。
+- **静态字段用 `.value`，方法用 `.implementation`**。写错不报错，只是不生效。
+- **Java 层 hook 对 native pinning 无效**。抓不到包先判断 pinning 在哪一层。
+- **`Java.choose` 只找已存在的实例**，找不到时先跑业务流程，别怀疑脚本。

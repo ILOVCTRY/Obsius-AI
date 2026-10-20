@@ -47,12 +47,12 @@ go install github.com/ffuf/ffuf/v2@latest
 
 ## Additional Resources
 
-- [sql-injection.md](../../../漏洞分类/injection/sql-injection.md) - SQL injection techniques: auth bypass, UNION extraction, filter bypasses, second-order SQLi, truncation, race-assisted leaks, INSERT ON DUPLICATE KEY UPDATE password overwrite, innodb_table_stats WAF bypass
+- [sql-injection.md](../../../漏洞分类/注入类/sql-injection.md) - SQL injection techniques: auth bypass, UNION extraction, filter bypasses, second-order SQLi, truncation, race-assisted leaks, INSERT ON DUPLICATE KEY UPDATE password overwrite, innodb_table_stats WAF bypass
 - [server-side.md](server-side.md) - PHP type juggling, php://filter LFI, Python str.format traversal, SSTI (Jinja2, Twig, ERB, Mako, EJS, Vue.js, Smarty), SSRF (Host header, DNS rebinding, curl redirect, unescaped-dot regex, SNI FTP smuggling, mod_vhost_alias), PHP hash_hmac NULL
 - [server-side-2.md](server-side-2.md) - XXE (basic, OOB, DOCX upload), XML injection via X-Forwarded-For, PHP variable variables, PHP uniqid predictable filename, sequential regex replacement bypass, command injection (newline, blocklist, sendmail CGI, multi-barcode, git CLI), GraphQL injection (introspection, batching, interpolation)
 - [server-side-exec.md](server-side-exec.md) - Direct code execution paths, upload-to-RCE, deserialization-adjacent execution, LaTeX injection, header and API abuses
 - [server-side-exec-2.md](server-side-exec-2.md) - More execution chains: SQLi fragmentation, path parser tricks, polyglot uploads, wrapper abuse, filename injection, BMP pixel webshell with filename truncation
-- [server-side-deser.md](../../../漏洞分类/injection/server-side-deser.md) - Java/Python/PHP deserialization and race-condition playbooks, PHP SoapClient CRLF SSRF via deserialization
+- [server-side-deser.md](../../../漏洞分类/注入类/server-side-deser.md) - Java/Python/PHP deserialization and race-condition playbooks, PHP SoapClient CRLF SSRF via deserialization
 - [server-side-advanced.md](server-side-advanced.md) - Advanced SSRF, traversal, archive, parser, framework, and modern app-server issues, Nginx alias traversal
 - [server-side-advanced-2.md](server-side-advanced-2.md) - Docker API SSRF, Castor/XML, Apache expression reads, parser discrepancies, Windows path tricks, rogue MySQL server file read
 - [server-side-advanced-3.md](server-side-advanced-3.md) - Part 3 (CSAW/35C3/ASIS/PlaidCTF 2018): WAV polyglot upload, multi-slash URL `path.startswith` bypass, Xalan XSLT `math:random()` seed guess, SoapClient `_user_agent` CRLF method smuggling, `gopher:///` no-host URL scheme bypass, SSRF credential leak via attacker-specified outbound URL
@@ -61,7 +61,7 @@ go install github.com/ffuf/ffuf/v2@latest
 - [client-side-advanced.md](../../../漏洞分类/client-side-advanced.md) - CSP bypasses, Unicode tricks, XSSI, CSS exfiltration, browser normalization quirks, postMessage null origin bypass
 - [auth-and-access.md](auth-and-access.md) - Auth/authz bypasses, hidden endpoints, IDOR, redirect chains, subdomain takeover, AI chatbot jailbreaks
 - [auth-and-access-2.md](auth-and-access-2.md) - Part 2 (2018-era): `std::unordered_set` bucket collision auth bypass, `nodeprep.prepare` Unicode homograph username collision, SRP A=0/A=N auth bypass, ArangoDB AQL MERGE privilege escalation
-- [auth-jwt.md](../../../漏洞分类/authn/auth-jwt.md) - JWT/JWE manipulation, weak secrets, header injection, key confusion, replay
+- [auth-jwt.md](../../../漏洞分类/认证与会话/auth-jwt.md) - JWT/JWE manipulation, weak secrets, header injection, key confusion, replay
 - [auth-infra.md](auth-infra.md) - OAuth/OIDC, SAML, CORS, CI/CD secrets, IdP abuse, login poisoning
 - [node-and-prototype.md](../../../漏洞分类/node-and-prototype.md) - Prototype pollution, JS sandbox escape, Node.js attack chains
 - [web3.md](../../../漏洞分类/web3.md) - Solidity and Web3 challenge notes
@@ -152,10 +152,10 @@ curl -v -X POST https://target.com/api -H "Content-Type: application/json" -d '{
 
 ## Fast Pattern Map
 
-- SQL errors, odd filtering, or state-dependent DB behavior: start with [sql-injection.md](../../../漏洞分类/injection/sql-injection.md).
+- SQL errors, odd filtering, or state-dependent DB behavior: start with [sql-injection.md](../../../漏洞分类/注入类/sql-injection.md).
 - Templating, file reads, SSRF, command execution, XML, or parser bugs: start with [server-side.md](server-side.md) and [server-side-exec.md](server-side-exec.md).
 - XSS, CSP bypass, admin bot, client routing, DOM issues, or scriptless exfiltration: start with [client-side.md](../../../漏洞分类/client-side.md).
-- Session forgery, hidden admin routes, JWT, OAuth, SAML, or weak trust boundaries: start with [auth-and-access.md](auth-and-access.md), [auth-jwt.md](../../../漏洞分类/authn/auth-jwt.md), and [auth-infra.md](auth-infra.md).
+- Session forgery, hidden admin routes, JWT, OAuth, SAML, or weak trust boundaries: start with [auth-and-access.md](auth-and-access.md), [auth-jwt.md](../../../漏洞分类/认证与会话/auth-jwt.md), and [auth-infra.md](auth-infra.md).
 - Node.js apps, prototype pollution, VM sandboxes, or SSRF into internal services: add [node-and-prototype.md](../../../漏洞分类/node-and-prototype.md).
 - Smart contract frontends or blockchain-integrated apps: add [web3.md](../../../漏洞分类/web3.md).
 

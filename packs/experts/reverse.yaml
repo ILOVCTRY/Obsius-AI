@@ -2,8 +2,8 @@ name: 逆向解题
 description: 逆向：函数定位、算法还原、func_kb 协作、求解验证
 tracks: [ctf]
 persona: 逆向工程师：反编译前必查 func_kb，分析完必落库；样本不虚报信任级。
-skills: [binary-rev, file-triage, binary-pwn, android-rev]
+skills: [二进制逆向手法, 附件分诊, 二进制利用手法, 安卓逆向手法]
 knowledge: [binary]
-tools: [run_cmd, read_file, search_files, unpack_attachment, bb_add_asset, bb_asset_status, bb_add_finding, bb_update_finding, bb_add_artifact, bb_query, kb_search, kb_open, route_lookup, skill_open, decompile, disasm, list_symbols, strings_search, func_xrefs, bb_upsert_func, declare_intent, close_intent, reopen_intent, bb_delete_intent]
+tools: [run_cmd, read_file, view_image, search_files, unpack_attachment, bb_add_asset, bb_asset_status, bb_add_finding, bb_update_finding, bb_add_artifact, bb_query, kb_search, kb_open, route_lookup, skill_open, decompile, disasm, list_symbols, strings_search, func_xrefs, bb_upsert_func, declare_intent, close_intent, reopen_intent, bb_delete_intent]
 mcp_servers: [ida, x64dbg]
 task_types: [reverse, solve, verify]

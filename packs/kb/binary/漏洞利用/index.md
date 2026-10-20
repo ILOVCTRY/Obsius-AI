@@ -1,221 +1,252 @@
 ---
 name: ctf-pwn
-description: Provides binary exploitation techniques for CTF challenges. Use when you already have a vulnerable native target or service and need to turn memory corruption or low-level primitives into code execution or privilege escalation, such as buffer overflows, format strings, heap bugs, ROP, ret2libc, shellcode, kernel exploitation, seccomp bypass, sandbox escape, or Windows/Linux exploit chains. Do not use it when the main blocker is understanding what the binary does; use reverse engineering first. Do not use it for pure web bugs, disk or packet forensics, or standalone crypto/math challenges.
+description: 二进制漏洞利用：已有可交互的脆弱目标，要把内存破坏或底层原语变成代码执行或提权时使用。覆盖栈溢出、格式串、堆漏洞、ROP/ret2libc、shellcode、内核利用、seccomp 绕过、沙箱逃逸、Windows/Linux 利用链。不适用：卡点在「看不懂二进制在干什么」时先走逆向；纯 Web、磁盘/流量取证、独立密码学题目也不走本包。
 license: MIT
-compatibility: Requires filesystem-based agent (Claude Code or similar) with bash, Python 3, and internet access for tool installation.
+compatibility: 需要可访问文件系统的 agent（Claude Code 或类似），具备 bash、Python 3，以及联网安装工具的能力。
 allowed-tools: Bash Read Write Edit Glob Grep Task WebFetch WebSearch
 metadata:
   user-invocable: "false"
 ---
 
-# CTF Binary Exploitation (Pwn)
+# 二进制漏洞利用
 
-Quick reference for binary exploitation (pwn) CTF challenges. Each technique has a one-liner here; see supporting files for full details.
+## 0. 判据速查
 
-## Prerequisites
+拿到目标先看 `checksec`，保护组合直接决定手法，不要凭经验猜。
 
-**Python packages (all platforms):**
-```bash
-pip install "pwntools==4.15.0" "ROPgadget==7.7" "ropper==1.13.13"
-# or via script: bash scripts/install_ctf_tools.sh python
-```
-
-**uv alternative:**
-```bash
-uv venv && uv pip install "pwntools==4.15.0" "ROPgadget==7.7" "ropper==1.13.13"
-```
-
-**Linux (apt):**
-```bash
-apt install gdb binutils strace ltrace qemu-system-x86
-```
-
-**Optional cross-arch (ARM/MIPS — Debian/Ubuntu):**
-```bash
-apt install qemu-user qemu-user-static gdb-multiarch binutils-multiarch libc6-armhf-cross libc6-arm64-cross libc6-mips-cross
-```
-
-**macOS (Homebrew):**
-```bash
-brew install gdb binutils qemu
-```
-
-**Ruby gems (all platforms):**
-```bash
-gem install one_gadget seccomp-tools
-```
-
-**Manual install:**
-- pwndbg — Linux: [GitHub](https://github.com/pwndbg/pwndbg), macOS: `brew install pwndbg/tap/pwndbg-gdb`
-- checksec — included with pwntools (`checksec --file=binary`)
-
-## Additional Resources
-
-- [[binary/漏洞利用/overflow-basics.md|overflow-basics.md]] - Stack/global buffer overflow, ret2win, canary bypass, canary byte-by-byte brute force on forking servers, struct pointer overwrite, signed integer bypass, hidden gadgets, stride-based OOB read leak, parser stack overflow via unchecked memcpy length with callee-saved register restoration
-- [[binary/漏洞利用/rop-and-shellcode.md|rop-and-shellcode.md]] - Core ROP chains (ret2libc, syscall ROP, rdx control, shell interaction), ret2csu, bad character XOR bypass, exotic x86 gadgets (BEXTR/XLAT/STOSB/PEXT), stack pivot via xchg rax,esp, sprintf() gadget chaining for bad character bypass, canary XOR epilogue as RDX zeroing gadget, stub_execveat syscall as execve alternative via read() return value
-- [[binary/漏洞利用/rop-advanced.md|rop-advanced.md]] - Advanced ROP techniques: double stack pivot to BSS via leave;ret, SROP (Sigreturn-Oriented Programming) with UTF-8 constraints, seccomp bypass, RETF architecture switch (x64→x32) for seccomp bypass, shellcode with input reversal, .fini_array hijack, ret2vdso, pwntools template, x32 ABI syscall aliasing for seccomp bypass, time-based blind shellcode exfiltration
-- [[binary/漏洞利用/format-string.md|format-string.md]] - Format string exploitation (leaks, GOT overwrite, blind pwn, filter bypass, canary leak, __free_hook, .rela.plt patching, saved EBP overwrite for .bss pivot, argv[0] overwrite for stack smash info leak, .fini_array loop for multi-stage exploitation, __printf_chk bypass with sequential %p, single-call leak + GOT overwrite, ROT13-encoded format string exploit through input transformation)
-- [[binary/漏洞利用/advanced.md|advanced.md]] - Seccomp advanced techniques, UAF, JIT, esoteric GOT, heap overlap via base conversion, tree data structure stack underallocation, ret2dlresolve, kernel exploitation (basic)
-- [[binary/漏洞利用/heap-techniques.md|heap-techniques.md]] - House of Apple 2 (+ setcontext SUID variant), House of Einherjar, House of Orange/Spirit/Lore/Force, heap grooming, custom allocators (nginx, talloc), classic unlink, musl libc heap (meta pointer + atexit hijack), tcache stashing unlink attack, unsafe unlink + top chunk consolidation
-- [[binary/漏洞利用/heap-techniques.md|heap-techniques.md]] - CTF-writeup heap variants: UAF vtable pointer encoding shell argument, uninitialized chunk residue pointer leak, tcache strcpy null-byte overflow + backward consolidation, adjacent-struct fn-pointer overflow for libc leak + GOT overwrite, hidden-menu tcache poisoning, tcache double-free + fake _IO_FILE vtable stdout hijack, tcache-to-fastbin promotion cross-bin attack, 6-bit index OOB + written_bytes accumulator, IS_MMAPED bit-flip for unsorted bin leak on calloc'd chunk, filename-regex-constrained fastbin via LSB-only heap pointer overwrite, custom allocator unsafe unlink to GOT
-- [[binary/漏洞利用/heap-fsop.md|heap-fsop.md]] - FILE-structure (_IO_FILE) exploitation: fastbin stdout vtable two-stage hijack for PIE + Full RELRO, _IO_buf_base null-byte stdin hijack, glibc 2.24+ _IO_FILE vtable validation bypass, unsorted-bin attack on stdin _IO_buf_end, unsorted-bin corruption via mp_ structure, realloc(ptr, 0) as free() UAF, single-byte reference counter wraparound UAF
-- [[binary/漏洞利用/advanced-exploits.md|advanced-exploits.md]] - Advanced exploit techniques (part 1): VM signed comparison, BF JIT shellcode, type confusion, off-by-one index corruption, DNS overflow, ASAN shadow memory, format string with encoding constraints, custom canary preservation, signed integer bypass, canary-aware partial overflow, CSV injection, MD5 preimage gadgets, VM GC UAF slab reuse, path traversal sanitizer bypass, FSOP + seccomp bypass via openat/mmap/write
-- [[binary/漏洞利用/advanced-exploits.md|advanced-exploits.md]] - Advanced exploit techniques (part 2): bytecode validator bypass via self-modification, io_uring UAF with SQE injection, integer truncation int32->int16, GC null-reference cascading corruption, leakless libc via multi-fgets stdout FILE overwrite, signed/unsigned char underflow heap overflow, XOR keystream brute-force write primitive, tcache pointer decryption heap leak, unsorted bin promotion via forged chunk size, FSOP stdout TLS leak, TLS destructor hijack via `__call_tls_dtors`, custom shadow stack pointer overflow bypass, signed int overflow negative OOB heap write, XSS-to-binary pwn bridge
-- [[binary/漏洞利用/advanced-exploits.md|advanced-exploits.md]] - Advanced exploit techniques (part 4): Windows SEH overwrite + pushad VirtualAlloc ROP, IAT-relative resolution, detached process shell stability, SeDebugPrivilege SYSTEM escalation, ARM buffer overflow with Thumb shellcode, Forth interpreter system word exploitation, GF(2) Gaussian elimination for multi-pass tcache poisoning, single-bit-flip exploitation primitive (mprotect + iterative code patching), Game of Life shellcode evolution via still-lifes, UAF via menu-driven strdup/free ordering, Windows CFG bypass via system() as valid call target, neural network output as function pointer index OOB, shellcode unique-byte limit bypass via counter overflow
-- [[binary/漏洞利用/advanced-exploits.md|advanced-exploits.md]] - Advanced exploit techniques (part 3): stack variable overlap / carry corruption OOB, 1-byte overflow via 8-bit loop counter, game AI arithmetic mean OOB read, arbitrary read/write GOT overwrite to shell, stack leak via __environ + memcpy overflow, JIT sandbox escape via uint16 jump truncation, DNS compression pointer stack overflow with multi-question ROP, ELF code signing bypass via program header manipulation, game level format signed/unsigned coordinate mismatch, file descriptor inheritance via missing O_CLOEXEC, sign extension integer underflow in metadata parsing, ROP chain construction with read-only primitive, 4-byte shellcode with timing side-channel via persistent registers, CRC oracle as arbitrary read, UTF-8 case conversion buffer overflow
-- [[binary/漏洞利用/advanced-exploits.md|advanced-exploits.md]] - Advanced exploit techniques (part 5): data-interpretation exploitation — Chip-8 emulator OOB memory for ret2libc, double-precision float quicksort canary repositioning, bloom filter abs(INT_MIN) negative index OOB write
-- [[binary/漏洞利用/sandbox-escape.md|sandbox-escape.md]] - Custom VM exploitation, FUSE/CUSE devices, busybox/restricted shell, shell tricks, process_vm_readv sandbox bypass, named pipe file size bypass, CPU emulator print opcode Python eval injection (cross-references misc/pyjails.md for Python jail techniques)
-- [[binary/漏洞利用/kernel.md|kernel.md]] - Linux kernel exploitation fundamentals: environment setup, QEMU debug, heap spray structures (tty_struct, poll_list, user_key_payload, seq_operations), kernel stack overflow, canary leak, privilege escalation (ret2usr, kernel ROP), modprobe_path overwrite, core_pattern overwrite, kmalloc size mismatch heap overflow + struct file f_op corruption
-- [[binary/漏洞利用/kernel-techniques.md|kernel-techniques.md]] - Kernel exploitation techniques: tty_struct kROP (fake vtable + stack pivot), AAW via ioctl register control, userfaultfd race stabilization, SLUB allocator internals (freelist hardening/obfuscation), leak via kernel panic, MADV_DONTNEED race window extension (DiceCTF 2026), cross-cache CPU-split attack (DiceCTF 2026), PTE overlap file write (DiceCTF 2026), addr_limit bypass via failed file open for kernel memory read/write
-- [[binary/漏洞利用/kernel-bypass.md|kernel-bypass.md]] - Kernel protection bypass: KASLR/FGKASLR bypass (__ksymtab), KPTI bypass (swapgs trampoline, signal handler, modprobe_path/core_pattern via ROP), SMEP/SMAP bypass, GDB kernel module debugging, initramfs/virtio-9p workflow, exploit templates, exploit delivery
-- [[binary/漏洞利用/field-notes.md|field-notes.md]] - Detailed pwn notes: heap exploitation quick reference, additional exploit notes, useful commands
+| 保护状态 | 直接能做什么 | 去哪节 |
+|---|---|---|
+| No PIE + Partial RELRO | GOT 覆盖（最省事，地址全固定） | §3 |
+| Full RELRO | GOT 只读 → 打 `__free_hook`/`__malloc_hook`（glibc<2.34）或返回地址 | §3、§6 |
+| 有 Canary | 先泄漏，或干脆走堆 | §3、§6 |
+| NX 开启 | 不能跑栈上 shellcode → ROP / ret2win | §4 |
+| 栈溢出偏移已知 + 有 `pop rdi` | ret2win，一行打完 | §4 |
+| 输入直接进 `printf` | 格式串，先泄后写 | §5 |
+| 有 `malloc`/`free`/`edit` 菜单 | 堆，按 glibc 版本选手法 | §6 |
+| 有 `seccomp` | 不能 `execve` → ORW / 换 syscall | §7 |
+| 目标是内核模块 | 先定原语类型 | §8 |
+| 是自定义 VM / 受限 shell | 逃逸，不是 pwn | §9 |
 
 ---
 
-## When to Pivot
-
-- If you do not yet understand what the binary does, switch to `/reverse` before trying to exploit it.
-- If the service is really a restricted shell, encoding puzzle, or sandbox language challenge, switch to `/misc`.
-- If the exploit path depends on a web endpoint, session bug, or upload primitive more than memory corruption, switch to `/ctf-web`.
-- If the vulnerability requires breaking a cryptographic primitive before exploitation, switch to `/crypto`.
-
-## Quick Start Commands
+## 1. 环境
 
 ```bash
-# Binary analysis
+pip install "pwntools==4.15.0" "ROPgadget==7.7" "ropper==1.13.13"
+# 或 bash scripts/install_ctf_tools.sh python
+
+apt install gdb binutils strace ltrace qemu-system-x86
+apt install qemu-user qemu-user-static gdb-multiarch binutils-multiarch \
+            libc6-armhf-cross libc6-arm64-cross libc6-mips-cross   # 跨架构
+brew install gdb binutils qemu                                    # macOS
+gem install one_gadget seccomp-tools
+```
+
+pwndbg：Linux 用 GitHub，macOS 用 `brew install pwndbg/tap/pwndbg-gdb`。`checksec` 随 pwntools 一起装。
+
+---
+
+## 2. 三分钟侦察
+
+```bash
 checksec --file=binary
 file binary
 readelf -h binary
 
-# Find gadgets
 ROPgadget --binary binary | grep "pop rdi"
 ropper -f binary --search "pop rdi"
 one_gadget /lib/x86_64-linux-gnu/libc.so.6
 
-# Debug
 gdb -q binary -ex 'start' -ex 'checksec'
 
-# Pattern for offset finding
-python3 -c "from pwn import *; print(cyclic(200))"
+python3 -c "from pwn import *; print(cyclic(200))"          # 找偏移
 python3 -c "from pwn import *; print(cyclic_find(0x61616168))"
 
-# libc identification
-./libc-database/find puts <leaked_addr_last_3_nibbles>
+./libc-database/find puts <泄漏地址末 3 个半字节>            # 认 libc
 ```
 
-## Source Code Red Flags
+**源码红旗**：`pthread` → 竞态；`usleep`/`sleep` → 时序窗口；多线程共享全局变量 → TOCTOU。
 
-- Threading/`pthread` -> race conditions
-- `usleep()`/`sleep()` -> timing windows
-- Global variables in multiple threads -> TOCTOU
-
-## Race Condition Exploitation
-
+**竞态速测**：
 ```bash
 bash -c '{ echo "cmd1"; echo "cmd2"; sleep 1; } | nc host port'
 ```
 
-## Common Vulnerabilities
+---
 
-- Buffer overflow: `gets()`, `scanf("%s")`, `strcpy()`
-- Format string: `printf(user_input)`
-- Integer overflow, UAF, race conditions
+## 3. 保护对应的打法
 
-## Protection Implications for Exploit Strategy
+| 保护 | 状态 | 含义 |
+|---|---|---|
+| PIE | 关 | 所有地址固定，直接覆盖 |
+| RELRO | Partial | GOT 可写，GOT 覆盖可行 |
+| RELRO | Full | GOT 只读，改打 hooks/vtable/返回地址 |
+| NX | 开 | 栈堆不可执行，走 ROP 或 ret2win |
+| Canary | 有 | 栈破坏会被发现，先泄漏或改用堆 |
 
-| Protection | Status | Implication |
-|-----------|--------|-------------|
-| PIE | Disabled | All addresses (GOT, PLT, functions) are fixed - direct overwrites work |
-| RELRO | Partial | GOT is writable - GOT overwrite attacks possible |
-| RELRO | Full | GOT is read-only - need alternative targets (hooks, vtables, return addr) |
-| NX | Enabled | Can't execute shellcode on stack/heap - use ROP or ret2win |
-| Canary | Present | Stack smash detected - need leak or avoid stack overflow (use heap) |
+---
 
-**Quick decision tree:**
-- Partial RELRO + No PIE -> GOT overwrite (easiest, use fixed addresses)
-- Full RELRO -> target `__free_hook`, `__malloc_hook` (glibc < 2.34), or return addresses
-- Stack canary present -> prefer heap-based attacks or leak canary first
+## 4. 栈溢出
 
-## Stack Buffer Overflow
+1. `cyclic 200` 找偏移，`cyclic -l <值>` 定位
+2. `checksec` 看保护
+3. No PIE + No Canary = 直接 ROP
+4. Canary 用格式串泄漏，或部分覆盖
+5. forking 服务器可以逐字节爆破 canary（最多 7×256 次）
 
-1. Find offset: `cyclic 200` then `cyclic -l <value>`
-2. Check protections: `checksec --file=binary`
-3. No PIE + No canary = direct ROP
-4. Canary leak via format string or partial overwrite
-5. Canary brute-force byte-by-byte on forking servers (7*256 attempts max)
+**ret2win + magic**：溢出 → `ret`（对齐）→ `pop rdi; ret` → magic → win()。
 
-**ret2win with magic value:** Overflow -> `ret` (alignment) -> `pop rdi; ret` -> magic -> win(). **Stack alignment:** SIGSEGV in `movaps` = add extra `ret` gadget. **Offset:** buffer at `rbp - N`, return at `rbp + 8`, total = N + 8. **Input filtering:** assert payload avoids `memmem()` banned strings. **Gadgets:** `ROPgadget --binary binary | grep "pop rdi"`, or pwntools `ROP()` for hidden gadgets in CMP immediates. See [[binary/漏洞利用/overflow-basics.md|overflow-basics.md]] for full exploit code.
+**三个高频坑**：
+- **栈对齐**：`movaps` 上 SIGSEGV = 多塞一个 `ret` gadget
+- **偏移算错**：缓冲区在 `rbp - N`，返回地址在 `rbp + 8`，总偏移 = N + 8
+- **输入过滤**：断言 payload 里不含 `memmem()` 的黑名单串
 
-## Parser Stack Overflow (Unchecked memcpy)
+**解析器栈溢出（未校验 `memcpy` 长度）**：自定义文件解析器（PCAP/图片/归档）用固定栈缓冲区但输入长度可超。`memcpy` 在长度校验前就拷贝，溢出保存寄存器与返回地址。必须**恢复 callee-saved 寄存器**（`rbx` 指向可读内存如 BSS、循环计数改成退出值），再 `ret` + win。详见 [[binary/漏洞利用/overflow-basics.md|栈与基础溢出]]。
 
-**Pattern:** Custom file parser (PCAP, image, archive) allocates fixed stack buffer but input records can exceed it. `memcpy` copies before length validation, overflowing saved registers and return address. Must restore callee-saved registers: `rbx` to readable memory (BSS), loop counters to exit values, then `ret` gadget + win function. See [[binary/漏洞利用/overflow-basics.md#parser-stack-overflow-via-unchecked-memcpy-length-metactf-flash-2026|overflow-basics.md]].
+**结构体指针覆盖（堆菜单题）**：create/modify/delete 的结构体含数据缓冲区 + 指针。把 name 溢出到指针字段填 GOT 地址，再用 modify 写 win 地址。
 
-## Struct Pointer Overwrite (Heap Menu Challenges)
+**有符号整数绕过**：`scanf("%d")` 不检查符号；负数量 × 单价 = 负总价，直接绕过余额检查。
 
-**Pattern:** Menu create/modify/delete on structs with data buffer + pointer. Overflow name into pointer field with GOT address, then write win address via modify. See [[binary/漏洞利用/overflow-basics.md|overflow-basics.md]] for full exploit and GOT target selection table.
+**Canary 感知的部分溢出**：溢出缓冲区与 canary 之间的 `valid` 标志。用 `./` 当无操作路径填充精确长度。
 
-## Signed Integer Bypass
+**全局缓冲区溢出（CSV 注入）**：相邻全局变量；多塞几个 CSV 分隔符就能改掉文件名指针。
 
-**Pattern:** `scanf("%d")` without sign check; negative quantity * price = negative total, bypasses balance check. See [[binary/漏洞利用/overflow-basics.md|overflow-basics.md]].
+**隐藏 gadget**：`ROPgadget` 找不到时用 pwntools `ROP()`，它能从 CMP 立即数里挖出 gadget。
 
-## Canary-Aware Partial Overflow
+---
 
-**Pattern:** Overflow `valid` flag between buffer and canary. Use `./` as no-op path padding for precise length. See [[binary/漏洞利用/overflow-basics.md|overflow-basics.md]] and [[binary/漏洞利用/advanced.md|advanced.md]] for full exploit chain.
+## 5. 格式串
 
-## Global Buffer Overflow (CSV Injection)
+输入直接进 `printf` 就是格式串。两阶段：先泄漏（libc/canary/栈），再写（GOT/hook）。
 
-**Pattern:** Adjacent global variables; overflow via extra CSV delimiters changes filename pointer. See [[binary/漏洞利用/overflow-basics.md|overflow-basics.md]] and [[binary/漏洞利用/advanced.md|advanced.md]] for full exploit.
+**经输入变换的格式串（ROT13）**：输入到达 `printf` 前被 ROT13/Caesar 变换，就把 payload 用逆变换预编码，让它到达时还原。
 
-## ROP Chain Building
+**关键判据**：能写几字节取决于 `%n` 家族（`%hhn` 1 字节、`%hn` 2 字节、`%n` 4 字节）；能泄什么取决于栈上恰好有什么。
 
-Leak libc via `puts@PLT(puts@GOT)`, return to vuln, stage 2 with `system("/bin/sh")`. See [[binary/漏洞利用/rop-and-shellcode.md|rop-and-shellcode.md]] for full two-stage ret2libc pattern, leak parsing, and return target selection.
+详见 [[binary/漏洞利用/format-string.md|格式串]]。
 
-**DynELF libc discovery:** `pwntools.DynELF(leak_func, pointer_in_libc)` resolves libc symbols remotely without knowing the libc version. See [[binary/漏洞利用/rop-and-shellcode.md#dynelf-automated-libc-discovery-rc3-ctf-2016|rop-and-shellcode.md]].
+---
 
-**Constrained shellcode in small buffers:** When buffer is too small, use `read()` shellcode stub (< 20 bytes) to pull full stage-2 shellcode. See [[binary/漏洞利用/rop-and-shellcode.md#constrained-shellcode-in-small-buffers-tum-ctf-2016|rop-and-shellcode.md]].
+## 6. 堆
 
-**Raw syscall ROP:** When `system()`/`execve()` crash (CET/IBT), use `pop rax; ret` + `syscall; ret` from libc. See [[binary/漏洞利用/rop-and-shellcode.md|rop-and-shellcode.md]].
+按 glibc 版本选手法，**版本判断先于漏洞分析**：
 
-**ret2csu:** `__libc_csu_init` gadgets control `rdx`, `rsi`, `edi` and call any GOT function — universal 3-argument call without libc gadgets. See [[binary/漏洞利用/rop-and-shellcode.md#ret2csu--__libc_csu_init-gadgets-crypto-cat|rop-and-shellcode.md]].
+| 版本 | 可用手法 |
+|---|---|
+| < 2.26 | fastbin dup、unsafe unlink、House of Force/Spirit |
+| 2.26+ | tcache（无校验，最快） |
+| 2.29+ | tcache key 校验 → 需要 double-free 变体 |
+| 2.31+ | 移除 `__malloc_hook`/`__free_hook` → 转 FSOP |
+| 2.32+ | safe-linking（指针混淆） |
 
-**Bad char XOR bypass:** XOR payload data with key before writing to `.data`, then XOR back in place with ROP gadgets. Avoids null bytes, newlines, and other filtered characters. See [[binary/漏洞利用/rop-and-shellcode.md#bad-character-bypass-via-xor-encoding-in-rop-crypto-cat|rop-and-shellcode.md]].
+**常用落点**：
+- `__free_hook` / `__malloc_hook`（glibc < 2.34）
+- `_IO_FILE` 结构体 + vtable（FSOP）
+- `_IO_list_all`、`stdout` 的 `_IO_buf_base`
 
-**Exotic gadgets (BEXTR/XLAT/STOSB/PEXT):** When standard `mov` write gadgets are unavailable, chain obscure x86 instructions for byte-by-byte memory writes. See [[binary/漏洞利用/rop-and-shellcode.md#exotic-x86-gadgets--bextrxlatstosbpext-crypto-cat|rop-and-shellcode.md]].
+详见 [[binary/漏洞利用/heap-techniques.md|堆利用]] 与 [[binary/漏洞利用/heap-fsop.md|FILE 结构体利用]]。
 
-**Stack pivot (xchg rax,esp):** Swap stack pointer to attacker-controlled heap/buffer when overflow is too small for full ROP chain. Requires `pop rax; ret` to load pivot address first. See [[binary/漏洞利用/rop-and-shellcode.md#stack-pivot-via-xchg-raxesp-crypto-cat|rop-and-shellcode.md]].
+---
 
-**rdx control:** After `puts()`, rdx is clobbered to 1. Use `pop rdx; pop rbx; ret` from libc, or re-enter binary's read setup + stack pivot. See [[binary/漏洞利用/rop-and-shellcode.md|rop-and-shellcode.md]].
+## 7. ROP
 
-**Canary XOR epilogue as rdx zeroing gadget:** When no `pop rdx; ret` exists, jump into the canary check epilogue `xor rdx, fs:28h` -- it zeros RDX when the canary is intact. See [[binary/漏洞利用/rop-and-shellcode.md#stack-canary-xor-epilogue-as-rdx-zeroing-gadget-volgactf-2017|rop-and-shellcode.md]].
+**基础两阶段 ret2libc**：`puts@PLT(puts@GOT)` 泄 libc → 返回 vuln → 第二阶段 `system("/bin/sh")`。
 
-**stub_execveat as execve alternative:** When no `pop rax; ret` exists, use `stub_execveat` (syscall 322/0x142) instead of `execve` -- send exactly 0x142 bytes so `read()` return value sets rax. See [[binary/漏洞利用/rop-and-shellcode.md#stub_execveat-syscall-as-execve-alternative-asis-ctf-2018|rop-and-shellcode.md]].
+**DynELF 自动识别 libc**：`pwntools.DynELF(leak_func, pointer_in_libc)` 在不知道 libc 版本时远程解析符号。
 
-**Shell interaction:** After `execve`, `sleep(1)` then `sendline(b'cat /flag*')`. See [[binary/漏洞利用/rop-and-shellcode.md|rop-and-shellcode.md]].
+**小缓冲区里的受限 shellcode**：缓冲区太小就先用 `read()` 存根（< 20 字节）拉完整二阶段 shellcode。
 
-## Format String Through Input Transformation
+**裸 syscall ROP**：`system()`/`execve()` 因 CET/IBT 崩掉时，改用 `pop rax; ret` + `syscall; ret`（都从 libc 取）。
 
-**ROT13-encoded format string:** When input is ROT13/Caesar-transformed before reaching `printf`, pre-encode the format string payload with the inverse transform so it arrives intact. See [[binary/漏洞利用/format-string.md#format-string-exploit-through-rot13-encoding-sunshinectf-2018|format-string.md]].
+**ret2csu**：`__libc_csu_init` 的 gadget 能控制 `rdx`/`rsi`/`edi` 并调用任意 GOT 函数——不需要 libc gadget 就能做三参数调用。
 
-## Kernel Exploitation
+**坏字符 XOR 绕过**：把 payload 与 key XOR 后写进 `.data`，再用 ROP gadget 原地 XOR 回来。避开 null、换行等被过滤的字节。
 
-**addr_limit bypass via failed file open:** When a kernel module sets `addr_limit = KERNEL_DS` but fails to restore it on error paths, force the error (e.g., make target file a directory) to retain kernel memory access from userspace `read()`/`write()`. See [[binary/漏洞利用/kernel-techniques.md#kernel-addr_limit-bypass-via-failed-file-open-midnight-sun-ctf-2018|kernel-techniques.md]].
+**冷门 gadget（BEXTR/XLAT/STOSB/PEXT）**：没有标准 `mov` 写 gadget 时，串这些冷门指令做逐字节写。
 
-## Sandbox and Emulator Escape
+**栈枢轴（`xchg rax, esp`）**：溢出空间不够放完整链时，把栈指针换到可控堆/缓冲区。需要先 `pop rax; ret` 装枢轴地址。
 
-**CPU emulator eval injection:** When an emulator's print opcode uses `eval('"' + buf + '"')` for escape sequences, build `"+__import__("os").system("cmd")#` in emulator memory via ADD opcodes to escape the string and execute Python. See [[binary/漏洞利用/sandbox-escape.md#cpu-emulator-print-opcode-python-eval-injection-midnight-sun-ctf-2018|sandbox-escape.md]].
+**rdx 控制**：`puts()` 之后 rdx 被清成 1。用 libc 的 `pop rdx; pop rbx; ret`，或重入二进制的 read 设置 + 栈枢轴。
 
-## Advanced Exploit Primitives
+**Canary XOR 尾声当 rdx 清零 gadget**：没有 `pop rdx; ret` 时，跳进 canary 校验尾声 `xor rdx, fs:28h`——canary 完好时它正好把 RDX 清零。
 
-**Neural network function pointer OOB:** When a binary uses NN output as an index into a function pointer array without bounds checking, retrain weights/biases to produce an out-of-bounds index that reads a target address from the biases array. See [[binary/漏洞利用/advanced-exploits.md#neural-network-output-as-function-pointer-index-oob-swampctf-2018|advanced-exploits.md]].
+**`stub_execveat` 替代 execve**：没有 `pop rax; ret` 时用 syscall 322（0x142），**正好发 0x142 字节**让 `read()` 的返回值把 rax 设成 322。
 
-**Shellcode unique-byte limit bypass via counter overflow:** When shellcode is limited to N unique bytes, spray the stack to corrupt the `seen[256]` counter, then re-execute main (skipping `memset`) so the overflowed counter allows arbitrary bytes on the second run. See [[binary/漏洞利用/advanced-exploits.md#shellcode-unique-byte-limit-bypass-via-counter-overflow-blaze-ctf-2018|advanced-exploits.md]].
+**拿 shell 后**：`sleep(1)` 再 `sendline(b'cat /flag*')`——不等会读到回显前的空缓冲。
 
-## Deep-Dive Notes
+详见 [[binary/漏洞利用/rop-and-shellcode.md|ROP 与 shellcode]]、[[binary/漏洞利用/rop-advanced.md|ROP 进阶]]。
 
-Use [[binary/漏洞利用/field-notes.md|field-notes.md]] once you have confirmed the challenge is truly exploitation-heavy.
+---
 
-- Heap and allocator notes: House of Apple, tcache, unsafe unlink, talloc, UAF, FSOP
-- Advanced exploit notes: seccomp bypass, ret2vdso, io_uring, integer truncation, ASAN, timing oracles
-- Sandbox and hybrid notes: pyjail crossover, busybox escapes, custom VMs, shell tricks, path sanitizers
-- Kernel and Windows notes: kernel playbooks, SEH, CFG bypass, privilege escalation
-- Historical case notes: older but still reusable CTF exploit patterns
+## 8. seccomp
+
+**判据**：`seccomp-tools dump ./binary` 看允许哪些 syscall。
+
+- 禁 `execve` 但允许 `open`/`read`/`write` → **ORW** shellcode
+- 只禁 `open` → 试 `openat`（syscall 437）、`openat2`
+- 禁 x86-64 → 切 x32 ABI（syscall 号 | `0x40000000`）或 `retf` 切 32 位
+- 禁 `read`/`write` → `sendfile`、`splice`、`pread64`
+
+详见 [[binary/漏洞利用/advanced.md|语义误用与 seccomp]]、[[binary/漏洞利用/rop-advanced.md|ROP 进阶]]。
+
+---
+
+## 9. 内核
+
+先定原语：AAW / UAF / 竞态 / 越界。有 AAW 就改 `modprobe_path`，别硬做 kROP。
+
+- 基础（环境、堆喷、栈溢出、提权、`modprobe_path`、`core_pattern`）：[[binary/漏洞利用/kernel.md|内核基础]]
+- 进阶（`tty_struct` kROP、uffd、SLUB、跨缓存、PTE 重叠）：[[binary/漏洞利用/kernel-techniques.md|内核进阶]]
+- 保护绕过（KASLR/FGKASLR/KPTI/SMEP/SMAP）：[[binary/漏洞利用/kernel-bypass.md|保护绕过]]
+
+---
+
+## 10. 沙箱与模拟器逃逸
+
+**判据**：目标不是「有内存破坏的原生程序」，而是「限制你能调什么」的容器。
+
+- 自定义 VM、FUSE/CUSE 设备、busybox 受限 shell
+- `process_vm_readv` 沙箱绕过、命名管道文件大小绕过
+- CPU 模拟器 print opcode 的 Python `eval` 注入：模拟器用 `eval('"' + buf + '"')` 处理转义序列时，用 ADD 指令在模拟内存里拼出 `"+__import__("os").system("cmd")#`，跳出字符串执行 Python
+
+详见 [[binary/漏洞利用/sandbox-escape.md|沙箱逃逸]]、[[misc/沙箱逃逸/pyjails.md|pyjail]]。
+
+---
+
+## 11. 何时该换方向
+
+- **看不懂二进制在干什么** → 先走 [[binary/逆向工程/index.md|逆向]]，别硬爆
+- **本质是受限 shell / 编码题 / 沙箱语言** → [[misc/沙箱逃逸/pyjails.md|misc 轨]]
+- **利用链依赖 Web 端点、会话、上传原语** → Web 轨
+- **必须先破密码学原语** → crypto 轨
+
+---
+
+## 12. 分册导航
+
+| 分册 | 内容 |
+|---|---|
+| [[binary/漏洞利用/overflow-basics.md\|栈与基础溢出]] | 栈/全局溢出、ret2win、canary 绕过、结构体指针覆盖、有符号整数、隐藏 gadget、解析器溢出 |
+| [[binary/漏洞利用/rop-and-shellcode.md\|ROP 与 shellcode]] | ret2libc、syscall ROP、rdx 控制、ret2csu、坏字符 XOR、冷门 gadget、栈枢轴、DynELF、`stub_execveat` |
+| [[binary/漏洞利用/rop-advanced.md\|ROP 进阶]] | 双栈枢轴到 BSS、SROP、seccomp 绕过、`retf` 架构切换、`.fini_array` 劫持、ret2vdso、x32 ABI、时间盲注外带 |
+| [[binary/漏洞利用/format-string.md\|格式串]] | 泄漏、GOT 覆盖、盲打、canary 泄漏、`__free_hook`、`.rela.plt` 改写、`argv[0]` 覆盖、`.fini_array` 循环、`__printf_chk` 绕过、ROT13 变换 |
+| [[binary/漏洞利用/heap-techniques.md\|堆利用]] | House of Apple/Einherjar/Orange/Spirit/Lore/Force、堆整形、自定义分配器（nginx/talloc）、经典 unlink、musl 堆、tcache stashing unlink |
+| [[binary/漏洞利用/heap-fsop.md\|FILE 结构体]] | `_IO_FILE` 利用、fastbin stdout vtable 两段劫持、`_IO_buf_base` 空字节劫持、vtable 校验绕过、`mp_` 结构体、`realloc(ptr,0)` 当 free、引用计数回绕 |
+| [[binary/漏洞利用/advanced.md\|语义误用]] | seccomp 进阶、UAF、JIT、冷门 GOT、进制转换堆重叠、`ret2dlresolve`、内核基础 |
+| [[binary/漏洞利用/advanced-exploits.md\|进阶原语合集]] | VM 有符号比较、BF JIT shellcode、类型混淆、ASAN 影子内存、`io_uring` UAF、整数截断、GC 空引用、无泄漏 libc、TLS 析构劫持、Windows SEH/CFG、GF(2) 消元、单比特翻转、神经网络索引越界、Chip-8 OOB |
+| [[binary/漏洞利用/sandbox-escape.md\|沙箱逃逸]] | 自定义 VM、FUSE/CUSE、busybox 受限 shell、`process_vm_readv` 绕过、命名管道、CPU 模拟器 eval 注入 |
+| [[binary/漏洞利用/kernel.md\|内核基础]] | 环境搭建、QEMU 调试、堆喷结构、内核栈溢出、canary 泄漏、提权、`modprobe_path`、`core_pattern` |
+| [[binary/漏洞利用/kernel-techniques.md\|内核进阶]] | `tty_struct` kROP、ioctl AAW、uffd、SLUB 内部、跨缓存 CPU 分裂、PTE 重叠、`addr_limit`、自定义 binfmt |
+| [[binary/漏洞利用/kernel-bypass.md\|内核保护绕过]] | KASLR/FGKASLR（`__ksymtab`）、KPTI（swapgs trampoline）、SMEP/SMAP、GDB 调模块、initramfs/virtio-9p |
+| [[binary/漏洞利用/field-notes.md\|实战笔记]] | 堆利用速查、补充笔记、常用命令 |
+
+---
+
+## 13. 纪律
+
+- **`checksec` 先于一切**。保护组合决定手法，不先看就是瞎猜。
+- **glibc 版本决定堆手法**。`< 2.26` / `2.26+` / `2.31+` 是完全不同的题，先 `ldd --version` 或从泄漏里认。
+- **能泄就先泄**。有格式串、有 `puts`、有未初始化栈，先把 libc 拿到手，再谈写。
+- **报的是保护组合不是漏洞名**。「有栈溢出」不够，要知道 PIE/RELRO/Canary/NX 才能定打法。
+- **一阶段打完发现打不动，先怀疑对齐**。`movaps` 崩、`system` 崩、`one_gadget` 不中——多半是栈对齐或多塞一个 `ret` 就好。
+- **`seccomp` 一定要先 dump**。不 dump 就写 ORW，可能白写一遍。

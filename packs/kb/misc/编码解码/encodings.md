@@ -1,512 +1,227 @@
-# CTF Misc - Encodings & Media
-
-## Table of Contents
-- [Common Encodings](#common-encodings)
-  - [Base64](#base64)
-  - [Base32](#base32)
-  - [Hex](#hex)
-  - [IEEE 754 Floating Point Encoding](#ieee-754-floating-point-encoding)
-  - [UTF-16 Endianness Reversal (LACTF 2026)](#utf-16-endianness-reversal-lactf-2026)
-  - [BCD (Binary-Coded Decimal) Encoding (VuwCTF 2025)](#bcd-binary-coded-decimal-encoding-vuwctf-2025)
-  - [Multi-Layer Encoding Detection (0xFun 2026)](#multi-layer-encoding-detection-0xfun-2026)
-  - [URL Encoding](#url-encoding)
-  - [ROT13 / Caesar](#rot13--caesar)
-  - [Caesar Brute Force](#caesar-brute-force)
-- [QR Codes](#qr-codes)
-  - [Basic Commands](#basic-commands)
-  - [QR Structure](#qr-structure)
-  - [Repairing Damaged QR](#repairing-damaged-qr)
-  - [Finder Pattern Template](#finder-pattern-template)
-  - [QR Code Chunk Reassembly (LACTF 2026)](#qr-code-chunk-reassembly-lactf-2026)
-  - [QR Code Chunk Reassembly via Indexed Directories (UTCTF 2026)](#qr-code-chunk-reassembly-via-indexed-directories-utctf-2026)
-- [Multi-Stage URL Encoding Chain (UTCTF 2026)](#multi-stage-url-encoding-chain-utctf-2026)
-- [Esoteric Languages](#esoteric-languages)
-  - [Whitespace Language Parser (BYPASS CTF 2025)](#whitespace-language-parser-bypass-ctf-2025)
-  - [Custom Brainfuck Variants (Themed Esolangs)](#custom-brainfuck-variants-themed-esolangs)
-  - [Multi-Layer Esoteric Language Chains (Break In 2016)](#multi-layer-esoteric-language-chains-break-in-2016)
-- [base65536 CJK Unicode Binary Encoding (IceCTF 2018)](#base65536-cjk-unicode-binary-encoding-icectf-2018)
-
-See also: [[misc/编码解码/encodings-advanced.md|encodings-advanced.md]] - Verilog/HDL, Gray code, binary tree encoding, RTF custom tags, SMS PDU decoding, multi-encoding solvers, UTF-9, pixel binary encoding, hex Sudoku + QR, TOPKEK, MaxiCode
-
+---
+title: 编码与二维码
+phase: misc
+vuln_class: [misc, encoding, base64, qr, esolang]
+summary: 编码题的判据是「字符集」而不是「看起来像什么」——全 0-9a-f 就先按 hex（base64 也接受这些字符），能看出压缩 magic 就先解压，字符集是 A-Z2-7 就是 base32。
 ---
 
-## Common Encodings
+# 编码与二维码
 
-### Base64
+进阶编码（Gray 码、二叉树编码、SMS PDU、base65536 变体、MaxiCode 等）见 [[misc/编码解码/encodings-advanced.md|进阶编码]]；图片隐写见 [[forensics/隐写与信号/图片隐写.md|图片隐写]]。
+
+## 0. 判据速查
+
+| 观察到什么 | 结论 | 去哪节 |
+|---|---|---|
+| 字符集 `A-Za-z0-9+/=` | base64 | §1 |
+| 字符集 `A-Z2-7=`，无小写无 0/1/8/9 | base32 | §1 |
+| 全是 `0-9a-f` 且长度偶数 | **先 hex**，不要先 base64 | §1 |
+| 开头 `78 01`/`78 9c` / `1f 8b` / `BZh` / `fd 37 7a 58 5a 00` | zlib / gzip / bz2 / xz | §2 |
+| 一串数字，含小数与科学计数法 | IEEE 754 float32，4 字节一字符 | §1 |
+| 文本「变成日文」了 | UTF-16 端序反了 | §1 |
+| 每字节两位十进制 | BCD | §1 |
+| 全是空格/Tab/换行，或 S/T/L | Whitespace | §4 |
+| 重复的少量主题词 | 自定义 Brainfuck 映射 | §4 |
+| 一片 CJK 汉字墙 | base65536 | §5 |
+| 二维码被切成块 | 看块名/目录名是否带序号 | §3 |
+| 二维码残缺 | 纠错码可恢复，先修图 | §3 |
+
+## 1. 基础编码
+
 ```bash
 echo "encoded" | base64 -d
-# Charset: A-Za-z0-9+/=
-```
-
-### Base32
-```bash
 echo "OBUWG32DKRDHWMLUL53TI43OG5PWQNDSMRPXK3TSGR3DG3BRNY4V65DIGNPW2MDCGFWDGX3DGBSDG7I=" | base32 -d
-# Charset: A-Z2-7= (no lowercase, no 0,1,8,9)
-```
-
-### Hex
-```bash
 echo "68656c6c6f" | xxd -r -p
+echo "uryyb" | tr 'a-zA-Z' 'n-za-mN-ZA-M'     # ROT13
 ```
 
-### IEEE 754 Floating Point Encoding
+**hex 优先规则**：纯 `0-9a-f` 的字符串**同时满足 base64 的字符集**，但正确解法是先 hex。判断依据是长度——hex 要求偶数长度且解出的字节可打印；base64 通常含 `+`/`/`/`=` 或大小写混排。
 
-Numbers that encode ASCII text when viewed as raw IEEE 754 bytes:
+**ROT13 识别词**：`gur` = the、`synt` = flag、`pna` = can。
+
+**IEEE 754**：给一串混合整数/小数/科学计数法的数字时，每个 float32 恰好 4 字节：
 
 ```python
 import struct
-
-values = [240600592, 212.2753143310547, 2.7884192016691608e+23]
-
-# Each float32 packs to 4 ASCII bytes
-for v in values:
-    packed = struct.pack('>f', v)  # Big-endian single precision
-    print(f"{v} -> {packed}")      # b'Meta', b'CTF{', b'fl04'
-
-# For double precision (8 bytes per value):
-# struct.pack('>d', v)
+for v in [240600592, 212.2753143310547, 2.7884192016691608e+23]:
+    print(struct.pack('>f', v))    # b'Meta' b'CTF{' b'fl04'
 ```
 
-**Key insight:** If challenge gives a list of numbers (mix of integers, decimals, scientific notation), try packing each as IEEE 754 float32 (`struct.pack('>f', v)`) — the 4 bytes often spell ASCII text.
+双精度用 `'>d'`（8 字节）。**端序先试大端**，大端解出乱码再试小端。
 
-### UTF-16 Endianness Reversal (LACTF 2026)
+**UTF-16 端序反转**：
 
-**Pattern (endians):** Text "turned to Japanese" -- mojibake from UTF-16 endianness mismatch.
-
-**Fix:** Reverse the encoding/decoding order:
 ```python
-# If encoded as UTF-16-LE but decoded as UTF-16-BE:
-fixed = mojibake.encode('utf-16-be').decode('utf-16-le')
-
-# If encoded as UTF-16-BE but decoded as UTF-16-LE:
-fixed = mojibake.encode('utf-16-le').decode('utf-16-be')
+fixed = mojibake.encode('utf-16-be').decode('utf-16-le')   # 存为 LE 但按 BE 读
+fixed = mojibake.encode('utf-16-le').decode('utf-16-be')   # 反之
 ```
 
-**Identification:** Text appears as CJK characters (Japanese/Chinese), challenge mentions "translation" or "endian".
+判据：文本变成一堆 CJK 字符，且题面提到 translation / endian / 乱码。
 
-### BCD (Binary-Coded Decimal) Encoding (VuwCTF 2025)
-
-**Pattern:** Challenge name hints at ratio (e.g., "1.5x" = 1.5:1 byte ratio). Each nibble encodes one decimal digit.
+**BCD**：每字节拆两个半字节各表一位十进制。
 
 ```python
-def bcd_decode(data):
-    """Decode BCD: each byte = 2 decimal digits."""
-    return ''.join(f'{(b>>4)&0xf}{b&0xf}' for b in data)
-
-# Then convert decimal string to ASCII
-ascii_text = ''.join(chr(int(decoded[i:i+2])) for i in range(0, len(decoded), 2))
+dec = ''.join(f'{(b>>4)&0xf}{b&0xf}' for b in data)
+ascii_text = ''.join(chr(int(dec[i:i+2])) for i in range(0, len(dec), 2))
 ```
 
-### Multi-Layer Encoding Detection (0xFun 2026)
+## 2. 多层解码：不要中途有损
 
-**Pattern (139 steps):** Recursive decoding with troll flags as decoys.
+**核心纪律：全程保持 bytes，不要在中途用 `errors='replace'` 转成 str**——那会把后续 pass 的输入永久污染。文本解码器（hex/base64）只在 ASCII 视图上跑，压缩/XOR 在 bytes 上跑。
 
-**Critical rule:** When data is all hex chars (0-9, a-f), decode as **hex FIRST**, not base64 (which also accepts those chars). Distinguish compression by magic: **zlib** `78 01`/`78 9c`, **gzip** `1f 8b`, **bz2** `42 5a 68` (`BZh`), **lzma/xz** `fd 37 7a 58 5a 00`.
+**magic 表**：
+
+| 压缩 | magic |
+|---|---|
+| zlib | `78 01` / `78 9c` |
+| gzip | `1f 8b` |
+| bz2 | `42 5a 68`（`BZh`） |
+| lzma/xz | `fd 37 7a 58 5a 00` |
 
 ```python
-import base64, zlib, gzip, bz2, lzma
-
-def try_xor(data, key_hint='flag'):
-    """Single-byte brute 256 + repeating-key hint; xor_flag heuristic."""
-    raw = data.encode() if isinstance(data, str) else data
+def try_xor(raw, hint=b'flag'):
+    # 第一遍：精确匹配 hint（区分大小写），避免 0x20 把 FLAG 变 flag 的假命中
+    for k in range(256):
+        d = bytes(b ^ k for b in raw)
+        if hint in d:
+            return d
+    # 第二遍：大小写不敏感 + 可打印兜底
     best = None
-    # First pass: exact hint match (case-sensitive) — avoids FLAG false positive
-    # (e.g. key 0x20 maps FLAG->flag; exact pass prefers the true key).
-    for key in range(256):
-        decoded = bytes(b ^ key for b in raw)
-        if key_hint and decoded.count(key_hint.encode()) > 0:
-            return decoded
-    # Second pass: case-insensitive flag + printable fallback
-    for key in range(256):
-        decoded = bytes(b ^ key for b in raw)
-        printable = all(32 <= b < 127 or b in b'\n\r\t' for b in decoded[:64]) if decoded else False
-        if printable and b'flag' in decoded.lower():
-            return decoded
-        if printable and best is None:
-            best = decoded
-    # repeating-key hint (key_hint as repeating key)
-    if key_hint:
-        kh = key_hint.encode()
-        decoded = bytes(b ^ kh[i % len(kh)] for i, b in enumerate(raw))
-        if b'flag{' in decoded or b'CTF{' in decoded:
-            return decoded
+    for k in range(256):
+        d = bytes(b ^ k for b in raw)
+        if all(32 <= b < 127 or b in b'\n\r\t' for b in d[:64]):
+            if b'flag' in d.lower():
+                return d
+            best = best or d
     return best
-
-def _as_text(raw: bytes):
-    """Decode only for str-only passes; return None if not text-safe."""
-    try:
-        return raw.decode('ascii')
-    except UnicodeDecodeError:
-        return None
-
-def auto_decode(data):
-    # Keep raw bytes across passes — never lossy-decode mid-chain with
-    # errors='replace' (that corrupts the next pass's input). Text-only
-    # decoders (hex/base64) run on the ASCII view; compression/xor run on bytes.
-    raw = data.encode() if isinstance(data, str) else bytes(data)
-    while True:
-        text = _as_text(raw)
-        s = text.strip() if text is not None else None
-        if s is not None and s.startswith('REAL_DATA_FOLLOWS:'):
-            raw = s.split(':', 1)[1].encode()
-            continue
-        # Distinguish zlib (78 01/78 9c) vs gzip (1f 8b) vs bz2 vs lzma magic before text decoders
-        if raw.startswith(b'\x78\x01') or raw.startswith(b'\x78\x9c'):  # zlib
-            try:
-                raw = zlib.decompress(raw)
-                continue
-            except Exception:
-                pass
-        if raw.startswith(b'\x1f\x8b'):  # gzip 1f 8b
-            try:
-                raw = gzip.decompress(raw)
-                continue
-            except Exception:
-                pass
-        if raw.startswith(b'BZh'):  # bz2
-            try:
-                raw = bz2.decompress(raw)
-                continue
-            except Exception:
-                pass
-        if raw.startswith(b'\xfd7zXZ\x00'):  # lzma/xz
-            try:
-                raw = lzma.decompress(raw)
-                continue
-            except Exception:
-                pass
-        # xor branch — try_xor(data, key_hint='flag') single-byte brute 256 + repeating-key hint
-        # (two-pass: exact hint first, then case-insensitive printable fallback)
-        xor_res = try_xor(raw, key_hint='flag')
-        if xor_res is not None and xor_res != raw and b'flag' in xor_res.lower():
-            raw = xor_res
-            continue
-        # Prioritize hex when ambiguous — hex-first rule (str-only passes)
-        if s is not None and len(s) % 2 == 0 and len(s) > 0 and all(c in '0123456789abcdefABCDEF' for c in s):
-            try:
-                raw = bytes.fromhex(s)
-                continue
-            except Exception:
-                pass
-        if s is not None and len(s) % 4 == 0 and set(s) <= set('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/='):
-            try:
-                raw = base64.b64decode(s)
-                continue
-            except Exception:
-                pass
-        break
-    return raw
 ```
 
-**Ignore troll flags** — check for "keep decoding" or "REAL_DATA_FOLLOWS:" markers.
+**两遍的顺序不能反**：先精确匹配再模糊，否则 `key=0x20` 会把 `FLAG` 映射成 `flag` 而抢先命中，导致后面全错。
 
-> **CyberChef Magic verify:** paste remaining bytes into CyberChef *Magic* operation — it brute-forces the same xor/base/compression stack and confirms the manual `auto_decode` chain. Use Magic's intensity slider to replicate the hex-first rule.
+**钓鱼 flag**：多层题常在中间插假 flag。看到「keep decoding」「REAL_DATA_FOLLOWS:」这类标记就继续解，别停。
 
-### URL Encoding
-```python
-import urllib.parse
-urllib.parse.unquote('hello%20world')
-```
+## 3. 二维码
 
-### ROT13 / Caesar
 ```bash
-echo "uryyb" | tr 'a-zA-Z' 'n-za-mN-ZA-M'
+zbarimg qrcode.png            # 解码
+zbarimg -S*.enable qr.png     # 所有条码类型
+qrencode -o out.png "data"    # 生成
 ```
 
-**ROT13 patterns:** `gur` = "the", `synt` = "flag"
+**结构**：三个 7×7 定位图案在左上/右上/左下；版本公式 `边长模块数 = version*4 + 17`。
 
-### Caesar Brute Force
-```python
-text = "Khoor Zruog"
-for shift in range(26):
-    decoded = ''.join(
-        chr((ord(c) - 65 - shift) % 26 + 65) if c.isupper()
-        else chr((ord(c) - 97 - shift) % 26 + 97) if c.islower()
-        else c for c in text)
-    print(f"{shift:2d}: {decoded}")
-```
-
----
-
-## QR Codes
-
-### Basic Commands
-```bash
-zbarimg qrcode.png           # Decode
-zbarimg -S*.enable qr.png    # All barcode types
-qrencode -o out.png "data"   # Encode
-```
-
-### QR Structure
-
-**Finder patterns (3 corners):** 7x7 modules at top-left, top-right, bottom-left
-
-**Version formula:** `(version * 4) + 17` modules per side
-
-### Repairing Damaged QR
+**残图修复**：
 
 ```python
-from PIL import Image
-import numpy as np
-
-img = Image.open('damaged_qr.png')
-arr = np.array(img)
-
-# Convert to binary
-gray = np.mean(arr, axis=2)
+gray = np.mean(np.array(Image.open('damaged_qr.png')), axis=2)
 binary = (gray < 128).astype(int)
-
-# Find QR bounds
-rows = np.any(binary, axis=1)
-cols = np.any(binary, axis=0)
+rows, cols = np.any(binary, axis=1), np.any(binary, axis=0)
 rmin, rmax = np.where(rows)[0][[0, -1]]
 cmin, cmax = np.where(cols)[0][[0, -1]]
-
-# Check finder patterns
 qr = binary[rmin:rmax+1, cmin:cmax+1]
-print("Top-left:", qr[0:7, 0:7].sum())  # Should be ~25
 ```
 
-### Finder Pattern Template
-```python
-finder_pattern = [
-    [1,1,1,1,1,1,1],
-    [1,0,0,0,0,0,1],
-    [1,0,1,1,1,0,1],
-    [1,0,1,1,1,0,1],
-    [1,0,1,1,1,0,1],
-    [1,0,0,0,0,0,1],
-    [1,1,1,1,1,1,1],
-]
+定位图案模板（`1` 为黑）：
+
+```text
+1 1 1 1 1 1 1
+1 0 0 0 0 0 1
+1 0 1 1 1 0 1
+1 0 1 1 1 0 1
+1 0 1 1 1 0 1
+1 0 0 0 0 0 1
+1 1 1 1 1 1 1
 ```
 
-### QR Code Chunk Reassembly (LACTF 2026)
+**拼块题分两类，判据是「块有没有带序号」**：
 
-**Pattern (error-correction):** QR code split into grid of chunks (e.g., 5x5 of 9x9 pixels), shuffled.
+- **带序号**（目录名/文件名是 base64 的 `MDAx` → `001`）→ 解 base64 得索引，排序拼图即可。`side = int(math.isqrt(n))`，按 `divmod(i, side)` 贴到画布。
+- **不带序号（打乱）** → 靠结构约束回溯：先用定位/定时/对齐图案钉住约 50% 的块，再按 QR 规范的像素不变量做约束搜索。工具用 `segno`。
 
-**Solving approach:**
-1. **Fix known chunks:** Use structural patterns -- finder patterns (3 corners), timing patterns, alignment patterns -- to place ~50% of chunks
-2. **Extract codeword constraints:** For each candidate payload length, use QR spec to identify which pixels are invariant across encodings
-3. **Backtracking search:** Assign remaining chunks under pixel constraints until QR decodes successfully
+## 4. 深奥语言
 
-**Tools:** `segno` (Python QR library), `zbarimg` for decoding.
-
-### QR Code Chunk Reassembly via Indexed Directories (UTCTF 2026)
-
-**Pattern (QRecreate):** QR code split into numbered chunks stored in separate directories. Directory names encode the chunk index as base64 (e.g., `MDAx` → `001` → index 1).
-
-**Solving approach:**
-1. Decode each directory name from base64 to get the numeric index
-2. Sort chunks by decoded index
-3. Arrange in a grid (e.g., 100 chunks → 10x10) and stitch into a single image
-4. Decode the reconstructed QR code
-
-```python
-import os, base64, math
-from PIL import Image
-
-# 1. Decode directory names to get indices
-chunks = []
-for dirname in os.listdir('chunks/'):
-    index = int(base64.b64decode(dirname).decode())
-    tile = Image.open(f'chunks/{dirname}/tile.png')
-    chunks.append((index, tile))
-
-# 2. Sort by index and arrange in grid
-chunks.sort(key=lambda x: x[0])
-n = len(chunks)
-side = int(math.isqrt(n))
-tile_w, tile_h = chunks[0][1].size
-
-canvas = Image.new("RGB", (side * tile_w, side * tile_h), (255, 255, 255))
-for i, (_, tile) in enumerate(chunks):
-    r, c = divmod(i, side)
-    canvas.paste(tile, (c * tile_w, r * tile_h))
-
-canvas.save('reconstructed_qr.png')
-# 3. Decode with zbarimg or pyzbar
-```
-
-**Key insight:** Unlike the LACTF variant (shuffled chunks requiring structural analysis), indexed chunks just need sorting. The challenge is recognizing that directory names are base64-encoded indices. Check `base64 -d` on folder names when they look like random strings.
-
----
-
-## Multi-Stage URL Encoding Chain (UTCTF 2026)
-
-**Pattern (Breadcrumbs):** Flag is hidden behind a chain of URLs, each encoded differently. Follow the breadcrumbs across external resources (GitHub Gists, Pastebin, etc.), decoding at each hop.
-
-**Common encoding layers per hop:**
-1. **Base64** → URL to next resource
-2. **Hex** → URL to next resource (e.g., `68747470733a2f2f...` = `https://...`)
-3. **ROT13** → final flag
-
-**Decoding workflow:**
-```python
-import base64, codecs
-
-# Hop 1: Base64
-hop1 = "aHR0cHM6Ly9naXN0Lmdp..."
-url2 = base64.b64decode(hop1).decode()
-
-# Hop 2: Hex-encoded URL
-hop2 = "68747470733a2f2f..."
-url3 = bytes.fromhex(hop2).decode()
-
-# Hop 3: ROT13-encoded flag
-hop3 = "hgsynt{...}"
-flag = codecs.decode(hop3, 'rot_13')
-```
-
-**Key insight:** Each resource contains a hint about the next encoding (e.g., "Three letters follow" hints at 3-character encoding like hex). Look for contextual clues in surrounding text (poetry, comments, filenames) that indicate the encoding type.
-
-**Detection:** Challenge mentions "trail", "breadcrumbs", "follow", or "scavenger hunt". First resource contains what looks like encoded data rather than a direct flag.
-
----
-
-## Esoteric Languages
-
-| Language | Pattern |
-|----------|---------|
+| 语言 | 特征 |
+|---|---|
 | Brainfuck | `++++++++++[>+++++++>` |
-| Whitespace | Only spaces, tabs, newlines (or S/T/L substitution) |
+| Whitespace | 只有空格/Tab/换行，或 S/T/L 替换 |
 | Ook! | `Ook. Ook? Ook!` |
-| Malbolge | Extremely obfuscated |
-| Piet | Image-based |
+| Malbolge | 极度混淆 |
+| Piet | 图像即代码 |
 
-### Whitespace Language Parser (BYPASS CTF 2025)
+**Whitespace 指令集**（IMP = 指令修饰参数）：
 
-**Pattern (Whispers of the Cursed Scroll):** File contains only S (space), T (tab), L (linefeed) characters — or visible substitutes. Stack-based virtual machine (VM) with PUSH, OUTPUT, and EXIT instructions.
-
-**Instruction set (IMP = Instruction Modification Parameter):**
-| Instruction | Encoding | Action |
-|-------------|----------|--------|
-| PUSH | `S S` + sign + binary + `L` | Push number to stack (S=0, T=1, L=terminator) |
-| OUTPUT CHAR | `T L S S` | Pop stack, print as ASCII character |
-| EXIT | `L L L` | Halt program |
+| 指令 | 编码 | 动作 |
+|---|---|---|
+| PUSH | `S S` + 符号 + 二进制 + `L` | 压栈（S=0, T=1, L 终止） |
+| 输出字符 | `T L S S` | 弹栈按 ASCII 打印 |
+| 退出 | `L L L` | 结束 |
 
 ```python
 def solve_whitespace(content):
-    # Convert to S/T/L tokens (handle both raw whitespace and visible chars)
-    if any(c in content for c in 'STL'):
-        code = [c for c in content if c in 'STL']
-    else:
-        code = [{'\\s': 'S', '\\t': 'T', '\\n': 'L'}.get(c, '') for c in content]
-        code = [c for c in code if c]
-
-    stack, output, i = [], "", 0
-
+    code = [c for c in content if c in 'STL'] if any(c in content for c in 'STL') \
+           else [m for c in content for m in [{' ': 'S', '\t': 'T', '\n': 'L'}.get(c)] if m]
+    stack, out, i = [], "", 0
     while i < len(code):
-        if code[i:i+2] == ['S', 'S']:  # PUSH
+        if code[i:i+2] == ['S', 'S']:
             i += 2
-            sign = 1 if code[i] == 'S' else -1
-            i += 1
+            sign = 1 if code[i] == 'S' else -1; i += 1
             val = 0
             while i < len(code) and code[i] != 'L':
-                val = (val << 1) + (1 if code[i] == 'T' else 0)
-                i += 1
-            i += 1  # skip terminator L
+                val = (val << 1) | (code[i] == 'T'); i += 1
+            i += 1
             stack.append(sign * val)
-        elif code[i:i+4] == ['T', 'L', 'S', 'S']:  # OUTPUT CHAR
+        elif code[i:i+4] == ['T', 'L', 'S', 'S']:
             i += 4
-            if stack:
-                output += chr(stack.pop())
-        elif code[i:i+3] == ['L', 'L', 'L']:  # EXIT
+            if stack: out += chr(stack.pop())
+        elif code[i:i+3] == ['L', 'L', 'L']:
             break
         else:
             i += 1
-
-    return output
+    return out
 ```
 
-**Identification:** File with only whitespace characters, or challenge mentions "invisible code", "blank page", or uses S/T/L substitution. Try [Whitespace interpreter online](https://vii5ard.github.io/whitespace/) for quick testing.
+**自定义 Brainfuck 映射的识别**：ASCII 文本、超长行、词表只有 5-8 个词、**有一个词专门做行尾**（对应 `.`）、一个词出现次数远多于其他（对应 `+`）。
 
----
-
-### Custom Brainfuck Variants (Themed Esolangs)
-
-**Pattern:** File contains repetitive themed words (e.g., "arch", "linux", "btw") used as substitutes for Brainfuck operations. Common in Easy/Misc CTF challenges.
-
-**Identification:**
-- File is ASCII text with very long lines of repeated words
-- Small vocabulary (5-8 unique words)
-- One word appears as a line terminator (maps to `.` output)
-- Two words are used for increment/decrement (one has many repeats per line)
-- Words often relate to a meme or theme (e.g., "I use Arch Linux BTW")
-
-**Standard Brainfuck operations to map:**
-| Op | Meaning | Typical pattern |
-|----|---------|-----------------|
-| `+` | Increment cell | Most repeated word (defines values) |
-| `-` | Decrement cell | Second most repeated word |
-| `>` | Move pointer right | Short word, appears alone or with `.` |
-| `<` | Move pointer left | Paired with `>` word |
-| `[` | Begin loop | Appears at start of lines with `]` counterpart |
-| `]` | End loop | Appears at end of same lines as `[` |
-| `.` | Output char | Line terminator word |
-
-**Solving approach:**
 ```python
 from collections import Counter
-words = content.split()
-freq = Counter(words)
-# Most frequent = likely + or -, line-ender = likely .
-
-# Map words to BF ops, translate, run standard BF interpreter
-mapping = {'arch': '+', 'linux': '-', 'i': '>', 'use': '<',
-           'the': '[', 'way': ']', 'btw': '.'}
-bf = ''.join(mapping.get(w, '') for w in words)
-# Then execute bf string with a standard Brainfuck interpreter
+freq = Counter(content.split())      # 最高频 → +/-，行尾词 → .
+mapping = {'arch':'+', 'linux':'-', 'i':'>', 'use':'<', 'the':'[', 'way':']', 'btw':'.'}
+bf = ''.join(mapping.get(w, '') for w in content.split())
 ```
 
-**Real example (0xL4ugh CTF - "iUseArchBTW"):** `.archbtw` extension, "I use Arch Linux BTW" meme theme.
+**输出不是 ASCII 时先交换 `+`/`-` 或 `>`/`<`**，这两组是最常见的映射歧义。
 
-**Tips:** Try swapping `+`/`-` or `>`/`<` if output is not ASCII. Verify output starts with known flag format.
+**Piet**：PNG 没有明显隐写时，试 `npiet challenge.png`。多层链常见形态：Piet → base64 → Malbolge、Brainfuck → Ook → Whitespace、JSFuck → JS。
 
----
+## 5. base65536
 
-### Multi-Layer Esoteric Language Chains (Break In 2016)
-
-Challenges may stack multiple esoteric languages requiring sequential interpretation:
-
-1. **Piet:** Visual programming language using colored pixel blocks. Execute PNG images as code:
-```bash
-npiet challenge.png         # npiet interpreter
-# Or: java -jar PietDev.jar challenge.png
-```
-
-2. **Malbolge:** Extremely difficult esoteric language. Decode output from previous layer:
-```bash
-# Piet output → base64 decode → Malbolge source
-echo "piet_output" | base64 -d > program.mal
-malbolge program.mal        # Or use online interpreter
-```
-
-Common esoteric chains: Piet → base64 → Malbolge, Brainfuck → Ook → Whitespace, JSFuck → standard JS.
-
-**Key insight:** When a PNG file doesn't contain obvious visual stego, try interpreting it as Piet code. Use `file` + visual inspection to identify the first layer, then decode sequentially.
-
----
-
-## base65536 CJK Unicode Binary Encoding (IceCTF 2018)
-
-**Pattern:** A blob that looks like a wall of Chinese characters (CJK Unified Ideographs) is actually a **base65536** encoding: each character carries two bytes of data, mapping 0x0000..0xFFFF to a picked subset of 65,536 Unicode codepoints. Detect by `file` reporting "Unicode text, UTF-8" with mostly CJK codepoints; decode with the `base65536` npm package or the Python port.
+一片 CJK 汉字墙，实际是 base65536：每个码位承载 2 字节。
 
 ```bash
-# Node.js / npm path
-npm install -g base65536
-echo -n "宝䀈䀋..." | base65536 --decode > out.bin
-
-# Python port
 pip install base65536
-python3 - <<'PY'
-import base65536, sys
-sys.stdout.buffer.write(base65536.decode(open("blob.txt").read()))
-PY > out.bin
-
+python3 -c "import base65536,sys; sys.stdout.buffer.write(base65536.decode(open('blob.txt').read()))" > out.bin
 file out.bin
-# common outcome: "Zip archive data" or "ELF 64-bit"
 ```
 
-**Key insight:** base64 expands 3 bytes → 4 chars; base65536 expands 2 bytes → 1 *Unicode codepoint*, and since a codepoint renders as 1–4 UTF-8 bytes the encoded stream actually *expands* by ~2× on disk — but visually it looks compact, which is the CTF trick. Any wall of Unicode that lacks variance across the Basic Multilingual Plane and is dominated by CJK, Hangul, or Tibetan is a candidate. Also check base1024 (BMP), base2048, base4096, and base32768 for related tricks.
+**反直觉点**：base64 是 3 字节 → 4 字符（膨胀 33%），base65536 是 2 字节 → 1 码位，但码位在磁盘上占 1-4 个 UTF-8 字节，**实际膨胀约 2 倍**。视觉上却显得紧凑，这就是它的伪装价值。
 
-**References:** IceCTF 2018 — Rabbit Hole, writeup 11421
+**同类变体**：base1024（BMP）、base2048、base4096、base32768。判据都是「一片非拉丁 Unicode，且码位分布集中」。
+
+## 6. 多跳面包屑
+
+flag 藏在一串外部资源后面，每跳用不同编码。
+
+```python
+url2 = base64.b64decode("aHR0cHM6Ly9naXN0Lmdp...").decode()
+url3 = bytes.fromhex("68747470733a2f2f...").decode()
+flag = codecs.decode("hgsynt{...}", 'rot_13')
+```
+
+**提示常在周围文本里**：「Three letters follow」暗示 3 字符编码（hex）、诗歌/注释/文件名都可能指路。**看到 `68747470733a2f2f` 就知道是 `https://`**——这是 hex 编码 URL 的固定开头，可以直接认出来。
+
+## 7. 纪律
+
+- **按字符集判，不按形状猜**。纯 hex 字符串也是合法 base64，先 hex 能避免走弯路。
+- **全链保持 bytes**。中途 `errors='replace'` 会把数据永久改坏，而症状是「后面几层解出来是乱码」，很难回溯定位。
+- **压缩先看 magic**，不要对每个输入都试一遍 decompress——顺序错了会解出垃圾并覆盖原数据。
+- **别被钓鱼 flag 骗停**。多层题看到「keep decoding」就继续，最终 flag 常在最内层。

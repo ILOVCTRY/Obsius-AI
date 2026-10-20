@@ -6,7 +6,7 @@ phase: reverse
 
 > 来源：r0re 收编改编（2026-09-21）。APK 的 native 校验拆五条线推进；每条线只报
 > 增量事实（offset / symbol / section），没有证据的叙述等于没做。ELF 通用纪律
-> （func_kb 查重、大文件读取、变换速查）沿 [[skills/binary-rev/SKILL.md|binary-rev]]
+> （func_kb 查重、大文件读取、变换速查）沿 [[skills/二进制逆向手法/SKILL.md|二进制逆向手法]]
 > 技能，本篇只补 Android/移动专项。
 
 ## ① JNI 桥定位线（JNI bridge）
@@ -59,5 +59,5 @@ phase: reverse
 ## 变换速查
 
 XOR 常量 / 逐字节加减 / 查表替换 / 简易 TEA·XTEA / 魔改 base64 / 反转+位移——
-多层嵌套先分层落 finding 再逐层求解；so 分析结论照 binary-rev 纪律落 func_kb
+多层嵌套先分层落 finding 再逐层求解；so 分析结论照 二进制逆向手法 纪律落 func_kb
 （address + 语义名 + 算法结论），并行会话共享。

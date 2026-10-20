@@ -1,0 +1,576 @@
+jpg-zip-png 拼接是 MISC 经典套路：FFD9 后接 504B0304（zip）+ 89504E47（png）
+OR 运算的零元是 0：传 256 个 0x00 = 等同 no-op 还原原始内容
+栈溢出字节数要逐个试（0x28）
+数独答案之和恒为 405 是数学技巧
+大量 PNG 拼接用 magick montage
+BitLocker 用取证大师提取恢复密钥
+VMP 字符串改 UPX 是经典脱壳绕过
+WIDC 综合靶场覆盖取证/RCE/反序列化/密码/逆向/堆 12 大类
+rtsp://ubnt:wbox123@ 是常见摄像头弱口令
+pynmea2 + folium PolyLine 是 GPS 取证标配
+FINS 协议头 46494e53 是工控 CTF 标志性 magic
+Modbus 寄存器值 35152 = PNG \x89P 起点 magic
+IEC104 ioa 信息体地址字段是工控 CTF 取证核心
+libc.so 字符串 XOR 0x17 是常见字符串加密模式（基于 XOR 单一字节）
+洗牌密码用蒙特卡洛多次实验取期望差分判断 bit 是统计侧信道套路
+冰蝎默认密钥 e45e329feb5d925b 是 WebShell 管理工具硬编码密钥
+PHP act() 动态函数 + trim 处理 → %00 注入 + 文件路径 + 行号格式
+SpamMimic 7-bit 解密是经典 stego 工具
+CodeQL/Joern 按 callee+index 查询是漏洞审计高效模式
+memmove 第 3 参数 vs 第 1 参数的 dfg 缺失 = 缓冲区未按 size 申请
+HTML 解析过滤 + 提示工程多维度 + 投票 = LLM 漏洞分析稳定框架
+RAG + 多轮提示 + 投票是降低 LLM 幻觉的三板斧
+函数粒度切分让 LLM 上下文更聚焦
+CodeQL/Joern 按 callee+index 查询是漏洞分析高效模式
+memmove 第 3 vs 第 1 参数 dfg 缺失 = size 未按 len 申请
+硬件 Badge 谜题第一步永远看边缘/背面刻印 + 物理连接器
+Base64 末尾 == 是标准编码特征，立刻识别尝试解码
+Wifi 密码常藏在 Badge 物理刻印 / 二维码 / LED 闪烁中
+As ipv4'' 类提示要把日期或数字转 IP（默认网关 7.21.19.69 是经典 1969-07-21 映射）
+SAO 插槽 + 历史人物名（莱特兄弟 + 詹姆斯韦伯）= Aerospace 主题答案
+olevba.py 是提取 Office 宏的标配工具（decalage2/oletools）
+DNS 子域名 exfil（base64 编码）是常见 c2/exfil 通道，pcap 解析必须拼 + rev + base64 -d
+Tabby 是 Java 静态分析利器，soot + Neo4j 是核心
+Tabby-path-finder 解决长链路污点分析精度问题
+ATT&CK T1195.002（供应链投毒）+ T1552.001（凭据）+ T1041（C2）是 npm 投毒事件三件套
+宏 chr 拼接是直接可读 flag
+binwalk 提 jpeg 尾 zip/wav 是隐写通用方法
+Rust Vec::grow UAF 是 Rust 二进制程序漏洞常见入口
+schema 检索 + 上下文补全是 Text2SQL 核心难点，不是 SQL 生成本身
+向量检索字段模拟问题比多级 LLM 召回更精准且省 Token
+复读机熔断 + 最大迭代次数是 Agent 循环必备保护
+UCS-4LE 的 r4 移位是 4 字节重排关键
+经典 ptrace pwn：在 write() 等高频系统调用时改寄存器劫持 PC 跳 puts，是 suid 程序 + 内存不可读写时唯一可行方案
+DNS TXT SPF 记录是邮件协议取证第一步，spf1 a mx ?all 是标准格式
+zer0pts2022 readflag 类题模式：原 flag 在全局变量，main 被覆盖，必须 ptrace 劫持 PC 跳 puts
+Burp 改 map_id 是 web 参数简化关卡入门题常见模式
+PoolBigPageTable 记录大块连续内存分配
+PTE 4 级页表遍历扫描可执行页是反 rootkit 利器
+MD5(IP) 提交是应急响应题目经典要求
+CAN 流量特征提取 = 多次触发同操作找重复帧
+git 信息泄露（.git 目录）是经典 web 入口
+命令执行双写（flflagag.php）+ %0a 截断是经典绕过滤招
+APP 逆向 (IPA) 控车 API 是车联网题常见入口
+弱口令 123 是取证解压题高频密码
+coalesce 字段合并比 RDD when/otherwise 更清、性能更稳 (LakeSoul/Delta 通用)
+国产数据湖 LakeSoul 支持流批一体，比 Iceberg/Hudi 国产化更友好
+频繁子图挖掘的核心是减少比较次数 (标签化 + 排序 + 概率剪枝 + 并行 4 把刀)
+边属性合并编码 type_tag 后排序，可按边模式快速分类
+C++ mmap 数据读取比 pandas read_csv 快 5-10 倍
+大模型 + 投票机制 + RAG + 多轮提示是 AI 漏洞挖掘黄金组合
+BeautifulSoup 解析 + 函数级切分 + 类型过滤是预处理三件套
+多轮 LLM 调用降低单一模型偏差
+投票机制对抗 LLM 不确定性 (3 次调用 ≥2 票才采纳)
+DH 密钥交换 a 离散对数 → bsgs (Baby-Step Giant-Step) 2^40 时间复杂度
+RSA 已知 e 形如 sum=2^I+K 时，构造 p+q 二次方程是快速分解法
+多线程 + while 1: t.start() 是 PHP 上传竞争条件经典模式
+modbus.func_code==6 写寄存器是工控场景最常见数据通道
+删除后用户态可控制内核 RSP 触发内核执行
+EntryBleed (-cpu host) 是 KASLR 旁路经典侧信道
+域名接管是 CNAME 注销 + TXT 验证绕过
+FastFlux 特征是 NS/A 频繁变 (分钟级)
+攻击者画像核心是建立指标体系 (is_dangerous/is_proxy/is_gov_targeted 等)
+同源关联靠风险等级+身份分类+IP 主机号接近
+MongoDB 单文档 16MB 限制需切分大文件
+楞伽经类题是自造字符表 (256 字符) 索引加密
+自定义 AES Sbox 需还原 Rcon + 逆 Sbox
+uniqid().png 命名可猜测文件路径
+调证平台查一级卡 + 重明查卡号 + 二维码解析 URL + 浏览器开发者模式抓包 + APK 反编译找 AES key + 数据库备份下载+恢复 + 模拟器抓包改日期 + 群聊分析 + Electron XSS→RCE 完整链条演练
+AES-128 key 是 32 hex (4JQVC6Y3DNICA8NYBVKFLQQG0E6J89UT)
+SROP 设置 rax=15 (sys_rt_sigreturn) 是栈空间无 syscall 时的最后手段
+1 位翻转密码对应有限次 isPrime 爆破 = 异常高效的密码恢复手段
+侧信道爆破 flag 用 cmp 卡秒循环不需要任何外部信号，靠 SSH 卡死
+魔改密码族的识别：TEA delta/SM4 S 盒/RC4 初始表/shld 字节序 = 各种改法都有逆向模板
+50x50 路径问题必有 DP[i][j] = max(DP[i][j-1],DP[i-1][j]) + arr[i][j] 模板
+paragen 三次多项式 + 三次偏导为单变量多项式爆破提速
+盲注用 substr+hex 提取完整十六进制密码比位提取快
+Go 逆向找 main_handle_input 看协议格式最直接
+PHP 反序列化用全角字符替换 a-z 绕 SSTI 黑名单
+二分搜索 15 次 log2(900000) ≈ 20 精度足够
+自定义 VM 用 \x2e \x3e \x2c \x3c 字节码表示 ADD/SUB/IF/PRINT
+多模数 RSA e=3 时用 AMM 算法在每个 a_i 下求 e 次根再 CRT
+RSA 单素数 p^k 次幂 phi = p^k * (p-1) 是密码基础题型
+zkaq 类题经典 Nuclei 0day 模板自定义 YAML 触发
+ZKAQ 赛事常见'非常安全，没有问题'判断逻辑
+grep -rn + GROUP BY + 递归是数据研判三大件
+uid→pid 是树形结构，递归前必须先一次性 SELECT 全部节点建图
+BETWEEN 范围 + IN 列表是 order 表筛选的标准组合
+PyMySQL 是 Python 端 SQL 操作的官方库
+冰蝎 3.x 流量特征 = behind.php + AES 加密 + 响应体内层 base64
+pcap 流量取证关键是先识别 webshell 类型再针对性解密
+PHP mt_srand(time()) + shuffle 是 shuffle 预测经典
+仿射密码解法：c = (a*x+b) mod m → x = (c-b) * inverse(a, m) mod m
+M4A 文件字节反序恢复 ZIP 是音频混淆隐藏 zip 的常用手法
+混合进制题的特征: 列表内字符串长度 3/4 vs 6/7 → 八进制 vs 二进制分流
+PHP 反序列化逃逸的核心是用占位字段吞掉多余长度让后续类被吞入
+铁人三项综合赛典型结构：企业环境渗透(多 flag)+ 取证溯源(SSH/VNC)
+本题含多 flag (1-14)，需要逐个对应不同靶机/阶段
+取证阶段常给 SSH root:Szivfn4bLZ + data2024.zip 流量包组合
+XXE expect:// + $IFS 替换空格是 PHP 命令执行传统套路
+RC5-32/12/b 标准块密码常用于 CTF 多约束赛题，识别后立即上 Z3 求解 pop32+SipHash 校验链
+XXTEA delta 魔改（如 0x87654321）是常见 RE 套路，IDA 反汇编时直接看 magic constant
+量子密码侧信道：Hadamard 变换后测量概率泄露汉明距离 → ILP 整数线性规划可恢复 256-bit 密钥
+Chaquopy 嵌入式 Python 调用 = 静态资源中提取 hello.py 再解密
+XXTEA 变种看 delta + rounds + MX 函数参数即可识别
+RE URL题常见 '内存导出 + base64 解密' 双步套路
+Web caps 控制大小写 + 路径穿越是长城杯京津冀特色
+libc.got 覆盖成 system 等价函数 = GOT hijack，需要 2 次任意写
+全角 Unicode 字符 \uFF0D 等与 ASCII 同形 = WAF 过滤绕过经典手法
+可信计算（TCM/TPM）是新兴 CTF 方向，cube-1.3 是国内主流可信计算模拟器框架
+可信报告机制（PCR_QUOTE）是核心安全机制，由 PIK 签名 PCR 值
+5 角色链式拦截（user→term→server→crypt_user→crypt_hub）是 cube 框架的设计特点
+二进制→PIL 写像素是 HexCode 类题标配
+Wiener 攻击条件：e 大（接近 N），连分数收敛找 d
+('%c'*N)%(…) 是 Jinja SSTI 绕字符黑名单通用模板
+服务器失控题核心在 进程链 + 网络 + 文件 三维度排查
+时间盲注 if ... sleep(2) 是无回显场景通用手法
+MySQL root:root 默认密码是 adminer 直连经典踩点
+CUDA PTX 逆向核心是提取常量 S-box + 逆循环算法
+Django 文件缓存 pickle+zlib 序列化 = 反序列化 RCE 经典点
+MQTT 协议窗口期命令注入需要时序控制, 必须 nc 按报文交互
+TEA-like 单字变种 4 字节空间可直接 numpy 向量化暴力
+USB 键盘流量 <DEL> (Backspace) 退格键每个删前面 1 字符，要计算 <DEL> 数还原真实输入
+exe 改后缀解压是流量包杂项最常见套路（ZIP magic 50 4B 03 04）
+工业流量分析按时间排序找最异常状态（STOP）
+全局搜关键字 flag + hex 解码是 pcapng 流量题快速路径
+身份证 18 位正则 \d{17}[\dXx] 是国内取证必考
+老版 15 位身份证兼容（不常用）
+显示/隐藏选项看隐藏文本 + 字体颜色白色是 docx 取证入口
+BPF verifier check_mem_access 是关键防御
+arg3=ARG_PTR_TO_FIXED_SIZE_MEM|MEM_UNINIT|MEM_ALIGNED|MEM_RDONLY 是 BPF helper 标准标注
+BPF_CALL_3 宏是 BPF helper 调用的标准封装
+arg3_size=sizeof(s64) 是固定大小标注的关键
+OpenWrt 固件题标准做法：官网下同版本 diff
+SWD 协议是 ARM 调试标准，3-wire (SWDIO/SWCLK/SWO) + 状态机 (W AP4/R APc/RDBUFF)
+CAN ID 778 是 vehicle bus 经典帧
+0x410fd212 = ARM Cortex-M3 CPU ID
+JPEG EXIF Artist 字段常被用来藏 flag
+函数名混淆 it4chi/n4ut1lus/sh4dy/sl4y3r 提示四元素（海龟汤）
+三省六部制 = 3 核心 brain 决策 + 6 子 agent 执行（中书/门下/尚书类比）
+异步记忆同步 = 4 个解题子 agent 共享 partial progress，是并行搜索 CTF 解的关键
+sandbox + 自动安装工具 = 部署环境无关，agent 启动即可解题
+幻觉指出子 agent = 元层校验，避免解题方向跑偏
+1 小时领先 7000 分说明 agent 接管 CTF 已是工业级应用而非 demo
+zip 伪加密是改目录 14 00 XX 00 08 中 XX 第 1 位（0/1 切换）
+CRC32 爆破只适合 ≤5 字符（小文件 + 短内容）
+明文攻击需已知明文 + 相同压缩算法 + 算法版本一致
+硬件 CTF 必装工具：digipcba viewer / pcbway OnlineGerberViewer（Gerber 查看）+ Sigrok/PulseView（逻辑分析）
+Hamming(7,4) 纠错规则：3 个 p 错 → data_in0 错；p0+p1 错 → data_in3 错；p0+p2 错 → data_in2 错；p1+p2 错 → data_in1 错
+7 段数码管标准映射：a=顶部/b=右上/c=右下/d=底部/e=左下/f=左上/g=中间
+波形图/Gerber/Signals.txt 多源数据交叉验证是硬件 CTF 核心方法
+并查集 + LCS 桶排序优化 + 多进程是大规模域名分析三件套
+HTML 相似度聚类需排除 404/模板雷同误判
+桶排序预过滤使 LCS 候选集远小于 O(N²)
+判定问题（阈值）替代数值问题可提前退出加速
+钓鱼邮件检测 = 关键词黑白名单 + URL 白名单 + 附件白名单 + 内联图片特征
+中间截断/谐音/近形字是黑名单必须考虑的绕过
+邮件炸弹突破思路 = 大量正常发件服务并行触发
+LLM 辅助 + 规则匹配 + 相似性聚类 = 供应链安全 3 大武器
+MPHunter 通过聚类发现新型恶意包家族
+供应链安全 4 步漏斗：粗筛 + 精筛 + LLM + 动态
+静态规则 → 字符串污点 → LLM 验证 → 动态沙箱 = 高效漏斗
+ChatGPT prompt 可学习新恶意特征反向更新规则
+混淆包必须靠动态分析确认
+EAN-8 校验位算法 (odd*3 + even) % 10 是 CTF 条形码题标配
+9 个 PNG → 9 个数字 → 9 个字符是 emoji/字母转换题型的常见结构
+chr(0x40 + N) 把数字 1-26 映射到 A-Z 是 CTF flag 解码常用映射
+zsteg 是 LSB 隐写标配工具
+文件尾追加 zip/binwalk 分离是 MISC 入门
+bkcrack 明文攻击需构造已知明文
+PNG 高度字节位修改可恢复被裁剪的图像
+OSINT 行政区划查询（省/市/区/街道）是基本功
+牌型密码映射表（黑桃/红桃/梅花/红尖）是非标密文
+B 站 BV 号定位 + binwalk 分离是 MISC 套路
+二维码拼图还原 = 24 张 piece 排序
+UHA 压缩包 + wmie 沙箱检测 + Resolve-DnsName TXT 外带是 Huntress 历年高频考点
+单字节 XOR 爆破靠前几个字节明文（flag 格式）即可识别
+Splunk 类题直接走 web UI search 即可
+H3C $c$3$ 加密是 3DES + salt，靠官方模拟器解最稳
+路由器配置题非预期解：直接搭同型号模拟器复现
+PPPoE 客户端配置中密码可走 PAP 明文
+Hillst0ne 是 L3HCTF 2021 复用题目背景
+HCL 模拟器是 H3C 设备的 GNS3 替代
+Rabin 密码（E=2）的解有 4 个，必须 CRT 拼接 + 试每个解找 flag
+1.png alpha 通道值作为 0/1 编码是 CTF MISC 经典模式（PIL 读 pixel alpha）
+JPEG Huffman 表结构：ST-2 位置存长度大端序，ST 后跳过 1 字节类别，16 字节是码长 B[i]，剩余是码字 C
+DC_len = DC.get(bits[st:ed]) 是 Huffman 表反查码长的标准范式，AC.get(...) >> 4 / & 0xf 解析游程/码长
+对抗样本 + Keras 黑盒 = 只能靠 mutation 单像素扰动循环爆破 score
+8 字符 × 4 bit = 32 bit = 1 字节是位流拼接 flag 的固定套路
+vmdk 文件可十六进制直接搜 flag
+QQ 空间 OSINT + 王者荣耀战绩联动
+jpg/wav 拼接是 MISC 文件尾分离基础
+rabbit + Ook 是 CTF 文本编码常见组合
+whois 命令并非全功能，部分需注册商页面查
+TLDpedia 是 .tld 注册商查询索引
+图片细节观察（贴纸 / IG 图标）是 OSINT 基本功
+日文 OSINT 跨国店铺电话格式：国码 + 无连字符
+AI 越狱中 J.S.O.N 格式编码是绕 prompt 防御常用手段
+多轮上下文 '复述整个对话' 是泄露系统 prompt 经典技巧
+racist/homophobic 触发词既是防御也是被利用的注入引子
+rot13 本质是 a-z 字母偏移 13，但变种形式可写为 chr(ord(c) - 0x61 + 0x54)
+WPA/WPA2-PSK 字典爆破速度慢，rockyou.txt 通常足够
+LSB 隐写 + 零宽字符 + Snow 隐写 + 佛曰/天书/阴阳怪气是国内 Misc 三件套
+图片两字节反转是常见处理
+铁路 OSINT 看线路编号
+汉信码是中国自主二维码标准
+Base45 是欧洲常用编码
+电子墨水屏双 bit 平面是常见方案（黑白+红/黄）
+136×249 = 常见电子墨水屏分辨率
+numpy packbits/unpackbits 是位图重组最常用
+颜色映射 {0:白,1:黑,2:红} 是嵌入式显示惯例
+PNG IDAT 10000+ 块 + CRC 不正常 = CRC 隐写标志
+IP 末位 38/39 二值编码 = 隐蔽通道
+题目名字 Capture Radiate 是 CRC 谐音提示
+中文压缩包文件名 cp437→gbk 解码是中文文件处理技巧
+文件名 base64 拼接 + 排序是 misc 经典拼图
+Block Harbor 是汽车网络安全公司，VSEC 是其教育平台
+Mach-E 是福特电动 SUV，UDS 模拟是其训练靶场
+CAN 仲裁 ID + data 字段是车载协议基础
+美国车牌反查 VIN 是 OSINT 经典手法（密歇根州开放数据库）
+MAC 地址 OUI 查询配合 wigle.net 可定位历史位置
+0xc0ffe000 是汽车 CTF 蜜罐地址（coffee = 可可 = 测试）
+UDS 测试 ID 0x7E0 + 响应 ID 0x7E8 是诊断通信固定对
+模型选择需兼顾精度和泛化 — A 榜 10 张图选 VGG，到 B 榜 1201 张 MCNN 精度严重下滑
+量化迭代次数对精度影响不大（趋于平稳），230 次已足够
+图像预处理（尺寸+锐度+亮度组合）对最终 FINAL_SCORE 贡献最大
+INT8 量化 + 锐度/亮度增强是 TPU 部署最优组合
+B 榜泛化测试是真实场景，A 榜小样本易过拟合
+模型加速首先选对基础模型 — 直接转 FP32 bmodel 对比 4 个模型选 VGG
+batch_size 从 1 换 8 反而速度加倍，故放弃大 batch
+预处理图片最大/最小尺寸 + 模型输入尺寸组合对最终成绩影响最大
+FP32 比 INT8 精度高 2-3%，但速度慢 2-4×，按 score 公式权衡
+高级工程师单挑用 VGG+精确尺寸组合也能拿三等奖
+TF-IDF + 截断 SVD 降维既能省内存又加速训练，树模型上效果稳定
+CVE 编号作为人工特征有判别力 (年份越老 + 序号越靠前 = 攻击向量越老)
+B 榜阈值调优对不均衡多分类提分明显 (默认 0.5 不是最优)
+LightGBM 比 BERT 在小数据 + 结构化文本场景更稳 (符合数据竞赛经验)
+领域 MLM 预训练 (60k 未标) 在专业 NLP 任务上比通用预训练基线更适配
+BERT×LGB 概率逐元素相乘再 softmax = 两个模型分布融合 = 防过拟合
+focal loss α 用类别预测熵均值做启发式，比网格搜索更智能
+冻结前 5 层 + 分层学习率 (前小后大) = BERT 微调防过拟合通用配方
+B 榜衰减率 < 4% 说明模型泛化好，过拟合检测比绝对分数更重要
+对抗验证 (train vs test 分类) 能识别训练集噪声样本 (50000-59872 是反例)
+AUC 指标下做 rank 加权融合比 proba 融合更稳 (AUC 只看排序不看概率)
+树模型 + 神经网络双源 Stacking 比单一族融合上限高
+TPU 平台低 FLOPs ≠ 低推理时间 (depth-wise 类因访存瓶颈反慢)
+量化参数优化用遗传算法 + 伪真值模型比网格搜索更高效
+VGG 比 CSRNet/MCNN 在 TPU 上综合分高 (186.74 vs 169.76/68.34)
+网格搜索 (Grid Search) 是模型选择标准方法，6×5×5 = 150 组很快跑完
+FP32 vs INT8 量化在精度敏感任务中 INT8 不一定更好 (与 ChaMd5-AI 共识)
+Batch Size 对单 batch 推理耗时近线性，B=1 是 TPU 推理最佳
+大图分块推理 (288×384, 768×768) 避免下采样特征丢失
+VGG 在 TPU 上的综合分 (186.74) 显著高于 MCNN/CSRNet (169.76/68.34)
+长文本按标点拆分 + 多折融合能缓解长度限制 (而不是截断)
+差异化模型 (GRTE 表填充 + GlobalPointer) 比同质融合上限高
+FGM + EMA + SWA + 混合精度 + 分层学习率 = 2022 LLM 训练全套 trick
+后处理规则 (头尾重叠 + 边界短 + 空格) 在关系抽取类任务能加分
+CCL 外部数据对 A 榜有泄露风险，部分模型不加伪标防过拟合
+LakeSoul/Iceberg/Hudi 默认按系统时间戳无法乱序并行，必须改源码加 userDefinedTimestamp
+repartition 数应根据数据量+核数判断，小文件直接写入避免 shuffle
+COW (Copy on Write) vs MOR (Merge on Read) 选择对性能影响巨大 (写频繁选 MOR)
+HackASat 是美国国防部太空 CTF (DoD + USSF 主办)
+Skyfield 是 Python 卫星轨道计算库 (含 TLE/Satellite/Observer)
+altitudeMode: clampToGround 表示可忽略高度 (altitude=0)
+MMS 协议的 fileOpen+fileRead 可被滥用成任意文件读取通道
+hex 字符串字母被 ascii 减移位是 ICS 流量混淆常见手法
+gaps 是 CTF MISC 拼图题必备工具，遗传算法自动求解
+montage 用于快速拼接预览
+tile 维度先 20X30 试，再换 30X20
+zip 标志位奇偶控制伪加密 (010editor 模板改通用方法)
+10 字节内可 CRC32 碰撞, 10 字节以上不现实
+docx/jar/ipa/apk 都是 zip, 改后缀解压
+已知明文攻击靠 bkcrack (3 个 32-bit key, 12 字节差异)
+压缩包注释位可存数据
+白盒对抗补丁方法：冻结模型 + 对 input 梯度下降 + Adam 优化最小化 NMS 前 bbox 置信度
+相对路径加载 + ln -s 替换模型文件是非预期偷梁换柱的经典手法
+DeepFool 是信安国赛 Deep_Learning 当年 0 解题的正常路线
+对抗补丁设计三要素：形状（网格/方形/圆/星形）、位置（检测框中心）、纹理
+EIP-2929 cold/warm 访问成本差 2600-100 = 隐蔽的'内存'状态
+MISC 题常以多题混合（漫画 QR + GIF + 后门用户 + 多重编码 + AES + DP + PWN）考查
+多重编码识别 = base32/64/rot13/Atbash/Vigenère 特征
+GIF 多帧可拆分逐帧看 flag 字符
+fgets 缓冲区溢出 + ret2libc 是 PWN 入门套路
+防火墙类取证查启动项 + netstat 外联是双保险路径
+CTF-NetA 工具梭分片压缩包是 misc 取证加分利器
+zsteg 是 1.8 步完成 90% 情况的瑞士军刀
+G 通道 [1::3] 单色提取是特殊隐写模式
+5 张图轮试 + 多通道枚举是 LSB 通用解法
+isprintable() 过滤 = 减少假阳性的关键
+0 宽度 Unicode 隐写用 330k 工具秒解
+xlsx/png/zip 等格式头互转是常见套娃
+RTMP 流量过滤 Video Data 后用 tcpflow 抽 + rtmp2flv + ffmpeg 三步抽帧是经典工作流
+数字水印 = 抗截取隐写，核心特征是周期重复填充
+RGBA Alpha 通道只有 255/254 是 LSB 隐写的最强信号
+2×4 0 矩阵作为分隔符是常见水印编码边界
+水印解码要先识别周期，再缩范围到最小重复单元
+base64 是 flag 在水印里再包一层编码的常用招
+SM2 nonce 偏差攻击与 ECDSA nonce 偏差是同一类 HNP 问题
+音频题先听一遍无信息 → Audacity 频谱图 → 上下峰二进制/倒序反相/慢速降噪
+MIDI 4D546864 头可改通道数
+HackRF/原始数据后缀 .s8 需 Import Raw
+PT2242 编码 4bit 同步+20bit 地址+4bit 功能+1bit 停止
+海量MISC数据处理必须用批量自动化脚本
+RTP+G.711是VoIP标准协议(PT=0是μ-law/8是A-law)
+1305个音频流+AI识别+八进制+历史考证是综合能力
+Net-A 嗦哈协议解码得到 class 二进制 = 字节拼接恢复文件的通用套路
+PNG 高度/宽度修改藏 flag 是图像隐写入门点
+XXTEA 魔改重点关注 sum 递增/递减方向 + delta + key 长度 + pack 模式
+自定义 B64 表 + pack_string_le_with_len 是 RE 加密组合拳
+RSA p^5 用 sage nth_root 一步搞定
+XTEA 32 轮是入门题标配
+pyModeS 是 ADS-B 解码标配库
+sage gamma() 算大数阶乘是简单技巧
+p-1=2q 特殊 DLP 用 bsgs+padding 拆分爆破可破
+共享 RSA 素数用 gcd 找公因子
+复数 RSA 转 |n|^2 = a^2+b^2 分解
+tshark -e field -T fields 是工控 CTF 提取关键字段的标准命令行
+UDP 流 hex 改后缀 .264 是视频取证隐写套路（VLC 兼容 .h264/.264 裸流）
+CRC32 爆破 4 字节可见 ASCII 100^4 = 1 亿，Python 跑 30 秒
+dp 攻击 RSA：for x in range(1, e): if e*dp%x==1: p=(e*dp-1)//x+1
+str_xor 循环 key 扩展是 XOR 经典手法
+md5 多轮 + 历史人物名（Joan of Arc）是常见密码学套路
+angr block 内符号执行可避免路径爆炸，仅在危险函数前 0x20 字节局部约束求解
+mips 延迟槽参数指令在 call 后，angr 需手动调整 PC
+PyPy JIT 比 CPython 快数倍，是大规模二进制批量分析的提速关键
+慢速 http 完成握手 = 真实僵尸机；UDP/SYN 单向流量源 IP 可伪造
+P2P 节点 IP = 僵尸主机 IP，配合 SSH 爆破确认
+AES-ECB 模式 + 16 字节全 0 段落 = 分组密码同明文同密文特征
+reversal 字符串是 LLM 幻觉的稳定触发器
+角色扮演（Lord of the Rings）+ 上下文遗忘 = 通用越狱模板
+多轮对话 EDR+fileless 拆解引导降低单轮拦截率
+Bind 编译选项（--with-geoip2/--with-libjson）可识别 DNS 开放解析器
+NS 递归链 a→b→c→…→victim 可被攻击者控制触发放大
+Bind 9.16 与 9.18 胶水/陈旧缓存策略差异是稳定指纹
+BF → C 翻译（bftoc.py）是 BF 逆向的标配工具
+QBasic VM 是 n00bz 系列特色（'写多语言'风格）
+JPEG FFD9 后 trailing data 隐写 = CTF MISC 经典位置（FFD8 起 / FFD9 止，FFD9 后是 trailing）
+vmware .ova = tar + .vmdk，qemu-img convert -f vmdk -O vhdx 转 Windows 挂载格式
+NahamCon 是面向新生的入门 CTF（多 MISC 入门题）
+阿尔伯特广场 / 利物浦大厦是 UK 著名地标
+Big John's 是英国西布罗姆维奇外卖店
+报纸隐写 + 维吉尼亚是 CTF 古典密码组合
+Royal Liver Building 是利物浦标志性建筑
+wall 命令注入是 Linux 经典 sudo reboot 提权路径
+TryHackMe 风格 SSH 二分搜索是真实漏洞训练
+高校赛题的'组合技'是常态：XR4=RC4+random seed；MERGE_ECC=爆破+Smart's attack；Ez_Calculate=背包+RSA+Rabin 一题三杀
+fmt-string 两次利用 %10$p 泄地址 + %9$hn 写 ret 是入门 pwn 必会链
+魔改 UPX 改 CTF→UPX 即可用标准 UPX 脱壳，是常见 RE 出题套路
+RSA p,q 邻近用 iroot(N,2) 一行还原 p，Rabin 密码 E=2 必须 CRT 拼 4 解
+USB 键盘流量还原 = tshark + normalKeys/shiftKeys + <DEL>/<CAP> 处理三步
+HID Usage ID 0x04-0x1d 映射 a-z 是 USB 键盘流量还原核心字典
+onboard/offboard key 切换是车载协议常见模式
+栈溢出盲打需要 ret2libc 配合 canary 泄或无 canary 二进制
+(ord(c) + 3) ^ 9 是经典 XOR 加偏移勒索病毒解密
+RSA 短密钥（n 短到 16 位级）暗示题目另有私钥，不是分解
+勒索病毒取证的核心是恢复加密 key，不是解密算法
+ICSim = zombieCraig/ICSim 仪表盘仿真器，./icsim vcan0 -s seed 启动
+CAN ID 统计可反推 arbitration ID 是车辆功能识别
+管理员私钥泄露 = 整个项目归零, 必须冷钱包隔离
+AirdropCheck() 给新用户 1000 是薅羊毛入口, 业务层必须设门槛
+EIP-191 签名 + commit-reveal 模式在 croupier 私钥泄露下完全失效
+call_once 闭包在 Rust 是单例随机数生成器，多处共享同一 PRNG 种子
+工控安全 + 可信 3.0 切面是信安国赛 Build 核心
+祖冲之序列密码是国产工控加密 (modbus 同步 + 丢包恢复)
+自动裁决靠日志读取 (静态) + 动态事件序列
+SM2 签名防逻辑替换, 鉴别机制防越权 (工程师/操作员/监视员)
+random.seed(0) 固定 + myPrime 伪随机可预测 2000 个 64-bit 素因子
+50 字符 flag 分两段校验用 IDApython 反推 retf 前段
+RSA 三种解法覆盖：已知 dp,dq 用 CRT；两 n 共享 p 用 gcd；多 seed 用 LCG 公式 + GCD 求素数
+调试器旗鼓相当题（flag{i_has_debugger_skill}）考察的是选手是否会用调试器读字符串
+DFS 回溯求迷宫通路是经典模板，注意避开访问标记循环
+LCG 泄漏多个 seed 时，相邻差与递推系数 a 与模 p 的关系就是破解点
+闪电贷借大额代币操纵预言机兑换比例是 DeFi 经典攻击
+Conflux eSpace Testnet 需先领 gas
+block.timestamp + keccak256 作 key 可预测
+工控 OT/IT 融合题考察 OT 协议 (modbus/TCP/CAN) + 流量分析 + 加密协议 (AES-CBC) 综合能力
+PCZ 改后缀 unzip 是工控破解入门口诀
+CAN 总线 ID 0x0000280 是速度信号，可用 36 秒间隔积分算距离
+身份证 18 位校验码权重 [7,9,10,5,8,4,2,1,6,3,7,9,10,5,8,4,2] 是 GB 11643 标准
+RSA 给 sum/diff 比直接给 n 易解 (p+q)和(p-q) 两方程联立
+滑动窗口+频率检测是反欺诈风控标配
+上三角矩阵求逆简单（直接回代）
+ZIP 伪加密 = 504b0102 第 5 字节改 08
+多层编码识别顺序是 CTF misc 基本功
+云影密码只用 0-9 数字表示字母
+pydumpck 是 Python exe 打包解包工具
+base85/base91/base36/base16 是 CTF 常用多层编码
+DARTS Codelets并行调度是数据流混淆前沿方向
+多项式商环RSA = 在GF(p)[x]/(f(x))上做RSA，需Sage分解多项式
+Luby-Rackoff定理：PRF经3+轮Feistel转PRP
+DARTS运行时内存中无严格中间状态=调试失效
+jpg 文件尾 FFD9 后常藏 VeraCrypt/zip/其他容器
+改图片高度可绕过 CRC 错误显示完整画面，但隐藏数据暴露
+取证综合题常用组合：改图片高度 → stegsolve → 组合密码 → 挂载解密
+hash+seed 固定 → shuffle 可重放，整数解线性约束 (S1[i] == S1.index(id))
+DSA 同一 r 两次签名 → 直接线性方程解 k
+矩阵 RSA 不交换律：要按矩阵运算顺序构造方程
+取证题多文件拆分是常见模式（5 张 img 需合并）
+AES-CBC + HMAC 是经典加密+认证组合
+COM_UnMunge2 是 Office COM 序列化混淆格式
+binwalk 是 IoT 固件分析首选工具
+RTP 推流用 AES 加密时 key 通常与代码/配置一起给出
+tshark -e rtp.payload 提取 RTP 载荷是录制 RTP 标准命令
+用户空间 mmap 物理页可被任意读写，配合 verifier 形成只读页写洞
+CUDA PTX 逆向核心是提取常量 S-box + 逆表 RT
+RSA LCG 生成素数时，bits 小+seed 少可用 nth_root 或暴力重建
+未知加密不要硬逆，先列方程组用 SMT/z3 求解
+pyc 反编译（pycdc/pyLingual）是 CTF 必备技能
+PTY 空白字符 IFS + Proxy 隐写触发 eval 是 RE 高级套路
+16-puzzle 是经典 AI 搜索问题
+MinBinHeapq 优先队列是 A* 标准实现
+UART 帧格式识别是嵌入式 misc 基础（起始位/数据位/校验位/停止位）
+USB 键盘流量第 3 字节非 0 即按键 + 修饰键位 (bit 1/2)
+Hill cipher + 变种字母表用 ngram quadgrams 评分爆破
+UsbKeyboardHacker.py 是 USB 键盘分析标配工具
+数独用回溯算法是基础
+贪吃蛇 RC4 用 srand + ARC4 解密
+6502 汇编越界读写 payload 字节写入是裸 pwn 套路
+负数数组下标可绕过 s[v5]=v4 边界，是 int 溢出经典
+取证题靠 IDA 字符串 + netstat + 反射加载 + .docx 解压看 _rels
+RSA 公钥前 10 字符直接 F5 拿
+反射加载 ArgenTINA.dll 是 .NET 后门常见模式
+RCTF 风格综合：pwn 改分 + webp IO_FILE + crypto XTEA 变种 delta 全方位
+USB 键盘流量 tshark 解 HID data + rot13 是 misc 常见套路
+32 位 VM 用 unicorn hook add/sub/xor 是反混淆通用手段
+列抽样拼 UUID 是图像 stego 常见出题思路
+身份证 18 位校验码是 GB 11643 强约束（加权 [7,9,10,5,8,4,2,1,6,3,7,9,10,5,8,4,2] % 11）
+手机号段归属地可作反欺诈证据（53 段黑名单）
+P2P 加密信使伪装合法应用层流量规避 NDR
+自动驾驶对抗攻击：横向 Stanley + 纵向 PID 控制
+GPS 注入通过修改 npc JSON 即可
+AVX-512 IFMA 52-bit 乘加是加速核心
+Mersenne 模 (x&p) + (x>>1279) 是简化加速关键
+PoW sha256(nonce)[:6] = 0x... 模式是 CTF 防爆破网关
+字符偏移 chr(ord(c)-98) 是 Xor/Caesar 简易加密解密
+4 个 ELF 文件 MD5 关联 → 同一攻击者多载荷
+PE section 熵 + 操作码序列 + CFG 是恶意软件家族分类特征
+LIEF 库跨语言 PE/ELF/Mach-O 解析首选
+m32_pattern = \x55\x8b\xec[^\xc3]*\xc3 是 x86 32 位函数头标志
+shikata_ga_nai 内存特征 xd9 x74 x24 xf4 是 fnstenv 指令（fcmovu 之后）
+PICT 自定义图像格式（stb_image 魔改）通过 4 字节头 + 'PICT' 校验
+mod_result = (a-b)%11，>0 才不取反可控制 index_temp 范围
+黑盒题先用最简单输入（空行、EOF）观察响应
+4 字节 0x80424d8a 魔数是协议头常见标识
+EOFError 在 pwntools 是服务端主动关闭连接标志
+黑盒 fuzz 用 nc 脚本而非 GUI 是 CTF 通用手法
+strace 是 CTF 快速定位文件/系统调用手段
+/dev/urandom 是 Linux 真随机源
+hlt 指令在用户态异常 = 程序自陷
+LCG 多输出差分还原 a,b,n 是 Crypto 通用手法
+字节级爆破 + 已知 flag 前缀组合可缩小搜索空间
+多素数 RSA + 已知明文 + LCG 状态 = CTF 常见组合
+ECDH TLS 协商栈：证书→ECDH→HKDF→HMAC 是固定管线
+AES-ECB 单密钥无需 IV
+双层 XOR 先反 v5 循环再反 i%3 分组
+Jigsaw 题 flag 分 3 段分别算 XOR
+encrypt 错位字节是 heap 漏洞挖法 (错位写 fake chunk size)
+JBIG2 算术编码 + pageBitmap 与/或/异或/替换 5 种运算可构建图灵完备计算机
+整数溢出 + 堆风水是 Project Zero 0-click 攻击核心思路
+Clone-and-Pwn 模式需看最近 CVE 修复记录
+全加器是图灵完备计算的最简构造单元
+GList 后备指针覆盖是 GLib 应用通用堆攻击面
+JavaCard 智能卡 APDU 协议 + 类型混淆是 CTF 高阶题
+Phi 攻击 (PhiProxy/Phi.fromShort) 是 JavaCard 类型系统漏洞核心
+arrayCopyNonAtomic 偏移 0x2b5 跳过 secret 头读 user data 是绕过关键
+ELF 数据段嵌入 BPF ELF 是逆向高阶技术
+Win10 32/64 call far 切换是反调试常见手段
+VT VMCS Exit Handler 分析需配合 Intel SDM 卷 3 附录 C
+自实现 SHA1 + Base8 + RC4 三段验证是反混淆多层加密套路
+pyda 动态二进制插桩跟踪 cmp/cons 节点是还原 Cons 链表算法的高阶工具
+cmp 位置 + cmp 值对比可爆破密钥
+AES-like SubBytes + Galois mul + rotl 是加密 4 步常见组合
+Vergilius 查 EPROCESS 字段偏移是 Windows 内核利用标准前置
+早期 win32k 图形子系统有大量未公开 IOCTL/结构偏移
+现代 Win10/Win11 已修复此类 ENG 路径
+SURFOBJ c 字段 test [eax+24h],1 是越界 access violation 触发点
+LFSR 已知明文 + 短长度即可用高斯消元解掩码 (与 0CTF zer0IIvm 思路同源)
+fxxkcors 报告页 admin bot + changeapi.php 提权是 web cors/csrf 经典链
+PDP-11 1971 复古 CPU 指令集是 CTF 复古题型（asl/asr/inc/dec）
+日本 OSINT 邮政编号是 7 位数字（ハイフン除き）
+GitHub SSH 公钥搜索用户是 OSINT 终极技巧
+sherlock.py 跨平台用户名检索工具
+间接跳转混淆去除的核心是'分别模拟条件 true/false 两条路径'收集寄存器，确定 br Xn 的目标后用 b.cond 互补对替换
+ARM64_CONDS = {'eq':'ne','ne':'eq', ...} 互补对是 b.cond patch 必备
+自定义 RC4 + 线程修改 input 是 RE 高阶题常见组合
+CRC32 验证 4 字符爆破速度足够快 (256^4 / sec)
+hook 改 r3 是 ARM 上做字符串混淆的最简方式
+字符重组 3+2+1 位 split 是 Base64-style 自定义编码的通用手法
+circom 是 zkSNARK DSL 入门工具
+halo2_proofs 是 Rust 实现 zk 电路的工业级库
+range check 通过 (1..range).fold(expr * (value - a)) 实现
+TLS 回调改字符串 + dec_xored (异或链) 是 Win 抗反调试通用手法
+DEBUG_ONLY_THIS_PROCESS 让子进程调试父进程是 anti-debuging 反转
+pusha/popa 三寄存器 VM (ecx/eax/ebx) 是 Win VM 逆向经典模型
+自定义 ISA 逆向中 'md5 哈希聚类函数类型' 是 CTF 高效还原利器
+SoFixer-Windows-64 是 .so 修复 + IDA 静态分析标准工具
+Z3 Python BitVec + C++ type1-14 模板是自定义指令求解模板
+PTRACE_GETREGS 改 RIP 是控制子进程 PC 指针的通用方法
+AI 翻译字节码/WASM 提速但要给足上下文
+UPX 自动脱壳工具链成熟，-d 一键
+wasm 模块化函数逆向需要逐函数跟入
+内存 dump + base64 表逆向比纯算法还原快
+CANopen 协议标准对象：0x1000 设备类型/0x1008 设备名/0x1009 硬件版本/0x100A 软件版本
+SDO 读 CS=40（请求）+ 43（多字节响应）+ 41（字符串响应）
+strings 提取协议字符串是 pcap 分析第一步
+CANopenDemoLinux 是开源 CANopen 协议栈
+小样本学习 = 数据增强（伪标签）+ 模型多样性（5 个不同架构）+ 鲁棒性优化（AWP+SWA+MSD）
+三阶段训练（通用→领域 MLM→微调）是 NLP 小样本稳态流程
+Bert-for-patents 翻译英文 + 5 段输入解决长文本 657 字符上限
+10 折集成 + 二阶段伪标签是 NLP 比赛冠军标配
+RAKE 关键短语抽取能大幅降低长文本学习难度
+MemoryBank + BCELoss + 对比学习是小样本过拟合通用解法
+R-Drop 利用 Dropout 机制构造正例 (同一样本两次 forward) 比对抗训练温和
+SimCSE 同一句子两次前向作为正样本对 = 对比学习入门 trick
+中翻英 + bert-for-patents 在英文域专利分类上效果比中文模型更好
+关系分布极不均时，小类同义替换阈值降低 + 三元组随机插入 + 句子重复可缓解
+滑动窗口以字/以句为单位两种切法保证三元组完整
+弱标注数据用加权 Loss 合理利用是工业级实战技巧
+R-Drop 减小训练推理 gap 比 FGM 温和 (同时使用冲突)
+不同结构模型 (GRTE + GlobalPointer) 分层投票比单结构融合稳定
+程序设计挑战赛考察算法实现能力 (整除/位运算/平方数/DP/二分/LCA 模板)
+(l+2)//3 ≤ r//3 是区间内 3 倍数存在的 O(1) 判法
+mask = (1<<30)-1 全 1 命中提前 break 是位运算 OR 优化技巧
+树上差分是 LCA 类题 (统计边使用次数) 标准解法
+PPC 编程题 = 爬虫/脚本自动化, 看清 API URL + 编码格式是关键
+栈式 VM 指令映射靠试错 + 验证 (A OP B = C 公式反推)
+VM 容错机制 (空栈补 0) 是反直觉点, 必须看代码确认
+C2 多协议 (t1=tls/t2=http/t3=其他) 区分用同一份配置, IOC 提取要全
+--cap-add=SYS_PTRACE 必备让 gdb 附加
+出题用 socat 比 xinetd 更现代
+迷宫题先识别存储格式 (1D/2D/3D)
+ACTF W/E/M/J 字符指令是 wind/emacs/match/j? 缩写
+3D 迷宫用 BFS + visited[layer][row][col] 防重复
+Native 验签成功判定要找 h1.a.S((byte[]) obj) == null 这种'成功条件
+反调试清零要在 hook 同时绕过
+AMI UsbRt 是 7 年老漏洞 (gUsbData 30+ 字段), 厂商维护意愿低
+CRC32 验证可被强制攻击绕过 (CVE-2020-12301)
+SMM_Code_Chk_En 仅 Kabylake+ 支持, 老平台无缓解
+SMM ROP 链是攻击 SMM 的核心利用面
+Binarly FwHunt + LVFS 协作是固件漏洞大规模检测标准姿势
+Jinja2 lipsum 全局函数 os.popen SSTI = 入门模板
+srand(0)+rand()%100+1 = 1..100 可爆破验证（ctypes 与目标共享 libc）
+CapooObj 正则 banlist 含空格可用 $IFS 绕
+mips_emu 中 0x23000 mmap 位置定位解密函数是 mips 仿真器逆向标准锚点
+remem 需自生成代码调试 + 字节序转换 + 64 位无符号整数运算
+RC4(key=b'6105t3') + swap 字节 + 多层 XOR + 自实现 S 盒(t<<7|>>1) + 16*((32*v3|v3>>3)^0xAD)
+历史向 CTF 考察领域知识（AGC 八进制 + Bank 寻址 + DP 浮点 + V/N 命令）
+V27N02E 是 DSKY 查 ROM 模式的标准动词
+AGC DP 浮点格式 = 1 位符号 + 14 位指数 + 27 位尾数
+GetData(key, count) 用 vector(begin, begin+count) 是经典 OOB 模式
+AI 隐写赛标准套路：R 通道 mod 10 → MLP 推理 → 输出 ASCII 取整
+3 层 MLP (Linear+ReLU) 是轻量 CTF 模型固定模式
+round(v.item()) 是把浮点输出转整数的关键
+同一比赛不同作者 WP 可互为补充：代码细节 + 应急策略都是解题者视角
+RC5/XXTEA delta 魔改是块密码常考点，反汇编时必看 magic constant
+公益 CTF 赛事反作弊：在某鱼平台钓鱼执法是常见赛事运营手段
+RSA 已知 dp 可直接求 p：e*dp ≡ 1 (mod p-1) → 爆破 k
+keyring UAF 是 Linux 内核漏洞利用经典模式
+auth.cgi 密码编码：base64+10 字节循环 XOR（xor_key 常硬编码在二进制）
+shm_addr（共享内存）用于存放 system 参数（命令字符串）
+目录穿越 (./../) 触发 make_rop 覆盖返回地址
+Tomcat 热部署可写 jsp 替换原文件
+UDS（统一诊断服务）+ CAN 是汽车安全比赛标配，caringcaribou 是首选工具
+AI 适合自动化解析 CAN 日志和补全逆向算法代码（节省体力）
+ror 旋转 + 奇偶不同置换必须按 round 倒序才能还原
+n=p^k q^k 高阶 RSA phi 是 (p^k-1)(q^k-1) 不是简单欧拉
+小 d 的 RSA 用连分数展开 n^k 是 Wiener 攻击的通用变种

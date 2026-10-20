@@ -79,3 +79,8 @@ webui/webui/
 docs/
 # AI 工作区记忆（本地专属，勿入版本控制）
 .workbuddy-ai/memory/
+# pytest 临时目录（--basetemp 产物，含大量测试残留；2026-10-20）
+.tmp_pytest*/
+# 本地调试探针脚本与临时输出（勿入库）
+.tmp_*.py
+.tmp_*.txt

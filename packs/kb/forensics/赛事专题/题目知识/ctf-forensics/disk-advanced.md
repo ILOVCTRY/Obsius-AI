@@ -458,7 +458,7 @@ flag = ''.join(values[i] for i in sorted(mapping.keys()))
 print(flag)
 ```
 
-**Key insight:** Hash databases store entries at positions determined by key hash values. When keys are zeroed/corrupted, the stored ordering is hash-based, not insertion-order. Insert probe keys one at a time and binary-diff the database to find which slot each probe overwrites, revealing the original key-to-value mapping.
+**Key insight:** Hash databases store entries at positions determined by key hash values. When keys are zeroed/corrupted, the stored ordering is hash-based, not insertion-order. Insert probe keys one at a time and 二进制版本比对 the database to find which slot each probe overwrites, revealing the original key-to-value mapping.
 
 ---
 

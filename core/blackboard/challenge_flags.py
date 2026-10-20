@@ -16,15 +16,16 @@
 
 状态机（五态，不是三态）：
 
-    untouched  未跑（无 flag、无活跃 Worker）
+    untouched  未跑（无 flag、无候选、无活跃 Worker）
     running    有 Worker 在跑（附 running 数）
-    partial    拿到部分 flag，仍需继续（flag_count>1 时必需）
+    partial    拿到部分进展仍需继续（部分 flag / 仅候选 / 前缀冲突 / 已收尾待确认）
     solved     全部 flag 到手（或 flag_count 未声明时拿到 1 条 accepted）
     abandoned  人工放弃（否则「未跑」与「跑过但放弃」混在一起，Planner 无限重派）
 
-**verdict 语义**：`pending`（AI 判定通过待人工复核）/ `accepted`（有效）/
-`rejected`（**人工标记错误**）。rejected 一律不进 solved 派生，且同串再提交必须
-拦（`is_rejected`）——这是「人工标错」唯一真正生效的地方。
+**verdict 语义**：`pending`（AI 判定通过待人工复核，即**候选**）/ `accepted`（有效）/
+`rejected`（**人工标记错误**）。**只有 accepted 计入 solved**（2026-10-20 起）；
+rejected 一律不进 solved 派生，且同串再提交必须拦（`is_rejected`）——这是「人工
+标错」唯一真正生效的地方。
 """
 from __future__ import annotations
 
@@ -40,9 +41,24 @@ log = logging.getLogger(__name__)
 # 人工否决落 rejected。**没有**「AI 直接 accepted」——flag 判定是加分项不是
 # 证明项，留一个人工确认窗口成本极低、收益是「模型自嗨」永远进不了 solved。
 VERDICTS = frozenset({"pending", "accepted", "rejected"})
-# 计入「解出」的 verdict：pending 与 accepted 都算（pending 是「AI 说对，人还没
-# 看」，若不算解出则题目永远停在 partial，与「已获取 flag 就不再测试」冲突）。
-_COUNTED_VERDICTS = frozenset({"pending", "accepted"})
+
+# **计入「解出」的只有 accepted**（2026-10-20 修正，用户裁决方案 A）。
+#
+# 此前 `pending` 也算解出，导致「候选 = 已解出」：AI 提交一个假 flag 就判 solved，
+# 调度层立刻停派，题目被一条假答案提前终止——用户实测正是这个后果
+# （`flag{E574...}` 与 `DASCTF{6f93...}` 同时入账，2/1 显示「已拿满」）。
+#
+# 现在的语义分工：
+#   pending   候选（AI 形态判定通过，**未经人工确认**）→ 进台账、前端「待复核」可见，
+#             但**不计 solved**，题目继续跑；
+#   accepted  人工确认有效（强证据）→ 才算解出。
+#
+# **无人值守逃生阀**：`config.ctf.auto_accept_ai`（默认关）为真时，AI 判定通过
+# 直接落 accepted——否则通宵跑题会全部停在 pending 白烧预算。开关由项目配置给，
+# 不由模型自述给。
+_COUNTED_VERDICTS = frozenset({"accepted"})
+# 候选态：进台账但不计 solved。单独列出来，供 summary / review 区分渲染。
+CANDIDATE_VERDICTS = frozenset({"pending"})
 
 # 题目派生状态五态。
 STATE_UNTOUCHED = "untouched"
@@ -71,9 +87,16 @@ def list_flags(bb, project_id: str, challenge_id: str, *,
 
     ``verdicts`` 可传单个 verdict 或列表做过滤；``None`` = 全部（人工复核界面
     需要看到 rejected，才能撤销误否决）。
+
+    **排序用 rowid 而不是 id**：`id` 是随机 hex（`cflag-<10位hex>`），同一秒内
+    登记的多条 flag 其 `created_at` 完全相同，`ORDER BY created_at, id` 就会
+    退化成按随机 id 排——「按登记顺序」这个承诺随即失效。实测后果：测试里用
+    `list_flags(...)[-1]` 取「最新一条」，会随机取到别的条目，把 rejected 判到
+    刚 accepted 的那条上（单跑通过、同批跑失败）。`challenge_flags.id` 是
+    `TEXT PRIMARY KEY`（不是 `INTEGER PRIMARY KEY`），故隐式 rowid 仍是插入序。
     """
     sql = ("SELECT * FROM challenge_flags WHERE project_id=? AND challenge_id=?"
-           " ORDER BY created_at ASC, id ASC")
+           " ORDER BY rowid ASC")
     args: list[Any] = [project_id, str(challenge_id or "")]
     rows = [_row_to_dict(r) or {} for r in bb.conn.execute(sql, args).fetchall()]
     if verdicts is not None:
@@ -84,9 +107,19 @@ def list_flags(bb, project_id: str, challenge_id: str, *,
 
 
 def accepted_flags(bb, project_id: str, challenge_id: str) -> list[dict]:
-    """计入「解出」的 flag（pending + accepted，不含 rejected）。"""
+    """计入「解出」的 flag（**只算 accepted**，pending 是候选不算）。
+
+    2026-10-20 语义变更：此前 pending 也计入，导致假 flag 一提交就判 solved、
+    题目被提前终止。现在 pending 是候选——进台账、前端可见，但不计解出。
+    """
     return [r for r in list_flags(bb, project_id, challenge_id)
             if str(r.get("verdict") or "") in _COUNTED_VERDICTS]
+
+
+def candidate_flags(bb, project_id: str, challenge_id: str) -> list[dict]:
+    """候选 flag（AI 判定通过、待人工确认；**不计解出**）。"""
+    return [r for r in list_flags(bb, project_id, challenge_id)
+            if str(r.get("verdict") or "") in CANDIDATE_VERDICTS]
 
 
 def rejected_flags(bb, project_id: str, challenge_id: str) -> list[dict]:
@@ -264,39 +297,96 @@ def challenge_flag_quota(bb, project_id: str, challenge_id: str) -> int:
     return max(1, min(n, MAX_FLAG_COUNT))
 
 
+def _flag_prefix(flag: str) -> str:
+    """flag 前缀（`flag{x}` → `flag`，`DASCTF{x}` → `dasctf`）。"""
+    head = str(flag or "").split("{", 1)[0].strip().casefold()
+    return head
+
+
+def _conflict_of(counted: list[dict]) -> list[dict]:
+    """同题内**前缀互不相同**的 accepted flag（一道题不该有两个格式）。
+
+    **为什么这是可信判据**：题面声明的格式是「提示不是约束」（`flag{}` 写成
+    `DASCTF{}` 很常见），故**不能**拿 `meta.flag_format` 比对。但**同题内部**
+    两条 flag 前缀不同，几乎必然是不同来源的污染——多 flag 题的多条通常同前缀。
+    只依赖台账内部事实，不依赖题面，不会被「题面写错格式」误伤。
+
+    少于 2 条 / 前缀全同 → 空列表（无冲突）。
+    """
+    if len(counted) < 2:
+        return []
+    prefixes = {_flag_prefix(f.get("flag")) for f in counted}
+    prefixes.discard("")
+    return counted if len(prefixes) > 1 else []
+
+
 def challenge_state(bb, project_id: str, challenge_id: str, *,
                     running: int = 0) -> dict:
     """派生一道题的状态。
 
-    返回 ``{state, solved, accepted, rejected, quota, abandoned, running}``。
+    返回 ``{state, solved, accepted, candidate, rejected, quota, abandoned,
+    running, conflict, over_quota}``。
 
     - ``running`` 由调用方传入该题目下当前 claimed/running 的 Intent 数（本模块
       不查 artex_intents，避免反向依赖调度层）；
     - ``abandoned`` 来自 meta.abandoned（人工放弃，唯一**不是**派生的一位——
       因为「放弃」是人类意图，不是数据事实）；
-    - 判定优先级：**solved > partial > abandoned > running > untouched**。
-      solved 优先于 abandoned：拿到全部 flag 后人工又标了放弃，仍算解出（状态
-      以事实为准，放弃只影响「要不要继续派 Worker」）。
+    - ``candidate`` 是待人工确认的候选数（**不计 solved**，2026-10-20 起）；
+    - ``conflict`` 是同题内前缀互不相同的 accepted flag 列表（一道题不该有两个
+      格式，至少一条是错的）——**有冲突时不判 solved**，要人工裁决；
+    - ``over_quota`` 是 accepted 数超过 quota（拿的比需要的多）。**它不压
+      solved**：最典型成因是用户主动把 flag_count 下调（「这题只要一个」），
+      此时多条前缀相同、都是人确认过的，判 partial 反而违背用户意图。它只作为
+      异常信号回传，供前端提示；
+    - 判定优先级：**solved > conflict > partial > abandoned > running > untouched**。
+      conflict 压过 solved：两条前缀不同时「看起来满了」其实是矛盾，不该让调度层
+      停派。solved 优先于 abandoned：拿到全部 flag 后人工又标了放弃，仍算解出。
     """
     cid = str(challenge_id or "").strip()
     quota = challenge_flag_quota(bb, project_id, cid)
     counted = accepted_flags(bb, project_id, cid)
+    candidates = candidate_flags(bb, project_id, cid)
     rejected = rejected_flags(bb, project_id, cid)
-    solved = len(counted) >= quota
-    abandoned = bool(_meta_of(bb.get_asset(cid)).get("abandoned"))
+    conflict = _conflict_of(counted)
+    over_quota = len(counted) > quota
+    # **只有冲突压 solved，超额不压**（2026-10-20 修正）。
+    #
+    # 超额（拿的比 quota 多）单独出现时**不是矛盾**：最典型是用户把
+    # flag_count 从 3 改成 1（「这题只要一个」），此时 2 条 accepted 前缀相同、
+    # 都是人确认过的，判 partial 反而与用户意图相反。而 `conflict`（同题内
+    # 前缀互不相同）才是「至少一条是假的」的硬信号——那个必须压住 solved，
+    # 否则假 flag 会顶掉真 flag 让调度层停派。
+    solved = len(counted) >= quota and not conflict
+    meta = _meta_of(bb.get_asset(cid))
+    abandoned = bool(meta.get("abandoned"))
+    # 主控主动收尾（`set_concluded`）：不再派工，但**不伪装成 solved**。
+    concluded = bool(meta.get("concluded"))
     if solved:
         state = STATE_SOLVED
+    elif conflict:
+        state = STATE_PARTIAL
     elif counted:
         state = STATE_PARTIAL
     elif abandoned:
         state = STATE_ABANDONED
-    elif running > 0:
+    elif running > 0 and not concluded:
         state = STATE_RUNNING
+    elif candidates:
+        # **只有候选也算 partial**（2026-10-20）：`untouched` 的定义是「无 flag、
+        # 无活跃 Worker」，而这里有 N 条候选——题目明显跑过、拿到东西了，只是
+        # 还没人确认。报 untouched 会让用户以为这题根本没动过（前端徽标、覆盖度
+        # 分母的「未测」全错）。partial 的语义是「拿到部分进展，仍需继续」，
+        # 候选正是这个状态。
+        state = STATE_PARTIAL
+    elif concluded:
+        state = STATE_PARTIAL
     else:
         state = STATE_UNTOUCHED
     return {"state": state, "solved": solved,
-            "accepted": len(counted), "rejected": len(rejected),
-            "quota": quota, "abandoned": abandoned,
+            "accepted": len(counted), "candidate": len(candidates),
+            "rejected": len(rejected),
+            "quota": quota, "abandoned": abandoned, "concluded": concluded,
+            "conflict": conflict, "over_quota": over_quota,
             "running": max(0, int(running or 0))}
 
 
@@ -314,6 +404,42 @@ def set_abandoned(bb, project_id: str, challenge_id: str, *,
     bb.append_event(project_id,
                     "challenge.abandoned" if abandoned else "challenge.resumed",
                     {"challenge_id": challenge_id, "author": str(author or "")[:80]})
+    return row
+
+
+def set_concluded(bb, project_id: str, challenge_id: str, *,
+                  concluded: bool = True, reason: str = "",
+                  author: str = "") -> dict:
+    """**主控主动收尾**：宣称「这题的答案已经拿到，别再派工」（meta.concluded）。
+
+    **为什么需要这个出口**（2026-10-20，方案 A 的配套）：
+
+    `pending` 不计 solved 之后，AI 判定通过只能把题目停在 `partial`——必须等人
+    点确认。这在有人值守时是对的（人工确认是强证据），但**通宵跑题会全部卡在
+    pending 白烧预算**：明明解出来了，没人点按钮，调度层就一直在派 Worker。
+
+    故给主控一个**显式收尾**动作：它看过证据、判定答案已拿到 → 置 `concluded`，
+    调度层停止派工，但题目状态**仍是 partial/待复核**，不伪装成 solved。
+    与 `abandoned` 的区别：放弃是「不做了，可能没解出」，收尾是「做完了，
+    但等人工确认」——两者都不再派工，语义不同，前端徽标也不同。
+
+    **与 solved 的区别**：`concluded` 只是「不再派工」的开关，**不参与 solved
+    派生**。所以人工后来否决了那条候选，题目会退回 partial/untouched 并且
+    `concluded` 仍在——此时调度层仍不派工。这是刻意的：主控已经判断过一轮，
+    再派只会重复劳动；要重新开跑由人撤销 `concluded`。
+    """
+    asset = bb.get_asset(challenge_id)
+    if asset is None or asset.get("project_id") != project_id:
+        raise ValueError(f"题目不存在于本项目: {challenge_id}")
+    patch = {"concluded": bool(concluded)}
+    if concluded and str(reason or "").strip():
+        patch["concluded_reason"] = str(reason)[:500]
+    row = bb.update_asset_meta(challenge_id, patch)
+    bb.append_event(project_id,
+                    "challenge.concluded" if concluded else "challenge.reopened",
+                    {"challenge_id": challenge_id,
+                     "author": str(author or "")[:80],
+                     "reason": str(reason or "")[:300]})
     return row
 
 
@@ -408,24 +534,41 @@ def challenge_flag_summary(bb, project_id: str, challenge_ids: list[str],
         flags = grouped.get(cid, [])
         counted = [f for f in flags
                    if str(f.get("verdict") or "") in _COUNTED_VERDICTS]
+        candidates = [f for f in flags
+                      if str(f.get("verdict") or "") in CANDIDATE_VERDICTS]
         rejected = [f for f in flags if str(f.get("verdict") or "") == "rejected"]
         quota = challenge_flag_quota(bb, project_id, cid)
-        abandoned = bool(_meta_of(bb.get_asset(cid)).get("abandoned"))
+        meta = _meta_of(bb.get_asset(cid))
+        abandoned = bool(meta.get("abandoned"))
+        concluded = bool(meta.get("concluded"))
         running = max(0, int(running_by_challenge.get(cid) or 0))
-        solved = len(counted) >= quota
+        # **必须与 `challenge_state` 逐字同口径**（两条派生路径分叉过一次，
+        # 见 CLAUDE.md）。冲突压 solved；超额不压（配额下调是用户意图）。
+        conflict = _conflict_of(counted)
+        over_quota = len(counted) > quota
+        solved = len(counted) >= quota and not conflict
         if solved:
             state = STATE_SOLVED
-        elif counted:
+        elif conflict or counted:
             state = STATE_PARTIAL
         elif abandoned:
             state = STATE_ABANDONED
-        elif running > 0:
+        elif running > 0 and not concluded:
             state = STATE_RUNNING
+        elif candidates:
+            # 与 `challenge_state` 逐字同口径：只有候选也算 partial（不是
+            # untouched——题目跑过、拿到东西了，只是没人确认）。
+            state = STATE_PARTIAL
+        elif concluded:
+            state = STATE_PARTIAL
         else:
             state = STATE_UNTOUCHED
         out[cid] = {"state": state, "solved": solved, "accepted": len(counted),
+                    "candidate": len(candidates),
                     "rejected": len(rejected), "quota": quota,
-                    "abandoned": abandoned, "running": running,
+                    "abandoned": abandoned, "concluded": concluded,
+                    "running": running,
+                    "conflict": conflict, "over_quota": over_quota,
                     "flags": flags}
     return out
 

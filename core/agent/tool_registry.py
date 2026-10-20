@@ -171,6 +171,44 @@ tool(
 )
 
 tool(
+    'view_image',
+    group='文件',
+    flags=("plan_pre", "file"),
+    description=(
+        '【看图】把图片直接送进你的视觉通道——**有图先看这里，不要先 OCR**。'
+        '支持 PNG/JPEG/GIF/BMP/WEBP；返回一句话元信息 + 图片本体，你能真正看到像素。'
+        'path 相对 scratch（与 run_cmd cwd 一致），也收工作区绝对路径。'
+        '适用：题目给的是图/截图/二维码/频谱图/位平面图/拼图碎片/UI 截图，'
+        '以及需要判断「这张图里写了什么/长什么样/哪里不对」的一切场合。'
+        '**OCR（tesseract/zbarimg）只在下面三种情况更优**：① 要批量扫几十上百张候选'
+        '（如位平面暴力枚举）；② 要机器可比的精确字符串（逐字符 diff）；'
+        '③ 图糊到人眼也难辨、只能靠算法容错。其余一律先 view_image 看一眼——'
+        '看错方向再 OCR 比先 OCR 再猜方向省得多。'
+        '图片过大自动缩到 max_edge；当前供应商未声明视觉能力时只回元信息并给 OCR 指引。'
+    ),
+    input_schema={
+        'type': 'object',
+        'properties': {
+            'path': {
+                'type': 'string',
+                'description': '图片路径，相对 scratch（如 att-abc123/flag.png）；也收工作区内绝对路径',
+            },
+            'max_edge': {
+                'type': 'integer',
+                'description': '长边像素上限，缺省 1568；隐写/二维码题看不清细节时可调大（token 随之增加）',
+            },
+            'note': {
+                'type': 'string',
+                'description': '可选：你希望重点看什么（如「读出图中的 flag」「这个二维码能否扫出」「两半是否对得上」），会一并带给视觉通道',
+            },
+        },
+        'required': [
+            'path',
+        ],
+    },
+)
+
+tool(
     'search_files',
     group='文件',
     flags=("plan_pre", "file"),
@@ -427,6 +465,96 @@ tool(
 )
 
 tool(
+    'ctf_abandon',
+    group='黑板',
+    # intent_pre：放弃**必须**不受意图先行闸限制（ctf-abandon，2026-10-20）。
+    # 语义死锁：本工具的用途正是「这个方向我打不下去了」——那种时刻模型手上
+    # 往往**没有 open 意图**（刚收尾完）或**正挂着一条解不动的意图**。若受闸，
+    # 它会先被要求 declare_intent 声明一条新假设才能表达「放弃」，荒谬且更烧
+    # 轮次。放行面成员不收任何代价：它只写 meta.abandoned，不执行、不探测。
+    flags=("intent_pre",),
+    description=(
+        'CTF 轨专用：**放弃这道题**（整题级，不是单个意图）或撤销放弃。'
+        '放弃后调度层不再为它派新 Worker，但**已登记的 flag 全部保留**'
+        '（放弃=不继续投入，不是清空结论）。'
+        '**什么该用它**：这题确实解不出来（缺附件/思路穷尽/时间不够）→ `abandoned=true`；'
+        '之后若拿到新线索想接着打 → `abandoned=false` 撤销。'
+        '**什么不该用它**：单条解题假设不成立 → 用 close_intent(outcome="dead_end")，'
+        '那只是这条路不通，题还能继续解；解出来了 → 什么都不用调（ctf_submit_flag 已入台账）。'
+        '**CTF 轨没有「资产测干净（tested_clean）」这个概念**——本题终态只看 flag 台账，'
+        '别去 bb_asset_status 标 tested_clean。**仅 CTF 轨可用**。'
+    ),
+    input_schema={
+        'type': 'object',
+        'properties': {
+            'challenge_id': {
+                'type': 'string',
+                'description': '题目资产 id（留空=自动用本线程归属的题目）',
+            },
+            'abandoned': {
+                'type': 'boolean',
+                'description': 'true=放弃（默认）；false=撤销放弃、恢复继续解题',
+            },
+            'reason': {
+                'type': 'string',
+                'description': (
+                    '放弃原因（写清卡在哪：缺什么附件/试过哪些方向/为什么判断不可解）'
+                    '——会随事件留痕，供人工复盘与 writeup'
+                ),
+            },
+        },
+        'required': [],
+    },
+)
+
+tool(
+    'ctf_conclude',
+    group='黑板',
+    # intent_pre：收尾判断与放弃同理——想收尾时手上**没有 open 意图**是常态
+    # （刚把最后一条假设收尾完）。若受闸，模型会被要求先声明一条新假设才能
+    # 表达「我做完了」，荒谬且直接催生一条假意图。本工具只写 meta.concluded，
+    # 不执行、不探测，放行面成员无代价。
+    flags=("intent_pre",),
+    description=(
+        'CTF 轨专用：**主动收尾**——「这题的答案我已经拿到了，别再派工」，'
+        '但**不冒充「已解出」**（题目仍显示 partial/待人工确认）。'
+        '收尾后调度层不再为它派新 Worker，已登记的 flag 全部保留。'
+        '**什么时候用**：你已经提交了 flag（ctf_submit_flag 回报「候选 N 条待人工确认」），'
+        '且你核对过证据、确认答案确实拿到了——此时若继续派 Worker 只是重复劳动。'
+        '**什么时候别用**：① 还没提交任何 flag → 先 ctf_submit_flag；'
+        '② 只是某条思路不通 → close_intent(dead_end)，题还能继续解；'
+        '③ 这题根本解不出来（缺附件/思路穷尽） → ctf_abandon，那才是「放弃」。'
+        '**与 ctf_abandon 的区别**：收尾=做完了等确认（状态 partial）；'
+        '放弃=不做了可能没解出（状态 abandoned）。两者都不再派工，语义不同。'
+        '**人工确认才算解出**：pending 的候选 flag 不计 solved，'
+        '只有用户在题目卡片上点确认才变 accepted。收尾只是替你省掉「白派 Worker」，'
+        '不替人做「这条 flag 对不对」的判断。'
+        '撤销收尾（concluded=false）后调度层可以重新派工。**仅 CTF 轨可用**。'
+    ),
+    input_schema={
+        'type': 'object',
+        'properties': {
+            'challenge_id': {
+                'type': 'string',
+                'description': '题目资产 id（留空=自动用本线程归属的题目）',
+            },
+            'concluded': {
+                'type': 'boolean',
+                'description': 'true=收尾停止派工（默认）；false=撤销收尾、恢复可派工',
+            },
+            'reason': {
+                'type': 'string',
+                'description': (
+                    '收尾理由（写清：已拿到哪条 flag、证据是什么、为什么判断答案完整）'
+                    '——会随事件留痕，供人工复核时判断该不该点确认'
+                ),
+            },
+        },
+        'required': [],
+    },
+)
+
+tool(
     'bb_delete_asset',
     group='黑板',
     flags=("intent_flow",),
@@ -521,6 +649,8 @@ tool(
         '须有直接围绕该资产的 closed/dead_end 意图（target 或 basis_refs 含本资产 id）——'
         '每资产独立立意，禁止父节点一条意图批量覆盖子树。四问并入审计事件可事后对账。'
         '测出问题直接 bb_add_finding，不要自报状态。'
+        '**CTF 轨没有 tested_clean**：本题终态由 flag 台账判定，标它必被拒——'
+        '解出后 close_intent(finding) 收尾即可，整题放弃用 ctf_abandon。'
     ),
     input_schema={
         'type': 'object',
@@ -968,6 +1098,14 @@ tool(
                     'what=assets：可选，只回该资产子树内的资产清单（不带发现/意图）'
                 ),
             },
+            'cross_challenge': {
+                'type': 'boolean',
+                'description': (
+                    'CTF 轨专用：默认 false=只回**本题**（本线程题目子树 + 未归属任何题目的条目），'
+                    '其它题目的发现/附件/事件全部不回传（防多题共跑上下文污染）。'
+                    '确实要跨题对照（如同一考点多题比较）才传 true。其它轨此参数无效果。'
+                ),
+            },
             'blueprint_id': {
                 'type': 'string',
                 'description': 'blueprint 查询：单份蓝图（缺省列全部）',
@@ -1103,6 +1241,10 @@ _BB_QUERY_REVERSE_ONLY_PROPS = ("blueprint_id", "package_id", "binary_sha256",
                                 "address", "risk_tag", "tree_id", "block_id")
 # CTF 删除的参数：package_id（分析包查询专属，CTF 无此面）
 _BB_QUERY_CTF_ONLY_PROPS = ("package_id",)
+# CTF 独占参数：cross_challenge（跨题隔离开关，challenge-isolation 2026-10-19）。
+# 只对 CTF 轨有意义——其它轨没有「题目」概念，下发只会让模型困惑于一个
+# 恒无效的开关（渗透/逆向拿不到它，等于多一个无关旋钮）。
+_BB_QUERY_CTF_EXCLUSIVE_PROPS = ("cross_challenge",)
 
 # 三轨共用的使用要点（findings/events/负结论口径一致，避免三份文案各自漂移）
 _BB_QUERY_DESC_COMMON = (
@@ -1134,6 +1276,10 @@ _BB_QUERY_DESC_REVERSE = (
 _BB_QUERY_DESC_CTF = (
     '查黑板（逆向 family：ctf）：findings / assets / events / func（函数知识库）/ '
     'blueprint（开发蓝图）/ feature_tree（功能树）/ logic_block（业务逻辑块）。'
+    '**默认只回本题**（本线程题目子树 + 未归属任何题目的条目）：别的题目的发现、'
+    '附件子资产、执行事件一律不回传——多题共跑时那些条目对本题是纯噪声，会把'
+    '你带偏到别人的打法上。assets 里仍能看到别的题的**题目行**（知道项目里还有'
+    '哪些题），但要跨题对照才传 cross_challenge=true。'
     + _BB_QUERY_DESC_COMMON
     + _BB_QUERY_DESC_REVERSE_COMMON
 )
@@ -1152,6 +1298,43 @@ def bb_query_what_for(track: str | None) -> list[str]:
     return list(_BB_QUERY_TRACK_WHAT.get((track or "").strip(), _BB_QUERY_WHAT_FULL))
 
 
+# ARTEX 主控专属面（artex-controller-slim，2026-10-20）：只留它真正会查的三面。
+#
+# 实测该主控线程 95 次 bb_query 的分布：what=events 93、assets 1、findings 1；
+# 参数只用到 what/limit/kinds/session_id 四个。而按 CTF 轨下发的 schema 仍带
+# func/blueprint/feature_tree/logic_block（逆向专属）与 20 个参数——那 2325 字符
+# 里大半是主控永远碰不到的东西，纯占上下文。
+#
+# 主控的职责是「看执行事件、看已有资产与发现」，函数知识库与功能树属于 Worker。
+_BB_QUERY_WHAT_ARTEX = ("events", "assets", "findings")
+_BB_QUERY_ARTEX_KEEP_PROPS = ("what", "kinds", "session_id", "limit", "type", "status")
+
+_BB_QUERY_DESC_ARTEX = (
+    '查黑板（ARTEX 主控面）：events（执行事件流）/ assets（已有资产）/ findings（已有发现）。'
+    '**主控不查函数库、蓝图、功能树——那些是 Worker 的面**。'
+    '看 Worker 干了什么用 what=events（可按 kinds/session_id 窄看，limit 小值会截断）；'
+    '盘点已有资产与发现用 what=assets / findings，避免重复派发。'
+    '**负结论不要塞进 events**：那是 Worker 的 declare_intent → close_intent(dead_end)，'
+    '主控只看不写。'
+)
+
+
+def bb_query_schema_for_artex() -> dict:
+    """ARTEX 主控的 bb_query 精简 schema（见 _BB_QUERY_WHAT_ARTEX 注释）。
+
+    与 ``bb_query_schema_for(track)`` 同构但收得更紧：what 只三面、参数只六个。
+    **返回全新 dict**，不与注册表共享可变子对象。
+    """
+    spec = REGISTRY["bb_query"].as_schema()
+    props = {k: dict(v)
+             for k, v in spec["input_schema"]["properties"].items()
+             if k in _BB_QUERY_ARTEX_KEEP_PROPS and k != "what"}
+    props["what"] = {"type": "string", "enum": list(_BB_QUERY_WHAT_ARTEX)}
+    return {"name": "bb_query", "description": _BB_QUERY_DESC_ARTEX,
+            "input_schema": {"type": "object", "properties": props,
+                             "required": ["what"]}}
+
+
 def bb_query_schema_for(track: str | None) -> dict:
     """bb_query 的 Anthropic schema 按轨变体：what.enum、description、参数面三者同步裁到
     本家族（渗透拿不到 tree_id，逆向的 description 不提 site）。**返回全新 dict**
@@ -1164,15 +1347,18 @@ def bb_query_schema_for(track: str | None) -> dict:
              for k, v in spec["input_schema"]["properties"].items()
              if k != "what"}
     if family is _BB_QUERY_WHAT_PENTEST:
-        for k in _BB_QUERY_REVERSE_ONLY_PROPS:
+        for k in _BB_QUERY_REVERSE_ONLY_PROPS + _BB_QUERY_CTF_EXCLUSIVE_PROPS:
             props.pop(k, None)
         desc = _BB_QUERY_DESC_PENTEST
     elif family is _BB_QUERY_WHAT_CTF:
-        # CTF：只摘 package_id 参数（分析包面已从 enum 裁掉）
+        # CTF：只摘 package_id 参数（分析包面已从 enum 裁掉）；cross_challenge 保留
         for k in _BB_QUERY_CTF_ONLY_PROPS:
             props.pop(k, None)
         desc = _BB_QUERY_DESC_CTF
     else:
+        # research（逆向）：cross_challenge 是 CTF 独占开关，此处不暴露
+        for k in _BB_QUERY_CTF_EXCLUSIVE_PROPS:
+            props.pop(k, None)
         desc = _BB_QUERY_DESC_REVERSE
     props["what"] = {"type": "string", "enum": list(family)}
     return {"name": "bb_query", "description": desc,
@@ -1186,8 +1372,8 @@ tool(
     flags=("plan_pre", "spill_skip", "knowledge"),
     description=(
         '[legacy] 打开尚未迁移的全局知识库模块（packs/kb/ 区，含测试包手册与快照）：直接返回文件正文，不返回路径。'
-        'module 走全局形态 `<域>/<快照>/<路径>`（如 web/漏洞分类/sqli/手册.md），也认 Obsidian wikilink '
-        '（[[web/漏洞分类/sqli/手册|手册]]）与反引号/引号包裹。'
+        'module 走全局形态 `<域>/<快照>/<路径>`（如 web/漏洞分类/SQL注入/注入类漏洞（SQL注入-命令注入-SSTI）.md），也认 Obsidian wikilink '
+        '（[[web/漏洞分类/SQL注入/注入类漏洞（SQL注入-命令注入-SSTI）|手册]]）与反引号/引号包裹。'
         '.md/.py/.txt/.json 均按 UTF-8 文本返回（弹药脚本只是文本，执行仍走 run_cmd）。'
         '路径不存在会返回可用模块清单（照清单改选，禁止猜文件名、禁止 .. 穿越）；禁止通读知识库目录。'
     ),
@@ -1196,9 +1382,9 @@ tool(
         'properties': {
             'module': {
                 'type': 'string',
-                'description': '知识库模块路径，全局形态 `<域>/<快照>/<路径>`，如 web/漏洞分类/sqli/手册.md（web 漏洞类目）、'
+                'description': '知识库模块路径，全局形态 `<域>/<快照>/<路径>`，如 web/漏洞分类/SQL注入/注入类漏洞（SQL注入-命令注入-SSTI）.md（web 漏洞类目）、'
                                'binary/赛事专题/题目知识/ctf-pwn/heap-fsop.md（题目知识原件）；'
-                               '也认 Obsidian wikilink [[web/漏洞分类/sqli/手册|手册]]',
+                               '也认 Obsidian wikilink [[web/漏洞分类/SQL注入/注入类漏洞（SQL注入-命令注入-SSTI）|手册]]',
             },
         },
         'required': [
@@ -1214,7 +1400,9 @@ tool(
     description=(
         '[legacy] 按关键词全文检索尚未迁移的全局知识库（大小写不敏感子串）：返回 '
         '{path（即 kb_open 的 module 参数）, source, matches, snippet}。'
-        '多关键词空格分隔为 AND 语义，零结果自动放宽为 OR。'
+        '多关键词空格分隔为 AND 语义，零结果自动放宽（英文 OR；中文按词元稀有度加权覆盖）。'
+        '**直接问中文自然语言即可**（如「如何测试文件上传漏洞」「jwt 算法混淆怎么打」），'
+        '不需要先拆成关键词——虚词会被自动剔除，术语按稀有度加权排序。'
         'tag 可选：按 frontmatter 分面标签过滤（phase/vuln_class，如 tag=jwt）。'
         '用法：kb_search 定位 → kb_open 细读；中文专题用中文词、英文快照用英文词，必要时各试一次。'
     ),
@@ -1223,7 +1411,7 @@ tool(
         'properties': {
             'query': {
                 'type': 'string',
-                'description': '检索关键词（子串匹配；空格分隔多关键词）',
+                'description': '检索词：关键词或中文自然语言问句均可（空格分隔多词为 AND 语义）',
             },
             'limit': {
                 'type': 'integer',
@@ -2147,11 +2335,11 @@ tool(
         'properties': {
             'name': {
                 'type': 'string',
-                'description': '技能名（如 sqli-test）',
+                'description': '技能名（中英文均可，须与技能目录名一致，如 sqli-test、注入测试）',
             },
             'path': {
                 'type': 'string',
-                'description': '可选资源路径，如 references/method.md 或 scripts/check.py',
+                'description': '可选资源路径（可含中文），如 references/method.md 或 scripts/check.py',
             },
         },
         'required': [
@@ -2272,6 +2460,8 @@ tool(
         '② finding——有效线索，至少一条 category=intel 的非误报；一个意图可带多条同类发现'
         '（目录爆破 5 条=一次发现收尾）；③ dead_end——死路，需 dead_reason + evidence_refs，且必须零发现。'
         '**未发现/测过没事也是结论**：必须用它收尾而非让意图悬挂——资产的 tested_clean 就靠 dead_end 背书。'
+        '**CTF 轨例外**：dead_end 只要求 `dead_reason`（写清卡点即可），不必凑 evidence_refs——'
+        'CTF 的终态判据是 flag 台账，没有 tested_clean 这个消费者。'
         '证据不足保持 open（宁严勿松）；有新证据先 reopen_intent。'
     ),
     input_schema={

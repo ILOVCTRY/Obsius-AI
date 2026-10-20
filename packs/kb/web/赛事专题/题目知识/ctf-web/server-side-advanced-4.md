@@ -255,7 +255,7 @@ for pos in range(1, 50):
 print(f"Final flag: {flag}")
 ```
 
-**Key insight:** `gopher://` sends raw TCP data, enabling communication with any TCP service. Capture a legitimate MySQL session with `tcpdump`, then replay the auth + query bytes via gopher. Use passwordless MySQL accounts (common in CTF setups). Double-URL-encode the payload when the SSRF handler URL-decodes once. This technique also works against PostgreSQL, Redis, and other TCP services accessible from the SSRF context. See also [sql-injection.md](../../../漏洞分类/injection/sql-injection.md) for SQL injection techniques.
+**Key insight:** `gopher://` sends raw TCP data, enabling communication with any TCP service. Capture a legitimate MySQL session with `tcpdump`, then replay the auth + query bytes via gopher. Use passwordless MySQL accounts (common in CTF setups). Double-URL-encode the payload when the SSRF handler URL-decodes once. This technique also works against PostgreSQL, Redis, and other TCP services accessible from the SSRF context. See also [sql-injection.md](../../../漏洞分类/注入类/sql-injection.md) for SQL injection techniques.
 
 ---
 

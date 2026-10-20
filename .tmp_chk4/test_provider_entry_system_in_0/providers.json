@@ -1,0 +1,16 @@
+{
+  "providers": [
+    {
+      "name": "gw",
+      "base_url": "https://gw.example",
+      "api_key": "k",
+      "format": "openai-responses",
+      "models": [
+        "m1"
+      ],
+      "enabled": true,
+      "model_context": {},
+      "system_in_user": true
+    }
+  ]
+}

@@ -1,312 +1,167 @@
-# Social Media OSINT
-
-## Table of Contents
-- [Twitter/X Account Tracking](#twitterx-account-tracking)
-- [Tumblr Investigation](#tumblr-investigation)
-- [BlueSky Advanced Search](#bluesky-advanced-search)
-- [Username OSINT](#username-osint)
-- [Platform False Positives](#platform-false-positives)
-- [Social Media General Tips](#social-media-general-tips)
-- [Multi-Platform OSINT Chain](#multi-platform-osint-chain)
-- [Gaming Platform OSINT / MMO Character Lookup (CSAW CTF 2016)](#gaming-platform-osint--mmo-character-lookup-csaw-ctf-2016)
-- [MetaCTF OSINT Challenge Patterns](#metactf-osint-challenge-patterns)
-- [Unicode Homoglyph Steganography on BlueSky (MetaCTF 2026)](#unicode-homoglyph-steganography-on-bluesky-metactf-2026)
-- [Strava Fitness Route OSINT (MidnightCTF 2026)](#strava-fitness-route-osint-midnightctf-2026)
-- [Discord API Enumeration](#discord-api-enumeration)
-
+---
+title: 社交媒体情报
+phase: forensics
+vuln_class: [osint, social-media, username, stego, metadata]
+summary: 账号题的判据是「ID 还是名字」——数字 ID 永久有效可跨改名追踪，用户名只是当前标签。用户名枚举最大的坑是平台假阳性，必须逐条复核页面内容而不是状态码。
 ---
 
-## Twitter/X Account Tracking
+# 社交媒体情报
 
-**Persistent numeric User ID (key technique):**
-- Every Twitter/X account has a permanent numeric ID that never changes
-- Access any account by ID: `https://x.com/i/user/<numeric_id>` -- works even after username changes
-- Find user ID from archived pages (JSON-LD `"author":{"identifier":"..."}`)
-- Useful when username is deleted/changed but you have the ID from forensic artifacts
+图与坐标见 [[forensics/开源情报/geolocation-and-media.md|地理定位与媒体]]；域名/IP/仓库见 [[forensics/开源情报/web-and-dns.md|Web 与 DNS]]；总入口见 [[forensics/开源情报/index.md|开源情报]]。
 
-**Username rename detection:**
-- Twitter User IDs persist across username changes; t.co shortlinks point to OLD usernames
-- Wayback CDX API to find archived profiles: `http://web.archive.org/cdx/search/cdx?url=twitter.com/USERNAME*&output=json`
-- Archived pages contain JSON-LD with user ID, creation date, follower/following counts
-- t.co links in archived tweets reveal previous usernames (the redirect URL contains the username at time of posting)
-- Same tweet ID accessible under different usernames = confirmed rename
+## 0. 判据速查
 
-**Alternative Twitter data sources:**
-- Nitter instances (e.g., `nitter.poast.org/USERNAME`) show tweets without login
-- Syndication API: `https://syndication.twitter.com/srv/timeline-profile/screen-name/USERNAME`
-- Twitter Snowflake IDs encode timestamps: `(id >> 22) + 1288834974657` = Unix ms
-- memory.lol and twitter.lolarchiver.com track username history
+| 观察到的现象 | 结论 | 去哪节 |
+|---|---|---|
+| 拿到一个数字 User ID | 改名追踪的锚点，比用户名可靠 | §1 |
+| 用户名在 Wayback 里有旧快照 | t.co 短链里藏着当时的旧用户名 | §1 |
+| 帖子字符看着一样但含非 ASCII | 同形字隐写，ASCII=0、异体=1 | §5 |
+| 帖子里有智能引号 `’` | 平台自动替换，**必须剔除**再解码 | §5 |
+| 用户名带尾随数字 | 邮编/出生年/区号，直接查地名 | §3 |
+| 枚举器报 50 个站点全命中 | 平台假阳性，逐个看页面内容 | §4 |
+| 题目提到跑步/骑行/GPS | Strava 轨迹端点 | §6 |
+| 题目提到服务器/角色/表情 | Discord 元数据里藏东西 | §7 |
+| 一个账号指向另一个平台 | 平台链，逐跳枚举 | §2 |
 
-**Wayback Machine for Twitter:**
+## 1. Twitter/X 账号追踪
+
+**数字 ID 是唯一稳定标识**，用户名可以改。`https://x.com/i/user/<numeric_id>` 改名后仍然可达。
+
+- **从存档里挖 ID**：归档页的 JSON-LD 有 `"author":{"identifier":"..."}`，还能拿到注册时间与粉丝数。
+- **Snowflake 解时间**：`(id >> 22) + 1288834974657` = Unix 毫秒。
+- **确认改名的硬证据**：同一条 tweet ID 在不同用户名下都能访问 → 确认为同一账号改过名。
+- **t.co 短链是时间胶囊**：归档的 t.co 重定向 URL 里保存的是**发布当时**的用户名。
+
 ```bash
-# Find all archived URLs for a username
 curl "http://web.archive.org/cdx/search/cdx?url=twitter.com/USERNAME*&output=json&fl=timestamp,original,statuscode"
-
-# Also check profile images
 curl "http://web.archive.org/cdx/search/cdx?url=pbs.twimg.com/profile_images/*&output=json"
-
-# Check t.co shortlinks
 curl "http://web.archive.org/cdx/search/cdx?url=t.co/SHORTCODE&output=json"
 ```
 
-## Tumblr Investigation
+免登录替代源：Nitter 实例（`nitter.poast.org/USERNAME`）、Syndication API（`syndication.twitter.com/srv/timeline-profile/screen-name/USERNAME`）、memory.lol 与 twitter.lolarchiver.com（用户名历史）。
 
-**Blog existence check:**
-- `curl -sI "https://USERNAME.tumblr.com"` -> look for `x-tumblr-user` header (confirms blog exists even if API returns 401)
-- Tumblr API may return 401 (Unauthorized) but the blog is still publicly viewable via browser
+**坑：Twitter 上传会剥离 EXIF**。从 Twitter 拿到的图做隐写分析基本是白费，直接转反向图搜。
 
-**Extracting post content from Tumblr HTML:**
-- Tumblr embeds post data as JSON in the page HTML
-- Search for `"content":[` to find post body data
-- Posts contain `type: "text"` with `text` field, and `type: "image"` with media URLs
-- Avatar URL pattern: `https://64.media.tumblr.com/HASH/HASH-XX/s512x512u_c1/FILENAME.jpg`
+## 2. 平台链：一跳接一跳
 
-**Avatar as flag container:**
-- Direct avatar endpoint: `https://api.tumblr.com/v2/blog/USERNAME.tumblr.com/avatar/512`
-- Or simply: `https://USERNAME.tumblr.com/avatar/512` (redirects to CDN URL)
-- Available sizes: 16, 24, 30, 40, 48, 64, 96, 128, 512
-- Flags may be hidden as small text in avatar images (visual stego, not binary stego)
-- Always download highest resolution (512) and zoom in on all areas
+典型链路：图片 EXIF → 用户名 → 多平台枚举 → 某平台指向下一平台 → 终点藏 flag。
 
-## BlueSky Advanced Search
+- **编码可能是非标准的**：Base58（无 `0OIl`）、base64url（`-_` 而非 `+/`）都要试。看到一串「像 base64 但解不开」的字符串，先换字母表。
+- **终点常是「描述字段」**：Spotify 歌单描述、SoundCloud 曲目简介、itch.io 项目说明、BlueSky 帖子正文——这些地方平台不做长度限制也少有人看。
+- **藏法可能是首字母**：歌单里每首歌标题首字母连起来是 flag，此时「选哪些歌」本身是信息。
+- **题目名是提示**：「Linked Traces」→ LinkedIn 或 linked accounts。
 
-**Pattern (Ms Blue Sky):** Find target's posts on BlueSky social media.
+## 3. 用户名里的元数据
 
-**Search filters:**
-```text
-from:username        # Posts from specific user
-since:2025-01-01     # Date range
-has:images           # Posts with images
-```
+用户名结构常带地理/时间信号，先拆再搜。
 
-**Reference:** https://bsky.social/about/blog/05-31-2024-search
+| 形态 | 例 | 信号 |
+|---|---|---|
+| 尾随 5 位数字 | `LinXiayu35170` | 35170 = 法国 Bruz 邮编 |
+| 尾随 4 位年份 | `jsmith1998` | 出生年 1998 |
+| 3 位区号 | `user212nyc` | 212 = 曼哈顿 |
+| 国家码 | `player44uk` | +44 = 英国 |
 
-## Username OSINT
+**顺序**：先按「数字长度」猜类型（3 位区号 / 4 位年份 / 5 位邮编 / 6 位中国邮编），再拿去查对应库。不要直接把整串丢进搜索。
 
-- [namechk.com](https://namechk.com) - Check username across platforms
-- [whatsmyname.app](https://whatsmyname.app) - Username enumeration (741+ sites)
-- [Osint Industries](https://osint.industries) - Cross-platform people search (paid, covers fitness/niche platforms)
-- Search `"username"` in quotes on major platforms
+**改名链追踪**：已知用户名 → Wayback 归档 → 归档页里的 t.co 或跨平台引用 → 新用户名 → 对新名字重新全平台枚举 → 循环直到命中。
 
-**Username metadata mining:**
-Usernames often embed geographic or temporal signals in their structure. Extract and research numeric suffixes, prefixes, or embedded patterns:
+## 4. 用户名枚举与假阳性
 
-| Pattern | Example | Signal |
-|---------|---------|--------|
-| Trailing digits = postal/ZIP code | `LinXiayu35170` | 35170 = Bruz, France |
-| Birth year suffix | `jsmith1998` | Born 1998 |
-| Area code | `user212nyc` | 212 = Manhattan |
-| Country code | `player44uk` | +44 = United Kingdom |
+工具：[whatsmyname.app](https://whatsmyname.app)（741+ 站）、[namechk.com](https://namechk.com)、[Osint Industries](https://osint.industries)（付费，覆盖健身/小众平台）。
 
-Cross-reference extracted codes with postal code databases, phone number registries, or geographic gazetteers to narrow the subject's location. (MidnightCTF 2026)
+**必须人工复核的假阳性清单**：
 
-**Username chain tracing (account renames):**
-1. Start with known username -> find Wayback archives
-2. Look for t.co links or cross-references to other usernames in archived pages
-3. Discovered new username -> enumerate across ALL platforms again
-4. Repeat until you find the platform with the flag
+| 平台 | 假阳性表现 | 怎么区分 |
+|---|---|---|
+| Telegram `t.me/USER` | 永远 200 | 标题是 "View" 还是 "Contact" |
+| TikTok | 200 但正文 "Couldn't find this account" | 查正文 |
+| Smule | 200 但正文 "Not Found" | 查正文 |
+| linkin.bio | 重定向到 Later.com 产品页 | 看落地域名 |
+| Instagram | 200 但弹登录墙 | 无法确认，需换途径 |
 
-**Priority platforms for CTF username enumeration:**
-- Twitter/X, Tumblr, GitHub, Reddit, Bluesky, Mastodon
-- Spotify, SoundCloud, Steam, Keybase
-- Strava, Garmin Connect, MapMyRun (fitness/GPS — leak physical locations)
-- Pastebin, LinkedIn, YouTube, TikTok
-- bio-link services (linktr.ee, bio.link, about.me)
+**优先级顺序**（CTF 里命中率从高到低）：GitHub → Twitter/X → Reddit → Bluesky/Mastodon → Spotify/SoundCloud → Steam/Keybase → Strava/Garmin（泄露物理位置）→ Pastebin/LinkedIn/YouTube/TikTok → bio-link 服务（linktr.ee、about.me）。
 
-## Platform False Positives
+## 5. 同形字隐写
 
-Platforms that return 200 but no real profile:
-- Telegram (`t.me/USER`): Always returns 200 with "Contact @USER" page; check for "View" vs "Contact" in title
-- TikTok: Returns 200 with "Couldn't find this account" in body
-- Smule: Returns 200 with "Not Found" in page content
-- linkin.bio: Redirects to Later.com product page for unclaimed names
-- Instagram: Returns 200 but shows login wall (may or may not exist)
+视觉相同、码位不同：ASCII = 0，异体 = 1。Cyrillic `а`(U+0430) vs `a`(U+0061)、`о`(U+043E)、`е`(U+0435)、`ѕ`(U+0455)、Math Monospace `𝚝`(U+1D69D)、`р`(U+0440)。
 
-## Social Media General Tips
-
-- Check Wayback Machine for deleted posts on Bluesky, Twitter, etc.
-- Unlisted YouTube videos may be linked in deleted posts
-- Bio links lead to itch.io, personal sites with more info
-- Search `"username"` with quotes on platform-specific searches
-- Challenge titles are often hints (e.g., "Linked Traces" -> LinkedIn / linked accounts)
-- **Twitter strips EXIF** on upload - don't waste time on stego for Twitter-served images
-- **Tumblr preserves more metadata** in avatars than in post images
-
-## Multi-Platform OSINT Chain
-
-**Pattern (Massive-Equipment393):** Reddit username -> Spotify social link -> Base58-encoded string -> Spotify playlist descriptions (base64) -> first-letter acrostic from song titles.
-
-**Key techniques:**
-- Base58 decoding for non-standard encodings
-- Spotify playlists encode data in descriptions and song title initials
-- Platform chaining: each platform links to the next
-
-## Gaming Platform OSINT / MMO Character Lookup (CSAW CTF 2016)
-
-CTF OSINT challenges may require looking up game characters, guilds, or profiles across MMO platforms.
-
-```text
-# World of Warcraft character/guild lookup:
-# - Blizzard API: https://develop.battle.net/documentation/world-of-warcraft
-# - WoW Progress: https://www.wowprogress.com
-# - Raider.IO: https://raider.io
-# Search: guild name + realm name (e.g., "Blackfathom Deep Dish" on US-Turalyon)
-
-# Steam profile search:
-# - steamcommunity.com/id/[username]
-# - steamid.io for SteamID lookups
-
-# Minecraft player lookup:
-# - NameMC: https://namemc.com
-# - Shows skin, name history, servers
-
-# Discord user lookup:
-# - discord.id for user/server lookups
-# - Bot: UserInfo for detailed profiles
-
-# Gaming OSINT chain pattern:
-# 1. Blog/Twitter mentions guild or game name
-# 2. Look up guild on game-specific tracker site
-# 3. Find character name from guild roster
-# 4. Character name may be used on other platforms
-# 5. Cross-reference with other OSINT findings
-```
-
-**Key insight:** Gaming profiles are often overlooked in OSINT but contain rich metadata (play times, real names, linked accounts, server regions). Guild/clan trackers index public game APIs and cache historical data. Character names are frequently reused across platforms.
-
----
-
-## MetaCTF OSINT Challenge Patterns
-
-**Common flow:**
-1. Start image with hidden EXIF/metadata -> extract username
-2. Username enumeration (Sherlock/WhatsMyName) across platforms
-3. Find profile on platform X with clues pointing to platform Y
-4. Flag hidden on the final platform (Spotify bio, BlueSky post, Tumblr avatar, etc.)
-
-**Platform-specific flag locations:**
-- Spotify: playlist names, artist bio
-- BlueSky: post content
-- Tumblr: avatar image, post text
-- Reddit: post/comment content
-- Smule: song recordings or bio
-- SoundCloud: track description
-
-**Key techniques:**
-- Account rename tracking via Wayback + t.co links
-- Cross-platform username correlation
-- Visual inspection of all profile images at max resolution
-- Song lyric identification -> artist/song as flag component
-
-## Unicode Homoglyph Steganography on BlueSky (MetaCTF 2026)
-
-**Pattern (Skybound Secrets):** Flag hidden in a Bluesky post using Unicode homoglyph steganography — visually identical characters from different Unicode blocks encode binary data.
-
-**Detection:**
-- Post text looks normal but character-by-character analysis reveals non-ASCII codepoints
-- Characters from Cyrillic (`а` U+0430 vs `a` U+0061), Greek, Armenian, Mathematical Monospace, etc.
-- Each character encodes 1 bit: ASCII = 0, homoglyph = 1
-
-**Bluesky API search workflow:**
-```bash
-# Search for posts about the CTF
-curl -s "https://public.api.bsky.app/xrpc/app.bsky.feed.searchPosts?q=metactf+flash+ctf&sort=latest" | jq '.posts[].record.text'
-
-# Search for specific accounts
-curl -s "https://public.api.bsky.app/xrpc/app.bsky.actor.searchActors?q=metactf" | jq '.actors[].handle'
-
-# Get profile
-curl -s "https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile?actor=metactf.bsky.social" | jq
-
-# Get author feed (all posts)
-curl -s "https://public.api.bsky.app/xrpc/app.bsky.feed.getAuthorFeed?actor=metactf.bsky.social&limit=50" | jq '.feed[].post.record.text'
-
-# Get post thread (including replies)
-curl -s "https://public.api.bsky.app/xrpc/app.bsky.feed.getPostThread?uri=at://did:plc:.../app.bsky.feed.post/..." | jq
-```
-
-**Decoding homoglyph steganography:**
 ```python
-def decode_homoglyph_stego(text):
+def decode_homoglyph(text):
     bits = []
     for ch in text:
-        if ch in ('\u2019',):  # Platform auto-inserted right single quote
-            continue  # Skip, not intentional homoglyph
-        if ord(ch) < 128:
-            bits.append(0)  # Standard ASCII
-        else:
-            bits.append(1)  # Unicode homoglyph = 1 bit
-
-    # Group into bytes (MSB first)
-    flag = ''
+        if ch in ('\u2019', '\u2018', '\u201c', '\u201d'):
+            continue          # 平台自动替换的智能引号，不是刻意异体
+        bits.append(0 if ord(ch) < 128 else 1)
+    out = ''
     for i in range(0, len(bits) - 7, 8):
-        byte_val = 0
+        b = 0
         for j in range(8):
-            byte_val = (byte_val << 1) | bits[i + j]
-        flag += chr(byte_val)
-    return flag
+            b = (b << 1) | bits[i + j]
+        out += chr(b)
+    return out
 ```
 
-**Common homoglyph pairs:**
-| ASCII | Homoglyph | Unicode Block |
-|-------|-----------|---------------|
-| `a` (U+0061) | `а` (U+0430) | Cyrillic |
-| `o` (U+006F) | `о` (U+043E) | Cyrillic |
-| `e` (U+0065) | `е` (U+0435) | Cyrillic |
-| `s` (U+0073) | `ѕ` (U+0455) | Cyrillic DZE |
-| `t` (U+0074) | `𝚝` (U+1D69D) | Math Monospace |
-| `p` (U+0070) | `р` (U+0440) | Cyrillic |
+**两个必踩的坑**：
 
-**Key lessons:**
-- Check ALL replies to official CTF posts, not just the main post
-- Platform auto-formatting (smart quotes `'` → `'`) must be excluded from bit encoding
-- Hints like "hype comes with its own secrets" suggest steganography in the social media posts themselves
-- Bluesky public API requires no authentication — use `public.api.bsky.app`
+- **智能引号**：平台会把 `'` 换成 `’`，这是自动行为不是隐写，不剔除会让整个位流错位。
+- **位序**：MSB first 是默认，但反向实现的题存在。解出来是乱码时先试 LSB first，再试反转字符串。
 
----
-
-## Strava Fitness Route OSINT (MidnightCTF 2026)
-
-**Pattern (Where was Chine):** Target's physical location identified through fitness tracking data. Username discovered on Twitter → alias found in GitHub code → alias searched on Strava → running route endpoint reveals location.
-
-**Strava public data exposure:**
-- Public athlete profiles: `https://www.strava.com/athletes/<id>`
-- Activity maps show GPS routes with start/end points
-- Even "privacy zones" can be circumvented by analyzing route shapes outside the zone
-- Segment leaderboards reveal athlete locations without following them
-
-**Location extraction workflow:**
-1. Find target's Strava profile via username enumeration (Whatsmyname, Osint Industries)
-2. Check public activities for GPS route maps
-3. Identify route start/end points or frequent locations
-4. Search the endpoint location on Google Maps
-5. Verify with Google Maps user-submitted photos (see [[forensics/开源情报/geolocation-and-media.md#google-maps-crowd-sourced-photo-verification-midnightctf-2026|geolocation-and-media.md]])
-
-**Key insight:** Fitness apps are high-value OSINT targets because users rarely restrict activity visibility. A single public run reveals home/work neighborhoods. Cross-reference GPS endpoints with Google Maps to identify specific parks, buildings, or landmarks.
-
-**Detection:** Challenge mentions exercise, running, cycling, fitness, GPS, or health tracking. Target persona has an active/athletic profile.
-
----
-
-## Discord API Enumeration
-
-**Pattern (Insanity 1 & 2, 0xFun 2026):** Flags hidden in Discord server metadata not visible in normal UI.
-
-**Hiding spots:**
-- Role names
-- Animated GIF emoji (flag in 2nd frame with tiny duration)
-- Message embeds
-- Server description, stickers, events
+**BlueSky 公开 API 无需鉴权**：
 
 ```bash
-# Enumerate with user token
-TOKEN="your_token"
-# List roles
+curl -s "https://public.api.bsky.app/xrpc/app.bsky.feed.searchPosts?q=KEYWORD&sort=latest" | jq '.posts[].record.text'
+curl -s "https://public.api.bsky.app/xrpc/app.bsky.actor.searchActors?q=KEYWORD" | jq '.actors[].handle'
+curl -s "https://public.api.bsky.app/xrpc/app.bsky.feed.getAuthorFeed?actor=HANDLE&limit=50" | jq '.feed[].post.record.text'
+curl -s "https://public.api.bsky.app/xrpc/app.bsky.feed.getPostThread?uri=at://..." | jq
+```
+
+**查回复区，不只查主帖**。官方帖的回复里经常有人（或出题人）留下藏着 flag 的帖子。搜索语法支持 `from:user`、`since:2025-01-01`、`has:images`。
+
+## 6. Strava 轨迹
+
+公开主页 `strava.com/athletes/<id>`，活动地图直接画 GPS 轨迹。
+
+**隐私区（privacy zone）可绕过**：区域只遮住起终点附近，但**轨迹形状本身**暴露了路线，用形状匹配地图就能定位。分段排行榜（segment leaderboard）也能在不关注的情况下暴露活动区域。
+
+流程：用户名枚举找到 Strava → 看公开活动的轨迹图 → 找起终点或高频位置 → Google Maps 定位 → 用用户上传照片交叉验证（见 [[forensics/开源情报/geolocation-and-media.md|地理定位与媒体]]）。
+
+**判据**：题面提到 exercise / running / cycling / fitness / GPS / health，或目标人设有运动属性。
+
+## 7. Discord 元数据
+
+flag 常藏在 UI 里看不见的地方：**角色名**、**动图表情的第 2 帧**（时长极短，正常播放看不到）、消息 embed、服务器描述、贴纸、活动。
+
+```bash
+TOKEN="..."
 curl -H "Authorization: $TOKEN" "https://discord.com/api/v10/guilds/GUILD_ID/roles"
-# List emojis
 curl -H "Authorization: $TOKEN" "https://discord.com/api/v10/guilds/GUILD_ID/emojis"
-# Search messages
 curl -H "Authorization: $TOKEN" "https://discord.com/api/v10/guilds/GUILD_ID/messages/search?content=flag"
 ```
 
-**Animated emoji:** Download GIF, extract frames -- hidden data in brief frames invisible at normal speed.
+**动图表情必须抽全部帧**：`ffmpeg -i emoji.gif frames/%03d.png`，然后逐帧看或算帧间差——只抽第一帧会完全错过。
+
+## 8. Tumblr
+
+- **存在性判断**：`curl -sI https://USER.tumblr.com`，有 `x-tumblr-user` 头就是存在。API 返 401 不代表博客不可见。
+- **帖子数据**：HTML 里内嵌 JSON，搜 `"content":[` 定位。`type: "text"` 有 `text` 字段，`type: "image"` 有媒体 URL。
+- **头像**：`https://USER.tumblr.com/avatar/512`，尺寸有 16/24/30/40/48/64/96/128/512。**永远取 512 并放大看全部区域**——flag 常是小字，属于视觉隐写不是二进制隐写。
+- **Tumblr 的头像保留元数据比帖子图多**，值得先 `exiftool` 一遍。
+
+## 9. 游戏平台
+
+| 平台 | 查询入口 |
+|---|---|
+| Steam | `steamcommunity.com/id/<user>`；SteamID 用 steamid.io |
+| Minecraft | NameMC（含**改名历史**与皮肤） |
+| WoW | Raider.IO / WoWProgress，按「公会名 + 服务器」搜 |
+| Discord | discord.id |
+
+**游戏账号常被 OSINT 忽略但信息密度高**：游玩时长能推时区，公会名能推社群，角色名常在其他平台复用。
+
+## 10. 纪律
+
+- **数字 ID 优先于用户名**。拿到 ID 就锁定账号，之后所有改名都追得到；只靠用户名，改名即断线。
+- **枚举结果必须看内容不看状态码**。200 是 HTTP 层的「请求成功」，不是「用户存在」。
+- **平台自动格式化要显式剔除**。智能引号、零宽字符、自动链接化都会污染位流，解码前先打印 `ord()` 分布确认。
+- **先查回复区和历史快照**。flag 藏在「官方帖的回复里」和「已删除的旧帖里」的概率，远高于藏在主帖正文。

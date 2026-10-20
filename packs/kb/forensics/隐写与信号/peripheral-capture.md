@@ -1,287 +1,244 @@
-# CTF Forensics - Peripheral Capture Analysis
-
-USB, HID, and Bluetooth peripheral traffic reconstruction from packet captures. For general network PCAP forensics (DNS/TCP/ICMP/SMB/RADIUS/RC4), see [[forensics/网络取证/network-advanced.md|network-advanced.md]]. For basic network forensics, see [[forensics/网络取证/network.md|network.md]].
-
-## Table of Contents
-- [USB HID Mouse/Pen Drawing Recovery (EHAX 2026)](#usb-hid-mousepen-drawing-recovery-ehax-2026)
-- [USB HID Keyboard Capture Decoding (EKOPARTY CTF 2016)](#usb-hid-keyboard-capture-decoding-ekoparty-ctf-2016)
-- [USB Keyboard LED Morse Code Exfiltration (BITSCTF 2017)](#usb-keyboard-led-morse-code-exfiltration-bitsctf-2017)
-- [USB HID Keyboard Arrow Key Navigation Tracking (HackIT 2017)](#usb-hid-keyboard-arrow-key-navigation-tracking-hackit-2017)
-- [Bluetooth RFCOMM Packet Reassembly (HITCON 2018)](#bluetooth-rfcomm-packet-reassembly-hitcon-2018)
-- [GBA USB URB_INTERRUPT Framebuffer Extraction (hxp 2018)](#gba-usb-urb_interrupt-framebuffer-extraction-hxp-2018)
-
+---
+title: USB/HID 与蓝牙外设流量分析
+phase: forensics
+vuln_class: [usb, hid, peripheral]
+summary: 拿到 USB/蓝牙抓包先按本表穷举：设备类型→传输类型→载荷格式，HID 键码/鼠标轨迹/存储/自定义协议逐项排除。含 tshark 字段真名与「输出为空」的判定顺序（-c 陷阱/rc 三义/MSC 载荷归属）。
 ---
 
-## USB HID Mouse/Pen Drawing Recovery (EHAX 2026)
+# USB / HID / 蓝牙外设流量分析（全方向）
 
-**Pattern (Painter):** PCAP contains USB HID interrupt transfers from a mouse/pen device. Drawing data encoded as relative movements with multiple draw modes.
+**用法**：USB 抓包不是「只有键盘一种」。先判**设备类型**，再判**传输类型**，最后才解载荷。
+判错设备类型就会拿键盘解码器去解鼠标数据，白费时间。
 
-**Packet format (7-byte HID reports):**
-| Byte | Field | Notes |
-|------|-------|-------|
-| 0 | Button state | 0x01 = pressed (may be constant) |
-| 1 | Mode/pad | 0=hover, 1=draw mode 1, 2=draw mode 2 |
-| 2-3 | dx (int16 LE) | Relative X movement |
-| 4-5 | dy (int16 LE) | Relative Y movement |
-| 6 | Wheel | Usually 0 |
-
-**Extraction and rendering:**
-```python
-import struct
-from PIL import Image, ImageDraw
-
-# Extract HID data
-# tshark -r capture.pcap -Y "usb.transfer_type==1" -T fields -e usb.capdata
-
-packets = []
-with open('hid_data.txt') as f:
-    for line in f:
-        raw = bytes.fromhex(line.strip().replace(':', ''))
-        if len(raw) >= 7:
-            btn = raw[0]
-            mode = raw[1]
-            dx = struct.unpack('<h', raw[2:4])[0]
-            dy = struct.unpack('<h', raw[4:6])[0]
-            packets.append((btn, mode, dx, dy))
-
-# Accumulate positions per mode
-SCALE = 5
-positions = {0: [], 1: [], 2: []}
-x, y = 0, 0
-for btn, mode, dx, dy in packets:
-    x += dx
-    y += dy
-    positions[mode].append((x, y))
-
-# Render each mode separately (different colors = different text layers)
-for mode in [1, 2]:
-    pts = positions[mode]
-    if not pts:
-        continue
-    min_x = min(p[0] for p in pts) - 100
-    min_y = min(p[1] for p in pts) - 100
-    max_x = max(p[0] for p in pts) + 100
-    max_y = max(p[1] for p in pts) + 100
-    w = (max_x - min_x) * SCALE
-    h = (max_y - min_y) * SCALE
-    img = Image.new('RGB', (w, h), 'white')
-    draw = ImageDraw.Draw(img)
-    for i in range(1, len(pts)):
-        x0 = (pts[i-1][0] - min_x) * SCALE
-        y0 = (pts[i-1][1] - min_y) * SCALE
-        x1 = (pts[i][0] - min_x) * SCALE
-        y1 = (pts[i][1] - min_y) * SCALE
-        # Skip long jumps (pen lifts)
-        if abs(pts[i][0]-pts[i-1][0]) < 50 and abs(pts[i][1]-pts[i-1][1]) < 50:
-            draw.line([(x0,y0),(x1,y1)], fill='black', width=3)
-    img.save(f'mode_{mode}.png')
-```
-
-**Key techniques:**
-- **Separate modes:** Different button/mode values draw different text layers — render each independently
-- **Skip pen lifts:** Large dx/dy jumps indicate pen was lifted, not drawn — filter by distance threshold
-- **High resolution:** Scale 5-8x with margins for readable handwriting
-- **Time gradient:** Color points by temporal order (rainbow gradient) to trace stroke direction
-- **Character segmentation:** Group consecutive same-mode points by large X gaps to isolate characters
-
-**Alternative: AWK extraction + SVG rendering (faster pipeline):**
-```bash
-# Extract capdata and convert to signed deltas in one pass
-tshark -r pref.pcap -Y "usb.transfer_type==0x01 && usb.endpoint_address==0x81 && usb.capdata" \
-  -T fields -e usb.capdata > capdata.txt
-
-awk '
-function hexval(c){ return index("0123456789abcdef",tolower(c))-1 }
-function hex2dec(h, n,i){ n=0; for(i=1;i<=length(h);i++) n=n*16+hexval(substr(h,i,1)); return n }
-function s16(u){ return (u>=32768)?u-65536:u }
-{ d=$1; if(length(d)!=14) next
-  btn=hex2dec(substr(d,3,2))
-  x=s16(hex2dec(substr(d,7,2) substr(d,5,2)))
-  y=s16(hex2dec(substr(d,11,2) substr(d,9,2)))
-  print btn, x, y }' capdata.txt > deltas.txt
-```
-Then render with SVG (Python) — filter on pen-down state (button=2), accumulate deltas, flip Y axis, draw strokes between consecutive pen-down points.
-
-**Difference from keyboard HID:** Mouse HID uses relative movements (accumulated), keyboard uses keycodes (direct). Mouse drawing requires rendering; keyboard requires keymap lookup.
-
----
-
-## USB HID Keyboard Capture Decoding (EKOPARTY CTF 2016)
-
-USB keyboard captures contain HID scan codes that map to keystrokes. Decode the capture to reconstruct typed text.
-
-```python
-# USB HID keyboard report format:
-# Byte 0: Modifier keys (Shift, Ctrl, Alt)
-# Byte 1: Reserved (0x00)
-# Bytes 2-7: Up to 6 simultaneous key codes
-
-# HID scan code to character mapping (partial)
-HID_MAP = {
-    0x04: 'a', 0x05: 'b', 0x06: 'c', 0x07: 'd', 0x08: 'e',
-    0x09: 'f', 0x0a: 'g', 0x0b: 'h', 0x0c: 'i', 0x0d: 'j',
-    0x0e: 'k', 0x0f: 'l', 0x10: 'm', 0x11: 'n', 0x12: 'o',
-    0x13: 'p', 0x14: 'q', 0x15: 'r', 0x16: 's', 0x17: 't',
-    0x18: 'u', 0x19: 'v', 0x1a: 'w', 0x1b: 'x', 0x1c: 'y',
-    0x1d: 'z', 0x1e: '1', 0x1f: '2', 0x20: '3', 0x21: '4',
-    0x22: '5', 0x23: '6', 0x24: '7', 0x25: '8', 0x26: '9',
-    0x27: '0', 0x28: '\n', 0x2c: ' ', 0x2d: '-', 0x2e: '=',
-    0x2f: '[', 0x30: ']', 0x33: ';', 0x34: "'", 0x36: ',',
-    0x37: '.', 0x38: '/',
-}
-
-SHIFT_MAP = {
-    'a': 'A', 'b': 'B', '1': '!', '2': '@', '3': '#', '4': '$',
-    '5': '%', '6': '^', '7': '&', '8': '*', '9': '(', '0': ')',
-    '-': '_', '=': '+', '[': '{', ']': '}', ';': ':', "'": '"',
-    ',': '<', '.': '>', '/': '?',
-}
-
-def decode_hid_keyboard(capture_data):
-    """Decode USB HID keyboard capture to text"""
-    text = ""
-    for report in capture_data:
-        modifier = report[0]
-        keycode = report[2]  # first key in report
-
-        if keycode == 0:
-            continue
-
-        char = HID_MAP.get(keycode, '')
-        if modifier & 0x22:  # Left or Right Shift
-            char = SHIFT_MAP.get(char, char.upper())
-
-        text += char
-    return text
-
-# Extract from Wireshark: tshark -r capture.pcapng -T fields -e usb.capdata
-# Or from text dump: parse +XX/-XX format (+ = keydown, - = keyup)
-```
-
-**Key insight:** USB HID keyboards send 8-byte reports where byte 0 is modifiers (Shift/Ctrl/Alt) and bytes 2-7 are active key scan codes. In Wireshark, filter with `usb.transfer_type == 1` and extract `usb.capdata`. Ignore reports where byte 2 is 0x00 (key release).
-
----
-
-## USB Keyboard LED Morse Code Exfiltration (BITSCTF 2017)
-
-**Pattern (Ghost in the Machine):** A pcap of USB keyboard traffic contains host-to-device packets with alternating `0x01`/`0x03` values controlling the Caps Lock LED state. Timing differences between LED state changes encode Morse code: durations >300ms represent dashes, shorter durations represent dots. Decode the Morse sequence to recover the flag.
-
-```python
-from scapy.all import rdpcap
-import struct
-
-packets = rdpcap('usb_capture.pcap')
-signals = []
-
-for p in packets:
-    raw = bytes(p)
-    # USB HID SET_REPORT to keyboard (host -> device)
-    if len(raw) >= 35 and raw[30] in (0x01, 0x03):
-        timestamp = p.time
-        led_state = raw[30]  # 0x01 = LED off, 0x03 = LED on
-        signals.append((timestamp, led_state))
-
-# Convert timing to Morse
-morse = ''
-for i in range(0, len(signals) - 1, 2):
-    duration = signals[i+1][0] - signals[i][0]
-    if duration > 0.3:
-        morse += '-'
-    else:
-        morse += '.'
-    # Gap between signals indicates letter/word boundary
-```
-
-**Key insight:** Data exfiltration via keyboard LED state changes captured in USB pcap. The LED control packets use HID SET_REPORT class requests. Timing analysis of on/off transitions reveals Morse code patterns. Tools: Wireshark USB dissector, filter on `usb.transfer_type == 0x02` (interrupt) and direction host→device.
-
----
-
-## USB HID Keyboard Arrow Key Navigation Tracking (HackIT 2017)
-
-USB HID keyboard traffic from an Apple Keyboard requires tracking arrow key navigation. Decode HID keycodes using the USB HID usage table. Modifier byte `0x02` = Shift (uppercase). Track cursor position via up/down arrow presses to determine which line contains the flag.
+## 0. 先判设备类型（决定后面全部路线）
 
 ```bash
-tshark -r capture.pcap -T fields -e usb.capdata | \
-  python3 decode_hid.py  # Must track arrow keys for line position
+# 列出抓包里出现过的所有 USB 设备
+tshark -r cap.pcapng -Y "usb.device_address" -T fields -e usb.src -e usb.dst | sort -u
+# 看设备描述符（厂商/产品字符串直接暴露设备类型）
+tshark -r cap.pcapng -Y "usb.bDescriptorType==1" -V | grep -E "idVendor|idProduct|iProduct"
 ```
 
-Arrow key HID codes to track:
-- `0x4F` = Right Arrow
-- `0x50` = Left Arrow
-- `0x51` = Down Arrow (next line)
-- `0x52` = Up Arrow (previous line)
+| 设备类型 | 判据 | 典型题型 |
+|---|---|---|
+| HID 键盘 | `bInterfaceClass=3`，报告 8 字节 | 敲击内容、LED 摩斯、方向键导航 |
+| HID 鼠标/画笔 | `bInterfaceClass=3`，报告 4-7 字节，含相对位移 | 轨迹还原成图/文字 |
+| HID 游戏手柄 | 报告含多个按钮位 + 摇杆 | 按键序列 → 编码 |
+| USB 存储（U盘） | `bInterfaceClass=8`，`SCSI`/`BOT` 命令 | 提取文件、删除恢复 |
+| USB 网卡/串口 | `bInterfaceClass=2/10` | 协议还原 |
+| 打印机/扫描仪 | `bInterfaceClass=7` | 打印内容还原 |
+| 蓝牙 | `btatt`/`btrfcomm` 协议 | RFCOMM 重组、ATT 特征值 |
 
-```python
-# Skeleton: track line position during HID decode
-line = 0
-lines = {0: ""}
-for report in hid_reports:
-    modifier = report[0]
-    keycode = report[2]
-    if keycode == 0x51:    # Down arrow
-        line += 1; lines.setdefault(line, "")
-    elif keycode == 0x52:  # Up arrow
-        line -= 1; lines.setdefault(line, "")
-    elif keycode in HID_MAP:
-        char = HID_MAP[keycode]
-        if modifier & 0x22:
-            char = char.upper()
-        lines[line] += char
-# Flag is on a specific line determined by arrow navigation
+## 1. 按设备类型的全部方向
+
+### 1.1 HID 键盘
+
+| 方向 | 判据 | 动作 |
+|---|---|---|
+| 明文敲击 | 报告 8 字节，byte2-7 为键码 | 键码表映射，注意 Shift（byte0 bit1） |
+| 大小写/符号 | 同一键码两种字符 | 结合 byte0 修饰位判 |
+| 方向键导航 | 只有方向键码（0x4F-0x52） | 还原光标轨迹（可能是迷宫/编辑器操作） |
+| LED 摩斯 | 输出报告（host→device）的 LED 位有规律闪烁 | 按时序转摩斯（长短间隔） |
+| 组合键/快捷键 | 多键同时按下 | 还原为 Ctrl+X 等操作序列 |
+| 输入节奏编码 | 击键间隔本身承载信息 | 提取时间差序列 |
+
+**键盘报告格式**（8 字节）：`byte0` 修饰键（bit0=LCtrl, bit1=LShift, bit2=LAlt, bit3=LGUI…），
+`byte1` 保留，`byte2-7` 最多 6 个同时按下的键码。**0x00 表示该槽位空**。
+
+### 1.2 HID 鼠标 / 画笔 / 数位板
+
+| 方向 | 判据 | 动作 |
+|---|---|---|
+| 轨迹还原成图 | 报告含 dx/dy 相对位移 | 累加坐标后绘制 |
+| 多图层绘制 | 报告含 mode/pen 字段 | 按 mode 分色分别绘制（叠加才能读出内容） |
+| 按钮状态编码 | button 字节有规律 | 按按钮状态分段 |
+| 滚轮数据 | byte6 非零 | 滚轮值可能是独立信道 |
+| 绝对坐标设备 | 报告含绝对 X/Y（数位板） | 直接用绝对坐标，不累加 |
+
+**鼠标报告格式**（常见 7 字节）：`byte0` 按钮，`byte1` 模式/填充，`byte2-3` dx(int16 LE)，
+`byte4-5` dy(int16 LE)，`byte6` 滚轮。**注意 dx/dy 是有符号 16 位**，直接当无符号会画出乱线。
+
+### 1.3 USB 存储
+
+| 方向 | 判据 | 动作 |
+|---|---|---|
+| 文件提取 | 有 SCSI READ(10) 命令 | 按 LBA 重组扇区 → 挂载/雕刻 |
+| 删除恢复 | 有 READ 但文件系统标记已删 | 走磁盘恢复流程（见 disk-recovery） |
+| 隐藏分区 | 容量与分区表不符 | 手工解析分区表 |
+
+### 1.4 蓝牙
+
+| 方向 | 判据 | 动作 |
+|---|---|---|
+| RFCOMM 串口数据 | `btrfcomm` 帧 | 重组字节流 |
+| ATT 特征值读写 | `btatt` 有 handle/value | 按 handle 分组还原 |
+| 配对/密钥 | SMP 协议 | 提取密钥后解密后续流量 |
+
+## 2. 通用提取命令
+
+```bash
+# 提取全部 URB 载荷（HID 等中断设备最常用）
+tshark -r cap.pcapng -T fields -e usb.capdata | grep -v '^$'
+
+# 只取中断传输（HID 走这个）
+tshark -r cap.pcapng -Y "usb.transfer_type==1" -T fields -e usb.capdata
+
+# 控制传输（设备描述符、LED 输出报告）
+tshark -r cap.pcapng -Y "usb.transfer_type==2" -T fields -e usb.capdata
 ```
 
-**Key insight:** USB keyboard captures must account for cursor movement keys (arrows, backspace). Track cursor line position to reconstruct text typed on each line separately — the flag may be on a non-zero line that arrow keys navigated to.
+`usb.capdata` 输出是**连续十六进制、无冒号**（`0200040000000000`），直接 `bytes.fromhex()` 即可。
+若见到冒号分隔（`02:00:04:...`）那是 Wireshark GUI 的显示格式，`-T fields` 不会产生。
 
----
+## 2.1 取不到载荷时的判定顺序（2026-10-20 实测重写）
 
-## Bluetooth RFCOMM Packet Reassembly (HITCON 2018)
+**先别断言「环境不支持」。** 按下面四步走，每步都有确定判据：
 
-**Pattern:** A Lego EV3-over-Bluetooth capture contains RFCOMM frames whose payloads are EV3 direct commands. Packets are 32–34 bytes long, have an 8-byte RFCOMM header, and carry an `order` byte plus a `group_number` byte that together reorder into a coherent binary. Reassemble by (1) filtering `btrfcomm` in Wireshark, (2) sorting packets first by `group_number` then by `order`, and (3) concatenating the data fields after the header.
+### ① `-c N` 与 `-Y` 不能混用（最常见的假空）
 
-```python
-# Python with pyshark
-import pyshark
-cap = pyshark.FileCapture("capture.pcap", display_filter="btrfcomm")
-frames = []
-for pkt in cap:
-    raw = bytes.fromhex(pkt.btrfcomm.payload.replace(":", ""))
-    # RFCOMM header size varies: 4 (UIH) or 5 (with length extension)
-    hdr_len = 4 if raw[2] & 0x01 == 0 else 5
-    body = raw[hdr_len:]
-    order, group = body[0], body[1]
-    frames.append((group, order, body[2:]))
-frames.sort()
-binary = b"".join(chunk for _, _, chunk in frames)
-open("payload.bin", "wb").write(binary)
+`-c` 在**读取阶段**生效：先只读前 N 帧，**再**做显示过滤。所以
+
+```bash
+tshark -r cap.pcapng -Y "usb.endpoint_address==0x01" -c 3 -V   # ✗ 几乎必然空
 ```
 
-**Key insight:** RFCOMM is a TCP-like serial port emulation layered on L2CAP; it fragments application payloads when they exceed the MTU. CTF challenges love to split flags across many frames because most pcap walkthroughs stop at TCP/UDP and skip the Bluetooth link layer. Use Wireshark filters `btrfcomm.channel`, `btl2cap`, or `btsnoop_hci` to isolate the relevant flows, then sort by any available order/group bytes before concatenating. Similar logic applies to USB bulk transfers (`usb.transfer_type == 0x03`) and MIDI-over-BLE traffic.
+只要前 3 帧端点不是 `0x01` 就必然空输出、`rc=0`、无任何报错。实测某题：前 3 帧全为 `0x80`，
+该命令输出 0 行；去掉 `-c 3` 后同一过滤器匹配 **522 帧**。
 
-**References:** HITCON CTF 2018 — EV3 Basic, writeup 11902
-
----
-
-## GBA USB URB_INTERRUPT Framebuffer Extraction (hxp 2018)
-
-**Pattern:** pcap contains USB `URB_INTERRUPT` packets from a Game Boy Advance debug adapter. The GBA framebuffer is `240 × 160` at RGB565 (2 bytes/pixel = 76 800 bytes). Block type 6 carries memory dumps; split each packet's payload into the framebuffer grid and convert RGB565 to 8-bit RGB tuples.
-
-```python
-from PIL import Image
-from scapy.all import rdpcap
-pkts = [p for p in rdpcap('cap.pcap') if p.haslayer('Raw')]
-img = Image.new('RGB', (240, 160))
-for p in pkts:
-    if p.Raw.load[3] == 0x06:        # type 6 = memory dump
-        data = p.Raw.load[4:]
-        for i in range(76800 // 2):
-            rgb = int.from_bytes(data[2*i:2*i+2], 'little')
-            r = (rgb & 0xF800) >> 8
-            g = (rgb & 0x07E0) >> 3
-            b = (rgb & 0x001F) << 3
-            img.putpixel((i % 240, i // 240), (r, g, b))
-img.save('screen.png')
+```bash
+# 要限量：过滤后用 head
+tshark -r cap.pcapng -Y "usb.endpoint_address==0x01" -V | head -80
+# 或者只取字段再 head
+tshark -r cap.pcapng -Y "usb.endpoint_address==0x01" -T fields -e usb.capdata | head -20
 ```
 
-**Key insight:** Handheld console debug protocols usually wrap memory dumps in typed blocks. When you see GBA/NDS/PSP USB traffic, grep for block type 6 (framebuffer) or type 7 (audio) before parsing the rest.
+**`-c` 只表达「我就要前 N 帧」这一个语义，永远不要拿它做「取样探查」。**
 
-**References:** hxp CTF 2018 — cheatquest of hxpschr 2, writeup 12591
+### ② 十六进制过滤器写法没问题，别甩锅给它
+
+实测等价（同一文件命中帧完全相同）：
+
+| 写法 | 结果 |
+|---|---|
+| `usb.endpoint_address==0x81` | ✅ 与 `==129` 一致 |
+| `usb.endpoint_address==0x02` | ✅ 与 `==2` 一致 |
+
+**不要写「hex 写法静默失败、要换十进制」这类经验**——它会让人放弃合法写法，掩盖真正的 `-c` 问题。
+
+### ③ 空 stdout 必须结合 rc 判语义（见 §2.2）
+
+### ④ MSC（U 盘）设备的载荷不在 `usb.capdata`，这是**正常**的
+
+USB Mass Storage 的 bulk 数据会被 **USBMS dissector 当作 SCSI Payload 消费掉**，
+`usb.capdata` / `usb.data_fragment` 全为空是解码正确的结果，不是 dissector 失能。
+
+```bash
+# 确认是 MSC 设备
+tshark -r cap.pcapng -T fields -e usb.bInterfaceClass | sort -u   # 0x08 = Mass Storage
+
+# 看 bulk 帧的真实结构：-V 里会出现 SCSI Payload 子树
+tshark -r cap.pcapng -Y "usb.transfer_type==0x03" -V | grep -A5 "SCSI Payload"
+```
+
+**关键区分**：
+- **SCSI 元数据（CDB 参数）可以导出** —— 见 §2.3，字段名带命令集前缀。
+- **SCSI 数据载荷没有可导出字段**（`scsi.data` / `usbms.data` 都不存在），只能
+  `-V` 读文本树，或按 USBPcap 27 字节 pseudoheader 手工切 payload。
+
+## 2.2 空 stdout 的三种语义（tshark 专用判定）
+
+| stdout | rc | 含义 | 该做什么 |
+|---|---|---|---|
+| 空 | 0 | **查询成功但无匹配**（过滤器/字段组合没命中） | 检查 `-c`、过滤器值、字段名 |
+| 空 | 1 | **字段名无效**（`-e` 写错，整条查询未执行） | 查真名（§2.3） |
+| 空 | 2 | **输入文件读不了**（不存在/权限/格式） | 查路径与 `file` 输出 |
+
+`-e` 无效是**原子失败**：`-e 有效 -e 无效` 混写也 `rc=1` 且 stdout 一字节不出（与顺序无关）。
+
+```bash
+# ✗ 禁止对 tshark 用裸 2>/dev/null —— 会把唯一的诊断信息吞掉
+tshark -r f -e usb.urb_func 2>/dev/null        # 看到"成功但空"，其实是字段名错
+
+# ✓ 先取 rc 再分流
+out=$(tshark -r f -T fields -e "$FIELD" 2>&1); rc=$?
+[ $rc -eq 0 ] || echo "rc=$rc 不是无匹配，是查询失败：$out"
+```
+
+## 2.3 查字段真名：用 PDML，不要用 `-V`
+
+`-V` 只输出**给人读的 showname**（`Logical Block Address (LBA): 4660`），拿不到机器字段名。
+`-T pdml` 才有 `name="..."`：
+
+```bash
+tshark -r cap.pcapng -c 1 -T pdml | grep -o 'name="[^"]*"' | sort -u
+```
+
+`-G fields` 是 **tab 分隔**，按空格 `awk` 会列漂移（`$3` 可能是 blurb 的碎片）：
+
+```bash
+tshark -G fields | awk -F'\t' '$1=="F" && $3 ~ /^scsi/ {print $3}'   # ✓
+tshark -G fields | grep -P '\tscsi_sbc\.rdwr10\.lba\t'               # ✓
+```
+
+**USBPcap 常见字段真名（4.0.17 实测）**：
+
+| 想拿什么 | 错误写法（不存在） | 正确字段名 |
+|---|---|---|
+| SCSI Read(10) 的 LBA | `scsi.cdb.lba`、`scsi.lba` | **`scsi_sbc.rdwr10.lba`** |
+| SCSI Read(10) 传输块数 | `scsi.cdb.len` | **`scsi_sbc.rdwr10.xferlen`** |
+| SCSI opcode | `scsi.cdb.opcode` | **`scsi_sbc.opcode`** |
+| SCSI LUN | `scsi.lun_id` | **`scsi.lun`** |
+| CBW 签名 | `usbms.signature` | **`usbms.dCBWSignature`** |
+| CBW Tag | `usbms.tag` | **`usbms.dCBWTag`** |
+| CSW 签名 / 状态 | `usbms.csw_*` | **`usbms.dCSWSignature` / `usbms.dCSWStatus`** |
+
+`usbms.*` 全部只有 15 个：`dCBW*`（7）+ `dCSW*`（3）+ `setup.*`（5）。
+SCSI 字段名一律带命令集前缀：`scsi_sbc.*`（块设备 SBC）/ `scsi_mmc.*`（多媒体）/ `scsi.cdb.*`（通用位域）。
+
+```bash
+# 一次性导出 SCSI 关键参数（实测可正常出值）
+tshark -r cap.pcapng -T fields \
+  -e frame.number -e usbms.dCBWTag -e scsi_sbc.opcode \
+  -e scsi_sbc.rdwr10.lba -e scsi_sbc.rdwr10.xferlen -e scsi.lun
+```
+
+## 2.4 `io,phs` 出现 `text` 嵌套 ≠ dissector 失能
+
+`text` 是 **"Line-based text data"** 的短名，出现在 USB **控制传输的枚举描述符**
+（端点 `0x00` / `0x80`）上属正常解码。实测某题 41 个 `text` 帧全部是端点 `0x80`/`0x00`
+的 GET_DESCRIPTOR，`_ws.col.Protocol` 仍是 `USB`。
+
+**不要据此判断「dissector 没识别这份抓包」**，那是错误归因。真要确认解码是否正常，
+看 `usb.bInterfaceClass`、`usbms.*`、`scsi_sbc.*` 有没有出值。
+
+## 2.5 重建大文件前必须查 snaplen 截断
+
+抓包时 snaplen 若设为 65535，而 USBPcap 的「包长」口径**含 27 字节 pseudoheader**，
+则每满 64KB 的 URB 会丢 28 字节（27 + 1 对齐）：
+
+```bash
+# 有差异帧 = 数据先天缺块，别去怀疑文件系统链损坏
+tshark -r cap.pcapng -T fields -e frame.number -e frame.cap_len -e frame.len \
+  | awk -F'\t' '$2!=$3 {print; n++} END{print "差异帧=" n}'
+```
+
+实测某题：51 帧 `cap_len=65535 / len=65563`，差 28 字节。从这种 pcap 重建磁盘镜像时，
+FAT 链会表现为「只有首簇，fat(首簇)=EOF」，看起来像**文件链损坏**——真因是抓包截断。
+**先对 `usb.data_len` 与实得 payload 长度，再决定要不要去翻未分配区。**
+
+## 3. 判据速查
+
+- 报告**长度**先判设备：8 字节 → 键盘，4/7 字节 → 鼠标，其他 → 查描述符。
+- 数据里**大量 0x00** → 多为键盘空闲槽位，说明是敲击流。
+- **dx/dy 同时为 0 且按钮为 0** → 鼠标悬停帧，绘制时跳过。
+- 键盘解出**乱码**但键码合法 → 大概率没处理 Shift 或键盘布局（QWERTY vs DVORAK）。
+- 键盘解出**全是方向键** → 不是打字题，是导航题（迷宫/光标移动）。
+- `usb.capdata` **全空先看 `bInterfaceClass`**：`0x08`（MSC）走 SCSI 子树，属正常（§2.4 ④）。
+- 命令**输出空但 rc=0** 先查 `-c` 与过滤器值，**别归因为「环境不支持」**（§2.1 ①）。
+
+
+## 4. 交叉引用
+
+- 通用网络流量（DNS/TCP/ICMP/SMB/RADIUS）：[[forensics/网络取证/network-advanced.md|network-advanced.md]]
+- 音频/频谱/摩斯/DTMF：[[forensics/隐写与信号/signals-and-hardware.md|signals-and-hardware.md]]
+- 磁盘镜像与删除恢复：[[forensics/磁盘与内存/disk-recovery.md|disk-recovery.md]]

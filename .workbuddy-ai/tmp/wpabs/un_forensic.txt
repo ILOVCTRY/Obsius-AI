@@ -1,0 +1,83 @@
+RSA 同模攻击 (e1,e2) 互质时必须用 gcdext 求逆元，公式 pow(c1,s,n)*pow(c2,t,n)
+vigor_router keyPath 注入点 = %27%0A换行绕过单引号闭合
+Modbus regval_uint16 35152 = PNG \x89P magic 起点的十进制
+BLE link key 解压是 IoT 设备最常见的流量取证套路
+Modbus 打开阀门 = func_code 5 + data FF00 是工控 SCADA 标准操作码
+SNMP 默认端口 161 是 UDP，OID 是 dot-decimal 数字层级标识
+应急响应 9 模块顺序：进程 → 端口 → 文件 → 账户 → 日志
+lsof -p <pid> 看进程打开的文件/网络连接能查回连 IP/木马上传
+太空信息安全赛的核心是利用 COSMOS + CCSDS 协议栈
+NASA 训练 PDF 给出完整环境配置
+SQL 注入双写绕：aandnd(aand and)/passwoorrd(or)/-- ' 闭合
+like binary 逐字符二分爆
+RC4 加密 + SMC 自修改代码是 RE 进阶套路
+工控 CTF 三大协议 filter：modbus / s7comm / omron
+S7comm Ack_Data 异常过滤用 s7comm.header.errcod !== 0x00
+OMRON 密文常需每两字节 swap_bytes 解码
+中文取证赛 60+ 问答题，单题 1-3 分，要工具链全（FTK/X-Ways/Autopsy/火眼）
+IndexerVolumeGuid 是 Windows USB 插入证据的关键文件
+WhatsApp msgstore.db + Crypt12 是手机取证切入点
+邮件主脑追踪要拉三方关系（Alice ↔ AP ↔ Bob/Cole）
+取证题重点是答案格式精准（手机号/身份证号/MD5 大写）
+数据库时间字段定位是常见考点
+磁盘修复 + mount + 扇区计数是取证基本功
+E01 镜像 SHA-1 计算要分块
+命令历史第 11 条要按精确序号定位
+iStoreOS OpenWrt NasTools PassWall2 订阅 token 是软路由取证常见入口
+火眼鲁盒 dst01.jpeg 镜像 0.85 缩放比是图像取证固定考点
+WannaCry 变种 t.wnry 加密扩展名是 2024 龙信杯常见考点
+MD5 答案严格全大写（取证比赛答案格式规范）
+龙信杯是国内电子数据取证头部赛事（苏州龙信科技主办）
+RAID 取证 = lvscan 看卷组 + mount 挂载 + diff 对比
+勒索恢复优先看 SAM/注册表 + U 盘插拔记录
+网络流量取证先 strings 搜默认密码（1234567qwerc）+ 已知 web 路径
+自制 profile 用 module.dwarf + System.map 打包 zip 放到 plugins/overlays/linux/
+nmap 版本指纹 = pcap 中 TCP SYN/SYN-ACK 行为 + TTL/Window Size
+bip39 钱包 mnemonic 在内存中是明文可 grep
+netscan 找 LISTENING 端口对应进程 PID + 镜像名 = wininit.exe PID 372 :49152 = 外联入口
+勒索病毒攻击后内存镜像常残留：webshell + 应用日志 + 网络连接（不残留进程本身）
+.vmdk/.vmem/.vmsn/.vmss/.vmsd/.vmtx 各有语义，flat.vmdk 是真磁盘
+malfind / apihooks / atomscan 检测 rootkit 与 API hook
+mov rax 0xfe2d7cf8 是进程注入跳转指令典型模式
+TLS ChangeCIPherSpec 是加密挖矿最稳定的握手信号 (比 JA3 指纹更稳)
+智能蜜罐的核心是请求重发器 (重发相同 payload 比响应差异)
+Suricata + Zeek + CICFlowMeter 三件套是流量分析标准工具链
+RDP fastpath scancode.keycode 是键码记录，可逐字节还原键盘输入
+n[0:2]=='02' 表示 Shift 按下，对应 shiftKeys 字典
+n[2:4]=='00' 表示无按键，必须跳过
+WPA 4 次握手靠 eapol 帧识别 + aircrack-ng 跑字典
+RSA 4 字符小块验证可单组爆破
+NULLIF(SUM(...), 0) 防除 0
+转出比 = SUM(出)/SUM(进) + ORDER BY DESC 排序
+obscured 字符串总长 64 是 base64 标准长度的暗示
+AES-CTR 多次加密同 key + nonce = 可还原明文
+LFSR 线性反馈移位寄存器 = GF(2) 线性系统（与 0CTF zer0IIvm 思路同源）
+AES-CBC 5 位 hex key 爆破 = md5(hex(i).rjust(5,'0')) 字典
+PEM corrupt 时手撕结构体是 RSA 标配
+SMC TEA 变种要看 delta 和移位
+Wiener 攻击是大 e RSA 兜底方案
+ICMP data 长度隐写是工控常见手法
+iOS 取证从 iTunes 备份 + 雷电 APP 分析 + realm studio 看 realm 数据库是 2024 主流流程
+Mattermost 数据库名 = base64(URL).db 是反取证隐藏套路
+雷电模拟器自带 APP 智能分析比 jadx 快很多
+unix 时间戳（毫秒）转北京时间是取证必会技能
+目录名拼 zip 需按 mtime 排序再 unhexlify（每个目录名首字符是 hex）
+冰蝎 4 → 冰蝎 3 链路是先解冰蝎 4 得 key 再解冰蝎 3 得 shell
+PGP/SSH 凭据泄露是真实企业 forensic 高频事件，套题模拟完整流程
+Black Basta 用 ChaCha 密钥流加密 64 字节块 + XOR
+Known Plaintext Attack 是勒索软件解密经典方法
+SRLabs Black Basta Buster 是开源解密工具
+SRL_IGNORE_MAGIC 环境变量跳过 magic 检查
+No More Ransom Project 是勒索软件解密工具轮合站
+XShellCryptoHelper.py 解密 SID + cipher
+冰蝎马用 MD5(p) 前 16 字节作 AES-ECB 密钥是标准实现
+分片文件上传 blockIndex 乱序是流量侧检测规避
+AES-GCM 自定义协议格式（4B 长度+12B nonce+n 字节密文+16B tag）稳定可识别
+AsyncRAT 通信 = TLS 1.x 外层 + gzip+MsgPack 内层 + 0xc4/0xc6 binary 标记
+开源 RAT 项目特征识别（github）能给出完整内层结构
+RDP JPEG 切片 SOI ffd8ffd8 + EOI ffd9 是流量里挑截图的标准做法
+文件头字节反转是常见出题手法，010 Editor 改头最直观
+md5 多段拼接 + base64 改码表 = 新生赛经典 reverse 套路
+固件逆向三件套顺序不可乱: 先识别加载基址 → 再 bindiff 恢复符号 → 最后扫漏洞
+PLC 工控固件比普通 Linux 固件更依赖字符串统计识别基址 (无 dynsym 无 eh_frame)
+BinDiff 置信度阈值 0.85 是经验值, 低于这个匹配几乎都是误报

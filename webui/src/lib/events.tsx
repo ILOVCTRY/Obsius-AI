@@ -157,6 +157,21 @@ export function eventStyle(kind: string, payload?: Record<string, unknown>): Eve
   if (kind === "blueprint.created") return { label: "📐 新建蓝图", className: "text-primary", defaultOpen: true }
   if (kind === "blueprint.updated") return { label: "📐 蓝图更新", className: "text-muted-foreground", defaultOpen: false }
   if (kind === "blueprint.status_changed") return { label: "📐 蓝图状态流转", className: "text-primary", defaultOpen: true }
+  // CTF flag 台账（challenge-flag-ledger v47）与候选唤醒（ctf-flag-wake，2026-10-20）：
+  // 事件流里给出「谁在什么时候提交/确认/否决了哪一串」的时间线；卡片在对话页，
+  // 这里只做可读行——否则落到 default 分支，模型看到的是裸 kind 字符串。
+  if (kind === "challenge.flag.recorded")
+    return payload?.verdict === "pending"
+      ? { label: "🚩 候选 flag 待确认", className: "text-(--status-approval)", defaultOpen: true }
+      : { label: "🚩 flag 登记", className: "text-(--viz-success)", defaultOpen: true }
+  if (kind === "challenge.flag.updated")
+    return { label: "🚩 flag 更新", className: "text-(--viz-success)", defaultOpen: false }
+  if (kind === "challenge.flag.decided")
+    return payload?.verdict === "rejected"
+      ? { label: "🚫 flag 被否决", className: "text-(--status-error)", defaultOpen: true }
+      : { label: "✅ flag 已确认", className: "text-(--viz-success)", defaultOpen: true }
+  if (kind === "chat.ctf_flag_wake")
+    return { label: "🔔 唤醒主控确认 flag", className: "text-(--status-approval)", defaultOpen: false }
   return { label: kind, className: "text-muted-foreground", defaultOpen: false }
 }
 

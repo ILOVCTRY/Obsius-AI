@@ -1,448 +1,382 @@
-# CTF Reverse - Compiled Language Reversing (Go, Rust)
+---
 
-## Table of Contents
-- [Go Binary Reversing](#go-binary-reversing)
-  - [Recognition](#recognition)
-  - [Symbol Recovery](#symbol-recovery)
-  - [Go Memory Layout](#go-memory-layout)
-  - [Goroutine and Concurrency Analysis](#goroutine-and-concurrency-analysis)
-  - [Common Go Patterns in Decompilation](#common-go-patterns-in-decompilation)
-  - [Go Binary Reversing Workflow](#go-binary-reversing-workflow)
-  - [Go Binary UUID Patching for C2 Client Enumeration (BSidesSF 2026)](#go-binary-uuid-patching-for-c2-client-enumeration-bsidessf-2026)
-- [Rust Binary Reversing](#rust-binary-reversing)
-  - [Rust Recognition](#rust-recognition)
-  - [Symbol Demangling](#symbol-demangling)
-  - [Common Rust Patterns in Decompilation](#common-rust-patterns-in-decompilation)
-  - [Rust-Specific Analysis Tools](#rust-specific-analysis-tools)
-  - [Rust Lifetime Escape via Compiler Bug #25860 (Hack.lu 2018)](#rust-lifetime-escape-via-compiler-bug-25860-hacklu-2018)
-  - [Rust #[no_mangle] libc Override for seccomp Bypass (Hack.lu 2018)](#rust-no_mangle-libc-override-for-seccomp-bypass-hacklu-2018)
-  - [Rust xmmword Constant Extraction via IDAPython (Insomnihack 2019)](#rust-xmmword-constant-extraction-via-idapython-insomnihack-2019)
-- [Nuitka-Compiled Python — Module Stub Injection (X-MAS CTF 2018)](#nuitka-compiled-python--module-stub-injection-x-mas-ctf-2018)
-- [Swift Binary Reversing](#swift-binary-reversing)
-- [Kotlin / JVM Binary Reversing](#kotlin--jvm-binary-reversing)
-  - [JVM Bytecode (Android/Server)](#jvm-bytecode-androidserver)
-  - [Kotlin/Native](#kotlinnative)
-- [D Language Binary Reversing (CSAW CTF 2016)](#d-language-binary-reversing-csaw-ctf-2016)
-- [Haskell Binary Reversing via STG Closures and hsdecomp (hxp CTF 2017, Codegate 2018)](#haskell-binary-reversing-via-stg-closures-and-hsdecomp-hxp-ctf-2017-codegate-2018)
-- [Haskell Binary RE via GHC CMM Intermediate Language (N1CTF 2018)](#haskell-binary-re-via-ghc-cmm-intermediate-language-n1ctf-2018)
-- [C++ Binary Reversing (Quick Reference)](#c-binary-reversing-quick-reference)
-  - [vtable Reconstruction](#vtable-reconstruction)
-  - [RTTI (Run-Time Type Information)](#rtti-run-time-type-information)
-  - [Standard Library Patterns](#standard-library-patterns)
+phase: binary
+vuln_class: [reverse, golang, rust, haskell, dlang, kotlin, cpp]
+title: 编译型语言逆向
+summary: 编译型语言的判据是「先认出编译器」，因为每种运行时留下的元数据完全不同——Go 带完整类型表、Rust 的 panic 串泄源码路径、Haskell 全靠闭包。认错语言就会用错工具。
+---
+
+# 编译型语言逆向
+
+脚本/字节码/esolang 见 [[binary/逆向工程/languages.md|语言与运行时]]；平台框架（Android/Roblox/Godot/Electron）见 [[binary/逆向工程/languages-platforms.md|平台语言]]；Swift 完整指南见 [[binary/逆向工程/platforms.md|平台专项]]。
+
+## 0. 判据速查
+
+| 看到什么 | 语言 | 第一动作 | 去哪节 |
+|---|---|---|---|
+| `go.buildid` / `runtime.gopanic` / 2MB+ 静态 | Go | GoReSym 恢复符号 | §1 |
+| `go version -m` 里有 `-ldflags -X` | Go | 直接改字符串常量 | §2 |
+| `core::panicking` / `.rustc` 节 / `/rustc/` | Rust | `strings \| grep panicked` 拿源码路径 | §3 |
+| 禁 `unsafe` 且钉死编译器版本 | Rust | 查该版本之后的 soundness bug | §4 |
+| 用户代码与沙箱静态链接在一起 | Rust | `#[no_mangle] extern "C"` 覆盖 libc 符号 | §5 |
+| 有 `xmmword` 常量 + 简单变换 | Rust | IDAPython 走 `.rodata` 反变换 | §6 |
+| 是 Nuitka/PyInstaller 单体二进制 | Python | CWD 放同名模块 stub 劫持 import | §7 |
+| `__swift5_*` / `swift_` 符号 | Swift | `swift demangle` | §8 |
+| `kotlin.Metadata` / `kotlin/jvm/internal` | Kotlin JVM | jadx（带 Kotlin 模式） | §9 |
+| `konan` 字符串 | Kotlin/Native | 无反射元数据，按 C/C++ 处理 | §9 |
+| `_D` 前缀符号 + Phobos 引用 | D | `set language d` 或在线 demangle | §10 |
+| `libHSbase-*` / `hs_main` / Z-encoding | Haskell | `hsdecomp`，失败就 monkey-patch | §11 |
+| 递归字符串结构指数增长 | Haskell | 记忆化算长度 + 二分定位 | §12 |
+| vtable / RTTI / `std::` 容器 | C++ | 按对象首 8 字节找 vtable | §13 |
 
 ---
 
-## Go Binary Reversing
-
-Go binaries are increasingly common in CTF challenges due to Go's popularity for CLI tools, network services, and malware.
-
-### Recognition
+## 1. Go 识别与符号恢复
 
 ```bash
-# Detect Go binary
 file binary | grep -i "go"
 strings binary | grep "go.buildid"
 strings binary | grep "runtime.gopanic"
-
-# Go version embedded in binary
-strings binary | grep "^go1\."
+strings binary | grep "^go1\."          # Go 版本
 ```
 
-**Key indicators:**
-- Very large static binary (even "hello world" is ~2MB)
-- Embedded `go.buildid` string
-- `runtime.*` symbols (even in stripped binaries, some remain)
-- `main.main` as entry point (not `main`)
-- Strings like `GOROOT`, `GOPATH`, `/usr/local/go/src/`
+**五个判据**：极大的静态二进制（hello world 也 2MB+）、内嵌 `go.buildid`、`runtime.*` 符号（stripped 后仍有残留）、入口是 `main.main` 而非 `main`、`GOROOT`/`GOPATH`/`/usr/local/go/src/` 之类的路径串。
 
-### Symbol Recovery
+### 恢复符号（关键，先做这个）
 
-Go embeds rich type and function information even in stripped binaries:
+Go 即使 stripped 也保留丰富的类型与函数信息。
 
 ```bash
-# GoReSym - recovers function names, types, interfaces from Go binaries
-# https://github.com/mandiant/GoReSym
+# GoReSym：从 Go 二进制恢复函数名、类型、接口
 ./GoReSym -d binary > symbols.json
 
-# Parse output
 python3 -c "
 import json
-with open('symbols.json') as f:
-    data = json.load(f)
+data = json.load(open('symbols.json'))
 for fn in data.get('UserFunctions', []):
     print(f\"{fn['Start']:#x}  {fn['FullName']}\")
 "
 ```
 
-**Ghidra with golang-loader:**
+**Ghidra 插件 golang-loader**：恢复函数名、字符串引用、接口表。
+
+**redress**（Go 二进制分析）：
 ```bash
-# Install: Ghidra → Window → Script Manager → search "golang"
-# Or use: https://github.com/getCUJO/ThreatFox/tree/main/ghidra-golang
-# Recovers function names, string references, interface tables
+redress -src binary         # 重建源码树
+redress -pkg binary         # 列包
+redress -type binary        # 列类型与方法
+redress -interface binary   # 列接口
 ```
 
-**redress (Go binary analysis):**
-```bash
-# https://github.com/goretk/redress
-redress -src binary         # Reconstruct source tree
-redress -pkg binary         # List packages
-redress -type binary        # List types and methods
-redress -interface binary   # List interfaces
-```
+**关键**：先跑 GoReSym 再做任何手工分析——它常能恢复 90%+ 的函数名，让反编译难度断崖式下降。
 
-### Go Memory Layout
-
-Understanding Go's data structures in decompilation:
+### Go 内存布局（反编译里必须认出来）
 
 ```c
-# String: {pointer, length} (16 bytes on 64-bit)
-# NOT null-terminated! Length field is critical.
-struct GoString {
-    char *ptr;    // pointer to UTF-8 data
-    int64 len;    // byte length
-};
+// String: {ptr, len}，64 位下 16 字节。不是 null 结尾！长度字段才是关键。
+struct GoString { char *ptr; int64 len; };
 
-# Slice: {pointer, length, capacity} (24 bytes on 64-bit)
-struct GoSlice {
-    void *ptr;    // pointer to backing array
-    int64 len;    // current length
-    int64 cap;    // allocated capacity
-};
+// Slice: {ptr, len, cap}，24 字节
+struct GoSlice { void *ptr; int64 len; int64 cap; };
 
-# Interface: {type_descriptor, data_pointer} (16 bytes)
-struct GoInterface {
-    void *type;   // points to type metadata (itab for non-empty interface)
-    void *data;   // points to actual value
-};
+// Interface: {type_descriptor, data_pointer}，16 字节
+struct GoInterface { void *type; void *data; };
 
-# Map: pointer to runtime.hmap struct
-# Channel: pointer to runtime.hchan struct
+// Map / Channel: 指向 runtime.hmap / runtime.hchan
 ```
 
-**In Ghidra/IDA:** When you see a function taking `(ptr, int64)` — it's likely a Go string. Three-field `(ptr, int64, int64)` is a slice.
+**判据**：函数签名是 `(ptr, int64)` → Go 字符串；`(ptr, int64, int64)` → slice。
 
-### Goroutine and Concurrency Analysis
+### 并发与 defer
 
 ```bash
-# Identify goroutine spawns in disassembly
-strings binary | grep "runtime.newproc"
-# newproc1 is the internal goroutine creation function
+strings binary | grep "runtime.newproc"    # 内部 goroutine 创建
+```
 
-# In GDB with Go support:
-gdb ./binary
+```gdb
 (gdb) source /usr/local/go/src/runtime/runtime-gdb.py
-(gdb) info goroutines          # List all goroutines
-(gdb) goroutine 1 bt          # Backtrace for goroutine 1
+(gdb) info goroutines
+(gdb) goroutine 1 bt
 ```
 
-**Channel operations in disassembly:**
-- `runtime.chansend1` → `ch <- value`
-- `runtime.chanrecv1` → `value = <-ch`
-- `runtime.selectgo` → `select { case ... }`
-- `runtime.closechan` → `close(ch)`
+**channel 操作判据**：`runtime.chansend1` → `ch <- v`；`runtime.chanrecv1` → `v = <-ch`；`runtime.selectgo` → `select`；`runtime.closechan` → `close(ch)`。
 
-### Common Go Patterns in Decompilation
+**defer 判据**：`runtime.deferproc` 注册、`runtime.deferreturn` 在函数出口执行。**LIFO 顺序**——这点在「清理/擦除密钥」的逻辑里很关键。
 
-**Defer mechanism:**
-- `runtime.deferproc` → registers deferred function
-- `runtime.deferreturn` → executes deferred functions at function exit
-- Deferred calls execute in LIFO order — relevant for cleanup/crypto key wiping
+**错误处理判据**：`call f` → 返回 `(result, error)` 两个值 → `test rax, rax` → `jne error_handler`。
 
-**Error handling (the `if err != nil` pattern):**
+**字符串拼接**：`runtime.concatstrings`、`fmt.Sprintf`；格式串在 `.rodata`（`"%s%d"`、`"%x"`）。
+
+### 标准库线索
+
 ```text
-# In disassembly, this appears as:
-# call some_function        → returns (result, error) as two values
-# test rax, rax             → check if error (second return value) is nil
-# jne error_handler
+加密：crypto/aes、crypto/cipher、crypto/sha256、encoding/hex、encoding/base64
+网络：net/http、net.Dial、bufio.NewReader
+文件：os.Open、io.ReadAll、os.ReadFile
 ```
 
-**String concatenation:**
-- `runtime.concatstrings` → `s1 + s2 + s3`
-- `fmt.Sprintf` → formatted string building
-- Look for format strings in `.rodata`: `"%s%d"`, `"%x"`
-
-**Common stdlib patterns in CTF:**
-```go
-// Crypto operations → look for these in strings/imports:
-// "crypto/aes", "crypto/cipher", "crypto/sha256", "encoding/hex", "encoding/base64"
-
-// Network operations:
-// "net/http", "net.Dial", "bufio.NewReader"
-
-// File operations:
-// "os.Open", "io.ReadAll", "os.ReadFile"
-```
-
-### Go Binary Reversing Workflow
+### 工作流
 
 ```bash
-1. file binary                          # Confirm Go, get arch
-2. GoReSym -d binary > syms.json       # Recover symbols
-3. strings binary | grep -i flag        # Quick win check
-4. Load in Ghidra with golang-loader    # Apply recovered symbols
-5. Find main.main                       # Entry point
-6. Identify string comparisons          # GoString {ptr, len} pairs
-7. Trace crypto operations              # crypto/* package usage
-8. Check for embedded resources         # embed.FS in Go 1.16+
+1. file binary                          # 确认 Go + 架构
+2. GoReSym -d binary > syms.json        # 恢复符号
+3. strings binary | grep -i flag        # 先查有没有白给
+4. Ghidra + golang-loader 载入符号
+5. 找 main.main
+6. 找字符串比较（GoString 的 {ptr,len} 对）
+7. 追 crypto/* 用法
+8. 查 embed.FS（Go 1.16+ 可内嵌文件）
 ```
 
-**Go embed.FS (Go 1.16+):** Binaries can embed files at compile time:
-```bash
-# Look for embedded file data
-strings binary | grep "embed"
-# Embedded files appear as raw data in the binary
-# Search for known file signatures (PK for zip, PNG header, etc.)
-```
+**`embed.FS` 判据**：`strings binary | grep "embed"`；内嵌文件以裸数据出现在二进制里，按已知文件签名搜（zip 的 `PK`、PNG 头等）。
 
-**Key insight:** Go's runtime embeds extensive metadata even in stripped binaries. Use GoReSym before any manual analysis — it often recovers 90%+ of function names, making decompilation dramatically easier. Go strings are `{ptr, len}` tuples, not null-terminated — Ghidra's default string analysis will miss them without the golang-loader plugin.
-
-**Detection:** Large static binary (2MB+ for simple programs), `go.buildid`, `runtime.gopanic`, source paths like `/home/user/go/src/`.
-
-### Go Binary UUID Patching for C2 Client Enumeration (BSidesSF 2026)
-
-**Pattern (see-two):** A Go-compiled C2 client has a UUID embedded via `-ldflags -X`. The C2 server uses mTLS for authentication. To enumerate other clients and their files, patch the UUID to register as a new client, then use the C2 API to list all clients and download their exfiltrated files.
-
-**Approach:**
-1. Extract embedded UUID from Go build metadata: `go version -m client_binary`
-2. Binary-patch the UUID (simple byte replacement — Go strings have fixed-length backing arrays)
-3. Register with the C2 server using the patched binary (mTLS certs are embedded or in distfiles)
-4. Enumerate clients via API: `GET /api/clients` or iterate known endpoints
-5. List and download files from each client's GCS bucket or file store
-6. Grep downloaded files for the flag
-
-```bash
-# Extract Go build info
-go version -m ./client_binary | grep ldflags
-# Output shows: -X main.clientUUID=<uuid>
-
-# Patch UUID in binary (replace old UUID bytes with new UUID)
-python3 -c "
-import sys
-data = open('client_binary', 'rb').read()
-old_uuid = b'original-uuid-value-here'
-new_uuid = b'attacker-uuid-value-here'
-patched = data.replace(old_uuid, new_uuid)
-open('client_patched', 'wb').write(patched)
-"
-chmod +x client_patched
-./client_patched --register
-```
-
-**Key insight:** Go binaries embed string values from `-ldflags -X` directly in the binary data section. Since Go strings are `{ptr, len}` pairs pointing to backing byte arrays, replacing the UUID bytes (same length) produces a valid patched binary. The mTLS certificates authenticate the client to the server but don't bind to a specific UUID.
-
-**References:** BSidesSF 2026 "see-two"
+**坑**：Ghidra 默认的字符串分析会漏掉 Go 字符串（它们不是 null 结尾），必须装 golang-loader。
 
 ---
 
-## Rust Binary Reversing
+## 2. Go 的 `-ldflags -X` 常量改法
 
-Rust binaries are common in modern CTFs, especially for crypto, systems, and security tooling challenges.
-
-### Rust Recognition
+**判据**：C2 客户端之类，UUID 通过 `-ldflags -X` 内嵌。
 
 ```bash
-# Detect Rust binary
-strings binary | grep -c "rust"
-strings binary | grep "rustc"             # Compiler version
-strings binary | grep "/rustc/"           # Source paths
-strings binary | grep "core::panicking"   # Panic infrastructure
+go version -m ./client_binary | grep ldflags
+# 输出里能看到 -X main.clientUUID=<uuid>
 ```
 
-**Key indicators:**
-- `core::panicking::panic` in strings
-- Mangled symbols starting with `_ZN` (Itanium ABI) — e.g., `_ZN4main4main17h...`
-- `.rustc` section in ELF
-- References to `/rustc/<commit_hash>/library/`
-- Large binary size (Rust statically links by default)
+```python
+data = open('client_binary','rb').read()
+patched = data.replace(b'original-uuid-value-here', b'attacker-uuid-value-here')
+open('client_patched','wb').write(patched)
+```
 
-### Symbol Demangling
+**关键**：`-ldflags -X` 的值就是二进制数据段里的裸字节，Go 字符串是 `{ptr, len}` 指向它。**等长替换**即得到合法补丁——`len` 不变，指针不变。
+
+---
+
+## 3. Rust 识别
 
 ```bash
-# Rust uses Itanium ABI mangling (same as C++)
-# rustfilt demangles Rust-specific symbols
+strings binary | grep -c "rust"
+strings binary | grep "rustc"             # 编译器版本
+strings binary | grep "/rustc/"           # 源码路径
+strings binary | grep "core::panicking"
+```
+
+**五个判据**：`core::panicking::panic`、`_ZN` 开头的 Itanium ABI 符号（如 `_ZN4main4main17h...`）、ELF 里的 `.rustc` 节、`/rustc/<commit>/library/` 路径、大体积（Rust 默认静态链接）。
+
+### demangle
+
+```bash
 cargo install rustfilt
 nm binary | rustfilt | grep "main"
-
-# Or use c++filt (works for most Rust symbols)
-nm binary | c++filt | grep "main"
-
-# In Ghidra: Window → Script Manager → search "Demangler"
-# Enable "DemangleAllScript" for automatic demangling
+nm binary | c++filt | grep "main"         # 多数 Rust 符号也能用
 ```
 
-### Common Rust Patterns in Decompilation
+Ghidra：Script Manager 里搜 "Demangler"，开 `DemangleAllScript`。
 
-**Option/Result enum:**
+### 反编译里的常见形态
+
 ```text
-# Option<T> in memory: {discriminant (0=None, 1=Some), value}
-# Result<T, E>: {discriminant (0=Ok, 1=Err), union{ok_val, err_val}}
+Option<T>：{判别式（0=None, 1=Some）, value}
+Result<T,E>：{判别式（0=Ok, 1=Err）, union{ok, err}}
 
-# In disassembly:
-# cmp byte [rbp-0x10], 0    → check if None/Err
-# je handle_none_case
+cmp byte [rbp-0x10], 0     → 判断是不是 None/Err
+je handle_none_case
 ```
 
-**Vec<T> (same as Go slice):**
-```c
-struct RustVec {
-    void *ptr;      // heap pointer
-    uint64 len;     // length
-    uint64 cap;     // capacity
-};
-// NOTE: field order (ptr, len, cap) vs (ptr, cap, len) is NOT
-// guaranteed by the Rust ABI and varies by compiler version —
-// confirm against the Vec constructor and its callers in
-// disassembly before trusting offsets.
-```
+**`Vec<T>`**：`{ptr, len, cap}`。
 
-**String / &str:**
-```text
-# String (owned): {ptr, length, capacity} — 24 bytes, heap-allocated
-# (same caveat as Vec: field order is compiler-dependent, verify in disassembly)
-# &str (borrowed): {ptr, length} — 16 bytes, can point anywhere
+**关键坑**：字段顺序 `(ptr,len,cap)` 还是 `(ptr,cap,len)` **Rust ABI 不保证**，随编译器版本变。**必须对着 `Vec` 构造函数与其调用者在反汇编里确认**，不能照抄。
 
-# In decompilation, look for:
-# alloc::string::String::from    → String creation
-# core::str::from_utf8           → byte slice to str
-```
+**`String`**：`{ptr, len, cap}` 24 字节堆分配；**`&str`**：`{ptr, len}` 16 字节，可指向任何地方。同样有字段顺序的坑。
 
-**Iterator chains:**
-```text
-# .iter().map().filter().collect() compiles to loop fusion
-# In disassembly: tight loop with inlined closures
-# Look for: core::iter::adapters::map, filter, etc.
-```
+**迭代器链**：`.iter().map().filter().collect()` 编译成循环融合——反汇编里是带内联闭包的紧凑循环，找 `core::iter::adapters::map`、`filter` 之类。
 
-**Panic unwinding:**
+**panic 串是金矿**：
+
 ```bash
-# Panic strings reveal source locations and error messages
 strings binary | grep "panicked at"
 strings binary | grep "called .unwrap().. on"
-# These often contain file paths, line numbers, and variable names
 ```
 
-### Rust-Specific Analysis Tools
+release 构建里也留着源文件路径、行号、描述性错误串。**第一件事就是 grep `panicked`**。
 
-```bash
-# cargo-bloat: analyze binary size by function
-cargo install cargo-bloat
-cargo bloat --release -n 50
-
-# Ghidra Rust helper scripts
-# https://github.com/AmateursCTF/ghidra-rust (community scripts for Rust RE)
-```
-
-**Key insight:** Rust panic messages are goldmines — they contain source file paths, line numbers, and descriptive error strings even in release builds. Always `strings binary | grep "panicked"` first. Rust's monomorphization means generic functions get duplicated per type — expect many similar-looking functions.
-
-**Detection:** `core::panicking`, `.rustc` section, `/rustc/` paths, `_ZN` mangled symbols with Rust-style module paths.
+**monomorphization 判据**：泛型函数按类型复制，会出现大量看起来相似但其实是同一模板不同实例的函数。
 
 ---
 
-## Swift Binary Reversing
+## 4. Rust 借用检查器的 soundness bug
 
-See [[binary/逆向工程/platforms.md#swift-binary-reversing|platforms.md]] for full Swift reversing guide including demangling, runtime structures, and Ghidra integration. Key quick reference:
+**判据**：Rust 沙箱只允许安全代码（禁 `unsafe`）且钉死某个编译器版本。
+
+去 rust-lang issue tracker 搜该版本**之后**修掉的 `soundness` bug——每一个都是可利用候选。
+
+**rust#25860（高阶生命周期变异性检查错误）**：闭包可以「重借」引用，把生命周期不健全地延长到 `'static`。于是能起别名、越界读写。
+
+```rust
+// 仅安全 Rust
+fn extend<'a, 'b, T>(_: &'a &'b (), v: &'b T) -> &'a T { v }
+
+fn bad<T>(v: T) -> &'static T {
+    let f: fn(&'_ &'_ (), &'_ T) -> &'_ T = extend;
+    f(&&(), &v)      // 返回的引用比 v 活得久
+}
+
+fn main() {
+    let aliased: &'static Vec<u8> = bad(vec![1u8, 2, 3]);
+    // 把 Vec 当裸头重解释（字段顺序随工具链变，必须对着构造函数确认）
+    let header: &(usize, usize, usize) = unsafe { std::mem::transmute(aliased) };
+    println!("ptr={:#x} len={} cap={}", header.0, header.1, header.2);
+}
+```
+
+**关键**：借用检查器的一个健全性 bug 就能把「只跑安全代码的沙箱」变成任意读写原语，完全不需要 `unsafe`。难点在「拿到生命周期被延长的引用」，`transmute` 那一步反而简单。
+
+---
+
+## 5. Rust `#[no_mangle]` 覆盖 libc
+
+**判据**：沙箱二进制在 `main` 早期调 `prctl(PR_SET_SECCOMP, ...)`，然后才跑用户代码，且用户 crate 与 libc **静态链接在同一二进制里**。
+
+```rust
+// 用户代码——与沙箱 harness 链进同一个二进制
+#[no_mangle]
+pub extern "C" fn prctl(_a: i64, _b: i64) -> i64 {
+    0        // 假装成功，不装任何过滤器
+}
+
+fn main() { /* 真程序在没有 seccomp 的情况下跑 */ }
+```
+
+**关键**：Rust 默认静态链接，`extern "C"` + `#[no_mangle]` 就等于**编译期的动态 hook**——沙箱 harness 调的任何 libc 符号（`prctl`、`chroot`、`seteuid`、`read`）都能被同一个二进制里的攻击者 crate 重定义。
+
+**加固口径**：把 syscall 走 `libc::syscall(SYS_prctl, ...)` 直接发（绕开符号表），或用 `-Wl,-Bsymbolic` 强制优先使用本意定义。
+
+---
+
+## 6. Rust 的 xmmword 常量提取
+
+**判据**：Rust 把字面字节缓冲（期望值、XOR 表）以 16 字节 xmmword 常量放在 `.rodata`。IDA 解析成 `xmmword_xxxx`。
+
+```python
+import idc
+start, end = 0x4A1000, 0x4A1100
+for ea in range(start, end, 4):
+    d = idc.get_wide_dword(ea)
+    print(chr((d >> 2) ^ 0xA), end='')     # 反掉简单变换
+```
+
+**关键**：Rust 难反编译，但极容易扫字面数据。任何 `input == const_buf` 形式的检查都会把期望值原样留在 `.rodata`。先 grep `mov reg, xmmword [rip+offset]` 定位槽位，再 dump。
+
+---
+
+## 7. Nuitka / 冻结 Python 的模块 stub 劫持
+
+**判据**：Nuitka 把 Python 源码变成单体原生二进制，但**运行时仍走标准 import 机制**。
+
+在当前工作目录放一个同名模块（`base64.py`、`midi.py`、`whatever_module.py`），`sys.path` 优先 CWD，你的 stub 会替代内嵌版本。把每次属性访问都打出来，增量拼出 API 形状。
+
+```python
+# 与二进制同目录的 base64.py
+class _Trace:
+    def __getattr__(self, name):
+        def f(*a, **k):
+            print(f'base64.{name}({a!r}, {k!r})')
+            return b''
+        return f
+import sys; sys.modules[__name__] = _Trace()
+```
+
+跑 `./target_bin`，打印出来的调用就暴露了算法，完全不用反编译 Nuitka 产物。
+
+**关键**：任何仍通过 `sys.path` 解析模块名的运行时（Nuitka、`--onefile` 的 PyInstaller、部分 Py2Exe、冻结 CPython）都能被 CWD stub 劫持。先 `strings` 找模块名挑 hook 目标。
+
+---
+
+## 8. Swift
 
 ```bash
-# Detect Swift binary
 strings binary | grep "swift"
-otool -l binary | grep "swift"
-
-# Demangle Swift symbols
+otool -l binary | grep "swift"        # __swift5_* 节
 swift demangle 's14MyApp0A8ClassC10checkInput6resultSbSS_tF'
 # → MyApp.MyAppClass.checkInput(result: String) -> Bool
-
-# Key runtime functions: swift_allocObject, swift_release, swift_once
-# String: small (≤15 bytes inline) or large (heap pointer + length)
-# Protocol witness tables = dynamic dispatch (like vtables)
 ```
 
-**Detection:** `__swift5_*` sections in Mach-O, `swift_` runtime symbols, `s` prefix in mangled names.
+**运行时函数**：`swift_allocObject`、`swift_release`、`swift_once`。**字符串**：小字符串（≤15 字节）内联，大字符串堆指针 + 长度。**动态派发**靠协议见证表（相当于 vtable）。
+
+完整指南（含 Ghidra 集成、Mach-O 细节）见 [[binary/逆向工程/platforms.md|平台专项]]。
+
+**判据**：Mach-O 里的 `__swift5_*` 节、`swift_` 运行时符号、mangled 名的 `s` 前缀。
 
 ---
 
-## Kotlin / JVM Binary Reversing
+## 9. Kotlin / JVM
 
-Kotlin compiles to JVM bytecode or native (via Kotlin/Native). Common in Android and server-side CTF.
-
-### JVM Bytecode (Android/Server)
+### JVM 字节码（Android/服务端）
 
 ```bash
-# Detect Kotlin
 strings classes.dex | grep "kotlin"
-# Look for: kotlin.Metadata annotation, kotlin/jvm/internal/*
+# 线索：kotlin.Metadata 注解、kotlin/jvm/internal/*
 
-# Decompile
-jadx classes.dex                     # Best for Kotlin bytecode
-cfr classes.jar --kotlin             # CFR with Kotlin mode
-fernflower classes.jar output/       # IntelliJ's decompiler
-
-# Kotlin-specific patterns in decompiled output:
-# - Companion objects: ClassName$Companion
-# - Data classes: copy(), component1(), component2(), toString()
-# - Coroutines: ContinuationImpl, invokeSuspend, state machine
-# - Null checks: Intrinsics.checkNotNull() everywhere
-# - When expression: compiled as tableswitch/lookupswitch
-# - Sealed classes: instanceof checks in chain
+jadx classes.dex                     # Kotlin 字节码最佳
+cfr classes.jar --kotlin
+fernflower classes.jar output/
 ```
 
-**Kotlin coroutines in disassembly:**
+**Kotlin 特有形态**：
+- 伴生对象：`ClassName$Companion`
+- 数据类：`copy()`、`component1()`、`component2()`、`toString()`
+- 协程：`ContinuationImpl`、`invokeSuspend`、状态机
+- 空检查：满地 `Intrinsics.checkNotNull()`
+- `when` 表达式：编译成 `tableswitch`/`lookupswitch`
+- 密封类：一串 `instanceof`
+
+**协程的状态机**：
+
 ```text
-# Coroutines compile to state machines:
-# invokeSuspend(result) {
-#     switch (this.label) {
-#         case 0: this.label = 1; return suspendFunction();
-#         case 1: processResult(result); return Unit;
-#     }
-# }
-# Each suspend point becomes a state in the switch.
-# Follow the state machine to understand async flow.
+invokeSuspend(result) {
+    switch (this.label) {
+        case 0: this.label = 1; return suspendFunction();
+        case 1: processResult(result); return Unit;
+    }
+}
+# 每个挂起点变成 switch 里的一个状态。跟着状态机走就能读懂异步流。
 ```
 
 ### Kotlin/Native
 
 ```bash
-# Kotlin/Native produces platform binaries (no JVM)
-# Recognize by: konan, kotlin.native strings
 strings binary | grep "konan"
-
-# Much harder to reverse — no reflection metadata
-# Uses LLVM backend, looks similar to C/C++ in disassembly
-# Key functions: InitRuntime, DeinitRuntime, CreateStablePointer
-# Memory management: automatic reference counting (not GC)
 ```
 
-**Detection:** `kotlin.Metadata` annotations (JVM), `konan` strings (Native), `kotlin/` package paths.
+**判据**：有 `konan` 串、没有 JVM 反射元数据、LLVM 后端产出（反汇编看着像 C/C++）。关键函数 `InitRuntime`/`DeinitRuntime`/`CreateStablePointer`；内存管理是 **ARC 不是 GC**。
 
 ---
 
-## D Language Binary Reversing (CSAW CTF 2016)
-
-D language binaries have unique symbol mangling different from C++. Template instantiation at compile-time produces many function variants.
+## 10. D 语言
 
 ```bash
-# Recognition: D binaries use different mangling than C++
-# Symbols contain "_D" prefix and numeric length-prefixed names
-# Example: _D4mainQaFNaNbNfZv
+# 识别：_D 前缀 + 数字长度前缀的符号，与 C++ mangling 不同
+# 例：_D4mainQaFNaNbNfZv
 
-# Symbol demangling:
+# demangle：
 # GDB: set language d
-# Radare2: export names show demangled D symbols
-# Online: dlang.org/phobos/core_demangle.html
+# radare2: 直接显示 demangle 后的名字
+```
 
-# Common D binary patterns:
-# - Templates instantiated at compile-time: enc!("111"), enc!("222"), ...
-# - Garbage collector references (GC.malloc, GC.free)
-# - Phobos standard library functions (_D3std...)
-# - String processing: std.string, std.conv.to
+**常见形态**：编译期实例化模板（`enc!("111")`、`enc!("222")`…）、GC 引用（`GC.malloc`/`GC.free`）、Phobos 库函数（`_D3std...`）、`std.string`/`std.conv.to`。
 
-# Reversing a D cipher (XOR with cycling key):
+**判据**：`_D` 前缀 + Phobos 引用。模板系统会让同一个函数按不同参数复制出几百份，找 `enc!("N")` 里 N 变化的模式。
+
+**多函数链的逆序**：
+
+```python
 def reverse_d_cipher(encrypted, num_functions=500):
-    """D binaries may chain multiple transformation functions.
-    Each function XORs with key character, then XORs with key length.
-    Process in reverse order."""
+    """D 二进制可能串多个变换函数，每个先 XOR 密钥字符再 XOR 密钥长度。
+    必须逆序处理。"""
     result = encrypted[:]
     for i in range(num_functions - 1, -1, -1):
-        key = str(i) * 3  # e.g., "499499499" for function enc!("499")
+        key = str(i) * 3               # 例：enc!("499") → "499499499"
         key_len = len(key)
         for j in range(len(result)):
             result[j] ^= key_len
@@ -450,64 +384,54 @@ def reverse_d_cipher(encrypted, num_functions=500):
     return bytes(result)
 ```
 
-**Key insight:** D binaries are rare in CTFs but identifiable by `_D` symbol prefixes and Phobos library references. The compile-time template system means D functions may be duplicated hundreds of times with different parameters — look for patterns like `enc!("N")` where N varies.
+**关键**：`XOR 长度` 再 `XOR 字符` 的顺序在逆推时必须完全反过来。
 
 ---
 
-### Haskell Binary Reversing via STG Closures and hsdecomp (hxp CTF 2017, Codegate 2018)
+## 11. Haskell：STG 闭包
 
-GHC-compiled Haskell binaries use the STG (Spineless Tagless G-machine) execution model, making them notoriously difficult to reverse due to lazy evaluation, closures, and thunks. The STG machine turns everything into closure calls rather than direct function calls.
+GHC 编译的 Haskell 用 STG（Spineless Tagless G-machine）执行模型——惰性求值、闭包、thunk，让「直接函数调用」几乎不存在。
 
-**Recognition:**
-- Shared libraries: `libHSbase-*`, `libHSrts-*`
-- Entry symbol: `hs_main` (replaces standard `main`)
-- Mangled symbols use Z-encoding: `z` = prefix, `Z` = uppercase, `zd` = `.`, `zi` = `$`
-- GHC calling convention register mapping: `rbx` = R1, `r14` = R2
+**识别**：
+- 共享库 `libHSbase-*`、`libHSrts-*`
+- 入口符号 `hs_main`（取代 `main`）
+- Z-encoding 的符号：`z` 前缀、`Z` 大写、`zd` 是 `.`、`zi` 是 `$`
+- GHC 调用约定：`rbx` = R1、`r14` = R2
 
-**Closure structure:**
-Closures are structs where the first qword points to the info table/code. The info table precedes the code pointer and contains metadata (closure type, layout info, SRT).
+**闭包结构**：闭包是结构体，第一个 qword 指向 info table / 代码。info table 在代码指针之前，含元数据（闭包类型、布局信息、SRT）。
 
 ```bash
-# Identify Haskell binary
 ldd ./binary | grep libHS
 readelf -s ./binary | grep hs_main
 
-# Decompile with hsdecomp (github.com/gereeter/hsdecomp)
-# Recovers closure structure and pattern matching into pseudo-Haskell
+# hsdecomp（github.com/gereeter/hsdecomp）把闭包与模式匹配还原成伪 Haskell
 python2 hsdecomp ./binary
+```
 
-# Compile reference for monkey-patching
+**monkey-patch（反编译失败时的杀招）**：用同一个 GHC 版本编一个最小 Haskell 程序，抽出编出来的 `Main_main_info` 闭包代码，patch 进题目二进制——把主入口换成已知的求值器，强迫求值隐藏闭包并打印结果。
+
+```haskell
+module Main where
+main :: IO ()
+main = print targetClosure     -- 换成你想求值的闭包
+```
+
+```bash
 ghc -O0 reference.hs -o reference
 objcopy --dump-section .text=main_code reference
 ```
 
-**Monkey-patching technique:**
-When decompilation fails or closures are opaque, compile a minimal Haskell program with the same GHC version, extract the compiled `Main_main_info` closure code, and patch it into the challenge binary. This forces evaluation of hidden closures and prints their results by replacing the main entry point with a known evaluator.
-
-```haskell
--- reference.hs: minimal program that evaluates and prints the target closure
-module Main where
-main :: IO ()
-main = print targetClosure  -- replace with the closure you want to evaluate
-```
-
-**Key insight:** Haskell binaries are notoriously hard to reverse due to lazy evaluation, closures, and thunks. The STG machine turns everything into closure calls rather than direct function calls. `hsdecomp` recovers the closure structure and pattern matching. When decompilation fails, monkey-patching a known `Main_main_info` from a reference binary forces evaluation of hidden closures and prints results.
-
-**Detection:** `libHSbase-*` shared libraries, `hs_main` entry, Z-encoded symbols (e.g., `MainZCmain`), GHC version strings.
-
-**References:** hxp CTF 2017, Codegate 2018
+**关键**：`hsdecomp` 能还原闭包结构与模式匹配；反编译失败就 monkey-patch 一个已知的 `Main_main_info`。
 
 ---
 
-### Haskell Binary RE via GHC CMM Intermediate Language (N1CTF 2018)
+## 12. Haskell：指数递归结构的定位
 
-GHC-compiled Haskell binaries are nearly impossible to decompile with IDA due to the STG execution model. When a `.cmm` (C-- intermediate) file is available or recoverable, read it to understand thunks, closures, and lazy evaluation semantics. For exponentially-growing recursive structures, compute segment sizes with memoization and use binary search instead of materializing the full string.
+**判据**：二进制构造递归字符串 `f(n) = s1 + f(n-1) + s2 + f(n-1) + s3`。直接求值是 `O(2^n)` 时间和空间。
 
-**Pattern:** The binary builds a recursive string structure where `f(n) = s1 + f(n-1) + s2 + f(n-1) + s3`. Direct evaluation is `O(2^n)` in both time and space. Instead, compute the size of each recursion level with memoization, then binary-search for the target character index by walking the segment boundaries.
+改成：记忆化算每层长度，再按段边界二分定位目标字符。
 
 ```python
-# Haskell recursive string: f(n) = s1 + f(n-1) + s2 + f(n-1) + s3
-# Direct evaluation is O(2^n) -- use size memoization:
 from functools import lru_cache
 
 @lru_cache(maxsize=None)
@@ -526,148 +450,53 @@ def char_at(n, offset):
     return char_at(n-1, offset)
 ```
 
-**Key insight:** GHC's CMM (C minus minus) intermediate representation preserves enough structure to identify algorithms. For recursive string constructions that double in size each level, compute segment sizes with memoization and binary-search for target indices instead of materializing the exponentially-growing string.
-
-**Detection:** Haskell binary (see recognition above) with a `.cmm` file included in the challenge distribution. Look for recursive closure applications that produce string-like data with exponential growth.
-
-**References:** N1CTF 2018
+**关键**：`.cmm`（C-- 中间表示）文件保留了足够结构来认算法；指数增长的递归串永远不要真的生成出来。
 
 ---
 
-## C++ Binary Reversing (Quick Reference)
+## 13. C++ 速查
 
-While C++ RE is well-covered by general tools, these patterns are CTF-specific:
-
-### vtable Reconstruction
+### vtable 重建
 
 ```text
-# Virtual function tables (vtables):
-# First 8 bytes of object → pointer to vtable
-# vtable entries: [typeinfo_ptr, destructor, method1, method2, ...]
-# In Ghidra: Data → Create Pointer at vtable address
+# 对象首 8 字节 → vtable 指针
+# vtable 项：[typeinfo_ptr, 析构, 方法1, 方法2, ...]
+# Ghidra：在 vtable 地址处 Data → Create Pointer
 
-# Identify polymorphic dispatch:
-# mov rax, [rdi]           # Load vtable from this pointer
-# call [rax + 0x18]        # Call 4th virtual method (0x18/8 = 3rd after typeinfo+dtor)
+mov rax, [rdi]        # 从 this 取 vtable
+call [rax + 0x18]     # 调第 4 个虚方法（0x18/8 = 3，跳过 typeinfo+析构）
 ```
 
-### RTTI (Run-Time Type Information)
+### RTTI
 
 ```bash
-# If not stripped, RTTI reveals class hierarchy
-strings binary | grep -E "^[0-9]+[A-Z]"   # Mangled type names
-c++filt _ZTI7MyClass                        # → typeinfo for MyClass
-
-# In Ghidra: search for vtable references, follow typeinfo pointer
-# typeinfo struct: {vtable_for_typeinfo, name_string, base_class_ptr}
+strings binary | grep -E "^[0-9]+[A-Z]"   # mangled 类型名
+c++filt _ZTI7MyClass                       # → typeinfo for MyClass
 ```
 
-### Standard Library Patterns
+`typeinfo` 结构：`{typeinfo 的 vtable, 名字字符串, 基类指针}`。
+
+### 标准库布局
 
 ```text
-std::string (libstdc++):
-  SSO (Small String Optimization): inline buffer for ≤15 chars
-  Layout: {char* ptr, size_t size, union{size_t cap, char buf[16]}}
+std::string（libstdc++）：SSO，≤15 字符内联
+  {char* ptr, size_t size, union{size_t cap, char buf[16]}}
 
-std::vector<T>:
-  {T* begin, T* end, T* capacity_end}
+std::vector<T>：{T* begin, T* end, T* capacity_end}
 
-std::map<K,V>:
-  Red-black tree: each node has {left, right, parent, color, key, value}
+std::map<K,V>：红黑树，节点 {left, right, parent, color, key, value}
 
-std::unordered_map<K,V>:
-  Hash table: {bucket_array, size, load_factor_max, ...}
+std::unordered_map<K,V>：哈希表 {bucket_array, size, load_factor_max, ...}
 ```
 
 ---
 
-### Rust Lifetime Escape via Compiler Bug #25860 (Hack.lu 2018)
+## 14. 纪律
 
-**Pattern:** Rust compiler bug rust-lang/rust#25860 — higher-ranked lifetime variance was checked incorrectly, so a closure could "reborrow" a reference and unsoundly extend its lifetime to `'static`. In a Rust-only sandbox that runs safe code (no `unsafe` block) this bug yields a UAF primitive: alias a `Vec<u8>` heap buffer as a `(usize, usize, usize)` tuple and read/write past its end.
-
-```rust
-// Triggering pattern — safe Rust only
-fn extend<'a, 'b, T>(_: &'a &'b (), v: &'b T) -> &'a T { v }
-
-fn bad<T>(v: T) -> &'static T {
-    // Closure infers 'a = 'static because of the variance bug
-    let f: fn(&'_ &'_ (), &'_ T) -> &'_ T = extend;
-    f(&&(), &v) // returned ref now outlives v
-}
-
-fn main() {
-    let aliased: &'static Vec<u8> = bad(vec![1u8, 2, 3]);
-    // Reinterpret the Vec as its raw header (field order is
-    // compiler-dependent — NOT guaranteed by the Rust ABI;
-    // confirm against the constructor/callers for this toolchain)
-    let header: &(usize, usize, usize) =
-        unsafe { std::mem::transmute(aliased) };
-    println!("ptr={:#x} len={} cap={}", header.0, header.1, header.2);
-}
-```
-
-**Key insight:** A single soundness bug in the borrow checker turns a sandboxed Rust playground into an arbitrary-read-write primitive — no `unsafe` required. When a Rust CTF bans `unsafe` and pins a specific compiler version, grep the rust-lang issue tracker for `soundness` bugs fixed after that version: each one is an exploitation candidate. Repro this family with `std::mem::transmute` only after you have a lifetime-extended reference; the alias is the hard part.
-
-**References:** Hack.lu CTF 2018 — Rusty CodePad, writeup 11859
-
----
-
-### Rust #[no_mangle] libc Override for seccomp Bypass (Hack.lu 2018)
-
-**Pattern:** A sandboxed Rust binary calls `prctl(PR_SET_SECCOMP, ...)` early in `main`, then drops to user code. Because the sandboxed crate is *linked statically* alongside libc, defining an `extern "C"` function named `prctl` with `#[no_mangle]` shadows libc's symbol at link time. Returning `0` from the override disables seccomp, leaving every syscall reachable from the attacker's code.
-
-```rust
-// User-supplied code — linked into the same binary as the sandbox harness
-#[no_mangle]
-pub extern "C" fn prctl(_a: i64, _b: i64) -> i64 {
-    0 // pretend success, do not install any filter
-}
-
-// When main() calls prctl(PR_SET_SECCOMP, ...) it hits our override
-fn main() {
-    // The real program runs without seccomp filtering
-}
-```
-
-**Key insight:** Rust's static-linking default means `extern "C"` + `#[no_mangle]` is effectively a dynamic hook at compile time — any libc symbol the sandbox harness calls (`prctl`, `chroot`, `seteuid`, `read`) can be redefined by attacker crate code that ships inside the same binary. Harden by routing syscalls through `libc::syscall(SYS_prctl, ...)` directly (which bypasses the symbol table) or by using `-Wl,-Bsymbolic` to prefer the intended definitions.
-
-**References:** Hack.lu CTF 2018 — Rusty CodePad seccomp variant, writeup 11864
-
-### Rust xmmword Constant Extraction via IDAPython (Insomnihack 2019)
-
-**Pattern:** Rust stores literal byte buffers (flag expected values, XOR tables) as 16-byte xmmword constants in `.rodata`. IDA parses these as `xmmword_xxxx` tokens. Walk the `.rodata` range in IDAPython, read each xmmword, reverse any simple obfuscation (e.g., `(dword >> 2) ^ 0xA`), and dump the plaintext.
-
-```python
-import idc, idaapi
-start, end = 0x4A1000, 0x4A1100
-for ea in range(start, end, 4):
-    d = idc.get_wide_dword(ea)
-    print(chr((d >> 2) ^ 0xA), end='')
-```
-
-**Key insight:** Rust binaries are hard to decompile but very easy to scan for literal data. Any check of the form `input == const_buf` leaves the expected value in `.rodata` untouched. Grep for `mov reg, xmmword [rip+offset]` to find the slot, then dump.
-
-**References:** Insomnihack teaser 2019 — beginner_reverse, writeup 12910
-
----
-
-## Nuitka-Compiled Python — Module Stub Injection (X-MAS CTF 2018)
-
-**Pattern:** Nuitka turns Python sources into a monolithic native binary, but still uses the standard Python import machinery at runtime. Put a dummy `base64.py` / `midi.py` / `whatever_module.py` in the current working directory before executing the binary; the module system prefers CWD, so your stub is loaded instead of the embedded one. Log every attribute access and incrementally build a shim of the API the binary uses.
-
-```python
-# base64.py next to the binary
-class _Trace:
-    def __getattr__(self, name):
-        def f(*a, **k):
-            print(f'base64.{name}({a!r}, {k!r})')
-            return b''
-        return f
-import sys; sys.modules[__name__] = _Trace()
-```
-
-Run `./target_bin`; the printed calls reveal the algorithm without decompiling the Nuitka output.
-
-**Key insight:** Any runtime that still resolves module names through `sys.path` (Nuitka, PyInstaller with `--onefile`, Py2Exe with `--bundle_files=1` off, frozen CPython) can be shimmed at import time with CWD stubs. Grep `strings` output for module names to pick good hook targets.
-
-**References:** X-MAS CTF 2018 — A Christmas Carol, writeup 12667
+- **先认编译器，再选工具**。Go 先跑 GoReSym、Rust 先 grep `panicked`、Haskell 先看有没有 `libHS*`——顺序错了就白干。
+- **Go 字符串不是 null 结尾**，`{ptr, len}` 元组。用 Ghidra 默认字符串分析一定漏。
+- **Rust 的 `Vec`/`String` 字段顺序不可信**，必须对着构造函数在反汇编里确认。
+- **panic 串与 `-ldflags -X` 常量都是白给的答案**，动手前先 `strings`。
+- **静态链接 = 编译期可 hook**：Rust 的 `#[no_mangle]` 能覆盖 libc 符号；冻结 Python 能被 CWD stub 劫持。
+- **指数结构不要物化**：记忆化算长度 + 二分定位。
+- **报的是编译器不是语言难度**：Haskell/Kotlin-Native 看着唬人，其实都是「换入口」。

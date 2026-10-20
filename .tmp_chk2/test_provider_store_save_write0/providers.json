@@ -1,0 +1,15 @@
+{
+  "providers": [
+    {
+      "name": "C",
+      "base_url": "https://z/api",
+      "api_key": "k3",
+      "format": "openai-chat-completions",
+      "models": [
+        "m"
+      ],
+      "enabled": true,
+      "model_context": {}
+    }
+  ]
+}

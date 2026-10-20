@@ -90,32 +90,32 @@ level: 2
 
 | 目标特征 | 优先测试模块（知识库） | 弹药（references） |
 |---|---|---|
-| 有用户体系（注册/登录） | `web/漏洞分类/idor/手册.md` + `web/漏洞分类/authbypass/手册.md`（§4.2.2） | `web/实战打法/arbitrary-x-authz.md` + `playbooks/api-rest/` |
-| 有搜索/筛选功能 | `web/漏洞分类/sqli/手册.md` | `web/实战打法/sqli.md` |
-| 有文件上传 | `web/漏洞分类/file-upload/手册.md` | `web/实战打法/file-upload/00-index.md` |
-| 有内容请求/预览功能 | `web/漏洞分类/ssrf/手册.md`（外带：`知识库/dnslog-oob.md`） | `web/实战打法/ssrf-cache-host/10-ssrf-core.md` + `11-cloud.md` |
-| 有评论/留言/富文本 | `web/漏洞分类/xss/手册.md` | `web/实战打法/xss/00-index.md` |
-| 有支付/优惠券/积分 | `web/漏洞分类/logic/手册.md` + `web/漏洞分类/race-condition/手册.md` | `web/实战打法/logic-flaws/00-index.md` + `web/实战打法/race-conditions.md` |
-| 接口返回字段多 | `web/漏洞分类/info-leak/手册.md` | `web/实战打法/info-disclosure.md` |
-| GraphQL 接口 | `web/漏洞分类/graphql/手册.md` | `web/实战打法/graphql.md` |
-| OAuth/JWT/SAML 认证 | `web/漏洞分类/jwt/手册.md` | `web/实战打法/oauth-saml-jwt/00-index.md` |
-| WebSocket 实时通信 | `web/漏洞分类/websocket/手册.md` | `web/实战打法/api-rest/13-websocket.md` |
-| API 网关/微服务架构 | `web/漏洞分类/api-gateway/手册.md` | `web/实战打法/api-rest/10-rest-api.md` |
-| CDN/缓存服务 | `web/漏洞分类/cache-poisoning/手册.md` | `web/实战打法/ssrf-cache-host/12-cache.md` |
-| AI/LLM 功能 | 对话口工具真执行走 `web/漏洞分类/agent-tool-exec/手册.md`。**禁开** `web/漏洞分类/llm-security/手册.md` 越狱教材；目标本身是 LLM 应用且明确收 prompt-injection 类时，可 Read `web/实战打法/llm-prompt-injection/00-index.md` 作方法论，产出仅限漏洞证明、禁通用越狱话术教材 | `web/实战打法/llm-prompt-injection/00-index.md` |
-| 身份口拦了、对话口仍接、工具列表有 bash/shell/code_interpreter | `web/漏洞分类/agent-tool-exec/手册.md` | `web/实战打法/llm-prompt-injection/12-agent-vulns.md` |
-| 云 IDE / Codex / AI 编程台 | `web/漏洞分类/cloud-ide-rce-chain/手册.md` | `web/实战打法/rce/13-file-rce-chain.md` |
-| 前后端分离架构 | `web/漏洞分类/http-smuggling/手册.md` | `web/实战打法/http-smuggling.md` |
-| 返回 401/403 | 先分清：登录页 → `dig-scope` §4.1.1 找业务面，认证口走 §4.2.2；**不要**开 `web/漏洞分类/401-403-bypass/手册.md` 磨登录 HTML。业务 API 的 401/403 现场改 path/METHOD/头自己打（本篇已收成一行） | — |
-| 公网已见 Redis/rsync/FPM/AJP/YARN/2375/h2-console | `web/漏洞分类/info-leak/手册.md` §五（见了才打）+ 对应 ssrf/jndi/path-traversal | `web/实战打法/unauth-access.md` |
-| 有 CORS / 跨域接口 | **跳过**（不挖，**勿开** `web/漏洞分类/cors/手册.md`）；转注入/越权等 | — |
-| 有状态变更写操作 | `web/漏洞分类/csrf/手册.md` | `web/实战打法/logic-flaws/10-csrf.md` |
-| 有 WAF 拦截 | `web/漏洞分类/waf-bypass/手册.md`（主），变体不够再 `references/methodology/02-bypass-toolkit.md`（263 变体决策树） | `methodology/02-bypass-toolkit.md` |
-| 路径/下载/读文件 | `web/漏洞分类/path-traversal/手册.md` | `web/实战打法/path-traversal/00-index.md` |
-| XML / 文件解析 | `web/漏洞分类/xxe/手册.md`（外带：`web/漏洞分类/dnslog-oob/手册.md`） | `web/实战打法/rce/15-xxe.md` |
-| Java 反序列化 / 中间件 | `web/漏洞分类/deserialization/手册.md` + `web/漏洞分类/jndi-injection/手册.md`（OOB：`web/漏洞分类/dnslog-oob/手册.md`） | `web/实战打法/rce/12-deserialization.md` |
-| 子域/资产接管线索 | `web/漏洞分类/subdomain-takeover/手册.md` | `web/实战打法/info-disclosure.md` |
-| Host / 缓存 CDN | `web/漏洞分类/host-header/手册.md` + `web/漏洞分类/cache-poisoning/手册.md` | `web/实战打法/ssrf-cache-host/12-cache.md` |
+| 有用户体系（注册/登录） | `web/漏洞分类/越权/越权漏洞（IDOR-权限绕过）.md` + `web/漏洞分类/认证绕过/认证绕过（登录-会话-密码重置-2FA）.md`（§4.2.2） | `web/实战打法/arbitrary-x-authz.md` + `playbooks/api-rest/` |
+| 有搜索/筛选功能 | `web/漏洞分类/SQL注入/注入类漏洞（SQL注入-命令注入-SSTI）.md` | `web/实战打法/sqli.md` |
+| 有文件上传 | `web/漏洞分类/文件上传/文件上传漏洞.md` | `web/实战打法/file-upload/00-index.md` |
+| 有内容请求/预览功能 | `web/漏洞分类/SSRF/SSRF测试.md`（外带：`知识库/dnslog-oob.md`） | `web/实战打法/ssrf-cache-host/10-ssrf-core.md` + `11-cloud.md` |
+| 有评论/留言/富文本 | `web/漏洞分类/XSS/XSS测试.md` | `web/实战打法/xss/00-index.md` |
+| 有支付/优惠券/积分 | `web/漏洞分类/业务逻辑/逻辑漏洞.md` + `web/漏洞分类/条件竞争/竞态条件.md` | `web/实战打法/logic-flaws/00-index.md` + `web/实战打法/race-conditions.md` |
+| 接口返回字段多 | `web/漏洞分类/信息泄露/信息泄露测试.md` | `web/实战打法/info-disclosure.md` |
+| GraphQL 接口 | `web/漏洞分类/GraphQL/GraphQL 安全.md` | `web/实战打法/graphql.md` |
+| OAuth/JWT/SAML 认证 | `web/漏洞分类/JWT/OAuth-JWT-SAML 安全.md` | `web/实战打法/oauth-saml-jwt/00-index.md` |
+| WebSocket 实时通信 | `web/漏洞分类/WebSocket/WebSocket 安全.md` | `web/实战打法/api-rest/13-websocket.md` |
+| API 网关/微服务架构 | `web/漏洞分类/API网关/API 网关安全.md` | `web/实战打法/api-rest/10-rest-api.md` |
+| CDN/缓存服务 | `web/漏洞分类/缓存投毒/缓存投毒测试.md` | `web/实战打法/ssrf-cache-host/12-cache.md` |
+| AI/LLM 功能 | 对话口工具真执行走 `web/漏洞分类/AI代理工具执行/对话口工具真执行（agent-tool-exec）.md`。**禁开** `web/漏洞分类/大模型安全/LLM 安全测试（禁开越狱教材）.md` 越狱教材；目标本身是 LLM 应用且明确收 prompt-injection 类时，可 Read `web/实战打法/llm-prompt-injection/00-index.md` 作方法论，产出仅限漏洞证明、禁通用越狱话术教材 | `web/实战打法/llm-prompt-injection/00-index.md` |
+| 身份口拦了、对话口仍接、工具列表有 bash/shell/code_interpreter | `web/漏洞分类/AI代理工具执行/对话口工具真执行（agent-tool-exec）.md` | `web/实战打法/llm-prompt-injection/12-agent-vulns.md` |
+| 云 IDE / Codex / AI 编程台 | `web/漏洞分类/云IDE远程执行链/云 IDE-AI 编程平台弱口令→RCE→凭证链.md` | `web/实战打法/rce/13-file-rce-chain.md` |
+| 前后端分离架构 | `web/漏洞分类/HTTP请求走私/HTTP 请求走私测试.md` | `web/实战打法/http-smuggling.md` |
+| 返回 401/403 | 先分清：登录页 → `dig-scope` §4.1.1 找业务面，认证口走 §4.2.2；**不要**开 `web/漏洞分类/401与403绕过/401-403 状态码绕过测试.md` 磨登录 HTML。业务 API 的 401/403 现场改 path/METHOD/头自己打（本篇已收成一行） | — |
+| 公网已见 Redis/rsync/FPM/AJP/YARN/2375/h2-console | `web/漏洞分类/信息泄露/信息泄露测试.md` §五（见了才打）+ 对应 ssrf/jndi/path-traversal | `web/实战打法/unauth-access.md` |
+| 有 CORS / 跨域接口 | **跳过**（不挖，**勿开** `web/漏洞分类/跨域配置错误/CORS 技术资料（SRC 禁用）.md`）；转注入/越权等 | — |
+| 有状态变更写操作 | `web/漏洞分类/跨站请求伪造/CSRF.md` | `web/实战打法/logic-flaws/10-csrf.md` |
+| 有 WAF 拦截 | `web/漏洞分类/WAF绕过/WAF 绕过测试.md`（主），变体不够再 `references/methodology/02-bypass-toolkit.md`（263 变体决策树） | `methodology/02-bypass-toolkit.md` |
+| 路径/下载/读文件 | `web/漏洞分类/路径穿越/路径穿越-LFI.md` | `web/实战打法/path-traversal/00-index.md` |
+| XML / 文件解析 | `web/漏洞分类/XXE/XXE测试.md`（外带：`web/漏洞分类/DNS外带/DNSLog OOB 外带回连.md`） | `web/实战打法/rce/15-xxe.md` |
+| Java 反序列化 / 中间件 | `web/漏洞分类/反序列化/反序列化测试.md` + `web/漏洞分类/JNDI注入/JNDI 注入测试.md`（OOB：`web/漏洞分类/DNS外带/DNSLog OOB 外带回连.md`） | `web/实战打法/rce/12-deserialization.md` |
+| 子域/资产接管线索 | `web/漏洞分类/子域接管/子域接管测试.md` | `web/实战打法/info-disclosure.md` |
+| Host / 缓存 CDN | `web/漏洞分类/Host头注入/Host 头注入与密码重置毒化.md` + `web/漏洞分类/缓存投毒/缓存投毒测试.md` | `web/实战打法/ssrf-cache-host/12-cache.md` |
 | **国产 OA / 中间件指纹命中**（weaver/seeyon/tongda/landray/yongyou/kingdee/hikvision/dahua） | 直接复现 `poc/` 同指纹 | `dictionaries/chinese-srcfingerprints.md` + `dictionaries/default-credentials-cn.md`（默认口令力度认 `web/实战打法/rules/weak-credential-limit.md`，计入 ≤10 额度） |
 | **银行 / 支付 / 网银 / 第三方支付聚合** | 力气分配认 `web/实战打法/rules/src-value-hunting.md` | `industry/banking-finance.md` |
 | **运营商 / BOSS / 网管 / 物联网卡** | 力气分配认 `web/实战打法/rules/src-value-hunting.md` | `web/playbooks` 无对应 playbook，走 `industry/telecom-isp.md` |

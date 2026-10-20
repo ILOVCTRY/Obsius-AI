@@ -1,254 +1,208 @@
-# CTF Crypto - ZKP, Solvers & Advanced Techniques
-
-## Table of Contents
-- [ZKP Attacks](#zkp-attacks)
-- [Graph 3-Coloring](#graph-3-coloring)
-- [Z3 SMT Solver Guide](#z3-smt-solver-guide)
-- [Garbled Circuits: Free XOR Delta Recovery (LACTF 2026)](#garbled-circuits-free-xor-delta-recovery-lactf-2026)
-- [Bigram/Trigram Substitution -> Constraint Solving (LACTF 2026)](#bigramtrigram-substitution---constraint-solving-lactf-2026)
-- [Shamir Secret Sharing with Deterministic Coefficients (LACTF 2026)](#shamir-secret-sharing-with-deterministic-coefficients-lactf-2026)
-- [Race Condition in Crypto-Protected Endpoints (LACTF 2026)](#race-condition-in-crypto-protected-endpoints-lactf-2026)
-- [Garbled Circuits: AES Key Recovery via Metadata Leakage (srdnlenCTF 2026)](#garbled-circuits-aes-key-recovery-via-metadata-leakage-srdnlenctf-2026)
-- [Post-Quantum Signature Fault Injection: MAYO (srdnlenCTF 2026)](#post-quantum-signature-fault-injection-mayo-srdnlenctf-2026)
-- [Lattice-Based Threshold Signature Attack: FROST (srdnlenCTF 2026)](#lattice-based-threshold-signature-attack-frost-srdnlenctf-2026)
-- [Groth16 Broken Trusted Setup — delta == gamma (DiceCTF 2026)](#groth16-broken-trusted-setup--delta--gamma-dicectf-2026)
-- [Groth16 Proof Replay — Unconstrained Nullifier (DiceCTF 2026)](#groth16-proof-replay--unconstrained-nullifier-dicectf-2026)
-- [DV-SNARG Forgery via Verifier Oracle (DiceCTF 2026)](#dv-snarg-forgery-via-verifier-oracle-dicectf-2026)
-- [KZG Pairing Oracle for Permutation Recovery (UNbreakable 2026)](#kzg-pairing-oracle-for-permutation-recovery-unbreakable-2026)
-- [Shamir Secret Sharing with Reused Polynomial Coefficients (PoliCTF 2017)](#shamir-secret-sharing-with-reused-polynomial-coefficients-polictf-2017)
-
+---
+title: 零知识证明与高阶密码攻击
+phase: crypto
+vuln_class: [crypto, zkp, groth16, garbled-circuit, shamir, threshold, fault-injection, z3]
+summary: 高阶密码题的判据是「协议里哪条等式本应成立但实际没被强制」——vk 常量相等、nullifier 未记录、电路未约束公开输入、Shamir 系数复用，都是同一种病的不同表现：验证者没检查它以为检查了的东西。
 ---
 
-## ZKP Attacks
+# 零知识证明与高阶密码攻击
 
-- Look for information leakage in proofs
-- If proving IMPOSSIBLE problem (e.g., 3-coloring K4), you must cheat
-- Find hash collisions to commit to one value but reveal another
-- PRNG state recovery: salts generated from seeded PRNG can be predicted
-- Small domain brute force: if you know `commit(i) = sha256(salt(i), color(i))` and have salt, brute all colors
+格与后量子见 [[crypto/格与后量子/lattice-and-lwe.md|格与 LWE]]；纯数学见 [[crypto/高阶专题/advanced-math.md|高阶数学]]；非常规构造见 [[crypto/高阶专题/exotic-crypto.md|非常规密码]]。
 
----
+## 0. 判据速查
 
-## Graph 3-Coloring
+| 观察到的现象 | 结论 | 去哪节 |
+|---|---|---|
+| 要证明一个**不可能**的命题 | 必须作弊，找承诺/挑战环节的漏洞 | §1 |
+| 有 `commit(i)=H(salt_i, x_i)` 且 salt 已知 | 小域爆破 | §1 |
+| 给了 Groth16 验证密钥 | **先比对 `vk_delta_2 == vk_gamma_2`** | §2 |
+| 同一份证明能在多个提案上通过 | nullifier 没被记录，或电路没约束它 | §2 |
+| 验证者能被反复查询 | DV-SNARG 在 oracle 下失去可靠性 | §3 |
+| 给了被打乱的 `{α^i·G1}` | 用配对比较指数加法恢复顺序 | §4 |
+| 有 garbled circuit 的加密真值表 | free XOR 的 delta 可由三行异或消出 | §5 |
+| 服务跨会话复用同一 garbled key | 元数据泄漏 → 恢复整个 AES 密钥 | §5 |
+| 只有一个 Shamir share 但系数由 secret 派生 | 单变量方程，求根 | §6 |
+| 多个 share 且高阶项相同 | 相减消掉随机项 | §6 |
+| 约束是布尔/位向量/有限域等式 | Z3 | §7 |
+| 约束是「合法单词序列」 | OR-Tools CP-SAT + 自动机 | §7 |
+| 签名方案有故障注入窗口 | 每个故障给一条域上线性方程 | §8 |
+| 门限签名且挑战值可控 | 拉格朗日系数尺度不同 → 区间交集 | §9 |
+| 检查与自增之间有时间窗 | TOCTOU 并发绕过 | §10 |
+
+## 1. ZKP 通用破法
+
+**判据：题目要求证明一个真命题时是正常题，要求证明假命题时必然有实现漏洞。**
+
+五个常规出口：
+
+- **证明里的信息泄漏**：承诺值、挑战值、响应值的位宽或分布异常。看响应是否比理论值短（泄漏高位）。
+- **哈希碰撞**：承诺用一个值、揭示另一个值。找到 `H(a) == H(b)` 且 `a != b` 即可。
+- **PRNG 状态恢复**：salt 由固定种子 PRNG 生成时可直接预测（见 [[crypto/随机数/prng.md|随机数与密钥恢复]]）。
+- **小域爆破**：`commit(i) = sha256(salt_i, color_i)` 且 salt 已知时，颜色空间小（3 色）就 3 次哈希。
+- **Fiat-Shamir 转录重放**：挑战由哈希算出的实现若漏了某个公开输入进哈希，就能在固定挑战下重放。
+
+## 2. Groth16：先看常量，再看 nullifier
+
+**第一件事永远是比对验证密钥**：
 
 ```python
-import networkx as nx
-nx.coloring.greedy_color(G, strategy='saturation_largest_first')
+if vk_delta_2 == vk_gamma_2:
+    # 整个方案崩塌，任何命题都可证
 ```
 
----
+`delta == gamma` 时配对等式退化成 `e(A,B) = e(alpha,beta)·e(vk_x + C, gamma)`，令 `A = vk_alpha1`、`B = vk_beta2`、`C = -vk_x`：
 
-## Z3 SMT Solver Guide
-
-Z3 solves constraint satisfaction - useful when crypto reduces to finding values satisfying conditions.
-
-**Basic usage:**
 ```python
-from z3 import *
-
-# Boolean variables (for bit-level problems)
-bits = [Bool(f'b{i}') for i in range(64)]
-
-# Integer/bitvector variables
-x = BitVec('x', 32)  # 32-bit bitvector
-y = Int('y')         # arbitrary precision int
-
-solver = Solver()
-solver.add(x ^ 0xdeadbeef == 0x12345678)
-solver.add(y > 100, y < 200)
-
-if solver.check() == sat:
-    model = solver.model()
-    print(model.eval(x))
+from py_ecc.bn128 import G1, G2, multiply, add, neg, pairing
+forged_A = vk_alpha1
+forged_B = vk_beta2
+forged_C = neg(vk_x)      # 使 e(vk_x + C, gamma) = 1
 ```
 
-**BPF/SECCOMP filter solving:**
+**这份伪造对任意公开输入都成立**，不需要知道 witness。
 
-When challenges use BPF bytecode for flag validation (e.g., custom syscall handlers):
+**第二件事是 nullifier**。两个独立缺陷常同时出现：
 
-```python
-from z3 import *
+- **合约不记录已用的 `nullifierHash`** → 同一份证明无限重放。
+- **电路把 nullifier 声明为公开输入却没加约束** → 换 nullifier 也验得过。
 
-# Model flag as array of 4-byte chunks (how BPF sees it)
-flag = [BitVec(f'f{i}', 32) for i in range(14)]
-s = Solver()
-
-# Constraint: printable ASCII
-for f in flag:
-    for byte in range(4):
-        b = (f >> (byte * 8)) & 0xff
-        s.add(b >= 0x20, b < 0x7f)
-
-# Extract constraints from BPF dump (seccomp-tools dump ./binary)
-mem = [BitVec(f'm{i}', 32) for i in range(16)]
-
-# Example BPF constraint reconstruction
-s.add(mem[0] == flag[0])
-s.add(mem[1] == mem[0] ^ flag[1])
-s.add(mem[4] == mem[0] + mem[1] + mem[2] + mem[3])
-s.add(mem[8] == 4127179254)  # From BPF if statement
-
-if s.check() == sat:
-    m = s.model()
-    flag_bytes = b''
-    for f in flag:
-        val = m[f].as_long()
-        flag_bytes += val.to_bytes(4, 'little')
-    print(flag_bytes.decode())
+```bash
+# 找部署交易，取构造函数参数里的合法证明
+# 然后对每个提案复用同一份 proof
 ```
 
-**Converting bits to flag:**
-```python
-from Crypto.Util.number import long_to_bytes
+**判据**：DAO / 投票 / 空投类题，先查「有没有 `used[nullifier]` 映射」和「circuit 里 nullifier 是否进 constraint」。
 
-if solver.check() == sat:
-    model = solver.model()
-    flag_bits = ''.join('1' if model.eval(b) else '0' for b in bits)
-    print(long_to_bytes(int(flag_bits, 2)))
+## 3. DV-SNARG：验证者 oracle
+
+**DV-SNARG 在 prover 能查询 verifier 时理论上就失去可靠性**（ePrint 2024/1138）——不是实现 bug，是定义使然。
+
+DPP（内积证明）结构：
+
+```text
+q[i] = v[i] + b*(tensor[i] - constraint[i])
+b 固定常数（如 162817），v[i] ∈ [-256,256]，约束权重 r ∈ [-2^40, 2^40]
 ```
 
-**When to use Z3:**
-- Type system constraints (OCaml GADTs, Haskell types)
-- Custom hash/cipher with algebraic structure
-- Equation systems over finite fields
-- Boolean satisfiability encoded in challenge
-- Constraint propagation puzzles
+**两条路**：
 
----
+- **学秘密 `v`**：对角线未约束对 `pair(i,i)` 的系数就是 `v[i]^2`，逐个试 0..256 看 oracle 响应差异，得 `|v[i]|`；非对角未约束对给乘积符号，一查询一个。
+- **CRS 项抵消伪造**：错答案只违反输出约束（wire N）。wire N 同时被 gate G 和输出约束触及，而 `pair(input1,input2)` 只被 gate G 触及，所以加上 `CRS[wire_N]` 减去 `CRS[pair]` 能消掉 `b*r_G`；剩下的 `b*r_output` 也自消；最后用 `delta = -v[N] + 2*b*v[input1]*v[input2]` 乘 G 加在 h2 上。
 
-## Garbled Circuits: Free XOR Delta Recovery (LACTF 2026)
+**「streak=0 时提交正确答案不算重置」是这类题的关键性质**——给了无限次免费 oracle 查询。
 
-**Pattern (sisyphus):** Yao's garbled circuit with free XOR optimization. Circuit designed so normal evaluation only reaches one wire label, but the other is needed.
+## 4. KZG 置换恢复
 
-**Free XOR property:** Wire labels satisfy `W_0 XOR W_1 = delta` for global secret delta.
+给了打乱的 `{α^i · G1}`，要恢复顺序再求 α。
 
-**Attack:** XOR three of four encrypted truth table entries to cancel AES terms:
-```python
-# Encrypted rows: E_i = AES(key_a_i XOR key_b_i, G_out_f(a,b))
-# XOR of three rows where AES inputs differ by delta causes cancellation
-# Reveals delta directly, then compute: W_1 = W_0 XOR delta
-```
+**核心恒等式**：`e(P_i, ψ(P_j)) = e(G1, ψ(G1))^(α^(a_i + a_j))`，其中 `ψ((x,y)) = (ζx, y)`、`ζ^3 = 1`。所以「配对值相等」等价于「指数相加相等」。
 
-**General lesson:** In garbled circuits, if you can obtain any two labels for the same wire, you recover delta and can compute all labels.
+- **找 G1（α^0）**：唯一满足 `e(P, ψ(P)) == e(G1, ψ(G1))` 的点。
+- **走链**：`e(P_i, ψ(G1))` 与 `e(G1, ψ(G1))` 比较定出 α·G1，再用 `e(αG1, ψ(αG1)) == e(α²G1, ψ(G1))` 递推。
+- **求 α**：顺序恢复后把点当多项式系数解 `A(x) = 0`（`sympy.nroots`），即得 toxic waste。
+- **伪造 opening**：有 α 就能算任意点的 KZG 证明。
 
----
+**判据是曲线**：只有**超奇异**配对友好曲线才有可用的 distortion map。BN128 上的 `ψ` 形式不同，直接套公式会算错——先确认曲线族。
 
-## Bigram/Trigram Substitution -> Constraint Solving (LACTF 2026)
+## 5. Garbled circuit
 
-**Pattern (lazy-bigrams):** Bigram substitution cipher where plaintext has known structure (NATO phonetic alphabet).
+**Free XOR 性质**：同一线两根标签满足 `W_0 ⊕ W_1 = Δ`（全局常量）。
 
-**OR-Tools CP-SAT approach:**
-1. Model substitution as injective mapping (IntVar per bigram)
-2. Add crib constraints from known flag prefix
-3. Add **regular language constraint** (automaton) for valid NATO word sequences
-4. Solver finds unique solution
+**只拿到同一线的任意两根标签，就等于拿到 Δ，然后全部标签都能算**。
 
-**Pattern (not-so-lazy-trigrams):** "Trigram substitution" that decomposes into three independent monoalphabetic ciphers on positions mod 3.
-
-**Decomposition insight:** If cipher uses `shuffle[pos % n][char]`, each residue class `pos = k (mod n)` is an independent monoalphabetic substitution. Solve each separately with frequency analysis or known-plaintext.
-
----
-
-## Shamir Secret Sharing with Deterministic Coefficients (LACTF 2026)
-
-**Pattern (spreading-secrets):** Coefficients `a_1...a_9` are deterministic functions of secret s (via RNG seeded with s). One share (x_0, y_0) is revealed.
-
-**Vulnerability:** Given one share, the equation `y_0 = s + g(s)*x_0 + g^2(s)*x_0^2 + ... + g^9(s)*x_0^9` is **univariate** in s.
-
-**Root-finding via Frobenius:**
-```python
-# In GF(p), find roots of h(s) via gcd with x^p - x
-# h(s) = s + g(s)*x_0 + ... + g^9(s)*x_0^9 - y_0
-# Compute x^p mod h(x) via binary exponentiation with polynomial reduction
-# gcd(x^p - x, h(x)) = product of (x - root_i) for all roots
-R.<x> = PolynomialRing(GF(p))
-h = construct_polynomial(x0, y0)
-xp = pow(x, p, h)  # Fast modular exponentiation
-g = gcd(xp - x, h)  # Extract linear factors
-roots = [-g[0]/g[1]] if g.degree() == 1 else g.roots()
-```
-
-**General lesson:** If ALL Shamir coefficients are derived from the secret, a single share creates a univariate equation. This completely breaks the (k,n) threshold scheme.
-
----
-
-## Race Condition in Crypto-Protected Endpoints (LACTF 2026)
-
-**Pattern (misdirection):** Endpoint has TOCTOU vulnerability: `if counter < 4` check happens before increment, allowing concurrent requests to all pass the check.
-
-**Exploitation:**
-1. **Cache-bust signatures:** Modify each request slightly (e.g., prepend zeros to nonce) so server can't use cached verification results
-2. **Synchronize requests:** Use multiprocessing with barrier to send ~80 simultaneous requests
-3. All pass `counter < 4` check before any increments -> counter jumps past limit
+**从加密真值表里消出 Δ**：四行 `E_i = AES(key_a_i ⊕ key_b_i, G_out)`，把三行异或，AES 输入两两相差 Δ，项抵消后直接暴露 Δ。
 
 ```python
-from multiprocessing import Process, Barrier
-barrier = Barrier(80)
-
-def make_request(barrier, modified_sig):
-    barrier.wait()  # Synchronize all processes
-    requests.post(url, json={"sig": modified_sig})
-
-# Launch 80 processes with unique signature modifications
-processes = [Process(target=make_request, args=(barrier, modify_sig(i))) for i in range(80)]
-```
-
-**Key insight:** TOCTOU in `check-then-act` patterns. Look for read-modify-write without atomicity/locking.
-
----
-
-## Garbled Circuits: AES Key Recovery via Metadata Leakage (srdnlenCTF 2026)
-
-**Pattern (FHAES):** Service evaluates AES via garbled circuits with a fixed per-connection key. Exploit garbling metadata rather than AES cryptanalysis.
-
-**Attack:**
-1. Construct a custom circuit with one attacker-controlled AND gate that leaks the global Free-XOR offset delta
-2. Use delta to locally evaluate the key-schedule section (first 1360 AND gates) as the evaluator
-3. For each of the first 16 key-schedule S-box calls, brute-force the input byte by re-garbling the S-box chunk and comparing observed AND tables
-4. Reconstruct key words from S-box outputs and recover the full 128-bit key through algebraic manipulation of the AES-128 schedule recurrence
-
-```python
-def garble_and(A, B, D, and_idx):
-    """Reproduce garbling with proper parity handling."""
-    r = B & 1
-    alpha = A & 1
-    beta = B & 1
-    # Computes gate0, gate1, z output via hash-based approach
-    return gate0, gate1, z
-
 def evaluator_and(A, B, gate0, gate1, and_idx):
-    """Evaluate AND gate using hash-based approach."""
-    hashA = h_wire(A, and_idx)
-    hashB = h_wire(B, and_idx)
+    hashA, hashB = h_wire(A, and_idx), h_wire(B, and_idx)
     L = hashA if (A & 1) == 0 else (hashA ^ gate0)
     R = hashB if (B & 1) == 0 else (hashB ^ gate1)
     return L ^ R ^ (A * (B & 1))
 ```
 
-**Key insight:** Garbled circuits that use free XOR optimization with fixed keys across sessions leak key material through the AND gate truth tables. Each S-box has a small enough input space (256 values) to brute-force when you know delta. This extends the LACTF technique from "recovering delta" to "recovering the entire AES key."
+**升级版：跨会话固定密钥 → 恢复整个 AES key**。步骤：
 
----
+1. 构造自定义电路，塞一个攻击者可控的 AND gate，从它的真值表泄出 Δ。
+2. 有 Δ 后本地当 evaluator 跑密钥扩展段（前 1360 个 AND gate）。
+3. 对前 16 次 S-box 调用，**每个输入字节只有 256 种**，重新 garble 那段再比对观测到的 AND 表即可定出。
+4. 由 S-box 输出反推密钥字，再用 AES-128 密钥扩展的递推关系补全 128 位。
 
-## Post-Quantum Signature Fault Injection: MAYO (srdnlenCTF 2026)
+**判据**：garbled circuit 题里出现「固定 key」「跨连接复用」「密钥扩展也走电路」——这三个同时成立才有这条路。
 
-**Pattern (Faulty Mayo):** One-byte fault injection window in `mayo_sign_signature` before final `s = v + O*x` construction. Controlled bit flips across 64 signature queries recover the secret matrix O row by row.
+## 6. Shamir 的两种结构性破坏
 
-**Attack:**
-1. Reverse binary to map fault offsets to `mayo_sign_signature` instructions
-2. For each of 64 rows of secret matrix O, use faulted signatures to extract linear equations over GF(16)
-3. Solve 17-variable linear systems over GF(16) for each row using Gaussian elimination
-4. Rebuild equivalent signer using recovered O and public seed from compressed public key
-5. Forge valid signature for challenge message
+### 系数由 secret 派生
 
-**GF(16) Gaussian elimination:**
+若 `a_1..a_{k-1}` 都是 s 的函数（例如用 s 作种子跑 RNG），那单个 share 就给出一元方程：
+
+```text
+y_0 = s + g(s)·x_0 + g²(s)·x_0² + ... + g^{k-1}(s)·x_0^{k-1}
+```
+
+在 `GF(p)` 上求根用 Frobenius：`gcd(x^p - x, h(x))` 的线性因子就是全部根。
+
 ```python
-# Precompute multiplication and inverse tables for GF(16)
-# GF(16) = GF(2)[x] / (x^4 + x + 1), elements 0-15
-INV = [0] * 16  # multiplicative inverses
-MUL = [[0]*16 for _ in range(16)]  # multiplication table
+R.<x> = PolynomialRing(GF(p))
+h = construct_polynomial(x0, y0)
+g = gcd(pow(x, p, h) - x, h)
+roots = g.roots()
+```
 
+**为什么这样能破 (k,n)**：正常 Shamir 的安全性来自「k-1 个未知独立系数」，系数一旦依赖 s，未知量就只剩 1 个。
+
+### 系数被复用
+
+若每个字符共用同一组系数，两条 share 相减就把所有高阶项消掉：
+
+```python
+# y_1[i] - y_1[0] = f[i] - f[0]（同一评估点 x=1）
+flag = ''.join(chr(shares[i] - shares[0] + ord('f')) for i in range(len(shares)))
+```
+
+**判据**：正常实现每个字节用独立随机系数；一旦发现「所有字符的多项式相同」，直接相减，连求根都不用。
+
+## 7. 约束求解
+
+```python
+from z3 import *
+x = BitVec('x', 32); y = Int('y')
+s = Solver()
+s.add(x ^ 0xdeadbeef == 0x12345678, y > 100, y < 200)
+if s.check() == sat:
+    print(s.model().eval(x))
+```
+
+**Z3 快的场景**：布尔、位向量、有限域上的**线性**等式、小规模非线性。**慢的场景**：大整数乘法链（RSA 类）、上百轮哈希、需要数论结构的方程。
+
+**BPF/seccomp 校验器**（`seccomp-tools dump ./binary` 拿字节码）是 Z3 的甜点区：
+
+```python
+flag = [BitVec(f'f{i}', 32) for i in range(14)]
+for f in flag:
+    for byte in range(4):
+        b = (f >> (byte*8)) & 0xff
+        s.add(b >= 0x20, b < 0x7f)     # 可打印约束，先把搜索空间砍掉
+mem = [BitVec(f'm{i}', 32) for i in range(16)]
+s.add(mem[0] == flag[0], mem[1] == mem[0] ^ flag[1], mem[8] == 4127179254)
+```
+
+**OR-Tools CP-SAT 用于「合法序列」**：双字母替换 + NATO 字母表这类题，把替换建模成单射 IntVar，加已知前缀 crib，再加**正则语言约束（自动机）**描述合法词序列，能唯一定解。
+
+**三色问题**：`nx.coloring.greedy_color(G, strategy='saturation_largest_first')`。
+
+**分解洞察**：若加密是 `shuffle[pos % n][char]`，每个余数类 `pos ≡ k (mod n)` 就是一个独立的单表替换，分别用频率分析或已知明文解，不要整体当 polyalphabetic 处理。
+
+## 8. 后量子签名故障注入（MAYO）
+
+**一字节故障窗口**在最终 `s = v + O·x` 之前，能控位翻转 → 64 次查询逐行恢复秘密矩阵 O。
+
+1. 逆二进制，把故障偏移映射到 `mayo_sign_signature` 的具体指令。
+2. 每行的故障签名给出 `GF(16)` 上的线性方程。
+3. 每行解 17 元线性方程组（高斯消元）。
+4. 用恢复的 O + 压缩公钥里的种子重建等价签名器，伪造任意消息。
+
+```python
 def solve_linear_gf16(equations, nvars=17):
-    """Gaussian elimination over GF(16)."""
     A = [x[:] + [y] for x, y in equations]
     m, row = len(A), 0
     for col in range(nvars):
@@ -260,216 +214,64 @@ def solve_linear_gf16(equations, nvars=17):
         for r in range(m):
             if r != row and A[r][col] != 0:
                 f = A[r][col]
-                A[r] = [A[r][c] ^ MUL[f][A[row][c]] for c in range(nvars + 1)]
+                A[r] = [A[r][c] ^ MUL[f][A[row][c]] for c in range(nvars+1)]
         row += 1
     return [A[i][nvars] for i in range(nvars)]
 ```
 
-**Key insight:** Post-quantum signature schemes like MAYO can be broken with fault injection if you can cause controlled bit flips during signing. Each fault creates a linear equation over GF(16), and 17+ equations per row suffice to recover the secret. This is analogous to DFA on classical schemes but over extension fields.
+**`GF(16) = GF(2)[x]/(x^4+x+1)`**，元素 0-15；加是异或，乘查表。**别用 `GF(2^8)` 的表**——域不同结果全错但不报错。
 
----
+## 9. 门限签名（FROST）
 
-## Lattice-Based Threshold Signature Attack: FROST (srdnlenCTF 2026)
+**两个前提同时成立才可打**：挑战值 `c` 可控，且能拿到同一 signer 在不同子集下的签名。
 
-**Pattern (Threshold):** Preprocessing queue capacity allows collecting many signatures. Fixed challenge construction enables solving 1D noisy linear equations per coefficient.
+1. **绕队列上限**：利用「活跃数 ≤8」而非「总用量」的漏洞，交替菜单项持续取签名。
+2. **固定挑战**：每次查询选 commitment `w_0` 把聚合承诺清零，使 `c` 恒定。
+3. `c` 固定后每个系数变成 `z = λ·u + noise (mod q)`。
+4. **换 signer 子集**拿到同一 share 的不同 `λ` 尺度（小/中/巨大）。
+5. 区间交集 + 最大似然收敛到唯一值。
 
-**Attack:**
-1. Exploit queue-depth cap (≤8 active) rather than total-usage cap by alternating menu options
-2. Force fixed challenge `c` by choosing commitment `w₀` each query to zero aggregate commitment before high-bit extraction
-3. With fixed `c`, each coefficient becomes: `z = λ·u + noise (mod q)`
-4. Select multiple signer subsets to obtain different Lagrange coefficient scales (small/mid/huge) for each target signer
-5. Solve via interval intersection and maximum-likelihood selection
-6. Recover 7 signer shares; combine with own share; reconstruct master secret via Lagrange interpolation
-
-**Interval intersection algorithm:**
 ```python
-from math import ceil, floor
-
 def intersect_intervals(intervals, lam, z, q, B):
-    """Refine candidate intervals using one (λ, z) observation with noise bound B."""
     out = []
     for lo, hi in intervals:
         if lam > 0:
-            kmin = ceil((lam * lo - z - B) / q)
-            kmax = floor((lam * hi - z + B) / q)
-            for k in range(kmin, kmax + 1):
-                a = (z + q * k - B) / lam
-                b = (z + q * k + B) / lam
+            for k in range(ceil((lam*lo - z - B)/q), floor((lam*hi - z + B)/q) + 1):
+                a, b = (z + q*k - B)/lam, (z + q*k + B)/lam
                 lo2, hi2 = max(lo, a), min(hi, b)
-                if lo2 <= hi2:
-                    out.append((lo2, hi2))
-    # Merge overlapping intervals
+                if lo2 <= hi2: out.append((lo2, hi2))
     out.sort()
     merged = [out[0]] if out else []
     for lo, hi in out[1:]:
-        if lo <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
-        else:
-            merged.append((lo, hi))
+        merged[-1] = (merged[-1][0], max(merged[-1][1], hi)) if lo <= merged[-1][1] else merged.append((lo, hi)) or merged[-1]
     return merged
 ```
 
-**Key insight:** Threshold signature schemes can leak individual shares when the challenge value is controlled. By querying with different signer subsets, you get different Lagrange coefficient scales for the same unknown share, allowing iterative interval refinement. With enough observations, the interval converges to a unique value.
+**关键在 λ 的多样性**：同一个 `u` 配不同 `λ` 才能把区间切细；全用同一子集则方程全相关，收敛不了。
 
----
+## 10. TOCTOU 竞态
 
-## Groth16 Broken Trusted Setup — delta == gamma (DiceCTF 2026)
-
-**Pattern (Housing Crisis):** Groth16 verifier has `vk_delta_2 == vk_gamma_2`, which breaks soundness entirely. Proofs are trivially forgeable.
-
-**Forgery:**
-```python
-from py_ecc.bn128 import G1, G2, multiply, add, neg, pairing
-from py_ecc.bn128 import curve_order as q
-
-# When delta == gamma, the pairing equation simplifies:
-# e(A, B) = e(alpha, beta) * e(vk_x + C, gamma)
-# Set A = vk_alpha1, B = vk_beta2, then:
-# e(alpha, beta) * e(vk_x + C, gamma) = e(alpha, beta)
-# → e(vk_x + C, gamma) = 1 → C = -vk_x (point negation)
-
-forged_A = vk_alpha1   # alpha point from verification key
-forged_B = vk_beta2    # beta point from verification key
-forged_C = neg(vk_x)   # negate the public input accumulator
-
-# This proof verifies for ANY public inputs
-```
-
-**Detection:** Compare `vk_delta_2` and `vk_gamma_2` in the verifier contract. If equal, the entire Groth16 scheme collapses — any statement can be "proven."
-
-**When to check:** Always inspect Groth16 verification key constants before attempting complex attacks. A broken trusted setup makes everything else unnecessary.
-
----
-
-## Groth16 Proof Replay — Unconstrained Nullifier (DiceCTF 2026)
-
-**Pattern (Housing Crisis):** DAO governance never tracks used `proposalNullifierHash` values, and the circuit leaves the nullifier unconstrained. A valid proof from the setup transaction can be replayed infinitely.
-
-**Attack:**
-1. Find the DAO contract's deployment/setup transaction
-2. Extract constructor arguments containing valid Groth16 proof
-3. Replay the same proof for every proposal — it always verifies
-4. Use proposals to control DAO actions (betting, market creation, resolution)
-
-**Key insight:** ZK circuits that leave inputs unconstrained and systems that don't track nullifiers are vulnerable to replay. Always check: does the verifier contract track proof nullifiers? Does the circuit actually constrain all declared public inputs?
-
----
-
-## DV-SNARG Forgery via Verifier Oracle (DiceCTF 2026)
-
-**Pattern (Dot):** DV-SNARG (Designated Verifier Succinct Non-interactive ARGument) for an adder circuit. Must produce 20 valid proofs for **wrong** answers.
-
-**Key insight:** DV-SNARGs explicitly lose soundness when the prover has oracle access to the verifier (ePrint 2024/1138). The verifier's secret randomness can be extracted through query patterns.
-
-**DPP (Dot Product Proof) structure:**
-```text
-q[i] = v[i] + b*(tensor[i] - constraint[i])
-where b = fixed constant (e.g., 162817)
-      v[i] = random in [-256, 256]
-      constraint weights r = random in [-2^40, 2^40]
-```
-
-**Forgery via CRS entry cancellation:**
-For a wrong answer, only the output constraint (wire N) is violated. Find two CRS entries whose constraint contributions cancel:
-
-1. Wire N is touched by gate G AND the output constraint
-2. `pair(input1, input2)` of gate G is touched ONLY by gate G
-3. Adding `CRS[wire_N]` and subtracting `CRS[pair]` to the wrong proof cancels `b*r_G` terms
-4. The remaining deficit `b*r_output` also cancels
-5. Adjust `delta = -v[N] + 2*b*v[input1]*v[input2]` via `delta*G` on h2
-
-**Learning secret v values via oracle:**
-```python
-# At streak=0, submitting correct answer is "safe" — doesn't reset streak
-# Use oracle to learn |v[i]| from unconstrained diagonal pairs:
-
-for guess in range(257):  # v[i] in [-256, 256], |v[i]| in [0, 256]
-    # Set pair(i,i) coefficient to guess^2
-    # If guess == |v[i]|, specific oracle response differs
-    response = oracle_query(guess)
-    if response == "hit":
-        abs_v_i = guess
-        break
-
-# Learn signs from off-diagonal unconstrained pairs (1 query each)
-# Learn product sign: v[a]*v[b] sign from pair(a,b)
-```
-
-**Performance:** ~364 oracle queries for Phase 1 (~97s), ~300s for 20 forged proofs ≈ 400s total.
-
-**Key insight:** When attacking DV-SNARGs with oracle access, the strategy is: (1) learn a small number of secret values from the verifier's randomness, (2) use algebraic cancellation between CRS entries to forge proofs. Unconstrained pair indices expose pure tensor products of the secret vector.
-
----
-
-## KZG Pairing Oracle for Permutation Recovery (UNbreakable 2026)
-
-**Pattern (toxicwaste):** KZG commitment scheme publishes shuffled points `{alpha^i * G1}` for i=0..n. The shuffle hides which point corresponds to which exponent. Recover the exponent ordering using bilinear pairings as an oracle, then extract the toxic waste `alpha`.
-
-**Distortion map technique:** On supersingular pairing-friendly curves, a distortion map `psi((x,y)) = (zeta*x, y)` (where `zeta^3 = 1`) enables additive exponent comparisons:
+`if counter < 4` 在自增之前检查，并发请求能全部通过。
 
 ```python
-# Pure-Python KZG pairing oracle via py_ecc (BN128) — no Sage
-from py_ecc.bn128 import G1, add, multiply, pairing, curve_order, FQ, FQ2, FQ12
-# Distortion map psi((x,y)) = (zeta*x, y) where zeta^3==1 in FQ2
-# e(P_i, psi(P_j)) = e(G1, psi(G1))^(alpha^(a_i+a_j))
-# If e(P_i, psi(P_j)) == e(P_k, psi(G1)), then a_i + a_j == a_k
-
-# Step 1: Identify G1 (alpha^0) — the only point where e(P, psi(P)) == e(G1, psi(G1))
-# Use py_ecc pairing(P, Q) after mapping Q via distortion
-# Step 2: Walk the chain — find alpha*G1 via pairing comparisons
-# Step 3: With ordered points, solve A(x)=0 over GF(q) to get alpha (sympy nroots)
-# Step 4: Forge KZG opening proofs using recovered alpha
-# Note: full pairing arithmetic requires BN128 field; see py_ecc.bn128.pairing
+from multiprocessing import Process, Barrier
+barrier = Barrier(80)
+def make_request(barrier, sig):
+    barrier.wait()
+    requests.post(url, json={"sig": sig})
+procs = [Process(target=make_request, args=(barrier, modify_sig(i))) for i in range(80)]
 ```
 
-<details><summary>Sage fallback (optional)</summary>
+**必须做对的两件事**：
 
-```python
-from sage.all import *
+- **cache-bust**：每个请求微改（nonce 前补零），否则服务端用缓存校验结果，实际只算了一次。
+- **真并发**：`Barrier` 而不是循环 `post`。Python 线程受 GIL 限制，要用多进程。
 
-# For points P_i = alpha^a_i * G1 and P_j = alpha^a_j * G1:
-# e(P_i, psi(P_j)) = e(G1, psi(G1))^(alpha^(a_i + a_j))
-# If e(P_i, psi(P_j)) == e(P_k, psi(G1)), then a_i + a_j == a_k
+**判据**：`check-then-act` 之间没有原子性/锁。搜 `if ... :` 后紧跟 `+= 1` 或 `INSERT` 的模式。
 
-# Step 1: Identify G1 (alpha^0) — the only point where e(P, psi(P)) == e(G1, psi(G1))
-g1 = None
-base_pairing = None
-for P in shuffled_points:
-    val = P.weil_pairing(psi(P), order)
-    if base_pairing is None:
-        base_pairing = val
-        g1 = P
-    elif val == base_pairing:
-        g1 = P
-        break
+## 11. 纪律
 
-# Step 2: Walk the chain — find alpha*G1 via e(P_?, psi(G1)) comparisons
-# Then alpha^2*G1 via e(alpha*G1, psi(alpha*G1)) == e(alpha^2*G1, psi(G1))
-# Continue until full ordering recovered
-
-# Step 3: With ordered points, solve A(x) = 0 over GF(q) to get alpha
-# Step 4: Forge KZG opening proofs using recovered alpha
-```
-
-</details>
-
-**Key insight:** Bilinear pairings reveal additive relationships between exponents without solving discrete log. The pairing `e(P_i, psi(P_j))` depends on `alpha^(a_i + a_j)`, so comparing against known pairing values identifies which shuffled point has which exponent. This turns a cryptographic shuffle into a solvable ordering problem.
-
----
-
-## Shamir Secret Sharing with Reused Polynomial Coefficients (PoliCTF 2017)
-
-**Pattern:** When a Shamir SSS implementation reuses the same random polynomial coefficients for every character of the secret, share subtraction cancels the higher-order terms.
-
-```python
-# Standard Shamir: y_i = f_i + a1*x + a2*x^2 + ... (different a_j per character)
-# Broken: y_i = f_i + a1*x + a2*x^2 + ... (SAME a_j for all characters)
-# Since higher-order terms are identical:
-# y_1[i] - y_1[0] = f[i] - f[0]  (for share x=1)
-# If f[0] is known (e.g., 'f' from flag prefix):
-flag = ''.join(chr(shares[i] - shares[0] + ord('f')) for i in range(len(shares)))
-```
-
-**Key insight:** In correct Shamir SSS, each secret byte uses independent random coefficients. When coefficients are reused, subtracting any two shares at the same evaluation point cancels all randomness, leaving only the difference between the corresponding secret bytes.
-
-**References:** PoliCTF 2017
+- **先找「本应成立但没被强制」的等式**。ZKP 与门限签名的所有破法都可归到这一句：验证者以为检查了某个约束，实际没检查（vk 常量相等 / nullifier 未记录 / 电路未约束 / 系数复用）。
+- **Groth16 先看常量**。`delta == gamma` 让后续所有攻击都变得不必要；反过来，不看这一步会白花几小时做复杂攻击。
+- **域先确认**。`GF(16)` 与 `GF(256)`、BN128 与 BLS12-381、超奇异与普通曲线的公式都不同，套错不报错只是全错。
+- **Z3 只解线性与小规模非线性**。遇到大整数乘法链或上百轮哈希，先换数学方法，别硬等 solver。

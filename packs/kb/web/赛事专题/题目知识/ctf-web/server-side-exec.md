@@ -30,7 +30,7 @@
 - [PHP eval() Function-Regex Bypass via current(getallheaders()) (RCTF 2018)](#php-eval-function-regex-bypass-via-currentgetallheaders-rctf-2018)
 - [Python f-string Format Injection Blind Extraction (Meepwn CTF Quals 2018)](#python-f-string-format-injection-blind-extraction-meepwn-ctf-quals-2018)
 
-For injection attacks (SQLi, SSTI, SSRF, XXE, command injection, PHP type juggling, PHP file inclusion), see [server-side.md](server-side.md). For deserialization attacks (Java, Pickle) and race conditions, see [server-side-deser.md](../../../漏洞分类/injection/server-side-deser.md). For CVE-specific exploits, path traversal bypasses, Flask/Werkzeug debug, and other advanced techniques, see [server-side-advanced.md](server-side-advanced.md).
+For injection attacks (SQLi, SSTI, SSRF, XXE, command injection, PHP type juggling, PHP file inclusion), see [server-side.md](server-side.md). For deserialization attacks (Java, Pickle) and race conditions, see [server-side-deser.md](../../../漏洞分类/注入类/server-side-deser.md). For CVE-specific exploits, path traversal bypasses, Flask/Werkzeug debug, and other advanced techniques, see [server-side-advanced.md](server-side-advanced.md).
 
 *See also: [server-side-exec-2.md](server-side-exec-2.md) for SQLi keyword fragmentation bypass, SQL WHERE ORDER BY bypass, SQL injection via DNS records, bash brace expansion, Common Lisp reader macro injection, PHP7 OPcache + LD_PRELOAD bypass, wget filename trick, tar filename injection, PNG/PHP polyglot upload, editor backup file disclosure, date -f file read, Apache mod_rewrite bypass, and PHP ReDoS code skip.*
 

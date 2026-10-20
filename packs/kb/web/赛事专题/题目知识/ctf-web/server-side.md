@@ -3,7 +3,7 @@
 ## Table of Contents
 - [PHP Type Juggling](#php-type-juggling)
 - [PHP File Inclusion / php://filter](#php-file-inclusion--phpfilter)
-- [SQL Injection](#sql-injection) — moved to [sql-injection.md](../../../漏洞分类/injection/sql-injection.md)
+- [SQL Injection](#sql-injection) — moved to [sql-injection.md](../../../漏洞分类/注入类/sql-injection.md)
 - [Python str.format() Attribute Traversal (PlaidCTF 2017)](#python-strformat-attribute-traversal-plaidctf-2017)
 - [SSTI (Server-Side Template Injection)](#ssti-server-side-template-injection)
   - [Jinja2 RCE](#jinja2-rce)
@@ -29,7 +29,7 @@
 - [User-Agent-Gated robots.txt (TAMUctf 2019)](#user-agent-gated-robotstxt-tamuctf-2019)
 - [PHP log()/INF Math Equality + Recursive urldecode() (Pragyan CTF 2019)](#php-loginf-math-equality--recursive-urldecode-pragyan-ctf-2019)
 
-For XXE, XML injection, PHP variable-variable abuse, uniqid/regex bypasses, command injection, and GraphQL exploitation, see [server-side-2.md](server-side-2.md). For code execution attacks (Ruby/Perl/JS/LaTeX/Prolog injection, PHP preg_replace /e, ReDoS, file upload to RCE, PHP deserialization, XPath injection, Thymeleaf SpEL SSTI), see [server-side-exec.md](server-side-exec.md). For SQLi keyword fragmentation, SQL WHERE bypass, SQL via DNS, bash brace expansion, Common Lisp injection, PHP7 OPcache, and more, see [server-side-exec-2.md](server-side-exec-2.md). For deserialization attacks (Java, Pickle) and race conditions, see [server-side-deser.md](../../../漏洞分类/injection/server-side-deser.md). For CVE-specific exploits, path traversal bypasses, Flask/Werkzeug debug, and other advanced techniques, see [server-side-advanced.md](server-side-advanced.md).
+For XXE, XML injection, PHP variable-variable abuse, uniqid/regex bypasses, command injection, and GraphQL exploitation, see [server-side-2.md](server-side-2.md). For code execution attacks (Ruby/Perl/JS/LaTeX/Prolog injection, PHP preg_replace /e, ReDoS, file upload to RCE, PHP deserialization, XPath injection, Thymeleaf SpEL SSTI), see [server-side-exec.md](server-side-exec.md). For SQLi keyword fragmentation, SQL WHERE bypass, SQL via DNS, bash brace expansion, Common Lisp injection, PHP7 OPcache, and more, see [server-side-exec-2.md](server-side-exec-2.md). For deserialization attacks (Java, Pickle) and race conditions, see [server-side-deser.md](../../../漏洞分类/注入类/server-side-deser.md). For CVE-specific exploits, path traversal bypasses, Flask/Werkzeug debug, and other advanced techniques, see [server-side-advanced.md](server-side-advanced.md).
 
 ---
 
@@ -121,7 +121,7 @@ php://filter/convert.base64-encode/resource=index  # Source code
 
 ## SQL Injection
 
-SQL injection techniques have been moved to a dedicated file. See [sql-injection.md](../../../漏洞分类/injection/sql-injection.md) for all SQL injection techniques.
+SQL injection techniques have been moved to a dedicated file. See [sql-injection.md](../../../漏洞分类/注入类/sql-injection.md) for all SQL injection techniques.
 
 ---
 

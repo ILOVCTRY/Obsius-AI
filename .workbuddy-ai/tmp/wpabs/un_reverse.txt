@@ -1,0 +1,433 @@
+TEA 系列（XTEA/XXTEA）sum/delta 不同但结构同
+OpenPLC 默认密码 openplc:openplc 必须立即改
+7z 缺 37 7A 头是压缩包修复经典手法
+特征码恢复靠写死 24 字节 syscall 入口
+TLS 线程局部存储守护每线程计数
+32 字符 flag + 32 变量 = 单一线性方程组解（不需要 z3 非线性 solver）
+LDR 双向链表 + 模块名 hash 是反调试经典手法
+fnv1a 哈希碰撞可枚举（21^4 较小）
+contest.exe 三段 NOP + add r14,0 = 输出明文
+cheat engine 找密文访问基址（r14 寄存器）
+native 层 base64 经常换字母表防识别
+16 字节字符表置换 + 32 字节相邻 swap 是两层变换
+str.maketrans 是 Python 处理自定义编码表的标准工具
+AES_PRECOMP_TE[i](x) = MixColumns(SBox(x) << 8*i) 是 AES 标准 S 盒的等价表达
+CRC32 校验 + 已知明文爆破是经典密码侧信道手法
+MFC 文本提取 = GetDlgItem + WM_GETTEXT 消息循环，不是 GetDlgItemTextA
+PE import 表列出的 API 是 MFC 程序文本逆向的唯一线索
+5 个 jne 串联跳到同一目标 = 等价 if(a&&b&&c&&d&&e) 复合条件
+64 字符常量多次出现是 base64 自定义码表的强信号
+VHDL/GHDL 编译后的二进制是少见的逆向题类型
+ghdl 源码+波形图+字符串抹除是常见反分析手段
+Interop.attach + show_backtrace 是 Frida 定位硬编码位置的经典手法
+PowerPC abiv2 函数 prologue 是 std r0,16(r1); std r, ... 模式，与 x86 push 不同
+SHA-1 派生 16 字节 AES key 是 Android/Java 常见代码模式
+AES/ECB 不需要 IV，比 CBC 更难检测 padding 错误
+IDCT 浮点变换在 native 层是 Android 加密常见做法（防 Java 层 hook）
+PNG 1-bit 24800x24800 巨型图 = 隐藏 QR 网格，必须按 [N,...] 比例分层切 + pyzbar 扫
+AES-ECB bytewise oracle + UAF + ASCII art 三类题型组合是 Hackvent Hard 标配
+自定义 VM 逆向：switch + tzcnt 指令调度
+白盒 AES 密钥提取可用 DFA 差分故障分析（注入 fault 观察密文差分推 key）
+字节码格式常见 0x08 开头 + reg + 操作
+AES 风格加密若奇偶轮操作错位，就是魔改 AES，必须独立还原而不是套标准实现
+AI 辅助适合数据流推理但容易在轮数/密钥派生上瞎编，必须用 docker debug 输出对齐
+逆 MixColumns 矩阵 [0x0E,0x0B,0x0D,0x09] 是 AES 标准逆矩阵的列置换表达
+dotnet 加密题先把混淆 patch 干净再让 AI 推链路，否则 AI 看到的代码是被搅乱的
+分 4KB 页读 + nullView 失败填充是稳定转储大内存空间的工程模式
+BSOD 后用 LiveKd 或离线 .dmp 解析可绕过反调试保护
+魔改 XTEA 常通过改 delta/移位位数/异或常数实现
+模数 n^k 离散对数用二项式定理展开降低复杂度
+Go tar 处理符号链接是任意文件写入入口
+魔改 AES 常见点：S 盒交换 / ShiftRows 方向 / keyExpansion / 对比数组
+异常处理（除0/未知指令）是藏逻辑的反调试经典手法
+patch 掉异常处理可正常调试 + 静态硬刚汇编
+AES_DE_402070 是 IDA 直接调用标准 AES 算法的桥梁
+4 处魔改点（MD5/AES S/shiftRow/GMul）需全部还原
+天堂之门 (CS=0x33 retf) 对抗大部分调试器
+三段 (64+32+64) 混合算法增加逆向难度
+cpp SEH 异常处理是干扰调试常见手法
+非预期思路：硬件断点 + 字符串观察 + 历史题对比
+XOR 异或 + LEFTMOVE/RIGHTMOVE 移位是常见混淆
+七段 shellcode 单字节操作 = 字典+异或+移位+分段置换
+KEY 长度 128 位（程序逆向直接得）
+python+vc 混合枚举速度（python 脚本调 vc 加速）
+10x10 迷宫 + 路径验证是 sc2 核心
+计算混淆代码有模式可nop（特征码对比）
+模逆元 a*x mod n=1 在小整数范围可枚举（多解）
+幻方对称加密 = 用魔方矩阵生成密钥流做对称加密
+key格式化为 幻方key+len+data+幻方key+len+data+校验和 是序列化套路
+动静结合：日志断点定位核心算法+静态nop清理
+位运算加密(XOR/rotl)识别后逆运算就是它本身
+数据包格式 [len 4B][nonce 12B][cipher] 是自定义协议通用套路
+AES-GCM J0/H/S/GHASH 推导是 GCM 还原必备
+RSA4096 e=65537 + sign = 签名验签经典
+MIPS 手搓 syscall 必须查最新 man 手册（不同内核版本差异）
+chroot 逃逸标配：mkdir foo; chroot foo; cd ..
+AF_UNIX + SCM_RIGHTS + CMSG_DATA 是传 fd 经典手法
+时间侧信道 exit_code -11 vs -31 是侧信道位 leak 通用做法
+魔改对称密码破题: 先识别原算法 (SM4/AES/XXTEA) → 再定位改动的 SBOX/DELTA/MASK/key
+XXTEA 加密 sum 起点 = DELTA*N, 解密必须从 DELTA*N 倒推
+IDA .rodata 提取的密钥永远是最干净的, 优先于伪代码推导
+自定义 IR 逆向关键是识别循环结构 + 操作类型
+差分加密逆向就是反向累加
+<+offset> 表示结构体内偏移，理解即可
+半字节反转 dec3(v) = ((v>>0)&1)<<7 + ... 是经典 8-bit reverse
+查表操作要反向回推（xor/加减互逆）
+v6[] 数组索引决定加密方式（按位分支）
+32 字节密文 + 4 步加密是 cpp reverse 常见结构
+tvm 保护下抓导入表+黑盒分析
+WRK 反推内核结构（PTE_TRACKER.Length 是关键）
+MmTrackPtes + MiTrackPtesAborted 组合触发 PTE_TRACKER 链表
+复杂的 init/enc 函数若只与输入无关则直接动调拿中间结果
+call $+5 是经典花指令混淆手法
+短密钥 + 标准 CRC32 函数 + 已知 48 字节密文是爆破黄金组合
+0xEDB88320 多项式是标准 CRC32 识别关键
+2 字节密钥爆破仅 65536 次是 CTF 逆向常见突破口
+48 字节密文 XOR 双字节循环是 CTF 简单加密模板
+序列号长度必须是 3 倍数 + 第 9 位覆盖隔壁变量的内存布局是 KCTF 老套路
+反调试改常量（num3_531008）必须从静态分析发现
+md5 校验是 KCTF 序列号题标配最终校验
+四皇后问题 92 解中要选能覆盖内存布局 0x39 的解
+反转字符串再算乘数是 KCTF 序列号混淆常见手法
+数独 + 迷宫是 KCTF 多阶段验证常见组合
+9x9 数独 81 位数字 + WASD 路径 = 70 字节字符串模板
+GPT/LLM 提炼长函数关键算法是 .NET 逆向加速技巧
+无效指令 NOP 替换 + 0x2A 字节还原是 shellcode 混淆常见两步
+FD EB 1F 3E 1C EB EB / FF EB 15 3E 1D EB FB / FE EB 18 3E 1C EB EB 是常见 6 字节花指令组合
+3x3 拼图 0 元素移动轨迹做注册码是 KCTF 出题套路
+BFS 求 3x3 拼图最短路径是拼图注册码通用解法
+ztokey(z) = dZpK+z[0:4]+drsi+z[4:8]+B6cn+z[8:12]+drGY+z[12:16]+z[16:] 是固定拼接模板
+hook input 是偷取 KCTF CrackMe 输入最稳路径
+KCTF 反混淆标准流程：特征匹配→CFG 还原→全局变量化简→ctree AST 操作四遍走
+pushf + push ds:[gvar] + pop ds:[gvar2] + popf 是早期混淆固定模式（机器码 9C FF 35 ?? 8F 05 ?? 9D）
+招新赛题往往不脱符号（C++ 编译选项保留 debug info）
+C++ 字符变换题常见循环移位+位操作复合（位 1 与位 N 交换）
+UPX l_info corrupted 时手脱 F8 步过 OEP 是必备技能
+swap_bits + circular_shift 是字符逆变换通用公式
+NLP 模型对抗样本常用策略：反向情绪关键词前缀 + 强度副词（very）保相似度
+DistilBERT 三分类情感模型对单情绪词很敏感
+calc_accuracy ≥ 90% 是 NLP 对抗样本通关标准
+Cython 编译的 Python 库仍可从 .so 中逆向出 PyObject 结构和函数指针
+setattr hook Python 函数比纯静态逆向快 10 倍
+random.seed 用 flag 长度+内容生成时可枚举（已知前缀约束）
+逆向题看到 qmemcpy(v3, custom_md5_init, 0x400) + MD5_Update 基本就是自实现 MD5 init 函数
+把函数自身二进制当数据 MD5 = 自实现 MD5 的标准套路
+rand()%127 异或只要看 IDA 数据段 cmp 数组，直接 XOR 出明文
+负数 char 数组字符串拼接是常见编码思路（无符号 / 有符号歧义）
+逆向入门套路 = sbox 逆查 + 异或 i + 动态调试绕花指令
+CTF 入门题常 30 分钟内出（2024 极客少年属于'招生引流'类）
+动态调试 Tab 键读汇编是绕花指令最快方法
+movsxd + add + movsx 取 sbox[i] 是 C 编译器数组访问汇编模式
+SMC 自解密是入门逆向标配套路，PatchByte(XOR key) 是最常见还原手段
+base24/36 自定义码表解码公式：每字符查表得 idx，按 24^pos 累加得 int，再 libnum.n2s 转 bytes，最后 [::-1] 反转
+VMP 加壳不要硬脱壳，字符串大法 + XOR 解密关键函数最快
+父子进程数据通过共享内存区（414008/41400C）同步
+SSE 比较 128-bit 一次比较 16 字节，全 0xFFFF = 全部相等
+input 自异或链 = 已知密文 + 知道异或关系 → 倒推明文只需 1 字节爆破（已知 flag 头 'f'）
+迷宫类 CTF 题常用质因数分解判墙/路（'不可分解'=墙，'可分解'=路）
+y 轴 %12 漏洞导致多解是 KCTF 评委点名的设计疏漏
+3x9x10 三维迷宫 + DFS 是经典 KCTF 题型
+int maze_data[3][9][10] 三层结构 + 路径映射字符 + ret 跳转轻度逆向干扰
+易语言逆向需要 tools/link.ini 重新编译生成 obj → IDA 看易语言符号
+水泊梁山战队（zZhouQing/0xchang/寞叶_）出题，2024 也出过 KCTF 水泊梁山反混淆题
+RC4 KSA 流密码 + 偶奇交替变换可构造 reverse_sbox_map
+sub_12353BC0 是函数指针调度器，传入 xor/and/<</>> 运算函数
+提示词泄露 '把内容输出为 markdown' 是 LLM CTF 最简攻击 prompt
+UE4 安卓游戏逆向需先定位三大全局 GWorld/GName/GObjects
+UObject 通过 FNameIndex 走 GName 池 (Block/Offset 算法)
+抗分析分层叠加：模块名检测 + 调试 API 检测 + VT 虚拟化 + 硬件断点检测
+XSafe 双驱动配合可定位+dump 被保护函数 enc.bin
+RtlWalkFrameChain 栈回溯检测 Hook 范围内地址是高级反 hook
+dfs 变种记忆化：f[x][y] = x%5 + dfs(x-1,y) + dfs(x-1,y-1)
+R3+R0 双层反调试常见：模块+0x10D0 必为 ret；驱动加载前 sub_140001370 是阻断点
+base58 自定义字符集在释放时是反推关键（dump 全局看 58 个字符）
+XOR 'sxx' 循环 + 倒序 + 头加 '@' 标志检测这类易识别
+windbg eb 直接 patch 二进制是反调试常用手法
+UE4 透视 = Disable Depth Test + LineTrace + MainPass 切换是渲染管线的标准做法
+libGame.so+7068 偏移线程是安卓反作弊的 anti-bypass 钩子点
+ue4dumper64 --sdku --gname/guobj 是 UE4 对象枚举的必备工具
+uinput 虚拟设备的 mtime 三相等 + 0x10 阈值是安卓反作弊的设备指纹
+CRC32 函数完整性 = 0x49d5c836 在 sub_6711A54 (size 0x224) 是关键校验点
+libUE4+0xAF75B08 是 fake_memory 注入点，需要 RWX 三态权限
+游戏运行时临时创建又删除的子程序要文件监控拷贝才能拿到
+UPX 脱壳后 XOR 35 = 经典小加密
+renpy.input().strip() + 自定义函数 l11111l1ll1l == ll111l11l111 = 方程求解
+TEB->LastErrorValue+0x68 是经典状态回写点
+驱动签名 + 用户态注入是双层防御
+ZwOpenEvent + ZwSetEvent 是驱动与用户态通信的标准 API
+13x13 迷宫 BFS 求解 + 状态位比特流解码是组合题型
+CrackMe 真码 = 假码外 + 真码（长度 + 校验和 + 子函数动态生成）三层防御
+视频像素作密文/明文是新颖 stego 形式
+AI 辅助解 CTF 逆向题（re1 AI 梭出）正在普及
+dropper + stager 两阶段加载是高级 ELF 设计模式
+高 SDK 版本必须降 targetSdkVersion 才能重签名 debuggable
+真机动态调试需 root + adb + android_server64 三件套
+CUDA reverse 用 cuobjdump -ptx 提汇编
+vprintf 调 call.uni 输出来看 gift1/gift2/gift3/gift4/gift5 分段结果
+T-table 查表 + 4-bit swap 是自定义加密常见组合
+现代 Rust 游戏引擎 (bevy) 逆向关键是理解 ECS 模型 + App schedule + 系统依赖图,不必纠结 Rust 闭包语法
+bevy_packed 资源需解压才能逆向
+MCP 让 LLM 直接调工具打 CTF Finals 是新趋势
+Unicorn 跨函数模拟需重建 Uc 实例（j==3 bug）
+rva_to_offset + 段映射是 ELF 操作基础
+DFS 末位剪枝（32766 阈值）是爆破加速关键
+JNI 反弹调 Java 函数是 Android 逆向难点
+2*s%3 索引巧妙选函数
+check1/2/3 累加算法差异点（s%2 是否翻转）必须区分
+Rust FFI 加密函数通过 IDA cross-ref 反追是常用手法（搜包名/函数特征）
+z3 解非线性约束 + 短解集穷举 = 混合策略必杀技
+长度检测通过 Frida 动态试错（不断改输入长度观察 hook 触发）
+Lua 5.3 字节码反编译用 viruscamp/luadec 自建
+Discord 公告 = CTF welcome 题最常见形式
+CTF 当天先把 welcome/survey 题解了拿分（高 solves 数）
+语种混合 wp 含日语 esolang 解码
+当反编译工具失败时，先识别'位运算 VM 模拟整型'模式，再反编译为 C/C++
+mov byte [rax+k], val 模式识别 isop's mom 是核心突破口
+GPU 加速 (numba + CUDA) 比 CPU 爆破 hash 类题快数十倍
+mprop 工具能离线修改 prop，无需重启
+硬编码字符串匹配 = 最简单的 2015 反向题套路
+加减异或都是可逆操作，逆向可还原（除法不可逆）
+Frida onEnter 计数器能打印执行序列辅助理解
+32 字节约束 + z3 BitVec 8 位单层 SAT 几分钟就能出
+花指令分 4 类：① 垃圾代码 ② 等价替换 ③ 抵消型 ④ jmp db 型
+call+5 拿 eip 是经典 trick（offset+5 = 下一条指令地址）
+算数拆分 add eax,5 = add eax,2 + add eax,1 + inc eax + inc eax
+enter/leave 等价 push ebp + mov ebp,esp + sub esp,N
+unidbg 提供 jni 函数模拟栈 + 反射调用
+自毁机制本质是清进程属性 + kill()，拦截 kill 即可绕过
+复杂 flag 验证可降为 SAT/Z3 约束求解：把验证函数建模为 Boolean formula
+逻辑门电路 vs 算术运算 vs 加密函数都能 Z3 建模关键路径
+BitVec 比 Bool 表达紧凑（每字符 8 位而非 8 个 Bool）
+sub_15D0/sub_16A0 双重函数调用模式（监听 vs 发送）是后门特征：监听者调加密发送函数
+sub_1420 是真正的加密函数，sub_15D0 只是 server 框架，逆向关键在 1420
+攻击者已 root 后部署加密后门 = 典型 APT 取证场景
+看到 'mov byte 一坨' 或 op[p2]=~(op[p0]&op[p1]) 等模式要立刻反应是 VM 题
+NAND VM = 仅用 NAND 操作可构造所有逻辑门，复现时要还原 ~ / & / XOR / OR
+Bindiff 合并 pyd 符号能快速对齐 strip 后的 Python native 模块
+控制流平坦化逆向核心是 '把被打散的 state 序列用 Python 数组 ops 重串执行
+4x10 矩阵 + 10x10 矩阵 = 4x10 flag 字符，sympy.inv() 求逆标准库现成
+RSA 128 bit + p,q 已知 = 直接 phi + inverse + pow(c,d,n) 标准流程
+RSA + TEA 组合 = 传统密码学 + 现代分组密码的双重加密
+当 reverse 题 IDA 静态看不出真实 key，优先动态调试 print 实际写入的地址值
+奇偶分 2 部分加密是出题人常用 '防止一次性爆破' 模式
+memcmp 命中触发下一轮 FUN_VA 是 CTF 嵌套查表典型模式
+XTEA 变体只需调整 delta 和轮数，32 轮结构不变
+XTEA-like 算法结构是 (v<<4)+k0 ^ (v+sum) ^ (v>>5)+k1
+RC4 加密 key {0x12,0x78,0xAB,0xDF} 固定
+DNS 隧道常被用于 C2 通信（dnslib TestResolver 模拟）
+NEXE 把 JS 源码直接打包进 EXE（无加密无压缩），十六进制编辑就能还原
+state = 1337 ^ random(2^30) 是 CTF 状态机逆推的经典模式：从 target 数组倒推 b[i]
+1n (BigInt) 永真 → 走 if 分支是 NodeJS 代码审计常见 trick
+44 字符输入通常意味着 16 个 long state × 多字符运算
+Caesar-21 偏移 + 26 调整（向下溢出）= 字母表 wrap
+check 函数强类型 int/int 用 overload('int','int') 区分
+KGB Messenger 闯关式 CTF App，每关独立 hook 点
+XOR+swap 算法 a(str) 是 CTF 经典反推题型
+frida -U -f 是 spawn 模式最早 hook 时机
+0-99999 爆破常见于简单校验函数
+emoji 字节 0xf09f988c 等 UTF-8 编码是 Salsa20 输出格式的提示
+Lambda 演算 + Church 编码是 CTF Reverse 高阶考点
+Church 数字 = 应用函数 n 次（λf.λx.f^n(x)）
+Church 布尔 = True=λx.λy.x / False=λx.λy.y
+线性代数（矩阵求逆）是解编码后的关键
+XCTF 2022 是 Lambda 演算逆向元年题目
+unicorn_blob 是 37C3 自定义 VM 格式（4 字节指令）
+BNIL lifting + 写自定义架构 plugin 是 BN 高阶用法
+自定义 ISA 题必须先还原 opcode 表再写模拟器
+37C3 Pot of Gold 是 unicorn VM 经典题
+当 output 矩阵每行/列只有 1 位为 1 时，行列和反推是经典线性代数问题
+RISC-V 32 位 MCU 加密通常基于 metal_gpio + 内置 srand 种子
+SP 网络 (IP + P 盒) 是经典分组密码结构，重复 1337 轮只是加深混淆
+var644 分区 (m32/input/m256/output) 是嵌入式 MCU 加密的典型内存布局
+目标密文 'iRrL63tve+H72wjr/HHiwlVu5RZU9XDcI7A=' 是 base64，可能是 AES/DES/RSA
+max_size 限制 + rehash = 元素位置可控
+前 N 个元素在 bucket 0..15，超出后被 rehash
+hash 碰撞触发 rehash 是 C++ 容器特性
+小米备份文件可 7zip 直接打开
+X 事件码 03003500 / Y 事件码 03003600
+触摸坐标还原图案是 Android 逆向常见思路
+RC4 流密码对称性可加解密同算法
+硬编码 byte[] 对比是 Android 通用校验手法
+2324x2324 像素图 = 5 颜色编码（0x01 红/0xEC 蓝/0x11 绿/0xCD 黑/0x80 黄/0xEA 青）
+Wireworld Simulator 在线工具可直接模拟（元胞自动机信号消失 = XOR 逻辑门）
+IDA 提取 byte 数组 + PIL 渲染是 Reverse 数据还原标准武器
+OLLVM 控制流平坦化 + 虚假控制流需 D-810 或 OLLVM-Unflattener 反混淆
+给开源工具加 --with-debug-verbose 是 CTF 题目常用的'半源码'逆向入口
+YARA 规则条件编译为字节码执行 (OP_PUSH_8/INT_EQ/BITWISE_XOR/AND/JFALSE/MATCH_RULE/HALT)
+字符级爆破 = 每次改 test.txt 重跑 + tail -3 提取最后 XOR 数值对
+chr(x^y) 还原单字符是经典 trace 解读手法
+加密字节码 + 自定义 opcode 是游戏反外挂常见组合
+XXTEA 密钥常以字符串形式硬编码在 .so 中 (strings 提取)
+链式 XOR+±1 加密从后向前解是数学推导通用思路
+DFS/BFS 是迷宫最短路径通用算法 (1=墙 0=可走)
+pyc 文件前 4 字节 magic + 12 字节时间戳/源文件大小是 Python 版本标识
+md5(最短路径) 是迷宫类 CTF 通用出题模式
+SFCTA 类自定义哈希 + 单字节 PUTCHAR 反馈 = 可逐字节爆破
+AI Agent 多模型协作可降低单模型偏差
+常见工具 calling func 大幅减少 token
+OpenViking 上下文压缩是会话管理参考实现
+MBA 表达式 n*(n+1) 或 n*(n-1) 是不透明谓词
+白盒密码 20 轮 + 28.8MB 查找表让 IDA F5 失败
+SipHash 变体可识别为标准实现 z3 还原
+wasm 加载失败时需工具栈 jeb5.36/IDA9.3 组合
+鸿蒙 ArkTS 编译为 ETS 字节码，可用 HarmonyOS 反编译工具还原
+简单模运算 (a*x + b) % m + offset 可通过 mod 逆元还原输入
+迷宫生成函数 CreateMaze(arg0) 把 flag 转迷宫
+QMK 是开源键盘固件，process_combo_event 是 Combo 触发回调
+LCG SEED=0 + 0x7fff 掩码 = 经典伪随机
+formatLayer + buildLayerMap 处理透明继承是逆向关键
+二进制函数相似性 = 度量学习 (孪生 + 余弦) 比分类学习更合适
+MS (Multi-Similarity) loss + MS miner 比 Triplet/Norm-Weighted 更关注信息量大的样本对
+指令标准化大幅降词表 (12532 比原始助记符数万降到万级)
+跨平台函数识别本质是反汇编 + 神经网络 + 度量学习三件套
+日语 CTF = 字符串题 + 古典密码 (Vigenere) + binwalk 隐写
+ASCII 字符求和触发 = 入门级条件分支, 反编译看比较常量 0x309
+自定义 S-box + 16 轮迭代必须写逆算法, 不能爆破
+memcmp vs 已知密文 + 16 轮 S 盒 = 经典逆向密码题结构
+MD5 变异常见手法: 调换 init state 顺序 / F 函数替换 / 步长修改
+dword_6080F4 < 10 是动物选项次数上限, 必须凑够 9 次才 Win
+魔改 MD5 必须自己实现, 不能直接调用标准库
+left(x,y) + xor(x,y) 双函数调度是入门逆向套路, temp[] 决定调度
+IDA F5 反编译后 printf %c 逐字节输出 = 直接看出 flag 拼接逻辑
+32 个 dword 常量 + 32 个 temp 标志 = 32 轮确定加密
+本题是逆向下界, 适合刚学 IDA 的新手
+花指令去花三步走: D 转数据 + C 转代码 + NOP 填充 + P 重新定义函数
+RC4 + Chacha20 双层加密 + PRNG 种子爆破是常见中级逆向结构
+预计算 token_bytes_list 把 update 提到 pin 循环外性能提升 100x
+多线程按时间分片爆破 ts 范围是常见优化
+测 '}' 字符快速过滤可打印解密是爆破提速技巧
+AES-ECB 短密钥直接字典/已知时间戳爆破
+排列置换反演：已知目标字节反推初始数组
+CRC32 0xEDB88320 多项式是 CTF shellcode 函数名匹配常用方法
+setJni(this) 必加防报错
+4 字节 key 循环移位加密是经典 pattern
+反向算法: 倒序循环 + k 循环右移
+r0/r1/r2/r3 偏移量 (>>4 / >>2) 是非线性, 不能线性化
+WoW64 下 32 位进程用 CS=0x33/0x23 切换 32/64 位模式, retf 是关键指令
+天堂之门实战多为反调反沙箱 (沙箱+火绒剑都识别), 但 CTF 主要考反静态分析
+动态天堂之门只能动调手撕
+dec_global_metadata 用 XOR 链式解 v9%v2
+Mobile 逆向 base+offset 是 il2cpp 标准定位
+APK 逆向需结合 Java 层 RS_MDS_Encode（GF(256) Reed-Solomon）+ C++ 层 TEA + switchEndian 字节序
+RS_MDS_Encode 4 字节 rem + 4 字节 rem + 2 次循环
+自定义 VM 逆向 = 数据结构（链表栈 LinkEntry） + opcode 表 + 操作数格式还原
+1 字节 opcode + 1 字节操作数 是最小化 VM 字节码设计
+复现 VM 比静态逆向更稳，写一个 vmrun2 直接 reproduce
+父子进程 ptrace + int 3 替换实现自定义 VM 调试
+data 结构体{lchild, rchild, func, reg2}0x20 字节固定是 VM 节点模式
+7 种 func（0/JL/JLE/JNE/JE/JNS/JG/return 2-4）= eflags 条件跳转 + 子例程
+Graphviz dot 语言可视化 CFT 是逆向大型 VM 的高效方法
+UPX 改 VMP 字样是最简单的反脱壳伪装，改回即可
+TLS 回调函数常用于反调试和密钥生成，必须先于 main 执行
+Nim 语言二进制 IDA 可识别特征（函数 prologue）
+CrackMe 多关常以 _ 分隔多段子串拼接
+(v2 | 16*v1) 是十六进制双字符解析模式（v1 是高位，v2 是低位）
+^32 / ^33 是大小写翻转 + 偏移的常见做法
+strlen-1 末位校验和 strncmp 前缀校验是 CrackMe 标配
+大整数加减乘除混合链 → 单步可逆公式（这里是 (input^2+2*input-3)//2）
+z3 建模需把 //2 (整除) 作为整数约束，不是浮点除法
+鸿蒙 NAPI 桥接 .so 是 native 层核心
+签到题常用 Collatz(3n+1) + 字节异或组合
+魔改 CRC32 折叠算法（不是标准 CRC32 表）
+KCTF 作为固定 4 字节是签到题彩蛋
+序列号分 3 段 (3+4+7) 设计
+ArmVMP 原理：反汇编器 + vmachine + 解释器
+指令模拟需重定位处理 PC 相对寻址
+ghidra 强制识别 arm 是破解虚拟化的辅助手段
+DES 在 ARM 平台常用硬件加速，scanmem 找明文
+62 进制 (0-9A-Za-z) = 标准 base62 编码
+大数模逆用 gmpy2.invert(a, n)
+自定义大数库的隐藏干扰点（第 31 次触发 +4）
+num 和 cnt 与注册码无明显联系 → 需数学特性分析
+cnt-1 整除 num*x±1 是核心判断条件
+srand 种子爆破范围小（0-99999）只需 1 分钟
+20 个 rand 值固定可反推种子
+KCTF 作为 4 字节固定字符串是签到题彩蛋
+拆分序列号 (5+4+5) 是 CrackMe 经典设计
+my_strlen 递归实现识别（不是标准库 strlen）
+IDA 混淆函数按汇编 push 个数修正签名
+正向迭代变量贯穿时中途断点取结果（非预期解）
+魔改 DES 仍可断点取 serial 不需要逆算法
+RSHash 保护算法部分内存完整性 → 内存被改就报错
+一血只用了 1.5 小时（非预期解威力）
+JS位图+奇偶交替循环生成器是CTF出题AI常见套路
+显式(S8)转换是规避平台相关行为的最佳实践
+500位长码作为注册码 = 输入长度上限 + 验证逻辑全在客户端
+AI生成注册码类题目 = 出题人用LLM快速生成JS算法，逆向等价于JS复现
+混淆模式固定=flag组合可枚举（push eax/ebx等）
+Python写IDA脚本是去混淆最高效方式（可调用ida_bytes）
+ob_start-ob_end地址区间是混淆代码边界的关键信号
+SOUI界面逆向先看dlg_main.xml找LAUNCHER类
+jz→jmp patch是定时器反调试通用绕过
+ARM代码明文对照=SHA256爆破节省反编译工作量
+syscall下断点+寄存器参数 = 现代逆向必杀技
+数独完整解可用现成SAT/sudoku求解器
+字符串异或解密key常固定（kctf前缀）
+多个相似函数对比是发现核心逻辑的常见手法
+两个未知数+两组和积约束 = 一元二次方程（韦达定理）
+韦达/factordb/z3/sympy 是已知和积求两数的三大工具
+判别式 D=b²-4ac > 0 才有两个实数解
+reverse入门题=逆向找关键比较+代数建模
+称重问题用测量矩阵(0/-1/1)编码每次测量（不选/左/右）
+结果-1/0/1表示左平/平/右重
+39球4次测量是最优称量方案
+测量矩阵求逆是线性代数应用（GF(3)或整数环）
+256字节S盒前8字节可用差集约束从尾部反推
+8! = 40320种排列可遍历爆破
+gbsA[256][256]统计衍生片段出现频次做有效性筛选
+codeH/codeL分别爆破再拼接是双输入SN的常见结构
+48轮DES密钥swap（u64读+倒序写）可解密
+双输入爆破=固定一个变另一个找密文
+6 call + lea esp [esp+N]后 = 真实指令（堆栈平衡识别）
+CodeLineToExpand结构化识别10种jmp混淆模式
+popfd+add esp 4+jmp间接 = 反调试还原栈
+首部配情感短视频的CTF赛题是出题里程碑
+Lambda演算+序列化是"代码即数据"反模式（隐蔽）
+Church Numeral ADD/SUB/MULT/IF/XOR/ABSDIFF 实现数值/逻辑
+Boost text_oarchive/text_iarchive序列化二进制Lambda
+用户每个4bit输入相对独立 = 可分28道独立小题
+z3 IntVector约束=28组ABSDIFF方程求和最终==0
+random.shuffle(range(256))做key置换可逆（inv_key字典）
+IDEA是经典mod 65537 (0x10001) 块密码，8轮×6步+最后4步
+keyExpend 52位（6×8+4）是IDEA标志
+.upxrecoverytool.py是修复修改版UPX的标准工具
+key[byte]^95是经典查表+异或加密
+int_80=0x5dde8fe0是Linux系统调用gadget
+AWD模式凭据复用是攻壳常见入口
+jadx右键复制Frida片段可加速hook开发
+ROT偏移负数补偿 chr(ord(char)-21)+26 是字母表循环
+Frida修改Java静态字段 Checker.code.value=512 是动态改值
+大狗云真机+Frida组合 = APK动态破解省去本地环境配置
+RC4 + 异或 + base64 是 CTF 入门级 RE 三件套
+字节码 VM 题 '每 N 字节一个 op + 4-bit op + 4-bit idx' 是经典操作码设计
+VxWorks 固件逆向必看：基址 0x10000 + 大端序 + 符号表偏移 0x301E74（vxworks_symtab 格式）
+WFP 驱动 ClassifyFn 签名识别是驱动逆向入口
+MSR C0000082(MSR_LSTAR) 读 KiSystemCall64 前 4 字节作为密码 key1
+驱动级逆向思路：从 filter/classify 函数入手定位算法
+WPOFFx64 = CR0 &= ~0x10000 关闭写保护（CR0 第16位）
+MDL 锁定内存保证 hook 代码页不被换出
+acosNvramConfig_get(lan_ipaddr)是路由器通用配置API,lan_ipaddr对比可被请求伪造
+自定义VM口令验证爆破关键:让程序返回'已验证字符数'作为侧信道
+r15作为索引寄存器的patch技术(短指令+NOP)是CTF密码学常用技巧
+贪心算法+穷举是逐位爆破的标准方法
+REX前缀+ModR/M字节编码熟悉是静态分析必备
+多线程反调试(子线程prctl+TracerPid检测)比单线程更难绕过
+多轮RC4+仿射+混淆函数名是常见组合加密模式
+CFB模式的链式XOR是流密码稳定模式,顺序敏感
+密钥常在异常处理函数中计算,需从handler提取
+静态分析遇到大量跳转和混淆,黑盒+动态调试更高效
+控制流平坦化不要深入分析,黑盒动态分析更高效
+tradre是2025强网杯控制流混淆+多反调试+魔改AES的高级题
+alarm(60)单点patch是绕过60秒超时的标准方法
+S盒三重XOR(随机数^XOR密钥^原始字节)需要从已知seed爆破
+最小化patch(minimal_patch)是CTF逆向高效策略
+复杂加密题常包装经典算法(数独+DLX),识别算法本质是关键
+DLX(Dancing Links)是数独/精确覆盖问题的高效解法
+动态分析比静态分析在字节级查表场景更有效
+严格按调用顺序导出变换表才能合成正确T_net
+TLS 回调函数是 RE 题的隐蔽执行点（DllMain 前后触发）
+自定义算法通过参数切换加解密（0x65 加密/0x64 解密）是好的出题思路
+调试器硬件断点是跟踪数据流的金钥匙（'对数据下硬件断点 F9'）
+错位异或 x[i]^=x[i+1] 是经典可逆变换，对解即反向迭代
+满月+日期穿越是 T8 的特色（SYSTEMTIME 月相计算）
+像素坐标取模 = 硬编码坐标是简单但巧妙的出题思路

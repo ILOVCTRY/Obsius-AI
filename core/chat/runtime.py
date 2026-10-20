@@ -30,6 +30,7 @@ import json
 import hashlib
 import inspect
 import logging
+import re
 import sqlite3
 import threading
 import time
@@ -39,7 +40,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from core.agent.tool_registry import (_CONTROL_TOOLS, _PLAN_TOOLS,
-                                      bb_query_schema_for)
+                                      bb_query_schema_for,
+                                      bb_query_schema_for_artex)
 from core.agent.tools import AGENT_TOOLS, ToolDispatcher
 from core.blackboard.store import BlackboardClosedError
 from core.blackboard.artex_intents import (claim_intent as claim_artex_intent,
@@ -61,6 +63,7 @@ from core.chat.wrapup import (REASON_MAX_TURNS, REASON_TIMEOUT,
                               wrapup_max_turns, wrapup_prompt_for_reason)
 from core.chat.taskclock import clamp_max_duration
 from core.coverage import situation_snapshot
+from core.ctf.session import key_of as ctf_key_of
 from core.diagnostics.failog import record_mcp_failure, record_tool_failure
 from core.diagnostics.system_prompt import save_system_prompt
 from core.dimensions import (
@@ -69,7 +72,11 @@ from core.dimensions import (
     load_track_dimensions,
 )
 from core.llm.provider import (ContextOverflowError, LLMError, TransientStreamError,
-                               is_reasoning_echo)
+                               is_reasoning_echo, tool_result_content)
+from core.llm.pseudo_toolcall import (PSEUDO_TC_FINAL_TEXT, PSEUDO_TC_MAX,
+                                      PSEUDO_TC_NUDGE, has_marker_prefix_tail,
+                                      has_pseudo_tool_call,
+                                      strip_pseudo_tool_calls)
 from core.runtime.gateway import ExecutionGateway
 from core.runtime.recovery import EnvironmentUnavailable
 from core.skills.experts import load_expert
@@ -92,8 +99,23 @@ ORCHESTRATOR_ID = "chat-orchestrator"
 # 出来的子线程一律不可再委派（深度=1，expert_names=[] 兜底）。
 AGGRESSIVE_CONTROLLER_ID = "aggressive-controller"
 ARTEX_CONTROLLER_ID = "artex-controller"
+# CTF 解题主控（ctf-controller，2026-10-19）：第三个控制器类智能体，**仅 CTF 轨**。
+# 与另外两个的根本区别是**决定权归属**：
+#
+# - chat-orchestrator：LLM 决定派谁、派几批、何时收工（蛙式排队）；
+# - aggressive-controller：LLM 决定派谁，代码只管「先返先触发」的并发语义；
+# - artEX-controller：LLM 只操舵，派发权全在项目 Engine（Planner 生成 Intent）；
+# - **ctf-controller：方向由 LLM 提，但「准不准派、派几轮、何时放弃」由代码判**。
+#
+# 为什么 CTF 需要这个：CTF 的失败模式不是「不会解」，而是「时间分配错了」——
+# 死磕一道已探尽的题到比赛结束，或一次快检没命中就放弃一道再挖十分钟就出的题。
+# 把这两个判断交给模型 = 把决定比赛得分的判断交给最不擅长计时的组件。代码侧
+# 判据见 `core/ctf/scheduler.py`（13 条可解释放弃判据），方向互斥见
+# `core/ctf/lease.py`，执行自证见 `core/ctf/attest.py`，上下文降级见
+# `core/ctf/fold.py`，四者由 `core/ctf/session.py` 合流。
+CTF_CONTROLLER_ID = "ctf-controller"
 CONTROLLER_IDS = frozenset({ORCHESTRATOR_ID, AGGRESSIVE_CONTROLLER_ID,
-                            ARTEX_CONTROLLER_ID})
+                            ARTEX_CONTROLLER_ID, CTF_CONTROLLER_ID})
 
 # 子专家不可用的控制原语（任务队列/计划闸/收尾/私信/HITL——
 # 对话线程没有任务上下文与收件箱，这些工具既无语义也危险：publish/claim
@@ -140,10 +162,10 @@ _NO_SKILL_OR_INTENT_TOOLS = ("skill_open", "propose_pack_edit", *_INTENT_TOOLS)
 # ctf_ammo（2026-10-19，ctf-ammo）：弱口令候选字典生成——线索机械展开成候选表，
 # 治「凭记忆打两个弱口令就放弃」。只产候选，不执行爆破。
 _CTF_CORE_TOOLS = (
-    "run_cmd", "read_file", "search_files", "unpack_attachment",
+    "run_cmd", "read_file", "view_image", "search_files", "unpack_attachment",
     "bb_add_asset", "bb_asset_status",
     "bb_add_finding", "bb_update_finding", "bb_add_artifact",
-    "ctf_submit_flag", "ctf_ammo",
+    "ctf_submit_flag", "ctf_ammo", "ctf_abandon", "ctf_conclude",
     "kb_search", "kb_open", "route_lookup",
     "browser_navigate", "browser_click", "browser_type",
     "browser_screenshot", "browser_content", "browser_back", "browser_replay",
@@ -151,6 +173,169 @@ _CTF_CORE_TOOLS = (
     "bb_upsert_func",
 )
 _AGGRESSIVE_CONTROLLER_TOOLS = ("run_cmd", "read_file", "search_files")
+
+# CTF flag 通道（ctf-flag-channel，2026-10-19 修 P0 撕裂）：CTF 轨上「拿到 flag
+# 怎么报」的唯一出口是 ``ctf_submit_flag``（判定+入台账），候选线索走
+# ``ctf_ammo``（生成候选字典）。这两个是**轨道语义**不是专家能力——和
+# record_fact / trace 三件套同一定位，因此**不写进任何专家 yaml**，而是在
+# 工具面装配时按「本线程是否归属一道题」动态追加。
+#
+# 为什么必须动态追加（真事故）：``_CTF_CORE_TOOLS`` 里虽然列了它们，但那条
+# 分支只在 ``self.is_worker`` 为真时命中；而 ``is_worker`` 判的是
+# ``agent_id == "worker"``，全仓**没有任何地方建 agent_id="worker" 的线程**
+# ——ARTEX Worker 走的是 ``agent_id=<专家 id>``（artex_worker.py:89 传
+# expert 名），于是它恒 False，实际走专家 yaml 白名单。而所有 CTF 专家 yaml
+# 都没声明这两个工具 → 提示词反复要求「一律用 ctf_submit_flag 登记」，模型
+# 一调就被「越界拒绝」，**flag 台账在真实 ARTEX 执行链上完全不可达**。
+# 测试没抓到是因为测试直接 new ToolDispatcher，绕过了 ChatTurn 的工具面裁剪。
+_CTF_FLAG_TOOLS = ("ctf_submit_flag", "ctf_ammo")
+
+# CTF「整题放弃」出口（ctf-abandon，2026-10-20）：与 flag 通道同一定位——
+# **轨道语义不是专家能力**，故同样按轨动态追加、不写进任何专家 yaml。
+#
+# 此前 `set_abandoned` 只挂在 HTTP API（`author="human"`），Agent 侧**没有
+# 任何工具能表达「这题我不解了」**。于是模型想收尾时唯一可见的出口是
+# `bb_asset_status("tested_clean")`——而 CTF 轨终态判据是 flag 台账，那个
+# 状态在 CTF 轨不对应任何东西，必然撞两道门禁（题目行「父节点由子树派生」、
+# 附件子资产「须死路背书」），再为凑 dead_end 去查 event id，白烧三四轮。
+# 补上这个出口，「合法地停」才有地方去。
+#
+# 只给**执行侧**（Worker / 子专家 / 激进主控）：放弃是解题过程中的判断，
+# 纯委派主控（chat-orchestrator）与 ARTEX 主控只操舵、不判定题目死活。
+_CTF_ABANDON_TOOLS = ("ctf_abandon",)
+
+# CTF「主动收尾」出口（ctf-conclude，2026-10-20，方案 A 配套）：与 abandon 同
+# 定位——轨道语义不是专家能力，按轨动态追加、不写进任何专家 yaml。
+#
+# **为什么必须有这个出口**：`pending` 不计 solved 之后，AI 判定通过只能把题目
+# 停在 partial（等人工确认）。有人值守时正确，但**无人值守通宵跑题会全卡在
+# pending 白烧预算**——明明解出来了、没人点按钮，调度层就一直派 Worker 重跑。
+# 于是给一个显式收尾动作：`meta.concluded` → 停派工，但状态仍是 partial，
+# **不伪装成 solved**（「这条 flag 对不对」只有人能判）。
+#
+# 发放面比 abandon 宽一点：**纯委派主控（chat-orchestrator）也给**——它虽然
+# 不判定题目死活，但它掌握全局（知道哪几道题已经有候选、哪几道还在找），
+# 恰恰是最该说「这题别再派了」的角色。ARTEX 主控不给（它连登记都不做）。
+_CTF_CONCLUDE_TOOLS = ("ctf_conclude",)
+
+# 需要**执行能力配合**的 flag 工具（artex-controller-no-exec，2026-10-19）：
+# ``ctf_ammo`` 只产候选表，真正消费它要 ``run_cmd``（喂 hydra/ffuf）。给一个
+# 没有 ``run_cmd`` 的角色发 ``ctf_ammo`` = 教它调一个半截工具。所以它只发给
+# **执行侧**（Worker / 子专家 / 激进主控 / 探针），不发给纯委派主控。
+#
+# ``ctf_submit_flag`` 则相反：它是**登记动作**，纯委派主控也该有（人工可能直接
+# 口述「flag 是 flag{xxx}，登记一下」）。ARTEX 主控两者都不给——它连登记都不做，
+# 只观察台账（`artex_status` 的题目进度段）。
+_CTF_FLAG_EXEC_TOOLS = ("ctf_ammo",)
+
+# CTF 解题主控（ctf-controller）的工具面：**代码调度 + LLM 只定方向**。
+#
+# 它**不拿任何执行工具**（没有 run_cmd / read_file / browser_* / decompile）——
+# 与 ARTEX 主控同理：主控一旦能自己跑命令就会直接解题，绕过整套调度。
+# 但它比 ARTEX 主控多两样东西，因为它的角色是**决定往哪走**而不是纯操舵：
+#
+# - `ctf_dispatch`：把「我想派这些方向」提交给代码判据，拿回「准派/拦下+理由」。
+#   这是**唯一**的派发入口——`call_expert` 的每条派发都要过 `allowed()` 校验，
+#   越权（不在本轮计划内）直接被拒并给出原因。
+# - `ctf_review`：看代码侧的 verdict 表（轮次/已得/放弃判据），据此决定下一批
+#   方向。**放弃判定不可推翻**：判据命中就是 drop，模型换措辞重派会被识别成
+#   同一方向键并拒收。
+#
+# `ctf_submit_flag` 给（人工可能直接口述「flag 是 flag{xxx}，登记一下」）；
+# `ctf_ammo` 不给（要 run_cmd 配合，主控没有）。
+_CTF_CONTROLLER_TOOLS = (
+    "bb_query", "kb_search", "kb_open", "route_lookup",
+    "bb_declare_challenge", "ctf_submit_flag", "ctf_conclude",
+    "todo_write", "call_expert",
+    "ctf_dispatch", "ctf_review", "ctf_inspect",
+    *_INTENT_TOOLS,
+)
+
+_CTF_DISPATCH_TOOL_SPEC = {
+    "name": "ctf_dispatch",
+    "description": (
+        "【唯一的派发入口】把你认为该做的方向提交给代码调度器，拿回「准派 / 拦下」"
+        "计划。\n"
+        "代码会做四件事（你无权推翻）：\n"
+        "① **方向归一互斥**——同一方向换个说法不算新方向，会被合并拒收；\n"
+        "② **放弃判据**——已判死的方向直接拦下（13 条可解释判据，见 ctf_review）；\n"
+        "③ **轮次记账**——每派一次记一轮，超过上限自动放弃；\n"
+        "④ **执行自证**——worker 上轮声称拿到执行时，本轮任务里会自动附加"
+        "「让目标机自证」的题目。\n"
+        "拿到计划后，**同一轮**用多个 call_expert 并发派出准派的方向（task 直接用"
+        "返回里的 task 文本，不要自己改写——里面有代码拼的上下文与自证段）。"),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "directions": {
+                "type": "array",
+                "description": "你要派的方向（每个只覆盖一个测试面）",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "subgoal": {"type": "string",
+                                    "description": "方向描述（一句话，说清查什么）"},
+                        "expert": {"type": "string",
+                                   "description": "派给哪个专家（默认 worker）"},
+                        "need": {"type": "integer",
+                                 "description": "该方向需要几个 flag（多 flag 题才填）"},
+                    },
+                    "required": ["subgoal"],
+                },
+            },
+            "breadth_starved": {
+                "type": "boolean",
+                "description": "是否还有「没开过的题」在等槽位（机会成本判据用；"
+                               "为真时零产出方向会更早让位）",
+            },
+        },
+        "required": ["directions"],
+    },
+}
+
+_CTF_REVIEW_TOOL_SPEC = {
+    "name": "ctf_review",
+    "description": (
+        "看代码侧的复核视图：每个方向的轮次、已得/需要的 flag、状态、以及"
+        "**代码给出的下一步判定与理由**（revive 续投 / requeue 让位 / drop 放弃）。\n"
+        "同时给出方向互斥表（谁在做哪个方向、还剩多久）。\n"
+        "**判为 drop 的方向不要再派**——换措辞重派会被识别成同一方向键并拒收。"
+        "判为 requeue 表示「还有救但先让别人上」，稍后可以再来。"),
+    "input_schema": {"type": "object", "properties": {}},
+}
+
+_CTF_INSPECT_TOOL_SPEC = {
+    "name": "ctf_inspect",
+    "description": (
+        "【只读核对通道】你现在手里只有 worker 的**自述摘要**。判 flag 真假、"
+        "判文件形态，都需要一手依据——用这个工具拿。\n"
+        "- `what=\"evidence\"`：把台账里**每条 flag 的完整证据链原文**摊开"
+        "（解题路径原文、transform、置信、判定者、关联 finding 的复现步骤）。"
+        "不摘要、不评价，你自己比。\n"
+        "- `what=\"files\"`：题目子树下的文件清单 + 来源标注（题目原件/上轮产物/"
+        "样本/未知）+ 每个文件的**头部 32 字节魔数**。\n"
+        "**它只能核对，不能执行**：没有任意路径读取、不返回文件全文、不跑命令。"
+        "要读全文或跑脚本，**派 worker**。\n"
+        "典型用法：worker 说「拿到了 flag」→ 先 evidence 看它的解题路径原文是否"
+        "真能推出那个串；worker 说「这是 pcapng」→ 用 files 看魔数对不对。"),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "what": {
+                "type": "string",
+                "enum": ["evidence", "files"],
+                "description": "evidence=flag 证据链原文（判真假）；"
+                               "files=文件清单+来源+魔数（判形态）",
+            },
+            "challenge_id": {
+                "type": "string",
+                "description": "题目资产 id（默认取本线程绑定的题目）",
+            },
+        },
+        "required": ["what"],
+    },
+}
+
 _PROBE_EXCLUDED_TOOLS = ("bb_query", *_NO_SKILL_OR_INTENT_TOOLS)
 
 _ORCH_BASE_TOOLS = ("todo_write", "call_expert", "skill_open",
@@ -161,6 +346,282 @@ _ORCH_BASE_TOOLS = ("todo_write", "call_expert", "skill_open",
                     # （只落 pending，人审）；每会话上限 3 条（ToolDispatcher 内）。
                     "propose_pack_edit",
                     *_INTENT_TOOLS)
+
+# ARTEX 主控工具面（artex-controller-slim，2026-10-20）：**只留「观察 + 操舵 + 登记」**。
+#
+# 起因：19 个工具的 schema 共 16201 字符（约 8100 token），单轮光工具定义就吃掉
+# 小半上下文。实测该主控线程（hxbai 项目）的全部调用分布是：
+#
+#     bb_query 95 · artex_status 88 · artex_hint 7 · artex_plan 5 · artex_fact 5
+#     bb_declare_challenge 1 · artex_control 1
+#
+# 其余 11 个工具**一次都没调用过**，且职责上与主控冲突：
+#
+#   todo_write / skill_open / kb_search / kb_open
+#       —— 主控不干活。`artex_plan` 自带 `todos` 参数（规划即记待办）；
+#          查打法、读技能手册是 Worker 的事（Worker 工具面里有这两个）。
+#          给主控只会诱导它「先自己查一查」，即越权的前奏。
+#   declare_intent / close_intent / reopen_intent / bb_delete_intent
+#       —— 意图链是 Worker 的执行纪律；主控是**调度者**，它自己的假设由
+#          Planner 拆成 Intent。给主控这套工具等于允许它绕过 Planner 自建链路。
+#   bb_delete_asset / bb_delete_assets / bb_merge_assets
+#       —— 资产维护是人工/Worker 的活。主控删资产会直接破坏覆盖度分母
+#          （任务范围锚点），而它自己无法判断该不该删。
+#
+# 保留 bb_query 是因为它承担唯一的「看执行事件」通道（93/95 次是 what=events）；
+# 保留 bb_declare_challenge 是 CTF 轨登记题目的入口。
+_ARTEX_CONTROLLER_TOOLS = ("bb_query", "bb_declare_challenge")
+
+# ARTEX 主控的**执行侧硬闸**（artex-controller-slim，2026-10-20 → 改造于
+# controller-tool-select）：撤下 schema 还不够——执行侧有三条旁路能把它们放进来，
+# schema 撤了也挡不住（模型从历史里记得工具名就会照调，主控历史里必然出现过
+# todo_write）：
+#
+#   ① `_dispatch` 的早拦截分支（todo_write / call_expert）**根本不经**
+#      ToolDispatcher，白名单压根没机会判；
+#   ② `ToolDispatcher._dispatch_once`（tools.py:572）对 `_PLAN_TOOLS`
+#      （declare_intent）与 `_CONTROL_TOOLS`（close_intent / reopen_intent /
+#      finish / request_steps）**恒放行**——§6.6 的收尾原语语义，防止模型被
+#      「先立意」死锁；代价是任何角色的白名单都裁不掉它们；
+#   ③ 收尾阶段 `filter_wrapup_whitelist` 是「白名单优先 + 其余放行」，
+#      todo_write 还在 `_WRAPUP_KEEP_TOOLS` 里。
+#
+# 实测（主控线程带完整参数直调）：`todo_write` 返回 `ok=True | 待办已更新：1 项`
+# ——真的把线程待办覆写了；`run_cmd` 则正确回「越界拒绝」。
+#
+# **闸的判据是「yaml 勾选面」而不是写死的黑名单**：用户要的是「勾选启动」，
+# 勾了就该能调、没勾就该被拒。写死黑名单会把勾选变成装饰。
+#
+# 但有一类工具是**结构性**不该给某个角色的（不是「没勾」，是「勾了也不对」），
+# 它们必须**先于**勾选面判据被拒，否则会被下面这条恒放行地板救回来：
+#
+#   计划/控制原语（`_PLAN_TOOLS` ∪ `_CONTROL_TOOLS`）**恒放行**，不进勾选面
+#   ——它们是「收尾/立意」的兜底出口，裁掉会死锁成「必须先声明一条假意图」，
+#   与 ToolDispatcher 的恒放行同口径。代价是任何角色的白名单都裁不掉它们，
+#   于是 ARTEX 主控的意图链禁令会被这条地板抵消（实测：`declare_intent` 从
+#   「被拒」变成「放行」）。故把结构性禁令提到勾选面判据**之前**。
+#
+# `controller_structural_denied()` 是这份清单的唯一出处，设置页候选集也从
+# 它扣——界面不该显示一个勾了也不生效的工具（那是另一种「界面在骗人」）。
+_ARTEX_CONTROLLER_DENIED = frozenset({
+    # 早拦截分支（不经过白名单）：ARTEX 主控派活只能走 artex_plan。
+    # call_expert 是实测事故（artex-plan-only，2026-10-19）——主控直接委派
+    # 一个专家会绕过 Planner，于是目标、探索图、任务范围全空，那条 Intent
+    # 的 task_id 还是线程 id 拼出来的假任务。todo_write 同理：待办由
+    # artex_plan 的 todos 参数承载，单独维护会与规划脱节。
+    "todo_write", "call_expert",
+    # 意图链：主控是调度者，它自己的假设由 Planner 拆成 Intent，
+    # 给它这套工具等于允许它绕过 Planner 自建链路。
+    "declare_intent", "close_intent", "reopen_intent", "bb_delete_intent",
+    # 控制原语：对话链没有任务队列语义（finish 会置位 finished、
+    # request_steps 改步数预算）；主控靠 artex_status 判态，不靠 finish 收尾。
+    "finish", "request_steps",
+})
+
+
+def controller_structural_denied(agent_id: str) -> frozenset[str]:
+    """该控制器**结构性**不可用的工具（勾了也不下发/不执行）。
+
+    只有 ARTEX 主控有这一档：它的角色是纯操舵（Planner 独占 Intent 生成），
+    意图链/待办/委派都是「绕过 Planner 自建链路」。其余控制器为空——
+    它们的勾选面就是最终裁决。
+    """
+    if str(agent_id or "") == ARTEX_CONTROLLER_ID:
+        return _ARTEX_CONTROLLER_DENIED
+    return frozenset()
+
+# ARTEX 主控的操舵六件套（artex-fusion / artex-goal / artex-fact）。
+# 它们**不在** `_ARTEX_CONTROLLER_TOOLS` 里：那六件套走
+# `artex_steering_dispatch` 直连分支（不经 ToolDispatcher，无 REGISTRY 条目），
+# 由 `_orch_tool_specs` → `_artex_tool_specs` 在运行时追加 schema。
+# 这里单独列出是为了让 `controller_tool_face`（默认勾选面）与
+# `controller_tool_candidates`（可勾选范围）都能覆盖它们——
+# 否则界面只显示 2 个，实际能调 8 个。**改 `_artex_tool_specs` 必须同步改这里。**
+_ARTEX_STEERING_TOOLS = (
+    "artex_plan", "artex_status", "artex_hint", "artex_control",
+    "artex_goal", "artex_fact",
+)
+
+
+def controller_tool_face(agent_id: str,
+                         track: str | None = None) -> list[str] | None:
+    """控制器类智能体的**代码默认工具面**（yaml `tools` 未设置时的回落值）。
+
+    背景（controller-tool-face 事故，2026-10-20）：控制器（chat-orchestrator /
+    aggressive-controller / artex-controller / ctf-controller）的工具面历史上
+    由**代码常量**决定，**完全不读**专家 yaml 的 `tools` 字段（那个字段只对
+    子专家生效，见 `expert_tool_names`）。于是设置页「工具白名单」对控制器
+    显示的是 `tools: null` → 「全部（未限制）」，与运行期真实工具面完全脱节：
+    用户以为主控能调 54 个工具，实际只有 8 个。
+
+    **当前语义（用户两次纠错后）**：设置页是**可勾选启动**的开关，不是只读
+    展示。yaml 的 `tools` 现在是控制器的**真实开关**（`ChatTurn.
+    _controller_tool_face()` 优先读它）；本函数只提供「未勾选过时用什么」的
+    默认值，同时作为设置页的**回填初值**（否则界面又是 null → 全选）。
+
+    与 `controller_tool_candidates()` 的分工：那个是「可勾选范围」（更大），
+    这个是「默认勾选」。**候选必须 ⊇ 本函数**，否则界面勾不到默认没开的工具，
+    又变回固定了。
+
+    **清单必须含动态挂载的工具**：ARTEX 主控的 `artex_*` 六件套不在
+    `_ARTEX_CONTROLLER_TOOLS` 里，由 `_orch_tool_specs` 在运行时追加
+    （它们不经 ToolDispatcher，走 `artex_steering_dispatch` 直连分支）。
+    只列 `_ARTEX_CONTROLLER_TOOLS` 会显示 2 个，而运行期实际 8 个。
+
+    `track`：CTF 轨会给纯委派主控（chat-orchestrator）额外追加 flag 通道
+    （`ctf_submit_flag` / `ctf_conclude`）。这是**轨道语义**不是专家能力，
+    原本由 `_tool_specs` 的按轨追加块负责；控制器改为「勾选面即最终裁决」后
+    那段整段跳过，故默认值必须自己含上，否则 CTF 轨的纯委派主控会突然失去
+    登记 flag 的入口。传 None = 取并集（设置页回填用，避免按单轨回填后
+    保存把另一条轨的工具清掉）。
+
+    返回 None = 该 agent 不是控制器（调用方应回落 yaml 的 tools 字段）。
+
+    **`propose_pack_edit` 不在任何默认清单里**：它受项目级 kb 迭代开关实时
+    门禁（`_kb_iteration_on`），开关关就不下发。静态清单无法表达「看开关」，
+    写进默认会让界面显示一个此刻调不动的工具——那正是本函数要消灭的脱节。
+    （它在**候选**清单里，用户可显式勾选。）
+    """
+    aid = str(agent_id or "")
+    if aid == ARTEX_CONTROLLER_ID:
+        # 与 `_tool_specs` 的 is_artex 分支同源：base ∪ _orch_tool_specs
+        # 追加的 artex_* 六件套（`_artex_tool_specs` 的 key 集合）。
+        return [*_ARTEX_CONTROLLER_TOOLS, *_ARTEX_STEERING_TOOLS]
+    if aid == CTF_CONTROLLER_ID:
+        return list(_CTF_CONTROLLER_TOOLS)
+    if aid == AGGRESSIVE_CONTROLLER_ID:
+        # `_orch_tool_specs` 对激进主控**照给** todo_write + call_expert
+        # （只有 ARTEX 主控才撤），且它的 base 走 `_CTF_CORE_TOOLS`；
+        # 同时 `is_aggressive` 命中 `_PROBE_EXCLUDED_TOOLS` 剔除面。
+        face = [*_CTF_CORE_TOOLS, "bb_declare_challenge",
+                "todo_write", "call_expert"]
+        face = [t for t in face if t not in _PROBE_EXCLUDED_TOOLS]
+        return list(dict.fromkeys(face))
+    if aid == ORCHESTRATOR_ID:
+        face = [t for t in _ORCH_BASE_TOOLS if t != "propose_pack_edit"]
+        # 纯委派主控原本靠 `_tool_specs` 的按轨追加拿到 flag 登记/收尾出口
+        # （`ctf_ammo` 除外——要 run_cmd 配合，它没有）。控制器改勾选面裁决后
+        # 那段跳过，故默认值补上。None = 并集（设置页回填用）。
+        if track in (None, "ctf"):
+            face = [*face, "ctf_submit_flag", *_CTF_CONCLUDE_TOOLS]
+        return list(dict.fromkeys(face))
+    return None
+
+
+_MCP_TOOL_PREFIX = "mcp__"
+_MCP_CONFIG_PATH = Path("config/mcp.json")   # 与 core/api/app.py 同口径（cwd=项目根）
+
+
+def mcp_server_of(name: str) -> str:
+    """``mcp__<server>__<tool>`` → server 名；不是 MCP 工具返回空串。"""
+    parts = str(name or "").split("__", 2)
+    return parts[1] if len(parts) == 3 and parts[0] == "mcp" else ""
+
+
+def mcp_allowed_by_face(name: str, face: set[str]) -> bool:
+    """MCP 工具是否在控制器勾选面内（controller-mcp-face）。
+
+    两种勾选粒度都认：
+    - 精确名 ``mcp__rea__compare_functions``（只开这一个工具）；
+    - server 通配 ``mcp__rea__*``（开整个 server 的全部工具）。
+
+    通配是必须的：rea 一个 server 就 215 个工具，逐个勾选在设置页里没法用，
+    而用户的真实决策本来就是「这个主控要不要用这个 server」。
+    """
+    if not name:
+        return False
+    if name in face:
+        return True
+    srv = mcp_server_of(name)
+    return bool(srv) and f"mcp__{srv}__*" in face
+
+
+def enabled_mcp_servers() -> list[str]:
+    """当前**已启用**的 MCP server 名（供设置页列出可勾选的 server 通配）。
+
+    读的是配置文件本身而非 MCPBridge 的实例状态：`controller_tool_candidates`
+    没有项目上下文（拿不到 domains），也不该为列候选去起 MCP 子进程。
+    """
+    try:
+        cfg = json.loads(_MCP_CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    out: list[str] = []
+    for entry in cfg.get("servers") or []:
+        if not isinstance(entry, dict) or not entry.get("enabled"):
+            continue
+        name = str(entry.get("name") or "").strip()
+        if name:
+            out.append(name)
+    return out
+
+
+def _track_filter(names: list[str], track: str) -> list[str]:
+    """控制器勾选面的**轨道适用性**过滤（controller-tool-select）。
+
+    yaml 的 `tools` 是跨轨共享的一份清单，但 `ctf_*` 是 CTF 轨语义：用户在
+    CTF 项目里勾了 `ctf_submit_flag`，pentest 轨的主控不该因此多出一个
+    「提交 flag」的入口（那里没有题目台账，调了只会报错）。
+
+    只做**单向**裁剪（非 CTF 轨剔 `ctf_*`），不反向剔——逆向专属工具（如
+    `decompile`）在 CTF 轨也有用（re/pwn 题），反向剔会误伤。
+    """
+    if track == "ctf":
+        return list(dict.fromkeys(names))
+    return list(dict.fromkeys(t for t in names if not t.startswith("ctf_")))
+
+
+def controller_tool_candidates(agent_id: str) -> list[str] | None:
+    """控制器在设置页**可勾选的候选工具全集**（controller-tool-select）。
+
+    与 `controller_tool_face` 的区别：那个是「当前实际生效的面」，这个是
+    「允许勾选的范围」。用户要的是**勾选启动**（自己决定开哪些），所以候选
+    必须**大于等于**当前面——否则界面上勾不到默认没开的工具，等于又变回固定。
+
+    候选构成三块，缺一块就会让某类工具在界面上永远勾不到：
+
+    ① `AGENT_TOOLS` 里未进 `_EXPERT_EXCLUDED` 的通用工具——注意
+       `_EXPERT_EXCLUDED` 里有 `bb_declare_challenge`/`finish`/`request_steps`，
+       但**控制器本来就在用** `bb_declare_challenge`（CTF 轨登记题目），
+       所以控制器的候选**不看** `_EXPERT_EXCLUDED`，直接用全量 `AGENT_TOOLS`。
+    ② 无 REGISTRY 条目、不在 `AGENT_TOOLS` 的**控制器专属**工具：
+       `todo_write` / `call_expert`（`_dispatch` 早拦截分支）与 `artex_*`
+       操舵六件套（`artex_steering_dispatch` 直连分支）。
+    ③ CTF 调度三件套 `ctf_dispatch`/`ctf_review`/`ctf_inspect`（同上，直连）。
+
+    **专属工具按角色给，不能全量并集**：`artex_*` 只对 ARTEX 主控有意义
+    （`_orch_tool_specs` 的 `is_artex` 分支才挂），`ctf_*` 三件套只对
+    CTF 解题主控有意义。全量并集会让 CTF 主控的界面出现 `artex_plan`——
+    勾了也不下发，又是一次「界面在骗人」。故按 `controller_tool_face` 的
+    角色分支分别给。
+
+    **结构性禁令必须从候选里扣掉**：`controller_structural_denied()` 里的工具
+    对该控制器是「勾了也不对」（ARTEX 主控的意图链/待办/委派会绕过 Planner），
+    显示出来只会让用户勾了不生效——那是另一种「界面在骗人」。
+
+    非控制器返回 None（调用方回落 yaml 的 `tools`，语义与子专家一致）。
+    """
+    if controller_tool_face(agent_id) is None:
+        return None
+    aid = str(agent_id or "")
+    denied = controller_structural_denied(agent_id)
+    names: list[str] = [s["name"] for s in AGENT_TOOLS]
+    # 专属工具按角色给（见 docstring ③ 与「按角色给」段）
+    if aid == ARTEX_CONTROLLER_ID:
+        names += list(_ARTEX_STEERING_TOOLS)
+    elif aid == CTF_CONTROLLER_ID:
+        names += ["ctf_dispatch", "ctf_review", "ctf_inspect"]
+    # todo_write / call_expert 走 `_dispatch` 早拦截分支，任何控制器都可能
+    # 被勾选启用（ARTEX 主控由结构性禁令扣掉，见下）。
+    names += ["todo_write", "call_expert"]
+    # MCP server 按**通配**给（controller-mcp-face）：逐个工具列会把 200+ 项
+    # 塞进设置页（rea 一个 server 就 215 个工具、549K 字符 schema），而勾选
+    # 粒度本来就该是「这个主控要不要用这个 server」。见 `mcp_allowed_by_face`。
+    names += [f"{_MCP_TOOL_PREFIX}{s}__*" for s in enabled_mcp_servers()]
+    # `propose_pack_edit` 受项目级 kb 迭代开关实时门禁——开关关着时勾了也
+    # 下发不了。仍列进候选（用户可以勾，开项目开关即生效），但界面会提示。
+    return list(dict.fromkeys(t for t in names if t not in denied))
+
 
 # ARTEX Worker trace 工具 schema（artex-traces，2026-10-19）：让 Worker 能检索
 # 本任务其他 work 的执行过程，复用他人观察、避免重复劳动。
@@ -275,13 +736,24 @@ _ARTEX_CONTROLLER_STYLE = (
     "## ARTEX 工作方式（观察 → 规划 → 引擎调度 → 操舵 → 目标收敛）\n"
     "你是 ARTEX 主控。**你不自己执行，也不逐个派活**：Intent 由 Planner 生成，"
     "项目 Engine 从 Frontier 领取并并发派给 Worker 执行。你只做判断与调整。\n"
+    "**你没有实操工具**（没有 run_cmd / read_file / search_files，也没有 "
+    "ctf_submit_flag / ctf_ammo）。这不是权限缺失，是角色分工：一旦你亲自跑命令、"
+    "读文件、解 flag，任务树与探索图就会被绕过，Worker 的并发调度也白搭——"
+    "整条 ARTEX 自主链路退化成你一个人单干。**用户看到主控自己解题就是这里出的错**。\n"
+    "要执行 → artex_plan 建 Intent；要纠偏 → artex_hint；要停 → artex_control。\n"
     "1. **盘点**：bb_query 看已登记资产与发现；artex_status 看当前任务的 runtime "
     "状态、**注册目标及达成情况**、Intent 计数、活跃 Worker 与探索图里的事实/发现。"
     "已有方向不要重复规划。\n"
-    "2. **规划**：artex_plan(goal=\"…\", mode=\"new\") 建立任务树（Planner 会把目标"
-    "拆成可核验的离散目标并登记）；对进行中的任务用 artex_plan(mode=\"extend\") "
+    "2. **规划**：首次建任务用 artex_plan(goal=\"…\", mode=\"new\")（Planner 会把目标"
+    "拆成可核验的离散目标并登记）；对当前任务用 artex_plan(mode=\"extend\") "
     "让 Planner 依据新事实追加方向，或用 artex_plan(intents=[…]) 直接指定方向。"
-    "Planner 是唯一 Intent 生成者——不要自己拼任务描述去 call_expert 绕过它。\n"
+    "CTF 特别纪律：needs_review 只表示探索停摆但题目未解；exhausted 表示方向未完成，"
+    "都不是任务成功。先 artex_status，之后 retry exhausted Intent 或在原任务 extend；"
+    "当前题目未 solved/abandoned 时严禁 mode=\"new\"。只有用户明确要求切换/新建任务时，"
+    "才用 mode=\"new\" 并传 new_task_confirmed=true。"
+    "Planner 是唯一 Intent 生成者——**你的工具面里没有 call_expert**，派活只有"
+    "artex_plan 这一条路。这不是限制，是保证目标分解、范围锚定与探索图三者"
+    "不会与执行脱节。\n"
     "3. **观察**：Worker 完成后会把结果写成探索图 Fact、把关联发现写成 Finding，"
     "并把证据自动挂到相关目标上；每轮先用 artex_status 复核，再决定是继续追加"
     "方向还是收尾。artex_status 同时显示**资产覆盖度**（已测/范围、未覆盖数）——"
@@ -309,13 +781,73 @@ _ARTEX_CONTROLLER_STYLE = (
     "6. **收敛**：artex_status 显示 goal_reached 时收尾，汇总已测方向、资产范围、"
     "已验证发现与证据、未验证假设和仍需人工确认的动作；显示 needs_review 时"
     "必须先解释「哪条目标未达成、为什么」，再决定补方向还是交人工。\n"
-    "7. **call_expert 例外**：只用于不值得建 Intent 的一次性查询/登记（例如查一条"
-    "配置、确认一个资产归属）。测试与深挖方向一律走 artex_plan。\n"
-    "8. **边界**：只在登记的授权范围内扩展子域、站点和端口，跨出范围立即暂停并请求"
+    "7. **边界**：只在登记的授权范围内扩展子域、站点和端口，跨出范围立即暂停并请求"
     "确认；漏洞利用、爆破、上传、提权、横向移动、业务写入和 CTF 提交等高风险动作"
     "必须逐项审批，发现线索不等于获得执行授权。\n"
-    "9. **证据**：命中结论必须有实际输出、请求响应、文件路径或复现步骤支撑；"
+    "8. **证据**：命中结论必须有实际输出、请求响应、文件路径或复现步骤支撑；"
     "没有证据的内容只能标为假设——目标达成同样要有证据，模型自述不算数。")
+
+# CTF 解题主控的工作方式（ctf-controller，2026-10-19）。
+#
+# 这段与另外两个主控的文案是**互斥**的：它们都强调「你来决定派什么」，本段
+# 强调「你只提方向，派不派由代码判」。写清这一点很关键——模型从训练数据里
+# 带来的默认行为是「我来统筹一切」，不明说就会绕过 ctf_dispatch 直接
+# call_expert，于是整套判据（放弃决策、互斥、自证、轮次记账）全被绕开。
+_CTF_CONTROLLER_STYLE = (
+    "## 工作方式（CTF 解题主控 · 代码调度 + 你只定方向）\n"
+    "你的职责是**判断往哪走**，不是判断「什么时候别走了」——后者由代码判。\n"
+    "这是刻意的分工：CTF 的失败模式不是不会解，而是时间分配错了（死磕已探尽的\n"
+    "方向到比赛结束，或一次快检没命中就放弃再挖十分钟就出的题）。这两个判断\n"
+    "交给代码，因为代码会记账、会计时、不会因为上一轮的沉没成本而不肯放手。\n"
+    "\n"
+    "### 你没有执行工具\n"
+    "没有 run_cmd / read_file / browser_* / decompile。一旦你亲自跑命令、读文件，\n"
+    "整套调度（方向互斥、轮次记账、自证核验）就全被绕过——**用户看到主控自己\n"
+    "解题就是这里出的错**。要执行 → call_expert 派给专家。\n"
+    "\n"
+    "### 每轮流程（三步，不许跳）\n"
+    "1. **提方向**：`ctf_dispatch(directions=[{subgoal, expert, need}])` 把你认为\n"
+    "   该做的方向交给代码。每个方向只覆盖一个测试面（例：robots.txt 备份、\n"
+    "   登录表单 SQL 注入、附件隐写、二进制反编译），**不要**把多个面塞进一条。\n"
+    "   代码会回你「准派 N 个 / 拦下 M 个 + 理由」。\n"
+    "   **第 1 轮必须是分诊**（代码会硬拦）：派一条廉价方向搞清楚这是什么题\n"
+    "   （file / 魔数 / linktype / 题面关键句），拿到结论再派深挖。盲派深挖会\n"
+    "   各自重写一遍解析器——实测同题 3 份重复脚本，方向还完全重叠。\n"
+    "2. **照计划派**：拿返回里 `task` 文本**原样**填进 call_expert（里面有代码拼的\n"
+    "   上下文与自证段，改写会丢掉这些）。准派几个就同轮并发派几个。\n"
+    "3. **看复核**：`ctf_review()` 看每个方向的轮次、已得 flag、耗时、以及代码的\n"
+    "   下一步判定（revive 续投 / requeue 让位 / drop 放弃）。据此提下一批方向。\n"
+    "\n"
+    "### 你要一手核实，不要只信自述\n"
+    "worker 的回执是**它的自述**，可能自相矛盾（实测同一份摘要里 linktype 既写\n"
+    "249 又写 220）。判 flag 真假、判文件形态，用 `ctf_inspect` 拿一手依据：\n"
+    "- `ctf_inspect(what=\"evidence\")`：台账里每条 flag 的**完整证据链原文**\n"
+    "  （解题路径、transform、置信、复现步骤）。逐条看它能不能真推出那个串。\n"
+    "- `ctf_inspect(what=\"files\")`：文件清单 + 来源（题目原件/上轮产物/样本）\n"
+    "  + **头部魔数**。魔数与自述不符 → 以魔数为准。\n"
+    "**它只能核对不能执行**（没有任意路径读取、不返回全文、不跑命令）。要读全文\n"
+    "或跑脚本 → 派 worker。清单里**出现** `[上轮产物]` 的 `solve_*.py` 说明这题\n"
+    "很可能已被解过：先派 worker 复现它，别从零重写。**没出现**就是从零分析，\n"
+    "不要臆测「也许解过」而去翻找不存在的旧产物。\n"
+    "\n"
+    "### 三条硬纪律\n"
+    "- **drop 的方向别再派**。换措辞重派会被归一成同一方向键并拒收——这是设计，\n"
+    "  不是 bug。要救它就先看 `ctf_review` 里的理由，换**真正不同**的面。\n"
+    "- **requeue ≠ 失败**。它表示「这题还有救，但先让别人上」；稍后（约 30 分钟）\n"
+    "  可以再来。别把它当判死，也别马上重派。\n"
+    "- **自证不是形式**。worker 上轮声称「拿到执行 / uid=0 / getshell」时，本轮\n"
+    "  task 里会自动附加一道让**目标机自己算**的哈希题。回执里出现正确答案才算\n"
+    "  真的打通了；只在 worker 自述里出现正确答案 = 编造，代码会拒收并记账。\n"
+    "\n"
+    "### 题目与 flag\n"
+    "- 新题先 `bb_declare_challenge(name=…, description=…, tags=[题型])`；\n"
+    "- 拿到疑似 flag 一律 `ctf_submit_flag`（人工可能直接口述 flag，你也用它登记）；\n"
+    "- flag 台账是进度**唯一真值**：拿满即解出，代码不再为该方向派工。\n"
+    "\n"
+    "### 收尾\n"
+    "所有方向都已 solved / drop，或时间进收尾窗口（见下方时间预算）时收尾，\n"
+    "汇总：走过的方向、正式 flag、候选线索、各自证据、仍未确认的内容。\n"
+    "**不要把候选线索写成正式 flag**，也不要在还有 open 方向时说「已全部完成」。")
 
 
 class ChatStopped(Exception):
@@ -482,6 +1014,16 @@ _TOOL_RESULT_EVENT_HEAD = 400        # 事件流 result_head 预览长度
 # 「[后台继续]」平滑更新为真实结果，跨轮回放也不丢信息。
 _PROBE_PENDING = "[后台继续]"
 _PROBE_OVERFLOW_HEAD = 1500          # overflow 注入上下文的单条截断
+
+# 「上一轮已写过解题脚本」的形态判据（ctf-inspect-provenance，2026-10-20）。
+# 命中即说明这题很可能已被解过——文件清单标题要弹硬提示，让主控先派人**读并
+# 复现**旧脚本，而不是从零重写一遍解析器（用户实测：同一题 3 个 agent 各写了
+# 一遍 USB 解析器，就因为清单里没标注这些是上轮产物）。
+_REUSE_SCRIPT_RX = re.compile(
+    r"(?:^|[_\-.])"
+    r"(?:solve|solver|extract|extractor|decode|decoder|parse|parser|"
+    r"carve|dump|recover|unpack|exp|exploit|poc)"
+    r"(?:[_\-. ]|$)", re.I)
 
 # 压缩占位/摘要标记（前端与测试可据此识别已压缩内容）
 _CTX_PLACEHOLDER_TAG = "[上下文压缩] "
@@ -1026,7 +1568,27 @@ class ChatTurn:
         self.is_orchestrator = self.agent_id in CONTROLLER_IDS
         self.is_aggressive = self.agent_id == AGGRESSIVE_CONTROLLER_ID
         self.is_artex = self.agent_id == ARTEX_CONTROLLER_ID
-        self.is_first_return_controller = self.is_aggressive or self.is_artex
+        self.is_ctf_controller = self.agent_id == CTF_CONTROLLER_ID
+        # 先返先触发（first_return）的启用面：激进主控 / ARTEX 主控 / **CTF 解题
+        # 主控**（2026-10-20 补上，用户实测真问题）。
+        #
+        # **为什么 CTF 主控必须启用**：它一批派 3 个 call_expert 探 3 个方向，
+        # 旧行为是等**全部**结束才唤醒——第一个方向 40 秒就回了「[未命中] 该方向
+        # 证伪」，主控却要等另两个跑满 10 分钟才拿到任何信息，中间这段时间它既
+        # 不能改道也不能收尾，纯空转。而 CTF 主控的派发本来就是**独立方向并发**，
+        # 没有任何「必须收齐才能判断」的语义。
+        #
+        # **轮次记账不受影响**（曾被误判为阻塞理由）：`record()` 的调用点在
+        # `_tool_call_expert` 尾部，由 `_dispatch(tc)` 在**每个 worker 自己的线程**
+        # 里执行（`_parallel_expert_dispatch::run_one`），本来就是「单方向完成即
+        # 记账」，从不依赖整批收齐。提前返回只是主线程不等了，worker 照旧跑完
+        # 自己的记账与落库。
+        self.is_first_return_controller = (self.is_aggressive or self.is_artex
+                                           or self.is_ctf_controller)
+        # CTF 解题主控的代码侧调度状态（ctf-controller，2026-10-19）：懒建——
+        # 只有真正调用 ctf_dispatch/ctf_review 时才构造（Pacing 要读项目配置与
+        # 线程创建时间，构造有 IO）。**恒 None 是合法状态**（非该主控线程）。
+        self._ctf_session = None
         self.is_worker = self.agent_id == "worker"
         # 先返先触发的后台探针账本（仅激进主控写读）：
         # _probe_abandoned——已被提前断候的 tool_call id（worker 完成时不
@@ -1112,12 +1674,27 @@ class ChatTurn:
         注入 system（不污染消息历史），使子专家知道主控划定的测试范围、每个测试
         面的 dimension 取值与收尾纪律。**分配资产（assigned_asset_ids）非空时**
         只列这些资产并要求逐面覆盖；未分配（查询/登记类委派）则列出项目台账供上下
-        文，不做收敛强制。读取失败降级为占位文本，不阻断。"""
+        文，不做收敛强制。读取失败降级为占位文本，不阻断。
+
+        **CTF 跨题隔离（challenge-isolation，2026-10-19）**：台账里别题的附件/
+        入口子资产整批剪掉（`chat_store.challenge_isolation_scope`）——多题共跑
+        时子专家本该只看本题文件，全项目台账把别题的 pcap/镜像也摊进来，等于
+        开局就把别人的题面灌进上下文。别题的**题目行**保留（知道还有哪些题）。
+        """
         try:
             all_assets = self.bb.list_assets(self.project_id)
         except Exception:  # noqa: BLE001 —— 注入失败不阻断委派
             log.exception("chat 子专家资产台账读取失败 thread=%s", self.thread_id)
             all_assets = []
+        if self.track == "ctf" and self.thread_id:
+            try:
+                scope = chat_store.challenge_isolation_scope(
+                    self.bb, self.project_id, self.thread_id)
+            except Exception:  # noqa: BLE001 —— 隔离失败按全量（宁松勿误空）
+                scope = None
+            if scope is not None:
+                hide = scope["other_assets"] - scope["other_roots"]
+                all_assets = [a for a in all_assets if a["id"] not in hide]
         by_id = {str(a.get("id")): a for a in all_assets}
         lines = ["## 工作台委派上下文"]
         if self.assigned_asset_ids:
@@ -1179,6 +1756,22 @@ class ChatTurn:
                 "只查任务描述中的一个方向，几分钟内跑完即收尾；不深挖、不盘点"
                 "黑板、不声明意图、不多方向。结论摘要以 [命中]/[未命中] 开头，"
                 "后跟一句证据（命中=该方向有值得主控跟进的信号）。")
+        elif self.track == "ctf":
+            # CTF 轨的 plan→execute→plan 是**解题**节奏，不是「逐面覆盖」节奏
+            # （ctf-intent-discipline，2026-10-20）：按面推回在 CTF 轨会变成机械
+            # 凑数——`packs/kb/ctf/dimensions.yaml` 的注释已明写这一点（「把它切成
+            # 10 个面会变成机械凑数：模型被迫为不适用本题的面写 dead_end，纯烧
+            # 轮次」），但这里的通用文案仍在要求「已声明资产还有适用维度未覆盖时
+            # 先补 plan」。两处口径必须一致，否则维度清单的克制被提示词推翻。
+            lines.append(
+                "### plan→execute→plan 纪律（CTF 解题节奏）\n"
+                "先 plan：用 declare_intent(target_asset_id=…, statement=…, "
+                "dimension=…) 把**当前解题假设**落成一句可证伪的话；再 execute；"
+                "每条意图用 close_intent 收尾（finding / dead_end，见题目上下文里的"
+                "「CTF 意图纪律」）。\n"
+                "**不要按测试面凑覆盖**：CTF 的收敛判据是 flag 台账，不是「每个面都"
+                "有收尾意图」。某个面（如 binary 的 analyze）对本题没有意义就跳过，"
+                "不要为了「补齐维度」去声明一条空意图再给它写 dead_end。")
         else:
             lines.append(
                 "### plan→execute→plan 纪律\n"
@@ -1188,13 +1781,45 @@ class ChatTurn:
                 "不要提前给最终摘要。")
         return "\n".join(lines)
 
+    # 文件清单的来源标注（ctf-inspect-provenance，2026-10-20）。
+    #
+    # **为什么需要 provenance**（用户实测真问题）：清单里同时躺着
+    # `solve_usb_pcapng.py` / `solve_shenbi_traffic.py` / `usbpcap_extract.py`
+    # ——这题**之前已经解过、脚本都在**。主控不知道哪些是「用户给的原件」、
+    # 哪些是「上一轮 agent 的产物」，于是从零派了 3 条方向，3 个 agent 各写了
+    # 一遍解析器（同一题 3 份重复劳动）。
+    #
+    # 标注只需四档，判据全是**路径前缀**（确定性、无猜测）：
+    _FILE_ORIGIN_RULES = (
+        ("artifacts/attachments/", "题目原件", "用户上传，**不可信也不可改**"),
+        ("scratch/", "上轮产物", "agent 自己产的，**可复用可覆盖**"),
+        ("work/", "上轮产物", "agent 自己产的，**可复用可覆盖**"),
+        ("samples/", "样本", "样本库"),
+    )
+
+    def _file_origin(self, rel: str) -> tuple[str, str]:
+        """路径 → (标签, 一句说明)。未知来源单独一档（需人工确认）。"""
+        low = rel.lower()
+        for prefix, label, note in self._FILE_ORIGIN_RULES:
+            if low.startswith(prefix):
+                return label, note
+        return "未知来源", "需人工确认来历"
+
     def _workspace_files_context(self) -> str:
-        """CTF 主控可见的项目文件清单，统一输出容器路径，避免重复猜路径。"""
+        """CTF 主控可见的项目文件清单 + **来源标注**（容器路径）。
+
+        清单的用途不只是「免得重复 find」，更是让主控判断**这题是否已被解过**。
+        所以每行必须带 provenance（`[题目原件]` / `[上轮产物]` / `[样本]` /
+        `[未知来源]`）——没有它，`solve_xxx.py` 和 `题目.zip` 在模型眼里一样，
+        它就会从零重写一遍解析器。见 `_FILE_ORIGIN_RULES` 的注释。
+        """
         if not self.artifacts_dir:
             return ""
         root = Path(self.artifacts_dir).parent
         rows: list[str] = []
-        for rel_root in ("samples", "artifacts/attachments", "artifacts"):
+        reuse_hit = False
+        for rel_root in ("samples", "artifacts/attachments", "artifacts",
+                         "scratch", "work"):
             base = root / rel_root
             if not base.is_dir():
                 continue
@@ -1208,10 +1833,19 @@ class ChatTurn:
                         if rel.startswith("artifacts/attachments/"):
                             continue
                     try:
-                        size = p.stat().st_size
+                        st = p.stat()
+                        size, mtime = st.st_size, st.st_mtime
                     except OSError:
-                        size = 0
-                    rows.append(f"- /workspace/{rel} ({size} bytes)")
+                        size, mtime = 0, 0.0
+                    label, _note = self._file_origin(rel)
+                    # 上轮产物里出现「解题脚本」形态 = 这题很可能已被解过，
+                    # 触发清单标题里的硬提示（比逐行标注更醒目）。
+                    if label == "上轮产物" and _REUSE_SCRIPT_RX.search(p.name):
+                        reuse_hit = True
+                    stamp = (time.strftime("%m-%d %H:%M",
+                                           time.localtime(mtime)) if mtime else "")
+                    rows.append(f"- [{label}] /workspace/{rel} ({size} bytes"
+                                + (f", {stamp}" if stamp else "") + ")")
                     if len(rows) >= 100:
                         break
             except OSError:
@@ -1220,8 +1854,49 @@ class ChatTurn:
                 break
         if not rows:
             return "## CTF 项目文件清单\n- （samples/ 与 artifacts/ 下暂无文件）"
-        return ("## CTF 项目文件清单（容器内路径，优先直接使用，不要重复 find）\n"
-                + "\n".join(rows))
+        head = ["## CTF 项目文件清单（容器内路径，优先直接使用，不要重复 find）",
+                "- 标注含义：`[题目原件]`=用户上传（不可信不可改）；"
+                "`[上轮产物]`=上一轮 agent 产出（**可复用可覆盖**）；"
+                "`[样本]`=样本库；`[未知来源]`=来历不明，需人工确认。"]
+        if reuse_hit:
+            # 这条单独就能把「3 个 agent / 3 份解析器」压到「1 个 agent / 5 分钟」。
+            head.append(
+                "- ⚠ 清单里有 `[上轮产物]` 的 `solve_*.py` / `*_extract.py` / "
+                "`*decode*.py` —— **这题很可能已被解过**。第一动作应该是派一个 "
+                "worker 去**读并复现**它（跑一遍看输出是否就是答案），"
+                "而不是从零重新发现题型、重写解析器。")
+        return "\n".join([*head, *rows])
+
+    def _vision_context(self) -> str:
+        """看图纪律注入（vision 通道，2026-10-19）：模型能看图时才返回正文。
+
+        动机（用户实测真问题）：`deepseek-v4.1-flash` 所在网关支持图片输入，
+        但此前全链路没有图像通道 + 知识库把 `tesseract`/`zbarimg` 写成唯一解，
+        模型于是**有眼睛却不用**，一路 OCR。这里把「先看，再决定要不要 OCR」
+        写成显式纪律，并划清 OCR 仍然更优的三种场合——不是禁用 OCR，是让它
+        别默认选 OCR。
+
+        与 `view_image` 的工具描述**互为冗余**（工具描述是模型调工具时才看到，
+        系统提示是每步都在）：用户踩过的坑，双保险值得。
+        """
+        if not getattr(self.llm, "supports_vision", False):
+            return ""
+        return "\n".join([
+            "## 看图能力（你的模型能直接看图片）",
+            "- 你**有视觉通道**：`view_image(path=…)` 会把图片本体送进你的上下文，"
+            "你看到的是真像素，不是文字描述。",
+            "- **题目给的是图/截图/二维码/频谱图/位平面图/拼图碎片/UI 截图时，"
+            "第一个动作就是 view_image 看一眼**，不要先跑 OCR。先看清楚「这是什么"
+            "形态的题」，再决定用什么工具——方向错了，OCR 再多也只是把错误方向"
+            "读得更细。",
+            "- OCR（`tesseract` / `zbarimg`）仍然更优的三种场合：① **批量**扫几十"
+            "上百张候选（位平面暴力枚举、逐帧扫描）——肉眼看不完；② 需要**机器可"
+            "比的精确字符串**（逐字符 diff、逐帧对比）；③ 图糊/残缺到人眼也难辨，"
+            "只能靠算法容错。这三种之外，一律先 view_image。",
+            "- 隐写题的常见误区：直接 `strings`/`binwalk` 扫一遍就下结论「没东西」。"
+            "先看图——LSB 改动、色彩异常、边界错位、拼图接缝，人眼一秒能看出，"
+            "命令行要试十次。",
+        ])
 
     def _challenge_context(self) -> str:
         """CTF 题目上下文（challenge-asset，2026-10-14）：把「本线程归属的题目」
@@ -1254,6 +1929,17 @@ class ChatTurn:
             lines.append(
                 "- 后续本线程的 declare_intent / bb_add_finding **不必再填**"
                 " target_asset_id，会自动归到这道题下；附件也无需单独登记。")
+            # 台账现状 + 冲突主动上报（ctf-conflict-push，2026-10-20，P1-1）。
+            #
+            # 要解决的问题（用户实测）：两个 agent 都能通过 bb_query 看到台账
+            # （所以都说「2/1 已满」），但没有一个提出「已经有另一个 flag 了，
+            # 我们冲突了」。根因是台账对 worker 只是**只读数据**，没有「你发现
+            # 异常要上报」的通道——`conflict` 只在**提交时**触发，只看不交就
+            # 永远不触发。
+            #
+            # 所以把异常变成**每轮注入的主动推送**：注入在 system 里（不污染
+            # 消息历史），每轮重投影，状态一出现就被看到。
+            lines.extend(self._ledger_context(cid))
         else:
             lines.append(
                 "- 本线程**尚未登记题目**。题目描述与附件都由用户在输入框给出，"
@@ -1264,6 +1950,51 @@ class ChatTurn:
             lines.append(
                 "- 立题之后本线程的 declare_intent / bb_add_finding 不必再填"
                 " target_asset_id，会自动归到这道题下。")
+        # 跨题隔离（challenge-isolation，2026-10-19）：把「你看到的黑板已经按题
+        # 裁过了」说清楚——否则模型会以为「findings 只有这么几条」是黑板真的空，
+        # 反复换参数重查；也会在查不到某条（其实属于别题）时误判自己没登记成功。
+        lines.append(
+            "- **黑板查询默认只看本题**：bb_query 的 findings/assets/events 已按"
+            "「本线程题目子树 + 未归属条目」裁过，**别的题目**的发现、附件子资产、"
+            "执行事件都不回传（`assets` 里仍能看到别的题的题目行，便于你知道项目"
+            "还有哪些题）。这不是「黑板是空的」——是别的题的结论与你无关，看到它们"
+            "只会把别人的打法当成自己的线索。确需跨题对照时显式传 "
+            "`cross_challenge=true`。")
+        # 以下「怎么解题」的纪律**只给执行侧**（Worker / 子专家 / 激进主控的
+        # 探针），**不给 ARTEX 主控**（artex-controller-no-exec，2026-10-19）。
+        # 原因：主控是观察者+操舵者，它看到「拿到 flag 用 ctf_submit_flag、
+        # 弱口令用 ctf_ammo 写 scratch 再 run_cmd 消费」这类执行级指令后，
+        # 会直接照着做——用户实测「ARTEX 主控自己在解题，不派 Worker」。
+        # 主控需要的只有：怎么建题、怎么操舵、怎么判收敛（见 _ARTEX_CONTROLLER_STYLE）。
+        if self.is_artex:
+            lines.append(
+                "- **你不解题**：本线程没有 run_cmd/read_file 等实操工具。看到题目"
+                "要求后，用 artex_plan 让 Planner 拆成 Intent、由 Engine 派 Worker 执行；"
+                "Worker 找到 flag 会自己用 ctf_submit_flag 入台账。你只观察 "
+                "artex_status 的题目进度并按需操舵。")
+            lines.append(
+                "- 建题只需 bb_declare_challenge 一次（题目由 Engine 调度时自动"
+                "锚进任务范围）；**不要**为了「赶紧开跑」去直接派专家——本线程"
+                "没有 call_expert，跳过 artex_plan 会让目标、范围与探索图全空。")
+            pctx = self._pacing_context()
+            if pctx:
+                lines.append(pctx)
+            return "\n".join(lines)
+        if self.is_ctf_controller:
+            # CTF 解题主控（ctf-controller，2026-10-19）：有 ctf_submit_flag
+            # （人工可能直接口述 flag）但**没有执行工具**。故讲「怎么登记」
+            # 不讲「怎么消费 ctf_ammo」——后者要 run_cmd 配合，它没有。
+            lines.append(
+                "- **你只定方向，不做执行**：本线程没有 run_cmd/read_file。要跑命令"
+                "就 ctf_dispatch 提方向、再按计划 call_expert 派专家；专家找到 flag "
+                "会自己用 ctf_submit_flag 入台账。人工直接口述 flag 时你也用它登记。")
+            lines.append(
+                "- flag 台账是进度**唯一真值**：`ctf_review` 的「已得/需要」就是台账"
+                "算出来的，拿满即解出，代码不再为该方向派工——别重复派。")
+            pctx = self._pacing_context()
+            if pctx:
+                lines.append(pctx)
+            return "\n".join(lines)
         # flag 判定纪律（ctf-flagjudge，2026-10-19）：把「拿到疑似 flag 怎么办」
         # 从纯自然语言约束升级成可执行工具调用——模型自己说「解出来了」不再算数。
         lines.append(
@@ -1289,11 +2020,50 @@ class ChatTurn:
         pctx = self._pacing_context()
         if pctx:
             lines.append(pctx)
+        # 弱口令候选字典（ctf-ammo）：只有**真能执行**的角色才讲「写入 scratch
+        # 再用 run_cmd 消费」。chat-orchestrator 这类纯委派主控没有 run_cmd，
+        # 讲这句等于教它调一个它没有的工具（同类撕裂，2026-10-19 一并修）。
+        if self.is_orchestrator:
+            lines.append(
+                "- 弱口令/默认口令题：把题面线索（产品名、年份、管理员名字）交给"
+                "负责该题的**专家**，让它用 `ctf_ammo(hint_text=…, obs_text=…)` "
+                "展开候选表——你本线程没有执行工具，不要自己跑。")
+        else:
+            lines.append(
+                "- 弱口令/默认口令题不要只凭记忆试 `admin/admin`：把题面线索（产品名、"
+                "年份、管理员名字）交给 `ctf_ammo(hint_text=…, obs_text=…)` 生成候选表"
+                "（`pairs=true` 给 `user:pass`），写入 scratch 后再用 run_cmd 消费。"
+                "它只产候选，不爆破、不发请求。")
+        # CTF 意图纪律（ctf-intent-discipline，2026-10-20）：**替换**渗透轨那套
+        # 「逐资产独立立意 / 判净须 dead_end 背书」。
+        #
+        # 要解决的问题（用户实测）：通用意图纪律（`agent/loop.py` 的
+        # STRICT_PROMPT_TAIL 第 10 条）是**渗透语义**——它要求「一个子目标要判净，
+        # 须它名下意图全部收尾且至少一条 dead_end」，因为渗透的收敛靠
+        # `tested_clean`、而 `tested_clean` 靠 dead_end 背书。CTF 轨的收敛靠
+        # **flag 台账**，根本没有 dead_end 背书的消费方。模型被那段文案指挥着
+        # 去为「本题不适用的面」补 dead_end，纯烧轮次——用户原话「导致在结束时
+        # 需要死意图背书这方面浪费时间」。
+        #
+        # 这段只给执行侧（ARTEX 主控/CTF 解题主控已提前 return，拿不到这里）：
+        # 主控不声明意图，讲了只会诱导越权。
         lines.append(
-            "- 弱口令/默认口令题不要只凭记忆试 `admin/admin`：把题面线索（产品名、"
-            "年份、管理员名字）交给 `ctf_ammo(hint_text=…, obs_text=…)` 生成候选表"
-            "（`pairs=true` 给 `user:pass`），写入 scratch 后再用 run_cmd 消费。"
-            "它只产候选，不爆破、不发请求。")
+            "## CTF 意图纪律（与渗透轨不同，按本轨口径执行）\n"
+            "- **一题一意图就够了**：意图 = 你的解题假设（「验证输入是否触发栈溢出」"
+            "「验证 pcap 里是否有明文凭据」）。解题过程中换方向就再声明一条，"
+            "**不要**为「本题不适用的测试面」凑意图。\n"
+            "- **收尾三选一，按实际结果**：① 解出了 → "
+            "`close_intent(outcome=\"finding\", finding_ids=[flag 留痕那条 finding])`"
+            "（ctf_submit_flag 的候选线索回执里给了 finding id；正式 flag 也会落一条"
+            " flag-capture 留痕）；② 这条路不通但题还能解 → "
+            "`close_intent(outcome=\"dead_end\", dead_reason=…)`，只写清卡点即可，"
+            "**不必**去凑 `event:`/`http:` 证据引用；③ 整道题放弃 → "
+            "`ctf_abandon(reason=…)`。\n"
+            "- **CTF 轨没有「资产测干净（tested_clean）」**：本题终态由 flag 台账判定，"
+            "不要用 `bb_asset_status` 标题目或附件为 tested_clean——它不会让任何东西"
+            "收敛，只会撞门禁。\n"
+            "- **不需要 dead_end 背书**：那是渗透轨给 `tested_clean` 做背书的机制，"
+            "CTF 轨没有消费者。解出题就直接收尾，别为了「留个死路记录」再补一条。")
         return "\n".join(lines)
 
     def _pacing_context(self) -> str:
@@ -1353,6 +2123,437 @@ class ChatTurn:
         except Exception:  # noqa: BLE001
             return None
 
+    # ---------- CTF 解题主控（ctf-controller）的代码侧调度 ----------
+
+    def _ctf_session_for(self):
+        """惰性构造本线程的 `CtfSession`（ctf-controller，2026-10-19）。
+
+        **Pacing 的构造要读项目 config 与线程创建时间**（有 IO），故不在
+        `__init__` 里建——绝大多数线程（子专家、其他主控）永远用不到它。
+        构造失败返回 None：调度不可用时主控仍能靠 call_expert 干活，不该整轮炸。
+
+        复用 `_pacing_context` 的配置读取口径（deadline 优先、无则阶梯推断），
+        但**不复用它的返回值**——那里返回的是给人看的文本，这里要的是 Pacing
+        对象本身（放弃判据要用 `hard_total_cap_s()` 等数值）。
+        """
+        if not self.is_ctf_controller:
+            return None
+        if self._ctf_session is not None:
+            return self._ctf_session
+        try:
+            from core.ctf import pacing as ctf_pacing
+            from core.ctf.session import CtfSession
+            proj = self.bb.get_project(self.project_id) or {}
+            cfg = (proj.get("config") or {}).get("ctf") or {}
+            n_tasks = int(cfg.get("tasks") or 0) or ctf_pacing.ANCHOR_NTASKS
+            started = self._thread_started_at()
+            deadline = cfg.get("deadline")
+            ts = _to_epoch(deadline) if deadline else None
+            p = (ctf_pacing.Pacing.from_deadline(ts, n_tasks=n_tasks,
+                                                 started_at=started)
+                 if ts else ctf_pacing.Pacing(n_tasks=n_tasks, started_at=started))
+            self._ctf_session = CtfSession(p, holder=f"chat-{self.thread_id[-12:]}")
+        except Exception:  # noqa: BLE001 —— 调度不可用不阻断主控基本能力
+            log.exception("chat ctf 会话构造失败 thread=%s", self.thread_id)
+            return None
+        return self._ctf_session
+
+    def _tool_ctf_dispatch(self, args: dict) -> str:
+        """`ctf_dispatch`：把 LLM 提的方向交给代码判据，返回准派/拦下计划。"""
+        sess = self._ctf_session_for()
+        if sess is None:
+            return ("[错误] ctf_dispatch 不可用：本线程没有装配 CTF 调度器"
+                    "（只有 ctf-controller 主控可用）")
+        dirs = args.get("directions")
+        if not isinstance(dirs, list) or not dirs:
+            return "[错误] ctf_dispatch 失败：directions 必须是非空数组"
+        clean: list[dict] = []
+        for d in dirs:
+            if not isinstance(d, dict):
+                continue
+            sg = str(d.get("subgoal") or "").strip()
+            if not sg:
+                continue
+            item: dict = {"subgoal": sg}
+            if d.get("expert"):
+                item["expert"] = str(d["expert"]).strip()
+            if d.get("need") not in (None, ""):
+                item["need"] = d["need"]
+            clean.append(item)
+        if not clean:
+            return "[错误] ctf_dispatch 失败：所有方向都缺 subgoal"
+        plan = sess.plan(clean, breadth_starved=bool(args.get("breadth_starved")))
+        if plan.triage_blocked:
+            # 分诊闸不是「你这几个方向都不行」，是「先改编排」——不要报
+            # 「准派 0 拦下 N」，那会让模型以为方向本身有问题去换措辞。
+            return "[代码调度] 分诊还没得出结论：整批方向暂不派。\n" + plan.render()
+        head = (f"[代码调度] 准派 {len(plan.granted)} 个，拦下 "
+                f"{len(plan.rejected)} 个。\n")
+        return head + plan.render()
+
+    def _tool_ctf_review(self, args: dict) -> str:
+        """`ctf_review`：代码侧 verdict 表 + 互斥表。"""
+        sess = self._ctf_session_for()
+        if sess is None:
+            return ("[错误] ctf_review 不可用：本线程没有装配 CTF 调度器"
+                    "（只有 ctf-controller 主控可用）")
+        return sess.review()
+
+    # 只读头部字节数：够判魔数（zip=PK\x03\x04、png=\x89PNG、elf=\x7fELF、
+    # pcapng=\x0a\x0d\x0d\x0a），不够解题。**这不是随便定的**——P0-2 的红线是
+    # 「给它核对的能力，不给它执行的能力」。
+    _INSPECT_HEAD_BYTES = 32
+    # 单次最多摊几个文件（防清单瀑）
+    _INSPECT_MAX_FILES = 80
+
+    def _tool_ctf_inspect(self, args: dict) -> str:
+        """`ctf_inspect`：**只读的裁决通道**（ctf-inspect，2026-10-20，P0-2）。
+
+        **为什么需要它**（用户复盘的核心矛盾）：
+        > 系统给了主控「必须一手核实」的纪律，却没给它任何核实的工具。
+
+        实测那一轮里，主控对「这条 flag 是不是误报」的判断**唯一依据是另一个
+        agent 的自述摘要**——它没看过 `solve_usb_pcapng.py`、没看过 `out.txt`、
+        没看过 `flag.zip`。于是自述里的 linktype 249 与 220 互相矛盾，它无法发现。
+
+        **为什么不能直接给 `read_file`/`run_cmd`**：主控一旦能读文件、跑命令，
+        就会自己解题，绕过整套调度（ARTEX 主控事故 `3d4834f`：用户实测主控自己
+        在解题、不派 Worker）。这是硬红线，不松。
+
+        **所以这条通道的设计原则是「给核对，不给执行」**：
+        - `what="evidence"`：把台账里每条 flag 的**完整证据链原文**摊开（source
+          提交时的解题路径原文、transform、confidence、judged_by、关联 finding
+          的 evidence）。**不做摘要、不做评价**——让主控自己比。这些内容本来就
+          在台账里，主控本来就该看得见。
+        - `what="files"`：题目子树下的文件清单 + provenance + **每个文件的头部
+          32 字节魔数**。只读头部，**绝不返回全文**——够判断「这是不是 zip/图片/
+          流量包」，不够解题。
+
+        没有任意路径读取（只认本题目子树 + 工作区内已登记文件）、没有全文、
+        没有命令执行。这三条是它区别于 `read_file` 的全部意义。
+        """
+        what = str(args.get("what") or "evidence").strip().lower()
+        cid = str(args.get("challenge_id") or "").strip()
+        if not cid:
+            # 只做**读**的兜底解析（沿 parent_thread_id 向上找题目绑定），
+            # **不按线程标题补建**——核对通道不该有副作用。`ToolDispatcher`
+            # 上的 `_challenge_fallback_asset()` 会补建，这里刻意不用它。
+            try:
+                cid = chat_store.resolve_challenge_asset_id(
+                    self.bb, self.thread_id) or ""
+            except Exception:  # noqa: BLE001 —— 解析失败按「无题」处理
+                cid = ""
+        if not cid:
+            return ("[拒绝] 无法确定这道题：先 bb_declare_challenge 登记题目"
+                    "（或显式传 challenge_id）")
+        asset = self.bb.get_asset(cid)
+        if asset is None or asset.get("project_id") != self.project_id:
+            return f"[错误] 题目不存在: {cid}"
+        if str(asset.get("type") or "") != "challenge":
+            return (f"[拒绝] {cid} 不是题目（type={asset.get('type')}）"
+                    "——核对是题目级动作。")
+        if what in ("evidence", "flag", "flags"):
+            return self._inspect_evidence(cid, asset)
+        if what in ("files", "file"):
+            return self._inspect_files(cid, asset)
+        return (f"[拒绝] what 只能是 evidence / files，收到 {what!r}。"
+                "evidence=看台账里每条 flag 的完整证据链原文（判真假用）；"
+                "files=看题目文件清单+来源标注+头部魔数（判形态用）。")
+
+    def _inspect_evidence(self, cid: str, asset: dict) -> str:
+        """摊开台账证据链原文（不摘要不评价）。"""
+        from core.blackboard.challenge_flags import (challenge_state, list_flags)
+        name = str(asset.get("value") or cid)
+        rows = list_flags(self.bb, self.project_id, cid)
+        st = challenge_state(self.bb, self.project_id, cid)
+        head = [f"## {name} 的 flag 证据链（原文，未摘要）",
+                f"- 状态 {st['state']}｜已确认 {st['accepted']}/{st['quota']}"
+                f"｜候选 {st['candidate']}｜否决 {st['rejected']}"]
+        if st.get("conflict"):
+            head.append("- ⚠ **格式冲突**：同题内出现前缀互不相同的已确认 flag——至少一条是假的。")
+        if st.get("concluded"):
+            head.append("- 主控已收尾（不再派工），但 flag 仍待人工确认。")
+        if not rows:
+            head.append("- （台账为空：还没有任何 flag 被登记）")
+            return "\n".join(head)
+        findings = {str(f.get("id")): f
+                    for f in self.bb.list_findings(self.project_id)}
+        for i, r in enumerate(rows, 1):
+            verdict = str(r.get("verdict") or "")
+            tag = {"accepted": "人工确认", "rejected": "已否决"}.get(verdict, "候选")
+            head.append(f"\n### {i}. {r.get('flag')}　[{tag}]")
+            head.append(f"- 置信 {float(r.get('confidence') or 0):.1f}"
+                        f"｜判定者 {r.get('judged_by') or 'ai'}"
+                        f"｜登记 {r.get('created_at') or ''}")
+            fmt = str(r.get("flag_format") or "")
+            if fmt:
+                head.append(f"- 题目声明格式 {fmt}")
+            transform = str(r.get("transform") or "")
+            head.append(f"- 变换 {transform or '**（未提供 → 没跑回环验证）**'}")
+            if r.get("verdict_reason"):
+                head.append(f"- 裁决理由 {r.get('verdict_reason')}")
+            src = str(r.get("source") or "").strip()
+            # **原文照贴**，只截长度（防一条超长把整段挤爆），不重述不总结。
+            if src:
+                head.append("- 解题路径原文：")
+                head.append("```")
+                head.append(src[:2000])
+                head.append("```")
+            else:
+                head.append("- 解题路径原文：**（空——这条没有任何一手依据）**")
+            fid = str(r.get("finding_id") or "")
+            f = findings.get(fid)
+            if f:
+                ev = f.get("evidence") or {}
+                steps = ev.get("repro_steps") if isinstance(ev, dict) else None
+                if steps:
+                    head.append(f"- 关联留痕 finding {fid} 的复现步骤：")
+                    for s in steps[:3]:
+                        code = str((s or {}).get("code") or "")[:400]
+                        head.append(f"  - {str((s or {}).get('desc') or '')[:80]}")
+                        if code:
+                            head.append("    ```")
+                            head.append("    " + code.replace("\n", "\n    "))
+                            head.append("    ```")
+        head.append("\n**怎么用这份材料**：逐条比 `source`/`transform` 是否真能推出"
+                    "该 flag。没有 transform 的条目**只是形态像**，不是证据。"
+                    "两条前缀不同 → 至少一条是假的，标掉错的那条。")
+        return "\n".join(head)
+
+    def _inspect_files(self, cid: str, asset: dict) -> str:
+        """题目子树文件清单 + provenance + 头部魔数（不返回全文）。
+
+        **两个来源都要列**（这是它区别于「只查资产表」的地方）：
+        ① 题目子树下的**已登记资产**（附件子资产 / 入口点）；
+        ② 工作区里的 `artifacts/attachments`（用户直接丢进输入框的）与
+           `scratch`/`work`（**上一轮 agent 自己的产物**）。
+
+        ②不可省：用户复盘里主控看不到 `solve_usb_pcapng.py` 就是因为它不是
+        资产、只在 `scratch/` 里躺着——而这恰好是「这题已经解过」的最强信号。
+        仍不做全盘遍历（只认这几个已知根），「没有任意路径读取」不变。
+        """
+        if not self.artifacts_dir:
+            return "[错误] 本线程未装配工作目录，无法列出文件"
+        root = Path(self.artifacts_dir).parent
+        # 题目子树内的资产（附件子资产 / 入口点）——只认这些，不做全盘遍历，
+        # 这就是「没有任意路径读取」的落实处。
+        try:
+            assets = self.bb.list_assets(self.project_id)
+        except Exception:  # noqa: BLE001
+            assets = []
+        parent_of = {a["id"]: a.get("parent_id") for a in assets}
+        by_id = {a["id"]: a for a in assets}
+
+        def _in_subtree(aid: str) -> bool:
+            walker, seen = aid, set()
+            while walker and walker not in seen:
+                seen.add(walker)
+                if walker == cid:
+                    return True
+                walker = parent_of.get(walker)
+            return False
+
+        name = str(asset.get("value") or cid)
+        lines = [f"## {name} 的文件（来源标注 + 头部魔数；**只给头部，不给全文**）"]
+        rows: list[str] = []
+        # 「这题已经解过」只能**基于本次清单的事实**说（ctf-inspect-reuse-hint，
+        # 2026-10-20）。此前这段提示是无条件拼在尾巴上的固定文案，于是新开的
+        # 项目、新派的题（清单里只有 `[题目原件]`）也会被告知「这题已经解过，
+        # 别再派从零分析」——直接与事实相反，还会把主控推去「复现」不存在的产物。
+        reuse: list[str] = []
+        # 两个来源会**指向同一个文件**（资产行登记的就是 `artifacts/attachments/x`
+        # 里的那个），不跨源去重就会把同一个 pcapng 列两遍——主控会以为有两份。
+        seen_rel: set[str] = set()
+
+        def _rel(p: Path) -> str:
+            try:
+                return p.relative_to(root).as_posix()
+            except ValueError:
+                return str(p)
+
+        def _note_reuse(p: Path) -> None:
+            rel = _rel(p)
+            if (self._file_origin(rel)[0] == "上轮产物"
+                    and _REUSE_SCRIPT_RX.search(p.name)):
+                reuse.append(rel)
+
+        for a in assets:
+            if a["id"] == cid or not _in_subtree(a["id"]):
+                continue
+            val = str(a.get("value") or "").strip()
+            if not val:
+                continue
+            p = Path(val)
+            if not p.is_absolute():
+                p = root / val
+            if not p.is_file():
+                continue
+            rel = _rel(p)
+            if rel in seen_rel:
+                continue
+            seen_rel.add(rel)
+            rows.append(self._inspect_one(p, root))
+            _note_reuse(p)
+            if len(rows) >= self._INSPECT_MAX_FILES:
+                break
+        # 附件目录 + 上轮产物目录：即使资产行缺失（用户直接丢附件进输入框、
+        # agent 自己写的脚本）也要能看见。**只认这三个已知根**，不做全盘遍历。
+        for sub, label in (("artifacts/attachments", "题目原件"),
+                           ("scratch", ""), ("work", "")):
+            base = root / sub
+            if not base.is_dir():
+                continue
+            try:
+                for p in sorted(base.rglob("*"), key=lambda x: str(x).lower()):
+                    if not p.is_file():
+                        continue
+                    rel = _rel(p)
+                    if rel in seen_rel:
+                        continue
+                    seen_rel.add(rel)
+                    rows.append(self._inspect_one(p, root, origin=label))
+                    _note_reuse(p)
+                    if len(rows) >= self._INSPECT_MAX_FILES:
+                        break
+            except OSError:
+                pass
+            if len(rows) >= self._INSPECT_MAX_FILES:
+                break
+        if not rows:
+            lines.append("- （题目子树下没有可读文件：附件可能还没上传，"
+                         "或资产值不是文件路径）")
+            return "\n".join(lines)
+        lines.extend(rows)
+        lines.append("\n**怎么用**：`PK\\x03\\x04`=zip、`\\x89PNG`=PNG、`\\x7fELF`=ELF、"
+                     "`\\x0a\\x0d\\x0d\\x0a`=pcapng、`\\xd4\\xc3\\xb2\\xa1`=pcap。"
+                     "魔数与 agent 自述不符 → 以魔数为准（这是你的一手依据）。"
+                     "需要读全文/跑脚本请**派 worker**，不要试图自己执行。")
+        if reuse:
+            # 只有清单里**真的**存在上轮解题脚本时才这么说。这条单独就能把
+            # 「3 个 agent / 3 份解析器」压到「1 个 agent / 5 分钟」。
+            shown = "、".join(reuse[:3]) + ("…" if len(reuse) > 3 else "")
+            lines.append(f"- ⚠ 上面有 `[上轮产物]` 的解题脚本（{shown}）——"
+                         "**这题很可能已被解过**。第一动作应该是派 worker 去"
+                         "**读并复现**它（跑一遍看输出是否就是答案），而不是从零"
+                         "重新发现题型、重写解析器。")
+        else:
+            # 反向也要明说，否则模型会自己脑补「也许已经解过」而绕路。
+            lines.append("- 清单里**没有** `[上轮产物]` 的解题脚本（`solve_*` / "
+                         "`extract_*` / `parse_*`）→ 这题**没有可复用的既有成果**，"
+                         "按新题从零分析是正常路径，不要去找不存在的旧脚本。")
+        return "\n".join(lines)
+
+    def _inspect_one(self, p: Path, root: Path, origin: str = "") -> str:
+        """单文件一行：来源 + 路径 + 大小 + 头部魔数（hex + 可读形态）。"""
+        try:
+            rel = p.relative_to(root).as_posix()
+        except ValueError:
+            rel = str(p)
+        if not origin:
+            origin = self._file_origin(rel)[0]
+        try:
+            size = p.stat().st_size
+            with p.open("rb") as fh:
+                head = fh.read(self._INSPECT_HEAD_BYTES)
+        except OSError as e:
+            return f"- [{origin}] /workspace/{rel} （读取失败: {e}）"
+        magic = self._magic_of(head)
+        return (f"- [{origin}] /workspace/{rel} ({size} bytes) "
+                f"头部={head.hex(' ') or '<空>'}　→ {magic}")
+
+    @staticmethod
+    def _magic_of(head: bytes) -> str:
+        """魔数 → 人话（判形态用；认不出就说认不出，不猜）。"""
+        if not head:
+            return "空文件"
+        if head.startswith(b"PK\x03\x04") or head.startswith(b"PK\x05\x06"):
+            return "**ZIP 压缩包**"
+        if head.startswith(b"\x89PNG\r\n\x1a\n"):
+            return "**PNG 图片**"
+        if head.startswith(b"\xff\xd8\xff"):
+            return "**JPEG 图片**"
+        if head.startswith(b"GIF8"):
+            return "**GIF 图片**"
+        if head.startswith(b"%PDF"):
+            return "**PDF 文档**"
+        if head.startswith(b"\x7fELF"):
+            return "**ELF 可执行**"
+        if head.startswith(b"MZ"):
+            return "**PE 可执行**"
+        if head.startswith(b"\x0a\x0d\x0d\x0a"):
+            return "**pcapng 流量包**"
+        if head.startswith(b"\xd4\xc3\xb2\xa1") or head.startswith(b"\xa1\xb2\xc3\xd4"):
+            return "**pcap 流量包（小端）**"
+        if head.startswith(b"\x4d\x3c\xb2\xa1") or head.startswith(b"\xa1\xb2\x3c\x4d"):
+            return "**pcap 流量包（大端）**"
+        if head.startswith(b"Rar!"):
+            return "**RAR 压缩包**"
+        if head.startswith(b"7z\xbc\xaf\x27\x1c"):
+            return "**7z 压缩包**"
+        if head.startswith(b"\x1f\x8b"):
+            return "**gzip 压缩**"
+        if head.startswith(b"BZh"):
+            return "**bzip2 压缩**"
+        if head.startswith(b"ustar") or head[257:262] == b"ustar":
+            return "**tar 归档**"
+        if head.startswith(b"SQLite format 3\x00"):
+            return "**SQLite 数据库**"
+        if head.startswith(b"\x00\x00\x00\x00"):
+            return "疑似全零（可能是被填充/损坏）"
+        try:
+            text = head.decode("utf-8")
+            if text.isprintable() or text.replace("\n", "").isprintable():
+                return "文本（可打印 ASCII/UTF-8 前缀）"
+        except UnicodeDecodeError:
+            pass
+        return "**未知形态**（认不出，别猜——派 worker 看）"
+
+    def _ledger_context(self, cid: str) -> list[str]:
+        """台账现状 + **冲突主动上报**（ctf-conflict-push，2026-10-20，P1-1）。
+
+        只报**异常**，不报常规进度：常规进度用 `ctf_review` 查，注入里再列一遍
+        会稀释真信号（模型对每轮都出现的长文本会开始跳过）。
+
+        三条异常各有不同的**该做什么**，必须分开写：
+        - `conflict`：同题内前缀互不相同的已确认 flag → 至少一条是假的。要它
+          用 `ctf_submit_flag` 附一手证据链，否则别提交。
+        - `over_quota`：确认数超过配额 → 多半是用户主动下调了 `flag_count`。
+          **不当错误**，只提示「按新的 M 算」。
+        - `concluded`：主控已收尾 → 别再派工，有异议先撤销收尾。
+        """
+        try:
+            from core.blackboard.challenge_flags import challenge_state
+            st = challenge_state(self.bb, self.project_id, cid)
+        except Exception:  # noqa: BLE001 —— 注入失败不阻断解题
+            return []
+        out: list[str] = []
+        quota = int(st.get("quota") or 0)
+        got = int(st.get("accepted") or 0)
+        cand = int(st.get("candidate") or 0)
+        if st.get("conflict"):
+            keys = [str((c or {}).get("flag") or "") for c in (st.get("conflict") or [])]
+            keys = [k for k in keys if k]
+            out.append(
+                "- ⚠ **本题已有格式不同的已确认 flag**"
+                f"（{' / '.join(keys[:4])}）——**至少一条是错的**。"
+                "若你手上的是其中一条，请用 ctf_submit_flag 附**一手证据链**"
+                "（source + transform + 可复现命令）再提交；否则不要提交。"
+                "两条都像真的时，让代码按前缀判冲突，不要靠感觉挑。")
+        if st.get("over_quota"):
+            out.append(
+                f"- 已确认 {got} 条 > 配额 {quota} 条：多半是配额被下调过。"
+                f"按新的 {quota} 条算进度，**不要**把多出来的那条当错报。")
+        if st.get("concluded"):
+            out.append(
+                "- 本题已被主控**收尾**（不再派新 Worker）：别再开新方向；"
+                "若你确认还有没做完的面，先 ctf_conclude(concluded=false) 撤销。")
+        if cand and not got:
+            out.append(
+                f"- 本题有 **{cand} 条候选 flag 待人工确认**（候选不计解出）："
+                "若你能补上一手证据链，用 ctf_submit_flag 重新提交同一条把它升级；"
+                "补不出来就继续找——别停在候选上。")
+        return out
+
     def _situation_context(self) -> str:
         """主控态势注入（asset-tri-state D8，2026-10-09）：三态分桶让主控看得见
         「哪些没测、哪些测了没测尽、哪些测干净」，据此规划委派；否则主控只能靠
@@ -1394,8 +2595,13 @@ class ChatTurn:
                      "（勿重复派发；新增子资产会自动使其掉出 clean，重新纳入）")
         lines.append(
             "纪律：优先委派**未测试**资产；**已访问**资产续派时按未覆盖的测试面深挖；"
-            "**已测干净**资产不再派发。委派时用 call_expert(asset_ids=...) 显式划定"
-            "该子专家的资产范围，避免多个子专家重复测试同一资产。")
+            "**已测干净**资产不再派发。"
+            + ("委派时用 artex_plan(asset_ids=[…]) 把要测的资产划进任务范围"
+               "（它同时是覆盖度分母），Planner 会据此派方向——你本线程没有 "
+               "call_expert。"
+               if self.is_artex else
+               "委派时用 call_expert(asset_ids=...) 显式划定"
+               "该子专家的资产范围，避免多个子专家重复测试同一资产。"))
         return "\n".join(lines)
 
     def _blueprint_context(self) -> str:
@@ -1514,18 +2720,58 @@ class ChatTurn:
                   "<资产id>, statement=...) 声明未覆盖面，执行后 close_intent 收尾；"
                   "全部适用面覆盖后再给最终摘要。")
 
+    def _controller_tool_face(self) -> list[str] | None:
+        """控制器工具面：**yaml `tools` 优先**，未设置才回落到代码默认。
+
+        用户语义（2026-10-20 纠错）：设置页「专家池 → 工具白名单」是**可勾选启动**
+        的开关，不是只读展示。此前控制器完全不读 yaml 的 `tools`（`is_orchestrator`
+        分支直接吃代码常量），于是：
+
+        - 界面上控制器一律显示「全部（未限制）」——因为 yaml 里没这个键；
+        - 用户在那儿勾选保存，**对控制器毫无影响**，改的是死字段。
+
+        现在把 `tools` 变成控制器的**真实开关**：
+        - yaml 有 `tools` 列表 → 用它（UI 勾了什么就是什么）；
+        - 没有 / 为 null → 回落 `controller_tool_face()` 的代码默认值
+          （保持既有行为，不因本次改动让老项目突然变宽或变窄）。
+
+        `[]`（显式空）也照用——语义是「一个业务工具都不开」，只留恒放行的
+        计划/控制原语。这与 `expert_tool_names` 对子专家的口径一致。
+
+        返回 None = 不是控制器。
+
+        **yaml 的 `tools` 是最终裁决**：勾了就下发、没勾就不下发（schema 与
+        执行白名单同步），不再被「按轨强制追加」补回来——否则勾选只是装饰。
+        代价是默认值必须自己含齐各轨必需项（见 `controller_tool_face` 的
+        `track` 参数说明）。
+
+        **轨道适用性过滤（controller-tool-select）**：`ctf_*` 是 CTF 轨语义，
+        非 CTF 轨即便勾了也不下发（yaml 的 `tools` 跨轨共享，用户在 CTF 项目
+        勾的 `ctf_submit_flag` 不该出现在 pentest 轨的工具面里）。同理 CTF 轨
+        也不下发逆向专属工具——那条由各角色默认面天然不含来保证。
+        """
+        default = controller_tool_face(self.agent_id, self.track)
+        if default is None:
+            return None
+        try:
+            expert = load_expert(self.packs_root, self.agent_id, self.track)
+        except FileNotFoundError:
+            return _track_filter(default, self.track)
+        tools = expert.get("tools")
+        if isinstance(tools, list):
+            return _track_filter([str(t) for t in tools], self.track)
+        return _track_filter(default, self.track)
+
     def _build_dispatcher(self) -> ToolDispatcher | None:
         """复用 ToolDispatcher 的黑板/技能/网关工具处理器（run_cmd/http/
         kb/skill/bb_* 全套安全机制免费拿）；allowed_tools 按线程角色收敛。"""
         try:
             if self.is_orchestrator:
-                if self.is_aggressive:
-                    base = (*_CTF_CORE_TOOLS, "bb_declare_challenge")
-                elif self.is_artex:
-                    base = tuple(_ORCH_BASE_TOOLS) + ("run_cmd", "read_file",
-                                                       "search_files")
-                else:
-                    base = _ORCH_BASE_TOOLS
+                # 控制器工具面：**yaml `tools` 优先**（可勾选启动），未设置才
+                # 回落各角色的代码默认值。见 `_controller_tool_face` 的注释
+                # ——此前控制器完全不读 yaml，设置页勾选对它们毫无影响。
+                face = self._controller_tool_face()
+                base = tuple(face or ())
                 allowed = [t for t in base if t != "todo_write"
                            and t != "call_expert"]
             else:
@@ -1550,7 +2796,16 @@ class ChatTurn:
             # 知识库迭代开关（2026-10-15）：关 = Agent 不提任何提案 → 工具面剔除
             # propose_pack_edit（与 _maybe_kb_iteration/_system_prompt 同口径实时读）；
             # ToolDispatcher 执行层另有一道硬闸，双保险。
-            if not self._kb_iteration_on():
+            #
+            # **开 = 动态追加**（controller-tool-select）：控制器改勾选面裁决后，
+            # `propose_pack_edit` 不再在默认面里（它受开关门禁，静态清单表达不了
+            # 「看开关」）。只保留上面的「关就剔」会让它永远消失——开关开了也
+            # 拿不到，`test_chat_kb_iteration_flag_gates_proposal_toolface` 实测
+            # 直接挂。故按 web_search 同款：开就补，与 `_tool_specs` 双边同步。
+            if self._kb_iteration_on():
+                if "propose_pack_edit" not in allowed:
+                    allowed = [*allowed, "propose_pack_edit"]
+            else:
                 allowed = [t for t in allowed if t != "propose_pack_edit"]
             # 联网搜索开关（v43，web-search-toggle）：线程级，主控开 = 子代理
             # 继承（call_expert/ARTEX Worker 建线程时从父线程带位）。工具面与
@@ -1566,6 +2821,20 @@ class ChatTurn:
                 # 事实写回（artex-record-fact）：与 schema 追加**双边同步**。
                 if RECORD_FACT_TOOL_NAME not in allowed:
                     allowed = [*allowed, RECORD_FACT_TOOL_NAME]
+            # CTF flag 通道（ctf-flag-channel）：与 `_tool_specs` 的追加**双边
+            # 同步**——只加 schema 不加白名单 = 模型看得见却调不动（越界拒绝），
+            # 只加白名单不加 schema = 模型不知道有这工具。
+            # **ARTEX 主控除外**（artex-controller-no-exec）：主控不判定 flag。
+            # **控制器整段跳过**（controller-tool-select）：控制器已经由 yaml
+            # 勾选面装配好 `allowed`，这里再「按轨强制追加」会把勾选变成装饰
+            # （用户取消勾选 ctf_conclude，白名单里又被加回来 = 界面在骗人）。
+            # 子专家没有勾选面语义变化，照旧按轨追加。
+            if self.track == "ctf" and not self.is_artex and not self.is_orchestrator:
+                want = [*_CTF_FLAG_TOOLS, *_CTF_ABANDON_TOOLS,
+                        *_CTF_CONCLUDE_TOOLS]
+                for tname in want:
+                    if tname not in allowed:
+                        allowed = [*allowed, tname]
             # 收尾阶段（artex-wrapup）：白名单裁成「只能写回」。与 _tool_specs
             # 的同类裁剪**双边同步**——只裁一边会撕裂（schema 有执行拒 / 执行放行
             # schema 无）。放在最后，确保它裁掉前面所有分支刚加进来的探测类工具。
@@ -1595,7 +2864,10 @@ class ChatTurn:
                 intent_free=(self.probe_mode or self.intent_free),
                 environment_id=(f"ctf-{self.project_id}" if self.track == "ctf" else None),
                 thread_id=self.thread_id,
-                recovery=self.recovery)
+                recovery=self.recovery,
+                # vision 通道（2026-10-19）：模型能否看图由 provider 实例的
+                # supports_vision 决定（providers.json `vision: true`）→ 注入工具层
+                supports_vision=bool(getattr(self.llm, "supports_vision", False)))
         except Exception:  # noqa: BLE001 —— 装配失败降级为无黑板工具
             log.exception("chat ToolDispatcher 装配失败 thread=%s", self.thread_id)
             return None
@@ -1629,14 +2901,10 @@ class ChatTurn:
 
     def _tool_specs(self) -> list[dict[str, Any]]:
         if self.is_orchestrator:
-            if self.is_aggressive:
-                base = (*_CTF_CORE_TOOLS, "bb_declare_challenge")
-            elif self.is_artex:
-                base = tuple(_ORCH_BASE_TOOLS) + ("run_cmd", "read_file",
-                                                   "search_files")
-            else:
-                base = _ORCH_BASE_TOOLS
-            names = {t for t in base if t not in ("todo_write", "call_expert")}
+            # 与 `_build_dispatcher` **双边同步**：控制器工具面 = yaml `tools`
+            # 优先，未设置才回落代码默认（见 `_controller_tool_face`）。
+            face = self._controller_tool_face() or []
+            names = {t for t in face if t not in ("todo_write", "call_expert")}
             specs = _specs_by_names(names)
             specs = [*self._orch_tool_specs(), *specs]
         else:
@@ -1656,25 +2924,40 @@ class ChatTurn:
                      if s.get("name") not in _PROBE_EXCLUDED_TOOLS]
         if self.mcp_bridge is not None:
             mcp_specs = self.mcp_bridge.tool_specs()
-            # 专家显式勾选 MCP server 时，仅暴露这些 server；缺省沿用全局已启用集合。
-            if not self.is_orchestrator:
+            if self.is_orchestrator:
+                # 控制器：MCP **同样受勾选面裁决**（controller-mcp-face，
+                # 2026-10-20）。此前这段只对子专家按 yaml `mcp_servers` 过滤，
+                # 控制器分支无条件全量注入——实测 CTF 主控勾了 16 个工具
+                # （13.4K 字符），却被塞进 rea server 的全部 215 个工具
+                # （549K 字符 / 约 183K token），单 `compare_web_captures`
+                # 一个 schema 就 62K（$defs 里 93 层嵌套结构定义）。
+                # 面板「工具定义 156.2K」不是估算失真，是真实下发量。
+                # 现在与业务工具同口径：勾了才下发（schema 与 `_dispatch`
+                # 的白名单检查天然双边一致——那里也是按同一 face 判）。
+                face = set(self._controller_tool_face() or [])
+                mcp_specs = [s for s in mcp_specs
+                             if mcp_allowed_by_face(str(s.get("name") or ""), face)]
+            else:
+                # 专家显式勾选 MCP server 时，仅暴露这些 server；缺省沿用全局已启用集合。
                 try:
                     mcp_allow = load_expert(self.packs_root, self.agent_id, self.track).get("mcp_servers")
                     if isinstance(mcp_allow, list):
                         allowed_servers = {str(x).strip() for x in mcp_allow if str(x).strip()}
-
-                        def _server_of(spec: dict[str, Any]) -> str:
-                            parts = str(spec.get("name") or "").split("__", 2)
-                            return parts[1] if len(parts) == 3 else ""
-
                         mcp_specs = [s for s in mcp_specs
-                                     if _server_of(s) in allowed_servers]
+                                     if mcp_server_of(str(s.get("name") or ""))
+                                     in allowed_servers]
                 except Exception:  # noqa: BLE001
                     log.exception("chat MCP 专家白名单读取失败 thread=%s", self.thread_id)
             specs = [*specs, *mcp_specs]
         # 知识库迭代开关（2026-10-15）：关 = 不下发 propose_pack_edit 的 schema
         # （LLM 看不到工具就不会调；执行层硬闸 + dispatcher 白名单三重保险）。
-        if not self._kb_iteration_on():
+        # 开 = **动态追加**（controller-tool-select，与 `_build_dispatcher` 双边
+        # 同步）：控制器改勾选面裁决后它不在默认面里，只留「关就剔」会让开关
+        # 开了也拿不到。按 web_search 同款补上。
+        if self._kb_iteration_on():
+            if not any(s.get("name") == "propose_pack_edit" for s in specs):
+                specs = [*specs, *_specs_by_names({"propose_pack_edit"})]
+        else:
             specs = [t for t in specs if t.get("name") != "propose_pack_edit"]
         # 联网搜索开关（v43）：开 = 追加 web_search 的 schema（LLM 看得见才调得
         # 动；执行层白名单同步放行）。放在过滤链尾部、bb_query 轨裁剪之前，
@@ -1693,10 +2976,35 @@ class ChatTurn:
             # 不是专家能力），已声明过则不重复挂。
             if not any(s.get("name") == RECORD_FACT_TOOL_NAME for s in specs):
                 specs = [*specs, RECORD_FACT_TOOL_SPEC]
+        # CTF flag 通道（ctf-flag-channel）：按轨追加，不写进专家 yaml。
+        # 见 `_CTF_FLAG_TOOLS` 的注释——此前漏了这一步导致 flag 台账在真实
+        # ARTEX 执行链上不可达（提示词要求调、工具面没有、一调就被越界拒）。
+        #
+        # **ARTEX 主控除外**（artex-controller-no-exec）：主控不执行、不判定
+        # flag，flag 由 Worker 报。给它这两个工具会诱导它自己去解题（用户实测
+        # 主控自己在解题、不派 Worker）。激进主控/探针是执行角色，照给。
+        #
+        # **控制器整段跳过**（controller-tool-select）：控制器已由 yaml 勾选面
+        # 装配好 specs，这里再按轨强制追加会把勾选变成装饰——用户取消勾选
+        # `ctf_conclude`，schema 又被加回来，界面与运行期再次脱节。
+        # 子专家没有勾选面语义变化，照旧按轨追加。
+        if self.track == "ctf" and not self.is_artex and not self.is_orchestrator:
+            want = [*_CTF_FLAG_TOOLS, *_CTF_ABANDON_TOOLS, *_CTF_CONCLUDE_TOOLS]
+            have = {s.get("name") for s in specs}
+            missing = [t for t in want if t not in have]
+            if missing:
+                specs = [*specs, *_specs_by_names(set(missing))]
         # bb_query 的 what 面按轨裁剪（track-query-split，2026-10-13）：
         # 渗透/逆向互用不到的面不下发——与 AgentSession 同口径（tool_registry 家族表）。
-        specs = [bb_query_schema_for(self.track) if s.get("name") == "bb_query" else s
-                 for s in specs]
+        # ARTEX 主控再收一档（artex-controller-slim，2026-10-20）：它只查
+        # events/assets/findings，逆向那四面（func/blueprint/feature_tree/
+        # logic_block）与另外十几个参数对它全是噪声。
+        if self.is_artex:
+            specs = [bb_query_schema_for_artex() if s.get("name") == "bb_query" else s
+                     for s in specs]
+        else:
+            specs = [bb_query_schema_for(self.track) if s.get("name") == "bb_query" else s
+                     for s in specs]
         # 收尾阶段（artex-wrapup）：裁成「只能写回」的子集。与 _build_dispatcher
         # 的白名单裁剪**双边同步**。放最后，确保裁掉上面所有分支刚追加的工具。
         if getattr(self, "_wrapup_active", False):
@@ -1705,6 +3013,14 @@ class ChatTurn:
 
     def _orch_tool_specs(self) -> list[dict[str, Any]]:
         """主控专属工具规格：todo_write + call_expert（专家清单动态生成）。
+
+        ARTEX 主控**不给 call_expert**（artex-plan-only，2026-10-19 事故）：
+        派活只能走 artex_plan（Planner → Engine → Worker）。给第二条旁路的后
+        果是实测过的——主控直接 call_expert 派一个专家，绕过了 Planner，
+        于是**目标、探索图、任务范围全空**，而那条 Intent 的 ``task_id`` 是
+        线程 id 拼出来的假任务。此处与 ``_build_dispatcher`` 的
+        「``allowed`` 剔除 call_expert」**双边同步**：只剔一边会撕裂成
+        「schema 有、执行拒」（模型看得见却调不动，白烧步数）。
 
         ARTEX 主控额外挂 artex_* 操舵四件套（见 ``_artex_tool_specs``）：派发
         权归项目 Engine，主控只做观察与调整。
@@ -1720,7 +3036,12 @@ class ChatTurn:
                 continue
             expert_rows.append(f"- {eid}：{e.get('name', eid)}——"
                                f"{e.get('description', '')}")
-        specs = [
+        # todo_write / call_expert 是否下发，**以 yaml `tools` 勾选为准**
+        # （controller-tool-select，2026-10-20）：用户要的是「勾选启动」，
+        # 所以这两个也不该由代码按角色硬性决定。`face` 就是 yaml 勾选结果
+        # （未设置时是代码默认值，默认值里 ARTEX 主控不含这两个）。
+        face = set(self._controller_tool_face() or ())
+        specs: list[dict[str, Any]] = [
             {
                 "name": "todo_write",
                 "description": "维护当前任务的待办清单（工作记忆外化，人类实时可见）。"
@@ -1745,7 +3066,10 @@ class ChatTurn:
                     "required": ["items"],
                 },
             },
-            {
+        ] if "todo_write" in face else []
+        # call_expert 同理：勾了就挂，没勾就不挂。
+        if "call_expert" in face:
+            specs.append({
                 "name": "call_expert",
                 "description": "委派专家池专家执行一项任务：spawn 隔离的专家线程"
                                "（持久留档，人类可打开追问），专家跑完返回摘要。"
@@ -1754,17 +3078,6 @@ class ChatTurn:
                                "信息/期望交付物）。你在委派前不直接实操——实操是"
                                "专家的事。（expert 只填下方专家 id，勿填技能名；"
                                "测试类任务用 asset_ids 把该专家负责的资产 id 明确划给它）"
-                               + ("\n【先返先触发 · ARTEX 调度】多个 call_expert "
-                                  "同轮并发派出后，第一个有效结果返回就立即推进对应方向，"
-                                  "未等到的任务后台继续跑、完成后以「[后台并发结果]」消息补达。"
-                                  "每个任务必须自包含、只覆盖一个测试方向并带真实证据；"
-                                  "不同任务应覆盖不同资产或测试面，禁止重复派发。"
-                                  "高风险动作必须逐项审批。"
-                                  "\n注意：ARTEX 主控的**默认派发通道是 artex_plan**"
-                                  "（Planner 生成 Intent → Engine 调度 Worker）。"
-                                  "call_expert 只用于不值得建 Intent 的一次性查询/登记；"
-                                  "不要用它替代任务规划，否则任务树与探索图会与执行脱节。"
-                                  if self.is_artex else "")
                                + ("\n【先返先触发 · 激进主控】多个 call_expert "
                                   "同轮并发派出后，第一个探针返回你就继续推进"
                                   "（[命中]→立即派深耕专家深挖，[未命中]→放弃"
@@ -1781,7 +3094,7 @@ class ChatTurn:
                 "input_schema": {
                     "type": "object",
                     "properties": {
-                        # enum（2026-10-01）：模型曾把技能名 recon-asset-enum 当专家名
+                        # enum（2026-10-01）：模型曾把技能名 资产侦察手法 当专家名
                         # 传进来（技能清单与专家名录同屏、语义相近）。值域与「可用专家」
                         # 文本块同源（_delegatable_experts），仅作软约束降错率；
                         # 硬校验仍在 _tool_call_expert 的成员判定。
@@ -1802,10 +3115,23 @@ class ChatTurn:
                     },
                     "required": ["expert", "task"],
                 },
-            },
-        ]
+            })
+        # artex_* / ctf_* 这些**控制器专属**工具同样按勾选下发
+        # （controller-tool-select，2026-10-20）。它们不在 AGENT_TOOLS 里
+        # （走专用 dispatch 分支、无 REGISTRY 条目），故 `_specs_by_names`
+        # 捞不到，必须在这里按名字过滤。
         if self.is_artex:
-            specs = [*specs, *self._artex_tool_specs()]
+            specs = [*specs,
+                     *[s for s in self._artex_tool_specs()
+                       if s.get("name") in face]]
+        if self.is_ctf_controller:
+            # CTF 解题主控的三个调度原语（ctf-controller，2026-10-19；
+            # ctf_inspect 2026-10-20）。执行层由 `_dispatch` 的专用分支处理，
+            # 不经 ToolDispatcher。
+            for spec in (_CTF_DISPATCH_TOOL_SPEC, _CTF_REVIEW_TOOL_SPEC,
+                         _CTF_INSPECT_TOOL_SPEC):
+                if spec.get("name") in face:
+                    specs = [*specs, spec]
         return specs
 
     def _artex_tool_specs(self) -> list[dict[str, Any]]:
@@ -1838,6 +3164,8 @@ class ChatTurn:
                                  "description": "auto（默认）/ new / extend"},
                         "task_id": {"type": "string",
                                     "description": "追加到指定任务；留空按活跃任务推导"},
+                        "new_task_confirmed": {"type": "boolean",
+                                                "description": "明确切换到新任务时设为 true；CTF 当前题目未解时必需"},
                         "intents": {
                             "type": "array",
                             "description": "显式方向（可选）：给了就不再问 Planner。"
@@ -1931,18 +3259,18 @@ class ChatTurn:
                 "name": "artex_control",
                 "description": "ARTEX 调度控制。start 启动 Engine；drain 停止领取新 "
                                "Intent 等 Worker 收尾；stop 停掉 Engine；pause 暂停任务"
-                               "剩余 pending；resume 把 paused 放回 Frontier；cancel 取消"
-                               "Intent（给 task_id 则取消该任务全部 pending/paused）；"
-                               "kill 终止单个运行中 Worker。",
+                               "剩余 pending；resume 把 paused 放回 Frontier；retry 重开单个"
+                               "失败/耗尽/阻塞 Intent；cancel 取消 Intent（给 task_id 则取消该任务全部"
+                               "pending/paused）；kill 终止单个运行中 Worker。",
                 "input_schema": {
                     "type": "object",
                     "properties": {
                         "action": {"type": "string",
                                    "enum": ["start", "drain", "stop", "pause",
-                                            "resume", "cancel", "kill"]},
+                                            "resume", "retry", "cancel", "kill"]},
                         "task_id": {"type": "string", "description": "留空取活跃任务"},
                         "intent_id": {"type": "string",
-                                      "description": "kill / 单条 cancel 必填"},
+                                      "description": "kill / retry / 单条 cancel 必填；retry 仅支持 failed/exhausted/blocked"},
                         "reason": {"type": "string", "description": "动作原因（留痕）"},
                         "timeout": {"type": "number",
                                     "description": "drain / stop 的等待秒数（默认 5）"},
@@ -2076,6 +3404,14 @@ class ChatTurn:
                 # 激进主控：探针海 + 先返先触发（与 chat-orchestrator 的
                 # 蛙式排队互斥，二选一注入）
                 parts.append(_AGGRESSIVE_CONTROLLER_STYLE)
+            elif self.is_ctf_controller:
+                # CTF 解题主控：代码调度 + LLM 只定方向（ctf-controller，
+                # 2026-10-19）。与激进主控同样需要工作区文件上下文（题目附件
+                # 由用户丢进输入框，主控要能看见有哪些文件可派）。
+                fctx = self._workspace_files_context()
+                if fctx:
+                    parts.append(fctx)
+                parts.append(_CTF_CONTROLLER_STYLE)
             elif self.is_artex:
                 parts.append(_ARTEX_CONTROLLER_STYLE)
                 parts.append(self._situation_context())
@@ -2108,7 +3444,13 @@ class ChatTurn:
         # （详见工具描述）；提示何时该提 + 证据要求 + 上限，与任务链 STRICT_PROMPT_TAIL 同口径。
         # **受项目级开关门禁（2026-10-15）**：关闭时整段不注入 + 工具面剔除
         # （_tool_specs/_build_dispatcher）——开关关 = Agent 不提任何提案，提示也不诱导。
-        if self._kb_iteration_on() and not (self.is_aggressive or self.probe_mode or self.is_worker):
+        # **ARTEX 主控除外**（artex-controller-slim，2026-10-20）：它的工具面里已经
+        # 没有 propose_pack_edit（slim 只留观察+操舵+登记），而这里只看开关不看角色
+        # → 开关一开就注入「用 propose_pack_edit 提提案」，模型调了必然撞越界拒绝，
+        # 白烧步数。**提示词必须与工具面同口径**，这是第三处需要同步的地方。
+        if self._kb_iteration_on() and not (
+                self.is_aggressive or self.probe_mode or self.is_worker
+                or self.is_artex):
             parts.append(
                 "## 经验沉淀（可选）\n"
                 "发现知识库/技能文档**内容有误**、**文档缺失**、某手法**已在本轮验证有效**，"
@@ -2179,6 +3521,13 @@ class ChatTurn:
             bp_ctx = self._blueprint_context()
             if bp_ctx:
                 parts.append(bp_ctx)
+        # 看图纪律（vision 通道，2026-10-19）：**只有模型真能看图时才注入**——
+        # 不能看图却被告知「你有眼睛」，模型会反复 view_image 拿到同一句
+        # 「未声明视觉能力」，白烧步数。反过来，能看图却不告诉它，它会按知识库
+        # 惯性一路 tesseract/zbarimg（用户实测的真问题：图明明能看却老是 OCR）。
+        vctx = self._vision_context()
+        if vctx:
+            parts.append(vctx)
         # 技能全量描述（K8 同款渐进披露层1：name+description，正文 skill_open）。
         # 激进主控及其 worker 明确禁用技能，不能因专家配置缺省而回退全量。
         try:
@@ -2191,10 +3540,13 @@ class ChatTurn:
                            if s.enabled and (role_skills is None or s.name in role_skills)]
                 if enabled:
                     # 消歧（2026-10-01）：技能名与专家名曾同屏混淆（模型把
-                    # recon-asset-enum 当专家名传给 call_expert），标题显式标注边界。
+                    # 资产侦察手法 当专家名传给 call_expert），标题显式标注边界。
                     parts.append("## 可用技能清单（skill_open(\"<name>\") 打开全量正文；"
-                                 "下列是【技能名】，不是专家——委派专家请用 call_expert "
-                                 "并填专家 id）\n"
+                                 "下列是【技能名】，不是专家——"
+                                 + ("本线程无 call_expert，派活走 artex_plan"
+                                    if self.is_artex else
+                                    "委派专家请用 call_expert 并填专家 id")
+                                 + "）\n"
                                  + "\n".join(f"- {s.name}：{s.description or ''}"
                                              for s in enabled))
         except Exception:  # noqa: BLE001 —— 技能清单失败不阻断对话
@@ -2274,7 +3626,12 @@ class ChatTurn:
         + 截断说明。返回 (入历史文本, 完整原文落盘路径或空串)。
 
         截断必须落在「写 DB」这一步：DB 是下一轮 _load_history 的回放源，若只
-        截断本轮 messages 而 DB 存全量，下轮仍会读回巨物 → input 再爆。"""
+        截断本轮 messages 而 DB 存全量，下轮仍会读回巨物 → input 再爆。
+
+        **带图结果（ToolOutput，vision 通道 2026-10-19）**：未超限时**原样返回
+        对象**（保住 ``.images``，内存里的 tool_result 块才带得上图）；超限时退回
+        普通 str——但那种结果本来就不可能带图（图片结果文本只有一两百字），
+        真超限说明是别的大文本，截断无妨。"""
         n = len(text)
         if n <= _MAX_TOOL_RESULT_CHARS:
             return text, ""
@@ -2284,15 +3641,31 @@ class ChatTurn:
                 d = Path(self.artifacts_dir) / "chat-results"
                 d.mkdir(parents=True, exist_ok=True)
                 fp = d / f"{self.thread_id}-{tc.id}.txt"
-                fp.write_text(text, encoding="utf-8")
+                fp.write_text(str(text), encoding="utf-8")
                 path = str(fp)
             except Exception:  # noqa: BLE001 —— 落盘失败不阻断（保截断版）
                 log.exception("chat 工具结果落盘失败 thread=%s", self.thread_id)
-        head = text[:_MAX_TOOL_RESULT_CHARS]
+        head = str(text)[:_MAX_TOOL_RESULT_CHARS]
         tail = (f"\n\n…（结果过长已截断：原文 {n} 字符，本条仅保留前 "
                 f"{_MAX_TOOL_RESULT_CHARS} 字符；完整结果见"
                 f"{path or '事件流'}）")
         return head + tail, path
+
+    @staticmethod
+    def _db_text(result: Any) -> str:
+        """工具结果 → 落库文本（**绝不含 base64**，vision 通道 2026-10-19）。
+
+        chat_messages.content 是 TEXT 列，base64 塞进去既撑爆库也毫无用处——
+        下一轮 _load_history 只回放文本。故带图结果落库时追加一行标记，让模型
+        知道「这条结果原本带图，历史回放里没有像素」，需要再看就重新 view_image。
+        这样图不会静默消失（那会让模型以为「我明明看过却想不起来」）。
+        """
+        text = str(result)
+        imgs = getattr(result, "images", None) or []
+        if not imgs:
+            return text
+        return (f"{text}\n（本条结果附带 {len(imgs)} 张图片；历史回放只保留文字、"
+                "不含像素——需要再看请重新 view_image 该文件）")
 
     def _ctx_window(self) -> tuple[int, int]:
         """(硬窗口, 有效软上限)：优先取 provider 配置（model_window/ctx_soft_budget），
@@ -2559,6 +3932,13 @@ class ChatTurn:
                 log.exception("chat delta 清剪失败 thread=%s", self.thread_id)
             self._maybe_kb_iteration()
             return final
+        except chat_store.ThreadGone:
+            # 人类在轮次跑到一半时把这条线程删了（2026-10-19 事故）：不是故障，
+            # 是「这条线程不要了」。线程行已不存在 → 无处落消息、也不必归位状态
+            # （update_thread 也写不进不存在的行）。安静退出，返回一句说明让调用
+            # 方（call_expert 的 spawn 方 / 工作台后台任务）按中止处理。
+            log.info("chat 线程已被删除，本轮安静退出 thread=%s", self.thread_id)
+            return "（本条线程已被删除，本轮中止；未产生新的消息记录）"
         except ChatStopped:
             # 人类中止（2026-10-09）：不是故障，归位 idle 且不落错误卡。中止说明
             # 在此落库（步间/工具后的中止点走 `_loop` 内的 `_persist_stopped`
@@ -2678,6 +4058,7 @@ class ChatTurn:
         empty_response_n = 0
         dimension_nudges = 0  # 子专家维度收敛闸连续推回数（2026-10-09）
         echo_nudges = 0       # 推理回声推回数（2026-10-09）
+        pseudo_tc_nudges = 0  # 伪工具调用（特殊 token 泄漏进正文）推回数（2026-10-20）
         reasoning_nudges = 0  # 推理膨胀推回数（2026-10-09）
         text_acc: list[str] = []
         for _step in range(max_steps):
@@ -2704,7 +4085,8 @@ class ChatTurn:
                 self._emit("chat.steer", {"text": steer[:500]})
             step_nudges: list[str] = []  # 本步事后追加的系统提示（推理膨胀闸等）
             acc: list[str] = []
-            pub = {"chars": 0, "seq": 0, "at": 0.0}
+            pub = {"chars": 0, "seq": 0, "at": 0.0,
+                   "leak": False}  # leak：本步正文已判为伪工具调用，停发增量
             thinking_acc: list[str] = []
             thinking_pub = {"chars": 0, "seq": 0, "at": 0.0}
             thinking_started = time.monotonic()
@@ -2712,6 +4094,16 @@ class ChatTurn:
             def on_text(delta: str, _acc=acc, _pub=pub) -> None:
                 _acc.append(delta)
                 text = "".join(_acc)
+                # 伪工具调用闸（2026-10-20 事故）：正文里出现 `<｜｜DSML｜｜ …>`
+                # 这类特殊 token 时**停止上屏**——chat.delta 携带累计全文，一旦
+                # 继续发就会把整段标记反复重发刷屏。闸死后本步不再发布，终稿守卫
+                # 负责剥掉标记并推回模型用工具通道重发。尾部恰好是标记前缀时也
+                # 先压住这一拍（下一块到了再判），免得「半截 `<｜｜`」闪一下。
+                if not pub["leak"] and has_pseudo_tool_call(text):
+                    pub["leak"] = True
+                    _pub["chars"] = len(text)
+                if pub["leak"] or has_marker_prefix_tail(text):
+                    return
                 now = time.monotonic()
                 grown = len(text) - _pub["chars"]
                 if not text or (grown < _DELTA_MIN_CHARS
@@ -2747,6 +4139,7 @@ class ChatTurn:
                 （前端取最后一条 chat.delta 的累计全文，从零重流即整段覆盖）。"""
                 _acc.clear()
                 _pub["chars"] = 0
+                _pub["leak"] = False
                 thinking_acc.clear()
                 thinking_pub["chars"] = 0
                 thinking_pub["seq"] = 0
@@ -2772,7 +4165,7 @@ class ChatTurn:
             sys_len = len(system) - len(refs_tail)
             est_system = max(1, sys_len // 3) if sys_len else 0
             est_refs = _est_tokens(refs_tail)
-            est_tools = _est_tokens(json.dumps(tools, ensure_ascii=False))
+            est_tools = _est_tokens(json.dumps(step_tools or [], ensure_ascii=False))
             est_msgs = sum(_est_tokens(_msg_text(m)) for m in messages)
             # 本 step 的 LLM 调用 + 无文本增量流中断的「原样重发」环（2026-10-09）。
             # 只吐了 thinking/工具参数就断流时（partial 但文本为空），无可续写的
@@ -3041,12 +4434,14 @@ class ChatTurn:
                                 separators=(",", ":"))[:300]})
                         ok, result = self._dispatch(tc)
                     result, artifact_path = self._clip_tool_result(result, tc)
+                    # 落库只存文本（DB 是 TEXT 列，base64 会撑爆且回放用不上）；
+                    # 内存里的块保留 ToolOutput → 本轮下一步模型能真正看到图。
                     chat_store.append_message(
-                        self.bb, self.thread_id, "tool", result,
+                        self.bb, self.thread_id, "tool", self._db_text(result),
                         tool_use_id=tc.id)
                     tool_result_blocks.append({
                         "type": "tool_result", "tool_use_id": tc.id,
-                        "content": result})
+                        "content": tool_result_content(result)})
                     # 串行/单专家路径补 done 事件（单专家此前漏发，行会一直「运行中」
                     # 直到轮末落库；现与并行路径一致，实时即可收尾）。
                     self._emit("chat.tool", {
@@ -3080,6 +4475,39 @@ class ChatTurn:
             # （stop_reason=length/max_tokens），不当作终稿收尾——把半截文本作为
             # assistant 前缀入历史 + 追一条 user 催续，继续循环拼接，避免「话说
             # 一半就正常终止」。续写次数超上限才接受现有文本并落 chat.truncated。
+            # 伪工具调用守卫（2026-10-20 事故）：正文里出现 `<｜｜DSML｜｜ calls>`
+            # 这类**工具调用特殊 token** = 网关没把它解析进 tool_calls，而是漏进了
+            # content。旧行为是「text 非空 → 纯文本终稿 → 落库 + break」，线程以
+            # status=idle / error='' 收场——系统认为一切正常，用户只看到一坨标记
+            # 吐在屏幕上对话就停了（hxbai 实测，全仓 7 条污染行）。
+            # 处置：① 剥掉标记，绝不落库（否则回放会教模型模仿该格式）；② 推回
+            # 要求改用工具通道重发；③ 剥完仍有实质正文 → 直接用剩余正文收轮（不
+            # 白烧一轮）。末步 `step_tools=None` 时模型手上没有工具，推回也调不出来
+            # → 直接落明确文案，不重试。超上限同样落明确文案（**不能静默收轮**）。
+            if text.strip() and has_pseudo_tool_call(text):
+                clean = strip_pseudo_tool_calls(text)
+                can_retry = (pseudo_tc_nudges < PSEUDO_TC_MAX
+                             and step_tools is not None)
+                self._emit("chat.pseudo_toolcall", {
+                    "phase": "nudge" if can_retry else "giveup",
+                    "chars": len(text), "clean_chars": len(clean),
+                    "nudges": pseudo_tc_nudges, "total": PSEUDO_TC_MAX})
+                if clean:
+                    # 正文里除调用块外还有真内容（如「先看下黑板」+ 调用块）：
+                    # 用剥净后的文本继续走终稿流程，不再多烧一轮。
+                    text = clean
+                elif can_retry:
+                    pseudo_tc_nudges += 1
+                    # 清掉本步已上屏的前缀（标记出现前可能已发过「好的，」这类
+                    # 片段）：发一条空累计全文让前端整段覆盖，否则那半句会挂在
+                    # 时间线尾部直到下一轮流式覆盖它。
+                    pub["seq"] += 1
+                    self._emit("chat.delta", {"text": "", "seq": pub["seq"]})
+                    _inject_nudge(messages, "\n\n".join(
+                        [PSEUDO_TC_NUDGE, *step_nudges]))
+                    continue
+                else:
+                    text = PSEUDO_TC_FINAL_TEXT
             # 推理回声守卫（2026-10-09 事故）：终稿其实只是整段推理的复制品时
             # （上游把同一段推理同时灌进内容与思考两个通道），不当终稿收轮——推回
             # 让模型给结论。解析层已做同类清空，这里兜未经该路径的 provider；上限后
@@ -3118,10 +4546,23 @@ class ChatTurn:
             # finish 拦截）。仅拦子专家——主控是调度者，其意图由委派流程负责。
             open_ids = self._open_intents_of_self()
             if open_ids and not self.is_orchestrator:
-                nudge = ("你还有未收尾的意图：" + ", ".join(open_ids)
-                         + "。链路图要求意图必收尾——先 close_intent"
-                         "（outcome=vuln/finding/dead_end）收尾每条意图，"
-                         "再给最终摘要。若意图不再成立，用 bb_delete_intent 物理删除。")
+                if self.track == "ctf":
+                    # CTF 轨的收尾出口与渗透不同（ctf-intent-discipline，
+                    # 2026-10-20）：不要求 dead_end 背书，也不引导去标
+                    # tested_clean（那会撞门禁）。按实际结果给三条路。
+                    nudge = ("你还有未收尾的意图：" + ", ".join(open_ids)
+                             + "。按实际情况选一个收尾——① 已解出："
+                             "close_intent(outcome=\"finding\", finding_ids=[flag 留痕发现])；"
+                             "② 这条路不通但题还能解：close_intent(outcome=\"dead_end\", "
+                             "dead_reason=卡点)（**不必**凑 evidence_refs）；"
+                             "③ 整道题放弃：ctf_abandon(reason=...)。"
+                             "不要用 bb_asset_status 标 tested_clean——CTF 轨没有这个概念。"
+                             "收尾后再给最终摘要。")
+                else:
+                    nudge = ("你还有未收尾的意图：" + ", ".join(open_ids)
+                             + "。链路图要求意图必收尾——先 close_intent"
+                             "（outcome=vuln/finding/dead_end）收尾每条意图，"
+                             "再给最终摘要。若意图不再成立，用 bb_delete_intent 物理删除。")
                 messages.append({"role": "user", "content": nudge})
                 self._emit("chat.intent_guard",
                            {"phase": "blocked", "open_intents": open_ids})
@@ -3344,6 +4785,49 @@ class ChatTurn:
                 "请立即写回，然后用一句话总结。")
         try:
             args = tc.arguments or {}
+            # 控制器执行侧闸（controller-tool-select，2026-10-20）：
+            # **按 yaml 勾选面判**，而不是按写死的黑名单判。
+            #
+            # 为什么必须有这道闸：撤 schema 挡不住执行——执行侧有三条旁路
+            # （`_dispatch` 早拦截分支根本不经 ToolDispatcher；`_PLAN_TOOLS` /
+            # `_CONTROL_TOOLS` 在 tools.py:572 恒放行；收尾白名单「其余放行」）。
+            # 实测未加闸时 `todo_write` 带完整参数直调会真的覆写线程待办。
+            #
+            # 为什么按勾选面判而不是黑名单：用户要的是「**勾选启动**」——
+            # 勾了就该能调、没勾就该被拒。写死黑名单会把勾选变成装饰。
+            # 勾选面 = yaml `tools`（未设置时回落各角色代码默认值）。
+            if self.is_orchestrator:
+                # ① **结构性禁令先判**（勾选面判据之前）：这类工具是「勾了也不对」
+                #    ——ARTEX 主控的意图链/待办/委派会绕过 Planner 自建链路。
+                #    必须先于下面 ② 的恒放行地板，否则 `declare_intent` 会被
+                #    `_PLAN_TOOLS` 恒放行救回来（实测从「被拒」变「放行」）。
+                denied = controller_structural_denied(self.agent_id)
+                if name in denied:
+                    r = (f"[错误] {name} 不适用于 ARTEX 主控：它的角色是纯操舵——"
+                         "Intent 由 Planner 独占生成、待办由 artex_plan 的 todos "
+                         "承载、派活只能走 artex_plan。该走的通道：派方向用 "
+                         "artex_plan / 观察用 artex_status 与 bb_query / "
+                         "纠偏用 artex_hint。")
+                    self._record_failure(name, r, args)
+                    return False, r
+                face = set(self._controller_tool_face() or ())
+                # ② 计划/控制原语恒放行（§6.6）：它们是「收尾/立意」的兜底出口，
+                # 裁掉会死锁成「必须先声明一条假意图」。这条与 ToolDispatcher
+                # 的 `_CONTROL_TOOLS`/`_PLAN_TOOLS` 恒放行同口径。
+                # MCP 工具走 `mcp_allowed_by_face`：它支持 `mcp__<server>__*`
+                # 通配勾选，与 `_tool_specs` 的裁剪同源——否则勾了 server 会
+                # 出现「schema 下发、执行被拒」的撕裂。
+                if (name not in face and name not in _CONTROL_TOOLS
+                        and name not in _PLAN_TOOLS
+                        and not (name.startswith(_MCP_TOOL_PREFIX)
+                                 and mcp_allowed_by_face(name, face))):
+                    r = (f"[错误] 工具 {name} 未在本控制器的工具白名单内"
+                         "（设置 → 专家池 → 该专家 → 工具白名单 勾选后保存即启用）。"
+                         "本次不改白名单的话，按角色该走的通道是：派方向用 "
+                         "artex_plan / 观察用 artex_status 与 bb_query / "
+                         "纠偏用 artex_hint。")
+                    self._record_failure(name, r, args)
+                    return False, r
             # 探针子任务（probe_mode）硬拒面（2026-10-17）：_PROBE_EXCLUDED_TOOLS
             # 里的 intent/plan 类工具带 plan/control flag——ToolDispatcher 的
             # 白名单检查对收尾原语**恒放行**（§6.6），只从 allowed_tools 裁
@@ -3365,6 +4849,25 @@ class ChatTurn:
                 return not r.startswith("[错误"), r
             if name == "call_expert":
                 r = self._tool_call_expert(args)
+                self._record_failure(name, r, args)
+                return not r.startswith("[错误"), r
+            # CTF 解题主控的调度原语（ctf-controller，2026-10-19）：不经
+            # ToolDispatcher（那里没有 handler），走本类的专用方法。
+            # 放在 call_expert 之后：两者同轮出现时先落计划再派发——否则
+            # `_tool_call_expert` 的 allowed() 校验会看到「还没 plan」而放行
+            # 越权派发（顺序反了就等于没有闸）。
+            if self.is_ctf_controller and name == "ctf_dispatch":
+                r = self._tool_ctf_dispatch(args)
+                self._record_failure(name, r, args)
+                return not r.startswith("[错误"), r
+            if self.is_ctf_controller and name == "ctf_review":
+                r = self._tool_ctf_review(args)
+                self._record_failure(name, r, args)
+                return not r.startswith("[错误"), r
+            # 只读核对通道（ctf-inspect，2026-10-20，P0-2）：同样不经
+            # ToolDispatcher——它刻意**不给** read_file/run_cmd 的能力面。
+            if self.is_ctf_controller and name == "ctf_inspect":
+                r = self._tool_ctf_inspect(args)
                 self._record_failure(name, r, args)
                 return not r.startswith("[错误"), r
             if self.is_artex and is_artex_tool(name):
@@ -3534,7 +5037,7 @@ class ChatTurn:
                         "ok": ok, "result": result})
             try:
                 chat_store.append_message(self.bb, self.thread_id, "tool",
-                                          result, tool_use_id=tc.id)
+                                          self._db_text(result), tool_use_id=tc.id)
             except Exception:  # noqa: BLE001
                 log.exception("chat 并行专家结果落库失败 thread=%s id=%s",
                               self.thread_id, tc.id)
@@ -3592,13 +5095,21 @@ class ChatTurn:
 
     def _drain_probe_overflow(self, messages: list[dict[str, Any]],
                               skip_ids: set[str] | None = None) -> None:
-        """把后台完成的探针结果并入**下一轮** LLM 上下文（先返先触发补达）。
+        """把后台完成的并发专家结果并入**下一轮** LLM 上下文（先返先触发补达）。
 
-        仅激进主控产生 overflow（见 `_parallel_expert_dispatch`）。DB 侧真实
-        tool 行已由 worker 落库（同 tool_use_id 续写），这里只做**内存注入**：
-        `_inject_nudge` 并入尾部 user 消息——连续两条 user 会被网关 400 拒收，
-        绝不能新起一条 user 消息。`skip_ids`：本批已作为正式 tool_result 交回
-        模型的调用（时间窗内收尾的双落盘），避免同一结果进两遍上下文。
+        仅启用 first_return 的主控产生 overflow（见 `_parallel_expert_dispatch`）。
+        DB 侧真实 tool 行已由 worker 落库（同 tool_use_id 续写），这里只做**内存
+        注入**：`_inject_nudge` 并入尾部 user 消息——连续两条 user 会被网关 400
+        拒收，绝不能新起一条 user 消息。`skip_ids`：本批已作为正式 tool_result
+        交回模型的调用（时间窗内收尾的双落盘），避免同一结果进两遍上下文。
+
+        **文案按轨分叉**（2026-10-20）：这段注入文案原本写死激进主控的语义
+        （「[命中]→立即派深挖专家；[未命中]→放弃该方向」——那是渗透探针的
+        纪律）。CTF 主控的 worker 回执用 `[命中]/[未命中]` 只是约定俗成的
+        前缀，它该做的动作完全不同：命中该走 `ctf_submit_flag` 登记、未命中该
+        走 `ctf_review` 看判据再决定换方向还是收尾。照搬渗透口径会让 CTF 主控
+        在一个「[命中]」之后去「派深挖专家」——把方向互斥/轮次记账整套调度
+        绕过去了。
         """
         if not self._probe_overflow:
             return
@@ -3609,8 +5120,12 @@ class ChatTurn:
                                     if it["id"] in skip]
         if not items:
             return
-        lines = ["[后台并发结果] 以下并发专家已在后台跑完，请按先返先触发规则"
-                 "处置（[命中]→立即派深挖专家；[未命中]→放弃该方向）："]
+        if self.is_ctf_controller:
+            lines = ["[后台并发结果] 以下并发专家已在后台跑完（其余方向仍在跑，"
+                     "不必等它们）："]
+        else:
+            lines = ["[后台并发结果] 以下并发专家已在后台跑完，请按先返先触发规则"
+                     "处置（[命中]→立即派深挖专家；[未命中]→放弃该方向）："]
         for it in items:
             body = it.get("result") or ""
             if len(body) > _PROBE_OVERFLOW_HEAD:
@@ -3618,6 +5133,15 @@ class ChatTurn:
                         + f"\n…（截断；全文见该专家的工具结果 {it['id']}）")
             lines.append(f"◆ 专家 {it.get('expert') or '?'}"
                          f"（调用 {str(it.get('id') or '')[-8:]}）：\n{body}")
+        if self.is_ctf_controller:
+            # 处置纪律必须落在**这里**：主控刚收到一条异步结果，最容易的动作
+            # 就是直接再 call_expert 派下一批——那会绕过 ctf_dispatch 的准派闸。
+            lines.append(
+                "处置：① 拿到 flag → `ctf_submit_flag` 登记（别口头声称拿到）；"
+                "② 某方向已证伪 → `close_intent(outcome=\"dead_end\")` 记下来，"
+                "再 `ctf_dispatch` 提新方向（**不要直接 call_expert**——不在准派"
+                "计划内会被拒）；③ 全部方向都做完、答案已登记 → `ctf_conclude` "
+                "收尾；④ 这题确实打不动 → `ctf_abandon`。")
         _inject_nudge(messages, "\n".join(lines))
 
     def _dispatch_mcp(self, name: str, args: dict) -> str:
@@ -3671,6 +5195,20 @@ class ChatTurn:
             available = ", ".join(self._delegatable_experts())
             return (f"[错误] call_expert 失败：未知专家 '{expert}'；"
                     f"可用：{available}（这些是专家 id，不是技能名）")
+        # CTF 解题主控的越权派发闸（ctf-controller，2026-10-19）：每条派发必须
+        # 在本轮 ctf_dispatch 的准派计划内。没有这道闸，模型可以跳过 ctf_dispatch
+        # 直接 call_expert——方向互斥、放弃判据、轮次记账、自证核验全部失效，
+        # 整套代码调度退化成装饰。文案要给出**下一步动作**（先 dispatch），
+        # 否则模型会反复重试同一次派发，白烧一轮。
+        # getattr 兜底：这是委派热路径，`object.__new__` 构造的壳（测试 / 旧实例）
+        # 没有该属性，不该在这里 AttributeError 炸成「工具异常」。
+        ctf_sess = (self._ctf_session_for()
+                    if getattr(self, "is_ctf_controller", False) else None)
+        if ctf_sess is not None and not ctf_sess.allowed(task):
+            return ("[错误] call_expert 失败：该方向不在本轮准派计划内。"
+                    "先用 ctf_dispatch(directions=[…]) 提交方向——代码会判定"
+                    "「准派/拦下」并给出理由（重复方向、已判死方向、被他人占用的"
+                    "方向都会被拦），然后按计划里的 task 文本原样派发。")
         if self.llm is None:
             return "[错误] call_expert 失败：LLM 未装配"
         # 分配资产（asset_ids，2026-10-09 严格单一派发）：主控把该子专家负责的
@@ -3705,19 +5243,49 @@ class ChatTurn:
         sub_id = ""
         artex_intent_id = ""
         try:
-            artex_intent = create_artex_intent(
-                self.bb, self.project_id, task, task_id=self.thread_id,
-                expert=expert, asset_ids=assigned,
-                constraints={"track": self.track or "", "controller": self.agent_id})
-            artex_intent_id = artex_intent.get("id", "")
-            claim_artex_intent(self.bb, self.project_id, artex_intent_id,
-                               f"chat-{self.thread_id[-12:]}")
-            transition_artex_intent(self.bb, self.project_id, artex_intent_id, "running")
+            # ARTEX Intent 记账（**尽力而为**，2026-10-19 事故修复）：
+            #
+            # 此前这里硬写 `task_id=self.thread_id`——线程 id 冒充任务 id，于是
+            # 每次委派都在 ARTEX 任务列表里凭空多出一个 `chat-xxxxxxxx` 的假任务：
+            # 它没有 Planner、没有目标（goal_stats 全 0）、没有探索图节点、没有
+            # 范围锚定，用户在工作台看到的就是「目标 0/1、探索图空白」。而且
+            # `claim_next_intent` **不按 task_id 过滤**，这种假任务里的 Intent
+            # 会被项目 Engine 当正常任务领取，调度语义彻底错乱。
+            #
+            # 现在：只有**本线程已绑定真实 ARTEX 任务**（artex_plan 建的）才记账，
+            # 且用那个真实 task_id；没有真任务就不建 Intent——call_expert 是
+            # 「不值得建 Intent 的一次性委派」，本来就不该在任务树里留痕。
+            # 记账失败也绝不阻断委派（它是审计附加项，不是执行前提）。
+            artex_task = str(getattr(self, "artex_task_id", "") or "").strip()
+            if artex_task:
+                try:
+                    artex_intent = create_artex_intent(
+                        self.bb, self.project_id, task, task_id=artex_task,
+                        expert=expert, asset_ids=assigned,
+                        constraints={"track": self.track or "",
+                                     "controller": self.agent_id})
+                    artex_intent_id = artex_intent.get("id", "")
+                    claim_artex_intent(self.bb, self.project_id, artex_intent_id,
+                                       f"chat-{self.thread_id[-12:]}")
+                    transition_artex_intent(self.bb, self.project_id,
+                                            artex_intent_id, "running")
+                except Exception:  # noqa: BLE001 —— 记账失败不影响委派本身
+                    log.exception("call_expert ARTEX Intent 记账失败 thread=%s",
+                                  self.thread_id)
+                    artex_intent_id = ""
             worker_agent = "worker" if self.is_aggressive else expert
             sub = chat_store.create_thread(
                 self.bb, self.project_id, worker_agent,
                 title=task[:40], parent_thread_id=self.thread_id,
                 spawned_task=task[:500],
+                # CTF 题目归属显式继承（challenge-asset，2026-10-19）：子线程
+                # 虽可沿 parent_thread_id 向上解析到题目，但那是**弱引用**——
+                # 父线程一旦被删/被改绑，子线程就退化成「无题目」，届时
+                # `_challenge_fallback_asset()` 会按线程标题**再建一道题**
+                # （用户实测：一道题变两道）。显式带位让它自持归属。
+                challenge_asset_id=(
+                    chat_store.resolve_challenge_asset_id(self.bb, self.thread_id)
+                    or ""),
                 # 联网搜索继承（v43，web-search-toggle）：主控开着「联网」时
                 # 子代理默认也启用——子线程落同一开关位，其 ChatTurn 工具面/
                 # 白名单据此双边放行；主控关着则子代理也不拿该工具。
@@ -3747,6 +5315,25 @@ class ChatTurn:
                 # 避免「多个 worker 同时给同一故障装一遍」。
                 recovery=self.recovery)
             summary = sub_turn.run(task)
+            # 子线程被删（2026-10-19 事故）：`ChatTurn.run` 捕获 ThreadGone 后
+            # 返回一句说明而非抛错，此处识别出来回一条**中性**文案——不写成
+            # 「执行失败」，因为这不是专家能力问题，是人类主动删了线程。
+            if chat_store.thread_exists(self.bb, sub_id) is False:
+                raise chat_store.ThreadGone(sub_id)
+        except chat_store.ThreadGone:
+            # 人类把子线程删了：Intent 归 cancelled（不是 failed——它没有出错，
+            # 是任务被撤销），主控收到中性说明，可决定重派或不重派。
+            log.info("call_expert 子线程已被删除 expert=%s thread=%s",
+                     expert, sub_id)
+            if artex_intent_id:
+                try:
+                    transition_artex_intent(self.bb, self.project_id,
+                                            artex_intent_id, "cancelled",
+                                            error="子线程被人工删除")
+                except Exception:  # noqa: BLE001
+                    log.exception("ARTEX Intent 取消失败 id=%s", artex_intent_id)
+            return (f"专家线程 {sub_id}（{expert}）已被人工删除，本次委派中止。"
+                    "需要这个方向请重新委派或改用 artex_plan 建 Intent。")
         except Exception as e:  # noqa: BLE001 —— 专家失败回文本，主控可改派
             log.exception("chat 子专家线程失败 expert=%s thread=%s",
                           expert, self.thread_id)
@@ -3764,6 +5351,45 @@ class ChatTurn:
                                         "completed", result=summary[:12000])
             except Exception:
                 log.exception("ARTEX Intent 完成回写失败 id=%s", artex_intent_id)
+        # CTF 解题主控的轮次记账（ctf-controller，2026-10-19）：这是放弃判据的
+        # 分母，必须由代码记——LLM 自述「我试了 2 轮」和「我试了 5 轮」在上下文
+        # 里长得一模一样，而判据的阈值就卡在 2 轮和 8 轮上。
+        #
+        # ``flags_added`` 取**台账实际增量**（派发前后各数一次 accepted+pending），
+        # 不信 worker 摘要里说自己拿了几个 flag。读库失败记 0（宁可少算进展，
+        # 也不要因为一次 DB 抖动就误判方向有进展而续投）。
+        if ctf_sess is not None:
+            try:
+                # 键必须走 `ctf_key_of`（先剥【方向】/【要求】壳）：`task` 常是
+                # 计划里回贴的整段文本，直接 `direction_key` 会得到另一个键，
+                # 于是既查不到已有 state（flags_got 基线读成 0 → 增量虚高），
+                # 又在 `record` 里新建一个 passes=0 的孤立方向（放弃判据失效）。
+                dkey = ctf_key_of(task)
+                before = ctf_sess.dirs.get(dkey)
+                n_before = before.flags_got if before else 0
+                cid = chat_store.resolve_challenge_asset_id(self.bb, self.thread_id) or ""
+                n_after = n_before
+                if cid:
+                    from core.blackboard.challenge_flags import accepted_flags
+                    n_after = len(accepted_flags(self.bb, self.project_id, cid))
+                added = max(0, n_after - n_before) if cid else 0
+                rec = ctf_sess.record(task, summary, flags_added=added)
+                v = rec["verdict"]
+                self._emit("chat.ctf_verdict", {
+                    "direction": dkey,
+                    "action": v.action, "code": v.code, "reason": v.reason,
+                    "passes": rec["state"].passes,
+                    "attest_issued": rec["attest_issued"],
+                    "attest_note": rec["attest_note"],
+                    # 耗时记账（ctf-cost，2026-10-20，P1-2）：不参与任何判据，
+                    # 只让「这一轮跑了多久」可被复盘。`first_at` 由代码在首次
+                    # 派发时写，故 elapsed 是**该方向累计墙钟**而非本轮耗时——
+                    # 复盘要看的是「这个方向烧了多久」，不是「最后一次多久」。
+                    "elapsed_s": round(max(
+                        0.0, ctf_sess._clock() - (rec["state"].first_at or 0.0)), 1),
+                })
+            except Exception:  # noqa: BLE001 —— 记账失败不阻断派发结果回传
+                log.exception("chat ctf 轮次记账失败 thread=%s", self.thread_id)
         return (f"专家线程 {sub_id}（{expert}）已完成。\n"
                 f"收尾摘要：\n{summary[:4000]}\n"
                 f"（人类可在工作台打开该线程查看全过程与追问）")

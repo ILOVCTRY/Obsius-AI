@@ -97,6 +97,11 @@ export interface ArtexExplorationNode {
   task_id: string
   intent_id?: string | null
   kind: "goal" | "intent" | "fact" | "finding" | "hint" | string
+  /** 渲染期派生（artex-exploration-canvas）：goal 分 begin/goal，fact 分 fact/summary。
+   *  老 API 可能缺该字段，前端按 metadata.source 反推（见 ExplorationCanvas.roleOf）。 */
+  role?: "begin" | "goal" | "intent" | "fact" | "summary" | "finding" | "hint" | string
+  /** 兜底汇总事实默认折叠（与显式结论重复）；老数据无此字段时按 source 判断。 */
+  collapsed_by_default?: boolean
   title: string
   content: string
   status: string
@@ -113,6 +118,9 @@ export interface ArtexExplorationEdge {
   from_node_id: string
   to_node_id: string
   relation: "spawns" | "yields" | "derived_from" | "proves" | string
+  /** 边分档（artex-exploration-canvas）：spine=主脊（参与分层）/ reverse=依据 /
+   *  system=系统挂链（默认隐藏）。缺字段时前端按 system 处理。 */
+  category?: "spine" | "reverse" | "system" | string
   metadata: Record<string, unknown>
   created_at: string
 }
@@ -459,6 +467,12 @@ export interface LlmProvider {
   proxy?: string | null
   /** system 兼容通道（2026-10-17）：该网关丢弃 system 字段时，system 前置于首条 user 消息 */
   system_in_user?: boolean
+  /**
+   * 视觉能力（vision 通道，2026-10-19）：勾选=该供应商的模型支持图片输入。
+   * 决定 `view_image` 是出图还是只回文本 + OCR 引导；未声明=不支持（宁缺勿炸，
+   * 往不支持的网关塞图片块会被 400 打死整轮）。
+   */
+  vision?: boolean
 }
 
 export interface ModelInfo {
@@ -576,9 +590,17 @@ export interface ChallengeSummary extends Asset {
   state: ChallengeState
   solved: boolean
   accepted_flags: number
+  /** 候选（pending，AI 判定通过待人工确认）——**不计 solved**（方案 A，2026-10-20） */
+  candidate_flags: number
   rejected_flags: number
   running_workers: number
   abandoned: boolean
+  /** 主控主动收尾（ctf_conclude）：不再派工，但**不是**解出 */
+  concluded: boolean
+  /** 同题内前缀互不相同的 accepted flag（非空 = 至少一条是假的） */
+  flag_conflict: ChallengeFlag[]
+  /** accepted 数超过 quota（多为用户下调 flag_count，仅作异常提示） */
+  over_quota: boolean
   flags: ChallengeFlag[]
   attachment_count: number
   attachments: { id: string; type: string; value: string }[]
@@ -619,10 +641,17 @@ export interface ChallengeFlagsResponse {
     state: ChallengeState
     solved: boolean
     accepted: number
+    /** 候选（pending）——不计 solved，前端单独显示 */
+    candidate: number
     rejected: number
     quota: number
     abandoned: boolean
+    /** 主控主动收尾：停派工但不等于解出 */
+    concluded: boolean
     running: number
+    /** 同题内前缀互不相同的 accepted flag（非空 = 冲突，需人工裁决） */
+    conflict: ChallengeFlag[]
+    over_quota: boolean
   }
 }
 
@@ -1327,6 +1356,14 @@ export interface Expert {
   knowledge?: string[] | null
   task_types?: string[] | null
   tools?: string[] | null
+  /** 控制器类智能体的**可勾选候选全集**（后端下发）。
+   *  必须含 `artex_*` / `ctf_*` / `todo_write` / `call_expert`——它们不在
+   *  `AGENT_TOOLS` 里（走专用 dispatch 分支），不额外下发就永远勾不到。
+   *  设置页把它与 AGENT_TOOLS 合并成勾选清单。非控制器为 null。 */
+  tools_runtime?: string[] | null
+  /** true = 这是控制器（候选集需合并 tools_runtime）。
+   *  **不是只读**：勾选照常提交，yaml 的 `tools` 是控制器的真实开关。 */
+  tools_controller?: boolean
   /** MCP server 白名单；缺省/null = 跟随全局已启用 server */
   mcp_servers?: string[] | null
   max_steps?: number | null

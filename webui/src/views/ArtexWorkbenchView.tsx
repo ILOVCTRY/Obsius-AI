@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import {
-  Activity, Check, ChevronDown, ChevronRight, Clock, GitBranch, Layers, Link2, Loader2, Pause, Play,
+  Activity, Check, ChevronDown, ChevronRight, Clock, GitBranch, Layers, Link2, Loader2, Network, Pause, Play,
   Plus, Power, Radar, RefreshCw, Send, Sparkles, Square, Target, WandSparkles, X,
 } from "lucide-react"
 import { api } from "@/lib/api"
@@ -10,6 +10,11 @@ import type {
   ArtexTaskGraph, ArtexTaskRuntime, ArtexTaskSummary, ProjectDetail,
 } from "@/lib/types"
 import { cn } from "@/lib/utils"
+
+// 探索图画布懒加载（artex-exploration-canvas，2026-10-20）：@xyflow/react 约
+// 192KB，只在人类真的切到「探索图 → 画布」时才拉，不进主包。与 AttackPath 同约定。
+const ExplorationCanvas = lazy(() => import("./artex/ExplorationCanvas")
+  .then(m => ({ default: m.ExplorationCanvas })))
 
 // ARTEX 工作台（artex-workbench-ui，2026-10-19）。
 //
@@ -100,6 +105,9 @@ export function ArtexWorkbenchView({ pid, meta }: { pid: string; meta: ProjectDe
   const [coverage, setCoverage] = useState<ArtexCoverageResponse | null>(null)
   const [coverageGraph, setCoverageGraph] = useState<{ task_id: string; nodes: ArtexCoverageGraphNode[]; edges: { src: string; dst: string }[] } | null>(null)
   const [tab, setTab] = useState<Tab>("graph")
+  // 探索图两种形态（artex-exploration-canvas）：画布看结构，列表找具体结论。
+  // 画布是默认——「关联与时间关系」正是卡片墙看不出来的东西。
+  const [explorationView, setExplorationView] = useState<"canvas" | "list">("canvas")
   const activityCursor = useRef(0)
   const streamConnected = useRef(false)
 
@@ -443,14 +451,38 @@ export function ArtexWorkbenchView({ pid, meta }: { pid: string; meta: ProjectDe
                   {root && <span className={cn("rounded-full border px-1.5 py-0.5", statusOf(root.status).pill)}>{statusOf(root.status).label}</span>}
                 </div>
               </div>
-              <div className="min-h-0 flex-1 overflow-y-auto p-3">
+              {/* 探索图画布要定高（xyflow 需要真实像素高度），其余分页仍是滚动列表。
+                  p-3 在画布模式下挪进内层，否则画布四周多出 12px 造成「贴边不齐」。 */}
+              <div className={cn("min-h-0 flex-1",
+                tab === "exploration" && explorationView === "canvas"
+                  ? "overflow-hidden" : "overflow-y-auto p-3")}>
                 {tab === "graph" && (root
                   ? <IntentTree node={root} byParent={byParent} byId={byId} onControl={control} onSteer={steerWorker} onKill={killWorker} busy={busy} depth={0} />
                   : <div className="py-10 text-center text-xs text-(--text-3)">任务图没有根 Intent。</div>)}
                 {tab === "goals" && <GoalPanel goals={goals} runtimeStatus={runtime?.status || ""} />}
                 {tab === "coverage" && <CoveragePanel coverage={coverage} graph={coverageGraph} pid={pid}
                   taskId={graph.task_id || taskId} onChanged={refreshCoverage} />}
-                {tab === "exploration" && <ExplorationPanel graph={exploration} />}
+                {tab === "exploration" && <div className="flex h-full min-h-0 flex-col">
+                  <div className="flex shrink-0 items-center gap-1 border-b border-(--border) px-2 py-1">
+                    <SubTabButton icon={Network} label="画布" active={explorationView === "canvas"}
+                      onClick={() => setExplorationView("canvas")} />
+                    <SubTabButton icon={Layers} label="列表" active={explorationView === "list"}
+                      onClick={() => setExplorationView("list")} />
+                    <span className="ml-auto pr-1 text-[10px] text-(--text-3)">
+                      {exploration ? `${exploration.nodes.length} 节点 · ${exploration.edges.length} 边` : ""}
+                    </span>
+                  </div>
+                  <div className={cn("min-h-0 flex-1", explorationView === "canvas" ? "p-2" : "overflow-y-auto p-3")}>
+                    {explorationView === "canvas"
+                      ? <Suspense fallback={<div className="grid h-full place-items-center text-xs text-(--text-3)">
+                        <span className="inline-flex items-center gap-1.5"><Loader2 className="h-3.5 w-3.5 animate-spin" />画布加载中…</span>
+                      </div>}>
+                        {exploration ? <ExplorationCanvas graph={exploration} />
+                          : <div className="grid h-full place-items-center text-xs text-(--text-3)">探索图加载中…</div>}
+                      </Suspense>
+                      : <ExplorationPanel graph={exploration} />}
+                  </div>
+                </div>}
                 {tab === "activity" && <ActivityTimeline events={activity} />}
               </div>
             </section>
@@ -530,6 +562,17 @@ function TabButton({ icon: Icon, label, count, active, onClick }: {
       active ? "bg-cyan-500/10 text-cyan-300" : "text-(--text-3) hover:bg-(--surface-2) hover:text-(--text-2)")}>
     <Icon className="h-3.5 w-3.5" />{label}
     <span className={cn("rounded-full px-1.5 font-mono text-[10px]", active ? "bg-cyan-500/20" : "bg-(--surface-2)")}>{count}</span>
+  </button>
+}
+
+/** 探索图子切换（画布/列表）：比 TabButton 轻一档，不带计数徽章。 */
+function SubTabButton({ icon: Icon, label, active, onClick }: {
+  icon: typeof Network; label: string; active: boolean; onClick: () => void
+}) {
+  return <button onClick={onClick}
+    className={cn("inline-flex items-center gap-1 rounded px-2 py-0.5 text-[11px] transition-colors",
+      active ? "bg-cyan-500/10 text-cyan-300" : "text-(--text-3) hover:bg-(--surface-2) hover:text-(--text-2)")}>
+    <Icon className="h-3 w-3" />{label}
   </button>
 }
 

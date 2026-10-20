@@ -1,245 +1,356 @@
-# Pwn Field Notes
-
-Detailed pwn notes that support [`SKILL.md`](SKILL.md). Read this file after confirming the challenge really needs exploitation.
-
-## Table of Contents
-
-- [Heap Exploitation](#heap-exploitation)
-- [Additional Exploit Notes](#additional-exploit-notes)
-  - [talloc Pool Header Forgery](#talloc-pool-header-forgery)
-  - [JIT Compilation Exploits](#jit-compilation-exploits)
-  - [Type Confusion in Interpreters](#type-confusion-in-interpreters)
-  - [Off-by-One Index / Size Corruption](#off-by-one-index--size-corruption)
-  - [Double win() Call](#double-win-call)
-  - [Arbitrary Read/Write to Shell via GOT Overwrite](#arbitrary-readwrite-to-shell-via-got-overwrite)
-  - [Stack Leak via __environ and memcpy Overflow](#stack-leak-via-__environ-and-memcpy-overflow)
-  - [JIT Sandbox Escape via uint16 Jump Truncation](#jit-sandbox-escape-via-uint16-jump-truncation)
-  - [DNS Compression Pointer Stack Overflow](#dns-compression-pointer-stack-overflow)
-  - [ELF Code Signing Bypass via Program Headers](#elf-code-signing-bypass-via-program-headers)
-  - [Game Level Format Signed/Unsigned Coordinate Mismatch](#game-level-format-signedunsigned-coordinate-mismatch)
-  - [File Descriptor Inheritance via Missing O_CLOEXEC](#file-descriptor-inheritance-via-missing-o_cloexec)
-  - [Sign Extension Integer Underflow in Metadata Parsing](#sign-extension-integer-underflow-in-metadata-parsing)
-  - [ROP Chain Construction with Read-Only Primitive](#rop-chain-construction-with-read-only-primitive)
-  - [Esoteric Language GOT Overwrite](#esoteric-language-got-overwrite)
-  - [Protocol Stack Bleeding](#protocol-stack-bleeding)
-  - [Timing Attack Flag Recovery](#timing-attack-flag-recovery)
-  - [DNS Record Buffer Overflow](#dns-record-buffer-overflow)
-  - [ASAN Shadow Memory Exploitation](#asan-shadow-memory-exploitation)
-  - [Format String .fini_array Loop for Multi-Stage Exploitation](#format-string-fini_array-loop-for-multi-stage-exploitation)
-  - [Format String with RWX .fini_array Hijack](#format-string-with-rwx-fini_array-hijack)
-  - [Custom Canary Preservation](#custom-canary-preservation)
-  - [MD5 Preimage Gadget Construction](#md5-preimage-gadget-construction)
-  - [Python Sandbox Escape](#python-sandbox-escape)
-  - [VM GC-Triggered UAF (Slab Reuse)](#vm-gc-triggered-uaf-slab-reuse)
-  - [GC Null-Reference Cascading Corruption](#gc-null-reference-cascading-corruption)
-  - [OOB Read via Stride/Rate Leak](#oob-read-via-striderate-leak)
-  - [SROP with UTF-8 Constraints](#srop-with-utf-8-constraints)
-  - [VM Exploitation (Custom Bytecode)](#vm-exploitation-custom-bytecode)
-  - [FUSE/CUSE Character Device Exploitation](#fusecuse-character-device-exploitation)
-  - [Busybox/Restricted Shell Escalation](#busyboxrestricted-shell-escalation)
-  - [process_vm_readv Sandbox Bypass](#process_vm_readv-sandbox-bypass)
-  - [Named Pipe (mkfifo) File Size Bypass](#named-pipe-mkfifo-file-size-bypass)
-  - [Shell Tricks](#shell-tricks)
-  - [Double Stack Pivot to BSS via leave;ret](#double-stack-pivot-to-bss-via-leaveret)
-  - [RETF Architecture Switch for Seccomp Bypass](#retf-architecture-switch-for-seccomp-bypass)
-  - [Leakless Libc via Multi-fgets stdout FILE Overwrite](#leakless-libc-via-multi-fgets-stdout-file-overwrite)
-  - [Signed/Unsigned Char Underflow to Heap Overflow](#signedunsigned-char-underflow-to-heap-overflow)
-  - [TLS Destructor Hijack via `__call_tls_dtors`](#tls-destructor-hijack-via-__call_tls_dtors)
-  - [Signed Int Overflow to Negative OOB Heap Write](#signed-int-overflow-to-negative-oob-heap-write)
-  - [Custom Shadow Stack Bypass via Pointer Overflow](#custom-shadow-stack-bypass-via-pointer-overflow)
-  - [Windows SEH Overwrite + VirtualAlloc ROP](#windows-seh-overwrite--virtualalloc-rop)
-  - [SeDebugPrivilege to SYSTEM](#sedebugprivilege-to-system)
-  - [mmap/munmap Size Mismatch UAF](#mmapmunmap-size-mismatch-uaf)
-  - [strcspn Indirect Null Byte Injection](#strcspn-indirect-null-byte-injection)
-  - [Windows CFG Bypass Using system() as Valid Call Target](#windows-cfg-bypass-using-system-as-valid-call-target)
-  - [4-Byte Shellcode with Timing Side-Channel](#4-byte-shellcode-with-timing-side-channel)
-  - [CRC Oracle as Arbitrary Read Primitive](#crc-oracle-as-arbitrary-read-primitive)
-  - [UTF-8 Case Conversion Buffer Overflow](#utf-8-case-conversion-buffer-overflow)
-- [Useful Commands](#useful-commands)
-
-## Heap Exploitation
-
-- tcache poisoning (glibc 2.26+), fastbin dup / double free
-- House of Force (old glibc), unsorted bin attack
-- **House of Apple 2** (glibc 2.34+): FSOP (File Stream Oriented Programming) via `_IO_wfile_jumps` when `__free_hook`/`__malloc_hook` removed. Fake FILE with `_flags = " sh"`, vtable chain → `system(fp)`. For SUID binaries: use `setcontext()` variant to stack pivot → `setuid(0)` → `system()` (dash drops privs when uid != euid). See [[binary/漏洞利用/heap-techniques.md#setcontext-variant-for-suid-binaries-midnight-flag-2026|heap-techniques.md]].
-- **Classic unlink**: Corrupt adjacent chunk metadata, trigger backward consolidation for write-what-where primitive. Pre-2.26 glibc only. See [[binary/漏洞利用/heap-techniques.md#classic-heap-unlink-attack-crypto-cat|heap-techniques.md]].
-- **House of Force:** Corrupt top chunk size to `0xffffffffffffffff`, next `malloc(target - top - 2*SIZE_SZ)` returns arbitrary address. Pre-2.29 glibc only. See [[binary/漏洞利用/heap-techniques.md#house-of-force-csaw-ctf-2016|heap-techniques.md]].
-- **House of Einherjar**: Off-by-one null clears PREV_INUSE, backward consolidation with self-pointing unlink.
-- **Safe-linking** (glibc 2.32+): tcache fd mangled as `ptr ^ (chunk_addr >> 12)`.
-- Check glibc version: `strings libc.so.6 | grep GLIBC`
-- Freed chunks contain libc pointers (fd/bk) -> leak via error messages or missing null-termination
-- Heap feng shui: control alloc order/sizes, create holes, place targets adjacent to overflow source
-- **Unsafe unlink + top chunk consolidation**: After unlink writes self-pointer to BSS, craft fake BSS chunk spanning to top chunk. `free()` consolidates, relocating heap base to BSS. Subsequent mallocs return BSS memory. See [[binary/漏洞利用/heap-techniques.md#unsafe-unlink-to-bss--top-chunk-consolidation-seccon-2016|heap-techniques.md]].
-
-**House of Orange:** Corrupt top chunk size → large malloc forces sysmalloc → old top freed without calling `free()`. Chain with FSOP. See [[binary/漏洞利用/heap-techniques.md#house-of-orange|heap-techniques.md]].
-
-**House of Spirit:** Forge fake chunk in target area, `free()` it, reallocate to get write access. Requires valid size + next chunk size. See [[binary/漏洞利用/heap-techniques.md#house-of-spirit|heap-techniques.md]].
+---
+
+phase: binary
+vuln_class: [pwn, primitive, heap, fsop, jit, sandbox, windows]
+title: 原语速查表
+summary: 不按漏洞名索引，按「手上是什么原语」索引——只有读、只有写、有 UAF、有越界索引、有格式串、有 JIT、有 GC。判据是先认出原语，再查表选手法。
+---
+
+# 原语速查表
+
+确认题目确实需要利用之后再看本表。分册详解：[[binary/漏洞利用/heap-techniques.md|堆利用]]、[[binary/漏洞利用/heap-fsop.md|FILE 结构体]]、[[binary/漏洞利用/advanced.md|语义误用]]、[[binary/漏洞利用/advanced-exploits.md|进阶原语合集]]、[[binary/漏洞利用/sandbox-escape.md|沙箱逃逸]]、[[binary/漏洞利用/rop-advanced.md|ROP 进阶]]、[[binary/漏洞利用/overflow-basics.md|栈与基础溢出]]、[[binary/漏洞利用/format-string.md|格式串]]。
+
+## 0. 按原语查表
+
+| 手上的原语 | 首选手法 | 去哪节 |
+|---|---|---|
+| 只有 `read()`，没有 win 函数 | 用 libc 里的字节「导入」gadget 地址上栈 | §1 |
+| 只有读原语 + `memcpy(dst=栈, src=用户地址, len=用户控)` | `__environ` 泄栈 → memcpy 覆盖返回地址 | §1 |
+| 任意读写，但函数要拿用户字符串当第一参数 | 挑这类 GOT 项改成 `system` | §1 |
+| UAF + 能喷堆 | vtable 里放 `system`，对象地址低字节凑 `"sh"` | §2 |
+| UAF + PIE + Full RELRO | fastbin stdout vtable 两段劫持 | §2 |
+| 能改堆元数据 + 老 glibc | unlink / House of Force / Einherjar | §3 |
+| 能改 top chunk 大小 | House of Orange（链 FSOP） | §3 |
+| 能在目标区伪造 chunk | House of Spirit | §3 |
+| 能改 smallbin `bk` | House of Lore / tcache stashing unlink | §3 |
+| glibc 2.32+ 且 tcache 被混淆 | safe-linking：`ptr ^ (chunk>>12)` | §3 |
+| 没有 libc 泄漏，但能多次调 `fgets` | 拼假 stdout 结构体，`fflush` 泄 GOT | §3 |
+| glibc 2.34+（hook 被移除） | House of Apple 2 / TLS 析构器劫持 | §4 |
+| 索引有检查但 `array[stride*idx]` | 检查的是索引不是偏移 | §5 |
+| 有符号索引配 `<= N` | 负数写到前面（GOT） | §5 |
+| 索引 0 映射到 `entries[-1]` | 覆盖结构体元数据里的 size 字段 | §5 |
+| `int32` 索引公式 `y*w+x` 溢出 | 负数索引 → 负向越界写堆 | §5 |
+| 元数据里 `to_int32` 把大值转负 | 符号扩展下溢 → 越界 | §5 |
+| `signed char` 尺寸被当 `unsigned char` 用 | `-112` → 144，溢出 17 字节 | §5 |
+| 有格式串但 `printf` 之后没有 GOT 调用 | 改 `.fini_array[0]` 回 main 做多阶段 | §6 |
+| 格式串 + RWX 区 | 写 shellcode 到 RWX，`%hn` 改 `.fini_array` | §6 |
+| 输入必须是合法 UTF-8（Rust/JSON） | SROP（只要 3 个 gadget） | §7 |
+| 溢出空间只够改 RBP + RIP | 双栈枢轴到 BSS | §7 |
+| seccomp 禁 64 位 syscall | `retf` 切 32 位，`int 0x80` 换号 | §7 |
+| 有 JIT 且指令编码 off-by-one | 把 shellcode 藏在 `sub` 立即数里 | §8 |
+| BF JIT 有未配对的 `]` | `]` 从栈弹出纸带地址（RWX）→ 跳过去 | §8 |
+| JIT 条件跳转偏移被截成 uint16 | 代码超 64KB 后错位，`jmp $+3` 串碎片 | §8 |
+| 解释器类型标签写错 | 结构体重解释，padding 变指针 | §8 |
+| 自定义 VM 有 NEWBUF/SLICE/GC | slice 共享 slab → drop+GC 后 UAF | §9 |
+| mark-compact GC 跟随空引用 | 在地址 0 造假对象，压缩时级联破坏 | §9 |
+| 自定义 VM syscall 有越界读写 | 泄 PIE（异或编码的函数指针）→ 改指针 | §9 |
+| 只有 4 字节 shellcode，循环 4096 次 | callee-saved 寄存器跨轮持久 → 时间侧信道 | §10 |
+| 有 CRC 且能控输入地址 | CRC 对单字节双射 → 任意读预言机 | §10 |
+| 校验耗时随正确字符变化 | 逐字节计时恢复 | §10 |
+| 二进制检查 `stat()` 文件大小 | `mkfifo` 永远报 `st_size=0` | §11 |
+| 沙箱用 `process_vm_readv` 校验路径 | 只读映射让读取失败 → 校验跳过 | §11 |
+| 有 FUSE/CUSE 设备 | 后门写处理器 → 改 `/etc/passwd` | §11 |
+| 受限 busybox shell | 找可写路径 → `/etc/passwd`/`sudoers` | §11 |
+| `mmap` 小 / `munmap` 大 | 多解映射毁掉相邻映射 → 线程栈重叠 | §12 |
+| `strcspn(buf,"\r\n")` 后写 null | 间接空字节注入，绕过 CGI 过滤 | §12 |
+| 代码签名只哈希节表不哈希程序头 | 追加 shellcode + 改 `p_offset` | §12 |
+| 缺 `O_CLOEXEC`/`MFD_CLOEXEC` | 子进程继承 fd，读 `/proc/self/fd/N` | §12 |
+| 关卡格式坐标有符号/无符号不一致 | 负坐标过检查 → 往前写任意字节 | §12 |
+| 文件名/路径检查可绕过 | shell 引号拆分 `p'r'oc` 过 `strstr` 过滤 | §12 |
+| UTF-8 大小写转换会变长 | 缓冲按输入长度分配 → 输出溢出 | §12 |
+| 自定义 DNS 服务不统计解压后长度 | 压缩指针链反复访问 → 栈溢出 | §12 |
+| DNS 响应塞大量 AAAA 记录 | 栈缓冲溢出 | §12 |
+| ASAN 二进制的格式串 + 越界写 | 先判真实栈/假栈（50% 概率） | §13 |
+| Windows 有格式串 | 泄 ASLR → 覆盖 SEH → 栈枢轴 | §14 |
+| Windows 有 `SeDebugPrivilege` | `migrate -N winlogon.exe` → SYSTEM | §14 |
+| Windows CFG 开着 | `system()` 本身是合法调用目标 | §14 |
+| 自造影子栈指针无上界 | 递归把指针推过数组进可控内存 | §14 |
+| 溢出必须保留已知 canary | 精确写回 canary 字节 | §15 |
+| 需要调 `win()` 两次 | 栈上叠两个返回地址 | §15 |
+| MD5 前像可当指令用 | 爆破 `eb 0c` 前缀的 preimage 拼 syscall | §15 |
+| Python 沙箱 | AST 绕过 / 审计钩子 / MRO 恢复 builtins | §16 |
+| 溢出发生在 `memcpy` 长度校验之前 | 恢复 callee-saved 后 `ret` | §17 |
+| 协议长度字段 > 实际数据 | 栈/堆越界读（Heartbleed 同构） | §17 |
+| 遍历步长由用户控制 | 步长跳过 null → 逐字节泄 canary/返回地址 | §17 |
 
-**House of Lore:** Corrupt smallbin `bk` → link fake chunk → second malloc returns attacker-controlled address. See [[binary/漏洞利用/heap-techniques.md#house-of-lore|heap-techniques.md]].
-
-**ret2dlresolve:** Forge Elf64_Sym/Rela to resolve arbitrary libc function without leak. `Ret2dlresolvePayload(elf, symbol="system", args=["/bin/sh"])`. Requires Partial RELRO. See [[binary/漏洞利用/advanced.md#ret2dlresolve|advanced.md]].
+---
 
-**tcache stashing unlink (glibc 2.29+):** Corrupt smallbin chunk's `bk` during tcache stashing → arbitrary address linked into tcache → write primitive. See [[binary/漏洞利用/heap-techniques.md#tcache-stashing-unlink-attack|heap-techniques.md]].
+## 1. 只有读 / 只有写
 
-**UAF vtable pointer encoding shell argument:** After UAF, heap spray places `system()` at offset +3. Object address containing `0x6873` ("sh") in low bytes doubles as the command string argument when `system(this)` is called through the hijacked vtable. See [[binary/漏洞利用/heap-techniques.md#uaf-vtable-pointer-encoding-shell-argument-bctf-2017|heap-techniques.md]].
+### 只有 `read()`，没有 win
 
-**Fastbin stdout vtable two-stage hijack (PIE + Full RELRO):** Use 0x7f byte in libc's stdout region as fake fastbin chunk size. Two-stage: first vtable redirect to `gets()` (rdi=stdout), then `gets()` overwrites vtable again to `system()` with command string. See [[binary/漏洞利用/heap-fsop.md#fastbin-stdout-vtable-two-stage-hijack-for-pie--full-relro-asis-ctf-2017|heap-techniques.md]].
+用读原语「导入」任意字节到栈上：从 libc 里找内容恰好等于目标 gadget 地址的偏移，读过来。读原语因此兼作写原语。
 
-See [[binary/漏洞利用/heap-techniques.md|heap-techniques.md]] for House of Apple 2 FSOP chain (+ setcontext SUID variant), House of Orange/Spirit/Lore/Force, tcache stashing unlink, custom allocator exploitation (nginx pools, talloc), classic unlink, musl libc heap. See [[binary/漏洞利用/advanced.md|advanced.md]] for ret2dlresolve, heap overlap via base conversion, tree data structure stack underallocation.
+### 读原语 + `memcpy(栈缓冲, 用户地址, 用户长度)`
 
-**GF(2) Gaussian elimination for tcache poisoning:** When a deterministic XOR cipher corrupts heap metadata as a side effect, model the corruption as linear algebra over GF(2). Find a subset of cipher seeds whose combined XOR transforms tcache `fd` from current value to target address. See [[binary/漏洞利用/advanced-exploits.md#gf2-gaussian-elimination-for-multi-pass-tcache-poisoning-midnight-flag-2026|advanced-exploits.md]].
+1. 读 GOT 泄 libc
+2. 读 `__environ` 泄栈
+3. 把 ROP 地址先放进输入缓冲
+4. 用 `memcpy` 把它覆盖到返回地址
+5. 发 EOF 触发返回
 
-## Additional Exploit Notes
+详见 [[binary/漏洞利用/advanced-exploits.md|高级利用手法判据]]。
 
-### talloc Pool Header Forgery
-**Pattern:** talloc (hierarchical allocator in Samba/CUPS) pool header forgery. Forge fake pool header with controlled `end`/`object_count` fields to redirect next `talloc()` to arbitrary address. Leak GOT for libc, write `__free_hook` with `system()`. See [[binary/漏洞利用/heap-techniques.md#talloc-pool-header-forgery-for-arbitrary-readwrite-boston-key-party-2016|heap-techniques.md]].
+### 任意读写 → 挑对 GOT 项
 
-### JIT Compilation Exploits
-**Pattern:** Off-by-one in instruction encoding -> misaligned machine code. Embed shellcode as operand bytes of subtraction operations, chain with 2-byte `jmp` instructions. See [[binary/漏洞利用/advanced.md|advanced.md]].
+判据：目标函数**第一参数就是用户可控字符串**。把这类 GOT 项改成 `system`，下次调用即 `system(用户输入)`。
 
-**BF JIT unbalanced bracket:** Unbalanced `]` pops tape address (RWX) from stack → write shellcode to tape with `+`/`-`, trigger `]` to jump to it. See [[binary/漏洞利用/advanced.md|advanced.md]].
+详见 [[binary/漏洞利用/advanced-exploits.md|高级利用手法判据]]。
 
-### Type Confusion in Interpreters
-**Pattern:** Interpreter sets wrong type tag → struct fields reinterpreted. Unused padding bytes in one variant become active pointers/data in another. Flag bytes as type value trigger UNKNOWN_DATA dump. See [[binary/漏洞利用/advanced.md|advanced.md]].
+---
 
-### Off-by-One Index / Size Corruption
-**Pattern:** Array index 0 maps to `entries[-1]`, overlapping struct metadata (size field). Corrupted size → OOB read leaks canary/libc, then OOB write places ROP chain. See [[binary/漏洞利用/advanced.md|advanced.md]].
+## 2. UAF
 
-### Double win() Call
-**Pattern:** `win()` checks `if (attempts++ > 0)` — needs two calls. Stack two return addresses: `p64(win) + p64(win)`. See [[binary/漏洞利用/advanced.md|advanced.md]].
+**vtable 指针编码当命令串**：UAF 后喷堆把 `system()` 放到偏移 +3，对象地址低字节凑出 `0x6873`（`"sh"`）——通过被劫持的 vtable 调 `system(this)` 时，对象地址本身就是命令字符串。
 
-### Arbitrary Read/Write to Shell via GOT Overwrite
-**Pattern:** Binary provides explicit read/write primitives. Leak libc via GOT read, overwrite `strtoll@GOT` with `system`, next call becomes `system(user_input)`. Choose GOT targets where the function takes a user-controlled string as first arg. See [[binary/漏洞利用/advanced-exploits.md#arbitrary-readwrite-to-shell-via-got-overwrite-bsidessf-2026|advanced-exploits.md]].
+详见 [[binary/漏洞利用/heap-techniques.md|堆利用]]。
 
-### Stack Leak via __environ and memcpy Overflow
-**Pattern:** Binary with read-only primitive and `memcpy(stack_buf, user_addr, user_len)`. Leak libc via GOT, leak stack via `__environ`, plant ROP addresses in input buffer, overflow memcpy to copy them over return address, send EOF to trigger return. See [[binary/漏洞利用/advanced-exploits.md#stack-leak-via-__environ-and-memcpy-overflow-bsidessf-2026|advanced-exploits.md]].
+**fastbin stdout vtable 两段劫持（PIE + Full RELRO）**：用 libc 里 stdout 区域的 `0x7f` 字节当假 fastbin chunk 的 size。两段：先把 vtable 重定向到 `gets()`（rdi=stdout），再用 `gets()` 把 vtable 改成 `system()` 并写入命令串。
 
-### JIT Sandbox Escape via uint16 Jump Truncation
-**Pattern:** JIT compiler truncates conditional jump offset to uint16, causing misalignment when code exceeds 64KB. Embed 2-byte shellcode fragments in `add` immediates, thread with `jmp $+3` to chain execution. See [[binary/漏洞利用/advanced-exploits.md#jit-sandbox-escape-via-conditional-jump-uint16-truncation-bsidessf-2026|advanced-exploits.md]].
+详见 [[binary/漏洞利用/heap-fsop.md#fastbin-stdout-vtable-two-stage-hijack-for-pie--full-relro-asis-ctf-2017|heap-fsop.md]]。
 
-### DNS Compression Pointer Stack Overflow
-**Pattern:** Custom DNS server doesn't track decompressed name length. Compression pointer chains revisit data, overflowing stack buffer. Split ROP chain across multiple DNS question entries. See [[binary/漏洞利用/advanced-exploits.md#dns-compression-pointer-stack-overflow-with-multi-question-rop-bsidessf-2026|advanced-exploits.md]].
+---
 
-### ELF Code Signing Bypass via Program Headers
-**Pattern:** Signing scheme hashes section headers/content but not program headers. Append shellcode, modify LOAD segment's `p_offset` to point to appended data — signature still valid, loader executes attacker code. See [[binary/漏洞利用/advanced-exploits.md#elf-code-signing-bypass-via-program-header-manipulation-bsidessf-2026|advanced-exploits.md]].
+## 3. 堆（按 glibc 版本）
 
-### Game Level Format Signed/Unsigned Coordinate Mismatch
-**Pattern:** Level editor parses signed integer coordinates but bounds-checks via unsigned comparison — negative coordinates pass the check and write block IDs (arbitrary bytes) before the level array, enabling stack return address overwrite. Leak stack address via hidden developer mode, encode shellcode as block IDs. See [[binary/漏洞利用/advanced-exploits.md#game-level-format-signedunsigned-coordinate-mismatch-bsidessf-2026|advanced-exploits.md]].
+| 手法 | 适用版本 | 一句话 |
+|---|---|---|
+| tcache poisoning | 2.26+ | 改 tcache `next` 直接拿任意地址 |
+| fastbin dup / double free | 全版本（有校验差异） | 同一 chunk 释放两次 |
+| **House of Force** | < 2.29 | top size 改成 `0xffffffffffffffff`，下次 malloc 返回任意地址 |
+| **House of Einherjar** | 全版本 | off-by-one null 清 `PREV_INUSE`，向后合并 + 自指 unlink |
+| **Classic unlink** | < 2.26 | 改相邻 chunk 元数据，向后合并得 write-what-where |
+| **House of Orange** | 全版本 | 改 top size → 大 malloc 触发 sysmalloc → 旧 top 不经 `free()` 就被释放，链 FSOP |
+| **House of Spirit** | 全版本 | 在目标区伪造 chunk 再 `free()`，重新分配即获写权（要求 size 与 next chunk size 合法） |
+| **House of Lore** | 全版本 | 改 smallbin `bk` 链入假 chunk，第二次 malloc 返回可控地址 |
+| **Unsafe unlink + top 合并** | 全版本 | unlink 往 BSS 写自指针，造跨到 top 的假 chunk，`free` 后堆基址迁到 BSS |
+| **tcache stashing unlink** | 2.29+ | stashing 期间改 smallbin `bk`，把任意地址链进 tcache |
+| **safe-linking** | 2.32+ | 不是手法而是障碍：`fd` 被混淆成 `ptr ^ (chunk>>12)` |
 
-### File Descriptor Inheritance via Missing O_CLOEXEC
-**Pattern:** Service reads secret into `memfd_create()` FD without `MFD_CLOEXEC`, then calls `system()` for user commands — child inherits the FD. Bypass `strstr()` keyword filters with shell quote splitting (`p'r'oc` instead of `proc`) to read `/proc/self/fd/N`. See [[binary/漏洞利用/advanced-exploits.md#file-descriptor-inheritance-via-missing-o_cloexec-bsidessf-2026|advanced-exploits.md]].
+**先查版本**：`strings libc.so.6 | grep GLIBC`。
 
-### Sign Extension Integer Underflow in Metadata Parsing
-**Pattern:** Metadata parser's `to_int32` converts unsigned values >= 0x80000000 to negative signed integers. Used as array index/offset, this causes OOB memory access. Iterate byte-by-byte to leak flag from memory. See [[binary/漏洞利用/advanced-exploits.md#sign-extension-integer-underflow-in-metadata-parsing-bsidessf-2026|advanced-exploits.md]].
+**堆整形（feng shui）**：控制分配顺序与尺寸，制造空洞，把目标对象摆到溢出源旁边。
 
-### ROP Chain Construction with Read-Only Primitive
-**Pattern:** Binary with only `read()` primitive — no write, no win function. Leak libc via GOT, then "import" arbitrary byte values onto the stack by reading from libc offsets whose content matches desired ROP gadget addresses. Read primitive doubles as write primitive. See [[binary/漏洞利用/advanced-exploits.md#rop-chain-construction-with-read-only-primitive-bsidessf-2026|advanced-exploits.md]].
+**GF(2) 消元破 tcache**：确定性 XOR 密码顺手污染了堆元数据时，把污染建模成 GF(2) 上的线性代数，找一组种子让合并后的 XOR 把 `fd` 从当前值变到目标地址。
 
-### Esoteric Language GOT Overwrite
-**Pattern:** Brainfuck/Pikalang interpreter with unbounded tape = arbitrary read/write relative to buffer base. Move pointer to GOT, overwrite byte-by-byte with `system()`. See [[binary/漏洞利用/advanced.md|advanced.md]].
+详见 [[binary/漏洞利用/advanced-exploits.md|高级利用手法判据]]。
 
-### Protocol Stack Bleeding
-Custom network protocols echoing data based on length field leak stack memory when length exceeds actual data (Heartbleed-style). See [[binary/漏洞利用/overflow-basics.md#protocol-length-field-stack-bleeding-ekoparty-ctf-2016|overflow-basics.md]].
+**talloc 池头伪造**：talloc（Samba/CUPS 的分层分配器）伪造池头，控 `end`/`object_count` 把下次 `talloc()` 重定向到任意地址。
 
-### Timing Attack Flag Recovery
-Validation time varies per correct character; measure elapsed time per candidate byte to recover flag character-by-character. See [[binary/漏洞利用/advanced-exploits.md#timing-attack-for-character-by-character-flag-recovery-rc3-ctf-2016|advanced-exploits.md]].
+详见 [[binary/漏洞利用/heap-techniques.md|堆利用]]。
 
-### DNS Record Buffer Overflow
-**Pattern:** Many AAAA records overflow stack buffer in DNS response parser. Set up DNS server with excessive records, overwrite return address. See [[binary/漏洞利用/advanced.md|advanced.md]].
+**无 libc 泄漏时拼假 stdout**：多次 `fgets(addr, 7, stdin)` 在 BSS 上拼出假 stdout 结构体，把 `_IO_write_base` 指向 GOT 项，`fflush(stdout)` 就泄出 GOT。每次只写 7 字节是为了避开 libc 指针高位本来就是 `\x00` 的事实。
 
-### ASAN Shadow Memory Exploitation
-**Pattern:** Binary with AddressSanitizer has format string + OOB write. ASAN may use "fake stack" (50% chance). Leak PIE, detect real vs fake stack, calculate OOB write offset to overwrite return address. See [[binary/漏洞利用/advanced.md|advanced.md]].
+详见 [[binary/漏洞利用/advanced-exploits.md|高级利用手法判据]]。
 
-### Format String .fini_array Loop for Multi-Stage Exploitation
-**Pattern:** No GOT function called after `printf()`. Overwrite `.fini_array[0]` with `main()` for re-execution loop. Stage 1: leak libc/stack. Stage 2: `printf@GOT` to `system()`, `__stack_chk_fail@GOT` to `main()`. Stage 3: corrupt canary to trigger `__stack_chk_fail` re-entry, now `printf(input)` is `system(input)`. See [[binary/漏洞利用/format-string.md#format-string-fini_array-loop-for-multi-stage-exploitation-codegate-2016|format-string.md]].
+---
 
-### Format String with RWX .fini_array Hijack
-**Pattern (Encodinator):** Base85-encoded input in RWX memory passed to `printf()`. Write shellcode to RWX region, overwrite `.fini_array[0]` via format string `%hn` writes. Use convergence loop for base85 argument numbering. See [[binary/漏洞利用/advanced.md|advanced.md]].
+## 4. glibc 2.34+（hook 已移除）
 
-### Custom Canary Preservation
-**Pattern:** Buffer overflow must preserve known canary value. Write exact canary bytes at correct offset: `b'A' * 64 + b'BIRD' + b'X'`. See [[binary/漏洞利用/advanced.md|advanced.md]].
+**House of Apple 2**：`__free_hook`/`__malloc_hook` 没了，走 FSOP（File Stream Oriented Programming），用 `_IO_wfile_jumps`。假 FILE 的 `_flags = " sh"`，vtable 链到 `system(fp)`。
 
-### MD5 Preimage Gadget Construction
-**Pattern (Hashchain):** Brute-force MD5 preimages with `eb 0c` prefix (jmp +12) to skip middle bytes; bytes 14-15 become 2-byte i386 instructions. Build syscall chains from gadgets like `31c0` (xor eax), `cd80` (int 0x80). See [[binary/漏洞利用/advanced.md|advanced.md]] for C code and v2 technique.
+**SUID 变体**：用 `setcontext()` 做栈枢轴 → `setuid(0)` → `system()`（dash 在 uid != euid 时会丢权限，所以必须先 `setuid`）。
 
-### Python Sandbox Escape
-AST bypass via f-strings, audit hook bypass with `b'flag.txt'` (bytes vs str), MRO-based `__builtins__` recovery. See [[binary/漏洞利用/sandbox-escape.md|sandbox-escape.md]].
+**TLS 析构器劫持**：伪造 `__tls_dtor_list` 节点，函数指针要过指针保护：`encoded = rol(target ^ pointer_guard, 0x11)`。`pointer_guard` 得从 TLS 段泄（用 FSOP 重定向 stdout）。退出时每个节点调 `PTR_DEMANGLE(func)(obj)`。
 
-### VM GC-Triggered UAF (Slab Reuse)
-**Pattern:** Custom VM with NEWBUF/SLICE/GC opcodes. Slicing creates shared slab reference; dropping+GC'ing slice frees slab while parent still holds it. Allocate function object to reuse slab, leak code pointer via UAF read, overwrite with win() address. See [[binary/漏洞利用/advanced.md|advanced.md]].
+详见 [[binary/漏洞利用/heap-techniques.md|堆利用]] 与 [[binary/漏洞利用/advanced-exploits.md|高级利用手法判据]]。
 
-### GC Null-Reference Cascading Corruption
-**Pattern:** Mark-compact GC follows null references to heap address 0, creating fake object. During compaction, memmove cascades corruption through adjacent object headers → OOB access → libc leak → FSOP. See [[binary/漏洞利用/advanced.md|advanced.md]].
+---
 
-### OOB Read via Stride/Rate Leak
-**Pattern:** String processing function with user-controlled stride skips past null terminator, leaking stack canary and return address one byte at a time. Then overflow with leaked values. See [[binary/漏洞利用/overflow-basics.md|overflow-basics.md]].
+## 5. 越界索引
 
-### SROP with UTF-8 Constraints
-**Pattern:** When payload must be valid UTF-8 (Rust binaries, JSON parsers), use SROP — only 3 gadgets needed. Multi-byte UTF-8 sequences spanning register field boundaries "fix" high bytes. See [[binary/漏洞利用/rop-advanced.md|rop-advanced.md]].
+| 形态 | 洞在哪 | 打法 |
+|---|---|---|
+| `array[stride*idx]`，检查 `idx <= N` | 检查的是索引不是字节偏移 | 取最大 idx，落到 `stride*N` 之外 |
+| 有符号 `idx` 配 `<= N` | 范围实际是 `[INT_MIN, N]` | 负索引写到前面（GOT/全局） |
+| 索引 0 映射到 `entries[-1]` | 与结构体元数据（size 字段）重叠 | 改 size → 越界读泄 canary/libc → 越界写放 ROP |
+| `y*width + x` 在 int32 溢出 | 负值通过边界检查 | 负向越界写堆元数据 |
+| 元数据 `to_int32` 把 `>= 0x80000000` 转负 | 符号扩展下溢 | 当索引/偏移用就 OOB |
+| `signed char` 尺寸转 `unsigned char` 使用 | `-112` → `144` | 溢出 127 字节缓冲 17 字节 |
 
-### VM Exploitation (Custom Bytecode)
-**Pattern:** Custom VM with OOB read/write in syscalls. Leak PIE via XOR-encoded function pointer, overflow to rewrite pointer with `win() ^ KEY`. See [[binary/漏洞利用/sandbox-escape.md|sandbox-escape.md]].
+**有符号 int 溢出到负向越界写（含 XSS 桥）**：索引用 `y * width + x` 在 int32 溢出成负值，过检查后往前写堆元数据 → 改相邻 chunk 尺寸 → unsorted bin 泄 libc → 把数据指针改到 `environ` 泄栈 → 往 main 的返回地址写 ROP。若二进制在 Web API 后面，链路是 XSS → Fetch API → 堆利用，并在 API 参数里注入 `\n` 做命令堆叠（`sendline()` 会当分隔符）。
 
-### FUSE/CUSE Character Device Exploitation
-Look for `cuse_lowlevel_main()` / `fuse_main()`, backdoor write handlers with command parsing. Exploit to `chmod /etc/passwd` then modify for root access. See [[binary/漏洞利用/sandbox-escape.md|sandbox-escape.md]].
+详见 [[binary/漏洞利用/advanced-exploits.md|高级利用手法判据]]。
 
-### Busybox/Restricted Shell Escalation
-Find writable paths via character devices, target `/etc/passwd` or `/etc/sudoers`, modify permissions then content. See [[binary/漏洞利用/sandbox-escape.md|sandbox-escape.md]].
+**有符号/无符号 char 下溢到堆溢出（完整链）**：`size = -112` → 144，溢出 127 字节缓冲 17 字节。配上 XOR 密钥流暴力做字节级精确写，伪造 chunk size 触发 unsorted bin 提升泄 libc，FSOP stdout 泄 TLS，最后改 TLS 析构器拿 RCE。
 
-### process_vm_readv Sandbox Bypass
-**Pattern:** Sandbox validates file paths via `process_vm_readv()` + `realpath()`. Map memory with `PROT_READ` only at fixed address via `mmap(MAP_FIXED)` -- sandbox's `process_vm_readv` fails silently, bypassing path validation entirely. See [[binary/漏洞利用/sandbox-escape.md#process_vm_readv-failure-as-sandbox-escape-0ctf-2016|sandbox-escape.md]].
+详见 [[binary/漏洞利用/advanced-exploits.md|高级利用手法判据]]。
 
-### Named Pipe (mkfifo) File Size Bypass
-**Pattern:** Binary checks `stat()` file size before reading. Named pipes report `st_size = 0` but deliver arbitrary data via `read()`. `mkfifo /tmp/pipe && cat payload > /tmp/pipe &` then pass pipe to binary. Combine with `ln -s /flag arena.c` for string reuse in ROP. See [[binary/漏洞利用/sandbox-escape.md#named-pipe-mkfifo-for-file-size-check-bypass-nuit-du-hack-2016|sandbox-escape.md]].
+---
 
-### Shell Tricks
-`exec<&3;sh>&3` for fd redirection, `$0` instead of `sh`, `ls -la /proc/self/fd` to find correct fd. See [[binary/漏洞利用/sandbox-escape.md|sandbox-escape.md]].
+## 6. 格式串
 
-### Double Stack Pivot to BSS via leave;ret
-**Pattern:** Small overflow (only RBP + RIP). Overwrite RBP → BSS address, RIP → `leave; ret` gadget. `leave` sets RSP = RBP (BSS). Second stage at BSS calls `fgets(BSS+offset, large_size, stdin)` to load full ROP chain. See [[binary/漏洞利用/rop-advanced.md#double-stack-pivot-to-bss-via-leaveret-midnightflag-2026|rop-advanced.md]].
+**`printf` 之后没有 GOT 调用**：把 `.fini_array[0]` 改成 `main()` 做循环。三阶段：
+1. 泄 libc/栈
+2. `printf@GOT` → `system()`，`__stack_chk_fail@GOT` → `main()`
+3. 破坏 canary 触发 `__stack_chk_fail` 重入，此时 `printf(input)` 已经是 `system(input)`
 
-### RETF Architecture Switch for Seccomp Bypass
-**Pattern:** Seccomp blocks 64-bit syscalls (`open`, `execve`). Use `retf` gadget to load CS=0x23 (IA-32e compatibility mode). In 32-bit mode, `int 0x80` uses different syscall numbers (open=5, read=3, write=4) not covered by the filter. Requires `mprotect` to make BSS executable for 32-bit shellcode. See [[binary/漏洞利用/rop-advanced.md#retf-architecture-switch-for-seccomp-bypass-midnightflag-2026|rop-advanced.md]].
+详见 [[binary/漏洞利用/format-string.md|格式串利用]]。
 
-### Leakless Libc via Multi-fgets stdout FILE Overwrite
-**Pattern:** No libc leak available. Chain multiple `fgets(addr, 7, stdin)` calls via ROP to construct fake stdout FILE struct on BSS. Set `_IO_write_base` to GOT entry, call `fflush(stdout)` → leaks GOT content → libc base. The 7-byte writes avoid null byte corruption since libc pointer MSBs are already `\x00`. See [[binary/漏洞利用/advanced-exploits.md#leakless-libc-via-multi-fgets-stdout-file-overwrite-midnightflag-2026|advanced-exploits.md]].
+**RWX 区 + `.fini_array`**：base85 编码的输入落在 RWX 内存后传给 `printf()`。先写 shellcode 到 RWX，再用 `%hn` 改 `.fini_array[0]`。base85 的参数编号要用收敛循环算。
 
-### Signed/Unsigned Char Underflow to Heap Overflow
-**Pattern:** Size field stored as `signed char`, cast to `unsigned char` for use. `size = -112` → `(unsigned char)(-112) = 144`, overflowing a 127-byte buffer by 17 bytes. Combine with XOR keystream brute-force for byte-precise writes, forge chunk sizes for unsorted bin promotion (libc leak), FSOP stdout for TLS leak, and TLS destructor (`__call_tls_dtors`) overwrite for RCE. See [[binary/漏洞利用/advanced-exploits.md#signedunsigned-char-underflow-to-heap-overflow--tls-destructor-hijack-midnightflag-2026|advanced-exploits.md]].
+详见 [[binary/漏洞利用/advanced.md|advanced.md]]。
 
-### TLS Destructor Hijack via `__call_tls_dtors`
-**Pattern:** Alternative to House of Apple 2 on glibc 2.34+. Forge `__tls_dtor_list` entries with pointer-guard-mangled function pointers: `encoded = rol(target ^ pointer_guard, 0x11)`. Requires leaking pointer guard from TLS segment (via FSOP stdout redirection). Each node calls `PTR_DEMANGLE(func)(obj)` on exit. See [[binary/漏洞利用/advanced-exploits.md#tls-destructor-overwrite-for-rce-via-__call_tls_dtors|advanced-exploits.md]].
+---
 
-### Signed Int Overflow to Negative OOB Heap Write
-**Pattern (Canvas of Fear):** Index formula `y * width + x` in signed 32-bit int overflows to negative value, passing bounds check and writing backward into heap metadata. Use to corrupt adjacent chunk sizes/pointers, leak libc via unsorted bin, redirect a data pointer to `environ` for stack leak, then write ROP chain to main's return address. When binary is behind a web API, chain XSS → Fetch API → heap exploit, and inject `\n` in API parameters for command stacking via `sendline()`. See [[binary/漏洞利用/advanced-exploits.md#signed-int-overflow-to-negative-oob-heap-write--xss-to-binary-pwn-bridge-midnight-2026|advanced-exploits.md]] for full exploit chain, XSS bridge pattern, and RGB pixel write primitive.
+## 7. ROP 特殊约束
 
-### Custom Shadow Stack Bypass via Pointer Overflow
-**Pattern (Revenant):** Userland shadow stack in `.bss` with unbounded pointer. Recurse to advance `shadow_stack_ptr` past the array into user-controlled memory (e.g., `username` buffer), write `win()` there, then overflow the hardware stack return address to match. Both checks pass. See [[binary/漏洞利用/advanced-exploits.md#custom-shadow-stack-bypass-via-pointer-overflow-midnight-2026|advanced-exploits.md]] for full exploit and `.bss` layout analysis.
+**输入必须是合法 UTF-8（Rust/JSON）**：用 SROP，只要 3 个 gadget。跨寄存器字段的多字节 UTF-8 序列正好能「补齐」高位字节。
 
-### Windows SEH Overwrite + VirtualAlloc ROP
-Format string leak defeats ASLR. SEH (Structured Exception Handler) overwrite with stack pivot to ROP chain. `pushad` builds VirtualAlloc call frame for DEP (Data Execution Prevention) bypass. Detached process launcher for shell stability on thread-based servers. See [[binary/漏洞利用/advanced-exploits.md#windows-seh-overwrite--pushad-virtualalloc-rop-rainbowtwo-htb|advanced-exploits.md]].
+详见 [[binary/漏洞利用/rop-advanced.md|ROP 进阶]]。
 
-### SeDebugPrivilege to SYSTEM
-`SeDebugPrivilege` + Meterpreter `migrate -N winlogon.exe` -> SYSTEM. See [[binary/漏洞利用/advanced-exploits.md#sedebugprivilege-to-system-rainbowtwo-htb|advanced-exploits.md]].
+**溢出空间只够改 RBP + RIP**：RBP 改成 BSS 地址，RIP 改成 `leave; ret`。`leave` 把 RSP 设成 BSS，第二阶段在 BSS 上 `fgets(BSS+offset, 大尺寸, stdin)` 载入完整链。
 
-### mmap/munmap Size Mismatch UAF
-Over-unmap via mmap(small)/munmap(large) destroys adjacent mappings. Thread stack fills gap, old buffer pointer becomes write-into-stack. Race-free UAF variant. See [[binary/漏洞利用/advanced-exploits.md#mmapmunmap-size-mismatch-uaf-for-thread-stack-overlap-0ctf-2017|advanced-exploits.md]].
+详见 [[binary/漏洞利用/rop-advanced.md|ROP 进阶]]。
 
-### strcspn Indirect Null Byte Injection
-`strcspn(buf, "\r\n")` + null write truncates strings at injected newlines. Bypasses CGI null-byte filtering for path traversal. See [[binary/漏洞利用/advanced-exploits.md#strcspn-as-indirect-null-byte-injection-bsidessf-2017|advanced-exploits.md]].
+**seccomp 禁 64 位 syscall**：`retf` 把 CS 切成 `0x23`（IA-32e 兼容模式）。32 位下 `int 0x80` 的编号不同（open=5、read=3、write=4），过滤器没覆盖。需要先 `mprotect` 让 BSS 可执行放 32 位 shellcode。
 
-### Windows CFG Bypass Using system() as Valid Call Target
-**Pattern:** Windows CFG validates indirect call targets but `system()` from msvcrt passes validation since it is a legitimate API entry point. Overwrite function pointer with `system()`, use comma instead of space in arguments to bypass input filters. See [[binary/漏洞利用/advanced-exploits.md#windows-cfg-bypass-using-system-as-valid-call-target-insomnihack-2017|advanced-exploits.md]].
+详见 [[binary/漏洞利用/rop-advanced.md|ROP 进阶]]。
 
-### 4-Byte Shellcode with Timing Side-Channel
-**Pattern:** Binary executes only 4 bytes of user shellcode in a 4096-iteration loop. Callee-saved registers (r12-r15) persist across iterations, enabling incremental state building. The 4096x loop amplifies timing differences for reliable side-channel measurement. See [[binary/漏洞利用/advanced-exploits.md#4-byte-shellcode-with-timing-side-channel-via-persistent-registers-google-ctf-2017|advanced-exploits.md]].
+---
 
-### CRC Oracle as Arbitrary Read Primitive
-**Pattern:** CRC is bijective on single bytes. Overflow a pointer to control the CRC input address, precompute all 256 single-byte CRCs, and reverse-lookup each byte of arbitrary memory. Chain reads to leak GOT, libc, stack, and canary. See [[binary/漏洞利用/advanced-exploits.md#crc-oracle-as-arbitrary-read-primitive-asis-ctf-2017|advanced-exploits.md]].
+## 8. JIT 与解释器
 
-### UTF-8 Case Conversion Buffer Overflow
-**Pattern:** Unicode case conversion can expand character byte length (e.g., 2-byte UTF-8 becomes 4 bytes when uppercased). If buffer is sized for input length, the longer output overflows. Affects GLib `g_utf8_strup()`, ICU, and similar functions. See [[binary/漏洞利用/advanced-exploits.md#utf-8-case-conversion-buffer-overflow-hitb-ctf-2017|advanced-exploits.md]].
+| 形态 | 洞 | 打法 |
+|---|---|---|
+| 指令编码 off-by-one | 机器码错位 | shellcode 当 `sub` 的操作数字节，用 2 字节 `jmp` 串起来 |
+| BF JIT 未配对 `]` | `]` 从栈弹出纸带地址（RWX） | 用 `+`/`-` 往纸带写 shellcode，触发 `]` 跳过去 |
+| 条件跳转偏移截成 uint16 | 代码超 64KB 后错位 | 2 字节 shellcode 碎片藏进 `add` 立即数，`jmp $+3` 串链 |
+| 解释器类型标签写错 | 结构体被重解释 | 某变体的 padding 字节在另一变体里是活跃指针/数据 |
 
-## Useful Commands
+---
 
-`checksec`, `one_gadget`, `ropper`, `ROPgadget`, `seccomp-tools dump`, `strings libc | grep GLIBC`. See [[binary/漏洞利用/rop-advanced.md|rop-advanced.md]] for full command list and pwntools template.
+## 9. 自定义 VM 与 GC
+
+**VM GC 触发的 UAF（slab 复用）**：VM 有 NEWBUF/SLICE/GC 操作码。slice 创建共享 slab 引用；丢掉 slice 并 GC 后 slab 被释放，但父对象仍持有它。分配函数对象复用这块 slab，通过 UAF 读泄代码指针，再覆盖成 `win()`。
+
+**GC 空引用级联破坏**：mark-compact GC 跟随空引用到堆地址 0，造出假对象。压缩时 `memmove` 把破坏级联到相邻对象头 → 越界 → 泄 libc → FSOP。
+
+**VM syscall 越界读写**：用异或编码的函数指针泄 PIE，溢出把指针改成 `win() ^ KEY`。
+
+---
+
+## 10. 侧信道原语
+
+**4 字节 shellcode + 时间侧信道**：二进制只在 4096 次循环里执行用户 4 字节 shellcode。callee-saved 寄存器（`r12`-`r15`）跨轮持久，能逐轮累积状态。4096 倍循环把时间差放大到可测。
+
+详见 [[binary/漏洞利用/advanced-exploits.md|高级利用手法判据]]。
+
+**CRC 当任意读**：CRC 对单字节是双射。溢出改指针控 CRC 输入地址，预算 256 个单字节 CRC，反查每个字节。链式读泄 GOT、libc、栈、canary。
+
+详见 [[binary/漏洞利用/advanced-exploits.md|高级利用手法判据]]。
+
+**计时恢复 flag**：校验耗时随正确字符数变化，逐字节测耗时。
+
+详见 [[binary/漏洞利用/advanced-exploits.md|高级利用手法判据]]。
+
+---
+
+## 11. 沙箱逃逸
+
+| 形态 | 洞 | 打法 |
+|---|---|---|
+| 先 `stat()` 查大小再读 | 命名管道 `st_size` 恒为 0 | `mkfifo` + 后台 `cat payload > pipe` |
+| `process_vm_readv` 校验路径 | 读取失败就当校验通过 | 用 `mmap(MAP_FIXED)` 只给 `PROT_READ` 让读取失败 |
+| FUSE/CUSE 设备 | 后门写处理器带命令解析 | `chmod /etc/passwd` 后改内容 |
+| 受限 busybox shell | 有可写路径 | 打 `/etc/passwd` 或 `/etc/sudoers` |
+
+**shell 小技巧**：`exec<&3; sh>&3` 做 fd 重定向、用 `$0` 代替 `sh`、`ls -la /proc/self/fd` 找正确的 fd。
+
+详见 [[binary/漏洞利用/sandbox-escape.md|沙箱逃逸]]。
+
+---
+
+## 12. 语义误用
+
+**`mmap` 小 / `munmap` 大**：多解映射会毁掉相邻映射。线程栈填进空洞，旧缓冲区指针变成「写进栈里」。这是免竞态的 UAF 变体。
+
+详见 [[binary/漏洞利用/advanced-exploits.md|高级利用手法判据]]。
+
+**`strcspn` 间接空字节注入**：`strcspn(buf, "\r\n")` 之后写 null，会把字符串在注入的换行处截断，绕过 CGI 的空字节过滤做路径穿越。
+
+详见 [[binary/漏洞利用/advanced-exploits.md|高级利用手法判据]]。
+
+**ELF 代码签名绕过**：签名只哈希节头/节内容，不哈希程序头。追加 shellcode，把某个 LOAD 段的 `p_offset` 指过去——签名依然有效，加载器执行攻击者代码。
+
+详见 [[binary/漏洞利用/advanced-exploits.md|高级利用手法判据]]。
+
+**fd 继承**：服务把秘密读进 `memfd_create()` 的 fd 但没加 `MFD_CLOEXEC`，然后为执行用户命令调 `system()`——子进程继承了那个 fd。用 shell 引号拆分（`p'r'oc`）绕过 `strstr()` 关键词过滤，再读 `/proc/self/fd/N`。
+
+详见 [[binary/漏洞利用/advanced-exploits.md|高级利用手法判据]]。
+
+**关卡格式坐标符号不一致**：编辑器按有符号解析坐标但用无符号比较做边界检查——负坐标通过检查，往前写方块 ID（任意字节），从而覆盖返回地址。用隐藏的开发者模式泄栈地址，把 shellcode 编码成方块 ID。
+
+详见 [[binary/漏洞利用/advanced-exploits.md|高级利用手法判据]]。
+
+**UTF-8 大小写转换溢出**：Unicode 大小写转换会让字节变长（2 字节 UTF-8 大写后变 4 字节）。缓冲按输入长度分配就溢出。影响 GLib 的 `g_utf8_strup()`、ICU 及同类函数。
+
+详见 [[binary/漏洞利用/advanced-exploits.md|高级利用手法判据]]。
+
+**DNS 压缩指针栈溢出**：自定义 DNS 服务不统计解压后的名字长度，压缩指针链反复访问同一段数据，把栈缓冲冲掉。ROP 链拆到多个 question 项里。
+
+详见 [[binary/漏洞利用/advanced-exploits.md|高级利用手法判据]]。
+
+**DNS 记录缓冲溢出**：响应里塞大量 AAAA 记录冲掉栈缓冲，覆盖返回地址。
+
+---
+
+## 13. ASAN
+
+**判据**：二进制带 AddressSanitizer，同时有格式串与越界写。ASAN 可能用「假栈」（约 50% 概率），要先判断当前是真实栈还是假栈，再算越界写偏移去覆盖返回地址。
+
+详见 [[binary/漏洞利用/advanced.md|advanced.md]]。
+
+---
+
+## 14. Windows
+
+| 形态 | 打法 |
+|---|---|
+| 有格式串 | 泄 ASLR → 覆盖 SEH → 栈枢轴到 ROP 链 → `pushad` 组 VirtualAlloc 调用帧绕 DEP |
+| `SeDebugPrivilege` 可用 | Meterpreter `migrate -N winlogon.exe` → SYSTEM |
+| CFG 开着 | `system()` 来自 msvcrt，本身就是合法 API 入口，能过校验；参数里用逗号代替空格绕过过滤 |
+| 自造影子栈指针无上界 | 递归把 `shadow_stack_ptr` 推过数组进可控内存（如 username 缓冲），把 `win()` 写在那，再让硬件栈返回地址与之匹配 |
+
+**线程型服务器上的 shell 稳定性**：要用 detached 进程启动器。
+
+详见 [[binary/漏洞利用/advanced-exploits.md|高级利用手法判据]] 与 [[binary/漏洞利用/advanced-exploits.md|高级利用手法判据]]。
+
+---
+
+## 15. 栈上的小技巧
+
+- **保留自定义 canary**：按偏移精确写回已知 canary 字节，例如 `b'A' * 64 + b'BIRD' + b'X'`。
+- **`win()` 要调两次**：`win()` 里有 `if (attempts++ > 0)` 时，栈上叠两个返回地址 `p64(win) + p64(win)`。
+- **MD5 前像当 gadget**：爆破以 `eb 0c`（`jmp +12`）开头的 MD5 前像，第 14-15 字节就成了 2 字节 i386 指令。用 `31c0`（`xor eax`）、`cd80`（`int 0x80`）这类拼 syscall 链。
+
+---
+
+## 16. Python 沙箱
+
+三条路：f-string 绕过 AST 检查、审计钩子用 `b'flag.txt'`（bytes 而非 str）绕过、通过 MRO 恢复 `__builtins__`。
+
+详见 [[binary/漏洞利用/sandbox-escape.md|沙箱逃逸]]。
+
+---
+
+## 17. 溢出点在哪
+
+| 溢出点 | 判据 | 关键动作 |
+|---|---|---|
+| `memcpy` 长度未校验（解析器） | 缓冲按「预期最大」分配，格式允许更大 | 恢复 callee-saved 寄存器后 `ret` |
+| 协议长度字段 | 长度 > 实际数据 | 越界读泄 flag/地址/canary |
+| 遍历步长可控 | 步长 > 缓冲长度跳过 null | 逐字节泄 canary + 返回地址 |
+
+前两条详见 [[binary/漏洞利用/overflow-basics.md|栈与基础溢出]]。
+
+---
+
+## 18. 纪律
+
+- **按原语索引，不按漏洞名索引**。题目说「UAF」不够，要知道它能变成什么。
+- **glibc 版本是堆题的第一判据**：`< 2.26` / `2.26+` / `2.29+` / `2.31+` / `2.32+` / `2.34+` 是六种不同的题。
+- **没有 libc 泄漏时先想「能不能造泄漏」**：假 stdout 结构体、CRC 预言机、`__environ`，比硬猜地址靠谱。
+- **hook 被移除不等于没路**：2.34+ 走 FSOP 与 TLS 析构器。
+- **符号问题到处都是**：有符号/无符号不一致、符号扩展、`signed char` 转 `unsigned char`——审计时优先搜这几类。
+- **报的是原语不是漏洞名**：能读出什么、能写什么、写到哪，这三个问题定一切。

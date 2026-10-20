@@ -17,6 +17,26 @@ log = logging.getLogger(__name__)
 NODE_KINDS = frozenset({"goal", "intent", "fact", "finding", "hint"})
 RELATIONS = frozenset({"spawns", "yields", "derived_from", "proves"})
 
+# 边分档（artex-exploration-canvas，2026-10-20）：探索图里的边语义完全不同，
+# 混在一起画就是一团乱麻。实测一个 25 节点的 CTF 任务有 42 条边，其中 18 条
+# （43%）是 `link_evidence_to_goals` 自动挂的 proves——它们把单个目标节点的
+# 入度撑到 13，真正的探索血缘（spawns/yields/derived_from）只有 21 条。
+#
+# spine   —— 主脊：起点派生意图、意图产出事实。**唯一参与自动分层的边**，
+#            保证「起点 → 意图 → 产出」恒定左到右。
+# reverse —— 反向旁注：新意图「依据」哪条事实/提示。方向与 spine 相反，
+#            若参与分层会和 spine 互相拉扯，布局必然缠绕。
+# system  —— 系统挂链：事实/发现 → 目标。是目标判定的证据链（verify_goals_met
+#            依赖它），但**不是探索过程**，前端默认隐藏。
+EDGE_CATEGORY = {
+    "spawns": "spine",
+    "yields": "spine",
+    "derived_from": "reverse",
+    "proves": "system",
+}
+# 参与自动分层的边（前端布局也按同一口径过滤，见 ExplorationCanvas.computeLayout）。
+SPINE_RELATIONS = frozenset(r for r, c in EDGE_CATEGORY.items() if c == "spine")
+
 
 def _json(value: Any, default: Any) -> str:
     return json.dumps(value if value is not None else default, ensure_ascii=False)
@@ -195,6 +215,45 @@ def record_hint(bb, project_id: str, *, task_id: str, intent_id: str,
     return node
 
 
+def _conclusion_title(text: str, objective: str = "") -> str:
+    """从 Worker 输出里抽一句「结论」当节点标题（artex-exploration-canvas）。
+
+    兜底汇总事实此前的标题是 ``Worker 结果：<objective>``——把「要做什么」当成了
+    标题，真正的结论埋在 content 里。图上十几张卡全是「Worker 结果：对指定 PNG
+    进行视觉检查…」，人类根本分不清哪条是哪条。
+
+    抽法按可靠性降序，取第一条非空且不像「过程流水账」的行：
+    1. 显式结论标记（``结论：`` / ``结论:`` / ``结论 -``）后的一行；
+    2. 首个非空行（跳过代码块围栏、纯符号行、``$`` 开头的命令行）；
+    3. 实在抽不出来 → 退回 objective 前 60 字（至少比「Worker 结果：」有信息量）。
+    """
+    raw = str(text or "").strip()
+    if raw:
+        for marker in ("结论：", "结论:", "结论 -", "结论-", "结论 —"):
+            idx = raw.find(marker)
+            if idx >= 0:
+                tail = raw[idx + len(marker):].strip()
+                if tail:
+                    first = tail.splitlines()[0].strip()
+                    if first:
+                        return first[:120]
+        in_fence = False
+        for line in raw.splitlines():
+            s = line.strip()
+            if s.startswith("```"):
+                in_fence = not in_fence  # 围栏内的命令行不是结论，整段跳过
+                continue
+            if in_fence:
+                continue
+            if not s or s.startswith(("$", ">", "#")) or len(s) < 4:
+                continue
+            if all(not ch.isalnum() and ch not in "一二三四五六七八九十" for ch in s):
+                continue  # 纯分隔线/符号行
+            return s[:120]
+    fallback = str(objective or "").strip()
+    return fallback[:120] or "Worker 结果"
+
+
 def record_intent_result(bb, project_id: str, intent: dict) -> dict:
     """把 Worker 收尾结果物化为 Fact，并同步关联期间写入的 Finding。
 
@@ -221,11 +280,15 @@ def record_intent_result(bb, project_id: str, intent: dict) -> dict:
         fact = None
     else:
         fact_id = f"{intent_id}:fact"
+        # 标题取结论而非 objective（artex-exploration-canvas）：objective 是「要
+        # 做什么」，图上一眼看不出各卡差异；content 首句才是「得到了什么」。
+        result_text = str(intent.get("result") or intent.get("error") or "")
+        objective = str(intent.get("objective") or "")
         fact = upsert_node(
             bb, project_id, fact_id, "fact",
             task_id=task_id, intent_id=intent_id,
-            title=f"Worker 结果：{str(intent.get('objective') or '')[:120]}",
-            content=str(intent.get("result") or intent.get("error") or ""),
+            title=_conclusion_title(result_text, objective),
+            content=result_text,
             status="closed" if intent.get("status") == "completed" else str(intent.get("status") or "open"),
             confidence=1.0 if intent.get("status") == "completed" else 0.5,
             asset_ids=intent.get("asset_ids") or [],
@@ -234,7 +297,14 @@ def record_intent_result(bb, project_id: str, intent: dict) -> dict:
                       "source": "intent_result",
                       # 兜底汇总事实没有真实 confidence 判定：标 inferred 语义，
                       # 让规划者知道「这条是整轮输出的概括，不是单条观察」。
-                      "confidence_level": "inferred"},
+                      "confidence_level": "inferred",
+                      # 原 objective 保留在 metadata：前端卡面把「标题=结论、
+                      # 副标题=意图」分开显示，也供抽屉展示完整上下文。
+                      "objective": objective[:500],
+                      # 前端默认折叠这类节点（与同意图的显式事实重复）。不删是
+                      # 因为 count_worker_facts=0 的老任务只有它，删了覆盖度分母
+                      # 就没人撑着了。
+                      "collapsed_by_default": True},
         )
     intent_node_id = f"{intent_id}:explore"
     if get_node(bb, project_id, intent_node_id) is None:
@@ -294,9 +364,40 @@ def record_intent_result(bb, project_id: str, intent: dict) -> dict:
     return {"fact": fact, "findings": mapped}
 
 
+def _annotate_node(node: dict) -> dict:
+    """给节点补渲染期派生字段（不落库，只随 API 返回）。
+
+    ``role`` 区分两类同 kind 不同语义的 goal（artex-exploration-canvas）：
+    实测一个任务里有两个 goal 节点标题几乎相同——一个是 Planner 给**根 Intent**
+    建的探索锚点（``{intent_id}:explore``，metadata 无 source），一个是
+    ``set_goals`` 注册的**计分目标**（metadata.source=planner）。前者是「起点」，
+    后者才是「目标」，同色同形画出来人类必然误读。
+    """
+    meta = node.get("metadata") or {}
+    kind = str(node.get("kind") or "")
+    role = ""
+    if kind == "goal":
+        role = "goal" if str(meta.get("source") or "") else "begin"
+    elif kind == "fact":
+        role = "summary" if str(meta.get("source") or "") == "intent_result" else "fact"
+    node["role"] = role
+    # 兜底汇总事实默认折叠：与同意图的显式事实重复，图上多一份只是噪声。
+    # 存量数据没有 collapsed_by_default 字段（本标记 2026-10-20 才加），故同时
+    # 认 source=intent_result——否则升级后老任务的汇总事实仍然默认展开。
+    node["collapsed_by_default"] = bool(
+        meta.get("collapsed_by_default")
+        or (kind == "fact" and str(meta.get("source") or "") == "intent_result"))
+    return node
+
+
 def exploration_graph(bb, project_id: str, *, task_id: str | None = None) -> dict:
-    nodes = list_nodes(bb, project_id, task_id=task_id)
+    nodes = [_annotate_node(n) for n in list_nodes(bb, project_id, task_id=task_id)]
     ids = {n["id"] for n in nodes}
-    edges = [e for e in list_edges(bb, project_id)
-             if e["from_node_id"] in ids and e["to_node_id"] in ids]
+    edges = []
+    for e in list_edges(bb, project_id):
+        if e["from_node_id"] not in ids or e["to_node_id"] not in ids:
+            continue
+        # 分档随边返回，前端据此决定样式与是否参与分层（EDGE_CATEGORY 是唯一口径）。
+        e["category"] = EDGE_CATEGORY.get(str(e.get("relation") or ""), "system")
+        edges.append(e)
     return {"project_id": project_id, "task_id": task_id, "nodes": nodes, "edges": edges}

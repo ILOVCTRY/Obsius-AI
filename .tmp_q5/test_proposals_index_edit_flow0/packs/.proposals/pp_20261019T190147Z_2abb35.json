@@ -1,0 +1,23 @@
+{
+  "id": "pp_20261019T190147Z_2abb35",
+  "status": "approved",
+  "origin": "agent",
+  "project": null,
+  "session": null,
+  "task": null,
+  "target": {
+    "kind": "index",
+    "cap": "web"
+  },
+  "mode": "edit",
+  "content": "entries:\n  - point: 原条目\n    kb: web/poc/tduck.md\n  - point: 新增条目\n    kb: web/poc/越权检测.md\n    tags: [file-upload-test]\n",
+  "summary": "索引加一条",
+  "reason": "任务证据",
+  "evidence": "",
+  "source_refs": [],
+  "revisions": [],
+  "created_at": "2026-10-19T19:01:47Z",
+  "decided_at": "2026-10-19T19:01:47Z",
+  "decided_by": "human",
+  "decision_note": null
+}

@@ -347,6 +347,56 @@ function ExpertsPane({ tax, focus }: { tax: Taxonomy | null; focus: ExpertFocus 
 
   const cur = experts.find((e) => e.id === selected)
 
+  /** 控制器专属工具（不在 AGENT_TOOLS 目录里，后端随 tools_runtime 下发）。
+   *  它们是走专用 dispatch 分支的工具：`todo_write`/`call_expert` 走 `_dispatch`
+   *  早拦截，`artex_*` 走 artex_steering_dispatch，`ctf_dispatch/review/inspect`
+   *  走 CTF 主控专用分支。没有条目就只能显示裸名字，补一份中文说明便于勾选。 */
+  const CONTROLLER_ONLY_TOOL_DETAIL: Record<string, string> = {
+    todo_write: "维护线程待办清单（整体覆写；工作记忆外化，人类实时可见）",
+    call_expert: "委派专家池专家执行一项任务（spawn 隔离子线程，返回摘要）",
+    artex_plan: "让 ARTEX Planner 生成/扩展 Intent（ARTEX 主控的默认派发通道）",
+    artex_status: "查看 ARTEX 任务 runtime 状态、目标达成、Intent 计数与探索图",
+    artex_hint: "给运行中的 Worker 下发方向调整 / 留给后续规划的 Hint",
+    artex_control: "暂停 / 取消 / 终止 ARTEX 任务",
+    artex_goal: "登记与核验目标达成（prove / goal_met）",
+    artex_fact: "写回探索图事实（主控视角的结论沉淀）",
+    ctf_dispatch: "CTF 唯一派发入口：方向提交代码调度器，拿回准派/拦下计划",
+    ctf_review: "查看代码侧 verdict 表（轮次/已得/放弃判据）",
+    ctf_inspect: "只读核对通道：摊台账证据链原文与产物 provenance（不执行）",
+  }
+  /** 工具勾选清单。
+   *
+   *  - **控制器**：**只用后端下发的 `tools_runtime`**（`controller_tool_candidates`）。
+   *    不能用「AGENT_TOOLS ∪ tools_runtime」——那样后端已扣掉的结构性禁令
+   *    （ARTEX 主控的 `declare_intent` 等意图链、`finish` 等控制原语）会从
+   *    AGENT_TOOLS 里漏回来，用户勾了不生效，又是一次「界面在骗人」。
+   *  - **子专家**：用 AGENT_TOOLS 通用目录（后端不下发候选）。
+   *
+   *  目录里查不到的（`artex_*` / `ctf_dispatch` 等专属工具）补一份中文说明，
+   *  否则勾选行只有裸名字。 */
+  const toolItems = useMemo<CheckItem[]>(() => {
+    const byName = new Map(toolCatalog.map((t) => [t.name, t]))
+    const controllerNames = cur?.tools_runtime
+    if (controllerNames && controllerNames.length) {
+      return controllerNames.map((n) => {
+        const hit = byName.get(n)
+        if (hit) return { id: hit.name, label: hit.name, detail: hit.description, group: hit.group }
+        // MCP server 通配（`mcp__<server>__*`，controller-mcp-face）：一个 server
+        // 可能有 200+ 工具（rea 215 个 / 549K 字符 schema），逐个列既没法勾也
+        // 没人看。勾选粒度就是「要不要让这个主控用这个 server」。
+        if (n.startsWith("mcp__") && n.endsWith("__*")) {
+          return { id: n, label: n,
+                   detail: "MCP server 整包：勾选后该 server 的全部工具下发给本控制器（未勾选则一个都不下发）",
+                   group: "MCP server" }
+        }
+        return { id: n, label: n,
+                 detail: CONTROLLER_ONLY_TOOL_DETAIL[n] ?? "控制器专属工具（无通用目录条目）",
+                 group: "控制器专属" }
+      })
+    }
+    return toolCatalog.map((t) => ({ id: t.name, label: t.name, detail: t.description, group: t.group }))
+  }, [toolCatalog, cur?.tools_runtime])
+
   useEffect(() => {
     if (!cur) return
     setDisplayName(cur.name && cur.name !== cur.id ? cur.name : "")
@@ -384,6 +434,9 @@ function ExpertsPane({ tax, focus }: { tax: Taxonomy | null; focus: ExpertFocus 
         // kb 方向两态（null/[] 都=不限），表单不编辑但必须原样回传，否则覆写会清空。
         knowledge: cur.knowledge ?? null,
         task_types: taskTypes.trim() ? toList(taskTypes) : null,
+        // 工具白名单：勾选即开关（controller-tool-select，2026-10-20）。
+        // 控制器与子专家同口径——null = 不落键（控制器此时回落代码默认面），
+        // [] = 明确一个都不开，非空 = 勾选清单。
         tools,
         mcp_servers: mcpServers,
         max_steps: stepsTrim ? Number(stepsTrim) : null,
@@ -464,7 +517,10 @@ function ExpertsPane({ tax, focus }: { tax: Taxonomy | null; focus: ExpertFocus 
             <Input value={description} onChange={(e) => setDescription(e.target.value)} className="text-xs"
                    placeholder="如：外网打点与入口利用" />
             <label className="text-[10px] text-muted-foreground">人设 persona（注入系统提示；轨变体可按轨覆写）</label>
-            <Textarea value={persona} onChange={(e) => setPersona(e.target.value)} className="min-h-16 text-xs" />
+            {/* shrink-0：本列是 flex-col，textarea 默认 flex-shrink:1 会被压回 min-h-16，
+                表现为「拖拽句柄拖大了又弹回去」。resize-y 显式声明可纵向拖拽。 */}
+            <Textarea value={persona} onChange={(e) => setPersona(e.target.value)}
+                      className="min-h-16 shrink-0 resize-y text-xs" />
             <div>
               <label className="text-[10px] text-muted-foreground">服务轨 tracks（不选 = 全轨通用）</label>
               <div className="mt-1 flex flex-wrap gap-1">
@@ -489,9 +545,28 @@ function ExpertsPane({ tax, focus }: { tax: Taxonomy | null; focus: ExpertFocus 
             </p>
             <label className="text-[10px] text-muted-foreground">任务类型 task_types（Worker 认领过滤器；按各轨注册表并集体检；留空 = 不限）</label>
             <Input value={taskTypes} onChange={(e) => setTaskTypes(e.target.value)} className="font-mono text-xs" placeholder="recon, exploit" />
+            {/* 工具白名单（controller-tool-select，2026-10-20 定稿）：
+                控制器类智能体（chat-orchestrator / aggressive / artex / ctf-controller）
+                的 yaml `tools` 现在是**真实开关**——勾了就下发、没勾就既不下发 schema
+                也会在执行侧被拒。候选清单额外并入后端下发的 `tools_runtime`
+                （`artex_*` / `ctf_*` / `todo_write` / `call_expert` 不在通用目录里），
+                否则这些工具永远勾不到，勾选又退化成固定清单。 */}
             <CheckList title="工具白名单（勾选启动）"
-                       items={toolCatalog.map((t) => ({ id: t.name, label: t.name, detail: t.description, group: t.group }))}
+                       items={toolItems}
                        selected={tools} onChange={setTools} groupOrder={toolGroups} />
+            {cur.tools_controller && (
+              <p className="text-[10px] leading-relaxed text-muted-foreground">
+                这是控制器类智能体：上方清单已并入后端下发的专属工具
+                （<code className="font-mono">artex_*</code> /
+                <code className="font-mono">ctf_dispatch/review/inspect</code> /
+                <code className="font-mono">todo_write</code> /
+                <code className="font-mono">call_expert</code>）。
+                勾选后保存即生效；<code className="font-mono">declare_intent</code> 等
+                计划/控制原语恒放行、不受勾选影响。
+                <code className="font-mono">propose_pack_edit</code> 另受项目级
+                kb 迭代开关门禁——勾了但项目开关关闭时仍不会下发。
+              </p>
+            )}
             <CheckList title="MCP server（勾选启动）"
                        items={mcpCatalog.map((s) => ({
                          id: s.name,
@@ -639,6 +714,9 @@ function LlmPane() {
             </div>
             <Badge variant="outline" className="shrink-0 text-[9px]">{FORMAT_LABEL[p.format]}</Badge>
             {p.name === defaultProvider && <Badge className="shrink-0 text-[9px]">默认</Badge>}
+            {/* 视觉能力（vision 通道）：勾了「图片输入」才有此标——让用户一眼看出
+                为什么模型不调 view_image（未声明的供应商按「不支持」处理）。 */}
+            {p.vision && <Badge variant="outline" className="shrink-0 text-[9px]">视觉</Badge>}
             {!p.enabled && <span className="llm-status shrink-0">已停用</span>}
             {rowTest[i] && (
               <span className={cn("llm-test-state shrink-0", rowTest[i].startsWith("✓") && "is-ok",

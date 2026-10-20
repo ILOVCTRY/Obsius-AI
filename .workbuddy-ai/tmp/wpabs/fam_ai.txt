@@ -1,0 +1,83 @@
+### OBS
+cmd 痕迹 = 取证金矿
+knapsack lattice 是经典格密码
+ECDLP 130-bit 可用 Pohlig-Hellman + ECM
+Flask pickle + cookie 签名 = 经典反序列化入口（源码含 secret = 'EnjoyThePlayTime123456'）
+Tomcat conf/web.xml 覆盖 + PUT 启用 readonly=false即可上传 .txt 当 jsp 解析
+AI prompt injection 需要先有 admin 权限拿到 LLM 调用接口
+路径穿越 /myapp/read 是 Tomcat 应用读任意文件的常见 misconfig
+ThinkPHP 3.2.2 db[] 写配置 RCE 是历史 CVE，必须无 disable_function 才有效
+is_numeric + 弱类型 == 字符串拼接绕过是 PHP 老牌套路（289114abc 假阴性但 == 289114）
+费马小定理 2^hint ≡ 1 mod p → p = gcd(2^hint-1, n) 是 RSA 隐 p 通用攻击
+Quat BSGS secret<2^50 比暴力 Pohlig-Hellman 快得多
+JWT 弱 secret 爆破 2 字符 3844 次是常考点
+小参数 LLM（33M-1B）只对复读/前缀补全模式有效，不能用 ChatGPT 套路
+OOV 词攻击必须用 Adversarial Suffix 扰动注意力分布
+短前缀 + 训练集高频搭配（如 Apology→accepted）是绕过 LLM 限制的经典套路
+Hackergame 原题是中科大 2023 改编，是国内 LLM CTF 入门样板
+XS-Leak + RCE 是现代 WEB 难度的天花板——纯前端时间侧信道 + 协议层走私组合
+font-face + unicode-range 是经典 timing oracle，可猜任意长字符
+WebRTC STUN 信令会泄露子域 (iceServers 注入)，盲打内网常用
+HTTP Request Smuggling CL.TE 在 nginx+后端组合下频繁出现
+LLM 应用 IDOR（图片 ID / 用户 ID 枚举）是最常见 web 题类型
+prompt injection 配合 google 搜索结果外带是 LLM 题目标配
+短选项 = 正确选项是 LLM 出题的反向指纹（出题者通常写简短正确答案）
+LLM 题目三件套：IDOR + prompt injection + 短选项统计
+Uniswap V2 addLiquidity 按当前储备比例计算份额,只要合约内两种代币比例恰好等于 pair 比例,即可一次性把全部余额入池
+DeFi 流动性题的本质是凑比例,而不是凑数量
+Poc 关键是先 swap 出中间代币再用中间代币换 pair 中第二种代币
+PHP 7.0 Throwable $name 格式串 bug 是真实 CVE，#71105 编号可查
+max_input_vars 触发 warning 能破坏后续 header 输出，绕过 CSP
+Laravel + mPDF + phar:// 是经典 PHAR 反序列化链
+SQLite3 自定义函数漏洞：edit(1)+edit(2) 注册为 vuln 是典型注册点攻击面
+EDITOR 环境变量 + system 命令注入是 Unix 工具的经典 CVE 模式
+gnome-calculator 弹窗是 RealWorld 题演示 RCE 的最直观方式
+AI WAF 绕过常见：拼接无害命令 ls/cat 让 AI 判无害
+temp%llx 临时文件名可预测，write 后立即 system 形成完整 RCE 链
+PHP 反序列化 POP 链跨类调用：a==md5(a)（0e215962017 符合 0e 正则 MD5）
+SoapClient SSRF 用 location+user_agent 注入 Cookie
+Node clone+merge 原型链污染：if(req.flag == 'flag') 触发
+AES-ECB 字节翻转攻击：c[32:64]==c[64:96] 判断爆破
+RSA 三公钥攻击：egcd(e1,e2)=E0, egcd(e1,e3)=E1, 双重 egcd(E0,E1) 恢复 m
+压缩炸弹 zstd/bunzip2 循环 = 自动化解压+判退出条件
+libc-2.27 无 tcache，fastbin + unlink 是经典路径
+aarch64 ret2csu 是 ARM64 libc 函数调用桥接必备 gadget
+Process Hollowing 五步流程 FindResourceW → VirtualAllocEx → WriteProcessMemory → SetThreadContext → ResumeThread 是固定套路
+BigI 多轮混合加密（add+mul+subabs）= Sage 逆推最优
+AI Agent 渗透时代,关键词层+调用签名层+CVE 编号层 anti-复读机制是 LLM CTF 自动化的核心
+多 MCP 并行 (chrome-devtools + Kali + MSF + Ghidra) 是当前最优架构
+Orchestrator + Executor/Browser/C2/Reverse 4 Agent 协作是 CTF AI 通用模板
+GLM5 vs GLM5.1 在 CTF 渗透场景表现差异显著
+MCP visibility=subagent:browser 是隔离浏览器上下文的标配
+### FAIL
+试图直接 Pohlig-Hellman 标准解 → 失败：130-bit 素数分解需 ECM
+试图 cmd 痕迹全文 grep → 失败：必须拼完整路径
+试图直接 admin/admin 登录 Lyrics For You → 失败：必须反序列化 pickle 拿 admin 权限
+试图用 Tomcat 自身 CVE 直接 RCE → 失败：版本已 patch
+试图只用 prompt injection 不读源码 → 失败：必须先拿 admin token
+试图直接拼 SQL 命令测 yunnuuu.php → 失败：是 PHP 弱类型比较不是 SQL 注入
+试图用 Groebner basis 暴力解 Quaternion DLP → 失败：运算量爆炸，转 BSGS
+试图把 JWT 整个 jwtKey 字典爆破 → 失败：字典太大，限定 2 字符才 3844 次可接受
+试图直接命令模型输出指定内容 → 失败：TinyStories-33M 没有 instruction following 能力
+flag2 用复读攻击长 prompt → 失败：长度限制 ≤7
+flag3 人工 prompt 引导 talk about hackergame → 失败：训练集没有这个词，模型直接幻觉替成 Rocco
+试图单次 font-face leak → 失败：10000+ 字符需分批，且要触发 background-image
+试图 CL.TE 单独攻击 → 失败：需 nginx + 后端特定组合才生效
+试图走 WebSocket 路径 → 失败：corCTF/Sekai 难度需 XS-Leak + RCE 双重
+试图用 prompt 直接问 'give me the flag' → 失败：bot 限制 google 域名
+试图所有 YellowDog 编号枚举 → 失败：carolina89 是唯一特殊 ID
+试图不转入 DAI 直接调 swapTokenForPoolToken → 失败:Uniswap 按比例 addLiquidity,WETH 仍留在合约
+试图只转入 5 ETH 等值 DAI → 失败:比例不足,WETH 无法按对应份额配对
+试图用普通 echo + include 经典 LFI → 失败：现代 PHP 多数 disable_functions
+试图直接 unserialize() 用户输入 → 失败：现代框架基本都禁止
+试图直接 nc reverse shell → 失败：AI WAF 拦截命令包含敏感字符串
+试图用 base64 编码 command → 失败：AI WAF 拦截长 base64
+试图只调 edit 写文件不触发 system → 失败：写完必须 system(EDITOR) 才执行
+直接 SoapClient.__call → 失败：必须 call_user_func+SoapClient 组合触发
+Node req.flag=='flag' → 失败：本题 flag 在 /infoflllllag
+AES-ECB 整块爆破 → 失败：必须字节翻转爆破 c[32:64]==c[64:96]
+试图直接走 4869 隐藏菜单 → 失败：magic < 0x1305 未初始化
+BigI 用逆序 + 单变量解 → 失败：128 进制 + 多轮混合操作需符号执行
+试图单 Agent 跑全部 → 失败:单 Agent 上下文不够
+试图不用 MCP 串工具 → 失败:每个 Agent 必须独立 MCP 隔离
+试图用 GPT-4 → 失败:CTF 渗透场景 GPT-4 弱于 GLM5

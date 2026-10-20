@@ -19,6 +19,35 @@ TODO_STATUSES = ("pending", "in_progress", "completed")
 _TITLE_MAX = 60
 
 
+class ThreadGone(RuntimeError):
+    """线程行已被删除（人类在工作台删掉了正在跑的线程）。
+
+    2026-10-19 事故：`chat_messages.thread_id REFERENCES chat_threads(id)` 且
+    连接开了 ``PRAGMA foreign_keys=ON``，用户在子专家跑到一半时删掉那条线程
+    → 子 `ChatTurn.run()` 下一次 `append_message` 抛
+    ``sqlite3.IntegrityError: FOREIGN KEY constraint failed``，一路穿成
+    「专家线程执行失败：FOREIGN KEY constraint failed」回给主控，看起来像
+    系统 bug 而不是「你自己把线程删了」。
+
+    这是**人类意图**（不想要这个线程了）而不是故障：用独立异常让上层优雅
+    收尾——不落错误卡、不再重试、不当成专家能力问题。
+    """
+
+
+def thread_exists(bb, thread_id: str) -> bool:
+    """线程行是否还在（删线程后的写库前置检查，避免 FK 炸整轮）。"""
+    tid = str(thread_id or "").strip()
+    if not tid:
+        return False
+    try:
+        row = bb.conn.execute(
+            "SELECT 1 FROM chat_threads WHERE id=?", (tid,)).fetchone()
+    except Exception:  # noqa: BLE001 —— 读失败按「在」处理，别误伤正常轮
+        return True
+    return row is not None
+
+
+
 # ---------- 线程 ----------
 
 def create_thread(bb, project_id: str, agent_id: str, *,
@@ -180,6 +209,86 @@ def resolve_challenge_asset_id(bb, thread_id: str, *, max_depth: int = 16) -> st
     return ""
 
 
+def challenge_isolation_scope(bb, project_id: str, thread_id: str, *,
+                              max_depth: int = 16) -> dict | None:
+    """CTF 跨题隔离面（challenge-isolation，2026-10-19）：本题 vs 其它题目。
+
+    返回 ``{"self_challenge": <本题 id 或 ''>,
+             "other_roots": set[题目根 id],
+             "other_assets": set[其它题目子树 id 全集],
+             "other_sessions": set[chat-<tid12> 会话 id]}``；
+    **没有别的题目**（或解析失败）返回 ``None`` = 不过滤，行为与改动前逐字一致。
+
+    **动机**（用户实测）：多题共跑时 ``bb_query what=findings`` 回的是**全项目**
+    发现——一道全新题刚上手，AI 顺手一查就翻到别的题的结论，上下文被污染、
+    推理被带偏（把别人的打法当本题线索）。同理 ``what=assets`` 会翻到别题的
+    附件清单、``what=events`` 会翻到别题跑过的命令。
+
+    口径：**排除别的题，保留未归属条目**（不是白名单式只留本题——题目还没
+    登记时那样会把正常查询全打空，把「新题上手先看黑板」这条正常流程堵死）。
+
+    两个资产集合的用法差异：
+    - ``other_assets`` 全集 → findings 用（挂在别题根上的结论同样要挡）；
+    - ``other_assets - other_roots`` → assets 用（别题的**题目行**仍可见，AI
+      据此知道项目里还有哪些题，不会误以为只有自己这道甚至重复建题）。
+
+    会话面（events 查询用）：线程树归属到**别的题目**的线程，其
+    ``chat-<tid12>`` 一并排除（子专家沿 parent_thread_id 继承题目）。
+    """
+    tid = str(thread_id or "").strip()
+    if not tid:
+        return None
+    try:
+        # 线程行不存在（脏 thread_id / 已删线程）→ 无法判定归属，不过滤。
+        # 不能把它当成「本题未绑定」——那会把所有题目的条目都排除掉，
+        # 查询直接被打空（宁松勿误空）。
+        exists = bb.conn.execute(
+            "SELECT 1 FROM chat_threads WHERE id=? AND project_id=?",
+            (tid, project_id)).fetchone()
+        if exists is None:
+            return None
+        from core.blackboard.attackpath import _subtree_ids
+        assets = bb.list_assets(project_id)
+        roots = [a["id"] for a in assets
+                 if a.get("type") == "challenge" and not a.get("parent_id")]
+        if not roots:
+            return None
+        self_cid = resolve_challenge_asset_id(bb, tid, max_depth=max_depth) or ""
+        other_roots: set[str] = set()
+        other_assets: set[str] = set()
+        for cid in roots:
+            if cid == self_cid:
+                continue
+            other_roots.add(cid)
+            other_assets |= _subtree_ids(assets, cid)
+        if not other_roots:
+            return None
+        rows = bb.conn.execute(
+            "SELECT id, parent_thread_id, challenge_asset_id FROM chat_threads"
+            " WHERE project_id=?", (project_id,)).fetchall()
+        by_tid = {str(r["id"]): (str(r["parent_thread_id"] or ""),
+                                 str(r["challenge_asset_id"] or ""))
+                  for r in rows}
+        other_sessions: set[str] = set()
+        for one in by_tid:
+            walker, seen, cid = one, set(), ""
+            for _ in range(max_depth):
+                if not walker or walker in seen:
+                    break
+                seen.add(walker)
+                parent, own = by_tid.get(walker, ("", ""))
+                if own:
+                    cid = own
+                    break
+                walker = parent
+            if cid and cid != self_cid:
+                other_sessions.add(f"chat-{one[-12:]}")
+        return {"self_challenge": self_cid, "other_roots": other_roots,
+                "other_assets": other_assets, "other_sessions": other_sessions}
+    except Exception:  # noqa: BLE001 —— 隔离是减噪手段，失败按不过滤（宁松勿误空）
+        return None
+
+
 def recover_running_threads(bb, running: set[str] | None = None, *,
                             note: str = "（⚠ 进程重启，本轮执行中断；可继续追问或重新发起）",
                             skip_ids: set[str] | None = None) -> list[str]:
@@ -282,19 +391,35 @@ def append_message(bb, thread_id: str, role: str, content: str, *,
                    tool_calls: list[dict] | None = None,
                    tool_use_id: str = "",
                    thinking: str = "") -> dict[str, Any]:
+    """落一条消息。线程已被删除时抛 ``ThreadGone``（而非裸 FK IntegrityError）。
+
+    2026-10-19 事故：`chat_messages.thread_id` 有外键约束、连接开着
+    ``PRAGMA foreign_keys=ON``。人类在子专家跑到一半时删掉线程 → 下一次写消息
+    抛 ``FOREIGN KEY constraint failed``，穿到 `_tool_call_expert` 的 except
+    变成「专家线程执行失败：FOREIGN KEY constraint failed」——用户看到的是
+    一个看不懂的系统错误，而真实原因是他自己的删除操作。转成 ``ThreadGone``
+    后上层可以「安静收尾」（线程都不要了，没地方写、也没必要写）。
+    """
     if role not in ("user", "assistant", "tool"):
         raise ValueError(f"非法消息角色: {role}")
     ts = now()
-    with bb._tx():
-        cur = bb.conn.execute(
-            "INSERT INTO chat_messages(thread_id, role, content, thinking,"
-            " tool_calls, tool_use_id, created_at) VALUES(?,?,?,?,?,?,?)",
-            (thread_id, role, content, thinking,
-             json.dumps(tool_calls or [], ensure_ascii=False),
-             tool_use_id, ts))
-        bb.conn.execute(
-            "UPDATE chat_threads SET updated_at=? WHERE id=?", (ts, thread_id))
-        mid = cur.lastrowid
+    try:
+        with bb._tx():
+            cur = bb.conn.execute(
+                "INSERT INTO chat_messages(thread_id, role, content, thinking,"
+                " tool_calls, tool_use_id, created_at) VALUES(?,?,?,?,?,?,?)",
+                (thread_id, role, content, thinking,
+                 json.dumps(tool_calls or [], ensure_ascii=False),
+                 tool_use_id, ts))
+            bb.conn.execute(
+                "UPDATE chat_threads SET updated_at=? WHERE id=?", (ts, thread_id))
+            mid = cur.lastrowid
+    except sqlite3.IntegrityError as exc:
+        # 只把「线程行没了」这一种翻译成 ThreadGone；其它完整性错误（脏数据）
+        # 照旧上抛，别把真 bug 静音。
+        if "FOREIGN KEY" in str(exc).upper():
+            raise ThreadGone(f"线程 {thread_id} 已被删除，消息无处落库") from exc
+        raise
     return {"id": mid, "thread_id": thread_id, "role": role, "content": content,
             "thinking": thinking,
             "tool_calls": tool_calls or [], "tool_use_id": tool_use_id,
